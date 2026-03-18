@@ -1,0 +1,4 @@
+venv/
+csv_simulated/
+csv_original/
+__pycache__/
