@@ -36,50 +36,64 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 
 ## Physical System
 
-### Rotor Geometry
-| Parameter | Value |
-|-----------|-------|
-| Number of blades | 4 (90° apart) |
-| Blade length | 2000 mm |
-| Hub radius | ~500 mm (hub diameter ~1000 mm) |
-| Total rotor radius | ~2500 mm |
-| Total rotor diameter | 5000 mm |
-| Rotor mass | 5 kg |
-| Blade airfoil | SG6042 |
-| Root airfoil | SG6040 |
-| Blade material | EPP RG30 (foam) |
-| Twist | None |
-| Tether attachment | Bottom of rotor axis (center) |
+> Full physical design detail in [physical_design.md](physical_design.md)
 
-### Pitch Control — Trailing-Edge Flaps via Swashplate
+### Assembly Layout (top to bottom)
 
-Pitch is controlled **indirectly** via trailing-edge flaps on each blade, driven mechanically by a conventional 3-servo swashplate via push-rods. This is Kaman-style aerodynamic pitch control:
+The rotor hub is the outer rotating shell. The swashplate and all electronics are sandwiched inside it, with the rotor hub running on bearings above and below the swashplate assembly. The axle runs through the center top to bottom; the tether attaches at the bottom of the axle.
 
 ```
-3 Servos (S1, S2, S3) → Swashplate plane → Push-rods → Trailing-edge flaps → Blade twist → Pitch change
+[ rotor hub top bearing ]
+
+  4× blades + trailing-edge flaps   ← no electronics; blades free-pitch within damper
+       push-rods (×4, rotate with hub)
+
+  upper swashplate ring              ← rotates with hub; push-rod anchor points
+  swashplate bearing
+  lower swashplate ring              ← NON-rotating; tilted by S1/S2/S3
+  servos S1, S2, S3
+  Pixhawk 6C, ESC, GB4008 motor     ← motor counter-torque keeps this stationary
+  battery, UBEC, radios
+
+[ rotor hub bottom bearing ]
+
+  axle → tether → ground/winch
 ```
 
-- The flaps are **not** individually motorized — they are mechanically linked to the swashplate
-- 3 servos control the swashplate plane (collective + cyclic), regardless of 4 blades
-- Low servo torque required: servos move only the small flaps, not the blades directly
-- Flap aerodynamic moment twists the flexible blade, changing angle of attack
+| Rotates (wind-driven)     | Stationary (GB4008 counter-torque)       |
+|---------------------------|------------------------------------------|
+| Rotor hub (outer shell)   | Lower swashplate ring                    |
+| 4× blades + flaps         | Servos, Pixhawk, ESC, battery, radios    |
+| Push-rods                 | Axle                                     |
+| Upper swashplate ring     |                                          |
 
-Sign convention: γ < 0 (upward flap) → positive moment → blade pitches UP
+### Key Parameters
 
-### Anti-Rotation Motor (Swashplate Hold)
-The **EMAX GB4008 gimbal motor** prevents the swashplate lower ring from rotating with the rotor:
-- Motor is **offset** from the rotor axis
-- Connected via **spur gear, ratio 80:44** (motor gear 44T → swashplate ring 80T)
-- Gear reduction gives ~1.82× torque multiplication at swashplate
-- Motor actively holds the non-rotating swashplate ring stationary against rotor drag
+| Parameter          | Value         |
+|--------------------|---------------|
+| Blade count        | 4 (90° apart) |
+| Blade length       | 2000 mm       |
+| Total rotor radius | ~2500 mm      |
+| Rotor mass         | 5 kg          |
+| Blade airfoil      | SG6042        |
+| Root airfoil       | SG6040        |
+| Blade material     | EPP RG30 (foam)|
+| Twist              | None          |
+| Tether diameter    | 1.9 mm        |
+| Max tether length  | 300 m         |
+| Min altitude       | 10 m          |
+| Tether attachment  | Bottom of axle|
 
-### Tether
-| Parameter | Value (reference) |
-|-----------|-------|
-| Tether attachment | Bottom center of rotor axis |
-| Tether diameter | 1.9 mm |
-| Max tether length | 300 m |
-| Min altitude | 10 m |
+### Pitch Control
+Blade pitch is controlled **indirectly** — no pitch bearings at blade root:
+```
+S1/S2/S3 servos → tilt lower swashplate ring → upper ring follows →
+push-rods → trailing-edge flaps → blade aerodynamic twist → pitch change
+```
+Sign convention: γ < 0 (upward flap) → blade pitches UP
+
+### Anti-Rotation Motor
+**EMAX GB4008** (66KV, hollow shaft) via **80:44 spur gear** applies counter-torque to keep the electronics/swashplate assembly non-rotating against rotor drag. It does not drive rotation.
 
 ---
 
@@ -184,59 +198,37 @@ Phase offset is **π/2 (90°)** for 4 blades — previously 2π/3 (120°) for 3 
 
 ## Electronics & Power
 
-### Power Architecture (from whiteboard)
+> Full component specs in [physical_design.md](physical_design.md)
 
+### Power Architecture
 ```
 Battery 4S 15.2V
-  ├── XT30 → BM/PM (Battery Monitor + Power Module) → XT60 → PDB → XT60 → ESC → [JST X7 2.34] → GB4008 Motor
-  └── XT30 → UBEC → 8.0V → Pixhawk servo rail → S1, S2, S3 (servos)
-                         └── Pixhawk FMU (via PM power module)
+  ├── XT30 → BM/PM → XT60 → ESC → GB4008 Motor
+  └── XT30 → UBEC → 8.0V → Pixhawk servo rail → S1, S2, S3 servos
+                         └── Pixhawk FMU (via PM)
 ```
-
-**Note on "?" in whiteboard:** The Pixhawk 6C PM powers the FMU electronics but does **not** power the servo output rail. The UBEC must connect to the servo rail (pin 1 of any servo output) to supply servo power. This connection is required.
+Note: PM powers FMU only — UBEC must supply the servo rail separately (pin 1 of any servo output).
 
 ### Communication Architecture
 ```
-MissionPlanner (PC) ──SiK Radio V3────────────────> Pixhawk 6C
-Boxer Controller    ──ExpressLRS 2.4GHz──> RP3-H ──> Pixhawk 6C
-Pixhawk 6C          ──PWM (S1,S2,S3)────────────> Swashplate Servos
-Pixhawk 6C          ──DSHOT/PWM─────────────────> REVVitRC ESC ──> GB4008 Motor
+MissionPlanner (PC) ──SiK Radio V3 (433/915MHz)────────► Pixhawk 6C
+Boxer M2 RC         ──ExpressLRS 2.4GHz──► RP3-H Rx ───► Pixhawk 6C
+Pixhawk 6C          ──PWM (S1, S2, S3)──────────────────► Swashplate servos
+Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ESC ► GB4008 Motor
 ```
 
-### Components
+### Component Summary
 
-**Flight Controller — Holybro Pixhawk 6C** (minimum spec)
-- ArduPilot / MissionPlanner
-- Manages collective + cyclic swashplate mixing in software (H_RSC_MODE, H_SV_MAN etc.)
-- S1, S2, S3 → swashplate servo outputs
-
-**Motor — EMAX GB4008 Brushless Gimbal Motor**
-- Hollow shaft, 66KV, 90T, 24N22P, 7.5Ω, 101g
-- Role: holds swashplate non-rotating ring stationary via 80:44 spur gear
-- Hollow shaft allows push-rod routing through blade axis
-
-**ESC — REVVitRC 50A AM32**
-- AM32 firmware, Servo PWM / DSHOT 300 / DSHOT 600
-- Built-in BEC 7.4V/8.4V (not used here — UBEC used instead)
-- Sinusoidal startup mode for smooth motor control
-
-**UBEC**
-- Output: 8.0V
-- Powers: Pixhawk servo rail + S1, S2, S3 servos
-- Input: battery via XT30
-
-**Battery**
-- 4S LiPo, 15.2V nominal
-- Capacity: 450mAh *(flagged as small — verify, may be 4500mAh)*
-
-**Telemetry — Holybro SiK Telemetry Radio V3**
-- MAVLink, 433/915MHz, up to 500mW, 300m+ range
-
-**RC Receiver — RadioMaster RP3-H ExpressLRS 2.4GHz**
-- CRSF / S.Bus output, 25–500Hz
-
-**RC Transmitter — RadioMaster Boxer (M2)**
-- EdgeTX, ExpressLRS 2.4GHz, Hall effect gimbals
+| Component        | Model                    | Role                                      |
+|------------------|--------------------------|-------------------------------------------|
+| Flight controller| Holybro Pixhawk 6C       | Swashplate mixing, servo + ESC outputs    |
+| Motor            | EMAX GB4008 (66KV)       | Counter-torque, keeps electronics stationary |
+| ESC              | REVVitRC 50A AM32        | Motor speed control                       |
+| UBEC             | —                        | 8.0V servo rail power                     |
+| Battery          | 4S LiPo 15.2V            | ~450 mAh *(verify — may be 4500 mAh)*    |
+| Telemetry        | Holybro SiK Radio V3     | MAVLink ground link, 300m+                |
+| RC receiver      | RadioMaster RP3-H        | ExpressLRS 2.4GHz, CRSF/S.Bus             |
+| RC transmitter   | RadioMaster Boxer M2     | EdgeTX, Hall effect gimbals               |
 
 ---
 
@@ -244,10 +236,11 @@ Pixhawk 6C          ──DSHOT/PWM───────────────
 
 | File | Contents |
 |------|---------|
+| [physical_design.md](physical_design.md) | Full physical design — assembly layout, rotor geometry, swashplate, servo flaps, all component specs |
 | [flapmodel.md](flapmodel.md) | Full mathematical model from Weyel 2025 — aerodynamics, state space, flap dynamics, controller, all parameter tables |
-| [flaprotordesign.md](flaprotordesign.md) | Physical blade design decisions — airfoil selection (SG6042), dimensions, Reynolds number, flap prototype |
+| [flaprotordesign.md](flaprotordesign.md) | Blade design decisions — airfoil selection (SG6042), dimensions, Reynolds number, flap prototype |
 | [servoflaps.md](servoflaps.md) | Kaman flap design reference — US patent US3217809, mechanical principle, swashplate linkage path |
-| [hardware.md](hardware.md) | Hardware stack — all components with full specs |
+| [hardware.md](hardware.md) | Hardware component specs (detailed) |
 | [summary.md](summary.md) | RAWES optimal control model from De Schutter et al. 2018 — pumping cycle, structural constraints, atmosphere model |
 | [simulation_model.md](simulation_model.md) | Duplicate of flapmodel.md |
 
