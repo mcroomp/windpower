@@ -2,7 +2,7 @@
 
 ## Project Goal
 
-Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort. **Current phase: knowledge collection and organization.**
+Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) based on a tethered Autogyro (gyrocopter) and a common AWE principle called pumping or reel in/out. The system can fly in all standard modes: takeoff, stabilized flight, pumping cycle, landing. This is a long-term, step-by-step effort. **Current phase: knowledge collection and organization.**
 
 ---
 
