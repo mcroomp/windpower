@@ -224,8 +224,9 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 | Flight controller| Holybro Pixhawk 6C       | Swashplate mixing, servo + ESC outputs    |
 | Motor            | EMAX GB4008 (66KV)       | Counter-torque, keeps electronics stationary |
 | ESC              | REVVitRC 50A AM32        | Motor speed control                       |
+| Servos S1/S2/S3  | DS113MG V6.0             | Swashplate tilt (collective + cyclic)     |
 | UBEC             | —                        | 8.0V servo rail power                     |
-| Battery          | 4S LiPo 15.2V            | ~450 mAh *(verify — may be 4500 mAh)*    |
+| Battery          | 4S LiPo 15.2V            | 450 mAh (confirmed)                       |
 | Telemetry        | Holybro SiK Radio V3     | MAVLink ground link, 300m+                |
 | RC receiver      | RadioMaster RP3-H        | ExpressLRS 2.4GHz, CRSF/S.Bus             |
 | RC transmitter   | RadioMaster Boxer M2     | EdgeTX, Hall effect gimbals               |
@@ -275,13 +276,35 @@ Additional physics limitations in current model:
 
 ---
 
+## Flight Modes
+
+### Takeoff — Jump Takeoff (Gyrocopter-style)
+
+RAWES uses a jump takeoff, exploiting the rotor's stored kinetic energy for vertical launch:
+
+1. **Pre-rotation:** The rotor rests on a launch arm mounted on a gimbal. The bottom of the rotor hub is cone-shaped; this cone engages a motorized pre-rotator shaft that spins the rotor to an RPM significantly above what is needed for level autorotation. Blades are held at **zero collective pitch** during this phase to minimize aerodynamic drag on the motor.
+2. **Jump:** Collective pitch is rapidly increased. This generates a spike in lift at the cost of decaying rotor RPM — the stored rotational kinetic energy is converted into vertical thrust, pushing the rotor upward.
+3. **Transition to autorotation:** As the rotor climbs to altitude, it transitions from consuming stored kinetic energy to sustained autorotation driven by the relative wind. Tether pays out as the rotor ascends.
+
+Key constraint: the pre-rotator shaft must disengage cleanly before autorotation establishes, and the gimbal launch arm must release without disturbing rotor attitude.
+
+### Landing — Autorotation Landing (Tether-assisted)
+
+Landing resembles a helicopter autorotation flare, with the tether providing additional control authority:
+
+1. **Descent:** The rotor descends in autorotation. Tether reel-in by the ground winch maintains relative wind across the rotor disk, sustaining autorotation throughout the descent — this is a key difference from an untethered gyrocopter.
+2. **Flare:** Just before the rotor cone touches the pre-rotator shaft, collective pitch is increased. This reduces sink rate and bleeds off rotor RPM in a controlled flare.
+3. **Touch-down / RPM match:** The pre-rotator shaft motor spins up to match the incoming rotor RPM before cone contact, allowing a smooth re-engagement without shock loading.
+
+---
+
 ## Next Steps (Planned)
 
-- [ ] Confirm battery capacity (450mAh vs 4500mAh)
-- [ ] Confirm servo model for S1/S2/S3
+- [x] Confirm battery capacity: 450 mAh (confirmed 2026-03-20)
+- [x] Confirm servo model for S1/S2/S3: DS113MG V6.0 Digital Metal Gear Micro Servo
+- [x] Define takeoff/landing modes for a tethered autorotating system
 - [ ] Update simulation parameters for 4-blade, 2m geometry
 - [ ] Python simulation running with flapmodel.md equations
 - [ ] ArduPilot helicopter frame configuration for RAWES (swashplate type, RSC mode)
 - [ ] Mapping: ArduPilot collective/cyclic outputs → swashplate → flap deflection → blade pitch
-- [ ] Define takeoff/landing modes for a tethered autorotating system
 - [ ] Hardware-in-the-loop testing with Pixhawk SITL

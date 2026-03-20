@@ -54,6 +54,15 @@ Pixhawk             ────────────────────
 
 ---
 
+## Servos S1, S2, S3 — DS113MG V6.0 Digital Metal Gear Micro Servo
+
+- **Type:** Digital, metal gear, micro
+- **Role:** Tilt lower swashplate ring (collective + cyclic control)
+- **Count:** 3× (3-point support on lower swashplate ring)
+- **Power:** 8.0V via UBEC through Pixhawk servo rail
+
+---
+
 ## Flight Controller — Pixhawk
 
 - **Ecosystem:** ArduPilot / MissionPlanner

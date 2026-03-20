@@ -226,9 +226,14 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 - Powers: Pixhawk servo rail + S1, S2, S3 servos
 - Input: battery via XT30
 
+**Servos S1, S2, S3 — DS113MG V6.0 Digital Metal Gear Micro Servo**
+- Type: Digital, metal gear, micro
+- Role: Tilt lower swashplate ring (collective + cyclic control)
+- 3× servos in 3-point arrangement
+
 **Battery**
 - 4S LiPo, 15.2V nominal
-- Capacity: 450 mAh *(flagged as possibly incorrect — verify, may be 4500 mAh)*
+- Capacity: 450 mAh (confirmed — short flight time acceptable for current phase)
 
 **Telemetry — Holybro SiK Telemetry Radio V3**
 - MAVLink, bidirectional
@@ -253,6 +258,57 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 - Gimbals: Hall effect V4.0
 - Display: 128×64 monochrome LCD
 - Weight: 532.5 g
+
+---
+
+## Power Budget
+
+### Power Sources
+
+| Source   | Input          | Output    | Connector | Powers                                |
+|----------|----------------|-----------|-----------|---------------------------------------|
+| Battery  | —              | 15.2V 4S  | XT30 ×2   | Everything (via PM and UBEC)          |
+| PM       | 15.2V battery  | ~5.3V     | JST-GH    | Pixhawk FMU only                      |
+| UBEC     | 15.2V battery  | 8.0V      | XT30 in, servo rail out | S1/S2/S3 + Pixhawk servo rail |
+
+### Per-Component Power Requirements
+
+| Component             | Supplied by    | Voltage     | Idle current     | Peak current        | Notes                                   |
+|-----------------------|----------------|-------------|------------------|---------------------|-----------------------------------------|
+| GB4008 Motor          | ESC → battery  | 15.2V (4S)  | ~0 A             | ~2 A (est.)         | 7.5Ω winding; only opposes drag torque — not driving rotation |
+| REVVitRC 50A ESC      | Battery        | 15.2V (4S)  | ~0.1 A           | 50 A max            | Current limit set by ESC firmware       |
+| Pixhawk 6C FMU        | PM             | 4.1–5.7V   | ~0.25 A (est.)   | ~0.5 A (est.)       | PM provides regulated 5.3V; servo rail powered separately |
+| DS113MG V6.0 (S1)     | UBEC → servo rail | 8.0V     | ~0.05 A          | 1.6 A stall         | Rated 4.8–8.4V; stall at 8.4V = 1.6 A  |
+| DS113MG V6.0 (S2)     | UBEC → servo rail | 8.0V     | ~0.05 A          | 1.6 A stall         | "                                       |
+| DS113MG V6.0 (S3)     | UBEC → servo rail | 8.0V     | ~0.05 A          | 1.6 A stall         | "                                       |
+| Holybro SiK Radio V3  | Pixhawk TELEM  | 5.0V        | 0.025 A RX       | 0.1 A TX            | Powered from Pixhawk TELEM port         |
+| RadioMaster RP3-H Rx  | Pixhawk RC port| 4.5–8.4V   | ~0.1 A (est.)    | ~0.15 A (est.)      | Connected to Pixhawk RC input at 5V     |
+
+### Servo Rail Budget (UBEC @ 8V)
+
+| Load              | Idle    | Peak (all 3 stall) |
+|-------------------|---------|--------------------|
+| 3× DS113MG        | ~0.15 A | ~4.8 A             |
+| Pixhawk servo rail| ~0.05 A | ~0.05 A            |
+| **Total**         | ~0.2 A  | ~4.85 A            |
+
+UBEC must be rated for at least **5 A continuous** at 8V. Verify UBEC model/rating — not yet confirmed.
+
+### Battery Runtime Estimate (450 mAh)
+
+| Scenario                  | Battery current (est.) | Runtime      |
+|---------------------------|------------------------|--------------|
+| Idle / bench test         | ~1 A                   | ~27 min      |
+| Active flight (motor + servos) | ~5–8 A            | ~4–6 min     |
+| Motor at full counter-torque   | ~8–12 A (est.)    | ~2–3 min     |
+
+> These are rough estimates. Actual motor current depends on rotor drag torque, which scales with rpm² and air density.
+
+### Open Items — Power
+
+- [ ] Confirm UBEC model and current rating (must support ≥5 A at 8V for 3× stall servos)
+- [ ] Confirm RP3-H power source (Pixhawk RC port 5V vs. servo rail 8V — check voltage compatibility)
+- [ ] Measure actual GB4008 counter-torque current at operating rotor RPM
 
 ---
 
