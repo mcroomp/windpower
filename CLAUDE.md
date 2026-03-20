@@ -242,6 +242,7 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 | [flaprotordesign.md](flaprotordesign.md) | Blade design decisions — airfoil selection (SG6042), dimensions, Reynolds number, flap prototype |
 | [servoflaps.md](servoflaps.md) | Kaman flap design reference — US patent US3217809, mechanical principle, swashplate linkage path |
 | [hardware.md](hardware.md) | Hardware component specs (detailed) |
+| [ardupilot_implementation.md](ardupilot_implementation.md) | ArduPilot integration — swashplate config, Kaman flap lag problem, RSC, companion computer architecture, implementation phases |
 | [summary.md](summary.md) | RAWES optimal control model from De Schutter et al. 2018 — pumping cycle, structural constraints, atmosphere model |
 | [simulation_model.md](simulation_model.md) | Duplicate of flapmodel.md |
 

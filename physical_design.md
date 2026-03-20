@@ -307,7 +307,7 @@ UBEC must be rated for at least **5 A continuous** at 8V. Verify UBEC model/rati
 ### Open Items — Power
 
 - [ ] Confirm UBEC model and current rating (must support ≥5 A at 8V for 3× stall servos)
-- [ ] Confirm RP3-H power source (Pixhawk RC port 5V vs. servo rail 8V — check voltage compatibility)
+- [x] Confirm RP3-H power source: powered from servo rail at 8V (working voltage DC 4.5–8.4V — confirmed compatible). Pixhawk FMU is powered from PM at 5V; UBEC powers servo rail at 8V; RP3-H connects to servo rail.
 - [ ] Measure actual GB4008 counter-torque current at operating rotor RPM
 
 ---
