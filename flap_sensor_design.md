@@ -269,6 +269,303 @@ With all 4 blades logged, check for:
 
 ---
 
+## Manual Measurement Procedure (Digital Level)
+
+Simpler alternative to the automated sensor rig. Requires only a digital level,
+MissionPlanner connected to the Pixhawk, and a marker on the hub for azimuth reference.
+Suitable for initial characterisation — ~20 minutes of work.
+
+### Equipment
+
+- Digital level / inclinometer
+- MissionPlanner connected to Pixhawk via USB or telemetry
+- Marker pen or tape to mark azimuth positions on hub (0°, 90°, 180°, 270°)
+- Notebook or spreadsheet to record readings
+
+### Step 1 — Mark azimuth positions
+
+With the hub assembled, mark 4 positions on the outer rim corresponding to each blade
+root: 0°, 90°, 180°, 270°. These are the positions you will rotate to for each reading.
+
+```
+        Blade 1
+          │  ← mark "0°" here on hub rim
+          │
+Blade 4 ──●── Blade 2
+   270°   │    90°
+          │
+        Blade 3
+         180°
+```
+
+### Step 2 — Zero reference (swashplate level)
+
+1. Set all servos to neutral in MissionPlanner (S1=S2=S3=1500µs)
+2. Verify swashplate is level — place digital level on lower swashplate ring and confirm ~0°
+3. Rotate hub to each azimuth position and record flap angle at each:
+
+| Azimuth | Flap angle (neutral) |
+|---------|---------------------|
+| 0°      | ___°                |
+| 90°     | ___°                |
+| 180°    | ___°                |
+| 270°    | ___°                |
+
+These are your zero offsets. Subtract them from all subsequent readings.
+
+### Step 3 — Measure flap response vs servo command
+
+Command a fixed tilt via MissionPlanner servo output test. Suggested test points:
+
+| Test | S1 (µs) | S2 (µs) | S3 (µs) | Description |
+|------|---------|---------|---------|-------------|
+| A    | 1600    | 1500    | 1500    | S1 only, +100µs |
+| B    | 1700    | 1500    | 1500    | S1 only, +200µs |
+| C    | 1400    | 1500    | 1500    | S1 only, −100µs |
+| D    | 1300    | 1500    | 1500    | S1 only, −200µs |
+| E    | 1500    | 1600    | 1500    | S2 only, +100µs |
+| F    | 1500    | 1500    | 1600    | S3 only, +100µs |
+
+For each test:
+1. Enter servo PWM values in MissionPlanner
+2. Rotate hub to 0° — hold still — read and record flap angle
+3. Rotate to 90° — hold still — read and record
+4. Repeat for 180° and 270°
+5. Subtract zero offsets from step 2
+
+### Step 4 — Record sheet
+
+```
+Test | S1   | S2   | S3   | 0°    | 90°   | 180°  | 270°
+-----|------|------|------|-------|-------|-------|------
+ A   | 1600 | 1500 | 1500 | ___°  | ___°  | ___°  | ___°
+ B   | 1700 | 1500 | 1500 | ___°  | ___°  | ___°  | ___°
+ C   | 1400 | 1500 | 1500 | ___°  | ___°  | ___°  | ___°
+ D   | 1300 | 1500 | 1500 | ___°  | ___°  | ___°  | ___°
+ E   | 1500 | 1600 | 1500 | ___°  | ___°  | ___°  | ___°
+ F   | 1500 | 1500 | 1600 | ___°  | ___°  | ___°  | ___°
+```
+
+### Step 5 — Analysis
+
+For each test row, the 4 readings should follow a cosine:
+
+```
+γ(θ) = A · cos(θ − Ψ)
+```
+
+Quick manual check — the values at 0° and 180° should be equal and opposite,
+and the values at 90° and 270° should be equal and opposite:
+
+```
+γ(0°)  ≈ −γ(180°)
+γ(90°) ≈ −γ(270°)
+```
+
+The amplitude `A` is:
+
+```
+A = (γ(0°) − γ(180°)) / 2
+```
+
+Plot `A` vs servo PWM offset for each servo → this is your `Δγ / Δδ` gain.
+Linearity check: doubling the PWM offset should double `A`.
+
+### What to look for
+
+| Observation | Meaning |
+|-------------|---------|
+| `γ(0°) ≈ −γ(180°)` and `γ(90°) ≈ −γ(270°)` | Geometry is symmetric — good |
+| One azimuth reads significantly different from expected | Push-rod length error or binding at that position |
+| `A` not proportional to PWM offset | Nonlinearity in linkage — check for slop or binding |
+| S2 and S3 tests give different `A` for same PWM offset | Unequal servo arm lengths or attachment radii |
+| All readings near zero regardless of servo command | Push-rods not connected or swashplate not moving |
+
+---
+
+## ArduPilot Configuration
+
+This section lists the ArduPilot parameters that must be set, and which ones
+come directly from the manual measurements above.
+
+Reference: ArduPilot Traditional Helicopter setup wiki — verify exact parameter
+names and function numbers against your ArduCopter firmware version.
+
+---
+
+### Step 1 — Frame type
+
+```
+FRAME_CLASS = 11        # Traditional Helicopter
+FRAME_TYPE  = 0         # (default)
+```
+
+This tells ArduCopter to use helicopter control laws and swashplate mixing.
+Servo outputs 1, 2, 3 are automatically assigned to swashplate servos.
+Servo output 8 is automatically assigned to RSC (rotor speed control).
+
+---
+
+### Step 2 — Swashplate geometry
+
+```
+H_SWASH_TYPE = 0        # H3-120: 3 servos equally spaced at 120°
+```
+
+Other options if geometry differs:
+
+| Value | Type | Notes |
+|-------|------|-------|
+| 0 | H3-120 | 3 servos at 120° — standard, use this |
+| 1 | H1 | Mechanical mixing — not applicable |
+| 2 | H3-140 | 3 servos at 140°/100° — non-standard |
+| 3 | H4-90 | 4 servos at 90° — not applicable |
+
+Verify by checking the physical servo mounting angles on the lower swashplate ring.
+
+---
+
+### Step 3 — Servo output wiring
+
+Connect Pixhawk main outputs to servos:
+
+| Pixhawk output | Connects to | ArduPilot role |
+|----------------|-------------|----------------|
+| MAIN OUT 1 | S1 servo | Swashplate servo 1 |
+| MAIN OUT 2 | S2 servo | Swashplate servo 2 |
+| MAIN OUT 3 | S3 servo | Swashplate servo 3 |
+| MAIN OUT 8 | REVVitRC ESC | RSC (GB4008 counter-torque motor) |
+
+---
+
+### Step 4 — Servo calibration
+
+Set limits and trim for each servo. **Trim values come from Step 2 of the
+manual measurement** (the neutral PWM where swashplate is level).
+
+```
+SERVO1_MIN      = 1000   # µs — safe minimum (adjust if servo hits mechanical stop)
+SERVO1_MAX      = 2000   # µs — safe maximum
+SERVO1_TRIM     = 1500   # µs — neutral (verify: swashplate level at this value)
+
+SERVO2_MIN      = 1000
+SERVO2_MAX      = 2000
+SERVO2_TRIM     = 1500
+
+SERVO3_MIN      = 1000
+SERVO3_MAX      = 2000
+SERVO3_TRIM     = 1500
+```
+
+**SERVO_REVERSED** — set from measurement data:
+After entering trim values, command a positive collective in MissionPlanner
+(H_SV_MAN = 1, increase collective slider). All 3 servos should move in the
+same direction (all up or all down). If any servo moves the wrong way:
+
+```
+SERVO1_REVERSED = 0 or 1   # flip if swashplate tilts wrong way for S1
+SERVO2_REVERSED = 0 or 1
+SERVO3_REVERSED = 0 or 1
+```
+
+---
+
+### Step 5 — Collective pitch range
+
+These define the PWM range ArduPilot uses for collective commands.
+Set based on your servo travel and mechanical limits:
+
+```
+H_COL_MIN = 1250    # µs — minimum collective (flat/negative pitch)
+H_COL_MAX = 1750    # µs — maximum collective (positive pitch)
+H_COL_MID = 1500    # µs — zero collective (neutral, matches SERVO_TRIM)
+```
+
+For a RAWES the collective is less critical than cyclic — set a conservative
+range (±200µs from trim) until the mechanical limits are confirmed.
+
+---
+
+### Step 6 — Cyclic pitch range
+
+**This value comes directly from the manual measurement.**
+
+From the measurement analysis, you have the amplitude `A` (flap degrees) for
+a given PWM offset. The equivalent blade pitch angle is what ArduPilot needs:
+
+```
+H_CYC_MAX = X.X     # degrees — maximum cyclic pitch
+```
+
+How to set it:
+
+1. From your measurement: note the PWM offset that gives a safe maximum flap
+   deflection (e.g. test B at +200µs gave `A = 8°` flap angle)
+2. Convert flap angle to approximate blade pitch using the model ratio from
+   [flapmodel.md](flapmodel.md) (CM_gamma / CM_beta ≈ −0.5/0.002 → ~250:1 reduction,
+   but this will be refined from in-flight ID)
+3. Start conservatively — set `H_CYC_MAX = 4.0` degrees and increase only
+   after verifying stable flight
+
+```
+H_CYC_MAX = 4.0     # degrees — start conservative, increase after testing
+```
+
+---
+
+### Step 7 — RSC configuration (wind-driven rotor)
+
+The GB4008 motor provides counter-torque only — it does not drive the rotor.
+ArduPilot must not try to spin up the rotor on arming.
+
+```
+H_RSC_MODE     = 0      # Disabled — no rotor speed control
+H_RSC_SETPOINT = 0      # Not used
+H_RSC_RUNUP_TIME = 0    # No runup wait on arming
+```
+
+ArduPilot normally refuses to arm until rotor reaches speed. With RSC disabled
+this check is bypassed. Verify arming is possible before outdoor testing.
+
+The GB4008 ESC (REVVitRC) is driven manually via RC channel or fixed PWM to
+maintain counter-torque. This is separate from the ArduPilot RSC system.
+
+---
+
+### Step 8 — Verify with H_SV_MAN
+
+Before first flight, use manual servo override to verify swashplate motion:
+
+```
+H_SV_MAN = 1           # Enable manual servo test mode
+```
+
+In MissionPlanner → Initial Setup → Mandatory Hardware → Heli Setup:
+- Move collective slider → all 3 servos should rise/fall together
+- Move roll cyclic → swashplate should tilt left/right
+- Move pitch cyclic → swashplate should tilt fore/aft
+- Verify direction matches physical expectation from measurement data
+
+Set back to normal after verification:
+```
+H_SV_MAN = 0
+```
+
+---
+
+### Parameter summary — what comes from measurements
+
+| Parameter | Source |
+|-----------|--------|
+| `SERVO1/2/3_TRIM` | Manual measurement Step 2 (neutral PWM) |
+| `SERVO1/2/3_REVERSED` | Manual measurement — servo direction check |
+| `H_COL_MIN/MAX` | Mechanical travel limits from measurement |
+| `H_CYC_MAX` | Amplitude A from measurement Step 5 analysis |
+| `H_SWASH_TYPE` | Physical servo mounting geometry |
+| `H_RSC_MODE = 0` | RAWES specific — wind drives rotor, not motor |
+
+---
+
 ## Known Limitations
 
 - **Bench only at high RPM**: Cable runs along 2m blades are fine for slow hand rotation.
