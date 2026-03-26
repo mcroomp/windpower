@@ -1,0 +1,29 @@
+# Default: normalise line endings in the index to LF
+* text=auto eol=lf
+
+# Shell scripts — always LF (run in WSL2/Linux)
+*.sh text eol=lf
+
+# Python — always LF
+*.py text eol=lf
+
+# MBDyn input files — always LF (parsed on Linux)
+*.mbd text eol=lf
+*.set text eol=lf
+*.c81 text eol=lf
+
+# Markdown and text docs
+*.md  text eol=lf
+*.txt text eol=lf
+
+# Windows-only files — CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files — no line ending conversion
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.gz  binary
