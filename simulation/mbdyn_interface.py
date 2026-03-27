@@ -183,10 +183,11 @@ class MBDynInterface:
         raw = _recv_exactly(self._state_sock, _STATE_SIZE)
         vals = struct.unpack(_STATE_FMT, raw)
 
+        # MBDyn socket stream "motion" output order (fixed by MBDyn regardless of
+        # flag list order): position(3), orientation_matrix(9), velocity(3), omega(3)
         pos   = np.array(vals[0:3],   dtype=np.float64)
-        vel   = np.array(vals[3:6],   dtype=np.float64)
-        # MBDyn sends rotation matrix in row-major order
-        R     = np.array(vals[6:15],  dtype=np.float64).reshape(3, 3)
+        R     = np.array(vals[3:12],  dtype=np.float64).reshape(3, 3)
+        vel   = np.array(vals[12:15], dtype=np.float64)
         omega = np.array(vals[15:18], dtype=np.float64)
 
         return {
@@ -216,18 +217,19 @@ if __name__ == "__main__":
     assert np.allclose(test_forces, unpacked), "Round-trip failed!"
     print("  Pack/unpack round-trip: OK")
 
+    # MBDyn output order: pos(3), R(9), vel(3), omega(3)
     test_state = np.concatenate([
         [0.0, 0.0, 50.0],          # pos
-        [0.0, 0.0,  0.0],          # vel
         np.eye(3).ravel(),          # R (identity)
+        [0.0, 0.0,  0.0],          # vel
         [0.0, 0.0, 28.0],          # omega
     ])
     packed_s = struct.pack(_STATE_FMT, *test_state)
     vals = struct.unpack(_STATE_FMT, packed_s)
     state = {
         "pos":   np.array(vals[0:3]),
-        "vel":   np.array(vals[3:6]),
-        "R":     np.array(vals[6:15]).reshape(3, 3),
+        "R":     np.array(vals[3:12]).reshape(3, 3),
+        "vel":   np.array(vals[12:15]),
         "omega": np.array(vals[15:18]),
     }
     assert np.allclose(state["pos"], [0, 0, 50]), "State pos mismatch!"

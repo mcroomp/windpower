@@ -95,7 +95,7 @@ and a Python mediator (aerodynamics + sensor simulation).
 # Step 1: Install dependencies (WSL2 Ubuntu, one time)
 #   install.sh will print any sudo commands you need to run manually
 bash simulation/install.sh
-#   A Python venv is created at simulation/.venv — no sudo needed for pip
+#   A simulation-local Python venv is created at simulation/.venv — no sudo needed for pip
 
 # Step 2: Start MBDyn + mediator
 #   run_sim.sh activates the venv automatically
@@ -119,6 +119,90 @@ python3 simulation/mbdyn_interface.py   # smoke test
 
 The mediator will print status logs. Once SITL connects, you should see
 position updates at 1 Hz.
+
+## Testing
+
+Use two separate paths for validation depending on what is being tested.
+
+### Local unit tests
+
+Run pure Python unit tests locally in their own dedicated virtual environment.
+These tests should cover mediator orchestration, frame conversions, swashplate
+math, and other logic that does not require a live MBDyn or SITL process.
+
+On Windows, use:
+
+```cmd
+simulation\run_unit_tests.cmd
+```
+
+This runner creates `simulation/tests/unit/.venv` if needed, installs the local test
+dependencies into that dedicated unit-test virtual environment, and runs `pytest` against the dedicated test tree under
+`simulation/tests/unit`.
+
+### Stack integration tests
+
+Use `stack integration` for the middle-ground test layer:
+
+- real ArduPilot SITL
+- real `mediator.py`
+- fake plant in place of MBDyn
+- fake MAVLink ground station in place of Mission Planner
+
+This is intentionally not labeled end-to-end. It verifies the controller and
+transport stack without claiming full real-plant coverage.
+
+The smoke test lives under `simulation/tests/stack` and is opt-in. It is meant
+to run in the Docker image, not through the local Windows unit-test path.
+
+Required environment variables:
+
+- `RAWES_RUN_STACK_INTEGRATION=1`
+- `RAWES_ARDUPILOT_PATH=/path/to/ardupilot`
+
+Or provide an explicit `sim_vehicle.py` path instead:
+
+- `RAWES_SIM_VEHICLE=/path/to/ardupilot/Tools/autotest/sim_vehicle.py`
+
+Build the image with ArduPilot SITL included:
+
+```cmd
+simulation\build.cmd ardupilot
+```
+
+Then run the stack integration smoke test inside the container:
+
+```cmd
+simulation\run_stack_integration.cmd -s
+```
+
+This wrapper expects the `rawes-sim` image to exist already. Build it first with:
+
+```cmd
+simulation\build.cmd ardupilot
+```
+
+On Linux or WSL, run the same container-side script with Docker:
+
+```bash
+docker run --rm -it \
+   -v "$(pwd)/simulation:/rawes/simulation" \
+   rawes-sim \
+   bash /rawes/simulation/test_stack.sh -s
+```
+
+### Container and integration checks
+
+Use the Docker image for Linux-specific and toolchain-heavy checks:
+
+- MBDyn installation and smoke tests
+- MBDyn syntax validation via `python simulation/validate.py`
+- containerized reproducibility for the simulation toolchain
+- optional ArduPilot SITL builds
+- stack integration tests against the container's ArduPilot checkout
+
+Keep the fast unit tests local. Keep MBDyn, Docker, and full integration
+validation in the container or WSL/Linux path.
 
 ---
 

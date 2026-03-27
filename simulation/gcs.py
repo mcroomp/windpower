@@ -1,0 +1,546 @@
+"""
+gcs.py — MAVLink GCS client for RAWES simulation control.
+
+Replaces a human Mission Planner operator for automated simulation scenarios.
+Handles: connection, background heartbeat, parameter set, arm, mode change,
+EKF health check, and GUIDED position targets.
+
+Usage
+-----
+    gcs = RawesGCS()
+    gcs.connect()
+    gcs.start_heartbeat()
+    gcs.set_param("ARMING_CHECK", 0)
+    gcs.wait_ekf_ok()
+    gcs.arm()
+    gcs.set_mode(GUIDED)
+    gcs.send_position_target_ned(north=0.0, east=35.4, down=14.6)
+    pos = gcs.recv_local_position()
+    gcs.close()
+"""
+
+import logging
+import threading
+import time
+
+from pymavlink import mavutil
+
+log = logging.getLogger(__name__)
+
+# ArduCopter custom mode numbers
+STABILIZE  = 0
+ALT_HOLD   = 2
+AUTO       = 3
+GUIDED     = 4
+LOITER     = 5
+
+# SET_POSITION_TARGET_LOCAL_NED type_mask: ignore everything except x, y, z
+# (bits set = ignore that field)
+_POS_ONLY_MASK = (
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+)
+
+
+class RawesGCS:
+    """
+    Minimal MAVLink GCS client for RAWES SITL control.
+
+    Parameters
+    ----------
+    address : str
+        pymavlink connection string.  Default connects to the SITL MAVLink
+        output port (udpin = we listen, SITL sends).
+    source_system : int
+        MAVLink system ID to use for outgoing messages (GCS = 255).
+    """
+
+    def __init__(
+        self,
+        address: str = "udpin:localhost:14550",
+        source_system: int = 255,
+    ):
+        self._address = address
+        self._source_system = source_system
+        self._mav = None
+        self._target_system = 1
+        self._target_component = 1
+        self._hb_thread: threading.Thread | None = None
+        self._hb_stop = threading.Event()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def connect(self, timeout: float = 30.0) -> None:
+        """Connect and wait for the first heartbeat from the vehicle."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                self._mav = mavutil.mavlink_connection(
+                    self._address,
+                    source_system=self._source_system,
+                )
+                hb = self._mav.wait_heartbeat(timeout=5.0)
+                if hb:
+                    self._target_system    = self._mav.target_system
+                    self._target_component = self._mav.target_component
+                    log.info(
+                        "GCS connected — vehicle sys=%d comp=%d",
+                        self._target_system, self._target_component,
+                    )
+                    return
+            except Exception as exc:
+                log.debug("Connect attempt failed: %s", exc)
+                time.sleep(0.5)
+        raise TimeoutError(
+            f"Could not connect to vehicle at {self._address!r} within {timeout:.0f}s"
+        )
+
+    def close(self) -> None:
+        """Stop heartbeat thread and close socket."""
+        self.stop_heartbeat()
+        if self._mav is not None:
+            try:
+                self._mav.close()
+            except Exception:
+                pass
+            self._mav = None
+
+    # ------------------------------------------------------------------
+    # Heartbeat
+    # ------------------------------------------------------------------
+
+    def start_heartbeat(self, rate_hz: float = 1.0) -> None:
+        """
+        Start a background thread that sends GCS heartbeats.
+
+        SITL requires periodic GCS heartbeats to stay in non-failsafe states.
+        Must be called after connect().
+        """
+        self._hb_stop.clear()
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_worker,
+            args=(rate_hz,),
+            daemon=True,
+            name="gcs-heartbeat",
+        )
+        self._hb_thread.start()
+        log.debug("GCS heartbeat thread started at %.1f Hz", rate_hz)
+
+    def stop_heartbeat(self) -> None:
+        self._hb_stop.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=2.0)
+            self._hb_thread = None
+
+    def _heartbeat_worker(self, rate_hz: float) -> None:
+        interval = 1.0 / rate_hz
+        while not self._hb_stop.wait(interval):
+            try:
+                self._mav.mav.heartbeat_send(
+                    mavutil.mavlink.MAV_TYPE_GCS,
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    0, 0, 0,
+                )
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Parameters
+    # ------------------------------------------------------------------
+
+    def set_param(
+        self,
+        name: str,
+        value: float,
+        timeout: float = 5.0,
+        retries: int = 3,
+    ) -> bool:
+        """
+        Set a parameter and confirm via PARAM_VALUE acknowledgement.
+
+        If no ACK arrives within *timeout* seconds, verifies the current value
+        with a PARAM_REQUEST_READ and retries the set up to *retries* times.
+        Returns True if the parameter is confirmed at the requested value.
+        """
+        name_bytes = name.encode("utf-8")
+
+        for attempt in range(retries):
+            if attempt > 0:
+                log.debug("set_param %s retry %d/%d", name, attempt, retries - 1)
+
+            self._mav.mav.param_set_send(
+                self._target_system,
+                self._target_component,
+                name_bytes,
+                float(value),
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                msg = self._mav.recv_match(
+                    type="PARAM_VALUE", blocking=True, timeout=1.0
+                )
+                if msg is None:
+                    continue
+                pid = msg.param_id.rstrip("\x00")
+                log.debug(
+                    "PARAM_VALUE received: %s = %g (looking for %s)",
+                    pid, msg.param_value, name,
+                )
+                if pid == name:
+                    log.info("Param %-20s = %g", name, msg.param_value)
+                    return True
+
+            # ACK not received — read back to check if the value was applied silently
+            log.debug("No ACK for %s — verifying via PARAM_REQUEST_READ", name)
+            self._mav.mav.param_request_read_send(
+                self._target_system,
+                self._target_component,
+                name_bytes,
+                -1,
+            )
+            verify_deadline = time.monotonic() + 2.0
+            while time.monotonic() < verify_deadline:
+                msg = self._mav.recv_match(
+                    type="PARAM_VALUE", blocking=True, timeout=0.5
+                )
+                if msg is None:
+                    continue
+                pid = msg.param_id.rstrip("\x00")
+                if pid == name:
+                    if msg.param_value == float(value):
+                        log.info(
+                            "Param %-20s = %g (set confirmed via readback)",
+                            name, msg.param_value,
+                        )
+                        return True
+                    log.debug(
+                        "Param %s readback = %g (wanted %g) — will retry set",
+                        name, msg.param_value, value,
+                    )
+                    break
+
+        log.warning("Failed to set %s = %g after %d attempts", name, value, retries)
+        return False
+
+    # ------------------------------------------------------------------
+    # EKF health
+    # ------------------------------------------------------------------
+
+    def wait_ekf_ok(self, timeout: float = 60.0) -> None:
+        """
+        Block until the EKF reports a healthy position and velocity estimate.
+
+        EKF_STATUS_REPORT flags checked:
+          attitude, velocity_horiz, velocity_vert,
+          pos_horiz_rel, pos_horiz_abs, pos_vert_abs
+        """
+        NEEDED = (
+            mavutil.mavlink.EKF_ATTITUDE
+            | mavutil.mavlink.EKF_VELOCITY_HORIZ
+            | mavutil.mavlink.EKF_VELOCITY_VERT
+            | mavutil.mavlink.EKF_POS_HORIZ_REL
+            | mavutil.mavlink.EKF_POS_HORIZ_ABS
+            | mavutil.mavlink.EKF_POS_VERT_ABS
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = self._mav.recv_match(
+                type="EKF_STATUS_REPORT", blocking=True, timeout=2.0
+            )
+            if msg is None:
+                continue
+            if (msg.flags & NEEDED) == NEEDED:
+                log.info("EKF healthy (flags=0x%04x)", msg.flags)
+                return
+            log.debug("EKF not ready yet (flags=0x%04x)", msg.flags)
+        raise TimeoutError(f"EKF not healthy after {timeout:.0f}s")
+
+    # ------------------------------------------------------------------
+    # Arm
+    # ------------------------------------------------------------------
+
+    def arm(
+        self,
+        timeout: float = 15.0,
+        force: bool = False,
+        rc_override: dict[int, int] | None = None,
+    ) -> None:
+        """Send arm command and confirm via HEARTBEAT armed flag.
+
+        Parameters
+        ----------
+        force : bool
+            Pass the ArduPilot force-arm magic number (21196) as param2 to
+            bypass all remaining pre-arm safety checks.  Use in simulation
+            when hardware-specific interlocks (motor interlock, RC failsafe)
+            are irrelevant.
+        rc_override : dict[int, int] | None
+            If provided, RC_CHANNELS_OVERRIDE is re-sent every 0.5 s while
+            waiting for arm confirmation, preventing ArduPilot from expiring
+            the override (default expiry ~1 s).  Format: {channel: pwm, ...}
+        """
+        param2 = 21196.0 if force else 0.0
+        log.info("Sending arm command (force=%s) …", force)
+        self._mav.mav.command_long_send(
+            self._target_system,
+            self._target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,       # confirmation
+            1,       # param1: 1 = arm
+            param2, 0, 0, 0, 0, 0,
+        )
+        deadline = time.monotonic() + timeout
+        t_last_override = time.monotonic()
+        t_last_arm_send = time.monotonic()
+        while time.monotonic() < deadline:
+            # Refresh RC override every 0.5 s (ArduPilot expires it after ~1 s)
+            if rc_override and (time.monotonic() - t_last_override) >= 0.5:
+                self.send_rc_override(rc_override)
+                t_last_override = time.monotonic()
+
+            msg = self._mav.recv_match(
+                type=["HEARTBEAT", "COMMAND_ACK"], blocking=True, timeout=0.5
+            )
+            if msg is None:
+                continue
+
+            if msg.get_type() == "COMMAND_ACK":
+                if msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                    if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                        pass  # confirmed; wait for armed HEARTBEAT
+                    elif msg.result in (
+                        mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED,
+                        mavutil.mavlink.MAV_RESULT_FAILED,
+                    ):
+                        # Transient pre-arm failure (e.g. interlock not yet registered,
+                        # EKF still converging).  ArduPilot returns FAILED (=4) for
+                        # pre-arm check failures, TEMPORARILY_REJECTED (=1) for busy.
+                        # Sleep 1 s then resend; do NOT raise.
+                        log.debug(
+                            "Arm rejected (result=%d) — retrying in 1 s", msg.result
+                        )
+                        time.sleep(1.0)
+                        self._mav.mav.command_long_send(
+                            self._target_system,
+                            self._target_component,
+                            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                            0, 1, param2, 0, 0, 0, 0, 0,
+                        )
+                        t_last_arm_send = time.monotonic()
+                    else:
+                        raise RuntimeError(
+                            f"Arm rejected by vehicle (result={msg.result})"
+                        )
+
+            if msg.get_type() == "HEARTBEAT":
+                if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+                    log.info("Vehicle is armed.")
+                    return
+
+        raise TimeoutError(f"Vehicle did not confirm armed within {timeout:.0f}s")
+
+    # ------------------------------------------------------------------
+    # Mode
+    # ------------------------------------------------------------------
+
+    def set_mode(
+        self,
+        mode_id: int,
+        timeout: float = 10.0,
+        rc_override: dict[int, int] | None = None,
+    ) -> None:
+        """Set ArduCopter flight mode by custom mode number.
+
+        Parameters
+        ----------
+        rc_override : dict[int, int] | None
+            If provided, RC_CHANNELS_OVERRIDE is re-sent every 0.5 s while
+            waiting for mode confirmation (prevents ArduPilot from expiring
+            the override, which would disengage the motor interlock).
+        """
+        log.info("Setting mode %d …", mode_id)
+        t_last_override = time.monotonic()
+        t_last_send     = time.monotonic()
+        self._mav.mav.command_long_send(
+            self._target_system,
+            self._target_component,
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            0,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            float(mode_id),
+            0, 0, 0, 0, 0,
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Refresh RC override every 0.5 s
+            if rc_override and (time.monotonic() - t_last_override) >= 0.5:
+                self.send_rc_override(rc_override)
+                t_last_override = time.monotonic()
+
+            msg = self._mav.recv_match(
+                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
+                blocking=True,
+                timeout=0.5,
+            )
+            if msg is None:
+                continue
+            t = msg.get_type()
+            if t == "HEARTBEAT":
+                if msg.custom_mode == mode_id:
+                    log.info("Mode confirmed: %d", mode_id)
+                    return
+                log.debug("Heartbeat custom_mode=%d (waiting for %d)", msg.custom_mode, mode_id)
+            elif t == "COMMAND_ACK":
+                if msg.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+                    if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                        log.debug("MAV_CMD_DO_SET_MODE accepted, waiting for heartbeat confirmation")
+                    elif msg.result == mavutil.mavlink.MAV_RESULT_FAILED:
+                        # Transient rejection (e.g. EKF not yet providing position).
+                        # Retry after 1 s.
+                        log.debug(
+                            "Mode %d rejected (result=%d) — retrying in 1 s",
+                            mode_id, msg.result,
+                        )
+                        time.sleep(1.0)
+                        self._mav.mav.command_long_send(
+                            self._target_system,
+                            self._target_component,
+                            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                            0,
+                            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                            float(mode_id),
+                            0, 0, 0, 0, 0,
+                        )
+                        t_last_send = time.monotonic()
+                    else:
+                        raise RuntimeError(
+                            f"Mode change rejected by vehicle "
+                            f"(mode={mode_id}, result={msg.result})"
+                        )
+            elif t == "STATUSTEXT":
+                log.warning("STATUSTEXT during mode set: %s", msg.text.rstrip("\x00").strip())
+        raise TimeoutError(f"Mode {mode_id} not confirmed within {timeout:.0f}s")
+
+    # ------------------------------------------------------------------
+    # GUIDED position target
+    # ------------------------------------------------------------------
+
+    def send_position_target_ned(
+        self,
+        north: float,
+        east:  float,
+        down:  float,
+        yaw:   float = 0.0,
+    ) -> None:
+        """
+        Send SET_POSITION_TARGET_LOCAL_NED in MAV_FRAME_LOCAL_NED.
+
+        Coordinate origin: EKF home (where SITL was launched).
+        Positive down = below home altitude.
+
+        Parameters
+        ----------
+        north, east, down : float   Target position [m]
+        yaw               : float   Target yaw [rad], default 0 (ignored in mask)
+        """
+        self._mav.mav.set_position_target_local_ned_send(
+            0,                                          # time_boot_ms
+            self._target_system,
+            self._target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            _POS_ONLY_MASK,
+            north, east, down,                          # position
+            0.0, 0.0, 0.0,                              # velocity (ignored)
+            0.0, 0.0, 0.0,                              # acceleration (ignored)
+            yaw, 0.0,                                   # yaw, yaw_rate (ignored)
+        )
+        log.info(
+            "Position target sent: N=%.1f E=%.1f D=%.1f m", north, east, down
+        )
+
+    # ------------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------------
+
+    def request_stream(self, stream_id: int, rate_hz: int) -> None:
+        """
+        Request a MAVLink data stream from the vehicle.
+
+        Parameters
+        ----------
+        stream_id : int
+            MAV_DATA_STREAM_* constant (e.g. mavutil.mavlink.MAV_DATA_STREAM_POSITION)
+        rate_hz : int
+            Requested message rate in Hz.  Call once; ArduPilot sustains the rate.
+        """
+        self._mav.mav.request_data_stream_send(
+            self._target_system,
+            self._target_component,
+            stream_id,
+            rate_hz,
+            1,   # 1 = start streaming
+        )
+        log.debug("Requested stream id=%d at %d Hz", stream_id, rate_hz)
+
+    def send_rc_override(self, channels: dict[int, int]) -> None:
+        """
+        Send RC_CHANNELS_OVERRIDE to the vehicle.
+
+        Parameters
+        ----------
+        channels : dict[int, int]
+            Mapping of channel number (1-indexed) to PWM value.
+            Channels not listed are set to 0 (= no override).
+
+        Example
+        -------
+        gcs.send_rc_override({8: 2000})   # CH8 = full high (motor interlock release)
+        """
+        pwm = [0] * 18
+        for ch, val in channels.items():
+            if 1 <= ch <= 18:
+                pwm[ch - 1] = val
+        self._mav.mav.rc_channels_override_send(
+            self._target_system,
+            self._target_component,
+            *pwm[:18],
+        )
+        log.debug("RC override sent: %s", channels)
+
+    # ------------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------------
+
+    def recv_local_position(
+        self, timeout: float = 2.0
+    ) -> tuple[float, float, float] | None:
+        """
+        Return current LOCAL_POSITION_NED (x=N, y=E, z=D) or None on timeout.
+        """
+        msg = self._mav.recv_match(
+            type="LOCAL_POSITION_NED", blocking=True, timeout=timeout
+        )
+        if msg:
+            return (msg.x, msg.y, msg.z)
+        return None
+
+    def recv_attitude(
+        self, timeout: float = 2.0
+    ) -> tuple[float, float, float] | None:
+        """Return (roll, pitch, yaw) radians or None on timeout."""
+        msg = self._mav.recv_match(
+            type="ATTITUDE", blocking=True, timeout=timeout
+        )
+        if msg:
+            return (msg.roll, msg.pitch, msg.yaw)
+        return None

@@ -52,9 +52,12 @@ set: real WEIGHT       = 49.05;     # M_ROTOR * G [N]  — used for initial forc
 
 # --------------------------------------------------------------------------
 # Tether
+# NOTE: tether force is computed in mediator.py (Python), not in MBDyn.
+#       The rod joint has been removed so that the tether can be modelled
+#       as tension-only (a real rope cannot push).
+#       Physical tether: Dyneema SK75 1.9 mm braided, EA ≈ 250 kN.
+#       See mediator.py TetherModel for the full parameter set.
 # --------------------------------------------------------------------------
-set: real TETHER_K     = 300.0;     # tether spring constant [N/m]
-set: real TETHER_OFFSET_Z = -0.5;   # tether attachment point below hub CoM [m]
 
 # --------------------------------------------------------------------------
 # Aerodynamic coefficients (SG6042, from Weyel 2025)
@@ -85,7 +88,6 @@ set: integer GROUND_NODE = 2;
 # --------------------------------------------------------------------------
 set: integer HUB_BODY    = 1;
 set: integer GROUND_CLAMP = 1;
-set: integer TETHER_JOINT = 1;
 set: integer FORCE_ELEM  = 1;
 set: integer COUPLE_ELEM = 2;
 

@@ -18,6 +18,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="$SCRIPT_DIR/install.log"
 ARDUPILOT_PATH="${1:-$HOME/ardupilot}"
+# Python environment for the MBDyn/SITL simulation stack only.
+# Keep this local to simulation/ so it stays isolated from any other repo venvs.
 VENV_DIR="$SCRIPT_DIR/.venv"
 MBDYN_BUILD_DIR="$HOME/mbdyn_build"
 MBDYN_PREFIX="$HOME/.local"
@@ -123,7 +125,7 @@ else
         log_warn "Existing venv is broken (missing pip) — recreating ..."
         rm -rf "$VENV_DIR"
     fi
-    log_info "Creating venv at $VENV_DIR ..."
+    log_info "Creating simulation-local venv at $VENV_DIR ..."
     python3 -m venv "$VENV_DIR"
     log_info "venv created."
 fi
@@ -137,7 +139,7 @@ log_info "pip upgrade ..."
 "$VENV_PIP" install --upgrade pip --quiet
 
 # Install/upgrade packages (idempotent — pip skips if already current)
-log_info "Installing numpy, matplotlib, scipy ..."
+log_info "Installing simulation Python packages (numpy, matplotlib, scipy) ..."
 "$VENV_PIP" install numpy matplotlib scipy --quiet
 
 # Verify using venv python explicitly

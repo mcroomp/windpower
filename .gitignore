@@ -20,6 +20,7 @@ simulation/mbdyn/SG6042.c81
 
 # MBDyn runtime output files
 *.nc
+*.out
 *.mov
 *.ine
 *.jnt
@@ -27,6 +28,9 @@ simulation/mbdyn/SG6042.c81
 *.act
 *.rbk
 *.drv
+
+# Generated data files
+simulation/telemetry.csv
 
 # Logs
 *.log

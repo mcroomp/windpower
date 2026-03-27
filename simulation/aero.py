@@ -41,7 +41,11 @@ _DEFAULTS = dict(
     CD0        = 0.007,    # zero-lift drag
     CD_alpha   = 0.00013,  # drag polar coefficient [1/rad²]
     n_strips   = 20,       # BEM integration strips
-    K_drag     = 0.1,      # drag torque fraction: Q = K_drag * T * r_tip
+    K_drag     = 0.1,      # drag torque fraction: Q_drag = K_drag * T * r_tip
+    K_auto     = 0.00684,  # autorotative driving torque coefficient
+                           # tuned so Q_drive = Q_drag at nominal conditions:
+                           # v_inplane=10 m/s, omega=28 rad/s, T≈164 N
+                           # Q_drive = K_auto * rho * disk_area * v_inplane² * r_tip
     K_cyc      = 0.4,      # cyclic moment scaling factor
     aoa_limit  = 0.26,     # AoA clamp [rad] ≈ ±15° (linear model validity)
     ramp_time  = 5.0,      # spin-up ramp duration [s]
@@ -71,6 +75,7 @@ class RotorAero:
         self.CD_alpha  = float(p["CD_alpha"])
         self.n_strips  = int(p["n_strips"])
         self.K_drag    = float(p["K_drag"])
+        self.K_auto    = float(p["K_auto"])
         self.K_cyc     = float(p["K_cyc"])
         self.aoa_limit = float(p["aoa_limit"])
         self.ramp_time = float(p["ramp_time"])
@@ -83,6 +88,19 @@ class RotorAero:
         # Strip centres and widths
         self._r_mid    = 0.5 * (self._r_edges[:-1] + self._r_edges[1:])
         self._dr       = self._r_edges[1:] - self._r_edges[:-1]
+
+        # Last computed internals — readable after each compute_forces() call
+        # for telemetry logging without changing the return API.
+        self.last_T             = 0.0
+        self.last_v_axial       = 0.0
+        self.last_v_i           = 0.0
+        self.last_v_inplane     = 0.0
+        self.last_ramp          = 0.0
+        self.last_collective_rad= 0.0
+        self.last_tilt_lon      = 0.0
+        self.last_tilt_lat      = 0.0
+        self.last_Q_drag        = 0.0
+        self.last_Q_drive       = 0.0
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -254,12 +272,24 @@ class RotorAero:
         F_world = T * disk_normal
 
         # ----------------------------------------------------------
-        # 6. Rotor drag torque (opposes rotation, about disk normal)
-        #    Q_drag ≈ K_drag * T * R_tip
-        #    Sign: if omega > 0 (CCW from above), drag is clockwise (negative)
+        # 6. Rotor spin torques about disk normal
+        #
+        # Drag torque: aerodynamic resistance opposes rotation.
+        #   Q_drag = -K_drag * T * r_tip
+        #
+        # Autorotative driving torque: in-plane wind accelerates the rotor.
+        #   The in-plane wind component acts on the blade profile and drives
+        #   autorotation. Modelled as proportional to rho * A * v_inplane².
+        #   K_auto is tuned so Q_drive = Q_drag at nominal conditions, giving
+        #   a stable equilibrium spin rate at the design tip-speed-ratio (λ=7).
+        #   As omega rises, T rises (∝ omega²), so Q_drag grows until it
+        #   balances Q_drive — providing the negative feedback for spin stability.
+        #
+        # Both terms are ramped with thrust so that spin-up is smooth.
         # ----------------------------------------------------------
-        Q_drag = -np.sign(omega_rotor) * self.K_drag * T * self.r_tip
-        M_drag_world = Q_drag * disk_normal   # [N·m] in world frame
+        Q_drag  = -np.sign(omega_rotor) * self.K_drag * T * self.r_tip
+        Q_drive =  np.sign(omega_rotor) * self.K_auto * self.rho * self.disk_area * v_inplane**2 * self.r_tip * ramp
+        M_spin_world = (Q_drag + Q_drive) * disk_normal   # [N·m] in world frame
 
         # ----------------------------------------------------------
         # 7. Cyclic moments from swashplate tilt
@@ -277,18 +307,30 @@ class RotorAero:
         # Body-frame moments
         Mx_body = self.K_cyc * tilt_lat_rad * T
         My_body = self.K_cyc * tilt_lon_rad * T
-        Mz_body = 0.0   # Mz from anti-rotation motor added in mediator
+        Mz_body = 0.0
 
         M_cyc_body  = np.array([Mx_body, My_body, Mz_body])
         # Rotate to world frame
         M_cyc_world = R_hub @ M_cyc_body
 
         # Total moment
-        M_world = M_drag_world + M_cyc_world
+        M_world = M_spin_world + M_cyc_world
 
         result = np.zeros(6)
         result[0:3] = F_world
         result[3:6] = M_world
+
+        # Store internals for telemetry access without API change
+        self.last_T              = T
+        self.last_v_axial        = v_axial
+        self.last_v_i            = v_i
+        self.last_v_inplane      = v_inplane
+        self.last_ramp           = ramp
+        self.last_collective_rad = collective_rad
+        self.last_tilt_lon       = tilt_lon
+        self.last_tilt_lat       = tilt_lat
+        self.last_Q_drag         = float(Q_drag)
+        self.last_Q_drive        = float(Q_drive)
 
         log.debug(
             "t=%.3f T=%.2fN v_axial=%.2f v_i=%.2f ramp=%.2f F=%s M=%s",
@@ -320,9 +362,11 @@ class RotorAero:
         -------
         float   Counter-torque [N·m], positive = same sign as omega_rotor
         """
-        # Motor authority: able to cancel ~full drag torque at max ESC
+        # Motor authority: able to cancel ~full drag torque at nominal tip speed.
+        # NOTE: in the current single-body MBDyn model this is NOT applied as an
+        # external couple — motor and bearing drag are internal forces that cancel.
+        # This method is retained for future two-body (hub + electronics) models.
         max_motor_torque = self.K_drag * 2.0 * 0.5 * 1.22 * self.disk_area * 70.0**2 * self.r_tip
-        # Clamp ESC to [0, 1] — motor spins only in one direction
         esc_cmd = max(0.0, esc_normalized)
         return esc_cmd * max_motor_torque * np.sign(omega_rotor)
 

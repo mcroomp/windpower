@@ -55,7 +55,7 @@ begin: control data;
 
     structural nodes:   2;  # hub (dynamic) + ground (static)
     rigid bodies:       1;  # hub body
-    joints:             2;  # ground clamp + tether rod
+    joints:             1;  # ground clamp only (tether is computed in Python mediator)
     forces:             2;  # external force + external couple
     gravity;               # uniform gravity field
 
@@ -63,7 +63,7 @@ begin: control data;
     file drivers:       1;
 
     # Output streams (outgoing state to Python)
-    # streams:            1;  # uncomment if using stream output element
+    output elements:    1;  # stream output for hub state
 
 end: control data;
 
@@ -92,6 +92,30 @@ begin: nodes;
 end: nodes;
 
 # ============================================================================
+begin: drivers;
+
+    # ------------------------------------------------------------------
+    # File driver: stream of 6 float64 values from Python mediator.
+    # MBDyn creates the UNIX domain socket; Python connects as client.
+    #
+    # Protocol: each time step, Python sends exactly 6 × 8 = 48 bytes.
+    # Channels: [1]=Fx [2]=Fy [3]=Fz [4]=Mx [5]=My [6]=Mz
+    #
+    # Initial values = gravity compensation so rotor hovers at t=0
+    # before SITL connects.
+    # ------------------------------------------------------------------
+    file: FORCES_DRIVER,
+        stream,
+        name, "rawes_forces",
+        create, yes,
+        local, "/tmp/rawes_forces.sock",
+        6,                              # channels: Fx Fy Fz Mx My Mz
+        initial values,
+            0.0, 0.0, WEIGHT, 0.0, 0.0, 0.0;
+
+end: drivers;
+
+# ============================================================================
 begin: elements;
 
     # ------------------------------------------------------------------
@@ -111,24 +135,11 @@ begin: elements;
         GROUND_NODE,
         node, node;
 
-    # ------------------------------------------------------------------
-    # Joint: tether rod — elastic constraint from hub attachment point
-    # to ground origin.
-    #
-    # The rod joint connects:
-    #   hub node at local offset (0, 0, TETHER_OFFSET_Z)  — tether eye
-    #   ground node at (0, 0, 0) — winch / anchor
-    #
-    # Modeled as linear elastic spring with stiffness TETHER_K.
-    # A rod joint in MBDyn is a deformable spring along the line joining
-    # the two attachment points.
-    # ------------------------------------------------------------------
-    joint: TETHER_JOINT, rod,
-        HUB_NODE,
-            0.0, 0.0, TETHER_OFFSET_Z,        # attachment offset on hub
-        GROUND_NODE,
-            0.0, 0.0, 0.0,                    # attachment point on ground
-        linear elastic, TETHER_K;
+    # NOTE: tether rod joint removed.
+    # The tether is now a tension-only element computed each step in
+    # mediator.py (TetherModel) and injected as part of the external force.
+    # A bilateral MBDyn rod joint cannot model a slack rope correctly —
+    # it applies compression forces that a real tether cannot exert.
 
     # ------------------------------------------------------------------
     # Gravity: uniform field pointing down (-Z in ENU)
@@ -137,37 +148,12 @@ begin: elements;
         const, G;                              # magnitude [m/s²]
 
     # ------------------------------------------------------------------
-    # File driver: stream of 6 float64 values from Python mediator.
-    # MBDyn creates the UNIX domain socket; Python connects as client.
-    #
-    # Protocol: each time step, Python sends exactly 6 × 8 = 48 bytes.
-    # Channels: [1]=Fx [2]=Fy [3]=Fz [4]=Mx [5]=My [6]=Mz
-    #
-    # Initial values = gravity compensation so rotor hovers at t=0
-    # before SITL connects.
-    # ------------------------------------------------------------------
-    file driver: FORCES_DRIVER,
-        stream,
-        name, "rawes_forces",
-        create, yes,
-        local, "/tmp/rawes_forces.sock",
-        no signal,
-        values, 6,
-        initial value,
-            0.0,       # Fx [N]
-            0.0,       # Fy [N]
-            WEIGHT,    # Fz [N] — gravity compensation (M*g = 49.05 N)
-            0.0,       # Mx [N·m]
-            0.0,       # My [N·m]
-            0.0;       # Mz [N·m]
-
-    # ------------------------------------------------------------------
     # Force element: external aerodynamic force on hub (world frame)
     # Reads channels 1,2,3 from the file driver (Fx, Fy, Fz).
     # ------------------------------------------------------------------
     force: FORCE_ELEM, absolute,
         HUB_NODE,
-        null,                              # applied at node origin
+        position, null,                    # applied at node origin
         component,
             file, FORCES_DRIVER, 1,        # Fx (East)
             file, FORCES_DRIVER, 2,        # Fy (North)
@@ -193,32 +179,15 @@ begin: elements;
     #   [7..15]  rotation matrix R (row-major): R00 R01 R02 R10 R11 R12 R20 R21 R22
     #   [16..18] angular velocity wx, wy, wz  [rad/s]
     #
-    # NOTE: The "stream" output element writes node motion data each step.
-    # If your MBDyn version does not support this element directly, use the
-    # alternative approach with individual "driven" or "genel" elements.
-    # Alternative syntax (comment the block below and uncomment this):
-    #
-    #   output element: STATE_OUTPUT, stream,
-    #       name, "rawes_state",
-    #       create, yes,
-    #       local, "/tmp/rawes_state.sock",
-    #       no signal,
-    #       motion,
-    #           HUB_NODE,
-    #               position, velocity, orientation matrix, angular velocity;
-    # ------------------------------------------------------------------
     output element: STATE_OUTPUT,
-        stream,
+        socket stream,
         name, "rawes_state",
         create, yes,
         local, "/tmp/rawes_state.sock",
         no signal,
         motion,
-            HUB_NODE,
-                position,
-                velocity,
-                orientation matrix,
-                angular velocity;
+        output flags, position, velocity, orientation matrix, angular velocity,
+        HUB_NODE;
 
 end: elements;
 
