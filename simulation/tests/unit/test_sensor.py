@@ -15,10 +15,13 @@ def test_rotation_matrix_to_euler_identity_is_zero():
 
 
 def test_sensor_compute_identity_frame_is_deterministic_without_noise():
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=1)
+    # anchor directly below hub so tether direction = world Z = disk_normal → deviation = 0
+    pos_enu = np.array([5.0, 10.0, 50.0])
+    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=1,
+                       anchor_enu=np.array([5.0, 10.0, 0.0]))
 
     result = sensor.compute(
-        pos_enu=np.array([5.0, 10.0, 50.0]),
+        pos_enu=pos_enu,
         vel_enu=np.array([1.0, 2.0, 3.0]),
         R_hub=np.eye(3),
         omega_body=np.array([0.0, 0.0, 28.0]),
@@ -64,3 +67,37 @@ def test_sensor_rotates_world_omega_into_body_frame():
     # dot(omega, disk_normal)=0 — no spin component is stripped. omega_orbital=[0,0,28].
     # Rotated into NED body frame: T @ (R_orb.T @ [0,0,28]) = T @ [0,28,0] = [28,0,0].
     np.testing.assert_allclose(result["gyro_body"], np.array([28.0, 0.0, 0.0]), atol=1e-6)
+
+
+def test_sensor_tether_aligned_orientation_reports_zero_attitude():
+    """
+    When the hub axle (body Z) is exactly aligned with the tether direction
+    (anchor → hub), the reported attitude must be roll=0, pitch=0, yaw=0.
+    This is the RAWES equilibrium — ArduPilot should not command cyclic correction.
+    """
+    import math as _math
+    elev = _math.radians(30.0)
+    L    = 50.0
+    pos  = np.array([L * _math.cos(elev), 0.0, L * _math.sin(elev)])  # ENU
+
+    # Build R_hub with body Z aligned with tether direction
+    tether_dir = pos / np.linalg.norm(pos)
+    east = np.array([1., 0., 0.])
+    bx   = east - np.dot(east, tether_dir) * tether_dir
+    bx  /= np.linalg.norm(bx)
+    R_hub = np.column_stack([bx, np.cross(tether_dir, bx), tether_dir])
+
+    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0,
+                       anchor_enu=np.zeros(3))
+
+    result = sensor.compute(
+        pos_enu=pos,
+        vel_enu=np.zeros(3),
+        R_hub=R_hub,
+        omega_body=np.zeros(3),
+        accel_world_enu=np.zeros(3),
+        dt=0.0025,
+    )
+
+    np.testing.assert_allclose(result["rpy"], np.zeros(3), atol=1e-10,
+        err_msg="Tether-aligned axle must report zero roll/pitch/yaw to ArduPilot")

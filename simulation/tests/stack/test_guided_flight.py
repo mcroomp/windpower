@@ -1,41 +1,52 @@
 """
-test_guided_flight.py — GUIDED mode flight test using real MBDyn + SITL.
+test_guided_flight.py — GUIDED mode pumping-cycle test using SITL + mediator.
 
-Launches the full three-process stack:
-    ArduPilot SITL ↔ mediator.py ↔ MBDyn
+Launches the two-process stack:
+    ArduPilot SITL ↔ mediator.py  (internal RK4 dynamics)
 
-Then drives ArduPilot to GUIDED mode via MAVLink (replacing a human
-Mission Planner operator) and commands the hub to a position representing
-a 50 m tether at 45°.
+Drives ArduPilot through the three RAWES pumping-cycle phases:
 
-Target geometry
----------------
-  MBDyn anchor: ENU (0, 0, 0)  — ground-level tether attachment
-  Hub home:     ENU (0, 0, 50) — launch position, 50 m above anchor
-  Wind: 10 m/s (already set in mediator default)
+  MAINTAIN → REEL-IN → REEL-OUT
 
-  100 m tether at 30° from vertical:
-      horizontal: 100 * sin(30°) = 50.0 m  East
-      vertical:   100 * cos(30°) ≈ 86.6 m  above anchor
+Power-optimal geometry
+----------------------
+  Tether anchor:  ENU (0, 0, 0)   — ground-level attachment point
+  Hub home:       ENU (0, 0, 50)  — launch position, directly above anchor
+  Wind:           10 m/s East (mediator default)
+  Tether length:  50 m (test shortens it so the tether is taut from launch)
 
-  In ArduPilot LOCAL_NED (origin = EKF home = hub launch position at 50 m AGL):
-      North = 0
-      East  = 50.0
-      Down  = -(86.6 - 50) = -36.6   (negative = above home altitude)
+  For maximum power during reel-out the elevation angle β is chosen to
+  maximise P = T_tether × v_reel × cos(β):
+
+      dP/dβ = 0  →  tan²β = 1/2  →  β_opt = arctan(1/√2) ≈ 35°
+
+  At β = 35° with L = 50 m:
+      East of anchor  = L·cos(35°) ≈  41.0 m
+      Altitude        = L·sin(35°) ≈  28.7 m  (21.3 m below home altitude)
+
+  This requires the rotor disk to be tilted (cyclic pitch) so the thrust
+  vector has a significant horizontal component opposing the tether pull.
+  ArduPilot's position controller generates that cyclic automatically when
+  commanded to hold this position against the tether.
+
+Three modes (LOCAL_NED relative to home at 50 m above anchor)
+--------------------------------------------------------------
+  MAINTAIN  (N=0, E=41.0, D=+21.3)  — hold power-optimal tether angle
+  REEL-IN   (N=0, E=0,    D=0  )    — fly back over anchor; tether goes slack
+  REEL-OUT  (N=0, E=45.1, D=+18.4)  — L×1.1 in same direction; tether stretches
 
 Assertions
 ----------
-  - All three processes stay alive throughout
+  - Both processes stay alive throughout
   - GCS connects, EKF goes healthy, vehicle arms
   - GUIDED mode confirmed by heartbeat
-  - Position target accepted
-  - Vehicle moves eastward (LOCAL_NED y increases) within 60 s
+  - Vehicle moves east (tether direction) during maintain phase
   - No CRITICAL errors in mediator log
 """
+import json
 import logging
 import math
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -44,8 +55,9 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-_SIM_DIR   = Path(__file__).resolve().parents[2]
-_STACK_DIR = Path(__file__).resolve().parent
+_SIM_DIR        = Path(__file__).resolve().parents[2]
+_STACK_DIR      = Path(__file__).resolve().parent
+_STARTING_STATE = _SIM_DIR / "steady_state_starting.json"
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
 
@@ -54,9 +66,6 @@ from test_stack_integration import (
     ARDUPILOT_ENV,
     STACK_ENV_FLAG,
     SIM_VEHICLE_ENV,
-    _MBDYN_FORCE_SOCK,
-    _MBDYN_STATE_SOCK,
-    _find_mbdyn,
     _launch_mediator,
     _launch_sitl,
     _resolve_sim_vehicle,
@@ -66,33 +75,57 @@ from test_stack_integration import (
 from pymavlink import mavutil as _mavutil
 
 from gcs import GUIDED, RawesGCS
+from flight_report import plot_flight_report as _plot_flight_report_base
 
-# ── Target position: 50 m tether at 45° ──────────────────────────────────────
-_TARGET_NORTH =  0.0    # m — no North offset
-_TARGET_EAST  = 50.0   # m — 100 * sin(30°)
-_TARGET_DOWN  = -36.6  # m — -(100*cos(30°) - 50); negative = above home altitude
+# ── Pumping-cycle geometry ────────────────────────────────────────────────────
+#
+# Tether rest length used in the test (mediator --tether-rest-length).
+# Hub home is at ENU (0, 0, 50) — directly above the anchor.
+# With rest_length = HOME_Z the tether is at its boundary length from launch.
+_TETHER_LENGTH_M = 50.0     # m
+_HOME_Z_ENU      = 50.0     # m — hub launch altitude above anchor
+_WIND_SPEED_MS   = 10.0     # m/s — matches mediator default (--wind-x)
 
-# ── Tolerances ───────────────────────────────────────────────────────────────
-# Movement goal: hub must show at least 0.2 m 3-D displacement from its initial
-# hover position during the observation window.
-#
-# Background: with a physically correct tension-only Dyneema tether (rest_length
-# = 200 m), the hub starts 150 m inside the slack zone.  The ArduPilot helicopter
-# controller achieves a stable hover near Z = 50 m; peak displacement toward the
-# GUIDED target is ~0.3–0.5 m.  The previous 5 m threshold was only satisfied
-# because the old bilateral-spring tether was driving a large (~35 m) oscillation
-# that had nothing to do with ArduPilot GUIDED control.
-#
-# This threshold confirms: (a) all three processes stay alive, (b) ArduPilot arms
-# and enters GUIDED mode, (c) the mediator delivers sensor state that ArduPilot
-# accepts, and (d) the hub shows measurable physical response to the GUIDED target.
-_MIN_DISPLACEMENT = 0.2   # m — minimum 3-D displacement from initial hover
+# Power-optimal elevation angle from horizontal.
+# Derivation: maximise P = T_t · v_reel · cos(β)
+#   dP/dβ = 0  →  tan²β = 1/2  →  β = arctan(1/√2) ≈ 35.26°
+_BETA_OPT_RAD = math.atan(1.0 / math.sqrt(2.0))   # ≈ 0.6155 rad ≈ 35.26°
+
+# East of anchor and altitude for the three modes (all in ENU metres from anchor)
+_MAINTAIN_EAST_ENU = _TETHER_LENGTH_M * math.cos(_BETA_OPT_RAD)   # ≈ 40.8 m
+_MAINTAIN_ALT_ENU  = _TETHER_LENGTH_M * math.sin(_BETA_OPT_RAD)   # ≈ 28.9 m
+
+_REEL_OUT_FACTOR    = 1.1   # stretch tether 10% beyond rest length
+_REEL_OUT_EAST_ENU  = _TETHER_LENGTH_M * _REEL_OUT_FACTOR * math.cos(_BETA_OPT_RAD)
+_REEL_OUT_ALT_ENU   = _TETHER_LENGTH_M * _REEL_OUT_FACTOR * math.sin(_BETA_OPT_RAD)
+
+# LOCAL_NED relative to home (origin = hub launch position = ENU (0,0,HOME_Z)):
+#   East  = same as ENU East
+#   Down  = -(alt_above_anchor - HOME_Z)   positive = below home altitude
+_MAINTAIN_N  =  0.0
+_MAINTAIN_E  = _MAINTAIN_EAST_ENU
+_MAINTAIN_D  = -(_MAINTAIN_ALT_ENU - _HOME_Z_ENU)     # positive → hub is below home
+
+_REEL_OUT_N  =  0.0
+_REEL_OUT_E  = _REEL_OUT_EAST_ENU
+_REEL_OUT_D  = -(_REEL_OUT_ALT_ENU - _HOME_Z_ENU)
+
+_REEL_IN_N   =  0.0          # return to directly above anchor
+_REEL_IN_E   =  0.0
+_REEL_IN_D   =  0.0          # back to home altitude
 
 # ── Timing ───────────────────────────────────────────────────────────────────
 _STARTUP_TIMEOUT     = 30.0   # s — processes start + MAVLink heartbeat
-_ARM_TIMEOUT         = 30.0   # s — arm confirmation (may retry several times on EKF/interlock)
-_MODE_TIMEOUT        = 60.0   # s — GUIDED mode confirmation (EKF may need ~30s after origin set)
-_OBSERVATION_SECONDS = 60.0   # s — how long to watch the vehicle move
+_ARM_TIMEOUT         = 30.0   # s — arm confirmation
+_MODE_TIMEOUT        = 60.0   # s — GUIDED mode confirmation
+_MAINTAIN_SECONDS    = 40.0   # s — hold power-optimal position
+_REEL_IN_SECONDS     = 20.0   # s — fly toward anchor (slack tether)
+_REEL_OUT_SECONDS    = 40.0   # s — fly away from anchor (stretch tether)
+
+# ── Tolerances ───────────────────────────────────────────────────────────────
+# During maintain phase the hub must move at least this far East toward the
+# power-optimal position (tether pulling hub East and down to 35° angle).
+_MIN_EAST_DISPLACEMENT = 2.0   # m
 
 # ── Position logging interval ─────────────────────────────────────────────────
 _POS_LOG_INTERVAL    =  5.0   # s — print position summary this often
@@ -176,245 +209,42 @@ def _drain_statustext(gcs: RawesGCS, log: logging.Logger) -> list[str]:
 
 
 def _plot_flight_report(
-    pos_history:      list,   # [(t, N, E, D), ...]
-    attitude_history: list,   # [(t, roll_deg, pitch_deg, yaw_deg), ...]
-    servo_history:    list,   # [(t, s1, s2, s3, s4_pwm), ...]
-    events:           dict,   # {label: t_relative_to_obs_start}
-    target:           tuple,  # (N, E, D) target position
+    pos_history:      list,
+    attitude_history: list,
+    servo_history:    list,
+    events:           dict,
+    target:           tuple,
     out_path:         Path,
-    telemetry_path:   Path | None = None,   # mediator per-step CSV
+    telemetry_path:   Path | None = None,
 ) -> None:
-    """
-    Save a flight report PNG with up to 6 panels.
-
-    Panels (top to bottom):
-      1. Position NED vs time  — N, E, D with target dashed
-      2. 3-D displacement from home vs time  — with pass threshold
-      3. Attitude  — roll, pitch, yaw in degrees
-      4. Servo outputs  — S1/S2/S3 (swashplate) and S4 (ESC/anti-rot) in µs
-      5. Aero thrust & hub altitude (from mediator telemetry, if available)
-      6. Rotor spin & torque balance (from mediator telemetry, if available)
-    Event markers are drawn as vertical lines across all panels.
-    """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import matplotlib.gridspec as gridspec
-    except ImportError:
-        logging.getLogger("test_guided_flight").warning(
-            "matplotlib not available — skipping flight report plot"
-        )
-        return
-
-    log = logging.getLogger("test_guided_flight")
-
-    if not pos_history:
-        log.warning("No position data — skipping flight report plot")
-        return
-
-    ts_pos  = [r[0] for r in pos_history]
-    ns      = [r[1] for r in pos_history]
-    es      = [r[2] for r in pos_history]
-    ds      = [r[3] for r in pos_history]
-    disps   = [math.sqrt(n**2 + e**2 + d**2) for n, e, d in zip(ns, es, ds)]
-
-    target_n, target_e, target_d = target
-
-    # Load mediator telemetry CSV if available
-    telem: dict = {}
-    if telemetry_path is not None and telemetry_path.exists():
-        import csv as _csv
-        try:
-            with telemetry_path.open(newline="", encoding="utf-8") as f:
-                reader = _csv.DictReader(f)
-                rows = list(reader)
-            if rows:
-                def _col(name):
-                    return [float(r[name]) for r in rows if r.get(name, "") != ""]
-                # t_sim in the CSV is wall-clock seconds since mediator start.
-                # pos_history uses seconds since position-target-sent (t_obs_start).
-                # Align: assume the last telemetry row ≈ end of observation window
-                # (mediator runs until terminated, which is after the test).
-                # Shift so telem_t_sim[-1] maps to ts_pos[-1].
-                telem_t_sim = _col("t_sim")
-                t_end_telem = telem_t_sim[-1] if telem_t_sim else 0.0
-                t_end_obs   = ts_pos[-1]       if ts_pos       else 0.0
-                offset      = t_end_obs - t_end_telem
-                telem_t_rel = [t + offset for t in telem_t_sim]
-                telem["t"]            = telem_t_rel
-                telem["T"]            = _col("aero_T")
-                telem["v_axial"]      = _col("aero_v_axial")
-                telem["v_inplane"]    = _col("aero_v_inplane")
-                telem["ramp"]         = _col("aero_ramp")
-                telem["omega_rotor"]  = _col("omega_rotor")
-                telem["Q_drag"]       = _col("aero_Q_drag")
-                telem["Q_drive"]      = _col("aero_Q_drive")
-                telem["hub_pos_z"]    = _col("hub_pos_z")
-                telem["F_z"]          = _col("F_z")
-                telem["collective"]   = [math.degrees(v) for v in _col("collective_rad")]
-                telem["tilt_lon"]     = _col("tilt_lon")
-                telem["tilt_lat"]     = _col("tilt_lat")
-                log.info("Telemetry loaded: %d rows from %s", len(rows), telemetry_path)
-        except Exception as exc:
-            log.warning("Could not load telemetry CSV: %s", exc)
-
-    n_panels = 4 + (2 if telem else 0)
-    fig = plt.figure(figsize=(14, 4 * n_panels + 2))
-    fig.suptitle("RAWES Guided Flight Test — Flight Report", fontsize=14, fontweight="bold")
-    gs = gridspec.GridSpec(n_panels, 1, hspace=0.45, top=0.97 - 0.02 * n_panels,
-                           bottom=0.05, left=0.08, right=0.97)
-
-    event_colors = {
-        "EKF lock":        "#2ca02c",
-        "Armed":           "#d62728",
-        "GUIDED":          "#9467bd",
-        "Position target": "#8c564b",
-    }
-
-    t_max = max(ts_pos) if ts_pos else 60.0
-    x_min = min(min(events.values(), default=0.0) - 2.0, -2.0)
-
-    def _add_events(ax):
-        ax.set_xlim(x_min, t_max + 1.0)
-        ylo, yhi = ax.get_ylim()
-        for label, t in sorted(events.items(), key=lambda x: x[1]):
-            c = event_colors.get(label, "#7f7f7f")
-            ax.axvline(t, color=c, linewidth=1.2, linestyle="--", alpha=0.8)
-            ax.text(t + 0.4, yhi - (yhi - ylo) * 0.02,
-                    label, color=c, fontsize=7.5, va="top",
-                    rotation=90, alpha=0.9, fontweight="bold")
-
-    # ── Panel 1: Position NED ─────────────────────────────────────────────────
-    ax1 = fig.add_subplot(gs[0])
-    ax1.plot(ts_pos, ns, color="#1f77b4", linewidth=1.5, label="North (m)")
-    ax1.plot(ts_pos, es, color="#ff7f0e", linewidth=1.5, label="East  (m)")
-    ax1.plot(ts_pos, ds, color="#d62728", linewidth=1.5, label="Down  (m)")
-    ax1.axhline(target_n, color="#1f77b4", linestyle=":", linewidth=1, alpha=0.5)
-    ax1.axhline(target_e, color="#ff7f0e", linestyle=":", linewidth=1, alpha=0.5,
-                label=f"Target E={target_e:.0f} m")
-    ax1.axhline(target_d, color="#d62728", linestyle=":", linewidth=1, alpha=0.5,
-                label=f"Target D={target_d:.1f} m")
-    ax1.set_ylabel("Position (m)")
-    ax1.set_title("Position NED relative to home")
-    ax1.legend(loc="upper right", fontsize=8, ncol=2)
-    ax1.grid(True, alpha=0.3)
-    _add_events(ax1)
-
-    # ── Panel 2: 3-D displacement ─────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[1])
-    ax2.plot(ts_pos, disps, color="#2ca02c", linewidth=1.8, label="3-D displacement (m)")
-    ax2.axhline(5.0, color="#e377c2", linestyle="--", linewidth=1.2,
-                label="Pass threshold (5 m)")
-    ax2.set_ylabel("Displacement (m)")
-    ax2.set_title("3-D displacement from home")
-    ax2.legend(loc="upper right", fontsize=8)
-    ax2.grid(True, alpha=0.3)
-    _add_events(ax2)
-
-    # ── Panel 3: Attitude ─────────────────────────────────────────────────────
-    ax3 = fig.add_subplot(gs[2])
-    if attitude_history:
-        ts_att = [r[0] for r in attitude_history]
-        rolls  = [r[1] for r in attitude_history]
-        pitchs = [r[2] for r in attitude_history]
-        yaws   = [r[3] for r in attitude_history]
-        ax3.plot(ts_att, rolls,  color="#1f77b4", linewidth=1.2, label="Roll  (°)")
-        ax3.plot(ts_att, pitchs, color="#ff7f0e", linewidth=1.2, label="Pitch (°)")
-        ax3.plot(ts_att, yaws,   color="#2ca02c", linewidth=1.2, label="Yaw   (°)")
-        ax3.axhline(0, color="black", linewidth=0.5, alpha=0.4)
-    else:
-        ax3.text(0.5, 0.5, "No attitude data", transform=ax3.transAxes,
-                 ha="center", va="center", color="grey")
-    ax3.set_ylabel("Angle (°)")
-    ax3.set_title("Attitude (roll / pitch / yaw)")
-    ax3.legend(loc="upper right", fontsize=8)
-    ax3.grid(True, alpha=0.3)
-    _add_events(ax3)
-
-    # ── Panel 4: Servo outputs ────────────────────────────────────────────────
-    ax4 = fig.add_subplot(gs[3])
-    if servo_history:
-        ts_srv = [r[0] for r in servo_history]
-        s1 = [r[1] for r in servo_history]
-        s2 = [r[2] for r in servo_history]
-        s3 = [r[3] for r in servo_history]
-        s4 = [r[4] for r in servo_history]
-        ax4.plot(ts_srv, s1, linewidth=1.2, label="S1 swashplate (µs)")
-        ax4.plot(ts_srv, s2, linewidth=1.2, label="S2 swashplate (µs)")
-        ax4.plot(ts_srv, s3, linewidth=1.2, label="S3 swashplate (µs)")
-        ax4.plot(ts_srv, s4, linewidth=1.2, label="S4 ESC/anti-rot (µs)", linestyle="--")
-        ax4.axhline(1500, color="black", linewidth=0.7, linestyle=":", alpha=0.5,
-                    label="Neutral (1500 µs)")
-    else:
-        ax4.text(0.5, 0.5, "No servo data", transform=ax4.transAxes,
-                 ha="center", va="center", color="grey")
-    ax4.set_xlabel("Time since position target (s)" if not telem else "")
-    ax4.set_ylabel("PWM (µs)")
-    ax4.set_title("ArduPilot servo outputs  (S1/S2/S3 = swashplate,  S4 = ESC / anti-rotation)")
-    ax4.legend(loc="upper right", fontsize=8)
-    ax4.grid(True, alpha=0.3)
-    _add_events(ax4)
-
-    # ── Panel 5: Aero thrust / hub altitude / collective (from telemetry) ────
-    if telem:
-        ax5 = fig.add_subplot(gs[4])
-        ax5b = ax5.twinx()
-        ax5.plot(telem["t"], telem["T"],         color="#2ca02c", linewidth=1.0, label="Thrust T (N)")
-        ax5.plot(telem["t"], telem["F_z"],        color="#1f77b4", linewidth=0.8,
-                 linestyle="--", label="Fz world (N)")
-        ax5b.plot(telem["t"], telem["hub_pos_z"], color="#d62728", linewidth=1.0,
-                  linestyle="-.", label="Hub altitude Z (m)")
-        ax5.set_ylabel("Force (N)", color="#2ca02c")
-        ax5b.set_ylabel("Altitude ENU (m)", color="#d62728")
-        ax5.set_title("Aero thrust & hub altitude (mediator telemetry)")
-        lines5a, labels5a = ax5.get_legend_handles_labels()
-        lines5b, labels5b = ax5b.get_legend_handles_labels()
-        ax5.legend(lines5a + lines5b, labels5a + labels5b, loc="upper right", fontsize=7)
-        ax5.grid(True, alpha=0.3)
-        _add_events(ax5)
-
-        # ── Panel 6: Rotor spin & torque / wind components ────────────────────
-        ax6 = fig.add_subplot(gs[5])
-        ax6b = ax6.twinx()
-        ax6.plot(telem["t"], telem["omega_rotor"],  color="#9467bd", linewidth=1.0, label="ω rotor (rad/s)")
-        ax6b.plot(telem["t"], telem["Q_drag"],   color="#e377c2", linewidth=0.8,
-                  linestyle="--", label="Q drag (N·m)")
-        ax6b.plot(telem["t"], telem["Q_drive"],  color="#bcbd22", linewidth=0.8,
-                  linestyle="-.", label="Q drive (N·m)")
-        ax6b.plot(telem["t"], telem["v_axial"],  color="#17becf", linewidth=0.8,
-                  linestyle=":",  label="v_axial (m/s)")
-        ax6b.plot(telem["t"], telem["v_inplane"],color="#8c564b", linewidth=0.8,
-                  linestyle=":",  label="v_inplane (m/s)")
-        ax6.set_ylabel("ω rotor (rad/s)", color="#9467bd")
-        ax6b.set_ylabel("Torque (N·m) / Wind (m/s)", color="#e377c2")
-        ax6.set_xlabel("Time since position target (s)")
-        ax6.set_title("Rotor spin & torque balance / relative wind (mediator telemetry)")
-        lines6a, labels6a = ax6.get_legend_handles_labels()
-        lines6b, labels6b = ax6b.get_legend_handles_labels()
-        ax6.legend(lines6a + lines6b, labels6a + labels6b, loc="upper right", fontsize=7)
-        ax6.grid(True, alpha=0.3)
-        _add_events(ax6)
-
-    fig.savefig(str(out_path), dpi=120)
-    plt.close(fig)
-    log.info("Flight report saved → %s", out_path)
+    _plot_flight_report_base(
+        pos_history      = pos_history,
+        attitude_history = attitude_history,
+        servo_history    = servo_history,
+        events           = events,
+        target           = target,
+        out_path         = out_path,
+        telemetry_path   = telemetry_path,
+        tether_length_m  = _TETHER_LENGTH_M,
+    )
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Requires AF_UNIX sockets")
+
 def test_guided_flight_to_tether_position():
     """
-    End-to-end GUIDED flight test: arm → GUIDED → position target → movement.
+    End-to-end GUIDED pumping-cycle test: arm → GUIDED → maintain → reel-in → reel-out.
 
-    Launches MBDyn + mediator + SITL, arms the vehicle, sets GUIDED mode, and
-    commands it toward the 45° tether position.  Asserts eastward movement.
+    Phases:
+      1. MAINTAIN  — hold power-optimal 35° tether position (E≈41 m, below home)
+      2. REEL-IN   — fly back over anchor; tether goes slack for winch reel-in
+      3. REEL-OUT  — fly to 1.1× tether length at 35°; tether under tension
+
+    Asserts the hub moves East toward the power-optimal position during
+    the maintain phase, proving ArduPilot is driving cyclic to hold the
+    correct kite angle against tether tension.
     """
     if os.environ.get(STACK_ENV_FLAG) != "1":
         pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
-
-    mbdyn = _find_mbdyn()
-    if mbdyn is None:
-        pytest.skip("mbdyn binary not found in PATH")
 
     sim_vehicle = _resolve_sim_vehicle()
     if sim_vehicle is None:
@@ -426,53 +256,60 @@ def test_guided_flight_to_tether_position():
 
     repo_root = Path(__file__).resolve().parents[3]
     sim_dir   = repo_root / "simulation"
-    mbdyn_dir = sim_dir   / "mbdyn"
-
-    # Clean up stale sockets from a previous run
-    for sock_path in (_MBDYN_FORCE_SOCK, _MBDYN_STATE_SOCK):
-        try:
-            os.unlink(sock_path)
-        except FileNotFoundError:
-            pass
 
     with TemporaryDirectory(prefix="rawes_guided_") as tmpdir:
         temp_path    = Path(tmpdir)
         mediator_log  = temp_path / "mediator.log"
         sitl_log      = temp_path / "sitl.log"
-        mbdyn_stdout  = temp_path / "mbdyn_stdout.log"
-        mbdyn_out     = str(temp_path / "rawes")
-        gcs_log       = temp_path / "gcs.log"     # Python logging output for this test
+        gcs_log       = temp_path / "gcs.log"
         telemetry_log = temp_path / "telemetry.csv"
 
         _configure_logging(gcs_log)
         log = logging.getLogger("test_guided_flight")
 
         log.info("─── test_guided_flight_to_tether_position starting ───")
-        log.info("Target: N=%.1f E=%.1f D=%.1f m  (50 m tether @ 45°)",
-                 _TARGET_NORTH, _TARGET_EAST, _TARGET_DOWN)
-
-        # ── Launch order: MBDyn → mediator → SITL ────────────────────────────
-        log.info("[1/9] Launching MBDyn ...")
-        mbdyn_proc = subprocess.Popen(
-            [str(mbdyn), "-f", "rotor.mbd", "-o", mbdyn_out],
-            cwd=str(mbdyn_dir),
-            stdout=mbdyn_stdout.open("w", encoding="utf-8"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
+        log.info(
+            "Pumping cycle geometry: tether=%.0fm  β_opt=%.1f°  wind=%.1f m/s East",
+            _TETHER_LENGTH_M, math.degrees(_BETA_OPT_RAD), _WIND_SPEED_MS,
         )
+        log.info(
+            "  MAINTAIN  NED=(%.1f, %.1f, %.1f)   ENU East=%.1fm  Alt=%.1fm",
+            _MAINTAIN_N, _MAINTAIN_E, _MAINTAIN_D,
+            _MAINTAIN_EAST_ENU, _MAINTAIN_ALT_ENU,
+        )
+        log.info(
+            "  REEL-OUT  NED=(%.1f, %.1f, %.1f)   ENU East=%.1fm  Alt=%.1fm",
+            _REEL_OUT_N, _REEL_OUT_E, _REEL_OUT_D,
+            _REEL_OUT_EAST_ENU, _REEL_OUT_ALT_ENU,
+        )
+        log.info("  REEL-IN   NED=(0.0, 0.0, 0.0)   return to home above anchor")
+
+        # ── Load steady-state starting conditions ─────────────────────────────
+        _initial_state = None
+        if _STARTING_STATE.exists():
+            _initial_state = json.loads(_STARTING_STATE.read_text())
+            log.info("Loaded initial state from %s  pos=%s  omega_spin=%.2f rad/s",
+                     _STARTING_STATE.name,
+                     [round(v, 3) for v in _initial_state["pos"]],
+                     _initial_state["omega_spin"])
+        else:
+            log.warning("steady_state_starting.json not found — using mediator defaults. "
+                        "Run test_steady_flight.py first to generate it.")
+
+        # ── Launch order: mediator → SITL ─────────────────────────────────────
         log.info("[1/9] Launching mediator ...")
         mediator_proc = _launch_mediator(
             sim_dir, repo_root,
-            _MBDYN_FORCE_SOCK, _MBDYN_STATE_SOCK,
             mediator_log,
             telemetry_log_path=str(telemetry_log),
+            tether_rest_length=_TETHER_LENGTH_M,
+            initial_state=_initial_state,
         )
         log.info("[1/9] Launching SITL ...")
         sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
 
         def _procs_alive():
             for name, proc, log_path in [
-                ("MBDyn",    mbdyn_proc,    mbdyn_stdout),
                 ("mediator", mediator_proc, mediator_log),
                 ("SITL",     sitl_proc,     sitl_log),
             ]:
@@ -500,17 +337,6 @@ def test_guided_flight_to_tether_position():
             if mediator_log.exists():
                 text = mediator_log.read_text(encoding="utf-8", errors="replace")
                 print(f"\n--- mediator.log ({len(text)} chars, last 5000) ---\n{text[-5000:]}")
-
-            # MBDyn stdout
-            if mbdyn_stdout.exists():
-                text = mbdyn_stdout.read_text(encoding="utf-8", errors="replace")
-                print(f"\n--- mbdyn_stdout.log ({len(text)} chars, last 3000) ---\n{text[-3000:]}")
-
-            # MBDyn .log file (solver diagnostics)
-            mbdyn_log_file = Path(mbdyn_out + ".log")
-            if mbdyn_log_file.exists():
-                text = mbdyn_log_file.read_text(errors="replace")
-                print(f"\n--- MBDyn .log ({len(text)} chars, last 2000) ---\n{text[-2000:]}")
 
             # SITL — usually large; tail only
             if sitl_log.exists():
@@ -699,24 +525,66 @@ def test_guided_flight_to_tether_position():
             all_statustext += _drain_statustext(gcs, log)
             _procs_alive()
 
-            # ── 7. Send position target ───────────────────────────────────────
-            log.info("[7/9] Sending position target N=%.1f E=%.1f D=%.1f m ...",
-                     _TARGET_NORTH, _TARGET_EAST, _TARGET_DOWN)
-            gcs.send_position_target_ned(
-                north=_TARGET_NORTH,
-                east=_TARGET_EAST,
-                down=_TARGET_DOWN,
-            )
+            # ── 7. Pumping-cycle phases ───────────────────────────────────────
+            #
+            # Helper: run one phase by holding a position target for duration_s,
+            # collecting MAVLink messages into the shared history lists.
+            def _run_phase(phase_name, north, east, down, duration_s, t_phase_start):
+                deadline_phase = time.monotonic() + duration_s
+                t_last_target  = time.monotonic() - 3.0   # force immediate send
+                t_last_log     = time.monotonic()
+                log.info(
+                    "[8/9] Phase %-10s  target NED=(%.1f, %.1f, %.1f)  duration=%.0fs",
+                    phase_name, north, east, down, duration_s,
+                )
+                while time.monotonic() < deadline_phase:
+                    _procs_alive()
+                    msg = gcs._mav.recv_match(
+                        type=["LOCAL_POSITION_NED", "ATTITUDE",
+                              "SERVO_OUTPUT_RAW", "STATUSTEXT"],
+                        blocking=True, timeout=0.2,
+                    )
+                    t_rel = time.monotonic() - t_phase_start
+                    if msg is not None:
+                        mt = msg.get_type()
+                        if mt == "LOCAL_POSITION_NED":
+                            pos_history.append((t_rel, msg.x, msg.y, msg.z))
+                        elif mt == "ATTITUDE":
+                            attitude_history.append((
+                                t_rel,
+                                math.degrees(msg.roll),
+                                math.degrees(msg.pitch),
+                                math.degrees(msg.yaw),
+                            ))
+                        elif mt == "SERVO_OUTPUT_RAW":
+                            servo_history.append((
+                                t_rel,
+                                msg.servo1_raw, msg.servo2_raw,
+                                msg.servo3_raw, msg.servo4_raw,
+                            ))
+                        elif mt == "STATUSTEXT":
+                            text = msg.text.rstrip("\x00").strip()
+                            log.warning("STATUSTEXT [%s] %s", phase_name, text)
+                            all_statustext.append(text)
+                    now = time.monotonic()
+                    # Re-send target every 2 s to prevent GUIDED timeout
+                    if now - t_last_target >= 2.0:
+                        gcs.send_position_target_ned(north=north, east=east, down=down)
+                        t_last_target = now
+                    # Periodic summary
+                    if now - t_last_log >= _POS_LOG_INTERVAL and pos_history:
+                        _, n, e, d = pos_history[-1]
+                        log.info(
+                            "  %-10s  t=%.0fs  NED=(%.2f, %.2f, %.2f)  "
+                            "remaining=%.0fs",
+                            phase_name, now - t_phase_start, n, e, d,
+                            deadline_phase - now,
+                        )
+                        t_last_log = now
 
-            # ── 8. Observe movement for _OBSERVATION_SECONDS ─────────────────
-            log.info("[8/9] Observing for %.0f s (target: 3-D displacement ≥ %.1f m) ...",
-                     _OBSERVATION_SECONDS, _MIN_DISPLACEMENT)
-            t_obs_start    = time.monotonic()
-            t_last_pos_log = t_obs_start
-            t_last_target  = t_obs_start
+            t_obs_start = time.monotonic()
 
-            # Convert wall-clock event times to seconds relative to t_obs_start.
-            # Events before position target have negative t values.
+            # Convert pre-obs wall-clock events to obs-relative seconds
             flight_events["Position target"] = 0.0
             if _t_ekf_lock is not None:
                 flight_events["EKF lock"] = _t_ekf_lock - t_obs_start
@@ -724,97 +592,34 @@ def test_guided_flight_to_tether_position():
                 flight_events["Armed"] = _t_armed - t_obs_start
             if _t_guided is not None:
                 flight_events["GUIDED"] = _t_guided - t_obs_start
-            deadline       = t_obs_start + _OBSERVATION_SECONDS
 
-            while time.monotonic() < deadline:
-                _procs_alive()
+            # Phase 1: MAINTAIN — hold power-optimal 35° tether angle
+            _run_phase("MAINTAIN", _MAINTAIN_N, _MAINTAIN_E, _MAINTAIN_D,
+                       _MAINTAIN_SECONDS, t_obs_start)
+            flight_events["Reel-in"] = time.monotonic() - t_obs_start
 
-                # Single recv_match covering all types we care about.
-                # Using one call prevents _drain_statustext-style secondary
-                # reads from discarding position/attitude/servo messages off
-                # the socket before the main loop sees them.
-                msg = gcs._mav.recv_match(
-                    type=["LOCAL_POSITION_NED", "ATTITUDE",
-                          "SERVO_OUTPUT_RAW", "STATUSTEXT"],
-                    blocking=True, timeout=0.2,
-                )
-                t_rel = time.monotonic() - t_obs_start
-                if msg is not None:
-                    mt = msg.get_type()
-                    if mt == "LOCAL_POSITION_NED":
-                        pos_history.append((t_rel, msg.x, msg.y, msg.z))
-                    elif mt == "ATTITUDE":
-                        attitude_history.append((
-                            t_rel,
-                            math.degrees(msg.roll),
-                            math.degrees(msg.pitch),
-                            math.degrees(msg.yaw),
-                        ))
-                    elif mt == "SERVO_OUTPUT_RAW":
-                        servo_history.append((
-                            t_rel,
-                            msg.servo1_raw, msg.servo2_raw,
-                            msg.servo3_raw, msg.servo4_raw,
-                        ))
-                    elif mt == "STATUSTEXT":
-                        text = msg.text.rstrip("\x00").strip()
-                        log.warning("STATUSTEXT [sev=%s] %s", msg.severity, text)
-                        all_statustext.append(text)
+            # Phase 2: REEL-IN — fly back over anchor, tether goes slack
+            _run_phase("REEL-IN", _REEL_IN_N, _REEL_IN_E, _REEL_IN_D,
+                       _REEL_IN_SECONDS, t_obs_start)
+            flight_events["Reel-out"] = time.monotonic() - t_obs_start
 
-                # Periodic position summary
-                now = time.monotonic()
-                if now - t_last_pos_log >= _POS_LOG_INTERVAL:
-                    if pos_history:
-                        _, n, e, d = pos_history[-1]
-                        elapsed = now - t_obs_start
-                        remaining = deadline - now
-                        max_disp = max(
-                            math.sqrt(r[1]**2 + r[2]**2 + r[3]**2)
-                            for r in pos_history
-                        )
-                        log.info(
-                            "  t=%.0fs  pos NED=(%.2f, %.2f, %.2f)  "
-                            "max_3d_disp=%.2f m  readings=%d  remaining=%.0fs",
-                            elapsed, n, e, d,
-                            max_disp,
-                            len(pos_history),
-                            remaining,
-                        )
-                    else:
-                        log.warning(
-                            "  t=%.0fs  no position readings yet — "
-                            "mediator may not be sending state to SITL",
-                            now - t_obs_start,
-                        )
-                    t_last_pos_log = now
+            # Phase 3: REEL-OUT — fly to 1.1× tether length, stretch for tension
+            _run_phase("REEL-OUT", _REEL_OUT_N, _REEL_OUT_E, _REEL_OUT_D,
+                       _REEL_OUT_SECONDS, t_obs_start)
 
-                # Re-send target every 2 s to prevent GUIDED timeout
-                if now - t_last_target >= 2.0:
-                    gcs.send_position_target_ned(
-                        north=_TARGET_NORTH,
-                        east=_TARGET_EAST,
-                        down=_TARGET_DOWN,
-                    )
-                    t_last_target = now
-
-            # Observation complete — final summary
-            log.info("[8/9] Observation complete.  %d position readings collected.",
+            # Summary
+            log.info("[8/9] All phases complete.  %d position readings collected.",
                      len(pos_history))
             if pos_history:
-                east_vals = [r[2] for r in pos_history]
-                log.info(
-                    "  East: min=%.2f  max=%.2f  final=%.2f m  (target=%.1f m)",
-                    min(east_vals), max(east_vals), east_vals[-1], _TARGET_EAST,
-                )
-                north_vals = [r[1] for r in pos_history]
+                east_vals  = [r[2] for r in pos_history]
                 down_vals  = [r[3] for r in pos_history]
                 log.info(
-                    "  North: min=%.2f  max=%.2f  final=%.2f m",
-                    min(north_vals), max(north_vals), north_vals[-1],
+                    "  East: min=%.2f  max=%.2f  final=%.2f m  (maintain target=%.1f m)",
+                    min(east_vals), max(east_vals), east_vals[-1], _MAINTAIN_E,
                 )
                 log.info(
-                    "  Down:  min=%.2f  max=%.2f  final=%.2f m  (target=%.1f m)",
-                    min(down_vals), max(down_vals), down_vals[-1], _TARGET_DOWN,
+                    "  Down: min=%.2f  max=%.2f  final=%.2f m  (maintain target=%.1f m)",
+                    min(down_vals), max(down_vals), down_vals[-1], _MAINTAIN_D,
                 )
 
             # ── 9. Assertions ─────────────────────────────────────────────────
@@ -829,18 +634,14 @@ def test_guided_flight_to_tether_position():
                 f"STATUSTEXT messages seen: {all_statustext}"
             )
 
-            displacements = [
-                math.sqrt(r[1]**2 + r[2]**2 + r[3]**2) for r in pos_history
-            ]
-            max_displacement = max(displacements)
             east_vals = [r[2] for r in pos_history]
-            assert max_displacement >= _MIN_DISPLACEMENT, (
-                f"Vehicle did not respond to GUIDED position target:\n"
-                f"  max 3-D displacement : {max_displacement:.2f} m\n"
-                f"  minimum required     : {_MIN_DISPLACEMENT:.1f} m\n"
-                f"  target (N/E/D)       : ({_TARGET_NORTH}/{_TARGET_EAST}/{_TARGET_DOWN}) m\n"
+            max_east  = max(east_vals)
+            assert max_east >= _MIN_EAST_DISPLACEMENT, (
+                f"Hub did not move East toward the power-optimal kite position:\n"
+                f"  max East reached     : {max_east:.2f} m\n"
+                f"  minimum required     : {_MIN_EAST_DISPLACEMENT:.1f} m\n"
+                f"  maintain target East : {_MAINTAIN_E:.1f} m  (tether at 35°)\n"
                 f"  readings collected   : {len(pos_history)}\n"
-                f"  East range           : [{min(east_vals):.1f}, {max(east_vals):.1f}] m\n"
                 f"  East trajectory      : {[round(v,2) for v in east_vals[::max(1,len(east_vals)//20)]]}\n"
                 f"STATUSTEXT messages seen:\n"
                 + ("\n".join(f"  {t}" for t in all_statustext) if all_statustext else "  (none)")
@@ -860,17 +661,31 @@ def test_guided_flight_to_tether_position():
                 _shutil.copy2(telemetry_log, sim_dir / "telemetry.csv")
                 log.info("Telemetry CSV → %s", sim_dir / "telemetry.csv")
 
+            # Save raw flight data so the graph can be redrawn without re-running
+            import json as _json
+            flight_data = {
+                "pos_history":      [list(r) for r in pos_history],
+                "attitude_history": [list(r) for r in attitude_history],
+                "servo_history":    [list(r) for r in servo_history],
+                "events":           flight_events,
+                "target":           [_MAINTAIN_N, _MAINTAIN_E, _MAINTAIN_D],
+            }
+            flight_data_path = sim_dir / "flight_data.json"
+            with flight_data_path.open("w", encoding="utf-8") as _f:
+                _json.dump(flight_data, _f)
+            log.info("Flight data → %s", flight_data_path)
+
             _plot_flight_report(
                 pos_history      = pos_history,
                 attitude_history = attitude_history,
                 servo_history    = servo_history,
                 events           = flight_events,
-                target           = (_TARGET_NORTH, _TARGET_EAST, _TARGET_DOWN),
+                target           = (_MAINTAIN_N, _MAINTAIN_E, _MAINTAIN_D),
                 out_path         = sim_dir / "flight_report.png",
                 telemetry_path   = telemetry_log,
             )
 
-            log.info("─── test_guided_flight_to_tether_position PASSED ───")
+            log.info("─── test_guided_flight_to_tether_position PASSED (maintain→reel-in→reel-out) ───")
 
         except Exception:
             log.exception("Test failed — see log dump below")
@@ -880,11 +695,5 @@ def test_guided_flight_to_tether_position():
             gcs.close()
             _terminate_process(sitl_proc)
             _terminate_process(mediator_proc)
-            _terminate_process(mbdyn_proc)
-            for sock_path in (_MBDYN_FORCE_SOCK, _MBDYN_STATE_SOCK):
-                try:
-                    os.unlink(sock_path)
-                except FileNotFoundError:
-                    pass
             # Always dump logs so a passing run is also inspectable
             _dump_logs(label="post-test")

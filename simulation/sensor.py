@@ -78,6 +78,26 @@ def _rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
     return np.array([roll, pitch, yaw])
 
 
+def _build_orb_frame(body_z: np.ndarray) -> np.ndarray:
+    """
+    Build an orbital rotation matrix from a disk-normal (body Z) direction.
+
+    The orbital frame removes rotor spin: body X is aligned with world East
+    projected onto the disk plane (falls back to world North if the disk
+    faces East).  Returns a 3×3 rotation matrix with body_z as column 2.
+    """
+    _EAST  = np.array([1.0, 0.0, 0.0])
+    _NORTH = np.array([0.0, 1.0, 0.0])
+    east_proj = _EAST - np.dot(_EAST, body_z) * body_z
+    if np.linalg.norm(east_proj) > 1e-6:
+        x_orb = east_proj / np.linalg.norm(east_proj)
+    else:
+        north_proj = _NORTH - np.dot(_NORTH, body_z) * body_z
+        x_orb = north_proj / np.linalg.norm(north_proj)
+    y_orb = np.cross(body_z, x_orb)
+    return np.column_stack([x_orb, y_orb, body_z])
+
+
 class SensorSim:
     """
     Simulated sensor suite for ArduPilot SITL.
@@ -87,6 +107,17 @@ class SensorSim:
     gyro_sigma  : float   Gyroscope noise std dev [rad/s]
     accel_sigma : float   Accelerometer noise std dev [m/s²]
     rng_seed    : int | None   Random number seed for reproducibility
+    home_enu_z  : float   ENU Z coordinate of the ArduPilot home position [m].
+                          ArduPilot's NED origin (D=0) corresponds to this altitude
+                          in the mediator's ENU frame.  Defaults to 0.0 (ENU origin
+                          = ArduPilot home), but must be set to the hub's initial
+                          ENU Z (typically 50.0 m) so that the hub starts at NED D=0
+                          (at home altitude) rather than 50 m above it.
+    anchor_enu  : array-like (3,)   ENU position of the tether anchor [m].
+                  Attitude is reported as deviation from the tether-aligned
+                  equilibrium orientation (body Z pointing from anchor to hub).
+                  When the hub axle is perfectly aligned with the tether,
+                  ArduPilot sees roll=0, pitch=0.  Defaults to world origin.
     """
 
     def __init__(
@@ -94,10 +125,15 @@ class SensorSim:
         gyro_sigma:  float = _GYRO_SIGMA,
         accel_sigma: float = _ACCEL_SIGMA,
         rng_seed:    Optional[int] = None,
+        home_enu_z:  float = 0.0,
+        anchor_enu:  Optional[np.ndarray] = None,
     ):
         self._gyro_sigma  = gyro_sigma
         self._accel_sigma = accel_sigma
         self._rng = np.random.default_rng(rng_seed)
+        self._home_enu_z  = float(home_enu_z)
+        self._anchor_enu  = np.asarray(anchor_enu, dtype=float) if anchor_enu is not None \
+                            else np.zeros(3)
 
     def compute(
         self,
@@ -124,73 +160,66 @@ class SensorSim:
         """
         # ------------------------------------------------------------------
         # 1. ENU → NED coordinate conversion
-        #    NED: x=North=ENU_y, y=East=ENU_x, z=Down=-ENU_z
+        #    NED: x=North=ENU_y, y=East=ENU_x, z=Down
+        #
+        # NED D is measured relative to the ArduPilot home altitude.
+        # home_enu_z is the ENU Z of the hub's starting position (= home).
+        # NED D = home_enu_z − ENU_Z   so that D=0 at the starting altitude.
+        #
+        # Without the home offset (−ENU_Z only), the hub at ENU Z=50m would
+        # send NED D=−50m (50m above home), making ArduPilot believe it is at
+        # home_altitude + 50m and command a 50m descent.  This is the root
+        # cause of the hub falling 100m below its starting position.
         # ------------------------------------------------------------------
-        pos_ned = np.array([pos_enu[1], pos_enu[0], -pos_enu[2]])
+        pos_ned = np.array([pos_enu[1], pos_enu[0], self._home_enu_z - pos_enu[2]])
         vel_ned = np.array([vel_enu[1], vel_enu[0], -vel_enu[2]])
 
         # ------------------------------------------------------------------
-        # 2. Attitude: extract ZYX Euler angles from the ELECTRONICS frame
+        # 2. Attitude: tether-relative deviation from equilibrium orientation
         #
-        # R_hub encodes the full hub orientation including the fast rotor spin
-        # (~28 rad/s ≈ 1600°/s).  ArduPilot sits on the NON-ROTATING electronics
-        # assembly.  Sending the spinning R_hub directly causes wild yaw oscillations
-        # that confuse the EKF (attitude changes by hundreds of degrees per second
-        # while the gyro — which already has spin removed — reports near-zero rates).
+        # The RAWES equilibrium has the rotor axle (body Z) aligned with the
+        # tether (anchor → hub direction).  ArduPilot must see roll=0, pitch=0
+        # at this equilibrium — otherwise its attitude controller commands
+        # maximum cyclic trying to "uprght" a disk that is already in its
+        # natural position.
         #
-        # Solution: build an "orbital" rotation matrix R_orb that captures only the
-        # tilt of the rotor disk (roll/pitch) and holds yaw to the world-North
-        # reference.  The spin component is removed by construction.
+        # Strategy:
+        #   1. Compute R_orb_eq: equilibrium orbital frame built from the tether
+        #      direction as body Z.  When hub axle = tether direction → equilibrium.
+        #   2. Compute R_orb: actual orbital frame from disk_normal (spin removed).
+        #   3. R_dev = R_orb_eq.T @ R_orb: deviation from equilibrium (small when
+        #      axle ≈ tether, large when axle is tilted away from tether).
+        #   4. Report attitude as R_dev in NED convention → roll=0,pitch=0 at equil.
         #
-        #   disk_normal = R_hub[:, 2]          body Z-axis in ENU world frame
-        #   x_orb = normalise(North - (North·disk_normal)*disk_normal)
-        #                                      world North projected onto disk plane
-        #   y_orb = disk_normal × x_orb
-        #   R_orb = [x_orb | y_orb | disk_normal]   (columns)
-        #
-        # This is equivalent to always facing North in the yaw sense while
-        # correctly capturing the disk tilt.  The yaw sent to ArduPilot will
-        # be near-zero (pointing North), and roll/pitch will match the actual
-        # disk tilt — consistent with the gyro's orbital-only angular rates.
+        # Accel and gyro are still expressed in R_orb (the physical electronics
+        # frame).  At equilibrium R_orb = R_orb_eq so all three are consistent.
+        # Small deviations cause only second-order EKF inconsistency.
         # ------------------------------------------------------------------
-        disk_normal = R_hub[:, 2]   # body Z expressed in ENU world frame
 
-        # Use world East [1,0,0] as the reference direction for the orbital
-        # body-X axis.  R_orb is built in ENU-convention (body Z = disk normal,
-        # pointing Up when hovering).  We subsequently convert to NED-convention
-        # (body Z = Down) via the symmetric ENU↔NED body transform T before
-        # extracting Euler angles and rotating sensor vectors.
-        _WORLD_EAST_ENU = np.array([1.0, 0.0, 0.0])   # X = East in ENU
-        east_proj = _WORLD_EAST_ENU - np.dot(_WORLD_EAST_ENU, disk_normal) * disk_normal
-        east_proj_norm = np.linalg.norm(east_proj)
-        if east_proj_norm > 1e-6:
-            x_orb = east_proj / east_proj_norm
+        # Actual orbital frame (spin removed): body Z = disk_normal.
+        disk_normal = R_hub[:, 2]
+        R_orb = _build_orb_frame(disk_normal)
+
+        # Equilibrium orbital frame: body Z = tether direction.
+        tether_vec = pos_enu - self._anchor_enu
+        tether_len = float(np.linalg.norm(tether_vec))
+        if tether_len > 1.0:
+            body_z_eq = tether_vec / tether_len
         else:
-            # Disk is nearly vertical and facing East — fall back to world North
-            _WORLD_NORTH_ENU = np.array([0.0, 1.0, 0.0])
-            north_proj = _WORLD_NORTH_ENU - np.dot(_WORLD_NORTH_ENU, disk_normal) * disk_normal
-            x_orb = north_proj / np.linalg.norm(north_proj)
-        y_orb = np.cross(disk_normal, x_orb)
-        R_orb = np.column_stack([x_orb, y_orb, disk_normal])
+            # Hub very close to anchor (slack tether) — default to upright.
+            body_z_eq = np.array([0.0, 0.0, 1.0])
+        R_orb_eq = _build_orb_frame(body_z_eq)
 
-        # Convert ENU-convention body frame to NED-convention body frame.
-        #
-        # ArduPilot uses NED body axes (body Z = Down when level).  Our R_orb
-        # uses ENU body axes (body Z = Up = disk normal when level).  Sending
-        # ENU-convention attitude to ArduPilot causes its compass simulation to
-        # compute wrong predicted magnetometer readings (body Z flipped), leading
-        # to large magnetic innovations and EKF compass failure.
-        #
-        # The ENU↔NED body transform is the symmetric orthogonal matrix:
-        #   T = [[0,1,0],[1,0,0],[0,0,-1]]  (T = Tᵀ = T⁻¹)
-        #
-        # R_ned = T @ R_orb @ T  maps the same physical orientation into NED
-        # body convention.  When R_orb = I (hovering level), R_ned = T²= I,
-        # giving Euler = [0,0,0] (level, facing North in NED). ✓
+        # Deviation rotation: identity when hub axle is aligned with tether.
+        R_dev = R_orb_eq.T @ R_orb
+
+        # Convert to NED body convention and extract Euler angles.
+        # T = [[0,1,0],[1,0,0],[0,0,-1]]: ENU body ↔ NED body (symmetric).
+        # T @ R_dev @ T gives NED convention; Euler=[0,0,0] at tether equilibrium.
         _T = np.array([[0., 1., 0.],
                        [1., 0., 0.],
                        [0., 0., -1.]])
-        R_ned = _T @ R_orb @ _T   # NED-convention body→world(ENU) rotation
+        R_ned = _T @ R_dev @ _T
 
         rpy = _rotation_matrix_to_euler_zyx(R_ned)
 

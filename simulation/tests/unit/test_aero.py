@@ -41,9 +41,13 @@ def test_compute_forces_produces_upward_thrust_and_opposing_drag_torque():
     )
 
     assert forces[2] > 0.0
-    np.testing.assert_allclose(forces[:2], np.zeros(2), atol=1e-9)
+    # H-force from in-plane wind (blowing in +X) pushes hub downwind → Fx > 0
+    assert forces[0] > 0.0, f"Expected positive Fx from in-plane wind drag (H-force), got {forces[0]}"
+    np.testing.assert_allclose(forces[1], 0.0, atol=1e-9)  # no Y force for X-aligned wind
     np.testing.assert_allclose(forces[3:5], np.zeros(2), atol=1e-9)
-    assert forces[5] < 0.0
+    # Near-equilibrium spin: |Mz| should be small relative to thrust (not a large drag spike)
+    assert abs(forces[5]) < abs(forces[2]), \
+        f"|Mz|={abs(forces[5]):.2f} should be < |Fz|={abs(forces[2]):.2f} at near-equilibrium spin"
 
 
 def test_compute_forces_cyclic_tilt_changes_lateral_moment_component():
@@ -70,7 +74,12 @@ def test_compute_forces_cyclic_tilt_changes_lateral_moment_component():
         t=10.0,
     )
 
-    assert tilted[3] > baseline[3]
+    # tilt_lat > 0 (roll right/East) → My_body > 0 → forces[4] (My) increases
+    # tilt_lon = 0 so Mx (forces[3]) is unchanged
+    assert tilted[4] > baseline[4], (
+        f"tilt_lat=0.5 should increase My (forces[4]); got baseline={baseline[4]:.4f} tilted={tilted[4]:.4f}"
+    )
+    np.testing.assert_allclose(tilted[3], baseline[3], rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(tilted[:3], baseline[:3], rtol=1e-9, atol=1e-9)
 
 

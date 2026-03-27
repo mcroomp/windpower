@@ -307,7 +307,7 @@ Landing resembles a helicopter autorotation flare, with the tether providing add
 
 ## Current Simulation Implementation In Repo
 
-The repository now contains a working simulation stack under `simulation/` built around ArduPilot SITL, a Python mediator, and an MBDyn rigid-body model.
+The repository now contains a working simulation stack under `simulation/` built around ArduPilot SITL and a Python mediator with an integrated RK4 rigid-body dynamics engine.
 
 ### Simulation Stack Overview
 
@@ -317,83 +317,82 @@ The implemented runtime architecture is:
 ArduPilot SITL (heli JSON backend)
    ⇅ UDP 9002 / 9003
 Python mediator.py
-   ⇅ UNIX sockets
-MBDyn rigid-body model
+   ⇅ function call
+dynamics.py (RK4 6-DOF integrator)
 ```
 
 - **ArduPilot SITL** provides flight-controller outputs (servo commands) and consumes synthetic IMU/pose/velocity state.
-- **mediator.py** is the co-simulation bridge. It converts SITL servo outputs into swashplate commands, computes aerodynamic loads, exchanges data with MBDyn, and synthesizes the sensor/state packet sent back to SITL.
-- **MBDyn** integrates the hub rigid-body motion, gravity, and tether constraint.
+- **mediator.py** is the co-simulation bridge. It converts SITL servo outputs into swashplate commands, computes aerodynamic and tether loads, steps the dynamics integrator, and synthesizes the sensor/state packet sent back to SITL.
+- **dynamics.py** integrates the hub rigid-body motion using RK4, with gravity applied internally.
+
+MBDyn has been removed from the runtime loop. See `simulation/mbdyn_reference.md` for the full MBDyn integration documentation and restoration instructions.
 
 ### Key Simulation Files
 
 | File | Role |
 |------|------|
 | `simulation/mediator.py` | Main 400 Hz co-simulation loop |
-| `simulation/mbdyn_interface.py` | UNIX socket transport to/from MBDyn |
+| `simulation/dynamics.py` | Python RK4 6-DOF rigid-body integrator |
 | `simulation/sitl_interface.py` | UDP JSON transport to/from ArduPilot SITL |
 | `simulation/swashplate.py` | H3-120 inverse mixing and cyclic pitch math |
-| `simulation/aero.py` | Simplified rotor aerodynamic model |
+| `simulation/aero.py` | BEM rotor aerodynamic model (per-strip torque integral) |
 | `simulation/sensor.py` | ENU → NED/state → sensor conversion |
-| `simulation/mbdyn/rotor.mbd` | MBDyn input deck |
-| `simulation/mbdyn/rawes.set` | MBDyn parameter definitions |
+| `simulation/mbdyn_reference.md` | MBDyn integration documentation for future restoration |
+| `simulation/archived/mbdyn_interface.py` | UNIX socket transport to/from MBDyn |
+| `simulation/archived/rotor.mbd` | MBDyn input deck |
+| `simulation/archived/rawes.set` | MBDyn parameter definitions |
 
 ### Coordinate Conventions
 
-- **MBDyn world frame:** ENU (`X=East, Y=North, Z=Up`)
+- **World frame:** ENU (`X=East, Y=North, Z=Up`)
 - **ArduPilot frame:** NED (`X=North, Y=East, Z=Down`)
-- **Mediator responsibility:** convert MBDyn ENU state into the NED/body-frame quantities expected by ArduPilot's JSON backend.
+- **Mediator responsibility:** convert ENU state into the NED/body-frame quantities expected by ArduPilot's JSON backend.
 
 ---
 
-## Current MBDyn Model
+## Natural / Equilibrium Hub Orientation
 
-The MBDyn model is intentionally compact. It is not yet a blade-resolved multibody rotor.
+**The rotor axle (body Z) always aligns with the tether direction.** The rotor disk rotates around the same axis as the tether. At any tether elevation angle β the equilibrium orientation is:
 
-### What Is Modeled In MBDyn
+```
+body Z = [cos(β), 0, sin(β)]   (ENU, hub East of anchor)
+```
 
-The current MBDyn deck represents the RAWES as:
+The tether restoring torque (`M = r_attach × F_tether`, implemented in `TetherModel`) enforces this alignment whenever the tether is taut. The hub should be initialised with this orientation, not upright. For simulation and tests, always set the initial rotation matrix so body Z points along the tether direction rather than vertically.
 
-1. **One dynamic hub node** starting at 50 m altitude
-2. **One static ground node** at the world origin
-3. **One rigid body** representing the full rotor/hub assembly as a lumped mass/inertia
-4. **One clamp joint** fixing the ground node to the inertial frame
-5. **One rod joint** representing the tether as a linear elastic spring constraint
-6. **Uniform gravity**
-7. **An externally applied force** from Python
-8. **An externally applied couple** from Python
-9. **A state output stream** sending hub position, velocity, orientation matrix, and angular velocity back to Python
+---
 
-### What Is Not Modeled In MBDyn
+## Current Dynamics Model
 
-The current MBDyn deck does **not** yet contain:
+The rigid-body dynamics are integrated by `simulation/dynamics.py` using RK4 at 400 Hz. The model is intentionally compact — a single hub body, not a blade-resolved multibody rotor.
 
-- Separate blade bodies
-- Blade flapping or lag DOFs
-- Explicit swashplate bodies or kinematic linkages
-- Explicit trailing-edge flap mechanics
+### What Is Modeled
+
+1. **Hub position and velocity** in ENU world frame
+2. **Hub orientation** as a rotation matrix (body → world), re-orthogonalised via SVD every 200 steps
+3. **Hub angular velocity** in world frame
+4. **Gravity** applied internally as `[0, 0, −m·g]`
+5. **External force** from Python (aerodynamic + tether combined)
+6. **External moment** from Python (aerodynamic moments)
+
+### What Is Not Modeled
+
+- Separate spinning hub body vs. non-rotating electronics body
+- Blade bodies, flapping, or lag DOFs
+- Explicit swashplate kinematic linkages
 - Distributed tether dynamics or catenary shape
-- A full rotor spin state equation with gyroscopic blade dynamics
+- Gyroscopic coupling between blades and hub
 
-So the MBDyn part is best understood as a **hub-centric 6-DOF rigid-body surrogate** with a spring tether and externally injected aerodynamic wrench.
+### Current Dynamics Parameters (hardcoded in `mediator.py`)
 
-### Current MBDyn Parameters
-
-The current parameter set in `simulation/mbdyn/rawes.set` uses:
-
-- `DT = 2.5e-3 s` → 400 Hz
-- `T_FINAL = 300 s`
-- Initial altitude `Z0 = 50 m`
-- Initial spin rate `OMEGA0 = 28 rad/s`
-- `N_BLADES = 4`
-- `BLADE_LEN = 2.0 m`
-- `R_TIP = 2.5 m`
-- `M_ROTOR = 5.0 kg`
-- `Ixx = Iyy = 5.0 kg·m²`
-- `Izz = 10.0 kg·m²`
-- `TETHER_K = 300 N/m`
-
-These values are closer to the intended 4-blade hardware than the thesis reference model, but the dynamics are still simplified.
+| Parameter | Value |
+|-----------|-------|
+| Timestep | 2.5e-3 s → 400 Hz |
+| Initial altitude | 50 m |
+| Initial spin rate | 28 rad/s |
+| Mass | 5.0 kg |
+| Ixx = Iyy | 5.0 kg·m² |
+| Izz | 10.0 kg·m² |
 
 ---
 
@@ -426,12 +425,16 @@ The mediator runs at a target rate of **400 Hz**. Each iteration performs:
   - Calls `RotorAero.compute_forces(...)`
   - Produces `[Fx, Fy, Fz, Mx, My, Mz]` in the world ENU frame
 
-5. **Send forces to MBDyn**
-  - Python writes 6 float64 values to the MBDyn force socket
+4b. **Compute tether force and add to wrench**
+  - Calls `TetherModel.compute(hub_pos, hub_vel)`
+  - Tension-only: zero if hub is closer to anchor than rest length (slack)
+  - Result added to `Fx/Fy/Fz`; moments unchanged
 
-6. **Receive new state from MBDyn**
-  - Python reads 18 float64 values in MBDyn's fixed output order: position, orientation matrix, velocity, angular velocity
-  - Parsed into pos (3), R (3×3 row-major), vel (3), omega (3)
+5. **Step the rigid-body dynamics integrator**
+  - Calls `RigidBodyDynamics.step(F_world, M_world, dt)`
+  - `F_world = forces[0:3]` (aero + tether); `M_world = forces[3:6]` (aero moments)
+  - Gravity applied internally — do **not** add it to forces
+  - Returns state dict: `{pos, vel, R, omega}` in ENU world frame
 
 7. **Estimate acceleration**
   - Uses finite-difference of velocity
@@ -445,16 +448,51 @@ The mediator runs at a target rate of **400 Hz**. Each iteration performs:
 9. **Send JSON physics state back to SITL**
    - UDP port 9003
 
+### Tether Model (`TetherModel` in `mediator.py`)
+
+| Property | Value |
+|----------|-------|
+| Material | Dyneema SK75 1.9 mm braided UHMWPE |
+| EA (axial stiffness) | ~281 kN (109 GPa × 2.835×10⁻⁶ m² × 0.91 braid eff.) |
+| k(L) | EA / L — nonlinear, stiffer at shorter lengths |
+| Linear mass | 2.1 g/m |
+| Break load | ~620 N (conservative for 1.9 mm) |
+| Structural damping | 5 N·s/m (extension only — no compression damping) |
+| Rest length | 49.940 m default (configurable via `--tether-rest-length`) |
+| Anchor | World origin (0, 0, 0) ENU |
+| Slack zone | Hub closer than rest length → zero force |
+
+Default rest length matches the steady-state equilibrium so the tether is taut from the first step. Logs warn if tension exceeds 80% of break load.
+
 ### Startup Behavior
 
 Before the main loop begins, the mediator:
 
 - binds the SITL UDP sockets
-- waits for MBDyn to create its UNIX sockets
-- sends an initial gravity-compensation wrench `[0, 0, 49.05, 0, 0, 0]`
-- reads an initial hub state from MBDyn if available
+- initialises `RigidBodyDynamics` with the initial state (see below)
 
-This avoids immediate free-fall before SITL servo commands begin arriving.
+No warm-up force send is needed — gravity is handled internally by the integrator from step 1.
+
+### Initial State and `steady_state_starting.json`
+
+The mediator's default initial state comes from the **warmup-settled equilibrium** of `test_steady_flight.py`:
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| `pos0` | `[46.258, 14.241, 12.530]` ENU m | 50 m tether, ~30° elev, ~14 m N drift from warmup |
+| `vel0` | `[-0.257, 0.916, -0.093]` m/s | settled hub velocity |
+| `body_z` | `[0.851, 0.305, 0.427]` | axle aligned with tether |
+| `omega_spin` | `20.148` rad/s | equilibrium autorotation spin |
+| `rest_length` | `49.940` m | tether taut from t=0 |
+
+These constants are exposed as `DEFAULT_POS0`, `DEFAULT_VEL0`, `DEFAULT_BODY_Z`, `DEFAULT_OMEGA_SPIN` in `mediator.py`.
+
+**Workflow for regenerating initial state:**
+1. Run `pytest simulation/tests/unit/test_steady_flight.py` — this writes `simulation/steady_state_starting.json`
+2. The stack flight test (`test_guided_flight.py`) reads this file and passes the values to the mediator via `--pos0`, `--vel0`, `--body-z`, `--omega-spin` CLI args
+3. If `steady_state_starting.json` is absent, mediator uses the built-in defaults above
+
+**Why the initial state matters:** Starting with body Z aligned to the tether and `omega_spin` at autorotation equilibrium means ArduPilot sees roll=0, pitch=0 from the first packet (tether-relative attitude, see Sensor section below) and the hub is already in a stable force balance with the tether taut.
 
 ---
 
@@ -503,9 +541,25 @@ The sensor model in `simulation/sensor.py` converts rigid-body truth state into 
 - body-frame accelerometer
 - body-frame gyroscope
 
-### Important Detail
+### Attitude Representation — Tether-Relative, Not Absolute
 
-MBDyn returns angular velocity in the **world frame**, so the sensor model rotates it into the body frame before packaging the gyro data.
+**Critical design decision:** attitude is reported as the **deviation from the tether equilibrium orientation**, not as absolute orientation relative to world Up.
+
+**Why this is necessary:** The RAWES equilibrium has the rotor axle (body Z) aligned with the tether at ~30° elevation — roughly 65° from vertical. If absolute attitude were reported, ArduPilot would see 58° roll / 36° pitch at rest and command maximum cyclic continuously to "correct" the perceived tilt. The hub would crash within 1 second of the startup freeze lifting.
+
+**How it works (`sensor.py`):**
+1. `R_orb_eq`: equilibrium orbital frame, built from `body_z_eq = (hub_pos − anchor) / |hub_pos − anchor|` (tether direction)
+2. `R_orb`: actual orbital frame, built from `disk_normal = R_hub[:, 2]` (spin removed)
+3. `R_dev = R_orb_eq.T @ R_orb`: deviation rotation (identity at tether equilibrium)
+4. Attitude sent to ArduPilot: ZYX Euler of `T @ R_dev @ T` (NED convention) → **roll=0, pitch=0 when axle is tether-aligned**
+
+Accel and gyro remain expressed in the physical `R_orb` frame (actual electronics body frame). At equilibrium `R_orb = R_orb_eq` so all three outputs are consistent.
+
+**Consequence for ArduPilot:** its attitude controller interprets small deviations from tether equilibrium as small roll/pitch errors, which it corrects with modest cyclic commands rather than saturating at maximum tilt.
+
+### Other Important Details
+
+Angular velocity is provided in the **world frame** from the dynamics integrator; sensor.py strips the spin component and rotates into the body frame before packaging the gyro.
 
 Simple noise is added to both accelerometer and gyro outputs so SITL is not fed perfectly noise-free sensors.
 
@@ -549,13 +603,18 @@ The communication pattern is synchronous per step:
 
 Important limitations of the current simulation stack:
 
-1. **Hub-centric MBDyn model only**
+1. **Hub-centric Python RK4 model**
+  - Single 6-DOF rigid body (translational + rotational), gravity internal
   - No explicit blade multibody dynamics yet
 
 2. **Rotor spin is estimated, not fully integrated**
   - The mediator infers spin from the hub angular velocity projected onto the disk normal
 
-3. **Tether is a spring-rod only**
+3. **Tether is tension-only elastic (Python `TetherModel`)**
+  - Dyneema SK75 1.9 mm: EA ≈ 281 kN, break load ≈ 620 N, 2.1 g/m
+  - Stiffness k = EA/L (nonlinear — stiffer when shorter)
+  - Structural damping 5 N·s/m (extension only; rope can't push)
+  - Rest length 200 m; hub starts at 50 m → slack at launch
   - No sag, drag, reel dynamics, or distributed mass
 
 4. **Aerodynamics are first-order**
@@ -587,60 +646,63 @@ There are two test suites under `simulation/tests/`. They have different environ
 
 ### Unit Tests — run on Windows, no Docker needed
 
-Unit tests only require numpy and pytest. A local venv is created automatically on first run.
+Unit tests only require numpy and pytest. Create a venv once, then run pytest directly:
 
 ```cmd
-simulation\run_unit_tests.cmd
+py -3 -m venv simulation\tests\unit\.venv
+simulation\tests\unit\.venv\Scripts\python.exe -m pip install numpy pytest
 ```
 
-To pass extra pytest flags (e.g. `-v`, `-k test_sensor`):
+Then to run:
 ```cmd
-simulation\run_unit_tests.cmd -v
+simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit
 ```
 
-### Stack Integration Tests — run in Docker
+With extra pytest flags (e.g. `-v`, `-k test_sensor`):
+```cmd
+simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -v -k test_sensor
+```
 
-Stack tests launch three processes inside the container (ArduPilot SITL, MBDyn, mediator.py) and drive a full guided-flight sequence via MAVLink. They require a Docker image built with ArduPilot SITL.
+### Stack Integration Tests — run in Docker via WSL
 
-**Step 1 — build the image (one-time, ~30 min):**
+Stack tests launch SITL + mediator inside the container and drive a full guided-flight sequence via MAVLink. They require a Docker image built with ArduPilot SITL.
+
+The image name is `rawes-sim`. The container mounts `simulation/` at `/rawes/simulation`.
+
+All Docker commands must run via `wsl.exe bash -c '...'` — this avoids MSYS/Git Bash path conversion. Do **not** use Git Bash or cmd.exe directly for docker volume mounts.
+
+**Build the image (one-time, ~30 min):**
 ```cmd
 simulation\build.cmd ardupilot
 ```
 
-**Step 2 — run the tests:**
+**`dev.sh` — manage the persistent container:**
+
+Run from Windows terminal using `wsl.exe bash -c '...'`:
 ```cmd
-simulation\run_stack_integration.cmd
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh start'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh stop'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-unit'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh shell'
 ```
 
-This mounts `simulation\` into a one-shot container and runs `tests/stack/` via `test_stack.sh`.
-
-### Dev Container — persistent container for faster iteration
-
-`dev.cmd` manages a persistent `rawes-dev` container so each test run skips Docker startup overhead. The `simulation\` directory is still mounted live, so code changes are reflected immediately.
-
+Extra pytest args are forwarded after the subcommand:
 ```cmd
-simulation\dev.cmd start            # start container (idempotent)
-simulation\dev.cmd test-unit        # run unit tests inside container
-simulation\dev.cmd test-stack       # run stack integration tests inside container
-simulation\dev.cmd shell            # interactive bash shell in container
-simulation\dev.cmd stop             # stop and remove container
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k test_guided_flight'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-unit -v -k test_sensor'
 ```
 
-Extra pytest args are forwarded:
-```cmd
-simulation\dev.cmd test-stack -v -k test_guided_flight
-simulation\dev.cmd test-unit  -v -k test_sensor
-```
-
-### When each script must be used
+### When each command must be used
 
 | Task | Command |
 |------|---------|
 | First-time setup (build image) | `simulation\build.cmd ardupilot` |
-| Quick unit-test pass on Windows | `simulation\run_unit_tests.cmd` |
-| One-shot stack integration run | `simulation\run_stack_integration.cmd` |
-| Iterating on stack tests (faster) | `simulation\dev.cmd test-stack` |
-| Interactive debugging in container | `simulation\dev.cmd shell` |
+| Quick unit-test pass on Windows | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit` |
+| Unit tests in container | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-unit'` |
+| Stack integration tests | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'` |
+| Interactive debugging in container | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh shell'` |
+| Regenerate flight_report.png from last run (no re-test) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/redraw_flight_report.py'` |
 
 ---
 
@@ -649,6 +711,7 @@ simulation\dev.cmd test-unit  -v -k test_sensor
 - [x] Confirm battery capacity: 450 mAh (confirmed 2026-03-20)
 - [x] Confirm servo model for S1/S2/S3: DS113MG V6.0 Digital Metal Gear Micro Servo
 - [x] Define takeoff/landing modes for a tethered autorotating system
+- [x] Fix aero.py spin torque model: replaced lumped K_drag/K_auto constants with per-strip BEM torque integral `dQ = (CL·sin φ − CD·cos φ)·q·chord·r·dr·N`
 - [ ] Update simulation parameters for 4-blade, 2m geometry
 - [ ] Python simulation running with flapmodel.md equations
 - [ ] ArduPilot helicopter frame configuration for RAWES (swashplate type, RSC mode)
