@@ -14,5 +14,7 @@ if [ -z "${RAWES_SIM_VEHICLE:-}" ] && [ -z "${RAWES_ARDUPILOT_PATH:-}" ]; then
     fi
 fi
 
+PYTEST_LOG="$SCRIPT_DIR/pytest_last_run.log"
 echo "[INFO] Running stack integration tests in the container ..."
-python -m pytest "$SCRIPT_DIR/tests/stack" "$@"
+echo "[INFO] Full test output → $PYTEST_LOG"
+python -m pytest -s "$SCRIPT_DIR/tests/stack" "$@" 2>&1 | tee "$PYTEST_LOG"

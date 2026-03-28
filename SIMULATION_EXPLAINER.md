@@ -39,7 +39,7 @@ The simulation has three interconnected layers:
                     │  Forces and moments (6 values per step)
                     ▼
 ┌─────────────────────────────────────────────────────┐
-│  Physics Engine  (MBDyn)                            │
+│  Physics Engine  (Python RK4)                       │
 │  Rigid-body dynamics: gravity, inertia, tether      │
 │  Updates position, velocity, orientation            │
 │  400 times per second                               │
@@ -89,7 +89,7 @@ The simulation is fully parameterised. You can change any of the following and i
 
 ## Can the Results Be Shown Graphically?
 
-Yes. The current MBDyn-based simulation can produce several useful categories of visualisation, and it has a clear path to full 3D animated rendering.
+Yes. The simulation produces several useful categories of visualisation.
 
 ---
 
@@ -131,33 +131,9 @@ These plots are useful for debugging controller behavior, spotting sign errors o
 
 ---
 
-### 4. Real-Time 3D Animation (Available via Blender)
+### 4. Real-Time 3D Animation (Future)
 
-The MBDyn physics engine includes an integration with **Blender**, the open-source 3D animation tool. After a simulation run, you can load the recorded motion data directly into Blender and produce a **rendered 3D animation** of the rotor flying.
-
-This gives you:
-- A video you can play back at any speed
-- The ability to fly a virtual camera around the rotor during the manoeuvre
-- Visual confirmation of rotor tilt, blade pitch changes, and tether behaviour
-- A presentation-quality asset for stakeholders who want to see the system in action
-
-The workflow is:
-1. Run the simulation → MBDyn writes motion data to a `.mov` file
-2. Open Blender → load the MBDyn animation plugin
-3. Import the `.mov` file → Blender animates each node
-4. Add a 3D model of the rotor → render
-
----
-
-### 5. Interactive Data Explorer (NCPost — Available)
-
-The MBDyn toolkit includes **NCPost**, a graphical desktop application for browsing simulation output data interactively. You can:
-- Load any simulation output file
-- Click to plot any variable against time
-- Zoom, pan, overlay multiple runs
-- Export selected signals to CSV for further analysis
-
-This is useful for comparing runs: e.g. overlay the rotor altitude for wind speeds of 5, 7.5, 10, 12.5, and 15 m/s on one chart to find the cut-in and rated wind speed.
+A Blender-based 3D animation of the rotor flying is possible once the simulation produces stable flight trajectories. The workflow would record hub position and orientation per step and import it into Blender for rendering.
 
 ---
 
@@ -192,4 +168,4 @@ The simulation is not a final answer — real flight will always reveal things a
 
 ---
 
-*Document prepared 2026-03-26. System: RAWES 4-blade tethered autorotating rotor kite. Physics: MBDyn. Aerodynamics + control bridge: Python. Flight controller: ArduPilot SITL. Design reference: De Schutter et al. (2018) and current project simulation documents.*
+*Document prepared 2026-03-26, updated 2026-03-28. System: RAWES 4-blade tethered autorotating rotor kite. Physics: Python RK4 (dynamics.py). Aerodynamics + control bridge: Python. Flight controller: ArduPilot SITL. Design reference: De Schutter et al. (2018) and current project simulation documents.*

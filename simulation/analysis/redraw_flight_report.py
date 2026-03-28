@@ -44,6 +44,7 @@ def main():
     servo_history    = [tuple(r) for r in d["servo_history"]]
     events           = d["events"]
     target           = tuple(d["target"])
+    anchor_ned       = tuple(d["anchor_ned"]) if "anchor_ned" in d else None
 
     sys.path.insert(0, str(_SIM_DIR))
     from flight_report import plot_flight_report
@@ -56,6 +57,7 @@ def main():
         target           = target,
         out_path         = out_path,
         telemetry_path   = telem_path if telem_path.exists() else None,
+        anchor_ned       = anchor_ned,
     )
     print(f"Flight report saved → {out_path}")
 

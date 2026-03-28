@@ -328,14 +328,31 @@ class RotorAero:
         tilt_lon_rad = tilt_lon * pitch_gain
         tilt_lat_rad = tilt_lat * pitch_gain
 
-        # Body-frame cyclic moments in ENU-convention body frame (body Z = disk Up)
+        # Build the orbital frame from disk_normal using the same East-projection
+        # convention as sensor.py's _build_orb_frame.  Using R_hub directly would
+        # apply moments along R_hub's accumulated body-X/Y axes, which drift from
+        # the orbital frame as the hub rotates (especially if R0 was built with a
+        # different reference).  R_orb is rebuilt fresh each step so cyclic moments
+        # are always consistent with the frame the attitude sensor reports.
+        _EAST_VEC = np.array([1.0, 0.0, 0.0])
+        _east_proj = _EAST_VEC - np.dot(_EAST_VEC, disk_normal) * disk_normal
+        if np.linalg.norm(_east_proj) > 1e-6:
+            _bx_orb = _east_proj / np.linalg.norm(_east_proj)
+        else:
+            _NORTH_VEC = np.array([0.0, 1.0, 0.0])
+            _np_proj = _NORTH_VEC - np.dot(_NORTH_VEC, disk_normal) * disk_normal
+            _bx_orb = _np_proj / np.linalg.norm(_np_proj)
+        _by_orb = np.cross(disk_normal, _bx_orb)
+        R_orb = np.column_stack([_bx_orb, _by_orb, disk_normal])
+
+        # Cyclic moments in ENU-convention orbital body frame:
         #   tilt_lon > 0 = forward/North → disk normal tilts toward ENU +Y (North)
         #     Rx(θ) tilts body Z toward −body Y, so need Mx < 0 → Mx = −K_cyc·tilt_lon·T
         #   tilt_lat > 0 = right/East   → disk normal tilts toward ENU +X (East)
         #     Ry(θ) tilts body Z toward +body X, so My = +K_cyc·tilt_lat·T
         Mx_body     = -self.K_cyc * tilt_lon_rad * T
         My_body     =  self.K_cyc * tilt_lat_rad * T
-        M_cyc_world = R_hub @ np.array([Mx_body, My_body, 0.0])
+        M_cyc_world = R_orb @ np.array([Mx_body, My_body, 0.0])
 
         M_world = M_spin_world + M_cyc_world
 
@@ -374,8 +391,8 @@ class RotorAero:
         """
         Counter-torque contribution from the GB4008 motor (Mz).
 
-        NOTE: not applied in the current single-body model — motor and bearing
-        drag are internal forces that cancel.  Retained for future two-body model.
+        NOTE: Not called in the current single-body model. Internal forces cancel.
+        Reserved for future two-body (spinning hub + non-rotating electronics) model.
         """
         _K_drag_nom = 0.1
         max_motor_torque = (_K_drag_nom * 2.0 * 0.5 * 1.22

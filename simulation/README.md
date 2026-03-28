@@ -1,323 +1,123 @@
 # RAWES Simulation
 
-End-to-end flight simulation for the **Rotary Airborne Wind Energy System (RAWES)** —
-a 4-blade tethered autorotating rotor kite controlled via trailing-edge flaps through an
-H3-120 swashplate. Combines ArduPilot SITL (flight controller logic), MBDyn (6-DOF rigid body physics),
-and a Python mediator (aerodynamics + sensor simulation).
+End-to-end flight simulation for the **Rotary Airborne Wind Energy System (RAWES)** — a 4-blade tethered autorotating rotor kite controlled via trailing-edge flaps through an H3-120 swashplate.
+
+Combines ArduPilot SITL (flight controller logic), a Python RK4 dynamics engine, and a Python mediator (aerodynamics + sensor simulation).
 
 ---
 
 ## Architecture
 
 ```
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │                     RAWES Simulation System                         │
-  │                                                                      │
-  │  ┌─────────────┐   UDP 9002 (servos)    ┌───────────────────────┐   │
-  │  │             │ ─────────────────────► │                       │   │
-  │  │ ArduPilot   │                        │    mediator.py        │   │
-  │  │ SITL        │ ◄───────────────────── │                       │   │
-  │  │ (heli frame)│   UDP 9003 (state)     │  - swashplate.py      │   │
-  │  └─────────────┘                        │  - aero.py (BEM)      │   │
-  │         ▲                               │  - sensor.py          │   │
-  │         │ MAVLink                       └───────┬───────────────┘   │
-  │  ┌──────┴──────┐                               │  UNIX sockets      │
-  │  │ Mission     │                  /tmp/rawes_forces.sock (forces →)  │
-  │  │ Planner /   │                  /tmp/rawes_state.sock  (← state)   │
-  │  │ MAVProxy    │                               │                    │
-  │  └─────────────┘                        ┌──────▼───────────────┐   │
-  │                                          │      MBDyn           │   │
-  │                                          │  6-DOF rigid body    │   │
-  │                                          │  + gravity           │   │
-  │                                          │  + tether spring     │   │
-  │                                          │  rotor.mbd           │   │
-  │                                          └──────────────────────┘   │
-  └──────────────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow (400 Hz loop)
-
-```
-  SITL → [servo PWM 1000-2000µs, 16 ch]
-       → swashplate.h3_inverse_mix(S1,S2,S3) → collective + tilt
-       → aero.compute_forces() → [Fx Fy Fz Mx My Mz] (ENU)
-       → mbdyn.send_forces()   → MBDyn integrates one step (RK)
-       → mbdyn.recv_state()    → [pos vel R omega] (ENU)
-       → sensor.compute()      → IMU + NED position/velocity
-       → sitl.send_state()     → SITL JSON physics state
+┌─────────────────────────────────────────────────────────────────┐
+│ ArduPilot SITL (heli JSON backend)                              │
+│   Sends servo PWM commands, receives JSON sensor state          │
+└────────────────┬──────────────────────────────────────────────┘
+                 │ UDP 9002 (servo commands)
+                 │ UDP 9003 (sensor state JSON)
+                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ mediator.py  (400 Hz loop)                                      │
+│   servo PWM → swashplate.py → collective, tilt_lon, tilt_lat   │
+│   aero.py        → aerodynamic wrench (ENU world frame)        │
+│   tether.py      → tether tension force + moment               │
+│   dynamics.py    → RK4 6-DOF step → {pos, vel, R, omega}       │
+│   sensor.py      → build_sitl_packet() → NED sensor outputs    │
+└─────────────────────────────────────────────────────────────────┘
+                 │ MAVLink TCP 5760
+                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ gcs.py / test GCS                                               │
+│   Arm, set mode, send RC overrides, read MAVLink messages       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## File Reference
+## Module Summary
 
 | File | Role |
 |------|------|
-| `mediator.py` | Main event loop — bridges all subsystems |
-| `mbdyn_interface.py` | UNIX socket client for MBDyn |
-| `sitl_interface.py` | UDP JSON interface to ArduPilot SITL |
-| `swashplate.py` | H3-120 swashplate mixing + cyclic pitch |
-| `aero.py` | Simplified BEM rotor aerodynamics |
-| `sensor.py` | IMU / GPS sensor simulation (ENU → NED) |
-| `airfoil_gen.py` | Generates `mbdyn/SG6042.c81` airfoil table |
-| `mbdyn/rotor.mbd` | MBDyn input deck (hub body, tether, streams) |
-| `mbdyn/rawes.set` | MBDyn parameter definitions (included by rotor.mbd) |
-| `run_sim.sh` | One-command sim launcher |
-| `install.sh` | WSL2 Ubuntu dependency installer |
+| `mediator.py` | 400 Hz co-simulation loop — orchestrates all subsystems |
+| `dynamics.py` | Python RK4 6-DOF rigid-body integrator (gravity internal) |
+| `aero.py` | De Schutter (2018) BEM aerodynamic model |
+| `tether.py` | Tension-only elastic tether (Dyneema SK75) |
+| `swashplate.py` | H3-120 inverse mixing and cyclic blade pitch math |
+| `frames.py` | Shared ENU↔NED transform (`T_ENU_NED`) and `build_orb_frame()` |
+| `sensor.py` | `build_sitl_packet()` — ENU truth state → ArduPilot JSON sensor packet |
+| `sitl_interface.py` | ArduPilot SITL UDP binary protocol (servo recv, state send) |
+| `controller.py` | `compute_swashplate_from_state()` — truth-state tether-alignment controller; `compute_rc_from_attitude()` — ACRO RC override controller |
+| `gcs.py` | MAVLink GCS client (arm, mode, RC override, params) |
+| `flight_report.py` | Multi-panel PNG flight report from position/attitude/servo history |
+
+Analysis scripts (not part of simulation runtime): `analysis/`
 
 ---
 
-## Prerequisites
+## Coordinate Frames
 
-### Required
+All defined in and imported from `frames.py`.
 
-| Software | Version | Install |
-|----------|---------|---------|
-| MBDyn | 1.7.x+ | `install.sh` clones from `public.gitlab.polimi.it/DAER/mbdyn` |
-| Python 3 | 3.10+ | Ubuntu: `apt install python3` |
-| NumPy | 1.21+ | `pip3 install numpy` |
-| ArduPilot SITL | 4.5+ | See ArduPilot docs |
+| Frame | Axes | Where used |
+|-------|------|-----------|
+| ENU (world) | X=East, Y=North, Z=Up | dynamics, aero, tether, controller |
+| NED (ArduPilot) | X=North, Y=East, Z=Down | sensor output, SITL JSON |
+| Body | columns of R_hub (body→world) | gyro, accel, swashplate |
 
-### Optional (recommended)
-
-| Software | Purpose |
-|----------|---------|
-| SciPy | Advanced analysis |
-| Matplotlib | Post-processing plots |
-| MAVProxy | CLI ground station |
-| Mission Planner | GUI ground station (Windows) |
+`T_ENU_NED = [[0,1,0],[1,0,0],[0,0,-1]]` — symmetric (T @ T = I). Import from `frames`, do not redefine.
 
 ---
 
-## Quick Start
+## Sensor Design — Tether-Relative Attitude
 
-```bash
-# Step 1: Install dependencies (WSL2 Ubuntu, one time)
-#   install.sh will print any sudo commands you need to run manually
-bash simulation/install.sh
-#   A simulation-local Python venv is created at simulation/.venv — no sudo needed for pip
+The RAWES equilibrium has body Z ~65° from vertical (aligned with the tether). Reporting absolute attitude causes ArduPilot to see ~65° tilt at rest and command maximum cyclic, crashing the hub.
 
-# Step 2: Start MBDyn + mediator
-#   run_sim.sh activates the venv automatically
-./simulation/run_sim.sh
-
-# Step 3: Start ArduPilot SITL (in a separate terminal — run_sim.sh prints the command)
-cd ~/ardupilot
-./Tools/autotest/sim_vehicle.py \
-    --vehicle ArduCopter \
-    --frame heli \
-    --custom-location=51.5074,-0.1278,50,0 \
-    --sitl-instance-args='-f json:127.0.0.1' \
-    --no-rebuild
-```
-
-To activate the venv manually for running individual scripts:
-```bash
-source simulation/activate_venv.sh
-python3 simulation/mbdyn_interface.py   # smoke test
-```
-
-The mediator will print status logs. Once SITL connects, you should see
-position updates at 1 Hz.
-
-## Testing
-
-Use two separate paths for validation depending on what is being tested.
-
-### Local unit tests
-
-Run pure Python unit tests locally in their own dedicated virtual environment.
-These tests should cover mediator orchestration, frame conversions, swashplate
-math, and other logic that does not require a live MBDyn or SITL process.
-
-On Windows, use:
-
-```cmd
-simulation\run_unit_tests.cmd
-```
-
-This runner creates `simulation/tests/unit/.venv` if needed, installs the local test
-dependencies into that dedicated unit-test virtual environment, and runs `pytest` against the dedicated test tree under
-`simulation/tests/unit`.
-
-### Stack integration tests
-
-Use `stack integration` for the middle-ground test layer:
-
-- real ArduPilot SITL
-- real `mediator.py`
-- fake plant in place of MBDyn
-- fake MAVLink ground station in place of Mission Planner
-
-This is intentionally not labeled end-to-end. It verifies the controller and
-transport stack without claiming full real-plant coverage.
-
-The smoke test lives under `simulation/tests/stack` and is opt-in. It is meant
-to run in the Docker image, not through the local Windows unit-test path.
-
-Required environment variables:
-
-- `RAWES_RUN_STACK_INTEGRATION=1`
-- `RAWES_ARDUPILOT_PATH=/path/to/ardupilot`
-
-Or provide an explicit `sim_vehicle.py` path instead:
-
-- `RAWES_SIM_VEHICLE=/path/to/ardupilot/Tools/autotest/sim_vehicle.py`
-
-Build the image with ArduPilot SITL included:
-
-```cmd
-simulation\build.cmd ardupilot
-```
-
-Then run the stack integration smoke test inside the container:
-
-```cmd
-simulation\run_stack_integration.cmd -s
-```
-
-This wrapper expects the `rawes-sim` image to exist already. Build it first with:
-
-```cmd
-simulation\build.cmd ardupilot
-```
-
-On Linux or WSL, run the same container-side script with Docker:
-
-```bash
-docker run --rm -it \
-   -v "$(pwd)/simulation:/rawes/simulation" \
-   rawes-sim \
-   bash /rawes/simulation/test_stack.sh -s
-```
-
-### Container and integration checks
-
-Use the Docker image for Linux-specific and toolchain-heavy checks:
-
-- MBDyn installation and smoke tests
-- MBDyn syntax validation via `python simulation/validate.py`
-- containerized reproducibility for the simulation toolchain
-- optional ArduPilot SITL builds
-- stack integration tests against the container's ArduPilot checkout
-
-Keep the fast unit tests local. Keep MBDyn, Docker, and full integration
-validation in the container or WSL/Linux path.
+`build_sitl_packet()` in `sensor.py` instead reports **tether-relative attitude**:
+- `roll = 0, pitch = 0` always (zero at tether equilibrium)
+- `yaw` derived from velocity heading (keeps EKF attitude/velocity consistent)
+- Gyro: spin stripped, rotated into yaw-aligned body frame
+- Accel: kinematic accel in NED body frame + −g correction
 
 ---
 
-## Port Layout
+## Initial State
 
-| Port | Protocol | Direction | Purpose |
-|------|----------|-----------|---------|
-| 9002 | UDP | SITL → mediator | Servo PWM outputs (16 channels) |
-| 9003 | UDP | mediator → SITL | Physics state (JSON) |
-| 14550 | UDP | SITL → Mission Planner | MAVLink telemetry |
-| 5760 | TCP | SITL → MAVProxy | MAVLink ground station |
-| `/tmp/rawes_forces.sock` | UNIX | mediator → MBDyn | Aerodynamic wrench (6 × float64) |
-| `/tmp/rawes_state.sock` | UNIX | MBDyn → mediator | Hub state (18 × float64) |
-
----
-
-## How to Connect Mission Planner
-
-1. Open Mission Planner on Windows.
-2. In the top-right connection selector, choose **UDP**.
-3. Port: **14550**.
-4. Click **Connect**.
-5. SITL will appear as an ArduCopter helicopter frame at 50 m altitude.
-
-Or use MAVProxy:
-```bash
-mavproxy.py --master=tcp:127.0.0.1:5760 --console --map
-```
-
----
-
-## Physical Model Summary
+Default starting state (warmup-settled equilibrium, 50 m tether at ~30° elevation):
 
 | Parameter | Value |
 |-----------|-------|
-| Blades | 4, 90° apart |
-| Blade length | 2.0 m |
-| Rotor radius | 2.5 m (incl. hub) |
-| Chord | 0.15 m |
-| Airfoil | SG6042 |
-| Rotor mass | 5 kg |
-| Rotor inertia (Iz) | 10.0 kg·m² |
-| Nominal spin rate | 28 rad/s (λ=7 at 10 m/s wind) |
-| Tether attachment | 0.5 m below hub CoM |
-| Tether spring k | 300 N/m |
-| Initial altitude | 50 m |
-| Design wind | 10 m/s East |
+| pos (ENU) | `[46.258, 14.241, 12.530]` m |
+| vel (ENU) | `[-0.257, 0.916, -0.093]` m/s |
+| body_z    | `[0.851, 0.305, 0.427]` (axle aligned with tether) |
+| omega_spin | 20.148 rad/s |
 
-### Coordinate Systems
-
-```
-  MBDyn:       ENU  →  X=East, Y=North, Z=Up
-  ArduPilot:   NED  →  X=North, Y=East, Z=Down
-
-  Conversion: ap_N = mbd_Y,  ap_E = mbd_X,  ap_D = -mbd_Z
-```
-
-### Swashplate (H3-120)
-
-- S1 at 0° (East reference)
-- S2 at 120°
-- S3 at 240°
-- Servo channels: ArduPilot outputs 1, 2, 3 → S1, S2, S3
-- ESC channel: output 4 → GB4008 anti-rotation motor
+Regenerate: `pytest tests/unit/test_steady_flight.py` → writes `steady_state_starting.json`.
 
 ---
 
-## Known Limitations / Future Work
+## Running Tests
 
-### Current limitations
+### Unit tests (Windows, no Docker)
 
-1. **Fixed wind field** — ambient wind is constant vector set at launch.
-   Wind turbulence, shear, and gusts are not modelled.
+```cmd
+simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit
+```
 
-2. **Simplified BEM aerodynamics** — no tip losses, no wake swirl, no blade
-   flap/lag dynamics. The BEM model gives reasonable first-order thrust and
-   torque but will not capture vortex ring state or dynamic inflow.
+Key unit tests:
+- `test_closed_loop.py` — closed-loop physics (dynamics + aero + tether + controller), no ArduPilot
+- `test_steady_flight.py` — open-loop equilibrium, writes `steady_state_starting.json`
+- `test_controller.py` — controller function unit tests
 
-3. **Rotor spin not modelled in MBDyn** — MBDyn integrates hub body translation
-   and tilt but the actual rotor angular momentum (gyroscopic effects) is
-   approximated. The spin rate is held near 28 rad/s via the aero model
-   rather than a full rotor spin equation of motion.
+### Stack integration tests (Docker via WSL)
 
-4. **No tether dynamics** — the tether is a massless spring-rod. Catenary
-   shape, tether drag, and reel-in/reel-out dynamics are not modelled.
+```cmd
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'
+```
 
-5. **Anti-rotation motor is open-loop** — GB4008 torque is proportional to
-   ESC input; no closed-loop speed control within the mediator.
-
-6. **Fixed-step integration** — MBDyn uses a fixed 2.5 ms step. If the
-   aerodynamic forces vary rapidly (e.g., stall transient), the step size
-   may need reduction.
-
-### TODO for future upgrades
-
-- [ ] Implement full rotor spin equation of motion in MBDyn (6th DOF)
-- [ ] Add von Karman turbulence model to wind field
-- [ ] BEM with tip-loss factor (Prandtl) and dynamic inflow (Peters-He)
-- [ ] Full Weyel 2025 flap controller (feed-forward + PID) in mediator.py
-- [ ] Tether catenary model with winch reel-in/reel-out control
-- [ ] Hardware-in-the-loop (HIL) testing with physical Pixhawk 6C
-- [ ] ArduPilot parameter file for RAWES helicopter frame configuration
-- [ ] Matplotlib real-time plot of rotor trajectory
-- [ ] Log to MAVLink binary (.tlog) for post-processing in Mission Planner
+See `CLAUDE.md` in the repo root for full Docker setup and test commands.
 
 ---
 
-## References
+## MBDyn
 
-1. Felix Weyel (2025) — "Modeling and Closed Loop Control of a Cyclic Pitch
-   Actuated Rotary Airborne Wind Energy System", Bachelor's Thesis, Uni Freiburg.
-
-2. De Schutter, Leuthold, Diehl (2018) — "Optimal Control of a Rigid-Wing
-   Rotary Kite System for Airborne Wind Energy".
-
-3. US Patent US3217809 (Kaman/Bossler, 1965) — Servo-flap rotor control system.
-
-4. MBDyn Manual — https://www.mbdyn.org/documentation/
+MBDyn was the original physics engine. It has been replaced by `dynamics.py` (Python RK4). The integration is documented in `simulation/mbdyn_reference.md` for future restoration if higher fidelity is needed (multi-body rotor, flexible tether, explicit blade bodies, etc.).

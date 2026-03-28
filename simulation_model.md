@@ -1,3 +1,5 @@
+> **OBSOLETE — do not use.** This is a duplicate of `flapmodel.md`. Retained for historical reference only. Refer to `flapmodel.md` instead.
+
 # RAWES Simulation Model Reference
 *Extracted from: "Modeling and Closed Loop Control of a Cyclic Pitch Actuated Rotary Airborne Wind Energy System" — Felix Weyel, Uni Freiburg, Sept 2025*
 

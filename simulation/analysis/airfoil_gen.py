@@ -2,6 +2,10 @@
 """
 airfoil_gen.py — Generate SG6042 airfoil table in C81 format
 
+NOTE: MBDyn has been removed from the simulation stack. This script generated
+C81 tables for MBDyn's rotor aerodynamics module. Retained for historical reference
+only. The current aerodynamic model (aero.py) uses a linear CL/CD model directly.
+
 C81 format (used by MBDyn rotor aerodynamics modules):
   - Header line: airfoil name, number of AoA points
   - Blocks per Mach number: CL, CD, CM vs AoA

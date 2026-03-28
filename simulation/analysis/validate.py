@@ -2,6 +2,10 @@
 """
 validate.py -- MBDyn syntax validator for RAWES simulation files
 
+NOTE: MBDyn has been removed from the simulation stack (replaced by dynamics.py,
+Python RK4). This script is retained for historical reference only and will not
+work without a running MBDyn installation. See simulation/mbdyn_reference.md.
+
 Runs MBDyn inside the rawes-sim Docker container and checks for parse errors.
 MBDyn parses the entire .mbd file before touching any sockets, so:
   - syntax errors  → MBDyn exits immediately with an error message  → FAIL

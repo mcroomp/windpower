@@ -16,13 +16,14 @@ def test_rotation_matrix_to_euler_identity_is_zero():
 
 def test_sensor_compute_identity_frame_is_deterministic_without_noise():
     # anchor directly below hub so tether direction = world Z = disk_normal → deviation = 0
+    # vel_enu = zeros: below the 0.1 m/s threshold so R_dev-derived yaw is used (not velocity yaw).
     pos_enu = np.array([5.0, 10.0, 50.0])
     sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=1,
                        anchor_enu=np.array([5.0, 10.0, 0.0]))
 
     result = sensor.compute(
         pos_enu=pos_enu,
-        vel_enu=np.array([1.0, 2.0, 3.0]),
+        vel_enu=np.zeros(3),
         R_hub=np.eye(3),
         omega_body=np.array([0.0, 0.0, 28.0]),
         accel_world_enu=np.array([0.0, 0.0, 0.0]),
@@ -30,7 +31,7 @@ def test_sensor_compute_identity_frame_is_deterministic_without_noise():
     )
 
     np.testing.assert_allclose(result["pos_ned"], np.array([10.0, 5.0, -50.0]))
-    np.testing.assert_allclose(result["vel_ned"], np.array([2.0, 1.0, -3.0]))
+    np.testing.assert_allclose(result["vel_ned"], np.zeros(3))
     np.testing.assert_allclose(result["rpy"], np.zeros(3))
     # Specific force in NED body frame when hovering stationary (accel_world=0):
     #   specific = 0 - g_enu = [0,0,+9.81]; rotate ENU body → NED body (T flips Z):
@@ -39,6 +40,7 @@ def test_sensor_compute_identity_frame_is_deterministic_without_noise():
     # With R_hub=I the full omega [0,0,28] is pure spin (disk normal = world Z).
     # The electronics are non-rotating so spin is stripped → gyro_body = [0,0,0].
     np.testing.assert_allclose(result["gyro_body"], np.zeros(3))
+
 
 
 def test_sensor_rotates_world_omega_into_body_frame():

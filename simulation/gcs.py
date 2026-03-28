@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 # ArduCopter custom mode numbers
 STABILIZE  = 0
+ACRO       = 1
 ALT_HOLD   = 2
 AUTO       = 3
 GUIDED     = 4
@@ -236,6 +237,38 @@ class RawesGCS:
     # EKF health
     # ------------------------------------------------------------------
 
+    def wait_ekf_attitude(self, timeout: float = 45.0) -> bool:
+        """
+        Block until a finite ATTITUDE message is received (EKF tilt aligned).
+
+        This is a weaker condition than wait_ekf_ok() — it only requires
+        attitude, not position.  Sufficient for force-arm in simulation.
+
+        Returns True on success, False on timeout.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = self._mav.recv_match(
+                type=["ATTITUDE", "STATUSTEXT", "EKF_STATUS_REPORT"],
+                blocking=True, timeout=1.0,
+            )
+            if msg is None:
+                continue
+            mt = msg.get_type()
+            if mt == "STATUSTEXT":
+                log.info("EKF wait STATUSTEXT: %s", msg.text.rstrip("\x00").strip())
+            elif mt == "EKF_STATUS_REPORT":
+                log.debug("EKF_STATUS flags=0x%04x", msg.flags)
+            elif mt == "ATTITUDE":
+                import math as _math
+                r = _math.degrees(msg.roll)
+                p = _math.degrees(msg.pitch)
+                y = _math.degrees(msg.yaw)
+                if all(_math.isfinite(v) for v in (r, p, y)):
+                    log.info("EKF attitude ready rpy=(%.1f, %.1f, %.1f)°", r, p, y)
+                    return True
+        return False
+
     def wait_ekf_ok(self, timeout: float = 60.0) -> None:
         """
         Block until the EKF reports a healthy position and velocity estimate.
@@ -309,15 +342,21 @@ class RawesGCS:
                 t_last_override = time.monotonic()
 
             msg = self._mav.recv_match(
-                type=["HEARTBEAT", "COMMAND_ACK"], blocking=True, timeout=0.5
+                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
+                blocking=True, timeout=0.5,
             )
             if msg is None:
+                continue
+
+            if msg.get_type() == "STATUSTEXT":
+                log.warning("STATUSTEXT during arm: %s",
+                            msg.text.rstrip("\x00").strip())
                 continue
 
             if msg.get_type() == "COMMAND_ACK":
                 if msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
                     if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                        pass  # confirmed; wait for armed HEARTBEAT
+                        log.info("Arm command ACCEPTED — waiting for armed heartbeat ...")
                     elif msg.result in (
                         mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED,
                         mavutil.mavlink.MAV_RESULT_FAILED,
@@ -326,7 +365,7 @@ class RawesGCS:
                         # EKF still converging).  ArduPilot returns FAILED (=4) for
                         # pre-arm check failures, TEMPORARILY_REJECTED (=1) for busy.
                         # Sleep 1 s then resend; do NOT raise.
-                        log.debug(
+                        log.info(
                             "Arm rejected (result=%d) — retrying in 1 s", msg.result
                         )
                         time.sleep(1.0)
@@ -341,9 +380,15 @@ class RawesGCS:
                         raise RuntimeError(
                             f"Arm rejected by vehicle (result={msg.result})"
                         )
+                elif msg.command != mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+                    log.debug("COMMAND_ACK for cmd=%d result=%d (not arm)",
+                              msg.command, msg.result)
 
             if msg.get_type() == "HEARTBEAT":
-                if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+                armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                log.info("HEARTBEAT: sysid=%d base_mode=0x%02x armed=%s custom_mode=%d",
+                         msg.get_srcSystem(), msg.base_mode, armed, msg.custom_mode)
+                if armed:
                     log.info("Vehicle is armed.")
                     return
 

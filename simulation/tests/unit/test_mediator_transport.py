@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -106,6 +107,7 @@ def _args(recv_port, send_port):
         vel0=None,
         body_z=None,
         omega_spin=None,
+        lock_orientation=False,
     )
 
 
@@ -150,7 +152,7 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: real_sitl)
     monkeypatch.setattr(mediator, "RotorAero",         lambda: fake_aero)
-    monkeypatch.setattr(mediator, "SensorSim",         lambda **kw: fake_sensor)
+    monkeypatch.setattr(mediator, "SensorSim",         lambda **kwargs: fake_sensor)
 
     times = iter([10.0, 10.1, 10.1005])
     monkeypatch.setattr(mediator.time, "monotonic", lambda: next(times))
@@ -163,15 +165,18 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
 
     sitl_thread.join(timeout=2.0)
 
-    # Verify the JSON state reply sent back to the fake SITL
+    # Verify the JSON state reply sent back to the fake SITL.
+    # FakeSensor.compute() returns fixed canned values regardless of hub state:
+    #   pos_ned=[20,10,-30], vel_ned=[2,1,-3], rpy=[0.1,0.2,0.3],
+    #   accel_body=[0.4,0.5,0.6], gyro_body=[0.7,0.8,0.9]
     raw_state, _ = sitl_sock.recvfrom(4096)
     message = json.loads(raw_state.decode("utf-8").strip())
 
-    assert message["position"] == [20.0, 10.0, -30.0]
-    assert message["velocity"] == [2.0, 1.0, -3.0]
-    assert message["attitude"] == [0.1, 0.2, 0.3]
-    assert message["imu"]["accel_body"] == [0.4, 0.5, 0.6]
-    assert message["imu"]["gyro"] == [0.7, 0.8, 0.9]
+    assert message["position"]       == pytest.approx([20.0, 10.0, -30.0], abs=1e-6)
+    assert message["velocity"]       == pytest.approx([2.0,  1.0,  -3.0],  abs=1e-6)
+    assert message["attitude"]       == pytest.approx([0.1,  0.2,   0.3],  abs=1e-6)
+    assert message["imu"]["accel_body"] == pytest.approx([0.4, 0.5, 0.6],  abs=1e-6)
+    assert message["imu"]["gyro"]    == pytest.approx([0.7,  0.8,   0.9],  abs=1e-6)
 
     # dynamics.step must have been called with the aero forces
     assert len(fake_dynamics.step_calls) == 1

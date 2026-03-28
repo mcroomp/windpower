@@ -28,6 +28,7 @@ import logging
 import numpy as np
 import math
 from typing import Optional
+from frames import T_ENU_NED, build_orb_frame
 
 log = logging.getLogger(__name__)
 
@@ -78,24 +79,23 @@ def _rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
     return np.array([roll, pitch, yaw])
 
 
-def _build_orb_frame(body_z: np.ndarray) -> np.ndarray:
+def _euler_zyx_to_rotation(roll: float, pitch: float, yaw: float) -> np.ndarray:
     """
-    Build an orbital rotation matrix from a disk-normal (body Z) direction.
+    Build a ZYX rotation matrix from [roll, pitch, yaw] angles.
 
-    The orbital frame removes rotor spin: body X is aligned with world East
-    projected onto the disk plane (falls back to world North if the disk
-    faces East).  Returns a 3×3 rotation matrix with body_z as column 2.
+    R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    Maps body frame to world: v_world = R @ v_body.
+    Inverse of _rotation_matrix_to_euler_zyx.
     """
-    _EAST  = np.array([1.0, 0.0, 0.0])
-    _NORTH = np.array([0.0, 1.0, 0.0])
-    east_proj = _EAST - np.dot(_EAST, body_z) * body_z
-    if np.linalg.norm(east_proj) > 1e-6:
-        x_orb = east_proj / np.linalg.norm(east_proj)
-    else:
-        north_proj = _NORTH - np.dot(_NORTH, body_z) * body_z
-        x_orb = north_proj / np.linalg.norm(north_proj)
-    y_orb = np.cross(body_z, x_orb)
-    return np.column_stack([x_orb, y_orb, body_z])
+    cr, sr = math.cos(roll),  math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw),   math.sin(yaw)
+    return np.array([
+        [ cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+        [ sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+        [-sp,     cp*sr,             cp*cr            ],
+    ])
+
 
 
 class SensorSim:
@@ -122,11 +122,12 @@ class SensorSim:
 
     def __init__(
         self,
-        gyro_sigma:  float = _GYRO_SIGMA,
-        accel_sigma: float = _ACCEL_SIGMA,
-        rng_seed:    Optional[int] = None,
-        home_enu_z:  float = 0.0,
-        anchor_enu:  Optional[np.ndarray] = None,
+        gyro_sigma:    float = _GYRO_SIGMA,
+        accel_sigma:   float = _ACCEL_SIGMA,
+        rng_seed:      Optional[int] = None,
+        home_enu_z:    float = 0.0,
+        anchor_enu:    Optional[np.ndarray] = None,
+        stable_body_z: Optional[np.ndarray] = None,
     ):
         self._gyro_sigma  = gyro_sigma
         self._accel_sigma = accel_sigma
@@ -134,6 +135,17 @@ class SensorSim:
         self._home_enu_z  = float(home_enu_z)
         self._anchor_enu  = np.asarray(anchor_enu, dtype=float) if anchor_enu is not None \
                             else np.zeros(3)
+        # Physical equilibrium orientation: the disk orientation where forces balance
+        # at zero collective.  When provided, ArduPilot sees roll=pitch=0 at this
+        # orientation — NOT at the tether direction.  At low tether elevation angles
+        # (< 20°) the tether direction has too little vertical component to support
+        # the hub against gravity + tether downward pull, so using the tether as
+        # the "level" reference causes the hub to fall immediately after unfreeze.
+        if stable_body_z is not None:
+            bz = np.asarray(stable_body_z, dtype=float)
+            self._stable_R_orb_eq = build_orb_frame(bz / np.linalg.norm(bz))
+        else:
+            self._stable_R_orb_eq = None
 
     def compute(
         self,
@@ -198,17 +210,21 @@ class SensorSim:
 
         # Actual orbital frame (spin removed): body Z = disk_normal.
         disk_normal = R_hub[:, 2]
-        R_orb = _build_orb_frame(disk_normal)
+        R_orb = build_orb_frame(disk_normal)
 
-        # Equilibrium orbital frame: body Z = tether direction.
-        tether_vec = pos_enu - self._anchor_enu
-        tether_len = float(np.linalg.norm(tether_vec))
-        if tether_len > 1.0:
-            body_z_eq = tether_vec / tether_len
+        # Equilibrium orbital frame.
+        # Use the stable_body_z if provided (physical force-balance equilibrium).
+        # Otherwise fall back to the live tether direction.
+        if self._stable_R_orb_eq is not None:
+            R_orb_eq = self._stable_R_orb_eq
         else:
-            # Hub very close to anchor (slack tether) — default to upright.
-            body_z_eq = np.array([0.0, 0.0, 1.0])
-        R_orb_eq = _build_orb_frame(body_z_eq)
+            tether_vec = pos_enu - self._anchor_enu
+            tether_len = float(np.linalg.norm(tether_vec))
+            if tether_len > 1.0:
+                body_z_eq = tether_vec / tether_len
+            else:
+                body_z_eq = np.array([0.0, 0.0, 1.0])
+            R_orb_eq = build_orb_frame(body_z_eq)
 
         # Deviation rotation: identity when hub axle is aligned with tether.
         R_dev = R_orb_eq.T @ R_orb
@@ -216,31 +232,57 @@ class SensorSim:
         # Convert to NED body convention and extract Euler angles.
         # T = [[0,1,0],[1,0,0],[0,0,-1]]: ENU body ↔ NED body (symmetric).
         # T @ R_dev @ T gives NED convention; Euler=[0,0,0] at tether equilibrium.
-        _T = np.array([[0., 1., 0.],
-                       [1., 0., 0.],
-                       [0., 0., -1.]])
+        _T = T_ENU_NED
         R_ned = _T @ R_dev @ _T
 
         rpy = _rotation_matrix_to_euler_zyx(R_ned)
 
         # ------------------------------------------------------------------
+        # 2b. Replace yaw with velocity-derived heading for EKF consistency.
+        #
+        # SensorSim reports roll/pitch as tether-relative deviations from
+        # R_dev — so ArduPilot sees roll=pitch=0 at equilibrium, giving the
+        # compute_rc_from_attitude P-term a real error signal.
+        #
+        # However the orientation-derived yaw (from R_dev) differs from the
+        # GPS velocity heading atan2(vE, vN).  At our equilibrium the
+        # orientation yaw is 0° while the velocity heading is ~−15.7°.  After
+        # GPS lock the EKF compares these and triggers "MAG ground anomaly /
+        # yaw re-aligned" or "GPS Glitch", causing an emergency yaw reset and
+        # hub crash.
+        #
+        # Fix: replace rpy[2] with velocity-derived yaw (as build_sitl_packet
+        # does).  This keeps roll/pitch as tether-relative deviations while
+        # making yaw consistent with the velocity vector, eliminating the EKF
+        # inconsistency.  Rebuild the body-frame rotation matrix to match.
+        #
+        # Fallback: when horizontal speed < 0.05 m/s (start-up or near-zero
+        # velocity) keep the orientation-derived yaw to avoid discontinuities.
+        # ------------------------------------------------------------------
+        v_horiz = math.hypot(vel_ned[0], vel_ned[1])
+        if v_horiz > 0.05:
+            rpy[2] = math.atan2(vel_ned[1], vel_ned[0])
+        # else: keep orientation-derived rpy[2]
+
+        # Rebuild R_body consistent with the (possibly updated) yaw.
+        R_body = _euler_zyx_to_rotation(float(rpy[0]), float(rpy[1]), float(rpy[2]))
+
+        # ------------------------------------------------------------------
         # 3. IMU accelerometer
         #
-        # The accelerometer is mounted on the NON-ROTATING electronics
-        # assembly.  Its body frame is R_orb (the orbital frame), not R_hub
-        # (which includes the rotor spin).  Using R_hub.T would rotate the
-        # measurement by the spin angle relative to R_orb, causing X-Y
-        # components to spin at 28 rad/s in the EKF body frame — inconsistent
-        # with the attitude (R_orb) and gyro.
+        # For EKF consistency, the accelerometer must be expressed in the
+        # SAME body frame as the attitude we report (R_body above).
         #
-        # Specific force: a_specific = a_inertial - g
-        #    a_specific_world = accel_world_enu - [0, 0, -9.81]
-        # Rotate to NED body frame:
-        #    accel_body = T @ (R_orb.T @ a_specific_world)
-        # (R_orb.T projects world→ENU-body; T then reindexes to NED-body)
+        #   specific_force_ned = T @ (accel_world_enu - gravity_enu)
+        #   accel_body = R_body.T @ specific_force_ned
+        #
+        # At tether equilibrium with vel_yaw: R_body = Rz(vel_yaw).
+        #   specific_force = T @ [0,0,9.81] = [0,0,-9.81]
+        #   accel_body = Rz(-vel_yaw) @ [0,0,-9.81] = [0,0,-9.81] ✓
         # ------------------------------------------------------------------
-        a_specific_world = accel_world_enu - _GRAVITY_ENU
-        accel_body = _T @ (R_orb.T @ a_specific_world)
+        a_specific_enu = accel_world_enu - _GRAVITY_ENU
+        specific_force_ned = _T @ a_specific_enu
+        accel_body = R_body.T @ specific_force_ned
 
         # Add accelerometer noise
         accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
@@ -248,25 +290,18 @@ class SensorSim:
         # ------------------------------------------------------------------
         # 4. IMU gyroscope
         #
-        # MBDyn provides omega in the WORLD (ENU) frame.  In the single-body
-        # model this includes both the rotor spin (~28 rad/s about the disk
-        # normal) and the slow orbital/tilting rate of the hub.
+        # Same consistency requirement: gyro must be in the same body frame
+        # (R_body) so that d(attitude)/dt = skew(gyro) × attitude.
         #
-        # The gyroscope is mounted on the NON-ROTATING electronics assembly
-        # (held stationary by the GB4008 counter-torque motor).  It therefore
-        # measures only the orbital/tilting component — NOT the rotor spin.
+        #   gyro_body = R_body.T @ (T @ omega_orbital_enu)
         #
-        # Remove the spin component by projecting omega onto the plane
-        # perpendicular to the disk normal (body Z-axis in world frame):
-        #   omega_orbital = omega_world - (omega_world · n̂) * n̂
-        # Then convert to the NED body frame — same convention as the attitude
-        # (R_ned) we send to ArduPilot.  Using R_hub.T instead would produce
-        # X-Y components rotated by the spin angle, causing EKF inconsistency.
+        # At equilibrium R_body = Rz(vel_yaw) and omega_orbital = 0:
+        #   gyro_body = 0 ✓
         # ------------------------------------------------------------------
         disk_normal_world = R_hub[:, 2]   # body Z-axis expressed in ENU world frame
         omega_spin_world   = np.dot(omega_body, disk_normal_world) * disk_normal_world
         omega_orbital_world = omega_body - omega_spin_world
-        omega_body_frame = _T @ (R_orb.T @ omega_orbital_world)
+        omega_body_frame = R_body.T @ (_T @ omega_orbital_world)
 
         # Add gyroscope noise
         gyro_body = omega_body_frame + self._rng.normal(0.0, self._gyro_sigma, 3)
@@ -278,6 +313,72 @@ class SensorSim:
             "accel_body": accel_body,
             "gyro_body":  gyro_body,
         }
+
+
+def build_sitl_packet(
+    hub_state:     dict,
+    accel_world:   np.ndarray,
+    home_z_enu:    float,
+    freeze_vel_ned: np.ndarray,
+    frozen:        bool,
+) -> dict:
+    """
+    Build the SITL sensor packet from hub ENU truth state.
+
+    Reports tether-relative attitude (rpy=[0,0,yaw_from_velocity]) so that
+    ArduPilot sees roll=pitch=0 at tether equilibrium. All quantities are
+    expressed in the yaw-aligned NED body frame ArduPilot expects.
+
+    Parameters
+    ----------
+    hub_state      : dict with keys pos, vel, R, omega (all ENU world frame)
+    accel_world    : (3,) kinematic acceleration in ENU world frame [m/s²]
+    home_z_enu     : ENU Z of the ArduPilot home position [m]
+    freeze_vel_ned : (3,) hint velocity [m/s] used during startup freeze
+    frozen         : True during startup freeze period
+
+    Returns
+    -------
+    dict with keys: pos_ned, vel_ned, rpy, accel_body, gyro_body
+    """
+    _pos = hub_state["pos"]
+    _R   = hub_state["R"]
+    _omg = hub_state["omega"]
+    _vel = hub_state["vel"]
+
+    # Position NED
+    _pos_ned = np.array([_pos[1], _pos[0], -(_pos[2] - home_z_enu)])
+
+    # Velocity NED (or freeze hint)
+    if frozen:
+        _vel_ned = freeze_vel_ned
+    else:
+        _vel_ned = np.array([_vel[1], _vel[0], -_vel[2]])
+
+    # Yaw from velocity heading (keeps attitude/velocity consistent in EKF)
+    _v_horiz = np.hypot(_vel_ned[0], _vel_ned[1])
+    _yaw_ned = float(np.arctan2(_vel_ned[1], _vel_ned[0])) if _v_horiz > 0.1 else 0.0
+    _rpy     = np.array([0., 0., _yaw_ned])
+
+    # Accelerometer: kinematic accel (ENU) → NED body frame
+    _accel_ned  = T_ENU_NED @ accel_world + np.array([0., 0., -9.81])
+    _cy, _sy    = np.cos(_yaw_ned), np.sin(_yaw_ned)
+    _Rz_inv     = np.array([[_cy, _sy, 0.], [-_sy, _cy, 0.], [0., 0., 1.]])
+    _accel_body = _Rz_inv @ _accel_ned
+
+    # Gyro: strip spin, rotate into yaw-aligned body frame
+    _bz_cur     = _R[:, 2]
+    _omg_nospin = _omg - np.dot(_omg, _bz_cur) * _bz_cur
+    _gyro_ned   = T_ENU_NED @ _omg_nospin
+    _gyro_body  = _Rz_inv @ _gyro_ned
+
+    return {
+        "pos_ned":    _pos_ned,
+        "vel_ned":    _vel_ned,
+        "rpy":        _rpy,
+        "accel_body": _accel_body,
+        "gyro_body":  _gyro_body,
+    }
 
 
 # ---------------------------------------------------------------------------

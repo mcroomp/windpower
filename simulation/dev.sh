@@ -59,11 +59,11 @@ case "$CMD" in
         ;;
     test-stack)
         ensure_running
-        docker exec "$CONTAINER" bash /rawes/simulation/test_stack.sh "$@"
+        docker exec -t "$CONTAINER" bash /rawes/simulation/test_stack.sh "$@"
         ;;
     test-unit)
         ensure_running
-        docker exec "$CONTAINER" bash -c "cd /rawes && .venv/bin/python -m pytest simulation/tests/unit $*"
+        docker exec -t "$CONTAINER" bash -c "cd /rawes && .venv/bin/python -m pytest -s simulation/tests/unit $*"
         ;;
     "")
         echo "Usage: $0 start | stop | shell | exec <cmd...> | test-stack [...] | test-unit [...]"

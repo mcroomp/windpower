@@ -12,7 +12,7 @@ Data flow (each 400 Hz step):
     3. aero.compute()    — BEM forces in world (ENU) frame
     4. tether.compute()  — tension-only tether force added to wrench
     5. dynamics.step()   — RK4 6-DOF integration (pure Python, gravity internal)
-    6. sensor.compute()  — world state -> IMU + NED outputs
+    6. sensor packet     — minimal NED state for ACRO mode (gyro + constant gravity)
     7. send_state()      — to SITL UDP port 9003
 
 Usage:
@@ -42,7 +42,9 @@ from dynamics        import RigidBodyDynamics
 from sitl_interface  import SITLInterface
 from swashplate      import h3_inverse_mix, collective_to_pitch, cyclic_to_blade_pitches, pwm_to_normalized
 from aero            import RotorAero
-from sensor          import SensorSim
+from tether          import TetherModel
+from frames          import T_ENU_NED, build_orb_frame
+from sensor          import build_sitl_packet, SensorSim
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -87,142 +89,6 @@ DEFAULT_BODY_Z      = [0.851018, 0.305391, 0.427206]  # unit vector (body Z = ax
 DEFAULT_OMEGA_SPIN  = 20.148                      # rad/s — equilibrium spin at 30° elevation
 
 
-# ---------------------------------------------------------------------------
-# Tether model
-# ---------------------------------------------------------------------------
-class TetherModel:
-    """
-    Tension-only elastic tether.
-
-    Models a Dyneema SK75 1.9 mm braided tether attached from a fixed ground
-    anchor to the hub node.  Force is zero when the tether is slack (hub
-    closer to anchor than rest_length) and elastic when taut.
-
-    Physical basis — Dyneema SK75 1.9 mm braided
-    -----------------------------------------------
-    Fibre:      UHMWPE (Dyneema SK75)
-    Diameter:   1.9 mm (nominal)
-    Area:       A = π × (0.00095 m)² = 2.835 × 10⁻⁶ m²
-    Fibre E:    109 GPa  (DSM Dyneema SK75 datasheet)
-    Braid eff.: ~0.91 (typical braid efficiency for a tight 12-strand braid)
-    EA:         109 × 10⁹ × 2.835 × 10⁻⁶ × 0.91 ≈ 281 kN → use 280 kN
-    Break load: ≈ 620 N  (DSM SK75, 2 mm; conservative for 1.9 mm)
-    Lin. mass:  ρ_fibre × A × braid_fill = 970 × 2.835e-6 / 0.91 ≈ 3.0 g/m
-                (fill factor inverted because braid is looser than solid rod)
-                Practical value: ~2.1 g/m (manufacturer data for 2 mm SK75)
-
-    Stiffness at operating length L
-    --------------------------------
-    k(L) = EA / L          [N/m]  — nonlinear: stiffer for shorter tether
-
-    Structural damping
-    ------------------
-    UHMWPE loss tangent: δ ≈ 0.04 → ζ ≈ 0.02 (2 % critical)
-    At L=200 m, m=5 kg:  c_crit = 2√(k·m) = 2√(1400·5) = 167 N·s/m
-    c = ζ · c_crit = 0.02 × 167 ≈ 3.3 N·s/m → use 5 N·s/m (conservative)
-    Damping is applied only while tether is extending (no negative damping).
-
-    Scenario
-    ---------
-    rest_length = 200 m : tether paid out to 200 m by the ground winch.
-    Hub starts at Z = 50 m ≪ 200 m → slack zone; no tether force at launch.
-    Tether activates only if hub flies farther than 200 m from anchor.
-    This represents a realistic AWE flight test scenario where the winch has
-    pre-deployed 200 m of tether before the hub launches.
-    """
-
-    # Dyneema SK75 1.9 mm braided — material constants
-    DIAMETER_M       = 0.0019           # nominal diameter [m]
-    AREA_M2          = np.pi * (DIAMETER_M / 2) ** 2   # = 2.835e-6 m²
-    E_FIBRE_PA       = 109e9            # fibre axial modulus [Pa]
-    BRAID_EFFICIENCY = 0.91             # braid efficiency (axial stiffness fraction)
-    EA_N             = E_FIBRE_PA * AREA_M2 * BRAID_EFFICIENCY  # ≈ 281 kN [N]
-    LINEAR_MASS_KG_M = 0.0021          # linear mass density [kg/m]  (2.1 g/m)
-    BREAK_LOAD_N     = 620.0           # conservative breaking load [N]
-
-    def __init__(
-        self,
-        anchor_enu:            np.ndarray = np.array([0.0, 0.0, 0.0]),
-        rest_length:           float      = 200.0,   # unstretched tether length [m]
-        EA:                    float      = None,    # override axial stiffness [N]
-        damping:               float      = 5.0,     # structural damping [N·s/m]
-        axle_attachment_length: float     = 0.3,     # distance from CoM to tether attach point along -body_Z [m]
-    ):
-        self.anchor      = np.asarray(anchor_enu, dtype=float)
-        self.rest_length = float(rest_length)
-        self.EA          = float(EA) if EA is not None else self.EA_N
-        self.damping     = float(damping)
-        self.axle_attach = float(axle_attachment_length)
-        self._last_info: dict = {}
-
-    def compute(
-        self,
-        hub_pos: np.ndarray,   # hub position in ENU world frame [m]
-        hub_vel: np.ndarray,   # hub velocity in ENU world frame [m/s]
-        R_hub:   np.ndarray = None,  # body→world rotation matrix (for restoring torque)
-    ) -> tuple:
-        """
-        Return (force, moment) on hub due to tether, both in ENU world frame [N] / [N·m].
-
-        When R_hub is provided and tether is taut, also computes a restoring moment
-        M = r_attach × F_tether that aligns the hub axle (body Z) with the tether.
-        The attachment point is 'axle_attachment_length' below the CoM along -body Z.
-
-        Stores diagnostic info in self._last_info for telemetry logging.
-        """
-        r = hub_pos - self.anchor           # vector: anchor → hub
-        L = float(np.linalg.norm(r))
-
-        _zero3 = np.zeros(3)
-        if L < 1e-6:
-            self._last_info = dict(slack=True, tension=0.0, extension=0.0,
-                                   length=0.0, k_eff=0.0)
-            return _zero3, _zero3
-
-        unit = r / L                        # unit vector anchor → hub
-        extension = L - self.rest_length
-
-        if extension <= 0.0:               # tether is slack
-            self._last_info = dict(slack=True, tension=0.0, extension=extension,
-                                   length=L, k_eff=0.0)
-            return _zero3, _zero3
-
-        # Stiffness: k = EA / L  (nonlinear — stiffer when shorter)
-        k_eff = self.EA / L
-
-        # Elastic tension
-        T_elastic = k_eff * extension
-
-        # Structural damping — only resists further extension
-        v_radial = float(np.dot(hub_vel, unit))   # rate of length increase
-        T_damp   = self.damping * max(0.0, v_radial)
-
-        T_total  = T_elastic + T_damp
-
-        # Force on hub: directed from hub toward anchor (opposes extension)
-        force = -T_total * unit
-
-        # Restoring moment: tether pulls on the axle bottom, not the CoM.
-        # r_attach = offset from CoM to tether attachment point in world frame.
-        # body Z = R_hub[:,2]; attachment is 'axle_attach' metres below CoM.
-        if R_hub is not None:
-            body_z_world = R_hub[:, 2]              # disk normal in world frame
-            r_attach = -self.axle_attach * body_z_world   # toward axle bottom
-            moment = np.cross(r_attach, force)
-        else:
-            moment = _zero3
-
-        self._last_info = dict(
-            slack        = False,
-            tension      = T_total,
-            t_elastic    = T_elastic,
-            t_damp       = T_damp,
-            extension    = extension,
-            length       = L,
-            k_eff        = k_eff,
-        )
-        return force, moment
-
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -247,13 +113,21 @@ def _parse_args():
                         help="Logging verbosity level")
     parser.add_argument("--telemetry-log", default=None,
                         help="Path for per-step CSV telemetry log (MBDyn + aero data)")
-    parser.add_argument("--tether-rest-length", type=float, default=49.940,
+    parser.add_argument("--tether-rest-length", type=float, default=49.949,
                         help="Unstretched tether length [m] (ground-winch pay-out). "
-                             "Default matches steady-state equilibrium (tether taut from start).")
+                             "Default 49.949 m chosen for near-zero force balance at the "
+                             "warmup equilibrium: T≈289N → net vertical ≈-2.6N vs gravity=49N.")
     parser.add_argument("--startup-freeze-seconds", type=float, default=30.0,
-                        help="Seconds to hold hub perfectly stationary at startup so "
-                             "ArduPilot EKF can achieve GPS position lock before "
-                             "any physics run.  After this period normal dynamics begin.")
+                        help="Seconds to immobilize hub at startup (pos/R fixed, vel=0) "
+                             "so ArduPilot EKF can achieve GPS lock.  The rotor still "
+                             "spins freely in the wind during this period.  After this "
+                             "period normal 6-DOF dynamics begin.")
+    parser.add_argument("--lock-orientation", action="store_true", default=False,
+                        help="Lock hub orientation to the initial R0 every step — "
+                             "no rotation allowed (magic tether that prevents all twist). "
+                             "Eliminates rotational dynamics so only translational physics "
+                             "needs to be validated.  Swashplate is always aligned correctly; "
+                             "anti-rotation motor torque is irrelevant.")
     parser.add_argument("--pos0", type=str, default=None,
                         help="Initial hub ENU position as 'x,y,z' [m]. "
                              "Overrides built-in default.")
@@ -298,7 +172,6 @@ def run_mediator(args):
     #   (50 m tether at ~30° elevation, body Z aligned with tether)
     _pos0            = list(DEFAULT_POS0)
     _vel0            = list(DEFAULT_VEL0)
-    _body_z_default  = list(DEFAULT_BODY_Z)
     _omega_spin_init = DEFAULT_OMEGA_SPIN
 
     if args.pos0 is not None:
@@ -308,15 +181,22 @@ def run_mediator(args):
     if args.omega_spin is not None:
         _omega_spin_init = args.omega_spin
 
-    _bz = np.array(args.body_z.split(","), dtype=float) if args.body_z else np.array(_body_z_default)
-    _bz /= np.linalg.norm(_bz)
-    _ref = np.array([0.0, 1.0, 0.0]) if abs(_bz[1]) < 0.9 else np.array([0.0, 0.0, 1.0])
-    _bx = _ref - np.dot(_ref, _bz) * _bz; _bx /= np.linalg.norm(_bx)
-    _R0 = np.column_stack([_bx, np.cross(_bz, _bx), _bz])
+    # body_z sets the initial hub orientation (rotor axle direction).
+    # Warmup body_z = DEFAULT_BODY_Z ≈ [0.851,0.305,0.427] has z=0.427:
+    # vertical thrust = T × 0.427 ≈ 128 N, balancing gravity+tether_down ≈ 126 N.
+    _pos0_arr = np.array(_pos0, dtype=float)
+    if args.body_z is not None:
+        _bz_raw = np.array([float(v) for v in args.body_z.split(",")], dtype=float)
+    else:
+        _bz_raw = np.array(DEFAULT_BODY_Z, dtype=float)
+    _bz = _bz_raw / np.linalg.norm(_bz_raw)
+
+    # Build _R0: body-X is the East-projection of _bz.
+    _R0 = build_orb_frame(_bz)
 
     dynamics = RigidBodyDynamics(
-        mass   = 30.0,
-        I_body = [30.0, 30.0, 60.0],  # orbital body inertia scaled with mass
+        mass   = 5.0,
+        I_body = [5.0, 5.0, 10.0],    # matches test_steady_flight.py warmup model
         I_spin = 0.0,                  # no gyroscopic coupling (see comment above)
         pos0   = _pos0,
         vel0   = _vel0,
@@ -329,11 +209,20 @@ def run_mediator(args):
         send_port=args.sitl_send_port,
     )
     aero   = RotorAero()
-    # home_enu_z matches pos0[2] so ArduPilot receives NED D=0 at start.
-    sensor = SensorSim(home_enu_z=float(_pos0[2]))
     tether = TetherModel(
-        anchor_enu  = np.array([0.0, 0.0, 0.0]),
-        rest_length = args.tether_rest_length,
+        anchor_enu             = np.array([0.0, 0.0, 0.0]),
+        rest_length            = args.tether_rest_length,
+        hub_mass               = 5.0,   # matches dynamics mass; sets critical damping scale
+        axle_attachment_length = 0.0,   # disable restoring torque; body_z stability via aero
+    )
+    # SensorSim reports tether-relative attitude (R_dev vs tether direction).
+    # Using live tether direction (stable_body_z=None) so roll=pitch=0 whenever
+    # body_z is aligned with the current tether direction, and non-zero otherwise.
+    # This gives compute_rc_from_attitude a real attitude-error signal.
+    sensor_sim = SensorSim(
+        home_enu_z    = float(_pos0[2]),
+        anchor_enu    = np.zeros(3),
+        stable_body_z = None,
     )
     log.info(
         "Tether: Dyneema SK75 1.9mm  EA=%.0f kN  rest_length=%.0f m  "
@@ -358,8 +247,9 @@ def run_mediator(args):
         "R":     _R0.copy(),
         "omega": np.array([0.0, 0.0, 0.0]),
     }
-    last_servos = np.zeros(16)   # neutral PWM (mapped from 1500µs → 0)
-    omega_spin  = _omega_spin_init
+    last_servos   = np.zeros(16)   # neutral PWM (mapped from 1500µs → 0)
+    omega_spin    = _omega_spin_init
+    startup_freeze = getattr(args, 'startup_freeze_seconds', 30.0)
 
     # -- Telemetry CSV --------------------------------------------------------
     _telemetry_file   = None
@@ -367,6 +257,7 @@ def run_mediator(args):
     if args.telemetry_log:
         _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")
         _telemetry_writer = csv.writer(_telemetry_file)
+        # CSV schema (see also: analysis/generate_flight_report.py for column usage)
         _telemetry_writer.writerow([
             # Time
             "t_sim",
@@ -391,6 +282,8 @@ def run_mediator(args):
             "tether_length", "tether_extension", "tether_tension",
             "tether_fx", "tether_fy", "tether_fz",
             "tether_slack",
+            # Tether-relative attitude sent to ArduPilot [rad]
+            "rpy_roll", "rpy_pitch", "rpy_yaw",
         ])
         log.info("Telemetry logging → %s", args.telemetry_log)
 
@@ -413,6 +306,64 @@ def run_mediator(args):
             # Use last known servo values if no new packet
             servos = last_servos
 
+            # ── Startup immobilization ────────────────────────────────────────
+            # Hold hub position and orientation fixed (axle anchored to a solid
+            # point) while the EKF achieves GPS lock.  The rotor still spins
+            # freely: we run aero with v_hub=0 so wind-driven torque brings
+            # omega_spin to its natural equilibrium before physics starts.
+            # ─────────────────────────────────────────────────────────────────
+            if t_sim < startup_freeze:
+                _imm_forces = aero.compute_forces(
+                    collective_rad = 0.0,
+                    tilt_lon       = 0.0,
+                    tilt_lat       = 0.0,
+                    R_hub          = hub_state["R"],
+                    v_hub_world    = np.zeros(3),   # hub stationary
+                    omega_rotor    = omega_spin,
+                    wind_world     = wind_world,
+                    t              = t_sim,
+                )
+                Q_spin = (K_DRIVE_SPIN * aero.last_v_inplane
+                          - K_DRAG_SPIN  * omega_spin ** 2)
+                omega_spin = max(OMEGA_SPIN_MIN,
+                                 omega_spin + Q_spin / I_SPIN_KGMS2 * DT_TARGET)
+                # Send the initial velocity as a hint so the EKF can align yaw
+                # before physics starts.  Without this, the EKF never sees enough
+                # velocity to complete yaw alignment when the tether is well-damped
+                # (hub barely moves after freeze ends → EKF stalls at origin-set).
+                # Using _vel0 (the velocity at physics start) avoids a discontinuity.
+                sensor_data = sensor_sim.compute(
+                    pos_enu         = hub_state["pos"],
+                    vel_enu         = _vel0,
+                    R_hub           = hub_state["R"],
+                    omega_body      = np.zeros(3),
+                    accel_world_enu = np.zeros(3),
+                    dt              = DT_TARGET,
+                )
+                sitl.send_state(
+                    timestamp  = t_sim,
+                    pos_ned    = sensor_data["pos_ned"],
+                    vel_ned    = sensor_data["vel_ned"],
+                    rpy_rad    = sensor_data["rpy"],
+                    accel_body = sensor_data["accel_body"],
+                    gyro_body  = sensor_data["gyro_body"],
+                    rpm_rad_s  = omega_spin,
+                )
+                if t_sim - last_log_time >= LOG_INTERVAL:
+                    last_log_time = t_sim
+                    log.info(
+                        "t=%6.1fs  [IMMOBILIZED — EKF startup]  "
+                        "omega=%.1f rad/s  remaining=%.0fs",
+                        t_sim, omega_spin, startup_freeze - t_sim,
+                    )
+                elapsed = time.monotonic() - t_wall_loop
+                remaining = DT_TARGET - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+                step += 1
+                continue
+
+            # ── Normal physics path (after immobilization) ────────────────────
             # ----------------------------------------------------------------
             # Step 2: Swashplate mixing
             # Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = ESC
@@ -479,7 +430,6 @@ def run_mediator(args):
             # The BEM Q_drive/Q_drag terms are NOT used here because the BEM
             # torque also scales as omega² (through dynamic pressure), making
             # drive and drag parallel — no equilibrium exists and omega runs away.
-            # ----------------------------------------------------------------
             Q_spin = (K_DRIVE_SPIN * aero.last_v_inplane
                       - K_DRAG_SPIN  * omega_spin ** 2)
             omega_spin = max(OMEGA_SPIN_MIN,
@@ -491,33 +441,66 @@ def run_mediator(args):
             # M_orbital   = cyclic moments only (M_spin excluded — it updates omega_spin above)
             # omega_spin  passed for gyroscopic coupling in Euler equations
             # Do NOT add gravity here — dynamics.py applies it internally.
-            #
-            # Startup freeze: hold the hub perfectly stationary for the first
-            # startup_freeze_seconds of wall time.  ArduPilot's EKF needs a
-            # stationary GPS signal to initialise.  Any horizontal or vertical
-            # motion during pre-arm (aero H-force, gravity vs. thrust imbalance)
-            # causes GPS glitch detection and prevents position lock.
             # ----------------------------------------------------------------
             M_orbital = forces[3:6] - aero.last_M_spin
-            startup_freeze = getattr(args, 'startup_freeze_seconds', 30.0)
-            if t_sim < startup_freeze:
-                # Freeze: return current state unchanged, accel = 0
-                hub_state   = dynamics.state
-                accel_world = np.zeros(3)
+
+            if args.lock_orientation:
+                # Magic tether: no rotation allowed.  Pass zero moments so the
+                # integrator never accelerates angular velocity, then forcibly
+                # reset R and omega after the step to eliminate numerical drift.
+                M_step = np.zeros(3)
             else:
-                prev_vel  = hub_state["vel"].copy()
-                hub_state = dynamics.step(forces[0:3], M_orbital, DT_TARGET,
-                                          omega_spin=omega_spin)
-                new_vel   = hub_state["vel"]
-                # ----------------------------------------------------------------
-                # Step 7: Compute hub acceleration (finite difference)
-                # ----------------------------------------------------------------
-                accel_world = (new_vel - prev_vel) / DT_TARGET
+                # Attitude rate damping: oppose orbital angular velocity to prevent
+                # free tumbling.  Without gyroscopic coupling (I_spin=0) any cyclic
+                # moment accelerates hub attitude without bound.  A viscous damping
+                # term M_damp = -c * omega_orbital mimics aerodynamic blade-flapping
+                # damping that a real rotor provides naturally.  The value ~2 N·m·s
+                # gives a time constant τ = I/c = 5/2 = 2.5 s — slow enough that
+                # ArduPilot's attitude loop (~100 Hz) easily commands through it,
+                # fast enough to prevent runaway tumbling.
+                M_orbital += -50.0 * hub_state["omega"]
+                M_step = M_orbital
+
+            prev_vel  = hub_state["vel"].copy()
+            hub_state = dynamics.step(forces[0:3], M_step, DT_TARGET,
+                                      omega_spin=omega_spin)
+            new_vel   = hub_state["vel"]
+
+            if args.lock_orientation:
+                # Track current tether direction: body_z = normalize(hub_pos).
+                # This keeps the rotor disk aligned with the tether as the hub
+                # orbits, while eliminating rotational tumbling (omega=0).
+                # Locking to the INITIAL direction (_R0) was wrong: thrust would
+                # stop being radial as the hub orbited, decelerating the orbit
+                # via aero drag until the hub came to rest.
+                _cur_body_z = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
+                hub_state["R"]     = build_orb_frame(_cur_body_z)
+                hub_state["omega"] = np.zeros(3)
 
             # ----------------------------------------------------------------
-            # Step 7b: Write telemetry row
+            # Step 7: Compute hub acceleration (finite difference)
+            # ----------------------------------------------------------------
+            accel_world = (new_vel - prev_vel) / DT_TARGET
+
+            # ----------------------------------------------------------------
+            # Step 8: Build SITL sensor packet
+            # SensorSim.compute() reports tether-relative roll/pitch so that
+            # compute_rc_from_attitude has a real error signal.
+            # ----------------------------------------------------------------
+            sensor_data = sensor_sim.compute(
+                pos_enu         = hub_state["pos"],
+                vel_enu         = hub_state["vel"],
+                R_hub           = hub_state["R"],
+                omega_body      = hub_state["omega"],
+                accel_world_enu = accel_world,
+                dt              = DT_TARGET,
+            )
+
+            # ----------------------------------------------------------------
+            # Step 8b: Write telemetry row (after sensor so rpy is available)
             # ----------------------------------------------------------------
             if _telemetry_writer is not None:
+                _rpy = sensor_data["rpy"]
                 _telemetry_writer.writerow([
                     f"{t_sim:.6f}",
                     f"{s1:.6f}", f"{s2:.6f}", f"{s3:.6f}", f"{esc_norm:.6f}",
@@ -542,19 +525,8 @@ def run_mediator(args):
                     f"{tether._last_info.get('tension', 0.0):.4f}",
                     f"{tether_force[0]:.4f}", f"{tether_force[1]:.4f}", f"{tether_force[2]:.4f}",
                     "1" if tether._last_info.get("slack", True) else "0",
+                    f"{_rpy[0]:.6f}", f"{_rpy[1]:.6f}", f"{_rpy[2]:.6f}",
                 ])
-
-            # ----------------------------------------------------------------
-            # Step 8: Compute sensor outputs
-            # ----------------------------------------------------------------
-            sensor_data = sensor.compute(
-                pos_enu         = hub_state["pos"],
-                vel_enu         = hub_state["vel"],
-                R_hub           = hub_state["R"],
-                omega_body      = hub_state["omega"],
-                accel_world_enu = accel_world,
-                dt              = DT_TARGET,
-            )
 
             # ----------------------------------------------------------------
             # Step 9: Send physics state to SITL
