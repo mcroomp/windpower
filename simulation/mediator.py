@@ -47,7 +47,7 @@ from aero            import RotorAero
 from tether          import TetherModel
 from frames          import T_ENU_NED, build_orb_frame
 from sensor          import make_sensor
-from controller      import compute_swashplate_from_state
+from controller      import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq, blend_body_z
 from trajectory      import HoldTrajectory, DeschutterTrajectory
 import config as _mcfg
 import rotor_definition as _rd
@@ -374,6 +374,20 @@ def run_mediator(args, trajectory=None):
         )
     log.info("Trajectory: %s", type(_trajectory).__name__)
 
+    # -- Mode_RAWES inner loops -----------------------------------------------
+    # Runs at 400 Hz on the Pixhawk.  Receives COMMAND packets from the
+    # trajectory planner and tracks them.
+    #
+    # Orbit tracking: always computes tether-aligned body_z_eq from current pos.
+    #   Blends toward body_z_target when blend_alpha > 0.
+    #   Captured at free-flight start; never re-sent by the planner.
+    # Tension PI:  tension error → collective_rad
+    #   setpoint updated from traj_cmd["tension_setpoint_n"]
+    # Winch:       tether.rest_length stepped from traj_cmd["winch_speed_ms"]
+    _tension_ctrl   = TensionController(setpoint_n=0.0)
+    _ic_tether_dir0: "np.ndarray | None" = None   # captured at free-flight start
+    _ic_body_z_eq0:  "np.ndarray | None" = None   # captured at free-flight start
+
     # -- Main loop ------------------------------------------------------------
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
 
@@ -421,22 +435,52 @@ def run_mediator(args, trajectory=None):
             esc_norm   = float(np.clip(servos[3], -1.0, 1.0))
 
             if cfg["internal_controller"] and _damp_alpha == 0.0:
-                _traj_state = {
-                    "pos":        hub_state["pos"],
-                    "vel":        hub_state["vel"],
-                    "R":          hub_state["R"],
-                    "omega":      hub_state["omega"],
-                    "omega_spin": omega_spin,
-                    "tension":    _pc_tension,
-                    "wind":       wind_world,
-                    "t_free":     _pc_free_t,
+                # ── STATE packet (Pixhawk → planner) ─────────────────────────
+                # Only position-level quantities cross the MAVLink boundary.
+                # Inner-loop state (R, omega, omega_spin) stays on the Pixhawk.
+                _state_pkt = {
+                    "pos_enu":   hub_state["pos"],
+                    "vel_enu":   hub_state["vel"],
+                    "tension_n": _pc_tension,
+                    "t_free":    _pc_free_t,
                 }
-                _traj_cmd = _trajectory.step(_traj_state, tether, DT_TARGET)  # also updates tether.rest_length
+                _traj_cmd = _trajectory.step(_state_pkt, DT_TARGET)
+                # _traj_cmd is a COMMAND packet: body_z_target, blend_alpha,
+                #   tension_setpoint_n, winch_speed_ms, phase
+
+                # ── Mode_RAWES inner loops (400 Hz, runs on Pixhawk) ──────────
+
+                # 1. Orbit tracking: capture IC on first free-flight step
+                if _ic_tether_dir0 is None:
+                    _ic_tether_dir0 = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
+                    _ic_body_z_eq0  = _bz.copy()
+
+                # 2. Winch: apply speed command, enforce rest_length floor
+                _ws = _traj_cmd["winch_speed_ms"]
+                if _ws < 0.0:
+                    tether.rest_length = max(
+                        float(cfg["tether_rest_length"]),
+                        tether.rest_length + _ws * DT_TARGET,
+                    )
+                else:
+                    tether.rest_length += _ws * DT_TARGET
+
+                # 3. Tension PI controller → collective
+                _tension_ctrl.setpoint = _traj_cmd["tension_setpoint_n"]
+                collective_rad = _tension_ctrl.update(_pc_tension, DT_TARGET)
+
+                # 4. Attitude: orbit-track tether, blend toward target if commanded
+                _bz_tether = orbit_tracked_body_z_eq(
+                    hub_state["pos"], _ic_tether_dir0, _ic_body_z_eq0)
+                _alpha = _traj_cmd["blend_alpha"]
+                if _alpha > 0.0 and _traj_cmd["body_z_target"] is not None:
+                    _body_z_eq = blend_body_z(_alpha, _bz_tether, _traj_cmd["body_z_target"])
+                else:
+                    _body_z_eq = _bz_tether
 
                 swash = compute_swashplate_from_state(
                     hub_state=hub_state, anchor_pos=np.zeros(3),
-                    body_z_eq=_traj_cmd["body_z_eq"])
-                collective_rad  = _traj_cmd["collective_rad"]
+                    body_z_eq=_body_z_eq)
                 tilt_lon        = swash["tilt_lon"]
                 tilt_lat        = swash["tilt_lat"]
                 collective_norm = 0.0   # for telemetry logging

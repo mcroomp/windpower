@@ -162,16 +162,20 @@ def make_trajectory(cfg: dict, wind_enu, rest_length_min: float):
     cfg            : full mediator config dict (as returned by load/defaults)
     wind_enu       : array-like [3] — ambient wind ENU [m/s]
     rest_length_min: float — tether rest_length floor for reel-in [m]
+                     Enforced by Mode_RAWES; passed here for informational use.
 
     Returns
     -------
     TrajectoryController instance (HoldTrajectory or DeschutterTrajectory).
 
+    Note: body_z_eq0 is no longer a parameter — orbit tracking runs inside
+    Mode_RAWES (mediator), not in the trajectory planner.
+
     Example
     -------
     >>> cfg = defaults()
     >>> cfg["trajectory"]["type"] = "deschutter"
-    >>> traj = make_trajectory(cfg, wind_enu=[10,0,0], rest_length_min=49.9)
+    >>> traj = make_trajectory(cfg, [10,0,0], 49.9)
     """
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -193,7 +197,7 @@ def make_trajectory(cfg: dict, wind_enu, rest_length_min: float):
             tension_in      = float(p.get("tension_in",      20.0)),
             wind_enu        = _np.asarray(wind_enu, dtype=float),
             rest_length_min = float(rest_length_min),
-            xi_reel_in_deg  = p.get("xi_reel_in_deg", 55.0),  # None → no tilt
+            xi_reel_in_deg  = p.get("xi_reel_in_deg", 55.0),
         )
 
     return HoldTrajectory()

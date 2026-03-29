@@ -33,6 +33,7 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
 from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from trajectory import HoldTrajectory
 from frames     import build_orb_frame
 
 DT            = 1.0 / 400.0
@@ -68,21 +69,34 @@ def _run(t_sim: float = T_SIM):
     telemetry  = []   # 20 Hz rich frames for 3D visualizer
     tel_every  = max(1, int(0.05 / DT))   # 20 Hz
 
-    # Orbit-tracking reference (captured from initial state = BODY_Z0 at POS0)
-    tether_dir0 = POS0 / np.linalg.norm(POS0)
-    body_z_eq0  = BODY_Z0.copy()
+    # Trajectory planner (offboard) — HoldTrajectory, no winch, no tilt correction
+    trajectory      = HoldTrajectory()
+    # Mode_RAWES orbit tracking ICs — captured at free-flight start
+    ic_tether_dir0  = POS0 / np.linalg.norm(POS0)
+    ic_body_z_eq0   = BODY_Z0.copy()
 
     for i in range(int(t_sim / DT)):
         t = i * DT
 
-        # Orbit-tracked equilibrium body_z: zero error at t=0
-        body_z_eq_cur = orbit_tracked_body_z_eq(
-            hub_state["pos"], tether_dir0, body_z_eq0)
+        # STATE packet (Pixhawk → planner)
+        state_pkt = {
+            "pos_enu":   hub_state["pos"],
+            "vel_enu":   hub_state["vel"],
+            "tension_n": 0.0,
+            "t_free":    t,
+        }
+        cmd = trajectory.step(state_pkt, DT)
+        # cmd["blend_alpha"] == 0.0 and cmd["body_z_target"] is None
+        # → Mode_RAWES stays at tether-aligned natural equilibrium
 
+        # Mode_RAWES: orbit tracking → body_z_eq
+        body_z_eq = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
+
+        # Mode_RAWES: attitude controller → tilt
         sw = compute_swashplate_from_state(
             hub_state  = hub_state,
             anchor_pos = ANCHOR,
-            body_z_eq  = body_z_eq_cur,
+            body_z_eq  = body_z_eq,
         )
 
         forces = aero.compute_forces(
@@ -131,7 +145,7 @@ def _run(t_sim: float = T_SIM):
                 "swash_collective":    sw["collective_rad"],
                 "swash_tilt_lon":      sw["tilt_lon"],
                 "swash_tilt_lat":      sw["tilt_lat"],
-                "body_z_eq":           body_z_eq_cur.tolist(),
+                "body_z_eq":           cmd["body_z_eq"].tolist(),
                 "wind_enu":            WIND.tolist(),
             })
 
@@ -182,9 +196,9 @@ def test_zero_tilt_at_equilibrium():
         "R":     R0,
         "omega": np.zeros(3),
     }
-    tether_dir0 = POS0 / np.linalg.norm(POS0)
-    body_z_eq0  = BODY_Z0.copy()
-    body_z_eq   = orbit_tracked_body_z_eq(hub_state["pos"], tether_dir0, body_z_eq0)
+    # Mode_RAWES orbit tracking at t=0: body_z_eq = BODY_Z0 (no azimuthal offset)
+    ic_tether_dir0 = POS0 / np.linalg.norm(POS0)
+    body_z_eq      = orbit_tracked_body_z_eq(POS0, ic_tether_dir0, BODY_Z0)
     sw = compute_swashplate_from_state(hub_state, ANCHOR, body_z_eq=body_z_eq)
     assert abs(sw["tilt_lon"]) < 1e-6, f"tilt_lon={sw['tilt_lon']:.6f} at equilibrium (expected 0)"
     assert abs(sw["tilt_lat"]) < 1e-6, f"tilt_lat={sw['tilt_lat']:.6f} at equilibrium (expected 0)"

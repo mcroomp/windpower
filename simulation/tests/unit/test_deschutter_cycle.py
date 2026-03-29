@@ -48,6 +48,7 @@ from aero        import create_aero
 from tether      import TetherModel
 from controller  import compute_swashplate_from_state
 from trajectory  import DeschutterTrajectory
+from controller  import TensionController, orbit_tracked_body_z_eq, blend_body_z
 from frames      import build_orb_frame
 
 # ── Simulation constants ───────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ def _run_deschutter_cycle(
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
+    # ── Trajectory planner (offboard, ~10 Hz equivalent) ─────────────────────
     trajectory = DeschutterTrajectory(
         t_reel_out      = t_reel_out,
         t_reel_in       = t_reel_in,
@@ -122,6 +124,13 @@ def _run_deschutter_cycle(
         wind_enu        = WIND,
         rest_length_min = REST_LENGTH0,
     )
+
+    # ── Mode_RAWES inner loop (400 Hz, on Pixhawk) ────────────────────────────
+    # Receives COMMAND packets from trajectory planner.
+    # Owns orbit tracking and attitude/tension control.
+    tension_ctrl    = TensionController(setpoint_n=tension_out)
+    ic_tether_dir0  = POS0 / np.linalg.norm(POS0)   # captured at free-flight start
+    ic_body_z_eq0   = BODY_Z0.copy()
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
@@ -144,32 +153,56 @@ def _run_deschutter_cycle(
     energy_out       = 0.0
     energy_in        = 0.0
 
-    sw          = {"tilt_lon": 0.0, "tilt_lat": 0.0}
-    cmd         = {"collective_rad": 0.0, "body_z_eq": BODY_Z0.copy(),
-                   "phase": "reel-out", "tension_setpoint": tension_out}
+    sw             = {"tilt_lon": 0.0, "tilt_lat": 0.0}
+    cmd            = {"body_z_target": None, "blend_alpha": 0.0,
+                      "tension_setpoint_n": tension_out,
+                      "winch_speed_ms": 0.0, "phase": "reel-out"}
     tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-    tension_now = tether._last_info.get("tension", 0.0)
+    tension_now    = tether._last_info.get("tension", 0.0)
+    collective_rad = 0.0
+    body_z_eq      = BODY_Z0.copy()
 
     for i in range(n_steps):
         t = i * DT
 
-        # ── Trajectory: winch + body_z_eq + collective ────────────────────
-        traj_state = {
-            "pos": hub_state["pos"], "vel": hub_state["vel"],
-            "R":   hub_state["R"],   "omega": hub_state["omega"],
-            "omega_spin": omega_spin, "tension": tension_now,
-            "wind": WIND, "t_free": t,
+        # ── STATE packet (Pixhawk → planner) ──────────────────────────────────
+        state_pkt = {
+            "pos_enu":   hub_state["pos"],
+            "vel_enu":   hub_state["vel"],
+            "tension_n": tension_now,
+            "t_free":    t,
         }
-        cmd = trajectory.step(traj_state, tether, DT)
+        cmd = trajectory.step(state_pkt, DT)
+        # cmd is a COMMAND packet: body_z_target, blend_alpha,
+        #   tension_setpoint_n, winch_speed_ms, phase
 
-        # ── Attitude controller → tilt ────────────────────────────────────
+        # ── Mode_RAWES: winch ─────────────────────────────────────────────────
+        ws = cmd["winch_speed_ms"]
+        if ws < 0.0:
+            tether.rest_length = max(REST_LENGTH0, tether.rest_length + ws * DT)
+        else:
+            tether.rest_length += ws * DT
+
+        # ── Mode_RAWES: tension PI → collective ───────────────────────────────
+        tension_ctrl.setpoint = cmd["tension_setpoint_n"]
+        collective_rad = tension_ctrl.update(tension_now, DT)
+
+        # ── Mode_RAWES: orbit tracking + blend → body_z_eq ───────────────────
+        bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
+        alpha = cmd["blend_alpha"]
+        if alpha > 0.0 and cmd["body_z_target"] is not None:
+            body_z_eq = blend_body_z(alpha, bz_tether, cmd["body_z_target"])
+        else:
+            body_z_eq = bz_tether
+
+        # ── Mode_RAWES: attitude controller → tilt ────────────────────────────
         sw = compute_swashplate_from_state(
             hub_state=hub_state, anchor_pos=ANCHOR,
-            body_z_eq=cmd["body_z_eq"])
+            body_z_eq=body_z_eq)
 
         # ── Aerodynamics ──────────────────────────────────────────────────
         forces = aero.compute_forces(
-            collective_rad = cmd["collective_rad"],
+            collective_rad = collective_rad,
             tilt_lon       = sw["tilt_lon"],
             tilt_lat       = sw["tilt_lat"],
             R_hub          = hub_state["R"],
@@ -212,7 +245,7 @@ def _run_deschutter_cycle(
             ts.append(t); tensions.append(tension_now)
             altitudes.append(hub_state["pos"][2])
             rest_lengths.append(tether.rest_length)
-            collectives.append(cmd["collective_rad"])
+            collectives.append(collective_rad)
             tilts_from_wind.append(xi_deg)
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────
@@ -224,10 +257,10 @@ def _run_deschutter_cycle(
                 "omega_spin":         omega_spin,
                 "tether_tension":     tension_now,
                 "tether_rest_length": tether.rest_length,
-                "swash_collective":   cmd["collective_rad"],
+                "swash_collective":   collective_rad,
                 "swash_tilt_lon":     sw["tilt_lon"],
                 "swash_tilt_lat":     sw["tilt_lat"],
-                "body_z_eq":          cmd["body_z_eq"].tolist(),
+                "body_z_eq":          body_z_eq.tolist(),
                 "wind_enu":           WIND.tolist(),
             })
 
@@ -238,7 +271,7 @@ def _run_deschutter_cycle(
     )))
     ts.append(t_total); tensions.append(tension_now)
     altitudes.append(hub_state["pos"][2]); rest_lengths.append(tether.rest_length)
-    collectives.append(cmd["collective_rad"]); tilts_from_wind.append(xi_deg)
+    collectives.append(collective_rad); tilts_from_wind.append(xi_deg)
 
     split = int(t_reel_out)
     return dict(
