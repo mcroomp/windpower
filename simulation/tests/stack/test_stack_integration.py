@@ -66,8 +66,11 @@ def _launch_mediator(
     telemetry_log_path: str | None = None,
     tether_rest_length: float | None = None,
     initial_state: dict | None = None,
-    startup_freeze_seconds: float | None = None,
+    startup_damp_seconds: float | None = None,
     lock_orientation: bool = False,
+    sensor_mode: str = "tether_relative",
+    run_id: int | None = None,
+    base_k_ang: float | None = None,
 ) -> subprocess.Popen:
     cmd = [
         sys.executable,
@@ -80,10 +83,16 @@ def _launch_mediator(
         cmd += ["--telemetry-log", telemetry_log_path]
     if tether_rest_length is not None:
         cmd += ["--tether-rest-length", str(tether_rest_length)]
-    if startup_freeze_seconds is not None:
-        cmd += ["--startup-freeze-seconds", str(startup_freeze_seconds)]
+    if startup_damp_seconds is not None:
+        cmd += ["--startup-damp-seconds", str(startup_damp_seconds)]
+    if base_k_ang is not None:
+        cmd += ["--base-k-ang", str(base_k_ang)]
     if lock_orientation:
         cmd += ["--lock-orientation"]
+    if sensor_mode != "tether_relative":
+        cmd += ["--sensor-mode", sensor_mode]
+    if run_id is not None:
+        cmd += ["--run-id", str(run_id)]
     if initial_state is not None:
         # Use = form to avoid argparse treating negative floats as flags
         cmd.append(f"--pos0={','.join(str(v) for v in initial_state['pos'])}")

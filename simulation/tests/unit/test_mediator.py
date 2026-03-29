@@ -121,12 +121,18 @@ def _args():
         log_level="INFO",
         telemetry_log=None,
         tether_rest_length=200.0,
-        startup_freeze_seconds=0.0,  # disable freeze so unit tests hit physics path
+        startup_damp_seconds=0.0,   # disable damping so unit tests hit physics path
+        startup_damp_k_vel=200.0,
+        startup_damp_k_ang=500.0,
+        startup_damp_k_pos=2000.0,
+        base_k_ang=50.0,
+        run_id=None,
         pos0=None,
         vel0=None,
         body_z=None,
         omega_spin=None,
         lock_orientation=False,
+        sensor_mode="tether_relative",
     )
 
 

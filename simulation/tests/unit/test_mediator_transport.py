@@ -102,12 +102,18 @@ def _args(recv_port, send_port):
         log_level="WARNING",
         telemetry_log=None,
         tether_rest_length=200.0,
-        startup_freeze_seconds=0.0,  # disable freeze so transport test hits physics path
+        startup_damp_seconds=0.0,   # disable damping so transport test hits physics path
+        startup_damp_k_vel=200.0,
+        startup_damp_k_ang=500.0,
+        startup_damp_k_pos=2000.0,
+        base_k_ang=50.0,
+        run_id=None,
         pos0=None,
         vel0=None,
         body_z=None,
         omega_spin=None,
         lock_orientation=False,
+        sensor_mode="tether_relative",
     )
 
 
@@ -152,7 +158,7 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: real_sitl)
     monkeypatch.setattr(mediator, "RotorAero",         lambda: fake_aero)
-    monkeypatch.setattr(mediator, "SensorSim",         lambda **kwargs: fake_sensor)
+    monkeypatch.setattr(mediator, "make_sensor",       lambda *a, **kw: fake_sensor)
 
     times = iter([10.0, 10.1, 10.1005])
     monkeypatch.setattr(mediator.time, "monotonic", lambda: next(times))

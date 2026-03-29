@@ -47,8 +47,18 @@ import socket as _socket
 
 from pymavlink import mavutil as _mavutil
 from gcs import ACRO, STABILIZE, RawesGCS
+from controller import make_hold_controller
 
 _STARTING_STATE   = _SIM_DIR / "steady_state_starting.json"
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--sensor-mode",
+        default=None,
+        choices=["tether_relative", "physical"],
+        help="Override sensor mode for all stack tests (default: tether_relative).",
+    )
 
 # ---------------------------------------------------------------------------
 # StackConfig — central configuration and pre-flight verification
@@ -89,15 +99,24 @@ class StackConfig:
     MODE_TIMEOUT          : float = 60.0
     EKF_ALIGN_TIMEOUT     : float = 45.0
     EKF_STABILISE_TIMEOUT : float = 30.0
-    # 15 s is enough for SITL GPS to lock (~3 s) and EKF to start fusing GPS
-    # position before physics starts.  With a 60 s freeze, EKF stays in
-    # const_pos_mode the whole freeze (vel=0 → no yaw alignment → no GPS fusion)
-    # and then triggers "GPS Glitch" when it transitions to GPS mode 2 s after
-    # physics starts (hub moved 3-5 m from GPS origin during that gap).
-    # With a 15 s freeze, EKF fuses GPS for ~12 s while hub is stationary
-    # (innovation = 0 → no GPS Glitch) and is already in GPS mode when physics starts.
-    STARTUP_FREEZE_S      : float = 15.0
-    LOCK_ORIENTATION      : bool  = True   # magic tether: no hub rotation allowed
+    # 45 s kinematic startup: hub moves at constant vel0 ≈ 0.96 m/s from
+    # launch_pos to equilibrium pos0, providing a non-zero velocity heading
+    # so EKF derives yaw via EK3_SRC1_YAW=2 (GPS velocity) from frame 0.
+    # The kinematic phase must cover the full GPS fusion timeline:
+    #   ~4 s  tiltAlignComplete + yawAlignComplete
+    #   ~19 s gpsGoodToAlign (hardcoded 10 s delay from GPS detect at ~9 s)
+    #   ~41 s delAngBiasLearned → GPS position fuses → LOCAL_POSITION_NED
+    # 45 s gives 4 s margin after GPS fusion before free flight starts.
+    # The hub is in stable constant-velocity kinematic throughout; EKF stays
+    # healthy (no tether force, no acceleration) and GPS fuses cleanly.
+    STARTUP_DAMP_S        : float = 45.0
+    LOCK_ORIENTATION      : bool  = False  # kinematic startup sets correct R0; let physics run free
+    # Permanent angular damping after startup ramp ends.
+    # 50 N·m·s/rad (mediator default) is insufficient for the 10 Hz MAVLink
+    # controller in physical-sensor mode — aerodynamic cyclic moments after
+    # kinematic end overcome it before the controller can respond.
+    # 300 N·m·s/rad gives τ=I/k=5/300≈17 ms — fast enough for 10 Hz hold.
+    BASE_K_ANG            : float = 300.0
 
     # Port descriptions for diagnostics
     _PORT_CHECKS = [
@@ -154,7 +173,7 @@ def assert_stack_ports_free() -> None:
 _STARTUP_TIMEOUT  = StackConfig.CONNECT_TIMEOUT
 _ARM_TIMEOUT      = StackConfig.ARM_TIMEOUT
 _MODE_TIMEOUT     = StackConfig.MODE_TIMEOUT
-_STARTUP_FREEZE_S = StackConfig.STARTUP_FREEZE_S
+_STARTUP_DAMP_S = StackConfig.STARTUP_DAMP_S
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +216,38 @@ class StackContext:
     setup_samples:  list      # EKF/ATTITUDE samples collected during setup
     log:            logging.Logger
     sim_dir:        Path
+    controller:     object    # TetherRelativeHoldController or PhysicalHoldController
+    sensor_mode:    str       # "tether_relative" or "physical"
 
 
 # ---------------------------------------------------------------------------
-# Fixture
+# Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def acro_armed(tmp_path):
+def sensor_mode(request):
+    """
+    Sensor model used by the mediator.
+
+    Resolved in priority order:
+    1. ``--sensor-mode`` CLI option (``pytest --sensor-mode physical``)
+    2. Override in a test module's own ``sensor_mode`` fixture
+    3. Default: ``"tether_relative"``
+
+    Choices
+    -------
+    ``"tether_relative"`` (default) — reports roll=pitch=0 at tether
+    equilibrium; compass must be disabled.
+
+    ``"physical"`` — reports actual orbital-frame orientation; GPS + compass
+    can be fused normally.
+    """
+    cli = request.config.getoption("--sensor-mode", default=None)
+    return cli if cli is not None else "physical"
+
+
+@pytest.fixture
+def acro_armed(tmp_path, sensor_mode):
     """
     Full ACRO stack fixture: launch → connect → configure → arm → ACRO.
 
@@ -235,14 +278,6 @@ def acro_armed(tmp_path):
         initial_state = json.loads(_STARTING_STATE.read_text())
         home_z_enu    = float(initial_state["pos"][2])
         initial_state = dict(initial_state)
-        # Override vel to zero: during the 60 s freeze the mediator sends vel=0 to
-        # SITL so the EKF converges to a stationary state.  If the mediator then
-        # starts physics with a non-zero initial velocity (e.g. the steady-state
-        # orbiting velocity ~0.96 m/s) the EKF sees a sudden velocity jump →
-        # GPS Glitch → EKF variance spike → bad ATTITUDE → controller crash.
-        # Starting from rest eliminates the discontinuity; the hub naturally
-        # accelerates into the orbiting equilibrium within a few seconds.
-        initial_state["vel"] = [0.0, 0.0, 0.0]
 
     # ── Paths ──────────────────────────────────────────────────────────────────
     mediator_log  = tmp_path / "mediator.log"
@@ -255,14 +290,37 @@ def acro_armed(tmp_path):
     log = logging.getLogger("acro_armed")
     logging.getLogger("gcs").setLevel(logging.DEBUG)
 
+    # ── Hold controller ────────────────────────────────────────────────────────
+    # Compute anchor NED in LOCAL_POSITION_NED frame.
+    #
+    # SITL is launched with --custom-location=51.5074,-0.1278,50,0 which sets
+    # HOME = GPS_ORIGIN = NED [0,0,0] relative to the anchor (ENU [0,0,0]).
+    # LOCAL_POSITION_NED = pos_ned_absolute - HOME_NED = pos_ned_absolute - 0.
+    #
+    # sensor.py sends: pos_ned = [pos_enu[1], pos_enu[0], -(pos_enu[2] - home_z)]
+    # At anchor ENU=[0,0,0]: pos_ned = [0, 0, home_z_enu]
+    # So anchor_ned_LOCAL = [0, 0, home_z_enu]  (NOT [-pos0_y, -pos0_x, pos0_z])
+    import numpy as _np
+    _anchor_ned = _np.array([0.0, 0.0, float(home_z_enu)])
+    controller = make_hold_controller(sensor_mode, anchor_ned=_anchor_ned)
+    log.info("Hold controller: %s  (sensor_mode=%s)", type(controller).__name__, sensor_mode)
+
     # ── Launch ────────────────────────────────────────────────────────────────
+    # Emit the same RUN_ID that mediator.py will write as its first log line.
+    # analyse_run.py uses these to validate both logs are from the same run.
+    import time as _t
+    _run_id = int(_t.time())
+    log.info("RUN_ID=%d", _run_id)
     log.info("acro_armed fixture: launching mediator + SITL ...")
     mediator_proc = _launch_mediator(
         sim_dir, repo_root, mediator_log,
         telemetry_log_path=str(telemetry_log),
         initial_state=initial_state,
-        startup_freeze_seconds=_STARTUP_FREEZE_S,
+        startup_damp_seconds=_STARTUP_DAMP_S,
         lock_orientation=StackConfig.LOCK_ORIENTATION,
+        sensor_mode=sensor_mode,
+        run_id=_run_id,
+        base_k_ang=StackConfig.BASE_K_ANG,
     )
     sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
 
@@ -283,6 +341,7 @@ def acro_armed(tmp_path):
         telemetry_log=telemetry_log, initial_state=initial_state,
         home_z_enu=home_z_enu, flight_events={}, all_statustext=[],
         setup_samples=[], log=log, sim_dir=sim_dir,
+        controller=controller, sensor_mode=sensor_mode,
     )
 
     try:
@@ -310,9 +369,9 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     """
     Shared ACRO setup sequence.
 
-    Timing contract: the mediator startup freeze is 60 s.  All steps here
-    must complete inside that window so the hub is stationary when we arm —
-    a moving hub causes GPS-glitch which blocks arm.
+    Timing contract: the mediator startup damping ramp is 30 s.  All steps
+    here must complete inside that window so the hub is barely moving when
+    we arm — strong damping keeps it near the initial position during GPS init.
 
     Steps:
         1. Connect GCS; request telemetry streams; clear motor interlock
@@ -383,36 +442,71 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     #   armed=True immediately after the force arm ACK.
     #   Note: AP_MotorsHeli::output() clears _flags.armed if runup_complete
     #   is not set, regardless of force arm — this is why CH8 must be HIGH.
-    log.info("[setup 3/6] Setting ACRO parameters ...")
-    _acro_params = {
-        "ARMING_SKIPCHK":    0xFFFF, # skip ALL pre-arm checks (4.7+ name for ARMING_CHECK)
-        "COMPASS_USE":       0,      # disable compass for EKF yaw fusion
-        "COMPASS_ENABLE":    0,      # disable compass subsystem entirely
-                                     # (prevents "MAG1 ground mag anomaly, yaw re-aligned" after GPS lock
-                                     #  which causes an emergency yaw reset and hub crash at t~55s)
-        "INITIAL_MODE":      1,      # boot into ACRO
-        "FS_THR_ENABLE":     0,      # no RC throttle failsafe
-        "FS_GCS_ENABLE":     0,      # no GCS heartbeat failsafe
-        "FS_EKF_ACTION":     0,      # disable EKF failsafe (belt-and-suspenders backup)
-        "H_RSC_MODE":        1,      # CH8 passthrough — instant runup_complete
-        # Zero ACRO rate-controller I-term limits to prevent integrator windup.
-        # The hub's natural orbital angular velocity (0.2–0.3 rad/s) appears as
-        # a persistent rate disturbance.  Without this the I-term accumulates and
-        # commands ever-growing cyclic tilt until the hub crashes (~4 s).
-        "ATC_RAT_RLL_IMAX":  0.0,
-        "ATC_RAT_PIT_IMAX":  0.0,
-        "ATC_RAT_YAW_IMAX":  0.0,
+    log.info("[setup 3/6] Setting ACRO parameters (sensor_mode=%s) ...", ctx.sensor_mode)
+    # Base params: always required regardless of sensor mode.
+    _base_params = {
+        "ARMING_SKIPCHK":   0xFFFF, # skip ALL pre-arm checks
+        "INITIAL_MODE":     1,      # boot into ACRO
+        "FS_THR_ENABLE":    0,      # no RC throttle failsafe
+        "FS_GCS_ENABLE":    0,      # no GCS heartbeat failsafe
+        "FS_EKF_ACTION":    0,      # disable EKF failsafe
+        "H_RSC_MODE":       1,      # CH8 passthrough — instant runup_complete
+        # Disable ACRO auto-leveling trainer: physical sensor mode reports
+        # roll≈58°/pitch≈-35° at tether equilibrium.  ACRO_TRAINER=1 (default)
+        # activates above 45° and commands large leveling corrections → rapid tumble.
+        "ACRO_TRAINER":     0,
+        # Zero ACRO I-term limits: orbital angular velocity accumulates as a
+        # persistent rate error, causing ever-growing cyclic and hub crash (~4 s).
+        "ATC_RAT_RLL_IMAX": 0.0,
+        "ATC_RAT_PIT_IMAX": 0.0,
+        "ATC_RAT_YAW_IMAX": 0.0,
     }
+    # Mode-specific params from the controller (e.g. COMPASS_USE=0 for
+    # tether_relative; no compass override for physical).
+    _acro_params = {**_base_params, **ctx.controller.extra_params}
     for name, value in _acro_params.items():
         ok = gcs.set_param(name, value, timeout=5.0)
         if not ok:
             log.warning("  %s=%s had no ACK — continuing", name, value)
 
+    # GPS position fusion params — applied AFTER ACRO params so they override
+    # any conflicting value from the controller's extra_params.
+    #
+    # COMPASS_USE/ENABLE=1: magnetometer provides yaw for EKF GPS fusion.
+    #   Required — EK3_SRC1_YAW=1 needs the compass sensor enabled.
+    #
+    # EK3_SRC1_YAW=1 (compass yaw):  hub is stationary during the 45 s kinematic
+    #   startup (body_z locked to _R0 → constant compass heading).  Compass gives
+    #   a stable, direct yaw measurement at 10 Hz, which converges P[12] in ~1 s
+    #   after tilt alignment.  P[10,11] then converge passively through EKF
+    #   cross-covariance in ~33 s → delAngBiasLearned at ~37 s.
+    #   Using EK3_SRC1_YAW=2 (GPS velocity heading) with a non-zero kinematic
+    #   velocity (vel0 ≈ 0.96 m/s) caused GPS position fusion to fail: when
+    #   delAngBiasLearned fired (~43 s) the hub had moved ~24 m from the GPS
+    #   origin, the position+velocity innovations were rejected, and the EKF
+    #   went unhealthy (flags → 0x0400) before LOCAL_POSITION_NED was received.
+    #
+    # EK3_MAG_CAL=0 (Never): use raw compass readings immediately without
+    #   in-flight calibration.  Same as stationary GPS test that passed.
+    #
+    # EK3_GPS_CHECK=0: skip HDOP/speed-accuracy/min-sat checks (SITL JSON GPS
+    #   has no real quality fields; default checks block fusion indefinitely).
+    _gps_params = {
+        "COMPASS_USE":    1,
+        "COMPASS_ENABLE": 1,
+        "EK3_GPS_CHECK":  0,
+        "EK3_SRC1_YAW":  1,    # 1=compass — overrides PhysicalHoldController=2
+        "EK3_MAG_CAL":   0,    # 0=Never — use raw compass; no calibration needed
+    }
+    for name, value in _gps_params.items():
+        ok = gcs.set_param(name, value, timeout=5.0)
+        if not ok:
+            log.warning("  GPS param %s=%s had no ACK — continuing", name, value)
+
     # ── 4. EKF attitude alignment ─────────────────────────────────────────────
     # Wait for a clean ATTITUDE (EKF attitude ready) before arming.
     # We also watch for LOCAL_POSITION_NED (EKF position ready) for diagnostics
-    # but do NOT require it — horizontal position lock needs velocity-derived
-    # yaw which may not be available during the freeze if vel_ned is zero.
+    # but do NOT require it — GPS position lock may still be initialising.
     # force=True arm bypasses any EKF position pre-arm check.
     #
     # FAIL HARD if ATTITUDE doesn't arrive within 45 s.
@@ -469,6 +563,16 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
                 log.info("[setup 4/6] Clean ATTITUDE — EKF attitude ready.")
                 ekf_att = True
                 t_ekf   = t_now
+                # Capture equilibrium orientation for PhysicalHoldController.
+                # This is the tether equilibrium the hub holds during the 45 s
+                # kinematic startup (R locked to R0).  The controller uses
+                # (roll - roll_eq, pitch - pitch_eq) as a yaw-independent error
+                # so corrections stay valid even when velocity-derived yaw jumps
+                # ~150° at kinematic end when the tether activates.
+                if hasattr(ctx.controller, "set_equilibrium"):
+                    ctx.controller.set_equilibrium(msg.roll, msg.pitch)
+                    log.info("[setup 4/6] Equilibrium set: roll_eq=%.2f° pitch_eq=%.2f°",
+                             r, p)
             ekf_ok = ekf_att
 
         elif mt == "EKF_STATUS_REPORT":
@@ -516,9 +620,13 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
             f"STATUSTEXT: {all_statustext}"
         )
     if not ekf_pos:
-        log.warning("[setup 4/6] WARNING: no LOCAL_POSITION_NED during EKF wait "
-                    "(EKF may not have horizontal position — normal with COMPASS_USE=0 "
-                    "and zero velocity during freeze; force arm will proceed)")
+        if ctx.sensor_mode == "tether_relative":
+            log.warning("[setup 4/6] WARNING: no LOCAL_POSITION_NED during EKF wait "
+                        "(EKF horizontal position not yet fused; force arm will proceed)")
+        else:
+            log.warning("[setup 4/6] WARNING: no LOCAL_POSITION_NED during EKF wait "
+                        "(physical sensor with GPS+compass enabled — EKF may still be "
+                        "initialising; force arm will proceed)")
 
     all_statustext += drain_statustext(gcs, log)
     _procs_alive()
@@ -527,22 +635,34 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     # completion, and wait for EKF_STATUS to leave the brief 0x0000 flash
     # (all-zeros means EKF reinitialising).  With ARMING_CHECK=0 + H_RSC_MODE=1
     # + CH8=2000 the arm will succeed as soon as 0x0000 clears.
-    # Wait for EKF to have GPS velocity (bits 1+2 set) before arming.
-    # Sending hint velocity during the freeze causes EKF flags 0x0400 (predicted
-    # position only) almost immediately — but GPS velocity (0x0006) only appears
-    # after GPS origin is set (~15-20 s from mediator start).  Arming before GPS
-    # locks means EKF is in compass-only mode; the compass then triggers a
-    # "MAG1 ground mag anomaly, yaw re-aligned" event that destabilises ACRO.
-    # With GPS velocity fused the compass anomaly yaw reset is a no-op (GPS and
-    # compass agree) and the hub stays stable.
-    # Fallback: if GPS never provides velocity, proceed after 30 s anyway.
-    _EKF_VEL_MASK = 0x0006   # bits 1+2: horizontal + vertical velocity valid
-    log.info("[setup] Waiting for EKF GPS velocity before arming (timeout=30s) ...")
+    # Wait for EKF GPS position fusion (LOCAL_POSITION_NED) before arming.
+    #
+    # WHY position, not velocity:
+    #   In AID_NONE mode the EKF has valid horiz/vert velocity estimates (from
+    #   IMU integration + GPS-velocity yaw), so bits 0x0006 (horiz_vel + vert_vel)
+    #   appear within ~5 s of tilt alignment — long before GPS position fuses.
+    #   Exiting on 0x0006 arms while delAngBiasLearned is still false (~37–42 s
+    #   from start), so GPS position never fuses before test_gps_fuses_during_startup
+    #   times out.
+    #
+    # WHAT we wait for:
+    #   - LOCAL_POSITION_NED received: EKF is in AID_ABSOLUTE (GPS position fused).
+    #     This is the correct signal that readyToUseGPS() returned true.
+    #   - Fallback: 50 s after first non-zero EKF flags.  This is longer than the
+    #     ~40 s needed for delAngBiasLearned (binding gate); it ensures GPS has time
+    #     to fuse before we give up.  For tether_relative mode (no GPS position
+    #     expected), this fallback still fires and proceeds to arm.
+    #
+    # TIMING (physical sensor mode, EK3_SRC1_YAW=2, vel0≈0.96 m/s):
+    #   ~4 s  : tiltAlignComplete, yawAlignComplete → EKF flags non-zero
+    #   ~19 s : gpsGoodToAlign (hardcoded 10 s delay from GPS detect at ~9 s)
+    #   ~41 s : delAngBiasLearned → GPS position fuses → LOCAL_POSITION_NED
+    _EKF_POS_FLAG = 0x0010   # horiz_pos_abs: GPS horizontal position fused
+    log.info("[setup] Waiting for EKF GPS position fusion before arming (timeout=50s from EKF ready) ...")
     ekf_non_zero_seen = False
     last_flags        = 0
-    t_stab = time.monotonic() + 30.0
-    t_stable_since    = None   # first non-zero
-    t_velocity_since  = None   # first time flags had velocity bits
+    t_stab = time.monotonic() + 60.0   # hard outer limit (EKF non-zero not seen yet)
+    t_stable_since    = None   # first non-zero EKF flags
     while time.monotonic() < t_stab:
         _procs_alive()
         msg = gcs._mav.recv_match(
@@ -563,7 +683,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
                                        "N": msg.x, "E": msg.y, "D": msg.z,
                                        "vN": msg.vx, "vE": msg.vy, "vD": msg.vz})
                 if not ekf_pos:
-                    log.info("[stabilise] EKF position ready (LOCAL_POSITION_NED).")
+                    log.info("[stabilise] EKF GPS position fused (LOCAL_POSITION_NED). Proceeding to arm.")
                     ekf_pos = True
             elif mt == "EKF_STATUS_REPORT":
                 flags     = msg.flags
@@ -574,23 +694,18 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
                         t_stable_since = time.monotonic()
                     ekf_non_zero_seen = True
                 else:
-                    t_stable_since   = None  # reset on 0x0000 flash
-                    t_velocity_since = None
-                if (flags & _EKF_VEL_MASK) == _EKF_VEL_MASK:
-                    if t_velocity_since is None:
-                        t_velocity_since = time.monotonic()
-                        log.info("[stabilise] EKF GPS velocity valid (flags=0x%04x)", flags)
-                else:
-                    t_velocity_since = None
+                    t_stable_since = None  # reset on 0x0000 flash
+                if flags & _EKF_POS_FLAG:
+                    log.info("[stabilise] horiz_pos_abs set (flags=0x%04x) — GPS position fused.",
+                             flags)
         gcs.send_rc_override({8: 2000})
-        # Prefer to wait for GPS velocity (1 s stable); fall back to any non-zero after 30 s.
-        if t_velocity_since is not None and (time.monotonic() - t_velocity_since) >= 1.0:
-            log.info("[stabilise] EKF GPS velocity stable ≥1s (flags=0x%04x). Proceeding to arm.",
-                     last_flags)
+        # Preferred exit: GPS position fused (LOCAL_POSITION_NED received).
+        if ekf_pos:
             break
-        if t_stable_since is not None and (time.monotonic() - t_stable_since) >= 28.0:
-            log.warning("[stabilise] GPS velocity never appeared; proceeding with flags=0x%04x",
-                        last_flags)
+        # Fallback: 50 s after EKF first went non-zero — proceed even if GPS never fused.
+        if t_stable_since is not None and (time.monotonic() - t_stable_since) >= 50.0:
+            log.warning("[stabilise] GPS position fusion did not occur within 50 s; "
+                        "proceeding with flags=0x%04x", last_flags)
             break
     if not ekf_non_zero_seen:
         log.warning("[stabilise] EKF never left 0x0000 state — arming anyway")
@@ -707,20 +822,29 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
             "PreArm: H_RUNUP_TIME too small — set H_RUNUP_TIME=0 to skip this check."
         )
     if any("gps glitch" in t.lower() for t in ctx.all_statustext):
-        issues.append(
-            "GPS Glitch — EKF sees position inconsistent with IMU. "
-            "In ACRO with simplified sensor packet this is usually harmless; "
-            "if arm fails, try setting EKF2_GPS_TYPE=3 to disable GPS in EKF."
-        )
+        if ctx.sensor_mode == "tether_relative":
+            issues.append(
+                "GPS Glitch — EKF sees position inconsistent with IMU. "
+                "With tether_relative sensor (artificial attitude) this is usually harmless in ACRO; "
+                "if arm fails, try setting EKF2_GPS_TYPE=3 to disable GPS in EKF."
+            )
+        else:
+            issues.append(
+                "GPS Glitch — EKF sees position inconsistent with IMU. "
+                "With physical sensor, GPS/compass/IMU must all agree — check that "
+                "accel_body and gyro_body are correctly expressed in the reported body frame."
+            )
     if any("ekf variance" in t.lower() for t in ctx.all_statustext):
         issues.append(
             "EKF variance over threshold — EKF is uncertain. "
             "Common causes: IMU accel not aligned with reported attitude, "
             "or GPS position jumping while IMU says stationary."
         )
-    if any("compass" in t.lower() for t in ctx.all_statustext):
+    if (ctx.sensor_mode == "tether_relative"
+            and any("compass" in t.lower() for t in ctx.all_statustext)):
         issues.append(
-            "Compass-related STATUSTEXT — ensure COMPASS_USE=0 is set before EKF init."
+            "Compass-related STATUSTEXT — ensure COMPASS_USE=0 is set before EKF init "
+            "(tether_relative sensor requires compass disabled)."
         )
     if not result["ekf_aligned"] and not result["attitude_samples"]:
         issues.append(

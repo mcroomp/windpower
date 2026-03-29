@@ -46,7 +46,7 @@ def main():
     target           = tuple(d["target"])
     anchor_ned       = tuple(d["anchor_ned"]) if "anchor_ned" in d else None
 
-    sys.path.insert(0, str(_SIM_DIR))
+    sys.path.insert(0, str(_SIM_DIR.parent))
     from flight_report import plot_flight_report
 
     plot_flight_report(

@@ -38,7 +38,6 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
 
 from conftest import StackContext, analyze_startup_logs, dump_startup_diagnostics
-from controller import compute_rc_from_attitude
 
 from flight_report import plot_flight_report as _plot_flight_report_base
 
@@ -85,6 +84,57 @@ def _plot_flight_report(
     )
 
 
+@pytest.fixture
+def sensor_mode():
+    """Force physical sensor mode for GPS fusing test."""
+    return "physical"
+
+
+def test_gps_fuses_during_startup(acro_armed: StackContext):
+    """
+    GPS horizontal position must fuse within 10 s of ACRO setup.
+
+    Requires physical sensor mode — tether_relative suppresses roll/pitch
+    and conflicts with compass heading, preventing GPS position fusion.
+    Physical mode reports actual orbital-frame orientation so compass and
+    GPS velocity are consistent, allowing the EKF to fuse position.
+
+    Asserts:
+      - At least one LOCAL_POSITION_NED received within 10 s
+    """
+    assert acro_armed.sensor_mode == "physical", (
+        "test_gps_fuses_during_startup requires physical sensor mode"
+    )
+    ctx = acro_armed
+    gcs = ctx.gcs
+    log = logging.getLogger("test_gps_fuses")
+
+    log.info("Waiting up to 10 s for LOCAL_POSITION_NED ...")
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        for name, proc, lp in [
+            ("mediator", ctx.mediator_proc, ctx.mediator_log),
+            ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
+        ]:
+            if proc.poll() is not None:
+                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                pytest.fail(f"{name} exited during GPS wait (rc={proc.returncode}):\n{txt[-2000:]}")
+
+        msg = gcs._mav.recv_match(
+            type=["LOCAL_POSITION_NED"],
+            blocking=True, timeout=0.5,
+        )
+        if msg is not None:
+            log.info("GPS fused: LOCAL_POSITION_NED  x=%.2f y=%.2f z=%.2f",
+                     msg.x, msg.y, msg.z)
+            return  # pass
+
+    pytest.fail(
+        "LOCAL_POSITION_NED never received within 10 s after ACRO setup.\n"
+        "EKF horizontal position did not fuse — check sensor pos_ned / vel_ned consistency."
+    )
+
+
 def test_acro_hold(acro_armed: StackContext):
     """
     ACRO tether-alignment hold test.
@@ -113,7 +163,8 @@ def test_acro_hold(acro_armed: StackContext):
     flight_events     = ctx.flight_events      # shared with fixture checkpoints
     all_statustext    = ctx.all_statustext
 
-    _last_att: dict = {}   # most recent ATTITUDE fields
+    _last_att: dict = {}             # most recent ATTITUDE fields
+    _last_pos: tuple | None = None   # most recent (n, e, d) from LOCAL_POSITION_NED
 
     try:
         log.info("─── test_acro_hold: ACRO RC-override hold for %.0f s ───", _HOLD_SECONDS)
@@ -143,13 +194,15 @@ def test_acro_hold(acro_armed: StackContext):
                 mt = msg.get_type()
                 if mt == "LOCAL_POSITION_NED":
                     pos_history.append((t_rel, msg.x, msg.y, msg.z))
+                    _last_pos = (msg.x, msg.y, msg.z)
                 elif mt == "ATTITUDE":
                     _last_att = {
-                        "roll":      msg.roll,
-                        "pitch":     msg.pitch,
-                        "rollspeed": msg.rollspeed,
+                        "roll":       msg.roll,
+                        "pitch":      msg.pitch,
+                        "yaw":        msg.yaw,
+                        "rollspeed":  msg.rollspeed,
                         "pitchspeed": msg.pitchspeed,
-                        "yawspeed":  msg.yawspeed,
+                        "yawspeed":   msg.yawspeed,
                     }
                     attitude_history.append((
                         t_rel,
@@ -169,32 +222,15 @@ def test_acro_hold(acro_armed: StackContext):
                     all_statustext.append(text)
 
             now = time.monotonic()
-            # Send RC override every 0.1 s.
-            # Uses compute_rc_from_attitude: P+D rate controller on tether-relative
-            # roll/pitch error plus rate damping.  CH3=1500 (neutral collective).
+            # Send RC override every 0.1 s via ctx.controller.send_correction().
+            # tether_relative: roll/pitch from ATTITUDE are the error directly.
+            # physical: error derived from pos_ned vs tether direction.
             if now - t_last_rc >= 0.1:
                 if _last_att:
-                    # Guard: if roll or pitch is extreme (EKF GPS Glitch can briefly
-                    # corrupt the ATTITUDE estimate), send neutral sticks instead.
-                    # ACRO with neutral sticks damps angular rates; the hub can
-                    # survive a few seconds without active correction.
-                    _MAX_ATT_RAD = math.radians(60.0)
-                    if (abs(_last_att["roll"]) < _MAX_ATT_RAD
-                            and abs(_last_att["pitch"]) < _MAX_ATT_RAD):
-                        rc = compute_rc_from_attitude(
-                            roll=_last_att["roll"],
-                            pitch=_last_att["pitch"],
-                            rollspeed=_last_att["rollspeed"],
-                            pitchspeed=_last_att["pitchspeed"],
-                            yawspeed=_last_att["yawspeed"],
-                        )
-                    else:
-                        rc = {1: 1500, 2: 1500, 3: 1500, 4: 1500}  # neutral during EKF glitch
-                    rc[3] = 1500   # CH3: neutral collective
-                    rc[8] = 2000   # CH8: motor interlock high
+                    rc = ctx.controller.send_correction(_last_att, _last_pos, gcs)
                 else:
                     rc = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 8: 2000}
-                gcs.send_rc_override(rc)
+                    gcs.send_rc_override(rc)
                 rc_history.append((
                     now - t_obs_start,
                     rc.get(1, 1500), rc.get(2, 1500),

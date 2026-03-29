@@ -207,9 +207,9 @@ def plot_flight_report(
     ax3 = fig.add_subplot(gs[2])
     if telem and "rpy_roll" in telem:
         # Prefer mediator ground-truth tether-relative attitude from telemetry
-        ax3.plot(telem["t"], telem["rpy_roll"],  color="#1f77b4", linewidth=1.2, label="Roll  (°)")
-        ax3.plot(telem["t"], telem["rpy_pitch"], color="#ff7f0e", linewidth=1.2, label="Pitch (°)")
-        ax3.plot(telem["t"], telem["rpy_yaw"],   color="#2ca02c", linewidth=1.2, label="Yaw   (°)")
+        ax3.plot(telem["t"], telem["rpy_roll"],  color="#1f77b4", linewidth=1.2, label="Roll  (°)  ← tilt_lat")
+        ax3.plot(telem["t"], telem["rpy_pitch"], color="#ff7f0e", linewidth=1.2, label="Pitch (°)  ← tilt_lon")
+        ax3.plot(telem["t"], telem["rpy_yaw"],   color="#2ca02c", linewidth=1.2, label="Yaw   (°)  (velocity heading)")
         ax3.axhline(0, color="black", linewidth=0.5, alpha=0.4)
     elif attitude_history:
         # Fallback: EKF attitude from ArduPilot MAVLink
@@ -217,9 +217,9 @@ def plot_flight_report(
         rolls  = [r[1] for r in attitude_history]
         pitchs = [r[2] for r in attitude_history]
         yaws   = [r[3] for r in attitude_history]
-        ax3.plot(ts_att, rolls,  color="#1f77b4", linewidth=1.2, label="Roll  (°) EKF")
-        ax3.plot(ts_att, pitchs, color="#ff7f0e", linewidth=1.2, label="Pitch (°) EKF")
-        ax3.plot(ts_att, yaws,   color="#2ca02c", linewidth=1.2, label="Yaw   (°) EKF")
+        ax3.plot(ts_att, rolls,  color="#1f77b4", linewidth=1.2, label="Roll  (°) EKF  ← tilt_lat")
+        ax3.plot(ts_att, pitchs, color="#ff7f0e", linewidth=1.2, label="Pitch (°) EKF  ← tilt_lon")
+        ax3.plot(ts_att, yaws,   color="#2ca02c", linewidth=1.2, label="Yaw   (°) EKF  (velocity heading)")
         ax3.axhline(0, color="black", linewidth=0.5, alpha=0.4)
     else:
         ax3.text(0.5, 0.5, "No attitude data", transform=ax3.transAxes,
@@ -248,11 +248,11 @@ def plot_flight_report(
             tilt_y_deg.append(((2/3) * (n1 - 0.5*n2 - 0.5*n3)) * _PITCH_GAIN_DEG)
             s4_pwm.append(p4)
         ax4.plot(ts_srv, coll_deg,   linewidth=1.4, label="Collective (°)")
-        ax4.plot(ts_srv, tilt_x_deg, linewidth=1.2, label="Tilt X / longitudinal (°)")
-        ax4.plot(ts_srv, tilt_y_deg, linewidth=1.2, label="Tilt Y / lateral (°)")
+        ax4.plot(ts_srv, tilt_x_deg, linewidth=1.2, label="tilt_lon / longitudinal (°)  → pitch")
+        ax4.plot(ts_srv, tilt_y_deg, linewidth=1.2, label="tilt_lat / lateral (°)  → roll")
         ax4.axhline(0, color="black", linewidth=0.7, linestyle=":", alpha=0.5)
         ax4b.plot(ts_srv, s4_pwm, linewidth=1.0, linestyle="--", color="grey",
-                  label="S4 ESC (µs)")
+                  label="S4 ESC / anti-rotation motor (µs)")
     else:
         ax4.text(0.5, 0.5, "No servo data", transform=ax4.transAxes,
                  ha="center", va="center", color="grey")

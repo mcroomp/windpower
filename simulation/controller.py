@@ -1,15 +1,26 @@
 """
-controller.py — RAWES attitude rate controller for ArduPilot ACRO mode.
+controller.py — RAWES attitude rate controllers for ArduPilot ACRO mode.
 
-Keeps body_z (rotor axle) aligned with the tether direction by computing
-angular rate corrections from hub truth state and expressing them in the
-yaw-rotated NED body frame that ArduPilot expects in ACRO mode.
+Two sensor modes are supported, both using ACRO + RC override:
+
+``tether_relative`` (TetherRelativeHoldController)
+    The mediator reports roll=pitch=0 at tether equilibrium, so ATTITUDE
+    roll/pitch ARE the attitude error.  ``compute_rc_from_attitude`` uses
+    them directly.  Compass must be disabled (EKF yaw from velocity only).
+
+``physical`` (PhysicalHoldController)
+    The mediator reports actual orbital-frame orientation (~65° from NED
+    vertical at equilibrium).  ``compute_rc_from_physical_attitude`` derives
+    the tether-alignment error from position (LOCAL_POSITION_NED) and the
+    reported physical attitude.  GPS + compass can be fused normally.
 
 Usage
 -----
-rc = compute_rc_rates(hub_state, anchor_pos, vel_ned)
-gcs.send_rc_override(rc)   # replaces the neutral-stick send in test_acro_hold
+controller = make_hold_controller(sensor_mode, anchor_ned=anchor_ned)
+controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 """
+
+import math
 
 import numpy as np
 from frames import T_ENU_NED, build_orb_frame
@@ -218,3 +229,243 @@ def compute_rc_from_attitude(
         4: _pwm(cmd_yaw),
         8: 2000,
     }
+
+
+def compute_rc_from_physical_attitude(
+    roll:         float,
+    pitch:        float,
+    yaw:          float,
+    rollspeed:    float,
+    pitchspeed:   float,
+    yawspeed:     float,
+    pos_ned:      np.ndarray,   # hub NED position [m] from LOCAL_POSITION_NED
+    anchor_ned:   np.ndarray,   # tether anchor NED position [m] (relative to same origin)
+    kp:           float = 1.0,
+    kd:           float = 0.3,
+    rate_max_deg: float = 200.0,
+) -> dict:
+    """
+    Compute RC override channels from physical attitude + position.
+
+    Used with ``PhysicalSensor`` where ATTITUDE.roll/pitch are the actual NED
+    Euler angles of the orbital frame (~65° from vertical at tether
+    equilibrium), NOT tether-relative deviations.
+
+    Derives the tether-alignment error directly from:
+      - The physical body_z direction (column 2 of R_body built from rpy)
+      - The tether equilibrium direction (pos_ned − anchor_ned, normalised)
+
+    The PD correction is computed in the physical NED body frame and mapped
+    to PWM the same way as ``compute_rc_from_attitude``.
+
+    Parameters
+    ----------
+    roll, pitch, yaw      : actual NED Euler angles [rad] from ATTITUDE message
+    rollspeed, pitchspeed, yawspeed : NED body-frame angular rates [rad/s]
+    pos_ned               : hub position in NED [m]
+    anchor_ned            : tether anchor in NED [m] (same LOCAL frame origin)
+    kp, kd, rate_max_deg  : same meaning as compute_rc_from_attitude
+
+    Returns
+    -------
+    dict : {1: pwm, 2: pwm, 4: pwm, 8: 2000}
+    """
+    max_rate = np.radians(rate_max_deg)
+
+    def _pwm(w: float) -> int:
+        return int(round(1500.0 + 500.0 * float(np.clip(w / max_rate, -1.0, 1.0))))
+
+    # Body→NED rotation matrix from ZYX Euler angles.
+    # Column j = j-th body axis expressed in NED.
+    cr, sr = math.cos(roll),  math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw),   math.sin(yaw)
+    R_body = np.array([
+        [ cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+        [ sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+        [-sp,     cp*sr,             cp*cr            ],
+    ])
+
+    # Actual rotor axle (body Z) in NED
+    body_z_ned = R_body[:, 2]
+
+    # Tether equilibrium direction: anchor → hub, normalised, in NED
+    tether_ned = np.asarray(pos_ned, dtype=float) - np.asarray(anchor_ned, dtype=float)
+    t_len = float(np.linalg.norm(tether_ned))
+    if t_len < 0.1:
+        return {1: 1500, 2: 1500, 4: 1500, 8: 2000}
+    body_z_eq = tether_ned / t_len
+
+    # Attitude error: rotation axis needed to align body_z with body_z_eq.
+    # cross(a, b) = |a||b|sin(θ) n̂ — small when already aligned.
+    error_ned = np.cross(body_z_ned, body_z_eq)
+
+    # Express error in NED body frame (NED→body = R_body.T)
+    error_body = R_body.T @ error_ned
+
+    # Angular velocity in body frame from ATTITUDE message
+    omega_body = np.array([rollspeed, pitchspeed, yawspeed])
+
+    # Strip spin component along body_z (electronics don't spin)
+    omega_spin    = np.dot(omega_body, body_z_ned) * body_z_ned
+    omega_orbital = omega_body - omega_spin
+
+    # PD rate correction in body frame
+    omega_corr = kp * error_body - kd * omega_orbital
+
+    return {
+        1: _pwm(omega_corr[0]),   # roll rate
+        2: _pwm(omega_corr[1]),   # pitch rate
+        4: _pwm(omega_corr[2]),   # yaw rate
+        8: 2000,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Hold controller abstraction — used by test_guided_flight.py
+# ---------------------------------------------------------------------------
+
+class TetherRelativeHoldController:
+    """
+    ACRO hold controller for tether_relative sensor mode.
+
+    ATTITUDE.roll/pitch are tether-relative deviations (=0 at equilibrium),
+    so they are used directly as error signals.  Compass must be disabled.
+    """
+
+    extra_params: dict = {
+        "COMPASS_USE":    0,   # velocity-derived yaw; compass conflicts with tether-relative attitude
+        "COMPASS_ENABLE": 0,
+        "ATC_RAT_RLL_IMAX": 0.0,
+        "ATC_RAT_PIT_IMAX": 0.0,
+        "ATC_RAT_YAW_IMAX": 0.0,
+    }
+
+    # Guard: if |roll| or |pitch| exceeds this, assume EKF glitch and send
+    # neutral sticks.  ACRO damps rates for a few seconds without crashing.
+    _MAX_ATT_RAD: float = math.radians(60.0)
+
+    def send_correction(
+        self,
+        att:     dict,
+        pos_ned: tuple | None,
+        gcs,
+    ) -> dict:
+        """
+        Compute and send RC override.  Returns the rc dict sent (for logging).
+        """
+        if (abs(att["roll"])  < self._MAX_ATT_RAD
+                and abs(att["pitch"]) < self._MAX_ATT_RAD):
+            rc = compute_rc_from_attitude(
+                roll       = att["roll"],
+                pitch      = att["pitch"],
+                rollspeed  = att["rollspeed"],
+                pitchspeed = att["pitchspeed"],
+                yawspeed   = att["yawspeed"],
+            )
+        else:
+            rc = {1: 1500, 2: 1500, 4: 1500}   # neutral during EKF glitch
+        rc[3] = 1500   # neutral collective
+        rc[8] = 2000   # motor interlock on
+        gcs.send_rc_override(rc)
+        return rc
+
+
+class PhysicalHoldController:
+    """
+    ACRO hold controller for physical sensor mode.
+
+    ATTITUDE.roll/pitch are actual NED Euler angles.  Error is computed as
+    deviation from the tether equilibrium orientation (roll_eq, pitch_eq)
+    captured during the kinematic startup.  Uses compute_rc_from_attitude so
+    the correction is yaw-independent — the velocity-derived yaw jumps ~150°
+    when the tether activates at kinematic end, making any yaw-dependent error
+    computation destabilising.
+
+    Parameters
+    ----------
+    anchor_ned : array (3,)
+        Tether anchor position in NED [m] (kept for divergence guard).
+
+    Call ``set_equilibrium(roll_eq, pitch_eq)`` with values from the first
+    clean ATTITUDE message before the controller is used.
+    """
+
+    extra_params: dict = {
+        "ATC_RAT_RLL_IMAX": 0.0,
+        "ATC_RAT_PIT_IMAX": 0.0,
+        "ATC_RAT_YAW_IMAX": 0.0,
+    }
+
+    def __init__(self, anchor_ned: np.ndarray):
+        self._anchor_ned = np.asarray(anchor_ned, dtype=float)
+        self._roll_eq:  float | None = None
+        self._pitch_eq: float | None = None
+
+    def set_equilibrium(self, roll_eq: float, pitch_eq: float) -> None:
+        """
+        Record the tether equilibrium roll and pitch [rad] from the first
+        clean ATTITUDE message during kinematic startup.  Must be called
+        before send_correction is used.
+        """
+        self._roll_eq  = float(roll_eq)
+        self._pitch_eq = float(pitch_eq)
+
+    def send_correction(
+        self,
+        att:     dict,
+        pos_ned: tuple | None,
+        gcs,
+    ) -> dict:
+        """
+        Compute and send RC override.  Returns the rc dict sent (for logging).
+
+        Error = (roll - roll_eq, pitch - pitch_eq) — yaw-independent deviation
+        from the tether equilibrium captured during kinematic startup.
+
+        Sends neutral sticks when equilibrium has not been set yet.
+        """
+        _neutral = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 8: 2000}
+
+        if self._roll_eq is None or self._pitch_eq is None:
+            gcs.send_rc_override(_neutral)
+            return _neutral
+
+        roll_dev  = att["roll"]  - self._roll_eq
+        pitch_dev = att["pitch"] - self._pitch_eq
+
+        rc = compute_rc_from_attitude(
+            roll       = roll_dev,
+            pitch      = pitch_dev,
+            rollspeed  = att["rollspeed"],
+            pitchspeed = att["pitchspeed"],
+            yawspeed   = att["yawspeed"],
+        )
+        rc[3] = 1500   # neutral collective
+        rc[8] = 2000   # motor interlock on
+        gcs.send_rc_override(rc)
+        return rc
+
+
+def make_hold_controller(
+    sensor_mode: str,
+    anchor_ned:  "np.ndarray | None" = None,
+) -> "TetherRelativeHoldController | PhysicalHoldController":
+    """
+    Return the appropriate hold controller for the given sensor mode.
+
+    Parameters
+    ----------
+    sensor_mode : ``"tether_relative"`` or ``"physical"``
+    anchor_ned  : required for ``"physical"`` mode — tether anchor in NED [m]
+                  relative to the LOCAL_POSITION_NED frame origin.
+                  When HOME = GPS_ORIGIN = anchor ENU [0,0,0]:
+                  ``anchor_ned = np.array([0.0, 0.0, home_z_enu])``
+    """
+    if sensor_mode == "tether_relative":
+        return TetherRelativeHoldController()
+    if sensor_mode == "physical":
+        if anchor_ned is None:
+            raise ValueError("PhysicalHoldController requires anchor_ned")
+        return PhysicalHoldController(anchor_ned)
+    raise ValueError(f"Unknown sensor mode {sensor_mode!r}")

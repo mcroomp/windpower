@@ -11,8 +11,9 @@ produces a multi-panel PNG figure with:
   Panel 4  — Aerodynamic thrust & vertical force (Fz)
   Panel 5  — Relative wind: axial and in-plane components
   Panel 6  — Torque balance: drag torque vs driving torque
-  Panel 7  — Swashplate inputs: collective (deg), tilt_lon, tilt_lat
-  Panel 8  — Raw servo inputs (normalised, -1..+1)
+  Panel 7  — Swashplate inputs: collective (deg), tilt_lon (→ pitch), tilt_lat (→ roll)
+  Panel 8  — Attitude reported to ArduPilot: roll, pitch, yaw (deg)
+  Panel 9  — Raw servo inputs (normalised, -1..+1)
 
 Usage
 -----
@@ -89,7 +90,7 @@ def plot_report(data: dict, out_path: Path) -> None:
         print("[ERROR] 't_sim' column missing.", file=sys.stderr)
         sys.exit(1)
 
-    n_panels = 8
+    n_panels = 9
     fig = plt.figure(figsize=(16, 4.0 * n_panels))
     fig.suptitle(
         f"RAWES Simulation — Mediator Telemetry\n{out_path.stem}",
@@ -162,14 +163,16 @@ def plot_report(data: dict, out_path: Path) -> None:
     ax.legend(fontsize=7, loc="upper right")
 
     # ── Panel 7: Swashplate commands ──────────────────────────────────────────
+    # tilt_lon drives longitudinal disk tilt → ArduPilot interprets as pitch correction
+    # tilt_lat drives lateral disk tilt      → ArduPilot interprets as roll correction
     ax = _ax(6, "Swashplate commands (decoded from servo channels)", "")
     collective_deg = [math.degrees(v) for v in _get("collective_rad", [0.0] * len(t))]
     ax.plot(t, collective_deg,         color="#1f77b4", linewidth=0.8, label="Collective (°)")
     ax2 = ax.twinx()
     ax2.plot(t, _get("tilt_lon"), color="#ff7f0e", linewidth=0.8, linestyle="--",
-             label="tilt_lon (norm)")
+             label="tilt_lon → pitch (norm)")
     ax2.plot(t, _get("tilt_lat"), color="#2ca02c", linewidth=0.8, linestyle="--",
-             label="tilt_lat (norm)")
+             label="tilt_lat → roll (norm)")
     ax2.set_ylabel("Tilt (−1…+1)", fontsize=8)
     ax2.tick_params(labelsize=7)
     lines1, labs1 = ax.get_legend_handles_labels()
@@ -177,12 +180,25 @@ def plot_report(data: dict, out_path: Path) -> None:
     ax.legend(lines1 + lines2, labs1 + labs2, fontsize=7, loc="upper right")
     ax.set_ylabel("Collective (°)", fontsize=8)
 
-    # ── Panel 8: Raw servo inputs ─────────────────────────────────────────────
-    ax = _ax(7, "Raw servo inputs from ArduPilot SITL (normalised −1…+1)", "")
+    # ── Panel 8: Attitude reported to ArduPilot ───────────────────────────────
+    # roll/pitch are tether-relative (0° at equilibrium); yaw = velocity heading.
+    # tilt_lat (panel 7) drives roll correction; tilt_lon drives pitch correction.
+    ax = _ax(7, "Attitude sent to ArduPilot EKF  (tether-relative: 0° = equilibrium)", "deg")
+    roll_deg  = [math.degrees(v) for v in _get("rpy_roll",  [0.0] * len(t))]
+    pitch_deg = [math.degrees(v) for v in _get("rpy_pitch", [0.0] * len(t))]
+    yaw_deg   = [math.degrees(v) for v in _get("rpy_yaw",   [0.0] * len(t))]
+    ax.plot(t, roll_deg,  color="#2ca02c", linewidth=0.8, label="roll  (← tilt_lat)")
+    ax.plot(t, pitch_deg, color="#ff7f0e", linewidth=0.8, label="pitch (← tilt_lon)")
+    ax.plot(t, yaw_deg,   color="#9467bd", linewidth=0.8, linestyle=":", label="yaw  (velocity heading)")
+    ax.axhline(0, color="black", linewidth=0.5, alpha=0.4)
+    ax.legend(fontsize=7, loc="upper right")
+
+    # ── Panel 9: Raw servo inputs ─────────────────────────────────────────────
+    ax = _ax(8, "Raw servo inputs from ArduPilot SITL (normalised −1…+1)", "")
     ax.plot(t, _get("servo_s1"),  linewidth=0.8, label="S1")
     ax.plot(t, _get("servo_s2"),  linewidth=0.8, label="S2")
     ax.plot(t, _get("servo_s3"),  linewidth=0.8, label="S3")
-    ax.plot(t, _get("servo_esc"), linewidth=0.8, linestyle="--", label="ESC (S4)")
+    ax.plot(t, _get("servo_esc"), linewidth=0.8, linestyle="--", label="ESC (anti-rotation motor)")
     ax.axhline(0, color="black", linewidth=0.5, alpha=0.4)
     ax.set_xlabel("Simulation time (s)", fontsize=8)
     ax.legend(fontsize=7, loc="upper right")

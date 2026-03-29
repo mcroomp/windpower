@@ -175,6 +175,7 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 | [simulation/ARMING.md](simulation/ARMING.md) | **ArduPilot helicopter arming reference** — RSC modes, motor interlock, EKF init sequence, common failure modes. **Update this file whenever new arming behavior is discovered.** |
 | [summary.md](summary.md) | RAWES optimal control model from De Schutter et al. 2018 — pumping cycle, structural constraints, atmosphere model |
 | [simulation/mbdyn_reference.md](simulation/mbdyn_reference.md) | MBDyn integration documentation and restoration instructions (MBDyn removed from runtime but archived) |
+| [simulation/heliparams.md](simulation/heliparams.md) | **ArduPilot heli EKF3 GPS fusion source analysis** — exact conditions for GPS position fusion, required params (`EK3_SRC1_YAW=1`, `EK3_GPS_CHECK=0`), 10 s mandatory GPS-check delay, `assume_zero_sideslip()=false` for heli. Read this before debugging EKF3 CONST_POS_MODE. |
 
 ---
 
@@ -490,12 +491,30 @@ wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k 
 | Build Docker image | `simulation\build.cmd ardupilot` |
 | Unit tests (Windows) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit` |
 | Unit tests (container) | `wsl.exe bash -c '... dev.sh test-unit'` |
+| Unit tests (filtered) | `wsl.exe bash -c '... dev.sh test-unit -v -k test_name'` |
+| Unit tests (status only) | `wsl.exe bash -c '... dev.sh test-unit --filterstatus'` |
 | Stack tests | `wsl.exe bash -c '... dev.sh test-stack'` |
+| Stack tests (filtered) | `wsl.exe bash -c '... dev.sh test-stack -v -k test_name'` |
+| Stack tests (status only) | `wsl.exe bash -c '... dev.sh test-stack --filterstatus'` |
 | Interactive shell | `wsl.exe bash -c '... dev.sh shell'` |
 | Regenerate steady state | `pytest simulation/tests/unit/test_steady_flight.py` |
 | Redraw flight report | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/redraw_flight_report.py'` |
 | EKF consistency analysis | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_ekf_consistency.py'` |
+| **Post-run analysis** | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'` |
+| Post-run analysis (plot) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --plot'` |
 | Last run logs | `simulation/pytest_last_run.log`, `mediator_last_run.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv` |
+
+### Post-run analysis (Claude — read this)
+
+**Always run `analyse_run.py` after a stack test to understand what happened.**  Do not grep through log files manually — the script parses `mediator_last_run.log` and `pytest_last_run.log` and prints a structured report covering damping phase stability, EKF timeline, setup step progress, hold stats, and test outcomes.
+
+If `analyse_run.py` lacks a feature you need, or a parser is broken, **modify `simulation/analysis/analyse_run.py` directly** — do not fall back to ad-hoc grep commands.
+
+```
+wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'
+wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --plot'
+wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --all-statustext'
+```
 
 ### Running Python scripts (Claude — read this)
 
@@ -504,8 +523,8 @@ wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k 
 | Context | How to run |
 |---------|-----------|
 | Any Python script (analysis, one-offs) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/...'` |
-| Unit tests (faster, no Docker) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-unit'` |
-| Stack tests (Docker required) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'` |
+| Unit tests | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-unit [-v] [-k name] [--filterstatus]'` |
+| Stack tests (Docker required) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack [-v] [-k name] [--filterstatus]'` |
 | One-off command inside container | `wsl.exe bash -c 'docker exec rawes-sim python3 /rawes/simulation/...'` |
 
 Windows repo root on WSL path: `/mnt/e/repos/windpower`

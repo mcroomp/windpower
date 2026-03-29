@@ -382,6 +382,189 @@ def build_sitl_packet(
 
 
 # ---------------------------------------------------------------------------
+# Physical sensor — reports actual orientation of the Pixhawk electronics
+# ---------------------------------------------------------------------------
+
+class PhysicalSensor:
+    """
+    Simulates the real sensor readings of the Pixhawk mounted on the
+    non-rotating RAWES electronics assembly.
+
+    Unlike SensorSim, this class does NOT transform attitude into a
+    tether-relative frame.  It reports the true NED Euler angles of the
+    orbital frame (rotor axle direction = body Z, spin stripped), which at
+    tether equilibrium is roughly 65° from NED vertical.
+
+    Accel and gyro are expressed in the same physical orbital body frame,
+    consistent with the reported attitude.  Yaw is still velocity-derived
+    for EKF GPS consistency (same constraint as SensorSim).
+
+    Use case: GUIDED_NOGPS + SET_ATTITUDE_TARGET, where the GCS commands
+    the real equilibrium quaternion as the target and ArduPilot holds it at
+    full inner-loop bandwidth.
+    """
+
+    def __init__(
+        self,
+        home_enu_z:  float = 0.0,
+        gyro_sigma:  float = _GYRO_SIGMA,
+        accel_sigma: float = _ACCEL_SIGMA,
+        rng_seed:    Optional[int] = None,
+    ):
+        self._home_enu_z  = float(home_enu_z)
+        self._gyro_sigma  = gyro_sigma
+        self._accel_sigma = accel_sigma
+        self._rng = np.random.default_rng(rng_seed)
+        # Cache of the last velocity-derived yaw.  Once set, this is used as
+        # the fallback yaw when v_horiz < threshold so there is no yaw
+        # discontinuity when the hub decelerates through zero (e.g. at physics
+        # unfreeze).  Without this, the orbital-frame geometric yaw would snap
+        # back into use, rotating the body frame and causing a large magnetometer
+        # reading change → EKF "GPS Glitch or Compass error".
+        self._last_vel_yaw: Optional[float] = None
+        # Maximum rate at which the velocity-derived yaw is allowed to change
+        # [rad/s].  This prevents a sudden gyro axis remap when the tether
+        # activates and the hub velocity direction rotates quickly.  Without
+        # rate-limiting, a 165° yaw jump in 2 s causes the ACRO rate loop to
+        # see gyro on the wrong body axis → destabilising corrections.
+        # The hub's natural orbital yaw rate is ~0.02 rad/s (1°/s); 0.05 rad/s
+        # (≈3°/s) allows orbital tracking while freezing the ~82°/s tether
+        # activation transient so the gyro body frame is stable.
+        self._vel_yaw_rate_max: float = 0.05   # rad/s
+
+    def compute(
+        self,
+        pos_enu:         np.ndarray,
+        vel_enu:         np.ndarray,
+        R_hub:           np.ndarray,
+        omega_body:      np.ndarray,
+        accel_world_enu: np.ndarray,
+        dt:              float,
+    ) -> dict:
+        """
+        Compute physical sensor outputs.
+
+        Returns the same dict schema as SensorSim.compute():
+            pos_ned, vel_ned, rpy, accel_body, gyro_body
+        """
+        # Position and velocity in NED (same as SensorSim)
+        pos_ned = np.array([pos_enu[1], pos_enu[0], -(pos_enu[2] - self._home_enu_z)])
+        vel_ned = np.array([vel_enu[1], vel_enu[0], -vel_enu[2]])
+
+        # Attitude: actual orbital frame (electronics, spin removed) → NED Euler angles.
+        # R_orb is body→world in ENU; T @ R_orb @ T converts both frames to NED.
+        disk_normal = R_hub[:, 2]
+        R_orb = build_orb_frame(disk_normal)
+        R_ned = T_ENU_NED @ R_orb @ T_ENU_NED
+        rpy   = _rotation_matrix_to_euler_zyx(R_ned)
+
+        # Replace orientation-derived yaw with velocity heading for EKF GPS
+        # consistency.  Cache the velocity-derived yaw and use it as fallback
+        # when v_horiz < threshold — prevents a compass reading jump when the
+        # hub decelerates through zero (physics unfreeze starts from vel=0).
+        #
+        # Rate-limit yaw updates: when the tether activates and the hub
+        # velocity direction rotates rapidly (~82°/s), an un-limited jump
+        # remaps the gyro body axes, causing ACRO's rate loop to apply
+        # destabilising corrections.  Limiting to _vel_yaw_rate_max (default
+        # 1.0 rad/s) prevents this while tracking the ~0.2 rad/s orbital rate.
+        v_horiz = math.hypot(vel_ned[0], vel_ned[1])
+        if v_horiz > 0.05:
+            raw_vel_yaw = math.atan2(vel_ned[1], vel_ned[0])
+            if self._last_vel_yaw is None:
+                self._last_vel_yaw = raw_vel_yaw
+            else:
+                # Wrap delta to [-π, π] before rate-limiting
+                delta = raw_vel_yaw - self._last_vel_yaw
+                delta = (delta + math.pi) % (2 * math.pi) - math.pi
+                max_delta = self._vel_yaw_rate_max * dt
+                self._last_vel_yaw += max(-max_delta, min(max_delta, delta))
+                self._last_vel_yaw = (self._last_vel_yaw + math.pi) % (2 * math.pi) - math.pi
+        if self._last_vel_yaw is not None:
+            rpy[2] = self._last_vel_yaw
+
+        # Rebuild R_body consistent with the (possibly yaw-overridden) rpy so
+        # accel and gyro are expressed in the same frame ArduPilot expects.
+        R_body = _euler_zyx_to_rotation(float(rpy[0]), float(rpy[1]), float(rpy[2]))
+
+        # Accelerometer: specific force in physical body frame
+        a_specific_enu    = accel_world_enu - _GRAVITY_ENU
+        specific_force_ned = T_ENU_NED @ a_specific_enu
+        accel_body = R_body.T @ specific_force_ned
+        accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
+
+        # Gyroscope: orbital angular velocity in physical body frame.
+        # The electronics are kept non-rotating by the GB4008 motor, so the
+        # gyro does not see the blade spin — strip it before projecting.
+        omega_spin_world    = np.dot(omega_body, disk_normal) * disk_normal
+        omega_orbital_world = omega_body - omega_spin_world
+        gyro_body = R_body.T @ (T_ENU_NED @ omega_orbital_world)
+        gyro_body = gyro_body + self._rng.normal(0.0, self._gyro_sigma, 3)
+
+        return {
+            "pos_ned":    pos_ned,
+            "vel_ned":    vel_ned,
+            "rpy":        rpy,
+            "accel_body": accel_body,
+            "gyro_body":  gyro_body,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def make_sensor(
+    mode:         str,
+    home_enu_z:   float = 0.0,
+    anchor_enu:   Optional[np.ndarray] = None,
+    stable_body_z: Optional[np.ndarray] = None,
+    gyro_sigma:   float = _GYRO_SIGMA,
+    accel_sigma:  float = _ACCEL_SIGMA,
+    rng_seed:     Optional[int] = None,
+) -> "SensorSim | PhysicalSensor":
+    """
+    Return a configured sensor for the given mode.
+
+    Parameters
+    ----------
+    mode : str
+        ``"tether_relative"`` — SensorSim: reports roll=pitch=0 at tether
+        equilibrium.  Use with ACRO + RC override.
+
+        ``"physical"`` — PhysicalSensor: reports actual orbital-frame
+        orientation (~65° from NED vertical at tether equilibrium).
+        Use with GUIDED_NOGPS + SET_ATTITUDE_TARGET.
+    home_enu_z : float
+        ENU Z of the ArduPilot home position (NED D=0 reference) [m].
+    anchor_enu : array (3,) or None
+        Tether anchor in ENU [m].  Only used by ``"tether_relative"`` mode.
+    stable_body_z : array (3,) or None
+        Fixed equilibrium body_z for tether-relative reporting.
+        ``None`` = use live tether direction.  Only used by ``"tether_relative"``.
+    """
+    if mode == "tether_relative":
+        return SensorSim(
+            home_enu_z    = home_enu_z,
+            anchor_enu    = anchor_enu,
+            stable_body_z = stable_body_z,
+            gyro_sigma    = gyro_sigma,
+            accel_sigma   = accel_sigma,
+            rng_seed      = rng_seed,
+        )
+    if mode == "physical":
+        return PhysicalSensor(
+            home_enu_z  = home_enu_z,
+            gyro_sigma  = gyro_sigma,
+            accel_sigma = accel_sigma,
+            rng_seed    = rng_seed,
+        )
+    raise ValueError(
+        f"Unknown sensor mode {mode!r}. Choose 'tether_relative' or 'physical'."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Standalone smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

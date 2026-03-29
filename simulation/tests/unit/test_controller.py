@@ -17,7 +17,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from controller import compute_rc_rates, compute_rc_from_attitude
+from controller import (
+    compute_rc_rates,
+    compute_rc_from_attitude,
+    compute_rc_from_physical_attitude,
+    TetherRelativeHoldController,
+    PhysicalHoldController,
+    make_hold_controller,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -300,3 +307,188 @@ def test_att_motor_interlock_always_2000():
     for roll in (-1.0, 0.0, 1.0):
         rc = compute_rc_from_attitude(roll, 0.0, 0.0, 0.0, 0.0)
         assert rc[8] == 2000
+
+
+# ---------------------------------------------------------------------------
+# compute_rc_from_physical_attitude tests
+# ---------------------------------------------------------------------------
+
+def _att_aligned():
+    """Attitude dict for hub exactly aligned with tether (equilibrium)."""
+    import math
+    elev = math.radians(30.0)
+    L    = 50.0
+    pos  = np.array([L * math.cos(elev), 0.0, L * math.sin(elev)])  # ENU
+    # body_z along tether, build orbital frame
+    tether_dir = pos / np.linalg.norm(pos)
+    east = np.array([1., 0., 0.])
+    bx   = east - np.dot(east, tether_dir) * tether_dir
+    bx  /= np.linalg.norm(bx)
+    R_hub = np.column_stack([bx, np.cross(tether_dir, bx), tether_dir])
+    # NED attitude from R_hub
+    T = np.array([[0,1,0],[1,0,0],[0,0,-1]], dtype=float)
+    R_ned = T @ R_hub @ T
+    sy = R_ned[1, 0]; cy = R_ned[0, 0]
+    sp = -R_ned[2, 0]
+    cp = math.sqrt(R_ned[2,1]**2 + R_ned[2,2]**2)
+    sr = R_ned[2, 1] / cp; cr = R_ned[2, 2] / cp
+    roll  = math.atan2(sr, cr)
+    pitch = math.atan2(sp, cp)
+    yaw   = math.atan2(sy, cy)
+    # pos_ned for tether equilibrium hub
+    pos_ned = np.array([pos[1], pos[0], -pos[2]])
+    anchor_ned = np.zeros(3)
+    return roll, pitch, yaw, pos_ned, anchor_ned
+
+
+def test_physical_att_aligned_gives_neutral():
+    """Hub exactly on tether → correction is near zero → neutral RC."""
+    roll, pitch, yaw, pos_ned, anchor_ned = _att_aligned()
+    rc = compute_rc_from_physical_attitude(
+        roll, pitch, yaw, 0.0, 0.0, 0.0,
+        pos_ned=pos_ned, anchor_ned=anchor_ned,
+        kp=1.0, kd=0.3,
+    )
+    # At perfect alignment cross(body_z, body_z_eq) = 0 → all neutral
+    assert rc[1] == 1500
+    assert rc[2] == 1500
+    assert rc[8] == 2000
+
+
+def test_physical_att_output_in_range():
+    """RC values from physical attitude controller always in [1000, 2000]."""
+    roll, pitch, yaw, pos_ned, anchor_ned = _att_aligned()
+    for delta in (-0.5, 0.0, 0.5):
+        rc = compute_rc_from_physical_attitude(
+            roll + delta, pitch + delta, yaw, 0.3, 0.3, 0.3,
+            pos_ned=pos_ned, anchor_ned=anchor_ned,
+        )
+        for ch in (1, 2, 4):
+            assert 1000 <= rc[ch] <= 2000, f"ch{ch}={rc[ch]} out of range"
+
+
+# ---------------------------------------------------------------------------
+# TetherRelativeHoldController tests
+# ---------------------------------------------------------------------------
+
+class _FakeGCS:
+    """Minimal GCS stub: records send_rc_override calls."""
+    def __init__(self):
+        self.sent = []
+    def send_rc_override(self, rc):
+        self.sent.append(dict(rc))
+
+
+def test_tether_relative_neutral_at_zero_attitude():
+    ctrl = TetherRelativeHoldController()
+    gcs  = _FakeGCS()
+    att  = {"roll": 0.0, "pitch": 0.0, "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
+    rc   = ctrl.send_correction(att, None, gcs)
+    assert rc[1] == 1500
+    assert rc[2] == 1500
+    assert rc[3] == 1500    # neutral collective
+    assert rc[8] == 2000    # motor interlock
+
+
+def test_tether_relative_sends_neutral_on_large_roll():
+    ctrl = TetherRelativeHoldController()
+    gcs  = _FakeGCS()
+    import math
+    att  = {"roll": math.radians(70.0), "pitch": 0.0,
+            "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
+    rc   = ctrl.send_correction(att, None, gcs)
+    # Roll > 60° → guard fires → neutral roll/pitch
+    assert rc[1] == 1500
+    assert rc[2] == 1500
+    assert rc[8] == 2000
+
+
+def test_tether_relative_extra_params_include_compass_disable():
+    ctrl = TetherRelativeHoldController()
+    assert ctrl.extra_params.get("COMPASS_USE") == 0
+    assert ctrl.extra_params.get("COMPASS_ENABLE") == 0
+    assert ctrl.extra_params.get("ATC_RAT_RLL_IMAX") == 0.0
+
+
+def test_physical_hold_extra_params_compass_enabled():
+    """PhysicalHoldController keeps compass enabled (COMPASS_USE at default).
+    Startup damping holds the hub stationary during EKF init so compass heading
+    is stable; GPS+compass fusion works without disabling either source.
+    EK3_SRC1_YAW is NOT set by the controller — conftest overrides it to 1
+    (compass) via _gps_params which apply after controller extra_params."""
+    ctrl = PhysicalHoldController(anchor_ned=np.zeros(3))
+    assert "COMPASS_USE" not in ctrl.extra_params
+    assert "COMPASS_ENABLE" not in ctrl.extra_params
+    assert "EK3_SRC1_YAW" not in ctrl.extra_params
+    assert ctrl.extra_params.get("ATC_RAT_RLL_IMAX") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# PhysicalHoldController tests
+# ---------------------------------------------------------------------------
+
+def test_physical_hold_neutral_when_no_pos():
+    ctrl = PhysicalHoldController(anchor_ned=np.zeros(3))
+    gcs  = _FakeGCS()
+    att  = {"roll": 0.1, "pitch": 0.2, "yaw": 0.0,
+            "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
+    rc   = ctrl.send_correction(att, pos_ned=None, gcs=gcs)
+    assert rc[1] == 1500
+    assert rc[2] == 1500
+    assert rc[8] == 2000
+
+
+def test_physical_hold_neutral_when_no_equilibrium():
+    """send_correction returns neutral sticks until set_equilibrium is called."""
+    import math
+    ctrl = PhysicalHoldController(anchor_ned=np.zeros(3))
+    gcs  = _FakeGCS()
+    pos_ned = (0.0, 0.0, -10.0)
+    att = {"roll": 0.5, "pitch": 0.3, "yaw": 1.0,
+           "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
+    rc  = ctrl.send_correction(att, pos_ned=pos_ned, gcs=gcs)
+    assert rc[1] == 1500
+    assert rc[2] == 1500
+    assert rc[8] == 2000
+
+
+def test_physical_hold_sends_correction_near_equilibrium():
+    """Near-equilibrium hub: controller sends a non-trivial correction.
+
+    set_equilibrium must be called first (normally done in conftest step 4
+    from the first ATTITUDE message during the 45 s kinematic startup).
+    """
+    import math
+    roll, pitch, yaw, pos_ned, anchor_ned = _att_aligned()
+    # Tilt slightly to create a small error
+    ctrl = PhysicalHoldController(anchor_ned=anchor_ned)
+    ctrl.set_equilibrium(roll, pitch)   # capture equilibrium before use
+    gcs  = _FakeGCS()
+    small_tilt = math.radians(5.0)
+    att  = {"roll": roll + small_tilt, "pitch": pitch + small_tilt, "yaw": yaw,
+            "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
+    rc   = ctrl.send_correction(att, pos_ned=tuple(pos_ned), gcs=gcs)
+    # RC must be in valid range; motor interlock must be 2000
+    for ch in (1, 2, 3, 4):
+        assert 1000 <= rc[ch] <= 2000
+    assert rc[8] == 2000
+    assert len(gcs.sent) == 1
+
+
+# ---------------------------------------------------------------------------
+# make_hold_controller factory tests
+# ---------------------------------------------------------------------------
+
+def test_make_hold_controller_tether_relative():
+    ctrl = make_hold_controller("tether_relative")
+    assert isinstance(ctrl, TetherRelativeHoldController)
+
+
+def test_make_hold_controller_physical():
+    ctrl = make_hold_controller("physical", anchor_ned=np.zeros(3))
+    assert isinstance(ctrl, PhysicalHoldController)
+
+
+def test_make_hold_controller_invalid_raises():
+    with pytest.raises(ValueError, match="Unknown sensor mode"):
+        make_hold_controller("bogus")
