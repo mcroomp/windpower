@@ -117,6 +117,14 @@ class StackConfig:
     # kinematic end overcome it before the controller can respond.
     # 300 N·m·s/rad gives τ=I/k=5/300≈17 ms — fast enough for 10 Hz hold.
     BASE_K_ANG            : float = 300.0
+    # Phase 2: truth-state controller at 400 Hz inside the mediator.
+    # When True, ArduPilot servo outputs are ignored in free flight;
+    # the hold loop sends neutral RC sticks (motor-interlock keepalive only).
+    # With the 400 Hz controller providing rate damping, BASE_K_ANG can be
+    # reduced back to 50 (the mediator default); 300 was only needed for the
+    # 10 Hz MAVLink controller which could not respond fast enough.
+    INTERNAL_CONTROLLER   : bool  = True
+    BASE_K_ANG_INTERNAL   : float = 50.0   # used when INTERNAL_CONTROLLER is True
 
     # Port descriptions for diagnostics
     _PORT_CHECKS = [
@@ -216,8 +224,9 @@ class StackContext:
     setup_samples:  list      # EKF/ATTITUDE samples collected during setup
     log:            logging.Logger
     sim_dir:        Path
-    controller:     object    # TetherRelativeHoldController or PhysicalHoldController
-    sensor_mode:    str       # "tether_relative" or "physical"
+    controller:          object    # TetherRelativeHoldController or PhysicalHoldController
+    sensor_mode:         str       # "tether_relative" or "physical"
+    internal_controller: bool      # True = mediator runs truth-state controller at 400 Hz
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +329,10 @@ def acro_armed(tmp_path, sensor_mode):
         lock_orientation=StackConfig.LOCK_ORIENTATION,
         sensor_mode=sensor_mode,
         run_id=_run_id,
-        base_k_ang=StackConfig.BASE_K_ANG,
+        base_k_ang=(StackConfig.BASE_K_ANG_INTERNAL
+                    if StackConfig.INTERNAL_CONTROLLER
+                    else StackConfig.BASE_K_ANG),
+        internal_controller=StackConfig.INTERNAL_CONTROLLER,
     )
     sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
 
@@ -342,6 +354,7 @@ def acro_armed(tmp_path, sensor_mode):
         home_z_enu=home_z_enu, flight_events={}, all_statustext=[],
         setup_samples=[], log=log, sim_dir=sim_dir,
         controller=controller, sensor_mode=sensor_mode,
+        internal_controller=StackConfig.INTERNAL_CONTROLLER,
     )
 
     try:

@@ -58,7 +58,8 @@ def _run_simulation(t_sim_s: float, wind: np.ndarray = None) -> list:
         z_floor = 1.0,
     )
     aero    = RotorAero()
-    tether  = TetherModel(anchor_enu=ANCHOR, rest_length=49.949)
+    tether  = TetherModel(anchor_enu=ANCHOR, rest_length=49.949,
+                         axle_attachment_length=0.0)
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0

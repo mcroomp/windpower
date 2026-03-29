@@ -9,6 +9,7 @@ Architecture:
 Data flow (each 400 Hz step):
     1. recv_servos()     — non-blocking, from SITL UDP port 9002
     2. swashplate mix    — servo PWM -> collective + cyclic tilt
+                          OR compute_swashplate_from_state() if --internal-controller
     3. aero.compute()    — BEM forces in world (ENU) frame
     4. tether.compute()  — tension-only tether force added to wrench
     5. dynamics.step()   — RK4 6-DOF integration (pure Python, gravity internal)
@@ -45,6 +46,7 @@ from aero            import RotorAero
 from tether          import TetherModel
 from frames          import T_ENU_NED, build_orb_frame
 from sensor          import make_sensor
+from controller      import compute_swashplate_from_state
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -182,6 +184,17 @@ def _parse_args():
                              "residual v=F_aero/k_vel≈0.06 m/s).  Critical-damping value "
                              "for k_vel=200, m=5: k_vel²/(4m)=2000 N/m.  Decays linearly "
                              "to zero with the same alpha as k_vel and k_ang.")
+    parser.add_argument("--internal-controller", action="store_true", default=False,
+                        help="Phase 2 validation: use compute_swashplate_from_state at 400 Hz "
+                             "instead of ArduPilot servo inputs during free flight.  "
+                             "ArduPilot SITL still runs for EKF initialisation and arming; "
+                             "its servo outputs are ignored once the kinematic startup ends. "
+                             "The hold-loop RC override in the test becomes a keepalive only.")
+    parser.add_argument("--internal-controller-ramp", type=float, default=3.0,
+                        help="Seconds over which the internal controller authority ramps from "
+                             "0 to 1 after the kinematic startup ends [s].  Prevents impulsive "
+                             "tilt commands at the kinematic→free-flight transition, giving the "
+                             "aerodynamic state time to re-establish.  Default: 3 s.")
     parser.add_argument("--lock-orientation", action="store_true", default=False,
                         help="Lock hub orientation to the initial R0 every step — "
                              "no rotation allowed (magic tether that prevents all twist). "
@@ -394,6 +407,20 @@ def run_mediator(args):
         ])
         log.info("Telemetry logging → %s", args.telemetry_log)
 
+    # -- Internal controller orbit-tracking state ------------------------------
+    # Captured at the first free-flight frame when internal_controller is active.
+    # The aerodynamic equilibrium body_z (BODY_Z0) is NOT aligned with the
+    # geometric tether direction — it sits ~11° above it due to the force
+    # balance at the tethered orbital equilibrium.  Targeting the raw tether
+    # direction would immediately apply a large disruptive tilt.
+    #
+    # Instead we capture the equilibrium body_z and tether direction at the
+    # kinematic→free-flight transition, then rotate both by the same azimuthal
+    # angle as the tether direction rotates.  This gives body_z_eq = BODY_Z0 at
+    # t=0 (zero error, zero tilt at equilibrium) and smoothly tracks the orbit.
+    _ic_tether_dir0 : "np.ndarray | None" = None   # initial tether direction
+    _ic_body_z_eq0  : "np.ndarray | None" = None   # initial equilibrium body_z
+
     # -- Main loop ------------------------------------------------------------
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
 
@@ -426,17 +453,75 @@ def run_mediator(args):
                 _damp_alpha = 0.0
 
             # ----------------------------------------------------------------
-            # Step 2: Swashplate mixing
-            # Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = ESC
-            # Servos arrive normalised [-1,1] from SITLInterface
+            # Step 2: Swashplate commands
+            #
+            # Phase 2 (--internal-controller, free flight only):
+            #   compute_swashplate_from_state() at 400 Hz using truth state.
+            #   ArduPilot servo outputs are ignored; SITL still runs for EKF.
+            #
+            # Normal path (ArduPilot servo PWM → H3-120 inverse mix):
+            #   Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = ESC
+            #   Servos arrive normalised [-1,1] from SITLInterface
             # ----------------------------------------------------------------
-            s1 = float(servos[0])
-            s2 = float(servos[1])
-            s3 = float(servos[2])
             esc_norm = float(np.clip(servos[3], -1.0, 1.0))
 
-            collective_norm, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
-            collective_rad = collective_to_pitch(collective_norm)
+            if args.internal_controller and _damp_alpha == 0.0:
+                # ── Phase 2: truth-state controller at 400 Hz ─────────────────
+                # Capture the aerodynamic equilibrium at the first free-flight
+                # frame.  The equilibrium body_z (BODY_Z0) sits ~11° above the
+                # geometric tether direction due to the force balance; using the
+                # raw tether direction would immediately apply a large disruptive
+                # tilt.  We instead capture the actual body_z and orbit-track it:
+                # body_z_eq rotates azimuthally by the same angle the tether
+                # direction has rotated from the initial value.  This gives zero
+                # tilt at the natural equilibrium and corrects deviations.
+                if _ic_tether_dir0 is None:
+                    _pos0 = hub_state["pos"]
+                    _ic_tether_dir0 = _pos0 / np.linalg.norm(_pos0)
+                    _ic_body_z_eq0  = hub_state["R"][:, 2].copy()
+                    log.info(
+                        "Internal controller: captured equilibrium body_z=%s"
+                        "  tether_dir=%s",
+                        np.round(_ic_body_z_eq0, 3),
+                        np.round(_ic_tether_dir0, 3),
+                    )
+
+                # Orbit-tracked body_z_eq: rotate body_z_eq0 by the azimuthal
+                # angle that the horizontal tether direction has rotated.
+                cur_pos    = hub_state["pos"]
+                cur_tdir   = cur_pos / np.linalg.norm(cur_pos)
+                th0h = np.array([_ic_tether_dir0[0], _ic_tether_dir0[1], 0.0])
+                thh  = np.array([cur_tdir[0],          cur_tdir[1],         0.0])
+                n0h  = np.linalg.norm(th0h); nhh = np.linalg.norm(thh)
+                if n0h > 0.01 and nhh > 0.01:
+                    th0h /= n0h; thh /= nhh
+                    cos_phi = float(np.clip(np.dot(th0h, thh), -1.0, 1.0))
+                    sin_phi = float(th0h[0] * thh[1] - th0h[1] * thh[0])
+                    bz0     = _ic_body_z_eq0
+                    _body_z_eq_tracked = np.array([
+                        cos_phi * bz0[0] - sin_phi * bz0[1],
+                        sin_phi * bz0[0] + cos_phi * bz0[1],
+                        bz0[2],
+                    ])
+                    _body_z_eq_tracked /= np.linalg.norm(_body_z_eq_tracked)
+                else:
+                    _body_z_eq_tracked = _ic_body_z_eq0
+
+                swash = compute_swashplate_from_state(
+                    hub_state  = hub_state,
+                    anchor_pos = np.zeros(3),
+                    body_z_eq  = _body_z_eq_tracked,
+                )
+                collective_rad  = swash["collective_rad"]
+                tilt_lon        = swash["tilt_lon"]
+                tilt_lat        = swash["tilt_lat"]
+                collective_norm = 0.0   # for telemetry logging
+            else:
+                s1 = float(servos[0])
+                s2 = float(servos[1])
+                s3 = float(servos[2])
+                collective_norm, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
+                collective_rad = collective_to_pitch(collective_norm)
 
             # ----------------------------------------------------------------
             # Step 3: Compute aerodynamic forces

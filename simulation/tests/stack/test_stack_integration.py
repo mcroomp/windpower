@@ -71,6 +71,7 @@ def _launch_mediator(
     sensor_mode: str = "tether_relative",
     run_id: int | None = None,
     base_k_ang: float | None = None,
+    internal_controller: bool = False,
 ) -> subprocess.Popen:
     cmd = [
         sys.executable,
@@ -87,6 +88,8 @@ def _launch_mediator(
         cmd += ["--startup-damp-seconds", str(startup_damp_seconds)]
     if base_k_ang is not None:
         cmd += ["--base-k-ang", str(base_k_ang)]
+    if internal_controller:
+        cmd += ["--internal-controller"]
     if lock_orientation:
         cmd += ["--lock-orientation"]
     if sensor_mode != "tether_relative":

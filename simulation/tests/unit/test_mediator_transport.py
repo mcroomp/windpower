@@ -107,6 +107,8 @@ def _args(recv_port, send_port):
         startup_damp_k_ang=500.0,
         startup_damp_k_pos=2000.0,
         base_k_ang=50.0,
+        internal_controller=False,
+        internal_controller_ramp=3.0,
         run_id=None,
         pos0=None,
         vel0=None,

@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Closed-loop physics validation. The simulation stack is structurally complete and all physics tests pass. The next step is proving closed-loop stability (controller + dynamics) before investing further in ArduPilot ACRO mode integration.
+**Current phase:** Phase 2 — Internal controller validation complete. The 400 Hz truth-state controller (`compute_swashplate_from_state`) is proven stable in 60 s closed-loop simulation, the De Schutter pumping cycle is validated in unit tests, and the controller is wired into `mediator.py`. The next step is proving the closed-loop stack test passes with the internal controller active.
 
 ---
 
@@ -567,6 +567,113 @@ ACRO mode was chosen because:
 
 ---
 
+## Phase 2 — Internal Controller: What Was Accomplished
+
+### Bug fixed: `compute_swashplate_from_state` tilt_lon sign error
+
+The longitudinal cyclic correction was applied with the wrong sign.  The aero
+model applies `Mx_body = -K × tilt_lon × T` (negative sign), so a positive
+`tilt_lon` produces a westward torque that tilts body_z **north**.  The
+controller was projecting the error onto `disk_x` (eastward), giving
+`tilt_lon < 0` when the hub needed to tilt north — the exact opposite.  Fixed
+by negating the projection: `tilt_lon = -dot(corr_enu, disk_x) / tilt_max_rad`.
+
+The tilt_lat sign was already correct (aero uses `My_body = +K × tilt_lat × T`).
+
+### 60 s closed-loop stability proven (`test_closed_loop_60s.py`)
+
+Four tests, all passing:
+- `test_60s_altitude_maintained` — 0 floor hits, z rises from 12.5 m → 13.3 m over 60 s
+- `test_60s_no_runaway` — hub drift stays below 200 m
+- `test_60s_spin_maintained` — autorotation spin 20→21 rad/s (sustained)
+- `test_zero_tilt_at_equilibrium` — controller outputs exactly zero tilt at POS0/BODY_Z0
+
+Key design decisions validated:
+- `axle_attachment_length=0.0` matches mediator (no tether restoring torque; attitude via aero only)
+- `T_AERO_OFFSET=45.0` — aero ramp already complete at kinematic-phase end; passed as `t=45+t`
+- **Orbit-tracking body_z_eq**: body_z_eq rotates azimuthally as hub orbits, keeping error=0 at
+  equilibrium throughout the orbit.  Without this, body_z_eq drifts from the hub's actual
+  aerodynamic equilibrium as it orbits and the controller generates ever-growing spurious tilt.
+
+### Orbit-tracking formula (used in mediator and all unit tests)
+
+```python
+# Capture at free-flight t=0:
+tether_dir0 = pos0 / |pos0|
+body_z_eq0  = R0[:, 2]
+
+# Each step:
+th0h = [tether_dir0.x, tether_dir0.y, 0]  (horizontal projection of initial tether dir)
+thh  = [cur_tdir.x,    cur_tdir.y,    0]  (horizontal projection of current tether dir)
+# normalise both, compute azimuthal rotation angle phi
+cos_phi = dot(th0h, thh)
+sin_phi = th0h.x * thh.y - th0h.y * thh.x
+body_z_eq = rotate_z(body_z_eq0, phi)    # rotate initial eq body_z by orbital azimuth
+```
+
+### Key physics insight: zero tilt = natural stability
+
+With `axle_attachment_length=0.0` and the aero ramp complete:
+- Zero tilt → `M_orbital = M_total - M_spin = 0` → no orbital moment → hub is perfectly stable
+- The hub needs **no controller at all** to maintain equilibrium — the aerodynamic equilibrium
+  is self-stable.  The controller only corrects perturbations.
+
+The open-loop diagnostic (`_diag2.py`) confirmed: 60 s, 0 floor hits, body_z_z=0.427
+constant, z=12.82 m constant, spin=20.3 rad/s constant — identical to the closed-loop result.
+
+### Pumping cycle — naive collective-only approach does not work
+
+`test_pumping_cycle.py` tests a collective-only strategy (no tilt change between phases):
+- Reel-out mean tension: 261 N, reel-in mean tension: 288 N → reel-in > reel-out → net energy negative
+- Root cause: tether tension during reel-in equals the force to pull hub inward against its
+  aerodynamic equilibrium, which is dominated by the full aerodynamic force regardless of collective.
+- Collective modulation alone cannot achieve the asymmetry needed for net positive energy.
+
+### Pumping cycle — De Schutter tilt strategy works (`test_deschutter_cycle.py`)
+
+Implements De Schutter (2018) Fig. 4: tilt ξ from wind direction changes between phases.
+
+**Reel-out:** body_z aligned with tether, ξ ≈ 31° from wind, high collective via PI controller
+- Mean tension: 233 N, max: 270 N, energy generated: 2791 J
+
+**Reel-in:** body_z transitions to vertical [0,0,1] over 5 s (ξ = 90° from wind, >70° criterion met)
+- Thrust acts upward (fighting gravity), not along tether → aerodynamic resistance to winch ≈ 0
+- Tension drops to mean: 55 N (winch only overcomes gravity component along tether ~17 N + inertia)
+- Energy consumed: 854 J
+
+**Net energy: +1937 J** — fundamental AWE pumping condition satisfied.
+
+Five tests all passing:
+- `test_deschutter_no_crash` — 0 floor hits throughout
+- `test_deschutter_reel_in_lower_tension` — 55 N < 233 N ✓
+- `test_deschutter_net_energy_positive` — +1937 J ✓
+- `test_deschutter_reel_in_tilt_achieved` — steady ξ = 90° ≥ 60° ✓
+- `test_deschutter_reel_out_tilt_in_range` — ξ = 31° within 25–60° ✓
+- `test_deschutter_tether_not_broken` — peak 270 N < 496 N (80% break load) ✓
+
+### Architecture: how the pumping cycle is controlled
+
+Three independent control loops, all at 400 Hz:
+```
+Attitude controller  →  tilt_lon, tilt_lat   (compute_swashplate_from_state)
+                         body_z_eq = tether-aligned (reel-out) or vertical (reel-in)
+Tension controller   →  collective_rad        (TensionController PI on tether tension)
+Winch controller     →  tether.rest_length    (±= v_reel × DT each step)
+```
+
+The **attitude controller's body_z_eq setpoint is the primary lever** for tension control,
+not collective.  Collective provides fine-grained tension tuning within a phase.
+
+### Mediator wiring (completed in this session)
+
+`mediator.py` was updated with orbit-tracking state captured at free-flight start:
+- `_ic_tether_dir0` and `_ic_body_z_eq0` captured once when `_damp_alpha == 0.0` first triggers
+- Body_z_eq tracked azimuthally each step (same formula as unit tests)
+- Internal controller branch calls `compute_swashplate_from_state` with orbit-tracked body_z_eq
+- collective_rad = 0.0 (pumping cycle collective control not yet wired into mediator)
+
+---
+
 ## Next Steps (Planned)
 
 - [x] Confirm battery capacity: 450 mAh (confirmed 2026-03-20)
@@ -576,8 +683,12 @@ ACRO mode was chosen because:
 - [x] Replace MBDyn with Python RK4 dynamics (dynamics.py)
 - [x] Restructure simulation into clean modules (frames, tether, sensor, controller)
 - [x] Closed-loop controller unit tests (test_closed_loop.py)
-- [ ] Wire `compute_swashplate_from_state` into mediator loop (bypass ArduPilot servo inputs at 400 Hz)
-- [ ] Prove closed-loop stack test passes with truth-state controller
+- [x] Fix tilt_lon sign bug in compute_swashplate_from_state (was destabilising; negated projection)
+- [x] Prove 60 s closed-loop stability with orbit-tracking controller (test_closed_loop_60s.py)
+- [x] Wire orbit-tracking internal controller into mediator.py
+- [x] Validate De Schutter pumping cycle in unit tests (test_deschutter_cycle.py)
+- [ ] Prove closed-loop stack test passes with internal controller (--internal-controller flag)
+- [ ] Wire pumping cycle (TensionController + body_z_eq tilt strategy) into mediator
 - [ ] Update simulation parameters for 4-blade, 2m geometry
 - [ ] ArduPilot helicopter frame configuration for RAWES (swashplate type, RSC mode)
 - [ ] Mapping: ArduPilot collective/cyclic outputs → swashplate → flap deflection → blade pitch

@@ -222,11 +222,16 @@ def test_acro_hold(acro_armed: StackContext):
                     all_statustext.append(text)
 
             now = time.monotonic()
-            # Send RC override every 0.1 s via ctx.controller.send_correction().
-            # tether_relative: roll/pitch from ATTITUDE are the error directly.
-            # physical: error derived from pos_ned vs tether direction.
+            # Send RC override every 0.1 s.
+            # Phase 2 (internal_controller=True): mediator runs compute_swashplate_from_state
+            #   at 400 Hz; RC override is a motor-interlock keepalive only (CH8=2000,
+            #   attitude sticks neutral).
+            # Normal path: send attitude correction via ctx.controller.send_correction().
             if now - t_last_rc >= 0.1:
-                if _last_att:
+                if ctx.internal_controller:
+                    rc = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 8: 2000}
+                    gcs.send_rc_override(rc)
+                elif _last_att:
                     rc = ctx.controller.send_correction(_last_att, _last_pos, gcs)
                 else:
                     rc = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 8: 2000}

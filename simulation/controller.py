@@ -121,6 +121,7 @@ def compute_swashplate_from_state(
     kp:           float = 0.5,
     kd:           float = 0.2,
     tilt_max_rad: float = 0.3,
+    body_z_eq:    "np.ndarray | None" = None,
 ) -> dict:
     """
     Compute swashplate tilt commands directly from hub truth state.
@@ -135,6 +136,12 @@ def compute_swashplate_from_state(
     kp          : proportional gain on attitude error [rad/rad]
     kd          : derivative gain on orbital rate [rad·s/rad]
     tilt_max_rad: maximum swashplate tilt [rad] (saturation limit)
+    body_z_eq   : optional equilibrium body-z override (unit vector, ENU).
+                  When None (default), body_z_eq is computed as the tether
+                  direction (pos - anchor) / |pos - anchor|.  Pass the hub's
+                  current R[:,2] to hold the present orientation with zero
+                  error, or a blended vector to ramp in tether-alignment
+                  gradually after a mode transition.
 
     Returns
     -------
@@ -152,7 +159,12 @@ def compute_swashplate_from_state(
     if t_len < 0.1:
         return {"collective_rad": 0.0, "tilt_lon": 0.0, "tilt_lat": 0.0}
 
-    body_z_eq  = tether / t_len
+    if body_z_eq is not None:
+        body_z_eq = np.asarray(body_z_eq, dtype=float)
+        n = float(np.linalg.norm(body_z_eq))
+        body_z_eq = body_z_eq / n if n > 1e-6 else tether / t_len
+    else:
+        body_z_eq = tether / t_len
     body_z_cur = R[:, 2]
 
     error_world = np.cross(body_z_cur, body_z_eq)
@@ -167,8 +179,12 @@ def compute_swashplate_from_state(
     disk_x = R[:, 0]
     disk_y = R[:, 1]
 
-    tilt_lon = float(np.clip(np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
-    tilt_lat = float(np.clip(np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
+    # tilt_lon sign: aero applies Mx_body = -K*tilt_lon*T, so positive tilt_lon
+    # produces negative Mx (torque about -X / West axis) → body_z tilts North.
+    # The required torque direction to tilt body_z North is West (-disk_x), which
+    # means tilt_lon must be *negative* of the projection onto disk_x.
+    tilt_lon = float(np.clip(-np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
+    tilt_lat = float(np.clip( np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
 
     return {
         "collective_rad": 0.0,   # collective held at zero; attitude via tilt only
