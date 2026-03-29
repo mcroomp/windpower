@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import config as _mcfg
 
 
 STACK_ENV_FLAG = "RAWES_RUN_STACK_INTEGRATION"
@@ -72,38 +73,45 @@ def _launch_mediator(
     run_id: int | None = None,
     base_k_ang: float | None = None,
     internal_controller: bool = False,
+    extra_config: dict | None = None,
 ) -> subprocess.Popen:
+    # Build config dict from defaults, then apply all overrides
+    cfg = _mcfg.defaults()
+    if initial_state is not None:
+        cfg["pos0"]    = list(initial_state["pos"])
+        cfg["vel0"]    = list(initial_state["vel"])
+        cfg["body_z"]  = list(initial_state["body_z"])
+        cfg["omega_spin"] = float(initial_state["omega_spin"])
+        if tether_rest_length is None and "rest_length" in initial_state:
+            cfg["tether_rest_length"] = float(initial_state["rest_length"])
+    if tether_rest_length is not None:
+        cfg["tether_rest_length"] = float(tether_rest_length)
+    if startup_damp_seconds is not None:
+        cfg["startup_damp_seconds"] = float(startup_damp_seconds)
+    if base_k_ang is not None:
+        cfg["base_k_ang"] = float(base_k_ang)
+    cfg["internal_controller"] = internal_controller
+    cfg["lock_orientation"]    = lock_orientation
+    cfg["sensor_mode"]         = sensor_mode
+    if extra_config:
+        cfg.update(extra_config)
+
+    # Write config to a temp file next to the log
+    cfg_path = log_path.parent / (log_path.stem + "_mediator_config.json")
+    _mcfg.save(cfg, str(cfg_path))
+
     cmd = [
         sys.executable,
         str(sim_dir / "mediator.py"),
         "--sitl-recv-port", "9002",
         "--sitl-send-port", "9003",
         "--log-level", "INFO",
+        "--config", str(cfg_path),
     ]
     if telemetry_log_path is not None:
         cmd += ["--telemetry-log", telemetry_log_path]
-    if tether_rest_length is not None:
-        cmd += ["--tether-rest-length", str(tether_rest_length)]
-    if startup_damp_seconds is not None:
-        cmd += ["--startup-damp-seconds", str(startup_damp_seconds)]
-    if base_k_ang is not None:
-        cmd += ["--base-k-ang", str(base_k_ang)]
-    if internal_controller:
-        cmd += ["--internal-controller"]
-    if lock_orientation:
-        cmd += ["--lock-orientation"]
-    if sensor_mode != "tether_relative":
-        cmd += ["--sensor-mode", sensor_mode]
     if run_id is not None:
         cmd += ["--run-id", str(run_id)]
-    if initial_state is not None:
-        # Use = form to avoid argparse treating negative floats as flags
-        cmd.append(f"--pos0={','.join(str(v) for v in initial_state['pos'])}")
-        cmd.append(f"--vel0={','.join(str(v) for v in initial_state['vel'])}")
-        cmd.append(f"--body-z={','.join(str(v) for v in initial_state['body_z'])}")
-        cmd.append(f"--omega-spin={initial_state['omega_spin']}")
-        if tether_rest_length is None and "rest_length" in initial_state:
-            cmd.append(f"--tether-rest-length={initial_state['rest_length']}")
     return subprocess.Popen(
         cmd,
         cwd=str(repo_root),

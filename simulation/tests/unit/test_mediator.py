@@ -7,7 +7,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator
-from mediator import DEFAULT_OMEGA_SPIN, DEFAULT_VEL0
+import config as _mcfg
+DEFAULT_OMEGA_SPIN = _mcfg.DEFAULTS["omega_spin"]
+DEFAULT_VEL0       = _mcfg.DEFAULTS["vel0"]
 
 
 def _state(pos, vel, omega):
@@ -100,7 +102,14 @@ class FakeSensor:
 def _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor=None):
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: fake_sitl)
-    monkeypatch.setattr(mediator, "RotorAero",         lambda: fake_aero)
+
+    # Mediator now calls RotorAero.from_definition(rotor) — patch the classmethod.
+    class _FakeRotorAero:
+        @classmethod
+        def from_definition(cls, defn):
+            return fake_aero
+
+    monkeypatch.setattr(mediator, "RotorAero", _FakeRotorAero)
     # SensorSim is NOT mocked here — mediator uses the real SensorSim with the test hub state.
     # Gyro noise is small (σ=0.003 rad/s); assertions use atol=0.05 to accommodate it.
 
@@ -111,30 +120,28 @@ def _install_time(monkeypatch, values, sleep_behavior):
     monkeypatch.setattr(mediator.time, "sleep", sleep_behavior)
 
 
-def _args():
+def _args(tmp_path=None):
+    """Build a minimal args Namespace for run_mediator unit tests.
+
+    Writes a JSON config with startup_damp_seconds=0 (so tests hit the
+    free-flight physics path immediately, without waiting 30 s of kinematic
+    startup) and tether_rest_length=200 (hub starts well inside tether envelope).
+    """
+    import tempfile, os as _os
+    cfg = _mcfg.defaults()
+    cfg["startup_damp_seconds"] = 0.0   # disable damping → immediate free flight
+    cfg["tether_rest_length"]   = 200.0  # hub starts inside tether envelope
+    if tmp_path is None:
+        tmp_path = tempfile.mkdtemp()
+    cfg_path = _os.path.join(str(tmp_path), "test_mediator_config.json")
+    _mcfg.save(cfg, cfg_path)
     return argparse.Namespace(
+        config=cfg_path,
+        run_id=None,
         sitl_recv_port=9002,
         sitl_send_port=9003,
-        wind_x=10.0,
-        wind_y=0.0,
-        wind_z=0.0,
         log_level="INFO",
         telemetry_log=None,
-        tether_rest_length=200.0,
-        startup_damp_seconds=0.0,   # disable damping so unit tests hit physics path
-        startup_damp_k_vel=200.0,
-        startup_damp_k_ang=500.0,
-        startup_damp_k_pos=2000.0,
-        base_k_ang=50.0,
-        internal_controller=False,
-        internal_controller_ramp=3.0,
-        run_id=None,
-        pos0=None,
-        vel0=None,
-        body_z=None,
-        omega_spin=None,
-        lock_orientation=False,
-        sensor_mode="tether_relative",
     )
 
 
@@ -168,7 +175,7 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
 
     # Mediator now uses SensorSim.compute() which includes small sensor noise.
     # pos_ned = [pos[1], pos[0], -(pos[2] - home_z)] with home_z = DEFAULT_POS0[2] = 12.530
-    home_z = mediator.DEFAULT_POS0[2]
+    home_z = _mcfg.DEFAULTS["pos0"][2]
     expected_pos_ned = np.array([
         stepped_state["pos"][1],
         stepped_state["pos"][0],

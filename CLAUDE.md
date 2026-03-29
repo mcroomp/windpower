@@ -4,7 +4,9 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 2 — Internal controller validation complete. The 400 Hz truth-state controller (`compute_swashplate_from_state`) is proven stable in 60 s closed-loop simulation, the De Schutter pumping cycle is validated in unit tests, and the controller is wired into `mediator.py`. The next step is proving the closed-loop stack test passes with the internal controller active.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED (`test_pumping_cycle.py`: net energy +1901 J, reel-in 55 N vs reel-out 211 N). Rotor definition abstracted into `rotor_definition.py` + YAML files; mediator/aero/dynamics wired to `beaupoil_2026.yaml`. 265 unit tests passing. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+
+See **[Phase 3 Plan](#phase-3-plan)** below for the full milestone breakdown.
 
 ---
 
@@ -444,21 +446,34 @@ During freeze:
 
 ## Running Tests
 
-### Unit Tests — Windows native, no Docker
+### Unit Tests and Simtests — Windows native, no Docker
 
+**CRITICAL: Only ArduPilot/stack tests require Docker. Unit tests and simtests run directly on Windows using the local venv.**
+
+One-time venv setup:
 ```cmd
 py -3 -m venv simulation\tests\unit\.venv
 simulation\tests\unit\.venv\Scripts\python.exe -m pip install numpy pytest matplotlib
 ```
 
-Then run:
+Fast unit tests (excludes long-running simulation loops):
+```cmd
+simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m "not simtest"
+```
+
+Simtests only (full 60 s physics simulation loops — slow, ~minutes):
+```cmd
+simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m simtest
+```
+
+All tests (unit + simtest):
 ```cmd
 simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit
 ```
 
 With flags:
 ```cmd
-simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -v -k test_closed_loop
+simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m "not simtest" -v -k test_closed_loop
 ```
 
 ### Stack Integration Tests — Docker via WSL
@@ -489,15 +504,15 @@ wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k 
 | Task | Command |
 |------|---------|
 | Build Docker image | `simulation\build.cmd ardupilot` |
-| Unit tests (Windows) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit` |
-| Unit tests (container) | `wsl.exe bash -c '... dev.sh test-unit'` |
-| Unit tests (filtered) | `wsl.exe bash -c '... dev.sh test-unit -v -k test_name'` |
-| Unit tests (status only) | `wsl.exe bash -c '... dev.sh test-unit --filterstatus'` |
-| Stack tests | `wsl.exe bash -c '... dev.sh test-stack'` |
+| **Unit tests (fast, local)** | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m "not simtest"` |
+| **Simtests (slow, local)** | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m simtest` |
+| All unit+simtests (local) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit` |
+| Stack tests (Docker) | `wsl.exe bash -c '... dev.sh test-stack'` |
 | Stack tests (filtered) | `wsl.exe bash -c '... dev.sh test-stack -v -k test_name'` |
 | Stack tests (status only) | `wsl.exe bash -c '... dev.sh test-stack --filterstatus'` |
+| Simtests (container) | `wsl.exe bash -c '... dev.sh test-simtest'` |
 | Interactive shell | `wsl.exe bash -c '... dev.sh shell'` |
-| Regenerate steady state | `pytest simulation/tests/unit/test_steady_flight.py` |
+| Regenerate steady state | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -k test_steady_flight` |
 | Redraw flight report | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/redraw_flight_report.py'` |
 | EKF consistency analysis | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_ekf_consistency.py'` |
 | **Post-run analysis** | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'` |
@@ -518,14 +533,16 @@ wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.
 
 ### Running Python scripts (Claude — read this)
 
-**Never** use bare `python3 script.py` or Windows-style paths in Bash tool calls — the shell is WSL bash, which cannot see Windows paths or the Windows Python.
+**CRITICAL: Unit tests and simtests run directly on Windows — no WSL, no Docker needed.**
+Only stack tests (ArduPilot SITL) require Docker and must go through WSL.
 
 | Context | How to run |
 |---------|-----------|
-| Any Python script (analysis, one-offs) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/...'` |
-| Unit tests | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-unit [-v] [-k name] [--filterstatus]'` |
+| Unit tests (fast) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m "not simtest"` |
+| Simtests (slow, ~minutes) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m simtest` |
 | Stack tests (Docker required) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack [-v] [-k name] [--filterstatus]'` |
-| One-off command inside container | `wsl.exe bash -c 'docker exec rawes-sim python3 /rawes/simulation/...'` |
+| Any Python analysis script | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/...'` |
+| One-off command inside container | `wsl.exe bash -c 'docker exec rawes-dev python3 /rawes/simulation/...'` |
 
 Windows repo root on WSL path: `/mnt/e/repos/windpower`
 
@@ -687,9 +704,52 @@ not collective.  Collective provides fine-grained tension tuning within a phase.
 - [x] Prove 60 s closed-loop stability with orbit-tracking controller (test_closed_loop_60s.py)
 - [x] Wire orbit-tracking internal controller into mediator.py
 - [x] Validate De Schutter pumping cycle in unit tests (test_deschutter_cycle.py)
-- [ ] Prove closed-loop stack test passes with internal controller (--internal-controller flag)
-- [ ] Wire pumping cycle (TensionController + body_z_eq tilt strategy) into mediator
-- [ ] Update simulation parameters for 4-blade, 2m geometry
-- [ ] ArduPilot helicopter frame configuration for RAWES (swashplate type, RSC mode)
-- [ ] Mapping: ArduPilot collective/cyclic outputs → swashplate → flap deflection → blade pitch
-- [ ] Hardware-in-the-loop testing with Pixhawk SITL
+- [x] Prove closed-loop stack test passes with internal controller (test_acro_hold PASSED: min alt 10 m, max drift 30 m in 60 s)
+- [x] Wire pumping cycle (TensionController + body_z_eq tilt strategy) into mediator
+- [x] Abstract rotor definition into YAML + API (rotor_definition.py, beaupoil_2026.yaml, de_schutter_2018.yaml)
+- [x] Wire rotor definition into mediator/aero/dynamics (replaces all hardcoded rotor constants)
+- [x] Physical model validation tests (test_physical_validation.py — 27 tests)
+- [x] Write pumping cycle stack test (test_pumping_cycle.py)
+- [x] **Run test_pumping_cycle — PASSED** (reel-out 211 N, reel-in 55 N, net energy +1901 J, peak 341 N, min alt 8.98 m)
+- [ ] Write rawes_params.parm (full ArduPilot parameter file for Pixhawk 6C)
+- [ ] ArduPilot helicopter frame configuration for RAWES (H_SWASH_TYPE, H_PHANG, H_TAIL_TYPE)
+- [ ] Hardware-in-the-loop testing with Pixhawk SITL (hil_interface.py)
+
+---
+
+## Phase 3 Plan
+
+Four milestones. M1+M2 are complete. M3 is in progress. M4 not started.
+
+### M1 — Wire Pumping Cycle into Mediator ✅
+- TensionController, orbit_tracked_body_z_eq, blend_body_z → `controller.py`
+- Pumping cycle state machine in `mediator.py` (REEL_OUT/REEL_IN phases, winch step, TensionController)
+- Telemetry columns: pumping_phase, tether_rest_length, tension_setpoint, collective_from_tension_ctrl
+- **Gate:** All unit tests pass, test_acro_hold passes ✓
+
+### M2 — Force Balance Audit & Rotor Abstraction ✅
+- Equilibrium collective confirmed ~−5.7° (rotor over-generates lift; tether balances)
+- `test_force_balance.py` passes (10 tests)
+- `rotor_definition.py` — full RotorDefinition API with validation, derived geometry, aero/dynamics factory helpers
+- `rotor_definitions/beaupoil_2026.yaml` — actual hardware spec (4 blades, 2 m, 5 kg, SG6042, Kaman flaps estimated)
+- `rotor_definitions/de_schutter_2018.yaml` — thesis reference (3 blades, 1.5 m, 40 kg)
+- `test_rotor_definition.py` — 67 tests; `test_physical_validation.py` — 27 tests
+- Mediator/aero/dynamics fully wired to rotor definition (no hardcoded rotor constants)
+- **Gate:** 265 unit tests pass ✓
+
+### M3 — ArduPilot Configuration & Pumping Cycle Stack Test (in progress)
+- [x] `test_pumping_cycle.py` written (stack test — mirrors test_deschutter_cycle.py)
+- [ ] Run test_pumping_cycle — confirm reel-in tension < reel-out, net energy > 0
+- [ ] Confirm H_SWASH_TYPE=1 (H3-120) in SITL
+- [ ] Determine H_PHANG via step cyclic → measure tilt response
+- [ ] Configure GB4008 tail: H_TAIL_TYPE, SERVO4_TRIM, yaw rate PID
+- [ ] Write `rawes_params.parm` (full parameter file for Pixhawk 6C)
+- **Gate:** test_pumping_cycle passes + rawes_params.parm exists
+
+### M4 — Hardware-in-the-Loop (Pixhawk 6C)
+- [ ] Write `hil_interface.py` — MAVLink HIL_SENSOR / HIL_GPS / HIL_ACTUATOR_CONTROLS
+- [ ] Add --hil-mode --hil-port to mediator
+- [ ] Confirm IMU mounting orientation (AHRS_ORIENTATION)
+- [ ] Write `test_hil_interface.py` (unit test with fake MAVLink)
+- [ ] Document HIL bench procedure in ARMING.md
+- **Gate:** test_hil_interface.py passes + successful 60 s HIL telemetry log

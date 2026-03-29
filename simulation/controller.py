@@ -463,6 +463,91 @@ class PhysicalHoldController:
         return rc
 
 
+# ---------------------------------------------------------------------------
+# Pumping cycle helpers — used by mediator (--pumping-cycle) and unit tests
+# ---------------------------------------------------------------------------
+
+class TensionController:
+    """
+    PI controller: adjusts collective_rad to maintain requested tether tension.
+
+    Designed for use at 400 Hz.  Anti-windup clamps the integrator so the
+    integral term cannot push the output beyond [coll_min, coll_max].
+    """
+
+    def __init__(self, setpoint_n: float, kp: float = 5e-4, ki: float = 1e-4,
+                 coll_min: float = -0.10, coll_max: float = 0.20):
+        self.setpoint  = float(setpoint_n)
+        self.kp        = float(kp)
+        self.ki        = float(ki)
+        self.coll_min  = float(coll_min)
+        self.coll_max  = float(coll_max)
+        self._integral = 0.0
+
+    def update(self, tension_actual: float, dt: float) -> float:
+        error           = self.setpoint - tension_actual
+        self._integral += error * dt
+        self._integral  = float(np.clip(
+            self._integral,
+            self.coll_min / max(self.ki, 1e-12),
+            self.coll_max / max(self.ki, 1e-12),
+        ))
+        raw = self.kp * error + self.ki * self._integral
+        return float(np.clip(raw, self.coll_min, self.coll_max))
+
+
+def orbit_tracked_body_z_eq(
+    cur_pos:     np.ndarray,
+    tether_dir0: np.ndarray,
+    body_z_eq0:  np.ndarray,
+) -> np.ndarray:
+    """
+    Rotate body_z_eq0 azimuthally to track the hub's orbital position.
+
+    As the hub orbits, the tether direction rotates in the horizontal plane.
+    This function rotates the initial equilibrium body_z by the same azimuthal
+    angle, keeping body_z_eq consistent with the hub's aerodynamic equilibrium
+    at each orbit position.
+
+    At t=0 (cur_pos = initial pos) returns body_z_eq0 unchanged → zero error
+    and zero tilt at the natural equilibrium.
+    """
+    cur_tdir = cur_pos / np.linalg.norm(cur_pos)
+    th0h = np.array([tether_dir0[0], tether_dir0[1], 0.0])
+    thh  = np.array([cur_tdir[0],    cur_tdir[1],    0.0])
+    n0h = np.linalg.norm(th0h); nhh = np.linalg.norm(thh)
+    if n0h < 0.01 or nhh < 0.01:
+        return body_z_eq0.copy()
+    th0h /= n0h; thh /= nhh
+    cos_phi = float(np.clip(np.dot(th0h, thh), -1.0, 1.0))
+    sin_phi = float(th0h[0] * thh[1] - th0h[1] * thh[0])
+    bz0    = body_z_eq0
+    result = np.array([
+        cos_phi * bz0[0] - sin_phi * bz0[1],
+        sin_phi * bz0[0] + cos_phi * bz0[1],
+        bz0[2],
+    ])
+    return result / np.linalg.norm(result)
+
+
+def blend_body_z(
+    alpha:    float,
+    bz_start: np.ndarray,
+    bz_end:   np.ndarray,
+) -> np.ndarray:
+    """
+    Linearly blend two unit vectors and renormalise.
+
+    alpha=0 → bz_start, alpha=1 → bz_end.  Not true SLERP but accurate
+    enough for smooth attitude transitions over several seconds.
+    """
+    alpha   = float(np.clip(alpha, 0.0, 1.0))
+    blended = (1.0 - alpha) * np.asarray(bz_start, dtype=float) \
+            + alpha          * np.asarray(bz_end,   dtype=float)
+    n = np.linalg.norm(blended)
+    return blended / n if n > 1e-6 else np.asarray(bz_end, dtype=float).copy()
+
+
 def make_hold_controller(
     sensor_mode: str,
     anchor_ned:  "np.ndarray | None" = None,

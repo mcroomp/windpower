@@ -8,9 +8,10 @@ Implements the two-phase strategy from De Schutter et al. (2018) Fig. 4:
     High collective → high thrust along tether → high tension → high power.
 
   Reel-in (recovery):
-    Rotor tilt ξ > 70° from wind direction (body_z tilted toward vertical).
-    Body_z ≈ [0, 0, 1] so thrust acts upward, not along tether direction.
-    Winch reels in against near-zero aerodynamic resistance → low tension → low energy cost.
+    Rotor tilt ξ = 55° from wind direction — constrained from the original 90° to
+    stay within BEM model validity (v_axial > 0) and cyclic linearity range.
+    Reduced thrust along tether → lower tension → lower energy cost.
+    Tension ratio ~0.6× reel-out (vs ~0.25× at ξ=90°) but model remains valid.
 
 The key difference from a naive collective-only approach: tilt is the primary
 lever for reducing reel-in tension, not collective.  By tilting body_z to
@@ -20,7 +21,7 @@ along the tether direction plus inertia — much lower than during reel-out.
 
 Controller split:
   - Attitude   → compute_swashplate_from_state  (tilt_lon / tilt_lat)
-                 body_z_eq transitions from tether-aligned to vertical at reel-in
+                 body_z_eq transitions from tether-aligned to ξ=55° at reel-in
   - Collective → TensionController (same as test_pumping_cycle.py)
   - Winch      → tether.rest_length ±= v_reel × DT  each step
 
@@ -30,6 +31,7 @@ Pass criteria:
   3. Net energy positive  (reel-out energy > reel-in energy).
   4. Peak tension stays below 80% of tether break load.
 """
+import math
 import sys
 from pathlib import Path
 
@@ -38,11 +40,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dynamics   import RigidBodyDynamics
-from aero       import RotorAero
-from tether     import TetherModel
-from controller import compute_swashplate_from_state
-from frames     import build_orb_frame
+pytestmark = pytest.mark.simtest
+
+import rotor_definition as rd
+from dynamics    import RigidBodyDynamics
+from aero        import create_aero
+from tether      import TetherModel
+from controller  import compute_swashplate_from_state
+from trajectory  import DeschutterTrajectory
+from frames      import build_orb_frame
 
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT            = 1.0 / 400.0
@@ -55,8 +61,6 @@ REST_LENGTH0  = 49.949
 
 T_AERO_OFFSET = 45.0
 
-K_DRIVE_SPIN   = 1.4
-K_DRAG_SPIN    = 0.01786
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 
@@ -70,71 +74,9 @@ T_TRANSITION  =  5.0    # s — body_z blend from tether-aligned to vertical at 
 V_REEL_OUT    =  0.4    # m/s
 V_REEL_IN     =  0.4    # m/s
 
-# Reel-in body_z target: rotor axis pointing up → thrust upward, not along tether
-# ξ = cos⁻¹(dot([0,0,1], [1,0,0])) = 90° > 70°  ✓  (De Schutter criterion satisfied)
-BODY_Z_REEL_IN = np.array([0.0, 0.0, 1.0])
-
-# Tension setpoints passed to TensionController
+# Tension setpoints
 DEFAULT_TENSION_OUT = 200.0   # N
 DEFAULT_TENSION_IN  =  20.0   # N
-
-
-# ── Re-use TensionController from test_pumping_cycle ──────────────────────────
-
-class TensionController:
-    """PI controller: adjusts collective to maintain requested tether tension."""
-
-    def __init__(self, setpoint_n, kp=5e-4, ki=1e-4, coll_min=-0.10, coll_max=0.20):
-        self.setpoint  = float(setpoint_n)
-        self.kp        = float(kp)
-        self.ki        = float(ki)
-        self.coll_min  = float(coll_min)
-        self.coll_max  = float(coll_max)
-        self._integral = 0.0
-
-    def update(self, tension_actual, dt):
-        error           = self.setpoint - tension_actual
-        self._integral += error * dt
-        self._integral  = np.clip(
-            self._integral,
-            self.coll_min / max(self.ki, 1e-12),
-            self.coll_max / max(self.ki, 1e-12),
-        )
-        raw = self.kp * error + self.ki * self._integral
-        return float(np.clip(raw, self.coll_min, self.coll_max))
-
-
-# ── Orbit-tracking helper ─────────────────────────────────────────────────────
-
-def _orbit_tracked_body_z_eq(cur_pos, tether_dir0, body_z_eq0):
-    """Rotate body_z_eq0 azimuthally to track the hub's orbital position."""
-    cur_tdir = cur_pos / np.linalg.norm(cur_pos)
-    th0h = np.array([tether_dir0[0], tether_dir0[1], 0.0])
-    thh  = np.array([cur_tdir[0],    cur_tdir[1],    0.0])
-    n0h = np.linalg.norm(th0h); nhh = np.linalg.norm(thh)
-    if n0h < 0.01 or nhh < 0.01:
-        return body_z_eq0
-    th0h /= n0h; thh /= nhh
-    cos_phi = float(np.clip(np.dot(th0h, thh), -1.0, 1.0))
-    sin_phi = float(th0h[0] * thh[1] - th0h[1] * thh[0])
-    bz0 = body_z_eq0
-    result = np.array([
-        cos_phi * bz0[0] - sin_phi * bz0[1],
-        sin_phi * bz0[0] + cos_phi * bz0[1],
-        bz0[2],
-    ])
-    return result / np.linalg.norm(result)
-
-
-def _blend_body_z(alpha, bz_start, bz_end):
-    """
-    Linearly blend two unit vectors and renormalise.  alpha=0 → bz_start,
-    alpha=1 → bz_end.  Not true SLERP but accurate enough for smooth transitions.
-    """
-    alpha = float(np.clip(alpha, 0.0, 1.0))
-    blended = (1.0 - alpha) * bz_start + alpha * bz_end
-    n = np.linalg.norm(blended)
-    return blended / n if n > 1e-6 else bz_end
 
 
 # ── Main simulation ────────────────────────────────────────────────────────────
@@ -147,83 +89,87 @@ def _run_deschutter_cycle(
     t_reel_out:   float = T_REEL_OUT,
     t_reel_in:    float = T_REEL_IN,
     t_transition: float = T_TRANSITION,
+    n_cycles:     int   = 1,
 ) -> dict:
     """
-    Run one De Schutter-style reel-out / reel-in pumping cycle.
+    Run n_cycles De Schutter-style reel-out / reel-in pumping cycles.
 
-    The rotor axis (body_z) transitions from tether-aligned to vertical at
-    the start of reel-in, implementing De Schutter's tilt strategy.
+    Phase per cycle:
+      Reel-out: body_z tether-aligned, high collective → high tension → power.
+      Reel-in:  body_z transitions to vertical over t_transition seconds →
+                thrust acts upward, low tether tension → low winch energy cost.
+
+    Between reel-in and the next reel-out, body_z blends back from vertical
+    to tether-aligned over t_transition seconds.
     """
     dyn    = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
         R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
     )
-    aero   = RotorAero()
+    aero   = create_aero(rd.default())
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
-    ctrl_out = TensionController(setpoint_n=tension_out)
-    ctrl_in  = TensionController(setpoint_n=tension_in)
+    trajectory = DeschutterTrajectory(
+        t_reel_out      = t_reel_out,
+        t_reel_in       = t_reel_in,
+        t_transition    = t_transition,
+        v_reel_out      = v_reel_out,
+        v_reel_in       = v_reel_in,
+        tension_out     = tension_out,
+        tension_in      = tension_in,
+        wind_enu        = WIND,
+        rest_length_min = REST_LENGTH0,
+    )
 
-    hub_state   = dyn.state
-    omega_spin  = OMEGA_SPIN0
-    tether_dir0 = POS0 / np.linalg.norm(POS0)
-    body_z_eq0  = BODY_Z0.copy()
+    hub_state  = dyn.state
+    omega_spin = OMEGA_SPIN0
 
-    t_total  = t_reel_out + t_reel_in
-    n_steps  = int(t_total / DT)
+    t_total   = n_cycles * (t_reel_out + t_reel_in)
+    n_steps   = int(t_total / DT)
     rec_every = int(1.0 / DT)
+    tel_every = max(1, int(0.05 / DT))
 
-    ts            = []
-    tensions      = []
-    altitudes     = []
-    rest_lengths  = []
-    collectives   = []
-    tilts_from_wind = []    # ξ = angle between body_z and wind direction [deg]
-    floor_hits    = 0
+    ts               = []
+    tensions         = []
+    tensions_out_acc = []
+    tensions_in_acc  = []
+    altitudes        = []
+    rest_lengths     = []
+    collectives      = []
+    tilts_from_wind  = []
+    floor_hits       = 0
+    telemetry        = []
+    energy_out       = 0.0
+    energy_in        = 0.0
 
-    energy_out = 0.0
-    energy_in  = 0.0
-    tension_now = 0.0
+    sw          = {"tilt_lon": 0.0, "tilt_lat": 0.0}
+    cmd         = {"collective_rad": 0.0, "body_z_eq": BODY_Z0.copy(),
+                   "phase": "reel-out", "tension_setpoint": tension_out}
+    tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
+    tension_now = tether._last_info.get("tension", 0.0)
 
     for i in range(n_steps):
         t = i * DT
-        phase_out = t < t_reel_out
 
-        # ── Winch: update rest_length ─────────────────────────────────────
-        if phase_out:
-            tether.rest_length += v_reel_out * DT
-        else:
-            new_rl = tether.rest_length - v_reel_in * DT
-            tether.rest_length = max(REST_LENGTH0, new_rl)
-
-        # ── Body_z_eq target: tether-aligned (reel-out), vertical (reel-in) ──
-        if phase_out:
-            body_z_eq_cur = _orbit_tracked_body_z_eq(
-                hub_state["pos"], tether_dir0, body_z_eq0)
-        else:
-            # Transition from tether-aligned to vertical over t_transition seconds
-            t_since_reel_in = t - t_reel_out
-            alpha = t_since_reel_in / t_transition
-            bz_tether = _orbit_tracked_body_z_eq(
-                hub_state["pos"], tether_dir0, body_z_eq0)
-            body_z_eq_cur = _blend_body_z(alpha, bz_tether, BODY_Z_REEL_IN)
-
-        # ── Collective from tension PI controller ─────────────────────────
-        ctrl       = ctrl_out if phase_out else ctrl_in
-        collective = ctrl.update(tension_now, DT)
+        # ── Trajectory: winch + body_z_eq + collective ────────────────────
+        traj_state = {
+            "pos": hub_state["pos"], "vel": hub_state["vel"],
+            "R":   hub_state["R"],   "omega": hub_state["omega"],
+            "omega_spin": omega_spin, "tension": tension_now,
+            "wind": WIND, "t_free": t,
+        }
+        cmd = trajectory.step(traj_state, tether, DT)
 
         # ── Attitude controller → tilt ────────────────────────────────────
         sw = compute_swashplate_from_state(
-            hub_state  = hub_state,
-            anchor_pos = ANCHOR,
-            body_z_eq  = body_z_eq_cur,
-        )
+            hub_state=hub_state, anchor_pos=ANCHOR,
+            body_z_eq=cmd["body_z_eq"])
 
         # ── Aerodynamics ──────────────────────────────────────────────────
         forces = aero.compute_forces(
-            collective_rad = collective,
+            collective_rad = cmd["collective_rad"],
             tilt_lon       = sw["tilt_lon"],
             tilt_lat       = sw["tilt_lat"],
             R_hub          = hub_state["R"],
@@ -240,35 +186,50 @@ def _run_deschutter_cycle(
         tension_now = tether._last_info.get("tension", 0.0)
 
         # ── Energy accounting ─────────────────────────────────────────────
-        if phase_out:
+        if cmd["phase"] == "reel-out":
             energy_out += tension_now * v_reel_out * DT
+            tensions_out_acc.append(tension_now)
         else:
             energy_in  += tension_now * v_reel_in  * DT
+            tensions_in_acc.append(tension_now)
 
-        # ── Spin & moment ─────────────────────────────────────────────────
-        Q_spin     = K_DRIVE_SPIN * aero.last_v_inplane - K_DRAG_SPIN * omega_spin ** 2
-        omega_spin = max(OMEGA_SPIN_MIN, omega_spin + Q_spin / I_SPIN_KGMS2 * DT)
-
+        # ── Spin & dynamics ───────────────────────────────────────────────
+        omega_spin = max(OMEGA_SPIN_MIN,
+                         omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
         M_orbital  = forces[3:6] - aero.last_M_spin
         M_orbital += -50.0 * hub_state["omega"]
-
-        hub_state = dyn.step(forces[0:3], M_orbital, DT, omega_spin=omega_spin)
+        hub_state  = dyn.step(forces[0:3], M_orbital, DT, omega_spin=omega_spin)
 
         if hub_state["pos"][2] <= 1.05:
             floor_hits += 1
 
-        # ── Record ────────────────────────────────────────────────────────
+        # ── Record (1 Hz) ─────────────────────────────────────────────────
         if i % rec_every == 0:
             body_z_cur = hub_state["R"][:, 2]
             xi_deg = float(np.degrees(np.arccos(
                 np.clip(np.dot(body_z_cur, WIND / np.linalg.norm(WIND)), -1.0, 1.0)
             )))
-            ts.append(t)
-            tensions.append(tension_now)
+            ts.append(t); tensions.append(tension_now)
             altitudes.append(hub_state["pos"][2])
             rest_lengths.append(tether.rest_length)
-            collectives.append(collective)
+            collectives.append(cmd["collective_rad"])
             tilts_from_wind.append(xi_deg)
+
+        # ── Telemetry (20 Hz) ─────────────────────────────────────────────
+        if i % tel_every == 0:
+            telemetry.append({
+                "t":                  t,
+                "pos_enu":            hub_state["pos"].tolist(),
+                "R":                  hub_state["R"].tolist(),
+                "omega_spin":         omega_spin,
+                "tether_tension":     tension_now,
+                "tether_rest_length": tether.rest_length,
+                "swash_collective":   cmd["collective_rad"],
+                "swash_tilt_lon":     sw["tilt_lon"],
+                "swash_tilt_lat":     sw["tilt_lat"],
+                "body_z_eq":          cmd["body_z_eq"].tolist(),
+                "wind_enu":           WIND.tolist(),
+            })
 
     # Final snapshot
     body_z_cur = hub_state["R"][:, 2]
@@ -277,24 +238,28 @@ def _run_deschutter_cycle(
     )))
     ts.append(t_total); tensions.append(tension_now)
     altitudes.append(hub_state["pos"][2]); rest_lengths.append(tether.rest_length)
-    collectives.append(collective); tilts_from_wind.append(xi_deg)
+    collectives.append(cmd["collective_rad"]); tilts_from_wind.append(xi_deg)
 
     split = int(t_reel_out)
     return dict(
-        ts              = ts,
-        tensions        = tensions,
-        tensions_out    = tensions[:split],
-        tensions_in     = tensions[split:],
-        altitudes       = altitudes,
-        rest_lengths    = rest_lengths,
-        collectives     = collectives,
-        tilts_from_wind = tilts_from_wind,
-        floor_hits      = floor_hits,
-        energy_out      = energy_out,
-        energy_in       = energy_in,
-        net_energy      = energy_out - energy_in,
-        tension_out_sp  = tension_out,
-        tension_in_sp   = tension_in,
+        ts               = ts,
+        tensions         = tensions,
+        tensions_out     = tensions[:split],
+        tensions_in      = tensions[split:split + int(t_reel_in)],
+        tensions_out_all = tensions_out_acc,
+        tensions_in_all  = tensions_in_acc,
+        altitudes        = altitudes,
+        rest_lengths     = rest_lengths,
+        collectives      = collectives,
+        tilts_from_wind  = tilts_from_wind,
+        floor_hits       = floor_hits,
+        energy_out       = energy_out,
+        energy_in        = energy_in,
+        net_energy       = energy_out - energy_in,
+        tension_out_sp   = tension_out,
+        tension_in_sp    = tension_in,
+        n_cycles         = n_cycles,
+        telemetry        = telemetry,
     )
 
 
@@ -344,9 +309,11 @@ def test_deschutter_net_energy_positive():
 
 def test_deschutter_reel_in_tilt_achieved():
     """
-    During steady reel-in (after transition), body_z must be tilted more
-    than 60° from the wind direction — approaching the De Schutter >70° target.
-    (60° is used here rather than 70° to allow for attitude controller lag.)
+    During steady reel-in (after transition), body_z must be within ±10° of the
+    constrained target ξ = 55° from the wind direction.
+
+    The 55° constraint keeps the model within BEM validity (v_axial > 0) and the
+    cyclic linearity range.  Controller lag is allowed ±10° around the target.
     """
     r = _run_deschutter_cycle()
     skip = int(T_TRANSITION) + 2   # allow a couple of extra seconds for settling
@@ -354,9 +321,10 @@ def test_deschutter_reel_in_tilt_achieved():
     if not tilts_steady:
         pytest.skip("No steady reel-in data to check tilt")
     mean_tilt = float(np.mean(tilts_steady))
-    assert mean_tilt >= 60.0, (
-        f"Steady reel-in mean tilt ξ = {mean_tilt:.1f}° < 60° — "
-        "body_z not sufficiently tilted away from wind"
+    xi_target = 55.0   # default xi_reel_in_deg in DeschutterTrajectory
+    assert xi_target - 10.0 <= mean_tilt <= xi_target + 10.0, (
+        f"Steady reel-in mean tilt ξ = {mean_tilt:.1f}° not within ±10° of "
+        f"target {xi_target:.0f}° — body_z not tracking constrained reel-in orientation"
     )
 
 
@@ -407,3 +375,26 @@ def _print_cycle(r):
     print(f"  Reel-in (steady): mean={np.mean(inn):.1f}N  max={max(inn):.1f}N  "
           f"energy={r['energy_in']:.1f}J")
     print(f"  Net energy: {r['net_energy']:.1f}J  floor_hits={r['floor_hits']}")
+
+
+# ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────
+if __name__ == "__main__":
+    import argparse as _ap
+    p = _ap.ArgumentParser(description="Run De Schutter cycle and save telemetry")
+    p.add_argument("--save-telemetry", metavar="PATH",
+                   default="telemetry_deschutter.json",
+                   help="Output JSON path (default: telemetry_deschutter.json)")
+    args = p.parse_args()
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from simulation.viz3d.telemetry import save_telemetry  # type: ignore
+
+    result = _run_deschutter_cycle(n_cycles=2)
+    print(f"Cycles: {result['n_cycles']}  "
+          f"Reel-out energy: {result['energy_out']:.1f} J  "
+          f"Reel-in energy: {result['energy_in']:.1f} J  "
+          f"Net: {result['net_energy']:.1f} J  "
+          f"Floor hits: {result['floor_hits']}")
+    save_telemetry(args.save_telemetry, result["telemetry"])
+    print(f"\nRun visualizer:")
+    print(f"  python simulation/viz3d/visualize_3d.py {args.save_telemetry}")

@@ -1,0 +1,89 @@
+# PCA-2 Autogyro Rotor — NACA Langley Wind Tunnel Test 1934
+# Source: Wheatley & Hood, NACA Report 515 (1934).
+# Test data digitized by Franklin D. Harris, NASA/CR-2008-215370 (2008),
+# Appendix 11.8 (performance data) and 11.5 (blade section properties).
+#
+# ── Simplifications vs actual PCA-2 ─────────────────────────────────────────
+# This is a constant-chord, zero-twist BEM approximation of the actual blade,
+# which has:
+#   - non-linear twist (~2.4° root to ~0.4° mid to ~1.8° tip)
+#   - two airfoil sections (cambered inboard, Göttingen 429 outboard)
+#   - elliptical chord taper from r=249" to r=270" (tip only)
+#   - articulated flap and lag hinges (not modeled)
+# These simplifications are appropriate for order-of-magnitude BEM validation.
+#
+# Derived non-dimensional quantities (for reference):
+#   Solidity:    σ = N·c / (π·R) = 4×0.552 / (π×6.858) = 0.1028
+#   Lock number: γ = ρ·a·c·R⁴ / I_b = 1.225×5.7×0.552×6.858⁴/453 = 19.2 ✓ (matches Harris)
+#   Disk area:   A = π·R² = π×6.858² = 147.7 m²  (full disk, no root cutout per NACA convention)
+#   Tip speed:   Ω·R = 10.43×6.858 = 71.5 m/s at ~99.6 RPM
+#   Re at r_cp:  Ω·r_cp·c/ν ≈ 10.43×4.57×0.552/1.5e-5 ≈ 1,960,000
+
+name: pca2_1934
+description: >
+  PCA-2 autogyro rotor, 4 blades, 45 ft diameter, Göttingen 429 airfoil.
+  Constant-chord / zero-twist BEM approximation for model validation.
+  Wind-tunnel tested in NACA 30×60 ft tunnel at Langley (1934).
+  Reference: Wheatley & Hood NACA Report 515 (1934);
+  Harris, NASA/CR-2008-215370 Appendix 11.8 & 11.9.
+
+rotor:
+  # Fundamental geometry
+  n_blades:      4          # N — number of blades
+  radius_m:      6.858      # R — tip radius [m]  (45 ft / 2 = 22.5 ft = 6.858 m)
+  root_cutout_m: 0.500      # r_root — approximate hub root cutout [m]
+                             # NACA convention uses full disk area (A=πR²), no cutout.
+                             # Cutout modeled here only to avoid BEM singularity at r=0.
+  chord_m:       0.552      # c — nominal chord [m]  (1.81 ft from Harris App. 11.5)
+                             # Simplified: constant along span (actual: slight taper at tip)
+  twist_deg:     0.0        # θ_tw — simplified zero-twist (actual: non-linear 0–2.4°)
+  taper_ratio:   1.0        # simplified rectangular (actual: elliptical tip taper last 21")
+
+airfoil:
+  designation:       Goettingen429
+  source:            "Lock & Townend R&M 1066 (1926); Harris NASA/CR-2008-215370 App. 11.9"
+  # Göttingen 429 is a symmetrical airfoil → no camber lift
+  # CL = CL_alpha · α  (no CL0 term)
+  # From Harris C81 table at α=5°:
+  #   Re=200,000:   CL=0.4975 → a ≈ 5.70/rad
+  #   Re=2,000,000: CL=0.5405 → a ≈ 6.19/rad
+  CL0:               0.0    # symmetrical airfoil
+  CL_alpha_per_rad:  5.7    # a — conservative (Re≈200k; actual operating Re≈1.96M gives 6.19)
+  # Drag polar: CD = CD0 + CL²/(π·AR·e)
+  # From Harris C81 table at α=0°:
+  #   Re=2,000,000: CD0 = 0.01020
+  #   Re=200,000:   CD0 = 0.01375  (use conservative value)
+  CD0:               0.012  # zero-lift drag (mid-range between Re extremes)
+  oswald_efficiency: 0.85   # e — span efficiency
+  alpha_stall_deg:   12.0   # α_stall — linear model valid to ~12° for Göttingen 429
+  Re_design:         200000  # calibration Re (Lock & Townend 1926)
+  Re_operating:      1960000 # actual Re at r_cp = 4.57 m, Ω=10.43 rad/s, c=0.552 m
+
+inertia:
+  mass_kg:           145.0    # m — rotor assembly (blades + hub); estimated
+  # Hub body inertia [I_xx, I_yy, I_zz] in principal body frame [kg·m²]
+  # Dominated by blade mass: I_b ≈ m_blade × r_cp² × N ≈ 36×4.57²×4 ≈ 3000 kg·m²
+  I_body_kgm2:       [1800.0, 1800.0, 3600.0]
+  I_spin_kgm2:       0.0      # gyroscopic coupling disabled (single-body model)
+  # From Harris App. 11.8: Flap Moment of Inertia = 334 slug·ft²
+  I_blade_flap_kgm2: 453.0    # I_b = 334 slug·ft² × 1.3558 = 453 kg·m²
+
+control:
+  K_cyc:       0.4            # cyclic moment gain (not used in autorotation tests)
+  aero_ramp_s: 5.0            # linear ramp duration [s]
+  kaman_flap:
+    enabled: false            # PCA-2 uses fixed blade pitch (no collective/cyclic control)
+
+autorotation:
+  # Calibration: ω_eq at ~99.6 RPM = 10.43 rad/s
+  # At test condition μ=0.341, αs=4.0°: V = 0.341×10.43×6.858/cos(4°) = 24.37 m/s
+  # v_inplane = V × cos(4°) = 24.31 m/s
+  # ω_eq² = K_drive / K_drag × v_inplane  →  K_drive/K_drag = 10.43²/24.31 = 4.47 m/s
+  K_drive_Nms_m:      50.0    # K_drive [N·m·s/m] — drive torque per (m/s) in-plane wind
+  K_drag_Nms2_rad2:   11.19   # K_drag = K_drive / (ω_eq²/v_inplane) = 50/4.47 [N·m·s²/rad²]
+  I_ode_kgm2:         453.0   # I_ode = I_blade_flap for spin ODE
+  omega_min_rad_s:    1.0     # ω_min — lower clamp
+  omega_eq_rad_s:     10.43   # ~99.6 RPM design point
+
+environment:
+  rho_kg_m3: 1.225            # ρ — air density [kg/m³]  (sea level, 15°C)

@@ -28,10 +28,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+pytestmark = pytest.mark.simtest
+
 from dynamics   import RigidBodyDynamics
 from aero       import RotorAero
 from tether     import TetherModel
-from controller import compute_swashplate_from_state
+from controller import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq
 from frames     import build_orb_frame
 
 # ── Simulation constants ───────────────────────────────────────────────────────
@@ -63,86 +65,7 @@ DEFAULT_T_REEL_OUT   =  30.0   # s — reel-out phase duration
 DEFAULT_T_REEL_IN    =  30.0   # s — reel-in phase duration
 
 
-# ── Tension PI controller ──────────────────────────────────────────────────────
-
-class TensionController:
-    """
-    Proportional-integral controller that adjusts collective blade pitch to
-    maintain a requested tether tension setpoint.
-
-    Higher collective → more thrust → hub flies farther from anchor → higher tension.
-    Lower collective → less thrust → hub stays closer → lower tension.
-
-    Parameters
-    ----------
-    setpoint_n   : float   Target tether tension [N]
-    kp           : float   Proportional gain [rad / N]
-    ki           : float   Integral gain [rad / (N·s)]
-    coll_min     : float   Minimum collective [rad]
-    coll_max     : float   Maximum collective [rad]
-    """
-
-    def __init__(
-        self,
-        setpoint_n: float,
-        kp:         float = 5e-4,
-        ki:         float = 1e-4,
-        coll_min:   float = -0.05,
-        coll_max:   float =  0.20,
-    ):
-        self.setpoint  = float(setpoint_n)
-        self.kp        = float(kp)
-        self.ki        = float(ki)
-        self.coll_min  = float(coll_min)
-        self.coll_max  = float(coll_max)
-        self._integral = 0.0
-        self._coll     = 0.0   # initial collective
-
-    def update(self, tension_actual: float, dt: float) -> float:
-        """
-        Compute collective [rad] for one timestep.
-
-        Parameters
-        ----------
-        tension_actual : float   Measured tether tension [N]
-        dt             : float   Timestep [s]
-
-        Returns
-        -------
-        float   Collective blade pitch [rad]
-        """
-        error           = self.setpoint - tension_actual
-        self._integral += error * dt
-        # Anti-windup: clamp integral contribution
-        self._integral  = np.clip(
-            self._integral,
-            self.coll_min / max(self.ki, 1e-12),
-            self.coll_max / max(self.ki, 1e-12),
-        )
-        raw = self.kp * error + self.ki * self._integral
-        self._coll = float(np.clip(raw, self.coll_min, self.coll_max))
-        return self._coll
-
-
-# ── Orbit-tracking helper (identical to test_closed_loop_60s.py) ──────────────
-
-def _orbit_tracked_body_z_eq(cur_pos, tether_dir0, body_z_eq0):
-    cur_tdir = cur_pos / np.linalg.norm(cur_pos)
-    th0h = np.array([tether_dir0[0], tether_dir0[1], 0.0])
-    thh  = np.array([cur_tdir[0],    cur_tdir[1],    0.0])
-    n0h = np.linalg.norm(th0h); nhh = np.linalg.norm(thh)
-    if n0h < 0.01 or nhh < 0.01:
-        return body_z_eq0
-    th0h /= n0h; thh /= nhh
-    cos_phi = float(np.clip(np.dot(th0h, thh), -1.0, 1.0))
-    sin_phi = float(th0h[0] * thh[1] - th0h[1] * thh[0])
-    bz0 = body_z_eq0
-    result = np.array([
-        cos_phi * bz0[0] - sin_phi * bz0[1],
-        sin_phi * bz0[0] + cos_phi * bz0[1],
-        bz0[2],
-    ])
-    return result / np.linalg.norm(result)
+# TensionController and orbit_tracked_body_z_eq imported from controller.py
 
 
 # ── Main simulation ────────────────────────────────────────────────────────────
@@ -215,7 +138,7 @@ def _run_pumping_cycle(
         collective  = ctrl.update(tension_now, DT)
 
         # ── Attitude controller → tilt ────────────────────────────────────
-        body_z_eq_cur = _orbit_tracked_body_z_eq(
+        body_z_eq_cur = orbit_tracked_body_z_eq(
             hub_state["pos"], tether_dir0, body_z_eq0)
         sw = compute_swashplate_from_state(
             hub_state  = hub_state,
@@ -385,7 +308,7 @@ def test_static_tension_setpoint_range():
         for i in range(int(T_SIM / DT)):
             t = i * DT
             collective = ctrl.update(tension_now, DT)
-            body_z_eq_cur = _orbit_tracked_body_z_eq(
+            body_z_eq_cur = orbit_tracked_body_z_eq(
                 hub_state["pos"], tether_dir0, body_z_eq0)
             sw = compute_swashplate_from_state(
                 hub_state=hub_state, anchor_pos=ANCHOR, body_z_eq=body_z_eq_cur)

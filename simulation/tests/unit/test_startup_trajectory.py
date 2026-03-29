@@ -32,11 +32,10 @@ import pytest
 _SIM_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, os.path.abspath(_SIM_DIR))
 
-from mediator import (
-    compute_launch_position,
-    DEFAULT_POS0,
-    DEFAULT_VEL0,
-)
+from mediator import compute_launch_position
+import config as _mcfg
+DEFAULT_POS0 = _mcfg.DEFAULTS["pos0"]
+DEFAULT_VEL0 = _mcfg.DEFAULTS["vel0"]
 
 # ---------------------------------------------------------------------------
 # Constants

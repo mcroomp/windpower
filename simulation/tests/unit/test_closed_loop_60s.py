@@ -26,10 +26,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+pytestmark = pytest.mark.simtest
+
+import rotor_definition as rd
 from dynamics   import RigidBodyDynamics
-from aero       import RotorAero
+from aero       import create_aero
 from tether     import TetherModel
-from controller import compute_swashplate_from_state
+from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
 from frames     import build_orb_frame
 
 DT            = 1.0 / 400.0
@@ -41,36 +44,11 @@ VEL0          = np.array([-0.257,  0.916, -0.093])
 BODY_Z0       = np.array([0.851018, 0.305391, 0.427206])
 OMEGA_SPIN0   = 20.148
 
-K_DRIVE_SPIN   = 1.4
-K_DRAG_SPIN    = 0.01786
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 
 WIND = np.array([10.0, 0.0, 0.0])
 
-
-def _orbit_tracked_body_z_eq(cur_pos, tether_dir0, body_z_eq0):
-    """
-    Rotate body_z_eq0 by the azimuthal angle the tether direction has rotated
-    from its initial value.  Gives body_z_eq = body_z_eq0 at t=0 (zero error
-    at equilibrium) and smoothly tracks the orbit thereafter.
-    """
-    cur_tdir = cur_pos / np.linalg.norm(cur_pos)
-    th0h = np.array([tether_dir0[0], tether_dir0[1], 0.0])
-    thh  = np.array([cur_tdir[0],    cur_tdir[1],    0.0])
-    n0h = np.linalg.norm(th0h); nhh = np.linalg.norm(thh)
-    if n0h < 0.01 or nhh < 0.01:
-        return body_z_eq0
-    th0h /= n0h; thh /= nhh
-    cos_phi = float(np.clip(np.dot(th0h, thh), -1.0, 1.0))
-    sin_phi = float(th0h[0] * thh[1] - th0h[1] * thh[0])
-    bz0 = body_z_eq0
-    result = np.array([
-        cos_phi * bz0[0] - sin_phi * bz0[1],
-        sin_phi * bz0[0] + cos_phi * bz0[1],
-        bz0[2],
-    ])
-    return result / np.linalg.norm(result)
 
 
 def _run(t_sim: float = T_SIM):
@@ -79,7 +57,7 @@ def _run(t_sim: float = T_SIM):
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
         R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
     )
-    aero   = RotorAero()
+    aero   = create_aero(rd.default())
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=49.949,
                          axle_attachment_length=0.0)   # match mediator
 
@@ -87,6 +65,8 @@ def _run(t_sim: float = T_SIM):
     omega_spin = OMEGA_SPIN0
     history    = []
     floor_hits = 0
+    telemetry  = []   # 20 Hz rich frames for 3D visualizer
+    tel_every  = max(1, int(0.05 / DT))   # 20 Hz
 
     # Orbit-tracking reference (captured from initial state = BODY_Z0 at POS0)
     tether_dir0 = POS0 / np.linalg.norm(POS0)
@@ -96,7 +76,7 @@ def _run(t_sim: float = T_SIM):
         t = i * DT
 
         # Orbit-tracked equilibrium body_z: zero error at t=0
-        body_z_eq_cur = _orbit_tracked_body_z_eq(
+        body_z_eq_cur = orbit_tracked_body_z_eq(
             hub_state["pos"], tether_dir0, body_z_eq0)
 
         sw = compute_swashplate_from_state(
@@ -119,9 +99,10 @@ def _run(t_sim: float = T_SIM):
         tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
         forces[0:3] += tf
         forces[3:6] += tm
+        tension_now = tether._last_info.get("tension", 0.0)
 
-        Q_spin = K_DRIVE_SPIN * aero.last_v_inplane - K_DRAG_SPIN * omega_spin ** 2
-        omega_spin = max(OMEGA_SPIN_MIN, omega_spin + Q_spin / I_SPIN_KGMS2 * DT)
+        omega_spin = max(OMEGA_SPIN_MIN,
+                         omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
 
         M_orbital = forces[3:6] - aero.last_M_spin
         M_orbital += -50.0 * hub_state["omega"]
@@ -139,18 +120,33 @@ def _run(t_sim: float = T_SIM):
                 "floor_hits": floor_hits,
             })
 
+        if i % tel_every == 0:
+            telemetry.append({
+                "t":                   t,
+                "pos_enu":             hub_state["pos"].tolist(),
+                "R":                   hub_state["R"].tolist(),
+                "omega_spin":          omega_spin,
+                "tether_tension":      tension_now,
+                "tether_rest_length":  tether.rest_length,
+                "swash_collective":    sw["collective_rad"],
+                "swash_tilt_lon":      sw["tilt_lon"],
+                "swash_tilt_lat":      sw["tilt_lat"],
+                "body_z_eq":           body_z_eq_cur.tolist(),
+                "wind_enu":            WIND.tolist(),
+            })
+
     history.append({
         "t":          t_sim,
         "pos":        hub_state["pos"].copy(),
         "omega_spin": omega_spin,
         "floor_hits": floor_hits,
     })
-    return history
+    return history, telemetry
 
 
 def test_60s_altitude_maintained():
     """Hub must stay above z_floor=1 m for the full 60 s."""
-    history = _run()
+    history, _ = _run()
     for snap in history:
         print(f"  t={snap['t']:5.1f}s  z={snap['pos'][2]:.2f}m  "
               f"spin={snap['omega_spin']:.1f}  floor_hits={snap['floor_hits']}")
@@ -160,14 +156,14 @@ def test_60s_altitude_maintained():
 
 def test_60s_no_runaway():
     """Hub must not drift more than 200 m from anchor over 60 s."""
-    history = _run()
+    history, _ = _run()
     drifts = [float(np.linalg.norm(s["pos"])) for s in history]
     assert max(drifts) <= 200.0, f"Hub runaway: max drift={max(drifts):.1f} m"
 
 
 def test_60s_spin_maintained():
     """Rotor must stay above 5 rad/s for full 60 s (autorotation sustained)."""
-    history = _run()
+    history, _ = _run()
     spins = [s["omega_spin"] for s in history]
     assert min(spins) >= 5.0, f"Spin collapsed: min={min(spins):.2f} rad/s"
 
@@ -188,7 +184,25 @@ def test_zero_tilt_at_equilibrium():
     }
     tether_dir0 = POS0 / np.linalg.norm(POS0)
     body_z_eq0  = BODY_Z0.copy()
-    body_z_eq   = _orbit_tracked_body_z_eq(hub_state["pos"], tether_dir0, body_z_eq0)
+    body_z_eq   = orbit_tracked_body_z_eq(hub_state["pos"], tether_dir0, body_z_eq0)
     sw = compute_swashplate_from_state(hub_state, ANCHOR, body_z_eq=body_z_eq)
     assert abs(sw["tilt_lon"]) < 1e-6, f"tilt_lon={sw['tilt_lon']:.6f} at equilibrium (expected 0)"
     assert abs(sw["tilt_lat"]) < 1e-6, f"tilt_lat={sw['tilt_lat']:.6f} at equilibrium (expected 0)"
+
+
+# ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────
+if __name__ == "__main__":
+    import argparse as _ap
+    p = _ap.ArgumentParser(description="Run 60 s closed-loop sim and save telemetry")
+    p.add_argument("--save-telemetry", metavar="PATH",
+                   default="telemetry_closed_loop.json",
+                   help="Output JSON path (default: telemetry_closed_loop.json)")
+    args = p.parse_args()
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from simulation.viz3d.telemetry import save_telemetry  # type: ignore
+
+    _, tel = _run()
+    save_telemetry(args.save_telemetry, tel)
+    print(f"\nRun visualizer:")
+    print(f"  python simulation/viz3d/visualize_3d.py {args.save_telemetry}")

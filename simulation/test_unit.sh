@@ -3,4 +3,4 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cd /rawes && .venv/bin/python -m pytest -s simulation/tests/unit "$@"
+cd /rawes && .venv/bin/python -m pytest -s -m "not simtest" simulation/tests/unit "$@"

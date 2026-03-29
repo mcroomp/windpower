@@ -1,0 +1,66 @@
+# De Schutter 2018 — RAWES Reference Rotor Definition
+# Mathematical reference design from:
+#   De Schutter, Leuthold & Diehl (2018), "Optimal Control of a Rigid-Wing
+#   Rotary Kite System for Airborne Wind Energy", IFAC proceedings.
+#
+# NOT actual hardware — this is the theoretical reference model used in the
+# optimal control paper. Parameters from Table I of that paper.
+#
+# Derived non-dimensional quantities (computed by RotorDefinition):
+#   Solidity:    σ = N·c / (π·R) = 3×0.125 / (π×2.0) = 0.0597
+#   Aspect ratio: AR = (R - r_root) / c = 1.5 / 0.125 = 12.0   (matches Table I AR=12)
+#   Disk area:   A = π(R² - r_root²) = π(4.0 - 0.25) = 11.78 m²
+#   r_cp:        r_root + 2/3·(R - r_root) = 0.5 + 2/3×1.5 = 1.5 m
+
+name: de_schutter_2018
+description: >
+  3-blade RAWES reference rotor from De Schutter et al. (2018) optimal control paper.
+  Parameters from Table I of the paper. Not actual hardware — mathematical reference.
+  Mass 40 kg represents a larger prototype than the Beaupoil 2026 hardware (5 kg).
+
+rotor:
+  # Fundamental geometry (from De Schutter 2018 Table I)
+  n_blades:      3          # N — number of blades
+  radius_m:      2.0        # R — tip radius [m]
+  root_cutout_m: 0.5        # r_root — root cutout [m]  (estimated, not stated in paper)
+  chord_m:       0.125      # c — blade chord [m]  (AR=12 → span/c = 1.5/0.125 = 12 ✓)
+  twist_deg:     0.0        # θ_tw — no blade twist (stated in paper)
+  taper_ratio:   1.0        # rectangular blade
+
+airfoil:
+  designation:       "De Schutter 2018 (Table I)"
+  source:            "De Schutter et al. 2018, Table I"
+  # Lift model:  CL = CL0 + CL_alpha · α
+  CL0:               0.10   # zero-AoA lift
+  CL_alpha_per_rad:  0.87   # a = ∂CL/∂α  [/rad]  — De Schutter Table I
+  # Drag polar:  CD = CD0 + CL²/(π·AR·e)
+  CD0:               0.01   # zero-lift drag  — De Schutter Table I
+  oswald_efficiency: 0.8    # e — De Schutter Table I
+  alpha_stall_deg:   15.0   # α_stall — De Schutter Eq. 28 constraint ±15°
+  Re_design:         null   # not specified in paper
+
+inertia:
+  mass_kg:           40.0     # m — rotor mass (De Schutter reference)
+  # Inertia estimated from mass scaling: Beaupoil I_body × (40/5)
+  I_body_kgm2:       [40.0, 40.0, 80.0]  # scaled estimate [kg·m²]
+  I_spin_kgm2:       0.0
+  I_blade_flap_kgm2: null   # not stated in paper
+
+control:
+  K_cyc: 0.4
+  aero_ramp_s: 5.0
+  kaman_flap:
+    enabled: false
+    notes: >
+      De Schutter 2018 paper does not model Kaman flaps.
+      Blade pitch is commanded directly (abstract control input).
+
+autorotation:
+  K_drive_Nms_m:    1.4
+  K_drag_Nms2_rad2: 0.01786
+  I_ode_kgm2:       10.0
+  omega_min_rad_s:  0.5
+  omega_eq_rad_s:   null    # not calibrated for this rotor mass/geometry
+
+environment:
+  rho_kg_m3: 1.22

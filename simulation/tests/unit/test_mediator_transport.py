@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator
+import config as _mcfg
 from sitl_interface import SITLInterface
 
 
@@ -93,29 +94,20 @@ class FakeSensor:
 
 
 def _args(recv_port, send_port):
+    import tempfile, os as _os
+    cfg = _mcfg.defaults()
+    cfg["startup_damp_seconds"] = 0.0   # disable damping → immediate free flight
+    cfg["tether_rest_length"]   = 200.0
+    tmp = tempfile.mkdtemp()
+    cfg_path = _os.path.join(tmp, "transport_test_config.json")
+    _mcfg.save(cfg, cfg_path)
     return argparse.Namespace(
+        config=cfg_path,
+        run_id=None,
         sitl_recv_port=recv_port,
         sitl_send_port=send_port,
-        wind_x=10.0,
-        wind_y=0.0,
-        wind_z=0.0,
         log_level="WARNING",
         telemetry_log=None,
-        tether_rest_length=200.0,
-        startup_damp_seconds=0.0,   # disable damping so transport test hits physics path
-        startup_damp_k_vel=200.0,
-        startup_damp_k_ang=500.0,
-        startup_damp_k_pos=2000.0,
-        base_k_ang=50.0,
-        internal_controller=False,
-        internal_controller_ramp=3.0,
-        run_id=None,
-        pos0=None,
-        vel0=None,
-        body_z=None,
-        omega_spin=None,
-        lock_orientation=False,
-        sensor_mode="tether_relative",
     )
 
 
@@ -159,7 +151,11 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
 
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: real_sitl)
-    monkeypatch.setattr(mediator, "RotorAero",         lambda: fake_aero)
+    class _FakeRotorAero:
+        @classmethod
+        def from_definition(cls, defn):
+            return fake_aero
+    monkeypatch.setattr(mediator, "RotorAero", _FakeRotorAero)
     monkeypatch.setattr(mediator, "make_sensor",       lambda *a, **kw: fake_sensor)
 
     times = iter([10.0, 10.1, 10.1005])

@@ -1,0 +1,121 @@
+# Beaupoil 2026 — RAWES Rotor Definition
+# Hardware built and operated by Christof Beaupoil.
+#
+# Specification conventions follow helicopter/autogyro rotor literature:
+#   Leishman (2006), Bramwell (2001), De Schutter (2018), Weyel (2025).
+#
+# Derived non-dimensional quantities (for reference, computed by RotorDefinition):
+#   Solidity:    σ = N·c / (π·R) = 4×0.15 / (π×2.5) = 0.0764
+#   Aspect ratio: AR = (R - r_root) / c = 2.0 / 0.15 = 13.33
+#   Disk area:   A = π(R² - r_root²) = π(6.25 - 0.25) = 18.85 m²
+#   Lock number: γ = ρ·a·c·R⁴ / I_b  (TBD — I_b not yet measured)
+#   r_cp:        r_root + 2/3·(R - r_root) = 0.5 + 2/3×2.0 = 1.833 m
+
+name: beaupoil_2026
+description: >
+  4-blade RAWES rotor, 2 m EPP RG30 foam blades, SG6042 airfoil.
+  Hub outer diameter 1 m (r_root = 0.5 m).  Total rotor diameter 5 m.
+  Designed and built by Christof Beaupoil.
+
+rotor:
+  # Fundamental geometry
+  n_blades:      4          # N — number of blades
+  radius_m:      2.5        # R — tip radius [m]  (hub r + blade length = 0.5 + 2.0)
+  root_cutout_m: 0.5        # r_root — root cutout radius [m]  (= hub_diameter/2 = 1.0/2)
+  chord_m:       0.15       # c — blade chord [m]  (constant along span)
+  twist_deg:     0.0        # θ_tw — linear twist root→tip [°]  (no twist)
+  taper_ratio:   1.0        # c_tip/c_root — chord taper  (rectangular blade)
+
+airfoil:
+  designation:       SG6042
+  source:            "Weyel 2025, empirical fit at Re ≈ 127,000"
+  # Lift model:  CL = CL0 + CL_alpha · α
+  CL0:               0.11   # zero-AoA lift (camber of SG6042)
+  CL_alpha_per_rad:  0.87   # a = ∂CL/∂α  [/rad]  — empirical Weyel 2025
+                             # Note: thin-airfoil 3D theory gives ≈ 5.46/rad at AR=13.3;
+                             # Weyel value accounts for low Re, unsteady rotating flow.
+  # Drag polar:  CD = CD0 + CL²/(π·AR·e)
+  CD0:               0.01   # zero-lift drag
+  oswald_efficiency: 0.8    # e — span efficiency (Oswald)
+  # Stall
+  alpha_stall_deg:   15.0   # α_stall — AoA clamp for linear model validity [°]
+  # Empirical Re range
+  Re_design:         127000 # calibration Reynolds number
+  Re_operating:      370000 # actual Re at r_cp (= Ω·r_cp·c/ν ≈ 20×1.833×0.15/1.5e-5)
+                             # Operating Re > calibration Re → model is conservative
+
+inertia:
+  mass_kg:           5.0      # m — total rotor assembly (blades + hub + bearings)
+  # Hub body inertia [I_xx, I_yy, I_zz] in principal body frame [kg·m²]
+  I_body_kgm2:       [5.0, 5.0, 10.0]
+  # Spin-axis inertia for gyroscopic coupling term (disabled in current single-body model)
+  I_spin_kgm2:       0.0      # I_s — set >0 to enable gyroscopic precession
+  # Blade flap inertia about flap hinge (for Lock number calculation)
+  I_blade_flap_kgm2: null     # I_b — TBD (not yet measured)
+
+# Lock number γ = ρ·a·c·R⁴ / I_b
+# Governs aerodynamic/inertia coupling (high γ = aerodynamically stiff).
+# Typical helicopters: γ = 5–12.  Cannot compute until I_b is measured.
+# lock_number: null  # TBD
+
+control:
+  # Swashplate cyclic moment scaling
+  K_cyc: 0.4                 # cyclic moment gain: M_cyc = K_cyc·tilt_rad·T
+
+  # Aero ramp at simulation start (avoids impulsive loads from standing start)
+  aero_ramp_s: 5.0            # linear ramp duration [s]
+
+  kaman_flap:
+    # Kaman servo-flap (Kaman, US3217809 1965): trailing-edge control surface
+    # on each blade driven by push-rods from the non-rotating swashplate.
+    # A small flap deflection γ creates an aerodynamic pitching moment on the
+    # blade, changing blade pitch without direct mechanical pitch bearing loads.
+    # Effect: swashplate push-rod loads reduced significantly vs direct pitch control.
+    enabled: true
+
+    # ── Geometry (estimated — exact design not yet finalized) ────────────────
+    # GUESS: chord_fraction=0.25 (mid-range of typical 0.20–0.30 for Kaman designs).
+    # GUESS: outer 65% of blade span: span_start = root + 35%·span = 0.5 + 0.70 = 1.2 m;
+    #        span_end = blade tip = 2.5 m.
+    chord_fraction: 0.25      # e_f = flap chord / blade chord  [–]
+                              # GUESS: 0.25 (mid of typical 0.20–0.30 Kaman range)
+    span_start_m: 1.2         # inboard end of flap strip [m from rotation axis]
+                              # GUESS: outer 65% of blade (0.5 + 35%×2.0 = 1.2 m)
+    span_end_m: 2.5           # outboard end of flap strip [m from rotation axis]
+                              # GUESS: extends to blade tip (outboard loading maximises moment)
+
+    # ── Aerodynamic effectiveness ─────────────────────────────────────────────
+    # GUESS: τ = √(1 − e_f) ≈ √0.75 ≈ 0.87 (thin-airfoil upper bound); real Kaman
+    #        hardware achieves 0.3–0.6 due to Re effects and hinge losses. Mid-range: 0.45.
+    # GUESS: CM_gamma from thin-airfoil: ∂CM/∂γ ≈ −τ·CL_alpha·e_f/2 ≈ −0.45×2π×0.125 ≈ −0.35/rad
+    tau: 0.45                 # τ — GUESS: flap effectiveness ∂β_blade/∂γ_flap  [–]
+    CM_gamma_per_rad: -0.35   # ∂CM/∂γ — GUESS: pitching moment slope [/rad]
+
+    # ── Swashplate load effect ────────────────────────────────────────────────
+    # GUESS: swashplate_load_fraction=0.1 — designed to carry only ~10% of pitch
+    # control moment mechanically (90% reduction); consistent with Kaman patent claims.
+    swashplate_load_fraction: 0.1   # GUESS — see note below
+
+    notes: >
+      Push-rods from lower swashplate ring deflect trailing-edge flap on
+      each blade. The flap aerodynamic moment pitches the blade, providing
+      full cyclic and collective authority with minimal swashplate mechanical
+      load. See simulation/servoflaps.md and US patent US3217809 (Kaman/Bossler 1965).
+      Geometry values are GUESSES based on typical Kaman designs — to be confirmed from build.
+
+# Autorotation spin dynamics (simplified ODE, separate from 6-DOF body)
+# dω_spin/dt = (Q_drive − Q_drag) / I_ode
+# Q_drive = K_drive · v_inplane   [energy extraction from lateral wind]
+# Q_drag  = K_drag  · ω_spin²    [profile + induced drag torque]
+# Equilibrium: ω_eq = √(K_drive · v_inplane / K_drag)
+autorotation:
+  K_drive_Nms_m:       1.4      # K_drive [N·m·s/m]    — drive torque per (m/s) in-plane wind
+  K_drag_Nms2_rad2:    0.01786  # K_drag  [N·m·s²/rad²] — drag torque coefficient
+  I_ode_kgm2:          10.0     # I_ode [kg·m²] — effective spin inertia for ODE
+  omega_min_rad_s:     0.5      # ω_min — lower clamp (prevents divide-by-zero)
+  omega_eq_rad_s:      20.148   # ω_eq at design point (V_wind=10 m/s, v_inplane≈5.83 m/s)
+  # Calibration note: K_drive/K_drag tuned so ω_eq ≈ 20.1 rad/s at actual equilibrium
+  # v_inplane=5.83 m/s (wind projected onto disk plane at 30° tether elevation).
+
+environment:
+  rho_kg_m3:           1.22     # ρ — air density [kg/m³]  (sea level, 15°C)

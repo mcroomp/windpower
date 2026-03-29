@@ -1,0 +1,77 @@
+# NACA TR-552 Rotor C — NACA 4412
+# Wheatley & Bioletti (1936) "Wind-Tunnel Tests of 10-Foot-Diameter Autogiro Rotors"
+#
+# This rotor was tested in the NACA 20-ft wind tunnel and is the closest historical
+# analogue to the Beaupoil RAWES rotor:
+#   - Cambered NACA 4412 airfoil (4% camber, 12% thick) — comparable to SG6042
+#   - 4 blades, 0° twist, rectangular plan-form
+#   - Tested at μ = 0.06–0.90 across pitch settings −4.5° to +4.5°
+#
+# Derived non-dimensional quantities (computed by RotorDefinition):
+#   Solidity:    σ = N·c / (π·R) = 4×0.167 / (π×1.525) = 0.140
+#   Aspect ratio: AR = span / c = 1.068 / 0.167 = 6.4
+#   Disk area (annular): A = π(R² − r_root²) = π(2.326 − 0.209) = 6.65 m²
+#   r_cp = r_root + 2/3·span = 0.457 + 0.712 = 1.169 m
+#   Tip speed at 99.6 RPM: ΩR = 10.43 × 1.525 = 15.9 m/s
+#
+# NACA normalization for CL comparison:
+#   CL_NACA = T / (ρ · n² · D⁴)  where n = 99.6/60 = 1.66 rev/s, D = 3.05 m
+#           = T / 292.7 N  ≈  CT × π³/4  ≈  CT × 7.75
+
+name: naca_tr_552_c
+description: >
+  NACA TR-552 Rotor C — 4-blade, 10-ft diameter, NACA 4412 cambered airfoil.
+  Wheatley & Bioletti (1936) wind tunnel autogiro rotor.  Closest historical
+  analogue to the Beaupoil RAWES rotor.  Not for RAWES simulation — for
+  BEM validation against digitized experimental data.
+
+rotor:
+  n_blades:      4          # N — 4-blade rotor (same as Beaupoil)
+  radius_m:      1.525      # R = 5 ft = 1.524 m  (10-ft diameter / 2)
+  root_cutout_m: 0.457      # r_root = inner 30% = 0.30 × 1.525 m
+  chord_m:       0.167      # c — constant chord (nominal, from σ = N·c/(2πR) ≈ 0.070)
+  twist_deg:     0.0        # θ_tw — no blade twist
+  taper_ratio:   1.0        # rectangular plan-form
+
+airfoil:
+  designation:       "NACA 4412"
+  source:            "Thin-airfoil theory + NACA 4412 empirical at Re ≈ 130,000"
+  # NACA 4412: cambered (4% camber at 40% chord), 12% thick
+  # Zero-lift angle α₀ ≈ −4°  →  CL0 = CL_alpha × |α₀| = 5.7 × 4π/180 = 0.398
+  CL0:               0.40   # zero-AoA lift (camber of NACA 4412 at α=0, α₀=-4°)
+  # CL_alpha: using Weyel empirical effective value (0.87/rad) tuned for the
+  # lumped BEM at r_cp.  The 2D NACA 4412 value (5.7/rad) causes stall saturation
+  # at all conditions because the actuator-disk induced velocity pushes effective
+  # inflow angle to ≥ 14° regardless of collective pitch.  The lumped model requires
+  # a much lower effective slope to keep AoA in the linear range.
+  CL_alpha_per_rad:  0.87   # Weyel (2025) empirical effective slope [/rad]
+                             # (same as Beaupoil SG6042 — represents the whole-rotor
+                             #  effective lift response in the autorotation regime)
+  # Drag polar:  CD = CD0 + CL²/(π·AR·e)
+  CD0:               0.012  # NACA 4412 minimum profile drag at Re ≈ 130,000
+  oswald_efficiency: 0.80
+  # Stall
+  alpha_stall_deg:   15.0   # α_stall
+  Re_design:         130000 # at 75% R (= 1.144 m), 99.6 RPM: Re = Ω×r×c/ν = 11.9×0.167/1.5e-5
+
+inertia:
+  # Rotor mass estimated — not provided in TR-552 (aluminum blades + hub assembly)
+  mass_kg:           10.0
+  I_body_kgm2:       [3.0, 3.0, 6.0]
+  I_spin_kgm2:       0.0
+
+control:
+  K_cyc:      0.4     # not calibrated for this rotor — not used in validation tests
+  aero_ramp_s: 0.0    # no ramp needed for quasi-static wind-tunnel comparison
+
+# Autorotation parameters estimated for 99.6 RPM equilibrium
+# (used by spin ODE, not by the quasi-static BEM comparison)
+autorotation:
+  K_drive_Nms_m:       2.0    # estimated to give ~100 RPM at μ=0.20
+  K_drag_Nms2_rad2:    0.02
+  I_ode_kgm2:          20.0   # estimated for aluminium blade assembly
+  omega_min_rad_s:     0.5
+  omega_eq_rad_s:      10.43  # 99.6 RPM = 10.43 rad/s
+
+environment:
+  rho_kg_m3:  1.225   # NACA wind tunnel at sea level
