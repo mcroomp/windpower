@@ -286,14 +286,12 @@ def run_mediator(args, trajectory=None):
         stable_body_z = None,
     )
     spin_sensor = SpinSensor(
-        n_magnets = int(cfg.get("spin_sensor_n_magnets", 8)),
-        dt        = DT_TARGET,
-        K_drive   = K_DRIVE_SPIN,
-        K_drag    = K_DRAG_SPIN,
+        sigma    = float(cfg.get("spin_sensor_sigma", 0.0)),
+        K_drive  = K_DRIVE_SPIN,
+        K_drag   = K_DRAG_SPIN,
     )
     log.info("Sensor mode: %s", cfg["sensor_mode"])
-    log.info("Spin sensor: %d magnets  noise_sigma=%.3f rad/s",
-             spin_sensor._n_magnets, spin_sensor._sigma)
+    log.info("Spin sensor: noise_sigma=%.3f rad/s", spin_sensor._sigma)
     log.info(
         "Tether: Dyneema SK75 1.9mm  EA=%.0f kN  rest_length=%.0f m  "
         "damping=%.1f N·s/m  break_load=%.0f N",
@@ -393,8 +391,9 @@ def run_mediator(args, trajectory=None):
     #   setpoint = cmd["thrust"] × tension_max_n
     # Winch:       tether.rest_length stepped from cmd["winch_speed_ms"]
     _tension_ctrl     = TensionController(setpoint_n=0.0)
-    _tension_max_n    = float(cfg.get("tension_max_n", 200.0))
-    _body_z_slew_rate = float(cfg.get("body_z_slew_rate_rad_s", 0.12))  # rad/s
+    _tension_max_n        = float(cfg.get("tension_max_n", 200.0))
+    _body_z_slew_rate     = float(cfg.get("body_z_slew_rate_rad_s", 0.12))   # rad/s
+    _swashplate_phase_deg = float(cfg.get("swashplate_phase_deg", 0.0))
     _ic_tether_dir0: "np.ndarray | None" = None   # captured at free-flight start
     _ic_body_z_eq0:  "np.ndarray | None" = None   # captured at free-flight start
     _body_z_eq_slewed: np.ndarray        = _bz.copy()  # rate-limited slew state
@@ -515,7 +514,8 @@ def run_mediator(args, trajectory=None):
 
                 swash = compute_swashplate_from_state(
                     hub_state=hub_state, anchor_pos=np.zeros(3),
-                    body_z_eq=_body_z_eq)
+                    body_z_eq=_body_z_eq,
+                    swashplate_phase_deg=_swashplate_phase_deg)
                 tilt_lon        = swash["tilt_lon"]
                 tilt_lat        = swash["tilt_lat"]
                 collective_norm = 0.0   # for telemetry logging

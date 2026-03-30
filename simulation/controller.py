@@ -116,12 +116,13 @@ def compute_rc_rates(
 
 
 def compute_swashplate_from_state(
-    hub_state:    dict,
-    anchor_pos:   np.ndarray,
-    kp:           float = 0.5,
-    kd:           float = 0.2,
-    tilt_max_rad: float = 0.3,
-    body_z_eq:    "np.ndarray | None" = None,
+    hub_state:            dict,
+    anchor_pos:           np.ndarray,
+    kp:                   float = 0.5,
+    kd:                   float = 0.2,
+    tilt_max_rad:         float = 0.3,
+    body_z_eq:            "np.ndarray | None" = None,
+    swashplate_phase_deg: float = 0.0,
 ) -> dict:
     """
     Compute swashplate tilt commands directly from hub truth state.
@@ -185,6 +186,18 @@ def compute_swashplate_from_state(
     # means tilt_lon must be *negative* of the projection onto disk_x.
     tilt_lon = float(np.clip(-np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
     tilt_lat = float(np.clip( np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
+
+    # Gyroscopic phase compensation.
+    # A spinning rotor precesses 90° off-axis from an applied cyclic torque.
+    # Rotating the command by swashplate_phase_deg advances it so the aerodynamic
+    # response lands in the intended direction.  0° = no compensation (I_spin = 0).
+    if swashplate_phase_deg != 0.0:
+        phi = math.radians(swashplate_phase_deg)
+        c, s = math.cos(phi), math.sin(phi)
+        tilt_lon, tilt_lat = (
+            c * tilt_lon - s * tilt_lat,
+            s * tilt_lon + c * tilt_lat,
+        )
 
     return {
         "collective_rad": 0.0,   # collective held at zero; attitude via tilt only

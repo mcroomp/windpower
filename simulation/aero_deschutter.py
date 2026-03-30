@@ -44,57 +44,38 @@ class DeSchutterAero:
 
     Parameters
     ----------
-    n_blades, r_root, r_tip, chord, rho : rotor geometry
-    aspect_ratio   : blade AR; computed from geometry if None
-    oswald_eff, CD0, CL0, CL_alpha, aoa_limit : aerodynamic coefficients
-    ramp_time      : spin-up ramp duration [s]
-    n_radial       : number of radial BEM strips per blade (default 8)
-    k_drive_spin   : empirical spin driving coefficient [N·m/(m/s)]
-    k_drag_spin    : empirical spin braking coefficient [N·m/(rad/s)²]
-    K_cyc, **kwargs : accepted for interface compatibility; unused
+    rotor : RotorDefinition
+        Rotor geometry, airfoil, and autorotation parameters.
+    ramp_time : float
+        Spin-up ramp duration [s] (simulation artifact, not a rotor property).
+    n_radial : int
+        Number of radial BEM strips per blade (default 8).
+    **overrides : optional keyword overrides for any aero_kwargs() field.
     """
 
     N_AZ          = 8            # azimuthal sample points for revolution averaging
     CP_FRAC       = 2.0 / 3.0   # bootstrap CP at 2/3 of span from root
     PITCH_MAX_DEG = 15.0         # max normalised cyclic → pitch [deg]
 
-    def __init__(
-        self,
-        n_blades:     int   = 4,
-        r_root:       float = 0.5,
-        r_tip:        float = 2.5,
-        chord:        float = 0.15,
-        rho:          float = 1.22,
-        aspect_ratio: float = None,
-        oswald_eff:   float = 0.8,
-        CD0:          float = 0.01,
-        CL0:          float = 0.11,
-        CL_alpha:     float = 0.87,
-        aoa_limit:    float = math.radians(15),
-        ramp_time:    float = 5.0,
-        n_radial:     int   = 8,
-        k_drive_spin: float = 1.4,
-        k_drag_spin:  float = 0.01786,
-        K_cyc:        float = None,   # unused — cyclic emerges from blade physics
-        **kwargs,
-    ):
-        self.N_BLADES   = int(n_blades)
-        self.R_ROOT     = float(r_root)
-        self.R_TIP      = float(r_tip)
-        self.CHORD      = float(chord)
-        self.RHO        = float(rho)
-        self.OSWALD     = float(oswald_eff)
-        self.CD0        = float(CD0)
-        self.CL0        = float(CL0)
-        self.CL_ALPHA   = float(CL_alpha)
-        self.AOA_LIMIT  = float(aoa_limit)
+    def __init__(self, rotor, ramp_time: float = 5.0, n_radial: int = 8, **overrides):
+        p = {**rotor.aero_kwargs(), **overrides}
+        self.N_BLADES   = int(p["n_blades"])
+        self.R_ROOT     = float(p["r_root"])
+        self.R_TIP      = float(p["r_tip"])
+        self.CHORD      = float(p["chord"])
+        self.RHO        = float(p["rho"])
+        self.OSWALD     = float(p["oswald_eff"])
+        self.CD0        = float(p["CD0"])
+        self.CL0        = float(p["CL0"])
+        self.CL_ALPHA   = float(p["CL_alpha"])
+        self.AOA_LIMIT  = float(p["aoa_limit"])
         self.ramp_time  = float(ramp_time)
-        self.k_drive_spin = float(k_drive_spin)
-        self.k_drag_spin  = float(k_drag_spin)
+        self.k_drive_spin = float(p["k_drive_spin"])
+        self.k_drag_spin  = float(p["k_drag_spin"])
 
         span            = self.R_TIP - self.R_ROOT
         self.S_blade    = span * self.CHORD
-        self.AR         = (span ** 2 / self.S_blade) if aspect_ratio is None else float(aspect_ratio)
+        self.AR         = float(p.get("aspect_ratio") or span ** 2 / self.S_blade)
         self.R_CP       = self.R_ROOT + self.CP_FRAC * span   # bootstrap only
         self.pitch_gain = math.radians(self.PITCH_MAX_DEG)
         self.disk_area  = math.pi * (self.R_TIP ** 2 - self.R_ROOT ** 2)
@@ -124,9 +105,9 @@ class DeSchutterAero:
         self.last_H_force        = 0.0
 
     @classmethod
-    def from_definition(cls, defn) -> "DeSchutterAero":
-        """Construct from a RotorDefinition object."""
-        return cls(**defn.aero_kwargs())
+    def from_definition(cls, defn, **overrides) -> "DeSchutterAero":
+        """Alias for DeSchutterAero(rotor, **overrides) — kept for backwards compatibility."""
+        return cls(defn, **overrides)
 
     def _ramp_factor(self, t: float) -> float:
         if t >= self.ramp_time:

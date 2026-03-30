@@ -20,10 +20,10 @@ Model implementations:
     aero_deschutter.py — DeSchutterAero: per-blade strip theory, natural cyclic from asymmetry
 """
 
-from aero_rotor      import RotorAero, _DEFAULTS   # noqa: F401  (re-exported)
-from aero_deschutter import DeSchutterAero          # noqa: F401  (re-exported)
+from aero_rotor      import RotorAero       # noqa: F401  (re-exported)
+from aero_deschutter import DeSchutterAero  # noqa: F401  (re-exported)
 
-__all__ = ["RotorAero", "DeSchutterAero", "_DEFAULTS", "create_aero"]
+__all__ = ["RotorAero", "DeSchutterAero", "create_aero"]
 
 
 def create_aero(defn=None, model: str = "rotor"):

@@ -1,6 +1,7 @@
 import sys; sys.path.insert(0, "/rawes/simulation")
 import numpy as np
 from aero import RotorAero
+import rotor_definition as _rd
 from tether import TetherModel
 from dynamics import RigidBodyDynamics
 from frames import build_orb_frame
@@ -11,7 +12,7 @@ WIND=np.array([10.,0.,0.]); DT=1./400.
 K_DRIVE=1.4; K_DRAG=0.01786; I_SPIN=10.; OMEGA_MIN=0.5
 R0=build_orb_frame(BODY_Z0)
 
-aero=RotorAero()
+aero=RotorAero(_rd.default())
 tether=TetherModel(anchor_enu=ANCHOR,rest_length=49.949,axle_attachment_length=0.0)
 dyn=RigidBodyDynamics(mass=5.,I_body=[5.,5.,10.],I_spin=0.,
     pos0=POS0.tolist(),vel0=VEL0.tolist(),R0=R0,omega0=[0.,0.,0.],z_floor=1.)

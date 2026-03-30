@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator as _mediator_module
 from aero     import RotorAero
+import rotor_definition as _rd
 from dynamics import RigidBodyDynamics
 
 TetherModel = _mediator_module.TetherModel
@@ -101,7 +102,7 @@ def _equilibrium_setup(elev_rad: float = ELEV_RAD):
 
     Returns (coll_rad, omega_spin_eq, R0, pos0, rest_length).
     """
-    aero  = RotorAero()
+    aero  = RotorAero(_rd.default())
     t_dir = _tether_dir(elev_rad)
     R0    = _R_from_body_z(t_dir)
     pos0  = _hub_pos(elev_rad)
@@ -124,6 +125,8 @@ def _equilibrium_setup(elev_rad: float = ELEV_RAD):
     coll_eq = None
     T_t_est = 0.0
 
+    _MAX_TETHER_TENSION_N = 496.0   # 80% of break load (620 N)
+
     for deg in range(0, -31, -1):
         coll_rad = math.radians(float(deg))
         f = aero.compute_forces(coll_rad, 0.0, 0.0, R0, np.zeros(3),
@@ -131,13 +134,13 @@ def _equilibrium_setup(elev_rad: float = ELEV_RAD):
         H_x = float(f[0])
         T_z = float(f[2])
         T_t = H_x / math.cos(elev_rad) if H_x > 0 else 0.0
-        if T_z <= W + T_t * math.sin(elev_rad):
+        if T_z <= W + T_t * math.sin(elev_rad) and T_t < _MAX_TETHER_TENSION_N:
             coll_eq = coll_rad
             T_t_est = T_t
             break
 
     if coll_eq is None:
-        coll_eq = math.radians(-30.0)
+        coll_eq = math.radians(-17.0)
         f = aero.compute_forces(coll_eq, 0.0, 0.0, R0, np.zeros(3),
                                 omega_spin_eq, WIND, t=10.0)
         T_t_est = max(float(f[0]) / math.cos(elev_rad), 0.0)
@@ -218,7 +221,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 4000):
     """
     coll_eq, omega_spin_eq, R0, pos0, rest = _equilibrium_setup()
 
-    aero   = RotorAero()
+    aero   = RotorAero(_rd.default())
 
     # ── Warmup pass ──────────────────────────────────────────────────────────
     tether_wu = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)

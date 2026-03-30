@@ -7,10 +7,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import RotorAero
+import rotor_definition as _rd
 
 
 def test_compute_forces_is_zero_during_ramp_start():
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
 
     forces = aero.compute_forces(
         collective_rad=0.1,
@@ -27,7 +28,7 @@ def test_compute_forces_is_zero_during_ramp_start():
 
 
 def test_compute_forces_produces_upward_thrust_and_opposing_drag_torque():
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
 
     forces = aero.compute_forces(
         collective_rad=0.1,
@@ -51,7 +52,7 @@ def test_compute_forces_produces_upward_thrust_and_opposing_drag_torque():
 
 
 def test_compute_forces_cyclic_tilt_changes_lateral_moment_component():
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
 
     baseline = aero.compute_forces(
         collective_rad=0.1,
@@ -83,14 +84,26 @@ def test_compute_forces_cyclic_tilt_changes_lateral_moment_component():
     np.testing.assert_allclose(tilted[:3], baseline[:3], rtol=1e-9, atol=1e-9)
 
 
-def test_compute_anti_rotation_moment_clamps_negative_esc_and_follows_spin_sign():
-    aero = RotorAero()
+def test_compute_anti_rotation_moment_proportional_to_rotor_speed():
+    """
+    Counter-torque is gear-coupled: M ∝ -omega_rotor (opposes rotation).
+    No esc_normalized parameter — motor speed is mechanically locked via gear ratio.
+    """
+    aero = RotorAero(_rd.default())
 
-    assert aero.compute_anti_rotation_moment(-1.0, 28.0, 50.0) == 0.0
+    # Torque opposes rotor rotation direction
+    assert aero.compute_anti_rotation_moment(28.0)  < 0.0   # CCW rotor → CW torque
+    assert aero.compute_anti_rotation_moment(-28.0) > 0.0   # CW rotor → CCW torque
 
-    positive = aero.compute_anti_rotation_moment(0.5, 28.0, 50.0)
-    negative = aero.compute_anti_rotation_moment(0.5, -28.0, 50.0)
+    # Magnitude proportional to omega_rotor (via gear ratio)
+    m_full = aero.compute_anti_rotation_moment(28.0)
+    m_half = aero.compute_anti_rotation_moment(14.0)
+    assert math.isclose(m_full / m_half, 2.0, rel_tol=1e-9)
 
-    assert positive > 0.0
-    assert negative < 0.0
-    assert math.isclose(abs(positive), abs(negative), rel_tol=1e-12)
+    # Zero spin → zero torque
+    assert aero.compute_anti_rotation_moment(0.0) == 0.0
+
+    # Custom gear ratio scales result
+    m_default = aero.compute_anti_rotation_moment(28.0, gear_ratio=80.0/44.0)
+    m_double  = aero.compute_anti_rotation_moment(28.0, gear_ratio=2 * 80.0/44.0)
+    assert math.isclose(m_double / m_default, 2.0, rel_tol=1e-9)

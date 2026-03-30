@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import RotorAero
+import rotor_definition as _rd
 from dynamics import RigidBodyDynamics
 from swashplate import collective_to_pitch, h3_inverse_mix, pwm_to_normalized
 
@@ -43,7 +44,7 @@ def _neutral_collective() -> float:
 
 def _aero_forces_after_ramp(collective_rad: float) -> np.ndarray:
     """Return aero forces at t=10s (ramp=1) with level disk, stationary hub."""
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     return aero.compute_forces(
         collective_rad = collective_rad,
         tilt_lon       = 0.0,
@@ -110,7 +111,7 @@ def test_aero_h_force_is_positive_east_for_east_wind():
 
 def test_aero_h_force_scales_with_wind_speed():
     """H-force should increase with wind speed (μ = v_wind / (ω·R_tip))."""
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     forces_10 = aero.compute_forces(0.0, 0.0, 0.0, np.eye(3), np.zeros(3),
                                     OMEGA, np.array([10.0, 0.0, 0.0]), t=10.0)
     forces_20 = aero.compute_forces(0.0, 0.0, 0.0, np.eye(3), np.zeros(3),
@@ -155,7 +156,7 @@ def test_thrust_greatly_exceeds_weight_at_reel_out_collective():
     collective in GUIDED mode.
     """
     REEL_OUT = math.radians(5.0)   # De Schutter reel-out operating point
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     forces = aero.compute_forces(
         collective_rad=REEL_OUT, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=np.eye(3), v_hub_world=np.zeros(3),
@@ -192,7 +193,7 @@ def test_hover_collective_is_negative():
     negative.  This means ArduPilot must command below-neutral collective to
     prevent the hub from rising when the tether is slack.
     """
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     # Scan collective until Fz crosses weight
     for coll_deg in range(0, -25, -1):
         coll_rad = math.radians(coll_deg)
@@ -215,7 +216,7 @@ def test_h_force_causes_eastward_drift():
     With 10 m/s East wind and no position controller, the hub should drift
     East over 10 seconds due to the H-force.
     """
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     dyn  = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
         pos0=[0.0, 0.0, 50.0], vel0=[0.0, 0.0, 0.0],
@@ -275,7 +276,7 @@ def test_force_balance_at_kite_equilibrium():
     This test documents this discrepancy and quantifies the actual
     equilibrium angle vs the power-optimal target.
     """
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     forces = aero.compute_forces(
         collective_rad=0.0, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=np.eye(3), v_hub_world=np.zeros(3),

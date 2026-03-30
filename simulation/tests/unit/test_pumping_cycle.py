@@ -32,6 +32,7 @@ pytestmark = pytest.mark.simtest
 
 from dynamics   import RigidBodyDynamics
 from aero       import RotorAero
+import rotor_definition as _rd
 from tether     import TetherModel
 from controller import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq
 from frames     import build_orb_frame
@@ -92,7 +93,7 @@ def _run_pumping_cycle(
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
         R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
     )
-    aero   = RotorAero()
+    aero   = RotorAero(_rd.default())
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
@@ -294,7 +295,7 @@ def test_static_tension_setpoint_range():
             pos0=POS0.tolist(), vel0=VEL0.tolist(),
             R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
         )
-        aero   = RotorAero()
+        aero   = RotorAero(_rd.default())
         tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                              axle_attachment_length=0.0)
         ctrl   = TensionController(setpoint_n=setpoint)

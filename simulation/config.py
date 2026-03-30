@@ -67,6 +67,13 @@ DEFAULTS: dict = {
     "internal_controller_ramp":   3.0,  # ramp-in time after kinematic end [s]
     "lock_orientation":         False,  # debug: lock R to initial value every step
 
+    # ── Swashplate phase compensation ─────────────────────────────────────────
+    # Rotates the (tilt_lon, tilt_lat) cyclic command before it reaches the aero model,
+    # compensating for gyroscopic precession when I_spin_kgm2 > 0.
+    # 0.0 = disabled (use when I_spin = 0).  Theoretical: 90° for CCW rotor.
+    # Determined by step-response test on hardware (corresponds to H_PHANG in ArduPilot).
+    "swashplate_phase_deg":   0.0,
+
     # ── Mode_RAWES attitude and tension parameters ────────────────────────────
     # tension_max_n: Mode_RAWES maps thrust [0..1] to setpoint via
     #   tension_setpoint_n = thrust × tension_max_n.
@@ -79,9 +86,12 @@ DEFAULTS: dict = {
 
     # ── Sensor model ──────────────────────────────────────────────────────────
     "sensor_mode": "tether_relative",   # "tether_relative" | "physical"
-    # Spin speed sensor: Hall-effect magnets on rotor hub.
-    # Set 0 to disable noise (ideal sensor — useful for unit tests).
-    "spin_sensor_n_magnets": 8,         # magnets; resolution = 2π/N / dt ≈ 1.96 rad/s
+    # Rotor spin speed is an internal simulation state (omega_spin ODE).
+    # In hardware, rotor spin speed measurement is handled separately from
+    # anti-rotation motor control — the gear coupling keeps the hub stationary
+    # without requiring spin feedback; spin measurement is TBD for hardware.
+    # Simulation noise: set 0 to use true omega_spin (ideal, recommended for unit tests).
+    "spin_sensor_sigma": 0.0,           # Gaussian noise sigma [rad/s]; 0 = ideal
 
     # ── Trajectory controller ─────────────────────────────────────────────────
     # "type" selects the active controller.  Each type has its own sub-dict so

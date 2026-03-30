@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator as _mediator_module
 from aero     import RotorAero
+import rotor_definition as _rd
 from dynamics import RigidBodyDynamics
 
 TetherModel = _mediator_module.TetherModel
@@ -99,11 +100,13 @@ def _compute_equilibrium_collective(
         T_t_est   : float  estimated tether tension at equilibrium [N]
         H_x       : float  East aero force at equilibrium collective [N]
     """
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
     W = mass * 9.81
 
     tether_dir = np.array([math.cos(elev_rad), 0.0, math.sin(elev_rad)])
     R_hub = _R_from_body_z(tether_dir)
+
+    _MAX_TETHER_TENSION_N = 496.0   # 80% of break load (620 N)
 
     for deg in range(0, -31, -1):
         coll_rad = math.radians(float(deg))
@@ -113,11 +116,11 @@ def _compute_equilibrium_collective(
         T_z   = float(f[2])   # Up force (world frame)
         T_t   = H_x / math.cos(elev_rad) if H_x > 0 else 0.0
         T_z_req = W + T_t * math.sin(elev_rad)
-        if T_z <= T_z_req:
+        if T_z <= T_z_req and T_t < _MAX_TETHER_TENSION_N:
             return coll_rad, T_z_req, T_t, H_x
 
-    # Fallback: use -30°
-    coll_rad = math.radians(-30.0)
+    # Fallback: use -17° (gives non-zero thrust unlike -30°)
+    coll_rad = math.radians(-17.0)
     f = aero.compute_forces(coll_rad, 0.0, 0.0, R_hub, np.zeros(3),
                             omega, wind, t=10.0)
     H_x = float(f[0])
@@ -217,7 +220,7 @@ def test_equilibrium_collective_gives_balanced_net_force():
         WIND, MASS, OMEGA, ELEV_RAD)
 
     pos  = _hub_pos()
-    aero = RotorAero()
+    aero = RotorAero(_rd.default())
 
     # Set rest_length so tether is taut with exactly T_t_est at L_TETHER
     # k = EA / L;  extension = T_t / k  →  rest_length = L - extension
@@ -276,7 +279,7 @@ def test_hub_stays_bounded_at_30_degrees():
     tether_dir = pos0 / np.linalg.norm(pos0)
     R0_eq      = _R_from_body_z(tether_dir)
 
-    aero   = RotorAero()
+    aero   = RotorAero(_rd.default())
     tether = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
     dyn    = RigidBodyDynamics(
         mass   = MASS,

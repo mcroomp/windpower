@@ -33,8 +33,7 @@ This is a second-order dynamic with its own time constant. The flap controller P
 
 ArduPilot's RSC assumes a *powered* rotor and commands throttle to hold RPM. RAWES rotor is wind-driven: RPM is determined by wind speed and blade pitch, not a motor. Options:
 
-- Set RSC to passthrough or autorotation mode
-- Repurpose the RSC motor output for the GB4008 counter-torque motor (which does need closed-loop speed control, just not for rotor RPM)
+- Set RSC to passthrough mode (`H_RSC_MODE=1`, CH8=2000). The GB4008 motor handles anti-rotation via gear coupling — no rotor RPM control loop needed.
 
 ### 3. Cyclic Phase Angle May Be Off
 
@@ -159,42 +158,37 @@ Implement the Weyel flap controller directly inside ArduPilot as a new frame typ
 
 > `H_SWASH_TYPE` = H4-90 assumes 4 push-rods at 90° spacing driven by 3 servos. Verify this matches the actual swashplate geometry — may need H3-120 if the lower ring uses a 3-point 120° servo arrangement driving 4 push-rods.
 
-### GB4008 Anti-Rotation Motor (Tail Rotor)
+### GB4008 Anti-Rotation Motor — Yaw-Rate Controlled via Gear-Coupled Motor
 
-The GB4008 counter-torque motor maps directly onto ArduPilot's DDFP (Direct Drive Fixed Pitch) tail rotor type. ArduPilot's yaw rate controller outputs to the tail channel, which modulates GB4008 motor speed to hold world-frame yaw rate = 0. This is the correct setpoint: the tether runs down the axle, so any world-frame rotation of the electronics assembly would twist it.
+The GB4008 keeps the electronics assembly stationary via a **closed-loop yaw rate controller**: the Pixhawk IMU measures any rotation of the assembly and the ESC modulates motor torque (current) to null it. The 80:44 gear is a **mechanical efficiency choice** — it sets the motor shaft RPM to `(80/44) × omega_rotor` so the motor operates in its efficient RPM band. All yaw stabilisation authority comes from the control loop, not the gear.
 
-The Pixhawk IMU sits on the electronics assembly (the non-rotating part), so it directly measures what the yaw controller needs to regulate — no separate sensor required.
+**Power curve difference from a conventional tail rotor:**
+In a DDFP tail rotor, PWM controls motor *speed* → thrust. Here, motor *speed* is gear-locked; PWM controls motor *torque* (ESC current). The transfer function (torque vs PWM instead of thrust vs PWM) is absorbed by PID tuning — the `ATC_RAT_YAW_*` gains will differ from a normal helicopter.
+
+**ArduPilot configuration:**
+DDFP (`H_TAIL_TYPE = 3` or `4`) is the correct type — it assigns yaw rate PID output to SERVO4. Use `H_COL2YAW` feedforward because collective changes alter rotor drag torque, which the motor must compensate.
 
 | Parameter | Value | Reason |
 |-----------|-------|--------|
-| `H_TAIL_TYPE` | 3 or 4 | DDFP CW or CCW — match to actual rotor spin direction (TBD) |
-| `SERVO4_FUNCTION` | 36 (Motor4) | Assigns output 4 to the DDFP tail motor (GB4008 ESC) |
-| `SERVO4_MIN` | 1000 | ESC minimum PWM |
-| `SERVO4_MAX` | 2000 | ESC maximum PWM |
-| `SERVO4_TRIM` | ~1150 | ESC idle PWM — base speed before yaw modulation; tune to provide steady counter-torque at cruise rotor RPM |
-| `H_TAIL_SPEED` | 0.5–0.7 | Normalised baseline motor speed (0–1); start at 0.5, increase if motor cannot hold against bearing drag at operating RPM |
-| `H_DDFP_THST_EXPO` | 0.65 | Thrust curve exponent — linearises motor torque response |
-| `H_COL2YAW` | TBD | Collective-to-yaw feedforward: when collective changes, rotor drag torque changes and GB4008 must compensate; tune to minimise yaw kick during collective inputs |
-| `ATC_RAT_YAW_P` | 0.20 | Starting value — increase if electronics drift, decrease if yaw wags |
-| `ATC_RAT_YAW_I` | 0.05 | Absorbs steady-state bearing friction load |
-| `ATC_RAT_YAW_D` | 0.0 | Start at zero; add only if underdamped oscillation appears |
-| `ATC_RAT_YAW_FF` | 0.0 | Feedforward — tune from log data after initial hover |
-| `ATC_ANG_YAW_P` | ≥3.5 | Angle controller — keep at default minimum |
-
-**Tuning notes:**
-
-- `SERVO4_TRIM` sets the idle torque. At operating rotor RPM the bearing drag is roughly constant, so the integrator (`ATC_RAT_YAW_I`) will wind up to that level. Setting trim near the steady-state operating point reduces how much integrator wind-up is needed and improves transient response.
-- The cyclic push-rod reactions create a periodic disturbance at blade-pass frequency (~18 Hz at 28 rad/s with 4 blades). The attitude loop runs at 400 Hz so bandwidth is not a concern, but avoid high `ATC_RAT_YAW_D` which would amplify this high-frequency content.
-- `H_COL2YAW` is the most important feedforward to tune early: every collective step changes rotor drag torque, which immediately disturbs electronics yaw. A well-tuned feedforward eliminates this coupling before the PID has to react.
+| `H_TAIL_TYPE` | 3 or 4 | DDFP CCW or CW — match to rotor spin direction (TBD) |
+| `SERVO4_FUNCTION` | 36 (Motor4) | Assigns SERVO4 to DDFP tail motor (GB4008 ESC) |
+| `SERVO4_MIN` | 1000 | ESC disarm |
+| `SERVO4_MAX` | 2000 | ESC maximum |
+| `SERVO4_TRIM` | ~1150 | Idle torque at rest; start low and increase if assembly drifts |
+| `ATC_RAT_YAW_P` | 0.20 | Starting value — increase if assembly drifts, decrease if it oscillates |
+| `ATC_RAT_YAW_I` | 0.05 | Absorbs steady-state bearing friction |
+| `ATC_RAT_YAW_D` | 0.0 | Start at zero |
+| `H_COL2YAW` | TBD | Feedforward: collective changes alter rotor drag → GB4008 must compensate |
+| `H_RSC_MODE` | 1 | CH8 passthrough — instant runup_complete for arming |
 
 ---
 
 ## Open Items
 
 - [ ] Determine correct `H_SWASH_TYPE` for 3-servo lower ring driving 4 push-rods
-- [ ] Confirm rotor spin direction (CW or CCW from above) to set `H_TAIL_TYPE` = 3 or 4
 - [ ] Determine `H_PHANG` — measure or simulate cyclic phase lag from flap dynamics
-- [ ] Tune `SERVO4_TRIM` and `H_TAIL_SPEED` against measured bearing friction at operating RPM
+- [ ] Confirm rotor spin direction (CW or CCW from above) to set `H_TAIL_TYPE` = 3 or 4
+- [ ] Tune `SERVO4_TRIM` and `ATC_RAT_YAW_*` against measured bearing friction at operating RPM
 - [ ] Tune `H_COL2YAW` to suppress yaw kick during collective changes
 - [ ] Decide companion computer hardware (weight budget, latency requirements)
 - [ ] Port Weyel Python flap controller to companion computer

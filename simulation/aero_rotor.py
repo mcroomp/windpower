@@ -4,29 +4,22 @@ aero_rotor.py — Lumped-blade BEM aerodynamic model (RotorAero)
 Computes the aerodynamic wrench (force + moment) acting on the rotor hub
 in the world (ENU) frame.
 
-Aerodynamic model — Weyel (2025) empirical SG6042 lift + De Schutter (2018) drag polar:
-  - Lift:       CL = CL0 + CL_alpha × α           (Weyel Eq. empirical, SG6042 at Re≈127k)
-                CL0 = 0.11 (camber offset), CL_alpha = 0.87 /rad (6× below thin-plate theory)
-  - Drag polar: CD = CD0 + CL²/(π·AR·Oe)          (De Schutter Eq. 25 induced drag)
-  - AoA clamp:  |α| ≤ 15° (De Schutter Eq. 28 constraint)
+Aerodynamic model — SG6042 lift + Oswald drag polar:
+  - Lift:       CL = CL0 + CL_alpha × α
+  - Drag polar: CD = CD0 + CL²/(π·AR·Oe)  (De Schutter Eq. 25 induced drag)
+  - AoA clamp:  |α| ≤ alpha_stall  (De Schutter Eq. 28 constraint)
   - Induction:  exact quadratic solution of momentum equation (De Schutter Eq. 17)
                 T = 2ρA·v_i·(|v_axial| + v_i)  →  v_i = (−|v_axial| + √(v_axial² + 2T/ρA)) / 2
 
 Force model — single-point lumped blade (De Schutter Eq. 30–31):
-  Forces are evaluated at the aerodynamic centre of pressure
-      r_cp = r_root + (2/3)×(r_tip − r_root)
-  using total blade area S_w = N_blades × chord × span.
+  Forces are evaluated at r_cp = r_root + (2/3)×span using total blade area S_w.
 
-Geometry (4-blade, 2 m blade, actual hardware):
-  ρ = 1.22 kg/m³, chord = 0.15 m, R_root = 0.5 m, R_tip = 2.5 m, N = 4
-  span = R_tip − R_root = 2.0 m,  S_w = N × chord × span = 1.2 m²
-  r_cp = 0.5 + (2/3)×2.0 = 1.833 m
-  AR = span / chord = 2.0 / 0.15 = 13.3
+All default parameter values are loaded from rotor_definitions/beaupoil_2026.yaml
+via rotor_definition.default().aero_kwargs().  Override by passing kwargs to __init__.
 
 Spin dynamics:
   last_Q_spin uses an empirical model:  Q = k_drive × v_inplane − k_drag × ω²
   Equilibrium: ω_eq = sqrt(k_drive × v_inplane / k_drag)
-  Fitted so ω_eq ≈ 20 rad/s at v_inplane ≈ 5 m/s (tethered hover, 30° elevation, 10 m/s wind).
 """
 
 import math
@@ -35,29 +28,6 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Default physical parameters (shared with aero.py facade)
-# ---------------------------------------------------------------------------
-_DEFAULTS = dict(
-    n_blades      = 4,
-    r_root        = 0.5,      # blade root radius [m]
-    r_tip         = 2.5,      # blade tip radius [m]
-    chord         = 0.15,     # blade chord [m]
-    rho           = 1.22,     # air density [kg/m³]
-    aspect_ratio  = 13.3,     # blade span / chord = 2.0 / 0.15
-    oswald_eff    = 0.8,      # Oswald efficiency (De Schutter Table I)
-    CD0           = 0.01,     # zero-lift drag coefficient (De Schutter Table I)
-    CL0           = 0.11,     # zero-AoA lift coefficient (Weyel 2025, SG6042 camber)
-    CL_alpha      = 0.87,     # lift slope [/rad] (Weyel 2025, empirical SG6042 at Re≈127k)
-    K_cyc         = 0.4,      # cyclic moment scaling factor
-    aoa_limit     = 0.26,     # AoA clamp [rad] ≈ ±15° (De Schutter Eq. 28)
-    ramp_time     = 5.0,      # spin-up ramp duration [s]
-    # Empirical spin ODE: Q_spin = k_drive_spin * v_inplane - k_drag_spin * omega²
-    # Equilibrium: omega_eq = sqrt(k_drive * v_inplane / k_drag)
-    # Fitted so omega_eq ≈ 20 rad/s at v_inplane ≈ 5 m/s (tethered hover, 30° elevation, 10 m/s wind)
-    k_drive_spin  = 1.4,      # [N·m / (m/s)]
-    k_drag_spin   = 0.01786,  # [N·m / (rad/s)²]
-)
 
 
 class RotorAero:
@@ -76,11 +46,15 @@ class RotorAero:
 
     Parameters
     ----------
-    **kwargs : override any of the default physical parameters listed in _DEFAULTS.
+    rotor : RotorDefinition
+        Rotor geometry, airfoil, and autorotation parameters.
+    ramp_time : float
+        Spin-up ramp duration [s] (simulation artifact, not a rotor property).
+    **overrides : optional keyword overrides for any aero_kwargs() field.
     """
 
-    def __init__(self, **kwargs):
-        p = {**_DEFAULTS, **kwargs}
+    def __init__(self, rotor, ramp_time: float = 5.0, **overrides):
+        p = {**rotor.aero_kwargs(), **overrides}
         self.n_blades     = int(p["n_blades"])
         self.r_root       = float(p["r_root"])
         self.r_tip        = float(p["r_tip"])
@@ -93,7 +67,7 @@ class RotorAero:
         self.CL_alpha     = float(p["CL_alpha"])
         self.K_cyc        = float(p["K_cyc"])
         self.aoa_limit    = float(p["aoa_limit"])
-        self.ramp_time    = float(p["ramp_time"])
+        self.ramp_time    = float(ramp_time)
         self.k_drive_spin = float(p["k_drive_spin"])
         self.k_drag_spin  = float(p["k_drag_spin"])
 
@@ -120,9 +94,9 @@ class RotorAero:
         self.last_Q_spin         = 0.0   # empirical spin torque [N·m] — use for spin ODE
 
     @classmethod
-    def from_definition(cls, defn) -> "RotorAero":
-        """Construct from a RotorDefinition object."""
-        return cls(**defn.aero_kwargs())
+    def from_definition(cls, defn, **overrides) -> "RotorAero":
+        """Alias for RotorAero(rotor, **overrides) — kept for backwards compatibility."""
+        return cls(defn, **overrides)
 
     def _ramp_factor(self, t: float) -> float:
         if t >= self.ramp_time:
@@ -254,14 +228,25 @@ class RotorAero:
                   t, T, H, v_axial, v_i, ramp)
         return result
 
-    def compute_anti_rotation_moment(self, esc_normalized: float,
-                                     omega_rotor: float, T: float) -> float:
+    def compute_anti_rotation_moment(self, omega_rotor: float,
+                                     gear_ratio: float = 80.0 / 44.0) -> float:
         """
-        Counter-torque from GB4008 motor (Mz).
-        Not called in the current single-body model — internal force cancels.
-        Reserved for future two-body model.
+        Counter-torque from GB4008 motor (Mz about disk axis).
+
+        The motor is geared to the rotor axle at gear_ratio = 80/44.  Motor shaft
+        speed is mechanically locked to gear_ratio × omega_rotor (opposite sign), so
+        no speed sensor or closed-loop speed control is needed.  The motor actively
+        drives the electronics assembly against bearing drag; the ESC runs at a fixed
+        setpoint.  Counter-torque scales with rotor speed through the gear ratio.
+
+        Simplified model: M = K_motor × gear_ratio × omega_rotor
+        K_motor is not yet calibrated — placeholder value used here.
+
+        Not called in the current single-body model — motor torque is an internal
+        force and cancels in the equations of motion.  Reserved for the future
+        two-body model (separate spinning-hub and stationary-electronics bodies).
         """
-        _K_drag_nom      = 0.1
-        max_motor_torque = (_K_drag_nom * 2.0 * 0.5 * 1.22
-                            * self.disk_area * 70.0 ** 2 * self.r_tip)
-        return max(0.0, esc_normalized) * max_motor_torque * np.sign(omega_rotor)
+        # Placeholder motor torque constant [N·m·s/rad at motor shaft]
+        # To calibrate: measure stall torque at known omega_rotor and back-calculate.
+        _K_motor = 0.5   # N·m·s/rad — UNCALIBRATED ESTIMATE
+        return -_K_motor * gear_ratio * omega_rotor

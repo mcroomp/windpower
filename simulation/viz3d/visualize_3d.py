@@ -68,12 +68,15 @@ if str(_SIM) not in sys.path:
 from viz3d.telemetry import TelemetryFrame, JSONSource, CSVSource
 
 # ---------------------------------------------------------------------------
-# Rotor geometry — must match aero.py _DEFAULTS
+# Rotor geometry — sourced from beaupoil_2026.yaml via RotorDefinition
 # ---------------------------------------------------------------------------
-N_BLADES         = 4
-R_ROOT           = 0.5    # m
-R_TIP            = 2.5    # m
-CHORD            = 0.15   # m
+import sys as _sys; _sys.path.insert(0, str(__import__('pathlib').Path(__file__).parents[1]))
+import rotor_definition as _rd
+_ROTOR           = _rd.default()
+N_BLADES         = _ROTOR.n_blades
+R_ROOT           = _ROTOR.root_cutout_m
+R_TIP            = _ROTOR.radius_m
+CHORD            = _ROTOR.chord_m
 BLADE_THK        = 0.025  # m — slight thickness so blades are visible from the side
 TETHER_AXLE_OFFSET = 0.4  # m — tether attaches this far below CM along -body_z
                             #    (bottom of axle, toward anchor side)

@@ -20,6 +20,7 @@ pytestmark = pytest.mark.simtest
 
 from dynamics   import RigidBodyDynamics
 from aero       import RotorAero
+import rotor_definition as _rd
 from tether     import TetherModel
 from controller import compute_swashplate_from_state
 from frames     import build_orb_frame
@@ -59,7 +60,7 @@ def _run_simulation(t_sim_s: float, wind: np.ndarray = None) -> list:
         omega0 = [0.0, 0.0, 0.0],
         z_floor = 1.0,
     )
-    aero    = RotorAero()
+    aero    = RotorAero(_rd.default())
     tether  = TetherModel(anchor_enu=ANCHOR, rest_length=49.949,
                          axle_attachment_length=0.0)
 
@@ -136,7 +137,7 @@ def test_closed_loop_spin_stays_positive():
         pos0=POS0.tolist(), vel0=VEL0.tolist(), R0=R0,
         omega0=[0.0, 0.0, 0.0], z_floor=1.0,
     )
-    aero   = RotorAero()
+    aero   = RotorAero(_rd.default())
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=49.949)
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0

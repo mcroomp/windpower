@@ -516,22 +516,11 @@ class PhysicalSensor:
 
 class SpinSensor:
     """
-    Simulated Hall-effect rotor spin rate sensor.
+    Simulated rotor spin rate sensor.
 
-    Models the spin rate measurement that would be produced by a Hall-effect
-    sensor reading magnets on the rotor hub.  In the real system this value
-    is reported by the Pixhawk as ``NAMED_VALUE_FLOAT "omega_spin"`` on the
-    STATE packet.
-
-    Noise model
-    -----------
-    A Hall-effect sensor with *n_magnets* produces one pulse every
-    2π / n_magnets radians of rotation.  The angular-velocity resolution is:
-
-        δω = 2π / n_magnets / dt   [rad/s per measurement step]
-
-    Gaussian noise with σ = δω / 3 (so ±1 pulse ≈ ±3 σ) is added to each
-    reading.  Set *n_magnets=0* (or *noise=False*) for an ideal noiseless sensor.
+    In the simulation, rotor spin speed (omega_spin) is an internal ODE state.
+    This class adds optional Gaussian noise to simulate measurement uncertainty.
+    Hardware spin speed sensing is TBD and separate from the anti-rotation motor.
 
     Physical model validation (optional)
     -------------------------------------
@@ -540,43 +529,29 @@ class SpinSensor:
 
         omega_expected = sqrt(K_drive × v_inplane / K_drag)
 
-    A large deviation indicates either an aerodynamic model parameter error
-    or a sensor fault.  Useful for HIL and physical model regression testing.
-
     Parameters
     ----------
-    n_magnets : int   — number of Hall-effect magnets on rotor (default: 8).
-                        Set 0 to disable noise.
-    dt        : float — nominal sensor timestep [s] (default: 1/400).
-    K_drive   : float — autorotation drive constant [N·m·s/m] (from rotor definition).
-    K_drag    : float — autorotation drag constant [N·m·s²/rad²] (from rotor definition).
-    rng_seed  : int or None — random seed for reproducibility.
+    sigma    : float — Gaussian noise std dev [rad/s].  0 = ideal (default).
+    K_drive  : float — autorotation drive constant [N·m·s/m].
+    K_drag   : float — autorotation drag constant [N·m·s²/rad²].
+    rng_seed : int or None — random seed for reproducibility.
     """
 
     def __init__(
         self,
-        n_magnets: int   = 8,
-        dt:        float = 1.0 / 400.0,
-        K_drive:   float = 1.4,
-        K_drag:    float = 0.01786,
-        rng_seed:  "int | None" = None,
+        sigma:    float = 0.0,
+        K_drive:  float = 1.4,
+        K_drag:   float = 0.01786,
+        rng_seed: "int | None" = None,
     ):
-        self._n_magnets = int(n_magnets)
-        self._K_drive   = float(K_drive)
-        self._K_drag    = float(K_drag)
-        self._rng       = np.random.default_rng(rng_seed)
-
-        if n_magnets > 0:
-            resolution = (2.0 * math.pi / n_magnets) / dt
-            self._sigma = resolution / 3.0
-        else:
-            self._sigma = 0.0
+        self._sigma   = float(sigma)
+        self._K_drive = float(K_drive)
+        self._K_drag  = float(K_drag)
+        self._rng     = np.random.default_rng(rng_seed)
 
     def measure(self, omega_true: float) -> float:
         """
-        Return a simulated sensor reading for true spin rate *omega_true* [rad/s].
-
-        Adds Gaussian noise calibrated to the Hall-effect resolution.
+        Return omega_true with optional Gaussian noise added [rad/s].
         Always returns a non-negative value.
         """
         if self._sigma > 0.0:

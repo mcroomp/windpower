@@ -184,13 +184,23 @@ class RotorDefinition:
     # ── Inertia ───────────────────────────────────────────────────────────────
     mass_kg:           float          = 5.0
     I_body_kgm2:       list           = field(default_factory=lambda: [5.0, 5.0, 10.0])
-    I_spin_kgm2:       float          = 0.0
+    I_spin_kgm2:       Optional[float] = None   # None = compute from blade_mass_kg; 0.0 = disabled
+    blade_mass_kg:     Optional[float] = None   # per-blade mass [kg] — used to derive I_spin
+    # Stationary assembly: axle, GB4008 motor, electronics, lower swashplate.
+    # Excluded from I_spin because it does not rotate with the rotor.
+    stationary_assembly_mass_kg: Optional[float] = None
+    # Spinning outer shell mass (hub shell + upper swashplate ring + push-rods).
+    # Does NOT include blade mass — blades are in blade_mass_kg.
+    # When all three component masses are set (blade, stationary, shell), mass_kg
+    # is derived: n_blades×blade + stationary + shell.  No need to set mass_kg
+    # explicitly in the YAML when the component breakdown is available.
+    spinning_hub_shell_mass_kg: Optional[float] = None
     I_blade_flap_kgm2: Optional[float] = None   # I_b — for Lock number
 
     # ── Control ───────────────────────────────────────────────────────────────
-    K_cyc:       float     = 0.4
-    aero_ramp_s: float     = 5.0
-    kaman_flap:  KamanFlap = field(default_factory=KamanFlap)
+    K_cyc:                float     = 0.4
+    swashplate_phase_deg: float     = 0.0       # cyclic phase advance for gyroscopic comp [°]
+    kaman_flap:           KamanFlap = field(default_factory=KamanFlap)
 
     # ── Autorotation ODE ─────────────────────────────────────────────────────
     K_drive_Nms_m:      float          = 1.4
@@ -255,6 +265,45 @@ class RotorDefinition:
         return self.mass_kg * 9.81 / self.disk_area_m2
 
     @property
+    def I_spin_blade_kgm2(self) -> Optional[float]:
+        """
+        Spin-axis moment of inertia estimated from blade geometry [kg·m²].
+
+        Only the SPINNING parts contribute: blades + outer hub shell.
+        The stationary assembly (axle, motor, electronics, lower swashplate)
+        does not rotate and is excluded via ``stationary_assembly_mass_kg``.
+
+        Formula:
+            I_blade       = m_blade × (R² + R·r_root + r_root²) / 3  (uniform rod)
+            m_hub_spin    = mass_kg − n_blades × blade_mass_kg − stationary_assembly_mass_kg
+            I_hub_spin    = m_hub_spin × r_root² / 2                  (solid disk)
+            I_spin        = n_blades × I_blade + I_hub_spin
+        """
+        if self.blade_mass_kg is None:
+            return None
+        R, r = self.radius_m, self.root_cutout_m
+        I_blade = self.blade_mass_kg * (R**2 + R * r + r**2) / 3.0
+        stationary = self.stationary_assembly_mass_kg or 0.0
+        m_hub = max(0.0, self.mass_kg - self.n_blades * self.blade_mass_kg - stationary)
+        I_hub = m_hub * r**2 / 2.0
+        return self.n_blades * I_blade + I_hub
+
+    @property
+    def I_spin_effective_kgm2(self) -> float:
+        """
+        Spin-axis inertia to use in dynamics [kg·m²].
+
+        Priority:
+          1. ``I_spin_kgm2`` if explicitly set (not None).
+          2. ``I_spin_blade_kgm2`` if ``blade_mass_kg`` is set.
+          3. 0.0 (gyroscopic coupling disabled).
+        """
+        if self.I_spin_kgm2 is not None:
+            return float(self.I_spin_kgm2)
+        computed = self.I_spin_blade_kgm2
+        return float(computed) if computed is not None else 0.0
+
+    @property
     def lock_number(self) -> Optional[float]:
         """
         γ = ρ · CL_alpha · c · R⁴ / I_b  [–]
@@ -279,18 +328,27 @@ class RotorDefinition:
         """
         return 2.0 * math.pi / (1.0 + 2.0 / self.aspect_ratio)
 
+    # Design-point v_inplane used for K_drive/K_drag consistency checks.
+    # Derived from 10 m/s headwind and DEFAULT_BODY_Z = [0.851, 0.305, 0.427]
+    # with hub stationary:
+    #   v_axial    = dot([10,0,0], body_z) = 8.51 m/s
+    #   v_inplane  = |[10,0,0] - 8.51·body_z| = 5.25 m/s
+    # Equivalently: v_inplane = V_wind · sin(θ) where θ = angle(wind, body_z) = 31.7°.
+    _V_INPLANE_DESIGN_MS: float = 5.25
+
     @property
     def omega_eq_from_K_rad_s(self) -> float:
         """
-        Theoretical equilibrium spin from K_drive/K_drag at design-point v_inplane.
+        Equilibrium spin from K_drive/K_drag at the design-point v_inplane.
 
-        ω_eq = √(K_drive · v_inplane_eq / K_drag)
+        ω_eq = √(K_drive · v_inplane_design / K_drag)
 
-        where v_inplane_eq is derived from the stored omega_eq_rad_s if available,
-        otherwise estimated from wind speed 10 m/s at 30° disk tilt (≈5.83 m/s).
+        Uses _V_INPLANE_DESIGN_MS = 5.25 m/s — the in-plane wind component at the
+        default tether orientation (body_z=[0.851,0.305,0.427]) and 10 m/s headwind
+        with hub stationary.  Gives ~20.3 rad/s vs the simulation-measured 20.148 rad/s.
         """
-        v_inplane_eq = 5.83  # m/s — wind in disk plane at ~30° tether elevation
-        return math.sqrt(self.K_drive_Nms_m * v_inplane_eq / self.K_drag_Nms2_rad2)
+        return math.sqrt(self.K_drive_Nms_m * self._V_INPLANE_DESIGN_MS
+                         / self.K_drag_Nms2_rad2)
 
     # =========================================================================
     # Factory helpers
@@ -315,7 +373,8 @@ class RotorDefinition:
             CL_alpha     = self.CL_alpha_per_rad,
             K_cyc        = self.K_cyc,
             aoa_limit    = math.radians(self.alpha_stall_deg),
-            ramp_time    = self.aero_ramp_s,
+            k_drive_spin = self.K_drive_Nms_m,
+            k_drag_spin  = self.K_drag_Nms2_rad2,
         )
 
     def dynamics_kwargs(self) -> dict:
@@ -329,7 +388,7 @@ class RotorDefinition:
         return dict(
             mass   = self.mass_kg,
             I_body = list(self.I_body_kgm2),
-            I_spin = self.I_spin_kgm2,
+            I_spin = self.I_spin_effective_kgm2,
         )
 
     # =========================================================================
@@ -390,7 +449,7 @@ class RotorDefinition:
             f"  Lock γ={'TBD' if ln is None else f'{ln:.2f}'}\n"
             f"\n"
             f"  Control:\n"
-            f"    K_cyc={self.K_cyc}  ramp={self.aero_ramp_s}s  "
+            f"    K_cyc={self.K_cyc}  "
             f"Kaman flap: {kf_str}\n"
             f"\n"
             f"  Autorotation:\n"
@@ -574,7 +633,8 @@ class RotorDefinition:
                 warn("autorotation",
                      f"Nominal ω_eq={self.omega_eq_rad_s:.3f}rad/s differs by "
                      f"{err_pct:.0%} from K-derived ω_eq={omega_theory:.3f}rad/s "
-                     f"at v_inplane=5.83m/s. K constants may not match design point.")
+                     f"at v_inplane={self._V_INPLANE_DESIGN_MS}m/s. "
+                     f"K constants may not match design point.")
 
         # ── C: Completeness ───────────────────────────────────────────────────
         if self.I_blade_flap_kgm2 is None:
@@ -659,7 +719,7 @@ def load(path_or_name: str) -> RotorDefinition:
         name        = str(data.get("name", p.stem)),
         description = str(data.get("description", "")),
 
-        n_blades       = int(ro.get("n_blades",      4)),
+        n_blades       = _require_int(ro, "n_blades", p),
         radius_m       = float(ro.get("radius_m",    2.5)),
         root_cutout_m  = float(ro.get("root_cutout_m", 0.5)),
         chord_m        = float(ro.get("chord_m",     0.15)),
@@ -676,14 +736,17 @@ def load(path_or_name: str) -> RotorDefinition:
         Re_design         = _m_int(af.get("Re_design")),
         Re_operating      = _m_int(af.get("Re_operating")),
 
-        mass_kg           = float(_m.get("mass_kg",      5.0)),
+        mass_kg           = _load_mass_kg(_m, n_blades=int(ro.get("n_blades", 4))),
         I_body_kgm2       = [float(v) for v in _m.get("I_body_kgm2", [5.0, 5.0, 10.0])],
-        I_spin_kgm2       = float(_m.get("I_spin_kgm2", 0.0)),
-        I_blade_flap_kgm2 = _m_float(_m.get("I_blade_flap_kgm2")),
+        I_spin_kgm2                  = _m_float(_m.get("I_spin_kgm2")),
+        blade_mass_kg                = _m_float(_m.get("blade_mass_kg")),
+        stationary_assembly_mass_kg  = _load_stationary_mass(_m.get("stationary_assembly_mass_kg")),
+        spinning_hub_shell_mass_kg   = _m_float(_m.get("spinning_hub_shell_mass_kg")),
+        I_blade_flap_kgm2            = _m_float(_m.get("I_blade_flap_kgm2")),
 
-        K_cyc         = float(ct.get("K_cyc",      0.4)),
-        aero_ramp_s   = float(ct.get("aero_ramp_s", 5.0)),
-        kaman_flap    = kaman,
+        K_cyc                = float(ct.get("K_cyc",              0.4)),
+        swashplate_phase_deg = float(ct.get("swashplate_phase_deg", 0.0)),
+        kaman_flap           = kaman,
 
         K_drive_Nms_m     = float(ar.get("K_drive_Nms_m",    1.4)),
         K_drag_Nms2_rad2  = float(ar.get("K_drag_Nms2_rad2", 0.01786)),
@@ -704,9 +767,53 @@ def default() -> RotorDefinition:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _require_int(section: dict, key: str, path) -> int:
+    """Return int(section[key]), raising ValueError if the key is absent."""
+    if key not in section:
+        raise ValueError(
+            f"Required field '{key}' is missing from rotor YAML: {path}"
+        )
+    return int(section[key])
+
+
 def _m_float(v) -> Optional[float]:
     """Parse optional float: None/null → None, else float(v)."""
     return None if v is None else float(v)
+
+
+def _load_mass_kg(inertia_section: dict, n_blades: int = 4) -> float:
+    """
+    Determine total mass from the inertia YAML section.
+
+    If blade_mass_kg, stationary_assembly_mass_kg (dict or float), and
+    spinning_hub_shell_mass_kg are all present, mass_kg is computed as:
+        n_blades × blade_mass_kg + stationary_assembly_mass_kg + spinning_hub_shell_mass_kg
+    so it does not need to be stated explicitly in the YAML.
+    Falls back to the explicit mass_kg field (default 5.0).
+    """
+    blade      = _m_float(inertia_section.get("blade_mass_kg"))
+    stationary = _load_stationary_mass(inertia_section.get("stationary_assembly_mass_kg"))
+    shell      = _m_float(inertia_section.get("spinning_hub_shell_mass_kg"))
+
+    if blade is not None and stationary is not None and shell is not None:
+        return blade * n_blades + stationary + shell
+
+    explicit = inertia_section.get("mass_kg")
+    if explicit is not None:
+        return float(explicit)
+    return 5.0
+
+
+def _load_stationary_mass(v) -> Optional[float]:
+    """
+    Parse stationary_assembly_mass_kg: accepts either a plain float/int or a
+    dict of {component_name: mass_kg} items whose values are summed.
+    """
+    if v is None:
+        return None
+    if isinstance(v, dict):
+        return float(sum(float(x) for x in v.values()))
+    return float(v)
 
 
 def _m_int(v) -> Optional[int]:

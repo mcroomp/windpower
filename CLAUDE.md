@@ -95,7 +95,11 @@ push-rods → trailing-edge flaps → blade aerodynamic twist → pitch change
 Sign convention: γ < 0 (upward flap) → blade pitches UP
 
 ### Anti-Rotation Motor
-**EMAX GB4008** (66KV, hollow shaft) via **80:44 spur gear** applies counter-torque to keep the electronics/swashplate assembly non-rotating.
+**EMAX GB4008** (66KV, hollow shaft) via **80:44 spur gear** keeps the electronics/swashplate assembly stationary via a closed-loop yaw rate controller: the Pixhawk IMU measures any rotation of the assembly and the ESC modulates motor torque to null it.
+
+The 80:44 gear is a **mechanical efficiency choice** — it sets the motor shaft to run at `(80/44) × omega_rotor` so the motor operates in an efficient RPM band. All yaw stabilisation authority comes from the yaw PID loop, not the gear itself. The motor torque (current) is modulated by the ESC under `ATC_RAT_YAW_*` control; motor speed is gear-locked.
+
+**I_spin note:** Only the spinning outer hub shell and blades contribute to angular momentum. The stationary assembly (axle, motor stator, electronics, lower swashplate, ~1 kg) does **not** spin and is excluded from I_spin.
 
 Both bearing friction and push-rod reaction forces are **internal** forces in the current single-body simulation model — they cancel in the equations of motion. Motor torque must **not** be added as an external couple. Motor modeling becomes necessary only when the simulation is split into separate spinning-hub and non-rotating-electronics bodies.
 
@@ -153,8 +157,8 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 | Component        | Model                    | Role                                      |
 |------------------|--------------------------|-------------------------------------------|
 | Flight controller| Holybro Pixhawk 6C       | Swashplate mixing, servo + ESC outputs    |
-| Motor            | EMAX GB4008 (66KV)       | Counter-torque, keeps electronics stationary |
-| ESC              | REVVitRC 50A AM32        | Motor speed control                       |
+| Motor            | EMAX GB4008 (66KV)       | Counter-torque; 80:44 gear sets operating RPM range; torque modulated by yaw PID |
+| ESC              | REVVitRC 50A AM32        | Drives GB4008 under ATC_RAT_YAW_* control; DSHOT output to motor                |
 | Servos S1/S2/S3  | DS113MG V6.0             | Swashplate tilt (collective + cyclic)     |
 | UBEC             | —                        | 8.0V servo rail power                     |
 | Battery          | 4S LiPo 15.2V            | 450 mAh (confirmed)                       |
@@ -752,7 +756,7 @@ Four milestones. M1+M2 are complete. M3 is in progress. M4 not started.
 - [ ] Run test_pumping_cycle — confirm reel-in tension < reel-out, net energy > 0
 - [ ] Confirm H_SWASH_TYPE=1 (H3-120) in SITL
 - [ ] Determine H_PHANG via step cyclic → measure tilt response
-- [ ] Configure GB4008 tail: H_TAIL_TYPE, SERVO4_TRIM, yaw rate PID
+- [ ] Configure GB4008: H_TAIL_TYPE=3/4 (DDFP), tune ATC_RAT_YAW_* and H_COL2YAW feedforward
 - [ ] Write `rawes_params.parm` (full parameter file for Pixhawk 6C)
 - **Gate:** test_pumping_cycle passes + rawes_params.parm exists
 
