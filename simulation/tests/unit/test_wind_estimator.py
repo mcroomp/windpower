@@ -23,19 +23,17 @@ from trajectory import WindEstimator, DeschutterTrajectory, quat_apply, Q_IDENTI
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _state(t, pos_enu, omega_spin=0.0, vel_enu=None, tension_n=0.0):
+def _state(pos_enu, omega_spin=0.0, vel_enu=None):
     return {
-        "t_free":     float(t),
         "pos_enu":    np.asarray(pos_enu, dtype=float),
         "vel_enu":    np.zeros(3) if vel_enu is None else np.asarray(vel_enu, dtype=float),
-        "tension_n":  float(tension_n),
         "omega_spin": float(omega_spin),
     }
 
 
-def _feed(est, states):
+def _feed(est, states, dt=1.0):
     for s in states:
-        est.update(s)
+        est.update(s, dt)
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +50,9 @@ def test_not_ready_initially():
 def test_ready_after_min_samples():
     est = WindEstimator(min_samples=5)
     for i in range(4):
-        est.update(_state(float(i), [10.0, 0.0, 5.0]))
+        est.update(_state([10.0, 0.0, 5.0]))
     assert not est.ready
-    est.update(_state(4.0, [10.0, 0.0, 5.0]))
+    est.update(_state([10.0, 0.0, 5.0]))
     assert est.ready
 
 
@@ -71,7 +69,7 @@ def test_wind_dir_eastward():
         pos = np.array([46.0 + 10.0 * np.cos(angle),
                         10.0 * np.sin(angle),
                         12.0])
-        est.update(_state(float(i), pos))
+        est.update(_state(pos))
     d = est.wind_dir_enu
     assert d is not None
     assert d[0] > 0.95, f"expected mostly east, got {d}"
@@ -87,7 +85,7 @@ def test_wind_dir_northward():
         pos = np.array([10.0 * np.cos(angle),
                         46.0 + 10.0 * np.sin(angle),
                         12.0])
-        est.update(_state(float(i), pos))
+        est.update(_state(pos))
     d = est.wind_dir_enu
     assert d is not None
     assert d[1] > 0.95, f"expected mostly north, got {d}"
@@ -97,7 +95,7 @@ def test_wind_dir_northward():
 def test_wind_dir_is_unit_vector():
     est = WindEstimator(min_samples=5)
     for i in range(10):
-        est.update(_state(float(i), [30.0 + i * 0.1, 5.0, 10.0]))
+        est.update(_state([30.0 + i * 0.1, 5.0, 10.0]))
     d = est.wind_dir_enu
     assert d is not None
     assert abs(np.linalg.norm(d) - 1.0) < 1e-9
@@ -107,7 +105,7 @@ def test_wind_dir_z_always_zero():
     """wind_dir_enu must be horizontal (z = 0)."""
     est = WindEstimator(min_samples=5)
     for i in range(10):
-        est.update(_state(float(i), [40.0, 20.0, 15.0 + i]))
+        est.update(_state([40.0, 20.0, 15.0 + i]))
     d = est.wind_dir_enu
     assert d is not None
     assert abs(d[2]) < 1e-9
@@ -120,7 +118,7 @@ def test_wind_dir_z_always_zero():
 def test_v_inplane_none_when_no_spin():
     est = WindEstimator(min_samples=5)
     for i in range(10):
-        est.update(_state(float(i), [40.0, 0.0, 12.0], omega_spin=0.0))
+        est.update(_state([40.0, 0.0, 12.0], omega_spin=0.0))
     assert est.v_inplane_ms is None
 
 
@@ -133,7 +131,7 @@ def test_v_inplane_formula():
 
     est = WindEstimator(min_samples=5, K_drive=K_drive, K_drag=K_drag)
     for i in range(10):
-        est.update(_state(float(i), [40.0, 0.0, 12.0], omega_spin=omega))
+        est.update(_state([40.0, 0.0, 12.0], omega_spin=omega))
     v = est.v_inplane_ms
     assert v is not None
     assert abs(v - expected) < 1e-6
@@ -145,12 +143,12 @@ def test_v_inplane_formula():
 
 def test_rolling_window_evicts_old_samples():
     est = WindEstimator(window_s=5.0, min_samples=3)
-    # Feed 10 samples at t=0..9; window=5 keeps only the last 5 (t=5..9)
+    # Feed 10 samples with dt=1.0; internal clock goes 1..10; window=5 keeps last 5
     for i in range(10):
-        est.update(_state(float(i), [float(i), 0.0, 5.0]))
-    # Only samples with t >= 9 - 5 = 4 remain
+        est.update(_state([float(i), 0.0, 5.0]), dt=1.0)
+    # Internal clock = 10; cutoff = 10 - 5 = 5; keep entries with t >= 5
     remaining_ts = [t for t, _, _ in est._buf]
-    assert all(t >= 4.0 for t in remaining_ts), f"stale samples remain: {remaining_ts}"
+    assert all(t >= 5.0 for t in remaining_ts), f"stale samples remain: {remaining_ts}"
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +167,9 @@ def test_deschutter_uses_initial_wind_before_estimator_ready():
         xi_reel_in_deg=55,
         wind_estimator=est,
     )
-    # Step into reel-in phase
-    cmd = traj.step({"t_free": 31.0, "pos_enu": [46, 14, 12],
-                     "vel_enu": [0, 0, 0], "tension_n": 0, "omega_spin": 0}, 0.1)
+    # Step into reel-in phase (advance internal clock past t_reel_out=30 s)
+    for _ in range(310):   # 310 × 0.1 s = 31 s
+        cmd = traj.step(_state([46, 14, 12]), 0.1)
     q = cmd["attitude_q"]
     # Must not be identity — reel-in q should be applied
     assert not (abs(q[0] - 1.0) < 1e-6 and np.linalg.norm(q[1:]) < 1e-6)
@@ -197,8 +195,7 @@ def test_deschutter_updates_reel_in_q_when_estimator_ready():
     for i in range(10):
         angle = i * 2 * np.pi / 10
         pos = np.array([10.0 * np.cos(angle), 46.0 + 10.0 * np.sin(angle), 12.0])
-        traj.step({"t_free": float(i * 3), "pos_enu": pos,
-                   "vel_enu": [0, 0, 0], "tension_n": 0, "omega_spin": 20.0}, 0.1)
+        traj.step(_state(pos, omega_spin=20.0), 0.1)
 
     q_after = traj._attitude_q_reel_in
     assert q_after is not None

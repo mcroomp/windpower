@@ -51,6 +51,9 @@ from trajectory  import DeschutterTrajectory
 from controller  import TensionController, orbit_tracked_body_z_eq
 from trajectory  import quat_apply, quat_is_identity
 from frames      import build_orb_frame
+from simtest_log import SimtestLog
+
+_log = SimtestLog(__file__)
 
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT            = 1.0 / 400.0
@@ -78,7 +81,7 @@ V_REEL_IN     =  0.4    # m/s
 
 # Tension setpoints
 DEFAULT_TENSION_OUT = 200.0   # N
-DEFAULT_TENSION_IN  =  20.0   # N
+DEFAULT_TENSION_IN  =  80.0   # N — must be high enough for altitude maintenance at ξ=55°
 
 # Mode_RAWES slew rate (matches config default body_z_slew_rate_rad_s)
 BODY_Z_SLEW_RATE = 0.12       # rad/s
@@ -408,27 +411,32 @@ def test_deschutter_tether_not_broken():
         f"Peak tension {peak:.1f} N ≥ 80% break load ({limit:.1f} N)"
 
 
-# ── Diagnostic printer ────────────────────────────────────────────────────────
+# ── Diagnostic log ────────────────────────────────────────────────────────────
 
 def _print_cycle(r):
     sp_out = r["tension_out_sp"]
     sp_in  = r["tension_in_sp"]
-    print(f"\nDe Schutter cycle  (setpoints: reel-out={sp_out:.0f}N  reel-in={sp_in:.0f}N)")
-    print(f"  {'t':>5}  {'phase':>8}  {'tension':>9}  {'coll':>7}  "
-          f"{'ξ_wind':>7}  {'altitude':>9}  {'rest_L':>8}")
+    lines = []
+    lines.append(f"De Schutter cycle  (setpoints: reel-out={sp_out:.0f}N  reel-in={sp_in:.0f}N)")
+    lines.append(f"  {'t':>5}  {'phase':>8}  {'tension':>9}  {'coll':>7}  "
+                 f"{'xi_wind':>7}  {'altitude':>9}  {'rest_L':>8}")
     for t, ten, coll, xi, alt, rl in zip(
             r["ts"], r["tensions"], r["collectives"], r["tilts_from_wind"],
             r["altitudes"], r["rest_lengths"]):
         phase = "reel-out" if t <= T_REEL_OUT else "reel-in "
-        print(f"  {t:5.1f}  {phase:>8}  {ten:8.1f}N  {np.degrees(coll):6.2f}°  "
-              f"{xi:6.1f}°  {alt:8.2f}m  {rl:7.2f}m")
+        lines.append(f"  {t:5.1f}  {phase:>8}  {ten:8.1f}N  {np.degrees(coll):6.2f}deg  "
+                     f"{xi:6.1f}deg  {alt:8.2f}m  {rl:7.2f}m")
     out = r["tensions_out"]
     inn = r["tensions_in"][int(T_TRANSITION):]
-    print(f"\n  Reel-out: mean={np.mean(out):.1f}N  max={max(out):.1f}N  "
-          f"energy={r['energy_out']:.1f}J")
-    print(f"  Reel-in (steady): mean={np.mean(inn):.1f}N  max={max(inn):.1f}N  "
-          f"energy={r['energy_in']:.1f}J")
-    print(f"  Net energy: {r['net_energy']:.1f}J  floor_hits={r['floor_hits']}")
+    lines.append(f"")
+    lines.append(f"  Reel-out: mean={np.mean(out):.1f}N  max={max(out):.1f}N  "
+                 f"energy={r['energy_out']:.1f}J")
+    lines.append(f"  Reel-in (steady): mean={np.mean(inn):.1f}N  max={max(inn):.1f}N  "
+                 f"energy={r['energy_in']:.1f}J")
+    lines.append(f"  Net energy: {r['net_energy']:.1f}J  floor_hits={r['floor_hits']}")
+    _log.write(lines, f"net={r['net_energy']:.0f}J  "
+               f"reel-out={np.mean(out):.0f}N  reel-in={np.mean(inn):.0f}N  "
+               f"floor_hits={r['floor_hits']}")
 
 
 # ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────

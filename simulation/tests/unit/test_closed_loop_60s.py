@@ -35,6 +35,9 @@ from tether     import TetherModel
 from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
 from trajectory import HoldTrajectory
 from frames     import build_orb_frame
+from simtest_log import SimtestLog
+
+_log = SimtestLog(__file__)
 
 DT            = 1.0 / 400.0
 T_SIM         = 60.0
@@ -161,10 +164,13 @@ def _run(t_sim: float = T_SIM):
 def test_60s_altitude_maintained():
     """Hub must stay above z_floor=1 m for the full 60 s."""
     history, _ = _run()
+    lines = ["t(s)      z(m)  spin(rad/s)  floor_hits"]
     for snap in history:
-        print(f"  t={snap['t']:5.1f}s  z={snap['pos'][2]:.2f}m  "
-              f"spin={snap['omega_spin']:.1f}  floor_hits={snap['floor_hits']}")
+        lines.append(f"  {snap['t']:5.1f}  {snap['pos'][2]:7.2f}  "
+                     f"{snap['omega_spin']:10.1f}  {snap['floor_hits']}")
     floor_hits = history[-1]["floor_hits"]
+    min_z = min(s["pos"][2] for s in history)
+    _log.write(lines, f"floor_hits={floor_hits}  min_z={min_z:.2f}m")
     assert floor_hits == 0, f"Hub hit z_floor {floor_hits} times in 60 s"
 
 

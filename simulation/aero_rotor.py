@@ -71,11 +71,17 @@ class RotorAero:
         self.k_drive_spin = float(p["k_drive_spin"])
         self.k_drag_spin  = float(p["k_drag_spin"])
 
-        # De Schutter lumped-blade geometry (Eq. 30–31)
-        span          = self.r_tip - self.r_root
-        self.r_cp     = self.r_root + (2.0 / 3.0) * span
-        self.S_w      = self.n_blades * self.chord * span
+        # Geometry
+        span           = self.r_tip - self.r_root
+        self.r_cp      = self.r_root + (2.0 / 3.0) * span   # kept for test/telemetry compat
+        self.S_w       = self.n_blades * self.chord * span   # kept for test/telemetry compat
         self.disk_area = math.pi * (self.r_tip ** 2 - self.r_root ** 2)
+
+        # Strip integration geometry (replaces lumped r_cp evaluation)
+        _n  = 20
+        _dr = span / _n
+        self._strip_r  = np.array([self.r_root + (i + 0.5) * _dr for i in range(_n)])
+        self._strip_dA = self.n_blades * self.chord * _dr   # blade area per strip, all blades
 
         # Telemetry — readable after each compute_forces() call
         self.last_T              = 0.0
@@ -112,25 +118,29 @@ class RotorAero:
 
     def _bem_integrate(self, v_eff: float, omega_abs: float,
                        collective_rad: float) -> tuple:
-        """De Schutter (2018) lumped-blade BEM — Eq. 25, 30–31."""
-        v_tan = omega_abs * self.r_cp
-        v_loc = math.sqrt(v_tan ** 2 + v_eff ** 2)
-        if v_loc < 0.5:
-            return 0.0, 0.0, 0.0
+        """Strip BEM — integrates dT and dQ over 20 radial strips."""
+        T_sum = 0.0
+        Q_sum = 0.0
+        for r_i in self._strip_r:
+            v_tan = omega_abs * r_i
+            v_loc = math.sqrt(v_tan ** 2 + v_eff ** 2)
+            if v_loc < 0.5:
+                continue
 
-        inflow_ang  = math.atan2(v_eff, v_tan)
-        aoa         = inflow_ang + collective_rad
-        aoa_clamped = max(-self.aoa_limit, min(self.aoa_limit, aoa))
+            inflow_ang  = math.atan2(v_eff, v_tan)
+            aoa_clamped = max(-self.aoa_limit,
+                              min(self.aoa_limit, inflow_ang + collective_rad))
 
-        CL = self.CL0 + self.CL_alpha * aoa_clamped
-        CD = self.CD0 + CL ** 2 / (math.pi * self.aspect_ratio * self.oswald_eff)
-        q  = 0.5 * self.rho * v_loc ** 2
+            CL = self.CL0 + self.CL_alpha * aoa_clamped
+            CD = self.CD0 + CL ** 2 / (math.pi * self.aspect_ratio * self.oswald_eff)
+            q  = 0.5 * self.rho * v_loc ** 2
 
-        T = q * self.S_w * (CL * math.cos(inflow_ang) - CD * math.sin(inflow_ang))
-        T = max(0.0, T)
+            dT = q * self._strip_dA * (CL * math.cos(inflow_ang) - CD * math.sin(inflow_ang))
+            dQ = q * self._strip_dA * r_i * (CL * math.sin(inflow_ang) - CD * math.cos(inflow_ang))
+            T_sum += max(0.0, dT)
+            Q_sum += dQ
 
-        Q = q * self.S_w * self.r_cp * (CL * math.sin(inflow_ang) - CD * math.cos(inflow_ang))
-        return T, max(0.0, Q), min(0.0, Q)
+        return T_sum, max(0.0, Q_sum), min(0.0, Q_sum)
 
     def compute_forces(
         self,

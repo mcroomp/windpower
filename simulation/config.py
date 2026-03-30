@@ -48,6 +48,8 @@ DEFAULTS: dict = {
 
     # ── Tether ────────────────────────────────────────────────────────────────
     "tether_rest_length": 49.949,   # unstretched tether length [m]
+    "anchor_enu": [0.0, 0.0, 0.0],  # tether anchor position ENU [m]
+                                     # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local ENU
 
     # ── Startup kinematic ramp ────────────────────────────────────────────────
     # Hub moves at constant vel0 from launch_pos for startup_damp_seconds,

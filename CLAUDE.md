@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED (`test_pumping_cycle.py`: net energy +1901 J, reel-in 55 N vs reel-out 211 N). Rotor definition abstracted into `rotor_definition.py` + YAML files; mediator/aero/dynamics wired to `beaupoil_2026.yaml`. 265 unit tests passing. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED (`test_pumping_cycle.py`: net energy +1901 J, reel-in 55 N vs reel-out 211 N). Rotor definition abstracted into `rotor_definition.py` + YAML files; mediator/aero/dynamics wired to `beaupoil_2026.yaml`. 268 fast unit tests + 23 simtests passing. `ModeRAWES` ArduPilot firmware architecture fully designed (documented in `simulation/raws_mode.md`). Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
 
 See **[Phase 3 Plan](#phase-3-plan)** below for the full milestone breakdown.
 
@@ -182,6 +182,7 @@ Pixhawk 6C          ──DSHOT/PWM──────────► REVVitRC ES
 | [summary.md](summary.md) | RAWES optimal control model from De Schutter et al. 2018 — pumping cycle, structural constraints, atmosphere model |
 | [simulation/mbdyn_reference.md](simulation/mbdyn_reference.md) | MBDyn integration documentation and restoration instructions (MBDyn removed from runtime but archived) |
 | [simulation/heliparams.md](simulation/heliparams.md) | **ArduPilot heli EKF3 GPS fusion source analysis** — exact conditions for GPS position fusion, required params (`EK3_SRC1_YAW=1`, `EK3_GPS_CHECK=0`), 10 s mandatory GPS-check delay, `assume_zero_sideslip()=false` for heli. Read this before debugging EKF3 CONST_POS_MODE. |
+| [simulation/raws_mode.md](simulation/raws_mode.md) | **Mode_RAWES complete spec** — MAVLink protocol (STATE/COMMAND/winch), control architecture, wind estimation, takeoff/landing, pumping cycle example, C++ firmware implementation (~160 lines), orbit tracking, tension PI, counter-torque motor, omega_spin from AM32 ESC eRPM, parameter table, simulation mapping. |
 
 ---
 
@@ -705,6 +706,66 @@ not collective.  Collective provides fine-grained tension tuning within a phase.
 
 ---
 
+## Phase 3 M3 — ModeRAWES Architecture: What Was Decided
+
+Full spec in `simulation/raws_mode.md`. Key settled decisions:
+
+### ModeRAWES inherits ModeAcro_Heli (not Mode directly)
+```
+Mode → ModeAcro → ModeAcro_Heli → ModeRAWES
+```
+Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards delegate to `ModeAcro_Heli::run()`. ~162 lines new C++.
+
+### 400 Hz loop (run()) pseudocode
+```
+1. Spool guards: SHUT_DOWN/GROUND_IDLE → ModeAcro_Heli::run(); return
+2. Planner timeout (2 s) → snap bz_target back to bz_tether
+3. Orbit tracking → update bz_tether from current tether direction
+4. Attitude setpoint: identity attitude_q → use bz_tether; else slerp toward bz_target
+5. Cyclic: error = cross(body_z_now, body_z_eq); rate_bf = kp × err_body → ATC_RAT_RLL/PIT
+6. Collective: set_throttle_out(_thrust_cmd, false, filt)  ← direct passthrough from ground PI
+7. Counter-torque: yaw rate = 0.0f → ATC_RAT_YAW → GB4008 (H_TAIL_TYPE=4)
+8. omega_spin: AP_ESC_Telem.get_rpm() × 2π/60 × 44/80 (11 pole pairs, 80:44 gear)
+9. send_state() at 10 Hz → Pixhawk→Planner STATE packet
+```
+
+### Protocol (MAVLink, 10 Hz)
+- **Planner → Pixhawk:** `SET_ATTITUDE_TARGET` — `attitude_q` (ENU quaternion attitude setpoint), `thrust` (normalized collective 0..1 from ground PI)
+- **Pixhawk → Planner (all standard streams, zero custom code):** `LOCAL_POSITION_NED` (pos + vel), `ATTITUDE_QUATERNION` (body_z_ned = quat_apply(q,[0,0,1])), `ESC_STATUS[RAWES_CTR_ESC]` (omega_spin — planner applies `× 2π/60 / 11 × 44/80`)
+- No `send_state()` function needed in `Mode_RAWES`
+- Tension and tether_length are **NOT** in the STATE packet — Pixhawk cannot measure them. Winch reads both locally.
+
+### Tension PI on ground (not Pixhawk)
+```python
+error          = tension_setpoint_n - tension_measured_n   # fresh local measurement
+collective_rad = kP * error + kI * integral                # ground config: kP=5e-4, kI=1e-4
+thrust         = clamp((collective_rad - col_min_rad) / (col_max_rad - col_min_rad), 0, 1)
+# col_min = -25°, col_max = 0° for beaupoil_2026
+# thrust sent in SET_ATTITUDE_TARGET.thrust field
+```
+**Why ground:** load cell is at winch; 10 Hz radio latency is fine for slow collective changes; winch is the fast tension regulator.
+
+### Pixhawk parameters (6)
+```
+RAWES_KP_CYC       = 1.0      # cyclic rate gain [rad/s per rad error]
+RAWES_BZ_SLEW      = 0.12     # body_z setpoint slew rate [rad/s]
+RAWES_CTR_ESC      = 3        # AP_ESC_Telem index for GB4008 counter-torque motor
+RAWES_ANCHOR_LAT   = 0.0      # tether anchor latitude [deg]
+RAWES_ANCHOR_LON   = 0.0      # tether anchor longitude [deg]
+RAWES_ANCHOR_ALT   = 0.0      # tether anchor altitude AMSL [m]
+```
+Anchor params allow any launch style (ground, hand-launch, mid-air entry).
+All tension PI params (KP, KI, col_min, col_max, tension setpoint) live in ground config only.
+
+### omega_spin measurement
+AM32 ESC telemetry via `AP_ESC_Telem`:
+```
+omega_spin = get_rpm(RAWES_CTR_ESC) × 2π/60 / 11 × 44/80
+```
+(11 pole pairs, 80:44 gear reduction)
+
+---
+
 ## Next Steps (Planned)
 
 - [x] Confirm battery capacity: 450 mAh (confirmed 2026-03-20)
@@ -725,8 +786,9 @@ not collective.  Collective provides fine-grained tension tuning within a phase.
 - [x] Physical model validation tests (test_physical_validation.py — 27 tests)
 - [x] Write pumping cycle stack test (test_pumping_cycle.py)
 - [x] **Run test_pumping_cycle — PASSED** (reel-out 211 N, reel-in 55 N, net energy +1901 J, peak 341 N, min alt 8.98 m)
+- [x] Design ModeRAWES ArduPilot firmware architecture — documented in `simulation/raws_mode.md`; inherits ModeAcro_Heli, 3 Pixhawk params, tension PI on ground
 - [ ] Write rawes_params.parm (full ArduPilot parameter file for Pixhawk 6C)
-- [ ] ArduPilot helicopter frame configuration for RAWES (H_SWASH_TYPE, H_PHANG, H_TAIL_TYPE)
+- [ ] ArduPilot helicopter frame configuration for RAWES (H_SWASH_TYPE=1, H_PHANG TBD, H_TAIL_TYPE=4)
 - [ ] Hardware-in-the-loop testing with Pixhawk SITL (hil_interface.py)
 
 ---
@@ -753,12 +815,13 @@ Four milestones. M1+M2 are complete. M3 is in progress. M4 not started.
 
 ### M3 — ArduPilot Configuration & Pumping Cycle Stack Test (in progress)
 - [x] `test_pumping_cycle.py` written (stack test — mirrors test_deschutter_cycle.py)
-- [ ] Run test_pumping_cycle — confirm reel-in tension < reel-out, net energy > 0
+- [x] Run test_pumping_cycle — PASSED (reel-out 211 N, reel-in 55 N, net energy +1901 J)
+- [x] Design `ModeRAWES` ArduPilot firmware architecture — fully documented in `simulation/raws_mode.md`
 - [ ] Confirm H_SWASH_TYPE=1 (H3-120) in SITL
 - [ ] Determine H_PHANG via step cyclic → measure tilt response
-- [ ] Configure GB4008: H_TAIL_TYPE=3/4 (DDFP), tune ATC_RAT_YAW_* and H_COL2YAW feedforward
+- [ ] Configure GB4008: H_TAIL_TYPE=4 (DDFP), tune ATC_RAT_YAW_* and H_COL2YAW feedforward
 - [ ] Write `rawes_params.parm` (full parameter file for Pixhawk 6C)
-- **Gate:** test_pumping_cycle passes + rawes_params.parm exists
+- **Gate:** rawes_params.parm exists + H_PHANG determined
 
 ### M4 — Hardware-in-the-Loop (Pixhawk 6C)
 - [ ] Write `hil_interface.py` — MAVLink HIL_SENSOR / HIL_GPS / HIL_ACTUATOR_CONTROLS

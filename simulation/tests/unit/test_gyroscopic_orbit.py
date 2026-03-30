@@ -39,6 +39,9 @@ from aero       import create_aero
 from tether     import TetherModel
 from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
 from frames     import build_orb_frame
+from simtest_log import SimtestLog
+
+_log = SimtestLog(__file__)
 
 # ---------------------------------------------------------------------------
 # Shared simulation constants (match test_closed_loop_60s.py)
@@ -221,8 +224,13 @@ def test_gyro_no_phase_destabilised():
 
     # Document the drift ratio for information (not asserted as degraded)
     drift_ratio = r_gyro["max_drift"] / max(r_base["max_drift"], 1.0)
-    print(f"\nGyroscopic drift ratio (I_spin={I_spin:.2f} kg·m², phase=0°): {drift_ratio:.2f}x"
-          f"  (baseline drift={r_base['max_drift']:.1f} m, gyro drift={r_gyro['max_drift']:.1f} m)")
+    _log.write(
+        [f"gyro_0deg  I_spin={I_spin:.2f} kg*m^2  phase=0deg",
+         f"  baseline_drift={r_base['max_drift']:.1f}m  gyro_drift={r_gyro['max_drift']:.1f}m  "
+         f"drift_ratio={drift_ratio:.2f}x"],
+        f"drift_ratio={drift_ratio:.2f}x  baseline={r_base['max_drift']:.1f}m  "
+        f"gyro={r_gyro['max_drift']:.1f}m  I_spin={I_spin:.2f}kg*m^2",
+    )
 
 
 @pytest.mark.simtest
@@ -286,9 +294,12 @@ def test_gyro_phase_sweep():
         )
     )
 
-    # Print summary for manual inspection (visible with pytest -s)
-    print("\nPhase sweep results (I_spin={:.2f} kg*m^2):".format(I_spin))
+    # Write phase sweep table to log file for post-run inspection
+    lines = [f"Phase sweep  I_spin={I_spin:.2f} kg*m^2",
+             f"  {'phase':>5}  {'stable':>6}  {'drift':>8}  {'min_z':>6}  {'floor_hits':>10}"]
     for p, v in sorted(results.items()):
         mark = "OK" if v["stable"] else "--"
-        print(f"  [{mark}] phase={p:3d} deg  drift={v['max_drift']:6.1f}m  "
-              f"min_z={v['min_z']:5.1f}m  floor_hits={v['floor_hits']}")
+        lines.append(f"  [{mark}] phase={p:3d} deg  drift={v['max_drift']:6.1f}m  "
+                     f"min_z={v['min_z']:5.1f}m  floor_hits={v['floor_hits']}")
+    stable_phases = [p for p, v in results.items() if v["stable"]]
+    _log.write(lines, f"stable_phases={stable_phases}  I_spin={I_spin:.2f}kg*m^2")

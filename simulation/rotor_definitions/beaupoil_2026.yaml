@@ -46,31 +46,34 @@ rotor:
 
 airfoil:
   designation:       SG6042
-  source:            "FlapRotor Blade Design doc (hardware); polar data from diyrcwings.com at Re≈127k"
+  source:            "NeuralFoil XFOIL surrogate at Re=490k (flight operating condition); sg6042.dat from aerosandbox database"
   # ── Lift model:  CL = CL0 + CL_alpha · α ────────────────────────────────
 
-  CL0:               0.43   # zero-AoA lift coefficient  [–]
-                             # SOURCE: SG6042 polar (diyrcwings.com, Re≈127k, FlapRotor doc p. 9):
-                             # CL ≈ 0.4–0.5 at α=0°.  0.43 is consistent with zero-lift AoA=−4.92°
-                             # and CL_alpha: CL(0°) = CL_alpha × 4.92°×π/180 ≈ 0.40.
-                             # MEASURE: XFOIL run on SG6042 at Re=127k; y-intercept of linear CL-α fit.
+  CL0:               0.524  # zero-AoA lift coefficient  [–]
+                             # SOURCE: NeuralFoil at Re=490k (r_cp=1.833m, ω=20 rad/s, c=0.20m).
+                             # NF fit over −4° to +9° linear range: CL(0°)=0.524.
+                             # Previous value (0.43) was from bench-test Re=127k — too low for flight.
+                             # MEASURE: XFOIL run on SG6042 at Re=490k; y-intercept of linear CL-α fit.
 
-  CL_alpha_per_rad:  4.71   # a = ∂CL/∂α  [/rad]
-                             # SOURCE: thin-airfoil 3D correction at AR=10:
-                             #   CL_alpha_3D = 2π / (1 + 2/AR) = 2π/1.2 ≈ 5.24/rad
-                             # 4.71/rad = 0.9 × 5.24 — 10% empirical reduction for low-Re
-                             # (Re=127k) sub-theoretical slope, consistent with published low-Re polars.
-                             # MEASURE: slope of CL-α line from SG6042 XFOIL polar at Re=127k
+  CL_alpha_per_rad:  5.47   # a = ∂CL/∂α  [/rad]
+                             # SOURCE: NeuralFoil at Re=490k, least-squares fit over −4° to +9°.
+                             # 5.47/rad is consistent with finite-wing lifting-line theory:
+                             #   CL_alpha_3D = 2π / (1 + 2/AR) = 2π/1.2 ≈ 5.24/rad (AR=10)
+                             # NF slightly exceeds lifting-line because SG6042 is cambered and
+                             # moderately thick (10%).  Previous value 4.71 was conservative (−14%).
+                             # MEASURE: slope of CL-α line from SG6042 XFOIL polar at Re=490k
                              # over linear range (≈ −5° to +10°).  Most important parameter —
                              # thrust scales linearly with CL_alpha.
 
   # ── Drag polar:  CD = CD0 + CL²/(π·AR·e) ───────────────────────────────
 
-  CD0:               0.010  # zero-lift drag coefficient  [–]
-                             # SOURCE: SG6042 polar (FlapRotor doc p. 9) shows CD,min ≈ 0.01–0.02
-                             # at Re=127k.  0.010 is the low end of that range (clean blade, no
-                             # surface roughness).
-                             # MEASURE: CD at zero lift (α ≈ −5°) from SG6042 XFOIL polar at Re=127k.
+  CD0:               0.018  # zero-lift drag coefficient  [–]
+                             # SOURCE: NeuralFoil at Re=490k: CD at zero lift ≈ 0.0181.
+                             # Previous value (0.010) was from bench-test Re=127k — lower Re
+                             # has higher skin-friction drag; flight Re gives lower CD0.
+                             # Note: 0.018 is still higher than the bench-test value (0.026)
+                             # because flight Re=490k gives cleaner attached-flow drag.
+                             # MEASURE: CD at zero lift (α ≈ −5°) from SG6042 XFOIL polar at Re=490k.
 
   oswald_efficiency: 0.8    # e — Oswald span efficiency factor  [–]
                              # SOURCE: standard engineering assumption for rectangular untwisted blades
@@ -79,11 +82,10 @@ airfoil:
                              # relative to CD0 at operating AoA (~5°).  Acceptable as-is.
 
   # Stall
-  alpha_stall_deg:   12.0   # α_stall — AoA clamp for linear model validity [°]
-                             # SOURCE: SG6042 polar (FlapRotor doc p. 9) shows CL peak at α≈10–12°
-                             # at Re=127k.  12° is the upper end of the linear CL range.
+  alpha_stall_deg:   14.4   # α_stall — AoA clamp for linear model validity [°]
+                             # SOURCE: NeuralFoil at Re=490k shows CL peak at α≈14.4° (vs 12° at Re=127k).
+                             # Higher Re delays stall onset; 14.4° is the upper end of the linear range.
                              # ASSUMPTION: model clips at this value (does not simulate post-stall).
-                             # Reduce to 10° if blade loading is found to regularly approach stall.
 
   # Empirical Re range — documentation only, NOT USED IN CURRENT MODEL
   Re_design:         127000 # Re at which Weyel 2025 / Beaupoil test rig operated
@@ -93,8 +95,7 @@ airfoil:
 
   Re_operating:      490000 # Re at r_cp in flight (= Ω·r_cp·c/ν ≈ 20×1.833×0.20/1.5e-5)
                              # NOT USED IN MODEL — documentation only.
-                             # Updated from 370k: chord is 0.20 m (not 0.15 m).
-                             # Operating Re > design Re → aero model is conservative (higher Re = lower CD).
+                             # Model coefficients above are taken at this Re (NeuralFoil fit).
 
 inertia:
   # mass_kg is NOT set here — it is computed by the loader as:

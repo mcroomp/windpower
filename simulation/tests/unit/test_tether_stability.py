@@ -108,8 +108,8 @@ def _compute_equilibrium_collective(
 
     _MAX_TETHER_TENSION_N = 496.0   # 80% of break load (620 N)
 
-    for deg in range(0, -31, -1):
-        coll_rad = math.radians(float(deg))
+    for half_deg in range(0, -81, -1):   # 0° → -40° in 0.5° steps
+        coll_rad = math.radians(half_deg * 0.5)
         f = aero.compute_forces(coll_rad, 0.0, 0.0, R_hub, np.zeros(3),
                                 omega, wind, t=10.0)
         H_x   = float(f[0])   # East force (world frame)

@@ -8,12 +8,15 @@ Protocol
 --------
 Two packet types cross the MAVLink boundary:
 
-    STATE packet  (Pixhawk → planner, ~10 Hz):
-        "pos_enu"    np.ndarray [3]  — hub position ENU [m]        (LOCAL_POSITION_NED)
-        "vel_enu"    np.ndarray [3]  — hub velocity ENU [m/s]      (LOCAL_POSITION_NED)
-        "tension_n"  float           — tether tension [N]           (NAMED_VALUE_FLOAT "tension")
-        "omega_spin" float           — rotor spin rate [rad/s]      (NAMED_VALUE_FLOAT "omega_spin")
-        "t_free"     float           — free-flight elapsed time [s] (SYSTEM_TIME or onboard timer)
+    STATE packet  (Pixhawk → planner, standard ArduPilot streams):
+        "pos_enu"    np.ndarray [3]  — hub position ENU [m]        (LOCAL_POSITION_NED converted)
+        "vel_enu"    np.ndarray [3]  — hub velocity ENU [m/s]      (LOCAL_POSITION_NED converted)
+        "omega_spin" float           — rotor spin rate [rad/s]      (ESC_STATUS[RAWES_CTR_ESC].rpm
+                                                                      × 2π/60 / 11 × 44/80)
+
+    Planner-local quantities (NOT in the STATE packet):
+        t_free       float  — free-flight elapsed time [s]  — computed locally by planner
+        tension_n    float  — tether tension [N]            — read locally from winch load cell
 
     COMMAND packet  (planner → Pixhawk, ~10 Hz):
         "attitude_q"      np.ndarray [4]  (w,x,y,z)                (SET_ATTITUDE_TARGET quaternion)
@@ -183,19 +186,22 @@ class WindEstimator:
         self._min_samples = int(min_samples)
         self._K_drive     = float(K_drive)
         self._K_drag      = float(K_drag)
-        # Buffer entries: (t_free, pos_enu [3], omega_spin)
+        self._t           = 0.0   # internal monotonic clock [s]
+        # Buffer entries: (t, pos_enu [3], omega_spin)
         self._buf: "list[tuple[float, np.ndarray, float]]" = []
 
-    def update(self, state: dict) -> None:
+    def update(self, state: dict, dt: float = 1.0) -> None:
         """
-        Ingest one STATE packet.  Call every planner step (~10 Hz or 400 Hz).
+        Ingest one STATE packet.  Call every planner step.
+
+        dt advances the internal clock used for window eviction.
         """
-        t          = float(state["t_free"])
+        self._t += float(dt)
         pos        = np.asarray(state["pos_enu"], dtype=float).copy()
         omega_spin = float(state.get("omega_spin", 0.0))
-        self._buf.append((t, pos, omega_spin))
+        self._buf.append((self._t, pos, omega_spin))
         # Trim entries older than window
-        cutoff = t - self._window_s
+        cutoff = self._t - self._window_s
         self._buf = [(ti, pi, oi) for ti, pi, oi in self._buf if ti >= cutoff]
 
     @property
@@ -255,9 +261,8 @@ class TrajectoryController:
 
         Parameters
         ----------
-        state : dict — STATE packet from Pixhawk
-                       (pos_enu, vel_enu, tension_n, omega_spin, t_free)
-        dt    : float — timestep [s]
+        state  : dict  — STATE packet (pos_enu, vel_enu, omega_spin)
+        dt     : float — timestep [s]
 
         Returns
         -------
@@ -285,7 +290,7 @@ class HoldTrajectory(TrajectoryController):
     def step(self, state: dict, dt: float) -> dict:
         return {
             "attitude_q":     Q_IDENTITY.copy(),  # SET_ATTITUDE_TARGET: identity = tether-aligned
-            "thrust":         0.0,                 # SET_ATTITUDE_TARGET thrust: tension_n / tension_max_n
+            "thrust":         0.0,                 # SET_ATTITUDE_TARGET thrust field
             "winch_speed_ms": 0.0,                 # MAV_CMD_DO_WINCH: hold
             "phase":          "hold",              # telemetry label (not on wire)
         }
@@ -365,6 +370,7 @@ class DeschutterTrajectory(TrajectoryController):
         self._tension_max   = float(tension_max_n) if tension_max_n is not None else float(tension_out)
         self._xi_reel_in_deg: "float | None" = float(xi_reel_in_deg) if xi_reel_in_deg is not None else None
         self._wind_estimator = wind_estimator
+        self._t_free         = 0.0   # internal elapsed free-flight time [s]
 
         # Initial/fallback reel-in attitude from fixed wind_enu
         self._attitude_q_reel_in: "np.ndarray | None" = self._q_from_wind(
@@ -389,9 +395,10 @@ class DeschutterTrajectory(TrajectoryController):
 
     # ------------------------------------------------------------------
     def step(self, state: dict, dt: float) -> dict:
+        self._t_free += dt
         # Update wind estimator and refresh reel-in quaternion if direction changed
         if self._wind_estimator is not None:
-            self._wind_estimator.update(state)
+            self._wind_estimator.update(state, dt)
             wind_dir = self._wind_estimator.wind_dir_enu
             if wind_dir is not None:
                 # Re-derive full 3D wind from direction + in-plane speed
@@ -404,8 +411,7 @@ class DeschutterTrajectory(TrajectoryController):
                 if q_new is not None:
                     self._attitude_q_reel_in = q_new
 
-        t_free    = float(state["t_free"])
-        t_cyc     = t_free % self._t_cycle
+        t_cyc     = self._t_free % self._t_cycle
         phase_out = t_cyc < self._t_reel_out
 
         winch_speed = self._v_reel_out if phase_out else -self._v_reel_in

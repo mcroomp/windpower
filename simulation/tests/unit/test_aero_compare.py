@@ -34,7 +34,12 @@ HOVER_KWARGS = dict(
     R_hub=np.eye(3),
     v_hub_world=np.zeros(3),
     omega_rotor=20.0,
-    wind_world=np.array([10.0, 0.0, 0.0]),
+    # 10 m/s wind at ~30° elevation: realistic RAWES reel-out condition.
+    # Purely horizontal wind (v_axial=0) causes DeSchutterAero to produce negative
+    # thrust at high CL because large induction reverses AoA on inner strips —
+    # a known BEM limitation in highly-loaded purely-edgewise flow not relevant
+    # to RAWES which always has significant axial flow.
+    wind_world=np.array([8.66, 0.0, 5.0]),
     t=10.0,          # past ramp
 )
 

@@ -270,8 +270,9 @@ def run_mediator(args, trajectory=None):
         send_port=args.sitl_send_port,
     )
     aero   = RotorAero.from_definition(rotor)
+    anchor_enu = np.array(cfg["anchor_enu"], dtype=float)
     tether = TetherModel(
-        anchor_enu             = np.array([0.0, 0.0, 0.0]),
+        anchor_enu             = anchor_enu,
         rest_length            = float(cfg["tether_rest_length"]),
         hub_mass               = rotor.mass_kg,
         axle_attachment_length = 0.0,   # disable restoring torque; body_z stability via aero
@@ -282,7 +283,7 @@ def run_mediator(args, trajectory=None):
     sensor_sim = make_sensor(
         mode          = cfg["sensor_mode"],
         home_enu_z    = float(_pos0_arr[2]),
-        anchor_enu    = np.zeros(3),
+        anchor_enu    = anchor_enu,
         stable_body_z = None,
     )
     spin_sensor = SpinSensor(
@@ -446,14 +447,15 @@ def run_mediator(args, trajectory=None):
 
             if cfg["internal_controller"] and _damp_alpha == 0.0:
                 # ── STATE packet (Pixhawk → planner) ─────────────────────────
-                # Only position-level quantities cross the MAVLink boundary.
-                # Inner-loop state (R, omega, omega_spin) stays on the Pixhawk.
+                # Mirrors standard ArduPilot telemetry streams:
+                #   pos_enu / vel_enu  ← LOCAL_POSITION_NED (converted)
+                #   omega_spin         ← ESC_STATUS[RAWES_CTR_ESC].rpm × gear formula
+                # tension_n is local to the winch controller — not in this packet.
+                # t_free is planner-owned — computed locally and passed separately.
                 _state_pkt = {
                     "pos_enu":    hub_state["pos"],
                     "vel_enu":    hub_state["vel"],
-                    "tension_n":  _pc_tension,
-                    "omega_spin": spin_sensor.measure(omega_spin),  # NAMED_VALUE_FLOAT "omega_spin"
-                    "t_free":     _pc_free_t,
+                    "omega_spin": spin_sensor.measure(omega_spin),
                 }
                 _traj_cmd = _trajectory.step(_state_pkt, DT_TARGET)
                 # _traj_cmd is a COMMAND packet: attitude_q, thrust,
@@ -513,7 +515,7 @@ def run_mediator(args, trajectory=None):
                     _body_z_eq = _body_z_eq_slewed
 
                 swash = compute_swashplate_from_state(
-                    hub_state=hub_state, anchor_pos=np.zeros(3),
+                    hub_state=hub_state, anchor_pos=anchor_enu,
                     body_z_eq=_body_z_eq,
                     swashplate_phase_deg=_swashplate_phase_deg)
                 tilt_lon        = swash["tilt_lon"]

@@ -486,16 +486,34 @@ class TensionController:
 
     Designed for use at 400 Hz.  Anti-windup clamps the integrator so the
     integral term cannot push the output beyond [coll_min, coll_max].
+
+    Defaults are tuned for the beaupoil_2026 rotor (4-blade, 2 m, SG6042):
+      coll_min = -0.44 rad (−25°) — minimum collective before thrust drops to ~70 N
+      coll_max =  0.00 rad (  0°) — neutral; positive collective gives >1 kN thrust
+      warm_coll_rad = −20° — pre-seeds the integrator so the first output is near
+          the reel-out equilibrium collective instead of clamping at 0° and spiking
+          to ~1718 N tether tension at t=0.
     """
 
+    # Physical limits for the beaupoil_2026 rotor — imported by tests that need
+    # to construct TensionController with matching range without re-specifying them.
+    COLL_MIN_RAD: float = -0.44    # −25°
+    COLL_MAX_RAD: float =  0.00    #   0°
+    WARM_COLL_RAD: float = -0.349  # ≈ −20°  (math.radians(-20))
+
     def __init__(self, setpoint_n: float, kp: float = 5e-4, ki: float = 1e-4,
-                 coll_min: float = -0.10, coll_max: float = 0.20):
+                 coll_min: float = COLL_MIN_RAD,
+                 coll_max: float = COLL_MAX_RAD,
+                 warm_coll_rad: "float | None" = WARM_COLL_RAD):
         self.setpoint  = float(setpoint_n)
         self.kp        = float(kp)
         self.ki        = float(ki)
         self.coll_min  = float(coll_min)
         self.coll_max  = float(coll_max)
-        self._integral = 0.0
+        if warm_coll_rad is not None:
+            self._integral = float(warm_coll_rad) / max(self.ki, 1e-12)
+        else:
+            self._integral = 0.0
 
     def update(self, tension_actual: float, dt: float) -> float:
         error           = self.setpoint - tension_actual

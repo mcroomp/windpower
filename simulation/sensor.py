@@ -520,7 +520,9 @@ class SpinSensor:
 
     In the simulation, rotor spin speed (omega_spin) is an internal ODE state.
     This class adds optional Gaussian noise to simulate measurement uncertainty.
-    Hardware spin speed sensing is TBD and separate from the anti-rotation motor.
+    On hardware, omega_spin is derived from the GB4008 counter-torque motor eRPM
+    reported by the AM32 ESC via telemetry, converted using the 80:44 gear ratio
+    and 11 pole pairs: ``omega_spin = eRPM × 2π/60 / 11 × 44/80``.
 
     Physical model validation (optional)
     -------------------------------------
