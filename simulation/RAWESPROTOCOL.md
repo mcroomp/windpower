@@ -23,6 +23,14 @@ swashplate assembly from spinning with the hub — directly analogous to the tai
 rotor of a helicopter, but acting on a stationary assembly rather than countering
 fuselage yaw.
 
+### Glossary
+
+| Term | Meaning |
+|---|---|
+| **body_z** | The unit vector along the rotor axle (spin axis). Naming convention used throughout this document and the codebase. |
+| **Orbit tracking** | The Pixhawk-side control function that continuously rotates the attitude setpoint to match the hub's orbital position, keeping body_z aligned with the tether direction as the hub moves around the anchor. Runs at 400 Hz; the trajectory planner is not involved. |
+| **ENU** | East-North-Up coordinate frame — used throughout this document. X = East, Y = North, Z = Up. Preferred over ArduPilot's native NED because positive-Z altitude makes tether and orbit geometry more intuitive. The conversion to NED is contained at the sensor boundary. |
+
 ### Physical variables
 
 | Symbol | English name | Name | Description |
