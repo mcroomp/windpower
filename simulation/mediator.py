@@ -47,8 +47,9 @@ from aero            import RotorAero
 from tether          import TetherModel
 from frames          import T_ENU_NED, build_orb_frame
 from sensor          import make_sensor, SpinSensor
-from controller      import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq
-from trajectory      import HoldTrajectory, DeschutterTrajectory, quat_apply, quat_is_identity
+from controller      import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from winch           import WinchController
+from planner         import HoldPlanner, DeschutterPlanner, quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 
@@ -367,32 +368,35 @@ def run_mediator(args, trajectory=None):
         ])
         log.info("Telemetry logging → %s", args.telemetry_log)  # args.telemetry_log is a runtime CLI arg
 
-    # -- Trajectory controller -----------------------------------------------
-    # Caller supplies a pre-built TrajectoryController, or one is built from
-    # cfg["trajectory"] (the standard path when running as a subprocess).
-    _pc_tension = 0.0   # last measured tether tension [N] (fed into trajectory state)
+    # -- Trajectory planner (ground station) ---------------------------------
+    # Caller supplies a pre-built planner, or one is built from cfg["trajectory"].
+    _pc_tension = 0.0   # last tether tension [N] from WinchController, fed to planner
     if trajectory is not None:
         _trajectory = trajectory
     else:
-        _trajectory = _mcfg.make_trajectory(
-            cfg,
-            wind_enu        = wind_world,
-            rest_length_min = float(cfg["tether_rest_length"]),
-        )
+        _trajectory = _mcfg.make_trajectory(cfg, wind_enu=wind_world)
     log.info("Trajectory: %s", type(_trajectory).__name__)
 
+    # -- WinchController (ground station, co-located with planner) -----------
+    # Executes winch_speed_ms commands from the planner, enforces tension safety.
+    # Provides tension_n and tether_length_m back to the planner each step.
+    _winch = WinchController(
+        rest_length      = float(cfg["tether_rest_length"]),
+        tension_safety_n = float(cfg.get("tension_safety_n", 496.0)),
+    )
+
+    # -- Pixhawk collective denormalisation -----------------------------------
+    # thrust [0..1] from SET_ATTITUDE_TARGET → collective_rad for aero model.
+    # Mirrors Pixhawk set_throttle_out() passthrough (raws_mode.md §8.4).
+    _traj_cfg   = cfg.get("trajectory", {}).get("deschutter", {})
+    _col_min_rad = float(_traj_cfg.get("col_min_rad", -0.436))
+    _col_max_rad = float(_traj_cfg.get("col_max_rad",  0.0))
+
     # -- Mode_RAWES inner loops -----------------------------------------------
-    # Runs at 400 Hz on the Pixhawk.  Receives COMMAND packets from the
-    # trajectory planner and tracks them.
-    #
-    # Orbit tracking: always computes tether-aligned body_z_eq from current pos.
-    #   Rate-limited slew toward attitude_q target when non-identity.
-    #   Captured at free-flight start; never re-sent by the planner.
-    # Tension PI:  tension error → collective_rad
-    #   setpoint = cmd["thrust"] × tension_max_n
-    # Winch:       tether.rest_length stepped from cmd["winch_speed_ms"]
-    _tension_ctrl     = TensionController(setpoint_n=0.0)
-    _tension_max_n        = float(cfg.get("tension_max_n", 200.0))
+    # Runs at 400 Hz on the Pixhawk.  Receives COMMAND packets from the planner.
+    # Orbit tracking: computes tether-aligned body_z_eq from current pos.
+    # Collective: set_throttle_out(thrust) — direct passthrough (no PI on Pixhawk).
+    # Winch: handled by WinchController above (ground station, not Pixhawk).
     _body_z_slew_rate     = float(cfg.get("body_z_slew_rate_rad_s", 0.12))   # rad/s
     _swashplate_phase_deg = float(cfg.get("swashplate_phase_deg", 0.0))
     _ic_tether_dir0: "np.ndarray | None" = None   # captured at free-flight start
@@ -457,9 +461,12 @@ def run_mediator(args, trajectory=None):
                     "vel_enu":    hub_state["vel"],
                     "omega_spin": spin_sensor.measure(omega_spin),
                 }
-                _traj_cmd = _trajectory.step(_state_pkt, DT_TARGET)
-                # _traj_cmd is a COMMAND packet: attitude_q, thrust,
-                #   winch_speed_ms, phase  (standard MAVLink mapping)
+                _traj_cmd = _trajectory.step(
+                    _state_pkt, DT_TARGET,
+                    tension_n       = _pc_tension,
+                    tether_length_m = _winch.tether_length_m,
+                )
+                # _traj_cmd: attitude_q, thrust [0..1], winch_speed_ms, phase
 
                 # ── Mode_RAWES inner loops (400 Hz, runs on Pixhawk) ──────────
 
@@ -468,21 +475,13 @@ def run_mediator(args, trajectory=None):
                     _ic_tether_dir0 = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
                     _ic_body_z_eq0  = _bz.copy()
 
-                # 2. Winch: apply speed command, enforce rest_length floor
-                #    (MAV_CMD_DO_WINCH RATE_CONTROL)
-                _ws = _traj_cmd["winch_speed_ms"]
-                if _ws < 0.0:
-                    tether.rest_length = max(
-                        float(cfg["tether_rest_length"]),
-                        tether.rest_length + _ws * DT_TARGET,
-                    )
-                else:
-                    tether.rest_length += _ws * DT_TARGET
+                # 2. WinchController (ground station) — apply speed + safety limit
+                _winch.step(_traj_cmd["winch_speed_ms"], _pc_tension, DT_TARGET)
+                tether.rest_length = _winch.rest_length
 
-                # 3. Tension PI controller → collective
-                #    thrust [0..1] × tension_max_n → setpoint_n
-                _tension_ctrl.setpoint = _traj_cmd["thrust"] * _tension_max_n
-                collective_rad = _tension_ctrl.update(_pc_tension, DT_TARGET)
+                # 3. Pixhawk collective passthrough (SET_ATTITUDE_TARGET thrust field)
+                #    Denormalise: thrust [0..1] → collective_rad for aero model
+                collective_rad = _col_min_rad + _traj_cmd["thrust"] * (_col_max_rad - _col_min_rad)
 
                 # 4. Attitude: orbit-track tether; rate-limited slew toward
                 #    attitude_q target when non-identity  (SET_ATTITUDE_TARGET)

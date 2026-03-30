@@ -33,7 +33,7 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
 from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
-from trajectory import HoldTrajectory
+from planner import HoldPlanner
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
 
@@ -73,7 +73,7 @@ def _run(t_sim: float = T_SIM):
     tel_every  = max(1, int(0.05 / DT))   # 20 Hz
 
     # Trajectory planner (offboard) — HoldTrajectory, no winch, no tilt correction
-    trajectory      = HoldTrajectory()
+    trajectory      = HoldPlanner()
     # Mode_RAWES orbit tracking ICs — captured at free-flight start
     ic_tether_dir0  = POS0 / np.linalg.norm(POS0)
     ic_body_z_eq0   = BODY_Z0.copy()

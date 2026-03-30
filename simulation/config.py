@@ -46,10 +46,12 @@ DEFAULTS: dict = {
     "body_z":     [0.851018, 0.305391, 0.427206],  # unit vector (axle direction)
     "omega_spin": 20.148,                          # rotor spin [rad/s]
 
-    # ── Tether ────────────────────────────────────────────────────────────────
+    # ── Tether & Winch ────────────────────────────────────────────────────────
     "tether_rest_length": 49.949,   # unstretched tether length [m]
     "anchor_enu": [0.0, 0.0, 0.0],  # tether anchor position ENU [m]
                                      # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local ENU
+    "tension_safety_n":  496.0,     # WinchController: stop paying out above this tension [N]
+                                     # ≈ 80% of Dyneema SK75 1.9 mm break load (620 N)
 
     # ── Startup kinematic ramp ────────────────────────────────────────────────
     # Hub moves at constant vel0 from launch_pos for startup_damp_seconds,
@@ -76,11 +78,7 @@ DEFAULTS: dict = {
     # Determined by step-response test on hardware (corresponds to H_PHANG in ArduPilot).
     "swashplate_phase_deg":   0.0,
 
-    # ── Mode_RAWES attitude and tension parameters ────────────────────────────
-    # tension_max_n: Mode_RAWES maps thrust [0..1] to setpoint via
-    #   tension_setpoint_n = thrust × tension_max_n.
-    #   The planner normalises against the same value.
-    "tension_max_n":           200.0,  # max operating tension [N]
+    # ── Mode_RAWES attitude parameters ───────────────────────────────────────
     # body_z_slew_rate_rad_s: max angular slew rate for body_z transitions [rad/s].
     #   At 0.12 rad/s a 0.57 rad (33°) reel-in transition takes ~5 s.
     #   Replaces the blend_alpha ramp that formerly lived in the trajectory planner.
@@ -117,6 +115,12 @@ DEFAULTS: dict = {
             "tension_in":      20.0,   # reel-in tension setpoint [N]
             "xi_reel_in_deg":  55.0,   # disk tilt from wind during reel-in [deg]
                                        # None → no tilt change (simple tension cycle)
+            # Tension PI (trajectory planner — ground station, raws_mode.md §3.2)
+            "tension_kp":      5e-4,   # proportional gain [rad/N]
+            "tension_ki":      1e-4,   # integral gain [rad/(N·s)]
+            # Collective normalisation (same values as Pixhawk denorm in mediator)
+            "col_min_rad":    -0.436,  # −25° — min collective [rad]
+            "col_max_rad":     0.0,    # 0°   — max collective [rad]
         },
     },
 }
@@ -178,16 +182,14 @@ def save(cfg: dict, path: str) -> None:
         fh.write("\n")
 
 
-def make_trajectory(cfg: dict, wind_enu, rest_length_min: float):
+def make_trajectory(cfg: dict, wind_enu):
     """
     Build a TrajectoryController from the ``cfg["trajectory"]`` section.
 
     Parameters
     ----------
-    cfg            : full mediator config dict (as returned by load/defaults)
-    wind_enu       : array-like [3] — ambient wind ENU [m/s]
-    rest_length_min: float — tether rest_length floor for reel-in [m]
-                     Enforced by Mode_RAWES; passed here for informational use.
+    cfg      : full mediator config dict (as returned by load/defaults)
+    wind_enu : array-like [3] — ambient wind ENU [m/s]
 
     Returns
     -------
@@ -204,7 +206,7 @@ def make_trajectory(cfg: dict, wind_enu, rest_length_min: float):
     """
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from trajectory import HoldTrajectory, DeschutterTrajectory
+    from planner import HoldPlanner, DeschutterPlanner
 
     import numpy as _np
     traj_cfg  = cfg.get("trajectory", {})
@@ -212,7 +214,7 @@ def make_trajectory(cfg: dict, wind_enu, rest_length_min: float):
 
     if traj_type == "deschutter":
         p = traj_cfg.get("deschutter", {})
-        return DeschutterTrajectory(
+        return DeschutterPlanner(
             t_reel_out      = float(p.get("t_reel_out",      30.0)),
             t_reel_in       = float(p.get("t_reel_in",       30.0)),
             t_transition    = float(p.get("t_transition",     5.0)),
@@ -221,8 +223,11 @@ def make_trajectory(cfg: dict, wind_enu, rest_length_min: float):
             tension_out     = float(p.get("tension_out",    200.0)),
             tension_in      = float(p.get("tension_in",      20.0)),
             wind_enu        = _np.asarray(wind_enu, dtype=float),
-            rest_length_min = float(rest_length_min),
             xi_reel_in_deg  = p.get("xi_reel_in_deg", 55.0),
+            tension_kp      = float(p.get("tension_kp",      5e-4)),
+            tension_ki      = float(p.get("tension_ki",      1e-4)),
+            col_min_rad     = float(p.get("col_min_rad",    -0.436)),
+            col_max_rad     = float(p.get("col_max_rad",     0.0)),
         )
 
-    return HoldTrajectory()
+    return HoldPlanner()

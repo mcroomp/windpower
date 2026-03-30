@@ -46,10 +46,9 @@ import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
-from controller  import compute_swashplate_from_state
-from trajectory  import DeschutterTrajectory
-from controller  import TensionController, orbit_tracked_body_z_eq
-from trajectory  import quat_apply, quat_is_identity
+from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from planner     import DeschutterPlanner, quat_apply, quat_is_identity
+from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
 
@@ -86,6 +85,13 @@ DEFAULT_TENSION_IN  =  80.0   # N — must be high enough for altitude maintenan
 # Mode_RAWES slew rate (matches config default body_z_slew_rate_rad_s)
 BODY_Z_SLEW_RATE = 0.12       # rad/s
 
+# Collective normalisation (matches config deschutter col_min/col_max)
+COL_MIN_RAD = -0.436   # −25°
+COL_MAX_RAD =  0.0     #   0°
+
+# WinchController safety limit
+TENSION_SAFETY_N = 496.0   # ≈ 80% break load
+
 
 # ── Main simulation ────────────────────────────────────────────────────────────
 
@@ -119,8 +125,9 @@ def _run_deschutter_cycle(
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
-    # ── Trajectory planner (offboard, ~10 Hz equivalent) ─────────────────────
-    trajectory = DeschutterTrajectory(
+    # ── Trajectory planner (ground station, ~10 Hz equivalent) ──────────────
+    # Owns the tension PI internally; outputs normalised thrust [0..1].
+    trajectory = DeschutterPlanner(
         t_reel_out      = t_reel_out,
         t_reel_in       = t_reel_in,
         t_transition    = t_transition,
@@ -129,13 +136,17 @@ def _run_deschutter_cycle(
         tension_out     = tension_out,
         tension_in      = tension_in,
         wind_enu        = WIND,
-        rest_length_min = REST_LENGTH0,
+        col_min_rad     = COL_MIN_RAD,
+        col_max_rad     = COL_MAX_RAD,
     )
+
+    # ── WinchController (ground station) ─────────────────────────────────────
+    winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=TENSION_SAFETY_N)
 
     # ── Mode_RAWES inner loop (400 Hz, on Pixhawk) ────────────────────────────
     # Receives COMMAND packets from trajectory planner.
-    # Owns orbit tracking, rate-limited attitude slew, and tension control.
-    tension_ctrl      = TensionController(setpoint_n=tension_out)
+    # Owns orbit tracking and rate-limited attitude slew.
+    # Collective: set_throttle_out(thrust) — direct passthrough, no PI on Pixhawk.
     ic_tether_dir0    = POS0 / np.linalg.norm(POS0)   # captured at free-flight start
     ic_body_z_eq0     = BODY_Z0.copy()
     body_z_eq_slewed  = BODY_Z0.copy()   # rate-limited slew state (Mode_RAWES)
@@ -161,7 +172,7 @@ def _run_deschutter_cycle(
     energy_out       = 0.0
     energy_in        = 0.0
 
-    from trajectory import Q_IDENTITY
+    from planner import Q_IDENTITY
     sw             = {"tilt_lon": 0.0, "tilt_lat": 0.0}
     cmd            = {"attitude_q": Q_IDENTITY.copy(), "thrust": 1.0,
                       "winch_speed_ms": 0.0, "phase": "reel-out"}
@@ -173,29 +184,25 @@ def _run_deschutter_cycle(
     for i in range(n_steps):
         t = i * DT
 
-        # ── STATE packet (Pixhawk → planner) ──────────────────────────────────
+        # ── STATE packet (Pixhawk → planner, standard streams) ───────────────
         state_pkt = {
             "pos_enu":    hub_state["pos"],
             "vel_enu":    hub_state["vel"],
-            "tension_n":  tension_now,
             "omega_spin": omega_spin,
-            "t_free":     t,
         }
-        cmd = trajectory.step(state_pkt, DT)
-        # cmd is a COMMAND packet (SET_ATTITUDE_TARGET + MAV_CMD_DO_WINCH):
-        #   attitude_q, thrust, winch_speed_ms, phase
+        # Planner reads tension + tether_length from WinchController local link
+        cmd = trajectory.step(state_pkt, DT,
+                              tension_n=tension_now,
+                              tether_length_m=winch.tether_length_m)
+        # cmd: attitude_q, thrust [0..1], winch_speed_ms, phase
 
-        # ── Mode_RAWES: winch  (MAV_CMD_DO_WINCH RATE_CONTROL) ───────────────
-        ws = cmd["winch_speed_ms"]
-        if ws < 0.0:
-            tether.rest_length = max(REST_LENGTH0, tether.rest_length + ws * DT)
-        else:
-            tether.rest_length += ws * DT
+        # ── WinchController (ground station) ─────────────────────────────────
+        winch.step(cmd["winch_speed_ms"], tension_now, DT)
+        tether.rest_length = winch.rest_length
 
-        # ── Mode_RAWES: tension PI → collective ───────────────────────────────
-        # thrust [0..1] × tension_max_n (= tension_out here) → setpoint
-        tension_ctrl.setpoint = cmd["thrust"] * tension_out
-        collective_rad = tension_ctrl.update(tension_now, DT)
+        # ── Mode_RAWES: collective passthrough (SET_ATTITUDE_TARGET thrust) ───
+        # Pixhawk denormalises thrust → collective_rad for aero model
+        collective_rad = COL_MIN_RAD + cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD)
 
         # ── Mode_RAWES: orbit tracking + rate-limited slew → body_z_eq ───────
         bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
@@ -378,7 +385,7 @@ def test_deschutter_reel_in_tilt_achieved():
     if not tilts_steady:
         pytest.skip("No steady reel-in data to check tilt")
     mean_tilt = float(np.mean(tilts_steady))
-    xi_target = 55.0   # default xi_reel_in_deg in DeschutterTrajectory
+    xi_target = 55.0   # default xi_reel_in_deg in DeschutterPlanner
     assert xi_target - 10.0 <= mean_tilt <= xi_target + 10.0, (
         f"Steady reel-in mean tilt ξ = {mean_tilt:.1f}° not within ±10° of "
         f"target {xi_target:.0f}° — body_z not tracking constrained reel-in orientation"

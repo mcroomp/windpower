@@ -220,8 +220,8 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
     import math as _math
     from dynamics   import RigidBodyDynamics
     from tether     import TetherModel
-    from controller import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq
-    from trajectory import DeschutterTrajectory, Q_IDENTITY, quat_apply, quat_is_identity
+    from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq
+    from planner    import DeschutterPlanner, Q_IDENTITY, quat_apply, quat_is_identity
 
     DT            = 1.0 / 400.0
     ANCHOR        = np.zeros(3)
@@ -258,7 +258,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
     tether   = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                            axle_attachment_length=0.0)
 
-    trajectory = DeschutterTrajectory(
+    trajectory = DeschutterPlanner(
         t_reel_out      = T_REEL_OUT,
         t_reel_in       = T_REEL_IN,
         t_transition    = T_TRANSITION,
@@ -267,10 +267,9 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         tension_out     = TENSION_OUT,
         tension_in      = TENSION_IN,
         wind_enu        = WIND,
-        rest_length_min = REST_LENGTH0,
     )
 
-    tension_ctrl     = TensionController(setpoint_n=TENSION_OUT)
+    tension_ctrl     = TensionPI(setpoint_n=TENSION_OUT)
     ic_tether_dir0   = POS0 / np.linalg.norm(POS0)
     ic_body_z_eq0    = BODY_Z0.copy()
     body_z_eq_slewed = BODY_Z0.copy()

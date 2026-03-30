@@ -6,7 +6,7 @@ Tests cover:
   - wind_dir_enu tracks mean horizontal hub position (→ wind direction)
   - v_inplane_ms tracks omega_spin via autorotation torque balance
   - Rolling window evicts old samples
-  - DeschutterTrajectory updates reel-in quaternion from live wind estimate
+  - DeschutterPlanner updates reel-in quaternion from live wind estimate
 """
 import sys
 from pathlib import Path
@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from trajectory import WindEstimator, DeschutterTrajectory, quat_apply, Q_IDENTITY
+from planner import WindEstimator, DeschutterPlanner, quat_apply, Q_IDENTITY
 
 
 # ---------------------------------------------------------------------------
@@ -152,14 +152,14 @@ def test_rolling_window_evicts_old_samples():
 
 
 # ---------------------------------------------------------------------------
-# DeschutterTrajectory with wind_estimator
+# DeschutterPlanner with wind_estimator
 # ---------------------------------------------------------------------------
 
 def test_deschutter_uses_initial_wind_before_estimator_ready():
     """Before estimator is ready, reel-in quaternion comes from fixed wind_enu."""
     wind_enu = np.array([10.0, 0.0, 0.0])
     est = WindEstimator(min_samples=100)  # high threshold — never ready in this test
-    traj = DeschutterTrajectory(
+    traj = DeschutterPlanner(
         t_reel_out=30, t_reel_in=30, t_transition=5,
         v_reel_out=0.4, v_reel_in=0.4,
         tension_out=200, tension_in=20,
@@ -179,7 +179,7 @@ def test_deschutter_updates_reel_in_q_when_estimator_ready():
     """After estimator converges on a different wind direction, reel-in q updates."""
     wind_initial = np.array([10.0, 0.0, 0.0])  # east
     est = WindEstimator(min_samples=5)
-    traj = DeschutterTrajectory(
+    traj = DeschutterPlanner(
         t_reel_out=30, t_reel_in=30, t_transition=5,
         v_reel_out=0.4, v_reel_in=0.4,
         tension_out=200, tension_in=20,

@@ -477,15 +477,16 @@ class PhysicalHoldController:
 
 
 # ---------------------------------------------------------------------------
-# Pumping cycle helpers — used by mediator (--pumping-cycle) and unit tests
+# Pumping cycle helpers — used by planner (planner.py) and unit tests
 # ---------------------------------------------------------------------------
 
-class TensionController:
+class TensionPI:
     """
     PI controller: adjusts collective_rad to maintain requested tether tension.
 
-    Designed for use at 400 Hz.  Anti-windup clamps the integrator so the
-    integral term cannot push the output beyond [coll_min, coll_max].
+    Owned by the Trajectory Planner (ground station) — raws_mode.md §3.2.
+    Runs on fresh load cell data at planner rate (~10 Hz or 400 Hz in simulation).
+    Anti-windup clamps the integrator so output stays within [coll_min, coll_max].
 
     Defaults are tuned for the beaupoil_2026 rotor (4-blade, 2 m, SG6042):
       coll_min = -0.44 rad (−25°) — minimum collective before thrust drops to ~70 N
@@ -495,8 +496,7 @@ class TensionController:
           to ~1718 N tether tension at t=0.
     """
 
-    # Physical limits for the beaupoil_2026 rotor — imported by tests that need
-    # to construct TensionController with matching range without re-specifying them.
+    # Physical limits for the beaupoil_2026 rotor
     COLL_MIN_RAD: float = -0.44    # −25°
     COLL_MAX_RAD: float =  0.00    #   0°
     WARM_COLL_RAD: float = -0.349  # ≈ −20°  (math.radians(-20))

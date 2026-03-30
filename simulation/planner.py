@@ -14,9 +14,10 @@ Two packet types cross the MAVLink boundary:
         "omega_spin" float           — rotor spin rate [rad/s]      (ESC_STATUS[RAWES_CTR_ESC].rpm
                                                                       × 2π/60 / 11 × 44/80)
 
-    Planner-local quantities (NOT in the STATE packet):
-        t_free       float  — free-flight elapsed time [s]  — computed locally by planner
-        tension_n    float  — tether tension [N]            — read locally from winch load cell
+    Planner-local quantities (NOT from Pixhawk — read from WinchController local link):
+        tension_n       float  — tether tension [N]       — winch load cell
+        tether_length_m float  — tether rest length [m]   — winch encoder
+        t_free          float  — elapsed free-flight [s]  — planner internal clock
 
     COMMAND packet  (planner → Pixhawk, ~10 Hz):
         "attitude_q"      np.ndarray [4]  (w,x,y,z)                (SET_ATTITUDE_TARGET quaternion)
@@ -26,37 +27,47 @@ Two packet types cross the MAVLink boundary:
             Non-identity = desired body_z is quat_apply(attitude_q, [0,0,1]).
             Mode_RAWES rate-limits the slew internally (body_z_slew_rate_rad_s).
         "thrust"          float [0..1]                              (SET_ATTITUDE_TARGET thrust)
-            Normalised tension setpoint.  Mode_RAWES converts:
-            tension_setpoint_n = thrust × tension_max_n.
+            Normalised collective, direct output of the tension PI:
+              collective_rad = kP * err + kI * integral
+              thrust = clamp((collective_rad - col_min) / (col_max - col_min), 0, 1)
+            Mode_RAWES calls set_throttle_out(thrust) — direct passthrough, no conversion.
+            Simulation mediator denormalises: collective_rad = col_min + thrust*(col_max-col_min).
         "phase"           str — telemetry label ("hold"|"reel-out"|"reel-in"). Not on wire.
 
-    Winch command  (planner → Winch Controller, ground-local link):
+    Winch command  (planner → WinchController, ground-local link):
         "winch_speed_ms"  float [m/s]                               (MAV_CMD_DO_WINCH RATE_CONTROL)
             +ve = pay out, −ve = reel in, 0 = hold.
-            Sent directly to the ground-station winch controller, not to the Pixhawk.
+            Passed to WinchController.step() — the Pixhawk is not involved.
 
 Mode_RAWES responsibilities (NOT in this file):
     - Orbit tracking: compute tether-aligned body_z_eq at 400 Hz from current pos
     - Slew body_z_eq toward attitude_q target at body_z_slew_rate_rad_s
     - Attitude error → cyclic tilt  (compute_swashplate_from_state)
-    - Tension PI → collective        (TensionController, setpoint = thrust × tension_max_n)
-    - Counter-torque motor           (inner loop, not commanded by planner)
+    - Collective: set_throttle_out(thrust) — direct passthrough, no PI on Pixhawk
+    - Counter-torque motor (inner loop, not commanded by planner)
+
+WinchController responsibilities (NOT in this file — see winch.py):
+    - Execute winch_speed_ms commands
+    - Enforce tension safety limit (stop paying out if tension too high)
+    - Provide tension_n and tether_length_m to the planner
 
 Available controllers
 ---------------------
-    HoldTrajectory()
+    HoldPlanner()
         Returns natural equilibrium command every step.
         attitude_q = identity → Mode_RAWES stays tether-aligned through orbit tracking.
         Use for: test_closed_loop_60s.py
 
-    DeschutterTrajectory(t_reel_out, t_reel_in, t_transition,
+    DeschutterPlanner(t_reel_out, t_reel_in, t_transition,
                          v_reel_out, v_reel_in, tension_out, tension_in,
-                         wind_enu, rest_length_min, xi_reel_in_deg=55.0,
+                         wind_enu, xi_reel_in_deg=55.0,
+                         tension_kp=5e-4, tension_ki=1e-4,
+                         col_min_rad=-0.436, col_max_rad=0.0,
                          tension_max_n=None, wind_estimator=None)
         De Schutter (2018) pumping cycle.
-        Reel-out: identity attitude_q (natural tether-aligned), thrust = tension_out/tension_max_n.
-        Reel-in:  reel-in attitude_q at xi_reel_in_deg from estimated (or fixed) wind direction,
-                  thrust = tension_in/tension_max_n.
+        Owns the tension PI internally; outputs normalised thrust [0..1].
+        Reel-out: identity attitude_q (natural tether-aligned orbit).
+        Reel-in:  reel-in attitude_q at xi_reel_in_deg from estimated (or fixed) wind direction.
         If wind_estimator is provided, the reel-in quaternion updates each step as the
         wind direction estimate converges.  Falls back to fixed wind_enu until ready.
         xi_reel_in_deg=55  — constrained from 90° for BEM validity (default).
@@ -82,6 +93,10 @@ Wind estimation
 
 import math
 import numpy as np
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from controller import TensionPI
 
 
 # ---------------------------------------------------------------------------
@@ -252,17 +267,21 @@ class WindEstimator:
 # Abstract base
 # ---------------------------------------------------------------------------
 
-class TrajectoryController:
+class TrajectoryPlanner:
     """Abstract base class — subclass and implement step()."""
 
-    def step(self, state: dict, dt: float) -> dict:
+    def step(self, state: dict, dt: float,
+             tension_n: float = 0.0,
+             tether_length_m: "float | None" = None) -> dict:
         """
         Advance one planner step.
 
         Parameters
         ----------
-        state  : dict  — STATE packet (pos_enu, vel_enu, omega_spin)
-        dt     : float — timestep [s]
+        state           : dict  — STATE packet (pos_enu, vel_enu, omega_spin)
+        dt              : float — timestep [s]
+        tension_n       : float — tether tension [N] from WinchController load cell
+        tether_length_m : float | None — tether rest length [m] from WinchController encoder
 
         Returns
         -------
@@ -274,10 +293,10 @@ class TrajectoryController:
 
 
 # ---------------------------------------------------------------------------
-# HoldTrajectory
+# HoldPlanner
 # ---------------------------------------------------------------------------
 
-class HoldTrajectory(TrajectoryController):
+class HoldPlanner(TrajectoryPlanner):
     """
     Natural equilibrium — no correction, no winch.
 
@@ -287,20 +306,22 @@ class HoldTrajectory(TrajectoryController):
     Use for: closed-loop stability tests where the pumping cycle is inactive.
     """
 
-    def step(self, state: dict, dt: float) -> dict:
+    def step(self, state: dict, dt: float,
+             tension_n: float = 0.0,
+             tether_length_m: "float | None" = None) -> dict:
         return {
-            "attitude_q":     Q_IDENTITY.copy(),  # SET_ATTITUDE_TARGET: identity = tether-aligned
-            "thrust":         0.0,                 # SET_ATTITUDE_TARGET thrust field
-            "winch_speed_ms": 0.0,                 # MAV_CMD_DO_WINCH: hold
-            "phase":          "hold",              # telemetry label (not on wire)
+            "attitude_q":     Q_IDENTITY.copy(),
+            "thrust":         0.0,
+            "winch_speed_ms": 0.0,
+            "phase":          "hold",
         }
 
 
 # ---------------------------------------------------------------------------
-# DeschutterTrajectory
+# DeschutterPlanner
 # ---------------------------------------------------------------------------
 
-class DeschutterTrajectory(TrajectoryController):
+class DeschutterPlanner(TrajectoryPlanner):
     """
     De Schutter (2018) reel-out / reel-in pumping cycle.
 
@@ -354,9 +375,11 @@ class DeschutterTrajectory(TrajectoryController):
         tension_out:     float,
         tension_in:      float,
         wind_enu:        np.ndarray,
-        rest_length_min: float = 10.0,
         xi_reel_in_deg:  "float | None" = 55.0,
-        tension_max_n:   "float | None" = None,
+        tension_kp:      float = 5e-4,
+        tension_ki:      float = 1e-4,
+        col_min_rad:     float = TensionPI.COLL_MIN_RAD,
+        col_max_rad:     float = TensionPI.COLL_MAX_RAD,
         wind_estimator:  "WindEstimator | None" = None,
     ):
         self._t_reel_out    = float(t_reel_out)
@@ -367,10 +390,22 @@ class DeschutterTrajectory(TrajectoryController):
         self._tension_out   = float(tension_out)
         self._tension_in    = float(tension_in)
         self._t_cycle       = self._t_reel_out + self._t_reel_in
-        self._tension_max   = float(tension_max_n) if tension_max_n is not None else float(tension_out)
+        self._col_min_rad   = float(col_min_rad)
+        self._col_max_rad   = float(col_max_rad)
         self._xi_reel_in_deg: "float | None" = float(xi_reel_in_deg) if xi_reel_in_deg is not None else None
         self._wind_estimator = wind_estimator
         self._t_free         = 0.0   # internal elapsed free-flight time [s]
+
+        # Tension PI — owned by the planner (raws_mode.md §3.2)
+        # Single controller whose setpoint changes at the phase boundary so the
+        # integral state carries across smoothly (no warm-start discontinuity).
+        self._tension_ctrl = TensionPI(
+            setpoint_n=float(tension_out),
+            kp=float(tension_kp),
+            ki=float(tension_ki),
+            coll_min=float(col_min_rad),
+            coll_max=float(col_max_rad),
+        )
 
         # Initial/fallback reel-in attitude from fixed wind_enu
         self._attitude_q_reel_in: "np.ndarray | None" = self._q_from_wind(
@@ -394,19 +429,18 @@ class DeschutterTrajectory(TrajectoryController):
         return quat_from_vectors(np.array([0.0, 0.0, 1.0]), body_z_target)
 
     # ------------------------------------------------------------------
-    def step(self, state: dict, dt: float) -> dict:
+    def step(self, state: dict, dt: float,
+             tension_n: float = 0.0,
+             tether_length_m: "float | None" = None) -> dict:
         self._t_free += dt
+
         # Update wind estimator and refresh reel-in quaternion if direction changed
         if self._wind_estimator is not None:
             self._wind_estimator.update(state, dt)
             wind_dir = self._wind_estimator.wind_dir_enu
             if wind_dir is not None:
-                # Re-derive full 3D wind from direction + in-plane speed
                 v_inplane = self._wind_estimator.v_inplane_ms
-                if v_inplane is not None and v_inplane > 0.5:
-                    wind_vec = wind_dir * v_inplane
-                else:
-                    wind_vec = wind_dir  # direction only; magnitude irrelevant for quaternion
+                wind_vec  = wind_dir * v_inplane if (v_inplane is not None and v_inplane > 0.5) else wind_dir
                 q_new = self._q_from_wind(wind_vec)
                 if q_new is not None:
                     self._attitude_q_reel_in = q_new
@@ -414,15 +448,26 @@ class DeschutterTrajectory(TrajectoryController):
         t_cyc     = self._t_free % self._t_cycle
         phase_out = t_cyc < self._t_reel_out
 
+        # Tension PI (planner-owned) — updates setpoint at phase boundary
+        tension_setpoint = self._tension_out if phase_out else self._tension_in
+        self._tension_ctrl.setpoint = tension_setpoint
+        collective_rad = self._tension_ctrl.update(float(tension_n), dt)
+
+        # Normalise collective → thrust [0..1] for SET_ATTITUDE_TARGET
+        col_range = self._col_max_rad - self._col_min_rad
+        thrust = float(max(0.0, min(1.0,
+            (collective_rad - self._col_min_rad) / col_range if col_range > 1e-9 else 0.5
+        )))
+
+        # Winch speed — stop reel-out if tether has reached max length (if provided)
         winch_speed = self._v_reel_out if phase_out else -self._v_reel_in
 
-        if phase_out or self._attitude_q_reel_in is None:
+        if phase_out and self._attitude_q_reel_in is None:
+            attitude_q = Q_IDENTITY.copy()
+        elif phase_out:
             attitude_q = Q_IDENTITY.copy()
         else:
-            attitude_q = self._attitude_q_reel_in.copy()
-
-        tension_setpoint = self._tension_out if phase_out else self._tension_in
-        thrust           = tension_setpoint / self._tension_max
+            attitude_q = self._attitude_q_reel_in.copy() if self._attitude_q_reel_in is not None else Q_IDENTITY.copy()
 
         return {
             "attitude_q":     attitude_q,

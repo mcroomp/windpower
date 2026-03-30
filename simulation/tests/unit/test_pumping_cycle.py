@@ -15,7 +15,7 @@ Tests the two-phase AWE pumping cycle with tension setpoint control:
 
 Controller split (matches planned mediator architecture):
   - Attitude   → compute_swashplate_from_state  (tilt_lon / tilt_lat)
-  - Collective → TensionController below        (closed-loop on tether tension)
+  - Collective → TensionPI below        (closed-loop on tether tension)
   - Winch      → tether.rest_length ±= v_reel × DT  each step
 
 Net energy must be positive: reel-out energy > reel-in energy.
@@ -34,7 +34,8 @@ from dynamics   import RigidBodyDynamics
 from aero       import RotorAero
 import rotor_definition as _rd
 from tether     import TetherModel
-from controller import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq
+from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq
+from winch      import WinchController
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
 
@@ -69,7 +70,7 @@ DEFAULT_T_REEL_OUT   =  30.0   # s — reel-out phase duration
 DEFAULT_T_REEL_IN    =  30.0   # s — reel-in phase duration
 
 
-# TensionController and orbit_tracked_body_z_eq imported from controller.py
+# TensionPI and orbit_tracked_body_z_eq imported from controller.py
 
 
 # ── Main simulation ────────────────────────────────────────────────────────────
@@ -100,9 +101,11 @@ def _run_pumping_cycle(
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
-    # Single controller whose setpoint changes at the phase boundary so the
-    # integral state carries across smoothly (no warm-start discontinuity).
-    tension_ctrl = TensionController(setpoint_n=tension_out)
+    # Tension PI (trajectory planner — ground station)
+    tension_ctrl = TensionPI(setpoint_n=tension_out)
+
+    # WinchController (ground station — executes reel commands + safety)
+    winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=496.0)
 
     hub_state   = dyn.state
     omega_spin  = OMEGA_SPIN0
@@ -132,12 +135,10 @@ def _run_pumping_cycle(
         t = i * DT
         phase_out = t < t_reel_out
 
-        # ── Winch: update rest_length ─────────────────────────────────────
-        if phase_out:
-            tether.rest_length += v_reel_out * DT
-        else:
-            new_rl = tether.rest_length - v_reel_in * DT
-            tether.rest_length = max(REST_LENGTH0, new_rl)
+        # ── WinchController (ground station) ─────────────────────────────
+        winch_speed = v_reel_out if phase_out else -v_reel_in
+        winch.step(winch_speed, tension_now, DT)
+        tether.rest_length = winch.rest_length
 
         # ── Tension PI controller → collective ────────────────────────────
         tension_ctrl.setpoint = tension_out if phase_out else tension_in
@@ -316,7 +317,7 @@ def test_static_tension_setpoint_range():
         aero   = RotorAero(_rd.default())
         tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                              axle_attachment_length=0.0)
-        ctrl   = TensionController(setpoint_n=setpoint)
+        ctrl   = TensionPI(setpoint_n=setpoint)
         hub_state   = dyn.state
         omega_spin  = OMEGA_SPIN0
         tether_dir0 = POS0 / np.linalg.norm(POS0)
