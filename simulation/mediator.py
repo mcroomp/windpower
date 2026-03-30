@@ -46,9 +46,9 @@ from swashplate      import h3_inverse_mix, collective_to_pitch, cyclic_to_blade
 from aero            import RotorAero
 from tether          import TetherModel
 from frames          import T_ENU_NED, build_orb_frame
-from sensor          import make_sensor
-from controller      import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq, blend_body_z
-from trajectory      import HoldTrajectory, DeschutterTrajectory
+from sensor          import make_sensor, SpinSensor
+from controller      import compute_swashplate_from_state, TensionController, orbit_tracked_body_z_eq
+from trajectory      import HoldTrajectory, DeschutterTrajectory, quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 
@@ -285,7 +285,15 @@ def run_mediator(args, trajectory=None):
         anchor_enu    = np.zeros(3),
         stable_body_z = None,
     )
+    spin_sensor = SpinSensor(
+        n_magnets = int(cfg.get("spin_sensor_n_magnets", 8)),
+        dt        = DT_TARGET,
+        K_drive   = K_DRIVE_SPIN,
+        K_drag    = K_DRAG_SPIN,
+    )
     log.info("Sensor mode: %s", cfg["sensor_mode"])
+    log.info("Spin sensor: %d magnets  noise_sigma=%.3f rad/s",
+             spin_sensor._n_magnets, spin_sensor._sigma)
     log.info(
         "Tether: Dyneema SK75 1.9mm  EA=%.0f kN  rest_length=%.0f m  "
         "damping=%.1f N·s/m  break_load=%.0f N",
@@ -379,14 +387,17 @@ def run_mediator(args, trajectory=None):
     # trajectory planner and tracks them.
     #
     # Orbit tracking: always computes tether-aligned body_z_eq from current pos.
-    #   Blends toward body_z_target when blend_alpha > 0.
+    #   Rate-limited slew toward attitude_q target when non-identity.
     #   Captured at free-flight start; never re-sent by the planner.
     # Tension PI:  tension error → collective_rad
-    #   setpoint updated from traj_cmd["tension_setpoint_n"]
-    # Winch:       tether.rest_length stepped from traj_cmd["winch_speed_ms"]
-    _tension_ctrl   = TensionController(setpoint_n=0.0)
+    #   setpoint = cmd["thrust"] × tension_max_n
+    # Winch:       tether.rest_length stepped from cmd["winch_speed_ms"]
+    _tension_ctrl     = TensionController(setpoint_n=0.0)
+    _tension_max_n    = float(cfg.get("tension_max_n", 200.0))
+    _body_z_slew_rate = float(cfg.get("body_z_slew_rate_rad_s", 0.12))  # rad/s
     _ic_tether_dir0: "np.ndarray | None" = None   # captured at free-flight start
     _ic_body_z_eq0:  "np.ndarray | None" = None   # captured at free-flight start
+    _body_z_eq_slewed: np.ndarray        = _bz.copy()  # rate-limited slew state
 
     # -- Main loop ------------------------------------------------------------
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
@@ -439,14 +450,15 @@ def run_mediator(args, trajectory=None):
                 # Only position-level quantities cross the MAVLink boundary.
                 # Inner-loop state (R, omega, omega_spin) stays on the Pixhawk.
                 _state_pkt = {
-                    "pos_enu":   hub_state["pos"],
-                    "vel_enu":   hub_state["vel"],
-                    "tension_n": _pc_tension,
-                    "t_free":    _pc_free_t,
+                    "pos_enu":    hub_state["pos"],
+                    "vel_enu":    hub_state["vel"],
+                    "tension_n":  _pc_tension,
+                    "omega_spin": spin_sensor.measure(omega_spin),  # NAMED_VALUE_FLOAT "omega_spin"
+                    "t_free":     _pc_free_t,
                 }
                 _traj_cmd = _trajectory.step(_state_pkt, DT_TARGET)
-                # _traj_cmd is a COMMAND packet: body_z_target, blend_alpha,
-                #   tension_setpoint_n, winch_speed_ms, phase
+                # _traj_cmd is a COMMAND packet: attitude_q, thrust,
+                #   winch_speed_ms, phase  (standard MAVLink mapping)
 
                 # ── Mode_RAWES inner loops (400 Hz, runs on Pixhawk) ──────────
 
@@ -456,6 +468,7 @@ def run_mediator(args, trajectory=None):
                     _ic_body_z_eq0  = _bz.copy()
 
                 # 2. Winch: apply speed command, enforce rest_length floor
+                #    (MAV_CMD_DO_WINCH RATE_CONTROL)
                 _ws = _traj_cmd["winch_speed_ms"]
                 if _ws < 0.0:
                     tether.rest_length = max(
@@ -466,17 +479,39 @@ def run_mediator(args, trajectory=None):
                     tether.rest_length += _ws * DT_TARGET
 
                 # 3. Tension PI controller → collective
-                _tension_ctrl.setpoint = _traj_cmd["tension_setpoint_n"]
+                #    thrust [0..1] × tension_max_n → setpoint_n
+                _tension_ctrl.setpoint = _traj_cmd["thrust"] * _tension_max_n
                 collective_rad = _tension_ctrl.update(_pc_tension, DT_TARGET)
 
-                # 4. Attitude: orbit-track tether, blend toward target if commanded
+                # 4. Attitude: orbit-track tether; rate-limited slew toward
+                #    attitude_q target when non-identity  (SET_ATTITUDE_TARGET)
                 _bz_tether = orbit_tracked_body_z_eq(
                     hub_state["pos"], _ic_tether_dir0, _ic_body_z_eq0)
-                _alpha = _traj_cmd["blend_alpha"]
-                if _alpha > 0.0 and _traj_cmd["body_z_target"] is not None:
-                    _body_z_eq = blend_body_z(_alpha, _bz_tether, _traj_cmd["body_z_target"])
-                else:
+                _aq = _traj_cmd["attitude_q"]
+                if quat_is_identity(_aq):
+                    # Natural tether-aligned orbit — track directly, reset slew state
+                    _body_z_eq_slewed = _bz_tether.copy()
                     _body_z_eq = _bz_tether
+                else:
+                    # Planner has commanded a specific ENU orientation.
+                    # body_z target = apply attitude_q to [0,0,1]
+                    _bz_target = quat_apply(_aq, np.array([0.0, 0.0, 1.0]))
+                    # Rate-limited slerp toward target
+                    _cos_a = float(np.clip(np.dot(_body_z_eq_slewed, _bz_target), -1.0, 1.0))
+                    _angle  = math.acos(_cos_a)
+                    _max_step = _body_z_slew_rate * DT_TARGET
+                    if _angle > 1e-6:
+                        _alpha_slew = min(1.0, _max_step / _angle)
+                        _sin_a = math.sin(_angle)
+                        if _sin_a > 1e-9:
+                            _body_z_eq_slewed = (
+                                math.sin((1.0 - _alpha_slew) * _angle) / _sin_a * _body_z_eq_slewed
+                                + math.sin(_alpha_slew * _angle) / _sin_a * _bz_target
+                            )
+                            _body_z_eq_slewed = (
+                                _body_z_eq_slewed / np.linalg.norm(_body_z_eq_slewed)
+                            )
+                    _body_z_eq = _body_z_eq_slewed
 
                 swash = compute_swashplate_from_state(
                     hub_state=hub_state, anchor_pos=np.zeros(3),

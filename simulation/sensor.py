@@ -511,6 +511,114 @@ class PhysicalSensor:
 
 
 # ---------------------------------------------------------------------------
+# SpinSensor
+# ---------------------------------------------------------------------------
+
+class SpinSensor:
+    """
+    Simulated Hall-effect rotor spin rate sensor.
+
+    Models the spin rate measurement that would be produced by a Hall-effect
+    sensor reading magnets on the rotor hub.  In the real system this value
+    is reported by the Pixhawk as ``NAMED_VALUE_FLOAT "omega_spin"`` on the
+    STATE packet.
+
+    Noise model
+    -----------
+    A Hall-effect sensor with *n_magnets* produces one pulse every
+    2π / n_magnets radians of rotation.  The angular-velocity resolution is:
+
+        δω = 2π / n_magnets / dt   [rad/s per measurement step]
+
+    Gaussian noise with σ = δω / 3 (so ±1 pulse ≈ ±3 σ) is added to each
+    reading.  Set *n_magnets=0* (or *noise=False*) for an ideal noiseless sensor.
+
+    Physical model validation (optional)
+    -------------------------------------
+    ``validate(omega_measured, v_inplane)`` checks the measured spin rate
+    against the autorotation torque-balance prediction:
+
+        omega_expected = sqrt(K_drive × v_inplane / K_drag)
+
+    A large deviation indicates either an aerodynamic model parameter error
+    or a sensor fault.  Useful for HIL and physical model regression testing.
+
+    Parameters
+    ----------
+    n_magnets : int   — number of Hall-effect magnets on rotor (default: 8).
+                        Set 0 to disable noise.
+    dt        : float — nominal sensor timestep [s] (default: 1/400).
+    K_drive   : float — autorotation drive constant [N·m·s/m] (from rotor definition).
+    K_drag    : float — autorotation drag constant [N·m·s²/rad²] (from rotor definition).
+    rng_seed  : int or None — random seed for reproducibility.
+    """
+
+    def __init__(
+        self,
+        n_magnets: int   = 8,
+        dt:        float = 1.0 / 400.0,
+        K_drive:   float = 1.4,
+        K_drag:    float = 0.01786,
+        rng_seed:  "int | None" = None,
+    ):
+        self._n_magnets = int(n_magnets)
+        self._K_drive   = float(K_drive)
+        self._K_drag    = float(K_drag)
+        self._rng       = np.random.default_rng(rng_seed)
+
+        if n_magnets > 0:
+            resolution = (2.0 * math.pi / n_magnets) / dt
+            self._sigma = resolution / 3.0
+        else:
+            self._sigma = 0.0
+
+    def measure(self, omega_true: float) -> float:
+        """
+        Return a simulated sensor reading for true spin rate *omega_true* [rad/s].
+
+        Adds Gaussian noise calibrated to the Hall-effect resolution.
+        Always returns a non-negative value.
+        """
+        if self._sigma > 0.0:
+            return float(max(0.0, omega_true + self._rng.normal(0.0, self._sigma)))
+        return float(max(0.0, omega_true))
+
+    def validate(
+        self,
+        omega_measured: float,
+        v_inplane:      float,
+        warn_threshold: float = 0.15,
+    ) -> dict:
+        """
+        Cross-check *omega_measured* against the autorotation torque-balance model.
+
+        Uses: omega_expected = sqrt(K_drive × v_inplane / K_drag)
+
+        Parameters
+        ----------
+        omega_measured  : float — measured spin rate [rad/s]
+        v_inplane       : float — estimated in-plane wind speed [m/s]
+        warn_threshold  : float — fractional deviation that triggers a warning (default 15 %)
+
+        Returns
+        -------
+        dict with keys:
+            "omega_expected"  float — model prediction [rad/s]
+            "deviation_frac"  float — |measured - expected| / expected
+            "ok"              bool  — True if deviation < warn_threshold
+        """
+        if v_inplane <= 0.0:
+            return {"omega_expected": 0.0, "deviation_frac": float("inf"), "ok": False}
+        omega_expected  = math.sqrt(self._K_drive * v_inplane / self._K_drag)
+        deviation_frac  = abs(omega_measured - omega_expected) / max(omega_expected, 1e-9)
+        return {
+            "omega_expected": omega_expected,
+            "deviation_frac": deviation_frac,
+            "ok":             deviation_frac < warn_threshold,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 

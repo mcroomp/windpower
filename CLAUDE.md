@@ -504,9 +504,9 @@ wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k 
 | Task | Command |
 |------|---------|
 | Build Docker image | `simulation\build.cmd ardupilot` |
-| **Unit tests (fast, local)** | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m "not simtest"` |
-| **Simtests (slow, local)** | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m simtest` |
-| All unit+simtests (local) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit` |
+| **Unit tests (fast, local)** | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| **Simtests (slow, local)** | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
+| All unit+simtests (local) | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -q` |
 | Stack tests (Docker) | `wsl.exe bash -c '... dev.sh test-stack'` |
 | Stack tests (filtered) | `wsl.exe bash -c '... dev.sh test-stack -v -k test_name'` |
 | Stack tests (status only) | `wsl.exe bash -c '... dev.sh test-stack --filterstatus'` |
@@ -536,10 +536,20 @@ wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.
 **CRITICAL: Unit tests and simtests run directly on Windows — no WSL, no Docker needed.**
 Only stack tests (ArduPilot SITL) require Docker and must go through WSL.
 
+**CRITICAL: Use the Bash tool directly — do NOT use `wsl.exe`, `powershell`, or `cmd /c` for unit tests.**
+The Bash tool runs Git Bash on Windows with the working directory already set to `E:\repos\windpower`.
+Python can be called directly with forward-slash paths. `/mnt/e/...` WSL paths do NOT exist in Git Bash —
+never `cd /mnt/e/...`.
+
+**Correct pattern for unit tests:**
+```
+simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
+```
+
 | Context | How to run |
 |---------|-----------|
-| Unit tests (fast) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m "not simtest"` |
-| Simtests (slow, ~minutes) | `simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit -m simtest` |
+| Unit tests (fast) | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| Simtests (slow, ~minutes) | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
 | Stack tests (Docker required) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack [-v] [-k name] [--filterstatus]'` |
 | Any Python analysis script | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/...'` |
 | One-off command inside container | `wsl.exe bash -c 'docker exec rawes-dev python3 /rawes/simulation/...'` |

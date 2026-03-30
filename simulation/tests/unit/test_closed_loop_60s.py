@@ -80,14 +80,14 @@ def _run(t_sim: float = T_SIM):
 
         # STATE packet (Pixhawk → planner)
         state_pkt = {
-            "pos_enu":   hub_state["pos"],
-            "vel_enu":   hub_state["vel"],
-            "tension_n": 0.0,
-            "t_free":    t,
+            "pos_enu":    hub_state["pos"],
+            "vel_enu":    hub_state["vel"],
+            "tension_n":  0.0,
+            "omega_spin": omega_spin,
+            "t_free":     t,
         }
         cmd = trajectory.step(state_pkt, DT)
-        # cmd["blend_alpha"] == 0.0 and cmd["body_z_target"] is None
-        # → Mode_RAWES stays at tether-aligned natural equilibrium
+        # cmd["attitude_q"] == identity → Mode_RAWES stays at tether-aligned natural equilibrium
 
         # Mode_RAWES: orbit tracking → body_z_eq
         body_z_eq = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
@@ -145,7 +145,7 @@ def _run(t_sim: float = T_SIM):
                 "swash_collective":    sw["collective_rad"],
                 "swash_tilt_lon":      sw["tilt_lon"],
                 "swash_tilt_lat":      sw["tilt_lat"],
-                "body_z_eq":           cmd["body_z_eq"].tolist(),
+                "body_z_eq":           body_z_eq.tolist(),
                 "wind_enu":            WIND.tolist(),
             })
 

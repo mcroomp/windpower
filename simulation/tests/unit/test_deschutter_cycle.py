@@ -48,7 +48,8 @@ from aero        import create_aero
 from tether      import TetherModel
 from controller  import compute_swashplate_from_state
 from trajectory  import DeschutterTrajectory
-from controller  import TensionController, orbit_tracked_body_z_eq, blend_body_z
+from controller  import TensionController, orbit_tracked_body_z_eq
+from trajectory  import quat_apply, quat_is_identity
 from frames      import build_orb_frame
 
 # ── Simulation constants ───────────────────────────────────────────────────────
@@ -78,6 +79,9 @@ V_REEL_IN     =  0.4    # m/s
 # Tension setpoints
 DEFAULT_TENSION_OUT = 200.0   # N
 DEFAULT_TENSION_IN  =  20.0   # N
+
+# Mode_RAWES slew rate (matches config default body_z_slew_rate_rad_s)
+BODY_Z_SLEW_RATE = 0.12       # rad/s
 
 
 # ── Main simulation ────────────────────────────────────────────────────────────
@@ -127,10 +131,11 @@ def _run_deschutter_cycle(
 
     # ── Mode_RAWES inner loop (400 Hz, on Pixhawk) ────────────────────────────
     # Receives COMMAND packets from trajectory planner.
-    # Owns orbit tracking and attitude/tension control.
-    tension_ctrl    = TensionController(setpoint_n=tension_out)
-    ic_tether_dir0  = POS0 / np.linalg.norm(POS0)   # captured at free-flight start
-    ic_body_z_eq0   = BODY_Z0.copy()
+    # Owns orbit tracking, rate-limited attitude slew, and tension control.
+    tension_ctrl      = TensionController(setpoint_n=tension_out)
+    ic_tether_dir0    = POS0 / np.linalg.norm(POS0)   # captured at free-flight start
+    ic_body_z_eq0     = BODY_Z0.copy()
+    body_z_eq_slewed  = BODY_Z0.copy()   # rate-limited slew state (Mode_RAWES)
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
@@ -153,9 +158,9 @@ def _run_deschutter_cycle(
     energy_out       = 0.0
     energy_in        = 0.0
 
+    from trajectory import Q_IDENTITY
     sw             = {"tilt_lon": 0.0, "tilt_lat": 0.0}
-    cmd            = {"body_z_target": None, "blend_alpha": 0.0,
-                      "tension_setpoint_n": tension_out,
+    cmd            = {"attitude_q": Q_IDENTITY.copy(), "thrust": 1.0,
                       "winch_speed_ms": 0.0, "phase": "reel-out"}
     tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
     tension_now    = tether._last_info.get("tension", 0.0)
@@ -167,16 +172,17 @@ def _run_deschutter_cycle(
 
         # ── STATE packet (Pixhawk → planner) ──────────────────────────────────
         state_pkt = {
-            "pos_enu":   hub_state["pos"],
-            "vel_enu":   hub_state["vel"],
-            "tension_n": tension_now,
-            "t_free":    t,
+            "pos_enu":    hub_state["pos"],
+            "vel_enu":    hub_state["vel"],
+            "tension_n":  tension_now,
+            "omega_spin": omega_spin,
+            "t_free":     t,
         }
         cmd = trajectory.step(state_pkt, DT)
-        # cmd is a COMMAND packet: body_z_target, blend_alpha,
-        #   tension_setpoint_n, winch_speed_ms, phase
+        # cmd is a COMMAND packet (SET_ATTITUDE_TARGET + MAV_CMD_DO_WINCH):
+        #   attitude_q, thrust, winch_speed_ms, phase
 
-        # ── Mode_RAWES: winch ─────────────────────────────────────────────────
+        # ── Mode_RAWES: winch  (MAV_CMD_DO_WINCH RATE_CONTROL) ───────────────
         ws = cmd["winch_speed_ms"]
         if ws < 0.0:
             tether.rest_length = max(REST_LENGTH0, tether.rest_length + ws * DT)
@@ -184,16 +190,31 @@ def _run_deschutter_cycle(
             tether.rest_length += ws * DT
 
         # ── Mode_RAWES: tension PI → collective ───────────────────────────────
-        tension_ctrl.setpoint = cmd["tension_setpoint_n"]
+        # thrust [0..1] × tension_max_n (= tension_out here) → setpoint
+        tension_ctrl.setpoint = cmd["thrust"] * tension_out
         collective_rad = tension_ctrl.update(tension_now, DT)
 
-        # ── Mode_RAWES: orbit tracking + blend → body_z_eq ───────────────────
+        # ── Mode_RAWES: orbit tracking + rate-limited slew → body_z_eq ───────
         bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
-        alpha = cmd["blend_alpha"]
-        if alpha > 0.0 and cmd["body_z_target"] is not None:
-            body_z_eq = blend_body_z(alpha, bz_tether, cmd["body_z_target"])
-        else:
+        _aq = cmd["attitude_q"]
+        if quat_is_identity(_aq):
+            body_z_eq_slewed = bz_tether.copy()
             body_z_eq = bz_tether
+        else:
+            bz_target = quat_apply(_aq, np.array([0.0, 0.0, 1.0]))
+            _cos_a = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
+            _angle = math.acos(_cos_a)
+            _max_step = BODY_Z_SLEW_RATE * DT
+            if _angle > 1e-6:
+                _alpha_slew = min(1.0, _max_step / _angle)
+                _sin_a = math.sin(_angle)
+                if _sin_a > 1e-9:
+                    body_z_eq_slewed = (
+                        math.sin((1.0 - _alpha_slew) * _angle) / _sin_a * body_z_eq_slewed
+                        + math.sin(_alpha_slew * _angle) / _sin_a * bz_target
+                    )
+                    body_z_eq_slewed = body_z_eq_slewed / np.linalg.norm(body_z_eq_slewed)
+            body_z_eq = body_z_eq_slewed
 
         # ── Mode_RAWES: attitude controller → tilt ────────────────────────────
         sw = compute_swashplate_from_state(

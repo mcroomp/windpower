@@ -67,8 +67,21 @@ DEFAULTS: dict = {
     "internal_controller_ramp":   3.0,  # ramp-in time after kinematic end [s]
     "lock_orientation":         False,  # debug: lock R to initial value every step
 
+    # ── Mode_RAWES attitude and tension parameters ────────────────────────────
+    # tension_max_n: Mode_RAWES maps thrust [0..1] to setpoint via
+    #   tension_setpoint_n = thrust × tension_max_n.
+    #   The planner normalises against the same value.
+    "tension_max_n":           200.0,  # max operating tension [N]
+    # body_z_slew_rate_rad_s: max angular slew rate for body_z transitions [rad/s].
+    #   At 0.12 rad/s a 0.57 rad (33°) reel-in transition takes ~5 s.
+    #   Replaces the blend_alpha ramp that formerly lived in the trajectory planner.
+    "body_z_slew_rate_rad_s":    0.12,
+
     # ── Sensor model ──────────────────────────────────────────────────────────
     "sensor_mode": "tether_relative",   # "tether_relative" | "physical"
+    # Spin speed sensor: Hall-effect magnets on rotor hub.
+    # Set 0 to disable noise (ideal sensor — useful for unit tests).
+    "spin_sensor_n_magnets": 8,         # magnets; resolution = 2π/N / dt ≈ 1.96 rad/s
 
     # ── Trajectory controller ─────────────────────────────────────────────────
     # "type" selects the active controller.  Each type has its own sub-dict so
