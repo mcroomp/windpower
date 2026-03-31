@@ -51,6 +51,9 @@ for _p in [str(_HERE), str(_SIM)]:
 import dataclasses as _dc
 from torque_telemetry import TorqueTelemetryFrame, TorqueJSONSource
 from mediator_torque import PROFILES as _MEDIATOR_PROFILES
+from model import HubParams as _HubParams, equilibrium_throttle as _eq_throttle
+
+_MODEL_PARAMS = _HubParams()   # default GB4008 params (same as mediator default)
 
 try:
     import pyvista as pv
@@ -233,13 +236,24 @@ class EventLog:
             self._observe_done = True
 
     def init_actors(self, win_w: int = 1024, win_h: int = 768) -> None:
-        """Create text actors once (pixel positions → vtkTextActor → SetInput)."""
+        """
+        Create text actors at fixed positions (positions cannot change after creation).
+
+        Event log box occupies the upper-left:
+          - History (grey):   top of box, text flows downward
+          - Latest (colour):  pinned to the bottom of the box
+        Motor/sensor panel occupies the lower-left (see _sensor_actor in play()).
+        """
+        _LINE_H = 13   # pixels per log line at font_size=7
+        _BOX_TOP = win_h - 40            # y of first history line (near top)
+        _BOX_BOT = _BOX_TOP - self.MAX_LINES * _LINE_H  # bottom of log box
+
         self._hist_actor = self.pl.add_text(
-            " ", position=(10, win_h - 220), font_size=7, font="courier",
+            " ", position=(10, _BOX_TOP), font_size=7, font="courier",
             color=(0.50, 0.50, 0.50),
         )
         self._latest_actor = self.pl.add_text(
-            " ", position=(10, win_h - 230), font_size=8, font="courier",
+            " ", position=(10, max(55, _BOX_BOT)), font_size=8, font="courier",
             color="white",
         )
 
@@ -273,10 +287,8 @@ class EventLog:
 
         sev, t_ev, msg = latest
         self._latest_actor.SetInput(f"[{t_ev:5.1f}] {msg}")
-        col = self._COLOURS.get(sev, "white")
-        # map colour name → RGB
         _rgb = {"white":(1,1,1), "yellow":(1,1,0), "lime":(0,1,0), "red":(1,0,0)}
-        r, g, b = _rgb.get(col, (1,1,1))
+        r, g, b = _rgb.get(self._COLOURS.get(sev, "white"), (1,1,1))
         self._latest_actor.GetTextProperty().SetColor(r, g, b)
 
 
@@ -454,9 +466,10 @@ class TorqueScene:
         # Yaw pointer — follows hub heading (full tilt orientation)
         self._ptr_a.user_matrix = Rhub
 
-        # Throttle bar: scale Z by throttle (box goes 0→max_h, scale → 0→thr*max_h)
+        # Motor voltage bar: height ∝ V_applied / V_bat_max
+        v_frac = max(0.002, frame.throttle)   # V_applied / 15.2V
         M = np.eye(4, dtype=float)
-        M[2, 2] = max(0.002, frame.throttle)
+        M[2, 2] = v_frac
         self._thr_a.user_matrix = M
 
         # Text overlays (fast — just string replacement)
@@ -467,11 +480,15 @@ class TorqueScene:
     # ── HUD text — updates in-place, no actor recreation ─────────────────
 
     def _draw_hud(self, frame: TorqueTelemetryFrame) -> None:
+        V_BAT = 15.2
+        v_mot = frame.throttle * V_BAT
+        pwm   = frame.servo_pwm_us if frame.servo_pwm_us > 900 else 0
         self._hud_actor.SetInput("\n".join([
             f"t      = {frame.t:7.2f} s",
             f"psi    = {frame.psi_deg:+7.2f} deg",
             f"psi_dt = {frame.psi_dot_degs:+7.2f} deg/s",
-            f"thr    = {frame.throttle:7.3f}",
+            f"V_mot  = {v_mot:7.2f} V  ({frame.throttle*100:.1f}%)",
+            f"PWM    = {pwm if pwm else '-':>7} us",
             f"omega  = {frame.omega_axle_rads:6.1f} rad/s",
             f"phase  = {frame.phase}",
         ]))
@@ -639,8 +656,8 @@ def play(frames: List[TorqueTelemetryFrame],
         color=(0.85, 0.85, 0.40),
     )
 
-    # Sensor / motor panel — what is being sent to ArduPilot and motor state
-    _sensor_actor = pl.add_text(" ", position=(10, _h - 270),
+    # Motor panel — lower-left, above FPS/controls (event log is upper-left)
+    _sensor_actor = pl.add_text(" ", position=(10, 55),
                                   font_size=7, font="courier",
                                   color=(0.55, 0.85, 0.55))
 
@@ -716,11 +733,18 @@ def play(frames: List[TorqueTelemetryFrame],
             else:
                 interp = cur_frames[-1]
 
-            # Inject profile-reconstructed omega so the rotor indicator and
-            # HUD reflect the actual (varying) axle speed, not the nominal constant.
+            # Inject profile-reconstructed omega (rotor indicator + HUD).
             real_omega = _omega_fn[0](interp.t)
-            if abs(real_omega - interp.omega_axle_rads) > 0.01:
-                interp = _dc.replace(interp, omega_axle_rads=real_omega)
+            # Convert actual servo PWM → throttle fraction [0,1] for the bar.
+            # servo_pwm_us is the real PWM ArduPilot sent to the motor channel.
+            # If not recorded (0), fall back to the reconstructed equilibrium.
+            if interp.servo_pwm_us > 900:
+                real_throttle = max(0.0, min(1.0, (interp.servo_pwm_us - 1000) / 1000.0))
+            else:
+                real_throttle = _eq_throttle(max(0.1, real_omega), _MODEL_PARAMS)
+            interp = _dc.replace(interp,
+                                 omega_axle_rads=real_omega,
+                                 throttle=real_throttle)
 
             scene.update(interp)
 
@@ -734,18 +758,26 @@ def play(frames: List[TorqueTelemetryFrame],
             tau_motor   = 0.293 * max(0.0, thr - om_motor / 105.1)
             q_motor     = 1.818 * tau_motor
             q_bearing   = 0.005 * om
+            V_BAT     = 15.2
+            KV_RAD    = 66.0 * math.pi / 30.0   # rad/s per volt
+            R_MOTOR   = 7.5                       # Ω
+            v_applied = thr * V_BAT               # V — what ESC puts on the coils
+            v_backemf = om_motor / KV_RAD         # V — back-EMF at current speed
+            i_motor   = max(0.0, (v_applied - v_backemf) / R_MOTOR)  # A
+            p_motor   = v_applied * i_motor        # W
+
             _sensor_actor.SetInput("\n".join([
                 "sent to ArduPilot",
                 f" gyro z   = {-pd_rad:+.3f} rad/s",
                 f" accel z  = {-9.81:.2f} m/s²",
                 f" yaw (NED)= {-psi_rad:+.3f} rad",
-                "motor state",
-                f" Ch4 PWM  = {pwm_ch4:4d} us",
-                f" throttle = {thr:.3f}",
+                "motor (ESC output)",
+                f" PWM      = {pwm_ch4:4d} us",
+                f" V_applied= {v_applied:6.2f} V  ({thr*100:.1f}%)",
+                f" V_backemf= {v_backemf:6.2f} V",
+                f" I_motor  = {i_motor:6.3f} A",
+                f" P_motor  = {p_motor:6.2f} W",
                 f" omega_m  = {om_motor:.1f} rad/s",
-                f" tau_m    = {tau_motor:.4f} Nm",
-                f" Q_motor  = {-q_motor:+.4f} Nm",
-                f" Q_bear   = {+q_bearing:+.4f} Nm",
                 f" Q_net    = {q_bearing-q_motor:+.4f} Nm",
             ]))
         else:

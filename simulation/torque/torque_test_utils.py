@@ -62,6 +62,19 @@ def run_observation_loop(
     deadline = t_start + timeout_s
     t_rc     = time.monotonic()
 
+    # Request SERVO_OUTPUT_RAW so we can record the actual PWM ArduPilot sends.
+    # This stream may not be on by default; request it once.
+    try:
+        from pymavlink import mavutil as _mavu
+        gcs._mav.mav.request_data_stream_send(
+            gcs._target_system, gcs._target_component,
+            _mavu.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER, 10, 1,
+        )
+    except Exception:
+        pass
+
+    latest_servo_pwm: int = 0   # most recent Ch9 (index 8) or Ch4 (index 3) PWM
+
     while time.monotonic() < deadline:
         # Keep motor interlock HIGH — ArduPilot expires RC override after ~1 s
         if time.monotonic() - t_rc >= 0.5:
@@ -76,7 +89,7 @@ def run_observation_loop(
                 return obs
 
         msg = gcs._mav.recv_match(
-            type=["ATTITUDE", "STATUSTEXT"],
+            type=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW"],
             blocking=True,
             timeout=0.5,
         )
@@ -87,6 +100,15 @@ def run_observation_loop(
 
         if msg.get_type() == "STATUSTEXT":
             log.debug("SITL t=%.1fs: %s", t_rel, msg.text.rstrip("\x00").strip())
+            continue
+
+        if msg.get_type() == "SERVO_OUTPUT_RAW":
+            # Ch9 (index 8, servo9_raw) for Lua test; Ch4 (index 3, servo4_raw)
+            # for standard tests. Pick whichever is non-neutral (>1050 µs).
+            ch9 = getattr(msg, "servo9_raw", 0) or 0
+            ch4 = getattr(msg, "servo4_raw", 0) or 0
+            # Use Ch9 if Lua is active (pwm >1050), otherwise Ch4
+            latest_servo_pwm = ch9 if ch9 > 1050 else ch4
             continue
 
         if msg.get_type() == "ATTITUDE":
@@ -100,11 +122,11 @@ def run_observation_loop(
                 t               = t_rel,
                 psi_deg         = yaw_deg,
                 psi_dot_degs    = yaw_rate_degs,
-                throttle        = 0.0,
                 omega_axle_rads = ctx.omega_axle,
                 phase           = "DYNAMIC",
                 roll_deg        = roll_deg,
                 pitch_deg       = pitch_deg,
+                servo_pwm_us    = latest_servo_pwm,
             )
 
             if t_rel >= settle_s:

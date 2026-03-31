@@ -51,8 +51,9 @@ class TorqueTelemetryFrame:
     roll_deg: float = 0.0            # hub roll [deg]         (ATTITUDE.roll, same sign)
     pitch_deg: float = 0.0           # hub pitch [deg]        (ATTITUDE.pitch, same sign)
 
-    # Motor command
-    throttle: float = 0.0            # motor throttle [0, 1] (from mediator model)
+    # Motor command — actual PWM output from ArduPilot (SERVO_OUTPUT_RAW)
+    throttle: float = 0.0            # computed equilibrium (filled by visualiser)
+    servo_pwm_us: int = 0            # actual Ch4 or Ch9 PWM from ArduPilot [µs]
 
     # Physics model state (from model.py, computed by mediator)
     omega_axle_rads: float = 0.0     # axle spin rate [rad/s]
@@ -110,13 +111,14 @@ class TorqueTelemetryRecorder:
         t: float,
         psi_deg: float,
         psi_dot_degs: float,
-        throttle: float,
+        throttle: float = 0.0,
         omega_axle_rads: float = 0.0,
         q_bearing_nm: float = 0.0,
         q_motor_nm: float = 0.0,
         phase: str = "DYNAMIC",
         roll_deg: float = 0.0,
         pitch_deg: float = 0.0,
+        servo_pwm_us: int = 0,
     ) -> None:
         """Append one telemetry frame."""
         self._frames.append(TorqueTelemetryFrame(
@@ -130,6 +132,7 @@ class TorqueTelemetryRecorder:
             phase=phase,
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
+            servo_pwm_us=servo_pwm_us,
         ))
 
     def add_meta(self, key: str, value: Any) -> None:
