@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-03-31 04:40:15",
-  "elapsed_s": 67.68,
+  "timestamp": "2026-03-31 08:25:16",
+  "elapsed_s": 399.64,
   "exit_code": 0,
-  "passed": 534,
+  "passed": 291,
   "failed": 0,
   "errors": 0,
   "skipped": 5,
@@ -17,9 +17,7 @@
     "-m",
     "pytest",
     "simulation/tests/unit",
-    "simulation/aero/tests",
-    "-m",
-    "not simtest",
-    "-q"
+    "-q",
+    "--tb=short"
   ]
 }

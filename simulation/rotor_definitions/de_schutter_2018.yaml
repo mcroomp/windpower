@@ -77,6 +77,9 @@ inertia:
 
 control:
   K_cyc: 0.4
+  swashplate_pitch_gain_rad: 0.262  # β_max ≈ 15° (PITCH_MAX_DEG class default in DeSchutterAero)
+                                     # De Schutter 2018 does not specify swashplate geometry;
+                                     # this value matches the original DeSchutterAero hardcoded constant.
   aero_ramp_s: 5.0
   kaman_flap:
     enabled: false

@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 
 from dynamics   import RigidBodyDynamics
-from aero       import RotorAero, create_aero
+from aero       import create_aero
 import rotor_definition as _rd
 from tether     import TetherModel
 from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq

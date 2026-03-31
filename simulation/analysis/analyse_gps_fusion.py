@@ -421,8 +421,8 @@ def plot_ekf_timeline(ekf, statustext, gps_fused, out_path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--log",  default=str(_SIM_DIR / "gcs_last_run.log"),
-                    help="Path to gcs log file (default: simulation/gcs_last_run.log)")
+    ap.add_argument("--log",  default=str(_SIM_DIR / "logs" / "gcs_last_run.log"),
+                    help="Path to gcs log file (default: simulation/logs/gcs_last_run.log)")
     ap.add_argument("--plot", action="store_true",
                     help="Save EKF timeline plot alongside the log")
     args = ap.parse_args()

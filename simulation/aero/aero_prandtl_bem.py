@@ -48,8 +48,7 @@ from aero import AeroResult
 
 log = logging.getLogger(__name__)
 
-# Swashplate max tilt → radians (same as swashplate._PITCH_GAIN_RAD)
-_PITCH_GAIN_RAD = 0.3
+_PITCH_GAIN_RAD_DEFAULT = 0.3   # fallback when not supplied via rotor_definition
 
 
 class PrandtlBEM:
@@ -82,8 +81,9 @@ class PrandtlBEM:
         self.CL_ALPHA   = float(p["CL_alpha"])
         self.AOA_LIMIT  = float(p["aoa_limit"])
         self.ramp_time  = float(ramp_time)
-        self.k_drive_spin = float(p["k_drive_spin"])
-        self.k_drag_spin  = float(p["k_drag_spin"])
+        self.k_drive_spin   = float(p["k_drive_spin"])
+        self.k_drag_spin    = float(p["k_drag_spin"])
+        self.pitch_gain_rad = float(p.get("pitch_gain_rad", _PITCH_GAIN_RAD_DEFAULT))
 
         span          = self.R_TIP - self.R_ROOT
         self.S_blade  = span * self.CHORD
@@ -188,8 +188,8 @@ class PrandtlBEM:
         spin_sign   = float(np.sign(omega_rotor)) if omega_rotor != 0.0 else 1.0
         omega_abs   = abs(float(omega_rotor))
 
-        tilt_lon_rad = tilt_lon * _PITCH_GAIN_RAD
-        tilt_lat_rad = tilt_lat * _PITCH_GAIN_RAD
+        tilt_lon_rad = tilt_lon * self.pitch_gain_rad
+        tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
         v_rel_world   = wind_world - v_hub_world
         v_axial       = float(np.dot(v_rel_world, disk_normal))

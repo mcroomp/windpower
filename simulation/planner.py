@@ -452,10 +452,12 @@ class DeschutterPlanner(TrajectoryPlanner):
         t_cyc     = self._t_free % self._t_cycle
         phase_out = t_cyc < self._t_reel_out
 
-        # Switch TensionPI limits at phase boundary:
-        # - Reel-out: col_min=-0.28 (tether-aligned body_z, positive thrust to -0.34 rad)
-        # - Reel-in: col_min=-0.20 (xi=55° body_z, zero-thrust at -0.228 rad; -0.20 has safe margin)
-        _col_min_now = self._col_min_rad if phase_out else self._col_min_reel_in_rad
+        # PI floor: always use col_min_rad throughout both phases.
+        # col_min_reel_in_rad is the hover collective at xi_reel_in (informational / warm-start
+        # reference only).  Using it as a floor during reel-in prevents the hub from descending
+        # to follow the shortening tether, causing tension to build uncontrolled.  At 80° tilt
+        # the tether itself is the altitude catch-net, not the collective floor.
+        _col_min_now = self._col_min_rad
         self._tension_ctrl.coll_min = _col_min_now
 
         # Detect reel-out → reel-in phase transition and warm the PI integral.
@@ -476,10 +478,13 @@ class DeschutterPlanner(TrajectoryPlanner):
         self._tension_ctrl.setpoint = tension_setpoint
         collective_rad = self._tension_ctrl.update(float(tension_n), dt)
 
-        # Normalise collective → thrust [0..1] for SET_ATTITUDE_TARGET
-        col_range = self._col_max_rad - _col_min_now
+        # Normalise collective → thrust [0..1] for SET_ATTITUDE_TARGET.
+        # Always use the full hardware range (col_min_rad..col_max_rad) so that
+        # Mode_RAWES can denormalise with fixed parameters regardless of the PI's
+        # internal coll_min limit (col_min_reel_in_rad during reel-in).
+        col_range = self._col_max_rad - self._col_min_rad
         thrust = float(max(0.0, min(1.0,
-            (collective_rad - _col_min_now) / col_range if col_range > 1e-9 else 0.5
+            (collective_rad - self._col_min_rad) / col_range if col_range > 1e-9 else 0.5
         )))
 
         # Winch speed — stop reel-out if tether has reached max length (if provided)

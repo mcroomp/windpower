@@ -52,7 +52,7 @@ from aero import AeroResult
 
 log = logging.getLogger(__name__)
 
-_PITCH_GAIN_RAD = 0.3
+_PITCH_GAIN_RAD_DEFAULT = 0.3   # fallback when not supplied via rotor_definition
 
 # Induction factor threshold for state transitions
 _A_TURBULENT   = 0.4   # above this: turbulent wake correction (Leishman)
@@ -92,8 +92,9 @@ class GlauertStateBEM:
         self.K_cyc        = float(p["K_cyc"])
         self.aoa_limit    = float(p["aoa_limit"])
         self.ramp_time    = float(ramp_time)
-        self.k_drive_spin = float(p["k_drive_spin"])
-        self.k_drag_spin  = float(p["k_drag_spin"])
+        self.k_drive_spin   = float(p["k_drive_spin"])
+        self.k_drag_spin    = float(p["k_drag_spin"])
+        self.pitch_gain_rad = float(p.get("pitch_gain_rad", _PITCH_GAIN_RAD_DEFAULT))
 
         span             = self.r_tip - self.r_root
         self.aspect_ratio = float(p.get("aspect_ratio") or span / self.chord)
@@ -319,8 +320,8 @@ class GlauertStateBEM:
         M_spin_world = Q_total * ramp * spin_sign * disk_normal
 
         # ── Cyclic moment (K_cyc empirical)  ──────────────────────────────────
-        tilt_lon_rad = tilt_lon * _PITCH_GAIN_RAD
-        tilt_lat_rad = tilt_lat * _PITCH_GAIN_RAD
+        tilt_lon_rad = tilt_lon * self.pitch_gain_rad
+        tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
         _EAST = np.array([1.0, 0.0, 0.0])
         _ep   = _EAST - np.dot(_EAST, disk_normal) * disk_normal

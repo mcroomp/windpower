@@ -311,7 +311,7 @@ def test_acro_hold(acro_armed: StackContext):
                 "target":           [0.0, 0.0, 0.0],
                 "anchor_ned":       anchor_ned,
             }
-            with (ctx.sim_dir / "flight_data.json").open("w", encoding="utf-8") as f:
+            with (ctx.sim_dir / "logs" / "flight_data.json").open("w", encoding="utf-8") as f:
                 json.dump(flight_data, f)
 
         if pos_history:

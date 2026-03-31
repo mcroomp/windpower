@@ -169,6 +169,41 @@ control:
   # Set 0.0 when gyroscopic coupling is disabled (I_spin_kgm2 = 0.0).
   swashplate_phase_deg: 0.0   # ESTIMATE — TBD from step-response test
 
+  # ── Swashplate pitch authority (Kaman flap) ──────────────────────────────
+  #
+  # swashplate_pitch_gain_rad is the effective blade pitch angle [rad] at
+  # normalised tilt = 1.0 (full cyclic deflection).
+  #
+  # For a Kaman flap system the chain is:
+  #   swashplate push-rod travel → flap deflection γ → aerodynamic pitching
+  #   moment → blade pitch β,   where  β = τ · γ  (τ = flap effectiveness).
+  #
+  # The static flap deflection γ_max CAN be measured without airflow:
+  #   Command full cyclic (tilt = 1.0), secure the rotor stationary, and read
+  #   the trailing-edge flap deflection angle with a digital inclinometer on
+  #   the flap chord at mid-span.  Then:
+  #     swashplate_pitch_gain_rad = τ · γ_max
+  #   where τ = kaman_flap.tau (0.45 here — see kaman_flap section).
+  #
+  # The resulting blade pitch β only manifests in flight (the Kaman flap works
+  # through an aerodynamic pitching moment, not a mechanical linkage to the
+  # blade root), so static measurement gives γ only, not β directly.  To
+  # measure β directly, a wind-tunnel test or a flight step-response is needed.
+  #
+  # Why it matters for trajectory planning:
+  #   The disk tilts by gyroscopic precession when a cyclic moment is applied:
+  #     ω_tilt_max = M_cyc_max / H,   H = I_spin · ω_eq  (angular momentum)
+  #   where M_cyc_max scales with swashplate_pitch_gain_rad × CL_α × ω_eq² × R⁴.
+  #   For this rotor: ω_tilt_max ≈ 20 rad/s — far above any useful planner rate.
+  #   The planner slew rate (BODY_Z_SLEW_RATE) is limited by controller bandwidth
+  #   to ~2–5% of ω_tilt_max (~0.4–1.0 rad/s).
+  #   See RotorDefinition.max_body_z_rate_rad_s for the computed upper bound.
+  #
+  # ESTIMATE: τ · γ_max = 0.45 × 0.67 rad ≈ 0.30 rad (17.2°).
+  # Assumes γ_max ≈ 38° (servo end-stop) and τ = 0.45 (kaman_flap.tau).
+  # MEASURE: digital inclinometer on flap at full servo deflection; multiply by τ.
+  swashplate_pitch_gain_rad: 0.3   # β_max = τ · γ_max [rad] at tilt = 1.0  ESTIMATE
+
   kaman_flap:
     # Kaman servo-flap (US3217809, Kaman/Bossler 1965): trailing-edge control surface
     # on each blade driven by push-rods from the non-rotating swashplate.

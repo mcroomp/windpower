@@ -67,6 +67,7 @@ from test_stack_integration import (
     _launch_sitl,
     _resolve_sim_vehicle,
     _terminate_process,
+    _kill_by_port,
 )
 
 log = logging.getLogger("test_arm_minimal")
@@ -269,3 +270,4 @@ def test_arm_minimal(tmp_path):
         except Exception:
             pass
         _terminate_process(sitl_proc)
+        _kill_by_port(StackConfig.SITL_GCS_PORT)

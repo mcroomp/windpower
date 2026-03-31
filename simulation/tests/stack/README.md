@@ -2,7 +2,7 @@
 
 This directory contains the RAWES stack integration smoke test.
 
-The goal is to validate the controller and transport path between ArduPilot SITL and the Python simulation bridge without requiring a live MBDyn process or Mission Planner.
+The goal is to validate the controller and transport path between ArduPilot SITL and the Python simulation bridge without requiring Mission Planner.
 
 ## What This Test Covers
 
@@ -10,7 +10,7 @@ The smoke test launches:
 
 - real ArduPilot SITL via `sim_vehicle.py`
 - real `simulation/mediator.py`
-- a fake plant that stands in for MBDyn over the UNIX socket protocol
+- a fake plant that stands in for the physics process
 - a fake ground station that connects over MAVLink and waits for telemetry
 
 The test currently verifies that:
@@ -29,15 +29,22 @@ This is intentionally a stack integration test, not a full end-to-end simulation
 
 It does not validate:
 
-- a real MBDyn process
+- real physics fidelity validation
 - real Mission Planner or MAVProxy usage
 - full rotor or tether physics fidelity
 - controller performance against a physical truth model
 - flight-mode behavior such as takeoff, autonomous flight, or landing
 
-## Test File
+## Files
 
-- `test_stack_integration.py`: end-to-end smoke test for SITL + mediator + fake plant + fake GCS
+- `stack_utils.py`: shared constants and helpers (env vars, logging, process launch/teardown, port cleanup, log copying)
+- `conftest.py`: `acro_armed` fixture, `StackConfig`, `StackContext`
+- `test_stack_integration.py`: SITL + mediator smoke tests
+- `test_guided_flight.py`: 60 s ACRO hold tests
+- `test_pumping_cycle.py`: pumping cycle energy test
+- `test_setup.py`: arming sequence test
+- `test_arm_minimal.py`: minimal SITL arm test
+- `test_stationary_gps.py`: GPS fusion test
 
 ## Prerequisites
 
@@ -137,4 +144,6 @@ Check that:
 
 ## Maintenance Notes
 
-If the mediator transport, socket paths, MAVLink endpoint, or SITL launch arguments change, update this README alongside `test_stack_integration.py`, `simulation/test_stack.sh`, and `simulation/run_stack_integration.cmd`.
+If the mediator transport, socket paths, MAVLink endpoint, or SITL launch arguments change, update this README alongside `stack_utils.py`, `test_stack_integration.py`, `simulation/test_stack.sh`, and `simulation/run_stack_integration.cmd`.
+
+Port numbers and env-var names live in `stack_utils.py` — change them there and they propagate everywhere. All logs write to `simulation/logs/`.

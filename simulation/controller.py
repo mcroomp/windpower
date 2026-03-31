@@ -596,6 +596,249 @@ def blend_body_z(
     return blended / n if n > 1e-6 else np.asarray(bz_end, dtype=float).copy()
 
 
+# ---------------------------------------------------------------------------
+# Simulated ACRO rate PID — mirrors ArduPilot AC_AttitudeControl inner loop.
+# ---------------------------------------------------------------------------
+
+class RatePID:
+    """
+    Single-axis rate PID: rate error (rad/s) → normalised tilt output [-1, 1].
+
+    Mirrors ArduPilot's AC_AttitudeControl inner rate loop so the simulation
+    uses the same two-loop architecture as the hardware:
+
+        outer: compute_rate_cmd(kp_outer, kd=0) → rate setpoint
+        inner: RatePID.update(setpoint, actual, dt) → normalised tilt
+
+    On hardware, ArduPilot's rate PIDs supply all damping, so compute_rate_cmd
+    is called with kd=0.  In simulation, RatePID provides the equivalent
+    damping via its kp term (setpoint=0 at equilibrium → tilt = -kp * omega).
+
+    Default gains are calibrated to match the legacy single-loop behaviour
+    (kp=0.5, kd=0.2, tilt_max_rad=0.3) so existing tests pass unchanged:
+        kp_inner * kp_outer = kp_old / tilt_max_rad  →  0.67 * 2.5 = 1.67
+        kp_inner             = kd_old / tilt_max_rad  →  0.2  / 0.3 = 0.67
+
+    ArduPilot parameter mapping (helicopter ACRO):
+        kp    ↔  ATC_RAT_RLL_P  /  ATC_RAT_PIT_P
+        ki    ↔  ATC_RAT_RLL_I  /  ATC_RAT_PIT_I   (set 0 in our config)
+        kd    ↔  ATC_RAT_RLL_D  /  ATC_RAT_PIT_D
+        imax  ↔  ATC_RAT_RLL_IMAX / ATC_RAT_PIT_IMAX (set 0 in our config)
+    """
+
+    # Gain calibrated to match legacy kd=0.2, tilt_max_rad=0.3 behaviour:
+    #   kd_old / tilt_max_rad = 0.2 / 0.3 = 2/3
+    DEFAULT_KP: float = 2.0 / 3.0
+
+    def __init__(
+        self,
+        kp:         float = DEFAULT_KP,
+        ki:         float = 0.0,
+        kd:         float = 0.0,
+        imax:       float = 0.0,
+        output_max: float = 1.0,
+    ):
+        self.kp         = float(kp)
+        self.ki         = float(ki)
+        self.kd         = float(kd)
+        self.imax       = float(imax)
+        self.output_max = float(output_max)
+        self._integral  = 0.0
+        self._last_err  = 0.0
+
+    def update(self, setpoint: float, actual: float, dt: float) -> float:
+        """
+        Advance the PID by one step.
+
+        Parameters
+        ----------
+        setpoint : desired angular rate [rad/s]
+        actual   : measured angular rate [rad/s]
+        dt       : time step [s]
+
+        Returns
+        -------
+        float — normalised tilt command in [-output_max, +output_max]
+        """
+        error  = float(setpoint) - float(actual)
+        output = self.kp * error
+
+        if self.ki != 0.0:
+            self._integral += error * float(dt)
+            if self.imax > 0.0:
+                limit = self.imax / self.ki
+                self._integral = float(np.clip(self._integral, -limit, limit))
+            output += self.ki * self._integral
+
+        if self.kd != 0.0 and dt > 0.0:
+            output += self.kd * (error - self._last_err) / float(dt)
+
+        self._last_err = error
+        return float(np.clip(output, -self.output_max, self.output_max))
+
+    def reset(self) -> None:
+        """Reset integrator and derivative state (call on mode entry)."""
+        self._integral = 0.0
+        self._last_err = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Aero-model utilities
+# ---------------------------------------------------------------------------
+
+def col_min_for_altitude_rad(
+    aero,
+    xi_deg:        float,
+    mass_kg:       float,
+    wind_m_s:      float = 10.0,
+    omega:         float = None,
+    safety_rad:    float = 0.01,
+) -> float:
+    """
+    Minimum collective [rad] that keeps Fz ≥ mass·g at tilt angle xi from wind.
+
+    Binary searches for the collective where the vertical aerodynamic force
+    equals the hub weight, then adds a small safety margin.  Used to set
+    ``col_min_reel_in_rad`` in the De Schutter planner so the hub stays aloft
+    during high-tilt reel-in without explicit altitude feedback.
+
+    Parameters
+    ----------
+    aero      : SkewedWakeBEM (or any aero model with compute_forces)
+    xi_deg    : disk tilt from wind direction [°]  (0°=into wind, 90°=vertical)
+    mass_kg   : hub mass [kg]
+    wind_m_s  : wind speed [m/s]
+    omega     : rotor spin rate [rad/s]; None → equilibrium from aero.k_drive_spin
+    safety_rad: margin added above the exact floor [rad]
+    """
+    import math as _math
+    import numpy as _np
+    from frames import build_orb_frame as _build_orb_frame
+
+    xi_r = _math.radians(xi_deg)
+    bz   = _np.array([_math.cos(xi_r), 0.0, _math.sin(xi_r)])
+    R    = _build_orb_frame(bz)
+    wind = _np.array([wind_m_s, 0.0, 0.0])
+    W    = mass_kg * 9.81
+
+    if omega is None:
+        v_ip = wind_m_s * _math.sin(xi_r)
+        omega = _math.sqrt(aero.k_drive_spin * max(v_ip, 0.01) / aero.k_drag_spin)
+
+    lo, hi = -0.35, 0.20
+    for _ in range(50):
+        mid = (lo + hi) / 2.0
+        r   = aero.compute_forces(mid, 0.0, 0.0, R, _np.zeros(3), omega, wind, 50.0)
+        if float(r.F_world[2]) > W:
+            hi = mid
+        else:
+            lo = mid
+
+    return (lo + hi) / 2.0 + safety_rad
+
+
+# ---------------------------------------------------------------------------
+# Portable core — frame-agnostic functions that map 1:1 to Lua/C++ Mode_RAWES.
+#
+# Rules:
+#   • No ArduPilot API calls, no side effects, no global state.
+#   • Frame-agnostic: callers pass ENU (simulation) or NED (Lua/C++ firmware);
+#     the functions work identically in either frame.
+#   • These three functions are the entire on-board algorithm; everything
+#     else (reading sensors, sending outputs) is platform glue.
+# ---------------------------------------------------------------------------
+
+def compute_bz_tether(
+    pos:    np.ndarray,
+    anchor: np.ndarray,
+) -> "np.ndarray | None":
+    """
+    Tether direction unit vector (anchor → hub).
+
+    Returns None when the hub is at or inside the anchor (degenerate).
+    Frame-agnostic: pass ENU or NED; the returned vector is in the same frame.
+    """
+    tether = np.asarray(pos, dtype=float) - np.asarray(anchor, dtype=float)
+    t_len  = float(np.linalg.norm(tether))
+    if t_len < 0.1:
+        return None
+    return tether / t_len
+
+
+def slerp_body_z(
+    bz_prev:         np.ndarray,
+    bz_target:       np.ndarray,
+    slew_rate_rad_s: float,
+    dt:              float,
+) -> np.ndarray:
+    """
+    Rate-limited spherical interpolation between two unit vectors.
+
+    Advances bz_prev toward bz_target by at most ``slew_rate_rad_s * dt``
+    radians per call.  Returns a copy of bz_target when already within 1 µrad.
+    Frame-agnostic.
+    """
+    bz_prev   = np.asarray(bz_prev,   dtype=float)
+    bz_target = np.asarray(bz_target, dtype=float)
+    cos_theta = float(np.clip(np.dot(bz_prev, bz_target), -1.0, 1.0))
+    theta     = float(np.arccos(cos_theta))
+    if theta < 1e-6:
+        return bz_target.copy()
+    alpha     = min(1.0, float(slew_rate_rad_s) * float(dt) / theta)
+    sin_theta = np.sin(theta)
+    result    = (np.sin((1.0 - alpha) * theta) * bz_prev
+                 + np.sin(alpha * theta) * bz_target) / sin_theta
+    return result / np.linalg.norm(result)
+
+
+def compute_rate_cmd(
+    bz_now:          np.ndarray,
+    bz_eq:           np.ndarray,
+    R_body_to_world: np.ndarray,
+    kp:              float,
+    kd:              float = 0.0,
+    omega_world:     "np.ndarray | None" = None,
+) -> np.ndarray:
+    """
+    Body_z alignment error → body-frame angular rate command.
+
+    Computes the rotation needed to align bz_now with bz_eq, then projects it
+    into the body frame as a rate command for an ACRO-style rate controller.
+
+    Parameters
+    ----------
+    bz_now          : current rotor axle unit vector (world frame)
+    bz_eq           : desired rotor axle unit vector (world frame)
+    R_body_to_world : rotation matrix; columns are body axes in world frame
+    kp              : proportional gain [rad/s per rad]
+    kd              : derivative damping gain on orbital rate [dimensionless];
+                      ignored when omega_world is None
+    omega_world     : angular velocity in world frame [rad/s]; needed for kd > 0
+
+    Returns
+    -------
+    np.ndarray (3,) — (roll_rate, pitch_rate, yaw_rate) in body frame [rad/s]
+
+    Frame-agnostic: pass ENU or NED consistently across all arguments.
+    On hardware (Lua/C++) kd=0 because ArduPilot's rate PIDs supply damping.
+    In simulation kd > 0 supplements the absent firmware rate loop.
+    """
+    bz_now  = np.asarray(bz_now,          dtype=float)
+    bz_eq   = np.asarray(bz_eq,           dtype=float)
+    R       = np.asarray(R_body_to_world, dtype=float)
+
+    error_world   = np.cross(bz_now, bz_eq)
+
+    damping_world = np.zeros(3)
+    if kd != 0.0 and omega_world is not None:
+        omega         = np.asarray(omega_world, dtype=float)
+        omega_spin    = np.dot(omega, bz_now) * bz_now
+        omega_orbital = omega - omega_spin
+        damping_world = kd * omega_orbital
+
+    return R.T @ (kp * error_world - damping_world)
+
+
 def make_hold_controller(
     sensor_mode: str,
     anchor_ned:  "np.ndarray | None" = None,

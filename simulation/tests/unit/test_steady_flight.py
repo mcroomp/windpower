@@ -67,8 +67,9 @@ ELEV_DEG = 30.0
 ELEV_RAD = math.radians(ELEV_DEG)
 L_TETHER = 50.0                     # m  tether length at this flight point
 
-# ── Output directory (same folder as this test file) ─────────────────────────
-_OUT_DIR = Path(__file__).resolve().parent
+# ── Output directory (simulation/logs/) ──────────────────────────────────────
+_OUT_DIR = Path(__file__).resolve().parents[2] / "logs"
+_OUT_DIR.mkdir(exist_ok=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -519,7 +520,7 @@ def test_steady_state_hub_does_not_drift():
     # Save artefacts regardless of pass/fail
     _save_json(data, _OUT_DIR / "steady_flight_telemetry.json")
     _save_plot(data, _OUT_DIR / "steady_flight_report.png")
-    _save_starting_json(data, _OUT_DIR.parent.parent / "steady_state_starting.json")
+    _save_starting_json(data, Path(__file__).resolve().parents[2] / "steady_state_starting.json")
 
     assert np.all(np.isfinite(data["pos"])), "NaN/inf in position history"
     assert np.all(np.isfinite(data["vel"])), "NaN/inf in velocity history"

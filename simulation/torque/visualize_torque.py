@@ -75,8 +75,16 @@ ROTOR_BLADE_LEN = 0.22    # indicator blade length from centre
 ROTOR_BLADE_W   = 0.026   # blade width
 ROTOR_Z         = HUB_HEIGHT + AXLE_TOTAL_H * 0.55  # blade height (~mid-axle)
 
-_EQ_THROTTLE    = 0.747   # equilibrium throttle line position
-_THRESHOLD      = 1.0     # ψ_dot warning threshold [deg/s]
+# GB4008 motor constants (also in model.py — duplicated here for standalone vis)
+_V_BAT      = 15.2               # 4S LiPo nominal [V]
+_KV_RAD     = 66.0 * math.pi / 30.0  # rad/s per volt
+_R_MOTOR    = 7.5                # winding resistance [Ω]
+_GEAR_RATIO = 80.0 / 44.0        # ω_motor / ω_axle
+_POLE_PAIRS = 11                 # GB4008 24N22P → 22 poles → 11 pole pairs
+_I_MAX      = _V_BAT / _R_MOTOR  # stall current [A] = 2.03 A
+_I_EQ       = (_V_BAT * 0.747 - (28.0 * _GEAR_RATIO / _KV_RAD)) / _R_MOTOR  # ≈ 0.53 A
+
+_THRESHOLD  = 1.0     # ψ_dot warning threshold [deg/s]
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -419,8 +427,8 @@ class TorqueScene:
             pv.Box(bounds=(_x-.027, _x+.027, _y-.027, _y+.027, 0.0, self._max_h)),
             color=(0.35,0.35,0.35), opacity=0.45, style="wireframe",
         )
-        # Equilibrium mark (static)
-        eq_z = _EQ_THROTTLE * self._max_h
+        # Equilibrium current mark (I_eq / I_max)
+        eq_z = (_I_EQ / _I_MAX) * self._max_h
         pl.add_mesh(
             pv.Box(bounds=(_x-.032, _x+.032, _y-.002, _y+.002,
                            eq_z-.003, eq_z+.003)),
@@ -466,10 +474,15 @@ class TorqueScene:
         # Yaw pointer — follows hub heading (full tilt orientation)
         self._ptr_a.user_matrix = Rhub
 
-        # Motor voltage bar: height ∝ V_applied / V_bat_max
-        v_frac = max(0.002, frame.throttle)   # V_applied / 15.2V
+        # Current bar: height ∝ I_motor / I_max
+        # I = (V_applied - V_backemf) / R   where V_applied = throttle × V_bat
+        _om_m   = max(0.0, frame.omega_axle_rads * _GEAR_RATIO)
+        _v_app  = frame.throttle * _V_BAT
+        _v_bemf = _om_m / _KV_RAD
+        _i_now  = max(0.0, (_v_app - _v_bemf) / _R_MOTOR)
+        i_frac  = max(0.002, _i_now / _I_MAX)
         M = np.eye(4, dtype=float)
-        M[2, 2] = v_frac
+        M[2, 2] = i_frac
         self._thr_a.user_matrix = M
 
         # Text overlays (fast — just string replacement)
@@ -480,17 +493,18 @@ class TorqueScene:
     # ── HUD text — updates in-place, no actor recreation ─────────────────
 
     def _draw_hud(self, frame: TorqueTelemetryFrame) -> None:
-        V_BAT = 15.2
-        v_mot = frame.throttle * V_BAT
-        pwm   = frame.servo_pwm_us if frame.servo_pwm_us > 900 else 0
+        om_m    = max(0.0, frame.omega_axle_rads * _GEAR_RATIO)
+        v_app   = frame.throttle * _V_BAT
+        v_bemf  = om_m / _KV_RAD
+        i_now   = max(0.0, (v_app - v_bemf) / _R_MOTOR)
+        axle_rpm = frame.omega_axle_rads * 60.0 / (2.0 * math.pi)
         self._hud_actor.SetInput("\n".join([
-            f"t      = {frame.t:7.2f} s",
-            f"psi    = {frame.psi_deg:+7.2f} deg",
-            f"psi_dt = {frame.psi_dot_degs:+7.2f} deg/s",
-            f"V_mot  = {v_mot:7.2f} V  ({frame.throttle*100:.1f}%)",
-            f"PWM    = {pwm if pwm else '-':>7} us",
-            f"omega  = {frame.omega_axle_rads:6.1f} rad/s",
-            f"phase  = {frame.phase}",
+            f"t        = {frame.t:7.2f} s",
+            f"psi      = {frame.psi_deg:+7.2f} deg",
+            f"psi_dot  = {frame.psi_dot_degs:+7.2f} deg/s",
+            f"I_motor  = {i_now:7.3f} A",
+            f"axle RPM = {axle_rpm:7.1f}",
+            f"phase    = {frame.phase}",
         ]))
         self._psi_dot_actor.SetInput(
             f"psi_dot = {frame.psi_dot_degs:+.2f} deg/s"
@@ -758,27 +772,28 @@ def play(frames: List[TorqueTelemetryFrame],
             tau_motor   = 0.293 * max(0.0, thr - om_motor / 105.1)
             q_motor     = 1.818 * tau_motor
             q_bearing   = 0.005 * om
-            V_BAT     = 15.2
-            KV_RAD    = 66.0 * math.pi / 30.0   # rad/s per volt
-            R_MOTOR   = 7.5                       # Ω
-            v_applied = thr * V_BAT               # V — what ESC puts on the coils
-            v_backemf = om_motor / KV_RAD         # V — back-EMF at current speed
-            i_motor   = max(0.0, (v_applied - v_backemf) / R_MOTOR)  # A
-            p_motor   = v_applied * i_motor        # W
+            # DSHOT telemetry chain: eRPM → RPM → axle RPM → current → torque
+            v_applied = thr * _V_BAT
+            v_backemf = om_motor / _KV_RAD
+            i_motor   = max(0.0, (v_applied - v_backemf) / _R_MOTOR)
+            p_motor   = v_applied * i_motor
+            e_rpm     = om_motor * 60.0 / (2.0 * math.pi) * _POLE_PAIRS
+            mech_rpm  = e_rpm / _POLE_PAIRS
+            axle_rpm  = mech_rpm / _GEAR_RATIO
 
             _sensor_actor.SetInput("\n".join([
-                "sent to ArduPilot",
-                f" gyro z   = {-pd_rad:+.3f} rad/s",
-                f" accel z  = {-9.81:.2f} m/s²",
-                f" yaw (NED)= {-psi_rad:+.3f} rad",
-                "motor (ESC output)",
-                f" PWM      = {pwm_ch4:4d} us",
-                f" V_applied= {v_applied:6.2f} V  ({thr*100:.1f}%)",
-                f" V_backemf= {v_backemf:6.2f} V",
-                f" I_motor  = {i_motor:6.3f} A",
-                f" P_motor  = {p_motor:6.2f} W",
-                f" omega_m  = {om_motor:.1f} rad/s",
-                f" Q_net    = {q_bearing-q_motor:+.4f} Nm",
+                "gyro (body frame, NED)",
+                f" gyro_z = {-pd_rad:+.3f} rad/s",
+                "DSHOT telemetry  ESC->FC",
+                f" eRPM   = {e_rpm:8.0f}",
+                f" RPM    = {mech_rpm:8.1f}  mech",
+                f" axle   = {axle_rpm:8.1f}  rpm",
+                f" I      = {i_motor:8.3f}  A",
+                f" P      = {p_motor:8.2f}  W",
+                "hub torques",
+                f" Q_bear = {q_bearing:+.4f}  Nm",
+                f" Q_mot  = {-q_motor:+.4f}  Nm",
+                f" Q_net  = {q_bearing-q_motor:+.4f}  Nm",
             ]))
         else:
             wall_t0[0] = t_frame_start

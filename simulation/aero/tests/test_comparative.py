@@ -1,21 +1,20 @@
 """
 test_comparative.py — Cross-model comparison tests.
 
-These tests compare all five models against each other to verify:
+These tests compare all four models against each other to verify:
   1. Agreement on fundamental outputs (signs, directions, order of magnitude)
   2. Documented differences between model families
   3. Model-specific features that should differ by design
 
 Model taxonomy
 --------------
-Lumped-BEM (no azimuth integration — empirical cyclic + H-force):
-  RotorAero       — baseline, strip BEM
+Lumped-BEM (no azimuth integration):
   GlauertStateBEM — strip BEM + Glauert inflow-state corrections
 
 Per-blade azimuth-integrated (natural cyclic + H-force):
   DeSchutterAero  — vectorised per-blade strip theory
   PrandtlBEM      — DeSchutterAero + Prandtl tip/root loss
-  SkewedWakeBEM   — DeSchutterAero + Prandtl + Coleman skewed wake
+  SkewedWakeBEM   — DeSchutterAero + Prandtl + Coleman skewed wake (production)
 
 Expected ordering (at design point, positive collective):
   Tip-loss models produce less thrust: PrandtlBEM ≤ DeSchutterAero  (Prandtl lowers tip)
@@ -40,7 +39,7 @@ from _helpers import (
     DESIGN_BODY_Z, DESIGN_OMEGA_EQ,
 )
 import rotor_definition as rd
-from aero import RotorAero, DeSchutterAero
+from aero import DeSchutterAero
 from aero_prandtl_bem    import PrandtlBEM
 from aero_skewed_wake    import SkewedWakeBEM
 from aero_glauert_states import GlauertStateBEM

@@ -116,8 +116,3 @@ wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'
 
 See `CLAUDE.md` in the repo root for full Docker setup and test commands.
 
----
-
-## MBDyn
-
-MBDyn was the original physics engine. It has been replaced by `dynamics.py` (Python RK4). The integration is documented in `simulation/mbdyn_reference.md` for future restoration if higher fidelity is needed (multi-body rotor, flexible tether, explicit blade bodies, etc.).

@@ -7,10 +7,6 @@
 # Python — always LF
 *.py text eol=lf
 
-# MBDyn input files — always LF (parsed on Linux)
-*.mbd text eol=lf
-*.set text eol=lf
-*.c81 text eol=lf
 
 # Markdown and text docs
 *.md  text eol=lf

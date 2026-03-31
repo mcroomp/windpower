@@ -146,21 +146,23 @@ computation.  The Pixhawk has no knowledge of tension.
 
 ### Design principles
 
-**Natural orbit is free.** `Mode_RAWES` tracks the tether direction at 400 Hz
-without planner involvement.  The planner only intervenes to request a specific
-disk orientation.
+**Natural orbit is free.** Lua orbit-tracking tracks the tether direction at
+50 Hz without planner involvement.  The planner only intervenes to request a
+specific disk orientation.
 
 **Inner loops stay on the Pixhawk.** Attitude tracking (cyclic), body_z
-slewing, and counter-torque control run at 400 Hz inside `Mode_RAWES`.
-The planner sends the collective directly; the Pixhawk executes it.
+slewing, and counter-torque control run inside Lua scripts on the Pixhawk at
+50–100 Hz.  No custom firmware is required — both scripts run on top of stock
+ACRO_Heli mode.  The planner sends the collective directly; the Pixhawk
+executes it.
 
 **Winch is on the ground.** The Pixhawk is never involved in winch control.
 
 **Thrust field = normalized collective.** The `thrust` field of
 `SET_ATTITUDE_TARGET` carries a normalized collective [0..1] computed by the
-ground PI.  `Mode_RAWES` passes it directly to `set_throttle_out()` — no
-tension awareness, no conversion, no PI on the Pixhawk.  This is structurally
-identical to a pilot's throttle stick in ACRO mode.
+ground PI.  The Lua flight script forwards this directly to Ch3 RC override —
+no tension awareness, no conversion, no PI on the Pixhawk.  This is
+structurally identical to a pilot's throttle stick in ACRO mode.
 
 ---
 
@@ -362,362 +364,276 @@ t=60s:  → Pixhawk:          attitude_q=[1,0,0,0] (identity),
 
 ---
 
-## 7. Mode_RAWES Firmware
+## 7. Lua Implementation
 
-### 7.1 Relationship to ACRO_Heli
+No custom firmware is required.  RAWES flight control runs as two Lua scripts
+loaded by ArduPilot's scripting subsystem (`SCR_ENABLE = 1`) on top of stock
+ACRO_Heli mode.  ACRO_Heli already provides the swashplate mixing, inner rate
+PIDs, spool-state guards, and arming infrastructure — exactly what a custom
+`ModeRAWES` would inherit from `ModeAcro_Heli` if written in C++.  The Lua
+scripts add only the RAWES-specific logic.
 
-`ModeRAWES` **subclasses** `ModeAcro_Heli` directly.  The inheritance chain is:
+### 7.1 Why Lua instead of C++
+
+| Property | Custom C++ firmware | Lua scripts |
+|---|---|---|
+| Requires firmware fork | Yes — maintain separate branch | No — stock ArduPilot |
+| Field update | Reflash Pixhawk via USB/DFU | Drop files onto SD card via MAVFtp |
+| Reuse ACRO rate PIDs | Via class inheritance | Via RC override injection |
+| Rate | 400 Hz in main loop | 50 Hz (adequate — orbit ≈ 0.2 rad/s) |
+| Simulation validation | Requires C++ ↔ Python mapping | Python mediator already implements identical algorithm |
+
+### 7.2 Two-Script Architecture
 
 ```
-Mode → ModeAcro → ModeAcro_Heli → ModeRAWES
+rawes_flight.lua                    rawes_yaw_trim.lua
+──────────────────────────────────  ─────────────────────────────────────
+Orbit tracking (capture + track)    Motor RPM: battery:voltage() [SITL]
+Rate-limited body_z slerp             or RPM:get_rpm(0) [hardware]
+Cyclic P loop (body_z error→rate)   trim = f(RPM, V_bat)
+Ch1/Ch2 RC override (roll/pitch)    yaw_corr = −Kp × gyro:z()
+Ch3 RC override (collective)        Ch4 RC override (DDFP tail)
+50 Hz                               100 Hz
 ```
 
-`run()` is overridden with two substitutions; everything else is inherited:
+Both scripts run concurrently.  Neither requires a firmware change or custom
+mode.
 
-| ACRO_Heli `run()` | ModeRAWES `run()` |
+### 7.3 Operating Mode
+
+**ACRO_Heli** (mode number 6 for Copter).
+
+ACRO maps RC channel inputs to body-frame rate commands:
+
+| Channel | Function |
 |---|---|
-| Pilot RC sticks → body-frame rate commands | Orbit-tracking body_z error → body-frame rate commands |
-| Pilot throttle → collective | Ground PI `thrust` field → collective (direct passthrough) |
-| — | Rate-limited slerp for body_z transitions |
+| Ch1 | Roll rate → `ATC_RAT_RLL` PID → swashplate |
+| Ch2 | Pitch rate → `ATC_RAT_PIT` PID → swashplate |
+| Ch3 | Collective (passthrough to swashplate H3-120 mix) |
+| Ch4 | Yaw rate → `ATC_RAT_YAW` PID → GB4008 motor (`H_TAIL_TYPE=4`) |
 
-Spool state guards, `AC_AttitudeControl` rate PIDs, swashplate mixing,
-counter-torque yaw control, and arming infrastructure are all **inherited**
-from `ModeAcro_Heli` — no code needed.
+`rawes_flight.lua` computes desired alignment rates from body_z error and
+injects them as Ch1/Ch2 RC overrides at 50 Hz.  `rawes_yaw_trim.lua` injects
+Ch4 at 100 Hz.
 
-**Firmware complexity: ~120 lines of new C++.**
+### 7.4 Collective (Ch3)
 
-### 7.2 The 400 Hz Loop
+The ground PI computes normalized collective [0..1] from the load cell.  It
+sends this to the Pixhawk via `RC_CHANNELS_OVERRIDE, Ch3` (mapped
+[0..1] → [1000..2000] µs).  `rawes_flight.lua` passes the received value
+through unchanged, or applies its own Ch3 override if it has received a
+`SET_ATTITUDE_TARGET.thrust` via a MAVLink message handler.
 
-```
-Each step:
+`RC_CHANNELS_OVERRIDE` (direct RC mapping) is simpler for initial testing.
+`SET_ATTITUDE_TARGET` gives finer-grained phase intent from the planner.
 
-1. Spool state guards (inherited behaviour):
-       if SHUT_DOWN or GROUND_IDLE: ModeAcro_Heli::run(); return;
+### 7.5 Phase Switching (Reel-in Tilt)
 
-2. Hold last COMMAND packet if no new one arrived.
-   Planner timeout (2 s): snap body_z_eq back to bz_tether (natural orbit).
+For reel-in the planner sends `SET_ATTITUDE_TARGET` with a non-identity
+quaternion.  `rawes_flight.lua` decodes `body_z_target` from it and
+rate-limits the slerp from natural orbit toward the target at
+`SCR_USER2` rad/s.  On a 2-second planner timeout the script automatically
+reverts to natural orbit.
 
-3. Orbit tracking:
-       Rotate initial equilibrium body_z by azimuthal change since free-flight start
-       → bz_tether (current tether-aligned target).
+### 7.6 What ACRO_Heli Provides Free
 
-4. Attitude setpoint:
-       if attitude_q == identity:
-           body_z_eq = bz_tether              ← natural orbit, planner silent
-       else:
-           body_z_target = quat_apply(attitude_q, [0,0,1])
-           body_z_eq = slerp_rate_limited(body_z_eq_prev, body_z_target,
-                                          RAWES_BZ_SLEW, dt)
-
-5. Cyclic — body_z error → body-frame rate commands:
-       error = cross(body_z_now, body_z_eq)   (world frame)
-       err_body = R_body_to_ned.T × error
-       attitude_control->input_rate_bf_roll_pitch_yaw_rads(
-           kp × err_body.x, kp × err_body.y, 0.0)
-       // AC_AttitudeControl rate PIDs + D-term damping handle the rest
-
-6. Collective — direct passthrough:
-       // thrust [0..1] = normalized collective from ground PI; no conversion needed
-       attitude_control->set_throttle_out(_thrust_cmd, false, throttle_filt)
-
-7. Counter-torque — null assembly yaw rate:
-       // yaw rate command = 0.0 → ATC_RAT_YAW drives GB4008 motor via H_TAIL_TYPE=4
-       // (zero yaw rate already sent in step 4 above)
-       // AP_ESC_Telem streams ESC_STATUS automatically — no send_state() needed
-```
-
-### 7.3 What ArduPilot Provides Free
-
-**Inherited from `ModeAcro_Heli` (zero new code):**
+Because the Lua scripts run inside ACRO_Heli mode, ArduPilot supplies:
 
 | Need | Mechanism |
 |---|---|
-| Spool state guards (`SHUT_DOWN`, `GROUND_IDLE`) | `ModeAcro_Heli::run()` called for guard cases |
-| Rate PIDs + swashplate H3/H4 mix | `AC_AttitudeControl::input_rate_bf_roll_pitch_yaw_rads()` |
-| Collective → PWM | `AC_AttitudeControl::set_throttle_out()` |
-| Counter-torque yaw (GB4008 via `H_TAIL_TYPE=4`) | `ATC_RAT_YAW` PID |
-| Arming infrastructure | `ModeAcro_Heli::allows_arming()` base (overridden to restrict to MAVLink) |
-| Mode registration boilerplate | Inherited `Mode` framework |
-| AHRS attitude + rates | `ahrs.get_rotation_body_to_ned()`, `ahrs.get_gyro()` |
-| EKF position | `inertial_nav.get_position_neu_m()` |
-| ESC telemetry (AM32 eRPM) | `AP::esc_telem().get_rpm()` |
-| `LOCAL_POSITION_NED` telemetry | Already on stream — planner reads directly |
+| Spool state guards (`SHUT_DOWN`, `GROUND_IDLE`) | ACRO_Heli refuses RC input; servos safe |
+| Rate PIDs + swashplate H3-120 mix | Ch1/Ch2 overrides feed directly into `ATC_RAT_RLL/PIT` |
+| Collective → PWM | Ch3 override is throttle passthrough |
+| Counter-torque yaw (`ATC_RAT_YAW` → GB4008) | `H_TAIL_TYPE=4`; `rawes_yaw_trim.lua` owns Ch4 |
+| Arming infrastructure | Standard ACRO arming; arm via MAVLink or GCS |
+| AHRS + EKF | `ahrs:*` Lua bindings available in any mode |
+| `ESC_STATUS`, `LOCAL_POSITION_NED` telemetry | Standard ArduPilot streams; planner reads directly |
 
-### 7.4 What Must Be Built
+### 7.7 What the Lua Scripts Build
 
-| Component | Python source | Lines | Notes |
-|-----------|--------------|-------|-------|
-| Class declaration + overrides | — | ~20 | Inherits from `ModeAcro_Heli`; only override `run()`, `is_autopilot()`, etc. |
-| Orbit tracking (`compute_bz_tether`) | `controller.py::orbit_tracked_body_z_eq()` | ~25 | Pure geometry |
-| Rate-limited slerp | `mediator.py` blend loop | ~20 | Firmware owns timing |
-| Cyclic rate command | `controller.py::compute_swashplate_from_state()` | ~15 | P gain × body_z error → rate |
-| Tension PI | `controller.py::TensionController` | — | **Ground-side** only; not on Pixhawk |
-| Counter-torque | `sensor.py::SpinSensor` | ~15 | `ATC_RAT_YAW` → GB4008 via `H_TAIL_TYPE=4` |
-| MAVLink COMMAND receiver | — | ~15 | Parse `SET_ATTITUDE_TARGET` |
-| ENU ↔ NED helpers | `sensor.py` | ~5 | Two inline functions |
-| **Total** | | **~115 lines** | |
+| Component | Script | Python equivalent |
+|---|---|---|
+| Orbit tracking | `rawes_flight.lua` | `controller.py::orbit_tracked_body_z_eq()` |
+| Rate-limited slerp | `rawes_flight.lua` | `mediator.py` blend loop |
+| Cyclic P loop (body_z error → rate) | `rawes_flight.lua` | `controller.py::compute_swashplate_from_state()` |
+| Counter-torque feedforward | `rawes_yaw_trim.lua` | `mediator_torque.py` trim compute |
+| Yaw rate correction | `rawes_yaw_trim.lua` | `ATC_RAT_YAW` (Kp correction) |
+
+Tension PI, phase logic, and winch control remain on the ground (trajectory
+planner).  The Pixhawk has no tension awareness.
 
 ---
 
-## 8. Implementation (C++)
+## 8. rawes_flight.lua
 
-### 8.0 `init()` — Anchor Conversion
+### 8.0 Parameters (SCR_USER slots)
 
-```cpp
-bool ModeRAWES::init(bool ignore_checks) {
-    if (!ModeAcro_Heli::init(ignore_checks)) return false;
+| Parameter | SCR_USER | Default | Description |
+|---|---|---|---|
+| `RAWES_KP_CYC` | SCR_USER1 | 1.0 | Cyclic P gain — rad/s per rad of body_z error |
+| `RAWES_BZ_SLEW` | SCR_USER2 | 0.40 | body_z slew rate limit (rad/s) |
+| `RAWES_ANCHOR_N` | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
+| `RAWES_ANCHOR_E` | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
+| `RAWES_ANCHOR_D` | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
 
-    // Convert RAWES_ANCHOR_LAT/LON/ALT parameters to local NED frame.
-    // Hub can be anywhere when mode is entered (ground, hand-launch, mid-air).
-    Location anchor_loc;
-    anchor_loc.lat         = (int32_t)(_anchor_lat.get() * 1.0e7f);
-    anchor_loc.lng         = (int32_t)(_anchor_lon.get() * 1.0e7f);
-    anchor_loc.alt         = (int32_t)(_anchor_alt.get() * 100.0f);  // m → cm
-    anchor_loc.relative_alt = false;
+`SCR_USER6..8` are reserved (future: reel-in tilt angle, gain scheduling).
 
-    Vector3f offset_ned;
-    if (!AP::ahrs().get_relative_position_NED_origin(anchor_loc, offset_ned)) {
-        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "RAWES: EKF origin not set — set RAWES_ANCHOR params");
-        return false;
-    }
-    _anchor_ned = offset_ned;
+Set before flight via MAVLink parameter set or include in a `.parm` file.
+No firmware recompilation needed to change any parameter.
 
-    _eq_captured    = false;
-    _planner_active = false;
-    _thrust_cmd     = 0.5f;
-    return true;
-}
+### 8.1 50 Hz Control Loop
+
+```
+Each step (every 20 ms):
+
+1. Guard: only run in ACRO_Heli (mode 6).  Return early otherwise.
+
+2. Read state:
+       R       ← ahrs:get_rotation_body_to_ned()
+       pos_ned ← ahrs:get_relative_position_NED_origin()
+       anchor  ← Vector3f(SCR_USER3, SCR_USER4, SCR_USER5)
+       diff    ← pos_ned − anchor
+
+3. Capture equilibrium (once, when |diff| ≥ 0.5 m):
+       _bz_eq0   ← R:colz()                  (body_z at capture)
+       _tdir0    ← diff:normalized()          (tether direction at capture)
+       _bz_slerp ← _bz_eq0                   (initialise rate-limited setpoint)
+
+4. Orbit tracking (each step):
+       bz_tether ← diff:normalized()
+       axis  ← _tdir0 × bz_tether
+       angle ← atan2(|axis|, _tdir0 · bz_tether)
+       _bz_orbit ← Rodrigues(_bz_eq0, axis/|axis|, angle)
+
+5. Planner timeout (2 s since last SET_ATTITUDE_TARGET):
+       clear _bz_target → revert to natural orbit
+
+6. Rate-limited slerp:
+       goal      ← _bz_target or _bz_orbit
+       remain    ← acos(_bz_slerp · goal)
+       step      ← min(SCR_USER2 × dt, remain)
+       _bz_slerp ← Rodrigues(_bz_slerp, (_bz_slerp × goal)/|…|, step)
+
+7. Cyclic:
+       err_ned ← R:colz() × _bz_slerp         (world-frame error)
+       err_bx  ← R:colx() · err_ned            (body X component — roll)
+       err_by  ← R:coly() · err_ned            (body Y component — pitch)
+       roll_rate  ← SCR_USER1 × err_bx         (rad/s)
+       pitch_rate ← SCR_USER1 × err_by         (rad/s)
+
+8. RC override (ACRO_RP_RATE deg/s = ±500 µs):
+       scale ← 500 / (ACRO_RP_RATE × π/180)
+       Ch1 PWM ← clamp(1500 + scale × roll_rate,  1000, 2000)
+       Ch2 PWM ← clamp(1500 + scale × pitch_rate, 1000, 2000)
+       rc:set_override(1, ch1); rc:set_override(2, ch2)
 ```
 
-### 8.1 Orbit Tracking
+### 8.2 Key Algorithm Notes
 
-Port of `orbit_tracked_body_z_eq()` from `controller.py`:
+**Orbit tracking** applies the same rotation to `_bz_eq0` that the tether has
+made since equilibrium capture.  This keeps body_z tracking the natural tether
+direction as the hub orbits, with zero control effort during steady orbit.  Port
+of `controller.py::orbit_tracked_body_z_eq()`.
 
-```cpp
-// capture once at free-flight start
-_body_z_eq0_ned  = ahrs.get_rotation_body_to_ned().colz();
-Vector3f pos_ned = inertial_nav.get_position_neu_m();
-pos_ned.z        = -pos_ned.z;                          // NEU → NED
-_tether_dir0_ned = (pos_ned - _anchor_ned).normalized();
+**Rate-limited slerp** rate-limits body_z transitions (identity→tilted during
+reel-in) at `SCR_USER2` rad/s (default 0.40 rad/s).  During steady orbit the
+slerp target moves slowly (orbit angular rate ~0.2 rad/s < 0.40 rad/s slew
+limit), so the slerp stays locked to orbit with no perceptible lag.
 
-// each 400 Hz step
-Vector3f cur_pos_ned = inertial_nav.get_position_neu_m();
-cur_pos_ned.z = -cur_pos_ned.z;                         // NEU → NED
-Vector3f tether_now = (cur_pos_ned - _anchor_ned).normalized();
-const Vector3f axis  = _tether_dir0_ned % tether_now;
-const float    sinth = axis.length();
-const float    costh = _tether_dir0_ned * tether_now;
-if (sinth > 1e-6f) {
-    Quaternion q; q.from_axis_angle(axis / sinth, atan2f(sinth, costh));
-    bz_tether = q * _body_z_eq0_ned;
-}
-```
+**Cyclic P loop** converts body_z error to body-frame roll and pitch rates.
+ACRO's `ATC_RAT_RLL/PIT` inner PIDs supply the rate damping.  Start
+`SCR_USER1 = 0.3` and increase slowly — Kaman flap lag adds phase delay that
+reduces the stability margin vs. direct blade pitch.
 
-### 8.2 Rate-Limited Slerp
+**ACRO_RP_RATE** (ArduPilot parameter, default 360 deg/s) sets the full-stick
+rate.  The `scale` factor maps the computed rate command to PWM so the ACRO PID
+sees the correct physical rate.  If `ACRO_RP_RATE` is changed, update the
+constant in `rawes_flight.lua`.
 
-```cpp
-const float dot    = constrain_float(_body_z_eq_ned * _body_z_target_ned, -1.0f, 1.0f);
-const float remain = acosf(dot);
-const float step   = MIN(_body_z_slew_rate_rads.get() * dt, remain);
-if (remain > 1e-4f) {
-    const Vector3f axis = (_body_z_eq_ned % _body_z_target_ned).normalized();
-    Quaternion q; q.from_axis_angle(axis, step);
-    _body_z_eq_ned = q * _body_z_eq_ned;
-}
-```
+### 8.3 Full Script
 
-### 8.3 Cyclic Rate Command
-
-```cpp
-const Vector3f body_z_now = ahrs.get_rotation_body_to_ned().colz();
-const Vector3f err_ned    = body_z_now % _body_z_eq_ned;
-const Vector3f err_body   = ahrs.get_rotation_body_to_ned().transposed() * err_ned;
-const float    kp         = _kp_cyclic.get();
-attitude_control->input_rate_bf_roll_pitch_yaw_rads(kp * err_body.x,
-                                                     kp * err_body.y,
-                                                     0.0f);
-```
-
-### 8.4 Collective Passthrough
-
-The tension PI runs on the ground (trajectory planner).  The Pixhawk receives
-the PI output as a normalized collective in the `thrust` field and passes it
-directly to `set_throttle_out()`:
-
-```cpp
-// _thrust_cmd is updated by set_command() whenever SET_ATTITUDE_TARGET arrives
-attitude_control->set_throttle_out(_thrust_cmd, false, g.throttle_filt);
-```
-
-### 8.5 Counter-Torque Motor and omega_spin
-
-The Pixhawk IMU is mounted on the stationary assembly.  Its gyro Z-axis
-measures co-rotation rate directly — the quantity the counter-torque loop must
-null.  Passing `yaw_rate = 0.0f` in the rate command (step 4 of the loop) causes
-`AC_AttitudeControl` to drive `ATC_RAT_YAW`, which commands the GB4008 motor
-via `H_TAIL_TYPE = 4` (Direct Drive Fixed Pitch).
-
-**Direction:** GB4008 must oppose hub spin direction.  Set `H_TAIL_DIR = 1`
-(reversed) if the default direction is wrong — verify on bench before first
-powered test.
-
-**omega_spin measurement** — ArduPilot streams `ESC_STATUS` (msg #291) automatically
-from `AP_ESC_Telem` at the configured telemetry rate.  The planner reads
-`ESC_STATUS[RAWES_CTR_ESC].rpm` (mechanical RPM, already divided by pole pairs
-internally by ArduPilot) and applies the gear reduction:
-
-```python
-# Planner-side, no Pixhawk code needed
-omega_spin = esc_status.rpm[RAWES_CTR_ESC] * (2*pi/60) * (44/80)
-```
-
-The 80:44 gear sets the motor operating RPM band (hub 18–35 rad/s → motor
-~33–64 rad/s mechanical) so the AM32 commutates at a useful rate across the
-full spin range.  No `send_state()` function is needed in `Mode_RAWES`.
-
-### 8.6 Class Declaration — `ArduCopter/mode.h`
-
-Inherits from `ModeAcro_Heli`.  Only override what differs:
-
-```cpp
-class ModeRAWES : public ModeAcro_Heli {
-public:
-    using ModeAcro_Heli::ModeAcro_Heli;
-    Number mode_number() const override { return Number::RAWES; }
-
-    void run() override;
-    bool init(bool ignore_checks) override;
-
-    // Autopilot mode — disallow manual arming, require MAVLink/scripting
-    bool is_autopilot()        const override { return true; }
-    bool has_manual_throttle() const override { return false; }
-    bool allows_arming(AP_Arming::Method m) const override {
-        return m == AP_Arming::Method::MAVLINK ||
-               m == AP_Arming::Method::SCRIPTING;
-    }
-
-    void set_command(const Quaternion& attitude_q_enu, float thrust_norm);
-
-protected:
-    const char *name()  const override { return "RAWES"; }
-    const char *name4() const override { return "RAWE"; }
-
-private:
-    void capture_equilibrium();
-    Vector3f compute_bz_tether() const;
-
-    bool     _eq_captured     = false;
-    Vector3f _anchor_ned;                // tether anchor in local NED — set from params at init()
-    Vector3f _body_z_eq0_ned;
-    Vector3f _tether_dir0_ned;
-    Vector3f _body_z_eq_ned;
-    Vector3f _body_z_target_ned;
-    float    _thrust_cmd      = 0.5f;
-    bool     _planner_active  = false;
-    uint32_t _planner_recv_ms = 0;
-
-    AP_Float _kp_cyclic;
-    AP_Float _body_z_slew_rate_rads;
-    AP_Int8  _ctr_esc_idx;
-    AP_Float _anchor_lat;               // deg
-    AP_Float _anchor_lon;               // deg
-    AP_Float _anchor_alt;               // m AMSL
-};
-```
-
-### 8.7 MAVLink Hook — `GCS_MAVLink_Copter.cpp`
-
-```cpp
-// SET_ATTITUDE_TARGET handler:
-if (copter.flightmode == &copter.mode_rawes) {
-    mavlink_set_attitude_target_t pkt;
-    mavlink_msg_set_attitude_target_decode(&msg, &pkt);
-    Quaternion q(pkt.q[0], pkt.q[1], pkt.q[2], pkt.q[3]);
-    copter.mode_rawes.set_command(q, pkt.thrust);
-    return;
-}
-
-// No NAMED_VALUE_FLOAT "tension" handler needed — tension PI runs on the ground.
-```
-
-### 8.8 Parameters
-
-```cpp
-// Parameters.cpp — AP_GROUPINFO (replace XX with next available index)
-AP_GROUPINFO("RAWES_KP_CYC",      XX, ParametersG2, rawes_kp_cyclic,        1.0f),
-AP_GROUPINFO("RAWES_BZ_SLEW",     XX, ParametersG2, rawes_bz_slew_rads,     0.12f),
-AP_GROUPINFO("RAWES_CTR_ESC",     XX, ParametersG2, rawes_ctr_esc_idx,           3),
-AP_GROUPINFO("RAWES_ANCHOR_LAT",  XX, ParametersG2, rawes_anchor_lat,        0.0f),
-AP_GROUPINFO("RAWES_ANCHOR_LON",  XX, ParametersG2, rawes_anchor_lon,        0.0f),
-AP_GROUPINFO("RAWES_ANCHOR_ALT",  XX, ParametersG2, rawes_anchor_alt,        0.0f),
-```
-
-The tension PI gains (`kP`, `kI`), collective range (`col_min_rad`, `col_max_rad`),
-and tension setpoints are **ground-station configuration**, not Pixhawk parameters.
-See `controller.py::TensionController` for defaults (beaupoil_2026 BEM scale).
-
-`RAWES_CTR_ESC = 3` is the DShot output index for the GB4008 motor (0-based).
-Adjust to match hardware wiring.
-
-### 8.9 Mode Registration
-
-```cpp
-// Copter.h:      ModeRAWES mode_rawes;
-// mode.h enum:   RAWES = 35,   // or next available
-// mode.cpp:      case Mode::Number::RAWES: return &mode_rawes;
-```
+See `simulation/scripts/rawes_flight.lua`.
 
 ---
 
-## 9. Files Changed
+## 9. rawes_yaw_trim.lua (Counter-Torque)
 
-| File | Change | Lines |
-|------|--------|-------|
-| `ArduCopter/mode_rawes.cpp` | **New** — subclass of `ModeAcro_Heli` | ~95 |
-| `ArduCopter/mode.h` | Class declaration (inherits most from `ModeAcro_Heli`) + RAWES enum | ~35 |
-| `ArduCopter/Parameters.h` | 3 `rawes_*` fields | ~3 |
-| `ArduCopter/Parameters.cpp` | Register 3 parameters | ~15 |
-| `ArduCopter/Copter.h` | `ModeRAWES mode_rawes` | 1 |
-| `ArduCopter/mode.cpp` | `mode_from_mode_num()` entry | ~3 |
-| `ArduCopter/GCS_MAVLink_Copter.cpp` | `SET_ATTITUDE_TARGET` RAWES branch | ~10 |
-| **Total** | | **~162 lines** |
+The counter-torque script is already validated (15/15 tests pass).  Full
+documentation in `simulation/torque/README.md`.  Summary:
 
----
+```
+motor_rpm  ← battery:voltage(0)   [SITL: mediator encodes RPM as voltage]
+           or RPM:get_rpm(0)       [hardware: DSHOT telemetry from AM32]
 
-## 10. Simulation Mapping
+trim       = tau_bearing / (tau_stall × (1 − ω_motor/ω₀))
+           ≈ 0.747 at nominal 28 rad/s axle speed
 
-Every firmware component maps to existing Python simulation code:
+yaw_corr   = −Kp_yaw × gyro:z()   [Kp_yaw = 0.001]
 
-| Mode_RAWES firmware | Python equivalent | File |
-|---------------------|------------------|------|
-| `capture_equilibrium()` | `_body_z_eq0`, `_tether_dir0` capture at free-flight start | `mediator.py` |
-| `compute_bz_tether()` | `orbit_tracked_body_z_eq()` | `controller.py` |
-| Rate-limited slerp | Rate-limited slerp in mediator inner loop | `mediator.py` |
-| Cyclic rate command + AC_AttitudeControl | `compute_swashplate_from_state()` + `h3_inverse_mix()` | `controller.py`, `swashplate.py` |
-| `set_throttle_out(_thrust_cmd)` | `TensionController` PI output → normalized collective → `trajectory.step()` thrust | `controller.py`, `trajectory.py` |
-| `set_command()` | `trajectory.step()` return value (`attitude_q`, `thrust`) | `trajectory.py` |
-| omega_spin (planner reads ESC_STATUS) | `SpinSensor.measure()` — models AM32 eRPM jitter via Gaussian σ | `sensor.py` |
-| Counter-torque | Not modelled (single-body; internal force cancels) | — |
-| STATE (pos, vel, att, ESC_STATUS) | Standard ArduPilot streams; planner reads directly | `mediator.py` |
+throttle   = clamp(trim + yaw_corr, 0, 1)
+Ch4 PWM    ← 1000 + throttle × 1000
+rc:set_override(4, pwm)
+```
+
+The `trim` feedforward handles steady-state bearing drag.  The `Kp_yaw`
+correction handles transient disturbances.  ArduPilot's `ATC_RAT_YAW` is
+still active and provides additional correction on top of the Lua trim.
 
 ---
 
-## 11. Known Gaps and Risks
+## 10. Files
+
+| File | Status | Description |
+|------|--------|-------------|
+| `simulation/scripts/rawes_flight.lua` | **New** | Orbit tracking + cyclic controller (this document's §8) |
+| `simulation/torque/scripts/rawes_yaw_trim.lua` | Existing | Counter-torque feedforward (validated) |
+| `simulation/torque/scripts/lua_defaults.parm` | Existing | SITL param overrides for Lua tests |
+
+To deploy to hardware: copy both `.lua` files to `APM/scripts/` on the SD card.
+
+---
+
+## 11. Simulation Mapping
+
+| Lua component | Python equivalent | File |
+|---|---|---|
+| `rawes_flight.lua` equilibrium capture | `_body_z_eq0`, `_tether_dir0` at free-flight start | `mediator.py` |
+| `rawes_flight.lua` orbit tracking | `orbit_tracked_body_z_eq()` | `controller.py` |
+| `rawes_flight.lua` rate-limited slerp | Rate-limited slerp in mediator inner loop | `mediator.py` |
+| `rawes_flight.lua` cyclic P loop | `compute_swashplate_from_state()` | `controller.py` |
+| ACRO `ATC_RAT_RLL/PIT` (rate damping) | `RatePID(kp=2/3)` inner loop | `controller.py` |
+| Ch3 collective (from ground RC override) | `TensionController` PI output → normalized collective | `controller.py` |
+| `rawes_yaw_trim.lua` trim + correction | `mediator_torque.py` compute_trim + Kp | `mediator_torque.py` |
+| `ESC_STATUS` rpm (planner reads) | `SpinSensor.measure()` — models AM32 eRPM jitter | `sensor.py` |
+| Standard telemetry streams | ArduPilot sends natively; planner reads | `mediator.py` |
+
+---
+
+## 12. Known Gaps and Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
-| `H_PHANG` cyclic phase error | Medium — axis coupling | Calibrate in SITL: compare firmware orbit tracking to Python `orbit_tracked_body_z_eq()` output |
-| Kaman flap lag | Medium — phase margin loss | Detune `RAWES_KP_CYC`; AC_AttitudeControl D-term damps oscillation |
-| Load cell hardware (tension feedback) | **High — critical path** | Validate ground PI in simulation (`TensionController`) before hardware; add load cell to winch before flight |
-| Orbit tracking before first tether tension | Medium — no tether direction during free climb | Planner sends explicit `attitude_q`; `_eq_captured` guard prevents orbit tracking until EKF position valid |
-| Planner timeout during reel-in tilt | Medium — loss of tilt command | 2 s timeout → snap back to `bz_tether` (natural orbit fallback) |
-| ENU/NED frame errors | High — subtle sign inversions | Single `enu_to_ned()` helper; test against Python `T_ENU_NED` from `frames.py` |
-| `RAWES_KP_CYC` tuning | Medium — oscillation on first flight | Start at 0.3, increase slowly; compare to Python closed-loop in SITL first |
-| GB4008 direction (H_TAIL_DIR) | Medium — yaw runaway if wrong | Verify on bench: with hub spinning CCW (viewed from above), motor must apply CW torque |
+| `H_PHANG` cyclic phase error | Medium — axis coupling | Calibrate in SITL: compare Lua orbit tracking output to Python `orbit_tracked_body_z_eq()` |
+| Kaman flap lag | Medium — phase margin loss | Start `SCR_USER1 (KP_CYC) = 0.3`; increase slowly; D-term in `ATC_RAT_RLL/PIT` damps oscillation |
+| Load cell hardware (tension feedback) | **High — critical path** | Validate ground PI in simulation before hardware; load cell must be on winch before flight |
+| Orbit tracking before first tether tension | Medium — no tether direction during free climb | Equilibrium capture guard (`|diff| < 0.5 m`) prevents tracking until tether is taut |
+| Planner timeout during reel-in tilt | Low — automatic fallback | 2 s timeout snaps slerp goal back to `_bz_orbit` (natural orbit) |
+| `rc:set_override()` API version | Low — stock ArduPilot 4.5+ | Verify binding name on target firmware; fallback: `SRV_Channels:set_output_pwm()` with H3-120 mix in Lua |
+| `ACRO_RP_RATE` mismatch | Medium — wrong rate scaling | Constant in `rawes_flight.lua` must match ArduPilot `ACRO_RP_RATE` parameter |
+| GB4008 direction (`H_TAIL_DIR`) | Medium — yaw runaway | Verify on bench: hub spinning CCW → motor must apply CW torque |
 
 ---
 
-## 12. ArduPilot Configuration
+## 13. ArduPilot Configuration
+
+### Scripting
+
+| Parameter | Value | Reason |
+|---|---|---|
+| `SCR_ENABLE` | 1 | Enable Lua scripting subsystem |
+| `SCR_USER1` | 1.0 | `RAWES_KP_CYC` — cyclic P gain; start at 0.3 |
+| `SCR_USER2` | 0.40 | `RAWES_BZ_SLEW` — body_z slew rate (rad/s) |
+| `SCR_USER3..5` | 0.0 | Anchor N/E/D offsets (m) — set to anchor NED from EKF origin |
 
 ### Swashplate and RSC
 
@@ -725,9 +641,9 @@ Every firmware component maps to existing Python simulation code:
 |-----------|-------|--------|
 | `FRAME_CLASS` | 11 (Heli) | Traditional helicopter frame |
 | `H_SWASH_TYPE` | H3-120 | 3-servo lower ring at 120° driving 4 push-rods |
-| `H_RSC_MODE` | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete; GB4008 handles anti-rotation |
-| `H_PHANG` | TBD | Cyclic phase angle — measure empirically: step cyclic, observe disk tilt axis |
-| `H_COL_MAX` | TBD | Limit collective to keep flap loads in linear regime |
+| `H_RSC_MODE` | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete |
+| `H_PHANG` | TBD | Cyclic phase angle — step cyclic in SITL, measure disk tilt axis |
+| `H_COL_MAX` | TBD (≈0.10 rad) | Limit collective to keep flap loads in linear regime |
 | `H_CYC_MAX` | TBD | Limit cyclic amplitude to ≤15° rotor tilt |
 | `SERVO1_FUNCTION` | 33 (Motor1 / S1) | Swashplate servo S1 |
 | `SERVO2_FUNCTION` | 34 (Motor2 / S2) | Swashplate servo S2 |
@@ -736,12 +652,9 @@ Every firmware component maps to existing Python simulation code:
 | `ATC_RAT_PIT_IMAX` | 0 | Same |
 | `ATC_RAT_YAW_IMAX` | 0 | Same |
 | `ACRO_TRAINER` | 0 | Disable leveling trainer (equilibrium is 65° from vertical) |
+| `ACRO_RP_RATE` | 360 | Must match constant in `rawes_flight.lua` |
 
 ### GB4008 Anti-Rotation Motor
-
-The GB4008 keeps the electronics assembly stationary via the Pixhawk IMU measuring any rotation and the ESC nulling it. The 80:44 gear sets motor RPM to `(80/44) × omega_rotor` to keep the motor in its efficient RPM band.
-
-**Key difference from a tail rotor:** Motor speed is gear-locked to rotor speed. PWM controls motor *torque* (ESC current), not speed. The `ATC_RAT_YAW_*` PID transfer function therefore differs from a standard helicopter tail.
 
 | Parameter | Value | Reason |
 |-----------|-------|--------|
@@ -749,28 +662,29 @@ The GB4008 keeps the electronics assembly stationary via the Pixhawk IMU measuri
 | `SERVO4_FUNCTION` | 36 (Motor4) | GB4008 ESC |
 | `SERVO4_MIN` | 1000 | ESC disarm |
 | `SERVO4_MAX` | 2000 | ESC maximum |
-| `SERVO4_TRIM` | ~1150 | Idle torque at rest; increase if assembly drifts |
-| `ATC_RAT_YAW_P` | 0.20 | Starting value |
+| `SERVO4_TRIM` | ~1150 | Idle torque at rest |
+| `ATC_RAT_YAW_P` | 0.20 | Starting value (trim handles steady state) |
 | `ATC_RAT_YAW_I` | 0.05 | Absorbs steady-state bearing friction |
 | `ATC_RAT_YAW_D` | 0.0 | Start at zero |
-| `H_COL2YAW` | TBD | Feedforward: collective changes alter rotor drag → GB4008 must compensate |
+| `H_COL2YAW` | TBD | Feedforward: collective changes alter drag → GB4008 must compensate |
 
-### Kaman Flap Lag — ArduPilot Implications
+### Kaman Flap Lag
 
-Standard helicopter: swashplate moves → blade pitch changes immediately.
-
-RAWES: swashplate moves → flap deflects → aerodynamic moment builds → blade elastically twists → pitch changes.
-
-This second-order inner-loop lag means ArduPilot's attitude PID sees additional phase delay. The outer loop (`ATC_RAT_RLL/PIT_P/I/D`) must be significantly detuned or it will oscillate. `RAWES_KP_CYC` (cyclic rate gain) is the primary tuning lever; start at 0.3 and increase slowly.
+RAWES blade pitch changes via aerodynamic moment on the flap, not direct
+mechanical linkage.  This adds a second-order lag in the cyclic response.
+`SCR_USER1 (KP_CYC)` is the primary tuning lever — start at 0.3 and increase
+slowly.  The `ATC_RAT_RLL/PIT_D` term provides damping across the lag.
 
 ---
 
-## 13. References
+## 14. References
 
-- `ArduCopter/mode_acro_heli.cpp` — structural template
+- `simulation/scripts/rawes_flight.lua` — orbit tracking + cyclic controller
+- `simulation/torque/scripts/rawes_yaw_trim.lua` — counter-torque feedforward
+- `simulation/torque/README.md` — full counter-torque documentation and test results
 - `simulation/controller.py` — `orbit_tracked_body_z_eq()`, `compute_swashplate_from_state()`, `TensionController`
 - `simulation/mediator.py` — rate-limited slerp, STATE/COMMAND packet assembly
 - `simulation/sensor.py` — `SpinSensor` (omega_spin noise model)
 - [physical_design.md](../physical_design.md) — swashplate geometry, servo specs, power architecture
 - ArduPilot Traditional Helicopter docs — https://ardupilot.org/copter/docs/traditional-helicopter-connecting-apm.html
-- ArduPilot Tail Rotor Setup — https://ardupilot.org/copter/docs/traditional-helicopter-tailrotor-setup.html
+- ArduPilot Lua scripting API — https://ardupilot.org/dev/docs/lua-scripts.html

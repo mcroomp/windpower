@@ -38,6 +38,7 @@ Controls (interactive mode):
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -87,7 +88,7 @@ ANCHOR    = np.zeros(3)
 # ---------------------------------------------------------------------------
 COL_HUB      = "#d0d0d0"   # light grey
 COL_DISK     = "#4488ff"   # blue (semi-transparent)
-COL_BLADE    = "#ffffff"   # white
+COL_BLADES   = ["#FF7043", "#4DD0E1", "#FFD54F", "#CE93D8"]  # deep-orange, cyan, amber, lavender
 COL_TETHER   = "#ff8800"   # orange
 COL_ANCHOR   = "#ff3300"   # red
 COL_BODY_Z   = "#00ff44"   # green  — current axle
@@ -227,6 +228,66 @@ def _human_figure(x: float = 3.0, y: float = 2.0) -> pv.PolyData:
     return pv.merge(parts)
 
 
+def _tree(x: float, y: float, height: float = 5.0, seed: int = 0) -> pv.PolyData:
+    """
+    Simple conifer: brown trunk cylinder + two stacked green cones.
+    ``seed`` offsets the proportions slightly for variety.
+    """
+    rng    = (seed * 7 + 13) % 10
+    h      = height * (0.85 + rng * 0.03)
+    r_base = h * 0.18
+    trunk_h = h * 0.30
+    parts  = [
+        pv.Cylinder(center=(x, y, trunk_h / 2), direction=(0, 0, 1),
+                    radius=h * 0.04, height=trunk_h, resolution=8),
+        pv.Cone(center=(x, y, trunk_h + h * 0.30), direction=(0, 0, 1),
+                height=h * 0.55, radius=r_base, resolution=12),
+        pv.Cone(center=(x, y, trunk_h + h * 0.52), direction=(0, 0, 1),
+                height=h * 0.42, radius=r_base * 0.75, resolution=12),
+    ]
+    return pv.merge(parts)
+
+
+def _mountain(cx: float, cy: float, radius: float, height: float,
+              n_faces: int = 6) -> pv.PolyData:
+    """
+    Irregular mountain silhouette: a jagged cone built from a polygon base.
+    ``n_faces`` sets the number of flanks (5-8 gives a good rocky look).
+    """
+    import math as _math
+    pts   = [[cx, cy, 0.0]]   # apex-ish at top; build from base up
+    faces_list = []
+
+    # Base ring with slight radial jitter
+    base = []
+    for i in range(n_faces):
+        a   = 2.0 * _math.pi * i / n_faces
+        r   = radius * (0.8 + 0.4 * ((i * 31 + 7) % 10) / 10.0)
+        base.append([cx + r * _math.cos(a), cy + r * _math.sin(a), 0.0])
+
+    # Summit jitter
+    summit = [cx + radius * 0.08 * (((n_faces * 3) % 5) - 2),
+              cy + radius * 0.05 * (((n_faces * 7) % 5) - 2),
+              height * (0.88 + 0.12 * ((n_faces * 13) % 10) / 10.0)]
+
+    all_pts = base + [summit]
+    n_base  = len(base)
+    summit_i = n_base
+
+    triangles = []
+    for i in range(n_base):
+        j = (i + 1) % n_base
+        triangles += [3, i, j, summit_i]   # side triangle
+    # Base cap
+    for i in range(1, n_base - 1):
+        triangles += [3, 0, i, i + 1]
+
+    mesh = pv.PolyData()
+    mesh.points = np.array(all_pts, dtype=float)
+    mesh.faces  = np.array(triangles, dtype=int)
+    return mesh
+
+
 def _ground_grid(extent: float = 200, spacing: float = 10) -> pv.PolyData:
     """
     Line grid on the z=0 plane, centred on the anchor.
@@ -313,6 +374,88 @@ def _drop_line(pos_enu: np.ndarray, dot_spacing: float = 1.5) -> pv.PolyData:
     return pv.PolyData(pts)
 
 
+def _lerp_frame(f1, f2, alpha: float):
+    """
+    Linearly interpolate between two TelemetryFrames.
+
+    alpha=0 → f1,  alpha=1 → f2.  Rotation matrices are lerp-then-renormalised
+    (Gram-Schmidt on the first two columns), which is accurate for the small
+    inter-frame angles at 20 Hz telemetry.
+    """
+    from viz3d.telemetry import TelemetryFrame
+    a = float(np.clip(alpha, 0.0, 1.0))
+    b = 1.0 - a
+
+    # Rotation: linear interpolation of columns, re-orthogonalise
+    R = b * f1.R + a * f2.R
+    c0 = R[:, 0] / max(np.linalg.norm(R[:, 0]), 1e-12)
+    c1 = R[:, 1] - np.dot(R[:, 1], c0) * c0
+    c1 /= max(np.linalg.norm(c1), 1e-12)
+    c2 = np.cross(c0, c1)
+    R_out = np.column_stack([c0, c1, c2])
+
+    bzeq = None
+    if f1.body_z_eq is not None and f2.body_z_eq is not None:
+        v = b * f1.body_z_eq + a * f2.body_z_eq
+        n = np.linalg.norm(v)
+        bzeq = v / n if n > 1e-9 else f1.body_z_eq.copy()
+
+    return TelemetryFrame(
+        t                  = b * f1.t + a * f2.t,
+        pos_enu            = b * f1.pos_enu + a * f2.pos_enu,
+        R                  = R_out,
+        omega_spin         = b * f1.omega_spin + a * f2.omega_spin,
+        tether_tension     = b * f1.tether_tension + a * f2.tether_tension,
+        tether_rest_length = b * f1.tether_rest_length + a * f2.tether_rest_length,
+        swash_collective   = b * f1.swash_collective + a * f2.swash_collective,
+        swash_tilt_lon     = b * f1.swash_tilt_lon + a * f2.swash_tilt_lon,
+        swash_tilt_lat     = b * f1.swash_tilt_lat + a * f2.swash_tilt_lat,
+        body_z_eq          = bzeq,
+        wind_enu           = b * f1.wind_enu + a * f2.wind_enu,
+    )
+
+
+def _dir_mat4(start: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    """
+    4×4 transform that maps a canonical unit +Z arrow to an arrow at ``start``
+    pointing in ``direction`` with length ``|direction|``.
+    Used to reorient pre-created arrow actors via user_matrix.
+    """
+    d      = np.asarray(direction, dtype=float)
+    length = float(np.linalg.norm(d))
+    if length < 1e-9:
+        M = np.eye(4, dtype=float); M[:3, 3] = start; return M
+    d_hat = d / length
+
+    z     = np.array([0., 0., 1.])
+    axis  = np.cross(z, d_hat)
+    sin_a = float(np.linalg.norm(axis))
+    cos_a = float(np.dot(z, d_hat))
+
+    if sin_a < 1e-9:
+        R3 = np.eye(3) if cos_a > 0 else np.diag([1., -1., -1.]).astype(float)
+    else:
+        axis /= sin_a
+        K  = np.array([[0, -axis[2], axis[1]],
+                        [axis[2], 0, -axis[0]],
+                        [-axis[1], axis[0], 0]], dtype=float)
+        R3 = np.eye(3) + sin_a * K + (1.0 - cos_a) * (K @ K)
+
+    M = np.eye(4, dtype=float)
+    M[:3, :3] = R3 * length
+    M[:3,  3] = start
+    return M
+
+
+def _rz4(angle: float) -> np.ndarray:
+    """4×4 rotation matrix about Z by angle [rad]."""
+    c, s = math.cos(angle), math.sin(angle)
+    m = np.eye(4, dtype=float)
+    m[0, 0] =  c;  m[0, 1] = -s
+    m[1, 0] =  s;  m[1, 1] =  c
+    return m
+
+
 def _trail_mesh(positions: np.ndarray) -> Optional[pv.PolyData]:
     if len(positions) < 2:
         return None
@@ -361,6 +504,33 @@ def _servo_z(collective_rad: float, tilt_lon: float, tilt_lat: float,
     z_coll      = collective_rad * _SWASH_COLL_SCALE
     nx, ny, nz  = _swash_normal(tilt_lon, tilt_lat)
     return float(z_coll - _SWASH_R_SERVO * (nx * np.cos(theta) + ny * np.sin(theta)) / nz)
+
+
+def _swash_plate_mat4(tilt_lon: float, tilt_lat: float,
+                      collective_rad: float) -> np.ndarray:
+    """
+    4×4 transform for the active swashplate ring.
+
+    Created flat (normal=[0,0,1]) at z=0; this matrix tilts it to the
+    requested normal and lifts it to the collective height.
+    """
+    normal = np.array(_swash_normal(tilt_lon, tilt_lat))
+    z      = np.array([0., 0., 1.])
+    axis   = np.cross(z, normal)
+    sin_a  = float(np.linalg.norm(axis))
+    cos_a  = float(np.dot(z, normal))
+    if sin_a < 1e-9:
+        R3 = np.eye(3) if cos_a > 0 else np.diag([1., -1., -1.]).astype(float)
+    else:
+        axis /= sin_a
+        K  = np.array([[0, -axis[2], axis[1]],
+                       [axis[2], 0, -axis[0]],
+                       [-axis[1], axis[0], 0]], dtype=float)
+        R3 = np.eye(3) + sin_a * K + (1.0 - cos_a) * (K @ K)
+    M          = np.eye(4, dtype=float)
+    M[:3, :3]  = R3
+    M[2,   3]  = collective_rad * _SWASH_COLL_SCALE
+    return M
 
 
 def _swashplate_meshes(collective_rad: float, tilt_lon: float,
@@ -480,58 +650,137 @@ class RAWESVisualizer:
         self._n           = len(frames)
         self._pos_history = np.array([f.pos_enu for f in frames])
         self._spin_angles = self._integrate_spin()
-        self._inset_ren: Optional[object]  = None   # vtkRenderer, set up lazily
-        self._inset_actors: list           = []
+        self._energy      = self._integrate_energy()
+        self._inset_ren: Optional[object] = None   # vtkRenderer, set up lazily
 
     # ------------------------------------------------------------------
     # Public API
 
     def play(self) -> None:
-        """Interactive window: slider, play/pause, keyboard step."""
+        """
+        Interactive window driven by a wall-clock while loop.
+
+        Uses ``show(interactive_update=True)`` so PyVista does not block,
+        then advances frames based on elapsed wall time.  This avoids the
+        unreliable PyVista timer and delivers consistent frame rates.
+        """
         plotter = pv.Plotter(title="RAWES 3D — interactive playback")
         plotter.set_background("#1a1a2e")
         self._add_static_scene(plotter)
         self._add_dynamic_actors(plotter, 0)
-        self._add_slider(plotter)
         self._add_hud(plotter)
 
-        idx    = [0]
-        playing = [True]
+        idx     = [0]
+        playing = [False]       # start paused so user can orient first
         speed   = [1.0]
+        wall_t0 = [time.monotonic()]
+        sim_t0  = [self._frames[0].t]
 
-        def step(delta: int) -> None:
-            idx[0] = max(0, min(self._n - 1, idx[0] + delta))
+        def _reanchor() -> None:
+            """Re-anchor wall↔sim clocks at the current position."""
+            wall_t0[0] = time.monotonic()
+            sim_t0[0]  = self._frames[idx[0]].t
+
+        def _go(i: int) -> None:
+            idx[0] = max(0, min(self._n - 1, i))
             self._update_dynamic(plotter, idx[0])
+            _reanchor()
+            _update_status()
+
+        def _update_status() -> None:
+            state = "PLAYING" if playing[0] else "PAUSED "
+            spd   = f" {speed[0]:.3g}x" if speed[0] != 1.0 else ""
+            _stat_actor.SetInput(f"[Space] {state}{spd}")
+            col = pv.Color("#00ff88" if playing[0] else "#ff8800").float_rgb
+            _stat_actor.GetTextProperty().SetColor(*col)
 
         def toggle_play() -> None:
             playing[0] = not playing[0]
+            _reanchor()
+            _update_status()
 
         def faster() -> None:
             speed[0] = min(speed[0] * 2, 16.0)
+            _reanchor()
+            _update_status()
 
         def slower() -> None:
             speed[0] = max(speed[0] / 2, 0.0625)
+            _reanchor()
+            _update_status()
 
-        plotter.add_key_event("space",  toggle_play)
-        plotter.add_key_event("Right",  lambda: step(1))
-        plotter.add_key_event("Left",   lambda: step(-1))
-        plotter.add_key_event("equal",  faster)
-        plotter.add_key_event("minus",  slower)
+        plotter.add_key_event("space", toggle_play)
+        plotter.add_key_event("Right", lambda: _go(idx[0] + 1))
+        plotter.add_key_event("Left",  lambda: _go(idx[0] - 1))
+        plotter.add_key_event("equal", faster)
+        plotter.add_key_event("minus", slower)
 
-        interval_ms = int(1000 / self._fps)
-
-        def timer_cb(_step: int) -> None:
-            if playing[0]:
-                idx[0] = (idx[0] + 1) % self._n
-                self._update_dynamic(plotter, idx[0])
-
-        plotter.add_timer_event(
-            max_steps=10**9,
-            duration=interval_ms,
-            callback=timer_cb,
-        )
+        _fps_actor  = plotter.add_text("FPS --",  position=(10, 40),
+                                       font_size=8, color="#aaaaaa")
+        _stat_actor = plotter.add_text("PAUSED",  position=(10, 60),
+                                       font_size=8, color="#ff8800")
+        # Slider registered after _stat_actor exists (PyVista fires cb at init)
+        self._add_slider(plotter, on_scrub=_go)
+        self._update_hud(plotter, 0)
+        _update_status()
         self._set_camera(plotter)
-        plotter.show()
+
+        _FRAME_DT  = 1.0 / 30.0
+        _fps_times: list = []
+
+        plotter.show(interactive_update=True, auto_close=False)
+
+        while (plotter.render_window is not None
+               and plotter.render_window.GetGenericContext()):
+            t_loop = time.monotonic()
+            _fps_times.append(t_loop)
+            if len(_fps_times) > 30:
+                _fps_times.pop(0)
+            if len(_fps_times) >= 2:
+                actual_fps = (len(_fps_times) - 1) / (_fps_times[-1] - _fps_times[0])
+                _fps_actor.SetInput(f"FPS {actual_fps:4.1f}")
+
+            if playing[0]:
+                sim_target = sim_t0[0] + (t_loop - wall_t0[0]) * speed[0]
+
+                if sim_target >= self._frames[-1].t:
+                    idx[0]    = 0
+                    _reanchor()
+                    sim_target = sim_t0[0]
+
+                # Find the bracket [i, i+1] containing sim_target
+                i = idx[0]
+                while i < self._n - 1 and self._frames[i + 1].t <= sim_target:
+                    i += 1
+                idx[0] = i
+
+                # Interpolate within the bracket for smooth sub-frame motion
+                if i < self._n - 1:
+                    f1, f2 = self._frames[i], self._frames[i + 1]
+                    dt_ = f2.t - f1.t
+                    alpha = (sim_target - f1.t) / dt_ if dt_ > 1e-9 else 0.0
+                    frame = _lerp_frame(f1, f2, alpha)
+                    sa    = self._spin_angles[i] + f1.omega_spin * (sim_target - f1.t)
+                else:
+                    frame = self._frames[-1]
+                    sa    = self._spin_angles[-1]
+
+                self._hud_frame_idx = i
+                self._render_frame_obj(frame, sa)
+                # Trail update for nearest recorded frame
+                self._last_trail_idx = i
+                start = max(0, i - self._trail_len)
+                pts   = self._pos_history[start : i + 1]
+                if len(pts) >= 2:
+                    seg = np.array([[2, j, j + 1] for j in range(len(pts) - 1)],
+                                   dtype=int).ravel()
+                    self._mesh_trail.points = pts
+                    self._mesh_trail.lines  = seg
+
+            budget_ms = max(1, int((_FRAME_DT - (time.monotonic() - t_loop)) * 1000))
+            plotter.update(budget_ms)
+
+        plotter.close()
 
     def scrub(self) -> None:
         """
@@ -598,8 +847,29 @@ class RAWESVisualizer:
         fit_camera(pl, self._pos_history)
         pl.show()
 
-    def export(self, path: str, fps: float = 10.0) -> None:
-        """Render all frames to a GIF or MP4 (requires ffmpeg for mp4)."""
+    def export(self, path: str, fps: float = 10.0,
+               spin_substeps: int = 0) -> None:
+        """
+        Render all frames to a GIF or MP4 (requires ffmpeg for mp4).
+
+        spin_substeps
+            Number of video frames rendered per telemetry frame.  Each sub-frame
+            advances the spin angle by omega * dt/substeps, keeping the rotor
+            below the 4-blade Nyquist limit (45°/frame).
+            0 = auto-compute the minimum to avoid backwards-aliasing (default).
+        """
+        # ── Auto-compute substeps to avoid stroboscopic aliasing ──────────────
+        # With n_blades=4, the blade pattern repeats every 90°.  To see forward
+        # rotation, each video frame must advance < 45° (Nyquist = period/2).
+        if spin_substeps == 0:
+            omega_max  = max((f.omega_spin for f in self._frames), default=30.0)
+            dt_tel     = ((self._frames[-1].t - self._frames[0].t)
+                          / max(1, len(self._frames) - 1))
+            nyquist    = math.pi / N_BLADES          # 45° for 4 blades
+            spin_substeps = max(1, math.ceil(omega_max * dt_tel / nyquist))
+
+        export_fps = fps * spin_substeps
+
         ext = Path(path).suffix.lower()
         plotter = pv.Plotter(off_screen=True, title="RAWES 3D export")
         plotter.set_background("#1a1a2e")
@@ -609,19 +879,39 @@ class RAWESVisualizer:
         self._set_camera(plotter)
 
         if ext == ".gif":
-            plotter.open_gif(path, fps=fps)
+            plotter.open_gif(path, fps=export_fps)
         elif ext in (".mp4", ".avi"):
-            plotter.open_movie(path, framerate=fps)
+            plotter.open_movie(path, framerate=export_fps)
         else:
             raise ValueError(f"Unsupported export format: {ext}")
 
-        for i in range(self._n):
-            self._update_dynamic(plotter, i)
-            plotter.render()
-            plotter.write_frame()
+        n_video = 0
+        for i in range(self._n - 1):
+            f1 = self._frames[i]
+            f2 = self._frames[i + 1]
+            sa1   = self._spin_angles[i]
+            dt_tel = f2.t - f1.t
+            for k in range(spin_substeps):
+                alpha    = k / spin_substeps
+                f_interp = _lerp_frame(f1, f2, alpha)
+                sa_interp = sa1 + f1.omega_spin * alpha * dt_tel
+                self._hud_frame_idx = i
+                self._render_frame_obj(f_interp, sa_interp)
+                plotter.render()
+                plotter.write_frame()
+                n_video += 1
+
+        # Final telemetry frame
+        self._hud_frame_idx = self._n - 1
+        self._render_frame_obj(self._frames[-1], self._spin_angles[-1])
+        plotter.render()
+        plotter.write_frame()
+        n_video += 1
 
         plotter.close()
-        print(f"Exported: {path}  ({self._n} frames @ {fps} fps)")
+        print(f"Exported: {path}  "
+              f"({n_video} frames @ {export_fps:.0f} fps, "
+              f"{spin_substeps} spin substep{'s' if spin_substeps != 1 else ''})")
 
     # ------------------------------------------------------------------
     # Scene construction
@@ -644,106 +934,272 @@ class RAWESVisualizer:
         human = _human_figure(x=3.0, y=2.0)
         plotter.add_mesh(human, color="#f5c99a", smooth_shading=True)
 
-        plotter.add_axes(
-            line_width=2,
-            x_color="red", y_color="green", z_color="blue",
-            xlabel="East", ylabel="North", zlabel="Up",
-        )
+        # ── Trees: random positions, outside 60 m of anchor ─────────────────
+        # All trunks merged → 1 actor; lower foliage merged → 1 actor;
+        # upper foliage merged → 1 actor.  Total: 3 actors regardless of count.
+        rng = np.random.default_rng(42)
+        trunks, lower_cones, upper_cones = [], [], []
+        n_trees, placed = 40, 0
+        while placed < n_trees:
+            tx = rng.uniform(-180, 180)
+            ty = rng.uniform(-180, 180)
+            if tx*tx + ty*ty < 60.0**2:
+                continue
+            th      = rng.uniform(4.5, 8.0)
+            trunk_h = th * 0.30
+            trunks.append(
+                pv.Cylinder(center=(tx, ty, trunk_h / 2), direction=(0,0,1),
+                            radius=th * 0.04, height=trunk_h, resolution=8))
+            lower_cones.append(
+                pv.Cone(center=(tx, ty, trunk_h + th*0.28), direction=(0,0,1),
+                        height=th*0.55, radius=th*0.18, resolution=12))
+            upper_cones.append(
+                pv.Cone(center=(tx, ty, trunk_h + th*0.50), direction=(0,0,1),
+                        height=th*0.42, radius=th*0.135, resolution=12))
+            placed += 1
+        plotter.add_mesh(pv.merge(trunks),      color="#5a3a1a", smooth_shading=True)
+        plotter.add_mesh(pv.merge(lower_cones), color="#2d6e2d", smooth_shading=True, opacity=0.92)
+        plotter.add_mesh(pv.merge(upper_cones), color="#3a8a3a", smooth_shading=True, opacity=0.92)
 
         self._setup_inset(plotter)
 
+    # ------------------------------------------------------------------
+    # Dynamic actor setup: ALL actors created ONCE; updated in-place per frame.
+    # No new meshes, no new shaders after initial setup.
+
+    _N_TETHER_PTS = 40   # fixed catenary sample count
+
     def _add_dynamic_actors(self, plotter: pv.Plotter, idx: int) -> None:
+        """
+        Create all dynamic actors exactly ONCE.  Subsequent calls just call
+        _fast_update (guard on _actors_created).
+        """
+        if getattr(self, "_actors_created", False):
+            self._fast_update(idx)
+            return
+
+        f  = self._frames[idx]
+        T  = _hub_to_world(f.R, f.pos_enu)
+        sa = self._spin_angles[idx]
+
+        # ── Rotor disk — local frame; spin via user_matrix ────────────────────
+        self._mesh_disk = pv.Disc(inner=R_ROOT, outer=R_TIP,
+                                  normal=[0, 0, 1], r_res=1, c_res=64)
+        self._actor_disk = plotter.add_mesh(self._mesh_disk, color=COL_DISK,
+                                            opacity=0.45, smooth_shading=True)
+        self._actor_disk.user_matrix = T @ _rz4(sa)
+
+        # ── Blades — single actor, per-cell colour per blade ─────────────────
+        # One merged mesh keeps the actor/shader count identical to before.
+        # Cell scalars (blade index 0-3) are mapped to COL_BLADES via a
+        # ListedColormap so each blade gets a distinct colour.
+        blade_meshes = [_blade_mesh_local(k, 0.0) for k in range(N_BLADES)]
+        self._mesh_blades = pv.merge(blade_meshes)
+        _N_FACES_PER_BLADE = blade_meshes[0].n_cells          # 6 quads per blade
+        self._mesh_blades.cell_data["blade_id"] = np.repeat(
+            np.arange(N_BLADES, dtype=float), _N_FACES_PER_BLADE)
+        from matplotlib.colors import ListedColormap as _LCM
+        _blade_cmap = _LCM(COL_BLADES[:N_BLADES])
+        self._actor_blades = plotter.add_mesh(
+            self._mesh_blades, scalars="blade_id", cmap=_blade_cmap,
+            clim=[0.0, float(N_BLADES - 1)], show_scalar_bar=False,
+            smooth_shading=True)
+        self._actor_blades.user_matrix = T @ _rz4(sa)
+
+        # ── Hub sphere ────────────────────────────────────────────────────────
+        self._mesh_hub = pv.Sphere(radius=0.2, center=[0, 0, 0])
+        self._actor_hub = plotter.add_mesh(self._mesh_hub, color=COL_HUB)
+        Mh = np.eye(4, dtype=float); Mh[:3, 3] = f.pos_enu
+        self._actor_hub.user_matrix = Mh
+
+        # ── Tether — PolyData line with fixed N points; update .points ────────
+        tether_attach = f.pos_enu - TETHER_AXLE_OFFSET * f.body_z
+        tpts = _tether_catenary(ANCHOR, tether_attach, f.tether_tension,
+                                n_pts=self._N_TETHER_PTS)
+        self._mesh_tether = pv.PolyData()
+        self._mesh_tether.points = tpts
+        seg = np.array([[2, i, i + 1] for i in range(self._N_TETHER_PTS - 1)],
+                       dtype=int).ravel()
+        self._mesh_tether.lines = seg
+        self._actor_tether = plotter.add_mesh(self._mesh_tether,
+                                              color=_tether_colour(f.tether_tension),
+                                              line_width=3, opacity=0.9)
+
+        # ── Drop line — PolyData points; update .points ───────────────────────
+        self._mesh_drop = pv.PolyData(np.zeros((1, 3), dtype=float))
+        self._actor_drop = plotter.add_mesh(self._mesh_drop,
+                                            color="#ffffff", opacity=0.5,
+                                            render_points_as_spheres=True,
+                                            point_size=6)
+
+        # ── Arrows — canonical unit +Z mesh; direction via user_matrix ────────
+        _arrow_kw = dict(tip_length=0.25, tip_radius=0.08, shaft_radius=0.03)
+        self._mesh_body_z   = pv.Arrow(start=[0,0,0], direction=[0,0,1],
+                                       scale=1.0, **_arrow_kw)
+        self._actor_body_z  = plotter.add_mesh(self._mesh_body_z, color=COL_BODY_Z)
+        self._actor_body_z.user_matrix = _dir_mat4(f.pos_enu, f.body_z * 4.0)
+
+        self._mesh_body_zeq  = pv.Arrow(start=[0,0,0], direction=[0,0,1],
+                                        scale=1.0, **_arrow_kw)
+        self._actor_body_zeq = plotter.add_mesh(self._mesh_body_zeq, color=COL_BODY_ZEQ)
+        bzeq = f.body_z_eq if f.body_z_eq is not None else f.body_z
+        self._actor_body_zeq.user_matrix = _dir_mat4(f.pos_enu, bzeq * 4.0)
+
+        self._mesh_wind  = pv.Arrow(start=[0,0,0], direction=[0,0,1],
+                                    scale=1.0, **_arrow_kw)
+        self._actor_wind = plotter.add_mesh(self._mesh_wind, color=COL_WIND)
+        wind_start = f.pos_enu - f.wind_enu * 0.3
+        self._actor_wind.user_matrix = _dir_mat4(wind_start,
+                                                  f.wind_enu * 0.4)
+
+        # ── Trail — PolyData; points updated in-place ─────────────────────────
+        self._mesh_trail = pv.PolyData(self._pos_history[:1].copy())
+        self._actor_trail = plotter.add_mesh(self._mesh_trail,
+                                             color=COL_TRAIL, line_width=1,
+                                             opacity=0.6)
+
+        self._actors_created = True
+        self._last_trail_idx = idx
+
+    def _fast_update(self, idx: int) -> None:
+        """Update all dynamic actors in-place. No new actors or shaders."""
         f = self._frames[idx]
-        T = _hub_to_world(f.R, f.pos_enu)
+        self._render_frame_obj(f, self._spin_angles[idx])
+        self._last_trail_idx = idx
+        self._last_trail_idx = idx
+        # Trail: update points in-place
+        start = max(0, idx - self._trail_len)
+        pts   = self._pos_history[start : idx + 1]
+        if len(pts) >= 2:
+            seg = np.array([[2, i, i + 1] for i in range(len(pts) - 1)],
+                           dtype=int).ravel()
+            self._mesh_trail.points = pts
+            self._mesh_trail.lines  = seg
 
-        rotor = _rotor_local(self._spin_angles[idx])
-        rotor.transform(T, inplace=True)
-        plotter.add_mesh(rotor, color=COL_DISK, opacity=0.45,
-                         smooth_shading=True, name="rotor")
+    def _render_frame_obj(self, f, spin_angle: float) -> None:
+        """
+        Update ALL dynamic actors in-place for frame object ``f``.
+        No new actors, no new shaders — only user_matrix and .points updates.
+        """
+        T  = _hub_to_world(f.R, f.pos_enu)
+        sa = spin_angle
 
-        blades_only = pv.merge([
-            _blade_mesh_local(k, self._spin_angles[idx]).transform(T, inplace=False)
-            for k in range(N_BLADES)
-        ])
-        plotter.add_mesh(blades_only, color=COL_BLADE,
-                         smooth_shading=True, name="blades")
+        # Rotor + blades: spin × hub transform
+        Tsa = T @ _rz4(sa)
+        self._actor_disk.user_matrix   = Tsa
+        self._actor_blades.user_matrix = Tsa
 
-        hub = pv.Sphere(radius=0.2, center=f.pos_enu)
-        plotter.add_mesh(hub, color=COL_HUB, name="hub")
+        # Hub sphere: translate only
+        Mh = np.eye(4, dtype=float); Mh[:3, 3] = f.pos_enu
+        self._actor_hub.user_matrix = Mh
 
-        # Tether attachment: bottom of axle, TETHER_AXLE_OFFSET below CM along -body_z
+        # Tether: update points in-place (fixed N, topology unchanged)
         tether_attach = f.pos_enu - TETHER_AXLE_OFFSET * f.body_z
+        tpts = _tether_catenary(ANCHOR, tether_attach, f.tether_tension,
+                                n_pts=self._N_TETHER_PTS)
+        self._mesh_tether.points = tpts
+        # Update tether colour via actor property
+        col = pv.Color(_tether_colour(f.tether_tension)).float_rgb
+        self._actor_tether.GetProperty().SetColor(*col)
 
+        # Drop line: update points in-place
         drop = _drop_line(tether_attach)
-        if drop.n_points:
-            plotter.add_mesh(drop, color="#ffffff", opacity=0.5,
-                             render_points_as_spheres=True, point_size=6,
-                             name="drop_line")
+        self._mesh_drop.points = drop.points if drop.n_points else np.zeros((1, 3))
 
-        # Tether attaches at the bottom of the axle (-body_z from CM)
-        tether_attach = f.pos_enu - TETHER_AXLE_OFFSET * f.body_z
-        tether_pts    = _tether_catenary(ANCHOR, tether_attach, f.tether_tension)
-        tether_spline = pv.Spline(tether_pts, n_points=len(tether_pts))
-        tether_tube   = tether_spline.tube(radius=TETHER_TUBE_RADIUS)
-        plotter.add_mesh(tether_tube, color=_tether_colour(f.tether_tension),
-                         smooth_shading=True, name="tether")
+        # Arrows: direction via user_matrix
+        self._actor_body_z.user_matrix = _dir_mat4(f.pos_enu, f.body_z * 4.0)
+        bzeq = f.body_z_eq if f.body_z_eq is not None else f.body_z
+        self._actor_body_zeq.user_matrix = _dir_mat4(f.pos_enu, bzeq * 4.0)
+        wind_start = f.pos_enu - f.wind_enu * 0.3
+        self._actor_wind.user_matrix = _dir_mat4(wind_start, f.wind_enu * 0.4)
 
-        axle = _arrow(f.pos_enu, f.body_z * 4.0)
-        if axle.n_points:
-            plotter.add_mesh(axle, color=COL_BODY_Z, name="body_z")
-
-        if f.body_z_eq is not None:
-            eq = _arrow(f.pos_enu, f.body_z_eq * 4.0)
-            if eq.n_points:
-                plotter.add_mesh(eq, color=COL_BODY_ZEQ, name="body_z_eq")
-
-        wind = _arrow(f.pos_enu - f.wind_enu * 0.3, f.wind_enu, scale=0.4)
-        if wind.n_points:
-            plotter.add_mesh(wind, color=COL_WIND, name="wind")
+        # HUD text: SetInput on the underlying vtkTextActor (no new actor)
+        self._update_inset_frame(f)
+        if hasattr(self, "_hud_actor") and hasattr(self, "_hud_frame_idx"):
+            fi = self._hud_frame_idx
+            e_net = self._energy[fi]
+            lines = [
+                f"t          {f.t:7.2f} s",
+                f"altitude   {f.altitude:7.2f} m",
+                f"spin       {f.omega_spin:7.2f} rad/s",
+                f"tension    {f.tether_tension:7.1f} N",
+                f"rest_len   {f.tether_rest_length:7.2f} m",
+                f"coll       {np.degrees(f.swash_collective):7.2f} deg",
+                f"tilt_lon   {f.swash_tilt_lon:7.4f}",
+                f"tilt_lat   {f.swash_tilt_lat:7.4f}",
+                f"",
+                f"E_net    {e_net:+8.1f} J",
+            ]
+            self._hud_actor.SetInput("\n".join(lines))
 
     def _update_dynamic(self, plotter: pv.Plotter, idx: int) -> None:
+        self._last_trail_idx = idx
         self._add_dynamic_actors(plotter, idx)
         self._update_trail(plotter, idx)
         self._update_hud(plotter, idx)
         self._update_inset(idx)
 
+    def _update_dynamic_inplace(self, idx: int) -> None:
+        """Fast in-place update used by the play loop — no plotter arg needed."""
+        self._fast_update(idx)
+        self._update_inset(idx)
+
     def _update_trail(self, plotter: pv.Plotter, idx: int) -> None:
+        if not getattr(self, "_actors_created", False):
+            return
         start = max(0, idx - self._trail_len)
-        trail = _trail_mesh(self._pos_history[start : idx + 1])
-        if trail is not None:
-            plotter.add_mesh(trail, color=COL_TRAIL, line_width=1,
-                             opacity=0.6, name="trail")
+        pts   = self._pos_history[start : idx + 1]
+        if len(pts) >= 2:
+            seg = np.array([[2, i, i + 1] for i in range(len(pts) - 1)],
+                           dtype=int).ravel()
+            self._mesh_trail.points = pts
+            self._mesh_trail.lines  = seg
 
     def _add_hud(self, plotter: pv.Plotter) -> None:
-        plotter.add_text("", position="upper_left",
-                         font_size=9, color="white",
-                         name="hud", shadow=True)
+        # Use pixel coordinates → returns vtkTextActor (has SetInput).
+        # "upper_left" returns CornerAnnotation which lacks SetInput.
+        w, h = plotter.window_size
+        self._hud_actor = plotter.add_text(
+            " ", position=(10, h - 170),
+            font_size=9, color="white", shadow=True,
+        )
         plotter.add_text(
-            "[Space] play/pause   [←/→] step   [+/-] speed   slider: scrub",
-            position="lower_right", font_size=7, color="#888888",
+            "[Space] play/pause   [</>] step   [+/-] speed   slider: scrub",
+            position=(10, 10), font_size=7, color="#888888",
         )
 
     def _update_hud(self, plotter: pv.Plotter, idx: int) -> None:
+        self._hud_frame_idx = idx
         f = self._frames[idx]
+        e_net = self._energy[idx]
         lines = [
             f"t          {f.t:7.2f} s",
             f"altitude   {f.altitude:7.2f} m",
             f"spin       {f.omega_spin:7.2f} rad/s",
             f"tension    {f.tether_tension:7.1f} N",
             f"rest_len   {f.tether_rest_length:7.2f} m",
-            f"coll       {np.degrees(f.swash_collective):7.2f} °",
+            f"coll       {np.degrees(f.swash_collective):7.2f} deg",
             f"tilt_lon   {f.swash_tilt_lon:7.4f}",
             f"tilt_lat   {f.swash_tilt_lat:7.4f}",
             f"frame      {idx+1}/{self._n}",
+            f"",
+            f"E_net    {e_net:+8.1f} J",
         ]
-        plotter.add_text("\n".join(lines), position="upper_left",
-                         font_size=9, color="white",
-                         name="hud", shadow=True)
+        if hasattr(self, "_hud_actor"):
+            self._hud_actor.SetInput("\n".join(lines))
 
-    def _add_slider(self, plotter: pv.Plotter) -> None:
+    def _add_slider(self, plotter: pv.Plotter, on_scrub=None) -> None:
+        """
+        Add a frame scrub slider.  ``on_scrub``, if provided, is called with
+        the integer frame index whenever the slider moves (allows play() to
+        sync its idx[0] closure).
+        """
         def cb(value: float) -> None:
-            idx = int(round(value))
-            self._update_dynamic(plotter, idx)
+            i = int(round(value))
+            if on_scrub is not None:
+                on_scrub(i)
+            else:
+                self._update_dynamic(plotter, i)
 
         plotter.add_slider_widget(
             cb,
@@ -760,11 +1216,12 @@ class RAWESVisualizer:
 
     def _setup_inset(self, plotter: pv.Plotter) -> None:
         """
-        Add a second VTK renderer in the bottom-right corner showing a
-        swashplate diagram: collective (plate height), tilt_lon and tilt_lat
-        (plate tilt), and three servo attachment spheres on travel tracks.
+        Create all swashplate inset actors ONCE.  Per-frame updates use
+        user_matrix only — no new actors or shaders after this call.
 
-        S1=red  S2=green  S3=blue  (H3-120 at 90°/210°/330°)
+        Static actors  : reference ring, axle, 3 servo tracks
+        Dynamic actors : active plate (user_matrix), 3 servo spheres (user_matrix)
+        Total          : 9 actors created once at startup.
         """
         if not _HAS_VTK:
             return
@@ -775,36 +1232,85 @@ class RAWESVisualizer:
         plotter.ren_win.SetNumberOfLayers(2)
         plotter.ren_win.AddRenderer(ren)
 
-        # 3/4 elevated camera so tilt and collective are both clearly visible
         cam = ren.GetActiveCamera()
         cam.SetPosition(1.6, -2.0, 2.2)
         cam.SetFocalPoint(0.0, 0.0, 0.0)
         cam.SetViewUp(0.0, 0.0, 1.0)
         cam.SetParallelProjection(True)
-        cam.SetParallelScale(1.05)   # fits ~2.1 m vertically (track ±0.85 m)
+        cam.SetParallelScale(1.05)
 
         self._inset_ren = ren
 
+        def _add(mesh, color, opacity=1.0):
+            return self._inset_add(mesh, color, opacity)
+
+        # ── Static: all merged into ONE actor to minimise shader count ──────────
+        z_eq         = _SWASH_COLL_EQ * _SWASH_COLL_SCALE
+        ref          = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
+                               normal=(0,0,1), c_res=48, r_res=1)
+        ref.translate((0.0, 0.0, z_eq), inplace=True)
+        static_parts = [ref,
+                        pv.Cylinder(center=(0,0,0), direction=(0,0,1),
+                                    radius=0.035, height=_SWASH_TRACK_HALF*2.5,
+                                    resolution=8)]
+        for angle_deg in _SWASH_SERVO_ANGLES:
+            theta = np.radians(angle_deg)
+            sx, sy = _SWASH_R_SERVO*np.cos(theta), _SWASH_R_SERVO*np.sin(theta)
+            static_parts.append(
+                pv.Cylinder(center=(sx, sy, z_eq), direction=(0,0,1),
+                            radius=0.018, height=_SWASH_TRACK_HALF*2,
+                            resolution=6))
+        _add(pv.merge(static_parts), "#4a4a77", 0.55)   # 1 actor for all static parts
+
+        # ── Dynamic: active plate — user_matrix updated per frame ──────────────
+        plate_mesh = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
+                             normal=(0,0,1), c_res=64, r_res=1)
+        self._inset_plate = _add(plate_mesh, "#33ccdd", 0.80)
+
+        # ── Dynamic: servo spheres — Z translated per frame ────────────────────
+        self._inset_spheres = []
+        for angle_deg, col in zip(_SWASH_SERVO_ANGLES, _SWASH_SERVO_COLORS):
+            theta = np.radians(angle_deg)
+            sx, sy = _SWASH_R_SERVO*np.cos(theta), _SWASH_R_SERVO*np.sin(theta)
+            sph = pv.Sphere(radius=0.068, center=(sx, sy, 0.0),
+                            theta_resolution=10, phi_resolution=10)
+            self._inset_spheres.append(_add(sph, col, 1.00))
+
     def _update_inset(self, idx: int) -> None:
-        """Rebuild swashplate inset actors for the current frame."""
-        if self._inset_ren is None:
+        """Update swashplate inset via user_matrix — no new actors created."""
+        if self._inset_ren is None or not hasattr(self, "_inset_plate"):
             return
-
-        ren = self._inset_ren
-        for actor in self._inset_actors:
-            ren.RemoveActor(actor)
-        self._inset_actors.clear()
-
         f = self._frames[idx]
-        for mesh, color, opacity in _swashplate_meshes(
-                f.swash_collective, f.swash_tilt_lon, f.swash_tilt_lat):
-            self._inset_actors.append(self._inset_add(mesh, color, opacity))
+        self._update_inset_frame(f)
 
-        ren.ResetCameraClippingRange()
+    @staticmethod
+    def _np_to_vtk4x4(m: np.ndarray):
+        """Convert 4×4 numpy array to vtkMatrix4x4 for raw vtkActor.SetUserMatrix."""
+        from vtkmodules.vtkCommonMath import vtkMatrix4x4
+        vtk_m = vtkMatrix4x4()
+        for i in range(4):
+            for j in range(4):
+                vtk_m.SetElement(i, j, float(m[i, j]))
+        return vtk_m
+
+    def _update_inset_frame(self, f) -> None:
+        """Update inset actors in-place — no new actors or shaders."""
+        if self._inset_ren is None or not hasattr(self, "_inset_plate"):
+            return
+        # Active plate: rotation + Z lift via vtkMatrix4x4
+        self._inset_plate.SetUserMatrix(
+            self._np_to_vtk4x4(_swash_plate_mat4(
+                f.swash_tilt_lon, f.swash_tilt_lat, f.swash_collective)))
+        # Servo spheres: Z translation via SetPosition (sphere local origin = sx,sy,0)
+        for actor, angle_deg in zip(self._inset_spheres, _SWASH_SERVO_ANGLES):
+            zh = _servo_z(f.swash_collective, f.swash_tilt_lon,
+                          f.swash_tilt_lat, angle_deg)
+            actor.SetPosition(0.0, 0.0, zh)
+        self._inset_ren.ResetCameraClippingRange()
 
     def _inset_add(self, mesh: pv.PolyData, color: str,
                    opacity: float = 1.0) -> "vtkActor":
-        """Add a pyvista mesh to the inset vtkRenderer; return the actor."""
+        """Add a mesh to the inset renderer; return the actor."""
         mapper = vtkPolyDataMapper()
         mapper.SetInputData(mesh)
         actor = vtkActor()
@@ -829,6 +1335,24 @@ class RAWESVisualizer:
             angles[i] = angles[i-1] + self._frames[i].omega_spin * dt
         return angles
 
+    def _integrate_energy(self) -> np.ndarray:
+        """
+        Running net winch energy [J] at each frame.
+
+        dE = tension × d(rest_length)
+          positive (rest_length grows) → reel-out, energy generated
+          negative (rest_length shrinks) → reel-in, energy consumed
+        Net = cumulative sum; positive = net power generated so far.
+        """
+        energy = np.zeros(self._n)
+        for i in range(1, self._n):
+            dl = (self._frames[i].tether_rest_length
+                  - self._frames[i-1].tether_rest_length)
+            t_avg = (self._frames[i].tether_tension
+                     + self._frames[i-1].tether_tension) * 0.5
+            energy[i] = energy[i-1] + t_avg * dl
+        return energy
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -847,6 +1371,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Export to GIF or MP4 instead of interactive window")
     p.add_argument("--fps", type=float, default=10.0,
                    help="Playback / export frame rate (default: 10)")
+    p.add_argument("--spin-substeps", type=int, default=0, metavar="N",
+                   help="Video frames per telemetry frame for smooth rotor spin "
+                        "(0 = auto, default)")
     p.add_argument("--trail", type=int, default=TRAIL_LEN,
                    help=f"Trajectory trail length in frames (default: {TRAIL_LEN})")
     return p
@@ -877,7 +1404,8 @@ def main(argv: Optional[list] = None) -> None:
     viz = RAWESVisualizer(frames, trail_len=args.trail, playback_fps=args.fps)
 
     if args.export:
-        viz.export(args.export, fps=args.fps)
+        viz.export(args.export, fps=args.fps,
+                   spin_substeps=args.spin_substeps)
     else:
         viz.play()
 

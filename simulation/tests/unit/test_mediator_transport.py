@@ -5,9 +5,8 @@ Tests that the mediator produces a correctly formatted JSON state reply when dri
 by a real UDP servo packet from a fake SITL client.  The dynamics integrator is
 mocked so the test does not depend on physics accuracy.
 
-Note: MBDyn socket transport tests were removed when MBDyn was replaced by the
-Python RigidBodyDynamics integrator.  See simulation/mbdyn_reference.md for the
-former MBDyn socket protocol documentation.
+Note: physics socket transport tests are no longer applicable; the dynamics
+integrator runs in-process as RigidBodyDynamics.
 """
 import argparse
 import json

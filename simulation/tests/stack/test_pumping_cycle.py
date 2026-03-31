@@ -40,7 +40,8 @@ _STACK_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
 
-from conftest import StackContext, dump_startup_diagnostics, assert_stack_ports_free
+from conftest import StackContext, dump_startup_diagnostics, assert_stack_ports_free, copy_logs_to_dir
+from test_stack_integration import _kill_by_port
 
 # ---------------------------------------------------------------------------
 # Pumping cycle parameters — match test_deschutter_cycle.py defaults
@@ -347,7 +348,6 @@ def acro_armed(tmp_path, sensor_mode):
       - Pumping cycle timing/tension parameters
     """
     import dataclasses
-    import shutil
     import subprocess
     import os as _os
 
@@ -460,11 +460,10 @@ def acro_armed(tmp_path, sensor_mode):
         gcs.close()
         _terminate_process(sitl_proc)
         _terminate_process(mediator_proc)
-        if telemetry_log.exists():
-            shutil.copy2(telemetry_log, sim_dir / "telemetry_pumping.csv")
-        if mediator_log.exists():
-            shutil.copy(mediator_log, sim_dir / "mediator_last_run.log")
-        if sitl_log.exists():
-            shutil.copy(sitl_log, sim_dir / "sitl_last_run.log")
-        if gcs_log.exists():
-            shutil.copy(gcs_log, sim_dir / "gcs_last_run.log")
+        _kill_by_port(StackConfig.SITL_GCS_PORT)
+        copy_logs_to_dir(sim_dir / "logs", {
+            "telemetry_pumping.csv": telemetry_log,
+            "mediator_last_run.log": mediator_log,
+            "sitl_last_run.log":     sitl_log,
+            "gcs_last_run.log":      gcs_log,
+        })

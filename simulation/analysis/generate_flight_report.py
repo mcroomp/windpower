@@ -5,7 +5,7 @@ generate_flight_report.py — Offline flight report generator for RAWES simulati
 Reads the CSV telemetry file written by mediator.py (--telemetry-log) and
 produces a multi-panel PNG figure with:
 
-  Panel 1  — Hub altitude & position (ENU, from MBDyn state)
+  Panel 1  — Hub altitude & position (ENU)
   Panel 2  — Hub velocity (ENU)
   Panel 3  — Rotor spin rate (omega_rotor)
   Panel 4  — Aerodynamic thrust & vertical force (Fz)
@@ -112,14 +112,14 @@ def plot_report(data: dict, out_path: Path) -> None:
         return col if len(col) == len(t) else (default or [None] * len(t))
 
     # ── Panel 1: Hub position (ENU) ──────────────────────────────────────────
-    ax = _ax(0, "Hub position — MBDyn world ENU frame", "m")
+    ax = _ax(0, "Hub position — ENU world frame", "m")
     ax.plot(t, _get("hub_pos_x"), linewidth=0.8, label="X (East)")
     ax.plot(t, _get("hub_pos_y"), linewidth=0.8, label="Y (North)")
     ax.plot(t, _get("hub_pos_z"), linewidth=0.8, label="Z (Up / altitude)")
     ax.legend(fontsize=7, loc="upper right")
 
     # ── Panel 2: Hub velocity (ENU) ──────────────────────────────────────────
-    ax = _ax(1, "Hub velocity — MBDyn world ENU frame", "m/s")
+    ax = _ax(1, "Hub velocity — ENU world frame", "m/s")
     ax.plot(t, _get("hub_vel_x"), linewidth=0.8, label="Vx (East)")
     ax.plot(t, _get("hub_vel_y"), linewidth=0.8, label="Vy (North)")
     ax.plot(t, _get("hub_vel_z"), linewidth=0.8, label="Vz (Up)")
@@ -134,10 +134,10 @@ def plot_report(data: dict, out_path: Path) -> None:
     ax.legend(fontsize=7, loc="upper right")
 
     # ── Panel 4: Thrust & Fz ─────────────────────────────────────────────────
-    ax = _ax(3, "Aerodynamic thrust (BEM) & vertical force sent to MBDyn", "N")
+    ax = _ax(3, "Aerodynamic thrust (BEM) & vertical force world vertical", "N")
     ax.plot(t, _get("aero_T"),  color="#2ca02c", linewidth=0.8, label="Thrust T (aero model)")
     ax.plot(t, _get("F_z"),     color="#1f77b4", linewidth=0.8, linestyle="--",
-            label="Fz world (sent to MBDyn)")
+            label="Fz world (world vertical)")
     ax.axhline(49.05, color="red", linewidth=0.6, linestyle=":", alpha=0.7,
                label="Weight 49.05 N")
     ax.legend(fontsize=7, loc="upper right")

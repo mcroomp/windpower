@@ -198,9 +198,10 @@ class RotorDefinition:
     I_blade_flap_kgm2: Optional[float] = None   # I_b — for Lock number
 
     # ── Control ───────────────────────────────────────────────────────────────
-    K_cyc:                float     = 0.4
-    swashplate_phase_deg: float     = 0.0       # cyclic phase advance for gyroscopic comp [°]
-    kaman_flap:           KamanFlap = field(default_factory=KamanFlap)
+    K_cyc:                    float     = 0.4
+    swashplate_phase_deg:     float     = 0.0   # cyclic phase advance for gyroscopic comp [°]
+    swashplate_pitch_gain_rad: float    = 0.3   # max blade pitch per unit normalised tilt [rad]
+    kaman_flap:               KamanFlap = field(default_factory=KamanFlap)
 
     # ── Autorotation ODE ─────────────────────────────────────────────────────
     K_drive_Nms_m:      float          = 1.4
@@ -350,6 +351,80 @@ class RotorDefinition:
         return math.sqrt(self.K_drive_Nms_m * self._V_INPLANE_DESIGN_MS
                          / self.K_drag_Nms2_rad2)
 
+    @property
+    def max_cyclic_moment_Nm(self) -> float:
+        """
+        Analytical upper bound on cyclic moment at full swashplate deflection [N·m].
+
+        Derived by integrating blade lift × moment arm over the disk at design
+        spin rate, then averaging over azimuth:
+
+            M_cyc_max = (N/4) · ρ · ω_eq² · c · CL_α · β_max · (R⁴ − r_root⁴) / 4
+
+        where β_max = swashplate_pitch_gain_rad (= blade pitch at normalised tilt = 1.0).
+
+        Overestimates the BEM result by ~25% because it omits Prandtl tip loss
+        and induction effects.  Use as a conservative upper bound.
+        """
+        omega = self.omega_eq_from_K_rad_s
+        return (
+            (self.n_blades / 4.0)
+            * self.rho_kg_m3
+            * omega ** 2
+            * self.chord_m
+            * self.CL_alpha_per_rad
+            * self.swashplate_pitch_gain_rad
+            * (self.radius_m ** 4 - self.root_cutout_m ** 4)
+            / 4.0
+        )
+
+    @property
+    def max_body_z_rate_rad_s(self) -> float:
+        """
+        Physical upper bound on body_z tilt rate [rad/s].
+
+        A spinning rotor precesses when a cyclic moment is applied.  The
+        maximum precession rate is:
+
+            ω_tilt_max = M_cyc_max / H
+            H           = I_spin · ω_eq   (angular momentum)
+
+        This is the fastest the disk CAN tilt when the swashplate is at full
+        deflection.  Because the angular momentum H is small for this rotor
+        (~80 kg·m²/s), the physical limit is high (~15–20 rad/s) and is
+        never the binding constraint.
+
+        The practical planner slew rate is set by the CONTROL BANDWIDTH, not
+        by this limit.  As a rule of thumb:
+
+            body_z_slew_rate ≈ 0.02–0.05 × max_body_z_rate_rad_s
+
+        The lower end (×0.02) applies when commanding via 10 Hz MAVLink RC
+        overrides (stack test / hardware).  The upper end (×0.05) applies for
+        a 400 Hz on-board controller (Mode_RAWES firmware).
+
+        Returns inf when I_spin = 0 (gyroscopic coupling disabled).
+        """
+        I = self.I_spin_effective_kgm2
+        if I <= 0.0:
+            return float("inf")
+        return self.max_cyclic_moment_Nm / (I * self.omega_eq_from_K_rad_s)
+
+    @property
+    def body_z_slew_rate_rad_s(self) -> float:
+        """
+        Recommended body_z planner slew rate for 10 Hz MAVLink control [rad/s].
+
+        Set to 2% of the physical maximum (max_body_z_rate_rad_s).  This
+        fraction is chosen so the slew is fast enough to complete a 55° reel-in
+        transition in ~3–4 s, while staying within the closed-loop bandwidth
+        of a 10 Hz RC-override attitude controller.
+
+        For a 400 Hz on-board controller (Mode_RAWES firmware), use
+        ``5% × max_body_z_rate_rad_s`` instead.
+        """
+        return 0.02 * self.max_body_z_rate_rad_s
+
     # =========================================================================
     # Factory helpers
     # =========================================================================
@@ -361,20 +436,21 @@ class RotorDefinition:
         Maps RotorDefinition fields to the RotorAero constructor parameter names.
         """
         return dict(
-            n_blades     = self.n_blades,
-            r_root       = self.root_cutout_m,
-            r_tip        = self.radius_m,
-            chord        = self.chord_m,
-            rho          = self.rho_kg_m3,
-            aspect_ratio = self.aspect_ratio,
-            oswald_eff   = self.oswald_efficiency,
-            CD0          = self.CD0,
-            CL0          = self.CL0,
-            CL_alpha     = self.CL_alpha_per_rad,
-            K_cyc        = self.K_cyc,
-            aoa_limit    = math.radians(self.alpha_stall_deg),
-            k_drive_spin = self.K_drive_Nms_m,
-            k_drag_spin  = self.K_drag_Nms2_rad2,
+            n_blades         = self.n_blades,
+            r_root           = self.root_cutout_m,
+            r_tip            = self.radius_m,
+            chord            = self.chord_m,
+            rho              = self.rho_kg_m3,
+            aspect_ratio     = self.aspect_ratio,
+            oswald_eff       = self.oswald_efficiency,
+            CD0              = self.CD0,
+            CL0              = self.CL0,
+            CL_alpha         = self.CL_alpha_per_rad,
+            K_cyc            = self.K_cyc,
+            aoa_limit        = math.radians(self.alpha_stall_deg),
+            k_drive_spin     = self.K_drive_Nms_m,
+            k_drag_spin      = self.K_drag_Nms2_rad2,
+            pitch_gain_rad   = self.swashplate_pitch_gain_rad,
         )
 
     def dynamics_kwargs(self) -> dict:

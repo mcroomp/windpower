@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED with SkewedWakeBEM (`test_pumping_cycle.py`: net energy +1396 J, reel-in 86 N vs reel-out 199 N, peak tension 455 N). SkewedWakeBEM is now the production aero model; RotorAero removed from production. 534 fast unit tests + 23 simtests passing. `ModeRAWES` ArduPilot firmware architecture fully designed (documented in `simulation/raws_mode.md`). **Counter-torque motor simulation complete** — `simulation/torque/` has 15/15 tests passing including a Lua feedforward controller running inside ArduPilot SITL. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED. SkewedWakeBEM is production aero model; RotorAero fully removed. Counter-torque motor simulation complete (Lua feedforward in SITL). **High-tilt De Schutter cycle validated** — ξ=80° reel-in achieves +24% net energy vs ξ=55° baseline; requires `col_max=0.10`, `col_min_reel_in=0.079`, `body_z_slew_rate=0.40 rad/s` (all now derived from rotor definition). **Two-loop attitude controller** implemented (`RatePID` class + `compute_rate_cmd`); `test_closed_loop_60s` uses it with `kd=0`. **Portable core** (`compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`) in `controller.py` — maps 1:1 to planned Lua/C++ Mode_RAWES. 335 fast unit tests + 23 simtests passing. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
 
 **Known stack test status:** `test_pumping_cycle`, `test_gps_fuses_during_startup`, `test_acro_armed`, `test_stationary_gps_fusion`, `test_arm_minimal`, `test_stack_integration` all PASS. `test_acro_hold` FAILS — hub descends below 2 m during neutral-stick hold due to insufficient thrust margin after the 45 s kinematic damping phase; unit-level equivalent (`test_closed_loop_60s`) passes.
 
@@ -94,6 +94,15 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 | [simulation/sim_internals.md](simulation/sim_internals.md) | Sensor design, controller functions, aero model (SkewedWakeBEM), tether, pumping cycle COL_MIN rules, initial state, known gaps |
 | [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions — why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
 
+### Key Design Decisions (this session)
+- **RotorAero removed** — `aero/aero_rotor.py` deleted; `create_aero()` factory now has 4 models (SkewedWakeBEM default).
+- **Two-loop attitude controller**: `compute_rate_cmd(kp, kd=0)` → rate setpoint; `RatePID(kp=2/3)` → swashplate tilt. Matches hardware architecture where ArduPilot rate PIDs supply damping.
+- **Portable core** in `controller.py`: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad` — frame-agnostic, map 1:1 to Lua/C++ Mode_RAWES.
+- **High-tilt De Schutter**: ξ=80° viable. AoA stays below stall (14.4°) because low v_axial at high tilt reduces inflow angle. Requires `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above ξ≈85°.
+- **body_z_slew_rate** = `rotor.body_z_slew_rate_rad_s` = 2% of gyroscopic limit = **0.40 rad/s** for beaupoil_2026. Optimal from sweep; faster than 0.40 causes oscillation, slower wastes reel-in time.
+- **`swashplate_pitch_gain_rad`** added to YAML/RotorDefinition — physically measurable via flap deflection angle × tau at full stick deflection.
+- **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD.
+
 ### Counter-Torque Motor Simulation
 | File | When to read |
 |------|-------------|
@@ -133,6 +142,9 @@ simulation/
 │   └── controller.py        compute_swashplate_from_state()  — truth-state controller
 │                            compute_rc_rates()               — ArduPilot RC override controller
 │                            compute_rc_from_attitude()       — ATTITUDE message controller
+│                            RatePID                          — simulated ACRO inner rate loop
+│                            compute_bz_tether/slerp_body_z/compute_rate_cmd  — portable core (Lua/C++ portable)
+│                            col_min_for_altitude_rad()       — aero-derived altitude floor collective
 │
 ├── Orchestration
 │   ├── mediator.py          400 Hz co-simulation loop (SITL ↔ physics)
@@ -150,11 +162,12 @@ simulation/
 │
 └── tests/
     ├── unit/                Windows native, no Docker
-    │   ├── test_closed_loop.py      ★ Closed-loop physics (dynamics+aero+tether+controller)
-    │   ├── test_steady_flight.py    Open-loop equilibrium → writes steady_state_starting.json
-    │   ├── test_controller.py       Unit tests for controller.py functions
-    │   ├── test_mediator.py         Mediator loop with fake SITL/dynamics
-    │   ├── test_aero.py             Aerodynamic model
+    │   ├── test_closed_loop.py               ★ Closed-loop physics (dynamics+aero+tether+controller)
+    │   ├── test_closed_loop_60s.py           60 s orbit — uses RatePID two-loop architecture
+    │   ├── test_steady_flight.py             Open-loop equilibrium → writes steady_state_starting.json
+    │   ├── test_controller.py                Unit tests (incl. RatePID, portable core functions)
+    │   ├── test_aero_trajectory_points.py    SkewedWakeBEM at De Schutter trajectory operating points
+    │   ├── test_deschutter_cycle.py          De Schutter pumping cycle (ξ=80°, col_max=0.10 rad)
     │   └── ...
     └── stack/               Docker required
         ├── stack_utils.py           Shared constants + helpers (env vars, logging, process launch/teardown, port kill, log copy)

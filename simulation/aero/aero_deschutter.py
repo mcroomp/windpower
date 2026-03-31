@@ -73,7 +73,7 @@ class DeSchutterAero:
         self.S_blade    = span * self.CHORD
         self.AR         = float(p.get("aspect_ratio") or span ** 2 / self.S_blade)
         self.R_CP       = self.R_ROOT + self.CP_FRAC * span
-        self.pitch_gain = math.radians(self.PITCH_MAX_DEG)
+        self.pitch_gain = float(p.get("pitch_gain_rad", math.radians(self.PITCH_MAX_DEG)))
         self.disk_area  = math.pi * (self.R_TIP ** 2 - self.R_ROOT ** 2)
 
         self.N_RADIAL    = int(n_radial)

@@ -348,9 +348,9 @@ def run_mediator(args, trajectory=None):
             # Aerodynamic model internals
             "aero_T", "aero_v_axial", "aero_v_i", "aero_v_inplane", "aero_ramp",
             "aero_Q_drag", "aero_Q_drive",
-            # Aerodynamic forces sent to MBDyn (ENU world frame)
+            # Aerodynamic forces (ENU world frame)
             "F_x", "F_y", "F_z", "M_x", "M_y", "M_z",
-            # Hub state received from MBDyn (ENU world frame)
+            # Hub state (ENU world frame)
             "hub_pos_x", "hub_pos_y", "hub_pos_z",
             "hub_vel_x", "hub_vel_y", "hub_vel_z",
             "hub_omega_x", "hub_omega_y", "hub_omega_z",
@@ -537,7 +537,7 @@ def run_mediator(args, trajectory=None):
 
             # ----------------------------------------------------------------
             # Step 3: Compute aerodynamic forces
-            # Use current hub state from previous MBDyn step
+            # Use current hub state from previous dynamics step
             # ----------------------------------------------------------------
             R_hub = hub_state["R"]
             v_hub = hub_state["vel"]

@@ -1,7 +1,7 @@
 """
 sensor.py — Sensor simulation for RAWES
 
-Converts MBDyn world-frame state (ENU) into simulated sensor readings
+Converts physics world-frame state (ENU) into simulated sensor readings
 in the body frame / NED convention expected by ArduPilot.
 
 Simulated sensors:
@@ -17,7 +17,7 @@ Noise model:
   (Pixhawk 6C: ICM-42688-P / ICM-20649 specs)
 
 Coordinate frames:
-  ENU (MBDyn):  X = East, Y = North, Z = Up
+  ENU:  X = East, Y = North, Z = Up
   NED (ArduPilot): X = North, Y = East, Z = Down
   Body frame:   defined by R_hub rotation matrix (columns = body axes in world)
 
@@ -61,7 +61,7 @@ def _rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
     #   roll   = atan2(R[2,1], R[2,2])
     #   yaw    = atan2(R[1,0], R[0,0])
     #
-    # (note: MBDyn uses column-major, but numpy is row-major, so R[row,col])
+    # (note: numpy is row-major, so R[row,col])
 
     # Clamp to avoid domain errors from floating point drift
     sin_pitch = float(np.clip(-R[2, 0], -1.0, 1.0))
@@ -153,13 +153,12 @@ class SensorSim:
         vel_enu:        np.ndarray,   # (3,) hub velocity in ENU [m/s]
         R_hub:          np.ndarray,   # (3,3) body→world rotation matrix
         omega_body:     np.ndarray,   # (3,) angular velocity in WORLD frame [rad/s]
-                                      #       (MBDyn returns omega in world frame)
         accel_world_enu: np.ndarray,  # (3,) hub acceleration in world ENU [m/s²]
                                       #       = (vel_new - vel_old) / dt
         dt:             float,        # time step [s] (unused; for API consistency)
     ) -> dict:
         """
-        Compute simulated sensor outputs from MBDyn world-frame state.
+        Compute simulated sensor outputs from physics world-frame state.
 
         Returns
         -------

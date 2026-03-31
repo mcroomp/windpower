@@ -518,14 +518,15 @@ def main():
         description="Analyse EKF vs. physics consistency after a test_acro_hold run.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    log_dir = sim_dir / "logs"
     parser.add_argument("--telemetry",  type=Path,
-                        default=sim_dir / "telemetry.csv",
+                        default=log_dir / "telemetry.csv",
                         help="Mediator telemetry CSV (400 Hz physics ground truth)")
     parser.add_argument("--flight",     type=Path,
-                        default=sim_dir / "flight_data.json",
+                        default=log_dir / "flight_data.json",
                         help="MAVLink capture JSON (EKF output from hold loop)")
     parser.add_argument("--out",        type=Path,
-                        default=sim_dir / "ekf_consistency.png",
+                        default=log_dir / "ekf_consistency.png",
                         help="Output plot path")
     parser.add_argument("--home-z-enu", type=float, default=None,
                         help="Hub home ENU Z [m] (default: read from telemetry first sample)")

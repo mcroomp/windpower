@@ -32,7 +32,7 @@ import rotor_definition as rd
 from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
-from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from controller import orbit_tracked_body_z_eq, compute_rate_cmd, RatePID
 from planner import HoldPlanner
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
@@ -52,6 +52,12 @@ OMEGA_SPIN0   = _IC.omega_spin
 
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
+
+# Two-loop controller gains (see controller.py RatePID docstring for derivation).
+# Outer loop: compute_rate_cmd converts body_z error (rad) → rate setpoint (rad/s).
+# Inner loop: RatePID converts rate error (rad/s) → normalised swashplate tilt [-1,1].
+KP_OUTER = 2.5   # outer P gain [rad/s per rad]  — matches hardware compute_rate_cmd call
+KP_INNER = RatePID.DEFAULT_KP  # inner P gain — calibrated to legacy kd=0.2 behaviour
 
 WIND = np.array([10.0, 0.0, 0.0])
 
@@ -81,6 +87,11 @@ def _run(t_sim: float = T_SIM):
     ic_tether_dir0  = POS0 / np.linalg.norm(POS0)
     ic_body_z_eq0   = BODY_Z0.copy()
 
+    # Simulated ACRO rate PIDs (one per swashplate axis).
+    # kp_inner calibrated to match legacy kd=0.2 damping (see RatePID docstring).
+    pid_lon = RatePID(kp=KP_INNER)   # lon axis: body_x error → tilt_lon
+    pid_lat = RatePID(kp=KP_INNER)   # lat axis: body_y error → tilt_lat
+
     for i in range(int(t_sim / DT)):
         t = i * DT
 
@@ -92,23 +103,27 @@ def _run(t_sim: float = T_SIM):
             "omega_spin": omega_spin,
             "t_free":     t,
         }
-        cmd = trajectory.step(state_pkt, DT)
+        trajectory.step(state_pkt, DT)
         # cmd["attitude_q"] == identity → Mode_RAWES stays at tether-aligned natural equilibrium
 
-        # Mode_RAWES: orbit tracking → body_z_eq
+        # Mode_RAWES outer loop: orbit tracking → body_z_eq → rate setpoint
         body_z_eq = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
+        bz_now    = hub_state["R"][:, 2]
+        rate_sp   = compute_rate_cmd(bz_now, body_z_eq, hub_state["R"],
+                                     kp=KP_OUTER, kd=0.0)
 
-        # Mode_RAWES: attitude controller → tilt
-        sw = compute_swashplate_from_state(
-            hub_state  = hub_state,
-            anchor_pos = ANCHOR,
-            body_z_eq  = body_z_eq,
-        )
+        # Mode_RAWES inner loop: rate PID → normalised swashplate tilt
+        # Strip spin (body_z in body frame = [0,0,1]) before feeding to PIDs.
+        omega_body          = hub_state["R"].T @ hub_state["omega"]
+        omega_body_orbital  = omega_body.copy()
+        omega_body_orbital[2] = 0.0
+        tilt_lon =  pid_lon.update(rate_sp[0],  omega_body_orbital[0], DT)
+        tilt_lat = -pid_lat.update(rate_sp[1],  omega_body_orbital[1], DT)
 
         result = aero.compute_forces(
             collective_rad=_IC.coll_eq_rad,
-            tilt_lon=sw["tilt_lon"],
-            tilt_lat=sw["tilt_lat"],
+            tilt_lon=tilt_lon,
+            tilt_lat=tilt_lat,
             R_hub=hub_state["R"],
             v_hub_world=hub_state["vel"],
             omega_rotor=omega_spin,
@@ -123,8 +138,6 @@ def _run(t_sim: float = T_SIM):
 
         omega_spin = max(OMEGA_SPIN_MIN,
                          omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
-
-        M_orbital += -50.0 * hub_state["omega"]
 
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
@@ -147,9 +160,9 @@ def _run(t_sim: float = T_SIM):
                 "omega_spin":          omega_spin,
                 "tether_tension":      tension_now,
                 "tether_rest_length":  tether.rest_length,
-                "swash_collective":    sw["collective_rad"],
-                "swash_tilt_lon":      sw["tilt_lon"],
-                "swash_tilt_lat":      sw["tilt_lat"],
+                "swash_collective":    _IC.coll_eq_rad,
+                "swash_tilt_lon":      tilt_lon,
+                "swash_tilt_lat":      tilt_lat,
                 "body_z_eq":           body_z_eq.tolist(),
                 "wind_enu":            WIND.tolist(),
             })
@@ -207,9 +220,15 @@ def test_zero_tilt_at_equilibrium():
     # Mode_RAWES orbit tracking at t=0: body_z_eq = BODY_Z0 (no azimuthal offset)
     ic_tether_dir0 = POS0 / np.linalg.norm(POS0)
     body_z_eq      = orbit_tracked_body_z_eq(POS0, ic_tether_dir0, BODY_Z0)
-    sw = compute_swashplate_from_state(hub_state, ANCHOR, body_z_eq=body_z_eq)
-    assert abs(sw["tilt_lon"]) < 1e-6, f"tilt_lon={sw['tilt_lon']:.6f} at equilibrium (expected 0)"
-    assert abs(sw["tilt_lat"]) < 1e-6, f"tilt_lat={sw['tilt_lat']:.6f} at equilibrium (expected 0)"
+    bz_now         = R0[:, 2]
+    rate_sp        = compute_rate_cmd(bz_now, body_z_eq, R0, kp=KP_OUTER, kd=0.0)
+    # At equilibrium bz_now == body_z_eq → rate_sp == 0 → PIDs output 0 tilt
+    pid_lon = RatePID(kp=KP_INNER)
+    pid_lat = RatePID(kp=KP_INNER)
+    tilt_lon =  pid_lon.update(rate_sp[0], 0.0, DT)
+    tilt_lat = -pid_lat.update(rate_sp[1], 0.0, DT)
+    assert abs(tilt_lon) < 1e-6, f"tilt_lon={tilt_lon:.6f} at equilibrium (expected 0)"
+    assert abs(tilt_lat) < 1e-6, f"tilt_lat={tilt_lat:.6f} at equilibrium (expected 0)"
 
 
 # ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────

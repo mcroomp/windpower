@@ -46,15 +46,17 @@ import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
-from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, col_min_for_altitude_rad
 from planner     import DeschutterPlanner, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
 
-_log = SimtestLog(__file__)
-_IC  = load_ic()
+_log   = SimtestLog(__file__)
+_IC    = load_ic()
+_ROTOR = rd.default()
+_AERO  = create_aero(_ROTOR)
 
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT            = 1.0 / 400.0
@@ -76,20 +78,26 @@ BREAK_LOAD_N  = 620.0
 # ── De Schutter cycle parameters ──────────────────────────────────────────────
 T_REEL_OUT    = 30.0    # s
 T_REEL_IN     = 30.0    # s
-T_TRANSITION  =  5.0    # s — body_z blend from tether-aligned to vertical at reel-in start
 V_REEL_OUT    =  0.4    # m/s
 V_REEL_IN     =  0.4    # m/s
 
+# Reel-in tilt target and transition time
+XI_REEL_IN_DEG  = 80.0   # ° from wind — aerodynamic equilibrium ~80° at this target
+# Transition time: angle to cover / slew_rate + margin
+import math as _math
+_XI_START_DEG   = 30.0   # approximate tether elevation at reel-in start
+BODY_Z_SLEW_RATE = _ROTOR.body_z_slew_rate_rad_s   # derived from gyroscopic limit
+T_TRANSITION    = _math.radians(XI_REEL_IN_DEG - _XI_START_DEG) / BODY_Z_SLEW_RATE + 1.5
+
 # Tension setpoints
 DEFAULT_TENSION_OUT = 200.0   # N
-DEFAULT_TENSION_IN  =  80.0   # N — must be high enough for altitude maintenance at ξ=55°
+DEFAULT_TENSION_IN  =  55.0   # N — above min achievable at xi=80° with col_min_reel_in
 
-# Mode_RAWES slew rate (matches config default body_z_slew_rate_rad_s)
-BODY_Z_SLEW_RATE = 0.12       # rad/s
-
-# Collective normalisation (matches config deschutter col_min/col_max)
-COL_MIN_RAD = -0.28    # −16° (SkewedWakeBEM: zero-thrust ≈ -0.34 rad; -0.28 safe floor)
-COL_MAX_RAD =  0.0     #   0°
+# Collective range
+# col_min_reel_in: minimum collective to sustain Fz ≥ weight at xi=80°, derived from aero model
+COL_MIN_RAD          = -0.28   # reel-out floor [rad]
+COL_MAX_RAD          =  0.10   # extended to support altitude at high tilt [rad]
+COL_MIN_REEL_IN_RAD  = col_min_for_altitude_rad(_AERO, XI_REEL_IN_DEG, _ROTOR.mass_kg)
 
 # WinchController safety limit
 TENSION_SAFETY_N = 496.0   # ≈ 80% break load
@@ -98,14 +106,18 @@ TENSION_SAFETY_N = 496.0   # ≈ 80% break load
 # ── Main simulation ────────────────────────────────────────────────────────────
 
 def _run_deschutter_cycle(
-    tension_out:  float = DEFAULT_TENSION_OUT,
-    tension_in:   float = DEFAULT_TENSION_IN,
-    v_reel_out:   float = V_REEL_OUT,
-    v_reel_in:    float = V_REEL_IN,
-    t_reel_out:   float = T_REEL_OUT,
-    t_reel_in:    float = T_REEL_IN,
-    t_transition: float = T_TRANSITION,
-    n_cycles:     int   = 1,
+    tension_out:          float = DEFAULT_TENSION_OUT,
+    tension_in:           float = DEFAULT_TENSION_IN,
+    v_reel_out:           float = V_REEL_OUT,
+    v_reel_in:            float = V_REEL_IN,
+    t_reel_out:           float = T_REEL_OUT,
+    t_reel_in:            float = T_REEL_IN,
+    t_transition:         float = T_TRANSITION,
+    n_cycles:             int   = 1,
+    xi_reel_in_deg:       float = XI_REEL_IN_DEG,
+    col_max_rad:          float = COL_MAX_RAD,
+    col_min_reel_in_rad:  float = COL_MIN_REEL_IN_RAD,
+    body_z_slew_rate:     float = BODY_Z_SLEW_RATE,
 ) -> dict:
     """
     Run n_cycles De Schutter-style reel-out / reel-in pumping cycles.
@@ -138,8 +150,10 @@ def _run_deschutter_cycle(
         tension_out     = tension_out,
         tension_in      = tension_in,
         wind_enu        = WIND,
-        col_min_rad     = COL_MIN_RAD,
-        col_max_rad     = COL_MAX_RAD,
+        col_min_rad              = COL_MIN_RAD,
+        col_max_rad              = col_max_rad,
+        xi_reel_in_deg           = xi_reel_in_deg,
+        col_min_reel_in_rad      = col_min_reel_in_rad,
     )
 
     # ── WinchController (ground station) ─────────────────────────────────────
@@ -204,7 +218,7 @@ def _run_deschutter_cycle(
 
         # ── Mode_RAWES: collective passthrough (SET_ATTITUDE_TARGET thrust) ───
         # Pixhawk denormalises thrust → collective_rad for aero model
-        collective_rad = COL_MIN_RAD + cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD)
+        collective_rad = COL_MIN_RAD + cmd["thrust"] * (col_max_rad - COL_MIN_RAD)
 
         # ── Mode_RAWES: orbit tracking + rate-limited slew → body_z_eq ───────
         bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
@@ -216,7 +230,7 @@ def _run_deschutter_cycle(
             bz_target = quat_apply(_aq, np.array([0.0, 0.0, 1.0]))
             _cos_a = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
             _angle = math.acos(_cos_a)
-            _max_step = BODY_Z_SLEW_RATE * DT
+            _max_step = body_z_slew_rate * DT
             if _angle > 1e-6:
                 _alpha_slew = min(1.0, _max_step / _angle)
                 _sin_a = math.sin(_angle)
@@ -376,11 +390,11 @@ def test_deschutter_net_energy_positive():
 
 def test_deschutter_reel_in_tilt_achieved():
     """
-    During steady reel-in (after transition), body_z must be within ±10° of the
-    constrained target ξ = 55° from the wind direction.
+    During steady reel-in (after transition), body_z must be within ±10° of
+    XI_REEL_IN_DEG (the module default reel-in tilt target).
 
-    The 55° constraint keeps the model within BEM validity (v_axial > 0) and the
-    cyclic linearity range.  Controller lag is allowed ±10° around the target.
+    The aerodynamic equilibrium settles ~1–3° below the commanded target due
+    to controller lag; ±10° tolerance accommodates this.
     """
     r = _run_deschutter_cycle()
     skip = int(T_TRANSITION) + 2   # allow a couple of extra seconds for settling
@@ -388,10 +402,9 @@ def test_deschutter_reel_in_tilt_achieved():
     if not tilts_steady:
         pytest.skip("No steady reel-in data to check tilt")
     mean_tilt = float(np.mean(tilts_steady))
-    xi_target = 55.0   # default xi_reel_in_deg in DeschutterPlanner
-    assert xi_target - 10.0 <= mean_tilt <= xi_target + 10.0, (
-        f"Steady reel-in mean tilt ξ = {mean_tilt:.1f}° not within ±10° of "
-        f"target {xi_target:.0f}° — body_z not tracking constrained reel-in orientation"
+    assert XI_REEL_IN_DEG - 10.0 <= mean_tilt <= XI_REEL_IN_DEG + 10.0, (
+        f"Steady reel-in mean tilt = {mean_tilt:.1f}° not within ±10° of "
+        f"target {XI_REEL_IN_DEG:.0f}° — body_z not tracking reel-in orientation"
     )
 
 

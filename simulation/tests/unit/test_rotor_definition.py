@@ -23,7 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import rotor_definition as rd
-from aero import RotorAero
+from aero import create_aero
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -290,12 +290,11 @@ class TestAeroKwargs:
         kw = r.aero_kwargs()
         assert kw["aspect_ratio"] == pytest.approx(r.aspect_ratio)
 
-    def test_can_construct_RotorAero(self):
-        r = rd.load("beaupoil_2026")
-        aero = RotorAero(r)
-        assert aero.n_blades == r.n_blades
-        assert aero.r_cp == pytest.approx(r.r_cp_m, rel=1e-6)
-        assert aero.S_w  == pytest.approx(r.S_w_m2,  rel=1e-6)
+    def test_can_construct_SkewedWakeBEM(self):
+        r    = rd.load("beaupoil_2026")
+        aero = create_aero(r)
+        assert aero.N_BLADES == r.n_blades
+        assert aero.R_TIP    == pytest.approx(r.radius_m, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -318,22 +317,19 @@ class TestDynamicsKwargs:
 
 
 # ---------------------------------------------------------------------------
-# RotorAero.from_definition — produces valid forces from beaupoil_2026 rotor definition
+# SkewedWakeBEM.from_definition — produces valid forces from beaupoil_2026
 # ---------------------------------------------------------------------------
 
 class TestFromDefinition:
-    """RotorAero.from_definition(beaupoil) must produce finite, non-zero forces
-    using the beaupoil_2026 rotor definition (RotorAero now requires a
-    RotorDefinition argument; bare RotorAero() is no longer valid)."""
+    """create_aero(beaupoil) must produce finite, non-zero forces."""
 
     def _aero_forces(self, aero, t=10.0, collective=0.05, tilt_lon=0.0, tilt_lat=0.0,
                      wind=None, omega_rotor=20.148):
         if wind is None:
             wind = np.array([10.0, 0.0, 0.0])
-        R = np.eye(3)
         return aero.compute_forces(
             t=t,
-            R_hub=R,
+            R_hub=np.eye(3),
             v_hub_world=np.zeros(3),
             wind_world=wind,
             collective_rad=collective,
@@ -343,44 +339,28 @@ class TestFromDefinition:
         )
 
     def test_from_definition_produces_valid_forces(self):
-        # Verify RotorAero.from_definition(beaupoil) runs and produces finite non-zero forces.
-        # (Previously compared against RotorAero() hardcoded defaults, but beaupoil now uses
-        # chord=0.20 m and CD0=0.007 which differ from the RotorAero._DEFAULTS values.)
-        r = rd.load("beaupoil_2026")
-        aero_from_def = RotorAero.from_definition(r)
-        forces = self._aero_forces(aero_from_def)
-        assert np.all(np.isfinite(forces)), "forces must be finite"
-        assert np.any(forces != 0.0), "forces must be non-zero"
+        r    = rd.load("beaupoil_2026")
+        aero = create_aero(r)
+        f    = self._aero_forces(aero)
+        assert np.all(np.isfinite(f)), "forces must be finite"
+        assert np.any(f.F_world != 0.0), "forces must be non-zero"
 
     def test_de_schutter_gives_different_thrust_than_beaupoil(self):
-        beaupoil  = rd.load("beaupoil_2026")
-        deschutter = rd.load("de_schutter_2018")
-
-        aero_b = RotorAero.from_definition(beaupoil)
-        aero_d = RotorAero.from_definition(deschutter)
-
-        forces_b = self._aero_forces(aero_b)
-        forces_d = self._aero_forces(aero_d)
-
-        # Thrust is F[2] (z-component = along disk normal in identity-R frame)
-        T_beaupoil    = forces_b[2]
-        T_de_schutter = forces_d[2]
-
+        aero_b = create_aero(rd.load("beaupoil_2026"))
+        aero_d = create_aero(rd.load("de_schutter_2018"))
+        T_b = float(self._aero_forces(aero_b).F_world[2])
+        T_d = float(self._aero_forces(aero_d).F_world[2])
         # De Schutter: 3 blades, shorter chord → different thrust than 4-blade Beaupoil
-        # They should NOT be equal
-        assert abs(T_beaupoil - T_de_schutter) > 1.0, (
-            f"Thrust should differ between rotors: beaupoil={T_beaupoil:.1f}N, "
-            f"de_schutter={T_de_schutter:.1f}N"
+        assert abs(T_b - T_d) > 1.0, (
+            f"Thrust should differ between rotors: beaupoil={T_b:.1f}N, de_schutter={T_d:.1f}N"
         )
 
     def test_from_definition_sets_correct_geometry(self):
-        r = rd.load("beaupoil_2026")
-        aero = RotorAero.from_definition(r)
-        assert aero.r_cp    == pytest.approx(r.r_cp_m,  rel=1e-6)
-        assert aero.S_w     == pytest.approx(r.S_w_m2,  rel=1e-6)
-        assert aero.r_root  == pytest.approx(r.root_cutout_m)
-        assert aero.r_tip   == pytest.approx(r.radius_m)
-        assert aero.n_blades == r.n_blades
+        r    = rd.load("beaupoil_2026")
+        aero = create_aero(r)
+        assert aero.R_ROOT   == pytest.approx(r.root_cutout_m)
+        assert aero.R_TIP    == pytest.approx(r.radius_m)
+        assert aero.N_BLADES == r.n_blades
 
 
 # ---------------------------------------------------------------------------

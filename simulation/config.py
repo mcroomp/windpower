@@ -80,8 +80,10 @@ DEFAULTS: dict = {
 
     # ── Mode_RAWES attitude parameters ───────────────────────────────────────
     # body_z_slew_rate_rad_s: max angular slew rate for body_z transitions [rad/s].
-    #   At 0.40 rad/s a 0.78 rad (45°) reel-in transition completes in ~2 s,
-    #   minimising altitude loss during the body_z tether→vertical transition.
+    #   Derived from RotorDefinition.body_z_slew_rate_rad_s = 2% of gyroscopic limit.
+    #   beaupoil_2026: max_body_z_rate=20.1 rad/s → 0.02×20.1 = 0.40 rad/s.
+    #   At 0.40 rad/s a 50° reel-in transition (xi=80°) completes in ~2.2 s.
+    #   Update when rotor changes: rd.default().body_z_slew_rate_rad_s.
     "body_z_slew_rate_rad_s":    0.40,
 
     # ── Sensor model ──────────────────────────────────────────────────────────
@@ -108,19 +110,22 @@ DEFAULTS: dict = {
         "deschutter": {
             "t_reel_out":      30.0,   # reel-out phase duration [s]
             "t_reel_in":       30.0,   # reel-in phase duration [s]
-            "t_transition":    15.0,   # body_z blend window at phase boundary [s] (longer = tension drops more slowly during body_z transition)
+            # t_transition derived: radians(xi_reel_in - 30) / body_z_slew_rate + 1.5 s margin.
+            # At slew=0.40 rad/s and xi=80°: (50°×π/180)/0.40 + 1.5 ≈ 3.7 s.
+            "t_transition":     3.7,   # body_z slew window [s]
             "v_reel_out":       0.4,   # winch pay-out speed [m/s]
             "v_reel_in":        0.4,   # winch reel-in speed [m/s]
             "tension_out":    200.0,   # reel-out tension setpoint [N]
-            "tension_in":     100.0,   # reel-in tension setpoint [N]
-            "xi_reel_in_deg":  55.0,   # De Schutter reel-in tilt [deg] from wind
+            "tension_in":      55.0,   # reel-in tension setpoint [N] — above min at xi=80°
+            # xi=80°: aerodynamic equilibrium settles ~80°; SkewedWakeBEM valid to ~85°.
+            "xi_reel_in_deg":  80.0,   # De Schutter reel-in tilt [deg] from wind
             # Tension PI (trajectory planner — ground station, raws_mode.md §3.2)
             "tension_kp":      5e-4,   # proportional gain [rad/N]
             "tension_ki":      1e-4,   # integral gain [rad/(N·s)]
-            # Collective normalisation (same values as Pixhawk denorm in mediator)
-            "col_min_rad":         -0.28,  # reel-out min [rad]: safe at tether-aligned body_z (zero-thrust at -0.34)
-            "col_min_reel_in_rad": -0.20,  # reel-in min [rad]: safe at xi=55° body_z (zero-thrust at -0.228)
-            "col_max_rad":          0.0,   # max collective [rad]
+            # col_min_reel_in derived: binary search Fz=weight at xi=80° → 0.069+0.01=0.079 rad.
+            "col_min_rad":         -0.28,  # reel-out floor [rad]
+            "col_min_reel_in_rad":  0.079, # reel-in floor [rad]: altitude floor at xi=80°
+            "col_max_rad":          0.10,  # extended for high-tilt altitude support [rad]
         },
     },
 }

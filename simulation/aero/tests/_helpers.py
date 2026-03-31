@@ -21,7 +21,7 @@ for _p in [str(_SIM_DIR), str(_AERO_DIR), str(_HERE)]:
         sys.path.insert(0, _p)
 
 import rotor_definition as rd
-from aero import RotorAero, DeSchutterAero
+from aero import DeSchutterAero
 from aero_prandtl_bem    import PrandtlBEM
 from aero_skewed_wake    import SkewedWakeBEM
 from aero_glauert_states import GlauertStateBEM
@@ -89,5 +89,5 @@ EDGEWISE_KWARGS = dict(
     t              = 10.0,
 )
 
-ALL_MODELS = [RotorAero, DeSchutterAero, PrandtlBEM, SkewedWakeBEM, GlauertStateBEM]
+ALL_MODELS = [DeSchutterAero, PrandtlBEM, SkewedWakeBEM, GlauertStateBEM]
 ALL_MODEL_NAMES = [c.__name__ for c in ALL_MODELS]

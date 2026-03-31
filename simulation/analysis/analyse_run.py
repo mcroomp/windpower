@@ -32,9 +32,10 @@ from typing import Optional
 
 _SIM_DIR = Path(__file__).resolve().parents[1]   # simulation/
 
-_DEFAULT_MEDIATOR = _SIM_DIR / "mediator_last_run.log"
-_DEFAULT_PYTEST   = _SIM_DIR / "pytest_last_run.log"
-_DEFAULT_GCS      = _SIM_DIR / "gcs_last_run.log"
+_LOG_DIR          = _SIM_DIR / "logs"
+_DEFAULT_MEDIATOR = _LOG_DIR / "mediator_last_run.log"
+_DEFAULT_PYTEST   = _LOG_DIR / "pytest_last_run.log"
+_DEFAULT_GCS      = _LOG_DIR / "gcs_last_run.log"
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +473,7 @@ def _plot(r: RunReport) -> None:
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    out = _SIM_DIR / "last_run_analysis.png"
+    out = _LOG_DIR / "last_run_analysis.png"
     plt.savefig(out, dpi=120)
     print(f"\n  Plot saved → {out}")
     plt.show()

@@ -233,6 +233,28 @@ Peak tension            :  455 N  (< 496 N = 80% break load)
 Min physics altitude    :   5.7 m (> 2.0 m limit)
 ```
 
+---
+
+## Post-M3 Infrastructure Changes
+
+### test_acro_hold known failure (not a regression)
+
+`test_acro_hold` fails with "Hub crashed: min ENU Z < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick ACRO hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_60s`) passes.
+
+**Root cause:** Kinematic phase ends with ~0.9 m/s orbital velocity. `HoldPlanner` → `thrust=0.0 → collective=col_min=−0.28 rad` provides barely-positive lift at shallow tether elevation (~8°). Hub spirals down. `test_closed_loop_60s` starts from near-zero IC velocity so lift is sufficient.
+
+### Output paths moved to simulation/logs/
+
+All runtime artifacts (logs, telemetry CSVs, analysis PNGs, unit test artefacts) now write to `simulation/logs/` instead of the simulation root or source directories.
+
+### Stack test SITL cleanup: _kill_by_port()
+
+`sim_vehicle.py` spawns `arducopter-heli` in a new process group so `os.killpg()` left it running and holding port 5760. `_kill_by_port()` in `stack_utils.py` finds and SIGKILLs the process via `/proc/net/tcp` inode lookup. Called in all teardowns after `_terminate_process()`. Port check now retries for 15 s instead of failing immediately.
+
+### stack_utils.py: central stack test helpers
+
+Shared infrastructure moved from `conftest.py` and `test_stack_integration.py` to `simulation/tests/stack/stack_utils.py`: env-var constants, `_configure_logging`, `copy_logs_to_dir`, `check_ports_free`, `_resolve_sim_vehicle`, `_launch_sitl`, `_terminate_process`, `_kill_by_port`. `test_stack_integration.py` re-exports for backward compatibility.
+
 ### Minimum tension_in for altitude maintenance at ξ=55°
 
 At ξ=55°, the vertical thrust component from the rotor must exceed hub weight (5 kg × 9.81 = 49 N) plus tether downward component. Testing showed tension_in=20 N (matching unit test default) was insufficient — the TensionPI reduced collective to near col_min=−0.20 where vertical thrust ≈ 38 N < gravity → hub fell.

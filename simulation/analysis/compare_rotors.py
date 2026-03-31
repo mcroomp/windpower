@@ -472,7 +472,7 @@ Possible improvements for edgewise flow:
   3. CFD lookup table (C81/C8-4):
        Pre-compute thrust coefficient C_T vs (μ, C_T_prev) sweep in
        a 2D lookup table from CFD/OpenFOAM.  Interpolate in real-time.
-       Already supported by MBDyn (which we archived) via C81 tables.
+       Would require C81 lookup tables pre-computed from CFD/OpenFOAM.
 
   4. Empirical power correction factor (quick fix):
        Multiply T by a correction factor f(ξ) that smoothly goes to
@@ -583,7 +583,7 @@ def _plot(rows_b, rows_d, pump_b, pump_d):
     ax6.legend(fontsize=8)
     ax6.grid(True, alpha=0.3, axis='y')
 
-    out_path = Path(__file__).parent / "rotor_comparison.png"
+    out_path = Path(__file__).parent.parent / "logs" / "rotor_comparison.png"
     fig.savefig(str(out_path), dpi=130, bbox_inches="tight")
     print(f"Plot saved: {out_path}")
     plt.close(fig)

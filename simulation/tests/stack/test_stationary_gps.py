@@ -15,7 +15,6 @@ import json
 import logging
 import math
 import os
-import shutil
 import signal
 import socket
 import struct
@@ -39,8 +38,9 @@ from test_stack_integration import (
     _launch_sitl,
     _resolve_sim_vehicle,
     _terminate_process,
+    _kill_by_port,
 )
-from conftest import StackConfig, _configure_logging
+from conftest import StackConfig, _configure_logging, copy_logs_to_dir
 from pymavlink import mavutil as _mavutil
 from gcs import RawesGCS
 
@@ -368,9 +368,9 @@ def test_stationary_gps_fusion(tmp_path):
         gcs.close()
         _terminate_process(sitl_proc)
         _terminate_process(stub_proc)
-        if stub_log.exists():
-            shutil.copy(stub_log, sim_dir / "stub_mediator_last_run.log")
-        if sitl_log.exists():
-            shutil.copy(sitl_log, sim_dir / "sitl_last_run.log")
-        if gcs_log.exists():
-            shutil.copy(gcs_log, sim_dir / "gcs_last_run.log")
+        _kill_by_port(StackConfig.SITL_GCS_PORT)
+        copy_logs_to_dir(sim_dir / "logs", {
+            "stub_mediator_last_run.log": stub_log,
+            "sitl_last_run.log":          sitl_log,
+            "gcs_last_run.log":           gcs_log,
+        })

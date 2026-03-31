@@ -1,10 +1,10 @@
 """
 dynamics.py — Python RK4 6-DOF rigid-body integrator for RAWES hub
 
-Replaces MBDyn for the current simulation phase.  Integrates Newton-Euler
-equations of motion for a single rigid body in the ENU world frame.
+Integrates Newton-Euler equations of motion for a single rigid body in the
+ENU world frame.
 
-State vector (identical layout to MBDyn socket output, for drop-in compatibility):
+State vector:
     pos     (3,)  hub position in ENU world frame [m]
     vel     (3,)  hub velocity in ENU world frame [m/s]
     R       (3,3) rotation matrix body → world (orthonormal)
@@ -12,12 +12,6 @@ State vector (identical layout to MBDyn socket output, for drop-in compatibility
 
 Gravity is applied internally as F_grav = [0, 0, −m·g] in the world frame.
 The caller supplies only aerodynamic + tether forces/moments — no gravity.
-
-The return dict from step() uses the same keys as MBDynInterface.recv_state():
-    {"pos": ..., "vel": ..., "R": ..., "omega": ...}
-so mediator.py needs no changes to how it reads hub state.
-
-See simulation/mbdyn_reference.md for the MBDyn integration this replaces.
 """
 
 import numpy as np
@@ -42,7 +36,6 @@ class RigidBodyDynamics:
         Initial rotation matrix body→world.  Defaults to identity (upright hub).
     omega0 : array-like, shape (3,)
         Initial angular velocity in the WORLD frame [rad/s].
-        (Convention matches MBDyn socket output.)
     g : float
         Gravitational acceleration [m/s²].  Applied as −g in the ENU Z direction.
     reorth_interval : int
@@ -172,8 +165,7 @@ class RigidBodyDynamics:
 
         Returns
         -------
-        dict with keys "pos", "vel", "R", "omega" — identical to
-        MBDynInterface.recv_state() output format.
+        dict with keys "pos", "vel", "R", "omega".
         """
         p, v, R, ow = self._pos, self._vel, self._R, self._omega
 

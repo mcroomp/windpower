@@ -10,6 +10,4 @@ These are not imported by `mediator.py` or any test fixture.
 | `merge_logs.py` | Merge mediator/SITL/GCS logs in timestamp order | Active |
 | `analyse_30s_dip.py` | Diagnostic for 30 s guided flight altitude dip | Historical |
 | `plot_30s_mechanism.py` | Annotated diagram of the 30 s dip mechanism | Historical |
-| `airfoil_gen.py` | SG6042 C81 table generator for MBDyn | Historical — MBDyn removed |
-| `validate.py` | MBDyn input file syntax validator | Historical — MBDyn removed |
 | `build.py` | Docker image build progress monitor | Active |

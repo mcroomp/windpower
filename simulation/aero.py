@@ -6,7 +6,6 @@ so callers only need to change one argument to swap models:
 
     rotor = rd.default()
     aero  = create_aero(rotor)                       # SkewedWakeBEM (default)
-    aero  = create_aero(rotor, model="rotor")        # RotorAero (fast, lumped)
     aero  = create_aero(rotor, model="deschutter")   # DeSchutterAero (per-blade)
     aero  = create_aero(rotor, model="prandtl")      # PrandtlBEM (tip-loss)
     aero  = create_aero(rotor, model="glauert")      # GlauertStateBEM (inflow states)
@@ -19,10 +18,9 @@ All models expose the same interface:
     M_orbital   = result.M_orbital              # orbital moments only
 
 Model implementations:
-    aero_rotor.py           — RotorAero:        lumped BEM, empirical H-force + cyclic
-    aero_deschutter.py      — DeSchutterAero:   per-blade, natural H-force + cyclic
-    aero/aero_prandtl_bem.py   — PrandtlBEM:   DeSchutter + Prandtl tip/root loss
-    aero/aero_skewed_wake.py   — SkewedWakeBEM: PrandtlBEM + Coleman skewed-wake (DEFAULT)
+    aero_deschutter.py         — DeSchutterAero:   per-blade, natural H-force + cyclic
+    aero/aero_prandtl_bem.py   — PrandtlBEM:       DeSchutter + Prandtl tip/root loss
+    aero/aero_skewed_wake.py   — SkewedWakeBEM:    PrandtlBEM + Coleman skewed-wake (DEFAULT)
     aero/aero_glauert_states.py — GlauertStateBEM: lumped + Glauert inflow states
 """
 
@@ -78,7 +76,6 @@ class AeroResult:
         return self._as_array()
 
 
-from aero_rotor        import RotorAero        # noqa: F401  (re-exported)
 from aero_deschutter   import DeSchutterAero   # noqa: F401  (re-exported)
 from aero_prandtl_bem  import PrandtlBEM       # noqa: F401  (re-exported)
 from aero_skewed_wake  import SkewedWakeBEM    # noqa: F401  (re-exported)
@@ -86,13 +83,12 @@ from aero_glauert_states import GlauertStateBEM  # noqa: F401  (re-exported)
 
 __all__ = [
     "AeroResult",
-    "RotorAero", "DeSchutterAero",
+    "DeSchutterAero",
     "PrandtlBEM", "SkewedWakeBEM", "GlauertStateBEM",
     "create_aero",
 ]
 
 _MODELS = {
-    "rotor":        RotorAero,
     "deschutter":   DeSchutterAero,
     "prandtl":      PrandtlBEM,
     "skewed_wake":  SkewedWakeBEM,
@@ -112,7 +108,6 @@ def create_aero(defn=None, model: str = "skewed_wake"):
         "skewed_wake"  (default) — SkewedWakeBEM: per-blade + Prandtl + Coleman skew
         "prandtl"                — PrandtlBEM: per-blade + Prandtl tip/root loss
         "deschutter"             — DeSchutterAero: per-blade strip theory
-        "rotor"                  — RotorAero: fast lumped BEM, empirical H-force
         "glauert"                — GlauertStateBEM: lumped + Glauert inflow states
 
     Returns
@@ -125,7 +120,6 @@ def create_aero(defn=None, model: str = "skewed_wake"):
     >>> from aero import create_aero
     >>> rotor = rd.default()
     >>> aero = create_aero(rotor)                      # SkewedWakeBEM (default)
-    >>> aero = create_aero(rotor, "rotor")             # RotorAero (fast)
     """
     if defn is None:
         import rotor_definition as rd
@@ -155,8 +149,7 @@ if __name__ == "__main__":
     v_h   = np.zeros(3)
     R     = np.eye(3)
 
-    for label, aero in [("RotorAero",      create_aero(rotor, "rotor")),
-                        ("DeSchutterAero",  create_aero(rotor, "deschutter")),
+    for label, aero in [("DeSchutterAero",  create_aero(rotor, "deschutter")),
                         ("SkewedWakeBEM",   create_aero(rotor, "skewed_wake"))]:
         print(f"\n--- {label} ---")
         f0 = aero.compute_forces(0.0, 0.0, 0.0, R, v_h, 28.0, wind, t=0.0)

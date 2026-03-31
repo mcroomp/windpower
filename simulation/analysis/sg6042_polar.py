@@ -291,7 +291,7 @@ def plot_polars(polars: list[dict]) -> None:
         ax6.text(bar.get_x() + bar.get_width()/2, val + 0.005, f"{val:.3f}",
                  ha="center", va="bottom", fontsize=7)
 
-    out = Path(__file__).parent / "sg6042_polar.png"
+    out = Path(__file__).parent.parent / "logs" / "sg6042_polar.png"
     fig.savefig(str(out), dpi=130, bbox_inches="tight")
     print(f"Plot saved: {out}")
     plt.close(fig)
