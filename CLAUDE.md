@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED (`test_pumping_cycle.py`: net energy +1901 J, reel-in 55 N vs reel-out 211 N). Rotor definition abstracted into `rotor_definition.py` + YAML files; mediator/aero/dynamics wired to `beaupoil_2026.yaml`. 268 fast unit tests + 23 simtests passing. `ModeRAWES` ArduPilot firmware architecture fully designed (documented in `simulation/raws_mode.md`). Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED with SkewedWakeBEM (`test_pumping_cycle.py`: net energy +1396 J, reel-in 86 N vs reel-out 199 N, peak tension 455 N). SkewedWakeBEM is now the production aero model; RotorAero removed from production. 534 fast unit tests + 23 simtests passing. `ModeRAWES` ArduPilot firmware architecture fully designed (documented in `simulation/raws_mode.md`). Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
 
 See **[Phase 3 Plan](#phase-3-plan)** below for the full milestone breakdown.
 
@@ -77,22 +77,20 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### Control Theory
 | File | When to read |
 |------|-------------|
-| [flapmodel.md](flapmodel.md) | Full Weyel 2025 math model — aerodynamics, state space, flap dynamics, controller, parameter tables |
-| [summary.md](summary.md) | De Schutter et al. 2018 optimal control — pumping cycle, structural constraints, atmosphere model |
+| [deshutter.md](deshutter.md) | De Schutter et al. 2018 — pumping cycle, state variables, aerodynamics, structural constraints, parameter table |
 
 ### ArduPilot / Firmware
 | File | When to read |
 |------|-------------|
-| [ardupilot_implementation.md](ardupilot_implementation.md) | Swashplate config, Kaman flap lag problem, RSC, companion computer architecture |
 | [simulation/ARMING.md](simulation/ARMING.md) | **Arming reference** — RSC modes, motor interlock, EKF init sequence, failure modes. **Update whenever new arming behavior is discovered.** |
 | [simulation/heliparams.md](simulation/heliparams.md) | **EKF3 GPS fusion** — exact fusion conditions, required params, 10 s GPS-check delay. Read before debugging EKF3 CONST_POS_MODE. |
-| [simulation/raws_mode.md](simulation/raws_mode.md) | **ModeRAWES complete spec** — MAVLink protocol, C++ firmware (~160 lines), orbit tracking, tension PI, omega_spin, parameter table. |
+| [simulation/raws_mode.md](simulation/raws_mode.md) | **ModeRAWES complete spec** — MAVLink protocol, C++ firmware, orbit tracking, tension PI, omega_spin, ArduPilot parameter table, GB4008 config, Kaman flap lag notes. |
 
 ### Simulation Internals
 | File | When to read |
 |------|-------------|
-| [simulation/sim_internals.md](simulation/sim_internals.md) | Sensor design, controller functions, dynamics/aero/tether model details, initial state, startup freeze, known gaps |
-| [simulation/history.md](simulation/history.md) | Phase 2 accomplishments, Phase 3 M3 architecture decisions |
+| [simulation/sim_internals.md](simulation/sim_internals.md) | Sensor design, controller functions, aero model (SkewedWakeBEM), tether, pumping cycle COL_MIN rules, initial state, known gaps |
+| [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions — why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
 | [simulation/mbdyn_reference.md](simulation/mbdyn_reference.md) | MBDyn restoration instructions (archived; MBDyn removed from runtime) |
 
 ---
@@ -113,7 +111,8 @@ Phases 1 and 2 run on Windows with no Docker. Phase 3 requires Docker + ArduPilo
 simulation/
 ├── Core physics
 │   ├── dynamics.py          RK4 6-DOF rigid-body integrator
-│   ├── aero.py              BEM aerodynamic model (thrust, drag, cyclic moments)
+│   ├── aero.py              Facade: re-exports all aero models, create_aero() factory → SkewedWakeBEM
+│   ├── aero/                Per-blade BEM models (SkewedWakeBEM production; RotorAero archived)
 │   ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 │   └── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 │
@@ -218,7 +217,7 @@ simulation\tests\unit\.venv\Scripts\python.exe -m pip install numpy pytest matpl
 | Regenerate steady state | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight` |
 | **Post-run analysis** | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'` |
 | Post-run analysis (plot) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --plot'` |
-| Last run logs | `simulation/pytest_last_run.log`, `mediator_last_run.log`, `sitl_last_run.log`, `telemetry.csv` |
+| Last run logs | `simulation/logs/pytest_last_run.log` + `_passed.log` + `_failed.log` + `_summary.json`, `mediator_last_run.log`, `sitl_last_run.log`, `telemetry.csv` |
 
 ### Post-run analysis
 
@@ -270,17 +269,17 @@ See [simulation/sim_internals.md](simulation/sim_internals.md) for full sensor/c
 ## Current Implementation Limits
 
 1. **Single-body hub model** — no blade multibody dynamics, no flapping DOF
-2. **Rotor spin is a scalar ODE** — not fully integrated with orbital dynamics; gyroscopic coupling disabled
+2. **Rotor spin is a scalar ODE** — driven by `Q_spin` from SkewedWakeBEM; gyroscopic coupling (`M_spin`) computed but effect is small at current I_spin
 3. **Tether is tension-only elastic** — no sag, no distributed mass, no reel dynamics
-4. **Aerodynamics are first-order BEM** — no dynamic inflow, no wake model, no stall hysteresis
+4. **Aerodynamics are steady-state BEM** — no dynamic inflow, no stall hysteresis; Coleman skewed wake handles non-uniform induction
 5. **Anti-rotation motor not modeled** — internal force in single-body model; cancels out
-6. **Controller runs at 10 Hz in stack test** — ACRO RC override via MAVLink; truth-state controller runs at 400 Hz but only used in unit tests
+6. **Controller runs at 10 Hz in stack test** — ACRO RC override via MAVLink; truth-state controller runs at 400 Hz (unit tests and internal controller mode)
 
 ---
 
 ## Phase 3 Plan
 
-Four milestones. M1+M2 complete. M3 in progress. M4 not started.
+Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedWakeBEM). M4 not started.
 
 ### M1 — Wire Pumping Cycle into Mediator ✅
 - TensionController, orbit_tracked_body_z_eq, blend_body_z → `controller.py`
@@ -293,7 +292,8 @@ Four milestones. M1+M2 complete. M3 in progress. M4 not started.
 - **Gate:** 265 unit tests pass ✓
 
 ### M3 — ArduPilot Configuration & Pumping Cycle Stack Test (in progress)
-- [x] Run test_pumping_cycle — PASSED (reel-out 211 N, reel-in 55 N, net energy +1901 J)
+- [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (reel-out 199 N, reel-in 86 N, net energy +1396 J)
+- [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 534 unit + 23 simtests passing
 - [x] Design `ModeRAWES` firmware architecture — documented in `simulation/raws_mode.md`
 - [ ] Confirm H_SWASH_TYPE=1 (H3-120) in SITL
 - [ ] Determine H_PHANG via step cyclic → measure tilt response

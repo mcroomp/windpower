@@ -34,11 +34,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator as _mediator_module
-from aero     import RotorAero
+from aero        import create_aero
 import rotor_definition as _rd
-from dynamics import RigidBodyDynamics
+from dynamics    import RigidBodyDynamics
+from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, TensionPI
+from frames      import build_orb_frame
 
 TetherModel = _mediator_module.TetherModel
+
+# Design tether equilibrium orientation (from beaupoil_2026.yaml)
+_BODY_Z_DESIGN = np.array([0.851018, 0.305391, 0.427206])
+_BASE_K_ANG    = 50.0   # N·m·s/rad — angular damping (matches mediator default)
+_T_AERO_OFFSET = 45.0   # s — aero ramp already done
 
 # ── Physical constants ────────────────────────────────────────────────────────
 MASS   = 5.0                        # kg
@@ -87,33 +94,32 @@ def _R_from_body_z(body_z_world: np.ndarray) -> np.ndarray:
     return np.column_stack([x, y, z])
 
 
-def _equilibrium_setup(elev_rad: float = ELEV_RAD):
+def _equilibrium_setup():
     """
-    Compute the self-consistent open-loop equilibrium for steady-state flight.
+    Compute the self-consistent equilibrium for steady-state orbit with attitude control.
 
-    Two coupled unknowns must be solved together:
-      1. omega_spin_eq — equilibrium spin from the autorotation torque balance
-         Q_drive(v_inplane) = Q_drag(omega²)  →  omega = sqrt(K_DRIVE · v_inplane / K_DRAG)
-         v_inplane itself depends on the disk orientation and hub velocity (zero here),
-         so we iterate: call aero, read last_v_inplane, recompute omega, repeat.
+    Uses the design tether orientation (body_z=[0.851, 0.305, 0.427]) and the
+    TensionPI minimum collective (COL_MIN_RAD) as the hold collective — matching
+    what the HoldPlanner outputs (thrust=0 → COL_MIN).
 
-      2. coll_eq — collective that balances forces at that omega
-         Scanned 0° → -30° until aero Up force ≤ W + (aero East force) · tan(β).
+    Iterates omega_spin to the autorotation equilibrium at this collective, then
+    computes the tether rest length from the expected thrust.
 
     Returns (coll_rad, omega_spin_eq, R0, pos0, rest_length).
     """
-    aero  = RotorAero(_rd.default())
-    t_dir = _tether_dir(elev_rad)
-    R0    = _R_from_body_z(t_dir)
-    pos0  = _hub_pos(elev_rad)
-    W     = MASS * G
+    aero  = create_aero(_rd.default())
+    t_dir = _BODY_Z_DESIGN / np.linalg.norm(_BODY_Z_DESIGN)
+    R0    = build_orb_frame(t_dir)
+    pos0  = L_TETHER * t_dir   # hub at design orientation, radius = tether length
 
-    # ── Step 1: converge omega_spin to the autorotation equilibrium ───────────
-    # The tilted disk reduces in-plane wind; iterate until omega stabilises.
-    omega_spin_eq = OMEGA   # initial guess
+    # Collective = TensionPI minimum (what HoldPlanner thrust=0 gives)
+    coll_eq = TensionPI.COLL_MIN_RAD   # -0.28 rad
+
+    # Converge omega_spin to autorotation equilibrium at this collective
+    omega_spin_eq = OMEGA
     for _ in range(30):
-        aero.compute_forces(0.0, 0.0, 0.0, R0, np.zeros(3),
-                            omega_spin_eq, WIND, t=10.0)
+        aero.compute_forces(coll_eq, 0.0, 0.0, R0, np.zeros(3),
+                            omega_spin_eq, WIND, t=_T_AERO_OFFSET)
         v_ip = float(aero.last_v_inplane)
         omega_new = math.sqrt(max(1e-6, K_DRIVE_SPIN * v_ip / K_DRAG_SPIN))
         if abs(omega_new - omega_spin_eq) < 1e-4:
@@ -121,44 +127,35 @@ def _equilibrium_setup(elev_rad: float = ELEV_RAD):
             break
         omega_spin_eq = omega_new
 
-    # ── Step 2: scan collective to find force balance at omega_spin_eq ────────
-    coll_eq = None
-    T_t_est = 0.0
+    # Estimate tether tension ≈ thrust (for orbit: T_tether ≈ T along tether)
+    f = aero.compute_forces(coll_eq, 0.0, 0.0, R0, np.zeros(3),
+                            omega_spin_eq, WIND, t=_T_AERO_OFFSET)
+    T_est = float(np.dot(f.F_world, t_dir))   # thrust component along tether
+    T_t_est = max(T_est, 10.0)                # tether tension ≈ thrust
 
-    _MAX_TETHER_TENSION_N = 496.0   # 80% of break load (620 N)
-
-    for deg in range(0, -31, -1):
-        coll_rad = math.radians(float(deg))
-        f = aero.compute_forces(coll_rad, 0.0, 0.0, R0, np.zeros(3),
-                                omega_spin_eq, WIND, t=10.0)
-        H_x = float(f[0])
-        T_z = float(f[2])
-        T_t = H_x / math.cos(elev_rad) if H_x > 0 else 0.0
-        if T_z <= W + T_t * math.sin(elev_rad) and T_t < _MAX_TETHER_TENSION_N:
-            coll_eq = coll_rad
-            T_t_est = T_t
-            break
-
-    if coll_eq is None:
-        coll_eq = math.radians(-17.0)
-        f = aero.compute_forces(coll_eq, 0.0, 0.0, R0, np.zeros(3),
-                                omega_spin_eq, WIND, t=10.0)
-        T_t_est = max(float(f[0]) / math.cos(elev_rad), 0.0)
-
-    ea    = TetherModel.EA_N
-    k_eff = ea / L_TETHER
-    ext   = T_t_est / k_eff if T_t_est > 0 else 0.005
+    k_eff = TetherModel.EA_N / L_TETHER
+    ext   = T_t_est / k_eff
     rest  = L_TETHER - max(ext, 0.001)
 
     return coll_eq, omega_spin_eq, R0, pos0, rest
 
 
-def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps):
+def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
+                  ic_dir0=None, ic_bz0=None, tension_ctrl=None):
     """
     Run `steps` physics steps and return per-step telemetry arrays plus the
     final omega_spin scalar.  Used for both warmup and the recorded run.
+
+    Uses the attitude controller (compute_swashplate_from_state) and angular
+    damping — matching the mediator and other simtests.
+
+    If tension_ctrl is provided, collective is controlled by the TensionPI
+    rather than the fixed coll_eq value.  This finds the natural operational
+    equilibrium altitude under closed-loop tension control.
     """
-    omega_spin = omega_spin_start
+    omega_spin  = omega_spin_start
+    anchor      = np.zeros(3)
+    tension_now = 0.0   # initial tether tension for TensionPI feedback
 
     t_arr      = np.zeros(steps)
     pos_arr    = np.zeros((steps, 3))
@@ -167,6 +164,12 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps):
     angle_arr  = np.zeros(steps)
     body_z_arr = np.zeros((steps, 3))
     spin_arr   = np.zeros(steps)
+
+    # Capture orbit-tracking ICs from first step
+    if ic_dir0 is None:
+        ic_dir0 = dyn.state["pos"] / max(np.linalg.norm(dyn.state["pos"]), 0.1)
+    if ic_bz0 is None:
+        ic_bz0 = dyn.state["R"][:, 2].copy()
 
     for step in range(steps):
         state  = dyn.state
@@ -180,7 +183,8 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps):
         spin_arr[step]   = omega_spin
 
         f_teth, m_teth = tether.compute(pos, state["vel"], state["R"])
-        ten_arr[step]  = np.linalg.norm(f_teth)
+        ten_arr[step]  = tether._last_info.get("tension", 0.0)
+        tension_now    = ten_arr[step]
 
         tlen = np.linalg.norm(pos)
         if tlen > 0.1:
@@ -188,24 +192,35 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps):
             cos_a = np.clip(np.dot(body_z, tdir), -1.0, 1.0)
             angle_arr[step] = math.degrees(math.acos(cos_a))
 
-        f_aero = aero.compute_forces(
-            collective_rad=coll_eq, tilt_lon=0., tilt_lat=0.,
+        # Attitude controller: orbit-tracking with tilt correction
+        body_z_eq = orbit_tracked_body_z_eq(pos, ic_dir0, ic_bz0)
+        sw = compute_swashplate_from_state(state, anchor, body_z_eq=body_z_eq)
+
+        # Collective: TensionPI (closed-loop) if provided, else fixed coll_eq
+        if tension_ctrl is not None:
+            collective = tension_ctrl.update(tension_now, DT)
+        else:
+            collective = coll_eq
+
+        result = aero.compute_forces(
+            collective_rad=collective,
+            tilt_lon=sw["tilt_lon"], tilt_lat=sw["tilt_lat"],
             R_hub=state["R"], v_hub_world=state["vel"],
-            omega_rotor=omega_spin, wind_world=WIND, t=10.,
+            omega_rotor=omega_spin, wind_world=WIND, t=_T_AERO_OFFSET + step * DT,
         )
 
         Q_spin     = K_DRIVE_SPIN * aero.last_v_inplane - K_DRAG_SPIN * omega_spin ** 2
         omega_spin = max(OMEGA_SPIN_MIN, omega_spin + Q_spin / I_SPIN_KGMS2 * DT)
 
-        f_aero[0:3] += f_teth
-        f_aero[3:6] += m_teth
-        dyn.step(f_aero[:3], f_aero[3:], DT)
+        F_net = result.F_world + f_teth
+        M_net = result.M_orbital + m_teth - _BASE_K_ANG * state["omega"]
+        dyn.step(F_net, M_net, DT)
 
     return (t_arr, pos_arr, vel_arr, ten_arr, angle_arr, body_z_arr, spin_arr,
             omega_spin)
 
 
-def _run_simulation(steps: int = 4000, warmup_steps: int = 4000):
+def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
     """
     Run the steady-state physics for `steps` iterations.
 
@@ -221,16 +236,23 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 4000):
     """
     coll_eq, omega_spin_eq, R0, pos0, rest = _equilibrium_setup()
 
-    aero   = RotorAero(_rd.default())
+    aero   = create_aero(_rd.default())
 
-    # ── Warmup pass ──────────────────────────────────────────────────────────
+    # ── Warmup pass with closed-loop tension control ───────────────────────────
+    # Use TensionPI to find the natural operational equilibrium altitude.
+    # A fixed coll_eq (COL_MIN) gives z≈5.8m which is too low for the pumping
+    # cycle.  TensionPI with tension_out=200N finds z≈10-12m (same as RotorAero).
+    tension_out = 200.0   # N — matches DeschutterPlanner default
+    tension_ctrl_wu = TensionPI(setpoint_n=tension_out)
+
     tether_wu = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
     dyn_wu    = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
         pos0=pos0.tolist(), vel0=[0., 0., 0.], R0=R0, omega0=[0., 0., 0.],
     )
     *_, omega_spin_settled = _physics_loop(
-        dyn_wu, aero, tether_wu, coll_eq, omega_spin_eq, warmup_steps)
+        dyn_wu, aero, tether_wu, coll_eq, omega_spin_eq, warmup_steps,
+        tension_ctrl=tension_ctrl_wu)
 
     # ── Extract settled state ─────────────────────────────────────────────────
     # Use the warmup final pos/vel/R/omega as initial conditions.
@@ -243,6 +265,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 4000):
     omega_s  = s["omega"]
 
     # ── Recorded run from settled state ──────────────────────────────────────
+    tension_ctrl_rec = TensionPI(setpoint_n=tension_out)
     tether = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
     dyn    = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
@@ -250,10 +273,12 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 4000):
     )
     (t_arr, pos_arr, vel_arr, ten_arr, angle_arr, body_z_arr, spin_arr,
      _final_spin) = _physics_loop(
-        dyn, aero, tether, coll_eq, omega_spin_settled, steps)
+        dyn, aero, tether, coll_eq, omega_spin_settled, steps,
+        tension_ctrl=tension_ctrl_rec)
 
     return {
         "coll_deg":       math.degrees(coll_eq),
+        "coll_eq":        coll_eq,
         "omega_spin_eq":  omega_spin_settled,
         "pos0":           pos_s,         # settled start position (after warmup)
         "vel0":           vel_s,
@@ -287,11 +312,13 @@ def _save_starting_json(data: dict, path: Path) -> None:
     R0 = data["R0"]
     body_z = R0[:, 2].tolist()   # third column = body Z in world frame
     out = {
-        "pos":         data["pos0"].tolist(),
-        "vel":         data["vel0"].tolist(),
-        "body_z":      body_z,
-        "omega_spin":  float(data["omega_spin_eq"]),
-        "rest_length": float(data["rest_length"]),
+        "pos":          data["pos0"].tolist(),
+        "vel":          data["vel0"].tolist(),
+        "body_z":       body_z,
+        "omega_spin":   float(data["omega_spin_eq"]),
+        "rest_length":  float(data["rest_length"]),
+        "coll_eq_rad":  float(data["coll_eq"]),
+        "home_z_enu":   0.0,   # GPS home below floor so altitude is always positive
     }
     path.write_text(json.dumps(out, indent=2))
 

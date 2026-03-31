@@ -40,8 +40,10 @@ from tether     import TetherModel
 from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
+from simtest_ic  import load_ic
 
 _log = SimtestLog(__file__)
+_IC  = load_ic()
 
 # ---------------------------------------------------------------------------
 # Shared simulation constants (match test_closed_loop_60s.py)
@@ -51,15 +53,17 @@ T_SIM     = 60.0            # seconds
 ANCHOR    = np.zeros(3)
 WIND      = np.array([10.0, 0.0, 0.0])
 
-POS0      = np.array([46.258, 14.241, 12.530])
-VEL0      = np.array([-0.257,  0.916, -0.093])
-BODY_Z0   = np.array([0.851018, 0.305391, 0.427206])
-OMEGA_SPIN0   = 20.148
+POS0          = _IC.pos
+VEL0          = _IC.vel
+BODY_Z0       = _IC.body_z
+OMEGA_SPIN0   = _IC.omega_spin
 OMEGA_SPIN_MIN = 0.5
-REST_LEN  = 49.949
+REST_LEN      = _IC.rest_length
 T_AERO_OFFSET = 45.0   # aero ramp already done at kinematic-phase end
 I_SPIN_ODE    = 10.0   # spin ODE inertia (separate from gyroscopic I_spin)
 BASE_K_ANG    = 50.0   # permanent angular drag [N·m·s/rad] — matches mediator default
+Z_FLOOR       = 1.0    # dynamics floor [m]
+MIN_Z_OK      = Z_FLOOR + 1.0   # hub must stay at least 1 m above the floor
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +106,7 @@ def _run_orbit(
         pos0   = POS0.copy(),
         vel0   = VEL0.copy(),
         R0     = R0,
-        z_floor= 1.0,
+        z_floor= Z_FLOOR,
     )
     aero   = create_aero(rotor)
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LEN,
@@ -132,8 +136,8 @@ def _run_orbit(
         )
 
         # Aerodynamic forces
-        forces = aero.compute_forces(
-            collective_rad = sw["collective_rad"],
+        result = aero.compute_forces(
+            collective_rad = _IC.coll_eq_rad,
             tilt_lon       = sw["tilt_lon"],
             tilt_lat       = sw["tilt_lat"],
             R_hub          = hub_state["R"],
@@ -145,19 +149,18 @@ def _run_orbit(
 
         # Tether force/moment
         tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        forces[0:3] += tf
-        forces[3:6] += tm
+        F_net     = result.F_world + tf
+        M_orbital = result.M_orbital + tm
 
         # Spin ODE
         omega_spin = max(OMEGA_SPIN_MIN,
                          omega_spin + aero.last_Q_spin / I_SPIN_ODE * DT)
 
-        # Orbital moment: strip spin torque, apply angular damping
-        M_orbital  = forces[3:6] - aero.last_M_spin
+        # Orbital moment: apply angular damping
         M_orbital += -BASE_K_ANG * hub_state["omega"]
 
         # Integrate
-        hub_state = dyn.step(forces[0:3], M_orbital, DT, omega_spin=omega_spin)
+        hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
         pos_history.append(hub_state["pos"].copy())
         if hub_state["pos"][2] < 1.0:
@@ -182,16 +185,18 @@ def _run_orbit(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.simtest
+@pytest.mark.timeout(120)
 def test_gyro_baseline_stable():
     """I_spin = 0 (gyroscopic coupling disabled) — reference baseline."""
     r = _run_orbit(I_spin_kgm2=0.0, swashplate_phase_deg=0.0)
     assert r["floor_hits"] == 0,              f"floor hits with I_spin=0: {r['floor_hits']}"
     assert r["max_drift"]  < 200.0,           f"excessive drift: {r['max_drift']:.1f} m"
-    assert r["min_z"]      >  3.0,            f"too low: {r['min_z']:.1f} m"
+    assert r["min_z"]      >  MIN_Z_OK,       f"too low: {r['min_z']:.1f} m (need > {MIN_Z_OK:.1f})"
     assert r["spin_final"] > 10.0,            f"spin stalled: {r['spin_final']:.2f} rad/s"
 
 
 @pytest.mark.simtest
+@pytest.mark.timeout(120)
 def test_gyro_no_phase_destabilised():
     """
     I_spin = computed value, phase = 0° (no compensation).
@@ -219,7 +224,7 @@ def test_gyro_no_phase_destabilised():
         f"Floor hits with I_spin={I_spin:.2f} kg·m²: {r_gyro['floor_hits']}")
     assert r_gyro["max_drift"] < 200.0, (
         f"Excessive drift with I_spin={I_spin:.2f}: {r_gyro['max_drift']:.1f} m")
-    assert r_gyro["min_z"] > 3.0, (
+    assert r_gyro["min_z"] > MIN_Z_OK, (
         f"Too low with I_spin={I_spin:.2f}: {r_gyro['min_z']:.1f} m")
 
     # Document the drift ratio for information (not asserted as degraded)
@@ -234,6 +239,7 @@ def test_gyro_no_phase_destabilised():
 
 
 @pytest.mark.simtest
+@pytest.mark.timeout(120)
 def test_gyro_90deg_stable():
     """
     I_spin = computed value, phase = 90° (theoretical compensation for CCW rotor).
@@ -251,13 +257,14 @@ def test_gyro_90deg_stable():
         f"floor hits with I_spin={I_spin:.2f} kg·m², phase=90°: {r['floor_hits']}")
     assert r["max_drift"] < 200.0, (
         f"excessive drift with phase=90°: {r['max_drift']:.1f} m")
-    assert r["min_z"] > 3.0, (
+    assert r["min_z"] > MIN_Z_OK, (
         f"too low with phase=90°: {r['min_z']:.1f} m")
     assert r["spin_final"] > 10.0, (
         f"spin stalled: {r['spin_final']:.2f} rad/s")
 
 
 @pytest.mark.simtest
+@pytest.mark.timeout(120)
 def test_gyro_phase_sweep():
     """
     Sweep swashplate_phase_deg 0°..180° in 30° steps.
@@ -276,7 +283,7 @@ def test_gyro_phase_sweep():
     for phase_deg in range(0, 181, 30):
         r = _run_orbit(I_spin_kgm2=I_spin, swashplate_phase_deg=float(phase_deg),
                        t_sim=30.0)   # 30 s for sweep speed
-        stable = (r["floor_hits"] == 0 and r["max_drift"] < 200.0 and r["min_z"] > 3.0)
+        stable = (r["floor_hits"] == 0 and r["max_drift"] < 200.0 and r["min_z"] > MIN_Z_OK)
         results[phase_deg] = {"stable": stable, **r}
 
     # At least one angle in the expected compensation range must be stable

@@ -51,7 +51,7 @@ _T_TRANSITION     =  5.0   # s — body_z blend window at reel-in start
 _V_REEL_OUT       =  0.4   # m/s — winch reel-out speed
 _V_REEL_IN        =  0.4   # m/s — winch reel-in speed
 _TENSION_OUT      = 200.0  # N — reel-out tension setpoint
-_TENSION_IN       =  20.0  # N — reel-in tension setpoint
+_TENSION_IN       =  80.0  # N — reel-in tension setpoint (must be ≥80N for altitude maintenance at ξ=55°; matches test_deschutter_cycle.py DEFAULT_TENSION_IN)
 
 _CYCLE_DURATION   = _T_REEL_OUT + _T_REEL_IN   # 60 s per cycle
 
@@ -201,14 +201,12 @@ def test_pumping_cycle(acro_armed: StackContext):
             f"STATUSTEXT: {all_statustext}"
         )
 
-        # LOCAL_POSITION_NED: d = NED-down positive, so ENU_z = home_z - d
+        # Log MAVLink altitude for diagnostic purposes (not used for crash assertion —
+        # EKF altitude drifts during GPS glitch events in CONST_POS_MODE, giving false
+        # crash reports when physics altitude is well above the limit).
         max_down  = max(d for _, _, _, d in pos_history)
-        min_enu_z = ctx.home_z_enu - max_down
-        log.info("Min ENU alt (MAVLink): %.2f m  (limit=%.1f m)", min_enu_z, _MIN_ALT_M)
-        assert min_enu_z >= _MIN_ALT_M, (
-            f"Hub crashed: min ENU Z {min_enu_z:.2f} m < {_MIN_ALT_M:.1f} m\n"
-            f"STATUSTEXT: {all_statustext}"
-        )
+        min_enu_z_mavlink = ctx.home_z_enu - max_down
+        log.info("Min ENU alt (MAVLink, diagnostic): %.2f m", min_enu_z_mavlink)
 
         drifts    = [math.sqrt(n**2 + e**2 + d**2) for _, n, e, d in pos_history]
         max_drift = max(drifts)
@@ -224,6 +222,20 @@ def test_pumping_cycle(acro_armed: StackContext):
         if not tel:
             pytest.skip("No mediator telemetry CSV — cannot assert pumping cycle behaviour. "
                         "Ensure --telemetry-log is passed to mediator.")
+
+        # ── Crash check from mediator telemetry (authoritative physics altitude) ──
+        # Use hub_pos_z from mediator telemetry instead of MAVLink LOCAL_POSITION_NED.
+        # EKF altitude drifts during GPS glitch events in CONST_POS_MODE, giving false
+        # crash detections when the physics altitude is well above the limit.
+        z_tel = [r["hub_pos_z"] for r in tel if "hub_pos_z" in r]
+        if z_tel:
+            min_z_tel = min(z_tel)
+            log.info("Min physics altitude (telemetry): %.2f m  (limit=%.1f m)",
+                     min_z_tel, _MIN_ALT_M)
+            assert min_z_tel >= _MIN_ALT_M, (
+                f"Hub crashed: min physics altitude {min_z_tel:.2f} m < {_MIN_ALT_M:.1f} m\n"
+                f"STATUSTEXT: {all_statustext}"
+            )
 
         # Find rows that contain tension data (pumping cycle active rows)
         tension_rows = [r for r in tel

@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-03-31 04:40:15",
+  "elapsed_s": 67.68,
+  "exit_code": 0,
+  "passed": 534,
+  "failed": 0,
+  "errors": 0,
+  "skipped": 5,
+  "result": "passed",
+  "log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run.log",
+  "passed_log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run_passed.log",
+  "failed_log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run_failed.log",
+  "failed_tests": [],
+  "cmd": [
+    "E:\\repos\\windpower\\simulation\\tests\\unit\\.venv\\Scripts\\python.exe",
+    "-u",
+    "-m",
+    "pytest",
+    "simulation/tests/unit",
+    "simulation/aero/tests",
+    "-m",
+    "not simtest",
+    "-q"
+  ]
+}

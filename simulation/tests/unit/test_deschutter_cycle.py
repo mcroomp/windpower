@@ -40,7 +40,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-pytestmark = pytest.mark.simtest
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 
 import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
@@ -51,17 +51,19 @@ from planner     import DeschutterPlanner, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
+from simtest_ic  import load_ic
 
 _log = SimtestLog(__file__)
+_IC  = load_ic()
 
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT            = 1.0 / 400.0
 ANCHOR        = np.zeros(3)
-POS0          = np.array([46.258, 14.241, 12.530])
-VEL0          = np.array([-0.257,  0.916, -0.093])
-BODY_Z0       = np.array([0.851018, 0.305391, 0.427206])
-OMEGA_SPIN0   = 20.148
-REST_LENGTH0  = 49.949
+POS0          = _IC.pos
+VEL0          = _IC.vel
+BODY_Z0       = _IC.body_z
+OMEGA_SPIN0   = _IC.omega_spin
+REST_LENGTH0  = _IC.rest_length
 
 T_AERO_OFFSET = 45.0
 
@@ -86,7 +88,7 @@ DEFAULT_TENSION_IN  =  80.0   # N — must be high enough for altitude maintenan
 BODY_Z_SLEW_RATE = 0.12       # rad/s
 
 # Collective normalisation (matches config deschutter col_min/col_max)
-COL_MIN_RAD = -0.436   # −25°
+COL_MIN_RAD = -0.28    # −16° (SkewedWakeBEM: zero-thrust ≈ -0.34 rad; -0.28 safe floor)
 COL_MAX_RAD =  0.0     #   0°
 
 # WinchController safety limit
@@ -232,7 +234,7 @@ def _run_deschutter_cycle(
             body_z_eq=body_z_eq)
 
         # ── Aerodynamics ──────────────────────────────────────────────────
-        forces = aero.compute_forces(
+        result = aero.compute_forces(
             collective_rad = collective_rad,
             tilt_lon       = sw["tilt_lon"],
             tilt_lat       = sw["tilt_lat"],
@@ -245,8 +247,8 @@ def _run_deschutter_cycle(
 
         # ── Tether ────────────────────────────────────────────────────────
         tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        forces[0:3] += tf
-        forces[3:6] += tm
+        F_net     = result.F_world + tf
+        M_orbital = result.M_orbital + tm
         tension_now = tether._last_info.get("tension", 0.0)
 
         # ── Energy accounting ─────────────────────────────────────────────
@@ -260,12 +262,13 @@ def _run_deschutter_cycle(
         # ── Spin & dynamics ───────────────────────────────────────────────
         omega_spin = max(OMEGA_SPIN_MIN,
                          omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
-        M_orbital  = forces[3:6] - aero.last_M_spin
         M_orbital += -50.0 * hub_state["omega"]
-        hub_state  = dyn.step(forces[0:3], M_orbital, DT, omega_spin=omega_spin)
+        hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
         if hub_state["pos"][2] <= 1.05:
             floor_hits += 1
+            if floor_hits > 200:
+                break   # persistent crash — abort early, test will fail
 
         # ── Record (1 Hz) ─────────────────────────────────────────────────
         if i % rec_every == 0:

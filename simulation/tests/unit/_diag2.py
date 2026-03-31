@@ -21,14 +21,14 @@ hs=dyn.state; omega_spin=20.148; floor_hits=0
 print("Zero tilt, axle_attach=0, k_ang=50, sub M_spin (exact mediator match for Phase 2):")
 for i in range(int(60./DT)+1):
     t=50.+i*DT
-    f=aero.compute_forces(0.,0.,0.,hs["R"],hs["vel"],omega_spin,WIND,t=t)
+    result=aero.compute_forces(0.,0.,0.,hs["R"],hs["vel"],omega_spin,WIND,t=t)
     tf,tm=tether.compute(hs["pos"],hs["vel"],hs["R"])
-    f[0:3]+=tf; f[3:6]+=tm
+    F_net=result.F_world+tf
+    M_orbital=result.M_orbital+tm
     Q=K_DRIVE*aero.last_v_inplane-K_DRAG*omega_spin**2
     omega_spin=max(OMEGA_MIN,omega_spin+Q/I_SPIN*DT)
-    M=f[3:6]-aero.last_M_spin
-    M+=-50.*hs["omega"]
-    hs=dyn.step(f[0:3],M,DT,omega_spin=omega_spin)
+    M_orbital+=-50.*hs["omega"]
+    hs=dyn.step(F_net,M_orbital,DT,omega_spin=omega_spin)
     if hs["pos"][2]<=1.05: floor_hits+=1
     if i%int(10./DT)==0:
         bz=hs["R"][:,2]

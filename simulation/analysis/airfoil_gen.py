@@ -13,7 +13,7 @@ C81 format (used by MBDyn rotor aerodynamics modules):
 
 Aerodynamic model:
   Based on thin airfoil theory modified for SG6042 low-Re airfoil
-  (CL0=0.11, CLα=0.87 from Weyel 2025 / CLAUDE.md).
+  (CL0=0.11, CLα=0.87 from De Schutter 2018 Table I — archived MBDyn parameters).
 
   Outer regions (|AoA| > 15°) use stall model with smooth blend:
     - Kirchhoff flat plate for post-stall
@@ -40,7 +40,7 @@ import numpy as np
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Airfoil parameters (SG6042, from CLAUDE.md / Weyel 2025)
+# Airfoil parameters (SG6042, De Schutter 2018 Table I values — archived for MBDyn)
 # ---------------------------------------------------------------------------
 CL0       = 0.11       # zero-AoA lift coefficient
 CL_ALPHA  = 0.87       # lift curve slope [1/rad]

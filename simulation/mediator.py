@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics        import RigidBodyDynamics
 from sitl_interface  import SITLInterface
 from swashplate      import h3_inverse_mix, collective_to_pitch, cyclic_to_blade_pitches, pwm_to_normalized
-from aero            import RotorAero
+from aero            import SkewedWakeBEM
 from tether          import TetherModel
 from frames          import T_ENU_NED, build_orb_frame
 from sensor          import make_sensor, SpinSensor
@@ -270,7 +270,7 @@ def run_mediator(args, trajectory=None):
         recv_port=args.sitl_recv_port,
         send_port=args.sitl_send_port,
     )
-    aero   = RotorAero.from_definition(rotor)
+    aero   = SkewedWakeBEM.from_definition(rotor)
     anchor_enu = np.array(cfg["anchor_enu"], dtype=float)
     tether = TetherModel(
         anchor_enu             = anchor_enu,
@@ -389,7 +389,7 @@ def run_mediator(args, trajectory=None):
     # thrust [0..1] from SET_ATTITUDE_TARGET → collective_rad for aero model.
     # Mirrors Pixhawk set_throttle_out() passthrough (raws_mode.md §8.4).
     _traj_cfg   = cfg.get("trajectory", {}).get("deschutter", {})
-    _col_min_rad = float(_traj_cfg.get("col_min_rad", -0.436))
+    _col_min_rad = float(_traj_cfg.get("col_min_rad", -0.28))
     _col_max_rad = float(_traj_cfg.get("col_max_rad",  0.0))
 
     # -- Mode_RAWES inner loops -----------------------------------------------
@@ -479,9 +479,16 @@ def run_mediator(args, trajectory=None):
                 _winch.step(_traj_cmd["winch_speed_ms"], _pc_tension, DT_TARGET)
                 tether.rest_length = _winch.rest_length
 
-                # 3. Pixhawk collective passthrough (SET_ATTITUDE_TARGET thrust field)
-                #    Denormalise: thrust [0..1] → collective_rad for aero model
-                collective_rad = _col_min_rad + _traj_cmd["thrust"] * (_col_max_rad - _col_min_rad)
+                # 3. Collective from planner.
+                #    DeschutterPlanner returns "collective_rad" directly — use it
+                #    to avoid normalization/denormalization mismatch when col_min
+                #    differs between reel-out (-0.28) and reel-in (-0.20) phases.
+                #    HoldPlanner (and any legacy planner) only returns "thrust";
+                #    fall back to thrust denormalization for those.
+                if "collective_rad" in _traj_cmd:
+                    collective_rad = float(_traj_cmd["collective_rad"])
+                else:
+                    collective_rad = _col_min_rad + _traj_cmd["thrust"] * (_col_max_rad - _col_min_rad)
 
                 # 4. Attitude: orbit-track tether; rate-limited slew toward
                 #    attitude_q target when non-identity  (SET_ATTITUDE_TARGET)
@@ -516,7 +523,8 @@ def run_mediator(args, trajectory=None):
                 swash = compute_swashplate_from_state(
                     hub_state=hub_state, anchor_pos=anchor_enu,
                     body_z_eq=_body_z_eq,
-                    swashplate_phase_deg=_swashplate_phase_deg)
+                    swashplate_phase_deg=_swashplate_phase_deg,
+                    kp=0.30, kd=0.12)   # tuned for SkewedWakeBEM (5.4× more moment/tilt than RotorAero)
                 tilt_lon        = swash["tilt_lon"]
                 tilt_lat        = swash["tilt_lat"]
                 collective_norm = 0.0   # for telemetry logging
@@ -534,7 +542,7 @@ def run_mediator(args, trajectory=None):
             R_hub = hub_state["R"]
             v_hub = hub_state["vel"]
 
-            forces = aero.compute_forces(
+            result = aero.compute_forces(
                 collective_rad = collective_rad,
                 tilt_lon       = tilt_lon,
                 tilt_lat       = tilt_lat,
@@ -568,14 +576,17 @@ def run_mediator(args, trajectory=None):
                     )
                 # Update tension measurement for trajectory controller (next step)
                 _pc_tension = tether._last_info.get("tension", 0.0)
-            forces[0:3] += tether_force    # add to Fx/Fy/Fz
-            forces[3:6] += tether_moment   # restoring torque aligns axle with tether
+
+            # Build net force and moments (aero + tether) for dynamics and logging
+            F_net     = result.F_world + tether_force
+            M_orbital = result.M_orbital + tether_moment
+            forces    = np.concatenate([F_net, M_orbital + result.M_spin])   # for telemetry log
 
             # ----------------------------------------------------------------
             # Step 4c: Thrust magnitude (for logging)
             # ----------------------------------------------------------------
             disk_normal = R_hub[:, 2]
-            T_est = max(0.0, float(np.dot(forces[0:3], disk_normal)))
+            T_est = max(0.0, float(np.dot(F_net, disk_normal)))
 
             # ----------------------------------------------------------------
             # Step 4c: Update omega_spin from autorotation torque balance
@@ -588,21 +599,17 @@ def run_mediator(args, trajectory=None):
             # The BEM Q_drive/Q_drag terms are NOT used here because the BEM
             # torque also scales as omega² (through dynamic pressure), making
             # drive and drag parallel — no equilibrium exists and omega runs away.
-            Q_spin = (K_DRIVE_SPIN * aero.last_v_inplane
-                      - K_DRAG_SPIN  * omega_spin ** 2)
+            # Spin ODE — owned by the aero model via result.Q_spin
             omega_spin = max(OMEGA_SPIN_MIN,
-                             omega_spin + Q_spin / I_SPIN_KGMS2 * DT_TARGET)
-
+                             omega_spin + result.Q_spin / I_SPIN_KGMS2 * DT_TARGET)
 
             # ----------------------------------------------------------------
             # Step 5: Integrate rigid-body dynamics (RK4, gravity internal)
-            # forces[0:3] = aero + tether force
+            # F_net       = aero + tether force
             # M_orbital   = cyclic moments only (M_spin excluded — it updates omega_spin above)
             # omega_spin  passed for gyroscopic coupling in Euler equations
             # Do NOT add gravity here — dynamics.py applies it internally.
             # ----------------------------------------------------------------
-            M_orbital = forces[3:6] - aero.last_M_spin
-
             if cfg["lock_orientation"]:
                 # Magic tether: no rotation allowed.  Pass zero moments so the
                 # integrator never accelerates angular velocity, then forcibly
@@ -619,7 +626,7 @@ def run_mediator(args, trajectory=None):
                 M_step = M_orbital
 
             prev_vel  = hub_state["vel"].copy()
-            hub_state = dynamics.step(forces[0:3], M_step, DT_TARGET,
+            hub_state = dynamics.step(F_net, M_step, DT_TARGET,
                                       omega_spin=omega_spin)
             new_vel   = hub_state["vel"]
 

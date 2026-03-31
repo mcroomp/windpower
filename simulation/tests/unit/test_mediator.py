@@ -6,6 +6,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from aero import AeroResult
+
 import mediator
 import config as _mcfg
 DEFAULT_OMEGA_SPIN = _mcfg.DEFAULTS["omega_spin"]
@@ -77,7 +79,12 @@ class FakeAero:
 
     def compute_forces(self, **kwargs):
         self.compute_calls.append(kwargs)
-        return np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], dtype=np.float64)
+        return AeroResult(
+            F_world   = np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            M_orbital = np.array([4.0, 5.0, 6.0], dtype=np.float64),
+            Q_spin    = 0.0,
+            M_spin    = np.zeros(3, dtype=np.float64),
+        )
 
     def compute_anti_rotation_moment(self, **kwargs):
         self.motor_calls.append(kwargs)
@@ -103,13 +110,13 @@ def _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: fake_sitl)
 
-    # Mediator now calls RotorAero.from_definition(rotor) — patch the classmethod.
-    class _FakeRotorAero:
+    # Mediator now calls SkewedWakeBEM.from_definition(rotor) — patch the classmethod.
+    class _FakeSkewedWakeBEM:
         @classmethod
         def from_definition(cls, defn):
             return fake_aero
 
-    monkeypatch.setattr(mediator, "RotorAero", _FakeRotorAero)
+    monkeypatch.setattr(mediator, "SkewedWakeBEM", _FakeSkewedWakeBEM)
     # SensorSim is NOT mocked here — mediator uses the real SensorSim with the test hub state.
     # Gyro noise is small (σ=0.003 rad/s); assertions use atol=0.05 to accommodate it.
 

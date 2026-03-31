@@ -138,7 +138,7 @@ class RotorDefinition:
     Follows standard rotor parameter conventions from:
       Leishman (2006) "Principles of Helicopter Aerodynamics"
       De Schutter et al. (2018) RAWES optimal control paper
-      Weyel (2025) SG6042 empirical data
+      NeuralFoil XFOIL surrogate (Re=490k, beaupoil_2026)
 
     Geometry parameters (all SI)
     ----------------------------
@@ -324,7 +324,7 @@ class RotorDefinition:
         CL_alpha_3D = 2π / (1 + 2/AR)
 
         Upper bound — does not account for Re losses, unsteady effects, or
-        tip losses.  Empirical (Weyel) value should be below this.
+        tip losses.  Actual measured value should be below this.
         """
         return 2.0 * math.pi / (1.0 + 2.0 / self.aspect_ratio)
 

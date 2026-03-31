@@ -180,12 +180,23 @@ def compute_swashplate_from_state(
     disk_x = R[:, 0]
     disk_y = R[:, 1]
 
-    # tilt_lon sign: aero applies Mx_body = -K*tilt_lon*T, so positive tilt_lon
-    # produces negative Mx (torque about -X / West axis) → body_z tilts North.
-    # The required torque direction to tilt body_z North is West (-disk_x), which
-    # means tilt_lon must be *negative* of the projection onto disk_x.
-    tilt_lon = float(np.clip(-np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
-    tilt_lat = float(np.clip( np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
+    # Sign convention — per-blade physics (SkewedWakeBEM / DeSchutterAero):
+    #
+    #   tilt_lat_rad > 0 → max pitch at ψ=0 (East/disk_x blade position)
+    #     moment arm = r·disk_x,  lift = F·disk_z
+    #     M = cross(r·disk_x, F·disk_z) = r·F·(disk_x × disk_z) = −r·F·disk_y
+    #     → moment in −disk_y  (NEGATIVE My for positive tilt_lat)
+    #
+    #   tilt_lon_rad > 0 → max pitch at ψ=90° (North/disk_y blade position)
+    #     moment arm = r·disk_y,  lift = F·disk_z
+    #     M = cross(r·disk_y, F·disk_z) = r·F·(disk_y × disk_z) = +r·F·disk_x
+    #     → moment in +disk_x  (POSITIVE Mx for positive tilt_lon)
+    #
+    # corr_enu is the required rotation axis (= direction to apply moment).
+    # To get M in +disk_x: need tilt_lon > 0 → tilt_lon = +dot(corr_enu, disk_x)
+    # To get M in +disk_y: need tilt_lat < 0 → tilt_lat = −dot(corr_enu, disk_y)
+    tilt_lon = float(np.clip( np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
+    tilt_lat = float(np.clip(-np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
 
     # Gyroscopic phase compensation.
     # A spinning rotor precesses 90° off-axis from an applied cyclic torque.
@@ -489,17 +500,19 @@ class TensionPI:
     Anti-windup clamps the integrator so output stays within [coll_min, coll_max].
 
     Defaults are tuned for the beaupoil_2026 rotor (4-blade, 2 m, SG6042):
-      coll_min = -0.44 rad (−25°) — minimum collective before thrust drops to ~70 N
+      coll_min = -0.28 rad (−16°) — safe floor for SkewedWakeBEM (zero-thrust ≈ -0.34 rad)
       coll_max =  0.00 rad (  0°) — neutral; positive collective gives >1 kN thrust
       warm_coll_rad = −20° — pre-seeds the integrator so the first output is near
           the reel-out equilibrium collective instead of clamping at 0° and spiking
           to ~1718 N tether tension at t=0.
     """
 
-    # Physical limits for the beaupoil_2026 rotor
-    COLL_MIN_RAD: float = -0.44    # −25°
+    # Physical limits for the beaupoil_2026 rotor (SkewedWakeBEM)
+    # Zero-thrust collective ≈ -0.34 rad; at -0.44 rad thrust = -472 N (downforce → crash).
+    # Safe floor is -0.28 rad (≈ -16°) where thrust ≈ 130 N (hub supported against gravity).
+    COLL_MIN_RAD: float = -0.28    # −16°
     COLL_MAX_RAD: float =  0.00    #   0°
-    WARM_COLL_RAD: float = -0.349  # ≈ −20°  (math.radians(-20))
+    WARM_COLL_RAD: float = -0.20   # ≈ −11°  (initial integrator seed near reel-out equilibrium)
 
     def __init__(self, setpoint_n: float, kp: float = 5e-4, ki: float = 1e-4,
                  coll_min: float = COLL_MIN_RAD,
@@ -516,13 +529,17 @@ class TensionPI:
             self._integral = 0.0
 
     def update(self, tension_actual: float, dt: float) -> float:
-        error           = self.setpoint - tension_actual
-        self._integral += error * dt
-        self._integral  = float(np.clip(
-            self._integral,
-            self.coll_min / max(self.ki, 1e-12),
-            self.coll_max / max(self.ki, 1e-12),
-        ))
+        error = self.setpoint - tension_actual
+        raw_before = self.kp * error + self.ki * self._integral
+
+        # Conditional anti-windup: only integrate when output is not already
+        # saturated in the same direction as the error.  This prevents the
+        # integrator from winding deep into the clamp, which would cause the
+        # output to stay at the clamp limit even after the error reverses.
+        if not (raw_before <= self.coll_min and error < 0):
+            if not (raw_before >= self.coll_max and error > 0):
+                self._integral += error * dt
+
         raw = self.kp * error + self.ki * self._integral
         return float(np.clip(raw, self.coll_min, self.coll_max))
 

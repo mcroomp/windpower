@@ -39,14 +39,14 @@ airfoil:
   # NACA 4412: cambered (4% camber at 40% chord), 12% thick
   # Zero-lift angle α₀ ≈ −4°  →  CL0 = CL_alpha × |α₀| = 5.7 × 4π/180 = 0.398
   CL0:               0.40   # zero-AoA lift (camber of NACA 4412 at α=0, α₀=-4°)
-  # CL_alpha: using Weyel empirical effective value (0.87/rad) tuned for the
-  # lumped BEM at r_cp.  The 2D NACA 4412 value (5.7/rad) causes stall saturation
-  # at all conditions because the actuator-disk induced velocity pushes effective
-  # inflow angle to ≥ 14° regardless of collective pitch.  The lumped model requires
-  # a much lower effective slope to keep AoA in the linear range.
-  CL_alpha_per_rad:  0.87   # Weyel (2025) empirical effective slope [/rad]
-                             # (same as Beaupoil SG6042 — represents the whole-rotor
-                             #  effective lift response in the autorotation regime)
+  # CL_alpha: using De Schutter 2018 simulation value (0.87/rad).  The 2D NACA 4412
+  # value (5.7/rad) causes stall saturation at all conditions because the actuator-disk
+  # induced velocity pushes effective inflow angle to ≥ 14° regardless of collective.
+  # The lumped single-point BEM requires a much lower effective slope to keep AoA in
+  # the linear range.  0.87/rad is from De Schutter 2018 Table I (SG6040 approximation).
+  CL_alpha_per_rad:  0.87   # De Schutter 2018 simulation value [/rad]
+                             # (represents whole-rotor effective lift response in the
+                             #  lumped single-point autorotation BEM approximation)
   # Drag polar:  CD = CD0 + CL²/(π·AR·e)
   CD0:               0.012  # NACA 4412 minimum profile drag at Re ≈ 130,000
   oswald_efficiency: 0.80

@@ -28,27 +28,29 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-pytestmark = pytest.mark.simtest
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 
 from dynamics   import RigidBodyDynamics
-from aero       import RotorAero
+from aero       import RotorAero, create_aero
 import rotor_definition as _rd
 from tether     import TetherModel
 from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq
 from winch      import WinchController
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
+from simtest_ic  import load_ic
 
 _log = SimtestLog(__file__)
+_IC  = load_ic()
 
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT            = 1.0 / 400.0
 ANCHOR        = np.zeros(3)
-POS0          = np.array([46.258, 14.241, 12.530])
-VEL0          = np.array([-0.257,  0.916, -0.093])
-BODY_Z0       = np.array([0.851018, 0.305391, 0.427206])
-OMEGA_SPIN0   = 20.148
-REST_LENGTH0  = 49.949     # taut at initial position (from steady_state_starting.json)
+POS0          = _IC.pos
+VEL0          = _IC.vel
+BODY_Z0       = _IC.body_z
+OMEGA_SPIN0   = _IC.omega_spin
+REST_LENGTH0  = _IC.rest_length
 
 T_AERO_OFFSET = 45.0       # s — aero ramp already complete at kinematic-phase end
 
@@ -97,7 +99,7 @@ def _run_pumping_cycle(
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
         R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
     )
-    aero   = RotorAero(_rd.default())
+    aero   = create_aero(_rd.default())
     tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
@@ -154,7 +156,7 @@ def _run_pumping_cycle(
         )
 
         # ── Aerodynamics ──────────────────────────────────────────────────
-        forces = aero.compute_forces(
+        result = aero.compute_forces(
             collective_rad = collective,          # from tension controller
             tilt_lon       = sw["tilt_lon"],      # from attitude controller
             tilt_lat       = sw["tilt_lat"],
@@ -167,8 +169,8 @@ def _run_pumping_cycle(
 
         # ── Tether force ──────────────────────────────────────────────────
         tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        forces[0:3] += tf
-        forces[3:6] += tm
+        F_net     = result.F_world + tf
+        M_orbital = result.M_orbital + tm
         tension_now = tether._last_info.get("tension", 0.0)
 
         # ── Energy accounting ─────────────────────────────────────────────
@@ -181,16 +183,17 @@ def _run_pumping_cycle(
         Q_spin     = K_DRIVE_SPIN * aero.last_v_inplane - K_DRAG_SPIN * omega_spin ** 2
         omega_spin = max(OMEGA_SPIN_MIN, omega_spin + Q_spin / I_SPIN_KGMS2 * DT)
 
-        M_orbital  = forces[3:6] - aero.last_M_spin
         M_orbital += -50.0 * hub_state["omega"]
 
-        hub_state = dyn.step(forces[0:3], M_orbital, DT, omega_spin=omega_spin)
+        hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
         if hub_state["pos"][2] <= 1.05:
             if phase_out:
                 floor_hits_out += 1
             else:
                 floor_hits_in += 1
+            if floor_hits_out + floor_hits_in > 200:
+                break   # persistent crash — abort early, test will fail
 
         # ── Record ────────────────────────────────────────────────────────
         if i % rec_every == 0:
@@ -314,7 +317,7 @@ def test_static_tension_setpoint_range():
             pos0=POS0.tolist(), vel0=VEL0.tolist(),
             R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
         )
-        aero   = RotorAero(_rd.default())
+        aero   = create_aero(_rd.default())
         tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
                              axle_attachment_length=0.0)
         ctrl   = TensionPI(setpoint_n=setpoint)
@@ -332,19 +335,19 @@ def test_static_tension_setpoint_range():
                 hub_state["pos"], tether_dir0, body_z_eq0)
             sw = compute_swashplate_from_state(
                 hub_state=hub_state, anchor_pos=ANCHOR, body_z_eq=body_z_eq_cur)
-            forces = aero.compute_forces(
+            result = aero.compute_forces(
                 collective_rad=collective, tilt_lon=sw["tilt_lon"],
                 tilt_lat=sw["tilt_lat"], R_hub=hub_state["R"],
                 v_hub_world=hub_state["vel"], omega_rotor=omega_spin,
                 wind_world=WIND, t=T_AERO_OFFSET + t)
             tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-            forces[0:3] += tf; forces[3:6] += tm
+            F_net     = result.F_world + tf
+            M_orbital = result.M_orbital + tm
             tension_now = tether._last_info.get("tension", 0.0)
             Q_spin     = K_DRIVE_SPIN * aero.last_v_inplane - K_DRAG_SPIN * omega_spin ** 2
             omega_spin = max(OMEGA_SPIN_MIN, omega_spin + Q_spin / I_SPIN_KGMS2 * DT)
-            M_orbital  = forces[3:6] - aero.last_M_spin
             M_orbital += -50.0 * hub_state["omega"]
-            hub_state = dyn.step(forces[0:3], M_orbital, DT, omega_spin=omega_spin)
+            hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
             if t >= 20.0:
                 tensions_late.append(tension_now)
         return float(np.mean(tensions_late))

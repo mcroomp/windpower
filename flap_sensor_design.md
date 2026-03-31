@@ -502,7 +502,7 @@ How to set it:
 1. From your measurement: note the PWM offset that gives a safe maximum flap
    deflection (e.g. test B at +200µs gave `A = 8°` flap angle)
 2. Convert flap angle to approximate blade pitch using the model ratio from
-   [flapmodel.md](flapmodel.md) (CM_gamma / CM_beta ≈ −0.5/0.002 → ~250:1 reduction,
+   the Weyel 2025 model (CM_gamma / CM_beta ≈ −0.5/0.002 → ~250:1 reduction,
    but this will be refined from in-flight ID)
 3. Start conservatively — set `H_CYC_MAX = 4.0` degrees and increase only
    after verifying stable flight

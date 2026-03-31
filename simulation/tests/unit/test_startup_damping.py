@@ -29,10 +29,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from dynamics import RigidBodyDynamics
-from aero import RotorAero
+from aero import create_aero
 import rotor_definition as _rd
 from tether import TetherModel
 from frames import build_orb_frame
+from simtest_ic import load_ic
+
+_IC = load_ic()
 
 # ── Mediator constants (mirrored from mediator.py) ─────────────────────────
 
@@ -42,10 +45,10 @@ K_DRAG_SPIN      = 0.01786
 OMEGA_SPIN_MIN   = 0.5
 I_SPIN_KGMS2     = 10.0
 
-DEFAULT_POS0        = [46.258, 14.241, 12.530]
-DEFAULT_VEL0        = [-0.257,  0.916, -0.093]
-DEFAULT_BODY_Z      = [0.851018, 0.305391, 0.427206]
-DEFAULT_OMEGA_SPIN  = 20.148
+DEFAULT_POS0        = _IC.pos.tolist()
+DEFAULT_VEL0        = _IC.vel.tolist()
+DEFAULT_BODY_Z      = _IC.body_z.tolist()
+DEFAULT_OMEGA_SPIN  = _IC.omega_spin
 
 STARTUP_DAMP_K_VEL = 200.0    # N·s/m   — velocity drag
 STARTUP_DAMP_K_ANG = 500.0    # N·m·s/rad
@@ -77,7 +80,7 @@ def _make_dynamics(pos0=None, vel0=None):
 def _make_tether():
     return TetherModel(
         anchor_enu             = np.zeros(3),
-        rest_length            = 49.949,
+        rest_length            = _IC.rest_length,
         hub_mass               = MASS,
         axle_attachment_length = 0.0,
     )
@@ -100,7 +103,7 @@ def _physics_step(dynamics, aero, tether, omega_spin, alpha,
     if pos0 is None:
         pos0 = np.array(DEFAULT_POS0, dtype=float)
     hub = dynamics.state
-    forces = aero.compute_forces(
+    result = aero.compute_forces(
         collective_rad = 0.0,
         tilt_lon       = 0.0,
         tilt_lat       = 0.0,
@@ -111,15 +114,14 @@ def _physics_step(dynamics, aero, tether, omega_spin, alpha,
         t              = t_sim,
     )
     tether_force, tether_moment = tether.compute(hub["pos"], hub["vel"], hub["R"])
-    forces[0:3] += tether_force
-    forces[3:6] += tether_moment
+    F_net     = result.F_world + tether_force
+    M_orbital = result.M_orbital + tether_moment
 
     if alpha > 0.0:
-        forces[0:3] -= k_vel * alpha * hub["vel"]
-        forces[0:3] -= k_pos * alpha * (hub["pos"] - pos0)
-        forces[2]   += MASS * G * alpha      # gravity compensation
+        F_net = F_net - k_vel * alpha * hub["vel"]
+        F_net = F_net - k_pos * alpha * (hub["pos"] - pos0)
+        F_net = F_net + np.array([0.0, 0.0, MASS * G * alpha])  # gravity compensation
 
-    M_orbital = forces[3:6] - aero.last_M_spin
     k_ang_total = 50.0 + k_ang * alpha
     M_orbital  -= k_ang_total * hub["omega"]
 
@@ -127,7 +129,7 @@ def _physics_step(dynamics, aero, tether, omega_spin, alpha,
     Q_spin     = K_DRIVE_SPIN * aero.last_v_inplane - K_DRAG_SPIN * omega_spin**2
     omega_spin = max(OMEGA_SPIN_MIN, omega_spin + Q_spin / I_SPIN_KGMS2 * DT_TARGET)
 
-    hub_state = dynamics.step(forces[0:3], M_orbital, DT_TARGET, omega_spin)
+    hub_state = dynamics.step(F_net, M_orbital, DT_TARGET, omega_spin)
     return hub_state, omega_spin
 
 
@@ -143,7 +145,7 @@ def test_full_damping_limits_position_drift():
     fly away), not that it holds position to sub-centimetre accuracy.
     """
     dynamics   = _make_dynamics()
-    aero       = RotorAero(_rd.default())
+    aero       = create_aero(_rd.default())
     tether     = _make_tether()
     omega_spin = DEFAULT_OMEGA_SPIN
 
@@ -172,7 +174,7 @@ def test_full_damping_limits_velocity():
     to that offset.  The limit is relaxed from 0.02 to 0.1 m/s accordingly.
     """
     dynamics   = _make_dynamics()
-    aero       = RotorAero(_rd.default())
+    aero       = create_aero(_rd.default())
     tether     = _make_tether()
     omega_spin = DEFAULT_OMEGA_SPIN
 
@@ -193,7 +195,7 @@ def test_gravity_compensation_prevents_sinking():
     more than 0.5 m over 10 s.  Without gravity compensation the hub would
     fall at ½g t² ≈ 490 m/s² over 10 s."""
     dynamics   = _make_dynamics(vel0=[0.0, 0.0, 0.0])
-    aero       = RotorAero(_rd.default())
+    aero       = create_aero(_rd.default())
     tether     = _make_tether()
     omega_spin = DEFAULT_OMEGA_SPIN
 
@@ -218,7 +220,7 @@ def test_no_position_jump_at_damp_end():
     one step before damp-end (alpha≈ε) then one step after (alpha=0) and
     verify position changes by at most one step's worth of drift."""
     dynamics   = _make_dynamics()
-    aero       = RotorAero(_rd.default())
+    aero       = create_aero(_rd.default())
     tether     = _make_tether()
     omega_spin = DEFAULT_OMEGA_SPIN
 
@@ -274,7 +276,7 @@ def test_physics_resumes_gradually_after_damping():
     rate of change is bounded."""
     T_damp   = 5.0   # short damp for speed
     dynamics   = _make_dynamics()
-    aero       = RotorAero(_rd.default())
+    aero       = create_aero(_rd.default())
     tether     = _make_tether()
     omega_spin = DEFAULT_OMEGA_SPIN
 

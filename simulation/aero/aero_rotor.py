@@ -1,0 +1,269 @@
+"""
+aero_rotor.py — Lumped-blade BEM aerodynamic model (RotorAero)
+
+Computes the aerodynamic wrench (force + moment) acting on the rotor hub
+in the world (ENU) frame.
+
+Aerodynamic model — SG6042 lift + Oswald drag polar:
+  - Lift:       CL = CL0 + CL_alpha × α
+  - Drag polar: CD = CD0 + CL²/(π·AR·Oe)  (De Schutter Eq. 25 induced drag)
+  - AoA clamp:  |α| ≤ alpha_stall  (De Schutter Eq. 28 constraint)
+  - Induction:  exact quadratic solution of momentum equation (De Schutter Eq. 17)
+                T = 2ρA·v_i·(|v_axial| + v_i)  →  v_i = (−|v_axial| + √(v_axial² + 2T/ρA)) / 2
+
+Force model — single-point lumped blade (De Schutter Eq. 30–31):
+  Forces are evaluated at r_cp = r_root + (2/3)×span using total blade area S_w.
+
+All default parameter values are loaded from rotor_definitions/beaupoil_2026.yaml
+via rotor_definition.default().aero_kwargs().  Override by passing kwargs to __init__.
+
+Spin dynamics:
+  last_Q_spin uses an empirical model:  Q = k_drive × v_inplane − k_drag × ω²
+  Equilibrium: ω_eq = sqrt(k_drive × v_inplane / k_drag)
+"""
+
+import math
+import logging
+import sys as _sys
+import os as _os
+import numpy as np
+
+_SIM_DIR = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _SIM_DIR not in _sys.path:
+    _sys.path.insert(0, _SIM_DIR)
+
+from aero import AeroResult
+
+log = logging.getLogger(__name__)
+
+
+
+class RotorAero:
+    """
+    BEM rotor aerodynamic force/moment model.
+
+    Lift model — NeuralFoil XFOIL surrogate at Re=490k (beaupoil_2026 default):
+        CL = CL0 + CL_alpha × α   (CL0=0.524, CL_alpha=5.47 /rad)
+    Drag polar — De Schutter Eq. 25:
+        CD = CD0 + CL² / (π × AR × Oe)
+    Induction per De Schutter Eq. 17 (exact quadratic):
+        v_i = (−|v_axial| + √(v_axial² + 2T/(ρA))) / 2
+
+    Spin: last_Q_spin = k_drive_spin * v_inplane - k_drag_spin * omega²
+    Use:  omega_spin += aero.last_Q_spin / I_spin * dt
+
+    Parameters
+    ----------
+    rotor : RotorDefinition
+        Rotor geometry, airfoil, and autorotation parameters.
+    ramp_time : float
+        Spin-up ramp duration [s] (simulation artifact, not a rotor property).
+    **overrides : optional keyword overrides for any aero_kwargs() field.
+    """
+
+    def __init__(self, rotor, ramp_time: float = 5.0, **overrides):
+        p = {**rotor.aero_kwargs(), **overrides}
+        self.n_blades     = int(p["n_blades"])
+        self.r_root       = float(p["r_root"])
+        self.r_tip        = float(p["r_tip"])
+        self.chord        = float(p["chord"])
+        self.rho          = float(p["rho"])
+        self.aspect_ratio = float(p["aspect_ratio"])
+        self.oswald_eff   = float(p["oswald_eff"])
+        self.CD0          = float(p["CD0"])
+        self.CL0          = float(p["CL0"])
+        self.CL_alpha     = float(p["CL_alpha"])
+        self.K_cyc        = float(p["K_cyc"])
+        self.aoa_limit    = float(p["aoa_limit"])
+        self.ramp_time    = float(ramp_time)
+        self.k_drive_spin = float(p["k_drive_spin"])
+        self.k_drag_spin  = float(p["k_drag_spin"])
+
+        # Geometry
+        span           = self.r_tip - self.r_root
+        self.r_cp      = self.r_root + (2.0 / 3.0) * span   # kept for test/telemetry compat
+        self.S_w       = self.n_blades * self.chord * span   # kept for test/telemetry compat
+        self.disk_area = math.pi * (self.r_tip ** 2 - self.r_root ** 2)
+
+        # Strip integration geometry (replaces lumped r_cp evaluation)
+        _n  = 20
+        _dr = span / _n
+        self._strip_r  = np.array([self.r_root + (i + 0.5) * _dr for i in range(_n)])
+        self._strip_dA = self.n_blades * self.chord * _dr   # blade area per strip, all blades
+
+        # Telemetry — readable after each compute_forces() call
+        self.last_T              = 0.0
+        self.last_v_axial        = 0.0
+        self.last_v_i            = 0.0
+        self.last_v_inplane      = 0.0
+        self.last_ramp           = 0.0
+        self.last_collective_rad = 0.0
+        self.last_tilt_lon       = 0.0
+        self.last_tilt_lat       = 0.0
+        self.last_Q_drag         = 0.0
+        self.last_Q_drive        = 0.0
+        self.last_H_force        = 0.0
+        self.last_M_spin         = np.zeros(3)
+        self.last_M_cyc          = np.zeros(3)
+        self.last_Q_spin         = 0.0   # empirical spin torque [N·m] — use for spin ODE
+
+    @classmethod
+    def from_definition(cls, defn, **overrides) -> "RotorAero":
+        """Alias for RotorAero(rotor, **overrides) — kept for backwards compatibility."""
+        return cls(defn, **overrides)
+
+    def _ramp_factor(self, t: float) -> float:
+        if t >= self.ramp_time:
+            return 1.0
+        return max(0.0, t / self.ramp_time)
+
+    def _induced_velocity(self, T_guess: float, v_axial: float = 0.0) -> float:
+        """Exact actuator-disk induced velocity (De Schutter Eq. 17)."""
+        T_abs = max(abs(T_guess), 0.01)
+        v_ax  = abs(v_axial)
+        disc  = v_ax ** 2 + 2.0 * T_abs / (self.rho * self.disk_area)
+        return max(0.0, (-v_ax + math.sqrt(disc)) / 2.0)
+
+    def _bem_integrate(self, v_eff: float, omega_abs: float,
+                       collective_rad: float) -> tuple:
+        """Strip BEM — integrates dT and dQ over 20 radial strips."""
+        T_sum = 0.0
+        Q_sum = 0.0
+        for r_i in self._strip_r:
+            v_tan = omega_abs * r_i
+            v_loc = math.sqrt(v_tan ** 2 + v_eff ** 2)
+            if v_loc < 0.5:
+                continue
+
+            inflow_ang  = math.atan2(v_eff, v_tan)
+            aoa_clamped = max(-self.aoa_limit,
+                              min(self.aoa_limit, inflow_ang + collective_rad))
+
+            CL = self.CL0 + self.CL_alpha * aoa_clamped
+            CD = self.CD0 + CL ** 2 / (math.pi * self.aspect_ratio * self.oswald_eff)
+            q  = 0.5 * self.rho * v_loc ** 2
+
+            dT = q * self._strip_dA * (CL * math.cos(inflow_ang) - CD * math.sin(inflow_ang))
+            dQ = q * self._strip_dA * r_i * (CL * math.sin(inflow_ang) - CD * math.cos(inflow_ang))
+            T_sum += max(0.0, dT)
+            Q_sum += dQ
+
+        return T_sum, max(0.0, Q_sum), min(0.0, Q_sum)
+
+    def compute_forces(
+        self,
+        collective_rad: float,
+        tilt_lon:       float,
+        tilt_lat:       float,
+        R_hub:          np.ndarray,
+        v_hub_world:    np.ndarray,
+        omega_rotor:    float,
+        wind_world:     np.ndarray,
+        t:              float,
+    ) -> AeroResult:
+        """
+        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world ENU [N, N·m].
+
+        After the call:
+          last_Q_spin  — empirical spin torque; use for spin ODE (omega += Q/I * dt)
+          last_M_spin  — spin-axis moment vector; subtract from total to get orbital moment
+          last_v_inplane — in-plane wind speed [m/s]
+        """
+        ramp = self._ramp_factor(t)
+
+        disk_normal   = R_hub[:, 2]
+        v_rel_world   = wind_world - v_hub_world
+        v_axial       = float(np.dot(v_rel_world, disk_normal))
+        v_inplane_vec = v_rel_world - v_axial * disk_normal
+        v_inplane     = float(np.linalg.norm(v_inplane_vec))
+        omega_abs     = abs(omega_rotor)
+
+        # Coupled BEM + induction iteration (3 passes)
+        v_i = 0.0
+        for _ in range(3):
+            T_raw, Q_pos, Q_neg = self._bem_integrate(v_axial + v_i, omega_abs, collective_rad)
+            v_i = self._induced_velocity(T_raw, v_axial)
+        T_raw, Q_pos, Q_neg = self._bem_integrate(v_axial + v_i, omega_abs, collective_rad)
+
+        T       = T_raw * ramp
+        F_world = T * disk_normal
+
+        # H-force (in-plane drag from advancing/retreating asymmetry)
+        H = 0.0
+        if v_inplane > 0.01 and omega_abs > 0.1:
+            mu            = v_inplane / (omega_abs * self.r_tip)
+            H             = 0.5 * mu * T * ramp
+            F_world       = F_world + H * (v_inplane_vec / v_inplane)
+
+        # Spin moment
+        Q_total      = Q_pos + Q_neg
+        spin_sign    = float(np.sign(omega_rotor)) if omega_rotor != 0.0 else 1.0
+        M_spin_world = Q_total * ramp * spin_sign * disk_normal
+        Q_drive      = Q_pos * ramp * spin_sign
+        Q_drag       = Q_neg * ramp * spin_sign
+
+        # Cyclic moments from swashplate tilt
+        from swashplate import _PITCH_GAIN_RAD as pitch_gain
+        tilt_lon_rad = tilt_lon * pitch_gain
+        tilt_lat_rad = tilt_lat * pitch_gain
+
+        _EAST  = np.array([1.0, 0.0, 0.0])
+        _ep    = _EAST - np.dot(_EAST, disk_normal) * disk_normal
+        if np.linalg.norm(_ep) > 1e-6:
+            _bx = _ep / np.linalg.norm(_ep)
+        else:
+            _NORTH = np.array([0.0, 1.0, 0.0])
+            _np2   = _NORTH - np.dot(_NORTH, disk_normal) * disk_normal
+            _bx    = _np2 / np.linalg.norm(_np2)
+        R_orb       = np.column_stack([_bx, np.cross(disk_normal, _bx), disk_normal])
+        M_cyc_world = R_orb @ np.array([-self.K_cyc * tilt_lon_rad * T,
+                                          self.K_cyc * tilt_lat_rad * T,
+                                          0.0])
+
+        self.last_M_spin         = M_spin_world.copy()
+        self.last_M_cyc          = M_cyc_world.copy()
+        self.last_T              = T
+        self.last_v_axial        = v_axial
+        self.last_v_i            = v_i
+        self.last_v_inplane      = v_inplane
+        self.last_ramp           = ramp
+        self.last_collective_rad = collective_rad
+        self.last_tilt_lon       = tilt_lon
+        self.last_tilt_lat       = tilt_lat
+        self.last_Q_drag         = float(Q_drag)
+        self.last_Q_drive        = float(Q_drive)
+        self.last_H_force        = float(H)
+        self.last_Q_spin         = float(self.k_drive_spin * v_inplane
+                                         - self.k_drag_spin * omega_abs ** 2)
+
+        log.debug("t=%.3f T=%.2fN H=%.2fN v_axial=%.2f v_i=%.2f ramp=%.2f",
+                  t, T, H, v_axial, v_i, ramp)
+        return AeroResult(
+            F_world   = F_world.copy(),
+            M_orbital = M_cyc_world.copy(),
+            Q_spin    = self.last_Q_spin,
+            M_spin    = M_spin_world.copy(),
+        )
+
+    def compute_anti_rotation_moment(self, omega_rotor: float,
+                                     gear_ratio: float = 80.0 / 44.0) -> float:
+        """
+        Counter-torque from GB4008 motor (Mz about disk axis).
+
+        The motor is geared to the rotor axle at gear_ratio = 80/44.  Motor shaft
+        speed is mechanically locked to gear_ratio × omega_rotor (opposite sign), so
+        no speed sensor or closed-loop speed control is needed.  The motor actively
+        drives the electronics assembly against bearing drag; the ESC runs at a fixed
+        setpoint.  Counter-torque scales with rotor speed through the gear ratio.
+
+        Simplified model: M = K_motor × gear_ratio × omega_rotor
+        K_motor is not yet calibrated — placeholder value used here.
+
+        Not called in the current single-body model — motor torque is an internal
+        force and cancels in the equations of motion.  Reserved for the future
+        two-body model (separate spinning-hub and stationary-electronics bodies).
+        """
+        # Placeholder motor torque constant [N·m·s/rad at motor shaft]
+        # To calibrate: measure stall torque at known omega_rotor and back-calculate.
+        _K_motor = 0.5   # N·m·s/rad — UNCALIBRATED ESTIMATE
+        return -_K_motor * gear_ratio * omega_rotor

@@ -24,7 +24,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator as _mediator_module
-from aero     import RotorAero
+from aero     import create_aero
 import rotor_definition as _rd
 from dynamics import RigidBodyDynamics
 
@@ -100,7 +100,7 @@ def _compute_equilibrium_collective(
         T_t_est   : float  estimated tether tension at equilibrium [N]
         H_x       : float  East aero force at equilibrium collective [N]
     """
-    aero = RotorAero(_rd.default())
+    aero = create_aero(_rd.default())
     W = mass * 9.81
 
     tether_dir = np.array([math.cos(elev_rad), 0.0, math.sin(elev_rad)])
@@ -220,7 +220,7 @@ def test_equilibrium_collective_gives_balanced_net_force():
         WIND, MASS, OMEGA, ELEV_RAD)
 
     pos  = _hub_pos()
-    aero = RotorAero(_rd.default())
+    aero = create_aero(_rd.default())
 
     # Set rest_length so tether is taut with exactly T_t_est at L_TETHER
     # k = EA / L;  extension = T_t / k  →  rest_length = L - extension
@@ -279,7 +279,7 @@ def test_hub_stays_bounded_at_30_degrees():
     tether_dir = pos0 / np.linalg.norm(pos0)
     R0_eq      = _R_from_body_z(tether_dir)
 
-    aero   = RotorAero(_rd.default())
+    aero   = create_aero(_rd.default())
     tether = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
     dyn    = RigidBodyDynamics(
         mass   = MASS,
@@ -297,7 +297,7 @@ def test_hub_stays_bounded_at_30_degrees():
         assert np.all(np.isfinite(pos)), f"NaN/inf in position at step {step}: {pos}"
         assert np.all(np.isfinite(state["R"])), f"NaN/inf in rotation at step {step}"
 
-        f_aero          = aero.compute_forces(
+        result          = aero.compute_forces(
             collective_rad = coll_eq,
             tilt_lon       = 0.0,
             tilt_lat       = 0.0,
@@ -308,10 +308,10 @@ def test_hub_stays_bounded_at_30_degrees():
             t              = 10.0,   # past 5 s ramp → ramp = 1.0
         )
         f_teth, m_teth  = tether.compute(pos, state["vel"], state["R"])
-        f_aero[0:3]    += f_teth
-        f_aero[3:6]    += m_teth
+        F_net = result.F_world + f_teth
+        M_net = result.M_orbital + result.M_spin + m_teth
 
-        dyn.step(f_aero[:3], f_aero[3:], DT)
+        dyn.step(F_net, M_net, DT)
 
     final = dyn.state["pos"]
     drift = np.abs(final - pos0)

@@ -88,7 +88,7 @@ airfoil:
                              # ASSUMPTION: model clips at this value (does not simulate post-stall).
 
   # Empirical Re range — documentation only, NOT USED IN CURRENT MODEL
-  Re_design:         127000 # Re at which Weyel 2025 / Beaupoil test rig operated
+  Re_design:         127000 # Re at Beaupoil test rig operating conditions
                              # NOT USED IN MODEL — documentation only.
                              # Source: FlapRotor Blade Design doc p. 14 (calculated: 10 m/s wind,
                              # 45 RPM, r=1.0 m, c=200 mm, ν=1.571×10⁻⁵ m²/s → Re=127,301).

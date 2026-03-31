@@ -62,7 +62,7 @@ Available controllers
                          v_reel_out, v_reel_in, tension_out, tension_in,
                          wind_enu, xi_reel_in_deg=55.0,
                          tension_kp=5e-4, tension_ki=1e-4,
-                         col_min_rad=-0.436, col_max_rad=0.0,
+                         col_min_rad=-0.28, col_max_rad=0.0,
                          tension_max_n=None, wind_estimator=None)
         De Schutter (2018) pumping cycle.
         Owns the tension PI internally; outputs normalised thrust [0..1].
@@ -367,20 +367,21 @@ class DeschutterPlanner(TrajectoryPlanner):
 
     def __init__(
         self,
-        t_reel_out:      float,
-        t_reel_in:       float,
-        t_transition:    float,
-        v_reel_out:      float,
-        v_reel_in:       float,
-        tension_out:     float,
-        tension_in:      float,
-        wind_enu:        np.ndarray,
-        xi_reel_in_deg:  "float | None" = 55.0,
-        tension_kp:      float = 5e-4,
-        tension_ki:      float = 1e-4,
-        col_min_rad:     float = TensionPI.COLL_MIN_RAD,
-        col_max_rad:     float = TensionPI.COLL_MAX_RAD,
-        wind_estimator:  "WindEstimator | None" = None,
+        t_reel_out:           float,
+        t_reel_in:            float,
+        t_transition:         float,
+        v_reel_out:           float,
+        v_reel_in:            float,
+        tension_out:          float,
+        tension_in:           float,
+        wind_enu:             np.ndarray,
+        xi_reel_in_deg:       "float | None" = 55.0,
+        tension_kp:           float = 5e-4,
+        tension_ki:           float = 1e-4,
+        col_min_rad:          float = TensionPI.COLL_MIN_RAD,
+        col_min_reel_in_rad:  "float | None" = None,
+        col_max_rad:          float = TensionPI.COLL_MAX_RAD,
+        wind_estimator:       "WindEstimator | None" = None,
     ):
         self._t_reel_out    = float(t_reel_out)
         self._t_reel_in     = float(t_reel_in)
@@ -391,6 +392,9 @@ class DeschutterPlanner(TrajectoryPlanner):
         self._tension_in    = float(tension_in)
         self._t_cycle       = self._t_reel_out + self._t_reel_in
         self._col_min_rad   = float(col_min_rad)
+        # Reel-in may need a less-negative minimum to stay above zero-thrust
+        # when body_z is tilted toward vertical (xi_reel_in_deg).
+        self._col_min_reel_in_rad = float(col_min_reel_in_rad) if col_min_reel_in_rad is not None else float(col_min_rad)
         self._col_max_rad   = float(col_max_rad)
         self._xi_reel_in_deg: "float | None" = float(xi_reel_in_deg) if xi_reel_in_deg is not None else None
         self._wind_estimator = wind_estimator
@@ -448,15 +452,34 @@ class DeschutterPlanner(TrajectoryPlanner):
         t_cyc     = self._t_free % self._t_cycle
         phase_out = t_cyc < self._t_reel_out
 
-        # Tension PI (planner-owned) — updates setpoint at phase boundary
-        tension_setpoint = self._tension_out if phase_out else self._tension_in
+        # Switch TensionPI limits at phase boundary:
+        # - Reel-out: col_min=-0.28 (tether-aligned body_z, positive thrust to -0.34 rad)
+        # - Reel-in: col_min=-0.20 (xi=55° body_z, zero-thrust at -0.228 rad; -0.20 has safe margin)
+        _col_min_now = self._col_min_rad if phase_out else self._col_min_reel_in_rad
+        self._tension_ctrl.coll_min = _col_min_now
+
+        # Detect reel-out → reel-in phase transition and warm the PI integral.
+        # At reel-in start the integral has wound to a bad value during reel-out.
+        # Re-warm to give collective ≈ reel-in col_min immediately.
+        _just_entered_reel_in = (not phase_out) and (t_cyc - self._t_reel_out < dt * 1.5)
+        if _just_entered_reel_in:
+            _coll_warm = self._col_min_reel_in_rad  # start at reel-in col_min; PI integrates up from here
+            self._tension_ctrl._integral = _coll_warm / max(self._tension_ctrl.ki, 1e-12)
+
+        # Tension PI — ramp setpoint over t_transition at each boundary.
+        if phase_out:
+            tension_setpoint = self._tension_out
+        else:
+            t_into_reel_in = t_cyc - self._t_reel_out
+            alpha = min(1.0, t_into_reel_in / self._t_transition)
+            tension_setpoint = self._tension_out + alpha * (self._tension_in - self._tension_out)
         self._tension_ctrl.setpoint = tension_setpoint
         collective_rad = self._tension_ctrl.update(float(tension_n), dt)
 
         # Normalise collective → thrust [0..1] for SET_ATTITUDE_TARGET
-        col_range = self._col_max_rad - self._col_min_rad
+        col_range = self._col_max_rad - _col_min_now
         thrust = float(max(0.0, min(1.0,
-            (collective_rad - self._col_min_rad) / col_range if col_range > 1e-9 else 0.5
+            (collective_rad - _col_min_now) / col_range if col_range > 1e-9 else 0.5
         )))
 
         # Winch speed — stop reel-out if tether has reached max length (if provided)
@@ -472,6 +495,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         return {
             "attitude_q":     attitude_q,
             "thrust":         thrust,
+            "collective_rad": collective_rad,  # raw collective [rad] for direct use by internal controller
             "winch_speed_ms": winch_speed,
             "phase":          "reel-out" if phase_out else "reel-in",
         }

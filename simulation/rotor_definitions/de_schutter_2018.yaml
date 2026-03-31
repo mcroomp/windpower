@@ -1,50 +1,79 @@
 # De Schutter 2018 — RAWES Reference Rotor Definition
-# Mathematical reference design from:
-#   De Schutter, Leuthold & Diehl (2018), "Optimal Control of a Rigid-Wing
-#   Rotary Kite System for Airborne Wind Energy", IFAC proceedings.
 #
-# NOT actual hardware — this is the theoretical reference model used in the
-# optimal control paper. Parameters from Table I of that paper.
+# Source: De Schutter J., Leuthold R., Diehl M. (2018).
+#   "Optimal Control of a Rigid-Wing Rotary Kite System for Airborne Wind Energy"
+#   IFAC Proceedings.  Full text: https://publications.syscop.de/DeSchutter2018.pdf
 #
-# Derived non-dimensional quantities (computed by RotorDefinition):
-#   Solidity:    σ = N·c / (π·R) = 3×0.125 / (π×2.0) = 0.0597
-#   Aspect ratio: AR = (R - r_root) / c = 1.5 / 0.125 = 12.0   (matches Table I AR=12)
-#   Disk area:   A = π(R² - r_root²) = π(4.0 - 0.25) = 11.78 m²
-#   r_cp:        r_root + 2/3·(R - r_root) = 0.5 + 2/3×1.5 = 1.5 m
+# All values taken directly from the paper unless marked [ESTIMATE].
+#
+# ── Geometry ──────────────────────────────────────────────────────────────────
+# Paper uses: wing span L_w, connecting beam length L_b (optimised result).
+# The three wings are mounted on carbon-fibre arms of length L_b that connect
+# to a central rod.  Wing root is therefore at radial distance L_b from centre.
+#
+#   r_root = L_b = 1.60 m   (Table I "optimal design" result, Section IV-A)
+#   R      = L_b + L_w = 1.60 + 1.50 = 3.10 m
+#   span   = L_w = 1.50 m              (Table I)
+#   chord  = L_w / A = 1.50 / 12 = 0.125 m  (Table I: A = 12)
+#
+# Actuator annulus area (Eq. 18):
+#   A_K = π((L_b + L_w)² − L_b²) = π(3.10² − 1.60²) = 22.15 m²
+#
+# Centre of pressure (Section II-D, "two-thirds of wing span from root"):
+#   r_cp = L_b + (2/3)·L_w = 1.60 + 1.00 = 2.60 m
+#
+# Derived non-dimensional:
+#   Solidity:    σ = N·c / (π·R) = 3×0.125 / (π×3.1) = 0.0385
+#   Aspect ratio: AR = span / chord = 1.50 / 0.125 = 12.0  ✓
+#   Disk area:   A_K = π(R² − r_root²) = π(9.61 − 2.56) = 22.15 m²
 
 name: de_schutter_2018
 description: >
-  3-blade RAWES reference rotor from De Schutter et al. (2018) optimal control paper.
-  Parameters from Table I of the paper. Not actual hardware — mathematical reference.
-  Mass 40 kg represents a larger prototype than the Beaupoil 2026 hardware (5 kg).
+  3-blade RAWES reference from De Schutter et al. (2018) optimal control paper.
+  Geometry and aerodynamics taken directly from the paper (Table I, Eq. 25).
+  Mass/inertia use Weyel (2025) preliminary estimates as De Schutter does not
+  specify these explicitly.  This is a mathematical reference — not actual hardware.
 
 rotor:
-  # Fundamental geometry (from De Schutter 2018 Table I)
-  n_blades:      3          # N — number of blades
-  radius_m:      2.0        # R — tip radius [m]
-  root_cutout_m: 0.5        # r_root — root cutout [m]  (estimated, not stated in paper)
-  chord_m:       0.125      # c — blade chord [m]  (AR=12 → span/c = 1.5/0.125 = 12 ✓)
-  twist_deg:     0.0        # θ_tw — no blade twist (stated in paper)
-  taper_ratio:   1.0        # rectangular blade
+  # Fundamental geometry — from De Schutter 2018
+  n_blades:      3          # N — 3 blades (wings), 120° apart
+  radius_m:      3.1        # R = L_b + L_w = 1.60 + 1.50 m  (Section IV-A result)
+  root_cutout_m: 1.6        # r_root = L_b = 1.60 m  (optimised connecting arm length)
+  chord_m:       0.125      # c = L_w / A = 1.50 / 12 = 0.125 m  (Table I: A=12, L_w=1.5m)
+  twist_deg:     0.0        # no blade twist (stated in paper)
+  taper_ratio:   1.0        # rectangular planform
 
 airfoil:
-  designation:       "De Schutter 2018 (Table I)"
-  source:            "De Schutter et al. 2018, Table I"
-  # Lift model:  CL = CL0 + CL_alpha · α
-  CL0:               0.10   # zero-AoA lift
-  CL_alpha_per_rad:  0.87   # a = ∂CL/∂α  [/rad]  — De Schutter Table I
-  # Drag polar:  CD = CD0 + CL²/(π·AR·e)
-  CD0:               0.01   # zero-lift drag  — De Schutter Table I
-  oswald_efficiency: 0.8    # e — De Schutter Table I
-  alpha_stall_deg:   15.0   # α_stall — De Schutter Eq. 28 constraint ±15°
-  Re_design:         null   # not specified in paper
+  designation:       "De Schutter 2018 — thin airfoil, elliptical finite wing"
+  source:            "De Schutter et al. 2018, Eq. 25 and Table I"
+  #
+  # De Schutter uses THIN AIRFOIL THEORY with Prandtl finite-wing correction (Eq. 25):
+  #
+  #   C_{L,k} = (2π / (1 + 2/A)) · α_k        (no CL0 term — symmetric/uncambered wing)
+  #
+  # For A = 12:
+  #   CL_alpha = 2π / (1 + 2/12) = 2π / (7/6) = 12π/7 ≈ 5.385 /rad
+  #
+  # NOTE: This is NOT the SG6042 or SG6040 airfoil.  De Schutter explicitly uses
+  # thin airfoil theory (from von Mises [18] in the paper), appropriate for his
+  # optimisation study.  The paper contains no airfoil designation.
+
+  CL0:               0.0    # zero — thin airfoil, symmetric wing assumption (Eq. 25)
+  CL_alpha_per_rad:  5.385  # 2π/(1+2/12) = 12π/7  (De Schutter Eq. 25, A=12)
+  CD0:               0.01   # C_{D,0} = 0.01  (De Schutter Table I)
+  oswald_efficiency: 0.8    # O_e = 0.8  (De Schutter Table I)
+  alpha_stall_deg:   15.0   # from De Schutter Eq. 28: |α_k| ≤ 15°, |β_k| ≤ 15°
+  Re_design:         null   # not specified — thin airfoil theory is Re-independent
 
 inertia:
-  mass_kg:           40.0     # m — rotor mass (De Schutter reference)
-  # Inertia estimated from mass scaling: Beaupoil I_body × (40/5)
-  I_body_kgm2:       [40.0, 40.0, 80.0]  # scaled estimate [kg·m²]
-  I_spin_kgm2:       0.0
-  I_blade_flap_kgm2: null   # not stated in paper
+  # De Schutter does not provide explicit mass or inertia values — they are
+  # computed from structural parameters (Eq. 4) that require m'_S (mass per wing
+  # area) which is not in Table I.  Values below are from Weyel (2025) Table 1,
+  # labelled as "preliminary estimations" in his thesis.
+  mass_kg:           40.0     # m — [ESTIMATE from Weyel 2025 Table 1]
+  I_body_kgm2:       [20.0, 20.0, 40.0]   # J_r = [20,20,40]·I  [ESTIMATE Weyel 2025 Table 1]
+  I_spin_kgm2:       0.0      # gyroscopic coupling disabled (De Schutter does not model spin)
+  I_blade_flap_kgm2: null     # not stated
 
 control:
   K_cyc: 0.4
@@ -52,15 +81,18 @@ control:
   kaman_flap:
     enabled: false
     notes: >
-      De Schutter 2018 paper does not model Kaman flaps.
-      Blade pitch is commanded directly (abstract control input).
+      De Schutter 2018 commands blade pitch directly (abstract control input).
+      No Kaman flap model.
 
 autorotation:
+  # De Schutter does not use an autorotation spin ODE — ω_θ is prescribed.
+  # The paper gives ω_θ = 15π ≈ 47.12 rad/s (Weyel Table 1, for tip-speed-ratio λ=7).
+  # K values below are order-of-magnitude estimates carried over from beaupoil_2026.
   K_drive_Nms_m:    1.4
   K_drag_Nms2_rad2: 0.01786
   I_ode_kgm2:       10.0
   omega_min_rad_s:  0.5
-  omega_eq_rad_s:   null    # not calibrated for this rotor mass/geometry
+  omega_eq_rad_s:   null    # not calibrated for this rotor geometry
 
 environment:
   rho_kg_m3: 1.22

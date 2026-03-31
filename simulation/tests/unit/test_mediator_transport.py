@@ -76,7 +76,13 @@ class FakeAero:
     last_v_inplane = 0.0
 
     def compute_forces(self, **kwargs):
-        return np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], dtype=np.float64)
+        from aero import AeroResult
+        return AeroResult(
+            F_world   = np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            M_orbital = np.array([4.0, 5.0, 6.0], dtype=np.float64),
+            Q_spin    = 0.0,
+            M_spin    = np.zeros(3, dtype=np.float64),
+        )
 
     def compute_anti_rotation_moment(self, **kwargs):
         return 0.0
@@ -151,11 +157,11 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
 
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: real_sitl)
-    class _FakeRotorAero:
+    class _FakeSkewedWakeBEM:
         @classmethod
         def from_definition(cls, defn):
             return fake_aero
-    monkeypatch.setattr(mediator, "RotorAero", _FakeRotorAero)
+    monkeypatch.setattr(mediator, "SkewedWakeBEM", _FakeSkewedWakeBEM)
     monkeypatch.setattr(mediator, "make_sensor",       lambda *a, **kw: fake_sensor)
 
     times = iter([10.0, 10.1, 10.1005])

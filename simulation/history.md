@@ -1,6 +1,6 @@
 # RAWES Simulation — Development History
 
-Phase 2 and Phase 3 M3 decisions. See [CLAUDE.md](../CLAUDE.md) for current status and [raws_mode.md](raws_mode.md) for the full ModeRAWES spec.
+Phase 2, Phase 3 M3 architecture decisions, and Phase 3 M3 SkewedWakeBEM production switch. See [CLAUDE.md](../CLAUDE.md) for current status and [raws_mode.md](raws_mode.md) for the full ModeRAWES spec.
 
 ---
 
@@ -100,13 +100,13 @@ Winch controller     →  tether.rest_length    (±= v_reel × DT each step)
 The **attitude controller's body_z_eq setpoint is the primary lever** for tension control,
 not collective.  Collective provides fine-grained tension tuning within a phase.
 
-### Mediator wiring (completed in Phase 2)
+### Mediator wiring (completed in Phase 2, extended in Phase 3 M3)
 
 `mediator.py` was updated with orbit-tracking state captured at free-flight start:
 - `_ic_tether_dir0` and `_ic_body_z_eq0` captured once when `_damp_alpha == 0.0` first triggers
 - Body_z_eq tracked azimuthally each step (same formula as unit tests)
 - Internal controller branch calls `compute_swashplate_from_state` with orbit-tracked body_z_eq
-- collective_rad = 0.0 (pumping cycle collective control not yet wired into mediator)
+- Collective from `DeschutterPlanner` via `_traj_cmd["collective_rad"]` (wired in Phase 3 M3)
 
 ---
 
@@ -167,3 +167,74 @@ AM32 ESC telemetry via `AP_ESC_Telem`:
 omega_spin = get_rpm(RAWES_CTR_ESC) × 2π/60 / 11 × 44/80
 ```
 (11 pole pairs, 80:44 gear reduction)
+
+---
+
+## Phase 3 M3 — SkewedWakeBEM Production Switch: What Was Decided
+
+### RotorAero replaced by SkewedWakeBEM
+
+`RotorAero` had three fundamental physics errors that made it incompatible with the pumping cycle:
+
+1. **Wrong cyclic sign**: empirical `K_cyc × tilt × T` had the sign tuned to work with the old controller. Per-blade BEM gives the opposite cyclic sign — `tilt_lat > 0` produces `−My`, not `+My`. The controller sign convention was updated to match (`tilt_lat = −dot(corr_enu, disk_y)`).
+
+2. **Wrong H-force**: `0.5 × μ × T` ≈ 105 N vs SkewedWakeBEM ≈ 13 N. A factor of 8× over-estimate.
+
+3. **No physical spin model**: `K_drive × v_inplane − K_drag × omega²` empirical constants with no BEM basis.
+
+**SkewedWakeBEM** uses per-blade strip BEM with Prandtl tip/root loss and Coleman skewed-wake induction. Returns `AeroResult` dataclass with `F_world`, `M_orbital`, `Q_spin`, `M_spin`. The `Q_spin` field drives the omega_spin ODE directly — no empirical constants.
+
+**Speed:** SkewedWakeBEM is ~3.3× slower than RotorAero per call (~0.5 ms vs ~0.15 ms), but comfortably runs in real-time at 400 Hz on the simulation host.
+
+### Aero model parameter attribution corrections
+
+Both `RotorAero` and earlier code had wrong airfoil parameters attributed to academic sources:
+
+- **De Schutter 2018**: `CL0=0.0, CL_alpha=5.385/rad` (thin airfoil formula `2π`-ish), `R=3.1 m`, `r_root=1.6 m` (L_b beam arm). Earlier code had `CL_alpha=0.87/rad` (a Weyel plot approximation) and wrong geometry.
+- **Weyel 2025** bench-test data is for SG6040 at Re=127,000 — not directly applicable to beaupoil_2026 (SG6042, Re≈490,000). The `weyel_2025.yaml` rotor definition was removed.
+
+### Phase-dependent COL_MIN (critical finding)
+
+The zero-thrust collective is geometry-dependent:
+- **Tether-aligned body_z** (reel-out, ξ≈31°): zero-thrust at **−0.34 rad** → `col_min=−0.28` safe
+- **ξ=55° body_z** (reel-in): zero-thrust at **−0.228 rad** → `col_min=−0.28` gives **downforce** → hub falls
+
+Solution: `DeschutterPlanner` switches `col_min` at the phase boundary:
+- Reel-out: `col_min=−0.28`
+- Reel-in: `col_min=−0.20` (20 mrad above zero-thrust at ξ=55°)
+
+The PI integral is re-warmed to `col_min_reel_in / ki` at the phase boundary to avoid integral wind-up from the reel-out phase.
+
+### Collective passthrough: normalized thrust vs raw collective_rad
+
+**Bug found and fixed:** `DeschutterPlanner` normalised collective to `thrust ∈ [0,1]` using `col_min_reel_in=−0.20`, but the mediator always denormalised using `col_min_reel_out=−0.28`. During reel-in this mapped the planner's floor (−0.20) to −0.28 in the aero model — below zero-thrust → downforce → crash.
+
+**Fix:** `DeschutterPlanner.step()` now returns `collective_rad` directly alongside `thrust`. The mediator uses `collective_rad` when present, bypassing the normalization roundtrip entirely.
+
+### vel0 must not come from steady_state_starting.json
+
+`steady_state_starting.json` stores the physics-settled velocity (≈ 0 m/s at equilibrium). If the mediator uses this as `vel0`, the kinematic startup ramp has zero velocity — the EKF gets no velocity-derived yaw heading from frame 0 → compass flipping → no GPS lock.
+
+**Rule:** `vel0` always comes from `config.py DEFAULTS = [-0.257, 0.916, -0.093]` m/s. This is the designed startup velocity tangent to the tether orbit (~0.96 m/s). The stack test helper (`_launch_mediator`) explicitly does **not** override `vel0` from `initial_state`.
+
+### EKF altitude unreliable during pumping cycle
+
+GPS glitch events occur during the rapid body_z transition at reel-in start (hub accelerates ≈5 m upward in 2 s, compass switches compasses repeatedly as the SITL magnetometer rotates with the hub). During these events `LOCAL_POSITION_NED` altitude (EKF output) can drop by 5–10 m below physics truth.
+
+**Rule:** Use mediator telemetry `hub_pos_z` (physics truth) for crash detection. `LOCAL_POSITION_NED` altitude is logged as diagnostic only.
+
+### Stack test results (SkewedWakeBEM, beaupoil_2026, wind=10 m/s East)
+
+```
+Reel-out mean tension   : 199 N   (setpoint 200 N)
+Reel-in steady mean     :  86 N   (setpoint  80 N)
+Net energy per cycle    : +1396 J
+Peak tension            :  455 N  (< 496 N = 80% break load)
+Min physics altitude    :   5.7 m (> 2.0 m limit)
+```
+
+### Minimum tension_in for altitude maintenance at ξ=55°
+
+At ξ=55°, the vertical thrust component from the rotor must exceed hub weight (5 kg × 9.81 = 49 N) plus tether downward component. Testing showed tension_in=20 N (matching unit test default) was insufficient — the TensionPI reduced collective to near col_min=−0.20 where vertical thrust ≈ 38 N < gravity → hub fell.
+
+**Rule:** `tension_in ≥ 80 N` for altitude maintenance at ξ=55°. This matches `test_deschutter_cycle.py`'s `DEFAULT_TENSION_IN=80 N` which documents the same constraint in its source comment.

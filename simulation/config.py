@@ -80,9 +80,9 @@ DEFAULTS: dict = {
 
     # ── Mode_RAWES attitude parameters ───────────────────────────────────────
     # body_z_slew_rate_rad_s: max angular slew rate for body_z transitions [rad/s].
-    #   At 0.12 rad/s a 0.57 rad (33°) reel-in transition takes ~5 s.
-    #   Replaces the blend_alpha ramp that formerly lived in the trajectory planner.
-    "body_z_slew_rate_rad_s":    0.12,
+    #   At 0.40 rad/s a 0.78 rad (45°) reel-in transition completes in ~2 s,
+    #   minimising altitude loss during the body_z tether→vertical transition.
+    "body_z_slew_rate_rad_s":    0.40,
 
     # ── Sensor model ──────────────────────────────────────────────────────────
     "sensor_mode": "tether_relative",   # "tether_relative" | "physical"
@@ -108,19 +108,19 @@ DEFAULTS: dict = {
         "deschutter": {
             "t_reel_out":      30.0,   # reel-out phase duration [s]
             "t_reel_in":       30.0,   # reel-in phase duration [s]
-            "t_transition":     5.0,   # body_z blend window at phase boundary [s]
+            "t_transition":    15.0,   # body_z blend window at phase boundary [s] (longer = tension drops more slowly during body_z transition)
             "v_reel_out":       0.4,   # winch pay-out speed [m/s]
             "v_reel_in":        0.4,   # winch reel-in speed [m/s]
             "tension_out":    200.0,   # reel-out tension setpoint [N]
-            "tension_in":      20.0,   # reel-in tension setpoint [N]
-            "xi_reel_in_deg":  55.0,   # disk tilt from wind during reel-in [deg]
-                                       # None → no tilt change (simple tension cycle)
+            "tension_in":     100.0,   # reel-in tension setpoint [N]
+            "xi_reel_in_deg":  55.0,   # De Schutter reel-in tilt [deg] from wind
             # Tension PI (trajectory planner — ground station, raws_mode.md §3.2)
             "tension_kp":      5e-4,   # proportional gain [rad/N]
             "tension_ki":      1e-4,   # integral gain [rad/(N·s)]
             # Collective normalisation (same values as Pixhawk denorm in mediator)
-            "col_min_rad":    -0.436,  # −25° — min collective [rad]
-            "col_max_rad":     0.0,    # 0°   — max collective [rad]
+            "col_min_rad":         -0.28,  # reel-out min [rad]: safe at tether-aligned body_z (zero-thrust at -0.34)
+            "col_min_reel_in_rad": -0.20,  # reel-in min [rad]: safe at xi=55° body_z (zero-thrust at -0.228)
+            "col_max_rad":          0.0,   # max collective [rad]
         },
     },
 }
@@ -226,8 +226,9 @@ def make_trajectory(cfg: dict, wind_enu):
             xi_reel_in_deg  = p.get("xi_reel_in_deg", 55.0),
             tension_kp      = float(p.get("tension_kp",      5e-4)),
             tension_ki      = float(p.get("tension_ki",      1e-4)),
-            col_min_rad     = float(p.get("col_min_rad",    -0.436)),
-            col_max_rad     = float(p.get("col_max_rad",     0.0)),
+            col_min_rad          = float(p.get("col_min_rad",          -0.28)),
+            col_min_reel_in_rad  = float(p["col_min_reel_in_rad"]) if "col_min_reel_in_rad" in p else None,
+            col_max_rad          = float(p.get("col_max_rad",           0.0)),
         )
 
     return HoldPlanner()

@@ -166,18 +166,22 @@ class TestDeSchutterGeometry:
         assert self.r.aspect_ratio == pytest.approx(12.0, rel=1e-6)
 
     def test_solidity(self):
-        # σ = 3×0.125/(π×2.0) ≈ 0.0597
-        expected = 3 * 0.125 / (math.pi * 2.0)
-        assert self.r.solidity == pytest.approx(expected, rel=1e-6)
+        # σ = N·c / (π·R)
+        r = self.r
+        expected = r.n_blades * r.chord_m / (math.pi * r.radius_m)
+        assert r.solidity == pytest.approx(expected, rel=1e-6)
 
     def test_r_cp_m(self):
-        # r_cp = 0.5 + 2/3 × 1.5 = 1.5 m
-        assert self.r.r_cp_m == pytest.approx(1.5, rel=1e-6)
+        # r_cp = r_root + 2/3 × span
+        r = self.r
+        expected = r.root_cutout_m + (2.0 / 3.0) * (r.radius_m - r.root_cutout_m)
+        assert r.r_cp_m == pytest.approx(expected, rel=1e-6)
 
     def test_disk_area_m2(self):
-        # A = π(4.0 − 0.25) = π×3.75 ≈ 11.781 m²
-        expected = math.pi * (2.0**2 - 0.5**2)
-        assert self.r.disk_area_m2 == pytest.approx(expected, rel=1e-6)
+        # A = π(R² − r_root²)
+        r = self.r
+        expected = math.pi * (r.radius_m**2 - r.root_cutout_m**2)
+        assert r.disk_area_m2 == pytest.approx(expected, rel=1e-6)
 
     def test_kaman_disabled(self):
         assert self.r.kaman_flap.enabled is False

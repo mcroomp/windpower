@@ -717,10 +717,60 @@ Every firmware component maps to existing Python simulation code:
 
 ---
 
-## 12. References
+## 12. ArduPilot Configuration
+
+### Swashplate and RSC
+
+| Parameter | Value | Reason |
+|-----------|-------|--------|
+| `FRAME_CLASS` | 11 (Heli) | Traditional helicopter frame |
+| `H_SWASH_TYPE` | H3-120 | 3-servo lower ring at 120° driving 4 push-rods |
+| `H_RSC_MODE` | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete; GB4008 handles anti-rotation |
+| `H_PHANG` | TBD | Cyclic phase angle — measure empirically: step cyclic, observe disk tilt axis |
+| `H_COL_MAX` | TBD | Limit collective to keep flap loads in linear regime |
+| `H_CYC_MAX` | TBD | Limit cyclic amplitude to ≤15° rotor tilt |
+| `SERVO1_FUNCTION` | 33 (Motor1 / S1) | Swashplate servo S1 |
+| `SERVO2_FUNCTION` | 34 (Motor2 / S2) | Swashplate servo S2 |
+| `SERVO3_FUNCTION` | 35 (Motor3 / S3) | Swashplate servo S3 |
+| `ATC_RAT_RLL_IMAX` | 0 | Prevent orbital angular rate integrator windup |
+| `ATC_RAT_PIT_IMAX` | 0 | Same |
+| `ATC_RAT_YAW_IMAX` | 0 | Same |
+| `ACRO_TRAINER` | 0 | Disable leveling trainer (equilibrium is 65° from vertical) |
+
+### GB4008 Anti-Rotation Motor
+
+The GB4008 keeps the electronics assembly stationary via the Pixhawk IMU measuring any rotation and the ESC nulling it. The 80:44 gear sets motor RPM to `(80/44) × omega_rotor` to keep the motor in its efficient RPM band.
+
+**Key difference from a tail rotor:** Motor speed is gear-locked to rotor speed. PWM controls motor *torque* (ESC current), not speed. The `ATC_RAT_YAW_*` PID transfer function therefore differs from a standard helicopter tail.
+
+| Parameter | Value | Reason |
+|-----------|-------|--------|
+| `H_TAIL_TYPE` | 4 (DDFP) | Assigns yaw rate PID output to SERVO4 |
+| `SERVO4_FUNCTION` | 36 (Motor4) | GB4008 ESC |
+| `SERVO4_MIN` | 1000 | ESC disarm |
+| `SERVO4_MAX` | 2000 | ESC maximum |
+| `SERVO4_TRIM` | ~1150 | Idle torque at rest; increase if assembly drifts |
+| `ATC_RAT_YAW_P` | 0.20 | Starting value |
+| `ATC_RAT_YAW_I` | 0.05 | Absorbs steady-state bearing friction |
+| `ATC_RAT_YAW_D` | 0.0 | Start at zero |
+| `H_COL2YAW` | TBD | Feedforward: collective changes alter rotor drag → GB4008 must compensate |
+
+### Kaman Flap Lag — ArduPilot Implications
+
+Standard helicopter: swashplate moves → blade pitch changes immediately.
+
+RAWES: swashplate moves → flap deflects → aerodynamic moment builds → blade elastically twists → pitch changes.
+
+This second-order inner-loop lag means ArduPilot's attitude PID sees additional phase delay. The outer loop (`ATC_RAT_RLL/PIT_P/I/D`) must be significantly detuned or it will oscillate. `RAWES_KP_CYC` (cyclic rate gain) is the primary tuning lever; start at 0.3 and increase slowly.
+
+---
+
+## 13. References
 
 - `ArduCopter/mode_acro_heli.cpp` — structural template
 - `simulation/controller.py` — `orbit_tracked_body_z_eq()`, `compute_swashplate_from_state()`, `TensionController`
 - `simulation/mediator.py` — rate-limited slerp, STATE/COMMAND packet assembly
 - `simulation/sensor.py` — `SpinSensor` (omega_spin noise model)
-- `ardupilot_implementation.md` — hardware parameters, swashplate config
+- [physical_design.md](../physical_design.md) — swashplate geometry, servo specs, power architecture
+- ArduPilot Traditional Helicopter docs — https://ardupilot.org/copter/docs/traditional-helicopter-connecting-apm.html
+- ArduPilot Tail Rotor Setup — https://ardupilot.org/copter/docs/traditional-helicopter-tailrotor-setup.html

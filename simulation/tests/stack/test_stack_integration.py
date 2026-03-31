@@ -79,7 +79,11 @@ def _launch_mediator(
     cfg = _mcfg.defaults()
     if initial_state is not None:
         cfg["pos0"]    = list(initial_state["pos"])
-        cfg["vel0"]    = list(initial_state["vel"])
+        # vel0 is intentionally NOT overridden from initial_state: the settled
+        # physics velocity is ≈ 0 (noise), but the kinematic startup ramp needs
+        # a non-zero vel0 so the EKF gets a velocity-derived yaw heading from
+        # frame 0.  config.py DEFAULTS["vel0"] = [-0.257, 0.916, -0.093] m/s is
+        # the designed startup velocity (~0.96 m/s tangent to the tether orbit).
         cfg["body_z"]  = list(initial_state["body_z"])
         cfg["omega_spin"] = float(initial_state["omega_spin"])
         if tether_rest_length is None and "rest_length" in initial_state:
@@ -94,7 +98,19 @@ def _launch_mediator(
     cfg["lock_orientation"]    = lock_orientation
     cfg["sensor_mode"]         = sensor_mode
     if extra_config:
-        cfg.update(extra_config)
+        import copy as _copy
+        for _k, _v in extra_config.items():
+            if _k == "trajectory" and isinstance(_v, dict):
+                # Deep-merge trajectory section so callers can override individual
+                # deschutter params without losing defaults for col_min_rad etc.
+                cfg["trajectory"].update(_v)
+                for _sub in ("hold", "deschutter"):
+                    if _sub in _v and isinstance(_v[_sub], dict):
+                        _merged = _copy.deepcopy(_mcfg.DEFAULTS["trajectory"].get(_sub, {}))
+                        _merged.update(_v[_sub])
+                        cfg["trajectory"][_sub] = _merged
+            else:
+                cfg[_k] = _v
 
     # Write config to a temp file next to the log
     cfg_path = log_path.parent / (log_path.stem + "_mediator_config.json")
