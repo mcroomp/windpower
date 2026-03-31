@@ -63,12 +63,12 @@ def run_observation_loop(
     t_rc     = time.monotonic()
 
     # Request SERVO_OUTPUT_RAW so we can record the actual PWM ArduPilot sends.
-    # This stream may not be on by default; request it once.
+    # SERVO_OUTPUT_RAW is in MAV_DATA_STREAM_RC_CHANNELS in ArduPilot helicopter.
     try:
         from pymavlink import mavutil as _mavu
         gcs._mav.mav.request_data_stream_send(
             gcs._target_system, gcs._target_component,
-            _mavu.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER, 10, 1,
+            _mavu.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10, 1,
         )
     except Exception:
         pass

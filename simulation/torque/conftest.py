@@ -202,7 +202,8 @@ def torque_armed(tmp_path):
         # Request ATTITUDE stream (needed for EKF wait and yaw observation)
         from pymavlink import mavutil as _mavu
         gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)   # ATTITUDE @ 10 Hz
-        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA3, 2)    # EKF_STATUS_REPORT @ 2 Hz
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)  # SERVO_OUTPUT_RAW @ 10 Hz
 
         # ── Wait for param subsystem ───────────────────────────────────────
         log.info("Waiting for param subsystem …")
@@ -456,6 +457,7 @@ def torque_armed_profile(request, tmp_path):
         from pymavlink import mavutil as _mavu
         gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
         gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)  # SERVO_OUTPUT_RAW
         for pname, pvalue in [
             ("ARMING_SKIPCHK",   0xFFFF), ("FS_EKF_ACTION",   0),
             ("FS_THR_ENABLE",    0),      ("COMPASS_USE",      1),
@@ -663,6 +665,7 @@ def torque_armed_lua(tmp_path):
         from pymavlink import mavutil as _mavu
         gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
         gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)  # SERVO_OUTPUT_RAW
 
         for pname, pvalue in [
             # Safety
