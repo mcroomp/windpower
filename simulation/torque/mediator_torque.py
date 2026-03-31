@@ -168,6 +168,21 @@ def _tilt_pitch_roll(dt: float) -> tuple[float, float]:
     pitch = math.radians(3.0) * math.sin(2 * math.pi * 0.05 * dt)
     return roll, pitch
 
+def _tilt_wobble(dt: float) -> tuple[float, float]:
+    """High-tilt wobble: ±20° roll / ±15° pitch at orbital frequency ~0.1 Hz.
+    Simulates a RAWES hub under high cyclic swashplate tilt (e.g. steep orbit,
+    strong crosswind correction, or large commanded heading change).
+    Two frequency components create a less regular, more realistic wobble.
+    GPS position/velocity fusion must be disabled in the test fixture to
+    prevent GPS Glitch from the large horizontal gravity projection (~3.4 m/s²)."""
+    # Primary orbital component (0.10 Hz, 10 s period)
+    roll  = math.radians(20.0) * math.sin(2 * math.pi * 0.10 * dt)
+    pitch = math.radians(15.0) * math.cos(2 * math.pi * 0.10 * dt)
+    # Secondary harmonic (0.23 Hz) adds realistic non-uniform wobble
+    roll  += math.radians(5.0) * math.sin(2 * math.pi * 0.23 * dt + 1.0)
+    pitch += math.radians(4.0) * math.sin(2 * math.pi * 0.17 * dt + 0.5)
+    return roll, pitch
+
 PROFILES: dict[str, tuple] = {
     "startup":    (_omega_startup,   _tilt_flat),
     "constant":   (_omega_constant, _tilt_flat),
@@ -175,6 +190,7 @@ PROFILES: dict[str, tuple] = {
     "fast_vary":  (_omega_fast_vary, _tilt_flat),
     "gust":       (_omega_gust,      _tilt_flat),
     "pitch_roll": (_omega_constant,  _tilt_pitch_roll),
+    "wobble":     (_omega_constant,  _tilt_wobble),
 }
 
 
