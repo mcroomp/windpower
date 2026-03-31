@@ -72,7 +72,7 @@ T_AERO_OFFSET = 45.0
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 
-WIND          = np.array([10.0, 0.0, 0.0])
+WIND          = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 BREAK_LOAD_N  = 620.0
 
 # ── De Schutter cycle parameters ──────────────────────────────────────────────
@@ -133,10 +133,10 @@ def _run_deschutter_cycle(
     dyn    = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
-        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
+        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(rd.default())
-    tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
+    tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
     # ── Trajectory planner (ground station, ~10 Hz equivalent) ──────────────
@@ -149,7 +149,7 @@ def _run_deschutter_cycle(
         v_reel_in       = v_reel_in,
         tension_out     = tension_out,
         tension_in      = tension_in,
-        wind_enu        = WIND,
+        wind_ned        = WIND,
         col_min_rad              = COL_MIN_RAD,
         col_max_rad              = col_max_rad,
         xi_reel_in_deg           = xi_reel_in_deg,
@@ -202,8 +202,8 @@ def _run_deschutter_cycle(
 
         # ── STATE packet (Pixhawk → planner, standard streams) ───────────────
         state_pkt = {
-            "pos_enu":    hub_state["pos"],
-            "vel_enu":    hub_state["vel"],
+            "pos_ned":    hub_state["pos"],
+            "vel_ned":    hub_state["vel"],
             "omega_spin": omega_spin,
         }
         # Planner reads tension + tether_length from WinchController local link
@@ -227,7 +227,7 @@ def _run_deschutter_cycle(
             body_z_eq_slewed = bz_tether.copy()
             body_z_eq = bz_tether
         else:
-            bz_target = quat_apply(_aq, np.array([0.0, 0.0, 1.0]))
+            bz_target = quat_apply(_aq, np.array([0.0, 0.0, -1.0]))  # NED up = -Z
             _cos_a = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
             _angle = math.acos(_cos_a)
             _max_step = body_z_slew_rate * DT
@@ -279,7 +279,7 @@ def _run_deschutter_cycle(
         M_orbital += -50.0 * hub_state["omega"]
         hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] <= 1.05:
+        if hub_state["pos"][2] >= -1.05:  # NED: Z >= -1.05 m = altitude <= 1.05 m
             floor_hits += 1
             if floor_hits > 200:
                 break   # persistent crash — abort early, test will fail
@@ -300,7 +300,7 @@ def _run_deschutter_cycle(
         if i % tel_every == 0:
             telemetry.append({
                 "t":                  t,
-                "pos_enu":            hub_state["pos"].tolist(),
+                "pos_ned":            hub_state["pos"].tolist(),
                 "R":                  hub_state["R"].tolist(),
                 "omega_spin":         omega_spin,
                 "tether_tension":     tension_now,

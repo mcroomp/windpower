@@ -51,7 +51,7 @@ _IC  = load_ic()
 DT        = 1.0 / 400.0     # 400 Hz
 T_SIM     = 60.0            # seconds
 ANCHOR    = np.zeros(3)
-WIND      = np.array([10.0, 0.0, 0.0])
+WIND      = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 
 POS0          = _IC.pos
 VEL0          = _IC.vel
@@ -62,8 +62,8 @@ REST_LEN      = _IC.rest_length
 T_AERO_OFFSET = 45.0   # aero ramp already done at kinematic-phase end
 I_SPIN_ODE    = 10.0   # spin ODE inertia (separate from gyroscopic I_spin)
 BASE_K_ANG    = 50.0   # permanent angular drag [N·m·s/rad] — matches mediator default
-Z_FLOOR       = 1.0    # dynamics floor [m]
-MIN_Z_OK      = Z_FLOOR + 1.0   # hub must stay at least 1 m above the floor
+Z_FLOOR       = -1.0   # NED: max NED Z = -1 m (altitude floor at 1 m)
+MIN_Z_OK      = 2.0    # hub must stay above this altitude [m]
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ def _run_orbit(
         z_floor= Z_FLOOR,
     )
     aero   = create_aero(rotor)
-    tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LEN,
+    tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LEN,
                          axle_attachment_length=0.0)
 
     omega_spin  = float(OMEGA_SPIN0)
@@ -163,7 +163,7 @@ def _run_orbit(
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
         pos_history.append(hub_state["pos"].copy())
-        if hub_state["pos"][2] < 1.0:
+        if hub_state["pos"][2] > -1.0:  # NED: Z > -1 m = altitude < 1 m
             floor_hits += 1
 
     pos_arr    = np.array(pos_history)
@@ -172,7 +172,7 @@ def _run_orbit(
 
     return {
         "pos_history":  pos_arr,
-        "min_z":        float(pos_arr[:, 2].min()),
+        "min_z":        float(-pos_arr[:, 2].max()),   # minimum altitude [m] = -(max NED Z)
         "max_drift":    float(drifts.max()),
         "final_bz_z":   float(final_bz_z),
         "floor_hits":   floor_hits,

@@ -138,7 +138,7 @@ class DeSchutterAero:
         spin_angle:     float = 0.0,
     ) -> AeroResult:
         """
-        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world ENU [N, N·m].
+        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world NED [N, N·m].
 
         Vectorized over all (N_AB × N_RADIAL) strips — no Python strip loop.
 

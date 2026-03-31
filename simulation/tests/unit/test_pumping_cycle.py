@@ -59,7 +59,7 @@ K_DRAG_SPIN    = 0.01786
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 
-WIND = np.array([10.0, 0.0, 0.0])
+WIND = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 
 BREAK_LOAD_N = 620.0   # Dyneema SK75 1.9 mm [N]
 
@@ -97,10 +97,10 @@ def _run_pumping_cycle(
     dyn    = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
-        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
+        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(_rd.default())
-    tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
+    tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=0.0)
 
     # Tension PI (trajectory planner — ground station)
@@ -187,7 +187,7 @@ def _run_pumping_cycle(
 
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] <= 1.05:
+        if hub_state["pos"][2] >= -1.05:  # NED: altitude <= 1.05 m
             if phase_out:
                 floor_hits_out += 1
             else:
@@ -315,10 +315,10 @@ def test_static_tension_setpoint_range():
         dyn    = RigidBodyDynamics(
             mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
             pos0=POS0.tolist(), vel0=VEL0.tolist(),
-            R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
+            R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
         )
         aero   = create_aero(_rd.default())
-        tether = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
+        tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                              axle_attachment_length=0.0)
         ctrl   = TensionPI(setpoint_n=setpoint)
         hub_state   = dyn.state

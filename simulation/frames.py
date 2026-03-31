@@ -4,9 +4,10 @@ frames.py — Shared coordinate-frame constants and utilities for RAWES simulati
 All simulation modules import from here to avoid duplicated frame definitions.
 
 Frames used:
-  ENU  — world frame: X=East, Y=North, Z=Up  (dynamics, aero)
-  NED  — ArduPilot: X=North, Y=East, Z=Down  (sensor output, SITL)
-  body — hub body frame: columns of R_hub are body axes in world frame
+  NED  — world frame: X=North, Y=East, Z=Down  (dynamics, aero, sensor output, SITL)
+  body — hub body frame: columns of R_hub are body axes in world NED frame
+
+Legacy constant T_ENU_NED is kept for converting ENU initial conditions / test data.
 """
 
 import numpy as np
@@ -37,15 +38,15 @@ def build_orb_frame(body_z: np.ndarray) -> np.ndarray:
 
     Parameters
     ----------
-    body_z : (3,) array  — unit vector pointing along rotor axle in world ENU frame
+    body_z : (3,) array  — unit vector pointing along rotor axle in world NED frame
 
     Returns
     -------
     R : (3, 3) rotation matrix whose columns are [x_orb, y_orb, body_z]
     """
     body_z = np.asarray(body_z, dtype=float)
-    _EAST  = np.array([1.0, 0.0, 0.0])
-    _NORTH = np.array([0.0, 1.0, 0.0])
+    _EAST  = np.array([0.0, 1.0, 0.0])   # NED: East = Y axis
+    _NORTH = np.array([1.0, 0.0, 0.0])   # NED: North = X axis
     east_proj = _EAST - np.dot(_EAST, body_z) * body_z
     if np.linalg.norm(east_proj) > 1e-6:
         x_orb = east_proj / np.linalg.norm(east_proj)

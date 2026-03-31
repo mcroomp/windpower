@@ -56,7 +56,7 @@ STARTUP_DAMP_K_POS = 2000.0   # N/m     — position spring (= k_vel²/(4m), cri
 MASS               = 5.0      # kg
 G                  = 9.81     # m/s²
 
-WIND_WORLD = np.array([10.0, 0.0, 0.0], dtype=float)   # 10 m/s East
+WIND_WORLD = np.array([0.0, 10.0, 0.0], dtype=float)   # NED: 10 m/s East = Y axis
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -73,13 +73,13 @@ def _make_dynamics(pos0=None, vel0=None):
         vel0   = vel0 if vel0 is not None else DEFAULT_VEL0,
         R0     = R0,
         omega0 = [0.0, 0.0, 0.0],
-        z_floor = 1.0,
+        z_floor = -1.0,   # NED: altitude floor at 1 m
     )
 
 
 def _make_tether():
     return TetherModel(
-        anchor_enu             = np.zeros(3),
+        anchor_ned             = np.zeros(3),
         rest_length            = _IC.rest_length,
         hub_mass               = MASS,
         axle_attachment_length = 0.0,

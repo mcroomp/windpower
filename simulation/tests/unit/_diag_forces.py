@@ -20,7 +20,7 @@ R0 = build_orb_frame(BODY_Z0)
 
 # Scan collective to find one that gives net_z >= 0 at equilibrium
 aero = RotorAero(_rd.default())
-tether = TetherModel(anchor_enu=ANCHOR, rest_length=49.949)
+tether = TetherModel(anchor_ned=ANCHOR, rest_length=49.949)
 tf, _ = tether.compute(POS0, VEL0, R0)
 print("Scanning collective for altitude equilibrium (net_z ~ 0):")
 for coll_deg in [0, -5, -10, -15, -20, -25, -30, -35, -40]:
@@ -48,7 +48,7 @@ print(f"  coll_eq = {np.degrees(coll_eq):.2f} deg = {coll_eq:.4f} rad  (net_z={n
 # Now test 60s stability with equilibrium collective and M_spin included
 print("\n--- 60s stability test with coll_eq and full M (like steady-state test) ---")
 aero2 = RotorAero(_rd.default())
-tether2 = TetherModel(anchor_enu=ANCHOR, rest_length=49.949)
+tether2 = TetherModel(anchor_ned=ANCHOR, rest_length=49.949)
 dyn = RigidBodyDynamics(mass=5.0, I_body=[5.0,5.0,10.0], I_spin=0.0,
     pos0=POS0.tolist(), vel0=VEL0.tolist(), R0=R0, omega0=[0.0,0.0,0.0], z_floor=1.0)
 hs = dyn.state

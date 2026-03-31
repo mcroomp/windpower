@@ -45,7 +45,7 @@ from sitl_interface  import SITLInterface
 from swashplate      import h3_inverse_mix, collective_to_pitch, cyclic_to_blade_pitches, pwm_to_normalized
 from aero            import SkewedWakeBEM
 from tether          import TetherModel
-from frames          import T_ENU_NED, build_orb_frame
+from frames          import build_orb_frame
 from sensor          import make_sensor, SpinSensor
 from controller      import compute_swashplate_from_state, orbit_tracked_body_z_eq
 from winch           import WinchController
@@ -186,7 +186,7 @@ def run_mediator(args, trajectory=None):
     log.info("RUN_ID=%d", _run_id)
 
     wind_world = np.array(cfg["wind"])
-    log.info("Wind vector (ENU): %s m/s", wind_world)
+    log.info("Wind vector (NED): %s m/s", wind_world)
 
     # -- Instantiate subsystems -----------------------------------------------
     # Mass 30 kg: the blade geometry (4 × 2 m, chord 0.15 m) was scaled from
@@ -264,16 +264,16 @@ def run_mediator(args, trajectory=None):
         vel0   = _dyn_vel0,
         R0     = _R0,
         omega0  = [0.0, 0.0, 0.0],    # orbital angular velocity only (no spin)
-        z_floor = 1.0,                # safety net only — prevent underground
+        z_floor = -1.0,               # safety net: NED Z ≤ -1 m (altitude ≥ 1 m)
     )
     sitl   = SITLInterface(
         recv_port=args.sitl_recv_port,
         send_port=args.sitl_send_port,
     )
     aero   = SkewedWakeBEM.from_definition(rotor)
-    anchor_enu = np.array(cfg["anchor_enu"], dtype=float)
+    anchor_ned = np.array(cfg["anchor_ned"], dtype=float)
     tether = TetherModel(
-        anchor_enu             = anchor_enu,
+        anchor_ned             = anchor_ned,
         rest_length            = float(cfg["tether_rest_length"]),
         hub_mass               = rotor.mass_kg,
         axle_attachment_length = 0.0,   # disable restoring torque; body_z stability via aero
@@ -283,8 +283,8 @@ def run_mediator(args, trajectory=None):
     #   physical        — reports actual orbital-frame orientation; use with GUIDED_NOGPS+SET_ATTITUDE_TARGET.
     sensor_sim = make_sensor(
         mode          = cfg["sensor_mode"],
-        home_enu_z    = float(_pos0_arr[2]),
-        anchor_enu    = anchor_enu,
+        home_ned_z    = float(_pos0_arr[2]),
+        anchor_ned    = anchor_ned,
         stable_body_z = None,
     )
     spin_sensor = SpinSensor(
@@ -374,7 +374,7 @@ def run_mediator(args, trajectory=None):
     if trajectory is not None:
         _trajectory = trajectory
     else:
-        _trajectory = _mcfg.make_trajectory(cfg, wind_enu=wind_world)
+        _trajectory = _mcfg.make_trajectory(cfg, wind_ned=wind_world)
     log.info("Trajectory: %s", type(_trajectory).__name__)
 
     # -- WinchController (ground station, co-located with planner) -----------
@@ -452,13 +452,13 @@ def run_mediator(args, trajectory=None):
             if cfg["internal_controller"] and _damp_alpha == 0.0:
                 # ── STATE packet (Pixhawk → planner) ─────────────────────────
                 # Mirrors standard ArduPilot telemetry streams:
-                #   pos_enu / vel_enu  ← LOCAL_POSITION_NED (converted)
+                #   pos_ned / vel_ned  ← LOCAL_POSITION_NED
                 #   omega_spin         ← ESC_STATUS[RAWES_CTR_ESC].rpm × gear formula
                 # tension_n is local to the winch controller — not in this packet.
                 # t_free is planner-owned — computed locally and passed separately.
                 _state_pkt = {
-                    "pos_enu":    hub_state["pos"],
-                    "vel_enu":    hub_state["vel"],
+                    "pos_ned":    hub_state["pos"],
+                    "vel_ned":    hub_state["vel"],
                     "omega_spin": spin_sensor.measure(omega_spin),
                 }
                 _traj_cmd = _trajectory.step(
@@ -521,7 +521,7 @@ def run_mediator(args, trajectory=None):
                     _body_z_eq = _body_z_eq_slewed
 
                 swash = compute_swashplate_from_state(
-                    hub_state=hub_state, anchor_pos=anchor_enu,
+                    hub_state=hub_state, anchor_pos=anchor_ned,
                     body_z_eq=_body_z_eq,
                     swashplate_phase_deg=_swashplate_phase_deg,
                     kp=0.30, kd=0.12)   # tuned for SkewedWakeBEM (5.4× more moment/tilt than RotorAero)
@@ -685,11 +685,11 @@ def run_mediator(args, trajectory=None):
             # compute_rc_from_attitude has a real error signal.
             # ----------------------------------------------------------------
             sensor_data = sensor_sim.compute(
-                pos_enu         = hub_state["pos"],
-                vel_enu         = hub_state["vel"],
+                pos_ned         = hub_state["pos"],
+                vel_ned         = hub_state["vel"],
                 R_hub           = hub_state["R"],
                 omega_body      = hub_state["omega"],
-                accel_world_enu = accel_world,
+                accel_world_ned = accel_world,
                 dt              = DT_TARGET,
             )
 
@@ -761,7 +761,7 @@ def run_mediator(args, trajectory=None):
                     if _damp_alpha > 0.0 else ""
                 )
                 log.info(
-                    "t=%6.1fs  pos_ENU=[%6.1f %6.1f %6.1f]m  "
+                    "t=%6.1fs  pos_NED=[%6.1f %6.1f %6.1f]m  "
                     "rpy=[%5.1f %5.1f %5.1f]deg  "
                     "omega=%.1f rad/s  T=%.1fN  tether=%s%s",
                     t_sim,
@@ -793,8 +793,8 @@ def run_mediator(args, trajectory=None):
     finally:
         # -- Graceful shutdown ------------------------------------------------
         log.info("Final state at step %d (t=%.2f s):", step, t_sim)
-        log.info("  pos_ENU : %s m",  hub_state["pos"].round(3))
-        log.info("  vel_ENU : %s m/s", hub_state["vel"].round(3))
+        log.info("  pos_NED : %s m",  hub_state["pos"].round(3))
+        log.info("  vel_NED : %s m/s", hub_state["vel"].round(3))
         log.info("  omega_spin : %.2f rad/s", omega_spin)
 
         if _telemetry_file is not None:

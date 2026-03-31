@@ -251,7 +251,7 @@ class GlauertStateBEM:
         t:              float,
     ) -> AeroResult:
         """
-        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world ENU [N, N·m].
+        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world NED [N, N·m].
 
         Strip-based BEM with Glauert inflow-state correction at each strip.
         Cyclic moment via K_cyc empirical model (same as RotorAero).
@@ -323,12 +323,12 @@ class GlauertStateBEM:
         tilt_lon_rad = tilt_lon * self.pitch_gain_rad
         tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
-        _EAST = np.array([1.0, 0.0, 0.0])
+        _EAST = np.array([0.0, 1.0, 0.0])   # NED: East = Y axis
         _ep   = _EAST - np.dot(_EAST, disk_normal) * disk_normal
         if np.linalg.norm(_ep) > 1e-6:
             _bx = _ep / np.linalg.norm(_ep)
         else:
-            _NORTH = np.array([0.0, 1.0, 0.0])
+            _NORTH = np.array([1.0, 0.0, 0.0])  # NED: North = X axis
             _np2   = _NORTH - np.dot(_NORTH, disk_normal) * disk_normal
             _bx    = _np2 / np.linalg.norm(_np2)
         R_orb       = np.column_stack([_bx, np.cross(disk_normal, _bx), disk_normal])

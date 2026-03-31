@@ -1,8 +1,11 @@
 """
 sensor.py — Sensor simulation for RAWES
 
-Converts physics world-frame state (ENU) into simulated sensor readings
+Converts physics world-frame state (NED) into simulated sensor readings
 in the body frame / NED convention expected by ArduPilot.
+
+The physics layer (dynamics, aero, tether, controller) all operate in NED,
+so no ENU↔NED conversion is required here.
 
 Simulated sensors:
   - IMU accelerometer  (body frame, m/s²)
@@ -17,9 +20,8 @@ Noise model:
   (Pixhawk 6C: ICM-42688-P / ICM-20649 specs)
 
 Coordinate frames:
-  ENU:  X = East, Y = North, Z = Up
-  NED (ArduPilot): X = North, Y = East, Z = Down
-  Body frame:   defined by R_hub rotation matrix (columns = body axes in world)
+  NED: X = North, Y = East, Z = Down  (world frame + ArduPilot convention)
+  Body frame: defined by R_hub rotation matrix (columns = body axes in world NED)
 
 Euler angles extracted in ZYX order (yaw-pitch-roll) to match ArduPilot.
 """
@@ -28,7 +30,7 @@ import logging
 import numpy as np
 import math
 from typing import Optional
-from frames import T_ENU_NED, build_orb_frame
+from frames import build_orb_frame
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +38,8 @@ log = logging.getLogger(__name__)
 _GYRO_SIGMA  = 0.003   # rad/s
 _ACCEL_SIGMA = 0.05    # m/s²
 
-# Gravity vector in ENU world frame [m/s²]
-_GRAVITY_ENU = np.array([0.0, 0.0, -9.81])
+# Gravity vector in NED world frame [m/s²]  (Z=Down so gravity is +Z)
+_GRAVITY_NED = np.array([0.0, 0.0, 9.81])
 
 
 def _rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
@@ -107,13 +109,11 @@ class SensorSim:
     gyro_sigma  : float   Gyroscope noise std dev [rad/s]
     accel_sigma : float   Accelerometer noise std dev [m/s²]
     rng_seed    : int | None   Random number seed for reproducibility
-    home_enu_z  : float   ENU Z coordinate of the ArduPilot home position [m].
-                          ArduPilot's NED origin (D=0) corresponds to this altitude
-                          in the mediator's ENU frame.  Defaults to 0.0 (ENU origin
-                          = ArduPilot home), but must be set to the hub's initial
-                          ENU Z (typically 50.0 m) so that the hub starts at NED D=0
-                          (at home altitude) rather than 50 m above it.
-    anchor_enu  : array-like (3,)   ENU position of the tether anchor [m].
+    home_ned_z  : float   NED Z of the ArduPilot home position [m].
+                          ArduPilot's LOCAL_POSITION_NED origin (D=0) is at this NED Z.
+                          Defaults to 0.0.  For a hub starting at altitude h m,
+                          set home_ned_z = -h so NED D=0 at the starting altitude.
+    anchor_ned  : array-like (3,)   NED position of the tether anchor [m].
                   Attitude is reported as deviation from the tether-aligned
                   equilibrium orientation (body Z pointing from anchor to hub).
                   When the hub axle is perfectly aligned with the tether,
@@ -125,15 +125,15 @@ class SensorSim:
         gyro_sigma:    float = _GYRO_SIGMA,
         accel_sigma:   float = _ACCEL_SIGMA,
         rng_seed:      Optional[int] = None,
-        home_enu_z:    float = 0.0,
-        anchor_enu:    Optional[np.ndarray] = None,
+        home_ned_z:    float = 0.0,
+        anchor_ned:    Optional[np.ndarray] = None,
         stable_body_z: Optional[np.ndarray] = None,
     ):
         self._gyro_sigma  = gyro_sigma
         self._accel_sigma = accel_sigma
         self._rng = np.random.default_rng(rng_seed)
-        self._home_enu_z  = float(home_enu_z)
-        self._anchor_enu  = np.asarray(anchor_enu, dtype=float) if anchor_enu is not None \
+        self._home_ned_z  = float(home_ned_z)
+        self._anchor_ned  = np.asarray(anchor_ned, dtype=float) if anchor_ned is not None \
                             else np.zeros(3)
         # Physical equilibrium orientation: the disk orientation where forces balance
         # at zero collective.  When provided, ArduPilot sees roll=pitch=0 at this
@@ -149,13 +149,13 @@ class SensorSim:
 
     def compute(
         self,
-        pos_enu:        np.ndarray,   # (3,) hub position in ENU [m]
-        vel_enu:        np.ndarray,   # (3,) hub velocity in ENU [m/s]
-        R_hub:          np.ndarray,   # (3,3) body→world rotation matrix
-        omega_body:     np.ndarray,   # (3,) angular velocity in WORLD frame [rad/s]
-        accel_world_enu: np.ndarray,  # (3,) hub acceleration in world ENU [m/s²]
-                                      #       = (vel_new - vel_old) / dt
-        dt:             float,        # time step [s] (unused; for API consistency)
+        pos_ned:         np.ndarray,   # (3,) hub position in NED [m]
+        vel_ned:         np.ndarray,   # (3,) hub velocity in NED [m/s]
+        R_hub:           np.ndarray,   # (3,3) body→world rotation matrix (NED world)
+        omega_body:      np.ndarray,   # (3,) angular velocity in WORLD NED frame [rad/s]
+        accel_world_ned: np.ndarray,   # (3,) hub acceleration in world NED [m/s²]
+                                       #       = (vel_new - vel_old) / dt
+        dt:              float,        # time step [s] (unused; for API consistency)
     ) -> dict:
         """
         Compute simulated sensor outputs from physics world-frame state.
@@ -163,27 +163,21 @@ class SensorSim:
         Returns
         -------
         dict with keys:
-            pos_ned    : np.ndarray (3,)  position NED [m]
+            pos_ned    : np.ndarray (3,)  position NED [m] relative to home
             vel_ned    : np.ndarray (3,)  velocity NED [m/s]
             rpy        : np.ndarray (3,)  [roll, pitch, yaw] radians (ZYX)
             accel_body : np.ndarray (3,)  accelerometer reading body frame [m/s²]
             gyro_body  : np.ndarray (3,)  gyroscope reading body frame [rad/s]
         """
         # ------------------------------------------------------------------
-        # 1. ENU → NED coordinate conversion
-        #    NED: x=North=ENU_y, y=East=ENU_x, z=Down
+        # 1. Position relative to ArduPilot home.
         #
-        # NED D is measured relative to the ArduPilot home altitude.
-        # home_enu_z is the ENU Z of the hub's starting position (= home).
-        # NED D = home_enu_z − ENU_Z   so that D=0 at the starting altitude.
-        #
-        # Without the home offset (−ENU_Z only), the hub at ENU Z=50m would
-        # send NED D=−50m (50m above home), making ArduPilot believe it is at
-        # home_altitude + 50m and command a 50m descent.  This is the root
-        # cause of the hub falling 100m below its starting position.
+        # Physics uses absolute NED coordinates.  ArduPilot reports position
+        # relative to its home (takeoff) location.  home_ned_z is the NED Z
+        # of the hub at arming time.  Subtracting it makes NED D=0 at home.
         # ------------------------------------------------------------------
-        pos_ned = np.array([pos_enu[1], pos_enu[0], self._home_enu_z - pos_enu[2]])
-        vel_ned = np.array([vel_enu[1], vel_enu[0], -vel_enu[2]])
+        pos_ned_rel = np.array([pos_ned[0], pos_ned[1], pos_ned[2] - self._home_ned_z])
+        vel_ned_out = vel_ned.copy()
 
         # ------------------------------------------------------------------
         # 2. Attitude: tether-relative deviation from equilibrium orientation
@@ -191,7 +185,7 @@ class SensorSim:
         # The RAWES equilibrium has the rotor axle (body Z) aligned with the
         # tether (anchor → hub direction).  ArduPilot must see roll=0, pitch=0
         # at this equilibrium — otherwise its attitude controller commands
-        # maximum cyclic trying to "uprght" a disk that is already in its
+        # maximum cyclic trying to "upright" a disk that is already in its
         # natural position.
         #
         # Strategy:
@@ -200,7 +194,8 @@ class SensorSim:
         #   2. Compute R_orb: actual orbital frame from disk_normal (spin removed).
         #   3. R_dev = R_orb_eq.T @ R_orb: deviation from equilibrium (small when
         #      axle ≈ tether, large when axle is tilted away from tether).
-        #   4. Report attitude as R_dev in NED convention → roll=0,pitch=0 at equil.
+        #   4. R_dev is already in NED; extract Euler angles directly.
+        #      roll=pitch=0 at tether equilibrium.
         #
         # Accel and gyro are still expressed in R_orb (the physical electronics
         # frame).  At equilibrium R_orb = R_orb_eq so all three are consistent.
@@ -217,24 +212,19 @@ class SensorSim:
         if self._stable_R_orb_eq is not None:
             R_orb_eq = self._stable_R_orb_eq
         else:
-            tether_vec = pos_enu - self._anchor_enu
+            tether_vec = pos_ned - self._anchor_ned
             tether_len = float(np.linalg.norm(tether_vec))
             if tether_len > 1.0:
                 body_z_eq = tether_vec / tether_len
             else:
-                body_z_eq = np.array([0.0, 0.0, 1.0])
+                body_z_eq = np.array([0.0, 0.0, -1.0])   # NED up = -Z fallback
             R_orb_eq = build_orb_frame(body_z_eq)
 
         # Deviation rotation: identity when hub axle is aligned with tether.
         R_dev = R_orb_eq.T @ R_orb
 
-        # Convert to NED body convention and extract Euler angles.
-        # T = [[0,1,0],[1,0,0],[0,0,-1]]: ENU body ↔ NED body (symmetric).
-        # T @ R_dev @ T gives NED convention; Euler=[0,0,0] at tether equilibrium.
-        _T = T_ENU_NED
-        R_ned = _T @ R_dev @ _T
-
-        rpy = _rotation_matrix_to_euler_zyx(R_ned)
+        # R_dev is already in NED — extract Euler angles directly.
+        rpy = _rotation_matrix_to_euler_zyx(R_dev)
 
         # ------------------------------------------------------------------
         # 2b. Replace yaw with velocity-derived heading for EKF consistency.
@@ -244,23 +234,16 @@ class SensorSim:
         # compute_rc_from_attitude P-term a real error signal.
         #
         # However the orientation-derived yaw (from R_dev) differs from the
-        # GPS velocity heading atan2(vE, vN).  At our equilibrium the
-        # orientation yaw is 0° while the velocity heading is ~−15.7°.  After
-        # GPS lock the EKF compares these and triggers "MAG ground anomaly /
-        # yaw re-aligned" or "GPS Glitch", causing an emergency yaw reset and
-        # hub crash.
-        #
-        # Fix: replace rpy[2] with velocity-derived yaw (as build_sitl_packet
-        # does).  This keeps roll/pitch as tether-relative deviations while
-        # making yaw consistent with the velocity vector, eliminating the EKF
-        # inconsistency.  Rebuild the body-frame rotation matrix to match.
+        # GPS velocity heading atan2(vE, vN).  Fix: replace rpy[2] with
+        # velocity-derived yaw, keeping roll/pitch as tether-relative deviations
+        # while making yaw consistent with the velocity vector.
         #
         # Fallback: when horizontal speed < 0.05 m/s (start-up or near-zero
         # velocity) keep the orientation-derived yaw to avoid discontinuities.
         # ------------------------------------------------------------------
-        v_horiz = math.hypot(vel_ned[0], vel_ned[1])
+        v_horiz = math.hypot(vel_ned_out[0], vel_ned_out[1])
         if v_horiz > 0.05:
-            rpy[2] = math.atan2(vel_ned[1], vel_ned[0])
+            rpy[2] = math.atan2(vel_ned_out[1], vel_ned_out[0])
         # else: keep orientation-derived rpy[2]
 
         # Rebuild R_body consistent with the (possibly updated) yaw.
@@ -269,45 +252,30 @@ class SensorSim:
         # ------------------------------------------------------------------
         # 3. IMU accelerometer
         #
-        # For EKF consistency, the accelerometer must be expressed in the
-        # SAME body frame as the attitude we report (R_body above).
-        #
-        #   specific_force_ned = T @ (accel_world_enu - gravity_enu)
-        #   accel_body = R_body.T @ specific_force_ned
-        #
-        # At tether equilibrium with vel_yaw: R_body = Rz(vel_yaw).
-        #   specific_force = T @ [0,0,9.81] = [0,0,-9.81]
-        #   accel_body = Rz(-vel_yaw) @ [0,0,-9.81] = [0,0,-9.81] ✓
+        # specific_force = accel_world_ned - gravity_ned
+        # At tether equilibrium, accel=0 and gravity=[0,0,+9.81]:
+        #   specific_force = [0,0,-9.81] (upward = negative NED Z) ✓
         # ------------------------------------------------------------------
-        a_specific_enu = accel_world_enu - _GRAVITY_ENU
-        specific_force_ned = _T @ a_specific_enu
-        accel_body = R_body.T @ specific_force_ned
+        a_specific_ned = accel_world_ned - _GRAVITY_NED
+        accel_body = R_body.T @ a_specific_ned
 
         # Add accelerometer noise
         accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
 
         # ------------------------------------------------------------------
-        # 4. IMU gyroscope
-        #
-        # Same consistency requirement: gyro must be in the same body frame
-        # (R_body) so that d(attitude)/dt = skew(gyro) × attitude.
-        #
-        #   gyro_body = R_body.T @ (T @ omega_orbital_enu)
-        #
-        # At equilibrium R_body = Rz(vel_yaw) and omega_orbital = 0:
-        #   gyro_body = 0 ✓
+        # 4. IMU gyroscope: orbital angular velocity in body frame
         # ------------------------------------------------------------------
-        disk_normal_world = R_hub[:, 2]   # body Z-axis expressed in ENU world frame
+        disk_normal_world  = R_hub[:, 2]
         omega_spin_world   = np.dot(omega_body, disk_normal_world) * disk_normal_world
         omega_orbital_world = omega_body - omega_spin_world
-        omega_body_frame = R_body.T @ (_T @ omega_orbital_world)
+        omega_body_frame = R_body.T @ omega_orbital_world
 
         # Add gyroscope noise
         gyro_body = omega_body_frame + self._rng.normal(0.0, self._gyro_sigma, 3)
 
         return {
-            "pos_ned":    pos_ned,
-            "vel_ned":    vel_ned,
+            "pos_ned":    pos_ned_rel,
+            "vel_ned":    vel_ned_out,
             "rpy":        rpy,
             "accel_body": accel_body,
             "gyro_body":  gyro_body,
@@ -317,12 +285,12 @@ class SensorSim:
 def build_sitl_packet(
     hub_state:     dict,
     accel_world:   np.ndarray,
-    home_z_enu:    float,
+    home_z_ned:    float,
     freeze_vel_ned: np.ndarray,
     frozen:        bool,
 ) -> dict:
     """
-    Build the SITL sensor packet from hub ENU truth state.
+    Build the SITL sensor packet from hub NED truth state.
 
     Reports tether-relative attitude (rpy=[0,0,yaw_from_velocity]) so that
     ArduPilot sees roll=pitch=0 at tether equilibrium. All quantities are
@@ -330,9 +298,9 @@ def build_sitl_packet(
 
     Parameters
     ----------
-    hub_state      : dict with keys pos, vel, R, omega (all ENU world frame)
-    accel_world    : (3,) kinematic acceleration in ENU world frame [m/s²]
-    home_z_enu     : ENU Z of the ArduPilot home position [m]
+    hub_state      : dict with keys pos, vel, R, omega (all NED world frame)
+    accel_world    : (3,) kinematic acceleration in NED world frame [m/s²]
+    home_z_ned     : NED Z of the ArduPilot home position [m]
     freeze_vel_ned : (3,) hint velocity [m/s] used during startup freeze
     frozen         : True during startup freeze period
 
@@ -345,22 +313,22 @@ def build_sitl_packet(
     _omg = hub_state["omega"]
     _vel = hub_state["vel"]
 
-    # Position NED
-    _pos_ned = np.array([_pos[1], _pos[0], -(_pos[2] - home_z_enu)])
+    # Position NED relative to home
+    _pos_ned = np.array([_pos[0], _pos[1], _pos[2] - home_z_ned])
 
     # Velocity NED (or freeze hint)
     if frozen:
         _vel_ned = freeze_vel_ned
     else:
-        _vel_ned = np.array([_vel[1], _vel[0], -_vel[2]])
+        _vel_ned = _vel.copy()
 
     # Yaw from velocity heading (keeps attitude/velocity consistent in EKF)
     _v_horiz = np.hypot(_vel_ned[0], _vel_ned[1])
     _yaw_ned = float(np.arctan2(_vel_ned[1], _vel_ned[0])) if _v_horiz > 0.1 else 0.0
     _rpy     = np.array([0., 0., _yaw_ned])
 
-    # Accelerometer: kinematic accel (ENU) → NED body frame
-    _accel_ned  = T_ENU_NED @ accel_world + np.array([0., 0., -9.81])
+    # Accelerometer: specific force in yaw-aligned NED body frame
+    _accel_ned  = accel_world - _GRAVITY_NED   # specific force in NED
     _cy, _sy    = np.cos(_yaw_ned), np.sin(_yaw_ned)
     _Rz_inv     = np.array([[_cy, _sy, 0.], [-_sy, _cy, 0.], [0., 0., 1.]])
     _accel_body = _Rz_inv @ _accel_ned
@@ -368,8 +336,7 @@ def build_sitl_packet(
     # Gyro: strip spin, rotate into yaw-aligned body frame
     _bz_cur     = _R[:, 2]
     _omg_nospin = _omg - np.dot(_omg, _bz_cur) * _bz_cur
-    _gyro_ned   = T_ENU_NED @ _omg_nospin
-    _gyro_body  = _Rz_inv @ _gyro_ned
+    _gyro_body  = _Rz_inv @ _omg_nospin
 
     return {
         "pos_ned":    _pos_ned,
@@ -405,12 +372,12 @@ class PhysicalSensor:
 
     def __init__(
         self,
-        home_enu_z:  float = 0.0,
+        home_ned_z:  float = 0.0,
         gyro_sigma:  float = _GYRO_SIGMA,
         accel_sigma: float = _ACCEL_SIGMA,
         rng_seed:    Optional[int] = None,
     ):
-        self._home_enu_z  = float(home_enu_z)
+        self._home_ned_z  = float(home_ned_z)
         self._gyro_sigma  = gyro_sigma
         self._accel_sigma = accel_sigma
         self._rng = np.random.default_rng(rng_seed)
@@ -433,11 +400,11 @@ class PhysicalSensor:
 
     def compute(
         self,
-        pos_enu:         np.ndarray,
-        vel_enu:         np.ndarray,
+        pos_ned:         np.ndarray,
+        vel_ned:         np.ndarray,
         R_hub:           np.ndarray,
         omega_body:      np.ndarray,
-        accel_world_enu: np.ndarray,
+        accel_world_ned: np.ndarray,
         dt:              float,
     ) -> dict:
         """
@@ -446,16 +413,15 @@ class PhysicalSensor:
         Returns the same dict schema as SensorSim.compute():
             pos_ned, vel_ned, rpy, accel_body, gyro_body
         """
-        # Position and velocity in NED (same as SensorSim)
-        pos_ned = np.array([pos_enu[1], pos_enu[0], -(pos_enu[2] - self._home_enu_z)])
-        vel_ned = np.array([vel_enu[1], vel_enu[0], -vel_enu[2]])
+        # Position and velocity relative to home (already in NED)
+        pos_ned_rel = np.array([pos_ned[0], pos_ned[1], pos_ned[2] - self._home_ned_z])
+        vel_ned_out = vel_ned.copy()
 
         # Attitude: actual orbital frame (electronics, spin removed) → NED Euler angles.
-        # R_orb is body→world in ENU; T @ R_orb @ T converts both frames to NED.
+        # R_orb is body→world in NED; extract Euler angles directly.
         disk_normal = R_hub[:, 2]
         R_orb = build_orb_frame(disk_normal)
-        R_ned = T_ENU_NED @ R_orb @ T_ENU_NED
-        rpy   = _rotation_matrix_to_euler_zyx(R_ned)
+        rpy   = _rotation_matrix_to_euler_zyx(R_orb)
 
         # Replace orientation-derived yaw with velocity heading for EKF GPS
         # consistency.  Cache the velocity-derived yaw and use it as fallback
@@ -467,9 +433,9 @@ class PhysicalSensor:
         # remaps the gyro body axes, causing ACRO's rate loop to apply
         # destabilising corrections.  Limiting to _vel_yaw_rate_max (default
         # 1.0 rad/s) prevents this while tracking the ~0.2 rad/s orbital rate.
-        v_horiz = math.hypot(vel_ned[0], vel_ned[1])
+        v_horiz = math.hypot(vel_ned_out[0], vel_ned_out[1])
         if v_horiz > 0.05:
-            raw_vel_yaw = math.atan2(vel_ned[1], vel_ned[0])
+            raw_vel_yaw = math.atan2(vel_ned_out[1], vel_ned_out[0])
             if self._last_vel_yaw is None:
                 self._last_vel_yaw = raw_vel_yaw
             else:
@@ -487,9 +453,8 @@ class PhysicalSensor:
         R_body = _euler_zyx_to_rotation(float(rpy[0]), float(rpy[1]), float(rpy[2]))
 
         # Accelerometer: specific force in physical body frame
-        a_specific_enu    = accel_world_enu - _GRAVITY_ENU
-        specific_force_ned = T_ENU_NED @ a_specific_enu
-        accel_body = R_body.T @ specific_force_ned
+        a_specific_ned = accel_world_ned - _GRAVITY_NED
+        accel_body = R_body.T @ a_specific_ned
         accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
 
         # Gyroscope: orbital angular velocity in physical body frame.
@@ -497,12 +462,12 @@ class PhysicalSensor:
         # gyro does not see the blade spin — strip it before projecting.
         omega_spin_world    = np.dot(omega_body, disk_normal) * disk_normal
         omega_orbital_world = omega_body - omega_spin_world
-        gyro_body = R_body.T @ (T_ENU_NED @ omega_orbital_world)
+        gyro_body = R_body.T @ omega_orbital_world
         gyro_body = gyro_body + self._rng.normal(0.0, self._gyro_sigma, 3)
 
         return {
-            "pos_ned":    pos_ned,
-            "vel_ned":    vel_ned,
+            "pos_ned":    pos_ned_rel,
+            "vel_ned":    vel_ned_out,
             "rpy":        rpy,
             "accel_body": accel_body,
             "gyro_body":  gyro_body,
@@ -600,8 +565,8 @@ class SpinSensor:
 
 def make_sensor(
     mode:         str,
-    home_enu_z:   float = 0.0,
-    anchor_enu:   Optional[np.ndarray] = None,
+    home_ned_z:   float = 0.0,
+    anchor_ned:   Optional[np.ndarray] = None,
     stable_body_z: Optional[np.ndarray] = None,
     gyro_sigma:   float = _GYRO_SIGMA,
     accel_sigma:  float = _ACCEL_SIGMA,
@@ -619,18 +584,18 @@ def make_sensor(
         ``"physical"`` — PhysicalSensor: reports actual orbital-frame
         orientation (~65° from NED vertical at tether equilibrium).
         Use with GUIDED_NOGPS + SET_ATTITUDE_TARGET.
-    home_enu_z : float
-        ENU Z of the ArduPilot home position (NED D=0 reference) [m].
-    anchor_enu : array (3,) or None
-        Tether anchor in ENU [m].  Only used by ``"tether_relative"`` mode.
+    home_ned_z : float
+        NED Z of the ArduPilot home position (LOCAL_POSITION_NED D=0 reference) [m].
+    anchor_ned : array (3,) or None
+        Tether anchor in NED [m].  Only used by ``"tether_relative"`` mode.
     stable_body_z : array (3,) or None
         Fixed equilibrium body_z for tether-relative reporting.
         ``None`` = use live tether direction.  Only used by ``"tether_relative"``.
     """
     if mode == "tether_relative":
         return SensorSim(
-            home_enu_z    = home_enu_z,
-            anchor_enu    = anchor_enu,
+            home_ned_z    = home_ned_z,
+            anchor_ned    = anchor_ned,
             stable_body_z = stable_body_z,
             gyro_sigma    = gyro_sigma,
             accel_sigma   = accel_sigma,
@@ -638,7 +603,7 @@ def make_sensor(
         )
     if mode == "physical":
         return PhysicalSensor(
-            home_enu_z  = home_enu_z,
+            home_ned_z  = home_ned_z,
             gyro_sigma  = gyro_sigma,
             accel_sigma = accel_sigma,
             rng_seed    = rng_seed,
@@ -658,20 +623,15 @@ if __name__ == "__main__":
 
     sensor = SensorSim(rng_seed=42)
 
-    # Test coordinate transform (ENU → NED)
-    pos_enu = np.array([5.0, 10.0, 50.0])   # East=5, North=10, Up=50
-    pos_ned_expected = np.array([10.0, 5.0, -50.0])  # North, East, Down
-    pos_ned = np.array([pos_enu[1], pos_enu[0], -pos_enu[2]])
-    assert np.allclose(pos_ned, pos_ned_expected), f"ENU→NED failed: {pos_ned}"
-    print("  ENU→NED conversion: OK")
-
     # Test with identity rotation (no tilt)
+    # In NED: hub at North=10, East=5, altitude=50 → pos_ned=[10, 5, -50]
+    pos_ned = np.array([10.0, 5.0, -50.0])   # North=10, East=5, Down=-50
     R = np.eye(3)
-    omega_world = np.array([0.0, 0.0, 28.0])  # spin about world Z
+    omega_world = np.array([0.0, 0.0, 28.0])  # spin about NED Z (down)
     accel_world = np.array([0.0, 0.0, 9.81])  # hovering (aero thrust = weight)
-    vel_enu     = np.zeros(3)
+    vel_ned_in  = np.zeros(3)
 
-    result = sensor.compute(pos_enu, vel_enu, R, omega_world, accel_world, dt=0.0025)
+    result = sensor.compute(pos_ned, vel_ned_in, R, omega_world, accel_world, dt=0.0025)
 
     print(f"  pos_ned    : {result['pos_ned']}")
     print(f"  vel_ned    : {result['vel_ned']}")
@@ -680,12 +640,10 @@ if __name__ == "__main__":
     print(f"  gyro_body  : {result['gyro_body'].round(4)}")
 
     # Hover accel in NED body frame:
-    #   specific_force_world = a_world - g_enu = [0,0,0] - [0,0,-9.81] = [0,0,+9.81]
-    #   In ENU orbital body frame (R_orb = I): accel_enu_body = [0, 0, +9.81]
-    #   Apply T (ENU→NED body): T @ [0,0,9.81] = [0, 0, -9.81]
-    #   (body Z flips: ENU Up → NED Down, so +9.81 Up → -9.81 in NED body Z)
+    #   specific_force = a_world - g_ned = [0,0,0] - [0,0,+9.81] = [0,0,-9.81]
+    #   In NED orbital body frame (R_orb = I): accel_body = [0, 0, -9.81] ✓
     accel_hover_world = np.zeros(3)
-    result2 = sensor.compute(pos_enu, vel_enu, R, omega_world, accel_hover_world, dt=0.0025)
+    result2 = sensor.compute(pos_ned, vel_ned_in, R, omega_world, accel_hover_world, dt=0.0025)
     assert abs(result2["accel_body"][2] - (-9.81)) < 0.3, \
         f"Hover accel Z expected ~-9.81 (NED body Z=Down), got {result2['accel_body'][2]}"
     print("  Hover accelerometer Z ≈ -9.81 (NED body-down): OK")

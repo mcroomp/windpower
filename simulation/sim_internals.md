@@ -8,7 +8,7 @@ Detailed technical reference for the simulation stack. See [CLAUDE.md](../CLAUDE
 
 **The rotor axle (body Z) always aligns with the tether direction.** At tether elevation angle β:
 ```
-body Z = [cos(β), 0, sin(β)]   (ENU, hub East of anchor)
+body Z = [0, cos(β), -sin(β)]   (NED, hub East of anchor; East=Y, Up=-Z)
 ```
 
 Always initialise the hub with body Z along the tether, not upright. The `build_orb_frame(body_z)` utility constructs a valid R0 from any body_z unit vector.
@@ -31,8 +31,8 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 **Sensor consistency rules (must all agree or EKF triggers emergency yaw reset):**
 1. `velocity_ned` heading must match `rpy[2]` (yaw) — both derived from `atan2(vE, vN)`
-2. `gyro_body` must be in yaw-aligned NED body frame (spin stripped, then `Rz(-yaw) @ (T @ omega_nospin)`)
-3. `accel_body` must be `Rz(-yaw) @ (T @ accel_world + [0,0,-9.81])`
+2. `gyro_body` must be in yaw-aligned NED body frame (spin stripped, then `Rz(-yaw) @ omega_nospin`)
+3. `accel_body` must be `Rz(-yaw) @ (accel_world_ned - [0,0,9.81])`
 
 **Physical sensor mode** (`PhysicalSensor`) reports actual orbital-frame orientation (~65° from NED vertical). Used by the pumping cycle stack test. Applies the same velocity-derived yaw override + rate-limiting to avoid a yaw jump when the tether activates (which would remap the gyro body axes and destabilise ACRO).
 
@@ -44,17 +44,17 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 ### `compute_swashplate_from_state(hub_state, anchor_pos, ...)` — truth-state controller
 
-Takes hub ENU state (pos, R, omega) directly. Computes attitude error as `cross(body_z_cur, body_z_eq)` and damps orbital rates. Returns `{collective_rad, tilt_lon, tilt_lat}` to feed directly into `aero.compute_forces()`. **No ArduPilot involved.**
+Takes hub NED state (pos, R, omega) directly. Computes attitude error as `cross(body_z_cur, body_z_eq)` and damps orbital rates. Returns `{collective_rad, tilt_lon, tilt_lat}` to feed directly into `aero.compute_forces()`. **No ArduPilot involved.**
 
 Used by: `test_closed_loop.py` (closed-loop physics validation), mediator internal controller.
 
 **Sign convention (SkewedWakeBEM):** SkewedWakeBEM's per-blade physics gives the opposite cyclic sign to RotorAero's empirical K_cyc formula. With SkewedWakeBEM, `tilt_lat > 0` produces `-My` (opposite to the old model). Controller projections negate accordingly:
 ```python
-tilt_lon = float(np.clip(+np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
-tilt_lat = float(np.clip(-np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
+tilt_lon = float(np.clip(+np.dot(corr, disk_x) / tilt_max_rad, -1.0, 1.0))
+tilt_lat = float(np.clip(-np.dot(corr, disk_y) / tilt_max_rad, -1.0, 1.0))
 ```
 
-### `compute_rc_rates(hub_state, anchor_pos, vel_ned, ...)` — ENU truth-state RC controller
+### `compute_rc_rates(hub_state, anchor_pos, vel_ned, ...)` — NED truth-state RC controller
 
 Same logic as above but outputs RC PWM dict `{1: pwm, 2: pwm, 4: pwm, 8: 2000}` for ArduPilot's ACRO rate loop. Converts correction to yaw-aligned NED body frame.
 
@@ -90,7 +90,7 @@ Anti-windup: conditional integration (stop integrating when saturated and error 
 | Ixx = Iyy | 5.0 kg·m² | `beaupoil_2026.yaml` |
 | Izz | 10.0 kg·m² | `beaupoil_2026.yaml` |
 | I_spin | ~3.94 kg·m² | `beaupoil_2026.yaml` (gyroscopic coupling enabled in simtests) |
-| Initial pos | `[47.5, 13.9, 7.1]` ENU m | `steady_state_starting.json` (SkewedWakeBEM IC) |
+| Initial pos | `[13.9, 47.5, -7.1]` NED m | `steady_state_starting.json` (SkewedWakeBEM IC) |
 | Initial vel | `[-0.257, 0.916, -0.093]` m/s | `config.py` DEFAULTS (startup ramp velocity) |
 | Initial body_z | `[0.878, 0.276, 0.392]` | `steady_state_starting.json` (SkewedWakeBEM IC) |
 | Initial spin | ~19.3 rad/s | `steady_state_starting.json` |
@@ -126,8 +126,8 @@ Per-blade strip BEM with:
 - **5-second aero startup ramp** to avoid impulse loads at t=0
 
 Returns `AeroResult(F_world, M_orbital, Q_spin, M_spin)`:
-- `F_world` — net aerodynamic force in ENU world frame [N]
-- `M_orbital` — cyclic/drag moments in ENU (drives hub attitude) [N·m]
+- `F_world` — net aerodynamic force in NED world frame [N]
+- `M_orbital` — cyclic/drag moments in NED (drives hub attitude) [N·m]
 - `Q_spin` — net rotor torque (drive − drag) for the omega_spin ODE [N·m]
 - `M_spin` — gyroscopic couple for rigid-body dynamics [N·m]
 
@@ -160,7 +160,7 @@ Test framework in `simulation/aero/tests/` validates all models against each oth
 | Break load | ~620 N |
 | Structural damping | 16.8 N·s/m |
 | Rest length | ~49.97 m (SkewedWakeBEM IC) |
-| Anchor | World origin (0, 0, 0) ENU |
+| Anchor | World origin (0, 0, 0) NED |
 
 When tether is slack (hub closer than rest length) → zero force. Logs warning when tension exceeds 80% of break load.
 
@@ -174,13 +174,13 @@ The mediator's default initial state is the warmup-settled equilibrium from `tes
 
 | Parameter | Value (SkewedWakeBEM) | Notes |
 |-----------|----------------------|-------|
-| `pos` | `[47.5, 13.9, 7.1]` ENU m | ~50 m tether at ~8° elevation |
+| `pos` | `[13.9, 47.5, -7.1]` NED m | ~50 m tether at ~8° elevation |
 | `vel` | ≈ 0 m/s | near-zero at settled equilibrium |
 | `body_z` | `[0.878, 0.276, 0.392]` | tether-aligned |
 | `omega_spin` | ~19.3 rad/s | equilibrium autorotation spin |
 | `rest_length` | ~49.97 m | tether taut from t=0 |
 | `coll_eq_rad` | −0.28 rad | TensionPI equilibrium collective |
-| `home_z_enu` | 0.0 m | GPS home below floor |
+| `home_z_ned` | 0.0 m | GPS home at ground level |
 
 **IMPORTANT:** The `vel` in this file is the near-zero physics velocity at settled state. The stack test does **NOT** use it as `vel0` for the kinematic startup ramp. `vel0 = [-0.257, 0.916, -0.093]` from `config.py` DEFAULTS is always used for the ramp — it provides a non-zero heading so the EKF gets a velocity-derived yaw from frame 0.
 

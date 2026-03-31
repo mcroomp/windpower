@@ -64,7 +64,7 @@ import rotor_definition as rd
 
 # ── De Schutter 2018 reference operating conditions ────────────────────────
 DS_OMEGA  = 15.0 * math.pi   # ≈ 47.12 rad/s  (Weyel Table 1: λ=7, V=10 m/s)
-DS_V_WIND = np.array([10.0, 0.0, 0.0])
+DS_V_WIND = np.array([0.0, 10.0, 0.0])   # NED: East wind = Y axis
 
 # Exact CL_alpha from De Schutter Eq. 25 with A=12
 DS_CL_ALPHA_EXACT = 2.0 * math.pi / (1.0 + 2.0 / 12.0)   # = 12π/7 ≈ 5.385 /rad
@@ -273,7 +273,7 @@ def test_ds_CT_in_physical_range(AeroClass, ds_rotor):
 @pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])
 def test_ds_H_force_positive_edgewise(AeroClass, ds_rotor):
     """
-    Horizontal disk + horizontal wind + small collective → H-force (Fx) > 0.
+    Horizontal disk + horizontal wind + small collective → H-force (Fy, NED East) > 0.
     Advance ratio μ = v_inplane/(ω·R) = 10/(47.12×3.1) = 0.068.
 
     Collective=0.05 rad is required for GlauertStateBEM: with CL0=0 (symmetric
@@ -283,8 +283,9 @@ def test_ds_H_force_positive_edgewise(AeroClass, ds_rotor):
     """
     model  = AeroClass(ds_rotor)
     forces = model.compute_forces(**{**DS_EDGEWISE_KWARGS, "collective_rad": 0.05})
-    assert forces[0] > 0, \
-        f"{AeroClass.__name__} [DS2018 edgewise]: Fx={forces[0]:.1f} N ≤ 0"
+    # NED: East = Y axis (index 1)
+    assert forces[1] > 0, \
+        f"{AeroClass.__name__} [DS2018 edgewise]: Fy={forces[1]:.1f} N ≤ 0"
 
 
 # ────────────────────────────────────────────────────────────────────────────

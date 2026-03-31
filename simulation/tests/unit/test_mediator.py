@@ -177,16 +177,17 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
 
     assert fake_aero.compute_calls[0]["collective_rad"] == 0.0
     assert fake_aero.compute_calls[0]["omega_rotor"] == DEFAULT_OMEGA_SPIN
-    np.testing.assert_allclose(fake_aero.compute_calls[0]["wind_world"], np.array([10.0, 0.0, 0.0]))
+    np.testing.assert_allclose(fake_aero.compute_calls[0]["wind_world"], np.array([0.0, 10.0, 0.0]))  # NED East
     assert len(fake_aero.motor_calls) == 0
 
-    # Mediator now uses SensorSim.compute() which includes small sensor noise.
-    # pos_ned = [pos[1], pos[0], -(pos[2] - home_z)] with home_z = DEFAULT_POS0[2] = 12.530
-    home_z = _mcfg.DEFAULTS["pos0"][2]
+    # Mediator uses SensorSim.compute() with NED pos and home_ned_z.
+    # pos_ned_rel = [pos[0], pos[1], pos[2] - home_ned_z]
+    # home_ned_z = cfg["pos0"][2] (NED Z of start position)
+    home_ned_z = _mcfg.DEFAULTS["pos0"][2]   # = -12.530 in NED
     expected_pos_ned = np.array([
-        stepped_state["pos"][1],
         stepped_state["pos"][0],
-        -(stepped_state["pos"][2] - home_z),
+        stepped_state["pos"][1],
+        stepped_state["pos"][2] - home_ned_z,
     ])
     # gyro_body should be near-zero: omega=[0,0,28], body_z=[0,0,1] → omega_nospin=0.
     # SensorSim adds MEMS noise (sigma=0.003 rad/s); allow atol=0.05 for noise.

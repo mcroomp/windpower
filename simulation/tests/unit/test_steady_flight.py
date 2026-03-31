@@ -17,7 +17,7 @@ and collective), it should remain near that position.  This is the "simple case"
 A separate test (test_drift_from_origin, TODO) will cover the harder case of
 starting directly above the anchor and letting wind + tether drive equilibrium.
 
-Coordinate frame: ENU — X=East, Y=North, Z=Up.  Tether anchor at origin.
+Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 
 Output artefacts (written alongside this file on every run):
   steady_flight_report.png  — 5-panel diagnostic plot
@@ -42,8 +42,8 @@ from frames      import build_orb_frame
 
 TetherModel = _mediator_module.TetherModel
 
-# Design tether equilibrium orientation (from beaupoil_2026.yaml)
-_BODY_Z_DESIGN = np.array([0.851018, 0.305391, 0.427206])
+# Design tether equilibrium orientation (from beaupoil_2026.yaml) in NED
+_BODY_Z_DESIGN = np.array([0.305391, 0.851018, -0.427206])  # NED: T @ ENU
 _BASE_K_ANG    = 50.0   # N·m·s/rad — angular damping (matches mediator default)
 _T_AERO_OFFSET = 45.0   # s — aero ramp already done
 
@@ -52,7 +52,7 @@ MASS   = 5.0                        # kg
 G      = 9.81                       # m/s²
 WEIGHT = MASS * G                   # N
 OMEGA  = 28.0                       # rad/s  initial spin (autorotation at 10 m/s wind)
-WIND   = np.array([10.0, 0.0, 0.0]) # m/s East
+WIND   = np.array([0.0, 10.0, 0.0]) # NED: 10 m/s East = Y axis
 
 DT     = 2.5e-3                     # s  (400 Hz)
 
@@ -75,8 +75,8 @@ _OUT_DIR.mkdir(exist_ok=True)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _tether_dir(elev_rad: float = ELEV_RAD) -> np.ndarray:
-    """Unit vector from anchor toward hub at given elevation angle (ENU)."""
-    return np.array([math.cos(elev_rad), 0.0, math.sin(elev_rad)])
+    """Unit vector from anchor toward hub at given elevation angle (NED: East = Y)."""
+    return np.array([0.0, math.cos(elev_rad), -math.sin(elev_rad)])
 
 
 def _hub_pos(elev_rad: float = ELEV_RAD, length: float = L_TETHER) -> np.ndarray:
@@ -246,7 +246,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
     tension_out = 200.0   # N — matches DeschutterPlanner default
     tension_ctrl_wu = TensionPI(setpoint_n=tension_out)
 
-    tether_wu = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
+    tether_wu = TetherModel(anchor_ned=np.zeros(3), rest_length=rest)
     dyn_wu    = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
         pos0=pos0.tolist(), vel0=[0., 0., 0.], R0=R0, omega0=[0., 0., 0.],
@@ -267,7 +267,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
 
     # ── Recorded run from settled state ──────────────────────────────────────
     tension_ctrl_rec = TensionPI(setpoint_n=tension_out)
-    tether = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
+    tether = TetherModel(anchor_ned=np.zeros(3), rest_length=rest)
     dyn    = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
         pos0=pos_s.tolist(), vel0=vel_s.tolist(), R0=R_s, omega0=omega_s.tolist(),
@@ -304,9 +304,9 @@ def _save_starting_json(data: dict, path: Path) -> None:
 
     Fields
     ------
-    pos       : ENU position [m]
-    vel       : ENU velocity [m/s]
-    body_z    : body-Z axis in world frame (unit vector; R0 derived from this)
+    pos       : NED position [m]
+    vel       : NED velocity [m/s]
+    body_z    : body-Z axis in world NED frame (unit vector; R0 derived from this)
     omega_spin: rotor spin rate [rad/s]
     rest_length: tether rest length [m]
     """
@@ -319,7 +319,7 @@ def _save_starting_json(data: dict, path: Path) -> None:
         "omega_spin":   float(data["omega_spin_eq"]),
         "rest_length":  float(data["rest_length"]),
         "coll_eq_rad":  float(data["coll_eq"]),
-        "home_z_enu":   0.0,   # GPS home below floor so altitude is always positive
+        "home_z_ned":   0.0,   # GPS home at ground level
     }
     path.write_text(json.dumps(out, indent=2))
 
@@ -525,12 +525,12 @@ def test_steady_state_hub_does_not_drift():
     assert np.all(np.isfinite(data["pos"])), "NaN/inf in position history"
     assert np.all(np.isfinite(data["vel"])), "NaN/inf in velocity history"
 
-    assert drift[0] < BOUNDS, (
-        f"East drift {drift[0]:.2f} m > {BOUNDS} m — hub not in steady state "
+    assert drift[1] < BOUNDS, (
+        f"East (NED Y) drift {drift[1]:.2f} m > {BOUNDS} m — hub not in steady state "
         f"(collective {data['coll_deg']:.1f}°)"
     )
     assert drift[2] < BOUNDS, (
-        f"Vertical drift {drift[2]:.2f} m > {BOUNDS} m — hub not in steady state "
+        f"Vertical (NED Z) drift {drift[2]:.2f} m > {BOUNDS} m — hub not in steady state "
         f"(collective {data['coll_deg']:.1f}°)"
     )
 

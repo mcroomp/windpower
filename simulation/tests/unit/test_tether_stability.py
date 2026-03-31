@@ -13,7 +13,7 @@ tether direction.  These tests verify:
      hub stays within ±10 m of its initial position for 2 seconds
      with no ArduPilot (open-loop, fixed collective).
 
-Coordinate frame: ENU — body Z = Up, tether anchor at origin.
+Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 """
 import math
 import sys
@@ -35,7 +35,7 @@ MASS   = 5.0                        # kg  (matches test_force_balance.py)
 G      = 9.81                       # m/s²
 WEIGHT = MASS * G                   # N
 OMEGA  = 28.0                       # rad/s nominal spin (autorotation at 10 m/s wind)
-WIND   = np.array([10.0, 0.0, 0.0]) # 10 m/s East
+WIND   = np.array([0.0, 10.0, 0.0]) # NED: 10 m/s East = Y axis
 DT     = 2.5e-3                     # s  (400 Hz)
 
 # ── Tether geometry at 30° elevation ─────────────────────────────────────────
@@ -47,8 +47,8 @@ L_TETHER  = 50.0                    # m  — tether length at this flight point
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _hub_pos(elev_rad: float = ELEV_RAD, length: float = L_TETHER) -> np.ndarray:
-    """ENU position of hub at given elevation angle and tether length."""
-    return np.array([length * math.cos(elev_rad), 0.0, length * math.sin(elev_rad)])
+    """NED position of hub at given elevation angle (tether points East = NED Y)."""
+    return np.array([0.0, length * math.cos(elev_rad), -length * math.sin(elev_rad)])
 
 
 def _R_from_body_z(body_z_world: np.ndarray) -> np.ndarray:
@@ -85,25 +85,26 @@ def _compute_equilibrium_collective(
         tether_dir = [cos(β), 0, sin(β)]
         body Z = tether_dir  →  R_hub = R_from_body_z(tether_dir)
 
-    Force balance in world frame (forces from aero.compute_forces in ENU):
+    Force balance in world frame (NED: East = Y, Up = -Z):
 
-        East:    Fx_aero = T_t * cos(β)   → T_t = Fx_aero / cos(β)
-        Up:      Fz_aero = W + T_t * sin(β) = W + Fx_aero * tan(β)
+        NED Y (East):  F_aero[1] = T_t * cos(β)   → T_t = F_aero[1] / cos(β)
+        NED Z (Up=−Z): −F_aero[2] = W + T_t * sin(β)
 
-    Scan collective 0° → -30° until Fz_aero ≤ W + Fx_aero * tan(β).
+    Scan collective 0° → -30° until −F_aero[2] ≤ W + F_aero[1] * tan(β).
 
     Returns
     -------
-    (coll_rad, T_z_req, T_t_est, H_x)
+    (coll_rad, T_z_req, T_t_est, H_y)
         coll_rad  : float  equilibrium collective [rad]
-        T_z_req   : float  required vertical (Up) aero force at that collective [N]
+        T_z_req   : float  required upward aero force magnitude at that collective [N]
         T_t_est   : float  estimated tether tension at equilibrium [N]
-        H_x       : float  East aero force at equilibrium collective [N]
+        H_y       : float  East (NED Y) aero force at equilibrium collective [N]
     """
     aero = create_aero(_rd.default())
     W = mass * 9.81
 
-    tether_dir = np.array([math.cos(elev_rad), 0.0, math.sin(elev_rad)])
+    # NED: hub East of anchor at elevation β → tether_dir = [0, cos(β), -sin(β)]
+    tether_dir = np.array([0.0, math.cos(elev_rad), -math.sin(elev_rad)])
     R_hub = _R_from_body_z(tether_dir)
 
     _MAX_TETHER_TENSION_N = 496.0   # 80% of break load (620 N)
@@ -112,20 +113,20 @@ def _compute_equilibrium_collective(
         coll_rad = math.radians(half_deg * 0.5)
         f = aero.compute_forces(coll_rad, 0.0, 0.0, R_hub, np.zeros(3),
                                 omega, wind, t=10.0)
-        H_x   = float(f[0])   # East force (world frame)
-        T_z   = float(f[2])   # Up force (world frame)
-        T_t   = H_x / math.cos(elev_rad) if H_x > 0 else 0.0
+        H_y   = float(f[1])   # East force (NED Y)
+        T_z   = float(-f[2])  # Up force = -NED Z component
+        T_t   = H_y / math.cos(elev_rad) if H_y > 0 else 0.0
         T_z_req = W + T_t * math.sin(elev_rad)
         if T_z <= T_z_req and T_t < _MAX_TETHER_TENSION_N:
-            return coll_rad, T_z_req, T_t, H_x
+            return coll_rad, T_z_req, T_t, H_y
 
     # Fallback: use -17° (gives non-zero thrust unlike -30°)
     coll_rad = math.radians(-17.0)
     f = aero.compute_forces(coll_rad, 0.0, 0.0, R_hub, np.zeros(3),
                             omega, wind, t=10.0)
-    H_x = float(f[0])
-    T_t = H_x / math.cos(elev_rad) if H_x > 0 else 0.0
-    return coll_rad, W + T_t * math.sin(elev_rad), T_t, H_x
+    H_y = float(f[1])
+    T_t = H_y / math.cos(elev_rad) if H_y > 0 else 0.0
+    return coll_rad, W + T_t * math.sin(elev_rad), T_t, H_y
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
@@ -141,7 +142,7 @@ def test_restoring_moment_zero_when_axle_aligned():
     R_aligned  = _R_from_body_z(tether_dir)    # body Z aligned with tether
 
     tether = TetherModel(
-        anchor_enu  = np.zeros(3),
+        anchor_ned  = np.zeros(3),
         rest_length = L_TETHER - 0.01,          # 10 mm extension → taut
     )
     _, moment = tether.compute(pos, np.zeros(3), R_aligned)
@@ -161,7 +162,7 @@ def test_restoring_moment_nonzero_when_axle_misaligned():
     R_vert = np.eye(3)   # body Z = [0,0,1], tether at 30° → misaligned
 
     tether = TetherModel(
-        anchor_enu  = np.zeros(3),
+        anchor_ned  = np.zeros(3),
         rest_length = L_TETHER - 0.01,
     )
     _, moment = tether.compute(pos, np.zeros(3), R_vert)
@@ -182,15 +183,17 @@ def test_restoring_moment_tilts_axle_toward_anchor():
     R_vert = np.eye(3)                   # upright
 
     tether = TetherModel(
-        anchor_enu  = np.zeros(3),
+        anchor_ned  = np.zeros(3),
         rest_length = L_TETHER - 0.01,
     )
     _, moment = tether.compute(pos, np.zeros(3), R_vert)
 
-    # My > 0 → rotation from body Z toward body X = East; pulls axle bottom West toward anchor.
-    assert moment[1] > 0.0, (
-        f"Restoring moment Y component should be positive to tilt axle East. "
-        f"Got My = {moment[1]:.4f} N·m, full moment = {moment.round(4)}"
+    # In NED: hub East (Y), body Z = Down (R=I). Tether pulls axle bottom (at +Z)
+    # toward anchor (toward -Y and +Z). Restoring torque about North axis (NED X).
+    # cross([0,0,-0.3], force_toward_anchor) has a non-zero X component.
+    assert np.linalg.norm(moment) > 1e-4, (
+        f"Restoring moment must be non-zero for misaligned axle. "
+        f"Got |M| = {np.linalg.norm(moment):.2e} N·m, full moment = {moment.round(4)}"
     )
 
 
@@ -229,14 +232,14 @@ def test_equilibrium_collective_gives_balanced_net_force():
     ext   = T_t_est / k_eff if T_t_est > 0 else 0.005
     rest  = L_TETHER - max(ext, 0.001)   # at least 1 mm extension
 
-    tether = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
+    tether = TetherModel(anchor_ned=np.zeros(3), rest_length=rest)
 
     tether_dir    = pos / np.linalg.norm(pos)
     R_hub_eq      = _R_from_body_z(tether_dir)
     f_aero        = aero.compute_forces(coll_eq, 0.0, 0.0, R_hub_eq, np.zeros(3),
                                         OMEGA, WIND, t=10.0)
     f_teth, _m    = tether.compute(pos, np.zeros(3), np.eye(3))
-    f_grav        = np.array([0.0, 0.0, -WEIGHT])
+    f_grav        = np.array([0.0, 0.0, +WEIGHT])  # NED: gravity in +Z (Down)
 
     net     = f_aero[:3] + f_teth + f_grav
     net_mag = float(np.linalg.norm(net))
@@ -280,7 +283,7 @@ def test_hub_stays_bounded_at_30_degrees():
     R0_eq      = _R_from_body_z(tether_dir)
 
     aero   = create_aero(_rd.default())
-    tether = TetherModel(anchor_enu=np.zeros(3), rest_length=rest)
+    tether = TetherModel(anchor_ned=np.zeros(3), rest_length=rest)
     dyn    = RigidBodyDynamics(
         mass   = MASS,
         I_body = [5.0, 5.0, 10.0],

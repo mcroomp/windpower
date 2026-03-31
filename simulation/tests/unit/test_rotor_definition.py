@@ -326,7 +326,7 @@ class TestFromDefinition:
     def _aero_forces(self, aero, t=10.0, collective=0.05, tilt_lon=0.0, tilt_lat=0.0,
                      wind=None, omega_rotor=20.148):
         if wind is None:
-            wind = np.array([10.0, 0.0, 0.0])
+            wind = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
         return aero.compute_forces(
             t=t,
             R_hub=np.eye(3),

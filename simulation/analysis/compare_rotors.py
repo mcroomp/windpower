@@ -225,15 +225,15 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
 
     DT            = 1.0 / 400.0
     ANCHOR        = np.zeros(3)
-    POS0          = np.array([46.258, 14.241, 12.530])
-    VEL0          = np.array([-0.257,  0.916, -0.093])
-    BODY_Z0       = np.array([0.851018, 0.305391, 0.427206])
+    POS0          = np.array([14.241, 46.258, -12.530])   # NED
+    VEL0          = np.array([ 0.916, -0.257,   0.093])   # NED
+    BODY_Z0       = np.array([0.305391, 0.851018, -0.427206])  # NED
     OMEGA_SPIN0   = 20.148
     REST_LENGTH0  = 49.949
     T_AERO_OFFSET = 45.0
     I_SPIN_KGMS2  = 10.0
     OMEGA_SPIN_MIN= 0.5
-    WIND          = np.array([10.0, 0.0, 0.0])
+    WIND          = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
     T_REEL_OUT    = 30.0
     T_REEL_IN     = 30.0
     T_TRANSITION  =  5.0
@@ -252,10 +252,10 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         vel0    = VEL0.tolist(),
         R0      = build_orb_frame(BODY_Z0),
         omega0  = [0.0, 0.0, 0.0],
-        z_floor = 1.0,
+        z_floor = -1.0,   # NED: maximum NED Z = altitude floor at 1 m
     )
     aero_obj = create_aero(rotor)
-    tether   = TetherModel(anchor_enu=ANCHOR, rest_length=REST_LENGTH0,
+    tether   = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                            axle_attachment_length=0.0)
 
     trajectory = DeschutterPlanner(
@@ -266,7 +266,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         v_reel_in       = V_REEL_IN,
         tension_out     = TENSION_OUT,
         tension_in      = TENSION_IN,
-        wind_enu        = WIND,
+        wind_ned        = WIND,
     )
 
     tension_ctrl     = TensionPI(setpoint_n=TENSION_OUT)
@@ -299,8 +299,8 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         t = i * DT
 
         state_pkt = {
-            "pos_enu":    hub_state["pos"],
-            "vel_enu":    hub_state["vel"],
+            "pos_ned":    hub_state["pos"],
+            "vel_ned":    hub_state["vel"],
             "tension_n":  tension_now,
             "omega_spin": omega_spin,
             "t_free":     t,

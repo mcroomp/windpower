@@ -134,7 +134,7 @@ Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards dele
 ```
 
 ### Protocol (MAVLink, 10 Hz)
-- **Planner → Pixhawk:** `SET_ATTITUDE_TARGET` — `attitude_q` (ENU quaternion attitude setpoint), `thrust` (normalized collective 0..1 from ground PI)
+- **Planner → Pixhawk:** `SET_ATTITUDE_TARGET` — `attitude_q` (NED quaternion attitude setpoint), `thrust` (normalized collective 0..1 from ground PI)
 - **Pixhawk → Planner (all standard streams, zero custom code):** `LOCAL_POSITION_NED` (pos + vel), `ATTITUDE_QUATERNION` (body_z_ned = quat_apply(q,[0,0,1])), `ESC_STATUS[RAWES_CTR_ESC]` (omega_spin — planner applies `× 2π/60 / 11 × 44/80`)
 - No `send_state()` function needed in `Mode_RAWES`
 - Tension and tether_length are **NOT** in the STATE packet — Pixhawk cannot measure them. Winch reads both locally.
@@ -239,7 +239,7 @@ Min physics altitude    :   5.7 m (> 2.0 m limit)
 
 ### test_acro_hold known failure (not a regression)
 
-`test_acro_hold` fails with "Hub crashed: min ENU Z < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick ACRO hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_60s`) passes.
+`test_acro_hold` fails with "Hub crashed: altitude < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick ACRO hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_60s`) passes.
 
 **Root cause:** Kinematic phase ends with ~0.9 m/s orbital velocity. `HoldPlanner` → `thrust=0.0 → collective=col_min=−0.28 rad` provides barely-positive lift at shallow tether elevation (~8°). Hub spirals down. `test_closed_loop_60s` starts from near-zero IC velocity so lift is sufficient.
 

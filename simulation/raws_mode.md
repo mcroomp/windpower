@@ -23,15 +23,14 @@ point the rotor disk in the right direction at the right time.
 |---|---|
 | **body_z** | The unit vector along the rotor axle (spin axis). Naming convention used throughout this document and the codebase. |
 | **Orbit tracking** | The Pixhawk-side control function that continuously rotates the attitude setpoint to match the hub's orbital position, keeping body_z aligned with the tether direction as the hub moves around the anchor. Implemented in `rawes_flight.lua` at 50 Hz; the trajectory planner is not involved. |
-| **NED** | North-East-Down coordinate frame (X=North, Y=East, Z=Down). Used by ArduPilot, the Lua scripts, and all MAVLink messages in this document. Up is `[0,0,−1]`. |
-| **ENU** | East-North-Up coordinate frame (X=East, Y=North, Z=Up). Used internally by the Python simulation. All values at the MAVLink boundary are converted to NED before transmission. |
+| **NED** | North-East-Down coordinate frame (X=North, Y=East, Z=Down). Used by ArduPilot, the Lua scripts, MAVLink messages, and the Python simulation. Up is `[0,0,−1]`. |
 
 ### 1.3 Physical and control variables
 
 | Symbol | Name | Description |
 |---|---|---|
-| **pos** | Hub position | 3D position of the rotor hub in NED [m] (hardware/MAVLink); ENU in Python simulation |
-| **vel** | Hub velocity | 3D velocity of the rotor hub in NED [m/s] (hardware/MAVLink); ENU in Python simulation |
+| **pos** | Hub position | 3D position of the rotor hub in NED [m] |
+| **vel** | Hub velocity | 3D velocity of the rotor hub in NED [m/s] |
 | **body_z** | Disk axis | Unit vector along the rotor axle (also tether direction at equilibrium) |
 | **ξ** | Disk tilt from wind | Angle between body_z and the horizontal wind direction [°]. Controls how much thrust acts along vs. perpendicular to the tether. |
 | **β** | Tether elevation | Angle of the tether above horizontal [°]. Determines the natural body_z direction at equilibrium. |

@@ -2,7 +2,7 @@
 test_controller.py — Unit tests for simulation/controller.py.
 
 Covers both:
-  compute_rc_rates()          — ENU truth-state based controller
+  compute_rc_rates()          — NED truth-state based controller
   compute_rc_from_attitude()  — ArduPilot ATTITUDE message based controller
 
 
@@ -34,7 +34,7 @@ from controller import (
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _Ry(angle_rad):
-    """Rotation matrix about Y axis (ENU: tilts from Z toward X)."""
+    """Rotation matrix about Y axis (NED: tilts from Z toward X)."""
     c, s = np.cos(angle_rad), np.sin(angle_rad)
     return np.array([[c, 0., s], [0., 1., 0.], [-s, 0., c]])
 
@@ -59,19 +59,22 @@ def _state(pos, R, omega):
     }
 
 
-# Reference configuration: hub 50 m from origin at ~30° elevation, hub East
-# tether direction: [cos(30°), 0, sin(30°)] = [0.866, 0, 0.5]
+# Reference configuration: hub 50 m from origin at ~30° elevation, hub East (NED Y)
+# tether direction NED: [0, cos(30°), -sin(30°)] = [0, 0.866, -0.5]
 _ANCHOR      = np.zeros(3)
 _TETHER_ELEV = np.radians(30.0)
-_POS         = 50.0 * np.array([np.cos(_TETHER_ELEV), 0., np.sin(_TETHER_ELEV)])
+_POS         = 50.0 * np.array([0., np.cos(_TETHER_ELEV), -np.sin(_TETHER_ELEV)])
 _BODY_Z_EQ   = _POS / np.linalg.norm(_POS)   # tether direction = desired body_z
 
-# Rotation matrix whose body_z = tether direction.
-# body_z = [cos30, 0, sin30]; choose body_x = [0,1,0], body_y = cross(body_z, body_x)
-_body_x = np.array([0., 1., 0.])
+# Rotation matrix whose body_z = tether direction (NED).
+# body_z = [0, cos30, -sin30]; choose body_x = [1,0,0] (North), body_y = cross(body_z, body_x)
+_body_x = np.array([1., 0., 0.])
 _body_z = _BODY_Z_EQ
 _body_y = np.cross(_body_z, _body_x)
-_R_EQ   = np.column_stack([_body_x, _body_y, _body_z])  # columns = body axes in world
+_body_x_orth = _body_x - np.dot(_body_x, _body_z) * _body_z
+_body_x_orth /= np.linalg.norm(_body_x_orth)
+_body_y = np.cross(_body_z, _body_x_orth)
+_R_EQ   = np.column_stack([_body_x_orth, _body_y, _body_z])  # columns = body axes in world
 
 # A representative NED velocity (hub drifting slowly North-East)
 _VEL_NED = np.array([1.0, 0.5, 0.0])
@@ -146,7 +149,7 @@ def test_larger_error_gives_larger_command():
 def test_orbital_rate_gives_damping_command():
     """A non-zero orbital rate at equilibrium attitude produces a damping RC command."""
     # Hub is aligned but has a small orbital angular velocity
-    omega_orbital = np.array([0., 0.3, 0.])  # world ENU rad/s
+    omega_orbital = np.array([0., 0.3, 0.])  # world NED rad/s
     state = _state(_POS, _R_EQ, omega_orbital)
     rc = compute_rc_rates(state, _ANCHOR, _VEL_NED, kp=0.0)   # P off; only D
     assert rc[1] != 1500 or rc[2] != 1500 or rc[4] != 1500
@@ -322,10 +325,10 @@ def _att_aligned():
     import math
     elev = math.radians(30.0)
     L    = 50.0
-    pos  = np.array([L * math.cos(elev), 0.0, L * math.sin(elev)])  # ENU
+    pos  = np.array([0.0, L * math.cos(elev), -L * math.sin(elev)])  # NED
     # body_z along tether, build orbital frame
     tether_dir = pos / np.linalg.norm(pos)
-    east = np.array([1., 0., 0.])
+    east = np.array([0., 1., 0.])   # NED: East = Y axis
     bx   = east - np.dot(east, tether_dir) * tether_dir
     bx  /= np.linalg.norm(bx)
     R_hub = np.column_stack([bx, np.cross(tether_dir, bx), tether_dir])

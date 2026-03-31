@@ -36,20 +36,20 @@ DEFAULTS: dict = {
     "rotor_definition": "beaupoil_2026",  # built-in name or path to .yaml file
 
     # ── Environment ──────────────────────────────────────────────────────────
-    "wind": [10.0, 0.0, 0.0],          # ambient wind ENU [m/s]
+    "wind": [0.0, 10.0, 0.0],          # ambient wind NED [m/s]  (East = NED Y axis)
 
     # ── Initial hub state ─────────────────────────────────────────────────────
     # Warmup-settled equilibrium from test_steady_flight.py.
     # 50 m tether at ~30° elevation; body_z aligned with tether direction.
-    "pos0":       [46.258, 14.241, 12.530],      # ENU [m]
-    "vel0":       [-0.257,  0.916, -0.093],      # ENU [m/s]
-    "body_z":     [0.851018, 0.305391, 0.427206],  # unit vector (axle direction)
-    "omega_spin": 20.148,                          # rotor spin [rad/s]
+    "pos0":       [14.241, 46.258, -12.530],       # NED [m]  (T @ ENU)
+    "vel0":       [ 0.916, -0.257,   0.093],       # NED [m/s]
+    "body_z":     [0.305391, 0.851018, -0.427206], # unit vector (axle direction, NED)
+    "omega_spin": 20.148,                           # rotor spin [rad/s]
 
     # ── Tether & Winch ────────────────────────────────────────────────────────
     "tether_rest_length": 49.949,   # unstretched tether length [m]
-    "anchor_enu": [0.0, 0.0, 0.0],  # tether anchor position ENU [m]
-                                     # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local ENU
+    "anchor_ned": [0.0, 0.0, 0.0],  # tether anchor position NED [m]
+                                     # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local NED
     "tension_safety_n":  496.0,     # WinchController: stop paying out above this tension [N]
                                      # ≈ 80% of Dyneema SK75 1.9 mm break load (620 N)
 
@@ -187,14 +187,14 @@ def save(cfg: dict, path: str) -> None:
         fh.write("\n")
 
 
-def make_trajectory(cfg: dict, wind_enu):
+def make_trajectory(cfg: dict, wind_ned):
     """
     Build a TrajectoryController from the ``cfg["trajectory"]`` section.
 
     Parameters
     ----------
     cfg      : full mediator config dict (as returned by load/defaults)
-    wind_enu : array-like [3] — ambient wind ENU [m/s]
+    wind_ned : array-like [3] — ambient wind NED [m/s]
 
     Returns
     -------
@@ -207,7 +207,7 @@ def make_trajectory(cfg: dict, wind_enu):
     -------
     >>> cfg = defaults()
     >>> cfg["trajectory"]["type"] = "deschutter"
-    >>> traj = make_trajectory(cfg, [10,0,0], 49.9)
+    >>> traj = make_trajectory(cfg, [0,10,0])  # East wind in NED
     """
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -227,7 +227,7 @@ def make_trajectory(cfg: dict, wind_enu):
             v_reel_in       = float(p.get("v_reel_in",        0.4)),
             tension_out     = float(p.get("tension_out",    200.0)),
             tension_in      = float(p.get("tension_in",      20.0)),
-            wind_enu        = _np.asarray(wind_enu, dtype=float),
+            wind_ned        = _np.asarray(wind_ned, dtype=float),
             xi_reel_in_deg  = p.get("xi_reel_in_deg", 55.0),
             tension_kp      = float(p.get("tension_kp",      5e-4)),
             tension_ki      = float(p.get("tension_ki",      1e-4)),

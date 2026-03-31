@@ -2,15 +2,16 @@
 dynamics.py — Python RK4 6-DOF rigid-body integrator for RAWES hub
 
 Integrates Newton-Euler equations of motion for a single rigid body in the
-ENU world frame.
+NED world frame (X=North, Y=East, Z=Down).
 
 State vector:
-    pos     (3,)  hub position in ENU world frame [m]
-    vel     (3,)  hub velocity in ENU world frame [m/s]
+    pos     (3,)  hub position in NED world frame [m]
+    vel     (3,)  hub velocity in NED world frame [m/s]
     R       (3,3) rotation matrix body → world (orthonormal)
-    omega   (3,)  angular velocity in WORLD frame [rad/s]
+    omega   (3,)  angular velocity in WORLD NED frame [rad/s]
 
-Gravity is applied internally as F_grav = [0, 0, −m·g] in the world frame.
+Gravity is applied internally as F_grav = [0, 0, +m·g] in the NED world frame
+(gravity acts in the +Z/Down direction).
 The caller supplies only aerodynamic + tether forces/moments — no gravity.
 """
 
@@ -29,15 +30,15 @@ class RigidBodyDynamics:
         Principal moments of inertia [Ixx, Iyy, Izz] in the body frame [kg·m²].
         The inertia tensor is assumed diagonal (principal axes aligned with body axes).
     pos0 : array-like, shape (3,)
-        Initial hub position in ENU world frame [m].
+        Initial hub position in NED world frame [m].
     vel0 : array-like, shape (3,)
-        Initial hub velocity in ENU world frame [m/s].
+        Initial hub velocity in NED world frame [m/s].
     R0 : ndarray, shape (3,3)
         Initial rotation matrix body→world.  Defaults to identity (upright hub).
     omega0 : array-like, shape (3,)
-        Initial angular velocity in the WORLD frame [rad/s].
+        Initial angular velocity in the WORLD NED frame [rad/s].
     g : float
-        Gravitational acceleration [m/s²].  Applied as −g in the ENU Z direction.
+        Gravitational acceleration [m/s²].  Applied as +g in the NED Z (Down) direction.
     reorth_interval : int
         Number of integration steps between SVD re-orthogonalisations of R.
         Re-orthogonalisation corrects floating-point drift without altering the
@@ -55,7 +56,7 @@ class RigidBodyDynamics:
         g:                float       = 9.81,
         reorth_interval:  int         = 200,
         I_spin:           float       = 0.0,   # spin-axis inertia for gyroscopic coupling [kg·m²]
-        z_floor:          float       = None,  # minimum ENU Z (ground floor) [m]; None = no floor
+        z_floor:          float       = None,  # maximum NED Z (altitude floor) [m]; None = no floor
     ):
         self.mass    = float(mass)
         self.g       = float(g)
@@ -110,7 +111,7 @@ class RigidBodyDynamics:
         converted back to the world frame.
         """
         # --- linear ---
-        F_total = F_ext + np.array([0.0, 0.0, -self.g * self.mass])
+        F_total = F_ext + np.array([0.0, 0.0, +self.g * self.mass])
         dpos    = vel
         dvel    = F_total / self.mass
 
@@ -140,8 +141,8 @@ class RigidBodyDynamics:
 
     def step(
         self,
-        F_world:    np.ndarray,   # (3,) external force in ENU world frame [N]  — no gravity
-        M_world:    np.ndarray,   # (3,) orbital moments in ENU world frame [N·m] (no M_spin)
+        F_world:    np.ndarray,   # (3,) external force in NED world frame [N]  — no gravity
+        M_world:    np.ndarray,   # (3,) orbital moments in NED world frame [N·m] (no M_spin)
         dt:         float,
         omega_spin: float = 0.0,  # rotor spin rate [rad/s] — for gyroscopic coupling only
     ) -> dict:
@@ -151,10 +152,10 @@ class RigidBodyDynamics:
         Parameters
         ----------
         F_world : (3,) ndarray
-            External force in ENU world frame [N].  Do NOT include gravity;
+            External force in NED world frame [N].  Do NOT include gravity;
             it is applied internally.
         M_world : (3,) ndarray
-            Orbital (cyclic) moment in ENU world frame [N·m].
+            Orbital (cyclic) moment in NED world frame [N·m].
             Do NOT include the spin-axis drag/drive torque (M_spin) — that is
             integrated separately by the mediator as the scalar omega_spin state.
         dt : float
@@ -180,10 +181,11 @@ class RigidBodyDynamics:
         self._R     = R  + c * (k1[2] + 2*k2[2] + 2*k3[2] + k4[2])
         self._omega = ow + c * (k1[3] + 2*k2[3] + 2*k3[3] + k4[3])
 
-        # Ground floor: prevent hub from falling through z_floor
-        if self._z_floor is not None and self._pos[2] < self._z_floor:
+        # Ground floor: prevent hub from falling through altitude floor.
+        # In NED, Z increases downward, so the altitude floor is a maximum NED Z value.
+        if self._z_floor is not None and self._pos[2] > self._z_floor:
             self._pos[2] = self._z_floor
-            if self._vel[2] < 0.0:
+            if self._vel[2] > 0.0:   # downward velocity → zero
                 self._vel[2] = 0.0
 
         # Periodic SVD re-orthogonalisation to suppress R drift
@@ -219,13 +221,14 @@ if __name__ == "__main__":
 
     print("RigidBodyDynamics smoke test")
 
-    # Hover test: upward force = weight, should stay at initial altitude
+    # Hover test: upward thrust = weight; in NED upward = -Z direction.
+    # Should stay at initial altitude (NED Z = -50 m = 50 m above ground).
     dyn = RigidBodyDynamics(
         mass   = 5.0,
         I_body = [5.0, 5.0, 10.0],
-        pos0   = [0.0, 0.0, 50.0],
-        vel0   = [0.0, 0.0, 0.0],
-        omega0 = [0.0, 0.0, 28.0],
+        pos0   = [0.0, 0.0, -50.0],  # NED Z = -50 m (50 m altitude)
+        vel0   = [0.0, 0.0,   0.0],
+        omega0 = [0.0, 0.0,  28.0],
     )
 
     W = 5.0 * 9.81  # weight [N]
@@ -233,28 +236,28 @@ if __name__ == "__main__":
 
     for _ in range(400):   # 1 second
         s = dyn.step(
-            F_world = np.array([0.0, 0.0, W]),  # exact weight compensation
+            F_world = np.array([0.0, 0.0, -W]),  # upward thrust in NED = -Z
             M_world = np.zeros(3),
             dt      = dt,
         )
 
     z = s["pos"][2]
-    assert abs(z - 50.0) < 0.01, f"Hover drift too large: z={z:.4f} m"
-    print(f"  Hover 1s: z={z:.4f} m (expect 50.0) — OK")
+    assert abs(z - (-50.0)) < 0.01, f"Hover drift too large: z={z:.4f} m"
+    print(f"  Hover 1s: z={z:.4f} m (expect -50.0) — OK")
 
-    # Free-fall test: no external force, should descend
+    # Free-fall test: no external force, should descend (NED Z increases).
     dyn2 = RigidBodyDynamics(
         mass   = 5.0,
         I_body = [5.0, 5.0, 10.0],
-        pos0   = [0.0, 0.0, 50.0],
-        vel0   = [0.0, 0.0, 0.0],
-        omega0 = [0.0, 0.0, 0.0],
+        pos0   = [0.0, 0.0, -50.0],  # 50 m altitude
+        vel0   = [0.0, 0.0,   0.0],
+        omega0 = [0.0, 0.0,   0.0],
     )
     for _ in range(400):
         s2 = dyn2.step(F_world=np.zeros(3), M_world=np.zeros(3), dt=dt)
 
     z2 = s2["pos"][2]
-    z_expected = 50.0 - 0.5 * 9.81 * 1.0**2
+    z_expected = -50.0 + 0.5 * 9.81 * 1.0**2  # NED Z increases as hub descends
     assert abs(z2 - z_expected) < 0.1, f"Free-fall z={z2:.3f} expected {z_expected:.3f}"
     print(f"  Free-fall 1s: z={z2:.3f} m (expect {z_expected:.3f}) — OK")
 

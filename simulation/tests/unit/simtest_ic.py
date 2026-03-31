@@ -33,13 +33,13 @@ _JSON_PATH = Path(__file__).resolve().parents[2] / "steady_state_starting.json"
 @dataclass
 class IC:
     """Steady-state initial conditions loaded from steady_state_starting.json."""
-    pos:          np.ndarray   # ENU hub position [m]
-    vel:          np.ndarray   # ENU hub velocity [m/s]
-    body_z:       np.ndarray   # rotor axle unit vector in world ENU
+    pos:          np.ndarray   # NED hub position [m]
+    vel:          np.ndarray   # NED hub velocity [m/s]
+    body_z:       np.ndarray   # rotor axle unit vector in world NED
     omega_spin:   float        # equilibrium spin rate [rad/s]
     rest_length:  float        # tether rest length [m]
     coll_eq_rad:  float        # equilibrium collective [rad]
-    home_z_enu:   float        # GPS home altitude [m ENU] — 0 = ground level
+    home_z_ned:   float        # GPS home NED Z [m] — 0 = ground level
 
 
 def load_ic() -> IC:
@@ -63,5 +63,5 @@ def load_ic() -> IC:
         omega_spin  = float(d["omega_spin"]),
         rest_length = float(d.get("rest_length", d.get("tether_rest_length", 50.0))),
         coll_eq_rad = float(d.get("coll_eq_rad", -0.28)),
-        home_z_enu  = float(d.get("home_z_enu", 0.0)),
+        home_z_ned  = float(d.get("home_z_ned", d.get("home_z_enu", 0.0))),
     )

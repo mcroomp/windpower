@@ -208,7 +208,7 @@ def test_forces_zero_at_t0(AeroClass):
     forces = model.compute_forces(
         collective_rad=0.1, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=np.eye(3), v_hub_world=np.zeros(3),
-        omega_rotor=20.0, wind_world=np.array([10.0, 0.0, 0.0]),
+        omega_rotor=20.0, wind_world=np.array([0.0, 10.0, 0.0]),   # NED: East wind
         t=0.0,
     )
     np.testing.assert_allclose(forces, np.zeros(6), atol=1e-12,

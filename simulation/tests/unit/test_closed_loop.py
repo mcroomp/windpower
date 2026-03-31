@@ -45,9 +45,9 @@ OMEGA_SPIN_MIN = 0.5
 
 
 def _run_simulation(t_sim_s: float, wind: np.ndarray = None) -> list:
-    """Run closed-loop simulation, return list of (t, pos_enu) tuples."""
+    """Run closed-loop simulation, return list of (t, pos_ned) tuples."""
     if wind is None:
-        wind = np.array([10.0, 0.0, 0.0])
+        wind = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 
     R0 = build_orb_frame(BODY_Z0)
 
@@ -59,10 +59,10 @@ def _run_simulation(t_sim_s: float, wind: np.ndarray = None) -> list:
         vel0   = VEL0.tolist(),
         R0     = R0,
         omega0 = [0.0, 0.0, 0.0],
-        z_floor = 1.0,
+        z_floor = -1.0,  # NED: max Z = -1 m (altitude floor at 1 m)
     )
     aero    = create_aero(_rd.default())
-    tether  = TetherModel(anchor_enu=ANCHOR, rest_length=49.949,
+    tether  = TetherModel(anchor_ned=ANCHOR, rest_length=49.949,
                          axle_attachment_length=0.0)
 
     hub_state  = dyn.state
@@ -114,7 +114,8 @@ def _run_simulation(t_sim_s: float, wind: np.ndarray = None) -> list:
 def test_closed_loop_altitude_maintained():
     """Hub must not fall below the ground floor (1 m) for 10 s with tether-alignment controller."""
     history = _run_simulation(T_SIM)
-    altitudes = [pos[2] for _, pos in history]
+    # In NED, altitude = -pos[2]. Floor at z_floor=-1 → altitude ≥ 1 m.
+    altitudes = [-pos[2] for _, pos in history]
     min_alt = min(altitudes)
     assert min_alt >= 1.0, f"Hub crashed below floor: min altitude = {min_alt:.2f} m"
 
@@ -130,15 +131,15 @@ def test_closed_loop_no_runaway():
 def test_closed_loop_spin_stays_positive():
     """Rotor must maintain positive spin throughout (autorotation sustained)."""
     # Simulate and track spin separately
-    wind = np.array([10.0, 0.0, 0.0])
+    wind = np.array([0.0, 10.0, 0.0])  # NED: East wind
     R0 = build_orb_frame(BODY_Z0)
     dyn = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(), R0=R0,
-        omega0=[0.0, 0.0, 0.0], z_floor=1.0,
+        omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(_rd.default())
-    tether = TetherModel(anchor_enu=ANCHOR, rest_length=49.949)
+    tether = TetherModel(anchor_ned=ANCHOR, rest_length=49.949)
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
     min_spin   = omega_spin

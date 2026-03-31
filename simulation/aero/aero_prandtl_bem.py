@@ -172,7 +172,7 @@ class PrandtlBEM:
         spin_angle:     float = 0.0,
     ) -> AeroResult:
         """
-        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world ENU [N, N·m].
+        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world NED [N, N·m].
 
         Identical interface to RotorAero / DeSchutterAero.  Prandtl tip+root loss
         is applied per radial strip using the azimuth-averaged inflow angle.

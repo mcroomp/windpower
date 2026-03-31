@@ -258,10 +258,10 @@ class TestDefaultParametersNumerical:
     """Spot-check the trajectory for the actual DEFAULT_POS0/DEFAULT_VEL0 values."""
 
     def test_launch_pos_reasonable_altitude(self):
-        """Launch position must be above the ground (z > 0)."""
+        """Launch position must be above the ground (NED Z < 0 = altitude > 0)."""
         launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
-        assert launch_pos[2] > 0.0, (
-            f"launch altitude {launch_pos[2]:.2f} m is underground"
+        assert launch_pos[2] < 0.0, (
+            f"launch altitude {launch_pos[2]:.2f} m is underground (NED Z must be negative)"
         )
 
     def test_launch_pos_within_tether_length(self):
@@ -277,11 +277,14 @@ class TestDefaultParametersNumerical:
         np.testing.assert_allclose(vel_half, _TARGET_VEL, atol=1e-12)
 
     def test_kinematic_values(self):
-        """Regression: verify the specific launch position for default parameters."""
+        """Regression: verify the specific launch position for default parameters (NED)."""
         launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
         expected_launch = _TARGET_POS - _TARGET_VEL * _T
-        # With T=30: offset = [-0.257, 0.916, -0.093] * 30 = [-7.71, 27.48, -2.79]
-        # launch_pos = [46.258+7.71, 14.241-27.48, 12.530+2.79] = [53.968, -13.239, 15.320]
+        # NED: _TARGET_POS=[14.241, 46.258, -12.530], _TARGET_VEL=[0.916, -0.257, 0.093]
+        # With T=30: offset = [0.916, -0.257, 0.093]*30 = [27.48, -7.71, 2.79]
+        # launch_pos = [14.241-27.48, 46.258+7.71, -12.530-2.79] = [-13.239, 53.968, -15.320]
         np.testing.assert_allclose(launch_pos, expected_launch, atol=1e-12)
-        assert launch_pos[0] > _TARGET_POS[0], "launch E should be east of target (v_E < 0)"
-        assert launch_pos[1] < _TARGET_POS[1], "launch N should be south of target (v_N > 0)"
+        # v_N > 0 → hub moving North → launch is SOUTH of target (NED X=North, smaller value)
+        assert launch_pos[0] < _TARGET_POS[0], "launch N should be south of target (v_N > 0)"
+        # v_E < 0 → hub moving West → launch is EAST of target (NED Y=East, larger value)
+        assert launch_pos[1] > _TARGET_POS[1], "launch E should be east of target (v_E < 0)"

@@ -132,10 +132,10 @@ simulation/
 │   └── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 │
 ├── Coordinate frames
-│   └── frames.py            T_ENU_NED matrix, build_orb_frame() — single source
+│   └── frames.py            build_orb_frame(), T_ENU_NED (legacy utility) — single source
 │
 ├── Sensor & interface
-│   ├── sensor.py            ENU→NED conversion, build_sitl_packet(), SensorSim
+│   ├── sensor.py            build_sitl_packet(), SensorSim — all NED, no frame conversion needed
 │   └── sitl_interface.py    ArduPilot SITL UDP binary protocol
 │
 ├── Control
@@ -185,9 +185,9 @@ ArduPilot SITL (UDP 9002)
   ▼
 mediator.py
   ├─ swashplate.h3_inverse_mix()        → collective, tilt_lon, tilt_lat
-  ├─ aero.compute_forces()              → F_world[6] (ENU wrench)
+  ├─ aero.compute_forces()              → F_world[6] (NED wrench)
   ├─ tether.compute()                   → F_tether, M_tether (added to wrench)
-  ├─ dynamics.step()                    → {pos, vel, R, omega} (ENU)
+  ├─ dynamics.step()                    → {pos, vel, R, omega} (NED)
   └─ sensor.build_sitl_packet()         → {pos_ned, vel_ned, rpy, accel_body, gyro_body}
   │ JSON state packet
   ▼
@@ -200,13 +200,14 @@ All defined in `frames.py`. Import from there — do not duplicate.
 
 | Frame | Axes | Used by |
 |-------|------|---------|
-| ENU (world) | X=East, Y=North, Z=Up | dynamics, aero, tether, controller |
-| NED (ArduPilot) | X=North, Y=East, Z=Down | sensor output, SITL JSON |
+| NED (world) | X=North, Y=East, Z=Down | dynamics, aero, tether, controller, sensor, SITL |
 | Body | columns of R_hub | gyro, accel, swashplate commands |
 
-**ENU ↔ NED:** `T_ENU_NED` from `frames.py`. This matrix is symmetric (T @ T = I).
+**Gravity:** `[0, 0, +g·m]` in NED (Z=Down). Altitude = `-pos[2]`.
 
-**Orbital frame:** `build_orb_frame(body_z)` from `frames.py`. Removes rotor spin; body X = East projected onto disk plane.
+**T_ENU_NED:** `frames.py` keeps this as a legacy utility for converting ENU data (e.g. old JSON files). Not used in the simulation loop.
+
+**Orbital frame:** `build_orb_frame(body_z)` from `frames.py`. Removes rotor spin; body X = East (NED Y) projected onto disk plane.
 
 ---
 
@@ -288,8 +289,8 @@ ACRO mode was chosen because:
 
 **Sensor consistency (must all agree or EKF triggers emergency yaw reset):**
 1. `velocity_ned` heading must match `rpy[2]` — both from `atan2(vE, vN)`
-2. `gyro_body` in yaw-aligned NED body frame: spin stripped, then `Rz(-yaw) @ (T @ omega_nospin)`
-3. `accel_body`: `Rz(-yaw) @ (T @ accel_world + [0,0,-9.81])`
+2. `gyro_body` in yaw-aligned NED body frame: spin stripped, then `Rz(-yaw) @ omega_nospin`
+3. `accel_body`: `Rz(-yaw) @ (accel_world_ned - [0,0,9.81])`
 
 See [simulation/sim_internals.md](simulation/sim_internals.md) for full sensor/controller design details.
 

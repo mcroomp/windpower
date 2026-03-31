@@ -171,7 +171,7 @@ class SkewedWakeBEM:
         spin_angle:     float = 0.0,
     ) -> AeroResult:
         """
-        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world ENU [N, N·m].
+        Compute aerodynamic wrench [Fx,Fy,Fz,Mx,My,Mz] in world NED [N, N·m].
 
         Applies Coleman skewed-wake correction: induction is non-uniform across
         the disk, modulated as  v_i(r, ψ) = v_i0·(1 + K·(r/R)·cos(ψ − ψ_skew)).
@@ -216,12 +216,12 @@ class SkewedWakeBEM:
         if v_inplane > 0.01:
             v_ip_unit = v_inplane_vec / v_inplane  # world frame, in disk plane
             # Project onto disk-frame x-axis (East projected onto disk plane)
-            _EAST = np.array([1.0, 0.0, 0.0])
+            _EAST = np.array([0.0, 1.0, 0.0])   # NED: East = Y axis
             _ep   = _EAST - np.dot(_EAST, disk_normal) * disk_normal
             if np.linalg.norm(_ep) > 1e-6:
                 _bx = _ep / np.linalg.norm(_ep)
             else:
-                _NORTH = np.array([0.0, 1.0, 0.0])
+                _NORTH = np.array([1.0, 0.0, 0.0])  # NED: North = X axis
                 _ep    = _NORTH - np.dot(_NORTH, disk_normal) * disk_normal
                 _bx    = _ep / np.linalg.norm(_ep)
             _by       = np.cross(disk_normal, _bx)

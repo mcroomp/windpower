@@ -9,8 +9,8 @@ Protocol
 Two packet types cross the MAVLink boundary:
 
     STATE packet  (Pixhawk → planner, standard ArduPilot streams):
-        "pos_enu"    np.ndarray [3]  — hub position ENU [m]        (LOCAL_POSITION_NED converted)
-        "vel_enu"    np.ndarray [3]  — hub velocity ENU [m/s]      (LOCAL_POSITION_NED converted)
+        "pos_ned"    np.ndarray [3]  — hub position NED [m]        (from LOCAL_POSITION_NED)
+        "vel_ned"    np.ndarray [3]  — hub velocity NED [m/s]      (from LOCAL_POSITION_NED)
         "omega_spin" float           — rotor spin rate [rad/s]      (ESC_STATUS[RAWES_CTR_ESC].rpm
                                                                       × 2π/60 / 11 × 44/80)
 
@@ -21,10 +21,10 @@ Two packet types cross the MAVLink boundary:
 
     COMMAND packet  (planner → Pixhawk, ~10 Hz):
         "attitude_q"      np.ndarray [4]  (w,x,y,z)                (SET_ATTITUDE_TARGET quaternion)
-            Desired disk orientation in ENU.
+            Desired disk orientation in NED.
             [1,0,0,0] (identity) = tether-aligned natural orbit — Mode_RAWES tracks
             the tether direction at 400 Hz without any planner correction.
-            Non-identity = desired body_z is quat_apply(attitude_q, [0,0,1]).
+            Non-identity = desired body_z is quat_apply(attitude_q, [0,0,-1]) in NED.
             Mode_RAWES rate-limits the slew internally (body_z_slew_rate_rad_s).
         "thrust"          float [0..1]                              (SET_ATTITUDE_TARGET thrust)
             Normalised collective, direct output of the tension PI:
@@ -60,7 +60,7 @@ Available controllers
 
     DeschutterPlanner(t_reel_out, t_reel_in, t_transition,
                          v_reel_out, v_reel_in, tension_out, tension_in,
-                         wind_enu, xi_reel_in_deg=55.0,
+                         wind_ned, xi_reel_in_deg=55.0,
                          tension_kp=5e-4, tension_ki=1e-4,
                          col_min_rad=-0.28, col_max_rad=0.0,
                          tension_max_n=None, wind_estimator=None)
@@ -79,10 +79,10 @@ Wind estimation
     WindEstimator(window_s=60.0, K_drive=1.4, K_drag=0.01786)
         Estimates wind direction and in-plane speed from STATE packets.
 
-        wind_dir_enu  — unit vector in wind direction (ENU, horizontal).
+        wind_dir_ned  — unit vector in wind direction (NED, horizontal).
             Derived from the rolling mean horizontal hub position.  Over one
             orbit the hub's mean horizontal position points downwind from the
-            anchor.  Requires no extra sensors beyond pos_enu.
+            anchor.  Requires no extra sensors beyond pos_ned.
 
         v_inplane_ms  — in-plane wind speed component [m/s].
             Derived from rotor spin rate via the autorotation torque balance:
@@ -202,7 +202,7 @@ class WindEstimator:
         self._K_drive     = float(K_drive)
         self._K_drag      = float(K_drag)
         self._t           = 0.0   # internal monotonic clock [s]
-        # Buffer entries: (t, pos_enu [3], omega_spin)
+        # Buffer entries: (t, pos_ned [3], omega_spin)
         self._buf: "list[tuple[float, np.ndarray, float]]" = []
 
     def update(self, state: dict, dt: float = 1.0) -> None:
@@ -212,7 +212,7 @@ class WindEstimator:
         dt advances the internal clock used for window eviction.
         """
         self._t += float(dt)
-        pos        = np.asarray(state["pos_enu"], dtype=float).copy()
+        pos        = np.asarray(state["pos_ned"], dtype=float).copy()
         omega_spin = float(state.get("omega_spin", 0.0))
         self._buf.append((self._t, pos, omega_spin))
         # Trim entries older than window
@@ -225,9 +225,9 @@ class WindEstimator:
         return len(self._buf) >= self._min_samples
 
     @property
-    def wind_dir_enu(self) -> "np.ndarray | None":
+    def wind_dir_ned(self) -> "np.ndarray | None":
         """
-        Estimated wind direction as a horizontal ENU unit vector, or None if
+        Estimated wind direction as a horizontal NED unit vector, or None if
         not yet ready.
 
         Computed as the normalised mean horizontal hub position.  A minimum
@@ -278,7 +278,7 @@ class TrajectoryPlanner:
 
         Parameters
         ----------
-        state           : dict  — STATE packet (pos_enu, vel_enu, omega_spin)
+        state           : dict  — STATE packet (pos_ned, vel_ned, omega_spin)
         dt              : float — timestep [s]
         tension_n       : float — tether tension [N] from WinchController load cell
         tether_length_m : float | None — tether rest length [m] from WinchController encoder
@@ -353,7 +353,7 @@ class DeschutterPlanner(TrajectoryPlanner):
     v_reel_in       : float — winch reel-in speed [m/s]
     tension_out     : float — reel-out tension setpoint [N]
     tension_in      : float — reel-in tension setpoint [N]
-    wind_enu        : array — initial/fallback wind vector ENU [m/s]
+    wind_ned        : array — initial/fallback wind vector NED [m/s]
     rest_length_min : float — informational floor; enforced by Mode_RAWES [m]
     xi_reel_in_deg  : float or None
         Angle between body_z and wind during reel-in [degrees].
@@ -374,7 +374,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         v_reel_in:            float,
         tension_out:          float,
         tension_in:           float,
-        wind_enu:             np.ndarray,
+        wind_ned:             np.ndarray,
         xi_reel_in_deg:       "float | None" = 55.0,
         tension_kp:           float = 5e-4,
         tension_ki:           float = 1e-4,
@@ -411,26 +411,28 @@ class DeschutterPlanner(TrajectoryPlanner):
             coll_max=float(col_max_rad),
         )
 
-        # Initial/fallback reel-in attitude from fixed wind_enu
+        # Initial/fallback reel-in attitude from fixed wind_ned
         self._attitude_q_reel_in: "np.ndarray | None" = self._q_from_wind(
-            np.asarray(wind_enu, dtype=float))
+            np.asarray(wind_ned, dtype=float))
 
     # ------------------------------------------------------------------
-    def _q_from_wind(self, wind_enu: np.ndarray) -> "np.ndarray | None":
-        """Compute reel-in quaternion from a wind direction vector."""
+    def _q_from_wind(self, wind_ned: np.ndarray) -> "np.ndarray | None":
+        """Compute reel-in quaternion from a wind direction vector (NED)."""
         if self._xi_reel_in_deg is None:
             return None
         xi_rad     = math.radians(self._xi_reel_in_deg)
-        wind_horiz = np.array([float(wind_enu[0]), float(wind_enu[1]), 0.0])
+        wind_horiz = np.array([float(wind_ned[0]), float(wind_ned[1]), 0.0])
         wh_norm    = np.linalg.norm(wind_horiz)
         if wh_norm < 1e-6:
             return None
         wind_horiz = wind_horiz / wh_norm
+        # In NED: up = [0,0,-1].  body_z_target tilts xi from horizontal toward up.
         body_z_target = (
             math.cos(xi_rad) * wind_horiz
-            + math.sin(xi_rad) * np.array([0.0, 0.0, 1.0])
+            + math.sin(xi_rad) * np.array([0.0, 0.0, -1.0])
         )
-        return quat_from_vectors(np.array([0.0, 0.0, 1.0]), body_z_target)
+        # quat_from_vectors: rotation from NED up [0,0,-1] to body_z_target
+        return quat_from_vectors(np.array([0.0, 0.0, -1.0]), body_z_target)
 
     # ------------------------------------------------------------------
     def step(self, state: dict, dt: float,
@@ -441,7 +443,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         # Update wind estimator and refresh reel-in quaternion if direction changed
         if self._wind_estimator is not None:
             self._wind_estimator.update(state, dt)
-            wind_dir = self._wind_estimator.wind_dir_enu
+            wind_dir = self._wind_estimator.wind_dir_ned
             if wind_dir is not None:
                 v_inplane = self._wind_estimator.v_inplane_ms
                 wind_vec  = wind_dir * v_inplane if (v_inplane is not None and v_inplane > 0.5) else wind_dir

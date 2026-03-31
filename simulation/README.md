@@ -19,7 +19,7 @@ Combines ArduPilot SITL (flight controller logic), a Python RK4 dynamics engine,
 ┌─────────────────────────────────────────────────────────────────┐
 │ mediator.py  (400 Hz loop)                                      │
 │   servo PWM → swashplate.py → collective, tilt_lon, tilt_lat   │
-│   aero.py        → aerodynamic wrench (ENU world frame)        │
+│   aero.py        → aerodynamic wrench (NED world frame)        │
 │   tether.py      → tether tension force + moment               │
 │   dynamics.py    → RK4 6-DOF step → {pos, vel, R, omega}       │
 │   sensor.py      → build_sitl_packet() → NED sensor outputs    │
@@ -43,8 +43,8 @@ Combines ArduPilot SITL (flight controller logic), a Python RK4 dynamics engine,
 | `aero.py` | De Schutter (2018) BEM aerodynamic model |
 | `tether.py` | Tension-only elastic tether (Dyneema SK75) |
 | `swashplate.py` | H3-120 inverse mixing and cyclic blade pitch math |
-| `frames.py` | Shared ENU↔NED transform (`T_ENU_NED`) and `build_orb_frame()` |
-| `sensor.py` | `build_sitl_packet()` — ENU truth state → ArduPilot JSON sensor packet |
+| `frames.py` | `T_ENU_NED` legacy constant and `build_orb_frame()` — shared coordinate-frame utilities |
+| `sensor.py` | `build_sitl_packet()` — NED truth state → ArduPilot JSON sensor packet |
 | `sitl_interface.py` | ArduPilot SITL UDP binary protocol (servo recv, state send) |
 | `controller.py` | `compute_swashplate_from_state()` — truth-state tether-alignment controller; `compute_rc_from_attitude()` — ACRO RC override controller |
 | `gcs.py` | MAVLink GCS client (arm, mode, RC override, params) |
@@ -60,11 +60,10 @@ All defined in and imported from `frames.py`.
 
 | Frame | Axes | Where used |
 |-------|------|-----------|
-| ENU (world) | X=East, Y=North, Z=Up | dynamics, aero, tether, controller |
-| NED (ArduPilot) | X=North, Y=East, Z=Down | sensor output, SITL JSON |
+| NED (world) | X=North, Y=East, Z=Down | dynamics, aero, tether, controller, sensor, SITL |
 | Body | columns of R_hub (body→world) | gyro, accel, swashplate |
 
-`T_ENU_NED = [[0,1,0],[1,0,0],[0,0,-1]]` — symmetric (T @ T = I). Import from `frames`, do not redefine.
+All physics uses NED. `T_ENU_NED` in `frames.py` is kept as a utility for converting legacy ENU data.
 
 ---
 
@@ -86,8 +85,8 @@ Default starting state (warmup-settled equilibrium, 50 m tether at ~30° elevati
 
 | Parameter | Value |
 |-----------|-------|
-| pos (ENU) | `[46.258, 14.241, 12.530]` m |
-| vel (ENU) | `[-0.257, 0.916, -0.093]` m/s |
+| pos (NED) | `[14.241, 46.258, -12.530]` m |
+| vel (NED) | `[0.916, -0.257, 0.093]` m/s |
 | body_z    | `[0.851, 0.305, 0.427]` (axle aligned with tether) |
 | omega_spin | 20.148 rad/s |
 

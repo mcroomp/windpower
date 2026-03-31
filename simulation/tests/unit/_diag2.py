@@ -13,7 +13,7 @@ K_DRIVE=1.4; K_DRAG=0.01786; I_SPIN=10.; OMEGA_MIN=0.5
 R0=build_orb_frame(BODY_Z0)
 
 aero=RotorAero(_rd.default())
-tether=TetherModel(anchor_enu=ANCHOR,rest_length=49.949,axle_attachment_length=0.0)
+tether=TetherModel(anchor_ned=ANCHOR,rest_length=49.949,axle_attachment_length=0.0)
 dyn=RigidBodyDynamics(mass=5.,I_body=[5.,5.,10.],I_spin=0.,
     pos0=POS0.tolist(),vel0=VEL0.tolist(),R0=R0,omega0=[0.,0.,0.],z_floor=1.)
 hs=dyn.state; omega_spin=20.148; floor_hits=0

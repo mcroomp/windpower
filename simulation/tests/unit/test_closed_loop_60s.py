@@ -59,7 +59,7 @@ OMEGA_SPIN_MIN = 0.5
 KP_OUTER = 2.5   # outer P gain [rad/s per rad]  — matches hardware compute_rate_cmd call
 KP_INNER = RatePID.DEFAULT_KP  # inner P gain — calibrated to legacy kd=0.2 behaviour
 
-WIND = np.array([10.0, 0.0, 0.0])
+WIND = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 
 
 
@@ -67,10 +67,10 @@ def _run(t_sim: float = T_SIM):
     dyn = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
-        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=1.0,
+        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(rd.default())
-    tether = TetherModel(anchor_enu=ANCHOR,
+    tether = TetherModel(anchor_ned=ANCHOR,
                          rest_length=_IC.rest_length,
                          axle_attachment_length=0.0)   # match mediator
 
@@ -97,8 +97,8 @@ def _run(t_sim: float = T_SIM):
 
         # STATE packet (Pixhawk → planner)
         state_pkt = {
-            "pos_enu":    hub_state["pos"],
-            "vel_enu":    hub_state["vel"],
+            "pos_ned":    hub_state["pos"],
+            "vel_ned":    hub_state["vel"],
             "tension_n":  0.0,
             "omega_spin": omega_spin,
             "t_free":     t,
@@ -141,7 +141,7 @@ def _run(t_sim: float = T_SIM):
 
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] <= 1.05:
+        if hub_state["pos"][2] >= -1.05:  # NED: Z >= -1.05 m means altitude <= 1.05 m
             floor_hits += 1
 
         if i % (int(10.0 / DT)) == 0:
@@ -155,7 +155,7 @@ def _run(t_sim: float = T_SIM):
         if i % tel_every == 0:
             telemetry.append({
                 "t":                   t,
-                "pos_enu":             hub_state["pos"].tolist(),
+                "pos_ned":             hub_state["pos"].tolist(),
                 "R":                   hub_state["R"].tolist(),
                 "omega_spin":          omega_spin,
                 "tether_tension":      tension_now,
@@ -164,7 +164,7 @@ def _run(t_sim: float = T_SIM):
                 "swash_tilt_lon":      tilt_lon,
                 "swash_tilt_lat":      tilt_lat,
                 "body_z_eq":           body_z_eq.tolist(),
-                "wind_enu":            WIND.tolist(),
+                "wind_ned":            WIND.tolist(),
             })
 
     history.append({

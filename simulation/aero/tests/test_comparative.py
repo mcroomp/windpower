@@ -222,7 +222,7 @@ def test_glauert_vortex_ring_at_zero_axial():
     m.compute_forces(
         collective_rad=0.1, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=np.eye(3), v_hub_world=np.zeros(3),
-        omega_rotor=20.0, wind_world=np.array([10.0, 0.0, 0.0]),
+        omega_rotor=20.0, wind_world=np.array([0.0, 10.0, 0.0]),   # NED: East wind
         t=10.0,
     )
     # At v_axial=0 the induction should be near zero (can't drive momentum)

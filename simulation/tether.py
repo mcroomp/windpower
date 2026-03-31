@@ -66,14 +66,14 @@ class TetherModel:
 
     def __init__(
         self,
-        anchor_enu:            np.ndarray = np.array([0.0, 0.0, 0.0]),
+        anchor_ned:            np.ndarray = np.array([0.0, 0.0, 0.0]),
         rest_length:           float      = 200.0,   # unstretched tether length [m]
         EA:                    float      = None,    # override axial stiffness [N]
         zeta:                  float      = 0.05,    # damping ratio (fraction of critical)
         hub_mass:              float      = 5.0,     # hub mass [kg] — sets critical damping scale
         axle_attachment_length: float     = 0.3,     # distance from CoM to tether attach point along -body_Z [m]
     ):
-        self.anchor      = np.asarray(anchor_enu, dtype=float)
+        self.anchor      = np.asarray(anchor_ned, dtype=float)
         self.rest_length = float(rest_length)
         self.EA          = float(EA) if EA is not None else self.EA_N
         self.zeta        = float(zeta)
@@ -89,12 +89,12 @@ class TetherModel:
 
     def compute(
         self,
-        hub_pos: np.ndarray,   # hub position in ENU world frame [m]
-        hub_vel: np.ndarray,   # hub velocity in ENU world frame [m/s]
+        hub_pos: np.ndarray,   # hub position in NED world frame [m]
+        hub_vel: np.ndarray,   # hub velocity in NED world frame [m/s]
         R_hub:   np.ndarray = None,  # body→world rotation matrix (for restoring torque)
     ) -> tuple:
         """
-        Return (force, moment) on hub due to tether, both in ENU world frame [N] / [N·m].
+        Return (force, moment) on hub due to tether, both in NED world frame [N] / [N·m].
 
         When R_hub is provided and tether is taut, also computes a restoring moment
         M = r_attach × F_tether that aligns the hub axle (body Z) with the tether.

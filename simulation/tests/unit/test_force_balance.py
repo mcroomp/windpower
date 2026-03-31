@@ -22,6 +22,7 @@ from aero import create_aero
 import rotor_definition as _rd
 from dynamics import RigidBodyDynamics
 from swashplate import collective_to_pitch, h3_inverse_mix, pwm_to_normalized
+from frames import build_orb_frame
 
 
 # ── Physical constants ─────────────────────────────────────────────────────────
@@ -29,7 +30,7 @@ MASS   = 5.0      # kg  (matches mediator.py)
 G      = 9.81     # m/s²
 WEIGHT = MASS * G  # N  — force that must be overcome to hover
 OMEGA  = 28.0     # rad/s nominal spin (mediator initial condition)
-WIND   = np.array([10.0, 0.0, 0.0])   # 10 m/s East (mediator default)
+WIND   = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East = Y axis (mediator default)
 DT     = 2.5e-3   # s  (mediator step size, 400 Hz)
 
 
@@ -43,18 +44,15 @@ def _neutral_collective() -> float:
 
 
 def _R_tilt_30() -> np.ndarray:
-    """Rotation matrix for a rotor disk tilted 30° from vertical (toward wind direction).
+    """Rotation matrix for a rotor disk tilted 30° from vertical (toward East).
 
     This is the typical RAWES operating condition: body Z (disk normal) aligned
-    with the tether at 30° elevation angle.  With wind blowing East, the disk
-    tilts East so the axial wind component is non-zero and generates positive thrust.
+    with the tether at 30° elevation angle.  In NED: East = Y, Up = -Z.
+    body_z = [0, cos(30°), -sin(30°)] points mostly East and somewhat Up.
     """
     tilt = math.radians(30.0)
-    return np.array([
-        [ math.cos(tilt), 0, math.sin(tilt)],
-        [             0,  1,             0  ],
-        [-math.sin(tilt), 0, math.cos(tilt) ],
-    ])
+    body_z = np.array([0.0, math.cos(tilt), -math.sin(tilt)])
+    return build_orb_frame(body_z)
 
 
 def _aero_forces_after_ramp(collective_rad: float, R_hub: np.ndarray = None) -> np.ndarray:
@@ -97,7 +95,7 @@ def test_aero_thrust_exceeds_weight_at_neutral_collective():
     If Fz < WEIGHT the hub will fall regardless of ArduPilot commands.
     """
     forces = _aero_forces_after_ramp(collective_rad=0.0)
-    Fz = forces[2]
+    Fz = -forces[2]   # In NED: upward thrust = -NED Z component
     assert Fz > WEIGHT, (
         f"Thrust Fz={Fz:.1f} N < weight={WEIGHT:.1f} N at neutral collective (30° tilt).\n"
         f"Hub will fall even with correct ArduPilot commands.\n"
@@ -112,7 +110,7 @@ def test_aero_thrust_exceeds_weight_at_minimum_positive_collective():
     """
     collective_rad = math.radians(5.0)   # 5° — typical low-collective hover
     forces = _aero_forces_after_ramp(collective_rad=collective_rad)
-    Fz = forces[2]
+    Fz = -forces[2]   # In NED: upward thrust = -NED Z component
     assert Fz > WEIGHT * 2.0, (
         f"At 5° collective (30° tilt), Fz={Fz:.1f} N should be well above weight={WEIGHT:.1f} N.\n"
         f"Full force vector: F={forces[:3].round(1)}"
@@ -122,12 +120,12 @@ def test_aero_thrust_exceeds_weight_at_minimum_positive_collective():
 def test_aero_h_force_is_positive_east_for_east_wind():
     """
     With 10 m/s East wind and a level disk, the H-force must push the hub
-    East (positive Fx in ENU).  This is the force that creates tether tension.
+    East (positive NED Y = F_world[1]).  This is the force that creates tether tension.
     """
     forces = _aero_forces_after_ramp(collective_rad=0.0)
-    Fx = forces[0]
-    assert Fx > 0.0, (
-        f"H-force Fx={Fx:.3f} N is not positive eastward with East wind.\n"
+    Fy = forces[1]   # NED: East = Y axis
+    assert Fy > 0.0, (
+        f"H-force Fy={Fy:.3f} N is not positive eastward with East wind.\n"
         f"Full force vector: F={forces[:3].round(2)}"
     )
 
@@ -136,12 +134,12 @@ def test_aero_h_force_scales_with_wind_speed():
     """H-force should increase with wind speed (μ = v_wind / (ω·R_tip))."""
     aero = create_aero(_rd.default())
     forces_10 = aero.compute_forces(0.0, 0.0, 0.0, np.eye(3), np.zeros(3),
-                                    OMEGA, np.array([10.0, 0.0, 0.0]), t=10.0)
+                                    OMEGA, np.array([0.0, 10.0, 0.0]), t=10.0)  # NED East
     forces_20 = aero.compute_forces(0.0, 0.0, 0.0, np.eye(3), np.zeros(3),
-                                    OMEGA, np.array([20.0, 0.0, 0.0]), t=10.0)
-    assert forces_20[0] > forces_10[0], (
-        f"H-force should be larger at 20 m/s wind than 10 m/s.\n"
-        f"Fx@10={forces_10[0]:.2f}  Fx@20={forces_20[0]:.2f}"
+                                    OMEGA, np.array([0.0, 20.0, 0.0]), t=10.0)  # NED East
+    assert forces_20[1] > forces_10[1], (
+        f"H-force (NED Y=East) should be larger at 20 m/s wind than 10 m/s.\n"
+        f"Fy@10={forces_10[1]:.2f}  Fy@20={forces_20[1]:.2f}"
     )
 
 
@@ -150,18 +148,19 @@ def test_dynamics_hover_with_exact_thrust():
     With F_world = weight (exact compensation), the hub must stay at its
     initial altitude for 10 seconds.
     """
+    # In NED: altitude 50 m = pos[2] = -50. Upward thrust = negative NED Z.
     dyn = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
-        pos0=[0.0, 0.0, 50.0], vel0=[0.0, 0.0, 0.0],
+        pos0=[0.0, 0.0, -50.0], vel0=[0.0, 0.0, 0.0],
         omega0=[0.0, 0.0, OMEGA],
     )
-    F_hover = np.array([0.0, 0.0, WEIGHT])
+    F_hover = np.array([0.0, 0.0, -WEIGHT])   # upward force = -NED Z
     for _ in range(int(10.0 / DT)):
         state = dyn.step(F_hover, np.zeros(3), DT)
 
     z_final = state["pos"][2]
-    assert abs(z_final - 50.0) < 0.05, (
-        f"Hub drifted {abs(z_final-50.0):.3f} m from 50 m with exact hover thrust.\n"
+    assert abs(z_final - (-50.0)) < 0.05, (
+        f"Hub drifted {abs(z_final-(-50.0)):.3f} m from NED Z=-50 with exact hover thrust.\n"
         f"Dynamics integrator may have a gravity bug."
     )
 
@@ -180,7 +179,7 @@ def test_thrust_greatly_exceeds_weight_at_reel_out_collective():
     """
     REEL_OUT = math.radians(5.0)   # De Schutter reel-out operating point
     forces = _aero_forces_after_ramp(collective_rad=REEL_OUT)
-    Fz = forces[2]
+    Fz = -forces[2]   # In NED: upward force = -NED Z component
     assert Fz > WEIGHT * 2.0, (
         f"At 5° collective (30° tilt), Fz={Fz:.1f} N should be >>weight={WEIGHT:.1f} N.\n"
         f"RAWES surplus thrust (Fz-W={Fz-WEIGHT:.1f} N) creates tether tension."
@@ -202,7 +201,7 @@ def test_hover_collective_is_negative():
         coll_rad = math.radians(coll_deg)
         f = aero.compute_forces(coll_rad, 0.0, 0.0, R_tilt, np.zeros(3),
                                 OMEGA, WIND, t=10.0)
-        if f[2] <= WEIGHT:
+        if -f[2] <= WEIGHT:   # In NED: upward = -NED Z
             hover_deg = coll_deg
             break
 
@@ -217,10 +216,11 @@ def test_h_force_causes_eastward_drift():
     With 10 m/s East wind and no position controller, the hub should drift
     East over 10 seconds due to the H-force.
     """
+    # In NED: hub at altitude 50 m = pos[2] = -50
     aero = create_aero(_rd.default())
     dyn  = RigidBodyDynamics(
         mass=MASS, I_body=[5.0, 5.0, 10.0],
-        pos0=[0.0, 0.0, 50.0], vel0=[0.0, 0.0, 0.0],
+        pos0=[0.0, 0.0, -50.0], vel0=[0.0, 0.0, 0.0],
         omega0=[0.0, 0.0, OMEGA],
     )
 
@@ -237,9 +237,10 @@ def test_h_force_causes_eastward_drift():
         dyn.step(forces[:3], forces[3:], DT)
 
     final_pos = dyn.state["pos"]
-    assert final_pos[0] > 0.1, (
-        f"Hub did not drift East after 10 s with 10 m/s East wind.\n"
-        f"Final ENU pos: {final_pos.round(3)}\n"
+    # In NED: East = Y axis (index 1)
+    assert final_pos[1] > 0.1, (
+        f"Hub did not drift East (NED Y) after 10 s with 10 m/s East wind.\n"
+        f"Final NED pos: {final_pos.round(3)}\n"
         f"H-force may be too small or not being applied."
     )
 
@@ -257,8 +258,8 @@ def test_force_balance_at_kite_equilibrium():
       - H ≈ 173 N (large eastward in-plane force, also creates tether tension)
     """
     forces = _aero_forces_after_ramp(collective_rad=0.0)
-    T = forces[2]   # vertical thrust component [N]
-    H = forces[0]   # horizontal (East) force component [N]
+    T = -forces[2]  # upward thrust [N] = -NED Z component
+    H = forces[1]   # horizontal (East) force component [N] = NED Y
 
     # Both thrust and H-force must be positive (rotor lifts and pushes East)
     assert T > WEIGHT, (

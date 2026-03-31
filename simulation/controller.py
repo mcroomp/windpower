@@ -23,7 +23,7 @@ controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 import math
 
 import numpy as np
-from frames import T_ENU_NED, build_orb_frame
+from frames import build_orb_frame  # noqa: F401 — re-exported for callers; also used locally in col_min_for_altitude_rad
 
 
 def compute_rc_rates(
@@ -41,11 +41,11 @@ def compute_rc_rates(
     ----------
     hub_state : dict
         Current rigid-body state with keys:
-          ``pos``   — ENU position (3,)
+          ``pos``   — NED position (3,)
           ``R``     — rotation matrix body→world (3, 3)
-          ``omega`` — angular velocity in world ENU frame (3,)
+          ``omega`` — angular velocity in world NED frame (3,)
     anchor_pos : array-like (3,)
-        Tether anchor position in ENU world frame.
+        Tether anchor position in NED world frame.
     vel_ned : array-like (3,)
         Hub velocity in NED frame (used to derive heading yaw for body-frame
         alignment with ArduPilot's ACRO controller).
@@ -80,18 +80,15 @@ def compute_rc_rates(
     # Actual body_z = third column of rotation matrix
     body_z_cur = R[:, 2]
 
-    # Attitude error in world ENU frame (cross product → rotation axis toward target)
+    # Attitude error in world NED frame (cross product → rotation axis toward target)
     error_world = np.cross(body_z_cur, body_z_eq)
 
     # Strip spin component from omega (spin is along body_z, not an orbital rate)
     omega_spin    = np.dot(omega, body_z_cur) * body_z_cur
     omega_orbital = omega - omega_spin
 
-    # Rate correction in ENU world frame: P term + D term
-    omega_corr_enu = kp * error_world - kd * omega_orbital
-
-    # Transform to NED
-    omega_corr_ned = T_ENU_NED @ omega_corr_enu
+    # Rate correction in NED world frame: P term + D term
+    omega_corr = kp * error_world - kd * omega_orbital
 
     # Rotate into ArduPilot's yaw-aligned body frame
     vel_ned  = np.asarray(vel_ned, dtype=float)
@@ -99,7 +96,7 @@ def compute_rc_rates(
     yaw      = float(np.arctan2(vel_ned[1], vel_ned[0])) if v_horiz > 0.1 else 0.0
     cy, sy   = np.cos(yaw), np.sin(yaw)
     Rz_inv   = np.array([[cy, sy, 0.], [-sy, cy, 0.], [0., 0., 1.]])
-    omega_body = Rz_inv @ omega_corr_ned
+    omega_body = Rz_inv @ omega_corr
 
     # Map rad/s to PWM [1000, 2000], 1500 = zero
     max_rate = np.radians(rate_max_deg)
@@ -716,9 +713,10 @@ def col_min_for_altitude_rad(
     from frames import build_orb_frame as _build_orb_frame
 
     xi_r = _math.radians(xi_deg)
-    bz   = _np.array([_math.cos(xi_r), 0.0, _math.sin(xi_r)])
+    # bz in NED: East = Y axis.  xi from East direction toward Down (negative NED Z = Up).
+    bz   = _np.array([0.0, _math.cos(xi_r), -_math.sin(xi_r)])
     R    = _build_orb_frame(bz)
-    wind = _np.array([wind_m_s, 0.0, 0.0])
+    wind = _np.array([0.0, wind_m_s, 0.0])   # NED: East wind = Y axis
     W    = mass_kg * 9.81
 
     if omega is None:
@@ -729,7 +727,8 @@ def col_min_for_altitude_rad(
     for _ in range(50):
         mid = (lo + hi) / 2.0
         r   = aero.compute_forces(mid, 0.0, 0.0, R, _np.zeros(3), omega, wind, 50.0)
-        if float(r.F_world[2]) > W:
+        # In NED, upward force is negative Z; hub stays aloft when -F_world[2] >= W
+        if float(-r.F_world[2]) > W:
             hi = mid
         else:
             lo = mid
@@ -852,7 +851,7 @@ def make_hold_controller(
     anchor_ned  : required for ``"physical"`` mode — tether anchor in NED [m]
                   relative to the LOCAL_POSITION_NED frame origin.
                   When HOME = GPS_ORIGIN = anchor ENU [0,0,0]:
-                  ``anchor_ned = np.array([0.0, 0.0, home_z_enu])``
+                  ``anchor_ned = np.array([0.0, 0.0, 0.0])`` when anchor is at ground origin
     """
     if sensor_mode == "tether_relative":
         return TetherRelativeHoldController()

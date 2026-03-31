@@ -36,7 +36,7 @@ from aero import create_aero
 from frames import build_orb_frame
 
 # ── Common conditions ────────────────────────────────────────────────────────
-WIND        = np.array([10.0, 0.0, 0.0])   # 10 m/s East
+WIND        = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East = Y axis
 T_PAST_RAMP = 50.0                          # s — well past the 5 s ramp
 V_HUB       = np.zeros(3)                  # hub stationary
 W_HUB_N     = 5.0 * 9.81                   # hub weight [N]
@@ -45,9 +45,9 @@ W_HUB_N     = 5.0 * 9.81                   # hub weight [N]
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _bz_from_xi(xi_deg: float) -> np.ndarray:
-    """bz = cos(ξ)·wind_hat + sin(ξ)·up"""
+    """bz = cos(ξ)·wind_hat + sin(ξ)·up  (in NED: East=Y, Up=-Z)"""
     xi_r = math.radians(xi_deg)
-    bz   = math.cos(xi_r) * np.array([1., 0., 0.]) + math.sin(xi_r) * np.array([0., 0., 1.])
+    bz   = math.cos(xi_r) * np.array([0., 1., 0.]) + math.sin(xi_r) * np.array([0., 0., -1.])
     return bz / np.linalg.norm(bz)
 
 
@@ -104,7 +104,7 @@ def test_reel_out_vertical_force():
     must produce Fz > W = 49 N so the hub can fly against gravity.
     """
     r, aero = _call(xi_deg=35.0, collective_rad=-0.20)
-    Fz = float(r.F_world[2])
+    Fz = float(-r.F_world[2])   # NED: upward = -Z
     assert Fz > W_HUB_N, (
         f"Reel-out Fz={Fz:.1f} N < weight {W_HUB_N:.1f} N — "
         f"disk cannot support hub (v_axial={aero.last_v_axial:.2f} m/s)"
@@ -143,8 +143,8 @@ def test_reel_in_55_altitude_supported():
     """
     r_flight, _  = _call(xi_deg=55.0, collective_rad=-0.10)
     r_too_low, _ = _call(xi_deg=55.0, collective_rad=-0.20)
-    Fz_flight   = float(r_flight.F_world[2])
-    Fz_too_low  = float(r_too_low.F_world[2])
+    Fz_flight   = float(-r_flight.F_world[2])  # NED: upward = -Z
+    Fz_too_low  = float(-r_too_low.F_world[2])  # NED: upward = -Z
     assert Fz_flight > W_HUB_N, (
         f"xi=55° col=-0.10: Fz={Fz_flight:.1f} N < weight {W_HUB_N:.1f} N"
     )
@@ -183,7 +183,7 @@ def test_high_tilt_requires_positive_collective_for_altitude(xi_deg):
     This documents the control authority limit for high-tilt reel-in.
     """
     r_col_max, _ = _call(xi_deg, collective_rad=0.00)   # normal range limit
-    Fz_col_max   = float(r_col_max.F_world[2])
+    Fz_col_max   = float(-r_col_max.F_world[2])  # NED: upward = -Z
     assert Fz_col_max < W_HUB_N, (
         f"xi={xi_deg}°: Fz={Fz_col_max:.1f} N at col=0.0 — "
         f"expected < weight {W_HUB_N:.1f} N (altitude unsupported at max normal collective)"
@@ -200,7 +200,7 @@ def test_high_tilt_altitude_recoverable_with_extended_collective(xi_deg):
     high tilt, but only with collective extended beyond the normal range.
     """
     r, _ = _call(xi_deg, collective_rad=0.10)
-    Fz   = float(r.F_world[2])
+    Fz   = float(-r.F_world[2])   # NED: upward = -Z
     assert Fz > W_HUB_N, (
         f"xi={xi_deg}°: Fz={Fz:.1f} N at col=+0.10 still below weight {W_HUB_N:.1f} N — "
         f"altitude not recoverable with extended collective"
@@ -283,7 +283,7 @@ def test_trajectory_characterisation_table(capsys):
         rows.append(
             f"{xi:4d}  {omega_eq:8.1f}  {a_lo.last_v_axial:5.2f}  {a_lo.last_v_inplane:5.2f}  "
             f"{a_lo.last_skew_angle_deg:5.1f}  "
-            f"{r_lo.F_world[2]:9.1f}  {r_mid.F_world[2]:8.1f}  {r_hi.F_world[2]:9.1f}"
+            f"{-r_lo.F_world[2]:9.1f}  {-r_mid.F_world[2]:8.1f}  {-r_hi.F_world[2]:9.1f}"
         )
     print("\n" + "\n".join(rows))
     print(f"\n  Hub weight = {W_HUB_N:.1f} N  |  COL_MAX (normal) = 0.00 rad")
