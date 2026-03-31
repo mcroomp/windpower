@@ -1,4 +1,4 @@
-# RAWES — Mode_RAWES Protocol and Firmware Implementation
+# RAWES — Flight Control Protocol and Architecture
 
 ## 1. System Overview
 
@@ -22,15 +22,16 @@ point the rotor disk in the right direction at the right time.
 | Term | Meaning |
 |---|---|
 | **body_z** | The unit vector along the rotor axle (spin axis). Naming convention used throughout this document and the codebase. |
-| **Orbit tracking** | The Pixhawk-side control function that continuously rotates the attitude setpoint to match the hub's orbital position, keeping body_z aligned with the tether direction as the hub moves around the anchor. Runs at 400 Hz; the trajectory planner is not involved. |
-| **ENU** | East-North-Up coordinate frame — used throughout this document. X = East, Y = North, Z = Up. Preferred over ArduPilot's native NED because positive-Z altitude makes tether and orbit geometry more intuitive. The conversion to NED is contained at the sensor boundary. |
+| **Orbit tracking** | The Pixhawk-side control function that continuously rotates the attitude setpoint to match the hub's orbital position, keeping body_z aligned with the tether direction as the hub moves around the anchor. Implemented in `rawes_flight.lua` at 50 Hz; the trajectory planner is not involved. |
+| **NED** | North-East-Down coordinate frame (X=North, Y=East, Z=Down). Used by ArduPilot, the Lua scripts, and all MAVLink messages in this document. Up is `[0,0,−1]`. |
+| **ENU** | East-North-Up coordinate frame (X=East, Y=North, Z=Up). Used internally by the Python simulation. All values at the MAVLink boundary are converted to NED before transmission. |
 
 ### 1.3 Physical and control variables
 
 | Symbol | Name | Description |
 |---|---|---|
-| **pos** | Hub position | 3D position of the rotor hub in ENU world frame [m] |
-| **vel** | Hub velocity | 3D velocity of the rotor hub ENU [m/s] |
+| **pos** | Hub position | 3D position of the rotor hub in NED [m] (hardware/MAVLink); ENU in Python simulation |
+| **vel** | Hub velocity | 3D velocity of the rotor hub in NED [m/s] (hardware/MAVLink); ENU in Python simulation |
 | **body_z** | Disk axis | Unit vector along the rotor axle (also tether direction at equilibrium) |
 | **ξ** | Disk tilt from wind | Angle between body_z and the horizontal wind direction [°]. Controls how much thrust acts along vs. perpendicular to the tether. |
 | **β** | Tether elevation | Angle of the tether above horizontal [°]. Determines the natural body_z direction at equilibrium. |
@@ -83,53 +84,48 @@ which the Pixhawk converts to rotor spin rate:
 omega_spin = eRPM × 2π/60 / 11 × 44/80
 ```
 
-This is an inner-loop function owned entirely by `Mode_RAWES`.  The trajectory
-planner never commands it.
+This is an inner-loop function implemented in `rawes_yaw_trim.lua` at 100 Hz.
+The trajectory planner never commands it.
 
 ---
 
 ## 2. Control Architecture
 
-Three nodes, two communication boundaries:
+Three nodes, two communication boundaries.  The Pixhawk runs two distinct
+loops at different rates — the 400 Hz ArduPilot main loop (ACRO_Heli) and the
+Lua scripting scheduler (50 Hz / 100 Hz).  Lua writes RC overrides that the
+main loop consumes at full rate.
 
-```
-┌─────────────────────────────────────────────────┐
-│  Trajectory Planner  (ground station, ~10 Hz)   │
-│                                                 │
-│  Inputs:  pos_ned, vel_ned, body_z_ned,           │
-│           omega_spin — all standard streams      │
-│           tension (local from winch controller) │
-│           tether_length (local from winch)      │
-│  Outputs: attitude_q + thrust → Pixhawk         │
-│           winch_speed → Winch Controller        │
-│                                                 │
-│  Owns: phase logic, energy accounting,          │
-│        tension PI, wind estimation, MPC (future)│
-└──────────────┬──────────────────┬───────────────┘
-               │                  │
-               │ MAVLink          │ local interface
-               │ (~10 Hz,         │ (serial / CAN /
-               │ SiK 433 MHz)     │ analog — TBD)
-               │ std streams ↑    │
-               │ (pos,vel,att,    │ winch_speed_ms ↓
-               │  ESC_STATUS)     │ tension (local) ↑
-               │ attitude_q,      │
-               │ thrust ↓         │
-┌──────────────┴──────────────┐  ┌┴──────────────────────┐
-│  Mode_RAWES                 │  │  Winch Controller      │
-│  (Pixhawk 6C, in air)       │  │  (ground station)      │
-│  400 Hz                     │  │                        │
-│  Inputs: attitude_q, thrust │  │  Drives motor to pay   │
-│          EKF, IMU           │  │  out / reel in tether  │
-│  Outputs: swashplate PWM,   │  │  at commanded rate.    │
-│           counter-torque PWM│  │                        │
-│                             │  │  Owns: reel speed PID, │
-│  Owns: orbit tracking,      │  │  tension safety limits │
-│  body_z slewing,            │  │                        │
-│  swashplate mixing,         │  │  Load cell + encoder   │
-│  counter-torque control     │  │  — source of tension   │
-│                             │  │  and tether length     │
-└─────────────────────────────┘  └────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph GND["Ground Station"]
+        direction LR
+        PL["Trajectory Planner<br/>~10 Hz<br/><br/>Phase logic · Tension PI<br/>Wind estimation"]
+        WC["Winch Controller<br/><br/>Reel speed PID<br/>Load cell · Encoder"]
+    end
+
+    subgraph PX["Pixhawk 6C  (in air)"]
+        subgraph LUA["Lua scripting scheduler"]
+            FL["rawes_flight.lua  50 Hz<br/><br/>Orbit tracking<br/>Rate-limited slerp<br/>Cyclic P loop<br/>Ch1 · Ch2 · Ch3"]
+            YT["rawes_yaw_trim.lua  100 Hz<br/><br/>Yaw trim and correction<br/>Ch4"]
+        end
+        AP["ACRO_Heli  400 Hz — ArduPilot main loop<br/><br/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
+    end
+
+    PL -- "SET_ATTITUDE_TARGET — attitude_q + thrust  (MAVLink)" --> FL
+    AP -- "pos · vel · att · ESC_STATUS  (MAVLink)" --> PL
+    PL -- "winch_speed_ms" --> WC
+    WC -- "tension_n" --> PL
+    FL -- "Ch1/Ch2/Ch3 RC override — persists between 50 Hz updates" --> AP
+    YT -- "Ch4 RC override — persists between 100 Hz updates" --> AP
+
+    classDef gnd  fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef lua  fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef acro fill:#fef9c3,stroke:#ca8a04,color:#713f12
+
+    class PL,WC gnd
+    class FL,YT lua
+    class AP acro
 ```
 
 **Tether tension is measured at the base station**, not on the hub.  A load
@@ -141,8 +137,8 @@ of the operating range; absorbed by the PI integrator).
 The tension PI runs on the ground (trajectory planner), where the load cell
 measurement is local and fresh.  The PI output — a normalized collective value
 [0..1] — is sent to the Pixhawk as the `thrust` field of `SET_ATTITUDE_TARGET`.
-The Pixhawk passes it directly to `set_throttle_out()` with no further
-computation.  The Pixhawk has no knowledge of tension.
+The `rawes_flight.lua` script passes this directly to Ch3 RC override — no
+conversion on the Pixhawk.  The Pixhawk has no knowledge of tension.
 
 ### Design principles
 
@@ -171,7 +167,7 @@ structurally identical to a pilot's throttle stick in ACRO mode.
 ### 3.1 STATE — Pixhawk → Planner (~10 Hz, all standard streams)
 
 The planner reads everything it needs from standard ArduPilot telemetry — no custom messages
-and no `send_state()` function in `Mode_RAWES`:
+and no custom Pixhawk code required:
 
 | Standard stream | MAVLink message | What the planner uses |
 |---|---|---|
@@ -184,33 +180,24 @@ needed beyond setting the stream rate.
 
 ### 3.1.1 Anchor Position
 
-`Mode_RAWES` needs the anchor position to compute `bz_tether = normalize(pos_hub − anchor)`
-at every 400 Hz step.  The anchor is set via three parameters:
+`rawes_flight.lua` needs the anchor position to compute
+`bz_tether = normalize(pos_hub − anchor)` at every 50 Hz Lua step.
+The anchor is set via three `SCR_USER` parameters:
 
 | Parameter | Description |
 |---|---|
-| `RAWES_ANCHOR_LAT` | Anchor latitude [degrees, AP_Float] |
-| `RAWES_ANCHOR_LON` | Anchor longitude [degrees, AP_Float] |
-| `RAWES_ANCHOR_ALT` | Anchor altitude AMSL [m, AP_Float] |
+| `SCR_USER3` | Anchor North offset from EKF origin (m) |
+| `SCR_USER4` | Anchor East offset from EKF origin (m) |
+| `SCR_USER5` | Anchor Down offset from EKF origin (m) |
 
-At `init()` these are converted once to local NED relative to the EKF origin and
-stored as `_anchor_ned`.  The hub can be anywhere when `Mode_RAWES` is entered —
-ground-launched, hand-launched, or already in the air.
+These are read at each Lua step (no init conversion needed).  The hub can be
+anywhere when the script starts — ground-launched, hand-launched, or already
+in the air.
 
 The wind direction does **not** affect the anchor calculation.  `bz_tether` is
 derived from actual hub position, so it naturally tracks wherever the hub flies —
 downwind, crosswind, or during wind shifts — without any wind knowledge on the
 Pixhawk.
-
----
-
-`tension_n` is **not** in the STATE packet.  The Pixhawk has no load cell and
-never measures tension.  The planner reads it locally from the winch controller.
-
-`tether_length_m` is also **not** in the STATE packet.  The Pixhawk does not
-know how much tether has been paid out — only the winch controller knows this
-(from its encoder).  The planner reads tether length from the winch controller
-via the same local link as tension, requiring no protocol change.
 
 ### 3.2 Planner → Pixhawk Uplink (~10 Hz)
 
@@ -218,8 +205,8 @@ Exactly one MAVLink message: `SET_ATTITUDE_TARGET`.
 
 | Field | Description |
 |---|---|
-| `quaternion` | Desired disk orientation ENU. Identity `[1,0,0,0]` = natural tether-aligned orbit (planner silent). Non-identity: `body_z_target = quat_apply(q, [0,0,1])`. `Mode_RAWES` slews at `RAWES_BZ_SLEW`. |
-| `thrust` | Normalized collective [0..1], computed by the ground PI from the load cell measurement. `Mode_RAWES` passes this directly to `set_throttle_out()` — no conversion on the Pixhawk. |
+| `quaternion` | Desired disk orientation in NED frame. Identity `[1,0,0,0]` = natural tether-aligned orbit (planner silent). Non-identity: `body_z_target_ned = quat_apply(q, [0,0,1])`. `rawes_flight.lua` slews toward it at `SCR_USER2` (RAWES_BZ_SLEW) rad/s. |
+| `thrust` | Normalized collective [0..1], computed by the ground PI from the load cell measurement. `rawes_flight.lua` passes this directly to Ch3 RC override — no conversion on the Pixhawk. |
 
 The ground PI runs locally with fresh load cell data:
 ```
@@ -257,8 +244,9 @@ Each step:
 
 5. Compute:
        attitude_q     ← identity during reel-out (planner silent)
-                         quat_from_vectors([0,0,1], body_z_reel_in) during reel-in
-                         body_z_reel_in = cos(xi)*wind_dir + sin(xi)*[0,0,1]
+                         quat_from_vectors([0,0,1], body_z_reel_in_ned) during reel-in
+                         body_z_reel_in_ned = cos(xi)*wind_dir_ned + sin(xi)*[0,0,-1]
+                         ([0,0,-1] = up in NED)
        winch_speed_ms ← +v_reel_out or −v_reel_in
 
 6. Send SET_ATTITUDE_TARGET (attitude_q + thrust) → Pixhawk
@@ -303,12 +291,12 @@ and omega_spin.  If implemented, `wind_ned` would be added as a `NAMED_VALUE_FLO
 
 **Phase ownership:**
 
-| Phase | Planner | Mode_RAWES |
+| Phase | Planner | Pixhawk (Lua + ACRO) |
 |---|---|---|
 | Spin-up | Monitor `omega_spin`; trigger release at ω ≥ ω_min | None |
-| Free climb (slack tether) | Pay out winch; send explicit `attitude_q` target | Attitude hold via swashplate; collective from `thrust` |
-| Tether catch | Detect tension > threshold (local winch read); reduce thrust | Orbit tracking begins |
-| Transition to pumping | Ramp to operating tension setpoint | Natural orbit; follow COMMAND packets |
+| Free climb (slack tether) | Pay out winch; send explicit `attitude_q` target | `rawes_flight.lua` holds attitude; Ch3 from `thrust` |
+| Tether catch | Detect tension > threshold (local winch read); reduce thrust | Orbit tracking begins once `_eq_captured` |
+| Transition to pumping | Ramp to operating tension setpoint | Natural orbit; follow `SET_ATTITUDE_TARGET` |
 
 During the slack-tether phase, `_eq_captured` is false so orbit tracking is
 suppressed until EKF position is valid and tether direction is meaningful.
@@ -318,21 +306,21 @@ suppressed until EKF position is valid and tether direction is meaningful.
 ```
 Step 1 — Normal reel-in:
     Planner: slow winch reel-in, reduce tension setpoint.
-    Mode_RAWES: orbit track (identity attitude_q); collective from thrust.
+    Lua: orbit track (identity attitude_q); Ch3 from thrust.
     Hub spirals inward and downward.
 
 Step 2 — Final approach (tether_length < ~10 m):
     Planner: ramp thrust → 0 over ~5 s; hold or very slow reel-in.
-    Mode_RAWES: collective approaches zero; body_z alignment maintained.
+    Lua: collective approaches zero; body_z alignment maintained.
     Autorotation continues — rotor stores kinetic energy during descent.
 
 Step 3 — Flare (optional):
     Planner: brief thrust spike (~0.3) for 1–2 s.
-    Mode_RAWES: momentary collective increase slows final descent.
+    Lua: momentary collective increase slows final descent.
 
 Step 4 — Ground contact:
     Planner: engage ground motor (local command).
-    Mode_RAWES: hold last attitude command.
+    Lua: hold last attitude command (slerp goal unchanged).
 ```
 
 **The division of responsibility is identical to pumping flight.**  Landing is
@@ -346,32 +334,29 @@ a subset of the normal protocol — no new COMMAND fields are required.
 t=0s:   → Pixhawk:          attitude_q=[1,0,0,0] (identity),
                              thrust = ground PI output (targeting ~200 N, ≈0.2 normalized)
         → Winch controller: winch_speed=+0.4 m/s (pay out)
-        Mode_RAWES holds tether-aligned orbit naturally.  Winch pays out.
+        rawes_flight.lua holds tether-aligned orbit naturally.  Winch pays out.
         Ground PI regulates tension to 200 N by adjusting thrust each 10 Hz step.
 
-t=30s:  → Pixhawk:          attitude_q=quat_from_vectors([0,0,1],[cos55°,0,sin55°]),
+t=30s:  → Pixhawk:          attitude_q=quat_from_vectors([0,0,1],[0,cos55°,-sin55°]),
+                             (NED: wind east → Y; up → −Z; xi=55° from wind toward vertical)
                              thrust = ground PI output (targeting ~80 N, ≈0.5 normalized)
         → Winch controller: winch_speed=-0.4 m/s (reel in)
-        Mode_RAWES slews body_z toward 55° from wind (~5 s at RAWES_BZ_SLEW).
+        rawes_flight.lua slews body_z toward 55° from wind (~5 s at SCR_USER2=0.40 rad/s).
 
-t=35s+: Mode_RAWES holds 55° tilt.  Ground PI holds low tension.  Winch reels in.
+t=35s+: rawes_flight.lua holds 55° tilt.  Ground PI holds low tension.  Winch reels in.
 
 t=60s:  → Pixhawk:          attitude_q=[1,0,0,0] (identity),
                              thrust = ground PI output (targeting ~200 N)
         → Winch controller: winch_speed=+0.4 m/s (pay out)
-        Mode_RAWES slews body_z back to tether-aligned.  Next reel-out begins.
+        rawes_flight.lua slews body_z back to tether-aligned.  Next reel-out begins.
 ```
 
 ---
 
 ## 7. Lua Implementation
 
-No custom firmware is required.  RAWES flight control runs as two Lua scripts
-loaded by ArduPilot's scripting subsystem (`SCR_ENABLE = 1`) on top of stock
-ACRO_Heli mode.  ACRO_Heli already provides the swashplate mixing, inner rate
-PIDs, spool-state guards, and arming infrastructure — exactly what a custom
-`ModeRAWES` would inherit from `ModeAcro_Heli` if written in C++.  The Lua
-scripts add only the RAWES-specific logic.
+RAWES flight control runs as two Lua scripts on top of stock ACRO_Heli mode.
+No custom firmware, no firmware fork.
 
 ### 7.1 Why Lua instead of C++
 
@@ -380,87 +365,63 @@ scripts add only the RAWES-specific logic.
 | Requires firmware fork | Yes — maintain separate branch | No — stock ArduPilot |
 | Field update | Reflash Pixhawk via USB/DFU | Drop files onto SD card via MAVFtp |
 | Reuse ACRO rate PIDs | Via class inheritance | Via RC override injection |
-| Rate | 400 Hz in main loop | 50 Hz (adequate — orbit ≈ 0.2 rad/s) |
+| Cyclic update rate | 400 Hz in main loop | 50 Hz (adequate — orbit ≈ 0.2 rad/s) |
 | Simulation validation | Requires C++ ↔ Python mapping | Python mediator already implements identical algorithm |
 
-### 7.2 Two-Script Architecture
+### 7.2 Channel Ownership
 
-```
-rawes_flight.lua                    rawes_yaw_trim.lua
-──────────────────────────────────  ─────────────────────────────────────
-Orbit tracking (capture + track)    Motor RPM: battery:voltage() [SITL]
-Rate-limited body_z slerp             or RPM:get_rpm(0) [hardware]
-Cyclic P loop (body_z error→rate)   trim = f(RPM, V_bat)
-Ch1/Ch2 RC override (roll/pitch)    yaw_corr = −Kp × gyro:z()
-Ch3 RC override (collective)        Ch4 RC override (DDFP tail)
-50 Hz                               100 Hz
-```
+The two scripts divide the four ACRO RC channels between them:
 
-Both scripts run concurrently.  Neither requires a firmware change or custom
-mode.
+| Channel | Owner | Rate | Path |
+|---|---|---|---|
+| Ch1 — roll rate | `rawes_flight.lua` | 50 Hz | body_z error (roll) → `ATC_RAT_RLL` PID → swashplate |
+| Ch2 — pitch rate | `rawes_flight.lua` | 50 Hz | body_z error (pitch) → `ATC_RAT_PIT` PID → swashplate |
+| Ch3 — collective | ground PI via MAVLink | ~10 Hz | Normalized thrust [0..1] from load cell → Ch3 RC override |
+| Ch4 — yaw rate | `rawes_yaw_trim.lua` | 100 Hz | Torque trim + correction → `ATC_RAT_YAW` → GB4008 |
 
-### 7.3 Operating Mode
+**Phase switching:** During reel-in the planner sends `SET_ATTITUDE_TARGET`
+with a non-identity quaternion.  `rawes_flight.lua` decodes `body_z_target`
+and rate-limits the slerp toward it at `SCR_USER2` rad/s.  After 2 s without
+a planner packet the script reverts to natural orbit automatically.
 
-**ACRO_Heli** (mode number 6 for Copter).
+**Collective passthrough:** The ground PI sends normalized collective as
+`RC_CHANNELS_OVERRIDE, Ch3`.  `rawes_flight.lua` forwards this to Ch3 with no
+further computation — the Pixhawk has no tension awareness.
 
-ACRO maps RC channel inputs to body-frame rate commands:
+### 7.3 Two-Loop Timing
 
-| Channel | Function |
-|---|---|
-| Ch1 | Roll rate → `ATC_RAT_RLL` PID → swashplate |
-| Ch2 | Pitch rate → `ATC_RAT_PIT` PID → swashplate |
-| Ch3 | Collective (passthrough to swashplate H3-120 mix) |
-| Ch4 | Yaw rate → `ATC_RAT_YAW` PID → GB4008 motor (`H_TAIL_TYPE=4`) |
+The Lua scheduler and the ArduPilot main loop run independently at different
+rates:
 
-`rawes_flight.lua` computes desired alignment rates from body_z error and
-injects them as Ch1/Ch2 RC overrides at 50 Hz.  `rawes_yaw_trim.lua` injects
-Ch4 at 100 Hz.
-
-### 7.4 Collective (Ch3)
-
-The ground PI computes normalized collective [0..1] from the load cell.  It
-sends this to the Pixhawk via `RC_CHANNELS_OVERRIDE, Ch3` (mapped
-[0..1] → [1000..2000] µs).  `rawes_flight.lua` passes the received value
-through unchanged, or applies its own Ch3 override if it has received a
-`SET_ATTITUDE_TARGET.thrust` via a MAVLink message handler.
-
-`RC_CHANNELS_OVERRIDE` (direct RC mapping) is simpler for initial testing.
-`SET_ATTITUDE_TARGET` gives finer-grained phase intent from the planner.
-
-### 7.5 Phase Switching (Reel-in Tilt)
-
-For reel-in the planner sends `SET_ATTITUDE_TARGET` with a non-identity
-quaternion.  `rawes_flight.lua` decodes `body_z_target` from it and
-rate-limits the slerp from natural orbit toward the target at
-`SCR_USER2` rad/s.  On a 2-second planner timeout the script automatically
-reverts to natural orbit.
-
-### 7.6 What ACRO_Heli Provides Free
-
-Because the Lua scripts run inside ACRO_Heli mode, ArduPilot supplies:
-
-| Need | Mechanism |
-|---|---|
-| Spool state guards (`SHUT_DOWN`, `GROUND_IDLE`) | ACRO_Heli refuses RC input; servos safe |
-| Rate PIDs + swashplate H3-120 mix | Ch1/Ch2 overrides feed directly into `ATC_RAT_RLL/PIT` |
-| Collective → PWM | Ch3 override is throttle passthrough |
-| Counter-torque yaw (`ATC_RAT_YAW` → GB4008) | `H_TAIL_TYPE=4`; `rawes_yaw_trim.lua` owns Ch4 |
-| Arming infrastructure | Standard ACRO arming; arm via MAVLink or GCS |
-| AHRS + EKF | `ahrs:*` Lua bindings available in any mode |
-| `ESC_STATUS`, `LOCAL_POSITION_NED` telemetry | Standard ArduPilot streams; planner reads directly |
-
-### 7.7 What the Lua Scripts Build
-
-| Component | Script | Python equivalent |
+| Loop | Rate | Owns |
 |---|---|---|
-| Orbit tracking | `rawes_flight.lua` | `controller.py::orbit_tracked_body_z_eq()` |
-| Rate-limited slerp | `rawes_flight.lua` | `mediator.py` blend loop |
-| Cyclic P loop (body_z error → rate) | `rawes_flight.lua` | `controller.py::compute_swashplate_from_state()` |
-| Counter-torque feedforward | `rawes_yaw_trim.lua` | `mediator_torque.py` trim compute |
-| Yaw rate correction | `rawes_yaw_trim.lua` | `ATC_RAT_YAW` (Kp correction) |
+| ArduPilot main loop (ACRO_Heli) | 400 Hz | Rate PIDs, H3-120 mix, spool guards, servo PWM |
+| `rawes_flight.lua` | 50 Hz | Orbit tracking, slerp, cyclic P loop → Ch1/Ch2/Ch3 |
+| `rawes_yaw_trim.lua` | 100 Hz | Yaw trim and correction → Ch4 |
 
-Tension PI, phase logic, and winch control remain on the ground (trajectory
-planner).  The Pixhawk has no tension awareness.
+RC overrides set by Lua **persist** until the next Lua update.  The 400 Hz
+ACRO loop applies the most recently set override at every step — attitude
+tracking is bounded by the 50 Hz Lua rate, but disturbance rejection (rate PID
+D-term) operates at full 400 Hz bandwidth.
+
+ArduPilot expires RC overrides after ~1 s of inactivity.  At 50/100 Hz both
+scripts refresh well within the expiry window.
+
+### 7.4 Division of Responsibility
+
+| Function | Provided by | Notes |
+|---|---|---|
+| Rate PIDs — roll, pitch, yaw | ACRO_Heli (400 Hz) | Full-rate damping between Lua updates |
+| H3-120 swashplate mixing | ACRO_Heli | `H_SWASH_TYPE = H3-120` |
+| Spool state guards | ACRO_Heli | `SHUT_DOWN` / `GROUND_IDLE` refuse RC input |
+| Arming infrastructure | ACRO_Heli | Standard pre-arm checks; arm via MAVLink or GCS |
+| AHRS / EKF state | ArduPilot firmware | `ahrs:*` Lua bindings available in any mode |
+| Telemetry streams | ArduPilot firmware | `LOCAL_POSITION_NED`, `ATTITUDE_QUATERNION`, `ESC_STATUS` |
+| Orbit tracking | `rawes_flight.lua` | Port of `controller.py::orbit_tracked_body_z_eq()` |
+| Rate-limited slerp | `rawes_flight.lua` | Port of `mediator.py` blend loop |
+| Cyclic P loop | `rawes_flight.lua` | Port of `controller.py::compute_rate_cmd()` |
+| Counter-torque feedforward | `rawes_yaw_trim.lua` | Port of `mediator_torque.py` trim |
+| Tension PI, phase logic, winch | Trajectory planner (ground) | Pixhawk has no tension awareness |
 
 ---
 
@@ -528,7 +489,7 @@ Each step (every 20 ms):
        rc:set_override(1, ch1); rc:set_override(2, ch2)
 ```
 
-### 8.2 Key Algorithm Notes
+### 8.2 Algorithm Notes
 
 **Orbit tracking** applies the same rotation to `_bz_eq0` that the tether has
 made since equilibrium capture.  This keeps body_z tracking the natural tether

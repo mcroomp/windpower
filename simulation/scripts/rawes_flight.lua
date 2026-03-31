@@ -103,8 +103,8 @@ local function update()
 
     if not _captured then
         if tlen >= MIN_TETHER_M then
-            _bz_eq0     = v3_copy(R:colz())          -- body_z at capture
-            _tdir0      = diff:normalized()           -- tether direction at capture
+            _bz_eq0     = v3_copy(R:colz())          -- body_z in NED at capture
+            _tdir0      = diff:normalized()           -- tether direction in NED at capture
             _bz_orbit   = v3_copy(_bz_eq0)
             _bz_slerp   = v3_copy(_bz_eq0)
             _captured   = true
@@ -115,7 +115,7 @@ local function update()
         return update, PERIOD_MS
     end
 
-    -- ── Orbit tracking ───────────────────────────────────────────────────
+    -- ── Orbit tracking (all vectors in NED) ─────────────────────────────
     -- Rotate _bz_eq0 by the same rotation that the tether has made since capture.
     -- This keeps body_z aligned with the natural tether direction as the hub orbits.
 
