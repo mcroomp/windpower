@@ -1,0 +1,220 @@
+"""
+torque/test_yaw_regulation.py — Counter-torque motor stack test.
+
+Verifies that ArduPilot SITL can hold hub yaw steady while the GB4008
+anti-rotation motor counteracts bearing drag from the spinning axle.
+
+Physical scenario
+-----------------
+  • Axle spins at ≈ 28 rad/s (nominal RAWES autorotation at 10 m/s wind)
+  • Bearing drag tries to rotate the stationary hub in yaw
+  • ArduPilot (heli frame, ACRO mode) senses the yaw rate via gyro and
+    commands Ch4 (H_TAIL_TYPE=0, servo) to drive the GB4008 motor
+  • The motor reaction (through the 80:44 gear) counteracts the bearing drag
+
+Pass criterion
+--------------
+  After 30 s of ACRO with neutral sticks:
+    • max |ψ_dot|  < 1°/s over the last 20 s  (yaw rate nearly zero)
+
+  Note: ACRO mode controls yaw RATE (not angle), so the hub may settle at a
+  non-zero yaw angle.  Only the rate is asserted.  The yaw angle represents
+  the hub's operating heading and has no operational significance.
+
+  A well-tuned yaw PID should do much better than 1°/s.  The point is to
+  confirm the control loop closes, not to verify final PID tuning.
+
+Telemetry
+---------
+  The test writes a structured JSON log to simulation/logs/torque_telemetry.json
+  after each run.  Load and play back with:
+      python simulation/torque/visualize_torque.py \\
+             simulation/logs/torque_telemetry.json
+
+Run with (inside Docker)
+------------------------
+  RAWES_RUN_STACK_INTEGRATION=1 pytest simulation/torque/test_yaw_regulation.py -v
+"""
+from __future__ import annotations
+
+import math
+import time
+from pathlib import Path
+
+import pytest
+
+from torque_telemetry import TorqueTelemetryRecorder
+
+# ── Thresholds ────────────────────────────────────────────────────────────────
+
+#: Observation window starts this many seconds after ACRO mode is entered.
+#: 40 s gives the EKF gyro-bias estimate time to converge after the startup
+#: spin ends before we start measuring.
+_SETTLE_S = 40.0
+
+#: Duration of the observation window [s]
+_OBSERVE_S = 20.0
+
+#: Maximum allowed |ψ_dot| during observation window [deg/s]
+#: ACRO is yaw-RATE control; angle is not asserted.
+_MAX_PSI_DOT_DEGS = 1.0
+
+#: Total test timeout (settle + observe + margin) [s]
+_TEST_TIMEOUT_S = _SETTLE_S + _OBSERVE_S + 20.0
+
+#: Where to save the telemetry JSON for post-run analysis and visualisation
+_SIM_DIR = Path(__file__).resolve().parents[1]
+_TELEMETRY_OUT = _SIM_DIR / "logs" / "torque_telemetry.json"
+
+
+# ---------------------------------------------------------------------------
+# Test
+# ---------------------------------------------------------------------------
+
+def test_yaw_regulation(torque_armed):
+    """
+    ArduPilot SITL regulates hub yaw using the tail-rotor (Ch4) output.
+
+    ACRO mode with neutral sticks commands ψ_dot = 0.  The yaw rate PID must
+    build enough Ch4 output to cancel bearing drag from the spinning axle and
+    hold |ψ_dot| < 1°/s after a 30 s settle period.
+
+    Telemetry is saved to simulation/logs/torque_telemetry.json for playback
+    with visualize_torque.py.
+    """
+    ctx = torque_armed
+    gcs = ctx.gcs
+    log = ctx.log
+
+    # ── Set up telemetry recorder ─────────────────────────────────────────
+    rec = TorqueTelemetryRecorder(meta={
+        "test":            "yaw_regulation",
+        "omega_axle_rads": ctx.omega_axle,
+        "settle_s":        _SETTLE_S,
+        "observe_s":       _OBSERVE_S,
+        "threshold_degs":  _MAX_PSI_DOT_DEGS,
+    })
+
+    log.info(
+        "test_yaw_regulation: settle=%.0f s  observe=%.0f s  "
+        "threshold ψ_dot<%.1f°/s",
+        _SETTLE_S, _OBSERVE_S, _MAX_PSI_DOT_DEGS,
+    )
+
+    # ── Collect ATTITUDE messages ─────────────────────────────────────────
+    observe_samples: list[dict] = []
+    t_start   = time.monotonic()
+    deadline  = t_start + _TEST_TIMEOUT_S
+    t_last_rc = time.monotonic()
+
+    while time.monotonic() < deadline:
+        # Keep motor interlock HIGH — ArduPilot expires RC override after ~1 s
+        if time.monotonic() - t_last_rc >= 0.5:
+            ctx.gcs.send_rc_override({8: 2000})
+            t_last_rc = time.monotonic()
+
+        # Check processes are still alive
+        for name, proc in [("mediator", ctx.mediator_proc), ("SITL", ctx.sitl_proc)]:
+            if proc.poll() is not None:
+                rec.add_meta("result", "process_crash")
+                rec.save(_TELEMETRY_OUT)
+                pytest.fail(f"{name} exited during test (rc={proc.returncode})")
+
+        msg = gcs._mav.recv_match(
+            type=["ATTITUDE", "STATUSTEXT"],
+            blocking=True,
+            timeout=0.5,
+        )
+        if msg is None:
+            continue
+
+        t_rel = time.monotonic() - t_start
+
+        if msg.get_type() == "STATUSTEXT":
+            log.debug("SITL t=%.1fs: %s", t_rel, msg.text.rstrip("\x00").strip())
+            continue
+
+        if msg.get_type() == "ATTITUDE":
+            # ArduPilot reports in NED; we negate back to ENU for display
+            yaw_deg      = -math.degrees(msg.yaw)
+            yaw_rate_degs = -math.degrees(msg.yawspeed)
+
+            # Record every frame to telemetry
+            rec.record(
+                t=t_rel,
+                psi_deg=yaw_deg,
+                psi_dot_degs=yaw_rate_degs,
+                throttle=0.0,        # throttle not available from GCS; use 0 as placeholder
+                omega_axle_rads=ctx.omega_axle,
+                phase="STARTUP" if t_rel < 0 else "DYNAMIC",
+            )
+
+            if t_rel >= _SETTLE_S:
+                observe_samples.append({
+                    "t":             t_rel,
+                    "yaw_deg":       yaw_deg,
+                    "yaw_rate_degs": yaw_rate_degs,
+                })
+
+            if len(observe_samples) % 50 == 0 and observe_samples:
+                log.info(
+                    "t=%6.1f s  ψ=%+7.2f°  ψ_dot=%+6.2f°/s",
+                    t_rel, yaw_deg, yaw_rate_degs,
+                )
+
+            # Stop once we have the full observation window
+            if t_rel >= _SETTLE_S + _OBSERVE_S:
+                break
+
+    # ── Evaluate observation window ────────────────────────────────────────
+    if len(observe_samples) < 10:
+        rec.add_meta("result", "insufficient_samples")
+        rec.save(_TELEMETRY_OUT)
+        pytest.fail(
+            f"Not enough ATTITUDE samples in observation window "
+            f"(got {len(observe_samples)}, need ≥ 10).  "
+            f"Total frames recorded: {len(rec.frames)}"
+        )
+
+    max_psi_dot_degs = max(abs(s["yaw_rate_degs"]) for s in observe_samples)
+    max_psi_deg      = max(abs(s["yaw_deg"])       for s in observe_samples)
+    passed = max_psi_dot_degs <= _MAX_PSI_DOT_DEGS
+
+    log.info(
+        "Observation window (t > %.0f s, %d samples):  "
+        "max |ψ_dot|=%.2f°/s (limit %.1f°/s)  "
+        "max |ψ|=%.2f° (informational, not asserted)",
+        _SETTLE_S, len(observe_samples),
+        max_psi_dot_degs, _MAX_PSI_DOT_DEGS,
+        max_psi_deg,
+    )
+
+    # ── Save telemetry ────────────────────────────────────────────────────
+    rec.add_meta("result",            "PASS" if passed else "FAIL")
+    rec.add_meta("max_psi_dot_degs",  max_psi_dot_degs)
+    rec.add_meta("max_psi_deg",       max_psi_deg)
+    rec.add_meta("n_frames",          len(rec.frames))
+    out = rec.save(_TELEMETRY_OUT)
+    log.info("Telemetry saved → %s  (%d frames)", out, len(rec.frames))
+    log.info(
+        "Visualise with:  python simulation/torque/visualize_torque.py %s", out
+    )
+
+    if not passed:
+        # Diagnose: is yaw rate monotonically growing?  (wrong motor direction sign)
+        if len(observe_samples) >= 2:
+            rate_first = observe_samples[0]["yaw_rate_degs"]
+            rate_last  = observe_samples[-1]["yaw_rate_degs"]
+            if abs(rate_last) > abs(rate_first) + 5.0:
+                log.warning(
+                    "Yaw rate growing (%+.1f → %+.1f°/s) — motor may be in wrong "
+                    "direction.  Try H_TAIL_TYPE=2 (CW) or 3 (CCW) in conftest.py.",
+                    rate_first, rate_last,
+                )
+
+    assert passed, (
+        f"Max |ψ_dot| = {max_psi_dot_degs:.2f}°/s exceeded limit {_MAX_PSI_DOT_DEGS}°/s "
+        f"in observation window (t > {_SETTLE_S:.0f} s)"
+    )
+
+    log.info("PASS — yaw held within limits for %.0f s observation window", _OBSERVE_S)

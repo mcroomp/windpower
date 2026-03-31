@@ -42,6 +42,12 @@ from test_stack_integration import (
     _launch_sitl,
     _resolve_sim_vehicle,
     _terminate_process,
+    _kill_by_port,
+)
+from stack_utils import (
+    _configure_logging,
+    copy_logs_to_dir,
+    check_ports_free,
 )
 import socket as _socket
 
@@ -50,6 +56,9 @@ from gcs import ACRO, STABILIZE, RawesGCS
 from controller import make_hold_controller
 
 _STARTING_STATE   = _SIM_DIR / "steady_state_starting.json"
+
+
+
 
 
 def pytest_addoption(parser):
@@ -150,21 +159,33 @@ class StackConfig:
         cls._check_ports()
 
     @classmethod
-    def _check_ports(cls) -> None:
+    def _check_ports(cls, retry_s: float = 15.0, poll_interval: float = 0.5) -> None:
+        """Check that all required ports are free, retrying for up to retry_s seconds.
+
+        A brief retry window handles the case where the previous test's SITL process
+        has been sent SIGKILL but the OS hasn't yet released the port.
+        """
+        import time as _time
         for host, port, proto, hint in cls._PORT_CHECKS:
             kind = _socket.SOCK_STREAM if proto == "tcp" else _socket.SOCK_DGRAM
-            s = _socket.socket(_socket.AF_INET, kind)
-            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-            try:
-                s.bind((host, port))
-            except OSError as exc:
-                raise RuntimeError(
-                    f"{proto.upper()} port {host}:{port} is already in use.\n"
-                    f"  Hint: {hint}\n"
-                    f"  Original error: {exc}"
-                ) from exc
-            finally:
-                s.close()
+            deadline = _time.monotonic() + retry_s
+            while True:
+                s = _socket.socket(_socket.AF_INET, kind)
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind((host, port))
+                    s.close()
+                    break   # port is free
+                except OSError as exc:
+                    s.close()
+                    if _time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            f"{proto.upper()} port {host}:{port} is still in use after "
+                            f"{retry_s:.0f}s.\n"
+                            f"  Hint: {hint}\n"
+                            f"  Original error: {exc}"
+                        ) from exc
+                    _time.sleep(poll_interval)
 
 
 # Convenience aliases — use StackConfig directly for new code
@@ -364,14 +385,13 @@ def acro_armed(tmp_path, sensor_mode):
         gcs.close()
         _terminate_process(sitl_proc)
         _terminate_process(mediator_proc)
-        if telemetry_log.exists():
-            shutil.copy2(telemetry_log, sim_dir / "telemetry.csv")
-        if mediator_log.exists():
-            shutil.copy(mediator_log, sim_dir / "mediator_last_run.log")
-        if sitl_log.exists():
-            shutil.copy(sitl_log, sim_dir / "sitl_last_run.log")
-        if gcs_log.exists():
-            shutil.copy(gcs_log, sim_dir / "gcs_last_run.log")
+        _kill_by_port(StackConfig.SITL_GCS_PORT)
+        copy_logs_to_dir(sim_dir / "logs", {
+            "telemetry.csv":         telemetry_log,
+            "mediator_last_run.log": mediator_log,
+            "sitl_last_run.log":     sitl_log,
+            "gcs_last_run.log":      gcs_log,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -972,21 +992,6 @@ def drain_statustext(gcs, log) -> list[str]:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _configure_logging(log_file: Path) -> None:
-    fmt     = "%(asctime)s %(name)-20s %(levelname)-8s %(message)s"
-    datefmt = "%H:%M:%S"
-    fh = logging.FileHandler(str(log_file), encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(fmt, datefmt))
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(logging.Formatter(fmt, datefmt))
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-    root.handlers.clear()
-    root.addHandler(fh)
-    root.addHandler(sh)
 
 
 def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:

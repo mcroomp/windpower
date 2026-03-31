@@ -4,7 +4,9 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED with SkewedWakeBEM (`test_pumping_cycle.py`: net energy +1396 J, reel-in 86 N vs reel-out 199 N, peak tension 455 N). SkewedWakeBEM is now the production aero model; RotorAero removed from production. 534 fast unit tests + 23 simtests passing. `ModeRAWES` ArduPilot firmware architecture fully designed (documented in `simulation/raws_mode.md`). Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED with SkewedWakeBEM (`test_pumping_cycle.py`: net energy +1396 J, reel-in 86 N vs reel-out 199 N, peak tension 455 N). SkewedWakeBEM is now the production aero model; RotorAero removed from production. 534 fast unit tests + 23 simtests passing. `ModeRAWES` ArduPilot firmware architecture fully designed (documented in `simulation/raws_mode.md`). **Counter-torque motor simulation complete** — `simulation/torque/` has 15/15 tests passing including a Lua feedforward controller running inside ArduPilot SITL. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+
+**Known stack test status:** `test_pumping_cycle`, `test_gps_fuses_during_startup`, `test_acro_armed`, `test_stationary_gps_fusion`, `test_arm_minimal`, `test_stack_integration` all PASS. `test_acro_hold` FAILS — hub descends below 2 m during neutral-stick hold due to insufficient thrust margin after the 45 s kinematic damping phase; unit-level equivalent (`test_closed_loop_60s`) passes.
 
 See **[Phase 3 Plan](#phase-3-plan)** below for the full milestone breakdown.
 
@@ -91,7 +93,11 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 |------|-------------|
 | [simulation/sim_internals.md](simulation/sim_internals.md) | Sensor design, controller functions, aero model (SkewedWakeBEM), tether, pumping cycle COL_MIN rules, initial state, known gaps |
 | [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions — why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
-| [simulation/mbdyn_reference.md](simulation/mbdyn_reference.md) | MBDyn restoration instructions (archived; MBDyn removed from runtime) |
+
+### Counter-Torque Motor Simulation
+| File | When to read |
+|------|-------------|
+| [simulation/torque/README.md](simulation/torque/README.md) | **Complete reference** — physics model, motor specs, gear efficiency, ArduPilot integration, all 6 tests, Lua feedforward controller, hardware deployment |
 
 ---
 
@@ -151,6 +157,7 @@ simulation/
     │   ├── test_aero.py             Aerodynamic model
     │   └── ...
     └── stack/               Docker required
+        ├── stack_utils.py           Shared constants + helpers (env vars, logging, process launch/teardown, port kill, log copy)
         ├── conftest.py              acro_armed fixture (full stack lifecycle)
         ├── test_guided_flight.py    60 s ACRO hold with tether-alignment RC controller
         ├── test_pumping_cycle.py    Pumping cycle stack test
@@ -190,6 +197,12 @@ All defined in `frames.py`. Import from there — do not duplicate.
 
 ---
 
+## Workflow Rules
+
+**Do NOT consult git history (`git log`, `git diff`, `git show`, `git blame`) when diagnosing problems unless you first ask the user whether that would make sense.** Diagnose from the current code and runtime logs instead. Git history is rarely the right tool for debugging and adds noise to the investigation.
+
+---
+
 ## Running Tests
 
 ### Unit Tests and Simtests — Windows native, no Docker
@@ -212,12 +225,15 @@ simulation\tests\unit\.venv\Scripts\python.exe -m pip install numpy pytest matpl
 | Stack tests (Docker) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'` |
 | Stack tests (filtered) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k test_name'` |
 | Stack tests (status only) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack --filterstatus'` |
+| **Torque tests (all)** | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v'` |
+| Torque tests (filtered) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v -k test_lua_yaw_trim'` |
+| Torque visualizer | `simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torque.py` |
 | Build Docker image | `simulation\build.cmd ardupilot` |
 | Start/stop container | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh start/stop'` |
 | Regenerate steady state | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight` |
 | **Post-run analysis** | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'` |
 | Post-run analysis (plot) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --plot'` |
-| Last run logs | `simulation/logs/pytest_last_run.log` + `_passed.log` + `_failed.log` + `_summary.json`, `mediator_last_run.log`, `sitl_last_run.log`, `telemetry.csv` |
+| Last run logs | All in `simulation/logs/`: `pytest_last_run.log` + `_passed.log` + `_failed.log` + `_summary.json`, `mediator_last_run.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv` |
 
 ### Post-run analysis
 

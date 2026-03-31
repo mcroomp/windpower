@@ -119,8 +119,27 @@ case "$CMD" in
             docker exec -t "$CONTAINER" bash /rawes/simulation/test_simtest.sh "${_PASS_ARGS[@]}"
         fi
         ;;
+    test-torque)
+        ensure_running
+        _FILTER=0
+        _PASS_ARGS=()
+        for _arg in "$@"; do
+            if [ "$_arg" = "--filterstatus" ]; then
+                _FILTER=1
+            else
+                _PASS_ARGS+=("$_arg")
+            fi
+        done
+        _STATUS_PAT='PASS|FAIL|PASSED|FAILED|ERROR|passed|failed|error|warning|psi|yaw|throttle|EKF|Armed|ACRO'
+        if [ "$_FILTER" = "1" ]; then
+            docker exec -t "$CONTAINER" bash /rawes/simulation/test_torque.sh "${_PASS_ARGS[@]}" \
+                | grep -E "$_STATUS_PAT" --line-buffered
+        else
+            docker exec -t "$CONTAINER" bash /rawes/simulation/test_torque.sh "${_PASS_ARGS[@]}"
+        fi
+        ;;
     "")
-        echo "Usage: $0 start | stop | shell | exec <cmd...> | test-stack [...] | test-unit [...] | test-simtest [...]"
+        echo "Usage: $0 start | stop | shell | exec <cmd...> | test-stack [...] | test-unit [...] | test-simtest [...] | test-torque [...]"
         exit 0
         ;;
     *)

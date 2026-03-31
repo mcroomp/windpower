@@ -13,53 +13,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import config as _mcfg
 
 
-STACK_ENV_FLAG = "RAWES_RUN_STACK_INTEGRATION"
-ARDUPILOT_ENV = "RAWES_ARDUPILOT_PATH"
-SIM_VEHICLE_ENV = "RAWES_SIM_VEHICLE"
+# Env var names and process helpers are centralised in stack_utils.py.
+# Import them here so existing importers of this module still work unchanged.
+from stack_utils import (
+    STACK_ENV_FLAG,
+    ARDUPILOT_ENV,
+    SIM_VEHICLE_ENV,
+    _resolve_sim_vehicle,
+    _launch_sitl,
+    _terminate_process,
+    _kill_by_port,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Discovery helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _resolve_sim_vehicle() -> Path | None:
-    explicit = os.environ.get(SIM_VEHICLE_ENV)
-    if explicit:
-        candidate = Path(explicit)
-        return candidate if candidate.is_file() else None
-
-    ardupilot_root = os.environ.get(ARDUPILOT_ENV)
-    if not ardupilot_root:
-        return None
-
-    candidate = Path(ardupilot_root) / "Tools" / "autotest" / "sim_vehicle.py"
-    return candidate if candidate.is_file() else None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Process launch helpers (shared by all stack tests)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _launch_sitl(sim_vehicle: Path, log_path: Path) -> subprocess.Popen:
-    return subprocess.Popen(
-        [
-            sys.executable,
-            str(sim_vehicle),
-            "--vehicle", "ArduCopter",
-            "--frame", "heli",
-            "--custom-location=51.5074,-0.1278,50,0",
-            "--model", "JSON",
-            "--sim-address", "127.0.0.1",
-            "--no-rebuild",
-            "--no-mavproxy",
-        ],
-        cwd=str(sim_vehicle.parent.parent.parent),
-        stdout=log_path.open("w", encoding="utf-8"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-
-
 def _launch_mediator(
     sim_dir: Path,
     repo_root: Path,
@@ -135,32 +104,6 @@ def _launch_mediator(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-
-
-def _terminate_process(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    import signal
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.wait(timeout=10.0)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    proc.wait(timeout=5.0)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Ground station drivers
-# ─────────────────────────────────────────────────────────────────────────────
-
 class FakeGroundStation:
     """Thin MAVLink driver."""
 

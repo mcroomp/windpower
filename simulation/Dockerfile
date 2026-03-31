@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # =============================================================================
 # RAWES simulation image
 #
-# Installs: system deps, Python venv (numpy/scipy/matplotlib/pytest/pymavlink), MBDyn
+# Installs: system deps, Python venv (numpy/scipy/matplotlib/pytest/pymavlink)
 # Optional: ArduPilot SITL (set INSTALL_ARDUPILOT=true at build time)
 #
 # Build (Windows cmd):
@@ -30,9 +30,7 @@ ENV TZ=UTC
 # =============================================================================
 RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone \
     && apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git gfortran \
-        automake autoconf libtool autotools-dev \
-        liblapack-dev libblas-dev libsuitesparse-dev \
+        build-essential cmake git \
         pkg-config python3 python3-pip python3-venv python3-dev \
         libssl-dev wget curl sudo tzdata \
     && rm -rf /var/lib/apt/lists/* \
@@ -54,60 +52,7 @@ ENV PATH="$VENV_DIR/bin:/usr/local/bin:$PATH"
 ENV VIRTUAL_ENV="$VENV_DIR"
 
 # =============================================================================
-# 3. MBDyn — clone → bootstrap → configure → build → install
-# =============================================================================
-ENV MBDYN_PREFIX=/usr/local
-ENV GITLAB_URL=https://public.gitlab.polimi.it/DAER/mbdyn.git
-
-RUN git clone --depth 1 "$GITLAB_URL" /tmp/mbdyn \
-    && cd /tmp/mbdyn \
-    # bootstrap — try each script in order of preference
-    && (bash bootstrap.sh 2>/dev/null || bash autogen.sh 2>/dev/null || autoconf) \
-    && ./configure \
-        --prefix="$MBDYN_PREFIX" \
-        --with-lapack \
-        --enable-python=no \
-        --disable-documentation \
-        CXXFLAGS="-O2 -pipe" \
-    && make -j"$(nproc)" \
-    && make install \
-    && rm -rf /tmp/mbdyn
-
-# =============================================================================
-# 4. MBDyn smoke test
-# =============================================================================
-RUN printf '%s\n' \
-        'begin: data;'                                    \
-        '    problem: initial value;'                     \
-        'end: data;'                                      \
-        'begin: initial value;'                           \
-        '    initial time: 0.;'                           \
-        '    final time:   0.001;'                        \
-        '    time step:    0.001;'                        \
-        '    tolerance:    1.e-6;'                        \
-        '    max iterations: 5;'                          \
-        'end: initial value;'                             \
-        'begin: control data;'                            \
-        '    structural nodes: 1;'                        \
-        '    rigid bodies:     1;'                        \
-        '    gravity;'                                    \
-        'end: control data;'                              \
-        'begin: nodes;'                                   \
-        '    structural: 1, dynamic,'                     \
-        '        0., 0., 0., eye,'                        \
-        '        0., 0., 0., 0., 0., 0.;'                \
-        'end: nodes;'                                     \
-        'begin: elements;'                                \
-        '    body: 1, 1, 1.0, null, eye;'                \
-        '    gravity: uniform, 0., 0., -1., const, 9.81;'\
-        'end: elements;'                                  \
-    > /tmp/smoke.mbd \
-    && mbdyn -f /tmp/smoke.mbd -o /tmp/smoke_out -s \
-    && rm -f /tmp/smoke.mbd /tmp/smoke_out.* \
-    && echo "MBDyn smoke test: PASSED"
-
-# =============================================================================
-# 5. ArduPilot SITL (optional — large download, ~30 min build)
+# 3. ArduPilot SITL (optional — large download, ~30 min build)
 #    Must run as non-root; switch to 'sim' user for this step.
 # =============================================================================
 ARG INSTALL_ARDUPILOT=false
@@ -134,7 +79,42 @@ RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
 USER root
 
 # =============================================================================
-# 6. Simulation files — mounted at runtime, not baked into the image
+# 3b. ArduPilot post-build configuration
+#     Enable Lua scripting by default so it is available for all RAWES tests
+#     and any future simulation work without requiring a separate enable step.
+#     These are appended to the SITL defaults file; they apply on the first
+#     SITL boot (before any EEPROM is created) and can be overridden via
+#     MAVLink parameters as usual.
+# =============================================================================
+RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
+        printf '\n# RAWES: Lua scripting + RPM sensor on by default\nSCR_ENABLE 1\nRPM1_TYPE 10\nRPM1_MIN 0\n' \
+            >> "$ARDUPILOT_PATH/Tools/autotest/default_params/copter-heli.parm" \
+        && mkdir -p "$ARDUPILOT_PATH/scripts"; \
+    fi
+
+# =============================================================================
+# 3c. Patch ArduPilot JSON backend to expose 'rpm' field to Lua scripting.
+#     The JSON keytable in SIM_JSON.h doesn't include rpm by default, so
+#     RPM:get_rpm(0) always returns 0 even when the physics backend sends rpm.
+#     We patch the keytable to add the rpm scalar field → state.rpm[0], then
+#     do an incremental waf rebuild (only recompiles the affected .cpp file).
+#     Battery.voltage is also added for completeness (already in keytable but
+#     we confirm the state field name).
+# =============================================================================
+COPY patch_sim_json.py /tmp/patch_sim_json.py
+USER sim
+RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
+        python3 /tmp/patch_sim_json.py \
+        && cd "$ARDUPILOT_PATH" \
+        && unset VIRTUAL_ENV \
+        && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        && . ~/.profile \
+        && ./waf --target bin/arducopter-heli; \
+    fi
+USER root
+
+# =============================================================================
+# 4. Simulation files — mounted at runtime, not baked into the image
 #
 #   docker run --rm -it -v "$(pwd)/simulation":/rawes/simulation rawes-sim
 #
@@ -150,6 +130,6 @@ EXPOSE 5761/tcp
 EXPOSE 5762/tcp
 
 # =============================================================================
-# 7. Default shell with venv + MBDyn on PATH
+# 5. Default shell with venv on PATH
 # =============================================================================
 CMD ["/bin/bash"]
