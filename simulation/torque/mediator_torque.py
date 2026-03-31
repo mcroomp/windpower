@@ -221,10 +221,24 @@ def _make_state_json(
     cr, sr = math.cos(roll), math.sin(roll)
     cp, sp = math.cos(pitch), math.sin(pitch)
     g = 9.81
+
+    # ── Correct Euler-rate → body-rate transformation ──────────────────────
+    # For ZYX Euler angles (ψ, θ, φ) the body angular velocities are:
+    #   p = φ̇  + ψ̇_ENU × sin(θ)
+    #   q = θ̇ × cos(φ) − ψ̇_ENU × sin(φ) × cos(θ)
+    #   r = −θ̇ × sin(φ) − ψ̇_ENU × cos(φ) × cos(θ)
+    # (substituting ψ̇_NED = −ψ̇_ENU into the standard ZYX formula)
+    #
+    # At 20° roll, pitch_dot=±9°/s: r ≈ ±3.1°/s even with zero yaw rate.
+    # This cross-coupling is real — without it the motor ignores the wobble.
+    gyro_x = roll_dot + psi_dot * sp
+    gyro_y = pitch_dot * cr - psi_dot * sr * cp
+    gyro_z = -pitch_dot * sr - psi_dot * cr * cp
+
     msg = {
         "timestamp": float(t),
         "imu": {
-            "gyro":       [float(roll_dot), float(pitch_dot), float(-psi_dot)],
+            "gyro":       [float(gyro_x), float(gyro_y), float(gyro_z)],
             "accel_body": [float(g * sp),
                            float(g * cp * sr),
                            float(-g * cp * cr)],
