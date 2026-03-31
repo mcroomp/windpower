@@ -188,11 +188,13 @@ class EventLog:
     _COLOURS = {"info": "white", "warn": "yellow", "pass": "lime", "fail": "red"}
 
     def __init__(self, pl: pv.Plotter,
-                 settle_s: float, observe_s: float, threshold: float) -> None:
+                 settle_s: float, observe_s: float, threshold: float,
+                 omega_nom: float = 28.0) -> None:
         self.pl          = pl
         self._settle_s   = settle_s
         self._observe_s  = observe_s
         self._threshold  = threshold
+        self._omega_nom  = omega_nom
         self._events: list[tuple[str, float, str]] = []
         self._prev_phase   = ""
         self._prev_above   = False
@@ -213,6 +215,16 @@ class EventLog:
         elif not above and self._prev_above:
             self._push("pass", f.t, f"|psi_dot|={pd:.2f} deg/s  within limit")
         self._prev_above = above
+        # Startup ramp milestone: note when omega crosses 50% and 100% of nominal
+        om_frac = f.omega_axle_rads / max(1.0, self._omega_nom)
+        if not hasattr(self, "_ramp50") and om_frac >= 0.50:
+            self._ramp50 = True
+            self._push("info", f.t,
+                        f"ramp 50%  omega={f.omega_axle_rads:.1f} rad/s")
+        if not hasattr(self, "_ramp100") and om_frac >= 0.98:
+            self._ramp100 = True
+            self._push("pass", f.t,
+                        f"ramp complete  omega={f.omega_axle_rads:.1f} rad/s")
         if not self._settle_done and f.t >= self._settle_s:
             self._push("info", f.t, f"settle t>={self._settle_s:.0f}s")
             self._settle_done = True
@@ -241,6 +253,9 @@ class EventLog:
         self._prev_above  = False
         self._settle_done = False
         self._observe_done = False
+        # Clear startup ramp milestones
+        if hasattr(self, "_ramp50"):  del self._ramp50
+        if hasattr(self, "_ramp100"): del self._ramp100
         if hasattr(self, "_hist_actor"):
             self._hist_actor.SetInput(" ")
         if hasattr(self, "_latest_actor"):
@@ -306,6 +321,7 @@ class TorqueScene:
         self.pl          = pl
         self._axle_angle = 0.0
         self._prev_t     = 0.0
+        self._omega_nom  = 28.0   # updated from metadata on load
         self.event_log   = EventLog(pl, settle_s, observe_s, threshold_degs)
         self._build()
 
@@ -501,6 +517,8 @@ def play(frames: List[TorqueTelemetryFrame],
         observe_s      = float(meta.get("observe_s",       20.0)),
         threshold_degs = float(meta.get("threshold_degs",  1.0)),
     )
+    scene._omega_nom = float(meta.get("omega_axle_rads", 28.0))
+    scene.event_log._omega_nom = scene._omega_nom
 
     # ── Auto-seek: start 5 s before hub dynamics kick in ──────────────────
     dyn_t   = _find_dynamics_start(frames)
@@ -539,16 +557,16 @@ def play(frames: List[TorqueTelemetryFrame],
 
     def _make_omega_fn(m: dict):
         """Return omega(frame_t) using the profile stored in metadata."""
-        profile  = m.get("profile", m.get("test", "constant"))
+        profile   = m.get("profile", m.get("test", "constant"))
         omega_nom = float(m.get("omega_axle_rads", 28.0))
         dyn_start = _find_dynamics_start(_frames[0])
         omega_fn, _ = _MEDIATOR_PROFILES.get(profile, _MEDIATOR_PROFILES["constant"])
-        startup_hold = 10.0   # matches STARTUP_HOLD_S in conftest
 
         def _omega(frame_t: float) -> float:
-            # dynamics_t mirrors mediator: t - startup_hold_s (clamped ≥ 0)
             dynamics_t = max(0.0, frame_t - dyn_start)
-            return max(1.0, omega_fn(dynamics_t, omega_nom))
+            # For startup profile, omega starts from near-zero
+            raw = omega_fn(dynamics_t, omega_nom)
+            return max(0.0, raw)   # allow 0 during ramp (don't clamp to 1)
 
         return _omega
 
@@ -568,11 +586,14 @@ def play(frames: List[TorqueTelemetryFrame],
         sim_t0[0]  = new_frames[0].t
         scene._axle_angle = 0.0
         scene._prev_t     = new_frames[0].t
+        new_omega_nom = float(new_meta.get("omega_axle_rads", 28.0))
+        scene._omega_nom = new_omega_nom
         scene.event_log.reset(
             float(new_meta.get("settle_s", 40.0)),
             float(new_meta.get("observe_s", 20.0)),
             float(new_meta.get("threshold_degs", 1.0)),
         )
+        scene.event_log._omega_nom = new_omega_nom
         # Update window title
         profile = new_meta.get("profile", new_meta.get("test", "?"))
         result  = new_meta.get("result", "?")

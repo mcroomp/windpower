@@ -150,6 +150,13 @@ def _omega_gust(dt: float, nom: float) -> float:
         return nom * 1.20
     return nom
 
+def _omega_startup(dt: float, nom: float) -> float:
+    """Linear spin-up from 0 to nominal over 30 s, then hold.
+    Simulates the rotor accelerating from rest to autorotation speed.
+    The adaptive trim tracks the changing bearing drag at every RPM point."""
+    T_RAMP = 30.0
+    return nom * min(1.0, dt / T_RAMP)
+
 def _tilt_flat(dt: float) -> tuple[float, float]:
     return 0.0, 0.0
 
@@ -162,6 +169,7 @@ def _tilt_pitch_roll(dt: float) -> tuple[float, float]:
     return roll, pitch
 
 PROFILES: dict[str, tuple] = {
+    "startup":    (_omega_startup,   _tilt_flat),
     "constant":   (_omega_constant, _tilt_flat),
     "slow_vary":  (_omega_slow_vary, _tilt_flat),
     "fast_vary":  (_omega_fast_vary, _tilt_flat),
