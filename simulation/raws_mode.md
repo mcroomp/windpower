@@ -439,8 +439,9 @@ scripts refresh well within the expiry window.
 | `RAWES_ANCHOR_N` | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
 | `RAWES_ANCHOR_E` | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
 | `RAWES_ANCHOR_D` | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
+| `RAWES_MAX_CYC_DELTA` | SCR_USER6 | 30 | Max cyclic PWM change per 20 ms step (output rate limiter). Prevents sudden swashplate movements regardless of error source (attitude jitter, planner timeout, phase transitions). 30 PWM/step = 1500 PWM/s ≈ 0.67 s to traverse full stick. 0 = disabled. |
 
-`SCR_USER6..8` are reserved (future: reel-in tilt angle, gain scheduling).
+`SCR_USER7..8` are reserved (future: reel-in tilt angle, gain scheduling).
 
 Set before flight via MAVLink parameter set or include in a `.parm` file.
 No firmware recompilation needed to change any parameter.
@@ -490,8 +491,13 @@ Each step (every 20 ms):
        scale ← 500 / (ACRO_RP_RATE × π/180)
        Ch1 PWM ← clamp(1500 + scale × roll_rate,  1000, 2000)
        Ch2 PWM ← clamp(1500 + scale × pitch_rate, 1000, 2000)
-       rc:get_channel(1):set_override(ch1)
-       rc:get_channel(2):set_override(ch2)
+
+9. Output rate limiter (SCR_USER6 = RAWES_MAX_CYC_DELTA, default 30 PWM/step):
+       Ch1 PWM ← prev_ch1 + clamp(Ch1 − prev_ch1, −max_delta, +max_delta)
+       Ch2 PWM ← prev_ch2 + clamp(Ch2 − prev_ch2, −max_delta, +max_delta)
+       prev_ch1, prev_ch2 ← Ch1, Ch2
+       rc:get_channel(1):set_override(Ch1)
+       rc:get_channel(2):set_override(Ch2)
 ```
 
 > **Note on Rodrigues:** Lua's `Vector3f` operator overloading (`*`, `+`) is not available
@@ -605,6 +611,7 @@ To deploy to hardware: copy both `.lua` files to `APM/scripts/` on the SD card.
 | `SCR_USER1` | 1.0 | `RAWES_KP_CYC` — cyclic P gain; start at 0.3 |
 | `SCR_USER2` | 0.40 | `RAWES_BZ_SLEW` — body_z slew rate (rad/s) |
 | `SCR_USER3..5` | 0.0 | Anchor N/E/D offsets (m) — set to anchor NED from EKF origin |
+| `SCR_USER6` | 30 | `RAWES_MAX_CYC_DELTA` — max cyclic PWM change per 20 ms step; 0 = disabled |
 
 ### Swashplate and RSC
 

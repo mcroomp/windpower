@@ -409,3 +409,108 @@ def test_cyclic_error_larger_tilt_larger_magnitude():
     mag_small = math.sqrt(bx_small**2 + by_small**2)
     mag_large = math.sqrt(bx_large**2 + by_large**2)
     assert mag_large > mag_small, "Larger tilt must give larger cyclic error"
+
+
+# ---------------------------------------------------------------------------
+# output_rate_limit() tests  (mirrors rawes_flight.lua step 9)
+# ---------------------------------------------------------------------------
+
+def output_rate_limit(
+    ch_desired: int,
+    ch_prev:    int,
+    max_delta:  int,
+) -> int:
+    """
+    Python reference implementation of the rawes_flight.lua output rate limiter.
+
+    Clamps the per-step PWM change to max_delta.  Returns the new PWM value.
+    max_delta == 0 means disabled (no clamping).
+
+    Mirrors rawes_flight.lua:
+        d = ch_desired - ch_prev
+        d = clamp(d, -max_delta, +max_delta)
+        return ch_prev + d
+    """
+    if max_delta == 0:
+        return ch_desired
+    d = ch_desired - ch_prev
+    if d >  max_delta: d =  max_delta
+    if d < -max_delta: d = -max_delta
+    return ch_prev + d
+
+
+def test_rate_limit_no_change_needed():
+    """If desired == prev, output equals desired."""
+    assert output_rate_limit(1600, 1600, 30) == 1600
+
+
+def test_rate_limit_small_step_passes_through():
+    """A step smaller than max_delta passes through unchanged."""
+    assert output_rate_limit(1520, 1500, 30) == 1520
+
+
+def test_rate_limit_exact_boundary():
+    """A step exactly equal to max_delta passes through."""
+    assert output_rate_limit(1530, 1500, 30) == 1530
+
+
+def test_rate_limit_large_positive_step_clamped():
+    """A step larger than max_delta is clamped to prev + max_delta."""
+    assert output_rate_limit(1700, 1500, 30) == 1530
+
+
+def test_rate_limit_large_negative_step_clamped():
+    """A large negative step is clamped to prev - max_delta."""
+    assert output_rate_limit(1300, 1500, 30) == 1470
+
+
+def test_rate_limit_disabled_when_zero():
+    """max_delta == 0 disables clamping: output equals desired regardless."""
+    assert output_rate_limit(1000, 1500, 0) == 1000
+    assert output_rate_limit(2000, 1500, 0) == 2000
+
+
+def test_rate_limit_converges_to_target():
+    """Repeated application of the limiter eventually reaches the target."""
+    target   = 1800
+    prev     = 1500
+    max_delta = 30
+    for _ in range(100):
+        prev = output_rate_limit(target, prev, max_delta)
+        if prev == target:
+            break
+    assert prev == target, f"Did not converge: stopped at {prev}"
+
+
+def test_rate_limit_convergence_steps():
+    """Number of steps to reach target equals ceil(|target - start| / max_delta)."""
+    start, target, max_delta = 1500, 1800, 30
+    import math as _math
+    expected_steps = _math.ceil(abs(target - start) / max_delta)
+    prev  = start
+    steps = 0
+    for _ in range(200):
+        new = output_rate_limit(target, prev, max_delta)
+        steps += 1
+        if new == target:
+            break
+        prev = new
+    assert steps == expected_steps, (
+        f"Expected {expected_steps} steps, took {steps}"
+    )
+
+
+@pytest.mark.parametrize("max_delta", [10, 30, 50, 100])
+def test_rate_limit_never_exceeds_delta(max_delta):
+    """Per-step change never exceeds max_delta for any input."""
+    import random
+    rng = random.Random(42)
+    prev = 1500
+    for _ in range(500):
+        desired = rng.randint(1000, 2000)
+        out = output_rate_limit(desired, prev, max_delta)
+        assert abs(out - prev) <= max_delta, (
+            f"Step {abs(out - prev)} exceeds max_delta={max_delta} "
+            f"(desired={desired}, prev={prev})"
+        )
+        prev = out

@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-04-01 13:32:49",
-  "elapsed_s": 37.62,
+  "timestamp": "2026-04-01 13:52:20",
+  "elapsed_s": 12.57,
   "exit_code": 0,
-  "passed": 7,
+  "passed": 43,
   "failed": 0,
   "errors": 0,
   "skipped": 0,
@@ -17,10 +17,8 @@
     "-m",
     "pytest",
     "e:/repos/windpower/simulation/tests/unit",
-    "-m",
-    "simtest",
     "-k",
-    "deschutter",
+    "test_lua_flight_logic",
     "-q"
   ]
 }

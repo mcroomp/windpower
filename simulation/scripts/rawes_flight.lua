@@ -10,11 +10,15 @@ Runs in ACRO mode (mode 1).  Injects RC overrides every 20 ms (50 Hz):
 rawes_yaw_trim.lua runs concurrently and owns Ch4 (counter-torque motor).
 
 Parameters (set before flight — no firmware change needed):
-  SCR_USER1   RAWES_KP_CYC    Cyclic P gain            [rad/s / rad]  default 1.0
-  SCR_USER2   RAWES_BZ_SLEW   body_z slerp rate limit  [rad/s]        default 0.40
-  SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]         default 0.0
-  SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]         default 0.0
-  SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]         default 0.0
+  SCR_USER1   RAWES_KP_CYC       Cyclic P gain            [rad/s / rad]  default 1.0
+  SCR_USER2   RAWES_BZ_SLEW      body_z slerp rate limit  [rad/s]        default 0.40
+  SCR_USER3   RAWES_ANCHOR_N     Anchor North from EKF origin [m]         default 0.0
+  SCR_USER4   RAWES_ANCHOR_E     Anchor East  from EKF origin [m]         default 0.0
+  SCR_USER5   RAWES_ANCHOR_D     Anchor Down  from EKF origin [m]         default 0.0
+  SCR_USER6   RAWES_MAX_CYC_DELTA Max cyclic PWM change per 20 ms step   default 30
+                                  Limits swashplate slew rate regardless of error source.
+                                  30 PWM/step = 1500 PWM/s (~0.67 s full-stick traverse).
+                                  0 = disabled (no rate limiting).
 
 ACRO_RP_RATE (ArduPilot parameter) sets the full-stick rate in deg/s.
 ACRO_RP_RATE_DEG below must match the ArduPilot parameter value.
@@ -40,6 +44,8 @@ local _bz_slerp     = nil       -- rate-limited active setpoint (what cyclic tra
 local _bz_target    = nil       -- planner override (nil = natural orbit)
 local _plan_ms      = 0         -- millis() when _bz_target was last commanded
 local _diag         = 0         -- diagnostic counter
+local _prev_ch1     = 1500      -- last sent Ch1 PWM (for output rate limiting)
+local _prev_ch2     = 1500      -- last sent Ch2 PWM (for output rate limiting)
 
 -- Cache RC channel objects at module load (rc:get_channel() is the correct API)
 local _rc_ch1 = rc:get_channel(1)   -- roll rate override
@@ -215,6 +221,23 @@ local function update()
     local ch2 = math.floor(1500.0 + scale * pitch_rads + 0.5)
     ch1 = math.max(1000, math.min(2000, ch1))
     ch2 = math.max(1000, math.min(2000, ch2))
+
+    -- Output rate limiter: clamp per-step PWM change to RAWES_MAX_CYC_DELTA.
+    -- Prevents sudden swashplate movements regardless of error source (attitude
+    -- jitter, planner timeout, phase transitions).  0 = disabled.
+    local max_delta = p("SCR_USER6", 30)
+    if max_delta > 0 then
+        local d1 = ch1 - _prev_ch1
+        local d2 = ch2 - _prev_ch2
+        if d1 >  max_delta then d1 =  max_delta end
+        if d1 < -max_delta then d1 = -max_delta end
+        if d2 >  max_delta then d2 =  max_delta end
+        if d2 < -max_delta then d2 = -max_delta end
+        ch1 = _prev_ch1 + d1
+        ch2 = _prev_ch2 + d2
+    end
+    _prev_ch1 = ch1
+    _prev_ch2 = ch2
 
     if _rc_ch1 then _rc_ch1:set_override(ch1) end
     if _rc_ch2 then _rc_ch2:set_override(ch2) end
