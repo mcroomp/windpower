@@ -411,10 +411,10 @@ class DeschutterPlanner(TrajectoryPlanner):
             coll_max=float(col_max_rad),
         )
 
-        # Snapshot of PI integral taken at the reel-out → reel-in boundary.
-        # Used to ramp collective smoothly from reel-out equilibrium to
-        # col_min_reel_in over t_transition without a step jump.
+        # Snapshots of PI integral at each phase boundary, used to ramp
+        # collective smoothly across transitions without step jumps.
         self._reel_out_integral: float = self._tension_ctrl._integral
+        self._reel_in_integral:  float = self._tension_ctrl._integral
 
         # Initial/fallback reel-in attitude from fixed wind_ned
         self._attitude_q_reel_in: "np.ndarray | None" = self._q_from_wind(
@@ -470,20 +470,27 @@ class DeschutterPlanner(TrajectoryPlanner):
         _col_min_now = self._col_min_rad
         self._tension_ctrl.coll_min = _col_min_now
 
-        # Snapshot the PI integral the moment we enter reel-in so we can ramp from
-        # the reel-out equilibrium collective to col_min_reel_in over t_transition.
-        _just_entered_reel_in = (not phase_out) and (t_cyc - self._t_reel_out < dt * 1.5)
+        # Snapshot the PI integral at each phase boundary so each transition
+        # can ramp collective smoothly from the previous equilibrium.
+        _just_entered_reel_in  = (not phase_out) and (t_cyc - self._t_reel_out < dt * 1.5)
+        _just_entered_reel_out = phase_out and (t_cyc < dt * 1.5)
         if _just_entered_reel_in:
             self._reel_out_integral = self._tension_ctrl._integral
+        if _just_entered_reel_out:
+            self._reel_in_integral = self._tension_ctrl._integral
 
-        # Reel-in transition progress: 0 at phase start → 1 at t_transition.
-        # Used by both the tension PI ramp and the winch speed ramp below.
+        # Transition progress scalars: 0 at phase start → 1 after t_transition.
+        # Both are always defined so winch and collective logic can share them.
         if phase_out:
-            alpha = 1.0  # not used during reel-out, but keeps the variable always bound
-            tension_setpoint = self._tension_out
+            # alpha_out: reel-in → reel-out transition (body_z slewing back to tether)
+            alpha_out = min(1.0, t_cyc / self._t_transition)
+            alpha     = 1.0   # unused sentinel
+            tension_setpoint = self._tension_in + alpha_out * (self._tension_out - self._tension_in)
         else:
+            # alpha: reel-out → reel-in transition (body_z slewing to xi)
             t_into_reel_in = t_cyc - self._t_reel_out
-            alpha = min(1.0, t_into_reel_in / self._t_transition)
+            alpha     = min(1.0, t_into_reel_in / self._t_transition)
+            alpha_out = 1.0   # unused sentinel
             tension_setpoint = self._tension_out + alpha * (self._tension_in - self._tension_out)
         self._tension_ctrl.setpoint = tension_setpoint
 
@@ -502,6 +509,29 @@ class DeschutterPlanner(TrajectoryPlanner):
             collective_rad = float(np.clip(coll_transition, _col_min_now, self._col_max_rad))
             # Keep PI integral in sync so it continues smoothly when alpha reaches 1
             self._tension_ctrl._integral = collective_rad / max(self._tension_ctrl.ki, 1e-12)
+        elif phase_out and alpha_out < 1.0:
+            # ── Reel-out transition: ramp collective from reel-in equilibrium
+            # back to the natural reel-out collective over t_transition.
+            #
+            # At the reel-in → reel-out boundary body_z is still tilted at xi_reel_in
+            # (mostly vertical).  The winch has reversed but the disk hasn't re-tilted
+            # yet.  Without this ramp:
+            #   - tension setpoint jumps to tension_out (200 N)
+            #   - PI sees a large error and drives collective hard
+            #   - tether is already extending at v_reel_out
+            #   - collective overshoot → altitude spike or descent before disk re-tilts
+            # The ramp holds collective at approximately the reel-in equilibrium and
+            # lets the PI take over smoothly once the disk is back in reel-out geometry.
+            coll_reel_in    = self._reel_in_integral * self._tension_ctrl.ki
+            coll_reel_out_target = float(np.clip(
+                self._tension_ctrl.kp * (self._tension_out - float(tension_n))
+                + coll_reel_in,
+                _col_min_now, self._col_max_rad,
+            ))
+            coll_transition = coll_reel_in + alpha_out * (coll_reel_out_target - coll_reel_in)
+            collective_rad  = float(np.clip(coll_transition, _col_min_now, self._col_max_rad))
+            # Keep PI integral in sync so it continues smoothly when alpha_out reaches 1
+            self._tension_ctrl._integral = collective_rad / max(self._tension_ctrl.ki, 1e-12)
         else:
             collective_rad = self._tension_ctrl.update(float(tension_n), dt)
 
@@ -515,12 +545,13 @@ class DeschutterPlanner(TrajectoryPlanner):
         )))
 
         # Winch speed.
-        # During reel-in the winch is ramped from 0 → v_reel_in over t_transition,
-        # synchronised with the body_z tilt ramp (same alpha).  This prevents the
-        # tether from shortening faster than the disk can tilt, which would build
-        # extension and spike tension before thrust has been redirected upward.
+        # Both transitions are ramped over t_transition, synchronised with the
+        # body_z slerp:
+        #   Reel-out → reel-in: ramp 0 → -v_reel_in  (prevents shortening before disk tilts)
+        #   Reel-in → reel-out: ramp 0 → +v_reel_out  (prevents extending before disk re-tilts;
+        #                                               gives altitude time to stabilise)
         if phase_out:
-            winch_speed = self._v_reel_out
+            winch_speed = self._v_reel_out * alpha_out
         else:
             winch_speed = -(self._v_reel_in * alpha)
 
