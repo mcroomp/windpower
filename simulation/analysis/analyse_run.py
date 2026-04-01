@@ -89,7 +89,7 @@ class RunReport:
 #          11=tension  12=ext  13=alpha(optional)
 _RE_MEDIATOR = re.compile(
     r"t=\s*([\d.]+)s\s+"
-    r"pos_ENU=\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\]m\s+"
+    r"pos_NED=\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\]m\s+"
     r"rpy=\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\]deg\s+"
     r"omega=([\d.]+)\s+rad/s\s+"
     r"T=([-\d.]+)N\s+"

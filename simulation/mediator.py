@@ -288,7 +288,7 @@ def run_mediator(args, trajectory=None):
         stable_body_z = None,
     )
     spin_sensor = SpinSensor(
-        sigma    = float(cfg.get("spin_sensor_sigma", 0.0)),
+        sigma    = float(cfg["spin_sensor_sigma"]),
         K_drive  = K_DRIVE_SPIN,
         K_drag   = K_DRAG_SPIN,
     )
@@ -321,6 +321,7 @@ def run_mediator(args, trajectory=None):
     s1 = s2 = s3       = 0.0           # servo values (updated in ArduPilot path; stale OK in IC path)
     _pc_free_t         = 0.0           # free-flight elapsed time [s]
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
+    _logged_transition = False         # one-shot: kinematic → free-flight transition log
     omega_spin         = _omega_spin_init
     startup_damp_T     = _startup_damp_T   # already computed above
     startup_damp_k_ang = float(cfg["startup_damp_k_ang"])
@@ -348,9 +349,9 @@ def run_mediator(args, trajectory=None):
             # Aerodynamic model internals
             "aero_T", "aero_v_axial", "aero_v_i", "aero_v_inplane", "aero_ramp",
             "aero_Q_drag", "aero_Q_drive",
-            # Aerodynamic forces (ENU world frame)
+            # Aerodynamic forces (NED world frame)
             "F_x", "F_y", "F_z", "M_x", "M_y", "M_z",
-            # Hub state (ENU world frame)
+            # Hub state (NED world frame: X=North, Y=East, Z=Down)
             "hub_pos_x", "hub_pos_y", "hub_pos_z",
             "hub_vel_x", "hub_vel_y", "hub_vel_z",
             "hub_omega_x", "hub_omega_y", "hub_omega_z",
@@ -382,23 +383,25 @@ def run_mediator(args, trajectory=None):
     # Provides tension_n and tether_length_m back to the planner each step.
     _winch = WinchController(
         rest_length      = float(cfg["tether_rest_length"]),
-        tension_safety_n = float(cfg.get("tension_safety_n", 496.0)),
+        tension_safety_n = float(cfg["tension_safety_n"]),
     )
 
     # -- Pixhawk collective denormalisation -----------------------------------
     # thrust [0..1] from SET_ATTITUDE_TARGET → collective_rad for aero model.
     # Mirrors Pixhawk set_throttle_out() passthrough (raws_mode.md §8.4).
-    _traj_cfg   = cfg.get("trajectory", {}).get("deschutter", {})
-    _col_min_rad = float(_traj_cfg.get("col_min_rad", -0.28))
-    _col_max_rad = float(_traj_cfg.get("col_max_rad",  0.0))
+    # Collective denormalisation range — read from trajectory config which is
+    # always complete (config.load starts from DEFAULTS; no fallbacks here).
+    _traj_cfg    = cfg["trajectory"]["deschutter"]
+    _col_min_rad = float(_traj_cfg["col_min_rad"])
+    _col_max_rad = float(_traj_cfg["col_max_rad"])
 
     # -- Mode_RAWES inner loops -----------------------------------------------
     # Runs at 400 Hz on the Pixhawk.  Receives COMMAND packets from the planner.
     # Orbit tracking: computes tether-aligned body_z_eq from current pos.
     # Collective: set_throttle_out(thrust) — direct passthrough (no PI on Pixhawk).
     # Winch: handled by WinchController above (ground station, not Pixhawk).
-    _body_z_slew_rate     = float(cfg.get("body_z_slew_rate_rad_s", 0.12))   # rad/s
-    _swashplate_phase_deg = float(cfg.get("swashplate_phase_deg", 0.0))
+    _body_z_slew_rate     = float(cfg["body_z_slew_rate_rad_s"])
+    _swashplate_phase_deg = float(cfg["swashplate_phase_deg"])
     _ic_tether_dir0: "np.ndarray | None" = None   # captured at free-flight start
     _ic_body_z_eq0:  "np.ndarray | None" = None   # captured at free-flight start
     _body_z_eq_slewed: np.ndarray        = _bz.copy()  # rate-limited slew state
@@ -501,8 +504,9 @@ def run_mediator(args, trajectory=None):
                     _body_z_eq = _bz_tether
                 else:
                     # Planner has commanded a specific ENU orientation.
-                    # body_z target = apply attitude_q to [0,0,1]
-                    _bz_target = quat_apply(_aq, np.array([0.0, 0.0, 1.0]))
+                    # body_z target = apply attitude_q to [0,0,-1] (NED up = -Z)
+                    # Protocol: quat_apply(attitude_q, [0,0,-1]) = desired body_z NED
+                    _bz_target = quat_apply(_aq, np.array([0.0, 0.0, -1.0]))
                     # Rate-limited slerp toward target
                     _cos_a = float(np.clip(np.dot(_body_z_eq_slewed, _bz_target), -1.0, 1.0))
                     _angle  = math.acos(_cos_a)
@@ -533,7 +537,7 @@ def run_mediator(args, trajectory=None):
                 s2 = float(servos[1])
                 s3 = float(servos[2])
                 collective_norm, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
-                collective_rad = collective_to_pitch(collective_norm)
+                collective_rad = collective_to_pitch(collective_norm, _col_max_rad)
 
             # ----------------------------------------------------------------
             # Step 3: Compute aerodynamic forces
@@ -673,6 +677,38 @@ def run_mediator(args, trajectory=None):
                 dynamics._vel[:]   = _kin_vel
                 dynamics._R[:]     = _R0
                 dynamics._omega[:] = np.zeros(3)
+            elif not _logged_transition:
+                # ── First free-flight step — one-shot transition diagnostic ────
+                # Logs the full hub state at the kinematic→free-flight boundary
+                # so analysis scripts can compare against the unit-test initial
+                # conditions (steady_state_starting.json, vel ≈ 0).
+                _logged_transition = True
+                _p  = hub_state["pos"]
+                _v  = hub_state["vel"]
+                _bz = hub_state["R"][:, 2]
+                _om = hub_state["omega"]
+                _ti = tether._last_info
+                log.info(
+                    "TRANSITION kinematic→free-flight at t=%.3f s", t_sim)
+                log.info(
+                    "  pos_NED  = [%.4f %.4f %.4f] m  altitude=%.3f m  "
+                    "orbit_radius=%.3f m",
+                    _p[0], _p[1], _p[2], -_p[2],
+                    float(np.sqrt(_p[0]**2 + _p[1]**2)))
+                log.info(
+                    "  vel_NED  = [%.4f %.4f %.4f] m/s  |v|=%.4f m/s",
+                    _v[0], _v[1], _v[2], float(np.linalg.norm(_v)))
+                log.info(
+                    "  body_z   = [%.4f %.4f %.4f]  omega=[%.4f %.4f %.4f] rad/s",
+                    _bz[0], _bz[1], _bz[2], _om[0], _om[1], _om[2])
+                log.info(
+                    "  tether:  L=%.4f m  rest=%.4f m  ext=%.5f m  T=%.2f N  slack=%s",
+                    _ti.get("length", 0.0), tether.rest_length,
+                    _ti.get("extension", 0.0), _ti.get("tension", 0.0),
+                    _ti.get("slack", True))
+                log.info(
+                    "  aero:    T_est=%.2f N  omega_spin=%.3f rad/s  col=%.4f rad",
+                    T_est, omega_spin, collective_rad)
 
             # ----------------------------------------------------------------
             # Step 7: Compute hub acceleration (finite difference)
@@ -749,6 +785,7 @@ def run_mediator(args, trajectory=None):
             if t_sim - last_log_time >= LOG_INTERVAL:
                 last_log_time = t_sim
                 pos   = hub_state["pos"]
+                vel   = hub_state["vel"]
                 rpy_d = np.degrees(sensor_data["rpy"])
                 teth  = tether._last_info
                 teth_str = (
@@ -761,17 +798,29 @@ def run_mediator(args, trajectory=None):
                     if _damp_alpha > 0.0 else ""
                 )
                 log.info(
-                    "t=%6.1fs  pos_NED=[%6.1f %6.1f %6.1f]m  "
+                    "t=%6.1fs  pos_NED=[%6.1f %6.1f %6.1f]m  alt=%.2fm  "
                     "rpy=[%5.1f %5.1f %5.1f]deg  "
                     "omega=%.1f rad/s  T=%.1fN  tether=%s%s",
                     t_sim,
-                    pos[0], pos[1], pos[2],
+                    pos[0], pos[1], pos[2], -pos[2],
                     rpy_d[0], rpy_d[1], rpy_d[2],
                     omega_spin,
                     T_est,
                     teth_str,
                     damp_str,
                 )
+                # Extra velocity detail for first 15 s of free flight
+                # (helps diagnose kinematic→free-flight transition oscillations)
+                t_free = t_sim - startup_damp_T
+                if 0.0 <= t_free <= 15.0:
+                    log.info(
+                        "  vel_NED=[%.3f %.3f %.3f] m/s  |v|=%.3f  "
+                        "orbit_r=%.2f m  col=%.4f rad  phase=%s",
+                        vel[0], vel[1], vel[2], float(np.linalg.norm(vel)),
+                        float(np.sqrt(pos[0]**2 + pos[1]**2)),
+                        collective_rad,
+                        _traj_cmd.get("phase", ""),
+                    )
 
             # ----------------------------------------------------------------
             # Timing: sleep remainder of target period

@@ -426,6 +426,11 @@ scripts refresh well within the expiry window.
 
 ## 8. rawes_flight.lua
 
+**SITL validation status:** `test_lua_flight_rc_overrides` PASSES — script loads in SITL,
+captures equilibrium at t≈0.5 s after ACRO arm, generates cyclic RC overrides.
+Stack test uses `internal_controller=True` (mediator holds hub stable; Lua output is
+observed via `SERVO_OUTPUT_RAW`).  Phase 2 (Lua as sole cyclic controller) pending.
+
 ### 8.0 Parameters (SCR_USER slots)
 
 | Parameter | SCR_USER | Default | Description |
@@ -446,21 +451,21 @@ No firmware recompilation needed to change any parameter.
 ```
 Each step (every 20 ms):
 
-1. Guard: only run in ACRO_Heli (mode 6).  Return early otherwise.
+1. Guard: only run in ACRO mode (mode 1 in ArduCopter).  Return early otherwise.
 
 2. Read state:
-       R       ← ahrs:get_rotation_body_to_ned()
+       bz_now  ← ahrs:body_to_earth(Vector3f([0,0,1]))   -- body_z in NED
        pos_ned ← ahrs:get_relative_position_NED_origin()
        anchor  ← Vector3f(SCR_USER3, SCR_USER4, SCR_USER5)
        diff    ← pos_ned − anchor
 
 3. Capture equilibrium (once, when |diff| ≥ 0.5 m):
-       _bz_eq0   ← R:colz()                  (body_z at capture)
-       _tdir0    ← diff:normalized()          (tether direction at capture)
+       _bz_eq0   ← bz_now                    (body_z at capture)
+       _tdir0    ← diff / |diff|              (tether direction at capture)
        _bz_slerp ← _bz_eq0                   (initialise rate-limited setpoint)
 
 4. Orbit tracking (each step):
-       bz_tether ← diff:normalized()
+       bz_tether ← diff / |diff|
        axis  ← _tdir0 × bz_tether
        angle ← atan2(|axis|, _tdir0 · bz_tether)
        _bz_orbit ← Rodrigues(_bz_eq0, axis/|axis|, angle)
@@ -475,9 +480,10 @@ Each step (every 20 ms):
        _bz_slerp ← Rodrigues(_bz_slerp, (_bz_slerp × goal)/|…|, step)
 
 7. Cyclic:
-       err_ned ← R:colz() × _bz_slerp         (world-frame error)
-       err_bx  ← R:colx() · err_ned            (body X component — roll)
-       err_by  ← R:coly() · err_ned            (body Y component — pitch)
+       err_ned  ← bz_now × _bz_slerp          (world-frame error)
+       err_body ← ahrs:earth_to_body(err_ned)  (body-frame error)
+       err_bx   ← err_body.x                   (roll)
+       err_by   ← err_body.y                   (pitch)
        roll_rate  ← SCR_USER1 × err_bx         (rad/s)
        pitch_rate ← SCR_USER1 × err_by         (rad/s)
 
@@ -485,8 +491,14 @@ Each step (every 20 ms):
        scale ← 500 / (ACRO_RP_RATE × π/180)
        Ch1 PWM ← clamp(1500 + scale × roll_rate,  1000, 2000)
        Ch2 PWM ← clamp(1500 + scale × pitch_rate, 1000, 2000)
-       rc:set_override(1, ch1); rc:set_override(2, ch2)
+       rc:get_channel(1):set_override(ch1)
+       rc:get_channel(2):set_override(ch2)
 ```
+
+> **Note on Rodrigues:** Lua's `Vector3f` operator overloading (`*`, `+`) is not available
+> in this ArduPilot build.  `rodrigues()` in the actual script uses explicit component
+> arithmetic (no `*` or `+` on Vector3f objects).  See `simulation/scripts/rawes_flight.lua`
+> for the exact implementation.
 
 ### 8.2 Algorithm Notes
 

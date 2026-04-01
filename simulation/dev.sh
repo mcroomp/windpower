@@ -60,26 +60,41 @@ case "$CMD" in
         ;;
     test-stack)
         ensure_running
-        # Extract --filterstatus from the arg list; pass everything else to pytest.
-        # With --filterstatus, stdout is piped through line-buffered grep so only
-        # key status lines appear in the terminal.  Full output is still written to
-        # pytest_last_run.log inside the container by test_stack.sh.
-        _FILTER=0
+        # Modes:
+        #   (default)      filter out repetitive noise; still informative
+        #   --filterstatus only the most important status lines (positive match)
+        #   --raw          full unfiltered output
+        _MODE=filter
         _PASS_ARGS=()
         for _arg in "$@"; do
-            if [ "$_arg" = "--filterstatus" ]; then
-                _FILTER=1
-            else
-                _PASS_ARGS+=("$_arg")
-            fi
+            case "$_arg" in
+                --filterstatus) _MODE=status ;;
+                --raw)          _MODE=raw ;;
+                *)              _PASS_ARGS+=("$_arg") ;;
+            esac
         done
-        _STATUS_PAT='PASS|FAIL|STATUSTEXT|EKF Failsafe|GPS Glitch|yaw aligned|hold complete|ACRO hold|t=[0-9]|Min ENU alt|Drift:|setup [0-9]/6|acro_armed +INFO +\[setup|acro_armed +WARNING|Hold controller'
-        if [ "$_FILTER" = "1" ]; then
-            docker exec -t "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}" \
-                | grep -E "$_STATUS_PAT" --line-buffered
-        else
-            docker exec -t "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}"
-        fi
+
+        LOG_HOST="$SCRIPT_DIR/logs/pytest_last_run.log"
+        echo "[INFO] Full log: $LOG_HOST"
+
+        # Noise to suppress in default filter mode (EKF_STATUS spam + Param echo lines)
+        _NOISE='EKF_STATUS\s+flags=0x|^\s*[0-9:]+ (gcs|acro_armed)\s+INFO\s+Param [A-Z_]'
+        # Key lines for --filterstatus (positive match only)
+        _IMPORTANT='PASS|FAIL|STATUSTEXT|EKF Failsafe|GPS Glitch|yaw aligned|[Hh]old complete|ACRO (hold|mode)|  t=[0-9]|Min ENU alt|Drift:|setup [0-9]/6|\[setup|acro_armed.*(INFO|WARNING).*\[setup|acro_armed.*WARNING|Hold controller|Armed\b|setup complete|Traceback|Exception|AssertionError|REEL_OUT|REEL_IN|net_energy|phase='
+
+        case "$_MODE" in
+            filter)
+                docker exec "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}" \
+                    | stdbuf -oL grep -vE "$_NOISE" --line-buffered
+                ;;
+            status)
+                docker exec "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}" \
+                    | stdbuf -oL grep -E "$_IMPORTANT" --line-buffered
+                ;;
+            raw)
+                docker exec -t "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}"
+                ;;
+        esac
         ;;
     test-unit)
         ensure_running

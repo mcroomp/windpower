@@ -218,22 +218,27 @@ def make_trajectory(cfg: dict, wind_ned):
     traj_type = traj_cfg.get("type", "hold")
 
     if traj_type == "deschutter":
-        p = traj_cfg.get("deschutter", {})
+        # config.load() always starts from DEFAULTS so every key is guaranteed
+        # present.  Use direct key access — no fallback values here so that
+        # a misconfigured (incomplete) dict produces a clear KeyError rather
+        # than silently using a wrong default.
+        p = traj_cfg["deschutter"]
+        _xi = p["xi_reel_in_deg"]
         return DeschutterPlanner(
-            t_reel_out      = float(p.get("t_reel_out",      30.0)),
-            t_reel_in       = float(p.get("t_reel_in",       30.0)),
-            t_transition    = float(p.get("t_transition",     5.0)),
-            v_reel_out      = float(p.get("v_reel_out",       0.4)),
-            v_reel_in       = float(p.get("v_reel_in",        0.4)),
-            tension_out     = float(p.get("tension_out",    200.0)),
-            tension_in      = float(p.get("tension_in",      20.0)),
-            wind_ned        = _np.asarray(wind_ned, dtype=float),
-            xi_reel_in_deg  = p.get("xi_reel_in_deg", 55.0),
-            tension_kp      = float(p.get("tension_kp",      5e-4)),
-            tension_ki      = float(p.get("tension_ki",      1e-4)),
-            col_min_rad          = float(p.get("col_min_rad",          -0.28)),
-            col_min_reel_in_rad  = float(p["col_min_reel_in_rad"]) if "col_min_reel_in_rad" in p else None,
-            col_max_rad          = float(p.get("col_max_rad",           0.0)),
+            t_reel_out          = float(p["t_reel_out"]),
+            t_reel_in           = float(p["t_reel_in"]),
+            t_transition        = float(p["t_transition"]),
+            v_reel_out          = float(p["v_reel_out"]),
+            v_reel_in           = float(p["v_reel_in"]),
+            tension_out         = float(p["tension_out"]),
+            tension_in          = float(p["tension_in"]),
+            wind_ned            = _np.asarray(wind_ned, dtype=float),
+            xi_reel_in_deg      = float(_xi) if _xi is not None else None,
+            tension_kp          = float(p["tension_kp"]),
+            tension_ki          = float(p["tension_ki"]),
+            col_min_rad         = float(p["col_min_rad"]),
+            col_min_reel_in_rad = float(p["col_min_reel_in_rad"]),
+            col_max_rad         = float(p["col_max_rad"]),
         )
 
     return HoldPlanner()

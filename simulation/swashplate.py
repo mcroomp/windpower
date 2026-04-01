@@ -23,11 +23,6 @@ _S1_ANG = 0.0               # 0°
 _S2_ANG = 2.0 * math.pi / 3   # 120°
 _S3_ANG = 4.0 * math.pi / 3   # 240°
 
-# Control gains
-_PITCH_GAIN_RAD = 0.3        # max swashplate tilt [rad] per unit normalised input
-_COLL_MAX_RAD   = 0.35       # max collective blade pitch [rad]
-_COLL_MIN_RAD   = -0.35      # min collective blade pitch [rad]
-
 # H3-120 inverse mix precomputed constants
 _SIN_S2 = math.sin(_S2_ANG)   #  sin(120°) =  0.866
 _SIN_S3 = math.sin(_S3_ANG)   #  sin(240°) = -0.866
@@ -108,25 +103,25 @@ def h3_inverse_mix(s1: float, s2: float, s3: float):
 # Collective → blade pitch
 # ---------------------------------------------------------------------------
 
-def collective_to_pitch(collective_norm: float) -> float:
+def collective_to_pitch(collective_norm: float, col_max_rad: float) -> float:
     """
     Convert normalised collective [-1, 1] to blade collective pitch angle [rad].
 
-    Maps linearly:
-        -1.0 → _COLL_MIN_RAD (-0.35 rad ≈ -20°)
+    Maps linearly and symmetrically:
+        -1.0 → -col_max_rad
          0.0 →  0.0 rad
-        +1.0 → _COLL_MAX_RAD (+0.35 rad ≈ +20°)
+        +1.0 → +col_max_rad
 
     Parameters
     ----------
     collective_norm : float   Normalised collective in [-1, 1]
+    col_max_rad     : float   Maximum collective blade pitch angle [rad]
 
     Returns
     -------
     float   Collective blade pitch angle in radians
     """
-    return float(np.clip(collective_norm * _COLL_MAX_RAD,
-                         _COLL_MIN_RAD, _COLL_MAX_RAD))
+    return float(np.clip(collective_norm * col_max_rad, -col_max_rad, col_max_rad))
 
 
 # ---------------------------------------------------------------------------
@@ -134,11 +129,12 @@ def collective_to_pitch(collective_norm: float) -> float:
 # ---------------------------------------------------------------------------
 
 def cyclic_to_blade_pitches(
-    tilt_lon:   float,
-    tilt_lat:   float,
-    omega:      float,
-    t:          float,
-    collective: float = 0.0,
+    tilt_lon:       float,
+    tilt_lat:       float,
+    omega:          float,
+    t:              float,
+    pitch_gain_rad: float,
+    collective:     float = 0.0,
 ) -> np.ndarray:
     """
     Compute individual blade pitch angles for a 4-blade rotor using cyclic
@@ -148,25 +144,25 @@ def cyclic_to_blade_pitches(
         βi(t) = β̄ + U0 * sin(ω·t + (i-1)·π/2 + Ψ)
     where:
         β̄  = collective blade pitch [rad]
-        U0  = cyclic amplitude = sqrt(tilt_lon² + tilt_lat²) * PITCH_GAIN [rad]
+        U0  = cyclic amplitude = sqrt(tilt_lon² + tilt_lat²) * pitch_gain_rad [rad]
         Ψ   = phase of rotor disk tilt = atan2(tilt_lon, tilt_lat) [rad]
         i   = blade index 0..3 (blade 0 starts at East reference)
 
     Parameters
     ----------
-    tilt_lon   : float   Normalised longitudinal tilt [-1, 1]
-    tilt_lat   : float   Normalised lateral tilt [-1, 1]
-    omega      : float   Rotor angular velocity [rad/s]
-    t          : float   Simulation time [s]
-    collective : float   Collective blade pitch [rad] (default 0)
+    tilt_lon       : float   Normalised longitudinal tilt [-1, 1]
+    tilt_lat       : float   Normalised lateral tilt [-1, 1]
+    omega          : float   Rotor angular velocity [rad/s]
+    t              : float   Simulation time [s]
+    pitch_gain_rad : float   Max blade pitch per unit normalised tilt [rad]
+    collective     : float   Collective blade pitch [rad] (default 0)
 
     Returns
     -------
     np.ndarray, shape (4,)   Blade pitch angles in radians [β0, β1, β2, β3]
     """
-    # Convert normalised tilt to radians using PITCH_GAIN
-    tilt_lon_rad = tilt_lon * _PITCH_GAIN_RAD
-    tilt_lat_rad = tilt_lat * _PITCH_GAIN_RAD
+    tilt_lon_rad = tilt_lon * pitch_gain_rad
+    tilt_lat_rad = tilt_lat * pitch_gain_rad
 
     # Cyclic amplitude and phase
     U0  = math.sqrt(tilt_lon_rad ** 2 + tilt_lat_rad ** 2)
@@ -185,9 +181,11 @@ def cyclic_to_blade_pitches(
 # ---------------------------------------------------------------------------
 
 def servos_to_blade_pitches(
-    servo_pwm: np.ndarray,
-    omega:     float,
-    t:         float,
+    servo_pwm:      np.ndarray,
+    omega:          float,
+    t:              float,
+    pitch_gain_rad: float,
+    col_max_rad:    float,
 ) -> tuple:
     """
     Full pipeline: servo PWM values → blade pitch angles.
@@ -196,9 +194,11 @@ def servos_to_blade_pitches(
 
     Parameters
     ----------
-    servo_pwm : array_like, length ≥ 3   PWM values in microseconds
-    omega     : float   Rotor spin rate [rad/s]
-    t         : float   Simulation time [s]
+    servo_pwm      : array_like, length ≥ 3   PWM values in microseconds
+    omega          : float   Rotor spin rate [rad/s]
+    t              : float   Simulation time [s]
+    pitch_gain_rad : float   Max blade pitch per unit normalised tilt [rad]
+    col_max_rad    : float   Max collective blade pitch [rad]
 
     Returns
     -------
@@ -214,9 +214,9 @@ def servos_to_blade_pitches(
     s3 = pwm_to_normalized(pwm[2])
 
     collective_norm, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
-    collective_rad = collective_to_pitch(collective_norm)
+    collective_rad = collective_to_pitch(collective_norm, col_max_rad)
     blade_pitches  = cyclic_to_blade_pitches(tilt_lon, tilt_lat, omega, t,
-                                              collective_rad)
+                                              pitch_gain_rad, collective_rad)
     return blade_pitches, collective_rad, tilt_lon, tilt_lat
 
 
@@ -248,24 +248,26 @@ if __name__ == "__main__":
     print(f"  h3_inverse_mix collective=1.0: coll={coll:.4f} tlon={tlon:.4f} tlat={tlat:.4f} OK")
 
     # Collective to pitch
-    assert abs(collective_to_pitch(0.0))  < 1e-10
-    assert abs(collective_to_pitch(1.0) - _COLL_MAX_RAD) < 1e-10
-    assert abs(collective_to_pitch(-1.0) - _COLL_MIN_RAD) < 1e-10
+    _COL_MAX = 0.35
+    assert abs(collective_to_pitch(0.0, _COL_MAX))  < 1e-10
+    assert abs(collective_to_pitch(1.0, _COL_MAX) - _COL_MAX) < 1e-10
+    assert abs(collective_to_pitch(-1.0, _COL_MAX) - (-_COL_MAX)) < 1e-10
     print("  collective_to_pitch: OK")
 
+    _PITCH_GAIN = 0.3
     # Cyclic: zero tilt → all blades at collective only
-    pitches = cyclic_to_blade_pitches(0.0, 0.0, 28.0, 0.0, 0.1)
+    pitches = cyclic_to_blade_pitches(0.0, 0.0, 28.0, 0.0, _PITCH_GAIN, 0.1)
     assert np.allclose(pitches, 0.1), f"Zero tilt cyclic failed: {pitches}"
     print("  cyclic_to_blade_pitches (zero tilt): OK")
 
     # Cyclic: non-zero tilt
-    pitches2 = cyclic_to_blade_pitches(0.3, 0.0, 28.0, 0.0, 0.0)
+    pitches2 = cyclic_to_blade_pitches(0.3, 0.0, 28.0, 0.0, _PITCH_GAIN, 0.0)
     print(f"  cyclic with tilt_lon=0.3: {pitches2.round(4)}")
     assert not np.allclose(pitches2, 0.0), "Non-zero tilt should produce non-zero pitches"
 
     # Full pipeline
     pwm = np.array([1500, 1700, 1300, 1500] + [1500]*12, dtype=float)
-    bp, coll_r, tl, tla = servos_to_blade_pitches(pwm, 28.0, 0.5)
+    bp, coll_r, tl, tla = servos_to_blade_pitches(pwm, 28.0, 0.5, _PITCH_GAIN, _COL_MAX)
     print(f"  Full pipeline: coll={coll_r:.4f} tlon={tl:.4f} tlat={tla:.4f}")
     print(f"  Blade pitches: {bp.round(4)}")
 

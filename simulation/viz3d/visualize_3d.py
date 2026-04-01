@@ -99,6 +99,22 @@ COL_GROUND   = "#2a4a2a"   # dark green
 
 TRAIL_LEN = 200  # frames to keep in trajectory trail
 
+# ---------------------------------------------------------------------------
+# NED → PyVista display (ENU, Z=up) conversion
+# ---------------------------------------------------------------------------
+# The simulation uses NED (North=X, East=Y, Down=Z).
+# PyVista renders with Z=up, so we display in ENU (East=X, North=Y, Up=Z).
+#   E = NED_Y,  N = NED_X,  U = -NED_Z
+_T_NED_ENU = np.array([
+    [0., 1., 0.],   # ENU_X = NED_Y (East)
+    [1., 0., 0.],   # ENU_Y = NED_X (North)
+    [0., 0., -1.],  # ENU_Z = -NED_Z (Up)
+])
+
+def _to_viz(v: np.ndarray) -> np.ndarray:
+    """Convert a NED vector/position to the PyVista ENU display frame."""
+    return _T_NED_ENU @ np.asarray(v, dtype=float)
+
 # Tether physical properties (matches tether.py / CLAUDE.md)
 TETHER_LINEAR_MASS  = 0.0021   # kg/m  (Dyneema SK75 1.9 mm)
 TETHER_TUBE_RADIUS  = 0.05     # m display radius (~26× actual; visible at scene scale)
@@ -360,9 +376,9 @@ def _tether_catenary(
     return straight + sag[:, None] * sag_dir[None, :]
 
 
-def _drop_line(pos_enu: np.ndarray, dot_spacing: float = 1.5) -> pv.PolyData:
-    """Dotted vertical plumb line from hub straight down to z=0."""
-    x, y, z = pos_enu
+def _drop_line(pos_viz: np.ndarray, dot_spacing: float = 1.5) -> pv.PolyData:
+    """Dotted vertical plumb line from hub straight down to z=0 (viz ENU frame)."""
+    x, y, z = pos_viz
     if z <= 0:
         return pv.PolyData()
     n = max(1, int(z / dot_spacing) + 1)
@@ -402,7 +418,7 @@ def _lerp_frame(f1, f2, alpha: float):
 
     return TelemetryFrame(
         t                  = b * f1.t + a * f2.t,
-        pos_enu            = b * f1.pos_enu + a * f2.pos_enu,
+        pos_ned            = b * f1.pos_ned + a * f2.pos_ned,
         R                  = R_out,
         omega_spin         = b * f1.omega_spin + a * f2.omega_spin,
         tether_tension     = b * f1.tether_tension + a * f2.tether_tension,
@@ -411,7 +427,7 @@ def _lerp_frame(f1, f2, alpha: float):
         swash_tilt_lon     = b * f1.swash_tilt_lon + a * f2.swash_tilt_lon,
         swash_tilt_lat     = b * f1.swash_tilt_lat + a * f2.swash_tilt_lat,
         body_z_eq          = bzeq,
-        wind_enu           = b * f1.wind_enu + a * f2.wind_enu,
+        wind_ned           = b * f1.wind_ned + a * f2.wind_ned,
     )
 
 
@@ -648,7 +664,7 @@ class RAWESVisualizer:
         self._trail_len   = trail_len
         self._fps         = playback_fps
         self._n           = len(frames)
-        self._pos_history = np.array([f.pos_enu for f in frames])
+        self._pos_history = np.array([_to_viz(f.pos_ned) for f in frames])
         self._spin_angles = self._integrate_spin()
         self._energy      = self._integrate_energy()
         self._inset_ren: Optional[object] = None   # vtkRenderer, set up lazily
@@ -978,9 +994,12 @@ class RAWESVisualizer:
             self._fast_update(idx)
             return
 
-        f  = self._frames[idx]
-        T  = _hub_to_world(f.R, f.pos_enu)
-        sa = self._spin_angles[idx]
+        f       = self._frames[idx]
+        pos_viz = _to_viz(f.pos_ned)
+        R_viz   = _T_NED_ENU @ f.R
+        bz_viz  = R_viz[:, 2]
+        T       = _hub_to_world(R_viz, pos_viz)
+        sa      = self._spin_angles[idx]
 
         # ── Rotor disk — local frame; spin via user_matrix ────────────────────
         self._mesh_disk = pv.Disc(inner=R_ROOT, outer=R_TIP,
@@ -1009,11 +1028,11 @@ class RAWESVisualizer:
         # ── Hub sphere ────────────────────────────────────────────────────────
         self._mesh_hub = pv.Sphere(radius=0.2, center=[0, 0, 0])
         self._actor_hub = plotter.add_mesh(self._mesh_hub, color=COL_HUB)
-        Mh = np.eye(4, dtype=float); Mh[:3, 3] = f.pos_enu
+        Mh = np.eye(4, dtype=float); Mh[:3, 3] = pos_viz
         self._actor_hub.user_matrix = Mh
 
         # ── Tether — PolyData line with fixed N points; update .points ────────
-        tether_attach = f.pos_enu - TETHER_AXLE_OFFSET * f.body_z
+        tether_attach = pos_viz - TETHER_AXLE_OFFSET * bz_viz
         tpts = _tether_catenary(ANCHOR, tether_attach, f.tether_tension,
                                 n_pts=self._N_TETHER_PTS)
         self._mesh_tether = pv.PolyData()
@@ -1037,20 +1056,20 @@ class RAWESVisualizer:
         self._mesh_body_z   = pv.Arrow(start=[0,0,0], direction=[0,0,1],
                                        scale=1.0, **_arrow_kw)
         self._actor_body_z  = plotter.add_mesh(self._mesh_body_z, color=COL_BODY_Z)
-        self._actor_body_z.user_matrix = _dir_mat4(f.pos_enu, f.body_z * 4.0)
+        self._actor_body_z.user_matrix = _dir_mat4(pos_viz, bz_viz * 4.0)
 
         self._mesh_body_zeq  = pv.Arrow(start=[0,0,0], direction=[0,0,1],
                                         scale=1.0, **_arrow_kw)
         self._actor_body_zeq = plotter.add_mesh(self._mesh_body_zeq, color=COL_BODY_ZEQ)
-        bzeq = f.body_z_eq if f.body_z_eq is not None else f.body_z
-        self._actor_body_zeq.user_matrix = _dir_mat4(f.pos_enu, bzeq * 4.0)
+        bzeq_viz = (_to_viz(f.body_z_eq) if f.body_z_eq is not None else bz_viz)
+        self._actor_body_zeq.user_matrix = _dir_mat4(pos_viz, bzeq_viz * 4.0)
 
         self._mesh_wind  = pv.Arrow(start=[0,0,0], direction=[0,0,1],
                                     scale=1.0, **_arrow_kw)
         self._actor_wind = plotter.add_mesh(self._mesh_wind, color=COL_WIND)
-        wind_start = f.pos_enu - f.wind_enu * 0.3
-        self._actor_wind.user_matrix = _dir_mat4(wind_start,
-                                                  f.wind_enu * 0.4)
+        wind_viz   = _to_viz(f.wind_ned)
+        wind_start = pos_viz - wind_viz * 0.3
+        self._actor_wind.user_matrix = _dir_mat4(wind_start, wind_viz * 0.4)
 
         # ── Trail — PolyData; points updated in-place ─────────────────────────
         self._mesh_trail = pv.PolyData(self._pos_history[:1].copy())
@@ -1081,8 +1100,11 @@ class RAWESVisualizer:
         Update ALL dynamic actors in-place for frame object ``f``.
         No new actors, no new shaders — only user_matrix and .points updates.
         """
-        T  = _hub_to_world(f.R, f.pos_enu)
-        sa = spin_angle
+        pos_viz = _to_viz(f.pos_ned)
+        R_viz   = _T_NED_ENU @ f.R
+        bz_viz  = R_viz[:, 2]
+        T       = _hub_to_world(R_viz, pos_viz)
+        sa      = spin_angle
 
         # Rotor + blades: spin × hub transform
         Tsa = T @ _rz4(sa)
@@ -1090,11 +1112,11 @@ class RAWESVisualizer:
         self._actor_blades.user_matrix = Tsa
 
         # Hub sphere: translate only
-        Mh = np.eye(4, dtype=float); Mh[:3, 3] = f.pos_enu
+        Mh = np.eye(4, dtype=float); Mh[:3, 3] = pos_viz
         self._actor_hub.user_matrix = Mh
 
         # Tether: update points in-place (fixed N, topology unchanged)
-        tether_attach = f.pos_enu - TETHER_AXLE_OFFSET * f.body_z
+        tether_attach = pos_viz - TETHER_AXLE_OFFSET * bz_viz
         tpts = _tether_catenary(ANCHOR, tether_attach, f.tether_tension,
                                 n_pts=self._N_TETHER_PTS)
         self._mesh_tether.points = tpts
@@ -1107,11 +1129,12 @@ class RAWESVisualizer:
         self._mesh_drop.points = drop.points if drop.n_points else np.zeros((1, 3))
 
         # Arrows: direction via user_matrix
-        self._actor_body_z.user_matrix = _dir_mat4(f.pos_enu, f.body_z * 4.0)
-        bzeq = f.body_z_eq if f.body_z_eq is not None else f.body_z
-        self._actor_body_zeq.user_matrix = _dir_mat4(f.pos_enu, bzeq * 4.0)
-        wind_start = f.pos_enu - f.wind_enu * 0.3
-        self._actor_wind.user_matrix = _dir_mat4(wind_start, f.wind_enu * 0.4)
+        self._actor_body_z.user_matrix = _dir_mat4(pos_viz, bz_viz * 4.0)
+        bzeq_viz = (_to_viz(f.body_z_eq) if f.body_z_eq is not None else bz_viz)
+        self._actor_body_zeq.user_matrix = _dir_mat4(pos_viz, bzeq_viz * 4.0)
+        wind_viz   = _to_viz(f.wind_ned)
+        wind_start = pos_viz - wind_viz * 0.3
+        self._actor_wind.user_matrix = _dir_mat4(wind_start, wind_viz * 0.4)
 
         # HUD text: SetInput on the underlying vtkTextActor (no new actor)
         self._update_inset_frame(f)

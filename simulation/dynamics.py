@@ -124,7 +124,13 @@ class RigidBodyDynamics:
         # Euler's equation for the orbital DOF:
         #   I_b * domega_b = tau_b − omega_b × (I_b * omega_b + H_spin_b)
         H_spin_b = np.array([0.0, 0.0, self._I_spin * omega_spin])
-        domega_b = self._I_b_inv @ (tau_b - np.cross(omega_b, self._I_b @ omega_b + H_spin_b))
+        Ih = self._I_b @ omega_b + H_spin_b
+        gyro = np.array([
+            omega_b[1]*Ih[2] - omega_b[2]*Ih[1],
+            omega_b[2]*Ih[0] - omega_b[0]*Ih[2],
+            omega_b[0]*Ih[1] - omega_b[1]*Ih[0],
+        ])
+        domega_b = self._I_b_inv @ (tau_b - gyro)
 
         # Convert back to world frame
         domega_w = R @ domega_b

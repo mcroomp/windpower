@@ -23,7 +23,7 @@ controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 import math
 
 import numpy as np
-from frames import build_orb_frame  # noqa: F401 — re-exported for callers; also used locally in col_min_for_altitude_rad
+from frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
 
 
 def compute_rc_rates(
@@ -81,7 +81,7 @@ def compute_rc_rates(
     body_z_cur = R[:, 2]
 
     # Attitude error in world NED frame (cross product → rotation axis toward target)
-    error_world = np.cross(body_z_cur, body_z_eq)
+    error_world = cross3(body_z_cur, body_z_eq)
 
     # Strip spin component from omega (spin is along body_z, not an orbital rate)
     omega_spin    = np.dot(omega, body_z_cur) * body_z_cur
@@ -165,7 +165,7 @@ def compute_swashplate_from_state(
         body_z_eq = tether / t_len
     body_z_cur = R[:, 2]
 
-    error_world = np.cross(body_z_cur, body_z_eq)
+    error_world = cross3(body_z_cur, body_z_eq)
 
     omega_spin    = np.dot(omega, body_z_cur) * body_z_cur
     omega_orbital = omega - omega_spin
@@ -335,7 +335,7 @@ def compute_rc_from_physical_attitude(
 
     # Attitude error: rotation axis needed to align body_z with body_z_eq.
     # cross(a, b) = |a||b|sin(θ) n̂ — small when already aligned.
-    error_ned = np.cross(body_z_ned, body_z_eq)
+    error_ned = cross3(body_z_ned, body_z_eq)
 
     # Express error in NED body frame (NED→body = R_body.T)
     error_body = R_body.T @ error_ned
@@ -826,7 +826,7 @@ def compute_rate_cmd(
     bz_eq   = np.asarray(bz_eq,           dtype=float)
     R       = np.asarray(R_body_to_world, dtype=float)
 
-    error_world   = np.cross(bz_now, bz_eq)
+    error_world   = cross3(bz_now, bz_eq)
 
     damping_world = np.zeros(3)
     if kd != 0.0 and omega_world is not None:

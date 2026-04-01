@@ -200,7 +200,7 @@ class RotorDefinition:
     # ── Control ───────────────────────────────────────────────────────────────
     K_cyc:                    float     = 0.4
     swashplate_phase_deg:     float     = 0.0   # cyclic phase advance for gyroscopic comp [°]
-    swashplate_pitch_gain_rad: float    = 0.3   # max blade pitch per unit normalised tilt [rad]
+    swashplate_pitch_gain_rad: float = 0.3    # max blade pitch per unit normalised tilt [rad]
     kaman_flap:               KamanFlap = field(default_factory=KamanFlap)
 
     # ── Autorotation ODE ─────────────────────────────────────────────────────
@@ -820,8 +820,10 @@ def load(path_or_name: str) -> RotorDefinition:
         spinning_hub_shell_mass_kg   = _m_float(_m.get("spinning_hub_shell_mass_kg")),
         I_blade_flap_kgm2            = _m_float(_m.get("I_blade_flap_kgm2")),
 
-        K_cyc                = float(ct.get("K_cyc",              0.4)),
-        swashplate_phase_deg = float(ct.get("swashplate_phase_deg", 0.0)),
+        K_cyc                    = float(ct.get("K_cyc",              0.4)),
+        swashplate_phase_deg     = float(ct.get("swashplate_phase_deg", 0.0)),
+        swashplate_pitch_gain_rad = _require_float(ct, "swashplate_pitch_gain_rad",
+                                                   "control", p),
         kaman_flap           = kaman,
 
         K_drive_Nms_m     = float(ar.get("K_drive_Nms_m",    1.4)),
@@ -850,6 +852,15 @@ def _require_int(section: dict, key: str, path) -> int:
             f"Required field '{key}' is missing from rotor YAML: {path}"
         )
     return int(section[key])
+
+
+def _require_float(section: dict, key: str, section_name: str, path) -> float:
+    """Return float(section[key]), raising ValueError if the key is absent."""
+    if key not in section:
+        raise ValueError(
+            f"Required field '{section_name}.{key}' is missing from rotor YAML: {path}"
+        )
+    return float(section[key])
 
 
 def _m_float(v) -> Optional[float]:

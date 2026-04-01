@@ -12,6 +12,16 @@ Legacy constant T_ENU_NED is kept for converting ENU initial conditions / test d
 
 import numpy as np
 
+
+def cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cross product a × b for 1D length-3 arrays. Avoids np.cross overhead."""
+    return np.array([
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0],
+    ])
+
+
 # ENU ↔ NED coordinate transform (symmetric: T @ T = I)
 # Maps [E, N, U] ↔ [N, E, D]:
 #   NED_x = ENU_y   (North = Y)
@@ -53,5 +63,5 @@ def build_orb_frame(body_z: np.ndarray) -> np.ndarray:
     else:
         north_proj = _NORTH - np.dot(_NORTH, body_z) * body_z
         x_orb = north_proj / np.linalg.norm(north_proj)
-    y_orb = np.cross(body_z, x_orb)
+    y_orb = cross3(body_z, x_orb)
     return np.column_stack([x_orb, y_orb, body_z])

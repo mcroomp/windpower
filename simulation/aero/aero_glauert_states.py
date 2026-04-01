@@ -52,8 +52,6 @@ from aero import AeroResult
 
 log = logging.getLogger(__name__)
 
-_PITCH_GAIN_RAD_DEFAULT = 0.3   # fallback when not supplied via rotor_definition
-
 # Induction factor threshold for state transitions
 _A_TURBULENT   = 0.4   # above this: turbulent wake correction (Leishman)
 _A_VORTEX_RING = 0.9   # above this: vortex ring ceiling (extreme over-induction)
@@ -94,10 +92,10 @@ class GlauertStateBEM:
         self.ramp_time    = float(ramp_time)
         self.k_drive_spin   = float(p["k_drive_spin"])
         self.k_drag_spin    = float(p["k_drag_spin"])
-        self.pitch_gain_rad = float(p.get("pitch_gain_rad", _PITCH_GAIN_RAD_DEFAULT))
+        self.pitch_gain_rad = float(p["pitch_gain_rad"])
 
         span             = self.r_tip - self.r_root
-        self.aspect_ratio = float(p.get("aspect_ratio") or span / self.chord)
+        self.aspect_ratio = float(p["aspect_ratio"])
         self.r_cp        = self.r_root + (2.0 / 3.0) * span
         self.disk_area   = math.pi * (self.r_tip ** 2 - self.r_root ** 2)
         self.S_w         = self.n_blades * self.chord * span

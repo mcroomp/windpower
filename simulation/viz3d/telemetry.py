@@ -42,31 +42,31 @@ class TelemetryFrame:
     """One snapshot of RAWES simulation state for 3D rendering."""
 
     t: float                            # simulation time [s]
-    pos_enu: np.ndarray                 # hub position ENU [m], shape (3,)
-    R: np.ndarray                       # body→world rotation matrix, shape (3,3)
+    pos_ned: np.ndarray                 # hub position NED [m], shape (3,)
+    R: np.ndarray                       # body→NED rotation matrix, shape (3,3)
     omega_spin: float                   # rotor spin rate [rad/s]
     tether_tension: float = 0.0        # tether tension [N]
     tether_rest_length: float = 0.0    # paid-out tether length [m]
     swash_collective: float = 0.0      # collective blade pitch [rad]
     swash_tilt_lon: float = 0.0        # longitudinal swashplate tilt, normalised [-1,1]
     swash_tilt_lat: float = 0.0        # lateral swashplate tilt, normalised [-1,1]
-    body_z_eq: Optional[np.ndarray] = None  # equilibrium body_z setpoint (unit vec)
-    wind_enu: np.ndarray = field(
+    body_z_eq: Optional[np.ndarray] = None  # equilibrium body_z setpoint (unit vec, NED)
+    wind_ned: np.ndarray = field(
         default_factory=lambda: np.array([10.0, 0.0, 0.0])
     )
 
     @property
     def body_z(self) -> np.ndarray:
-        """Rotor axle direction (world ENU), i.e. R[:,2]."""
+        """Rotor axle direction (world NED), i.e. R[:,2]."""
         return self.R[:, 2]
 
     @property
     def altitude(self) -> float:
-        return float(self.pos_enu[2])
+        return float(-self.pos_ned[2])
 
     @property
     def tether_length(self) -> float:
-        return float(np.linalg.norm(self.pos_enu))
+        return float(np.linalg.norm(self.pos_ned))
 
 
 # ---------------------------------------------------------------------------
@@ -86,28 +86,26 @@ class InMemorySource:
     """
     Wraps a list of dicts from a unit test telemetry recording.
 
-    Expected keys per dict:
-        t, pos_enu (or pos), R, omega_spin
+    Expected keys per dict (mediator-compatible names):
+        t_sim, pos_ned, R, omega_rotor
     Optional:
         tether_tension, tether_rest_length, swash_collective,
-        swash_tilt_lon, swash_tilt_lat, body_z_eq, wind_enu
+        swash_tilt_lon, swash_tilt_lat, body_z_eq, wind_ned
     """
     def __init__(self, history: List[dict]) -> None:
         self._history = history
 
     def frames(self) -> Iterator[TelemetryFrame]:
         for h in self._history:
-            pos = np.asarray(
-                h.get("pos_enu", h.get("pos", [0.0, 0.0, 0.0])), dtype=float
-            )
+            pos = np.asarray(h.get("pos_ned", [0.0, 0.0, 0.0]), dtype=float)
             R_raw = h.get("R", np.eye(3))
             R = np.asarray(R_raw, dtype=float).reshape(3, 3)
             bzeq = h.get("body_z_eq")
             yield TelemetryFrame(
-                t                  = float(h["t"]),
-                pos_enu            = pos,
+                t                  = float(h["t_sim"]),
+                pos_ned            = pos,
                 R                  = R,
-                omega_spin         = float(h.get("omega_spin", 0.0)),
+                omega_spin         = float(h.get("omega_rotor", 0.0)),
                 tether_tension     = float(h.get("tether_tension", 0.0)),
                 tether_rest_length = float(h.get("tether_rest_length", 0.0)),
                 swash_collective   = float(h.get("swash_collective", 0.0)),
@@ -115,8 +113,8 @@ class InMemorySource:
                 swash_tilt_lat     = float(h.get("swash_tilt_lat", 0.0)),
                 body_z_eq          = (np.asarray(bzeq, dtype=float)
                                       if bzeq is not None else None),
-                wind_enu           = np.asarray(
-                    h.get("wind_enu", [10.0, 0.0, 0.0]), dtype=float
+                wind_ned           = np.asarray(
+                    h.get("wind_ned", [10.0, 0.0, 0.0]), dtype=float
                 ),
             )
 
@@ -168,7 +166,7 @@ class CSVSource:
                     R = _orb_frame_from_pos(pos)
                     yield TelemetryFrame(
                         t                  = float(row.get("t_sim", 0)),
-                        pos_enu            = pos,
+                        pos_ned            = pos,
                         R                  = R,
                         omega_spin         = float(row.get("omega_rotor", 0)),
                         tether_tension     = float(row.get("tether_tension", 0)),
@@ -233,18 +231,18 @@ def save_telemetry(path: str | Path, frames: List[dict]) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _orb_frame_from_pos(pos: np.ndarray) -> np.ndarray:
+def _orb_frame_from_pos(pos_ned: np.ndarray) -> np.ndarray:
     """
-    Approximate rotation matrix from hub position alone.
-    body_z = tether direction, body_x = East projected onto disk plane.
+    Approximate rotation matrix from hub NED position alone.
+    body_z = tether direction (NED), body_x = East (NED [0,1,0]) projected onto disk plane.
     Matches build_orb_frame() in frames.py.
     """
-    body_z = pos / (np.linalg.norm(pos) + 1e-12)
-    east   = np.array([1.0, 0.0, 0.0])
+    body_z = pos_ned / (np.linalg.norm(pos_ned) + 1e-12)
+    east   = np.array([0.0, 1.0, 0.0])   # East in NED
     body_x = east - np.dot(east, body_z) * body_z
     norm_x = np.linalg.norm(body_x)
     if norm_x < 1e-6:
-        east   = np.array([0.0, 1.0, 0.0])
+        east   = np.array([1.0, 0.0, 0.0])   # North in NED (fallback)
         body_x = east - np.dot(east, body_z) * body_z
         norm_x = np.linalg.norm(body_x)
     body_x /= norm_x

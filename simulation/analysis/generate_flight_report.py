@@ -111,18 +111,18 @@ def plot_report(data: dict, out_path: Path) -> None:
         col = data.get(name, default or [])
         return col if len(col) == len(t) else (default or [None] * len(t))
 
-    # ── Panel 1: Hub position (ENU) ──────────────────────────────────────────
-    ax = _ax(0, "Hub position — ENU world frame", "m")
-    ax.plot(t, _get("hub_pos_x"), linewidth=0.8, label="X (East)")
-    ax.plot(t, _get("hub_pos_y"), linewidth=0.8, label="Y (North)")
-    ax.plot(t, _get("hub_pos_z"), linewidth=0.8, label="Z (Up / altitude)")
+    # ── Panel 1: Hub position (NED) ──────────────────────────────────────────
+    ax = _ax(0, "Hub position — NED world frame", "m")
+    ax.plot(t, _get("hub_pos_x"), linewidth=0.8, label="X (North)")
+    ax.plot(t, _get("hub_pos_y"), linewidth=0.8, label="Y (East)")
+    ax.plot(t, _get("hub_pos_z"), linewidth=0.8, label="Z (Down, altitude = −Z)")
     ax.legend(fontsize=7, loc="upper right")
 
-    # ── Panel 2: Hub velocity (ENU) ──────────────────────────────────────────
-    ax = _ax(1, "Hub velocity — ENU world frame", "m/s")
-    ax.plot(t, _get("hub_vel_x"), linewidth=0.8, label="Vx (East)")
-    ax.plot(t, _get("hub_vel_y"), linewidth=0.8, label="Vy (North)")
-    ax.plot(t, _get("hub_vel_z"), linewidth=0.8, label="Vz (Up)")
+    # ── Panel 2: Hub velocity (NED) ──────────────────────────────────────────
+    ax = _ax(1, "Hub velocity — NED world frame", "m/s")
+    ax.plot(t, _get("hub_vel_x"), linewidth=0.8, label="Vx (North)")
+    ax.plot(t, _get("hub_vel_y"), linewidth=0.8, label="Vy (East)")
+    ax.plot(t, _get("hub_vel_z"), linewidth=0.8, label="Vz (Down)")
     ax.axhline(0, color="black", linewidth=0.5, alpha=0.4)
     ax.legend(fontsize=7, loc="upper right")
 

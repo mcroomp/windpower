@@ -50,8 +50,6 @@ from aero import AeroResult
 
 log = logging.getLogger(__name__)
 
-_PITCH_GAIN_RAD_DEFAULT = 0.3   # fallback when not supplied via rotor_definition
-
 
 class SkewedWakeBEM:
     """
@@ -84,11 +82,11 @@ class SkewedWakeBEM:
         self.ramp_time = float(ramp_time)
         self.k_drive_spin  = float(p["k_drive_spin"])
         self.k_drag_spin   = float(p["k_drag_spin"])
-        self.pitch_gain_rad = float(p.get("pitch_gain_rad", _PITCH_GAIN_RAD_DEFAULT))
+        self.pitch_gain_rad = float(p["pitch_gain_rad"])
 
         span = self.R_TIP - self.R_ROOT
         self.S_blade  = span * self.CHORD
-        self.AR       = float(p.get("aspect_ratio") or span / self.CHORD)
+        self.AR       = float(p["aspect_ratio"])
         self.R_CP     = self.R_ROOT + (2.0 / 3.0) * span
         self.disk_area = math.pi * (self.R_TIP ** 2 - self.R_ROOT ** 2)
 
@@ -231,13 +229,17 @@ class SkewedWakeBEM:
         else:
             psi_skew  = 0.0
 
-        # ── Prandtl F per radial strip ────────────────────────────────────────
-        F_per_strip = np.zeros(self.N_RADIAL)
-        v_ax_eff = abs(v_axial + v_i0)
-        for j, r_j in enumerate(self._r_stations):
-            v_tan_j = omega_abs * r_j
-            phi_j   = math.atan2(v_ax_eff, max(v_tan_j, 0.5))
-            F_per_strip[j] = self._prandtl_F(r_j, phi_j)
+        # ── Prandtl F per radial strip (vectorized) ───────────────────────────
+        v_ax_eff    = abs(v_axial + v_i0)
+        v_tan_j     = np.maximum(omega_abs * self._r_stations, 0.5)
+        phi_j       = np.arctan2(v_ax_eff, v_tan_j)
+        sin_phi_j   = np.maximum(np.abs(np.sin(phi_j)), 1e-4)
+        r_ref       = max(self.R_ROOT, 0.01)
+        f_tip       = (self.N_BLADES / 2.0) * (self.R_TIP - self._r_stations) / (self._r_stations * sin_phi_j)
+        f_root      = (self.N_BLADES / 2.0) * (self._r_stations - self.R_ROOT) / (r_ref * sin_phi_j)
+        F_tip_arr   = (2.0 / math.pi) * np.arccos(np.minimum(1.0, np.exp(-np.maximum(0.0, f_tip))))
+        F_root_arr  = (2.0 / math.pi) * np.arccos(np.minimum(1.0, np.exp(-np.maximum(0.0, f_root))))
+        F_per_strip = np.maximum(0.01, F_tip_arr * F_root_arr)
 
         self.last_F_prandtl = float(np.mean(F_per_strip))
 
@@ -309,14 +311,20 @@ class SkewedWakeBEM:
         q_dyn = q_dyn * F_per_strip[None, :]
 
         # ── Lift direction and forces  ────────────────────────────────────────
-        lift_raw  = np.cross(ua, e_span_world[:, None, :])
-        lift_norm = np.linalg.norm(lift_raw, axis=-1, keepdims=True)
+        # Manual cross product avoids np.cross dispatch overhead on (N_AB,N_RADIAL,3)
+        ua0, ua1, ua2 = ua[..., 0], ua[..., 1], ua[..., 2]
+        es0 = e_span_world[:, None, 0]; es1 = e_span_world[:, None, 1]; es2 = e_span_world[:, None, 2]
+        lift_raw  = np.stack([ua1*es2 - ua2*es1, ua2*es0 - ua0*es2, ua0*es1 - ua1*es0], axis=-1)
+        lift_norm = np.sqrt(np.einsum('ijk,ijk->ij', lift_raw, lift_raw))[..., None]
         e_lift    = np.where(lift_norm > 1e-9,
                              lift_raw / np.maximum(lift_norm, 1e-9), 0.0)
 
         ua_unit  = ua / np.maximum(ua_norm[..., None], 1e-9)
         F_strip  = q_dyn[..., None] * (CL[..., None] * e_lift + CD[..., None] * ua_unit)
-        M_strip  = np.cross(r_cp_world, F_strip)
+        # Manual cross product for M_strip = r_cp_world × F_strip
+        rc0, rc1, rc2 = r_cp_world[...,0], r_cp_world[...,1], r_cp_world[...,2]
+        fs0, fs1, fs2 = F_strip[...,0],    F_strip[...,1],    F_strip[...,2]
+        M_strip  = np.stack([rc1*fs2 - rc2*fs1, rc2*fs0 - rc0*fs2, rc0*fs1 - rc1*fs0], axis=-1)
         Q_strip  = (np.einsum('ijk,ik->ij', F_strip, e_tang)
                     * self._r_stations[None, :] * spin_sign)
 

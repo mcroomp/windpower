@@ -154,10 +154,10 @@ def _run(t_sim: float = T_SIM):
 
         if i % tel_every == 0:
             telemetry.append({
-                "t":                   t,
+                "t_sim":               t,
                 "pos_ned":             hub_state["pos"].tolist(),
                 "R":                   hub_state["R"].tolist(),
-                "omega_spin":          omega_spin,
+                "omega_rotor":         omega_spin,
                 "tether_tension":      tension_now,
                 "tether_rest_length":  tether.rest_length,
                 "swash_collective":    _IC.coll_eq_rad,

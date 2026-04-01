@@ -1,7 +1,7 @@
 --[[
 rawes_flight.lua — RAWES orbit-tracking cyclic flight controller
 
-Runs in ACRO_Heli (mode 6).  Injects RC overrides every 20 ms (50 Hz):
+Runs in ACRO mode (mode 1).  Injects RC overrides every 20 ms (50 Hz):
   Ch1  roll rate  — orbit tracking cyclic
   Ch2  pitch rate — orbit tracking cyclic
   Ch3  collective — forwarded from ground PI (via RC_CHANNELS_OVERRIDE Ch3)
@@ -25,7 +25,7 @@ Deployment:
 --]]
 
 local PERIOD_MS         = 20       -- 50 Hz
-local ACRO_MODE_NUM     = 6        -- ACRO_Heli mode number
+local ACRO_MODE_NUM     = 1        -- ACRO mode number (ArduCopter ACRO = 1)
 local MIN_TETHER_M      = 0.5      -- minimum tether length before orbit tracking activates
 local ACRO_RP_RATE_DEG  = 360.0    -- must match ACRO_RP_RATE ArduPilot parameter
 local PLANNER_TIMEOUT   = 2000     -- ms: revert to natural orbit after this
@@ -41,6 +41,10 @@ local _bz_target    = nil       -- planner override (nil = natural orbit)
 local _plan_ms      = 0         -- millis() when _bz_target was last commanded
 local _diag         = 0         -- diagnostic counter
 
+-- Cache RC channel objects at module load (rc:get_channel() is the correct API)
+local _rc_ch1 = rc:get_channel(1)   -- roll rate override
+local _rc_ch2 = rc:get_channel(2)   -- pitch rate override
+
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 
 -- Deep copy of a Vector3f
@@ -50,14 +54,49 @@ local function v3_copy(v)
     return r
 end
 
+-- Return a new normalized copy of v (Vector3f:normalize() is in-place only)
+local function v3_normalize(v)
+    local r = v3_copy(v)
+    r:normalize()
+    return r
+end
+
+-- Scalar multiply: returns v * s as a new Vector3f (v * s not overloaded here)
+local function v3_scale(v, s)
+    local r = Vector3f()
+    r:x(v:x() * s)
+    r:y(v:y() * s)
+    r:z(v:z() * s)
+    return r
+end
+
+-- Unit body-Z vector [0, 0, 1] (Vector3f() constructor ignores args in this build)
+local function v3_body_z()
+    local v = Vector3f()
+    v:z(1.0)
+    return v
+end
+
 -- Rodrigues rotation: rotate vector v around unit vector axis_n by angle radians
 -- v' = v·cos(θ) + (axis×v)·sin(θ) + axis·(axis·v)·(1−cos(θ))
+-- Uses only component arithmetic to avoid Vector3f operator overloading issues.
 local function rodrigues(v, axis_n, angle)
     local ca  = math.cos(angle)
     local sa  = math.sin(angle)
-    local ac  = axis_n:cross(v)     -- axis × v
-    local ad  = axis_n:dot(v)       -- axis · v
-    return v * ca + ac * sa + axis_n * (ad * (1.0 - ca))
+    local vx, vy, vz     = v:x(),      v:y(),      v:z()
+    local nx, ny, nz     = axis_n:x(), axis_n:y(), axis_n:z()
+    -- axis × v
+    local acx = ny*vz - nz*vy
+    local acy = nz*vx - nx*vz
+    local acz = nx*vy - ny*vx
+    -- axis · v
+    local ad  = nx*vx + ny*vy + nz*vz
+    local k   = ad * (1.0 - ca)
+    local r   = Vector3f()
+    r:x(vx*ca + acx*sa + nx*k)
+    r:y(vy*ca + acy*sa + ny*k)
+    r:z(vz*ca + acz*sa + nz*k)
+    return r
 end
 
 -- Read SCR_USER param with fallback default
@@ -86,9 +125,8 @@ local function update()
         return update, PERIOD_MS
     end
 
-    -- Read attitude
-    local R = ahrs:get_rotation_body_to_ned()
-    if not R then return update, PERIOD_MS end
+    -- Read attitude — use available API (no get_rotation_body_to_ned in this build)
+    if not ahrs:healthy() then return update, PERIOD_MS end
 
     -- Read position (NED, relative to EKF origin)
     local pos_ned = ahrs:get_relative_position_NED_origin()
@@ -103,8 +141,8 @@ local function update()
 
     if not _captured then
         if tlen >= MIN_TETHER_M then
-            _bz_eq0     = v3_copy(R:colz())          -- body_z in NED at capture
-            _tdir0      = diff:normalized()           -- tether direction in NED at capture
+            _bz_eq0     = ahrs:body_to_earth(v3_body_z())   -- body_z in NED
+            _tdir0      = v3_normalize(diff)          -- tether direction in NED at capture
             _bz_orbit   = v3_copy(_bz_eq0)
             _bz_slerp   = v3_copy(_bz_eq0)
             _captured   = true
@@ -120,12 +158,12 @@ local function update()
     -- This keeps body_z aligned with the natural tether direction as the hub orbits.
 
     if tlen >= MIN_TETHER_M then
-        local bzt   = diff:normalized()
+        local bzt   = v3_normalize(diff)
         local axis  = _tdir0:cross(bzt)
         local sinth = axis:length()
         if sinth > 1e-6 then
             local costh = _tdir0:dot(bzt)
-            _bz_orbit = rodrigues(_bz_eq0, axis:normalized(), math.atan(sinth, costh))
+            _bz_orbit = rodrigues(_bz_eq0, v3_normalize(axis), math.atan(sinth, costh))
         end
         -- if sinth ≤ 1e-6 the tether hasn't moved: keep _bz_orbit = _bz_eq0 (unchanged)
     end
@@ -150,20 +188,21 @@ local function update()
         local ax = _bz_slerp:cross(goal)
         if ax:length() > 1e-6 then
             local step = math.min(bz_slew * dt, remain)
-            _bz_slerp = rodrigues(_bz_slerp, ax:normalized(), step)
+            _bz_slerp = rodrigues(_bz_slerp, v3_normalize(ax), step)
         end
     end
 
     -- ── Cyclic P loop ────────────────────────────────────────────────────
     -- error = cross(body_z_now, _bz_slerp) in NED frame
-    -- transform to body frame using columns of R (R^T × v_ned = v_body)
+    -- transform to body frame via ahrs:earth_to_body()
 
-    local kp     = p("SCR_USER1", 1.0)
-    local bz_now = R:colz()
+    local kp      = p("SCR_USER1", 1.0)
+    local bz_now  = ahrs:body_to_earth(v3_body_z())
     local err_ned = bz_now:cross(_bz_slerp)
 
-    local err_bx = R:colx():dot(err_ned)    -- body X (roll)
-    local err_by = R:coly():dot(err_ned)    -- body Y (pitch)
+    local err_body = ahrs:earth_to_body(err_ned)
+    local err_bx   = err_body:x()    -- body X (roll)
+    local err_by   = err_body:y()    -- body Y (pitch)
 
     local roll_rads  = kp * err_bx
     local pitch_rads = kp * err_by
@@ -177,8 +216,8 @@ local function update()
     ch1 = math.max(1000, math.min(2000, ch1))
     ch2 = math.max(1000, math.min(2000, ch2))
 
-    rc:set_override(1, ch1)
-    rc:set_override(2, ch2)
+    if _rc_ch1 then _rc_ch1:set_override(ch1) end
+    if _rc_ch2 then _rc_ch2:set_override(ch2) end
 
     -- ── Diagnostics ──────────────────────────────────────────────────────
 

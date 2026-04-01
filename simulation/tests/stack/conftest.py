@@ -224,7 +224,7 @@ class StackContext:
     gcs_log        : path to GCS/test structured log
     telemetry_log  : path to mediator telemetry CSV
     initial_state  : dict from steady_state_starting.json (vel overridden to 0)
-    home_z_enu     : ENU Z of the home (starting) position [m]
+    home_alt_m     : hub altitude above anchor [m] at launch (positive = above ground)
     flight_events  : timing checkpoints; setup populates, tests add their own
     all_statustext : all STATUSTEXT messages seen during setup
     setup_samples  : list of dicts — EKF/ATTITUDE samples captured during setup
@@ -239,7 +239,7 @@ class StackContext:
     gcs_log:        Path
     telemetry_log:  Path
     initial_state:  dict | None
-    home_z_enu:     float
+    home_alt_m:     float
     flight_events:  dict
     all_statustext: list
     setup_samples:  list      # EKF/ATTITUDE samples collected during setup
@@ -303,10 +303,11 @@ def acro_armed(tmp_path, sensor_mode):
 
     # ── Initial state ──────────────────────────────────────────────────────────
     initial_state = None
-    home_z_enu    = 12.530
+    home_alt_m    = 12.530    # hub altitude above ground [m] (positive = up)
     if _STARTING_STATE.exists():
         initial_state = json.loads(_STARTING_STATE.read_text())
-        home_z_enu    = float(initial_state["pos"][2])
+        # pos[2] is NED Z (negative for altitude above ground); altitude = -pos[2]
+        home_alt_m    = -float(initial_state["pos"][2])
         initial_state = dict(initial_state)
 
     # ── Paths ──────────────────────────────────────────────────────────────────
@@ -327,11 +328,13 @@ def acro_armed(tmp_path, sensor_mode):
     # HOME = GPS_ORIGIN = NED [0,0,0] relative to the anchor (ENU [0,0,0]).
     # LOCAL_POSITION_NED = pos_ned_absolute - HOME_NED = pos_ned_absolute - 0.
     #
-    # sensor.py sends: pos_ned = [pos_enu[1], pos_enu[0], -(pos_enu[2] - home_z)]
-    # At anchor ENU=[0,0,0]: pos_ned = [0, 0, home_z_enu]
-    # So anchor_ned_LOCAL = [0, 0, home_z_enu]  (NOT [-pos0_y, -pos0_x, pos0_z])
+    # Anchor in LOCAL_POSITION_NED:
+    #   sensor.py: pos_ned_rel[2] = pos_ned[2] - home_ned_z
+    #   home_ned_z = -home_alt_m (NED Z is negative for altitude above ground)
+    #   At physics anchor NED [0,0,0]: pos_ned_rel[2] = 0 - (-home_alt_m) = +home_alt_m
+    # So anchor_ned_LOCAL = [0, 0, home_alt_m]  (anchor is home_alt_m metres below EKF HOME)
     import numpy as _np
-    _anchor_ned = _np.array([0.0, 0.0, float(home_z_enu)])
+    _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
     controller = make_hold_controller(sensor_mode, anchor_ned=_anchor_ned)
     log.info("Hold controller: %s  (sensor_mode=%s)", type(controller).__name__, sensor_mode)
 
@@ -372,7 +375,7 @@ def acro_armed(tmp_path, sensor_mode):
         gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
         mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
         telemetry_log=telemetry_log, initial_state=initial_state,
-        home_z_enu=home_z_enu, flight_events={}, all_statustext=[],
+        home_alt_m=home_alt_m, flight_events={}, all_statustext=[],
         setup_samples=[], log=log, sim_dir=sim_dir,
         controller=controller, sensor_mode=sensor_mode,
         internal_controller=StackConfig.INTERNAL_CONTROLLER,
@@ -391,6 +394,176 @@ def acro_armed(tmp_path, sensor_mode):
             "mediator_last_run.log": mediator_log,
             "sitl_last_run.log":     sitl_log,
             "gcs_last_run.log":      gcs_log,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Lua flight fixture helpers
+# ---------------------------------------------------------------------------
+
+_FLIGHT_SCRIPTS_DIR = _SIM_DIR / "scripts"  # simulation/scripts/rawes_flight.lua
+
+
+def _install_lua_flight_scripts() -> None:
+    """
+    Copy rawes_flight.lua to SITL's /ardupilot/scripts/ directory.
+
+    Must be called before SITL starts.  rawes_yaw_trim.lua is intentionally
+    excluded — the main mediator does not model the counter-torque motor.
+    """
+    dst_dir = Path("/ardupilot/scripts")
+    dst_dir.mkdir(exist_ok=True)
+    src = _FLIGHT_SCRIPTS_DIR / "rawes_flight.lua"
+    shutil.copy2(src, dst_dir / src.name)
+
+
+@pytest.fixture
+def acro_armed_lua(tmp_path, sensor_mode):
+    """
+    ACRO stack fixture with rawes_flight.lua active in SITL.
+
+    Extends ``acro_armed`` with three additional steps:
+      1. Wipe /ardupilot/eeprom.bin so copter-heli.parm defaults
+         (SCR_ENABLE=1) take effect on fresh boot.
+      2. Install simulation/scripts/rawes_flight.lua to
+         /ardupilot/scripts/ before SITL starts.
+      3. Set SCR_USER1..5 (kp, slew rate, anchor NED) via MAVLink after
+         the standard ACRO arm.
+
+    Uses internal_controller=True so the mediator's 400 Hz truth-state
+    controller stabilises the hub physics.  Lua's Ch1/Ch2 RC overrides
+    are observable from SERVO_OUTPUT_RAW without risking a crash.  This
+    is the correct first validation step — prove Lua runs and generates
+    correct outputs before trusting it as the sole cyclic controller.
+    """
+    if os.environ.get(STACK_ENV_FLAG) != "1":
+        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
+
+    sim_vehicle = _resolve_sim_vehicle()
+    if sim_vehicle is None:
+        pytest.skip(
+            f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py"
+        )
+
+    pytest.importorskip("pymavlink")
+
+    assert_stack_ports_free()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    sim_dir   = repo_root / "simulation"
+
+    # ── Pre-launch: install Lua scripts ───────────────────────────────────
+    # Do NOT wipe EEPROM: this build's scripting engine does not start from
+    # copter-heli.parm defaults on a first-boot (no EEPROM) — it only starts
+    # if SCR_ENABLE=1 is already stored in EEPROM from a previous run.
+    # The preceding acro_armed tests preserve EEPROM (and its SCR_ENABLE=1),
+    # so scripting is already active when this fixture launches SITL.
+    # SCR_ENABLE=1 is also written explicitly in the post-arm param set below
+    # so that future runs keep it in EEPROM.
+    _install_lua_flight_scripts()
+
+    # ── Initial state ──────────────────────────────────────────────────────
+    initial_state = None
+    home_alt_m    = 12.530    # hub altitude above anchor [m] (positive = above ground)
+    if _STARTING_STATE.exists():
+        initial_state = json.loads(_STARTING_STATE.read_text())
+        # pos[2] is NED Z (negative for altitude above ground); altitude = -pos[2]
+        home_alt_m    = -float(initial_state["pos"][2])
+        initial_state = dict(initial_state)
+
+    # ── Paths ──────────────────────────────────────────────────────────────
+    mediator_log  = tmp_path / "mediator.log"
+    sitl_log      = tmp_path / "sitl.log"
+    gcs_log       = tmp_path / "gcs.log"
+    telemetry_log = tmp_path / "telemetry.csv"
+
+    _configure_logging(gcs_log)
+    log = logging.getLogger("acro_armed_lua")
+    logging.getLogger("gcs").setLevel(logging.DEBUG)
+
+    # ── Hold controller ────────────────────────────────────────────────────
+    import numpy as _np
+    _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
+    controller  = make_hold_controller(sensor_mode, anchor_ned=_anchor_ned)
+    log.info("Hold controller: %s  (sensor_mode=%s)", type(controller).__name__, sensor_mode)
+
+    # ── Launch ─────────────────────────────────────────────────────────────
+    import time as _t
+    _run_id = int(_t.time())
+    log.info("RUN_ID=%d", _run_id)
+    log.info("acro_armed_lua: launching mediator + SITL (Lua scripting enabled) ...")
+    mediator_proc = _launch_mediator(
+        sim_dir, repo_root, mediator_log,
+        telemetry_log_path=str(telemetry_log),
+        initial_state=initial_state,
+        startup_damp_seconds=_STARTUP_DAMP_S,
+        lock_orientation=StackConfig.LOCK_ORIENTATION,
+        sensor_mode=sensor_mode,
+        run_id=_run_id,
+        base_k_ang=StackConfig.BASE_K_ANG_INTERNAL,
+        internal_controller=True,   # mediator stabilises physics; Lua is observed
+    )
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
+
+    def _procs_alive():
+        for name, proc, lp in [
+            ("mediator", mediator_proc, mediator_log),
+            ("SITL",     sitl_proc,     sitl_log),
+        ]:
+            if proc.poll() is not None:
+                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
+
+    gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+
+    ctx = StackContext(
+        gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
+        mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
+        telemetry_log=telemetry_log, initial_state=initial_state,
+        home_alt_m=home_alt_m, flight_events={}, all_statustext=[],
+        setup_samples=[], log=log, sim_dir=sim_dir,
+        controller=controller, sensor_mode=sensor_mode,
+        internal_controller=True,
+    )
+
+    try:
+        _run_acro_setup(ctx, _procs_alive)
+
+        # ── Post-arm: configure rawes_flight.lua via SCR_USER params ──────
+        # Anchor in LOCAL_POSITION_NED frame:
+        #   sensor.py: pos_ned_rel = pos_ned - [0, 0, home_ned_z]
+        #   home_ned_z = initial_state["pos"][2]  (NED Z of hub at launch, negative = up)
+        #   Physics anchor = NED [0, 0, 0]:
+        #     anchor_LOCAL = [0, 0, -home_ned_z] = [0, 0, home_alt_m]
+        #   e.g.  home_alt_m = 7.12  →  SCR_USER5 = +7.12 (anchor is 7.12 m below EKF HOME)
+        # SCR_ENABLE=1 is also written here to ensure EEPROM has scripting
+        # enabled for future runs (the scripting engine itself started at
+        # SITL boot; this MAVLink write only persists it to EEPROM).
+        log.info("Setting SCR_USER params for rawes_flight.lua ...")
+        lua_params = {
+            "SCR_ENABLE": 1,           # persist scripting in EEPROM for future boots
+            "SCR_USER1": 1.0,          # RAWES_KP_CYC   [rad/s / rad]
+            "SCR_USER2": 0.40,         # RAWES_BZ_SLEW  [rad/s]
+            "SCR_USER3": 0.0,          # anchor North   [m]
+            "SCR_USER4": 0.0,          # anchor East    [m]
+            "SCR_USER5": home_alt_m,   # anchor Down from EKF HOME [m] = hub launch altitude
+        }
+        for pname, pvalue in lua_params.items():
+            ok = gcs.set_param(pname, pvalue, timeout=5.0)
+            log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
+
+        yield ctx
+
+    finally:
+        gcs.close()
+        _terminate_process(sitl_proc)
+        _terminate_process(mediator_proc)
+        _kill_by_port(StackConfig.SITL_GCS_PORT)
+        copy_logs_to_dir(sim_dir / "logs", {
+            "telemetry.csv":             telemetry_log,
+            "mediator_lua_last_run.log": mediator_log,
+            "sitl_lua_last_run.log":     sitl_log,
+            "gcs_lua_last_run.log":      gcs_log,
         })
 
 

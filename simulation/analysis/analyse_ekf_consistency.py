@@ -91,15 +91,23 @@ def _load_flight_data(path: Path) -> dict:
     return out
 
 
-def _mediator_to_pos_ned(tel: dict, home_z_enu: float) -> np.ndarray:
-    """Convert mediator ENU hub position to NED [N, E, D] (m)."""
-    N = tel["hub_pos_y"]
-    E = tel["hub_pos_x"]
-    D = -(tel["hub_pos_z"] - home_z_enu)
+def _mediator_to_pos_ned(tel: dict, home_ned_z: float) -> np.ndarray:
+    """
+    Return mediator hub NED position offset to EKF origin [N, E, D] (m).
+
+    Mediator hub_pos_x/y/z are NED relative to the simulation anchor origin.
+    home_ned_z is hub_pos_z at t=0 (the EKF origin NED Z, which is negative
+    for an airborne hub).  We subtract it from D so that the origin matches
+    ArduPilot LOCAL_POSITION_NED (EKF home = hub's initial position).
+    N and E are compared raw; origin_offset in main() handles any residual XY bias.
+    """
+    N = tel["hub_pos_x"]              # NED X = North
+    E = tel["hub_pos_y"]              # NED Y = East
+    D = tel["hub_pos_z"] - home_ned_z  # NED Z offset to EKF home (home_ned_z < 0)
     return np.column_stack([N, E, D])   # (T, 3)
 
 
-def _find_time_offset(tel: dict, fd: dict, home_z_enu: float) -> float:
+def _find_time_offset(tel: dict, fd: dict, home_ned_z: float) -> float:
     """
     Find the time offset δ such that  tel["t_sim"] + δ ≈ flight_data t_rel.
 
@@ -121,7 +129,7 @@ def _find_time_offset(tel: dict, fd: dict, home_z_enu: float) -> float:
     pos_fd0 = fd["pos_history"][0, 1:4]   # (N, E, D)
 
     # Mediator pos_NED at each step
-    med_ned = _mediator_to_pos_ned(tel, home_z_enu)   # (T, 3)
+    med_ned = _mediator_to_pos_ned(tel, home_ned_z)   # (T, 3)
     dists   = np.linalg.norm(med_ned - pos_fd0, axis=1)
     best_idx = int(np.argmin(dists))
     best_dist = dists[best_idx]
@@ -183,8 +191,7 @@ def _detect_events(times: np.ndarray, signal: np.ndarray,
     return events
 
 
-def _trigger_report(onset_t_rel: float, tel: dict, delta: float,
-                    home_z_enu: float) -> dict:
+def _trigger_report(onset_t_rel: float, tel: dict, delta: float) -> dict:
     """
     Summarise mediator state in [onset_t_rel − LOOKBACK_S, onset_t_rel].
 
@@ -217,14 +224,14 @@ def _trigger_report(onset_t_rel: float, tel: dict, delta: float,
     report["omega_mean_rads"]  = float(np.mean(omega))
     report["omega_drop_rads"]  = float(np.max(omega) - np.min(omega))
 
-    # Net vertical force (ENU Z: thrust_z + tether_z − gravity)
+    # Net upward force (NED: negate Z forces to get upward; subtract gravity)
     weight = ROTOR_MASS_KG * GRAVITY_MS2
-    F_vert = tel["F_z"][mask] + tel["tether_fz"][mask]
-    report["net_vert_force_mean_N"] = float(np.mean(F_vert) - weight)
-    report["net_vert_force_std_N"]  = float(np.std(F_vert))
+    F_vert_up = -(tel["F_z"][mask] + tel["tether_fz"][mask])
+    report["net_vert_force_mean_N"] = float(np.mean(F_vert_up) - weight)
+    report["net_vert_force_std_N"]  = float(np.std(F_vert_up))
 
-    # Hub altitude
-    alt = tel["hub_pos_z"][mask]
+    # Hub altitude (NED Z is negative when airborne; altitude = -hub_pos_z)
+    alt = -tel["hub_pos_z"][mask]
     report["altitude_mean_m"] = float(np.mean(alt))
     report["altitude_min_m"]  = float(np.min(alt))
 
@@ -273,15 +280,14 @@ def _print_summary(pos_events: list, att_events: list,
     print()
 
 
-def _print_trigger_reports(pos_events: list, tel: dict, delta: float,
-                           home_z_enu: float) -> None:
+def _print_trigger_reports(pos_events: list, tel: dict, delta: float) -> None:
     if not pos_events:
         return
     print("═" * 70)
     print("  TRIGGER REPORTS (mediator state in window before each event)")
     print("═" * 70)
     for i, ev in enumerate(pos_events, 1):
-        rpt = _trigger_report(ev["onset_t"], tel, delta, home_z_enu)
+        rpt = _trigger_report(ev["onset_t"], tel, delta)
         if not rpt:
             continue
         print(f"\n  Event #{i}  onset t_rel={ev['onset_t']:+.1f} s  "
@@ -328,7 +334,7 @@ def _plot(tel: dict, fd: dict, pos_res: np.ndarray,
           att_res_roll: np.ndarray, att_res_pitch: np.ndarray,
           t_ekf: np.ndarray, t_med_aligned: np.ndarray,
           pos_events: list, att_events: list,
-          med_ned: np.ndarray, home_z_enu: float,
+          med_ned: np.ndarray,
           out_path: Path,
           freeze_end_t_rel: float = 0.0) -> None:
     import matplotlib
@@ -437,7 +443,7 @@ def _plot(tel: dict, fd: dict, pos_res: np.ndarray,
     T_ds  = tel["aero_T"][::ds]
     ten_ds = tel["tether_tension"][::ds]
     om_ds  = tel["omega_rotor"][::ds]
-    alt_ds = tel["hub_pos_z"][::ds]
+    alt_ds = -tel["hub_pos_z"][::ds]   # NED Z → altitude (positive up)
 
     ax2 = ax.twinx()
     l1, = ax.plot(t_ds, T_ds,  "C0", lw=1.2, label="Thrust [N]")
@@ -454,9 +460,10 @@ def _plot(tel: dict, fd: dict, pos_res: np.ndarray,
     # ── Panel 5: Vertical force balance ──────────────────────────────────
     ax = axes[4]
     ax.set_title("Net Vertical Force Balance  "
-                 "(F_z_aero + F_z_tether − mg,  should ≈ 0 in orbit)")
+                 "(−F_z_aero − F_z_tether − mg,  NED sign;  should ≈ 0 in orbit)")
     weight = ROTOR_MASS_KG * GRAVITY_MS2
-    F_vert_net = tel["F_z"][::ds] + tel["tether_fz"][::ds] - weight
+    # In NED, F_z is positive-down. Negate all NED-Z forces to get net upward force.
+    F_vert_net = -(tel["F_z"][::ds] + tel["tether_fz"][::ds]) - weight
     ax.plot(t_ds, F_vert_net, "C5", lw=1.0, label="net F_z [N]")
     ax.axhline(0.0, color="gray", lw=0.8, ls=":")
     ax.fill_between(t_ds, F_vert_net, 0.0,
@@ -528,8 +535,9 @@ def main():
     parser.add_argument("--out",        type=Path,
                         default=log_dir / "ekf_consistency.png",
                         help="Output plot path")
-    parser.add_argument("--home-z-enu", type=float, default=None,
-                        help="Hub home ENU Z [m] (default: read from telemetry first sample)")
+    parser.add_argument("--home-ned-z", type=float, default=None,
+                        help="Hub home NED Z [m] (negative = above ground; "
+                             "default: read from telemetry first sample)")
     args = parser.parse_args()
 
     # -- Load ----------------------------------------------------------------
@@ -544,21 +552,22 @@ def main():
     tel = _load_telemetry(args.telemetry)
     fd  = _load_flight_data(args.flight)
 
-    # Home Z: altitude the EKF uses as "ground level" (hub pos at t=0 of mediator)
-    home_z_enu = args.home_z_enu
-    if home_z_enu is None:
-        home_z_enu = float(tel["hub_pos_z"][0])
-        print(f"  home_z_enu = {home_z_enu:.3f} m  (first mediator sample)")
+    # Home NED Z: hub_pos_z at t=0 (negative for airborne hub).
+    # Used as the EKF-origin reference for the D axis.
+    home_ned_z = args.home_ned_z
+    if home_ned_z is None:
+        home_ned_z = float(tel["hub_pos_z"][0])
+        print(f"  home_ned_z = {home_ned_z:.3f} m  (first mediator sample)")
 
     # -- Time alignment ------------------------------------------------------
     print("\nAligning time bases...")
-    delta   = _find_time_offset(tel, fd, home_z_enu)
+    delta   = _find_time_offset(tel, fd, home_ned_z)
     # t_rel = t_sim + delta;  t_rel axis is relative to hold-loop start
     t_med_aligned = tel["t_sim"] + delta
 
     # -- Compute residuals ---------------------------------------------------
     print("\nComputing residuals...")
-    med_ned       = _mediator_to_pos_ned(tel, home_z_enu)   # (T, 3)
+    med_ned       = _mediator_to_pos_ned(tel, home_ned_z)   # (T, 3)
     origin_offset = np.zeros(3)   # filled in below once EKF home is known
 
     if "pos_history" in fd and len(fd["pos_history"]) > 0:
@@ -612,7 +621,7 @@ def main():
 
     # -- Report --------------------------------------------------------------
     _print_summary(pos_events, att_events, pos_res, att_res_roll, att_res_pitch)
-    _print_trigger_reports(pos_events, tel, delta, home_z_enu)
+    _print_trigger_reports(pos_events, tel, delta)
 
     # -- Plot ----------------------------------------------------------------
     # Freeze ends when telemetry begins; convert to t_rel for the marker.
@@ -630,7 +639,6 @@ def main():
         pos_events       = pos_events,
         att_events       = att_events,
         med_ned          = med_ned - origin_offset,   # same reference as EKF
-        home_z_enu       = home_z_enu,
         out_path         = args.out,
         freeze_end_t_rel = freeze_end_t_rel,
     )

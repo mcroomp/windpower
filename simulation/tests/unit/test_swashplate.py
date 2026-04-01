@@ -29,14 +29,18 @@ def test_h3_inverse_mix_detects_pure_collective():
     assert math.isclose(tilt_lat, 0.0, abs_tol=1e-12)
 
 
+_COL_MAX    = 0.35   # beaupoil_2026 collective limit [rad]
+_PITCH_GAIN = 0.3    # beaupoil_2026 swashplate pitch gain [rad]
+
+
 def test_collective_to_pitch_clamps_to_expected_limits():
-    assert collective_to_pitch(0.0) == 0.0
-    assert math.isclose(collective_to_pitch(1.0), 0.35)
-    assert math.isclose(collective_to_pitch(-1.0), -0.35)
+    assert collective_to_pitch(0.0, _COL_MAX) == 0.0
+    assert math.isclose(collective_to_pitch(1.0, _COL_MAX), _COL_MAX)
+    assert math.isclose(collective_to_pitch(-1.0, _COL_MAX), -_COL_MAX)
 
 
 def test_cyclic_to_blade_pitches_zero_tilt_returns_collective_only():
-    blade_pitches = cyclic_to_blade_pitches(0.0, 0.0, 28.0, 0.0, 0.1)
+    blade_pitches = cyclic_to_blade_pitches(0.0, 0.0, 28.0, 0.0, _PITCH_GAIN, 0.1)
     np.testing.assert_allclose(blade_pitches, np.full(4, 0.1))
 
 
@@ -45,6 +49,8 @@ def test_servos_to_blade_pitches_pipeline_preserves_zero_cyclic_for_equal_servos
         np.array([1750.0, 1750.0, 1750.0]),
         omega=28.0,
         t=0.0,
+        pitch_gain_rad=_PITCH_GAIN,
+        col_max_rad=_COL_MAX,
     )
 
     assert math.isclose(collective_rad, 0.175)

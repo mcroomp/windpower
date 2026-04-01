@@ -31,6 +31,7 @@ Pass criteria:
   3. Net energy positive  (reel-out energy > reel-in energy).
   4. Peak tension stays below 80% of tether break load.
 """
+import csv
 import math
 import sys
 from pathlib import Path
@@ -296,20 +297,37 @@ def _run_deschutter_cycle(
             collectives.append(collective_rad)
             tilts_from_wind.append(xi_deg)
 
-        # ── Telemetry (20 Hz) ─────────────────────────────────────────────
+        # ── Telemetry (20 Hz) — columns match mediator CSV format ────────
         if i % tel_every == 0:
+            _ti = tether._last_info
             telemetry.append({
-                "t":                  t,
+                # ── mediator-compatible columns (same names as mediator CSV) ──
+                "t_sim":              t,
+                "hub_pos_x":          float(hub_state["pos"][0]),
+                "hub_pos_y":          float(hub_state["pos"][1]),
+                "hub_pos_z":          float(hub_state["pos"][2]),
+                "hub_vel_x":          float(hub_state["vel"][0]),
+                "hub_vel_y":          float(hub_state["vel"][1]),
+                "hub_vel_z":          float(hub_state["vel"][2]),
+                "tether_length":      float(_ti.get("length",   0.0)),
+                "tether_extension":   float(_ti.get("extension", 0.0)),
+                "tether_tension":     float(tension_now),
+                "tether_rest_length": float(tether.rest_length),
+                "tether_slack":       int(_ti.get("slack", True)),
+                "collective_rad":     float(collective_rad),
+                "collective_norm":    float(cmd.get("thrust", 0.0)),
+                "pumping_phase":      str(cmd.get("phase", "")),
+                "tension_setpoint":   float(cmd.get("tension_setpoint_n", 0.0)),
+                "collective_from_tension_ctrl": float(cmd.get("thrust", 0.0)),
+                "omega_rotor":        float(omega_spin),
+                # ── visualiser-only extras kept for compatibility ─────────────
                 "pos_ned":            hub_state["pos"].tolist(),
                 "R":                  hub_state["R"].tolist(),
-                "omega_spin":         omega_spin,
-                "tether_tension":     tension_now,
-                "tether_rest_length": tether.rest_length,
                 "swash_collective":   collective_rad,
                 "swash_tilt_lon":     sw["tilt_lon"],
                 "swash_tilt_lat":     sw["tilt_lat"],
                 "body_z_eq":          body_z_eq.tolist(),
-                "wind_enu":           WIND.tolist(),
+                "wind_ned":           WIND.tolist(),
             })
 
     # Final snapshot
@@ -342,6 +360,35 @@ def _run_deschutter_cycle(
         n_cycles         = n_cycles,
         telemetry        = telemetry,
     )
+
+
+# ── Telemetry CSV export (mediator-compatible format) ─────────────────────────
+
+_MEDIATOR_CSV_COLS = [
+    "t_sim", "hub_pos_x", "hub_pos_y", "hub_pos_z",
+    "hub_vel_x", "hub_vel_y", "hub_vel_z",
+    "tether_length", "tether_extension", "tether_tension", "tether_rest_length",
+    "tether_slack", "collective_rad", "collective_norm",
+    "pumping_phase", "tension_setpoint", "collective_from_tension_ctrl",
+    "omega_rotor",
+]
+
+
+def write_mediator_csv(telemetry: list[dict], path: Path) -> None:
+    """
+    Write telemetry rows to a CSV in the same column format as the mediator.
+
+    Only the mediator-compatible columns are written; visualiser extras
+    (pos_ned, R, body_z_eq, wind_ned) are skipped.  This allows
+    analyse_pumping_cycle.py to process both unit-test and stack-test runs.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_MEDIATOR_CSV_COLS,
+                                extrasaction="ignore")
+        writer.writeheader()
+        for row in telemetry:
+            writer.writerow({k: row.get(k, "") for k in _MEDIATOR_CSV_COLS})
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -432,6 +479,28 @@ def test_deschutter_tether_not_broken():
     limit = 0.8 * BREAK_LOAD_N
     assert peak < limit, \
         f"Peak tension {peak:.1f} N ≥ 80% break load ({limit:.1f} N)"
+
+
+# ── Analysis CSV export test ─────────────────────────────────────────────────
+
+_LOGS_DIR = Path(__file__).resolve().parents[3] / "simulation" / "logs"
+_UNIT_CSV = _LOGS_DIR / "telemetry_unit_deschutter.csv"
+
+
+@pytest.mark.simtest
+def test_deschutter_write_analysis_csv():
+    """
+    Run one De Schutter cycle and write telemetry to the standard mediator CSV
+    format so analyse_pumping_cycle.py can compare unit-test vs stack-test runs.
+
+    Output: simulation/logs/telemetry_unit_deschutter.csv
+    Run:    pytest simulation/tests/unit -k test_deschutter_write_analysis_csv
+    """
+    r = _run_deschutter_cycle()
+    write_mediator_csv(r["telemetry"], _UNIT_CSV)
+    assert _UNIT_CSV.exists(), f"CSV not written to {_UNIT_CSV}"
+    n_rows = sum(1 for _ in _UNIT_CSV.open(encoding="utf-8")) - 1  # minus header
+    assert n_rows > 100, f"Only {n_rows} rows written — telemetry appears empty"
 
 
 # ── Diagnostic log ────────────────────────────────────────────────────────────

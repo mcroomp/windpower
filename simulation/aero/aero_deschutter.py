@@ -71,9 +71,9 @@ class DeSchutterAero:
 
         span            = self.R_TIP - self.R_ROOT
         self.S_blade    = span * self.CHORD
-        self.AR         = float(p.get("aspect_ratio") or span ** 2 / self.S_blade)
+        self.AR         = float(p["aspect_ratio"])
         self.R_CP       = self.R_ROOT + self.CP_FRAC * span
-        self.pitch_gain = float(p.get("pitch_gain_rad", math.radians(self.PITCH_MAX_DEG)))
+        self.pitch_gain_rad = float(p["pitch_gain_rad"])
         self.disk_area  = math.pi * (self.R_TIP ** 2 - self.R_ROOT ** 2)
 
         self.N_RADIAL    = int(n_radial)
@@ -153,8 +153,8 @@ class DeSchutterAero:
         spin_sign   = float(np.sign(omega_rotor)) if omega_rotor != 0.0 else 1.0
         omega_abs   = abs(float(omega_rotor))
 
-        tilt_lon_rad = tilt_lon * self.pitch_gain
-        tilt_lat_rad = tilt_lat * self.pitch_gain
+        tilt_lon_rad = tilt_lon * self.pitch_gain_rad
+        tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
         v_rel_world   = wind_world - v_hub_world                     # (3,)
         v_axial       = float(np.dot(v_rel_world, disk_normal))

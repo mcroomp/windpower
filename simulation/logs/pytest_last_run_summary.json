@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-03-31 08:25:16",
-  "elapsed_s": 399.64,
+  "timestamp": "2026-04-01 12:08:08",
+  "elapsed_s": 2.28,
   "exit_code": 0,
-  "passed": 291,
+  "passed": 31,
   "failed": 0,
   "errors": 0,
-  "skipped": 5,
+  "skipped": 0,
   "result": "passed",
   "log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run.log",
   "passed_log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run_passed.log",
@@ -16,8 +16,10 @@
     "-u",
     "-m",
     "pytest",
-    "simulation/tests/unit",
-    "-q",
-    "--tb=short"
+    "e:/repos/windpower/simulation/tests/unit",
+    "-k",
+    "test_lua_flight_logic",
+    "--no-header",
+    "-q"
   ]
 }

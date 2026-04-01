@@ -4,9 +4,9 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED. SkewedWakeBEM is production aero model; RotorAero fully removed. Counter-torque motor simulation complete (Lua feedforward in SITL). **High-tilt De Schutter cycle validated** — ξ=80° reel-in achieves +24% net energy vs ξ=55° baseline; requires `col_max=0.10`, `col_min_reel_in=0.079`, `body_z_slew_rate=0.40 rad/s` (all now derived from rotor definition). **Two-loop attitude controller** implemented (`RatePID` class + `compute_rate_cmd`); `test_closed_loop_60s` uses it with `kd=0`. **Portable core** (`compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`) in `controller.py` — maps 1:1 to planned Lua/C++ Mode_RAWES. 335 fast unit tests + 23 simtests passing. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED. SkewedWakeBEM is production aero model; RotorAero fully removed. Counter-torque motor simulation complete (Lua feedforward in SITL). **High-tilt De Schutter cycle validated** — ξ=80° reel-in achieves +24% net energy vs ξ=55° baseline; requires `col_max=0.10`, `col_min_reel_in=0.079`, `body_z_slew_rate=0.40 rad/s` (all now derived from rotor definition). **Two-loop attitude controller** implemented (`RatePID` class + `compute_rate_cmd`); `test_closed_loop_60s` uses it with `kd=0`. **Portable core** (`compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`) in `controller.py` — maps 1:1 to planned Lua/C++ Mode_RAWES. **`rawes_flight.lua` orbit-tracking controller validated in SITL** — `test_lua_flight_rc_overrides` PASSES; captures equilibrium at t≈0.5 s, produces cyclic RC overrides. 398 fast unit tests + 23 simtests passing. Next: write `rawes_params.parm` and ArduPilot hardware frame configuration.
 
-**Known stack test status:** `test_pumping_cycle`, `test_gps_fuses_during_startup`, `test_acro_armed`, `test_stationary_gps_fusion`, `test_arm_minimal`, `test_stack_integration` all PASS. `test_acro_hold` FAILS — hub descends below 2 m during neutral-stick hold due to insufficient thrust margin after the 45 s kinematic damping phase; unit-level equivalent (`test_closed_loop_60s`) passes.
+**Known stack test status:** `test_pumping_cycle`, `test_gps_fuses_during_startup`, `test_acro_armed`, `test_stationary_gps_fusion`, `test_arm_minimal`, `test_stack_integration`, **`test_lua_flight_rc_overrides`** all PASS. `test_acro_hold` FAILS — hub descends below 2 m during neutral-stick hold due to insufficient thrust margin after the 45 s kinematic damping phase; unit-level equivalent (`test_closed_loop_60s`) passes.
 
 See **[Phase 3 Plan](#phase-3-plan)** below for the full milestone breakdown.
 
@@ -102,11 +102,36 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 - **body_z_slew_rate** = `rotor.body_z_slew_rate_rad_s` = 2% of gyroscopic limit = **0.40 rad/s** for beaupoil_2026. Optimal from sweep; faster than 0.40 causes oscillation, slower wastes reel-in time.
 - **`swashplate_pitch_gain_rad`** added to YAML/RotorDefinition — physically measurable via flap deflection angle × tau at full stick deflection.
 - **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD.
+- **`rawes_flight.lua` SITL-validated** — orbit-tracking cyclic controller confirmed working in SITL via `test_lua_flight_rc_overrides`. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
 
 ### Counter-Torque Motor Simulation
 | File | When to read |
 |------|-------------|
 | [simulation/torque/README.md](simulation/torque/README.md) | **Complete reference** — physics model, motor specs, gear efficiency, ArduPilot integration, all 6 tests, Lua feedforward controller, hardware deployment |
+
+### Lua Flight Controller
+| File | When to read |
+|------|-------------|
+| [simulation/scripts/rawes_flight.lua](simulation/scripts/rawes_flight.lua) | Orbit-tracking cyclic controller — captures equilibrium, tracks tether, rate-limited slerp, cyclic P loop |
+
+---
+
+## Lua API Constraints (this ArduPilot build)
+
+These constraints apply to `rawes_flight.lua` (and any future Lua scripts) running on the ArduPilot SITL Docker image and on the Pixhawk 6C with the same firmware.
+
+| What you'd expect | What actually works |
+|---|---|
+| `ahrs:get_rotation_body_to_ned()` | Doesn't exist. Use `ahrs:body_to_earth(v)` and `ahrs:earth_to_body(v)` |
+| `Vector3f(x, y, z)` | Constructor ignores args (warning + wrong value). Use `Vector3f()` then `:x()/:y()/:z()` setters |
+| `v:normalized()` | Doesn't exist. Copy then `:normalize()` in-place: `local r = v3_copy(v); r:normalize(); return r` |
+| `vec * scalar` or `vec + vec` | `*` not overloaded; `+` may silently fail. Use component arithmetic directly |
+| `rc:set_override(chan, pwm)` | Doesn't exist. Correct API: `rc:get_channel(n):set_override(pwm)` (cache channel at module load) |
+| ArduCopter ACRO mode = 6 | ACRO = **1**. Mode 6 is RTL. Use `vehicle:get_mode() == 1` |
+
+**SCR_ENABLE bootstrap:** After wiping EEPROM, scripting does NOT start from `copter-heli.parm` defaults on the first cold boot in this build. Scripting starts only when `SCR_ENABLE=1` is already in EEPROM from a previous session. The `acro_armed_lua` fixture handles this by NOT wiping EEPROM and setting `SCR_ENABLE=1` via MAVLink post-arm (persists to EEPROM for future boots). `copter-heli.parm` already contains `SCR_ENABLE 1` but this only takes effect on the second boot.
+
+**Anchor position in `LOCAL_POSITION_NED`:** After the NED migration, `initial_state["pos"][2]` is NED Z (negative ≈ −7.12 for altitude 7.12 m above ground). The anchor in `LOCAL_POSITION_NED` frame is at `[0, 0, -initial_state["pos"][2]]` = +7.12 m Down from EKF origin. So `SCR_USER5 = -home_z_enu` (negate).
 
 ---
 
@@ -168,12 +193,14 @@ simulation/
     │   ├── test_controller.py                Unit tests (incl. RatePID, portable core functions)
     │   ├── test_aero_trajectory_points.py    SkewedWakeBEM at De Schutter trajectory operating points
     │   ├── test_deschutter_cycle.py          De Schutter pumping cycle (ξ=80°, col_max=0.10 rad)
+    │   ├── test_lua_flight_logic.py          ★ Rodrigues rotation, orbit tracking, slerp, cyclic error (rawes_flight.lua math)
     │   └── ...
     └── stack/               Docker required
         ├── stack_utils.py           Shared constants + helpers (env vars, logging, process launch/teardown, port kill, log copy)
-        ├── conftest.py              acro_armed fixture (full stack lifecycle)
+        ├── conftest.py              acro_armed + acro_armed_lua fixtures (full stack lifecycle)
         ├── test_guided_flight.py    60 s ACRO hold with tether-alignment RC controller
         ├── test_pumping_cycle.py    Pumping cycle stack test
+        ├── test_lua_flight.py       ★ rawes_flight.lua orbit-tracking validation (Lua captures + RC overrides)
         └── test_setup.py            Verifies setup reaches armed ACRO
 ```
 
@@ -209,65 +236,122 @@ All defined in `frames.py`. Import from there — do not duplicate.
 
 **Orbital frame:** `build_orb_frame(body_z)` from `frames.py`. Removes rotor spin; body X = East (NED Y) projected onto disk plane.
 
+> ⚠️ **NED-only policy:** The entire codebase uses NED exclusively. We migrated from a mixed ENU/NED codebase — there may be vestigial ENU references (variable names, comments, formulas) that survived the migration and must be removed when found. If you see `pos_enu`, `home_z_enu`, `pos_ENU`, ENU-style altitude arithmetic (`altitude = pos[2]` without negation), or similar, treat it as a bug. Altitude above ground = `-pos_ned[2]`. The `T_ENU_NED` utility in `frames.py` exists only for converting legacy external data, never for internal simulation state.
+
 ---
 
 ## Workflow Rules
 
+**No silent defaults for physics parameters.** Do not use `dict.get("key", fallback)` or `x = x or default` for any value that is a physical constant, control gain, mechanical limit, or rotor/airfoil property. If a required config key is absent, raise `KeyError` or `ValueError` explicitly so the gap is visible at startup, not hidden at runtime. The only acceptable defaults in function signatures are structural/optional flags (e.g. `wind_world=None`, `spin_angle=0.0`). Convenience defaults like `_PITCH_GAIN_RAD_DEFAULT = 0.3` are the exact anti-pattern to avoid — they make it impossible to audit the effective configuration and silently produce wrong physics when a YAML field is missing.
+
 **Do NOT consult git history (`git log`, `git diff`, `git show`, `git blame`) when diagnosing problems unless you first ask the user whether that would make sense.** Diagnose from the current code and runtime logs instead. Git history is rarely the right tool for debugging and adds noise to the investigation.
+
+**⚠️ NEVER use non-ASCII characters in Python `print()` output** (no `─`, `✓`, `✗`, `σ`, `→`, `−`, `∫`, `•`, etc.). Python scripts run on Windows with cp1252 encoding by default; non-ASCII chars cause `UnicodeEncodeError` and crash analysis scripts. Use only 7-bit ASCII: `-` for lines, `[PASS]`/`[FAIL]` for status, `sd=` for standard deviation, `-` for minus, etc.
 
 ---
 
 ## Running Tests
 
-### Unit Tests and Simtests — Windows native, no Docker
+Tests run in three sequential stages. Always run them in order — later stages depend on earlier ones passing.
 
-**CRITICAL: Only ArduPilot/stack tests require Docker. Unit tests and simtests run directly on Windows using the local venv.**
+**CRITICAL: Unit tests and simtests run on Windows natively (no Docker). Stack/torque tests require Docker via WSL. Never mix these.**
 
-One-time venv setup:
+**CRITICAL: Use the Bash tool directly for unit/simtests — do NOT use `wsl.exe`. The Bash tool runs Git Bash on Windows. `/mnt/e/...` WSL paths do NOT exist in Git Bash.**
+
+**CRITICAL: The Bash tool's working directory is NOT the repo root. Always use absolute paths for the venv python and for file arguments. Relative paths like `simulation/tests/unit/.venv/Scripts/python.exe` will fail with "No such file or directory". Use `e:/repos/windpower/simulation/tests/unit/.venv/Scripts/python.exe` instead.**
+
+One-time venv setup (Windows):
 ```cmd
 py -3 -m venv simulation\tests\unit\.venv
 simulation\tests\unit\.venv\Scripts\python.exe -m pip install numpy pytest matplotlib
 ```
 
-### Quick Reference
+---
+
+### Stage 1 — Unit tests (fast, Windows, no Docker)
+
+Pure Python: physics, aero, tether, controller, sensor, planner. No ArduPilot, no network, no Docker.
+
+```
+e:/repos/windpower/simulation/tests/unit/.venv/Scripts/python.exe -m pytest e:/repos/windpower/simulation/tests/unit -m "not simtest" -q
+```
+
+Expected: ~398 tests, ~65 s. Fix all failures here before proceeding.
+
+---
+
+### Stage 2 — Simtests (slow, Windows, no Docker)
+
+Full closed-loop physics (dynamics + aero + tether + attitude controller) for 10–60 s. No ArduPilot.
+
+```
+e:/repos/windpower/simulation/tests/unit/.venv/Scripts/python.exe -m pytest e:/repos/windpower/simulation/tests/unit -m simtest -q
+```
+
+Expected: ~23 tests, ~5 min. Fix all failures here before proceeding.
+
+To run both stages together:
+```
+e:/repos/windpower/simulation/tests/unit/.venv/Scripts/python.exe -m pytest e:/repos/windpower/simulation/tests/unit -q
+```
+
+---
+
+### Stage 3 — Stack tests (Docker, ArduPilot SITL)
+
+Full SITL co-simulation: mediator + ArduPilot + MAVLink GCS. Runs sequentially — never launch two stack/torque tests at the same time.
+
+```
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v'
+```
+
+Filtered runs:
+```
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k test_pumping_cycle'
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v -k test_lua_yaw_trim'
+```
+
+Status-only (pass/fail summary, no logs):
+```
+wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack --filterstatus'
+```
+
+**Always run `analyse_run.py` after a stack test:**
+```
+wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'
+wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --plot'
+```
+
+---
+
+### Other commands
 
 | Task | Command |
 |------|---------|
-| **Unit tests (fast, local)** | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| **Simtests (slow, local)** | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
-| All unit+simtests (local) | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -q` |
-| Stack tests (Docker) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'` |
-| Stack tests (filtered) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack -v -k test_name'` |
-| Stack tests (status only) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack --filterstatus'` |
-| **Torque tests (all)** | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v'` |
-| Torque tests (filtered) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v -k test_lua_yaw_trim'` |
+| Regenerate steady state | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight` |
 | Torque visualizer | `simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torque.py` |
 | Build Docker image | `simulation\build.cmd ardupilot` |
 | Start/stop container | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh start/stop'` |
-| Regenerate steady state | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight` |
-| **Post-run analysis** | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py'` |
-| Post-run analysis (plot) | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/analysis/analyse_run.py --plot'` |
-| Last run logs | All in `simulation/logs/`: `pytest_last_run.log` + `_passed.log` + `_failed.log` + `_summary.json`, `mediator_last_run.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv` |
+| Add Python package to stack | Edit `simulation/Dockerfile` pip install line → rebuild image (see below) |
+| Add Python package to unit tests | `simulation/tests/unit/.venv/Scripts/python.exe -m pip install <pkg>` |
 
-### Post-run analysis
+**⚠️ Rebuilding the Docker image — CRITICAL rules:**
 
-**Always run `analyse_run.py` after a stack test to understand what happened.** Do not grep through log files manually — the script parses `mediator_last_run.log` and `pytest_last_run.log` and prints a structured report. If the script lacks a feature, modify it directly rather than falling back to ad-hoc grep.
+1. **Always pass `--build-arg INSTALL_ARDUPILOT=true`** (or use `build.cmd ardupilot`). Running `docker build` without this arg replaces the ArduPilot image with a base-only 1.9 GB image — ArduPilot binary vanishes and all stack tests fail with `RAWES_SIM_VEHICLE` errors.
 
-### Running Python scripts
+2. **The full build takes ~30–60 min** (ArduPilot clone + waf compile). Use `run_in_background=true` on the Bash tool call **without** a trailing `&` inside the command. Adding `&` inside causes the shell to exit early and SIGHUP kills the Docker build mid-compile, producing a corrupt image with exit code 0.
 
-**CRITICAL: Unit tests and simtests run directly on Windows — no WSL, no Docker needed.**
-Only stack tests (ArduPilot SITL) require Docker and must go through WSL.
+3. After rebuilding: `dev.sh stop && dev.sh start` to swap the container to the new image.
 
-**CRITICAL: Use the Bash tool directly — do NOT use `wsl.exe`, `powershell`, or `cmd /c` for unit tests.**
-The Bash tool runs Git Bash on Windows. `/mnt/e/...` WSL paths do NOT exist in Git Bash — never `cd /mnt/e/...`.
-
-| Context | How to run |
-|---------|-----------|
-| Unit tests (fast) | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| Simtests (slow) | `simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
-| Stack tests (Docker) | `wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack [-v] [-k name]'` |
-| Any Python analysis script | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/...'` |
+WSL equivalent of `build.cmd ardupilot`:
+```
+wsl.exe bash -c 'docker build /mnt/e/repos/windpower/simulation -t rawes-sim --build-arg INSTALL_ARDUPILOT=true'
+```
+| Python analysis script | `wsl.exe bash -c 'python3 /mnt/e/repos/windpower/simulation/...'` |
 | One-off inside container | `wsl.exe bash -c 'docker exec rawes-dev python3 /rawes/simulation/...'` |
+
+Last run logs: `simulation/logs/` — `pytest_last_run.log`, `mediator_last_run.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv`
 
 Windows repo root on WSL path: `/mnt/e/repos/windpower`
 
@@ -325,6 +409,7 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 - [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (reel-out 199 N, reel-in 86 N, net energy +1396 J)
 - [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 534 unit + 23 simtests passing
 - [x] Design `ModeRAWES` firmware architecture — documented in `simulation/raws_mode.md`
+- [x] Write and validate `rawes_flight.lua` orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection)
 - [ ] Confirm H_SWASH_TYPE=1 (H3-120) in SITL
 - [ ] Determine H_PHANG via step cyclic → measure tilt response
 - [ ] Configure GB4008: H_TAIL_TYPE=4 (DDFP), tune ATC_RAT_YAW_* and H_COL2YAW feedforward

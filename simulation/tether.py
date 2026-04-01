@@ -7,6 +7,8 @@ anchor to the hub.  Force is zero when slack; elastic + damped when taut.
 
 import numpy as np
 
+from frames import cross3
+
 
 class TetherModel:
     """
@@ -67,12 +69,14 @@ class TetherModel:
     def __init__(
         self,
         anchor_ned:            np.ndarray = np.array([0.0, 0.0, 0.0]),
-        rest_length:           float      = 200.0,   # unstretched tether length [m]
+        rest_length:           float      = None,    # unstretched tether length [m] — required; no default
         EA:                    float      = None,    # override axial stiffness [N]
         zeta:                  float      = 0.05,    # damping ratio (fraction of critical)
         hub_mass:              float      = 5.0,     # hub mass [kg] — sets critical damping scale
         axle_attachment_length: float     = 0.3,     # distance from CoM to tether attach point along -body_Z [m]
     ):
+        if rest_length is None:
+            raise ValueError("TetherModel requires rest_length — no default (mission-specific parameter)")
         self.anchor      = np.asarray(anchor_ned, dtype=float)
         self.rest_length = float(rest_length)
         self.EA          = float(EA) if EA is not None else self.EA_N
@@ -143,7 +147,7 @@ class TetherModel:
         if R_hub is not None:
             body_z_world = R_hub[:, 2]              # disk normal in world frame
             r_attach = -self.axle_attach * body_z_world   # toward axle bottom
-            moment = np.cross(r_attach, force)
+            moment = cross3(r_attach, force)
         else:
             moment = _zero3
 

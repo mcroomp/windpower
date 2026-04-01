@@ -45,7 +45,7 @@ ENV VENV_DIR=/rawes/.venv
 
 RUN python3 -m venv "$VENV_DIR" \
     && "$VENV_DIR/bin/pip" install --upgrade pip --quiet \
-    && "$VENV_DIR/bin/pip" install numpy matplotlib scipy pytest pymavlink pexpect "empy==3.3.4" pyyaml --quiet
+    && "$VENV_DIR/bin/pip" install numpy matplotlib scipy pytest pymavlink pexpect "empy==3.3.4" pyyaml numba --quiet
 
 # Activate venv for all subsequent RUN commands and the final shell
 ENV PATH="$VENV_DIR/bin:/usr/local/bin:$PATH"

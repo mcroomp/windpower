@@ -253,7 +253,7 @@ def test_stack_integration_smoke():
                 time.sleep(1.0)
 
             log_text = mediator_log.read_text(encoding="utf-8", errors="replace") if mediator_log.exists() else ""
-            loop_lines = [l for l in log_text.splitlines() if "pos_ENU" in l]
+            loop_lines = [l for l in log_text.splitlines() if "pos_NED" in l]
             assert len(loop_lines) >= 10, (
                 f"Mediator loop ran fewer than 10 per-second iterations: {len(loop_lines)} lines found.\n"
                 f"Loop may have stalled after startup."
