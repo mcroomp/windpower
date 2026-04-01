@@ -411,7 +411,7 @@ scripts refresh well within the expiry window.
 | Function | Provided by | Notes |
 |---|---|---|
 | Rate PIDs — roll, pitch, yaw | ACRO_Heli (400 Hz) | Full-rate damping between Lua updates |
-| H3-120 swashplate mixing | ACRO_Heli | `H_SWASH_TYPE = H3-120` |
+| H3-120 swashplate mixing | ACRO_Heli | `H_SWASH_TYPE = 3` (H3_120, default) |
 | Spool state guards | ACRO_Heli | `SHUT_DOWN` / `GROUND_IDLE` refuse RC input |
 | Arming infrastructure | ACRO_Heli | Standard pre-arm checks; arm via MAVLink or GCS |
 | AHRS / EKF state | ArduPilot firmware | `ahrs:*` Lua bindings available in any mode |
@@ -426,10 +426,9 @@ scripts refresh well within the expiry window.
 
 ## 8. rawes_flight.lua
 
-**SITL validation status:** `test_lua_flight_rc_overrides` PASSES — script loads in SITL,
-captures equilibrium at t≈0.5 s after ACRO arm, generates cyclic RC overrides.
-Stack test uses `internal_controller=True` (mediator holds hub stable; Lua output is
-observed via `SERVO_OUTPUT_RAW`).  Phase 2 (Lua as sole cyclic controller) pending.
+**SITL validation status:**
+- `test_lua_flight_rc_overrides` PASSES — script loads in SITL, captures equilibrium at t≈0.5 s after ACRO arm, generates cyclic RC overrides (max cyclic activity 227 PWM). Stack test uses `internal_controller=True` (mediator holds hub stable; Lua output is observed via `SERVO_OUTPUT_RAW`). Phase 2 (Lua as sole cyclic controller) pending.
+- `test_h_swash_phang` PASSES — confirms H_SW_PHANG=0 and H_SWASH_TYPE=3 are correct for the RAWES servo layout. See §13 and §12.
 
 ### 8.0 Parameters (SCR_USER slots)
 
@@ -585,7 +584,7 @@ To deploy to hardware: copy both `.lua` files to `APM/scripts/` on the SD card.
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
-| `H_PHANG` cyclic phase error | Medium — axis coupling | Calibrate in SITL: compare Lua orbit tracking output to Python `orbit_tracked_body_z_eq()` |
+| `H_SW_PHANG` cyclic phase | **Resolved** — H_SW_PHANG=0 confirmed | `test_h_swash_phang` measured cross_ch1=1.5%, cross_ch2=19.7% (both <20%) at H_SW_PHANG=0. ArduPilot H3_120 formula's +90° roll advance angle aligns with RAWES servo geometry without correction. |
 | Kaman flap lag | Medium — phase margin loss | Start `SCR_USER1 (KP_CYC) = 0.3`; increase slowly; D-term in `ATC_RAT_RLL/PIT` damps oscillation |
 | Load cell hardware (tension feedback) | **High — critical path** | Validate ground PI in simulation before hardware; load cell must be on winch before flight |
 | Orbit tracking before first tether tension | Medium — no tether direction during free climb | Equilibrium capture guard (`|diff| < 0.5 m`) prevents tracking until tether is taut |
@@ -611,10 +610,10 @@ To deploy to hardware: copy both `.lua` files to `APM/scripts/` on the SD card.
 
 | Parameter | Value | Reason |
 |-----------|-------|--------|
-| `FRAME_CLASS` | 11 (Heli) | Traditional helicopter frame |
-| `H_SWASH_TYPE` | H3-120 | 3-servo lower ring at 120° driving 4 push-rods |
+| `FRAME_CLASS` | 6 (Heli) | Traditional helicopter frame (ArduCopter-Heli; matches copter-heli.parm default) |
+| `H_SWASH_TYPE` | 3 (H3_120, default) | 3-servo lower ring at 120° driving 4 push-rods. Enum: 0=H3 Generic, 1=H1, 2=H3_140, 3=H3_120. |
 | `H_RSC_MODE` | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete |
-| `H_PHANG` | TBD | Cyclic phase angle — step cyclic in SITL, measure disk tilt axis |
+| `H_SW_PHANG` | 0 (confirmed) | Cyclic phase trim (±30 deg). Empirically verified by `test_h_swash_phang`: cross-coupling 1.5% (roll) and 19.7% (pitch) at H_SW_PHANG=0. ArduPilot's built-in +90° roll advance angle in the H3_120 formula already aligns with RAWES servo layout (S1=0°/East, S2=120°, S3=240°). |
 | `H_COL_MAX` | TBD (≈0.10 rad) | Limit collective to keep flap loads in linear regime |
 | `H_CYC_MAX` | TBD | Limit cyclic amplitude to ≤15° rotor tilt |
 | `SERVO1_FUNCTION` | 33 (Motor1 / S1) | Swashplate servo S1 |
