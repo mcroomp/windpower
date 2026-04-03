@@ -134,16 +134,8 @@ See CLAUDE.md for the full workflow, Docker setup, and troubleshooting.
 
 ## Current Status
 
-**Phase 3, Milestone 3 -- Pumping cycle stack test PASSED.**
+Phase 3, Milestone 3 -- pumping cycle stack test passed. Physics, closed-loop
+controller, and ArduPilot SITL integration are all validated. Next milestone
+covers GB4008 yaw configuration and writing the full rawes_params.parm.
 
-- SkewedWakeBEM is production aero model
-- Counter-torque motor simulation complete (Lua feedforward in SITL)
-- High-tilt De Schutter cycle validated (xi=80 deg reel-in achieves +24% net energy)
-- Two-loop attitude controller implemented (RatePID class + compute_rate_cmd)
-- rawes_flight.lua orbit-tracking controller validated in SITL
-- H_SW_PHANG=0 confirmed, H_SW_TYPE=3 (H3_120) confirmed
-- De Schutter 2018 aero validation complete (32-test suite)
-- SkewedWakeBEMJit (Numba JIT) added, 18-test equivalence suite
-- 460 fast unit tests + 29 simtests passing
-
-**Next:** configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), then write rawes_params.parm.
+Full phase plan, milestone checklist, and known test status: [CLAUDE.md](CLAUDE.md)
