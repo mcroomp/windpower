@@ -15,16 +15,16 @@ Lua writes RC overrides that the main loop consumes at full rate.
 flowchart TB
     subgraph GS["Ground Station"]
         direction LR
-        TP["**Trajectory Planner** (~10 Hz)<BR/>Phase logic · Tension PI<BR/>Wind estimation"]
-        WC["**Winch Controller**<BR/>Reel speed PID<BR/>Load cell · Encoder"]
+        TP["<b>Trajectory Planner</b> (~10 Hz)<BR/>Phase logic · Tension PI<BR/>Wind estimation"]
+        WC["<b>Winch Controller</b><BR/>Reel speed PID<BR/>Load cell · Encoder"]
         TP <-->|"tension_n (local)<BR/>winch_speed_ms"| WC
     end
 
     subgraph PX["Pixhawk 6C (in air)"]
         direction TB
-        LUA1["**rawes_flight.lua**  50 Hz<BR/>Orbit tracking · Rate-limited slerp<BR/>Cyclic P loop · Ch1/Ch2/Ch3 RC overrides"]
-        LUA2["**rawes_yaw_trim.lua**  100 Hz<BR/>Yaw trim and correction · Ch4 RC override"]
-        ACRO["**ACRO_Heli**  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
+        LUA1["<b>rawes_flight.lua</b>  50 Hz<BR/>Orbit tracking · Rate-limited slerp<BR/>Cyclic P loop · Ch1/Ch2/Ch3 RC overrides"]
+        LUA2["<b>rawes_yaw_trim.lua</b>  100 Hz<BR/>Yaw trim and correction · Ch4 RC override"]
+        ACRO["<b>ACRO_Heli</b>  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
         LUA1 --> ACRO
         LUA2 --> ACRO
     end
@@ -108,9 +108,9 @@ Net energy per cycle = (T_out - T_in) x v_reel x t_phase > 0 as long as T_out > 
 
 ```mermaid
 flowchart LR
-    RO["**Reel-Out**<BR/>*(Power Phase)*<BR/><BR/>body_z tether-aligned<BR/>xi ~ 30-55°<BR/>TensionPI → 200 N<BR/>col_max = 0.10 rad<BR/>col_min = -0.28 rad<BR/>Winch pays out<BR/>→ generator power"]
-    TR["**Transition**<BR/>*(15 s)*<BR/><BR/>body_z slews to<BR/>xi = 80° from wind<BR/>at 0.40 rad/s"]
-    RI["**Reel-In**<BR/>*(Recovery Phase)*<BR/><BR/>body_z at xi = 80°<BR/>Thrust acts upward<BR/>col_min = 0.079 rad<BR/>Tether tension ~58 N<BR/>→ cheap reel-in"]
+    RO["<b>Reel-Out</b> (Power Phase)<BR/><BR/>body_z tether-aligned<BR/>xi ~ 30-55°<BR/>TensionPI → 200 N<BR/>col_max = 0.10 rad<BR/>col_min = -0.28 rad<BR/>Winch pays out<BR/>→ generator power"]
+    TR["<b>Transition</b> (15 s)<BR/><BR/>body_z slews to<BR/>xi = 80° from wind<BR/>at 0.40 rad/s"]
+    RI["<b>Reel-In</b> (Recovery Phase)<BR/><BR/>body_z at xi = 80°<BR/>Thrust acts upward<BR/>col_min = 0.079 rad<BR/>Tether tension ~58 N<BR/>→ cheap reel-in"]
 
     RO -->|"tether length<BR/>reached"| TR
     TR -->|"slerp<BR/>complete"| RI
@@ -312,23 +312,23 @@ Set before flight via MAVLink parameter set or .parm file. No firmware recompila
 flowchart TD
     START(["Every 20 ms"]) --> GUARD{"ACRO mode?<BR/>vehicle:get_mode() == 1"}
     GUARD -- No --> SKIP(["return early"])
-    GUARD -- Yes --> READ["**2. Read state**<BR/>bz_now = ahrs:body_to_earth([0,0,1])<BR/>pos_ned = ahrs:get_relative_position_NED_origin()<BR/>diff = pos_ned - anchor(SCR_USER3/4/5)"]
+    GUARD -- Yes --> READ["<b>2. Read state</b><BR/>bz_now = ahrs:body_to_earth([0,0,1])<BR/>pos_ned = ahrs:get_relative_position_NED_origin()<BR/>diff = pos_ned - anchor(SCR_USER3/4/5)"]
 
     READ --> CAPT{"Equilibrium<BR/>captured?"}
-    CAPT -- "No, |diff| >= 0.5 m" --> CAPTURE["**3. Capture equilibrium** (once)<BR/>_bz_eq0   = bz_now<BR/>_tdir0    = diff / |diff|<BR/>_bz_slerp = _bz_eq0"]
+    CAPT -- "No, |diff| >= 0.5 m" --> CAPTURE["<b>3. Capture equilibrium</b> (once)<BR/>_bz_eq0   = bz_now<BR/>_tdir0    = diff / |diff|<BR/>_bz_slerp = _bz_eq0"]
     CAPTURE --> ORBIT
-    CAPT -- Yes --> ORBIT["**4. Orbit tracking**<BR/>bz_tether = diff / |diff|<BR/>axis  = _tdir0 x bz_tether<BR/>angle = atan2(|axis|, _tdir0 . bz_tether)<BR/>_bz_orbit = Rodrigues(_bz_eq0, axis/|axis|, angle)"]
+    CAPT -- Yes --> ORBIT["<b>4. Orbit tracking</b><BR/>bz_tether = diff / |diff|<BR/>axis  = _tdir0 x bz_tether<BR/>angle = atan2(|axis|, _tdir0 . bz_tether)<BR/>_bz_orbit = Rodrigues(_bz_eq0, axis/|axis|, angle)"]
 
     ORBIT --> TIMEOUT{"Planner silent<BR/>> 2 s?"}
-    TIMEOUT -- Yes --> CLEAR["**5. Clear _bz_target**<BR/>revert to natural orbit"]
+    TIMEOUT -- Yes --> CLEAR["<b>5. Clear _bz_target</b><BR/>revert to natural orbit"]
     TIMEOUT -- No --> SLERP
-    CLEAR --> SLERP["**6. Rate-limited slerp**<BR/>goal = _bz_target or _bz_orbit<BR/>step = min(SCR_USER2 * dt, remain)<BR/>_bz_slerp = Rodrigues(_bz_slerp, axis, step)"]
+    CLEAR --> SLERP["<b>6. Rate-limited slerp</b><BR/>goal = _bz_target or _bz_orbit<BR/>step = min(SCR_USER2 * dt, remain)<BR/>_bz_slerp = Rodrigues(_bz_slerp, axis, step)"]
 
-    SLERP --> CYCLIC["**7. Cyclic P loop**<BR/>err_ned  = bz_now x _bz_slerp<BR/>err_body = ahrs:earth_to_body(err_ned)<BR/>roll_rate  = SCR_USER1 * err_body.x<BR/>pitch_rate = SCR_USER1 * err_body.y"]
+    SLERP --> CYCLIC["<b>7. Cyclic P loop</b><BR/>err_ned  = bz_now x _bz_slerp<BR/>err_body = ahrs:earth_to_body(err_ned)<BR/>roll_rate  = SCR_USER1 * err_body.x<BR/>pitch_rate = SCR_USER1 * err_body.y"]
 
-    CYCLIC --> RC["**8. RC override**<BR/>scale = 500 / (ACRO_RP_RATE * pi/180)<BR/>Ch1 = clamp(1500 + scale * roll_rate,  1000, 2000)<BR/>Ch2 = clamp(1500 + scale * pitch_rate, 1000, 2000)"]
+    CYCLIC --> RC["<b>8. RC override</b><BR/>scale = 500 / (ACRO_RP_RATE * pi/180)<BR/>Ch1 = clamp(1500 + scale * roll_rate,  1000, 2000)<BR/>Ch2 = clamp(1500 + scale * pitch_rate, 1000, 2000)"]
 
-    RC --> RLIMIT["**9. Output rate limiter** (SCR_USER6 = 30 PWM/step)<BR/>Ch1 = prev_ch1 + clamp(Ch1-prev_ch1, -delta, +delta)<BR/>Ch2 = prev_ch2 + clamp(Ch2-prev_ch2, -delta, +delta)<BR/>rc:get_channel(1):set_override(Ch1)<BR/>rc:get_channel(2):set_override(Ch2)"]
+    RC --> RLIMIT["<b>9. Output rate limiter</b> (SCR_USER6 = 30 PWM/step)<BR/>Ch1 = prev_ch1 + clamp(Ch1-prev_ch1, -delta, +delta)<BR/>Ch2 = prev_ch2 + clamp(Ch2-prev_ch2, -delta, +delta)<BR/>rc:get_channel(1):set_override(Ch1)<BR/>rc:get_channel(2):set_override(Ch2)"]
     RLIMIT --> START
 ```
 
