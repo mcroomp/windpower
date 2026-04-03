@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED. SkewedWakeBEM is production aero model; RotorAero fully removed. Counter-torque motor simulation complete (Lua feedforward in SITL). **High-tilt De Schutter cycle validated** — ξ=80° reel-in achieves +24% net energy vs ξ=55° baseline; requires `col_max=0.10`, `col_min_reel_in=0.079`, `body_z_slew_rate=0.40 rad/s` (all now derived from rotor definition). **Two-loop attitude controller** implemented (`RatePID` class + `compute_rate_cmd`); `test_closed_loop_60s` uses it with `kd=0`. **Portable core** (`compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`) in `controller.py` — maps 1:1 to planned Lua/C++ Mode_RAWES. **`rawes_flight.lua` orbit-tracking controller validated in SITL** — `test_lua_flight_rc_overrides` PASSES; captures equilibrium at t≈0.5 s, produces cyclic RC overrides. **H_SW_PHANG=0 confirmed** — `test_h_swash_phang` PASSES; ArduPilot H3_120 +90° roll advance angle already aligns with RAWES servo layout; H_SW_TYPE=3 (H3_120) is the correct default enum value (not 1). 398 fast unit tests + 23 simtests passing. Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), then write `rawes_params.parm`.
+**Current phase:** Phase 3, Milestone 3 — Pumping cycle stack test PASSED. SkewedWakeBEM is production aero model; RotorAero fully removed. Counter-torque motor simulation complete (Lua feedforward in SITL). **High-tilt De Schutter cycle validated** — ξ=80° reel-in achieves +24% net energy vs ξ=55° baseline; requires `col_max=0.10`, `col_min_reel_in=0.079`, `body_z_slew_rate=0.40 rad/s` (all now derived from rotor definition). **Two-loop attitude controller** implemented (`RatePID` class + `compute_rate_cmd`); `test_closed_loop_60s` uses it with `kd=0`. **Portable core** (`compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`) in `controller.py` — maps 1:1 to planned Lua/C++ Mode_RAWES. **`rawes_flight.lua` orbit-tracking controller validated in SITL** — `test_lua_flight_rc_overrides` PASSES; captures equilibrium at t≈0.5 s, produces cyclic RC overrides. **H_SW_PHANG=0 confirmed** — `test_h_swash_phang` PASSES; ArduPilot H3_120 +90° roll advance angle already aligns with RAWES servo layout; H_SW_TYPE=3 (H3_120) is the correct default enum value (not 1). **De Schutter 2018 aero validation complete** — `DeSchutterAero` audited against paper equations 25-31; β side-slip added as diagnostic, C_{D,T}=0.021 structural drag implemented, induction bootstrap floor bug fixed; 32-test validation suite in `test_deschutter_equations.py`. **`SkewedWakeBEMJit`** (Numba JIT) added as drop-in fast replacement; 18-test equivalence suite. **`aero_skewed_wake.py`** rewritten as clear reference (explicit loops, full docstrings) for human-readability; JIT version is the fast path. 460 fast unit tests + 29 simtests passing. Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), then write `rawes_params.parm`.
 
 **Known stack test status:** `test_pumping_cycle`, `test_gps_fuses_during_startup`, `test_acro_armed`, `test_stationary_gps_fusion`, `test_arm_minimal`, `test_stack_integration`, **`test_lua_flight_rc_overrides`**, **`test_h_swash_phang`** all PASS. `test_acro_hold` FAILS — hub descends below 2 m during neutral-stick hold due to insufficient thrust margin after the 45 s kinematic damping phase; unit-level equivalent (`test_closed_loop_60s`) passes.
 
@@ -93,6 +93,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 |------|-------------|
 | [simulation/sim_internals.md](simulation/sim_internals.md) | Sensor design, controller functions, aero model (SkewedWakeBEM), tether, pumping cycle COL_MIN rules, initial state, known gaps |
 | [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions — why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
+| [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter 2018 equation-level validation — maps each paper equation (Eq. 25-31, Table I) to its implementation, documents C_{D,T} derivation, β diagnostic, known gaps vs SkewedWakeBEM |
 
 ### Key Design Decisions (this session)
 - **RotorAero removed** — `aero/aero_rotor.py` deleted; `create_aero()` factory now has 4 models (SkewedWakeBEM default).
@@ -103,6 +104,10 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 - **`swashplate_pitch_gain_rad`** added to YAML/RotorDefinition — physically measurable via flap deflection angle × tau at full stick deflection.
 - **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD.
 - **`rawes_flight.lua` SITL-validated** — orbit-tracking cyclic controller confirmed working in SITL via `test_lua_flight_rc_overrides`. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
+- **`SkewedWakeBEMJit`** (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in replacement for `SkewedWakeBEM`; two kernels (`_jit_vi0`, `_jit_strip_loop`); 18-test equivalence suite (`test_skewed_wake_jit.py`, atol=1e-10). Select via `create_aero(model="jit")`.
+- **`aero_skewed_wake.py` rewritten for clarity** — non-JIT reference version; explicit double for-loop, `np.cross()`, `_prandtl_F()` helper; all intermediate numpy broadcasting and dead code removed. Full class + method docstrings added. Only purpose is human-readable reference and JIT equivalence validation.
+- **De Schutter 2018 aero audit** — `DeSchutterAero` compared to paper equations 25–31. Two additions: (1) **β side-slip** (`last_sideslip_mean_deg`) as validity diagnostic (Eq. 27-28); β does NOT enter force formulas. (2) **C_{D,T}=0.021** structural parasitic drag (Eq. 29, 31) added to blade CD; derived from cable geometry in Table I. Bug fixed: induction bootstrap floor `max(T,0.01)` replaced with `abs(T)` — floor caused phantom 200 N thrust at zero collective. Validation doc at `simulation/aero/deschutter.md`.
+- **`CD_structural`** field added to `RotorDefinition` and YAML files; `beaupoil_2026.yaml` = 0.0 (direct spar mount), `de_schutter_2018.yaml` = 0.021 (thin cable arms).
 
 ### Counter-Torque Motor Simulation
 | File | When to read |
@@ -152,7 +157,7 @@ simulation/
 ├── Core physics
 │   ├── dynamics.py          RK4 6-DOF rigid-body integrator
 │   ├── aero.py              Facade: re-exports all aero models, create_aero() factory → SkewedWakeBEM
-│   ├── aero/                Per-blade BEM models (SkewedWakeBEM production; RotorAero archived)
+│   ├── aero/                Per-blade BEM models (SkewedWakeBEM production; SkewedWakeBEMJit fast JIT; DeSchutterAero reference)
 │   ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 │   └── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 │
@@ -193,6 +198,10 @@ simulation/
     │   ├── test_controller.py                Unit tests (incl. RatePID, portable core functions)
     │   ├── test_aero_trajectory_points.py    SkewedWakeBEM at De Schutter trajectory operating points
     │   ├── test_deschutter_cycle.py          De Schutter pumping cycle (ξ=80°, col_max=0.10 rad)
+    │   ├── test_deschutter_equations.py      ★ Eq-level validation of DeSchutterAero vs paper (32 tests)
+    │   ├── test_deschutter_wind.py           Wind estimator integration with De Schutter planner
+    │   ├── test_skewed_wake_jit.py           SkewedWakeBEMJit equivalence to reference (18 tests, atol=1e-10)
+    │   ├── test_wind_estimator.py            Rolling-window wind estimator unit tests
     │   ├── test_lua_flight_logic.py          ★ Rodrigues rotation, orbit tracking, slerp, cyclic error (rawes_flight.lua math)
     │   └── ...
     └── stack/               Docker required
@@ -276,7 +285,7 @@ Pure Python: physics, aero, tether, controller, sensor, planner. No ArduPilot, n
 bash sim.sh test-unit -q
 ```
 
-Expected: ~398 tests, ~65 s. Fix all failures here before proceeding.
+Expected: ~460 tests, ~65 s. Fix all failures here before proceeding.
 
 ---
 
@@ -288,7 +297,7 @@ Full closed-loop physics (dynamics + aero + tether + attitude controller) for 10
 bash sim.sh test-simtest -q
 ```
 
-Expected: ~23 tests, ~5 min. Fix all failures here before proceeding.
+Expected: ~29 tests, ~5 min. Fix all failures here before proceeding.
 
 To run both stages together:
 ```bash
@@ -407,7 +416,7 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 
 ### M3 — ArduPilot Configuration & Pumping Cycle Stack Test (in progress)
 - [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (reel-out 199 N, reel-in 86 N, net energy +1396 J)
-- [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 534 unit + 23 simtests passing
+- [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 460 fast unit + 29 simtests passing
 - [x] Design `ModeRAWES` firmware architecture — documented in `simulation/raws_mode.md`
 - [x] Write and validate `rawes_flight.lua` orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection)
 - [x] Confirm H_SW_TYPE=3 (H3-120) — `test_h_swash_phang` PASSES; default is already H3_120 (value 3, not 1)

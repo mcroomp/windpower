@@ -137,11 +137,20 @@ All located in `simulation/aero/` and importable via `simulation/aero.py`:
 
 | Class | File | Description |
 |-------|------|-------------|
-| `SkewedWakeBEM` | `aero_skewed_wake.py` | **Production** — Prandtl + Coleman |
+| `SkewedWakeBEM` | `aero_skewed_wake.py` | **Production reference** — Prandtl + Coleman; explicit loops, full docstrings |
+| `SkewedWakeBEMJit` | `aero_skewed_wake_jit.py` | **Fast path** — Numba `@njit` drop-in; select via `create_aero(model="jit")` |
 | `PrandtlBEM` | `aero_prandtl_bem.py` | BEM + Prandtl tip/root loss, no skewed wake |
 | `GlauertStateBEM` | `aero_glauert_states.py` | BEM + Glauert inflow-state detection |
 | `RotorAero` | `aero_rotor.py` | Archived empirical model (do not use in simulation) |
-| `DeSchutterAero` | `aero_deschutter.py` | De Schutter 2018 lumped-blade BEM (for validation) |
+| `DeSchutterAero` | `aero_deschutter.py` | De Schutter 2018 lumped-blade BEM (equation validation only) |
+
+`SkewedWakeBEM` is the human-readable reference; `SkewedWakeBEMJit` inherits from it and
+overrides `compute_forces` with two Numba kernels. Equivalence verified to `atol=1e-10`.
+
+`DeSchutterAero` implements the paper's thin-airfoil model (Eq. 25–31) including:
+- β side-slip diagnostic (`last_sideslip_mean_deg`) — validity check, not a force modifier
+- C_{D,T} structural parasitic drag (cable drag, Eq. 29, 31) — 0.021 for de_schutter_2018
+- See `simulation/aero/deschutter.md` for the full equation-level validation
 
 Test framework in `simulation/aero/tests/` validates all models against each other.
 

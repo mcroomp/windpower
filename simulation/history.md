@@ -255,6 +255,84 @@ All runtime artifacts (logs, telemetry CSVs, analysis PNGs, unit test artefacts)
 
 Shared infrastructure moved from `conftest.py` and `test_stack_integration.py` to `simulation/tests/stack/stack_utils.py`: env-var constants, `_configure_logging`, `copy_logs_to_dir`, `check_ports_free`, `_resolve_sim_vehicle`, `_launch_sitl`, `_terminate_process`, `_kill_by_port`. `test_stack_integration.py` re-exports for backward compatibility.
 
+---
+
+## Post-M3 — Aero Model Clarity & De Schutter Validation
+
+### aero_skewed_wake.py rewritten as clear reference
+
+The non-JIT version had accumulated intermediate optimisations (numpy broadcasting over
+`(N_AB, N_RADIAL, 3)`, manual cross products, `valid` mask without `continue`) that obscured
+the physics. Since its only purpose is to be the human-readable reference for the JIT version,
+it was rewritten with:
+- Explicit double for-loop: `for i in range(N_AB): for j in range(N_RADIAL):`
+- `np.cross()` for all cross products
+- `_prandtl_F()` helper function
+- `continue` statements for invalid strips (no `valid` mask accumulation)
+- Removed dead `Q_strip` and `spin_sign` code
+- Full class docstring with 8-step algorithm summary
+- Per-method and per-step inline physics comments
+
+All 18 JIT equivalence tests (`test_skewed_wake_jit.py`, `atol=1e-10`) pass after the rewrite.
+
+### SkewedWakeBEMJit — Numba JIT fast path
+
+`aero/aero_skewed_wake_jit.py` implements `SkewedWakeBEMJit`, a drop-in `SkewedWakeBEM`
+subclass that overrides `compute_forces` with two Numba `@njit` kernels:
+- `_jit_vi0`: induced velocity bootstrap (3 iterations at R_CP)
+- `_jit_strip_loop`: full (N_AB × N_RADIAL) strip loop → F, M, Q_spin accumulation
+
+Select with `create_aero(model="jit")`. First call triggers JIT compilation (~2 s);
+subsequent calls are C-speed. Equivalence to reference verified to `atol=1e-10`.
+
+### DeSchutterAero — paper equation audit
+
+`DeSchutterAero` (in `aero_deschutter.py`) was audited against all aerodynamic
+equations in De Schutter et al. (2018).
+
+**Two new features implemented:**
+
+1. **β side-slip (Eq. 27, 28) as diagnostic:**
+   `beta_rad = arcsin(ua_span / |ua|)` computed per strip and stored as
+   `last_sideslip_mean_deg`. The paper constrains |β| ≤ 15° for BEM validity.
+   β does NOT appear in the lift or drag formulas — the Kutta-Joukowski cross
+   product `ua × e_span` already handles the geometry. β is a post-hoc validity
+   check only.
+
+2. **C_{D,T} structural parasitic drag (Eq. 29, 31):**
+   Added to blade CD: `CD_total = CD + self.CD_T` where `CD_T = CD_structural`
+   from the rotor YAML.  For de_schutter_2018: `C_{D,T} = 0.021`, derived from
+   `C_D_cyl(1.0) × d_cable(1.5 mm) × L_cable(2.60 m) / S_w(0.1875 m²)`.
+   The paper gives cable dimensions in Table I but not the final C_{D,T} value.
+   For beaupoil_2026: `CD_structural = 0.0` (blades attach to hub via spar).
+
+3. **RotorDefinition.CD_structural field** added to `rotor_definition.py` and
+   both YAML files.
+
+**Bug fixed — induction bootstrap floor:**
+`_induced_velocity()` had `T_abs = max(abs(T_guess), 0.01)`. At zero collective +
+symmetric airfoil, the 0.01 N floor seeded a nonlinear iteration that converged to
+~4 m/s induced velocity and ~200 N phantom thrust. Correct formula uses
+`T_abs = abs(T_guess)` — when T=0, discriminant reduces to v_axial^2 and v_i=0
+correctly. Normal flight cases (T >> 0.01) are unaffected.
+
+### test_deschutter_equations.py — 32 equation-level validation tests
+
+New test file mapping paper equations to implementation and YAML values:
+
+| Test class | Paper equations | Tests |
+|------------|----------------|-------|
+| `TestEq25LiftDragCoefficients` | Eq. 25 | 7 |
+| `TestEq26AngleOfAttack` | Eq. 26, 28 | 2 |
+| `TestEq27SideSlip` | Eq. 27, 28 | 4 |
+| `TestEq29StructuralDrag` | Eq. 29, 31 | 6 |
+| `TestEq30Eq31ForcDirections` | Eq. 30, 31 | 3 |
+| `TestTableI` | Table I | 10 |
+
+Module-level constants mirror paper symbols exactly (`N`, `L_w`, `L_b`, `R`,
+`A_aspect`, `chord`, `S_w`, `r_cp`, `CL_alpha`, `omega_paper`, `v_tan_cp`, `q_cp`).
+All 32 pass. Validation doc at `simulation/aero/deschutter.md`.
+
 ### Minimum tension_in for altitude maintenance at ξ=55°
 
 At ξ=55°, the vertical thrust component from the rotor must exceed hub weight (5 kg × 9.81 = 49 N) plus tether downward component. Testing showed tension_in=20 N (matching unit test default) was insufficient — the TensionPI reduced collective to near col_min=−0.20 where vertical thrust ≈ 38 N < gravity → hub fell.

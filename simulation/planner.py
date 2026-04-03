@@ -72,9 +72,9 @@ Available controllers
         Reel-in:  reel-in attitude_q at xi_reel_in_deg from wind_estimator.wind_dir_ned.
         The estimator starts from its seed (ground anemometer) and converges toward
         the orbital GPS estimate over the first few cycles.
-        xi_reel_in_deg=55  — constrained from 90° for BEM validity (default).
+        xi_reel_in_deg=80  — validated optimal (default); +24% net energy vs 55°.
         xi_reel_in_deg=None — no tilt change; identity attitude_q all cycle.
-        Use for: test_deschutter_cycle.py (xi=55), test_pumping_cycle.py (xi=None)
+        Use for: test_deschutter_cycle.py (xi=80), test_pumping_cycle.py (xi=None)
 
 Wind estimation
 ---------------
@@ -606,7 +606,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         Seed (ground anemometer) is used until orbital GPS estimate converges.
     xi_reel_in_deg  : float or None
         Angle between body_z and wind during reel-in [degrees].
-        55.0 (default) — constrained from 90° for BEM validity.
+        80.0 (default) — validated optimal; +24% net energy vs 55°. BEM valid to ~85°.
         None — no tilt change; identity attitude_q all cycle.
     tension_max_n   : float or None
         Max tension for thrust normalisation.  None → use tension_out.
@@ -622,7 +622,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         tension_out:          float,
         tension_in:           float,
         wind_estimator:       WindEstimator,
-        xi_reel_in_deg:       "float | None" = 55.0,
+        xi_reel_in_deg:       "float | None" = 80.0,
         tension_kp:           float = 5e-4,
         tension_ki:           float = 1e-4,
         col_min_rad:          float = TensionPI.COLL_MIN_RAD,
