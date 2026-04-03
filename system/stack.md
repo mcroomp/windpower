@@ -156,22 +156,56 @@ Prevents integral wind-up during kinematic startup.
 
 ### 2.6 Wind Estimation
 
-Wind direction and speed are needed to compute body_z_reel_in. Four methods:
+Wind direction and speed are needed to compute body_z_reel_in.
+WindEstimator in planner.py implements all estimation in-loop; DeschutterPlanner
+passes state to it on every step and reads back wind_dir_ned /
+wind_speed_at(altitude_m) for reel-in body_z computation.
 
-**Method 1 -- Rotor spin rate (in-plane speed):**
-Using the autorotation torque balance: v_inplane = omega_spin^2 x K_drag / K_drive.
-v_wind ~= v_inplane / sin(xi) where xi comes from Method 2.
+**Direction -- orbital mean position (implemented):**
+Over one full orbit the hub's mean horizontal position points downwind.
+```
+wind_dir_ned = normalize(mean(pos_ned_horizontal))   # over rolling 60 s window
+```
+No extra hardware. Converges within one orbit (~60 s). Before ready
+(< min_samples accumulated) the estimator returns a seed direction supplied
+at construction (ground anemometer reading or operator input).
 
-**Method 2 -- Orbital mean position (direction):**
-Over one orbit, wind_dir ~= normalize(mean(pos_ned_horizontal)).
-No extra hardware. Direction converges within one orbit (~60 s).
+**In-plane speed -- autorotation torque balance (implemented):**
+At spin equilibrium, aerodynamic drive torque equals drag torque:
+```
+v_inplane = omega_spin^2 * K_drag / K_drive
+```
+K_drive and K_drag are rotor-specific constants (currently tuned for beaupoil_2026).
+Full wind speed is recovered from:
+```
+v_wind = v_inplane / sin(xi)
+```
+where xi is the angle between body_z (mean over window) and wind_dir_ned.
+Exposed as wind_speed_ms (bulk mean) and wind_speed_at(altitude_m) (shear-corrected).
 
-**Method 3 -- Ground anemometer (future):**
-3D ultrasonic anemometer at ground station, extrapolated to hub altitude via log profile.
-No protocol impact -- the planner reads it locally.
+**Altitude-stratified shear and veer (implemented):**
+The buffer is altitude-binned (5 m bins, minimum 3 samples/bin, minimum 3 bins
+before fitting). Two fits are performed each call:
 
-**Method 4 -- EKF wind state augmentation (future):**
-Augment the Pixhawk EKF with a 3D wind vector estimated from tension, velocity, and omega_spin.
+| Property | Model | API |
+|---|---|---|
+| shear_alpha | Power-law: log(v) = alpha*log(z) + const | wind_speed_at(z) |
+| veer_rate_deg_per_m | Linear: azimuth = veer_rate*z + const | wind_dir_at(z) |
+
+Typically available after 3-5 pumping cycles of altitude excursion. Both models
+fall back gracefully to the bulk mean when insufficient data.
+
+Buffer management: rolling 60 s window; hard cap of 600 samples (prevents O(n^2)
+at 400 Hz). Per-step cache invalidated on each update() call.
+
+**Ground anemometer (not yet implemented):**
+Already supported as the seed/fallback direction -- wiring to actual hardware
+just requires passing the live anemometer reading as seed_wind_ned at construction.
+
+**EKF wind state augmentation (future):**
+Augment the Pixhawk EKF with a 3D wind vector estimated from tension, velocity,
+and omega_spin. If implemented, wind_ned would be added as a NAMED_VALUE_FLOAT
+custom field.
 
 ### 2.7 Planner Logic (~10 Hz)
 
