@@ -11,32 +11,26 @@ Three nodes, two communication boundaries. The Pixhawk runs two distinct loops a
 rates -- the 400 Hz ArduPilot main loop (ACRO_Heli) and the Lua scripting scheduler (50/100 Hz).
 Lua writes RC overrides that the main loop consumes at full rate.
 
-```
-+-------------------------------------------------------------+
-|  Ground Station                                             |
-|                                                             |
-|  Trajectory Planner (~10 Hz)     Winch Controller          |
-|  Phase logic, Tension PI,        Reel speed PID            |
-|  Wind estimation                 Load cell, Encoder        |
-+--+----------------------------------------------------------+
-   |                                     ^
-   | SET_ATTITUDE_TARGET                 | tension_n (local)
-   | (attitude_q + thrust, MAVLink)      | winch_speed_ms
-   | LOCAL_POSITION_NED, ATTITUDE_QUATERNION, ESC_STATUS
-   v
-+-------------------------------------------------------------+
-|  Pixhawk 6C (in air)                                        |
-|                                                             |
-|  rawes_flight.lua   50 Hz                                   |
-|    Orbit tracking, rate-limited slerp                       |
-|    Cyclic P loop, Ch1/Ch2/Ch3 RC overrides                  |
-|                                                             |
-|  rawes_yaw_trim.lua  100 Hz                                 |
-|    Yaw trim and correction, Ch4 RC override                 |
-|                                                             |
-|  ACRO_Heli  400 Hz (ArduPilot main loop)                    |
-|    Rate PIDs, H3-120 mix, spool guards, servo PWM           |
-+-------------------------------------------------------------+
+```mermaid
+flowchart TB
+    subgraph GS["Ground Station"]
+        direction LR
+        TP["**Trajectory Planner** (~10 Hz)<BR/>Phase logic · Tension PI<BR/>Wind estimation"]
+        WC["**Winch Controller**<BR/>Reel speed PID<BR/>Load cell · Encoder"]
+        TP <-->|"tension_n (local)<BR/>winch_speed_ms"| WC
+    end
+
+    subgraph PX["Pixhawk 6C (in air)"]
+        direction TB
+        LUA1["**rawes_flight.lua**  50 Hz<BR/>Orbit tracking · Rate-limited slerp<BR/>Cyclic P loop · Ch1/Ch2/Ch3 RC overrides"]
+        LUA2["**rawes_yaw_trim.lua**  100 Hz<BR/>Yaw trim and correction · Ch4 RC override"]
+        ACRO["**ACRO_Heli**  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
+        LUA1 --> ACRO
+        LUA2 --> ACRO
+    end
+
+    TP -->|"SET_ATTITUDE_TARGET<BR/>(attitude_q + thrust, MAVLink)"| PX
+    PX -->|"LOCAL_POSITION_NED<BR/>ATTITUDE_QUATERNION · ESC_STATUS"| TP
 ```
 
 **Key design principles:**
@@ -67,6 +61,7 @@ The base-to-hub tension difference is the tether weight component along the teth
 | body_z | Unit vector along the rotor axle (spin axis) |
 | Orbit tracking | Pixhawk-side control that rotates attitude setpoint to match hub orbital position |
 | NED | North-East-Down coordinate frame (X=North, Y=East, Z=Down). Up is [0,0,-1] |
+| Rodrigues rotation | Rotates a unit vector **v** around a unit axis **k** by angle **θ**: `v_rot = v·cos(θ) + (k×v)·sin(θ) + k·(k·v)·(1−cos(θ))`. Used throughout rawes_flight.lua for orbit tracking and rate-limited slerp because it operates directly on Vector3f components without requiring a quaternion library. |
 
 ### 2.2 Physical and Control Variables
 
@@ -103,41 +98,39 @@ planner only needs to command deviations.
 produces high thrust mostly along the tether. High tether tension. The winch pays out against
 this tension, driving a generator.
 
-**Reel-in (recovery phase):** The disk tilts so that xi increases toward 90 deg. Thrust acts
-mostly upward rather than along the tether. Tether tension drops to near the gravity component
-alone (~15-30 N). The winch reels in cheaply.
+**Reel-in (recovery phase):** The disk tilts to xi=80 deg. Thrust acts almost entirely upward
+rather than along the tether. Tether tension drops to ~58 N (mostly gravity component).
+The winch reels in cheaply.
 
 Net energy per cycle = (T_out - T_in) x v_reel x t_phase > 0 as long as T_out > T_in.
 
 **DeschutterPlanner** (`simulation/planner.py`) implements this strategy:
 
+```mermaid
+flowchart LR
+    RO["**Reel-Out**<BR/>*(Power Phase)*<BR/><BR/>body_z tether-aligned<BR/>xi ~ 30-55°<BR/>TensionPI → 200 N<BR/>col_max = 0.10 rad<BR/>col_min = -0.28 rad<BR/>Winch pays out<BR/>→ generator power"]
+    TR["**Transition**<BR/>*(15 s)*<BR/><BR/>body_z slews to<BR/>xi = 80° from wind<BR/>at 0.40 rad/s"]
+    RI["**Reel-In**<BR/>*(Recovery Phase)*<BR/><BR/>body_z at xi = 80°<BR/>Thrust acts upward<BR/>col_min = 0.079 rad<BR/>Tether tension ~58 N<BR/>→ cheap reel-in"]
+
+    RO -->|"tether length<BR/>reached"| TR
+    TR -->|"slerp<BR/>complete"| RI
+    RI -->|"fully<BR/>reeled in"| RO
 ```
-Reel-out: body_z tether-aligned, TensionPI targets tension_out (200 N)
-          -> high tether tension -> winch generates power
-          col_min = -0.28 rad (safe above zero-thrust at -0.34 rad)
 
-Transition (t_transition=15 s): body_z slews to xi=55 deg from wind at 0.40 rad/s
-
-Reel-in: body_z at xi=55 deg, TensionPI targets tension_in (>=80 N for altitude maintenance)
-         -> thrust acts upward, not along tether -> low aerodynamic resistance
-         col_min = -0.20 rad (safe above zero-thrust at -0.228 rad for xi=55 deg)
-```
-
-**Why tension_in >= 80 N:** At xi=55 deg, vertical thrust component is collective-dependent.
-With col_min=-0.20, thrust ~= 70-100 N vertically. Hub mass is 5 kg -> gravity 49 N. At low
-collective the hub would fall -- tension_in must be high enough to keep TensionPI outputting
-adequate collective.
+**Why col_min_reel_in = 0.079 rad:** At xi=80 deg, the disk is nearly perpendicular to the
+wind. Almost all thrust acts upward (sin(80 deg) ~= 0.985), so even modest collective
+maintains altitude. col_min is set just above the collective at which net vertical thrust
+equals gravity (zero-altitude-hold point), giving a hard floor below which the TensionPI
+cannot push. This is derived from the rotor definition via `col_min_for_altitude_rad()`.
 
 **Stack test results (beaupoil_2026, SkewedWakeBEM, wind=10 m/s East):**
-- Reel-out mean tension: 199 N
-- Reel-in steady mean tension: 86 N
-- Net energy: +1396 J per cycle
-- Peak tension: 455 N (< 496 N = 80% break load limit)
-- Min physics altitude: 5.7 m throughout cycle
 
-**High-tilt De Schutter (xi=80 deg reel-in):** Net energy improves to approximately +1735 J/cycle
-(+24%), with reel-in tension dropping to ~58 N. Requires col_max=0.10 rad and
-col_min_reel_in=0.079 rad.
+| Config | Reel-out tension | Reel-in tension | Net energy | Peak tension |
+|---|---|---|---|---|
+| xi=80 deg (production) | 199 N | ~58 N | +1735 J | 455 N |
+| xi=55 deg (baseline) | 199 N | 86 N | +1396 J | 455 N |
+
+Peak tension 455 N < 496 N (80% break load limit). Min physics altitude 5.7 m throughout.
 
 ### 2.5 Tension PI Controller
 
@@ -315,55 +308,28 @@ Set before flight via MAVLink parameter set or .parm file. No firmware recompila
 
 ### 4.3 50 Hz Control Loop
 
-```
-Each step (every 20 ms):
+```mermaid
+flowchart TD
+    START(["Every 20 ms"]) --> GUARD{"ACRO mode?<BR/>vehicle:get_mode() == 1"}
+    GUARD -- No --> SKIP(["return early"])
+    GUARD -- Yes --> READ["**2. Read state**<BR/>bz_now = ahrs:body_to_earth([0,0,1])<BR/>pos_ned = ahrs:get_relative_position_NED_origin()<BR/>diff = pos_ned - anchor(SCR_USER3/4/5)"]
 
-1. Guard: only run in ACRO mode (mode 1 in ArduCopter). Return early otherwise.
+    READ --> CAPT{"Equilibrium<BR/>captured?"}
+    CAPT -- "No, |diff| >= 0.5 m" --> CAPTURE["**3. Capture equilibrium** (once)<BR/>_bz_eq0   = bz_now<BR/>_tdir0    = diff / |diff|<BR/>_bz_slerp = _bz_eq0"]
+    CAPTURE --> ORBIT
+    CAPT -- Yes --> ORBIT["**4. Orbit tracking**<BR/>bz_tether = diff / |diff|<BR/>axis  = _tdir0 x bz_tether<BR/>angle = atan2(|axis|, _tdir0 . bz_tether)<BR/>_bz_orbit = Rodrigues(_bz_eq0, axis/|axis|, angle)"]
 
-2. Read state:
-       bz_now  <- ahrs:body_to_earth(Vector3f([0,0,1]))   -- body_z in NED
-       pos_ned <- ahrs:get_relative_position_NED_origin()
-       anchor  <- Vector3f(SCR_USER3, SCR_USER4, SCR_USER5)
-       diff    <- pos_ned - anchor
+    ORBIT --> TIMEOUT{"Planner silent<BR/>> 2 s?"}
+    TIMEOUT -- Yes --> CLEAR["**5. Clear _bz_target**<BR/>revert to natural orbit"]
+    TIMEOUT -- No --> SLERP
+    CLEAR --> SLERP["**6. Rate-limited slerp**<BR/>goal = _bz_target or _bz_orbit<BR/>step = min(SCR_USER2 * dt, remain)<BR/>_bz_slerp = Rodrigues(_bz_slerp, axis, step)"]
 
-3. Capture equilibrium (once, when |diff| >= 0.5 m):
-       _bz_eq0   <- bz_now                    (body_z at capture)
-       _tdir0    <- diff / |diff|              (tether direction at capture)
-       _bz_slerp <- _bz_eq0                   (initialise rate-limited setpoint)
+    SLERP --> CYCLIC["**7. Cyclic P loop**<BR/>err_ned  = bz_now x _bz_slerp<BR/>err_body = ahrs:earth_to_body(err_ned)<BR/>roll_rate  = SCR_USER1 * err_body.x<BR/>pitch_rate = SCR_USER1 * err_body.y"]
 
-4. Orbit tracking (each step):
-       bz_tether <- diff / |diff|
-       axis  <- _tdir0 x bz_tether
-       angle <- atan2(|axis|, _tdir0 . bz_tether)
-       _bz_orbit <- Rodrigues(_bz_eq0, axis/|axis|, angle)
+    CYCLIC --> RC["**8. RC override**<BR/>scale = 500 / (ACRO_RP_RATE * pi/180)<BR/>Ch1 = clamp(1500 + scale * roll_rate,  1000, 2000)<BR/>Ch2 = clamp(1500 + scale * pitch_rate, 1000, 2000)"]
 
-5. Planner timeout (2 s since last SET_ATTITUDE_TARGET):
-       clear _bz_target -> revert to natural orbit
-
-6. Rate-limited slerp:
-       goal      <- _bz_target or _bz_orbit
-       remain    <- acos(_bz_slerp . goal)
-       step      <- min(SCR_USER2 x dt, remain)
-       _bz_slerp <- Rodrigues(_bz_slerp, (_bz_slerp x goal)/|...|, step)
-
-7. Cyclic:
-       err_ned  <- bz_now x _bz_slerp          (world-frame error)
-       err_body <- ahrs:earth_to_body(err_ned)  (body-frame error)
-       err_bx   <- err_body.x                   (roll)
-       err_by   <- err_body.y                   (pitch)
-       roll_rate  <- SCR_USER1 x err_bx         (rad/s)
-       pitch_rate <- SCR_USER1 x err_by         (rad/s)
-
-8. RC override (ACRO_RP_RATE deg/s = +-500 us):
-       scale <- 500 / (ACRO_RP_RATE x pi/180)
-       Ch1 PWM <- clamp(1500 + scale x roll_rate,  1000, 2000)
-       Ch2 PWM <- clamp(1500 + scale x pitch_rate, 1000, 2000)
-
-9. Output rate limiter (SCR_USER6 = RAWES_MAX_CYC_DELTA, default 30 PWM/step):
-       Ch1 PWM <- prev_ch1 + clamp(Ch1 - prev_ch1, -max_delta, +max_delta)
-       Ch2 PWM <- prev_ch2 + clamp(Ch2 - prev_ch2, -max_delta, +max_delta)
-       rc:get_channel(1):set_override(Ch1)
-       rc:get_channel(2):set_override(Ch2)
+    RC --> RLIMIT["**9. Output rate limiter** (SCR_USER6 = 30 PWM/step)<BR/>Ch1 = prev_ch1 + clamp(Ch1-prev_ch1, -delta, +delta)<BR/>Ch2 = prev_ch2 + clamp(Ch2-prev_ch2, -delta, +delta)<BR/>rc:get_channel(1):set_override(Ch1)<BR/>rc:get_channel(2):set_override(Ch2)"]
+    RLIMIT --> START
 ```
 
 Note on Rodrigues: Lua's Vector3f operator overloading (* , +) is not available in this ArduPilot
