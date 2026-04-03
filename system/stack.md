@@ -54,6 +54,27 @@ The base-to-hub tension difference is the tether weight component along the teth
 
 ## 2. Ground Planner
 
+### 2.0 Overview
+
+The rotor is a wind-driven autogyrating hub on a tether. Gyroscopic precession causes it
+to orbit the anchor point continuously -- this is the natural equilibrium, not a disturbance
+to be corrected. Blade pitch is controlled via a swashplate (H3-120 servo layout) using
+cyclic and collective, actuated indirectly through Kaman trailing-edge flaps.
+
+Energy extraction follows a pumping cycle (De Schutter 2018):
+
+- **Reel-out:** disk axis tether-aligned (xi ~ 30-55 deg), high collective, high tether
+  tension (~200 N). Winch pays out against this tension and drives a generator.
+- **Reel-in:** disk tilted to xi = 80 deg, thrust acts mostly upward, tether tension drops
+  to ~58 N. Winch reels in at low cost. Net energy per cycle ~ +1735 J.
+
+Control is split across two nodes. The ground station runs the pumping cycle logic, reads
+the load cell directly, and runs a tension PI to compute collective -- it sends one MAVLink
+message (SET_ATTITUDE_TARGET) to the Pixhawk at ~10 Hz. The Pixhawk runs two Lua scripts on
+top of stock ACRO_Heli: rawes_flight.lua tracks the tether direction and closes the cyclic
+attitude loop at 50 Hz; rawes_yaw_trim.lua feeds forward motor torque to the GB4008
+counter-torque motor at 100 Hz. No custom firmware is required.
+
 ### 2.1 Glossary
 
 | Term | Meaning |
