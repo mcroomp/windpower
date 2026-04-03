@@ -49,6 +49,7 @@ from frames          import build_orb_frame
 from sensor          import make_sensor, SpinSensor
 from controller      import compute_swashplate_from_state, orbit_tracked_body_z_eq
 from winch           import WinchController
+from winch_node      import WinchNode, Anemometer
 from planner         import HoldPlanner, DeschutterPlanner, quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
@@ -369,22 +370,30 @@ def run_mediator(args, trajectory=None):
         ])
         log.info("Telemetry logging → %s", args.telemetry_log)  # args.telemetry_log is a runtime CLI arg
 
+    # -- WinchNode (separate MAVLink node, co-located physically with anchor) --
+    # Encapsulates WinchController + Anemometer.  The planner communicates
+    # with this node ONLY through get_telemetry() and receive_command().
+    # The mediator calls update_sensors() to feed physics outputs in.
+    _winch_node = WinchNode(
+        winch=WinchController(
+            rest_length      = float(cfg["tether_rest_length"]),
+            tension_safety_n = float(cfg["tension_safety_n"]),
+        ),
+        anemometer=Anemometer(height_m=3.0),
+    )
+    _winch_node.update_sensors(0.0, wind_world)   # prime anemometer before planner init
+
     # -- Trajectory planner (ground station) ---------------------------------
     # Caller supplies a pre-built planner, or one is built from cfg["trajectory"].
-    _pc_tension = 0.0   # last tether tension [N] from WinchController, fed to planner
+    # Wind seed comes from the WinchNode anemometer -- NOT from wind_world directly.
+    _pc_tension  = 0.0
+    _pc_telemetry: dict = _winch_node.get_telemetry()
     if trajectory is not None:
         _trajectory = trajectory
     else:
-        _trajectory = _mcfg.make_trajectory(cfg, wind_ned=wind_world)
+        _trajectory = _mcfg.make_trajectory(
+            cfg, wind_ned=_pc_telemetry["wind_ned"])
     log.info("Trajectory: %s", type(_trajectory).__name__)
-
-    # -- WinchController (ground station, co-located with planner) -----------
-    # Executes winch_speed_ms commands from the planner, enforces tension safety.
-    # Provides tension_n and tether_length_m back to the planner each step.
-    _winch = WinchController(
-        rest_length      = float(cfg["tether_rest_length"]),
-        tension_safety_n = float(cfg["tension_safety_n"]),
-    )
 
     # -- Pixhawk collective denormalisation -----------------------------------
     # thrust [0..1] from SET_ATTITUDE_TARGET → collective_rad for aero model.
@@ -467,8 +476,8 @@ def run_mediator(args, trajectory=None):
                 }
                 _traj_cmd = _trajectory.step(
                     _state_pkt, DT_TARGET,
-                    tension_n       = _pc_tension,
-                    tether_length_m = _winch.tether_length_m,
+                    tension_n       = _pc_telemetry["tension_n"],
+                    tether_length_m = _pc_telemetry["tether_length_m"],
                 )
                 # _traj_cmd: attitude_q, thrust [0..1], winch_speed_ms, phase
 
@@ -479,9 +488,9 @@ def run_mediator(args, trajectory=None):
                     _ic_tether_dir0 = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
                     _ic_body_z_eq0  = _bz.copy()
 
-                # 2. WinchController (ground station) — apply speed + safety limit
-                _winch.step(_traj_cmd["winch_speed_ms"], _pc_tension, DT_TARGET)
-                tether.rest_length = _winch.rest_length
+                # 2. WinchNode (ground station) — apply speed command + safety limit
+                _winch_node.receive_command(_traj_cmd["winch_speed_ms"], DT_TARGET)
+                tether.rest_length = _winch_node.rest_length
 
                 # 3. Collective from planner.
                 #    DeschutterPlanner returns "collective_rad" directly — use it
@@ -579,8 +588,12 @@ def run_mediator(args, trajectory=None):
                         "t=%.1f TETHER TENSION %.0f N is >80%% of break load (%.0f N)!",
                         t_sim, tether._last_info["tension"], tether.BREAK_LOAD_N,
                     )
-                # Update tension measurement for trajectory controller (next step)
-                _pc_tension = tether._last_info.get("tension", 0.0)
+                # Feed physics outputs into WinchNode; planner reads via get_telemetry().
+                # wind_world is NOT accessible to the planner -- only the anemometer reading is.
+                _winch_node.update_sensors(
+                    tether._last_info.get("tension", 0.0), wind_world)
+                _pc_telemetry = _winch_node.get_telemetry()
+                _pc_tension   = _pc_telemetry["tension_n"]   # kept for break-load warning below
 
             # Build net force and moments (aero + tether) for dynamics and logging
             F_net     = result.F_world + tether_force

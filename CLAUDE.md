@@ -107,6 +107,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 - **`aero_skewed_wake.py` rewritten for clarity** — non-JIT reference version; explicit double for-loop, `np.cross()`, `_prandtl_F()` helper; all intermediate numpy broadcasting and dead code removed. Full class + method docstrings added. Only purpose is human-readable reference and JIT equivalence validation.
 - **De Schutter 2018 aero audit** — `DeSchutterAero` compared to paper equations 25–31. Two additions: (1) **β side-slip** (`last_sideslip_mean_deg`) as validity diagnostic (Eq. 27-28); β does NOT enter force formulas. (2) **C_{D,T}=0.021** structural parasitic drag (Eq. 29, 31) added to blade CD; derived from cable geometry in Table I. Bug fixed: induction bootstrap floor `max(T,0.01)` replaced with `abs(T)` — floor caused phantom 200 N thrust at zero collective. Validation doc at `simulation/aero/deschutter.md`.
 - **`CD_structural`** field added to `RotorDefinition` and YAML files; `beaupoil_2026.yaml` = 0.0 (direct spar mount), `de_schutter_2018.yaml` = 0.021 (thin cable arms).
+- **`WinchNode` protocol boundary** (`winch_node.py`) — enforces hardware MAVLink boundary in simulation. Mediator calls `update_sensors(tension, wind_world)` (physics side only); planner calls `get_telemetry()` returning `{tension_n, tether_length_m, wind_ned}` and `receive_command(speed, dt)` (planner side only). Wind seed for `WindEstimator` comes from `Anemometer.measure()` at 3 m height, not from `wind_world` directly. Prevents simulation from cheating by accessing physics state unavailable on hardware.
 
 ### Counter-Torque Motor Simulation
 | File | When to read |
@@ -177,6 +178,7 @@ simulation/
 │
 ├── Orchestration
 │   ├── mediator.py          400 Hz co-simulation loop (SITL ↔ physics)
+│   ├── winch_node.py        WinchNode + Anemometer — protocol boundary between physics and planner
 │   └── gcs.py               MAVLink GCS client (arm, mode, RC override, params)
 │
 ├── Reporting
@@ -405,7 +407,7 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 
 ### M1 — Wire Pumping Cycle into Mediator ✅
 - TensionController, orbit_tracked_body_z_eq, blend_body_z → `controller.py`
-- Pumping cycle state machine in `mediator.py` (REEL_OUT/REEL_IN phases, winch step, TensionController)
+- Pumping cycle state machine in `mediator.py` (REEL_OUT/REEL_IN phases, WinchNode, TensionController)
 - **Gate:** All unit tests pass, test_acro_hold passes ✓
 
 ### M2 — Force Balance Audit & Rotor Abstraction ✅

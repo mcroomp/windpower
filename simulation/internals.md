@@ -227,26 +227,32 @@ During the ramp:
 
 ```
 Reel-out: body_z tether-aligned, TensionPI targets tension_out (200 N)
-          → high tether tension → winch generates power
-          col_min = −0.28 rad (safe above zero-thrust at −0.34 rad)
+          -> high tether tension -> winch generates power
+          col_max = 0.10 rad, col_min = -0.28 rad
 
-Transition (t_transition=15 s): body_z slews to xi=55° from wind at body_z_slew_rate=0.40 rad/s
+Transition (15 s): body_z slews to xi=80 deg from wind at 0.40 rad/s
 
-Reel-in:  body_z at xi=55°, TensionPI targets tension_in (≥80 N for altitude maintenance)
-          → thrust acts upward, not along tether → low aerodynamic resistance
-          col_min = −0.20 rad (safe above zero-thrust at −0.228 rad for xi=55°)
+Reel-in:  body_z at xi=80 deg, TensionPI targets tension_in (~55 N)
+          -> thrust acts upward (sin(80 deg) ~= 0.985), low tether tension
+          col_min = 0.079 rad (above altitude-hold floor at xi=80 deg)
 ```
-
-**Why tension_in ≥ 80 N:** At ξ=55°, vertical thrust component ≈ collective-dependent. With col_min=−0.20, thrust ≈ 70–100 N vertically. Hub mass is 5 kg → gravity 49 N. At low collective the hub would fall — tension_in must be high enough to keep TensionPI outputting adequate collective.
 
 **Collective passthrough:** `DeschutterPlanner.step()` returns `collective_rad` directly (the raw value from `TensionPI.update()`). The mediator uses this directly without any normalization/denormalization. This avoids the col_min mismatch that would occur if the planner normalized using `col_min_reel_in` but the mediator denormalized using `col_min_reel_out`.
 
 **Stack test results (beaupoil_2026, SkewedWakeBEM, wind=10 m/s East):**
-- Reel-out mean tension: 199 N
-- Reel-in steady mean tension: 86 N
-- Net energy: +1396 J per cycle
-- Peak tension: 455 N (< 496 N = 80% break load limit)
-- Min physics altitude: 5.7 m throughout cycle
+
+| Config | Reel-out tension | Reel-in tension | Net energy | Peak tension |
+|--------|-----------------|-----------------|------------|--------------|
+| xi=80 deg (production) | 199 N | ~58 N | +1735 J | 455 N |
+| xi=55 deg (baseline)   | 199 N |  86 N | +1396 J | 455 N |
+
+Peak tension 455 N < 496 N (80% break load limit). Min physics altitude 5.7 m.
+
+**WinchNode protocol boundary:** The planner communicates with the winch node exclusively
+through `WinchNode.get_telemetry()` and `WinchNode.receive_command()`. It has no direct
+access to `tether._last_info`, `wind_world`, or `WinchController`. Wind direction for
+`WindEstimator` is seeded from `Anemometer.measure()` (3 m height) -- not the raw wind
+vector. This mirrors the hardware MAVLink boundary and prevents simulation cheating.
 
 ---
 

@@ -288,7 +288,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 
 ---
 
-> **Sim:** No separate winch process or MAVLink link. `mediator.py` updates tether rest length L0 directly each physics step at 400 Hz. Tether tension is computed by `tether.py` (elastic Dyneema SK75 model) and fed directly into the planner.
+> **Sim:** `winch_node.py` -- `WinchNode` enforces the protocol boundary. The mediator calls `update_sensors(tension, wind_world)` after `tether.compute()` each step; the planner reads `get_telemetry()` which returns `{tension_n, tether_length_m, wind_ned}` only -- no direct access to `tether._last_info`, `wind_world`, or `WinchController`. Wind seed for `WindEstimator` comes from `Anemometer.measure()` (3 m height), not the raw wind vector. `winch_node.receive_command(speed, dt)` delegates to `WinchController.step()` with tension safety limiting.
 
 ## 4. Pixhawk Lua Scripts
 
