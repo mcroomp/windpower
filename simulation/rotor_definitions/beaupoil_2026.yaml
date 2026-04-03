@@ -67,6 +67,9 @@ airfoil:
 
   # ── Drag polar:  CD = CD0 + CL²/(π·AR·e) ───────────────────────────────
 
+  CD_structural:     0.0    # C_{D,T} — no thin connecting cables in beaupoil design
+                             # Blade roots attach directly to hub via rigid spar attachment.
+
   CD0:               0.018  # zero-lift drag coefficient  [–]
                              # SOURCE: NeuralFoil at Re=490k: CD at zero lift ≈ 0.0181.
                              # Previous value (0.010) was from bench-test Re=127k — lower Re

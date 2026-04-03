@@ -50,7 +50,7 @@ from controller  import (compute_swashplate_from_state,
                          col_min_for_altitude_rad)
 from dynamics    import RigidBodyDynamics
 from frames      import build_orb_frame
-from planner     import DeschutterPlanner, quat_is_identity, quat_apply
+from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat_apply
 from simtest_ic  import load_ic
 from tether      import TetherModel
 from winch       import WinchController
@@ -181,7 +181,7 @@ def _run_pumping_cycle(
         v_reel_in           = 0.4,
         tension_out         = tension_out,
         tension_in          = tension_in,
-        wind_ned            = WIND,
+        wind_estimator      = WindEstimator(seed_wind_ned=WIND),
         xi_reel_in_deg      = xi_reel_in_deg,
         col_min_rad         = col_min_rad,
         col_max_rad         = col_max_rad,
@@ -254,13 +254,14 @@ def _run_pumping_cycle(
 
         # 2. Planner: tension PI drives collective; winch speed for phase
         state_pkt = {
-            "pos_ned":    hub_state["pos"],
-            "vel_ned":    hub_state["vel"],
-            "omega_spin": omega_spin,
+            "pos_ned":         hub_state["pos"],
+            "vel_ned":         hub_state["vel"],
+            "omega_spin":      omega_spin,
+            "body_z":          hub_state["R"][:, 2],
+            "tension_n":       tension_now,
+            "tether_length_m": winch.tether_length_m,
         }
-        cmd = trajectory.step(state_pkt, DT,
-                              tension_n=tension_now,
-                              tether_length_m=winch.tether_length_m)
+        cmd = trajectory.step(state_pkt, DT)
 
         # 3. WinchController
         winch.step(cmd["winch_speed_ms"], tension_now, DT)

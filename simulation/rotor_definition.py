@@ -55,6 +55,10 @@ BUILTIN: dict = {
     "naca_tr_552_c":    _DEFS_DIR / "naca_tr_552_c.yaml",
 }
 
+# Cache of resolved path -> RotorDefinition.  RotorDefinition is treated as
+# read-only after load; callers must not mutate the returned instance.
+_LOAD_CACHE: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # Validation result
@@ -75,7 +79,7 @@ class ValidationIssue:
 # Kaman flap sub-record
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class KamanFlap:
     """
     Kaman servo-flap parameters (US3217809, Kaman/Bossler 1965).
@@ -130,7 +134,7 @@ class KamanFlap:
 # RotorDefinition — main class
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class RotorDefinition:
     """
     Complete aerodynamic and structural specification of one RAWES rotor variant.
@@ -176,6 +180,9 @@ class RotorDefinition:
     CL0:                 float         = 0.11
     CL_alpha_per_rad:    float         = 0.87
     CD0:                 float         = 0.01
+    CD_structural:       float         = 0.0   # C_{D,T} — parasitic drag from connecting beams/cables
+                                                # De Schutter 2018 Eq. 29, 31.  Added to blade CD.
+                                                # Normalised to blade planform area S_w.
     oswald_efficiency:   float         = 0.8
     alpha_stall_deg:     float         = 15.0
     Re_design:           Optional[int] = None
@@ -444,6 +451,7 @@ class RotorDefinition:
             aspect_ratio     = self.aspect_ratio,
             oswald_eff       = self.oswald_efficiency,
             CD0              = self.CD0,
+            CD_structural    = self.CD_structural,
             CL0              = self.CL0,
             CL_alpha         = self.CL_alpha_per_rad,
             K_cyc            = self.K_cyc,
@@ -769,6 +777,10 @@ def load(path_or_name: str) -> RotorDefinition:
                 f"Built-in options: {list(BUILTIN)}"
             )
 
+    cache_key = str(p.resolve())
+    if cache_key in _LOAD_CACHE:
+        return _LOAD_CACHE[cache_key]
+
     with p.open(encoding="utf-8") as f:
         data = _yaml.safe_load(f)
 
@@ -791,7 +803,7 @@ def load(path_or_name: str) -> RotorDefinition:
         notes                    = kf_data.get("notes", ""),
     )
 
-    return RotorDefinition(
+    _rotor = RotorDefinition(
         name        = str(data.get("name", p.stem)),
         description = str(data.get("description", "")),
 
@@ -807,6 +819,7 @@ def load(path_or_name: str) -> RotorDefinition:
         CL0               = float(af.get("CL0",            0.11)),
         CL_alpha_per_rad  = float(af.get("CL_alpha_per_rad", 0.87)),
         CD0               = float(af.get("CD0",            0.01)),
+        CD_structural     = float(af.get("CD_structural",  0.0)),
         oswald_efficiency = float(af.get("oswald_efficiency", 0.8)),
         alpha_stall_deg   = float(af.get("alpha_stall_deg", 15.0)),
         Re_design         = _m_int(af.get("Re_design")),
@@ -834,6 +847,9 @@ def load(path_or_name: str) -> RotorDefinition:
 
         rho_kg_m3 = float(ev.get("rho_kg_m3", 1.22)),
     )
+    _LOAD_CACHE[cache_key] = _rotor
+    return _rotor
+
 
 
 def default() -> RotorDefinition:

@@ -650,6 +650,8 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     #   is not set, regardless of force arm — this is why CH8 must be HIGH.
     log.info("[setup 3/6] Setting ACRO parameters (sensor_mode=%s) ...", ctx.sensor_mode)
     # Base params: always required regardless of sensor mode.
+    # All swashplate params are set explicitly so test results never depend on
+    # ArduPilot defaults (which may change between builds).
     _base_params = {
         "ARMING_SKIPCHK":   0xFFFF, # skip ALL pre-arm checks
         "INITIAL_MODE":     1,      # boot into ACRO
@@ -666,6 +668,12 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
         "ATC_RAT_RLL_IMAX": 0.0,
         "ATC_RAT_PIT_IMAX": 0.0,
         "ATC_RAT_YAW_IMAX": 0.0,
+        # Swashplate geometry — set explicitly to avoid build-to-build default drift.
+        # H3_120: CH_1 at -60 deg, CH_2 at +60 deg, CH_3 at 180 deg.
+        # H_SW_PHANG=0: no phase correction; ArduPilot H3_120 +90 deg roll advance
+        # aligns with RAWES servo layout (S1=0 deg/East, S2=120 deg, S3=240 deg).
+        "H_SW_TYPE":        3,      # 3 = H3_120  (subgroup H_SW_ + TYPE)
+        "H_SW_PHANG":       0,      # deg, reset to known state before each test
     }
     # Mode-specific params from the controller (e.g. COMPASS_USE=0 for
     # tether_relative; no compass override for physical).

@@ -1,24 +1,22 @@
 {
-  "timestamp": "2026-04-01 13:52:20",
-  "elapsed_s": 12.57,
+  "timestamp": "2026-04-03 12:29:35",
+  "elapsed_s": 475.41,
   "exit_code": 0,
-  "passed": 43,
+  "passed": 488,
   "failed": 0,
   "errors": 0,
   "skipped": 0,
   "result": "passed",
-  "log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run.log",
-  "passed_log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run_passed.log",
-  "failed_log": "E:\\repos\\windpower\\simulation\\logs\\pytest_last_run_failed.log",
+  "log": "C:\\repos\\windpower\\simulation\\logs\\pytest_last_run.log",
+  "passed_log": "C:\\repos\\windpower\\simulation\\logs\\pytest_last_run_passed.log",
+  "failed_log": "C:\\repos\\windpower\\simulation\\logs\\pytest_last_run_failed.log",
   "failed_tests": [],
   "cmd": [
-    "E:\\repos\\windpower\\simulation\\tests\\unit\\.venv\\Scripts\\python.exe",
+    "C:\\repos\\windpower\\simulation\\.venv\\Scripts\\python.exe",
     "-u",
     "-m",
     "pytest",
-    "e:/repos/windpower/simulation/tests/unit",
-    "-k",
-    "test_lua_flight_logic",
+    "simulation/tests/unit",
     "-q"
   ]
 }

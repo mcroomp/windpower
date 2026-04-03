@@ -74,6 +74,7 @@ class RigidBodyDynamics:
         self._omega = np.zeros(3, dtype=float) if omega0 is None else np.asarray(omega0, dtype=float).copy()
 
         self._step_count = 0
+        self._F_grav = np.array([0.0, 0.0, self.g * self.mass])  # constant; avoid per-step allocation
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -111,7 +112,7 @@ class RigidBodyDynamics:
         converted back to the world frame.
         """
         # --- linear ---
-        F_total = F_ext + np.array([0.0, 0.0, +self.g * self.mass])
+        F_total = F_ext + self._F_grav
         dpos    = vel
         dvel    = F_total / self.mass
 

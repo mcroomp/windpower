@@ -61,6 +61,12 @@ airfoil:
   CL0:               0.0    # zero — thin airfoil, symmetric wing assumption (Eq. 25)
   CL_alpha_per_rad:  5.385  # 2π/(1+2/12) = 12π/7  (De Schutter Eq. 25, A=12)
   CD0:               0.01   # C_{D,0} = 0.01  (De Schutter Table I)
+  CD_structural:     0.021  # C_{D,T} — structural parasitic drag from connecting cable (Eq. 29, 31)
+                             # Estimated: C_D_cyl(1.0) * d_ck(0.0015 m) * L_ck(2.60 m) / S_w(0.1875 m²)
+                             #           = 1.0 * 0.0015 * 2.60 / 0.1875 = 0.0208 ≈ 0.021
+                             # d_ck = 1.5 mm reinforcement cable diameter (Table I optimal design)
+                             # L_ck ≈ r_cp = 2.60 m  (hub centre to wing centre-of-pressure)
+                             # Paper does not state the final C_{D,T} value directly.
   oswald_efficiency: 0.8    # O_e = 0.8  (De Schutter Table I)
   alpha_stall_deg:   15.0   # from De Schutter Eq. 28: |α_k| ≤ 15°, |β_k| ≤ 15°
   Re_design:         null   # not specified — thin airfoil theory is Re-independent

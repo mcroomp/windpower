@@ -13,6 +13,7 @@ Tests cover:
   - Validation correctly catches bad geometry inputs
 """
 
+import dataclasses
 import math
 import sys
 from pathlib import Path
@@ -142,8 +143,7 @@ class TestBeaupoilGeometry:
         assert self.r.lock_number is None
 
     def test_lock_number_computed_when_I_b_given(self):
-        r = rd.load("beaupoil_2026")
-        r.I_blade_flap_kgm2 = 0.5
+        r = dataclasses.replace(rd.load("beaupoil_2026"), I_blade_flap_kgm2=0.5)
         gamma = r.lock_number
         assert gamma is not None
         # γ = ρ·a·c·R⁴ / I_b = 1.22 × 5.47 × 0.20 × 2.5⁴ / 0.5
@@ -227,39 +227,35 @@ class TestValidation:
         assert re_warns[0].level == "WARNING"
 
     def test_bad_span_gives_error(self):
-        r = rd.load("beaupoil_2026")
-        r.radius_m = 0.3   # R < r_root → span < 0
+        r = dataclasses.replace(rd.load("beaupoil_2026"), radius_m=0.3)  # R < r_root → span < 0
         issues = r.validate()
         assert any(i.level == "ERROR" and "span" in i.field for i in issues)
 
     def test_zero_mass_gives_error(self):
-        r = rd.load("beaupoil_2026")
-        r.mass_kg = 0.0
+        r = dataclasses.replace(rd.load("beaupoil_2026"), mass_kg=0.0)
         issues = r.validate()
         assert any(i.level == "ERROR" and "mass" in i.field for i in issues)
 
     def test_negative_CL_alpha_gives_error(self):
-        r = rd.load("beaupoil_2026")
-        r.CL_alpha_per_rad = -0.1
+        r = dataclasses.replace(rd.load("beaupoil_2026"), CL_alpha_per_rad=-0.1)
         issues = r.validate()
         assert any(i.level == "ERROR" and "CL_alpha" in i.field for i in issues)
 
     def test_kaman_span_start_in_hub_gives_error(self):
-        r = rd.load("beaupoil_2026")
-        r.kaman_flap.span_start_m = 0.3   # < root_cutout_m=0.5 → inside hub
+        base = rd.load("beaupoil_2026")
+        r = dataclasses.replace(base, kaman_flap=dataclasses.replace(base.kaman_flap, span_start_m=0.3))
         issues = r.validate()
         assert any(i.level == "ERROR" and "span_start_m" in i.field for i in issues)
 
     def test_kaman_span_end_beyond_tip_gives_error(self):
-        r = rd.load("beaupoil_2026")
-        r.kaman_flap.span_end_m = 3.0   # > R=2.5 → beyond tip
+        base = rd.load("beaupoil_2026")
+        r = dataclasses.replace(base, kaman_flap=dataclasses.replace(base.kaman_flap, span_end_m=3.0))
         issues = r.validate()
         assert any(i.level == "ERROR" and "span_end_m" in i.field for i in issues)
 
     def test_omega_eq_consistency_warning(self):
         # If omega_eq_rad_s differs by >15% from K-derived value, warn
-        r = rd.load("beaupoil_2026")
-        r.omega_eq_rad_s = 50.0   # far from theory ~21 rad/s → >15% difference
+        r = dataclasses.replace(rd.load("beaupoil_2026"), omega_eq_rad_s=50.0)
         issues = r.validate()
         auto_warns = [i for i in issues if "autorotation" in i.field and i.level == "WARNING"]
         assert len(auto_warns) >= 1
@@ -378,17 +374,15 @@ class TestKamanFlap:
         assert r.kaman_flap.is_fully_specified()
 
     def test_swashplate_load_reduction_computed_when_given(self):
-        r = rd.load("beaupoil_2026")
-        r.kaman_flap.swashplate_load_fraction = 0.2   # 80% load reduction
-        pct = r.kaman_flap.swashplate_load_reduction_pct()
-        assert pct == pytest.approx(80.0)
+        kf = dataclasses.replace(rd.load("beaupoil_2026").kaman_flap, swashplate_load_fraction=0.2)
+        assert kf.swashplate_load_reduction_pct() == pytest.approx(80.0)
 
     def test_is_geometry_defined_true_when_set(self):
-        r = rd.load("beaupoil_2026")
-        r.kaman_flap.chord_fraction = 0.25
-        r.kaman_flap.span_start_m   = 0.8
-        r.kaman_flap.span_end_m     = 2.4
-        assert r.kaman_flap.is_geometry_defined()
+        kf = dataclasses.replace(
+            rd.load("beaupoil_2026").kaman_flap,
+            chord_fraction=0.25, span_start_m=0.8, span_end_m=2.4,
+        )
+        assert kf.is_geometry_defined()
 
     def test_de_schutter_kaman_disabled(self):
         r = rd.load("de_schutter_2018")

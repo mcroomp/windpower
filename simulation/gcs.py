@@ -233,6 +233,31 @@ class RawesGCS:
         log.warning("Failed to set %s = %g after %d attempts", name, value, retries)
         return False
 
+    def get_param(self, name: str, timeout: float = 5.0) -> float | None:
+        """
+        Read a parameter value via PARAM_REQUEST_READ.
+
+        Returns the float value, or None if no response within *timeout*.
+        """
+        name_bytes = name.encode("utf-8")
+        self._mav.mav.param_request_read_send(
+            self._target_system,
+            self._target_component,
+            name_bytes,
+            -1,
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = self._mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+            if msg is None:
+                continue
+            pid = msg.param_id.rstrip("\x00")
+            if pid == name:
+                log.debug("get_param %s = %g", name, msg.param_value)
+                return float(msg.param_value)
+        log.warning("get_param %s: no response within %.1f s", name, timeout)
+        return None
+
     # ------------------------------------------------------------------
     # EKF health
     # ------------------------------------------------------------------

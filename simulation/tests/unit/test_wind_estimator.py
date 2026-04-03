@@ -25,6 +25,9 @@ from planner import WindEstimator, DeschutterPlanner, quat_apply, Q_IDENTITY
 # Helpers
 # ---------------------------------------------------------------------------
 
+_SEED_EAST = np.array([0.0, 1.0, 0.0])   # NED: East — default seed for tests that don't care about direction
+
+
 def _state(pos_ned, omega_spin=0.0, vel_ned=None):
     return {
         "pos_ned":    np.asarray(pos_ned, dtype=float),
@@ -43,14 +46,15 @@ def _feed(est, states, dt=1.0):
 # ---------------------------------------------------------------------------
 
 def test_not_ready_initially():
-    est = WindEstimator(min_samples=5)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=5)
     assert not est.ready
-    assert est.wind_dir_ned is None
+    # Before ready, wind_dir_ned returns the seed (never None)
+    assert np.allclose(est.wind_dir_ned, _SEED_EAST)
     assert est.v_inplane_ms is None
 
 
 def test_ready_after_min_samples():
-    est = WindEstimator(min_samples=5)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=5)
     for i in range(4):
         est.update(_state([0.0, 10.0, -5.0]))  # NED: East
     assert not est.ready
@@ -64,7 +68,7 @@ def test_ready_after_min_samples():
 
 def test_wind_dir_eastward():
     """Hub consistently east of anchor → wind_dir_ned points east (NED Y)."""
-    est = WindEstimator(min_samples=10)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=10)
     for i in range(20):
         angle = i * 2 * np.pi / 20
         # Hub orbits at radius ~48 m, east of anchor (mean NED Y ≈ 46)
@@ -81,7 +85,7 @@ def test_wind_dir_eastward():
 
 def test_wind_dir_northward():
     """Hub consistently north of anchor → wind_dir_ned points north (NED X)."""
-    est = WindEstimator(min_samples=10)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=10)
     for i in range(20):
         angle = i * 2 * np.pi / 20
         pos = np.array([46.0 + 10.0 * np.sin(angle),
@@ -95,7 +99,7 @@ def test_wind_dir_northward():
 
 
 def test_wind_dir_is_unit_vector():
-    est = WindEstimator(min_samples=5)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=5)
     for i in range(10):
         est.update(_state([5.0, 30.0 + i * 0.1, -10.0]))
     d = est.wind_dir_ned
@@ -105,7 +109,7 @@ def test_wind_dir_is_unit_vector():
 
 def test_wind_dir_z_always_zero():
     """wind_dir_ned must be horizontal (NED Z = 0)."""
-    est = WindEstimator(min_samples=5)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=5)
     for i in range(10):
         est.update(_state([20.0, 40.0, -15.0 - i]))
     d = est.wind_dir_ned
@@ -118,7 +122,7 @@ def test_wind_dir_z_always_zero():
 # ---------------------------------------------------------------------------
 
 def test_v_inplane_none_when_no_spin():
-    est = WindEstimator(min_samples=5)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=5)
     for i in range(10):
         est.update(_state([0.0, 40.0, -12.0], omega_spin=0.0))
     assert est.v_inplane_ms is None
@@ -131,7 +135,7 @@ def test_v_inplane_formula():
     omega   = 20.0
     expected = omega ** 2 * K_drag / K_drive
 
-    est = WindEstimator(min_samples=5, K_drive=K_drive, K_drag=K_drag)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, min_samples=5, K_drive=K_drive, K_drag=K_drag)
     for i in range(10):
         est.update(_state([0.0, 40.0, -12.0], omega_spin=omega))
     v = est.v_inplane_ms
@@ -144,12 +148,12 @@ def test_v_inplane_formula():
 # ---------------------------------------------------------------------------
 
 def test_rolling_window_evicts_old_samples():
-    est = WindEstimator(window_s=5.0, min_samples=3)
+    est = WindEstimator(seed_wind_ned=_SEED_EAST, window_s=5.0, min_samples=3)
     # Feed 10 samples with dt=1.0; internal clock goes 1..10; window=5 keeps last 5
     for i in range(10):
         est.update(_state([0.0, float(i), -5.0]), dt=1.0)
     # Internal clock = 10; cutoff = 10 - 5 = 5; keep entries with t >= 5
-    remaining_ts = [t for t, _, _ in est._buf]
+    remaining_ts = [e[0] for e in est._buf]
     assert all(t >= 5.0 for t in remaining_ts), f"stale samples remain: {remaining_ts}"
 
 
@@ -158,16 +162,16 @@ def test_rolling_window_evicts_old_samples():
 # ---------------------------------------------------------------------------
 
 def test_deschutter_uses_initial_wind_before_estimator_ready():
-    """Before estimator is ready, reel-in quaternion comes from fixed wind_ned."""
+    """Before estimator is ready, reel-in quaternion comes from the seed direction."""
     wind_ned = np.array([0.0, 10.0, 0.0])  # NED: East wind
-    est = WindEstimator(min_samples=100)  # high threshold — never ready in this test
+    # high min_samples threshold — estimator never reaches ready in this test
+    est = WindEstimator(seed_wind_ned=wind_ned, min_samples=100)
     traj = DeschutterPlanner(
         t_reel_out=30, t_reel_in=30, t_transition=5,
         v_reel_out=0.4, v_reel_in=0.4,
         tension_out=200, tension_in=20,
-        wind_ned=wind_ned,
-        xi_reel_in_deg=55,
         wind_estimator=est,
+        xi_reel_in_deg=55,
     )
     # Step into reel-in phase (advance internal clock past t_reel_out=30 s)
     for _ in range(310):   # 310 × 0.1 s = 31 s
@@ -180,22 +184,24 @@ def test_deschutter_uses_initial_wind_before_estimator_ready():
 def test_deschutter_updates_reel_in_q_when_estimator_ready():
     """After estimator converges on a different wind direction, reel-in q updates."""
     wind_initial = np.array([0.0, 10.0, 0.0])  # NED: East wind
-    est = WindEstimator(min_samples=5)
+    est = WindEstimator(seed_wind_ned=wind_initial, min_samples=5)
     traj = DeschutterPlanner(
         t_reel_out=30, t_reel_in=30, t_transition=5,
         v_reel_out=0.4, v_reel_in=0.4,
         tension_out=200, tension_in=20,
-        wind_ned=wind_initial,
-        xi_reel_in_deg=55,
         wind_estimator=est,
+        xi_reel_in_deg=55,
     )
     # Record initial reel-in quaternion (from wind_initial = East)
     q_before = traj._attitude_q_reel_in.copy()
 
-    # Feed estimator with hub positions indicating wind from north (NED X)
-    # mean NED pos should be north of anchor → wind_dir = north
-    for i in range(10):
-        angle = i * 2 * np.pi / 10
+    # Feed estimator with hub positions indicating wind from north (NED X).
+    # Run enough steps for: estimator to reach ready (min_samples=5) AND
+    # at least one wind-update cycle to fire after that.
+    # DeschutterPlanner refreshes wind estimate every 10 steps (initialised
+    # to fire on step 1, then every 10 thereafter → next fire at step 11).
+    for i in range(20):
+        angle = i * 2 * np.pi / 20
         pos = np.array([46.0 + 10.0 * np.sin(angle), 10.0 * np.cos(angle), -12.0])
         traj.step(_state(pos, omega_spin=20.0), 0.1)
 

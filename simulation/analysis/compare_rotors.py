@@ -221,7 +221,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
     from dynamics   import RigidBodyDynamics
     from tether     import TetherModel
     from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq
-    from planner    import DeschutterPlanner, Q_IDENTITY, quat_apply, quat_is_identity
+    from planner    import DeschutterPlanner, WindEstimator, Q_IDENTITY, quat_apply, quat_is_identity
 
     DT            = 1.0 / 400.0
     ANCHOR        = np.zeros(3)
@@ -266,7 +266,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         v_reel_in       = V_REEL_IN,
         tension_out     = TENSION_OUT,
         tension_in      = TENSION_IN,
-        wind_ned        = WIND,
+        wind_estimator  = WindEstimator(seed_wind_ned=WIND),
     )
 
     tension_ctrl     = TensionPI(setpoint_n=TENSION_OUT)
@@ -299,11 +299,12 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         t = i * DT
 
         state_pkt = {
-            "pos_ned":    hub_state["pos"],
-            "vel_ned":    hub_state["vel"],
-            "tension_n":  tension_now,
-            "omega_spin": omega_spin,
-            "t_free":     t,
+            "pos_ned":         hub_state["pos"],
+            "vel_ned":         hub_state["vel"],
+            "omega_spin":      omega_spin,
+            "body_z":          hub_state["R"][:, 2],
+            "tension_n":       tension_now,
+            "tether_length_m": tether.rest_length,
         }
         cmd = trajectory.step(state_pkt, DT)
 

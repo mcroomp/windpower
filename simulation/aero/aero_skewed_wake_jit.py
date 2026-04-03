@@ -36,6 +36,9 @@ from aero_skewed_wake import SkewedWakeBEM
 
 log = logging.getLogger(__name__)
 
+# NED axis unit vectors — module-level constants to avoid per-call allocation
+_NED_EAST  = np.array([0.0, 1.0, 0.0])
+_NED_NORTH = np.array([1.0, 0.0, 0.0])
 
 # ---------------------------------------------------------------------------
 # JIT kernel 1 — uniform induced velocity bootstrap (3-iteration Newton)
@@ -72,7 +75,6 @@ def _jit_strip_loop(
     phi_offsets,   # (N_AB,)   blade azimuth phase offsets
     r_stations,    # (N_RADIAL,) radial centres
     r_norm,        # (N_RADIAL,) r/R_tip
-    F_per_strip,   # (N_RADIAL,) Prandtl F, pre-computed
     R_hub,         # (3, 3)    hub rotation matrix (body -> world)
     # scalars
     collective_rad, tilt_lon_rad, tilt_lat_rad,
@@ -84,11 +86,32 @@ def _jit_strip_loop(
     dn0, dn1, dn2,  # disk_normal             (world NED)
     CL0, CL_ALPHA, CD0, AOA_LIMIT, AR_pi_e, RHO, S_elem,
     N_AZ,
+    # Prandtl F parameters (replaces pre-computed F_per_strip array)
+    N_BLADES_f, R_TIP, R_ROOT_ref, v_ax_eff, omega_abs,
 ):
     N_AB     = phi_offsets.shape[0]
     N_RADIAL = r_stations.shape[0]
     Fx = 0.0; Fy = 0.0; Fz = 0.0
     Mx = 0.0; My = 0.0; Mz = 0.0
+
+    # -- Prandtl tip/root loss per radial strip (azimuth-independent) ----------
+    # Computed once here rather than as vectorised NumPy in the Python wrapper,
+    # eliminating N_RADIAL intermediate array allocations per compute_forces call.
+    F_prandtl = np.empty(N_RADIAL)
+    F_prandtl_sum = 0.0
+    half_blades = N_BLADES_f * 0.5
+    for j in range(N_RADIAL):
+        r_j      = r_stations[j]
+        v_tan_j  = max(omega_abs * r_j, 0.5)
+        phi_j    = math.atan2(v_ax_eff, v_tan_j)
+        sin_phi_j = max(abs(math.sin(phi_j)), 1e-4)
+        f_tip  = half_blades * (R_TIP    - r_j) / (r_j      * sin_phi_j)
+        f_root = half_blades * (r_j - R_ROOT_ref) / (R_ROOT_ref * sin_phi_j)
+        F_j = max(0.01,
+                  (2.0 / math.pi) * math.acos(min(1.0, math.exp(-max(0.0, f_tip))))
+                  * (2.0 / math.pi) * math.acos(min(1.0, math.exp(-max(0.0, f_root)))))
+        F_prandtl[j]  = F_j
+        F_prandtl_sum += F_j
 
     for i in range(N_AB):
         phi_az = spin_angle + phi_offsets[i]
@@ -150,7 +173,7 @@ def _jit_strip_loop(
             alpha = max(-AOA_LIMIT, min(AOA_LIMIT, -ua_normal / ua_chord))
             CL_   = CL0 + CL_ALPHA * alpha
             CD_   = CD0 + CL_ * CL_ / AR_pi_e
-            q     = 0.5 * RHO * ua_norm_sq * S_elem * F_per_strip[j]
+            q     = 0.5 * RHO * ua_norm_sq * S_elem * F_prandtl[j]
 
             # Lift direction:  e_lift = (ua x e_span_world) / |...|
             lr0 = ua1*esw2 - ua2*esw1
@@ -177,7 +200,7 @@ def _jit_strip_loop(
     s = ramp / N_AZ
     F_out = np.empty(3); F_out[0] = Fx*s; F_out[1] = Fy*s; F_out[2] = Fz*s
     M_out = np.empty(3); M_out[0] = Mx*s; M_out[1] = My*s; M_out[2] = Mz*s
-    return F_out, M_out
+    return F_out, M_out, F_prandtl_sum / N_RADIAL
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +228,14 @@ class SkewedWakeBEMJit(SkewedWakeBEM):
                  self._AR_pi_e, self.AOA_LIMIT, 0.05)
         _jit_strip_loop(
             self._phi_offsets, self._r_stations, self._r_norm,
-            np.ones(self.N_RADIAL), np.eye(3),
+            np.eye(3),
             0.05, 0.0, 0.0, 3.0, 0.0, 1.0,
             0.1, 0.3, 0.0,
             0.0, 5.0, 0.0,
             0.0, 0.0, 1.0,
             self.CL0, self.CL_ALPHA, self.CD0, self.AOA_LIMIT,
             self._AR_pi_e, self.RHO, float(self._S_elem), self.N_AZ,
+            float(self.N_BLADES), self.R_TIP, max(self.R_ROOT, 0.01), 1.0, 3.0,
         )
         log.info("SkewedWakeBEMJit: JIT compilation done.")
 
@@ -252,40 +276,36 @@ class SkewedWakeBEMJit(SkewedWakeBEM):
 
         if v_inplane > 0.01:
             v_ip_unit = v_inplane_vec / v_inplane
-            _ep = np.array([0.0, 1.0, 0.0])   # NED East
-            _ep = _ep - np.dot(_ep, disk_normal) * disk_normal
+            dn0_ = float(disk_normal[0]); dn1_ = float(disk_normal[1]); dn2_ = float(disk_normal[2])
+            _ep = _NED_EAST  - np.dot(_NED_EAST,  disk_normal) * disk_normal
             if np.linalg.norm(_ep) < 1e-6:
-                _ep = np.array([1.0, 0.0, 0.0])   # NED North fallback
-                _ep = _ep - np.dot(_ep, disk_normal) * disk_normal
-            _bx      = _ep / np.linalg.norm(_ep)
-            _by      = np.cross(disk_normal, _bx)
-            psi_skew = math.atan2(float(np.dot(v_ip_unit, _by)),
-                                  float(np.dot(v_ip_unit, _bx)))
+                _ep = _NED_NORTH - np.dot(_NED_NORTH, disk_normal) * disk_normal
+            _bx = _ep / np.linalg.norm(_ep)
+            # inline np.cross(disk_normal, _bx) to avoid numpy dispatch overhead
+            bx0_ = float(_bx[0]); bx1_ = float(_bx[1]); bx2_ = float(_bx[2])
+            by0_ = dn1_ * bx2_ - dn2_ * bx1_
+            by1_ = dn2_ * bx0_ - dn0_ * bx2_
+            by2_ = dn0_ * bx1_ - dn1_ * bx0_
+            psi_skew = math.atan2(
+                float(v_ip_unit[0]) * by0_ + float(v_ip_unit[1]) * by1_ + float(v_ip_unit[2]) * by2_,
+                float(np.dot(v_ip_unit, _bx)),
+            )
         else:
             psi_skew = 0.0
 
-        # -- Prandtl F per radial strip (vectorized numpy, N_RADIAL=10) --------
-        v_ax_eff    = abs(v_axial + v_i0)
-        v_tan_j     = np.maximum(omega_abs * self._r_stations, 0.5)
-        phi_j       = np.arctan2(v_ax_eff, v_tan_j)
-        sin_phi_j   = np.maximum(np.abs(np.sin(phi_j)), 1e-4)
-        r_ref       = max(self.R_ROOT, 0.01)
-        f_tip       = (self.N_BLADES / 2.0) * (self.R_TIP  - self._r_stations) / (self._r_stations * sin_phi_j)
-        f_root      = (self.N_BLADES / 2.0) * (self._r_stations - self.R_ROOT) / (r_ref * sin_phi_j)
-        F_per_strip = np.maximum(0.01,
-                                 (2.0 / math.pi) * np.arccos(np.minimum(1.0, np.exp(-np.maximum(0.0, f_tip))))
-                                 * (2.0 / math.pi) * np.arccos(np.minimum(1.0, np.exp(-np.maximum(0.0, f_root)))))
+        v_ax_eff = abs(v_axial + v_i0)
 
-        self.last_F_prandtl      = float(np.mean(F_per_strip))
         self.last_K_skew         = K_skew
         self.last_skew_angle_deg = math.degrees(chi)
 
-        # -- Main strip loop (JIT) ---------------------------------------------
+        # -- Main strip loop (JIT) — also computes Prandtl F per strip ---------
         dn = disk_normal
         vb = v_rel_world
-        F_total, M_total = _jit_strip_loop(
-            self._phi_offsets, self._r_stations, self._r_norm, F_per_strip,
-            np.ascontiguousarray(R_hub, dtype=np.float64),
+        R_hub_c = R_hub if (R_hub.dtype == np.float64 and R_hub.flags['C_CONTIGUOUS']) \
+                       else np.ascontiguousarray(R_hub, dtype=np.float64)
+        F_total, M_total, F_prandtl_mean = _jit_strip_loop(
+            self._phi_offsets, self._r_stations, self._r_norm,
+            R_hub_c,
             float(collective_rad), float(tilt_lon_rad), float(tilt_lat_rad),
             float(omega_rotor), float(spin_angle), float(ramp),
             float(v_i0), float(K_skew), float(psi_skew),
@@ -293,7 +313,10 @@ class SkewedWakeBEMJit(SkewedWakeBEM):
             float(dn[0]), float(dn[1]), float(dn[2]),
             self.CL0, self.CL_ALPHA, self.CD0, self.AOA_LIMIT,
             self._AR_pi_e, self.RHO, float(self._S_elem), self.N_AZ,
+            float(self.N_BLADES), self.R_TIP, max(self.R_ROOT, 0.01),
+            float(v_ax_eff), float(omega_abs),
         )
+        self.last_F_prandtl = float(F_prandtl_mean)
 
         # -- Decompose moment into spin and cyclic components ------------------
         Q_spin_scalar = float(np.dot(M_total, disk_normal))

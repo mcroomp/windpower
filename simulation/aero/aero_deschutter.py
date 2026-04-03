@@ -68,6 +68,7 @@ class DeSchutterAero:
         self.ramp_time  = float(ramp_time)
         self.k_drive_spin = float(p["k_drive_spin"])
         self.k_drag_spin  = float(p["k_drag_spin"])
+        self.CD_T         = float(p["CD_structural"])  # structural parasitic drag (Eq. 29, 31)
 
         span            = self.R_TIP - self.R_ROOT
         self.S_blade    = span * self.CHORD
@@ -102,12 +103,13 @@ class DeSchutterAero:
         self.last_collective_rad = 0.0
         self.last_tilt_lon       = 0.0
         self.last_tilt_lat       = 0.0
-        self.last_Q_spin         = 0.0
-        self.last_M_spin         = np.zeros(3)
-        self.last_M_cyc          = np.zeros(3)
-        self.last_Q_drive        = 0.0
-        self.last_Q_drag         = 0.0
-        self.last_H_force        = 0.0
+        self.last_Q_spin            = 0.0
+        self.last_M_spin            = np.zeros(3)
+        self.last_M_cyc             = np.zeros(3)
+        self.last_Q_drive           = 0.0
+        self.last_Q_drag            = 0.0
+        self.last_H_force           = 0.0
+        self.last_sideslip_mean_deg = 0.0  # mean |β| across valid strips [deg]
 
     @classmethod
     def from_definition(cls, defn, **overrides) -> "DeSchutterAero":
@@ -120,7 +122,7 @@ class DeSchutterAero:
         return max(0.0, t / self.ramp_time)
 
     def _induced_velocity(self, T_guess: float, v_axial: float = 0.0) -> float:
-        T_abs = max(abs(T_guess), 0.01)
+        T_abs = abs(T_guess)
         v_ax  = abs(v_axial)
         disc  = v_ax ** 2 + 2.0 * T_abs / (self.RHO * self.disk_area)
         return max(0.0, (-v_ax + math.sqrt(disc)) / 2.0)
@@ -218,12 +220,22 @@ class DeSchutterAero:
 
         # ── Velocity decomposition ────────────────────────────────────────────
         ua_norm   = np.sqrt(np.einsum('ijk,ijk->ij', ua, ua))        # (N_AB, N_RADIAL)
-        # Project onto chord / normal: einsum contracts last axis (dim 3)
+        # Project onto chord / normal / span: einsum contracts last axis (dim 3)
         ua_chord  = np.einsum('ijk,ik->ij', ua, e_chord_world)       # (N_AB, N_RADIAL)
         ua_normal = np.einsum('ijk,ik->ij', ua, e_normal_world)      # (N_AB, N_RADIAL)
+        ua_span   = np.einsum('ijk,ik->ij', ua, e_span_world)        # (N_AB, N_RADIAL)
 
         # Valid strips: sufficient speed and non-degenerate chord component
         valid = (ua_norm >= 0.5) & (np.abs(ua_chord) >= 1e-6)        # (N_AB, N_RADIAL) bool
+
+        # ── Side-slip angle β (De Schutter Eq. 27) ───────────────────────────
+        # β_k = arcsin((ua · e_span) / |ua|) — the spanwise component of apparent wind.
+        # De Schutter constrains |β| ≤ 15° (Eq. 28) to keep the linearised model valid.
+        # β does NOT enter the force formulas (CL and CD have no β terms) — it is a
+        # validity indicator only.  Values above 15° mean this BEM is outside its range.
+        beta_rad = np.arcsin(np.clip(
+            ua_span / np.maximum(ua_norm, 1e-9), -1.0, 1.0
+        ))                                                            # (N_AB, N_RADIAL)
 
         if not np.any(valid):
             self.last_M_spin = np.zeros(3)
@@ -254,9 +266,14 @@ class DeSchutterAero:
                              0.0)                                     # (N_AB, N_RADIAL, 3)
 
         # ── Per-strip force and moment ────────────────────────────────────────
+        # Structural drag C_{D,T} (De Schutter Eq. 29, 31): parasitic drag from
+        # connecting beams and cables, added to the airfoil drag coefficient.
+        # C_{D,T} = C_D_cyl * d_cable * L_cable / S_w  (normalised to blade area).
+        CD_total = CD + self.CD_T                                     # (N_AB, N_RADIAL)
+
         ua_unit = ua / np.maximum(ua_norm[..., None], 1e-9)          # (N_AB, N_RADIAL, 3)
         F_strip = q_dyn[..., None] * (CL[..., None] * e_lift
-                                      + CD[..., None] * ua_unit)     # (N_AB, N_RADIAL, 3)
+                                      + CD_total[..., None] * ua_unit)  # (N_AB, N_RADIAL, 3)
         M_strip = np.cross(r_cp_world, F_strip)                      # (N_AB, N_RADIAL, 3)
 
         # Torque component along spin axis per strip: (N_AB, N_RADIAL)
@@ -293,10 +310,12 @@ class DeSchutterAero:
                                          - self.k_drag_spin * omega_abs ** 2)
         self.last_Q_drive        = Q_drive
         self.last_Q_drag         = Q_drag
-        self.last_H_force        = float(np.linalg.norm(
+        self.last_H_force           = float(np.linalg.norm(
             F_total - self.last_T * disk_normal))
-        self.last_M_spin         = M_spin_world.copy()
-        self.last_M_cyc          = M_cyc_world.copy()
+        self.last_M_spin            = M_spin_world.copy()
+        self.last_M_cyc             = M_cyc_world.copy()
+        self.last_sideslip_mean_deg = float(np.degrees(
+            np.mean(np.abs(beta_rad[valid]))))
 
         log.debug("t=%.3f T=%.2fN H=%.2fN v_axial=%.2f v_i=%.2f ramp=%.2f",
                   t, self.last_T, self.last_H_force, v_axial, v_i, ramp)

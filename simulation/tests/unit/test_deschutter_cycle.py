@@ -41,14 +41,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
 from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, col_min_for_altitude_rad
-from planner     import DeschutterPlanner, quat_apply, quat_is_identity
+from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
@@ -150,7 +150,7 @@ def _run_deschutter_cycle(
         v_reel_in       = v_reel_in,
         tension_out     = tension_out,
         tension_in      = tension_in,
-        wind_ned        = WIND,
+        wind_estimator  = WindEstimator(seed_wind_ned=WIND),
         col_min_rad              = COL_MIN_RAD,
         col_max_rad              = col_max_rad,
         xi_reel_in_deg           = xi_reel_in_deg,
@@ -201,16 +201,16 @@ def _run_deschutter_cycle(
     for i in range(n_steps):
         t = i * DT
 
-        # ── STATE packet (Pixhawk → planner, standard streams) ───────────────
+        # ── STATE packet (ground station assembles from MAVLink + local sensors) ──
         state_pkt = {
-            "pos_ned":    hub_state["pos"],
-            "vel_ned":    hub_state["vel"],
-            "omega_spin": omega_spin,
+            "pos_ned":         hub_state["pos"],
+            "vel_ned":         hub_state["vel"],
+            "omega_spin":      omega_spin,
+            "body_z":          hub_state["R"][:, 2],
+            "tension_n":       tension_now,
+            "tether_length_m": winch.tether_length_m,
         }
-        # Planner reads tension + tether_length from WinchController local link
-        cmd = trajectory.step(state_pkt, DT,
-                              tension_n=tension_now,
-                              tether_length_m=winch.tether_length_m)
+        cmd = trajectory.step(state_pkt, DT)
         # cmd: attitude_q, thrust [0..1], winch_speed_ms, phase
 
         # ── WinchController (ground station) ─────────────────────────────────

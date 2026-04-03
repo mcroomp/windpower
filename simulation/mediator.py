@@ -463,6 +463,7 @@ def run_mediator(args, trajectory=None):
                     "pos_ned":    hub_state["pos"],
                     "vel_ned":    hub_state["vel"],
                     "omega_spin": spin_sensor.measure(omega_spin),
+                    "body_z":     hub_state["R"][:, 2],
                 }
                 _traj_cmd = _trajectory.step(
                     _state_pkt, DT_TARGET,

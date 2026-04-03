@@ -43,9 +43,10 @@ RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone \
 # =============================================================================
 ENV VENV_DIR=/rawes/.venv
 
+COPY requirements.txt requirements-docker.txt /tmp/
 RUN python3 -m venv "$VENV_DIR" \
     && "$VENV_DIR/bin/pip" install --upgrade pip --quiet \
-    && "$VENV_DIR/bin/pip" install numpy matplotlib scipy pytest pymavlink pexpect "empy==3.3.4" pyyaml numba --quiet
+    && "$VENV_DIR/bin/pip" install -r /tmp/requirements-docker.txt --quiet
 
 # Activate venv for all subsequent RUN commands and the final shell
 ENV PATH="$VENV_DIR/bin:/usr/local/bin:$PATH"

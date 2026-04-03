@@ -211,7 +211,7 @@ def make_trajectory(cfg: dict, wind_ned):
     """
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from planner import HoldPlanner, DeschutterPlanner
+    from planner import HoldPlanner, DeschutterPlanner, WindEstimator
 
     import numpy as _np
     traj_cfg  = cfg.get("trajectory", {})
@@ -224,6 +224,10 @@ def make_trajectory(cfg: dict, wind_ned):
         # than silently using a wrong default.
         p = traj_cfg["deschutter"]
         _xi = p["xi_reel_in_deg"]
+        # WindEstimator seeded from the ground station anemometer reading.
+        # Provides wind direction immediately (seed), then converges toward
+        # the orbital GPS estimate over the first few pumping cycles.
+        estimator = WindEstimator(seed_wind_ned=_np.asarray(wind_ned, dtype=float))
         return DeschutterPlanner(
             t_reel_out          = float(p["t_reel_out"]),
             t_reel_in           = float(p["t_reel_in"]),
@@ -232,7 +236,7 @@ def make_trajectory(cfg: dict, wind_ned):
             v_reel_in           = float(p["v_reel_in"]),
             tension_out         = float(p["tension_out"]),
             tension_in          = float(p["tension_in"]),
-            wind_ned            = _np.asarray(wind_ned, dtype=float),
+            wind_estimator      = estimator,
             xi_reel_in_deg      = float(_xi) if _xi is not None else None,
             tension_kp          = float(p["tension_kp"]),
             tension_ki          = float(p["tension_ki"]),

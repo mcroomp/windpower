@@ -1,0 +1,4 @@
+-r requirements.txt
+pymavlink
+pexpect
+empy==3.3.4

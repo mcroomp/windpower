@@ -1,0 +1,8 @@
+numpy
+matplotlib
+scipy
+pytest
+pytest-timeout
+pyyaml
+numba
+pyvista
