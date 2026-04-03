@@ -98,20 +98,52 @@ Regenerate: `pytest tests/unit/test_steady_flight.py` → writes `steady_state_s
 
 ### Unit tests (Windows, no Docker)
 
-```cmd
-simulation\tests\unit\.venv\Scripts\python.exe -m pytest simulation\tests\unit
+```bash
+bash sim.sh test-unit -q
 ```
 
 Key unit tests:
-- `test_closed_loop.py` — closed-loop physics (dynamics + aero + tether + controller), no ArduPilot
-- `test_steady_flight.py` — open-loop equilibrium, writes `steady_state_starting.json`
-- `test_controller.py` — controller function unit tests
+- `test_closed_loop.py` -- closed-loop physics (dynamics + aero + tether + controller), no ArduPilot
+- `test_steady_flight.py` -- open-loop equilibrium, writes `steady_state_starting.json`
+- `test_controller.py` -- controller function unit tests
 
 ### Stack integration tests (Docker via WSL)
 
-```cmd
-wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-stack'
+```bash
+bash sim.sh test-stack -v
 ```
 
 See `CLAUDE.md` in the repo root for full Docker setup and test commands.
+
+---
+
+## Analysis Tools
+
+Standalone scripts in `analysis/`. Not part of the simulation runtime; not imported by
+`mediator.py` or any test fixture. Run after stack tests to produce structured reports and plots.
+
+**Always run analyse_run.py after a stack test:**
+
+```bash
+bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py'
+bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py --plot'
+```
+
+| Script | Purpose | Status |
+|--------|---------|--------|
+| `analyse_run.py` | Post-run structured report -- reads last mediator/SITL/GCS logs, prints key metrics | Active |
+| `generate_flight_report.py` | Offline multi-panel PNG plot from mediator telemetry CSV | Active |
+| `redraw_flight_report.py` | Regenerate flight_report.png from saved flight_data.json | Active |
+| `merge_logs.py` | Merge mediator/SITL/GCS logs in timestamp order for unified timeline | Active |
+| `analyse_30s_dip.py` | Diagnostic for 30 s guided flight altitude dip | Historical |
+| `plot_30s_mechanism.py` | Annotated diagram of the 30 s dip mechanism | Historical |
+| `build.py` | Docker image build progress monitor | Active |
+| `analyse_pumping_cycle.py` | Pumping cycle energy/tension analysis from telemetry CSV | Active |
+| `analyse_gps_fusion.py` | EKF3 GPS fusion event analysis from SITL log | Active |
+| `analyse_ekf_consistency.py` | EKF consistency metrics over time | Active |
+| `compare_rotors.py` | Side-by-side rotor definition comparison | Active |
+| `sg6042_polar.py` | SG6042 airfoil polar plotter | Active |
+
+Last run logs: `simulation/logs/` -- `pytest_last_run.log`, `mediator_last_run.log`,
+`sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv`
 

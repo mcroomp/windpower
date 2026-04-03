@@ -42,7 +42,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 
 ## Physical System
 
-> Full details in [physical_design.md](physical_design.md) and [hardware.md](hardware.md)
+> Full details in [hardware/design.md](hardware/design.md) and [hardware/components.md](hardware/components.md)
 
 **Key parameters:**
 
@@ -71,29 +71,28 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### Hardware & Physical Design
 | File | When to read |
 |------|-------------|
-| [physical_design.md](physical_design.md) | Full assembly layout, rotor geometry, swashplate, servo flaps, all component specs |
-| [hardware.md](hardware.md) | Detailed component specs, power architecture, wiring |
-| [flaprotordesign.md](flaprotordesign.md) | Blade design, airfoil selection (SG6042), Reynolds numbers, flap prototype |
-| [servoflaps.md](servoflaps.md) | Kaman flap mechanism (US patent US3217809), swashplate linkage path |
+| [hardware/design.md](hardware/design.md) | Full assembly layout, rotor geometry, blade design (SG6042), swashplate, Kaman servo flap mechanism (US3217809), anti-rotation motor, electronics and power architecture |
+| [hardware/components.md](hardware/components.md) | Detailed component specs: GB4008 motor, REVVitRC ESC, AM32 firmware, DS113MG servos, SiK radio, RP3-H receiver, Boxer M2 transmitter |
+| [hardware/flap_sensor_bench.md](hardware/flap_sensor_bench.md) | Bench measurement system for swashplate-to-flap deflection characterisation |
 
 ### Control Theory
 | File | When to read |
 |------|-------------|
-| [deshutter.md](deshutter.md) | De Schutter et al. 2018 — pumping cycle, state variables, aerodynamics, structural constraints, parameter table |
+| [theory/pumping_cycle.md](theory/pumping_cycle.md) | De Schutter et al. 2018 -- pumping cycle, state variables, aerodynamics, structural constraints, parameter table |
+| [theory/orbit_mechanics.md](theory/orbit_mechanics.md) | Beaupoil 2026 -- orbit characteristics, gyroscopic analysis, five control design requirements |
+| [theory/flap_dynamics.md](theory/flap_dynamics.md) | Weyel 2025 -- flap state-space model, feed-forward + PID controller, N4SID identification |
 
 ### ArduPilot / Firmware
 | File | When to read |
 |------|-------------|
-| [simulation/ARMING.md](simulation/ARMING.md) | **Arming reference** — RSC modes, motor interlock, EKF init sequence, failure modes. **Update whenever new arming behavior is discovered.** |
-| [simulation/heliparams.md](simulation/heliparams.md) | **EKF3 GPS fusion** — exact fusion conditions, required params, 10 s GPS-check delay. Read before debugging EKF3 CONST_POS_MODE. |
-| [simulation/raws_mode.md](simulation/raws_mode.md) | **RAWES flight controller spec** — MAVLink protocol, orbit tracking, tension PI, omega_spin, ArduPilot parameter table, GB4008 config, Kaman flap lag notes. **Lua scripts (`rawes_flight.lua`) are the final target — no C++ custom firmware mode planned.** |
+| [system/stack.md](system/stack.md) | **Complete flight control reference** -- system architecture, ground planner, winch controller, Pixhawk orbit tracker (rawes_flight.lua), yaw trim, ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints. **Update whenever new arming or EKF behavior is discovered.** |
 
 ### Simulation Internals
 | File | When to read |
 |------|-------------|
-| [simulation/sim_internals.md](simulation/sim_internals.md) | Sensor design, controller functions, aero model (SkewedWakeBEM), tether, pumping cycle COL_MIN rules, initial state, known gaps |
-| [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions — why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
-| [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter 2018 equation-level validation — maps each paper equation (Eq. 25-31, Table I) to its implementation, documents C_{D,T} derivation, β diagnostic, known gaps vs SkewedWakeBEM |
+| [simulation/internals.md](simulation/internals.md) | Sensor design, controller functions, aero model (SkewedWakeBEM), tether, pumping cycle COL_MIN rules, initial state, known gaps |
+| [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions -- why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
+| [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter 2018 equation-level validation -- maps each paper equation (Eq. 25-31, Table I) to its implementation, documents C_{D,T} derivation, beta diagnostic, known gaps vs SkewedWakeBEM |
 
 ### Key Design Decisions (this session)
 - **RotorAero removed** — `aero/aero_rotor.py` deleted; `create_aero()` factory now has 4 models (SkewedWakeBEM default).
@@ -385,7 +384,7 @@ ACRO mode was chosen because:
 2. `gyro_body` in yaw-aligned NED body frame: spin stripped, then `Rz(-yaw) @ omega_nospin`
 3. `accel_body`: `Rz(-yaw) @ (accel_world_ned - [0,0,9.81])`
 
-See [simulation/sim_internals.md](simulation/sim_internals.md) for full sensor/controller design details.
+See [simulation/internals.md](simulation/internals.md) for full sensor/controller design details.
 
 ---
 
@@ -417,7 +416,7 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 ### M3 — ArduPilot Configuration & Pumping Cycle Stack Test (in progress)
 - [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (reel-out 199 N, reel-in 86 N, net energy +1396 J)
 - [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 460 fast unit + 29 simtests passing
-- [x] Design `ModeRAWES` firmware architecture — documented in `simulation/raws_mode.md`
+- [x] Design `ModeRAWES` firmware architecture — documented in `system/stack.md`
 - [x] Write and validate `rawes_flight.lua` orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection)
 - [x] Confirm H_SW_TYPE=3 (H3-120) — `test_h_swash_phang` PASSES; default is already H3_120 (value 3, not 1)
 - [x] Determine H_PHANG — `test_h_swash_phang` empirical step-cyclic test: H_SW_PHANG=0 confirmed; cross_ch1=1.5%, cross_ch2=19.7%; ArduPilot H3_120 +90° roll advance angle already aligns with RAWES servo layout (S1=0°/East, S2=120°, S3=240°)
@@ -430,5 +429,5 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 - [ ] Add --hil-mode --hil-port to mediator
 - [ ] Confirm IMU mounting orientation (AHRS_ORIENTATION)
 - [ ] Write `test_hil_interface.py`
-- [ ] Document HIL bench procedure in ARMING.md
+- [ ] Document HIL bench procedure in system/stack.md
 - **Gate:** test_hil_interface.py passes + successful 60 s HIL telemetry log
