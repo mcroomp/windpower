@@ -108,6 +108,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 - **De Schutter 2018 aero audit** — `DeSchutterAero` compared to paper equations 25–31. Two additions: (1) **β side-slip** (`last_sideslip_mean_deg`) as validity diagnostic (Eq. 27-28); β does NOT enter force formulas. (2) **C_{D,T}=0.021** structural parasitic drag (Eq. 29, 31) added to blade CD; derived from cable geometry in Table I. Bug fixed: induction bootstrap floor `max(T,0.01)` replaced with `abs(T)` — floor caused phantom 200 N thrust at zero collective. Validation doc at `simulation/aero/deschutter.md`.
 - **`CD_structural`** field added to `RotorDefinition` and YAML files; `beaupoil_2026.yaml` = 0.0 (direct spar mount), `de_schutter_2018.yaml` = 0.021 (thin cable arms).
 - **`WinchNode` protocol boundary** (`winch_node.py`) — enforces hardware MAVLink boundary in simulation. Mediator calls `update_sensors(tension, wind_world)` (physics side only); planner calls `get_telemetry()` returning `{tension_n, tether_length_m, wind_ned}` and `receive_command(speed, dt)` (planner side only). Wind seed for `WindEstimator` comes from `Anemometer.measure()` at 3 m height, not from `wind_world` directly. Prevents simulation from cheating by accessing physics state unavailable on hardware.
+- **Vertical landing validated** (`test_landing.py`, `test_pump_and_land.py`) — landing is a vertical drop directly above the anchor, not a spiral descent. Key facts: (1) At the end of De Schutter reel-in the disk is already at xi=80° from the horizontal wind = only ~10° from horizontal; leveling is instant. (2) The nearly-vertical tether supports >95% of hub weight throughout descent. (3) Descent rate controller (COL_CRUISE + KP_VZ * vz_error) replaces TensionPI during landing — TensionPI oscillates when the tether briefly goes slack; the vz controller does not. (4) Tether pendulum effect naturally centres hub over the anchor: touchdown 0.5–0.7 m from anchor, 2° disk tilt, 0 m/s. Full sequence (pumping + landing) validated end-to-end in test_pump_and_land.py: +1857 J net energy, 92 s total. See `system/stack.md §7.2` and `simulation/internals.md §Landing Architecture`.
 
 ### Counter-Torque Motor Simulation
 | File | When to read |
@@ -204,6 +205,8 @@ simulation/
     │   ├── test_skewed_wake_jit.py           SkewedWakeBEMJit equivalence to reference (18 tests, atol=1e-10)
     │   ├── test_wind_estimator.py            Rolling-window wind estimator unit tests
     │   ├── test_lua_flight_logic.py          ★ Rodrigues rotation, orbit tracking, slerp, cyclic error (rawes_flight.lua math)
+    │   ├── test_landing.py                   ★ Vertical landing from xi=80° high-elevation hover (20 m tether)
+    │   ├── test_pump_and_land.py             ★ Full De Schutter pumping cycle + vertical landing (~50 m)
     │   └── ...
     └── stack/               Docker required
         ├── stack_utils.py           Shared constants + helpers (env vars, logging, process launch/teardown, port kill, log copy)
@@ -341,10 +344,16 @@ bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py --plot'
 |------|---------|
 | Regenerate steady state | `bash sim.sh test-unit -k test_steady_flight` |
 | Torque visualizer | `bash sim.sh exec 'python3 /rawes/simulation/torque/visualize_torque.py'` |
+| 3D visualizer (live) | `cd simulation && .venv/Scripts/python.exe viz3d/visualize_3d.py logs/telemetry_pump_and_land.json` |
+| Export MP4 | `cd simulation && .venv/Scripts/python.exe viz3d/visualize_3d.py <telemetry.json> --export <out.mp4> --fps 30` |
 | Build Docker image | `bash sim.sh build` |
 | Start/stop container | `bash sim.sh start` / `bash sim.sh stop` |
 | Add Windows package | Add to `simulation/requirements.txt`, re-run `bash sim.sh setup` |
 | Add Docker package | Add to `simulation/requirements-docker.txt`, rebuild image |
+
+**MP4 export** requires `imageio` and `imageio-ffmpeg` (both in `requirements.txt`).
+`imageio-ffmpeg` bundles its own ffmpeg binary — no system ffmpeg needed.
+The visualizer auto-computes spin substeps to avoid stroboscopic blade aliasing.
 
 **⚠️ Rebuilding the Docker image — CRITICAL rules:**
 

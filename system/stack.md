@@ -625,34 +625,94 @@ Phase ownership:
 During the slack-tether phase, _eq_captured is false so orbit tracking is suppressed until
 EKF position is valid and tether direction is meaningful.
 
-### 7.2 Landing -- Spiral Descent
+### 7.2 Landing -- Vertical Descent
+
+**Key constraint:** the rotor disk must be horizontal (body_z pointing up, NED [0,0,-1]) at
+touchdown or the blade tips strike the ground.  A tilted disk during the pumping orbit is fine;
+during final approach it is not.
+
+**Geometry insight:** at the end of the reel-in phase, body_z is already at xi=80 deg from the
+wind direction.  Because the East wind is horizontal, that means the disk is only ~10 deg from
+horizontal -- leveling is nearly instant.  The tether, now nearly vertical, supports >95% of the
+hub weight throughout the descent, making the tether a passive altitude-hold mechanism rather than
+a source of tension spikes.
+
+**Why not a spiral descent?**  As the tether shortens during a tethered orbit the hub speeds up
+(figure-skater effect).  At short tether lengths the orbital speed exceeds the reel-in rate and
+the tether goes slack, causing tension spikes and oscillation.  A vertical drop directly above the
+anchor avoids this entirely.
+
+**Landing sequence (validated in simulation, test_pump_and_land.py):**
 
 ```
-Step 1 -- Normal reel-in:
-    Planner: slow winch reel-in, reduce tension setpoint.
-    Lua: orbit track (identity attitude_q); Ch3 from thrust.
-    Hub spirals inward and downward.
+Step 1 -- End of reel-in (normal pumping):
+    Planner: complete reel-in to REST_LENGTH (~50 m). Body_z at xi~80 deg.
+    Lua: standard reel-in orbit tracking.  Hub is ~49 m above anchor.
 
-Step 2 -- Final approach (tether_length < ~10 m):
-    Planner: ramp thrust -> 0 over ~5 s; hold or very slow reel-in.
-    Lua: collective approaches zero; body_z alignment maintained.
-    Autorotation continues -- rotor stores kinetic energy during descent.
+Step 2 -- Leveling (<1 s):
+    Planner: send attitude_q targeting BZ_LEVEL = [0,0,-1] NED.
+    Lua: slerp body_z toward [0,0,-1] at body_z_slew_rate_rad_s (0.40 rad/s).
+    Because xi=80 deg -> only 10 deg from horizontal, leveling completes in ~1 s.
+    Switch to descent rate controller (see below).
 
-Step 3 -- Flare (optional):
-    Planner: brief thrust spike (~0.3) for 1-2 s.
-    Lua: momentary collective increase slows final descent.
+Step 3 -- Vertical descent (~32 s from 50 m):
+    Planner: winch reel in at V_LAND = 1.5 m/s.
+    Planner: descent rate controller for collective:
+        vz_error = hub_vel_z - V_LAND    (NED; +ve = too fast)
+        collective = clamp(COL_CRUISE + KP_VZ * vz_error, col_min, col_max)
+        COL_CRUISE = 0.079 rad  (col_min_reel_in at xi=80 deg)
+        KP_VZ      = 0.05 rad/(m/s)
+    Lua: body_z_eq fixed at [0,0,-1]; hover gains (kp=1.5, kd=0.5).
+    Tether pendulum effect centres hub above anchor during descent.
 
-Step 4 -- Ground contact:
-    Planner: engage ground motor (local command).
-    Lua: hold last attitude command (slerp goal unchanged).
+Step 4 -- Final drop (tether <= MIN_TETHER_M = 2 m):
+    Planner: collective = 0; winch hold.
+    Hub drops last ~2 m onto catch device.
+    No flare needed -- hub is already directly above anchor.
 ```
 
-The division of responsibility is identical to pumping flight. Landing is a subset of the normal
-protocol -- no new COMMAND fields are required.
+**Responsibility split (same protocol -- no new COMMAND fields):**
+
+| Step | Planner (ground) | Lua / ACRO (Pixhawk) |
+|---|---|---|
+| Leveling | attitude_q = bz_level quaternion; descent rate ctrl | slerp body_z; hover kp/kd; Ch3 thrust |
+| Descent | V_LAND winch command; descent rate ctrl | body_z_eq = [0,0,-1]; hover kp/kd |
+| Final drop | collective = 0; winch hold | hold last attitude |
+
+**Simulation results (test_landing.py -- isolated landing from xi=80 deg, 20 m tether):**
+
+| Metric | Value |
+|---|---|
+| Max tension (leveling + descent) | 403 N  (<620 N break load) |
+| Min altitude during descent | 1.92 m  (floor = 1.0 m) |
+| Anchor distance at touchdown | 0.51 m |
+| Disk tilt at touchdown | 2.2 deg |
+| Touchdown speed (vz) | 0.00 m/s |
+| Total time | 12.3 s |
+
+**Simulation results (test_pump_and_land.py -- full pumping cycle then land from ~50 m):**
+
+| Metric | Value |
+|---|---|
+| Net pumping energy | +1857 J |
+| Max tension during landing | 359 N |
+| Anchor distance at touchdown | 0.69 m |
+| Disk tilt at touchdown | 2.0 deg |
+| Touchdown speed (vz) | 0.00 m/s |
+| Total sequence time | 92 s |
+
+**Why the descent rate controller instead of TensionPI:**
+TensionPI reacts to tension error.  When the hub descends faster than the reel-in rate the tether
+goes slack, TensionPI sees near-zero tension, commands max collective, tether snaps taut again --
+classic oscillation.  The descent rate controller reacts to hub vz directly (from
+LOCAL_POSITION_NED) and keeps descent at V_LAND regardless of tether state.
 
 ---
 
-> **Sim:** Launch sequencing and landing are not yet implemented in simulation. Stack tests start with the hub already airborne at the equilibrium position, held kinematically for 45 s while the EKF converges, then released into live physics.
+> **Sim:** Landing is validated in `tests/unit/test_landing.py` (isolated from xi=80 deg, 20 m)
+> and `tests/unit/test_pump_and_land.py` (full pumping cycle + landing from ~50 m).
+> Both run without ArduPilot (simtest mark).  Stack tests still start with the hub already
+> airborne at the equilibrium position, held kinematically for 45 s while the EKF converges.
 
 ## Appendix A. Algorithm Detail
 

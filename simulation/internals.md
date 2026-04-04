@@ -256,6 +256,76 @@ vector. This mirrors the hardware MAVLink boundary and prevents simulation cheat
 
 ---
 
+## Landing Architecture
+
+Validated in `tests/unit/test_landing.py` (isolated, from xi=80 deg, 20 m tether) and
+`tests/unit/test_pump_and_land.py` (full pumping cycle then land from ~50 m).
+
+### Why vertical descent, not spiral
+
+During a tethered orbit the hub orbits faster as the tether shortens (angular momentum
+conservation -- figure-skater effect).  At short tether lengths the orbital speed exceeds the
+reel-in rate, the tether goes slack, and tension spikes 400+ N as it snaps taut.  A vertical
+drop directly above the anchor avoids this entirely.
+
+At the end of the De Schutter reel-in, body_z is at xi=80 deg from the (horizontal) wind vector.
+That puts the disk only ~10 deg from horizontal -- leveling is essentially instant.  The nearly-
+vertical tether supports >95% of hub weight throughout descent.
+
+### Phase sequence
+
+```
+Pumping ends: tether ~50 m, body_z at xi=80 deg, altitude ~49 m.
+
+Leveling (<1 s):
+  Planner sends attitude_q targeting BZ_LEVEL = [0,0,-1] NED.
+  Lua: slerp body_z at BODY_Z_SLEW_RATE (0.40 rad/s) -- 10 deg covered in ~0.4 s.
+  Descent rate controller active from start of this phase.
+
+Vertical descent (~32 s from 50 m at V_LAND=1.5 m/s):
+  Planner: winch -V_LAND; descent rate controller for collective:
+    vz_error = hub_vel_z - V_LAND   (NED +ve = downward)
+    collective = clamp(COL_CRUISE + KP_VZ * vz_error, col_min, col_max)
+    COL_CRUISE = 0.079 rad  KP_VZ = 0.05 rad/(m/s)
+  Lua: body_z_eq = [0,0,-1]; hover gains (kp=1.5, kd=0.5).
+  Tether pendulum naturally centres hub above anchor.
+
+Final drop (tether <= 2 m):
+  Planner: collective = 0; winch hold.
+  Hub drops ~2 m onto catch device.
+```
+
+### Controller gains
+
+| Phase | kp | kd | Rationale |
+|---|---|---|---|
+| Pumping (orbit) | 0.5 | 0.2 | Tether provides passive attitude restoring force |
+| Leveling + descent | 1.5 | 0.5 | Cyclic must carry all attitude authority alone |
+
+### Why descent rate controller (not TensionPI)
+
+TensionPI reacts to tension error.  If the hub descends faster than the reel-in rate the tether
+goes slack, TensionPI sees near-zero tension and commands max collective.  The tether snaps taut
+and the cycle repeats.  The descent rate controller reacts to hub vz from LOCAL_POSITION_NED and
+holds descent at V_LAND regardless of tether state.
+
+### Collective floor during descent
+
+`COL_CRUISE = 0.079 rad` = `col_min_reel_in` at xi=80 deg = the minimum collective to sustain
+Fz >= hub weight when the disk is horizontal.  This is the no-load hover point; the descent rate
+controller adds or subtracts a small correction (KP_VZ * vz_error) around this base.
+
+### Validated results
+
+| Test | Max tension | Anchor dist | Tilt | vz at touchdown |
+|---|---|---|---|---|
+| test_landing.py (20 m start) | 403 N | 0.51 m | 2.2 deg | 0.00 m/s |
+| test_pump_and_land.py (~50 m start) | 359 N | 0.69 m | 2.0 deg | 0.00 m/s |
+
+Both below 620 N break load.  Hub lands within 5 m (ANCHOR_LAND_RADIUS_M) of the catch device.
+
+---
+
 ## Known Gaps Between Source Thesis Model And Actual Hardware
 
 | Item | Thesis model | Actual design |
