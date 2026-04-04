@@ -7,6 +7,52 @@ https://publications.syscop.de/DeSchutter2018.pdf
 
 ---
 
+## Validation Summary
+
+This section summarises the outcome of implementing and numerically validating
+the aerodynamic model from De Schutter et al. (2018) against the paper's equations
+and Table I parameters.  The validation suite (`test_deschutter_equations.py`)
+contains 32 tests.
+
+### What was confirmed
+
+| Aspect | Result |
+|--------|--------|
+| Table I rotor geometry (N, R, L_w, L_b, c, A, r_cp, C_{D,0}, O_e, alpha_stall) | All values reproduced exactly |
+| Eq. 25 -- thin-airfoil lift slope with finite-span Prandtl correction | Confirmed: CL_alpha = 12*pi/7 = 5.385 /rad for AR=12 |
+| Eq. 25 -- induced drag (Oswald efficiency) | Confirmed at design point: CD = 0.01583 at alpha=5 deg |
+| Eq. 26 -- angle of attack from apparent wind components | Confirmed: sign convention consistent with paper |
+| Eq. 27-28 -- side-slip beta as validity check | Confirmed: beta < 5 deg at design conditions; model is within stated linearisation range |
+| Eq. 29, 31 -- structural parasitic drag C_{D,T} via cylindrical arm drag | Confirmed derivation from Table I cable geometry: C_{D,T} = 0.021 |
+| Eq. 30, 31 -- thrust T and in-plane H-force signs and directions | Confirmed: forces decompose correctly along disk-normal and in-plane |
+
+### Clarifications and implementation choices
+
+**C_{D,T} is not stated numerically in the paper.**  The value 0.021 must be
+derived from Table I cable geometry (d_cable = 1.5 mm, L_cable = r_cp = 2.60 m,
+S_w = 0.1875 m^2, C_{D,cyl} = 1.0) using Eq. 29.  This derivation is shown in
+detail in the [Eq. 29, 31 section](#eq-29-31--structural-parasitic-drag-c_dt)
+below.  At design conditions, C_{D,T} roughly doubles the profile drag and
+significantly reduces the net spin torque; omitting it would noticeably
+overestimate rotor efficiency.
+
+**beta (side-slip) does not enter the force equations.**  Equations 27-28 bound
+the side-slip angle as a validity condition for the thin-airfoil linearisation.
+The lift direction is determined by the Kutta-Joukowski cross product, which
+already handles spanwise flow geometry without an explicit beta correction term.
+The implementation records beta as a post-run diagnostic (`last_sideslip_mean_deg`)
+rather than a force modifier, consistent with the paper.
+
+**Wake skew and tip/root losses are not part of the De Schutter 2018 model.**
+The paper applies a uniform actuator-disk induction at a single representative
+radius r_cp, which is a reasonable and computationally efficient choice for
+trajectory optimisation.  The production simulation model (`SkewedWakeBEM`)
+adds Coleman skewed-wake correction and Prandtl tip/root loss factors for
+improved accuracy at high tilt angles.  `DeSchutterAero` is retained as a
+faithful reference implementation for equation-level validation.
+
+---
+
 ## Overview
 
 `aero_deschutter.py` implements the aerodynamic model of De Schutter et al. (2018)
@@ -23,18 +69,18 @@ paper equation against the implementation and the YAML parameter values.
 
 ### Table I — Rotor Geometry
 
-| Paper symbol | Value   | Where set              | Test                   |
-|-------------|---------|------------------------|------------------------|
-| N           | 3       | YAML `n_blades`        | `TestTableI`           |
-| L_w (span)  | 1.50 m  | YAML `root_cutout_m`   | `TestTableI`           |
-| L_b (arm)   | 1.60 m  | derived R - L_w        | `TestTableI`           |
-| R (tip)     | 3.10 m  | YAML `radius_m`        | `TestTableI`           |
-| c (chord)   | 0.125 m | YAML `chord_m`         | `TestTableI`           |
-| A (AR)      | 12.0    | derived span/chord     | `TestTableI`           |
-| r_cp        | 2.60 m  | R_ROOT + 2/3 * span    | `TestTableI`           |
-| C_{D,0}     | 0.01    | YAML `CD0`             | `TestTableI`           |
-| O_e         | 0.8     | YAML `oswald_eff`      | `TestTableI`           |
-| alpha_stall | 15 deg  | YAML `aoa_limit`       | `TestTableI`           |
+| Paper symbol | Value   | Where set            | Test         |
+| ------------ | ------- | -------------------- | ------------ |
+| N            | 3       | YAML `n_blades`      | `TestTableI` |
+| L_w (span)   | 1.50 m  | YAML `root_cutout_m` | `TestTableI` |
+| L_b (arm)    | 1.60 m  | derived R - L_w      | `TestTableI` |
+| R (tip)      | 3.10 m  | YAML `radius_m`      | `TestTableI` |
+| c (chord)    | 0.125 m | YAML `chord_m`       | `TestTableI` |
+| A (AR)       | 12.0    | derived span/chord   | `TestTableI` |
+| r_cp         | 2.60 m  | R_ROOT + 2/3 * span  | `TestTableI` |
+| C_{D,0}      | 0.01    | YAML `CD0`           | `TestTableI` |
+| O_e          | 0.8     | YAML `oswald_eff`    | `TestTableI` |
+| alpha_stall  | 15 deg  | YAML `aoa_limit`     | `TestTableI` |
 
 The centre of pressure r_cp = L_b + (2/3)*L_w = 2.60 m is stated in
 Section II-D: "two-thirds of wing span from root."
@@ -206,26 +252,6 @@ The production aerodynamic model (`SkewedWakeBEM` in `aero_skewed_wake.py`)
 adds Coleman skewed-wake correction and Prandtl tip/root loss, and is the
 default model used in simulation.  `DeSchutterAero` is the reference
 implementation closest to the paper and is used for equation-level validation.
-
----
-
-## Numerical Fix: Induced Velocity Bootstrap Floor
-
-The original `_induced_velocity()` used `T_abs = max(abs(T_guess), 0.01)` to
-prevent near-zero issues.  This caused a phantom 0.01 N seed that — through
-the nonlinear BEM iteration — amplified to ~4 m/s induced velocity and ~200 N
-thrust at zero collective + purely in-plane wind.
-
-The correct formula requires no floor:
-
-    disc = v_axial^2 + 2*T_abs / (rho * A_disk)
-    v_i  = max(0, (-v_axial + sqrt(disc)) / 2)
-
-When T=0: disc = v_axial^2, v_i = (-|v_axial| + |v_axial|)/2 = 0. Correct.
-When T>0: formula gives the standard actuator-disk induced velocity. Correct.
-
-The floor `max(..., 0.01)` was mathematically unnecessary and physically
-incorrect; it has been removed.
 
 ---
 

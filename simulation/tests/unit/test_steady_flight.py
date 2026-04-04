@@ -171,7 +171,6 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
         ic_dir0 = dyn.state["pos"] / max(np.linalg.norm(dyn.state["pos"]), 0.1)
     if ic_bz0 is None:
         ic_bz0 = dyn.state["R"][:, 2].copy()
-
     for step in range(steps):
         state  = dyn.state
         pos    = state["pos"]

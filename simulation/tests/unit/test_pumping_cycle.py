@@ -34,7 +34,7 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 import rotor_definition as _rd
 from tether     import TetherModel
-from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq
+from controller import compute_swashplate_from_state, TensionPI, OrbitTracker
 from winch      import WinchController
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
@@ -72,7 +72,7 @@ DEFAULT_T_REEL_OUT   =  30.0   # s — reel-out phase duration
 DEFAULT_T_REEL_IN    =  30.0   # s — reel-in phase duration
 
 
-# TensionPI and orbit_tracked_body_z_eq imported from controller.py
+# TensionPI and OrbitTracker imported from controller.py
 
 
 # ── Main simulation ────────────────────────────────────────────────────────────
@@ -109,10 +109,10 @@ def _run_pumping_cycle(
     # WinchController (ground station — executes reel commands + safety)
     winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=496.0)
 
-    hub_state   = dyn.state
-    omega_spin  = OMEGA_SPIN0
-    tether_dir0 = POS0 / np.linalg.norm(POS0)
-    body_z_eq0  = BODY_Z0.copy()
+    hub_state     = dyn.state
+    omega_spin    = OMEGA_SPIN0
+    orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0),
+                                 _rd.default().body_z_slew_rate_rad_s)
 
     t_total  = t_reel_out + t_reel_in
     n_steps  = int(t_total / DT)
@@ -147,12 +147,10 @@ def _run_pumping_cycle(
         collective  = tension_ctrl.update(tension_now, DT)
 
         # ── Attitude controller → tilt ────────────────────────────────────
-        body_z_eq_cur = orbit_tracked_body_z_eq(
-            hub_state["pos"], tether_dir0, body_z_eq0)
         sw = compute_swashplate_from_state(
             hub_state  = hub_state,
             anchor_pos = ANCHOR,
-            body_z_eq  = body_z_eq_cur,
+            body_z_eq  = orbit_tracker.update(hub_state["pos"], DT),
         )
 
         # ── Aerodynamics ──────────────────────────────────────────────────
@@ -321,20 +319,19 @@ def test_static_tension_setpoint_range():
         tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                              axle_attachment_length=0.0)
         ctrl   = TensionPI(setpoint_n=setpoint)
-        hub_state   = dyn.state
-        omega_spin  = OMEGA_SPIN0
-        tether_dir0 = POS0 / np.linalg.norm(POS0)
-        body_z_eq0  = BODY_Z0.copy()
+        hub_state     = dyn.state
+        omega_spin    = OMEGA_SPIN0
+        orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0),
+                                     _rd.default().body_z_slew_rate_rad_s)
         T_SIM = 30.0
         tensions_late = []
         tension_now = 0.0
         for i in range(int(T_SIM / DT)):
             t = i * DT
             collective = ctrl.update(tension_now, DT)
-            body_z_eq_cur = orbit_tracked_body_z_eq(
-                hub_state["pos"], tether_dir0, body_z_eq0)
             sw = compute_swashplate_from_state(
-                hub_state=hub_state, anchor_pos=ANCHOR, body_z_eq=body_z_eq_cur)
+                hub_state=hub_state, anchor_pos=ANCHOR,
+                body_z_eq=orbit_tracker.update(hub_state["pos"], DT))
             result = aero.compute_forces(
                 collective_rad=collective, tilt_lon=sw["tilt_lon"],
                 tilt_lat=sw["tilt_lat"], R_hub=hub_state["R"],

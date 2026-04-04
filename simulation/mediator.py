@@ -47,7 +47,7 @@ from aero            import SkewedWakeBEM
 from tether          import TetherModel
 from frames          import build_orb_frame
 from sensor          import make_sensor, SpinSensor
-from controller      import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from controller      import compute_swashplate_from_state, OrbitTracker
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 from planner         import HoldPlanner, DeschutterPlanner, quat_apply, quat_is_identity
@@ -411,9 +411,7 @@ def run_mediator(args, trajectory=None):
     # Winch: handled by WinchController above (ground station, not Pixhawk).
     _body_z_slew_rate     = float(cfg["body_z_slew_rate_rad_s"])
     _swashplate_phase_deg = float(cfg["swashplate_phase_deg"])
-    _ic_tether_dir0: "np.ndarray | None" = None   # captured at free-flight start
-    _ic_body_z_eq0:  "np.ndarray | None" = None   # captured at free-flight start
-    _body_z_eq_slewed: np.ndarray        = _bz.copy()  # rate-limited slew state
+    _orbit_tracker: "OrbitTracker | None" = None   # created at free-flight start
 
     # -- Main loop ------------------------------------------------------------
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
@@ -483,10 +481,10 @@ def run_mediator(args, trajectory=None):
 
                 # ── Mode_RAWES inner loops (400 Hz, runs on Pixhawk) ──────────
 
-                # 1. Orbit tracking: capture IC on first free-flight step
-                if _ic_tether_dir0 is None:
+                # 1. Orbit tracking: create tracker on first free-flight step
+                if _orbit_tracker is None:
                     _ic_tether_dir0 = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
-                    _ic_body_z_eq0  = _bz.copy()
+                    _orbit_tracker  = OrbitTracker(_bz, _ic_tether_dir0, _body_z_slew_rate)
 
                 # 2. WinchNode (ground station) — apply speed command + safety limit
                 _winch_node.receive_command(_traj_cmd["winch_speed_ms"], DT_TARGET)
@@ -503,36 +501,12 @@ def run_mediator(args, trajectory=None):
                 else:
                     collective_rad = _col_min_rad + _traj_cmd["thrust"] * (_col_max_rad - _col_min_rad)
 
-                # 4. Attitude: orbit-track tether; rate-limited slew toward
+                # 4. Attitude: orbit-track tether; rate-limited slerp toward
                 #    attitude_q target when non-identity  (SET_ATTITUDE_TARGET)
-                _bz_tether = orbit_tracked_body_z_eq(
-                    hub_state["pos"], _ic_tether_dir0, _ic_body_z_eq0)
                 _aq = _traj_cmd["attitude_q"]
-                if quat_is_identity(_aq):
-                    # Natural tether-aligned orbit — track directly, reset slew state
-                    _body_z_eq_slewed = _bz_tether.copy()
-                    _body_z_eq = _bz_tether
-                else:
-                    # Planner has commanded a specific ENU orientation.
-                    # body_z target = apply attitude_q to [0,0,-1] (NED up = -Z)
-                    # Protocol: quat_apply(attitude_q, [0,0,-1]) = desired body_z NED
-                    _bz_target = quat_apply(_aq, np.array([0.0, 0.0, -1.0]))
-                    # Rate-limited slerp toward target
-                    _cos_a = float(np.clip(np.dot(_body_z_eq_slewed, _bz_target), -1.0, 1.0))
-                    _angle  = math.acos(_cos_a)
-                    _max_step = _body_z_slew_rate * DT_TARGET
-                    if _angle > 1e-6:
-                        _alpha_slew = min(1.0, _max_step / _angle)
-                        _sin_a = math.sin(_angle)
-                        if _sin_a > 1e-9:
-                            _body_z_eq_slewed = (
-                                math.sin((1.0 - _alpha_slew) * _angle) / _sin_a * _body_z_eq_slewed
-                                + math.sin(_alpha_slew * _angle) / _sin_a * _bz_target
-                            )
-                            _body_z_eq_slewed = (
-                                _body_z_eq_slewed / np.linalg.norm(_body_z_eq_slewed)
-                            )
-                    _body_z_eq = _body_z_eq_slewed
+                _bz_target = (None if quat_is_identity(_aq)
+                              else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
+                _body_z_eq = _orbit_tracker.update(hub_state["pos"], DT_TARGET, _bz_target)
 
                 swash = compute_swashplate_from_state(
                     hub_state=hub_state, anchor_pos=anchor_ned,

@@ -220,7 +220,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
     import math as _math
     from dynamics   import RigidBodyDynamics
     from tether     import TetherModel
-    from controller import compute_swashplate_from_state, TensionPI, orbit_tracked_body_z_eq
+    from controller import compute_swashplate_from_state, TensionPI, OrbitTracker
     from planner    import DeschutterPlanner, WindEstimator, Q_IDENTITY, quat_apply, quat_is_identity
 
     DT            = 1.0 / 400.0
@@ -269,10 +269,10 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         wind_estimator  = WindEstimator(seed_wind_ned=WIND),
     )
 
-    tension_ctrl     = TensionPI(setpoint_n=TENSION_OUT)
-    ic_tether_dir0   = POS0 / np.linalg.norm(POS0)
-    ic_body_z_eq0    = BODY_Z0.copy()
-    body_z_eq_slewed = BODY_Z0.copy()
+    tension_ctrl  = TensionPI(setpoint_n=TENSION_OUT)
+    ic_tether_dir0 = POS0 / np.linalg.norm(POS0)
+    ic_body_z_eq0  = BODY_Z0.copy()
+    orbit_tracker  = OrbitTracker(ic_body_z_eq0, ic_tether_dir0, BODY_Z_SLEW)
 
     hub_state    = dyn.state
     omega_spin   = OMEGA_SPIN0
@@ -317,26 +317,10 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
         tension_ctrl.setpoint = cmd["thrust"] * TENSION_OUT
         collective_rad = tension_ctrl.update(tension_now, DT)
 
-        bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
         _aq = cmd["attitude_q"]
-        if quat_is_identity(_aq):
-            body_z_eq_slewed = bz_tether.copy()
-            body_z_eq        = bz_tether
-        else:
-            bz_target = quat_apply(_aq, np.array([0.0, 0.0, 1.0]))
-            _cos_a    = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
-            _angle    = _math.acos(_cos_a)
-            _max_step = BODY_Z_SLEW * DT
-            if _angle > 1e-6:
-                _alpha_slew = min(1.0, _max_step / _angle)
-                _sin_a = _math.sin(_angle)
-                if _sin_a > 1e-9:
-                    body_z_eq_slewed = (
-                        _math.sin((1.0 - _alpha_slew) * _angle) / _sin_a * body_z_eq_slewed
-                        + _math.sin(_alpha_slew * _angle) / _sin_a * bz_target
-                    )
-                    body_z_eq_slewed = body_z_eq_slewed / np.linalg.norm(body_z_eq_slewed)
-            body_z_eq = body_z_eq_slewed
+        _bz_target = (None if quat_is_identity(_aq)
+                      else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
+        body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
         sw = compute_swashplate_from_state(hub_state=hub_state, anchor_pos=ANCHOR,
                                            body_z_eq=body_z_eq)

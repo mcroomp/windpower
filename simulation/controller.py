@@ -129,12 +129,12 @@ def compute_swashplate_from_state(
 
     Parameters
     ----------
-    hub_state   : dict with pos (ENU), R (body→world), omega (world ENU)
-    anchor_pos  : tether anchor in ENU [m]
+    hub_state   : dict with pos (NED), R (body→world), omega (world NED)
+    anchor_pos  : tether anchor in NED [m]
     kp          : proportional gain on attitude error [rad/rad]
     kd          : derivative gain on orbital rate [rad·s/rad]
     tilt_max_rad: maximum swashplate tilt [rad] (saturation limit)
-    body_z_eq   : optional equilibrium body-z override (unit vector, ENU).
+    body_z_eq   : optional equilibrium body-z override (unit vector, NED).
                   When None (default), body_z_eq is computed as the tether
                   direction (pos - anchor) / |pos - anchor|.  Pass the hub's
                   current R[:,2] to hold the present orientation with zero
@@ -170,8 +170,8 @@ def compute_swashplate_from_state(
     omega_spin    = np.dot(omega, body_z_cur) * body_z_cur
     omega_orbital = omega - omega_spin
 
-    # Correction in world ENU frame
-    corr_enu = kp * error_world - kd * omega_orbital
+    # Correction in world NED frame
+    corr_ned = kp * error_world - kd * omega_orbital
 
     # Project onto disk-plane axes (tilt_lon = along disk X, tilt_lat = along disk Y)
     disk_x = R[:, 0]
@@ -189,11 +189,11 @@ def compute_swashplate_from_state(
     #     M = cross(r·disk_y, F·disk_z) = r·F·(disk_y × disk_z) = +r·F·disk_x
     #     → moment in +disk_x  (POSITIVE Mx for positive tilt_lon)
     #
-    # corr_enu is the required rotation axis (= direction to apply moment).
-    # To get M in +disk_x: need tilt_lon > 0 → tilt_lon = +dot(corr_enu, disk_x)
-    # To get M in +disk_y: need tilt_lat < 0 → tilt_lat = −dot(corr_enu, disk_y)
-    tilt_lon = float(np.clip( np.dot(corr_enu, disk_x) / tilt_max_rad, -1.0, 1.0))
-    tilt_lat = float(np.clip(-np.dot(corr_enu, disk_y) / tilt_max_rad, -1.0, 1.0))
+    # corr_ned is the required rotation axis (= direction to apply moment).
+    # To get M in +disk_x: need tilt_lon > 0 → tilt_lon = +dot(corr_ned, disk_x)
+    # To get M in +disk_y: need tilt_lat < 0 → tilt_lat = −dot(corr_ned, disk_y)
+    tilt_lon = float(np.clip( np.dot(corr_ned, disk_x) / tilt_max_rad, -1.0, 1.0))
+    tilt_lat = float(np.clip(-np.dot(corr_ned, disk_y) / tilt_max_rad, -1.0, 1.0))
 
     # Gyroscopic phase compensation.
     # A spinning rotor precesses 90° off-axis from an applied cyclic torque.
@@ -549,10 +549,17 @@ def orbit_tracked_body_z_eq(
     """
     Rotate body_z_eq0 azimuthally to track the hub's orbital position.
 
-    As the hub orbits, the tether direction rotates in the horizontal plane.
-    This function rotates the initial equilibrium body_z by the same azimuthal
-    angle, keeping body_z_eq consistent with the hub's aerodynamic equilibrium
-    at each orbit position.
+    Projects both tether directions onto the horizontal plane and applies the
+    resulting azimuthal (vertical-axis only) rotation to body_z_eq0.  The
+    vertical (Z) component of body_z_eq0 is preserved exactly.
+
+    Used by the Python simulation loop, which calls this at 400 Hz without
+    rate limiting.  The altitude-insensitive Z-preservation prevents the
+    positive-feedback altitude instability that would arise if the setpoint
+    fully tracked tether elevation changes at high bandwidth.
+
+    For the Lua-equivalent 3D algorithm (used on hardware, where a rate-limited
+    slerp acts as the bandwidth limiter) see orbit_tracked_body_z_eq_3d().
 
     At t=0 (cur_pos = initial pos) returns body_z_eq0 unchanged → zero error
     and zero tilt at the natural equilibrium.
@@ -573,6 +580,113 @@ def orbit_tracked_body_z_eq(
         bz0[2],
     ])
     return result / np.linalg.norm(result)
+
+
+def orbit_tracked_body_z_eq_3d(
+    cur_pos:     np.ndarray,
+    tether_dir0: np.ndarray,
+    body_z_eq0:  np.ndarray,
+) -> np.ndarray:
+    """
+    Rotate body_z_eq0 to track the hub's orbital position via full 3D Rodrigues.
+
+    Applies the minimal 3D rotation that maps tether_dir0 to the current
+    tether direction (cur_pos normalised).  Matches rawes_flight.lua
+    orbit_track() exactly.
+
+    Use this function only when the output is fed through a rate-limited slerp
+    before reaching the attitude controller — otherwise the altitude-sensitive
+    Z component creates a positive-feedback instability (see orbit_tracked_body_z_eq
+    docstring).  On hardware the Lua slerp (0.40 rad/s) provides this limiting.
+
+    Frame-agnostic: pass NED or ENU consistently across all arguments.
+    """
+    cur_pos     = np.asarray(cur_pos,     dtype=float)
+    tether_dir0 = np.asarray(tether_dir0, dtype=float)
+    body_z_eq0  = np.asarray(body_z_eq0,  dtype=float)
+
+    t_len = float(np.linalg.norm(cur_pos))
+    if t_len < 0.01:
+        return body_z_eq0.copy()
+    bzt = cur_pos / t_len
+
+    axis  = np.cross(tether_dir0, bzt)
+    sinth = float(np.linalg.norm(axis))
+    if sinth < 1e-6:
+        return body_z_eq0.copy()
+    costh  = float(np.dot(tether_dir0, bzt))
+    angle  = float(np.arctan2(sinth, costh))
+    axis_n = axis / sinth
+
+    ca = float(np.cos(angle))
+    sa = float(np.sin(angle))
+    ad = float(np.dot(axis_n, body_z_eq0))
+    return body_z_eq0 * ca + np.cross(axis_n, body_z_eq0) * sa + axis_n * (ad * (1.0 - ca))
+
+
+class OrbitTracker:
+    """
+    Rate-limited orbit-tracking body_z setpoint.
+
+    Mirrors the rawes_flight.lua state machine exactly:
+        _bz_orbit = orbit_track_3d(bz_eq0, tdir0, pos/|pos|)   each step
+        _bz_slerp = slerp(_bz_slerp, bz_target or _bz_orbit, slew_rate, dt)
+
+    Parameters
+    ----------
+    body_z_eq0      : body_z at equilibrium capture (NED unit vector)
+    tether_dir0     : tether direction at capture (NED unit vector)
+    slew_rate_rad_s : maximum setpoint rotation rate [rad/s]
+                      Use rotor_definition.body_z_slew_rate_rad_s.
+
+    Usage
+    -----
+        tracker = OrbitTracker(ic_body_z_eq0, ic_tether_dir0, rd.body_z_slew_rate_rad_s)
+        # in loop — natural orbit:
+        body_z_eq = tracker.update(pos, dt)
+        # in loop — planner override (e.g. reel-in tilt):
+        body_z_eq = tracker.update(pos, dt, bz_target=quat_apply(aq, [0,0,-1]))
+    """
+
+    def __init__(
+        self,
+        body_z_eq0:      np.ndarray,
+        tether_dir0:     np.ndarray,
+        slew_rate_rad_s: float,
+    ) -> None:
+        self._bz_slerp    = np.asarray(body_z_eq0,  dtype=float).copy()
+        self._tether_dir0 = np.asarray(tether_dir0, dtype=float).copy()
+        self._body_z_eq0  = np.asarray(body_z_eq0,  dtype=float).copy()
+        self._slew_rate   = float(slew_rate_rad_s)
+
+    def update(
+        self,
+        pos:       np.ndarray,
+        dt:        float,
+        bz_target: "np.ndarray | None" = None,
+    ) -> np.ndarray:
+        """
+        Advance and return the rate-limited body_z setpoint.
+
+        Parameters
+        ----------
+        pos       : hub position NED [m]; anchor assumed at origin
+        dt        : timestep [s]
+        bz_target : planner override unit vector NED; None = follow natural orbit
+
+        Returns
+        -------
+        np.ndarray (3,) — rate-limited body_z setpoint (copy)
+        """
+        bz_orbit = orbit_tracked_body_z_eq_3d(pos, self._tether_dir0, self._body_z_eq0)
+        goal     = np.asarray(bz_target, dtype=float) if bz_target is not None else bz_orbit
+        self._bz_slerp = slerp_body_z(self._bz_slerp, goal, self._slew_rate, dt)
+        return self._bz_slerp.copy()
+
+    @property
+    def bz_slerp(self) -> np.ndarray:
+        """Current rate-limited setpoint (read-only copy)."""
+        return self._bz_slerp.copy()
 
 
 def blend_body_z(
@@ -741,8 +855,8 @@ def col_min_for_altitude_rad(
 #
 # Rules:
 #   • No ArduPilot API calls, no side effects, no global state.
-#   • Frame-agnostic: callers pass ENU (simulation) or NED (Lua/C++ firmware);
-#     the functions work identically in either frame.
+#   • Frame-agnostic: callers pass NED or ENU; the functions work identically
+#     in either frame.  The simulation uses NED; firmware uses NED.
 #   • These three functions are the entire on-board algorithm; everything
 #     else (reading sensors, sending outputs) is platform glue.
 # ---------------------------------------------------------------------------

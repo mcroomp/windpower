@@ -37,7 +37,7 @@ import rotor_definition as rd
 from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
-from controller import compute_swashplate_from_state, orbit_tracked_body_z_eq
+from controller import compute_swashplate_from_state, OrbitTracker
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
@@ -112,11 +112,10 @@ def _run_orbit(
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LEN,
                          axle_attachment_length=0.0)
 
-    omega_spin  = float(OMEGA_SPIN0)
-    hub_state   = dyn.state
-    tether_dir0 = POS0 / np.linalg.norm(POS0)
-    body_z_eq0  = BODY_Z0.copy()
-
+    omega_spin    = float(OMEGA_SPIN0)
+    hub_state     = dyn.state
+    orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0),
+                                 rd.default().body_z_slew_rate_rad_s)
     pos_history = []
     floor_hits  = 0
 
@@ -125,8 +124,7 @@ def _run_orbit(
         t = i * DT
 
         # Orbit-tracked attitude setpoint
-        body_z_eq = orbit_tracked_body_z_eq(
-            hub_state["pos"], tether_dir0, body_z_eq0)
+        body_z_eq = orbit_tracker.update(hub_state["pos"], DT)
 
         # Attitude controller → tilt (with optional phase compensation)
         sw = compute_swashplate_from_state(

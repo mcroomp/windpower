@@ -47,7 +47,7 @@ from aero            import create_aero
 from tether          import TetherModel
 from controller      import (
     compute_swashplate_from_state,
-    orbit_tracked_body_z_eq,
+    OrbitTracker,
     col_min_for_altitude_rad,
 )
 from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity, Q_IDENTITY
@@ -143,9 +143,7 @@ def _run_pump_and_land() -> dict:
     )
 
     # Mode_RAWES inner state (pumping phase)
-    ic_tether_dir0   = _IC.pos / np.linalg.norm(_IC.pos)
-    ic_body_z_eq0    = _IC.body_z.copy()
-    body_z_eq_slewed = _IC.body_z.copy()
+    orbit_tracker = OrbitTracker(_IC.body_z, _IC.pos / np.linalg.norm(_IC.pos), BODY_Z_SLEW_RATE)
 
     hub_state   = dyn.state
     omega_spin  = _IC.omega_spin
@@ -153,7 +151,7 @@ def _run_pump_and_land() -> dict:
     tension_now    = tether._last_info.get("tension", 0.0)
     collective_rad = _IC.coll_eq_rad
     sw             = {"tilt_lon": 0.0, "tilt_lat": 0.0}
-    body_z_eq      = body_z_eq_slewed.copy()
+    body_z_eq      = orbit_tracker.bz_slerp
 
     t_pumping_end   = T_REEL_OUT + T_REEL_IN
     landing_planner = None    # created at the pumping->landing transition
@@ -192,7 +190,7 @@ def _run_pump_and_land() -> dict:
         if outer_phase == "pumping" and t_sim >= t_pumping_end:
             outer_phase     = "landing"
             landing_planner = LandingPlanner(
-                initial_body_z   = body_z_eq_slewed,
+                initial_body_z   = orbit_tracker.bz_slerp,
                 v_land           = V_LAND,
                 col_cruise       = COL_CRUISE,
                 kp_vz            = KP_VZ,
@@ -222,23 +220,9 @@ def _run_pump_and_land() -> dict:
             collective_rad = COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD)
 
             _aq = pump_cmd["attitude_q"]
-            if quat_is_identity(_aq):
-                body_z_eq_slewed = orbit_tracked_body_z_eq(
-                    hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
-            else:
-                bz_target = quat_apply(_aq, np.array([0.0, 0.0, -1.0]))
-                _cos_a = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
-                _angle = math.acos(_cos_a)
-                if _angle > 1e-6:
-                    _alpha = min(1.0, BODY_Z_SLEW_RATE * DT / _angle)
-                    _sin_a = math.sin(_angle)
-                    if _sin_a > 1e-9:
-                        body_z_eq_slewed = (
-                            math.sin((1.0 - _alpha) * _angle) / _sin_a * body_z_eq_slewed
-                            + math.sin(_alpha * _angle)       / _sin_a * bz_target
-                        )
-                        body_z_eq_slewed /= np.linalg.norm(body_z_eq_slewed)
-            body_z_eq = body_z_eq_slewed
+            _bz_target = (None if quat_is_identity(_aq)
+                          else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
+            body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
             if pump_cmd["phase"] == "reel-out":
                 energy_out += tension_now * V_REEL_OUT * DT

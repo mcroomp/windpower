@@ -47,7 +47,7 @@ import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
-from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, col_min_for_altitude_rad
+from controller  import compute_swashplate_from_state, OrbitTracker, col_min_for_altitude_rad
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
@@ -159,14 +159,12 @@ def _run_deschutter_cycle(
 
     # ── WinchController (ground station) ─────────────────────────────────────
     winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=TENSION_SAFETY_N)
+    orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0), body_z_slew_rate)
 
     # ── Mode_RAWES inner loop (400 Hz, on Pixhawk) ────────────────────────────
     # Receives COMMAND packets from trajectory planner.
     # Owns orbit tracking and rate-limited attitude slew.
     # Collective: set_throttle_out(thrust) — direct passthrough, no PI on Pixhawk.
-    ic_tether_dir0    = POS0 / np.linalg.norm(POS0)   # captured at free-flight start
-    ic_body_z_eq0     = BODY_Z0.copy()
-    body_z_eq_slewed  = BODY_Z0.copy()   # rate-limited slew state (Mode_RAWES)
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
@@ -222,26 +220,10 @@ def _run_deschutter_cycle(
         collective_rad = COL_MIN_RAD + cmd["thrust"] * (col_max_rad - COL_MIN_RAD)
 
         # ── Mode_RAWES: orbit tracking + rate-limited slew → body_z_eq ───────
-        bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
         _aq = cmd["attitude_q"]
-        if quat_is_identity(_aq):
-            body_z_eq_slewed = bz_tether.copy()
-            body_z_eq = bz_tether
-        else:
-            bz_target = quat_apply(_aq, np.array([0.0, 0.0, -1.0]))  # NED up = -Z
-            _cos_a = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
-            _angle = math.acos(_cos_a)
-            _max_step = body_z_slew_rate * DT
-            if _angle > 1e-6:
-                _alpha_slew = min(1.0, _max_step / _angle)
-                _sin_a = math.sin(_angle)
-                if _sin_a > 1e-9:
-                    body_z_eq_slewed = (
-                        math.sin((1.0 - _alpha_slew) * _angle) / _sin_a * body_z_eq_slewed
-                        + math.sin(_alpha_slew * _angle) / _sin_a * bz_target
-                    )
-                    body_z_eq_slewed = body_z_eq_slewed / np.linalg.norm(body_z_eq_slewed)
-            body_z_eq = body_z_eq_slewed
+        _bz_target = (None if quat_is_identity(_aq)
+                      else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
+        body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
         # ── Mode_RAWES: attitude controller → tilt ────────────────────────────
         sw = compute_swashplate_from_state(

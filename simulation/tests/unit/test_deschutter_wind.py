@@ -35,7 +35,7 @@ import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
-from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, col_min_for_altitude_rad
+from controller  import compute_swashplate_from_state, OrbitTracker, col_min_for_altitude_rad
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
@@ -129,11 +129,9 @@ def _run() -> dict:
         col_min_reel_in_rad      = col_min_reel_in_rad,
     )
     winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=TENSION_SAFETY_N)
+    orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0), _ROTOR.body_z_slew_rate_rad_s)
 
     from planner import Q_IDENTITY
-    ic_tether_dir0   = POS0 / np.linalg.norm(POS0)
-    ic_body_z_eq0    = BODY_Z0.copy()
-    body_z_eq_slewed = BODY_Z0.copy()
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
@@ -186,25 +184,10 @@ def _run() -> dict:
 
         collective_rad = COL_MIN_RAD + cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD)
 
-        bz_tether = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
         _aq = cmd["attitude_q"]
-        if quat_is_identity(_aq):
-            body_z_eq_slewed = bz_tether.copy()
-            body_z_eq = bz_tether
-        else:
-            bz_target = quat_apply(_aq, np.array([0.0, 0.0, -1.0]))
-            _cos_a = float(np.clip(np.dot(body_z_eq_slewed, bz_target), -1.0, 1.0))
-            _angle = math.acos(_cos_a)
-            if _angle > 1e-6:
-                _alpha_slew = min(1.0, _ROTOR.body_z_slew_rate_rad_s * DT / _angle)
-                _sin_a = math.sin(_angle)
-                if _sin_a > 1e-9:
-                    body_z_eq_slewed = (
-                        math.sin((1.0 - _alpha_slew) * _angle) / _sin_a * body_z_eq_slewed
-                        + math.sin(_alpha_slew * _angle) / _sin_a * bz_target
-                    )
-                    body_z_eq_slewed = body_z_eq_slewed / np.linalg.norm(body_z_eq_slewed)
-            body_z_eq = body_z_eq_slewed
+        _bz_target = (None if quat_is_identity(_aq)
+                      else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
+        body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
         sw = compute_swashplate_from_state(
             hub_state=hub_state, anchor_pos=ANCHOR, body_z_eq=body_z_eq)

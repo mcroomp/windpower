@@ -11,16 +11,15 @@ Validates three algorithms transplanted from Python into rawes_flight.lua:
 Python transcriptions of the Lua functions live in this file as module-level
 helpers so the comparison is exact (same arithmetic, same algorithm).
 
-Design note — orbit tracking differs between Python and Lua:
-  controller.py::orbit_tracked_body_z_eq()  azimuthal-only rotation (projects
-      tether onto the horizontal plane, rotates around world-Z)
-  rawes_flight.lua::orbit_track()           full 3D Rodrigues rotation
-      (maps tdir0 → bzt via the shortest 3D arc)
+Design note — two orbit-tracking functions in controller.py:
+  orbit_tracked_body_z_eq()     azimuthal-only rotation (preserves Z, stable at
+      400 Hz without rate limiting — used in the Python simulation loop)
+  orbit_tracked_body_z_eq_3d()  full 3D Rodrigues rotation — matches
+      rawes_flight.lua::orbit_track() exactly; safe only when downstream slerp
+      limits bandwidth (as the Lua's 0.40 rad/s slerp does on hardware)
 
-When bz_eq0 = tdir0 (tether-aligned capture, normal reel-out case) both give
-the same result: the current tether direction.  For tilted capture (reel-in)
-the Lua version is more geometrically correct.  Tests B-3 and B-4 document
-both the agreement and the known divergence.
+Tests B-3/B-4 verify orbit_tracked_body_z_eq_3d against the Lua reference;
+B-5 documents the intentional divergence of the simulation variant.
 
 No SITL, no Docker.  Runs with the existing unit-test venv.
 """
@@ -33,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller import (
     orbit_tracked_body_z_eq,
+    orbit_tracked_body_z_eq_3d,
     slerp_body_z,
     compute_rate_cmd,
 )
@@ -257,10 +257,10 @@ class TestOrbitTracking:
         result = _lua_orbit_track(_TDIR0, _TDIR0, pos1, _ANCHOR)
         np.testing.assert_allclose(result, bzt, atol=1e-12)
 
-    def test_azimuthal_orbit_agrees_with_python_when_tether_aligned(self):
+    def test_azimuthal_orbit_agrees_with_3d_when_tether_aligned(self):
         """
         For azimuthal orbit at constant elevation with bz_eq0 = tdir0,
-        the Lua 3D Rodrigues result matches orbit_tracked_body_z_eq().
+        the Lua 3D Rodrigues result matches orbit_tracked_body_z_eq_3d().
         Both reduce to 'track the current tether direction' in this case.
         """
         for az_deg in [30, 60, 90, 120, 180]:
@@ -269,28 +269,39 @@ class TestOrbitTracking:
                                    math.cos(_ELEV) * math.sin(az),
                                    math.sin(_ELEV)])
             lua_result = _lua_orbit_track(_TDIR0, _TDIR0, pos, _ANCHOR)
-            py_result  = orbit_tracked_body_z_eq(pos, _TDIR0, _TDIR0)
-            np.testing.assert_allclose(lua_result, py_result, atol=1e-6,
+            py_result  = orbit_tracked_body_z_eq_3d(pos, _TDIR0, _TDIR0)
+            np.testing.assert_allclose(lua_result, py_result, atol=1e-10,
                 err_msg=f"az_deg={az_deg}")
 
-    def test_non_tether_aligned_diverges_from_python(self):
+    def test_non_tether_aligned_agrees_with_3d(self):
         """
-        When bz_eq0 ≠ tdir0 (tilted capture, e.g. reel-in phase),
-        the Lua 3D Rodrigues and the Python azimuthal formula give
-        different results.  This documents the known divergence.
-
-        The Lua version is more geometrically correct (full 3D rotation);
-        the Python version applies only the horizontal azimuthal component.
-        Neither is wrong — they represent different valid orbit-tracking
-        conventions.  The Lua version is used on hardware; the Python
-        version remains in the simulation for backward compatibility.
+        When bz_eq0 != tdir0 (tilted capture, e.g. reel-in phase),
+        orbit_tracked_body_z_eq_3d() matches the Lua exactly.
         """
-        # Capture body_z tilted 20° away from tether direction
-        tilt_axis = np.array([0., 0., 1.])               # tilt around Z
+        tilt_axis = np.array([0., 0., 1.])
         bz_eq0_tilted = _rodrigues(_TDIR0, tilt_axis, math.radians(20.0))
         bz_eq0_tilted /= np.linalg.norm(bz_eq0_tilted)
 
-        # Hub orbits 60° azimuthally
+        az  = math.radians(60.0)
+        pos = 50.0 * np.array([math.cos(_ELEV) * math.cos(az),
+                               math.cos(_ELEV) * math.sin(az),
+                               math.sin(_ELEV)])
+
+        lua_result = _lua_orbit_track(bz_eq0_tilted, _TDIR0, pos, _ANCHOR)
+        py_result  = orbit_tracked_body_z_eq_3d(pos, _TDIR0, bz_eq0_tilted)
+
+        np.testing.assert_allclose(lua_result, py_result, atol=1e-10)
+
+    def test_simulation_variant_diverges_from_lua_for_tilted_capture(self):
+        """
+        orbit_tracked_body_z_eq() (simulation variant) diverges from the Lua
+        when bz_eq0 != tdir0.  This is intentional: the simulation variant
+        preserves body_z_eq[2] to avoid altitude instability at 400 Hz.
+        """
+        tilt_axis = np.array([0., 0., 1.])
+        bz_eq0_tilted = _rodrigues(_TDIR0, tilt_axis, math.radians(20.0))
+        bz_eq0_tilted /= np.linalg.norm(bz_eq0_tilted)
+
         az  = math.radians(60.0)
         pos = 50.0 * np.array([math.cos(_ELEV) * math.cos(az),
                                math.cos(_ELEV) * math.sin(az),
@@ -299,16 +310,11 @@ class TestOrbitTracking:
         lua_result = _lua_orbit_track(bz_eq0_tilted, _TDIR0, pos, _ANCHOR)
         py_result  = orbit_tracked_body_z_eq(pos, _TDIR0, bz_eq0_tilted)
 
-        # They should differ by a meaningful amount
         angle_diff = math.acos(float(np.clip(np.dot(lua_result, py_result), -1, 1)))
         assert angle_diff > math.radians(0.5), (
-            f"Expected Lua and Python orbit tracking to diverge for tilted "
-            f"capture, but they agree to {math.degrees(angle_diff):.2f}°"
+            f"Expected simulation variant to diverge from Lua, "
+            f"but they agree to {math.degrees(angle_diff):.2f} deg"
         )
-
-        # Both outputs remain unit vectors
-        np.testing.assert_allclose(np.linalg.norm(lua_result), 1.0, atol=1e-10)
-        np.testing.assert_allclose(np.linalg.norm(py_result),  1.0, atol=1e-10)
 
     def test_360deg_orbit_returns_bz_eq0(self):
         """Full 360° orbit returns to starting tether direction → bz_eq0 restored."""
