@@ -87,30 +87,48 @@ def _resolve_sim_vehicle() -> Path | None:
 # Process management
 # ---------------------------------------------------------------------------
 
-def _launch_sitl(sim_vehicle: Path, log_path: Path) -> subprocess.Popen:
+def _launch_sitl(
+    sim_vehicle: Path,
+    log_path: Path,
+    add_param_file: "Path | None" = None,
+) -> subprocess.Popen:
     """
     Launch ArduPilot SITL (heli frame, JSON physics backend).
 
     Parameters
     ----------
-    sim_vehicle : path to sim_vehicle.py
-    log_path    : file to receive stdout + stderr from SITL
+    sim_vehicle    : path to sim_vehicle.py
+    log_path       : file to receive stdout + stderr from SITL
+    add_param_file : if given, pass --add-param-file <path> (boot defaults)
 
     Returns
     -------
     Running Popen instance.
+
+    Notes
+    -----
+    eeprom.bin is deleted before every launch so each run starts from
+    copter-heli.parm defaults — identical to a fresh container.  Prevents
+    stale param values (e.g. H_RSC_MODE=1) from accumulating across test
+    runs and causing intermittent Motor Interlock arm failures.
     """
+    eeprom = Path(sim_vehicle).parent.parent.parent / "eeprom.bin"
+    if eeprom.exists():
+        eeprom.unlink()
+    cmd = [
+        sys.executable, str(sim_vehicle),
+        "--vehicle", "ArduCopter",
+        "--frame",   "heli",
+        "--custom-location=51.5074,-0.1278,50,0",
+        "--model",   "JSON",
+        "--sim-address", "127.0.0.1",
+        "--no-rebuild",
+        "--no-mavproxy",
+    ]
+    if add_param_file is not None:
+        cmd += ["--add-param-file", str(add_param_file)]
     return subprocess.Popen(
-        [
-            sys.executable, str(sim_vehicle),
-            "--vehicle", "ArduCopter",
-            "--frame",   "heli",
-            "--custom-location=51.5074,-0.1278,50,0",
-            "--model",   "JSON",
-            "--sim-address", "127.0.0.1",
-            "--no-rebuild",
-            "--no-mavproxy",
-        ],
+        cmd,
         cwd=str(sim_vehicle.parent.parent.parent),
         stdout=log_path.open("w", encoding="utf-8"),
         stderr=subprocess.STDOUT,

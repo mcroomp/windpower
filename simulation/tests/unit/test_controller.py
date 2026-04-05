@@ -21,7 +21,6 @@ from controller import (
     compute_rc_rates,
     compute_rc_from_attitude,
     compute_rc_from_physical_attitude,
-    TetherRelativeHoldController,
     PhysicalHoldController,
     make_hold_controller,
     compute_bz_tether,
@@ -375,7 +374,7 @@ def test_physical_att_output_in_range():
 
 
 # ---------------------------------------------------------------------------
-# TetherRelativeHoldController tests
+# PhysicalHoldController tests
 # ---------------------------------------------------------------------------
 
 class _FakeGCS:
@@ -386,43 +385,8 @@ class _FakeGCS:
         self.sent.append(dict(rc))
 
 
-def test_tether_relative_neutral_at_zero_attitude():
-    ctrl = TetherRelativeHoldController()
-    gcs  = _FakeGCS()
-    att  = {"roll": 0.0, "pitch": 0.0, "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
-    rc   = ctrl.send_correction(att, None, gcs)
-    assert rc[1] == 1500
-    assert rc[2] == 1500
-    assert rc[3] == 1500    # neutral collective
-    assert rc[8] == 2000    # motor interlock
-
-
-def test_tether_relative_sends_neutral_on_large_roll():
-    ctrl = TetherRelativeHoldController()
-    gcs  = _FakeGCS()
-    import math
-    att  = {"roll": math.radians(70.0), "pitch": 0.0,
-            "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
-    rc   = ctrl.send_correction(att, None, gcs)
-    # Roll > 60° → guard fires → neutral roll/pitch
-    assert rc[1] == 1500
-    assert rc[2] == 1500
-    assert rc[8] == 2000
-
-
-def test_tether_relative_extra_params_include_compass_disable():
-    ctrl = TetherRelativeHoldController()
-    assert ctrl.extra_params.get("COMPASS_USE") == 0
-    assert ctrl.extra_params.get("COMPASS_ENABLE") == 0
-    assert ctrl.extra_params.get("ATC_RAT_RLL_IMAX") == 0.0
-
-
 def test_physical_hold_extra_params_compass_enabled():
-    """PhysicalHoldController keeps compass enabled (COMPASS_USE at default).
-    Startup damping holds the hub stationary during EKF init so compass heading
-    is stable; GPS+compass fusion works without disabling either source.
-    EK3_SRC1_YAW is NOT set by the controller — conftest overrides it to 1
-    (compass) via _gps_params which apply after controller extra_params."""
+    """PhysicalHoldController keeps compass enabled (COMPASS_USE at default)."""
     ctrl = PhysicalHoldController(anchor_ned=np.zeros(3))
     assert "COMPASS_USE" not in ctrl.extra_params
     assert "COMPASS_ENABLE" not in ctrl.extra_params
@@ -720,16 +684,6 @@ def test_rate_pid_default_kp_matches_legacy():
 # make_hold_controller factory tests
 # ---------------------------------------------------------------------------
 
-def test_make_hold_controller_tether_relative():
-    ctrl = make_hold_controller("tether_relative")
-    assert isinstance(ctrl, TetherRelativeHoldController)
-
-
-def test_make_hold_controller_physical():
-    ctrl = make_hold_controller("physical", anchor_ned=np.zeros(3))
+def test_make_hold_controller_returns_physical():
+    ctrl = make_hold_controller(anchor_ned=np.zeros(3))
     assert isinstance(ctrl, PhysicalHoldController)
-
-
-def test_make_hold_controller_invalid_raises():
-    with pytest.raises(ValueError, match="Unknown sensor mode"):
-        make_hold_controller("bogus")

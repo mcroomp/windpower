@@ -40,8 +40,7 @@ _STACK_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
 
-from conftest import StackContext, dump_startup_diagnostics, assert_stack_ports_free, copy_logs_to_dir
-from test_stack_integration import _kill_by_port
+from conftest import StackContext, dump_startup_diagnostics
 
 # ---------------------------------------------------------------------------
 # Pumping cycle parameters — taken from config DEFAULTS so stack test and
@@ -168,16 +167,6 @@ def _split_phases(rows: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 # ---------------------------------------------------------------------------
-# Fixture override — use physical sensor mode for GPS fusion
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sensor_mode():
-    """Pumping cycle test uses physical sensor mode (GPS + compass consistent)."""
-    return "physical"
-
-
-# ---------------------------------------------------------------------------
 # Main test
 # ---------------------------------------------------------------------------
 
@@ -194,7 +183,7 @@ def sensor_mode():
         "Fix: smooth kinematic exit ramp or longer settle period before cycle."
     ),
 )
-def test_pumping_cycle(acro_armed: StackContext):
+def test_pumping_cycle(acro_armed_pumping: StackContext):
     """
     Full pumping cycle stack test: reel-out (30 s) then reel-in (30 s).
 
@@ -205,7 +194,7 @@ def test_pumping_cycle(acro_armed: StackContext):
       4. Peak tension below 80% break load (496 N).
       5. No CRITICAL errors in mediator log.
     """
-    ctx = acro_armed
+    ctx = acro_armed_pumping
     gcs = ctx.gcs
     log = logging.getLogger("test_pumping_cycle")
 
@@ -386,144 +375,3 @@ def test_pumping_cycle(acro_armed: StackContext):
         raise
 
 
-# ---------------------------------------------------------------------------
-# Fixture: launch mediator with pumping_cycle=True
-# ---------------------------------------------------------------------------
-
-# Override the acro_armed fixture's mediator launch to include pumping cycle config.
-# We do this by extending conftest's acro_armed with a module-level fixture that
-# injects the pumping cycle config via extra_config.
-
-@pytest.fixture
-def acro_armed(tmp_path, sensor_mode):
-    """
-    Pumping cycle variant of acro_armed.
-
-    Extends conftest.acro_armed by launching the mediator with:
-      - pumping_cycle = True
-      - internal_controller = True  (required — pumping cycle uses truth-state controller)
-      - Pumping cycle timing/tension parameters
-    """
-    import dataclasses
-    import subprocess
-    import os as _os
-
-    from test_stack_integration import (
-        ARDUPILOT_ENV, STACK_ENV_FLAG, SIM_VEHICLE_ENV,
-        _launch_mediator, _launch_sitl, _resolve_sim_vehicle, _terminate_process,
-    )
-    from conftest import (
-        StackConfig, _configure_logging, _run_acro_setup,
-        assert_stack_ports_free,
-    )
-    from gcs import RawesGCS
-    from controller import make_hold_controller
-    import config as _mcfg
-
-    if _os.environ.get(STACK_ENV_FLAG) != "1":
-        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
-
-    sim_vehicle = _resolve_sim_vehicle()
-    if sim_vehicle is None:
-        pytest.skip(f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py")
-
-    pytest.importorskip("pymavlink")
-    assert_stack_ports_free()
-
-    repo_root = Path(__file__).resolve().parents[3]
-    sim_dir   = repo_root / "simulation"
-
-    _STARTING_STATE = sim_dir / "steady_state_starting.json"
-    initial_state   = None
-    home_alt_m      = 12.530    # hub altitude above anchor [m] (positive = above ground)
-    if _STARTING_STATE.exists():
-        initial_state = json.loads(_STARTING_STATE.read_text())
-        # pos[2] is NED Z (negative = above ground); altitude = -pos[2]
-        home_alt_m    = -float(initial_state["pos"][2])
-
-    mediator_log  = tmp_path / "mediator.log"
-    sitl_log      = tmp_path / "sitl.log"
-    gcs_log       = tmp_path / "gcs.log"
-    telemetry_log = tmp_path / "telemetry.csv"
-
-    _configure_logging(gcs_log)
-    log = logging.getLogger("acro_armed_pumping")
-    logging.getLogger("gcs").setLevel(logging.DEBUG)
-
-    import numpy as _np
-    _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
-    controller = make_hold_controller(sensor_mode, anchor_ned=_anchor_ned)
-
-    import time as _t
-    _run_id = int(_t.time())
-    log.info("RUN_ID=%d", _run_id)
-    log.info("acro_armed (pumping cycle): launching mediator + SITL ...")
-
-    trajectory_extra = {
-        "trajectory": {
-            "type": "deschutter",
-            "hold": {},
-            # Only override timing/speed — physics values (xi, col_min_reel_in,
-            # col_max, tension setpoints) come from config DEFAULTS so they are
-            # consistent with test_deschutter_cycle.py.
-            "deschutter": {
-                "t_reel_out":   _T_REEL_OUT,
-                "t_reel_in":    _T_REEL_IN,
-                "t_transition": _T_TRANSITION,
-                "v_reel_out":   _V_REEL_OUT,
-                "v_reel_in":    _V_REEL_IN,
-                "tension_out":  _TENSION_OUT,
-                "tension_in":   _TENSION_IN,
-            },
-        },
-    }
-
-    mediator_proc = _launch_mediator(
-        sim_dir, repo_root, mediator_log,
-        telemetry_log_path    = str(telemetry_log),
-        initial_state         = initial_state,
-        startup_damp_seconds  = StackConfig.STARTUP_DAMP_S,
-        lock_orientation      = StackConfig.LOCK_ORIENTATION,
-        sensor_mode           = sensor_mode,
-        run_id                = _run_id,
-        base_k_ang            = StackConfig.BASE_K_ANG_INTERNAL,
-        internal_controller   = True,   # required for pumping cycle
-        extra_config          = trajectory_extra,
-    )
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
-
-    def _procs_alive():
-        for name, proc, lp in [
-            ("mediator", mediator_proc, mediator_log),
-            ("SITL",     sitl_proc,     sitl_log),
-        ]:
-            if proc.poll() is not None:
-                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
-
-    gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
-
-    ctx = StackContext(
-        gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
-        mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
-        telemetry_log=telemetry_log, initial_state=initial_state,
-        home_alt_m=home_alt_m, flight_events={}, all_statustext=[],
-        setup_samples=[], log=log, sim_dir=sim_dir,
-        controller=controller, sensor_mode=sensor_mode,
-        internal_controller=True,
-    )
-
-    try:
-        _run_acro_setup(ctx, _procs_alive)
-        yield ctx
-    finally:
-        gcs.close()
-        _terminate_process(sitl_proc)
-        _terminate_process(mediator_proc)
-        _kill_by_port(StackConfig.SITL_GCS_PORT)
-        copy_logs_to_dir(sim_dir / "logs", {
-            "telemetry_pumping.csv": telemetry_log,
-            "mediator_last_run.log": mediator_log,
-            "sitl_last_run.log":     sitl_log,
-            "gcs_last_run.log":      gcs_log,
-        })

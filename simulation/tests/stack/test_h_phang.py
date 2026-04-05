@@ -89,38 +89,6 @@ _log = logging.getLogger("test_h_phang")
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sensor_mode():
-    """Physical sensor mode: GPS + compass consistent for EKF GPS fusion."""
-    return "physical"
-
-
-@pytest.fixture
-def _no_lua():
-    """
-    Remove all Lua scripts from /ardupilot/scripts/ BEFORE SITL starts.
-
-    rawes_flight.lua sends Ch1/Ch2 RC overrides at 50 Hz when active.
-    This fixture must be listed FIRST in the test parameters so it executes
-    before the acro_armed fixture launches SITL.
-    """
-    lua_dir = Path("/ardupilot/scripts")
-    removed = []
-    if lua_dir.exists():
-        for script in sorted(lua_dir.glob("*.lua")):
-            script.unlink()
-            removed.append(script.name)
-    if removed:
-        _log.info("_no_lua: removed Lua scripts: %s", removed)
-    else:
-        _log.info("_no_lua: no Lua scripts present")
-    yield
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -236,7 +204,7 @@ def _measure_response(gcs, ctx: StackContext) -> dict:
 # Test
 # ---------------------------------------------------------------------------
 
-def test_h_swash_phang(_no_lua, acro_armed: StackContext):
+def test_h_swash_phang(acro_armed: StackContext):
     """
     Verify H_SW_TYPE and H_SW_PHANG are set correctly, then measure swashplate
     step response.  Cross-coupling values are logged for diagnostics but are

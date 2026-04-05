@@ -40,19 +40,31 @@ def _resolve_sim_vehicle() -> "Path | None":
     return candidate if candidate.is_file() else None
 
 
-def _launch_sitl(sim_vehicle: Path, log_path: Path) -> subprocess.Popen:
+def _launch_sitl(
+    sim_vehicle: Path,
+    log_path: Path,
+    add_param_file: "Path | None" = None,
+) -> subprocess.Popen:
+    # EEPROM is NOT wiped between runs.  All critical params (H_RSC_MODE,
+    # SCR_ENABLE, ARMING_SKIPCHK, etc.) are set explicitly via MAVLink in
+    # _run_acro_setup step 3, so stale EEPROM values never take effect.
+    # Preserving EEPROM allows SCR_ENABLE=1 (written by step 3) to persist
+    # across reboots so Lua scripting starts on every subsequent boot.
+    cmd = [
+        sys.executable,
+        str(sim_vehicle),
+        "--vehicle", "ArduCopter",
+        "--frame", "heli",
+        "--custom-location=51.5074,-0.1278,50,0",
+        "--model", "JSON",
+        "--sim-address", "127.0.0.1",
+        "--no-rebuild",
+        "--no-mavproxy",
+    ]
+    if add_param_file is not None:
+        cmd += ["--add-param-file", str(add_param_file)]
     return subprocess.Popen(
-        [
-            sys.executable,
-            str(sim_vehicle),
-            "--vehicle", "ArduCopter",
-            "--frame", "heli",
-            "--custom-location=51.5074,-0.1278,50,0",
-            "--model", "JSON",
-            "--sim-address", "127.0.0.1",
-            "--no-rebuild",
-            "--no-mavproxy",
-        ],
+        cmd,
         cwd=str(sim_vehicle.parent.parent.parent),
         stdout=log_path.open("w", encoding="utf-8"),
         stderr=subprocess.STDOUT,
@@ -168,6 +180,88 @@ def copy_logs_to_dir(log_dir: Path, copies: dict) -> None:
     for dest_name, src in copies.items():
         if Path(src).exists():
             shutil.copy2(src, log_dir / dest_name)
+
+
+# ---------------------------------------------------------------------------
+# Mediator launcher
+# ---------------------------------------------------------------------------
+
+def _launch_mediator(
+    sim_dir: Path,
+    repo_root: Path,
+    log_path: Path,
+    telemetry_log_path: "str | None" = None,
+    tether_rest_length: "float | None" = None,
+    initial_state: "dict | None" = None,
+    startup_damp_seconds: "float | None" = None,
+    lock_orientation: bool = False,
+    run_id: "int | None" = None,
+    base_k_ang: "float | None" = None,
+    internal_controller: bool = False,
+    extra_config: "dict | None" = None,
+) -> subprocess.Popen:
+    # Lazy import: config lives in simulation/, which must be on sys.path.
+    # conftest.py and all test files add simulation/ to sys.path before importing
+    # stack_utils, so this import will succeed.
+    import config as _mcfg
+
+    # Build config dict from defaults, then apply all overrides
+    cfg = _mcfg.defaults()
+    if initial_state is not None:
+        cfg["pos0"]    = list(initial_state["pos"])
+        # vel0 intentionally NOT overridden from initial_state: the kinematic
+        # startup ramp needs vel0 from config.py defaults (~0.96 m/s) so the EKF
+        # gets a velocity-derived yaw heading from frame 0.
+        cfg["body_z"]     = list(initial_state["body_z"])
+        cfg["omega_spin"] = float(initial_state["omega_spin"])
+        if tether_rest_length is None and "rest_length" in initial_state:
+            cfg["tether_rest_length"] = float(initial_state["rest_length"])
+    if tether_rest_length is not None:
+        cfg["tether_rest_length"] = float(tether_rest_length)
+    if startup_damp_seconds is not None:
+        cfg["startup_damp_seconds"] = float(startup_damp_seconds)
+    if base_k_ang is not None:
+        cfg["base_k_ang"] = float(base_k_ang)
+    cfg["internal_controller"] = internal_controller
+    cfg["lock_orientation"]    = lock_orientation
+    if extra_config:
+        import copy as _copy
+        for _k, _v in extra_config.items():
+            if _k == "trajectory" and isinstance(_v, dict):
+                cfg["trajectory"].update(_v)
+                for _sub in ("hold", "deschutter"):
+                    if _sub in _v and isinstance(_v[_sub], dict):
+                        _merged = _copy.deepcopy(
+                            _mcfg.DEFAULTS["trajectory"].get(_sub, {})
+                        )
+                        _merged.update(_v[_sub])
+                        cfg["trajectory"][_sub] = _merged
+            else:
+                cfg[_k] = _v
+
+    # Write config to a temp file next to the log
+    cfg_path = log_path.parent / (log_path.stem + "_mediator_config.json")
+    _mcfg.save(cfg, str(cfg_path))
+
+    cmd = [
+        sys.executable,
+        str(Path(sim_dir) / "mediator.py"),
+        "--sitl-recv-port", "9002",
+        "--sitl-send-port", "9003",
+        "--log-level", "INFO",
+        "--config", str(cfg_path),
+    ]
+    if telemetry_log_path is not None:
+        cmd += ["--telemetry-log", telemetry_log_path]
+    if run_id is not None:
+        cmd += ["--run-id", str(run_id)]
+    return subprocess.Popen(
+        cmd,
+        cwd=str(repo_root),
+        stdout=log_path.open("w", encoding="utf-8"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
 
 
 # ---------------------------------------------------------------------------

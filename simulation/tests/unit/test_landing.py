@@ -28,7 +28,7 @@ import rotor_definition as rd
 from dynamics       import RigidBodyDynamics
 from aero           import create_aero
 from tether         import TetherModel
-from controller     import compute_swashplate_from_state
+from controller     import AcroController
 from winch          import WinchController
 from frames         import build_orb_frame
 from simtest_log    import SimtestLog
@@ -61,9 +61,6 @@ OMEGA_SPIN_IC = _IC.omega_spin
 COL_MIN_RAD = -0.28
 COL_MAX_RAD =  0.10
 
-# ── Cyclic gains (hover: cyclic must carry full attitude authority) ────────────
-KP_HOVER, KD_HOVER = 1.5, 0.5
-
 # ── LandingPlanner parameters ─────────────────────────────────────────────────
 V_REEL            = 1.5     # m/s  reel-in speed matched to natural descent rate
 COL_CRUISE        = 0.079   # rad  base collective (col_min_reel_in at xi=80 deg)
@@ -95,6 +92,7 @@ def _run_landing() -> dict:
     winch  = WinchController(rest_length=LAND_TETHER_M,
                               tension_safety_n=BREAK_LOAD_N * 0.8,
                               min_length=MIN_TETHER_M)
+    acro   = AcroController.from_rotor(_ROTOR, use_servo=True)
     planner = LandingPlanner(
         initial_body_z   = BZ_INIT,
         v_land           = V_REEL,
@@ -169,16 +167,14 @@ def _run_landing() -> dict:
         winch.step(cmd["winch_speed_ms"], tension_now, DT)
         tether.rest_length = winch.rest_length
 
-        # ── Attitude controller ───────────────────────────────────────────────
-        sw = compute_swashplate_from_state(
-            hub_state=hub_state, anchor_pos=ANCHOR,
-            body_z_eq=body_z_eq, kp=KP_HOVER, kd=KD_HOVER)
+        # ── Attitude controller (two-loop AcroController, same as SITL) ─────────
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
 
         # ── Aerodynamics ──────────────────────────────────────────────────────
         result = aero.compute_forces(
             collective_rad = collective_rad,
-            tilt_lon       = sw["tilt_lon"],
-            tilt_lat       = sw["tilt_lat"],
+            tilt_lon       = tilt_lon,
+            tilt_lat       = tilt_lat,
             R_hub          = hub_state["R"],
             v_hub_world    = hub_state["vel"],
             omega_rotor    = omega_spin,

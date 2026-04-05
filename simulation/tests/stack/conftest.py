@@ -36,7 +36,7 @@ sys.path.insert(0, str(_STACK_DIR))
 
 import rotor_definition as _rd
 
-from test_stack_integration import (
+from stack_utils import (
     ARDUPILOT_ENV,
     STACK_ENV_FLAG,
     SIM_VEHICLE_ENV,
@@ -45,8 +45,6 @@ from test_stack_integration import (
     _resolve_sim_vehicle,
     _terminate_process,
     _kill_by_port,
-)
-from stack_utils import (
     _configure_logging,
     copy_logs_to_dir,
     check_ports_free,
@@ -57,19 +55,15 @@ from pymavlink import mavutil as _mavutil
 from gcs import ACRO, STABILIZE, RawesGCS
 from controller import make_hold_controller
 
-_STARTING_STATE   = _SIM_DIR / "steady_state_starting.json"
+_STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
+_RAWES_DEFAULTS_PARM  = _STACK_DIR / "rawes_sitl_defaults.parm"
 
 
 
 
 
 def pytest_addoption(parser):
-    parser.addoption(
-        "--sensor-mode",
-        default=None,
-        choices=["tether_relative", "physical"],
-        help="Override sensor mode for all stack tests (default: tether_relative).",
-    )
+    pass
 
 # ---------------------------------------------------------------------------
 # StackConfig — central configuration and pre-flight verification
@@ -106,22 +100,27 @@ class StackConfig:
 
     # Timeouts (seconds)
     CONNECT_TIMEOUT       : float = 30.0
-    ARM_TIMEOUT           : float = 30.0
+    ARM_TIMEOUT           : float = 120.0
     MODE_TIMEOUT          : float = 60.0
     EKF_ALIGN_TIMEOUT     : float = 45.0
     EKF_STABILISE_TIMEOUT : float = 30.0
-    # 45 s kinematic startup: hub moves at constant vel0 ≈ 0.96 m/s from
-    # launch_pos to equilibrium pos0, providing a non-zero velocity heading
-    # so EKF derives yaw via EK3_SRC1_YAW=2 (GPS velocity) from frame 0.
-    # The kinematic phase must cover the full GPS fusion timeline:
+    # 65 s kinematic startup: hub moves at constant vel0 ≈ 0.96 m/s from
+    # launch_pos to equilibrium pos0.  Kinematic must last past the arm attempt
+    # so the hub is still frozen (constant velocity) when we arm — hub motion
+    # after kinematic-end causes GPS innovations that corrupt EKF3.
+    #
+    # Timeline with EK3_SRC1_YAW=1 (compass yaw):
     #   ~4 s  tiltAlignComplete + yawAlignComplete
-    #   ~19 s gpsGoodToAlign (hardcoded 10 s delay from GPS detect at ~9 s)
-    #   ~41 s delAngBiasLearned → GPS position fuses → LOCAL_POSITION_NED
-    # 45 s gives 4 s margin after GPS fusion before free flight starts.
-    # The hub is in stable constant-velocity kinematic throughout; EKF stays
-    # healthy (no tether force, no acceleration) and GPS fuses cleanly.
-    STARTUP_DAMP_S        : float = 45.0
-    LOCK_ORIENTATION      : bool  = False  # kinematic startup sets correct R0; let physics run free
+    #   ~10 s GPS detected
+    #   ~21 s EKF3 GPS origin set (GPS fusion begins)
+    #   ~54 s delAngBiasLearned → GPS position fuses → LOCAL_POSITION_NED
+    #          (54 s = 21 s origin + ~33 s bias learning from compass-yaw start)
+    #
+    # Arm attempt fires at ~54 s from mediator start (50 s from EKF non-zero at ~4 s).
+    # 65 s gives 11 s margin: hub is still kinematic at arm time, GPS is healthy.
+    # After arm (~54 s), kinematic runs 11 more seconds before physics starts.
+    STARTUP_DAMP_S        : float = 65.0
+    LOCK_ORIENTATION      : bool  = True   # lock R_hub=R0 during kinematic so compass heading is constant (required for EK3_SRC1_YAW=1)
     # Permanent angular damping after startup ramp ends.
     # 50 N·m·s/rad (mediator default) is insufficient for the 10 Hz MAVLink
     # controller in physical-sensor mode — aerodynamic cyclic moments after
@@ -247,68 +246,64 @@ class StackContext:
     setup_samples:  list      # EKF/ATTITUDE samples collected during setup
     log:            logging.Logger
     sim_dir:        Path
-    controller:          object    # TetherRelativeHoldController or PhysicalHoldController
-    sensor_mode:         str       # "tether_relative" or "physical"
+    controller:          object    # PhysicalHoldController
     internal_controller: bool      # True = mediator runs truth-state controller at 400 Hz
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# _acro_stack — single context manager behind all ACRO fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def sensor_mode(request):
+import contextlib
+import numpy as _np
+
+@contextlib.contextmanager
+def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefix="",
+                arm: bool = True, with_mediator: bool = True, test_name: str = ""):
     """
-    Sensor model used by the mediator.
+    Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
-    Resolved in priority order:
-    1. ``--sensor-mode`` CLI option (``pytest --sensor-mode physical``)
-    2. Override in a test module's own ``sensor_mode`` fixture
-    3. Default: ``"tether_relative"``
+    All fixtures (acro_armed, acro_armed_pumping, acro_armed_lua) call this.
+    Differences between them are handled outside this function:
+      - extra_config   : pumping cycle passes trajectory config here
+      - pre-launch work: Lua fixture installs scripts before calling this
+      - post-arm work  : Lua fixture sets SCR_USER params inside the with-block
 
-    Choices
-    -------
-    ``"tether_relative"`` (default) — reports roll=pitch=0 at tether
-    equilibrium; compass must be disabled.
-
-    ``"physical"`` — reports actual orbital-frame orientation; GPS + compass
-    can be fused normally.
-    """
-    cli = request.config.getoption("--sensor-mode", default=None)
-    return cli if cli is not None else "physical"
-
-
-@pytest.fixture
-def acro_armed(tmp_path, sensor_mode):
-    """
-    Full ACRO stack fixture: launch → connect → configure → arm → ACRO.
-
-    Yields a StackContext with a live GCS armed in ACRO mode.
-    Teardown terminates processes and copies logs to simulation/.
+    Parameters
+    ----------
+    tmp_path       : pytest tmp_path fixture value
+    extra_config   : optional dict merged into mediator config (pumping cycle)
+    log_name       : logger name (shown in log output)
+    log_prefix     : prefix component for persistent log file names
+    arm            : if False, skip _run_acro_setup — yield with procs running
+                     but GCS not connected and vehicle not armed.  Callers may
+                     call ctx.gcs.connect() manually (e.g. smoke tests).
+    with_mediator  : if False, skip mediator launch (pure SITL connectivity tests)
+    test_name      : pytest test node name; included in persistent log file names
+                     so each test run produces uniquely-named files in logs/
     """
     if os.environ.get(STACK_ENV_FLAG) != "1":
         pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
 
     sim_vehicle = _resolve_sim_vehicle()
     if sim_vehicle is None:
-        pytest.skip(
-            f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py"
-        )
+        pytest.skip(f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py")
 
     pytest.importorskip("pymavlink")
-
-    # Check for port conflicts before launching — surfaces lingering processes early.
     assert_stack_ports_free()
 
     repo_root = Path(__file__).resolve().parents[3]
     sim_dir   = repo_root / "simulation"
 
     # ── Initial state ──────────────────────────────────────────────────────────
+    # pos[2] is NED Z; altitude above ground = -pos[2].
+    # vel0 is intentionally NOT loaded from steady_state_starting.json — the
+    # kinematic startup ramp needs vel0 from config.py defaults (~0.96 m/s) so
+    # the EKF gets a velocity-derived yaw heading from frame 0.
     initial_state = None
-    home_alt_m    = 12.530    # hub altitude above ground [m] (positive = up)
+    home_alt_m    = 12.530
     if _STARTING_STATE.exists():
         initial_state = json.loads(_STARTING_STATE.read_text())
-        # pos[2] is NED Z (negative for altitude above ground); altitude = -pos[2]
         home_alt_m    = -float(initial_state["pos"][2])
         initial_state = dict(initial_state)
 
@@ -318,55 +313,52 @@ def acro_armed(tmp_path, sensor_mode):
     gcs_log       = tmp_path / "gcs.log"
     telemetry_log = tmp_path / "telemetry.csv"
 
-    # ── Logging ───────────────────────────────────────────────────────────────
     _configure_logging(gcs_log)
-    log = logging.getLogger("acro_armed")
+    log = logging.getLogger(log_name)
     logging.getLogger("gcs").setLevel(logging.DEBUG)
 
     # ── Hold controller ────────────────────────────────────────────────────────
-    # Compute anchor NED in LOCAL_POSITION_NED frame.
-    #
-    # SITL is launched with --custom-location=51.5074,-0.1278,50,0 which sets
-    # HOME = GPS_ORIGIN = NED [0,0,0] relative to the anchor (ENU [0,0,0]).
-    # LOCAL_POSITION_NED = pos_ned_absolute - HOME_NED = pos_ned_absolute - 0.
-    #
-    # Anchor in LOCAL_POSITION_NED:
-    #   sensor.py: pos_ned_rel[2] = pos_ned[2] - home_ned_z
-    #   home_ned_z = -home_alt_m (NED Z is negative for altitude above ground)
-    #   At physics anchor NED [0,0,0]: pos_ned_rel[2] = 0 - (-home_alt_m) = +home_alt_m
-    # So anchor_ned_LOCAL = [0, 0, home_alt_m]  (anchor is home_alt_m metres below EKF HOME)
-    import numpy as _np
+    # Anchor in LOCAL_POSITION_NED frame:
+    #   sensor.py sets home_ned_z = -home_alt_m; pos_ned_rel[2] = pos_ned[2] + home_alt_m
+    #   Physics anchor NED [0,0,0] maps to LOCAL [0, 0, home_alt_m].
     _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
-    controller = make_hold_controller(sensor_mode, anchor_ned=_anchor_ned)
-    log.info("Hold controller: %s  (sensor_mode=%s)", type(controller).__name__, sensor_mode)
+    controller   = make_hold_controller(anchor_ned=_anchor_ned)
+    log.info("Hold controller: %s", type(controller).__name__)
+
+    # ── Lua scripts ───────────────────────────────────────────────────────────
+    # Always install rawes_flight.lua so it is available if scripting is enabled.
+    # Whether Lua actually RUNS is controlled by SCR_ENABLE in EEPROM at boot:
+    #   wipe_eeprom=True  → fresh EEPROM → SCR_ENABLE not set → Lua does not start
+    #   wipe_eeprom=False → EEPROM preserved from previous run → if SCR_ENABLE=1
+    #                       was written by a prior session, Lua starts on this boot
+    _install_lua_flight_scripts()
 
     # ── Launch ────────────────────────────────────────────────────────────────
-    # Emit the same RUN_ID that mediator.py will write as its first log line.
-    # analyse_run.py uses these to validate both logs are from the same run.
-    import time as _t
-    _run_id = int(_t.time())
+    _run_id = int(time.time())
     log.info("RUN_ID=%d", _run_id)
-    log.info("acro_armed fixture: launching mediator + SITL ...")
-    mediator_proc = _launch_mediator(
-        sim_dir, repo_root, mediator_log,
-        telemetry_log_path=str(telemetry_log),
-        initial_state=initial_state,
-        startup_damp_seconds=_STARTUP_DAMP_S,
-        lock_orientation=StackConfig.LOCK_ORIENTATION,
-        sensor_mode=sensor_mode,
-        run_id=_run_id,
-        base_k_ang=(StackConfig.BASE_K_ANG_INTERNAL
-                    if StackConfig.INTERNAL_CONTROLLER
-                    else StackConfig.BASE_K_ANG),
-        internal_controller=StackConfig.INTERNAL_CONTROLLER,
-    )
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
+    log.info("%s: launching%s SITL ...", log_name, " mediator +" if with_mediator else "")
+    if with_mediator:
+        mediator_proc = _launch_mediator(
+            sim_dir, repo_root, mediator_log,
+            telemetry_log_path   = str(telemetry_log),
+            initial_state        = initial_state,
+            startup_damp_seconds = _STARTUP_DAMP_S,
+            lock_orientation     = StackConfig.LOCK_ORIENTATION,
+            run_id               = _run_id,
+            base_k_ang           = StackConfig.BASE_K_ANG_INTERNAL,
+            internal_controller  = True,
+            extra_config         = extra_config,
+        )
+    else:
+        mediator_proc = None
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
+                             add_param_file=_RAWES_DEFAULTS_PARM)
 
     def _procs_alive():
-        for name, proc, lp in [
-            ("mediator", mediator_proc, mediator_log),
-            ("SITL",     sitl_proc,     sitl_log),
-        ]:
+        _checks = [("SITL", sitl_proc, sitl_log)]
+        if with_mediator:
+            _checks.insert(0, ("mediator", mediator_proc, mediator_log))
+        for name, proc, lp in _checks:
             if proc.poll() is not None:
                 txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                 pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
@@ -379,24 +371,70 @@ def acro_armed(tmp_path, sensor_mode):
         telemetry_log=telemetry_log, initial_state=initial_state,
         home_alt_m=home_alt_m, flight_events={}, all_statustext=[],
         setup_samples=[], log=log, sim_dir=sim_dir,
-        controller=controller, sensor_mode=sensor_mode,
-        internal_controller=StackConfig.INTERNAL_CONTROLLER,
+        controller=controller,
+        internal_controller=True,
     )
 
+    # Build a unique log-file label: log_prefix + test_name (both optional).
+    # Each test produces distinctly-named files in logs/ so reruns don't clobber.
+    label = "_".join(filter(None, [log_prefix, test_name]))
+    pfx   = (label + "_") if label else ""
+
     try:
-        _run_acro_setup(ctx, _procs_alive)
+        if arm:
+            _run_acro_setup(ctx, _procs_alive)
         yield ctx
     finally:
         gcs.close()
         _terminate_process(sitl_proc)
-        _terminate_process(mediator_proc)
+        if mediator_proc is not None:
+            _terminate_process(mediator_proc)
         _kill_by_port(StackConfig.SITL_GCS_PORT)
-        copy_logs_to_dir(sim_dir / "logs", {
-            "telemetry.csv":         telemetry_log,
-            "mediator_last_run.log": mediator_log,
-            "sitl_last_run.log":     sitl_log,
-            "gcs_last_run.log":      gcs_log,
-        })
+        _logs = {
+            f"sitl_{pfx}last.log": sitl_log,
+            f"gcs_{pfx}last.log":  gcs_log,
+        }
+        if with_mediator:
+            _logs[f"mediator_{pfx}last.log"]  = mediator_log
+            _logs[f"telemetry_{pfx}last.csv"] = telemetry_log
+        copy_logs_to_dir(sim_dir / "logs", _logs)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures — thin wrappers around _acro_stack
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def acro_armed(tmp_path, request):
+    """Full ACRO stack fixture. Yields StackContext armed in ACRO mode."""
+    with _acro_stack(tmp_path, test_name=request.node.name) as ctx:
+        yield ctx
+
+
+@pytest.fixture
+def acro_armed_pumping(tmp_path, request):
+    """
+    Pumping-cycle variant of acro_armed.
+
+    Mediator is launched with trajectory=deschutter so the pumping-cycle
+    state machine runs (internal_controller=True required).
+    """
+    import config as _mcfg
+    _dcfg = _mcfg.DEFAULTS["trajectory"]["deschutter"]
+    extra = {
+        "trajectory": {
+            "type": "deschutter",
+            "hold": {},
+            "deschutter": {k: _dcfg[k] for k in (
+                "t_reel_out", "t_reel_in", "t_transition",
+                "v_reel_out", "v_reel_in", "tension_out", "tension_in",
+            )},
+        },
+    }
+    with _acro_stack(tmp_path, extra_config=extra,
+                     log_name="acro_armed_pumping", log_prefix="pumping",
+                     test_name=request.node.name) as ctx:
+        yield ctx
 
 
 # ---------------------------------------------------------------------------
@@ -420,153 +458,36 @@ def _install_lua_flight_scripts() -> None:
 
 
 @pytest.fixture
-def acro_armed_lua(tmp_path, sensor_mode):
+def acro_armed_lua(tmp_path, request):
     """
     ACRO stack fixture with rawes_flight.lua active in SITL.
 
-    Extends ``acro_armed`` with three additional steps:
-      1. Wipe /ardupilot/eeprom.bin so copter-heli.parm defaults
-         (SCR_ENABLE=1) take effect on fresh boot.
-      2. Install simulation/scripts/rawes_flight.lua to
-         /ardupilot/scripts/ before SITL starts.
-      3. Set SCR_USER1..5 (kp, slew rate, anchor NED) via MAVLink after
-         the standard ACRO arm.
+    Extends acro_armed with:
+      1. rawes_flight.lua installed to /ardupilot/scripts/ before SITL starts.
+      2. SCR_USER1..5 (kp, slew rate, anchor NED) set via MAVLink after arm.
 
-    Uses internal_controller=True so the mediator's 400 Hz truth-state
-    controller stabilises the hub physics.  Lua's Ch1/Ch2 RC overrides
-    are observable from SERVO_OUTPUT_RAW without risking a crash.  This
-    is the correct first validation step — prove Lua runs and generates
-    correct outputs before trusting it as the sole cyclic controller.
+    Lua's RC overrides are observable from SERVO_OUTPUT_RAW while the
+    mediator's internal controller stabilises physics (internal_controller=True).
     """
-    if os.environ.get(STACK_ENV_FLAG) != "1":
-        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
-
-    sim_vehicle = _resolve_sim_vehicle()
-    if sim_vehicle is None:
-        pytest.skip(
-            f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py"
-        )
-
-    pytest.importorskip("pymavlink")
-
-    assert_stack_ports_free()
-
-    repo_root = Path(__file__).resolve().parents[3]
-    sim_dir   = repo_root / "simulation"
-
-    # ── Pre-launch: install Lua scripts ───────────────────────────────────
-    # Do NOT wipe EEPROM: this build's scripting engine does not start from
-    # copter-heli.parm defaults on a first-boot (no EEPROM) — it only starts
-    # if SCR_ENABLE=1 is already stored in EEPROM from a previous run.
-    # The preceding acro_armed tests preserve EEPROM (and its SCR_ENABLE=1),
-    # so scripting is already active when this fixture launches SITL.
-    # SCR_ENABLE=1 is also written explicitly in the post-arm param set below
-    # so that future runs keep it in EEPROM.
-    _install_lua_flight_scripts()
-
-    # ── Initial state ──────────────────────────────────────────────────────
-    initial_state = None
-    home_alt_m    = 12.530    # hub altitude above anchor [m] (positive = above ground)
-    if _STARTING_STATE.exists():
-        initial_state = json.loads(_STARTING_STATE.read_text())
-        # pos[2] is NED Z (negative for altitude above ground); altitude = -pos[2]
-        home_alt_m    = -float(initial_state["pos"][2])
-        initial_state = dict(initial_state)
-
-    # ── Paths ──────────────────────────────────────────────────────────────
-    mediator_log  = tmp_path / "mediator.log"
-    sitl_log      = tmp_path / "sitl.log"
-    gcs_log       = tmp_path / "gcs.log"
-    telemetry_log = tmp_path / "telemetry.csv"
-
-    _configure_logging(gcs_log)
-    log = logging.getLogger("acro_armed_lua")
-    logging.getLogger("gcs").setLevel(logging.DEBUG)
-
-    # ── Hold controller ────────────────────────────────────────────────────
-    import numpy as _np
-    _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
-    controller  = make_hold_controller(sensor_mode, anchor_ned=_anchor_ned)
-    log.info("Hold controller: %s  (sensor_mode=%s)", type(controller).__name__, sensor_mode)
-
-    # ── Launch ─────────────────────────────────────────────────────────────
-    import time as _t
-    _run_id = int(_t.time())
-    log.info("RUN_ID=%d", _run_id)
-    log.info("acro_armed_lua: launching mediator + SITL (Lua scripting enabled) ...")
-    mediator_proc = _launch_mediator(
-        sim_dir, repo_root, mediator_log,
-        telemetry_log_path=str(telemetry_log),
-        initial_state=initial_state,
-        startup_damp_seconds=_STARTUP_DAMP_S,
-        lock_orientation=StackConfig.LOCK_ORIENTATION,
-        sensor_mode=sensor_mode,
-        run_id=_run_id,
-        base_k_ang=StackConfig.BASE_K_ANG_INTERNAL,
-        internal_controller=True,   # mediator stabilises physics; Lua is observed
-    )
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log)
-
-    def _procs_alive():
-        for name, proc, lp in [
-            ("mediator", mediator_proc, mediator_log),
-            ("SITL",     sitl_proc,     sitl_log),
-        ]:
-            if proc.poll() is not None:
-                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
-
-    gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
-
-    ctx = StackContext(
-        gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
-        mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
-        telemetry_log=telemetry_log, initial_state=initial_state,
-        home_alt_m=home_alt_m, flight_events={}, all_statustext=[],
-        setup_samples=[], log=log, sim_dir=sim_dir,
-        controller=controller, sensor_mode=sensor_mode,
-        internal_controller=True,
-    )
-
-    try:
-        _run_acro_setup(ctx, _procs_alive)
-
-        # ── Post-arm: configure rawes_flight.lua via SCR_USER params ──────
-        # Anchor in LOCAL_POSITION_NED frame:
-        #   sensor.py: pos_ned_rel = pos_ned - [0, 0, home_ned_z]
-        #   home_ned_z = initial_state["pos"][2]  (NED Z of hub at launch, negative = up)
-        #   Physics anchor = NED [0, 0, 0]:
-        #     anchor_LOCAL = [0, 0, -home_ned_z] = [0, 0, home_alt_m]
-        #   e.g.  home_alt_m = 7.12  →  SCR_USER5 = +7.12 (anchor is 7.12 m below EKF HOME)
-        # SCR_ENABLE=1 is also written here to ensure EEPROM has scripting
-        # enabled for future runs (the scripting engine itself started at
-        # SITL boot; this MAVLink write only persists it to EEPROM).
-        log.info("Setting SCR_USER params for rawes_flight.lua ...")
+    with _acro_stack(tmp_path, log_name="acro_armed_lua", log_prefix="lua",
+                     test_name=request.node.name) as ctx:
+        # Post-arm: configure rawes_flight.lua via SCR_USER params.
+        # SCR_USER5 = home_alt_m: anchor is home_alt_m metres below EKF HOME
+        # (sensor.py sets pos_ned_rel[2] = pos_ned[2] + home_alt_m, so physics
+        # anchor NED [0,0,0] appears at LOCAL [0, 0, home_alt_m]).
+        ctx.log.info("Setting SCR_USER params for rawes_flight.lua ...")
         lua_params = {
-            "SCR_ENABLE": 1,           # persist scripting in EEPROM for future boots
-            "SCR_USER1": 1.0,          # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,         # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,          # anchor North   [m]
-            "SCR_USER4": 0.0,          # anchor East    [m]
-            "SCR_USER5": home_alt_m,   # anchor Down from EKF HOME [m] = hub launch altitude
+            "SCR_ENABLE": 1,              # persist scripting in EEPROM for future boots
+            "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
+            "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
+            "SCR_USER3": 0.0,             # anchor North   [m]
+            "SCR_USER4": 0.0,             # anchor East    [m]
+            "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
         }
         for pname, pvalue in lua_params.items():
-            ok = gcs.set_param(pname, pvalue, timeout=5.0)
-            log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
+            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
+            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
         yield ctx
-
-    finally:
-        gcs.close()
-        _terminate_process(sitl_proc)
-        _terminate_process(mediator_proc)
-        _kill_by_port(StackConfig.SITL_GCS_PORT)
-        copy_logs_to_dir(sim_dir / "logs", {
-            "telemetry.csv":             telemetry_log,
-            "mediator_lua_last_run.log": mediator_log,
-            "sitl_lua_last_run.log":     sitl_log,
-            "gcs_lua_last_run.log":      gcs_log,
-        })
 
 
 # ---------------------------------------------------------------------------
@@ -627,11 +548,13 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
         _mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1,  # LOCAL_POSITION_NED
     )
 
-    # Send motor interlock HIGH immediately — matches the original GUIDED approach
-    # that confirmed arm works.  The "Motor Interlock Enabled" warning is suppressed
-    # by force arm; keeping it high avoids any RSC-ready state complications.
-    log.info("[setup 1/6] Sending motor interlock HIGH (CH8=2000) ...")
-    gcs.send_rc_override({8: 2000})
+    # Motor interlock must be LOW (CH8=1000) during arm.
+    # In H_RSC_MODE=1 (passthrough), motor_interlock_switch = (pilot_rotor_speed > 0.01).
+    # CH8=2000 → motor_interlock_switch=True → "Arm: Motor Interlock Enabled" blocks arm
+    # even with force=True.  CH8=1000 → motor_interlock_switch=False → arm succeeds.
+    # After arm confirmation, CH8 is raised to 2000 so the rotor interlock engages.
+    log.info("[setup 1/6] Sending motor interlock LOW (CH8=1000) ...")
+    gcs.send_rc_override({8: 1000})
 
     # ── 2. Param subsystem ────────────────────────────────────────────────────
     log.info("[setup 2/6] Waiting for param subsystem ...")
@@ -639,9 +562,6 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     _procs_alive()
 
     # ── 3. ACRO parameters ────────────────────────────────────────────────────
-    # ARMING_CHECK=0:  disable ALL pre-arm checks (including "Motor Interlock
-    #   Enabled") so force arm succeeds unconditionally.
-    #
     # H_RSC_MODE=1 (CH8 Passthrough): RSC output = CH8 input directly.
     #   No ramp / runup sequence — runup_complete fires immediately when CH8
     #   is high.  SITL default (0) is INVALID ("H_RSC_MODE invalid" auto-
@@ -650,12 +570,12 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     #   armed=True immediately after the force arm ACK.
     #   Note: AP_MotorsHeli::output() clears _flags.armed if runup_complete
     #   is not set, regardless of force arm — this is why CH8 must be HIGH.
-    log.info("[setup 3/6] Setting ACRO parameters (sensor_mode=%s) ...", ctx.sensor_mode)
-    # Base params: always required regardless of sensor mode.
+    log.info("[setup 3/6] Setting ACRO parameters ...")
     # All swashplate params are set explicitly so test results never depend on
     # ArduPilot defaults (which may change between builds).
     _base_params = {
-        "ARMING_SKIPCHK":   0xFFFF, # skip ALL pre-arm checks
+        "ARMING_SKIPCHK":   0xFFFF, # skip ALL pre-arm checks (bitmask: each bit = one check to skip)
+        "SCR_ENABLE":       1,      # enable Lua scripting; persisted to EEPROM for acro_armed_lua
         "INITIAL_MODE":     1,      # boot into ACRO
         "FS_THR_ENABLE":    0,      # no RC throttle failsafe
         "FS_GCS_ENABLE":    0,      # no GCS heartbeat failsafe
@@ -681,47 +601,18 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
         # DS113MG at 6V: 1200 deg/s / 60 deg travel = 20.0
         "SIM_SERVO_SPEED":  _rd.default().sim_servo_speed,
     }
-    # Mode-specific params from the controller (e.g. COMPASS_USE=0 for
-    # tether_relative; no compass override for physical).
     _acro_params = {**_base_params, **ctx.controller.extra_params}
     for name, value in _acro_params.items():
         ok = gcs.set_param(name, value, timeout=5.0)
         if not ok:
             log.warning("  %s=%s had no ACK — continuing", name, value)
 
-    # GPS position fusion params — applied AFTER ACRO params so they override
-    # any conflicting value from the controller's extra_params.
-    #
-    # COMPASS_USE/ENABLE=1: magnetometer provides yaw for EKF GPS fusion.
-    #   Required — EK3_SRC1_YAW=1 needs the compass sensor enabled.
-    #
-    # EK3_SRC1_YAW=1 (compass yaw):  hub is stationary during the 45 s kinematic
-    #   startup (body_z locked to _R0 → constant compass heading).  Compass gives
-    #   a stable, direct yaw measurement at 10 Hz, which converges P[12] in ~1 s
-    #   after tilt alignment.  P[10,11] then converge passively through EKF
-    #   cross-covariance in ~33 s → delAngBiasLearned at ~37 s.
-    #   Using EK3_SRC1_YAW=2 (GPS velocity heading) with a non-zero kinematic
-    #   velocity (vel0 ≈ 0.96 m/s) caused GPS position fusion to fail: when
-    #   delAngBiasLearned fired (~43 s) the hub had moved ~24 m from the GPS
-    #   origin, the position+velocity innovations were rejected, and the EKF
-    #   went unhealthy (flags → 0x0400) before LOCAL_POSITION_NED was received.
-    #
-    # EK3_MAG_CAL=0 (Never): use raw compass readings immediately without
-    #   in-flight calibration.  Same as stationary GPS test that passed.
-    #
-    # EK3_GPS_CHECK=0: skip HDOP/speed-accuracy/min-sat checks (SITL JSON GPS
-    #   has no real quality fields; default checks block fusion indefinitely).
-    _gps_params = {
-        "COMPASS_USE":    1,
-        "COMPASS_ENABLE": 1,
-        "EK3_GPS_CHECK":  0,
-        "EK3_SRC1_YAW":  1,    # 1=compass — overrides PhysicalHoldController=2
-        "EK3_MAG_CAL":   0,    # 0=Never — use raw compass; no calibration needed
-    }
-    for name, value in _gps_params.items():
-        ok = gcs.set_param(name, value, timeout=5.0)
-        if not ok:
-            log.warning("  GPS param %s=%s had no ACK — continuing", name, value)
+    # EK3 GPS/compass params are set as boot defaults in rawes_sitl_defaults.parm
+    # (EK3_SRC1_YAW=1, EK3_MAG_CAL=0, EK3_GPS_CHECK=0, COMPASS_USE=1,
+    # COMPASS_ENABLE=1).  We do NOT set them via MAVLink here — resetting the same
+    # value via MAVLink after boot can trigger a subtle EKF3 yaw-state reset that
+    # prevents GPS fusion (flags stay at 0x0400 GPS glitch instead of reaching
+    # 0x0010 horiz_pos_abs).
 
     # ── 4. EKF attitude alignment ─────────────────────────────────────────────
     # Wait for a clean ATTITUDE (EKF attitude ready) before arming.
@@ -840,49 +731,42 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
             f"STATUSTEXT: {all_statustext}"
         )
     if not ekf_pos:
-        if ctx.sensor_mode == "tether_relative":
-            log.warning("[setup 4/6] WARNING: no LOCAL_POSITION_NED during EKF wait "
-                        "(EKF horizontal position not yet fused; force arm will proceed)")
-        else:
-            log.warning("[setup 4/6] WARNING: no LOCAL_POSITION_NED during EKF wait "
-                        "(physical sensor with GPS+compass enabled — EKF may still be "
-                        "initialising; force arm will proceed)")
+        log.warning("[setup 4/6] WARNING: no LOCAL_POSITION_NED during EKF wait "
+                    "(GPS+compass enabled — EKF may still be initialising; "
+                    "force arm will proceed)")
 
     all_statustext += drain_statustext(gcs, log)
     _procs_alive()
 
-    # Stabilisation wait: drain queued STATUSTEXT, watch for tilt/yaw alignment
-    # completion, and wait for EKF_STATUS to leave the brief 0x0000 flash
-    # (all-zeros means EKF reinitialising).  With ARMING_CHECK=0 + H_RSC_MODE=1
-    # + CH8=2000 the arm will succeed as soon as 0x0000 clears.
-    # Wait for EKF GPS position fusion (LOCAL_POSITION_NED) before arming.
+    # Stabilisation wait: arm immediately when EKF3 first reports attitude
+    # confidence (flags & EKF_ATTITUDE = 0x0001).
     #
-    # WHY position, not velocity:
-    #   In AID_NONE mode the EKF has valid horiz/vert velocity estimates (from
-    #   IMU integration + GPS-velocity yaw), so bits 0x0006 (horiz_vel + vert_vel)
-    #   appear within ~5 s of tilt alignment — long before GPS position fuses.
-    #   Exiting on 0x0006 arms while delAngBiasLearned is still false (~37–42 s
-    #   from start), so GPS position never fuses before test_gps_fuses_during_startup
-    #   times out.
+    # WHY early arm (not waiting for GPS fusion):
+    #   With physical sensor mode (hub at roll~124 deg, pitch~-46 deg), EKF3
+    #   periodically reinitialises (~41 s after start when GPS fusion is
+    #   attempted with large innovations).  After each reinit, EKF3 and DCM
+    #   diverge by ~30-140 deg, failing the mandatory attitudes_consistent()
+    #   arm check.  The safe window is the ~8 s immediately after EKF3
+    #   completes tilt+yaw alignment: both DCM (fast accel correction) and
+    #   EKF3 (freshly aligned) agree on the orbital attitude within ~5 deg.
+    #
+    # TIMING (physical sensor mode, EK3_SRC1_YAW=1, vel0~0.96 m/s):
+    #   ~2 s  : ATTITUDE message arrives (DCM converged) - step 4/6 exits
+    #   ~5 s  : EKF3 IMU0 initialised, AHRS: EKF3 active
+    #   ~8 s  : tiltAlignComplete + yawAlignComplete -> flags=0x00a7 (0x0001 set)
+    #   ~41 s : GPS fusion attempt -> large innovations -> EKF3 reinit -> DCM diverges
     #
     # WHAT we wait for:
-    #   - LOCAL_POSITION_NED received: EKF is in AID_ABSOLUTE (GPS position fused).
-    #     This is the correct signal that readyToUseGPS() returned true.
-    #   - Fallback: 50 s after first non-zero EKF flags.  This is longer than the
-    #     ~40 s needed for delAngBiasLearned (binding gate); it ensures GPS has time
-    #     to fuse before we give up.  For tether_relative mode (no GPS position
-    #     expected), this fallback still fires and proceeds to arm.
-    #
-    # TIMING (physical sensor mode, EK3_SRC1_YAW=2, vel0≈0.96 m/s):
-    #   ~4 s  : tiltAlignComplete, yawAlignComplete → EKF flags non-zero
-    #   ~19 s : gpsGoodToAlign (hardcoded 10 s delay from GPS detect at ~9 s)
-    #   ~41 s : delAngBiasLearned → GPS position fuses → LOCAL_POSITION_NED
-    _EKF_POS_FLAG = 0x0010   # horiz_pos_abs: GPS horizontal position fused
-    log.info("[setup] Waiting for EKF GPS position fusion before arming (timeout=50s from EKF ready) ...")
-    ekf_non_zero_seen = False
-    last_flags        = 0
-    t_stab = time.monotonic() + 60.0   # hard outer limit (EKF non-zero not seen yet)
-    t_stable_since    = None   # first non-zero EKF flags
+    #   - EKF_STATUS flags & 0x0001 (EKF_ATTITUDE): EKF3 attitude confidence.
+    #     This is the earliest moment both DCM and EKF3 agree on the attitude.
+    #   - Still capture LOCAL_POSITION_NED if it arrives (for test_gps_fuses_*).
+    #   - Fallback: 20 s timeout (EKF3 should align well within this).
+    _EKF_ATT_FLAG  = 0x0001   # bit 0: EKF3 attitude estimate good
+    _EKF_POS_FLAG  = 0x0010   # bit 4: horiz_pos_abs (GPS position fused)
+    log.info("[setup] Waiting for EKF3 attitude confidence before arming (timeout=20s) ...")
+    ekf_att_ready  = False
+    last_flags     = 0
+    t_stab = time.monotonic() + 20.0
     while time.monotonic() < t_stab:
         _procs_alive()
         msg = gcs._mav.recv_match(
@@ -896,6 +780,15 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
                 sev  = getattr(msg, "severity", "?")
                 log.info("[stabilise] STATUSTEXT [sev=%s]: %s", sev, text)
                 all_statustext.append(text)
+                # "tilt alignment complete" STATUSTEXT is the definitive signal
+                # that EKF3 attitude is ready.  EKF_STATUS_REPORT polling at
+                # 5 Hz often misses the brief 0x0001 window before EKF
+                # transitions to 0x0400 (EKF_ACCEL_ERROR) when GPS fusion
+                # begins.  Acting on the STATUSTEXT avoids this race.
+                if "tilt alignment" in text.lower() and not ekf_att_ready:
+                    ekf_att_ready = True
+                    log.info("[stabilise] EKF tilt alignment confirmed via STATUSTEXT "
+                             "-- proceeding to arm immediately.")
             elif mt == "LOCAL_POSITION_NED":
                 log.info("[stabilise] LOCAL_POSITION_NED  N=%.2f  E=%.2f  D=%.2f",
                          msg.x, msg.y, msg.z)
@@ -903,45 +796,42 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
                                        "N": msg.x, "E": msg.y, "D": msg.z,
                                        "vN": msg.vx, "vE": msg.vy, "vD": msg.vz})
                 if not ekf_pos:
-                    log.info("[stabilise] EKF GPS position fused (LOCAL_POSITION_NED). Proceeding to arm.")
+                    log.info("[stabilise] EKF GPS position fused (LOCAL_POSITION_NED).")
                     ekf_pos = True
             elif mt == "EKF_STATUS_REPORT":
-                flags     = msg.flags
+                flags      = msg.flags
                 last_flags = flags
                 log.info("[stabilise] EKF_STATUS  flags=0x%04x", flags)
-                if flags != 0:
-                    if t_stable_since is None:
-                        t_stable_since = time.monotonic()
-                    ekf_non_zero_seen = True
-                else:
-                    t_stable_since = None  # reset on 0x0000 flash
                 if flags & _EKF_POS_FLAG:
                     log.info("[stabilise] horiz_pos_abs set (flags=0x%04x) — GPS position fused.",
                              flags)
-        gcs.send_rc_override({8: 2000})
-        # Preferred exit: GPS position fused (LOCAL_POSITION_NED received).
-        if ekf_pos:
+                if (flags & _EKF_ATT_FLAG) and not ekf_att_ready:
+                    ekf_att_ready = True
+                    log.info("[stabilise] EKF3 attitude confidence (flags=0x%04x). "
+                             "Proceeding to arm.", flags)
+        gcs.send_rc_override({8: 1000})   # keep interlock LOW until arm
+        if ekf_att_ready:
             break
-        # Fallback: 50 s after EKF first went non-zero — proceed even if GPS never fused.
-        if t_stable_since is not None and (time.monotonic() - t_stable_since) >= 50.0:
-            log.warning("[stabilise] GPS position fusion did not occur within 50 s; "
-                        "proceeding with flags=0x%04x", last_flags)
-            break
-    if not ekf_non_zero_seen:
-        log.warning("[stabilise] EKF never left 0x0000 state — arming anyway")
+    if not ekf_att_ready:
+        log.warning("[stabilise] EKF3 attitude confidence not seen within 20 s; "
+                    "proceeding with flags=0x%04x", last_flags)
 
     # ── 5. Arm ────────────────────────────────────────────────────────────────
-    # H_RSC_MODE=1 (CH8 passthrough): RSC output = CH8 directly.
-    # CH8=2000 (motor interlock enabled): RSC immediately at setpoint →
-    # runup_complete fires instantly → AP_MotorsHeli keeps _flags.armed=True.
-    # ARMING_CHECK=0 bypasses "Motor Interlock Enabled" pre-arm check.
-    log.info("[setup 5/6] Arming with motor interlock enabled (CH8=2000) ...")
-    gcs.send_rc_override({8: 2000})
+    # Arm with CH8=1000 (motor interlock LOW).  In H_RSC_MODE=1 passthrough,
+    # motor_interlock_switch = (pilot_rotor_speed > 0.01): CH8=1000 → false →
+    # "Motor Interlock Enabled" check passes → arm command accepted.
+    # After HEARTBEAT confirms armed, raise CH8=2000 so the rotor interlock
+    # engages and the RSC output matches the passthrough value.
+    log.info("[setup 5/6] Arming with CH8=1000 (motor interlock LOW) ...")
+    gcs.send_rc_override({8: 1000})
     time.sleep(0.3)
-    gcs.send_rc_override({8: 2000})
+    gcs.send_rc_override({8: 1000})
     try:
-        gcs.arm(timeout=_ARM_TIMEOUT, force=True, rc_override={8: 2000})
-        log.info("[setup 5/6] Armed.")
+        gcs.arm(timeout=_ARM_TIMEOUT, force=True, rc_override={8: 1000})
+        log.info("[setup 5/6] Armed — raising motor interlock (CH8=2000) ...")
+        gcs.send_rc_override({8: 2000})
+        time.sleep(0.3)
+        gcs.send_rc_override({8: 2000})
     except Exception as exc:
         all_statustext += drain_statustext(gcs, log)
         dump_startup_diagnostics(ctx)
@@ -1042,29 +932,16 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
             "PreArm: H_RUNUP_TIME too small — set H_RUNUP_TIME=0 to skip this check."
         )
     if any("gps glitch" in t.lower() for t in ctx.all_statustext):
-        if ctx.sensor_mode == "tether_relative":
-            issues.append(
-                "GPS Glitch — EKF sees position inconsistent with IMU. "
-                "With tether_relative sensor (artificial attitude) this is usually harmless in ACRO; "
-                "if arm fails, try setting EKF2_GPS_TYPE=3 to disable GPS in EKF."
-            )
-        else:
-            issues.append(
-                "GPS Glitch — EKF sees position inconsistent with IMU. "
-                "With physical sensor, GPS/compass/IMU must all agree — check that "
-                "accel_body and gyro_body are correctly expressed in the reported body frame."
-            )
+        issues.append(
+            "GPS Glitch — EKF sees position inconsistent with IMU. "
+            "GPS/compass/IMU must all agree — check that "
+            "accel_body and gyro_body are correctly expressed in the reported body frame."
+        )
     if any("ekf variance" in t.lower() for t in ctx.all_statustext):
         issues.append(
             "EKF variance over threshold — EKF is uncertain. "
             "Common causes: IMU accel not aligned with reported attitude, "
             "or GPS position jumping while IMU says stationary."
-        )
-    if (ctx.sensor_mode == "tether_relative"
-            and any("compass" in t.lower() for t in ctx.all_statustext)):
-        issues.append(
-            "Compass-related STATUSTEXT — ensure COMPASS_USE=0 is set before EKF init "
-            "(tether_relative sensor requires compass disabled)."
         )
     if not result["ekf_aligned"] and not result["attitude_samples"]:
         issues.append(

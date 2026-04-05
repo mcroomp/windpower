@@ -79,12 +79,6 @@ _MIN_CYCLIC_ACTIVITY_PWM =  50    # |servo1−1500| + |servo2−1500| floor
 _POS_LOG_INTERVAL = 5.0   # s
 
 
-@pytest.fixture
-def sensor_mode():
-    """Physical sensor mode: GPS + compass consistent for EKF GPS fusion."""
-    return "physical"
-
-
 def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
     """
     rawes_flight.lua orbit-tracking stack validation.
@@ -104,9 +98,59 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
     gcs = ctx.gcs
     log = logging.getLogger("test_lua_flight")
 
+    all_statustext      = ctx.all_statustext
+
+    # ── Pre-flight Lua assertions ─────────────────────────────────────────────
+    # Check 1: SCR_ENABLE=1 in EEPROM (param round-trip confirms the write
+    # from _run_acro_setup step 3 persisted to EEPROM).
+    scr_enable = gcs.get_param("SCR_ENABLE", timeout=5.0)
+    assert scr_enable == 1.0, (
+        f"SCR_ENABLE = {scr_enable}, expected 1.  "
+        "Lua scripting is disabled.  This is set in _run_acro_setup step 3; "
+        "if it's not 1 here, the param set failed."
+    )
+    log.info("[pre-flight] SCR_ENABLE = 1  OK")
+
+    # Check 2: script file present on disk (catches install failures).
+    script_path = Path("/ardupilot/scripts/rawes_flight.lua")
+    assert script_path.exists(), (
+        f"rawes_flight.lua not found at {script_path}.  "
+        "_install_lua_flight_scripts() in _acro_stack must copy it before SITL starts."
+    )
+    log.info("[pre-flight] rawes_flight.lua present  OK")
+
+    # Check 3: "RAWES flight: loaded" STATUSTEXT must appear within 10 s.
+    # If Lua is enabled and the script is present it logs this immediately
+    # at startup.  Absence means SCR_ENABLE was 0 at boot time (set to 1 only
+    # via MAVLink this run — takes effect on the NEXT boot) or the script has
+    # a syntax error.  Fail here with a clear message rather than waiting the
+    # full 30 s capture timeout.
+    lua_loaded = any("rawes flight" in s.lower() and "loaded" in s.lower()
+                     for s in all_statustext)
+    if not lua_loaded:
+        log.info("[pre-flight] 'RAWES flight: loaded' not yet in buffered STATUSTEXT; "
+                 "waiting up to 10 s ...")
+        t_load_deadline = time.monotonic() + 10.0
+        while time.monotonic() < t_load_deadline:
+            msg = gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.5)
+            if msg is not None:
+                text = msg.text.rstrip("\x00").strip()
+                all_statustext.append(text)
+                log.info("[pre-flight] STATUSTEXT: %s", text)
+                if "rawes flight" in text.lower() and "loaded" in text.lower():
+                    lua_loaded = True
+                    break
+    assert lua_loaded, (
+        "rawes_flight.lua did not log 'RAWES flight: loaded' within 10 s of arm.\n"
+        "Root cause: SCR_ENABLE was 0 at SITL boot.  This happens on the first\n"
+        "run from a clean container — _run_acro_setup writes SCR_ENABLE=1 to\n"
+        "EEPROM this run so the NEXT run will start Lua automatically.\n"
+        f"STATUSTEXT seen: {all_statustext[-20:]}"
+    )
+    log.info("[pre-flight] 'RAWES flight: loaded' confirmed  OK")
+
     pos_history:        list[tuple[float, float, float, float]] = []
     servo_history:      list[tuple[float, int, int]]            = []  # (t, servo1, servo2)
-    all_statustext      = ctx.all_statustext
 
     lua_captured        = False
     max_cyclic_activity = 0

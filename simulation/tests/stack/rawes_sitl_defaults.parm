@@ -1,0 +1,20 @@
+# rawes_sitl_defaults.parm — SITL boot-time parameter defaults for RAWES stack tests.
+#
+# Loaded via --add-param-file (combined with --wipe-eeprom) in _launch_sitl().
+# These params become the boot defaults so setting them again via MAVLink is a
+# no-op (value unchanged) — prevents EKF reinit that would delay GPS fusion.
+#
+# Without this file, setting EK3_SRC1_YAW=1 via MAVLink after SITL starts causes
+# an EKF reinit that delays GPS fusion from ~37 s to ~88 s — past the 45 s
+# kinematic window.  With these as boot defaults, GPS fuses at ~37 s (within
+# kinematic), so arm happens with EKF/DCM agreeing on attitude.
+
+EK3_IMU_MASK    1      # bit 0 only = IMU0 only = single EKF3 core (eliminates Roll/Pitch inconsistency)
+EK3_SRC1_YAW    1      # 1=compass — stable constant heading during kinematic startup
+EK3_MAG_CAL     0      # 0=Never — use raw compass; no in-flight calibration
+EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks (SITL JSON GPS has no quality fields)
+EK3_POS_I_GATE  50     # position innovation gate (sigma) — default 5; widened to prevent GPS glitch at extreme attitude
+EK3_VEL_I_GATE  50     # velocity innovation gate (sigma) — default 5; widened to prevent GPS glitch at extreme attitude
+COMPASS_USE     1      # enable compass for EKF yaw
+COMPASS_ENABLE  1      # enable compass sensor
+SCR_ENABLE      1      # enable Lua scripting on first boot (required for acro_armed_lua)

@@ -54,9 +54,13 @@ DEFAULTS: dict = {
                                      # ≈ 80% of Dyneema SK75 1.9 mm break load (620 N)
 
     # ── Startup kinematic ramp ────────────────────────────────────────────────
-    # Hub moves at constant vel0 from launch_pos for startup_damp_seconds,
-    # then physics takes over.  Gives EKF time to lock on GPS before free flight.
+    # Hub moves at vel0 from launch_pos for startup_damp_seconds, then physics
+    # takes over.  Gives EKF time to lock on GPS before free flight.
+    # kinematic_vel_ramp_s: vel taper window at end of kinematic (0 = no taper).
+    # NOTE: ramp > 0 reduces GPS horizontal position change → slower EKF fusion.
+    # Default 0.0 keeps vel0 constant so GPS fuses quickly (within kinematic window).
     "startup_damp_seconds": 30.0,   # kinematic ramp duration [s]
+    "kinematic_vel_ramp_s":  0.0,   # vel ramp-to-zero window at end of kinematic [s]
     "startup_damp_k_vel":  200.0,   # peak translational drag [N·s/m]
     "startup_damp_k_ang":  500.0,   # peak angular drag [N·m·s/rad]
     "startup_damp_k_pos": 2000.0,   # peak position spring [N/m]
@@ -87,7 +91,6 @@ DEFAULTS: dict = {
     "body_z_slew_rate_rad_s":    0.40,
 
     # ── Sensor model ──────────────────────────────────────────────────────────
-    "sensor_mode": "tether_relative",   # "tether_relative" | "physical"
     # Rotor spin speed is an internal simulation state (omega_spin ODE).
     # In hardware, rotor spin speed measurement is handled separately from
     # anti-rotation motor control — the gear coupling keeps the hub stationary

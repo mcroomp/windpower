@@ -117,8 +117,8 @@ def _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor
             return fake_aero
 
     monkeypatch.setattr(mediator, "SkewedWakeBEM", _FakeSkewedWakeBEM)
-    # SensorSim is NOT mocked here — mediator uses the real SensorSim with the test hub state.
-    # Gyro noise is small (σ=0.003 rad/s); assertions use atol=0.05 to accommodate it.
+    # PhysicalSensor is NOT mocked here — mediator uses the real sensor with the test hub state.
+    # Gyro noise is small (sigma=0.003 rad/s); assertions use atol=0.05 to accommodate it.
 
 
 def _install_time(monkeypatch, values, sleep_behavior):
@@ -180,7 +180,7 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
     np.testing.assert_allclose(fake_aero.compute_calls[0]["wind_world"], np.array([0.0, 10.0, 0.0]))  # NED East
     assert len(fake_aero.motor_calls) == 0
 
-    # Mediator uses SensorSim.compute() with NED pos and home_ned_z.
+    # Mediator uses PhysicalSensor.compute() with NED pos and home_ned_z.
     # pos_ned_rel = [pos[0], pos[1], pos[2] - home_ned_z]
     # home_ned_z = cfg["pos0"][2] (NED Z of start position)
     home_ned_z = _mcfg.DEFAULTS["pos0"][2]   # = -12.530 in NED
@@ -190,7 +190,7 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
         stepped_state["pos"][2] - home_ned_z,
     ])
     # gyro_body should be near-zero: omega=[0,0,28], body_z=[0,0,1] → omega_nospin=0.
-    # SensorSim adds MEMS noise (sigma=0.003 rad/s); allow atol=0.05 for noise.
+    # PhysicalSensor adds MEMS noise (sigma=0.003 rad/s); allow atol=0.05 for noise.
     assert len(fake_sitl.sent_states) == 1
     np.testing.assert_allclose(fake_sitl.sent_states[0]["pos_ned"],   expected_pos_ned)
     np.testing.assert_allclose(fake_sitl.sent_states[0]["gyro_body"], np.zeros(3), atol=0.05)

@@ -1,22 +1,15 @@
 """
 controller.py — RAWES attitude rate controllers for ArduPilot ACRO mode.
 
-Two sensor modes are supported, both using ACRO + RC override:
-
-``tether_relative`` (TetherRelativeHoldController)
-    The mediator reports roll=pitch=0 at tether equilibrium, so ATTITUDE
-    roll/pitch ARE the attitude error.  ``compute_rc_from_attitude`` uses
-    them directly.  Compass must be disabled (EKF yaw from velocity only).
-
-``physical`` (PhysicalHoldController)
-    The mediator reports actual orbital-frame orientation (~65° from NED
-    vertical at equilibrium).  ``compute_rc_from_physical_attitude`` derives
-    the tether-alignment error from position (LOCAL_POSITION_NED) and the
-    reported physical attitude.  GPS + compass can be fused normally.
+The mediator reports actual orbital-frame orientation (~65° from NED vertical
+at tether equilibrium).  PhysicalHoldController derives the tether-alignment
+error from the equilibrium captured during kinematic startup and uses
+compute_rc_from_attitude to send corrective ACRO RC overrides.
+GPS + compass are fused normally.
 
 Usage
 -----
-controller = make_hold_controller(sensor_mode, anchor_ned=anchor_ned)
+controller = make_hold_controller(anchor_ned=anchor_ned)
 controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 """
 
@@ -363,50 +356,6 @@ def compute_rc_from_physical_attitude(
 # Hold controller abstraction — used by test_guided_flight.py
 # ---------------------------------------------------------------------------
 
-class TetherRelativeHoldController:
-    """
-    ACRO hold controller for tether_relative sensor mode.
-
-    ATTITUDE.roll/pitch are tether-relative deviations (=0 at equilibrium),
-    so they are used directly as error signals.  Compass must be disabled.
-    """
-
-    extra_params: dict = {
-        "COMPASS_USE":    0,   # velocity-derived yaw; compass conflicts with tether-relative attitude
-        "COMPASS_ENABLE": 0,
-        "ATC_RAT_RLL_IMAX": 0.0,
-        "ATC_RAT_PIT_IMAX": 0.0,
-        "ATC_RAT_YAW_IMAX": 0.0,
-    }
-
-    # Guard: if |roll| or |pitch| exceeds this, assume EKF glitch and send
-    # neutral sticks.  ACRO damps rates for a few seconds without crashing.
-    _MAX_ATT_RAD: float = math.radians(60.0)
-
-    def send_correction(
-        self,
-        att:     dict,
-        pos_ned: tuple | None,
-        gcs,
-    ) -> dict:
-        """
-        Compute and send RC override.  Returns the rc dict sent (for logging).
-        """
-        if (abs(att["roll"])  < self._MAX_ATT_RAD
-                and abs(att["pitch"]) < self._MAX_ATT_RAD):
-            rc = compute_rc_from_attitude(
-                roll       = att["roll"],
-                pitch      = att["pitch"],
-                rollspeed  = att["rollspeed"],
-                pitchspeed = att["pitchspeed"],
-                yawspeed   = att["yawspeed"],
-            )
-        else:
-            rc = {1: 1500, 2: 1500, 4: 1500}   # neutral during EKF glitch
-        rc[3] = 1500   # neutral collective
-        rc[8] = 2000   # motor interlock on
-        gcs.send_rc_override(rc)
-        return rc
 
 
 class PhysicalHoldController:
@@ -1055,24 +1004,13 @@ def compute_rate_cmd(
 
 
 def make_hold_controller(
-    sensor_mode: str,
-    anchor_ned:  "np.ndarray | None" = None,
-) -> "TetherRelativeHoldController | PhysicalHoldController":
+    anchor_ned: "np.ndarray",
+) -> "PhysicalHoldController":
     """
-    Return the appropriate hold controller for the given sensor mode.
+    Return a PhysicalHoldController for the given anchor position.
 
     Parameters
     ----------
-    sensor_mode : ``"tether_relative"`` or ``"physical"``
-    anchor_ned  : required for ``"physical"`` mode — tether anchor in NED [m]
-                  relative to the LOCAL_POSITION_NED frame origin.
-                  When HOME = GPS_ORIGIN = anchor ENU [0,0,0]:
-                  ``anchor_ned = np.array([0.0, 0.0, 0.0])`` when anchor is at ground origin
+    anchor_ned : tether anchor in NED [m] relative to LOCAL_POSITION_NED origin.
     """
-    if sensor_mode == "tether_relative":
-        return TetherRelativeHoldController()
-    if sensor_mode == "physical":
-        if anchor_ned is None:
-            raise ValueError("PhysicalHoldController requires anchor_ned")
-        return PhysicalHoldController(anchor_ned)
-    raise ValueError(f"Unknown sensor mode {sensor_mode!r}")
+    return PhysicalHoldController(anchor_ned)

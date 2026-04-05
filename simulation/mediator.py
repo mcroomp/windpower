@@ -98,34 +98,40 @@ K_DRAG_SPIN  = 0.01786  # N·m·s²/rad²  (profile drag coefficient)
 # Startup trajectory helpers
 # ---------------------------------------------------------------------------
 
-def compute_launch_position(target_pos, target_vel, damp_seconds: float):
-    """Compute the starting position for a constant-velocity startup trajectory.
+def compute_launch_position(target_pos, target_vel, damp_seconds: float,
+                            ramp_s: float = 0.0):
+    """Compute the starting position for a kinematic startup trajectory.
 
-    Given a target position and velocity that the hub should reach at the end
-    of the damping window, work backwards to find the position at t=0 where
-    the hub should start moving at constant velocity so it arrives at
-    (target_pos, target_vel) at t=damp_seconds.
+    The hub travels at constant velocity vel from launch_pos, arriving at
+    target_pos at t=damp_seconds.  If ramp_s > 0, the velocity is linearly
+    tapered to zero over the last ramp_s seconds so the hub enters free flight
+    at rest.  launch_pos is adjusted so the hub still reaches target_pos at
+    t=damp_seconds despite the reduced average velocity during the ramp.
 
-    Kinematics (per-axis, no forces):
-        velocity(t)  = target_vel          (constant throughout)
-        position(t)  = launch_pos + target_vel * t
+    Velocity profile:
+        t in [0,  T-ramp_s]:  v(t) = target_vel        (constant)
+        t in [T-ramp_s, T]:   v(t) = target_vel * (T-t)/ramp_s  (linear → 0)
 
-    At t=damp_seconds:
-        velocity = target_vel                                        ✓
-        position = launch_pos + target_vel * damp_seconds
-               → launch_pos = target_pos − target_vel * damp_seconds
+    Position at t=T with ramp:
+        launch_pos + target_vel*(T-ramp_s) + target_vel*ramp_s/2 = target_pos
+        → launch_pos = target_pos − target_vel*(T − ramp_s/2)
 
-    Benefits over constant-acceleration:
-    - Non-zero velocity from frame 0 → EKF derives yaw heading immediately
-    - Zero acceleration → IMU sees only gravity (cleaner IMU signal for EKF)
+    Without ramp (ramp_s=0):
+        launch_pos = target_pos − target_vel*T   (original formula)
+
+    Benefits:
+    - Non-zero velocity during [0, T-ramp_s] → EKF derives yaw heading early
+    - Zero acceleration → IMU sees only gravity (cleaner EKF signal)
+    - Zero entry velocity → no kinetic kick at free-flight start (stable TensionPI)
 
     Returns
     -------
-    launch_pos : np.ndarray shape (3,)  — starting ENU position [m]
+    launch_pos : np.ndarray shape (3,)
     """
     target_pos = np.asarray(target_pos, dtype=float)
     target_vel = np.asarray(target_vel, dtype=float)
-    launch_pos = target_pos - target_vel * damp_seconds
+    ramp_s = float(np.clip(ramp_s, 0.0, damp_seconds))
+    launch_pos = target_pos - target_vel * (damp_seconds - ramp_s / 2.0)
     return launch_pos
 
 
@@ -226,20 +232,23 @@ def run_mediator(args, trajectory=None):
     # During the startup window the hub state is overridden directly (no physics
     # integration for translation); physics takes over at t=T with the hub
     # exactly at the equilibrium position and velocity.
-    _startup_damp_T = max(0.0, float(cfg["startup_damp_seconds"]))
+    _startup_damp_T  = max(0.0, float(cfg["startup_damp_seconds"]))
+    _vel_ramp_s      = float(np.clip(cfg["kinematic_vel_ramp_s"], 0.0, _startup_damp_T))
+    _t_ramp_start    = _startup_damp_T - _vel_ramp_s   # time when vel ramp begins
     if _startup_damp_T > 0.0:
-        _launch_pos = compute_launch_position(_pos0_arr, _vel0_arr, _startup_damp_T)
+        _launch_pos = compute_launch_position(
+            _pos0_arr, _vel0_arr, _startup_damp_T, _vel_ramp_s)
         log.info(
-            "Kinematic startup: T=%.0fs  "
-            "launch_pos=[%.3f, %.3f, %.3f]  vel=[%.5f, %.5f, %.5f] m/s (constant)",
-            _startup_damp_T, *_launch_pos, *_vel0_arr,
+            "Kinematic startup: T=%.0fs  ramp=%.0fs  "
+            "launch_pos=[%.3f, %.3f, %.3f]  vel=[%.5f, %.5f, %.5f] m/s",
+            _startup_damp_T, _vel_ramp_s, *_launch_pos, *_vel0_arr,
         )
         _dyn_pos0 = _launch_pos
         _dyn_vel0 = _vel0_arr
     else:
-        _launch_pos = _pos0_arr.copy()
-        _dyn_pos0   = _pos0_arr
-        _dyn_vel0   = _vel0_arr
+        _launch_pos   = _pos0_arr.copy()
+        _dyn_pos0     = _pos0_arr
+        _dyn_vel0     = _vel0_arr
 
     rotor  = _rd.load(cfg["rotor_definition"])
     log.info("Rotor: %s", rotor.summary())
@@ -279,21 +288,14 @@ def run_mediator(args, trajectory=None):
         hub_mass               = rotor.mass_kg,
         axle_attachment_length = 0.0,   # disable restoring torque; body_z stability via aero
     )
-    # Sensor model: selectable via config["sensor_mode"].
-    #   tether_relative — reports roll=pitch=0 at tether equilibrium; use with ACRO+RC override.
-    #   physical        — reports actual orbital-frame orientation; use with GUIDED_NOGPS+SET_ATTITUDE_TARGET.
     sensor_sim = make_sensor(
-        mode          = cfg["sensor_mode"],
-        home_ned_z    = float(_pos0_arr[2]),
-        anchor_ned    = anchor_ned,
-        stable_body_z = None,
+        home_ned_z = float(_pos0_arr[2]),
     )
     spin_sensor = SpinSensor(
         sigma    = float(cfg["spin_sensor_sigma"]),
         K_drive  = K_DRIVE_SPIN,
         K_drag   = K_DRAG_SPIN,
     )
-    log.info("Sensor mode: %s", cfg["sensor_mode"])
     log.info("Spin sensor: noise_sigma=%.3f rad/s", spin_sensor._sigma)
     log.info(
         "Tether: Dyneema SK75 1.9mm  EA=%.0f kN  rest_length=%.0f m  "
@@ -326,9 +328,13 @@ def run_mediator(args, trajectory=None):
     omega_spin         = _omega_spin_init
     startup_damp_T     = _startup_damp_T   # already computed above
     startup_damp_k_ang = float(cfg["startup_damp_k_ang"])
+    startup_vel_ramp_s = _vel_ramp_s       # vel ramp window at end of kinematic [s]
+    t_ramp_start       = _t_ramp_start     # t_sim when ramp begins
+    # Pre-compute ramp start position (constant throughout loop)
+    _ramp_start_pos = _launch_pos + _vel0_arr * t_ramp_start if startup_damp_T > 0.0 else _pos0_arr.copy()
     log.info(
-        "Startup damping: T=%.0fs  k_ang=%.0f N·m·s/rad  (translational: constant-velocity kinematic)",
-        startup_damp_T, startup_damp_k_ang,
+        "Startup damping: T=%.0fs  vel_ramp=%.0fs  k_ang=%.0f N*m*s/rad",
+        startup_damp_T, startup_vel_ramp_s, startup_damp_k_ang,
     )
 
     # -- Telemetry CSV --------------------------------------------------------
@@ -652,8 +658,18 @@ def run_mediator(args, trajectory=None):
             # exactly the equilibrium orientation, ready for free flight.
             # ----------------------------------------------------------------
             if _damp_alpha > 0.0:
-                _kin_pos = _launch_pos + _vel0_arr * t_sim
-                _kin_vel = _vel0_arr.copy()
+                # Compute kinematic position and velocity.
+                # Before ramp: constant velocity.
+                # During ramp (last startup_vel_ramp_s seconds): linear vel → 0.
+                if startup_vel_ramp_s > 0.0 and t_sim >= t_ramp_start:
+                    _u = t_sim - t_ramp_start          # time into ramp [0, ramp_s]
+                    _ramp_frac = max(0.0, (startup_vel_ramp_s - _u) / startup_vel_ramp_s)
+                    _kin_pos = (_ramp_start_pos
+                                + _vel0_arr * _u * (1.0 - _u / (2.0 * startup_vel_ramp_s)))
+                    _kin_vel = _vel0_arr * _ramp_frac
+                else:
+                    _kin_pos = _launch_pos + _vel0_arr * t_sim
+                    _kin_vel = _vel0_arr.copy()
                 hub_state["pos"]   = _kin_pos
                 hub_state["vel"]   = _kin_vel
                 hub_state["R"]     = _R0.copy()
@@ -705,8 +721,6 @@ def run_mediator(args, trajectory=None):
 
             # ----------------------------------------------------------------
             # Step 8: Build SITL sensor packet
-            # SensorSim.compute() reports tether-relative roll/pitch so that
-            # compute_rc_from_attitude has a real error signal.
             # ----------------------------------------------------------------
             sensor_data = sensor_sim.compute(
                 pos_ned         = hub_state["pos"],

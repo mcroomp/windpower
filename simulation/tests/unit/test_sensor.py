@@ -7,152 +7,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from frames import build_orb_frame
-from sensor import SensorSim, PhysicalSensor, make_sensor, _rotation_matrix_to_euler_zyx
+from sensor import PhysicalSensor, make_sensor, _rotation_matrix_to_euler_zyx
 
 
 def test_rotation_matrix_to_euler_identity_is_zero():
     rpy = _rotation_matrix_to_euler_zyx(np.eye(3))
     np.testing.assert_allclose(rpy, np.zeros(3))
-
-
-def test_sensor_compute_tether_aligned_is_deterministic_without_noise():
-    """
-    Hub directly above anchor in NED. body Z points up ([0,0,-1] in NED).
-    Tether direction = [0,0,-1] = up in NED. R_orb = R_orb_eq → R_dev = I → rpy=0.
-    """
-    # Hub at NED [10, 5, -50] (North=10, East=5, 50 m altitude)
-    # Anchor at NED [10, 5,  0] (same N/E, at ground)
-    anchor_ned = np.array([10.0, 5.0, 0.0])
-    pos_ned    = np.array([10.0, 5.0, -50.0])
-    # R_hub: body Z = up = [0,0,-1] in NED (tether direction)
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))
-
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=1,
-                       anchor_ned=anchor_ned)
-
-    result = sensor.compute(
-        pos_ned=pos_ned,
-        vel_ned=np.zeros(3),
-        R_hub=R_hub,
-        omega_body=np.array([0.0, 0.0, -28.0]),  # spin about NED Up = -Z
-        accel_world_ned=np.zeros(3),
-        dt=0.0025,
-    )
-
-    # Position relative to home (home_ned_z=0)
-    np.testing.assert_allclose(result["pos_ned"], np.array([10.0, 5.0, -50.0]))
-    np.testing.assert_allclose(result["vel_ned"], np.zeros(3))
-    np.testing.assert_allclose(result["rpy"], np.zeros(3), atol=1e-10)
-
-    # Stationary hover: specific force = a_world - g_ned = [0,0,0] - [0,0,9.81] = [0,0,-9.81]
-    # R_body (from rpy=0) = I → accel_body = [0, 0, -9.81]
-    np.testing.assert_allclose(result["accel_body"], np.array([0.0, 0.0, -9.81]))
-
-    # omega_body = [0,0,-28]: pure spin along body Z ([0,0,-1] in NED).
-    # disk_normal = [0,0,-1]. dot([0,0,-28], [0,0,-1]) = 28. omega_spin = 28*[0,0,-1] = [0,0,-28].
-    # omega_orbital = [0,0,-28] - [0,0,-28] = [0,0,0] → gyro = 0.
-    np.testing.assert_allclose(result["gyro_body"], np.zeros(3), atol=1e-10)
-
-
-def test_sensor_spin_stripped_from_gyro():
-    """Pure spin about disk normal must not appear in gyro output."""
-    # disk normal = [0,0,-1] (up in NED), spin rate = 28 rad/s about this axis
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=1)
-    result = sensor.compute(
-        pos_ned=np.zeros(3),
-        vel_ned=np.zeros(3),
-        R_hub=R_hub,
-        omega_body=np.array([0.0, 0.0, -28.0]),  # pure spin about NED Up
-        accel_world_ned=np.zeros(3),
-        dt=0.0025,
-    )
-    np.testing.assert_allclose(result["gyro_body"], np.zeros(3), atol=1e-10)
-
-
-def test_sensor_orbital_omega_appears_in_gyro():
-    """Orbital (non-spin) angular velocity must appear in gyro output."""
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=1)
-    omega_orbital = np.array([0.3, 0.0, 0.0])  # orbital rate about NED North
-    result = sensor.compute(
-        pos_ned=np.zeros(3),
-        vel_ned=np.zeros(3),
-        R_hub=R_hub,
-        omega_body=omega_orbital,   # no spin component
-        accel_world_ned=np.zeros(3),
-        dt=0.0025,
-    )
-    # Gyro should be non-zero (orbital rate projected into body frame)
-    assert np.linalg.norm(result["gyro_body"]) > 0.1
-
-
-def test_sensor_tether_aligned_orientation_reports_zero_attitude():
-    """
-    When the hub axle (body Z) is exactly aligned with the tether direction
-    (anchor → hub), the reported attitude must be roll=0, pitch=0, yaw=0.
-    This is the RAWES equilibrium — ArduPilot should not command cyclic correction.
-    """
-    elev = math.radians(30.0)
-    L    = 50.0
-    # Hub position: tethered at 30° elevation toward NED East (Y axis)
-    # In NED: East = Y. Hub at [0, L*cos(elev), -L*sin(elev)].
-    pos_ned = np.array([0.0, L * math.cos(elev), -L * math.sin(elev)])
-
-    # Build R_hub with body Z aligned with tether direction (anchor→hub)
-    tether_dir = pos_ned / np.linalg.norm(pos_ned)
-    R_hub = build_orb_frame(tether_dir)
-
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0,
-                       anchor_ned=np.zeros(3))
-
-    result = sensor.compute(
-        pos_ned=pos_ned,
-        vel_ned=np.zeros(3),
-        R_hub=R_hub,
-        omega_body=np.zeros(3),
-        accel_world_ned=np.zeros(3),
-        dt=0.0025,
-    )
-
-    np.testing.assert_allclose(result["rpy"], np.zeros(3), atol=1e-10,
-        err_msg="Tether-aligned axle must report zero roll/pitch/yaw to ArduPilot")
-
-
-def test_sensor_hover_accel_is_minus_g_in_body_z():
-    """
-    Stationary hover with zero world acceleration: accelerometer must read
-    [0, 0, -9.81] in body frame when body Z points up (NED body Z = up = negative NED).
-    """
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))  # body Z = up
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0)
-    result = sensor.compute(
-        pos_ned=np.zeros(3),
-        vel_ned=np.zeros(3),
-        R_hub=R_hub,
-        omega_body=np.zeros(3),
-        accel_world_ned=np.zeros(3),
-        dt=0.0025,
-    )
-    np.testing.assert_allclose(result["accel_body"], np.array([0.0, 0.0, -9.81]),
-                                atol=1e-6)
-
-
-def test_sensor_pos_ned_home_offset():
-    """Position relative to home: home_ned_z offset is applied to NED Z."""
-    # Hub at NED [0, 0, -50] (50 m altitude). home_ned_z = -50 → D=0 at hub start.
-    sensor = SensorSim(gyro_sigma=0.0, accel_sigma=0.0, home_ned_z=-50.0)
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))
-    result = sensor.compute(
-        pos_ned=np.array([0.0, 0.0, -50.0]),
-        vel_ned=np.zeros(3),
-        R_hub=R_hub,
-        omega_body=np.zeros(3),
-        accel_world_ned=np.zeros(3),
-        dt=0.0025,
-    )
-    # pos_ned_rel = [0, 0, -50 - (-50)] = [0, 0, 0]
-    np.testing.assert_allclose(result["pos_ned"], np.array([0.0, 0.0, 0.0]))
 
 
 # ---------------------------------------------------------------------------
@@ -275,17 +135,6 @@ def test_physical_sensor_velocity_yaw_override():
 # make_sensor factory tests
 # ---------------------------------------------------------------------------
 
-def test_make_sensor_tether_relative_returns_sensorsim():
-    sensor = make_sensor("tether_relative")
-    assert isinstance(sensor, SensorSim)
-
-
-def test_make_sensor_physical_returns_physical_sensor():
-    sensor = make_sensor("physical")
+def test_make_sensor_returns_physical_sensor():
+    sensor = make_sensor()
     assert isinstance(sensor, PhysicalSensor)
-
-
-def test_make_sensor_invalid_mode_raises():
-    import pytest
-    with pytest.raises(ValueError, match="Unknown sensor mode"):
-        make_sensor("bogus")

@@ -518,7 +518,7 @@ class WindEstimator:
 class TrajectoryPlanner:
     """Abstract base class — subclass and implement step()."""
 
-    def step(self, state: dict, dt: float) -> dict:
+    def step(self, state: dict, dt: float, **kwargs) -> dict:
         """
         Advance one planner step.
 
@@ -556,7 +556,7 @@ class HoldPlanner(TrajectoryPlanner):
     Use for: closed-loop stability tests where the pumping cycle is inactive.
     """
 
-    def step(self, state: dict, dt: float) -> dict:
+    def step(self, state: dict, dt: float, **kwargs) -> dict:
         return {
             "attitude_q":     Q_IDENTITY.copy(),
             "thrust":         0.0,
@@ -702,7 +702,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         return quat_from_vectors(np.array([0.0, 0.0, -1.0]), body_z_target)
 
     # ------------------------------------------------------------------
-    def step(self, state: dict, dt: float) -> dict:
+    def step(self, state: dict, dt: float, **kwargs) -> dict:
         self._t_free += dt
 
         # Determine phase before calling WindEstimator so we can pass it as context.
