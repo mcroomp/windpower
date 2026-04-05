@@ -46,9 +46,9 @@ from dynamics        import RigidBodyDynamics
 from aero            import create_aero
 from tether          import TetherModel
 from controller      import (
-    compute_swashplate_from_state,
     OrbitTracker,
     col_min_for_altitude_rad,
+    AcroController,
 )
 from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity, Q_IDENTITY
 from landing_planner import LandingPlanner
@@ -144,13 +144,13 @@ def _run_pump_and_land() -> dict:
 
     # Mode_RAWES inner state (pumping phase)
     orbit_tracker = OrbitTracker(_IC.body_z, _IC.pos / np.linalg.norm(_IC.pos), BODY_Z_SLEW_RATE)
+    acro          = AcroController.from_rotor(rd.default())
 
     hub_state   = dyn.state
     omega_spin  = _IC.omega_spin
     tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
     tension_now    = tether._last_info.get("tension", 0.0)
     collective_rad = _IC.coll_eq_rad
-    sw             = {"tilt_lon": 0.0, "tilt_lat": 0.0}
     body_z_eq      = orbit_tracker.bz_slerp
 
     t_pumping_end   = T_REEL_OUT + T_REEL_IN
@@ -231,8 +231,6 @@ def _run_pump_and_land() -> dict:
                 energy_in  += tension_now * V_REEL_IN  * DT
                 tensions_in.append(tension_now)
 
-            kp, kd = KP_ORBIT, KD_ORBIT
-
         # ── Landing phase: LandingPlanner controls everything ────────────────
         else:
             land_state = {
@@ -253,9 +251,11 @@ def _run_pump_and_land() -> dict:
             if land_phase in ("leveling", "descent"):
                 tensions_land.append(tension_now)
 
-            # Floor hit detection (test-level, not planner-level)
-            if land_phase == "final_drop":
-                if t_final_start is None:
+            # Floor hit detection (test-level, not planner-level).
+            # With AcroController the hub may reach FLOOR_ALT_M during descent
+            # (tether slack) rather than in the final_drop phase — both count.
+            if land_phase in ("descent", "final_drop"):
+                if land_phase == "final_drop" and t_final_start is None:
                     t_final_start = t_sim
                 if altitude <= FLOOR_ALT_M and not floor_hit:
                     floor_hit      = True
@@ -264,21 +264,15 @@ def _run_pump_and_land() -> dict:
                     touchdown_pos  = hub_state["pos"].copy()
                     touchdown_time = t_sim
                     break
-                if (t_sim - t_final_start) >= T_FINAL_DROP_MAX:
+                if land_phase == "final_drop" and t_final_start is not None and (t_sim - t_final_start) >= T_FINAL_DROP_MAX:
                     break
 
-            kp, kd = KP_HOVER, KD_HOVER
-
-        # ── Attitude controller ───────────────────────────────────────────────
-        sw = compute_swashplate_from_state(
-            hub_state=hub_state, anchor_pos=ANCHOR,
-            body_z_eq=body_z_eq, kp=kp, kd=kd)
-
-        # ── Aerodynamics ──────────────────────────────────────────────────────
+        # ── Attitude controller + servo (emulates ArduPilot ACRO) ────────────
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
         result = aero.compute_forces(
             collective_rad = collective_rad,
-            tilt_lon       = sw["tilt_lon"],
-            tilt_lat       = sw["tilt_lat"],
+            tilt_lon       = tilt_lon,
+            tilt_lat       = tilt_lat,
             R_hub          = hub_state["R"],
             v_hub_world    = hub_state["vel"],
             omega_rotor    = omega_spin,
@@ -301,8 +295,8 @@ def _run_pump_and_land() -> dict:
             floor_hits += 1
             if outer_phase == "pumping":
                 pumping_floor_hits += 1
-            if floor_hits > 200:
-                break
+                if pumping_floor_hits > 200:   # only crash-guard for pumping phase
+                    break
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────────
         tel_phase = land_phase if outer_phase == "landing" else outer_phase
@@ -323,8 +317,8 @@ def _run_pump_and_land() -> dict:
                 "omega_rotor":        float(omega_spin),
                 "wind_ned":           WIND.tolist(),
                 "swash_collective":   float(collective_rad),
-                "swash_tilt_lon":     float(sw["tilt_lon"]),
-                "swash_tilt_lat":     float(sw["tilt_lat"]),
+                "swash_tilt_lon":     float(tilt_lon),
+                "swash_tilt_lat":     float(tilt_lat),
                 "body_z_eq":          body_z_eq.tolist(),
             })
 

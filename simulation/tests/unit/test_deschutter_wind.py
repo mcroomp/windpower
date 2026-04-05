@@ -35,7 +35,7 @@ import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
-from controller  import compute_swashplate_from_state, OrbitTracker, col_min_for_altitude_rad
+from controller  import OrbitTracker, col_min_for_altitude_rad, AcroController
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
@@ -103,7 +103,14 @@ def _get_result() -> dict:
 
 def _run() -> dict:
     aero = create_aero(rd.default())
-    col_min_reel_in_rad = col_min_for_altitude_rad(aero, XI_REEL_IN_DEG, _ROTOR.mass_kg)
+    # Compute reel-in altitude floor using the actual power-law wind speed at the
+    # starting altitude.  The default (wind_m_s=10.0) is the ground-reference speed,
+    # which overestimates the lift available at the hub's 7 m operating altitude
+    # (power-law gives ~9.5 m/s there).  Using the correct speed gives a more
+    # restrictive floor and prevents altitude loss during reel-in.
+    _reel_in_wind_ms = float(np.linalg.norm(_wind(POS0)))
+    col_min_reel_in_rad  = col_min_for_altitude_rad(
+        aero, XI_REEL_IN_DEG, _ROTOR.mass_kg, wind_m_s=_reel_in_wind_ms)
 
     dyn    = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
@@ -120,7 +127,10 @@ def _run() -> dict:
         t_transition        = T_TRANSITION,
         v_reel_out          = V_REEL_OUT,
         v_reel_in           = V_REEL_IN,
-        tension_out         = 200.0,
+        tension_out         = 250.0,   # higher than uniform-wind 200 N: power-law wind
+                                         # is stronger at 15 m altitude (10.6 m/s vs 10 m/s),
+                                         # so the orbit naturally generates ~250 N tension at
+                                         # the equilibrium collective that maintains altitude.
         tension_in          =  55.0,
         wind_estimator      = estimator,
         col_min_rad              = COL_MIN_RAD,
@@ -130,6 +140,7 @@ def _run() -> dict:
     )
     winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=TENSION_SAFETY_N)
     orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0), _ROTOR.body_z_slew_rate_rad_s)
+    acro = AcroController.from_rotor(_ROTOR, use_servo=True)
 
     from planner import Q_IDENTITY
 
@@ -189,13 +200,12 @@ def _run() -> dict:
                       else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
         body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
-        sw = compute_swashplate_from_state(
-            hub_state=hub_state, anchor_pos=ANCHOR, body_z_eq=body_z_eq)
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
 
         result = aero.compute_forces(
             collective_rad = collective_rad,
-            tilt_lon       = sw["tilt_lon"],
-            tilt_lat       = sw["tilt_lat"],
+            tilt_lon       = tilt_lon,
+            tilt_lat       = tilt_lat,
             R_hub          = hub_state["R"],
             v_hub_world    = hub_state["vel"],
             omega_rotor    = omega_spin,

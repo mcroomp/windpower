@@ -66,6 +66,7 @@ The base-to-hub tension difference is the tether weight component along the teth
 | Orbit tracking | Pixhawk-side control that rotates attitude setpoint to match hub orbital position |
 | NED | North-East-Down coordinate frame (X=North, Y=East, Z=Down). Up is [0,0,-1] |
 | Rodrigues rotation | Rotates a unit vector **v** around a unit axis **k** by angle **theta**: `v_rot = v*cos(theta) + (k x v)*sin(theta) + k*(k.v)*(1-cos(theta))`. Used throughout rawes_flight.lua for orbit tracking and rate-limited slerp because it operates directly on Vector3f components without requiring a quaternion library. |
+| Slerp | **Spherical Linear intERPolation** — moves a unit vector toward a target at a constant angular rate (rad/s), independent of frame rate. Given current vector **a**, target **b**, and slew rate **r**: compute the angle between them, cap the step at `r * dt`, then rotate **a** toward **b** by exactly that angle using Rodrigues rotation. The result stays on the unit sphere (no renormalization needed) and moves at a predictable maximum angular speed regardless of how large the error is. Used by `OrbitTracker` / `slerp_body_z` (Python) and `rawes_flight.lua`'s `slerp_step` to rate-limit body_z attitude setpoint changes to 0.40 rad/s. |
 
 ### 2.2 Physical and Control Variables
 

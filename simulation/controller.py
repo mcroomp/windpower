@@ -23,7 +23,8 @@ controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 import math
 
 import numpy as np
-from frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
+from frames    import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
+from swashplate import SwashplateServoModel
 
 
 def compute_rc_rates(
@@ -791,6 +792,107 @@ class RatePID:
         """Reset integrator and derivative state (call on mode entry)."""
         self._integral = 0.0
         self._last_err = 0.0
+
+
+# ---------------------------------------------------------------------------
+# ACRO attitude controller emulator
+# ---------------------------------------------------------------------------
+
+class AcroController:
+    """
+    Emulates ArduPilot ACRO mode: two-loop attitude control + optional servo slew.
+
+    In SITL stack tests, ArduPilot handles attitude control internally and the
+    mediator only receives the resulting servo PWM.  In unit simtests this class
+    provides identical behaviour so the same physics code runs without Docker.
+
+    Architecture (mirrors AC_AttitudeControl + AC_PID):
+        outer loop : compute_rate_cmd(kp_outer, kd=0) -> angular rate setpoint
+        inner loop : RatePID                           -> normalised tilt command
+        servo      : SwashplateServoModel              -> slew-limited tilt (optional)
+
+    The servo model is optional because its 25 ms slew lag destabilises 400 Hz
+    feedback loops that lack a separate altitude controller.  In SITL the servo
+    runs inside ArduPilot between a 10 Hz outer loop and the plant, so the
+    lag-to-period ratio is 10x smaller.  Tests that include altitude floor
+    protection (test_deschutter_cycle) can safely enable use_servo=True.
+
+    Usage::
+
+        acro = AcroController.from_rotor(rotor)         # no servo
+        acro = AcroController.from_rotor(rotor, use_servo=True)  # with servo
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, dt)
+    """
+
+    DEFAULT_KP_OUTER: float = 2.5
+
+    def __init__(
+        self,
+        rotor,
+        kp_outer:  float = DEFAULT_KP_OUTER,
+        kp_inner:  float = RatePID.DEFAULT_KP,
+        use_servo: bool  = False,
+    ) -> None:
+        self._kp_outer = float(kp_outer)
+        self._pid_lon  = RatePID(kp=kp_inner)
+        self._pid_lat  = RatePID(kp=kp_inner)
+        self._servo    = SwashplateServoModel.from_rotor(rotor) if use_servo else None
+
+    @classmethod
+    def from_rotor(cls, rotor, kp_outer: float = DEFAULT_KP_OUTER,
+                   kp_inner: float = RatePID.DEFAULT_KP,
+                   use_servo: bool = False) -> "AcroController":
+        return cls(rotor, kp_outer=kp_outer, kp_inner=kp_inner, use_servo=use_servo)
+
+    def update(
+        self,
+        hub_state:            dict,
+        body_z_eq:            np.ndarray,
+        dt:                   float,
+        swashplate_phase_deg: float = 0.0,
+    ) -> "tuple[float, float]":
+        """
+        Compute slew-limited tilt commands for one timestep.
+
+        Parameters
+        ----------
+        hub_state            : dict with R (3x3) and omega (3,) in world frame
+        body_z_eq            : desired rotor axis unit vector (world frame)
+        dt                   : timestep [s]
+        swashplate_phase_deg : gyroscopic phase advance [deg]; 0 = no compensation
+
+        Returns
+        -------
+        (tilt_lon, tilt_lat) : normalised swashplate tilt in [-1, 1]
+        """
+        bz_now   = np.asarray(hub_state["R"], dtype=float)[:, 2]
+        rate_sp  = compute_rate_cmd(bz_now, body_z_eq,
+                                    np.asarray(hub_state["R"], dtype=float),
+                                    kp=self._kp_outer, kd=0.0)
+        omega_body    = np.asarray(hub_state["R"], dtype=float).T @ np.asarray(hub_state["omega"], dtype=float)
+        omega_body[2] = 0.0   # strip spin axis — rate PID ignores yaw
+
+        tilt_lon_cmd =  self._pid_lon.update(rate_sp[0], omega_body[0], dt)
+        tilt_lat_cmd = -self._pid_lat.update(rate_sp[1], omega_body[1], dt)
+
+        if swashplate_phase_deg != 0.0:
+            phi = math.radians(swashplate_phase_deg)
+            c, s = math.cos(phi), math.sin(phi)
+            tilt_lon_cmd, tilt_lat_cmd = (
+                c * tilt_lon_cmd - s * tilt_lat_cmd,
+                s * tilt_lon_cmd + c * tilt_lat_cmd,
+            )
+
+        if self._servo is not None:
+            return self._servo.step(tilt_lon_cmd, tilt_lat_cmd, dt)
+        return float(tilt_lon_cmd), float(tilt_lat_cmd)
+
+    def reset(self) -> None:
+        """Reset all stateful components (call on phase transitions)."""
+        self._pid_lon.reset()
+        self._pid_lat.reset()
+        if self._servo is not None:
+            self._servo.reset()
 
 
 # ---------------------------------------------------------------------------

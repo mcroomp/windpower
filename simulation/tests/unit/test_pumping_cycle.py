@@ -34,7 +34,7 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 import rotor_definition as _rd
 from tether     import TetherModel
-from controller import compute_swashplate_from_state, TensionPI, OrbitTracker
+from controller import TensionPI, OrbitTracker, AcroController
 from winch      import WinchController
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
@@ -64,7 +64,7 @@ WIND = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 BREAK_LOAD_N = 620.0   # Dyneema SK75 1.9 mm [N]
 
 # ── Default pumping cycle parameters ──────────────────────────────────────────
-DEFAULT_TENSION_OUT  = 150.0   # N — target tether tension during reel-out
+DEFAULT_TENSION_OUT  = 200.0   # N — target tether tension during reel-out (matches natural orbit equilibrium ~200 N)
 DEFAULT_TENSION_IN   =  20.0   # N — target tether tension during reel-in
 DEFAULT_V_REEL_OUT   =   0.4   # m/s — winch pay-out speed
 DEFAULT_V_REEL_IN    =   0.4   # m/s — winch reel-in speed
@@ -113,6 +113,7 @@ def _run_pumping_cycle(
     omega_spin    = OMEGA_SPIN0
     orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0),
                                  _rd.default().body_z_slew_rate_rad_s)
+    acro = AcroController.from_rotor(_rd.default())
 
     t_total  = t_reel_out + t_reel_in
     n_steps  = int(t_total / DT)
@@ -146,18 +147,15 @@ def _run_pumping_cycle(
         tension_ctrl.setpoint = tension_out if phase_out else tension_in
         collective  = tension_ctrl.update(tension_now, DT)
 
-        # ── Attitude controller → tilt ────────────────────────────────────
-        sw = compute_swashplate_from_state(
-            hub_state  = hub_state,
-            anchor_pos = ANCHOR,
-            body_z_eq  = orbit_tracker.update(hub_state["pos"], DT),
-        )
+        # ── Two-loop attitude controller + servo (emulates ArduPilot ACRO) ──
+        body_z_eq          = orbit_tracker.update(hub_state["pos"], DT)
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
 
         # ── Aerodynamics ──────────────────────────────────────────────────
         result = aero.compute_forces(
             collective_rad = collective,          # from tension controller
-            tilt_lon       = sw["tilt_lon"],      # from attitude controller
-            tilt_lat       = sw["tilt_lat"],
+            tilt_lon       = tilt_lon,
+            tilt_lat       = tilt_lat,
             R_hub          = hub_state["R"],
             v_hub_world    = hub_state["vel"],
             omega_rotor    = omega_spin,
@@ -323,18 +321,18 @@ def test_static_tension_setpoint_range():
         omega_spin    = OMEGA_SPIN0
         orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0),
                                      _rd.default().body_z_slew_rate_rad_s)
+        acro_s = AcroController.from_rotor(_rd.default())
         T_SIM = 30.0
         tensions_late = []
         tension_now = 0.0
         for i in range(int(T_SIM / DT)):
             t = i * DT
-            collective = ctrl.update(tension_now, DT)
-            sw = compute_swashplate_from_state(
-                hub_state=hub_state, anchor_pos=ANCHOR,
-                body_z_eq=orbit_tracker.update(hub_state["pos"], DT))
+            collective          = ctrl.update(tension_now, DT)
+            body_z_eq           = orbit_tracker.update(hub_state["pos"], DT)
+            tilt_lon_s, tilt_lat_s = acro_s.update(hub_state, body_z_eq, DT)
             result = aero.compute_forces(
-                collective_rad=collective, tilt_lon=sw["tilt_lon"],
-                tilt_lat=sw["tilt_lat"], R_hub=hub_state["R"],
+                collective_rad=collective, tilt_lon=tilt_lon_s,
+                tilt_lat=tilt_lat_s, R_hub=hub_state["R"],
                 v_hub_world=hub_state["vel"], omega_rotor=omega_spin,
                 wind_world=WIND, t=T_AERO_OFFSET + t)
             tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
@@ -391,10 +389,16 @@ def _print_cycle(r):
                      f"{alt:8.2f}m  {rl:7.2f}m")
     out = r["tensions_out"]; inn = r["tensions_in"]
     lines.append(f"")
-    lines.append(f"  Reel-out: mean={np.mean(out):.1f}N  "
-                 f"max={max(out):.1f}N  energy={r['energy_out']:.1f}J")
-    lines.append(f"  Reel-in:  mean={np.mean(inn):.1f}N  "
-                 f"max={max(inn):.1f}N  energy={r['energy_in']:.1f}J")
+    if out:
+        lines.append(f"  Reel-out: mean={np.mean(out):.1f}N  "
+                     f"max={max(out):.1f}N  energy={r['energy_out']:.1f}J")
+    else:
+        lines.append(f"  Reel-out: (no data)  energy={r['energy_out']:.1f}J")
+    if inn:
+        lines.append(f"  Reel-in:  mean={np.mean(inn):.1f}N  "
+                     f"max={max(inn):.1f}N  energy={r['energy_in']:.1f}J")
+    else:
+        lines.append(f"  Reel-in:  (no data)  energy={r['energy_in']:.1f}J")
     lines.append(f"  Net energy: {r['net_energy']:.1f}J  "
                  f"floor_hits_out={r['floor_hits_out']}  floor_hits_in={r['floor_hits_in']}")
     _log.write(lines, f"net={r['net_energy']:.0f}J  "

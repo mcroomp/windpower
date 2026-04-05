@@ -221,6 +221,87 @@ def servos_to_blade_pitches(
 
 
 # ---------------------------------------------------------------------------
+# Servo slew rate limiter
+# ---------------------------------------------------------------------------
+
+def _slew_limit(current: float, target: float, max_step: float) -> float:
+    """Move current toward target by at most max_step."""
+    delta = target - current
+    if abs(delta) <= max_step:
+        return target
+    return current + math.copysign(max_step, delta)
+
+
+class SwashplateServoModel:
+    """
+    Stateful swashplate servo model with physical slew rate limiting.
+
+    Models the DS113MG V6.0 servo speed through the H3-120 swashplate
+    geometry to limit how fast tilt_lon and tilt_lat can change each step.
+
+    Mirrors ArduPilot's SIM_SERVO_SPEED constraint so simtests and SITL
+    apply identical servo bandwidth.  Both are derived from the same
+    RotorDefinition fields (servo_slew_rate_deg_s, servo_travel_deg):
+
+        SIM_SERVO_SPEED         = slew_rate_deg_s / travel_deg     [full-range/s]
+        max_rate_norm [norm/s]  = 2 * SIM_SERVO_SPEED
+
+    The factor of 2 converts ArduPilot's [0, 1] output range to our
+    normalised tilt range [-1, +1].
+
+    Example — DS113MG at 6 V (60 deg in 0.05 s = 1200 deg/s):
+        SIM_SERVO_SPEED = 1200 / 60 = 20
+        max_rate_norm   = 40 normalised units/s
+        At 400 Hz (dt=0.0025 s): max step = 0.10 per step (10% of full range)
+    """
+
+    def __init__(self, slew_rate_deg_s: float, travel_deg: float):
+        # normalised range [-1,1] = 2 units; ArduPilot range [0,1] = 1 unit
+        self._max_rate = 2.0 * slew_rate_deg_s / travel_deg
+        self._tilt_lon = 0.0
+        self._tilt_lat = 0.0
+
+    @classmethod
+    def from_rotor(cls, rotor) -> "SwashplateServoModel":
+        """Construct from a RotorDefinition."""
+        return cls(
+            slew_rate_deg_s=rotor.servo_slew_rate_deg_s,
+            travel_deg=rotor.servo_travel_deg,
+        )
+
+    def step(self, tilt_lon_cmd: float, tilt_lat_cmd: float, dt: float):
+        """
+        Advance servo state by dt seconds toward commanded tilt.
+
+        Parameters
+        ----------
+        tilt_lon_cmd, tilt_lat_cmd : float   Target normalised tilt [-1, 1]
+        dt                         : float   Time step [s]
+
+        Returns
+        -------
+        (tilt_lon, tilt_lat) : tuple of float — slew-rate-limited output
+        """
+        max_step = self._max_rate * dt
+        self._tilt_lon = _slew_limit(self._tilt_lon, float(tilt_lon_cmd), max_step)
+        self._tilt_lat = _slew_limit(self._tilt_lat, float(tilt_lat_cmd), max_step)
+        return self._tilt_lon, self._tilt_lat
+
+    def reset(self, tilt_lon: float = 0.0, tilt_lat: float = 0.0) -> None:
+        """Reset servo state (call on mode entry or between simulation runs)."""
+        self._tilt_lon = float(tilt_lon)
+        self._tilt_lat = float(tilt_lat)
+
+    @property
+    def tilt_lon(self) -> float:
+        return self._tilt_lon
+
+    @property
+    def tilt_lat(self) -> float:
+        return self._tilt_lat
+
+
+# ---------------------------------------------------------------------------
 # Standalone smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

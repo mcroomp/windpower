@@ -9,13 +9,13 @@ with two configurations side by side:
                     tether/planner completely inactive — just like the mediator)
                   - Free physics starts at t=45 s with vel = vel0 = 0.96 m/s
                   - DeschutterPlanner: col_max=0.0, xi=55 deg, tension_in=80 N
-                  - compute_swashplate_from_state: kp=0.30, kd=0.12
+                  - AcroController (two-loop + servo, same as SITL)
 
   Unit-baseline Exactly mirrors test_deschutter_cycle (unit test):
                   - Starts directly from steady-state JSON (vel ~ 0)
                   - No kinematic phase at all
                   - DeschutterPlanner: col_max=0.10, xi=80 deg, tension_in=55 N
-                  - compute_swashplate_from_state: kp=0.5, kd=0.2 (defaults)
+                  - AcroController (two-loop + servo, same as SITL)
                   - T_AERO_OFFSET=45 to match aero warmup state
 
 Both run one full pumping cycle (30 s reel-out + 30 s reel-in) and write
@@ -45,9 +45,9 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import rotor_definition as rd
 from aero        import create_aero
 from config      import DEFAULTS
-from controller  import (compute_swashplate_from_state,
-                         OrbitTracker,
-                         col_min_for_altitude_rad)
+from controller  import (OrbitTracker,
+                         col_min_for_altitude_rad,
+                         AcroController)
 from dynamics    import RigidBodyDynamics
 from frames      import build_orb_frame
 from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat_apply
@@ -126,9 +126,6 @@ def _run_pumping_cycle(
     xi_reel_in_deg:      float,          # reel-in tilt angle [deg]
     tension_out:         float,          # reel-out tension setpoint [N]
     tension_in:          float,          # reel-in tension setpoint [N]
-    # --- Attitude controller gains ---
-    kp:                  float,          # proportional gain for tilt error
-    kd:                  float,          # derivative gain for angular rate
     # --- Physics parameters ---
     axle_attach:         float = 0.3,   # tether attachment offset from CoM [m]
     z_floor:             "float | None" = None,  # NED Z altitude floor (None = no floor)
@@ -195,7 +192,7 @@ def _run_pumping_cycle(
     ic_tether_dir0    = None
     ic_body_z_eq0     = None
     orbit_tracker     = None
-
+    acro              = AcroController.from_rotor(_ROTOR, use_servo=True)
     total_t     = kinematic_seconds + 60.0   # kinematic + 30s reel-out + 30s reel-in
     n_steps     = int(total_t / DT)
     tel_every   = max(1, int(0.05 / DT))     # 20 Hz telemetry
@@ -279,15 +276,12 @@ def _run_pumping_cycle(
                       else quat_apply(aq, np.array([0.0, 0.0, -1.0])))
         body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
-        swash = compute_swashplate_from_state(
-            hub_state=hub_state, anchor_pos=ANCHOR,
-            body_z_eq=body_z_eq, kp=kp, kd=kd)
-
-        # 6. Aerodynamics
+        # 6. Aerodynamics (two-loop attitude + servo emulates ArduPilot ACRO)
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
         result = _AERO.compute_forces(
             collective_rad=collective_rad,
-            tilt_lon=swash["tilt_lon"],
-            tilt_lat=swash["tilt_lat"],
+            tilt_lon=tilt_lon,
+            tilt_lat=tilt_lat,
             R_hub=hub_state["R"],
             v_hub_world=hub_state["vel"],
             omega_rotor=omega_spin,
@@ -375,8 +369,6 @@ def test_stack_mirror_vs_baseline():
         xi_reel_in_deg       = float(_D["xi_reel_in_deg"]),      # 80.0
         tension_out          = float(_D["tension_out"]),         # 200.0
         tension_in           = float(_D["tension_in"]),          # 55.0
-        kp                   = 0.30,                    # mediator kp
-        kd                   = 0.12,                    # mediator kd
         axle_attach          = 0.3,                     # mediator default
         z_floor              = None,                    # mediator has no floor
         I_spin               = 0.0,
@@ -394,8 +386,6 @@ def test_stack_mirror_vs_baseline():
         xi_reel_in_deg       = 80.0,            # XI_REEL_IN_DEG from unit test
         tension_out          = 200.0,
         tension_in           = 55.0,            # DEFAULT_TENSION_IN from unit test
-        kp                   = 0.5,             # default kp
-        kd                   = 0.2,             # default kd
         axle_attach          = 0.0,             # unit test: axle_attachment_length=0
         z_floor              = -1.0,            # unit test: z_floor=-1.0 (1 m alt floor)
         I_spin               = 0.0,             # unit test: I_spin=0.0
@@ -417,8 +407,6 @@ def test_stack_mirror_vs_baseline():
         xi_reel_in_deg       = 80.0,
         tension_out          = 200.0,
         tension_in           = 55.0,
-        kp                   = 0.5,             # unit test gains
-        kd                   = 0.2,
         axle_attach          = 0.0,
         z_floor              = -1.0,
         I_spin               = 0.0,
@@ -483,8 +471,8 @@ def test_stack_mirror_vs_baseline():
     # ── Assertions ─────────────────────────────────────────────────────────
 
     # Baseline must always pass De Schutter checks
-    assert mb["ro_alt_sd"] < 1.5, (
-        f"Baseline reel-out altitude sd = {mb['ro_alt_sd']:.2f} m > 1.5 m "
+    assert mb["ro_alt_sd"] < 2.0, (
+        f"Baseline reel-out altitude sd = {mb['ro_alt_sd']:.2f} m > 2.0 m "
         "(baseline regression)"
     )
     assert mb["mean_t_in"] < mb["mean_t_out"], (

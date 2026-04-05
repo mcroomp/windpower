@@ -33,6 +33,7 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
 from controller import orbit_tracked_body_z_eq, compute_rate_cmd, RatePID
+from swashplate import SwashplateServoModel
 from planner import HoldPlanner
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
@@ -91,6 +92,8 @@ def _run(t_sim: float = T_SIM):
     # kp_inner calibrated to match legacy kd=0.2 damping (see RatePID docstring).
     pid_lon = RatePID(kp=KP_INNER)   # lon axis: body_x error → tilt_lon
     pid_lat = RatePID(kp=KP_INNER)   # lat axis: body_y error → tilt_lat
+    # Servo slew rate model — mirrors ArduPilot SIM_SERVO_SPEED derived from rotor YAML
+    servo   = SwashplateServoModel.from_rotor(rd.default())
 
     for i in range(int(t_sim / DT)):
         t = i * DT
@@ -117,8 +120,9 @@ def _run(t_sim: float = T_SIM):
         omega_body          = hub_state["R"].T @ hub_state["omega"]
         omega_body_orbital  = omega_body.copy()
         omega_body_orbital[2] = 0.0
-        tilt_lon =  pid_lon.update(rate_sp[0],  omega_body_orbital[0], DT)
-        tilt_lat = -pid_lat.update(rate_sp[1],  omega_body_orbital[1], DT)
+        tilt_lon_cmd =  pid_lon.update(rate_sp[0],  omega_body_orbital[0], DT)
+        tilt_lat_cmd = -pid_lat.update(rate_sp[1],  omega_body_orbital[1], DT)
+        tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
 
         result = aero.compute_forces(
             collective_rad=_IC.coll_eq_rad,

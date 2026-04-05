@@ -34,6 +34,8 @@ _STACK_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
 
+import rotor_definition as _rd
+
 from test_stack_integration import (
     ARDUPILOT_ENV,
     STACK_ENV_FLAG,
@@ -674,6 +676,10 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
         # aligns with RAWES servo layout (S1=0 deg/East, S2=120 deg, S3=240 deg).
         "H_SW_TYPE":        3,      # 3 = H3_120  (subgroup H_SW_ + TYPE)
         "H_SW_PHANG":       0,      # deg, reset to known state before each test
+        # Servo speed — derived from RotorDefinition to stay in sync with SwashplateServoModel
+        # in simtests.  SIM_SERVO_SPEED units: full output range (0..1) per second.
+        # DS113MG at 6V: 1200 deg/s / 60 deg travel = 20.0
+        "SIM_SERVO_SPEED":  _rd.default().sim_servo_speed,
     }
     # Mode-specific params from the controller (e.g. COMPASS_USE=0 for
     # tether_relative; no compass override for physical).

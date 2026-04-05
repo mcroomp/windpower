@@ -208,6 +208,8 @@ class RotorDefinition:
     K_cyc:                    float     = 0.4
     swashplate_phase_deg:     float     = 0.0   # cyclic phase advance for gyroscopic comp [°]
     swashplate_pitch_gain_rad: float = 0.3    # max blade pitch per unit normalised tilt [rad]
+    servo_slew_rate_deg_s:    float     = 1200.0  # DS113MG at 6 V: 60 deg in 0.05 s
+    servo_travel_deg:         float     = 60.0    # DS113MG total angular travel [deg]
     kaman_flap:               KamanFlap = field(default_factory=KamanFlap)
 
     # ── Autorotation ODE ─────────────────────────────────────────────────────
@@ -431,6 +433,21 @@ class RotorDefinition:
         ``5% × max_body_z_rate_rad_s`` instead.
         """
         return 0.02 * self.max_body_z_rate_rad_s
+
+    @property
+    def sim_servo_speed(self) -> float:
+        """
+        SIM_SERVO_SPEED value for ArduPilot SITL.
+
+        Units: full servo output range (0..1) per second — the same units
+        ArduPilot uses for SIM_SERVO_SPEED.
+
+        Derived from the physical servo spec:
+            SIM_SERVO_SPEED = servo_slew_rate_deg_s / servo_travel_deg
+
+        For DS113MG at 6 V: 1200 / 60 = 20.0
+        """
+        return self.servo_slew_rate_deg_s / self.servo_travel_deg
 
     # =========================================================================
     # Factory helpers
@@ -837,6 +854,8 @@ def load(path_or_name: str) -> RotorDefinition:
         swashplate_phase_deg     = float(ct.get("swashplate_phase_deg", 0.0)),
         swashplate_pitch_gain_rad = _require_float(ct, "swashplate_pitch_gain_rad",
                                                    "control", p),
+        servo_slew_rate_deg_s = float(ct.get("servo_slew_rate_deg_s", 1200.0)),
+        servo_travel_deg      = float(ct.get("servo_travel_deg",       60.0)),
         kaman_flap           = kaman,
 
         K_drive_Nms_m     = float(ar.get("K_drive_Nms_m",    1.4)),

@@ -47,7 +47,7 @@ import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from aero        import create_aero
 from tether      import TetherModel
-from controller  import compute_swashplate_from_state, OrbitTracker, col_min_for_altitude_rad
+from controller  import OrbitTracker, col_min_for_altitude_rad, AcroController
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
@@ -160,6 +160,7 @@ def _run_deschutter_cycle(
     # ── WinchController (ground station) ─────────────────────────────────────
     winch = WinchController(rest_length=REST_LENGTH0, tension_safety_n=TENSION_SAFETY_N)
     orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0), body_z_slew_rate)
+    acro          = AcroController.from_rotor(_ROTOR, use_servo=True)
 
     # ── Mode_RAWES inner loop (400 Hz, on Pixhawk) ────────────────────────────
     # Receives COMMAND packets from trajectory planner.
@@ -225,16 +226,12 @@ def _run_deschutter_cycle(
                       else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
         body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
-        # ── Mode_RAWES: attitude controller → tilt ────────────────────────────
-        sw = compute_swashplate_from_state(
-            hub_state=hub_state, anchor_pos=ANCHOR,
-            body_z_eq=body_z_eq)
-
-        # ── Aerodynamics ──────────────────────────────────────────────────
+        # ── Mode_RAWES: attitude controller + servo (emulates ArduPilot ACRO) ──
+        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
         result = aero.compute_forces(
             collective_rad = collective_rad,
-            tilt_lon       = sw["tilt_lon"],
-            tilt_lat       = sw["tilt_lat"],
+            tilt_lon       = tilt_lon,
+            tilt_lat       = tilt_lat,
             R_hub          = hub_state["R"],
             v_hub_world    = hub_state["vel"],
             omega_rotor    = omega_spin,

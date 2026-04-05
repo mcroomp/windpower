@@ -38,6 +38,7 @@ from aero        import create_aero
 import rotor_definition as _rd
 from dynamics    import RigidBodyDynamics
 from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, TensionPI
+from swashplate  import SwashplateServoModel
 from frames      import build_orb_frame
 
 TetherModel = _mediator_module.TetherModel
@@ -171,6 +172,7 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
         ic_dir0 = dyn.state["pos"] / max(np.linalg.norm(dyn.state["pos"]), 0.1)
     if ic_bz0 is None:
         ic_bz0 = dyn.state["R"][:, 2].copy()
+    servo = SwashplateServoModel.from_rotor(_rd.default())
     for step in range(steps):
         state  = dyn.state
         pos    = state["pos"]
@@ -195,6 +197,7 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
         # Attitude controller: orbit-tracking with tilt correction
         body_z_eq = orbit_tracked_body_z_eq(pos, ic_dir0, ic_bz0)
         sw = compute_swashplate_from_state(state, anchor, body_z_eq=body_z_eq)
+        tilt_lon, tilt_lat = servo.step(sw["tilt_lon"], sw["tilt_lat"], DT)
 
         # Collective: TensionPI (closed-loop) if provided, else fixed coll_eq
         if tension_ctrl is not None:
@@ -204,7 +207,7 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
 
         result = aero.compute_forces(
             collective_rad=collective,
-            tilt_lon=sw["tilt_lon"], tilt_lat=sw["tilt_lat"],
+            tilt_lon=tilt_lon, tilt_lat=tilt_lat,
             R_hub=state["R"], v_hub_world=state["vel"],
             omega_rotor=omega_spin, wind_world=WIND, t=_T_AERO_OFFSET + step * DT,
         )
