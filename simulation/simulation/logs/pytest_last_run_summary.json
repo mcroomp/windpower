@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-04-06 06:28:07",
+  "elapsed_s": 0.19,
+  "exit_code": 0,
+  "passed": 0,
+  "failed": 0,
+  "errors": 0,
+  "skipped": 0,
+  "result": "passed",
+  "log": "/rawes/simulation/simulation/logs/pytest_last_run.log",
+  "passed_log": "/rawes/simulation/simulation/logs/pytest_last_run_passed.log",
+  "failed_log": "/rawes/simulation/simulation/logs/pytest_last_run_failed.log",
+  "failed_tests": [],
+  "cmd": [
+    "/rawes/.venv/bin/python",
+    "-u",
+    "-m",
+    "pytest",
+    "--help"
+  ]
+}

@@ -119,35 +119,10 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
     )
     log.info("[pre-flight] rawes_flight.lua present  OK")
 
-    # Check 3: "RAWES flight: loaded" STATUSTEXT must appear within 10 s.
-    # If Lua is enabled and the script is present it logs this immediately
-    # at startup.  Absence means SCR_ENABLE was 0 at boot time (set to 1 only
-    # via MAVLink this run — takes effect on the NEXT boot) or the script has
-    # a syntax error.  Fail here with a clear message rather than waiting the
-    # full 30 s capture timeout.
-    lua_loaded = any("rawes flight" in s.lower() and "loaded" in s.lower()
-                     for s in all_statustext)
-    if not lua_loaded:
-        log.info("[pre-flight] 'RAWES flight: loaded' not yet in buffered STATUSTEXT; "
-                 "waiting up to 10 s ...")
-        t_load_deadline = time.monotonic() + 10.0
-        while time.monotonic() < t_load_deadline:
-            msg = gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.5)
-            if msg is not None:
-                text = msg.text.rstrip("\x00").strip()
-                all_statustext.append(text)
-                log.info("[pre-flight] STATUSTEXT: %s", text)
-                if "rawes flight" in text.lower() and "loaded" in text.lower():
-                    lua_loaded = True
-                    break
-    assert lua_loaded, (
-        "rawes_flight.lua did not log 'RAWES flight: loaded' within 10 s of arm.\n"
-        "Root cause: SCR_ENABLE was 0 at SITL boot.  This happens on the first\n"
-        "run from a clean container — _run_acro_setup writes SCR_ENABLE=1 to\n"
-        "EEPROM this run so the NEXT run will start Lua automatically.\n"
-        f"STATUSTEXT seen: {all_statustext[-20:]}"
-    )
-    log.info("[pre-flight] 'RAWES flight: loaded' confirmed  OK")
+    # Note: "RAWES flight: loaded" STATUSTEXT is NOT checked here.
+    # Lua sends it at module load (~1 s after SITL starts), before the GCS
+    # connects (~4 s after start).  The message is always dropped.
+    # Lua running is proven by "RAWES flight: captured" in the observation window.
 
     pos_history:        list[tuple[float, float, float, float]] = []
     servo_history:      list[tuple[float, int, int]]            = []  # (t, servo1, servo2)

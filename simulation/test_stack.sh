@@ -15,7 +15,14 @@ if [ -z "${RAWES_SIM_VEHICLE:-}" ] && [ -z "${RAWES_ARDUPILOT_PATH:-}" ]; then
 fi
 
 mkdir -p "$SCRIPT_DIR/logs"
-PYTEST_LOG="$SCRIPT_DIR/logs/pytest_last_run.log"
-echo "[INFO] Running stack integration tests in the container ..."
-echo "[INFO] Full test output → $PYTEST_LOG"
-PYTHONUNBUFFERED=1 python -u -m pytest -s "$SCRIPT_DIR/tests/stack" "$@" 2>&1 | stdbuf -oL tee "$PYTEST_LOG"
+
+# RAWES_FILTER_MODE: summary (default) | all | failures
+# summary = show PASSED/FAILED lines + failure details only (hides per-test log spam)
+# all     = full raw output (same as before)
+# failures = failure sections only
+FILTER_MODE="${RAWES_FILTER_MODE:-summary}"
+
+exec python "$SCRIPT_DIR/run_tests.py" \
+    --log "$SCRIPT_DIR/logs/pytest_last_run.log" \
+    --filter "$FILTER_MODE" \
+    "$SCRIPT_DIR/tests/stack" -s "$@"

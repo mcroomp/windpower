@@ -1089,11 +1089,21 @@ ArduPilot SITL Docker image and on the Pixhawk 6C with the same firmware.
 | rc:set_override(chan, pwm) | Doesn't exist. Correct API: rc:get_channel(n):set_override(pwm) (cache channel at module load) |
 | ArduCopter ACRO mode = 6 | ACRO = **1**. Mode 6 is RTL. Use vehicle:get_mode() == 1 |
 
-**SCR_ENABLE bootstrap:** After wiping EEPROM, scripting does NOT start from copter-heli.parm
-defaults on the first cold boot in this build. Scripting starts only when SCR_ENABLE=1 is already
-in EEPROM from a previous session. The acro_armed_lua fixture handles this by NOT wiping EEPROM
-and setting SCR_ENABLE=1 via MAVLink post-arm (persists to EEPROM for future boots).
-copter-heli.parm already contains SCR_ENABLE 1 but this only takes effect on the second boot.
+**SCR_ENABLE bootstrap:** In this build `SCRIPTING_ENABLE_DEFAULT=0` (compiled-in). The startup
+sequence is: (1) AP_Param reads EEPROM -- if EEPROM has SCR_ENABLE=0 (compiled-in default, stored
+on first boot), scripting.init() sees 0 and Lua does NOT start. (2) load_defaults_file() applies
+copter-heli.parm (SCR_ENABLE=1) -- this write lands in EEPROM via _timer_tick(). (3) On the NEXT
+boot, EEPROM has SCR_ENABLE=1 so scripting.init() starts Lua.
+
+Consequence: Lua is unavailable on the FIRST boot from a fresh EEPROM. All subsequent boots start
+Lua automatically. The EEPROM is NOT wiped between test runs; copter-heli.parm + rawes_sitl_defaults
+both carry SCR_ENABLE=1 and self-heal EEPROM after one failing boot.
+
+**"RAWES flight: loaded" STATUSTEXT timing:** Lua sends this message at module load (~1 s after
+SITL starts). The GCS connects ~4 s after SITL starts. The message is dropped before the GCS has
+any active link -- it will NEVER appear in STATUSTEXT polling. Do NOT use "loaded" as a readiness
+signal. Instead poll for the periodic "RAWES: ch1=..." diagnostic messages (sent every ~5 s,
+_diag % 250 == 1 at 50 Hz) or wait for "RAWES flight: captured" in the observation window.
 
 **Anchor position in LOCAL_POSITION_NED:** After the NED migration, initial_state["pos"][2] is
 NED Z (negative ~= -7.12 for altitude 7.12 m above ground). The anchor in LOCAL_POSITION_NED

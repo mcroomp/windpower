@@ -335,9 +335,18 @@ bash sim.sh test-stack -v -k test_pumping_cycle
 bash sim.sh test-torque -v -k test_lua_yaw_trim
 ```
 
-Status-only (pass/fail summary, no logs):
+**Output is filtered by default** (summary mode: PASSED/FAILED lines + failure details only).
+Full raw output always saved to `simulation/logs/pytest_last_run.log`. After the run:
+```
+[LOGS] summary: C:\repos\windpower\simulation\logs\pytest_last_run_summary.json
+[LOGS] full:    C:\repos\windpower\simulation\logs\pytest_last_run.log
+```
+Read `pytest_last_run_summary.json` for pass/fail counts and failed test list. Do NOT re-run.
+
+Other filter modes:
 ```bash
-bash sim.sh test-stack --filterstatus
+bash sim.sh test-stack --filterstatus   # failures section only
+bash sim.sh test-stack --raw            # full unfiltered output
 ```
 
 **Always run `analyse_run.py` after a stack test:**
@@ -380,7 +389,7 @@ bash sim.sh build
 | Python analysis script | `bash sim.sh exec 'python3 /rawes/simulation/...'` |
 | One-off inside container | `bash sim.sh exec 'python3 /rawes/simulation/...'` |
 
-Last run logs: `simulation/logs/` — `pytest_last_run.log`, `mediator_last_run.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv`
+Last run logs: `simulation/logs/` — `pytest_last_run_summary.json` (machine-readable, read this first), `pytest_last_run.log` (full raw), `mediator_last_run.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv`
 
 **Path note:** `sim.sh` (repo root) converts paths automatically for any drive. Do not hardcode `/mnt/X/...` WSL paths — use `sim.sh` instead.
 

@@ -60,41 +60,31 @@ case "$CMD" in
         ;;
     test-stack)
         ensure_running
-        # Modes:
-        #   (default)      filter out repetitive noise; still informative
-        #   --filterstatus only the most important status lines (positive match)
-        #   --raw          full unfiltered output
-        _MODE=filter
+        # Filter modes passed to run_tests.py via RAWES_FILTER_MODE:
+        #   (default)      summary  — PASSED/FAILED lines + failure details only
+        #   --filterstatus failures — failure sections only
+        #   --raw          all      — full unfiltered output
+        _FILTER_MODE=summary
         _PASS_ARGS=()
         for _arg in "$@"; do
             case "$_arg" in
-                --filterstatus) _MODE=status ;;
-                --raw)          _MODE=raw ;;
+                --filterstatus) _FILTER_MODE=failures ;;
+                --raw)          _FILTER_MODE=all ;;
                 *)              _PASS_ARGS+=("$_arg") ;;
             esac
         done
 
-        LOG_HOST="$SCRIPT_DIR/logs/pytest_last_run.log"
-        echo "[INFO] Full log: $LOG_HOST"
+        _rc=0
+        docker exec "$CONTAINER" \
+            env RAWES_FILTER_MODE="$_FILTER_MODE" \
+            bash /rawes/simulation/test_stack.sh ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} || _rc=$?
 
-        # Noise to suppress in default filter mode (EKF_STATUS spam + Param echo lines)
-        _NOISE='EKF_STATUS\s+flags=0x|^\s*[0-9:]+ (gcs|acro_armed)\s+INFO\s+Param [A-Z_]'
-        # Key lines for --filterstatus (positive match only)
-        _IMPORTANT='PASS|FAIL|STATUSTEXT|EKF Failsafe|GPS Glitch|yaw aligned|[Hh]old complete|ACRO (hold|mode)|  t=[0-9]|Min ENU alt|Drift:|setup [0-9]/6|\[setup|acro_armed.*(INFO|WARNING).*\[setup|acro_armed.*WARNING|Hold controller|Armed\b|setup complete|Traceback|Exception|AssertionError|REEL_OUT|REEL_IN|net_energy|phase='
+        _WIN_LOGS=$(wslpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
+        echo ""
+        echo "[LOGS] summary: ${_WIN_LOGS}\\pytest_last_run_summary.json"
+        echo "[LOGS] full:    ${_WIN_LOGS}\\pytest_last_run.log"
 
-        case "$_MODE" in
-            filter)
-                docker exec "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}" \
-                    | stdbuf -oL grep -vE "$_NOISE" --line-buffered
-                ;;
-            status)
-                docker exec "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}" \
-                    | stdbuf -oL grep -E "$_IMPORTANT" --line-buffered
-                ;;
-            raw)
-                docker exec -t "$CONTAINER" bash /rawes/simulation/test_stack.sh "${_PASS_ARGS[@]}"
-                ;;
-        esac
+        exit $_rc
         ;;
     test-unit)
         ensure_running

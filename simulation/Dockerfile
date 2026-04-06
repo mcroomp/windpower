@@ -81,16 +81,34 @@ USER root
 
 # =============================================================================
 # 3b. ArduPilot post-build configuration
-#     Enable Lua scripting by default so it is available for all RAWES tests
-#     and any future simulation work without requiring a separate enable step.
-#     These are appended to the SITL defaults file; they apply on the first
-#     SITL boot (before any EEPROM is created) and can be overridden via
-#     MAVLink parameters as usual.
+#     Append SCR_ENABLE=1 and RPM sensor defaults to copter-heli.parm, then
+#     boot ArduPilot once to flush those defaults into eeprom.bin.
+#
+#     WHY the boot is needed:
+#       ArduPilot's scripting.init() runs before load_defaults_file() in the
+#       startup sequence.  So SCR_ENABLE=1 in a --defaults file only takes
+#       effect on the SECOND boot (first boot writes it to EEPROM; second boot
+#       reads it from EEPROM before scripting.init() runs).  By running
+#       arducopter-heli once here during image build we flush the defaults into
+#       eeprom.bin, which is then baked into the image.  Every container created
+#       from this image starts with SCR_ENABLE=1 already in EEPROM so Lua
+#       scripting starts from the very first test boot.
+#
+#     --model heli uses the built-in helicopter physics (no external JSON
+#     backend needed) so this runs cleanly in a Docker build layer.
+#     --speedup 100 makes the 8 s wall-clock window cover ~800 s sim-time,
+#     more than enough for AP_Param to complete its initialisation loop.
 # =============================================================================
 RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
         printf '\n# RAWES: Lua scripting + RPM sensor on by default\nSCR_ENABLE 1\nRPM1_TYPE 10\nRPM1_MIN 0\n' \
             >> "$ARDUPILOT_PATH/Tools/autotest/default_params/copter-heli.parm" \
-        && mkdir -p "$ARDUPILOT_PATH/scripts"; \
+        && mkdir -p "$ARDUPILOT_PATH/scripts" \
+        && cd "$ARDUPILOT_PATH" \
+        && timeout 8 build/sitl/bin/arducopter-heli \
+               --model heli --speedup 100 --slave 0 \
+               --defaults "Tools/autotest/default_params/copter-heli.parm" \
+               -I0 --home 51.5074,-0.1278,50,0 \
+               2>/dev/null; true; \
     fi
 
 # =============================================================================

@@ -1,22 +1,27 @@
 {
-  "timestamp": "2026-04-03 12:37:08",
-  "elapsed_s": 544.1,
-  "exit_code": 0,
-  "passed": 488,
-  "failed": 0,
+  "timestamp": "2026-04-06 07:08:15",
+  "elapsed_s": 70.75,
+  "exit_code": 1,
+  "passed": 1,
+  "failed": 1,
   "errors": 0,
   "skipped": 0,
-  "result": "passed",
-  "log": "C:\\repos\\windpower\\simulation\\logs\\pytest_last_run.log",
-  "passed_log": "C:\\repos\\windpower\\simulation\\logs\\pytest_last_run_passed.log",
-  "failed_log": "C:\\repos\\windpower\\simulation\\logs\\pytest_last_run_failed.log",
-  "failed_tests": [],
+  "result": "failed",
+  "log": "/rawes/simulation/logs/pytest_last_run.log",
+  "passed_log": "/rawes/simulation/logs/pytest_last_run_passed.log",
+  "failed_log": "/rawes/simulation/logs/pytest_last_run_failed.log",
+  "failed_tests": [
+    "tests/stack/test_lua_flight.py::test_lua_flight_rc_overrides"
+  ],
   "cmd": [
-    "C:\\repos\\windpower\\simulation\\.venv\\Scripts\\python.exe",
+    "/rawes/.venv/bin/python",
     "-u",
     "-m",
     "pytest",
-    "simulation/tests/unit",
-    "-q"
+    "/rawes/simulation/tests/stack",
+    "-s",
+    "-v",
+    "-k",
+    "test_h_swash_phang or test_lua_flight_rc_overrides"
   ]
 }
