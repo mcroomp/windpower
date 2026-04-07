@@ -63,8 +63,12 @@ _CYCLE_DURATION   = _T_REEL_OUT + _T_REEL_IN   # 60 s per cycle
 # elapsed by the time the fixture yields — we just need the aero ramp (5 s).
 _SETTLE_SECONDS   = 6.0
 
-# Total observation window: one full pumping cycle + settle time + margin
-_OBS_SECONDS      = _SETTLE_SECONDS + _CYCLE_DURATION + 10.0
+# Total observation window.
+# With kinematic_vel_ramp_s=15, arm fires at ~t=10s mediator time (EKF tilt
+# aligns quickly during kinematic).  Kinematic runs until t=65s, leaving
+# ~55s of remaining kinematic after fixture yield.  The observation must cover:
+#   remaining_kinematic (~55s) + full_cycle (60s) + margin (10s) = 125s.
+_OBS_SECONDS      = 125.0
 
 # ---------------------------------------------------------------------------
 # Pass/fail thresholds
@@ -173,14 +177,14 @@ def _split_phases(rows: list[dict]) -> tuple[list[dict], list[dict]]:
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "Pumping cycle physics unstable after kinematic startup: hub altitude "
-        "oscillates 1–27 m during reel-out (should be ~7 m) due to residual "
-        "kinetic energy from the 45 s kinematic phase entering the free-flight "
-        "phase.  The unit test (test_deschutter_cycle.py) starts from a true "
-        "steady state and passes.  Root cause: kinematic→free-flight transition "
-        "leaves the hub in a perturbed orbit that the TensionController cannot "
-        "damp, causing tether extension spikes (5 kN) during reel-in.  "
-        "Fix: smooth kinematic exit ramp or longer settle period before cycle."
+        "Pumping cycle cannot complete after kinematic startup. "
+        "Root cause: the equilibrium at col=-0.28 rad has zero net thrust margin "
+        "(T_est=0), so any kinematic exit perturbation (~0.2 m/s downward) causes "
+        "the hub to descend to the 1 m physics floor (equilibrium altitude=7.1 m). "
+        "Confirmed: setting cyclic kp=0 produces identical crash — the controller "
+        "is not the cause; the equilibrium is intrinsically marginally stable. "
+        "Fix: raise coll_eq_rad above -0.28 (positive T_est margin) OR increase "
+        "equilibrium altitude so kinematic perturbation can be absorbed."
     ),
 )
 def test_pumping_cycle(acro_armed_pumping: StackContext):

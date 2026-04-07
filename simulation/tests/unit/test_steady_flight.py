@@ -66,7 +66,7 @@ OMEGA_SPIN_MIN = 0.5     # rad/s  minimum clamp
 # ── Tether geometry ───────────────────────────────────────────────────────────
 ELEV_DEG = 30.0
 ELEV_RAD = math.radians(ELEV_DEG)
-L_TETHER = 50.0                     # m  tether length at this flight point
+L_TETHER = 100.0                     # m  tether length at this flight point
 
 # ── Output directory (simulation/logs/) ──────────────────────────────────────
 _OUT_DIR = Path(__file__).resolve().parents[2] / "logs"
@@ -114,8 +114,17 @@ def _equilibrium_setup():
     R0    = build_orb_frame(t_dir)
     pos0  = L_TETHER * t_dir   # hub at design orientation, radius = tether length
 
-    # Collective = TensionPI minimum (what HoldPlanner thrust=0 gives)
-    coll_eq = TensionPI.COLL_MIN_RAD   # -0.28 rad
+    # Collective = TensionPI minimum (what HoldPlanner thrust=0 gives).
+    # The warmup physics is computed at this collective to find the unit-test equilibrium.
+    # The stack test uses coll_eq_target (below) for warm_coll_rad — giving TensionPI
+    # 0.10 rad of downward headroom during the pumping cycle.
+    coll_eq = TensionPI.COLL_MIN_RAD   # -0.28 rad (unit-test equilibrium)
+
+    # Stack-test target collective: 0.10 rad above col_min for PI headroom.
+    # At this collective, compute the equilibrium tether tension so the stack test
+    # can set tension_out=tension_eq_n.  The TensionPI then operates at coll_eq_target
+    # (above col_min) with room to decrease if tension rises.
+    coll_eq_target = TensionPI.COLL_MIN_RAD + 0.10   # -0.18 rad
 
     # Converge omega_spin to autorotation equilibrium at this collective
     omega_spin_eq = OMEGA
@@ -139,7 +148,16 @@ def _equilibrium_setup():
     ext   = T_t_est / k_eff
     rest  = L_TETHER - max(ext, 0.001)
 
-    return coll_eq, omega_spin_eq, R0, pos0, rest
+    # Compute equilibrium tension at the stack-test target collective (coll_eq_target).
+    # This is what the stack test's TensionPI should target so it operates at
+    # coll_eq_target rather than col_min.
+    f_target = aero.compute_forces(coll_eq_target, 0.0, 0.0, R0, np.zeros(3),
+                                   omega_spin_eq, WIND, t=_T_AERO_OFFSET)
+    T_est_target = float(np.dot(f_target.F_world, t_dir))
+    T_gravity_along_tether = MASS * G * math.sin(ELEV_RAD)
+    T_tether_target = max(T_est_target - T_gravity_along_tether, 10.0)
+
+    return coll_eq, omega_spin_eq, R0, pos0, rest, coll_eq_target, T_tether_target
 
 
 def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
@@ -237,14 +255,12 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
 
     Returns a dict of per-step arrays plus scalars.
     """
-    coll_eq, omega_spin_eq, R0, pos0, rest = _equilibrium_setup()
+    coll_eq, omega_spin_eq, R0, pos0, rest, coll_eq_target, T_tether_target = _equilibrium_setup()
 
     aero   = create_aero(_rd.default())
 
     # ── Warmup pass with closed-loop tension control ───────────────────────────
-    # Use TensionPI to find the natural operational equilibrium altitude.
-    # A fixed coll_eq (COL_MIN) gives z≈5.8m which is too low for the pumping
-    # cycle.  TensionPI with tension_out=200N finds z≈10-12m (same as RotorAero).
+    # Use standard tension_out=200N so the unit-test equilibrium is unchanged.
     tension_out = 200.0   # N — matches DeschutterPlanner default
     tension_ctrl_wu = TensionPI(setpoint_n=tension_out)
 
@@ -288,6 +304,10 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
         "R0":             R_s,
         "omega0":         omega_s,
         "rest_length":    rest,
+        "coll_eq":        coll_eq,            # unit-test equilibrium (-0.28 rad)
+        "omega_spin_eq":  omega_spin_eq,
+        "tension_eq_n":   T_tether_target,  # stack-test tension_out for PI headroom
+        "stack_coll_eq":  coll_eq_target,   # stack-test warm-start (-0.18 rad, gives PI headroom)
         "t":              t_arr,
         "pos":            pos_arr,
         "vel":            vel_arr,
@@ -306,11 +326,15 @@ def _save_starting_json(data: dict, path: Path) -> None:
 
     Fields
     ------
-    pos       : NED position [m]
-    vel       : NED velocity [m/s]
-    body_z    : body-Z axis in world NED frame (unit vector; R0 derived from this)
-    omega_spin: rotor spin rate [rad/s]
-    rest_length: tether rest length [m]
+    pos          : NED position [m]
+    vel          : NED velocity [m/s]
+    body_z       : body-Z axis in world NED frame (unit vector; R0 derived from this)
+    omega_spin   : rotor spin rate [rad/s]
+    rest_length  : tether rest length [m]
+    coll_eq_rad  : equilibrium collective [rad] — TensionPI warm-start value
+    tension_eq_n : equilibrium tether tension [N] — TensionPI setpoint (tension_out)
+                   at this collective.  Set tension_out=tension_eq_n so PI has zero
+                   error at equilibrium and headroom in both directions.
     """
     R0 = data["R0"]
     body_z = R0[:, 2].tolist()   # third column = body Z in world frame
@@ -320,7 +344,9 @@ def _save_starting_json(data: dict, path: Path) -> None:
         "body_z":       body_z,
         "omega_spin":   float(data["omega_spin_eq"]),
         "rest_length":  float(data["rest_length"]),
-        "coll_eq_rad":  float(data["coll_eq"]),
+        "coll_eq_rad":    float(data["coll_eq"]),        # unit-test equilibrium collective
+        "tension_eq_n":   float(data["tension_eq_n"]),   # stack-test tension_out
+        "stack_coll_eq":  float(data["stack_coll_eq"]),  # stack-test TensionPI warm-start
         "home_z_ned":   0.0,   # GPS home at ground level
     }
     path.write_text(json.dumps(out, indent=2))

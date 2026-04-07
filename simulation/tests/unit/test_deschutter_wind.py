@@ -118,7 +118,7 @@ def _run() -> dict:
         R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
-                         axle_attachment_length=0.0)
+                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
 
     estimator  = WindEstimator(seed_wind_ned=_wind(ANEMOMETER_POS_NED))
     trajectory = DeschutterPlanner(

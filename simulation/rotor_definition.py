@@ -204,6 +204,12 @@ class RotorDefinition:
     spinning_hub_shell_mass_kg: Optional[float] = None
     I_blade_flap_kgm2: Optional[float] = None   # I_b — for Lock number
 
+    # ── Tether attachment ─────────────────────────────────────────────────────
+    axle_attachment_length_m: float = 0.3   # distance from hub CoM to tether attach along -body_Z [m]
+                                             # Creates restoring torque M = r_attach × F_tether
+                                             # that passively aligns body_z with tether (pendulum).
+                                             # beaupoil_2026: 0.3 m (bottom of axle).
+
     # ── Control ───────────────────────────────────────────────────────────────
     K_cyc:                    float     = 0.4
     swashplate_phase_deg:     float     = 0.0   # cyclic phase advance for gyroscopic comp [°]
@@ -850,6 +856,7 @@ def load(path_or_name: str) -> RotorDefinition:
         spinning_hub_shell_mass_kg   = _m_float(_m.get("spinning_hub_shell_mass_kg")),
         I_blade_flap_kgm2            = _m_float(_m.get("I_blade_flap_kgm2")),
 
+        axle_attachment_length_m = float(ct.get("axle_attachment_length_m", 0.3)),
         K_cyc                    = float(ct.get("K_cyc",              0.4)),
         swashplate_phase_deg     = float(ct.get("swashplate_phase_deg", 0.0)),
         swashplate_pitch_gain_rad = _require_float(ct, "swashplate_pitch_gain_rad",

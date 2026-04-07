@@ -138,7 +138,7 @@ def _run_deschutter_cycle(
     )
     aero   = create_aero(rd.default())
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
-                         axle_attachment_length=0.0)
+                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
 
     # ── Trajectory planner (ground station, ~10 Hz equivalent) ──────────────
     # Owns the tension PI internally; outputs normalised thrust [0..1].

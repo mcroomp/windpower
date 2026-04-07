@@ -31,7 +31,6 @@ Options:
 import argparse
 import csv
 import logging
-import math
 import sys
 import time
 import os
@@ -42,15 +41,16 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics        import RigidBodyDynamics
 from sitl_interface  import SITLInterface
-from swashplate      import h3_inverse_mix, collective_to_pitch, cyclic_to_blade_pitches, pwm_to_normalized
+from swashplate      import h3_inverse_mix, collective_to_pitch
 from aero            import SkewedWakeBEM
 from tether          import TetherModel
 from frames          import build_orb_frame
 from sensor          import make_sensor, SpinSensor
 from controller      import compute_swashplate_from_state, OrbitTracker
+from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
-from planner         import HoldPlanner, DeschutterPlanner, quat_apply, quat_is_identity
+from planner         import quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 
@@ -94,45 +94,9 @@ K_DRAG_SPIN  = 0.01786  # N·m·s²/rad²  (profile drag coefficient)
 # Initial state defaults live in config.py (DEFAULTS dict) — single source of truth.
 
 
-# ---------------------------------------------------------------------------
-# Startup trajectory helpers
-# ---------------------------------------------------------------------------
-
-def compute_launch_position(target_pos, target_vel, damp_seconds: float,
-                            ramp_s: float = 0.0):
-    """Compute the starting position for a kinematic startup trajectory.
-
-    The hub travels at constant velocity vel from launch_pos, arriving at
-    target_pos at t=damp_seconds.  If ramp_s > 0, the velocity is linearly
-    tapered to zero over the last ramp_s seconds so the hub enters free flight
-    at rest.  launch_pos is adjusted so the hub still reaches target_pos at
-    t=damp_seconds despite the reduced average velocity during the ramp.
-
-    Velocity profile:
-        t in [0,  T-ramp_s]:  v(t) = target_vel        (constant)
-        t in [T-ramp_s, T]:   v(t) = target_vel * (T-t)/ramp_s  (linear → 0)
-
-    Position at t=T with ramp:
-        launch_pos + target_vel*(T-ramp_s) + target_vel*ramp_s/2 = target_pos
-        → launch_pos = target_pos − target_vel*(T − ramp_s/2)
-
-    Without ramp (ramp_s=0):
-        launch_pos = target_pos − target_vel*T   (original formula)
-
-    Benefits:
-    - Non-zero velocity during [0, T-ramp_s] → EKF derives yaw heading early
-    - Zero acceleration → IMU sees only gravity (cleaner EKF signal)
-    - Zero entry velocity → no kinetic kick at free-flight start (stable TensionPI)
-
-    Returns
-    -------
-    launch_pos : np.ndarray shape (3,)
-    """
-    target_pos = np.asarray(target_pos, dtype=float)
-    target_vel = np.asarray(target_vel, dtype=float)
-    ramp_s = float(np.clip(ramp_s, 0.0, damp_seconds))
-    launch_pos = target_pos - target_vel * (damp_seconds - ramp_s / 2.0)
-    return launch_pos
+# compute_launch_position is imported from kinematic.py (see imports above).
+# It is re-exported here so existing callers (test_startup_trajectory.py) continue
+# to work with:  from mediator import compute_launch_position
 
 
 # ---------------------------------------------------------------------------
@@ -223,32 +187,22 @@ def run_mediator(args, trajectory=None):
     _R0 = build_orb_frame(_bz)
 
     # -- Kinematic startup trajectory -----------------------------------------
-    # Instead of force-based damping (which zeroes velocity and leaves the hub
-    # in a non-physical hover state), we compute a "launch position" from which
-    # constant acceleration smoothly carries the hub to (_pos0, _vel0) at t=T.
-    #
-    #   launch_pos = _pos0 − _vel0 × T
-    #
-    # During the startup window the hub state is overridden directly (no physics
-    # integration for translation); physics takes over at t=T with the hub
-    # exactly at the equilibrium position and velocity.
-    _startup_damp_T  = max(0.0, float(cfg["startup_damp_seconds"]))
-    _vel_ramp_s      = float(np.clip(cfg["kinematic_vel_ramp_s"], 0.0, _startup_damp_T))
-    _t_ramp_start    = _startup_damp_T - _vel_ramp_s   # time when vel ramp begins
-    if _startup_damp_T > 0.0:
-        _launch_pos = compute_launch_position(
-            _pos0_arr, _vel0_arr, _startup_damp_T, _vel_ramp_s)
+    _startup = KinematicStartup(
+        target_pos = _pos0_arr,
+        target_vel = _vel0_arr,
+        duration   = max(0.0, float(cfg["startup_damp_seconds"])),
+        ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
+        R0         = _R0,
+    )
+    if _startup.duration > 0.0:
         log.info(
             "Kinematic startup: T=%.0fs  ramp=%.0fs  "
             "launch_pos=[%.3f, %.3f, %.3f]  vel=[%.5f, %.5f, %.5f] m/s",
-            _startup_damp_T, _vel_ramp_s, *_launch_pos, *_vel0_arr,
+            _startup.duration, _startup.ramp_s,
+            *_startup.launch_pos, *_vel0_arr,
         )
-        _dyn_pos0 = _launch_pos
-        _dyn_vel0 = _vel0_arr
-    else:
-        _launch_pos   = _pos0_arr.copy()
-        _dyn_pos0     = _pos0_arr
-        _dyn_vel0     = _vel0_arr
+    _dyn_pos0 = _startup.launch_pos
+    _dyn_vel0 = _vel0_arr
 
     rotor  = _rd.load(cfg["rotor_definition"])
     log.info("Rotor: %s", rotor.summary())
@@ -286,10 +240,12 @@ def run_mediator(args, trajectory=None):
         anchor_ned             = anchor_ned,
         rest_length            = float(cfg["tether_rest_length"]),
         hub_mass               = rotor.mass_kg,
-        axle_attachment_length = 0.0,   # disable restoring torque; body_z stability via aero
+        axle_attachment_length = rotor.axle_attachment_length_m,
     )
     sensor_sim = make_sensor(
-        home_ned_z = float(_pos0_arr[2]),
+        home_ned_z  = float(_pos0_arr[2]),
+        initial_vel = _vel0_arr,
+        initial_R   = _R0,
     )
     spin_sensor = SpinSensor(
         sigma    = float(cfg["spin_sensor_sigma"]),
@@ -313,7 +269,6 @@ def run_mediator(args, trajectory=None):
     t_sim           = 0.0
     step            = 0
     last_log_time   = -LOG_INTERVAL       # ensure immediate first log
-    last_vel        = np.zeros(3)
     hub_state       = {
         "pos":   _dyn_pos0.copy(),
         "vel":   _dyn_vel0.copy(),
@@ -322,19 +277,13 @@ def run_mediator(args, trajectory=None):
     }
     last_servos        = np.zeros(16)   # neutral PWM (mapped from 1500µs → 0)
     s1 = s2 = s3       = 0.0           # servo values (updated in ArduPilot path; stale OK in IC path)
-    _pc_free_t         = 0.0           # free-flight elapsed time [s]
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
     omega_spin         = _omega_spin_init
-    startup_damp_T     = _startup_damp_T   # already computed above
     startup_damp_k_ang = float(cfg["startup_damp_k_ang"])
-    startup_vel_ramp_s = _vel_ramp_s       # vel ramp window at end of kinematic [s]
-    t_ramp_start       = _t_ramp_start     # t_sim when ramp begins
-    # Pre-compute ramp start position (constant throughout loop)
-    _ramp_start_pos = _launch_pos + _vel0_arr * t_ramp_start if startup_damp_T > 0.0 else _pos0_arr.copy()
     log.info(
         "Startup damping: T=%.0fs  vel_ramp=%.0fs  k_ang=%.0f N*m*s/rad",
-        startup_damp_T, startup_vel_ramp_s, startup_damp_k_ang,
+        _startup.duration, _startup.ramp_s, startup_damp_k_ang,
     )
 
     # -- Telemetry CSV --------------------------------------------------------
@@ -392,7 +341,6 @@ def run_mediator(args, trajectory=None):
     # -- Trajectory planner (ground station) ---------------------------------
     # Caller supplies a pre-built planner, or one is built from cfg["trajectory"].
     # Wind seed comes from the WinchNode anemometer -- NOT from wind_world directly.
-    _pc_tension  = 0.0
     _pc_telemetry: dict = _winch_node.get_telemetry()
     if trajectory is not None:
         _trajectory = trajectory
@@ -440,15 +388,12 @@ def run_mediator(args, trajectory=None):
 
             # ── Startup kinematic phase ───────────────────────────────────────
             # Hub moves at constant velocity (vel0) from launch_pos, arriving
-            # at (pos0, vel0) at t=startup_damp_T.  Constant velocity means:
+            # at (pos0, vel0) at t=duration.  Constant velocity means:
             #   - Non-zero velocity from frame 0 → EKF gets yaw heading immediately
             #   - Zero acceleration → IMU sees only gravity (clean EKF signal)
             # alpha=1 during kinematic phase, 0 in free flight.
             # ─────────────────────────────────────────────────────────────────
-            if startup_damp_T > 0.0 and t_sim < startup_damp_T:
-                _damp_alpha = 1.0 - (t_sim / startup_damp_T)
-            else:
-                _damp_alpha = 0.0
+            _damp_alpha = _startup.damp_alpha(t_sim)
 
             # ----------------------------------------------------------------
             # Step 2: Swashplate commands
@@ -462,7 +407,6 @@ def run_mediator(args, trajectory=None):
             #   Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = ESC
             #   Servos arrive normalised [-1,1] from SITLInterface
             # ----------------------------------------------------------------
-            _pc_free_t = max(0.0, t_sim - startup_damp_T)
             esc_norm   = float(np.clip(servos[3], -1.0, 1.0))
 
             if cfg["internal_controller"] and _damp_alpha == 0.0:
@@ -518,7 +462,8 @@ def run_mediator(args, trajectory=None):
                     hub_state=hub_state, anchor_pos=anchor_ned,
                     body_z_eq=_body_z_eq,
                     swashplate_phase_deg=_swashplate_phase_deg,
-                    kp=0.30, kd=0.12)   # tuned for SkewedWakeBEM (5.4× more moment/tilt than RotorAero)
+                    kp=float(cfg["cyclic_kp"]),
+                    kd=float(cfg["cyclic_kd"]))
                 tilt_lon        = swash["tilt_lon"]
                 tilt_lat        = swash["tilt_lat"]
                 collective_norm = 0.0   # for telemetry logging
@@ -573,7 +518,6 @@ def run_mediator(args, trajectory=None):
                 _winch_node.update_sensors(
                     tether._last_info.get("tension", 0.0), wind_world)
                 _pc_telemetry = _winch_node.get_telemetry()
-                _pc_tension   = _pc_telemetry["tension_n"]   # kept for break-load warning below
 
             # Build net force and moments (aero + tether) for dynamics and logging
             F_net     = result.F_world + tether_force
@@ -657,30 +601,8 @@ def run_mediator(args, trajectory=None):
             # omega=0 throughout the kinematic window the hub arrives at t=T in
             # exactly the equilibrium orientation, ready for free flight.
             # ----------------------------------------------------------------
-            if _damp_alpha > 0.0:
-                # Compute kinematic position and velocity.
-                # Before ramp: constant velocity.
-                # During ramp (last startup_vel_ramp_s seconds): linear vel → 0.
-                if startup_vel_ramp_s > 0.0 and t_sim >= t_ramp_start:
-                    _u = t_sim - t_ramp_start          # time into ramp [0, ramp_s]
-                    _ramp_frac = max(0.0, (startup_vel_ramp_s - _u) / startup_vel_ramp_s)
-                    _kin_pos = (_ramp_start_pos
-                                + _vel0_arr * _u * (1.0 - _u / (2.0 * startup_vel_ramp_s)))
-                    _kin_vel = _vel0_arr * _ramp_frac
-                else:
-                    _kin_pos = _launch_pos + _vel0_arr * t_sim
-                    _kin_vel = _vel0_arr.copy()
-                hub_state["pos"]   = _kin_pos
-                hub_state["vel"]   = _kin_vel
-                hub_state["R"]     = _R0.copy()
-                hub_state["omega"] = np.zeros(3)
-                new_vel            = _kin_vel
-                # Keep dynamics internal state in sync so the first free-flight
-                # step integrates from the correct position, velocity, and orientation.
-                dynamics._pos[:]   = _kin_pos
-                dynamics._vel[:]   = _kin_vel
-                dynamics._R[:]     = _R0
-                dynamics._omega[:] = np.zeros(3)
+            if _startup.apply(hub_state, dynamics, t_sim):
+                new_vel = hub_state["vel"]
             elif not _logged_transition:
                 # ── First free-flight step — one-shot transition diagnostic ────
                 # Logs the full hub state at the kinematic→free-flight boundary
@@ -796,7 +718,7 @@ def run_mediator(args, trajectory=None):
                     f"TAUT  T={teth.get('tension',0):.0f}N  ext={teth.get('extension',0):.3f}m"
                 )
                 damp_str = (
-                    f"  [DAMP α={_damp_alpha:.2f} remaining={startup_damp_T - t_sim:.0f}s]"
+                    f"  [DAMP α={_damp_alpha:.2f} remaining={_startup.duration - t_sim:.0f}s]"
                     if _damp_alpha > 0.0 else ""
                 )
                 log.info(
@@ -813,7 +735,7 @@ def run_mediator(args, trajectory=None):
                 )
                 # Extra velocity detail for first 15 s of free flight
                 # (helps diagnose kinematic→free-flight transition oscillations)
-                t_free = t_sim - startup_damp_T
+                t_free = t_sim - _startup.duration
                 if 0.0 <= t_free <= 15.0:
                     log.info(
                         "  vel_NED=[%.3f %.3f %.3f] m/s  |v|=%.3f  "

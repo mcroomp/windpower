@@ -47,7 +47,7 @@ DEFAULTS: dict = {
     "omega_spin": 20.148,                           # rotor spin [rad/s]
 
     # ── Tether & Winch ────────────────────────────────────────────────────────
-    "tether_rest_length": 49.949,   # unstretched tether length [m]
+    "tether_rest_length": 99.949,   # unstretched tether length [m]
     "anchor_ned": [0.0, 0.0, 0.0],  # tether anchor position NED [m]
                                      # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local NED
     "tension_safety_n":  496.0,     # WinchController: stop paying out above this tension [N]
@@ -60,10 +60,8 @@ DEFAULTS: dict = {
     # NOTE: ramp > 0 reduces GPS horizontal position change → slower EKF fusion.
     # Default 0.0 keeps vel0 constant so GPS fuses quickly (within kinematic window).
     "startup_damp_seconds": 30.0,   # kinematic ramp duration [s]
-    "kinematic_vel_ramp_s":  0.0,   # vel ramp-to-zero window at end of kinematic [s]
-    "startup_damp_k_vel":  200.0,   # peak translational drag [N·s/m]
-    "startup_damp_k_ang":  500.0,   # peak angular drag [N·m·s/rad]
-    "startup_damp_k_pos": 2000.0,   # peak position spring [N/m]
+    "kinematic_vel_ramp_s": 15.0,   # vel ramp-to-zero window at end of kinematic [s]
+    "startup_damp_k_ang":  500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
 
     # ── Attitude damping ──────────────────────────────────────────────────────
     "base_k_ang": 50.0,             # permanent angular drag [N·m·s/rad]
@@ -81,6 +79,8 @@ DEFAULTS: dict = {
     # 0.0 = disabled (use when I_spin = 0).  Theoretical: 90° for CCW rotor.
     # Determined by step-response test on hardware (corresponds to H_PHANG in ArduPilot).
     "swashplate_phase_deg":   0.0,
+    "cyclic_kp":              0.30,  # truth-state cyclic proportional gain [rad/s / rad]
+    "cyclic_kd":              0.12,  # truth-state cyclic derivative gain [rad/s / (rad/s)]
 
     # ── Mode_RAWES attitude parameters ───────────────────────────────────────
     # body_z_slew_rate_rad_s: max angular slew rate for body_z transitions [rad/s].
@@ -111,6 +111,7 @@ DEFAULTS: dict = {
         "type": "hold",
         "hold": {},
         "deschutter": {
+            "t_hold_s":         0.0,   # hold phase before first reel-out [s]; use ~20s in stack test to settle orbit
             "t_reel_out":      30.0,   # reel-out phase duration [s]
             "t_reel_in":       30.0,   # reel-in phase duration [s]
             # t_transition derived: radians(xi_reel_in - 30) / body_z_slew_rate + 1.5 s margin.
@@ -129,6 +130,10 @@ DEFAULTS: dict = {
             "col_min_rad":         -0.28,  # reel-out floor [rad]
             "col_min_reel_in_rad":  0.079, # reel-in floor [rad]: altitude floor at xi=80°
             "col_max_rad":          0.10,  # extended for high-tilt altitude support [rad]
+            # TensionPI warm-start: collective output at zero error on first step.
+            # Overridden by initial_state["coll_eq_rad"] when available so PI
+            # starts at the exact equilibrium collective after kinematic exit.
+            "warm_coll_rad":       -0.20,  # [rad] default from TensionPI.WARM_COLL_RAD
         },
     },
 }
@@ -246,6 +251,8 @@ def make_trajectory(cfg: dict, wind_ned):
             col_min_rad         = float(p["col_min_rad"]),
             col_min_reel_in_rad = float(p["col_min_reel_in_rad"]),
             col_max_rad         = float(p["col_max_rad"]),
+            t_hold_s            = float(p.get("t_hold_s", 0.0)),
+            warm_coll_rad       = float(p.get("warm_coll_rad", -0.20)),
         )
 
     return HoldPlanner()

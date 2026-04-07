@@ -1,18 +1,16 @@
 {
-  "timestamp": "2026-04-07 00:35:03",
-  "elapsed_s": 19.15,
-  "exit_code": 1,
-  "passed": 0,
-  "failed": 1,
+  "timestamp": "2026-04-07 16:20:28",
+  "elapsed_s": 423.54,
+  "exit_code": 0,
+  "passed": 7,
+  "failed": 0,
   "errors": 0,
-  "skipped": 0,
-  "result": "failed",
+  "skipped": 1,
+  "result": "passed",
   "log": "/rawes/simulation/logs/pytest_last_run.log",
   "passed_log": "/rawes/simulation/logs/pytest_last_run_passed.log",
   "failed_log": "/rawes/simulation/logs/pytest_last_run_failed.log",
-  "failed_tests": [
-    "tests/stack/test_arm_minimal.py::test_arm_minimal"
-  ],
+  "failed_tests": [],
   "cmd": [
     "/rawes/.venv/bin/python",
     "-u",
@@ -20,8 +18,6 @@
     "pytest",
     "/rawes/simulation/tests/stack",
     "-s",
-    "-v",
-    "-k",
-    "test_arm_minimal"
+    "-v"
   ]
 }

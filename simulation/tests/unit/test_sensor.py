@@ -136,5 +136,9 @@ def test_physical_sensor_velocity_yaw_override():
 # ---------------------------------------------------------------------------
 
 def test_make_sensor_returns_physical_sensor():
-    sensor = make_sensor()
+    sensor = make_sensor(
+        home_ned_z  = 0.0,
+        initial_vel = np.array([0.9, 0.0, 0.0]),
+        initial_R   = np.eye(3),
+    )
     assert isinstance(sensor, PhysicalSensor)

@@ -161,33 +161,63 @@ class StackConfig:
         cls._check_ports()
 
     @classmethod
-    def _check_ports(cls, retry_s: float = 15.0, poll_interval: float = 0.5) -> None:
-        """Check that all required ports are free, retrying for up to retry_s seconds.
+    def _check_ports(cls) -> None:
+        """Ensure all required ports are free before launching SITL.
 
-        A brief retry window handles the case where the previous test's SITL process
-        has been sent SIGKILL but the OS hasn't yet released the port.
+        Strategy:
+        1. Kill any process currently holding the port immediately (no waiting).
+        2. Also kill lingering arducopter/sim_vehicle processes by name.
+        3. Wait 2 s for the OS to release sockets.
+        4. Verify the port is free.
+        5. If still busy, restart the container (last resort).
         """
         import time as _time
+        import subprocess as _sp
+        import logging as _log
+
+        _clog = _log.getLogger("conftest")
+
+        # Step 1: kill any process holding the ports by port number (targeted, not by name).
+        # Using fuser -k rather than pkill-by-name avoids killing processes mid-EEPROM-write
+        # which corrupts eeprom.bin and causes a reload loop on the next SITL boot.
+        for host, port, proto, hint in cls._PORT_CHECKS:
+            if proto == "tcp":
+                _kill_by_port(port)
+
+        # Step 2: brief wait for sockets to be released
+        _time.sleep(1.0)
+
+        # Step 4: verify ports are free
         for host, port, proto, hint in cls._PORT_CHECKS:
             kind = _socket.SOCK_STREAM if proto == "tcp" else _socket.SOCK_DGRAM
-            deadline = _time.monotonic() + retry_s
-            while True:
-                s = _socket.socket(_socket.AF_INET, kind)
-                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            s = _socket.socket(_socket.AF_INET, kind)
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, port))
+                s.close()
+            except OSError as exc:
+                s.close()
+                # Step 5: last resort — restart the container via dev.sh
+                _clog.warning(
+                    "Port %s:%d still busy after kill — restarting container", host, port
+                )
+                import os as _os
+                _script = _os.path.join(_os.path.dirname(__file__), "..", "..", "dev.sh")
+                _sp.run(["bash", _script, "stop"], capture_output=True, check=False)
+                _sp.run(["bash", _script, "start"], capture_output=True, check=False)
+                _time.sleep(3.0)
+                # Final check after restart
+                s2 = _socket.socket(_socket.AF_INET, kind)
+                s2.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
                 try:
-                    s.bind((host, port))
-                    s.close()
-                    break   # port is free
-                except OSError as exc:
-                    s.close()
-                    if _time.monotonic() >= deadline:
-                        raise RuntimeError(
-                            f"{proto.upper()} port {host}:{port} is still in use after "
-                            f"{retry_s:.0f}s.\n"
-                            f"  Hint: {hint}\n"
-                            f"  Original error: {exc}"
-                        ) from exc
-                    _time.sleep(poll_interval)
+                    s2.bind((host, port))
+                    s2.close()
+                except OSError as exc2:
+                    s2.close()
+                    raise RuntimeError(
+                        f"{proto.upper()} port {host}:{port} still busy after container restart.\n"
+                        f"  Hint: {hint}\n  Error: {exc2}"
+                    ) from exc2
 
 
 # Convenience aliases — use StackConfig directly for new code
@@ -331,20 +361,18 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     # Always install rawes_flight.lua so it is available if scripting is enabled.
     _install_lua_flight_scripts()
 
-    # ── EEPROM priming for Lua fixtures ───────────────────────────────────────
-    # ArduPilot's scripting.init() runs before load_defaults_file(), so
-    # SCR_ENABLE=1 in --add-param-file only takes effect on the SECOND boot
-    # (first boot writes it to EEPROM; second boot reads it before Lua inits).
-    # _prime_sitl_eeprom() boots SITL briefly to flush params into eeprom.bin,
-    # then kills it.  The real launch (wipe_eeprom=False) preserves that EEPROM
-    # so Lua starts immediately on the first test boot.
+    # ── EEPROM / Lua: SCR_ENABLE=1 is set via MAVLink in step 3 and persists.
+    # For the Lua fixture specifically: prime_eeprom=True runs a short SITL boot
+    # to pre-seed SCR_ENABLE=1 into eeprom.bin on a fresh container where no
+    # prior test has set it yet.  Subsequent runs skip the prime (eeprom.bin
+    # already has SCR_ENABLE=1 from the previous Lua test's step 3 write).
     if prime_eeprom:
         ardupilot_root = sim_vehicle.parent.parent.parent
         eeprom_exists = (ardupilot_root / "eeprom.bin").exists()
         if eeprom_exists:
-            log.info("%s: EEPROM already exists (prior test run wrote SCR_ENABLE=1) — skipping prime.", log_name)
+            log.info("%s: EEPROM has SCR_ENABLE=1 from prior run — skipping prime.", log_name)
         else:
-            log.info("%s: Fresh container — priming EEPROM for Lua scripting (6 s boot) ...", log_name)
+            log.info("%s: Fresh container — priming EEPROM for Lua scripting ...", log_name)
             _prime_sitl_eeprom(sim_vehicle)
             log.info("%s: EEPROM primed.", log_name)
 
@@ -390,10 +418,19 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         internal_controller=True,
     )
 
-    # Build a unique log-file label: log_prefix + test_name (both optional).
-    # Each test produces distinctly-named files in logs/ so reruns don't clobber.
+    # Per-test log directory: simulation/logs/{label}/
+    # Cleared at test start so stale logs never mislead.  Falls back to the
+    # top-level logs/ directory when label is empty (e.g. smoke test).
     label = "_".join(filter(None, [log_prefix, test_name]))
-    pfx   = (label + "_") if label else ""
+    if label:
+        test_log_dir = sim_dir / "logs" / label
+        if test_log_dir.exists():
+            import shutil as _shutil
+            _shutil.rmtree(test_log_dir)
+        test_log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        test_log_dir = sim_dir / "logs"
+        test_log_dir.mkdir(exist_ok=True)
 
     try:
         if arm:
@@ -406,13 +443,29 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
             _terminate_process(mediator_proc)
         _kill_by_port(StackConfig.SITL_GCS_PORT)
         _logs = {
-            f"sitl_{pfx}last.log": sitl_log,
-            f"gcs_{pfx}last.log":  gcs_log,
+            "sitl.log": sitl_log,
+            "gcs.log":  gcs_log,
         }
         if with_mediator:
-            _logs[f"mediator_{pfx}last.log"]  = mediator_log
-            _logs[f"telemetry_{pfx}last.csv"] = telemetry_log
-        copy_logs_to_dir(sim_dir / "logs", _logs)
+            _logs["mediator.log"]  = mediator_log
+            _logs["telemetry.csv"] = telemetry_log
+        copy_logs_to_dir(test_log_dir, _logs)
+        # Copy the ArduCopter terminal log (truncated per-test in _launch_sitl)
+        _ardupilot_log = Path("/tmp/ArduCopter.log")
+        if _ardupilot_log.exists():
+            import shutil as _shutil2
+            _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
+        # Also copy to top-level with "last" names for quick access
+        pfx = (label + "_") if label else ""
+        copy_logs_to_dir(sim_dir / "logs", {
+            f"sitl_{pfx}last.log": sitl_log,
+            f"gcs_{pfx}last.log":  gcs_log,
+        })
+        if with_mediator:
+            copy_logs_to_dir(sim_dir / "logs", {
+                "mediator_last.log": mediator_log,
+                "telemetry_last.csv": telemetry_log,
+            })
 
 
 # ---------------------------------------------------------------------------

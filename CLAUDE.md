@@ -345,6 +345,8 @@ Full raw output always saved to `simulation/logs/pytest_last_run.log`. After the
 ```
 Read `pytest_last_run_summary.json` for pass/fail counts and failed test list. Do NOT re-run.
 
+**CRITICAL: Per-test log directories.** Each stack test writes its own logs to `simulation/logs/{test_name}/` (e.g., `simulation/logs/test_h_swash_phang/`). These contain: `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, **`arducopter.log`**. Always read these per-test logs when diagnosing a failure — **never look at `/tmp/ArduCopter.log` inside the container**, which accumulates across all test sessions and is stale. The per-test `arducopter.log` is truncated before each SITL launch so it contains only that test's SITL output.
+
 Other filter modes:
 ```bash
 bash sim.sh test-stack --filterstatus   # failures section only

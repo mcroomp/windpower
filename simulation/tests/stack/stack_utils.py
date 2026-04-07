@@ -45,11 +45,18 @@ def _launch_sitl(
     log_path: Path,
     add_param_file: "Path | None" = None,
 ) -> subprocess.Popen:
-    # EEPROM is NOT wiped between runs.  All critical params (H_RSC_MODE,
+    # Truncate the ArduCopter terminal log so each test run starts fresh.
+    # /tmp/ArduCopter.log accumulates across runs in the container — clearing it
+    # here makes it contain only output from this test's SITL instance.
+    try:
+        open("/tmp/ArduCopter.log", "w").close()
+    except OSError:
+        pass
+
+    # EEPROM is preserved between tests.  All required params (H_RSC_MODE,
     # SCR_ENABLE, ARMING_SKIPCHK, etc.) are set explicitly via MAVLink in
-    # _run_acro_setup step 3, so stale EEPROM values never take effect.
-    # Preserving EEPROM allows SCR_ENABLE=1 (written by step 3) to persist
-    # across reboots so Lua scripting starts on every subsequent boot.
+    # _run_acro_setup step 3.  Persisting EEPROM means SCR_ENABLE=1 (written
+    # by step 3) survives across reboots so Lua scripting starts on every boot.
     cmd = [
         sys.executable,
         str(sim_vehicle),
@@ -80,36 +87,35 @@ def _prime_sitl_eeprom(
     Boot SITL briefly with --model heli and a minimal parm file (SCR_ENABLE 1
     only) to flush SCR_ENABLE into eeprom.bin, then kill it.
 
-    ArduPilot's scripting subsystem initialises before the defaults file is
-    loaded, so SCR_ENABLE=1 only takes effect on the SECOND boot (first boot
-    writes it to EEPROM; second boot reads it before scripting.init() runs).
+    Also saves the result to eeprom_pristine.bin so _launch_sitl() can restore
+    from it before each test — giving a clean, known-good EEPROM state without
+    the accumulation of 20-30 param writes that causes slow startup.
 
     Uses --model heli (internal physics, no JSON backend) so no sensor
     calibration is written — the real boot's --add-param-file supplies all
     needed EKF/sensor params without stale calibration interference.
-
-    The minimal parm file (SCR_ENABLE 1 only) avoids writing sensor-specific
-    defaults that would conflict with the JSON physics in the real boot.
     """
     ardupilot_root = Path(sim_vehicle).parent.parent.parent
     eeprom = ardupilot_root / "eeprom.bin"
+    eeprom_pristine = ardupilot_root / "eeprom_pristine.bin"
     if eeprom.exists():
         eeprom.unlink()
 
-    # Write a minimal parm file — only SCR_ENABLE, nothing sensor-specific.
-    prime_parm = ardupilot_root / "scr_enable_prime.parm"
-    prime_parm.write_text("SCR_ENABLE 1\n")
-
+    # Boot with only the standard copter-heli.parm defaults — no SCR_ENABLE.
+    # SCR_ENABLE=1 is set via MAVLink in _run_acro_setup step 3 where needed.
+    # Keeping it out of pristine prevents Lua scripts from loading on startup
+    # (scripts in /ardupilot/scripts/ from a prior session would run otherwise).
     arducopter = ardupilot_root / "build" / "sitl" / "bin" / "arducopter-heli"
+    copter_heli_parm = ardupilot_root / "Tools" / "autotest" / "default_params" / "copter-heli.parm"
     cmd = [
         str(arducopter),
         "--model", "heli",
-        "--speedup", "10",
+        "--speedup", "100",   # 100× so EEPROM init completes well within wait_s
         "--slave", "0",
         "--no-mavproxy",
         "-I0",
         "--home", "51.5074,-0.1278,50,0",
-        "--defaults", str(prime_parm),
+        "--defaults", str(copter_heli_parm),
     ]
     devnull = open(os.devnull, "w")
     proc = subprocess.Popen(
@@ -122,7 +128,10 @@ def _prime_sitl_eeprom(
     time.sleep(wait_s)
     _terminate_process(proc)
     devnull.close()
-    prime_parm.unlink(missing_ok=True)
+
+    # Save pristine copy so _launch_sitl() can restore it before each test.
+    if eeprom.exists():
+        shutil.copy2(eeprom, eeprom_pristine)
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -291,6 +300,18 @@ def _launch_mediator(
                         cfg["trajectory"][_sub] = _merged
             else:
                 cfg[_k] = _v
+
+    # Apply equilibrium collective AFTER extra_config merge so it isn't overridden.
+    # warm_coll_rad seeds TensionPI integral at the exact equilibrium value on
+    # kinematic exit — must survive the trajectory.deschutter extra_config merge.
+    if initial_state is not None and "stack_coll_eq" in initial_state:
+        cfg.setdefault("trajectory", {}).setdefault("deschutter", {})
+        cfg["trajectory"]["deschutter"]["warm_coll_rad"] = float(initial_state["stack_coll_eq"])
+    # tension_out is intentionally NOT read from initial_state["tension_eq_n"].
+    # The equilibrium tension at stack_coll_eq (-0.18 rad) is ~345 N, but the
+    # operational reel-out target stays at the config default (200 N) for energy
+    # optimization.  The warm_coll_rad=-0.18 already gives the PI 0.10 rad of
+    # downward headroom when tension rises above 200 N.
 
     # Write config to a temp file next to the log
     cfg_path = log_path.parent / (log_path.stem + "_mediator_config.json")

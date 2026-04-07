@@ -164,6 +164,11 @@ control:
   # Swashplate cyclic moment scaling
   # SOURCE: tuned empirically in simulation to give stable closed-loop response.
   # MEASURE: step-response test on hardware — apply known swashplate tilt, measure disk tilt rate.
+  # Tether attachment offset along -body_Z from hub CoM [m].
+  # Creates passive restoring torque M = r_attach × F_tether that aligns axle with tether.
+  # Measured from hub CoM to bottom of axle where tether connects.
+  axle_attachment_length_m: 0.3   # ESTIMATE — measure on hardware
+
   K_cyc: 0.4                 # cyclic moment gain: M_cyc = K_cyc·tilt_rad·T  ESTIMATE
 
   # Swashplate phase advance for gyroscopic precession compensation [°]

@@ -188,6 +188,8 @@ class PhysicalSensor:
         gyro_sigma:  float = _GYRO_SIGMA,
         accel_sigma: float = _ACCEL_SIGMA,
         rng_seed:    Optional[int] = None,
+        initial_vel: Optional[np.ndarray] = None,
+        initial_R:   Optional[np.ndarray] = None,
     ):
         self._home_ned_z  = float(home_ned_z)
         self._gyro_sigma  = gyro_sigma
@@ -199,7 +201,24 @@ class PhysicalSensor:
         # unfreeze).  Without this, the orbital-frame geometric yaw would snap
         # back into use, rotating the body frame and causing a large magnetometer
         # reading change → EKF "GPS Glitch or Compass error".
-        self._last_vel_yaw: Optional[float] = None
+        #
+        # Pre-initialized from initial_vel/initial_R when provided (production
+        # path via make_sensor).  Tests that construct PhysicalSensor directly
+        # and control every compute() call can omit these.
+        if initial_vel is not None:
+            v = np.asarray(initial_vel, dtype=float)
+            v_horiz = math.hypot(v[0], v[1])
+            if v_horiz > 0.05:
+                self._last_vel_yaw: Optional[float] = math.atan2(v[1], v[0])
+            elif initial_R is not None:
+                disk_normal = np.asarray(initial_R, dtype=float)[:, 2]
+                R_orb = build_orb_frame(disk_normal)
+                rpy = _rotation_matrix_to_euler_zyx(R_orb)
+                self._last_vel_yaw = float(rpy[2])
+            else:
+                self._last_vel_yaw = None
+        else:
+            self._last_vel_yaw = None
         # Maximum rate at which the velocity-derived yaw is allowed to change
         # [rad/s].  This prevents a sudden gyro axis remap when the tether
         # activates and the hub velocity direction rotates quickly.  Without
@@ -376,24 +395,29 @@ class SpinSensor:
 # ---------------------------------------------------------------------------
 
 def make_sensor(
-    home_ned_z:  float = 0.0,
+    home_ned_z:  float,
+    initial_vel: np.ndarray,
+    initial_R:   np.ndarray,
     gyro_sigma:  float = _GYRO_SIGMA,
     accel_sigma: float = _ACCEL_SIGMA,
     rng_seed:    Optional[int] = None,
 ) -> "PhysicalSensor":
     """
-    Return a configured PhysicalSensor.
+    Return a PhysicalSensor with yaw cache pre-seeded from the initial state.
 
     Parameters
     ----------
-    home_ned_z : float
-        NED Z of the ArduPilot home position (LOCAL_POSITION_NED D=0 reference) [m].
+    home_ned_z  : NED Z of ArduPilot home (LOCAL_POSITION_NED D=0 reference) [m]
+    initial_vel : initial hub NED velocity [m/s] — seeds the yaw cache
+    initial_R   : initial hub rotation matrix — fallback yaw when vel is near zero
     """
     return PhysicalSensor(
         home_ned_z  = home_ned_z,
         gyro_sigma  = gyro_sigma,
         accel_sigma = accel_sigma,
         rng_seed    = rng_seed,
+        initial_vel = initial_vel,
+        initial_R   = initial_R,
     )
 
 
@@ -405,7 +429,12 @@ if __name__ == "__main__":
 
     print("PhysicalSensor smoke test")
 
-    sensor = make_sensor(rng_seed=42)
+    sensor = make_sensor(
+        home_ned_z  = -50.0,
+        initial_vel = np.array([0.9, 0.0, 0.0]),
+        initial_R   = np.eye(3),
+        rng_seed    = 42,
+    )
 
     # Test with identity rotation (no tilt)
     # In NED: hub at North=10, East=5, altitude=50 → pos_ned=[10, 5, -50]

@@ -119,7 +119,7 @@ def _run_10hz() -> dict:
     )
     aero   = create_aero(_ROTOR)
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
-                         axle_attachment_length=0.0)
+                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
     winch  = WinchController(rest_length=REST_LENGTH0,
                              tension_safety_n=TENSION_SAFETY_N)
     trajectory = DeschutterPlanner(

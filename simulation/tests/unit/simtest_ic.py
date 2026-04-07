@@ -38,7 +38,8 @@ class IC:
     body_z:       np.ndarray   # rotor axle unit vector in world NED
     omega_spin:   float        # equilibrium spin rate [rad/s]
     rest_length:  float        # tether rest length [m]
-    coll_eq_rad:  float        # equilibrium collective [rad]
+    coll_eq_rad:  float        # equilibrium collective [rad] — static balance with full restoring torque
+    stack_coll_eq: float       # orbit collective [rad] — 0.10 rad above coll_eq for free-flight orbit
     home_z_ned:   float        # GPS home NED Z [m] — 0 = ground level
 
 
@@ -62,6 +63,7 @@ def load_ic() -> IC:
         body_z      = np.array(d["body_z"], dtype=float),
         omega_spin  = float(d["omega_spin"]),
         rest_length = float(d.get("rest_length", d.get("tether_rest_length", 50.0))),
-        coll_eq_rad = float(d.get("coll_eq_rad", -0.28)),
-        home_z_ned  = float(d.get("home_z_ned", d.get("home_z_enu", 0.0))),
+        coll_eq_rad  = float(d.get("coll_eq_rad", -0.28)),
+        stack_coll_eq = float(d.get("stack_coll_eq", -0.18)),
+        home_z_ned   = float(d.get("home_z_ned", d.get("home_z_enu", 0.0))),
     )

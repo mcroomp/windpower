@@ -7,8 +7,8 @@ internal controller at 400 Hz.  Fails if the hub crashes (z <= 1 m) or
 spin collapses.
 
 Key design decisions replicated from mediator.py:
-  - axle_attachment_length=0.0: tether restoring torque disabled (body_z
-    stability comes from aerodynamics, not tether moment)
+  - axle_attachment_length from rotor definition (0.3 m): matches mediator;
+    physical tether attachment offset, restoring torque included
   - aero time offset by 45 s: matches the 45 s kinematic phase so the
     5 s aero startup ramp is already done at free-flight t=0
   - Orbit-tracking body_z_eq: the controller references the aerodynamic
@@ -73,7 +73,7 @@ def _run(t_sim: float = T_SIM):
     aero   = create_aero(rd.default())
     tether = TetherModel(anchor_ned=ANCHOR,
                          rest_length=_IC.rest_length,
-                         axle_attachment_length=0.0)   # match mediator
+                         axle_attachment_length=0.3)   # match mediator config
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
@@ -125,7 +125,7 @@ def _run(t_sim: float = T_SIM):
         tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
 
         result = aero.compute_forces(
-            collective_rad=_IC.coll_eq_rad,
+            collective_rad=_IC.stack_coll_eq,
             tilt_lon=tilt_lon,
             tilt_lat=tilt_lat,
             R_hub=hub_state["R"],
@@ -164,7 +164,7 @@ def _run(t_sim: float = T_SIM):
                 "omega_rotor":         omega_spin,
                 "tether_tension":      tension_now,
                 "tether_rest_length":  tether.rest_length,
-                "swash_collective":    _IC.coll_eq_rad,
+                "swash_collective":    _IC.stack_coll_eq,
                 "swash_tilt_lon":      tilt_lon,
                 "swash_tilt_lat":      tilt_lat,
                 "body_z_eq":           body_z_eq.tolist(),

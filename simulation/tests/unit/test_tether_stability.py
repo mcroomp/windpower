@@ -41,7 +41,7 @@ DT     = 2.5e-3                     # s  (400 Hz)
 # ── Tether geometry at 30° elevation ─────────────────────────────────────────
 ELEV_DEG  = 30.0
 ELEV_RAD  = math.radians(ELEV_DEG)
-L_TETHER  = 50.0                    # m  — tether length at this flight point
+L_TETHER  = 100.0                   # m  — tether length at this flight point
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

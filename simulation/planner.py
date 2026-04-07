@@ -628,6 +628,8 @@ class DeschutterPlanner(TrajectoryPlanner):
         col_min_rad:          float = TensionPI.COLL_MIN_RAD,
         col_min_reel_in_rad:  "float | None" = None,
         col_max_rad:          float = TensionPI.COLL_MAX_RAD,
+        t_hold_s:             float = 0.0,
+        warm_coll_rad:        "float | None" = TensionPI.WARM_COLL_RAD,
     ):
         self._t_reel_out    = float(t_reel_out)
         self._t_reel_in     = float(t_reel_in)
@@ -644,6 +646,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         self._col_max_rad   = float(col_max_rad)
         self._xi_reel_in_deg: "float | None" = float(xi_reel_in_deg) if xi_reel_in_deg is not None else None
         self._wind_estimator = wind_estimator
+        self._t_hold_s       = float(max(t_hold_s, 0.0))  # hold phase before first reel-out
         self._t_free         = 0.0   # internal elapsed free-flight time [s]
 
         # Tension PI — owned by the planner (raws_mode.md §3.2)
@@ -655,6 +658,7 @@ class DeschutterPlanner(TrajectoryPlanner):
             ki=float(tension_ki),
             coll_min=float(col_min_rad),
             coll_max=float(col_max_rad),
+            warm_coll_rad=warm_coll_rad,
         )
 
         # Snapshots of PI integral at each phase boundary, used to ramp
@@ -702,11 +706,42 @@ class DeschutterPlanner(TrajectoryPlanner):
         return quat_from_vectors(np.array([0.0, 0.0, -1.0]), body_z_target)
 
     # ------------------------------------------------------------------
+    def _hold_step(self, state: dict, dt: float, **kwargs) -> dict:
+        """Orbit-track with no winch movement — hub settles before pumping starts.
+
+        The TensionPI is warm-started from warm_coll_rad (= coll_eq_rad from
+        steady_state_starting.json).  With kinematic_vel_ramp_s > 0 the hub
+        arrives at pos0 with vel≈0 and tension≈tension_out, so the PI error is
+        near zero and the warm-start integral produces the equilibrium collective
+        immediately.  The hub holds altitude stably for t_hold_s before reel-out.
+        """
+        tension_n = float(kwargs.get("tension_n", state.get("tension_n", 0.0)))
+        self._tension_ctrl.setpoint = self._tension_out
+        collective_rad = self._tension_ctrl.update(tension_n, dt)
+        col_range = self._col_max_rad - self._col_min_rad
+        thrust = float(max(0.0, min(1.0,
+            (collective_rad - self._col_min_rad) / col_range if col_range > 1e-9 else 0.5
+        )))
+        self._prev_collective = collective_rad
+        return {
+            "attitude_q":     Q_IDENTITY.copy(),
+            "thrust":         thrust,
+            "collective_rad": collective_rad,
+            "winch_speed_ms": 0.0,
+            "phase":          "hold",
+        }
+
+    # ------------------------------------------------------------------
     def step(self, state: dict, dt: float, **kwargs) -> dict:
         self._t_free += dt
 
-        # Determine phase before calling WindEstimator so we can pass it as context.
-        t_cyc     = self._t_free % self._t_cycle
+        # Initial hold phase: orbit-track without winch movement, letting the hub
+        # settle into its natural orbit before the pumping cycle starts.
+        if self._t_free <= self._t_hold_s:
+            return self._hold_step(state, dt, **kwargs)
+
+        # Pumping cycle clock starts after the hold phase.
+        t_cyc     = (self._t_free - self._t_hold_s) % self._t_cycle
         phase_out = t_cyc < self._t_reel_out
 
         # Read sensor values from STATE — tension and tether_length are local ground

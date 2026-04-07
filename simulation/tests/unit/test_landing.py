@@ -6,10 +6,17 @@ nearly stationary (no orbital velocity).  This is equivalent to the end of a
 normal pumping-cycle reel-in at high tilt -- the hub is already almost directly
 above the anchor.
 
-Landing is managed by LandingPlanner which owns the three-phase state machine:
-  leveling  -> slerp body_z toward [0,0,-1]; descent rate controller
-  descent   -> body_z=[0,0,-1]; descent rate controller; reel in at V_REEL
-  final_drop -> collective=0; hub drops onto catch device
+Landing is managed by LandingPlanner which owns the two-phase state machine:
+  descent   -> body_z tracks tether direction; descent rate controller; reel in at V_REEL
+  final_drop -> collective=0; hub drops onto catch pad
+
+The disk is NOT leveled to horizontal (xi=90 deg) because:
+  - xi=90 deg is outside SkewedWakeBEM valid range (~85 deg limit)
+  - Wind H-force on horizontal disk has no tether-pendulum correction
+  - Tether restoring torque is zero at xi=90 deg (no stabilisation)
+Tracking the tether direction keeps xi ~79-80 deg throughout the descent,
+within the BEM valid range, with tether-pendulum lateral centering and
+passive restoring torque for orientation stability.
 
 See landing_planner.py for full controller documentation.
 """
@@ -62,12 +69,10 @@ COL_MIN_RAD = -0.28
 COL_MAX_RAD =  0.10
 
 # ── LandingPlanner parameters ─────────────────────────────────────────────────
-V_REEL            = 1.5     # m/s  reel-in speed matched to natural descent rate
+V_REEL            = 0.5     # m/s  reel-in speed (slow to avoid tension spikes)
 COL_CRUISE        = 0.079   # rad  base collective (col_min_reel_in at xi=80 deg)
 KP_VZ             = 0.05    # rad/(m/s)
 BODY_Z_SLEW_RATE  = _ROTOR.body_z_slew_rate_rad_s
-LEVEL_THRESH_DEG  = 10.0    # deg
-T_LEVEL_MAX       = 30.0    # s  leveling emergency timeout
 MIN_TETHER_M      = 2.0     # m  switch to final drop
 
 FLOOR_ALT_M          = 1.0
@@ -88,7 +93,7 @@ def _run_landing() -> dict:
     )
     aero   = create_aero(rd.default())
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=LAND_TETHER_M,
-                         axle_attachment_length=0.0)
+                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
     winch  = WinchController(rest_length=LAND_TETHER_M,
                               tension_safety_n=BREAK_LOAD_N * 0.8,
                               min_length=MIN_TETHER_M)
@@ -101,9 +106,8 @@ def _run_landing() -> dict:
         col_min_rad      = COL_MIN_RAD,
         col_max_rad      = COL_MAX_RAD,
         body_z_slew_rate = BODY_Z_SLEW_RATE,
-        level_thresh_deg = LEVEL_THRESH_DEG,
-        t_level_max      = T_LEVEL_MAX,
         min_tether_m     = MIN_TETHER_M,
+        anchor_ned       = ANCHOR,
     )
 
     hub_state   = dyn.state
@@ -112,22 +116,19 @@ def _run_landing() -> dict:
     tension_now = tether._last_info.get("tension", 0.0)
 
     floor_hit      = False
-    leveling_done  = False
     t_final_start  = None
 
-    ph1_tensions     = []
-    ph2_tensions     = []
-    ph1_altitudes    = []
-    ph2_altitudes    = []
-    vz_at_floor      = None
-    bz_at_floor      = None
-    pos_at_floor     = None
-    touchdown_time   = None
+    tensions      = []
+    altitudes     = []
+    vz_at_floor   = None
+    bz_at_floor   = None
+    pos_at_floor  = None
+    touchdown_time = None
 
     telemetry = []
     tel_every = max(1, int(0.05 / DT))
 
-    max_steps = int((T_LEVEL_MAX + LAND_TETHER_M / V_REEL + T_FINAL_DROP_MAX + 10.0) / DT)
+    max_steps = int((LAND_TETHER_M / V_REEL + T_FINAL_DROP_MAX + 10.0) / DT)
 
     t_sim = 0.0
     for i in range(max_steps):
@@ -138,7 +139,9 @@ def _run_landing() -> dict:
         state_pkt = {
             "body_z":          hub_state["R"][:, 2],
             "vel_ned":         hub_state["vel"],
+            "pos_ned":         hub_state["pos"],
             "tether_length_m": winch.rest_length,
+            "tension_n":       tension_now,
         }
         cmd = planner.step(state_pkt, DT)
         phase          = cmd["phase"]
@@ -146,8 +149,6 @@ def _run_landing() -> dict:
         body_z_eq      = cmd["body_z_eq"]
 
         # ── Phase bookkeeping ─────────────────────────────────────────────────
-        if phase == "descent" and not leveling_done:
-            leveling_done = True
         if phase == "final_drop" and t_final_start is None:
             t_final_start = t_sim
 
@@ -194,12 +195,9 @@ def _run_landing() -> dict:
         hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
         # ── Per-phase metrics ─────────────────────────────────────────────────
-        if phase == "leveling":
-            ph1_tensions.append(tension_now)
-            ph1_altitudes.append(altitude)
-        elif phase == "descent":
-            ph2_tensions.append(tension_now)
-            ph2_altitudes.append(altitude)
+        if phase == "descent":
+            tensions.append(tension_now)
+            altitudes.append(altitude)
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────────
         if i % tel_every == 0:
@@ -230,9 +228,7 @@ def _run_landing() -> dict:
 
     parts = [
         f"alt_start={-POS_INIT[2]:.1f}m",
-        f"ph1_max_tension={max(ph1_tensions):.0f}N" if ph1_tensions else "",
-        f"ph2_max_tension={max(ph2_tensions):.0f}N" if ph2_tensions else "",
-        f"leveled={leveling_done}",
+        f"max_tension={max(tensions):.0f}N" if tensions else "",
         f"floor_hit={floor_hit}",
     ]
     if anchor_dist    is not None: parts.append(f"anchor_dist={anchor_dist:.1f}m")
@@ -253,18 +249,15 @@ def _run_landing() -> dict:
         json.dump(telemetry, fh)
 
     return dict(
-        t_end            = t_sim,
-        floor_hit        = floor_hit,
-        leveling_done    = leveling_done,
-        touchdown_time   = touchdown_time,
-        vz_at_floor      = vz_at_floor,
-        anchor_dist      = anchor_dist,
-        touchdown_tilt   = touchdown_tilt,
-        ph1_max_tension  = max(ph1_tensions)  if ph1_tensions  else None,
-        ph2_max_tension  = max(ph2_tensions)  if ph2_tensions  else None,
-        ph1_min_altitude = min(ph1_altitudes) if ph1_altitudes else None,
-        ph2_min_altitude = min(ph2_altitudes) if ph2_altitudes else None,
-        telemetry        = telemetry,
+        t_end           = t_sim,
+        floor_hit       = floor_hit,
+        touchdown_time  = touchdown_time,
+        vz_at_floor     = vz_at_floor,
+        anchor_dist     = anchor_dist,
+        touchdown_tilt  = touchdown_tilt,
+        max_tension     = max(tensions)  if tensions else None,
+        min_altitude    = min(altitudes) if altitudes else None,
+        telemetry       = telemetry,
     )
 
 
@@ -280,31 +273,28 @@ def _results():
 # ---------------------------------------------------------------------------
 
 def test_no_tension_spikes():
-    """Tension stays below tether break load throughout leveling and descent."""
+    """Tension stays below tether break load throughout descent."""
     r = _results()
-    ph1 = r["ph1_max_tension"]
-    ph2 = r["ph2_max_tension"]
-    print(f"\n  Leveling max tension: {ph1:.0f} N" if ph1 is not None else "\n  Leveling max tension: (no samples)")
-    print(f"  Descent max tension:  {ph2:.0f} N  (break load {BREAK_LOAD_N:.0f} N)" if ph2 is not None else "  Descent max tension: (no samples)")
-    assert ph1 is None or ph1 < BREAK_LOAD_N, f"Tension spike {ph1:.0f} N during leveling"
-    assert ph2 is None or ph2 < BREAK_LOAD_N, f"Tension spike {ph2:.0f} N during descent"
+    T_max = r["max_tension"]
+    print(f"\n  Max descent tension: {T_max:.0f} N  (break load {BREAK_LOAD_N:.0f} N)"
+          if T_max is not None else "\n  No tension samples")
+    assert T_max is None or T_max < BREAK_LOAD_N, f"Tension spike {T_max:.0f} N during descent"
 
 
 def test_altitude_maintained():
-    """Hub stays above floor throughout leveling and descent."""
+    """Hub stays above floor during controlled descent (before final_drop)."""
     r = _results()
-    for phase, key in [("leveling", "ph1_min_altitude"), ("descent", "ph2_min_altitude")]:
-        val = r[key]
-        if val is not None:
-            print(f"\n  {phase} min altitude: {val:.2f} m")
-            assert val > 1.1, f"Hub hit floor during {phase} (min alt {val:.2f} m)"
+    val = r["min_altitude"]
+    if val is not None:
+        print(f"\n  Descent min altitude: {val:.2f} m")
+        assert val > 1.1, f"Hub hit floor during controlled descent (min alt {val:.2f} m)"
 
 
 def test_leveling_completes():
-    """Disk reaches horizontal within T_LEVEL_MAX."""
+    """Tether-aligned descent reaches final_drop phase (no leveling needed)."""
     r = _results()
-    print(f"\n  Leveling done: {r['leveling_done']}")
-    assert r["leveling_done"], "Leveling timed out"
+    print(f"\n  Floor hit: {r['floor_hit']}  (tether-aligned descent, no leveling phase)")
+    assert r["floor_hit"], "Hub did not reach floor during final_drop"
 
 
 def test_touchdown_over_anchor():
@@ -325,7 +315,9 @@ def test_touchdown_orientation():
     if tilt is None:
         pytest.skip("Hub did not reach floor")
     print(f"\n  Disk tilt at touchdown: {tilt:.1f} deg from horizontal")
-    assert tilt < 15.0, f"Rotor tilted {tilt:.1f} deg -- blade tips would strike ground"
+    # Blade tips strike ground when tilt > arcsin(altitude/R) = arcsin(1/2.5) = 23 deg.
+    # Allow 20 deg for margin; tether restoring torque may drift body_z ~5 deg during final drop.
+    assert tilt < 20.0, f"Rotor tilted {tilt:.1f} deg -- blade tips risk ground contact"
 
 
 def test_touchdown_speed():

@@ -229,7 +229,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
     VEL0          = np.array([ 0.916, -0.257,   0.093])   # NED
     BODY_Z0       = np.array([0.305391, 0.851018, -0.427206])  # NED
     OMEGA_SPIN0   = 20.148
-    REST_LENGTH0  = 49.949
+    REST_LENGTH0  = 99.949
     T_AERO_OFFSET = 45.0
     I_SPIN_KGMS2  = 10.0
     OMEGA_SPIN_MIN= 0.5
@@ -256,7 +256,7 @@ def _run_pumping_cycle(rotor, label: str) -> dict:
     )
     aero_obj = create_aero(rotor)
     tether   = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
-                           axle_attachment_length=0.0)
+                           axle_attachment_length=rotor.axle_attachment_length_m)
 
     trajectory = DeschutterPlanner(
         t_reel_out      = T_REEL_OUT,
