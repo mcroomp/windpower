@@ -61,9 +61,7 @@ sys.path.insert(0, str(_STACK_DIR))
 from conftest import StackConfig
 from gcs import RawesGCS
 from test_stack_integration import (
-    ARDUPILOT_ENV,
     STACK_ENV_FLAG,
-    SIM_VEHICLE_ENV,
     _launch_sitl,
     _resolve_sim_vehicle,
     _terminate_process,
@@ -136,27 +134,16 @@ def _sensor_worker(stop_event: threading.Event) -> None:
 # Arm strategy helper
 # ---------------------------------------------------------------------------
 
-def _try_arm(gcs: RawesGCS, params: dict, label: str,
-             rc8: int = 2000, timeout: float = 20.0) -> bool:
-    """
-    Set params, send RC override, then force-arm.  Wait for HEARTBEAT armed.
-
-    Returns True if armed within timeout; disarms and returns False otherwise.
-    Uses gcs.set_param() and gcs.arm() from gcs.py.
-    """
-    log.info("─── Strategy: %s ───", label)
-    for name, val in params.items():
-        gcs.set_param(name, val)
-    time.sleep(0.3)
+def _try_arm(gcs: RawesGCS, label: str, rc8: int = 2000, timeout: float = 20.0) -> bool:
+    """Send RC override then force-arm. Returns True if HEARTBEAT shows armed."""
+    log.info("Arming: %s", label)
     gcs.send_rc_override({8: rc8})
     time.sleep(0.2)
-
     try:
         gcs.arm(timeout=timeout, force=True, rc_override={8: rc8})
-        log.info("✓  ARMED with strategy: %s", label)
         return True
     except Exception as exc:
-        log.info("✗  Strategy failed (%s): %s", label, exc)
+        log.info("Arm failed (%s): %s", label, exc)
         return False
 
 
@@ -168,8 +155,10 @@ def test_arm_minimal(tmp_path):
     """
     Minimal arm test: SITL + hardcoded sensor packets.  No mediator.
 
-    Tries multiple (RSC mode, interlock, ARMING_SKIPCHK) combinations and
-    reports which achieves HEARTBEAT armed=True.
+    Verifies that ArduPilot arms with our production config (ARMING_SKIPCHK=0xFFFF,
+    H_RSC_MODE=1, CH8=2000) in isolation from the mediator and physics stack.
+    If this fails, the issue is in ArduPilot params or the GCS arm sequence,
+    not in the mediator or dynamics.
     """
     if os.environ.get(STACK_ENV_FLAG) != "1":
         pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack tests")
@@ -202,7 +191,6 @@ def test_arm_minimal(tmp_path):
         # Disable failsafes that fire when there's no real RC or GCS heartbeat
         gcs.set_param("FS_THR_ENABLE", 0)
         gcs.set_param("FS_GCS_ENABLE", 0)
-        gcs.set_param("COMPASS_USE",   0)
 
         log.info("Waiting for EKF attitude alignment …")
         if not gcs.wait_ekf_attitude(timeout=30.0):
@@ -210,57 +198,19 @@ def test_arm_minimal(tmp_path):
                 log.warning("SITL log:\n%s", sitl_log.read_text(errors="replace")[-2000:])
             pytest.fail("EKF never aligned — check sensor packet format")
 
-        # ── Arm strategies (tried in order, stop on first success) ─────────
-        # ARMING_SKIPCHK is the 4.7+ rename of ARMING_CHECK.
-        # Values: 0 = skip nothing, 0xFFFF = skip everything.
-        # H_RSC_MODE: 1=CH8passthrough, 2=setpoint
-        strategies = [
-            (
-                "ARMING_SKIPCHK=0xFFFF + H_RSC_MODE=1 + CH8=2000",
-                {"ARMING_SKIPCHK": 0xFFFF, "H_RSC_MODE": 1},
-                2000,
-            ),
-            (
-                "ARMING_SKIPCHK=0xFFFF + H_RSC_MODE=2 + H_RSC_SETPOINT=50 + H_RUNUP_TIME=1 + CH8=2000",
-                {"ARMING_SKIPCHK": 0xFFFF, "H_RSC_MODE": 2, "H_RSC_SETPOINT": 50, "H_RUNUP_TIME": 1},
-                2000,
-            ),
-            (
-                "ARMING_SKIPCHK=0xFFFF + H_RSC_MODE=1 + CH8=1000",
-                {"ARMING_SKIPCHK": 0xFFFF, "H_RSC_MODE": 1},
-                1000,
-            ),
-            (
-                "ARMING_SKIPCHK=0xFFFF + H_RSC_MODE=2 + H_RUNUP_TIME=0 + CH8=1000",
-                {"ARMING_SKIPCHK": 0xFFFF, "H_RSC_MODE": 2, "H_RUNUP_TIME": 0},
-                1000,
-            ),
-            (
-                "no ARMING_SKIPCHK + H_RSC_MODE=1 + CH8=2000",
-                {"H_RSC_MODE": 1},
-                2000,
-            ),
-        ]
+        # ── Arm with production config ────────────────────────────────────────
+        gcs.set_param("ARMING_SKIPCHK", 0xFFFF)
+        gcs.set_param("H_RSC_MODE", 1)
 
-        armed_strategy = None
-        for label, params, rc8 in strategies:
-            if _try_arm(gcs, params, label, rc8=rc8):
-                armed_strategy = label
-                break
-
-        log.info("━━━ RESULT ━━━")
-        if armed_strategy:
-            log.info("SUCCESS — ARMED with: %s", armed_strategy)
-        else:
-            sitl_tail = ""
-            if sitl_log.exists():
-                sitl_tail = sitl_log.read_text(errors="replace")[-3000:]
+        if not _try_arm(gcs, "production config", rc8=2000):
+            sitl_tail = sitl_log.read_text(errors="replace")[-3000:] if sitl_log.exists() else ""
             pytest.fail(
-                "Could not arm ArduCopter SITL with any strategy.\n"
-                "Strategies tried:\n" +
-                "\n".join(f"  • {s[0]}" for s in strategies) +
-                (f"\n\nSITL log tail:\n{sitl_tail}" if sitl_tail else "")
+                "Could not arm with production config "
+                "(ARMING_SKIPCHK=0xFFFF, H_RSC_MODE=1, CH8=2000).\n"
+                + (f"\nSITL log tail:\n{sitl_tail}" if sitl_tail else "")
             )
+
+        log.info("ARMED — production config OK")
 
     finally:
         stop_sensors.set()

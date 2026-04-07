@@ -13,6 +13,10 @@
 #
 set -euo pipefail
 
+# Prevent Git Bash from converting /rawes/... Linux paths to Windows paths
+# when passing them as arguments to docker exec.
+export MSYS_NO_PATHCONV=1
+
 IMAGE=rawes-sim
 CONTAINER=rawes-dev
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,7 +83,7 @@ case "$CMD" in
             env RAWES_FILTER_MODE="$_FILTER_MODE" \
             bash /rawes/simulation/test_stack.sh ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} || _rc=$?
 
-        _WIN_LOGS=$(wslpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
+        _WIN_LOGS=$(cygpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
         echo ""
         echo "[LOGS] summary: ${_WIN_LOGS}\\pytest_last_run_summary.json"
         echo "[LOGS] full:    ${_WIN_LOGS}\\pytest_last_run.log"

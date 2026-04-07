@@ -42,6 +42,7 @@ from stack_utils import (
     SIM_VEHICLE_ENV,
     _launch_mediator,
     _launch_sitl,
+    _prime_sitl_eeprom,
     _resolve_sim_vehicle,
     _terminate_process,
     _kill_by_port,
@@ -259,7 +260,8 @@ import numpy as _np
 
 @contextlib.contextmanager
 def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefix="",
-                arm: bool = True, with_mediator: bool = True, test_name: str = ""):
+                arm: bool = True, with_mediator: bool = True, test_name: str = "",
+                prime_eeprom: bool = False):
     """
     Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
@@ -327,11 +329,24 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
 
     # ── Lua scripts ───────────────────────────────────────────────────────────
     # Always install rawes_flight.lua so it is available if scripting is enabled.
-    # Whether Lua actually RUNS is controlled by SCR_ENABLE in EEPROM at boot:
-    #   wipe_eeprom=True  → fresh EEPROM → SCR_ENABLE not set → Lua does not start
-    #   wipe_eeprom=False → EEPROM preserved from previous run → if SCR_ENABLE=1
-    #                       was written by a prior session, Lua starts on this boot
     _install_lua_flight_scripts()
+
+    # ── EEPROM priming for Lua fixtures ───────────────────────────────────────
+    # ArduPilot's scripting.init() runs before load_defaults_file(), so
+    # SCR_ENABLE=1 in --add-param-file only takes effect on the SECOND boot
+    # (first boot writes it to EEPROM; second boot reads it before Lua inits).
+    # _prime_sitl_eeprom() boots SITL briefly to flush params into eeprom.bin,
+    # then kills it.  The real launch (wipe_eeprom=False) preserves that EEPROM
+    # so Lua starts immediately on the first test boot.
+    if prime_eeprom:
+        ardupilot_root = sim_vehicle.parent.parent.parent
+        eeprom_exists = (ardupilot_root / "eeprom.bin").exists()
+        if eeprom_exists:
+            log.info("%s: EEPROM already exists (prior test run wrote SCR_ENABLE=1) — skipping prime.", log_name)
+        else:
+            log.info("%s: Fresh container — priming EEPROM for Lua scripting (6 s boot) ...", log_name)
+            _prime_sitl_eeprom(sim_vehicle)
+            log.info("%s: EEPROM primed.", log_name)
 
     # ── Launch ────────────────────────────────────────────────────────────────
     _run_id = int(time.time())
@@ -470,7 +485,7 @@ def acro_armed_lua(tmp_path, request):
     mediator's internal controller stabilises physics (internal_controller=True).
     """
     with _acro_stack(tmp_path, log_name="acro_armed_lua", log_prefix="lua",
-                     test_name=request.node.name) as ctx:
+                     test_name=request.node.name, prime_eeprom=True) as ctx:
         # Post-arm: configure rawes_flight.lua via SCR_USER params.
         # SCR_USER5 = home_alt_m: anchor is home_alt_m metres below EKF HOME
         # (sensor.py sets pos_ned_rel[2] = pos_ned[2] + home_alt_m, so physics
@@ -487,6 +502,19 @@ def acro_armed_lua(tmp_path, request):
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
+
+        # Drain any STATUSTEXT that arrived during param setting (including
+        # "RAWES flight: captured" which Lua may have sent while the GCS was
+        # busy with PARAM_VALUE exchanges and couldn't process STATUSTEXT).
+        import time as _time
+        _t_drain = _time.monotonic() + 1.0
+        while _time.monotonic() < _t_drain:
+            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
+            if _msg is not None:
+                _text = _msg.text.rstrip("\x00").strip()
+                ctx.all_statustext.append(_text)
+                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
+
         yield ctx
 
 

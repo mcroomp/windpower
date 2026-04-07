@@ -94,7 +94,26 @@ def test_acro_armed(acro_armed: StackContext):
                 + "\n".join(critical[:10])
             )
 
-        # ── 5. Setup complete event recorded (arm + ACRO both succeeded) ──────
+        # ── 5. MAVLink bidirectionality — param request/reply round-trip ────────
+        # Confirms SITL→GCS telemetry AND GCS→SITL command path both work.
+        import time as _time
+        ctx.gcs._mav.mav.param_request_list_send(
+            ctx.gcs._mav.target_system, ctx.gcs._mav.target_component
+        )
+        _deadline = _time.monotonic() + 5.0
+        _got_param = False
+        while _time.monotonic() < _deadline:
+            _pm = ctx.gcs._mav.recv_match(type=["PARAM_VALUE"], blocking=True, timeout=0.5)
+            if _pm is not None and math.isfinite(_pm.param_value):
+                _got_param = True
+                log.info("MAVLink round-trip OK: %s = %g", _pm.param_id, _pm.param_value)
+                break
+        assert _got_param, (
+            "PARAM_REQUEST_LIST got no PARAM_VALUE reply within 5 s.\n"
+            "MAVLink uplink (GCS→SITL) or downlink (SITL→GCS) is broken."
+        )
+
+        # ── 6. Setup complete event recorded (arm + ACRO both succeeded) ──────
         assert "Setup complete" in ctx.flight_events, (
             "Setup did not complete — arm or mode-set raised an exception.\n"
             f"flight_events: {ctx.flight_events}\n"

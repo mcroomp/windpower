@@ -14,7 +14,7 @@ Any module inside simulation/ (or a subdirectory) can use:
     from stack_utils import (
         STACK_ENV_FLAG, ARDUPILOT_ENV, SIM_VEHICLE_ENV,
         SITL_GCS_PORT, SITL_JSON_PORT, GCS_ADDRESS,
-        _resolve_sim_vehicle, _launch_sitl,
+        _resolve_sim_vehicle, _launch_sitl, _prime_sitl_eeprom,
         _terminate_process, _kill_by_port,
         _configure_logging, copy_logs_to_dir, check_ports_free,
     )
@@ -91,6 +91,7 @@ def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
     add_param_file: "Path | None" = None,
+    wipe_eeprom: bool = True,
 ) -> subprocess.Popen:
     """
     Launch ArduPilot SITL (heli frame, JSON physics backend).
@@ -100,6 +101,10 @@ def _launch_sitl(
     sim_vehicle    : path to sim_vehicle.py
     log_path       : file to receive stdout + stderr from SITL
     add_param_file : if given, pass --add-param-file <path> (boot defaults)
+    wipe_eeprom    : if True (default), delete eeprom.bin before launch so each
+                     run starts from copter-heli.parm defaults.  Set False when
+                     a prior _prime_sitl_eeprom() call has already written a
+                     primed EEPROM that must be preserved.
 
     Returns
     -------
@@ -107,13 +112,13 @@ def _launch_sitl(
 
     Notes
     -----
-    eeprom.bin is deleted before every launch so each run starts from
-    copter-heli.parm defaults — identical to a fresh container.  Prevents
-    stale param values (e.g. H_RSC_MODE=1) from accumulating across test
-    runs and causing intermittent Motor Interlock arm failures.
+    When wipe_eeprom=True, eeprom.bin is deleted before launch so each run
+    starts from copter-heli.parm defaults — identical to a fresh container.
+    Prevents stale param values (e.g. H_RSC_MODE=1) from accumulating across
+    test runs and causing intermittent Motor Interlock arm failures.
     """
     eeprom = Path(sim_vehicle).parent.parent.parent / "eeprom.bin"
-    if eeprom.exists():
+    if wipe_eeprom and eeprom.exists():
         eeprom.unlink()
     cmd = [
         sys.executable, str(sim_vehicle),
@@ -134,6 +139,37 @@ def _launch_sitl(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+
+
+def _prime_sitl_eeprom(
+    sim_vehicle: Path,
+    add_param_file: "Path | None" = None,
+    wait_s: float = 4.0,
+) -> None:
+    """
+    Boot SITL briefly to flush --add-param-file params into eeprom.bin, then kill it.
+
+    ArduPilot's scripting subsystem initialises before the defaults file is
+    loaded, so SCR_ENABLE=1 only takes effect on the SECOND boot (first boot
+    writes it to EEPROM; second boot reads it before scripting.init() runs).
+    Call this before the real _launch_sitl(wipe_eeprom=False) to ensure Lua
+    scripting starts on the very first test boot.
+
+    Parameters
+    ----------
+    sim_vehicle    : path to sim_vehicle.py
+    add_param_file : passed to _launch_sitl (must include SCR_ENABLE=1)
+    wait_s         : seconds to wait for AP_Param init before killing (4 s is
+                     enough; EEPROM is written in setup() before the physics
+                     connection loop starts).
+    """
+    eeprom = Path(sim_vehicle).parent.parent.parent / "eeprom.bin"
+    if eeprom.exists():
+        eeprom.unlink()
+    devnull = Path("/dev/null")
+    proc = _launch_sitl(sim_vehicle, devnull, add_param_file=add_param_file, wipe_eeprom=False)
+    time.sleep(wait_s)
+    _terminate_process(proc)
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:

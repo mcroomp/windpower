@@ -72,6 +72,59 @@ def _launch_sitl(
     )
 
 
+def _prime_sitl_eeprom(
+    sim_vehicle: Path,
+    wait_s: float = 6.0,
+) -> None:
+    """
+    Boot SITL briefly with --model heli and a minimal parm file (SCR_ENABLE 1
+    only) to flush SCR_ENABLE into eeprom.bin, then kill it.
+
+    ArduPilot's scripting subsystem initialises before the defaults file is
+    loaded, so SCR_ENABLE=1 only takes effect on the SECOND boot (first boot
+    writes it to EEPROM; second boot reads it before scripting.init() runs).
+
+    Uses --model heli (internal physics, no JSON backend) so no sensor
+    calibration is written — the real boot's --add-param-file supplies all
+    needed EKF/sensor params without stale calibration interference.
+
+    The minimal parm file (SCR_ENABLE 1 only) avoids writing sensor-specific
+    defaults that would conflict with the JSON physics in the real boot.
+    """
+    ardupilot_root = Path(sim_vehicle).parent.parent.parent
+    eeprom = ardupilot_root / "eeprom.bin"
+    if eeprom.exists():
+        eeprom.unlink()
+
+    # Write a minimal parm file — only SCR_ENABLE, nothing sensor-specific.
+    prime_parm = ardupilot_root / "scr_enable_prime.parm"
+    prime_parm.write_text("SCR_ENABLE 1\n")
+
+    arducopter = ardupilot_root / "build" / "sitl" / "bin" / "arducopter-heli"
+    cmd = [
+        str(arducopter),
+        "--model", "heli",
+        "--speedup", "10",
+        "--slave", "0",
+        "--no-mavproxy",
+        "-I0",
+        "--home", "51.5074,-0.1278,50,0",
+        "--defaults", str(prime_parm),
+    ]
+    devnull = open(os.devnull, "w")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ardupilot_root),
+        stdout=devnull,
+        stderr=devnull,
+        start_new_session=True,
+    )
+    time.sleep(wait_s)
+    _terminate_process(proc)
+    devnull.close()
+    prime_parm.unlink(missing_ok=True)
+
+
 def _terminate_process(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return

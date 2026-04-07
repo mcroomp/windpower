@@ -138,9 +138,12 @@ local function update()
     local pos_ned = ahrs:get_relative_position_NED_origin()
     if not pos_ned then return update, PERIOD_MS end
 
-    -- Tether vector
+    -- Tether vector: use component arithmetic (vector - may not be overloaded)
     local anch = anchor_ned()
-    local diff = pos_ned - anch
+    local diff = Vector3f()
+    diff:x(pos_ned:x() - anch:x())
+    diff:y(pos_ned:y() - anch:y())
+    diff:z(pos_ned:z() - anch:z())
     local tlen = diff:length()
 
     -- ── Equilibrium capture ──────────────────────────────────────────────

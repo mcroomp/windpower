@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-04-06 07:08:15",
-  "elapsed_s": 70.75,
+  "timestamp": "2026-04-07 00:35:03",
+  "elapsed_s": 19.15,
   "exit_code": 1,
-  "passed": 1,
+  "passed": 0,
   "failed": 1,
   "errors": 0,
   "skipped": 0,
@@ -11,7 +11,7 @@
   "passed_log": "/rawes/simulation/logs/pytest_last_run_passed.log",
   "failed_log": "/rawes/simulation/logs/pytest_last_run_failed.log",
   "failed_tests": [
-    "tests/stack/test_lua_flight.py::test_lua_flight_rc_overrides"
+    "tests/stack/test_arm_minimal.py::test_arm_minimal"
   ],
   "cmd": [
     "/rawes/.venv/bin/python",
@@ -22,6 +22,6 @@
     "-s",
     "-v",
     "-k",
-    "test_h_swash_phang or test_lua_flight_rc_overrides"
+    "test_arm_minimal"
   ]
 }
