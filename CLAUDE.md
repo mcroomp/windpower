@@ -119,7 +119,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### Counter-Torque Motor Simulation
 | File | When to read |
 |------|-------------|
-| [simulation/torque/README.md](simulation/torque/README.md) | **Complete reference** — physics model, motor specs, gear efficiency, ArduPilot integration, all 6 tests, Lua feedforward controller, hardware deployment |
+| [simulation/torque/README.md](simulation/torque/README.md) | **Complete reference** — physics model, motor specs, gear efficiency, ArduPilot integration, Lua feedforward controller, hardware deployment. Stack tests are in `simulation/tests/stack/` (unified with flight stack). |
 
 ### Lua Flight Controller
 | File | When to read |
@@ -277,13 +277,13 @@ All defined in `frames.py`. Import from there — do not duplicate.
 
 Tests run in three sequential stages. Always run them in order — later stages depend on earlier ones passing.
 
-**CRITICAL: Unit tests and simtests run on Windows natively (no Docker). Stack/torque tests require Docker. Never mix these.**
+**CRITICAL: Unit tests and simtests run on Windows natively (no Docker). Stack tests (flight + torque) require Docker. Never mix these.**
 
 **CRITICAL: Use the Bash tool directly for unit/simtests and for Docker commands — do NOT use `wsl.exe`. The Bash tool runs Git Bash on Windows, and Docker Desktop exposes the `docker` CLI directly in Git Bash. WSL `/mnt/...` paths do NOT exist in Git Bash.**
 
 **CRITICAL: The Bash tool's working directory is NOT the repo root. Always use absolute paths.**
 
-**CRITICAL: NEVER call `docker exec` directly to run stack tests.** Always use `bash sim.sh test-stack [...]` (or `bash sim.sh test-torque [...]`). The `dev.sh` scripts manage process teardown and port cleanup between tests — calling `docker exec ... pytest` directly bypasses this cleanup and leaves SITL processes holding ports, causing subsequent tests to fail with "Address already in use". If a port is stuck after an aborted run, restart the container with `bash sim.sh stop && bash sim.sh start`.
+**CRITICAL: NEVER call `docker exec` directly to run stack tests.** Always use `bash sim.sh test-stack [...]`. The `dev.sh` scripts manage process teardown and port cleanup between tests — calling `docker exec ... pytest` directly bypasses this cleanup and leaves SITL processes holding ports, causing subsequent tests to fail with "Address already in use". If a port is stuck after an aborted run, restart the container with `bash sim.sh stop && bash sim.sh start`.
 
 One-time venv setup (Windows, run from repo root in Git Bash):
 ```bash
@@ -324,17 +324,17 @@ bash sim.sh test-unit -q && bash sim.sh test-simtest -q
 
 ### Stage 3 — Stack tests (Docker, ArduPilot SITL)
 
-Full SITL co-simulation: mediator + ArduPilot + MAVLink GCS. Runs sequentially — never launch two stack/torque tests at the same time.
+Full SITL co-simulation: mediator + ArduPilot + MAVLink GCS. Runs sequentially — never launch two stack tests at the same time. Includes both flight orbit tests and counter-torque motor tests.
 
 ```bash
 bash sim.sh test-stack -v
-bash sim.sh test-torque -v
 ```
 
 Filtered runs:
 ```bash
 bash sim.sh test-stack -v -k test_pumping_cycle
-bash sim.sh test-torque -v -k test_lua_yaw_trim
+bash sim.sh test-stack -v -k test_lua_yaw_trim
+bash sim.sh test-stack -v -k torque_armed    # all counter-torque tests
 ```
 
 **Output is filtered by default** (summary mode: PASSED/FAILED lines + failure details only).

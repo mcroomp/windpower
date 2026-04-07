@@ -1,0 +1,13 @@
+{
+  "include": ["simulation"],
+  "extraPaths": [
+    "simulation",
+    "simulation/torque",
+    "simulation/tests/stack",
+    "simulation/tests/unit/.venv/Lib/site-packages"
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none"
+}

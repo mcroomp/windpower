@@ -63,7 +63,7 @@ _MAX_PSI_DOT_DEGS = 1.0
 _TEST_TIMEOUT_S = _SETTLE_S + _OBSERVE_S + 20.0
 
 #: Where to save the telemetry JSON for post-run analysis and visualisation
-_SIM_DIR = Path(__file__).resolve().parents[1]
+_SIM_DIR = Path(__file__).resolve().parents[2]
 _TELEMETRY_OUT = _SIM_DIR / "logs" / "torque_telemetry.json"
 
 
@@ -97,7 +97,7 @@ def test_yaw_regulation(torque_armed):
 
     log.info(
         "test_yaw_regulation: settle=%.0f s  observe=%.0f s  "
-        "threshold ψ_dot<%.1f°/s",
+        "threshold psi_dot<%.1f deg/s",
         _SETTLE_S, _OBSERVE_S, _MAX_PSI_DOT_DEGS,
     )
 
@@ -158,7 +158,7 @@ def test_yaw_regulation(torque_armed):
 
             if len(observe_samples) % 50 == 0 and observe_samples:
                 log.info(
-                    "t=%6.1f s  ψ=%+7.2f°  ψ_dot=%+6.2f°/s",
+                    "t=%6.1f s  psi=%+7.2f deg  psi_dot=%+6.2f deg/s",
                     t_rel, yaw_deg, yaw_rate_degs,
                 )
 
@@ -172,7 +172,7 @@ def test_yaw_regulation(torque_armed):
         rec.save(_TELEMETRY_OUT)
         pytest.fail(
             f"Not enough ATTITUDE samples in observation window "
-            f"(got {len(observe_samples)}, need ≥ 10).  "
+            f"(got {len(observe_samples)}, need >= 10).  "
             f"Total frames recorded: {len(rec.frames)}"
         )
 
@@ -182,8 +182,8 @@ def test_yaw_regulation(torque_armed):
 
     log.info(
         "Observation window (t > %.0f s, %d samples):  "
-        "max |ψ_dot|=%.2f°/s (limit %.1f°/s)  "
-        "max |ψ|=%.2f° (informational, not asserted)",
+        "max |psi_dot|=%.2f deg/s (limit %.1f deg/s)  "
+        "max |psi|=%.2f deg (informational, not asserted)",
         _SETTLE_S, len(observe_samples),
         max_psi_dot_degs, _MAX_PSI_DOT_DEGS,
         max_psi_deg,
@@ -195,7 +195,7 @@ def test_yaw_regulation(torque_armed):
     rec.add_meta("max_psi_deg",       max_psi_deg)
     rec.add_meta("n_frames",          len(rec.frames))
     out = rec.save(_TELEMETRY_OUT)
-    log.info("Telemetry saved → %s  (%d frames)", out, len(rec.frames))
+    log.info("Telemetry saved -> %s  (%d frames)", out, len(rec.frames))
     log.info(
         "Visualise with:  python simulation/torque/visualize_torque.py %s", out
     )
@@ -207,14 +207,14 @@ def test_yaw_regulation(torque_armed):
             rate_last  = observe_samples[-1]["yaw_rate_degs"]
             if abs(rate_last) > abs(rate_first) + 5.0:
                 log.warning(
-                    "Yaw rate growing (%+.1f → %+.1f°/s) — motor may be in wrong "
+                    "Yaw rate growing (%+.1f -> %+.1f deg/s) — motor may be in wrong "
                     "direction.  Try H_TAIL_TYPE=2 (CW) or 3 (CCW) in conftest.py.",
                     rate_first, rate_last,
                 )
 
     assert passed, (
-        f"Max |ψ_dot| = {max_psi_dot_degs:.2f}°/s exceeded limit {_MAX_PSI_DOT_DEGS}°/s "
+        f"Max |psi_dot| = {max_psi_dot_degs:.2f} deg/s exceeded limit {_MAX_PSI_DOT_DEGS} deg/s "
         f"in observation window (t > {_SETTLE_S:.0f} s)"
     )
 
-    log.info("PASS — yaw held within limits for %.0f s observation window", _OBSERVE_S)
+    log.info("PASS -- yaw held within limits for %.0f s observation window", _OBSERVE_S)

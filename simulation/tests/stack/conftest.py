@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,9 +31,11 @@ import pytest
 
 _SIM_DIR   = Path(__file__).resolve().parents[2]
 _STACK_DIR = Path(__file__).resolve().parent
+_TORQUE_DIR = _SIM_DIR / "torque"
 
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
+sys.path.insert(0, str(_TORQUE_DIR))
 
 import rotor_definition as _rd
 
@@ -41,6 +44,7 @@ from stack_utils import (
     STACK_ENV_FLAG,
     SIM_VEHICLE_ENV,
     _launch_mediator,
+    _launch_mediator_torque,
     _launch_sitl,
     _prime_sitl_eeprom,
     _resolve_sim_vehicle,
@@ -359,7 +363,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
 
     # ── Lua scripts ───────────────────────────────────────────────────────────
     # Always install rawes_flight.lua so it is available if scripting is enabled.
-    _install_lua_flight_scripts()
+    _install_lua_scripts("rawes_flight.lua")
 
     # ── EEPROM / Lua: SCR_ENABLE=1 is set via MAVLink in step 3 and persists.
     # For the Lua fixture specifically: prime_eeprom=True runs a short SITL boot
@@ -509,20 +513,27 @@ def acro_armed_pumping(tmp_path, request):
 # Lua flight fixture helpers
 # ---------------------------------------------------------------------------
 
-_FLIGHT_SCRIPTS_DIR = _SIM_DIR / "scripts"  # simulation/scripts/rawes_flight.lua
+_SCRIPTS_DIR = _SIM_DIR / "scripts"  # simulation/scripts/ — all Lua scripts
 
 
-def _install_lua_flight_scripts() -> None:
+def _install_lua_scripts(*names: str) -> None:
     """
-    Copy rawes_flight.lua to SITL's /ardupilot/scripts/ directory.
+    Copy the named Lua scripts from simulation/scripts/ to SITL's /ardupilot/scripts/.
 
-    Must be called before SITL starts.  rawes_yaw_trim.lua is intentionally
-    excluded — the main mediator does not model the counter-torque motor.
+    Must be called before SITL starts.  Pass only the scripts needed for
+    the test — do not install scripts that would conflict (e.g. rawes_flight.lua
+    and rawes_yaw_trim.lua both claim RC overrides and should not coexist).
+
+    Examples::
+
+        _install_lua_scripts("rawes_flight.lua")
+        _install_lua_scripts("rawes_yaw_trim.lua", "rawes_null.lua")
     """
     dst_dir = Path("/ardupilot/scripts")
     dst_dir.mkdir(exist_ok=True)
-    src = _FLIGHT_SCRIPTS_DIR / "rawes_flight.lua"
-    shutil.copy2(src, dst_dir / src.name)
+    for name in names:
+        src = _SCRIPTS_DIR / name
+        shutil.copy2(src, dst_dir / name)
 
 
 @pytest.fixture
@@ -1152,3 +1163,332 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
             return
         log.debug("Waiting for param subsystem ...")
     raise TimeoutError(f"Param subsystem not ready after {timeout:.0f}s")
+
+
+# ---------------------------------------------------------------------------
+# Counter-torque motor stack fixtures
+# ---------------------------------------------------------------------------
+# These fixtures test the GB4008 anti-rotation motor (yaw stabilisation).
+# They use mediator_torque.py instead of mediator.py — stationary hub model
+# with bearing drag + motor physics — and a different EKF alignment sequence
+# (short compass-only alignment instead of the long kinematic ramp).
+
+_TORQUE_STARTUP_HOLD_S: float = 10.0   # mediator yaw-spin duration for EKF bias alignment
+
+_BASE_TORQUE_PARAMS: list[tuple[str, float]] = [
+    # Safety / arming
+    ("ARMING_SKIPCHK",    0xFFFF),
+    ("FS_EKF_ACTION",     0),
+    ("FS_THR_ENABLE",     0),
+    # EKF -- compass yaw (suitable for stationary test)
+    ("COMPASS_USE",       1),
+    ("COMPASS_ENABLE",    1),
+    ("EK3_SRC1_YAW",      1),
+    ("EK3_MAG_CAL",       0),
+    ("EK3_GPS_CHECK",     0),
+    # RSC -- CH8 passthrough: instant runup_complete when CH8=2000
+    ("H_RSC_MODE",        1),
+    ("H_RSC_RUNUP_TIME",  1),
+    # Tail type -- servo (Type 0): neutral at 1500 us (bias mapping works correctly)
+    ("H_TAIL_TYPE",       0),
+    ("H_COL2YAW",         0.0),
+    # Yaw PID -- pure-P; motor back-EMF provides inherent speed regulation
+    ("ATC_RAT_YAW_P",     0.001),
+    ("ATC_RAT_YAW_I",     0.0),
+    ("ATC_RAT_YAW_D",     0.0),
+    ("ATC_RAT_YAW_IMAX",  0.0),
+    # Disable roll/pitch IMAX -- prevent swashplate wind-up on neutral sticks
+    ("ATC_RAT_RLL_IMAX",  0.0),
+    ("ATC_RAT_PIT_IMAX",  0.0),
+]
+
+# Applied after _BASE_TORQUE_PARAMS for the Lua feedforward fixture.
+_LUA_TORQUE_EXTRA_PARAMS: list[tuple[str, float]] = [
+    ("ATC_RAT_YAW_P",    0.0),   # override: Lua is the sole feedforward provider
+    ("SCR_ENABLE",       1),
+    ("RPM1_TYPE",        10),    # SITL: read rpm from JSON sensor packet
+    ("RPM1_MIN",         0),
+    ("SERVO9_FUNCTION",  94),    # Script 1 -- Lua writes exclusively to Ch9
+]
+
+
+@dataclasses.dataclass
+class TorqueStackContext:
+    """Everything a torque stack test needs after setup."""
+    gcs:           object
+    mediator_proc: subprocess.Popen
+    sitl_proc:     subprocess.Popen
+    mediator_log:  Path
+    sitl_log:      Path
+    gcs_log:       Path
+    omega_axle:    float
+    log:           logging.Logger
+
+
+@contextlib.contextmanager
+def _torque_stack(
+    tmp_path: Path,
+    *,
+    omega_axle: float,
+    profile: str = "constant",
+    lua_mode: bool = False,
+    tail_channel: int = 3,
+    extra_params=(),
+    log_name: str = "torque_armed",
+    test_name: str = "",
+    eeprom_wipe: bool = False,
+    install_scripts: tuple = (),
+):
+    """
+    Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
+
+    Logs written to simulation/logs/{test_name}/ (per-test directory,
+    matching the flight stack convention) and also to top-level logs/ with
+    _last suffixes for quick access.
+
+    Parameters
+    ----------
+    omega_axle      : axle angular velocity [rad/s]
+    profile         : mediator_torque.py --profile value
+    lua_mode        : if True, pass --lua-mode to mediator (linear mapping, no trim)
+    tail_channel    : ArduPilot tail servo channel read by mediator
+    extra_params    : additional (name, value) tuples applied after _BASE_TORQUE_PARAMS
+    log_name        : logger name shown in log output
+    test_name       : pytest test node name; used for per-test log directory
+    eeprom_wipe     : if True, delete eeprom.bin before SITL launch
+    install_scripts : tuple of Lua script names to install from simulation/scripts/
+    """
+    if os.environ.get(STACK_ENV_FLAG) != "1":
+        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run counter-torque stack tests")
+
+    sim_vehicle = _resolve_sim_vehicle()
+    if sim_vehicle is None:
+        pytest.skip(f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py")
+
+    pytest.importorskip("pymavlink")
+    assert_stack_ports_free()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    sim_dir   = repo_root / "simulation"
+
+    # Per-test log directory (mirrors flight stack convention)
+    if test_name:
+        test_log_dir = sim_dir / "logs" / test_name
+        if test_log_dir.exists():
+            import shutil as _shutil
+            _shutil.rmtree(test_log_dir)
+        test_log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        test_log_dir = sim_dir / "logs"
+        test_log_dir.mkdir(exist_ok=True)
+
+    mediator_log = tmp_path / "mediator.log"
+    sitl_log     = tmp_path / "sitl.log"
+    gcs_log      = tmp_path / "gcs.log"
+
+    _configure_logging(gcs_log)
+    log = logging.getLogger(log_name)
+    log.info(
+        "launching  profile=%s  omega_axle=%.1f rad/s (%.0f RPM)",
+        profile, omega_axle, omega_axle * 60.0 / (2.0 * math.pi),
+    )
+
+    # Pre-launch: install Lua scripts before SITL starts
+    if install_scripts:
+        _install_lua_scripts(*install_scripts)
+
+    mediator_proc = _launch_mediator_torque(
+        _TORQUE_DIR, repo_root, mediator_log, omega_axle,
+        profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
+        startup_hold_s=_TORQUE_STARTUP_HOLD_S,
+    )
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log, wipe_eeprom=eeprom_wipe)
+
+    def _assert_alive() -> None:
+        for name, proc, lp in [
+            ("mediator_torque", mediator_proc, mediator_log),
+            ("SITL",            sitl_proc,     sitl_log),
+        ]:
+            if proc.poll() is not None:
+                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
+
+    from gcs import RawesGCS, ACRO as _ACRO
+    gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+    ctx = TorqueStackContext(
+        gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
+        mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
+        omega_axle=omega_axle, log=log,
+    )
+
+    try:
+        log.info("Connecting GCS ...")
+        gcs.connect(timeout=30.0)
+        gcs.start_heartbeat(rate_hz=1.0)
+        _assert_alive()
+        log.info("GCS connected")
+
+        from pymavlink import mavutil as _mavu
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
+        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+
+        log.info("Waiting for param subsystem ...")
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            _assert_alive()
+            gcs._mav.mav.param_request_read_send(
+                gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
+            )
+            msg = gcs._mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+            if msg is not None:
+                log.info("Param subsystem ready (SYSID_THISMAV=%g)", msg.param_value)
+                break
+        else:
+            pytest.fail("Param subsystem never responded within 20 s")
+
+        log.info("Setting parameters ...")
+        for pname, pvalue in list(_BASE_TORQUE_PARAMS) + list(extra_params):
+            ok = gcs.set_param(pname, pvalue, timeout=5.0)
+            log.info("  %-28s = %-10g  ACK=%s", pname, pvalue, ok)
+            _assert_alive()
+
+        # Motor interlock HIGH + EKF alignment
+        # Keep CH8 alive every 0.5 s (ArduPilot expires RC override after ~1 s).
+        log.info("Waiting for EKF yaw alignment (CH8=2000, up to 45 s) ...")
+        gcs.send_rc_override({8: 2000})
+        ekf_ok  = False
+        t_start = time.monotonic()
+        t_rc    = time.monotonic()
+        deadline = time.monotonic() + 45.0
+        _MIN_WAIT = 3.0
+
+        while time.monotonic() < deadline:
+            _assert_alive()
+            if time.monotonic() - t_rc >= 0.5:
+                gcs.send_rc_override({8: 2000})
+                t_rc = time.monotonic()
+            msg = gcs._mav.recv_match(
+                type=["ATTITUDE", "STATUSTEXT"], blocking=True, timeout=0.5,
+            )
+            if msg is None:
+                continue
+            now = time.monotonic()
+            if msg.get_type() == "STATUSTEXT":
+                text = msg.text.rstrip("\x00").strip()
+                log.info("SITL: %s", text)
+                if "EKF3 active" in text or "EKF3 IMU" in text:
+                    gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
+                if lua_mode and "rawes yaw trim" in text.lower():
+                    log.info("Lua script confirmed loaded: %s", text)
+                if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
+                    ekf_ok = True
+                    break
+            elif msg.get_type() == "ATTITUDE":
+                if (all(math.isfinite(v) for v in (msg.roll, msg.pitch, msg.yaw))
+                        and now - t_start >= _MIN_WAIT):
+                    log.info(
+                        "EKF attitude ready  rpy=(%.1f, %.1f, %.1f) deg",
+                        math.degrees(msg.roll), math.degrees(msg.pitch), math.degrees(msg.yaw),
+                    )
+                    ekf_ok = True
+                    break
+
+        if not ekf_ok:
+            log.warning("EKF alignment timed out -- proceeding (SKIPCHK set)")
+
+        gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
+        log.info("Armed")
+        gcs.set_mode(_ACRO, timeout=10.0, rc_override={8: 2000})
+        log.info("ACRO active -- profile=%s", profile)
+
+        yield ctx
+
+    finally:
+        log.info("Teardown: terminating processes ...")
+        try:
+            gcs.close()
+        except Exception:
+            pass
+        _terminate_process(sitl_proc)
+        _terminate_process(mediator_proc)
+        _kill_by_port(StackConfig.SITL_GCS_PORT)
+
+        copy_logs_to_dir(test_log_dir, {
+            "mediator.log": mediator_log,
+            "sitl.log":     sitl_log,
+            "gcs.log":      gcs_log,
+        })
+        _ardupilot_log = Path("/tmp/ArduCopter.log")
+        if _ardupilot_log.exists():
+            import shutil as _shutil2
+            _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
+        pfx = f"{test_name}_" if test_name else ""
+        copy_logs_to_dir(sim_dir / "logs", {
+            f"sitl_{pfx}last.log":      sitl_log,
+            f"gcs_{pfx}last.log":       gcs_log,
+            "mediator_torque_last.log": mediator_log,
+        })
+        log.info("Logs copied to %s", test_log_dir)
+
+
+@pytest.fixture
+def torque_armed(tmp_path, request):
+    """Counter-torque stack fixture (constant RPM). Yields TorqueStackContext."""
+    import model as _m
+    with _torque_stack(
+        tmp_path,
+        omega_axle=_m.OMEGA_AXLE_NOMINAL,
+        test_name=request.node.name,
+    ) as ctx:
+        yield ctx
+
+
+@pytest.fixture
+def torque_armed_profile(request, tmp_path):
+    """
+    Like torque_armed but accepts a profile name via request.param.
+
+    Usage::
+
+        @pytest.mark.parametrize("torque_armed_profile", ["slow_vary"], indirect=True)
+        def test_foo(torque_armed_profile):
+            ...
+    """
+    import model as _m
+    profile = getattr(request, "param", "constant")
+    with _torque_stack(
+        tmp_path,
+        omega_axle=_m.OMEGA_AXLE_NOMINAL,
+        profile=profile,
+        log_name=f"torque_armed[{profile}]",
+        test_name=request.node.name,
+    ) as ctx:
+        yield ctx
+
+
+@pytest.fixture
+def torque_armed_lua(tmp_path, request):
+    """
+    Like torque_armed but with the Lua feedforward yaw-trim script active.
+
+    Key differences from torque_armed:
+      - rawes_yaw_trim.lua + rawes_null.lua installed to /ardupilot/scripts/ before boot
+      - EEPROM wiped so copter-heli.parm defaults apply cleanly
+      - SCR_ENABLE=1, RPM1_TYPE=10, SERVO9_FUNCTION=94
+      - mediator_torque.py --lua-mode --tail-channel 8 (reads Ch9, linear mapping)
+      - ATC_RAT_YAW_P=0 (Lua is sole feedforward provider, no ArduPilot yaw PID)
+    """
+    import model as _m
+    with _torque_stack(
+        tmp_path,
+        omega_axle=_m.OMEGA_AXLE_NOMINAL,
+        lua_mode=True,
+        tail_channel=8,
+        extra_params=_LUA_TORQUE_EXTRA_PARAMS,
+        eeprom_wipe=True,
+        install_scripts=("rawes_yaw_trim.lua", "rawes_null.lua"),
+        log_name="torque_armed_lua",
+        test_name=request.node.name,
+    ) as ctx:
+        yield ctx

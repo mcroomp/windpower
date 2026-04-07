@@ -1119,7 +1119,7 @@ SCR_USER5 = -home_z_enu (negate).
 | File                                         | Description                                                                   |
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
 | simulation/scripts/rawes_flight.lua          | Orbit tracking + cyclic controller                                            |
-| simulation/torque/scripts/rawes_yaw_trim.lua | Counter-torque feedforward (validated)                                        |
+| simulation/scripts/rawes_yaw_trim.lua        | Counter-torque feedforward (validated)                                        |
 | simulation/torque/scripts/lua_defaults.parm  | SITL param overrides for Lua tests                                            |
 | simulation/torque/README.md                  | Full counter-torque documentation and test results                            |
 | simulation/controller.py                     | orbit_tracked_body_z_eq(), compute_swashplate_from_state(), TensionController |

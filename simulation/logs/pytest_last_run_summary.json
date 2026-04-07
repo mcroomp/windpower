@@ -1,16 +1,18 @@
 {
-  "timestamp": "2026-04-07 16:20:28",
-  "elapsed_s": 423.54,
-  "exit_code": 0,
-  "passed": 7,
-  "failed": 0,
+  "timestamp": "2026-04-07 19:27:01",
+  "elapsed_s": 1055.33,
+  "exit_code": 1,
+  "passed": 15,
+  "failed": 1,
   "errors": 0,
   "skipped": 1,
-  "result": "passed",
+  "result": "failed",
   "log": "/rawes/simulation/logs/pytest_last_run.log",
   "passed_log": "/rawes/simulation/logs/pytest_last_run_passed.log",
   "failed_log": "/rawes/simulation/logs/pytest_last_run_failed.log",
-  "failed_tests": [],
+  "failed_tests": [
+    "tests/stack/test_wobble_active.py::test_wobble_active[wobble]"
+  ],
   "cmd": [
     "/rawes/.venv/bin/python",
     "-u",

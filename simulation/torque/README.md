@@ -134,11 +134,14 @@ Unit tests run natively on Windows with the existing venv.
 # Unit tests (Windows native, no Docker)
 simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/torque/test_model.py -v
 
-# Stack tests (Docker)
-wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v'
+# All stack tests — counter-torque tests are unified with flight stack tests
+bash sim.sh test-stack -v
+
+# Counter-torque tests only
+bash sim.sh test-stack -v -k torque_armed
 
 # Single stack test
-wsl.exe bash -c 'bash /mnt/e/repos/windpower/simulation/dev.sh test-torque -v -k test_yaw_regulation'
+bash sim.sh test-stack -v -k test_yaw_regulation
 ```
 
 ### Test Files
@@ -195,21 +198,27 @@ simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torqu
 simulation/torque/
 ├── model.py                Physics: hub yaw dynamics, GB4008 motor, RK4
 ├── torque_telemetry.py     TorqueTelemetryFrame, Recorder, JSONSource
-├── torque_test_utils.py    Shared observation loop + assertions (base for all tests)
+├── torque_test_utils.py    Shared observation loop + assertions (used by stack tests)
 ├── mediator_torque.py      ArduPilot SITL mediator — profiles, sensor packets, lua_mode
-├── conftest.py             Fixtures: torque_armed, torque_armed_profile, torque_armed_lua
 ├── test_model.py           9 unit tests (native Windows, no Docker)
+├── visualize_torque.py     3D PyVista visualiser (30 fps, hardware OpenGL)
+└── scripts/
+    ├── lua_defaults.parm   SITL param overrides for Lua test (minimal, avoids SIGFPE)
+    └── check_params.py     Debug utility: connects to SITL and reads params
+
+simulation/scripts/
+├── rawes_flight.lua        Orbit-tracking cyclic controller
+├── rawes_yaw_trim.lua      Lua: reads motor RPM -> computes feedforward -> writes SERVO9
+└── rawes_null.lua          Minimal Lua placeholder (scripting runtime init check)
+
+simulation/tests/stack/
+├── conftest.py             Unified fixtures: acro_armed* + torque_armed* + TorqueStackContext
 ├── test_yaw_regulation.py  Constant RPM yaw hold (mediator adaptive trim)
 ├── test_slow_rpm.py        Slow sinusoidal RPM variation
 ├── test_fast_rpm.py        Fast sinusoidal RPM variation
 ├── test_gust_recovery.py   Gust shock + recovery (20% overspeed)
 ├── test_pitch_roll.py      Pitch/roll oscillation with yaw regulation
-├── test_lua_yaw_trim.py    Lua feedforward controller running inside ArduPilot SITL
-├── scripts/
-│   ├── rawes_yaw_trim.lua  Lua script: reads motor RPM → computes feedforward → writes SERVO9
-│   ├── lua_defaults.parm   SITL param overrides for Lua test (minimal, avoids SIGFPE)
-│   └── check_params.py     Debug utility: connects to SITL and reads params
-└── visualize_torque.py     3D PyVista visualiser (30 fps, hardware OpenGL)
+└── test_lua_yaw_trim.py    Lua feedforward controller running inside ArduPilot SITL
 ```
 
 ---
@@ -262,7 +271,7 @@ RPM1_TYPE  10    — SITL: read rpm from JSON (unused; workaround uses battery.v
 RPM1_MIN    0
 ```
 
-EEPROM is deleted before the Lua test starts (`_eeprom.unlink()` in the fixture)
+EEPROM is deleted before the Lua test starts (`wipe_eeprom=True` in `_torque_stack`)
 so the fresh defaults take effect without requiring `--wipe` (which crashes this
 ArduPilot build with SIGFPE).
 

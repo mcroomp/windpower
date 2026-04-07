@@ -44,6 +44,7 @@ def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
     add_param_file: "Path | None" = None,
+    wipe_eeprom: bool = False,
 ) -> subprocess.Popen:
     # Truncate the ArduCopter terminal log so each test run starts fresh.
     # /tmp/ArduCopter.log accumulates across runs in the container — clearing it
@@ -57,6 +58,10 @@ def _launch_sitl(
     # SCR_ENABLE, ARMING_SKIPCHK, etc.) are set explicitly via MAVLink in
     # _run_acro_setup step 3.  Persisting EEPROM means SCR_ENABLE=1 (written
     # by step 3) survives across reboots so Lua scripting starts on every boot.
+    eeprom = Path(sim_vehicle).parent.parent.parent / "eeprom.bin"
+    if wipe_eeprom and eeprom.exists():
+        eeprom.unlink()
+
     cmd = [
         sys.executable,
         str(sim_vehicle),
@@ -352,6 +357,36 @@ _PORT_CHECKS = [
     ("0.0.0.0",   _SITL_JSON_PORT, "udp",
      "mediator/sensor JSON port — a previous mediator or sensor worker may still be running"),
 ]
+
+
+def _launch_mediator_torque(
+    torque_dir: Path,
+    repo_root: Path,
+    log_path: Path,
+    omega_axle: float,
+    profile: str = "constant",
+    tail_channel: int = 3,
+    lua_mode: bool = False,
+    startup_hold_s: float = 10.0,
+) -> subprocess.Popen:
+    """Launch mediator_torque.py as a subprocess."""
+    cmd = [
+        sys.executable, str(torque_dir / "mediator_torque.py"),
+        "--omega-axle",   str(omega_axle),
+        "--startup-hold", str(startup_hold_s),
+        "--profile",      profile,
+        "--tail-channel", str(tail_channel),
+        "--log-level",    "INFO",
+    ]
+    if lua_mode:
+        cmd.append("--lua-mode")
+    return subprocess.Popen(
+        cmd,
+        cwd=str(repo_root),
+        stdout=log_path.open("w", encoding="utf-8"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
 
 
 def check_ports_free(retry_s: float = 15.0, poll_interval: float = 0.5) -> None:
