@@ -1,7 +1,7 @@
 """
-torque/test_fast_rpm.py — Fast sinusoidal axle RPM variation test.
+torque/test_fast_rpm.py — Fast sinusoidal rotor hub RPM variation test.
 
-Profile: omega_axle = 28 + 5·sin(2π·0.25·t) rad/s  (±18%, 4 s period)
+Profile: omega_rotor = 28 + 5·sin(2π·0.25·t) rad/s  (±18%, 4 s period)
 
 The motor PID must track rapidly changing RPM and maintain counter-rotation
 to keep yaw rate within ±3°/s.  Higher threshold than slow_vary because
@@ -24,7 +24,7 @@ _THRESHOLD  = 3.0     # °/s — more lenient: 4 s period leaves little settling
 @pytest.mark.parametrize("torque_armed_profile", ["fast_vary"], indirect=True)
 def test_fast_rpm(torque_armed_profile):
     """
-    Axle speed varies sinusoidally at 0.25 Hz (±18% of nominal, 4 s period).
+    Rotor hub speed varies sinusoidally at 0.25 Hz (±18% of nominal, 4 s period).
     The yaw rate PID must reject the rapidly oscillating RPM disturbance.
     Pass: max |ψ_dot| < 3°/s after 40 s settle.
     """
@@ -32,7 +32,7 @@ def test_fast_rpm(torque_armed_profile):
     rec = TorqueTelemetryRecorder(meta={
         "test":            "fast_rpm",
         "profile":         "fast_vary",
-        "omega_axle_rads": ctx.omega_axle,
+        "omega_rotor_rads": ctx.omega_rotor,
         "omega_amplitude": 5.0,
         "omega_freq_hz":   0.25,
         "settle_s":        _SETTLE_S,

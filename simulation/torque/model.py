@@ -1,36 +1,39 @@
 """
 torque/model.py — Counter-torque motor simulation model
 
-Simulates the RAWES stationary hub + axle + anti-rotation motor (GB4008) system.
+Simulates the RAWES stationary inner assembly + spinning rotor hub + GB4008 motor.
 Goal: verify that ArduPilot's SITL can regulate yaw using the tail-rotor control
 channel while the motor counter-rotates to maintain hub heading.
 
 Physical setup
 --------------
-  Axle   : represents the outer rotor in autorotation; driven at ω_axle [rad/s]
-  Hub    : stationary assembly (~1 kg); has yaw DOF ψ [rad], ψ_dot [rad/s]
-  Gear   : 80:44 (axle:motor), so ω_motor = ω_axle × (80/44) — motor runs faster
-  Motor  : GB4008 66KV BLDC; stator fixed to hub, rotor geared to axle
+  Rotor hub : outer spinning shell (blades + hub) in autorotation; ω_rotor [rad/s]
+  Hub       : stationary inner assembly (~1 kg); yaw DOF ψ [rad], ψ_dot [rad/s]
+  Axle      : stationary central shaft; tether attaches at bottom — does NOT rotate
+  Gear      : 80:44 (rotor hub : motor pinion), so ω_motor = ω_rotor × (80/44)
+  Motor     : GB4008 66KV BLDC; stator fixed to inner assembly, rotor geared to
+              spinning outer rotor hub
 
 Gear direction
 --------------
-The motor stator is fixed to the hub frame.  The motor rotor is geared to the
-axle (80 teeth on axle, 44 on motor pinion — motor side runs faster).  When the
-motor produces electromagnetic torque τ_em on its rotor, the equal and opposite
-reaction acts on the stator (hub).  The gear multiplies this reaction:
+The motor stator is fixed to the stationary inner assembly.  The motor rotor is
+geared to the spinning outer rotor hub (80 teeth on hub, 44 on motor pinion —
+motor runs faster than the rotor hub).  When the motor produces electromagnetic
+torque τ_em on its rotor, the equal and opposite reaction acts on the stator
+(inner assembly).  The gear multiplies this reaction:
 
     Q_motor_on_hub = −(80/44) × τ_em_at_motor_shaft
 
 A positive throttle → positive τ_em → negative Q_motor_on_hub (counter-rotating
-against axle spin to maintain hub heading).
+against rotor hub spin to maintain inner assembly heading).
 
 Hub equation of motion
 ----------------------
     I_hub × ψ̈ = Q_bearing + Q_motor_on_hub
 
-    Q_bearing      = k_bearing × (ω_axle − ψ_dot)      [viscous; drags hub toward axle]
+    Q_bearing      = k_bearing × (ω_rotor − ψ_dot)      [viscous; drags inner assembly toward rotor hub]
     Q_motor_on_hub = −GEAR_RATIO × τ_motor(throttle, ω_motor)
-    ω_motor        = ω_axle × GEAR_RATIO
+    ω_motor        = ω_rotor × GEAR_RATIO
 
 Motor model (DC motor equation)
 --------------------------------
@@ -48,7 +51,7 @@ Motor is unidirectional (ESC cannot reverse), so τ ≥ 0.
 
 Nominal operating point
 -----------------------
-  ω_axle = 28 rad/s  (≈ 267 RPM, de Schutter 2018 at 10 m/s wind)
+  ω_rotor = 28 rad/s  (≈ 267 RPM, de Schutter 2018 at 10 m/s wind)
   At this speed ω_motor ≈ 51 rad/s; motor is well below no-load speed → good
   torque authority.  equilibrium_throttle() gives the exact feedforward value.
 """
@@ -81,8 +84,8 @@ MOTOR_RESISTANCE: float = 7.5
 #:             τ_stall = K_t × I_stall = V_bat / (KV_rad × R)
 MOTOR_TAU_STALL: float = BATTERY_V / (MOTOR_KV_RAD * MOTOR_RESISTANCE)  # ≈ 0.293 N·m
 
-#: Autorotation spin rate at design point (10 m/s wind, de Schutter 2018)
-OMEGA_AXLE_NOMINAL: float = 28.0   # rad/s  ≈ 267 RPM
+#: Autorotation spin rate of the outer rotor hub at design point (10 m/s wind, de Schutter 2018)
+OMEGA_ROTOR_NOMINAL: float = 28.0   # rad/s  ≈ 267 RPM
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +106,7 @@ class HubParams:
     I_hub: float = 0.007
 
     # Bearing viscous drag coefficient [N·m·s/rad]
-    # At ω_axle = 28 rad/s bearing drag ≈ 0.14 N·m  →  k = 0.005 N·m·s/rad
+    # At ω_rotor = 28 rad/s bearing drag ≈ 0.14 N·m  →  k = 0.005 N·m·s/rad
     # This is deliberately tunable — real bearing friction depends on lubrication,
     # preload, and temperature.
     k_bearing: float = 0.005
@@ -160,7 +163,7 @@ def motor_torque(throttle: float, omega_motor_rel: float, params: HubParams) -> 
 
 def _derivatives(
     state: HubState,
-    omega_axle: float,
+    omega_rotor: float,
     throttle: float,
     params: HubParams,
 ) -> tuple[float, float]:
@@ -171,12 +174,12 @@ def _derivatives(
     -------
     (psi_ddot, psi_dot)  — i.e. the time derivatives of [ψ_dot, ψ]
     """
-    # Bearing drag: viscous coupling between spinning axle and hub
-    Q_bearing = params.k_bearing * (omega_axle - state.psi_dot)
+    # Bearing drag: viscous coupling between spinning rotor hub and stationary inner assembly
+    Q_bearing = params.k_bearing * (omega_rotor - state.psi_dot)
 
-    # Motor reaction on hub (counter-rotates to maintain heading).
-    # Motor back-EMF depends on relative speed of rotor vs stator (stator is on hub).
-    omega_motor_rel = max(0.0, (omega_axle - state.psi_dot) * params.gear_ratio)
+    # Motor reaction on inner assembly (counter-rotates to maintain heading).
+    # Motor back-EMF depends on relative speed of motor rotor vs stator (stator on inner assembly).
+    omega_motor_rel = max(0.0, (omega_rotor - state.psi_dot) * params.gear_ratio)
     tau_shaft   = motor_torque(throttle, omega_motor_rel, params)
     Q_motor     = -params.gear_ratio * tau_shaft  # Newton's 3rd law through gear
 
@@ -186,7 +189,7 @@ def _derivatives(
 
 def step(
     state: HubState,
-    omega_axle: float,
+    omega_rotor: float,
     throttle: float,
     params: HubParams,
     dt: float,
@@ -196,18 +199,18 @@ def step(
 
     Parameters
     ----------
-    state      : current hub yaw state
-    omega_axle : axle angular speed [rad/s] (assumed constant over dt)
-    throttle   : motor throttle [0, 1]
-    params     : HubParams
-    dt         : time step [s]
+    state       : current hub yaw state
+    omega_rotor : rotor hub angular speed [rad/s] (assumed constant over dt)
+    throttle    : motor throttle [0, 1]
+    params      : HubParams
+    dt          : time step [s]
 
     Returns
     -------
     New HubState at t + dt.
     """
     def deriv(s: HubState) -> tuple[float, float]:
-        return _derivatives(s, omega_axle, throttle, params)
+        return _derivatives(s, omega_rotor, throttle, params)
 
     k1_pdot, k1_p = deriv(state)
     s2 = HubState(state.psi + 0.5 * dt * k1_p,  state.psi_dot + 0.5 * dt * k1_pdot)
@@ -230,29 +233,29 @@ def step(
 # Feedforward helper
 # ---------------------------------------------------------------------------
 
-def equilibrium_throttle(omega_axle: float, params: HubParams) -> float:
+def equilibrium_throttle(omega_rotor: float, params: HubParams) -> float:
     """
-    Compute the motor throttle that holds ψ_dot = 0 at a given axle speed.
+    Compute the motor throttle that holds ψ_dot = 0 at a given rotor hub speed.
 
     Derivation (steady state, ψ̈=0, ψ_dot=0):
 
-        0 = k_bearing × ω_axle − gear_ratio × τ_motor
-        τ_motor_needed = k_bearing × ω_axle / gear_ratio
+        0 = k_bearing × ω_rotor − gear_ratio × τ_motor
+        τ_motor_needed = k_bearing × ω_rotor / gear_ratio
 
     Inverted from the DC motor equation τ = τ_stall × (throttle − ω_rel/ω₀):
 
         throttle = τ_motor_needed / τ_stall + ω_motor_rel / ω_no_load
 
-    where ω_motor_rel = ω_axle × gear_ratio  (at ψ_dot=0, relative = absolute).
+    where ω_motor_rel = ω_rotor × gear_ratio  (at ψ_dot=0, relative = absolute).
 
     Returns throttle ∈ [0, 1].  Returns 1.0 if motor is saturated.
 
     Parameters
     ----------
-    omega_axle : axle angular speed [rad/s]
-    params     : HubParams
+    omega_rotor : rotor hub angular speed [rad/s]
+    params      : HubParams
     """
-    tau_needed      = params.k_bearing * omega_axle / params.gear_ratio
-    omega_motor_rel = omega_axle * params.gear_ratio
+    tau_needed      = params.k_bearing * omega_rotor / params.gear_ratio
+    omega_motor_rel = omega_rotor * params.gear_ratio
     throttle        = tau_needed / params.tau_stall + omega_motor_rel / params.omega_no_load
     return min(1.0, max(0.0, throttle))

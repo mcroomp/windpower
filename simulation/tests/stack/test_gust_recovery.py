@@ -6,8 +6,8 @@ gust drives it to 150% of nominal, then it returns to nominal.
 
 Timeline (approximate test time):
   t =  0–10 s  : EKF bias settles (from 10 s startup hold)
-  t = 10–15 s  : gust hits  — omega_axle suddenly ×1.5
-  t = 15–20 s  : gust ends  — omega_axle returns to nominal
+  t = 10–15 s  : gust hits  — omega_rotor suddenly ×1.5
+  t = 15–20 s  : gust ends  — omega_rotor returns to nominal
   t = 40 s+    : observation window starts (25 s recovery time)
 
 Pass criterion: max |ψ_dot| < 2°/s in the observation window, confirming
@@ -31,7 +31,7 @@ _THRESHOLD  = 2.0     # °/s — should be recovered and regulated by settle tim
 @pytest.mark.parametrize("torque_armed_profile", ["gust"], indirect=True)
 def test_gust_recovery(torque_armed_profile):
     """
-    At dynamics_t=10 s the axle suddenly spins at 150% nominal for 5 seconds
+    At dynamics_t=10 s the rotor hub suddenly spins at 150% nominal for 5 seconds
     (gust), then returns to nominal.  The yaw rate PID must reject the bearing-drag
     shock and recover to |ψ_dot| < 2°/s within 25 s of gust end.
     """
@@ -39,7 +39,7 @@ def test_gust_recovery(torque_armed_profile):
     rec = TorqueTelemetryRecorder(meta={
         "test":               "gust_recovery",
         "profile":            "gust",
-        "omega_axle_rads":    ctx.omega_axle,
+        "omega_rotor_rads":   ctx.omega_rotor,
         "gust_start_dyn_t":   10.0,
         "gust_end_dyn_t":     15.0,
         "gust_multiplier":    1.20,

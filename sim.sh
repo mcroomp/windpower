@@ -8,6 +8,7 @@
 #   bash sim.sh setup                     create simulation/.venv and install requirements.txt (Windows)
 #   bash sim.sh test-unit [...]           run unit tests (Windows, no Docker)
 #   bash sim.sh test-simtest [...]        run simtests (Windows, no Docker)
+#   bash sim.sh test-hil [...]            run HIL smoke tests (Windows, Pixhawk on USB)
 #   bash sim.sh build                     build Docker image with ArduPilot (~30-60 min)
 #   bash sim.sh start | stop | shell      manage the rawes-dev container
 #   bash sim.sh test-stack [...]          run stack integration tests (Docker)
@@ -48,13 +49,20 @@ case "$CMD" in
     test-simtest)
         "$PYTHON" -m pytest "$(_winpath "$SIM_DIR/tests/unit")" -m simtest "$@"
         ;;
+    test-hil)
+        "$PYTHON" -m pytest "$(_winpath "$SIM_DIR/tests/hil")" "$@"
+        ;;
+    setup-hw)
+        # Interactive Pixhawk setup script.  Requires RAWES_HIL_PORT=COMx.
+        "$PYTHON" "$(_winpath "$SIM_DIR/scripts/setup_pixhawk.py")" "$@"
+        ;;
     build)
         echo "[INFO] Building rawes-sim with ArduPilot -- expect ~30-60 min ..."
         docker build "$SIM_DIR" -t rawes-sim --build-arg INSTALL_ARDUPILOT=true
         echo "[INFO] Build complete. Run: bash sim.sh start"
         ;;
     "")
-        echo "Usage: $0 setup | test-unit [...] | test-simtest [...] | build | start | stop | shell | test-stack [...] | test-torque [...] | exec <cmd>"
+        echo "Usage: $0 setup | test-unit [...] | test-simtest [...] | test-hil [...] | setup-hw | build | start | stop | shell | test-stack [...] | test-torque [...] | exec <cmd>"
         ;;
     *)
         bash "$SIM_DIR/dev.sh" "$CMD" "$@"

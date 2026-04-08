@@ -29,7 +29,7 @@ _THRESHOLD  = 2.0     # °/s — same as constant-RPM test; tilt shouldn't degra
 def test_pitch_roll(torque_armed_profile):
     """
     Hub tilts in pitch (±8°, 0.05 Hz) and roll (±12°, 0.08 Hz) while
-    the axle spins at constant nominal RPM.  Gravity projection changes
+    the rotor hub spins at constant nominal RPM.  Gravity projection changes
     the accelerometer and gyro Z in the body frame.
 
     Pass: yaw rate stays within ±2°/s throughout, confirming that the
@@ -39,7 +39,7 @@ def test_pitch_roll(torque_armed_profile):
     rec = TorqueTelemetryRecorder(meta={
         "test":             "pitch_roll",
         "profile":          "pitch_roll",
-        "omega_axle_rads":  ctx.omega_axle,
+        "omega_rotor_rads": ctx.omega_rotor,
         "roll_amplitude_deg":  5.0,
         "roll_freq_hz":        0.08,
         "pitch_amplitude_deg": 3.0,

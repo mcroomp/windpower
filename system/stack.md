@@ -398,14 +398,15 @@ while the outer shell spins; otherwise the tether wraps and heading control is l
 **Motor:** EMAX GB4008, 66 KV, 90T, 24N22P brushless gimbal motor (hollow shaft)
 **ESC:**   REVVitRC 50A AM32, 3-6S, servo PWM / DSHOT, firmware AM32
 
-The motor stator is fixed to the stationary assembly. The motor rotor is geared to the
-spinning axle via an **80:44 spur gear** (motor side has 44 teeth; axle side has 80 teeth).
-The motor therefore spins at `80/44 ~= 1.82x` the axle speed.
+The motor stator is fixed to the stationary inner assembly. The motor rotor is geared to the
+spinning outer rotor hub via an **80:44 spur gear** (hub side has 80 teeth; motor pinion has
+44 teeth). The motor therefore spins at `80/44 ~= 1.82x` the rotor hub speed.
 
-Because the motor is mechanically geared to the axle, it counter-rotates at a rate that
-exactly cancels the rotor spin as seen by the stationary assembly, keeping the assembly at
-a fixed heading. The work the motor does is overcoming bearing and swashplate friction --
-in a frictionless system the inner assembly would stay stationary on its own inertia.
+Because the motor is geared to the spinning rotor hub, driving the motor produces a
+counter-torque on the inner assembly that cancels the bearing drag from the rotor hub,
+keeping the inner assembly at a fixed heading. The work the motor does is overcoming bearing
+and swashplate friction -- in a frictionless system the inner assembly would stay stationary
+on its own inertia.
 
 The GB4008 behaves as a standard DC motor:
 
@@ -419,7 +420,7 @@ omega_0    = KV_rad x V_bat = 6.91 x 15.2 ~= 105 rad/s   (no-load speed at full 
 ```
 
 The motor only produces torque when `throttle > omega_motor / omega_0` (above the back-EMF
-threshold). At nominal axle speed (28 rad/s), `omega_motor ~= 51 rad/s` and the back-EMF
+threshold). At nominal rotor hub speed (28 rad/s), `omega_motor ~= 51 rad/s` and the back-EMF
 threshold is `51/105 ~= 48.5%`. **Equilibrium throttle is ~= 75%.**
 
 Hub yaw dynamics:
@@ -427,24 +428,24 @@ Hub yaw dynamics:
 ```
 I_hub x psi_ddot = Q_bearing + Q_motor
 
-Q_bearing = k_bearing x (omega_axle - psi_dot)           [viscous bearing drag]
+Q_bearing = k_bearing x (omega_rotor - psi_dot)          [viscous bearing drag]
 Q_motor   = -(80/44) x tau_motor(throttle, omega_rel)    [reaction on hub, maintains heading]
-omega_rel = (omega_axle - psi_dot) x (80/44)             [motor speed relative to hub]
+omega_rel = (omega_rotor - psi_dot) x (80/44)            [motor speed relative to inner assembly]
 ```
 
 Default parameters:
 
-| Symbol     | Value           | Source                               |
-| ---------- | --------------- | ------------------------------------ |
-| I_hub      | 0.007 kg*m^2    | ~1 kg stationary assembly, r~=0.12 m |
-| k_bearing  | 0.005 N*m*s/rad | Tunable; start here                  |
-| tau_stall  | 0.293 N*m       | From hardware specs (R=7.5 ohm)      |
-| omega_0    | 105 rad/s       | KV x V_bat                           |
-| Gear ratio | 80/44 ~= 1.818  | Motor faster than axle               |
+| Symbol     | Value           | Source                                    |
+| ---------- | --------------- | ----------------------------------------- |
+| I_hub      | 0.007 kg*m^2    | ~1 kg stationary assembly, r~=0.12 m     |
+| k_bearing  | 0.005 N*m*s/rad | Tunable; start here                       |
+| tau_stall  | 0.293 N*m       | From hardware specs (R=7.5 ohm)           |
+| omega_0    | 105 rad/s       | KV x V_bat                                |
+| Gear ratio | 80/44 ~= 1.818  | Motor pinion faster than rotor hub        |
 
 **Gear Efficiency Analysis:**
 
-At nominal operating point (omega_axle = 28 rad/s, k_bearing = 0.005):
+At nominal operating point (omega_rotor = 28 rad/s, k_bearing = 0.005):
 
 | Gear ratio     | Motor speed % | Throttle | Current | Input power | Efficiency |
 | -------------- | ------------- | -------- | ------- | ----------- | ---------- |
@@ -480,7 +481,7 @@ stick (1500 us) corresponds exactly to the equilibrium trim throttle:
 ```
 pwm <= 1500 us:  throttle = trim x (pwm - 1000) / 500
 pwm >  1500 us:  throttle = trim + (1 - trim) x (pwm - 1500) / 500
-trim = equilibrium_throttle(omega_axle, params) ~= 0.747
+trim = equilibrium_throttle(omega_rotor, params) ~= 0.747
 ```
 
 On hardware (Pixhawk 6C), H_TAIL_TYPE = 0 (servo output) gives symmetric output around

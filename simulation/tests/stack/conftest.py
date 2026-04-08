@@ -1221,7 +1221,7 @@ class TorqueStackContext:
     mediator_log:  Path
     sitl_log:      Path
     gcs_log:       Path
-    omega_axle:    float
+    omega_rotor:   float
     log:           logging.Logger
 
 
@@ -1229,7 +1229,7 @@ class TorqueStackContext:
 def _torque_stack(
     tmp_path: Path,
     *,
-    omega_axle: float,
+    omega_rotor: float,
     profile: str = "constant",
     lua_mode: bool = False,
     tail_channel: int = 3,
@@ -1248,7 +1248,7 @@ def _torque_stack(
 
     Parameters
     ----------
-    omega_axle      : axle angular velocity [rad/s]
+    omega_rotor     : rotor hub angular velocity [rad/s]
     profile         : mediator_torque.py --profile value
     lua_mode        : if True, pass --lua-mode to mediator (linear mapping, no trim)
     tail_channel    : ArduPilot tail servo channel read by mediator
@@ -1289,8 +1289,8 @@ def _torque_stack(
     _configure_logging(gcs_log)
     log = logging.getLogger(log_name)
     log.info(
-        "launching  profile=%s  omega_axle=%.1f rad/s (%.0f RPM)",
-        profile, omega_axle, omega_axle * 60.0 / (2.0 * math.pi),
+        "launching  profile=%s  omega_rotor=%.1f rad/s (%.0f RPM)",
+        profile, omega_rotor, omega_rotor * 60.0 / (2.0 * math.pi),
     )
 
     # Pre-launch: install Lua scripts before SITL starts
@@ -1298,7 +1298,7 @@ def _torque_stack(
         _install_lua_scripts(*install_scripts)
 
     mediator_proc = _launch_mediator_torque(
-        _TORQUE_DIR, repo_root, mediator_log, omega_axle,
+        _TORQUE_DIR, repo_root, mediator_log, omega_rotor,
         profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
         startup_hold_s=_TORQUE_STARTUP_HOLD_S,
     )
@@ -1318,7 +1318,7 @@ def _torque_stack(
     ctx = TorqueStackContext(
         gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
         mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
-        omega_axle=omega_axle, log=log,
+        omega_rotor=omega_rotor, log=log,
     )
 
     try:
@@ -1438,7 +1438,7 @@ def torque_armed(tmp_path, request):
     import model as _m
     with _torque_stack(
         tmp_path,
-        omega_axle=_m.OMEGA_AXLE_NOMINAL,
+        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
         test_name=request.node.name,
     ) as ctx:
         yield ctx
@@ -1459,7 +1459,7 @@ def torque_armed_profile(request, tmp_path):
     profile = getattr(request, "param", "constant")
     with _torque_stack(
         tmp_path,
-        omega_axle=_m.OMEGA_AXLE_NOMINAL,
+        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
         profile=profile,
         log_name=f"torque_armed[{profile}]",
         test_name=request.node.name,
@@ -1482,7 +1482,7 @@ def torque_armed_lua(tmp_path, request):
     import model as _m
     with _torque_stack(
         tmp_path,
-        omega_axle=_m.OMEGA_AXLE_NOMINAL,
+        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
         lua_mode=True,
         tail_channel=8,
         extra_params=_LUA_TORQUE_EXTRA_PARAMS,

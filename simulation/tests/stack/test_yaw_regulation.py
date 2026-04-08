@@ -2,12 +2,12 @@
 torque/test_yaw_regulation.py — Counter-torque motor stack test.
 
 Verifies that ArduPilot SITL can hold hub yaw steady while the GB4008
-anti-rotation motor counter-rotates against the spinning axle.
+anti-rotation motor counter-rotates against the spinning rotor hub.
 
 Physical scenario
 -----------------
-  • Axle spins at ≈ 28 rad/s (nominal RAWES autorotation at 10 m/s wind)
-  • The motor counter-rotates via the 80:44 gear to maintain hub heading
+  • Rotor hub spins at ≈ 28 rad/s (nominal RAWES autorotation at 10 m/s wind)
+  • The motor counter-rotates via the 80:44 gear to maintain inner assembly heading
   • Bearing and swashplate friction is the load the motor works against
   • ArduPilot (heli frame, ACRO mode) senses the yaw rate via gyro and
     commands Ch4 (H_TAIL_TYPE=0, servo) to control GB4008 motor speed
@@ -89,7 +89,7 @@ def test_yaw_regulation(torque_armed):
     # ── Set up telemetry recorder ─────────────────────────────────────────
     rec = TorqueTelemetryRecorder(meta={
         "test":            "yaw_regulation",
-        "omega_axle_rads": ctx.omega_axle,
+        "omega_rotor_rads": ctx.omega_rotor,
         "settle_s":        _SETTLE_S,
         "observe_s":       _OBSERVE_S,
         "threshold_degs":  _MAX_PSI_DOT_DEGS,
@@ -145,7 +145,7 @@ def test_yaw_regulation(torque_armed):
                 psi_deg=yaw_deg,
                 psi_dot_degs=yaw_rate_degs,
                 throttle=0.0,        # throttle not available from GCS; use 0 as placeholder
-                omega_axle_rads=ctx.omega_axle,
+                omega_rotor_rads=ctx.omega_rotor,
                 phase="STARTUP" if t_rel < 0 else "DYNAMIC",
             )
 

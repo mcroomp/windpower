@@ -16,13 +16,13 @@ while the outer shell spins; otherwise the tether wraps and heading control is l
 **Motor:** EMAX GB4008, 66 KV, 90T, 24N22P brushless gimbal motor (hollow shaft)
 **ESC:**   REVVitRC 50A AM32, 3–6S, servo PWM / DSHOT, firmware AM32
 
-The motor stator is fixed to the stationary assembly.  The motor rotor is geared to the
-spinning axle via an **80:44 spur gear** (motor side has 44 teeth; axle side has 80 teeth).
-The motor therefore spins at `80/44 ≈ 1.82×` the axle speed.
+The motor stator is fixed to the stationary inner assembly.  The motor rotor is geared to the
+spinning outer rotor hub via an **80:44 spur gear** (hub side has 80 teeth; motor pinion has
+44 teeth).  The motor therefore spins at `80/44 ≈ 1.82×` the rotor hub speed.
 
-Because the motor is mechanically geared to the axle, it counter-rotates at a rate that
-exactly cancels the rotor spin as seen by the stationary assembly, keeping the assembly at
-a fixed heading.  The work the motor does is overcoming bearing and swashplate friction —
+Because the motor is geared to the spinning rotor hub, driving the motor produces a
+counter-torque on the inner assembly that cancels the bearing drag, keeping the inner assembly
+at a fixed heading.  The work the motor does is overcoming bearing and swashplate friction —
 in a frictionless system the inner assembly would stay stationary on its own inertia.
 
 ### Motor Model
@@ -182,7 +182,7 @@ simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torqu
 
 **Scene elements:**
 - Hub cylinder with alternating black/white top quadrants (rotate with ψ; tilts for pitch_roll test)
-- Central axle rod with 4-blade rotor indicator spinning at ω_axle (speed varies for slow/fast/gust)
+- Stationary axle rod with 4-blade rotor indicator spinning at ω_rotor (speed varies for slow/fast/gust)
 - Amber yaw pointer showing hub heading
 - Green throttle bar with yellow equilibrium mark at 74.7%
 - Sensor/motor panel (left): gyro, accel, attitude sent to ArduPilot + Ch4 PWM, torques

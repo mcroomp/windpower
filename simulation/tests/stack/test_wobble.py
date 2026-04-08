@@ -51,7 +51,7 @@ def test_wobble(torque_armed_profile):
     rec = TorqueTelemetryRecorder(meta={
         "test":                "wobble",
         "profile":             "wobble",
-        "omega_axle_rads":     ctx.omega_axle,
+        "omega_rotor_rads":    ctx.omega_rotor,
         "roll_amplitude_deg":  20.0,
         "pitch_amplitude_deg": 15.0,
         "orbital_freq_hz":     0.10,

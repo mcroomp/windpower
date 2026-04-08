@@ -1,7 +1,7 @@
 """
-torque/test_slow_rpm.py — Slow sinusoidal axle RPM variation test.
+torque/test_slow_rpm.py — Slow sinusoidal rotor hub RPM variation test.
 
-Profile: omega_axle = 28 + 5·sin(2π·0.05·t) rad/s  (±18%, 20 s period)
+Profile: omega_rotor = 28 + 5·sin(2π·0.05·t) rad/s  (±18%, 20 s period)
 
 The motor PID must track the slowly changing RPM and maintain counter-rotation
 to keep yaw rate within ±2°/s throughout the observation window.
@@ -23,7 +23,7 @@ _THRESHOLD  = 2.0     # °/s — more lenient than constant-RPM test
 @pytest.mark.parametrize("torque_armed_profile", ["slow_vary"], indirect=True)
 def test_slow_rpm(torque_armed_profile):
     """
-    Axle speed varies sinusoidally at 0.05 Hz (±18% of nominal).
+    Rotor hub speed varies sinusoidally at 0.05 Hz (±18% of nominal).
     The yaw rate PID must reject the slowly varying RPM disturbance.
     Pass: max |ψ_dot| < 2°/s after 40 s settle.
     """
@@ -31,7 +31,7 @@ def test_slow_rpm(torque_armed_profile):
     rec = TorqueTelemetryRecorder(meta={
         "test":            "slow_rpm",
         "profile":         "slow_vary",
-        "omega_axle_rads": ctx.omega_axle,
+        "omega_rotor_rads": ctx.omega_rotor,
         "omega_amplitude": 5.0,
         "omega_freq_hz":   0.05,
         "settle_s":        _SETTLE_S,

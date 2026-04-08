@@ -5,7 +5,7 @@ Simulates the RAWES rotor accelerating from zero to nominal autorotation
 speed (0 → 28 rad/s over 30 s) and verifies the yaw regulation holds
 throughout the entire spin-up.
 
-Profile: omega_axle = 28 × min(1, t / 30)  (linear ramp, then hold)
+Profile: omega_rotor = 28 × min(1, t / 30)  (linear ramp, then hold)
 
 The adaptive trim in the mediator tracks the changing RPM in
 real time, so the motor feedforward adjusts counter-rotation at every RPM point.
@@ -52,10 +52,10 @@ def test_startup(torque_armed_profile):
     rec = TorqueTelemetryRecorder(meta={
         "test":              "startup",
         "profile":           "startup",
-        "omega_axle_rads":   ctx.omega_axle,
+        "omega_rotor_rads":  ctx.omega_rotor,
         "ramp_duration_s":   30.0,
         "ramp_start_rads":   0.0,
-        "ramp_end_rads":     ctx.omega_axle,
+        "ramp_end_rads":     ctx.omega_rotor,
         "settle_s":          _SETTLE_S,
         "observe_s":         _OBSERVE_S,
         "threshold_degs":    _THRESHOLD,

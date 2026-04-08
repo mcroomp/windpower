@@ -8,8 +8,8 @@ counter-torque motor test.
 Physical scenario
 -----------------
   • Hub sits stationary at NED = [0, 0, 0], roll = 0, pitch = 0.
-  • The axle is driven at ``--omega-axle`` rad/s (simulated autorotation).
-  • The motor counter-rotates via the 80:44 gear to maintain hub heading.
+  • The rotor hub spins at ``--omega-rotor`` rad/s (simulated autorotation).
+  • The motor counter-rotates via the 80:44 gear to maintain inner assembly heading.
   • Bearing and swashplate friction is the load the motor works against.
   • ArduPilot sees the yaw rate in the gyro and commands the tail-rotor
     channel (Ch4) to hold the counter-rotation speed via the GB4008 motor.
@@ -33,12 +33,12 @@ ArduPilot → mediator (binary servo packet over UDP 9002)
 
 Usage (Docker / WSL)
 --------------------
-    python3 mediator_torque.py [--omega-axle FLOAT] [--log-level LEVEL]
+    python3 mediator_torque.py [--omega-rotor FLOAT] [--log-level LEVEL]
 
 Options
 -------
-    --omega-axle  FLOAT   Axle spin rate [rad/s] (default: 28.0)
-    --log-level   LEVEL   Logging level (default: INFO)
+    --omega-rotor  FLOAT   Rotor hub spin rate [rad/s] (default: 28.0)
+    --log-level    LEVEL   Logging level (default: INFO)
 """
 from __future__ import annotations
 
@@ -203,7 +203,7 @@ def _make_state_json(
     psi_dot: float,
     roll_dot: float,
     pitch_dot: float,
-    omega_axle: float,
+    omega_rotor: float,
 ) -> bytes:
     """
     Build the JSON state packet sent back to ArduPilot SITL.
@@ -252,13 +252,13 @@ def _make_state_json(
         # Battery voltage is reliable: battery:voltage(0) in Lua reads this.
         # The Lua script interprets voltage > 50 as motor RPM (not a real voltage).
         # In non-lua-mode tests, voltage=12.6 < 50 so Lua returns early harmlessly.
-        "battery":    {"voltage": float(omega_axle * (80.0/44.0) * 60.0 / (2.0 * math.pi))},
+        "battery":    {"voltage": float(omega_rotor * (80.0/44.0) * 60.0 / (2.0 * math.pi))},
     }
     return (json.dumps(msg) + "\n").encode("utf-8")
 
 
 def run(
-    omega_axle: float,
+    omega_rotor: float,
     startup_hold_s: float = 5.0,
     trim_throttle: float | None = None,
     profile: str = "constant",
@@ -288,7 +288,7 @@ def run(
 
     Parameters
     ----------
-    omega_axle     : axle spin rate [rad/s] (nominal autorotation speed)
+    omega_rotor    : rotor hub spin rate [rad/s] (nominal autorotation speed)
     startup_hold_s : duration of EKF-initialisation spin phase [s]
     log_level      : Python logging level string
     """
@@ -309,17 +309,17 @@ def run(
     # Trim throttle: bias so neutral PWM (1500 µs) = equilibrium torque.
     # Defaults to the model's equilibrium throttle for the given axle speed.
     if trim_throttle is None:
-        trim_throttle = _m.equilibrium_throttle(omega_axle, params)
+        trim_throttle = _m.equilibrium_throttle(omega_rotor, params)
 
-    eq_throttle = _m.equilibrium_throttle(omega_axle, params)
+    eq_throttle = _m.equilibrium_throttle(omega_rotor, params)
     log.info(
         "Counter-torque mediator starting  "
-        "omega_axle=%.2f rad/s (%.0f RPM)  "
+        "omega_rotor=%.2f rad/s (%.0f RPM)  "
         "k_bearing=%.4f Nm*s/rad  "
         "gear=%.3f  tau_stall=%.2f Nm  eq_throttle=%.4f  "
         "trim_throttle=%.4f  startup_hold=%.0f s",
-        omega_axle,
-        omega_axle * 60.0 / (2.0 * math.pi),
+        omega_rotor,
+        omega_rotor * 60.0 / (2.0 * math.pi),
         params.k_bearing,
         params.gear_ratio,
         params.tau_stall,
@@ -378,12 +378,12 @@ def run(
                 pitch_send   = 0.0
                 roll_dot     = 0.0
                 pitch_dot    = 0.0
-                current_omega = omega_axle
+                current_omega = omega_rotor
                 # Fixed trim during startup
                 throttle = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
             else:
-                # Profile-driven axle speed (clamped positive)
-                current_omega = max(1.0, omega_fn(dynamics_t, omega_axle))
+                # Profile-driven rotor hub speed (clamped positive)
+                current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor))
 
                 if lua_mode:
                     # Lua script is the intended controller via the tail channel.
@@ -439,7 +439,7 @@ def run(
                     "throttle=%.3f  omega=%.1f rad/s  roll=%+.1f deg  pitch=%+.1f deg  n=%d",
                     t, phase,
                     math.degrees(psi_send), math.degrees(psi_dot_send),
-                    throttle, current_omega if not in_startup else omega_axle,
+                    throttle, current_omega if not in_startup else omega_rotor,
                     math.degrees(roll_send), math.degrees(pitch_send),
                     n_sent,
                 )
@@ -458,8 +458,8 @@ if __name__ == "__main__":
         description="RAWES counter-torque motor mediator (stationary hub, yaw-only)"
     )
     parser.add_argument(
-        "--omega-axle", type=float, default=_m.OMEGA_AXLE_NOMINAL,
-        help=f"Axle spin rate [rad/s] (default: {_m.OMEGA_AXLE_NOMINAL:.1f})",
+        "--omega-rotor", type=float, default=_m.OMEGA_ROTOR_NOMINAL,
+        help=f"Rotor hub spin rate [rad/s] (default: {_m.OMEGA_ROTOR_NOMINAL:.1f})",
     )
     parser.add_argument(
         "--startup-hold", type=float, default=5.0,
@@ -487,5 +487,5 @@ if __name__ == "__main__":
         help="Logging level (default: INFO)",
     )
     args = parser.parse_args()
-    run(args.omega_axle, args.startup_hold, args.trim_throttle,
+    run(args.omega_rotor, args.startup_hold, args.trim_throttle,
         args.profile, args.tail_channel, args.lua_mode, args.log_level)

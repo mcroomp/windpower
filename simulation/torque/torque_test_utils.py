@@ -122,7 +122,7 @@ def run_observation_loop(
                 t               = t_rel,
                 psi_deg         = yaw_deg,
                 psi_dot_degs    = yaw_rate_degs,
-                omega_axle_rads = ctx.omega_axle,
+                omega_rotor_rads = ctx.omega_rotor,
                 phase           = "DYNAMIC",
                 roll_deg        = roll_deg,
                 pitch_deg       = pitch_deg,

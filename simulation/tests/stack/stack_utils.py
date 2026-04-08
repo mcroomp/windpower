@@ -363,7 +363,7 @@ def _launch_mediator_torque(
     torque_dir: Path,
     repo_root: Path,
     log_path: Path,
-    omega_axle: float,
+    omega_rotor: float,
     profile: str = "constant",
     tail_channel: int = 3,
     lua_mode: bool = False,
@@ -372,7 +372,7 @@ def _launch_mediator_torque(
     """Launch mediator_torque.py as a subprocess."""
     cmd = [
         sys.executable, str(torque_dir / "mediator_torque.py"),
-        "--omega-axle",   str(omega_axle),
+        "--omega-rotor",  str(omega_rotor),
         "--startup-hold", str(startup_hold_s),
         "--profile",      profile,
         "--tail-channel", str(tail_channel),

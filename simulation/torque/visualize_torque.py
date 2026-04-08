@@ -6,9 +6,9 @@ Scene (ENU, Z up)
   Hub cylinder        — squat disc that rotates in yaw (ψ)
   Hub top quadrants   — alternating black/white quarters on top face; rotate
                         with hub so yaw rotation is clearly visible
-  Axle                — thin dark rod through hub centre, spins at ω_axle
-  Rotor indicator     — 4 small blade stubs at top of axle; spin fast to show
-                        that the axle is driven at autorotation speed
+  Axle                — thin dark stationary rod through hub centre
+  Rotor indicator     — 4 small blade stubs representing the outer rotor hub;
+                        spin fast to show autorotation speed
   Yaw pointer         — amber arrow showing current hub heading direction
   Torque arcs         — orange = bearing drag (CCW), blue = motor (CW)
   Throttle bar        — vertical green bar at left (with equilibrium line)
@@ -163,7 +163,7 @@ def _lerp_frame(f1: TorqueTelemetryFrame,
         psi_deg         = _lerp_angle(f1.psi_deg, f2.psi_deg, alpha),
         psi_dot_degs    = L(f1.psi_dot_degs, f2.psi_dot_degs),
         throttle        = L(f1.throttle, f2.throttle),
-        omega_axle_rads = f1.omega_axle_rads,          # constant
+        omega_rotor_rads = f1.omega_rotor_rads,          # constant
         q_bearing_nm    = L(f1.q_bearing_nm, f2.q_bearing_nm),
         q_motor_nm      = L(f1.q_motor_nm, f2.q_motor_nm),
         phase           = f1.phase,
@@ -227,15 +227,15 @@ class EventLog:
             self._push("pass", f.t, f"|psi_dot|={pd:.2f} deg/s  within limit")
         self._prev_above = above
         # Startup ramp milestone: note when omega crosses 50% and 100% of nominal
-        om_frac = f.omega_axle_rads / max(1.0, self._omega_nom)
+        om_frac = f.omega_rotor_rads / max(1.0, self._omega_nom)
         if not hasattr(self, "_ramp50") and om_frac >= 0.50:
             self._ramp50 = True
             self._push("info", f.t,
-                        f"ramp 50%  omega={f.omega_axle_rads:.1f} rad/s")
+                        f"ramp 50%  omega={f.omega_rotor_rads:.1f} rad/s")
         if not hasattr(self, "_ramp100") and om_frac >= 0.98:
             self._ramp100 = True
             self._push("pass", f.t,
-                        f"ramp complete  omega={f.omega_axle_rads:.1f} rad/s")
+                        f"ramp complete  omega={f.omega_rotor_rads:.1f} rad/s")
         if not self._settle_done and f.t >= self._settle_s:
             self._push("info", f.t, f"settle t>={self._settle_s:.0f}s")
             self._settle_done = True
@@ -452,7 +452,7 @@ class TorqueScene:
         psi   = math.radians(frame.psi_deg)
         roll  = math.radians(frame.roll_deg)
         pitch = math.radians(frame.pitch_deg)
-        omega = frame.omega_axle_rads
+        omega = frame.omega_rotor_rads
         dt    = max(0.0, frame.t - self._prev_t)
         self._axle_angle = (self._axle_angle + omega * dt) % (2 * math.pi)
         self._prev_t     = frame.t
@@ -467,7 +467,7 @@ class TorqueScene:
         for a in self._spoke_a:
             a.user_matrix = Rhub
 
-        # Rotor blades each get their own axle rotation
+        # Rotor blades each get their own rotation angle
         for i, a in enumerate(self._blade_a):
             a.user_matrix = _rz4(self._axle_angle + i * math.pi / 2)
 
@@ -476,7 +476,7 @@ class TorqueScene:
 
         # Current bar: height ∝ I_motor / I_max
         # I = (V_applied - V_backemf) / R   where V_applied = throttle × V_bat
-        _om_m   = max(0.0, frame.omega_axle_rads * _GEAR_RATIO)
+        _om_m   = max(0.0, frame.omega_rotor_rads * _GEAR_RATIO)
         _v_app  = frame.throttle * _V_BAT
         _v_bemf = _om_m / _KV_RAD
         _i_now  = max(0.0, (_v_app - _v_bemf) / _R_MOTOR)
@@ -493,17 +493,17 @@ class TorqueScene:
     # ── HUD text — updates in-place, no actor recreation ─────────────────
 
     def _draw_hud(self, frame: TorqueTelemetryFrame) -> None:
-        om_m    = max(0.0, frame.omega_axle_rads * _GEAR_RATIO)
+        om_m    = max(0.0, frame.omega_rotor_rads * _GEAR_RATIO)
         v_app   = frame.throttle * _V_BAT
         v_bemf  = om_m / _KV_RAD
         i_now   = max(0.0, (v_app - v_bemf) / _R_MOTOR)
-        axle_rpm = frame.omega_axle_rads * 60.0 / (2.0 * math.pi)
+        rotor_rpm = frame.omega_rotor_rads * 60.0 / (2.0 * math.pi)
         self._hud_actor.SetInput("\n".join([
             f"t        = {frame.t:7.2f} s",
             f"psi      = {frame.psi_deg:+7.2f} deg",
             f"psi_dot  = {frame.psi_dot_degs:+7.2f} deg/s",
             f"I_motor  = {i_now:7.3f} A",
-            f"axle RPM = {axle_rpm:7.1f}",
+            f"rotor RPM= {rotor_rpm:7.1f}",
             f"phase    = {frame.phase}",
         ]))
         self._psi_dot_actor.SetInput(
@@ -529,7 +529,7 @@ def play(frames: List[TorqueTelemetryFrame],
         return
 
     title = (
-        f"Counter-torque test  omega={meta.get('omega_axle_rads','?'):.1f} rad/s  "
+        f"Counter-torque test  omega={meta.get('omega_rotor_rads','?'):.1f} rad/s  "
         f"result={meta.get('result','?')}"
     )
 
@@ -548,7 +548,7 @@ def play(frames: List[TorqueTelemetryFrame],
         observe_s      = float(meta.get("observe_s",       20.0)),
         threshold_degs = float(meta.get("threshold_degs",  1.0)),
     )
-    scene._omega_nom = float(meta.get("omega_axle_rads", 28.0))
+    scene._omega_nom = float(meta.get("omega_rotor_rads", 28.0))
     scene.event_log._omega_nom = scene._omega_nom
 
     # ── Auto-seek: start 5 s before hub dynamics kick in ──────────────────
@@ -589,7 +589,7 @@ def play(frames: List[TorqueTelemetryFrame],
     def _make_omega_fn(m: dict):
         """Return omega(frame_t) using the profile stored in metadata."""
         profile   = m.get("profile", m.get("test", "constant"))
-        omega_nom = float(m.get("omega_axle_rads", 28.0))
+        omega_nom = float(m.get("omega_rotor_rads", 28.0))
         dyn_start = _find_dynamics_start(_frames[0])
         omega_fn, _ = _MEDIATOR_PROFILES.get(profile, _MEDIATOR_PROFILES["constant"])
 
@@ -617,7 +617,7 @@ def play(frames: List[TorqueTelemetryFrame],
         sim_t0[0]  = new_frames[0].t
         scene._axle_angle = 0.0
         scene._prev_t     = new_frames[0].t
-        new_omega_nom = float(new_meta.get("omega_axle_rads", 28.0))
+        new_omega_nom = float(new_meta.get("omega_rotor_rads", 28.0))
         scene._omega_nom = new_omega_nom
         scene.event_log.reset(
             float(new_meta.get("settle_s", 40.0)),
@@ -757,7 +757,7 @@ def play(frames: List[TorqueTelemetryFrame],
             else:
                 real_throttle = _eq_throttle(max(0.1, real_omega), _MODEL_PARAMS)
             interp = _dc.replace(interp,
-                                 omega_axle_rads=real_omega,
+                                 omega_rotor_rads=real_omega,
                                  throttle=real_throttle)
 
             scene.update(interp)
@@ -765,7 +765,7 @@ def play(frames: List[TorqueTelemetryFrame],
             # Sensor / motor panel
             psi_rad     = math.radians(interp.psi_deg)
             pd_rad      = math.radians(interp.psi_dot_degs)
-            om          = interp.omega_axle_rads
+            om          = interp.omega_rotor_rads
             thr         = interp.throttle
             pwm_ch4     = int(1000 + thr * 1000)
             om_motor    = om * (80 / 44)
@@ -779,7 +779,7 @@ def play(frames: List[TorqueTelemetryFrame],
             p_motor   = v_applied * i_motor
             e_rpm     = om_motor * 60.0 / (2.0 * math.pi) * _POLE_PAIRS
             mech_rpm  = e_rpm / _POLE_PAIRS
-            axle_rpm  = mech_rpm / _GEAR_RATIO
+            rotor_rpm = mech_rpm / _GEAR_RATIO
 
             _sensor_actor.SetInput("\n".join([
                 "gyro (body frame, NED)",
@@ -787,7 +787,7 @@ def play(frames: List[TorqueTelemetryFrame],
                 "DSHOT telemetry  ESC->FC",
                 f" eRPM   = {e_rpm:8.0f}",
                 f" RPM    = {mech_rpm:8.1f}  mech",
-                f" axle   = {axle_rpm:8.1f}  rpm",
+                f" rotor  = {rotor_rpm:8.1f}  rpm",
                 f" I      = {i_motor:8.3f}  A",
                 f" P      = {p_motor:8.2f}  W",
                 "hub torques",

@@ -9,7 +9,7 @@ Run with:
 
 Tests
 -----
-1. test_bearing_drag_alone          — zero throttle → hub spins in axle direction
+1. test_bearing_drag_alone          — zero throttle → hub spins in rotor hub direction
 2. test_equilibrium_throttle_holds  — computed feedforward keeps ψ = ψ_dot = 0
 3. test_p_controller_convergence    — P-controller on yaw rate converges within 15 s
 4. test_rpm_step_recovery           — step in ω_axle is rejected within 10 s
@@ -38,7 +38,7 @@ TMAX = 30.0           # [s] used for steady-state checks
 
 
 def _simulate(
-    omega_axle_fn,    # callable(t: float) -> float
+    omega_rotor_fn,   # callable(t: float) -> float
     throttle_fn,      # callable(state: m.HubState, t: float) -> float
     params: m.HubParams | None = None,
     t_end: float = TMAX,
@@ -55,7 +55,7 @@ def _simulate(
     history = [(0.0, m.HubState(state.psi, state.psi_dot))]
     t = 0.0
     while t < t_end:
-        omega    = omega_axle_fn(t)
+        omega    = omega_rotor_fn(t)
         throttle = throttle_fn(state, t)
         state    = m.step(state, omega, throttle, params, dt)
         t       += dt
@@ -67,12 +67,12 @@ def _simulate(
 
 def test_bearing_drag_alone():
     """
-    With no motor (throttle=0), bearing drag alone accelerates the hub in the
-    same direction as the axle rotation.  After 5 s, ψ_dot and ψ must both be
-    clearly positive.
+    With no motor (throttle=0), bearing drag alone accelerates the inner assembly
+    in the same direction as the rotor hub rotation.  After 5 s, ψ_dot and ψ must
+    both be clearly positive.
     """
     hist = _simulate(
-        omega_axle_fn=lambda t: m.OMEGA_AXLE_NOMINAL,
+        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
         throttle_fn=lambda s, t: 0.0,
         t_end=5.0,
     )
@@ -91,7 +91,7 @@ def test_equilibrium_throttle_holds():
     for all time when started from rest.  Any deviation is a modelling error.
     """
     params      = m.HubParams()
-    eq_throttle = m.equilibrium_throttle(m.OMEGA_AXLE_NOMINAL, params)
+    eq_throttle = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
 
     # Throttle must be physically realizable
     assert 0.0 < eq_throttle < 1.0, (
@@ -99,7 +99,7 @@ def test_equilibrium_throttle_holds():
     )
 
     hist = _simulate(
-        omega_axle_fn=lambda t: m.OMEGA_AXLE_NOMINAL,
+        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
         throttle_fn=lambda s, t: eq_throttle,
         t_end=10.0,
     )
@@ -128,12 +128,12 @@ def test_p_controller_convergence():
     Kp     = 1.0
 
     def throttle_fn(state: m.HubState, t: float) -> float:
-        eq  = m.equilibrium_throttle(m.OMEGA_AXLE_NOMINAL, params)
+        eq  = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
         cmd = eq + Kp * state.psi_dot
         return max(0.0, min(1.0, cmd))
 
     hist = _simulate(
-        omega_axle_fn=lambda t: m.OMEGA_AXLE_NOMINAL,
+        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
         throttle_fn=throttle_fn,
         t_end=TMAX,
     )
@@ -158,8 +158,8 @@ def test_rpm_step_recovery():
     the step.
     """
     params     = m.HubParams()
-    omega_low  = m.OMEGA_AXLE_NOMINAL * 0.8
-    omega_high = m.OMEGA_AXLE_NOMINAL * 1.2
+    omega_low  = m.OMEGA_ROTOR_NOMINAL * 0.8
+    omega_high = m.OMEGA_ROTOR_NOMINAL * 1.2
     Kp         = 1.0   # numerically stable at 400 Hz (see test_p_controller_convergence)
 
     def omega_fn(t: float) -> float:
@@ -170,7 +170,7 @@ def test_rpm_step_recovery():
         cmd = eq + Kp * state.psi_dot
         return max(0.0, min(1.0, cmd))
 
-    hist = _simulate(omega_axle_fn=omega_fn, throttle_fn=throttle_fn, t_end=20.0)
+    hist = _simulate(omega_rotor_fn=omega_fn, throttle_fn=throttle_fn, t_end=20.0)
 
     # Check 10 s after the step (t > 15 s) — should be re-settled
     late = [(t, s) for t, s in hist if t > 15.0]
@@ -186,7 +186,7 @@ def test_zero_axle_no_drift():
     remain perfectly at rest regardless of throttle.
     """
     hist = _simulate(
-        omega_axle_fn=lambda t: 0.0,
+        omega_rotor_fn=lambda t: 0.0,
         throttle_fn=lambda s, t: 0.0,
         t_end=10.0,
     )
@@ -205,8 +205,8 @@ def test_motor_reaction_direction():
     things worse instead of better, and yaw regulation would be impossible.
     """
     params      = m.HubParams()
-    omega_axle  = m.OMEGA_AXLE_NOMINAL
-    omega_motor = omega_axle * params.gear_ratio
+    omega_rotor = m.OMEGA_ROTOR_NOMINAL
+    omega_motor = omega_rotor * params.gear_ratio
 
     tau_shaft       = m.motor_torque(0.5, omega_motor, params)
     Q_motor_on_hub  = -params.gear_ratio * tau_shaft   # same calc as in _derivatives
@@ -224,10 +224,10 @@ def test_gear_ratio_authority():
     axle speed — otherwise yaw is uncontrollable at design-point RPM.
     """
     params      = m.HubParams()
-    omega_axle  = m.OMEGA_AXLE_NOMINAL
-    omega_motor = omega_axle * params.gear_ratio
+    omega_rotor = m.OMEGA_ROTOR_NOMINAL
+    omega_motor = omega_rotor * params.gear_ratio
 
-    Q_bearing_magnitude = params.k_bearing * omega_axle        # N·m, magnitude
+    Q_bearing_magnitude = params.k_bearing * omega_rotor        # N·m, magnitude
     tau_full            = m.motor_torque(1.0, omega_motor, params)
     Q_motor_magnitude   = params.gear_ratio * tau_full         # N·m, magnitude
 
@@ -243,7 +243,7 @@ def test_motor_saturation():
     throttle range.  Clamping must be graceful.
     """
     params      = m.HubParams()
-    omega_motor = m.OMEGA_AXLE_NOMINAL * params.gear_ratio
+    omega_motor = m.OMEGA_ROTOR_NOMINAL * params.gear_ratio
 
     for throttle in [-2.0, -1.0, -0.001, 0.0, 0.5, 1.0, 1.5, 2.0]:
         tau = m.motor_torque(throttle, omega_motor, params)
@@ -262,9 +262,9 @@ def test_equilibrium_throttle_scales_with_rpm():
     Higher axle speed needs proportionally more throttle to maintain ψ_dot = 0.
     """
     params  = m.HubParams()
-    thr_low = m.equilibrium_throttle(m.OMEGA_AXLE_NOMINAL * 0.5, params)
-    thr_nom = m.equilibrium_throttle(m.OMEGA_AXLE_NOMINAL,       params)
-    thr_hi  = m.equilibrium_throttle(m.OMEGA_AXLE_NOMINAL * 1.5, params)
+    thr_low = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL * 0.5, params)
+    thr_nom = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL,       params)
+    thr_hi  = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL * 1.5, params)
 
     assert thr_low < thr_nom < thr_hi, (
         f"Equilibrium throttle should increase with RPM: "

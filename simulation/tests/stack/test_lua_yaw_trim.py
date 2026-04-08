@@ -56,7 +56,7 @@ def test_lua_yaw_trim(torque_armed_lua):
         "test":            "lua_yaw_trim",
         "profile":         "constant",
         "control":         "lua_feedforward",
-        "omega_axle_rads": ctx.omega_axle,
+        "omega_rotor_rads": ctx.omega_rotor,
         "settle_s":        _SETTLE_S,
         "observe_s":       _OBSERVE_S,
         "threshold_degs":  _THRESHOLD,

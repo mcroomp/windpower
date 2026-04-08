@@ -15,7 +15,7 @@ Usage — recording inside a test
     from torque_telemetry import TorqueTelemetryRecorder
     rec = TorqueTelemetryRecorder(meta={"test": "yaw_regulation"})
     rec.record(t=1.0, psi_deg=0.5, psi_dot_degs=0.3, throttle=0.74,
-               omega_axle_rads=28.0, q_bearing_nm=0.14, q_motor_nm=0.14)
+               omega_rotor_rads=28.0, q_bearing_nm=0.14, q_motor_nm=0.14)
     rec.save("logs/torque_telemetry.json")
 
 Usage — loading for visualisation
@@ -56,7 +56,7 @@ class TorqueTelemetryFrame:
     servo_pwm_us: int = 0            # actual Ch4 or Ch9 PWM from ArduPilot [µs]
 
     # Physics model state (from model.py, computed by mediator)
-    omega_axle_rads: float = 0.0     # axle spin rate [rad/s]
+    omega_rotor_rads: float = 0.0    # rotor hub spin rate [rad/s]
     q_bearing_nm: float = 0.0        # bearing drag torque on hub [N·m]
     q_motor_nm: float = 0.0          # motor reaction torque on hub [N·m]
 
@@ -97,7 +97,7 @@ class TorqueTelemetryRecorder:
     calls .record() inside its observation loop, and saves at the end.
 
     Meta dict is stored in the JSON header and can hold any test parameters
-    (omega_axle, k_bearing, gear_ratio, pass/fail status, thresholds, etc.).
+    (omega_rotor, k_bearing, gear_ratio, pass/fail status, thresholds, etc.).
     """
 
     def __init__(self, meta: Optional[dict[str, Any]] = None) -> None:
@@ -112,7 +112,7 @@ class TorqueTelemetryRecorder:
         psi_deg: float,
         psi_dot_degs: float,
         throttle: float = 0.0,
-        omega_axle_rads: float = 0.0,
+        omega_rotor_rads: float = 0.0,
         q_bearing_nm: float = 0.0,
         q_motor_nm: float = 0.0,
         phase: str = "DYNAMIC",
@@ -126,7 +126,7 @@ class TorqueTelemetryRecorder:
             psi_deg=psi_deg,
             psi_dot_degs=psi_dot_degs,
             throttle=throttle,
-            omega_axle_rads=omega_axle_rads,
+            omega_rotor_rads=omega_rotor_rads,
             q_bearing_nm=q_bearing_nm,
             q_motor_nm=q_motor_nm,
             phase=phase,
