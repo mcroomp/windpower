@@ -99,7 +99,7 @@ running inside a computer. It has three interconnected layers:
 
 | File | Description |
 |------|-------------|
-| [system/stack.md](system/stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Pixhawk orbit tracker (rawes_flight.lua), yaw trim (rawes_yaw_trim.lua), ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
+| [system/stack.md](system/stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Pixhawk orbit tracker (rawes.lua), yaw trim (rawes.lua), ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
 
 ### Simulation
 

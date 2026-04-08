@@ -362,8 +362,8 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     log.info("Hold controller: %s", type(controller).__name__)
 
     # ── Lua scripts ───────────────────────────────────────────────────────────
-    # Always install rawes_flight.lua so it is available if scripting is enabled.
-    _install_lua_scripts("rawes_flight.lua")
+    # Always install rawes.lua so it is available if scripting is enabled.
+    _install_lua_scripts("rawes.lua")
 
     # ── EEPROM / Lua: SCR_ENABLE=1 is set via MAVLink in step 3 and persists.
     # For the Lua fixture specifically: prime_eeprom=True runs a short SITL boot
@@ -520,14 +520,12 @@ def _install_lua_scripts(*names: str) -> None:
     """
     Copy the named Lua scripts from simulation/scripts/ to SITL's /ardupilot/scripts/.
 
-    Must be called before SITL starts.  Pass only the scripts needed for
-    the test — do not install scripts that would conflict (e.g. rawes_flight.lua
-    and rawes_yaw_trim.lua both claim RC overrides and should not coexist).
+    Must be called before SITL starts.  In normal use, pass only "rawes.lua"
+    (the unified script); SCR_USER7 selects the active mode at runtime.
 
     Examples::
 
-        _install_lua_scripts("rawes_flight.lua")
-        _install_lua_scripts("rawes_yaw_trim.lua", "rawes_null.lua")
+        _install_lua_scripts("rawes.lua")
     """
     dst_dir = Path("/ardupilot/scripts")
     dst_dir.mkdir(exist_ok=True)
@@ -539,22 +537,22 @@ def _install_lua_scripts(*names: str) -> None:
 @pytest.fixture
 def acro_armed_lua(tmp_path, request):
     """
-    ACRO stack fixture with rawes_flight.lua active in SITL.
+    ACRO stack fixture with rawes.lua active in flight mode (SCR_USER7=1).
 
     Extends acro_armed with:
-      1. rawes_flight.lua installed to /ardupilot/scripts/ before SITL starts.
-      2. SCR_USER1..5 (kp, slew rate, anchor NED) set via MAVLink after arm.
+      1. rawes.lua installed to /ardupilot/scripts/ before SITL starts.
+      2. SCR_USER1..5 (kp, slew rate, anchor NED) and SCR_USER7=1 set via MAVLink after arm.
 
     Lua's RC overrides are observable from SERVO_OUTPUT_RAW while the
     mediator's internal controller stabilises physics (internal_controller=True).
     """
     with _acro_stack(tmp_path, log_name="acro_armed_lua", log_prefix="lua",
                      test_name=request.node.name, prime_eeprom=True) as ctx:
-        # Post-arm: configure rawes_flight.lua via SCR_USER params.
+        # Post-arm: configure rawes.lua via SCR_USER params.
         # SCR_USER5 = home_alt_m: anchor is home_alt_m metres below EKF HOME
         # (sensor.py sets pos_ned_rel[2] = pos_ned[2] + home_alt_m, so physics
         # anchor NED [0,0,0] appears at LOCAL [0, 0, home_alt_m]).
-        ctx.log.info("Setting SCR_USER params for rawes_flight.lua ...")
+        ctx.log.info("Setting SCR_USER params for rawes.lua (flight mode) ...")
         lua_params = {
             "SCR_ENABLE": 1,              # persist scripting in EEPROM for future boots
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
@@ -562,6 +560,7 @@ def acro_armed_lua(tmp_path, request):
             "SCR_USER3": 0.0,             # anchor North   [m]
             "SCR_USER4": 0.0,             # anchor East    [m]
             "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
+            "SCR_USER7": 1,               # RAWES_MODE = 1 (flight only)
         }
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
@@ -1209,6 +1208,7 @@ _LUA_TORQUE_EXTRA_PARAMS: list[tuple[str, float]] = [
     ("RPM1_TYPE",        10),    # SITL: read rpm from JSON sensor packet
     ("RPM1_MIN",         0),
     ("SERVO9_FUNCTION",  94),    # Script 1 -- Lua writes exclusively to Ch9
+    ("SCR_USER7",        2),     # RAWES_MODE = 2 (yaw trim only)
 ]
 
 
@@ -1470,12 +1470,12 @@ def torque_armed_profile(request, tmp_path):
 @pytest.fixture
 def torque_armed_lua(tmp_path, request):
     """
-    Like torque_armed but with the Lua feedforward yaw-trim script active.
+    Like torque_armed but with rawes.lua active in yaw mode (SCR_USER7=2).
 
     Key differences from torque_armed:
-      - rawes_yaw_trim.lua + rawes_null.lua installed to /ardupilot/scripts/ before boot
+      - rawes.lua installed to /ardupilot/scripts/ before boot
       - EEPROM wiped so copter-heli.parm defaults apply cleanly
-      - SCR_ENABLE=1, RPM1_TYPE=10, SERVO9_FUNCTION=94
+      - SCR_ENABLE=1, SCR_USER7=2, RPM1_TYPE=10, SERVO9_FUNCTION=94
       - mediator_torque.py --lua-mode --tail-channel 8 (reads Ch9, linear mapping)
       - ATC_RAT_YAW_P=0 (Lua is sole feedforward provider, no ArduPilot yaw PID)
     """
@@ -1487,7 +1487,7 @@ def torque_armed_lua(tmp_path, request):
         tail_channel=8,
         extra_params=_LUA_TORQUE_EXTRA_PARAMS,
         eeprom_wipe=True,
-        install_scripts=("rawes_yaw_trim.lua", "rawes_null.lua"),
+        install_scripts=("rawes.lua",),
         log_name="torque_armed_lua",
         test_name=request.node.name,
     ) as ctx:

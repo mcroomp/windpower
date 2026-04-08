@@ -541,7 +541,7 @@ def orbit_tracked_body_z_eq_3d(
     Rotate body_z_eq0 to track the hub's orbital position via full 3D Rodrigues.
 
     Applies the minimal 3D rotation that maps tether_dir0 to the current
-    tether direction (cur_pos normalised).  Matches rawes_flight.lua
+    tether direction (cur_pos normalised).  Matches rawes.lua
     orbit_track() exactly.
 
     Use this function only when the output is fed through a rate-limited slerp
@@ -578,7 +578,7 @@ class OrbitTracker:
     """
     Rate-limited orbit-tracking body_z setpoint.
 
-    Mirrors the rawes_flight.lua state machine exactly:
+    Mirrors the rawes.lua state machine exactly:
         _bz_orbit = orbit_track_3d(bz_eq0, tdir0, pos/|pos|)   each step
         _bz_slerp = slerp(_bz_slerp, bz_target or _bz_orbit, slew_rate, dt)
 

@@ -52,7 +52,7 @@ Used by: `test_steady_flight.py`, `test_closed_loop_60s.py` — inner-loop physi
 
 **`orbit_tracked_body_z_eq_3d(cur_pos, tether_dir0, body_z_eq0)`** — 3D Rodrigues (Lua-equivalent)
 
-Rotates `body_z_eq0` by the full 3D rotation that maps `tether_dir0` onto the current tether direction `cur_pos/|cur_pos|`. Matches `rawes_flight.lua`'s `orbit_track_3d()` exactly. The setpoint tracks the altitude component of the tether direction — requires a rate-limited slerp downstream to be stable.
+Rotates `body_z_eq0` by the full 3D rotation that maps `tether_dir0` onto the current tether direction `cur_pos/|cur_pos|`. Matches `rawes.lua`'s `orbit_track_3d()` exactly. The setpoint tracks the altitude component of the tether direction — requires a rate-limited slerp downstream to be stable.
 
 Used by: `OrbitTracker` (below), `mediator.py`, pumping cycle tests.
 
@@ -65,7 +65,7 @@ OrbitTracker(body_z_eq0, tether_dir0, slew_rate_rad_s)
 orbit_tracker.update(pos, dt, bz_target=None) -> body_z_slerped
 ```
 
-Encapsulates `orbit_tracked_body_z_eq_3d` + `slerp_body_z` in one object, mirroring `rawes_flight.lua`'s `_bz_orbit`/`_bz_slerp` state machine. When `bz_target` is provided (e.g., planner attitude override during landing), slerps toward that target instead of the natural orbit setpoint.
+Encapsulates `orbit_tracked_body_z_eq_3d` + `slerp_body_z` in one object, mirroring `rawes.lua`'s `_bz_orbit`/`_bz_slerp` state machine. When `bz_target` is provided (e.g., planner attitude override during landing), slerps toward that target instead of the natural orbit setpoint.
 
 Used by: `mediator.py`, `test_gyroscopic_orbit.py`, `test_pumping_cycle.py`, `test_deschutter_cycle.py`, `test_deschutter_wind.py`, `test_kinematic_transition.py`, `test_pump_and_land.py`, `compare_rotors.py`.
 

@@ -207,9 +207,7 @@ simulation/torque/
     └── check_params.py     Debug utility: connects to SITL and reads params
 
 simulation/scripts/
-├── rawes_flight.lua        Orbit-tracking cyclic controller
-├── rawes_yaw_trim.lua      Lua: reads motor RPM -> computes feedforward -> writes SERVO9
-└── rawes_null.lua          Minimal Lua placeholder (scripting runtime init check)
+└── rawes.lua               Unified Lua controller (SCR_USER7: 0=none, 1=flight, 2=yaw, 3=both)
 
 simulation/tests/stack/
 ├── conftest.py             Unified fixtures: acro_armed* + torque_armed* + TorqueStackContext
@@ -233,7 +231,7 @@ the feedforward computation runs inside ArduPilot rather than in the mediator.
 ```
 mediator_torque.py (--lua-mode)     ArduPilot SITL
 ────────────────────────────────    ──────────────────────────────────────
-Pure physics engine only:           scripts/rawes_yaw_trim.lua:
+Pure physics engine only:           rawes.lua (SCR_USER7=2):
   hub yaw dynamics                    motor_rpm = battery:voltage(0)
   bearing drag                          (mediator encodes RPM as voltage)
   motor torque                        trim = compute_trim(motor_rpm)

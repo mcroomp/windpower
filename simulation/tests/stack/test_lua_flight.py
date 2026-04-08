@@ -1,7 +1,7 @@
 """
-test_lua_flight.py — rawes_flight.lua orbit-tracking validation (stack test).
+test_lua_flight.py — rawes.lua flight-mode (SCR_USER7=1) orbit-tracking validation.
 
-Validates that rawes_flight.lua:
+Validates that rawes.lua in flight mode (SCR_USER7=1):
   1. Loads and starts in SITL (SCR_ENABLE=1, script installed to
      /ardupilot/scripts/ before launch, EEPROM wiped for clean defaults).
   2. Captures equilibrium within _CAPTURE_TIMEOUT_S of ACRO arm by logging
@@ -10,9 +10,9 @@ Validates that rawes_flight.lua:
      cyclic activity above _MIN_CYCLIC_ACTIVITY_PWM at least once.
 
 Uses the ``acro_armed_lua`` fixture from conftest.py, which:
-  - Wipes /ardupilot/eeprom.bin + installs rawes_flight.lua before SITL starts
+  - Wipes /ardupilot/eeprom.bin + installs rawes.lua before SITL starts
   - Runs the full 45 s kinematic startup + EKF alignment + ACRO arm sequence
-  - Sets SCR_USER1..5 (kp, slew, anchor NED) via MAVLink after arm
+  - Sets SCR_USER1..5 (kp, slew, anchor NED) and SCR_USER7=1 via MAVLink after arm
   - Enables internal_controller=True so the mediator's 400 Hz truth-state
     controller keeps the hub stable; Lua's RC overrides are safely observable
 
@@ -53,7 +53,7 @@ sys.path.insert(0, str(_STACK_DIR))
 from conftest import StackContext, dump_startup_diagnostics
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-# rawes_flight.lua captures equilibrium as soon as it sees a tether length
+# rawes.lua captures equilibrium as soon as it sees a tether length
 # ≥ MIN_TETHER_M (0.5 m) and a valid AHRS rotation matrix.  Both are
 # available immediately after ACRO arm, so 30 s is generous.
 _CAPTURE_TIMEOUT_S = 50.0   # s — Lua must log "captured" within this window
@@ -83,10 +83,10 @@ _POS_LOG_INTERVAL = 5.0   # s
 
 def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
     """
-    rawes_flight.lua orbit-tracking stack validation.
+    rawes.lua orbit-tracking stack validation.
 
     After the 45 s kinematic startup + ACRO arm:
-      - rawes_flight.lua must log "RAWES flight: captured" within 30 s.
+      - rawes.lua must log "RAWES flight: captured" within 30 s.
       - SERVO_OUTPUT_RAW must show |servo1−1500|+|servo2−1500| ≥ 50 PWM
         at some point during the 60 s observation window, proving that
         Lua's orbit-tracking P-loop is injecting non-trivial RC overrides.
@@ -114,12 +114,12 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
     log.info("[pre-flight] SCR_ENABLE = 1  OK")
 
     # Check 2: script file present on disk (catches install failures).
-    script_path = Path("/ardupilot/scripts/rawes_flight.lua")
+    script_path = Path("/ardupilot/scripts/rawes.lua")
     assert script_path.exists(), (
-        f"rawes_flight.lua not found at {script_path}.  "
-        "_install_lua_flight_scripts() in _acro_stack must copy it before SITL starts."
+        f"rawes.lua not found at {script_path}.  "
+        "_install_lua_scripts() in _acro_stack must copy it before SITL starts."
     )
-    log.info("[pre-flight] rawes_flight.lua present  OK")
+    log.info("[pre-flight] rawes.lua present  OK")
 
     # Note: "RAWES flight: loaded" STATUSTEXT is NOT checked here.
     # Lua sends it at module load (~1 s after SITL starts), before the GCS
@@ -198,12 +198,12 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
                          max_cyclic_activity, t_rel)
             if not lua_captured and now > t_capture_deadline:
                 pytest.fail(
-                    f"rawes_flight.lua did not capture equilibrium within "
+                    f"rawes.lua did not capture equilibrium within "
                     f"{_CAPTURE_TIMEOUT_S:.0f}s.\n"
                     f"STATUSTEXT seen: {all_statustext[-20:]}\n"
                     "Checklist:\n"
                     "  • SCR_ENABLE=1 baked into copter-heli.parm (eeprom wiped?)\n"
-                    "  • rawes_flight.lua installed to /ardupilot/scripts/\n"
+                    "  • rawes.lua installed to /ardupilot/scripts/\n"
                     "  • SCR_USER3/4/5 (anchor NED) set correctly\n"
                     "  • SITL log for Lua load errors"
                 )
@@ -230,7 +230,7 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
 
         # ── Assertion 1: Lua captured equilibrium ─────────────────────────
         assert lua_captured, (
-            "rawes_flight.lua never logged 'RAWES flight: captured'.\n"
+            "rawes.lua never logged 'RAWES flight: captured'.\n"
             f"STATUSTEXT: {all_statustext}"
         )
 
@@ -271,7 +271,7 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
         assert max_cyclic_activity >= _MIN_CYCLIC_ACTIVITY_PWM, (
             f"Lua cyclic activity too low: max |servo1−1500|+|servo2−1500| = "
             f"{max_cyclic_activity} < {_MIN_CYCLIC_ACTIVITY_PWM} PWM.\n"
-            "rawes_flight.lua may have captured but is producing near-neutral overrides.\n"
+            "rawes.lua may have captured but is producing near-neutral overrides.\n"
             "Check kp (SCR_USER1) and anchor position (SCR_USER3/4/5).\n"
             f"STATUSTEXT: {all_statustext}"
         )

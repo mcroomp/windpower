@@ -1,5 +1,5 @@
 """
-test_lua_math.py -- Unit tests for all math in rawes_flight.lua.
+test_lua_math.py -- Unit tests for all math in rawes.lua.
 
 Covers four Lua operations:
   1. rodrigues()        -- rotate a vector around a unit axis by an angle.
@@ -16,7 +16,7 @@ Design note -- two orbit-tracking functions in controller.py:
   orbit_tracked_body_z_eq()     azimuthal-only rotation (preserves Z, stable at
       400 Hz without rate limiting -- used in the Python simulation loop)
   orbit_tracked_body_z_eq_3d()  full 3D Rodrigues rotation -- matches
-      rawes_flight.lua::orbit_track() exactly; safe only when downstream slerp
+      rawes.lua::orbit_track() exactly; safe only when downstream slerp
       limits bandwidth (as the Lua 0.40 rad/s slerp does on hardware)
 
 No SITL, no Docker.  Runs with the existing unit-test venv.
@@ -41,7 +41,7 @@ from controller import (
 
 # ===========================================================================
 # -- Reference implementations --
-# Python reference implementations of rawes_flight.lua functions.
+# Python reference implementations of rawes.lua functions.
 # These must stay bit-for-bit identical to the Lua source.
 # ===========================================================================
 
@@ -51,7 +51,7 @@ def rodrigues(v: np.ndarray, axis_n: np.ndarray, angle: float) -> np.ndarray:
 
     v' = v*cos(theta) + (axis x v)*sin(theta) + axis*(axis.v)*(1 - cos(theta))
 
-    Mirrors rawes_flight.lua rodrigues() verbatim.
+    Mirrors rawes.lua rodrigues() verbatim.
 
     Lua source:
         local ca  = math.cos(angle)
@@ -75,7 +75,7 @@ def orbit_track_bz(
     """
     Rotate bz_eq0 by the minimal rotation that maps tdir0 -> bzt.
 
-    Mirrors rawes_flight.lua orbit-tracking block:
+    Mirrors rawes.lua orbit-tracking block:
         axis  = tdir0 x bzt
         sinth = |axis|
         if sinth > 1e-6:
@@ -100,7 +100,7 @@ def slerp_step(
     """
     One rate-limited slerp step advancing bz_slerp toward goal.
 
-    Mirrors rawes_flight.lua slerp block:
+    Mirrors rawes.lua slerp block:
         dot    = clamp(bz_slerp . goal, -1, 1)
         remain = acos(dot)
         if remain > 1e-4:
@@ -128,7 +128,7 @@ def cyclic_error_body(
     """
     Body-frame cyclic error (roll, pitch) from the P-gain loop.
 
-    Mirrors rawes_flight.lua:
+    Mirrors rawes.lua:
         err_ned = bz_now x bz_slerp
         err_bx  = R.col(0) . err_ned    (body X = roll axis)
         err_by  = R.col(1) . err_ned    (body Y = pitch axis)
@@ -147,12 +147,12 @@ def output_rate_limit(
     max_delta:  int,
 ) -> int:
     """
-    Python reference implementation of the rawes_flight.lua output rate limiter.
+    Python reference implementation of the rawes.lua output rate limiter.
 
     Clamps the per-step PWM change to max_delta.  Returns the new PWM value.
     max_delta == 0 means disabled (no clamping).
 
-    Mirrors rawes_flight.lua:
+    Mirrors rawes.lua:
         d = ch_desired - ch_prev
         d = clamp(d, -max_delta, +max_delta)
         return ch_prev + d
@@ -176,7 +176,7 @@ def _lua_orbit_track(
     anchor: np.ndarray,
 ) -> np.ndarray:
     """
-    Python transcription of rawes_flight.lua orbit_track().
+    Python transcription of rawes.lua orbit_track().
 
     Rotates bz_eq0 by the same 3D rotation that maps tdir0 -> current
     tether direction.  Returns bz_eq0 unchanged when |pos-anchor| < 0.5 m
@@ -202,7 +202,7 @@ def _lua_slerp_step(
     dt:        float,
 ) -> np.ndarray:
     """
-    Python transcription of rawes_flight.lua rate-limited slerp step.
+    Python transcription of rawes.lua rate-limited slerp step.
 
     Advances bz_slerp toward goal by at most slew_rate*dt radians.
     """
@@ -227,7 +227,7 @@ def _lua_cyclic_rates(
     acro_rp_deg: float = 360.0,
 ) -> tuple:
     """
-    Python transcription of rawes_flight.lua cyclic loop.
+    Python transcription of rawes.lua cyclic loop.
 
     Returns (roll_rads, pitch_rads, ch1_pwm, ch2_pwm).
 
@@ -255,7 +255,7 @@ def _lua_cyclic_rates(
 
 
 def _lua_pwm(rate_rads: float, acro_rp_rate_deg: float = 360.0) -> int:
-    """Mirror of rawes_flight.lua ch1/ch2 computation (pure math, no ArduPilot)."""
+    """Mirror of rawes.lua ch1/ch2 computation (pure math, no ArduPilot)."""
     scale = 500.0 / (acro_rp_rate_deg * math.pi / 180.0)
     ch = math.floor(1500.0 + scale * rate_rads + 0.5)
     return max(1000, min(2000, ch))
@@ -640,7 +640,7 @@ def test_cyclic_error_larger_tilt_larger_magnitude():
 
 
 # ---------------------------------------------------------------------------
-# output_rate_limit() tests  (mirrors rawes_flight.lua step 9)
+# output_rate_limit() tests  (mirrors rawes.lua step 9)
 # ---------------------------------------------------------------------------
 
 def test_rate_limit_no_change_needed():
@@ -1228,7 +1228,7 @@ def test_orbit_track_3d_equivalence(bz_eq0, tdir0, bzt, label):
 # ---------------------------------------------------------------------------
 # PWM scalar formula
 #
-# Lua (rawes_flight.lua):
+# Lua (rawes.lua):
 #   scale = 500 / (ACRO_RP_RATE_DEG * math.pi / 180)
 #   ch = math.floor(1500 + scale * rate_rads + 0.5)
 #   ch = math.max(1000, math.min(2000, ch))

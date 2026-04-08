@@ -24,11 +24,9 @@ flowchart TB
 
     subgraph PX["Pixhawk 6C (in air)"]
         direction TB
-        LUA1["<b>rawes_flight.lua</b>  50 Hz<BR/>Orbit tracking · Rate-limited slerp<BR/>Cyclic P loop · Ch1/Ch2/Ch3 RC overrides"]
-        LUA2["<b>rawes_yaw_trim.lua</b>  100 Hz<BR/>Yaw trim and correction · Ch4 RC override"]
+        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER7: 1=flight 50 Hz, 2=yaw 100 Hz, 3=both<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim and correction · Ch1/Ch2 + Ch9 overrides"]
         ACRO["<b>ACRO_Heli</b>  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
-        LUA1 --> ACRO
-        LUA2 --> ACRO
+        LUA --> ACRO
     end
 
     TP -->|"MAV_CMD_DO_WINCH<BR/>(winch_speed_ms, MAVLink)"| WCI
@@ -65,8 +63,8 @@ The base-to-hub tension difference is the tether weight component along the teth
 | body_z | Unit vector along the rotor axle (spin axis) |
 | Orbit tracking | Pixhawk-side control that rotates attitude setpoint to match hub orbital position |
 | NED | North-East-Down coordinate frame (X=North, Y=East, Z=Down). Up is [0,0,-1] |
-| Rodrigues rotation | Rotates a unit vector **v** around a unit axis **k** by angle **theta**: `v_rot = v*cos(theta) + (k x v)*sin(theta) + k*(k.v)*(1-cos(theta))`. Used throughout rawes_flight.lua for orbit tracking and rate-limited slerp because it operates directly on Vector3f components without requiring a quaternion library. |
-| Slerp | **Spherical Linear intERPolation** — moves a unit vector toward a target at a constant angular rate (rad/s), independent of frame rate. Given current vector **a**, target **b**, and slew rate **r**: compute the angle between them, cap the step at `r * dt`, then rotate **a** toward **b** by exactly that angle using Rodrigues rotation. The result stays on the unit sphere (no renormalization needed) and moves at a predictable maximum angular speed regardless of how large the error is. Used by `OrbitTracker` / `slerp_body_z` (Python) and `rawes_flight.lua`'s `slerp_step` to rate-limit body_z attitude setpoint changes to 0.40 rad/s. |
+| Rodrigues rotation | Rotates a unit vector **v** around a unit axis **k** by angle **theta**: `v_rot = v*cos(theta) + (k x v)*sin(theta) + k*(k.v)*(1-cos(theta))`. Used throughout rawes.lua for orbit tracking and rate-limited slerp because it operates directly on Vector3f components without requiring a quaternion library. |
+| Slerp | **Spherical Linear intERPolation** — moves a unit vector toward a target at a constant angular rate (rad/s), independent of frame rate. Given current vector **a**, target **b**, and slew rate **r**: compute the angle between them, cap the step at `r * dt`, then rotate **a** toward **b** by exactly that angle using Rodrigues rotation. The result stays on the unit sphere (no renormalization needed) and moves at a predictable maximum angular speed regardless of how large the error is. Used by `OrbitTracker` / `slerp_body_z` (Python) and `rawes.lua`'s `slerp_step` to rate-limit body_z attitude setpoint changes to 0.40 rad/s. |
 
 ### 2.2 Physical and Control Variables
 
@@ -109,8 +107,8 @@ the pumping cycle logic and tension PI, receives load cell, encoder, and anemome
 the winch controller via MAVLink, and commands winch speed via MAV_CMD_DO_WINCH. The wind meter is hosted on the winch node (co-located physically) and its readings serve as the
 seed/fallback for the ground station's orbital wind estimator. The ground station sends one MAVLink message (SET_ATTITUDE_TARGET) to
 the Pixhawk at ~10 Hz. The Pixhawk runs two Lua scripts on top of stock ACRO_Heli:
-rawes_flight.lua tracks the tether direction and closes the cyclic attitude loop at 50 Hz;
-rawes_yaw_trim.lua feeds forward motor torque to the GB4008 counter-torque motor at 100 Hz.
+rawes.lua tracks the tether direction and closes the cyclic attitude loop at 50 Hz;
+rawes.lua feeds forward motor torque to the GB4008 counter-torque motor at 100 Hz.
 No custom firmware is required.
 
 ### 3.2 The Natural Orbit
@@ -259,8 +257,8 @@ Exactly one MAVLink message: SET_ATTITUDE_TARGET.
 
 | Field | Description |
 |---|---|
-| quaternion | Desired disk orientation in NED frame. Identity [1,0,0,0] = natural tether-aligned orbit (planner silent). Non-identity: body_z_target_ned = quat_apply(q, [0,0,1]). rawes_flight.lua slews toward it at SCR_USER2 (RAWES_BZ_SLEW) rad/s. |
-| thrust | Normalized collective [0..1], computed by ground PI from load cell. rawes_flight.lua passes this directly to Ch3 RC override -- no conversion on the Pixhawk. |
+| quaternion | Desired disk orientation in NED frame. Identity [1,0,0,0] = natural tether-aligned orbit (planner silent). Non-identity: body_z_target_ned = quat_apply(q, [0,0,1]). rawes.lua slews toward it at SCR_USER2 (RAWES_BZ_SLEW) rad/s. |
+| thrust | Normalized collective [0..1], computed by ground PI from load cell. rawes.lua passes this directly to Ch3 RC override -- no conversion on the Pixhawk. |
 
 **Planner -> Winch Controller (local link):**
 
@@ -272,7 +270,7 @@ The Pixhawk is not involved in winch control.
 
 **Anchor Position:**
 
-rawes_flight.lua needs the anchor position to compute bz_tether = normalize(pos_hub - anchor)
+rawes.lua needs the anchor position to compute bz_tether = normalize(pos_hub - anchor)
 at every 50 Hz Lua step. The anchor is set via three SCR_USER parameters:
 
 | Parameter | Description |
@@ -293,7 +291,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 
 ## 4. Pixhawk Lua Scripts
 
-### 4.1 rawes_flight.lua -- Orbit Tracker
+### 4.1 rawes.lua -- Flight Subsystem (SCR_USER7=1 or 3)
 
 **SITL Validation Status:**
 
@@ -334,11 +332,11 @@ adds phase delay that reduces the stability margin vs. direct blade pitch.
 
 **ACRO_RP_RATE** (ArduPilot parameter, default 360 deg/s) sets the full-stick rate. The scale
 factor maps the computed rate command to PWM so the ACRO PID sees the correct physical rate.
-If ACRO_RP_RATE is changed, update the constant in rawes_flight.lua.
+If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 
 > **Sim:** The script runs unchanged inside the ArduPilot SITL Docker container. `mediator.py` provides physics via the SITL UDP JSON protocol. `test_lua_flight_rc_overrides` (stack) validates equilibrium capture at t~0.5 s and cyclic RC override output. `test_lua_flight_logic.py` (31 unit tests) covers Rodrigues rotation, orbit tracking, slerp, and cyclic projection independently of SITL.
 
-### 4.2 rawes_yaw_trim.lua -- Yaw Trim
+### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER7=2 or 3)
 
 The counter-torque script is already validated (15/15 tests pass). Full documentation in
 simulation/torque/README.md. Summary:
@@ -366,22 +364,22 @@ of the Lua trim.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1 -- roll rate | rawes_flight.lua | 50 Hz | body_z error (roll) -> ATC_RAT_RLL PID -> swashplate |
-| Ch2 -- pitch rate | rawes_flight.lua | 50 Hz | body_z error (pitch) -> ATC_RAT_PIT PID -> swashplate |
+| Ch1 -- roll rate | rawes.lua | 50 Hz | body_z error (roll) -> ATC_RAT_RLL PID -> swashplate |
+| Ch2 -- pitch rate | rawes.lua | 50 Hz | body_z error (pitch) -> ATC_RAT_PIT PID -> swashplate |
 | Ch3 -- collective | ground PI via MAVLink | ~10 Hz | Normalized thrust [0..1] from load cell -> Ch3 RC override |
-| Ch4 -- yaw rate | rawes_yaw_trim.lua | 100 Hz | Torque trim + correction -> ATC_RAT_YAW -> GB4008 |
+| Ch4 -- yaw rate | rawes.lua | 100 Hz | Torque trim + correction -> ATC_RAT_YAW -> GB4008 |
 
 ### 4.4 Simulation Mapping
 
 | Lua component                            | Python equivalent                                    | File               |
 | ---------------------------------------- | ---------------------------------------------------- | ------------------ |
-| rawes_flight.lua equilibrium capture     | _body_z_eq0, _tether_dir0 at free-flight start       | mediator.py        |
-| rawes_flight.lua orbit tracking          | orbit_tracked_body_z_eq()                            | controller.py      |
-| rawes_flight.lua rate-limited slerp      | Rate-limited slerp in mediator inner loop            | mediator.py        |
-| rawes_flight.lua cyclic P loop           | compute_swashplate_from_state()                      | controller.py      |
+| rawes.lua equilibrium capture     | _body_z_eq0, _tether_dir0 at free-flight start       | mediator.py        |
+| rawes.lua orbit tracking          | orbit_tracked_body_z_eq()                            | controller.py      |
+| rawes.lua rate-limited slerp      | Rate-limited slerp in mediator inner loop            | mediator.py        |
+| rawes.lua cyclic P loop           | compute_swashplate_from_state()                      | controller.py      |
 | ACRO ATC_RAT_RLL/PIT (rate damping)      | RatePID(kp=2/3) inner loop                           | controller.py      |
 | Ch3 collective (from ground RC override) | TensionController PI output -> normalized collective | controller.py      |
-| rawes_yaw_trim.lua trim + correction     | mediator_torque.py compute_trim + Kp                 | mediator_torque.py |
+| rawes.lua trim + correction     | mediator_torque.py compute_trim + Kp                 | mediator_torque.py |
 | ESC_STATUS rpm (planner reads)           | SpinSensor.measure() -- models AM32 eRPM jitter      | sensor.py          |
 
 ---
@@ -462,11 +460,11 @@ A higher ratio (e.g. 3:1) would give 80%+ efficiency but leave almost no headroo
 
 Three layers operate in series:
 
-1. **Feedforward trim (rawes_yaw_trim.lua):** Computes the equilibrium throttle from motor RPM
+1. **Feedforward trim (rawes.lua):** Computes the equilibrium throttle from motor RPM
    and applies it as a base command. At nominal 28 rad/s axle speed the trim is ~=74.7%.
    This handles steady-state bearing drag without any integrator.
 
-2. **Kp yaw rate correction (rawes_yaw_trim.lua):** A proportional correction `yaw_corr = -Kp_yaw x gyro.z()` (Kp_yaw = 0.001) is added to the trim. Handles transient disturbances before
+2. **Kp yaw rate correction (rawes.lua):** A proportional correction `yaw_corr = -Kp_yaw x gyro.z()` (Kp_yaw = 0.001) is added to the trim. Handles transient disturbances before
    the ArduPilot PID loop can respond.
 
 3. **ArduPilot ATC_RAT_YAW PID (ACRO_Heli):** ACRO mode commands a desired yaw rate (zero with
@@ -566,7 +564,7 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 | ATC_RAT_PIT_IMAX | 0 | Same |
 | ATC_RAT_YAW_IMAX | 0 | Same |
 | ACRO_TRAINER | 0 | Disable leveling trainer (equilibrium is 65 deg from vertical) |
-| ACRO_RP_RATE | 360 | Must match constant in rawes_flight.lua |
+| ACRO_RP_RATE | 360 | Must match constant in rawes.lua |
 
 ### 6.3 GB4008 Anti-Rotation Motor
 
@@ -597,7 +595,7 @@ lever -- start at 0.3 and increase slowly. The ATC_RAT_RLL/PIT_D term provides d
 | Load cell hardware (tension feedback)      | High -- critical path                           | Validate ground PI in simulation before hardware; load cell must be on winch before flight |      |                                                 |
 | Orbit tracking before first tether tension | Medium -- no tether direction during free climb | Equilibrium capture guard (                                                                | diff | < 0.5 m) prevents tracking until tether is taut |
 | Planner timeout during reel-in tilt        | Low -- automatic fallback                       | 2 s timeout snaps slerp goal back to _bz_orbit (natural orbit)                             |      |                                                 |
-| ACRO_RP_RATE mismatch                      | Medium -- wrong rate scaling                    | Constant in rawes_flight.lua must match ArduPilot ACRO_RP_RATE parameter                   |      |                                                 |
+| ACRO_RP_RATE mismatch                      | Medium -- wrong rate scaling                    | Constant in rawes.lua must match ArduPilot ACRO_RP_RATE parameter                   |      |                                                 |
 | GB4008 direction (H_TAIL_DIR)              | Medium -- yaw runaway                           | Verify on bench: hub spinning CCW -> motor must apply CW torque                            |      |                                                 |
 
 ---
@@ -619,7 +617,7 @@ Phase ownership:
 | Phase | Planner | Pixhawk (Lua + ACRO) |
 |---|---|---|
 | Spin-up | Monitor omega_spin; trigger release at omega >= omega_min | None |
-| Free climb (slack tether) | Pay out winch; send explicit attitude_q target | rawes_flight.lua holds attitude; Ch3 from thrust |
+| Free climb (slack tether) | Pay out winch; send explicit attitude_q target | rawes.lua holds attitude; Ch3 from thrust |
 | Tether catch | Detect tension > threshold (local winch read); reduce thrust | Orbit tracking begins once _eq_captured |
 | Transition to pumping | Ramp to operating tension setpoint | Natural orbit; follow SET_ATTITUDE_TARGET |
 
@@ -774,7 +772,7 @@ flowchart TD
 
 Note on Rodrigues: Lua's Vector3f operator overloading (* , +) is not available in this ArduPilot
 build. rodrigues() in the actual script uses explicit component arithmetic. See
-simulation/scripts/rawes_flight.lua for the exact implementation.
+simulation/scripts/rawes.lua for the exact implementation.
 
 ### A.3 Yaw Trim Formula
 
@@ -1077,7 +1075,7 @@ Seeing 0x00a7 = bits {0,1,2,5,7} means:
 
 ## Appendix E. Lua API Constraints
 
-These constraints apply to rawes_flight.lua (and any future Lua scripts) running on the
+These constraints apply to rawes.lua (and any future Lua scripts) running on the
 ArduPilot SITL Docker image and on the Pixhawk 6C with the same firmware.
 
 | What you'd expect | What actually works |
@@ -1118,8 +1116,7 @@ SCR_USER5 = -home_z_enu (negate).
 
 | File                                         | Description                                                                   |
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| simulation/scripts/rawes_flight.lua          | Orbit tracking + cyclic controller                                            |
-| simulation/scripts/rawes_yaw_trim.lua        | Counter-torque feedforward (validated)                                        |
+| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER7: 0=none, 1=flight, 2=yaw, 3=both)          |
 | simulation/torque/scripts/lua_defaults.parm  | SITL param overrides for Lua tests                                            |
 | simulation/torque/README.md                  | Full counter-torque documentation and test results                            |
 | simulation/controller.py                     | orbit_tracked_body_z_eq(), compute_swashplate_from_state(), TensionController |

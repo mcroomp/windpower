@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Full stack working. 487 unit + 38 simtests + 7 stack tests passing (1 xfailed: test_pumping_cycle kinematic-transition instability). SkewedWakeBEM is production aero model. `rawes_flight.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 8 stack tests (was 10), Lua math tests merged into `test_lua_math.py`. Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle xfail.
+**Current phase:** Phase 3, Milestone 3 — Full stack working. 487 unit + 38 simtests + 7 stack tests passing (1 xfailed: test_pumping_cycle kinematic-transition instability). SkewedWakeBEM is production aero model. `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 8 stack tests (was 10), Lua math tests merged into `test_lua_math.py`. Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle xfail.
 
 **Current stack test status:** 7 PASS, 1 XFAIL (test_pumping_cycle — known kinematic-transition instability), 0 failures. Tests: test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_stationary_gps_fusion all PASS.
 
@@ -85,7 +85,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### ArduPilot / Firmware
 | File | When to read |
 |------|-------------|
-| [system/stack.md](system/stack.md) | **Complete flight control reference** -- system architecture, ground planner, winch controller, Pixhawk orbit tracker (rawes_flight.lua), yaw trim, ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints. **Update whenever new arming or EKF behavior is discovered.** |
+| [system/stack.md](system/stack.md) | **Complete flight control reference** -- system architecture, ground planner, winch controller, Pixhawk orbit tracker (rawes.lua), yaw trim, ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints. **Update whenever new arming or EKF behavior is discovered.** |
 
 ### Simulation Internals
 | File | When to read |
@@ -97,17 +97,17 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### Key Design Decisions (this session)
 - **RotorAero removed** — `aero/aero_rotor.py` deleted; `create_aero()` factory now has 4 models (SkewedWakeBEM default).
 - **Two-loop attitude controller**: `compute_rate_cmd(kp, kd=0)` → rate setpoint; `RatePID(kp=2/3)` → swashplate tilt. Matches hardware architecture where ArduPilot rate PIDs supply damping.
-- **Portable core** in `controller.py`: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad` — frame-agnostic, map 1:1 to Lua (`rawes_flight.lua`). No C++ custom firmware planned.
+- **Portable core** in `controller.py`: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad` — frame-agnostic, map 1:1 to Lua (`rawes.lua`). No C++ custom firmware planned.
 - **High-tilt De Schutter**: ξ=80° viable. AoA stays below stall (14.4°) because low v_axial at high tilt reduces inflow angle. Requires `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above ξ≈85°.
 - **body_z_slew_rate** = `rotor.body_z_slew_rate_rad_s` = 2% of gyroscopic limit = **0.40 rad/s** for beaupoil_2026. Optimal from sweep; faster than 0.40 causes oscillation, slower wastes reel-in time.
 - **`swashplate_pitch_gain_rad`** added to YAML/RotorDefinition — physically measurable via flap deflection angle × tau at full stick deflection.
 - **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD.
-- **`rawes_flight.lua` SITL-validated** — orbit-tracking cyclic controller confirmed working in SITL via `test_lua_flight_rc_overrides`. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
+- **`rawes.lua` unified Lua controller** — single script replaces `rawes.lua` + `rawes.lua`; SCR_USER7 selects mode (0=none, 1=flight, 2=yaw, 3=both). Flight mode SITL-validated via `test_lua_flight_rc_overrides`. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
 - **`SkewedWakeBEMJit`** (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in replacement for `SkewedWakeBEM`; two kernels (`_jit_vi0`, `_jit_strip_loop`); 18-test equivalence suite (`test_skewed_wake_jit.py`, atol=1e-10). Select via `create_aero(model="jit")`.
 - **`aero_skewed_wake.py` rewritten for clarity** — non-JIT reference version; explicit double for-loop, `np.cross()`, `_prandtl_F()` helper; all intermediate numpy broadcasting and dead code removed. Full class + method docstrings added. Only purpose is human-readable reference and JIT equivalence validation.
 - **De Schutter 2018 aero audit** — `DeSchutterAero` compared to paper equations 25–31. Two additions: (1) **β side-slip** (`last_sideslip_mean_deg`) as validity diagnostic (Eq. 27-28); β does NOT enter force formulas. (2) **C_{D,T}=0.021** structural parasitic drag (Eq. 29, 31) added to blade CD; derived from cable geometry in Table I. Bug fixed: induction bootstrap floor `max(T,0.01)` replaced with `abs(T)` — floor caused phantom 200 N thrust at zero collective. Validation doc at `simulation/aero/deschutter.md`.
 - **`CD_structural`** field added to `RotorDefinition` and YAML files; `beaupoil_2026.yaml` = 0.0 (direct spar mount), `de_schutter_2018.yaml` = 0.021 (thin cable arms).
-- **Two orbit-tracking algorithms** — `orbit_tracked_body_z_eq` (azimuthal, Z-preserving) and `orbit_tracked_body_z_eq_3d` (3D Rodrigues, Lua-equivalent). The 3D version matches `rawes_flight.lua` exactly but requires a downstream rate-limited slerp; without it the altitude component of the setpoint creates positive feedback (hub sinks → setpoint more horizontal → less lift → more sinking). Inner-loop physics tests (`test_steady_flight`, `test_closed_loop_60s`) use the azimuthal version because they have no separate altitude controller. `mediator.py` and all pumping-cycle tests use `OrbitTracker` (3D + slerp), which mirrors the Lua. Lua/Python algorithm equivalence is verified in `test_lua_math.py`.
+- **Two orbit-tracking algorithms** — `orbit_tracked_body_z_eq` (azimuthal, Z-preserving) and `orbit_tracked_body_z_eq_3d` (3D Rodrigues, Lua-equivalent). The 3D version matches `rawes.lua` exactly but requires a downstream rate-limited slerp; without it the altitude component of the setpoint creates positive feedback (hub sinks → setpoint more horizontal → less lift → more sinking). Inner-loop physics tests (`test_steady_flight`, `test_closed_loop_60s`) use the azimuthal version because they have no separate altitude controller. `mediator.py` and all pumping-cycle tests use `OrbitTracker` (3D + slerp), which mirrors the Lua. Lua/Python algorithm equivalence is verified in `test_lua_math.py`.
 - **`OrbitTracker` class** — encapsulates `orbit_tracked_body_z_eq_3d` + `slerp_body_z`; mirrors Lua's `_bz_orbit`/`_bz_slerp` state machine. `update(pos, dt, bz_target=None)` returns the slerped body_z; pass `bz_target` for planner overrides (e.g. landing leveling). Replaces the 20-line slerp block that was duplicated across 6 files.
 - **`WinchNode` protocol boundary** (`winch_node.py`) — enforces hardware MAVLink boundary in simulation. Mediator calls `update_sensors(tension, wind_world)` (physics side only); planner calls `get_telemetry()` returning `{tension_n, tether_length_m, wind_ned}` and `receive_command(speed, dt)` (planner side only). Wind seed for `WindEstimator` comes from `Anemometer.measure()` at 3 m height, not from `wind_world` directly. Prevents simulation from cheating by accessing physics state unavailable on hardware.
 - **Vertical landing validated** (`test_landing.py`, `test_pump_and_land.py`) — landing is a vertical drop directly above the anchor, not a spiral descent. Key facts: (1) At the end of De Schutter reel-in the disk is already at xi=80° from the horizontal wind = only ~10° from horizontal; leveling is instant. (2) The nearly-vertical tether supports >95% of hub weight throughout descent. (3) Descent rate controller (COL_CRUISE + KP_VZ * vz_error) replaces TensionPI during landing — TensionPI oscillates when the tether briefly goes slack; the vz controller does not. (4) Tether pendulum effect naturally centres hub over the anchor: touchdown 0.5–0.7 m from anchor, 2° disk tilt, 0 m/s. (5) Floor hit may occur during DESCENT phase (tether briefly slack), not only during final_drop — floor_hit detection covers both phases; the crash-guard `floor_hits > 200` break is restricted to pumping phase only (landing floor contact is expected and correct). Full sequence (pumping + landing) validated end-to-end in test_pump_and_land.py: +1857 J net energy, 92 s total. See `system/stack.md §7.2` and `simulation/internals.md §Landing Architecture`.
@@ -124,13 +124,13 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### Lua Flight Controller
 | File | When to read |
 |------|-------------|
-| [simulation/scripts/rawes_flight.lua](simulation/scripts/rawes_flight.lua) | Orbit-tracking cyclic controller — captures equilibrium, tracks tether, rate-limited slerp, cyclic P loop |
+| [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER7: 0=none, 1=flight cyclic, 2=yaw trim, 3=both) |
 
 ---
 
 ## Lua API Constraints (this ArduPilot build)
 
-These constraints apply to `rawes_flight.lua` (and any future Lua scripts) running on the ArduPilot SITL Docker image and on the Pixhawk 6C with the same firmware.
+These constraints apply to `rawes.lua` (and any future Lua scripts) running on the ArduPilot SITL Docker image and on the Pixhawk 6C with the same firmware.
 
 | What you'd expect | What actually works |
 |---|---|
@@ -213,7 +213,7 @@ simulation/
     │   ├── test_deschutter_wind.py           Wind estimator integration with De Schutter planner
     │   ├── test_skewed_wake_jit.py           SkewedWakeBEMJit equivalence to reference (18 tests, atol=1e-10)
     │   ├── test_wind_estimator.py            Rolling-window wind estimator unit tests
-    │   ├── test_lua_flight_logic.py          ★ Rodrigues rotation, orbit tracking, slerp, cyclic error (rawes_flight.lua math)
+    │   ├── test_lua_flight_logic.py          ★ Rodrigues rotation, orbit tracking, slerp, cyclic error (rawes.lua math)
     │   ├── test_lua_math.py                 ★ Lua/Python algorithm equivalence (Rodrigues, orbit tracking, slerp, PWM)
     │   ├── test_landing.py                   ★ Vertical landing from xi=80° high-elevation hover (20 m tether)
     │   ├── test_pump_and_land.py             ★ Full De Schutter pumping cycle + vertical landing (~50 m)
@@ -223,7 +223,7 @@ simulation/
         ├── conftest.py              acro_armed + acro_armed_lua fixtures (full stack lifecycle)
         ├── test_guided_flight.py    60 s ACRO hold with tether-alignment RC controller
         ├── test_pumping_cycle.py    Pumping cycle stack test
-        ├── test_lua_flight.py       ★ rawes_flight.lua orbit-tracking validation (Lua captures + RC overrides)
+        ├── test_lua_flight.py       ★ rawes.lua flight-mode (SCR_USER7=1) orbit-tracking validation
         └── test_setup.py            Verifies setup reaches armed ACRO
 ```
 
@@ -451,7 +451,7 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 - [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (reel-out 199 N, reel-in 86 N, net energy +1396 J)
 - [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 487 fast unit + 38 simtests passing
 - [x] Design `ModeRAWES` firmware architecture — documented in `system/stack.md`
-- [x] Write and validate `rawes_flight.lua` orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection)
+- [x] Write and validate orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection); unified into `rawes.lua` (SCR_USER7 mode selection)
 - [x] Confirm H_SW_TYPE=3 (H3-120) — `test_h_swash_phang` PASSES; default is already H3_120 (value 3, not 1)
 - [x] Determine H_PHANG — `test_h_swash_phang` empirical step-cyclic test: H_SW_PHANG=0 confirmed; cross_ch1=1.5%, cross_ch2=19.7%; ArduPilot H3_120 +90° roll advance angle already aligns with RAWES servo layout (S1=0°/East, S2=120°, S3=240°)
 - [ ] Configure GB4008: H_TAIL_TYPE=4 (DDFP), tune ATC_RAT_YAW_* and H_COL2YAW feedforward
