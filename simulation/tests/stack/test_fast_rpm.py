@@ -3,8 +3,8 @@ torque/test_fast_rpm.py — Fast sinusoidal axle RPM variation test.
 
 Profile: omega_axle = 28 + 5·sin(2π·0.25·t) rad/s  (±18%, 4 s period)
 
-The motor PID must track rapidly changing bearing drag and keep
-yaw rate within ±3°/s.  Higher threshold than slow_vary because
+The motor PID must track rapidly changing RPM and maintain counter-rotation
+to keep yaw rate within ±3°/s.  Higher threshold than slow_vary because
 the PID has less time to adapt between RPM peaks.
 
 Telemetry → simulation/logs/torque_telemetry_fast_vary.json
@@ -25,7 +25,7 @@ _THRESHOLD  = 3.0     # °/s — more lenient: 4 s period leaves little settling
 def test_fast_rpm(torque_armed_profile):
     """
     Axle speed varies sinusoidally at 0.25 Hz (±18% of nominal, 4 s period).
-    The yaw rate PID must reject the rapidly oscillating bearing drag disturbance.
+    The yaw rate PID must reject the rapidly oscillating RPM disturbance.
     Pass: max |ψ_dot| < 3°/s after 40 s settle.
     """
     ctx = torque_armed_profile

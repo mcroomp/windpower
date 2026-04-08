@@ -7,8 +7,8 @@ throughout the entire spin-up.
 
 Profile: omega_axle = 28 × min(1, t / 30)  (linear ramp, then hold)
 
-The adaptive trim in the mediator tracks the changing bearing drag in
-real time, so the motor feedforward adjusts at every RPM point.
+The adaptive trim in the mediator tracks the changing RPM in
+real time, so the motor feedforward adjusts counter-rotation at every RPM point.
 
 Timeline (approximate test time after ACRO)
 -------------------------------------------
@@ -41,7 +41,7 @@ _THRESHOLD  = 2.0     # °/s — allows small ramp transients
 def test_startup(torque_armed_profile):
     """
     Rotor spins up from rest (ω=0) to nominal autorotation (ω=28 rad/s)
-    over 30 s.  The motor adaptive trim tracks the increasing bearing drag
+    over 30 s.  The motor adaptive trim tracks the increasing RPM
     in real time.  Yaw rate must stay within ±2°/s throughout spin-up
     and at steady state.
 

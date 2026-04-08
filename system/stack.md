@@ -354,7 +354,7 @@ throttle   = clamp(trim + yaw_corr, 0, 1)
 Ch4 PWM    <- 1000 + throttle x 1000
 ```
 
-The trim feedforward handles steady-state bearing drag. The Kp_yaw correction handles transient
+The trim feedforward sets the steady-state counter-rotation speed. The Kp_yaw correction handles transient
 disturbances. ArduPilot's ATC_RAT_YAW is still active and provides additional correction on top
 of the Lua trim.
 
@@ -390,10 +390,8 @@ of the Lua trim.
 
 The RAWES rotor (blades + outer hub shell) spins freely in autorotation driven by wind.
 The stationary inner assembly -- flight controller, battery, servo linkages -- is mounted
-on bearings inside the spinning shell. Bearing friction between the spinning shell and
-the stationary assembly creates a drag torque that tries to spin the stationary assembly
-in the same direction as the rotor. If uncorrected, the stationary assembly slowly
-rotates, wrapping the tether and losing heading control.
+on bearings inside the spinning shell. The inner assembly must maintain a fixed heading
+while the outer shell spins; otherwise the tether wraps and heading control is lost.
 
 ### 5.2 Actuator: GB4008 + 80:44 Gear
 
@@ -404,9 +402,10 @@ The motor stator is fixed to the stationary assembly. The motor rotor is geared 
 spinning axle via an **80:44 spur gear** (motor side has 44 teeth; axle side has 80 teeth).
 The motor therefore spins at `80/44 ~= 1.82x` the axle speed.
 
-When the motor produces electromagnetic torque on its rotor, Newton's third law applies an
-equal and opposite torque to its stator (the stationary assembly). This reaction torque
-counteracts bearing drag and holds the assembly at a fixed heading.
+Because the motor is mechanically geared to the axle, it counter-rotates at a rate that
+exactly cancels the rotor spin as seen by the stationary assembly, keeping the assembly at
+a fixed heading. The work the motor does is overcoming bearing and swashplate friction --
+in a frictionless system the inner assembly would stay stationary on its own inertia.
 
 The GB4008 behaves as a standard DC motor:
 
@@ -429,7 +428,7 @@ Hub yaw dynamics:
 I_hub x psi_ddot = Q_bearing + Q_motor
 
 Q_bearing = k_bearing x (omega_axle - psi_dot)           [viscous bearing drag]
-Q_motor   = -(80/44) x tau_motor(throttle, omega_rel)    [reaction on hub, opposing drag]
+Q_motor   = -(80/44) x tau_motor(throttle, omega_rel)    [reaction on hub, maintains heading]
 omega_rel = (omega_axle - psi_dot) x (80/44)             [motor speed relative to hub]
 ```
 
@@ -462,15 +461,16 @@ Three layers operate in series:
 
 1. **Feedforward trim (rawes.lua):** Computes the equilibrium throttle from motor RPM
    and applies it as a base command. At nominal 28 rad/s axle speed the trim is ~=74.7%.
-   This handles steady-state bearing drag without any integrator.
+   This sets the counter-rotation speed needed to maintain heading against bearing and
+   swashplate friction.
 
 2. **Kp yaw rate correction (rawes.lua):** A proportional correction `yaw_corr = -Kp_yaw x gyro.z()` (Kp_yaw = 0.001) is added to the trim. Handles transient disturbances before
    the ArduPilot PID loop can respond.
 
 3. **ArduPilot ATC_RAT_YAW PID (ACRO_Heli):** ACRO mode commands a desired yaw rate (zero with
    neutral stick). The yaw rate PID outputs a tail-rotor command (Ch4) to null the sensed yaw
-   rate. Because the Lua feedforward already supplies the bulk of the required torque, the PID
-   only corrects deviations -- no integrator wind-up is needed for steady-state torque balance.
+   rate. Because the Lua feedforward already supplies the bulk of the required counter-rotation,
+   the PID only corrects deviations -- no integrator wind-up is needed for steady-state balance.
 
 **Biased throttle mapping:**
 
@@ -495,8 +495,8 @@ biased throttle curve.
 | H_RSC_MODE      | 1      | CH8 passthrough -- instant runup       |
 | H_TAIL_TYPE     | 0      | Servo output, symmetric +/-1500 us     |
 | H_COL2YAW       | 0      | No collective->yaw feedforward         |
-| ATC_RAT_YAW_P   | 0.001  | Very small P -- trim does steady-state |
-| ATC_RAT_YAW_I/D | 0      | No integrator (trim handles it)        |
+| ATC_RAT_YAW_P   | 0.001  | Very small P -- feedforward sets counter-rotation |
+| ATC_RAT_YAW_I/D | 0      | No integrator (feedforward handles it) |
 | EK3_SRC1_YAW    | 1      | Compass yaw source                     |
 | COMPASS_USE     | 1      | Compass enabled                        |
 
@@ -575,8 +575,8 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 | SERVO4_MIN      | 1000        | ESC disarm                                                           |
 | SERVO4_MAX      | 2000        | ESC maximum                                                          |
 | SERVO4_TRIM     | ~1150       | Idle torque at rest                                                  |
-| ATC_RAT_YAW_P   | 0.20        | Starting value (trim handles steady state)                           |
-| ATC_RAT_YAW_I   | 0.05        | Absorbs steady-state bearing friction                                |
+| ATC_RAT_YAW_P   | 0.20        | Starting value (feedforward sets counter-rotation)                   |
+| ATC_RAT_YAW_I   | 0.05        | Absorbs steady-state bearing/swashplate friction                     |
 | ATC_RAT_YAW_D   | 0.0         | Start at zero                                                        |
 | H_COL2YAW       | TBD         | Feedforward: collective changes alter drag -> GB4008 must compensate |
 

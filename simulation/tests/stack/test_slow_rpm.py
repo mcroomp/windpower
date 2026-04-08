@@ -3,8 +3,8 @@ torque/test_slow_rpm.py — Slow sinusoidal axle RPM variation test.
 
 Profile: omega_axle = 28 + 5·sin(2π·0.05·t) rad/s  (±18%, 20 s period)
 
-The motor PID must track the slowly changing bearing drag and keep
-yaw rate within ±2°/s throughout the observation window.
+The motor PID must track the slowly changing RPM and maintain counter-rotation
+to keep yaw rate within ±2°/s throughout the observation window.
 
 Telemetry → simulation/logs/torque_telemetry_slow_vary.json
 """
@@ -24,7 +24,7 @@ _THRESHOLD  = 2.0     # °/s — more lenient than constant-RPM test
 def test_slow_rpm(torque_armed_profile):
     """
     Axle speed varies sinusoidally at 0.05 Hz (±18% of nominal).
-    The yaw rate PID must reject the slowly varying bearing drag disturbance.
+    The yaw rate PID must reject the slowly varying RPM disturbance.
     Pass: max |ψ_dot| < 2°/s after 40 s settle.
     """
     ctx = torque_armed_profile

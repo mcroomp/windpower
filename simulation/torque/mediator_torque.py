@@ -9,9 +9,10 @@ Physical scenario
 -----------------
   • Hub sits stationary at NED = [0, 0, 0], roll = 0, pitch = 0.
   • The axle is driven at ``--omega-axle`` rad/s (simulated autorotation).
-  • Bearing drag between axle and hub tries to rotate the hub in yaw.
+  • The motor counter-rotates via the 80:44 gear to maintain hub heading.
+  • Bearing and swashplate friction is the load the motor works against.
   • ArduPilot sees the yaw rate in the gyro and commands the tail-rotor
-    channel (Ch4) to counteract it via the GB4008 motor.
+    channel (Ch4) to hold the counter-rotation speed via the GB4008 motor.
 
 Sensor data sent to ArduPilot (JSON over UDP 9003 → SITL)
 ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ def _omega_gust(dt: float, nom: float) -> float:
 def _omega_startup(dt: float, nom: float) -> float:
     """Linear spin-up from 0 to nominal over 30 s, then hold.
     Simulates the rotor accelerating from rest to autorotation speed.
-    The adaptive trim tracks the changing bearing drag at every RPM point."""
+    The adaptive trim tracks the changing counter-rotation speed at every RPM point."""
     T_RAMP = 30.0
     return nom * min(1.0, dt / T_RAMP)
 
@@ -281,9 +282,9 @@ def run(
 
     Dynamic phase (startup_hold_s … ∞)
     ------------------------------------
-    Real hub yaw dynamics: bearing drag from the spinning axle tries to
-    rotate the hub; ArduPilot's tail-rotor PID (Ch4) drives the GB4008 motor
-    to counteract it.
+    Real hub yaw dynamics: the motor counter-rotates via the 80:44 gear to
+    maintain hub heading; ArduPilot's tail-rotor PID (Ch4) controls the
+    GB4008 motor speed.
 
     Parameters
     ----------

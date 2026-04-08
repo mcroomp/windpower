@@ -249,8 +249,10 @@ Control feel is light and consistent regardless of rotor loading.
 
 ## 6. Anti-Rotation Motor (GB4008)
 
-The **EMAX GB4008** gimbal motor keeps the lower swashplate ring, servos, and electronics
-stationary against rotor drag torque.
+The **EMAX GB4008** gimbal motor is mechanically geared to the spinning axle via an 80:44
+spur gear. It counter-rotates against the rotor, keeping the lower swashplate ring,
+servos, and electronics at a fixed heading. Speed control ensures the motor's
+counter-rotation exactly cancels the axle spin seen by the stationary assembly.
 
 | Parameter      | Value                          |
 |----------------|--------------------------------|
@@ -265,8 +267,9 @@ stationary against rotor drag torque.
 | Mounting       | 19x19 mm or 25x25 mm           |
 | Gear reduction | 80:44 spur gear (~1.82x torque)|
 
-The hollow shaft allows mechanical linkage through the blade axis. The motor only needs to match
-the drag torque of the rotor -- it does not drive rotation.
+The hollow shaft allows mechanical linkage through the blade axis. The motor does not drive
+rotor rotation -- it counter-rotates via the gear coupling, and we control its speed to keep
+the stationary assembly at a fixed heading.
 
 Application notes:
 - Low-KV / high-torque characteristic matches the low-speed, high-precision deflection requirement
@@ -384,7 +387,7 @@ Pixhawk 6C          --DSHOT/PWM----------> REVVitRC ESC -> GB4008 Motor
 
 | Component             | Supplied by    | Voltage     | Idle current     | Peak current        | Notes                                   |
 |-----------------------|----------------|-------------|------------------|---------------------|-----------------------------------------|
-| GB4008 Motor          | ESC -> battery | 15.2V (4S)  | ~0 A             | ~2 A (est.)         | 7.5 ohm winding; only opposes drag torque |
+| GB4008 Motor          | ESC -> battery | 15.2V (4S)  | ~0 A             | ~2 A (est.)         | 7.5 ohm winding; geared counter-rotation for heading hold |
 | REVVitRC 50A ESC      | Battery        | 15.2V (4S)  | ~0.1 A           | 50 A max            | Current limit set by ESC firmware       |
 | Pixhawk 6C FMU        | PM             | 4.1-5.7V    | ~0.25 A (est.)   | ~0.5 A (est.)       | PM provides regulated 5.3V             |
 | DS113MG V6.0 (S1)     | UBEC -> servo rail | 8.0V   | ~0.05 A          | 1.6 A stall         | Rated 4.8-8.4V; stall at 8.4V = 1.6 A |
@@ -411,8 +414,8 @@ UBEC must be rated for at least **5 A continuous** at 8V. Verify UBEC model/rati
 | Active flight (motor + servos) | ~5-8 A            | ~4-6 min     |
 | Motor at full counter-torque   | ~8-12 A (est.)    | ~2-3 min     |
 
-These are rough estimates. Actual motor current depends on rotor drag torque, which scales with
-rpm^2 and air density.
+These are rough estimates. Actual motor current depends on bearing and swashplate friction,
+which scales with rpm.
 
 ### Open Items -- Power
 

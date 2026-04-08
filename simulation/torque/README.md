@@ -8,10 +8,8 @@ Isolated simulation and ArduPilot stack test for the RAWES anti-rotation motor s
 
 The RAWES rotor (blades + outer hub shell) spins freely in autorotation driven by wind.
 The *stationary* inner assembly — flight controller, battery, servo linkages — is mounted
-on bearings inside the spinning shell.  Bearing friction between the spinning shell and
-the stationary assembly creates a drag torque that tries to spin the stationary assembly
-in the same direction as the rotor.  If uncorrected, the stationary assembly slowly
-rotates, wrapping the tether and losing heading control.
+on bearings inside the spinning shell.  The inner assembly must maintain a fixed heading
+while the outer shell spins; otherwise the tether wraps and heading control is lost.
 
 ### The Actuator
 
@@ -22,9 +20,10 @@ The motor stator is fixed to the stationary assembly.  The motor rotor is geared
 spinning axle via an **80:44 spur gear** (motor side has 44 teeth; axle side has 80 teeth).
 The motor therefore spins at `80/44 ≈ 1.82×` the axle speed.
 
-When the motor produces electromagnetic torque on its rotor, Newton's third law applies an
-equal and opposite torque to its stator (the stationary assembly).  This reaction torque
-counteracts bearing drag and holds the assembly at a fixed heading.
+Because the motor is mechanically geared to the axle, it counter-rotates at a rate that
+exactly cancels the rotor spin as seen by the stationary assembly, keeping the assembly at
+a fixed heading.  The work the motor does is overcoming bearing and swashplate friction —
+in a frictionless system the inner assembly would stay stationary on its own inertia.
 
 ### Motor Model
 
@@ -49,7 +48,7 @@ threshold is `51/105 ≈ 48.5%`.  **Equilibrium throttle is ≈ 75%.**
 I_hub × ψ̈ = Q_bearing + Q_motor
 
 Q_bearing = k_bearing × (ω_axle − ψ̇)           [viscous bearing drag]
-Q_motor   = −(80/44) × τ_motor(throttle, ω_rel)  [reaction on hub, opposing drag]
+Q_motor   = −(80/44) × τ_motor(throttle, ω_rel)  [reaction on hub, maintains heading]
 ω_rel     = (ω_axle − ψ̇) × (80/44)              [motor speed relative to hub]
 ```
 
@@ -106,7 +105,7 @@ The mediator runs a 10-second startup phase before enabling hub dynamics:
 2. EKF aligns tilt + yaw (compass-based) in ≈4 s
 3. Hub is locked at ψ = 0 during startup (no dynamics)
 4. Hub psi at startup end is preserved to avoid attitude discontinuity
-5. Dynamics phase begins: bearing drag + motor PID active
+5. Dynamics phase begins: motor counter-rotation + bearing friction active
 
 ### Key Parameters
 
@@ -233,7 +232,7 @@ mediator_torque.py (--lua-mode)     ArduPilot SITL
 ────────────────────────────────    ──────────────────────────────────────
 Pure physics engine only:           rawes.lua (SCR_USER7=2):
   hub yaw dynamics                    motor_rpm = battery:voltage(0)
-  bearing drag                          (mediator encodes RPM as voltage)
+  bearing friction                      (mediator encodes RPM as voltage)
   motor torque                        trim = compute_trim(motor_rpm)
   sends battery.voltage=motor_rpm     yaw_corr = -Kp × gyro:z()
   (encodes motor RPM for Lua)         throttle = trim + yaw_corr

@@ -2,15 +2,15 @@
 torque/test_yaw_regulation.py — Counter-torque motor stack test.
 
 Verifies that ArduPilot SITL can hold hub yaw steady while the GB4008
-anti-rotation motor counteracts bearing drag from the spinning axle.
+anti-rotation motor counter-rotates against the spinning axle.
 
 Physical scenario
 -----------------
   • Axle spins at ≈ 28 rad/s (nominal RAWES autorotation at 10 m/s wind)
-  • Bearing drag tries to rotate the stationary hub in yaw
+  • The motor counter-rotates via the 80:44 gear to maintain hub heading
+  • Bearing and swashplate friction is the load the motor works against
   • ArduPilot (heli frame, ACRO mode) senses the yaw rate via gyro and
-    commands Ch4 (H_TAIL_TYPE=0, servo) to drive the GB4008 motor
-  • The motor reaction (through the 80:44 gear) counteracts the bearing drag
+    commands Ch4 (H_TAIL_TYPE=0, servo) to control GB4008 motor speed
 
 Pass criterion
 --------------
@@ -76,8 +76,8 @@ def test_yaw_regulation(torque_armed):
     ArduPilot SITL regulates hub yaw using the tail-rotor (Ch4) output.
 
     ACRO mode with neutral sticks commands ψ_dot = 0.  The yaw rate PID must
-    build enough Ch4 output to cancel bearing drag from the spinning axle and
-    hold |ψ_dot| < 1°/s after a 30 s settle period.
+    build enough Ch4 output to maintain counter-rotation against the spinning
+    axle and hold |ψ_dot| < 1°/s after a 30 s settle period.
 
     Telemetry is saved to simulation/logs/torque_telemetry.json for playback
     with visualize_torque.py.

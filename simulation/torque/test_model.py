@@ -14,9 +14,9 @@ Tests
 3. test_p_controller_convergence    — P-controller on yaw rate converges within 15 s
 4. test_rpm_step_recovery           — step in ω_axle is rejected within 10 s
 5. test_zero_axle_no_drift          — stopped axle → hub stays at rest
-6. test_motor_reaction_direction    — motor torque must oppose bearing drag on hub
-7. test_motor_saturation            — throttle clamped; torque always ≥ 0
-8. test_gear_ratio_authority        — motor at full throttle must dominate bearing drag
+6. test_motor_reaction_direction    — motor torque must oppose bearing friction on hub
+7. test_motor_saturation            — throttle clamped; torque always >= 0
+8. test_gear_ratio_authority        — motor at full throttle must overcome bearing friction
 """
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def test_zero_axle_no_drift():
 def test_motor_reaction_direction():
     """
     Increasing throttle must produce a torque on the hub that OPPOSES the
-    direction of bearing drag (not adds to it).
+    direction of bearing friction (not adds to it).
 
     If this fails it means the gear-ratio sign is wrong — the motor would make
     things worse instead of better, and yaw regulation would be impossible.
@@ -211,16 +211,16 @@ def test_motor_reaction_direction():
     tau_shaft       = m.motor_torque(0.5, omega_motor, params)
     Q_motor_on_hub  = -params.gear_ratio * tau_shaft   # same calc as in _derivatives
 
-    # Bearing drag is positive (CCW); motor reaction must be negative (CW)
+    # Bearing friction is positive (CCW); motor reaction must be negative (CW)
     assert Q_motor_on_hub < 0.0, (
-        f"Motor reaction on hub must be negative (opposing bearing drag); "
+        f"Motor reaction on hub must be negative (opposing bearing friction); "
         f"got {Q_motor_on_hub:.4f} N·m"
     )
 
 
 def test_gear_ratio_authority():
     """
-    At full throttle the motor reaction must exceed the bearing drag at nominal
+    At full throttle the motor reaction must exceed the bearing friction at nominal
     axle speed — otherwise yaw is uncontrollable at design-point RPM.
     """
     params      = m.HubParams()

@@ -3,7 +3,7 @@ torque/model.py — Counter-torque motor simulation model
 
 Simulates the RAWES stationary hub + axle + anti-rotation motor (GB4008) system.
 Goal: verify that ArduPilot's SITL can regulate yaw using the tail-rotor control
-channel when bearing drag from the spinning axle tries to rotate the hub.
+channel while the motor counter-rotates to maintain hub heading.
 
 Physical setup
 --------------
@@ -21,8 +21,8 @@ reaction acts on the stator (hub).  The gear multiplies this reaction:
 
     Q_motor_on_hub = −(80/44) × τ_em_at_motor_shaft
 
-A positive throttle → positive τ_em → negative Q_motor_on_hub (opposing axle-
-direction bearing drag).
+A positive throttle → positive τ_em → negative Q_motor_on_hub (counter-rotating
+against axle spin to maintain hub heading).
 
 Hub equation of motion
 ----------------------
@@ -174,7 +174,7 @@ def _derivatives(
     # Bearing drag: viscous coupling between spinning axle and hub
     Q_bearing = params.k_bearing * (omega_axle - state.psi_dot)
 
-    # Motor reaction on hub (opposes bearing drag when throttle > 0).
+    # Motor reaction on hub (counter-rotates to maintain heading).
     # Motor back-EMF depends on relative speed of rotor vs stator (stator is on hub).
     omega_motor_rel = max(0.0, (omega_axle - state.psi_dot) * params.gear_ratio)
     tau_shaft   = motor_torque(throttle, omega_motor_rel, params)
