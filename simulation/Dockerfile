@@ -66,8 +66,8 @@ RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
 USER sim
 ENV USER=sim
 RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        git clone --recurse-submodules \
-            https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
+        git clone --recurse-submodules --branch sitl-json-rpm-feedback \
+            https://github.com/mcroomp/ardupilot.git "$ARDUPILOT_PATH" \
         && cd "$ARDUPILOT_PATH" \
         && unset VIRTUAL_ENV \
         && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -110,27 +110,6 @@ RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
                -I0 --home 51.5074,-0.1278,50,0 \
                2>/dev/null; true; \
     fi
-
-# =============================================================================
-# 3c. Patch ArduPilot JSON backend to expose 'rpm' field to Lua scripting.
-#     The JSON keytable in SIM_JSON.h doesn't include rpm by default, so
-#     RPM:get_rpm(0) always returns 0 even when the physics backend sends rpm.
-#     We patch the keytable to add the rpm scalar field → state.rpm[0], then
-#     do an incremental waf rebuild (only recompiles the affected .cpp file).
-#     Battery.voltage is also added for completeness (already in keytable but
-#     we confirm the state field name).
-# =============================================================================
-COPY patch_sim_json.py /tmp/patch_sim_json.py
-USER sim
-RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        python3 /tmp/patch_sim_json.py \
-        && cd "$ARDUPILOT_PATH" \
-        && unset VIRTUAL_ENV \
-        && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-        && . ~/.profile \
-        && ./waf --target bin/arducopter-heli; \
-    fi
-USER root
 
 # =============================================================================
 # 4. Simulation files — mounted at runtime, not baked into the image

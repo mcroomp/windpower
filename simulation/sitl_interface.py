@@ -154,7 +154,7 @@ class SITLInterface:
             "velocity": [float(vel_ned[0]),
                          float(vel_ned[1]),
                          float(vel_ned[2])],
-            "rpm":       [rpm1, 0.0],
+            "rpm":       {"rpm_1": rpm1, "rpm_2": 0.0, "rpm_3": 0.0, "rpm_4": 0.0},
         }
         payload = (json.dumps(msg) + "\n").encode("utf-8")
         try:

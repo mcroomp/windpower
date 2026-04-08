@@ -247,12 +247,9 @@ def _make_state_json(
         "position":   [0.0, 0.0, 0.0],
         "attitude":   [float(roll), float(pitch), float(-psi)],
         "velocity":   [0.0, 0.0, 0.0],
-        # Send motor RPM via battery.voltage field — the rpm field approach
-        # failed because state.rpm[] gets overwritten by SITL motor simulation.
-        # Battery voltage is reliable: battery:voltage(0) in Lua reads this.
-        # The Lua script interprets voltage > 50 as motor RPM (not a real voltage).
-        # In non-lua-mode tests, voltage=12.6 < 50 so Lua returns early harmlessly.
-        "battery":    {"voltage": float(omega_rotor * (80.0/44.0) * 60.0 / (2.0 * math.pi))},
+        # Motor RPM via the SITL JSON rpm field (mcroomp/ardupilot fork).
+        # ArduPilot maps rpm.rpm_1 -> state.rpm[0] -> RPM:get_rpm(0) in Lua.
+        "rpm":        {"rpm_1": float(omega_rotor * (80.0/44.0) * 60.0 / (2.0 * math.pi))},
     }
     return (json.dumps(msg) + "\n").encode("utf-8")
 

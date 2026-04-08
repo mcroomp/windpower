@@ -29,9 +29,9 @@ Yaw-trim subsystem constants (compile-time):
   KP_YAW       0.001 rad/s -> throttle proportional yaw correction
 
 SITL RPM encoding:
-  mediator_torque.py sends motor_rpm as battery.voltage (SITL hack).
-  Values below MIN_RPM (50) mean no RPM data (real 4S = 12.6 V < 50).
-  On hardware replace battery:voltage(0) with RPM:get_rpm(0).
+  mediator_torque.py sends motor_rpm via the JSON "rpm.rpm_1" field.
+  ArduPilot (mcroomp fork) maps this to state.rpm[0] -> RPM:get_rpm(0).
+  Values below MIN_RPM (50 RPM) mean no data / motor stopped.
 
 Deployment:
   Copy rawes.lua to APM/scripts/ on the Pixhawk SD card.
@@ -58,7 +58,7 @@ local KV_RAD        = 66.0 * math.pi / 30.0
 local R_MOTOR       = 7.5
 local K_BEARING     = 0.005
 local KP_YAW        = 0.001
-local MIN_RPM       = 50            -- RPM below this = no data (real 4S is 12.6 V < 50)
+local MIN_RPM       = 50            -- RPM below this = motor stopped / no ESC telemetry yet
 local V_BAT_NOM     = 15.2          -- nominal 4S LiPo voltage for trim computation
 local YAW_SRV_FUNC  = 94            -- ArduPilot servo function for Script 1 output (SERVO9)
 
@@ -156,8 +156,8 @@ local function compute_trim(motor_rpm, v_bat)
 end
 
 local function run_yaw_trim()
-    -- Motor RPM via battery.voltage encoding (SITL) or RPM:get_rpm(0) (hardware)
-    local motor_rpm = battery:voltage(0)
+    -- Motor RPM from SITL JSON rpm field (RPM1_TYPE=10) and hardware ESC telemetry
+    local motor_rpm = RPM:get_rpm(0)
 
     if _diag % 500 == 1 then
         gcs:send_text(6, string.format(
