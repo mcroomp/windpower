@@ -19,9 +19,9 @@ precession and destabilises the system.  Instead we run a P+D rate controller:
     cmd_pitch = -kp * pitch - kd * pitchspeed
     cmd_yaw   =             - kd * yawspeed
 
-where roll/pitch are the tether-relative attitude angles the mediator reports
-(zero at tether equilibrium) and rollspeed/pitchspeed/yawspeed are the
-body-frame angular rates from the ArduPilot ATTITUDE message.
+where roll/pitch are attitude error angles (physical attitude minus the
+equilibrium captured at kinematic startup) and rollspeed/pitchspeed/yawspeed
+are body-frame angular rates from the ArduPilot ATTITUDE message.
 """
 import json
 import logging
@@ -94,10 +94,9 @@ def test_acro_hold(acro_armed: StackContext):
     Uses the ``acro_armed`` fixture for setup.  Only the hold loop and
     assertions are here.
 
-    The hold loop runs a P+D rate controller (compute_rc_from_attitude) that
-    keeps the hub aligned with the tether direction.  The mediator reports
-    tether-relative attitude (roll=pitch=0 at equilibrium), so ATTITUDE.roll
-    and .pitch are directly the attitude error angles.
+    The hold loop uses PhysicalHoldController.send_correction(), which subtracts
+    the equilibrium roll/pitch captured at kinematic startup and calls
+    compute_rc_from_attitude with the resulting deviation angles.
 
     Asserts:
       - Hub stays above _MIN_ALT_M (did not crash)

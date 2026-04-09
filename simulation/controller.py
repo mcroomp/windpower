@@ -219,23 +219,20 @@ def compute_rc_from_attitude(
     rate_max_deg: float = 200.0,
 ) -> dict:
     """
-    Compute RC override channels from ArduPilot ATTITUDE message fields.
+    Map attitude error + body rates to ACRO RC PWM overrides.
 
-    Because the mediator reports **tether-relative** attitude (roll=0, pitch=0
-    when body_z is on the tether), the ATTITUDE message roll/pitch are directly
-    the attitude error from tether equilibrium.  rollspeed/pitchspeed/yawspeed
-    are the body-frame angular rates that ArduPilot's ACRO loop is controlling.
+    Generic error-to-PWM converter used by PhysicalHoldController, which
+    pre-computes roll/pitch as deviations from the captured equilibrium
+    (att["roll"] − roll_eq, att["pitch"] − pitch_eq) before calling here.
 
-    The controller commands:
+    Commands:
         cmd_roll  = -kp * roll  - kd * rollspeed
         cmd_pitch = -kp * pitch - kd * pitchspeed
-        cmd_yaw   = -kd * yawspeed
-
-    This keeps body_z aligned with the tether and damps all body-frame rates.
+        cmd_yaw   =             - kd * yawspeed
 
     Parameters
     ----------
-    roll, pitch           : tether-relative attitude angles [rad]
+    roll, pitch           : attitude error from equilibrium [rad]
     rollspeed, pitchspeed, yawspeed : body-frame angular rates [rad/s]
     kp                    : attitude error gain [rad/s per rad]
     kd                    : rate damping gain [dimensionless]

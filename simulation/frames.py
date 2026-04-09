@@ -43,7 +43,7 @@ def build_orb_frame(body_z: np.ndarray) -> np.ndarray:
 
     Used by:
       - mediator.py  — to build the initial R0 from body_z
-      - sensor.py    — to compute tether-relative attitude deviation
+      - sensor.py    — to extract physical orbital-frame Euler angles
       - aero.py      — (if needed) to express forces in disk frame
 
     Parameters

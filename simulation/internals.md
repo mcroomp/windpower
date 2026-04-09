@@ -15,26 +15,22 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 ---
 
-## Sensor Design — Tether-Relative Attitude
+## Sensor Design — Physical Attitude
 
-**Critical design decision:** attitude is reported as the **deviation from the tether equilibrium orientation**, not absolute orientation relative to world Up.
+`PhysicalSensor` (the only sensor class) reports the **true physical orbital-frame orientation** — approximately roll=124°, pitch=−46° at tether equilibrium (ZYX Euler, NED). ACRO mode is compatible with this because it only damps angular rates toward commanded rates; the large physical tilt causes no automatic corrective cyclic.
 
-**Why:** The RAWES equilibrium has body Z at ~30° elevation — ~65° from vertical. Reporting absolute attitude causes ArduPilot to see 58° roll / 36° pitch at rest and command maximum cyclic, crashing the hub within 1 second.
+**`PhysicalSensor.compute()`** (`sensor.py`):
+- `rpy` = actual ZYX Euler angles of the orbital frame (spin stripped), with yaw replaced by velocity heading
+- yaw derived from `atan2(vE, vN)`, rate-limited to ~0.05 rad/s to prevent gyro body-axis remapping when the tether activates
+- gyro has spin stripped; rotated into the physical orbital body frame via `R_body.T`
+- accel = specific force `R_body.T @ (accel_world_ned − [0,0,9.81])`
 
-**How** (`sensor.build_sitl_packet`):
-- `rpy = [0, 0, yaw_from_velocity]` — roll and pitch are always zero (tether-relative)
-- yaw is derived from velocity heading so EKF attitude and velocity are consistent
-- gyro has spin stripped; rotated into yaw-aligned body frame
-- accel is kinematic accel in NED body frame plus −g correction
-
-**EKF consequence:** ArduPilot interprets deviations from tether equilibrium as small roll/pitch errors and corrects with modest cyclic, not maximum deflection.
+**`PhysicalHoldController`** (`controller.py`): captures equilibrium roll/pitch at kinematic startup end. Calls `compute_rc_from_attitude(roll − roll_eq, pitch − pitch_eq, ...)` so the function receives the deviation from equilibrium, not the raw physical angle.
 
 **Sensor consistency rules (must all agree or EKF triggers emergency yaw reset):**
-1. `velocity_ned` heading must match `rpy[2]` (yaw) — both derived from `atan2(vE, vN)`
-2. `gyro_body` must be in yaw-aligned NED body frame (spin stripped, then `Rz(-yaw) @ omega_nospin`)
-3. `accel_body` must be `Rz(-yaw) @ (accel_world_ned - [0,0,9.81])`
-
-**Physical sensor mode** (`PhysicalSensor`) reports actual orbital-frame orientation (~65° from NED vertical). Used by the pumping cycle stack test. Applies the same velocity-derived yaw override + rate-limiting to avoid a yaw jump when the tether activates (which would remap the gyro body axes and destabilise ACRO).
+1. `velocity_ned` heading must match `rpy[2]` (yaw) — both from `atan2(vE, vN)`
+2. `gyro_body` in physical orbital body frame (spin stripped, then `R_body.T @ omega_orbital`)
+3. `accel_body` = `R_body.T @ (accel_world_ned − [0,0,9.81])`
 
 ---
 

@@ -181,9 +181,9 @@ def plot_report(data: dict, out_path: Path) -> None:
     ax.set_ylabel("Collective (°)", fontsize=8)
 
     # ── Panel 8: Attitude reported to ArduPilot ───────────────────────────────
-    # roll/pitch are tether-relative (0° at equilibrium); yaw = velocity heading.
-    # tilt_lat (panel 7) drives roll correction; tilt_lon drives pitch correction.
-    ax = _ax(7, "Attitude sent to ArduPilot EKF  (tether-relative: 0° = equilibrium)", "deg")
+    # roll/pitch are physical orbital-frame Euler angles (~124°/-46° at equilibrium);
+    # yaw = velocity heading.
+    ax = _ax(7, "Attitude sent to ArduPilot EKF  (physical orbital frame; ~124 deg roll at equilibrium)", "deg")
     roll_deg  = [math.degrees(v) for v in _get("rpy_roll",  [0.0] * len(t))]
     pitch_deg = [math.degrees(v) for v in _get("rpy_pitch", [0.0] * len(t))]
     yaw_deg   = [math.degrees(v) for v in _get("rpy_yaw",   [0.0] * len(t))]

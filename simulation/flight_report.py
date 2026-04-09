@@ -203,10 +203,10 @@ def plot_flight_report(
     ax2.grid(True, alpha=0.3)
     _add_events(ax2)
 
-    # ── Panel 3: Attitude (tether-relative) ──────────────────────────────────
+    # ── Panel 3: Attitude (physical orbital frame) ───────────────────────────
     ax3 = fig.add_subplot(gs[2])
     if telem and "rpy_roll" in telem:
-        # Prefer mediator ground-truth tether-relative attitude from telemetry
+        # Prefer mediator ground-truth physical attitude from telemetry
         ax3.plot(telem["t"], telem["rpy_roll"],  color="#1f77b4", linewidth=1.2, label="Roll  (°)  ← tilt_lat")
         ax3.plot(telem["t"], telem["rpy_pitch"], color="#ff7f0e", linewidth=1.2, label="Pitch (°)  ← tilt_lon")
         ax3.plot(telem["t"], telem["rpy_yaw"],   color="#2ca02c", linewidth=1.2, label="Yaw   (°)  (velocity heading)")

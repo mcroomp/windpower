@@ -27,7 +27,7 @@ The present work fills this gap. We show that:
 
 1. The RAWES natural orbit is a quasi-circular cone traced on the tether sphere, sustained without active steering.
 2. The orbital period (~60 s), radius (~15 m), and body-frame angular rate (~0.2-0.3 rad/s) are directly set by tether length, wind speed, and disk tilt.
-3. Five concrete control design requirements follow from orbit mechanics: tether-relative attitude reporting, orbital rate bias compensation, orbit tracking, disk-tilt slew rate limiting, and passive wind direction estimation.
+3. Five concrete control design requirements follow from orbit mechanics: ACRO-mode physical attitude compatibility, orbital rate bias compensation, orbit tracking, disk-tilt slew rate limiting, and passive wind direction estimation.
 4. The pumping cycle changes the orbital cone geometry predictably with disk tilt, enabling controlled tension modulation without external orbit steering.
 
 ---

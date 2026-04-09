@@ -67,15 +67,14 @@ All physics uses NED. `T_ENU_NED` in `frames.py` is kept as a utility for conver
 
 ---
 
-## Sensor Design — Tether-Relative Attitude
+## Sensor Design — Physical Attitude
 
-The RAWES equilibrium has body Z ~65° from vertical (aligned with the tether). Reporting absolute attitude causes ArduPilot to see ~65° tilt at rest and command maximum cyclic, crashing the hub.
+`PhysicalSensor` in `sensor.py` reports the **true physical orbital-frame orientation** (~124° roll / −46° pitch at tether equilibrium, ZYX Euler NED). ACRO mode is used because it only damps angular rates, so the large physical tilt causes no automatic corrective cyclic.
 
-`build_sitl_packet()` in `sensor.py` instead reports **tether-relative attitude**:
-- `roll = 0, pitch = 0` always (zero at tether equilibrium)
-- `yaw` derived from velocity heading (keeps EKF attitude/velocity consistent)
-- Gyro: spin stripped, rotated into yaw-aligned body frame
-- Accel: kinematic accel in NED body frame + −g correction
+- `rpy` = actual ZYX Euler angles (spin stripped), yaw replaced by velocity heading
+- `yaw` derived from `atan2(vE, vN)`, rate-limited to prevent gyro body-axis remapping at tether activation
+- Gyro: spin stripped, rotated into physical orbital body frame
+- Accel: specific force in physical orbital body frame
 
 ---
 
