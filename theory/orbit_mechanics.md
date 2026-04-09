@@ -221,13 +221,17 @@ The energy asymmetry arises entirely from orbit geometry: during reel-out the di
 
 This section derives five specific control design requirements that follow directly from the orbit characteristics described above.
 
-### 7.1 Tether-Relative Attitude Reporting
+### 7.1 Physical Attitude and ACRO-Mode Compatibility
 
-**Problem:** At orbital equilibrium the RAWES hub sits at ~67 deg from vertical (NED down). Standard attitude estimation (e.g. ArduPilot EKF3) interprets this as ~67 deg roll/pitch error from level and immediately commands full cyclic deflection, crashing the hub within 1-2 s.
+**Situation:** At orbital equilibrium the RAWES hub sits at ~67 deg from vertical (NED down), giving true Euler angles of approximately roll=124 deg, pitch=-46 deg (ZYX convention). ArduPilot EKF3 sees this full physical tilt.
 
-**Solution:** The sensor model must report attitude as *deviation from the tether-aligned equilibrium*, not as absolute NED orientation. Roll and pitch are zero at tether equilibrium regardless of the physical disk angle. Yaw is derived from velocity heading (`atan2(v_East, v_North)`) for EKF consistency.
+**Why this is not a problem in ACRO mode:** ACRO mode does not hold an absolute NED attitude -- it only damps angular *rates* toward the commanded RC rates. A 65 deg physical tilt causes no automatic corrective cyclic; the hub floats at whatever attitude it happens to be in as long as the commanded rate is zero. This is the reason ACRO was chosen for RAWES over STABILIZE or GUIDED, both of which command cyclic to drive the hub toward level (roll=0, pitch=0) and crash within seconds.
 
-**Implication for control architecture:** This is a sensor calibration requirement, not a controller gain. It must be implemented in the SITL sensor bridge or the hardware IMU calibration. Changing it after EKF initialisation triggers an emergency yaw reset and crash.
+**rawes.lua approach:** On first activation, rawes.lua reads the actual body_z in NED via `ahrs:body_to_earth(v3_body_z())`. This captures the real physical disk orientation at that moment, including the full tether-alignment tilt (~67 deg from vertical). Orbit tracking (`_bz_orbit`, updated via Rodrigues rotation each 20 ms step) operates relative to this captured body_z. The cyclic error is computed as `bz_now:cross(_bz_slerp)` in NED and projected into the body frame via `ahrs:earth_to_body()` -- all using the real physical orientation, no coordinate frame tricks required.
+
+**Sensor consistency requirement:** The PhysicalSensor must report consistent attitude, accelerometer, and gyroscope readings, all expressed in the physical orbital body frame (spin stripped). Yaw is still derived from velocity heading (`atan2(v_East, v_North)`) for EKF GPS consistency, rate-limited to ~0.05 rad/s to prevent gyro body-axis remapping when the tether activates. Changing the yaw convention after EKF initialisation triggers an emergency yaw reset and crash.
+
+**Note on STABILIZE:** STABILIZE commands absolute NED attitude (roll=0, pitch=0 = level), which fights the 65 deg tether equilibrium with maximum cyclic and crashes within 1-2 s regardless of sensor mode. Do not use STABILIZE.
 
 ### 7.2 Orbital Angular Rate as a Rate-Loop Bias
 
@@ -326,7 +330,7 @@ The five control requirements above translate directly to specific ArduPilot con
 
 | Requirement | ArduPilot Parameter / Design Choice |
 |-------------|--------------------------------------|
-| Tether-relative attitude | SITL sensor bridge (tether-relative rpy); COMPASS_USE=0 |
+| Physical attitude + ACRO mode | PhysicalSensor reports true orbital-frame Euler (~124 deg roll / -46 deg pitch at equilibrium); rawes.lua captures actual body_z via ahrs:body_to_earth() at startup; COMPASS_USE=0 |
 | Orbital rate bias | ATC_RAT_RLL/PIT/YAW_IMAX = 0 |
 | Orbit tracking | Mode_RAWES: orbit_tracked_body_z_eq at 400 Hz |
 | Slew rate limiting | Mode_RAWES: body_z_slew_rate = 0.40 rad/s |
@@ -342,7 +346,7 @@ The natural orbit of a tethered RAWES is a quasi-circular cone driven by aerodyn
 
 Five flight control requirements follow directly from these orbit characteristics:
 
-1. Attitude must be reported relative to the tether equilibrium, not the world vertical.
+1. ACRO mode must be used; attitude-hold modes (STABILIZE, GUIDED) fight the 65 deg tether equilibrium. The Lua controller captures the actual physical body_z on startup and tracks it in the real orbital body frame -- no sensor deception required.
 2. The orbit angular rate produces a persistent I-term bias in ACRO rate loops; IMAX must be zeroed.
 3. The attitude reference must track the orbital azimuth continuously to maintain zero steady-state error.
 4. The disk-tilt slew rate must be limited to <= 0.40 rad/s to avoid gyroscopic transients at pumping cycle phase transitions.
