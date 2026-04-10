@@ -41,6 +41,7 @@ from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
+from tel         import make_tel
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -258,35 +259,14 @@ def _run() -> dict:
             wind_est_ready_log.append(estimator.ready)
 
         if i % tel_every == 0:
-            _ti = tether._last_info
-            telemetry.append({
-                "t_sim":              t,
-                "hub_pos_x":          float(hub_state["pos"][0]),
-                "hub_pos_y":          float(hub_state["pos"][1]),
-                "hub_pos_z":          float(hub_state["pos"][2]),
-                "hub_vel_x":          float(hub_state["vel"][0]),
-                "hub_vel_y":          float(hub_state["vel"][1]),
-                "hub_vel_z":          float(hub_state["vel"][2]),
-                "tether_length":      float(_ti.get("length",   0.0)),
-                "tether_extension":   float(_ti.get("extension", 0.0)),
-                "tether_tension":     float(tension_now),
-                "tether_rest_length": float(tether.rest_length),
-                "tether_slack":       int(_ti.get("slack", True)),
-                "collective_rad":     float(collective_rad),
-                "collective_norm":    float(cmd.get("thrust", 0.0)),
-                "pumping_phase":      str(cmd.get("phase", "")),
-                "tension_setpoint":   float(cmd.get("tension_setpoint_n", 0.0)),
-                "collective_from_tension_ctrl": float(cmd.get("thrust", 0.0)),
-                "omega_rotor":        float(omega_spin),
-                "pos_ned":            hub_state["pos"].tolist(),
-                "R":                  hub_state["R"].tolist(),
-                "swash_collective":   collective_rad,
-                "swash_tilt_lon":     sw["tilt_lon"],
-                "swash_tilt_lat":     sw["tilt_lat"],
-                "body_z_eq":          body_z_eq.tolist(),
-                "wind_ned":           wind_now.tolist(),
-                "wind_est_ned":       (estimator.wind_dir_ned * float(est_speed or 0.0)).tolist(),
-            })
+            telemetry.append(make_tel(
+                t, hub_state, omega_spin, tether, tension_now,
+                collective_rad, sw["tilt_lon"], sw["tilt_lat"], wind_now,
+                body_z_eq=body_z_eq,
+                phase=str(cmd.get("phase", "")),
+                tension_setpoint=float(cmd.get("tension_setpoint_n", 0.0)),
+                wind_est_ned=(estimator.wind_dir_ned * float(est_speed or 0.0)).tolist(),
+            ))
 
     t_split = int(T_REEL_OUT)
     return dict(

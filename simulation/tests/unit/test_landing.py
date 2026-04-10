@@ -41,6 +41,7 @@ from frames         import build_orb_frame
 from simtest_log    import SimtestLog
 from simtest_ic     import load_ic
 from landing_planner import LandingPlanner
+from tel             import make_tel
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -201,20 +202,11 @@ def _run_landing() -> dict:
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────────
         if i % tel_every == 0:
-            telemetry.append({
-                "t_sim":              t_sim,
-                "phase":              phase,
-                "pos_ned":            hub_state["pos"].tolist(),
-                "R":                  hub_state["R"].tolist(),
-                "altitude_m":         altitude,
-                "hub_vel_z":          float(hub_state["vel"][2]),
-                "tether_rest_length": float(tether.rest_length),
-                "tether_tension":     float(tension_now),
-                "collective_rad":     float(collective_rad),
-                "omega_rotor":        float(omega_spin),
-                "wind_ned":           WIND.tolist(),
-                "body_z_eq":          body_z_eq.tolist(),
-            })
+            telemetry.append(make_tel(
+                t_sim, hub_state, omega_spin, tether, tension_now,
+                collective_rad, tilt_lon, tilt_lat, WIND,
+                body_z_eq=body_z_eq, phase=phase,
+            ))
 
     # ── Results ───────────────────────────────────────────────────────────────
     anchor_dist   = None

@@ -857,16 +857,23 @@ class DeschutterPlanner(TrajectoryPlanner):
             (collective_rad - self._col_min_rad) / col_range if col_range > 1e-9 else 0.5
         )))
 
-        # Winch speed.
-        # Both transitions are ramped over t_transition, synchronised with the
-        # body_z slerp:
-        #   Reel-out → reel-in: ramp 0 → -v_reel_in  (prevents shortening before disk tilts)
-        #   Reel-in → reel-out: ramp 0 → +v_reel_out  (prevents extending before disk re-tilts;
-        #                                               gives altitude time to stabilise)
+        # Winch speed — trapezoid profile: ramp up at phase start AND ramp down
+        # at phase end, both over t_transition.  This prevents the discontinuous
+        # speed jump (±v → 0) at phase boundaries that caused tether slack:
+        #   - End of reel-in: hub has inward momentum; if winch speed snaps to 0
+        #     the rest_length starts growing while hub still moves inward → slack.
+        #   - End of reel-out: symmetric; prevents tether snap when reversing.
+        # alpha_*_end approaches 0 only in the last t_transition seconds of the
+        # phase; outside that window it is 1.0 and has no effect.
         if phase_out:
-            winch_speed = self._v_reel_out * alpha_out
+            t_remaining_out = self._t_reel_out - t_cyc
+            alpha_out_end   = min(1.0, t_remaining_out / self._t_transition)
+            winch_speed     = self._v_reel_out * min(alpha_out, alpha_out_end)
         else:
-            winch_speed = -(self._v_reel_in * alpha)
+            t_into_reel_in  = t_cyc - self._t_reel_out
+            t_remaining_in  = self._t_reel_in - t_into_reel_in
+            alpha_in_end    = min(1.0, t_remaining_in / self._t_transition)
+            winch_speed     = -(self._v_reel_in * min(alpha, alpha_in_end))
 
         if phase_out and self._attitude_q_reel_in is None:
             attitude_q = Q_IDENTITY.copy()

@@ -38,6 +38,7 @@ from planner import HoldPlanner
 from frames     import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
+from tel         import make_tel
 
 _log = SimtestLog(__file__)
 _IC  = load_ic()
@@ -157,19 +158,11 @@ def _run(t_sim: float = T_SIM):
             })
 
         if i % tel_every == 0:
-            telemetry.append({
-                "t_sim":               t,
-                "pos_ned":             hub_state["pos"].tolist(),
-                "R":                   hub_state["R"].tolist(),
-                "omega_rotor":         omega_spin,
-                "tether_tension":      tension_now,
-                "tether_rest_length":  tether.rest_length,
-                "swash_collective":    _IC.stack_coll_eq,
-                "swash_tilt_lon":      tilt_lon,
-                "swash_tilt_lat":      tilt_lat,
-                "body_z_eq":           body_z_eq.tolist(),
-                "wind_ned":            WIND.tolist(),
-            })
+            telemetry.append(make_tel(
+                t, hub_state, omega_spin, tether, tension_now,
+                _IC.stack_coll_eq, tilt_lon, tilt_lat, WIND,
+                body_z_eq=body_z_eq,
+            ))
 
     history.append({
         "t":          t_sim,

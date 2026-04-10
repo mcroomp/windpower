@@ -43,6 +43,7 @@ from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
+from tel         import make_tel
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -250,15 +251,12 @@ def _run_10hz() -> dict:
                 break
 
         if i % tel_every == 0:
-            _ti = tether._last_info
-            telemetry.append({
-                "t_sim":          t,
-                "phase":          phase,
-                "altitude_m":     float(-hub_state["pos"][2]),
-                "tether_tension": float(tension_now),
-                "collective_rad": float(collective_rad),
-                "omega_rotor":    float(omega_spin),
-            })
+            telemetry.append(make_tel(
+                t, hub_state, omega_spin, tether, tension_now,
+                collective_rad, tilt_lon, tilt_lat, WIND,
+                body_z_eq=body_z_eq, phase=phase,
+                tension_setpoint=float(last_cmd.get("tension_setpoint_n", 0.0)),
+            ))
 
     skip = int(T_TRANSITION / DT_OUTER)   # skip reel-in transition in mean
     n_skip_inner = skip * INNER_PER_OUTER

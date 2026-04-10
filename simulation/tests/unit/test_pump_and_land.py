@@ -56,6 +56,7 @@ from winch           import WinchController
 from frames          import build_orb_frame
 from simtest_log     import SimtestLog
 from simtest_ic      import load_ic
+from tel             import make_tel
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -167,8 +168,9 @@ def _run_pump_and_land() -> dict:
     tensions_land      = []
     energy_out         = 0.0
     energy_in          = 0.0
-    floor_hits         = 0
-    pumping_floor_hits = 0
+    floor_hits           = 0
+    pumping_floor_hits   = 0
+    pumping_slack_events = 0
 
     touchdown_vz   = None
     touchdown_bz   = None
@@ -223,6 +225,8 @@ def _run_pump_and_land() -> dict:
                           else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
             body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
+            if tether._last_info.get("slack", False):
+                pumping_slack_events += 1
             if pump_cmd["phase"] == "reel-out":
                 energy_out += tension_now * V_REEL_OUT * DT
                 tensions_out.append(tension_now)
@@ -302,24 +306,12 @@ def _run_pump_and_land() -> dict:
         if i % tel_every == 0:
             xi_level = float(np.degrees(np.arccos(
                 np.clip(np.dot(hub_state["R"][:, 2], BZ_LEVEL), -1.0, 1.0))))
-            telemetry.append({
-                "t_sim":              t_sim,
-                "phase":              tel_phase,
-                "pos_ned":            hub_state["pos"].tolist(),
-                "R":                  hub_state["R"].tolist(),
-                "altitude_m":         altitude,
-                "hub_vel_z":          float(hub_state["vel"][2]),
-                "tether_rest_length": float(tether.rest_length),
-                "tether_tension":     float(tension_now),
-                "collective_rad":     float(collective_rad),
-                "xi_level_deg":       xi_level,
-                "omega_rotor":        float(omega_spin),
-                "wind_ned":           WIND.tolist(),
-                "swash_collective":   float(collective_rad),
-                "swash_tilt_lon":     float(tilt_lon),
-                "swash_tilt_lat":     float(tilt_lat),
-                "body_z_eq":          body_z_eq.tolist(),
-            })
+            telemetry.append(make_tel(
+                t_sim, hub_state, omega_spin, tether, tension_now,
+                collective_rad, tilt_lon, tilt_lat, WIND,
+                body_z_eq=body_z_eq, phase=tel_phase,
+                xi_level_deg=xi_level,
+            ))
 
     # ── Results ───────────────────────────────────────────────────────────────
     anchor_dist   = None
@@ -365,6 +357,7 @@ def _run_pump_and_land() -> dict:
         net_energy       = energy_out - energy_in,
         floor_hits            = floor_hits,
         pumping_floor_hits    = pumping_floor_hits,
+        pumping_slack_events  = pumping_slack_events,
         floor_hit        = floor_hit,
         touchdown_time   = touchdown_time,
         touchdown_vz     = touchdown_vz,
@@ -400,6 +393,22 @@ def test_pumping_no_crash():
     print(f"\n  Floor hits during pumping: {r['pumping_floor_hits']}")
     assert r["pumping_floor_hits"] == 0, \
         f"Hub hit floor {r['pumping_floor_hits']} times during pumping"
+
+
+def test_pumping_no_tether_slack():
+    """
+    Tether must never go slack during the pumping cycle.
+
+    Zero tension means free fall, loss of tether torque, and uncontrolled disk
+    orientation — equivalent to a crash on hardware.  The planner's trapezoid
+    winch-speed profile prevents momentum-driven slack at phase boundaries.
+    """
+    r = _results()
+    print(f"\n  Tether slack events during pumping: {r['pumping_slack_events']}")
+    assert r["pumping_slack_events"] == 0, (
+        f"Tether went slack {r['pumping_slack_events']} times during pumping "
+        "(zero tension = loss of control)"
+    )
 
 
 def test_landing_no_tension_spikes():

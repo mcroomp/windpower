@@ -485,52 +485,40 @@ def _trail_mesh(positions: np.ndarray) -> Optional[pv.PolyData]:
     return mesh
 
 
+
+
 # ---------------------------------------------------------------------------
 # Swashplate inset helpers
 # ---------------------------------------------------------------------------
 
-_SWASH_R_INNER         = 0.12   # inner radius of display ring  [m]
-_SWASH_R_OUTER         = 0.58   # outer radius of display ring  [m]
-_SWASH_R_SERVO         = 0.50   # servo attachment radius       [m]
-_SWASH_COLL_SCALE      = 4.0    # vertical travel per radian collective
-                                 # (±0.1 rad → ±0.4 m, comparable to tilt excursion)
-_SWASH_TRACK_HALF      = 0.85   # ± height of the servo travel track [m]
-_SWASH_COLL_EQ         = -0.1   # equilibrium collective [rad] — reference ring shown here
-# H3-120: three servo attachment points equally spaced at 90°, 210°, 330°
-_SWASH_SERVO_ANGLES    = (90.0, 210.0, 330.0)
-_SWASH_SERVO_COLORS    = ("#ff5555", "#55ee88", "#5599ff")   # S1 red, S2 green, S3 blue
+_SWASH_R_INNER      = 0.12   # inner radius of display ring  [m]
+_SWASH_R_OUTER      = 0.58   # outer radius of display ring  [m]
+_SWASH_R_SERVO      = 0.50   # servo attachment radius       [m]
+_SWASH_COLL_SCALE   = 4.0    # vertical travel per radian collective
+_SWASH_TRACK_HALF   = 0.85   # ± height of servo travel track [m]
+_SWASH_COLL_EQ      = -0.1   # equilibrium collective [rad]
+_SWASH_SERVO_ANGLES = (90.0, 210.0, 330.0)
+_SWASH_SERVO_COLORS = ("#ff5555", "#55ee88", "#5599ff")   # S1 red, S2 green, S3 blue
 
 
-def _swash_normal(tilt_lon: float, tilt_lat: float) -> tuple:
-    """
-    Swashplate disk normal from cyclic tilt inputs.
-      tilt_lat  — tilts the plate about Y (east side rises/falls)
-      tilt_lon  — tilts the plate about X (north side rises/falls)
-    Returns a normalised (nx, ny, nz) tuple.
-    """
+def _swash_normal(tilt_lon: float, tilt_lat: float) -> np.ndarray:
     n = np.array([tilt_lat, tilt_lon, 1.0])
-    n /= np.linalg.norm(n)
-    return tuple(n.tolist())
+    return n / np.linalg.norm(n)
 
 
 def _servo_z(collective_rad: float, tilt_lon: float, tilt_lat: float,
              angle_deg: float) -> float:
     """Z height of a servo attachment point on the tilted swashplate."""
-    theta       = np.radians(angle_deg)
-    z_coll      = collective_rad * _SWASH_COLL_SCALE
-    nx, ny, nz  = _swash_normal(tilt_lon, tilt_lat)
+    theta      = np.radians(angle_deg)
+    z_coll     = collective_rad * _SWASH_COLL_SCALE
+    nx, ny, nz = _swash_normal(tilt_lon, tilt_lat)
     return float(z_coll - _SWASH_R_SERVO * (nx * np.cos(theta) + ny * np.sin(theta)) / nz)
 
 
 def _swash_plate_mat4(tilt_lon: float, tilt_lat: float,
                       collective_rad: float) -> np.ndarray:
-    """
-    4×4 transform for the active swashplate ring.
-
-    Created flat (normal=[0,0,1]) at z=0; this matrix tilts it to the
-    requested normal and lifts it to the collective height.
-    """
-    normal = np.array(_swash_normal(tilt_lon, tilt_lat))
+    """4×4 local transform: tilt the flat disk and lift by collective."""
+    normal = _swash_normal(tilt_lon, tilt_lat)
     z      = np.array([0., 0., 1.])
     axis   = np.cross(z, normal)
     sin_a  = float(np.linalg.norm(axis))
@@ -543,66 +531,10 @@ def _swash_plate_mat4(tilt_lon: float, tilt_lat: float,
                        [axis[2], 0, -axis[0]],
                        [-axis[1], axis[0], 0]], dtype=float)
         R3 = np.eye(3) + sin_a * K + (1.0 - cos_a) * (K @ K)
-    M          = np.eye(4, dtype=float)
-    M[:3, :3]  = R3
-    M[2,   3]  = collective_rad * _SWASH_COLL_SCALE
+    M         = np.eye(4, dtype=float)
+    M[:3, :3] = R3
+    M[2,   3] = collective_rad * _SWASH_COLL_SCALE
     return M
-
-
-def _swashplate_meshes(collective_rad: float, tilt_lon: float,
-                       tilt_lat: float) -> list:
-    """
-    Return list of (PolyData, color_hex, opacity) representing the swashplate.
-
-    Scene elements
-    --------------
-    - Neutral reference ring  (flat grey, z=0)
-    - Tilted swashplate plate (teal, offset vertically by collective)
-    - Central axle bar
-    - Three servo tracks (dark cylinders, full travel range)
-    - Three servo attachment spheres at current heights (S1=red, S2=green, S3=blue)
-    """
-    z_coll = collective_rad * _SWASH_COLL_SCALE
-    normal = _swash_normal(tilt_lon, tilt_lat)
-    parts  = []
-
-    # Equilibrium reference ring — flat, centred on the typical operating collective
-    z_eq = _SWASH_COLL_EQ * _SWASH_COLL_SCALE
-    ref  = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
-                   normal=(0, 0, 1), c_res=64, r_res=1)
-    ref.translate((0.0, 0.0, z_eq), inplace=True)
-    parts.append((ref, "#4444aa", 0.40))
-
-    # Tilted active plate
-    plate = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
-                    normal=normal, c_res=64, r_res=1)
-    plate.translate((0.0, 0.0, z_coll), inplace=True)
-    parts.append((plate, "#33ccdd", 0.80))
-
-    # Central axle
-    axle = pv.Cylinder(center=(0, 0, 0), direction=(0, 0, 1),
-                       radius=0.035, height=_SWASH_TRACK_HALF * 2.5,
-                       resolution=10)
-    parts.append((axle, "#666677", 0.50))
-
-    for angle_deg, col in zip(_SWASH_SERVO_ANGLES, _SWASH_SERVO_COLORS):
-        theta = np.radians(angle_deg)
-        sx    = _SWASH_R_SERVO * np.cos(theta)
-        sy    = _SWASH_R_SERVO * np.sin(theta)
-        zh    = _servo_z(collective_rad, tilt_lon, tilt_lat, angle_deg)
-
-        # Travel track — centred on equilibrium z so operating range sits mid-track
-        track = pv.Cylinder(center=(sx, sy, z_eq), direction=(0, 0, 1),
-                             radius=0.018, height=_SWASH_TRACK_HALF * 2,
-                             resolution=8)
-        parts.append((track, "#2a2a44", 0.70))
-
-        # Current attachment sphere
-        sph = pv.Sphere(radius=0.068, center=(sx, sy, zh),
-                        theta_resolution=14, phi_resolution=14)
-        parts.append((sph, col, 1.00))
-
-    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -659,15 +591,18 @@ class RAWESVisualizer:
         frames: List[TelemetryFrame],
         trail_len: int = TRAIL_LEN,
         playback_fps: float = 10.0,
+        no_inset: bool = False,
     ) -> None:
         self._frames      = frames
         self._trail_len   = trail_len
         self._fps         = playback_fps
         self._n           = len(frames)
+        self._no_inset    = no_inset
         self._pos_history = np.array([_to_viz(f.pos_ned) for f in frames])
         self._spin_angles = self._integrate_spin()
         self._energy      = self._integrate_energy()
         self._inset_ren: Optional[object] = None   # vtkRenderer, set up lazily
+        self._plotter: Optional[object]  = None   # active plotter for camera sync
 
     # ------------------------------------------------------------------
     # Public API
@@ -682,6 +617,7 @@ class RAWESVisualizer:
         """
         plotter = pv.Plotter(title="RAWES 3D — interactive playback")
         plotter.set_background("#1a1a2e")
+        self._plotter = plotter
         self._add_static_scene(plotter)
         self._add_dynamic_actors(plotter, 0)
         self._add_hud(plotter)
@@ -793,6 +729,7 @@ class RAWESVisualizer:
                     self._mesh_trail.points = pts
                     self._mesh_trail.lines  = seg
 
+            self._sync_inset_camera()
             budget_ms = max(1, int((_FRAME_DT - (time.monotonic() - t_loop)) * 1000))
             plotter.update(budget_ms)
 
@@ -813,6 +750,7 @@ class RAWESVisualizer:
         """
         pl = pv.Plotter(title="RAWES scrubber")
         pl.set_background("#1a1a2e")
+        self._plotter = pl
         self._add_static_scene(pl)
         self._add_dynamic_actors(pl, 0)
         self._update_trail(pl, 0)
@@ -889,6 +827,7 @@ class RAWESVisualizer:
         ext = Path(path).suffix.lower()
         plotter = pv.Plotter(off_screen=True, title="RAWES 3D export")
         plotter.set_background("#1a1a2e")
+        self._plotter = plotter
         self._add_static_scene(plotter)
         self._add_dynamic_actors(plotter, 0)
         self._add_hud(plotter)
@@ -977,7 +916,8 @@ class RAWESVisualizer:
         plotter.add_mesh(pv.merge(lower_cones), color="#2d6e2d", smooth_shading=True, opacity=0.92)
         plotter.add_mesh(pv.merge(upper_cones), color="#3a8a3a", smooth_shading=True, opacity=0.92)
 
-        self._setup_inset(plotter)
+        if not self._no_inset:
+            self._setup_inset(plotter)
 
     # ------------------------------------------------------------------
     # Dynamic actor setup: ALL actors created ONCE; updated in-place per frame.
@@ -1079,6 +1019,7 @@ class RAWESVisualizer:
 
         self._actors_created = True
         self._last_trail_idx = idx
+        self._link_inset_actors()
 
     def _fast_update(self, idx: int) -> None:
         """Update all dynamic actors in-place. No new actors or shaders."""
@@ -1136,8 +1077,10 @@ class RAWESVisualizer:
         wind_start = pos_viz - wind_viz * 0.3
         self._actor_wind.user_matrix = _dir_mat4(wind_start, wind_viz * 0.4)
 
-        # HUD text: SetInput on the underlying vtkTextActor (no new actor)
+        # Swashplate inset
         self._update_inset_frame(f)
+
+        # HUD text: SetInput on the underlying vtkTextActor (no new actor)
         if hasattr(self, "_hud_actor") and hasattr(self, "_hud_frame_idx"):
             fi = self._hud_frame_idx
             e_net = self._energy[fi]
@@ -1239,12 +1182,12 @@ class RAWESVisualizer:
 
     def _setup_inset(self, plotter: pv.Plotter) -> None:
         """
-        Create all swashplate inset actors ONCE.  Per-frame updates use
-        user_matrix only — no new actors or shaders after this call.
+        Create the inset renderer and swashplate schematic actors.
 
-        Static actors  : reference ring, axle, 3 servo tracks
-        Dynamic actors : active plate (user_matrix), 3 servo spheres (user_matrix)
-        Total          : 9 actors created once at startup.
+        All actors live in the inset's own coordinate space (hub body frame).
+        _update_inset_frame() applies R_hub each frame so the diagram is
+        always oriented exactly as the real swashplate is in the world.
+        _sync_inset_camera() keeps the camera angle matching the main view.
         """
         if not _HAS_VTK:
             return
@@ -1252,63 +1195,62 @@ class RAWESVisualizer:
         ren.SetViewport(0.72, 0.02, 0.98, 0.30)
         ren.SetBackground(0.05, 0.05, 0.12)
         ren.SetLayer(1)
+        ren.SetInteractive(0)   # camera driven by _sync_inset_camera, not mouse
         plotter.ren_win.SetNumberOfLayers(2)
         plotter.ren_win.AddRenderer(ren)
-
         cam = ren.GetActiveCamera()
-        cam.SetPosition(1.6, -2.0, 2.2)
-        cam.SetFocalPoint(0.0, 0.0, 0.0)
-        cam.SetViewUp(0.0, 0.0, 1.0)
         cam.SetParallelProjection(True)
         cam.SetParallelScale(1.05)
-
         self._inset_ren = ren
 
         def _add(mesh, color, opacity=1.0):
             return self._inset_add(mesh, color, opacity)
 
-        # ── Static: all merged into ONE actor to minimise shader count ──────────
-        z_eq         = _SWASH_COLL_EQ * _SWASH_COLL_SCALE
-        ref          = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
-                               normal=(0,0,1), c_res=48, r_res=1)
+        # Static parts (reference ring, axle, servo tracks) — merged into one actor
+        z_eq = _SWASH_COLL_EQ * _SWASH_COLL_SCALE
+        ref  = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
+                       normal=(0, 0, 1), c_res=48, r_res=1)
         ref.translate((0.0, 0.0, z_eq), inplace=True)
         static_parts = [ref,
-                        pv.Cylinder(center=(0,0,0), direction=(0,0,1),
-                                    radius=0.035, height=_SWASH_TRACK_HALF*2.5,
+                        pv.Cylinder(center=(0, 0, 0), direction=(0, 0, 1),
+                                    radius=0.035, height=_SWASH_TRACK_HALF * 2.5,
                                     resolution=8)]
         for angle_deg in _SWASH_SERVO_ANGLES:
             theta = np.radians(angle_deg)
-            sx, sy = _SWASH_R_SERVO*np.cos(theta), _SWASH_R_SERVO*np.sin(theta)
+            sx, sy = _SWASH_R_SERVO * np.cos(theta), _SWASH_R_SERVO * np.sin(theta)
             static_parts.append(
-                pv.Cylinder(center=(sx, sy, z_eq), direction=(0,0,1),
-                            radius=0.018, height=_SWASH_TRACK_HALF*2,
+                pv.Cylinder(center=(sx, sy, z_eq), direction=(0, 0, 1),
+                            radius=0.018, height=_SWASH_TRACK_HALF * 2,
                             resolution=6))
-        _add(pv.merge(static_parts), "#4a4a77", 0.55)   # 1 actor for all static parts
+        self._inset_static = _add(pv.merge(static_parts), "#4a4a77", 0.55)
 
-        # ── Dynamic: active plate — user_matrix updated per frame ──────────────
-        plate_mesh = pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
-                             normal=(0,0,1), c_res=64, r_res=1)
-        self._inset_plate = _add(plate_mesh, "#33ccdd", 0.80)
+        # Active plate — user_matrix updated per frame
+        self._inset_plate = _add(
+            pv.Disc(inner=_SWASH_R_INNER, outer=_SWASH_R_OUTER,
+                    normal=(0, 0, 1), c_res=64, r_res=1),
+            "#33ccdd", 0.80)
 
-        # ── Dynamic: servo spheres — Z translated per frame ────────────────────
+        # Servo spheres — geometry pre-centred at (sx, sy, 0); user_matrix per frame
         self._inset_spheres = []
         for angle_deg, col in zip(_SWASH_SERVO_ANGLES, _SWASH_SERVO_COLORS):
             theta = np.radians(angle_deg)
-            sx, sy = _SWASH_R_SERVO*np.cos(theta), _SWASH_R_SERVO*np.sin(theta)
-            sph = pv.Sphere(radius=0.068, center=(sx, sy, 0.0),
-                            theta_resolution=10, phi_resolution=10)
-            self._inset_spheres.append(_add(sph, col, 1.00))
+            sx, sy = _SWASH_R_SERVO * np.cos(theta), _SWASH_R_SERVO * np.sin(theta)
+            self._inset_spheres.append(_add(
+                pv.Sphere(radius=0.068, center=(sx, sy, 0.0),
+                          theta_resolution=10, phi_resolution=10),
+                col, 1.00))
+
+    def _link_inset_actors(self) -> None:
+        pass   # inset uses its own separate swashplate actors
 
     def _update_inset(self, idx: int) -> None:
-        """Update swashplate inset via user_matrix — no new actors created."""
         if self._inset_ren is None or not hasattr(self, "_inset_plate"):
             return
-        f = self._frames[idx]
-        self._update_inset_frame(f)
+        self._update_inset_frame(self._frames[idx])
+        self._sync_inset_camera()
 
     @staticmethod
     def _np_to_vtk4x4(m: np.ndarray):
-        """Convert 4×4 numpy array to vtkMatrix4x4 for raw vtkActor.SetUserMatrix."""
         from vtkmodules.vtkCommonMath import vtkMatrix4x4
         vtk_m = vtkMatrix4x4()
         for i in range(4):
@@ -1317,23 +1259,70 @@ class RAWESVisualizer:
         return vtk_m
 
     def _update_inset_frame(self, f) -> None:
-        """Update inset actors in-place — no new actors or shaders."""
+        """
+        Orient all swashplate actors by the actual hub rotation so the inset
+        diagram matches what the real swashplate looks like in 3D space.
+
+        Every actor is in the hub body frame.  Applying R_viz (hub rotation
+        in ENU) as the base transform makes the schematic align with the hub
+        orientation seen in the main view.
+        """
         if self._inset_ren is None or not hasattr(self, "_inset_plate"):
             return
-        # Active plate: rotation + Z lift via vtkMatrix4x4
+
+        # Hub rotation: NED body → ENU display frame
+        R_viz = _T_NED_ENU @ np.asarray(f.R, dtype=float)
+        R4    = np.eye(4, dtype=float)
+        R4[:3, :3] = R_viz
+
+        # Static parts: pure hub rotation
+        self._inset_static.SetUserMatrix(self._np_to_vtk4x4(R4))
+
+        # Active plate: hub rotation composed with swashplate tilt + collective lift
         self._inset_plate.SetUserMatrix(
-            self._np_to_vtk4x4(_swash_plate_mat4(
+            self._np_to_vtk4x4(R4 @ _swash_plate_mat4(
                 f.swash_tilt_lon, f.swash_tilt_lat, f.swash_collective)))
-        # Servo spheres: Z translation via SetPosition (sphere local origin = sx,sy,0)
+
+        # Servo spheres: geometry at (sx, sy, 0) in body frame; move to R_viz @ (sx, sy, zh)
+        # M[:3,:3] = R_viz rotates the sphere; M[:3,3] = R_viz @ [0,0,zh] adds the Z lift
         for actor, angle_deg in zip(self._inset_spheres, _SWASH_SERVO_ANGLES):
             zh = _servo_z(f.swash_collective, f.swash_tilt_lon,
                           f.swash_tilt_lat, angle_deg)
-            actor.SetPosition(0.0, 0.0, zh)
+            M         = np.eye(4, dtype=float)
+            M[:3, :3] = R_viz
+            M[:3,  3] = R_viz @ np.array([0.0, 0.0, zh])
+            actor.SetUserMatrix(self._np_to_vtk4x4(M))
+
         self._inset_ren.ResetCameraClippingRange()
+
+    def _sync_inset_camera(self) -> None:
+        """
+        Copy the main camera's view direction and up vector to the inset camera.
+        Called every loop iteration so the inset tracks the main view even when paused.
+        """
+        if self._inset_ren is None or self._plotter is None:
+            return
+        try:
+            cam = self._plotter.camera
+            pos = np.asarray(cam.position,    dtype=float)
+            fp  = np.asarray(cam.focal_point, dtype=float)
+            up  = np.asarray(cam.up,          dtype=float)
+            d   = pos - fp
+            n   = float(np.linalg.norm(d))
+            if n < 1e-9:
+                return
+            d_unit = d / n
+            ic = self._inset_ren.GetActiveCamera()
+            ic.SetPosition(*(d_unit * 3.4))
+            ic.SetFocalPoint(0.0, 0.0, 0.0)
+            ic.SetViewUp(*up)
+            self._inset_ren.ResetCameraClippingRange()
+        except Exception:
+            pass
 
     def _inset_add(self, mesh: pv.PolyData, color: str,
                    opacity: float = 1.0) -> "vtkActor":
-        """Add a mesh to the inset renderer; return the actor."""
+        """Add a mesh to the inset renderer; return the raw vtkActor."""
         mapper = vtkPolyDataMapper()
         mapper.SetInputData(mesh)
         actor = vtkActor()
@@ -1399,6 +1388,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(0 = auto, default)")
     p.add_argument("--trail", type=int, default=TRAIL_LEN,
                    help=f"Trajectory trail length in frames (default: {TRAIL_LEN})")
+    p.add_argument("--no-inset", action="store_true",
+                   help="Disable swashplate inset renderer (reduces GPU texture load)")
     return p
 
 
@@ -1424,7 +1415,8 @@ def main(argv: Optional[list] = None) -> None:
     print(f"  t_start={frames[0].t:.2f}s  t_end={frames[-1].t:.2f}s  "
           f"fps={len(frames)/(frames[-1].t - frames[0].t + 1e-9):.1f}")
 
-    viz = RAWESVisualizer(frames, trail_len=args.trail, playback_fps=args.fps)
+    viz = RAWESVisualizer(frames, trail_len=args.trail, playback_fps=args.fps,
+                         no_inset=args.no_inset)
 
     if args.export:
         viz.export(args.export, fps=args.fps,

@@ -74,6 +74,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 | [hardware/design.md](hardware/design.md) | Full assembly layout, rotor geometry, blade design (SG6042), swashplate, Kaman servo flap mechanism (US3217809), anti-rotation motor, electronics and power architecture |
 | [hardware/components.md](hardware/components.md) | Detailed component specs: GB4008 motor, REVVitRC ESC, AM32 firmware, DS113MG servos, SiK radio, RP3-H receiver, Boxer M2 transmitter |
 | [hardware/flap_sensor_bench.md](hardware/flap_sensor_bench.md) | Bench measurement system for swashplate-to-flap deflection characterisation |
+| [hardware/calibrate.md](hardware/calibrate.md) | **calibrate.py reference** — all CLI commands for servo control, motor test, ESC diagnostics (diag/monitor), and Lua script upload over MAVLink. Read when doing bench calibration or diagnosing motor/ESC issues. |
 
 ### Control Theory
 | File | When to read |
@@ -101,7 +102,8 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 - **High-tilt De Schutter**: ξ=80° viable. AoA stays below stall (14.4°) because low v_axial at high tilt reduces inflow angle. Requires `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above ξ≈85°.
 - **body_z_slew_rate** = `rotor.body_z_slew_rate_rad_s` = 2% of gyroscopic limit = **0.40 rad/s** for beaupoil_2026. Optimal from sweep; faster than 0.40 causes oscillation, slower wastes reel-in time.
 - **`swashplate_pitch_gain_rad`** added to YAML/RotorDefinition — physically measurable via flap deflection angle × tau at full stick deflection.
-- **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD.
+- **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD. Swashplate inset (bottom-right) shows the schematic oriented by the actual hub rotation matrix (`R_hub → ENU`), so the diagram always matches the orientation seen in the main view. Inset camera is non-interactive and tracks the main camera direction every loop iteration. `--no-inset` disables the inset renderer.
+- **Canonical telemetry schema** (`simulation/tests/unit/tel.py`): all simtests use `make_tel()` to produce a uniform JSON dict. Keys: `t_sim, phase, pos_ned, vel_ned, R, altitude_m, omega_rotor, collective_rad, tilt_lon, tilt_lat, tether_tension, tether_rest_length, tether_slack, body_z_eq, wind_ned, tension_setpoint`. Extra test-specific keys (e.g. `xi_level_deg`, `wind_est_ned`) passed as `**extra`. `viz3d/telemetry.py` JSONSource reads this schema directly (`collective_rad` → `swash_collective`, `tilt_lon/lat` → `swash_tilt_*`).
 - **`rawes.lua` unified Lua controller** — single script replaces `rawes.lua` + `rawes.lua`; SCR_USER7 selects mode (0=none, 1=flight, 2=yaw, 3=both). Flight mode SITL-validated via `test_lua_flight_rc_overrides`. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
 - **`SkewedWakeBEMJit`** (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in replacement for `SkewedWakeBEM`; two kernels (`_jit_vi0`, `_jit_strip_loop`); 18-test equivalence suite (`test_skewed_wake_jit.py`, atol=1e-10). Select via `create_aero(model="jit")`.
 - **`aero_skewed_wake.py` rewritten for clarity** — non-JIT reference version; explicit double for-loop, `np.cross()`, `_prandtl_F()` helper; all intermediate numpy broadcasting and dead code removed. Full class + method docstrings added. Only purpose is human-readable reference and JIT equivalence validation.
@@ -125,6 +127,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 | File | When to read |
 |------|-------------|
 | [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER7: 0=none, 1=flight cyclic, 2=yaw trim, 3=both) |
+| [simulation/scripts/calibrate.py](simulation/scripts/calibrate.py) | Hardware calibration tool — servo/motor/ESC/script management over MAVLink. See [hardware/calibrate.md](hardware/calibrate.md) for full CLI reference. |
 
 ---
 

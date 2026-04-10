@@ -55,6 +55,7 @@ from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat
 from simtest_ic  import load_ic
 from tether      import TetherModel
 from winch       import WinchController
+from tel         import make_tel
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -216,27 +217,12 @@ def _run_pumping_cycle(
         if _startup.apply(hub_state, dyn, t_sim):
             # Tether, planner, and tension controller are inactive during kinematic
             if i % tel_every == 0:
-                pos = hub_state["pos"]
-                telemetry.append({
-                    "t_sim":       t_sim,
-                    "hub_pos_x":   float(pos[0]),
-                    "hub_pos_y":   float(pos[1]),
-                    "hub_pos_z":   float(pos[2]),
-                    "hub_vel_x":   float(vel_at_start[0]),
-                    "hub_vel_y":   float(vel_at_start[1]),
-                    "hub_vel_z":   float(vel_at_start[2]),
-                    "tether_length":      0.0,
-                    "tether_extension":   0.0,
-                    "tether_tension":     0.0,
-                    "tether_rest_length": float(REST_LENGTH0),
-                    "tether_slack":       1,
-                    "collective_rad":     float(col_min_rad),
-                    "collective_norm":    0.0,
-                    "pumping_phase":      "",
-                    "tension_setpoint":   0.0,
-                    "collective_from_tension_ctrl": 0.0,
-                    "omega_rotor":        float(omega_spin),
-                })
+                telemetry.append(make_tel(
+                    t_sim, hub_state, omega_spin, tether, 0.0,
+                    col_min_rad, 0.0, 0.0, WIND,
+                    body_z_eq=hub_state["R"][:, 2],
+                    phase="kinematic",
+                ))
             continue
 
         # ── Free physics phase ─────────────────────────────────────────────
@@ -301,28 +287,13 @@ def _run_pumping_cycle(
 
         # 9. Telemetry (20 Hz)
         if i % tel_every == 0:
-            ti = tether._last_info
-            pos = hub_state["pos"]
-            telemetry.append({
-                "t_sim":          t_sim,
-                "hub_pos_x":      float(pos[0]),
-                "hub_pos_y":      float(pos[1]),
-                "hub_pos_z":      float(pos[2]),
-                "hub_vel_x":      float(hub_state["vel"][0]),
-                "hub_vel_y":      float(hub_state["vel"][1]),
-                "hub_vel_z":      float(hub_state["vel"][2]),
-                "tether_length":       float(ti.get("length",    0.0)),
-                "tether_extension":    float(ti.get("extension",  0.0)),
-                "tether_tension":      float(tension_now),
-                "tether_rest_length":  float(tether.rest_length),
-                "tether_slack":        int(ti.get("slack", True)),
-                "collective_rad":      float(collective_rad),
-                "collective_norm":     float(cmd.get("thrust", 0.0)),
-                "pumping_phase":       str(cmd.get("phase", "")),
-                "tension_setpoint":    float(cmd.get("tension_setpoint_n", 0.0)),
-                "collective_from_tension_ctrl": float(cmd.get("thrust", 0.0)),
-                "omega_rotor":         float(omega_spin),
-            })
+            telemetry.append(make_tel(
+                t_sim, hub_state, omega_spin, tether, tension_now,
+                collective_rad, tilt_lon, tilt_lat, WIND,
+                body_z_eq=body_z_eq,
+                phase=str(cmd.get("phase", "")),
+                tension_setpoint=float(cmd.get("tension_setpoint_n", 0.0)),
+            ))
 
     return {"label": label, "telemetry": telemetry}
 

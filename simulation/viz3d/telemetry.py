@@ -108,9 +108,9 @@ class InMemorySource:
                 omega_spin         = float(h.get("omega_rotor", 0.0)),
                 tether_tension     = float(h.get("tether_tension", 0.0)),
                 tether_rest_length = float(h.get("tether_rest_length", 0.0)),
-                swash_collective   = float(h.get("swash_collective", 0.0)),
-                swash_tilt_lon     = float(h.get("swash_tilt_lon", 0.0)),
-                swash_tilt_lat     = float(h.get("swash_tilt_lat", 0.0)),
+                swash_collective   = float(h.get("collective_rad", 0.0)),
+                swash_tilt_lon     = float(h.get("tilt_lon", 0.0)),
+                swash_tilt_lat     = float(h.get("tilt_lat", 0.0)),
                 body_z_eq          = (np.asarray(bzeq, dtype=float)
                                       if bzeq is not None else None),
                 wind_ned           = np.asarray(

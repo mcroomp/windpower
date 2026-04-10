@@ -53,6 +53,7 @@ from winch       import WinchController
 from frames      import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
+from tel         import make_tel
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -184,6 +185,7 @@ def _run_deschutter_cycle(
     collectives      = []
     tilts_from_wind  = []
     floor_hits       = 0
+    pumping_slack_events = 0
     telemetry        = []
     energy_out       = 0.0
     energy_in        = 0.0
@@ -245,7 +247,9 @@ def _run_deschutter_cycle(
         M_orbital = result.M_orbital + tm
         tension_now = tether._last_info.get("tension", 0.0)
 
-        # ── Energy accounting ─────────────────────────────────────────────
+        # ── Energy accounting + slack detection ──────────────────────────
+        if tether._last_info.get("slack", False):
+            pumping_slack_events += 1
         if cmd["phase"] == "reel-out":
             energy_out += tension_now * v_reel_out * DT
             tensions_out_acc.append(tension_now)
@@ -276,38 +280,15 @@ def _run_deschutter_cycle(
             collectives.append(collective_rad)
             tilts_from_wind.append(xi_deg)
 
-        # ── Telemetry (20 Hz) — columns match mediator CSV format ────────
+        # ── Telemetry (20 Hz) ────────────────────────────────────────────
         if i % tel_every == 0:
-            _ti = tether._last_info
-            telemetry.append({
-                # ── mediator-compatible columns (same names as mediator CSV) ──
-                "t_sim":              t,
-                "hub_pos_x":          float(hub_state["pos"][0]),
-                "hub_pos_y":          float(hub_state["pos"][1]),
-                "hub_pos_z":          float(hub_state["pos"][2]),
-                "hub_vel_x":          float(hub_state["vel"][0]),
-                "hub_vel_y":          float(hub_state["vel"][1]),
-                "hub_vel_z":          float(hub_state["vel"][2]),
-                "tether_length":      float(_ti.get("length",   0.0)),
-                "tether_extension":   float(_ti.get("extension", 0.0)),
-                "tether_tension":     float(tension_now),
-                "tether_rest_length": float(tether.rest_length),
-                "tether_slack":       int(_ti.get("slack", True)),
-                "collective_rad":     float(collective_rad),
-                "collective_norm":    float(cmd.get("thrust", 0.0)),
-                "pumping_phase":      str(cmd.get("phase", "")),
-                "tension_setpoint":   float(cmd.get("tension_setpoint_n", 0.0)),
-                "collective_from_tension_ctrl": float(cmd.get("thrust", 0.0)),
-                "omega_rotor":        float(omega_spin),
-                # ── visualiser-only extras kept for compatibility ─────────────
-                "pos_ned":            hub_state["pos"].tolist(),
-                "R":                  hub_state["R"].tolist(),
-                "swash_collective":   collective_rad,
-                "swash_tilt_lon":     sw["tilt_lon"],
-                "swash_tilt_lat":     sw["tilt_lat"],
-                "body_z_eq":          body_z_eq.tolist(),
-                "wind_ned":           WIND.tolist(),
-            })
+            telemetry.append(make_tel(
+                t, hub_state, omega_spin, tether, tension_now,
+                collective_rad, sw["tilt_lon"], sw["tilt_lat"], WIND,
+                body_z_eq=body_z_eq,
+                phase=str(cmd.get("phase", "")),
+                tension_setpoint=float(cmd.get("tension_setpoint_n", 0.0)),
+            ))
 
     # Final snapshot
     body_z_cur = hub_state["R"][:, 2]
@@ -330,8 +311,9 @@ def _run_deschutter_cycle(
         rest_lengths     = rest_lengths,
         collectives      = collectives,
         tilts_from_wind  = tilts_from_wind,
-        floor_hits       = floor_hits,
-        energy_out       = energy_out,
+        floor_hits            = floor_hits,
+        pumping_slack_events  = pumping_slack_events,
+        energy_out            = energy_out,
         energy_in        = energy_in,
         net_energy       = energy_out - energy_in,
         tension_out_sp   = tension_out,
@@ -378,6 +360,24 @@ def test_deschutter_no_crash():
     _print_cycle(r)
     assert r["floor_hits"] == 0, \
         f"Hub hit z_floor {r['floor_hits']} times during De Schutter cycle"
+
+
+def test_deschutter_no_tether_slack():
+    """
+    Tether must never go slack during the pumping cycle.
+
+    A slack tether means zero tension: the hub is in free fall, the tether
+    torque vanishes, and disk orientation becomes uncontrolled.  On hardware
+    this is a loss-of-control event.  The planner's trapezoid winch-speed
+    profile (ramp up AND ramp down over t_transition) prevents the momentum-
+    driven slack that occurred with an abrupt speed reversal at the phase
+    boundary.
+    """
+    r = _run_deschutter_cycle()
+    assert r["pumping_slack_events"] == 0, (
+        f"Tether went slack {r['pumping_slack_events']} times during pumping "
+        "(zero tension = loss of control)"
+    )
 
 
 def test_deschutter_reel_in_lower_tension():
