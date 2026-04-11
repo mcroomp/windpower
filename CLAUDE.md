@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Full stack working. 487 unit + 38 simtests + 7 stack tests passing (1 xfailed: test_pumping_cycle kinematic-transition instability). SkewedWakeBEM is production aero model. `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 8 stack tests (was 10), Lua math tests merged into `test_lua_math.py`. Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle xfail.
+**Current phase:** Phase 3, Milestone 3 — Full stack working. 482 unit + 45 simtests + 7 stack tests passing (1 xfailed: test_pumping_cycle kinematic-transition instability). SkewedWakeBEM is production aero model. `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 8 stack tests (was 10), Lua math tests merged into `test_lua_math.py`. Telemetry unified to `telemetry_csv.py` (TelRow CSV schema, 67 columns, `damp_alpha`, `heartbeat()`). Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle xfail.
 
 **Current stack test status:** 7 PASS, 1 XFAIL (test_pumping_cycle — known kinematic-transition instability), 0 failures. Tests: test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_stationary_gps_fusion all PASS.
 
@@ -199,15 +199,14 @@ simulation/
 │
 ├── Analysis tools
 │   └── analysis/
-│       ├── analyse_run.py             Post-run structured report (always run after stack test)
-│       ├── generate_flight_report.py  Offline report from mediator telemetry CSV
-│       ├── redraw_flight_report.py    Regenerate PNG from saved flight_data.json
+│       ├── analyse_run.py             Post-run structured report; reads physics from telemetry_last.csv
+│       ├── analyse_pumping_cycle.py   Pumping cycle report from mediator telemetry CSV
+│       ├── generate_flight_report.py  Offline multi-panel report from mediator telemetry CSV
 │       └── merge_logs.py              Unified log timeline merger
 │
 └── tests/
     ├── unit/                Windows native, no Docker
-    │   ├── test_closed_loop_60s.py           ★ 60 s closed-loop physics (dynamics+aero+tether+controller)
-    │   ├── test_closed_loop_60s.py           60 s orbit — uses RatePID two-loop architecture
+    │   ├── test_closed_loop_60s.py           ★ 60 s closed-loop orbit — RatePID two-loop architecture
     │   ├── test_steady_flight.py             Open-loop equilibrium → writes steady_state_starting.json
     │   ├── test_controller.py                Unit tests (incl. RatePID, portable core functions)
     │   ├── test_aero_trajectory_points.py    SkewedWakeBEM at De Schutter trajectory operating points
