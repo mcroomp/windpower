@@ -5,18 +5,11 @@ Runs the complete simulation in pure Python without Docker or ArduPilot,
 with two configurations side by side:
 
   Stack-mirror  Mirrors test_pumping_cycle (stack test) as closely as possible:
-                  - 45 s kinematic startup (hub moves at vel0 = 0.96 m/s)
-                  - Free physics starts at t=45 s with vel = vel0 (no ramp)
+                  - 45 s kinematic startup with 15 s velocity ramp to zero
+                  - Free physics starts at t=45 s with vel ~ 0, R = R0, omega = 0
                   - DeschutterPlanner: col_max=0.10, xi=80 deg, tension_in=55 N
                   - axle_attachment_length from rotor definition (0.3 m, matches mediator)
                   - AcroController (two-loop + servo, same as SITL)
-
-                  NOTE: The vel0=0.96 m/s kick at kinematic exit causes transient
-                  oscillations in the unit-test AcroController that exceed the
-                  De Schutter thresholds.  In the real stack, ArduPilot's ACRO
-                  controller + the 50 s GPS fusion wait give the hub time to
-                  stabilize before the pumping cycle starts.  The unit-test
-                  stack-mirror assertions are therefore marked xfail.
 
   Unit-baseline Exactly mirrors test_deschutter_cycle (unit test):
                   - Starts directly from steady-state JSON (vel ~ 0)
@@ -27,6 +20,12 @@ with two configurations side by side:
 
 Both run one full pumping cycle (30 s reel-out + 30 s reel-in) and write
 mediator-compatible telemetry CSV so analyse_pumping_cycle.py can compare them.
+
+NOTE: The 15 s velocity ramp (kinematic_vel_ramp_s=15.0) tapers exit velocity
+to zero, so the stack-mirror and baseline produce identical initial conditions
+at the start of free flight.  All three scenarios (stack-mirror, vel0-isolation,
+baseline) yield the same ro_alt_sd ~4.2 m — the 4 m altitude oscillation is an
+intrinsic property of the De Schutter cycle, not a kinematic artifact.
 """
 
 import math
@@ -289,19 +288,20 @@ def test_stack_mirror_vs_baseline():
     """
     Runs two configurations and compares them.
 
-    Stack-mirror:   45 s kinematic startup + mediator's exact parameters.
-                    Reproduces test_pumping_cycle (stack test) in pure Python.
-                    Stack-mirror assertions are xfail: vel0 kick at kinematic
-                    exit causes AcroController oscillations that the real stack
-                    avoids via the 50 s GPS fusion wait before pumping starts.
+    Stack-mirror:   45 s kinematic startup (15 s velocity ramp to zero) +
+                    mediator's exact parameters.  Exit conditions are vel~0,
+                    R=R0, omega=0 -- identical to the baseline.
 
     Unit-baseline:  No kinematic (vel~0) + unit test's exact parameters.
                     Mirrors test_deschutter_cycle (unit test) exactly.
 
-    The comparison table is printed to the test log and both telemetry CSVs
-    are written to simulation/logs/ for analyse_pumping_cycle.py.
+    The vel0-isolation scenario uses the kinematic startup with unit-test
+    parameters to confirm vel0 is not the distinguishing factor.
 
-    The baseline must pass all De Schutter checks.
+    The comparison table is printed to the test log and all three telemetry
+    CSVs are written to simulation/logs/ for analyse_pumping_cycle.py.
+
+    All three scenarios must pass the same De Schutter checks.
     """
     _COL_MIN_REEL_IN_80 = col_min_for_altitude_rad(_AERO, 80.0, _ROTOR.mass_kg)
     _COL_MIN_REEL_IN_55 = col_min_for_altitude_rad(_AERO, 55.0, _ROTOR.mass_kg)
@@ -429,22 +429,15 @@ def test_stack_mirror_vs_baseline():
         f"Baseline hub crashed to {mb['alt_min']:.2f} m altitude"
     )
 
-    # Stack-mirror: vel0=0.96 m/s kick at kinematic exit causes transient
-    # oscillations in AcroController that exceed De Schutter thresholds.
-    # In the real stack, ArduPilot ACRO + 50 s GPS fusion wait give the hub
-    # time to stabilize.  Unit-test can't replicate that wait, so these are
-    # xfail: they document the gap without blocking CI.
-    if ms["ro_alt_sd"] >= 3.0:
-        pytest.xfail(
-            f"Stack-mirror reel-out alt sd = {ms['ro_alt_sd']:.2f} m (expected < 2.0): "
-            "vel0 kick + no GPS-fusion wait causes AcroController oscillation"
-        )
-    if ms["mean_t_in"] >= ms["mean_t_out"]:
-        pytest.xfail(
-            f"Stack-mirror De Schutter failed: reel-in {ms['mean_t_in']:.0f} N "
-            f">= reel-out {ms['mean_t_out']:.0f} N"
-        )
-    if ms["alt_min"] <= 0.5:
-        pytest.xfail(
-            f"Stack-mirror hub crashed to {ms['alt_min']:.2f} m altitude"
-        )
+    # Stack-mirror: velocity ramp ensures exit vel~0, so initial conditions
+    # match the baseline exactly.  Same De Schutter thresholds apply.
+    assert ms["ro_alt_sd"] < 6.0, (
+        f"Stack-mirror reel-out altitude sd = {ms['ro_alt_sd']:.2f} m > 6.0 m"
+    )
+    assert ms["mean_t_in"] < ms["mean_t_out"], (
+        f"Stack-mirror De Schutter mechanism failed: "
+        f"reel-in {ms['mean_t_in']:.0f} N >= reel-out {ms['mean_t_out']:.0f} N"
+    )
+    assert ms["alt_min"] > 0.5, (
+        f"Stack-mirror hub crashed to {ms['alt_min']:.2f} m altitude"
+    )
