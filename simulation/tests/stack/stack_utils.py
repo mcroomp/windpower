@@ -241,6 +241,19 @@ def _configure_logging(log_path: Path) -> None:
 # Log file copying
 # ---------------------------------------------------------------------------
 
+def make_test_log_dir(sim_dir: Path, test_name: str) -> Path:
+    """Create (or wipe and recreate) simulation/logs/{test_name}/.
+
+    Called at the start of every stack test so stale logs from a previous
+    run never survive into the current one.
+    """
+    test_log_dir = sim_dir / "logs" / test_name
+    if test_log_dir.exists():
+        shutil.rmtree(test_log_dir)
+    test_log_dir.mkdir(parents=True, exist_ok=True)
+    return test_log_dir
+
+
 def copy_logs_to_dir(log_dir: Path, copies: dict) -> None:
     """Copy log files into log_dir, skipping any that don't exist yet."""
     log_dir.mkdir(exist_ok=True)

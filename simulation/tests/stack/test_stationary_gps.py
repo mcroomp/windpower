@@ -41,6 +41,7 @@ from test_stack_integration import (
     _kill_by_port,
 )
 from conftest import StackConfig, _configure_logging, copy_logs_to_dir
+from stack_utils import make_test_log_dir
 from pymavlink import mavutil as _mavutil
 from gcs import RawesGCS
 
@@ -149,7 +150,7 @@ def _launch_stub_mediator(log_path: Path) -> subprocess.Popen:
 # Test
 # ---------------------------------------------------------------------------
 
-def test_stationary_gps_fusion(tmp_path):
+def test_stationary_gps_fusion(tmp_path, request):
     """
     Hub sits at NED=[0,0,0] forever.  EKF3 must fuse GPS horizontal position
     within 60 s, demonstrated by receiving LOCAL_POSITION_NED.
@@ -178,11 +179,7 @@ def test_stationary_gps_fusion(tmp_path):
     StackConfig.verify()
 
     sim_dir      = _SIM_DIR
-    test_log_dir = sim_dir / "logs" / "test_stationary_gps_fusion"
-    import shutil as _shutil
-    if test_log_dir.exists():
-        _shutil.rmtree(test_log_dir)
-    test_log_dir.mkdir(parents=True, exist_ok=True)
+    test_log_dir = make_test_log_dir(sim_dir, request.node.name)
 
     stub_log = tmp_path / "stub_mediator.log"
     sitl_log = tmp_path / "sitl.log"
@@ -382,5 +379,5 @@ def test_stationary_gps_fusion(tmp_path):
         })
         _ardupilot_log = Path("/tmp/ArduCopter.log")
         if _ardupilot_log.exists():
-            import shutil as _shutil2
-            _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
+            import shutil
+            shutil.copy2(_ardupilot_log, test_log_dir / "arducopter.log")

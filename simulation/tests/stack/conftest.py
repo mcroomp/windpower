@@ -52,6 +52,7 @@ from stack_utils import (
     _kill_by_port,
     _configure_logging,
     copy_logs_to_dir,
+    make_test_log_dir,
     check_ports_free,
 )
 import socket as _socket
@@ -423,18 +424,8 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     )
 
     # Per-test log directory: simulation/logs/{label}/
-    # Cleared at test start so stale logs never mislead.  Falls back to the
-    # top-level logs/ directory when label is empty (e.g. smoke test).
     label = "_".join(filter(None, [log_prefix, test_name]))
-    if label:
-        test_log_dir = sim_dir / "logs" / label
-        if test_log_dir.exists():
-            import shutil as _shutil
-            _shutil.rmtree(test_log_dir)
-        test_log_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        test_log_dir = sim_dir / "logs"
-        test_log_dir.mkdir(exist_ok=True)
+    test_log_dir = make_test_log_dir(sim_dir, label) if label else sim_dir / "logs"
 
     try:
         if arm:
@@ -1261,15 +1252,7 @@ def _torque_stack(
     sim_dir   = repo_root / "simulation"
 
     # Per-test log directory (mirrors flight stack convention)
-    if test_name:
-        test_log_dir = sim_dir / "logs" / test_name
-        if test_log_dir.exists():
-            import shutil as _shutil
-            _shutil.rmtree(test_log_dir)
-        test_log_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        test_log_dir = sim_dir / "logs"
-        test_log_dir.mkdir(exist_ok=True)
+    test_log_dir = make_test_log_dir(sim_dir, test_name) if test_name else sim_dir / "logs"
 
     mediator_log = tmp_path / "mediator.log"
     sitl_log     = tmp_path / "sitl.log"
