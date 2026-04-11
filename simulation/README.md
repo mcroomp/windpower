@@ -124,25 +124,24 @@ Standalone scripts in `analysis/`. Not part of the simulation runtime; not impor
 **Always run analyse_run.py after a stack test:**
 
 ```bash
+# List available test runs (newest first)
 bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py'
-bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py --plot'
+# Analyse a specific test
+bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
+bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
 ```
 
 | Script | Purpose | Status |
 |--------|---------|--------|
-| `analyse_run.py` | Post-run structured report -- reads last mediator/SITL/GCS logs, prints key metrics | Active |
-| `generate_flight_report.py` | Offline multi-panel PNG plot from mediator telemetry CSV | Active |
-| `redraw_flight_report.py` | Regenerate flight_report.png from saved flight_data.json | Active |
-| `merge_logs.py` | Merge mediator/SITL/GCS logs in timestamp order for unified timeline | Active |
-| `analyse_30s_dip.py` | Diagnostic for 30 s guided flight altitude dip | Historical |
-| `plot_30s_mechanism.py` | Annotated diagram of the 30 s dip mechanism | Historical |
-| `build.py` | Docker image build progress monitor | Active |
+| `analyse_run.py` | Post-run structured report; reads `logs/{test_name}/telemetry.csv` + `mediator.log` | Active |
+| `analyse_gps_fusion.py` | EKF3 GPS fusion event analysis from `logs/{test_name}/gcs.log` | Active |
 | `analyse_pumping_cycle.py` | Pumping cycle energy/tension analysis from telemetry CSV | Active |
-| `analyse_gps_fusion.py` | EKF3 GPS fusion event analysis from SITL log | Active |
-| `analyse_ekf_consistency.py` | EKF consistency metrics over time | Active |
+| `generate_flight_report.py` | Offline multi-panel PNG plot from mediator telemetry CSV | Active |
+| `merge_logs.py` | Merge mediator/SITL/GCS logs in timestamp order for unified timeline | Active |
+| `build.py` | Docker image build progress monitor | Active |
 | `compare_rotors.py` | Side-by-side rotor definition comparison | Active |
 | `sg6042_polar.py` | SG6042 airfoil polar plotter | Active |
 
-Last run logs: `simulation/logs/` -- `pytest_last_run.log`, `mediator_last_run.log`,
-`sitl_last_run.log`, `gcs_last_run.log`, `telemetry.csv`
+Per-test logs: `simulation/logs/{test_name}/` -- `telemetry.csv`, `mediator.log`,
+`sitl.log`, `gcs.log`, `arducopter.log`. Suite log: `simulation/logs/pytest_last_run.log`.
 

@@ -199,7 +199,7 @@ simulation/
 │
 ├── Analysis tools
 │   └── analysis/
-│       ├── analyse_run.py             Post-run structured report; reads physics from telemetry_last.csv
+│       ├── analyse_run.py             Post-run structured report; pass test_name to read from logs/{test_name}/
 │       ├── analyse_pumping_cycle.py   Pumping cycle report from mediator telemetry CSV
 │       ├── generate_flight_report.py  Offline multi-panel report from mediator telemetry CSV
 │       └── merge_logs.py              Unified log timeline merger

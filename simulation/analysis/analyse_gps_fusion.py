@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-analyse_gps_fusion.py — Parse gcs_last_run.log and diagnose EKF3 GPS fusion.
+analyse_gps_fusion.py — Parse a per-test gcs.log and diagnose EKF3 GPS fusion.
 
 Reads the GCS log written by test_stationary_gps or test_guided_flight and
 prints a structured timeline covering:
 
-  • STATUSTEXT events (EKF alignment, GPS detection, origin set, …)
-  • EKF flag transitions (when each flag appears or disappears)
-  • hp / hv trend (position / velocity variance over time)
-  • Whether LOCAL_POSITION_NED was ever received (GPS fused)
-  • Diagnosis: which readyToUseGPS() condition is still blocking
+  * STATUSTEXT events (EKF alignment, GPS detection, origin set, ...)
+  * EKF flag transitions (when each flag appears or disappears)
+  * hp / hv trend (position / velocity variance over time)
+  * Whether LOCAL_POSITION_NED was ever received (GPS fused)
+  * Diagnosis: which readyToUseGPS() condition is still blocking
 
 Usage
 -----
-    python3 simulation/analysis/analyse_gps_fusion.py
+    python3 simulation/analysis/analyse_gps_fusion.py test_stationary_gps_fusion
+    python3 simulation/analysis/analyse_gps_fusion.py test_guided_flight --plot
     python3 simulation/analysis/analyse_gps_fusion.py --log /path/to/gcs.log
-    python3 simulation/analysis/analyse_gps_fusion.py --plot
 """
 
 import argparse
@@ -421,13 +421,35 @@ def plot_ekf_timeline(ekf, statustext, gps_fused, out_path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--log",  default=str(_SIM_DIR / "logs" / "gcs_last_run.log"),
-                    help="Path to gcs log file (default: simulation/logs/gcs_last_run.log)")
+    ap.add_argument("test_name", nargs="?", default=None,
+                    help="Test name (e.g. test_stationary_gps_fusion). "
+                         "Reads logs/{test_name}/gcs.log.")
+    ap.add_argument("--log",  default=None,
+                    help="Override: explicit path to a gcs.log file")
     ap.add_argument("--plot", action="store_true",
                     help="Save EKF timeline plot alongside the log")
     args = ap.parse_args()
 
-    log_path = Path(args.log)
+    _log_dir = _SIM_DIR / "logs"
+    if args.log:
+        log_path = Path(args.log)
+    elif args.test_name:
+        log_path = _log_dir / args.test_name / "gcs.log"
+    else:
+        # List available test directories
+        dirs = sorted(
+            [d for d in _log_dir.iterdir() if d.is_dir() and (d / "gcs.log").exists()],
+            key=lambda d: d.stat().st_mtime, reverse=True,
+        ) if _log_dir.exists() else []
+        if dirs:
+            print("Available test runs (newest first):")
+            for d in dirs:
+                print(f"  {d.name}")
+            print(f"\nUsage: python analyse_gps_fusion.py <test_name>")
+        else:
+            print(f"No test directories with gcs.log found in {_log_dir}")
+        sys.exit(0)
+
     if not log_path.exists():
         print(f"ERROR: log file not found: {log_path}", file=sys.stderr)
         sys.exit(1)
