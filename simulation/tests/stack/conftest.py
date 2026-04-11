@@ -459,17 +459,6 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         if _ardupilot_log.exists():
             import shutil as _shutil2
             _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
-        # Also copy to top-level with "last" names for quick access
-        pfx = (label + "_") if label else ""
-        copy_logs_to_dir(sim_dir / "logs", {
-            f"sitl_{pfx}last.log": sitl_log,
-            f"gcs_{pfx}last.log":  gcs_log,
-        })
-        if with_mediator:
-            copy_logs_to_dir(sim_dir / "logs", {
-                "mediator_last.log": mediator_log,
-                "telemetry_last.csv": telemetry_log,
-            })
 
 
 # ---------------------------------------------------------------------------
@@ -1423,12 +1412,6 @@ def _torque_stack(
         if _ardupilot_log.exists():
             import shutil as _shutil2
             _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
-        pfx = f"{test_name}_" if test_name else ""
-        copy_logs_to_dir(sim_dir / "logs", {
-            f"sitl_{pfx}last.log":      sitl_log,
-            f"gcs_{pfx}last.log":       gcs_log,
-            "mediator_torque_last.log": mediator_log,
-        })
         log.info("Logs copied to %s", test_log_dir)
 
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-analyse_run.py -- Post-run analysis of the last simulation test run.
+analyse_run.py -- Post-run analysis of a stack test run.
 
-Reads the standard log files written by every test run and prints a
+Reads the per-test log directory written by every stack test and prints a
 structured report covering:
 
   * Damping phase: position drift, min altitude, velocity convergence
@@ -11,13 +11,16 @@ structured report covering:
   * Hold results: position / attitude / servo sample counts, drift, altitude
   * Test outcomes: PASSED / FAILED per test
 
-Physics frames are read from the mediator telemetry CSV (telemetry_last.csv).
-The mediator log is still parsed for run metadata (RUN_ID, sensor mode, damping
-config, kinematic launch params) but heartbeat lines are no longer needed there.
+Each stack test writes its logs to simulation/logs/{test_name}/:
+  telemetry.csv   -- physics frames (TelRow CSV, primary source for this script)
+  mediator.log    -- run metadata (RUN_ID, sensor mode, damping config)
+  gcs.log         -- GCS / MAVLink events (STATUSTEXT, EKF flags, setup steps)
 
-Usage (from repo root on Windows via Git Bash):
-  bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py'
-  bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py --plot'
+Usage:
+  bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
+  bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
+
+With no test name, lists available test directories in simulation/logs/.
 """
 
 from __future__ import annotations
@@ -36,10 +39,8 @@ from typing import Optional
 
 _SIM_DIR = Path(__file__).resolve().parents[1]   # simulation/
 
-_LOG_DIR              = _SIM_DIR / "logs"
-_DEFAULT_TELEMETRY    = _LOG_DIR / "telemetry_last.csv"
-_DEFAULT_MEDIATOR     = _LOG_DIR / "mediator_last.log"
-_DEFAULT_PYTEST       = _LOG_DIR / "pytest_last_run.log"
+_LOG_DIR     = _SIM_DIR / "logs"
+_PYTEST_LOG  = _LOG_DIR / "pytest_last_run.log"
 
 sys.path.insert(0, str(_SIM_DIR))
 from telemetry_csv import TelRow, read_csv  # noqa: E402
@@ -455,26 +456,70 @@ def _plot(r: RunReport) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _list_test_dirs() -> list:
+    """Return per-test subdirectories in logs/, sorted by modification time (newest first)."""
+    if not _LOG_DIR.exists():
+        return []
+    return sorted(
+        [d for d in _LOG_DIR.iterdir() if d.is_dir()],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--telemetry", default=str(_DEFAULT_TELEMETRY),
-                        help="mediator telemetry CSV (default: logs/telemetry_last.csv)")
-    parser.add_argument("--mediator", default=str(_DEFAULT_MEDIATOR),
-                        help="mediator log for run metadata (default: logs/mediator_last.log)")
-    parser.add_argument("--pytest",   default=str(_DEFAULT_PYTEST),
-                        help="pytest log file (default: logs/pytest_last_run.log)")
+    parser.add_argument("test_name", nargs="?", default=None,
+                        help="Test name to analyse (e.g. test_acro_armed). "
+                             "Reads logs/{test_name}/telemetry.csv and mediator.log. "
+                             "Omit to list available test directories.")
+    parser.add_argument("--telemetry", default=None,
+                        help="Override telemetry CSV path")
+    parser.add_argument("--mediator", default=None,
+                        help="Override mediator log path")
+    parser.add_argument("--pytest",   default=str(_PYTEST_LOG),
+                        help="pytest suite log (default: logs/pytest_last_run.log)")
     parser.add_argument("--plot", action="store_true",
                         help="Save + show a 4-panel position/attitude/spin plot")
     parser.add_argument("--all-statustext", action="store_true",
                         help="Print every STATUSTEXT line (not just EKF/GPS)")
     args = parser.parse_args()
 
+    if args.test_name is None:
+        dirs = _list_test_dirs()
+        if not dirs:
+            print(f"No test directories found in {_LOG_DIR}")
+        else:
+            print(f"Available test runs in {_LOG_DIR}  (newest first):")
+            for d in dirs:
+                has_tel = (d / "telemetry.csv").exists()
+                has_med = (d / "mediator.log").exists()
+                tags = " ".join(filter(None, [
+                    "telemetry.csv" if has_tel else "",
+                    "mediator.log"  if has_med else "",
+                ]))
+                print(f"  {d.name:<45}  {tags}")
+            print(f"\nUsage: python analyse_run.py <test_name>")
+        return
+
+    test_dir = _LOG_DIR / args.test_name
+    if not test_dir.exists():
+        print(f"[ERROR] Test directory not found: {test_dir}")
+        dirs = _list_test_dirs()
+        if dirs:
+            print("Available:", ", ".join(d.name for d in dirs[:5]))
+        return
+
+    telemetry_path = Path(args.telemetry) if args.telemetry else test_dir / "telemetry.csv"
+    mediator_path  = Path(args.mediator)  if args.mediator  else test_dir / "mediator.log"
+
     report = RunReport()
-    print(f"\nLoading telemetry CSV : {args.telemetry}")
-    load_telemetry(Path(args.telemetry), report)
-    print(f"Parsing mediator log  : {args.mediator}")
-    parse_mediator(Path(args.mediator), report)
+    print(f"\nTest dir      : {test_dir}")
+    print(f"Loading telemetry CSV : {telemetry_path}")
+    load_telemetry(telemetry_path, report)
+    print(f"Parsing mediator log  : {mediator_path}")
+    parse_mediator(mediator_path, report)
     print(f"Parsing pytest log    : {args.pytest}")
     parse_pytest(Path(args.pytest), report)
     print(f"  telemetry rows     : {len(report.tel_rows)}")

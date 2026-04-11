@@ -4,7 +4,7 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Full stack working. 482 unit + 45 simtests + 7 stack tests passing (1 xfailed: test_pumping_cycle kinematic-transition instability). SkewedWakeBEM is production aero model. `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 8 stack tests (was 10), Lua math tests merged into `test_lua_math.py`. Telemetry unified to `telemetry_csv.py` (TelRow CSV schema, 67 columns, `damp_alpha`, `heartbeat()`). Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle xfail.
+**Current phase:** Phase 3, Milestone 3 — Full stack working. 482 unit + 45 simtests + 7 stack tests passing (1 xfailed: test_pumping_cycle stack test). SkewedWakeBEM is production aero model. `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 8 stack tests (was 10), Lua math tests merged into `test_lua_math.py`. Telemetry unified to `telemetry_csv.py` (TelRow CSV schema, 67 columns, `damp_alpha`, `heartbeat()`). Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle xfail.
 
 **Current stack test status:** 7 PASS, 1 XFAIL (test_pumping_cycle — known kinematic-transition instability), 0 failures. Tests: test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_stationary_gps_fusion all PASS.
 
@@ -347,7 +347,7 @@ Full raw output always saved to `simulation/logs/pytest_last_run.log`. After the
 ```
 Read `pytest_last_run_summary.json` for pass/fail counts and failed test list. Do NOT re-run.
 
-**CRITICAL: Per-test log directories.** Each stack test writes its own logs to `simulation/logs/{test_name}/` (e.g., `simulation/logs/test_h_swash_phang/`). These contain: `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, **`arducopter.log`**. Always read these per-test logs when diagnosing a failure — **never look at `/tmp/ArduCopter.log` inside the container**, which accumulates across all test sessions and is stale. The per-test `arducopter.log` is truncated before each SITL launch so it contains only that test's SITL output.
+**CRITICAL: Per-test log directories.** Each stack test writes its own logs exclusively to `simulation/logs/{test_name}/` (e.g., `simulation/logs/test_h_swash_phang/`). No `_last` copies are written to the top-level `logs/`. Contents: `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, **`arducopter.log`**. Always read these per-test logs when diagnosing a failure — **never look at `/tmp/ArduCopter.log` inside the container**, which accumulates across all test sessions and is stale. The per-test `arducopter.log` is truncated before each SITL launch so it contains only that test's SITL output.
 
 Other filter modes:
 ```bash
@@ -357,8 +357,11 @@ bash sim.sh test-stack --raw            # full unfiltered output
 
 **Always run `analyse_run.py` after a stack test:**
 ```bash
+# List available test runs (newest first)
 bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py'
-bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py --plot'
+# Analyse a specific test (reads logs/{test_name}/telemetry.csv + mediator.log)
+bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
+bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
 ```
 
 ---
@@ -395,7 +398,7 @@ bash sim.sh build
 | Python analysis script | `bash sim.sh exec 'python3 /rawes/simulation/...'` |
 | One-off inside container | `bash sim.sh exec 'python3 /rawes/simulation/...'` |
 
-Last run logs: `simulation/logs/` — `pytest_last_run_summary.json` (machine-readable, read this first), `pytest_last_run.log` (full raw), `mediator_last.log`, `sitl_last_run.log`, `gcs_last_run.log`, `telemetry_last.csv`. `analyse_run.py` reads physics frames from `telemetry_last.csv` (not the mediator log); mediator log is only parsed for run metadata (RUN_ID, sensor mode, damping config).
+Last run logs: `simulation/logs/` — `pytest_last_run_summary.json` (machine-readable suite summary, read this first), `pytest_last_run.log` (full raw suite output). Per-test physics data in `simulation/logs/{test_name}/` — `telemetry.csv`, `mediator.log`, `sitl.log`, `gcs.log`, `arducopter.log`.
 
 **Path note:** `sim.sh` (repo root) converts paths automatically for any drive. Do not hardcode `/mnt/X/...` WSL paths — use `sim.sh` instead.
 

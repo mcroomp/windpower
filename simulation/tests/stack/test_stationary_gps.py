@@ -177,7 +177,13 @@ def test_stationary_gps_fusion(tmp_path):
     # Check ports free before launch
     StackConfig.verify()
 
-    sim_dir  = _SIM_DIR
+    sim_dir      = _SIM_DIR
+    test_log_dir = sim_dir / "logs" / "test_stationary_gps_fusion"
+    import shutil as _shutil
+    if test_log_dir.exists():
+        _shutil.rmtree(test_log_dir)
+    test_log_dir.mkdir(parents=True, exist_ok=True)
+
     stub_log = tmp_path / "stub_mediator.log"
     sitl_log = tmp_path / "sitl.log"
     gcs_log  = tmp_path / "gcs.log"
@@ -369,8 +375,12 @@ def test_stationary_gps_fusion(tmp_path):
         _terminate_process(sitl_proc)
         _terminate_process(stub_proc)
         _kill_by_port(StackConfig.SITL_GCS_PORT)
-        copy_logs_to_dir(sim_dir / "logs", {
-            "stub_mediator_last_run.log": stub_log,
-            "sitl_last_run.log":          sitl_log,
-            "gcs_last_run.log":           gcs_log,
+        copy_logs_to_dir(test_log_dir, {
+            "stub_mediator.log": stub_log,
+            "sitl.log":          sitl_log,
+            "gcs.log":           gcs_log,
         })
+        _ardupilot_log = Path("/tmp/ArduCopter.log")
+        if _ardupilot_log.exists():
+            import shutil as _shutil2
+            _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
