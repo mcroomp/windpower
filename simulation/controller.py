@@ -833,6 +833,23 @@ class AcroController:
             return self._servo.step(tilt_lon_cmd, tilt_lat_cmd, dt)
         return float(tilt_lon_cmd), float(tilt_lat_cmd)
 
+    def slew_collective(self, collective_rad_cmd: float, dt: float) -> float:
+        """
+        Rate-limit collective_rad using the servo model (if enabled).
+
+        Parameters
+        ----------
+        collective_rad_cmd : float   Desired collective blade pitch [rad]
+        dt                 : float   Timestep [s]
+
+        Returns
+        -------
+        float   Slew-limited collective [rad]; unchanged if use_servo=False.
+        """
+        if self._servo is None:
+            return float(collective_rad_cmd)
+        return self._servo.step_collective(collective_rad_cmd, dt)
+
     def reset(self) -> None:
         """Reset all stateful components (call on phase transitions)."""
         self._pid_lon.reset()

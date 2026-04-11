@@ -213,11 +213,15 @@ control:
   swashplate_pitch_gain_rad: 0.3   # β_max = τ · γ_max [rad] at tilt = 1.0  ESTIMATE
 
   # ── Servo dynamics (DS113MG V6.0) ────────────────────────────────────────
-  # Source: DS113MG datasheet — 60 deg in 0.05 s at 6.0 V.
+  # Source: KST DS113MG V6.0 datasheet (openelab.io / spexdrone.com).
+  #   Speed at 4.8 V: 0.13 s/60 deg = 462 deg/s
+  #   Speed at 6.0 V: 0.11 s/60 deg = 545 deg/s
+  #   Speed at 7.4 V: 0.10 s/60 deg = 600 deg/s
+  #   Total travel:   +/-50 deg = 100 deg (NOT 60 deg as previously assumed)
   # Used by SwashplateServoModel in simtests and to set SIM_SERVO_SPEED in SITL.
-  # SIM_SERVO_SPEED = servo_slew_rate_deg_s / servo_travel_deg = 1200/60 = 20.
-  servo_slew_rate_deg_s: 1200.0  # deg/s — DS113MG at 6 V
-  servo_travel_deg:       60.0   # total angular travel of servo [deg]
+  # SIM_SERVO_SPEED = servo_slew_rate_deg_s / servo_travel_deg = 545/100 = 5.45
+  servo_slew_rate_deg_s: 545.0   # deg/s — DS113MG at 6 V (0.11 s/60 deg)
+  servo_travel_deg:      100.0   # total angular travel of servo [deg] (+/-50 deg)
 
   kaman_flap:
     # Kaman servo-flap (US3217809, Kaman/Bossler 1965): trailing-edge control surface

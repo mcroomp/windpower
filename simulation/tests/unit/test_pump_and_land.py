@@ -145,7 +145,7 @@ def _run_pump_and_land() -> dict:
 
     # Mode_RAWES inner state (pumping phase)
     orbit_tracker = OrbitTracker(_IC.body_z, _IC.pos / np.linalg.norm(_IC.pos), BODY_Z_SLEW_RATE)
-    acro          = AcroController.from_rotor(rd.default())
+    acro          = AcroController.from_rotor(rd.default(), use_servo=True)
 
     hub_state   = dyn.state
     omega_spin  = _IC.omega_spin
@@ -216,7 +216,9 @@ def _run_pump_and_land() -> dict:
             winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
             tether.rest_length = winch.rest_length
 
-            collective_rad = COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD)
+            collective_rad = acro.slew_collective(
+                COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
+            )
 
             _aq = pump_cmd["attitude_q"]
             _bz_target = (None if quat_is_identity(_aq)
@@ -241,7 +243,7 @@ def _run_pump_and_land() -> dict:
             }
             land_cmd   = landing_planner.step(land_state, DT)
             land_phase = land_cmd["phase"]
-            collective_rad = land_cmd["collective_rad"]
+            collective_rad = acro.slew_collective(land_cmd["collective_rad"], DT)
             body_z_eq      = land_cmd["body_z_eq"]
 
             winch.step(land_cmd["winch_speed_ms"], tension_now, DT)
@@ -337,12 +339,10 @@ def _run_pump_and_land() -> dict:
     if touchdown_tilt is not None: parts.append(f"tilt={touchdown_tilt:.1f}deg")
     parts.append(f"t_end={t_sim:.1f}s")
 
-    _json_dir = Path(__file__).resolve().parents[2] / "logs"
-    _json_dir.mkdir(exist_ok=True)
     if telemetry:
         write_csv([TelRow.from_tel(d) for d in telemetry],
-                  _json_dir / "telemetry_pump_and_land.csv")
-    _log.write(["(telemetry: telemetry_pump_and_land.csv)"],
+                  _log.log_dir / "telemetry.csv")
+    _log.write(["(telemetry: telemetry.csv)"],
                "  ".join(p for p in parts if p))
 
     return dict(

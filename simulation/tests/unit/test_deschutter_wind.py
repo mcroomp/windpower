@@ -194,7 +194,9 @@ def _run() -> dict:
         winch.step(cmd["winch_speed_ms"], tension_now, DT)
         tether.rest_length = winch.rest_length
 
-        collective_rad = COL_MIN_RAD + cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD)
+        collective_rad = acro.slew_collective(
+            COL_MIN_RAD + cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
+        )
 
         _aq = cmd["attitude_q"]
         _bz_target = (None if quat_is_identity(_aq)

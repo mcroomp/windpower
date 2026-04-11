@@ -237,7 +237,8 @@ class SwashplateServoModel:
     Stateful swashplate servo model with physical slew rate limiting.
 
     Models the DS113MG V6.0 servo speed through the H3-120 swashplate
-    geometry to limit how fast tilt_lon and tilt_lat can change each step.
+    geometry to limit how fast tilt_lon, tilt_lat, and collective can change
+    each step.
 
     Mirrors ArduPilot's SIM_SERVO_SPEED constraint so simtests and SITL
     apply identical servo bandwidth.  Both are derived from the same
@@ -249,17 +250,29 @@ class SwashplateServoModel:
     The factor of 2 converts ArduPilot's [0, 1] output range to our
     normalised tilt range [-1, +1].
 
-    Example — DS113MG at 6 V (60 deg in 0.05 s = 1200 deg/s):
-        SIM_SERVO_SPEED = 1200 / 60 = 20
-        max_rate_norm   = 40 normalised units/s
-        At 400 Hz (dt=0.0025 s): max step = 0.10 per step (10% of full range)
+    Collective is slew-limited in physical units [rad/s]:
+        max_col_rate [rad/s] = max_rate_norm * swashplate_pitch_gain_rad
+
+    Example — DS113MG at 6 V (0.11 s/60 deg = 545 deg/s, 100 deg total travel),
+    swashplate_pitch_gain_rad = 0.3 rad:
+        SIM_SERVO_SPEED  = 545 / 100 = 5.45
+        max_rate_norm    = 2 * 5.45 = 10.9 normalised units/s
+        max_col_rate     = 10.9 * 0.3 = 3.27 rad/s
+        Full-range tilt  = 2 / 10.9 = 183 ms; full collective (0.3 rad) = 92 ms
     """
 
-    def __init__(self, slew_rate_deg_s: float, travel_deg: float):
+    def __init__(
+        self,
+        slew_rate_deg_s:    float,
+        travel_deg:         float,
+        col_pitch_gain_rad: float,
+    ):
         # normalised range [-1,1] = 2 units; ArduPilot range [0,1] = 1 unit
-        self._max_rate = 2.0 * slew_rate_deg_s / travel_deg
-        self._tilt_lon = 0.0
-        self._tilt_lat = 0.0
+        self._max_rate     = 2.0 * slew_rate_deg_s / travel_deg
+        self._max_col_rate = self._max_rate * col_pitch_gain_rad
+        self._tilt_lon     = 0.0
+        self._tilt_lat     = 0.0
+        self._collective_rad = 0.0
 
     @classmethod
     def from_rotor(cls, rotor) -> "SwashplateServoModel":
@@ -267,6 +280,7 @@ class SwashplateServoModel:
         return cls(
             slew_rate_deg_s=rotor.servo_slew_rate_deg_s,
             travel_deg=rotor.servo_travel_deg,
+            col_pitch_gain_rad=rotor.swashplate_pitch_gain_rad,
         )
 
     def step(self, tilt_lon_cmd: float, tilt_lat_cmd: float, dt: float):
@@ -287,10 +301,35 @@ class SwashplateServoModel:
         self._tilt_lat = _slew_limit(self._tilt_lat, float(tilt_lat_cmd), max_step)
         return self._tilt_lon, self._tilt_lat
 
-    def reset(self, tilt_lon: float = 0.0, tilt_lat: float = 0.0) -> None:
+    def step_collective(self, collective_rad_cmd: float, dt: float) -> float:
+        """
+        Advance collective state by dt seconds toward commanded value.
+
+        Parameters
+        ----------
+        collective_rad_cmd : float   Target collective blade pitch [rad]
+        dt                 : float   Time step [s]
+
+        Returns
+        -------
+        float   Slew-rate-limited collective [rad]
+        """
+        max_step = self._max_col_rate * dt
+        self._collective_rad = _slew_limit(
+            self._collective_rad, float(collective_rad_cmd), max_step
+        )
+        return self._collective_rad
+
+    def reset(
+        self,
+        tilt_lon:       float = 0.0,
+        tilt_lat:       float = 0.0,
+        collective_rad: float = 0.0,
+    ) -> None:
         """Reset servo state (call on mode entry or between simulation runs)."""
-        self._tilt_lon = float(tilt_lon)
-        self._tilt_lat = float(tilt_lat)
+        self._tilt_lon       = float(tilt_lon)
+        self._tilt_lat       = float(tilt_lat)
+        self._collective_rad = float(collective_rad)
 
     @property
     def tilt_lon(self) -> float:
@@ -299,6 +338,10 @@ class SwashplateServoModel:
     @property
     def tilt_lat(self) -> float:
         return self._tilt_lat
+
+    @property
+    def collective_rad(self) -> float:
+        return self._collective_rad
 
 
 # ---------------------------------------------------------------------------

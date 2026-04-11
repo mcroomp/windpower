@@ -81,12 +81,36 @@ class BadEventLog:
 
 
 class SimtestLog:
-    """Write simtest diagnostic output to simulation/logs/<module_stem>.log."""
+    """
+    Per-test log directory and diagnostic file for simtests.
+
+    Creates simulation/logs/<module_stem>/ on construction and writes
+    a simtest.log file into it when write() is called.  The log_dir
+    property gives callers the directory path so they can co-locate
+    telemetry.csv and other outputs in the same place.
+
+    Usage::
+
+        _log = SimtestLog(__file__)
+
+        # write telemetry alongside the log
+        write_csv(rows, _log.log_dir / "telemetry.csv")
+
+        # flush diagnostic text and print summary line
+        _log.write(lines, summary)
+    """
 
     def __init__(self, caller_file: str) -> None:
         _LOG_DIR.mkdir(exist_ok=True)
         self.name = Path(caller_file).stem          # e.g. "test_deschutter_cycle"
-        self.path = _LOG_DIR / f"{self.name}.log"
+        self._log_dir = _LOG_DIR / self.name
+        self._log_dir.mkdir(exist_ok=True)
+        self.path = self._log_dir / "simtest.log"
+
+    @property
+    def log_dir(self) -> Path:
+        """Per-test output directory: simulation/logs/<module_stem>/"""
+        return self._log_dir
 
     def write(self, lines: list[str], summary: str) -> None:
         """

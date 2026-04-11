@@ -126,6 +126,44 @@ omega_spin += result.Q_spin / I_SPIN_KGMS2 × dt
 ```
 `Q_spin` comes from `SkewedWakeBEM.compute_forces()` which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium without manual K_drive/K_drag constants.
 
+**Gyroscopic coupling** is included in Euler's equations (`dynamics.py`):
+```
+H_spin = I_spin * omega_spin * body_z   (spin angular momentum vector)
+domega_b = I_body_inv @ (tau_b - omega_b × (I_body @ omega_b + H_spin))
+```
+The `omega_b × H_spin` cross-product term is the precession coupling: any torque applied to the spinning rotor causes the hub to precess at 90° to that torque rather than rotating directly toward the torque direction.
+
+---
+
+## Hub Stability Physics
+
+The RAWES hub has **no passive stability**. Understanding why is important for control design.
+
+### Inverted pendulum configuration
+
+The tether attaches at the **bottom** of the axle, 0.3 m below the centre of mass. For a non-spinning body this is an inverted pendulum — the CM sits above the pivot point, so any tilt causes the tether torque to increase the tilt further rather than restore it. This is unconditionally unstable without active control.
+
+### Gyroscopic conversion of torques to precession
+
+The spinning rotor changes the instability character. Any torque applied to a spinning gyroscope does not produce rotation in the torque direction — it produces **precession at 90°** to the torque. This applies to every torque acting on the hub:
+
+| Torque source | Non-spinning response | Spinning rotor response |
+|---|---|---|
+| Tether offset (inverted pendulum) | Increases tilt (unstable) | Precesses body_z sideways |
+| Gravity on CM above attachment | Pulls CM down (unstable) | Precesses body_z (like a spinning top) |
+| Aerodynamic cyclic moment | Tilts disk | Precesses body_z in controlled direction |
+
+The tether and gravity torques therefore drive **uncontrolled orbital precession** rather than a simple fall. Without active cyclic control the hub drifts into an uncontrolled orbit and crashes within seconds. This is confirmed empirically: neutral sticks in ACRO mode always crashes the hub.
+
+### What the simulation models
+
+Both effects are fully implemented:
+
+- **Tether offset moment** (`M = r_attach × F_tether`, `r_attach = 0.3 m along body_z`) — computed in `tether.py` and applied to `dynamics.step()` every timestep.
+- **Gyroscopic precession** (`omega × (I_body @ omega + H_spin)`) — included in Euler's equations in `dynamics.py`.
+
+The cyclic controller (`AcroController`, or ArduPilot ACRO + `rawes.lua` on hardware) provides the active stabilisation that makes controlled orbital flight possible.
+
 ---
 
 ## Aerodynamic Model
@@ -196,7 +234,7 @@ Test framework in `simulation/aero/tests/` validates all models against each oth
 
 When tether is slack (hub closer than rest length) → zero force. Logs warning when tension exceeds 80% of break load.
 
-Restoring moment (`r_attach × F_tether`) is supported but currently disabled (`axle_attachment_length=0.0`) — body_z stability comes from aerodynamics, not tether moment.
+Tether offset moment (`M = r_attach × F_tether`) is **enabled**: `axle_attachment_length = 0.3 m` (from `beaupoil_2026.yaml`). This moment is computed at every timestep and passed to `dynamics.step()` as part of `M_orbital`. See **Hub Stability Physics** below for the physical implications.
 
 ---
 
@@ -362,9 +400,10 @@ Both below 620 N break load.  Hub lands within 5 m (ANCHOR_LAND_RADIUS_M) of the
 
 Additional physics limitations in the current simulation:
 - No dynamic inflow, no wake memory, no tip vortices
-- Tether: tension-only elastic spring, no sag, no distributed mass
-- Spin ODE is separate scalar, not fully coupled with orbital dynamics
+- Tether: tension-only elastic spring, no sag, no distributed mass, no reel dynamics
+- Spin ODE is a separate scalar — not fully coupled with orbital dynamics (spin-axis torque Q_spin updates omega_spin independently; gyroscopic coupling from omega_spin is fed back into Euler's equations each step)
 - Anti-rotation motor not modeled (internal force in single-body model)
+- Kaman flap aerodynamic response dynamics not modeled (Weyel level B); servo slew rate limits the mechanical input but blade pitch responds instantaneously
 
 ---
 

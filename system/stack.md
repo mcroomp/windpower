@@ -567,6 +567,8 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 | ACRO_TRAINER | 0 | Disable leveling trainer (equilibrium is 65 deg from vertical) |
 | ACRO_RP_RATE | 360 | Must match constant in rawes.lua |
 
+**Why ACRO mode, not STABILIZE or GUIDED:** The hub has no passive stability -- the tether attaches 0.3 m below the centre of mass (inverted pendulum configuration), and for a spinning rotor the tether restoring moment causes gyroscopic precession at 90 deg rather than attitude restoration. Active cyclic is the only stabilisation mechanism. ACRO mode damps angular rates without commanding any absolute attitude, so the hub can sit at its natural 65 deg tilt without corrective cyclic. STABILIZE and GUIDED command cyclic to drive roll=0/pitch=0 (level) and crash within seconds. Do not switch to STABILIZE. See `theory/orbit_mechanics.md §5.3` for the full stability physics analysis.
+
 ### 6.3 GB4008 Anti-Rotation Motor
 
 | Parameter       | Value       | Reason                                                               |

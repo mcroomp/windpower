@@ -74,7 +74,7 @@ All results are produced by a 400 Hz RK4 6-DOF rigid-body integrator coupled to 
 - **Coleman skewed-wake induction** for non-uniform induction at high disk tilt (xi > 20 deg)
 - **5 s aero startup ramp** to avoid impulse loads at t=0
 
-The tether is modelled as a tension-only elastic spring (EA ~= 281 kN, Dyneema SK75). The restoring tether moment at the axle attachment point is disabled (`axle_attachment_length = 0`); disk-tilt stability is provided entirely by aerodynamics.
+The tether is modelled as a tension-only elastic spring (EA ~= 281 kN, Dyneema SK75). The tether attachment point is `axle_attachment_length = 0.3 m` below the centre of mass; the resulting tether moment `M = r_attach x F_tether` is included in the dynamics and is the primary source of tether-pendulum restoring torque during vertical landing descent.
 
 ---
 
@@ -193,6 +193,39 @@ Simulating the full orbit for 30 s with swashplate phase compensation swept from
 - This is consistent with a hardware phase compensation range of **60-120 deg**, matching the theoretical prediction of 90 deg for a counter-clockwise rotor.
 
 The stable phase window matters for hardware tuning: when setting `H_PHANG` in ArduPilot, any value in the 60-120 deg range should produce stable closed-loop response. The exact optimal value is determined by a flight step-response test.
+
+### 5.3 Hub Stability: Inverted Pendulum and No Passive Stability
+
+**The hub has zero passive stability.** Two independent mechanisms make it inherently unstable; only active cyclic prevents divergence.
+
+**Mechanism 1 -- Inverted pendulum (non-spinning case):**
+
+The tether attachment point is 0.3 m *below* the centre of mass. This places the centre of mass *above* the effective pivot, which is the inverted-pendulum configuration. For a non-spinning body any angular perturbation causes a diverging rotation away from equilibrium (gravity torque reinforces the perturbation rather than opposing it). There is no passive tilt restoration.
+
+**Mechanism 2 -- Gyroscopic precession (spinning case):**
+
+For the spinning rotor the situation is different but equally unstable. Any applied torque (including the tether restoring moment or aerodynamic imbalance) does not cause rotation in the torque direction -- it causes precession at 90 deg to the torque vector. Specifically:
+
+| Applied torque | Result (non-spinning) | Result (spinning rotor) |
+|---|---|---|
+| Tether moment (tilt correction) | Restores tilt toward equilibrium | Causes precession perpendicular to tether -- drives ORBIT, not restoration |
+| Gravitational tilt torque | Increases tilt (unstable) | Causes precession perpendicular to tilt -- drives orbit azimuth shift |
+| Aerodynamic disk torque | Damps or amplifies tilt | Precession drives orbit inclination change |
+
+The tether pendulum moment that appears self-stabilising for a non-spinning pendulum instead becomes the gyroscopic drive mechanism for orbital motion (see section 3.4). It does not restore the hub to the vertical -- it pushes the hub around the orbit.
+
+**Why the orbit does not diverge:**
+
+Orbit stability is maintained not by passive mechanics but by the balance of:
+1. Aerodynamic thrust vector (tilted by cyclic), which provides orbital centripetal acceleration
+2. Tether tension, which provides the inward restoring force along the tether
+3. Active cyclic control, which continuously adjusts disk orientation to maintain this balance
+
+The `k_ang` angular damping term in the simulation (50 N.m.s/rad, modelling the AcroController rate PIDs) provides the dissipation that prevents oscillatory divergence. Without active damping (k_ang = 0) the orbit becomes unstable within a few seconds.
+
+**Implication for flight control:**
+
+The hub cannot maintain any attitude without active cyclic. ACRO mode with `rawes.lua` provides the necessary continuous cyclic correction. Any flight mode that commands zero cyclic (including ACRO with neutral sticks and no Lua override) causes uncontrolled precession and a crash within seconds. See `simulation/internals.md §Hub Stability Physics` for the complete torque-source analysis table.
 
 ---
 

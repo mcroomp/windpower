@@ -219,8 +219,10 @@ def _run_deschutter_cycle(
         tether.rest_length = winch.rest_length
 
         # ── Mode_RAWES: collective passthrough (SET_ATTITUDE_TARGET thrust) ───
-        # Pixhawk denormalises thrust → collective_rad for aero model
-        collective_rad = COL_MIN_RAD + cmd["thrust"] * (col_max_rad - COL_MIN_RAD)
+        # Pixhawk denormalises thrust → collective_rad for aero model; servo-slewed
+        collective_rad = acro.slew_collective(
+            COL_MIN_RAD + cmd["thrust"] * (col_max_rad - COL_MIN_RAD), DT
+        )
 
         # ── Mode_RAWES: orbit tracking + rate-limited slew → body_z_eq ───────
         _aq = cmd["attitude_q"]
@@ -435,8 +437,7 @@ def test_deschutter_tether_not_broken():
 
 # ── Analysis CSV export test ─────────────────────────────────────────────────
 
-_LOGS_DIR = Path(__file__).resolve().parents[3] / "simulation" / "logs"
-_UNIT_CSV = _LOGS_DIR / "telemetry_unit_deschutter.csv"
+_UNIT_CSV = _log.log_dir / "telemetry.csv"
 
 
 @pytest.mark.simtest
@@ -445,7 +446,7 @@ def test_deschutter_write_analysis_csv():
     Run one De Schutter cycle and write telemetry to the standard mediator CSV
     format so analyse_pumping_cycle.py can compare unit-test vs stack-test runs.
 
-    Output: simulation/logs/telemetry_unit_deschutter.csv
+    Output: simulation/logs/test_deschutter_cycle/telemetry.csv
     Run:    pytest simulation/tests/unit -k test_deschutter_write_analysis_csv
     """
     r = _run_deschutter_cycle()

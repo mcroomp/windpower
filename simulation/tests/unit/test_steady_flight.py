@@ -67,10 +67,6 @@ ELEV_DEG = 30.0
 ELEV_RAD = math.radians(ELEV_DEG)
 L_TETHER = 100.0                     # m  tether length at this flight point
 
-# ── Output directory (simulation/logs/) ──────────────────────────────────────
-_OUT_DIR = Path(__file__).resolve().parents[2] / "logs"
-_OUT_DIR.mkdir(exist_ok=True)
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

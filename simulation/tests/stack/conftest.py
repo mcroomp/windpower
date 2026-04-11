@@ -669,7 +669,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
         "H_SW_PHANG":       0,      # deg, reset to known state before each test
         # Servo speed — derived from RotorDefinition to stay in sync with SwashplateServoModel
         # in simtests.  SIM_SERVO_SPEED units: full output range (0..1) per second.
-        # DS113MG at 6V: 1200 deg/s / 60 deg travel = 20.0
+        # DS113MG at 6V: 545 deg/s / 100 deg travel = 5.45
         "SIM_SERVO_SPEED":  _rd.default().sim_servo_speed,
     }
     _acro_params = {**_base_params, **ctx.controller.extra_params}

@@ -147,7 +147,7 @@ def _run_landing() -> dict:
         }
         cmd = planner.step(state_pkt, DT)
         phase          = cmd["phase"]
-        collective_rad = cmd["collective_rad"]
+        collective_rad = acro.slew_collective(cmd["collective_rad"], DT)
         body_z_eq      = cmd["body_z_eq"]
 
         # ── Phase bookkeeping ─────────────────────────────────────────────────
@@ -228,12 +228,10 @@ def _run_landing() -> dict:
     if touchdown_tilt is not None: parts.append(f"tilt={touchdown_tilt:.1f}deg")
     parts.append(f"t_end={t_sim:.1f}s")
 
-    _json_dir = Path(__file__).resolve().parents[2] / "logs"
-    _json_dir.mkdir(exist_ok=True)
     if telemetry:
         write_csv([TelRow.from_tel(d) for d in telemetry],
-                  _json_dir / "telemetry_landing.csv")
-    _log.write(["(telemetry: telemetry_landing.csv)"],
+                  _log.log_dir / "telemetry.csv")
+    _log.write(["(telemetry: telemetry.csv)"],
                "  ".join(p for p in parts if p))
 
     return dict(

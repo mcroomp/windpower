@@ -51,6 +51,7 @@ from frames      import build_orb_frame
 from kinematic   import KinematicStartup
 from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat_apply
 from simtest_ic  import load_ic
+from simtest_log import SimtestLog
 from tether      import TetherModel
 from winch       import WinchController
 from tel           import make_tel
@@ -60,6 +61,7 @@ from telemetry_csv import TelRow, write_csv, read_csv
 # Shared constants
 # ---------------------------------------------------------------------------
 
+_log    = SimtestLog(__file__)
 _IC     = load_ic()
 _ROTOR  = rd.default()
 _AERO   = create_aero(_ROTOR)
@@ -89,9 +91,8 @@ TENSION_SAFETY_N = 496.0   # 80% break load
 # Output paths for analyse_pumping_cycle.py
 # ---------------------------------------------------------------------------
 
-_LOGS_DIR       = Path(__file__).resolve().parents[3] / "simulation" / "logs"
-_CSV_STACK      = _LOGS_DIR / "telemetry_unit_stack_mirror.csv"
-_CSV_BASELINE   = _LOGS_DIR / "telemetry_unit_baseline.csv"
+_CSV_STACK      = _log.log_dir / "telemetry_stack_mirror.csv"
+_CSV_BASELINE   = _log.log_dir / "telemetry_baseline.csv"
 
 
 
@@ -229,11 +230,12 @@ def _run_pumping_cycle(
         winch.step(cmd["winch_speed_ms"], tension_now, DT)
         tether.rest_length = winch.rest_length
 
-        # 4. Collective (DeschutterPlanner returns collective_rad directly)
+        # 4. Collective (DeschutterPlanner returns collective_rad directly); servo-slewed
         if "collective_rad" in cmd:
-            collective_rad = float(cmd["collective_rad"])
+            raw_col = float(cmd["collective_rad"])
         else:
-            collective_rad = col_min_rad + cmd["thrust"] * (col_max_rad - col_min_rad)
+            raw_col = col_min_rad + cmd["thrust"] * (col_max_rad - col_min_rad)
+        collective_rad = acro.slew_collective(raw_col, DT)
 
         # 5. Orbit-tracking body_z setpoint + rate-limited slew (mediator path)
         aq = cmd["attitude_q"]
@@ -367,7 +369,7 @@ def test_stack_mirror_vs_baseline():
     )
 
     # Write CSVs for downstream analysis
-    _CSV_VEL0 = _LOGS_DIR / "telemetry_unit_vel0_isolation.csv"
+    _CSV_VEL0 = _log.log_dir / "telemetry_vel0_isolation.csv"
     write_csv([TelRow.from_tel(d) for d in stack["telemetry"]],          _CSV_STACK)
     write_csv([TelRow.from_tel(d) for d in baseline["telemetry"]],       _CSV_BASELINE)
     write_csv([TelRow.from_tel(d) for d in vel0_isolation["telemetry"]], _CSV_VEL0)
@@ -411,7 +413,7 @@ def test_stack_mirror_vs_baseline():
     print(f"  {'mean reel-in tension (N)':<32} {ms['mean_t_in']:>12.1f} {mv['mean_t_in']:>14.1f} {mb['mean_t_in']:>13.1f}  <reel-out")
     print(f"  {'peak tension (N)':<32} {ms['peak_t']:>12.1f} {mv['peak_t']:>14.1f} {mb['peak_t']:>13.1f}  < 496")
     print("=" * w)
-    print(f"  CSVs: {_CSV_STACK.name} | {_CSV_VEL0.name} | {_CSV_BASELINE.name}")
+    print(f"  CSVs in {_log.log_dir.name}/: {_CSV_STACK.name} | {_CSV_VEL0.name} | {_CSV_BASELINE.name}")
 
     # ── Assertions ─────────────────────────────────────────────────────────
 

@@ -451,7 +451,7 @@ class RotorDefinition:
         Derived from the physical servo spec:
             SIM_SERVO_SPEED = servo_slew_rate_deg_s / servo_travel_deg
 
-        For DS113MG at 6 V: 1200 / 60 = 20.0
+        For DS113MG at 6 V: 545 / 100 = 5.45
         """
         return self.servo_slew_rate_deg_s / self.servo_travel_deg
 
