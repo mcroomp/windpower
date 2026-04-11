@@ -53,6 +53,7 @@ from winch_node      import WinchNode, Anemometer
 from planner         import quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
+from telemetry_csv import COLUMNS as _TEL_COLUMNS, TelRow as _TelRow
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -277,6 +278,7 @@ def run_mediator(args, trajectory=None):
     }
     last_servos        = np.zeros(16)   # neutral PWM (mapped from 1500µs → 0)
     s1 = s2 = s3       = 0.0           # servo values (updated in ArduPilot path; stale OK in IC path)
+    _body_z_eq         = np.zeros(3)   # body_z setpoint (IC path only; zeros in ArduPilot path)
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
     omega_spin         = _omega_spin_init
@@ -291,39 +293,9 @@ def run_mediator(args, trajectory=None):
     _telemetry_writer = None
     if args.telemetry_log:
         _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")  # noqa: WPS515
-        _telemetry_writer = csv.writer(_telemetry_file)
-        # CSV schema (see also: analysis/generate_flight_report.py for column usage)
-        _telemetry_writer.writerow([
-            # Time
-            "t_sim",
-            # Servo inputs (normalized, -1..+1)
-            "servo_s1", "servo_s2", "servo_s3", "servo_esc",
-            # Swashplate mixing outputs
-            "collective_norm", "tilt_lon", "tilt_lat", "collective_rad",
-            # Rotor spin estimate
-            "omega_rotor",
-            # Aerodynamic model internals
-            "aero_T", "aero_v_axial", "aero_v_i", "aero_v_inplane", "aero_ramp",
-            "aero_Q_drag", "aero_Q_drive",
-            # Aerodynamic forces (NED world frame)
-            "F_x", "F_y", "F_z", "M_x", "M_y", "M_z",
-            # Hub state (NED world frame: X=North, Y=East, Z=Down)
-            "hub_pos_x", "hub_pos_y", "hub_pos_z",
-            "hub_vel_x", "hub_vel_y", "hub_vel_z",
-            "hub_omega_x", "hub_omega_y", "hub_omega_z",
-            # Hub acceleration (finite-difference)
-            "hub_accel_x", "hub_accel_y", "hub_accel_z",
-            # Tether state
-            "tether_length", "tether_extension", "tether_tension",
-            "tether_fx", "tether_fy", "tether_fz",
-            "tether_slack",
-            # Tether-relative attitude sent to ArduPilot [rad]
-            "rpy_roll", "rpy_pitch", "rpy_yaw",
-            # Pumping cycle (empty strings when --pumping-cycle not active)
-            "pumping_phase", "tether_rest_length", "tension_setpoint",
-            "collective_from_tension_ctrl",
-        ])
-        log.info("Telemetry logging → %s", args.telemetry_log)  # args.telemetry_log is a runtime CLI arg
+        _telemetry_writer = csv.DictWriter(_telemetry_file, fieldnames=_TEL_COLUMNS)
+        _telemetry_writer.writeheader()
+        log.info("Telemetry logging -> %s", args.telemetry_log)  # args.telemetry_log is a runtime CLI arg
 
     # -- WinchNode (separate MAVLink node, co-located physically with anchor) --
     # Encapsulates WinchController + Anemometer.  The planner communicates
@@ -658,37 +630,73 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             if _telemetry_writer is not None:
                 _rpy = sensor_data["rpy"]
-                _telemetry_writer.writerow([
-                    f"{t_sim:.6f}",
-                    f"{s1:.6f}", f"{s2:.6f}", f"{s3:.6f}", f"{esc_norm:.6f}",
-                    f"{collective_norm:.6f}", f"{tilt_lon:.6f}", f"{tilt_lat:.6f}",
-                    f"{collective_rad:.6f}",
-                    f"{omega_spin:.4f}",
-                    f"{aero.last_T:.4f}",
-                    f"{aero.last_v_axial:.4f}",
-                    f"{aero.last_v_i:.4f}",
-                    f"{aero.last_v_inplane:.4f}",
-                    f"{aero.last_ramp:.4f}",
-                    f"{aero.last_Q_drag:.4f}",
-                    f"{aero.last_Q_drive:.4f}",
-                    f"{forces[0]:.4f}", f"{forces[1]:.4f}", f"{forces[2]:.4f}",
-                    f"{forces[3]:.4f}", f"{forces[4]:.4f}", f"{forces[5]:.4f}",
-                    f"{hub_state['pos'][0]:.4f}", f"{hub_state['pos'][1]:.4f}", f"{hub_state['pos'][2]:.4f}",
-                    f"{hub_state['vel'][0]:.4f}", f"{hub_state['vel'][1]:.4f}", f"{hub_state['vel'][2]:.4f}",
-                    f"{hub_state['omega'][0]:.4f}", f"{hub_state['omega'][1]:.4f}", f"{hub_state['omega'][2]:.4f}",
-                    f"{accel_world[0]:.4f}", f"{accel_world[1]:.4f}", f"{accel_world[2]:.4f}",
-                    f"{tether._last_info.get('length', 0.0):.4f}",
-                    f"{tether._last_info.get('extension', 0.0):.4f}",
-                    f"{tether._last_info.get('tension', 0.0):.4f}",
-                    f"{tether_force[0]:.4f}", f"{tether_force[1]:.4f}", f"{tether_force[2]:.4f}",
-                    "1" if tether._last_info.get("slack", True) else "0",
-                    f"{_rpy[0]:.6f}", f"{_rpy[1]:.6f}", f"{_rpy[2]:.6f}",
-                    # Trajectory columns (phase="hold" when pumping cycle inactive)
-                    _traj_cmd.get("phase", ""),
-                    f"{tether.rest_length:.4f}",
-                    f"{_traj_cmd.get('tension_setpoint', 0.0):.2f}",
-                    f"{collective_rad:.6f}",
-                ])
+                _ti  = tether._last_info
+                _telemetry_writer.writerow({
+                    "t_sim":           t_sim,
+                    "phase":           _traj_cmd.get("phase", ""),
+                    "damp_alpha":      _damp_alpha,
+                    "pos_x":           hub_state["pos"][0],
+                    "pos_y":           hub_state["pos"][1],
+                    "pos_z":           hub_state["pos"][2],
+                    "vel_x":           hub_state["vel"][0],
+                    "vel_y":           hub_state["vel"][1],
+                    "vel_z":           hub_state["vel"][2],
+                    "omega_x":         hub_state["omega"][0],
+                    "omega_y":         hub_state["omega"][1],
+                    "omega_z":         hub_state["omega"][2],
+                    "accel_x":         accel_world[0],
+                    "accel_y":         accel_world[1],
+                    "accel_z":         accel_world[2],
+                    "omega_rotor":     omega_spin,
+                    "tether_length":   _ti.get("length",    0.0),
+                    "tether_extension":_ti.get("extension", 0.0),
+                    "tether_tension":  _ti.get("tension",   0.0),
+                    "tether_rest_length": tether.rest_length,
+                    "tether_slack":    1 if _ti.get("slack", True) else 0,
+                    "tether_fx":       tether_force[0],
+                    "tether_fy":       tether_force[1],
+                    "tether_fz":       tether_force[2],
+                    "collective_rad":  collective_rad,
+                    "collective_norm": collective_norm,
+                    "tilt_lon":        tilt_lon,
+                    "tilt_lat":        tilt_lat,
+                    "tension_setpoint":           _traj_cmd.get("tension_setpoint", 0.0),
+                    "collective_from_tension_ctrl": collective_rad,
+                    "aero_T":          aero.last_T,
+                    "aero_v_axial":    aero.last_v_axial,
+                    "aero_v_inplane":  aero.last_v_inplane,
+                    "aero_v_i":        aero.last_v_i,
+                    "aero_Q_drag":     aero.last_Q_drag,
+                    "aero_Q_drive":    aero.last_Q_drive,
+                    "F_x":             forces[0],
+                    "F_y":             forces[1],
+                    "F_z":             forces[2],
+                    "M_x":             forces[3],
+                    "M_y":             forces[4],
+                    "M_z":             forces[5],
+                    "rpy_roll":        _rpy[0],
+                    "rpy_pitch":       _rpy[1],
+                    "rpy_yaw":         _rpy[2],
+                    "servo_s1":        s1,
+                    "servo_s2":        s2,
+                    "servo_s3":        s3,
+                    "servo_esc":       esc_norm,
+                    "wind_x":          wind_world[0],
+                    "wind_y":          wind_world[1],
+                    "wind_z":          wind_world[2],
+                    "bz_eq_x":         _body_z_eq[0],
+                    "bz_eq_y":         _body_z_eq[1],
+                    "bz_eq_z":         _body_z_eq[2],
+                    "r00": float(hub_state["R"][0, 0]),
+                    "r01": float(hub_state["R"][0, 1]),
+                    "r02": float(hub_state["R"][0, 2]),
+                    "r10": float(hub_state["R"][1, 0]),
+                    "r11": float(hub_state["R"][1, 1]),
+                    "r12": float(hub_state["R"][1, 2]),
+                    "r20": float(hub_state["R"][2, 0]),
+                    "r21": float(hub_state["R"][2, 1]),
+                    "r22": float(hub_state["R"][2, 2]),
+                })
 
             # ----------------------------------------------------------------
             # Step 9: Send physics state to SITL
@@ -708,31 +716,25 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             if t_sim - last_log_time >= LOG_INTERVAL:
                 last_log_time = t_sim
-                pos   = hub_state["pos"]
-                vel   = hub_state["vel"]
-                rpy_d = np.degrees(sensor_data["rpy"])
-                teth  = tether._last_info
-                teth_str = (
-                    f"SLACK  L={teth.get('length',0):.1f}m"
-                    if teth.get("slack", True) else
-                    f"TAUT  T={teth.get('tension',0):.0f}N  ext={teth.get('extension',0):.3f}m"
+                vel  = hub_state["vel"]
+                _ti  = tether._last_info
+                _hb  = _TelRow(
+                    t_sim            = t_sim,
+                    pos_x            = hub_state["pos"][0],
+                    pos_y            = hub_state["pos"][1],
+                    pos_z            = hub_state["pos"][2],
+                    rpy_roll         = sensor_data["rpy"][0],
+                    rpy_pitch        = sensor_data["rpy"][1],
+                    rpy_yaw          = sensor_data["rpy"][2],
+                    omega_rotor      = omega_spin,
+                    tether_tension   = _ti.get("tension",   0.0),
+                    tether_length    = _ti.get("length",    0.0),
+                    tether_extension = _ti.get("extension", 0.0),
+                    tether_slack     = 1 if _ti.get("slack", True) else 0,
+                    damp_alpha       = _damp_alpha,
                 )
-                damp_str = (
-                    f"  [DAMP α={_damp_alpha:.2f} remaining={_startup.duration - t_sim:.0f}s]"
-                    if _damp_alpha > 0.0 else ""
-                )
-                log.info(
-                    "t=%6.1fs  pos_NED=[%6.1f %6.1f %6.1f]m  alt=%.2fm  "
-                    "rpy=[%5.1f %5.1f %5.1f]deg  "
-                    "omega=%.1f rad/s  T=%.1fN  tether=%s%s",
-                    t_sim,
-                    pos[0], pos[1], pos[2], -pos[2],
-                    rpy_d[0], rpy_d[1], rpy_d[2],
-                    omega_spin,
-                    T_est,
-                    teth_str,
-                    damp_str,
-                )
+                log.info("%s", _hb.heartbeat(
+                    remaining_s=max(0.0, _startup.duration - t_sim)))
                 # Extra velocity detail for first 15 s of free flight
                 # (helps diagnose kinematic→free-flight transition oscillations)
                 t_free = t_sim - _startup.duration
@@ -741,7 +743,7 @@ def run_mediator(args, trajectory=None):
                         "  vel_NED=[%.3f %.3f %.3f] m/s  |v|=%.3f  "
                         "orbit_r=%.2f m  col=%.4f rad  phase=%s",
                         vel[0], vel[1], vel[2], float(np.linalg.norm(vel)),
-                        float(np.sqrt(pos[0]**2 + pos[1]**2)),
+                        float(np.sqrt(_hb.pos_x**2 + _hb.pos_y**2)),
                         collective_rad,
                         _traj_cmd.get("phase", ""),
                     )

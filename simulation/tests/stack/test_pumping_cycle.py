@@ -13,8 +13,8 @@ Pumping cycle strategy (De Schutter 2018 Fig. 4):
 The mediator's internal pumping-cycle state machine handles all of this.
 This test only observes and asserts from the outside, via mediator telemetry CSV.
 
-Telemetry columns used:
-  t, tension, tether_rest_length, phase, collective_rad, pos_enu_z
+Telemetry columns used (TelRow fields):
+  t_sim, tether_tension, tether_rest_length, phase, collective_rad, pos_z
 
 Pass criteria (matching unit test thresholds):
   1. Hub stays above MIN_ALT_M throughout — no crash.
@@ -24,8 +24,6 @@ Pass criteria (matching unit test thresholds):
   5. No CRITICAL errors in mediator log.
 """
 
-import csv
-import json
 import logging
 import math
 import os
@@ -41,6 +39,7 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_STACK_DIR))
 
 from conftest import StackContext, dump_startup_diagnostics
+from telemetry_csv import read_csv, TelRow
 
 # ---------------------------------------------------------------------------
 # Pumping cycle parameters — taken from config DEFAULTS so stack test and
@@ -83,88 +82,40 @@ _TENSION_LIMIT_N  = 0.8 * _BREAK_LOAD_N   # 496 N
 
 
 # ---------------------------------------------------------------------------
-# Telemetry parsing
+# Telemetry helpers
 # ---------------------------------------------------------------------------
 
-def _parse_telemetry(path: Path) -> list[dict]:
-    """Read mediator telemetry CSV into a list of dicts.
-
-    Numeric columns are converted to float.  String columns (e.g.
-    pumping_phase = "reel-out" | "reel-in") are kept as strings so
-    that phase splits work correctly.
-
-    Mediator column names used here:
-      t_sim              — simulation time [s]
-      tether_tension     — tether tension [N]
-      pumping_phase      — "reel-out" | "reel-in" | "" (empty = not in cycle)
-      tether_rest_length — current rest length [m]
-      hub_pos_z          — hub NED Z [m]  (negative = above ground; altitude = −hub_pos_z)
+def _split_phases(rows: list) -> tuple[list, list]:
     """
-    # Columns that must stay as strings even when they look numeric-ish
-    _STR_COLS = {"pumping_phase"}
+    Split TelRow list into first-complete-cycle reel-out and reel-in rows.
 
-    rows = []
-    if not path.exists():
-        return rows
-    with path.open(encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            parsed: dict = {}
-            for k, v in row.items():
-                if v in ("", "None", "nan"):
-                    continue
-                if k in _STR_COLS:
-                    parsed[k] = v.strip()
-                else:
-                    try:
-                        parsed[k] = float(v)
-                    except ValueError:
-                        parsed[k] = v.strip()
-            if parsed:
-                rows.append(parsed)
-    return rows
-
-
-def _split_phases(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """
-    Split telemetry rows into first-complete-cycle reel-out and reel-in rows.
-
-    Uses the 'pumping_phase' string column ("reel-out" | "reel-in") set by
-    the mediator.  Only returns rows from the FIRST complete cycle — i.e.
-    the first contiguous run of "reel-out" rows followed by the first
-    contiguous run of "reel-in" rows.  Partial cycles at the end of the
-    observation window are discarded so assertions are never contaminated
-    by incomplete data.
+    Uses TelRow.phase ("reel-out" | "reel-in" | "") written by the mediator.
+    Only returns rows from the FIRST complete cycle.  Partial cycles at the
+    end of the observation window are discarded so assertions are never
+    contaminated by incomplete data.
 
     Returns (out_rows, in_rows) where both lists may be empty if no
     complete cycle is found.
     """
-    # Collect phase transitions in order
-    out_rows: list[dict] = []
-    in_rows:  list[dict] = []
-    in_reel_out = False
-    in_reel_in  = False
+    out_rows     = []
+    in_rows      = []
+    in_reel_out  = False
     reel_in_done = False
 
     for r in rows:
-        phase = r.get("pumping_phase", "")
+        phase = r.phase
         if phase == "reel-out":
             if reel_in_done:
-                # Second cycle's reel-out — first cycle is complete, stop
                 break
             in_reel_out = True
-            in_reel_in  = False
             out_rows.append(r)
         elif phase == "reel-in":
             if not in_reel_out:
-                # reel-in before any reel-out — skip
                 continue
-            in_reel_in = True
             reel_in_done = True
             in_rows.append(r)
         else:
             if reel_in_done:
-                # Phase ended after a complete cycle — stop
                 break
 
     return out_rows, in_rows
@@ -264,7 +215,7 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
         )
 
         # ── Parse telemetry CSV for pumping-cycle assertions ─────────────────
-        tel = _parse_telemetry(ctx.telemetry_log)
+        tel = read_csv(ctx.telemetry_log)
         log.info("Telemetry: %d rows", len(tel))
 
         if not tel:
@@ -272,12 +223,11 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
                         "Ensure --telemetry-log is passed to mediator.")
 
         # ── Crash check from mediator telemetry (authoritative physics altitude) ──
-        # Use hub_pos_z from mediator telemetry instead of MAVLink LOCAL_POSITION_NED.
+        # Use pos_z (NED Z) from mediator telemetry instead of MAVLink LOCAL_POSITION_NED.
         # EKF altitude drifts during GPS glitch events in CONST_POS_MODE, giving false
         # crash detections when the physics altitude is well above the limit.
-        # hub_pos_z is NED Z (negative = above ground); altitude = -hub_pos_z.
-        z_tel = [-float(r["hub_pos_z"]) for r in tel
-                 if r.get("hub_pos_z") not in ("", "None", "nan", None)]
+        # pos_z is NED Z (negative = above ground); altitude = -pos_z.
+        z_tel = [-r.pos_z for r in tel]
         if z_tel:
             min_alt_tel = min(z_tel)
             log.info("Min physics altitude (telemetry): %.2f m  (limit=%.1f m)",
@@ -288,7 +238,7 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
             )
 
         # ── Phase split: first complete reel-out + reel-in cycle ─────────────
-        # _split_phases uses the "pumping_phase" string label ("reel-out" /
+        # _split_phases uses the "phase" string label ("reel-out" /
         # "reel-in") written by the mediator.  Only the first complete cycle
         # is returned; partial cycles at the end of the observation window
         # are discarded so assertions are never contaminated by incomplete data.
@@ -297,9 +247,7 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
         log.info("Phase split: reel-out=%d rows  reel-in=%d rows", len(out_rows), len(in_rows))
 
         # Confirm tension data is present in the active-phase rows
-        tension_rows = [r for r in out_rows + in_rows
-                        if "tether_tension" in r and r["tether_tension"] > 0
-                        and "t_sim" in r]
+        tension_rows = [r for r in out_rows + in_rows if r.tether_tension > 0]
         if not tension_rows:
             pytest.skip("No tension data in phase rows — pumping cycle assertions skipped.")
 
@@ -310,18 +258,18 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
             )
 
         # Timing step between telemetry rows (400 Hz → ≈ 0.0025 s)
-        all_t   = [r["t_sim"] for r in out_rows + in_rows if "t_sim" in r]
+        all_t   = [r.t_sim for r in out_rows + in_rows]
         dt_tel  = ((all_t[-1] - all_t[0]) / max(len(all_t) - 1, 1)) if len(all_t) > 1 else 0.0025
 
-        mean_tension_out = sum(r["tether_tension"] for r in out_rows) / len(out_rows)
+        mean_tension_out = sum(r.tether_tension for r in out_rows) / len(out_rows)
 
         # Skip transition period at start of reel-in (body_z blending)
         skip_in   = int(_T_TRANSITION * len(in_rows) / _T_REEL_IN)
         steady_in = in_rows[skip_in:] or in_rows
 
-        mean_tension_in_steady = sum(r["tether_tension"] for r in steady_in) / len(steady_in)
+        mean_tension_in_steady = sum(r.tether_tension for r in steady_in) / len(steady_in)
 
-        peak_tension = max((r["tether_tension"] for r in tension_rows), default=0.0)
+        peak_tension = max((r.tether_tension for r in tension_rows), default=0.0)
 
         log.info(
             "Reel-out mean tension: %.1f N  |  Reel-in steady mean: %.1f N  |  Peak: %.1f N",
@@ -330,8 +278,8 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
 
         # ── Energy accounting from telemetry ──────────────────────────────────
         # E = Σ T × v_reel × dt  (400 Hz telemetry; trapezoidal integral per phase)
-        energy_out = sum(r["tether_tension"] * _V_REEL_OUT * dt_tel for r in out_rows)
-        energy_in  = sum(r["tether_tension"] * _V_REEL_IN  * dt_tel for r in in_rows)
+        energy_out = sum(r.tether_tension * _V_REEL_OUT * dt_tel for r in out_rows)
+        energy_in  = sum(r.tether_tension * _V_REEL_IN  * dt_tel for r in in_rows)
         net_energy = energy_out - energy_in
 
         log.info(

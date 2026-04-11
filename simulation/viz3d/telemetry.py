@@ -4,28 +4,25 @@ telemetry.py — RAWES simulation telemetry data stream abstraction.
 Defines TelemetryFrame (unit of data) and TelemetrySource protocol.
 The same renderer works with any source:
 
-  InMemorySource   — unit test history list (no file I/O)
-  JSONSource       — JSON file written by unit tests via save_telemetry()
-  CSVSource        — mediator telemetry.csv from stack tests (approx R)
+  CSVSource        — mediator telemetry.csv or unit-test telemetry CSV
   LiveQueueSource  — queue.Queue for future live rendering at 400 Hz
 
-Usage from a unit test:
-    import sys; sys.path.insert(0, ...)
-    from viz3d.telemetry import save_telemetry
-    result = _run_deschutter_cycle()
-    save_telemetry("telemetry.json", result["telemetry"])
+All telemetry is written as CSV via write_csv() from telemetry_csv.py and
+read back as TelRow objects which carry the full R matrix, so blade
+orientation in the 3D renderer is exact.
 
-Usage from the visualizer:
-    source = JSONSource("telemetry.json")
+Usage:
+    from telemetry_csv import TelRow, write_csv
+    write_csv([TelRow.from_tel(d) for d in telemetry], "telemetry.csv")
+
+    source = CSVSource("telemetry.csv")
     for frame in source.frames():
         renderer.update(frame)
 """
 from __future__ import annotations
 
-import csv
-import json
-import math
 import queue
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, List, Optional, Protocol, runtime_checkable
@@ -79,104 +76,40 @@ class TelemetrySource(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# InMemorySource
-# ---------------------------------------------------------------------------
-
-class InMemorySource:
-    """
-    Wraps a list of dicts from a unit test telemetry recording.
-
-    Expected keys per dict (mediator-compatible names):
-        t_sim, pos_ned, R, omega_rotor
-    Optional:
-        tether_tension, tether_rest_length, swash_collective,
-        swash_tilt_lon, swash_tilt_lat, body_z_eq, wind_ned
-    """
-    def __init__(self, history: List[dict]) -> None:
-        self._history = history
-
-    def frames(self) -> Iterator[TelemetryFrame]:
-        for h in self._history:
-            pos = np.asarray(h.get("pos_ned", [0.0, 0.0, 0.0]), dtype=float)
-            R_raw = h.get("R", np.eye(3))
-            R = np.asarray(R_raw, dtype=float).reshape(3, 3)
-            bzeq = h.get("body_z_eq")
-            yield TelemetryFrame(
-                t                  = float(h["t_sim"]),
-                pos_ned            = pos,
-                R                  = R,
-                omega_spin         = float(h.get("omega_rotor", 0.0)),
-                tether_tension     = float(h.get("tether_tension", 0.0)),
-                tether_rest_length = float(h.get("tether_rest_length", 0.0)),
-                swash_collective   = float(h.get("collective_rad", 0.0)),
-                swash_tilt_lon     = float(h.get("tilt_lon", 0.0)),
-                swash_tilt_lat     = float(h.get("tilt_lat", 0.0)),
-                body_z_eq          = (np.asarray(bzeq, dtype=float)
-                                      if bzeq is not None else None),
-                wind_ned           = np.asarray(
-                    h.get("wind_ned", [10.0, 0.0, 0.0]), dtype=float
-                ),
-            )
-
-
-# ---------------------------------------------------------------------------
-# JSONSource
-# ---------------------------------------------------------------------------
-
-class JSONSource:
-    """
-    Reads a JSON telemetry file written by save_telemetry().
-
-    File format: JSON array of frame dicts (same keys as InMemorySource).
-    """
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path)
-
-    def frames(self) -> Iterator[TelemetryFrame]:
-        with open(self._path) as fh:
-            data = json.load(fh)
-        yield from InMemorySource(data).frames()
-
-
-# ---------------------------------------------------------------------------
-# CSVSource  (mediator telemetry.csv from stack tests)
+# CSVSource
 # ---------------------------------------------------------------------------
 
 class CSVSource:
     """
-    Reads the mediator telemetry CSV (telemetry.csv from dev.sh test-stack).
+    Reads a telemetry CSV written by write_csv() (telemetry_csv.COLUMNS schema).
 
-    R is approximated from hub position: body_z ≈ tether direction, disk
-    plane built by _orb_frame_from_pos().  For exact orientation, use
-    JSONSource from unit tests which log R directly.
+    R is read directly from the r00..r22 columns — exact, not approximated.
+    Auto-detected from .csv extension in all visualizer CLIs.
     """
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
 
     def frames(self) -> Iterator[TelemetryFrame]:
-        with open(self._path, newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                try:
-                    pos = np.array([
-                        float(row["hub_pos_x"]),
-                        float(row["hub_pos_y"]),
-                        float(row["hub_pos_z"]),
-                    ])
-                    R = _orb_frame_from_pos(pos)
-                    yield TelemetryFrame(
-                        t                  = float(row.get("t_sim", 0)),
-                        pos_ned            = pos,
-                        R                  = R,
-                        omega_spin         = float(row.get("omega_rotor", 0)),
-                        tether_tension     = float(row.get("tether_tension", 0)),
-                        tether_rest_length = float(row.get("tether_rest_length", 0)),
-                        swash_collective   = float(row.get("collective_rad", 0)),
-                        swash_tilt_lon     = float(row.get("tilt_lon", 0)),
-                        swash_tilt_lat     = float(row.get("tilt_lat", 0)),
-                    )
-                except (KeyError, ValueError):
-                    continue
+        _sim = str(Path(__file__).resolve().parents[1])
+        if _sim not in sys.path:
+            sys.path.insert(0, _sim)
+        from telemetry_csv import read_csv as _read_csv  # noqa: PLC0415
+
+        for r in _read_csv(self._path):
+            bzeq = r.body_z_eq
+            yield TelemetryFrame(
+                t                  = r.t_sim,
+                pos_ned            = r.pos_ned,
+                R                  = r.R,
+                omega_spin         = r.omega_rotor,
+                tether_tension     = r.tether_tension,
+                tether_rest_length = r.tether_rest_length,
+                swash_collective   = r.collective_rad,
+                swash_tilt_lon     = r.tilt_lon,
+                swash_tilt_lat     = r.tilt_lat,
+                body_z_eq          = (bzeq if np.linalg.norm(bzeq) > 0.5 else None),
+                wind_ned           = r.wind_ned,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -207,44 +140,3 @@ class LiveQueueSource:
             if frame is None:
                 return
             yield frame
-
-
-# ---------------------------------------------------------------------------
-# save_telemetry — helper for unit tests
-# ---------------------------------------------------------------------------
-
-def save_telemetry(path: str | Path, frames: List[dict]) -> None:
-    """
-    Serialise a unit-test telemetry list to a JSON file.
-
-    Example:
-        result = _run_deschutter_cycle()
-        save_telemetry("telemetry_deschutter.json", result["telemetry"])
-    """
-    path = Path(path)
-    with open(path, "w") as fh:
-        json.dump(frames, fh)
-    print(f"Telemetry saved: {path}  ({len(frames)} frames)")
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _orb_frame_from_pos(pos_ned: np.ndarray) -> np.ndarray:
-    """
-    Approximate rotation matrix from hub NED position alone.
-    body_z = tether direction (NED), body_x = East (NED [0,1,0]) projected onto disk plane.
-    Matches build_orb_frame() in frames.py.
-    """
-    body_z = pos_ned / (np.linalg.norm(pos_ned) + 1e-12)
-    east   = np.array([0.0, 1.0, 0.0])   # East in NED
-    body_x = east - np.dot(east, body_z) * body_z
-    norm_x = np.linalg.norm(body_x)
-    if norm_x < 1e-6:
-        east   = np.array([1.0, 0.0, 0.0])   # North in NED (fallback)
-        body_x = east - np.dot(east, body_z) * body_z
-        norm_x = np.linalg.norm(body_x)
-    body_x /= norm_x
-    body_y  = np.cross(body_z, body_x)
-    return np.column_stack([body_x, body_y, body_z])

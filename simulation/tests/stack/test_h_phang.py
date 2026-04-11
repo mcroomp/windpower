@@ -258,11 +258,9 @@ def test_h_swash_phang(acro_armed: StackContext):
 
         # ── 3. Physics altitude check ─────────────────────────────────────────
         if ctx.telemetry_log.exists():
-            import csv as _csv
-            with ctx.telemetry_log.open(encoding="utf-8") as _f:
-                tel = list(_csv.DictReader(_f))
-            alts = [-float(r["hub_pos_z"]) for r in tel
-                    if r.get("hub_pos_z") not in ("", "None", "nan")]
+            from telemetry_csv import read_csv as _read_csv
+            tel  = _read_csv(ctx.telemetry_log)
+            alts = [-r.pos_z for r in tel]
             if alts:
                 min_alt = min(alts)
                 _log.info("Min physics altitude: %.2f m  (limit=%.1f m)", min_alt, _MIN_ALT_M)

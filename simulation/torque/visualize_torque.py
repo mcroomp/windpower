@@ -28,8 +28,8 @@ Controls
 
 Usage
 -----
-  python simulation/torque/visualize_torque.py simulation/logs/torque_telemetry.json
-  python simulation/torque/visualize_torque.py telemetry.json --export out.gif --fps 15
+  python simulation/torque/visualize_torque.py simulation/logs/torque_telemetry.csv
+  python simulation/torque/visualize_torque.py telemetry.csv --export out.gif --fps 15
 """
 from __future__ import annotations
 
@@ -49,11 +49,30 @@ for _p in [str(_HERE), str(_SIM)]:
         sys.path.insert(0, _p)
 
 import dataclasses as _dc
-from torque_telemetry import TorqueTelemetryFrame, TorqueJSONSource
+from torque_telemetry import TorqueTelemetryFrame
+from telemetry_csv import read_csv as _read_csv
 from mediator_torque import PROFILES as _MEDIATOR_PROFILES
 from model import HubParams as _HubParams, equilibrium_throttle as _eq_throttle
 
 _MODEL_PARAMS = _HubParams()   # default GB4008 params (same as mediator default)
+
+
+def _row_to_frame(r) -> TorqueTelemetryFrame:
+    """Convert a TelRow (NED storage) to TorqueTelemetryFrame (ENU display)."""
+    import math as _math
+    return TorqueTelemetryFrame(
+        t               = r.t_sim,
+        psi_deg         = -_math.degrees(r.rpy_yaw),      # NED -> ENU display
+        psi_dot_degs    = -_math.degrees(r.omega_z),       # NED -> ENU display
+        roll_deg        = _math.degrees(r.rpy_roll),
+        pitch_deg       = _math.degrees(r.rpy_pitch),
+        throttle        = r.throttle,
+        servo_pwm_us    = int(r.servo_esc),
+        omega_rotor_rads = r.omega_rotor,
+        q_bearing_nm    = r.q_bearing_nm,
+        q_motor_nm      = r.q_motor_nm,
+        phase           = r.phase if r.phase else "DYNAMIC",
+    )
 
 try:
     import pyvista as pv
@@ -815,7 +834,7 @@ def main() -> None:
         description="3D real-time playback of counter-torque motor telemetry"
     )
     ap.add_argument("telemetry", nargs="?", default=None,
-                    help="Path to a specific torque_telemetry*.json  "
+                    help="Path to a specific torque_telemetry*.csv  "
                          "(default: auto-discover all in simulation/logs/)")
     ap.add_argument("--fps",    type=float, default=30.0,
                     help="Playback rate for export (default: 30)")
@@ -828,9 +847,9 @@ def main() -> None:
         all_paths = [Path(args.telemetry)]
     else:
         log_dir   = Path(__file__).resolve().parents[1] / "logs"
-        all_paths = sorted(log_dir.glob("torque_telemetry*.json"))
+        all_paths = sorted(log_dir.glob("torque_telemetry*.csv"))
         if not all_paths:
-            print(f"No torque_telemetry*.json found in {log_dir}")
+            print(f"No torque_telemetry*.csv found in {log_dir}")
             return
 
     print(f"Found {len(all_paths)} telemetry file(s):")
@@ -843,13 +862,18 @@ def main() -> None:
     def _load(idx: int):
         path = all_paths[idx % len(all_paths)]
         print(f"\nLoading [{idx % len(all_paths) + 1}/{len(all_paths)}]: {path.name}")
-        src  = TorqueJSONSource(path)
-        frms = list(src.frames())
-        meta = src.meta
-        print(f"  {len(frms)} frames  "
-              f"t=[{frms[0].t:.1f}, {frms[-1].t:.1f}]s  "
-              f"result={meta.get('result','?')}  "
-              f"profile={meta.get('profile', meta.get('test','?'))}")
+        rows = _read_csv(path)
+        frms = [_row_to_frame(r) for r in rows]
+        omega_nom = rows[0].omega_rotor if rows else 28.0
+        meta = {
+            "omega_rotor_rads": omega_nom,
+            "result": "?",
+            "settle_s": 40.0,
+            "observe_s": 20.0,
+            "threshold_degs": 1.0,
+        }
+        if frms:
+            print(f"  {len(frms)} frames  t=[{frms[0].t:.1f}, {frms[-1].t:.1f}]s")
         return frms, meta
 
     if args.export:

@@ -2,14 +2,13 @@
 render_cycle.py — Render a RAWES telemetry file to MP4 or GIF.
 
 Usage:
-    python render_cycle.py telemetry_deschutter.json
-    python render_cycle.py telemetry_deschutter.json --out cycle.mp4
-    python render_cycle.py telemetry_deschutter.json --out cycle.gif --fps 15
-    python render_cycle.py telemetry.csv --source csv --speed 4
+    python render_cycle.py telemetry_deschutter.csv
+    python render_cycle.py telemetry_deschutter.csv --out cycle.mp4
+    python render_cycle.py telemetry_deschutter.csv --out cycle.gif --fps 15
+    python render_cycle.py telemetry.csv --speed 4
 
 Options:
     --out FILE       Output file (.mp4 or .gif).  Default: <input stem>.mp4
-    --source         json (default) or csv
     --fps FPS        Playback frame rate.  Default: 20
     --speed N        Real-time multiplier: every Nth frame is rendered.
                      speed=2 → 2× faster, half the frames.  Default: 2
@@ -42,7 +41,7 @@ try:
 except ImportError:
     sys.exit("PyVista not found.  pip install pyvista")
 
-from viz3d.telemetry import JSONSource, CSVSource
+from viz3d.telemetry import CSVSource
 from viz3d.visualize_3d import RAWESVisualizer, fit_camera
 
 
@@ -133,9 +132,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("input",          help="Telemetry file (.json or .csv)")
+    p.add_argument("input",          help="Telemetry CSV file")
     p.add_argument("--out",          help="Output file (default: <input>.mp4)")
-    p.add_argument("--source",       choices=["json", "csv"], default="json")
     p.add_argument("--fps",          type=int,   default=20)
     p.add_argument("--speed",        type=int,   default=2,
                    help="Render every Nth frame (default: 2 = 2× realtime)")
@@ -153,7 +151,7 @@ def main() -> None:
     if not in_path.exists():
         sys.exit(f"Not found: {in_path}")
 
-    source = CSVSource(in_path) if args.source == "csv" else JSONSource(in_path)
+    source = CSVSource(in_path)
 
     render(
         source    = source,

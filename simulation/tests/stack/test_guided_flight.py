@@ -23,7 +23,6 @@ where roll/pitch are attitude error angles (physical attitude minus the
 equilibrium captured at kinematic startup) and rollspeed/pitchspeed/yawspeed
 are body-frame angular rates from the ArduPilot ATTITUDE message.
 """
-import json
 import logging
 import math
 import sys
@@ -39,8 +38,6 @@ sys.path.insert(0, str(_STACK_DIR))
 
 from conftest import StackContext, analyze_startup_logs, dump_startup_diagnostics
 
-from flight_report import plot_flight_report as _plot_flight_report_base
-
 # ── Timing ───────────────────────────────────────────────────────────────────
 _HOLD_SECONDS = 60.0   # s — tether-alignment controller hold in ACRO
 
@@ -52,39 +49,6 @@ _MIN_ALT_M   =   0.5  # m — hub must stay above this (not crashed)
 
 # ── Logging interval ─────────────────────────────────────────────────────────
 _POS_LOG_INTERVAL = 5.0   # s
-
-
-def _plot_flight_report(
-    pos_history:      list,
-    attitude_history: list,
-    servo_history:    list,
-    events:           dict,
-    out_path:         Path,
-    telemetry_path:   Path | None = None,
-    home_alt_m:       float = 0.0,
-) -> None:
-    _STARTING_STATE = _SIM_DIR / "steady_state_starting.json"
-    if _STARTING_STATE.exists():
-        st      = json.loads(_STARTING_STATE.read_text())
-        pos_ned = st["pos"]   # NED: hub starting position in physics frame
-        # In LOCAL_POSITION_NED, HOME = hub start; anchor at [0, 0, -pos_ned[2]]
-        anchor_ned = (0.0, 0.0, -float(pos_ned[2]))
-        tether_len = math.sqrt(sum(x**2 for x in pos_ned))
-    else:
-        anchor_ned = (0.0, 0.0, 0.0)
-        tether_len = 50.0
-
-    _plot_flight_report_base(
-        pos_history      = pos_history,
-        attitude_history = attitude_history,
-        servo_history    = servo_history,
-        events           = events,
-        target           = (0.0, 0.0, 0.0),
-        out_path         = out_path,
-        telemetry_path   = telemetry_path,
-        tether_length_m  = tether_len,
-        anchor_ned       = anchor_ned,
-    )
 
 
 def test_acro_hold(acro_armed: StackContext):
@@ -110,7 +74,6 @@ def test_acro_hold(acro_armed: StackContext):
     pos_history:      list[tuple[float, float, float, float]] = []
     attitude_history: list[tuple[float, float, float, float]] = []
     servo_history:    list[tuple[float, int, int, int, int]]  = []
-    rc_history:       list[tuple[float, int, int, int, int]]  = []  # (t, ch1, ch2, ch3, ch4)
     flight_events     = ctx.flight_events      # shared with fixture checkpoints
     all_statustext    = ctx.all_statustext
 
@@ -187,11 +150,6 @@ def test_acro_hold(acro_armed: StackContext):
                 else:
                     rc = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 8: 2000}
                     gcs.send_rc_override(rc)
-                rc_history.append((
-                    now - t_obs_start,
-                    rc.get(1, 1500), rc.get(2, 1500),
-                    rc.get(3, 1500), rc.get(4, 1500),
-                ))
                 t_last_rc = now
 
             if now - t_last_log >= _POS_LOG_INTERVAL and pos_history:
@@ -231,13 +189,11 @@ def test_acro_hold(acro_armed: StackContext):
         # Altitude from mediator telemetry (authoritative NED physics).
         # LOCAL_POSITION_NED D drifts significantly in CONST_POS_MODE (no GPS fusion)
         # and gives false crash detections; telemetry is the ground truth.
-        # hub_pos_z is NED Z (negative = above ground); altitude = -hub_pos_z.
+        # pos_z is NED Z (negative = above ground); altitude = -pos_z.
         if ctx.telemetry_log.exists():
-            import csv as _csv
-            with ctx.telemetry_log.open(encoding="utf-8") as _f:
-                _tel = list(_csv.DictReader(_f))
-            _alts = [-float(r["hub_pos_z"]) for r in _tel
-                     if r.get("hub_pos_z") not in ("", "None", "nan", None)]
+            from telemetry_csv import read_csv as _read_csv
+            _tel  = _read_csv(ctx.telemetry_log)
+            _alts = [-r.pos_z for r in _tel]
             if _alts:
                 min_alt = min(_alts)
                 log.info("Min physics altitude (telemetry): %.2f m  (limit=%.1f m)",
@@ -266,36 +222,3 @@ def test_acro_hold(acro_armed: StackContext):
     finally:
         import shutil as _shutil
 
-        # Save flight data JSON for redraw tool
-        if pos_history and ctx.initial_state:
-            anchor_ned = [
-                -ctx.initial_state["pos"][1],
-                -ctx.initial_state["pos"][0],
-                float(ctx.initial_state["pos"][2]),
-            ]
-            flight_data = {
-                "pos_history":      [list(r) for r in pos_history],
-                "attitude_history": [list(r) for r in attitude_history],
-                "servo_history":    [list(r) for r in servo_history],
-                "rc_history":       [list(r) for r in rc_history],
-                "events":           flight_events,
-                "target":           [0.0, 0.0, 0.0],
-                "anchor_ned":       anchor_ned,
-            }
-            with (ctx.sim_dir / "logs" / "flight_data.json").open("w", encoding="utf-8") as f:
-                json.dump(flight_data, f)
-
-        if pos_history:
-            try:
-                _plot_flight_report(
-                    pos_history      = pos_history,
-                    attitude_history = attitude_history,
-                    servo_history    = servo_history,
-                    events           = flight_events,
-                    out_path         = ctx.sim_dir / "flight_report.png",
-                    telemetry_path   = ctx.telemetry_log if ctx.telemetry_log.exists() else None,
-                    home_alt_m       = ctx.home_alt_m,
-                )
-                log.info("Flight report → %s", ctx.sim_dir / "flight_report.png")
-            except Exception as exc:
-                log.warning("Flight report failed: %s", exc)

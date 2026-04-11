@@ -20,7 +20,6 @@ passive restoring torque for orientation stability.
 
 See landing_planner.py for full controller documentation.
 """
-import json
 import sys
 from pathlib import Path
 
@@ -42,6 +41,7 @@ from simtest_log    import SimtestLog
 from simtest_ic     import load_ic
 from landing_planner import LandingPlanner
 from tel             import make_tel
+from telemetry_csv   import TelRow, write_csv
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -109,6 +109,7 @@ def _run_landing() -> dict:
         body_z_slew_rate = BODY_Z_SLEW_RATE,
         min_tether_m     = MIN_TETHER_M,
         anchor_ned       = ANCHOR,
+        k_winch          = 0.0,   # open-loop: hub starts static, no orbital velocity to track
     )
 
     hub_state   = dyn.state
@@ -227,18 +228,13 @@ def _run_landing() -> dict:
     if touchdown_tilt is not None: parts.append(f"tilt={touchdown_tilt:.1f}deg")
     parts.append(f"t_end={t_sim:.1f}s")
 
-    skip = {"pos_ned", "R"}
-    header    = ",".join(k for k in telemetry[0] if k not in skip) if telemetry else ""
-    log_lines = [header] + [
-        ",".join(str(v) for k, v in row.items() if k not in skip)
-        for row in telemetry
-    ] if telemetry else ["(no telemetry)"]
-    _log.write(log_lines, "  ".join(p for p in parts if p))
-
     _json_dir = Path(__file__).resolve().parents[2] / "logs"
     _json_dir.mkdir(exist_ok=True)
-    with open(_json_dir / "telemetry_landing.json", "w") as fh:
-        json.dump(telemetry, fh)
+    if telemetry:
+        write_csv([TelRow.from_tel(d) for d in telemetry],
+                  _json_dir / "telemetry_landing.csv")
+    _log.write(["(telemetry: telemetry_landing.csv)"],
+               "  ".join(p for p in parts if p))
 
     return dict(
         t_end           = t_sim,

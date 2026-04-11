@@ -11,18 +11,18 @@ the gyro Z component changes with tilt angle.
 Pass criterion: max |ψ_dot| < 2°/s after 40 s settle, confirming that
 tilt does not break the yaw control loop.
 
-Telemetry → simulation/logs/torque_telemetry_pitch_roll.json
+Telemetry → simulation/logs/torque_telemetry_pitch_roll.csv
 """
 from __future__ import annotations
 
+import math
 import pytest
 
-from torque_telemetry import TorqueTelemetryRecorder
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
 
 _SETTLE_S   = 40.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = 2.0     # °/s — same as constant-RPM test; tilt shouldn't degrade yaw
+_THRESHOLD  = math.radians(2.0)   # [rad/s] -- same as constant-RPM test; tilt shouldn't degrade yaw
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["pitch_roll"], indirect=True)
@@ -36,18 +36,7 @@ def test_pitch_roll(torque_armed_profile):
     yaw PID is decoupled from the pitch/roll motion.
     """
     ctx = torque_armed_profile
-    rec = TorqueTelemetryRecorder(meta={
-        "test":             "pitch_roll",
-        "profile":          "pitch_roll",
-        "omega_rotor_rads": ctx.omega_rotor,
-        "roll_amplitude_deg":  5.0,
-        "roll_freq_hz":        0.08,
-        "pitch_amplitude_deg": 3.0,
-        "pitch_freq_hz":       0.05,
-        "settle_s":            _SETTLE_S,
-        "observe_s":           _OBSERVE_S,
-        "threshold_degs":      _THRESHOLD,
-    })
+    rows: list = []
 
     # Disable GPS position/velocity fusion for this test — hub tilt projects
     # gravity into horizontal axes (g·sin θ ≈ 0.5 m/s² at ±5°), which looks
@@ -60,10 +49,10 @@ def test_pitch_roll(torque_armed_profile):
         ctx.log.info("  %-25s = %g  ACK=%s", pname, pval, ok)
 
     obs = run_observation_loop(
-        ctx=ctx, rec=rec,
+        ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
-    save_telemetry(rec, "pitch_roll", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, rec, ctx.log)
+    save_telemetry(rows, "pitch_roll", ctx.log)
+    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)

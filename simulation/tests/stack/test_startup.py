@@ -22,19 +22,19 @@ Pass criterion
   small transients during the ramp; tight enough to confirm the motor
   is actively regulating throughout spin-up, not just at steady state).
 
-Telemetry → simulation/logs/torque_telemetry_startup.json
+Telemetry → simulation/logs/torque_telemetry_startup.csv
 """
 from __future__ import annotations
 
+import math
 import pytest
 
-from torque_telemetry import TorqueTelemetryRecorder
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
 
 #: Settle long enough to cover the 30 s ramp + 20 s post-ramp stabilisation
 _SETTLE_S   = 50.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = 2.0     # °/s — allows small ramp transients
+_THRESHOLD  = math.radians(2.0)   # [rad/s] -- allows small ramp transients
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["startup"], indirect=True)
@@ -49,23 +49,13 @@ def test_startup(torque_armed_profile):
     and confirms the motor can regulate yaw even at low RPM.
     """
     ctx = torque_armed_profile
-    rec = TorqueTelemetryRecorder(meta={
-        "test":              "startup",
-        "profile":           "startup",
-        "omega_rotor_rads":  ctx.omega_rotor,
-        "ramp_duration_s":   30.0,
-        "ramp_start_rads":   0.0,
-        "ramp_end_rads":     ctx.omega_rotor,
-        "settle_s":          _SETTLE_S,
-        "observe_s":         _OBSERVE_S,
-        "threshold_degs":    _THRESHOLD,
-    })
+    rows: list = []
 
     obs = run_observation_loop(
-        ctx=ctx, rec=rec,
+        ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
-    save_telemetry(rec, "startup", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, rec, ctx.log)
+    save_telemetry(rows, "startup", ctx.log)
+    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)

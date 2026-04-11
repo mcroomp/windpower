@@ -21,14 +21,12 @@ Usage (from repo root):
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -37,6 +35,9 @@ from typing import Optional
 _SIM_DIR     = Path(__file__).resolve().parents[1]
 _DEFAULT_CSV = _SIM_DIR / "logs" / "telemetry_pumping.csv"
 
+sys.path.insert(0, str(_SIM_DIR))
+from telemetry_csv import TelRow, read_csv  # noqa: E402
+
 # Thresholds (match test_pumping_cycle.py)
 _MIN_ALT_M       = 0.5     # m — crash floor
 _BREAK_LOAD_N    = 620.0   # N — Dyneema SK75 1.9 mm
@@ -44,83 +45,7 @@ _TENSION_LIMIT_N = 0.8 * _BREAK_LOAD_N  # 496 N — 80% break load
 
 
 # ---------------------------------------------------------------------------
-# Telemetry parsing
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TelRow:
-    t:                   float
-    hub_pos_x:           float = 0.0
-    hub_pos_y:           float = 0.0
-    hub_pos_z:           float = 0.0    # NED Z; altitude = -hub_pos_z
-    hub_vel_x:           float = 0.0
-    hub_vel_y:           float = 0.0
-    hub_vel_z:           float = 0.0
-    tether_length:       float = 0.0
-    tether_extension:    float = 0.0
-    tether_tension:      float = 0.0
-    tether_rest_length:  float = 0.0
-    tether_slack:        int   = 1
-    collective_rad:      float = 0.0
-    collective_norm:     float = 0.0
-    pumping_phase:       str   = ""     # "reel-out" | "reel-in" | ""
-    tension_setpoint:    float = 0.0
-    collective_from_tension_ctrl: float = 0.0
-    omega_rotor:         float = 0.0
-    aero_T:              float = 0.0
-
-    @property
-    def altitude(self) -> float:
-        """Hub altitude above anchor [m] = -NED_Z."""
-        return -self.hub_pos_z
-
-    @property
-    def orbit_radius(self) -> float:
-        """Horizontal distance from anchor [m]."""
-        return math.sqrt(self.hub_pos_x**2 + self.hub_pos_y**2)
-
-
-def _try_float(s: str) -> Optional[float]:
-    if s in ("", "None", "nan", "inf", "-inf"):
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def load_telemetry(path: Path) -> list[TelRow]:
-    """Load telemetry CSV into a list of TelRow objects."""
-    rows: list[TelRow] = []
-    if not path.exists():
-        return rows
-
-    with path.open(encoding="utf-8", errors="replace") as f:
-        reader = csv.DictReader(f)
-        for raw in reader:
-            t = _try_float(raw.get("t_sim", ""))
-            if t is None:
-                continue
-            r = TelRow(t=t)
-            for fld in (
-                "hub_pos_x", "hub_pos_y", "hub_pos_z",
-                "hub_vel_x", "hub_vel_y", "hub_vel_z",
-                "tether_length", "tether_extension", "tether_tension",
-                "tether_rest_length", "collective_rad", "collective_norm",
-                "tension_setpoint", "collective_from_tension_ctrl",
-                "omega_rotor", "aero_T",
-            ):
-                v = _try_float(raw.get(fld, ""))
-                if v is not None:
-                    setattr(r, fld, v)
-            # tether_slack is an integer flag
-            v_slack = _try_float(raw.get("tether_slack", ""))
-            if v_slack is not None:
-                r.tether_slack = int(v_slack)
-            # pumping_phase is a string label
-            r.pumping_phase = raw.get("pumping_phase", "").strip()
-            rows.append(r)
-    return rows
+# Telemetry parsing: TelRow and read_csv imported from telemetry_csv
 
 
 # ---------------------------------------------------------------------------
@@ -136,16 +61,16 @@ class PumpingCycle:
 
     @property
     def t_start(self) -> float:
-        return self.out_rows[0].t if self.out_rows else 0.0
+        return self.out_rows[0].t_sim if self.out_rows else 0.0
 
     @property
     def t_reel_in_start(self) -> float:
-        return self.in_rows[0].t if self.in_rows else 0.0
+        return self.in_rows[0].t_sim if self.in_rows else 0.0
 
     @property
     def t_end(self) -> float:
-        return self.in_rows[-1].t if self.in_rows else (
-            self.out_rows[-1].t if self.out_rows else 0.0)
+        return self.in_rows[-1].t_sim if self.in_rows else (
+            self.out_rows[-1].t_sim if self.out_rows else 0.0)
 
     @property
     def complete(self) -> bool:
@@ -167,7 +92,7 @@ def split_cycles(rows: list[TelRow]) -> list[PumpingCycle]:
     cycle_idx  = 0
 
     for r in rows:
-        phase = r.pumping_phase  # "reel-out" | "reel-in" | ""
+        phase = r.phase  # "reel-out" | "reel-in" | ""
 
         if phase == "reel-out":
             if last_phase == "reel-in":
@@ -205,7 +130,7 @@ def split_phases(rows: list[TelRow]) -> dict[str, list[TelRow]]:
     """
     phases: dict[str, list[TelRow]] = {"": [], "reel-out": [], "reel-in": []}
     for r in rows:
-        label = r.pumping_phase if r.pumping_phase in ("reel-out", "reel-in") else ""
+        label = r.phase if r.phase in ("reel-out", "reel-in") else ""
         phases[label].append(r)
     return phases
 
@@ -256,21 +181,21 @@ def find_tension_spikes(rows: list[TelRow], threshold: float = 500.0,
     for r in rows:
         if r.tether_tension > threshold:
             if not in_spike:
-                t0 = r.t
+                t0 = r.t_sim
                 peak = r.tether_tension
                 in_spike = True
             else:
                 peak = max(peak, r.tether_tension)
         else:
             if in_spike:
-                dur = r.t - t0
+                dur = r.t_sim - t0
                 if dur >= 0.005:   # ignore sub-timestep artifacts
-                    spikes.append(TensionSpike(t0, r.t, peak, dur))
+                    spikes.append(TensionSpike(t0, r.t_sim, peak, dur))
                 in_spike = False
 
     if in_spike and rows:
-        dur = rows[-1].t - t0
-        spikes.append(TensionSpike(t0, rows[-1].t, peak, dur))
+        dur = rows[-1].t_sim - t0
+        spikes.append(TensionSpike(t0, rows[-1].t_sim, peak, dur))
 
     # Merge spikes separated by < min_gap_s
     merged: list[TensionSpike] = []
@@ -301,13 +226,13 @@ def _pass_fail(ok: bool, msg: str) -> str:
 def _phase_detail(rows: list[TelRow]) -> dict:
     """Extract per-row data for a phase as lists suitable for JSON output."""
     return {
-        "t":                   [r.t                  for r in rows],
-        "altitude_m":          [-r.hub_pos_z          for r in rows],
-        "tether_length_m":     [r.tether_length       for r in rows],
-        "tether_extension_m":  [r.tether_extension    for r in rows],
-        "tether_rest_length_m":[r.tether_rest_length  for r in rows],
-        "tether_tension_n":    [r.tether_tension       for r in rows],
-        "tension_setpoint_n":  [r.tension_setpoint    for r in rows],
+        "t":                   [r.t_sim                  for r in rows],
+        "altitude_m":          [-r.pos_z          for r in rows],
+        "tether_length_m":     [r.tether_length            for r in rows],
+        "tether_extension_m":  [r.tether_extension         for r in rows],
+        "tether_rest_length_m":[r.tether_rest_length       for r in rows],
+        "tether_tension_n":    [r.tether_tension           for r in rows],
+        "tension_setpoint_n":  [r.tension_setpoint         for r in rows],
         "collective_rad":      [r.collective_rad       for r in rows],
         "collective_ctrl":     [r.collective_from_tension_ctrl for r in rows],
         "orbit_radius_m":      [r.orbit_radius        for r in rows],
@@ -327,33 +252,33 @@ def analyse(rows: list[TelRow]) -> dict:
         print("  No telemetry rows loaded.")
         return results
 
-    t_total = rows[-1].t - rows[0].t
-    print(f"  rows: {len(rows):,}   t: {rows[0].t:.1f}–{rows[-1].t:.1f}s  "
+    t_total = rows[-1].t_sim - rows[0].t_sim
+    print(f"  rows: {len(rows):,}   t: {rows[0].t_sim:.1f}–{rows[-1].t_sim:.1f}s  "
           f"(duration={t_total:.1f}s)")
 
     phases = split_phases(rows)
     for label in ("reel-out", "reel-in"):
         ph = phases[label]
         if ph:
-            dt = ph[-1].t - ph[0].t
+            dt = ph[-1].t_sim - ph[0].t_sim
             print(f"  {label:<10}: {len(ph):>6} rows  "
-                  f"t={ph[0].t:.1f}–{ph[-1].t:.1f}s  ({dt:.1f}s)")
+                  f"t={ph[0].t_sim:.1f}–{ph[-1].t_sim:.1f}s  ({dt:.1f}s)")
         else:
             print(f"  {label:<10}: (no rows)")
 
-    results["t_start"] = rows[0].t
-    results["t_end"]   = rows[-1].t
+    results["t_start"] = rows[0].t_sim
+    results["t_end"]   = rows[-1].t_sim
 
     # ── Altitude ─────────────────────────────────────────────────────────
-    _section("ALTITUDE  (physics NED, altitude = -hub_pos_z)")
-    alts = [-r.hub_pos_z for r in rows]
+    _section("ALTITUDE  (physics NED, altitude = -pos_z)")
+    alts = [-r.pos_z for r in rows]
     min_alt = min(alts)
     max_alt = max(alts)
     print(f"  All phases:    {_stats(alts)}")
     for label in ("reel-out", "reel-in"):
         ph = phases[label]
         if ph:
-            a = [-r.hub_pos_z for r in ph]
+            a = [-r.pos_z for r in ph]
             print(f"  {label:<10}: {_stats(a)}")
 
     alt_ok = min_alt >= _MIN_ALT_M
@@ -449,7 +374,7 @@ def analyse(rows: list[TelRow]) -> dict:
         col_vals  = [r.collective_from_tension_ctrl for r in ri
                      if r.collective_from_tension_ctrl != 0.0]
         tens_ri   = [r.tether_tension for r in ri]
-        t_ri      = [r.t for r in ri]
+        t_ri      = [r.t_sim for r in ri]
 
         if col_vals:
             print(f"  collective_ctrl: {_stats(col_vals)}")
@@ -462,7 +387,7 @@ def analyse(rows: list[TelRow]) -> dict:
         rest_ri = [r.tether_rest_length for r in ri]
         v_reel_ri = []
         for i in range(1, len(ri)):
-            dt = ri[i].t - ri[i-1].t
+            dt = ri[i].t_sim - ri[i-1].t_sim
             if dt > 0:
                 v_reel_ri.append(abs(rest_ri[i] - rest_ri[i-1]) / dt)
             else:
@@ -478,11 +403,11 @@ def analyse(rows: list[TelRow]) -> dict:
     ro = phases["reel-out"]
     if ro:
         tens_ro  = [r.tether_tension for r in ro]
-        t_ro     = [r.t for r in ro]
+        t_ro     = [r.t_sim for r in ro]
         rest_ro  = [r.tether_rest_length for r in ro]
         v_reel_ro = []
         for i in range(1, len(ro)):
-            dt = ro[i].t - ro[i-1].t
+            dt = ro[i].t_sim - ro[i-1].t_sim
             v_reel_ro.append(abs(rest_ro[i] - rest_ro[i-1]) / dt if dt > 0 else 0.0)
         v_reel_ro.insert(0, v_reel_ro[0] if v_reel_ro else 0.0)
 
@@ -530,8 +455,8 @@ def analyse(rows: list[TelRow]) -> dict:
     for cyc in cycles:
         label = f"Cycle {cyc.index + 1}"
         status = "complete" if cyc.complete else "partial"
-        t_out_dur = (cyc.out_rows[-1].t - cyc.out_rows[0].t) if len(cyc.out_rows) > 1 else 0.0
-        t_in_dur  = (cyc.in_rows[-1].t  - cyc.in_rows[0].t)  if len(cyc.in_rows)  > 1 else 0.0
+        t_out_dur = (cyc.out_rows[-1].t_sim - cyc.out_rows[0].t_sim) if len(cyc.out_rows) > 1 else 0.0
+        t_in_dur  = (cyc.in_rows[-1].t_sim  - cyc.in_rows[0].t_sim)  if len(cyc.in_rows)  > 1 else 0.0
         print(f"  {label} [{status}]  t={cyc.t_start:.1f}–{cyc.t_end:.1f}s  "
               f"reel-out={t_out_dur:.1f}s  reel-in={t_in_dur:.1f}s")
 
@@ -605,16 +530,16 @@ def compare(rows_a: list[TelRow], label_a: str,
         phases = split_phases(rows)
         ro = phases["reel-out"]
         ri = phases["reel-in"]
-        alts = [-r.hub_pos_z for r in rows]
+        alts = [-r.pos_z for r in rows]
         out_t = [r.tether_tension for r in ro if r.tether_tension > 0]
         in_t  = [r.tether_tension for r in ri if r.tether_tension > 0]
         return {
             "n_rows":          len(rows),
             "n_cycles":        len(cycles),
-            "t_span":          f"{rows[0].t:.1f}-{rows[-1].t:.1f}s" if rows else "?",
+            "t_span":          f"{rows[0].t_sim:.1f}-{rows[-1].t_sim:.1f}s" if rows else "?",
             "alt_min":         min(alts) if alts else 0.0,
             "alt_max":         max(alts) if alts else 0.0,
-            "alt_out_sd":      stdev([-r.hub_pos_z for r in ro]) if len(ro) > 1 else 0.0,
+            "alt_out_sd":      stdev([-r.pos_z for r in ro]) if len(ro) > 1 else 0.0,
             "peak_tension":    max((r.tether_tension for r in rows), default=0.0),
             "t_above_500":     sum(sp.duration for sp in find_tension_spikes(rows, 500.0)),
             "mean_t_out":      mean(out_t) if out_t else 0.0,
@@ -679,7 +604,7 @@ def main() -> None:
     args = ap.parse_args()
 
     print(f"Loading: {args.csv}")
-    rows = load_telemetry(args.csv)
+    rows = read_csv(args.csv)
     if not rows:
         print(f"ERROR: no rows loaded from {args.csv}", file=sys.stderr)
         sys.exit(1)
@@ -689,7 +614,7 @@ def main() -> None:
     # Optional side-by-side comparison
     if args.compare_csv is not None:
         print(f"\nLoading comparison: {args.compare_csv}")
-        rows_b = load_telemetry(args.compare_csv)
+        rows_b = read_csv(args.compare_csv)
         if rows_b:
             compare(rows, args.csv.name, rows_b, args.compare_csv.name)
         else:

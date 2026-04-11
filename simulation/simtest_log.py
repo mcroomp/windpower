@@ -12,12 +12,72 @@ summary output or with -s).
 
 Log files land in simulation/logs/<module_stem>.log so they are easy to find
 and read after a run without grepping pytest output.
+
+BadEventLog
+-----------
+Append bad simulation events (slack, floor_hit, tension_spike) during a run,
+then query counts by kind and phase for assertions and summaries.
+
+    events = BadEventLog()
+    if tether._last_info.get("slack"):
+        events.record("slack", t, phase, alt, tension=tension_now)
+    if altitude <= FLOOR_ALT_M:
+        events.record("floor_hit", t, phase, alt)
+    if tension_now > BREAK_LOAD_N:
+        events.record("tension_spike", t, phase, alt, tension=tension_now)
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 _LOG_DIR = Path(__file__).parent / "logs"
+
+
+class BadEventLog:
+    """
+    Unified tracker for simulation bad events.
+
+    Events are classified by *kind* (slack | floor_hit | tension_spike) and
+    *phase* (pumping | reel-out | reel-in | descent | final_drop | ...).
+    Both dimensions are needed for assertions: pumping slack is always fatal;
+    final_drop floor-contact is expected; descent slack is a controller bug.
+    """
+
+    def __init__(self) -> None:
+        self._events: list[dict] = []
+
+    # ------------------------------------------------------------------ write
+    def record(self, kind: str, t: float, phase: str, alt: float, **extra) -> None:
+        """Append one bad event."""
+        self._events.append(dict(kind=kind, t=t, phase=phase, alt=alt, **extra))
+
+    # ----------------------------------------------------------------- query
+    def of_kind(self, kind: str, phase: str = None) -> list[dict]:
+        evs = [e for e in self._events if e["kind"] == kind]
+        if phase is not None:
+            evs = [e for e in evs if e["phase"] == phase]
+        return evs
+
+    def count(self, kind: str, phase: str = None) -> int:
+        return len(self.of_kind(kind, phase))
+
+    # ------------------------------------------------------------ diagnostics
+    def summary(self) -> str:
+        if not self._events:
+            return "no bad events"
+        parts = []
+        for kind in ("slack", "floor_hit", "tension_spike"):
+            evs = self.of_kind(kind)
+            if not evs:
+                continue
+            by_phase: dict[str, int] = {}
+            for e in evs:
+                by_phase[e["phase"]] = by_phase.get(e["phase"], 0) + 1
+            detail = "+".join(
+                f"{c}({p})" for p, c in sorted(by_phase.items())
+            )
+            parts.append(f"{kind}={detail}")
+        return "  ".join(parts)
 
 
 class SimtestLog:

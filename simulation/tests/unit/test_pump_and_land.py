@@ -29,7 +29,6 @@ descent rate controller (COL_CRUISE + KP_VZ * vz_error) in place of TensionPI.
 The slerped body_z_eq is preserved across the phase boundary so there is no
 discontinuity in the attitude setpoint.
 """
-import json
 import math
 import sys
 from pathlib import Path
@@ -54,9 +53,10 @@ from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_i
 from landing_planner import LandingPlanner
 from winch           import WinchController
 from frames          import build_orb_frame
-from simtest_log     import SimtestLog
+from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
 from tel             import make_tel
+from telemetry_csv   import TelRow, write_csv
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -168,9 +168,7 @@ def _run_pump_and_land() -> dict:
     tensions_land      = []
     energy_out         = 0.0
     energy_in          = 0.0
-    floor_hits           = 0
-    pumping_floor_hits   = 0
-    pumping_slack_events = 0
+    events             = BadEventLog()
 
     touchdown_vz   = None
     touchdown_bz   = None
@@ -225,8 +223,6 @@ def _run_pump_and_land() -> dict:
                           else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
             body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
 
-            if tether._last_info.get("slack", False):
-                pumping_slack_events += 1
             if pump_cmd["phase"] == "reel-out":
                 energy_out += tension_now * V_REEL_OUT * DT
                 tensions_out.append(tension_now)
@@ -294,12 +290,19 @@ def _run_pump_and_land() -> dict:
                          omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
         hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
+        # ── Unified bad-event tracking ────────────────────────────────────────
+        current_phase = land_phase if outer_phase == "landing" else outer_phase
+        if tether._last_info.get("slack", False):
+            events.record("slack", t_sim, current_phase, altitude,
+                          tension=tension_now)
+        if tension_now > BREAK_LOAD_N:
+            events.record("tension_spike", t_sim, current_phase, altitude,
+                          tension=tension_now)
         if hub_state["pos"][2] >= -1.05:
-            floor_hits += 1
-            if outer_phase == "pumping":
-                pumping_floor_hits += 1
-                if pumping_floor_hits > 200:   # only crash-guard for pumping phase
-                    break
+            events.record("floor_hit", t_sim, current_phase,
+                          -hub_state["pos"][2])
+            if outer_phase == "pumping" and events.count("floor_hit", "pumping") > 200:
+                break
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────────
         tel_phase = land_phase if outer_phase == "landing" else outer_phase
@@ -328,43 +331,38 @@ def _run_pump_and_land() -> dict:
         f"energy_net={energy_out - energy_in:.0f}J",
         f"land_max_tension={max(tensions_land):.0f}N" if tensions_land else "",
         f"floor_hit={floor_hit}",
+        events.summary(),
     ]
     if anchor_dist    is not None: parts.append(f"anchor_dist={anchor_dist:.1f}m")
     if touchdown_tilt is not None: parts.append(f"tilt={touchdown_tilt:.1f}deg")
     parts.append(f"t_end={t_sim:.1f}s")
 
-    skip = {"pos_ned", "R"}
-    if telemetry:
-        header    = ",".join(k for k in telemetry[0] if k not in skip)
-        log_lines = [header] + [
-            ",".join(str(v) for k, v in row.items() if k not in skip)
-            for row in telemetry
-        ]
-    else:
-        log_lines = ["(no telemetry)"]
-
-    _log.write(log_lines, "  ".join(p for p in parts if p))
-
     _json_dir = Path(__file__).resolve().parents[2] / "logs"
     _json_dir.mkdir(exist_ok=True)
-    with open(_json_dir / "telemetry_pump_and_land.json", "w") as fh:
-        json.dump(telemetry, fh)
+    if telemetry:
+        write_csv([TelRow.from_tel(d) for d in telemetry],
+                  _json_dir / "telemetry_pump_and_land.csv")
+    _log.write(["(telemetry: telemetry_pump_and_land.csv)"],
+               "  ".join(p for p in parts if p))
 
     return dict(
-        t_end            = t_sim,
-        energy_out       = energy_out,
-        energy_in        = energy_in,
-        net_energy       = energy_out - energy_in,
-        floor_hits            = floor_hits,
-        pumping_floor_hits    = pumping_floor_hits,
-        pumping_slack_events  = pumping_slack_events,
-        floor_hit        = floor_hit,
-        touchdown_time   = touchdown_time,
-        touchdown_vz     = touchdown_vz,
-        anchor_dist      = anchor_dist,
-        touchdown_tilt   = touchdown_tilt,
-        land_max_tension = max(tensions_land) if tensions_land else None,
-        telemetry        = telemetry,
+        t_end                = t_sim,
+        energy_out           = energy_out,
+        energy_in            = energy_in,
+        net_energy           = energy_out - energy_in,
+        events               = events,
+        # Derived counts (convenience for assertions)
+        floor_hits           = events.count("floor_hit"),
+        pumping_floor_hits   = events.count("floor_hit", "pumping"),
+        pumping_slack_events = events.count("slack", "pumping"),
+        descent_slack_events = events.count("slack", "descent"),
+        floor_hit            = floor_hit,
+        touchdown_time       = touchdown_time,
+        touchdown_vz         = touchdown_vz,
+        anchor_dist          = anchor_dist,
+        touchdown_tilt       = touchdown_tilt,
+        land_max_tension     = max(tensions_land) if tensions_land else None,
+        telemetry            = telemetry,
     )
 
 
@@ -407,6 +405,25 @@ def test_pumping_no_tether_slack():
     print(f"\n  Tether slack events during pumping: {r['pumping_slack_events']}")
     assert r["pumping_slack_events"] == 0, (
         f"Tether went slack {r['pumping_slack_events']} times during pumping "
+        "(zero tension = loss of control)"
+    )
+
+
+def test_landing_no_slack():
+    """
+    Tether must never go slack during the landing descent phase.
+
+    Slack during descent means the hub is in free fall under gravity and wind
+    only — the winch has lost control authority.  The LandingPlanner's
+    tension-feedback winch (pause reel-in when slack) prevents this.
+    Note: slack during final_drop (last ~2 m onto catch pad) is expected
+    and is not checked here.
+    """
+    r = _results()
+    n = r["descent_slack_events"]
+    print(f"\n  Tether slack events during landing descent: {n}")
+    assert n == 0, (
+        f"Tether went slack {n} times during landing descent "
         "(zero tension = loss of control)"
     )
 

@@ -373,12 +373,11 @@ if __name__ == "__main__":
     _p = _ap.ArgumentParser(
         description="Run De Schutter cycle with power-law wind and save telemetry")
     _p.add_argument("--save-telemetry", metavar="PATH",
-                    default="telemetry_deschutter_wind.json",
-                    help="Output JSON path (default: telemetry_deschutter_wind.json)")
+                    default="telemetry_deschutter_wind.csv",
+                    help="Output CSV path (default: telemetry_deschutter_wind.csv)")
     _args = _p.parse_args()
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from simulation.viz3d.telemetry import save_telemetry  # type: ignore
+    from telemetry_csv import TelRow as _TelRow, write_csv as _write_csv  # type: ignore
 
     r = _run()
     print(f"Power-law wind (alpha=1/7, {_WIND_SPEED_REF}m/s at {_WIND_Z_REF}m)")
@@ -388,6 +387,6 @@ if __name__ == "__main__":
     print(f"  Reel-in energy:  {r['energy_in']:.1f} J")
     print(f"  Net:             {r['net_energy']:.1f} J")
     print(f"  Floor hits:      {r['floor_hits']}")
-    save_telemetry(_args.save_telemetry, r["telemetry"])
+    _write_csv([_TelRow.from_tel(d) for d in r["telemetry"]], _args.save_telemetry)
     print(f"\nRun visualizer:")
     print(f"  python simulation/viz3d/visualize_3d.py {_args.save_telemetry}")

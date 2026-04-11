@@ -46,7 +46,7 @@ def _rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
     """
     Extract ZYX Euler angles (yaw, pitch, roll) from rotation matrix.
 
-    R transforms from body frame to world (ENU) frame:
+    R transforms from body frame to world (NED) frame:
         v_world = R @ v_body
 
     Returns [roll, pitch, yaw] in radians (ArduPilot convention).

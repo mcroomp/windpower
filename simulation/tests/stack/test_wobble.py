@@ -24,18 +24,18 @@ Pass criterion
   The threshold is looser than constant-RPM (1°/s) to account for the
   ~4°/s gyro projection contamination from the large tilt motion.
 
-Telemetry → simulation/logs/torque_telemetry_wobble.json
+Telemetry → simulation/logs/torque_telemetry_wobble.csv
 """
 from __future__ import annotations
 
+import math
 import pytest
 
-from torque_telemetry import TorqueTelemetryRecorder
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
 
 _SETTLE_S   = 40.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = 5.0     # °/s — ~4°/s gyro Z contamination from 20° tilt at 0.1 Hz
+_THRESHOLD  = math.radians(5.0)   # [rad/s] -- ~4 deg/s gyro Z contamination from 20 deg tilt at 0.1 Hz
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["wobble"], indirect=True)
@@ -48,17 +48,7 @@ def test_wobble(torque_armed_profile):
     from the tilt motion.  Pass: max |ψ_dot| < 5°/s after 40 s settle.
     """
     ctx = torque_armed_profile
-    rec = TorqueTelemetryRecorder(meta={
-        "test":                "wobble",
-        "profile":             "wobble",
-        "omega_rotor_rads":    ctx.omega_rotor,
-        "roll_amplitude_deg":  20.0,
-        "pitch_amplitude_deg": 15.0,
-        "orbital_freq_hz":     0.10,
-        "settle_s":            _SETTLE_S,
-        "observe_s":           _OBSERVE_S,
-        "threshold_degs":      _THRESHOLD,
-    })
+    rows: list = []
 
     # Disable GPS position/velocity fusion — 20° tilt → 3.4 m/s² horizontal
     # accel → GPS Glitch false positive without this.
@@ -70,10 +60,10 @@ def test_wobble(torque_armed_profile):
         ctx.log.info("  %-25s = %g  ACK=%s", pname, pval, ok)
 
     obs = run_observation_loop(
-        ctx=ctx, rec=rec,
+        ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
-    save_telemetry(rec, "wobble", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, rec, ctx.log)
+    save_telemetry(rows, "wobble", ctx.log)
+    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)

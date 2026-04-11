@@ -63,37 +63,28 @@ def plot_flight_report(
     # Load mediator telemetry CSV if available
     telem: dict = {}
     if telemetry_path is not None and Path(telemetry_path).exists():
-        import csv as _csv
         try:
-            with Path(telemetry_path).open(newline="", encoding="utf-8") as f:
-                reader = _csv.DictReader(f)
-                rows = list(reader)
+            from telemetry_csv import read_csv as _read_csv
+            rows = _read_csv(telemetry_path)
             if rows:
-                def _col(name):
-                    return [float(r[name]) for r in rows if r.get(name, "") != ""]
-                telem_t_sim = _col("t_sim")
-                t_end_telem = telem_t_sim[-1] if telem_t_sim else 0.0
-                t_end_obs   = ts_pos[-1]       if ts_pos       else 0.0
-                offset      = t_end_obs - t_end_telem
-                telem_t_rel = [t + offset for t in telem_t_sim]
-                telem["t"]            = telem_t_rel
-                telem["T"]            = _col("aero_T")
-                telem["v_axial"]      = _col("aero_v_axial")
-                telem["v_inplane"]    = _col("aero_v_inplane")
-                telem["ramp"]         = _col("aero_ramp")
-                telem["omega_rotor"]  = _col("omega_rotor")
-                telem["Q_drag"]       = _col("aero_Q_drag")
-                telem["Q_drive"]      = _col("aero_Q_drive")
-                telem["hub_pos_z"]    = _col("hub_pos_z")
-                telem["F_z"]          = _col("F_z")
-                telem["collective"]   = [math.degrees(v) for v in _col("collective_rad")]
-                telem["tilt_lon"]     = _col("tilt_lon")
-                telem["tilt_lat"]     = _col("tilt_lat")
-                # Tether-relative attitude [deg] — from sensor.py, sent to ArduPilot
-                if rows and "rpy_roll" in rows[0]:
-                    telem["rpy_roll"]  = [math.degrees(v) for v in _col("rpy_roll")]
-                    telem["rpy_pitch"] = [math.degrees(v) for v in _col("rpy_pitch")]
-                    telem["rpy_yaw"]   = [math.degrees(v) for v in _col("rpy_yaw")]
+                t_end_telem      = rows[-1].t_sim
+                t_end_obs        = ts_pos[-1] if ts_pos else 0.0
+                offset           = t_end_obs - t_end_telem
+                telem["t"]           = [r.t_sim + offset      for r in rows]
+                telem["T"]           = [r.aero_T              for r in rows]
+                telem["v_axial"]     = [r.aero_v_axial        for r in rows]
+                telem["v_inplane"]   = [r.aero_v_inplane      for r in rows]
+                telem["omega_rotor"] = [r.omega_rotor         for r in rows]
+                telem["Q_drag"]      = [r.aero_Q_drag         for r in rows]
+                telem["Q_drive"]     = [r.aero_Q_drive        for r in rows]
+                telem["pos_z"]       = [r.pos_z               for r in rows]
+                telem["F_z"]         = [r.F_z                 for r in rows]
+                telem["collective"]  = [math.degrees(r.collective_rad) for r in rows]
+                telem["tilt_lon"]    = [r.tilt_lon             for r in rows]
+                telem["tilt_lat"]    = [r.tilt_lat             for r in rows]
+                telem["rpy_roll"]    = [math.degrees(r.rpy_roll)  for r in rows]
+                telem["rpy_pitch"]   = [math.degrees(r.rpy_pitch) for r in rows]
+                telem["rpy_yaw"]     = [math.degrees(r.rpy_yaw)   for r in rows]
                 log.info("Telemetry loaded: %d rows from %s", len(rows), telemetry_path)
         except Exception as exc:
             log.warning("Could not load telemetry CSV: %s", exc)
@@ -274,10 +265,10 @@ def plot_flight_report(
         ax5.plot(telem["t"], telem["T"],         color="#2ca02c", linewidth=1.0, label="Thrust T (N)")
         ax5.plot(telem["t"], telem["F_z"],        color="#1f77b4", linewidth=0.8,
                  linestyle="--", label="Fz world (N)")
-        ax5b.plot(telem["t"], telem["hub_pos_z"], color="#d62728", linewidth=1.0,
-                  linestyle="-.", label="Hub altitude Z (m)")
+        ax5b.plot(telem["t"], [-z for z in telem["pos_z"]], color="#d62728", linewidth=1.0,
+                  linestyle="-.", label="Hub altitude (m)")
         ax5.set_ylabel("Force (N)", color="#2ca02c")
-        ax5b.set_ylabel("Altitude ENU (m)", color="#d62728")
+        ax5b.set_ylabel("Altitude (m)", color="#d62728")
         ax5.set_title("Aero thrust & hub altitude (mediator telemetry)")
         lines5a, labels5a = ax5.get_legend_handles_labels()
         lines5b, labels5b = ax5b.get_legend_handles_labels()

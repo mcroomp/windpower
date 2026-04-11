@@ -20,8 +20,7 @@ starting directly above the anchor and letting wind + tether drive equilibrium.
 Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 
 Output artefacts (written alongside this file on every run):
-  steady_flight_report.png  — 5-panel diagnostic plot
-  steady_flight_telemetry.json — full per-step telemetry for offline analysis
+  steady_state_starting.json  — equilibrium initial conditions (read by stack tests)
 """
 import json
 import math
@@ -352,176 +351,6 @@ def _save_starting_json(data: dict, path: Path) -> None:
     path.write_text(json.dumps(out, indent=2))
 
 
-def _save_json(data: dict, path: Path) -> None:
-    out = {
-        "coll_deg":    data["coll_deg"],
-        "rest_length": data["rest_length"],
-        "pos0":        data["pos0"].tolist(),
-        "omega_eq_rad_s": float(data["omega_spin_eq"]),
-        "steps": [
-            {
-                "t":            float(data["t"][i]),
-                "pos":          data["pos"][i].tolist(),
-                "vel":          data["vel"][i].tolist(),
-                "tension_N":    float(data["tension"][i]),
-                "axle_deg":     float(data["axle_deg"][i]),
-                "body_z":       data["body_z"][i].tolist(),
-                "omega_spin":   float(data["omega_spin"][i]),
-            }
-            for i in range(0, len(data["t"]), 40)   # every 40 steps = every 0.1 s
-        ],
-    }
-    path.write_text(json.dumps(out, indent=2))
-
-
-def _save_plot(data: dict, path: Path) -> None:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import matplotlib.gridspec as gridspec
-    except ImportError:
-        return   # matplotlib optional; skip silently
-
-    t    = data["t"]
-    pos  = data["pos"]
-    vel  = data["vel"]
-    ten  = data["tension"]
-    ang  = data["axle_deg"]
-    spin = data["omega_spin"]
-    pos0 = data["pos0"]
-    coll = data["coll_deg"]
-
-    omega_eq = data["omega_spin_eq"]
-
-    fig = plt.figure(figsize=(14, 16))
-    fig.suptitle(
-        f"Steady-state flight at 30° tether elevation  |  collective = {coll:.1f}°  |  10 m/s East wind",
-        fontsize=13, fontweight="bold",
-    )
-    gs = gridspec.GridSpec(4, 2, figure=fig, hspace=0.50, wspace=0.35,
-                           height_ratios=[1.0, 1.0, 1.0, 1.4])
-
-    # ── Hub position ─────────────────────────────────────────────────────────
-    ax1 = fig.add_subplot(gs[0, :])
-    ax1.plot(t, pos[:, 0], label="East (X)", color="steelblue")
-    ax1.plot(t, pos[:, 2], label="Altitude (Z)", color="tomato")
-    ax1.axhline(pos0[0], color="steelblue", ls="--", lw=0.8, label=f"Start East={pos0[0]:.1f} m")
-    ax1.axhline(pos0[2], color="tomato",    ls="--", lw=0.8, label=f"Start Alt={pos0[2]:.1f} m")
-    ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Position (m)")
-    ax1.set_title("Hub position — ENU"); ax1.legend(fontsize=8, ncol=2); ax1.grid(True, alpha=0.3)
-
-    # ── Hub velocity ──────────────────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[1, 0])
-    ax2.plot(t, vel[:, 0], label="East vel", color="steelblue")
-    ax2.plot(t, vel[:, 2], label="Up vel",   color="tomato")
-    ax2.axhline(0, color="k", lw=0.5)
-    ax2.set_xlabel("Time (s)"); ax2.set_ylabel("Velocity (m/s)")
-    ax2.set_title("Hub velocity"); ax2.legend(fontsize=8); ax2.grid(True, alpha=0.3)
-
-    # ── Rotor spin ────────────────────────────────────────────────────────────
-    ax3 = fig.add_subplot(gs[1, 1])
-    ax3.plot(t, spin, color="darkgreen", label="ω_spin")
-    ax3.axhline(omega_eq, color="green", ls="--", lw=0.8,
-                label=f"ω_eq = {omega_eq:.1f} rad/s (start)")
-    ax3_rpm = ax3.twinx()
-    ax3_rpm.plot(t, spin * 60 / (2 * math.pi), alpha=0.0)
-    ax3_rpm.set_ylabel("RPM", color="darkgreen", fontsize=8)
-    ax3_rpm.tick_params(axis="y", labelcolor="darkgreen", labelsize=7)
-    ax3.set_xlabel("Time (s)"); ax3.set_ylabel("ω (rad/s)")
-    ax3.set_title("Rotor spin rate"); ax3.legend(fontsize=8); ax3.grid(True, alpha=0.3)
-
-    # ── Tether tension ────────────────────────────────────────────────────────
-    ax4 = fig.add_subplot(gs[2, 0])
-    ax4.plot(t, ten, color="darkorange")
-    ax4.axhline(TetherModel.BREAK_LOAD_N * 0.8, color="red", ls="--", lw=0.8, label="80% break load")
-    ax4.set_xlabel("Time (s)"); ax4.set_ylabel("Tension (N)")
-    ax4.set_title("Tether tension"); ax4.legend(fontsize=8); ax4.grid(True, alpha=0.3)
-
-    # ── Axle misalignment ─────────────────────────────────────────────────────
-    ax5 = fig.add_subplot(gs[2, 1])
-    ax5.plot(t, ang, color="purple")
-    ax5.axhline(20.0, color="red", ls="--", lw=0.8, label="20° limit")
-    ax5.set_xlabel("Time (s)"); ax5.set_ylabel("Misalignment (°)")
-    ax5.set_title("Axle vs tether direction"); ax5.legend(fontsize=8); ax5.grid(True, alpha=0.3)
-
-    # ── Side-view geometry: anchor, tether, hub ──────────────────────────────
-    # Use slant range (distance along ground projected horizontally) so that
-    # North drift is represented correctly: horiz = sqrt(E²+N²), vert = Z.
-    ax6 = fig.add_subplot(gs[3, :])
-
-    pos_start = pos0
-    pos_final = pos[-1]
-    anchor    = np.zeros(3)
-
-    def _horiz(p):
-        return math.sqrt(p[0]**2 + p[1]**2)   # horizontal distance from anchor
-
-    horiz_traj = np.sqrt(pos[:, 0]**2 + pos[:, 1]**2)
-
-    h_start = _horiz(pos_start)
-    h_final = _horiz(pos_final)
-    tlen_start = np.linalg.norm(pos_start)
-    tlen_final = np.linalg.norm(pos_final)
-
-    elev_start = math.degrees(math.atan2(pos_start[2], h_start))
-    elev_final = math.degrees(math.atan2(pos_final[2], h_final))
-    north_start = pos_start[1]
-    north_final = pos_final[1]
-
-    # Tether trajectory (slant view)
-    ax6.plot(horiz_traj, pos[:, 2], color="teal", lw=1.5, label="Hub trajectory", zorder=3)
-
-    # Tether lines anchor → hub
-    ax6.plot([0, h_start], [0, pos_start[2]],
-             color="green", lw=2.5, ls="-", zorder=2,
-             label=f"Tether start  L={tlen_start:.1f} m  elev={elev_start:.1f}°  N={north_start:.1f} m")
-    ax6.plot([0, h_final], [0, pos_final[2]],
-             color="firebrick", lw=2.5, ls="--", zorder=2,
-             label=f"Tether end    L={tlen_final:.1f} m  elev={elev_final:.1f}°  N={north_final:.1f} m")
-
-    # Hub markers
-    ax6.plot(h_start, pos_start[2], "o", color="green",    ms=10, zorder=5, label="Hub start")
-    ax6.plot(h_final, pos_final[2], "s", color="firebrick", ms=10, zorder=5, label="Hub end")
-    ax6.plot(0, 0, "k^", ms=12, zorder=5, label="Anchor")
-
-    # Elevation arcs
-    for h, z, colour in [(h_start, pos_start[2], "green"), (h_final, pos_final[2], "firebrick")]:
-        tl = math.sqrt(h**2 + z**2)
-        elev = math.degrees(math.atan2(z, h))
-        arc_r = tl * 0.22
-        thetas = np.linspace(0, math.radians(elev), 40)
-        ax6.plot(arc_r * np.cos(thetas), arc_r * np.sin(thetas), color=colour, lw=1.0, ls=":")
-        mid = math.radians(elev / 2)
-        ax6.text(arc_r * 1.08 * math.cos(mid), arc_r * 1.08 * math.sin(mid),
-                 f"{elev:.1f}°", fontsize=8, color=colour, va="center")
-
-    # Ground
-    x_max = max(h_start, h_final) * 1.15
-    ax6.axhline(0, color="saddlebrown", lw=1.0, alpha=0.5)
-    ax6.fill_between([0, x_max], [-x_max * 0.03, -x_max * 0.03], [0, 0],
-                     color="saddlebrown", alpha=0.15)
-
-    # Wind arrow
-    ax6.annotate("", xy=(x_max * 0.15, pos_start[2] * 0.45),
-                 xytext=(0.0, pos_start[2] * 0.45),
-                 arrowprops=dict(arrowstyle="->", color="royalblue", lw=1.5))
-    ax6.text(x_max * 0.075, pos_start[2] * 0.52,
-             "10 m/s wind", fontsize=8, color="royalblue", ha="center")
-
-    ax6.set_xlim(-x_max * 0.03, x_max)
-    ax6.set_ylim(-x_max * 0.04, max(pos_start[2], pos_final[2]) * 1.35)
-    ax6.set_xlabel("Horizontal distance from anchor  √(E²+N²)  (m)")
-    ax6.set_ylabel("Altitude (m)")
-    ax6.set_title("Side view — tether geometry  (slant: horizontal distance vs altitude; N drift shown in legend)")
-    ax6.set_aspect("equal")
-    ax6.legend(fontsize=8, ncol=2, loc="upper left")
-    ax6.grid(True, alpha=0.25)
-
-    fig.savefig(str(path), dpi=130, bbox_inches="tight")
-    plt.close(fig)
-
-
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 def test_steady_state_hub_does_not_drift():
@@ -532,9 +361,6 @@ def test_steady_state_hub_does_not_drift():
     The 15 m bound allows for the ~1° scan resolution of the equilibrium
     collective while still catching any catastrophic divergence.
 
-    Artefacts written to the test directory:
-      steady_flight_report.png   — diagnostic plots
-      steady_flight_telemetry.json — per-step telemetry (every 0.1 s)
     """
     STEPS  = 4000    # 10 s at 400 Hz
     BOUNDS = 15.0    # m — catches instability; not sub-metre accuracy
@@ -546,8 +372,6 @@ def test_steady_state_hub_does_not_drift():
     drift = np.abs(final - pos0)
 
     # Save artefacts regardless of pass/fail
-    _save_json(data, _OUT_DIR / "steady_flight_telemetry.json")
-    _save_plot(data, _OUT_DIR / "steady_flight_report.png")
     _save_starting_json(data, Path(__file__).resolve().parents[2] / "steady_state_starting.json")
 
     assert np.all(np.isfinite(data["pos"])), "NaN/inf in position history"

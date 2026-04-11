@@ -561,11 +561,11 @@ class TestCyclicPitchConvention:
         d_lat = lat[3:] - base[3:]
         d_lon = lon[3:] - base[3:]
 
-        # ENU body frame: body X=East, body Y=North, body Z=Up
-        #   tilt_lat > 0 (roll right/East): Ry torque → My (forces[4]) dominant
-        #   tilt_lon > 0 (pitch forward/North): -Rx torque → Mx (forces[3]) dominant
-        assert abs(d_lat[1]) > abs(d_lat[0]), "Lateral tilt should mainly produce My (ENU body Y = North axis)"
-        assert abs(d_lon[0]) > abs(d_lon[1]), "Longitudinal tilt should mainly produce Mx (ENU body X = East axis)"
+        # NED body frame: body X=North, body Y=East, body Z=Down (at identity orientation)
+        #   tilt_lat > 0 (roll right/East): Ry torque -> My (forces[4]) dominant
+        #   tilt_lon > 0 (pitch forward/North): -Rx torque -> Mx (forces[3]) dominant
+        assert abs(d_lat[1]) > abs(d_lat[0]), "Lateral tilt should mainly produce My (NED body Y = East axis)"
+        assert abs(d_lon[0]) > abs(d_lon[1]), "Longitudinal tilt should mainly produce Mx (NED body X = North axis)"
 
     def test_four_blade_phase_offset_is_90deg(self):
         """4-blade offset = π/2 (90°), distinct from De Schutter's 2π/3 (120°)."""

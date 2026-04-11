@@ -42,7 +42,7 @@ class AeroResult:
     Return type for compute_forces().
 
     The three fields needed by the mediator loop:
-        F_world    — force on hub in ENU world frame [N]
+        F_world    — force on hub in NED world frame [N]
         M_orbital  — orbital (tilting) moments, spin-axis component excluded [N·m]
         Q_spin     — net spin torque: dω/dt = Q_spin / I_ode  [N·m]
 

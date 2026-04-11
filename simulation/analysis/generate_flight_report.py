@@ -5,8 +5,8 @@ generate_flight_report.py — Offline flight report generator for RAWES simulati
 Reads the CSV telemetry file written by mediator.py (--telemetry-log) and
 produces a multi-panel PNG figure with:
 
-  Panel 1  — Hub altitude & position (ENU)
-  Panel 2  — Hub velocity (ENU)
+  Panel 1  — Hub altitude & position (NED)
+  Panel 2  — Hub velocity (NED)
   Panel 3  — Rotor spin rate (omega_rotor)
   Panel 4  — Aerodynamic thrust & vertical force (Fz)
   Panel 5  — Relative wind: axial and in-plane components
@@ -24,10 +24,12 @@ The telemetry CSV is written by mediator.py when launched with:
 """
 
 import argparse
-import csv
 import math
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from telemetry_csv import read_csv as _read_csv, COLUMNS as _COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -36,32 +38,21 @@ from pathlib import Path
 
 def load_telemetry(csv_path: Path) -> dict:
     """
-    Load mediator telemetry CSV into a dict of column-name → list[float].
+    Load mediator telemetry CSV into a dict of column-name -> list of values.
 
     Returns an empty dict if the file is missing or has no data rows.
+    Uses read_csv / TelRow so the schema is always in sync with COLUMNS.
     """
     if not csv_path.exists():
         print(f"[ERROR] File not found: {csv_path}", file=sys.stderr)
         return {}
 
-    with csv_path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
+    rows = _read_csv(csv_path)
     if not rows:
         print(f"[WARNING] No data rows in {csv_path}", file=sys.stderr)
         return {}
 
-    def _col(name):
-        return [float(r[name]) for r in rows if r.get(name, "").strip() != ""]
-
-    data = {}
-    for col in rows[0].keys():
-        try:
-            data[col] = _col(col)
-        except (ValueError, KeyError):
-            pass   # skip columns that can't be parsed as float
-
+    data = {col: [getattr(r, col) for r in rows] for col in _COLUMNS}
     print(f"[INFO] Loaded {len(rows)} rows, {len(data)} columns from {csv_path}")
     return data
 
@@ -113,16 +104,16 @@ def plot_report(data: dict, out_path: Path) -> None:
 
     # ── Panel 1: Hub position (NED) ──────────────────────────────────────────
     ax = _ax(0, "Hub position — NED world frame", "m")
-    ax.plot(t, _get("hub_pos_x"), linewidth=0.8, label="X (North)")
-    ax.plot(t, _get("hub_pos_y"), linewidth=0.8, label="Y (East)")
-    ax.plot(t, _get("hub_pos_z"), linewidth=0.8, label="Z (Down, altitude = −Z)")
+    ax.plot(t, _get("pos_x"), linewidth=0.8, label="X (North)")
+    ax.plot(t, _get("pos_y"), linewidth=0.8, label="Y (East)")
+    ax.plot(t, _get("pos_z"), linewidth=0.8, label="Z (Down, altitude = -Z)")
     ax.legend(fontsize=7, loc="upper right")
 
     # ── Panel 2: Hub velocity (NED) ──────────────────────────────────────────
     ax = _ax(1, "Hub velocity — NED world frame", "m/s")
-    ax.plot(t, _get("hub_vel_x"), linewidth=0.8, label="Vx (North)")
-    ax.plot(t, _get("hub_vel_y"), linewidth=0.8, label="Vy (East)")
-    ax.plot(t, _get("hub_vel_z"), linewidth=0.8, label="Vz (Down)")
+    ax.plot(t, _get("vel_x"), linewidth=0.8, label="Vx (North)")
+    ax.plot(t, _get("vel_y"), linewidth=0.8, label="Vy (East)")
+    ax.plot(t, _get("vel_z"), linewidth=0.8, label="Vz (Down)")
     ax.axhline(0, color="black", linewidth=0.5, alpha=0.4)
     ax.legend(fontsize=7, loc="upper right")
 

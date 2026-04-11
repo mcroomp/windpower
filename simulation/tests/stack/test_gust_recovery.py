@@ -13,19 +13,19 @@ Timeline (approximate test time):
 Pass criterion: max |ψ_dot| < 2°/s in the observation window, confirming
 that the PID recovered from the bearing-drag spike within 25 s of gust end.
 
-Telemetry → simulation/logs/torque_telemetry_gust.json
+Telemetry → simulation/logs/torque_telemetry_gust.csv
 """
 from __future__ import annotations
 
+import math
 import pytest
 
-from torque_telemetry import TorqueTelemetryRecorder
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
 
-# Gust ends at dynamics_t≈15 s ≈ test t≈25 s.  Settle = 40 s gives ~15 s recovery.
+# Gust ends at dynamics_t~15 s ~ test t~25 s.  Settle = 40 s gives ~15 s recovery.
 _SETTLE_S   = 40.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = 2.0     # °/s — should be recovered and regulated by settle time
+_THRESHOLD  = math.radians(2.0)   # [rad/s] -- should be recovered and regulated by settle time
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["gust"], indirect=True)
@@ -36,23 +36,13 @@ def test_gust_recovery(torque_armed_profile):
     shock and recover to |ψ_dot| < 2°/s within 25 s of gust end.
     """
     ctx = torque_armed_profile
-    rec = TorqueTelemetryRecorder(meta={
-        "test":               "gust_recovery",
-        "profile":            "gust",
-        "omega_rotor_rads":   ctx.omega_rotor,
-        "gust_start_dyn_t":   10.0,
-        "gust_end_dyn_t":     15.0,
-        "gust_multiplier":    1.20,
-        "settle_s":           _SETTLE_S,
-        "observe_s":          _OBSERVE_S,
-        "threshold_degs":     _THRESHOLD,
-    })
+    rows: list = []
 
     obs = run_observation_loop(
-        ctx=ctx, rec=rec,
+        ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
-    save_telemetry(rec, "gust", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, rec, ctx.log)
+    save_telemetry(rows, "gust", ctx.log)
+    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)

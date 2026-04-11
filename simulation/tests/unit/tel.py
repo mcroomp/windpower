@@ -2,8 +2,9 @@
 tel.py -- Canonical telemetry-frame helper for unit / simtests.
 
 All simulation tests that append telemetry should use make_tel() so
-every JSON file has the same schema.  The visualizer (viz3d/telemetry.py
-JSONSource) and analysis scripts consume this schema directly.
+every telemetry frame has the same schema.  Rows are written to CSV via
+TelRow.from_tel() + write_csv(), and read by the visualizer (CSVSource)
+and analysis scripts.
 
 Canonical keys
 --------------

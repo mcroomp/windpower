@@ -29,7 +29,6 @@ Both run one full pumping cycle (30 s reel-out + 30 s reel-in) and write
 mediator-compatible telemetry CSV so analyse_pumping_cycle.py can compare them.
 """
 
-import csv
 import math
 import sys
 from pathlib import Path
@@ -55,7 +54,8 @@ from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat
 from simtest_ic  import load_ic
 from tether      import TetherModel
 from winch       import WinchController
-from tel         import make_tel
+from tel           import make_tel
+from telemetry_csv import TelRow, write_csv, read_csv
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -94,24 +94,6 @@ _LOGS_DIR       = Path(__file__).resolve().parents[3] / "simulation" / "logs"
 _CSV_STACK      = _LOGS_DIR / "telemetry_unit_stack_mirror.csv"
 _CSV_BASELINE   = _LOGS_DIR / "telemetry_unit_baseline.csv"
 
-# Mediator-compatible CSV columns (must match analyse_pumping_cycle.py TelRow)
-_CSV_COLS = [
-    "t_sim", "hub_pos_x", "hub_pos_y", "hub_pos_z",
-    "hub_vel_x", "hub_vel_y", "hub_vel_z",
-    "tether_length", "tether_extension", "tether_tension", "tether_rest_length",
-    "tether_slack", "collective_rad", "collective_norm",
-    "pumping_phase", "tension_setpoint", "collective_from_tension_ctrl",
-    "omega_rotor",
-]
-
-
-def _write_csv(rows: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=_CSV_COLS, extrasaction="ignore")
-        w.writeheader()
-        for row in rows:
-            w.writerow({k: row.get(k, "") for k in _CSV_COLS})
 
 
 # ---------------------------------------------------------------------------
@@ -386,23 +368,19 @@ def test_stack_mirror_vs_baseline():
 
     # Write CSVs for downstream analysis
     _CSV_VEL0 = _LOGS_DIR / "telemetry_unit_vel0_isolation.csv"
-    _write_csv(stack["telemetry"],          _CSV_STACK)
-    _write_csv(baseline["telemetry"],       _CSV_BASELINE)
-    _write_csv(vel0_isolation["telemetry"], _CSV_VEL0)
+    write_csv([TelRow.from_tel(d) for d in stack["telemetry"]],          _CSV_STACK)
+    write_csv([TelRow.from_tel(d) for d in baseline["telemetry"]],       _CSV_BASELINE)
+    write_csv([TelRow.from_tel(d) for d in vel0_isolation["telemetry"]], _CSV_VEL0)
 
     # ── Compare ────────────────────────────────────────────────────────────
-    def _metrics(tel: list[dict]) -> dict:
-        free    = [r for r in tel if r.get("pumping_phase", "") != ""]
-        ro      = [r for r in free if r.get("pumping_phase") == "reel-out"]
-        ri      = [r for r in free if r.get("pumping_phase") == "reel-in"]
-        alts    = [-float(r["hub_pos_z"]) for r in free
-                   if r.get("hub_pos_z") not in ("", None)]
-        ro_t    = [float(r["tether_tension"]) for r in ro
-                   if r.get("tether_tension") not in ("", None, "0.0")]
-        ri_t    = [float(r["tether_tension"]) for r in ri
-                   if r.get("tether_tension") not in ("", None, "0.0")]
-        ro_alts = [-float(r["hub_pos_z"]) for r in ro
-                   if r.get("hub_pos_z") not in ("", None)]
+    def _metrics(rows: list[TelRow]) -> dict:
+        free    = [r for r in rows if r.phase != ""]
+        ro      = [r for r in free if r.phase == "reel-out"]
+        ri      = [r for r in free if r.phase == "reel-in"]
+        alts    = [r.altitude      for r in free]
+        ro_t    = [r.tether_tension for r in ro if r.tether_tension > 0]
+        ri_t    = [r.tether_tension for r in ri if r.tether_tension > 0]
+        ro_alts = [r.altitude      for r in ro]
         return {
             "alt_sd":     stdev(alts)    if len(alts)  > 1 else 0.0,
             "alt_min":    min(alts)      if alts        else 0.0,
@@ -413,9 +391,9 @@ def test_stack_mirror_vs_baseline():
             "peak_t":     max(ro_t + ri_t) if ro_t + ri_t else 0.0,
         }
 
-    ms = _metrics(stack["telemetry"])
-    mb = _metrics(baseline["telemetry"])
-    mv = _metrics(vel0_isolation["telemetry"])
+    ms = _metrics(read_csv(_CSV_STACK))
+    mb = _metrics(read_csv(_CSV_BASELINE))
+    mv = _metrics(read_csv(_CSV_VEL0))
 
     w = 80
     print("\n" + "=" * w)

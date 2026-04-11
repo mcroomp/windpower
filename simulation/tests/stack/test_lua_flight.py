@@ -237,16 +237,14 @@ def test_lua_flight_rc_overrides(acro_armed_lua: StackContext):
         # ── Assertion 2: Hub did not crash (physics altitude from telemetry) ──
         # LOCAL_POSITION_NED altitude is unreliable here: EKF runs in CONST_POS
         # mode (no GPS fusion during observation) and its altitude drifts by 5–15 m.
-        # Use hub_pos_z from mediator telemetry CSV (physics NED Z, authoritative).
-        # hub_pos_z is NED Z — negative = above ground, so altitude = -hub_pos_z.
+        # Use pos_z from mediator telemetry CSV (physics NED Z, authoritative).
+        # pos_z is NED Z — negative = above ground, so altitude = -pos_z.
         # internal_controller=True guarantees physics stability, but we still
         # check the telemetry to catch any unexpected mediator failures.
         if ctx.telemetry_log.exists():
-            import csv as _csv
-            with ctx.telemetry_log.open(encoding="utf-8") as _f:
-                _tel = list(_csv.DictReader(_f))
-            z_tel = [-float(r["hub_pos_z"]) for r in _tel
-                     if r.get("hub_pos_z") not in ("", "None", "nan")]
+            from telemetry_csv import read_csv as _read_csv
+            _tel  = _read_csv(ctx.telemetry_log)
+            z_tel = [-r.pos_z for r in _tel]
             if z_tel:
                 min_phys_alt = min(z_tel)
                 log.info("Min physics altitude (telemetry): %.2f m  (limit=%.1f m)",

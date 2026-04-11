@@ -18,15 +18,15 @@ Scene elements:
   - HUD: t, alt, spin, tension, collective, tilt
 
 Usage:
-    # From unit test JSON (run test first with --save-telemetry):
-    python visualize_3d.py telemetry_deschutter.json
-    python visualize_3d.py telemetry_closed_loop.json
+    # From unit test (run test first, or run with --save-telemetry):
+    python visualize_3d.py telemetry_deschutter.csv
+    python visualize_3d.py telemetry_closed_loop.csv
 
     # From mediator CSV (stack test):
-    python visualize_3d.py /path/to/telemetry.csv --source csv
+    python visualize_3d.py /path/to/telemetry.csv
 
     # Export to GIF:
-    python visualize_3d.py telemetry.json --export playback.gif --fps 10
+    python visualize_3d.py telemetry.csv --export playback.gif --fps 10
 
 Controls (interactive mode):
     Space       — play / pause
@@ -66,7 +66,7 @@ _SIM  = _HERE.parent
 if str(_SIM) not in sys.path:
     sys.path.insert(0, str(_SIM))
 
-from viz3d.telemetry import TelemetryFrame, JSONSource, CSVSource
+from viz3d.telemetry import TelemetryFrame, CSVSource
 
 # ---------------------------------------------------------------------------
 # Rotor geometry — sourced from beaupoil_2026.yaml via RotorDefinition
@@ -1376,9 +1376,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("path", help="Telemetry file (.json or .csv)")
-    p.add_argument("--source", choices=["json", "csv"], default="json",
-                   help="File format (default: json)")
+    p.add_argument("path", help="Telemetry CSV file")
     p.add_argument("--export", metavar="FILE",
                    help="Export to GIF or MP4 instead of interactive window")
     p.add_argument("--fps", type=float, default=10.0,
@@ -1401,10 +1399,7 @@ def main(argv: Optional[list] = None) -> None:
         print(f"File not found: {path}")
         sys.exit(1)
 
-    if args.source == "csv":
-        source = CSVSource(path)
-    else:
-        source = JSONSource(path)
+    source = CSVSource(path)
 
     frames = list(source.frames())
     if not frames:

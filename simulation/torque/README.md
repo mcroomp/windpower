@@ -170,12 +170,12 @@ bash sim.sh test-stack -v -k test_yaw_regulation
 ## Visualiser
 
 ```sh
-# Auto-discovers all torque_telemetry*.json in simulation/logs/
+# Auto-discovers all torque_telemetry*.csv in simulation/logs/
 simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torque.py
 
 # Specific file
 simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torque.py \
-    simulation/logs/torque_telemetry_slow_vary.json
+    simulation/logs/torque_telemetry_slow_vary.csv
 ```
 
 **Controls:** `Space` play/pause · `←/→` step · `+/-` speed · `N`/`B` next/prev file · drag orbit
@@ -196,7 +196,7 @@ simulation/tests/unit/.venv/Scripts/python.exe simulation/torque/visualize_torqu
 ```
 simulation/torque/
 ├── model.py                Physics: hub yaw dynamics, GB4008 motor, RK4
-├── torque_telemetry.py     TorqueTelemetryFrame, Recorder, JSONSource
+├── torque_telemetry.py     TorqueTelemetryFrame (display-only dataclass; I/O via telemetry_csv.py)
 ├── torque_test_utils.py    Shared observation loop + assertions (used by stack tests)
 ├── mediator_torque.py      ArduPilot SITL mediator — profiles, sensor packets, lua_mode
 ├── test_model.py           9 unit tests (native Windows, no Docker)

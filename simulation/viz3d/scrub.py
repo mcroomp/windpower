@@ -5,9 +5,9 @@ Opens a 3D window with a large slider.  Drag to any frame and the scene
 renders live — no pre-rendered movie.
 
 Usage:
-    python scrub.py telemetry_deschutter.json
-    python scrub.py telemetry_closed_loop.json
-    python scrub.py telemetry.csv --source csv
+    python scrub.py telemetry_deschutter.csv
+    python scrub.py telemetry_closed_loop.csv
+    python scrub.py logs/telemetry.csv
 
 Controls:
     Slider     — drag to any frame
@@ -33,7 +33,7 @@ try:
 except ImportError:
     sys.exit("PyVista not found.  pip install pyvista")
 
-from viz3d.telemetry import JSONSource, CSVSource
+from viz3d.telemetry import CSVSource
 from viz3d.visualize_3d import RAWESVisualizer
 
 
@@ -43,9 +43,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("input", help="Telemetry file (.json or .csv)")
-    p.add_argument("--source", choices=["json", "csv"], default="json",
-                   help="File format (default: json)")
+    p.add_argument("input", help="Telemetry CSV file")
     p.add_argument("--fps", type=float, default=20.0,
                    help="Auto-play frame rate when Space is pressed (default: 20)")
     p.add_argument("--trail", type=int, default=200,
@@ -56,7 +54,7 @@ def main() -> None:
     if not path.exists():
         sys.exit(f"Not found: {path}")
 
-    source = CSVSource(path) if args.source == "csv" else JSONSource(path)
+    source = CSVSource(path)
     frames = list(source.frames())
     if not frames:
         sys.exit("No frames loaded — check file format.")

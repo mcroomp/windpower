@@ -87,7 +87,7 @@ def _run_orbit(
     Returns
     -------
     dict with keys:
-        pos_history   : list of ENU positions (one per step)
+        pos_history   : list of NED positions (one per step)
         min_z         : minimum altitude [m]
         max_drift     : maximum horizontal distance from POS0 [m]
         final_bz_z    : final body_z[2] (should be ~0.43 at equilibrium)

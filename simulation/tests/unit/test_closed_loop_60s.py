@@ -228,19 +228,18 @@ def test_zero_tilt_at_equilibrium():
     assert abs(tilt_lat) < 1e-6, f"tilt_lat={tilt_lat:.6f} at equilibrium (expected 0)"
 
 
-# ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────
+# ── CLI: generate telemetry CSV for 3D visualizer ────────────────────────────
 if __name__ == "__main__":
     import argparse as _ap
     p = _ap.ArgumentParser(description="Run 60 s closed-loop sim and save telemetry")
     p.add_argument("--save-telemetry", metavar="PATH",
-                   default="telemetry_closed_loop.json",
-                   help="Output JSON path (default: telemetry_closed_loop.json)")
+                   default="telemetry_closed_loop.csv",
+                   help="Output CSV path (default: telemetry_closed_loop.csv)")
     args = p.parse_args()
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from simulation.viz3d.telemetry import save_telemetry  # type: ignore
+    from telemetry_csv import TelRow as _TelRow, write_csv as _write_csv  # type: ignore
 
     _, tel = _run()
-    save_telemetry(args.save_telemetry, tel)
+    _write_csv([_TelRow.from_tel(d) for d in tel], args.save_telemetry)
     print(f"\nRun visualizer:")
     print(f"  python simulation/viz3d/visualize_3d.py {args.save_telemetry}")

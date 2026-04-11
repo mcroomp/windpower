@@ -26,16 +26,17 @@ Pass criterion
   After 40 s settle: max |ψ_dot| < 1°/s over 20 s observation window.
   Same threshold as the adaptive-trim baseline — Lua should match it.
 
-Telemetry → simulation/logs/torque_telemetry_lua.json
+Telemetry → simulation/logs/torque_telemetry_lua.csv
 """
 from __future__ import annotations
 
-from torque_telemetry import TorqueTelemetryRecorder
+import math
+
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
 
 _SETTLE_S   = 40.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = 1.0
+_THRESHOLD  = math.radians(1.0)   # [rad/s]
 
 
 def test_lua_yaw_trim(torque_armed_lua):
@@ -52,21 +53,13 @@ def test_lua_yaw_trim(torque_armed_lua):
       RPM1_TYPE=5 (DSHOT ESC telemetry) on the Pixhawk 6C.
     """
     ctx = torque_armed_lua
-    rec = TorqueTelemetryRecorder(meta={
-        "test":            "lua_yaw_trim",
-        "profile":         "constant",
-        "control":         "lua_feedforward",
-        "omega_rotor_rads": ctx.omega_rotor,
-        "settle_s":        _SETTLE_S,
-        "observe_s":       _OBSERVE_S,
-        "threshold_degs":  _THRESHOLD,
-    })
+    rows: list = []
 
     obs = run_observation_loop(
-        ctx=ctx, rec=rec,
+        ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
-    save_telemetry(rec, "lua", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, rec, ctx.log)
+    save_telemetry(rows, "lua", ctx.log)
+    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)

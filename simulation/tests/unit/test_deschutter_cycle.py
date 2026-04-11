@@ -31,7 +31,6 @@ Pass criteria:
   3. Net energy positive  (reel-out energy > reel-in energy).
   4. Peak tension stays below 80% of tether break load.
 """
-import csv
 import math
 import sys
 from pathlib import Path
@@ -54,6 +53,7 @@ from frames      import build_orb_frame
 from simtest_log import SimtestLog
 from simtest_ic  import load_ic
 from tel         import make_tel
+from telemetry_csv import TelRow, write_csv
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -323,33 +323,6 @@ def _run_deschutter_cycle(
     )
 
 
-# ── Telemetry CSV export (mediator-compatible format) ─────────────────────────
-
-_MEDIATOR_CSV_COLS = [
-    "t_sim", "hub_pos_x", "hub_pos_y", "hub_pos_z",
-    "hub_vel_x", "hub_vel_y", "hub_vel_z",
-    "tether_length", "tether_extension", "tether_tension", "tether_rest_length",
-    "tether_slack", "collective_rad", "collective_norm",
-    "pumping_phase", "tension_setpoint", "collective_from_tension_ctrl",
-    "omega_rotor",
-]
-
-
-def write_mediator_csv(telemetry: list[dict], path: Path) -> None:
-    """
-    Write telemetry rows to a CSV in the same column format as the mediator.
-
-    Only the mediator-compatible columns are written; visualiser extras
-    (pos_ned, R, body_z_eq, wind_ned) are skipped.  This allows
-    analyse_pumping_cycle.py to process both unit-test and stack-test runs.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=_MEDIATOR_CSV_COLS,
-                                extrasaction="ignore")
-        writer.writeheader()
-        for row in telemetry:
-            writer.writerow({k: row.get(k, "") for k in _MEDIATOR_CSV_COLS})
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -476,7 +449,7 @@ def test_deschutter_write_analysis_csv():
     Run:    pytest simulation/tests/unit -k test_deschutter_write_analysis_csv
     """
     r = _run_deschutter_cycle()
-    write_mediator_csv(r["telemetry"], _UNIT_CSV)
+    write_csv([TelRow.from_tel(d) for d in r["telemetry"]], _UNIT_CSV)
     assert _UNIT_CSV.exists(), f"CSV not written to {_UNIT_CSV}"
     n_rows = sum(1 for _ in _UNIT_CSV.open(encoding="utf-8")) - 1  # minus header
     assert n_rows > 100, f"Only {n_rows} rows written — telemetry appears empty"
@@ -510,17 +483,16 @@ def _print_cycle(r):
                f"floor_hits={r['floor_hits']}")
 
 
-# ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────
+# ── CLI: generate telemetry CSV for 3D visualizer ────────────────────────────
 if __name__ == "__main__":
     import argparse as _ap
     p = _ap.ArgumentParser(description="Run De Schutter cycle and save telemetry")
     p.add_argument("--save-telemetry", metavar="PATH",
-                   default="telemetry_deschutter.json",
-                   help="Output JSON path (default: telemetry_deschutter.json)")
+                   default="telemetry_deschutter.csv",
+                   help="Output CSV path (default: telemetry_deschutter.csv)")
     args = p.parse_args()
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from simulation.viz3d.telemetry import save_telemetry  # type: ignore
+    from telemetry_csv import TelRow as _TelRow, write_csv as _write_csv  # type: ignore
 
     result = _run_deschutter_cycle(n_cycles=2)
     print(f"Cycles: {result['n_cycles']}  "
@@ -528,6 +500,6 @@ if __name__ == "__main__":
           f"Reel-in energy: {result['energy_in']:.1f} J  "
           f"Net: {result['net_energy']:.1f} J  "
           f"Floor hits: {result['floor_hits']}")
-    save_telemetry(args.save_telemetry, result["telemetry"])
+    _write_csv([_TelRow.from_tel(d) for d in result["telemetry"]], args.save_telemetry)
     print(f"\nRun visualizer:")
     print(f"  python simulation/viz3d/visualize_3d.py {args.save_telemetry}")
