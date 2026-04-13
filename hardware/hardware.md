@@ -246,4 +246,4 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | SCR_USER params | SCR_USER1..9 | SCR_USER1..6 only |
 | H_SW_PHANG | Exists (set to 0) | Does not exist; phase implicit in H_SW_TYPE |
 | RPM source in Lua | battery:voltage(0) (mediator hack) | rpm:get_rpm(0) (DSHOT telemetry) |
-| Mode selector param | SCR_USER7 | SCR_USER6 (rawes_hw.lua) |
+| Mode selector param | SCR_USER6 | SCR_USER6 (rawes_hw.lua) |

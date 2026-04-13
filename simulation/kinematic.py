@@ -201,13 +201,17 @@ class KinematicStartup:
         dynamics._pos[:] = pos
         dynamics._vel[:] = vel
 
-        # Lock orientation only during the constant-velocity phase.
-        # Release it during the velocity ramp so angular dynamics can settle.
-        in_ramp = self.ramp_s > 0.0 and t_sim >= self.t_ramp_start
-        if not in_ramp:
-            hub_state["R"]     = self.R0.copy()
-            hub_state["omega"] = np.zeros(3)
-            dynamics._R[:]     = self.R0
-            dynamics._omega[:] = np.zeros(3)
+        # Lock orientation throughout the entire kinematic phase (including the
+        # velocity-ramp window).  The mediator's internal controller only runs
+        # when damp_alpha == 0.0 (free flight), so releasing R during the ramp
+        # just lets ArduPilot ACRO drive body_z to a wrong orientation in the
+        # 15 s before kinematic exit — causing insufficient lift on entry to
+        # free flight.  Keeping R = R0 until the very last kinematic frame
+        # ensures the hub arrives at free-flight start in the correct equilibrium
+        # orientation, consistent with the mediator CRITICAL comment above.
+        hub_state["R"]     = self.R0.copy()
+        hub_state["omega"] = np.zeros(3)
+        dynamics._R[:]     = self.R0
+        dynamics._omega[:] = np.zeros(3)
 
         return True

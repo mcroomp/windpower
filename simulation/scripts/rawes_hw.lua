@@ -1,16 +1,6 @@
 --[[
-rawes_hw.lua — RAWES flight + yaw-trim controller (hardware deployment)
-
-Differences from rawes.lua (SITL version):
-  - RPM source: rpm:get_rpm(0) instead of battery:voltage(0) (SITL hack)
-  - Battery voltage: battery:voltage(0) real sensor, falls back to V_BAT_NOM
-  - Mode selector: SCR_USER6 (hardware firmware only has SCR_USER1..6)
-
-Required ArduPilot parameters (set before deploying):
-  RPM1_TYPE       5   -- DSHOT bidirectional ESC telemetry (AM32 firmware)
-  RPM1_MIN        0
-  SERVO9_FUNCTION 94  -- Script 1: Lua writes motor command to Ch9 (AUX1)
-  SCR_ENABLE      1   -- reboot required after setting
+rawes.lua — Unified RAWES flight + yaw-trim controller
+Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via SCR_USER6:
   0  none   — script loaded but both subsystems disabled
@@ -18,19 +8,15 @@ Mode is selected at runtime via SCR_USER6:
   2  yaw    — counter-torque yaw trim only (Ch9/SERVO9)   100 Hz
   3  both   — flight + yaw trim active simultaneously
 
-Note: this firmware build only exposes SCR_USER1..6 (not SCR_USER7..9).
-SCR_USER6 is therefore repurposed as the mode selector here.
-The SITL version uses SCR_USER7 and has SCR_USER6 as cyclic rate limiter.
-
-SCR_USER1..5 are used by the flight subsystem (see below).
-
-Flight subsystem parameters (SCR_USER1..5) and mode selector (SCR_USER6):
+Parameters (SCR_USER1..6):
   SCR_USER1   RAWES_KP_CYC    Cyclic P gain            [rad/s / rad]  default 1.0
   SCR_USER2   RAWES_BZ_SLEW   body_z slerp rate limit  [rad/s]        default 0.40
   SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]         default 0.0
   SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]         default 0.0
   SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]         default 0.0
-  SCR_USER6   RAWES_MODE      Mode selector (0/1/2/3 — see above)      default 0
+  SCR_USER6   RAWES_MODE      Mode selector (0/1/2/3 -- see above)     default 0
+
+Cyclic output rate limiter is hardcoded at 30 PWM/step (0.67 s full-stick traverse).
 
 Yaw-trim subsystem constants (compile-time):
   GEAR_RATIO   80:44 spur gear between GB4008 pinion and rotor hub
@@ -38,12 +24,26 @@ Yaw-trim subsystem constants (compile-time):
   R_MOTOR      7.5 ohm phase resistance
   K_BEARING    0.005 N·m·s/rad bearing drag
   KP_YAW       0.001 rad/s -> throttle proportional yaw correction
-  V_BAT_NOM    15.2 V nominal 4S LiPo (fallback if battery sensor unavailable)
+
+RPM source:
+  SITL: mediator sends motor_rpm via JSON "rpm.rpm_1" field; ArduPilot maps
+        this to RPM:get_rpm(0).
+  Hardware: DSHOT bidirectional ESC telemetry (RPM1_TYPE=5, AM32 firmware).
+  The script tries both 'rpm' and 'RPM' library names for firmware compatibility.
+
+Battery voltage:
+  Read from onboard sensor (battery:voltage(0)).  Falls back to V_BAT_NOM if
+  the sensor is not ready or reads below V_BAT_MIN (early boot / bench testing).
+
+Required ArduPilot parameters:
+  SCR_ENABLE      1   -- reboot required after first set
+  RPM1_TYPE       5   -- DSHOT bidirectional (hardware) or 10 (SITL JSON)
+  RPM1_MIN        0
+  SERVO9_FUNCTION 94  -- Script 1: Lua writes motor command to Ch9 (AUX1)
 
 Deployment:
-  Copy rawes_hw.lua to APM/scripts/rawes_hw.lua on the Pixhawk SD card.
-  Requires SCR_ENABLE=1 in ArduPilot parameters.
-  Set SCR_USER6=2 to activate yaw-trim mode.
+  Copy rawes.lua to APM/scripts/ on the Pixhawk SD card.
+  Set SCR_USER6 to activate the desired mode.
 --]]
 
 -- ── Shared constants ─────────────────────────────────────────────────────────
@@ -58,6 +58,27 @@ local MIN_TETHER_M      = 0.5       -- minimum tether length before orbit tracki
 local ACRO_RP_RATE_DEG  = 360.0     -- must match ACRO_RP_RATE ArduPilot parameter
 local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
 
+-- ── VZ collective controller ─────────────────────────────────────────────────
+-- Pixhawk-side descent-rate controller: mirrors AcroController.step_vz() in
+-- controller.py.  Runs at 50 Hz inside run_flight().  Computes collective from
+-- NED vz feedback and writes Ch3 RC override.
+--
+-- Ground station encodes vz_setpoint on Ch7 RC override:
+--   PWM = 1500 + vz_setpoint_ms * CH7_VZ_SCALE
+--   1500 = hold altitude (vz=0), 1600 = descend 0.5 m/s, 1400 = climb 0.5 m/s
+-- Ch7 not set or = 0  ->  default vz_setpoint = 0 (hold altitude).
+
+local KP_VZ          = 0.05    -- collective gain [rad/(m/s)]
+local COL_CRUISE_RAD = 0.079   -- altitude-neutral feedforward [rad] at xi~80 deg
+local COL_MIN_RAD    = -0.28   -- hardware collective floor  [rad]
+local COL_MAX_RAD    =  0.10   -- hardware collective ceiling [rad]
+-- DS113MG at 6 V: 545 deg/s over 100 deg travel.
+-- max_col_rate = 2 * 545/100 * swashplate_pitch_gain(0.10) = 1.09 rad/s
+-- At 50 Hz (0.020 s/step): max_col_step = 1.09 * 0.020 = 0.022 rad/step
+local COL_SLEW_MAX   = 0.022   -- rad per 50 Hz step
+
+local CH7_VZ_SCALE   = 200.0   -- PWM units per (m/s): 1600 PWM = 0.5 m/s descent
+
 -- ── Yaw-trim subsystem constants ─────────────────────────────────────────────
 
 local GEAR_RATIO    = 80.0 / 44.0
@@ -67,13 +88,14 @@ local K_BEARING     = 0.005
 local KP_YAW        = 0.001
 local MIN_RPM       = 50            -- RPM below this = no signal from ESC telemetry
 local STARTUP_PWM   = 1050          -- ~5% throttle: arms DShot ESC and primes telemetry
-local V_BAT_NOM     = 15.2          -- fallback if battery sensor returns nil or < 10 V
-local V_BAT_MIN     = 10.0          -- below this = battery sensor not ready
+local V_BAT_NOM     = 15.2          -- nominal 4S LiPo voltage
+local V_BAT_MIN     = 10.0          -- below this = battery sensor not ready; use V_BAT_NOM
 local YAW_SRV_FUNC  = 94            -- ArduPilot servo function for Script 1 output (SERVO9)
 
--- RPM sensor binding: try 'rpm' (standard) then 'RPM' (some firmware builds).
--- Nil at module load means the RPM library is not compiled into this firmware.
-local _rpm_lib = rpm or RPM
+-- RPM library binding.  SITL (mcroomp fork) exposes 'RPM' (uppercase).
+-- Some hardware firmware builds use 'rpm' (lowercase) instead.
+-- Try RPM first; fall back to rpm if RPM is nil.
+local _rpm_lib = RPM or rpm
 
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -83,18 +105,21 @@ local _last_flight_ms   = 0         -- millis() when flight subsystem last ran
 -- Cache RC channel objects at module load (rc:get_channel() is the correct API)
 local _rc_ch1 = rc:get_channel(1)   -- roll rate override (flight)
 local _rc_ch2 = rc:get_channel(2)   -- pitch rate override (flight)
+local _rc_ch3 = rc:get_channel(3)   -- collective override (vz controller)
+local _rc_ch7 = rc:get_channel(7)   -- vz_setpoint input from ground station
 
 -- ── Flight subsystem state ───────────────────────────────────────────────────
 
-local _captured     = false         -- true once equilibrium has been snapped
-local _bz_eq0       = nil           -- body_z_ned at equilibrium capture
-local _tdir0        = nil           -- tether direction at equilibrium capture
-local _bz_orbit     = nil           -- instantaneous orbit-tracked body_z setpoint
-local _bz_slerp     = nil           -- rate-limited active setpoint (what cyclic tracks)
-local _bz_target    = nil           -- planner override (nil = natural orbit)
-local _plan_ms      = 0             -- millis() when _bz_target was last commanded
-local _prev_ch1     = 1500          -- last sent Ch1 PWM (for output rate limiting)
-local _prev_ch2     = 1500          -- last sent Ch2 PWM (for output rate limiting)
+local _last_col_rad = COL_CRUISE_RAD  -- collective slew state [rad]
+local _captured     = false           -- true once equilibrium has been snapped
+local _bz_eq0       = nil             -- body_z_ned at equilibrium capture
+local _tdir0        = nil             -- tether direction at equilibrium capture
+local _bz_orbit     = nil             -- instantaneous orbit-tracked body_z setpoint
+local _bz_slerp     = nil             -- rate-limited active setpoint (what cyclic tracks)
+local _bz_target    = nil             -- planner override (nil = natural orbit)
+local _plan_ms      = 0               -- millis() when _bz_target was last commanded
+local _prev_ch1     = 1500            -- last sent Ch1 PWM (for output rate limiting)
+local _prev_ch2     = 1500            -- last sent Ch2 PWM (for output rate limiting)
 
 -- ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -169,8 +194,6 @@ local function compute_trim(motor_rpm, v_bat)
 end
 
 local function run_yaw_trim()
-    -- Motor RPM from DSHOT bidirectional ESC telemetry (RPM1_TYPE=5, AM32 firmware).
-    -- Returns nil if ESC telemetry has not yet sent a packet or library unavailable.
     if not _rpm_lib then
         if _diag % 500 == 1 then
             gcs:send_text(3, "RAWES yaw: rpm library not available on this firmware")
@@ -179,10 +202,13 @@ local function run_yaw_trim()
     end
     local motor_rpm = _rpm_lib:get_rpm(0)
 
-    -- Battery voltage from onboard sensor.
-    -- Falls back to V_BAT_NOM if the sensor is not ready or reads implausibly low.
-    local v_bat = battery:voltage(0)
-    if not v_bat or v_bat < V_BAT_MIN then v_bat = V_BAT_NOM end
+    -- Battery voltage from onboard sensor; fall back to nominal if not ready
+    -- or if the battery binding is not available in this firmware build.
+    local v_bat = V_BAT_NOM
+    pcall(function()
+        local raw = battery:voltage(0)
+        if raw and raw >= V_BAT_MIN then v_bat = raw end
+    end)
 
     if _diag % 500 == 1 then
         gcs:send_text(6, string.format(
@@ -190,9 +216,9 @@ local function run_yaw_trim()
             motor_rpm or -1, v_bat, _diag))
     end
 
-    -- Cold-start: if armed but no RPM yet, output a small startup throttle so
-    -- the DShot ESC arms and begins returning telemetry.  Once RPM exceeds
-    -- MIN_RPM the trim loop takes over.  No output if disarmed (safe bench default).
+    -- Cold-start: output a small startup throttle so the DShot ESC arms and
+    -- begins returning telemetry.  Once RPM exceeds MIN_RPM the trim loop takes
+    -- over.  No output if disarmed (safe bench default).
     if not motor_rpm or motor_rpm < MIN_RPM then
         if arming:is_armed() then
             SRV_Channels:set_output_pwm(YAW_SRV_FUNC, STARTUP_PWM)
@@ -312,16 +338,13 @@ local function run_flight()
     ch1 = math.max(1000, math.min(2000, ch1))
     ch2 = math.max(1000, math.min(2000, ch2))
 
-    -- Output rate limiter: disabled on hardware (SCR_USER6 is the mode selector,
-    -- not available as max_delta here; SITL version uses SCR_USER7 for mode
-    -- and SCR_USER6 for rate limiting).
+    -- Output rate limiter (30 PWM/step = ~0.67 s full-stick traverse)
     local d1 = ch1 - _prev_ch1
     local d2 = ch2 - _prev_ch2
-    local max_delta = 30
-    if d1 >  max_delta then d1 =  max_delta end
-    if d1 < -max_delta then d1 = -max_delta end
-    if d2 >  max_delta then d2 =  max_delta end
-    if d2 < -max_delta then d2 = -max_delta end
+    if d1 >  30 then d1 =  30 end
+    if d1 < -30 then d1 = -30 end
+    if d2 >  30 then d2 =  30 end
+    if d2 < -30 then d2 = -30 end
     ch1 = _prev_ch1 + d1
     ch2 = _prev_ch2 + d2
     _prev_ch1 = ch1
@@ -330,11 +353,48 @@ local function run_flight()
     if _rc_ch1 then _rc_ch1:set_override(ch1) end
     if _rc_ch2 then _rc_ch2:set_override(ch2) end
 
+    -- ── VZ collective controller ──────────────────────────────────────────
+    -- Read vz_setpoint from Ch7 (ground station encodes: PWM = 1500 + vz * 200).
+    -- Default to 0 (hold altitude) if Ch7 is not set or returns nil.
+    local vz_sp = 0.0
+    if _rc_ch7 then
+        local ch7_pwm = _rc_ch7:get_pwm()
+        if ch7_pwm and ch7_pwm > 0 then
+            vz_sp = (ch7_pwm - 1500) / CH7_VZ_SCALE
+        end
+    end
+
+    -- Read NED vertical velocity from EKF (z positive = downward in NED).
+    local vz_actual = 0.0
+    local vel_ned = ahrs:get_velocity_NED()
+    if vel_ned then vz_actual = vel_ned:z() end
+
+    -- P controller: positive error = descending too fast = increase collective.
+    local vz_error = vz_actual - vz_sp
+    local col_cmd  = COL_CRUISE_RAD + KP_VZ * vz_error
+    if col_cmd < COL_MIN_RAD then col_cmd = COL_MIN_RAD end
+    if col_cmd > COL_MAX_RAD then col_cmd = COL_MAX_RAD end
+
+    -- Slew-limit collective change per step.
+    local col_delta = col_cmd - _last_col_rad
+    if col_delta >  COL_SLEW_MAX then col_delta =  COL_SLEW_MAX end
+    if col_delta < -COL_SLEW_MAX then col_delta = -COL_SLEW_MAX end
+    _last_col_rad = _last_col_rad + col_delta
+
+    -- Normalise collective_rad -> Ch3 PWM (mirrors planner thrust encoding).
+    -- thrust = (col - col_min) / (col_max - col_min)  ->  PWM = 1000 + thrust * 1000
+    local col_thrust = (_last_col_rad - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+    if col_thrust < 0.0 then col_thrust = 0.0 end
+    if col_thrust > 1.0 then col_thrust = 1.0 end
+    local ch3 = math.floor(1000.0 + col_thrust * 1000.0 + 0.5)
+
+    if _rc_ch3 then _rc_ch3:set_override(ch3) end
+
     if _diag % 250 == 1 then     -- every ~5 s at 50 Hz
         local err_mag = math.sqrt(err_bx * err_bx + err_by * err_by)
         gcs:send_text(6, string.format(
-            "RAWES: ch1=%d ch2=%d |err|=%.3f rad  slerp_to_goal=%.3f rad",
-            ch1, ch2, err_mag, remain))
+            "RAWES: ch1=%d ch2=%d ch3=%d |err|=%.3f rad  vz=%.2f/%.2f col=%.3f rad",
+            ch1, ch2, ch3, err_mag, vz_actual, vz_sp, _last_col_rad))
     end
 end
 
@@ -367,12 +427,12 @@ end
 
 -- ── Entry point ──────────────────────────────────────────────────────────────
 
-local _mode_init = math.floor(p("SCR_USER6", 0) + 0.5)
+local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
 local _mode_names = {[0]="none", [1]="flight", [2]="yaw", [3]="both"}
-local _mode_str = _mode_names[_mode_init] or "unknown"
+local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
-    "RAWES hw: loaded  mode=%d (%s)  kp=%.2f  slew=%.2f  anchor=(%.1f,%.1f,%.1f)",
+    "RAWES: loaded  mode=%d (%s)  kp=%.2f  slew=%.2f  anchor=(%.1f %.1f %.1f)",
     _mode_init, _mode_str,
     p("SCR_USER1", 1.0), p("SCR_USER2", 0.40),
     p("SCR_USER3", 0.0), p("SCR_USER4", 0.0), p("SCR_USER5", 0.0)))

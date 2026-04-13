@@ -39,8 +39,7 @@ from typing import Optional
 
 _SIM_DIR = Path(__file__).resolve().parents[1]   # simulation/
 
-_LOG_DIR     = _SIM_DIR / "logs"
-_PYTEST_LOG  = _LOG_DIR / "pytest_last_run.log"
+_LOG_DIR = _SIM_DIR / "logs"
 
 sys.path.insert(0, str(_SIM_DIR))
 from telemetry_csv import TelRow, read_csv  # noqa: E402
@@ -114,6 +113,7 @@ def parse_mediator(path: Path, report: RunReport) -> None:
     """Extract run metadata from the mediator log (RUN_ID, sensor mode, damping config).
 
     Physics frames are no longer read here -- use load_telemetry() instead.
+    Transition state is computed from the telemetry CSV in _print_mediator().
     """
     if not path.exists():
         print(f"  [!] mediator log not found: {path}")
@@ -281,6 +281,26 @@ def _print_mediator(r: RunReport) -> None:
         print(f"    final thrust at damp end       : {last_damp.aero_T:.1f} N")
         print(f"    final tether tension           : {last_damp.tether_tension:.0f} N")
 
+    # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV;
+    # fall back to first free-flight row (damp_alpha==0) for older logs.
+    _tr_rows = [r for r in rows if r.note == "kinematic_exit"]
+    tr = _tr_rows[0] if _tr_rows else (free_rows[0] if free_rows else None)
+    if tr is not None:
+        bz_elev_deg = math.degrees(math.asin(max(-1.0, min(1.0, -tr.r22))))
+        upward_frac = -tr.r22   # fraction of thrust pointing up (NED Z is down)
+        print()
+        print(f"  -- Kinematic exit (t={tr.t_sim:.1f}s) --")
+        print(f"    body_z elevation : {bz_elev_deg:.1f} deg  "
+              + ("[OK]" if bz_elev_deg >= 15.0 else "[!!] too horizontal, insufficient lift"))
+        print(f"    upward fraction  : {upward_frac:.3f}  "
+              + ("[OK]" if upward_frac >= 0.25 else "[!!] < 0.25 -- hub will fall"))
+        print(f"    collective_rad   : {tr.collective_rad:.4f} rad")
+        print(f"    tether tension   : {tr.tether_tension:.1f} N  "
+              + ("[OK]" if tr.tether_tension > 50 else "[!!] slack or very low"))
+        print(f"    altitude         : {-tr.pos_z:.2f} m")
+        print(f"    vel_z (down+)    : {tr.vel_z:.3f} m/s  "
+              + ("[OK]" if tr.vel_z < 1.0 else "[!!] falling fast at exit"))
+
     # Free-flight phase
     if free_rows:
         t_start = free_rows[0].t_sim
@@ -296,9 +316,34 @@ def _print_mediator(r: RunReport) -> None:
         print(f"    tether length    : {min_r:.1f} - {max_r:.1f} m")
         print(f"    mean rotor spin  : {omega_mean:.1f} rad/s")
 
+        # First 10s of free flight — crash rate check
+        dt_tel = 1.0 / 400.0  # default 400 Hz
+        if len(free_rows) > 1:
+            dt_tel = (free_rows[-1].t_sim - free_rows[0].t_sim) / max(len(free_rows) - 1, 1)
+        n_early = min(len(free_rows), max(1, int(10.0 / dt_tel)))
+        early = free_rows[:n_early]
+        if early:
+            min_alt_early = min(-r.pos_z for r in early)
+            max_vz_early  = max(r.vel_z for r in early)
+            t_early_end   = early[-1].t_sim
+            if min_alt_early < 3.0 or max_vz_early > 3.0:
+                print(f"    [!!] first {t_early_end - t_start:.0f}s: "
+                      f"min_alt={min_alt_early:.1f}m  "
+                      f"max_vel_down={max_vz_early:.1f} m/s  (crash indicator)")
+
         floor_hits = sum(1 for row in free_rows if -row.pos_z <= 1.05)
         if floor_hits:
             print(f"    [!!] floor hits  : {floor_hits} frames at altitude<=1.05 m")
+
+
+def _print_tel_events(r: RunReport) -> None:
+    """Print timeline of note-stamped events from the telemetry CSV."""
+    events = [(row.t_sim, row.note) for row in r.tel_rows if row.note]
+    if not events:
+        return
+    _header("TELEMETRY EVENTS (from CSV notes)")
+    for t_ev, note in events:
+        print(f"  t={t_ev:7.2f}s  {note}")
 
 
 def _print_ekf(r: RunReport) -> None:
@@ -340,6 +385,66 @@ def _print_ekf(r: RunReport) -> None:
         print(f"    horiz position valid : {'[OK]' if has_pos else '[!!]'}")
         print(f"    velocity valid       : {'[OK]' if has_vel else '[!!]'}")
         print(f"    GPS yaw valid        : {'[OK]' if final_f & 0x0080 else '[!!]'}")
+
+
+def _print_landing(r: RunReport) -> None:
+    """Print landing-specific diagnostics (descent, tension, yaw tracking)."""
+    rows = r.tel_rows
+    descent_rows = [row for row in rows if row.phase == "descent"]
+    final_rows   = [row for row in rows if row.phase == "final_drop"]
+    if not descent_rows and not final_rows:
+        return
+
+    _header("LANDING DIAGNOSTICS")
+
+    if descent_rows:
+        t0   = descent_rows[0].t_sim
+        t1   = descent_rows[-1].t_sim
+        alts = [-row.pos_z for row in descent_rows]
+        tens = [row.tether_tension for row in descent_rows]
+        vhs  = [row.v_horiz_ms     for row in descent_rows]
+        orbs = [math.degrees(row.orb_yaw_rad) for row in descent_rows]
+        # velocity-derived yaw (what EKF got, approximated from rpy)
+        rpys = [math.degrees(row.rpy_yaw) for row in descent_rows]
+        # yaw gap: difference between orb yaw and sent rpy yaw
+        gaps = [abs(((o - s + 180) % 360) - 180)
+                for o, s in zip(orbs, rpys)]
+        horiz_dists = [(row.pos_x**2 + row.pos_y**2)**0.5 for row in descent_rows]
+
+        print(f"  Descent phase: t={t0:.1f}s to t={t1:.1f}s  ({len(descent_rows)} rows)")
+        print(f"    altitude      : {min(alts):.2f} m .. {max(alts):.2f} m")
+        print(f"    descent rate  : {(alts[0]-alts[-1])/(t1-t0):.3f} m/s avg  "
+              + "(positive = down)")
+        print(f"    tether tension: peak={max(tens):.0f} N  mean={sum(tens)/len(tens):.0f} N")
+        print(f"    v_horiz       : max={max(vhs):.2f} m/s  mean={sum(vhs)/len(vhs):.2f} m/s")
+        print(f"    horiz dist    : max={max(horiz_dists):.2f} m from anchor")
+        print(f"    orb_yaw       : {min(orbs):.0f} .. {max(orbs):.0f} deg")
+        print(f"    rpy_yaw (sent): {min(rpys):.0f} .. {max(rpys):.0f} deg")
+        print(f"    yaw gap       : max={max(gaps):.1f} deg  mean={sum(gaps)/len(gaps):.1f} deg")
+
+        # Sample the first 60s of descent at ~1 Hz
+        dt_tel = 1.0
+        if len(descent_rows) > 1:
+            dt_tel = (descent_rows[-1].t_sim - descent_rows[0].t_sim) / max(len(descent_rows)-1, 1)
+        stride = max(1, int(1.0 / dt_tel))
+        sampled = descent_rows[::stride][:60]
+        if sampled:
+            print()
+            print("  Descent sample (1s stride, first 60s):")
+            print("  t_sim    alt     v_horiz  orb_yaw  rpy_yaw  yaw_gap  tension  pos_x  pos_y")
+            for row in sampled:
+                alt   = -row.pos_z
+                oy    = math.degrees(row.orb_yaw_rad)
+                ry    = math.degrees(row.rpy_yaw)
+                gap   = abs(((oy - ry + 180) % 360) - 180)
+                print(f"  {row.t_sim:6.1f}  {alt:5.1f}   {row.v_horiz_ms:6.2f}   "
+                      f"{oy:6.1f}   {ry:6.1f}   {gap:5.1f}   "
+                      f"{row.tether_tension:7.0f}  {row.pos_x:5.2f}  {row.pos_y:5.2f}")
+
+    if final_rows:
+        alt_fd = min(-row.pos_z for row in final_rows)
+        print(f"\n  final_drop phase: {len(final_rows)} rows  "
+              f"min_alt={alt_fd:.2f} m")
 
 
 def _print_setup(r: RunReport) -> None:
@@ -478,8 +583,6 @@ def main() -> None:
                         help="Override telemetry CSV path")
     parser.add_argument("--mediator", default=None,
                         help="Override mediator log path")
-    parser.add_argument("--pytest",   default=str(_PYTEST_LOG),
-                        help="pytest suite log (default: logs/pytest_last_run.log)")
     parser.add_argument("--plot", action="store_true",
                         help="Save + show a 4-panel position/attitude/spin plot")
     parser.add_argument("--all-statustext", action="store_true",
@@ -514,14 +617,16 @@ def main() -> None:
     telemetry_path = Path(args.telemetry) if args.telemetry else test_dir / "telemetry.csv"
     mediator_path  = Path(args.mediator)  if args.mediator  else test_dir / "mediator.log"
 
+    gcs_path = test_dir / "gcs.log"
+
     report = RunReport()
     print(f"\nTest dir      : {test_dir}")
     print(f"Loading telemetry CSV : {telemetry_path}")
     load_telemetry(telemetry_path, report)
     print(f"Parsing mediator log  : {mediator_path}")
     parse_mediator(mediator_path, report)
-    print(f"Parsing pytest log    : {args.pytest}")
-    parse_pytest(Path(args.pytest), report)
+    print(f"Parsing gcs log       : {gcs_path}")
+    parse_pytest(gcs_path, report)
     print(f"  telemetry rows     : {len(report.tel_rows)}")
     print(f"  STATUSTEXT lines   : {len(report.statustext)}")
     print(f"  EKF_STATUS lines   : {len(report.ekf_flags)}")
@@ -542,7 +647,9 @@ def main() -> None:
         print("  WARNING: logs are from different runs -- analysis may be misleading!")
 
     _print_mediator(report)
+    _print_tel_events(report)
     _print_ekf(report)
+    _print_landing(report)
     _print_setup(report)
     _print_hold(report)
     _print_results(report)

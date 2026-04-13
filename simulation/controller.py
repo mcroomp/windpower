@@ -850,6 +850,51 @@ class AcroController:
             return float(collective_rad_cmd)
         return self._servo.step_collective(collective_rad_cmd, dt)
 
+    def step_vz(
+        self,
+        vz_setpoint_ms: float,
+        vz_actual:      float,
+        col_cruise_rad: float,
+        col_min_rad:    float,
+        col_max_rad:    float,
+        kp_vz:          float,
+        dt:             float,
+    ) -> float:
+        """
+        Pixhawk-side descent-rate controller: compute and slew-limit collective.
+
+        Mirrors the rawes.lua vz control loop.  The ground station supplies
+        vz_setpoint_ms; this method runs on the Pixhawk (AcroController) and
+        outputs collective_rad.  Replaces direct collective computation on the
+        ground station, making comms-loss failsafe trivial (hold last setpoint).
+
+        NED convention: positive vz = downward.
+
+        Parameters
+        ----------
+        vz_setpoint_ms : float  desired NED vz [m/s]; positive = descend
+        vz_actual      : float  current NED vz from EKF vel[2] [m/s]
+        col_cruise_rad : float  altitude-neutral feedforward = col_min_for_altitude
+                                at the current xi angle [rad]
+        col_min_rad    : float  hardware collective floor (servo limit) [rad]
+        col_max_rad    : float  hardware collective ceiling [rad]
+        kp_vz          : float  gain [rad/(m/s)]; pos error = descending too fast
+                                = increase collective to brake
+        dt             : float  timestep [s]
+
+        Returns
+        -------
+        float   Slew-limited collective [rad]
+        """
+        # NED: positive vz_error means hub is descending faster than setpoint
+        # -> increase collective to brake.  Negative means too slow -> reduce
+        # collective to let gravity win.
+        vz_error       = vz_actual - vz_setpoint_ms
+        collective_cmd = float(np.clip(
+            col_cruise_rad + kp_vz * vz_error,
+            col_min_rad, col_max_rad))
+        return self.slew_collective(collective_cmd, dt)
+
     def reset(self) -> None:
         """Reset all stateful components (call on phase transitions)."""
         self._pid_lon.reset()

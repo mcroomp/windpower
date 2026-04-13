@@ -156,14 +156,14 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
 
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: real_sitl)
-    class _FakeSkewedWakeBEM:
+    class _FakeSkewedWakeBEMJit:
         @classmethod
         def from_definition(cls, defn):
             return fake_aero
-    monkeypatch.setattr(mediator, "SkewedWakeBEM", _FakeSkewedWakeBEM)
+    monkeypatch.setattr(mediator, "SkewedWakeBEMJit", _FakeSkewedWakeBEMJit)
     monkeypatch.setattr(mediator, "make_sensor",       lambda *a, **kw: fake_sensor)
 
-    times = iter([10.0, 10.1, 10.1005])
+    times = iter([10.0, 10.1, 10.1005, 10.1010, 10.1015])
     monkeypatch.setattr(mediator.time, "monotonic", lambda: next(times))
     monkeypatch.setattr(
         mediator.time, "sleep",

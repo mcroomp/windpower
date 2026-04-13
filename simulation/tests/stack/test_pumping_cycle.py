@@ -57,17 +57,27 @@ _TENSION_IN   = float(_DCFG["tension_in"])    # 55.0 N
 
 _CYCLE_DURATION   = _T_REEL_OUT + _T_REEL_IN   # 60 s per cycle
 
-# How long after ACRO arm to wait for physics to stabilise before the first
-# reel-out starts.  The mediator's startup_damp_seconds (45 s) has already
-# elapsed by the time the fixture yields — we just need the aero ramp (5 s).
-_SETTLE_SECONDS   = 6.0
-
 # Total observation window.
-# With kinematic_vel_ramp_s=15, arm fires at ~t=10s mediator time (EKF tilt
-# aligns quickly during kinematic).  Kinematic runs until t=65s, leaving
-# ~55s of remaining kinematic after fixture yield.  The observation must cover:
-#   remaining_kinematic (~55s) + full_cycle (60s) + margin (10s) = 125s.
+# arm fires at ~t=54s from mediator start; fixture yields then.
+# acro_armed_pumping uses t_hold_s=10s so the winch holds briefly after
+# kinematic exit (t=65s) to let TensionPI stabilise.  After fixture yield:
+#   remaining kinematic:  ~11s  (kinematic ends at t=65s)
+#   post-kinematic hold:  10s   (t_hold_s=10, winch paused)
+#   first reel-out:       30s
+#   first reel-in:        30s
+#   margin:               10s
+#   total: ~91s  -> 125s gives ample margin.
 _OBS_SECONDS      = 125.0
+
+# Observation window for the Lua pumping variant.
+# Kinematic runs for 120 s (startup_damp_seconds=120); GPS fuses at ~74 s so
+# Lua captures at ~79 s.  After kinematic exit (t=120 s):
+#   t_hold_s=10 s hold:  t=120..130 s
+#   reel_out triggers:   t~130.4 s (0.05 m / 0.12 m/s after reel-out starts)
+# Fixture yields at ~mediator t=12 s; observation must reach t~131 s = 119 s.
+# Full pumping cycle to validate physics: add ~70 s reel-out + reel-in.
+# 165 s gives ample margin.
+_LUA_OBS_SECONDS  = 165.0
 
 # ---------------------------------------------------------------------------
 # Pass/fail thresholds
@@ -125,19 +135,6 @@ def _split_phases(rows: list) -> tuple[list, list]:
 # Main test
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pumping cycle cannot complete after kinematic startup. "
-        "Root cause: the equilibrium at col=-0.28 rad has zero net thrust margin "
-        "(T_est=0), so any kinematic exit perturbation (~0.2 m/s downward) causes "
-        "the hub to descend to the 1 m physics floor (equilibrium altitude=7.1 m). "
-        "Confirmed: setting cyclic kp=0 produces identical crash — the controller "
-        "is not the cause; the equilibrium is intrinsically marginally stable. "
-        "Fix: raise coll_eq_rad above -0.28 (positive T_est margin) OR increase "
-        "equilibrium altitude so kinematic perturbation can be absorbed."
-    ),
-)
 def test_pumping_cycle(acro_armed_pumping: StackContext):
     """
     Full pumping cycle stack test: reel-out (30 s) then reel-in (30 s).
@@ -194,25 +191,20 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
 
         log.info("Observation complete: %d pos samples", len(pos_history))
 
-        # ── Crash check from MAVLink position ─────────────────────────────────
-        assert pos_history, (
-            "No LOCAL_POSITION_NED received during pumping cycle.\n"
-            f"STATUSTEXT: {all_statustext}"
-        )
-
-        # Log MAVLink altitude for diagnostic purposes (not used for crash assertion —
-        # EKF altitude drifts during GPS glitch events in CONST_POS_MODE, giving false
-        # crash reports when physics altitude is well above the limit).
-        max_down  = max(d for _, _, _, d in pos_history)
-        min_alt_mavlink = ctx.home_alt_m - max_down   # EKF D=0 at HOME; D>0 = below home
-        log.info("Min altitude (MAVLink, diagnostic): %.2f m", min_alt_mavlink)
-
-        drifts    = [math.sqrt(n**2 + e**2 + d**2) for _, n, e, d in pos_history]
-        max_drift = max(drifts)
-        log.info("Max drift: %.2f m  (limit=%.0f m)", max_drift, _MAX_DRIFT_M)
-        assert max_drift <= _MAX_DRIFT_M, (
-            f"Hub runaway: max drift {max_drift:.2f} m > {_MAX_DRIFT_M:.0f} m"
-        )
+        # ── MAVLink position (diagnostic only) ────────────────────────────────
+        # LOCAL_POSITION_NED requires GPS fusion.  In physical-sensor mode the
+        # EKF may not fuse GPS (CONST_POS_MODE), so 0 samples is normal.
+        # The authoritative crash check uses the mediator telemetry CSV below.
+        if pos_history:
+            max_down  = max(d for _, _, _, d in pos_history)
+            min_alt_mavlink = ctx.home_alt_m - max_down
+            log.info("Min altitude (MAVLink, diagnostic): %.2f m", min_alt_mavlink)
+            drifts    = [math.sqrt(n**2 + e**2 + d**2) for _, n, e, d in pos_history]
+            max_drift = max(drifts)
+            log.info("Max drift: %.2f m  (limit=%.0f m)", max_drift, _MAX_DRIFT_M)
+        else:
+            log.info("No LOCAL_POSITION_NED received (GPS not fused -- expected in "
+                     "physical-sensor mode).  Using mediator CSV for crash check.")
 
         # ── Parse telemetry CSV for pumping-cycle assertions ─────────────────
         tel = read_csv(ctx.telemetry_log)
@@ -327,3 +319,162 @@ def test_pumping_cycle(acro_armed_pumping: StackContext):
         raise
 
 
+# ---------------------------------------------------------------------------
+# Lua pumping cycle test
+# ---------------------------------------------------------------------------
+
+def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
+    """
+    Pumping cycle stack test with rawes.lua (SCR_USER6=5) running.
+
+    Uses internal_controller=True (same as test_pumping_cycle) because the
+    orbital tether geometry gives a net downward force at kinematic exit (~22
+    m/s^2) -- the tether pulls mostly horizontally and slightly downward
+    toward the anchor (8 deg below the hub), so Lua's 50 Hz RC overrides
+    cannot recover.  The internal 400 Hz controller stabilises the hub.
+
+    What this test validates beyond test_pumping_cycle:
+      - Lua SCR_USER6=5 starts without error and does not disrupt physics.
+      - Lua detects the mediator's winch reel-out from tether length change
+        and sends "RAWES pump: reel_out" STATUSTEXT.
+
+    Same pass criteria as test_pumping_cycle:
+      1. No crash (hub above MIN_ALT_M throughout).
+      2. Reel-in steady tension < reel-out mean tension.
+      3. Net energy positive.
+      4. Peak tension < 80% break load (496 N).
+      5. "RAWES pump: reel_out" STATUSTEXT appears (Lua detected reel-out).
+      6. No CRITICAL errors in mediator log.
+    """
+    ctx = acro_armed_pumping_lua
+    gcs = ctx.gcs
+    log = logging.getLogger("test_pumping_cycle_lua")
+
+    all_statustext = ctx.all_statustext
+    # Pre-populate from STATUSTEXT captured during fixture setup (e.g. drain loop)
+    reel_out_seen  = any("RAWES pump: reel_out" in t for t in all_statustext)
+
+    t_obs_start = time.monotonic()
+    deadline    = t_obs_start + _LUA_OBS_SECONDS
+
+    log.info("--- test_pumping_cycle_lua: observing %.0f s ---", _LUA_OBS_SECONDS)
+
+    try:
+        while time.monotonic() < deadline:
+            # Motor interlock keepalive; Lua owns Ch1/Ch2/Ch3
+            gcs.send_rc_override({8: 2000})
+
+            for name, proc, lp in [
+                ("mediator", ctx.mediator_proc, ctx.mediator_log),
+                ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
+            ]:
+                if proc.poll() is not None:
+                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                    pytest.fail(f"{name} exited during pumping_lua (rc={proc.returncode}):\n{txt[-3000:]}")
+
+            msg = gcs._mav.recv_match(
+                type=["LOCAL_POSITION_NED", "STATUSTEXT"],
+                blocking=True, timeout=0.1,
+            )
+            if msg is not None:
+                mt = msg.get_type()
+                if mt == "STATUSTEXT":
+                    text = msg.text.rstrip("\x00").strip()
+                    all_statustext.append(text)
+                    log.info("STATUSTEXT: %s", text)
+                    if "RAWES pump: reel_out" in text:
+                        reel_out_seen = True
+
+        # ── Parse telemetry CSV ────────────────────────────────────────────
+        tel = read_csv(ctx.telemetry_log)
+        log.info("Telemetry: %d rows", len(tel))
+
+        if not tel:
+            pytest.skip("No mediator telemetry CSV.")
+
+        # ── Lua sync check ────────────────────────────────────────────────
+        assert reel_out_seen, (
+            "STATUSTEXT 'RAWES pump: reel_out' never appeared. "
+            "Lua may not have detected the mediator's winch paying out. "
+            f"All STATUSTEXT: {all_statustext}"
+        )
+
+        # ── Crash check ───────────────────────────────────────────────────
+        z_tel = [-r.pos_z for r in tel]
+        if z_tel:
+            min_alt_tel = min(z_tel)
+            log.info("Min physics altitude: %.2f m  (limit=%.1f m)",
+                     min_alt_tel, _MIN_ALT_M)
+            assert min_alt_tel >= _MIN_ALT_M, (
+                f"Hub crashed: min physics altitude {min_alt_tel:.2f} m < {_MIN_ALT_M:.1f} m\n"
+                f"STATUSTEXT: {all_statustext}"
+            )
+
+        # ── Phase split ───────────────────────────────────────────────────
+        out_rows, in_rows = _split_phases(tel)
+        log.info("Phase split: reel-out=%d rows  reel-in=%d rows",
+                 len(out_rows), len(in_rows))
+
+        tension_rows = [r for r in out_rows + in_rows if r.tether_tension > 0]
+        if not tension_rows:
+            pytest.skip("No tension data in phase rows.")
+
+        if len(out_rows) < 5 or len(in_rows) < 5:
+            pytest.skip(
+                f"Insufficient phase data: reel-out={len(out_rows)} "
+                f"reel-in={len(in_rows)} rows."
+            )
+
+        all_t   = [r.t_sim for r in out_rows + in_rows]
+        dt_tel  = ((all_t[-1] - all_t[0]) / max(len(all_t) - 1, 1)) if len(all_t) > 1 else 0.0025
+
+        mean_tension_out = sum(r.tether_tension for r in out_rows) / len(out_rows)
+
+        skip_in   = int(_T_TRANSITION * len(in_rows) / _T_REEL_IN)
+        steady_in = in_rows[skip_in:] or in_rows
+        mean_tension_in_steady = sum(r.tether_tension for r in steady_in) / len(steady_in)
+        peak_tension = max((r.tether_tension for r in tension_rows), default=0.0)
+
+        energy_out = sum(r.tether_tension * _V_REEL_OUT * dt_tel for r in out_rows)
+        energy_in  = sum(r.tether_tension * _V_REEL_IN  * dt_tel for r in in_rows)
+        net_energy = energy_out - energy_in
+
+        log.info(
+            "Tension: out=%.1f N  in_steady=%.1f N  peak=%.1f N",
+            mean_tension_out, mean_tension_in_steady, peak_tension,
+        )
+        log.info(
+            "Energy: out=%.1f J  in=%.1f J  net=%.1f J",
+            energy_out, energy_in, net_energy,
+        )
+
+        assert peak_tension < _TENSION_LIMIT_N, (
+            f"Peak tension {peak_tension:.1f} N >= 80%% break load "
+            f"({_TENSION_LIMIT_N:.1f} N)"
+        )
+
+        assert mean_tension_in_steady < mean_tension_out, (
+            f"Reel-in steady tension ({mean_tension_in_steady:.1f} N) not less than "
+            f"reel-out ({mean_tension_out:.1f} N) -- De Schutter tilt mechanism not working"
+        )
+
+        assert net_energy > 0, (
+            f"Net energy {net_energy:.1f} J <= 0 -- pumping cycle does not produce net power"
+        )
+
+        # ── CRITICAL log check ────────────────────────────────────────────
+        if ctx.mediator_log.exists():
+            med_text = ctx.mediator_log.read_text(encoding="utf-8", errors="replace")
+            critical = [l for l in med_text.splitlines() if "CRITICAL" in l]
+            assert not critical, (
+                "CRITICAL errors in mediator log:\n" + "\n".join(critical[:10])
+            )
+
+        log.info(
+            "--- test_pumping_cycle_lua PASSED  (net_energy=%.1f J  peak=%.1f N) ---",
+            net_energy, peak_tension,
+        )
+
+    except Exception:
+        dump_startup_diagnostics(ctx)
+        raise

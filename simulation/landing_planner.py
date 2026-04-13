@@ -29,7 +29,7 @@ Two layered fixes:
 2. Geometry feed-forward (anti-slack guard)
    dL/dt = vel_ned . unit_tether  (rate hub-anchor distance changes)
    If dL/dt < PI_speed (hub approaching faster than PI commands):
-       winch_speed = max(dL/dt, -v_land_max)   -- track hub; keep extension >= 0
+       winch_speed = max(dL_dt, -v_land_max)   -- track hub; keep extension >= 0
 
    This ensures rest_length never decreases slower than L, preventing slack
    during fast orbital passes regardless of the PI state.
@@ -37,17 +37,37 @@ Two layered fixes:
 State packet fields consumed
 -----------------------------
     vel_ned         np.ndarray [3]   hub velocity NED [m/s]   (required)
-    tether_length_m float            winch encoder reading [m] (required)
-    tension_n       float            load-cell tension [N]     (for PI; defaults to tension_target)
+    body_z          np.ndarray [3]   hub body_z NED unit vec   (required on first call when
+                                      initial_body_z=None; captured once then ignored)
+    tether_length_m float            winch encoder reading [m] (state_pkt or kwargs)
+    tension_n       float            load-cell tension [N]     (state_pkt or kwargs;
+                                      defaults to tension_target when absent from both)
     pos_ned         np.ndarray [3]   hub position NED [m]      (for feed-forward; falls back to open-loop)
-    body_z, omega_spin               accepted but not used
+    omega_spin                        accepted but not used
+
+Mediator protocol boundary
+---------------------------
+The mediator calls step(state_pkt, dt, tension_n=..., tether_length_m=...) where
+state_pkt contains only MAVLink fields (pos_ned, vel_ned, body_z, omega_spin).
+Tension and tether_length come as **kwargs (ground-station measurements).
+
+Unit tests put tension_n and tether_length_m directly in state_pkt.  Both paths
+are supported: kwargs take priority; state_pkt is the fallback.
 
 Command dict returned
 ---------------------
-    collective_rad  float
-    winch_speed_ms  float   negative = reel in, positive = pay out, 0 = hold
-    body_z_eq       np.ndarray [3]
-    phase           str     "descent" | "final_drop"
+    vz_setpoint_ms  float           desired NED descent rate [m/s]; positive = down
+                                    (pass to AcroController.step_vz as vz_setpoint_ms)
+    col_cruise_rad  float           altitude-neutral feedforward collective [rad]
+                                    (pass to AcroController.step_vz as col_cruise_rad)
+    collective_rad  float           descent-rate-controlled collective [rad]
+                                    (used by mediator internal-controller path directly)
+    attitude_q      np.ndarray [4]  (w,x,y,z) quaternion encoding the fixed body_z_eq;
+                                    non-identity so OrbitTracker slerps to the landing
+                                    orientation rather than tracking the tether direction
+    winch_speed_ms  float           negative = reel in, positive = pay out, 0 = hold
+    body_z_eq       np.ndarray [3]  fixed disk-orientation setpoint (NED unit vector)
+    phase           str             "descent" | "final_drop"
 """
 from __future__ import annotations
 
@@ -56,6 +76,8 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from planner import quat_from_vectors, Q_IDENTITY
+
 
 class LandingPlanner:
     """
@@ -63,12 +85,16 @@ class LandingPlanner:
 
     Parameters
     ----------
-    initial_body_z   : np.ndarray [3]
+    initial_body_z   : np.ndarray [3] | None
+                               Initial (and fixed) disk orientation NED unit vector.
+                               If None, captured from state_pkt["body_z"] on the
+                               first call to step() -- useful when the exact body_z
+                               at landing transition is not known at construction.
     v_land           : float   target descent rate [m/s], positive = downward
-    col_cruise       : float   base collective [rad] = col_min_reel_in at xi=80 deg
-    kp_vz            : float   descent rate gain [rad/(m/s)]
-    col_min_rad      : float
-    col_max_rad      : float
+                               output as vz_setpoint_ms in the command dict
+    col_cruise       : float   altitude-neutral feedforward collective [rad]
+                               = col_min_for_altitude_rad at xi=80 deg
+                               output as col_cruise_rad in the command dict
     min_tether_m     : float   tether length at which final_drop begins [m]
     anchor_ned       : np.ndarray [3] | None
                                Anchor position NED.  Required for geometry
@@ -78,33 +104,40 @@ class LandingPlanner:
     k_winch          : float   winch PI gain [m/s per N].
     v_pay_out        : float   maximum pay-out speed [m/s].  Limits how fast the
                                winch can lengthen the tether to shed tension.
+    kp_vz            : float   descent-rate proportional gain [rad/(m/s)].
+                               collective_rad = col_cruise + kp_vz * (vz - v_land)
+                               where vz = vel_ned[2] (positive = downward in NED).
+    col_min_rad      : float   collective floor [rad] for collective_rad output.
+    col_max_rad      : float   collective ceiling [rad] for collective_rad output.
     """
 
     def __init__(
         self,
-        initial_body_z:   np.ndarray,
+        initial_body_z:   "np.ndarray | None",
         v_land:           float,
         col_cruise:       float,
-        kp_vz:            float,
-        col_min_rad:      float,
-        col_max_rad:      float,
         min_tether_m:     float,
         anchor_ned:       "np.ndarray | None" = None,
         tension_target_n: float = 80.0,
         k_winch:          float = 0.005,
         v_pay_out:        float = 0.5,
+        kp_vz:            float = 0.05,
+        col_min_rad:      float = -0.28,
+        col_max_rad:      float =  0.10,
         # Ignored (kept for API compatibility with old callers)
         body_z_slew_rate: float = 0.4,
         **_kwargs,
     ):
-        self._body_z_eq = np.array(initial_body_z, dtype=float)
-        self._body_z_eq /= np.linalg.norm(self._body_z_eq)
+        if initial_body_z is not None:
+            bz = np.array(initial_body_z, dtype=float)
+            self._body_z_eq = bz / np.linalg.norm(bz)
+            self._body_z_captured = True
+        else:
+            self._body_z_eq       = None
+            self._body_z_captured = False
 
         self._v_land        = float(v_land)
         self._col_cruise    = float(col_cruise)
-        self._kp_vz         = float(kp_vz)
-        self._col_min       = float(col_min_rad)
-        self._col_max       = float(col_max_rad)
         self._min_tether    = float(min_tether_m)
         self._anchor        = (np.asarray(anchor_ned, dtype=float)
                                if anchor_ned is not None else None)
@@ -112,6 +145,9 @@ class LandingPlanner:
         self._k_winch       = float(k_winch)
         self._v_pay_out     = float(v_pay_out)
         self._v_land_max    = 3.0 * self._v_land   # geometry feed-forward cap
+        self._kp_vz         = float(kp_vz)
+        self._col_min_rad   = float(col_min_rad)
+        self._col_max_rad   = float(col_max_rad)
 
         self._phase         = "descent"
 
@@ -121,22 +157,35 @@ class LandingPlanner:
         return self._phase
 
     # ------------------------------------------------------------------
-    def step(self, state_pkt: dict, dt: float) -> dict:
+    def step(self, state_pkt: dict, dt: float, **kwargs) -> dict:
+        # ── Capture body_z on first call when initial_body_z=None ────────
+        if not self._body_z_captured:
+            bz = np.asarray(state_pkt["body_z"], dtype=float)
+            self._body_z_eq       = bz / np.linalg.norm(bz)
+            self._body_z_captured = True
+
         vel_ned    = np.asarray(state_pkt["vel_ned"], dtype=float)
-        tether_len = float(state_pkt["tether_length_m"])
-        tension_n  = float(state_pkt.get("tension_n", self._T_target))
+
+        # tension_n and tether_length_m: kwargs takes priority (mediator
+        # protocol boundary — ground-station measurements passed as keyword
+        # arguments) with state_pkt as fallback (unit-test path).
+        tension_n  = float(kwargs.get("tension_n",
+                                      state_pkt.get("tension_n", self._T_target)))
+        _tl = kwargs.get("tether_length_m", state_pkt.get("tether_length_m"))
+        if _tl is None:
+            raise KeyError(
+                "tether_length_m must be provided in state_pkt or as a keyword argument"
+            )
+        tether_len = float(_tl)
 
         # ── Phase transition ──────────────────────────────────────────
         if self._phase == "descent" and tether_len <= self._min_tether:
             self._phase = "final_drop"
 
-        # ── Collective and winch ──────────────────────────────────────
+        # ── Winch ─────────────────────────────────────────────────────
         if self._phase == "descent":
-            # Descent rate controller (collective)
-            vz_error       = float(vel_ned[2]) - self._v_land
-            collective_rad = float(np.clip(
-                self._col_cruise + self._kp_vz * vz_error,
-                self._col_min, self._col_max))
+            # Collective is computed by the caller via AcroController.step_vz()
+            # in unit tests; the mediator uses collective_rad directly.
 
             # Tension-PI winch:
             #   tension < target -> reel in faster (more negative)
@@ -207,11 +256,29 @@ class LandingPlanner:
                                   + T_excess_frac * (pi_speed - winch_speed_ms))
 
         else:   # final_drop
-            collective_rad = 0.0
             winch_speed_ms = 0.0
 
+        # ── Collective (descent rate controller) ─────────────────────────
+        # vz_error > 0: hub descending faster than v_land -> raise collective to brake
+        # vz_error < 0: hub descending slower than v_land -> lower collective to speed up
+        if self._phase == "descent":
+            vz_error       = float(vel_ned[2]) - self._v_land
+            collective_rad = float(np.clip(
+                self._col_cruise + self._kp_vz * vz_error,
+                self._col_min_rad, self._col_max_rad))
+        else:   # final_drop: zero collective, hub free-falls
+            collective_rad = 0.0
+
+        # ── Attitude quaternion ───────────────────────────────────────────
+        # Encodes the fixed landing body_z so the mediator's OrbitTracker
+        # slerps to it rather than tracking the tether direction.
+        attitude_q = quat_from_vectors(np.array([0.0, 0.0, -1.0]), self._body_z_eq)
+
         return {
+            "vz_setpoint_ms": self._v_land,
+            "col_cruise_rad": self._col_cruise,
             "collective_rad": collective_rad,
+            "attitude_q":     attitude_q,
             "winch_speed_ms": winch_speed_ms,
             "body_z_eq":      self._body_z_eq.copy(),
             "phase":          self._phase,

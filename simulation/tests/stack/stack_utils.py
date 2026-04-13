@@ -45,6 +45,7 @@ def _launch_sitl(
     log_path: Path,
     add_param_file: "Path | None" = None,
     wipe_eeprom: bool = False,
+    speedup: int = 1,
 ) -> subprocess.Popen:
     # Truncate the ArduCopter terminal log so each test run starts fresh.
     # /tmp/ArduCopter.log accumulates across runs in the container — clearing it
@@ -75,6 +76,8 @@ def _launch_sitl(
     ]
     if add_param_file is not None:
         cmd += ["--add-param-file", str(add_param_file)]
+    if speedup > 1:
+        cmd += ["--speedup", str(speedup)]
     return subprocess.Popen(
         cmd,
         cwd=str(sim_vehicle.parent.parent.parent),
@@ -101,42 +104,73 @@ def _prime_sitl_eeprom(
     needed EKF/sensor params without stale calibration interference.
     """
     ardupilot_root = Path(sim_vehicle).parent.parent.parent
-    eeprom = ardupilot_root / "eeprom.bin"
-    eeprom_pristine = ardupilot_root / "eeprom_pristine.bin"
+
+    # arducopter-heli writes eeprom.bin to its CWD.  When launched via
+    # sim_vehicle.py inside Docker, the CWD is the pytest working directory
+    # (/rawes/simulation), NOT ardupilot_root.  Match that here.
+    eeprom = Path.cwd() / "eeprom.bin"
     if eeprom.exists():
         eeprom.unlink()
 
-    # Boot with only the standard copter-heli.parm defaults — no SCR_ENABLE.
-    # SCR_ENABLE=1 is set via MAVLink in _run_acro_setup step 3 where needed.
-    # Keeping it out of pristine prevents Lua scripts from loading on startup
-    # (scripts in /ardupilot/scripts/ from a prior session would run otherwise).
+    # Boot ArduPilot briefly to write SCR_ENABLE=1 into eeprom.bin.
+    # Key observations:
+    #   1. copter-heli.parm has "SCR_ENABLE 1"; defaults are written to EEPROM
+    #      during the first boot, but Lua does NOT start until the NEXT boot.
+    #   2. "Loaded defaults from ..." (and EEPROM init) only happens AFTER a
+    #      MAVLink client connects to the serial port — we must open a TCP
+    #      socket to port 5850 (instance -I9) to trigger it.
+    #   3. Model must be "-M Heli" (capital H; lowercase "heli" is unrecognized,
+    #      makes the binary print help and exit with code 1).
+    #   4. cwd must be the same as the real SITL (pytest working directory) so
+    #      that eeprom.bin is written to the location the real test will find.
     arducopter = ardupilot_root / "build" / "sitl" / "bin" / "arducopter-heli"
     copter_heli_parm = ardupilot_root / "Tools" / "autotest" / "default_params" / "copter-heli.parm"
     cmd = [
         str(arducopter),
-        "--model", "heli",
-        "--speedup", "100",   # 100× so EEPROM init completes well within wait_s
-        "--slave", "0",
-        "--no-mavproxy",
-        "-I0",
-        "--home", "51.5074,-0.1278,50,0",
+        "-M", "Heli",
+        "-s", "100",  # 100× speedup
+        "-I9",        # instance 9 → serial0 on TCP port 5850 (avoids -I0 conflict)
+        "-O", "51.5074,-0.1278,50,0",
         "--defaults", str(copter_heli_parm),
     ]
     devnull = open(os.devnull, "w")
     proc = subprocess.Popen(
         cmd,
-        cwd=str(ardupilot_root),
+        cwd=str(Path.cwd()),  # same CWD as real SITL (/rawes/simulation in Docker)
+        stdin=subprocess.DEVNULL,
         stdout=devnull,
         stderr=devnull,
         start_new_session=True,
     )
-    time.sleep(wait_s)
+
+    # Wait for SITL to open the serial port, then connect to trigger EEPROM init.
+    time.sleep(2.0)
+    _tcp_touch("127.0.0.1", 5850, duration_s=wait_s - 2.0)
+
     _terminate_process(proc)
     devnull.close()
 
-    # Save pristine copy so _launch_sitl() can restore it before each test.
-    if eeprom.exists():
-        shutil.copy2(eeprom, eeprom_pristine)
+
+def _tcp_touch(host: str, port: int, duration_s: float) -> None:
+    """Open a TCP connection for duration_s seconds, then close it.
+
+    Used by _prime_sitl_eeprom: ArduPilot's SITL only writes default params to
+    EEPROM after a MAVLink client connects to the serial port.  A bare TCP
+    connection (no MAVLink framing) is sufficient to trigger param init.
+    """
+    deadline = time.monotonic() + duration_s
+    while time.monotonic() < deadline:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect((host, port))
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            sock.close()
+            return
+        except OSError:
+            time.sleep(0.5)
 
 
 def _terminate_process(proc: subprocess.Popen) -> None:
@@ -309,7 +343,7 @@ def _launch_mediator(
         for _k, _v in extra_config.items():
             if _k == "trajectory" and isinstance(_v, dict):
                 cfg["trajectory"].update(_v)
-                for _sub in ("hold", "deschutter"):
+                for _sub in ("hold", "deschutter", "landing"):
                     if _sub in _v and isinstance(_v[_sub], dict):
                         _merged = _copy.deepcopy(
                             _mcfg.DEFAULTS["trajectory"].get(_sub, {})

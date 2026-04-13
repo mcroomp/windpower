@@ -7,7 +7,7 @@ This test validates the full hardware-equivalent control architecture:
   ─────────────────        ─────────────────────────────────────────
   Hub yaw dynamics    ←─── SERVO9 PWM  (Ch9, Script 1)
   Bearing drag model        ↑
-  Motor torque model        rawes.lua (SCR_USER7=2, yaw mode):
+  Motor torque model        rawes.lua (SCR_USER6=2, yaw mode):
   Sends JSON sensors ──────→ rpm:get_rpm(1)   ← motor RPM from "rpm" field
   (pos, vel, att,            compute trim(RPM, V_bat)
    gyro, accel, RPM)        + Kp × gyro.z
@@ -41,7 +41,7 @@ _THRESHOLD  = math.radians(1.0)   # [rad/s]
 
 def test_lua_yaw_trim(torque_armed_lua):
     """
-    Yaw rate regulated by rawes.lua (SCR_USER7=2) running inside ArduPilot SITL.
+    Yaw rate regulated by rawes.lua (SCR_USER6=2) running inside ArduPilot SITL.
 
     The Lua script reads motor RPM (via SITL JSON → RPM1_TYPE=10), computes
     the equilibrium throttle feedforward, adds a proportional yaw rate

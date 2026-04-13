@@ -20,10 +20,19 @@ Usage
 """
 
 import logging
+import os
+import sys
 import threading
 import time
 
 from pymavlink import mavutil
+
+# sim_time lives in simulation/ — add it to sys.path if needed (e.g. when
+# gcs.py is imported from a test subdirectory before the caller has done so).
+_SIM_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SIM_DIR not in sys.path:
+    sys.path.insert(0, _SIM_DIR)
+from sim_time import wall_s, sim_sleep, record_sim_step
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +83,36 @@ class RawesGCS:
         self._target_component = 1
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
+        # Speed estimator tracking state — updated by _track_msg_timing()
+        self._last_boot_ms:   float | None = None
+        self._last_boot_wall: float | None = None
+
+    # ------------------------------------------------------------------
+    # Speed estimation from MAVLink message timing
+    # ------------------------------------------------------------------
+
+    def _track_msg_timing(self, msg) -> None:
+        """Update the adaptive speed estimator from a timestamped MAVLink message.
+
+        Any message that carries time_boot_ms (e.g. ATTITUDE, LOCAL_POSITION_NED)
+        lets us compute: sim_dt = delta_time_boot_ms / 1000, wall_dt = elapsed
+        wall-clock.  This is the GCS-side equivalent of the mediator's
+        recv_servos() click timing — both feed record_sim_step() so wall_s()
+        and sim_sleep() automatically reflect the actual simulation speed.
+
+        HEARTBEAT does not carry time_boot_ms and is silently skipped.
+        """
+        boot_ms = getattr(msg, "time_boot_ms", None)
+        if boot_ms is None or boot_ms == 0:
+            return
+        now = time.monotonic()
+        if self._last_boot_ms is not None and self._last_boot_wall is not None:
+            sim_dt  = (boot_ms - self._last_boot_ms) / 1000.0
+            wall_dt = now - self._last_boot_wall
+            if sim_dt > 0 and wall_dt > 0:
+                record_sim_step(wall_dt, sim_dt)
+        self._last_boot_ms   = boot_ms
+        self._last_boot_wall = now
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -99,7 +138,7 @@ class RawesGCS:
                     return
             except Exception as exc:
                 log.debug("Connect attempt failed: %s", exc)
-                time.sleep(0.5)
+                sim_sleep(0.5)
         raise TimeoutError(
             f"Could not connect to vehicle at {self._address!r} within {timeout:.0f}s"
         )
@@ -360,18 +399,23 @@ class RawesGCS:
         deadline = time.monotonic() + timeout
         t_last_override = time.monotonic()
         t_last_arm_send = time.monotonic()
+        _poll = wall_s(0.5)   # RC refresh interval and recv timeout — scales with speedup
         while time.monotonic() < deadline:
-            # Refresh RC override every 0.5 s (ArduPilot expires it after ~1 s)
-            if rc_override and (time.monotonic() - t_last_override) >= 0.5:
+            # Refresh RC override every wall_s(0.5) seconds.
+            # ArduPilot's RC-override expiry is ~1 sim-second; refreshing at half
+            # that nominal rate keeps us safe at any speedup.
+            if rc_override and (time.monotonic() - t_last_override) >= _poll:
                 self.send_rc_override(rc_override)
                 t_last_override = time.monotonic()
+                _poll = wall_s(0.5)   # re-read in case estimator updated
 
             msg = self._mav.recv_match(
-                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
-                blocking=True, timeout=0.5,
+                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
+                blocking=True, timeout=max(_poll, 0.005),
             )
             if msg is None:
                 continue
+            self._track_msg_timing(msg)   # update speed estimator
 
             if msg.get_type() == "STATUSTEXT":
                 log.warning("STATUSTEXT during arm: %s",
@@ -391,9 +435,9 @@ class RawesGCS:
                         # pre-arm check failures, TEMPORARILY_REJECTED (=1) for busy.
                         # Sleep 1 s then resend; do NOT raise.
                         log.info(
-                            "Arm rejected (result=%d) — retrying in 1 s", msg.result
+                            "Arm rejected (result=%d) — retrying", msg.result
                         )
-                        time.sleep(1.0)
+                        sim_sleep(1.0)
                         self._mav.mav.command_long_send(
                             self._target_system,
                             self._target_component,
@@ -451,19 +495,22 @@ class RawesGCS:
             0, 0, 0, 0, 0,
         )
         deadline = time.monotonic() + timeout
+        _poll = wall_s(0.5)
         while time.monotonic() < deadline:
-            # Refresh RC override every 0.5 s
-            if rc_override and (time.monotonic() - t_last_override) >= 0.5:
+            # Refresh RC override at wall_s(0.5) intervals (see arm() for rationale)
+            if rc_override and (time.monotonic() - t_last_override) >= _poll:
                 self.send_rc_override(rc_override)
                 t_last_override = time.monotonic()
+                _poll = wall_s(0.5)
 
             msg = self._mav.recv_match(
-                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
+                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
                 blocking=True,
-                timeout=0.5,
+                timeout=max(_poll, 0.005),
             )
             if msg is None:
                 continue
+            self._track_msg_timing(msg)
             t = msg.get_type()
             if t == "HEARTBEAT":
                 if msg.custom_mode == mode_id:
@@ -478,10 +525,10 @@ class RawesGCS:
                         # Transient rejection (e.g. EKF not yet providing position).
                         # Retry after 1 s.
                         log.debug(
-                            "Mode %d rejected (result=%d) — retrying in 1 s",
+                            "Mode %d rejected (result=%d) — retrying",
                             mode_id, msg.result,
                         )
-                        time.sleep(1.0)
+                        sim_sleep(1.0)
                         self._mav.mav.command_long_send(
                             self._target_system,
                             self._target_component,

@@ -24,7 +24,7 @@ flowchart TB
 
     subgraph PX["Pixhawk 6C (in air)"]
         direction TB
-        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER7: 1=flight 50 Hz, 2=yaw 100 Hz, 3=both<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim and correction · Ch1/Ch2 + Ch9 overrides"]
+        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 1=flight 50 Hz, 2=yaw 100 Hz, 3=both<BR/>4=landing 50 Hz, 5=pumping 50 Hz<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim · VZ collective (modes 4,5) · Ch1/Ch2/Ch3+Ch9 overrides"]
         ACRO["<b>ACRO_Heli</b>  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
         LUA --> ACRO
     end
@@ -291,7 +291,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 
 ## 4. Pixhawk Lua Scripts
 
-### 4.1 rawes.lua -- Flight Subsystem (SCR_USER7=1 or 3)
+### 4.1 rawes.lua -- Flight Subsystem (SCR_USER6=1 or 3)
 
 **SITL Validation Status:**
 
@@ -309,9 +309,10 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 | RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
 | RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
 | RAWES_ANCHOR_D | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
-| RAWES_MAX_CYC_DELTA | SCR_USER6 | 30 | Max cyclic PWM change per 20 ms step. 30 PWM/step = 1500 PWM/s ~= 0.67 s to traverse full stick. 0 = disabled. |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=flight, 2=yaw, 3=both, 4=landing, 5=pumping. |
 
-SCR_USER7..8 are reserved (future: reel-in tilt angle, gain scheduling).
+Cyclic output rate limiter is hardcoded at 30 PWM/step (~0.67 s full-stick traverse).
+No further SCR_USER params are available on hardware (firmware exposes only SCR_USER1..6).
 
 Set before flight via MAVLink parameter set or .parm file. No firmware recompilation needed.
 
@@ -336,7 +337,46 @@ If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 
 > **Sim:** The script runs unchanged inside the ArduPilot SITL Docker container. `mediator.py` provides physics via the SITL UDP JSON protocol. `test_lua_flight_rc_overrides` (stack) validates equilibrium capture at t~0.5 s and cyclic RC override output. `test_lua_flight_logic.py` (31 unit tests) covers Rodrigues rotation, orbit tracking, slerp, and cyclic projection independently of SITL.
 
-### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER7=2 or 3)
+### 4.1.1 rawes.lua -- Landing Mode (SCR_USER6=4)
+
+**Division of labour:**
+- Lua (50 Hz): cyclic orbit tracking + VZ collective controller + final_drop detection
+- Mediator: LandingPlanner runs the winch (reel-in). No RC override on Ch3 from ground.
+
+**Algorithm:**
+1. Gates on `ahrs:healthy()` (GPS position fusion required). Until healthy, returns immediately.
+2. On first healthy call: captures `_bz_eq0` (equilibrium body_z) and `_tdir0` (tether direction). Sends "RAWES land: captured" STATUSTEXT.
+3. Altitude estimate: `alt_est = anch.z - hub_ned.z` (EKF-frame). Independent of horizontal EKF origin offset because `vel0[2]=0` during kinematic keeps EKF origin Z aligned with launch altitude.
+4. Collective: `col_cmd = COL_CRUISE_RAD + KP_VZ * (vz_actual - VZ_LAND_SP)` where `VZ_LAND_SP=0.5 m/s` (positive = descending in NED).
+5. Final drop: when `alt_est <= LAND_MIN_TETHER_M=2.0 m`, sets collective=0, sends "RAWES land: final_drop" STATUSTEXT.
+
+**GPS / Lua capture timing:** GPS fuses at t~80 s from mediator start (15 s after kinematic exit at t=65 s). Lua captures 2 s later (~t=82 s). With `internal_controller=False`, the hub is under ArduPilot ACRO with no Ch3 override during the ~17 s gap (kinematic exit t=65 s to Lua capture t=82 s). Hub survival during this gap depends on ArduPilot ACRO trim; this is an open design problem.
+
+**SCR_USER5 (RAWES_ANCHOR_D):** Set to `-pos0[2]` (altitude of hub above EKF origin at kinematic exit) so the Lua altitude estimate matches the physics coordinate. With `vel0[2]=0`, `EKF_ORIGIN.z = pos0[2]`, so `SCR_USER5 = -pos0[2] = physics altitude`.
+
+> **Sim fixture:** `acro_armed_landing_lua` in `conftest.py`. `internal_controller=False`. Hub at xi=80 deg (pos0=[0, 3.47, -19.70], tether_rest_length=20 m). Validates: "RAWES land: captured", "RAWES land: final_drop", floor reached (alt<=2.5 m), tension < 496 N. Stack test: `test_landing_stack.py::test_landing_lua`.
+
+### 4.1.2 rawes.lua -- Pumping Mode (SCR_USER6=5)
+
+**Division of labour:**
+- Lua (50 Hz): cyclic orbit tracking + per-phase body_z slerp + per-phase collective
+- Ground planner (mediator): DeschutterPlanner owns phase timing and winch commands
+- Synchronisation: Lua detects tether paying-out/reeling-in from tether length change. No separate communication channel needed.
+
+**Algorithm:**
+1. Gates on `ahrs:healthy()`. Until healthy, returns immediately.
+2. On first healthy call: captures `_bz_eq0` and `_tdir0`. Sets `_pump_bz_ri` (reel-in body_z at xi=80 deg from wind). Sets `_pump_tlen_ref = tlen` (current tether length). Sends "RAWES pump: bz_ri=..." STATUSTEXT. Starts in "hold" phase.
+3. Phase state machine (tether-length driven):
+   - **hold**: Tracks minimum tlen (follows hub inward to orbit equilibrium after kinematic exit). Transitions to reel_out when `tlen > min_tlen_seen + PUMP_LEN_THRESH`. Sends "RAWES pump: reel_out" STATUSTEXT.
+   - **reel_out**: Tracks peak tlen. Transitions to transition when `tlen < peak - PUMP_LEN_THRESH`.
+   - **transition**: Time-based (T_TRANSITION seconds). Sends "RAWES pump: transition". Transitions to reel_in.
+   - **reel_in**: Tracks trough tlen. Transitions to reel_out when `tlen > trough + PUMP_LEN_THRESH`.
+4. PUMP_LEN_THRESH=0.05 m. Per-iteration Dtlen (~0.0024 m at 0.12 m/s over 20 ms) is far below the threshold; only cumulative change from phase reference correctly detects motion.
+5. Hold phase uses minimum-tracking (not fixed-at-capture): Lua may capture during or just after kinematic when tlen is at launch-phase value; hub then moves inward to orbit equilibrium (smaller tlen). The minimum follows, so reel_out detection fires correctly when the winch starts paying out from equilibrium.
+
+> **Sim fixture:** `acro_armed_pumping_lua` in `conftest.py`. `internal_controller=True`. DeschutterPlanner trajectory (t_hold_s=10 s, then reel_out starts). Validates: "RAWES pump: reel_out" STATUSTEXT fires. Stack test: `test_pumping_cycle.py::test_pumping_cycle_lua`.
+
+### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2 or 3)
 
 The counter-torque script is already validated (15/15 tests pass). Full documentation in
 simulation/torque/README.md. Summary:
@@ -366,7 +406,7 @@ of the Lua trim.
 |---|---|---|---|
 | Ch1 -- roll rate | rawes.lua | 50 Hz | body_z error (roll) -> ATC_RAT_RLL PID -> swashplate |
 | Ch2 -- pitch rate | rawes.lua | 50 Hz | body_z error (pitch) -> ATC_RAT_PIT PID -> swashplate |
-| Ch3 -- collective | ground PI via MAVLink | ~10 Hz | Normalized thrust [0..1] from load cell -> Ch3 RC override |
+| Ch3 -- collective | ground PI via MAVLink (modes 1-3) OR rawes.lua (modes 4-5) | ~10 Hz / 50 Hz | Modes 1-3: normalized thrust [0..1] from load cell -> Ch3 RC override. Modes 4 (landing) and 5 (pumping): Lua owns Ch3 entirely -- VZ descent-rate controller or per-phase collective. No ground RC override on Ch3 in modes 4/5. |
 | Ch4 -- yaw rate | rawes.lua | 100 Hz | Torque trim + correction -> ATC_RAT_YAW -> GB4008 |
 
 ### 4.4 Simulation Mapping
@@ -1019,24 +1059,33 @@ Parameters that **do NOT exist** in this build (4.8.0-dev heli):
 | delAngBiasLearned=true (yaw-only stub motion) | **~37-42 s** |
 | GPS position fusion starts | **~41 s** |
 
-**Real RAWES mediator (constant-velocity kinematic, EK3_SRC1_YAW=1):**
+**Real RAWES mediator (kinematic_vel_ramp_s=15, startup_damp_seconds=65, EK3_SRC1_YAW=1):**
 
-| Event | Time from SITL start |
+Empirically measured from passing stack tests (acro_armed_lua, test_lua_flight_rc_overrides):
+
+| Event | Time from mediator start |
 |---|---|
 | EKF3 tilt alignment | ~4-5 s |
-| Compass yaw alignment (immediate after tilt) | ~5-6 s |
+| Compass yaw alignment | ~5-6 s |
 | GPS detected | ~9 s |
-| gpsGoodToAlign=true | ~19-20 s |
-| delAngBiasLearned=true | **~29-33 s** (faster than stub) |
-| GPS position fusion ("EKF3 is using GPS") | **~31-33 s** |
+| GPS origin set ("EKF3 IMU0 origin set") | **~14-25 s** |
+| Kinematic exit (hub transitions to free flight) | **65 s** |
+| GPS position fusion ("EKF3 IMU0 is using GPS") | **~80 s** (~15 s after kinematic exit) |
+| Lua capture ("RAWES flight: captured" / "RAWES land: captured") | **~82 s** (~2 s after GPS fusion) |
 
-With EK3_SRC1_YAW=1 (compass) and constant body orientation (R=_R0 locked):
-- Compass heading is constant -> P[12] converges in ~1 s after tilt align
-- P[10,11] converge passively in ~28 s -> delAngBiasLearned at ~33 s
-- GPS fuses at ~33 s (hub still in kinematic = stable) -> SUCCESS
+GPS fusion fires ~15 s after kinematic exit, NOT during kinematic. The velocity taper
+(kinematic_vel_ramp_s=15: vel ramps to 0 in the last 15 s of kinematic) causes the EKF
+predicted position to converge toward GPS position near kinematic exit, enabling fusion.
 
-**Stack tests must set STARTUP_DAMP_S = 45 s** so GPS fusion (~33 s) occurs during the stable
-kinematic phase. The binding gate is delAngBiasLearned.
+**CRITICAL:** Do NOT override kinematic_vel_ramp_s=0 in Lua fixtures. With constant
+velocity (vel_ramp=0), the EKF predicted position drifts monotonically away from GPS
+position -- innovations exceed the gate and GPS is rejected for the entire test duration.
+
+**Stack tests:** startup_damp_seconds=65 s (current default) is correct. GPS fuses ~15 s
+after kinematic exit, not during kinematic. For Lua modes (SCR_USER6=4/5), this means Lua
+captures at t~82 s. With internal_controller=True (pumping fixture), the hub orbits stably
+during the ~17 s gap and Lua can capture cleanly. With internal_controller=False (landing
+fixture), the hub is uncontrolled for ~17 s -- this is an open design problem.
 
 Required param set for GPS position fusion in real stack tests:
 ```
@@ -1119,7 +1168,7 @@ SCR_USER5 = -home_z_enu (negate).
 
 | File                                         | Description                                                                   |
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER7: 0=none, 1=flight, 2=yaw, 3=both)          |
+| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=flight, 2=yaw, 3=both, 4=landing, 5=pumping) |
 | simulation/torque/scripts/lua_defaults.parm  | SITL param overrides for Lua tests                                            |
 | simulation/torque/README.md                  | Full counter-torque documentation and test results                            |
 | simulation/controller.py                     | orbit_tracked_body_z_eq(), compute_swashplate_from_state(), TensionController |

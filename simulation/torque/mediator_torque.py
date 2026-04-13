@@ -384,16 +384,22 @@ def run(
 
                 if lua_mode:
                     # Lua script is the intended controller via the tail channel.
-                    # Safety fallback: if Ch9 is at default/zero (Lua hasn't written
-                    # yet or hasn't started), use adaptive trim to keep the hub stable.
-                    # This prevents extreme gyro values (hub spinning freely) from
-                    # triggering ArduPilot's SIGFPE when scripting is enabled.
+                    # Safety fallback: if Ch9 is at default/zero or at STARTUP_PWM
+                    # (Lua hasn't written a real trim yet), use adaptive trim to keep
+                    # the hub stable.  This prevents extreme gyro values (hub spinning
+                    # freely) from triggering ArduPilot's SIGFPE when scripting is
+                    # enabled.
+                    #
+                    # STARTUP_PWM=1050 in rawes.lua maps to raw_throttle=0.05 exactly.
+                    # Lua outputs STARTUP_PWM when RPM<MIN_RPM (sensor not yet active,
+                    # e.g. RPM1_TYPE set post-boot and driver not yet initialised).
+                    # Using <= 0.05 catches this case; any real computed trim is >> 0.05.
                     raw_throttle = max(0.0, min(1.0, (last_pwm_ch4 - 1000.0) / 1000.0))
-                    if raw_throttle < 0.05:
-                        # Ch9 at default → Lua not yet active, keep hub stable
+                    if raw_throttle <= 0.05:
+                        # Ch9 at default or STARTUP_PWM → Lua not ready, keep hub stable
                         throttle = _m.equilibrium_throttle(current_omega, params)
                     else:
-                        # Lua is writing — use its output directly
+                        # Lua is writing a real trim — use its output directly
                         throttle = raw_throttle
                 else:
                     # Adaptive trim: mediator computes equilibrium feedforward.
@@ -411,6 +417,15 @@ def run(
                 state = _m.step(state, current_omega, throttle, params, DT)
                 psi_send     = math.atan2(math.sin(state.psi), math.cos(state.psi))
                 psi_dot_send = state.psi_dot
+
+            # Safety clamp: cap yaw rate sent to SITL to prevent ArduPilot SIGFPE
+            # from extreme gyro values in the EKF.  Normal hub operation is <5 deg/s;
+            # runaway scenarios can reach 1500 deg/s which overflows ArduPilot's EKF.
+            _MAX_PSI_DOT = math.radians(500.0)   # 500 deg/s hard cap
+            if psi_dot_send > _MAX_PSI_DOT:
+                psi_dot_send = _MAX_PSI_DOT
+            elif psi_dot_send < -_MAX_PSI_DOT:
+                psi_dot_send = -_MAX_PSI_DOT
 
             prev_roll, prev_pitch = roll_send, pitch_send
             t += DT

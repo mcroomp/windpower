@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics        import RigidBodyDynamics
 from sitl_interface  import SITLInterface
 from swashplate      import h3_inverse_mix, collective_to_pitch
-from aero            import SkewedWakeBEM
+from aero            import SkewedWakeBEMJit
 from tether          import TetherModel
 from frames          import build_orb_frame
 from sensor          import make_sensor, SpinSensor
@@ -54,6 +54,7 @@ from planner         import quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 from telemetry_csv import COLUMNS as _TEL_COLUMNS, TelRow as _TelRow
+import sim_time as _stm
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -235,7 +236,7 @@ def run_mediator(args, trajectory=None):
         recv_port=args.sitl_recv_port,
         send_port=args.sitl_send_port,
     )
-    aero   = SkewedWakeBEM.from_definition(rotor)
+    aero   = SkewedWakeBEMJit.from_definition(rotor)
     anchor_ned = np.array(cfg["anchor_ned"], dtype=float)
     tether = TetherModel(
         anchor_ned             = anchor_ned,
@@ -267,6 +268,7 @@ def run_mediator(args, trajectory=None):
     log.info("Python RigidBodyDynamics ready. Starting main loop.")
 
     # -- State ----------------------------------------------------------------
+    t_wall_start    = time.monotonic()   # wall-clock reference for sim time
     t_sim           = 0.0
     step            = 0
     last_log_time   = -LOG_INTERVAL       # ensure immediate first log
@@ -281,6 +283,8 @@ def run_mediator(args, trajectory=None):
     _body_z_eq         = np.zeros(3)   # body_z setpoint (IC path only; zeros in ArduPilot path)
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
+    _tel_note          = ""            # single-frame event marker written to telemetry CSV; cleared after write
+    _prev_phase        = ""            # detect phase changes for tel note
     omega_spin         = _omega_spin_init
     startup_damp_k_ang = float(cfg["startup_damp_k_ang"])
     log.info(
@@ -339,23 +343,27 @@ def run_mediator(args, trajectory=None):
     _swashplate_phase_deg = float(cfg["swashplate_phase_deg"])
     _orbit_tracker: "OrbitTracker | None" = None   # created at free-flight start
 
-    # -- Main loop ------------------------------------------------------------
+    # -- Fast mode ------------------------------------------------------------
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
 
-    try:
-        t_wall_start = time.monotonic()
+    # -- Main loop ------------------------------------------------------------
+    # t_sim is an accumulator (not wall-time derived) so it stays correct at
+    # any speedup.  At 1x with the rate-limiter sleep the step period is
+    # ~DT_TARGET wall-seconds, so the accumulator tracks wall-time closely.
+    # In fast mode the sleep is skipped; the loop runs at max Python speed.
 
+    try:
         while True:
             t_wall_loop = time.monotonic()
-            t_sim = t_wall_loop - t_wall_start
 
             # ----------------------------------------------------------------
-            # Step 1: Receive servo values from SITL (non-blocking)
+            # Step 1: Receive servo values from SITL
+            #   Normal mode : non-blocking (returns None on timeout → reuse last)
+            #   Fast mode   : blocking until SITL replies (1:1 lockstep)
             # ----------------------------------------------------------------
             new_servos = sitl.recv_servos()
             if new_servos is not None:
                 last_servos = new_servos
-            # Use last known servo values if no new packet
             servos = last_servos
 
             # ── Startup kinematic phase ───────────────────────────────────────
@@ -381,13 +389,48 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             esc_norm   = float(np.clip(servos[3], -1.0, 1.0))
 
-            if cfg["internal_controller"] and _damp_alpha == 0.0:
-                # ── STATE packet (Pixhawk → planner) ─────────────────────────
-                # Mirrors standard ArduPilot telemetry streams:
-                #   pos_ned / vel_ned  ← LOCAL_POSITION_NED
-                #   omega_spin         ← ESC_STATUS[RAWES_CTR_ESC].rpm × gear formula
-                # tension_n is local to the winch controller — not in this packet.
-                # t_free is planner-owned — computed locally and passed separately.
+            # ----------------------------------------------------------------
+            # Step 2a: Tether force (pre-computed before the planner call)
+            #
+            # The trajectory planner (TensionPI) needs the CURRENT tether
+            # tension on every step, including the very first free-flight step
+            # right after kinematic exit.  Computing the tether here — using
+            # hub_state from the previous dynamics step, exactly like the
+            # planner itself — ensures tension_n is never stale.
+            #
+            # Without this, the first free-flight call to _trajectory.step()
+            # sees tension_n=0 (left over from the kinematic phase), so
+            # TensionPI warm-starts at collective≈-0.08 rad instead of the
+            # ~-0.20 rad equilibrium.  This causes a large thrust overshoot
+            # that drives the hub to the ground in the first 20 s of reel-out.
+            #
+            # Skipped during kinematic startup: hub position is set by the
+            # kinematic trajectory (which may be outside the tether envelope)
+            # and translation is overridden after dynamics.step() anyway.
+            # ----------------------------------------------------------------
+            if _damp_alpha > 0.0:
+                tether_force  = np.zeros(3)
+                tether_moment = np.zeros(3)
+            else:
+                tether_force, tether_moment = tether.compute(
+                    hub_state["pos"], hub_state["vel"], hub_state["R"])
+                if tether._last_info.get("tension", 0) > 0.8 * tether.BREAK_LOAD_N:
+                    log.warning(
+                        "t=%.1f TETHER TENSION %.0f N is >80%% of break load (%.0f N)!",
+                        t_sim, tether._last_info["tension"], tether.BREAK_LOAD_N,
+                    )
+                # Feed physics outputs into WinchNode; planner reads via get_telemetry().
+                # wind_world is NOT accessible to the planner -- only the anemometer reading is.
+                _winch_node.update_sensors(
+                    tether._last_info.get("tension", 0.0), wind_world)
+                _pc_telemetry = _winch_node.get_telemetry()
+
+            if _damp_alpha == 0.0:
+                # ── Ground-station trajectory planner (always runs in free flight) ──
+                # Runs regardless of internal_controller flag so that ground-station
+                # actuators (winch) are always controlled by the planner.
+                # When internal_controller=True the planner also drives collective and
+                # attitude; when False those come from ArduPilot/Lua RC overrides.
                 _state_pkt = {
                     "pos_ned":    hub_state["pos"],
                     "vel_ned":    hub_state["vel"],
@@ -399,20 +442,23 @@ def run_mediator(args, trajectory=None):
                     tension_n       = _pc_telemetry["tension_n"],
                     tether_length_m = _pc_telemetry["tether_length_m"],
                 )
-                # _traj_cmd: attitude_q, thrust [0..1], winch_speed_ms, phase
 
-                # ── Mode_RAWES inner loops (400 Hz, runs on Pixhawk) ──────────
-
-                # 1. Orbit tracking: create tracker on first free-flight step
-                if _orbit_tracker is None:
-                    _ic_tether_dir0 = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
-                    _orbit_tracker  = OrbitTracker(_bz, _ic_tether_dir0, _body_z_slew_rate)
-
-                # 2. WinchNode (ground station) — apply speed command + safety limit
+                # WinchNode (ground station) — apply speed command + safety limit
                 _winch_node.receive_command(_traj_cmd["winch_speed_ms"], DT_TARGET)
                 tether.rest_length = _winch_node.rest_length
 
-                # 3. Collective from planner.
+            if cfg["internal_controller"] and _damp_alpha == 0.0:
+                # ── Mode_RAWES inner loops (400 Hz, runs on Pixhawk) ──────────
+                # Internal controller: planner also drives collective and attitude.
+                # Used when ArduPilot RC overrides are too slow (pumping cycle).
+
+                # 1. Orbit tracking: create tracker on first free-flight step
+                if _orbit_tracker is None:
+                    _bz = hub_state["R"][:, 2]
+                    _ic_tether_dir0 = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
+                    _orbit_tracker  = OrbitTracker(_bz, _ic_tether_dir0, _body_z_slew_rate)
+
+                # 2. Collective from planner.
                 #    DeschutterPlanner returns "collective_rad" directly — use it
                 #    to avoid normalization/denormalization mismatch when col_min
                 #    differs between reel-out (-0.28) and reel-in (-0.20) phases.
@@ -423,7 +469,7 @@ def run_mediator(args, trajectory=None):
                 else:
                     collective_rad = _col_min_rad + _traj_cmd["thrust"] * (_col_max_rad - _col_min_rad)
 
-                # 4. Attitude: orbit-track tether; rate-limited slerp toward
+                # 3. Attitude: orbit-track tether; rate-limited slerp toward
                 #    attitude_q target when non-identity  (SET_ATTITUDE_TARGET)
                 _aq = _traj_cmd["attitude_q"]
                 _bz_target = (None if quat_is_identity(_aq)
@@ -465,31 +511,9 @@ def run_mediator(args, trajectory=None):
             )
 
             # ----------------------------------------------------------------
-            # Step 4: Tether force (tension-only, Dyneema SK75 1.9 mm)
-            # Skipped during kinematic startup: hub position is set by the
-            # kinematic trajectory (which may be outside the tether envelope)
-            # and translation is overridden after dynamics.step() anyway.
+            # Step 4: Tether force — already computed in Step 2a above.
+            # tether_force / tether_moment are set; WinchNode sensors updated.
             # ----------------------------------------------------------------
-            if _damp_alpha > 0.0:
-                # Kinematic phase — hub position is controlled directly.
-                # Skip tether (launch_pos is ~2 m further from anchor than
-                # rest_length → would generate ~11 kN, well above break load).
-                tether_force  = np.zeros(3)
-                tether_moment = np.zeros(3)
-            else:
-                tether_force, tether_moment = tether.compute(
-                    hub_state["pos"], hub_state["vel"], hub_state["R"])
-                # Warn if tether tension approaches break load
-                if tether._last_info.get("tension", 0) > 0.8 * tether.BREAK_LOAD_N:
-                    log.warning(
-                        "t=%.1f TETHER TENSION %.0f N is >80%% of break load (%.0f N)!",
-                        t_sim, tether._last_info["tension"], tether.BREAK_LOAD_N,
-                    )
-                # Feed physics outputs into WinchNode; planner reads via get_telemetry().
-                # wind_world is NOT accessible to the planner -- only the anemometer reading is.
-                _winch_node.update_sensors(
-                    tether._last_info.get("tension", 0.0), wind_world)
-                _pc_telemetry = _winch_node.get_telemetry()
 
             # Build net force and moments (aero + tether) for dynamics and logging
             F_net     = result.F_world + tether_force
@@ -581,6 +605,7 @@ def run_mediator(args, trajectory=None):
                 # so analysis scripts can compare against the unit-test initial
                 # conditions (steady_state_starting.json, vel ≈ 0).
                 _logged_transition = True
+                _tel_note = "kinematic_exit"
                 _p  = hub_state["pos"]
                 _v  = hub_state["vel"]
                 _bz = hub_state["R"][:, 2]
@@ -631,9 +656,14 @@ def run_mediator(args, trajectory=None):
             if _telemetry_writer is not None:
                 _rpy = sensor_data["rpy"]
                 _ti  = tether._last_info
+                _cur_phase = _traj_cmd.get("phase", "")
+                if _cur_phase and _cur_phase != _prev_phase and not _tel_note:
+                    _tel_note = f"phase_{_cur_phase.replace('-', '_')}_start"
+                _prev_phase = _cur_phase
                 _telemetry_writer.writerow({
                     "t_sim":           t_sim,
-                    "phase":           _traj_cmd.get("phase", ""),
+                    "phase":           _cur_phase,
+                    "note":            _tel_note,
                     "damp_alpha":      _damp_alpha,
                     "pos_x":           hub_state["pos"][0],
                     "pos_y":           hub_state["pos"][1],
@@ -677,6 +707,8 @@ def run_mediator(args, trajectory=None):
                     "rpy_roll":        _rpy[0],
                     "rpy_pitch":       _rpy[1],
                     "rpy_yaw":         _rpy[2],
+                    "orb_yaw_rad":     sensor_data.get("orb_yaw_rad", 0.0),
+                    "v_horiz_ms":      sensor_data.get("v_horiz_ms",  0.0),
                     "servo_s1":        s1,
                     "servo_s2":        s2,
                     "servo_s3":        s3,
@@ -697,6 +729,7 @@ def run_mediator(args, trajectory=None):
                     "r21": float(hub_state["R"][2, 1]),
                     "r22": float(hub_state["R"][2, 2]),
                 })
+                _tel_note = ""  # stamp only on the single event frame
 
             # ----------------------------------------------------------------
             # Step 9: Send physics state to SITL
@@ -749,12 +782,21 @@ def run_mediator(args, trajectory=None):
                     )
 
             # ----------------------------------------------------------------
-            # Timing: sleep remainder of target period
+            # Timing: advance sim-clock; sleep remainder in normal mode;
+            # record total wall-clock time per step for adaptive speed estimate.
             # ----------------------------------------------------------------
+            # t_sim tracks wall-clock elapsed time so fixtures and the kinematic
+            # startup complete in real time regardless of physics loop rate.
+            # In Docker the BEM loop takes ~20ms/step vs 2.5ms target, so the
+            # step accumulator (DT_TARGET per step) would advance sim-time 8x
+            # slower than wall clock and cause fixture timeouts.
+            t_sim   = time.monotonic() - t_wall_start
             elapsed = time.monotonic() - t_wall_loop
-            remaining = DT_TARGET - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
+            if elapsed < DT_TARGET:
+                time.sleep(DT_TARGET - elapsed)
+
+            # Record wall time per physics step for the adaptive speed estimator.
+            _stm.record_sim_step(time.monotonic() - t_wall_loop, DT_TARGET)
 
             step += 1
 

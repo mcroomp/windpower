@@ -56,13 +56,23 @@ class SITLInterface:
     Parameters
     ----------
     recv_port       : int    UDP port to bind for incoming servo data (default 9002)
-    recv_timeout_ms : float  Non-blocking receive timeout in milliseconds
+    recv_timeout_ms : float  Non-blocking receive timeout in milliseconds (normal mode)
+    lockstep        : bool   If True, recv_servos() blocks until ArduPilot replies,
+                             ensuring a 1:1 state→servo exchange.  The simulation
+                             runs as fast as Python and ArduPilot can exchange packets.
+                             Use set_lockstep() to switch modes after bind().
     """
+
+    # In lockstep mode the socket blocks up to this long before giving up.
+    # Long enough that normal operation never trips it; short enough to detect
+    # a crashed SITL within a reasonable time.
+    _LOCKSTEP_TIMEOUT_S: float = 5.0
 
     def __init__(
         self,
         recv_port: int = _SITL_RECV_PORT,
         recv_timeout_ms: float = 5.0,
+        lockstep: bool = False,
         # Legacy parameter — kept so callers that pass send_port= don't break.
         # The send address is now determined dynamically from each incoming packet.
         send_port: int = 9003,
@@ -70,6 +80,7 @@ class SITLInterface:
     ):
         self._recv_port = recv_port
         self._timeout_s = recv_timeout_ms / 1000.0
+        self._lockstep  = lockstep
 
         self._sock: socket.socket | None = None
         self._sitl_addr: tuple[str, int] | None = None   # filled on first recv
@@ -85,8 +96,30 @@ class SITLInterface:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("", self._recv_port))
-        self._sock.settimeout(self._timeout_s)
-        log.info("SITLInterface bound to port %d", self._recv_port)
+        self._sock.settimeout(self._active_timeout())
+        log.info("SITLInterface bound to port %d (lockstep=%s)", self._recv_port, self._lockstep)
+
+    def set_lockstep(self, enabled: bool) -> None:
+        """Switch between lockstep and normal (non-blocking) receive mode.
+
+        In lockstep mode recv_servos() blocks until ArduPilot sends a servo
+        packet, guaranteeing a 1:1 state→servo exchange and allowing the
+        simulation to run at maximum speed.  A 5 s safety timeout still applies
+        so a crashed SITL process is detected promptly.
+
+        In normal mode recv_servos() returns None after recv_timeout_ms so the
+        mediator can proceed with the last known servo values if SITL is slow.
+
+        May be called before or after bind().
+        """
+        self._lockstep = enabled
+        if self._sock is not None:
+            self._sock.settimeout(self._active_timeout())
+        log.info("SITLInterface lockstep=%s", enabled)
+
+    def _active_timeout(self) -> float:
+        """Return the socket timeout to use given the current lockstep setting."""
+        return self._LOCKSTEP_TIMEOUT_S if self._lockstep else self._timeout_s
 
     def close(self) -> None:
         if self._sock is not None:

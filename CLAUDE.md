@@ -4,9 +4,9 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) that can fly in all standard modes: takeoff, stabilized flight, autonomous flight, landing. This is a long-term, step-by-step effort.
 
-**Current phase:** Phase 3, Milestone 3 — Full stack working. 482 unit + 45 simtests + 15 stack tests passing. SkewedWakeBEM is production aero model. `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 17 stack tests (7 flight + 8 torque + test_arm_minimal + test_stack_integration_smoke). Telemetry unified to `telemetry_csv.py` (TelRow CSV schema, 67 columns, `damp_alpha`, `heartbeat()`). Per-test log dirs in `simulation/logs/{test_name}/`. Next: configure GB4008 (H_TAIL_TYPE=4, ATC_RAT_YAW_*, H_COL2YAW), write `rawes_params.parm`, fix test_pumping_cycle.
+**Current phase:** Phase 3, Milestone 3 — Full stack working. 482 unit + 45 simtests + 14 stack tests passing. SkewedWakeBEM is production aero model (JIT via SkewedWakeBEMJit in mediator). `rawes.lua` orbit-tracking controller validated in SITL. H_SW_PHANG=0 and H_SW_TYPE=3 confirmed. Test suite rationalized: 14 stack tests (6 flight + 6 torque + test_arm_minimal + test_stack_integration_smoke). Telemetry unified to `telemetry_csv.py` (TelRow CSV schema, 67 columns, `damp_alpha`, `heartbeat()`). Per-test log dirs in `simulation/logs/{test_name}/`. rawes.lua extended with SCR_USER6=4 (landing) and SCR_USER6=5 (pumping) modes. Next: get test_pumping_cycle_lua and test_landing_lua passing; then configure GB4008, write `rawes_params.parm`.
 
-**Current stack test status:** 15 PASS, 1 XFAIL (test_wobble_active — P=0.05 demo gain overcorrects in SITL; placeholder for hardware tuning), 1 SKIPPED (test_pumping_cycle — self-skips when reel-in phase has <5 rows due to kinematic-transition crash), 0 failures. Tests: test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_stationary_gps_fusion, test_wobble, test_fast_vary, test_gust, test_pitch_roll, test_slow_vary, test_startup, test_lua(torque) all PASS.
+**Current stack test status:** 14 PASS, 0 SKIPPED, 0 failures. Tests: test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_wobble, test_gust, test_pitch_roll, test_slow_vary, test_startup, test_lua_yaw_trim, test_yaw_regulation, test_pumping_cycle all PASS. test_pumping_cycle: net_energy=+2098 J, peak_tension=315 N (limit 496 N). test_pumping_cycle_lua and test_landing_lua: in development, not yet passing (GPS timing + Lua capture gap under investigation — see design decisions below).
 
 See **[Phase 3 Plan](#phase-3-plan)** below for the full milestone breakdown.
 
@@ -104,7 +104,10 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 - **`swashplate_pitch_gain_rad`** added to YAML/RotorDefinition — physically measurable via flap deflection angle × tau at full stick deflection.
 - **Visualizer** (`viz3d/visualize_3d.py`): create-once actor pattern (`user_matrix` for rotor/hub/arrows, `.points` in-place for tether/trail), wall-clock while loop, linear interpolation between telemetry frames, net energy HUD. Swashplate inset (bottom-right) shows the schematic oriented by the actual hub rotation matrix (`R_hub → ENU`), so the diagram always matches the orientation seen in the main view. Inset camera is non-interactive and tracks the main camera direction every loop iteration. `--no-inset` disables the inset renderer.
 - **Canonical telemetry schema** (`simulation/telemetry_csv.py`): single source of truth for the flat CSV schema. `COLUMNS` (67 columns) + `TelRow` dataclass + `write_csv`/`read_csv`. Key columns: `t_sim, phase, damp_alpha, pos_{x,y,z}, vel_{x,y,z}, omega_{x,y,z}, accel_{x,y,z}, omega_rotor, tether_*, collective_rad, tilt_lon, tilt_lat, aero_*, F_{x,y,z}, M_{x,y,z}, rpy_{roll,pitch,yaw}, servo_{s1,s2,s3,esc}, q_bearing_nm, q_motor_nm, throttle, wind_{x,y,z}, bz_eq_{x,y,z}, r{00..22}`. `damp_alpha` is the startup damping blend [0..1]; 0.0 during free flight — used by `analyse_run.py` to split damp vs free-flight phases. `TelRow.heartbeat(remaining_s)` generates the one-line ASCII status string emitted by the mediator's 1 Hz log. Simtests still use `make_tel()` from `simulation/tests/unit/tel.py` to build the canonical JSON dict; `TelRow.from_tel()` converts it to CSV rows. `viz3d/telemetry.py` JSONSource reads the JSON schema (`collective_rad` → `swash_collective`, `tilt_lon/lat` → `swash_tilt_*`).
-- **`rawes.lua` unified Lua controller** — single script replaces `rawes.lua` + `rawes.lua`; SCR_USER7 selects mode (0=none, 1=flight, 2=yaw, 3=both). Flight mode SITL-validated via `test_lua_flight_rc_overrides`. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
+- **`rawes.lua` unified Lua controller** — SCR_USER6 selects mode: 0=none, 1=flight (cyclic orbit-tracking, 50 Hz), 2=yaw (counter-torque trim, 100 Hz), 3=both, **4=landing** (cyclic + VZ descent-rate collective + auto final_drop, 50 Hz), **5=pumping** (De Schutter cyclic + per-phase collective, 50 Hz). Flight mode SITL-validated via `test_lua_flight_rc_overrides`. Modes 4 and 5 own Ch3 (collective) entirely — no ground-planner RC override on Ch3 in these modes. See [Lua API Constraints](#lua-api-constraints-this-ardupilot-build) below.
+- **GPS fusion timing (empirical, stack tests)** — With the default kinematic (65 s, `kinematic_vel_ramp_s=15`), GPS origin is set at t≈14–25 s from mediator start; GPS position fusion ("EKF3 IMU0 is using GPS") fires at **t≈80 s** — approximately 15 s after kinematic exit at t=65 s. The velocity taper (`vel_ramp=15 s`) causes EKF predicted position to converge toward GPS position near kinematic exit, enabling fusion. Setting `kinematic_vel_ramp_s=0` (constant vel0) BREAKS GPS fusion: the EKF predicted position drifts away from GPS monotonically, innovations exceed the gate and GPS is rejected for the entire test. Never override `kinematic_vel_ramp_s` to 0 in Lua stack test fixtures.
+- **rawes.lua SCR_USER6=4 (landing) algorithm** — On `ahrs:healthy()` (GPS fused): captures body_z and tether direction, starts VZ descent-rate collective controller (`col_cmd = COL_CRUISE_RAD + KP_VZ * (vz_actual - VZ_LAND_SP)`, VZ_LAND_SP=0.5 m/s down). Monitors altitude via `anch.z - hub_ned.z` (EKF-frame, independent of horizontal origin). Triggers `final_drop` (collective→0) when altitude ≤ LAND_MIN_TETHER_M=2.0 m. Fixture: `acro_armed_landing_lua` in `conftest.py` (internal_controller=False). Known issue: GPS fuses ~15 s after kinematic exit; during that gap Lua is not yet active and the hub is under ArduPilot ACRO with no Ch3 override — survival depends on ArduPilot trim. Under investigation.
+- **rawes.lua SCR_USER6=5 (pumping) algorithm** — On `ahrs:healthy()`: enters hold phase, monitors tether length for winch motion without a separate communication channel. Phase state machine: hold→reel_out→transition→reel_in→reel_out. Detection uses cumulative tether length change relative to a running reference (`_pump_tlen_ref`): hold tracks the **minimum** tlen seen since capture (so the reference follows the hub inward to orbit equilibrium after kinematic exit, not the larger capture-time value); reel_out tracks the **peak**; reel_in tracks the **trough**. Phase threshold `PUMP_LEN_THRESH=0.05 m`. Per-iteration comparison was wrong (Δtlen≈0.0024 m per 20 ms << threshold); cumulative tracking is required.
 - **`SkewedWakeBEMJit`** (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in replacement for `SkewedWakeBEM`; two kernels (`_jit_vi0`, `_jit_strip_loop`); 18-test equivalence suite (`test_skewed_wake_jit.py`, atol=1e-10). Select via `create_aero(model="jit")`.
 - **`aero_skewed_wake.py` rewritten for clarity** — non-JIT reference version; explicit double for-loop, `np.cross()`, `_prandtl_F()` helper; all intermediate numpy broadcasting and dead code removed. Full class + method docstrings added. Only purpose is human-readable reference and JIT equivalence validation.
 - **De Schutter 2018 aero audit** — `DeSchutterAero` compared to paper equations 25–31. Two additions: (1) **β side-slip** (`last_sideslip_mean_deg`) as validity diagnostic (Eq. 27-28); β does NOT enter force formulas. (2) **C_{D,T}=0.021** structural parasitic drag (Eq. 29, 31) added to blade CD; derived from cable geometry in Table I. Bug fixed: induction bootstrap floor `max(T,0.01)` replaced with `abs(T)` — floor caused phantom 200 N thrust at zero collective. Validation doc at `simulation/aero/deschutter.md`.
@@ -126,7 +129,7 @@ The ArduPilot integration sits at level A (trajectory planning) and will delegat
 ### Lua Flight Controller
 | File | When to read |
 |------|-------------|
-| [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER7: 0=none, 1=flight cyclic, 2=yaw trim, 3=both) |
+| [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER6: 0=none, 1=flight cyclic, 2=yaw trim, 3=both, 4=landing, 5=pumping) |
 | [simulation/scripts/calibrate.py](simulation/scripts/calibrate.py) | Hardware calibration tool — servo/motor/ESC/script management over MAVLink. See [hardware/calibrate.md](hardware/calibrate.md) for full CLI reference. |
 
 ---
@@ -225,7 +228,7 @@ simulation/
         ├── conftest.py              acro_armed + acro_armed_lua fixtures (full stack lifecycle)
         ├── test_guided_flight.py    60 s ACRO hold with tether-alignment RC controller
         ├── test_pumping_cycle.py    Pumping cycle stack test
-        ├── test_lua_flight.py       ★ rawes.lua flight-mode (SCR_USER7=1) orbit-tracking validation
+        ├── test_lua_flight.py       ★ rawes.lua flight-mode (SCR_USER6=1) orbit-tracking validation
         └── test_setup.py            Verifies setup reaches armed ACRO
 ```
 
@@ -270,6 +273,12 @@ All defined in `frames.py`. Import from there — do not duplicate.
 **No silent defaults for physics parameters.** Do not use `dict.get("key", fallback)` or `x = x or default` for any value that is a physical constant, control gain, mechanical limit, or rotor/airfoil property. If a required config key is absent, raise `KeyError` or `ValueError` explicitly so the gap is visible at startup, not hidden at runtime. The only acceptable defaults in function signatures are structural/optional flags (e.g. `wind_world=None`, `spin_angle=0.0`). Convenience defaults like `_PITCH_GAIN_RAD_DEFAULT = 0.3` are the exact anti-pattern to avoid — they make it impossible to audit the effective configuration and silently produce wrong physics when a YAML field is missing.
 
 **Do NOT consult git history (`git log`, `git diff`, `git show`, `git blame`) when diagnosing problems unless you first ask the user whether that would make sense.** Diagnose from the current code and runtime logs instead. Git history is rarely the right tool for debugging and adds noise to the investigation.
+
+**Stack tests must not violate physics to pass.** Never add artificial mechanisms (lock_orientation, inflated angular damping, truth-state controller bypassing ArduPilot servos) just to stabilise a test. If a test only passes with such hacks, the underlying physics or control design is wrong and must be fixed. Acceptable parameters: lock_orientation=False (hub orientation evolves freely), internal_controller=False (ArduPilot servos drive the physics), base_k_ang=50 N·m·s/rad (physical bearing/air damping). Exceptions where internal_controller=True is correct: (1) Lua fixture — Lua only controls cyclic; collective source is a separate concern. (2) Pumping cycle fixture — ArduPilot RC overrides at 10 Hz cannot stabilize the hub after the kinematic-exit tether jolt; the internal 400 Hz controller uses the same physical equations as the real Pixhawk (which also runs at 400 Hz) and is MORE representative of hardware than the MAVLink RC override interface. test_acro_hold separately validates ArduPilot ACRO cyclic control with internal_controller=False.
+
+**CRITICAL — SITL must run as close to hardware as possible.** Do NOT use `internal_controller=True` or other physics overrides to make a test pass when the hardware equivalent would not have that override. If something does not work in SITL the same way it would on hardware, the root cause must be found and fixed — do NOT paper over it with simulation-only hacks. If you believe something cannot work in SITL without an override, confirm with the user before making any change, and work together to find a hardware-equivalent workaround.
+
+**CRITICAL — GPS/EKF glitches mean the physics inputs are wrong; fix the physics, do not disable fusion.** When ArduPilot reports "GPS Glitch or Compass error", "EKF variance: over thresholds", or "EKF3 IMU0 emergency yaw reset" in SITL, the root cause is always that the simulation is feeding incoherent data to ArduPilot — typically a mismatch between the attitude/yaw sent as `rpy`, the velocity sent as `vel_ned`, and the angular rates sent as `gyro_body`. Do NOT work around this by disabling EKF fusion sources (e.g. `EK3_SRC1_YAW=0`) or by reducing EKF thresholds. Instead, find the physics inconsistency and fix it. The telemetry columns `orb_yaw_rad` and `v_horiz_ms` (logged by `sensor.py`) show the gap between the hub's actual orientation yaw and the velocity-heading yaw sent to ArduPilot — a large gap there is the exact cause of GPS/compass-inconsistency failsafes.
 
 **⚠️ NEVER use non-ASCII characters in Python `print()` output** (no `─`, `✓`, `✗`, `σ`, `→`, `−`, `∫`, `•`, etc.). Python scripts run on Windows with cp1252 encoding by default; non-ASCII chars cause `UnicodeEncodeError` and crash analysis scripts. Use only 7-bit ASCII: `-` for lines, `[PASS]`/`[FAIL]` for status, `sd=` for standard deviation, `-` for minus, etc.
 
@@ -340,12 +349,11 @@ bash sim.sh test-stack -v -k torque_armed    # all counter-torque tests
 ```
 
 **Output is filtered by default** (summary mode: PASSED/FAILED lines + failure details only).
-Full raw output always saved to `simulation/logs/pytest_last_run.log`. After the run:
+After the run, a small JSON summary is written to `simulation/logs/suite_summary.json`:
 ```
-[LOGS] summary: C:\repos\windpower\simulation\logs\pytest_last_run_summary.json
-[LOGS] full:    C:\repos\windpower\simulation\logs\pytest_last_run.log
+[LOGS] summary: C:\repos\windpower\simulation\logs\suite_summary.json
 ```
-Read `pytest_last_run_summary.json` for pass/fail counts and failed test list. Do NOT re-run.
+Read `suite_summary.json` for pass/fail counts and failed test list. Do NOT re-run.
 
 **CRITICAL: Per-test log directories.** Each stack test writes its own logs exclusively to `simulation/logs/{test_name}/` (e.g., `simulation/logs/test_h_swash_phang/`). No `_last` copies are written to the top-level `logs/`. Contents: `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, **`arducopter.log`**. Always read these per-test logs when diagnosing a failure — **never look at `/tmp/ArduCopter.log` inside the container**, which accumulates across all test sessions and is stale. The per-test `arducopter.log` is truncated before each SITL launch so it contains only that test's SITL output.
 
@@ -398,7 +406,7 @@ bash sim.sh build
 | Python analysis script | `bash sim.sh exec 'python3 /rawes/simulation/...'` |
 | One-off inside container | `bash sim.sh exec 'python3 /rawes/simulation/...'` |
 
-Last run logs: `simulation/logs/` — `pytest_last_run_summary.json` (machine-readable suite summary, read this first), `pytest_last_run.log` (full raw suite output). Per-test physics data in `simulation/logs/{test_name}/` — `telemetry.csv`, `mediator.log`, `sitl.log`, `gcs.log`, `arducopter.log`.
+Suite summary: `simulation/logs/suite_summary.json` (pass/fail counts + failed test list, read this first). Per-test logs in `simulation/logs/{test_name}/` — `telemetry.csv`, `mediator.log`, `sitl.log`, `gcs.log`, `arducopter.log`.
 
 **Path note:** `sim.sh` (repo root) converts paths automatically for any drive. Do not hardcode `/mnt/X/...` WSL paths — use `sim.sh` instead.
 
@@ -453,12 +461,15 @@ Four milestones. M1+M2 complete. M3 in progress (stack test passing with SkewedW
 - **Gate:** 265 unit tests pass ✓
 
 ### M3 — ArduPilot Configuration & Pumping Cycle Stack Test (in progress)
-- [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (reel-out 199 N, reel-in 86 N, net energy +1396 J)
+- [x] Run test_pumping_cycle — PASSED with SkewedWakeBEM (net_energy=+2098 J, peak_tension=315 N); fixed TensionPI stale-tension bug (tension_n read from state dict instead of kwargs → PI saw 0 N → drove collective to 0 → orbital instability)
 - [x] Switch production aero to SkewedWakeBEM (per-blade BEM + Prandtl + Coleman); 487 fast unit + 38 simtests passing
 - [x] Design `ModeRAWES` firmware architecture — documented in `system/stack.md`
-- [x] Write and validate orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection); unified into `rawes.lua` (SCR_USER7 mode selection)
+- [x] Write and validate orbit-tracking controller in SITL — `test_lua_flight_rc_overrides` PASSES; equilibrium captured at t≈0.5 s; 31 unit tests for Lua math (Rodrigues, orbit tracking, slerp, cyclic projection); unified into `rawes.lua` (SCR_USER6 mode selection)
 - [x] Confirm H_SW_TYPE=3 (H3-120) — `test_h_swash_phang` PASSES; default is already H3_120 (value 3, not 1)
 - [x] Determine H_PHANG — `test_h_swash_phang` empirical step-cyclic test: H_SW_PHANG=0 confirmed; cross_ch1=1.5%, cross_ch2=19.7%; ArduPilot H3_120 +90° roll advance angle already aligns with RAWES servo layout (S1=0°/East, S2=120°, S3=240°)
+- [x] Add SCR_USER6=4 (landing) and SCR_USER6=5 (pumping) modes to rawes.lua; fix PUMP_LEN_THRESH cumulative tracking; fix hold-phase minimum tlen tracking
+- [ ] Get test_pumping_cycle_lua passing — GPS timing fix (revert kinematic_vel_ramp_s=0.0); GPS fuses at t≈80s (~15s after kinematic exit)
+- [ ] Get test_landing_lua passing — bridge 15s gap between kinematic exit (t=65s) and Lua capture (t≈80s) with internal_controller=False
 - [ ] Configure GB4008: H_TAIL_TYPE=4 (DDFP), tune ATC_RAT_YAW_* and H_COL2YAW feedforward
 - [ ] Write `rawes_params.parm` (full parameter file for Pixhawk 6C)
 - **Gate:** rawes_params.parm exists + H_PHANG determined

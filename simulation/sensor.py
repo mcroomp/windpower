@@ -189,30 +189,44 @@ class PhysicalSensor:
         R_orb = build_orb_frame(disk_normal)
         rpy   = _rotation_matrix_to_euler_zyx(R_orb)
 
-        # Replace orientation-derived yaw with velocity heading for EKF GPS
-        # consistency.  Cache the velocity-derived yaw and use it as fallback
-        # when v_horiz < threshold — prevents a compass reading jump when the
-        # hub decelerates through zero (physics unfreeze starts from vel=0).
+        # Replace orientation-derived yaw with a coherent velocity-or-attitude
+        # heading for EKF GPS consistency.  Two regimes, both rate-limited:
         #
-        # Rate-limit yaw updates: when the tether activates and the hub
+        #   v_horiz > 0.05 m/s  ->  GPS velocity heading (atan2 vel_ned)
+        #   v_horiz <= 0.05 m/s ->  orbital frame yaw from R_orb
+        #
+        # Tracking the orbital frame yaw at low speed (rather than freezing the
+        # last cached value) prevents EKF yaw divergence during long kinematic
+        # hold phases where ACRO/Lua corrections rotate the hub: a frozen
+        # reported yaw causes the gyro-integrated yaw to drift away from the
+        # attitude yaw → EKF detects compass/GPS inconsistency → emergency yaw
+        # reset.  The orbital frame yaw is already coherent with the gyroscope
+        # because it is derived from R_hub (the same orientation the gyro tracks).
+        #
+        # Rate-limit in both cases: when the tether activates and the hub
         # velocity direction rotates rapidly (~82°/s), an un-limited jump
         # remaps the gyro body axes, causing ACRO's rate loop to apply
-        # destabilising corrections.  Limiting to _vel_yaw_rate_max (default
-        # 1.0 rad/s) prevents this while tracking the ~0.2 rad/s orbital rate.
-        v_horiz = math.hypot(vel_ned_out[0], vel_ned_out[1])
+        # destabilising corrections.  0.05 rad/s (~3°/s) covers the normal
+        # orbital yaw rate (~0.02 rad/s) with margin, while damping the
+        # tether-activation transient.
+        v_horiz  = math.hypot(vel_ned_out[0], vel_ned_out[1])
+        orb_yaw  = float(rpy[2])          # R_orb yaw before any override
+
         if v_horiz > 0.05:
-            raw_vel_yaw = math.atan2(vel_ned_out[1], vel_ned_out[0])
-            if self._last_vel_yaw is None:
-                self._last_vel_yaw = raw_vel_yaw
-            else:
-                # Wrap delta to [-π, π] before rate-limiting
-                delta = raw_vel_yaw - self._last_vel_yaw
-                delta = (delta + math.pi) % (2 * math.pi) - math.pi
-                max_delta = self._vel_yaw_rate_max * dt
-                self._last_vel_yaw += max(-max_delta, min(max_delta, delta))
-                self._last_vel_yaw = (self._last_vel_yaw + math.pi) % (2 * math.pi) - math.pi
-        if self._last_vel_yaw is not None:
-            rpy[2] = self._last_vel_yaw
+            raw_yaw = math.atan2(vel_ned_out[1], vel_ned_out[0])
+        else:
+            raw_yaw = orb_yaw
+
+        if self._last_vel_yaw is None:
+            self._last_vel_yaw = raw_yaw
+        else:
+            # Wrap delta to [-π, π] before rate-limiting
+            delta = raw_yaw - self._last_vel_yaw
+            delta = (delta + math.pi) % (2 * math.pi) - math.pi
+            max_delta = self._vel_yaw_rate_max * dt
+            self._last_vel_yaw += max(-max_delta, min(max_delta, delta))
+            self._last_vel_yaw = (self._last_vel_yaw + math.pi) % (2 * math.pi) - math.pi
+        rpy[2] = self._last_vel_yaw
 
         # Rebuild R_body consistent with the (possibly yaw-overridden) rpy so
         # accel and gyro are expressed in the same frame ArduPilot expects.
@@ -232,11 +246,15 @@ class PhysicalSensor:
         gyro_body = gyro_body + self._rng.normal(0.0, self._gyro_sigma, 3)
 
         return {
-            "pos_ned":    pos_ned_rel,
-            "vel_ned":    vel_ned_out,
-            "rpy":        rpy,
-            "accel_body": accel_body,
-            "gyro_body":  gyro_body,
+            "pos_ned":     pos_ned_rel,
+            "vel_ned":     vel_ned_out,
+            "rpy":         rpy,
+            "accel_body":  accel_body,
+            "gyro_body":   gyro_body,
+            # Diagnostics for EKF yaw tracking: logged to telemetry CSV so
+            # GPS/EKF glitches can be correlated with the physics inputs.
+            "orb_yaw_rad": orb_yaw,   # R_orb yaw (actual hub orientation)
+            "v_horiz_ms":  v_horiz,   # horizontal speed [m/s]
         }
 
 

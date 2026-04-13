@@ -44,6 +44,7 @@ import numpy as np
 COLUMNS: list[str] = [
     "t_sim",
     "phase",               # "reel-out" | "reel-in" | "descent" | "final_drop" | ""
+    "note",                # free-text event annotation (e.g. "kinematic_exit", "reel_out_start")
     "damp_alpha",          # startup damping blend factor [0..1]; 0.0 when not damping
     "pos_x", "pos_y", "pos_z",          # NED [m]; altitude = -pos_z
     "vel_x", "vel_y", "vel_z",          # NED [m/s]
@@ -61,6 +62,11 @@ COLUMNS: list[str] = [
     "F_x", "F_y", "F_z",                # net aero force NED [N]
     "M_x", "M_y", "M_z",                # net aero moment NED [N·m]
     "rpy_roll", "rpy_pitch", "rpy_yaw",
+    # EKF yaw tracking diagnostics: difference between vel-heading yaw
+    # (sent to ArduPilot as rpy_yaw) and actual R_orb orientation yaw.
+    # Large delta -> EKF may see attitude/GPS inconsistency.
+    "orb_yaw_rad",   # R_orb yaw before velocity-heading override [rad]
+    "v_horiz_ms",    # horizontal speed [m/s]; selects yaw tracking source
     "servo_s1", "servo_s2", "servo_s3", "servo_esc",
     "q_bearing_nm", "q_motor_nm", "throttle",
     "wind_x", "wind_y", "wind_z",
@@ -80,6 +86,7 @@ COLUMNS: list[str] = [
 class TelRow:
     t_sim: float = 0.0
     phase: str   = ""
+    note:  str   = ""          # free-text event marker stamped once per event frame
     damp_alpha: float = 0.0   # startup damping blend [0..1]; 0.0 when free-flying
 
     pos_x: float = 0.0
@@ -133,6 +140,10 @@ class TelRow:
     rpy_roll:  float = 0.0
     rpy_pitch: float = 0.0
     rpy_yaw:   float = 0.0
+
+    # EKF yaw diagnostics
+    orb_yaw_rad: float = 0.0   # R_orb yaw (actual hub orientation) [rad]
+    v_horiz_ms:  float = 0.0   # horizontal speed [m/s]
 
     servo_s1:  float = 0.0
     servo_s2:  float = 0.0
@@ -317,7 +328,7 @@ def read_csv(path: "Path | str") -> "list[TelRow]":
 # Internal
 # ---------------------------------------------------------------------------
 
-_STR_COLS   = frozenset({"phase"})
+_STR_COLS   = frozenset({"phase", "note"})
 _INT_COLS   = frozenset({"tether_slack"})
 _FLOAT_COLS = [c for c in COLUMNS if c not in _STR_COLS and c not in _INT_COLS and c != "t_sim"]
 
@@ -337,6 +348,7 @@ def _row_from_raw(raw: dict) -> Optional[TelRow]:
         return None
     r = TelRow(t_sim=t)
     r.phase = str(raw.get("phase") or "").strip()
+    r.note  = str(raw.get("note")  or "").strip()
     v = _f(raw.get("tether_slack"))
     if v is not None:
         r.tether_slack = int(v)

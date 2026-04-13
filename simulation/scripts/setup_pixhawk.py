@@ -3,7 +3,7 @@
 setup_pixhawk.py -- RAWES Pixhawk 6C yaw-trim bench setup.
 
 Connects to the Pixhawk over USB, sets the parameters required to run the
-GB4008 counter-torque motor under rawes_hw.lua yaw-trim control (SCR_USER7=2).
+GB4008 counter-torque motor under rawes.lua yaw-trim control (SCR_USER6=2).
 Prompts before each reboot.
 
 Usage (Windows Git Bash):

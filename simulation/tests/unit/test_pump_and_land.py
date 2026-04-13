@@ -193,9 +193,6 @@ def _run_pump_and_land() -> dict:
                 initial_body_z   = orbit_tracker.bz_slerp,
                 v_land           = V_LAND,
                 col_cruise       = COL_CRUISE,
-                kp_vz            = KP_VZ,
-                col_min_rad      = COL_MIN_RAD,
-                col_max_rad      = COL_MAX_RAD,
                 body_z_slew_rate = BODY_Z_SLEW_RATE,
                 min_tether_m     = MIN_TETHER_M,
                 anchor_ned       = ANCHOR,
@@ -243,8 +240,13 @@ def _run_pump_and_land() -> dict:
             }
             land_cmd   = landing_planner.step(land_state, DT)
             land_phase = land_cmd["phase"]
-            collective_rad = acro.slew_collective(land_cmd["collective_rad"], DT)
-            body_z_eq      = land_cmd["body_z_eq"]
+            if land_phase == "final_drop":
+                collective_rad = acro.slew_collective(0.0, DT)
+            else:
+                collective_rad = acro.step_vz(
+                    land_cmd["vz_setpoint_ms"], float(hub_state["vel"][2]),
+                    land_cmd["col_cruise_rad"], COL_MIN_RAD, COL_MAX_RAD, KP_VZ, DT)
+            body_z_eq = land_cmd["body_z_eq"]
 
             winch.step(land_cmd["winch_speed_ms"], tension_now, DT)
             tether.rest_length = winch.rest_length

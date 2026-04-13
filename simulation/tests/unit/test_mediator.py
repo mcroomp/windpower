@@ -110,13 +110,13 @@ def _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: fake_sitl)
 
-    # Mediator now calls SkewedWakeBEM.from_definition(rotor) — patch the classmethod.
-    class _FakeSkewedWakeBEM:
+    # Mediator calls SkewedWakeBEMJit.from_definition(rotor) — patch the classmethod.
+    class _FakeSkewedWakeBEMJit:
         @classmethod
         def from_definition(cls, defn):
             return fake_aero
 
-    monkeypatch.setattr(mediator, "SkewedWakeBEM", _FakeSkewedWakeBEM)
+    monkeypatch.setattr(mediator, "SkewedWakeBEMJit", _FakeSkewedWakeBEMJit)
     # PhysicalSensor is NOT mocked here — mediator uses the real sensor with the test hub state.
     # Gyro noise is small (sigma=0.003 rad/s); assertions use atol=0.05 to accommodate it.
 
@@ -160,7 +160,7 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
     fake_sensor   = FakeSensor()
 
     _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor)
-    _install_time(monkeypatch, [10.0, 10.1, 10.1005],
+    _install_time(monkeypatch, [10.0, 10.1, 10.1005, 10.1010, 10.1015],
                   lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     mediator.run_mediator(_args())
@@ -209,7 +209,7 @@ def test_run_mediator_uses_separate_omega_spin_for_aero(monkeypatch):
     fake_sensor = FakeSensor()
 
     _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor)
-    _install_time(monkeypatch, [5.0, 5.1, 5.1005],
+    _install_time(monkeypatch, [5.0, 5.1, 5.1005, 5.1010, 5.1015],
                   lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     mediator.run_mediator(_args())
@@ -239,7 +239,7 @@ def test_run_mediator_reuses_last_servo_packet(monkeypatch):
             raise KeyboardInterrupt()
 
     _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor)
-    _install_time(monkeypatch, [0.0, 0.01, 0.0105, 0.02, 0.0205], fake_sleep)
+    _install_time(monkeypatch, [0.0, 0.01, 0.0105, 0.0110, 0.0115, 0.02, 0.0205, 0.0210, 0.0215], fake_sleep)
 
     mediator.run_mediator(_args())
 

@@ -744,10 +744,12 @@ class DeschutterPlanner(TrajectoryPlanner):
         t_cyc     = (self._t_free - self._t_hold_s) % self._t_cycle
         phase_out = t_cyc < self._t_reel_out
 
-        # Read sensor values from STATE — tension and tether_length are local ground
-        # station measurements (load cell + encoder), not MAVLink streams.
-        tension_n       = float(state.get("tension_n", 0.0))
-        tether_length_m = state.get("tether_length_m")  # noqa: F841 — reserved for future use
+        # Read sensor values from STATE or kwargs — tension and tether_length are
+        # local ground station measurements (load cell + encoder), not MAVLink
+        # streams.  The mediator passes them as keyword arguments (matching the
+        # hardware protocol boundary in WinchNode), so kwargs takes priority.
+        tension_n       = float(kwargs.get("tension_n",       state.get("tension_n",       0.0)))
+        tether_length_m = kwargs.get(      "tether_length_m", state.get("tether_length_m"))  # noqa: F841 — reserved for future use
 
         # Update wind estimator with full STATE plus planner-internal context.
         # collective_rad from the PREVIOUS step is the best available operating-point

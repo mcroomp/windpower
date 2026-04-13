@@ -103,9 +103,6 @@ def _run_landing() -> dict:
         initial_body_z   = BZ_INIT,
         v_land           = V_REEL,
         col_cruise       = COL_CRUISE,
-        kp_vz            = KP_VZ,
-        col_min_rad      = COL_MIN_RAD,
-        col_max_rad      = COL_MAX_RAD,
         body_z_slew_rate = BODY_Z_SLEW_RATE,
         min_tether_m     = MIN_TETHER_M,
         anchor_ned       = ANCHOR,
@@ -145,10 +142,15 @@ def _run_landing() -> dict:
             "tether_length_m": winch.rest_length,
             "tension_n":       tension_now,
         }
-        cmd = planner.step(state_pkt, DT)
-        phase          = cmd["phase"]
-        collective_rad = acro.slew_collective(cmd["collective_rad"], DT)
-        body_z_eq      = cmd["body_z_eq"]
+        cmd   = planner.step(state_pkt, DT)
+        phase = cmd["phase"]
+        if phase == "final_drop":
+            collective_rad = acro.slew_collective(0.0, DT)
+        else:
+            collective_rad = acro.step_vz(
+                cmd["vz_setpoint_ms"], float(hub_state["vel"][2]),
+                cmd["col_cruise_rad"], COL_MIN_RAD, COL_MAX_RAD, KP_VZ, DT)
+        body_z_eq = cmd["body_z_eq"]
 
         # ── Phase bookkeeping ─────────────────────────────────────────────────
         if phase == "final_drop" and t_final_start is None:

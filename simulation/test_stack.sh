@@ -23,6 +23,6 @@ mkdir -p "$SCRIPT_DIR/logs"
 FILTER_MODE="${RAWES_FILTER_MODE:-summary}"
 
 exec python "$SCRIPT_DIR/run_tests.py" \
-    --log "$SCRIPT_DIR/logs/pytest_last_run.log" \
     --filter "$FILTER_MODE" \
+    --summary "$SCRIPT_DIR/logs/suite_summary.json" \
     "$SCRIPT_DIR/tests/stack" -s "$@"

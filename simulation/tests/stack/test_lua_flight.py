@@ -1,7 +1,7 @@
 """
-test_lua_flight.py — rawes.lua flight-mode (SCR_USER7=1) orbit-tracking validation.
+test_lua_flight.py — rawes.lua flight-mode (SCR_USER6=1) orbit-tracking validation.
 
-Validates that rawes.lua in flight mode (SCR_USER7=1):
+Validates that rawes.lua in flight mode (SCR_USER6=1):
   1. Loads and starts in SITL (SCR_ENABLE=1, script installed to
      /ardupilot/scripts/ before launch, EEPROM wiped for clean defaults).
   2. Captures equilibrium within _CAPTURE_TIMEOUT_S of ACRO arm by logging
@@ -12,7 +12,7 @@ Validates that rawes.lua in flight mode (SCR_USER7=1):
 Uses the ``acro_armed_lua`` fixture from conftest.py, which:
   - Wipes /ardupilot/eeprom.bin + installs rawes.lua before SITL starts
   - Runs the full 45 s kinematic startup + EKF alignment + ACRO arm sequence
-  - Sets SCR_USER1..5 (kp, slew, anchor NED) and SCR_USER7=1 via MAVLink after arm
+  - Sets SCR_USER1..5 (kp, slew, anchor NED) and SCR_USER6=1 via MAVLink after arm
   - Enables internal_controller=True so the mediator's 400 Hz truth-state
     controller keeps the hub stable; Lua's RC overrides are safely observable
 

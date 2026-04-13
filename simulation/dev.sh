@@ -85,8 +85,7 @@ case "$CMD" in
 
         _WIN_LOGS=$(cygpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
         echo ""
-        echo "[LOGS] summary: ${_WIN_LOGS}\\pytest_last_run_summary.json"
-        echo "[LOGS] full:    ${_WIN_LOGS}\\pytest_last_run.log"
+        echo "[LOGS] summary: ${_WIN_LOGS}\\suite_summary.json"
 
         exit $_rc
         ;;

@@ -321,7 +321,7 @@ L("|---------|------------|-------------|")
 L("| SCR_USER params | SCR_USER1..9 | SCR_USER1..6 only |")
 L("| H_SW_PHANG | Exists (set to 0) | Does not exist; phase implicit in H_SW_TYPE |")
 L("| RPM source in Lua | battery:voltage(0) (mediator hack) | rpm:get_rpm(0) (DSHOT telemetry) |")
-L("| Mode selector param | SCR_USER7 | SCR_USER6 (rawes_hw.lua) |")
+L("| Mode selector param | SCR_USER6 | SCR_USER6 |")
 L()
 
 mav.close()
