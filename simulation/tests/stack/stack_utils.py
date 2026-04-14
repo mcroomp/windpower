@@ -23,6 +23,148 @@ SIM_VEHICLE_ENV = "RAWES_SIM_VEHICLE"
 
 
 # ---------------------------------------------------------------------------
+# ParamSetup — declarative parameter table with built-in verification
+# ---------------------------------------------------------------------------
+
+class ParamSetup:
+    """Declarative ArduPilot parameter table that can set and verify itself.
+
+    Typical usage (MAVLink-settable params)::
+
+        setup = ParamSetup({
+            "EK3_SRC1_POSXY": 0,
+            "H_RSC_MODE":     1,
+            ...
+        })
+        setup.apply(gcs, log=log)   # set all via MAVLink, then read back every
+                                    # value; pytest.fail() on any mismatch
+
+    For params that come from the boot param file (not settable via MAVLink,
+    e.g. ARMING_SKIPCHK which silently fails as REAL32), skip the set phase
+    and just verify::
+
+        boot_check = ParamSetup({"ARMING_SKIPCHK": 65535, ...})
+        boot_check.verify(gcs, log=log)
+
+    Composition::
+
+        combined = base_setup.merge(extra_setup)   # other overrides self
+        extended = base_setup.update({"NEW_PARAM": 1.0})
+    """
+
+    def __init__(self, params: "dict[str, float]"):
+        self._params: dict[str, float] = {k: float(v) for k, v in params.items()}
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def apply(
+        self,
+        gcs,
+        log: "logging.Logger | None" = None,
+        set_timeout: float = 5.0,
+    ) -> None:
+        """Set every param via MAVLink, then verify all values match.
+
+        Calls ``pytest.fail()`` with a full mismatch report if any param did
+        not reach its expected value after the set-and-read-back cycle.
+        """
+        _log = log or logging.getLogger("ParamSetup")
+        for name, value in self._params.items():
+            ok = gcs.set_param(name, value, timeout=set_timeout)
+            _log.info("  %-28s = %-10g  ACK=%s", name, value, ok)
+        self.verify(gcs, log=_log)
+
+    def verify(
+        self,
+        gcs,
+        log: "logging.Logger | None" = None,
+        tol: float = 1e-4,
+        read_timeout: float = 5.0,
+    ) -> None:
+        """Read back every param and ``pytest.fail()`` on any mismatch.
+
+        Use this (without ``apply``) for params set via the boot param file
+        that cannot be reliably set via MAVLink (e.g. ARMING_SKIPCHK INT32).
+        """
+        import pytest
+
+        _log = log or logging.getLogger("ParamSetup")
+        mismatches: list[str] = []
+
+        for name, expected in sorted(self._params.items()):
+            actual = gcs.get_param(name, timeout=read_timeout)
+            if actual is None:
+                mismatches.append(
+                    f"  {name:<30s}  expected={expected}  got=NO_RESPONSE"
+                )
+                _log.error("verify: %s — no response", name)
+            elif abs(actual - expected) > tol:
+                mismatches.append(
+                    f"  {name:<30s}  expected={expected}  got={actual}"
+                )
+                _log.error(
+                    "verify: %s expected=%g got=%g (delta=%g)",
+                    name, expected, actual, abs(actual - expected),
+                )
+            else:
+                _log.debug("verify: %s = %g OK", name, actual)
+
+        if mismatches:
+            pytest.fail(
+                f"Parameter mismatch after setup"
+                f" ({len(mismatches)}/{len(self._params)} wrong):\n"
+                + "\n".join(mismatches)
+                + "\n\nLikely causes:\n"
+                + "  - Docker EEPROM contamination from a previous sequential test\n"
+                + "  - Boot param file value ignored (EEPROM already has a value)\n"
+                + "  - MAVLink set_param silently failed (INT32 sent as REAL32)\n"
+                + "  - ARMING_SKIPCHK must be set via boot param file, not MAVLink\n"
+            )
+
+    def merge(self, other: "ParamSetup") -> "ParamSetup":
+        """Return a new ParamSetup combining self and *other* (other wins)."""
+        return ParamSetup({**self._params, **other._params})
+
+    def update(self, params: "dict[str, float]") -> "ParamSetup":
+        """Return a new ParamSetup with extra *params* merged in (they win)."""
+        return ParamSetup({**self._params, **params})
+
+    def write_parm_file(self, path: "Path | str") -> None:
+        """Write params to a SITL ``--add-param-file`` text file."""
+        lines = [f"{name} {value}\n" for name, value in self._params.items()]
+        Path(path).write_text("".join(lines), encoding="utf-8")
+
+    @classmethod
+    def from_parm_file(cls, path: "Path | str") -> "ParamSetup":
+        """Load a ParamSetup from an existing SITL parm file.
+
+        Comment lines (starting with ``#``) and blank lines are ignored.
+        """
+        params: dict[str, float] = {}
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) >= 2:
+                try:
+                    params[parts[0]] = float(parts[1])
+                except ValueError:
+                    pass
+        return cls(params)
+
+    def as_list(self) -> "list[tuple[str, float]]":
+        """Return params as a list of (name, value) tuples (preserves dict order)."""
+        return list(self._params.items())
+
+    def __len__(self) -> int:
+        return len(self._params)
+
+    def __repr__(self) -> str:
+        return f"ParamSetup({len(self._params)} params)"
+
+
+# ---------------------------------------------------------------------------
 # Process helpers
 # ---------------------------------------------------------------------------
 
@@ -44,7 +186,6 @@ def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
     add_param_file: "Path | None" = None,
-    wipe_eeprom: bool = False,
     speedup: int = 1,
 ) -> subprocess.Popen:
     # Truncate the ArduCopter terminal log so each test run starts fresh.
@@ -55,12 +196,13 @@ def _launch_sitl(
     except OSError:
         pass
 
-    # EEPROM is preserved between tests.  All required params (H_RSC_MODE,
-    # SCR_ENABLE, ARMING_SKIPCHK, etc.) are set explicitly via MAVLink in
-    # _run_acro_setup step 3.  Persisting EEPROM means SCR_ENABLE=1 (written
-    # by step 3) survives across reboots so Lua scripting starts on every boot.
+    # Always wipe EEPROM before launch — no parameter carryover between tests.
+    # Each test writes a complete per-test boot param file (--add-param-file)
+    # that is the single source of truth for all ArduPilot parameters.
+    # With a fresh EEPROM, boot-file params are applied as the only source;
+    # sequential test contamination is impossible.
     eeprom = Path(sim_vehicle).parent.parent.parent / "eeprom.bin"
-    if wipe_eeprom and eeprom.exists():
+    if eeprom.exists():
         eeprom.unlink()
 
     cmd = [
@@ -83,7 +225,6 @@ def _launch_sitl(
         cwd=str(sim_vehicle.parent.parent.parent),
         stdout=log_path.open("w", encoding="utf-8"),
         stderr=subprocess.STDOUT,
-        start_new_session=True,
     )
 
 
@@ -177,8 +318,11 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
     import signal
+    # Try SIGTERM first, then SIGKILL. Use os.kill (specific PID) rather than
+    # os.killpg because processes may not be their own process group leader
+    # (e.g. when start_new_session is not set).
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.kill(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
     try:
@@ -187,25 +331,28 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.kill(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
     proc.wait(timeout=5.0)
 
 
-def _kill_by_port(port: int) -> None:
-    """Kill any process still holding the given TCP port (Linux only).
+def _kill_by_port(port: int, proto: str = "tcp") -> None:
+    """Kill any process still holding the given port (Linux only).
+
+    proto is "tcp" or "udp".
 
     sim_vehicle.py spawns arducopter-heli in a different process group, so
     os.killpg() on sim_vehicle.py's PID may leave the SITL binary running.
-    This function finds the remaining process via /proc/net/tcp and kills it.
+    This function finds the remaining process via /proc/net/tcp (or udp) and
+    kills it.
     """
     import signal as _signal
 
     # Try fuser first (fast, available when psmisc is installed)
     try:
         subprocess.run(
-            ["fuser", "-k", f"{port}/tcp"],
+            ["fuser", "-k", f"{port}/{proto}"],
             timeout=5.0,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -214,11 +361,11 @@ def _kill_by_port(port: int) -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Fallback: parse /proc/net/tcp to find the inode, then scan /proc/*/fd/
+    # Fallback: parse /proc/net/{proto} to find the inode, then scan /proc/*/fd/
     try:
         hex_port = f"{port:04X}"
         inode = None
-        with open("/proc/net/tcp") as f:
+        with open(f"/proc/net/{proto}") as f:
             for line in f:
                 parts = line.split()
                 if len(parts) < 10:

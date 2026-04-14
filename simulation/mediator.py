@@ -490,7 +490,15 @@ def run_mediator(args, trajectory=None):
                 s2 = float(servos[1])
                 s3 = float(servos[2])
                 collective_norm, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
-                collective_rad = collective_to_pitch(collective_norm, _col_max_rad)
+                # Asymmetric decode: Lua encodes col_rad in [col_min, col_max] as
+                # thrust = (col_rad - col_min) / (col_max - col_min), ch3 = 1000 + thrust*1000.
+                # With H_COL_MIN=1000/H_COL_MAX=2000: servo_norm = thrust*2 - 1.
+                # Inverse: thrust = (collective_norm + 1) / 2.
+                _col_thrust = (collective_norm + 1.0) / 2.0
+                collective_rad = float(np.clip(
+                    _col_min_rad + _col_thrust * (_col_max_rad - _col_min_rad),
+                    _col_min_rad, _col_max_rad,
+                ))
 
             # ----------------------------------------------------------------
             # Step 3: Compute aerodynamic forces

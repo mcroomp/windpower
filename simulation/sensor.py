@@ -185,6 +185,14 @@ class PhysicalSensor:
 
         # Attitude: actual orbital frame (electronics, spin removed) → NED Euler angles.
         # R_orb is body→world in NED; extract Euler angles directly.
+        #
+        # build_orb_frame(disk_normal) places disk_normal as body Z (UP direction for
+        # xi=80°).  This gives roll≈180° from NED, but EKF3 handles this correctly in
+        # SITL with the compass providing yaw.  Negating body_y and body_z to get
+        # body_z=DOWN inverts the ACRO pitch axis (body_y flips North→South), causing
+        # unstable pitch feedback.  Keep the original convention: body_z = disk_normal.
+        # Lua recovers disk_normal via ahrs:body_to_earth([0,0,-1]) = -body_z_NED which
+        # equals disk_normal when body_z = disk_normal (UP).
         disk_normal = R_hub[:, 2]
         R_orb = build_orb_frame(disk_normal)
         rpy   = _rotation_matrix_to_euler_zyx(R_orb)

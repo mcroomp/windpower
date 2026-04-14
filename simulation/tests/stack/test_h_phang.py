@@ -81,8 +81,8 @@ _CROSS_COUPLING_MAX = 0.80   # < 0.80 with correct H3_120 + RAWES layout
 
 # ── Expected parameter values -------------------------------------------------
 _EXPECTED_PARAMS = {
-    "H_SW_TYPE":  3.0,   # H3_120
-    "H_SW_PHANG": 0.0,   # no phase correction
+    "H_SW_TYPE":     3.0,   # H3_120
+    "H_SW_H3_PHANG": 0.0,   # no phase correction (renamed from H_SW_PHANG in ArduPilot 4.6)
 }
 
 _log = logging.getLogger("test_h_phang")

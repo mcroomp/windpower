@@ -13,10 +13,10 @@ Landing sequence:
 
 Timing (from mediator start):
   t=0..65 s  kinematic phase (hub locked to pos0=[0,3.47,-19.70] NED, xi=80 deg)
-  t~54 s     arm fires; fixture yields
-  t~65 s     kinematic exits; EKF recovers; Lua landing mode captures body_z (~67 s)
-  t~67..91s  descent (~14 m at 0.5 m/s = 28 s)
-  t~91 s     final_drop and floor contact
+  t~15 s     arm fires; fixture yields; SCR_USER6=4 set; Lua enters settle wait
+  t~62 s     KINEMATIC_SETTLE_MS expires; Lua captures body_z with converged EKF
+  t~67..102s Lua VZ descent (17.7 m at 0.5 m/s = ~35 s)
+  t~102 s    final_drop and floor contact
 
 Telemetry columns used (TelRow fields):
   t_sim, pos_z, tether_rest_length, tether_tension, phase
@@ -40,11 +40,12 @@ from telemetry_csv import read_csv
 # ---------------------------------------------------------------------------
 
 # Observation window after fixture yield.
-# startup_damp_seconds=120: kinematic runs until t=120 s.
-# GPS origin: t~20 s.  GPS fusion (EKF3 is using GPS): t~74 s.
-# Lua ahrs:healthy() + capture: t~79 s (fixture yields at t~12 s -> 67 s in).
-# Descent: 19.7 m at 0.5 m/s = 39 s; final_drop at t~159 s (147 s in).
-# 165 s window ends at mediator t~177 s -> 18 s margin after final_drop.
+# startup_damp_seconds=65: kinematic runs until t=65 s.
+# GPS origin: t~20 s.  GPS fusion: t~37-54 s.
+# Fixture yields at t~15 s (arm complete); test observes from there.
+# Lua KINEMATIC_SETTLE_MS=62000: capture at t~62 s (3 s before kinematic exit).
+# Descent: 17.7 m at 0.5 m/s = 35 s; final_drop at t~102 s (87 s into obs window).
+# 165 s window ends at mediator t~180 s -> 78 s margin after final_drop.
 _OBS_SECONDS      = 165.0
 
 # Hub altitude limit above which it must stay during descent (physics safety).

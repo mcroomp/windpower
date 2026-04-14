@@ -73,6 +73,21 @@ local MIN_TETHER_M      = 0.5       -- minimum tether length before orbit tracki
 local LAND_MIN_TETHER_M = 2.0       -- landing mode: final_drop below this tether length [m]
 local ACRO_RP_RATE_DEG  = 360.0     -- must match ACRO_RP_RATE ArduPilot parameter
 local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
+-- Capture delay: millis() must exceed this value before body_z is snapped.
+-- Stack test kinematic = 65 s; both thresholds set to 62 s (3 s before exit)
+-- so orbit-tracking cyclic with gyro feedthrough is active AT kinematic exit.
+-- _tdir0 is set to nil at capture (GPS may not yet be fused); the Rodrigues
+-- orbit update is deferred until the first valid pos_ned from the EKF.
+-- On real hardware millis() >> these thresholds so capture is immediate.
+local KINEMATIC_SETTLE_MS  = 62000  -- landing: delay capture until 3 s before kinematic exit [ms]
+local FLIGHT_SETTLE_MS     = 62000  -- flight/pumping: capture 3 s BEFORE kinematic exit [ms]
+                                    -- Same timing as KINEMATIC_SETTLE_MS so orbit-tracking
+                                    -- cyclic (with gyro feedthrough) is active at kinematic
+                                    -- exit.  Without this, neutral ACRO sticks zeroes the
+                                    -- natural orbital rate (~229 deg/s body X) -> crash.
+                                    -- _tdir0 is nil at capture (no GPS yet); set on first
+                                    -- pos_ned availability.  Rodrigues orbit tracking holds
+                                    -- _bz_orbit = _bz_eq0 until GPS fuses.
 
 -- ── VZ collective controller ─────────────────────────────────────────────────
 -- Pixhawk-side descent-rate controller: mirrors AcroController.step_vz() in
@@ -84,8 +99,9 @@ local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
 --   flight / both (modes 1, 3): 0.0 m/s (altitude hold)
 -- pumping (mode 5) uses open-loop collective per phase; this controller is bypassed.
 
-local KP_VZ          = 0.05    -- collective gain [rad/(m/s)]
-local COL_CRUISE_RAD = 0.079   -- altitude-neutral feedforward [rad] at xi~80 deg
+local KP_VZ               = 0.05   -- collective gain [rad/(m/s)]
+local COL_CRUISE_FLIGHT_RAD = -0.18  -- altitude-neutral at natural orbit (xi~8 deg, 100 m tether)
+local COL_CRUISE_LAND_RAD   =  0.079 -- altitude-neutral at reel-in position (xi~80 deg, 20 m tether)
 local COL_MIN_RAD    = -0.28   -- hardware collective floor  [rad]
 local COL_MAX_RAD    =  0.10   -- hardware collective ceiling [rad]
 -- DS113MG at 6 V: 545 deg/s over 100 deg travel.
@@ -143,12 +159,13 @@ local _active_mode      = -1        -- last mode seen; -1 = uninitialised (trigg
 local _rc_ch1 = rc:get_channel(1)   -- roll rate override (flight)
 local _rc_ch2 = rc:get_channel(2)   -- pitch rate override (flight)
 local _rc_ch3 = rc:get_channel(3)   -- collective override (vz controller)
+local _rc_ch8 = rc:get_channel(8)   -- motor interlock keepalive (H_RSC_MODE=1 passthrough)
 
 -- ── Flight subsystem state ───────────────────────────────────────────────────
 
-local _last_col_rad     = COL_CRUISE_RAD  -- collective slew state [rad]
+local _last_col_rad     = COL_CRUISE_FLIGHT_RAD  -- collective slew state [rad]
 local _captured         = false           -- true once equilibrium has been snapped
-local _bz_eq0           = nil             -- body_z_ned at equilibrium capture
+local _bz_eq0           = nil             -- body_z_ned at equilibrium capture (from DCM)
 local _tdir0            = nil             -- tether direction at equilibrium capture
 local _bz_orbit         = nil             -- instantaneous orbit-tracked body_z setpoint
 local _bz_slerp         = nil             -- rate-limited active setpoint (what cyclic tracks)
@@ -188,6 +205,18 @@ local function v3_body_z()
     local v = Vector3f()
     v:z(1.0)
     return v
+end
+
+-- Return -body_z in NED (= -disk_normal = disk DOWN direction).
+-- sensor.py body Z = disk_normal (UP, roll~180 deg from NED).
+-- body_to_earth([0,0,1]) = disk_normal (UP). Negate to get -disk_normal (DOWN).
+-- Orbit tracking cross products are sign-invariant: this DOWN direction is
+-- fully consistent (bz_now = -dn_current, _bz_orbit = -dn_target, err cancels).
+local function disk_normal_ned()
+    local bz = ahrs:body_to_earth(v3_body_z())
+    local r = Vector3f()
+    r:x(-bz:x()); r:y(-bz:y()); r:z(-bz:z())
+    return r
 end
 
 -- Rodrigues rotation: rotate vector v around unit vector axis_n by angle radians
@@ -329,46 +358,81 @@ local function run_flight()
     -- Only run in ACRO_Heli mode
     if vehicle:get_mode() ~= ACRO_MODE_NUM then return end
 
-    if not ahrs:healthy() then return end
-
-    -- Read position (NED, relative to EKF origin)
-    local pos_ned = ahrs:get_relative_position_NED_origin()
-    if not pos_ned then return end
-
-    -- Tether vector: use component arithmetic
-    local anch = anchor_ned()
-    local diff = Vector3f()
-    diff:x(pos_ned:x() - anch:x())
-    diff:y(pos_ned:y() - anch:y())
-    diff:z(pos_ned:z() - anch:z())
-    local tlen = diff:length()
-
-    local mode_now   = math.floor(p("SCR_USER6", 0) + 0.5)
+    local mode_now    = math.floor(p("SCR_USER6", 0) + 0.5)
     local _is_landing = mode_now == 4
     local _is_pumping = mode_now == 5
+    -- Select altitude-neutral collective for the current mode.
+    local col_cruise  = _is_landing and COL_CRUISE_LAND_RAD or COL_CRUISE_FLIGHT_RAD
 
-    -- ── Equilibrium capture ───────────────────────────────────────────────
-    if not _captured then
-        if tlen >= MIN_TETHER_M then
-            _bz_eq0     = ahrs:body_to_earth(v3_body_z())
-            _tdir0      = v3_normalize(diff)
-            _bz_orbit   = v3_copy(_bz_eq0)
-            _bz_slerp   = v3_copy(_bz_eq0)
-            _captured   = true
+    -- ── Pre-capture: hold Ch1/Ch2 neutral and Ch3 at cruise collective ────
+    -- Runs BEFORE the ahrs:healthy() guard so the hub gets collective support
+    -- even during AHRS initialisation (before GPS fusion).  Without this,
+    -- Ch1/Ch2/Ch3 stay at ArduPilot default neutral (1500) and ACRO's rate
+    -- loop zeroes the natural orbital rate (~229 deg/s body X) -> crash.
+    -- This block only matters in the pre-capture window; after _captured=true
+    -- the orbit-tracking cyclic below drives Ch1/Ch2.
+    if not _captured and mode_now ~= 0 then
+        local ct = (col_cruise - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+        if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + ct * 1000.0 + 0.5)) end
+        if _rc_ch1 then _rc_ch1:set_override(1500) end
+        if _rc_ch2 then _rc_ch2:set_override(1500) end
+    end
+
+    -- AHRS must be healthy for attitude-dependent calculations (body_to_earth,
+    -- earth_to_body, gyro).  The pre-capture RC above is the only path that
+    -- runs without healthy AHRS.
+    if not ahrs:healthy() then return end
+
+    -- ── DCM capture: snap body_z at settle time using attitude only ───────
+    -- Captures at FLIGHT_SETTLE_MS (62 s) = 3 s before kinematic exits (65 s),
+    -- or at KINEMATIC_SETTLE_MS (62 s) for landing.  Uses body_to_earth (DCM)
+    -- -- no GPS needed.  Starting orbit-tracking cyclic BEFORE kinematic exit
+    -- ensures gyro feedthrough ramps up correctly over the 100 PWM/step limiter
+    -- so the correct cyclic is active the instant the hub enters free flight.
+    -- _tdir0 = nil at capture (GPS not yet fused); populated below on first
+    -- pos_ned.  Until then, _bz_orbit = _bz_eq0 (no Rodrigues update).
+    if not _captured and mode_now ~= 0 then
+        local settle_ms = _is_landing and KINEMATIC_SETTLE_MS or FLIGHT_SETTLE_MS
+        if millis() >= settle_ms then
+            _bz_eq0   = disk_normal_ned()
+            _bz_orbit = v3_copy(_bz_eq0)
+            _bz_slerp = disk_normal_ned()
+            _tdir0    = nil   -- set on first GPS fix below
+            _captured = true
             local label
             if _is_landing then label = "land"
             elseif _is_pumping then label = "pump"
             else label = "flight" end
             gcs:send_text(6, string.format(
-                "RAWES %s: captured  tlen=%.1f m  bz=(%.2f %.2f %.2f)",
-                label, tlen, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z()))
+                "RAWES %s: captured  bz=(%.2f %.2f %.2f)",
+                label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z()))
         end
         return
     end
 
-    -- ── Pumping: compute reel-in body_z once after capture ────────────────
+    -- ── GPS tether vector (optional; nil until EKF fuses position) ────────
+    -- Used for Rodrigues orbit update and pumping phase detection.
+    -- If nil, _bz_orbit stays at _bz_eq0 (safe fallback -- holds initial bz).
+    local pos_ned = ahrs:get_relative_position_NED_origin()
+    local diff, tlen
+    if pos_ned then
+        local anch = anchor_ned()
+        diff = Vector3f()
+        diff:x(pos_ned:x() - anch:x())
+        diff:y(pos_ned:y() - anch:y())
+        diff:z(pos_ned:z() - anch:z())
+        tlen = diff:length()
+        -- First GPS position after DCM capture: initialise tether direction.
+        if _tdir0 == nil and tlen >= MIN_TETHER_M then
+            _tdir0 = v3_normalize(diff)
+            gcs:send_text(6, string.format(
+                "RAWES flight: GPS  tlen=%.1f m", tlen))
+        end
+    end
+
+    -- ── Pumping: compute reel-in body_z once _tdir0 is known ─────────────
     -- body_z_reel_in: xi = XI_REEL_IN_DEG from the horizontal wind direction.
-    -- Wind direction estimated from captured tether direction (_tdir0).
+    -- Wind direction estimated from tether direction (_tdir0).
     -- At xi=80 deg East wind: bz_ri = [0, cos(80), -sin(80)] = [0, 0.17, -0.98]
     if _is_pumping and _pump_bz_ri == nil and _tdir0 ~= nil then
         local wx, wy = _tdir0:x(), _tdir0:y()
@@ -384,15 +448,16 @@ local function run_flight()
         gcs:send_text(6, string.format(
             "RAWES pump: bz_ri=(%.2f %.2f %.2f)  xi=%.0f deg",
             _pump_bz_ri:x(), _pump_bz_ri:y(), _pump_bz_ri:z(), XI_REEL_IN_DEG))
-        _pump_tlen_ref = tlen  -- baseline tether length for hold->reel_out detection
+        if tlen then _pump_tlen_ref = tlen end
     end
 
     -- ── Landing: final_drop transition ────────────────────────────────────
     -- Use altitude estimate (anchor.z - hub.z) rather than 3D tlen.
     -- With vel0 pointing horizontally, EKF origin Z = 0, so:
-    --   altitude_est = anch:z() - pos_ned:z() = anchor_local_z - hub_local_z = physics altitude
+    --   altitude_est = anch:z() - pos_ned:z() = anchor_local_z - hub_local_z
     -- This is independent of EKF horizontal origin offset.
-    if _is_landing then
+    if _is_landing and pos_ned then
+        local anch = anchor_ned()
         local alt_est = anch:z() - pos_ned:z()
         if (not _land_final_drop) and alt_est <= LAND_MIN_TETHER_M then
             _land_final_drop = true
@@ -412,7 +477,7 @@ local function run_flight()
         end
     end
 
-    -- ── Pumping: phase state machine ──────────────────────────────────────
+    -- ── Pumping: phase state machine (requires GPS tlen) ─────────────────
     -- Phases follow the ground planner's actual winch motion (tether length
     -- change), not a local timer, so Lua stays synchronised regardless of
     -- kinematic startup timing.
@@ -423,26 +488,21 @@ local function run_flight()
     -- reel_in   -> reel_out  : tether pays out (mediator starts next cycle)
     local dt = FLIGHT_PERIOD_MS * 0.001
 
-    if _is_pumping then
+    if _is_pumping and tlen then
         _pump_t_phase = _pump_t_phase + dt
 
         if _pump_phase == "hold" then
             -- Detect cumulative reel-out: tlen must increase PUMP_LEN_THRESH above
-            -- the minimum tlen seen since capture.  We track the minimum (not the
-            -- capture value) because Lua may capture during the kinematic phase when
-            -- the hub is far from its equilibrium orbit (large tlen); after kinematic
-            -- exit the hub moves inward and tlen decreases to the orbit radius before
-            -- the winch starts paying out.  Tracking the minimum ensures the reference
-            -- follows the hub to equilibrium, so the first reel-out (small Dtlen) is
-            -- detected correctly rather than comparing against the kinematic tlen.
+            -- the minimum tlen seen since GPS became available.  Track minimum so
+            -- the reference follows the hub to equilibrium after kinematic exit.
             if _pump_tlen_ref == nil or tlen < _pump_tlen_ref then
-                _pump_tlen_ref = tlen  -- track minimum: follow hub inward to equilibrium
+                _pump_tlen_ref = tlen
             end
             if _pump_tlen_ref ~= nil and tlen > _pump_tlen_ref + PUMP_LEN_THRESH then
-                _pump_phase   = "reel_out"
-                _pump_t_phase = 0.0
-                _pump_cycle   = _pump_cycle + 1
-                _pump_tlen_ref = tlen  -- reset: track peak during reel_out
+                _pump_phase    = "reel_out"
+                _pump_t_phase  = 0.0
+                _pump_cycle    = _pump_cycle + 1
+                _pump_tlen_ref = tlen
                 gcs:send_text(6, string.format(
                     "RAWES pump: reel_out  cycle=%d  tlen=%.1f m",
                     _pump_cycle, tlen))
@@ -452,9 +512,9 @@ local function run_flight()
             -- Track peak tether length; detect start of reel-in (tlen drops from peak)
             if _pump_tlen_ref == nil or tlen > _pump_tlen_ref then _pump_tlen_ref = tlen end
             if tlen < _pump_tlen_ref - PUMP_LEN_THRESH then
-                _pump_phase   = "transition"
-                _pump_t_phase = 0.0
-                _pump_tlen_ref = tlen  -- reset: track trough during reel_in
+                _pump_phase    = "transition"
+                _pump_t_phase  = 0.0
+                _pump_tlen_ref = tlen
                 gcs:send_text(6, string.format(
                     "RAWES pump: transition  tlen=%.1f m", tlen))
             end
@@ -468,13 +528,13 @@ local function run_flight()
             end
 
         elseif _pump_phase == "reel_in" then
-            -- Track trough tether length; detect start of next reel-out (tlen rises from trough)
+            -- Track trough tether length; detect start of next reel-out (tlen rises)
             if _pump_tlen_ref == nil or tlen < _pump_tlen_ref then _pump_tlen_ref = tlen end
             if tlen > _pump_tlen_ref + PUMP_LEN_THRESH then
-                _pump_phase   = "reel_out"
-                _pump_t_phase = 0.0
-                _pump_cycle   = _pump_cycle + 1
-                _pump_tlen_ref = tlen  -- reset: track peak during next reel_out
+                _pump_phase    = "reel_out"
+                _pump_t_phase  = 0.0
+                _pump_cycle    = _pump_cycle + 1
+                _pump_tlen_ref = tlen
                 gcs:send_text(6, string.format(
                     "RAWES pump: reel_out  cycle=%d  tlen=%.1f m",
                     _pump_cycle, tlen))
@@ -482,9 +542,12 @@ local function run_flight()
         end
     end
 
-    -- ── Orbit tracking ────────────────────────────────────────────────────
-    -- Rotate _bz_eq0 by the same rotation that the tether has made since capture.
-    if tlen >= MIN_TETHER_M then
+    -- ── Orbit tracking update (requires GPS tether direction) ─────────────
+    -- Rotate _bz_eq0 by the Rodrigues rotation from _tdir0 to current tether
+    -- direction.  Only runs once _tdir0 is known (GPS fused after DCM capture).
+    -- Landing: skip (orbit stays at _bz_eq0 = straight-descent direction).
+    -- Pre-GPS: skip (holds _bz_orbit = _bz_eq0 as safe fallback).
+    if not _is_landing and _tdir0 ~= nil and tlen and tlen >= MIN_TETHER_M then
         local bzt   = v3_normalize(diff)
         local axis  = _tdir0:cross(bzt)
         local sinth = axis:length()
@@ -508,7 +571,7 @@ local function run_flight()
     local bz_slew = p("SCR_USER2", 0.40)
     local goal
     if _is_pumping and (_pump_phase == "transition" or _pump_phase == "reel_in") then
-        goal = _pump_bz_ri
+        goal = _pump_bz_ri or _bz_orbit  -- fallback if _pump_bz_ri not yet computed
     else
         goal = _bz_target or _bz_orbit
     end
@@ -524,17 +587,29 @@ local function run_flight()
     end
 
     -- ── Cyclic P loop ─────────────────────────────────────────────────────
-    -- error = cross(body_z_now, _bz_slerp) in NED frame, transformed to body frame
+    -- Error: bz_now × _bz_orbit (NOT _bz_slerp).
+    -- _bz_slerp moves at 0.40 rad/s; orbit rate is ~4 rad/s.  When slerp
+    -- lags behind orbit, bz_now × bz_slerp pushes BACKWARD, fighting the
+    -- natural precession.  Using _bz_orbit (the advancing orbit target)
+    -- gives the correct restoring direction.
     local kp      = p("SCR_USER1", 1.0)
-    local bz_now  = ahrs:body_to_earth(v3_body_z())
-    local err_ned = bz_now:cross(_bz_slerp)
+    local bz_now  = disk_normal_ned()
+    local err_ned = bz_now:cross(_bz_orbit)
 
     local err_body = ahrs:earth_to_body(err_ned)
     local err_bx   = err_body:x()    -- body X (roll)
     local err_by   = err_body:y()    -- body Y (pitch)
 
-    local roll_rads  = kp * err_bx
-    local pitch_rads = kp * err_by
+    -- Gyro feedthrough: cmd = kp*err + gyro so ACRO desired rate = actual + correction.
+    -- Without this, ch1=1500+scale*kp*err would set desired rate to kp*err only, and
+    -- ACRO's rate loop would zero out the orbital body rate (~229 deg/s body X),
+    -- killing the natural orbit.  With feedthrough, ACRO tracks actual body rate + err.
+    local gyro   = ahrs:get_gyro()
+    local gyro_x = gyro and gyro:x() or 0.0
+    local gyro_y = gyro and gyro:y() or 0.0
+
+    local roll_rads  = kp * err_bx + gyro_x
+    local pitch_rads = kp * err_by + gyro_y
 
     -- Map rate to RC PWM; full stick (+/-500 us) = +/-ACRO_RP_RATE_DEG deg/s
     local scale = 500.0 / (ACRO_RP_RATE_DEG * math.pi / 180.0)
@@ -544,13 +619,13 @@ local function run_flight()
     ch1 = math.max(1000, math.min(2000, ch1))
     ch2 = math.max(1000, math.min(2000, ch2))
 
-    -- Output rate limiter (30 PWM/step = ~0.67 s full-stick traverse)
+    -- Output rate limiter (100 PWM/step -- fast enough for gyro feedthrough ramp-up)
     local d1 = ch1 - _prev_ch1
     local d2 = ch2 - _prev_ch2
-    if d1 >  30 then d1 =  30 end
-    if d1 < -30 then d1 = -30 end
-    if d2 >  30 then d2 =  30 end
-    if d2 < -30 then d2 = -30 end
+    if d1 >  100 then d1 =  100 end
+    if d1 < -100 then d1 = -100 end
+    if d2 >  100 then d2 =  100 end
+    if d2 < -100 then d2 = -100 end
     ch1 = _prev_ch1 + d1
     ch2 = _prev_ch2 + d2
     _prev_ch1 = ch1
@@ -580,7 +655,14 @@ local function run_flight()
         local vel_ned = ahrs:get_velocity_NED()
         if vel_ned then vz_actual = vel_ned:z() end
         local vz_error = vz_actual - vz_sp
-        col_cmd = COL_CRUISE_RAD + KP_VZ * vz_error
+        col_cmd = col_cruise + KP_VZ * vz_error
+        -- Landing only: never reduce collective below cruise so the winch
+        -- controls descent rate; collective only corrects overshoot.
+        -- Flight mode: allow collective below col_cruise to correct upward drift
+        -- (bidirectional P controller; hard floor is COL_MIN_RAD below).
+        if _is_landing then
+            col_cmd = math.max(col_cmd, col_cruise)
+        end
     end
 
     if col_cmd < COL_MIN_RAD then col_cmd = COL_MIN_RAD end
@@ -605,7 +687,7 @@ local function run_flight()
     if _diag % 250 == 1 then
         local err_mag  = math.sqrt(err_bx * err_bx + err_by * err_by)
         local pump_info = ""
-        if _is_pumping then
+        if _is_pumping and tlen then
             pump_info = string.format("  pump=%s/c%d  tlen=%.1f m",
                 _pump_phase, _pump_cycle, tlen)
         end
@@ -619,6 +701,12 @@ end
 
 local function update()
     _diag = _diag + 1
+
+    -- Motor interlock keepalive: RC overrides expire after ~1 s; 100 Hz keeps Ch8 HIGH.
+    -- Tests must NOT send Ch8 -- Lua owns the interlock once scripting is active.
+    if arming:is_armed() and _rc_ch8 then
+        _rc_ch8:set_override(2000)
+    end
 
     local mode = math.floor(p("SCR_USER6", 0) + 0.5)
 

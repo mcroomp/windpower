@@ -24,6 +24,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 from pymavlink import mavutil
 
@@ -86,6 +87,9 @@ class RawesGCS:
         # Speed estimator tracking state — updated by _track_msg_timing()
         self._last_boot_ms:   float | None = None
         self._last_boot_wall: float | None = None
+        # Message hooks — callables invoked for every received MAVLink message.
+        # Use add_message_hook() to register; hooks are called in recv order.
+        self._msg_hooks: list = []
 
     # ------------------------------------------------------------------
     # Speed estimation from MAVLink message timing
@@ -113,6 +117,27 @@ class RawesGCS:
                 record_sim_step(wall_dt, sim_dt)
         self._last_boot_ms   = boot_ms
         self._last_boot_wall = now
+
+    def add_message_hook(self, callback) -> None:
+        """Register a callable invoked for every MAVLink message received.
+
+        The callback is called as ``callback(msg)`` from the thread that calls
+        _recv().  Use a thread-safe queue inside the callback if the hook needs
+        to hand messages to another thread.
+        """
+        self._msg_hooks.append(callback)
+
+    def _recv(self, **kwargs):
+        """Thin wrapper around ``self._mav.recv_match`` that fires message hooks."""
+        msg = self._mav.recv_match(**kwargs)
+        if msg is not None:
+            self._track_msg_timing(msg)
+            for hook in self._msg_hooks:
+                try:
+                    hook(msg)
+                except Exception:
+                    pass
+        return msg
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -226,7 +251,7 @@ class RawesGCS:
 
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                msg = self._mav.recv_match(
+                msg = self._recv(
                     type="PARAM_VALUE", blocking=True, timeout=1.0
                 )
                 if msg is None:
@@ -250,7 +275,7 @@ class RawesGCS:
             )
             verify_deadline = time.monotonic() + 2.0
             while time.monotonic() < verify_deadline:
-                msg = self._mav.recv_match(
+                msg = self._recv(
                     type="PARAM_VALUE", blocking=True, timeout=0.5
                 )
                 if msg is None:
@@ -287,7 +312,7 @@ class RawesGCS:
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self._mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+            msg = self._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
             if msg is None:
                 continue
             pid = msg.param_id.rstrip("\x00")
@@ -312,7 +337,7 @@ class RawesGCS:
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self._mav.recv_match(
+            msg = self._recv(
                 type=["ATTITUDE", "STATUSTEXT", "EKF_STATUS_REPORT"],
                 blocking=True, timeout=1.0,
             )
@@ -351,7 +376,7 @@ class RawesGCS:
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self._mav.recv_match(
+            msg = self._recv(
                 type="EKF_STATUS_REPORT", blocking=True, timeout=2.0
             )
             if msg is None:
@@ -409,13 +434,12 @@ class RawesGCS:
                 t_last_override = time.monotonic()
                 _poll = wall_s(0.5)   # re-read in case estimator updated
 
-            msg = self._mav.recv_match(
+            msg = self._recv(
                 type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
                 blocking=True, timeout=max(_poll, 0.005),
             )
             if msg is None:
                 continue
-            self._track_msg_timing(msg)   # update speed estimator
 
             if msg.get_type() == "STATUSTEXT":
                 log.warning("STATUSTEXT during arm: %s",
@@ -503,14 +527,13 @@ class RawesGCS:
                 t_last_override = time.monotonic()
                 _poll = wall_s(0.5)
 
-            msg = self._mav.recv_match(
+            msg = self._recv(
                 type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
                 blocking=True,
                 timeout=max(_poll, 0.005),
             )
             if msg is None:
                 continue
-            self._track_msg_timing(msg)
             t = msg.get_type()
             if t == "HEARTBEAT":
                 if msg.custom_mode == mode_id:
@@ -644,7 +667,7 @@ class RawesGCS:
         """
         Return current LOCAL_POSITION_NED (x=N, y=E, z=D) or None on timeout.
         """
-        msg = self._mav.recv_match(
+        msg = self._recv(
             type="LOCAL_POSITION_NED", blocking=True, timeout=timeout
         )
         if msg:
@@ -655,9 +678,137 @@ class RawesGCS:
         self, timeout: float = 2.0
     ) -> tuple[float, float, float] | None:
         """Return (roll, pitch, yaw) radians or None on timeout."""
-        msg = self._mav.recv_match(
+        msg = self._recv(
             type="ATTITUDE", blocking=True, timeout=timeout
         )
         if msg:
             return (msg.roll, msg.pitch, msg.yaw)
         return None
+
+
+# ---------------------------------------------------------------------------
+# EkfLogger — continuous EKF state capture on a second MAVLink connection
+# ---------------------------------------------------------------------------
+
+#: CSV columns written by EkfLogger.  One row per ATTITUDE message.
+EKF_LOG_COLUMNS: list[str] = [
+    "time_boot_ms",
+    # ArduPilot EKF attitude estimate (ATTITUDE msg)
+    "att_roll", "att_pitch", "att_yaw",
+    "att_rollspeed", "att_pitchspeed", "att_yawspeed",
+    # EKF position + velocity (LOCAL_POSITION_NED msg)
+    "pos_n", "pos_e", "pos_d",
+    "vel_n", "vel_e", "vel_d",
+    # EKF health (EKF_STATUS_REPORT msg — may lag behind by one ATTITUDE interval)
+    "ekf_flags",
+    "ekf_vel_variance",
+    "ekf_pos_horiz_variance",
+    "ekf_pos_vert_variance",
+    "ekf_compass_variance",
+    "ekf_terrain_alt_variance",
+]
+
+
+class EkfLogger:
+    """
+    Logs EKF state to a CSV file by hooking into an existing RawesGCS connection.
+
+    Registers itself as a message hook on the GCS so it receives every MAVLink
+    message the GCS processes — no second TCP connection needed.  One row is
+    written per ATTITUDE message using the most recently seen LOCAL_POSITION_NED
+    and EKF_STATUS_REPORT values.
+
+    Usage
+    -----
+        logger = EkfLogger()
+        logger.start("logs/test_foo/ekf_telemetry.csv", gcs)
+        ...test...
+        logger.stop()
+    """
+
+    def __init__(self):
+        import queue as _queue
+        self._log_path: Path | None = None
+        self._thread:   threading.Thread | None = None
+        self._stop      = threading.Event()
+        self._queue     = _queue.SimpleQueue()
+
+    def start(self, log_path: "str | Path", gcs: "RawesGCS") -> None:
+        """Register hook on *gcs* and start the background writer thread."""
+        self._log_path = Path(log_path)
+        self._stop.clear()
+        gcs.add_message_hook(self._on_message)
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="ekf-logger"
+        )
+        self._thread.start()
+        log.debug("EkfLogger started -> %s", self._log_path)
+
+    def stop(self) -> None:
+        """Signal the writer thread to stop and wait for it to finish."""
+        self._stop.set()
+        self._queue.put(None)  # unblock the writer
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    def _on_message(self, msg) -> None:
+        """Called from the GCS thread for every received MAVLink message."""
+        mt = msg.get_type()
+        if mt in ("ATTITUDE", "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"):
+            self._queue.put(msg)
+
+    def _run(self) -> None:
+        import csv as _csv
+
+        assert self._log_path is not None
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        last_pos: dict = {}
+        last_ekf: dict = {}
+
+        with self._log_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = _csv.DictWriter(fh, fieldnames=EKF_LOG_COLUMNS)
+            writer.writeheader()
+
+            while not self._stop.is_set():
+                try:
+                    msg = self._queue.get(timeout=0.5)
+                except Exception:
+                    continue
+                if msg is None:
+                    break
+
+                mt  = msg.get_type()
+                tbs = int(getattr(msg, "time_boot_ms", 0))
+
+                if mt == "LOCAL_POSITION_NED":
+                    last_pos = {
+                        "pos_n": msg.x,  "pos_e": msg.y,  "pos_d": msg.z,
+                        "vel_n": msg.vx, "vel_e": msg.vy, "vel_d": msg.vz,
+                    }
+
+                elif mt == "EKF_STATUS_REPORT":
+                    last_ekf = {
+                        "ekf_flags":                msg.flags,
+                        "ekf_vel_variance":         msg.velocity_variance,
+                        "ekf_pos_horiz_variance":   msg.pos_horiz_variance,
+                        "ekf_pos_vert_variance":    msg.pos_vert_variance,
+                        "ekf_compass_variance":     msg.compass_variance,
+                        "ekf_terrain_alt_variance": msg.terrain_alt_variance,
+                    }
+
+                elif mt == "ATTITUDE" and last_pos:
+                    row: dict = {
+                        "time_boot_ms":   tbs,
+                        "att_roll":       msg.roll,
+                        "att_pitch":      msg.pitch,
+                        "att_yaw":        msg.yaw,
+                        "att_rollspeed":  msg.rollspeed,
+                        "att_pitchspeed": msg.pitchspeed,
+                        "att_yawspeed":   msg.yawspeed,
+                    }
+                    row.update(last_pos)
+                    row.update(last_ekf)
+                    writer.writerow(row)
+                    fh.flush()

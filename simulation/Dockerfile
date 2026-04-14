@@ -66,7 +66,7 @@ RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
 USER sim
 ENV USER=sim
 RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        git clone --recurse-submodules --branch sitl-json-rpm-feedback \
+        git clone --recurse-submodules --branch sitl-json-rpm-feedback-4.6.3 \
             https://github.com/mcroomp/ardupilot.git "$ARDUPILOT_PATH" \
         && cd "$ARDUPILOT_PATH" \
         && unset VIRTUAL_ENV \

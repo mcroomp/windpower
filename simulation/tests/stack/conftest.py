@@ -43,6 +43,7 @@ from stack_utils import (
     ARDUPILOT_ENV,
     STACK_ENV_FLAG,
     SIM_VEHICLE_ENV,
+    ParamSetup,
     _launch_mediator,
     _launch_mediator_torque,
     _launch_sitl,
@@ -58,12 +59,39 @@ from stack_utils import (
 import socket as _socket
 
 from pymavlink import mavutil as _mavutil
-from gcs import ACRO, STABILIZE, RawesGCS
+from gcs import ACRO, STABILIZE, RawesGCS, EkfLogger
 from controller import make_hold_controller
 from sim_time import sim_sleep
 
 _STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
 _RAWES_DEFAULTS_PARM  = _STACK_DIR / "rawes_sitl_defaults.parm"
+
+# ── Flight fixture boot params ────────────────────────────────────────────────
+# All ACRO/flight fixtures boot SITL with this complete parameter set.
+# Combined with always-wipe EEPROM in _launch_sitl, this is the single source
+# of truth — no EEPROM contamination from sequential tests is possible.
+#
+# rawes_sitl_defaults.parm provides EKF/compass/collective params.
+# _BASE_ACRO_PARAMS adds the MAVLink-side ACRO mode params.
+# Per-fixture extras (e.g. SCR_USER6, COL_CRUISE_FLIGHT_RAD) are merged on top.
+#
+# EKF params (EK3_*, COMPASS_*) are ONLY in the boot file — never set via
+# MAVLink — because setting them post-boot triggers EKF3 yaw-state reset.
+_BASE_ACRO_PARAMS = ParamSetup({
+    "SCR_ENABLE":       1,      # Lua scripting — always enabled; boot file avoids
+                                # the prime_eeprom bootstrap that was needed before
+    "INITIAL_MODE":     1,      # boot directly into ACRO (mode 1)
+    "FS_THR_ENABLE":    0,      # no RC throttle failsafe
+    "FS_GCS_ENABLE":    0,      # no GCS heartbeat failsafe
+    "FS_EKF_ACTION":    0,      # disable EKF failsafe
+    "H_RSC_MODE":       1,      # CH8 passthrough — instant runup_complete
+    "ACRO_TRAINER":     0,      # disable auto-leveling (physical tilt ~65 deg)
+    "ATC_RAT_RLL_IMAX": 0.0,   # zero I-term limits — orbital rate accumulates
+    "ATC_RAT_PIT_IMAX": 0.0,
+    "ATC_RAT_YAW_IMAX": 0.0,
+    "H_SW_TYPE":        3,      # H3_120 swashplate
+    "H_SW_H3_PHANG":    0,      # no phase correction (RAWES geometry)
+})
 
 
 
@@ -201,8 +229,7 @@ class StackConfig:
         # Using fuser -k rather than pkill-by-name avoids killing processes mid-EEPROM-write
         # which corrupts eeprom.bin and causes a reload loop on the next SITL boot.
         for host, port, proto, hint in cls._PORT_CHECKS:
-            if proto == "tcp":
-                _kill_by_port(port)
+            _kill_by_port(port, proto)
 
         # Step 2: brief wait for sockets to be released
         _time.sleep(1.0)
@@ -311,12 +338,13 @@ import numpy as _np
 @contextlib.contextmanager
 def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefix="",
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
-                prime_eeprom: bool = False, speedup: int = 1,
+                extra_boot_params: "dict[str, float] | None" = None,
+                speedup: int = 1,
                 internal_controller: bool | None = None):
     """
     Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
-    All fixtures (acro_armed, acro_armed_pumping, acro_armed_lua) call this.
+    All fixtures call this.
     Differences between them are handled outside this function:
       - extra_config   : pumping cycle passes trajectory config here
       - pre-launch work: Lua fixture installs scripts before calling this
@@ -365,6 +393,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     sitl_log      = tmp_path / "sitl.log"
     gcs_log       = tmp_path / "gcs.log"
     telemetry_log = tmp_path / "telemetry.csv"
+    ekf_log       = tmp_path / "ekf_telemetry.csv"
 
     _configure_logging(gcs_log)
     log = logging.getLogger(log_name)
@@ -382,16 +411,23 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     # Always install rawes.lua so it is available if scripting is enabled.
     _install_lua_scripts("rawes.lua")
 
-    # ── EEPROM / Lua: SCR_ENABLE=1 is set via MAVLink in step 3 and persists.
-    # For the Lua fixture specifically: prime_eeprom=True always runs a short
-    # SITL boot to pre-seed SCR_ENABLE=1 into eeprom.bin.  We cannot skip this
-    # based on eeprom.bin existing because the file may have been created by a
-    # non-Lua test that never set SCR_ENABLE=1.
-    if prime_eeprom:
-        ardupilot_root = sim_vehicle.parent.parent.parent
-        log.info("%s: Priming EEPROM for Lua scripting (SCR_ENABLE=1) ...", log_name)
-        _prime_sitl_eeprom(sim_vehicle)
-        log.info("%s: EEPROM primed.", log_name)
+    # ── Per-test boot param file ──────────────────────────────────────────────
+    # Build one complete ParamSetup for this test: rawes defaults + base ACRO
+    # params + servo speed (runtime value) + fixture-specific extras.
+    # Write it as the SITL --add-param-file.  Combined with always-wipe EEPROM
+    # in _launch_sitl, this file is the single source of truth — no carryover
+    # from previous tests is possible.
+    _servo_speed = _rd.default().sim_servo_speed
+    _boot_setup = (
+        ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
+        .merge(_BASE_ACRO_PARAMS)
+        .merge(ParamSetup({"SIM_SERVO_SPEED": _servo_speed}))
+        .merge(ParamSetup(controller.extra_params))
+        .merge(ParamSetup(extra_boot_params or {}))
+    )
+    boot_parm_file = tmp_path / "boot_params.parm"
+    _boot_setup.write_parm_file(boot_parm_file)
+    log.info("Boot params file: %s  (%d entries)", boot_parm_file, len(_boot_setup))
 
     # ── Launch ────────────────────────────────────────────────────────────────
     _run_id = int(time.time())
@@ -414,7 +450,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     else:
         mediator_proc = None
     sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
-                             add_param_file=_RAWES_DEFAULTS_PARM,
+                             add_param_file=boot_parm_file,
                              speedup=speedup)
 
     def _procs_alive():
@@ -442,16 +478,39 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     label = "_".join(filter(None, [log_prefix, test_name]))
     test_log_dir = make_test_log_dir(sim_dir, label) if label else sim_dir / "logs"
 
+    # EKF logger hooks into the GCS message stream — no second TCP connection.
+    # Started after _run_acro_setup so gcs is already connected before we hook.
+    ekf_logger = EkfLogger()
+
     try:
         if arm:
-            _run_acro_setup(ctx, _procs_alive)
+            _run_acro_setup(ctx, _procs_alive, boot_setup=_boot_setup)
+        ekf_logger.start(ekf_log, gcs)
         yield ctx
     finally:
+        ekf_logger.stop()
         gcs.close()
         _terminate_process(sitl_proc)
         if mediator_proc is not None:
             _terminate_process(mediator_proc)
-        _kill_by_port(StackConfig.SITL_GCS_PORT)
+        _kill_by_port(StackConfig.SITL_GCS_PORT, "tcp")
+        _kill_by_port(StackConfig.SITL_JSON_PORT, "udp")
+        # Belt-and-suspenders: sim_vehicle.py spawns arducopter-heli in its own
+        # process group, so os.killpg() on sim_vehicle.py's PID misses it.
+        # pkill -f catches any survivors by name regardless of port state.
+        import subprocess as _subprocess
+        # Use pgrep+xargs rather than pkill -f to avoid pkill matching its own
+        # command-line args and sending SIGKILL to itself before all targets die.
+        # pgrep without -f matches by process name (argv[0]), so no self-match.
+        # /sim_vehicle.py path segment is specific enough not to hit pgrep itself.
+        _subprocess.run(
+            ["bash", "-c", "pgrep arducopter-heli | xargs -r kill -9"],
+            capture_output=True,
+        )
+        _subprocess.run(
+            ["bash", "-c", "pgrep -f /sim_vehicle.py | xargs -r kill -9"],
+            capture_output=True,
+        )
         _logs = {
             "sitl.log": sitl_log,
             "gcs.log":  gcs_log,
@@ -459,6 +518,8 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         if with_mediator:
             _logs["mediator.log"]  = mediator_log
             _logs["telemetry.csv"] = telemetry_log
+        if ekf_log.exists():
+            _logs["ekf_telemetry.csv"] = ekf_log
         copy_logs_to_dir(test_log_dir, _logs)
         # Copy the ArduCopter terminal log (truncated per-test in _launch_sitl)
         _ardupilot_log = Path("/tmp/ArduCopter.log")
@@ -476,54 +537,6 @@ def acro_armed(tmp_path, request):
     """Full ACRO stack fixture. Yields StackContext armed in ACRO mode."""
     speedup = request.config.getoption("--sitl-speedup", default=1)
     with _acro_stack(tmp_path, test_name=request.node.name, speedup=speedup) as ctx:
-        yield ctx
-
-
-@pytest.fixture
-def acro_armed_pumping(tmp_path, request):
-    """
-    Pumping-cycle variant of acro_armed.
-
-    Mediator is launched with trajectory=deschutter so the pumping-cycle
-    state machine runs (internal_controller=True required).
-    """
-    import config as _mcfg
-    _dcfg = _mcfg.DEFAULTS["trajectory"]["deschutter"]
-    extra = {
-        # t_hold_s: brief post-kinematic settle window before reel-out starts.
-        # The winch does not pay out during the kinematic phase regardless of
-        # t_hold_s (the planner only runs when damp_alpha == 0.0).  This hold
-        # just lets TensionPI reach the reel-out setpoint before the winch
-        # starts paying out tether.  10 s is sufficient since:
-        #   (a) the hub exits kinematic at pos0/vel=0/R=R0 (locked throughout)
-        #   (b) tether tension is ~200 N immediately (stale-tension fix)
-        #   (c) TensionPI warm-start seeds the integral at equilibrium collective
-        # kinematic_vel_ramp_s uses the default (15 s) so hub arrives at exit
-        # with vel=0; R is locked to R0 throughout so body_z is correct.
-        "trajectory": {
-            "type": "deschutter",
-            "hold": {},
-            "deschutter": {
-                **{k: _dcfg[k] for k in (
-                    "t_reel_out", "t_reel_in", "t_transition",
-                    "v_reel_out", "v_reel_in", "tension_out", "tension_in",
-                )},
-                "t_hold_s": 10.0,
-            },
-        },
-    }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_pumping", log_prefix="pumping",
-                     test_name=request.node.name, speedup=speedup,
-                     # ArduPilot RC overrides at 10 Hz cannot recover the hub
-                     # from the kinematic-exit tether jolt fast enough.  The
-                     # internal controller runs at 400 Hz using the same physical
-                     # equations as the real Pixhawk — this is MORE representative
-                     # of hardware than the 10 Hz MAVLink RC override interface.
-                     # test_acro_hold separately validates ArduPilot cyclic control
-                     # via internal_controller=False.
-                     internal_controller=True) as ctx:
         yield ctx
 
 
@@ -558,7 +571,7 @@ def acro_armed_pumping_lua(tmp_path, request):
         "RAWES pump: reel_out" STATUSTEXT appears.
       - Pumping cycle physics (TensionPI + OrbitTracker) remain unchanged.
     Lua's cyclic orbit tracking and collective logic (COL_REEL_OUT / COL_REEL_IN)
-    are validated separately by test_lua_flight_rc_overrides (cyclic) and unit
+    are validated separately by test_lua_flight_steady (cyclic) and unit
     tests (collective formula).
     """
     import config as _mcfg
@@ -585,12 +598,11 @@ def acro_armed_pumping_lua(tmp_path, request):
     with _acro_stack(tmp_path, extra_config=extra,
                      log_name="acro_armed_pumping_lua", log_prefix="pumping_lua",
                      test_name=request.node.name, speedup=speedup,
-                     prime_eeprom=True,
-                     # See docstring above: orbital tether geometry gives net
-                     # downward force at kinematic exit; 50 Hz Lua RC overrides
-                     # cannot recover.  internal_controller=True matches the
-                     # rationale of acro_armed_pumping (same exception in CLAUDE.md).
-                     internal_controller=True) as ctx:
+                     
+                     # internal_controller=False: SITL stack tests must let ArduPilot
+                     # + Lua drive physics (CLAUDE.md critical rule).  Lua RC overrides
+                     # at 50 Hz control cyclic; collective is also via Lua Ch3.
+                     internal_controller=False) as ctx:
         # Post-arm: configure rawes.lua via SCR_USER params.
         ctx.log.info("Setting SCR_USER params for rawes.lua (pumping mode) ...")
         lua_params = {
@@ -606,8 +618,8 @@ def acro_armed_pumping_lua(tmp_path, request):
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
 
-        # Motor interlock keepalive (Ch8=2000); Lua owns Ch1/Ch2/Ch3.
-        ctx.gcs.send_rc_override({8: 2000})
+        # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
+        # Tests must NOT send RC overrides.
 
         # Drain STATUSTEXT that arrived during param setting.
         import time as _time
@@ -628,11 +640,23 @@ def acro_armed_landing_lua(tmp_path, request):
     Landing stack fixture with rawes.lua active in landing mode (SCR_USER6=4).
 
     Extends acro_armed_landing:
-      - internal_controller=False (Lua owns cyclic+collective via RC overrides).
+      - internal_controller=False: ArduPilot + Lua own the physics (CLAUDE.md
+        critical rule — SITL tests must validate the actual control loop).
+      - kinematic_vel_ramp_s=20: hub exits kinematic at vel=0, eliminating the
+        linear tether jolt that required internal_controller=True in prior attempts.
+        Tether extension at exit ~ 0 m, tension ~ 0 N; Lua's 50 Hz is sufficient.
       - rawes.lua installed before SITL starts.
-      - SCR_USER1..6 configured post-arm (SCR_USER6=4 = landing mode).
-      - No RC_CHANNELS_OVERRIDE sent: Lua owns Ch1/Ch2/Ch3 entirely.
-        vz_setpoint is hardcoded in Lua (0.5 m/s descent for landing mode).
+      - SCR_USER1..5 configured post-arm immediately; SCR_USER6=4 set so Lua
+        starts in landing mode; KINEMATIC_SETTLE_MS=62000 delays body_z capture
+        until EKF has converged.
+      What is validated:
+          (a) Lua enters landing mode and body_z capture fires on schedule
+              ("RAWES land: captured" STATUSTEXT at t≈62 s).
+          (b) Lua alt_est computation is correct: "RAWES land: final_drop"
+              STATUSTEXT fires when alt_est <= LAND_MIN_TETHER_M=2 m.
+          (c) Hub descends to floor and tension stays safe (Lua + LandingPlanner).
+        Lua's VZ descent and orbit-tracking formulas are covered by unit tests
+        and test_lua_flight_steady.
 
     Hub starts at tether equilibrium with xi=80 deg (10 deg from horizontal).
     Matches test_landing.py: BZ_INIT=[0, cos(80), -sin(80)], pos0=20*BZ_INIT.
@@ -645,22 +669,29 @@ def acro_armed_landing_lua(tmp_path, request):
         vel0=[0, 0.96, 0] yaw=+pi/2, so no GPS Glitch at kinematic exit.
       - vel0[2]=0: altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
 
-    Lua captures body_z ~2s after kinematic exit (empirically consistent across
-    all Lua stack tests). During those 2s, BEM provides small but valid thrust at
-    neutral collective (col~-0.008 rad), and tether equilibrium prevents free-fall.
-    After capture, Lua VZ controller descends at 0.5 m/s to alt<=2 m, then
-    triggers final_drop.
+    Timing (from mediator start, speedup=1):
+      t=0..45 s   kinematic constant-velocity phase (vel=0.96 m/s East)
+      t≈23 s      GPS fuses (EK3_GPS_CHECK=0 + widened gates)
+      t~15 s      arm complete; fixture sets SCR_USER1-6; yields to test
+      t=45..65 s  kinematic ramp phase: vel ramps 0.96→0 m/s (vel_ramp_s=20)
+      t~51 s      ahrs:healthy() True; Lua enters KINEMATIC_SETTLE_MS wait
+      t~62 s      Lua KINEMATIC_SETTLE_MS (62 s) expires; captures body_z
+      t~62..65 s  Lua sends RC overrides; kinematic still ramps vel to 0
+      t=65 s      kinematic exits; hub at pos0 with vel=0, tension~0
+      t~65..102 s Lua VZ controller descends hub; LandingPlanner reels in winch
+      t~102 s     Lua triggers final_drop STATUSTEXT (alt_est <= 2 m)
+      fixture yields at t~15 s; test observes for 165 s (until t~180 s SITL)
     """
     _xi_rad = math.radians(80.0)
     _tether_m = 20.0
     extra = {
-        # kinematic_vel_ramp_s=0: keep vel0 constant throughout the 65 s kinematic
-        # so GPS innovations stay small and EKF fuses GPS during kinematic (~37-54 s).
-        # rawes_sitl_defaults.parm is tuned for this constant-velocity pattern.
-        # With internal_controller=False, Lua must be active before kinematic exits
-        # (t=65 s) so it can immediately control the hub.  GPS fusion during kinematic
-        # guarantees Lua is live well before kinematic exit.
-        "kinematic_vel_ramp_s": 0.0,
+        # kinematic_vel_ramp_s=20: hub velocity ramps from 0.96 m/s (East) to 0
+        # over the last 20 s of the kinematic phase (t=45..65 s), so hub arrives at
+        # pos0 with vel=0.  This eliminates the linear tether jolt: at kinematic
+        # exit the hub is stationary at the tether equilibrium point, tether
+        # extension ~ 0, tension ~ 0.  GPS fuses during the constant-velocity phase
+        # (t ~ 23 s; EK3_GPS_CHECK=0 + widened gates in rawes_sitl_defaults.parm).
+        "kinematic_vel_ramp_s": 20.0,
         # pos0: hub at tether equilibrium for xi=80 deg (matches test_landing.py).
         # tether direction = body_z, so tether is nearly slack at kinematic exit.
         "pos0":              [0.0,
@@ -668,27 +699,43 @@ def acro_armed_landing_lua(tmp_path, request):
                               -math.sin(_xi_rad) * _tether_m], # ~-19.696 m (alt 19.7 m)
         # vel0 points East; EKF establishes yaw=+pi/2 (East) during kinematic.
         # orb_yaw for body_z=[0, cos(80), -sin(80)] is also +pi/2 (East), so no
-        # yaw discontinuity when kinematic velocity ramps to zero at t=65s.
+        # GPS Glitch at kinematic exit.
         "vel0":              [0.0, 0.96, 0.0],
         "body_z":            [0.0, math.cos(_xi_rad), -math.sin(_xi_rad)],
         "omega_spin":        20.0,
         "tether_rest_length": _tether_m,
         "trajectory": {
             "type":    "landing",
-            "landing": {},   # all values from DEFAULTS["trajectory"]["landing"]
+            "landing": {
+                # tension_target_n: at xi=80 deg hover the equilibrium tether
+                # tension is ~190 N (hub weight + thrust vertical imbalance).
+                # The default (80 N) was designed for orbital transition where
+                # tether tension is low.  At 80 N the PI pays OUT instead of
+                # reeling in.  200 N keeps PI in reel-in mode throughout descent.
+                "tension_target_n": 200.0,
+            },
         },
     }
     speedup = request.config.getoption("--sitl-speedup", default=1)
     with _acro_stack(tmp_path, extra_config=extra,
                      log_name="acro_armed_landing_lua", log_prefix="landing_lua",
                      test_name=request.node.name, speedup=speedup,
-                     prime_eeprom=True,
+                     
+                     # internal_controller=False: SITL stack tests must let
+                     # ArduPilot + Lua drive physics (CLAUDE.md critical rule).
+                     # kinematic_vel_ramp_s=20 ensures vel=0 at kinematic exit,
+                     # eliminating the linear tether jolt.  Lua's 50 Hz is
+                     # sufficient for the residual angular perturbations.
                      internal_controller=False) as ctx:
         # Post-arm: configure rawes.lua via SCR_USER params.
         # SCR_USER5 = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
         # vel0[2]=0 => altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
         # anch_EKF.z = SCR_USER5 = -pos0[2] = altitude above EKF origin.
         # Lua: alt_est = anch.z - hub_ned.z (hub_ned.z from LOCAL_POSITION_NED).
+        #
+        # SCR_USER6=4 set here; rawes.lua DELAYS body_z capture until
+        # millis() >= KINEMATIC_SETTLE_MS (62 s) to ensure EKF has converged.
+        import time as _time
         ctx.log.info("Setting SCR_USER params for rawes.lua (landing mode) ...")
         lua_params = {
             "SCR_ENABLE": 1,                    # persist scripting in EEPROM for future boots
@@ -704,7 +751,6 @@ def acro_armed_landing_lua(tmp_path, request):
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
 
         # Drain any STATUSTEXT that arrived during param setting.
-        import time as _time
         _t_drain = _time.monotonic() + 1.0
         while _time.monotonic() < _t_drain:
             _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
@@ -742,28 +788,70 @@ def _install_lua_scripts(*names: str) -> None:
 
 
 @pytest.fixture
-def acro_armed_lua(tmp_path, request):
+def acro_armed_lua_full(tmp_path, request):
     """
-    ACRO stack fixture with rawes.lua active in flight mode (SCR_USER6=1).
+    Full-stack ACRO fixture with rawes.lua in flight mode (SCR_USER6=1),
+    internal_controller=False.
 
-    Extends acro_armed with:
-      1. rawes.lua installed to /ardupilot/scripts/ before SITL starts.
-      2. SCR_USER1..5 (kp, slew rate, anchor NED) and SCR_USER6=1 set via MAVLink after arm.
+    Uses the same initial conditions as every other passing stack test:
+    pos0/body_z/omega_spin/rest_length from steady_state_starting.json
+    (natural orbit equilibrium at xi~8 deg, 100 m tether, altitude~14 m);
+    vel0 from config.py defaults (~0.96 m/s orbital velocity).
 
-    Lua's RC overrides are observable from SERVO_OUTPUT_RAW while the
-    mediator's internal controller stabilises physics (internal_controller=True).
+    This mirrors test_closed_loop_60s.py (the validating simtest) exactly:
+    same position, same orbit, but Lua owns cyclic + collective instead of
+    the internal Python controller.
+
+    Key design points:
+      - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
+      - kinematic_vel_ramp_s=0: vel0 held constant throughout 65 s kinematic
+        so GPS innovations stay non-zero and EKF fuses GPS at ~54 s (during
+        kinematic, before Lua capture at t=66.5 s).
+      - COL_CRUISE_FLIGHT_RAD=-0.18 rad in rawes.lua matches stack_coll_eq
+        from test_steady_flight.py: altitude-neutral at the natural orbit.
+      - Lua VZ altitude-hold (vz_sp=0): bidirectional P controller around
+        COL_CRUISE_FLIGHT_RAD=-0.18 rad.  Mediator decode is asymmetric
+        (col_min=-0.28, col_max=0.10) matching Lua's encoding exactly.
+
+    Timeline (SITL time):
+      t=0..65 s   kinematic (hub at constant vel0 from launch_pos to pos0)
+      t~21 s      EKF3 GPS origin set
+      t~54 s      GPS fuses (EKF3 transitions to horiz_pos_abs); pos_ned available
+      t=62 s      Lua captures body_z (FLIGHT_SETTLE_MS=62000 ms, 3 s before exit)
+                  _tdir0 set immediately from GPS position (~100 m tlen); orbit
+                  tracking active before kinematic exits — eliminates neutral-stick
+                  crash at exit.
+      t=65 s      kinematic exits; Lua orbit-tracking cyclic already active
+      t=65+       free flight under ArduPilot + Lua
+
+    Fixture yields at ~t=15 s.  Observation window of 200 s covers kinematic
+    exit (t_obs~50 s) + Lua capture (t_obs~47 s) + >=60 s stable orbit.
     """
+    extra = {
+        # kinematic_vel_ramp_s=0: keep vel0 constant throughout kinematic.
+        # Default (15 s ramp) tapers vel to 0 in the last 15 s, which reduces
+        # GPS innovations and delays fusion.  Constant vel0 gives consistent
+        # GPS innovations so EKF fuses at ~54 s (within kinematic window),
+        # ensuring GPS is available before Lua captures at t=66.5 s.
+        "kinematic_vel_ramp_s": 0.0,
+        # No pos0/vel0/body_z/tether overrides: use steady_state_starting.json
+        # (same as acro_armed, test_wobble, etc.).
+    }
     speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, log_name="acro_armed_lua", log_prefix="lua",
-                     test_name=request.node.name, prime_eeprom=True, speedup=speedup,
-                     internal_controller=True) as ctx:
+    with _acro_stack(tmp_path, extra_config=extra,
+                     log_name="acro_armed_lua_full", log_prefix="lua_full",
+                     test_name=request.node.name, speedup=speedup,
+                     
+                     # CLAUDE.md critical rule: internal_controller=False for all
+                     # full-stack flight tests.  ArduPilot + Lua own the physics.
+                     internal_controller=False) as ctx:
         # Post-arm: configure rawes.lua via SCR_USER params.
-        # SCR_USER5 = home_alt_m: anchor is home_alt_m metres below EKF HOME
-        # (sensor.py sets pos_ned_rel[2] = pos_ned[2] + home_alt_m, so physics
-        # anchor NED [0,0,0] appears at LOCAL [0, 0, home_alt_m]).
-        ctx.log.info("Setting SCR_USER params for rawes.lua (flight mode) ...")
+        # SCR_USER5 = ctx.home_alt_m: anchor is home_alt_m metres below EKF HOME
+        # (sensor.py pos_ned_rel[2] = pos_ned[2] + home_alt_m; physics anchor NED
+        # [0,0,0] appears at LOCAL [0, 0, home_alt_m]).  Matches acro_armed_lua.
+        ctx.log.info("Setting SCR_USER params for rawes.lua (flight mode, full-stack) ...")
         lua_params = {
-            "SCR_ENABLE": 1,              # persist scripting in EEPROM for future boots
+            "SCR_ENABLE": 1,              # persist scripting in EEPROM
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
             "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
             "SCR_USER3": 0.0,             # anchor North   [m]
@@ -775,9 +863,10 @@ def acro_armed_lua(tmp_path, request):
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
 
-        # Drain any STATUSTEXT that arrived during param setting (including
-        # "RAWES flight: captured" which Lua may have sent while the GCS was
-        # busy with PARAM_VALUE exchanges and couldn't process STATUSTEXT).
+        # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
+        # Tests must NOT send RC overrides.
+
+        # Drain STATUSTEXT that arrived during param setting.
         import time as _time
         _t_drain = _time.monotonic() + 1.0
         while _time.monotonic() < _t_drain:
@@ -794,7 +883,7 @@ def acro_armed_lua(tmp_path, request):
 # Setup sequence
 # ---------------------------------------------------------------------------
 
-def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
+def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | None" = None) -> None:
     """
     Shared ACRO setup sequence.
 
@@ -805,8 +894,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     Steps:
         1. Connect GCS; request telemetry streams; clear motor interlock
         2. Wait for param subsystem
-        3. Set ACRO parameters  (H_RUNUP_TIME intentionally omitted — force
-           arm bypasses that check, and attempting to set it wastes 23 s)
+        3. Verify all boot params via MAVLink read-back (pytest.fail on mismatch)
         4. Wait for EKF tilt alignment — FAIL HARD if it doesn't arrive
         5. Arm with force=True (motor interlock low → arm → raise interlock)
         6. Confirm ACRO mode
@@ -861,58 +949,11 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
     _wait_params_ready(gcs, log)
     _procs_alive()
 
-    # ── 3. ACRO parameters ────────────────────────────────────────────────────
-    # H_RSC_MODE=1 (CH8 Passthrough): RSC output = CH8 input directly.
-    #   No ramp / runup sequence — runup_complete fires immediately when CH8
-    #   is high.  SITL default (0) is INVALID ("H_RSC_MODE invalid" auto-
-    #   disarm).  Modes 2–4 all require a runup wait AND motor interlock ON.
-    #   Mode 1 with CH8=2000 gives instant runup_complete so HEARTBEAT shows
-    #   armed=True immediately after the force arm ACK.
-    #   Note: AP_MotorsHeli::output() clears _flags.armed if runup_complete
-    #   is not set, regardless of force arm — this is why CH8 must be HIGH.
-    log.info("[setup 3/6] Setting ACRO parameters ...")
-    # All swashplate params are set explicitly so test results never depend on
-    # ArduPilot defaults (which may change between builds).
-    _base_params = {
-        "ARMING_SKIPCHK":   0xFFFF, # skip ALL pre-arm checks (bitmask: each bit = one check to skip)
-        "SCR_ENABLE":       1,      # enable Lua scripting; persisted to EEPROM for acro_armed_lua
-        "INITIAL_MODE":     1,      # boot into ACRO
-        "FS_THR_ENABLE":    0,      # no RC throttle failsafe
-        "FS_GCS_ENABLE":    0,      # no GCS heartbeat failsafe
-        "FS_EKF_ACTION":    0,      # disable EKF failsafe
-        "H_RSC_MODE":       1,      # CH8 passthrough — instant runup_complete
-        # Disable ACRO auto-leveling trainer: physical sensor mode reports
-        # roll≈58°/pitch≈-35° at tether equilibrium.  ACRO_TRAINER=1 (default)
-        # activates above 45° and commands large leveling corrections → rapid tumble.
-        "ACRO_TRAINER":     0,
-        # Zero ACRO I-term limits: orbital angular velocity accumulates as a
-        # persistent rate error, causing ever-growing cyclic and hub crash (~4 s).
-        "ATC_RAT_RLL_IMAX": 0.0,
-        "ATC_RAT_PIT_IMAX": 0.0,
-        "ATC_RAT_YAW_IMAX": 0.0,
-        # Swashplate geometry — set explicitly to avoid build-to-build default drift.
-        # H3_120: CH_1 at -60 deg, CH_2 at +60 deg, CH_3 at 180 deg.
-        # H_SW_PHANG=0: no phase correction; ArduPilot H3_120 +90 deg roll advance
-        # aligns with RAWES servo layout (S1=0 deg/East, S2=120 deg, S3=240 deg).
-        "H_SW_TYPE":        3,      # 3 = H3_120  (subgroup H_SW_ + TYPE)
-        "H_SW_PHANG":       0,      # deg, reset to known state before each test
-        # Servo speed — derived from RotorDefinition to stay in sync with SwashplateServoModel
-        # in simtests.  SIM_SERVO_SPEED units: full output range (0..1) per second.
-        # DS113MG at 6V: 545 deg/s / 100 deg travel = 5.45
-        "SIM_SERVO_SPEED":  _rd.default().sim_servo_speed,
-    }
-    _acro_params = {**_base_params, **ctx.controller.extra_params}
-    for name, value in _acro_params.items():
-        ok = gcs.set_param(name, value, timeout=5.0)
-        if not ok:
-            log.warning("  %s=%s had no ACK — continuing", name, value)
-
-    # EK3 GPS/compass params are set as boot defaults in rawes_sitl_defaults.parm
-    # (EK3_SRC1_YAW=1, EK3_MAG_CAL=0, EK3_GPS_CHECK=0, COMPASS_USE=1,
-    # COMPASS_ENABLE=1).  We do NOT set them via MAVLink here — resetting the same
-    # value via MAVLink after boot can trigger a subtle EKF3 yaw-state reset that
-    # prevents GPS fusion (flags stay at 0x0400 GPS glitch instead of reaching
-    # 0x0010 horiz_pos_abs).
+    # ── 3 / 4. EKF alignment then boot-param verify ───────────────────────────
+    # EKF alignment is time-critical (must complete within kinematic startup).
+    # Param verify is a sanity-check only — it runs AFTER EKF ready so it
+    # doesn't delay the kinematic window.  All params are already in EEPROM
+    # from the boot file; verify just reads them back (no SET calls).
 
     # ── 4. EKF attitude alignment ─────────────────────────────────────────────
     # Wait for a clean ATTITUDE (EKF attitude ready) before arming.
@@ -1036,6 +1077,15 @@ def _run_acro_setup(ctx: StackContext, _procs_alive) -> None:
                     "force arm will proceed)")
 
     all_statustext += drain_statustext(gcs, log)
+    _procs_alive()
+
+    # ── 3. Verify boot parameters (after EKF ready — non-critical path) ───────
+    # EKF alignment is done, so verifying params here doesn't delay kinematic.
+    # Use a short per-param timeout (1 s): params respond instantly once SITL
+    # is running; anything that doesn't respond in 1 s is a genuine problem.
+    if boot_setup is not None:
+        log.info("[setup 3/6] Verifying boot parameters ...")
+        boot_setup.verify(gcs, log=log, read_timeout=1.0)
     _procs_alive()
 
     # Stabilisation wait: arm immediately when EKF3 first reports attitude
@@ -1383,42 +1433,103 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
 
 _TORQUE_STARTUP_HOLD_S: float = 10.0   # mediator yaw-spin duration for EKF bias alignment
 
-_BASE_TORQUE_PARAMS: list[tuple[str, float]] = [
-    # Safety / arming
-    ("ARMING_SKIPCHK",    0xFFFF),
-    ("FS_EKF_ACTION",     0),
-    ("FS_THR_ENABLE",     0),
+_BASE_TORQUE_PARAMS = ParamSetup({
+    # Safety / arming  (ARMING_SKIPCHK removed in ArduPilot 4.6; force-arm bypasses)
+    "FS_EKF_ACTION":     0,
+    "FS_THR_ENABLE":     0,
     # EKF -- compass yaw (suitable for stationary test)
-    ("COMPASS_USE",       1),
-    ("COMPASS_ENABLE",    1),
-    ("EK3_SRC1_YAW",      1),
-    ("EK3_MAG_CAL",       0),
-    ("EK3_GPS_CHECK",     0),
+    "COMPASS_USE":       1,
+    "COMPASS_ENABLE":    1,
+    "EK3_SRC1_YAW":      1,
+    "EK3_MAG_CAL":       0,
+    "EK3_GPS_CHECK":     0,
+    # EKF source config: disable GPS position/velocity for torque tests.
+    # Hub is stationary but tilted; GPS Glitch from g·sin(θ) lateral projection
+    # would make EKF unhealthy → arm fails.  Set here via MAVLink (not boot params)
+    # because Docker EEPROM has POSXY=3/VELXY=3 (compiled-in defaults) and boot
+    # params (--defaults) cannot override EEPROM.  MAVLink writes always override
+    # EEPROM.  EKF reinit from these writes is acceptable: the 45-second EKF
+    # alignment window + 40-second settle window give 85+ seconds for re-convergence
+    # before the 20-second observation window starts.
+    "EK3_SRC1_POSXY":    0,
+    "EK3_SRC1_VELXY":    0,
     # RSC -- CH8 passthrough: instant runup_complete when CH8=2000
-    ("H_RSC_MODE",        1),
-    ("H_RSC_RUNUP_TIME",  1),
+    "H_RSC_MODE":        1,
+    "H_RSC_RUNUP_TIME":  1,
     # Tail type -- servo (Type 0): neutral at 1500 us (bias mapping works correctly)
-    ("H_TAIL_TYPE",       0),
-    ("H_COL2YAW",         0.0),
+    "H_TAIL_TYPE":       0,
+    "H_COL2YAW":         0.0,
     # Yaw PID -- pure-P; motor back-EMF provides inherent speed regulation
-    ("ATC_RAT_YAW_P",     0.001),
-    ("ATC_RAT_YAW_I",     0.0),
-    ("ATC_RAT_YAW_D",     0.0),
-    ("ATC_RAT_YAW_IMAX",  0.0),
+    "ATC_RAT_YAW_P":     0.001,
+    "ATC_RAT_YAW_I":     0.0,
+    "ATC_RAT_YAW_D":     0.0,
+    "ATC_RAT_YAW_IMAX":  0.0,
     # Disable roll/pitch IMAX -- prevent swashplate wind-up on neutral sticks
-    ("ATC_RAT_RLL_IMAX",  0.0),
-    ("ATC_RAT_PIT_IMAX",  0.0),
-]
+    "ATC_RAT_RLL_IMAX":  0.0,
+    "ATC_RAT_PIT_IMAX":  0.0,
+})
+
+# Params that must be in the SITL boot param file (not set via MAVLink post-boot).
+#
+# ONE reason to put params here instead of in _BASE_TORQUE_PARAMS (MAVLink):
+#
+# PID/frame params (ATC_RAT_YAW_*, H_TAIL_TYPE): the mediator's physics become
+# active at t=10 s (TORQUE_STARTUP_HOLD_S) but MAVLink param-setting takes ~25 s.
+# During that window ArduPilot uses default helicopter PID gains (ATC_RAT_YAW_P ≈ 0.18)
+# which are ~180x larger than our 0.001 setpoint and cause the yaw loop to oscillate
+# at ±300 deg/s.  Those oscillations corrupt the EKF gyro-bias estimate so severely
+# that even after the hub settles (t≈38 s), ATTITUDE.yawspeed reads ~9 deg/s on a
+# flat, stationary hub.  Setting the PID gains at boot eliminates the oscillation
+# entirely.
+#
+# NOTE: EK3_SRC1_POSXY and EK3_SRC1_VELXY are set via MAVLink in _BASE_TORQUE_PARAMS
+# (not here) because Docker EEPROM (baked during image build) always overrides boot-time
+# --defaults param files.  MAVLink writes always override EEPROM.
+#
+# These are ALWAYS written to the SITL --add-param-file regardless of fixture; fixture
+# boot_params are merged on top and may override individual values (e.g. ATC_RAT_YAW_P=0
+# for the Lua fixture where Lua is the sole feedforward provider).
+_BASE_TORQUE_BOOT_PARAMS = ParamSetup({
+    # Failsafe — disable EKF failsafe
+    # (ARMING_SKIPCHK was removed in ArduPilot 4.6; force-arm bypasses checks)
+    "FS_EKF_ACTION":    0,
+    "FS_THR_ENABLE":    0,
+    # Compass — enable and do not auto-calibrate.  Default EK3_MAG_CAL=3 (auto) causes
+    # the EKF to distrust compass during calibration; when the wobble profile starts at
+    # t=10 s the EKF has no yaw reference → diverges badly.  Set =0 (no calibration) so
+    # compass headings are used from the first EKF loop.
+    "COMPASS_USE":      1,
+    "COMPASS_ENABLE":   1,
+    "EK3_SRC1_YAW":    1,     # compass yaw (default, but be explicit so boot is consistent)
+    "EK3_MAG_CAL":     0,     # no magnetometer calibration
+    "EK3_GPS_CHECK":   0,     # no GPS pre-arm check (GPS not used in torque tests)
+    # Yaw PID — tiny P so the motor doesn't oscillate before MAVLink params arrive.
+    # Default ATC_RAT_YAW_P ≈ 0.18 causes ±300 deg/s oscillations in the t=10-25 s
+    # window before MAVLink params are set, corrupting the EKF gyro-bias estimate.
+    "ATC_RAT_YAW_P":   0.001,
+    "ATC_RAT_YAW_I":   0.0,
+    "ATC_RAT_YAW_D":   0.0,
+    "ATC_RAT_YAW_IMAX": 0.0,
+    # Roll/pitch I-term — disable to prevent swashplate wind-up on neutral sticks
+    "ATC_RAT_RLL_IMAX": 0.0,
+    "ATC_RAT_PIT_IMAX": 0.0,
+    # Frame/tail config — must be correct before first ACRO command
+    "H_TAIL_TYPE":     0,     # servo tail: neutral at 1500 µs (default may be DDVP)
+    "H_COL2YAW":      0.0,
+    # RSC — enable CH8 passthrough (instant runup when CH8=2000)
+    "H_RSC_MODE":      1,
+    "H_RSC_RUNUP_TIME": 1,
+})
 
 # Applied after _BASE_TORQUE_PARAMS for the Lua feedforward fixture.
-_LUA_TORQUE_EXTRA_PARAMS: list[tuple[str, float]] = [
-    ("ATC_RAT_YAW_P",    0.0),   # override: Lua is the sole feedforward provider
-    ("SCR_ENABLE",       1),
-    ("RPM1_TYPE",        10),    # SITL: read rpm from JSON sensor packet
-    ("RPM1_MIN",         0),
-    ("SERVO9_FUNCTION",  94),    # Script 1 -- Lua writes exclusively to Ch9
-    ("SCR_USER6",        2),     # RAWES_MODE = 2 (yaw trim only)
-]
+_LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
+    "ATC_RAT_YAW_P":    0.0,   # override: Lua is the sole feedforward provider
+    "SCR_ENABLE":       1,
+    "RPM1_TYPE":        10,    # SITL: read rpm from JSON sensor packet
+    "RPM1_MIN":         0,
+    "SERVO9_FUNCTION":  94,    # Script 1 -- Lua writes exclusively to Ch9
+    "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw trim only)
+})
 
 
 @dataclasses.dataclass
@@ -1445,7 +1556,6 @@ def _torque_stack(
     extra_params=(),
     log_name: str = "torque_armed",
     test_name: str = "",
-    eeprom_wipe: bool = False,
     install_scripts: tuple = (),
     boot_params: "dict | None" = None,
 ):
@@ -1462,14 +1572,12 @@ def _torque_stack(
     profile         : mediator_torque.py --profile value
     lua_mode        : if True, pass --lua-mode to mediator (linear mapping, no trim)
     tail_channel    : ArduPilot tail servo channel read by mediator
-    extra_params    : additional (name, value) tuples applied after _BASE_TORQUE_PARAMS
+    extra_params    : ParamSetup merged into torque params before boot-file write
     log_name        : logger name shown in log output
     test_name       : pytest test node name; used for per-test log directory
-    eeprom_wipe     : if True, delete eeprom.bin before SITL launch
     install_scripts : tuple of Lua script names to install from simulation/scripts/
-    boot_params     : dict of {param_name: value} loaded via --add-param-file at SITL
-                      boot (needed for params whose drivers require boot-time init,
-                      e.g. RPM1_TYPE).
+    boot_params     : dict of {param_name: value} merged on top of torque_setup
+                      (for params only known at fixture call time, e.g. SCR_USER6).
     """
     if os.environ.get(STACK_ENV_FLAG) != "1":
         pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run counter-torque stack tests")
@@ -1502,25 +1610,29 @@ def _torque_stack(
     if install_scripts:
         _install_lua_scripts(*install_scripts)
 
-    # Write boot-time param file for driver-init params (e.g. RPM1_TYPE).
-    # ArduPilot sensor drivers are initialised at boot; params set via MAVLink
-    # post-boot do not activate the driver until the next reboot.
-    # --add-param-file applies these params before the first ArduPilot loop,
-    # so RPM1_TYPE=10 activates the JSON RPM driver immediately.
-    boot_parm_file: "Path | None" = None
-    if boot_params:
-        boot_parm_file = tmp_path / "boot_params.parm"
-        lines = [f"{name} {value}\n" for name, value in boot_params.items()]
-        boot_parm_file.write_text("".join(lines), encoding="utf-8")
-        log.info("Boot params file: %s  (%d entries)", boot_parm_file, len(boot_params))
+    # Build one complete param setup for this test.
+    # Always-wipe EEPROM + per-test boot file = single source of truth.
+    # Order (each layer overrides the previous):
+    #   1. _BASE_TORQUE_BOOT_PARAMS  — base EKF/PID/RSC/arming values
+    #   2. _BASE_TORQUE_PARAMS       — MAVLink values (now also in boot file)
+    #   3. extra_params              — fixture-specific overrides (e.g. Lua)
+    #   4. boot_params               — caller-supplied boot-time extras (e.g. RPM1_TYPE)
+    torque_setup = (
+        _BASE_TORQUE_BOOT_PARAMS
+        .merge(_BASE_TORQUE_PARAMS)
+        .merge(extra_params or ParamSetup({}))
+        .merge(ParamSetup(boot_params) if boot_params else ParamSetup({}))
+    )
+    boot_parm_file = tmp_path / "boot_params.parm"
+    torque_setup.write_parm_file(boot_parm_file)
+    log.info("Boot params file: %s  (%d entries)", boot_parm_file, len(torque_setup))
 
     mediator_proc = _launch_mediator_torque(
         _TORQUE_DIR, repo_root, mediator_log, omega_rotor,
         profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
         startup_hold_s=_TORQUE_STARTUP_HOLD_S,
     )
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log, wipe_eeprom=eeprom_wipe,
-                             add_param_file=boot_parm_file)
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log, add_param_file=boot_parm_file)
 
     def _assert_alive() -> None:
         for name, proc, lp in [
@@ -1564,12 +1676,6 @@ def _torque_stack(
                 break
         else:
             pytest.fail("Param subsystem never responded within 20 s")
-
-        log.info("Setting parameters ...")
-        for pname, pvalue in list(_BASE_TORQUE_PARAMS) + list(extra_params):
-            ok = gcs.set_param(pname, pvalue, timeout=5.0)
-            log.info("  %-28s = %-10g  ACK=%s", pname, pvalue, ok)
-            _assert_alive()
 
         # Motor interlock HIGH + EKF alignment
         # Keep CH8 alive every 0.5 s (ArduPilot expires RC override after ~1 s).
@@ -1615,6 +1721,11 @@ def _torque_stack(
         if not ekf_ok:
             log.warning("EKF alignment timed out -- proceeding (SKIPCHK set)")
 
+        # Verify all params after EKF ready — non-critical path, won't delay kinematic.
+        log.info("Verifying boot parameters via MAVLink ...")
+        torque_setup.verify(gcs, log=log, read_timeout=1.0)
+        _assert_alive()
+
         gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
         log.info("Armed")
         gcs.set_mode(_ACRO, timeout=10.0, rc_override={8: 2000})
@@ -1630,7 +1741,24 @@ def _torque_stack(
             pass
         _terminate_process(sitl_proc)
         _terminate_process(mediator_proc)
-        _kill_by_port(StackConfig.SITL_GCS_PORT)
+        _kill_by_port(StackConfig.SITL_GCS_PORT, "tcp")
+        _kill_by_port(StackConfig.SITL_JSON_PORT, "udp")
+        # Belt-and-suspenders: sim_vehicle.py spawns arducopter-heli in its own
+        # process group, so os.killpg() on sim_vehicle.py's PID misses it.
+        # pkill -f catches any survivors by name regardless of port state.
+        import subprocess as _subprocess
+        # Use pgrep+xargs rather than pkill -f to avoid pkill matching its own
+        # command-line args and sending SIGKILL to itself before all targets die.
+        # pgrep without -f matches by process name (argv[0]), so no self-match.
+        # /sim_vehicle.py path segment is specific enough not to hit pgrep itself.
+        _subprocess.run(
+            ["bash", "-c", "pgrep arducopter-heli | xargs -r kill -9"],
+            capture_output=True,
+        )
+        _subprocess.run(
+            ["bash", "-c", "pgrep -f /sim_vehicle.py | xargs -r kill -9"],
+            capture_output=True,
+        )
 
         copy_logs_to_dir(test_log_dir, {
             "mediator.log": mediator_log,
@@ -1698,9 +1826,15 @@ def torque_armed_lua(tmp_path, request):
         lua_mode=True,
         tail_channel=8,
         extra_params=_LUA_TORQUE_EXTRA_PARAMS,
-        eeprom_wipe=True,
         install_scripts=("rawes.lua",),
         log_name="torque_armed_lua",
         test_name=request.node.name,
+        # Boot-time params for the Lua fixture (merged on top of _BASE_TORQUE_BOOT_PARAMS):
+        # - RPM1_TYPE=10: JSON RPM backend must be activated at boot (driver init).
+        #   Setting post-boot via MAVLink does NOT activate the driver → rawes.lua gets
+        #   nil from get_rpm() → outputs STARTUP_PWM (1050 µs) instead of trim → hub yaws.
+        # - ATC_RAT_YAW_P=0.0: Lua is the sole feedforward provider; ArduPilot yaw PID
+        #   must be inactive so it doesn't fight the Lua trim output.
+        boot_params={"RPM1_TYPE": 10, "RPM1_MIN": 0, "ATC_RAT_YAW_P": 0.0},
     ) as ctx:
         yield ctx

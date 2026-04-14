@@ -24,7 +24,7 @@ def run_mediator():
                 "imu": {"gyro": [0,0,0], "accel_body": [0,0,-9.81]},
                 "position": [0,0,0], "attitude": [0,0,0], "velocity": [0,0,0],
                 "rpm": [485.0, 0.0]
-            }) + "\n"
+            }, separators=(',', ':')) + "\n"
             try: s.sendto(msg.encode(), addr)
             except: pass
         t += 0.0025

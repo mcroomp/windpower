@@ -492,6 +492,187 @@ def _print_all_statustext(r: RunReport) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Physics yaw divergence (from existing telemetry.csv)
+# ---------------------------------------------------------------------------
+
+def _print_yaw_divergence(r: RunReport) -> None:
+    """
+    Yaw gap between true orbital-frame yaw (orb_yaw_rad) and the
+    velocity-heading yaw sent to ArduPilot (rpy_yaw).
+
+    A sustained gap > ~15 deg usually triggers GPS-compass inconsistency
+    or an EKF emergency yaw reset.  This section breaks the gap down
+    by flight phase so you can see exactly when the divergence occurred.
+    """
+    rows = r.tel_rows
+    if not rows:
+        return
+
+    def _yaw_gap_deg(row: TelRow) -> float:
+        o = math.degrees(row.orb_yaw_rad)
+        s = math.degrees(row.rpy_yaw)
+        return abs(((o - s + 180) % 360) - 180)
+
+    _header("YAW DIVERGENCE  (orb_yaw vs rpy_yaw sent to ArduPilot)")
+    print("  A sustained gap > ~15 deg risks GPS-compass inconsistency failsafe.")
+
+    # Group into three logical segments: kinematic, free-flight, pumping phases
+    segments = [
+        ("kinematic (damp_alpha>0)",  [r for r in rows if r.damp_alpha > 0.0]),
+        ("free-flight (damp_alpha=0, no pump phase)",
+         [r for r in rows if r.damp_alpha == 0.0
+                          and r.phase not in ("reel-out", "reel-in", "descent", "final_drop")]),
+        ("pumping (reel-out/reel-in)", [r for r in rows if r.phase in ("reel-out", "reel-in")]),
+        ("landing (descent/final_drop)", [r for r in rows if r.phase in ("descent", "final_drop")]),
+    ]
+
+    for label, seg_rows in segments:
+        if not seg_rows:
+            continue
+        gaps = [_yaw_gap_deg(row) for row in seg_rows]
+        mean_gap  = sum(gaps) / len(gaps)
+        max_gap   = max(gaps)
+        max_row   = seg_rows[gaps.index(max_gap)]
+        hi_frac   = sum(1 for g in gaps if g > 15.0) / len(gaps)
+
+        flag = "[OK]"
+        if max_gap > 30.0:
+            flag = "[!!] LARGE"
+        elif max_gap > 15.0:
+            flag = "[!]  check"
+
+        print()
+        print(f"  {label}  ({len(seg_rows)} rows)")
+        print(f"    mean gap : {mean_gap:.1f} deg")
+        print(f"    max gap  : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  "
+              f"(v_horiz={max_row.v_horiz_ms:.2f} m/s)  {flag}")
+        print(f"    >15 deg  : {hi_frac*100:.0f}% of frames")
+
+
+# ---------------------------------------------------------------------------
+# EKF telemetry (from ekf_telemetry.csv produced by EkfLogger)
+# ---------------------------------------------------------------------------
+
+def _load_ekf_csv(path: Path) -> list[dict]:
+    """Load ekf_telemetry.csv into a list of dicts.  Returns [] if missing."""
+    import csv
+    if not path.exists():
+        return []
+    rows = []
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for raw in csv.DictReader(fh):
+            try:
+                rows.append({k: (float(v) if k != "ekf_flags" else int(float(v)))
+                              for k, v in raw.items() if v not in ("", None)})
+            except (ValueError, TypeError):
+                pass
+    return rows
+
+
+def _print_ekf_state(ekf_log_path: Path) -> None:
+    """
+    Print EKF health metrics from ekf_telemetry.csv.
+
+    Covers:
+      - Flag transitions (which EKF capabilities were gained/lost and when)
+      - Variance spikes (position / velocity / compass uncertainty)
+      - Attitude rate peaks (indication of oscillation or divergence)
+    """
+    rows = _load_ekf_csv(ekf_log_path)
+    if not rows:
+        print(f"\n  (ekf_telemetry.csv not found or empty: {ekf_log_path.name})")
+        return
+
+    _header("EKF TELEMETRY  (from ekf_telemetry.csv)")
+
+    t0_ms = rows[0].get("time_boot_ms", 0.0)
+    t1_ms = rows[-1].get("time_boot_ms", 0.0)
+    dur_s = (t1_ms - t0_ms) / 1000.0
+    print(f"  rows: {len(rows)}   span: {t0_ms/1000:.1f}s - {t1_ms/1000:.1f}s"
+          f"  ({dur_s:.0f}s)")
+
+    # ── Flag transitions ──────────────────────────────────────────────────
+    EKF_FLAG_NAMES = {
+        0x0001: "attitude",
+        0x0002: "horiz vel",
+        0x0004: "vert vel",
+        0x0008: "horiz pos (rel)",
+        0x0010: "horiz pos (abs)",
+        0x0020: "vert pos (abs)",
+        0x0040: "terrain alt",
+        0x0080: "GPS yaw",
+        0x0100: "pred horiz pos",
+        0x0200: "const pos mode",
+    }
+
+    def _decode(flags: int) -> str:
+        return ", ".join(n for m, n in EKF_FLAG_NAMES.items() if flags & m) or "none"
+
+    print()
+    print("  EKF flag transitions:")
+    prev_flags = None
+    for row in rows:
+        flags = row.get("ekf_flags")
+        if flags is None:
+            continue
+        if flags != prev_flags:
+            tbs = row.get("time_boot_ms", 0)
+            gained = 0 if prev_flags is None else (flags & ~prev_flags)
+            lost   = 0 if prev_flags is None else (~flags & prev_flags)
+            changes = []
+            if prev_flags is None:
+                changes.append(f"init [{_decode(flags)}]")
+            else:
+                if gained:
+                    changes.append(f"+[{_decode(gained)}]")
+                if lost:
+                    changes.append(f"-[{_decode(lost)}]")
+            label = "  ".join(changes) if changes else "(no change)"
+            print(f"    t={tbs/1000:7.1f}s  0x{flags:04x}  {label}")
+            prev_flags = flags
+
+    # ── Variance peaks ────────────────────────────────────────────────────
+    # Thresholds tuned to ArduPilot EKF3 default innovation gate sizes.
+    VAR_THRESHOLDS = {
+        "ekf_pos_horiz_variance":   (1.0, 5.0, "m^2  horiz pos"),
+        "ekf_pos_vert_variance":    (0.5, 2.0, "m^2  vert pos"),
+        "ekf_vel_variance":         (0.5, 2.0, "(m/s)^2  vel"),
+        "ekf_compass_variance":     (0.2, 0.5, "rad^2  compass"),
+        "ekf_terrain_alt_variance": (1.0, 5.0, "m^2  terrain alt"),
+    }
+
+    print()
+    print("  EKF variance peaks:")
+    any_spike = False
+    for col, (warn, crit, unit) in VAR_THRESHOLDS.items():
+        eligible = [row for row in rows if col in row]
+        if not eligible:
+            continue
+        peak_row = max(eligible, key=lambda r: r[col])
+        peak   = peak_row[col]
+        peak_t = peak_row.get("time_boot_ms", 0)
+        flag = "[OK]" if peak < warn else ("[!!]" if peak >= crit else "[! ]")
+        if peak >= warn:
+            any_spike = True
+        print(f"    {col:<35} peak={peak:.3f} {unit}  at t={peak_t/1000:.1f}s  {flag}")
+    if not any_spike:
+        print("    (all variances within normal range)")
+
+    # ── Attitude rate peaks ───────────────────────────────────────────────
+    rate_cols = ["att_rollspeed", "att_pitchspeed", "att_yawspeed"]
+    rate_vals = {c: [abs(row[c]) for row in rows if c in row] for c in rate_cols}
+    if any(rate_vals.values()):
+        print()
+        print("  EKF attitude rate peaks (rad/s):")
+        for c, vals in rate_vals.items():
+            if not vals:
+                continue
+            peak = max(vals)
+            flag = "[OK]" if peak < 1.5 else ("[!!]" if peak > 5.0 else "[! ]")
+            print(f"    {c:<20} peak={peak:.2f} rad/s  {flag}")
+
+
+# ---------------------------------------------------------------------------
 # Optional plot
 # ---------------------------------------------------------------------------
 
@@ -649,6 +830,8 @@ def main() -> None:
     _print_mediator(report)
     _print_tel_events(report)
     _print_ekf(report)
+    _print_yaw_divergence(report)
+    _print_ekf_state(test_dir / "ekf_telemetry.csv")
     _print_landing(report)
     _print_setup(report)
     _print_hold(report)

@@ -150,6 +150,7 @@ class SITLInterface:
         accel_body:  np.ndarray,   # [ax, ay, az] m/s² in body frame
         gyro_body:   np.ndarray,   # [gx, gy, gz] rad/s in body frame
         rpm_rad_s:   float = 0.0,  # rotor spin rate [rad/s] → sent as RPM for RPM1_TYPE=10
+        battery_voltage: "float | None" = None,  # if set, overrides SITL battery sim [V]
     ) -> None:
         """
         Send a JSON physics state packet back to ArduPilot SITL.
@@ -160,6 +161,12 @@ class SITLInterface:
         The ``rpm`` field is read by ArduPilot when RPM1_TYPE=10 (SITL RPM).
         ArduPilot uses the RPM sensor to determine whether the rotor has
         completed its runup sequence before allowing GUIDED/AUTO modes.
+
+        The optional ``battery_voltage`` field overrides the SITL's internal
+        battery simulation.  When set, ``battery:voltage()`` in Lua returns
+        this value instead of the simulated draining voltage.  Use this when
+        the mediator's physics model uses a fixed nominal voltage (e.g. 15.2 V)
+        and you want Lua's feedforward trim to match that same voltage.
         """
         if self._sock is None:
             raise RuntimeError("Not bound — call bind() first.")
@@ -189,7 +196,9 @@ class SITLInterface:
                          float(vel_ned[2])],
             "rpm":       {"rpm_1": rpm1, "rpm_2": 0.0, "rpm_3": 0.0, "rpm_4": 0.0},
         }
-        payload = (json.dumps(msg) + "\n").encode("utf-8")
+        if battery_voltage is not None:
+            msg["battery"] = {"voltage": float(battery_voltage), "current": 0.0}
+        payload = (json.dumps(msg, separators=(',', ':')) + "\n").encode("utf-8")
         try:
             self._sock.sendto(payload, self._sitl_addr)
         except OSError as exc:
@@ -302,7 +311,7 @@ if __name__ == "__main__":
         "attitude":  rpy.tolist(),
         "velocity":  vel_ned.tolist(),
     }
-    payload = json.dumps(msg) + "\n"
+    payload = json.dumps(msg, separators=(',', ':')) + "\n"
     assert payload.endswith("\n")
     parsed = json.loads(payload.strip())
     assert parsed["timestamp"] == ts

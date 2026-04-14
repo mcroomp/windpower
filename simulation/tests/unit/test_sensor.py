@@ -95,11 +95,11 @@ def test_physical_sensor_spin_stripped_from_gyro():
 
 
 def test_physical_sensor_accel_stationary():
-    # Stationary hub with body Z = NED Up ([0,0,-1]).
+    # Stationary hub with disk_normal = NED Up ([0,0,-1]).
+    # sensor.py body Z = disk_normal = NED Up ([0,0,-1]).
     # NED specific force = accel_world - g_ned = [0,0,0] - [0,0,9.81] = [0,0,-9.81].
-    # Body Z = [0,0,-1] points up; the upward reaction to gravity is positive along body Z.
-    # accel_body[2] = dot([0,0,-9.81], body_Z) = dot([0,0,-9.81], [0,0,-1]) = +9.81.
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))  # body Z = NED up
+    # Body Z = [0,0,-1] (UP): accel_body[2] = dot([0,0,-9.81], [0,0,-1]) = +9.81.
+    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))  # disk_normal = NED up
     sensor = PhysicalSensor(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0)
     result = sensor.compute(
         pos_ned=np.zeros(3),
@@ -109,7 +109,7 @@ def test_physical_sensor_accel_stationary():
         accel_world_ned=np.zeros(3),  # zero world accel = gravity only
         dt=0.0025,
     )
-    # With body Z pointing up, accel_body[2] = +9.81 (reaction force upward)
+    # body Z points UP ([0,0,-1] NED), specific force = [0,0,-9.81]: Z component = +9.81
     np.testing.assert_allclose(result["accel_body"], np.array([0.0, 0.0, 9.81]), atol=1e-6)
 
 

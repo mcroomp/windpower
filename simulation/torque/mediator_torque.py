@@ -2,8 +2,8 @@
 """
 torque/mediator_torque.py — Counter-torque motor stack-test mediator
 
-Bridges ArduPilot SITL (UDP 9002/9003) ↔ hub yaw dynamics for the
-counter-torque motor test.
+Bridges ArduPilot SITL ↔ hub yaw dynamics for the counter-torque motor test
+using SITLInterface for all binary servo I/O and JSON state serialisation.
 
 Physical scenario
 -----------------
@@ -14,14 +14,14 @@ Physical scenario
   • ArduPilot sees the yaw rate in the gyro and commands the tail-rotor
     channel (Ch4) to hold the counter-rotation speed via the GB4008 motor.
 
-Sensor data sent to ArduPilot (JSON over UDP 9003 → SITL)
+Sensor data sent to ArduPilot (via SITLInterface.send_state)
 ---------------------------------------------------------------------------
   position    [0, 0, 0]  NED [m]  — hub is stationary
   velocity    [0, 0, 0]  NED [m/s]
-  attitude    [0, 0, ψ]           — hub yaw angle [rad]
-  gyro_body   [0, 0, ψ_dot]      — yaw rate only [rad/s], in body frame
-  accel_body  [0, 0, −9.81]      — gravity only [m/s²]; hub is flat
-  rpm         [ω_axle → RPM, 0]  — rotor RPM for ArduPilot RSC
+  attitude    [roll, pitch, −ψ]   — hub attitude (NED convention)
+  gyro_body   [p, q, r]           — body-frame angular velocity [rad/s]
+  accel_body  [ax, ay, az]        — gravity only [m/s²] projected into body frame
+  rpm         ω_axle × gear → RPM — rotor RPM for ArduPilot RSC (RPM1_TYPE=10)
 
 ArduPilot → mediator (binary servo packet over UDP 9002)
 ---------------------------------------------------------------------------
@@ -43,40 +43,36 @@ Options
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
-import socket
-import struct
 import sys
-import time
 from pathlib import Path
 
-# Model lives in the same directory
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import numpy as np
+
+# simulation/ is one directory up; add it so SITLInterface and model are importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent))           # torque/ → model
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # simulation/ → sitl_interface
+
 import model as _m
+from sitl_interface import SITLInterface
 
 # ---------------------------------------------------------------------------
-# Protocol constants (must match ArduPilot SITL JSON backend)
+# Timing / port constants
 # ---------------------------------------------------------------------------
 
-RECV_PORT       = 9002        # UDP — we bind here; SITL sends servo packets to us
-DT              = 1.0 / 400.0 # 400 Hz loop target
-
-_SERVO_FMT_16   = "<HHI16H"
-_SERVO_SIZE_16  = struct.calcsize(_SERVO_FMT_16)
-_SERVO_MAGIC_16 = 18458
-_SERVO_FMT_32   = "<HHI32H"
-_SERVO_SIZE_32  = struct.calcsize(_SERVO_FMT_32)
-_SERVO_MAGIC_32 = 29569
+_RECV_PORT = 9002        # must match ArduPilot SITL JSON backend default
+DT         = 1.0 / 400.0  # 400 Hz loop target [s]
 
 # Default ArduPilot channel for yaw/tail-rotor (0-based index → Ch4).
-# When --tail-channel 9 is passed (Lua scripting mode), the mediator reads
-# from Ch9 (index 8) which the Lua script writes exclusively.
+# When --tail-channel 9 is passed (Lua scripting mode), reads Ch9 (index 8).
 _CH_YAW_DEFAULT = 3
 
 # Log interval [s]
 _LOG_INTERVAL = 1.0
+
+# Gear ratio: motor axle speed → RPM sent to ArduPilot RSC
+_GEAR_RATIO = 80.0 / 44.0
 
 
 def _pwm_to_throttle(pwm_us: float, trim: float = 0.0) -> float:
@@ -99,32 +95,48 @@ def _pwm_to_throttle(pwm_us: float, trim: float = 0.0) -> float:
     """
     trim = max(0.0, min(1.0, trim))
     if pwm_us >= 1500.0:
-        # neutral → trim,  2000 → 1.0
         t = trim + (1.0 - trim) * (pwm_us - 1500.0) / 500.0
     else:
-        # 1000 → 0.0,  neutral → trim
         t = trim * (pwm_us - 1000.0) / 500.0
     return max(0.0, min(1.0, t))
 
 
-def _parse_servos(data: bytes) -> list[float] | None:
+def _body_vectors(
+    roll: float, pitch: float,
+    psi_dot: float, roll_dot: float, pitch_dot: float,
+) -> tuple[list[float], list[float]]:
     """
-    Parse a binary SITL servo packet.
+    Convert Euler angles + rates to body-frame gyro and specific-force vectors.
 
-    Returns a list of 16 PWM values in microseconds, or None if the packet
-    format is unrecognised.
+    Returns (gyro_body [rad/s], accel_body [m/s²]).
+
+    Sign conventions — ENU model → ArduPilot NED body frame
+    --------------------------------------------------------
+    Gyro Z positive  = yaw CW from above (NED Z down).
+    Yaw angle positive = CW from above.
+    Our psi/psi_dot are ENU (positive = CCW), so we negate for NED.
+
+    For a tilted hub (roll φ, pitch θ) gravity projects into body frame:
+      g_body_x =  9.81 * sin(θ)
+      g_body_y =  9.81 * cos(θ) * sin(φ)
+      g_body_z = -9.81 * cos(θ) * cos(φ)
     """
-    if len(data) == _SERVO_SIZE_16:
-        fields = struct.unpack(_SERVO_FMT_16, data)
-        if fields[0] != _SERVO_MAGIC_16:
-            return None
-        return list(fields[3:])    # 16 PWM values
-    elif len(data) == _SERVO_SIZE_32:
-        fields = struct.unpack(_SERVO_FMT_32, data)
-        if fields[0] != _SERVO_MAGIC_32:
-            return None
-        return list(fields[3:19])  # first 16 channels only
-    return None
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    g = 9.81
+
+    # Euler-rate → body-rate (ZYX Euler, ψ̇_NED = −ψ̇_ENU)
+    gyro = [
+        float(roll_dot + psi_dot * sp),
+        float(pitch_dot * cr - psi_dot * sr * cp),
+        float(-pitch_dot * sr - psi_dot * cr * cp),
+    ]
+    accel = [
+        float(g * sp),
+        float(g * cp * sr),
+        float(-g * cp * cr),
+    ]
+    return gyro, accel
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +188,8 @@ def _tilt_wobble(dt: float) -> tuple[float, float]:
     Two frequency components create a less regular, more realistic wobble.
     GPS position/velocity fusion must be disabled in the test fixture to
     prevent GPS Glitch from the large horizontal gravity projection (~3.4 m/s²)."""
-    # Primary orbital component (0.10 Hz, 10 s period)
     roll  = math.radians(20.0) * math.sin(2 * math.pi * 0.10 * dt)
     pitch = math.radians(15.0) * math.cos(2 * math.pi * 0.10 * dt)
-    # Secondary harmonic (0.23 Hz) adds realistic non-uniform wobble
     roll  += math.radians(5.0) * math.sin(2 * math.pi * 0.23 * dt + 1.0)
     pitch += math.radians(4.0) * math.sin(2 * math.pi * 0.17 * dt + 0.5)
     return roll, pitch
@@ -193,65 +203,6 @@ PROFILES: dict[str, tuple] = {
     "pitch_roll": (_omega_constant,  _tilt_pitch_roll),
     "wobble":     (_omega_constant,  _tilt_wobble),
 }
-
-
-def _make_state_json(
-    t: float,
-    roll: float,
-    pitch: float,
-    psi: float,
-    psi_dot: float,
-    roll_dot: float,
-    pitch_dot: float,
-    omega_rotor: float,
-) -> bytes:
-    """
-    Build the JSON state packet sent back to ArduPilot SITL.
-
-    Sign conventions — ENU model → ArduPilot NED body frame
-    --------------------------------------------------------
-    Gyro Z positive  = yaw CW from above (NED Z down).
-    Yaw angle positive = CW from above.
-    Our psi/psi_dot are ENU (positive = CCW), so we negate for NED.
-
-    For a tilted hub (roll φ, pitch θ) gravity projects into body frame:
-      g_body_x =  9.81 * sin(θ)
-      g_body_y =  9.81 * cos(θ) * sin(φ)
-      g_body_z = -9.81 * cos(θ) * cos(φ)
-    """
-    cr, sr = math.cos(roll), math.sin(roll)
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    g = 9.81
-
-    # ── Correct Euler-rate → body-rate transformation ──────────────────────
-    # For ZYX Euler angles (ψ, θ, φ) the body angular velocities are:
-    #   p = φ̇  + ψ̇_ENU × sin(θ)
-    #   q = θ̇ × cos(φ) − ψ̇_ENU × sin(φ) × cos(θ)
-    #   r = −θ̇ × sin(φ) − ψ̇_ENU × cos(φ) × cos(θ)
-    # (substituting ψ̇_NED = −ψ̇_ENU into the standard ZYX formula)
-    #
-    # At 20° roll, pitch_dot=±9°/s: r ≈ ±3.1°/s even with zero yaw rate.
-    # This cross-coupling is real — without it the motor ignores the wobble.
-    gyro_x = roll_dot + psi_dot * sp
-    gyro_y = pitch_dot * cr - psi_dot * sr * cp
-    gyro_z = -pitch_dot * sr - psi_dot * cr * cp
-
-    msg = {
-        "timestamp": float(t),
-        "imu": {
-            "gyro":       [float(gyro_x), float(gyro_y), float(gyro_z)],
-            "accel_body": [float(g * sp),
-                           float(g * cp * sr),
-                           float(-g * cp * cr)],
-        },
-        "position":   [0.0, 0.0, 0.0],
-        "attitude":   [float(roll), float(pitch), float(-psi)],
-        "velocity":   [0.0, 0.0, 0.0],
-        # Motor RPM via the SITL JSON rpm field (mcroomp/ardupilot fork).
-        # ArduPilot maps rpm.rpm_1 -> state.rpm[0] -> RPM:get_rpm(0) in Lua.
-        "rpm":        {"rpm_1": float(omega_rotor * (80.0/44.0) * 60.0 / (2.0 * math.pi))},
-    }
-    return (json.dumps(msg) + "\n").encode("utf-8")
 
 
 def run(
@@ -271,11 +222,6 @@ def run(
     Hub is locked stationary at ψ=0.  A slow constant yaw drift of 5°/s is
     sent to SITL to give ArduPilot's EKF enough gyro and compass data to
     initialise.  Bearing drag and motor dynamics are NOT active.
-
-    This mirrors the kinematic startup phase used by the full RAWES stack
-    tests: send physically consistent (but low-amplitude) motion so the EKF
-    can align its tilt, yaw, and gyro bias estimates before real dynamics
-    start.
 
     Dynamic phase (startup_hold_s … ∞)
     ------------------------------------
@@ -299,12 +245,8 @@ def run(
     state   = _m.HubState()
     t       = 0.0
 
-    # Slow yaw spin rate during startup hold [rad/s].
-    # 5°/s drives compass + gyro updates for EKF alignment without confusing it.
     _STARTUP_YAW_RATE = math.radians(5.0)
 
-    # Trim throttle: bias so neutral PWM (1500 µs) = equilibrium torque.
-    # Defaults to the model's equilibrium throttle for the given axle speed.
     if trim_throttle is None:
         trim_throttle = _m.equilibrium_throttle(omega_rotor, params)
 
@@ -325,122 +267,92 @@ def run(
         startup_hold_s,
     )
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", RECV_PORT))
-    sock.settimeout(DT)
-
-    log.info("Bound to UDP port %d", RECV_PORT)
-
     omega_fn, tilt_fn = PROFILES.get(profile, PROFILES["constant"])
-    ch_yaw = tail_channel   # which servo channel carries the motor command
+    ch_yaw = tail_channel
     log.info("Profile: %s  tail_channel: %d  lua_mode: %s", profile, ch_yaw, lua_mode)
 
-    sitl_addr  = None
-    throttle   = 0.0
-    n_sent     = 0
-    last_log   = 0.0
-    prev_roll  = 0.0
-    prev_pitch = 0.0
+    throttle      = 0.0
+    n_sent        = 0
+    last_log      = 0.0
+    prev_roll     = 0.0
+    prev_pitch    = 0.0
+    trim_fixed    = float(trim_throttle)
+    last_pwm_ch4  = 1500.0   # neutral default
+    throttle      = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
 
-    # Clamp trim_throttle type for _pwm_to_throttle
-    trim_fixed = float(trim_throttle) if trim_throttle is not None else float(eq_throttle)
-
-    # Store last raw Ch4 PWM so we can re-apply the correct (possibly updated)
-    # trim after computing current_omega for adaptive profiles.
-    last_pwm_ch4 = 1500.0   # neutral default
-    throttle     = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
+    iface = SITLInterface(recv_port=_RECV_PORT, recv_timeout_ms=DT * 1000.0)
+    iface.bind()
+    log.info("Bound to UDP port %d", _RECV_PORT)
 
     try:
         while True:
             # ── Receive servo packet from SITL ─────────────────────────────
-            try:
-                data, addr = sock.recvfrom(4096)
-                sitl_addr  = addr
-                pwm_list   = _parse_servos(data)
-                if pwm_list is not None:
-                    last_pwm_ch4 = pwm_list[ch_yaw]
-            except socket.timeout:
-                pass
-            except OSError as exc:
-                log.warning("Recv error: %s", exc)
+            # recv_servos() returns None on timeout; servos are normalised [-1, 1].
+            # Convert the relevant channel back to PWM µs for _pwm_to_throttle.
+            servos = iface.recv_servos()
+            if servos is not None:
+                last_pwm_ch4 = 1500.0 + servos[ch_yaw] * 500.0
 
-            in_startup   = (t < startup_hold_s)
-            dynamics_t   = max(0.0, t - startup_hold_s)
+            in_startup = (t < startup_hold_s)
+            dynamics_t = max(0.0, t - startup_hold_s)
 
             if in_startup:
-                psi_send     = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
-                psi_dot_send = _STARTUP_YAW_RATE
-                roll_send    = 0.0
-                pitch_send   = 0.0
-                roll_dot     = 0.0
-                pitch_dot    = 0.0
+                psi_send      = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
+                psi_dot_send  = _STARTUP_YAW_RATE
+                roll_send     = 0.0
+                pitch_send    = 0.0
+                roll_dot      = 0.0
+                pitch_dot     = 0.0
                 current_omega = omega_rotor
-                # Fixed trim during startup
-                throttle = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
+                throttle      = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
             else:
-                # Profile-driven rotor hub speed (clamped positive)
                 current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor))
 
                 if lua_mode:
-                    # Lua script is the intended controller via the tail channel.
-                    # Safety fallback: if Ch9 is at default/zero or at STARTUP_PWM
-                    # (Lua hasn't written a real trim yet), use adaptive trim to keep
-                    # the hub stable.  This prevents extreme gyro values (hub spinning
-                    # freely) from triggering ArduPilot's SIGFPE when scripting is
-                    # enabled.
-                    #
-                    # STARTUP_PWM=1050 in rawes.lua maps to raw_throttle=0.05 exactly.
-                    # Lua outputs STARTUP_PWM when RPM<MIN_RPM (sensor not yet active,
-                    # e.g. RPM1_TYPE set post-boot and driver not yet initialised).
-                    # Using <= 0.05 catches this case; any real computed trim is >> 0.05.
                     raw_throttle = max(0.0, min(1.0, (last_pwm_ch4 - 1000.0) / 1000.0))
                     if raw_throttle <= 0.05:
-                        # Ch9 at default or STARTUP_PWM → Lua not ready, keep hub stable
                         throttle = _m.equilibrium_throttle(current_omega, params)
                     else:
-                        # Lua is writing a real trim — use its output directly
                         throttle = raw_throttle
                 else:
-                    # Adaptive trim: mediator computes equilibrium feedforward.
                     current_trim = _m.equilibrium_throttle(current_omega, params)
                     throttle     = _pwm_to_throttle(last_pwm_ch4, current_trim)
 
-                # Profile-driven hub tilt + rates
                 roll_send, pitch_send = tilt_fn(dynamics_t)
                 roll_dot  = (roll_send  - prev_roll)  / DT
                 pitch_dot = (pitch_send - prev_pitch) / DT
 
-                # Initialise psi continuity on first dynamic step
                 if state.psi == 0.0 and state.psi_dot == 0.0:
                     state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
                 state = _m.step(state, current_omega, throttle, params, DT)
                 psi_send     = math.atan2(math.sin(state.psi), math.cos(state.psi))
                 psi_dot_send = state.psi_dot
 
-            # Safety clamp: cap yaw rate sent to SITL to prevent ArduPilot SIGFPE
-            # from extreme gyro values in the EKF.  Normal hub operation is <5 deg/s;
-            # runaway scenarios can reach 1500 deg/s which overflows ArduPilot's EKF.
-            _MAX_PSI_DOT = math.radians(500.0)   # 500 deg/s hard cap
-            if psi_dot_send > _MAX_PSI_DOT:
-                psi_dot_send = _MAX_PSI_DOT
-            elif psi_dot_send < -_MAX_PSI_DOT:
-                psi_dot_send = -_MAX_PSI_DOT
+            # Safety clamp: cap yaw rate to prevent ArduPilot SIGFPE
+            _MAX_PSI_DOT = math.radians(500.0)
+            psi_dot_send = max(-_MAX_PSI_DOT, min(_MAX_PSI_DOT, psi_dot_send))
 
             prev_roll, prev_pitch = roll_send, pitch_send
             t += DT
 
-            # ── Send state back to SITL ────────────────────────────────────
-            if sitl_addr is not None:
-                payload = _make_state_json(
-                    t, roll_send, pitch_send, psi_send, psi_dot_send,
-                    roll_dot, pitch_dot, current_omega,
-                )
-                try:
-                    sock.sendto(payload, sitl_addr)
-                    n_sent += 1
-                except OSError as exc:
-                    log.warning("Send error: %s", exc)
+            # ── Send state back to SITL via SITLInterface ──────────────────
+            gyro_body, accel_body = _body_vectors(
+                roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot,
+            )
+            iface.send_state(
+                timestamp       = t,
+                pos_ned         = np.array([0.0, 0.0, 0.0]),
+                vel_ned         = np.array([0.0, 0.0, 0.0]),
+                rpy_rad         = np.array([roll_send, pitch_send, -psi_send]),
+                accel_body      = np.asarray(accel_body),
+                gyro_body       = np.asarray(gyro_body),
+                rpm_rad_s       = current_omega * _GEAR_RATIO,
+                # Override SITL battery simulation with the nominal voltage used
+                # by the Python physics model so that rawes.lua's compute_trim()
+                # sees the same voltage and produces the same equilibrium throttle.
+                battery_voltage = _m.BATTERY_V,
+            )
+            n_sent += 1
 
             # ── Periodic log ───────────────────────────────────────────────
             if t - last_log >= _LOG_INTERVAL:
@@ -461,8 +373,7 @@ def run(
     except KeyboardInterrupt:
         log.info("Interrupted — shutting down  t=%.1f s  n_sent=%d", t, n_sent)
     finally:
-        sock.close()
-        log.info("Socket closed.")
+        iface.close()
 
 
 if __name__ == "__main__":
