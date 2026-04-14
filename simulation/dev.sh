@@ -241,7 +241,7 @@ case "$CMD" in
         trap _parallel_cleanup EXIT INT TERM
 
         # Discover test files from the host filesystem (no container needed)
-        mapfile -t _ALL_FILES < <(ls "$SCRIPT_DIR/tests/stack/test_"*.py | sort)
+        mapfile -t _ALL_FILES < <(find "$SCRIPT_DIR/tests/sitl" -name "test_*.py" | sort)
         _N_FILES=${#_ALL_FILES[@]}
 
         # Clear host log dirs before the run so only this run's logs survive.
@@ -288,7 +288,7 @@ case "$CMD" in
 
                 _c="rawes-parallel-${_RUN_ID}-${j}"
                 _CONTAINERS+=("$_c")
-                _f="/rawes/simulation/tests/stack/$(basename "${_ALL_FILES[$j]}")"
+                _f="/rawes/simulation/${_ALL_FILES[$j]#${SCRIPT_DIR}/}"
                 _log="/tmp/rawes-parallel-${_RUN_ID}-t${j}.log"
                 _WORKER_LOGS+=("$_log")
                 _label="$(basename "${_ALL_FILES[$j]}" .py)"
@@ -367,7 +367,7 @@ case "$CMD" in
             done
             for j in $(seq 0 $((_N_FILES-1))); do
                 _w=$(( j % _ACTUAL_WORKERS ))
-                _f="/rawes/simulation/tests/stack/$(basename "${_ALL_FILES[$j]}")"
+                _f="/rawes/simulation/${_ALL_FILES[$j]#${SCRIPT_DIR}/}"
                 _WORKER_FILE_ARGS[$_w]+=" $_f"
             done
 

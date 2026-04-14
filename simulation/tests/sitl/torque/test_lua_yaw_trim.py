@@ -4,29 +4,29 @@ torque/test_lua_yaw_trim.py — Lua feedforward yaw regulation test.
 This test validates the full hardware-equivalent control architecture:
 
   mediator_torque.py       ArduPilot SITL
-  ─────────────────        ─────────────────────────────────────────
-  Hub yaw dynamics    ←─── SERVO9 PWM  (Ch9, Script 1)
-  Bearing drag model        ↑
+  -----------------        -----------------------------------------
+  Hub yaw dynamics    <--- SERVO9 PWM  (Ch9, Script 1)
+  Bearing drag model        ^
   Motor torque model        rawes.lua (SCR_USER6=2, yaw mode):
-  Sends JSON sensors ──────→ rpm:get_rpm(1)   ← motor RPM from "rpm" field
+  Sends JSON sensors -----> rpm:get_rpm(1)   <- motor RPM from "rpm" field
   (pos, vel, att,            compute trim(RPM, V_bat)
-   gyro, accel, RPM)        + Kp × gyro.z
+   gyro, accel, RPM)        + Kp x gyro.z
                              write PWM to Ch9
 
 Key differences from test_yaw_regulation (which uses mediator adaptive trim):
-  • Mediator is pure physics — no feedforward computation, linear PWM→throttle
-  • rawes.lua (yaw mode) runs inside SITL, reads motor RPM, computes feedforward
-  • The Lua script is identical to what would run on the Pixhawk 6C hardware
-  • RPM1_TYPE=10 reads motor RPM from the JSON sensor packet (SITL equivalent
+  - Mediator is pure physics -- no feedforward computation, linear PWM->throttle
+  - rawes.lua (yaw mode) runs inside SITL, reads motor RPM, computes feedforward
+  - The Lua script is identical to what would run on the Pixhawk 6C hardware
+  - RPM1_TYPE=10 reads motor RPM from the JSON sensor packet (SITL equivalent
     of DSHOT bidirectional telemetry from the AM32 ESC on hardware)
-  • SERVO9_FUNCTION=94 gives Lua exclusive control of Ch9 (tail motor)
+  - SERVO9_FUNCTION=94 gives Lua exclusive control of Ch9 (tail motor)
 
 Pass criterion
 --------------
-  After 40 s settle: max |ψ_dot| < 1°/s over 20 s observation window.
-  Same threshold as the adaptive-trim baseline — Lua should match it.
+  After 40 s settle: max |psi_dot| < 1 deg/s over 20 s observation window.
+  Same threshold as the adaptive-trim baseline -- Lua should match it.
 
-Telemetry → simulation/logs/torque_telemetry_lua.csv
+Telemetry -> simulation/logs/torque_telemetry_lua.csv
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def test_lua_yaw_trim(torque_armed_lua):
     """
     Yaw rate regulated by rawes.lua (SCR_USER6=2) running inside ArduPilot SITL.
 
-    The Lua script reads motor RPM (via SITL JSON → RPM1_TYPE=10), computes
+    The Lua script reads motor RPM (via SITL JSON -> RPM1_TYPE=10), computes
     the equilibrium throttle feedforward, adds a proportional yaw rate
     correction from the onboard gyro, and writes the result directly to
     SERVO9 (Ch9).  The mediator applies this as a pure motor torque command

@@ -78,7 +78,11 @@ class RunReport:
 # ---------------------------------------------------------------------------
 
 _RE_RUN_ID      = re.compile(r"RUN_ID=(\d+)")
-_RE_STATUSTEXT  = re.compile(r"STATUSTEXT \[sev=\d+\]:\s*(.+)$")
+# Two STATUSTEXT formats in gcs.log:
+#   fixture logger:  STATUSTEXT [sev=6]: <text>
+#   test logger:     STATUSTEXT [t=1.7s]: <text>
+_RE_STATUSTEXT  = re.compile(r"STATUSTEXT \[(?:sev=\d+|t=[\d.]+s)\]:\s*(.+)$")
+_RE_STATUSTEXT_T = re.compile(r"STATUSTEXT \[t=([\d.]+)s\]:\s*(.+)$")
 _RE_EKF_FLAGS   = re.compile(r"EKF_STATUS\s+flags=(0x[0-9a-fA-F]+)")
 _RE_SETUP_STEP  = re.compile(r"\[setup\s+\d+/\d+\]\s+(.+)$")
 _RE_HOLD_STAT   = re.compile(r"Hold complete\.\s+pos=(\d+)\s+att=(\d+)\s+servo=(\d+)")
@@ -146,7 +150,10 @@ def parse_pytest(path: Path, report: RunReport) -> None:
             report.pytest_run_id = int(m.group(1))
 
         if m := _RE_STATUSTEXT.search(line):
-            report.statustext.append((ts, m.group(1).strip()))
+            # Prefer obs-time from [t=X.Xs] format when present; fall back to wall clock ts
+            tm = _RE_STATUSTEXT_T.search(line)
+            obs_label = f"t={tm.group(1)}s" if tm else ts
+            report.statustext.append((obs_label, m.group(1).strip()))
 
         if m := _RE_EKF_FLAGS.search(line):
             report.ekf_flags.append((ts, int(m.group(1), 16)))
@@ -349,15 +356,25 @@ def _print_tel_events(r: RunReport) -> None:
 def _print_ekf(r: RunReport) -> None:
     _header("EKF TIMELINE")
 
+    # GPS fusion keywords — shown with [OK]/[!!] flags for quick triage
+    GPS_GOOD = {"origin set", "is using gps", "yaw aligned", "tilt alignment"}
+    GPS_BAD  = {"gps glitch", "ekf failsafe", "compass error", "yaw reset", "emergency yaw"}
     keywords = [
         "initialised", "tilt alignment", "origin set", "GPS Glitch",
-        "EKF Failsafe", "yaw aligned", "GPS 1:", "AHRS:",
+        "EKF Failsafe", "yaw aligned", "GPS 1:", "AHRS:", "is using GPS",
+        "Compass error", "emergency yaw", "yaw reset", "RAWES flight: GPS",
     ]
     relevant = [(ts, txt) for ts, txt in r.statustext
                 if any(k.lower() in txt.lower() for k in keywords)]
     if relevant:
         for ts, txt in relevant:
-            print(f"  {ts}  {txt}")
+            tl = txt.lower()
+            flag = ""
+            if any(k in tl for k in GPS_GOOD):
+                flag = "  [OK]"
+            elif any(k in tl for k in GPS_BAD):
+                flag = "  [!!]"
+            print(f"  {ts}  {txt}{flag}")
     else:
         print("  (no EKF / GPS STATUSTEXT found)")
 
@@ -385,6 +402,117 @@ def _print_ekf(r: RunReport) -> None:
         print(f"    horiz position valid : {'[OK]' if has_pos else '[!!]'}")
         print(f"    velocity valid       : {'[OK]' if has_vel else '[!!]'}")
         print(f"    GPS yaw valid        : {'[OK]' if final_f & 0x0080 else '[!!]'}")
+
+
+def _print_free_flight_quality(r: RunReport) -> None:
+    """
+    Per-10s bucket analysis of free-flight orbit quality.
+
+    Detects:
+      - Floor hits (alt <= 1.05 m)
+      - Tether slack/taut oscillations (chatter)
+      - Altitude instability (high std within bucket)
+      - Attitude tumbling (large rpy_yaw change rate)
+      - Orbit radius drift
+    """
+    rows = [
+        row for row in r.tel_rows
+        if row.damp_alpha == 0.0
+        and row.phase not in ("reel-out", "reel-in", "descent", "final_drop")
+    ]
+    if not rows:
+        return
+
+    _header("FREE-FLIGHT QUALITY")
+
+    t0        = rows[0].t_sim
+    t1        = rows[-1].t_sim
+    alts      = [-row.pos_z              for row in rows]
+    orbit_rs  = [(row.pos_x**2 + row.pos_y**2)**0.5 for row in rows]
+    tensions  = [row.tether_tension      for row in rows]
+    slacks    = [row.tether_slack        for row in rows]
+
+    total_floor_hits = sum(1 for a in alts if a <= 1.05)
+    # Tether oscillation: count slack->taut transitions
+    tether_transitions = sum(
+        1 for i in range(1, len(slacks))
+        if slacks[i-1] != slacks[i]
+    ) // 2   # each oscillation = 2 transitions
+
+    dt = (t1 - t0) / max(len(rows) - 1, 1)
+
+    # Attitude change rate: |delta rpy_yaw| / dt per step, capped at pi
+    att_rates = []
+    for i in range(1, len(rows)):
+        dy = abs(rows[i].rpy_yaw - rows[i-1].rpy_yaw)
+        if dy > math.pi:
+            dy = 2 * math.pi - dy
+        att_rates.append(dy / max(dt, 1e-6))
+    peak_att_rate = max(att_rates) if att_rates else 0.0
+
+    # Summary
+    mean_alt    = sum(alts) / len(alts)
+    std_alt     = (sum((a - mean_alt)**2 for a in alts) / len(alts))**0.5
+    mean_orbit  = sum(orbit_rs) / len(orbit_rs)
+    mean_tens   = sum(tensions) / len(tensions)
+    max_tens    = max(tensions)
+
+    print(f"  Duration       : t={t0:.1f}s .. t={t1:.1f}s  ({t1-t0:.0f}s, {len(rows)} rows)")
+    print(f"  Altitude       : mean={mean_alt:.1f} m  std={std_alt:.1f} m  "
+          f"range=[{min(alts):.1f}, {max(alts):.1f}] m  "
+          + ("[OK]" if min(alts) > 3.0 else "[!!] below 3 m"))
+    print(f"  Orbit radius   : mean={mean_orbit:.1f} m  "
+          f"range=[{min(orbit_rs):.1f}, {max(orbit_rs):.1f}] m")
+    print(f"  Tether tension : mean={mean_tens:.0f} N  max={max_tens:.0f} N  "
+          + ("[OK]" if max_tens < 500 else "[!!] near break load"))
+    print(f"  Floor hits     : {total_floor_hits} frames  "
+          + ("[OK]" if total_floor_hits == 0 else "[!!] hub hit floor"))
+    print(f"  Tether chatter : {tether_transitions} slack/taut cycles  "
+          + ("[OK]" if tether_transitions < 5 else "[!!] oscillating tether"))
+    print(f"  Peak att. rate : {math.degrees(peak_att_rate):.0f} deg/s  "
+          + ("[OK]" if peak_att_rate < 1.0 else "[!!] tumbling"))
+
+    # Per-10s bucket table
+    BUCKET_S = 10.0
+    print()
+    print(f"  {'t_start':>7}  {'alt_mean':>8}  {'alt_std':>7}  {'orbit_r':>7}  "
+          f"{'T_mean':>6}  {'T_max':>6}  {'floor':>5}  {'chatter':>7}")
+    print(f"  {'(s)':>7}  {'(m)':>8}  {'(m)':>7}  {'(m)':>7}  "
+          f"{'(N)':>6}  {'(N)':>6}  {'hits':>5}  {'cycles':>7}")
+    print("  " + "-" * 68)
+
+    bucket_start = t0
+    while bucket_start < t1 - 0.5:
+        bucket_end = bucket_start + BUCKET_S
+        br = [row for row in rows if bucket_start <= row.t_sim < bucket_end]
+        if not br:
+            bucket_start = bucket_end
+            continue
+
+        b_alts    = [-row.pos_z for row in br]
+        b_orbits  = [(row.pos_x**2 + row.pos_y**2)**0.5 for row in br]
+        b_tens    = [row.tether_tension for row in br]
+        b_slacks  = [row.tether_slack for row in br]
+        b_floor   = sum(1 for a in b_alts if a <= 1.05)
+        b_chat    = sum(1 for i in range(1, len(b_slacks))
+                        if b_slacks[i-1] != b_slacks[i]) // 2
+        b_alt_m   = sum(b_alts) / len(b_alts)
+        b_alt_s   = (sum((a - b_alt_m)**2 for a in b_alts) / len(b_alts))**0.5
+        b_orb_m   = sum(b_orbits) / len(b_orbits)
+        b_t_m     = sum(b_tens) / len(b_tens)
+        b_t_max   = max(b_tens)
+
+        flag = ""
+        if b_floor > 0:
+            flag = " [!!]floor"
+        elif b_alt_m < 3.0:
+            flag = " [!] low"
+        elif b_chat >= 3:
+            flag = " [!] chatter"
+
+        print(f"  {bucket_start:7.0f}  {b_alt_m:8.1f}  {b_alt_s:7.2f}  {b_orb_m:7.1f}  "
+              f"{b_t_m:6.0f}  {b_t_max:6.0f}  {b_floor:5d}  {b_chat:7d}{flag}")
+        bucket_start = bucket_end
 
 
 def _print_landing(r: RunReport) -> None:
@@ -497,12 +625,15 @@ def _print_all_statustext(r: RunReport) -> None:
 
 def _print_yaw_divergence(r: RunReport) -> None:
     """
-    Yaw gap between true orbital-frame yaw (orb_yaw_rad) and the
-    velocity-heading yaw sent to ArduPilot (rpy_yaw).
+    Gap between orb_yaw_rad (actual R_orb orientation yaw) and rpy_yaw
+    (attitude yaw sent to SITL as Euler angle).
 
-    A sustained gap > ~15 deg usually triggers GPS-compass inconsistency
-    or an EKF emergency yaw reset.  This section breaks the gap down
-    by flight phase so you can see exactly when the divergence occurred.
+    With honest sensors (current codebase): rpy_yaw == orb_yaw_rad, so this
+    gap should always be ~0.  A non-zero gap here means sensor.py is
+    overriding rpy[2] with something other than the R_orb yaw (regression).
+
+    For the compass-vs-GPS-velocity heading gap that blocks GPS fusion, see
+    the SENSOR CONSISTENCY section above (heading_gap_deg column).
     """
     rows = r.tel_rows
     if not rows:
@@ -513,8 +644,9 @@ def _print_yaw_divergence(r: RunReport) -> None:
         s = math.degrees(row.rpy_yaw)
         return abs(((o - s + 180) % 360) - 180)
 
-    _header("YAW DIVERGENCE  (orb_yaw vs rpy_yaw sent to ArduPilot)")
-    print("  A sustained gap > ~15 deg risks GPS-compass inconsistency failsafe.")
+    _header("YAW DIVERGENCE  (orb_yaw vs rpy_yaw -- should be ~0 with honest sensors)")
+    print("  With honest sensors rpy_yaw == orb_yaw; gap > 0 indicates a sensor regression.")
+    print("  For GPS fusion diagnostics see SENSOR CONSISTENCY above.")
 
     # Group into three logical segments: kinematic, free-flight, pumping phases
     segments = [
@@ -547,6 +679,120 @@ def _print_yaw_divergence(r: RunReport) -> None:
         print(f"    max gap  : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  "
               f"(v_horiz={max_row.v_horiz_ms:.2f} m/s)  {flag}")
         print(f"    >15 deg  : {hi_frac*100:.0f}% of frames")
+
+
+# ---------------------------------------------------------------------------
+# Sensor consistency (compass heading vs GPS velocity heading)
+# ---------------------------------------------------------------------------
+
+def _print_sensor_consistency(r: RunReport) -> None:
+    """
+    Compass-vs-GPS-velocity heading gap analysis.
+
+    ArduPilot EKF3 cross-checks compass yaw against the heading implied by
+    GPS velocity (atan2(vel_E, vel_N)).  When the gap is large (typically
+    > ~30 deg) the EKF blocks GPS velocity fusion and may trigger an
+    emergency yaw reset.
+
+    With honest sensors (EK3_SRC1_YAW=1):
+      compass heading = rpy_yaw = R_orb yaw (built by build_orb_frame())
+      vel heading     = atan2(vel_ned_E, vel_ned_N)  (what GPS sees)
+      heading_gap_deg = compass - vel_heading  (wrapped to -180..180)
+
+    These are the 'heading_gap_deg' and 'vel_heading_deg' columns added to
+    telemetry in the sensor-columns refactor.  If absent (old telemetry),
+    this section is skipped.
+    """
+    rows = r.tel_rows
+    if not rows:
+        return
+
+    # Check if new sensor columns are populated (all-zero means old telemetry)
+    has_cols = any(row.heading_gap_deg != 0.0 or row.vel_heading_deg != 0.0
+                   for row in rows)
+    if not has_cols:
+        # Old telemetry: try to derive from rpy_yaw + physics vel directly.
+        # orb_yaw = math.degrees(row.orb_yaw_rad)
+        # vel_heading = math.degrees(math.atan2(row.vel_y, row.vel_x))
+        # This approximation uses physics world vel, not sensor vel_ned.
+        # Only run if orbit speeds are non-trivial (|v| > 0.1 m/s).
+        derived = []
+        for row in rows:
+            v = math.hypot(row.vel_x, row.vel_y)
+            if v < 0.1:
+                derived.append(None)
+                continue
+            comp = math.degrees(row.rpy_yaw)
+            vhd  = math.degrees(math.atan2(row.vel_y, row.vel_x))
+            gap  = ((comp - vhd + 180.0) % 360.0) - 180.0
+            derived.append(gap)
+        if not any(g is not None for g in derived):
+            return
+        # Fall through: build synthetic rows list with derived gap
+        _header("SENSOR CONSISTENCY  (derived from rpy_yaw vs physics vel -- old telemetry)")
+        print("  NOTE: 'heading_gap_deg' column absent; gap derived from rpy_yaw vs vel_x/vel_y.")
+        print("  For accurate sensor diagnostics, re-run the test (new telemetry schema).")
+        good_gaps = [g for g in derived if g is not None]
+        mean_gap = sum(abs(g) for g in good_gaps) / len(good_gaps)
+        max_gap  = max(abs(g) for g in good_gaps)
+        hi_frac  = sum(1 for g in good_gaps if abs(g) > 30.0) / len(good_gaps)
+        flag = ("[!!] GPS fusion likely blocked" if max_gap > 90.0
+                else ("[!]  check" if max_gap > 30.0 else "[OK]"))
+        print(f"  mean |gap| : {mean_gap:.1f} deg")
+        print(f"  max  |gap| : {max_gap:.1f} deg  {flag}")
+        print(f"  >30 deg    : {hi_frac*100:.0f}%")
+        return
+
+    _header("SENSOR CONSISTENCY  (compass vs GPS velocity heading)")
+    print("  ArduPilot EKF blocks GPS fusion when |compass - vel_heading| is large.")
+    print("  compass heading = rpy_yaw = R_orb yaw  (what SITL compass reads)")
+    print("  vel heading     = atan2(vel_ned_E, vel_ned_N)  (what GPS velocity implies)")
+    print("  heading_gap_deg = compass - vel_heading  wrapped to (-180, 180]")
+
+    segments = [
+        ("kinematic",
+         [row for row in rows if row.damp_alpha > 0.0]),
+        ("free-flight (no pump/landing)",
+         [row for row in rows if row.damp_alpha == 0.0
+          and row.phase not in ("reel-out", "reel-in", "descent", "final_drop")]),
+        ("pumping (reel-out/reel-in)",
+         [row for row in rows if row.phase in ("reel-out", "reel-in")]),
+        ("landing (descent/final_drop)",
+         [row for row in rows if row.phase in ("descent", "final_drop")]),
+    ]
+
+    for label, seg in segments:
+        if not seg:
+            continue
+        gaps     = [abs(row.heading_gap_deg) for row in seg]
+        mean_gap = sum(gaps) / len(gaps)
+        max_gap  = max(gaps)
+        max_row  = seg[gaps.index(max_gap)]
+        hi_frac  = sum(1 for g in gaps if g > 30.0) / len(gaps)
+
+        flag = ("[!!] GPS fusion likely blocked" if max_gap > 90.0
+                else ("[!]  check" if max_gap > 30.0 else "[OK]"))
+
+        print()
+        print(f"  {label}  ({len(seg)} rows)")
+        print(f"    mean |gap|     : {mean_gap:.1f} deg")
+        print(f"    max  |gap|     : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  {flag}")
+        frac_str = f"{hi_frac*100:.0f}%"
+        print(f"    >30 deg frames : {frac_str}  "
+              + ("[OK]" if hi_frac < 0.05 else "[!!] EKF unlikely to fuse GPS this phase"))
+
+        # 5-point sample across the segment
+        stride = max(1, len(seg) // 5)
+        sample = seg[::stride][:5]
+        print(f"    {'t_sim':>8}  {'compass':>8}  {'vel_head':>8}  "
+              f"{'gap':>7}  {'v_horiz':>7}  {'sens_vel_n':>10}  {'sens_vel_e':>10}")
+        for sr in sample:
+            comp  = math.degrees(sr.rpy_yaw)
+            vhd   = sr.vel_heading_deg
+            gap   = sr.heading_gap_deg
+            print(f"    {sr.t_sim:8.1f}  {comp:8.1f}  {vhd:8.1f}  "
+                  f"{gap:7.1f}  {sr.v_horiz_ms:7.2f}  "
+                  f"{sr.sens_vel_n:10.3f}  {sr.sens_vel_e:10.3f}")
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +1076,9 @@ def main() -> None:
     _print_mediator(report)
     _print_tel_events(report)
     _print_ekf(report)
+    _print_sensor_consistency(report)
     _print_yaw_divergence(report)
+    _print_free_flight_quality(report)
     _print_ekf_state(test_dir / "ekf_telemetry.csv")
     _print_landing(report)
     _print_setup(report)

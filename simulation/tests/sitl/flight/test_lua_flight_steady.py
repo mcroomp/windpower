@@ -46,25 +46,25 @@ from pathlib import Path
 
 import pytest
 
-_SIM_DIR   = Path(__file__).resolve().parents[2]
-_STACK_DIR = Path(__file__).resolve().parent
+_SIM_DIR  = Path(__file__).resolve().parents[3]
+_SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
-sys.path.insert(0, str(_STACK_DIR))
+sys.path.insert(0, str(_SITL_DIR))
 
-from conftest import StackContext, dump_startup_diagnostics
+from stack_infra import StackContext, dump_startup_diagnostics
 
-# ── Timing ────────────────────────────────────────────────────────────────────
-_CAPTURE_TIMEOUT_S = 60.0   # s from fixture yield — Lua captures at SITL t=62 s
+# -- Timing -------------------------------------------------------------------
+_CAPTURE_TIMEOUT_S = 60.0   # s from fixture yield -- Lua captures at SITL t=62 s
                             # (FLIGHT_SETTLE_MS), which is t_obs~46 s (fixture yields
                             # at SITL t~16 s).  60 s gives 14 s margin.
 _OBS_SECONDS       = 200.0  # s total observation from fixture yield.
                             # Kinematic exits at t_obs~49 s (SITL 65 s);
                             # 200 s gives >150 s of free flight (>= 60 s stable needed).
 
-# ── Pass thresholds ───────────────────────────────────────────────────────────
-_MIN_ALT_M               = 1.0   # m — hard floor (no crash)
-_STABLE_ALT_M            = 3.0   # m — floor for continuous-stable window
-_MIN_STABLE_FLIGHT_S     = 60.0  # s — required continuous time above STABLE_ALT_M
+# -- Pass thresholds ----------------------------------------------------------
+_MIN_ALT_M               = 1.0   # m -- hard floor (no crash)
+_STABLE_ALT_M            = 3.0   # m -- floor for continuous-stable window
+_MIN_STABLE_FLIGHT_S     = 60.0  # s -- required continuous time above STABLE_ALT_M
 _MIN_CYCLIC_ACTIVITY_PWM = 50    # |servo1-1500| + |servo2-1500| minimum peak
 
 _POS_LOG_INTERVAL        = 5.0   # s between periodic position log lines
@@ -124,7 +124,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
                 if mt == "LOCAL_POSITION_NED":
                     # Altitude above ground: home_alt_m (= -pos0[2]) minus EKF D.
                     # sensor.py: pos_ned_rel[2] = pos_ned[2] - home_ned_z = pos_ned[2] + home_alt_m
-                    # So LOCAL_POSITION_NED.D = pos_ned[2] + home_alt_m → alt = home_alt_m - D.
+                    # So LOCAL_POSITION_NED.D = pos_ned[2] + home_alt_m -> alt = home_alt_m - D.
                     alt_ekf = ctx.home_alt_m - msg.z
                     if alt_ekf >= _STABLE_ALT_M:
                         if t_above_start is None:
@@ -191,7 +191,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
             max_cyclic_activity, max_stable_s,
         )
 
-        # ── Physics altitude from telemetry (authoritative) ────────────────
+        # -- Physics altitude from telemetry (authoritative) ------------------
         min_phys_alt = float("inf")
         if ctx.telemetry_log.exists():
             from telemetry_csv import read_csv as _read_csv
@@ -205,7 +205,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
             log.warning("No telemetry CSV -- skipping physics altitude check")
             min_phys_alt = _MIN_ALT_M   # pass through if no telemetry
 
-        # ── Assertions ─────────────────────────────────────────────────────
+        # -- Assertions -------------------------------------------------------
         assert lua_captured, (
             "rawes.lua never captured equilibrium.\n"
             f"STATUSTEXT: {all_statustext}"

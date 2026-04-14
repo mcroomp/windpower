@@ -3,37 +3,35 @@ test_sensor_closed_loop.py — PhysicalSensor properties during 60-second flight
 
 Fills the validation gap between:
   - test_sensor.py          (unit tests at static/hand-crafted states)
-  - test_acro_hold           (full stack, Docker required)
+  - full stack tests        (Docker required)
 
 The control loop uses truth state (same as test_closed_loop_60s) to keep the
 flight stable.  PhysicalSensor runs as a shadow computation alongside it,
 receiving the same physics state at 400 Hz.  Sensor outputs are checked for
 consistency properties that the EKF depends on.
 
-Why shadow (not closed-loop)?
-------------------------------
-At the RAWES tether equilibrium the hub is tilted ~65 deg from NED vertical,
-giving Euler angles of roughly (roll=124 deg, pitch=-46 deg).  At such large
-tilts the Euler ZYX representation is ill-conditioned: reconstructing R_body
-from (roll, pitch, yaw_vel) after overriding only the yaw component produces
-a body_z column that diverges from the true disk normal, scrambling the lon/lat
-projection axes in compute_rate_cmd.  The stack avoids this because ArduPilot's
-EKF works in quaternions and feeds consistent attitude back to the Lua controller.
-Without the EKF in the loop the sensor frame cannot be safely used to close the
-attitude control loop in simulation.
+Physical sensor design principle
+----------------------------------
+sensor.py is physically faithful: rpy[2] is the actual hub orientation yaw
+from build_orb_frame(disk_normal), NOT a velocity-heading override.  The SITL
+compass reads the same R_orb orientation, so compass and reported attitude always
+agree → no EKF emergency yaw reset.
+
+The GB4008 counter-torque motor keeps the electronics non-rotating relative to
+the rotor spin axis, modelled by stripping the spin component from omega_body
+before projecting to body frame.  The yaw of the electronics platform is
+whatever build_orb_frame gives (East-projection onto disk plane); its exact
+direction is unimportant as long as it is steady.
 
 What this specifically tests
 -----------------------------
-1. Yaw rate limiter:
-     The hub velocity direction rotates ~82 deg/s when the tether becomes taut.
-     Without _vel_yaw_rate_max the gyro body axes remap suddenly, making the
-     ACRO rate loop apply destabilising corrections in the stack.  This test
-     catches regressions in the limiter by verifying that sensor yaw stays close
-     to velocity heading throughout 60 s of realistic orbital flight.
+1. Sensor yaw tracks R_orb (honest orientation):
+     rpy[2] must equal atan2(R[1,0], R[0,0]) from R_orb throughout flight.
+     This verifies no yaw override is applied.
 
-2. Sensor yaw / velocity-heading consistency:
-     rpy[2] from PhysicalSensor must track atan2(vel_E, vel_N) within
-     YAW_TRACKING_TOL_DEG (EKF GPS-fusion requirement).
+2. Sensor yaw changes slowly (orbital rate):
+     The hub's orbital frame yaw changes at ~0.01-0.02 rad/s as disk_normal
+     rotates during orbit.  Rapid changes (>1 rad/s) indicate a frame bug.
 
 3. Gyro boundedness:
      gyro_body norm must stay below GYRO_MAX_RAD_S throughout.  A large value
@@ -45,9 +43,7 @@ What this specifically tests
 
 Sensor configuration
 --------------------
-gyro_sigma = accel_sigma = 0.0 — noiseless for determinism.  Noise properties
-are covered by test_sensor.py unit tests.  The sensor is pre-initialised from
-VEL0/BODY_Z0 so _last_vel_yaw matches t=0 and there is no cold-start jump.
+gyro_sigma = accel_sigma = 0.0 — noiseless for determinism.
 """
 
 import math
@@ -124,14 +120,11 @@ def _run(t_sim: float = T_SIM):
                          rest_length=_IC.rest_length,
                          axle_attachment_length=rd.default().axle_attachment_length_m)
 
-    # Shadow sensor: pre-initialised so _last_vel_yaw matches t=0.
     sensor = PhysicalSensor(
         home_ned_z  = _IC.home_z_ned,
         gyro_sigma  = 0.0,
         accel_sigma = 0.0,
         rng_seed    = 0,
-        initial_vel = VEL0,
-        initial_R   = build_orb_frame(BODY_Z0),
     )
 
     hub_state  = dyn.state
@@ -213,9 +206,6 @@ def _run(t_sim: float = T_SIM):
 
         # 10 Hz snapshot
         if i % int(10.0 / DT) == 0:
-            vel = hub_state["vel"]
-            v_horiz = math.hypot(vel[0], vel[1])
-            true_yaw = math.atan2(vel[1], vel[0]) if v_horiz > 0.1 else None
             history.append({
                 "t":          t,
                 "pos":        hub_state["pos"].copy(),
@@ -224,9 +214,10 @@ def _run(t_sim: float = T_SIM):
             sensor_log.append({
                 "t":           t,
                 "yaw_sensor":  float(pkt["rpy"][2]),
-                "yaw_true":    true_yaw,
+                "orb_yaw":     float(pkt["orb_yaw_rad"]),
                 "gyro_norm":   float(np.linalg.norm(pkt["gyro_body"])),
                 "omega_spin":  omega_spin,
+                "R":           hub_state["R"].copy(),
             })
 
     history.append({
@@ -265,93 +256,57 @@ def test_sensor_loop_spin_maintained():
 # Sensor property tests (PhysicalSensor outputs during realistic flight)
 # ---------------------------------------------------------------------------
 
-def test_sensor_yaw_rate_limited():
+def test_sensor_yaw_equals_orb_yaw():
     """
-    Sensor yaw must change at most _vel_yaw_rate_max radians per second.
+    rpy[2] from PhysicalSensor must equal orb_yaw_rad (actual R_orb yaw).
 
-    This is the core property of the rate limiter: it prevents the ~82 deg/s
-    tether-activation yaw spike from remapping the gyro body axes.  We sample
-    at 400 Hz (every physics step) and check that consecutive yaw changes stay
-    within the limit.  Only samples where v_horiz > 0.05 m/s at BOTH steps are
-    checked (below threshold the yaw freezes, which is also verified).
-
-    Note: the hub in this simtest has very low orbital velocity (max ~0.3 m/s),
-    so convergence to a specific heading is not meaningful here.  The rate-limit
-    property is independent of whether the heading converges.
+    Physical faithfulness: sensor reports the actual hub orientation yaw —
+    no velocity-heading override.  orb_yaw_rad and rpy[2] are derived from
+    the same R_orb, so they must be identical to floating-point precision.
     """
-    # Run a shorter loop at full 400 Hz to measure per-step yaw changes
-    T_CHECK  = 15.0   # 15 s is enough to see any transient
-    DT_SIM   = 1.0 / 400.0
-    RATE_MAX = 0.05   # rad/s  (_vel_yaw_rate_max)
-    EPSILON  = 1e-4   # numerical tolerance on top of rate limit
-
-    dyn = RigidBodyDynamics(
-        mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
-        pos0=POS0.tolist(), vel0=VEL0.tolist(),
-        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
-    )
-    aero   = create_aero(rd.default())
-    tether = TetherModel(anchor_ned=ANCHOR, rest_length=_IC.rest_length,
-                         axle_attachment_length=rd.default().axle_attachment_length_m)
-    sensor = PhysicalSensor(
-        home_ned_z=_IC.home_z_ned, gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0,
-        initial_vel=VEL0, initial_R=build_orb_frame(BODY_Z0),
-    )
-    pid_lon = RatePID(kp=KP_INNER); pid_lat = RatePID(kp=KP_INNER)
-    servo   = SwashplateServoModel.from_rotor(rd.default())
-    trajectory   = HoldPlanner()
-    ic_tdir0 = POS0 / np.linalg.norm(POS0); ic_bz0 = BODY_Z0.copy()
-    hub_state = dyn.state; omega_spin = OMEGA_SPIN0; prev_vel = hub_state["vel"].copy()
-
-    prev_yaw = None
-    max_rate = 0.0
+    _, sensor_log = _run()
     violations = []
-
-    for i in range(int(T_CHECK / DT_SIM)):
-        t = i * DT_SIM
-        accel = (hub_state["vel"] - prev_vel) / DT_SIM if i > 0 else np.zeros(3)
-        pkt = sensor.compute(hub_state["pos"], hub_state["vel"], hub_state["R"],
-                             hub_state["omega"], accel, DT_SIM)
-
-        cur_yaw    = float(pkt["rpy"][2])
-        cur_vhoriz = math.hypot(hub_state["vel"][0], hub_state["vel"][1])
-
-        if prev_yaw is not None:
-            delta = cur_yaw - prev_yaw
-            # Wrap to [-pi, pi]
-            delta = (delta + math.pi) % (2 * math.pi) - math.pi
-            rate  = abs(delta) / DT_SIM
-            max_rate = max(max_rate, rate)
-            if rate > RATE_MAX + EPSILON:
-                violations.append(f"t={t:.4f}s  rate={math.degrees(rate):.2f} deg/s  "
-                                  f"v_horiz={cur_vhoriz:.3f}")
-
-        traj_pkt = {"pos_ned": hub_state["pos"], "vel_ned": hub_state["vel"],
-                    "tension_n": 0.0, "omega_spin": omega_spin, "t_free": t}
-        trajectory.step(traj_pkt, DT_SIM)
-        bz_eq   = orbit_tracked_body_z_eq(hub_state["pos"], ic_tdir0, ic_bz0)
-        rate_sp = compute_rate_cmd(hub_state["R"][:, 2], bz_eq, hub_state["R"],
-                                   kp=KP_OUTER, kd=0.0)
-        omb = hub_state["R"].T @ hub_state["omega"]; omb[2] = 0.0
-        tlon, tlat = servo.step(pid_lon.update(rate_sp[0], omb[0], DT_SIM),
-                                -pid_lat.update(rate_sp[1], omb[1], DT_SIM), DT_SIM)
-        res = aero.compute_forces(_IC.coll_eq_rad, tlon, tlat, hub_state["R"],
-                                  hub_state["vel"], omega_spin, WIND, T_AERO_OFFSET + t)
-        tf, tm   = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        omega_spin = max(OMEGA_SPIN_MIN, omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT_SIM)
-        prev_vel   = hub_state["vel"].copy()
-        hub_state  = dyn.step(res.F_world + tf, res.M_orbital + tm, DT_SIM, omega_spin)
-
-        prev_yaw = cur_yaw
-
-    _log.write(
-        violations or ["(no violations)"],
-        f"max_yaw_rate={math.degrees(max_rate):.2f} deg/s  "
-        f"limit={math.degrees(RATE_MAX):.2f} deg/s  violations={len(violations)}",
-    )
+    for s in sensor_log:
+        diff = abs(s["yaw_sensor"] - s["orb_yaw"])
+        # Wrap to [-pi, pi]
+        diff = (diff + math.pi) % (2 * math.pi) - math.pi
+        if abs(diff) > 1e-9:
+            violations.append(f"t={s['t']:.1f}s  rpy[2]={math.degrees(s['yaw_sensor']):.3f}  "
+                              f"orb_yaw={math.degrees(s['orb_yaw']):.3f}  diff={math.degrees(diff):.4f} deg")
+    _log.write(violations or ["(all match to floating-point precision)"],
+               f"violations={len(violations)}")
     assert not violations, (
-        f"Yaw rate limiter violated {len(violations)} times "
-        f"(max {math.degrees(max_rate):.2f} deg/s, limit {math.degrees(RATE_MAX):.2f} deg/s):\n"
+        f"rpy[2] != orb_yaw_rad in {len(violations)} samples "
+        "(velocity-heading override crept back in?):\n" + "\n".join(violations[:10])
+    )
+
+
+def test_sensor_yaw_changes_slowly():
+    """
+    Sensor yaw (orb_yaw from R_orb) must change slowly — at orbital rate only.
+
+    The orbital frame yaw changes as disk_normal rotates during orbit.
+    Typical rate is ~0.01-0.05 rad/s.  A rate > 1 rad/s indicates a frame
+    singularity or spin-strip bug.
+    """
+    _, sensor_log = _run()
+    YAW_RATE_MAX = 1.0   # rad/s — generous; orbital rate is ~0.02 rad/s
+    violations = []
+    prev = None
+    for s in sensor_log:
+        if prev is not None:
+            dt_snap = s["t"] - prev["t"]
+            if dt_snap > 0:
+                delta = s["orb_yaw"] - prev["orb_yaw"]
+                delta = (delta + math.pi) % (2 * math.pi) - math.pi
+                rate = abs(delta) / dt_snap
+                if rate > YAW_RATE_MAX:
+                    violations.append(f"t={s['t']:.1f}s  yaw_rate={math.degrees(rate):.1f} deg/s")
+        prev = s
+    _log.write(violations or ["(all within 1 rad/s)"],
+               f"violations={len(violations)}  limit=1.0 rad/s")
+    assert not violations, (
+        f"Orbital yaw rate exceeded 1 rad/s in {len(violations)} samples:\n"
         + "\n".join(violations[:10])
     )
 

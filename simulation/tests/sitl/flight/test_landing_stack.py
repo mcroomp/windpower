@@ -27,12 +27,12 @@ import sys
 import time
 from pathlib import Path
 
-_STACK_DIR = Path(__file__).resolve().parent
-_SIM_DIR   = _STACK_DIR.parent.parent
+_SIM_DIR  = Path(__file__).resolve().parents[3]
+_SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
-sys.path.insert(0, str(_STACK_DIR))
+sys.path.insert(0, str(_SITL_DIR))
 
-from conftest import StackContext, dump_startup_diagnostics
+from stack_infra import StackContext, dump_startup_diagnostics
 from telemetry_csv import read_csv
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
                     final_drop_seen = True
                     log.info("  -> Lua final_drop triggered")
 
-        # ── Parse telemetry CSV ────────────────────────────────────────────
+        # -- Parse telemetry CSV -----------------------------------------------
         tel = read_csv(ctx.telemetry_log)
         log.info("Telemetry: %d rows", len(tel))
 
@@ -136,7 +136,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
                 "Ensure mediator is writing telemetry."
             )
 
-        # ── STATUSTEXT assertions ─────────────────────────────────────────
+        # -- STATUSTEXT assertions ---------------------------------------------
         assert captured_seen, (
             "STATUSTEXT 'RAWES land: captured' never appeared. "
             "Lua landing mode may not have activated (SCR_USER6=4) or "
@@ -151,7 +151,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
             f"All STATUSTEXT seen: {ctx.all_statustext}"
         )
 
-        # ── Altitude: descent direction + floor reached ───────────────────
+        # -- Altitude: descent direction + floor reached -----------------------
         altitudes = [-r.pos_z for r in tel]
         max_alt   = max(altitudes) if altitudes else 0.0
         min_alt   = min(altitudes) if altitudes else 0.0
@@ -169,7 +169,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
             "Lua landing descent did not complete within the observation window."
         )
 
-        # ── Tension: no spike during descent ─────────────────────────────
+        # -- Tension: no spike during descent ----------------------------------
         descent_rows = [r for r in tel if r.phase == "descent"]
         if descent_rows:
             peak_tension = max(r.tether_tension for r in descent_rows)
@@ -183,7 +183,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
         else:
             log.warning("No descent rows in telemetry -- tension check skipped.")
 
-        # ── CRITICAL log check ────────────────────────────────────────────
+        # -- CRITICAL log check -----------------------------------------------
         if ctx.mediator_log.exists():
             lines = ctx.mediator_log.read_text(encoding="utf-8", errors="replace").splitlines()
             critical = [l for l in lines if "CRITICAL" in l]

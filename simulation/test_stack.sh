@@ -25,4 +25,4 @@ FILTER_MODE="${RAWES_FILTER_MODE:-summary}"
 exec python "$SCRIPT_DIR/run_tests.py" \
     --filter "$FILTER_MODE" \
     --summary "$SCRIPT_DIR/logs/suite_summary.json" \
-    "$SCRIPT_DIR/tests/stack" -s "$@"
+    "$SCRIPT_DIR/tests/sitl" -s "$@"

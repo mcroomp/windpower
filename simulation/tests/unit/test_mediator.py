@@ -175,7 +175,11 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
     # M_world = aero moments [4,5,6]
     np.testing.assert_allclose(fake_dynamics.step_calls[0][1], np.array([4.0, 5.0, 6.0]))
 
-    assert fake_aero.compute_calls[0]["collective_rad"] == 0.0
+    # With all-zero SITL servos: collective_norm=0, _col_thrust=0.5 → midpoint of [col_min, col_max].
+    # Mediator reads col bounds from cfg["trajectory"]["deschutter"].
+    _ds_cfg       = _mcfg.defaults()["trajectory"]["deschutter"]
+    _expected_col = _ds_cfg["col_min_rad"] + 0.5 * (_ds_cfg["col_max_rad"] - _ds_cfg["col_min_rad"])
+    np.testing.assert_allclose(fake_aero.compute_calls[0]["collective_rad"], _expected_col, atol=1e-9)
     assert fake_aero.compute_calls[0]["omega_rotor"] == DEFAULT_OMEGA_SPIN
     np.testing.assert_allclose(fake_aero.compute_calls[0]["wind_world"], np.array([0.0, 10.0, 0.0]))  # NED East
     assert len(fake_aero.motor_calls) == 0

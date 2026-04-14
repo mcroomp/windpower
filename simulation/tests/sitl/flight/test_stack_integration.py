@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_SIM_DIR  = Path(__file__).resolve().parents[3]
+_SITL_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_SIM_DIR))
+sys.path.insert(0, str(_SITL_DIR))
 
 from stack_utils import (
     STACK_ENV_FLAG,
@@ -66,9 +69,9 @@ class FakeGroundStation:
             self._conn = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Smoke test (fast connectivity check)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_stack_integration_smoke(tmp_path, request):
     """
@@ -83,7 +86,7 @@ def test_stack_integration_smoke(tmp_path, request):
     Uses _acro_stack(arm=False): processes are launched and available but the
     full arm/EKF sequence is skipped, keeping the test fast.
     """
-    from conftest import _acro_stack
+    from stack_infra import _acro_stack
 
     with _acro_stack(tmp_path, arm=False,
                      log_name="smoke", test_name=request.node.name) as ctx:

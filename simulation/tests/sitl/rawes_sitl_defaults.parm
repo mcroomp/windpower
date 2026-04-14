@@ -3,14 +3,29 @@
 # Loaded via --add-param-file (combined with --wipe-eeprom) in _launch_sitl().
 # These params become the boot defaults so setting them again via MAVLink is a
 # no-op (value unchanged) — prevents EKF reinit that would delay GPS fusion.
+# Loading as boot defaults (not post-boot MAVLink sets) avoids the EKF reinit
+# that would otherwise delay GPS fusion past the kinematic window.
 #
-# Without this file, setting EK3_SRC1_YAW=1 via MAVLink after SITL starts causes
-# an EKF reinit that delays GPS fusion from ~37 s to ~88 s — past the 45 s
-# kinematic window.  With these as boot defaults, GPS fuses at ~37 s (within
-# kinematic), so arm happens with EKF/DCM agreeing on attitude.
+# EK3_SRC1_YAW=1 (compass): sensor.py reports rpy[2] = R_orb yaw (build_orb_frame),
+# which is exactly what the SITL synthetic compass reads.  Compass and attitude always
+# agree, so no EKF emergency yaw reset.  Do NOT set =8 (GPS velocity yaw) — that
+# was a workaround for an old sensor bug where rpy[2] was overridden with velocity
+# heading instead of the honest hub yaw.  That bug is fixed; =1 is correct.
+
+# ACRO rate controller I-term limits.
+# Lua sends rate commands starting 3 s before kinematic exits (FLIGHT_SETTLE_MS=62s,
+# kinematic exits at 65s).  During that window kinematic locks R=R0 and omega=0, so
+# ArduPilot sees rate_error = setpoint - 0 != 0 and integrates the I-term.  At
+# kinematic exit the accumulated I-term discharges as a large torque impulse, tumbling
+# the hub.  Setting IMAX=0 disables I-term accumulation; P-term alone drives corrections.
+ATC_RAT_RLL_IMAX  0    # roll  rate I-term limit = 0 → no I windup during kinematic
+ATC_RAT_PIT_IMAX  0    # pitch rate I-term limit = 0 → no I windup during kinematic
+ATC_RAT_YAW_IMAX  0    # yaw   rate I-term limit = 0 → no I windup during kinematic
 
 EK3_IMU_MASK    1      # bit 0 only = IMU0 only = single EKF3 core (eliminates Roll/Pitch inconsistency)
-EK3_SRC1_YAW    1      # 1=compass — stable constant heading during kinematic startup
+EK3_SRC1_YAW    1      # 1=compass — consistent with sensor.py reporting honest R_orb yaw
+                       # The SITL compass reads the same R_orb orientation as rpy[2], so
+                       # compass and attitude always agree → no EKF emergency yaw reset.
                        # EK3_SRC1_POSXY and EK3_SRC1_VELXY are NOT set here: ArduPilot defaults (3=GPS)
                        # are correct for flight tests.  Torque tests that need POSXY=0/VELXY=0 must set
                        # them via MAVLink in _BASE_TORQUE_PARAMS (after connecting GCS, before arming).
@@ -18,7 +33,7 @@ EK3_MAG_CAL     0      # 0=Never — use raw compass; no in-flight calibration
 EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks (SITL JSON GPS has no quality fields)
 EK3_POS_I_GATE  50     # position innovation gate (sigma) — default 5; widened to prevent GPS glitch at extreme attitude
 EK3_VEL_I_GATE  50     # velocity innovation gate (sigma) — default 5; widened to prevent GPS glitch at extreme attitude
-COMPASS_USE     1      # enable compass for EKF yaw
+COMPASS_USE     1      # enable compass for EKF yaw — consistent with honest rpy[2] = R_orb yaw
 COMPASS_ENABLE  1      # enable compass sensor
 SCR_ENABLE      1      # enable Lua scripting on first boot (required for acro_armed_lua)
 # Collective servo range: full 1000-2000 us so Lua's ch3 encoding maps 1:1 to servos.

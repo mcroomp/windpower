@@ -19,12 +19,12 @@ from pathlib import Path
 
 import pytest
 
-_SIM_DIR   = Path(__file__).resolve().parents[2]
-_STACK_DIR = Path(__file__).resolve().parent
+_SIM_DIR  = Path(__file__).resolve().parents[3]
+_SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
-sys.path.insert(0, str(_STACK_DIR))
+sys.path.insert(0, str(_SITL_DIR))
 
-from conftest import StackContext, dump_startup_diagnostics
+from stack_infra import StackContext, dump_startup_diagnostics
 from telemetry_csv import read_csv
 
 # ---------------------------------------------------------------------------
@@ -158,21 +158,21 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
                     if "RAWES pump: reel_out" in text:
                         reel_out_seen = True
 
-        # ── Parse telemetry CSV ────────────────────────────────────────────
+        # -- Parse telemetry CSV -----------------------------------------------
         tel = read_csv(ctx.telemetry_log)
         log.info("Telemetry: %d rows", len(tel))
 
         if not tel:
             pytest.skip("No mediator telemetry CSV.")
 
-        # ── Lua sync check ────────────────────────────────────────────────
+        # -- Lua sync check ---------------------------------------------------
         assert reel_out_seen, (
             "STATUSTEXT 'RAWES pump: reel_out' never appeared. "
             "Lua may not have detected the mediator's winch paying out. "
             f"All STATUSTEXT: {all_statustext}"
         )
 
-        # ── Crash check ───────────────────────────────────────────────────
+        # -- Crash check ------------------------------------------------------
         z_tel = [-r.pos_z for r in tel]
         if z_tel:
             min_alt_tel = min(z_tel)
@@ -183,7 +183,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
                 f"STATUSTEXT: {all_statustext}"
             )
 
-        # ── Phase split ───────────────────────────────────────────────────
+        # -- Phase split ------------------------------------------------------
         out_rows, in_rows = _split_phases(tel)
         log.info("Phase split: reel-out=%d rows  reel-in=%d rows",
                  len(out_rows), len(in_rows))
@@ -235,7 +235,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
             f"Net energy {net_energy:.1f} J <= 0 -- pumping cycle does not produce net power"
         )
 
-        # ── CRITICAL log check ────────────────────────────────────────────
+        # -- CRITICAL log check -----------------------------------------------
         if ctx.mediator_log.exists():
             med_text = ctx.mediator_log.read_text(encoding="utf-8", errors="replace")
             critical = [l for l in med_text.splitlines() if "CRITICAL" in l]

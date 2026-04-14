@@ -30,9 +30,9 @@ Phase angle definitions
 
 Cross-coupling at H_SW_PHANG=0
 -------------------------------
-ArduPilot H3_120 assumes servo angles of -60°/+60°/180°.
-RAWES physical layout is 0°/120°/240° (S1 East, S2 120°, S3 240°).
-The 60° geometric offset produces inherent cross-coupling of ~0.55 at PHANG=0.
+ArduPilot H3_120 assumes servo angles of -60 deg/+60 deg/180 deg.
+RAWES physical layout is 0 deg/120 deg/240 deg (S1 East, S2 120 deg, S3 240 deg).
+The 60 deg geometric offset produces inherent cross-coupling of ~0.55 at PHANG=0.
 This is expected and is asserted to stay below _CROSS_COUPLING_MAX (0.80).
 Values above 0.80 would indicate a servo swap, wrong H_SW_TYPE, or firmware bug.
 """
@@ -45,33 +45,33 @@ from pathlib import Path
 
 import pytest
 
-_SIM_DIR   = Path(__file__).resolve().parents[2]
-_STACK_DIR = Path(__file__).resolve().parent
+_SIM_DIR  = Path(__file__).resolve().parents[3]
+_SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
-sys.path.insert(0, str(_STACK_DIR))
+sys.path.insert(0, str(_SITL_DIR))
 
-from conftest import StackContext, dump_startup_diagnostics
+from stack_infra import StackContext, dump_startup_diagnostics
 from swashplate import h3_inverse_mix
 
-# ── Timing --------------------------------------------------------------------
+# -- Timing --------------------------------------------------------------------
 _BASELINE_S = 4.0   # s -- neutral sticks before measurement
 _STEP_S     = 5.0   # s -- step command duration
 _SETTLE_S   = 3.0   # s -- neutral between steps
 _DISCARD_S  = 0.5   # s -- discard initial transient after step
 
-# ── RC values -----------------------------------------------------------------
+# -- RC values -----------------------------------------------------------------
 _PWM_NEUTRAL = 1500
 _PWM_STEP    = 1700   # +0.4 normalised
 
-# ── Pass/fail limits ----------------------------------------------------------
+# -- Pass/fail limits ----------------------------------------------------------
 _MIN_AXIS_RESPONSE  = 0.01   # normalised tilt -- servos must move at least this much
 _MIN_ALT_M          = 0.5    # m -- physics crash guard
 
 # Cross-coupling bounds at H_SW_PHANG=0.
 #
-# ArduPilot H3_120 assumes CH_1 at -60°, CH_2 at +60°, CH_3 at 180°.
-# RAWES physical layout has S1 at 0° (East), S2 at 120°, S3 at 240°.
-# This 60° geometric offset produces inherent cross-coupling even at PHANG=0;
+# ArduPilot H3_120 assumes CH_1 at -60 deg, CH_2 at +60 deg, CH_3 at 180 deg.
+# RAWES physical layout has S1 at 0 deg (East), S2 at 120 deg, S3 at 240 deg.
+# This 60 deg geometric offset produces inherent cross-coupling even at PHANG=0;
 # empirically measured values are ~0.55 for both axes.
 #
 # _CROSS_COUPLING_MAX is intentionally loose (< 0.80) to tolerate the known
@@ -79,7 +79,7 @@ _MIN_ALT_M          = 0.5    # m -- physics crash guard
 # mean the off-axis response dominates, indicating a servo swap or wrong SW_TYPE).
 _CROSS_COUPLING_MAX = 0.80   # < 0.80 with correct H3_120 + RAWES layout
 
-# ── Expected parameter values -------------------------------------------------
+# -- Expected parameter values -------------------------------------------------
 _EXPECTED_PARAMS = {
     "H_SW_TYPE":     3.0,   # H3_120
     "H_SW_H3_PHANG": 0.0,   # no phase correction (renamed from H_SW_PHANG in ArduPilot 4.6)
@@ -214,7 +214,7 @@ def test_h_swash_phang(acro_armed: StackContext):
     gcs = ctx.gcs
 
     try:
-        # ── 1. Verify parameter values ────────────────────────────────────────
+        # -- 1. Verify parameter values ----------------------------------------
         _log.info("=== Verifying swashplate parameters ===")
         for pname, expected_val in _EXPECTED_PARAMS.items():
             actual = gcs.get_param(pname, timeout=5.0)
@@ -228,7 +228,7 @@ def test_h_swash_phang(acro_armed: StackContext):
             )
             _log.info("  %s = %.0f  [OK]", pname, actual)
 
-        # ── 2. Measure swashplate response ────────────────────────────────────
+        # -- 2. Measure swashplate response ------------------------------------
         _log.info("=== Measuring swashplate step response at H_PHANG=0 ===")
         m = _measure_response(gcs, ctx)
 
@@ -256,7 +256,7 @@ def test_h_swash_phang(acro_armed: StackContext):
             m["cross_ch2"],
         )
 
-        # ── 3. Physics altitude check ─────────────────────────────────────────
+        # -- 3. Physics altitude check -----------------------------------------
         if ctx.telemetry_log.exists():
             from telemetry_csv import read_csv as _read_csv
             tel  = _read_csv(ctx.telemetry_log)
@@ -268,7 +268,7 @@ def test_h_swash_phang(acro_armed: StackContext):
                     f"Hub crashed: min alt {min_alt:.2f} m < {_MIN_ALT_M:.1f} m"
                 )
 
-        # ── 4. Summary ────────────────────────────────────────────────────────
+        # -- 4. Summary --------------------------------------------------------
         _log.info("=== RESULT ===")
         _log.info("  H_SW_TYPE  = 3  (H3_120)  [OK]")
         _log.info("  H_SW_PHANG = 0            [OK]")

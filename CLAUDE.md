@@ -8,6 +8,8 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 
 **Stack test status (14 PASS):** test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_wobble, test_gust, test_pitch_roll, test_slow_vary, test_startup, test_lua_yaw_trim, test_yaw_regulation, test_pumping_cycle (net_energy=+2098 J, peak_tension=315 N). test_pumping_cycle_lua and test_landing_lua: in development.
 
+**Test infrastructure:** Stack tests moved from `tests/stack/` to `tests/sitl/flight/` + `tests/sitl/torque/`. Shared code extracted into `stack_infra.py` (context managers `_sitl_stack`, `_acro_stack`, `_torque_stack`). `conftest.py` is now a thin re-exporter only.
+
 ---
 
 ## Physical System
@@ -56,8 +58,8 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **RotorDefinition YAML fields:** `swashplate_pitch_gain_rad` (measurable via flap deflection); `CD_structural` (beaupoil_2026=0.0, de_schutter_2018=0.021).
 - **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line.
 - **rawes.lua SCR_USER6 modes:** 0=none, 1=flight cyclic (50 Hz), 2=yaw trim (100 Hz), 3=both, 4=landing (cyclic + VZ descent + auto final_drop, 50 Hz), 5=pumping (De Schutter cyclic + per-phase collective, 50 Hz). Modes 4+5 own Ch3 entirely.
-- **GPS fusion timing:** Lua fixtures use `kinematic_vel_ramp_s=0` (constant vel) + `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) → GPS fuses at t≈37–54 s during kinematic. Default non-Lua fixtures use `kinematic_vel_ramp_s=15` (vel ramp) → GPS fuses at t≈80 s (15 s after kinematic exit at 65 s). `kinematic_vel_ramp_s=0` without the widened EK3 params breaks GPS fusion.
-- **EK3_SRC1_YAW=1** (compass) for SITL — stable through kinematic vel=0 phase; SITL compass is synthetic and perfect at any tilt. On hardware, switch to `=8` (GPS velocity yaw) for orbital flight.
+- **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) are required boot params (in `rawes_sitl_defaults.parm`). GPS origin sets during arm; "EKF3 IMU0 is using GPS" appears once EKF innovations settle. Without widened gates, GPS fusion fails. Active diagnosis: "EKF3 IMU0 switching to compass X" cycling (every ~10 s) observed in SITL — compass instability may be blocking GPS fusion.
+- **EK3_SRC1_YAW=1** (compass) for SITL — `rawes_sitl_defaults.parm` boot default. SITL compass is synthetic and tracks `rpy[2]` exactly, so compass and attitude always agree → no EKF emergency yaw reset. On hardware, consider switching to `=8` (GPS velocity yaw) for orbital flight where attitude yaw is ambiguous.
 - **rawes.lua landing (SCR_USER6=4):** captures body_z on `ahrs:healthy()`; VZ descent controller (`col_cmd = COL_CRUISE + KP_VZ*(vz_actual - VZ_LAND_SP)`, VZ_LAND_SP=0.5 m/s); `final_drop` (collective→0) when alt ≤ 2.0 m. Fixture: `acro_armed_landing_lua` (`internal_controller=False`, `kinematic_vel_ramp_s=20` so hub exits kinematic at vel=0 — eliminates linear tether jolt without internal controller).
 - **rawes.lua pumping (SCR_USER6=5):** phase detection uses **cumulative** tether length change vs. running reference (`PUMP_LEN_THRESH=0.05 m`). Hold tracks min tlen; reel-out tracks peak; reel-in tracks trough. Per-iteration delta is too small (≈0.0024 m per 20 ms).
 - **Anchor in `LOCAL_POSITION_NED`:** `SCR_USER5 = -initial_state["pos"][2]` (NED Z negated). Anchor at `[0, 0, -pos0[2]]` in EKF frame.
@@ -95,7 +97,7 @@ simulation/
 ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 ├── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 ├── frames.py            build_orb_frame(), T_ENU_NED (legacy external-data utility only)
-├── sensor.py            PhysicalSensor — velocity-derived yaw, NED throughout
+├── sensor.py            PhysicalSensor — honest R_orb sensors, NED throughout
 ├── sitl_interface.py    ArduPilot SITL UDP binary protocol
 ├── controller.py        compute_swashplate_from_state, compute_rc_from_attitude, RatePID,
 │                        portable core (compute_bz_tether/slerp_body_z/compute_rate_cmd/
@@ -108,7 +110,22 @@ simulation/
 ├── telemetry_csv.py     Canonical 67-column CSV schema (TelRow, COLUMNS, heartbeat)
 └── tests/
     ├── unit/            Windows native, no Docker (~460 tests)
-    └── stack/           Docker; conftest.py (fixtures), stack_utils.py (shared helpers)
+    └── sitl/            Docker; all SITL/stack tests live here
+        ├── conftest.py          thin re-exporter — pytest_addoption + pytest_configure only
+        ├── stack_infra.py       ALL shared infrastructure: StackConfig, SitlContext,
+        │                        _sitl_stack, _acro_stack, _torque_stack, _run_acro_setup,
+        │                        _install_lua_scripts, diagnostics helpers
+        ├── stack_utils.py       low-level helpers: port checks, log copy, mediator launcher
+        ├── rawes_sitl_defaults.parm  boot-time ArduPilot params (EEPROM defaults)
+        ├── flight/              flight stack tests (mediator + physics + ArduPilot)
+        │   ├── conftest.py      flight fixtures: acro_armed, acro_armed_*_lua, etc.
+        │   ├── test_arm_minimal.py          no mediator; static sensor; arm only
+        │   ├── test_gps_fusion_layers.py    GPS fusion diagnostic (6 layers + armed variant)
+        │   ├── test_acro_armed.py           ...
+        │   └── ...
+        └── torque/              torque/anti-rotation tests
+            ├── conftest.py      torque fixtures: torque_armed, torque_armed_profile, etc.
+            └── ...
 ```
 
 **Data flow (400 Hz):** SITL servo PWM → swashplate mix → aero → tether → RK4 dynamics → sensor packet → SITL
@@ -135,7 +152,7 @@ simulation/
 
 **CRITICAL — SITL must run as close to hardware as possible.** Find and fix root causes. Do NOT paper over failures with simulation-only hacks. Confirm with user before adding any override.
 
-**CRITICAL — GPS/EKF glitches mean physics inputs are wrong; fix the physics.** Do NOT disable EKF fusion sources or reduce thresholds. Telemetry columns `orb_yaw_rad` and `v_horiz_ms` (from `sensor.py`) show the gap between hub orientation yaw and velocity-heading yaw sent to ArduPilot — a large gap there is the cause of GPS/compass-inconsistency failsafes.
+**CRITICAL — GPS/EKF glitches mean physics inputs are wrong; fix the physics.** Do NOT disable EKF fusion sources or reduce thresholds. Telemetry column `orb_yaw_rad` (= `rpy[2]` with honest sensors) and `v_horiz_ms` are logged for diagnostics. With honest sensors, EKF emergency yaw resets indicate a compass/attitude mismatch in the physical model — fix the sensor output, not the EKF config.
 
 **⚠️ NEVER use non-ASCII characters in Python `print()` output.** Windows cp1252 encoding causes `UnicodeEncodeError`. Use only 7-bit ASCII: `-` for lines, `[PASS]`/`[FAIL]` for status, `sd=` for sigma, etc.
 
@@ -149,16 +166,18 @@ simulation/
 
 **CRITICAL: NEVER call `docker exec` directly to run stack tests.** Use `bash simulation/dev.sh test-stack [...]`. Direct `docker exec pytest` bypasses port cleanup → "Address already in use" on next test. If stuck: `bash simulation/dev.sh stop && bash simulation/dev.sh start`.
 
+**CRITICAL: Unit tests and simtests run on Windows using the venv directly — NOT via `dev.sh test-unit` (which routes to Docker and fails because `tests/unit` is excluded from the container sync). Always use the Windows venv paths below.**
+
 ```bash
 bash simulation/dev.sh setup                              # one-time venv setup
 
-# Stage 1 — Unit tests (~460, ~65 s, Windows)
-bash simulation/dev.sh test-unit -q
+# Stage 1 — Unit tests (~460, ~65 s, Windows native — use venv directly)
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
 
-# Stage 2 — Simtests (~29, ~5 min, Windows)
-bash simulation/dev.sh test-simtest -q
+# Stage 2 — Simtests (~29, ~5 min, Windows native — use venv directly)
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q
 
-# Stage 3 — Stack tests (Docker)
+# Stage 3 — Stack tests (Docker; test files live in tests/sitl/flight/ and tests/sitl/torque/)
 # Preferred: parallel fresh mode — one isolated container per test, fully isolated EEPROM.
 # -n 8 is safe (each test binds its own ports inside its own container; no port conflicts).
 bash simulation/dev.sh test-stack-parallel --fresh -n 8
@@ -166,6 +185,9 @@ bash simulation/dev.sh test-stack-parallel --fresh -n 8
 bash simulation/dev.sh test-stack-parallel --fresh -n 4
 # Single test (non-parallel is fine when -k isolates one test)
 bash simulation/dev.sh test-stack -v -k test_pumping_cycle
+# GPS fusion diagnostic tests:
+bash simulation/dev.sh test-stack -v -k test_gps_fusion_armed
+bash simulation/dev.sh test-stack -v -k "test_gps_fusion_layers[L0"
 # All tests sequentially (slow, use only when parallel is not available)
 bash simulation/dev.sh test-stack -v
 
@@ -174,13 +196,18 @@ bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py t
 bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
 ```
 
-**Per-test logs:** `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. Always read these; never `/tmp/ArduCopter.log` (stale, accumulates across tests).
+**Per-test logs:** `simulation/logs/{log_prefix}_{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. The directory name is `"{log_prefix}_{test_name}"` when both are set, or just `"{test_name}"` when no prefix. Always read these; never `/tmp/ArduCopter.log` (stale, accumulates across tests).
+
+Example log paths:
+- `simulation/logs/test_acro_armed/` — acro_armed flight test (no prefix)
+- `simulation/logs/gps_fusion_test_gps_fusion_armed/` — GPS diagnostic (prefix=`gps_fusion`)
+- `simulation/logs/gps_layers_test_gps_fusion_layers[L0_baseline]/` — parametrized layer test
 
 **Suite summary:** `simulation/logs/suite_summary.json` — pass/fail counts + failed list.
 
 | Task | Command |
 |------|---------|
-| Regenerate steady state | `bash simulation/dev.sh test-unit -k test_steady_flight` |
+| Regenerate steady state | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight` |
 | 3D visualizer | `cd simulation && .venv/Scripts/python.exe viz3d/visualize_3d.py logs/telemetry_pump_and_land.json` |
 | Container | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |
@@ -198,10 +225,12 @@ bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py t
 
 **ACRO I-term windup:** 0.2–0.3 rad/s orbital angular velocity accumulates as rate error. Fix: `ATC_RAT_RLL_IMAX=ATC_RAT_PIT_IMAX=ATC_RAT_YAW_IMAX=0`.
 
-**Sensor consistency — all three must agree or EKF triggers emergency yaw reset:**
-1. `velocity_ned` heading = `rpy[2]` — both from `atan2(vE, vN)`
-2. `gyro_body`: spin stripped, then `Rz(-yaw) @ omega_nospin`
-3. `accel_body`: `Rz(-yaw) @ (accel_world_ned - [0,0,9.81])`
+**CRITICAL — Physically faithful sensors: no transformations, no overrides.** `sensor.py` must report exactly what the real Pixhawk hardware would see:
+- `rpy` = actual Euler angles from `build_orb_frame(disk_normal)` — the real hub orientation. **Never override `rpy[2]` with velocity heading.** The SITL compass reads the same `R_orb` orientation, so compass and attitude always agree → no EKF yaw reset.
+- `gyro_body` = `R_orb.T @ (omega_body − omega_spin_component)` — spin stripped (GB4008 keeps electronics non-rotating), projected into actual body frame.
+- `accel_body` = `R_orb.T @ (accel_world − gravity)` — in actual body frame.
+- The exact yaw direction of the electronics platform does not matter; it just needs to be steady. `build_orb_frame` (East-projection convention) provides a stable, deterministic yaw consistent with the GB4008 counter-torque assumption.
+- `EK3_SRC1_YAW=1` (compass) + `COMPASS_USE=1`: compass is consistent with honest `rpy[2]` → correct EKF yaw source. On hardware also use `EK3_SRC1_YAW=1` during orbital flight.
 
 ---
 

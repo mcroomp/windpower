@@ -28,7 +28,7 @@ Telemetry
 ---------
   The test writes a CSV log to simulation/logs/torque_telemetry.csv
   after each run.  Load and play back with:
-      python simulation/torque/visualize_torque.py \\
+      python simulation/torque/visualize_torque.py
              simulation/logs/torque_telemetry.csv
 
 Run with (inside Docker)
@@ -44,13 +44,13 @@ from pathlib import Path
 
 import pytest
 
-_SIM_DIR = Path(__file__).resolve().parents[2]
+_SIM_DIR = Path(__file__).resolve().parents[3]
 if str(_SIM_DIR) not in sys.path:
     sys.path.insert(0, str(_SIM_DIR))
 
 from telemetry_csv import TelRow, write_csv
 
-# ── Thresholds ────────────────────────────────────────────────────────────────
+# -- Thresholds ---------------------------------------------------------------
 
 _SETTLE_S = 40.0
 _OBSERVE_S = 20.0
@@ -87,7 +87,7 @@ def test_yaw_regulation(torque_armed):
         _SETTLE_S, _OBSERVE_S, math.degrees(_MAX_PSI_DOT_RAD_S),
     )
 
-    # ── Collect ATTITUDE messages ─────────────────────────────────────────
+    # -- Collect ATTITUDE messages --------------------------------------------
     observe_samples: list[dict] = []
     t_start   = time.monotonic()
     deadline  = t_start + _TEST_TIMEOUT_S
@@ -144,7 +144,7 @@ def test_yaw_regulation(torque_armed):
             if t_rel >= _SETTLE_S + _OBSERVE_S:
                 break
 
-    # ── Evaluate observation window ────────────────────────────────────────
+    # -- Evaluate observation window ------------------------------------------
     if len(observe_samples) < 10:
         write_csv(rows, _TELEMETRY_OUT)
         pytest.fail(
@@ -166,7 +166,7 @@ def test_yaw_regulation(torque_armed):
         math.degrees(max_psi),
     )
 
-    # ── Save telemetry ────────────────────────────────────────────────────
+    # -- Save telemetry -------------------------------------------------------
     write_csv(rows, _TELEMETRY_OUT)
     log.info("Telemetry saved -> %s  (%d frames)", _TELEMETRY_OUT, len(rows))
     log.info(

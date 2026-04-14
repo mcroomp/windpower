@@ -108,13 +108,17 @@ class PhysicalSensor:
     Simulates the real sensor readings of the Pixhawk mounted on the
     non-rotating RAWES electronics assembly.
 
-    Reports the true NED Euler angles of the orbital frame (rotor axle
-    direction = body Z, spin stripped).  At tether equilibrium the attitude
-    is roughly 65° from NED vertical.
+    Physically faithful: reports exactly what the real sensors would read.
+      - Attitude (rpy): actual orbital-frame Euler angles from R_orb.
+        No velocity-heading override — the yaw is whatever the GB4008
+        counter-torque motor settles to (East-projection convention in
+        build_orb_frame), which is steady and consistent with the SITL compass.
+      - Gyro: orbital angular velocity projected into R_orb body frame.
+        Rotor spin is stripped (GB4008 keeps electronics non-rotating).
+      - Accel: specific force projected into R_orb body frame.
 
-    Accel and gyro are expressed in the physical orbital body frame,
-    consistent with the reported attitude.  Yaw is velocity-derived for
-    EKF GPS consistency.
+    The SITL compass reads the same R_orb orientation → compass and reported
+    attitude yaw always agree → no EKF emergency yaw reset.
     """
 
     def __init__(
@@ -123,46 +127,11 @@ class PhysicalSensor:
         gyro_sigma:  float = _GYRO_SIGMA,
         accel_sigma: float = _ACCEL_SIGMA,
         rng_seed:    Optional[int] = None,
-        initial_vel: Optional[np.ndarray] = None,
-        initial_R:   Optional[np.ndarray] = None,
     ):
         self._home_ned_z  = float(home_ned_z)
         self._gyro_sigma  = gyro_sigma
         self._accel_sigma = accel_sigma
         self._rng = np.random.default_rng(rng_seed)
-        # Cache of the last velocity-derived yaw.  Once set, this is used as
-        # the fallback yaw when v_horiz < threshold so there is no yaw
-        # discontinuity when the hub decelerates through zero (e.g. at physics
-        # unfreeze).  Without this, the orbital-frame geometric yaw would snap
-        # back into use, rotating the body frame and causing a large magnetometer
-        # reading change → EKF "GPS Glitch or Compass error".
-        #
-        # Pre-initialized from initial_vel/initial_R when provided (production
-        # path via make_sensor).  Tests that construct PhysicalSensor directly
-        # and control every compute() call can omit these.
-        if initial_vel is not None:
-            v = np.asarray(initial_vel, dtype=float)
-            v_horiz = math.hypot(v[0], v[1])
-            if v_horiz > 0.05:
-                self._last_vel_yaw: Optional[float] = math.atan2(v[1], v[0])
-            elif initial_R is not None:
-                disk_normal = np.asarray(initial_R, dtype=float)[:, 2]
-                R_orb = build_orb_frame(disk_normal)
-                rpy = _rotation_matrix_to_euler_zyx(R_orb)
-                self._last_vel_yaw = float(rpy[2])
-            else:
-                self._last_vel_yaw = None
-        else:
-            self._last_vel_yaw = None
-        # Maximum rate at which the velocity-derived yaw is allowed to change
-        # [rad/s].  This prevents a sudden gyro axis remap when the tether
-        # activates and the hub velocity direction rotates quickly.  Without
-        # rate-limiting, a 165° yaw jump in 2 s causes the ACRO rate loop to
-        # see gyro on the wrong body axis → destabilising corrections.
-        # The hub's natural orbital yaw rate is ~0.02 rad/s (1°/s); 0.05 rad/s
-        # (≈3°/s) allows orbital tracking while freezing the ~82°/s tether
-        # activation transient so the gyro body frame is stable.
-        self._vel_yaw_rate_max: float = 0.05   # rad/s
 
     def compute(
         self,
@@ -171,98 +140,49 @@ class PhysicalSensor:
         R_hub:           np.ndarray,
         omega_body:      np.ndarray,
         accel_world_ned: np.ndarray,
-        dt:              float,
+        dt:              float,      # retained for API compatibility; not used
     ) -> dict:
         """
         Compute physical sensor outputs.
 
         Returns:
-            pos_ned, vel_ned, rpy, accel_body, gyro_body
+            pos_ned, vel_ned, rpy, accel_body, gyro_body,
+            orb_yaw_rad (= rpy[2]), v_horiz_ms
         """
         # Position and velocity relative to home (already in NED)
         pos_ned_rel = np.array([pos_ned[0], pos_ned[1], pos_ned[2] - self._home_ned_z])
-        vel_ned_out = vel_ned.copy()
 
         # Attitude: actual orbital frame (electronics, spin removed) → NED Euler angles.
         # R_orb is body→world in NED; extract Euler angles directly.
-        #
-        # build_orb_frame(disk_normal) places disk_normal as body Z (UP direction for
-        # xi=80°).  This gives roll≈180° from NED, but EKF3 handles this correctly in
-        # SITL with the compass providing yaw.  Negating body_y and body_z to get
-        # body_z=DOWN inverts the ACRO pitch axis (body_y flips North→South), causing
-        # unstable pitch feedback.  Keep the original convention: body_z = disk_normal.
-        # Lua recovers disk_normal via ahrs:body_to_earth([0,0,-1]) = -body_z_NED which
-        # equals disk_normal when body_z = disk_normal (UP).
+        # No yaw override — the compass (SITL) reads the same R_orb orientation,
+        # so reported attitude and compass always agree → no EKF yaw reset.
         disk_normal = R_hub[:, 2]
         R_orb = build_orb_frame(disk_normal)
         rpy   = _rotation_matrix_to_euler_zyx(R_orb)
 
-        # Replace orientation-derived yaw with a coherent velocity-or-attitude
-        # heading for EKF GPS consistency.  Two regimes, both rate-limited:
-        #
-        #   v_horiz > 0.05 m/s  ->  GPS velocity heading (atan2 vel_ned)
-        #   v_horiz <= 0.05 m/s ->  orbital frame yaw from R_orb
-        #
-        # Tracking the orbital frame yaw at low speed (rather than freezing the
-        # last cached value) prevents EKF yaw divergence during long kinematic
-        # hold phases where ACRO/Lua corrections rotate the hub: a frozen
-        # reported yaw causes the gyro-integrated yaw to drift away from the
-        # attitude yaw → EKF detects compass/GPS inconsistency → emergency yaw
-        # reset.  The orbital frame yaw is already coherent with the gyroscope
-        # because it is derived from R_hub (the same orientation the gyro tracks).
-        #
-        # Rate-limit in both cases: when the tether activates and the hub
-        # velocity direction rotates rapidly (~82°/s), an un-limited jump
-        # remaps the gyro body axes, causing ACRO's rate loop to apply
-        # destabilising corrections.  0.05 rad/s (~3°/s) covers the normal
-        # orbital yaw rate (~0.02 rad/s) with margin, while damping the
-        # tether-activation transient.
-        v_horiz  = math.hypot(vel_ned_out[0], vel_ned_out[1])
-        orb_yaw  = float(rpy[2])          # R_orb yaw before any override
-
-        if v_horiz > 0.05:
-            raw_yaw = math.atan2(vel_ned_out[1], vel_ned_out[0])
-        else:
-            raw_yaw = orb_yaw
-
-        if self._last_vel_yaw is None:
-            self._last_vel_yaw = raw_yaw
-        else:
-            # Wrap delta to [-π, π] before rate-limiting
-            delta = raw_yaw - self._last_vel_yaw
-            delta = (delta + math.pi) % (2 * math.pi) - math.pi
-            max_delta = self._vel_yaw_rate_max * dt
-            self._last_vel_yaw += max(-max_delta, min(max_delta, delta))
-            self._last_vel_yaw = (self._last_vel_yaw + math.pi) % (2 * math.pi) - math.pi
-        rpy[2] = self._last_vel_yaw
-
-        # Rebuild R_body consistent with the (possibly yaw-overridden) rpy so
-        # accel and gyro are expressed in the same frame ArduPilot expects.
-        R_body = _euler_zyx_to_rotation(float(rpy[0]), float(rpy[1]), float(rpy[2]))
-
-        # Accelerometer: specific force in physical body frame
+        # Accelerometer: specific force projected into orbital body frame.
         a_specific_ned = accel_world_ned - _GRAVITY_NED
-        accel_body = R_body.T @ a_specific_ned
+        accel_body = R_orb.T @ a_specific_ned
         accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
 
         # Gyroscope: orbital angular velocity in physical body frame.
-        # The electronics are kept non-rotating by the GB4008 motor, so the
-        # gyro does not see the blade spin — strip it before projecting.
+        # The GB4008 motor keeps the electronics non-rotating, so the gyro
+        # does not see rotor spin — strip the spin component before projecting.
         omega_spin_world    = np.dot(omega_body, disk_normal) * disk_normal
         omega_orbital_world = omega_body - omega_spin_world
-        gyro_body = R_body.T @ omega_orbital_world
+        gyro_body = R_orb.T @ omega_orbital_world
         gyro_body = gyro_body + self._rng.normal(0.0, self._gyro_sigma, 3)
+
+        v_horiz = math.hypot(vel_ned[0], vel_ned[1])
 
         return {
             "pos_ned":     pos_ned_rel,
-            "vel_ned":     vel_ned_out,
+            "vel_ned":     vel_ned.copy(),
             "rpy":         rpy,
             "accel_body":  accel_body,
             "gyro_body":   gyro_body,
-            # Diagnostics for EKF yaw tracking: logged to telemetry CSV so
-            # GPS/EKF glitches can be correlated with the physics inputs.
-            "orb_yaw_rad": orb_yaw,   # R_orb yaw (actual hub orientation)
-            "v_horiz_ms":  v_horiz,   # horizontal speed [m/s]
+            "orb_yaw_rad": float(rpy[2]),   # actual hub orientation yaw [rad]
+            "v_horiz_ms":  v_horiz,          # horizontal speed [m/s]
         }
 
 
@@ -357,28 +277,22 @@ class SpinSensor:
 
 def make_sensor(
     home_ned_z:  float,
-    initial_vel: np.ndarray,
-    initial_R:   np.ndarray,
     gyro_sigma:  float = _GYRO_SIGMA,
     accel_sigma: float = _ACCEL_SIGMA,
     rng_seed:    Optional[int] = None,
 ) -> "PhysicalSensor":
     """
-    Return a PhysicalSensor with yaw cache pre-seeded from the initial state.
+    Return a PhysicalSensor for the given home altitude.
 
     Parameters
     ----------
     home_ned_z  : NED Z of ArduPilot home (LOCAL_POSITION_NED D=0 reference) [m]
-    initial_vel : initial hub NED velocity [m/s] — seeds the yaw cache
-    initial_R   : initial hub rotation matrix — fallback yaw when vel is near zero
     """
     return PhysicalSensor(
         home_ned_z  = home_ned_z,
         gyro_sigma  = gyro_sigma,
         accel_sigma = accel_sigma,
         rng_seed    = rng_seed,
-        initial_vel = initial_vel,
-        initial_R   = initial_R,
     )
 
 
@@ -391,10 +305,8 @@ if __name__ == "__main__":
     print("PhysicalSensor smoke test")
 
     sensor = make_sensor(
-        home_ned_z  = -50.0,
-        initial_vel = np.array([0.9, 0.0, 0.0]),
-        initial_R   = np.eye(3),
-        rng_seed    = 42,
+        home_ned_z = -50.0,
+        rng_seed   = 42,
     )
 
     # Test with identity rotation (no tilt)

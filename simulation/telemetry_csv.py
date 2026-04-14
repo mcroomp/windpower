@@ -67,6 +67,15 @@ COLUMNS: list[str] = [
     # Large delta -> EKF may see attitude/GPS inconsistency.
     "orb_yaw_rad",   # R_orb yaw before velocity-heading override [rad]
     "v_horiz_ms",    # horizontal speed [m/s]; selects yaw tracking source
+    # Sensor consistency: what the mediator actually sends to SITL.
+    # Use these to verify compass/GPS velocity heading alignment.
+    # heading_gap_deg = |compass_deg - vel_heading_deg| wrapped to [-180,180].
+    # EKF blocks GPS when |heading_gap_deg| is large (typically > ~90 deg).
+    "sens_vel_n", "sens_vel_e", "sens_vel_d",         # GPS vel sent to SITL (NED) [m/s]
+    "sens_accel_x", "sens_accel_y", "sens_accel_z",   # IMU accel sent to SITL (body) [m/s^2]
+    "sens_gyro_x", "sens_gyro_y", "sens_gyro_z",      # IMU gyro sent to SITL (body) [rad/s]
+    "vel_heading_deg",   # atan2(vel_E, vel_N) in degrees — GPS velocity heading
+    "heading_gap_deg",   # |compass_deg - vel_heading_deg| wrapped to (-180,180] deg
     "servo_s1", "servo_s2", "servo_s3", "servo_esc",
     "q_bearing_nm", "q_motor_nm", "throttle",
     "wind_x", "wind_y", "wind_z",
@@ -145,6 +154,19 @@ class TelRow:
     orb_yaw_rad: float = 0.0   # R_orb yaw (actual hub orientation) [rad]
     v_horiz_ms:  float = 0.0   # horizontal speed [m/s]
 
+    # Sensor consistency: actual values sent to SITL
+    sens_vel_n:  float = 0.0   # GPS vel North sent to SITL [m/s]
+    sens_vel_e:  float = 0.0   # GPS vel East  sent to SITL [m/s]
+    sens_vel_d:  float = 0.0   # GPS vel Down  sent to SITL [m/s]
+    sens_accel_x: float = 0.0  # IMU accel X (body) sent to SITL [m/s^2]
+    sens_accel_y: float = 0.0  # IMU accel Y (body) sent to SITL [m/s^2]
+    sens_accel_z: float = 0.0  # IMU accel Z (body) sent to SITL [m/s^2]
+    sens_gyro_x: float = 0.0   # IMU gyro X (body) sent to SITL [rad/s]
+    sens_gyro_y: float = 0.0   # IMU gyro Y (body) sent to SITL [rad/s]
+    sens_gyro_z: float = 0.0   # IMU gyro Z (body) sent to SITL [rad/s]
+    vel_heading_deg:  float = 0.0  # atan2(vel_E, vel_N) [deg] — GPS heading
+    heading_gap_deg:  float = 0.0  # compass - vel_heading wrapped to (-180,180] [deg]
+
     servo_s1:  float = 0.0
     servo_s2:  float = 0.0
     servo_s3:  float = 0.0
@@ -195,11 +217,13 @@ class TelRow:
             Seconds remaining in the startup damping phase.  Only shown when
             damp_alpha > 0; ignored (and not shown) during free flight.
         """
-        teth = (
-            f"SLACK  L={self.tether_length:.1f}m"
-            if self.tether_slack
-            else f"TAUT  T={self.tether_tension:.0f}N  ext={self.tether_extension:.3f}m"
-        )
+        if self.damp_alpha > 0.0:
+            # Kinematic phase: hub on fake trajectory, tether force not computed.
+            teth = "N/A (kinematic)"
+        elif self.tether_slack:
+            teth = f"SLACK  L={self.tether_length:.1f}m"
+        else:
+            teth = f"TAUT  T={self.tether_tension:.0f}N  ext={self.tether_extension:.3f}m"
         damp = (
             f"  [DAMP a={self.damp_alpha:.2f} remaining={remaining_s:.0f}s]"
             if self.damp_alpha > 0.0 else ""

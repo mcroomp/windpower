@@ -245,9 +245,7 @@ def run_mediator(args, trajectory=None):
         axle_attachment_length = rotor.axle_attachment_length_m,
     )
     sensor_sim = make_sensor(
-        home_ned_z  = float(_pos0_arr[2]),
-        initial_vel = _vel0_arr,
-        initial_R   = _R0,
+        home_ned_z = float(_pos0_arr[2]),
     )
     spin_sensor = SpinSensor(
         sigma    = float(cfg["spin_sensor_sigma"]),
@@ -717,6 +715,23 @@ def run_mediator(args, trajectory=None):
                     "rpy_yaw":         _rpy[2],
                     "orb_yaw_rad":     sensor_data.get("orb_yaw_rad", 0.0),
                     "v_horiz_ms":      sensor_data.get("v_horiz_ms",  0.0),
+                    # Sensor consistency: what the mediator actually sent to SITL
+                    "sens_vel_n":      sensor_data["vel_ned"][0],
+                    "sens_vel_e":      sensor_data["vel_ned"][1],
+                    "sens_vel_d":      sensor_data["vel_ned"][2],
+                    "sens_accel_x":    sensor_data["accel_body"][0],
+                    "sens_accel_y":    sensor_data["accel_body"][1],
+                    "sens_accel_z":    sensor_data["accel_body"][2],
+                    "sens_gyro_x":     sensor_data["gyro_body"][0],
+                    "sens_gyro_y":     sensor_data["gyro_body"][1],
+                    "sens_gyro_z":     sensor_data["gyro_body"][2],
+                    "vel_heading_deg": float(np.degrees(
+                        np.arctan2(sensor_data["vel_ned"][1], sensor_data["vel_ned"][0]))),
+                    "heading_gap_deg": float(
+                        (np.degrees(sensor_data.get("orb_yaw_rad", 0.0))
+                         - np.degrees(np.arctan2(
+                             sensor_data["vel_ned"][1], sensor_data["vel_ned"][0]))
+                         + 180.0) % 360.0 - 180.0),
                     "servo_s1":        s1,
                     "servo_s2":        s2,
                     "servo_s3":        s3,

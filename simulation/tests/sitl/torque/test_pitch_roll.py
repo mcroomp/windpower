@@ -2,16 +2,16 @@
 torque/test_pitch_roll.py — Hub pitch/roll oscillation with yaw regulation.
 
 Profile: axle speed constant at nominal; hub slowly oscillates in pitch
-(±8°, 0.05 Hz) and roll (±12°, 0.08 Hz) to simulate tether-induced swinging.
+(+/-8 deg, 0.05 Hz) and roll (+/-12 deg, 0.08 Hz) to simulate tether-induced swinging.
 
 The yaw rate PID must continue regulating yaw despite the tilted body
 frame — gravity projects into the horizontal body axes when tilted, and
 the gyro Z component changes with tilt angle.
 
-Pass criterion: max |ψ_dot| < 2°/s after 40 s settle, confirming that
+Pass criterion: max |psi_dot| < 2 deg/s after 40 s settle, confirming that
 tilt does not break the yaw control loop.
 
-Telemetry → simulation/logs/torque_telemetry_pitch_roll.csv
+Telemetry -> simulation/logs/torque_telemetry_pitch_roll.csv
 """
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ _THRESHOLD  = math.radians(4.0)   # [rad/s] -- raised from 2.0 to 4.0: EKF compa
 @pytest.mark.parametrize("torque_armed_profile", ["pitch_roll"], indirect=True)
 def test_pitch_roll(torque_armed_profile):
     """
-    Hub tilts in pitch (±8°, 0.05 Hz) and roll (±12°, 0.08 Hz) while
+    Hub tilts in pitch (+/-8 deg, 0.05 Hz) and roll (+/-12 deg, 0.08 Hz) while
     the rotor hub spins at constant nominal RPM.  Gravity projection changes
     the accelerometer and gyro Z in the body frame.
 
-    Pass: yaw rate stays within ±2°/s throughout, confirming that the
+    Pass: yaw rate stays within +/-2 deg/s throughout, confirming that the
     yaw PID is decoupled from the pitch/roll motion.
     """
     ctx = torque_armed_profile

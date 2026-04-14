@@ -113,22 +113,36 @@ def test_physical_sensor_accel_stationary():
     np.testing.assert_allclose(result["accel_body"], np.array([0.0, 0.0, 9.81]), atol=1e-6)
 
 
-def test_physical_sensor_velocity_yaw_override():
-    # When v_horiz > 0.05 m/s, rpy[2] must match atan2(vE, vN).
-    # NED: vE = vel_ned[1], vN = vel_ned[0].
-    # vel_ned = [0, 1, 0] → vN=0, vE=1 → yaw = atan2(1, 0) = π/2
+def test_physical_sensor_yaw_is_orb_frame_not_velocity():
+    """
+    rpy[2] must equal the orbital-frame yaw from R_orb — NOT the velocity heading.
+
+    Uses disk_normal = [0.5, 0.5, -sqrt(0.5)] so that orb_yaw differs from
+    velocity_yaw (velocity heading = atan2(0,1)=0 while orb_yaw > π/4).
+    """
+    dn = np.array([0.5, 0.5, -math.sqrt(0.5)])   # unit vector
+    R_hub = build_orb_frame(dn)
+
     sensor = PhysicalSensor(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0)
-    R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))
     result = sensor.compute(
         pos_ned=np.zeros(3),
-        vel_ned=np.array([0.0, 1.0, 0.0]),  # NED: pure East velocity
+        vel_ned=np.array([1.0, 0.0, 0.0]),  # NED: pure North → vel_yaw = 0
         R_hub=R_hub,
         omega_body=np.zeros(3),
         accel_world_ned=np.zeros(3),
         dt=0.0025,
     )
-    expected_yaw = math.atan2(1.0, 0.0)   # atan2(vE, vN) = π/2
-    np.testing.assert_allclose(result["rpy"][2], expected_yaw, atol=1e-6)
+    # Expected: orb_yaw from R_orb directly
+    expected_rpy = _rotation_matrix_to_euler_zyx(R_hub)
+    expected_orb_yaw = expected_rpy[2]
+    vel_yaw = math.atan2(0.0, 1.0)   # = 0
+
+    # orb_yaw must differ from velocity_yaw for this test to be meaningful
+    assert abs(expected_orb_yaw - vel_yaw) > 0.3, \
+        "Test setup error: orb_yaw and vel_yaw are too close to distinguish"
+
+    # rpy[2] must equal orb_yaw, NOT vel_yaw
+    np.testing.assert_allclose(result["rpy"][2], expected_orb_yaw, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +150,5 @@ def test_physical_sensor_velocity_yaw_override():
 # ---------------------------------------------------------------------------
 
 def test_make_sensor_returns_physical_sensor():
-    sensor = make_sensor(
-        home_ned_z  = 0.0,
-        initial_vel = np.array([0.9, 0.0, 0.0]),
-        initial_R   = np.eye(3),
-    )
+    sensor = make_sensor(home_ned_z=0.0)
     assert isinstance(sensor, PhysicalSensor)

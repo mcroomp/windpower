@@ -1,20 +1,23 @@
 """
-conftest.py — shared pytest fixtures and helpers for RAWES stack integration tests.
+stack_infra.py — infrastructure for RAWES stack integration tests.
 
-The ``acro_armed`` fixture handles the full stack lifecycle:
-    launch mediator + SITL → connect GCS → set ACRO params →
-    wait for EKF tilt alignment → arm (force) → confirm ACRO mode → yield
+Contains all non-pytest code: imports, constants, classes, context managers,
+and helper functions.  Pytest fixtures and hooks live in conftest.py.
 
-Tests receive a ``StackContext`` and can immediately start their observation phase.
-Process teardown and log copying happen automatically after each test.
-
-Diagnostic helpers
-------------------
-``analyze_startup_logs(ctx)``  — parse mediator + GCS logs, return structured dict
-``dump_startup_diagnostics(ctx)`` — print full human-readable diagnostic block
-``wait_for_acro_stability(gcs, log)`` — wait for clean ATTITUDE messages
-``drain_statustext(gcs, log)``  — drain buffered STATUSTEXT, return list
+Exported names (imported by conftest.py via ``from stack_infra import *``):
+    StackConfig, SitlContext, StackContext, TorqueStackContext
+    _sitl_stack, _acro_stack, _torque_stack
+    _BASE_ACRO_PARAMS, _BASE_TORQUE_PARAMS, _BASE_TORQUE_BOOT_PARAMS
+    _LUA_TORQUE_EXTRA_PARAMS
+    assert_stack_ports_free, dump_startup_diagnostics
+    analyze_startup_logs, wait_for_acro_stability, drain_statustext
+    _run_acro_setup, _wait_params_ready, _install_lua_scripts
+    SITL_GCS_PORT, SITL_JSON_PORT
+    _STARTING_STATE, _RAWES_DEFAULTS_PARM
+    _TORQUE_STARTUP_HOLD_S
+    _STARTUP_TIMEOUT, _ARM_TIMEOUT, _MODE_TIMEOUT, _STARTUP_DAMP_S
 """
+import contextlib
 import dataclasses
 import json
 import logging
@@ -22,6 +25,7 @@ import math
 import os
 import re
 import shutil
+import socket as _socket
 import subprocess
 import sys
 import time
@@ -29,14 +33,15 @@ from pathlib import Path
 
 import pytest
 
-_SIM_DIR   = Path(__file__).resolve().parents[2]
-_STACK_DIR = Path(__file__).resolve().parent
+_SIM_DIR    = Path(__file__).resolve().parents[2]
+_SITL_DIR   = Path(__file__).resolve().parent
 _TORQUE_DIR = _SIM_DIR / "torque"
 
 sys.path.insert(0, str(_SIM_DIR))
-sys.path.insert(0, str(_STACK_DIR))
+sys.path.insert(0, str(_SITL_DIR))
 sys.path.insert(0, str(_TORQUE_DIR))
 
+import numpy as _np
 import rotor_definition as _rd
 
 from stack_utils import (
@@ -56,7 +61,6 @@ from stack_utils import (
     make_test_log_dir,
     check_ports_free,
 )
-import socket as _socket
 
 from pymavlink import mavutil as _mavutil
 from gcs import ACRO, STABILIZE, RawesGCS, EkfLogger
@@ -64,7 +68,7 @@ from controller import make_hold_controller
 from sim_time import sim_sleep
 
 _STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
-_RAWES_DEFAULTS_PARM  = _STACK_DIR / "rawes_sitl_defaults.parm"
+_RAWES_DEFAULTS_PARM  = _SITL_DIR / "rawes_sitl_defaults.parm"
 
 # ── Flight fixture boot params ────────────────────────────────────────────────
 # All ACRO/flight fixtures boot SITL with this complete parameter set.
@@ -93,30 +97,6 @@ _BASE_ACRO_PARAMS = ParamSetup({
     "H_SW_H3_PHANG":    0,      # no phase correction (RAWES geometry)
 })
 
-
-
-
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--sitl-speedup",
-        type=int,
-        default=1,
-        help="Run ArduPilot SITL at Nx real-time speed (--speedup N passed to sim_vehicle.py). "
-             "Also sets RAWES_SPEEDUP=N so GCS timeouts and sim_sleep() scale correctly. "
-             "Example: --sitl-speedup 2  runs the suite ~2x faster.",
-    )
-
-
-def pytest_configure(config):
-    # Sync --sitl-speedup option → RAWES_SPEEDUP env var so sim_time.wall_s()
-    # and sim_sleep() in gcs.py (same process) scale timeouts correctly.
-    try:
-        sp = config.getoption("--sitl-speedup")
-        if sp and sp > 1:
-            os.environ["RAWES_SPEEDUP"] = str(float(sp))
-    except ValueError:
-        pass   # option not registered yet (e.g. during collection without our conftest)
 
 # ---------------------------------------------------------------------------
 # StackConfig — central configuration and pre-flight verification
@@ -329,11 +309,129 @@ class StackContext:
 
 
 # ---------------------------------------------------------------------------
-# _acro_stack — single context manager behind all ACRO fixtures
+# _sitl_stack — minimal SITL lifecycle (base for _acro_stack and bare tests)
 # ---------------------------------------------------------------------------
 
-import contextlib
-import numpy as _np
+@dataclasses.dataclass
+class SitlContext:
+    """
+    What _sitl_stack yields: SITL process + log paths + derived config.
+
+    Use this directly when you need SITL + your own sensor worker without
+    the full mediator + arm sequence (e.g. GPS fusion layer tests).
+    """
+    sitl_proc:    subprocess.Popen  # type: ignore[type-arg]
+    sitl_log:     Path
+    gcs_log:      Path
+    sim_dir:      Path
+    repo_root:    Path
+    log:          logging.Logger
+    test_log_dir: Path
+    boot_setup:   object    # ParamSetup
+
+
+@contextlib.contextmanager
+def _sitl_stack(
+    tmp_path, *,
+    log_name:           str = "sitl",
+    log_prefix:         str = "",
+    test_name:          str = "",
+    extra_boot_params:  "dict[str, float] | None" = None,
+    speedup:            int = 1,
+):
+    """
+    Minimal SITL lifecycle: pre-checks → boot params → launch SITL → yield → teardown.
+
+    Handles everything that doesn't require the mediator or physics:
+      - environment / port pre-checks
+      - rawes_defaults + BASE_ACRO + servo_speed + extra_boot_params param file
+      - SITL process launch
+      - logging setup (writes to gcs_log)
+      - teardown: kill SITL + stray procs, kill ports, copy sitl/gcs/arducopter logs
+
+    Yields SitlContext.  Caller is responsible for:
+      - starting any sensor / mediator worker that feeds SITL
+      - connecting and driving RawesGCS
+    """
+    if os.environ.get(STACK_ENV_FLAG) != "1":
+        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
+
+    sim_vehicle = _resolve_sim_vehicle()
+    if sim_vehicle is None:
+        pytest.skip(f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py")
+
+    pytest.importorskip("pymavlink")
+    assert_stack_ports_free()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    sim_dir   = repo_root / "simulation"
+
+    # ── Paths ──────────────────────────────────────────────────────────────────
+    sitl_log = tmp_path / "sitl.log"
+    gcs_log  = tmp_path / "gcs.log"
+
+    _configure_logging(gcs_log)
+    log = logging.getLogger(log_name)
+    logging.getLogger("gcs").setLevel(logging.DEBUG)
+
+    # ── Boot param file ────────────────────────────────────────────────────────
+    _servo_speed = _rd.default().sim_servo_speed
+    _boot_setup = (
+        ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
+        .merge(_BASE_ACRO_PARAMS)
+        .merge(ParamSetup({"SIM_SERVO_SPEED": _servo_speed}))
+        .merge(ParamSetup(extra_boot_params or {}))
+    )
+    boot_parm_file = tmp_path / "boot_params.parm"
+    _boot_setup.write_parm_file(boot_parm_file)
+    log.info("Boot params: %d entries", len(_boot_setup))
+
+    # ── Per-test log directory ─────────────────────────────────────────────────
+    label = "_".join(filter(None, [log_prefix, test_name]))
+    test_log_dir = make_test_log_dir(sim_dir, label) if label else sim_dir / "logs"
+
+    # ── Launch SITL ───────────────────────────────────────────────────────────
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
+                             add_param_file=boot_parm_file, speedup=speedup)
+
+    ctx = SitlContext(
+        sitl_proc    = sitl_proc,
+        sitl_log     = sitl_log,
+        gcs_log      = gcs_log,
+        sim_dir      = sim_dir,
+        repo_root    = repo_root,
+        log          = log,
+        test_log_dir = test_log_dir,
+        boot_setup   = _boot_setup,
+    )
+
+    try:
+        yield ctx
+    finally:
+        _terminate_process(sitl_proc)
+        _kill_by_port(StackConfig.SITL_GCS_PORT, "tcp")
+        _kill_by_port(StackConfig.SITL_JSON_PORT, "udp")
+        import subprocess as _subprocess
+        _subprocess.run(
+            ["bash", "-c", "pgrep arducopter-heli | xargs -r kill -9"],
+            capture_output=True,
+        )
+        _subprocess.run(
+            ["bash", "-c", "pgrep -f /sim_vehicle.py | xargs -r kill -9"],
+            capture_output=True,
+        )
+        copy_logs_to_dir(test_log_dir, {
+            "sitl.log": sitl_log,
+            "gcs.log":  gcs_log,
+        })
+        _ardupilot_log = Path("/tmp/ArduCopter.log")
+        if _ardupilot_log.exists():
+            shutil.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
+
+
+# ---------------------------------------------------------------------------
+# _acro_stack — full ACRO stack (mediator + arm) built on top of _sitl_stack
+# ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
 def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefix="",
@@ -344,8 +442,10 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     """
     Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
-    All fixtures call this.
-    Differences between them are handled outside this function:
+    All fixtures call this.  Built on top of _sitl_stack which handles
+    pre-checks, boot params, SITL launch, logging, and teardown.
+
+    Differences between fixtures are handled outside this function:
       - extra_config   : pumping cycle passes trajectory config here
       - pre-launch work: Lua fixture installs scripts before calling this
       - post-arm work  : Lua fixture sets SCR_USER params inside the with-block
@@ -363,24 +463,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     test_name      : pytest test node name; included in persistent log file names
                      so each test run produces uniquely-named files in logs/
     """
-    if os.environ.get(STACK_ENV_FLAG) != "1":
-        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
-
-    sim_vehicle = _resolve_sim_vehicle()
-    if sim_vehicle is None:
-        pytest.skip(f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py")
-
-    pytest.importorskip("pymavlink")
-    assert_stack_ports_free()
-
-    repo_root = Path(__file__).resolve().parents[3]
-    sim_dir   = repo_root / "simulation"
-
     # ── Initial state ──────────────────────────────────────────────────────────
-    # pos[2] is NED Z; altitude above ground = -pos[2].
-    # vel0 is intentionally NOT loaded from steady_state_starting.json — the
-    # kinematic startup ramp needs vel0 from config.py defaults (~0.96 m/s) so
-    # the EKF gets a velocity-derived yaw heading from frame 0.
     initial_state = None
     home_alt_m    = 12.530
     if _STARTING_STATE.exists():
@@ -388,382 +471,103 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         home_alt_m    = -float(initial_state["pos"][2])
         initial_state = dict(initial_state)
 
-    # ── Paths ──────────────────────────────────────────────────────────────────
-    mediator_log  = tmp_path / "mediator.log"
-    sitl_log      = tmp_path / "sitl.log"
-    gcs_log       = tmp_path / "gcs.log"
-    telemetry_log = tmp_path / "telemetry.csv"
-    ekf_log       = tmp_path / "ekf_telemetry.csv"
-
-    _configure_logging(gcs_log)
-    log = logging.getLogger(log_name)
-    logging.getLogger("gcs").setLevel(logging.DEBUG)
-
     # ── Hold controller ────────────────────────────────────────────────────────
-    # Anchor in LOCAL_POSITION_NED frame:
-    #   sensor.py sets home_ned_z = -home_alt_m; pos_ned_rel[2] = pos_ned[2] + home_alt_m
-    #   Physics anchor NED [0,0,0] maps to LOCAL [0, 0, home_alt_m].
     _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
     controller   = make_hold_controller(anchor_ned=_anchor_ned)
-    log.info("Hold controller: %s", type(controller).__name__)
 
     # ── Lua scripts ───────────────────────────────────────────────────────────
-    # Always install rawes.lua so it is available if scripting is enabled.
     _install_lua_scripts("rawes.lua")
 
-    # ── Per-test boot param file ──────────────────────────────────────────────
-    # Build one complete ParamSetup for this test: rawes defaults + base ACRO
-    # params + servo speed (runtime value) + fixture-specific extras.
-    # Write it as the SITL --add-param-file.  Combined with always-wipe EEPROM
-    # in _launch_sitl, this file is the single source of truth — no carryover
-    # from previous tests is possible.
-    _servo_speed = _rd.default().sim_servo_speed
-    _boot_setup = (
-        ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
-        .merge(_BASE_ACRO_PARAMS)
-        .merge(ParamSetup({"SIM_SERVO_SPEED": _servo_speed}))
-        .merge(ParamSetup(controller.extra_params))
-        .merge(ParamSetup(extra_boot_params or {}))
-    )
-    boot_parm_file = tmp_path / "boot_params.parm"
-    _boot_setup.write_parm_file(boot_parm_file)
-    log.info("Boot params file: %s  (%d entries)", boot_parm_file, len(_boot_setup))
+    # ── Merge controller params + test extras into boot params ─────────────────
+    _extra: dict = dict(controller.extra_params)
+    if extra_boot_params:
+        _extra.update(extra_boot_params)
 
-    # ── Launch ────────────────────────────────────────────────────────────────
-    _run_id = int(time.time())
-    log.info("RUN_ID=%d", _run_id)
-    log.info("%s: launching%s SITL ...", log_name, " mediator +" if with_mediator else "")
-    _use_internal = internal_controller if internal_controller is not None else StackConfig.INTERNAL_CONTROLLER
-    if with_mediator:
-        _k_ang = StackConfig.BASE_K_ANG_INTERNAL if _use_internal else StackConfig.BASE_K_ANG
-        mediator_proc = _launch_mediator(
-            sim_dir, repo_root, mediator_log,
-            telemetry_log_path   = str(telemetry_log),
-            initial_state        = initial_state,
-            startup_damp_seconds = _STARTUP_DAMP_S,
-            lock_orientation     = StackConfig.LOCK_ORIENTATION,
-            run_id               = _run_id,
-            base_k_ang           = _k_ang,
-            internal_controller  = _use_internal,
-            extra_config         = extra_config,
-        )
-    else:
-        mediator_proc = None
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
-                             add_param_file=boot_parm_file,
-                             speedup=speedup)
+    with _sitl_stack(
+        tmp_path,
+        log_name          = log_name,
+        log_prefix        = log_prefix,
+        test_name         = test_name,
+        extra_boot_params = _extra,
+        speedup           = speedup,
+    ) as sitl_ctx:
+        log = sitl_ctx.log
+        log.info("Hold controller: %s", type(controller).__name__)
 
-    def _procs_alive():
-        _checks = [("SITL", sitl_proc, sitl_log)]
+        # ── Extra log paths (mediator-specific) ────────────────────────────────
+        mediator_log  = tmp_path / "mediator.log"
+        telemetry_log = tmp_path / "telemetry.csv"
+        ekf_log       = tmp_path / "ekf_telemetry.csv"
+
+        # ── Launch mediator ────────────────────────────────────────────────────
+        _run_id = int(time.time())
+        log.info("RUN_ID=%d", _run_id)
+        log.info("%s: launching%s SITL ...", log_name, " mediator +" if with_mediator else "")
+        _use_internal = internal_controller if internal_controller is not None else StackConfig.INTERNAL_CONTROLLER
         if with_mediator:
-            _checks.insert(0, ("mediator", mediator_proc, mediator_log))
-        for name, proc, lp in _checks:
-            if proc.poll() is not None:
-                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
+            _k_ang = StackConfig.BASE_K_ANG_INTERNAL if _use_internal else StackConfig.BASE_K_ANG
+            mediator_proc = _launch_mediator(
+                sitl_ctx.sim_dir, sitl_ctx.repo_root, mediator_log,
+                telemetry_log_path   = str(telemetry_log),
+                initial_state        = initial_state,
+                startup_damp_seconds = _STARTUP_DAMP_S,
+                lock_orientation     = StackConfig.LOCK_ORIENTATION,
+                run_id               = _run_id,
+                base_k_ang           = _k_ang,
+                internal_controller  = _use_internal,
+                extra_config         = extra_config,
+            )
+        else:
+            mediator_proc = None
 
-    gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+        def _procs_alive():
+            _checks = [("SITL", sitl_ctx.sitl_proc, sitl_ctx.sitl_log)]
+            if with_mediator:
+                _checks.insert(0, ("mediator", mediator_proc, mediator_log))
+            for name, proc, lp in _checks:
+                if proc.poll() is not None:
+                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                    pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
-    ctx = StackContext(
-        gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
-        mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
-        telemetry_log=telemetry_log, initial_state=initial_state,
-        home_alt_m=home_alt_m, flight_events={}, all_statustext=[],
-        setup_samples=[], log=log, sim_dir=sim_dir,
-        controller=controller,
-        internal_controller=_use_internal,
-    )
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
 
-    # Per-test log directory: simulation/logs/{label}/
-    label = "_".join(filter(None, [log_prefix, test_name]))
-    test_log_dir = make_test_log_dir(sim_dir, label) if label else sim_dir / "logs"
-
-    # EKF logger hooks into the GCS message stream — no second TCP connection.
-    # Started after _run_acro_setup so gcs is already connected before we hook.
-    ekf_logger = EkfLogger()
-
-    try:
-        if arm:
-            _run_acro_setup(ctx, _procs_alive, boot_setup=_boot_setup)
-        ekf_logger.start(ekf_log, gcs)
-        yield ctx
-    finally:
-        ekf_logger.stop()
-        gcs.close()
-        _terminate_process(sitl_proc)
-        if mediator_proc is not None:
-            _terminate_process(mediator_proc)
-        _kill_by_port(StackConfig.SITL_GCS_PORT, "tcp")
-        _kill_by_port(StackConfig.SITL_JSON_PORT, "udp")
-        # Belt-and-suspenders: sim_vehicle.py spawns arducopter-heli in its own
-        # process group, so os.killpg() on sim_vehicle.py's PID misses it.
-        # pkill -f catches any survivors by name regardless of port state.
-        import subprocess as _subprocess
-        # Use pgrep+xargs rather than pkill -f to avoid pkill matching its own
-        # command-line args and sending SIGKILL to itself before all targets die.
-        # pgrep without -f matches by process name (argv[0]), so no self-match.
-        # /sim_vehicle.py path segment is specific enough not to hit pgrep itself.
-        _subprocess.run(
-            ["bash", "-c", "pgrep arducopter-heli | xargs -r kill -9"],
-            capture_output=True,
+        ctx = StackContext(
+            gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
+            mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
+            gcs_log=sitl_ctx.gcs_log, telemetry_log=telemetry_log,
+            initial_state=initial_state, home_alt_m=home_alt_m,
+            flight_events={}, all_statustext=[], setup_samples=[],
+            log=log, sim_dir=sitl_ctx.sim_dir,
+            controller=controller,
+            internal_controller=_use_internal,
         )
-        _subprocess.run(
-            ["bash", "-c", "pgrep -f /sim_vehicle.py | xargs -r kill -9"],
-            capture_output=True,
-        )
-        _logs = {
-            "sitl.log": sitl_log,
-            "gcs.log":  gcs_log,
-        }
-        if with_mediator:
-            _logs["mediator.log"]  = mediator_log
-            _logs["telemetry.csv"] = telemetry_log
-        if ekf_log.exists():
-            _logs["ekf_telemetry.csv"] = ekf_log
-        copy_logs_to_dir(test_log_dir, _logs)
-        # Copy the ArduCopter terminal log (truncated per-test in _launch_sitl)
-        _ardupilot_log = Path("/tmp/ArduCopter.log")
-        if _ardupilot_log.exists():
-            import shutil as _shutil2
-            _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
+
+        # EKF logger hooks into the GCS message stream — no second TCP connection.
+        ekf_logger = EkfLogger()
+
+        try:
+            if arm:
+                _run_acro_setup(ctx, _procs_alive, boot_setup=sitl_ctx.boot_setup)
+            ekf_logger.start(ekf_log, gcs)
+            yield ctx
+        finally:
+            ekf_logger.stop()
+            gcs.close()
+            if mediator_proc is not None:
+                _terminate_process(mediator_proc)
+            # Copy mediator-specific logs on top of what _sitl_stack already copies
+            _logs = {}
+            if with_mediator:
+                _logs["mediator.log"]  = mediator_log
+                _logs["telemetry.csv"] = telemetry_log
+            if ekf_log.exists():
+                _logs["ekf_telemetry.csv"] = ekf_log
+            if _logs:
+                copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)
 
 
 # ---------------------------------------------------------------------------
-# Fixtures — thin wrappers around _acro_stack
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def acro_armed(tmp_path, request):
-    """Full ACRO stack fixture. Yields StackContext armed in ACRO mode."""
-    speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, test_name=request.node.name, speedup=speedup) as ctx:
-        yield ctx
-
-
-@pytest.fixture
-def acro_armed_pumping_lua(tmp_path, request):
-    """
-    Pumping-cycle stack fixture with rawes.lua active in pumping mode (SCR_USER6=5).
-
-    Division of labour:
-      - Mediator: DeschutterPlanner owns phase state machine, winch, TensionPI.
-      - Lua (Pixhawk, 50 Hz): cyclic orbit tracking + per-phase body_z slerp +
-        per-phase collective (fixed open-loop: COL_REEL_OUT / COL_REEL_IN).
-      - Synchronisation: Lua detects tether paying-out / reeling-in to follow
-        the mediator's winch motion without any RC channel bridge.
-
-    The mediator trajectory=deschutter config matches acro_armed_pumping
-    (same phase timing, tension targets, winch speeds).
-
-    internal_controller=True (same as acro_armed_pumping): at the orbital
-    equilibrium the tether acts mostly HORIZONTALLY and slightly DOWNWARD
-    (anchor is 8 deg below the hub, not above it), so tether tension at
-    kinematic exit gives a NET DOWNWARD force on the hub (~22 m/s^2), not
-    upward support.  Lua's 50 Hz RC overrides cannot recover from this
-    kinematic-exit jolt; the internal 400 Hz controller provides the
-    stability needed.  This matches CLAUDE.md exception (2): "Pumping cycle
-    fixture -- ArduPilot RC overrides at 10 Hz cannot stabilize the hub
-    after the kinematic-exit tether jolt."
-
-    What is validated here vs acro_armed_pumping (no Lua):
-      - Lua SCR_USER6=5 starts without error.
-      - Lua detects winch reel-out from tether length change ->
-        "RAWES pump: reel_out" STATUSTEXT appears.
-      - Pumping cycle physics (TensionPI + OrbitTracker) remain unchanged.
-    Lua's cyclic orbit tracking and collective logic (COL_REEL_OUT / COL_REEL_IN)
-    are validated separately by test_lua_flight_steady (cyclic) and unit
-    tests (collective formula).
-    """
-    import config as _mcfg
-    _dcfg = _mcfg.DEFAULTS["trajectory"]["deschutter"]
-    extra = {
-        # kinematic_vel_ramp_s=0: keep vel0 constant throughout the 65 s kinematic
-        # so GPS innovations stay small and EKF fuses GPS during kinematic (~37-54 s).
-        # rawes_sitl_defaults.parm is tuned for this constant-velocity pattern
-        # (EK3_GPS_CHECK=0, widened gates).  Lua captures ~2 s after GPS fuses.
-        "kinematic_vel_ramp_s": 0.0,
-        "trajectory": {
-            "type": "deschutter",
-            "hold": {},
-            "deschutter": {
-                **{k: _dcfg[k] for k in (
-                    "t_reel_out", "t_reel_in", "t_transition",
-                    "v_reel_out", "v_reel_in", "tension_out", "tension_in",
-                )},
-                "t_hold_s": 10.0,
-            },
-        },
-    }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_pumping_lua", log_prefix="pumping_lua",
-                     test_name=request.node.name, speedup=speedup,
-                     
-                     # internal_controller=False: SITL stack tests must let ArduPilot
-                     # + Lua drive physics (CLAUDE.md critical rule).  Lua RC overrides
-                     # at 50 Hz control cyclic; collective is also via Lua Ch3.
-                     internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua via SCR_USER params.
-        ctx.log.info("Setting SCR_USER params for rawes.lua (pumping mode) ...")
-        lua_params = {
-            "SCR_ENABLE": 1,
-            "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,             # anchor North   [m]
-            "SCR_USER4": 0.0,             # anchor East    [m]
-            "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 5,               # RAWES_MODE = 5 (pumping)
-        }
-        for pname, pvalue in lua_params.items():
-            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
-            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
-        # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
-        # Tests must NOT send RC overrides.
-
-        # Drain STATUSTEXT that arrived during param setting.
-        import time as _time
-        _t_drain = _time.monotonic() + 1.0
-        while _time.monotonic() < _t_drain:
-            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
-            if _msg is not None:
-                _text = _msg.text.rstrip("\x00").strip()
-                ctx.all_statustext.append(_text)
-                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
-
-        yield ctx
-
-
-@pytest.fixture
-def acro_armed_landing_lua(tmp_path, request):
-    """
-    Landing stack fixture with rawes.lua active in landing mode (SCR_USER6=4).
-
-    Extends acro_armed_landing:
-      - internal_controller=False: ArduPilot + Lua own the physics (CLAUDE.md
-        critical rule — SITL tests must validate the actual control loop).
-      - kinematic_vel_ramp_s=20: hub exits kinematic at vel=0, eliminating the
-        linear tether jolt that required internal_controller=True in prior attempts.
-        Tether extension at exit ~ 0 m, tension ~ 0 N; Lua's 50 Hz is sufficient.
-      - rawes.lua installed before SITL starts.
-      - SCR_USER1..5 configured post-arm immediately; SCR_USER6=4 set so Lua
-        starts in landing mode; KINEMATIC_SETTLE_MS=62000 delays body_z capture
-        until EKF has converged.
-      What is validated:
-          (a) Lua enters landing mode and body_z capture fires on schedule
-              ("RAWES land: captured" STATUSTEXT at t≈62 s).
-          (b) Lua alt_est computation is correct: "RAWES land: final_drop"
-              STATUSTEXT fires when alt_est <= LAND_MIN_TETHER_M=2 m.
-          (c) Hub descends to floor and tension stays safe (Lua + LandingPlanner).
-        Lua's VZ descent and orbit-tracking formulas are covered by unit tests
-        and test_lua_flight_steady.
-
-    Hub starts at tether equilibrium with xi=80 deg (10 deg from horizontal).
-    Matches test_landing.py: BZ_INIT=[0, cos(80), -sin(80)], pos0=20*BZ_INIT.
-      - BEM valid: chi=80 deg < 85 deg limit (chi=90 = horizontal disk fails).
-      - body_z=[0,0,-1] (horizontal) is outside SkewedWakeBEM valid range and
-        produces degenerate negative thrust (-762 N) causing immediate free-fall.
-      - Hub at tether equilibrium: pos0 = tether_rest_length * body_z, so
-        tether is nearly slack at kinematic exit (extension ~ 0 m).
-      - orb_yaw for body_z=[0, 0.174, -0.985] = +pi/2 (East). Matches
-        vel0=[0, 0.96, 0] yaw=+pi/2, so no GPS Glitch at kinematic exit.
-      - vel0[2]=0: altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
-
-    Timing (from mediator start, speedup=1):
-      t=0..45 s   kinematic constant-velocity phase (vel=0.96 m/s East)
-      t≈23 s      GPS fuses (EK3_GPS_CHECK=0 + widened gates)
-      t~15 s      arm complete; fixture sets SCR_USER1-6; yields to test
-      t=45..65 s  kinematic ramp phase: vel ramps 0.96→0 m/s (vel_ramp_s=20)
-      t~51 s      ahrs:healthy() True; Lua enters KINEMATIC_SETTLE_MS wait
-      t~62 s      Lua KINEMATIC_SETTLE_MS (62 s) expires; captures body_z
-      t~62..65 s  Lua sends RC overrides; kinematic still ramps vel to 0
-      t=65 s      kinematic exits; hub at pos0 with vel=0, tension~0
-      t~65..102 s Lua VZ controller descends hub; LandingPlanner reels in winch
-      t~102 s     Lua triggers final_drop STATUSTEXT (alt_est <= 2 m)
-      fixture yields at t~15 s; test observes for 165 s (until t~180 s SITL)
-    """
-    _xi_rad = math.radians(80.0)
-    _tether_m = 20.0
-    extra = {
-        # kinematic_vel_ramp_s=20: hub velocity ramps from 0.96 m/s (East) to 0
-        # over the last 20 s of the kinematic phase (t=45..65 s), so hub arrives at
-        # pos0 with vel=0.  This eliminates the linear tether jolt: at kinematic
-        # exit the hub is stationary at the tether equilibrium point, tether
-        # extension ~ 0, tension ~ 0.  GPS fuses during the constant-velocity phase
-        # (t ~ 23 s; EK3_GPS_CHECK=0 + widened gates in rawes_sitl_defaults.parm).
-        "kinematic_vel_ramp_s": 20.0,
-        # pos0: hub at tether equilibrium for xi=80 deg (matches test_landing.py).
-        # tether direction = body_z, so tether is nearly slack at kinematic exit.
-        "pos0":              [0.0,
-                              math.cos(_xi_rad) * _tether_m,   # ~3.473 m East
-                              -math.sin(_xi_rad) * _tether_m], # ~-19.696 m (alt 19.7 m)
-        # vel0 points East; EKF establishes yaw=+pi/2 (East) during kinematic.
-        # orb_yaw for body_z=[0, cos(80), -sin(80)] is also +pi/2 (East), so no
-        # GPS Glitch at kinematic exit.
-        "vel0":              [0.0, 0.96, 0.0],
-        "body_z":            [0.0, math.cos(_xi_rad), -math.sin(_xi_rad)],
-        "omega_spin":        20.0,
-        "tether_rest_length": _tether_m,
-        "trajectory": {
-            "type":    "landing",
-            "landing": {
-                # tension_target_n: at xi=80 deg hover the equilibrium tether
-                # tension is ~190 N (hub weight + thrust vertical imbalance).
-                # The default (80 N) was designed for orbital transition where
-                # tether tension is low.  At 80 N the PI pays OUT instead of
-                # reeling in.  200 N keeps PI in reel-in mode throughout descent.
-                "tension_target_n": 200.0,
-            },
-        },
-    }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_landing_lua", log_prefix="landing_lua",
-                     test_name=request.node.name, speedup=speedup,
-                     
-                     # internal_controller=False: SITL stack tests must let
-                     # ArduPilot + Lua drive physics (CLAUDE.md critical rule).
-                     # kinematic_vel_ramp_s=20 ensures vel=0 at kinematic exit,
-                     # eliminating the linear tether jolt.  Lua's 50 Hz is
-                     # sufficient for the residual angular perturbations.
-                     internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua via SCR_USER params.
-        # SCR_USER5 = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
-        # vel0[2]=0 => altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
-        # anch_EKF.z = SCR_USER5 = -pos0[2] = altitude above EKF origin.
-        # Lua: alt_est = anch.z - hub_ned.z (hub_ned.z from LOCAL_POSITION_NED).
-        #
-        # SCR_USER6=4 set here; rawes.lua DELAYS body_z capture until
-        # millis() >= KINEMATIC_SETTLE_MS (62 s) to ensure EKF has converged.
-        import time as _time
-        ctx.log.info("Setting SCR_USER params for rawes.lua (landing mode) ...")
-        lua_params = {
-            "SCR_ENABLE": 1,                    # persist scripting in EEPROM for future boots
-            "SCR_USER1": 1.0,                   # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,                  # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,                   # anchor North   [m]
-            "SCR_USER4": 0.0,                   # anchor East    [m]
-            "SCR_USER5": -extra["pos0"][2],     # anchor Down in EKF frame = 20.0 m
-            "SCR_USER6": 4,                     # RAWES_MODE = 4 (landing)
-        }
-        for pname, pvalue in lua_params.items():
-            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
-            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
-        # Drain any STATUSTEXT that arrived during param setting.
-        _t_drain = _time.monotonic() + 1.0
-        while _time.monotonic() < _t_drain:
-            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
-            if _msg is not None:
-                _text = _msg.text.rstrip("\x00").strip()
-                ctx.all_statustext.append(_text)
-                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
-
-        yield ctx
-
-
-# ---------------------------------------------------------------------------
-# Lua flight fixture helpers
+# Lua scripts helper
 # ---------------------------------------------------------------------------
 
 _SCRIPTS_DIR = _SIM_DIR / "scripts"  # simulation/scripts/ — all Lua scripts
@@ -785,98 +589,6 @@ def _install_lua_scripts(*names: str) -> None:
     for name in names:
         src = _SCRIPTS_DIR / name
         shutil.copy2(src, dst_dir / name)
-
-
-@pytest.fixture
-def acro_armed_lua_full(tmp_path, request):
-    """
-    Full-stack ACRO fixture with rawes.lua in flight mode (SCR_USER6=1),
-    internal_controller=False.
-
-    Uses the same initial conditions as every other passing stack test:
-    pos0/body_z/omega_spin/rest_length from steady_state_starting.json
-    (natural orbit equilibrium at xi~8 deg, 100 m tether, altitude~14 m);
-    vel0 from config.py defaults (~0.96 m/s orbital velocity).
-
-    This mirrors test_closed_loop_60s.py (the validating simtest) exactly:
-    same position, same orbit, but Lua owns cyclic + collective instead of
-    the internal Python controller.
-
-    Key design points:
-      - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
-      - kinematic_vel_ramp_s=0: vel0 held constant throughout 65 s kinematic
-        so GPS innovations stay non-zero and EKF fuses GPS at ~54 s (during
-        kinematic, before Lua capture at t=66.5 s).
-      - COL_CRUISE_FLIGHT_RAD=-0.18 rad in rawes.lua matches stack_coll_eq
-        from test_steady_flight.py: altitude-neutral at the natural orbit.
-      - Lua VZ altitude-hold (vz_sp=0): bidirectional P controller around
-        COL_CRUISE_FLIGHT_RAD=-0.18 rad.  Mediator decode is asymmetric
-        (col_min=-0.28, col_max=0.10) matching Lua's encoding exactly.
-
-    Timeline (SITL time):
-      t=0..65 s   kinematic (hub at constant vel0 from launch_pos to pos0)
-      t~21 s      EKF3 GPS origin set
-      t~54 s      GPS fuses (EKF3 transitions to horiz_pos_abs); pos_ned available
-      t=62 s      Lua captures body_z (FLIGHT_SETTLE_MS=62000 ms, 3 s before exit)
-                  _tdir0 set immediately from GPS position (~100 m tlen); orbit
-                  tracking active before kinematic exits — eliminates neutral-stick
-                  crash at exit.
-      t=65 s      kinematic exits; Lua orbit-tracking cyclic already active
-      t=65+       free flight under ArduPilot + Lua
-
-    Fixture yields at ~t=15 s.  Observation window of 200 s covers kinematic
-    exit (t_obs~50 s) + Lua capture (t_obs~47 s) + >=60 s stable orbit.
-    """
-    extra = {
-        # kinematic_vel_ramp_s=0: keep vel0 constant throughout kinematic.
-        # Default (15 s ramp) tapers vel to 0 in the last 15 s, which reduces
-        # GPS innovations and delays fusion.  Constant vel0 gives consistent
-        # GPS innovations so EKF fuses at ~54 s (within kinematic window),
-        # ensuring GPS is available before Lua captures at t=66.5 s.
-        "kinematic_vel_ramp_s": 0.0,
-        # No pos0/vel0/body_z/tether overrides: use steady_state_starting.json
-        # (same as acro_armed, test_wobble, etc.).
-    }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_lua_full", log_prefix="lua_full",
-                     test_name=request.node.name, speedup=speedup,
-                     
-                     # CLAUDE.md critical rule: internal_controller=False for all
-                     # full-stack flight tests.  ArduPilot + Lua own the physics.
-                     internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua via SCR_USER params.
-        # SCR_USER5 = ctx.home_alt_m: anchor is home_alt_m metres below EKF HOME
-        # (sensor.py pos_ned_rel[2] = pos_ned[2] + home_alt_m; physics anchor NED
-        # [0,0,0] appears at LOCAL [0, 0, home_alt_m]).  Matches acro_armed_lua.
-        ctx.log.info("Setting SCR_USER params for rawes.lua (flight mode, full-stack) ...")
-        lua_params = {
-            "SCR_ENABLE": 1,              # persist scripting in EEPROM
-            "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,             # anchor North   [m]
-            "SCR_USER4": 0.0,             # anchor East    [m]
-            "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 1,               # RAWES_MODE = 1 (flight only)
-        }
-        for pname, pvalue in lua_params.items():
-            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
-            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
-        # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
-        # Tests must NOT send RC overrides.
-
-        # Drain STATUSTEXT that arrived during param setting.
-        import time as _time
-        _t_drain = _time.monotonic() + 1.0
-        while _time.monotonic() < _t_drain:
-            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
-            if _msg is not None:
-                _text = _msg.text.rstrip("\x00").strip()
-                ctx.all_statustext.append(_text)
-                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
-
-        yield ctx
 
 
 # ---------------------------------------------------------------------------
@@ -1770,71 +1482,3 @@ def _torque_stack(
             import shutil as _shutil2
             _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
         log.info("Logs copied to %s", test_log_dir)
-
-
-@pytest.fixture
-def torque_armed(tmp_path, request):
-    """Counter-torque stack fixture (constant RPM). Yields TorqueStackContext."""
-    import model as _m
-    with _torque_stack(
-        tmp_path,
-        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
-        test_name=request.node.name,
-    ) as ctx:
-        yield ctx
-
-
-@pytest.fixture
-def torque_armed_profile(request, tmp_path):
-    """
-    Like torque_armed but accepts a profile name via request.param.
-
-    Usage::
-
-        @pytest.mark.parametrize("torque_armed_profile", ["slow_vary"], indirect=True)
-        def test_foo(torque_armed_profile):
-            ...
-    """
-    import model as _m
-    profile = getattr(request, "param", "constant")
-    with _torque_stack(
-        tmp_path,
-        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
-        profile=profile,
-        log_name=f"torque_armed[{profile}]",
-        test_name=request.node.name,
-    ) as ctx:
-        yield ctx
-
-
-@pytest.fixture
-def torque_armed_lua(tmp_path, request):
-    """
-    Like torque_armed but with rawes.lua active in yaw mode (SCR_USER6=2).
-
-    Key differences from torque_armed:
-      - rawes.lua installed to /ardupilot/scripts/ before boot
-      - EEPROM wiped so copter-heli.parm defaults apply cleanly
-      - SCR_ENABLE=1, SCR_USER6=2, RPM1_TYPE=10, SERVO9_FUNCTION=94
-      - mediator_torque.py --lua-mode --tail-channel 8 (reads Ch9, linear mapping)
-      - ATC_RAT_YAW_P=0 (Lua is sole feedforward provider, no ArduPilot yaw PID)
-    """
-    import model as _m
-    with _torque_stack(
-        tmp_path,
-        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
-        lua_mode=True,
-        tail_channel=8,
-        extra_params=_LUA_TORQUE_EXTRA_PARAMS,
-        install_scripts=("rawes.lua",),
-        log_name="torque_armed_lua",
-        test_name=request.node.name,
-        # Boot-time params for the Lua fixture (merged on top of _BASE_TORQUE_BOOT_PARAMS):
-        # - RPM1_TYPE=10: JSON RPM backend must be activated at boot (driver init).
-        #   Setting post-boot via MAVLink does NOT activate the driver → rawes.lua gets
-        #   nil from get_rpm() → outputs STARTUP_PWM (1050 µs) instead of trim → hub yaws.
-        # - ATC_RAT_YAW_P=0.0: Lua is the sole feedforward provider; ArduPilot yaw PID
-        #   must be inactive so it doesn't fight the Lua trim output.
-        boot_params={"RPM1_TYPE": 10, "RPM1_MIN": 0, "ATC_RAT_YAW_P": 0.0},
-    ) as ctx:
-        yield ctx
