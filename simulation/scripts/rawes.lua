@@ -73,21 +73,6 @@ local MIN_TETHER_M      = 0.5       -- minimum tether length before orbit tracki
 local LAND_MIN_TETHER_M = 2.0       -- landing mode: final_drop below this tether length [m]
 local ACRO_RP_RATE_DEG  = 360.0     -- must match ACRO_RP_RATE ArduPilot parameter
 local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
--- Capture delay: millis() must exceed this value before body_z is snapped.
--- Stack test kinematic = 65 s; both thresholds set to 62 s (3 s before exit)
--- so orbit-tracking cyclic with gyro feedthrough is active AT kinematic exit.
--- _tdir0 is set to nil at capture (GPS may not yet be fused); the Rodrigues
--- orbit update is deferred until the first valid pos_ned from the EKF.
--- On real hardware millis() >> these thresholds so capture is immediate.
-local KINEMATIC_SETTLE_MS  = 62000  -- landing: delay capture until 3 s before kinematic exit [ms]
-local FLIGHT_SETTLE_MS     = 62000  -- flight/pumping: capture 3 s BEFORE kinematic exit [ms]
-                                    -- Same timing as KINEMATIC_SETTLE_MS so orbit-tracking
-                                    -- cyclic (with gyro feedthrough) is active at kinematic
-                                    -- exit.  Without this, neutral ACRO sticks zeroes the
-                                    -- natural orbital rate (~229 deg/s body X) -> crash.
-                                    -- _tdir0 is nil at capture (no GPS yet); set on first
-                                    -- pos_ned availability.  Rodrigues orbit tracking holds
-                                    -- _bz_orbit = _bz_eq0 until GPS fuses.
 
 -- ── VZ collective controller ─────────────────────────────────────────────────
 -- Pixhawk-side descent-rate controller: mirrors AcroController.step_vz() in
@@ -207,31 +192,52 @@ local function v3_body_z()
     return v
 end
 
--- Return -body_z in NED (= -disk_normal = disk DOWN direction).
--- sensor.py body Z = disk_normal (UP, roll~180 deg from NED).
--- body_to_earth([0,0,1]) = disk_normal (UP). Negate to get -disk_normal (DOWN).
--- Orbit tracking cross products are sign-invariant: this DOWN direction is
--- fully consistent (bz_now = -dn_current, _bz_orbit = -dn_target, err cancels).
+-- Return body_z in NED: body_to_earth([0,0,1]) = R[:,2] = rotor axis in world frame.
+-- Positive convention matches Python controller (R[:,2]).
+-- Cross-product error is sign-consistent because both bz_now and _bz_orbit
+-- use the same positive convention.
 local function disk_normal_ned()
-    local bz = ahrs:body_to_earth(v3_body_z())
+    return ahrs:body_to_earth(v3_body_z())
+end
+
+-- Azimuthal orbit tracking: rotate bz_eq0 around NED Z by the horizontal
+-- angle from tdir0 to the current tether direction (diff/|diff|).
+-- Matches Python orbit_tracked_body_z_eq() exactly:
+--   preserves bz_eq0:z() — no altitude feedback → no positive-feedback instability.
+-- Safe at 50 Hz without rate limiting (azimuthal rotation only, no Z change).
+local function orbit_track_azimuthal(bz_eq0, tdir0, diff)
+    local dx, dy = diff:x(), diff:y()
+    local dh = math.sqrt(dx*dx + dy*dy)
+    if dh < 0.01 then return v3_copy(bz_eq0) end
+    local thx = dx / dh
+    local thy = dy / dh
+    local t0x = tdir0:x()
+    local t0y = tdir0:y()
+    local n0 = math.sqrt(t0x*t0x + t0y*t0y)
+    if n0 < 0.01 then return v3_copy(bz_eq0) end
+    t0x = t0x / n0; t0y = t0y / n0
+    -- 2-D rotation angle from tdir0 to current direction
+    local cos_phi = math.max(-1.0, math.min(1.0, t0x*thx + t0y*thy))
+    local sin_phi = t0x*thy - t0y*thx
+    -- Rotate only X,Y of bz_eq0; Z is preserved exactly
+    local bx, by, bz = bz_eq0:x(), bz_eq0:y(), bz_eq0:z()
     local r = Vector3f()
-    r:x(-bz:x()); r:y(-bz:y()); r:z(-bz:z())
+    r:x(cos_phi*bx - sin_phi*by)
+    r:y(sin_phi*bx + cos_phi*by)
+    r:z(bz)
+    r:normalize()
     return r
 end
 
--- Rodrigues rotation: rotate vector v around unit vector axis_n by angle radians
--- v' = v*cos(th) + (axis x v)*sin(th) + axis*(axis.v)*(1-cos(th))
--- Uses only component arithmetic to avoid Vector3f operator overloading issues.
+-- Rodrigues rotation kept for pumping slerp (body_z transitions between phases).
 local function rodrigues(v, axis_n, angle)
     local ca  = math.cos(angle)
     local sa  = math.sin(angle)
     local vx, vy, vz = v:x(),      v:y(),      v:z()
     local nx, ny, nz = axis_n:x(), axis_n:y(), axis_n:z()
-    -- axis x v
     local acx = ny*vz - nz*vy
     local acy = nz*vx - nx*vz
     local acz = nx*vy - ny*vx
-    -- axis . v
     local ad  = nx*vx + ny*vy + nz*vz
     local k   = ad * (1.0 - ca)
     local r   = Vector3f()
@@ -364,18 +370,29 @@ local function run_flight()
     -- Select altitude-neutral collective for the current mode.
     local col_cruise  = _is_landing and COL_CRUISE_LAND_RAD or COL_CRUISE_FLIGHT_RAD
 
-    -- ── Pre-capture: hold Ch1/Ch2 neutral and Ch3 at cruise collective ────
-    -- Runs BEFORE the ahrs:healthy() guard so the hub gets collective support
-    -- even during AHRS initialisation (before GPS fusion).  Without this,
-    -- Ch1/Ch2/Ch3 stay at ArduPilot default neutral (1500) and ACRO's rate
-    -- loop zeroes the natural orbital rate (~229 deg/s body X) -> crash.
-    -- This block only matters in the pre-capture window; after _captured=true
-    -- the orbit-tracking cyclic below drives Ch1/Ch2.
+    -- ── Pre-capture: gyro feedthrough to preserve orbital rate ───────────
+    -- Runs BEFORE the ahrs:healthy() guard so Ch3 gets collective support even
+    -- during AHRS initialisation.  Ch1/Ch2 use pure gyro feedthrough so ACRO's
+    -- desired_rate = measured_rate -> rate_error = 0 -> zero corrective torque.
+    -- Hub orbits naturally while GPS fuses (~35 s after kinematic exit).
+    -- Without this, ch1=1500 -> desired_rate=0 -> ACRO kills 229 deg/s orbital
+    -- rate within seconds -> crash before GPS fuses.
     if not _captured and mode_now ~= 0 then
         local ct = (col_cruise - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
         if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + ct * 1000.0 + 0.5)) end
-        if _rc_ch1 then _rc_ch1:set_override(1500) end
-        if _rc_ch2 then _rc_ch2:set_override(1500) end
+        if ahrs:healthy() then
+            local gyro_pre = ahrs:get_gyro()
+            local gx = gyro_pre and gyro_pre:x() or 0.0
+            local gy = gyro_pre and gyro_pre:y() or 0.0
+            local sc = 500.0 / (ACRO_RP_RATE_DEG * math.pi / 180.0)
+            local c1 = math.max(1000, math.min(2000, math.floor(1500.0 + sc * gx + 0.5)))
+            local c2 = math.max(1000, math.min(2000, math.floor(1500.0 + sc * gy + 0.5)))
+            if _rc_ch1 then _rc_ch1:set_override(c1) end
+            if _rc_ch2 then _rc_ch2:set_override(c2) end
+        else
+            if _rc_ch1 then _rc_ch1:set_override(1500) end
+            if _rc_ch2 then _rc_ch2:set_override(1500) end
+        end
     end
 
     -- AHRS must be healthy for attitude-dependent calculations (body_to_earth,
@@ -383,36 +400,36 @@ local function run_flight()
     -- runs without healthy AHRS.
     if not ahrs:healthy() then return end
 
-    -- ── DCM capture: snap body_z at settle time using attitude only ───────
-    -- Captures at FLIGHT_SETTLE_MS (62 s) = 3 s before kinematic exits (65 s),
-    -- or at KINEMATIC_SETTLE_MS (62 s) for landing.  Uses body_to_earth (DCM)
-    -- -- no GPS needed.  Starting orbit-tracking cyclic BEFORE kinematic exit
-    -- ensures gyro feedthrough ramps up correctly over the 100 PWM/step limiter
-    -- so the correct cyclic is active the instant the hub enters free flight.
-    -- _tdir0 = nil at capture (GPS not yet fused); populated below on first
-    -- pos_ned.  Until then, _bz_orbit = _bz_eq0 (no Rodrigues update).
+    -- ── DCM capture: immediate bz_eq0 from attitude estimate ─────────────
+    -- Captures bz_eq0 = disk_normal_ned() as soon as AHRS becomes healthy
+    -- (~t=15 s during kinematic, well before GPS fuses).
+    -- EKF yaw is initially wrong (GPS velocity yaw hasn't aligned), but because
+    -- bz_now and bz_eq0 are computed in the SAME EKF frame, bz_now × bz_eq0 ≈ 0
+    -- near equilibrium → cyclic stays near neutral → hub doesn't tumble at
+    -- kinematic exit.  GPS tether recapture (below) corrects bz_eq0 once GPS
+    -- fuses (~35 s after kinematic exit).
     if not _captured and mode_now ~= 0 then
-        local settle_ms = _is_landing and KINEMATIC_SETTLE_MS or FLIGHT_SETTLE_MS
-        if millis() >= settle_ms then
-            _bz_eq0   = disk_normal_ned()
-            _bz_orbit = v3_copy(_bz_eq0)
-            _bz_slerp = disk_normal_ned()
-            _tdir0    = nil   -- set on first GPS fix below
-            _captured = true
-            local label
-            if _is_landing then label = "land"
-            elseif _is_pumping then label = "pump"
-            else label = "flight" end
-            gcs:send_text(6, string.format(
-                "RAWES %s: captured  bz=(%.2f %.2f %.2f)",
-                label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z()))
-        end
-        return
+        _bz_eq0   = disk_normal_ned()
+        _bz_orbit = v3_copy(_bz_eq0)
+        _bz_slerp = v3_copy(_bz_eq0)
+        _tdir0    = nil   -- set by GPS tether recapture when GPS fuses
+        _captured = true
+        local label = _is_landing and "land" or (_is_pumping and "pump" or "flight")
+        gcs:send_text(6, string.format(
+            "RAWES %s: captured  bz=(%.2f %.2f %.2f)",
+            label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z()))
     end
 
-    -- ── GPS tether vector (optional; nil until EKF fuses position) ────────
-    -- Used for Rodrigues orbit update and pumping phase detection.
-    -- If nil, _bz_orbit stays at _bz_eq0 (safe fallback -- holds initial bz).
+    -- ── GPS tether vector + synchronized capture ──────────────────────────
+    -- diff/tlen: used for azimuthal orbit tracking and pumping phase detection.
+    -- GPS synchronized capture: when GPS first fuses (_tdir0 still nil), capture
+    -- bz_eq0 from disk_normal_ned() at that exact moment.
+    -- The pre-GPS DCM tracking (below) continuously sets bz_orbit = bz_now, so
+    -- at GPS fire time bz_orbit = bz_now.  Resetting bz_eq0 = bz_orbit (= bz_now)
+    -- and _tdir0 = normalize(diff) makes orbit tracking start with zero error:
+    --   azimuthal(bz_eq0, _tdir0, diff) = bz_eq0 (diff == _tdir0 at fire time).
+    -- As the hub orbits: diff rotates -> bz_orbit rotates; bz_now tracks via
+    -- gyros at the same rate -> error stays near-zero throughout.
     local pos_ned = ahrs:get_relative_position_NED_origin()
     local diff, tlen
     if pos_ned then
@@ -422,11 +439,15 @@ local function run_flight()
         diff:y(pos_ned:y() - anch:y())
         diff:z(pos_ned:z() - anch:z())
         tlen = diff:length()
-        -- First GPS position after DCM capture: initialise tether direction.
         if _tdir0 == nil and tlen >= MIN_TETHER_M then
-            _tdir0 = v3_normalize(diff)
+            _tdir0    = v3_normalize(diff)
+            _bz_eq0   = disk_normal_ned()   -- capture from DCM at GPS fire time
+            _bz_orbit = v3_copy(_bz_eq0)    -- bz_orbit was already tracking bz_now
+            _bz_slerp = v3_copy(_bz_eq0)    -- no step change in slerp
+            local label = _is_landing and "land" or (_is_pumping and "pump" or "flight")
             gcs:send_text(6, string.format(
-                "RAWES flight: GPS  tlen=%.1f m", tlen))
+                "RAWES %s: GPS  bz=(%.2f %.2f %.2f)  tlen=%.1f m",
+                label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z(), tlen))
         end
     end
 
@@ -543,17 +564,43 @@ local function run_flight()
     end
 
     -- ── Orbit tracking update (requires GPS tether direction) ─────────────
-    -- Rotate _bz_eq0 by the Rodrigues rotation from _tdir0 to current tether
-    -- direction.  Only runs once _tdir0 is known (GPS fused after DCM capture).
+    -- Azimuthal (horizontal-only) rotation: rotate _bz_eq0 around NED Z by
+    -- the horizontal angle from _tdir0 to the current tether direction.
+    -- Preserves _bz_eq0:z() exactly — no altitude feedback, no instability.
+    -- Matches Python orbit_tracked_body_z_eq(); safe at 50 Hz without slerp.
     -- Landing: skip (orbit stays at _bz_eq0 = straight-descent direction).
-    -- Pre-GPS: skip (holds _bz_orbit = _bz_eq0 as safe fallback).
-    if not _is_landing and _tdir0 ~= nil and tlen and tlen >= MIN_TETHER_M then
-        local bzt   = v3_normalize(diff)
-        local axis  = _tdir0:cross(bzt)
-        local sinth = axis:length()
-        if sinth > 1e-6 then
-            local costh = _tdir0:dot(bzt)
-            _bz_orbit = rodrigues(_bz_eq0, v3_normalize(axis), math.atan(sinth, costh))
+    -- Pre-GPS: skip; handled by DCM tracking block below.
+    if not _is_landing and _tdir0 ~= nil and diff ~= nil and tlen and tlen >= MIN_TETHER_M then
+        _bz_orbit = orbit_track_azimuthal(_bz_eq0, _tdir0, diff)
+    end
+
+    -- ── Pre-GPS attitude hold ─────────────────────────────────────────────
+    -- Before GPS fuses (_tdir0 == nil): track bz_now so cyclic = pure gyro
+    -- feedthrough (err = bz_now x bz_orbit = 0).
+    --
+    -- Why not hold bz_eq0 fixed (the old design):
+    --   bz_eq0 is captured at AHRS healthy time (~t=0 in kinematic).  EKF yaw
+    --   at t=0 is wrong (GPS velocity yaw hasn't aligned yet).  Over the next
+    --   65 s the EKF yaw converges to the GPS velocity heading, rotating
+    --   disk_normal_ned() by ~27 deg.  At kinematic exit bz_now (GPS-aligned)
+    --   diverges from bz_eq0 (t=0 snapshot) -> err = bz_now x bz_eq0 != 0 ->
+    --   full cyclic saturation -> hub tumbles immediately.
+    --
+    -- Why tracking bz_now is safe during kinematic:
+    --   The kinematic locks hub orientation, so bz_now = physics body_z in EKF
+    --   frame regardless of EKF yaw drift.  err = bz_now x bz_now = 0 always
+    --   -> cyclic = gyro feedthrough only -> no conflict with kinematic.
+    --   At kinematic exit: bz_orbit = bz_now -> err = 0 -> stable entry.
+    --
+    -- After kinematic exit (if GPS not yet fused):
+    --   Hub in free flight with pure gyro feedthrough (zero corrective cyclic).
+    --   Hub may drift slightly under natural dynamics but won't actively tumble.
+    --   GPS recapture fires when pos_ned becomes available, freshly capturing
+    --   bz_eq0 = disk_normal_ned() at that moment -> zero step change in error.
+    if _tdir0 == nil then
+        local bz_now_pre = disk_normal_ned()
+        if bz_now_pre then
+            _bz_orbit = bz_now_pre
         end
     end
 
@@ -600,16 +647,15 @@ local function run_flight()
     local err_bx   = err_body:x()    -- body X (roll)
     local err_by   = err_body:y()    -- body Y (pitch)
 
-    -- Gyro feedthrough: cmd = kp*err + gyro so ACRO desired rate = actual + correction.
-    -- Without this, ch1=1500+scale*kp*err would set desired rate to kp*err only, and
-    -- ACRO's rate loop would zero out the orbital body rate (~229 deg/s body X),
-    -- killing the natural orbit.  With feedthrough, ACRO tracks actual body rate + err.
-    local gyro   = ahrs:get_gyro()
-    local gyro_x = gyro and gyro:x() or 0.0
-    local gyro_y = gyro and gyro:y() or 0.0
-
-    local roll_rads  = kp * err_bx + gyro_x
-    local pitch_rads = kp * err_by + gyro_y
+    -- Pure P control (no gyro feedthrough).
+    -- The orbital body_z precession rate is ~0.01 rad/s; the P gain corrects
+    -- any lag with a negligible steady-state error.  Gyro feedthrough was
+    -- removed because it makes the control sensitive to EKF yaw error: with
+    -- EKF yaw ~46 deg off from physical yaw, gyro_x/y in EKF body frame are
+    -- rotated versions of physical rates -> feedthrough applies corrective
+    -- torque in the wrong body axes -> hub tumbles at kinematic exit.
+    local roll_rads  = kp * err_bx
+    local pitch_rads = kp * err_by
 
     -- Map rate to RC PWM; full stick (+/-500 us) = +/-ACRO_RP_RATE_DEG deg/s
     local scale = 500.0 / (ACRO_RP_RATE_DEG * math.pi / 180.0)
@@ -619,7 +665,7 @@ local function run_flight()
     ch1 = math.max(1000, math.min(2000, ch1))
     ch2 = math.max(1000, math.min(2000, ch2))
 
-    -- Output rate limiter (100 PWM/step -- fast enough for gyro feedthrough ramp-up)
+    -- Output rate limiter (100 PWM/step = 1.26 rad/s/step at 50 Hz)
     local d1 = ch1 - _prev_ch1
     local d2 = ch2 - _prev_ch2
     if d1 >  100 then d1 =  100 end
@@ -646,6 +692,11 @@ local function run_flight()
         else   -- transition or reel_in
             col_cmd = COL_REEL_IN
         end
+    elseif _tdir0 == nil then
+        -- Pre-GPS: EKF vz is biased (GPS altitude noise during horizontal kinematic flight).
+        -- VZ controller would over-command collective → excess thrust → tether tension runaway.
+        -- Hold at cruise collective until GPS recapture fires (_tdir0 becomes non-nil).
+        col_cmd = col_cruise
     else
         -- VZ controller: hardcoded setpoint per mode (no RC receiver in this system).
         -- Landing: descend at VZ_LAND_SP = 0.5 m/s.  Flight/yaw: hold altitude (0.0).

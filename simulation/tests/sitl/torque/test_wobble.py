@@ -69,9 +69,8 @@ def test_wobble(torque_armed_profile):
     ctx = torque_armed_profile
     rows: list = []
 
-    # EK3_SRC1_POSXY=0 and EK3_SRC1_VELXY=0 are set via the SITL boot param file
-    # (conftest._BASE_TORQUE_BOOT_PARAMS) to avoid the EKF forced reset that occurs
-    # when these are written via MAVLink post-boot.
+    # EK3_SRC1_POSXY=0 and EK3_SRC1_VELXY=0 are in _BASE_TORQUE_BOOT_PARAMS (boot file).
+    # Writing EK3_SRC* via MAVLink post-boot triggers EKF forced reset; boot file avoids it.
 
     obs = run_observation_loop(
         ctx=ctx, rows=rows,

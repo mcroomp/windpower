@@ -43,9 +43,9 @@ def test_pitch_roll(torque_armed_profile):
     ctx = torque_armed_profile
     rows: list = []
 
-    # EK3_SRC1_POSXY=0 and EK3_SRC1_VELXY=0 are set via the SITL boot param file
-    # (conftest._BASE_TORQUE_BOOT_PARAMS).  Setting them via MAVLink post-boot triggers
-    # "EKF3 IMU0 forced reset" even if the value is unchanged, corrupting the gyro bias.
+    # EK3_SRC1_POSXY=0 and EK3_SRC1_VELXY=0 are in _BASE_TORQUE_BOOT_PARAMS (boot file).
+    # Writing EK3_SRC* via MAVLink post-boot triggers "EKF3 IMU0 forced reset" even if
+    # the value is unchanged, corrupting the gyro-bias estimate.
 
     obs = run_observation_loop(
         ctx=ctx, rows=rows,

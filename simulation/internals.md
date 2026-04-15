@@ -120,6 +120,39 @@ Anti-windup: conditional integration (stop integrating when saturated and error 
 
 Gravity is applied internally — do **not** add it to forces.
 
+### Electronics hub as fuselage
+
+The RAWES hub maps directly onto a helicopter model:
+
+| Helicopter | RAWES |
+|---|---|
+| Fuselage | Electronics hub (Pixhawk, GB4008 stator, frame) |
+| Main rotor | Spinning blade assembly (4 blades + outer shell) |
+| Tail rotor | GB4008 counter-torque motor |
+| Fuselage orientation (R) | `R_hub` — full 3-DOF rotation matrix |
+| Rotor speed (Ω) | `omega_spin` — separate scalar ODE |
+
+**`R_hub` is the fuselage orientation.** It is a full 3×3 rotation matrix with all three orientation DOF:
+- `R_hub[:, 2]` = `disk_normal` — where the rotor axle points (2 DOF: tilt direction)
+- `R_hub[:, 0]` = electronics x-axis — **the yaw DOF** (1 DOF: rotation around axle)
+
+The yaw DOF is not a convention or a derived quantity — it is a physical state integrated
+by the dynamics ODE like any other orientation component. The sensor reads `R_hub` directly
+to build the attitude packet sent to ArduPilot; no separate yaw state is needed.
+
+**GB4008 as tail rotor.** The GB4008 provides a torque around `disk_normal` on the electronics
+hub to counteract the aerodynamic spin-up torque from the rotor drag. In the mediator this is
+modelled as:
+
+```python
+omega_yaw = np.dot(hub_state["omega"], disk_normal)   # electronics yaw rate [rad/s]
+T_GB4008  = -K_yaw * omega_yaw                         # counter-torque [N·m]
+M_orbital += disk_normal * T_GB4008
+```
+
+`K_yaw → large`: perfect damper (yaw rate ≈ 0, hardware nominal).
+`K_yaw` finite: realistic GB4008 with residual yaw drift, visible in `rpy_yaw` telemetry.
+
 **Rotor spin** is maintained as a separate scalar `omega_spin`, updated each step via the BEM-derived spin torque:
 ```
 omega_spin += result.Q_spin / I_SPIN_KGMS2 × dt

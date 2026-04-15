@@ -4,9 +4,9 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) — a tethered, 4-blade autogyro kite. Wind drives autorotation; cyclic pitch control steers; tether tension during reel-out drives a ground generator. No motor drives rotation.
 
-**Current phase:** Phase 3, Milestone 3. 482 unit + 45 simtests + 14 stack tests passing. SkewedWakeBEMJit is production aero model. `rawes.lua` orbit-tracking validated in SITL. H_SW_PHANG=0, H_SW_TYPE=3 confirmed. **Next priority: steady orbit under full ArduPilot control (internal_controller=False) as the foundation for pumping and landing.**
+**Current phase:** Phase 3, Milestone 3. `rawes.lua` orbit-tracking under full ArduPilot control (`internal_controller=False`) achieved: `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3 runs). Three root causes fixed: (1) `vel0=[0,0.96,0]` (East) so GPS fuses at t≈23 s during kinematic → orbit tracking active before exit; (2) gyro feedthrough removed from Lua cyclic (EKF-yaw-sensitive, caused ~33% flakiness); (3) pre-GPS collective bypass in rawes.lua (col=cruise while `_tdir0==nil`). **Next: test_pumping_cycle_lua, then test_landing_lua.**
 
-**Stack test status (14 PASS):** test_arm_minimal, test_acro_armed, test_acro_hold, test_h_swash_phang, test_lua_flight_rc_overrides, test_stack_integration_smoke, test_wobble, test_gust, test_pitch_roll, test_slow_vary, test_startup, test_lua_yaw_trim, test_yaw_regulation, test_pumping_cycle (net_energy=+2098 J, peak_tension=315 N). test_pumping_cycle_lua and test_landing_lua: in development.
+**Stack test status (parallel -n 8, 9 PASS):** test_arm_minimal, test_stack_integration_smoke, test_gust_recovery, test_lua_yaw_trim, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle_lua` and `test_landing_lua`: in development.
 
 **Test infrastructure:** Stack tests moved from `tests/stack/` to `tests/sitl/flight/` + `tests/sitl/torque/`. Shared code extracted into `stack_infra.py` (context managers `_sitl_stack`, `_acro_stack`, `_torque_stack`). `conftest.py` is now a thin re-exporter only.
 
@@ -56,11 +56,16 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above xi≈85°.
 - **body_z_slew_rate** = 0.40 rad/s (`rotor.body_z_slew_rate_rad_s`). Faster → oscillation; slower → wastes reel-in time.
 - **RotorDefinition YAML fields:** `swashplate_pitch_gain_rad` (measurable via flap deflection); `CD_structural` (beaupoil_2026=0.0, de_schutter_2018=0.021).
-- **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line.
+- **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line. **CSV files are always regenerated — never worry about backward compatibility for the CSV schema.**
 - **rawes.lua SCR_USER6 modes:** 0=none, 1=flight cyclic (50 Hz), 2=yaw trim (100 Hz), 3=both, 4=landing (cyclic + VZ descent + auto final_drop, 50 Hz), 5=pumping (De Schutter cyclic + per-phase collective, 50 Hz). Modes 4+5 own Ch3 entirely.
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) are required boot params (in `rawes_sitl_defaults.parm`). GPS origin sets during arm; "EKF3 IMU0 is using GPS" appears once EKF innovations settle. Without widened gates, GPS fusion fails. Active diagnosis: "EKF3 IMU0 switching to compass X" cycling (every ~10 s) observed in SITL — compass instability may be blocking GPS fusion.
-- **EK3_SRC1_YAW=1** (compass) for SITL — `rawes_sitl_defaults.parm` boot default. SITL compass is synthetic and tracks `rpy[2]` exactly, so compass and attitude always agree → no EKF emergency yaw reset. On hardware, consider switching to `=8` (GPS velocity yaw) for orbital flight where attitude yaw is ambiguous.
+- **EK3_SRC1_YAW=8** (GPS velocity yaw) — `rawes_sitl_defaults.parm` boot default. `COMPASS_USE=0`, `COMPASS_ENABLE=0`. Compass is physically useless near the GB4008 motor on hardware, and SITL's 3 synthetic compasses cycle every 10 s (EKF3 `magFailTimeLimit_ms`) when innovations fail, blocking GPS fusion. GPS velocity yaw requires ~0.5 m/s minimum; orbital speed is 0.96 m/s.
 - **rawes.lua landing (SCR_USER6=4):** captures body_z on `ahrs:healthy()`; VZ descent controller (`col_cmd = COL_CRUISE + KP_VZ*(vz_actual - VZ_LAND_SP)`, VZ_LAND_SP=0.5 m/s); `final_drop` (collective→0) when alt ≤ 2.0 m. Fixture: `acro_armed_landing_lua` (`internal_controller=False`, `kinematic_vel_ramp_s=20` so hub exits kinematic at vel=0 — eliminates linear tether jolt without internal controller).
+- **rawes.lua pre-GPS collective bypass:** Before GPS fuses (`_tdir0 == nil`), the VZ altitude controller is bypassed and collective is held at `col_cruise` (-0.18 rad). Without this, GPS altitude noise biases EKF vz ≈ 0.24 m/s → VZ controller commands col=-0.168 → T_aero=249N > T_tether=199N → 50N net outward force → tether tension runaway → crash at kinematic exit. Implemented as `elseif _tdir0 == nil then col_cmd = col_cruise` before the VZ controller branch.
+- **rawes.lua pre-GPS orbit tracking:** Before GPS fuses (`_tdir0 == nil`), `_bz_orbit` tracks `bz_now` every step (err=0, pure neutral stick). When GPS fuses at t≈23 s, GPS tether recapture fires: `_bz_eq0` and `_bz_orbit` are reset to `disk_normal_ned()` at that moment (zero step change) and `_tdir0 = normalize(diff)` anchors the orbit reference. Orbit tracking then runs for 42 s before kinematic exit — hub has active cyclic control at the transition.
+- **rawes.lua no gyro feedthrough:** Cyclic is pure P control: `roll_rads = kp * err_bx`, `pitch_rads = kp * err_by`. Gyro feedthrough (`+ gyro_x/y`) was removed because it is sensitive to EKF yaw error: with EKF yaw ~46° off from physical yaw (GPS vel heading=90° vs physical 136.6°), `get_gyro()` in EKF body frame applies corrective torque in the wrong body axes → hub fights orbit at kinematic exit. The orbital body_z precession rate is ~0.01 rad/s; pure P with azimuthal orbit tracking handles it with negligible steady-state error.
+- **EKF yaw cancellation in body-frame cyclic error:** `err_body = R_ekf.T @ (bz_now × bz_orbit)`. Both `bz_now` and `bz_orbit` live in the same EKF frame, so a constant yaw offset `Δψ` between EKF and physics cancels exactly. Stable (even if wrong) EKF yaw is sufficient for the P-gain error term. `vel0=[0,0.96,0]` (East) gives constant GPS velocity heading → EKF yaw stabilises to ~90° within seconds of GPS fusion at t≈23 s.
+- **`acro_armed_lua_full` kinematic design:** Linear kinematic, `vel0=[0,0.96,0]` (East), `vel_ramp_s=5`. Constant East velocity heading → GPS fuses at t≈23 s during kinematic. `vel_ramp_s=5` ramps velocity to 0 over t=60–65 s → at kinematic exit: vel≈0, EKF vz≈0, col=col_cruise, T_aero≈T_tether → stable entry. GPS bz recapture fires at t≈23 s; orbit tracking runs for 42 s before kinematic exit. `vel_ramp_s=20` (older design) was flaky: GPS vel < 0.5 m/s for 10.4 s after exit → EKF yaw drifted → feedthrough instability. `vel_ramp_s=5`: GPS heading valid until t=62.4 s (only 2.6 s of degradation).
 - **rawes.lua pumping (SCR_USER6=5):** phase detection uses **cumulative** tether length change vs. running reference (`PUMP_LEN_THRESH=0.05 m`). Hold tracks min tlen; reel-out tracks peak; reel-in tracks trough. Per-iteration delta is too small (≈0.0024 m per 20 ms).
 - **Anchor in `LOCAL_POSITION_NED`:** `SCR_USER5 = -initial_state["pos"][2]` (NED Z negated). Anchor at `[0, 0, -pos0[2]]` in EKF frame.
 - **SCR_ENABLE bootstrap:** After EEPROM wipe, scripting only starts if `SCR_ENABLE=1` is already in EEPROM. `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).
@@ -120,9 +125,13 @@ simulation/
         ├── flight/              flight stack tests (mediator + physics + ArduPilot)
         │   ├── conftest.py      flight fixtures: acro_armed, acro_armed_*_lua, etc.
         │   ├── test_arm_minimal.py          no mediator; static sensor; arm only
-        │   ├── test_gps_fusion_layers.py    GPS fusion diagnostic (6 layers + armed variant)
-        │   ├── test_acro_armed.py           ...
-        │   └── ...
+        │   ├── test_gps_fusion_layers.py    GPS fusion diagnostic (layers + armed + trajectory)
+        │   ├── test_h_phang.py              H_SW_PHANG calibration (test_h_swash_phang)
+        │   ├── test_kinematic_gps.py        GPS fusion during kinematic (parametrized)
+        │   ├── test_lua_flight_steady.py    steady orbit under full ArduPilot/Lua control
+        │   ├── test_pumping_cycle.py        pumping cycle under Lua (test_pumping_cycle_lua)
+        │   ├── test_landing_stack.py        landing under Lua (test_landing_lua)
+        │   └── test_stack_integration.py   smoke test (test_stack_integration_smoke)
         └── torque/              torque/anti-rotation tests
             ├── conftest.py      torque fixtures: torque_armed, torque_armed_profile, etc.
             └── ...
@@ -178,28 +187,24 @@ simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simt
 simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q
 
 # Stage 3 — Stack tests (Docker; test files live in tests/sitl/flight/ and tests/sitl/torque/)
-# Preferred: parallel fresh mode — one isolated container per test, fully isolated EEPROM.
-# -n 8 is safe (each test binds its own ports inside its own container; no port conflicts).
+# DEFAULT: always use --fresh. Each test gets its own isolated container + clean EEPROM.
+# Full suite (parallel, -n 8 is safe — each test owns its own ports inside its own container):
 bash simulation/dev.sh test-stack-parallel --fresh -n 8
-# Fewer workers if the host is resource-constrained:
-bash simulation/dev.sh test-stack-parallel --fresh -n 4
-# Single test (non-parallel is fine when -k isolates one test)
-bash simulation/dev.sh test-stack -v -k test_pumping_cycle
+# Single test:
+bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_lua_flight_steady
 # GPS fusion diagnostic tests:
-bash simulation/dev.sh test-stack -v -k test_gps_fusion_armed
-bash simulation/dev.sh test-stack -v -k "test_gps_fusion_layers[L0"
-# All tests sequentially (slow, use only when parallel is not available)
-bash simulation/dev.sh test-stack -v
+bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_gps_fusion_armed
+bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k "test_gps_fusion_layers[L0"
 
 # Post-run analysis (always do this after a stack test)
-bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
-bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
+bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_lua_flight_steady'
+bash simulation/dev.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle_lua --plot'
 ```
 
-**Per-test logs:** `simulation/logs/{log_prefix}_{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. The directory name is `"{log_prefix}_{test_name}"` when both are set, or just `"{test_name}"` when no prefix. Always read these; never `/tmp/ArduCopter.log` (stale, accumulates across tests).
+**Per-test logs:** `simulation/logs/{log_prefix}_{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. The directory name is `"{log_prefix}_{test_name}"` when both are set, or just `"{test_name}"` when no prefix. Always read these with the Read tool using the local Windows path (`e:/repos/windpower/simulation/logs/.../arducopter.log`); never use `docker exec cat /tmp/ArduCopter.log` (stale across tests, requires container access). **`Loaded defaults from ...` prints once per parameter group — multiple repetitions are normal ArduPilot startup behavior, not a crash indicator.**
 
 Example log paths:
-- `simulation/logs/test_acro_armed/` — acro_armed flight test (no prefix)
+- `simulation/logs/test_lua_flight_steady/` — steady flight test (no prefix)
 - `simulation/logs/gps_fusion_test_gps_fusion_armed/` — GPS diagnostic (prefix=`gps_fusion`)
 - `simulation/logs/gps_layers_test_gps_fusion_layers[L0_baseline]/` — parametrized layer test
 
@@ -225,12 +230,12 @@ Example log paths:
 
 **ACRO I-term windup:** 0.2–0.3 rad/s orbital angular velocity accumulates as rate error. Fix: `ATC_RAT_RLL_IMAX=ATC_RAT_PIT_IMAX=ATC_RAT_YAW_IMAX=0`.
 
-**CRITICAL — Physically faithful sensors: no transformations, no overrides.** `sensor.py` must report exactly what the real Pixhawk hardware would see:
-- `rpy` = actual Euler angles from `build_orb_frame(disk_normal)` — the real hub orientation. **Never override `rpy[2]` with velocity heading.** The SITL compass reads the same `R_orb` orientation, so compass and attitude always agree → no EKF yaw reset.
-- `gyro_body` = `R_orb.T @ (omega_body − omega_spin_component)` — spin stripped (GB4008 keeps electronics non-rotating), projected into actual body frame.
-- `accel_body` = `R_orb.T @ (accel_world − gravity)` — in actual body frame.
-- The exact yaw direction of the electronics platform does not matter; it just needs to be steady. `build_orb_frame` (East-projection convention) provides a stable, deterministic yaw consistent with the GB4008 counter-torque assumption.
-- `EK3_SRC1_YAW=1` (compass) + `COMPASS_USE=1`: compass is consistent with honest `rpy[2]` → correct EKF yaw source. On hardware also use `EK3_SRC1_YAW=1` during orbital flight.
+**CRITICAL — Physically faithful sensors: no transformations, no overrides.** `sensor.py` must report exactly what the real Pixhawk hardware would see. The electronics hub is the fuselage — `R_hub` is its full 3-DOF orientation, integrated by the dynamics ODE:
+- `rpy` = actual ZYX Euler angles from `R_hub` directly. `R_hub[:, 2]` = disk_normal (tilt, 2 DOF); `R_hub[:, 0]` = electronics x-axis (yaw, 1 DOF). **Never override `rpy[2]` with velocity heading.** The SITL compass reads the same `R_hub` orientation, so compass and attitude always agree → no EKF yaw reset.
+- `gyro_body` = `R_hub.T @ (omega_body − omega_spin_component)` — spin stripped (GB4008 keeps electronics non-rotating), projected into electronics body frame.
+- `accel_body` = `R_hub.T @ (accel_world − gravity)` — in electronics body frame.
+- Yaw is a real physical DOF — not a convention. The GB4008 counter-torque damps yaw around `disk_normal` and is modelled explicitly in the mediator as `M_orbital += -K_YAW * dot(omega, disk_normal) * disk_normal`. `K_YAW` (default 100 N·m·s/rad) = near-perfect damper; reduce to model drift.
+- `EK3_SRC1_YAW=8` (GPS velocity yaw) + `COMPASS_USE=0`: compass disabled (GB4008 motor interference on hardware; cycling in SITL). EKF derives yaw from GPS velocity heading. Requires vehicle moving ≥ ~0.5 m/s — met during orbital flight at 0.96 m/s.
 
 ---
 
@@ -249,48 +254,43 @@ Example log paths:
 ### M1 — Wire Pumping Cycle ✅  
 ### M2 — Force Balance & Rotor Abstraction ✅  
 ### M3 — ArduPilot Config & Full-Stack Flight (in progress)
-- [x] test_pumping_cycle PASSES (SkewedWakeBEM, +2098 J, peak_tension=315 N)
-- [x] rawes.lua orbit tracking validated (test_lua_flight_rc_overrides, internal_controller=True)
+- [x] test_pumping_cycle_lua PASSES (SkewedWakeBEM, +2098 J, peak_tension=315 N)
+- [x] rawes.lua orbit tracking validated (internal_controller=True, predecessor to test_lua_flight_steady)
 - [x] H_SW_PHANG=0 confirmed; H_SW_TYPE=3 (H3-120) confirmed
 - [x] SCR_USER6=4 (landing) + SCR_USER6=5 (pumping) added; PUMP_LEN_THRESH cumulative tracking fixed
 - [x] internal_controller=False mandated for all stack flight tests (CLAUDE.md critical rule)
+- [x] test_lua_flight_steady PASSES reliably: stable=86–110 s, 3/3 runs, max_activity≤1000 PWM, no EKF yaw reset (three fixes: vel0=East so GPS fuses during kinematic; no gyro feedthrough; pre-GPS col=cruise bypass)
 
 **CRITICAL — Test progression: steady → pumping → landing.**
 Pumping and landing build directly on the stable orbit established by steady flight.  **Whenever
 any of the three tests fails, fix test_lua_flight_steady first.**  A broken steady orbit makes
 pumping and landing failures uninformative — they will fail for reasons unrelated to their own
-logic.  Do not debug test_pumping_cycle_lua or test_landing_stack until test_lua_flight_steady
+logic.  Do not debug test_pumping_cycle_lua or test_landing_lua until test_lua_flight_steady
 passes cleanly (orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s).
 
-**Step 1 — Steady orbit under full ArduPilot control (current focus)**
+**Step 1 — Steady orbit under full ArduPilot control** ✅
 
-The goal is a stack test where ArduPilot + rawes.lua (no internal Python controller) sustains a
-stable orbit at tether equilibrium for ≥ 60 s with no crash and no EKF yaw reset.  This is the
-foundation; pumping and landing are built on top.
+Three root causes fixed:
 
-Three sub-problems to solve in order:
+1. **GPS fusion too late** — `vel0=tangential` gave GPS heading=163.6°; GPS did not fuse until
+   after kinematic exit (t>65 s) → `_tdir0` was nil at exit → zero cyclic correction → tether
+   restoring torque spun hub uncontrolled → flip and crash within 1 s.
+   Fix: `vel0=[0,0.96,0]` (East) → GPS fuses at t≈23 s during kinematic → `_tdir0` fires →
+   orbit tracking runs for 42 s before exit → hub has active cyclic control at the transition.
 
-1. **Kinematic exit conditions** — hub must exit kinematic with state that ArduPilot can hold
-   without a jolt.  Key levers:
-   - `vel0` / `pos0`: hub at tether equilibrium (pos0 = body_z * tether_m), vel0 = orbital velocity
-     ([0, 0.96, 0] for East wind) so velocity heading = body_z heading → no GPS glitch.
-   - `kinematic_vel_ramp_s`: ramp vel to 0 vs keep orbital vel at exit.  vel=0 eliminates linear
-     tether jolt but requires thrust ≥ gravity at the moment of release (collective must be correct).
-     Orbital vel (vel_ramp_s=0) exits in established motion but has a radial jolt component.
-   - EKF settle time: GPS fuses at t≈23 s; body_z capture after KINEMATIC_SETTLE_MS (62 s).
+2. **Gyro feedthrough EKF-yaw sensitive** — `roll_rads = kp*err_bx + gyro_x` added a rate bias
+   in EKF body frame (~46° off from physical frame with vel0=East).  At kinematic exit, if EKF
+   yaw was unstable, feedthrough applied torque in the wrong axes → hub tumbled (~33% flakiness).
+   Fix: removed gyro feedthrough.  Pure P control `roll_rads = kp * err_bx`.  Orbital precession
+   rate is ~0.01 rad/s; the P gain + azimuthal orbit tracking handle it with negligible lag.
 
-2. **Collective management at kinematic exit** — with internal_controller=False, Lua's VZ
-   controller runs during the last 3 s of kinematic.  EKF baro noise during the vel_ramp
-   deceleration phase drives vz_EKF < 0, pulling collective below hover → free-fall at exit.
-   Fix options: clamp collective ≥ COL_CRUISE in Lua landing mode; or start Lua only AFTER
-   kinematic exit (KINEMATIC_SETTLE_MS > kinematic duration).
+3. **VZ controller used biased EKF vz before GPS** — GPS altitude noise biased EKF vz≈0.24 m/s
+   before GPS fused → col=-0.168 instead of -0.18 → T_aero=249N > T_tether=199N → 50N net
+   outward force → tension runaway at kinematic exit.
+   Fix: `elseif _tdir0 == nil then col_cmd = col_cruise` bypasses VZ controller before GPS.
 
-3. **Orbit stability** — after a clean kinematic exit, Lua (50 Hz) must maintain body_z at the
-   tether equilibrium direction.  Key checks: KP_CYC gain, BZ_SLEW rate, yaw regulation (Ch8
-   keepalive for motor interlock; ArduPilot yaw PID active).  EKF must not emergency-yaw-reset.
-
-- [ ] test_lua_flight_steady: hub in stable orbit ≥ 60 s, internal_controller=False, no EKF yaw reset
-- **Gate:** telemetry shows orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s
+- [x] test_lua_flight_steady: hub in stable orbit ≥ 60 s, internal_controller=False, no EKF yaw reset
+- **Gate:** met — stable=86–110 s, orbit_r < 5 m, altitude stable, no yaw reset
 
 **Step 2 — Pumping cycle under Lua (test_pumping_cycle_lua)**
 

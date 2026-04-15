@@ -127,9 +127,9 @@ def _run(t_sim: float = T_SIM):
         rng_seed    = 0,
     )
 
-    hub_state  = dyn.state
-    omega_spin = OMEGA_SPIN0
-    prev_vel   = hub_state["vel"].copy()
+    hub_state    = dyn.state
+    omega_spin   = OMEGA_SPIN0
+    prev_vel     = hub_state["vel"].copy()
 
     trajectory     = HoldPlanner()
     ic_tether_dir0 = POS0 / np.linalg.norm(POS0)
@@ -212,12 +212,12 @@ def _run(t_sim: float = T_SIM):
                 "omega_spin": omega_spin,
             })
             sensor_log.append({
-                "t":           t,
-                "yaw_sensor":  float(pkt["rpy"][2]),
-                "orb_yaw":     float(pkt["orb_yaw_rad"]),
-                "gyro_norm":   float(np.linalg.norm(pkt["gyro_body"])),
-                "omega_spin":  omega_spin,
-                "R":           hub_state["R"].copy(),
+                "t":              t,
+                "yaw_sensor":     float(pkt["rpy"][2]),
+                "orb_yaw":        float(pkt["orb_yaw_rad"]),
+                "gyro_norm":      float(np.linalg.norm(pkt["gyro_body"])),
+                "omega_spin":     omega_spin,
+                "R":              hub_state["R"].copy(),
             })
 
     history.append({
@@ -356,4 +356,62 @@ def test_sensor_gyro_spin_isolated():
     assert min_ratio >= SPIN_ISOLATION_FACTOR, (
         f"Spin leaked into gyro: min(omega_spin/gyro_norm)={min_ratio:.1f} "
         f"(required >= {SPIN_ISOLATION_FACTOR})"
+    )
+
+
+def test_electronics_yaw_changes_slowly():
+    """
+    Electronics x-axis (R_hub[:, 0], the yaw DOF) must change slowly during flight.
+
+    The GB4008 keeps the electronics hub from spinning around disk_normal.
+    R_hub[:, 0] changes only at the orbital rate (~0.01-0.02 rad/s) as the
+    tether direction rotates.  A rapid change indicates a yaw-stability failure.
+    """
+    _, sensor_log = _run()
+    YAW_RATE_MAX = 1.0   # rad/s — generous; orbital rate is ~0.02 rad/s
+    violations = []
+    prev = None
+    for s in sensor_log:
+        if prev is not None:
+            dt_snap = s["t"] - prev["t"]
+            if dt_snap > 0:
+                # angle between consecutive R[:, 0] vectors
+                cos_a = float(np.clip(np.dot(s["R"][:, 0], prev["R"][:, 0]), -1.0, 1.0))
+                delta = math.acos(cos_a)
+                rate  = delta / dt_snap
+                if rate > YAW_RATE_MAX:
+                    violations.append(
+                        f"t={s['t']:.1f}s  yaw_rate={math.degrees(rate):.1f} deg/s"
+                    )
+        prev = s
+    _log.write(violations or ["(all within 1 rad/s)"],
+               f"violations={len(violations)}  limit=1.0 rad/s")
+    assert not violations, (
+        f"Electronics yaw (R_hub[:,0]) changed too rapidly in {len(violations)} samples "
+        "(GB4008 yaw stability failure?):\n" + "\n".join(violations[:10])
+    )
+
+
+def test_R_hub_is_valid_rotation_matrix():
+    """
+    R_hub must remain a valid rotation matrix throughout flight.
+
+    det(R_hub) == 1 and R_hub.T @ R_hub == I to near machine precision.
+    Failure indicates numerical drift in the dynamics integrator corrupting R.
+    """
+    _, sensor_log = _run()
+    violations = []
+    for s in sensor_log:
+        R = s["R"]
+        det  = float(np.linalg.det(R))
+        orth = float(np.max(np.abs(R.T @ R - np.eye(3))))
+        if abs(det - 1.0) > 1e-6 or orth > 1e-6:
+            violations.append(
+                f"t={s['t']:.1f}s  det={det:.8f}  max_orth_err={orth:.2e}"
+            )
+    _log.write(violations or ["(all valid)"],
+               f"violations={len(violations)}")
+    assert not violations, (
+        f"R_hub not a valid rotation matrix in {len(violations)} samples:\n"
+        + "\n".join(violations[:10])
     )

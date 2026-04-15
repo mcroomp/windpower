@@ -126,7 +126,7 @@ ensure_running() {
     fi
     docker rm -f "$CONTAINER" 2>/dev/null || true
     echo "[INFO] Starting container '$CONTAINER'..."
-    docker run -d --name "$CONTAINER" "$IMAGE" sleep infinity >/dev/null
+    docker run -d --cap-add=SYS_PTRACE --name "$CONTAINER" "$IMAGE" sleep infinity >/dev/null
     echo "[INFO] Container '$CONTAINER' is ready."
     _sync_code "$CONTAINER"
 }
@@ -152,7 +152,7 @@ health_check() {
     if [ "$stale" = "1" ]; then
         echo "[INFO] Restarting container to clear stale state..."
         docker rm -f "$CONTAINER" 2>/dev/null || true
-        docker run -d --name "$CONTAINER" "$IMAGE" sleep infinity >/dev/null
+        docker run -d --cap-add=SYS_PTRACE --name "$CONTAINER" "$IMAGE" sleep infinity >/dev/null
         echo "[INFO] Container restarted and ready."
         _sync_code "$CONTAINER"
     fi
@@ -295,7 +295,7 @@ case "$CMD" in
 
                 echo "[t${j}] starting: $_label"
                 (
-                    docker run -d --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
+                    docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
                     _sync_code "$_c" >/dev/null 2>&1
                     # Clear container logs so each test starts with a blank slate.
                     docker exec "$_c" bash -c "rm -rf /rawes/simulation/logs && mkdir -p /rawes/simulation/logs"
@@ -350,7 +350,7 @@ case "$CMD" in
             for i in $(seq 0 $((_ACTUAL_WORKERS-1))); do
                 _c="rawes-parallel-${_RUN_ID}-${i}"
                 _CONTAINERS+=("$_c")
-                docker run -d --name "$_c" "$IMAGE" sleep infinity >/dev/null
+                docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null
             done
 
             # Sync code to all containers in parallel

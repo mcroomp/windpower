@@ -147,21 +147,55 @@ def _parse_telemetry_csv(path: Path) -> list[LogLine]:
 # Discover log files
 # ---------------------------------------------------------------------------
 
-def _find_log_dir() -> Path | None:
-    """Find the most recent pytest tmpdir for our test."""
-    import tempfile, os
+def _find_log_dir(name: str | None = None) -> Path | None:
+    """Find a log directory by name prefix or fall back to most recent.
+
+    Search order:
+      1. simulation/logs/<name>/        (exact match)
+      2. simulation/logs/<prefix>_<name>/  (prefixed match, e.g. gps_fusion_test_gps_fusion_armed)
+      3. Most recent dir in simulation/logs/ with a gcs.log or mediator.log
+      4. Most recent pytest tmpdir
+    """
+    sim_logs = Path(__file__).resolve().parents[1] / "logs"
+
+    if name:
+        # Exact match
+        exact = sim_logs / name
+        if exact.is_dir():
+            return exact
+        # Prefix match: any dir whose name ends with the given name
+        matches = sorted(
+            [d for d in sim_logs.iterdir() if d.is_dir() and d.name.endswith(name)],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if matches:
+            return matches[0]
+        # Substring match
+        matches = sorted(
+            [d for d in sim_logs.iterdir() if d.is_dir() and name in d.name],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if matches:
+            return matches[0]
+
+    # Most recent dir in simulation/logs/ that has a gcs.log or mediator.log
+    if sim_logs.is_dir():
+        candidates = sorted(
+            [d for d in sim_logs.iterdir()
+             if d.is_dir() and ((d / "gcs.log").exists() or (d / "mediator.log").exists())],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+
+    import tempfile
     tmp = Path(tempfile.gettempdir())
-    # pytest creates /tmp/pytest-of-USER/pytest-NNN/test_name0/
     candidates = sorted(tmp.glob("pytest-of-*/pytest-*/"), key=lambda p: p.stat().st_mtime, reverse=True)
     for c in candidates:
         subdirs = sorted(c.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
         for sub in subdirs:
             if (sub / "mediator.log").exists() or (sub / "gcs.log").exists():
                 return sub
-    # Also try simulation/ directory directly
-    sim_dir = Path(__file__).parent
-    if (sim_dir / "mediator.log").exists():
-        return sim_dir
     return None
 
 
@@ -171,20 +205,25 @@ def _find_log_dir() -> Path | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Merge RAWES stack log files")
-    parser.add_argument("log_dir", nargs="?", help="Directory containing log files")
+    parser.add_argument("log_dir", nargs="?",
+                        help="Directory path or test name (e.g. test_gps_fusion_armed)")
     parser.add_argument("--only", nargs="+",
                         choices=["mediator", "sitl", "gcs", "telemetry"],
                         help="Show only these sources")
     parser.add_argument("--errors-only", action="store_true",
                         help="Show only WARNING/ERROR/CRITICAL lines")
+    parser.add_argument("--no-debug", action="store_true",
+                        help="Hide DEBUG lines (removes RC override keepalive spam)")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable ANSI color codes")
+    parser.add_argument("--write", action="store_true",
+                        help="Write filtered output to analysis.log in the log directory")
     args = parser.parse_args()
 
-    if args.log_dir:
+    if args.log_dir and Path(args.log_dir).is_dir():
         log_dir = Path(args.log_dir)
     else:
-        log_dir = _find_log_dir()
+        log_dir = _find_log_dir(args.log_dir)   # args.log_dir may be a name hint
         if log_dir is None:
             print("No log directory found.  Run a stack test first or pass a path.",
                   file=sys.stderr)
@@ -206,7 +245,7 @@ def main() -> int:
             if args.only and "sitl" in args.only:
                 all_lines += sitl_lines
             else:
-                print("─── SITL log (unordered) ───", flush=True)
+                print("--- SITL log (unordered) ---", flush=True)
                 for ln in sitl_lines:
                     if args.errors_only and ln.level not in ("WARNING", "ERROR", "CRITICAL"):
                         continue
@@ -220,21 +259,36 @@ def main() -> int:
 
     if args.errors_only:
         all_lines = [l for l in all_lines if l.level in ("WARNING", "ERROR", "CRITICAL")]
+    if args.no_debug:
+        all_lines = [l for l in all_lines if l.level != "DEBUG"]
 
-    use_color = not args.no_color and sys.stdout.isatty()
+    use_color = not args.no_color and sys.stdout.isatty() and not args.write
 
     source_w = max((len(l.source) for l in all_lines), default=8)
     level_w  = 8
 
+    out_lines = []
     for ln in all_lines:
         c  = ln.color if use_color else ""
         rc = ln.reset if use_color else ""
-        print(f"{ln.wall_time}  {ln.source:<{source_w}}  {c}{ln.level:<{level_w}}{rc}  {ln.text}")
+        out_lines.append(
+            f"{ln.wall_time}  {ln.source:<{source_w}}  {c}{ln.level:<{level_w}}{rc}  {ln.text}"
+        )
 
     total = len(all_lines)
     errs  = sum(1 for l in all_lines if l.level in ("ERROR", "CRITICAL"))
     warns = sum(1 for l in all_lines if l.level == "WARNING")
-    print(f"\n─── {total} lines  {errs} errors  {warns} warnings ───", file=sys.stderr)
+    summary = f"\n--- {total} lines  {errs} errors  {warns} warnings ---"
+
+    if args.write:
+        out_path = log_dir / "analysis.log"
+        out_path.write_text("\n".join(out_lines) + summary + "\n", encoding="utf-8")
+        print(f"Written: {out_path}", file=sys.stderr)
+    else:
+        for line in out_lines:
+            print(line)
+        print(summary, file=sys.stderr)
+
     return 0
 
 

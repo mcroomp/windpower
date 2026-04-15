@@ -10,7 +10,6 @@ Fixtures:
 """
 import math
 import os
-import time
 
 import pytest
 
@@ -117,15 +116,7 @@ def acro_armed_pumping_lua(tmp_path, request):
         # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
         # Tests must NOT send RC overrides.
 
-        # Drain STATUSTEXT that arrived during param setting.
-        _t_drain = time.monotonic() + 1.0
-        while time.monotonic() < _t_drain:
-            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
-            if _msg is not None:
-                _text = _msg.text.rstrip("\x00").strip()
-                ctx.all_statustext.append(_text)
-                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
-
+        ctx.wait_drain(timeout=1.0, label="post-param")
         yield ctx
 
 
@@ -244,15 +235,7 @@ def acro_armed_landing_lua(tmp_path, request):
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
 
-        # Drain any STATUSTEXT that arrived during param setting.
-        _t_drain = time.monotonic() + 1.0
-        while time.monotonic() < _t_drain:
-            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
-            if _msg is not None:
-                _text = _msg.text.rstrip("\x00").strip()
-                ctx.all_statustext.append(_text)
-                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
-
+        ctx.wait_drain(timeout=1.0, label="post-param")
         yield ctx
 
 
@@ -273,9 +256,24 @@ def acro_armed_lua_full(tmp_path, request):
 
     Key design points:
       - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
-      - kinematic_vel_ramp_s=0: vel0 held constant throughout 65 s kinematic
-        so GPS innovations stay non-zero and EKF fuses GPS at ~54 s (during
-        kinematic, before Lua capture at t=66.5 s).
+      - kinematic_traj_type=linear, vel_ramp_s=0: hub starts at launch_pos
+        (pos0 - vel0*T) moving at constant vel0.  Orientation is body_z from
+        steady_state_starting.json from t=0.  Tether aligned throughout --
+        no orientation drift.  Hub exits kinematic at pos0 with vel0.
+        min_jerk was rejected: starting at [0,0,0] (anchor) with no tether
+        tension lets orientation drift during 65 s kinematic -- hub is badly
+        misaligned at exit -> crash.
+      - SCR_USER6=1 set immediately in fixture (not delayed until kinematic exit).
+        During kinematic, Lua pre-capture sends pure gyro feedthrough so ACRO
+        rate_error = 0 -- no corrective swashplate torque, no kinematic conflict.
+        When AHRS first becomes healthy (~t=15 s), Lua immediately captures bz_eq0
+        from the DCM (disk_normal_ned()).  EKF yaw may be wrong at this point, but
+        bz_now and bz_eq0 are both in the same EKF frame so their cross product is
+        near-zero -> cyclic stays near neutral -> hub doesn't tumble at kinematic
+        exit.  When GPS fuses at ~43 s, GPS tether recapture replaces bz_eq0 with
+        the accurate tether direction (immune to EKF yaw error) and orbit tracking
+        begins with correct geometry DURING kinematic.
+        At kinematic exit the hub is already under correct Lua control -- no gap.
       - COL_CRUISE_FLIGHT_RAD=-0.18 rad in rawes.lua matches stack_coll_eq
         from test_steady_flight.py: altitude-neutral at the natural orbit.
       - Lua VZ altitude-hold (vz_sp=0): bidirectional P controller around
@@ -283,42 +281,66 @@ def acro_armed_lua_full(tmp_path, request):
         (col_min=-0.28, col_max=0.10) matching Lua's encoding exactly.
 
     Timeline (SITL time):
-      t=0..65 s   kinematic (hub at constant vel0 from launch_pos to pos0)
+      t=0..60 s   kinematic constant-velocity phase: launch_pos->near pos0 at vel0
+      t=60..65 s  kinematic ramp-to-zero (vel_ramp_s=5): vel decelerates from 0.96 to 0
+      t~15 s      arm complete; fixture sets SCR_USER1-6 (SCR_USER6=1); yields
+      t~15 s      AHRS healthy; Lua DCM capture: "RAWES flight: captured" sent
+                  bz_eq0 = disk_normal_ned() (in EKF frame, yaw may be wrong)
+                  _tdir0 = nil (set later by GPS recapture)
+                  Pre-GPS DCM tracking: bz_orbit = bz_now every step -> no spike at GPS fire
       t~21 s      EKF3 GPS origin set
-      t~54 s      GPS fuses (EKF3 transitions to horiz_pos_abs); pos_ned available
-      t=62 s      Lua captures body_z (FLIGHT_SETTLE_MS=62000 ms, 3 s before exit)
-                  _tdir0 set immediately from GPS position (~100 m tlen); orbit
-                  tracking active before kinematic exits -- eliminates neutral-stick
-                  crash at exit.
-      t=65 s      kinematic exits; Lua orbit-tracking cyclic already active
+      t~23 s      GPS fuses; GPS synchronized capture fires:
+                  _tdir0 = normalize(diff) (world frame reference for orbit tracking)
+                  bz_eq0 = disk_normal_ned() at that moment (= bz_now = bz_orbit -> error=0)
+                  orbit tracking: azimuthal(bz_eq0, _tdir0, diff) rotates bz_orbit at
+                  the same rate as bz_now (gyros), keeping error ~0 throughout.
+      t=65 s      kinematic exits (vel~0); EKF vz~0 -> col=-0.18 (equilibrium) ->
+                  net radial force~0 -> stable entry into free flight.
       t=65+       free flight under ArduPilot + Lua
 
-    Fixture yields at ~t=15 s.  Observation window of 200 s covers kinematic
-    exit (t_obs~50 s) + Lua capture (t_obs~47 s) + >=60 s stable orbit.
+    Fixture yields at ~t=15 s.  "RAWES flight: captured" STATUSTEXT was consumed
+    by the fixture drain and stored in ctx.all_statustext.  The test checks
+    ctx.all_statustext for prior captures before starting its post-kinematic drain.
     """
     extra = {
-        # kinematic_vel_ramp_s=0: keep vel0 constant throughout kinematic.
-        # Default (15 s ramp) tapers vel to 0 in the last 15 s, which reduces
-        # GPS innovations and delays fusion.  Constant vel0 gives consistent
-        # GPS innovations so EKF fuses at ~54 s (within kinematic window),
-        # ensuring GPS is available before Lua captures at t=66.5 s.
-        "kinematic_vel_ramp_s": 0.0,
-        # No pos0/vel0/body_z/tether overrides: use steady_state_starting.json
-        # (same as acro_armed, test_wobble, etc.).
+        # Linear kinematic: vel0=East, vel_ramp_s=5.
+        # Hub moves East at 0.96 m/s for t=0..60s, decelerates to 0 over t=60..65s.
+        #
+        # Why vel0=East [0, 0.96, 0]:
+        #   GPS velocity heading = 90 deg (East), constant and unambiguous.
+        #   EK3_SRC1_YAW=8 aligns EKF yaw to GPS velocity heading -> EKF yaw
+        #   stabilises to 90 deg within seconds of GPS fusion (~t=23 s).
+        #   GPS fuses DURING the kinematic (at t~23 s) -> GPS tether recapture
+        #   fires at t~23 s -> orbit tracking starts 42 s before kinematic exit.
+        #   At kinematic exit (t=65 s), Lua already has active cyclic control
+        #   via orbit tracking -> smooth transition, no control gap.
+        #
+        # Why vel_ramp_s=5:
+        #   Ramps velocity from 0.96 to 0 over t=60..65 s (last 5 s of kinematic).
+        #   At kinematic exit: vel~0, EKF vz~0 -> Lua VZ controller outputs
+        #   col_cmd = col_cruise + KP_VZ*0 = -0.18 rad (equilibrium) ->
+        #   T_aero ~ T_tether -> net radial force ~ 0 -> stable entry.
+        #   vel_ramp_s=20 (older design) was flaky: EKF yaw degraded too long
+        #   after exit (GPS vel < 0.5 m/s for 10.4 s) -> feedthrough instability.
+        #   vel_ramp_s=5: GPS heading degrades only 2.6 s (vel<0.5 from t=62.4 s).
+        "kinematic_traj_type":  "linear",
+        "kinematic_vel_ramp_s": 5.0,
+        "vel0":                 [0.0, 0.96, 0.0],
     }
     speedup = request.config.getoption("--sitl-speedup", default=1)
     with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_lua_full", log_prefix="lua_full",
+                     log_name="acro_armed_lua_full", log_prefix="",
                      test_name=request.node.name, speedup=speedup,
 
                      # CLAUDE.md critical rule: internal_controller=False for all
                      # full-stack flight tests.  ArduPilot + Lua own the physics.
                      internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua via SCR_USER params.
-        # SCR_USER5 = ctx.home_alt_m: anchor is home_alt_m metres below EKF HOME
-        # (sensor.py pos_ned_rel[2] = pos_ned[2] + home_alt_m; physics anchor NED
-        # [0,0,0] appears at LOCAL [0, 0, home_alt_m]).  Matches acro_armed_lua.
-        ctx.log.info("Setting SCR_USER params for rawes.lua (flight mode, full-stack) ...")
+        # Post-arm: configure rawes.lua with SCR_USER6=1 active immediately.
+        # Lua pre-capture sends pure gyro feedthrough (ACRO rate_error=0) so
+        # no kinematic conflict.  GPS-based capture fires when EKF fuses GPS
+        # (~43 s into sim), before kinematic exits at 65 s.
+        # SCR_USER5 = ctx.home_alt_m: anchor is home_alt_m metres below EKF HOME.
+        ctx.log.info("Setting SCR_USER params for rawes.lua (SCR_USER6=1 active immediately) ...")
         lua_params = {
             "SCR_ENABLE": 1,              # persist scripting in EEPROM
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
@@ -326,22 +348,11 @@ def acro_armed_lua_full(tmp_path, request):
             "SCR_USER3": 0.0,             # anchor North   [m]
             "SCR_USER4": 0.0,             # anchor East    [m]
             "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 1,               # RAWES_MODE = 1 (flight only)
+            "SCR_USER6": 1,               # RAWES_MODE = 1 (flight) -- active now
         }
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
 
-        # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
-        # Tests must NOT send RC overrides.
-
-        # Drain STATUSTEXT that arrived during param setting.
-        _t_drain = time.monotonic() + 1.0
-        while time.monotonic() < _t_drain:
-            _msg = ctx.gcs._mav.recv_match(type=["STATUSTEXT"], blocking=True, timeout=0.1)
-            if _msg is not None:
-                _text = _msg.text.rstrip("\x00").strip()
-                ctx.all_statustext.append(_text)
-                ctx.log.info("  [drain] STATUSTEXT: %s", _text)
-
+        ctx.wait_drain(timeout=1.0, label="post-param")
         yield ctx

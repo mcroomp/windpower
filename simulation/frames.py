@@ -34,6 +34,36 @@ T_ENU_NED = np.array([
 ], dtype=float)
 
 
+def build_vel_aligned_frame(body_z: np.ndarray, vel_ned: np.ndarray) -> np.ndarray:
+    """
+    Build an orbital rotation matrix whose ZYX yaw matches the GPS velocity heading.
+
+    Ensures atan2(R[1,0], R[0,0]) == atan2(vel_ned[1], vel_ned[0]), so the
+    compass heading ArduPilot reads matches the GPS velocity direction exactly.
+    This gives zero heading gap from t=0, allowing GPS fusion during kinematic.
+
+    Falls back to build_orb_frame when horizontal speed < 0.1 m/s.
+    """
+    body_z  = np.asarray(body_z,  dtype=float)
+    vel_ned = np.asarray(vel_ned, dtype=float)
+    v_horiz = float(np.sqrt(vel_ned[0]**2 + vel_ned[1]**2))
+    if v_horiz < 0.1 or abs(body_z[2]) < 1e-6:
+        return build_orb_frame(body_z)
+
+    # Need x_orb in disk plane with atan2(x_orb[1], x_orb[0]) = psi = vel_heading.
+    # x_orb = [cos(psi)*k, sin(psi)*k, c] with body_z · x_orb = 0:
+    #   c = -(body_z[0]*cos(psi) + body_z[1]*sin(psi)) / body_z[2]  (per unit k)
+    psi = float(np.arctan2(vel_ned[1], vel_ned[0]))
+    cp  = float(np.cos(psi))
+    sp  = float(np.sin(psi))
+    c_per_k = -(body_z[0]*cp + body_z[1]*sp) / body_z[2]
+    k       = 1.0 / float(np.sqrt(1.0 + c_per_k**2))
+    x_orb   = np.array([cp*k, sp*k, c_per_k*k])
+    y_orb   = cross3(body_z, x_orb)
+    y_orb   = y_orb / float(np.linalg.norm(y_orb))
+    return np.column_stack([x_orb, y_orb, body_z])
+
+
 def build_orb_frame(body_z: np.ndarray) -> np.ndarray:
     """
     Build an orbital rotation matrix whose column 2 = body_z (rotor axle direction).

@@ -43,6 +43,120 @@ _LOG_DIR = _SIM_DIR / "logs"
 
 sys.path.insert(0, str(_SIM_DIR))
 from telemetry_csv import TelRow, read_csv  # noqa: E402
+from mavlink_log import iter_messages as _iter_mavlink  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Public API — importable from tests
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SteadyMetrics:
+    """Physics-based stability metrics for steady-orbit assessment.
+
+    All values are derived from the telemetry CSV (physics ground truth), not
+    from EKF estimates.  Computed by compute_steady_metrics().
+    """
+    min_phys_alt:     float   # m   minimum altitude in free-flight
+    max_stable_s:     float   # s   longest continuous window >= stable_alt_m (sim time)
+    floor_hits:       int     # #   frames at altitude <= 1.05 m
+    mean_alt:         float   # m   mean free-flight altitude
+    max_tension:      float   # N   peak tether tension in free-flight
+    free_flight_rows: int     # #   telemetry rows in free-flight phase
+
+
+def compute_steady_metrics(
+    tel_rows: list,
+    stable_alt_m: float = 3.0,
+) -> SteadyMetrics:
+    """Compute stability metrics from TelRow list (physics ground truth).
+
+    Considers only free-flight rows (damp_alpha == 0).  The stable window is
+    measured in simulation seconds so it is independent of wall-clock timing.
+
+    Args:
+        tel_rows:     list[TelRow] from read_csv() or load_telemetry()
+        stable_alt_m: altitude floor for the continuous-stable window [m]
+
+    Returns:
+        SteadyMetrics with physics-based pass/fail values.
+    """
+    free_rows = [r for r in tel_rows if r.damp_alpha == 0.0]
+    if not free_rows:
+        return SteadyMetrics(
+            min_phys_alt=0.0, max_stable_s=0.0, floor_hits=0,
+            mean_alt=0.0, max_tension=0.0, free_flight_rows=0,
+        )
+
+    alts     = [-r.pos_z           for r in free_rows]
+    tensions = [r.tether_tension   for r in free_rows]
+
+    min_phys_alt = min(alts)
+    floor_hits   = sum(1 for a in alts if a <= 1.05)
+    mean_alt     = sum(alts) / len(alts)
+    max_tension  = max(tensions)
+
+    # Longest continuous window above stable_alt_m (sim seconds).
+    max_stable_s = 0.0
+    win_start_t: Optional[float] = None
+    for r, alt in zip(free_rows, alts):
+        if alt >= stable_alt_m:
+            if win_start_t is None:
+                win_start_t = r.t_sim
+            else:
+                max_stable_s = max(max_stable_s, r.t_sim - win_start_t)
+        else:
+            win_start_t = None
+    if win_start_t is not None:
+        max_stable_s = max(max_stable_s, free_rows[-1].t_sim - win_start_t)
+
+    return SteadyMetrics(
+        min_phys_alt=min_phys_alt,
+        max_stable_s=max_stable_s,
+        floor_hits=floor_hits,
+        mean_alt=mean_alt,
+        max_tension=max_tension,
+        free_flight_rows=len(free_rows),
+    )
+
+
+def print_flight_report(log_dir: Path) -> None:
+    """Load logs from log_dir and print the full flight analysis report.
+
+    Covers physics health (altitude, tension, tumbling), EKF timeline, sensor
+    consistency, yaw divergence, and per-phase diagnostics.  Works for any
+    flight type: steady orbit, pumping cycle, or landing.
+
+    Called from stack tests after the observation window so the log shows the
+    complete picture of what happened in the run.
+    """
+    tel_path  = log_dir / "telemetry.csv"
+    med_path  = log_dir / "mediator.log"
+    gcs_path  = log_dir / "gcs.log"
+    ekf_path  = log_dir / "mavlink.jsonl"
+
+    report = RunReport()
+    load_telemetry(tel_path, report)
+    parse_mediator(med_path, report)
+    parse_pytest(gcs_path, report)
+    parse_arducopter(log_dir / "arducopter.log", report)
+
+    _print_mediator(report)
+    _print_sitl_crash(report)
+    _print_tel_events(report)
+    _print_free_flight_quality(report)
+    _print_sensor_consistency(report)
+    _print_yaw_divergence(report)
+    _print_ekf_state(ekf_path)
+    _print_ekf(report)
+    _print_landing(report)
+    _print_setup(report)
+    _print_hold(report)
+    _print_results(report)
+
+
+# Keep the old name as an alias so existing callers don't break.
+print_steady_report = print_flight_report
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +168,13 @@ class EkfEvent:
     timestamp: str
     t_wall:    float   # seconds-of-day from log timestamp
     text:      str
+
+
+@dataclass
+class SitlCrash:
+    """ArduPilot crash detected in arducopter.log."""
+    error_line: str          # the "ERROR: ..." line
+    stack:      list         # list of '#N  <frame>' strings from dumpstack output
 
 
 @dataclass
@@ -71,6 +192,12 @@ class RunReport:
     pytest_run_id:    Optional[int]   = None
     kin_launch_pos:   Optional[tuple] = None   # (x, y, z) NED [m]
     kin_vel:          Optional[tuple] = None   # (vx, vy, vz) [m/s]
+    sitl_crash:       Optional[SitlCrash] = None
+    # Timing anchors for crash localisation
+    mediator_t0_wall_s:    Optional[float] = None  # wall-sec of mediator t=0 (first log line)
+    gcs_last_ap_wall_s:    Optional[float] = None  # wall-sec of last AP-originated GCS message
+    gcs_obs_start_wall_s:  Optional[float] = None  # wall-sec of "observing X s of free flight"
+    gcs_last_obs_t_s:      Optional[float] = None  # last obs-loop heartbeat sim-offset (e.g. 20s)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +222,17 @@ _RE_KIN_START   = re.compile(
     r"vel=\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]"
 )
 _RE_TIMESTAMP   = re.compile(r"^(\d+:\d+:\d+)")
+# Lines in gcs.log that prove ArduPilot was alive (heartbeat or STATUSTEXT received).
+# Covers all logger formats: [sev=6], [t=Xs], [post-kin drain], [drain], etc.
+_RE_AP_ALIVE    = re.compile(
+    r"HEARTBEAT: sysid=1|"
+    r"STATUSTEXT[^:]*:|"
+    r"EKF_STATUS flags="
+)
+# Observation-loop heartbeat line: "t=20s  max_activity=667 PWM ..."
+_RE_OBS_TICK    = re.compile(r"\bt=(\d+)s\s+max_activity=\d+\s+PWM")
+# Start of free-flight observation
+_RE_OBS_START   = re.compile(r"observing [\d.]+ s of free flight")
 
 
 def _wall_seconds(ts: str) -> float:
@@ -123,6 +261,9 @@ def parse_mediator(path: Path, report: RunReport) -> None:
         print(f"  [!] mediator log not found: {path}")
         return
     for line in path.read_text(errors="replace").splitlines():
+        ts_m = _RE_TIMESTAMP.match(line)
+        if ts_m and report.mediator_t0_wall_s is None:
+            report.mediator_t0_wall_s = _wall_seconds(ts_m.group(1))
         if m := _RE_RUN_ID.search(line):
             report.mediator_run_id = int(m.group(1))
         if m := _RE_SENSOR_MODE.search(line):
@@ -135,6 +276,40 @@ def parse_mediator(path: Path, report: RunReport) -> None:
             report.kin_vel        = (float(m.group(5)), float(m.group(6)), float(m.group(7)))
 
 
+def parse_arducopter(path: Path, report: RunReport) -> None:
+    """Detect ArduPilot crashes and extract stack traces from arducopter.log."""
+    if not path.exists():
+        return
+    text = path.read_text(errors="replace")
+    lines = text.splitlines()
+
+    error_line = None
+    for ln in lines:
+        if "ERROR:" in ln and ("exception" in ln.lower() or "abort" in ln.lower()
+                               or "signal" in ln.lower()):
+            error_line = ln.strip()
+            break
+    if error_line is None:
+        return
+
+    # Extract stack from dumpstack output
+    stack = []
+    in_dump = False
+    for ln in lines:
+        if "begin dumpstack" in ln:
+            in_dump = True
+            continue
+        if "end dumpstack" in ln:
+            in_dump = False
+            continue
+        if in_dump:
+            s = ln.strip()
+            if s.startswith("#") and s:
+                stack.append(s)
+
+    report.sitl_crash = SitlCrash(error_line=error_line, stack=stack)
+
+
 def parse_pytest(path: Path, report: RunReport) -> None:
     if not path.exists():
         print(f"  [!] pytest log not found: {path}")
@@ -143,6 +318,7 @@ def parse_pytest(path: Path, report: RunReport) -> None:
     for line in path.read_text(errors="replace").splitlines():
         ts_m = _RE_TIMESTAMP.match(line)
         ts   = ts_m.group(1) if ts_m else ""
+        ts_s = _wall_seconds(ts) if ts else None
         if ts and t0 is None:
             t0 = _wall_seconds(ts)
 
@@ -173,6 +349,15 @@ def parse_pytest(path: Path, report: RunReport) -> None:
 
         if m := _RE_PASS.search(line):
             report.test_results.append((m.group(2), m.group(1)))
+
+        # Crash timing: track last AP-originated message and obs-loop progress
+        if ts_s is not None:
+            if _RE_AP_ALIVE.search(line):
+                report.gcs_last_ap_wall_s = ts_s
+            if _RE_OBS_START.search(line):
+                report.gcs_obs_start_wall_s = ts_s
+            if m := _RE_OBS_TICK.search(line):
+                report.gcs_last_obs_t_s = float(m.group(1))
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +785,40 @@ def _print_hold(r: RunReport) -> None:
           + ("[OK]" if servo > 10 else "[!!]"))
 
 
+def _print_sitl_crash(r: RunReport) -> None:
+    if r.sitl_crash is None:
+        return
+    _header("ARDUPILOT CRASH")
+    print(f"  {r.sitl_crash.error_line}")
+
+    # Estimate sim-time of crash from GCS log timing anchors
+    t0 = r.mediator_t0_wall_s
+    if t0 is not None:
+        # Last message ArduPilot sent (heartbeat, STATUSTEXT, EKF_STATUS)
+        if r.gcs_last_ap_wall_s is not None:
+            last_ap_sim = r.gcs_last_ap_wall_s - t0
+            print(f"  last AP message: ~t={last_ap_sim:.0f}s sim")
+
+        # Last obs-loop heartbeat gives a tight upper bound on crash time
+        if r.gcs_obs_start_wall_s is not None and r.gcs_last_obs_t_s is not None:
+            crash_upper_sim = (r.gcs_obs_start_wall_s - t0) + r.gcs_last_obs_t_s + 5.0
+            ff_upper = crash_upper_sim - (r.damp_T or 0.0)
+            print(
+                f"  crash detected: ~t={crash_upper_sim:.0f}s sim"
+                f"  (~{ff_upper:.0f}s into free flight)"
+            )
+        elif r.gcs_obs_start_wall_s is not None:
+            obs_sim = r.gcs_obs_start_wall_s - t0
+            print(f"  obs started: ~t={obs_sim:.0f}s sim  (crash somewhere after)")
+
+    if r.sitl_crash.stack:
+        print("  Stack trace:")
+        for frame in r.sitl_crash.stack:
+            print(f"    {frame}")
+    else:
+        print("  (no stack trace available — ptrace blocked or dumpstack failed)")
+
+
 def _print_results(r: RunReport) -> None:
     _header("TEST OUTCOMES")
     if not r.test_results:
@@ -796,40 +1015,67 @@ def _print_sensor_consistency(r: RunReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# EKF telemetry (from ekf_telemetry.csv produced by EkfLogger)
+# EKF telemetry (from mavlink.jsonl written by RawesGCS)
 # ---------------------------------------------------------------------------
 
-def _load_ekf_csv(path: Path) -> list[dict]:
-    """Load ekf_telemetry.csv into a list of dicts.  Returns [] if missing."""
-    import csv
-    if not path.exists():
-        return []
+def _load_mavlink_ekf_rows(path: Path) -> list[dict]:
+    """
+    Read mavlink.jsonl and build one merged row per ATTITUDE message.
+
+    Each row contains fields from ATTITUDE + latest LOCAL_POSITION_NED +
+    latest EKF_STATUS_REPORT, keyed the same way as the old ekf_telemetry.csv.
+    """
     rows = []
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for raw in csv.DictReader(fh):
-            try:
-                rows.append({k: (float(v) if k != "ekf_flags" else int(float(v)))
-                              for k, v in raw.items() if v not in ("", None)})
-            except (ValueError, TypeError):
-                pass
+    last_pos: dict = {}
+    last_ekf: dict = {}
+    for msg in _iter_mavlink(path, types=["ATTITUDE", "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"]):
+        mt = msg.get("mavpackettype", "")
+        if mt == "LOCAL_POSITION_NED":
+            last_pos = {
+                "pos_n": msg.get("x", 0.0), "pos_e": msg.get("y", 0.0),
+                "pos_d": msg.get("z", 0.0), "vel_n": msg.get("vx", 0.0),
+                "vel_e": msg.get("vy", 0.0), "vel_d": msg.get("vz", 0.0),
+            }
+        elif mt == "EKF_STATUS_REPORT":
+            last_ekf = {
+                "ekf_flags":                int(msg.get("flags", 0)),
+                "ekf_vel_variance":         msg.get("velocity_variance", 0.0),
+                "ekf_pos_horiz_variance":   msg.get("pos_horiz_variance", 0.0),
+                "ekf_pos_vert_variance":    msg.get("pos_vert_variance", 0.0),
+                "ekf_compass_variance":     msg.get("compass_variance", 0.0),
+                "ekf_terrain_alt_variance": msg.get("terrain_alt_variance", 0.0),
+            }
+        elif mt == "ATTITUDE":
+            row: dict = {
+                "time_boot_ms":   int(msg.get("time_boot_ms", 0)),
+                "att_roll":       msg.get("roll", 0.0),
+                "att_pitch":      msg.get("pitch", 0.0),
+                "att_yaw":        msg.get("yaw", 0.0),
+                "att_rollspeed":  msg.get("rollspeed", 0.0),
+                "att_pitchspeed": msg.get("pitchspeed", 0.0),
+                "att_yawspeed":   msg.get("yawspeed", 0.0),
+            }
+            row.update(last_pos)
+            row.update(last_ekf)
+            rows.append(row)
     return rows
 
 
-def _print_ekf_state(ekf_log_path: Path) -> None:
+def _print_ekf_state(mavlink_log_path: Path) -> None:
     """
-    Print EKF health metrics from ekf_telemetry.csv.
+    Print EKF health metrics from mavlink.jsonl.
 
     Covers:
       - Flag transitions (which EKF capabilities were gained/lost and when)
       - Variance spikes (position / velocity / compass uncertainty)
       - Attitude rate peaks (indication of oscillation or divergence)
     """
-    rows = _load_ekf_csv(ekf_log_path)
+    rows = _load_mavlink_ekf_rows(mavlink_log_path)
     if not rows:
-        print(f"\n  (ekf_telemetry.csv not found or empty: {ekf_log_path.name})")
+        print(f"\n  (mavlink.jsonl not found or empty: {mavlink_log_path.name})")
         return
 
-    _header("EKF TELEMETRY  (from ekf_telemetry.csv)")
+    _header("EKF TELEMETRY  (from mavlink.jsonl)")
 
     t0_ms = rows[0].get("time_boot_ms", 0.0)
     t1_ms = rows[-1].get("time_boot_ms", 0.0)
@@ -1054,6 +1300,8 @@ def main() -> None:
     parse_mediator(mediator_path, report)
     print(f"Parsing gcs log       : {gcs_path}")
     parse_pytest(gcs_path, report)
+    acp_path = test_dir / "arducopter.log"
+    parse_arducopter(acp_path, report)
     print(f"  telemetry rows     : {len(report.tel_rows)}")
     print(f"  STATUSTEXT lines   : {len(report.statustext)}")
     print(f"  EKF_STATUS lines   : {len(report.ekf_flags)}")
@@ -1074,12 +1322,13 @@ def main() -> None:
         print("  WARNING: logs are from different runs -- analysis may be misleading!")
 
     _print_mediator(report)
+    _print_sitl_crash(report)
     _print_tel_events(report)
     _print_ekf(report)
     _print_sensor_consistency(report)
     _print_yaw_divergence(report)
     _print_free_flight_quality(report)
-    _print_ekf_state(test_dir / "ekf_telemetry.csv")
+    _print_ekf_state(test_dir / "mavlink.jsonl")
     _print_landing(report)
     _print_setup(report)
     _print_hold(report)

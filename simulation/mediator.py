@@ -44,10 +44,10 @@ from sitl_interface  import SITLInterface
 from swashplate      import h3_inverse_mix, collective_to_pitch
 from aero            import SkewedWakeBEMJit
 from tether          import TetherModel
-from frames          import build_orb_frame
+from frames          import build_orb_frame, build_vel_aligned_frame
 from sensor          import make_sensor, SpinSensor
 from controller      import compute_swashplate_from_state, OrbitTracker
-from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
+from kinematic       import KinematicStartup, compute_launch_position, make_min_jerk_traj  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 from planner         import quat_apply, quat_is_identity
@@ -64,6 +64,10 @@ LOG_INTERVAL = 1.0             # position/attitude log interval [s]
 WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
 I_SPIN_KGMS2 = 10.0            # rotor spin-axis moment of inertia [kg·m²]
 OMEGA_SPIN_MIN = 0.5           # minimum spin rate clamp [rad/s]
+
+# GB4008 yaw-damper gain [N·m·s/rad].  Large value → near-perfect yaw lock.
+# Reduce to model imperfect GB4008 damping / yaw drift.
+_K_YAW_DEFAULT = 100.0
 
 # Spin torque model: Q_net = K_DRIVE * v_inplane − K_DRAG * omega²
 #
@@ -185,26 +189,59 @@ def run_mediator(args, trajectory=None):
     _bz_raw          = np.array(cfg["body_z"],   dtype=float)
     _bz = _bz_raw / np.linalg.norm(_bz_raw)
 
-    # Build _R0: body-X is the East-projection of _bz.
-    _R0 = build_orb_frame(_bz)
+    # Build _R0: x_orb aligned to vel0 so ZYX yaw == GPS velocity heading from t=0.
+    _R0 = build_vel_aligned_frame(_bz, _vel0_arr)
 
     # -- Kinematic startup trajectory -----------------------------------------
-    _startup = KinematicStartup(
-        target_pos = _pos0_arr,
-        target_vel = _vel0_arr,
-        duration   = max(0.0, float(cfg["startup_damp_seconds"])),
-        ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
-        R0         = _R0,
-    )
-    if _startup.duration > 0.0:
-        log.info(
-            "Kinematic startup: T=%.0fs  ramp=%.0fs  "
-            "launch_pos=[%.3f, %.3f, %.3f]  vel=[%.5f, %.5f, %.5f] m/s",
-            _startup.duration, _startup.ramp_s,
-            *_startup.launch_pos, *_vel0_arr,
+    _kin_duration = max(0.0, float(cfg["startup_damp_seconds"]))
+    _traj_type    = cfg["kinematic_traj_type"]
+
+    if _traj_type == "min_jerk":
+        # 5th-order minimum-jerk from home [0,0,0] at rest → pos0 at rest.
+        # T_traj = duration - margin.  After T_traj the hub holds at pos0 for
+        # margin seconds so GPS can fuse before free flight begins.
+        _margin_s = float(cfg["kinematic_min_jerk_margin_s"])
+        _T_traj   = max(5.0, _kin_duration - _margin_s)
+        _traj_fn  = make_min_jerk_traj(
+            p0 = [0.0, 0.0, 0.0],
+            v0 = [0.0, 0.0, 0.0],
+            pf = _pos0_arr,
+            vf = _vel0_arr,          # arrive at orbital velocity → smooth hand-off
+            T  = _T_traj,
         )
-    _dyn_pos0 = _startup.launch_pos
-    _dyn_vel0 = _vel0_arr
+        _startup = KinematicStartup(
+            traj_fn  = _traj_fn,
+            duration = _kin_duration,
+            R0       = _R0,
+        )
+        log.info(
+            "Kinematic startup (min_jerk): T_traj=%.0fs  margin=%.0fs  "
+            "total=%.0fs  target=[%.3f, %.3f, %.3f] m  vf=[%.3f, %.3f, %.3f] m/s",
+            _T_traj, _margin_s, _kin_duration, *_pos0_arr, *_vel0_arr,
+        )
+        _dyn_pos0 = np.zeros(3)
+        _dyn_vel0 = np.zeros(3)
+    elif _traj_type == "linear":
+        _startup = KinematicStartup(
+            target_pos = _pos0_arr,
+            target_vel = _vel0_arr,
+            duration   = _kin_duration,
+            ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
+            R0         = _R0,
+        )
+        if _startup.duration > 0.0:
+            log.info(
+                "Kinematic startup (linear): T=%.0fs  ramp=%.0fs  "
+                "launch_pos=[%.3f, %.3f, %.3f]  vel=[%.5f, %.5f, %.5f] m/s",
+                _startup.duration, _startup.ramp_s,
+                *_startup.launch_pos, *_vel0_arr,
+            )
+        _dyn_pos0 = _startup.launch_pos
+        _dyn_vel0 = _vel0_arr
+    else:
+        raise ValueError(
+            f"kinematic_traj_type must be 'linear' or 'min_jerk', got {_traj_type!r}"
+        )
 
     rotor  = _rd.load(cfg["rotor_definition"])
     log.info("Rotor: %s", rotor.summary())
@@ -277,6 +314,8 @@ def run_mediator(args, trajectory=None):
         "omega": np.array([0.0, 0.0, 0.0]),
     }
     last_servos        = np.zeros(16)   # neutral PWM (mapped from 1500µs → 0)
+    _t_last_servo      = None           # wall time of last servo reception (None = not yet connected)
+    _SITL_STALL_S      = 10.0          # seconds without a servo after first connection → SITL dead
     s1 = s2 = s3       = 0.0           # servo values (updated in ArduPilot path; stale OK in IC path)
     _body_z_eq         = np.zeros(3)   # body_z setpoint (IC path only; zeros in ArduPilot path)
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
@@ -362,6 +401,15 @@ def run_mediator(args, trajectory=None):
             new_servos = sitl.recv_servos()
             if new_servos is not None:
                 last_servos = new_servos
+                _t_last_servo = time.monotonic()
+            else:
+                _t_ref = _t_last_servo if _t_last_servo is not None else t_wall_start
+                if time.monotonic() - _t_ref > _SITL_STALL_S:
+                    log.error(
+                        "SITL watchdog: no servo packet for %.0f s — SITL has crashed. Exiting.",
+                        _SITL_STALL_S,
+                    )
+                    sys.exit(1)
             servos = last_servos
 
             # ── Startup kinematic phase ───────────────────────────────────────
@@ -561,12 +609,18 @@ def run_mediator(args, trajectory=None):
                 M_step = np.zeros(3)
             else:
                 # Attitude rate damping: oppose orbital angular velocity to prevent
-                # free tumbling.  The base term (--base-k-ang, default 50 N·m·s/rad)
+                # free tumbling.  The base term (base_k_ang, default 50 N·m·s/rad)
                 # prevents runaway tumbling at all times.  During the startup ramp
                 # an additional term (startup_damp_k_ang) provides stronger damping
                 # so the hub barely rotates while the EKF initialises.
                 _k_ang_total = cfg["base_k_ang"] + startup_damp_k_ang * _damp_alpha
                 M_orbital += -_k_ang_total * hub_state["omega"]
+                # GB4008 counter-torque: explicit yaw damper around rotor axle.
+                # Models the GB4008 motor keeping the electronics hub from spinning
+                # around disk_normal (helicopter tail-rotor analogue).
+                # disk_normal is already computed above at Step 4c.
+                _omega_yaw  = float(np.dot(hub_state["omega"], disk_normal))
+                M_orbital  += -cfg.get("k_yaw", _K_YAW_DEFAULT) * _omega_yaw * disk_normal
                 M_step = M_orbital
 
             prev_vel  = hub_state["vel"].copy()
@@ -588,20 +642,9 @@ def run_mediator(args, trajectory=None):
                 hub_state["omega"] = np.zeros(3)
 
             # ----------------------------------------------------------------
-            # Step 5b: Kinematic startup override — runs LAST so it always wins
-            # over lock_orientation (which would set R to the launch-pos tether
-            # direction, collapsing v_inplane and killing the spin equilibrium).
-            #
-            # During the startup window, override the full hub state with the
-            # pre-computed kinematic trajectory.
-            #
-            # CRITICAL: orientation (R, omega) is locked to equilibrium _R0
-            # as well as translation.  ACRO servo commands during startup
-            # generate cyclic aerodynamic moments that would otherwise spin the
-            # hub to a misaligned disk orientation before physics takes over,
-            # causing thrust to collapse to zero at t=T.  By locking R=_R0 and
-            # omega=0 throughout the kinematic window the hub arrives at t=T in
-            # exactly the equilibrium orientation, ready for free flight.
+            # Step 5b: Kinematic startup override
+            # Overrides pos/vel/R/omega from trajectory.  R is locked to _R0
+            # (velocity-aligned frame) so yaw matches GPS heading throughout.
             # ----------------------------------------------------------------
             if _startup.apply(hub_state, dynamics, t_sim):
                 new_vel = hub_state["vel"]
@@ -647,6 +690,8 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             # Step 8: Build SITL sensor packet
             # ----------------------------------------------------------------
+            # R_hub is the full electronics-platform orientation (fuselage).
+            # sensor.py uses it directly — no separate yaw state needed.
             sensor_data = sensor_sim.compute(
                 pos_ned         = hub_state["pos"],
                 vel_ned         = hub_state["vel"],
@@ -757,10 +802,16 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             # Step 9: Send physics state to SITL
             # ----------------------------------------------------------------
+            # Delay GPS velocity for the first 2 s so EKFGSF can run
+            # alignTilt() from IMU data before fuseVelData() is called.
+            # Without this delay, GPS velocity arrives on the first packet
+            # and triggers alignYaw() before AHRS[].R is initialised → SIGFPE.
+            _vel_to_send = (sensor_data["vel_ned"]
+                            if t_sim >= 2.0 else np.zeros(3))
             sitl.send_state(
                 timestamp  = t_sim,
                 pos_ned    = sensor_data["pos_ned"],
-                vel_ned    = sensor_data["vel_ned"],
+                vel_ned    = _vel_to_send,
                 rpy_rad    = sensor_data["rpy"],
                 accel_body = sensor_data["accel_body"],
                 gyro_body  = sensor_data["gyro_body"],

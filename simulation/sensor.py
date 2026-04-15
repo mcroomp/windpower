@@ -30,7 +30,6 @@ import logging
 import numpy as np
 import math
 from typing import Optional
-from frames import build_orb_frame
 
 log = logging.getLogger(__name__)
 
@@ -109,16 +108,16 @@ class PhysicalSensor:
     non-rotating RAWES electronics assembly.
 
     Physically faithful: reports exactly what the real sensors would read.
-      - Attitude (rpy): actual orbital-frame Euler angles from R_orb.
-        No velocity-heading override — the yaw is whatever the GB4008
-        counter-torque motor settles to (East-projection convention in
-        build_orb_frame), which is steady and consistent with the SITL compass.
-      - Gyro: orbital angular velocity projected into R_orb body frame.
+      - Attitude (rpy): Euler angles of the electronics platform (R_orb).
+      - Gyro: orbital angular velocity projected into the electronics body frame.
         Rotor spin is stripped (GB4008 keeps electronics non-rotating).
-      - Accel: specific force projected into R_orb body frame.
+      - Accel: specific force projected into the electronics body frame.
 
-    The SITL compass reads the same R_orb orientation → compass and reported
-    attitude yaw always agree → no EKF emergency yaw reset.
+    The electronics hub is the fuselage: ``R_hub`` is the full 3-DOF rotation
+    matrix of the electronics platform (same as a helicopter fuselage orientation).
+    The sensor reads ``R_hub`` directly — no separate yaw state is needed.
+    Yaw is the third orientation DOF of ``R_hub``, integrated by the dynamics ODE
+    and kept stable by the GB4008 counter-torque (modelled in the mediator).
     """
 
     def __init__(
@@ -131,7 +130,7 @@ class PhysicalSensor:
         self._home_ned_z  = float(home_ned_z)
         self._gyro_sigma  = gyro_sigma
         self._accel_sigma = accel_sigma
-        self._rng = np.random.default_rng(rng_seed)
+        self._rng         = np.random.default_rng(rng_seed)
 
     def compute(
         self,
@@ -140,34 +139,33 @@ class PhysicalSensor:
         R_hub:           np.ndarray,
         omega_body:      np.ndarray,
         accel_world_ned: np.ndarray,
-        dt:              float,      # retained for API compatibility; not used
+        dt:              float = 0.0,   # retained for API compatibility; not used
     ) -> dict:
         """
         Compute physical sensor outputs.
 
-        Returns:
-            pos_ned, vel_ned, rpy, accel_body, gyro_body,
-            orb_yaw_rad (= rpy[2]), v_horiz_ms
+        Returns
+        -------
+        pos_ned, vel_ned, rpy, accel_body, gyro_body,
+        orb_yaw_rad (= rpy[2]), v_horiz_ms
         """
         # Position and velocity relative to home (already in NED)
         pos_ned_rel = np.array([pos_ned[0], pos_ned[1], pos_ned[2] - self._home_ned_z])
 
-        # Attitude: actual orbital frame (electronics, spin removed) → NED Euler angles.
-        # R_orb is body→world in NED; extract Euler angles directly.
-        # No yaw override — the compass (SITL) reads the same R_orb orientation,
-        # so reported attitude and compass always agree → no EKF yaw reset.
+        # Electronics hub is the fuselage: R_hub is its full orientation.
+        # Use it directly — no separate yaw state or x_orb reconstruction needed.
         disk_normal = R_hub[:, 2]
-        R_orb = build_orb_frame(disk_normal)
-        rpy   = _rotation_matrix_to_euler_zyx(R_orb)
+        R_orb = R_hub
+        rpy   = _rotation_matrix_to_euler_zyx(R_hub)
 
-        # Accelerometer: specific force projected into orbital body frame.
+        # Accelerometer: specific force projected into electronics body frame.
         a_specific_ned = accel_world_ned - _GRAVITY_NED
         accel_body = R_orb.T @ a_specific_ned
         accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
 
-        # Gyroscope: orbital angular velocity in physical body frame.
-        # The GB4008 motor keeps the electronics non-rotating, so the gyro
-        # does not see rotor spin — strip the spin component before projecting.
+        # Gyroscope: orbital angular velocity in electronics body frame.
+        # GB4008 keeps electronics non-rotating relative to rotor spin — strip
+        # the spin component before projecting into the electronics frame.
         omega_spin_world    = np.dot(omega_body, disk_normal) * disk_normal
         omega_orbital_world = omega_body - omega_spin_world
         gyro_body = R_orb.T @ omega_orbital_world
@@ -317,7 +315,11 @@ if __name__ == "__main__":
     accel_world = np.array([0.0, 0.0, 9.81])  # hovering (aero thrust = weight)
     vel_ned_in  = np.zeros(3)
 
-    result = sensor.compute(pos_ned, vel_ned_in, R, omega_world, accel_world, dt=0.0025)
+    result = sensor.compute(
+        pos_ned=pos_ned, vel_ned=vel_ned_in, R_hub=R,
+        omega_body=omega_world,
+        accel_world_ned=accel_world, dt=0.0025,
+    )
 
     print(f"  pos_ned    : {result['pos_ned']}")
     print(f"  vel_ned    : {result['vel_ned']}")
@@ -325,7 +327,11 @@ if __name__ == "__main__":
     print(f"  accel_body : {result['accel_body'].round(4)}")
     print(f"  gyro_body  : {result['gyro_body'].round(4)}")
     accel_hover_world = np.zeros(3)
-    result2 = sensor.compute(pos_ned, vel_ned_in, R, omega_world, accel_hover_world, dt=0.0025)
+    result2 = sensor.compute(
+        pos_ned=pos_ned, vel_ned=vel_ned_in, R_hub=R,
+        omega_body=omega_world,
+        accel_world_ned=accel_hover_world, dt=0.0025,
+    )
     assert abs(result2["accel_body"][2] - (-9.81)) < 0.3, \
         f"Hover accel Z expected ~-9.81 (NED body Z=Down), got {result2['accel_body'][2]}"
     print("  Hover accelerometer Z ≈ -9.81 (NED body-down): OK")

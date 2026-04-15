@@ -7,7 +7,7 @@ and helper functions.  Pytest fixtures and hooks live in conftest.py.
 Exported names (imported by conftest.py via ``from stack_infra import *``):
     StackConfig, SitlContext, StackContext, TorqueStackContext
     _sitl_stack, _acro_stack, _torque_stack
-    _BASE_ACRO_PARAMS, _BASE_TORQUE_PARAMS, _BASE_TORQUE_BOOT_PARAMS
+    _BASE_ACRO_PARAMS, _BASE_TORQUE_BOOT_PARAMS
     _LUA_TORQUE_EXTRA_PARAMS
     assert_stack_ports_free, dump_startup_diagnostics
     analyze_startup_logs, wait_for_acro_stability, drain_statustext
@@ -63,7 +63,7 @@ from stack_utils import (
 )
 
 from pymavlink import mavutil as _mavutil
-from gcs import ACRO, STABILIZE, RawesGCS, EkfLogger
+from gcs import ACRO, STABILIZE, RawesGCS
 from controller import make_hold_controller
 from sim_time import sim_sleep
 
@@ -307,6 +307,107 @@ class StackContext:
     controller:          object    # PhysicalHoldController
     internal_controller: bool      # True = mediator runs truth-state controller at 400 Hz
 
+    def wait_drain(
+        self,
+        *,
+        until=None,
+        timeout: float = 3.0,
+        drain_s: float = 0.0,
+        check_procs: bool = False,
+        label: str = "drain",
+    ) -> bool:
+        """Drain STATUSTEXT into self.all_statustext, optionally waiting for a condition.
+
+        Parameters
+        ----------
+        until       : zero-argument callable -> bool.  If given, poll until it
+                      returns True (or timeout expires).  If None, drain for the
+                      full timeout duration.
+        timeout     : seconds to wait for ``until`` (or total drain time).
+        drain_s     : extra seconds to keep draining after ``until`` fires —
+                      useful to flush messages buffered in the MAVLink socket.
+        check_procs : if True, call pytest.fail() immediately if mediator or
+                      SITL process exits (crash detection).
+        label       : prefix used in log lines: "STATUSTEXT [<label>]: ...".
+
+        Returns True if ``until`` fired (or ``until`` is None), False on timeout.
+
+        Examples
+        --------
+        # Timed flush only (no condition):
+            ctx.wait_drain(timeout=1.0, label="post-param")
+
+        # Wait for a log marker, then flush 3 s of buffered messages:
+            ctx.wait_drain(
+                until=lambda: "TRANSITION kinematic" in med_log.read_text(),
+                timeout=90.0, drain_s=3.0, check_procs=True, label="kin-wait",
+            )
+        """
+        def _recv_one(recv_timeout: float) -> None:
+            msg = self.gcs._recv(
+                type=["STATUSTEXT", "ATTITUDE", "LOCAL_POSITION_NED",
+                      "EKF_STATUS_REPORT", "SERVO_OUTPUT_RAW"],
+                blocking=True, timeout=recv_timeout)
+            if msg is not None and msg.get_type() == "STATUSTEXT":
+                text = msg.text.rstrip("\x00").strip()
+                self.all_statustext.append(text)
+                self.log.info("STATUSTEXT [%s]: %s", label, text)
+
+        def _check_liveness() -> None:
+            if not check_procs:
+                return
+            for name, proc, lp in [
+                ("mediator", self.mediator_proc, self.mediator_log),
+                ("SITL",     self.sitl_proc,     self.sitl_log),
+            ]:
+                if proc.poll() is not None:
+                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                    pytest.fail(
+                        f"{name} exited during {label} "
+                        f"(rc={proc.returncode}):\n{txt[-3000:]}"
+                    )
+
+        deadline = time.monotonic() + timeout
+        if until is None:
+            while time.monotonic() < deadline:
+                _check_liveness()
+                _recv_one(min(0.1, deadline - time.monotonic()))
+            return True
+
+        while time.monotonic() < deadline:
+            _check_liveness()
+            _recv_one(0.5)
+            try:
+                if until():
+                    t_end = time.monotonic() + drain_s
+                    while time.monotonic() < t_end:
+                        _check_liveness()
+                        _recv_one(min(0.1, t_end - time.monotonic()))
+                    return True
+            except OSError:
+                pass
+        return False
+
+    def wait_kinematic_done(self, timeout: float = 90.0, drain_s: float = 3.0) -> bool:
+        """Block until the kinematic->free-flight transition, draining STATUSTEXT throughout.
+
+        Polls the mediator log for the "TRANSITION kinematic->free-flight" marker.
+        Returns True if seen, False on timeout.  Raises pytest.fail if mediator
+        or SITL exits during the wait.
+        """
+        med_log = self.mediator_log
+
+        def _transition_seen() -> bool:
+            return "TRANSITION kinematic" in med_log.read_text(errors="replace")
+
+        return self.wait_drain(
+            until=_transition_seen,
+            timeout=timeout,
+            drain_s=drain_s,
+            check_procs=True,
+            label="kin-wait",
+        )
+
 
 # ---------------------------------------------------------------------------
 # _sitl_stack — minimal SITL lifecycle (base for _acro_stack and bare tests)
@@ -338,13 +439,15 @@ def _sitl_stack(
     test_name:          str = "",
     extra_boot_params:  "dict[str, float] | None" = None,
     speedup:            int = 1,
+    base_params:        "ParamSetup | None" = None,
 ):
     """
     Minimal SITL lifecycle: pre-checks → boot params → launch SITL → yield → teardown.
 
     Handles everything that doesn't require the mediator or physics:
       - environment / port pre-checks
-      - rawes_defaults + BASE_ACRO + servo_speed + extra_boot_params param file
+      - boot param file (rawes_defaults + BASE_ACRO + servo_speed + extra_boot_params
+        when base_params is None; or base_params + extra_boot_params when provided)
       - SITL process launch
       - logging setup (writes to gcs_log)
       - teardown: kill SITL + stray procs, kill ports, copy sitl/gcs/arducopter logs
@@ -352,6 +455,14 @@ def _sitl_stack(
     Yields SitlContext.  Caller is responsible for:
       - starting any sensor / mediator worker that feeds SITL
       - connecting and driving RawesGCS
+
+    Parameters
+    ----------
+    base_params : ParamSetup | None
+        When provided, replaces the default rawes_defaults + BASE_ACRO + SIM_SERVO_SPEED
+        chain as the boot param set.  Use this for non-ACRO stacks (e.g. torque tests)
+        that need a completely different parameter base.  extra_boot_params are merged
+        on top regardless.
     """
     if os.environ.get(STACK_ENV_FLAG) != "1":
         pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run stack integration tests")
@@ -375,13 +486,17 @@ def _sitl_stack(
     logging.getLogger("gcs").setLevel(logging.DEBUG)
 
     # ── Boot param file ────────────────────────────────────────────────────────
-    _servo_speed = _rd.default().sim_servo_speed
-    _boot_setup = (
-        ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
-        .merge(_BASE_ACRO_PARAMS)
-        .merge(ParamSetup({"SIM_SERVO_SPEED": _servo_speed}))
-        .merge(ParamSetup(extra_boot_params or {}))
-    )
+    if base_params is not None:
+        # Caller supplied a complete param base (e.g. torque stack) — use as-is.
+        _boot_setup = base_params.merge(ParamSetup(extra_boot_params or {}))
+    else:
+        _servo_speed = _rd.default().sim_servo_speed
+        _boot_setup = (
+            ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
+            .merge(_BASE_ACRO_PARAMS)
+            .merge(ParamSetup({"SIM_SERVO_SPEED": _servo_speed}))
+            .merge(ParamSetup(extra_boot_params or {}))
+        )
     boot_parm_file = tmp_path / "boot_params.parm"
     _boot_setup.write_parm_file(boot_parm_file)
     log.info("Boot params: %d entries", len(_boot_setup))
@@ -427,6 +542,10 @@ def _sitl_stack(
         _ardupilot_log = Path("/tmp/ArduCopter.log")
         if _ardupilot_log.exists():
             shutil.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
+        # DataFlash binary log — ArduPilot writes to /ardupilot/logs/ (cwd at launch)
+        _df_log = Path("/ardupilot/logs/00000001.BIN")
+        if _df_log.exists():
+            shutil.copy2(_df_log, test_log_dir / "dataflash.BIN")
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +616,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         # ── Extra log paths (mediator-specific) ────────────────────────────────
         mediator_log  = tmp_path / "mediator.log"
         telemetry_log = tmp_path / "telemetry.csv"
-        ekf_log       = tmp_path / "ekf_telemetry.csv"
+        mavlink_log   = tmp_path / "mavlink.jsonl"
 
         # ── Launch mediator ────────────────────────────────────────────────────
         _run_id = int(time.time())
@@ -529,7 +648,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
                     txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                     pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
-        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log)
 
         ctx = StackContext(
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
@@ -542,16 +661,11 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
             internal_controller=_use_internal,
         )
 
-        # EKF logger hooks into the GCS message stream — no second TCP connection.
-        ekf_logger = EkfLogger()
-
         try:
             if arm:
                 _run_acro_setup(ctx, _procs_alive, boot_setup=sitl_ctx.boot_setup)
-            ekf_logger.start(ekf_log, gcs)
             yield ctx
         finally:
-            ekf_logger.stop()
             gcs.close()
             if mediator_proc is not None:
                 _terminate_process(mediator_proc)
@@ -560,8 +674,8 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
             if with_mediator:
                 _logs["mediator.log"]  = mediator_log
                 _logs["telemetry.csv"] = telemetry_log
-            if ekf_log.exists():
-                _logs["ekf_telemetry.csv"] = ekf_log
+            if mavlink_log.exists():
+                _logs["mavlink.jsonl"] = mavlink_log
             if _logs:
                 copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)
 
@@ -682,7 +796,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     deadline  = time.monotonic() + 45.0
     while time.monotonic() < deadline and not ekf_ok:
         _procs_alive()
-        msg = gcs._mav.recv_match(
+        msg = gcs._recv(
             type=["ATTITUDE", "EKF_STATUS_REPORT", "STATUSTEXT",
                   "LOCAL_POSITION_NED", "GLOBAL_POSITION_INT"],
             blocking=True, timeout=1.0,
@@ -831,7 +945,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     t_stab = time.monotonic() + 20.0
     while time.monotonic() < t_stab:
         _procs_alive()
-        msg = gcs._mav.recv_match(
+        msg = gcs._recv(
             type=["STATUSTEXT", "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"],
             blocking=True, timeout=0.2,
         )
@@ -890,6 +1004,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     gcs.send_rc_override({8: 1000})
     try:
         gcs.arm(timeout=_ARM_TIMEOUT, force=True, rc_override={8: 1000})
+        ctx.flight_events["arm_wall_t"] = time.monotonic()
         log.info("[setup 5/6] Armed — raising motor interlock (CH8=2000) ...")
         gcs.send_rc_override({8: 2000})
         sim_sleep(0.3)
@@ -1089,7 +1204,7 @@ def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        msg = gcs._mav.recv_match(type="ATTITUDE", blocking=True, timeout=1.0)
+        msg = gcs._recv(type="ATTITUDE", blocking=True, timeout=1.0)
         if msg is None:
             continue
         r = math.degrees(msg.roll)
@@ -1106,7 +1221,7 @@ def drain_statustext(gcs, log) -> list[str]:
     """Drain all buffered STATUSTEXT messages; return them as a list."""
     texts = []
     while True:
-        msg = gcs._mav.recv_match(type="STATUSTEXT", blocking=True, timeout=0.05)
+        msg = gcs._recv(type="STATUSTEXT", blocking=True, timeout=0.05)
         if msg is None:
             break
         text = msg.text.rstrip("\x00").strip()
@@ -1126,7 +1241,7 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
         gcs._mav.mav.param_request_read_send(
             gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
         )
-        msg = gcs._mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+        msg = gcs._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
         if msg is not None:
             log.info("Param subsystem ready (%s = %g)",
                      msg.param_id.rstrip("\x00"), msg.param_value)
@@ -1145,62 +1260,26 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
 
 _TORQUE_STARTUP_HOLD_S: float = 10.0   # mediator yaw-spin duration for EKF bias alignment
 
-_BASE_TORQUE_PARAMS = ParamSetup({
-    # Safety / arming  (ARMING_SKIPCHK removed in ArduPilot 4.6; force-arm bypasses)
-    "FS_EKF_ACTION":     0,
-    "FS_THR_ENABLE":     0,
-    # EKF -- compass yaw (suitable for stationary test)
-    "COMPASS_USE":       1,
-    "COMPASS_ENABLE":    1,
-    "EK3_SRC1_YAW":      1,
-    "EK3_MAG_CAL":       0,
-    "EK3_GPS_CHECK":     0,
-    # EKF source config: disable GPS position/velocity for torque tests.
-    # Hub is stationary but tilted; GPS Glitch from g·sin(θ) lateral projection
-    # would make EKF unhealthy → arm fails.  Set here via MAVLink (not boot params)
-    # because Docker EEPROM has POSXY=3/VELXY=3 (compiled-in defaults) and boot
-    # params (--defaults) cannot override EEPROM.  MAVLink writes always override
-    # EEPROM.  EKF reinit from these writes is acceptable: the 45-second EKF
-    # alignment window + 40-second settle window give 85+ seconds for re-convergence
-    # before the 20-second observation window starts.
-    "EK3_SRC1_POSXY":    0,
-    "EK3_SRC1_VELXY":    0,
-    # RSC -- CH8 passthrough: instant runup_complete when CH8=2000
-    "H_RSC_MODE":        1,
-    "H_RSC_RUNUP_TIME":  1,
-    # Tail type -- servo (Type 0): neutral at 1500 us (bias mapping works correctly)
-    "H_TAIL_TYPE":       0,
-    "H_COL2YAW":         0.0,
-    # Yaw PID -- pure-P; motor back-EMF provides inherent speed regulation
-    "ATC_RAT_YAW_P":     0.001,
-    "ATC_RAT_YAW_I":     0.0,
-    "ATC_RAT_YAW_D":     0.0,
-    "ATC_RAT_YAW_IMAX":  0.0,
-    # Disable roll/pitch IMAX -- prevent swashplate wind-up on neutral sticks
-    "ATC_RAT_RLL_IMAX":  0.0,
-    "ATC_RAT_PIT_IMAX":  0.0,
-})
-
-# Params that must be in the SITL boot param file (not set via MAVLink post-boot).
+# All torque test parameters in one boot-file set.
 #
-# ONE reason to put params here instead of in _BASE_TORQUE_PARAMS (MAVLink):
+# _launch_sitl always wipes EEPROM and uses --add-param-file (which overrides EEPROM),
+# so every param here is applied at first boot — no MAVLink setting phase is needed.
 #
-# PID/frame params (ATC_RAT_YAW_*, H_TAIL_TYPE): the mediator's physics become
-# active at t=10 s (TORQUE_STARTUP_HOLD_S) but MAVLink param-setting takes ~25 s.
-# During that window ArduPilot uses default helicopter PID gains (ATC_RAT_YAW_P ≈ 0.18)
-# which are ~180x larger than our 0.001 setpoint and cause the yaw loop to oscillate
-# at ±300 deg/s.  Those oscillations corrupt the EKF gyro-bias estimate so severely
-# that even after the hub settles (t≈38 s), ATTITUDE.yawspeed reads ~9 deg/s on a
-# flat, stationary hub.  Setting the PID gains at boot eliminates the oscillation
-# entirely.
+# Why PID/frame params must be at boot (not via MAVLink post-boot):
+# mediator_torque physics become active at t=10 s (TORQUE_STARTUP_HOLD_S).  Any
+# post-boot MAVLink write only completes at ~25 s.  The default ATC_RAT_YAW_P ≈ 0.18
+# (180× larger than our 0.001 target) causes ±300 deg/s yaw oscillations in that
+# window, corrupting the EKF gyro-bias estimate so badly that ATTITUDE.yawspeed reads
+# ~9 deg/s even after the hub settles.
 #
-# NOTE: EK3_SRC1_POSXY and EK3_SRC1_VELXY are set via MAVLink in _BASE_TORQUE_PARAMS
-# (not here) because Docker EEPROM (baked during image build) always overrides boot-time
-# --defaults param files.  MAVLink writes always override EEPROM.
+# Why EK3_SRC1_POSXY/VELXY=0 must be at boot:
+# Hub is stationary but tilted; g·sin(θ) lateral accel projection triggers GPS Glitch,
+# making EKF unhealthy → arm fails.  Writing EK3_SRC* via MAVLink post-boot triggers
+# "EKF3 IMU0 forced reset" even if the value is unchanged, corrupting the gyro-bias
+# estimate in the same way as the PID oscillation above.
 #
-# These are ALWAYS written to the SITL --add-param-file regardless of fixture; fixture
-# boot_params are merged on top and may override individual values (e.g. ATC_RAT_YAW_P=0
-# for the Lua fixture where Lua is the sole feedforward provider).
+# fixture boot_params are merged on top and may override individual values (e.g.
+# ATC_RAT_YAW_P=0 for the Lua fixture where Lua is the sole feedforward provider).
 _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     # Failsafe — disable EKF failsafe
     # (ARMING_SKIPCHK was removed in ArduPilot 4.6; force-arm bypasses checks)
@@ -1215,9 +1294,10 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "EK3_SRC1_YAW":    1,     # compass yaw (default, but be explicit so boot is consistent)
     "EK3_MAG_CAL":     0,     # no magnetometer calibration
     "EK3_GPS_CHECK":   0,     # no GPS pre-arm check (GPS not used in torque tests)
-    # Yaw PID — tiny P so the motor doesn't oscillate before MAVLink params arrive.
-    # Default ATC_RAT_YAW_P ≈ 0.18 causes ±300 deg/s oscillations in the t=10-25 s
-    # window before MAVLink params are set, corrupting the EKF gyro-bias estimate.
+    # EKF source config: disable GPS position/velocity (see comment above).
+    "EK3_SRC1_POSXY":  0,
+    "EK3_SRC1_VELXY":  0,
+    # Yaw PID — tiny P to avoid oscillation during boot (see comment above).
     "ATC_RAT_YAW_P":   0.001,
     "ATC_RAT_YAW_I":   0.0,
     "ATC_RAT_YAW_D":   0.0,
@@ -1233,7 +1313,7 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "H_RSC_RUNUP_TIME": 1,
 })
 
-# Applied after _BASE_TORQUE_PARAMS for the Lua feedforward fixture.
+# Extra params for the Lua feedforward fixture, merged on top of _BASE_TORQUE_BOOT_PARAMS.
 _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "ATC_RAT_YAW_P":    0.0,   # override: Lua is the sole feedforward provider
     "SCR_ENABLE":       1,
@@ -1274,9 +1354,14 @@ def _torque_stack(
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
 
+    Built on top of _sitl_stack which handles pre-checks, EEPROM wipe, boot params,
+    SITL launch, logging, and teardown.  This context manager adds:
+      - mediator_torque.py launch (stationary hub + bearing drag + motor physics)
+      - EKF compass-yaw alignment (short, ~3-10 s)
+      - arm + ACRO mode entry
+
     Logs written to simulation/logs/{test_name}/ (per-test directory,
-    matching the flight stack convention) and also to top-level logs/ with
-    _last suffixes for quick access.
+    matching the flight stack convention).
 
     Parameters
     ----------
@@ -1289,35 +1374,8 @@ def _torque_stack(
     test_name       : pytest test node name; used for per-test log directory
     install_scripts : tuple of Lua script names to install from simulation/scripts/
     boot_params     : dict of {param_name: value} merged on top of torque_setup
-                      (for params only known at fixture call time, e.g. SCR_USER6).
+                      (for params only known at fixture call time, e.g. RPM1_TYPE).
     """
-    if os.environ.get(STACK_ENV_FLAG) != "1":
-        pytest.skip(f"Set {STACK_ENV_FLAG}=1 to run counter-torque stack tests")
-
-    sim_vehicle = _resolve_sim_vehicle()
-    if sim_vehicle is None:
-        pytest.skip(f"Set {SIM_VEHICLE_ENV} or {ARDUPILOT_ENV} to locate sim_vehicle.py")
-
-    pytest.importorskip("pymavlink")
-    assert_stack_ports_free()
-
-    repo_root = Path(__file__).resolve().parents[3]
-    sim_dir   = repo_root / "simulation"
-
-    # Per-test log directory (mirrors flight stack convention)
-    test_log_dir = make_test_log_dir(sim_dir, test_name) if test_name else sim_dir / "logs"
-
-    mediator_log = tmp_path / "mediator.log"
-    sitl_log     = tmp_path / "sitl.log"
-    gcs_log      = tmp_path / "gcs.log"
-
-    _configure_logging(gcs_log)
-    log = logging.getLogger(log_name)
-    log.info(
-        "launching  profile=%s  omega_rotor=%.1f rad/s (%.0f RPM)",
-        profile, omega_rotor, omega_rotor * 60.0 / (2.0 * math.pi),
-    )
-
     # Pre-launch: install Lua scripts before SITL starts
     if install_scripts:
         _install_lua_scripts(*install_scripts)
@@ -1325,160 +1383,145 @@ def _torque_stack(
     # Build one complete param setup for this test.
     # Always-wipe EEPROM + per-test boot file = single source of truth.
     # Order (each layer overrides the previous):
-    #   1. _BASE_TORQUE_BOOT_PARAMS  — base EKF/PID/RSC/arming values
-    #   2. _BASE_TORQUE_PARAMS       — MAVLink values (now also in boot file)
-    #   3. extra_params              — fixture-specific overrides (e.g. Lua)
-    #   4. boot_params               — caller-supplied boot-time extras (e.g. RPM1_TYPE)
+    #   1. _BASE_TORQUE_BOOT_PARAMS  — all EKF/PID/RSC/arming/GPS-source values
+    #   2. extra_params              — fixture-specific overrides (e.g. Lua)
+    #   3. boot_params               — caller-supplied boot-time extras (e.g. RPM1_TYPE)
     torque_setup = (
         _BASE_TORQUE_BOOT_PARAMS
-        .merge(_BASE_TORQUE_PARAMS)
         .merge(extra_params or ParamSetup({}))
         .merge(ParamSetup(boot_params) if boot_params else ParamSetup({}))
     )
-    boot_parm_file = tmp_path / "boot_params.parm"
-    torque_setup.write_parm_file(boot_parm_file)
-    log.info("Boot params file: %s  (%d entries)", boot_parm_file, len(torque_setup))
 
-    mediator_proc = _launch_mediator_torque(
-        _TORQUE_DIR, repo_root, mediator_log, omega_rotor,
-        profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
-        startup_hold_s=_TORQUE_STARTUP_HOLD_S,
-    )
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log, add_param_file=boot_parm_file)
+    with _sitl_stack(
+        tmp_path,
+        log_name    = log_name,
+        test_name   = test_name,
+        base_params = torque_setup,
+    ) as sitl_ctx:
+        log = sitl_ctx.log
+        log.info(
+            "torque stack: profile=%s  omega_rotor=%.1f rad/s (%.0f RPM)  %d boot params",
+            profile, omega_rotor, omega_rotor * 60.0 / (2.0 * math.pi), len(torque_setup),
+        )
 
-    def _assert_alive() -> None:
-        for name, proc, lp in [
-            ("mediator_torque", mediator_proc, mediator_log),
-            ("SITL",            sitl_proc,     sitl_log),
-        ]:
-            if proc.poll() is not None:
-                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
+        mediator_log = tmp_path / "mediator.log"
+        mavlink_log  = tmp_path / "mavlink.jsonl"
 
-    from gcs import RawesGCS, ACRO as _ACRO
-    gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
-    ctx = TorqueStackContext(
-        gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_proc,
-        mediator_log=mediator_log, sitl_log=sitl_log, gcs_log=gcs_log,
-        omega_rotor=omega_rotor, log=log,
-    )
+        mediator_proc = _launch_mediator_torque(
+            _TORQUE_DIR, sitl_ctx.repo_root, mediator_log, omega_rotor,
+            profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
+            startup_hold_s=_TORQUE_STARTUP_HOLD_S,
+        )
 
-    try:
-        log.info("Connecting GCS ...")
-        gcs.connect(timeout=30.0)
-        gcs.start_heartbeat(rate_hz=1.0)
-        _assert_alive()
-        log.info("GCS connected")
+        def _assert_alive() -> None:
+            for name, proc, lp in [
+                ("mediator_torque", mediator_proc,           mediator_log),
+                ("SITL",           sitl_ctx.sitl_proc, sitl_ctx.sitl_log),
+            ]:
+                if proc.poll() is not None:
+                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+                    pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
-        from pymavlink import mavutil as _mavu
-        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
-        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
-        gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log)
+        ctx = TorqueStackContext(
+            gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
+            mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
+            gcs_log=sitl_ctx.gcs_log,
+            omega_rotor=omega_rotor, log=log,
+        )
 
-        log.info("Waiting for param subsystem ...")
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline:
-            _assert_alive()
-            gcs._mav.mav.param_request_read_send(
-                gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
-            )
-            msg = gcs._mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
-            if msg is not None:
-                log.info("Param subsystem ready (SYSID_THISMAV=%g)", msg.param_value)
-                break
-        else:
-            pytest.fail("Param subsystem never responded within 20 s")
-
-        # Motor interlock HIGH + EKF alignment
-        # Keep CH8 alive every 0.5 s (ArduPilot expires RC override after ~1 s).
-        log.info("Waiting for EKF yaw alignment (CH8=2000, up to 45 s) ...")
-        gcs.send_rc_override({8: 2000})
-        ekf_ok  = False
-        t_start = time.monotonic()
-        t_rc    = time.monotonic()
-        deadline = time.monotonic() + 45.0
-        _MIN_WAIT = 3.0
-
-        while time.monotonic() < deadline:
-            _assert_alive()
-            if time.monotonic() - t_rc >= 0.5:
-                gcs.send_rc_override({8: 2000})
-                t_rc = time.monotonic()
-            msg = gcs._mav.recv_match(
-                type=["ATTITUDE", "STATUSTEXT"], blocking=True, timeout=0.5,
-            )
-            if msg is None:
-                continue
-            now = time.monotonic()
-            if msg.get_type() == "STATUSTEXT":
-                text = msg.text.rstrip("\x00").strip()
-                log.info("SITL: %s", text)
-                if "EKF3 active" in text or "EKF3 IMU" in text:
-                    gcs.request_stream(_mavu.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
-                if lua_mode and "rawes yaw trim" in text.lower():
-                    log.info("Lua script confirmed loaded: %s", text)
-                if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
-                    ekf_ok = True
-                    break
-            elif msg.get_type() == "ATTITUDE":
-                if (all(math.isfinite(v) for v in (msg.roll, msg.pitch, msg.yaw))
-                        and now - t_start >= _MIN_WAIT):
-                    log.info(
-                        "EKF attitude ready  rpy=(%.1f, %.1f, %.1f) deg",
-                        math.degrees(msg.roll), math.degrees(msg.pitch), math.degrees(msg.yaw),
-                    )
-                    ekf_ok = True
-                    break
-
-        if not ekf_ok:
-            log.warning("EKF alignment timed out -- proceeding (SKIPCHK set)")
-
-        # Verify all params after EKF ready — non-critical path, won't delay kinematic.
-        log.info("Verifying boot parameters via MAVLink ...")
-        torque_setup.verify(gcs, log=log, read_timeout=1.0)
-        _assert_alive()
-
-        gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
-        log.info("Armed")
-        gcs.set_mode(_ACRO, timeout=10.0, rc_override={8: 2000})
-        log.info("ACRO active -- profile=%s", profile)
-
-        yield ctx
-
-    finally:
-        log.info("Teardown: terminating processes ...")
         try:
-            gcs.close()
-        except Exception:
-            pass
-        _terminate_process(sitl_proc)
-        _terminate_process(mediator_proc)
-        _kill_by_port(StackConfig.SITL_GCS_PORT, "tcp")
-        _kill_by_port(StackConfig.SITL_JSON_PORT, "udp")
-        # Belt-and-suspenders: sim_vehicle.py spawns arducopter-heli in its own
-        # process group, so os.killpg() on sim_vehicle.py's PID misses it.
-        # pkill -f catches any survivors by name regardless of port state.
-        import subprocess as _subprocess
-        # Use pgrep+xargs rather than pkill -f to avoid pkill matching its own
-        # command-line args and sending SIGKILL to itself before all targets die.
-        # pgrep without -f matches by process name (argv[0]), so no self-match.
-        # /sim_vehicle.py path segment is specific enough not to hit pgrep itself.
-        _subprocess.run(
-            ["bash", "-c", "pgrep arducopter-heli | xargs -r kill -9"],
-            capture_output=True,
-        )
-        _subprocess.run(
-            ["bash", "-c", "pgrep -f /sim_vehicle.py | xargs -r kill -9"],
-            capture_output=True,
-        )
+            log.info("Connecting GCS ...")
+            gcs.connect(timeout=30.0)
+            gcs.start_heartbeat(rate_hz=1.0)
+            _assert_alive()
+            log.info("GCS connected")
 
-        copy_logs_to_dir(test_log_dir, {
-            "mediator.log": mediator_log,
-            "sitl.log":     sitl_log,
-            "gcs.log":      gcs_log,
-        })
-        _ardupilot_log = Path("/tmp/ArduCopter.log")
-        if _ardupilot_log.exists():
-            import shutil as _shutil2
-            _shutil2.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
-        log.info("Logs copied to %s", test_log_dir)
+            gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
+            gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
+            gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+
+            log.info("Waiting for param subsystem ...")
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                _assert_alive()
+                gcs._mav.mav.param_request_read_send(
+                    gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
+                )
+                msg = gcs._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
+                if msg is not None:
+                    log.info("Param subsystem ready (SYSID_THISMAV=%g)", msg.param_value)
+                    break
+            else:
+                pytest.fail("Param subsystem never responded within 20 s")
+
+            # Motor interlock HIGH + EKF alignment
+            # Keep CH8 alive every 0.5 s (ArduPilot expires RC override after ~1 s).
+            log.info("Waiting for EKF yaw alignment (CH8=2000, up to 45 s) ...")
+            gcs.send_rc_override({8: 2000})
+            ekf_ok  = False
+            t_start = time.monotonic()
+            t_rc    = time.monotonic()
+            deadline = time.monotonic() + 45.0
+            _MIN_WAIT = 3.0
+
+            while time.monotonic() < deadline:
+                _assert_alive()
+                if time.monotonic() - t_rc >= 0.5:
+                    gcs.send_rc_override({8: 2000})
+                    t_rc = time.monotonic()
+                msg = gcs._recv(
+                    type=["ATTITUDE", "STATUSTEXT"], blocking=True, timeout=0.5,
+                )
+                if msg is None:
+                    continue
+                now = time.monotonic()
+                if msg.get_type() == "STATUSTEXT":
+                    text = msg.text.rstrip("\x00").strip()
+                    log.info("SITL: %s", text)
+                    if "EKF3 active" in text or "EKF3 IMU" in text:
+                        gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
+                    if lua_mode and "rawes yaw trim" in text.lower():
+                        log.info("Lua script confirmed loaded: %s", text)
+                    if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
+                        ekf_ok = True
+                        break
+                elif msg.get_type() == "ATTITUDE":
+                    if (all(math.isfinite(v) for v in (msg.roll, msg.pitch, msg.yaw))
+                            and now - t_start >= _MIN_WAIT):
+                        log.info(
+                            "EKF attitude ready  rpy=(%.1f, %.1f, %.1f) deg",
+                            math.degrees(msg.roll), math.degrees(msg.pitch), math.degrees(msg.yaw),
+                        )
+                        ekf_ok = True
+                        break
+
+            if not ekf_ok:
+                log.warning("EKF alignment timed out -- proceeding (SKIPCHK set)")
+
+            # Verify all params after EKF ready — non-critical path.
+            log.info("Verifying boot parameters via MAVLink ...")
+            torque_setup.verify(gcs, log=log, read_timeout=1.0)
+            _assert_alive()
+
+            gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
+            log.info("Armed")
+            gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
+            log.info("ACRO active -- profile=%s", profile)
+
+            yield ctx
+
+        finally:
+            log.info("Teardown: closing GCS and terminating mediator ...")
+            try:
+                gcs.close()
+            except Exception:
+                pass
+            _terminate_process(mediator_proc)
+            # sitl/gcs/arducopter/dataflash logs are handled by _sitl_stack teardown.
+            # Copy mediator log and mavlink log here.
+            _logs = {"mediator.log": mediator_log}
+            if mavlink_log.exists():
+                _logs["mavlink.jsonl"] = mavlink_log
+            copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)
+            log.info("Mediator log copied to %s", sitl_ctx.test_log_dir)

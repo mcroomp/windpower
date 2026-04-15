@@ -56,12 +56,26 @@ DEFAULTS: dict = {
     # ── Startup kinematic ramp ────────────────────────────────────────────────
     # Hub moves at vel0 from launch_pos for startup_damp_seconds, then physics
     # takes over.  Gives EKF time to lock on GPS before free flight.
+    #
+    # kinematic_traj_type selects the trajectory shape:
+    #   "linear"   — constant vel0 from launch_pos, optional linear ramp to zero.
+    #                Hub starts at pos0 - vel0*duration; vel unchanged unless ramp_s>0.
+    #   "min_jerk" — 5th-order polynomial from [0,0,0] at rest to pos0 at vel0.
+    #                Zero accel at both ends; accel_body computed analytically.
+    #                Kinematic ends immediately on arrival (startup_damp_seconds
+    #                must be long enough for GPS to fuse before arrival — 65 s
+    #                gives ~11 s after fusion at ~54 s).
+    #                kinematic_min_jerk_margin_s: optional extra hold at
+    #                (pos0, vel0) before free flight (0 = hand over on arrival).
+    #
     # kinematic_vel_ramp_s: vel taper window at end of kinematic (0 = no taper).
     # NOTE: ramp > 0 reduces GPS horizontal position change → slower EKF fusion.
     # Default 0.0 keeps vel0 constant so GPS fuses quickly (within kinematic window).
-    "startup_damp_seconds": 30.0,   # kinematic ramp duration [s]
-    "kinematic_vel_ramp_s": 15.0,   # vel ramp-to-zero window at end of kinematic [s]
-    "startup_damp_k_ang":  500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
+    "startup_damp_seconds":         30.0,   # kinematic duration [s]
+    "kinematic_vel_ramp_s":         15.0,   # linear: vel ramp-to-zero window [s]
+    "kinematic_traj_type":          "min_jerk",  # "linear" or "min_jerk"
+    "kinematic_min_jerk_margin_s":   0.0,   # min_jerk: extra hold after trajectory [s]; 0 = hand over immediately on arrival
+    "startup_damp_k_ang":          500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
 
     # ── Attitude damping ──────────────────────────────────────────────────────
     "base_k_ang": 50.0,             # permanent angular drag [N·m·s/rad]

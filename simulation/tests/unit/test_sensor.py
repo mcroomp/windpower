@@ -146,6 +146,68 @@ def test_physical_sensor_yaw_is_orb_frame_not_velocity():
 
 
 # ---------------------------------------------------------------------------
+# Yaw DOF tests — electronics hub as fuselage
+# ---------------------------------------------------------------------------
+
+def test_physical_sensor_yaw_comes_from_R_hub():
+    """
+    rpy[2] must equal the ZYX yaw extracted directly from R_hub.
+
+    The electronics hub is the fuselage: R_hub is its full orientation.
+    rpy[2] must equal _rotation_matrix_to_euler_zyx(R_hub)[2] — no override,
+    no convention substitution.
+    """
+    dn = np.array([0.5, 0.5, -math.sqrt(0.5)])
+    R_hub = build_orb_frame(dn)
+    sensor = PhysicalSensor(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0)
+    result = sensor.compute(
+        pos_ned=np.zeros(3),
+        vel_ned=np.array([1.0, 0.0, 0.0]),
+        R_hub=R_hub,
+        omega_body=np.zeros(3),
+        accel_world_ned=np.zeros(3),
+        dt=0.0025,
+    )
+    expected_yaw = _rotation_matrix_to_euler_zyx(R_hub)[2]
+    np.testing.assert_allclose(result["rpy"][2], expected_yaw, atol=1e-10,
+        err_msg="rpy[2] does not match ZYX yaw from R_hub")
+
+
+def test_physical_sensor_yaw_changes_with_hub_rotation():
+    """
+    Rotating R_hub around disk_normal (yaw DOF) must change rpy[2].
+
+    Verifies that yaw is a real tracked DOF — two hub orientations that differ
+    only in yaw around disk_normal must produce different rpy[2] values.
+    """
+    disk_normal = np.array([0.0, 0.0, -1.0])   # upward-pointing axle
+    R_hub_0 = build_orb_frame(disk_normal)
+
+    # Rotate R_hub_0 by 30° around disk_normal
+    angle = math.radians(30.0)
+    c, s = math.cos(angle), math.sin(angle)
+    # Rotation matrix around NED-up axis ([0,0,-1]) by 30°:
+    R_yaw30 = np.array([[ c, s, 0],
+                         [-s, c, 0],
+                         [ 0, 0, 1]], dtype=float)
+    R_hub_30 = R_yaw30 @ R_hub_0
+
+    sensor = PhysicalSensor(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0)
+    r0 = sensor.compute(pos_ned=np.zeros(3), vel_ned=np.zeros(3), R_hub=R_hub_0,
+                        omega_body=np.zeros(3), accel_world_ned=np.zeros(3), dt=0.0025)
+    r30 = sensor.compute(pos_ned=np.zeros(3), vel_ned=np.zeros(3), R_hub=R_hub_30,
+                         omega_body=np.zeros(3), accel_world_ned=np.zeros(3), dt=0.0025)
+
+    delta_yaw = abs(r30["rpy"][2] - r0["rpy"][2])
+    # Wrap to [0, pi]
+    delta_yaw = min(delta_yaw, abs(delta_yaw - 2*math.pi))
+    assert delta_yaw > 0.1, (
+        f"Yaw did not change with 30-deg hub rotation around disk_normal: "
+        f"delta_yaw={math.degrees(delta_yaw):.3f} deg"
+    )
+
+
+# ---------------------------------------------------------------------------
 # make_sensor factory tests
 # ---------------------------------------------------------------------------
 
