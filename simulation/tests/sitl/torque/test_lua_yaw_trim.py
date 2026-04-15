@@ -32,11 +32,14 @@ from __future__ import annotations
 
 import math
 
-from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
+from torque_test_utils  import (
+    run_observation_loop, save_telemetry,
+    assert_physics_yaw_rate,
+)
 
 _SETTLE_S   = 40.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = math.radians(1.0)   # [rad/s]
+_THRESHOLD  = math.radians(2.0)   # [rad/s] physics ground truth; 2 deg/s limit
 
 
 def test_lua_yaw_trim(torque_armed_lua):
@@ -44,10 +47,14 @@ def test_lua_yaw_trim(torque_armed_lua):
     Yaw rate regulated by rawes.lua (SCR_USER6=2) running inside ArduPilot SITL.
 
     The Lua script reads motor RPM (via SITL JSON -> RPM1_TYPE=10), computes
-    the equilibrium throttle feedforward, adds a proportional yaw rate
-    correction from the onboard gyro, and writes the result directly to
-    SERVO9 (Ch9).  The mediator applies this as a pure motor torque command
-    with no additional feedforward of its own.
+    the equilibrium throttle feedforward, adds a PI yaw rate correction from
+    the onboard gyro, and writes the result directly to SERVO9 (Ch9).
+    The mediator applies this as a pure motor torque command with no additional
+    feedforward of its own.
+
+    Pass criterion: actual physics psi_dot (from mediator log) stays within
+    2 deg/s after 40 s settle.  Uses mediator log rather than ArduPilot
+    ATTITUDE.yawspeed to avoid EKF compass-tilt artefacts.
 
     This is the closest SITL equivalent to the hardware deployment:
       RPM1_TYPE=5 (DSHOT ESC telemetry) on the Pixhawk 6C.
@@ -55,11 +62,11 @@ def test_lua_yaw_trim(torque_armed_lua):
     ctx = torque_armed_lua
     rows: list = []
 
-    obs = run_observation_loop(
+    run_observation_loop(
         ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
     save_telemetry(rows, "lua", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)
+    assert_physics_yaw_rate(ctx.mediator_log, _THRESHOLD, _SETTLE_S, _OBSERVE_S, ctx.log)

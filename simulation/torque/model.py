@@ -119,9 +119,9 @@ class HubParams:
 
 @dataclasses.dataclass
 class HubState:
-    """Instantaneous yaw state of the stationary hub."""
-    psi: float = 0.0       # yaw angle [rad]
-    psi_dot: float = 0.0   # yaw rate [rad/s]
+    """Instantaneous yaw state of the stationary hub (NED: positive = CW from above)."""
+    psi: float = 0.0       # NED yaw angle [rad]
+    psi_dot: float = 0.0   # NED yaw rate [rad/s]
 
 
 # ---------------------------------------------------------------------------

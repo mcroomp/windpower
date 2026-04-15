@@ -211,7 +211,7 @@ def test_motor_reaction_direction():
     tau_shaft       = m.motor_torque(0.5, omega_motor, params)
     Q_motor_on_hub  = -params.gear_ratio * tau_shaft   # same calc as in _derivatives
 
-    # Bearing friction is positive (CCW); motor reaction must be negative (CW)
+    # Bearing friction is positive (NED: CW from above); motor reaction must oppose it
     assert Q_motor_on_hub < 0.0, (
         f"Motor reaction on hub must be negative (opposing bearing friction); "
         f"got {Q_motor_on_hub:.4f} N·m"
@@ -255,6 +255,115 @@ def test_motor_saturation():
     tau_half = m.motor_torque(0.5, omega_motor, params)
     tau_full = m.motor_torque(1.0, omega_motor, params)
     assert tau_full >= tau_half, "Full throttle must give at least as much torque as half"
+
+
+def test_lua_p_controller():
+    """
+    Mirror of rawes.lua run_yaw_trim() with the current P-only gains.
+
+    Constants must match rawes.lua exactly:
+      KP_YAW = 0.001
+      feedforward = equilibrium_throttle (mirrors compute_trim)
+
+    Prints steady-state psi_dot so we can see how well pure P holds yaw.
+    """
+    KP_YAW = 0.001
+    params  = m.HubParams()
+
+    def throttle_fn(state: m.HubState, t: float) -> float:
+        trim = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
+        return max(0.0, min(1.0, trim - KP_YAW * state.psi_dot))
+
+    hist = _simulate(
+        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
+        throttle_fn=throttle_fn,
+        t_end=60.0,
+    )
+
+    late = [(t, s) for t, s in hist if t > 10.0]
+    max_psi_dot     = max(abs(s.psi_dot) for _, s in late)
+    max_psi_dot_dgs = math.degrees(max_psi_dot)
+    max_psi_deg     = math.degrees(max(abs(s.psi) for _, s in late))
+
+    print(f"\n[lua_p] max psi_dot={max_psi_dot_dgs:.3f} deg/s  max psi={max_psi_deg:.2f} deg  (60 s)")
+    assert max_psi_dot < math.radians(2.0), (
+        f"Lua P controller: settled psi_dot={max_psi_dot_dgs:.3f} deg/s > 2 deg/s"
+    )
+
+
+def test_lua_p_controller_k_bearing_error():
+    """
+    Same Lua P controller, but k_bearing is 20% higher than the model expects
+    (simulating swashplate load adding bearing friction).
+
+    Feedforward is computed with nominal k_bearing; physics runs with actual.
+    Prints the steady-state psi_dot to show how much error pure P leaves.
+    """
+    KP_YAW          = 0.001
+    nominal_params   = m.HubParams()                    # what Lua thinks
+    actual_params    = m.HubParams(k_bearing=0.006)     # reality (+20%)
+
+    def throttle_fn(state: m.HubState, t: float) -> float:
+        trim = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, nominal_params)
+        return max(0.0, min(1.0, trim - KP_YAW * state.psi_dot))
+
+    hist = _simulate(
+        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
+        throttle_fn=throttle_fn,
+        params=actual_params,
+        t_end=60.0,
+    )
+
+    late = [(t, s) for t, s in hist if t > 30.0]
+    final_psi_dot     = hist[-1][1].psi_dot
+    max_psi_dot_dgs   = math.degrees(max(abs(s.psi_dot) for _, s in late))
+    final_psi_dot_dgs = math.degrees(final_psi_dot)
+
+    print(f"\n[lua_p +20% k_bearing] settled psi_dot={final_psi_dot_dgs:.3f} deg/s  "
+          f"max={max_psi_dot_dgs:.3f} deg/s  (30-60 s window)")
+
+
+def test_lua_pi_controller_k_bearing_error():
+    """
+    Lua PI controller (+20% k_bearing disturbance).
+
+    KI_YAW and YAW_I_MAX must match rawes.lua exactly once the I-term is added.
+    Prints convergence behaviour so we can tune KI_YAW by running this test.
+    """
+    KP_YAW    = 0.001
+    YAW_I_MAX = 0.2
+
+    nominal_params = m.HubParams()
+    actual_params  = m.HubParams(k_bearing=0.006)   # +20%
+
+    for KI_YAW in [0.005, 0.01, 0.05, 0.1]:
+        integral = [0.0]
+
+        def throttle_fn(state: m.HubState, t: float, ki=KI_YAW) -> float:
+            integral[0] = max(-YAW_I_MAX, min(YAW_I_MAX,
+                              integral[0] + ki * state.psi_dot * DT))
+            trim = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, nominal_params)
+            return max(0.0, min(1.0, trim + KP_YAW * state.psi_dot + integral[0]))
+
+        hist = _simulate(
+            omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
+            throttle_fn=throttle_fn,
+            params=actual_params,
+            t_end=60.0,
+        )
+
+        sample_times = [5, 10, 20, 30, 60]
+        snapshots = []
+        for target_t in sample_times:
+            closest = min(hist, key=lambda x, tt=target_t: abs(x[0] - tt))
+            snapshots.append((target_t, math.degrees(closest[1].psi_dot)))
+
+        late = [s for t, s in hist if t > 30.0]
+        settled = math.degrees(max(abs(s.psi_dot) for s in late))
+
+        print(f"\n[lua_pi KI={KI_YAW} +20% k_bearing]  settled={settled:.3f} deg/s")
+        for t, v in snapshots:
+            print(f"  t={t:2d}s  {v:+.3f} deg/s")
 
 
 def test_equilibrium_throttle_scales_with_rpm():

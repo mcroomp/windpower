@@ -110,11 +110,7 @@ def _body_vectors(
 
     Returns (gyro_body [rad/s], accel_body [m/s²]).
 
-    Sign conventions — ENU model → ArduPilot NED body frame
-    --------------------------------------------------------
-    Gyro Z positive  = yaw CW from above (NED Z down).
-    Yaw angle positive = CW from above.
-    Our psi/psi_dot are ENU (positive = CCW), so we negate for NED.
+    NED convention throughout: psi_dot is NED yaw rate [rad/s], positive = CW from above.
 
     For a tilted hub (roll φ, pitch θ) gravity projects into body frame:
       g_body_x =  9.81 * sin(θ)
@@ -125,11 +121,14 @@ def _body_vectors(
     cp, sp = math.cos(pitch), math.sin(pitch)
     g = 9.81
 
-    # Euler-rate → body-rate (ZYX Euler, ψ̇_NED = −ψ̇_ENU)
+    # ZYX Euler rates → body rates (NED, all rates positive = CW / nose-up / roll-right)
+    #   p =  φ̇ − ψ̇ sin(θ)
+    #   q =  θ̇ cos(φ) + ψ̇ cos(θ) sin(φ)
+    #   r = −θ̇ sin(φ) + ψ̇ cos(θ) cos(φ)
     gyro = [
-        float(roll_dot + psi_dot * sp),
-        float(pitch_dot * cr - psi_dot * sr * cp),
-        float(-pitch_dot * sr - psi_dot * cr * cp),
+        float(roll_dot  - psi_dot * sp),
+        float(pitch_dot * cr + psi_dot * sr * cp),
+        float(-pitch_dot * sr + psi_dot * cr * cp),
     ]
     accel = [
         float(g * sp),
@@ -343,7 +342,7 @@ def run(
                 timestamp       = t,
                 pos_ned         = np.array([0.0, 0.0, 0.0]),
                 vel_ned         = np.array([0.0, 0.0, 0.0]),
-                rpy_rad         = np.array([roll_send, pitch_send, -psi_send]),
+                rpy_rad         = np.array([roll_send, pitch_send, psi_send]),
                 accel_body      = np.asarray(accel_body),
                 gyro_body       = np.asarray(gyro_body),
                 rpm_rad_s       = current_omega * _GEAR_RATIO,

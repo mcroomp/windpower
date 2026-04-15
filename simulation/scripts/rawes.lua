@@ -123,16 +123,24 @@ local KV_RAD        = 66.0 * math.pi / 30.0
 local R_MOTOR       = 7.5
 local K_BEARING     = 0.005
 local KP_YAW        = 0.001
+local KI_YAW        = 0.05             -- integrator gain; corrects load-dependent bearing friction
+local YAW_I_MAX     = 0.2              -- anti-windup clamp [throttle fraction]
 local MIN_RPM       = 50            -- RPM below this = no signal from ESC telemetry
 local STARTUP_PWM   = 1050          -- ~5% throttle: arms DShot ESC and primes telemetry
 local V_BAT_NOM     = 15.2          -- nominal 4S LiPo voltage
 local V_BAT_MIN     = 10.0          -- below this = battery sensor not ready; use V_BAT_NOM
 local YAW_SRV_FUNC  = 94            -- ArduPilot servo function for Script 1 output (SERVO9)
+local YAW_STABLE_RAD_S     = math.rad(5.0)  -- stable band: |yaw_rate| < 5 deg/s [rad/s]
+local YAW_STABLE_TIMEOUT_MS = 30000         -- cut motor if not stable for this long [ms]
 
 -- RPM library binding.  SITL (mcroomp fork) exposes 'RPM' (uppercase).
 -- Some hardware firmware builds use 'rpm' (lowercase) instead.
 -- Try RPM first; fall back to rpm if RPM is nil.
 local _rpm_lib = RPM or rpm
+
+local _yaw_not_stable_ms  = nil    -- millis() when yaw first exceeded stable band; nil when stable
+local _yaw_stopped        = false  -- latched; motor cut due to sustained yaw instability
+local _yaw_i              = 0.0    -- integrator state [throttle fraction]
 
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -271,6 +279,8 @@ end
 -- switches (hub position hasn't moved).
 
 local function _on_mode_enter(mode)
+    _yaw_i            = 0.0
+    _yaw_not_stable_ms = nil
     if mode == 4 then
         -- Landing: clear final_drop latch so a re-entry works correctly
         _land_final_drop = false
@@ -297,6 +307,13 @@ local function compute_trim(motor_rpm, v_bat)
 end
 
 local function run_yaw_trim()
+    -- Stability watchdog latch: once triggered, keep motor at minimum and don't recover.
+    -- Ensures the vehicle stops without needing a radio/MAVLink connection.
+    if _yaw_stopped then
+        SRV_Channels:set_output_pwm(YAW_SRV_FUNC, 1000)
+        return
+    end
+
     if not _rpm_lib then
         if _diag % 500 == 1 then
             gcs:send_text(3, "RAWES yaw: rpm library not available on this firmware")
@@ -335,13 +352,44 @@ local function run_yaw_trim()
         return
     end
 
-    local trim = compute_trim(motor_rpm, v_bat)
-
-    local yaw_corr = 0.0
+    -- Read gyro once; reused for both the stability watchdog and the yaw correction.
+    local gyro_z = 0.0
     local gyro = ahrs:get_gyro()
-    if gyro then yaw_corr = -KP_YAW * gyro:z() end
+    if gyro then gyro_z = gyro:z() end
 
-    local throttle = math.max(0.0, math.min(1.0, trim + yaw_corr))
+    -- Stability watchdog: track how long yaw has been outside the stable band.
+    -- The 30 s clock only starts once RPM > MIN_RPM (motor actively running).
+    if math.abs(gyro_z) > YAW_STABLE_RAD_S then
+        if _yaw_not_stable_ms == nil then _yaw_not_stable_ms = millis() end
+        if millis() - _yaw_not_stable_ms >= YAW_STABLE_TIMEOUT_MS then
+            _yaw_i       = 0.0
+            _yaw_stopped = true
+            SRV_Channels:set_output_pwm(YAW_SRV_FUNC, 1000)
+            gcs:send_text(0, "RAWES: yaw unstable 30s - motor off")
+            arming:disarm()
+            return
+        end
+    else
+        _yaw_not_stable_ms = nil
+    end
+
+    -- Wrong rotation direction: motor can only make it worse, so do nothing.
+    -- Threshold is set well below any physical overshoot (~2 deg/s) so that
+    -- brief PI over-corrections don't trigger this guard.  A truly reversed
+    -- rotor produces psi_dot many times larger in magnitude.
+    -- The stability watchdog will disarm after 30 s if this persists.
+    local REVERSED_THRESHOLD = -math.rad(30.0)   -- -30 deg/s
+    if gyro_z < REVERSED_THRESHOLD then
+        _yaw_i = 0.0
+        SRV_Channels:set_output_pwm(YAW_SRV_FUNC, 1000)
+        return
+    end
+
+    -- PI controller: feedforward + P + I (all positive — NED convention).
+    _yaw_i = math.max(-YAW_I_MAX, math.min(YAW_I_MAX,
+             _yaw_i + KI_YAW * gyro_z * 0.01))   -- 0.01 s = 100 Hz tick
+    local trim = compute_trim(motor_rpm, v_bat)
+    local throttle = math.max(0.0, math.min(1.0, trim + KP_YAW * gyro_z + _yaw_i))
     local pwm_us   = math.floor(1000.0 + throttle * 1000.0 + 0.5)
 
     if _diag % 500 == 1 then
