@@ -125,6 +125,7 @@ local K_BEARING     = 0.005
 local KP_YAW        = 0.001
 local KI_YAW        = 0.05             -- integrator gain; corrects load-dependent bearing friction
 local YAW_I_MAX     = 0.2              -- anti-windup clamp [throttle fraction]
+local YAW_I_GATE    = math.rad(3.0)    -- only integrate when |gyro_z| < 3 deg/s (prevents startup windup)
 local MIN_RPM       = 50            -- RPM below this = no signal from ESC telemetry
 local STARTUP_PWM   = 1050          -- ~5% throttle: arms DShot ESC and primes telemetry
 local V_BAT_NOM     = 15.2          -- nominal 4S LiPo voltage
@@ -386,8 +387,13 @@ local function run_yaw_trim()
     end
 
     -- PI controller: feedforward + P + I (all positive — NED convention).
-    _yaw_i = math.max(-YAW_I_MAX, math.min(YAW_I_MAX,
-             _yaw_i + KI_YAW * gyro_z * 0.01))   -- 0.01 s = 100 Hz tick
+    -- Only integrate when near steady state (|gyro_z| < YAW_I_GATE = 3 deg/s).
+    -- This prevents I-term windup during the startup hold period (forced +5 deg/s)
+    -- and during large disturbances.
+    if math.abs(gyro_z) < YAW_I_GATE then
+        _yaw_i = math.max(-YAW_I_MAX, math.min(YAW_I_MAX,
+                 _yaw_i + KI_YAW * gyro_z * 0.01))   -- 0.01 s = 100 Hz tick
+    end
     local trim = compute_trim(motor_rpm, v_bat)
     local throttle = math.max(0.0, math.min(1.0, trim + KP_YAW * gyro_z + _yaw_i))
     local pwm_us   = math.floor(1000.0 + throttle * 1000.0 + 0.5)

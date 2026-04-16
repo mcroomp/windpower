@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # simulation/
 
 import model as _m
 from sitl_interface import SITLInterface
+from mediator_events import MediatorEventLog
 
 # ---------------------------------------------------------------------------
 # Timing / port constants
@@ -212,6 +213,7 @@ def run(
     tail_channel: int = _CH_YAW_DEFAULT,
     lua_mode: bool = False,
     log_level: str = "INFO",
+    events_log_path: "str | None" = None,
 ) -> None:
     """
     Main mediator loop.
@@ -239,6 +241,8 @@ def run(
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     log = logging.getLogger("mediator_torque")
+    ev  = MediatorEventLog(events_log_path)
+    ev.open()
 
     params  = _m.HubParams()
     state   = _m.HubState()
@@ -250,25 +254,21 @@ def run(
         trim_throttle = _m.equilibrium_throttle(omega_rotor, params)
 
     eq_throttle = _m.equilibrium_throttle(omega_rotor, params)
-    log.info(
-        "Counter-torque mediator starting  "
-        "omega_rotor=%.2f rad/s (%.0f RPM)  "
-        "k_bearing=%.4f Nm*s/rad  "
-        "gear=%.3f  tau_stall=%.2f Nm  eq_throttle=%.4f  "
-        "trim_throttle=%.4f  startup_hold=%.0f s",
-        omega_rotor,
-        omega_rotor * 60.0 / (2.0 * math.pi),
-        params.k_bearing,
-        params.gear_ratio,
-        params.tau_stall,
-        eq_throttle,
-        trim_throttle,
-        startup_hold_s,
-    )
-
     omega_fn, tilt_fn = PROFILES.get(profile, PROFILES["constant"])
     ch_yaw = tail_channel
-    log.info("Profile: %s  tail_channel: %d  lua_mode: %s", profile, ch_yaw, lua_mode)
+
+    ev.write("startup", t_sim=0.0,
+             omega_rotor_rad_s=round(omega_rotor, 2),
+             omega_rotor_rpm=round(omega_rotor * 60.0 / (2.0 * math.pi)),
+             k_bearing=round(params.k_bearing, 4),
+             gear_ratio=round(params.gear_ratio, 3),
+             tau_stall_nm=round(params.tau_stall, 2),
+             eq_throttle=round(eq_throttle, 4),
+             trim_throttle=round(trim_throttle, 4),
+             startup_hold_s=round(startup_hold_s, 1),
+             profile=profile,
+             tail_channel=ch_yaw,
+             lua_mode=lua_mode)
 
     throttle      = 0.0
     n_sent        = 0
@@ -279,7 +279,7 @@ def run(
     last_pwm_ch4  = 1500.0   # neutral default
     throttle      = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
 
-    iface = SITLInterface(recv_port=_RECV_PORT, recv_timeout_ms=DT * 1000.0)
+    iface = SITLInterface(recv_port=_RECV_PORT)
     iface.bind()
     log.info("Bound to UDP port %d", _RECV_PORT)
 
@@ -339,7 +339,6 @@ def run(
                 roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot,
             )
             iface.send_state(
-                timestamp       = t,
                 pos_ned         = np.array([0.0, 0.0, 0.0]),
                 vel_ned         = np.array([0.0, 0.0, 0.0]),
                 rpy_rad         = np.array([roll_send, pitch_send, psi_send]),
@@ -357,21 +356,22 @@ def run(
             if t - last_log >= _LOG_INTERVAL:
                 last_log = t
                 phase = "STARTUP" if in_startup else "DYNAMIC"
-                log.info(
-                    "t=%6.1f s [%s]  psi=%+7.2f deg  psi_dot=%+7.3f deg/s  "
-                    "throttle=%.3f  omega=%.1f rad/s  roll=%+.1f deg  pitch=%+.1f deg  n=%d",
-                    t, phase,
-                    math.degrees(psi_send), math.degrees(psi_dot_send),
-                    throttle, current_omega if not in_startup else omega_rotor,
-                    math.degrees(roll_send), math.degrees(pitch_send),
-                    n_sent,
-                )
+                ev.write("heartbeat", t_sim=round(t, 1),
+                         phase=phase,
+                         psi_deg=round(math.degrees(psi_send), 2),
+                         psi_dot_deg_s=round(math.degrees(psi_dot_send), 3),
+                         throttle=round(throttle, 3),
+                         omega_rad_s=round(current_omega if not in_startup else omega_rotor, 1),
+                         roll_deg=round(math.degrees(roll_send), 1),
+                         pitch_deg=round(math.degrees(pitch_send), 1))
                 if not in_startup and t - startup_hold_s < 2.0:
-                    log.info("*** STARTUP HOLD COMPLETE — hub dynamics now active ***")
+                    ev.write("dynamics_start", t_sim=round(t, 1))
 
     except KeyboardInterrupt:
-        log.info("Interrupted — shutting down  t=%.1f s  n_sent=%d", t, n_sent)
+        log.info("Interrupted — shutting down")
     finally:
+        ev.write("shutdown", t_sim=round(t, 1), n_sent=n_sent)
+        ev.close()
         iface.close()
 
 
@@ -408,6 +408,11 @@ if __name__ == "__main__":
         "--log-level", default="INFO",
         help="Logging level (default: INFO)",
     )
+    parser.add_argument(
+        "--events-log", default=None,
+        help="Path for structured JSONL event log",
+    )
     args = parser.parse_args()
     run(args.omega_rotor, args.startup_hold, args.trim_throttle,
-        args.profile, args.tail_channel, args.lua_mode, args.log_level)
+        args.profile, args.tail_channel, args.lua_mode, args.log_level,
+        events_log_path=args.events_log)

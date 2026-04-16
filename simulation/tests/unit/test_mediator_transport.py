@@ -135,7 +135,7 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
     fake_aero   = FakeAero()
     fake_sensor = FakeSensor()
 
-    real_sitl = SITLInterface(recv_port=recv_port, send_port=send_port, recv_timeout_ms=100.0)
+    real_sitl = SITLInterface(recv_port=recv_port, watchdog_timeout=0.1)
 
     sitl_bound = threading.Event()
     original_bind = real_sitl.bind
@@ -163,12 +163,11 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
     monkeypatch.setattr(mediator, "SkewedWakeBEMJit", _FakeSkewedWakeBEMJit)
     monkeypatch.setattr(mediator, "make_sensor",       lambda *a, **kw: fake_sensor)
 
-    times = iter([10.0, 10.1, 10.1005, 10.1010, 10.1015])
-    monkeypatch.setattr(mediator.time, "monotonic", lambda: next(times))
-    monkeypatch.setattr(
-        mediator.time, "sleep",
-        lambda _: (_ for _ in ()).throw(KeyboardInterrupt()),
-    )
+    # After one packet is processed the mediator blocks on recv_servos() again.
+    # The real SITLInterface has recv_timeout_ms=100ms, so it returns None after
+    # the timeout and calls sys.exit(1).  Redirect sys.exit → KeyboardInterrupt
+    # so the mediator shuts down cleanly and the test can assert on results.
+    monkeypatch.setattr(sys, "exit", lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     mediator.run_mediator(_args(recv_port, send_port))
 
@@ -182,7 +181,9 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
     message = json.loads(raw_state.decode("utf-8").strip())
 
     assert message["position"]       == pytest.approx([20.0, 10.0, -30.0], abs=1e-6)
-    assert message["velocity"]       == pytest.approx([2.0,  1.0,  -3.0],  abs=1e-6)
+    # Mediator suppresses GPS velocity for t_sim < 2.0 s to let EKFGSF initialise
+    # from IMU first.  The first step is always t_sim=0 so velocity is zero.
+    assert message["velocity"]       == pytest.approx([0.0,  0.0,   0.0],  abs=1e-6)
     assert message["attitude"]       == pytest.approx([0.1,  0.2,   0.3],  abs=1e-6)
     assert message["imu"]["accel_body"] == pytest.approx([0.4, 0.5, 0.6],  abs=1e-6)
     assert message["imu"]["gyro"]    == pytest.approx([0.7,  0.8,   0.9],  abs=1e-6)

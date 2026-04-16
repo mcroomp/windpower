@@ -32,7 +32,6 @@ import argparse
 import csv
 import logging
 import sys
-import time
 import os
 
 import numpy as np
@@ -47,14 +46,14 @@ from tether          import TetherModel
 from frames          import build_orb_frame, build_vel_aligned_frame
 from sensor          import make_sensor, SpinSensor
 from controller      import compute_swashplate_from_state, OrbitTracker
-from kinematic       import KinematicStartup, compute_launch_position, make_min_jerk_traj  # noqa: F401
+from kinematic       import KinematicStartup, compute_launch_position, make_min_jerk_traj, make_orbital_kinematics, make_fast_circle_orbit_kinematics  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 from planner         import quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 from telemetry_csv import COLUMNS as _TEL_COLUMNS, TelRow as _TelRow
-import sim_time as _stm
+from mediator_events import MediatorEventLog
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -129,6 +128,8 @@ def _parse_args():
                         help="Logging verbosity level")
     parser.add_argument("--telemetry-log", default=None,
                         help="Path for per-step CSV telemetry log")
+    parser.add_argument("--events-log", default=None,
+                        help="Path for structured JSONL event log")
     return parser.parse_args()
 
 
@@ -152,6 +153,8 @@ def run_mediator(args, trajectory=None):
     """
     import time as _time_mod
     log = logging.getLogger("mediator")
+    ev  = MediatorEventLog(getattr(args, "events_log", None))
+    ev.open()
 
     cfg = _mcfg.load(getattr(args, "config", None))
 
@@ -160,10 +163,8 @@ def run_mediator(args, trajectory=None):
     # Authoritative source: conftest.py generates once and passes via --run-id.
     # When run standalone (no --run-id), generate locally as fallback.
     _run_id = args.run_id if args.run_id is not None else int(_time_mod.time())
-    log.info("RUN_ID=%d", _run_id)
-
     wind_world = np.array(cfg["wind"])
-    log.info("Wind vector (NED): %s m/s", wind_world)
+    ev.write("startup", t_sim=0.0, run_id=_run_id, wind_ned=wind_world.tolist())
 
     # -- Instantiate subsystems -----------------------------------------------
     # Mass 30 kg: the blade geometry (4 × 2 m, chord 0.15 m) was scaled from
@@ -193,8 +194,9 @@ def run_mediator(args, trajectory=None):
     _R0 = build_vel_aligned_frame(_bz, _vel0_arr)
 
     # -- Kinematic startup trajectory -----------------------------------------
-    _kin_duration = max(0.0, float(cfg["startup_damp_seconds"]))
-    _traj_type    = cfg["kinematic_traj_type"]
+    _kin_duration    = max(0.0, float(cfg["startup_damp_seconds"]))
+    _traj_type       = cfg["kinematic_traj_type"]
+    _phase3_start_t  = float("inf")   # set below for fast_circle; sentinel for other types
 
     if _traj_type == "min_jerk":
         # 5th-order minimum-jerk from home [0,0,0] at rest → pos0 at rest.
@@ -214,11 +216,11 @@ def run_mediator(args, trajectory=None):
             duration = _kin_duration,
             R0       = _R0,
         )
-        log.info(
-            "Kinematic startup (min_jerk): T_traj=%.0fs  margin=%.0fs  "
-            "total=%.0fs  target=[%.3f, %.3f, %.3f] m  vf=[%.3f, %.3f, %.3f] m/s",
-            _T_traj, _margin_s, _kin_duration, *_pos0_arr, *_vel0_arr,
-        )
+        ev.write("kinematic_config", t_sim=0.0,
+                 traj_type="min_jerk",
+                 T_traj=round(_T_traj, 1), margin_s=round(_margin_s, 1),
+                 total_s=round(_kin_duration, 1),
+                 target_pos=_pos0_arr.tolist(), target_vel=_vel0_arr.tolist())
         _dyn_pos0 = np.zeros(3)
         _dyn_vel0 = np.zeros(3)
     elif _traj_type == "linear":
@@ -230,17 +232,104 @@ def run_mediator(args, trajectory=None):
             R0         = _R0,
         )
         if _startup.duration > 0.0:
-            log.info(
-                "Kinematic startup (linear): T=%.0fs  ramp=%.0fs  "
-                "launch_pos=[%.3f, %.3f, %.3f]  vel=[%.5f, %.5f, %.5f] m/s",
-                _startup.duration, _startup.ramp_s,
-                *_startup.launch_pos, *_vel0_arr,
-            )
+            ev.write("kinematic_config", t_sim=0.0,
+                     traj_type="linear",
+                     total_s=round(_startup.duration, 1),
+                     ramp_s=round(_startup.ramp_s, 1),
+                     launch_pos=[round(v, 3) for v in _startup.launch_pos],
+                     vel=_vel0_arr.tolist())
         _dyn_pos0 = _startup.launch_pos
         _dyn_vel0 = _vel0_arr
+    elif _traj_type == "orbital":
+        # Circular orbit around the anchor.  Gives a continuously rotating GPS
+        # velocity heading so EKFGSF can discriminate its yaw hypotheses and set
+        # yawAlignComplete — which a constant straight-line velocity cannot do.
+        _orb_anchor = np.array(
+            cfg.get("kinematic_orbital_anchor_ned", [0.0, 0.0, 0.0]), dtype=float
+        )
+        _orb_dir    = int(cfg.get("kinematic_orbital_dir", 1))
+        _v_orb      = float(np.linalg.norm(_vel0_arr[:2]))   # horizontal speed
+        _traj_fn, _R_fn = make_orbital_kinematics(
+            anchor_pos = _orb_anchor,
+            p0         = _pos0_arr,
+            v_orb      = _v_orb,
+            orbit_dir  = _orb_dir,
+        )
+        _startup = KinematicStartup(
+            traj_fn  = _traj_fn,
+            duration = _kin_duration,
+            R0       = _R0,    # unused when R_fn is set; kept for completeness
+            R_fn     = _R_fn,
+        )
+        _dyn_pos0, _dyn_vel0 = _traj_fn(0.0)
+        _r_h = float(np.hypot(_pos0_arr[0] - _orb_anchor[0],
+                               _pos0_arr[1] - _orb_anchor[1]))
+        ev.write("kinematic_config", t_sim=0.0,
+                 traj_type="orbital",
+                 total_s=round(_kin_duration, 1),
+                 r_h_m=round(_r_h, 1),
+                 omega_rad_s=round(_v_orb / _r_h, 4),
+                 orbit_dir=_orb_dir,
+                 start_pos=[round(v, 1) for v in _dyn_pos0],
+                 start_vel=[round(v, 3) for v in _dyn_vel0])
+    elif _traj_type == "fast_circle":
+        # Fast-circle EKFGSF convergence trajectory:
+        #   Phase 1: n_fast tight circles (v=v_fast, r=r_circle) → EKFGSF converges
+        #   Phase 2: 1 decel circle (v → v_orb_eq) → return to orbital speed
+        #   Phase 3: T_lead s on large orbit → Lua captures, kinematic exits at p_eq
+        _orb_anchor = np.array(
+            cfg.get("kinematic_orbital_anchor_ned", [0.0, 0.0, 0.0]), dtype=float
+        )
+        _orb_dir      = int(cfg.get("kinematic_orbital_dir", 1))
+        _v_orb_eq     = float(np.linalg.norm(_vel0_arr[:2]))
+        _v_fast       = float(cfg.get("kinematic_fast_speed", 5.0))
+        _r_circle     = float(cfg.get("kinematic_circle_radius", 10.0))
+        _n_fast       = int(cfg.get("kinematic_fast_circles", 0))
+        _T_lead       = float(cfg.get("kinematic_orbit_lead_s", 10.0))
+        _t_hold       = float(cfg.get("kinematic_hold_s", 15.0))
+        _traj_fn, _R_fn = make_fast_circle_orbit_kinematics(
+            anchor_pos = _orb_anchor,
+            p_eq       = _pos0_arr,
+            v_orb_eq   = _v_orb_eq,
+            v_fast     = _v_fast,
+            n_fast     = _n_fast,
+            T_lead     = _T_lead,
+            r_circle   = _r_circle,
+            orbit_dir  = _orb_dir,
+            t_hold     = _t_hold,
+        )
+        _dyn_pos0, _dyn_vel0 = _traj_fn(0.0)
+        # Override _R0 so initial orientation matches trajectory start, not vel0.
+        # vel0 = equilibrium velocity (East), but fast circle starts at p_start
+        # with NW-pointing velocity — ~158° yaw gap → DCM inconsistency at boot.
+        _R0 = _R_fn(0.0)
+        _startup = KinematicStartup(
+            traj_fn  = _traj_fn,
+            duration = _kin_duration,
+            R0       = _R0,
+            R_fn     = _R_fn,
+        )
+        _total_dur        = float(getattr(_traj_fn, "total_duration",   _kin_duration))
+        _phase3_start_t   = float(getattr(_traj_fn, "phase3_start_t",   _kin_duration))
+        _phase3_start_pos = getattr(_traj_fn, "phase3_start_pos", _pos0_arr)
+        _phase3_logged    = False
+        _phase_at_fn      = getattr(_traj_fn, "phase_at", None)
+        _last_kin_phase   = ""
+        ev.write("kinematic_config", t_sim=0.0,
+                 traj_type="fast_circle",
+                 hold_s=round(_t_hold, 1),
+                 v_fast_m_s=round(_v_fast, 2),
+                 r_circle_m=round(_r_circle, 1),
+                 n_fast=_n_fast,
+                 T_lead_s=round(_T_lead, 1),
+                 total_s=round(_total_dur, 1),
+                 phase3_start_t=round(_phase3_start_t, 1),
+                 start_pos=[round(v, 1) for v in _dyn_pos0],
+                 exit_pos=[round(v, 1) for v in _pos0_arr])
     else:
         raise ValueError(
-            f"kinematic_traj_type must be 'linear' or 'min_jerk', got {_traj_type!r}"
+            f"kinematic_traj_type must be 'linear', 'min_jerk', 'orbital', or 'fast_circle', "
+            f"got {_traj_type!r}"
         )
 
     rotor  = _rd.load(cfg["rotor_definition"])
@@ -271,7 +360,6 @@ def run_mediator(args, trajectory=None):
     )
     sitl   = SITLInterface(
         recv_port=args.sitl_recv_port,
-        send_port=args.sitl_send_port,
     )
     aero   = SkewedWakeBEMJit.from_definition(rotor)
     anchor_ned = np.array(cfg["anchor_ned"], dtype=float)
@@ -289,13 +377,12 @@ def run_mediator(args, trajectory=None):
         K_drive  = K_DRIVE_SPIN,
         K_drag   = K_DRAG_SPIN,
     )
-    log.info("Spin sensor: noise_sigma=%.3f rad/s", spin_sensor._sigma)
-    log.info(
-        "Tether: Dyneema SK75 1.9mm  EA=%.0f kN  rest_length=%.0f m  "
-        "damping=%.1f N·s/m  break_load=%.0f N",
-        tether.EA / 1000, tether.rest_length,
-        tether.damping, tether.BREAK_LOAD_N,
-    )
+    ev.write("config", t_sim=0.0,
+             spin_sensor_sigma=round(spin_sensor._sigma, 3),
+             tether_EA_kN=round(tether.EA / 1000),
+             tether_rest_length_m=round(tether.rest_length, 1),
+             tether_damping=round(tether.damping, 1),
+             tether_break_load_N=round(tether.BREAK_LOAD_N))
 
     # -- Connect ---------------------------------------------------------------
     log.info("Binding SITL UDP sockets...")
@@ -303,7 +390,6 @@ def run_mediator(args, trajectory=None):
     log.info("Python RigidBodyDynamics ready. Starting main loop.")
 
     # -- State ----------------------------------------------------------------
-    t_wall_start    = time.monotonic()   # wall-clock reference for sim time
     t_sim           = 0.0
     step            = 0
     last_log_time   = -LOG_INTERVAL       # ensure immediate first log
@@ -314,20 +400,19 @@ def run_mediator(args, trajectory=None):
         "omega": np.array([0.0, 0.0, 0.0]),
     }
     last_servos        = np.zeros(16)   # neutral PWM (mapped from 1500µs → 0)
-    _t_last_servo      = None           # wall time of last servo reception (None = not yet connected)
-    _SITL_STALL_S      = 10.0          # seconds without a servo after first connection → SITL dead
     s1 = s2 = s3       = 0.0           # servo values (updated in ArduPilot path; stale OK in IC path)
     _body_z_eq         = np.zeros(3)   # body_z setpoint (IC path only; zeros in ArduPilot path)
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
+    _phase3_logged     = False         # one-shot: fast_circle phase 3 start (for Lua enable)
     _tel_note          = ""            # single-frame event marker written to telemetry CSV; cleared after write
     _prev_phase        = ""            # detect phase changes for tel note
     omega_spin         = _omega_spin_init
     startup_damp_k_ang = float(cfg["startup_damp_k_ang"])
-    log.info(
-        "Startup damping: T=%.0fs  vel_ramp=%.0fs  k_ang=%.0f N*m*s/rad",
-        _startup.duration, _startup.ramp_s, startup_damp_k_ang,
-    )
+    ev.write("config", t_sim=0.0,
+             startup_damp_T_s=round(_startup.duration, 1),
+             startup_damp_ramp_s=round(_startup.ramp_s, 1),
+             startup_damp_k_ang=round(startup_damp_k_ang))
 
     # -- Telemetry CSV --------------------------------------------------------
     _telemetry_file   = None
@@ -336,7 +421,7 @@ def run_mediator(args, trajectory=None):
         _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")  # noqa: WPS515
         _telemetry_writer = csv.DictWriter(_telemetry_file, fieldnames=_TEL_COLUMNS)
         _telemetry_writer.writeheader()
-        log.info("Telemetry logging -> %s", args.telemetry_log)  # args.telemetry_log is a runtime CLI arg
+        log.info("Telemetry logging -> %s", args.telemetry_log)
 
     # -- WinchNode (separate MAVLink node, co-located physically with anchor) --
     # Encapsulates WinchController + Anemometer.  The planner communicates
@@ -360,7 +445,7 @@ def run_mediator(args, trajectory=None):
     else:
         _trajectory = _mcfg.make_trajectory(
             cfg, wind_ned=_pc_telemetry["wind_ned"])
-    log.info("Trajectory: %s", type(_trajectory).__name__)
+    ev.write("config", t_sim=0.0, trajectory=type(_trajectory).__name__)
 
     # -- Pixhawk collective denormalisation -----------------------------------
     # thrust [0..1] from SET_ATTITUDE_TARGET → collective_rad for aero model.
@@ -384,33 +469,21 @@ def run_mediator(args, trajectory=None):
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
 
     # -- Main loop ------------------------------------------------------------
-    # t_sim is an accumulator (not wall-time derived) so it stays correct at
-    # any speedup.  At 1x with the rate-limiter sleep the step period is
-    # ~DT_TARGET wall-seconds, so the accumulator tracks wall-time closely.
-    # In fast mode the sleep is skipped; the loop runs at max Python speed.
 
     try:
         while True:
-            t_wall_loop = time.monotonic()
-
             # ----------------------------------------------------------------
-            # Step 1: Receive servo values from SITL
-            #   Normal mode : non-blocking (returns None on timeout → reuse last)
-            #   Fast mode   : blocking until SITL replies (1:1 lockstep)
+            # Step 1: Block until ArduPilot sends servo values (lockstep).
+            # Returns None only if the watchdog timeout (5 s) fires → SITL dead.
             # ----------------------------------------------------------------
             new_servos = sitl.recv_servos()
-            if new_servos is not None:
-                last_servos = new_servos
-                _t_last_servo = time.monotonic()
-            else:
-                _t_ref = _t_last_servo if _t_last_servo is not None else t_wall_start
-                if time.monotonic() - _t_ref > _SITL_STALL_S:
-                    log.error(
-                        "SITL watchdog: no servo packet for %.0f s — SITL has crashed. Exiting.",
-                        _SITL_STALL_S,
-                    )
-                    sys.exit(1)
+            if new_servos is None:
+                log.error("SITL watchdog: no servo packet for 5 s — SITL has crashed. Exiting.")
+                sys.exit(1)
+            last_servos = new_servos
             servos = last_servos
+            t_sim = sitl.sim_now()
+            _dt   = sitl.dt()
 
             # ── Startup kinematic phase ───────────────────────────────────────
             # Hub moves at constant velocity (vel0) from launch_pos, arriving
@@ -484,13 +557,13 @@ def run_mediator(args, trajectory=None):
                     "body_z":     hub_state["R"][:, 2],
                 }
                 _traj_cmd = _trajectory.step(
-                    _state_pkt, DT_TARGET,
+                    _state_pkt, _dt,
                     tension_n       = _pc_telemetry["tension_n"],
                     tether_length_m = _pc_telemetry["tether_length_m"],
                 )
 
                 # WinchNode (ground station) — apply speed command + safety limit
-                _winch_node.receive_command(_traj_cmd["winch_speed_ms"], DT_TARGET)
+                _winch_node.receive_command(_traj_cmd["winch_speed_ms"], _dt)
                 tether.rest_length = _winch_node.rest_length
 
             if cfg["internal_controller"] and _damp_alpha == 0.0:
@@ -520,7 +593,7 @@ def run_mediator(args, trajectory=None):
                 _aq = _traj_cmd["attitude_q"]
                 _bz_target = (None if quat_is_identity(_aq)
                               else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
-                _body_z_eq = _orbit_tracker.update(hub_state["pos"], DT_TARGET, _bz_target)
+                _body_z_eq = _orbit_tracker.update(hub_state["pos"], _dt, _bz_target)
 
                 swash = compute_swashplate_from_state(
                     hub_state=hub_state, anchor_pos=anchor_ned,
@@ -593,7 +666,7 @@ def run_mediator(args, trajectory=None):
             # drive and drag parallel — no equilibrium exists and omega runs away.
             # Spin ODE — owned by the aero model via result.Q_spin
             omega_spin = max(OMEGA_SPIN_MIN,
-                             omega_spin + result.Q_spin / I_SPIN_KGMS2 * DT_TARGET)
+                             omega_spin + result.Q_spin / I_SPIN_KGMS2 * _dt)
 
             # ----------------------------------------------------------------
             # Step 5: Integrate rigid-body dynamics (RK4, gravity internal)
@@ -624,7 +697,7 @@ def run_mediator(args, trajectory=None):
                 M_step = M_orbital
 
             prev_vel  = hub_state["vel"].copy()
-            hub_state = dynamics.step(F_net, M_step, DT_TARGET,
+            hub_state = dynamics.step(F_net, M_step, _dt,
                                       omega_spin=omega_spin)
             new_vel   = hub_state["vel"]
 
@@ -648,6 +721,21 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             if _startup.apply(hub_state, dynamics, t_sim):
                 new_vel = hub_state["vel"]
+                # Log each phase transition and populate _last_kin_phase for heartbeats.
+                if _phase_at_fn is not None:
+                    _cur_phase = _phase_at_fn(t_sim)
+                    if _cur_phase != _last_kin_phase:
+                        _last_kin_phase = _cur_phase
+                        ev.write("kinematic_phase", t_sim=t_sim, phase=_cur_phase,
+                                 pos_ned=[round(v, 1) for v in hub_state["pos"].tolist()])
+                # One-shot: log when fast_circle trajectory enters Phase 3 (large orbit).
+                # Conftest uses this marker to know when to enable Lua (SCR_USER6=1).
+                if (_traj_type == "fast_circle"
+                        and not _phase3_logged
+                        and t_sim >= _phase3_start_t):
+                    _phase3_logged = True
+                    ev.write("kinematic_phase3_start", t_sim=t_sim,
+                             pos_ned=[round(v, 1) for v in hub_state["pos"].tolist()])
             elif not _logged_transition:
                 # ── First free-flight step — one-shot transition diagnostic ────
                 # Logs the full hub state at the kinematic→free-flight boundary
@@ -660,32 +748,22 @@ def run_mediator(args, trajectory=None):
                 _bz = hub_state["R"][:, 2]
                 _om = hub_state["omega"]
                 _ti = tether._last_info
-                log.info(
-                    "TRANSITION kinematic→free-flight at t=%.3f s", t_sim)
-                log.info(
-                    "  pos_NED  = [%.4f %.4f %.4f] m  altitude=%.3f m  "
-                    "orbit_radius=%.3f m",
-                    _p[0], _p[1], _p[2], -_p[2],
-                    float(np.sqrt(_p[0]**2 + _p[1]**2)))
-                log.info(
-                    "  vel_NED  = [%.4f %.4f %.4f] m/s  |v|=%.4f m/s",
-                    _v[0], _v[1], _v[2], float(np.linalg.norm(_v)))
-                log.info(
-                    "  body_z   = [%.4f %.4f %.4f]  omega=[%.4f %.4f %.4f] rad/s",
-                    _bz[0], _bz[1], _bz[2], _om[0], _om[1], _om[2])
-                log.info(
-                    "  tether:  L=%.4f m  rest=%.4f m  ext=%.5f m  T=%.2f N  slack=%s",
-                    _ti.get("length", 0.0), tether.rest_length,
-                    _ti.get("extension", 0.0), _ti.get("tension", 0.0),
-                    _ti.get("slack", True))
-                log.info(
-                    "  aero:    T_est=%.2f N  omega_spin=%.3f rad/s  col=%.4f rad",
-                    T_est, omega_spin, collective_rad)
+                ev.write("kinematic_exit", t_sim=t_sim,
+                         pos_ned=[round(v, 4) for v in _p.tolist()],
+                         vel_ned=[round(v, 4) for v in _v.tolist()],
+                         body_z=[round(v, 4) for v in _bz.tolist()],
+                         omega=[round(v, 4) for v in _om.tolist()],
+                         tether_length_m=round(_ti.get("length", 0.0), 4),
+                         tether_tension_n=round(_ti.get("tension", 0.0), 2),
+                         tether_slack=bool(_ti.get("slack", True)),
+                         T_aero_n=round(T_est, 2),
+                         omega_spin_rad_s=round(omega_spin, 3),
+                         collective_rad=round(collective_rad, 4))
 
             # ----------------------------------------------------------------
             # Step 7: Compute hub acceleration (finite difference)
             # ----------------------------------------------------------------
-            accel_world = (new_vel - prev_vel) / DT_TARGET
+            accel_world = (new_vel - prev_vel) / _dt
 
             # ----------------------------------------------------------------
             # Step 8: Build SITL sensor packet
@@ -698,7 +776,7 @@ def run_mediator(args, trajectory=None):
                 R_hub           = hub_state["R"],
                 omega_body      = hub_state["omega"],
                 accel_world_ned = accel_world,
-                dt              = DT_TARGET,
+                dt              = _dt,
             )
 
             # ----------------------------------------------------------------
@@ -809,7 +887,6 @@ def run_mediator(args, trajectory=None):
             _vel_to_send = (sensor_data["vel_ned"]
                             if t_sim >= 2.0 else np.zeros(3))
             sitl.send_state(
-                timestamp  = t_sim,
                 pos_ned    = sensor_data["pos_ned"],
                 vel_ned    = _vel_to_send,
                 rpy_rad    = sensor_data["rpy"],
@@ -840,39 +917,27 @@ def run_mediator(args, trajectory=None):
                     tether_slack     = 1 if _ti.get("slack", True) else 0,
                     damp_alpha       = _damp_alpha,
                 )
-                log.info("%s", _hb.heartbeat(
-                    remaining_s=max(0.0, _startup.duration - t_sim)))
-                # Extra velocity detail for first 15 s of free flight
-                # (helps diagnose kinematic→free-flight transition oscillations)
-                t_free = t_sim - _startup.duration
-                if 0.0 <= t_free <= 15.0:
-                    log.info(
-                        "  vel_NED=[%.3f %.3f %.3f] m/s  |v|=%.3f  "
-                        "orbit_r=%.2f m  col=%.4f rad  phase=%s",
-                        vel[0], vel[1], vel[2], float(np.linalg.norm(vel)),
-                        float(np.sqrt(_hb.pos_x**2 + _hb.pos_y**2)),
-                        collective_rad,
-                        _traj_cmd.get("phase", ""),
-                    )
+                _remaining_s = max(0.0, _startup.duration - t_sim)
+                _phase = "kinematic" if _damp_alpha > 0.0 else "free_flight"
+                ev.write("heartbeat", t_sim=t_sim,
+                         phase=_phase,
+                         pos_ned=[round(_hb.pos_x, 1), round(_hb.pos_y, 1), round(_hb.pos_z, 1)],
+                         alt_m=round(-_hb.pos_z, 2),
+                         rpy_deg=[round(float(np.degrees(_hb.rpy_roll)), 1),
+                                  round(float(np.degrees(_hb.rpy_pitch)), 1),
+                                  round(float(np.degrees(_hb.rpy_yaw)), 1)],
+                         omega_spin_rad_s=round(_hb.omega_rotor, 2),
+                         tether_tension_n=round(_hb.tether_tension, 1),
+                         tether_length_m=round(_hb.tether_length, 1),
+                         tether_slack=bool(_hb.tether_slack),
+                         damp_alpha=round(_hb.damp_alpha, 3),
+                         remaining_s=round(_remaining_s, 1),
+                         vel_ned=[round(v, 3) for v in vel.tolist()],
+                         orbit_r_m=round(float(np.sqrt(_hb.pos_x**2 + _hb.pos_y**2)), 2),
+                         collective_rad=round(collective_rad, 4),
+                         traj_phase=_last_kin_phase if _damp_alpha > 0.0 else _traj_cmd.get("phase", ""))
 
-            # ----------------------------------------------------------------
-            # Timing: advance sim-clock; sleep remainder in normal mode;
-            # record total wall-clock time per step for adaptive speed estimate.
-            # ----------------------------------------------------------------
-            # t_sim tracks wall-clock elapsed time so fixtures and the kinematic
-            # startup complete in real time regardless of physics loop rate.
-            # In Docker the BEM loop takes ~20ms/step vs 2.5ms target, so the
-            # step accumulator (DT_TARGET per step) would advance sim-time 8x
-            # slower than wall clock and cause fixture timeouts.
-            t_sim   = time.monotonic() - t_wall_start
-            elapsed = time.monotonic() - t_wall_loop
-            if elapsed < DT_TARGET:
-                time.sleep(DT_TARGET - elapsed)
-
-            # Record wall time per physics step for the adaptive speed estimator.
-            _stm.record_sim_step(time.monotonic() - t_wall_loop, DT_TARGET)
-
-            step += 1
+            step  += 1
 
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt received — shutting down.")
@@ -883,10 +948,12 @@ def run_mediator(args, trajectory=None):
 
     finally:
         # -- Graceful shutdown ------------------------------------------------
-        log.info("Final state at step %d (t=%.2f s):", step, t_sim)
-        log.info("  pos_NED : %s m",  hub_state["pos"].round(3))
-        log.info("  vel_NED : %s m/s", hub_state["vel"].round(3))
-        log.info("  omega_spin : %.2f rad/s", omega_spin)
+        ev.write("shutdown", t_sim=t_sim,
+                 step=step,
+                 pos_ned=[round(v, 3) for v in hub_state["pos"].tolist()],
+                 vel_ned=[round(v, 3) for v in hub_state["vel"].tolist()],
+                 omega_spin_rad_s=round(omega_spin, 2))
+        ev.close()
 
         if _telemetry_file is not None:
             try:

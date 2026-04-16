@@ -16,7 +16,6 @@ This module provides:
 from __future__ import annotations
 
 import math
-import re as _re
 import time
 from pathlib import Path
 
@@ -30,6 +29,7 @@ if str(_SIM_DIR) not in _sys.path:
     _sys.path.insert(0, str(_SIM_DIR))
 
 from telemetry_csv import TelRow, write_csv
+from mediator_events import MediatorEventLog
 
 
 def run_observation_loop(
@@ -202,49 +202,39 @@ def assert_yaw_rate(
 # Physics assertion (reads actual psi_dot from mediator log)
 # ---------------------------------------------------------------------------
 
-_MEDIATOR_PSI_DOT_RE = _re.compile(
-    r"t=\s*([\d.]+)\s*s\s*\[DYNAMIC\].*psi_dot=\s*([+-]?[\d.]+)\s*deg/s"
-)
-
-
 def read_physics_psi_dot(
-    mediator_log_path: Path,
+    events_log: MediatorEventLog,
     settle_s: float,
     observe_s: float,
 ) -> list[dict]:
     """
-    Parse the mediator log to extract physics psi_dot during the observation window.
+    Extract physics psi_dot samples from the mediator events log.
 
-    The mediator logs one line per second in the form:
-        t=  40.0 s [DYNAMIC]  psi= ... deg  psi_dot= +0.123 deg/s  ...
+    Reads heartbeat events with phase=="DYNAMIC" in the observation window.
 
     Returns a list of {"t": float [s], "psi_dot": float [rad/s]} for samples
     where settle_s <= t <= settle_s + observe_s.
     """
     samples: list[dict] = []
-    try:
-        text = mediator_log_path.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            m = _MEDIATOR_PSI_DOT_RE.search(line)
-            if m:
-                t          = float(m.group(1))
-                psi_dot_ds = float(m.group(2))
-                if settle_s <= t <= settle_s + observe_s:
-                    samples.append({"t": t, "psi_dot": math.radians(psi_dot_ds)})
-    except Exception:
-        pass
+    for ev in events_log.get_events("heartbeat"):
+        if ev.get("phase") != "DYNAMIC":
+            continue
+        t = float(ev.get("t_sim", 0.0))
+        if settle_s <= t <= settle_s + observe_s:
+            psi_dot_deg_s = float(ev.get("psi_dot_deg_s", 0.0))
+            samples.append({"t": t, "psi_dot": math.radians(psi_dot_deg_s)})
     return samples
 
 
 def assert_physics_yaw_rate(
-    mediator_log_path: Path,
+    events_log: MediatorEventLog,
     threshold_rad_s: float,
     settle_s: float,
     observe_s: float,
     log,
 ) -> None:
     """
-    Assert that the actual physics psi_dot (from mediator log) stays within threshold.
+    Assert that the actual physics psi_dot stays within threshold.
 
     Unlike assert_yaw_rate (which reads ArduPilot EKF ATTITUDE.yawspeed and can
     be inflated by compass-tilt artefacts), this reads the physics simulation
@@ -252,19 +242,19 @@ def assert_physics_yaw_rate(
 
     Parameters
     ----------
-    mediator_log_path : path to the mediator.log file (available as ctx.mediator_log)
-    threshold_rad_s   : max allowed |psi_dot| [rad/s]
-    settle_s          : start of observation window [s simulation time]
-    observe_s         : length of observation window [s]
-    log               : test logger
+    events_log      : MediatorEventLog (available as ctx.events_log)
+    threshold_rad_s : max allowed |psi_dot| [rad/s]
+    settle_s        : start of observation window [s simulation time]
+    observe_s       : length of observation window [s]
+    log             : test logger
     """
-    samples = read_physics_psi_dot(mediator_log_path, settle_s, observe_s)
+    samples = read_physics_psi_dot(events_log, settle_s, observe_s)
 
     if len(samples) < 3:
         pytest.fail(
-            f"Not enough physics psi_dot samples in mediator log "
+            f"Not enough physics psi_dot samples in events log "
             f"(got {len(samples)}, need >= 3, window {settle_s:.0f}-{settle_s+observe_s:.0f} s). "
-            f"Log: {mediator_log_path}"
+            f"Log: {events_log.path}"
         )
 
     max_rate = max(abs(s["psi_dot"]) for s in samples)

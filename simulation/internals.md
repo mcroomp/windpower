@@ -20,17 +20,16 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 `PhysicalSensor` (the only sensor class) reports the **true physical orbital-frame orientation** — approximately roll=124°, pitch=−46° at tether equilibrium (ZYX Euler, NED). ACRO mode is compatible with this because it only damps angular rates toward commanded rates; the large physical tilt causes no automatic corrective cyclic.
 
 **`PhysicalSensor.compute()`** (`sensor.py`):
-- `rpy` = actual ZYX Euler angles of the orbital frame (spin stripped), with yaw replaced by velocity heading
-- yaw derived from `atan2(vE, vN)`, rate-limited to ~0.05 rad/s to prevent gyro body-axis remapping when the tether activates
-- gyro has spin stripped; rotated into the physical orbital body frame via `R_body.T`
-- accel = specific force `R_body.T @ (accel_world_ned − [0,0,9.81])`
+- `rpy` = actual ZYX Euler angles from `R_hub` directly (no overrides)
+- `gyro_body` = `R_hub.T @ omega_body` — full body angular velocity in electronics body frame. No stripping: GB4008 keeps electronics non-rotating via K_YAW damping in dynamics.
+- `accel_body` = `R_hub.T @ (accel_world_ned − [0,0,9.81])` — specific force in electronics body frame
 
 **`PhysicalHoldController`** (`controller.py`): captures equilibrium roll/pitch at kinematic startup end. Calls `compute_rc_from_attitude(roll − roll_eq, pitch − pitch_eq, ...)` so the function receives the deviation from equilibrium, not the raw physical angle.
 
 **Sensor consistency rules (must all agree or EKF triggers emergency yaw reset):**
-1. `velocity_ned` heading must match `rpy[2]` (yaw) — both from `atan2(vE, vN)`
-2. `gyro_body` in physical orbital body frame (spin stripped, then `R_body.T @ omega_orbital`)
-3. `accel_body` = `R_body.T @ (accel_world_ned − [0,0,9.81])`
+1. `rpy[2]` = actual hub orientation yaw from `R_hub` (never overridden with velocity heading)
+2. `gyro_body` = `R_hub.T @ omega_body` — no artificial stripping
+3. `accel_body` = `R_hub.T @ (accel_world_ned − [0,0,9.81])`
 
 ---
 

@@ -30,8 +30,7 @@ from stack_infra import (
 @pytest.fixture
 def acro_armed(tmp_path, request):
     """Full ACRO stack fixture. Yields StackContext armed in ACRO mode."""
-    speedup = request.config.getoption("--sitl-speedup", default=1)
-    with _acro_stack(tmp_path, test_name=request.node.name, speedup=speedup) as ctx:
+    with _acro_stack(tmp_path, test_name=request.node.name) as ctx:
         yield ctx
 
 
@@ -89,10 +88,9 @@ def acro_armed_pumping_lua(tmp_path, request):
             },
         },
     }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
     with _acro_stack(tmp_path, extra_config=extra,
                      log_name="acro_armed_pumping_lua", log_prefix="pumping_lua",
-                     test_name=request.node.name, speedup=speedup,
+                     test_name=request.node.name,
 
                      # internal_controller=False: SITL stack tests must let ArduPilot
                      # + Lua drive physics (CLAUDE.md critical rule).  Lua RC overrides
@@ -202,10 +200,9 @@ def acro_armed_landing_lua(tmp_path, request):
             },
         },
     }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
     with _acro_stack(tmp_path, extra_config=extra,
                      log_name="acro_armed_landing_lua", log_prefix="landing_lua",
-                     test_name=request.node.name, speedup=speedup,
+                     test_name=request.node.name,
 
                      # internal_controller=False: SITL stack tests must let
                      # ArduPilot + Lua drive physics (CLAUDE.md critical rule).
@@ -256,91 +253,89 @@ def acro_armed_lua_full(tmp_path, request):
 
     Key design points:
       - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
-      - kinematic_traj_type=linear, vel_ramp_s=0: hub starts at launch_pos
-        (pos0 - vel0*T) moving at constant vel0.  Orientation is body_z from
-        steady_state_starting.json from t=0.  Tether aligned throughout --
-        no orientation drift.  Hub exits kinematic at pos0 with vel0.
-        min_jerk was rejected: starting at [0,0,0] (anchor) with no tether
-        tension lets orientation drift during 65 s kinematic -- hub is badly
-        misaligned at exit -> crash.
-      - SCR_USER6=1 set immediately in fixture (not delayed until kinematic exit).
-        During kinematic, Lua pre-capture sends pure gyro feedthrough so ACRO
-        rate_error = 0 -- no corrective swashplate torque, no kinematic conflict.
-        When AHRS first becomes healthy (~t=15 s), Lua immediately captures bz_eq0
-        from the DCM (disk_normal_ned()).  EKF yaw may be wrong at this point, but
-        bz_now and bz_eq0 are both in the same EKF frame so their cross product is
-        near-zero -> cyclic stays near neutral -> hub doesn't tumble at kinematic
-        exit.  When GPS fuses at ~43 s, GPS tether recapture replaces bz_eq0 with
-        the accurate tether direction (immune to EKF yaw error) and orbit tracking
-        begins with correct geometry DURING kinematic.
-        At kinematic exit the hub is already under correct Lua control -- no gap.
-      - COL_CRUISE_FLIGHT_RAD=-0.18 rad in rawes.lua matches stack_coll_eq
-        from test_steady_flight.py: altitude-neutral at the natural orbit.
+      - kinematic_traj_type=fast_circle (n_fast=1, v_fast=5 m/s, r=5 m):
+        Phases 1-3 (hold→accel→const→decel) complete at t=44.4 s.
+        Phase 4 (large orbit at 0.96 m/s) runs from t=44.4 s until kinematic exit
+        at t=80 s.  Hub exits at the large orbit with omega~0.01 rad/s (tiny).
+        Orbital kinematic alone (0.56 deg/s) causes EKFGSF to run for 60-97 s
+        without converging, leading to FPE in EKFGSF_yaw::predict() → GPS Glitch
+        → hub crashes at kinematic exit.
+      - v_fast=5 m/s: Phase 1/2/3 heading rotates at 1 rad/s → EKFGSF converges
+        quickly.  But velNEDdiff=5 m/s > 1 m/s during Phase 1/2/3 so GPS cannot
+        fuse yet.  GPS fuses in Phase 4 (v=0.96 m/s, velNEDdiff=0.96<1 m/s) at
+        t~76 s after ~32 s of slow heading rotation (0.0097 rad/s).
+      - SCR_USER6=0 during fast circles and decel (hub near level, wrong equilibrium).
+        SCR_USER6=1 set at Phase 4 start (t~45 s): hub is in large-orbit tether
+        orientation.  Pre-GPS bypass holds col_cruise while _tdir0=nil.
+        GPS tether recapture fires at t~76 s (_tdir0 set, orbit tracking active).
+        Hub exits kinematic at t=80 s with 4 s of active orbit tracking.
+      - COL_CRUISE_FLIGHT_RAD=-0.18 rad in rawes.lua matches stack_coll_eq.
       - Lua VZ altitude-hold (vz_sp=0): bidirectional P controller around
-        COL_CRUISE_FLIGHT_RAD=-0.18 rad.  Mediator decode is asymmetric
-        (col_min=-0.28, col_max=0.10) matching Lua's encoding exactly.
+        COL_CRUISE_FLIGHT_RAD.  Mediator decode is asymmetric (col_min=-0.28,
+        col_max=0.10) matching Lua's encoding exactly.
 
-    Timeline (SITL time):
-      t=0..60 s   kinematic constant-velocity phase: launch_pos->near pos0 at vel0
-      t=60..65 s  kinematic ramp-to-zero (vel_ramp_s=5): vel decelerates from 0.96 to 0
-      t~15 s      arm complete; fixture sets SCR_USER1-6 (SCR_USER6=1); yields
-      t~15 s      AHRS healthy; Lua DCM capture: "RAWES flight: captured" sent
-                  bz_eq0 = disk_normal_ned() (in EKF frame, yaw may be wrong)
-                  _tdir0 = nil (set later by GPS recapture)
-                  Pre-GPS DCM tracking: bz_orbit = bz_now every step -> no spike at GPS fire
-      t~21 s      EKF3 GPS origin set
-      t~23 s      GPS fuses; GPS synchronized capture fires:
-                  _tdir0 = normalize(diff) (world frame reference for orbit tracking)
-                  bz_eq0 = disk_normal_ned() at that moment (= bz_now = bz_orbit -> error=0)
-                  orbit tracking: azimuthal(bz_eq0, _tdir0, diff) rotates bz_orbit at
-                  the same rate as bz_now (gyros), keeping error ~0 throughout.
-      t=65 s      kinematic exits (vel~0); EKF vz~0 -> col=-0.18 (equilibrium) ->
-                  net radial force~0 -> stable entry into free flight.
-      t=65+       free flight under ArduPilot + Lua
+    Timeline (from mediator start, speedup=1):
+      t=0..15 s    Phase 0: stationary hold.
+      t=15..27.6 s Phase 1: accel circle (v 0→5 m/s, r=5 m, omega up to 57 deg/s).
+      t=27.6..33.9 s Phase 2: constant-speed circle (v=5 m/s).
+      t=33.9..44.4 s Phase 3: decel circle (v 5→0.96 m/s).
+      t~11 s       GPS first fix.
+      t~10 s       arm complete; fixture sets SCR_USER1-6 (SCR_USER6=0).
+      t~19 s       GPS origin set.
+      t=44.4..80 s Phase 4: large orbit (r=99 m, v=0.96 m/s, omega=0.56 deg/s).
+      t~45 s       fixture wait expires; SCR_USER6=1 set.
+                   Lua pre-GPS bypass: col=col_cruise, _tdir0=nil.
+      t~76 s       GPS fuses (yawAlignComplete + delAngBiasLearned in Phase 4).
+                   GPS tether recapture: _tdir0 set, orbit tracking active.
+      t=80 s       kinematic exits at large-orbit position; omega~0.01 rad/s.
+      t~80+        free flight under ArduPilot + Lua; Lua already tracking orbit.
 
-    Fixture yields at ~t=15 s.  "RAWES flight: captured" STATUSTEXT was consumed
-    by the fixture drain and stored in ctx.all_statustext.  The test checks
-    ctx.all_statustext for prior captures before starting its post-kinematic drain.
+    Fixture yields at Phase 4 start (~t=45 s).  wait_kinematic_done() in the test
+    waits for the remaining ~35 s of Phase 4.  STATUSTEXTs from the kinematic
+    (GPS fusion at t~76 s, Lua capture) are in ctx.all_statustext.
     """
     extra = {
-        # Linear kinematic: vel0=East, vel_ramp_s=5.
-        # Hub moves East at 0.96 m/s for t=0..60s, decelerates to 0 over t=60..65s.
+        # Fast-circle kinematic for reliable EKFGSF convergence + clean kinematic exit.
         #
-        # Why vel0=East [0, 0.96, 0]:
-        #   GPS velocity heading = 90 deg (East), constant and unambiguous.
-        #   EK3_SRC1_YAW=8 aligns EKF yaw to GPS velocity heading -> EKF yaw
-        #   stabilises to 90 deg within seconds of GPS fusion (~t=23 s).
-        #   GPS fuses DURING the kinematic (at t~23 s) -> GPS tether recapture
-        #   fires at t~23 s -> orbit tracking starts 42 s before kinematic exit.
-        #   At kinematic exit (t=65 s), Lua already has active cyclic control
-        #   via orbit tracking -> smooth transition, no control gap.
+        # v_fast=5 m/s (57 deg/s heading): fast EKFGSF convergence during Phase 1/2/3.
+        # velNEDdiff=5 m/s > 1 m/s threshold → GPS cannot fuse during Phase 1/2/3.
+        # Phase 4 (large orbit, v=0.96 m/s, velNEDdiff=0.96 < 1 m/s): GPS fuses ~32 s
+        # into Phase 4 (t~76 s) after EKFGSF converges from slow heading rotation.
         #
-        # Why vel_ramp_s=5:
-        #   Ramps velocity from 0.96 to 0 over t=60..65 s (last 5 s of kinematic).
-        #   At kinematic exit: vel~0, EKF vz~0 -> Lua VZ controller outputs
-        #   col_cmd = col_cruise + KP_VZ*0 = -0.18 rad (equilibrium) ->
-        #   T_aero ~ T_tether -> net radial force ~ 0 -> stable entry.
-        #   vel_ramp_s=20 (older design) was flaky: EKF yaw degraded too long
-        #   after exit (GPS vel < 0.5 m/s for 10.4 s) -> feedthrough instability.
-        #   vel_ramp_s=5: GPS heading degrades only 2.6 s (vel<0.5 from t=62.4 s).
-        "kinematic_traj_type":  "linear",
-        "kinematic_vel_ramp_s": 5.0,
-        "vel0":                 [0.0, 0.96, 0.0],
+        # CRITICAL: kinematic must exit during Phase 4 (large orbit, omega~0.01 rad/s).
+        # Phase timings with v_fast=5, r=5, n_fast=1, T_lead=10, t_hold=15:
+        #   T_accel = 4pi*5/5 = 12.6 s     (Phase 1: 0→5 m/s over 2pi)
+        #   T_per   = 2pi*5/5 =  6.3 s     (Phase 2: constant 5 m/s, n_fast=1 circle)
+        #   T_decel = 2pi*5/2.98 = 10.5 s  (Phase 3: 5→0.96 m/s, mean=2.98)
+        #   t_d     = 15+12.6+6.3+10.5 = 44.4 s  (Phase 4 start)
+        #   t_total = 44.4+10 = 54.4 s     (trajectory end, but kinematic keeps running
+        #                                    in Phase 4 beyond t_total until duration=80 s)
+        # startup_damp_seconds=80 s → kinematic exits at t=80 s (35.6 s into Phase 4).
+        # At exit: position = large-orbit point (r=99 m), omega~0.01 rad/s (tiny). ✓
+        #
+        # Contrast: v_fast=0.96 m/s gives t_d=145.8 s >> startup_damp=80 s, so the
+        # kinematic exits during Phase 1 (accel) with omega~0.19 rad/s → hub tumbles.
+        "kinematic_traj_type":       "fast_circle",
+        "kinematic_orbital_dir":     1,
+        "kinematic_fast_speed":      5.0,    # v_fast [m/s]: fast EKFGSF convergence
+        "kinematic_circle_radius":   5.0,    # r_circle [m]: omega_fast = 57 deg/s
+        "kinematic_fast_circles":    1,      # 1 constant-speed circle after accel
+        "kinematic_orbit_lead_s":    10.0,   # T_lead [s] on large orbit before t_total
+        "vel0":                      [0.0, 0.96, 0.0],
+        # startup_damp=80 s > t_total=54.4 s: kinematic exits at t=80 s in Phase 4.
+        "startup_damp_seconds":      80.0,
     }
-    speedup = request.config.getoption("--sitl-speedup", default=1)
     with _acro_stack(tmp_path, extra_config=extra,
                      log_name="acro_armed_lua_full", log_prefix="",
-                     test_name=request.node.name, speedup=speedup,
+                     test_name=request.node.name,
 
                      # CLAUDE.md critical rule: internal_controller=False for all
                      # full-stack flight tests.  ArduPilot + Lua own the physics.
                      internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua with SCR_USER6=1 active immediately.
-        # Lua pre-capture sends pure gyro feedthrough (ACRO rate_error=0) so
-        # no kinematic conflict.  GPS-based capture fires when EKF fuses GPS
-        # (~43 s into sim), before kinematic exits at 65 s.
-        # SCR_USER5 = ctx.home_alt_m: anchor is home_alt_m metres below EKF HOME.
-        ctx.log.info("Setting SCR_USER params for rawes.lua (SCR_USER6=1 active immediately) ...")
+        # Post-arm: configure rawes.lua params.  SCR_USER6=0 (Lua inactive) until
+        # Phase 3 (large orbit) starts — avoids Lua capturing wrong equilibrium
+        # while hub is level during fast circles (Phases 1 and 2).
+        ctx.log.info("Setting SCR_USER params for rawes.lua (SCR_USER6=0 until Phase 3) ...")
         lua_params = {
             "SCR_ENABLE": 1,              # persist scripting in EEPROM
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
@@ -348,11 +343,30 @@ def acro_armed_lua_full(tmp_path, request):
             "SCR_USER3": 0.0,             # anchor North   [m]
             "SCR_USER4": 0.0,             # anchor East    [m]
             "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 1,               # RAWES_MODE = 1 (flight) -- active now
+            "SCR_USER6": 0,               # inactive during fast circles
         }
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
 
         ctx.wait_drain(timeout=1.0, label="post-param")
+
+        # Wait for fast circles + decel circle to finish before enabling Lua.
+        # Phase boundary timing (deterministic at speedup=1):
+        #   T_accel  = 4*pi*5/5.0 = 12.6 s  (Phase 1: accel circle, v_fast=5)
+        #   T_per    = 2*pi*5/5.0 =  6.3 s  (Phase 2: constant circle, n_fast=1)
+        #   T_decel  = 2*pi*5/2.98 = 10.5 s (Phase 3: decel 5→0.96, mean=2.98)
+        #   t_d      = 15+12.6+6.3+10.5 = 44.4 s from mediator start (Phase 4 start)
+        #   Arm fires  ~ 10 s from mediator start
+        #   Wait after arm: 44.4 - 10 = 34.4 s -> use 35 s
+        _PHASE3_WAIT_S = 35.0
+        ctx.log.info(
+            "Waiting %.0f s for fast circle + decel to finish before enabling Lua ...",
+            _PHASE3_WAIT_S,
+        )
+        ctx.wait_drain(timeout=_PHASE3_WAIT_S, check_procs=True, label="circles-wait")
+        ok = ctx.gcs.set_param("SCR_USER6", 1, timeout=5.0)
+        ctx.log.info("SCR_USER6=1 enabled (Phase 3 started)  ACK=%s", ok)
+
+        ctx.wait_drain(timeout=1.0, label="post-lua-enable")
         yield ctx

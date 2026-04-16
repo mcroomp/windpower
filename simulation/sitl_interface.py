@@ -53,39 +53,29 @@ class SITLInterface:
     The physics backend replies to the source address of each packet with a
     JSON state string.
 
+    recv_servos() blocks until ArduPilot sends a servo packet (lockstep).
+    Returns None only when the watchdog timeout expires, indicating SITL died.
+
     Parameters
     ----------
-    recv_port       : int    UDP port to bind for incoming servo data (default 9002)
-    recv_timeout_ms : float  Non-blocking receive timeout in milliseconds (normal mode)
-    lockstep        : bool   If True, recv_servos() blocks until ArduPilot replies,
-                             ensuring a 1:1 state→servo exchange.  The simulation
-                             runs as fast as Python and ArduPilot can exchange packets.
-                             Use set_lockstep() to switch modes after bind().
+    recv_port        : int   UDP port to bind for incoming servo data (default 9002)
+    watchdog_timeout : float Seconds to wait for a servo packet before giving up (default 5 s)
     """
-
-    # In lockstep mode the socket blocks up to this long before giving up.
-    # Long enough that normal operation never trips it; short enough to detect
-    # a crashed SITL within a reasonable time.
-    _LOCKSTEP_TIMEOUT_S: float = 5.0
 
     def __init__(
         self,
         recv_port: int = _SITL_RECV_PORT,
-        recv_timeout_ms: float = 5.0,
-        lockstep: bool = False,
-        # Legacy parameter — kept so callers that pass send_port= don't break.
-        # The send address is now determined dynamically from each incoming packet.
-        send_port: int = 9003,
-        host: str = "127.0.0.1",
+        watchdog_timeout: float = 5.0,
     ):
         self._recv_port = recv_port
-        self._timeout_s = recv_timeout_ms / 1000.0
-        self._lockstep  = lockstep
+        self._timeout_s = watchdog_timeout
 
         self._sock: socket.socket | None = None
         self._sitl_addr: tuple[str, int] | None = None   # filled on first recv
 
         self._last_servos: np.ndarray = np.zeros(16, dtype=np.float64)
+        self._sim_time_s:  float      = 0.0
+        self._frame_rate:  int        = 400   # updated from servo packets; default 400 Hz
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -96,30 +86,8 @@ class SITLInterface:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("", self._recv_port))
-        self._sock.settimeout(self._active_timeout())
-        log.info("SITLInterface bound to port %d (lockstep=%s)", self._recv_port, self._lockstep)
-
-    def set_lockstep(self, enabled: bool) -> None:
-        """Switch between lockstep and normal (non-blocking) receive mode.
-
-        In lockstep mode recv_servos() blocks until ArduPilot sends a servo
-        packet, guaranteeing a 1:1 state→servo exchange and allowing the
-        simulation to run at maximum speed.  A 5 s safety timeout still applies
-        so a crashed SITL process is detected promptly.
-
-        In normal mode recv_servos() returns None after recv_timeout_ms so the
-        mediator can proceed with the last known servo values if SITL is slow.
-
-        May be called before or after bind().
-        """
-        self._lockstep = enabled
-        if self._sock is not None:
-            self._sock.settimeout(self._active_timeout())
-        log.info("SITLInterface lockstep=%s", enabled)
-
-    def _active_timeout(self) -> float:
-        """Return the socket timeout to use given the current lockstep setting."""
-        return self._LOCKSTEP_TIMEOUT_S if self._lockstep else self._timeout_s
+        self._sock.settimeout(self._timeout_s)
+        log.info("SITLInterface bound to port %d", self._recv_port)
 
     def close(self) -> None:
         if self._sock is not None:
@@ -143,7 +111,6 @@ class SITLInterface:
 
     def send_state(
         self,
-        timestamp:   float,
         pos_ned:     np.ndarray,   # [N, E, D] metres
         vel_ned:     np.ndarray,   # [vN, vE, vD] m/s
         rpy_rad:     np.ndarray,   # [roll, pitch, yaw] radians
@@ -174,9 +141,8 @@ class SITLInterface:
             return   # SITL hasn't sent anything yet; nothing to reply to
 
         rpm1 = rpm_rad_s * (60.0 / (2.0 * 3.141592653589793))
-
         msg = {
-            "timestamp": float(timestamp),
+            "timestamp": self._sim_time_s,
             "imu": {
                 "gyro":       [float(gyro_body[0]),
                                float(gyro_body[1]),
@@ -210,13 +176,15 @@ class SITLInterface:
 
     def recv_servos(self) -> Optional[np.ndarray]:
         """
-        Non-blocking receive of binary servo data from SITL.
+        Blocking receive of binary servo data from SITL (lockstep).
+
+        Blocks until ArduPilot sends a servo packet, then returns immediately.
+        Returns None only if the watchdog timeout expires (SITL has crashed).
 
         Returns
         -------
         np.ndarray, shape (16,), dtype float64
             Servo values normalised to [-1, 1].
-            Returns None if no packet arrived within recv_timeout_ms.
 
         PWM → normalised mapping: (pwm_us - 1500) / 500
             1000 µs → -1.0
@@ -255,6 +223,9 @@ class SITLInterface:
 
         # Record SITL's address so send_state() knows where to reply
         self._sitl_addr = addr
+        if frame_rate > 0:
+            self._frame_rate  = frame_rate
+            self._sim_time_s  = frame_count / frame_rate
 
         pwm = np.array(pwm_raw[:16], dtype=np.float64)
         normalised = (pwm - 1500.0) / 500.0
@@ -265,6 +236,16 @@ class SITLInterface:
     def last_servos(self) -> np.ndarray:
         """Return the most recently received servo array (never None)."""
         return self._last_servos.copy()
+
+    def sim_now(self) -> float:
+        """Sim time [s] derived from the most recent servo packet (frame_count / frame_rate).
+        Returns 0.0 before the first packet is received."""
+        return self._sim_time_s
+
+    def dt(self) -> float:
+        """Physics timestep [s] = 1 / frame_rate from the most recent servo packet.
+        Returns 1/400 before the first packet is received."""
+        return 1.0 / self._frame_rate
 
 
 # ---------------------------------------------------------------------------

@@ -186,7 +186,6 @@ def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
     add_param_file: "Path | None" = None,
-    speedup: int = 1,
 ) -> subprocess.Popen:
     # Truncate the ArduCopter terminal log so each test run starts fresh.
     # /tmp/ArduCopter.log accumulates across runs in the container — clearing it
@@ -218,8 +217,6 @@ def _launch_sitl(
     ]
     if add_param_file is not None:
         cmd += ["--add-param-file", str(add_param_file)]
-    if speedup > 1:
-        cmd += ["--speedup", str(speedup)]
     return subprocess.Popen(
         cmd,
         cwd=str(sim_vehicle.parent.parent.parent),
@@ -452,6 +449,7 @@ def _launch_mediator(
     repo_root: Path,
     log_path: Path,
     telemetry_log_path: "str | None" = None,
+    events_log_path: "str | None" = None,
     tether_rest_length: "float | None" = None,
     initial_state: "dict | None" = None,
     startup_damp_seconds: "float | None" = None,
@@ -526,6 +524,8 @@ def _launch_mediator(
     ]
     if telemetry_log_path is not None:
         cmd += ["--telemetry-log", telemetry_log_path]
+    if events_log_path is not None:
+        cmd += ["--events-log", events_log_path]
     if run_id is not None:
         cmd += ["--run-id", str(run_id)]
     return subprocess.Popen(
@@ -562,6 +562,7 @@ def _launch_mediator_torque(
     tail_channel: int = 3,
     lua_mode: bool = False,
     startup_hold_s: float = 10.0,
+    events_log_path: "str | None" = None,
 ) -> subprocess.Popen:
     """Launch mediator_torque.py as a subprocess."""
     cmd = [
@@ -574,6 +575,8 @@ def _launch_mediator_torque(
     ]
     if lua_mode:
         cmd.append("--lua-mode")
+    if events_log_path is not None:
+        cmd += ["--events-log", events_log_path]
     return subprocess.Popen(
         cmd,
         cwd=str(repo_root),

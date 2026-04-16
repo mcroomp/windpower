@@ -39,7 +39,7 @@ time.sleep(0.5)
 proc = subprocess.Popen([
     '/ardupilot/build/sitl/bin/arducopter-heli',
     '--home', '51.5,-0.1,50,0',
-    '--model', 'JSON', '--speedup', '1',
+    '--model', 'JSON',
     '--defaults', 'Tools/autotest/default_params/copter-heli.parm',
     '-I0'
 ], cwd='/ardupilot', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

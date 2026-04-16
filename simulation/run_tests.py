@@ -33,11 +33,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# sim_time lives in simulation/ — add it to sys.path so run_tests.py can import
-# it regardless of the working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sim_time as _stm
-
 VENV_PYTHON   = "simulation/tests/unit/.venv/Scripts/python.exe"
 DEFAULT_SUMMARY = "simulation/logs/suite_summary.json"
 
@@ -98,7 +93,6 @@ def main() -> int:
     raw_args = sys.argv[1:]
     filter_mode  = "summary"
     summary_file = DEFAULT_SUMMARY
-    sitl_speedup = 1          # --sitl-speedup N, parsed here for speedup-aware timing
     pytest_args: list[str] = []
 
     i = 0
@@ -108,14 +102,6 @@ def main() -> int:
             filter_mode = raw_args[i + 1]; i += 2
         elif a == "--summary" and i + 1 < len(raw_args):
             summary_file = raw_args[i + 1]; i += 2
-        elif a == "--sitl-speedup" and i + 1 < len(raw_args):
-            try:
-                sitl_speedup = int(raw_args[i + 1])
-            except ValueError:
-                sitl_speedup = 1
-            pytest_args.append(a)        # still forward to pytest (conftest needs it)
-            pytest_args.append(raw_args[i + 1])
-            i += 2
         else:
             pytest_args.append(a); i += 1
 
@@ -203,23 +189,13 @@ def main() -> int:
 
     rc = proc.returncode
 
-    # Determine speedup for wall-clock normalisation.
-    # Precedence: --sitl-speedup CLI arg > RAWES_SPEEDUP env var > adaptive estimator.
-    # The run_tests.py process itself has no sim steps so the adaptive estimator
-    # always falls back to the env var; --sitl-speedup is the authoritative source
-    # when running stack tests via "bash sim.sh test-stack --sitl-speedup N".
-    _speedup = float(sitl_speedup) if sitl_speedup > 1 else _stm.get_speedup()
-    equiv_s  = elapsed * _speedup
-
     # ── Write summary JSON ───────────────────────────────────────────────────
     summary_path = Path(summary_file)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary = {
         "timestamp":    timestamp,
-        "elapsed_s":    round(equiv_s, 2),   # 1x-equivalent; comparable across speedups
-        "wall_s":       round(elapsed, 2),   # actual wall-clock
-        "speedup":      _speedup,
+        "elapsed_s":    round(elapsed, 2),
         "exit_code":    rc,
         "passed":       n_pass,
         "failed":       n_fail,
@@ -231,11 +207,7 @@ def main() -> int:
     }
     summary_path.write_text(json.dumps(summary, indent=2))
 
-    # Time label: always show 1x-equivalent so suites at different speedups compare fairly.
-    if _speedup > 1.0:
-        _time_str = f"{equiv_s:.1f}s equiv ({elapsed:.1f}s wall at {_speedup:.0f}x)"
-    else:
-        _time_str = f"{elapsed:.1f}s"
+    _time_str = f"{elapsed:.1f}s"
 
     print()
     print(f"{CYAN}{'-'*70}{RESET}")

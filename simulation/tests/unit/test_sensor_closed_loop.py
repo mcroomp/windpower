@@ -18,10 +18,11 @@ compass reads the same R_orb orientation, so compass and reported attitude alway
 agree → no EKF emergency yaw reset.
 
 The GB4008 counter-torque motor keeps the electronics non-rotating relative to
-the rotor spin axis, modelled by stripping the spin component from omega_body
-before projecting to body frame.  The yaw of the electronics platform is
-whatever build_orb_frame gives (East-projection onto disk plane); its exact
-direction is unimportant as long as it is steady.
+the rotor spin axis, modelled as a K_YAW damping torque in the dynamics ODE.
+The sensor faithfully reports whatever angular velocity the body has — no
+stripping.  The yaw of the electronics platform is whatever build_orb_frame
+gives (East-projection onto disk plane); its exact direction is unimportant
+as long as it is steady.
 
 What this specifically tests
 -----------------------------
@@ -35,11 +36,12 @@ What this specifically tests
 
 3. Gyro boundedness:
      gyro_body norm must stay below GYRO_MAX_RAD_S throughout.  A large value
-     indicates a spin-strip bug or frame inversion in the sensor code.
+     indicates a sensor or K_YAW dynamics bug.
 
 4. Gyro spin isolation:
-     The GB4008 motor keeps the electronics non-rotating; the gyro must not see
-     rotor spin.  Verified by checking that gyro_body norm is << omega_spin.
+     The GB4008 motor keeps the electronics non-rotating via K_YAW dynamics.
+     In steady flight, gyro_body norm must remain << omega_spin (the rotor
+     spin speed), because the body itself is not spinning.
 
 Sensor configuration
 --------------------
@@ -90,13 +92,14 @@ KP_INNER = RatePID.DEFAULT_KP
 WIND = np.array([0.0, 10.0, 0.0])   # NED: East wind
 
 # Maximum plausible gyro_body norm [rad/s].  Orbital rate is ~0.2-0.3 rad/s;
-# 5 rad/s is a generous upper bound that catches spin-strip bugs without
+# 5 rad/s is a generous upper bound that catches body-rate anomalies without
 # being sensitive to short transients.
 GYRO_MAX_RAD_S = 5.0
 
 # Gyro must be well below rotor spin (factor by which omega_spin exceeds gyro).
 # At omega_spin ~28 rad/s and orbital rate ~0.3 rad/s, the ratio is ~90x.
-# Requiring 10x gives significant headroom while catching spin-strip failures.
+# Requiring 10x gives significant headroom; K_YAW dynamics keep body spin
+# near zero so this ratio should be met easily.
 SPIN_ISOLATION_FACTOR = 10.0
 
 
@@ -287,7 +290,7 @@ def test_sensor_yaw_changes_slowly():
 
     The orbital frame yaw changes as disk_normal rotates during orbit.
     Typical rate is ~0.01-0.05 rad/s.  A rate > 1 rad/s indicates a frame
-    singularity or spin-strip bug.
+    singularity or sensor frame bug.
     """
     _, sensor_log = _run()
     YAW_RATE_MAX = 1.0   # rad/s — generous; orbital rate is ~0.02 rad/s
@@ -315,9 +318,9 @@ def test_sensor_gyro_bounded():
     """
     gyro_body norm must stay below GYRO_MAX_RAD_S.
 
-    260 rad/s in an earlier run indicated a spin-strip failure.  The orbital
-    rate during normal flight is ~0.2-0.3 rad/s; 5 rad/s catches bugs with
-    margin for short transients.
+    260 rad/s in an earlier run indicated a sensor modeling failure.  The
+    orbital rate during normal flight is ~0.2-0.3 rad/s; 5 rad/s catches
+    anomalies with margin for short transients.
     """
     _, sensor_log = _run()
     peak = max(s["gyro_norm"] for s in sensor_log)
@@ -327,16 +330,17 @@ def test_sensor_gyro_bounded():
     )
     assert peak <= GYRO_MAX_RAD_S, (
         f"gyro_body peak {peak:.3f} rad/s exceeded {GYRO_MAX_RAD_S} rad/s "
-        "(spin-strip bug?)"
+        "(sensor or K_YAW dynamics bug?)"
     )
 
 
 def test_sensor_gyro_spin_isolated():
     """
-    Gyro must be well below rotor spin rate (GB4008 keeps electronics non-rotating).
+    Gyro must be well below rotor spin rate.
 
-    Ratio omega_spin / gyro_norm must exceed SPIN_ISOLATION_FACTOR at every sample.
-    A failure here means the spin component is leaking into gyro_body.
+    The GB4008 K_YAW damping keeps the electronics body from spinning in
+    free flight.  Ratio omega_spin / gyro_norm must exceed SPIN_ISOLATION_FACTOR
+    at every sample.  A failure indicates K_YAW dynamics or sensor model issues.
     """
     _, sensor_log = _run()
     min_ratio = float("inf")
@@ -354,7 +358,7 @@ def test_sensor_gyro_spin_isolated():
     _log.write(lines,
                f"min_ratio={min_ratio:.1f}  required={SPIN_ISOLATION_FACTOR}")
     assert min_ratio >= SPIN_ISOLATION_FACTOR, (
-        f"Spin leaked into gyro: min(omega_spin/gyro_norm)={min_ratio:.1f} "
+        f"Body spin in gyro: min(omega_spin/gyro_norm)={min_ratio:.1f} "
         f"(required >= {SPIN_ISOLATION_FACTOR})"
     )
 

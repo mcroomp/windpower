@@ -19,21 +19,14 @@ Usage
     gcs.close()
 """
 
+import collections
 import logging
-import os
-import sys
 import threading
 import time
 from pathlib import Path
 
 from pymavlink import mavutil
 
-# sim_time lives in simulation/ — add it to sys.path if needed (e.g. when
-# gcs.py is imported from a test subdirectory before the caller has done so).
-_SIM_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SIM_DIR not in sys.path:
-    sys.path.insert(0, _SIM_DIR)
-from sim_time import wall_s, sim_sleep, record_sim_step
 from mavlink_log import MavlinkLogWriter
 
 log = logging.getLogger(__name__)
@@ -58,6 +51,65 @@ _POS_ONLY_MASK = (
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
     | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
+
+
+class SimClock:
+    """
+    Simulation-time clock driven by ArduPilot MAVLink messages.
+
+    **Sim time vs wall-clock time**
+
+    ArduPilot SITL uses a lockstep physics protocol: the flight-controller
+    binary sends a servo packet and then blocks until the physics backend
+    replies with a state packet.  Because of this lockstep, ArduPilot's
+    internal clock (``time_boot_ms``) advances only when the physics loop is
+    running — it is *not* a real-time clock.
+
+    - At SITL speedup=1 (default), sim time ≈ wall-clock time (roughly 1:1),
+      but the two are never guaranteed to be equal.
+    - Every received MAVLink message carries ``time_boot_ms``; this class
+      advances monotonically from those timestamps so callers using
+      ``sim_now()`` stay synchronised with ArduPilot's internal time rather
+      than with wall-clock.
+    - **All messages advance the clock — including discarded ones.**  When
+      ``_recv(type="ATTITUDE")`` is waiting and a HEARTBEAT arrives first,
+      the clock is updated from the HEARTBEAT's ``time_boot_ms`` before the
+      HEARTBEAT is thrown away.  The type filter controls what is *returned*
+      to the caller; it does not affect clock updates.
+
+    No lock is needed: only the main test thread reads and writes this clock
+    (the heartbeat thread only *sends* MAVLink messages, never receives them).
+    """
+
+    def __init__(self) -> None:
+        self._t_ms: int = 0
+
+    def update(self, time_boot_ms: int) -> None:
+        """Advance the clock to *time_boot_ms*.
+
+        Messages with time_boot_ms=0 are silently skipped (not all message
+        types carry a meaningful timestamp).  Any non-zero timestamp that is
+        less than the current clock value is a bug — messages must arrive in
+        non-decreasing order.
+        """
+        if time_boot_ms == 0:
+            return
+        assert time_boot_ms >= self._t_ms, (
+            f"sim clock went backward: {time_boot_ms} ms < {self._t_ms} ms"
+        )
+        self._t_ms = time_boot_ms
+
+    def now(self) -> float:
+        """
+        Current simulation time in seconds (ArduPilot ``time_boot_ms / 1000``).
+
+        Returns 0.0 before the first MAVLink message is received.
+        """
+        return self._t_ms / 1000.0
+
+    def now_ms(self) -> int:
+        """Current simulation time in milliseconds (raw ``time_boot_ms``)."""
+        return self._t_ms
 
 
 class RawesGCS:
@@ -86,40 +138,87 @@ class RawesGCS:
         self._target_component = 1
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
-        # Speed estimator tracking state — updated by _track_msg_timing()
-        self._last_boot_ms:   float | None = None
-        self._last_boot_wall: float | None = None
+        self._sim_clock = SimClock()
+        # Internal receive buffer — messages drained from the network socket but
+        # not yet returned to a caller.  Populated by _recv; popped in FIFO order.
+        # Clock is advanced only when a message is popped, so sim_now() stays
+        # consistent with the message that caused _recv to return.
+        self._recv_buf: collections.deque = collections.deque()
         # JSON message log — every received MAVLink message written as one line
         self._mavlog: MavlinkLogWriter | None = None
         if mavlog_path is not None:
             self._mavlog = MavlinkLogWriter.open(mavlog_path)
 
     # ------------------------------------------------------------------
-    # Speed estimation from MAVLink message timing
+    # Simulation time
     # ------------------------------------------------------------------
 
-    def _track_msg_timing(self, msg) -> None:
-        """Update the adaptive speed estimator from a timestamped MAVLink message.
-
-        Any message that carries time_boot_ms (e.g. ATTITUDE, LOCAL_POSITION_NED)
-        lets us compute: sim_dt = delta_time_boot_ms / 1000, wall_dt = elapsed
-        wall-clock.  This is the GCS-side equivalent of the mediator's
-        recv_servos() click timing — both feed record_sim_step() so wall_s()
-        and sim_sleep() automatically reflect the actual simulation speed.
-
-        HEARTBEAT does not carry time_boot_ms and is silently skipped.
+    def sim_now(self) -> float:
         """
-        boot_ms = getattr(msg, "time_boot_ms", None)
-        if boot_ms is None or boot_ms == 0:
-            return
-        now = time.monotonic()
-        if self._last_boot_ms is not None and self._last_boot_wall is not None:
-            sim_dt  = (boot_ms - self._last_boot_ms) / 1000.0
-            wall_dt = now - self._last_boot_wall
-            if sim_dt > 0 and wall_dt > 0:
-                record_sim_step(wall_dt, sim_dt)
-        self._last_boot_ms   = boot_ms
-        self._last_boot_wall = now
+        Current ArduPilot simulation time in seconds.
+
+        Derived from the ``time_boot_ms`` field of the most recently received
+        MAVLink message.  This is ArduPilot's internal clock — it advances in
+        lockstep with the physics backend, not with wall-clock time.
+
+        At SITL speedup=1 (default) sim time ≈ wall time, but they are never
+        guaranteed equal.  Returns 0.0 before the first message is received.
+        """
+        return self._sim_clock.now()
+
+    def sim_sleep(self, duration_s: float, check=None) -> None:
+        """
+        Block until *duration_s* of **simulation** time has elapsed.
+
+        **How it works (lockstep-aware)**
+
+        ``sim_sleep`` does *not* call ``time.sleep``.  Instead it pumps
+        ``_recv(blocking=True, timeout=0.1)`` in a tight loop.  Each call
+        waits up to 0.1 wall-clock seconds for the next MAVLink message;
+        when one arrives its ``time_boot_ms`` advances the sim-clock.  The
+        loop exits once the sim-clock has advanced by *duration_s*.
+
+        Because ArduPilot SITL uses a lockstep physics protocol (the
+        flight-controller binary blocks until the physics backend replies),
+        the physics worker must keep running and replying while ``sim_sleep``
+        is active — otherwise ArduPilot stalls and the sim-clock never
+        advances.  ``sim_sleep`` itself is purely a *consumer* of MAVLink
+        messages; it never sends physics state.
+
+        All STATUSTEXT, EKF_STATUS_REPORT, GPS_RAW_INT, and other messages
+        that arrive during the wait are consumed by ``_recv()`` and written
+        to the MAVLink log.  This means tests can inspect ``gcs_log``
+        (the JSON MAVLink log) after ``sim_sleep`` to check what happened.
+
+        **Sim time vs wall time**
+
+        At SITL speedup=1 (default), 1 sim-second takes approximately 1
+        wall-clock second, so ``sim_sleep(70)`` takes ~70 s in real time.
+        The two clocks are not guaranteed equal — use sim time for all
+        test deadlines and assertions.
+
+        **Lockstep anti-pattern**
+
+        Do NOT use ``sim_now()`` as a rate-limiting clock inside a physics
+        worker.  If the worker skips replying to servo packets in order to
+        "wait for sim time to advance", ArduPilot will block waiting for a
+        reply, ``time_boot_ms`` will stop advancing, ``sim_now()`` will
+        never cross the threshold, and the test will deadlock.
+
+        Parameters
+        ----------
+        duration_s : float
+            Number of simulation seconds to wait.
+        check : callable | None
+            Zero-argument callable invoked after each ~0.1 s recv poll.
+            Use it to detect process crashes or other failure conditions.
+            Exceptions raised by *check* propagate immediately.
+        """
+        deadline = self._sim_clock.now() + duration_s
+        while self._sim_clock.now() < deadline:
+            self._recv(blocking=True, timeout=0.1)
+            if check is not None:
+                check()
 
     def _recv(
         self,
@@ -127,12 +226,18 @@ class RawesGCS:
         blocking: bool = True,
         timeout: float = 1.0,
     ):
-        """Receive the next matching message, logging every message seen.
+        """Receive the next matching MAVLink message, advancing the sim-clock.
 
-        Unlike pymavlink's recv_match(type=...), this reads ALL messages from
-        the connection and logs each one before applying the type filter.
-        Non-matching messages are consumed and logged but not returned — the
-        caller only receives the first message whose type matches *type*.
+        Drains all available bytes from the network socket into an internal
+        deque, then pops messages from that deque one at a time.  For each
+        popped message the clock is advanced and the message is logged; if it
+        matches *type* it is returned immediately.  Any messages still in the
+        deque are left for the next call, so ``sim_now()`` is always
+        consistent with the message that caused this call to return.
+
+        The *timeout* parameter is a **wall-clock** deadline (``time.monotonic``),
+        not a sim-time deadline.  All test logic that should be tied to sim
+        time should use ``sim_now()`` + ``sim_sleep()`` instead.
 
         Parameters
         ----------
@@ -148,25 +253,40 @@ class RawesGCS:
             type_set = set(type) if isinstance(type, list) else {type}
         deadline = time.monotonic() + (timeout or 0.0)
         while True:
-            msg = self._mav.recv_match(blocking=False)
-            if msg is not None:
-                self._track_msg_timing(msg)
+            # Drain all currently available messages from the network into the
+            # internal buffer without blocking.
+            while True:
+                msg = self._mav.recv_match(blocking=False)
+                if msg is None:
+                    break
+                self._recv_buf.append(msg)
+
+            # Process the buffer in arrival order.  Clock and log are updated
+            # as each message is popped; unprocessed messages stay for next call.
+            while self._recv_buf:
+                msg = self._recv_buf.popleft()
+                self._sim_clock.update(getattr(msg, 'time_boot_ms', 0))
                 if self._mavlog is not None:
-                    self._mavlog.write(msg)
+                    self._mavlog.write(msg, self._sim_clock.now_ms())
                 if type_set is None or msg.get_type() in type_set:
                     return msg
-                # Non-matching: logged above, keep looking.
-            else:
-                if not blocking or time.monotonic() >= deadline:
-                    return None
-                time.sleep(0.002)
+                # Non-matching: clock updated + logged; discard and continue.
+
+            # Buffer exhausted.
+            if not blocking or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.002)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def connect(self, timeout: float = 30.0) -> None:
-        """Connect and wait for the first heartbeat from the vehicle."""
+        """Connect and wait for the first heartbeat from the vehicle.
+
+        Uses wall-clock time: no MAVLink messages have been received yet,
+        so the sim-clock is unavailable.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -185,7 +305,7 @@ class RawesGCS:
                     return
             except Exception as exc:
                 log.debug("Connect attempt failed: %s", exc)
-                sim_sleep(0.5)
+                time.sleep(0.5)
         raise TimeoutError(
             f"Could not connect to vehicle at {self._address!r} within {timeout:.0f}s"
         )
@@ -274,8 +394,8 @@ class RawesGCS:
                 mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
             )
 
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
+            deadline = self.sim_now() + timeout
+            while self.sim_now() < deadline:
                 msg = self._recv(
                     type="PARAM_VALUE", blocking=True, timeout=1.0
                 )
@@ -298,8 +418,8 @@ class RawesGCS:
                 name_bytes,
                 -1,
             )
-            verify_deadline = time.monotonic() + 2.0
-            while time.monotonic() < verify_deadline:
+            verify_deadline = self.sim_now() + 2.0
+            while self.sim_now() < verify_deadline:
                 msg = self._recv(
                     type="PARAM_VALUE", blocking=True, timeout=0.5
                 )
@@ -335,8 +455,8 @@ class RawesGCS:
             name_bytes,
             -1,
         )
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = self.sim_now() + timeout
+        while self.sim_now() < deadline:
             msg = self._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
             if msg is None:
                 continue
@@ -360,8 +480,8 @@ class RawesGCS:
 
         Returns True on success, False on timeout.
         """
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = self.sim_now() + timeout
+        while self.sim_now() < deadline:
             msg = self._recv(
                 type=["ATTITUDE", "STATUSTEXT", "EKF_STATUS_REPORT"],
                 blocking=True, timeout=1.0,
@@ -370,7 +490,8 @@ class RawesGCS:
                 continue
             mt = msg.get_type()
             if mt == "STATUSTEXT":
-                log.info("EKF wait STATUSTEXT: %s", msg.text.rstrip("\x00").strip())
+                log.info("[t=%.1f] EKF wait STATUSTEXT: %s",
+                         self.sim_now(), msg.text.rstrip("\x00").strip())
             elif mt == "EKF_STATUS_REPORT":
                 log.debug("EKF_STATUS flags=0x%04x", msg.flags)
             elif mt == "ATTITUDE":
@@ -379,7 +500,8 @@ class RawesGCS:
                 p = _math.degrees(msg.pitch)
                 y = _math.degrees(msg.yaw)
                 if all(_math.isfinite(v) for v in (r, p, y)):
-                    log.info("EKF attitude ready rpy=(%.1f, %.1f, %.1f)°", r, p, y)
+                    log.info("[t=%.1f] EKF attitude ready rpy=(%.1f, %.1f, %.1f)deg",
+                             self.sim_now(), r, p, y)
                     return True
         return False
 
@@ -399,15 +521,15 @@ class RawesGCS:
             | mavutil.mavlink.EKF_POS_HORIZ_ABS
             | mavutil.mavlink.EKF_POS_VERT_ABS
         )
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = self.sim_now() + timeout
+        while self.sim_now() < deadline:
             msg = self._recv(
                 type="EKF_STATUS_REPORT", blocking=True, timeout=2.0
             )
             if msg is None:
                 continue
             if (msg.flags & NEEDED) == NEEDED:
-                log.info("EKF healthy (flags=0x%04x)", msg.flags)
+                log.info("[t=%.1f] EKF healthy (flags=0x%04x)", self.sim_now(), msg.flags)
                 return
             log.debug("EKF not ready yet (flags=0x%04x)", msg.flags)
         raise TimeoutError(f"EKF not healthy after {timeout:.0f}s")
@@ -446,18 +568,15 @@ class RawesGCS:
             1,       # param1: 1 = arm
             param2, 0, 0, 0, 0, 0,
         )
-        deadline = time.monotonic() + timeout
-        t_last_override = time.monotonic()
-        t_last_arm_send = time.monotonic()
-        _poll = wall_s(0.5)   # RC refresh interval and recv timeout — scales with speedup
-        while time.monotonic() < deadline:
-            # Refresh RC override every wall_s(0.5) seconds.
-            # ArduPilot's RC-override expiry is ~1 sim-second; refreshing at half
-            # that nominal rate keeps us safe at any speedup.
-            if rc_override and (time.monotonic() - t_last_override) >= _poll:
+        deadline        = self.sim_now() + timeout
+        t_last_override = self.sim_now()
+        t_last_arm_send = self.sim_now()
+        _poll = 0.5
+        while self.sim_now() < deadline:
+            # Refresh RC override every 0.5 s sim-time (ArduPilot expiry is ~1 s).
+            if rc_override and (self.sim_now() - t_last_override) >= _poll:
                 self.send_rc_override(rc_override)
-                t_last_override = time.monotonic()
-                _poll = wall_s(0.5)   # re-read in case estimator updated
+                t_last_override = self.sim_now()
 
             msg = self._recv(
                 type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
@@ -467,14 +586,15 @@ class RawesGCS:
                 continue
 
             if msg.get_type() == "STATUSTEXT":
-                log.warning("STATUSTEXT during arm: %s",
-                            msg.text.rstrip("\x00").strip())
+                log.warning("[t=%.1f] STATUSTEXT during arm: %s",
+                            self.sim_now(), msg.text.rstrip("\x00").strip())
                 continue
 
             if msg.get_type() == "COMMAND_ACK":
                 if msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
                     if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                        log.info("Arm command ACCEPTED — waiting for armed heartbeat ...")
+                        log.info("[t=%.1f] Arm command ACCEPTED — waiting for armed heartbeat ...",
+                                 self.sim_now())
                     elif msg.result in (
                         mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED,
                         mavutil.mavlink.MAV_RESULT_FAILED,
@@ -482,18 +602,19 @@ class RawesGCS:
                         # Transient pre-arm failure (e.g. interlock not yet registered,
                         # EKF still converging).  ArduPilot returns FAILED (=4) for
                         # pre-arm check failures, TEMPORARILY_REJECTED (=1) for busy.
-                        # Sleep 1 s then resend; do NOT raise.
+                        # Sleep 1 s sim-time then resend; do NOT raise.
                         log.info(
-                            "Arm rejected (result=%d) — retrying", msg.result
+                            "[t=%.1f] Arm rejected (result=%d) — retrying",
+                            self.sim_now(), msg.result,
                         )
-                        sim_sleep(1.0)
+                        self.sim_sleep(1.0)
                         self._mav.mav.command_long_send(
                             self._target_system,
                             self._target_component,
                             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
                             0, 1, param2, 0, 0, 0, 0, 0,
                         )
-                        t_last_arm_send = time.monotonic()
+                        t_last_arm_send = self.sim_now()
                     else:
                         raise RuntimeError(
                             f"Arm rejected by vehicle (result={msg.result})"
@@ -504,10 +625,10 @@ class RawesGCS:
 
             if msg.get_type() == "HEARTBEAT":
                 armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                log.info("HEARTBEAT: sysid=%d base_mode=0x%02x armed=%s custom_mode=%d",
-                         msg.get_srcSystem(), msg.base_mode, armed, msg.custom_mode)
+                log.info("[t=%.1f] HEARTBEAT: sysid=%d base_mode=0x%02x armed=%s custom_mode=%d",
+                         self.sim_now(), msg.get_srcSystem(), msg.base_mode, armed, msg.custom_mode)
                 if armed:
-                    log.info("Vehicle is armed.")
+                    log.info("[t=%.1f] Vehicle is armed.", self.sim_now())
                     return
 
         raise TimeoutError(f"Vehicle did not confirm armed within {timeout:.0f}s")
@@ -532,8 +653,8 @@ class RawesGCS:
             the override, which would disengage the motor interlock).
         """
         log.info("Setting mode %d …", mode_id)
-        t_last_override = time.monotonic()
-        t_last_send     = time.monotonic()
+        t_last_override = self.sim_now()
+        t_last_send     = self.sim_now()
         self._mav.mav.command_long_send(
             self._target_system,
             self._target_component,
@@ -543,14 +664,13 @@ class RawesGCS:
             float(mode_id),
             0, 0, 0, 0, 0,
         )
-        deadline = time.monotonic() + timeout
-        _poll = wall_s(0.5)
-        while time.monotonic() < deadline:
-            # Refresh RC override at wall_s(0.5) intervals (see arm() for rationale)
-            if rc_override and (time.monotonic() - t_last_override) >= _poll:
+        deadline = self.sim_now() + timeout
+        _poll = 0.5
+        while self.sim_now() < deadline:
+            # Refresh RC override every 0.5 s sim-time (ArduPilot expiry is ~1 s).
+            if rc_override and (self.sim_now() - t_last_override) >= _poll:
                 self.send_rc_override(rc_override)
-                t_last_override = time.monotonic()
-                _poll = wall_s(0.5)
+                t_last_override = self.sim_now()
 
             msg = self._recv(
                 type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
@@ -562,7 +682,7 @@ class RawesGCS:
             t = msg.get_type()
             if t == "HEARTBEAT":
                 if msg.custom_mode == mode_id:
-                    log.info("Mode confirmed: %d", mode_id)
+                    log.info("[t=%.1f] Mode confirmed: %d", self.sim_now(), mode_id)
                     return
                 log.debug("Heartbeat custom_mode=%d (waiting for %d)", msg.custom_mode, mode_id)
             elif t == "COMMAND_ACK":
@@ -571,12 +691,12 @@ class RawesGCS:
                         log.debug("MAV_CMD_DO_SET_MODE accepted, waiting for heartbeat confirmation")
                     elif msg.result == mavutil.mavlink.MAV_RESULT_FAILED:
                         # Transient rejection (e.g. EKF not yet providing position).
-                        # Retry after 1 s.
+                        # Retry after 1 s sim-time.
                         log.debug(
                             "Mode %d rejected (result=%d) — retrying",
                             mode_id, msg.result,
                         )
-                        sim_sleep(1.0)
+                        self.sim_sleep(1.0)
                         self._mav.mav.command_long_send(
                             self._target_system,
                             self._target_component,
@@ -586,14 +706,15 @@ class RawesGCS:
                             float(mode_id),
                             0, 0, 0, 0, 0,
                         )
-                        t_last_send = time.monotonic()
+                        t_last_send = self.sim_now()
                     else:
                         raise RuntimeError(
                             f"Mode change rejected by vehicle "
                             f"(mode={mode_id}, result={msg.result})"
                         )
             elif t == "STATUSTEXT":
-                log.warning("STATUSTEXT during mode set: %s", msg.text.rstrip("\x00").strip())
+                log.warning("[t=%.1f] STATUSTEXT during mode set: %s",
+                            self.sim_now(), msg.text.rstrip("\x00").strip())
         raise TimeoutError(f"Mode {mode_id} not confirmed within {timeout:.0f}s")
 
     # ------------------------------------------------------------------
@@ -683,7 +804,7 @@ class RawesGCS:
         log.debug("RC override sent: %s", channels)
 
     # ------------------------------------------------------------------
-    # Telemetry
+    # Telemetry receive
     # ------------------------------------------------------------------
 
     def recv_local_position(
@@ -709,4 +830,3 @@ class RawesGCS:
         if msg:
             return (msg.roll, msg.pitch, msg.yaw)
         return None
-

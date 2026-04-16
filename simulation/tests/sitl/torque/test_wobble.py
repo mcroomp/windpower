@@ -46,25 +46,27 @@ from __future__ import annotations
 import math
 import pytest
 
-from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
+from torque_test_utils  import (
+    run_observation_loop, save_telemetry,
+    assert_physics_yaw_rate,
+)
 
 _SETTLE_S   = 40.0
 _OBSERVE_S  = 20.0
-_THRESHOLD  = math.radians(16.0)  # [rad/s] -- circular-tilt EKF compass artifact (see module docstring)
-                                  # Physics psi_dot confirmed 0.000 deg/s; 16 deg/s accommodates the
-                                  # ~10-13 deg/s ATTITUDE.yawspeed bias from compass-tilt coupling at +/-20 deg.
+_THRESHOLD  = math.radians(1.0)   # [rad/s] physics ground truth; hub must not actually rotate
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["wobble"], indirect=True)
 def test_wobble(torque_armed_profile):
     """
     Hub tilts aggressively: roll +/-20 deg, pitch +/-15 deg, at orbital frequency 0.10 Hz.
-    Circular tilting (sin/cos at same frequency) creates ~11 deg/s apparent yaw in
-    ATTITUDE.yawspeed via compass-tilt coupling.  Physics psi_dot remains 0 deg/s.
+    Circular tilting creates an apparent ~10-20 deg/s yaw in ATTITUDE.yawspeed via
+    compass-tilt coupling, but physics psi_dot is 0.000 deg/s -- the hub does not actually
+    rotate.  ATC_RAT_YAW_P=0.001 is too weak to cause physical movement from EKF artifact.
 
-    Pass: max |ATTITUDE.yawspeed| < 16 deg/s after 40 s settle.  The high limit
-    accommodates the EKF compass artifact; the ACRO PID (P=0.001) is too weak
-    to respond meaningfully to this spurious signal.
+    Pass: actual physics psi_dot (mediator log) < 1 deg/s after 40 s settle.
+    The EKF ATTITUDE.yawspeed is intentionally NOT checked -- it reflects a compass
+    artifact from circular tilting, not real hub rotation.
     """
     ctx = torque_armed_profile
     rows: list = []
@@ -72,11 +74,11 @@ def test_wobble(torque_armed_profile):
     # EK3_SRC1_POSXY=0 and EK3_SRC1_VELXY=0 are in _BASE_TORQUE_BOOT_PARAMS (boot file).
     # Writing EK3_SRC* via MAVLink post-boot triggers EKF forced reset; boot file avoids it.
 
-    obs = run_observation_loop(
+    run_observation_loop(
         ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
         timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
     )
 
     save_telemetry(rows, "wobble", ctx.log)
-    assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)
+    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, _SETTLE_S, _OBSERVE_S, ctx.log)

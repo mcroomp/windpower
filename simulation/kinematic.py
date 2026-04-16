@@ -23,16 +23,34 @@ and final acceleration.  After ``T`` the callable returns ``(pf, vf)`` (clamped)
 Set ``KinematicStartup.duration > T`` to hold at ``(pf, vf)`` for a margin
 before free flight begins — useful to ensure GPS fuses before hand-off.
 
+Orbital trajectory
+------------------
+Use ``make_orbital_kinematics(anchor_pos, p0, v_orb)`` to fly a circular orbit
+around ``anchor_pos`` at constant altitude.  Returns ``(traj_fn, R_fn)`` where
+``R_fn`` keeps body_z aligned with the tether direction and compass yaw matches
+the GPS velocity heading at every step.
+
+Why orbital is required for EKFGSF convergence:
+  The EK3_SRC1_YAW=8 GPS-velocity-yaw source uses the EKFGSF (Gaussian Sum
+  Filter) to estimate heading from GPS velocity.  EKFGSF maintains N=5 heading
+  hypotheses and down-weights the ones whose predicted velocity diverges from
+  GPS.  With a constant straight-line velocity, all hypotheses predict the same
+  NED velocity — no divergence, no discrimination, YCS stays at maximum, and
+  yawAlignComplete is never set.  An orbital trajectory gives a continuously
+  rotating GPS velocity heading (omega = v_orb / r_h rad/s) that makes the N
+  hypotheses produce distinguishably different velocity predictions, allowing
+  the filter to converge.
+
 Custom trajectories
 -------------------
 Pass ``traj_fn(t_sim) -> (pos, vel)`` to fly any path during kinematic startup.
 Optionally pass ``R_fn(t_sim) -> R`` to vary the locked orientation over time
 (e.g. so body_z tracks the tether direction on a curved trajectory).
 
-Use ``make_linear_traj()`` or ``make_min_jerk_traj()`` to build callables.
+Use ``make_linear_traj()``, ``make_min_jerk_traj()``, or
+``make_orbital_kinematics()`` to build callables.
 
 Shared between mediator.py (production loop) and unit/simtests (no Docker).
-No imports beyond numpy — zero Docker / SITL dependencies.
 """
 from __future__ import annotations
 
@@ -217,6 +235,368 @@ def make_min_jerk_traj(
 
 
 # ---------------------------------------------------------------------------
+# Trajectory factory — circular orbital
+# ---------------------------------------------------------------------------
+
+def make_orbital_kinematics(
+    anchor_pos,
+    p0,
+    v_orb: float,
+    orbit_dir: int = +1,
+) -> "tuple[Callable[[float], Tuple[np.ndarray, np.ndarray]], Callable[[float], np.ndarray]]":
+    """
+    Return ``(traj_fn, R_fn)`` for a circular orbital kinematic trajectory.
+
+    The hub orbits ``anchor_pos`` at constant altitude and constant radius, giving
+    a continuously rotating GPS velocity heading.  This is required for EKFGSF yaw
+    convergence: a constant straight-line velocity makes all EKFGSF hypotheses
+    predict identical NED velocities, so the filter cannot discriminate between
+    them and yawAlignComplete is never set.
+
+    Both returned callables share the same orbital geometry so they stay
+    consistent with each other.
+
+    Parameters
+    ----------
+    anchor_pos : array-like (3,)
+        Anchor position in NED [m].  Usually ``[0, 0, 0]``.
+    p0 : array-like (3,)
+        Hub equilibrium position in NED [m].  Defines the orbital radius,
+        altitude, and starting angle.  The hub starts here at t=0.
+    v_orb : float
+        Orbital speed [m/s].
+    orbit_dir : int
+        ``+1`` = counter-clockwise when viewed from above (N→E→S→W).
+        ``-1`` = clockwise.
+
+    Returns
+    -------
+    traj_fn : Callable[[float], tuple[ndarray, ndarray]]
+        ``traj_fn(t_sim)`` → ``(pos, vel)`` in NED.
+        Attaches ``traj_fn.accel(t_sim)`` → centripetal acceleration [m/s²].
+    R_fn : Callable[[float], ndarray]
+        ``R_fn(t_sim)`` → 3×3 body-to-NED rotation matrix.
+        body_z tracks the tether direction (anchor→hub); x_orb is aligned so
+        ZYX yaw equals the GPS velocity heading at every step.
+    """
+    # Import here to avoid making frames a module-level dependency; frames.py
+    # is pure-numpy and Docker-free so this is safe in all test contexts.
+    from frames import build_vel_aligned_frame
+
+    anchor = np.asarray(anchor_pos, dtype=float).copy()
+    p0_arr = np.asarray(p0,         dtype=float).copy()
+
+    r_vec   = p0_arr - anchor
+    r_h     = float(np.hypot(r_vec[0], r_vec[1]))
+    if r_h < 0.1:
+        raise ValueError(
+            f"make_orbital_kinematics: hub is directly above/below anchor "
+            f"(r_h={r_h:.3f} m).  Check anchor_pos and p0."
+        )
+
+    alt_d    = float(p0_arr[2])              # NED Z of hub (negative = above ground)
+    theta0   = float(np.arctan2(r_vec[1], r_vec[0]))
+    omega    = v_orb / r_h                   # angular velocity [rad/s]
+    teth_len = float(np.sqrt(r_h**2 + alt_d**2))  # tether length [m]
+
+    def _traj_fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+        theta = theta0 + orbit_dir * omega * t_sim
+        pos = np.array([
+            anchor[0] + r_h * np.cos(theta),
+            anchor[1] + r_h * np.sin(theta),
+            alt_d,
+        ])
+        vel = np.array([
+            -orbit_dir * v_orb * np.sin(theta),
+             orbit_dir * v_orb * np.cos(theta),
+             0.0,
+        ])
+        return pos, vel
+
+    def _accel(t_sim: float) -> "np.ndarray":
+        # Centripetal acceleration: a = v²/r inward = v_orb*omega inward
+        theta = theta0 + orbit_dir * omega * t_sim
+        return v_orb * omega * np.array([-np.cos(theta), -np.sin(theta), 0.0])
+
+    _traj_fn.accel = _accel  # type: ignore[attr-defined]
+
+    def _R_fn(t_sim: float) -> "np.ndarray":
+        theta  = theta0 + orbit_dir * omega * t_sim
+        # body_z: tether direction from anchor to hub
+        body_z = np.array([r_h * np.cos(theta), r_h * np.sin(theta), alt_d]) / teth_len
+        vel    = np.array([
+            -orbit_dir * v_orb * np.sin(theta),
+             orbit_dir * v_orb * np.cos(theta),
+             0.0,
+        ])
+        # Align x_orb so ZYX yaw == GPS velocity heading — zero heading gap prevents
+        # EKF GPS-glitch at every step of the orbital kinematic.
+        return build_vel_aligned_frame(body_z, vel)
+
+    return _traj_fn, _R_fn
+
+
+# ---------------------------------------------------------------------------
+# Trajectory factory — fast circles → slow orbit  (EKFGSF convergence)
+# ---------------------------------------------------------------------------
+
+def make_fast_circle_orbit_kinematics(
+    anchor_pos,
+    p_eq,
+    v_orb_eq:   float,
+    v_fast:     float  = 5.0,
+    n_fast:     int    = 0,
+    T_lead:     float  = 10.0,
+    r_circle:   float  = 10.0,
+    orbit_dir:  int    = +1,
+    t_hold:     float  = 15.0,
+) -> "tuple[Callable[[float], Tuple[np.ndarray, np.ndarray]], Callable[[float], np.ndarray]]":
+    """
+    Five-phase kinematic trajectory: hold → accelerate → [constant] → decelerate → large orbit.
+
+    Designed to converge EKFGSF (GPS-velocity-yaw, EK3_SRC1_YAW=8) quickly.
+    EKFGSF needs a rotating GPS velocity heading to discriminate its 5 yaw
+    hypotheses (spaced 72° apart).  The large equilibrium orbit gives only
+    ~0.56 deg/s — too slow for practical convergence.  This trajectory briefly
+    circles a tight loop at v_fast (default 5 m/s → 57 deg/s at r=5 m), then
+    decelerates back to equilibrium orbital speed before handing off to free flight.
+
+    Phase 0 — stationary hold (t ∈ [0, t_hold]):
+        Hub sits at p_start with zero velocity.  EKF tilt aligns, GPS detects,
+        and the vehicle is armed during this window.  GPS heading is undefined
+        (vel=0) so EKFGSF is idle — that is expected and fine.
+
+    Phase 1 — acceleration circle (t ∈ [t_hold, t_hold + T_accel]):
+        Hub accelerates from rest to v_fast over exactly one full circle.
+        Speed ramps linearly: v(u) = v_fast * u / T_accel, u = t − t_hold.
+        T_accel = 4π r_circle / v_fast  (derived so angle traversed = 2π).
+        GPS heading immediately starts rotating — EKFGSF sees the signal from
+        the first metre of movement.  omega_heading at v_fast/2 is already
+        v_fast / (2 r_circle) rad/s.
+
+    Phase 2 — constant-speed circles (t ∈ [t_hold+T_accel, t_hold+T_accel + n_fast·T_per]):
+        Hub circles at v_fast for n_fast additional circles.  Optional: n_fast=0
+        skips this phase entirely.  The acceleration circle (Phase 1) alone
+        provides sufficient EKFGSF signal at v_fast ≥ 3 m/s.
+
+    Phase 3 — deceleration circle:
+        One circle, speed linearly ramped from v_fast down to v_orb_eq.
+        Hub returns to p_start at orbital speed and heading.
+
+    Phase 4 — large orbit lead-in (T_lead seconds):
+        Hub follows the equilibrium orbit from p_start to p_eq.  Lua captures
+        orbit tracking here (GPS already fused by Phase 1).  Kinematic exits
+        at p_eq with the correct orbital velocity.
+
+    Geometry:
+        p_eq      — equilibrium position on large orbit (kinematic exit)
+        p_start   — large orbit position T_lead s before p_eq (hub starts here)
+        c         — circle centre = p_start shifted r_circle m toward anchor
+        |p_start - c| = r_circle  → hub returns to p_start after each full circle
+
+    Phase durations:
+        T_accel  = 4π r_circle / v_fast                (accel circle)
+        T_per    = 2π r_circle / v_fast                (one constant circle)
+        T_decel  = 2π r_circle / mean(v_fast, v_orb_eq) (decel circle)
+        Total    = t_hold + T_accel + n_fast·T_per + T_decel + T_lead
+
+    Parameters
+    ----------
+    anchor_pos : array-like (3,)  Anchor NED position [m].
+    p_eq       : array-like (3,)  Equilibrium (exit) position NED [m].
+    v_orb_eq   : float            Equilibrium orbital speed [m/s].
+    v_fast     : float            Peak circle speed [m/s].  Default 5.0.
+                                  Must be > v_orb_eq.  Use ≥ 3 m/s for reliable
+                                  EKFGSF convergence.
+    n_fast     : int              Additional constant-speed circles after the
+                                  acceleration circle.  Default 0.
+    T_lead     : float            Large-orbit lead-in before exit [s].  Default 10.
+    r_circle   : float            Circle radius [m].  Default 10.
+    orbit_dir  : int              +1=CCW, -1=CW (viewed from above).
+    t_hold     : float            Stationary hold at p_start before Phase 1 [s].
+                                  Set to ≥ the expected arm time (typically 12–15 s).
+                                  Default 15.0.
+
+    Returns
+    -------
+    traj_fn : Callable  traj_fn(t) → (pos, vel) NED.  Has .accel(t) attribute.
+    R_fn    : Callable  R_fn(t) → 3×3 body-to-NED rotation matrix.
+    """
+    anchor  = np.asarray(anchor_pos, dtype=float).copy()
+    p_eq    = np.asarray(p_eq,       dtype=float).copy()
+
+    # ── Large orbit geometry ──────────────────────────────────────────────────
+    r_vec     = p_eq[:2] - anchor[:2]
+    r_h       = float(np.hypot(r_vec[0], r_vec[1]))
+    alt_d     = float(p_eq[2])
+    theta_eq  = float(np.arctan2(r_vec[1], r_vec[0]))
+    omega_lrg = v_orb_eq / r_h          # large-orbit angular velocity [rad/s]
+
+    # p_start: large-orbit position T_lead s before p_eq (hub holds and exits here)
+    theta_start = theta_eq - orbit_dir * omega_lrg * T_lead
+    p_start = np.array([
+        anchor[0] + r_h * np.cos(theta_start),
+        anchor[1] + r_h * np.sin(theta_start),
+        alt_d,
+    ])
+
+    # ── Fast-circle geometry ──────────────────────────────────────────────────
+    # Centre is r_circle m toward anchor (horizontal) from p_start.
+    c = np.array([
+        anchor[0] + (r_h - r_circle) * np.cos(theta_start),
+        anchor[1] + (r_h - r_circle) * np.sin(theta_start),
+        alt_d,
+    ])
+    circle_theta0 = theta_start          # angle from c to p_start = theta_start
+
+    omega_fast   = v_fast / r_circle
+    T_per_fast   = 2.0 * np.pi / omega_fast                        # period of one constant circle
+    T_accel      = 4.0 * np.pi * r_circle / v_fast                 # accel circle: 0 → v_fast in 2π
+    v_mean_decel = 0.5 * (v_fast + v_orb_eq)
+    T_decel      = 2.0 * np.pi * r_circle / v_mean_decel           # decel circle: v_fast → v_orb_eq
+
+    # Phase time boundaries (relative to t=0)
+    t_a = float(t_hold)                             # end of hold / start of accel
+    t_b = t_a + T_accel                             # end of accel / start of constant
+    t_c = t_b + n_fast * T_per_fast                 # end of constant / start of decel
+    t_d = t_c + T_decel                             # end of decel / start of large orbit
+    t_total = t_d + T_lead                          # kinematic exit
+
+    # After accel circle (1×2π) + n_fast constant circles (n_fast×2π), the hub
+    # is back at circle_theta0.  The decel circle starts from the same angle.
+    theta_decel_start = circle_theta0 + orbit_dir * (1.0 + n_fast) * 2.0 * np.pi
+
+    # ── Trajectory callable ───────────────────────────────────────────────────
+    def _traj_fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+        if t_sim < t_a:
+            # Phase 0: stationary hold
+            return p_start.copy(), np.zeros(3)
+
+        elif t_sim < t_b:
+            # Phase 1: acceleration circle — speed ramps 0 → v_fast over 2π
+            u     = t_sim - t_a
+            v     = v_fast * u / T_accel
+            theta = circle_theta0 + orbit_dir * v_fast * u * u / (2.0 * r_circle * T_accel)
+            pos   = np.array([c[0] + r_circle * np.cos(theta),
+                               c[1] + r_circle * np.sin(theta), alt_d])
+            vel   = np.array([-orbit_dir * v * np.sin(theta),
+                               orbit_dir * v * np.cos(theta), 0.0])
+
+        elif t_sim < t_c:
+            # Phase 2: constant-speed circles at v_fast
+            u     = t_sim - t_b
+            theta = circle_theta0 + orbit_dir * (2.0 * np.pi + omega_fast * u)
+            pos   = np.array([c[0] + r_circle * np.cos(theta),
+                               c[1] + r_circle * np.sin(theta), alt_d])
+            vel   = np.array([-orbit_dir * v_fast * np.sin(theta),
+                               orbit_dir * v_fast * np.cos(theta), 0.0])
+
+        elif t_sim < t_d:
+            # Phase 3: decel circle — speed ramps v_fast → v_orb_eq over 2π
+            u     = t_sim - t_c
+            dv    = v_orb_eq - v_fast
+            v     = v_fast + dv * u / T_decel
+            delta = orbit_dir * (v_fast * u + dv * u * u / (2.0 * T_decel)) / r_circle
+            theta = theta_decel_start + delta
+            pos   = np.array([c[0] + r_circle * np.cos(theta),
+                               c[1] + r_circle * np.sin(theta), alt_d])
+            vel   = np.array([-orbit_dir * v * np.sin(theta),
+                               orbit_dir * v * np.cos(theta), 0.0])
+
+        else:
+            # Phase 4: large equilibrium orbit from p_start → p_eq
+            u     = t_sim - t_d
+            theta = theta_start + orbit_dir * omega_lrg * u
+            pos   = np.array([anchor[0] + r_h * np.cos(theta),
+                               anchor[1] + r_h * np.sin(theta), alt_d])
+            vel   = np.array([-orbit_dir * v_orb_eq * np.sin(theta),
+                               orbit_dir * v_orb_eq * np.cos(theta), 0.0])
+
+        return pos, vel
+
+    def _accel(t_sim: float) -> "np.ndarray":
+        if t_sim < t_a:
+            # Phase 0: stationary
+            return np.zeros(3)
+        elif t_sim < t_b:
+            # Phase 1: centripetal + tangential (constant tangential accel)
+            u      = t_sim - t_a
+            v      = v_fast * u / T_accel
+            theta  = circle_theta0 + orbit_dir * v_fast * u * u / (2.0 * r_circle * T_accel)
+            inward = np.array([-np.cos(theta), -np.sin(theta), 0.0])
+            tangent = np.array([-orbit_dir * np.sin(theta), orbit_dir * np.cos(theta), 0.0])
+            return (v * v / r_circle) * inward + (v_fast / T_accel) * tangent
+        elif t_sim < t_c:
+            # Phase 2: centripetal only (constant speed)
+            u      = t_sim - t_b
+            theta  = circle_theta0 + orbit_dir * (2.0 * np.pi + omega_fast * u)
+            inward = np.array([-np.cos(theta), -np.sin(theta), 0.0])
+            return (v_fast * v_fast / r_circle) * inward
+        elif t_sim < t_d:
+            # Phase 3: centripetal + tangential (constant tangential decel)
+            u      = t_sim - t_c
+            dv     = v_orb_eq - v_fast
+            v      = v_fast + dv * u / T_decel
+            delta  = orbit_dir * (v_fast * u + dv * u * u / (2.0 * T_decel)) / r_circle
+            theta  = theta_decel_start + delta
+            inward = np.array([-np.cos(theta), -np.sin(theta), 0.0])
+            tangent = np.array([-orbit_dir * np.sin(theta), orbit_dir * np.cos(theta), 0.0])
+            return (v * v / r_circle) * inward + (dv / T_decel) * tangent
+        else:
+            # Phase 4: centripetal toward anchor on large orbit
+            u      = t_sim - t_d
+            theta  = theta_start + orbit_dir * omega_lrg * u
+            inward = np.array([-np.cos(theta), -np.sin(theta), 0.0])
+            return (v_orb_eq * v_orb_eq / r_h) * inward
+
+    _traj_fn.accel = _accel  # type: ignore[attr-defined]
+
+    # ── Velocity reference for hold phase ────────────────────────────────────
+    # During hold (vel=0), build_vel_aligned_frame would fall back to
+    # build_orb_frame, giving yaw = East-reference orientation.  When Phase 1
+    # starts and vel builds past 0.1 m/s, build_vel_aligned_frame switches to
+    # tangential direction (~NW at p_start) → sudden 80+ deg yaw jump → 600+
+    # deg/s gyro spike → EKF corruption.
+    # Fix: pre-compute the tangential vel direction at p_start and use it as
+    # the vel reference whenever actual speed is below 0.1 m/s.  This keeps
+    # yaw aligned with the upcoming circle direction throughout the hold phase
+    # so the transition is smooth.
+    _vel_start_ref = np.array([
+        -float(orbit_dir) * np.sin(theta_start),
+         float(orbit_dir) * np.cos(theta_start),
+         0.0,
+    ])
+
+    from frames import build_vel_aligned_frame as _bvaf
+
+    def _R_fn(t_sim: float) -> "np.ndarray":
+        pos, vel = _traj_fn(t_sim)
+        raw    = pos - anchor
+        body_z = raw / max(float(np.linalg.norm(raw)), 1e-6)
+        # Use actual vel when moving; use tangential reference during hold so
+        # there is no yaw discontinuity when circles start.
+        v_horiz = float(np.sqrt(vel[0]**2 + vel[1]**2))
+        vel_ref = vel if v_horiz >= 0.1 else _vel_start_ref
+        return _bvaf(body_z, vel_ref)
+
+    # ── Expose timing metadata used by the mediator ──────────────────────────
+    _traj_fn.total_duration   = t_total  # type: ignore[attr-defined]
+    _traj_fn.phase3_start_t   = t_d      # type: ignore[attr-defined]  # start of large-orbit lead-in
+    _traj_fn.phase3_start_pos = p_start.copy()  # type: ignore[attr-defined]
+
+    def _phase_at(t_sim: float) -> str:
+        if t_sim < t_a:  return "hold"
+        if t_sim < t_b:  return "accel"
+        if t_sim < t_c:  return "const"
+        if t_sim < t_d:  return "decel"
+        return "orbit"
+
+    _traj_fn.phase_at = _phase_at  # type: ignore[attr-defined]
+
+    return _traj_fn, _R_fn
+
+
+# ---------------------------------------------------------------------------
 # KinematicStartup
 # ---------------------------------------------------------------------------
 
@@ -362,6 +742,40 @@ class KinematicStartup:
         return self._traj_fn(t_sim)
 
     # ------------------------------------------------------------------
+    def _omega_body_at(self, t_sim: float) -> np.ndarray:
+        """
+        Compute world-frame (NED) angular velocity [rad/s] from the time derivative
+        of R_fn at t_sim, or return zeros if R_fn is not set.
+
+        Uses 1 ms numerical differentiation of R_fn:
+            S        = R(t)^T @ (R(t+dt) - R(t)) / dt   (body-frame skew-symmetric)
+            omega_b  = vee(S)                             (body-frame angular velocity)
+            omega_w  = R(t) @ omega_b                    (world-frame, NED)
+
+        Returns world-frame omega because hub_state["omega"] and mediator.py
+        yaw damping both use the world (NED) frame convention.
+
+        At fast circles (~1 rad/s) the body-frame and world-frame values differ
+        significantly (~6x at typical RAWES tilt).  World-frame is required so
+        that apply() can correctly strip GPS-tracking spin before setting
+        dynamics._omega as the free-flight initial condition.
+        """
+        if self._R_fn is None:
+            return np.zeros(3)
+        dt_fd = 1e-3                           # 1 ms: small enough for accuracy, large enough for stability
+        R0    = self._R_fn(t_sim)
+        R1    = self._R_fn(t_sim + dt_fd)
+        # S = R^T @ dR/dt  (should be skew-symmetric: S = -S^T)
+        S = R0.T @ ((R1 - R0) / dt_fd)
+        # vee operator extracts body-frame angular velocity from skew-symmetric matrix:
+        #   S = [[0, -wz, wy], [wz, 0, -wx], [-wy, wx, 0]]
+        #   omega_body = [S[2,1], S[0,2], S[1,0]]
+        omega_body_frame = np.array([S[2, 1], S[0, 2], S[1, 0]])
+        # sensor.compute() and hub_state["omega"] convention: world (NED) frame.
+        # Convert: omega_world = R @ omega_body
+        return R0 @ omega_body_frame
+
+    # ------------------------------------------------------------------
     def apply(self, hub_state: dict, dynamics: Any, t_sim: float) -> bool:
         """
         If kinematic phase is active, override hub_state in-place and sync the
@@ -380,8 +794,17 @@ class KinematicStartup:
         the tether direction on a curved trajectory).
         Otherwise: ``R = R0`` (fixed equilibrium orientation, original behaviour).
 
-        In both cases omega is held at zero so ACRO commands cannot misalign the
-        disk before free-flight physics takes over.
+        Angular velocity override
+        -------------------------
+        If ``R_fn`` was provided: orbital component of ``_omega_body_at(t_sim)``
+        (GPS-heading spin stripped).  This is required for EKFGSF convergence:
+        with zero gyro and a rotating R_fn, the EKFGSF sees contradictory
+        measurements (gyro says "no rotation" but GPS velocity heading rotates at
+        omega_orb rad/s) and never converges.  By reporting the correct orbital
+        gyro, the EKFGSF can track the rotating heading and assign correct weights
+        to hypotheses → yawAlignComplete is set in ~10–20 s after GPS origin.
+        If ``R_fn`` is None (fixed orientation): omega is held at zero (original
+        behaviour for linear/ramp trajectories).
 
         Parameters
         ----------
@@ -402,9 +825,30 @@ class KinematicStartup:
 
         # Orientation: fixed R0 (default) or time-varying R_fn.
         R = self._R_fn(t_sim) if self._R_fn is not None else self.R0
-        hub_state["R"]     = R.copy()
-        hub_state["omega"] = np.zeros(3)
-        dynamics._R[:]     = R
-        dynamics._omega[:] = np.zeros(3)
+        hub_state["R"] = R.copy()
+        dynamics._R[:] = R
+
+        # Angular velocity: orbital component only (GPS-heading spin stripped).
+        #
+        # _omega_body_at returns world-frame angular velocity of R_fn.  R_fn
+        # includes artificial GPS-heading spin: build_vel_aligned_frame aligns
+        # x_orb with velocity heading, which rotates at omega_fast rad/s during
+        # fast circles.  Near the fast-circle closure (~t_b) this spin reaches
+        # ~1 rad/s while the hub is at ~99 m radius — far larger than the
+        # physical orbital angular velocity (~0.01–0.19 rad/s).
+        #
+        # sensor.py passes omega_body directly to the IMU (no stripping).  But
+        # dynamics._omega is used as the initial condition for free-flight
+        # integration at kinematic exit.
+        # Injecting 1 rad/s horizontal angular velocity causes immediate
+        # tumbling.  Strip the GPS-heading spin here so free flight begins
+        # with only the physical orbital angular velocity.
+        omega_world = self._omega_body_at(t_sim)
+        if self._R_fn is not None:
+            disk_normal = R[:, 2]            # world-frame body_z (R set above)
+            spin = np.dot(omega_world, disk_normal) * disk_normal
+            omega_world = omega_world - spin  # remove GPS-tracking spin
+        hub_state["omega"] = omega_world
+        dynamics._omega[:] = omega_world
 
         return True

@@ -71,10 +71,9 @@ All physics uses NED. `T_ENU_NED` in `frames.py` is kept as a utility for conver
 
 `PhysicalSensor` in `sensor.py` reports the **true physical orbital-frame orientation** (~124° roll / −46° pitch at tether equilibrium, ZYX Euler NED). ACRO mode is used because it only damps angular rates, so the large physical tilt causes no automatic corrective cyclic.
 
-- `rpy` = actual ZYX Euler angles (spin stripped), yaw replaced by velocity heading
-- `yaw` derived from `atan2(vE, vN)`, rate-limited to prevent gyro body-axis remapping at tether activation
-- Gyro: spin stripped, rotated into physical orbital body frame
-- Accel: specific force in physical orbital body frame
+- `rpy` = actual ZYX Euler angles from `R_hub` directly (no overrides)
+- Gyro: `R_hub.T @ omega_body` — full body angular velocity; GB4008 keeps body non-rotating via K_YAW dynamics, no sensor stripping
+- Accel: specific force `R_hub.T @ (accel_world − gravity)` in body frame
 
 ---
 

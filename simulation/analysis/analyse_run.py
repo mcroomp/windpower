@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -252,28 +253,42 @@ def load_telemetry(path: Path, report: RunReport) -> None:
 
 
 def parse_mediator(path: Path, report: RunReport) -> None:
-    """Extract run metadata from the mediator log (RUN_ID, sensor mode, damping config).
+    """Extract run metadata from the mediator log and events.jsonl (RUN_ID, sensor mode, damping config).
 
     Physics frames are no longer read here -- use load_telemetry() instead.
     Transition state is computed from the telemetry CSV in _print_mediator().
+    RUN_ID is read from events.jsonl (startup event) if not present in the prose log.
     """
     if not path.exists():
         print(f"  [!] mediator log not found: {path}")
-        return
-    for line in path.read_text(errors="replace").splitlines():
-        ts_m = _RE_TIMESTAMP.match(line)
-        if ts_m and report.mediator_t0_wall_s is None:
-            report.mediator_t0_wall_s = _wall_seconds(ts_m.group(1))
-        if m := _RE_RUN_ID.search(line):
-            report.mediator_run_id = int(m.group(1))
-        if m := _RE_SENSOR_MODE.search(line):
-            report.sensor_mode = m.group(1)
-        if m := _RE_DAMP_CFG.search(line):
-            report.damp_T = float(m.group(1))
-            report.k_ang  = float(m.group(2))
-        if m := _RE_KIN_START.search(line):
-            report.kin_launch_pos = (float(m.group(2)), float(m.group(3)), float(m.group(4)))
-            report.kin_vel        = (float(m.group(5)), float(m.group(6)), float(m.group(7)))
+    else:
+        for line in path.read_text(errors="replace").splitlines():
+            ts_m = _RE_TIMESTAMP.match(line)
+            if ts_m and report.mediator_t0_wall_s is None:
+                report.mediator_t0_wall_s = _wall_seconds(ts_m.group(1))
+            if m := _RE_RUN_ID.search(line):
+                report.mediator_run_id = int(m.group(1))
+            if m := _RE_SENSOR_MODE.search(line):
+                report.sensor_mode = m.group(1)
+            if m := _RE_DAMP_CFG.search(line):
+                report.damp_T = float(m.group(1))
+                report.k_ang  = float(m.group(2))
+            if m := _RE_KIN_START.search(line):
+                report.kin_launch_pos = (float(m.group(2)), float(m.group(3)), float(m.group(4)))
+                report.kin_vel        = (float(m.group(5)), float(m.group(6)), float(m.group(7)))
+
+    # Fall back to events.jsonl for RUN_ID (structured log, replaces prose log.info for metadata)
+    if report.mediator_run_id is None:
+        events_path = path.parent / "events.jsonl"
+        if events_path.exists():
+            for line in events_path.read_text(errors="replace").splitlines():
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event") == "startup" and "run_id" in ev:
+                    report.mediator_run_id = int(ev["run_id"])
+                    break
 
 
 def parse_arducopter(path: Path, report: RunReport) -> None:
@@ -372,10 +387,10 @@ _EKF_FLAG_NAMES = {
     0x0010: "horiz pos (abs)",
     0x0020: "vert pos (abs)",
     0x0040: "terrain alt",
-    0x0080: "GPS yaw",
-    0x0100: "pred horiz pos",
-    0x0200: "const pos mode",
-    0x0400: "pred horiz ok",
+    0x0080: "const pos mode",   # EKF in constant-position fallback (no GPS pos fix)
+    0x0100: "pred horiz pos rel",
+    0x0200: "pred horiz pos abs",
+    0x0400: "GPS glitch",       # GPS position innovation rejected
 }
 
 def _decode_flags(flags: int) -> str:

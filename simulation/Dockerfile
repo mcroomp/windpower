@@ -96,8 +96,6 @@ USER root
 #
 #     --model heli uses the built-in helicopter physics (no external JSON
 #     backend needed) so this runs cleanly in a Docker build layer.
-#     --speedup 100 makes the 8 s wall-clock window cover ~800 s sim-time,
-#     more than enough for AP_Param to complete its initialisation loop.
 # =============================================================================
 RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
         printf '\n# RAWES: Lua scripting + RPM sensor on by default\nSCR_ENABLE 1\nRPM1_TYPE 10\nRPM1_MIN 0\n' \
@@ -105,7 +103,7 @@ RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
         && mkdir -p "$ARDUPILOT_PATH/scripts" \
         && cd "$ARDUPILOT_PATH" \
         && timeout 8 build/sitl/bin/arducopter-heli \
-               --model heli --speedup 100 --slave 0 \
+               --model heli --slave 0 \
                --defaults "Tools/autotest/default_params/copter-heli.parm" \
                -I0 --home 51.5074,-0.1278,50,0 \
                2>/dev/null; true; \

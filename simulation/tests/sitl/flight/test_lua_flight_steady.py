@@ -6,10 +6,13 @@ internal_controller=False — ArduPilot + Lua own the physics entirely.
 
 This is M3 Step 1: the foundational gate for pumping and landing tests.
 
-Uses the acro_armed_lua_full fixture (linear kinematic, vel0=East):
-  - kinematic_traj_type=linear, vel0=[0, 0.96, 0]: hub moves East at 0.96 m/s
-    for 65 s.  GPS fuses at t~23 s (East GPS velocity heading = stable EKF yaw).
-    GPS tether recapture fires at t~23 s; orbit tracking starts then.
+Uses the acro_armed_lua_full fixture (orbital kinematic, vel0=East):
+  - kinematic_traj_type=orbital, vel0=[0, 0.96, 0]: hub circles anchor at
+    r_h~99 m, alt~14 m, v=0.96 m/s.  GPS velocity heading rotates at 0.56 deg/s,
+    giving EKFGSF enough heading variation to converge; straight-line (linear)
+    velocity is degenerate for EKFGSF (all hypotheses predict identical NED vel).
+    GPS tether recapture fires when GPS origin sets (~t=21 s); orbit tracking
+    starts then (attitude-based, robust to EKF const_pos_mode until t~41 s).
   - internal_controller=False (Lua RC overrides drive physics at 50 Hz)
   - SCR_USER6=1 set immediately in fixture (Lua active from t~15 s).
   - COL_CRUISE_FLIGHT_RAD=-0.18 rad (matches stack_coll_eq from simtest)
@@ -18,18 +21,21 @@ No RC overrides are sent by this test — Lua owns Ch1/Ch2/Ch3 (cyclic +
 collective) and Ch8 (motor interlock keepalive at 100 Hz).
 
 Timing from mediator start (speedup=1):
-  t=0..60 s   kinematic constant-velocity phase (East at 0.96 m/s)
-  t=60..65 s  kinematic ramp-to-zero (vel_ramp_s=5)
+  t=0..65 s   kinematic orbital phase (v=0.96 m/s, r_h~99 m)
+  t~11 s      GPS first fix
+  t~13 s      arm complete; SCR_USER6=1 set
   t~15 s      AHRS healthy; Lua DCM capture fires
               "RAWES flight: captured" sent; bz_eq0 = disk_normal_ned()
-  t~21 s      EKF3 origin set (GPS first fix)
-  t~23 s      GPS fuses; GPS tether recapture fires
+  t~21 s      EKF3 origin set; GPS tether recapture fires
               "RAWES flight: GPS bz=(...)" sent; orbit tracking begins
-  t=65 s      kinematic exits -- ctx.wait_kinematic_done() returns
+  t~41 s      delAngBiasLearned; GPS position/velocity fusion starts
+  t=65 s      kinematic exits mid-orbit at v=0.96 m/s (no vel ramp)
+  t~71 s      fixture yields (6 s after kinematic end)
   t=65+       free flight under ArduPilot + Lua; Lua already tracking orbit
 
-Fixture yields at ~t=15 s.  Test waits for kinematic end, then drains
-buffered STATUSTEXTs and observes 120 s of free flight.
+Fixture yields at ~t=71 s (after kinematic ends).  STATUSTEXTs from the
+kinematic phase are in ctx.all_statustext.  wait_kinematic_done() returns
+immediately (transition already logged).  Test observes 120 s of free flight.
 
 Pass criteria (all from physics telemetry CSV, not EKF estimates)
 -----------------------------------------------------------------
@@ -45,7 +51,6 @@ not EKF LOCAL_POSITION_NED (which can lag physics crashes by tens of seconds).
 """
 import logging
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -61,7 +66,7 @@ from stack_infra import StackContext, dump_startup_diagnostics
 from analyse_run import compute_steady_metrics, print_flight_report, parse_arducopter, RunReport
 
 # -- Timing -------------------------------------------------------------------
-_KINEMATIC_TIMEOUT_S = 90.0   # s to wait for kinematic->free-flight transition
+_KINEMATIC_TIMEOUT_S = 50.0   # s from fixture yield to kinematic end (fixture yields ~46s, kinematic exits ~80s → 34s gap; 50s has margin)
 _CAPTURE_TIMEOUT_S   = 30.0   # s from observation start -- Lua captures during kinematic
 _OBS_SECONDS         = 120.0  # s of free-flight observation after kinematic ends
 
@@ -133,7 +138,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
     max_cyclic_activity = 0
     ekf_yaw_reset       = False
 
-    t_obs_start        = time.monotonic()
+    t_obs_start        = gcs.sim_now()
     deadline           = t_obs_start + _OBS_SECONDS
     t_last_log         = t_obs_start
     t_capture_deadline = t_obs_start + _CAPTURE_TIMEOUT_S
@@ -141,7 +146,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
     log.info("=== test_lua_flight_steady: observing %.0f s of free flight ===", _OBS_SECONDS)
 
     try:
-        while time.monotonic() < deadline:
+        while gcs.sim_now() < deadline:
             for name, proc, lp in [
                 ("mediator", ctx.mediator_proc, ctx.mediator_log),
                 ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
@@ -160,8 +165,8 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"],
                 blocking=True, timeout=0.2,
             )
-            t_rel = time.monotonic() - t_obs_start
-            now   = time.monotonic()
+            t_rel = gcs.sim_now() - t_obs_start
+            now   = gcs.sim_now()
 
             if msg is not None:
                 mt = msg.get_type()

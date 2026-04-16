@@ -79,19 +79,25 @@ def test_physical_sensor_tether_aligned_reports_nonzero_attitude():
         f"PhysicalSensor should report large tilt for 30° elevation; got {rpy_deg}"
 
 
-def test_physical_sensor_spin_stripped_from_gyro():
-    # Pure spin about disk_normal must not appear in gyro output.
+def test_physical_sensor_gyro_faithful():
+    # The sensor reports the full body angular velocity — no spin stripping.
+    # The GB4008 keeps the electronics non-rotating via K_YAW torque in dynamics;
+    # the sensor simply reads whatever angular velocity the body has.
+    # Here we inject a pure spin about disk_normal and verify it IS reported.
     R_hub = build_orb_frame(np.array([0.0, 0.0, -1.0]))  # body Z = NED up
+    omega_world = np.array([0.0, 0.0, -20.0])             # spin about NED up
     sensor = PhysicalSensor(gyro_sigma=0.0, accel_sigma=0.0, rng_seed=0)
     result = sensor.compute(
         pos_ned=np.zeros(3),
         vel_ned=np.zeros(3),
         R_hub=R_hub,
-        omega_body=np.array([0.0, 0.0, -20.0]),   # pure spin about NED up
+        omega_body=omega_world,
         accel_world_ned=np.zeros(3),
         dt=0.0025,
     )
-    np.testing.assert_allclose(result["gyro_body"], np.zeros(3), atol=1e-10)
+    # Expected: gyro_body = R_hub.T @ omega_world
+    expected = R_hub.T @ omega_world
+    np.testing.assert_allclose(result["gyro_body"], expected, atol=1e-10)
 
 
 def test_physical_sensor_accel_stationary():

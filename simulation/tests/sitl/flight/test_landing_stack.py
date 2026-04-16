@@ -24,7 +24,6 @@ Telemetry columns used (TelRow fields):
 
 import logging
 import sys
-import time
 from pathlib import Path
 
 _SIM_DIR  = Path(__file__).resolve().parents[3]
@@ -89,13 +88,13 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
     captured_seen   = any("RAWES land: captured"    in t for t in ctx.all_statustext)
     final_drop_seen = any("RAWES land: final_drop"  in t for t in ctx.all_statustext)
 
-    t_obs_start = time.monotonic()
+    t_obs_start = gcs.sim_now()
     deadline    = t_obs_start + _OBS_SECONDS
 
     log.info("--- test_landing_lua: observing %.0f s ---", _OBS_SECONDS)
 
     try:
-        while time.monotonic() < deadline:
+        while gcs.sim_now() < deadline:
             # Check processes haven't died
             for name, proc, lp in [
                 ("mediator", ctx.mediator_proc, ctx.mediator_log),
@@ -107,7 +106,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
                         f"{name} exited during landing_lua test (rc={proc.returncode}):\n{txt[-3000:]}"
                     )
 
-            msg = gcs._mav.recv_match(
+            msg = gcs._recv(
                 type=["STATUSTEXT", "LOCAL_POSITION_NED"],
                 blocking=True, timeout=0.1,
             )

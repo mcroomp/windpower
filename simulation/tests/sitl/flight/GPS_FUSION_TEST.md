@@ -15,12 +15,12 @@ The test gates on five sequential milestones:
 ```
 [1] EKF tilt aligned        (pre-arm, ~3.5 s)
 [2] GPS origin set          (pre-arm, ~17.7 s after GPS detected)
-[3] Armed in ACRO           (~22.7 s wall time)
+[3] Armed in ACRO           (~22.7 s sim time)
 [4] Yaw aligned             (pre-arm compass, already done at step [3])
 [5] EKF3 is using GPS       (~54.5 s into step [5], ~83 s total)
 ```
 
-Total wall time: **83 s** (PASS).
+Total sim time: **83 s** (PASS).  At SITL speedup=1 this equals ~83 s wall time.
 
 ---
 
@@ -59,12 +59,12 @@ the production mediator would format it (`sitl_interface.SITLInterface`).
 
 ## EKF Fusion Chain — Observed Timings
 
-All times are relative to SITL start (GCS connect = t=0 s).
+All times are **simulation seconds** (from `time_boot_ms`), relative to SITL start (GCS connect = t=0 s).  At SITL speedup=1 these equal wall-clock seconds.
 
 ### Pre-arm phase
 
-| t (s) | Event | EKF flags | Notes |
-|-------|-------|-----------|-------|
+| t (sim s) | Event | EKF flags | Notes |
+|-----------|-------|-----------|-------|
 | 0.0   | GCS connected, sensor worker started | — | Stationary: vel=[0,0,0] |
 | 1.0   | EKF flags = 0x0400 | pred_horiz_ok only | Filter initialising |
 | 2.0   | EKF3 IMU0 initialised; AHRS: EKF3 active | 0x0400 | |
@@ -79,7 +79,7 @@ All times are relative to SITL start (GCS connect = t=0 s).
 
 ### Post-arm phase
 
-| t (s) | Event | pos_h variance | Notes |
+| t (sim s) | Event | pos_h variance | Notes |
 |-------|-------|----------------|-------|
 | 0.0   | Armed; vel target set to [1.5, 0, -1.5] m/s | 0.00 | |
 | 1.0   | Velocity ramp complete (0.3 m/s^2); GPS spd=1.50 m/s | 0.23 | Innovation spike |

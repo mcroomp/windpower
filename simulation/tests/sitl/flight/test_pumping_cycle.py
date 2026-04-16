@@ -14,7 +14,6 @@ Telemetry columns used (TelRow fields):
 
 import logging
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -127,13 +126,13 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
     # Pre-populate from STATUSTEXT captured during fixture setup (e.g. drain loop)
     reel_out_seen  = any("RAWES pump: reel_out" in t for t in all_statustext)
 
-    t_obs_start = time.monotonic()
+    t_obs_start = gcs.sim_now()
     deadline    = t_obs_start + _LUA_OBS_SECONDS
 
     log.info("--- test_pumping_cycle_lua: observing %.0f s ---", _LUA_OBS_SECONDS)
 
     try:
-        while time.monotonic() < deadline:
+        while gcs.sim_now() < deadline:
             # Motor interlock keepalive; Lua owns Ch1/Ch2/Ch3
             gcs.send_rc_override({8: 2000})
 
@@ -145,7 +144,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
                     txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                     pytest.fail(f"{name} exited during pumping_lua (rc={proc.returncode}):\n{txt[-3000:]}")
 
-            msg = gcs._mav.recv_match(
+            msg = gcs._recv(
                 type=["LOCAL_POSITION_NED", "STATUSTEXT"],
                 blocking=True, timeout=0.1,
             )

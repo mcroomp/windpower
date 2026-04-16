@@ -64,8 +64,8 @@ from stack_utils import (
 
 from pymavlink import mavutil as _mavutil
 from gcs import ACRO, STABILIZE, RawesGCS
+from mediator_events import MediatorEventLog
 from controller import make_hold_controller
-from sim_time import sim_sleep
 
 _STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
 _RAWES_DEFAULTS_PARM  = _SITL_DIR / "rawes_sitl_defaults.parm"
@@ -297,6 +297,8 @@ class StackContext:
     sitl_log:       Path
     gcs_log:        Path
     telemetry_log:  Path
+    mavlink_log:    Path
+    events_log:     MediatorEventLog
     initial_state:  dict | None
     home_alt_m:     float
     flight_events:  dict
@@ -339,10 +341,12 @@ class StackContext:
 
         # Wait for a log marker, then flush 3 s of buffered messages:
             ctx.wait_drain(
-                until=lambda: "TRANSITION kinematic" in med_log.read_text(),
+                until=lambda _: "TRANSITION kinematic" in med_log.read_text(),
                 timeout=90.0, drain_s=3.0, check_procs=True, label="kin-wait",
             )
         """
+        last_text: list[str | None] = [None]
+
         def _recv_one(recv_timeout: float) -> None:
             msg = self.gcs._recv(
                 type=["STATUSTEXT", "ATTITUDE", "LOCAL_POSITION_NED",
@@ -352,6 +356,9 @@ class StackContext:
                 text = msg.text.rstrip("\x00").strip()
                 self.all_statustext.append(text)
                 self.log.info("STATUSTEXT [%s]: %s", label, text)
+                last_text[0] = text
+            else:
+                last_text[0] = None
 
         def _check_liveness() -> None:
             if not check_procs:
@@ -367,22 +374,22 @@ class StackContext:
                         f"(rc={proc.returncode}):\n{txt[-3000:]}"
                     )
 
-        deadline = time.monotonic() + timeout
+        deadline = self.gcs.sim_now() + timeout
         if until is None:
-            while time.monotonic() < deadline:
+            while self.gcs.sim_now() < deadline:
                 _check_liveness()
-                _recv_one(min(0.1, deadline - time.monotonic()))
+                _recv_one(min(0.1, deadline - self.gcs.sim_now()))
             return True
 
-        while time.monotonic() < deadline:
+        while self.gcs.sim_now() < deadline:
             _check_liveness()
             _recv_one(0.5)
             try:
-                if until():
-                    t_end = time.monotonic() + drain_s
-                    while time.monotonic() < t_end:
+                if until(last_text[0]):
+                    t_end = self.gcs.sim_now() + drain_s
+                    while self.gcs.sim_now() < t_end:
                         _check_liveness()
-                        _recv_one(min(0.1, t_end - time.monotonic()))
+                        _recv_one(min(0.1, t_end - self.gcs.sim_now()))
                     return True
             except OSError:
                 pass
@@ -391,14 +398,14 @@ class StackContext:
     def wait_kinematic_done(self, timeout: float = 90.0, drain_s: float = 3.0) -> bool:
         """Block until the kinematic->free-flight transition, draining STATUSTEXT throughout.
 
-        Polls the mediator log for the "TRANSITION kinematic->free-flight" marker.
+        Polls events.jsonl for the "kinematic_exit" event written by the mediator.
         Returns True if seen, False on timeout.  Raises pytest.fail if mediator
         or SITL exits during the wait.
         """
-        med_log = self.mediator_log
+        ev = self.events_log
 
-        def _transition_seen() -> bool:
-            return "TRANSITION kinematic" in med_log.read_text(errors="replace")
+        def _transition_seen(_text: str | None) -> bool:
+            return ev.has_event("kinematic_exit")
 
         return self.wait_drain(
             until=_transition_seen,
@@ -438,7 +445,6 @@ def _sitl_stack(
     log_prefix:         str = "",
     test_name:          str = "",
     extra_boot_params:  "dict[str, float] | None" = None,
-    speedup:            int = 1,
     base_params:        "ParamSetup | None" = None,
 ):
     """
@@ -507,7 +513,7 @@ def _sitl_stack(
 
     # ── Launch SITL ───────────────────────────────────────────────────────────
     sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
-                             add_param_file=boot_parm_file, speedup=speedup)
+                             add_param_file=boot_parm_file)
 
     ctx = SitlContext(
         sitl_proc    = sitl_proc,
@@ -556,7 +562,6 @@ def _sitl_stack(
 def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefix="",
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
                 extra_boot_params: "dict[str, float] | None" = None,
-                speedup: int = 1,
                 internal_controller: bool | None = None):
     """
     Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
@@ -608,7 +613,6 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         log_prefix        = log_prefix,
         test_name         = test_name,
         extra_boot_params = _extra,
-        speedup           = speedup,
     ) as sitl_ctx:
         log = sitl_ctx.log
         log.info("Hold controller: %s", type(controller).__name__)
@@ -617,6 +621,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         mediator_log  = tmp_path / "mediator.log"
         telemetry_log = tmp_path / "telemetry.csv"
         mavlink_log   = tmp_path / "mavlink.jsonl"
+        events_path   = tmp_path / "events.jsonl"
 
         # ── Launch mediator ────────────────────────────────────────────────────
         _run_id = int(time.time())
@@ -628,6 +633,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
             mediator_proc = _launch_mediator(
                 sitl_ctx.sim_dir, sitl_ctx.repo_root, mediator_log,
                 telemetry_log_path   = str(telemetry_log),
+                events_log_path      = str(events_path),
                 initial_state        = initial_state,
                 startup_damp_seconds = _STARTUP_DAMP_S,
                 lock_orientation     = StackConfig.LOCK_ORIENTATION,
@@ -654,6 +660,8 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
             mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
             gcs_log=sitl_ctx.gcs_log, telemetry_log=telemetry_log,
+            mavlink_log=mavlink_log,
+            events_log=MediatorEventLog(events_path),
             initial_state=initial_state, home_alt_m=home_alt_m,
             flight_events={}, all_statustext=[], setup_samples=[],
             log=log, sim_dir=sitl_ctx.sim_dir,
@@ -676,6 +684,8 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
                 _logs["telemetry.csv"] = telemetry_log
             if mavlink_log.exists():
                 _logs["mavlink.jsonl"] = mavlink_log
+            if events_path.exists():
+                _logs["events.jsonl"] = events_path
             if _logs:
                 copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)
 
@@ -793,8 +803,8 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     ekf_att   = False   # seen a finite ATTITUDE
     ekf_pos   = False   # seen a LOCAL_POSITION_NED (optional, diagnostic only)
     ekf_ok    = False   # ATTITUDE ready
-    deadline  = time.monotonic() + 45.0
-    while time.monotonic() < deadline and not ekf_ok:
+    deadline  = gcs.sim_now() + 45.0
+    while gcs.sim_now() < deadline and not ekf_ok:
         _procs_alive()
         msg = gcs._recv(
             type=["ATTITUDE", "EKF_STATUS_REPORT", "STATUSTEXT",
@@ -803,7 +813,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
         )
         if msg is None:
             continue
-        t_now = time.monotonic()
+        t_now = gcs.sim_now()
         mt    = msg.get_type()
 
         if mt == "STATUSTEXT":
@@ -942,8 +952,8 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     log.info("[setup] Waiting for EKF3 attitude confidence before arming (timeout=20s) ...")
     ekf_att_ready  = False
     last_flags     = 0
-    t_stab = time.monotonic() + 20.0
-    while time.monotonic() < t_stab:
+    t_stab = gcs.sim_now() + 20.0
+    while gcs.sim_now() < t_stab:
         _procs_alive()
         msg = gcs._recv(
             type=["STATUSTEXT", "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"],
@@ -968,7 +978,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
             elif mt == "LOCAL_POSITION_NED":
                 log.info("[stabilise] LOCAL_POSITION_NED  N=%.2f  E=%.2f  D=%.2f",
                          msg.x, msg.y, msg.z)
-                setup_samples.append({"t": time.monotonic(), "type": "LOCAL_POSITION_NED",
+                setup_samples.append({"t": gcs.sim_now(), "type": "LOCAL_POSITION_NED",
                                        "N": msg.x, "E": msg.y, "D": msg.z,
                                        "vN": msg.vx, "vE": msg.vy, "vD": msg.vz})
                 if not ekf_pos:
@@ -1000,14 +1010,14 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     # engages and the RSC output matches the passthrough value.
     log.info("[setup 5/6] Arming with CH8=1000 (motor interlock LOW) ...")
     gcs.send_rc_override({8: 1000})
-    sim_sleep(0.3)
+    gcs.sim_sleep(0.3)
     gcs.send_rc_override({8: 1000})
     try:
         gcs.arm(timeout=_ARM_TIMEOUT, force=True, rc_override={8: 1000})
-        ctx.flight_events["arm_wall_t"] = time.monotonic()
+        ctx.flight_events["arm_t"] = gcs.sim_now()
         log.info("[setup 5/6] Armed — raising motor interlock (CH8=2000) ...")
         gcs.send_rc_override({8: 2000})
-        sim_sleep(0.3)
+        gcs.sim_sleep(0.3)
         gcs.send_rc_override({8: 2000})
     except Exception as exc:
         all_statustext += drain_statustext(gcs, log)
@@ -1028,7 +1038,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     all_statustext += drain_statustext(gcs, log)
     _procs_alive()
 
-    t0 = time.monotonic()
+    t0 = gcs.sim_now()
     ctx.flight_events["Setup complete"] = 0.0
     if t_ekf is not None:
         ctx.flight_events["EKF lock"] = t_ekf - t0
@@ -1202,8 +1212,8 @@ def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
     Drain MAVLink until a finite ATTITUDE message arrives or timeout.
     Returns True if a clean ATTITUDE was received.
     """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    deadline = gcs.sim_now() + timeout
+    while gcs.sim_now() < deadline:
         msg = gcs._recv(type="ATTITUDE", blocking=True, timeout=1.0)
         if msg is None:
             continue
@@ -1236,8 +1246,8 @@ def drain_statustext(gcs, log) -> list[str]:
 
 
 def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    deadline = gcs.sim_now() + timeout
+    while gcs.sim_now() < deadline:
         gcs._mav.mav.param_request_read_send(
             gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
         )
@@ -1333,6 +1343,7 @@ class TorqueStackContext:
     mediator_log:  Path
     sitl_log:      Path
     gcs_log:       Path
+    events_log:    MediatorEventLog
     omega_rotor:   float
     log:           logging.Logger
 
@@ -1406,11 +1417,13 @@ def _torque_stack(
 
         mediator_log = tmp_path / "mediator.log"
         mavlink_log  = tmp_path / "mavlink.jsonl"
+        events_path  = tmp_path / "events.jsonl"
 
         mediator_proc = _launch_mediator_torque(
             _TORQUE_DIR, sitl_ctx.repo_root, mediator_log, omega_rotor,
             profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
             startup_hold_s=_TORQUE_STARTUP_HOLD_S,
+            events_log_path=str(events_path),
         )
 
         def _assert_alive() -> None:
@@ -1427,6 +1440,7 @@ def _torque_stack(
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
             mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
             gcs_log=sitl_ctx.gcs_log,
+            events_log=MediatorEventLog(events_path),
             omega_rotor=omega_rotor, log=log,
         )
 
@@ -1442,8 +1456,8 @@ def _torque_stack(
             gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
 
             log.info("Waiting for param subsystem ...")
-            deadline = time.monotonic() + 20.0
-            while time.monotonic() < deadline:
+            deadline = gcs.sim_now() + 20.0
+            while gcs.sim_now() < deadline:
                 _assert_alive()
                 gcs._mav.mav.param_request_read_send(
                     gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
@@ -1460,22 +1474,22 @@ def _torque_stack(
             log.info("Waiting for EKF yaw alignment (CH8=2000, up to 45 s) ...")
             gcs.send_rc_override({8: 2000})
             ekf_ok  = False
-            t_start = time.monotonic()
-            t_rc    = time.monotonic()
-            deadline = time.monotonic() + 45.0
+            t_start = gcs.sim_now()
+            t_rc    = gcs.sim_now()
+            deadline = gcs.sim_now() + 45.0
             _MIN_WAIT = 3.0
 
-            while time.monotonic() < deadline:
+            while gcs.sim_now() < deadline:
                 _assert_alive()
-                if time.monotonic() - t_rc >= 0.5:
+                if gcs.sim_now() - t_rc >= 0.5:
                     gcs.send_rc_override({8: 2000})
-                    t_rc = time.monotonic()
+                    t_rc = gcs.sim_now()
                 msg = gcs._recv(
                     type=["ATTITUDE", "STATUSTEXT"], blocking=True, timeout=0.5,
                 )
                 if msg is None:
                     continue
-                now = time.monotonic()
+                now = gcs.sim_now()
                 if msg.get_type() == "STATUSTEXT":
                     text = msg.text.rstrip("\x00").strip()
                     log.info("SITL: %s", text)
@@ -1523,5 +1537,7 @@ def _torque_stack(
             _logs = {"mediator.log": mediator_log}
             if mavlink_log.exists():
                 _logs["mavlink.jsonl"] = mavlink_log
+            if events_path.exists():
+                _logs["events.jsonl"] = events_path
             copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)
             log.info("Mediator log copied to %s", sitl_ctx.test_log_dir)

@@ -29,12 +29,19 @@ class MavlinkLogWriter:
     def __init__(self, fh) -> None:
         self._fh = fh
 
-    def write(self, msg) -> None:
-        """Serialize *msg* (a pymavlink message) as one JSON line."""
+    def write(self, msg, last_time_boot_ms: int) -> None:
+        """
+        Serialize *msg* (a pymavlink message) as one JSON line.
+
+        Some MAVLink message types (e.g. STATUSTEXT) do not carry a
+        ``time_boot_ms`` field.  Pass the last known sim time as
+        *last_time_boot_ms* so those entries get a meaningful timestamp.
+        """
         try:
-            self._fh.write(
-                json.dumps({"_t_wall": time.time(), **msg.to_dict()}) + "\n"
-            )
+            d = msg.to_dict()
+            if "time_boot_ms" not in d and last_time_boot_ms > 0:
+                d["time_boot_ms"] = last_time_boot_ms
+            self._fh.write(json.dumps({"_t_wall": time.time(), **d}) + "\n")
         except Exception:
             pass
 

@@ -1,25 +1,25 @@
 """
-test_gps_fusion_layers.py -- Layer-by-layer GPS fusion diagnostic.
+test_gps_fusion_layers.py -- GPS fusion diagnostic with orbital sensor.
 
-Static sensor worker, no mediator, no dynamics.  Each layer changes one
-variable from the baseline to isolate what blocks GPS fusion.
+Each test: hold stationary at orbit start position pre-arm, then after arm
+accelerate in a 10 m radius CCW circle.  Speed ramps linearly 0 -> 5 m/s over
+exactly one full circle (~25 s), then holds 5 m/s.  The rotating GPS velocity
+heading gives EKFGSF (EK3_SRC1_YAW=8) enough signal to converge and set
+yawAlignComplete, which unblocks GPS fusion.
 
-Layer progression:
-  L0  Level vehicle, yaw=0, vel=[0.1,0,0] North  -- gap=0 deg  (expect PASS)
-  L1  RAWES tilt (65 deg), yaw=0, vel North       -- gap=0 deg  (expect PASS)
-  L2  RAWES tilt + RAWES yaw=136.6, vel aligned   -- gap=0 deg  (expect PASS)
-  L3  RAWES tilt + yaw=136.6, vel=current cfg     -- gap=152 deg (may fail)
-  L4  RAWES tilt + yaw=136.6, vel=East (90 deg)   -- gap=46.6 deg (may fail)
-  L5  RAWES tilt + yaw=136.6, vel=North (0 deg)   -- gap=136.6 deg (may fail)
+Layer variants test different altitudes; the orbital pattern is identical.
 
-Also: test_gps_fusion_armed -- same L0 sensor, but arms vehicle first,
-  then waits for GPS fusion.  Tests hypothesis that GPS fusion requires
-  armed state.
+test_gps_fusion_fast_circle: same fast-circle trajectory as test_kinematic_gps
+  (hold->accel->const->decel->large orbit) but using the simpler level-body
+  sensor model (BZ_LEVEL=[0,0,1], no tether-direction tilt).
+  Used to isolate whether GPS glitch is caused by the trajectory itself or by
+  the tilted body_z in the full mediator/sensor.py path.
 
 Run:
-  bash simulation/dev.sh test-stack -v -k test_gps_fusion_layers
-  bash simulation/dev.sh test-stack -v -k "test_gps_fusion_layers[L0"
-  bash simulation/dev.sh test-stack -v -k test_gps_fusion_armed
+  bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_gps_fusion_layers
+  bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_gps_fusion_armed
+  bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_gps_fusion_trajectory
+  bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_gps_fusion_fast_circle
 """
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ import logging
 import math
 import sys
 import threading
-import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 _SIM_DIR  = Path(__file__).resolve().parents[3]
@@ -50,674 +50,184 @@ log = logging.getLogger("test_gps_layers")
 
 _GRAVITY = 9.81
 
+
 # ---------------------------------------------------------------------------
-# Rotation matrix helpers
+# Frame helpers
 # ---------------------------------------------------------------------------
 
-def _euler_to_R(roll: float, pitch: float, yaw: float):
-    """Body-to-NED rotation matrix from ZYX Euler angles [rad]."""
-    cr, sr = math.cos(roll),  math.sin(roll)
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw),   math.sin(yaw)
-    return [
-        [ cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
-        [ sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
-        [-sp,     cp*sr,             cp*cr            ],
-    ]
-
-
-def _accel_body_from_rpy_deg(roll_deg, pitch_deg, yaw_deg):
-    """
-    IMU specific force at rest in body frame = R^T @ [0, 0, -9.81].
-    (NED: gravity = +Z, specific force at rest = -Z in world frame.)
-    """
-    R = _euler_to_R(math.radians(roll_deg), math.radians(pitch_deg), math.radians(yaw_deg))
-    g = [0.0, 0.0, -_GRAVITY]
-    return [
-        R[0][0]*g[0] + R[1][0]*g[1] + R[2][0]*g[2],
-        R[0][1]*g[0] + R[1][1]*g[1] + R[2][1]*g[2],
-        R[0][2]*g[0] + R[1][2]*g[1] + R[2][2]*g[2],
-    ]
+def _rpy_from_R(R: np.ndarray) -> np.ndarray:
+    """ZYX Euler [roll, pitch, yaw] in radians from a 3x3 body-to-NED matrix."""
+    pitch = math.asin(-float(np.clip(R[2, 0], -1.0, 1.0)))
+    roll  = math.atan2(float(R[2, 1]), float(R[2, 2]))
+    yaw   = math.atan2(float(R[1, 0]), float(R[0, 0]))
+    return np.array([roll, pitch, yaw])
 
 
 # ---------------------------------------------------------------------------
-# Physics engine for sensor worker
+# Unified orbital sensor worker
 # ---------------------------------------------------------------------------
 
-class _Physics:
-    """Minimal kinematic physics for the GPS-fusion sensor worker.
-
-    Maintains position, velocity, and kinematic acceleration in NED.
-    The sensor worker calls step() each tick; the main thread calls
-    set_target_vel() to schedule smooth velocity transitions.
-
-    accel_body returned is the IMU specific force:
-        specific_force_NED = accel_world - gravity_NED
-                           = accel_world - [0, 0, +g]
-        accel_body         = R^T @ specific_force_NED
-
-    This ensures the EKF's IMU integration matches the GPS velocity/position
-    data — preventing large innovations that would block GPS fusion.
-    """
-
-    def __init__(
-        self,
-        pos_ned: list,
-        vel_ned: list,
-        attitude_deg: list,
-        accel_limit: float = 0.3,   # m/s^2 per-axis ramp limit
-    ) -> None:
-        self._lock       = threading.Lock()
-        self.pos         = list(pos_ned)
-        self.vel         = list(vel_ned)
-        self.target_vel  = list(vel_ned)
-        self.accel_world = [0.0, 0.0, 0.0]   # kinematic accel in NED (m/s^2)
-        self.accel_limit = accel_limit
-        rpy = [math.radians(a) for a in attitude_deg]
-        self._rpy_rad = rpy
-        self._R       = _euler_to_R(*rpy)
-
-    def set_target_vel(self, target: list) -> None:
-        """Schedule a velocity transition (main-thread safe)."""
-        with self._lock:
-            self.target_vel = list(target)
-
-    def step(self, dt: float) -> None:
-        """Advance physics by dt seconds (sensor-thread only)."""
-        if dt <= 0:
-            return
-        with self._lock:
-            dv_max = self.accel_limit * dt
-            for i in range(3):
-                err   = self.target_vel[i] - self.vel[i]
-                delta = max(-dv_max, min(dv_max, err))
-                self.accel_world[i] = delta / dt
-                self.vel[i] += delta
-            for i in range(3):
-                self.pos[i] += self.vel[i] * dt
-
-    def snapshot(self):
-        """Return (pos, vel, accel_world, accel_body, rpy_rad) atomically.
-
-        accel_world : kinematic acceleration in NED [m/s^2]  (what we log as accel_x/y/z)
-        accel_body  : IMU specific force in body frame        (what we send to SITL)
-        """
-        with self._lock:
-            aw = list(self.accel_world)
-            sf = [aw[0], aw[1], aw[2] - _GRAVITY]
-            R  = self._R
-            ab = [
-                R[0][0]*sf[0] + R[1][0]*sf[1] + R[2][0]*sf[2],
-                R[0][1]*sf[0] + R[1][1]*sf[1] + R[2][1]*sf[2],
-                R[0][2]*sf[0] + R[1][2]*sf[1] + R[2][2]*sf[2],
-            ]
-            return list(self.pos), list(self.vel), aw, ab, list(self._rpy_rad)
+_ORB_R     = 10.0   # orbit radius [m]
+_ORB_VMAX  = 5.0    # peak speed [m/s]
+# T_ramp: one full circle (2π r) at mean speed (v_max/2)  →  4π r / v_max
+_ORB_TRAMP = 4.0 * math.pi * _ORB_R / _ORB_VMAX   # ≈ 25.13 s
 
 
-# ---------------------------------------------------------------------------
-# Minimum-jerk trajectory
-# ---------------------------------------------------------------------------
-
-class _MinJerkTraj:
-    """5th-order polynomial (minimum-jerk) trajectory for each NED axis.
-
-    Boundary conditions:
-        pos(0) = p0,  vel(0) = v0,  accel(0) = 0
-        pos(T) = pf,  vel(T) = vf,  accel(T) = 0
-
-    Coefficients in normalised time tau = t/T:
-        p(tau) = c0 + c1*tau + c2*tau^2 + c3*tau^3 + c4*tau^4 + c5*tau^5
-
-    Derivation for zero initial/final acceleration (c2 = 0):
-        D = pf - p0 - v0*T
-        E = (vf - v0)*T
-        c0=p0, c1=v0*T, c2=0, c3=10D-4E, c4=-15D+7E, c5=6D-3E
-    """
-
-    def __init__(
-        self,
-        p0: list,
-        v0: list,
-        pf: list,
-        vf: list,
-        T: float,
-    ) -> None:
-        self.T  = float(T)
-        self._n = len(p0)
-        self._c = []        # list of [c0..c5] per axis
-        for i in range(self._n):
-            D  = pf[i] - p0[i] - v0[i] * T
-            E  = (vf[i] - v0[i]) * T
-            self._c.append([
-                p0[i],          # c0
-                v0[i] * T,      # c1
-                0.0,            # c2  (zero initial accel constraint)
-                10*D - 4*E,     # c3
-                -15*D + 7*E,    # c4
-                6*D - 3*E,      # c5
-            ])
-
-    def at(self, t: float):
-        """Return (pos, vel, accel_world) lists at time t (clamped to [0, T])."""
-        tau = max(0.0, min(1.0, t / self.T))
-        T   = self.T
-        pos, vel, acc = [], [], []
-        for c in self._c:
-            p = (c[0] + c[1]*tau + c[2]*tau**2
-                 + c[3]*tau**3 + c[4]*tau**4 + c[5]*tau**5)
-            v = (c[1] + 2*c[2]*tau + 3*c[3]*tau**2
-                 + 4*c[4]*tau**3 + 5*c[5]*tau**4) / T
-            a = (2*c[2] + 6*c[3]*tau + 12*c[4]*tau**2
-                 + 20*c[5]*tau**3) / T**2
-            pos.append(p); vel.append(v); acc.append(a)
-        return pos, vel, acc
-
-    @property
-    def peak_speed(self) -> float:
-        """Approximate peak speed (m/s) — at tau=0.5 for zero-boundary case."""
-        _, v05, _ = self.at(0.5 * self.T)
-        return math.sqrt(sum(vi**2 for vi in v05))
-
-
-class _TrajPhysics:
-    """Kinematic physics that follows a _MinJerkTraj analytically.
-
-    Unlike _Physics (which ramps toward a target velocity numerically),
-    _TrajPhysics evaluates the polynomial closed-form at each tick so
-    accel_body is exact — no numerical differentiation noise.
-
-    omega_spin ramps linearly from 0 to omega_target over the trajectory
-    duration and is returned from snapshot() for send_state(rpm_rad_s=...).
-    """
-
-    def __init__(
-        self,
-        traj: _MinJerkTraj,
-        attitude_deg: list,
-        omega_target: float = 0.0,
-    ) -> None:
-        self._lock         = threading.Lock()
-        self._traj         = traj
-        self._t            = 0.0
-        self._started      = False
-        self._omega_target = omega_target
-        rpy                = [math.radians(a) for a in attitude_deg]
-        self._rpy_rad      = rpy
-        self._R            = _euler_to_R(*rpy)
-
-    def start(self) -> None:
-        """Begin the trajectory clock.  Call this after arm."""
-        with self._lock:
-            self._started = True
-
-    def step(self, dt: float) -> None:
-        """Advance trajectory clock (sensor-thread only)."""
-        with self._lock:
-            if self._started:
-                self._t = min(self._t + dt, self._traj.T)
-
-    def snapshot(self):
-        """Return (pos, vel, accel_world, accel_body, rpy_rad, omega_rad_s)."""
-        with self._lock:
-            t   = self._t
-            T   = self._traj.T
-            pos, vel, aw = self._traj.at(t)
-            # IMU specific force = accel_world - gravity_NED
-            sf = [aw[0], aw[1], aw[2] - _GRAVITY]
-            R  = self._R
-            ab = [
-                R[0][0]*sf[0] + R[1][0]*sf[1] + R[2][0]*sf[2],
-                R[0][1]*sf[0] + R[1][1]*sf[1] + R[2][1]*sf[2],
-                R[0][2]*sf[0] + R[1][2]*sf[1] + R[2][2]*sf[2],
-            ]
-            alpha = t / T if T > 0 else 1.0
-            omega = self._omega_target * alpha
-            return list(pos), list(vel), list(aw), ab, list(self._rpy_rad), omega
-
-    @property
-    def elapsed(self) -> float:
-        with self._lock:
-            return self._t
-
-    @property
-    def done(self) -> bool:
-        with self._lock:
-            return self._t >= self._traj.T
-
-
-def _traj_sensor_worker(
-    stop_event: threading.Event,
-    traj_phys: _TrajPhysics,
-    hz: int = 100,
-    telemetry: list | None = None,
-    tel_hz: int = 10,
+def _orbital_sensor_worker(
+    stop_event:  threading.Event,
+    p_hold:      np.ndarray,          # NED [m] — hold position pre-arm (= orbit start)
+    alt_d:       float,               # NED Z of orbit plane [m] (< 0 = above ground)
+    start_event: threading.Event,    # set after arm → begin circular motion
+    telemetry:   list | None = None,
+    tel_hz:      int = 10,
 ) -> None:
-    """Sensor worker driven by _TrajPhysics (minimum-jerk trajectory).
+    """Lockstep sensor worker.
 
-    Identical protocol to _physics_sensor_worker but also passes rpm_rad_s
-    to send_state() so ArduPilot's RPM sensor sees the rotor spinning up.
+    Hold phase  (until start_event):
+        Stationary at p_hold, level attitude, zero velocity.
+        Sends correct gravity-consistent accel_body so EKF tilt aligns.
+
+    Orbit phase (after start_event):
+        10 m radius CCW circle.  Speed ramps 0 → 5 m/s over one full circle
+        (T_ramp ≈ 25 s), then holds 5 m/s.  Yaw tracks GPS velocity heading
+        (heading gap = 0) via build_vel_aligned_frame.  Gyro computed from
+        finite-diff of the orientation matrix.
+
+    Replies to every SITL servo packet (lockstep — never skip a reply).
     """
-    gyro   = [0.0, 0.0, 0.0]
-    sitl   = SITLInterface(recv_port=StackConfig.SITL_JSON_PORT, lockstep=False)
+    from frames import build_vel_aligned_frame, build_orb_frame
+
+    GRAVITY_NED = np.array([0.0, 0.0, _GRAVITY])
+    BZ_LEVEL    = np.array([0.0, 0.0, 1.0])
+
+    # Pre-arm constants (level, stationary)
+    R_HOLD  = build_orb_frame(BZ_LEVEL)
+    RPY_HOLD = _rpy_from_R(R_HOLD)
+    AB_HOLD  = R_HOLD.T @ (-GRAVITY_NED)   # = [0, 0, -g] for level body
+
+    # Orbit start angle
+    theta0 = math.atan2(float(p_hold[1]), float(p_hold[0]))   # = 0 for [r,0,alt]
+
+    DT_FD  = 1e-3          # finite-diff step for gyro [s]
+    tel_dt = 1.0 / tel_hz
+
+    sitl      = SITLInterface(recv_port=StackConfig.SITL_JSON_PORT)
     sitl.bind()
 
-    t0        = time.monotonic()
-    t_next    = t0
-    t_last    = t0
-    t_tel     = t0
+    t_arm     = None       # sim time when orbit started
+    t_tel     = 0.0
     connected = False
-    tel_dt    = 1.0 / tel_hz
+
+    def _orbit_state(t: float):
+        """Return (pos, vel, accel_world) for time t since orbit start."""
+        if t < _ORB_TRAMP:
+            v  = _ORB_VMAX * t / _ORB_TRAMP
+            at = _ORB_VMAX / _ORB_TRAMP          # tangential accel
+            th = theta0 + (_ORB_VMAX * t * t) / (2.0 * _ORB_R * _ORB_TRAMP)
+        else:
+            v  = _ORB_VMAX
+            at = 0.0
+            th = theta0 + 2.0 * math.pi + (_ORB_VMAX / _ORB_R) * (t - _ORB_TRAMP)
+        sn, cs = math.sin(th), math.cos(th)
+        pos = np.array([_ORB_R * cs, _ORB_R * sn, alt_d])
+        vel = np.array([-v * sn,      v * cs,      0.0  ])
+        ac  = v * v / _ORB_R                    # centripetal magnitude
+        aw  = np.array([
+            -ac * cs - at * sn,                 # centripetal-inward + tangential
+            -ac * sn + at * cs,
+            0.0,
+        ])
+        return pos, vel, aw
 
     try:
         while not stop_event.is_set():
             servos = sitl.recv_servos()
-            if servos is not None and not connected:
-                log.info("traj_worker: SITL connected")
+            if servos is None:
+                continue
+            if not connected:
+                log.info("orbital_worker: SITL connected")
                 connected = True
 
-            now = time.monotonic()
-            if connected and now >= t_next:
-                dt = now - t_last
-                traj_phys.step(dt)
-                t_last = now
+            t_sim = sitl.sim_now()
 
-                pos, vel, accel_w, accel_b, rpy, omega = traj_phys.snapshot()
+            if t_arm is None and start_event.is_set():
+                t_arm = t_sim
+                log.info("orbital_worker: orbit started at t_sim=%.2f s", t_arm)
+
+            if t_arm is None:
+                # ── Hold phase ────────────────────────────────────────────
+                sitl.send_state(
+                    pos_ned    = p_hold,
+                    vel_ned    = np.zeros(3),
+                    rpy_rad    = RPY_HOLD,
+                    accel_body = AB_HOLD,
+                    gyro_body  = np.zeros(3),
+                )
+            else:
+                # ── Orbit phase ───────────────────────────────────────────
+                t       = t_sim - t_arm
+                pos, vel, aw = _orbit_state(t)
+
+                R       = build_vel_aligned_frame(BZ_LEVEL, vel)
+                rpy     = _rpy_from_R(R)
+
+                # Gyro from orientation finite-diff
+                _, vel1, _ = _orbit_state(t + DT_FD)
+                R1      = build_vel_aligned_frame(BZ_LEVEL, vel1)
+                S       = R.T @ ((R1 - R) / DT_FD)
+                gyro    = np.array([S[2, 1], S[0, 2], S[1, 0]])
+
+                accel_body = R.T @ (aw - GRAVITY_NED)
 
                 sitl.send_state(
-                    timestamp  = now - t0,
                     pos_ned    = pos,
                     vel_ned    = vel,
                     rpy_rad    = rpy,
-                    accel_body = accel_b,
+                    accel_body = accel_body,
                     gyro_body  = gyro,
-                    rpm_rad_s  = omega,
                 )
-                t_next = now + 1.0 / hz
 
-                if telemetry is not None and now >= t_tel:
-                    t_tel = now + tel_dt
+                if telemetry is not None and t_sim >= t_tel:
+                    t_tel = t_sim + tel_dt
+                    v_horiz = math.hypot(float(vel[0]), float(vel[1]))
                     telemetry.append(TelRow(
-                        t_sim        = now - t0,
-                        pos_x        = pos[0],
-                        pos_y        = pos[1],
-                        pos_z        = pos[2],
-                        vel_x        = vel[0],
-                        vel_y        = vel[1],
-                        vel_z        = vel[2],
-                        accel_x      = accel_w[0],
-                        accel_y      = accel_w[1],
-                        accel_z      = accel_w[2],
-                        sens_vel_n   = vel[0],
-                        sens_vel_e   = vel[1],
-                        sens_vel_d   = vel[2],
-                        sens_accel_x = accel_b[0],
-                        sens_accel_y = accel_b[1],
-                        sens_accel_z = accel_b[2],
-                        rpy_roll     = math.degrees(rpy[0]),
-                        rpy_pitch    = math.degrees(rpy[1]),
-                        rpy_yaw      = math.degrees(rpy[2]),
-                        v_horiz_ms   = math.hypot(vel[0], vel[1]),
-                        omega_rotor  = omega,
+                        t_sim      = t_sim,
+                        pos_x      = float(pos[0]),
+                        pos_y      = float(pos[1]),
+                        pos_z      = float(pos[2]),
+                        vel_x      = float(vel[0]),
+                        vel_y      = float(vel[1]),
+                        vel_z      = float(vel[2]),
+                        v_horiz_ms = v_horiz,
                     ))
     finally:
         sitl.close()
 
 
-def _physics_sensor_worker(
-    stop_event: threading.Event,
-    phys: _Physics,
-    hz: int = 100,
-    telemetry: list | None = None,
-    tel_hz: int = 10,
-) -> None:
-    """Send sensor packets to SITL driven by _Physics state.
-
-    Each tick:
-      1. phys.step(dt) — ramps vel toward target_vel, integrates pos
-      2. phys.snapshot() — returns pos, vel, accel_world, accel_body, rpy_rad
-      3. sitl.send_state() — sends JSON packet using the same format as mediator
-
-    The accel_body is computed from the actual velocity change each tick, so the
-    EKF's IMU integration predicts the same position/velocity as GPS — small
-    innovations allow GPS fusion to succeed.
-
-    If telemetry is not None, appends a TelRow every 1/tel_hz seconds.
-    """
-    gyro = [0.0, 0.0, 0.0]
-
-    sitl = SITLInterface(recv_port=StackConfig.SITL_JSON_PORT, lockstep=False)
-    sitl.bind()
-
-    t0        = time.monotonic()
-    t_next    = t0
-    t_last    = t0
-    t_tel     = t0
-    connected = False
-    tel_dt    = 1.0 / tel_hz
-
-    try:
-        while not stop_event.is_set():
-            servos = sitl.recv_servos()   # non-blocking; discovers SITL addr
-            if servos is not None and not connected:
-                log.info("sensor_worker: SITL connected")
-                connected = True
-
-            now = time.monotonic()
-            if connected and now >= t_next:
-                dt = now - t_last
-                phys.step(dt)
-                t_last = now
-
-                pos, vel, accel_w, accel_b, rpy = phys.snapshot()
-
-                sitl.send_state(
-                    timestamp  = now - t0,
-                    pos_ned    = pos,
-                    vel_ned    = vel,
-                    rpy_rad    = rpy,
-                    accel_body = accel_b,
-                    gyro_body  = gyro,
-                )
-                t_next = now + 1.0 / hz
-
-                # Telemetry at tel_hz
-                if telemetry is not None and now >= t_tel:
-                    t_tel = now + tel_dt
-                    row = TelRow(
-                        t_sim        = now - t0,
-                        pos_x        = pos[0],
-                        pos_y        = pos[1],
-                        pos_z        = pos[2],
-                        vel_x        = vel[0],
-                        vel_y        = vel[1],
-                        vel_z        = vel[2],
-                        accel_x      = accel_w[0],
-                        accel_y      = accel_w[1],
-                        accel_z      = accel_w[2],
-                        sens_vel_n   = vel[0],
-                        sens_vel_e   = vel[1],
-                        sens_vel_d   = vel[2],
-                        sens_accel_x = accel_b[0],
-                        sens_accel_y = accel_b[1],
-                        sens_accel_z = accel_b[2],
-                        rpy_roll     = math.degrees(rpy[0]),
-                        rpy_pitch    = math.degrees(rpy[1]),
-                        rpy_yaw      = math.degrees(rpy[2]),
-                        v_horiz_ms   = math.hypot(vel[0], vel[1]),
-                    )
-                    telemetry.append(row)
-    finally:
-        sitl.close()
-
-
 # ---------------------------------------------------------------------------
-# Layer definitions
-# ---------------------------------------------------------------------------
-# RAWES equilibrium Euler angles (from build_orb_frame(body_z=[0.277,0.877,-0.392])):
-#   roll ~124.74 deg, pitch ~-46.12 deg, yaw ~136.6 deg
-#
-# Current vel0 = [0.916, -0.257, 0.093]  -> heading = atan2(-0.257, 0.916) = -15.7 deg
-# heading_gap = 136.6 - (-15.7) = 152.3 deg  <- EKF blocks GPS here
-
-_RAWES_ROLL  =  124.74
-_RAWES_PITCH =  -46.12
-_RAWES_YAW   =  136.6
-_RAWES_ALT   =  14.12    # m above SITL home
-_V           =  0.96     # orbital speed m/s
-
-
-def _vel_heading(heading_deg: float, speed: float = _V):
-    h = math.radians(heading_deg)
-    return [speed*math.cos(h), speed*math.sin(h), 0.0]
-
-
-# (id, description, attitude_deg=[roll,pitch,yaw], vel_ned, position_ned, expected_gap_deg)
-_LAYERS = [
-    (
-        "L0_baseline",
-        "Level hover, yaw=0, vel North  (gap=0 deg)",
-        [0.0, 0.0, 0.0],
-        [0.1, 0.0, 0.0],
-        [0.0, 0.0, -50.0],
-        0.0,
-    ),
-    (
-        "L1_rawes_tilt_yaw0",
-        "RAWES tilt, yaw=0, vel North  (gap=0 deg)",
-        [_RAWES_ROLL, _RAWES_PITCH, 0.0],
-        [0.1, 0.0, 0.0],
-        [0.0, 0.0, -_RAWES_ALT],
-        0.0,
-    ),
-    (
-        "L2_rawes_full_vel_aligned",
-        "RAWES full attitude, vel aligned with compass  (gap=0 deg)",
-        [_RAWES_ROLL, _RAWES_PITCH, _RAWES_YAW],
-        _vel_heading(_RAWES_YAW),
-        [27.9, 95.0, -_RAWES_ALT],
-        0.0,
-    ),
-    (
-        "L3_rawes_vel_current",
-        "RAWES full attitude, vel=current cfg  (gap=152 deg)",
-        [_RAWES_ROLL, _RAWES_PITCH, _RAWES_YAW],
-        [0.916, -0.257, 0.093],
-        [27.9, 95.0, -_RAWES_ALT],
-        152.3,
-    ),
-    (
-        "L4_rawes_vel_east",
-        "RAWES full attitude, vel East  (gap=46.6 deg)",
-        [_RAWES_ROLL, _RAWES_PITCH, _RAWES_YAW],
-        _vel_heading(90.0),
-        [27.9, 95.0, -_RAWES_ALT],
-        46.6,
-    ),
-    (
-        "L5_rawes_vel_north",
-        "RAWES full attitude, vel North  (gap=136.6 deg)",
-        [_RAWES_ROLL, _RAWES_PITCH, _RAWES_YAW],
-        _vel_heading(0.0),
-        [27.9, 95.0, -_RAWES_ALT],
-        136.6,
-    ),
-]
-
-
-# ---------------------------------------------------------------------------
-# Static sensor worker
-# ---------------------------------------------------------------------------
-
-def _sensor_worker(
-    stop_event: threading.Event,
-    attitude_deg: list,
-    vel_ned: list,
-    position_ned: list,
-    hz: int = 100,
-) -> None:
-    """Send sensor packets to SITL (no dynamics, no mediator).
-
-    Attitude, velocity, and accel are constant.  Position is integrated from
-    vel_ned each tick so GPS position is always consistent with velocity —
-    prevents a growing EKF position innovation that would block GPS fusion.
-    """
-    accel   = _accel_body_from_rpy_deg(*attitude_deg)
-    rpy_rad = [math.radians(a) for a in attitude_deg]
-    gyro    = [0.0, 0.0, 0.0]
-    pos     = list(position_ned)   # mutable; integrated each tick
-
-    sitl = SITLInterface(recv_port=StackConfig.SITL_JSON_PORT, lockstep=False)
-    sitl.bind()
-
-    t0        = time.monotonic()
-    t_next    = t0
-    t_last    = t0
-    connected = False
-
-    try:
-        while not stop_event.is_set():
-            servos = sitl.recv_servos()   # non-blocking; discovers SITL addr
-            if servos is not None and not connected:
-                log.info("sensor_worker: SITL connected")
-                connected = True
-
-            now = time.monotonic()
-            if connected and now >= t_next:
-                dt = now - t_last
-                pos[0] += vel_ned[0] * dt
-                pos[1] += vel_ned[1] * dt
-                pos[2] += vel_ned[2] * dt
-                t_last  = now
-
-                sitl.send_state(
-                    timestamp  = now - t0,
-                    pos_ned    = pos,
-                    vel_ned    = vel_ned,
-                    rpy_rad    = rpy_rad,
-                    accel_body = accel,
-                    gyro_body  = gyro,
-                )
-                t_next = now + 1.0 / hz
-    finally:
-        sitl.close()
-
-
-# ---------------------------------------------------------------------------
-# Test
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "layer_id,description,attitude_deg,vel_ned,position_ned,expected_gap",
-    _LAYERS,
-    ids=[l[0] for l in _LAYERS],
-)
-def test_gps_fusion_layers(
-    tmp_path, request,
-    layer_id, description, attitude_deg, vel_ned, position_ned, expected_gap,
-):
-    """
-    Launch SITL with standard boot params, send static sensor packets for 90 s,
-    report whether GPS fused.
-
-    Layers with expected_gap < 30 deg assert GPS must fuse.
-    Layers with expected_gap >= 30 deg are marked xfail.
-    """
-    compass_deg  = attitude_deg[2]
-    vel_head_deg = math.degrees(math.atan2(vel_ned[1], vel_ned[0]))
-    actual_gap   = abs(((compass_deg - vel_head_deg + 180) % 360) - 180)
-
-    with _sitl_stack(
-        tmp_path,
-        log_name   = f"gps_layers_{layer_id}",
-        log_prefix = "gps_layers",
-        test_name  = request.node.name,
-    ) as ctx:
-        _log = ctx.log
-        _log.info("")
-        _log.info("=" * 60)
-        _log.info("  Layer       : %s", layer_id)
-        _log.info("  Description : %s", description)
-        _log.info("  attitude    : roll=%.1f  pitch=%.1f  yaw=%.1f", *attitude_deg)
-        _log.info("  accel_body  : %s", _accel_body_from_rpy_deg(*attitude_deg))
-        _log.info("  vel_ned     : %s  heading=%.1f deg", vel_ned, vel_head_deg)
-        _log.info("  heading_gap : %.1f deg  (compass=%.1f, vel=%.1f)",
-                  actual_gap, compass_deg, vel_head_deg)
-        _log.info("=" * 60)
-
-        # Start static sensor worker
-        stop_ev = threading.Event()
-        worker  = threading.Thread(
-            target=_sensor_worker,
-            args=(stop_ev, attitude_deg, vel_ned, position_ned),
-            daemon=True, name=f"sensor_{layer_id}",
-        )
-        worker.start()
-
-        gps_origin = False
-        gps_fused  = False
-        gps_glitch = False
-
-        try:
-            gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
-            gcs.connect(timeout=30.0)
-            gcs.start_heartbeat(rate_hz=1.0)
-            gcs.request_stream(0, 10)
-
-            _log.info("Connected. Waiting 90 s for GPS fusion ...")
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < 90.0:
-                msg = gcs._recv(  # type: ignore[union-attr]
-                    type=["STATUSTEXT"],
-                    blocking=True, timeout=1.0,
-                )
-                if msg is None:
-                    continue
-                text = msg.text.strip()
-                _log.info("  STATUSTEXT: %s", text)
-                tl = text.lower()
-                if "origin set" in tl:
-                    gps_origin = True
-                if "is using gps" in tl:
-                    gps_fused = True
-                if "gps glitch" in tl or "compass error" in tl:
-                    gps_glitch = True
-
-        finally:
-            stop_ev.set()
-            worker.join(timeout=2.0)
-            try:
-                gcs.close()
-            except Exception:
-                pass
-
-        result = ("FUSED"  if gps_fused and not gps_glitch else
-                  "GLITCH" if gps_glitch else
-                  "NO_GPS")
-        _log.info("")
-        _log.info("  GPS origin : %s", gps_origin)
-        _log.info("  GPS fused  : %s", gps_fused)
-        _log.info("  GPS glitch : %s", gps_glitch)
-        _log.info("  RESULT     : %s", result)
-
-        _expect_pass = (expected_gap < 30.0)
-        if _expect_pass:
-            assert gps_origin, f"[{layer_id}] GPS origin never set"
-            assert gps_fused,  f"[{layer_id}] GPS never fused (gap={actual_gap:.1f} deg)"
-            assert not gps_glitch, f"[{layer_id}] GPS fused then glitched"
-        else:
-            if not gps_fused or gps_glitch:
-                pytest.xfail(
-                    f"[{layer_id}] GPS did not fuse as expected (gap={actual_gap:.1f} deg)"
-                )
-
-
-# ---------------------------------------------------------------------------
-# "In-between" test: same L0 sensor, but arm vehicle before watching GPS
+# Helpers shared by all tests
 # ---------------------------------------------------------------------------
 
 def _wait_statustext(gcs, keywords, timeout, log, label):
-    """Poll MAVLink messages until any keyword matches a STATUSTEXT or timeout.
+    """Poll MAVLink until any keyword matches a STATUSTEXT or timeout.
 
-    Logs every second:
-      EKF_STATUS_REPORT  — flags + variances
-      GPS_RAW_INT        — fix type, satellites, HDOP, speed
-      ATTITUDE           — roll/pitch/yaw from EKF
-    Local position logged every 5 s.
+    Logs EKF_STATUS_REPORT, GPS_RAW_INT, ATTITUDE, and LOCAL_POSITION_NED.
+    Returns the matching STATUSTEXT string, or calls pytest.fail on timeout.
     """
-    t0         = time.monotonic()
-    t_last_ekf = t0 - 1.0   # force immediate first log
+    t0         = gcs.sim_now()
+    t_last_ekf = t0 - 1.0
     t_last_gps = t0 - 1.0
     t_last_att = t0 - 1.0
     t_last_pos = t0
     last_flags = None
 
-    while time.monotonic() - t0 < timeout:
+    while gcs.sim_now() - t0 < timeout:
         msg = gcs._recv(  # type: ignore[union-attr]
             type=["STATUSTEXT", "EKF_STATUS_REPORT", "LOCAL_POSITION_NED",
                   "GPS_RAW_INT", "ATTITUDE"],
             blocking=True, timeout=0.2,
         )
-        now     = time.monotonic()
+        now     = gcs.sim_now()
         elapsed = now - t0
 
         if msg is None:
@@ -745,13 +255,12 @@ def _wait_statustext(gcs, keywords, timeout, log, label):
                 last_flags = flags
 
         elif mt == "GPS_RAW_INT" and now - t_last_gps >= 1.0:
-            # fix_type: 0=no fix,1=no fix,2=2D,3=3D,4=DGPS,5=RTK float,6=RTK fixed
             log.info(
                 "  [%s t=%5.1f s] GPS fix=%d sats=%d hdop=%.1f spd=%.2f m/s",
                 label, elapsed,
                 msg.fix_type, msg.satellites_visible,
-                msg.eph / 100.0,          # eph is HDOP*100
-                msg.vel / 100.0,          # vel is cm/s
+                msg.eph / 100.0,
+                msg.vel / 100.0,
             )
             t_last_gps = now
 
@@ -767,7 +276,7 @@ def _wait_statustext(gcs, keywords, timeout, log, label):
 
         elif mt == "LOCAL_POSITION_NED" and now - t_last_pos >= 5.0:
             log.info(
-                "  [%s t=%5.1f s] LOCAL_POS z=%.2f vz=%.3f (NED, -=up)",
+                "  [%s t=%5.1f s] LOCAL_POS z=%.2f vz=%.3f",
                 label, elapsed, msg.z, msg.vz,
             )
             t_last_pos = now
@@ -775,18 +284,8 @@ def _wait_statustext(gcs, keywords, timeout, log, label):
     pytest.fail(f"[{label}] timed out after {timeout:.0f} s waiting for: {keywords}")
 
 
-
-def _rc_keepalive(
-    gcs,
-    channels: dict,
-    stop_event: threading.Event,
-    interval: float = 0.4,
-) -> None:
-    """Send RC_CHANNELS_OVERRIDE every `interval` seconds until stop_event is set.
-
-    ArduPilot's RC-override expiry is ~1 sim-second, so 0.4 s keeps a safe margin.
-    Runs as a daemon thread; stops automatically when the test exits.
-    """
+def _rc_keepalive(gcs, channels: dict, stop_event: threading.Event, interval: float = 0.4):
+    """Send RC_CHANNELS_OVERRIDE every interval seconds until stop_event."""
     while not stop_event.is_set():
         try:
             gcs.send_rc_override(channels)
@@ -795,318 +294,65 @@ def _rc_keepalive(
         stop_event.wait(interval)
 
 
-def _ramp_vel(vel_ned: list, target: list, duration: float, _log) -> None:
-    """Linearly ramp vel_ned in-place toward target over duration seconds.
+# ---------------------------------------------------------------------------
+# Layer definitions
+# ---------------------------------------------------------------------------
+# Each layer tests a different altitude.  The orbital sensor pattern is the
+# same for all: stationary pre-arm, then 10 m circle accelerating to 5 m/s.
 
-    Updates vel_ned every 0.1 s so the sensor worker sees a smooth acceleration
-    rather than a step change that would spike GPS velocity innovations.
-    """
-    steps = max(1, int(duration / 0.1))
-    v0 = list(vel_ned)
-    for i in range(1, steps + 1):
-        alpha = i / steps
-        for j in range(3):
-            vel_ned[j] = v0[j] + alpha * (target[j] - v0[j])
-        time.sleep(0.1)
-    for j in range(3):
-        vel_ned[j] = target[j]
-    _log.info("  vel_ned ramped to [%.2f, %.2f, %.2f]", *vel_ned)
-
-
-def test_gps_fusion_armed(tmp_path, request):
-    """
-    GPS fusion pre-arm + post-arm checklist (EK3_SRC1_YAW=8 GSF, no compass).
-
-    Pre-arm the vehicle is stationary — moving velocity causes GPS position to drift
-    away from EKF's AID_NONE constant-position estimate → horizErrSq > 1 → healthy()=False
-    → all EKF flags stay 0x0000.  Stationary sensor keeps innovations near zero.
-
-    From EKF3 source (AP_NavEKF3_VehicleStatus.cpp, AP_NavEKF3_Control.cpp):
-      [1] Pre-arm: EKF tilt alignment  (~5 s)
-      [2] Pre-arm: GPS origin set      (~10 s after GPS detected, EK3_GPS_CHECK=0 bypasses checks)
-      [3] Arm vehicle (force=True)
-      [4] Post-arm: ramp vel to 1.2 m/s North + 0.5 m/s climb over 4 s
-             inFlight fires when pos.z - posDownAtTakeoff < -1.5 m  (~3 s at 0.5 m/s)
-             EKFGSF_run_filterbank=True → GSF accumulates → yawAlignComplete
-             "EKF3 IMU0 yaw aligned using GPS" STATUSTEXT
-      [5] GPS fusion: readyToUseGPS() → AID_ABSOLUTE
-             "EKF3 IMU0 is using GPS" STATUSTEXT
-
-    Sensor: stationary pre-arm (vel=[0,0,0]), position=[0,0,-50] NED.
-    After arm, velocity is ramped smoothly to [1.2, 0, -0.5] to avoid innovation spikes.
-    """
-    attitude_deg = [0.0, 0.0, 0.0]
-    position_ned = [0.0, 0.0, 0.0]    # start at home altitude (ground level)
-    # Physics engine: stationary until arm, then ramp to 1.5 m/s North + 1.5 m/s
-    # climb (NED Z negative).  At 0.3 m/s² per axis the ramp completes in ~5 s.
-    # After ~35 s of cruise the vehicle is ~50 m North and ~50 m above home.
-    phys = _Physics(
-        pos_ned      = position_ned,
-        vel_ned      = [0.0, 0.0, 0.0],
-        attitude_deg = attitude_deg,
-        accel_limit  = 0.3,   # m/s^2 -> 1.5 m/s in ~5 s
-    )
-
-    with _sitl_stack(
-        tmp_path,
-        log_name   = "gps_fusion_armed",
-        log_prefix = "gps_fusion",
-        test_name  = request.node.name,
-    ) as ctx:
-        _log = ctx.log
-        _log.info("Pre-arm GPS checks: EK3_SRC1_YAW=1 (compass), EK3_GPS_CHECK=0, COMPASS_USE=1")
-        _log.info("Sensor: physics engine — stationary pre-arm, ramped post-arm, pos=[0,0,-50]")
-
-        tel_rows: list[TelRow] = []
-
-        stop_ev = threading.Event()
-        worker  = threading.Thread(
-            target=_physics_sensor_worker,
-            args=(stop_ev, phys),
-            kwargs={"telemetry": tel_rows},
-            daemon=True, name="sensor_physics",
-        )
-        worker.start()
-
-        try:
-            gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
-            gcs.connect(timeout=30.0)
-            gcs.start_heartbeat(rate_hz=1.0)
-            gcs.request_stream(0, 10)   # ALL streams at 10 Hz
-
-            # ------------------------------------------------------------------
-            # [1] Pre-arm: EKF tilt alignment
-            # ------------------------------------------------------------------
-            _log.info("[1] Waiting for EKF tilt alignment (pre-arm) ...")
-            if not gcs.wait_ekf_attitude(timeout=20.0):
-                pytest.fail("[1] EKF tilt alignment timed out after 20 s")
-            _log.info("[1] PASS — EKF tilt aligned")
-
-            # ------------------------------------------------------------------
-            # [2] Pre-arm: GPS origin set
-            #     calcGpsGoodToAlign() needs 10 s of no GPS failures.
-            #     With EK3_GPS_CHECK=0 all checks disabled → fires ~10 s after
-            #     first GPS data.  Stationary sensor keeps EKF healthy (no drift).
-            # ------------------------------------------------------------------
-            _log.info("[2] Waiting for GPS origin (pre-arm, stationary, expect ~20 s) ...")
-            _wait_statustext(
-                gcs, ["origin set"],
-                timeout=35.0, log=_log, label="2-origin",
-            )
-            _log.info("[2] PASS — GPS origin set pre-arm")
-
-            time.sleep(0.5)
-            t_check = time.monotonic()
-            while time.monotonic() - t_check < 3.0:
-                msg = gcs._recv(type=["EKF_STATUS_REPORT"], blocking=True, timeout=1.0)
-                if msg is not None:
-                    _log.info(
-                        "Post-origin EKF flags=0x%04x vel=%.3f pos_h=%.3f pos_v=%.3f",
-                        msg.flags, msg.velocity_variance,
-                        msg.pos_horiz_variance, msg.pos_vert_variance,
-                    )
-                    break
-
-            _log.info("Pre-arm checks complete. Ready to arm.")
-
-            # ------------------------------------------------------------------
-            # [3] Switch to ACRO, arm, engage motor interlock
-            #   Mirrors _run_acro_setup: arm with CH8=1000 (interlock LOW) so
-            #   H_RSC_MODE=1 passthrough doesn't block arm, then raise to 2000.
-            # ------------------------------------------------------------------
-            _log.info("[3] Setting ACRO mode (mode 1) ...")
-            gcs.set_mode(1, timeout=10.0)
-            gcs.send_rc_override({8: 1000})   # interlock LOW before arm
-
-            _log.info("[3] Arming vehicle ...")
-            gcs.arm(force=True, timeout=15.0, rc_override={8: 1000})
-            _log.info("[3] PASS — armed")
-
-            # Raise interlock HIGH and start keepalive (mirrors stack_infra behaviour)
-            gcs.send_rc_override({3: 1700, 8: 2000})
-            rc_stop = threading.Event()
-            rc_thread = threading.Thread(
-                target=_rc_keepalive,
-                args=(gcs, {3: 1700, 8: 2000}, rc_stop),
-                daemon=True, name="rc_keepalive",
-            )
-            rc_thread.start()
-            _log.info("[3] RC keepalive started: CH3=1700, CH8=2000 (interlock HIGH)")
-
-            # Ramp velocity post-arm: 1.2 m/s North + 0.5 m/s climb (NED Z negative).
-            # - Horizontal speed > 0.5 m/s needed for compass yaw estimate
-            # - Climb rate 0.5 m/s -> 1.5 m altitude gain in ~3 s -> inFlight=True
-            # - Physics engine ramps at 0.3 m/s^2 (reach 1.2 m/s in ~4 s)
-            # - accel_body is computed from actual dv/dt each tick -> EKF IMU integration
-            #   predicts the same velocity as GPS -> small innovations -> fusion succeeds
-            # H_RSC_MODE=1 (Passthrough): servo8 = RC8 immediately -> THROTTLE_UNLIMITED
-            # on first RC override -> land_complete clears -> onGround=False -> posDownAtTakeoff
-            # freezes at arm-time position.  No spool-up wait needed.
-            # Fly 50 m North + 50 m up.  Physics ramps at 0.3 m/s^2; 1.5 m/s
-            # reached in ~5 s.  After ~35 s cruise: pos ~ [50, 0, -50] NED.
-            _log.info("[3] Climbing to 50 m North + 50 m altitude (1.5 m/s each axis) ...")
-            phys.set_target_vel([1.5, 0.0, -1.5])
-            time.sleep(5.0)   # wait for ramp to complete (0.3 m/s^2 -> ~5 s)
-            pos_snap, vel_snap, _, _, _ = phys.snapshot()
-            _log.info("vel ramped: vel=[%.2f, %.2f, %.2f] pos=[%.1f, %.1f, %.1f]",
-                      *vel_snap, *pos_snap)
-
-            # ------------------------------------------------------------------
-            # [4] Wait for yaw alignment
-            #     With EK3_SRC1_YAW=1 (compass), yaw alignment can complete
-            #     pre-arm — in that case the EKF attitude bit (0x0001) is
-            #     already set when we reach this step.  Check flags first;
-            #     fall back to STATUSTEXT poll only if not yet aligned.
-            # ------------------------------------------------------------------
-            _log.info("[4] Waiting for yaw alignment (post-arm, expect ~30 s) ...")
-            yaw_aligned = False
-            t_check = time.monotonic()
-            while time.monotonic() - t_check < 3.0 and not yaw_aligned:
-                msg = gcs._recv(type=["EKF_STATUS_REPORT"], blocking=True, timeout=0.5)
-                if msg is not None:
-                    _log.info(
-                        "[4-yaw t=  0.0 s] EKF flags=0x%04x vel=%.2f pos_h=%.2f pos_v=%.2f",
-                        msg.flags, msg.velocity_variance,
-                        msg.pos_horiz_variance, msg.pos_vert_variance,
-                    )
-                    if msg.flags & 0x0001:   # EKF_ATTITUDE — attitude + yaw aligned
-                        yaw_aligned = True
-                        _log.info("[4] EKF attitude bit set — yaw aligned (pre-arm or post-arm)")
-            if not yaw_aligned:
-                _wait_statustext(
-                    gcs, ["yaw align"],
-                    timeout=60.0, log=_log, label="4-yaw",
-                )
-            _log.info("[4] PASS — yaw aligned")
-
-            # Log EKF flags at yaw-align — expect velocity + attitude bits set
-            time.sleep(0.5)
-            t_check = time.monotonic()
-            while time.monotonic() - t_check < 3.0:
-                msg = gcs._recv(type=["EKF_STATUS_REPORT"], blocking=True, timeout=1.0)
-                if msg is not None:
-                    _log.info(
-                        "Post-yaw EKF flags=0x%04x vel=%.3f pos_h=%.3f pos_v=%.3f",
-                        msg.flags, msg.velocity_variance,
-                        msg.pos_horiz_variance, msg.pos_vert_variance,
-                    )
-                    break
-
-            # ------------------------------------------------------------------
-            # [5] Wait for GPS fusion
-            #     yawAlignComplete → readyToUseGPS() → PV_AidingMode=AID_ABSOLUTE
-            #     "EKF3 IMU0 is using GPS" STATUSTEXT
-            # ------------------------------------------------------------------
-            _log.info("[5] Waiting for GPS fusion (vehicle flying N+up, expect ~30 s) ...")
-            _wait_statustext(
-                gcs, ["is using gps"],
-                timeout=60.0, log=_log, label="5-fused",
-            )
-            _log.info("[5] PASS — GPS fused")
-
-        finally:
-            try:
-                rc_stop.set()
-            except NameError:
-                pass
-            stop_ev.set()
-            worker.join(timeout=2.0)
-            try:
-                gcs.close()
-            except Exception:
-                pass
-            if tel_rows:
-                tel_path = ctx.test_log_dir / "telemetry.csv"
-                write_csv(tel_rows, tel_path)
-                _log.info("Telemetry written: %d rows -> %s", len(tel_rows), tel_path)
-            # Post-run: call  python simulation/analysis/merge_logs.py gps_fusion_test_gps_fusion_armed
+_LAYERS = [
+    ("L0_baseline",  "Level vehicle at 50 m altitude",          -50.0),
+    ("L1_rawes_alt", "RAWES equilibrium altitude (14.12 m)",    -14.12),
+]
 
 
 # ---------------------------------------------------------------------------
-# Trajectory test: smooth flight from ground to steady-state position
+# test_gps_fusion_layers
 # ---------------------------------------------------------------------------
 
-def test_gps_fusion_trajectory(tmp_path, request):
+@pytest.mark.parametrize(
+    "layer_id, description, alt_ned",
+    _LAYERS,
+    ids=[l[0] for l in _LAYERS],
+)
+def test_gps_fusion_layers(tmp_path, request, layer_id, description, alt_ned):
     """
-    Fly a minimum-jerk trajectory from ground to the RAWES steady-state
-    position (steady_state_starting.json) and verify GPS fuses en-route.
+    GPS fusion via 10 m orbital trajectory.
 
-    Trajectory design
-    -----------------
-    Start : pos=[0,0,0] NED, vel=[0,0,0]
-    End   : pos=steady_state pos, vel=[0,0,0]
-
-    Yaw is fixed to the compass bearing from origin to the target:
-        yaw = atan2(pos_E, pos_N)  [degrees]
-    This guarantees heading_gap = 0 throughout -- GPS velocity heading and
-    compass heading match -- so GPS fusion is never blocked by yaw mismatch.
-
-    The 5th-order minimum-jerk polynomial has zero accel at both ends, so
-    the IMU sees no step changes.  accel_body is computed analytically from
-    the polynomial (not numerically), so EKF innovations are minimal.
-
-    omega_spin ramps linearly from 0 to the steady-state value over T seconds
-    and is reported via RPM1_TYPE=10 (SITL RPM sensor).
-
-    GPS fusion is expected to complete well before the trajectory ends.
-    The test asserts GPS fuses within the trajectory duration + a 30 s buffer.
+    Pattern:
+      [1] Stationary at orbit start position, EKF tilt aligns.
+      [2] Wait for GPS origin (~20 s).
+      [3] Arm in ACRO.
+      [4] Start 10 m circles — speed ramps 0→5 m/s over one circle.
+      [5] Assert "EKF3 IMU0 is using GPS" within 90 s.
     """
-    ss = json.loads(_STEADY_STATE_JSON.read_text())
-    pos_target   = ss["pos"]          # NED [m]
-    vel_target   = [0.0, 0.0, 0.0]   # arrive at rest (steady-state vel ~ 0)
-    omega_target = ss["omega_spin"]   # rad/s
-
-    # Compass yaw = bearing from origin to target (North = 0, East = +90 deg)
-    yaw_deg = math.degrees(math.atan2(pos_target[1], pos_target[0]))
-    # Horizontal distance and altitude gain for logging
-    h_dist  = math.hypot(pos_target[0], pos_target[1])
-    alt_m   = -pos_target[2]    # NED Z negative = above ground
-
-    # Trajectory duration = STARTUP_DAMP_S (65 s).
-    # GPS fusion happens at ~63 s post-arm, so the vehicle arrives at the
-    # target ~2 s after GPS fuses — the EKF is already tracking for the
-    # final approach, giving the smallest possible position error at arrival.
-    T_traj  = 65.0   # seconds
-
-    traj = _MinJerkTraj(
-        p0 = [0.0, 0.0, 0.0],
-        v0 = [0.0, 0.0, 0.0],
-        pf = pos_target,
-        vf = vel_target,
-        T  = T_traj,
-    )
+    p_hold = np.array([_ORB_R, 0.0, alt_ned])
 
     with _sitl_stack(
         tmp_path,
-        log_name   = "gps_fusion_trajectory",
-        log_prefix = "gps_fusion",
+        log_name   = f"gps_layers_{layer_id}",
+        log_prefix = "gps_layers",
         test_name  = request.node.name,
     ) as ctx:
         _log = ctx.log
-        _log.info("Steady-state target (NED): pos=[%.2f, %.2f, %.2f] m",
-                  *pos_target)
-        _log.info("  h_dist=%.1f m  alt=%.1f m  yaw=%.1f deg  T=%.0f s",
-                  h_dist, alt_m, yaw_deg, T_traj)
-        _log.info("  omega_target=%.3f rad/s  peak_speed~=%.2f m/s",
-                  omega_target, traj.peak_speed)
+        _log.info("Layer: %s — %s  (alt_ned=%.2f m)", layer_id, description, alt_ned)
+        _log.info("Orbit: r=%.0f m  v_max=%.0f m/s  T_ramp=%.1f s",
+                  _ORB_R, _ORB_VMAX, _ORB_TRAMP)
 
-        traj_phys = _TrajPhysics(
-            traj         = traj,
-            attitude_deg = [0.0, 0.0, yaw_deg],   # level, heading toward target
-            omega_target = omega_target,
-        )
         tel_rows: list[TelRow] = []
+        stop_ev  = threading.Event()
+        start_ev = threading.Event()
 
-        stop_ev = threading.Event()
-        worker  = threading.Thread(
-            target = _traj_sensor_worker,
-            args   = (stop_ev, traj_phys),
-            kwargs = {"telemetry": tel_rows},
-            daemon = True,
-            name   = "traj_worker",
+        worker = threading.Thread(
+            target  = _orbital_sensor_worker,
+            args    = (stop_ev, p_hold, alt_ned, start_ev),
+            kwargs  = {"telemetry": tel_rows},
+            daemon  = True,
+            name    = f"orb_{layer_id}",
         )
         worker.start()
 
+        rc_stop = threading.Event()
         try:
             gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
             gcs.connect(timeout=30.0)
@@ -1116,84 +362,39 @@ def test_gps_fusion_trajectory(tmp_path, request):
             # [1] EKF tilt alignment
             _log.info("[1] Waiting for EKF tilt alignment ...")
             if not gcs.wait_ekf_attitude(timeout=20.0):
-                pytest.fail("[1] EKF tilt alignment timed out")
-            _log.info("[1] PASS — EKF tilt aligned")
+                pytest.fail(f"[{layer_id}] EKF tilt alignment timed out")
+            _log.info("[1] PASS")
 
-            # [2] GPS origin (pre-arm, vehicle stationary at [0,0,0])
-            _log.info("[2] Waiting for GPS origin (stationary pre-arm) ...")
-            _wait_statustext(gcs, ["origin set"], timeout=35.0,
-                             log=_log, label="2-origin")
-            _log.info("[2] PASS — GPS origin set")
+            # [2] GPS origin
+            _log.info("[2] Waiting for GPS origin ...")
+            _wait_statustext(gcs, ["origin set"], timeout=35.0, log=_log, label="2-origin")
+            _log.info("[2] PASS")
 
-            # [3] Arm in ACRO; raise interlock; trajectory starts immediately
-            _log.info("[3] Setting ACRO mode and arming ...")
+            # [3] Arm in ACRO
+            _log.info("[3] Arming in ACRO ...")
             gcs.set_mode(1, timeout=10.0)
             gcs.send_rc_override({8: 1000})
             gcs.arm(force=True, timeout=15.0, rc_override={8: 1000})
-            _log.info("[3] PASS — armed; trajectory now running")
-
-            # Start trajectory clock now — vehicle was stationary at [0,0,0] pre-arm
-            traj_phys.start()
-            _log.info("[3] Trajectory clock started at arm")
-
             gcs.send_rc_override({3: 1700, 8: 2000})
-            rc_stop = threading.Event()
-            threading.Thread(
-                target = _rc_keepalive,
-                args   = (gcs, {3: 1700, 8: 2000}, rc_stop),
-                daemon = True,
-                name   = "rc_keepalive",
-            ).start()
+            rc_thread = threading.Thread(
+                target=_rc_keepalive,
+                args=(gcs, {3: 1700, 8: 2000}, rc_stop),
+                daemon=True, name="rc_keepalive",
+            )
+            rc_thread.start()
+            _log.info("[3] PASS — armed")
 
-            # [4] Yaw alignment — compass fired pre-arm; just check the flag
-            _log.info("[4] Checking yaw alignment ...")
-            yaw_aligned = False
-            t_chk = time.monotonic()
-            while time.monotonic() - t_chk < 3.0 and not yaw_aligned:
-                msg = gcs._recv(type=["EKF_STATUS_REPORT"],
-                                blocking=True, timeout=0.5)
-                if msg is not None and (msg.flags & 0x0001):
-                    yaw_aligned = True
-            if not yaw_aligned:
-                _wait_statustext(gcs, ["yaw align"], timeout=60.0,
-                                 log=_log, label="4-yaw")
-            _log.info("[4] PASS — yaw aligned")
+            # [4] Start orbital motion
+            start_ev.set()
+            _log.info("[4] Orbital motion started (10 m circle, 0->5 m/s over one lap)")
 
-            # [5] GPS fusion — wait up to T_traj + 30 s
-            _log.info("[5] Waiting for GPS fusion (trajectory T=%.0f s) ...", T_traj)
-            _wait_statustext(gcs, ["is using gps"],
-                             timeout=T_traj + 30.0, log=_log, label="5-fused")
+            # [5] Wait for GPS fusion
+            _log.info("[5] Waiting for GPS fusion ...")
+            _wait_statustext(gcs, ["is using gps"], timeout=90.0, log=_log, label="5-gps")
             _log.info("[5] PASS — GPS fused")
 
-            # Read EKF position immediately after fusion for error report
-            ekf_pos = None
-            t_ekf = time.monotonic()
-            while time.monotonic() - t_ekf < 2.0:
-                msg = gcs._recv(type=["LOCAL_POSITION_NED"],
-                                blocking=True, timeout=0.5)
-                if msg is not None:
-                    ekf_pos = [msg.x, msg.y, msg.z]   # NED metres
-                    break
-
-            pos_now, _, _, _, _, _ = traj_phys.snapshot()
-            traj_frac = 100.0 * traj_phys.elapsed / T_traj
-            _log.info("Trajectory at GPS fusion: t=%.1f s / %.0f s (%.0f%%)",
-                      traj_phys.elapsed, T_traj, traj_frac)
-            _log.info("  physics pos = [%.3f, %.3f, %.3f] m", *pos_now)
-            if ekf_pos is not None:
-                ekf_err = [ekf_pos[i] - pos_now[i] for i in range(3)]
-                ekf_dist = math.sqrt(sum(e**2 for e in ekf_err))
-                _log.info("  EKF pos     = [%.3f, %.3f, %.3f] m", *ekf_pos)
-                _log.info("  EKF error   = [%+.3f, %+.3f, %+.3f] m  |err|=%.3f m",
-                          *ekf_err, ekf_dist)
-            else:
-                _log.warning("  LOCAL_POSITION_NED not received within 2 s of fusion")
-
         finally:
-            try:
-                rc_stop.set()
-            except NameError:
-                pass
+            rc_stop.set()
             stop_ev.set()
             worker.join(timeout=2.0)
             try:
@@ -1204,3 +405,384 @@ def test_gps_fusion_trajectory(tmp_path, request):
                 tel_path = ctx.test_log_dir / "telemetry.csv"
                 write_csv(tel_rows, tel_path)
                 _log.info("Telemetry: %d rows -> %s", len(tel_rows), tel_path)
+
+
+# ---------------------------------------------------------------------------
+# test_gps_fusion_armed
+# ---------------------------------------------------------------------------
+
+def test_gps_fusion_armed(tmp_path, request):
+    """
+    GPS fusion step-by-step diagnostic at RAWES altitude.
+
+    Same orbital sensor as test_gps_fusion_layers but logs each EKF milestone:
+    tilt alignment, GPS origin, yaw alignment, GPS fusion.
+    """
+    alt_ned = -14.12
+    p_hold  = np.array([_ORB_R, 0.0, alt_ned])
+
+    with _sitl_stack(
+        tmp_path,
+        log_name   = "gps_fusion_armed",
+        log_prefix = "gps_fusion",
+        test_name  = request.node.name,
+    ) as ctx:
+        _log = ctx.log
+        _log.info("Sensor: stationary at [%.1f, 0, %.1f], then 10 m circles 0->5 m/s",
+                  _ORB_R, alt_ned)
+
+        tel_rows: list[TelRow] = []
+        stop_ev  = threading.Event()
+        start_ev = threading.Event()
+
+        worker = threading.Thread(
+            target  = _orbital_sensor_worker,
+            args    = (stop_ev, p_hold, alt_ned, start_ev),
+            kwargs  = {"telemetry": tel_rows},
+            daemon  = True,
+            name    = "sensor_armed",
+        )
+        worker.start()
+
+        rc_stop = threading.Event()
+        try:
+            gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+            gcs.connect(timeout=30.0)
+            gcs.start_heartbeat(rate_hz=1.0)
+            gcs.request_stream(0, 10)
+
+            # [1] EKF tilt alignment
+            _log.info("[1] Waiting for EKF tilt alignment ...")
+            if not gcs.wait_ekf_attitude(timeout=20.0):
+                pytest.fail("[1] EKF tilt alignment timed out")
+            _log.info("[1] PASS")
+
+            # [2] GPS origin
+            _log.info("[2] Waiting for GPS origin (stationary, expect ~20 s) ...")
+            _wait_statustext(gcs, ["origin set"], timeout=35.0, log=_log, label="2-origin")
+            _log.info("[2] PASS")
+
+            # [3] Arm in ACRO
+            _log.info("[3] Arming in ACRO ...")
+            gcs.set_mode(1, timeout=10.0)
+            gcs.send_rc_override({8: 1000})
+            gcs.arm(force=True, timeout=15.0, rc_override={8: 1000})
+            gcs.send_rc_override({3: 1700, 8: 2000})
+            rc_thread = threading.Thread(
+                target=_rc_keepalive,
+                args=(gcs, {3: 1700, 8: 2000}, rc_stop),
+                daemon=True, name="rc_keepalive",
+            )
+            rc_thread.start()
+            _log.info("[3] PASS — armed")
+
+            # [4] Start orbital motion
+            start_ev.set()
+            _log.info("[4] Orbital motion started")
+
+            # [5] Yaw alignment
+            _log.info("[5] Waiting for yaw alignment ...")
+            _wait_statustext(gcs, ["yaw align", "yaw aligned"], timeout=60.0,
+                             log=_log, label="5-yaw")
+            _log.info("[5] PASS — yaw aligned")
+
+            # [6] GPS fusion
+            _log.info("[6] Waiting for GPS fusion ...")
+            _wait_statustext(gcs, ["is using gps"], timeout=60.0, log=_log, label="6-gps")
+            _log.info("[6] PASS — GPS fused")
+
+        finally:
+            rc_stop.set()
+            stop_ev.set()
+            worker.join(timeout=2.0)
+            try:
+                gcs.close()
+            except Exception:
+                pass
+            if tel_rows:
+                tel_path = ctx.test_log_dir / "telemetry.csv"
+                write_csv(tel_rows, tel_path)
+                _log.info("Telemetry: %d rows -> %s", len(tel_rows), tel_path)
+
+
+# ---------------------------------------------------------------------------
+# test_gps_fusion_trajectory
+# ---------------------------------------------------------------------------
+
+def test_gps_fusion_trajectory(tmp_path, request):
+    """
+    GPS fusion at RAWES equilibrium altitude using the orbital sensor.
+
+    Same pattern as test_gps_fusion_armed but uses the equilibrium altitude
+    from steady_state_starting.json so this test exercises the real operating
+    condition (alt ~14 m, r_h ~99 m from anchor).
+    """
+    ss      = json.loads(_STEADY_STATE_JSON.read_text())
+    alt_ned = float(ss["pos"][2])   # NED Z (<0 = above ground)
+
+    p_hold  = np.array([_ORB_R, 0.0, alt_ned])
+
+    with _sitl_stack(
+        tmp_path,
+        log_name   = "gps_fusion_trajectory",
+        log_prefix = "gps_fusion",
+        test_name  = request.node.name,
+    ) as ctx:
+        _log = ctx.log
+        _log.info("Steady-state alt_ned=%.2f m, orbit r=%.0f m v_max=%.0f m/s",
+                  alt_ned, _ORB_R, _ORB_VMAX)
+
+        tel_rows: list[TelRow] = []
+        stop_ev  = threading.Event()
+        start_ev = threading.Event()
+
+        worker = threading.Thread(
+            target  = _orbital_sensor_worker,
+            args    = (stop_ev, p_hold, alt_ned, start_ev),
+            kwargs  = {"telemetry": tel_rows},
+            daemon  = True,
+            name    = "traj_worker",
+        )
+        worker.start()
+
+        rc_stop = threading.Event()
+        try:
+            gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+            gcs.connect(timeout=30.0)
+            gcs.start_heartbeat(rate_hz=1.0)
+            gcs.request_stream(0, 10)
+
+            _log.info("[1] Waiting for EKF tilt alignment ...")
+            if not gcs.wait_ekf_attitude(timeout=20.0):
+                pytest.fail("[1] EKF tilt alignment timed out")
+            _log.info("[1] PASS")
+
+            _log.info("[2] Waiting for GPS origin ...")
+            _wait_statustext(gcs, ["origin set"], timeout=35.0, log=_log, label="2-origin")
+            _log.info("[2] PASS")
+
+            _log.info("[3] Arming in ACRO ...")
+            gcs.set_mode(1, timeout=10.0)
+            gcs.send_rc_override({8: 1000})
+            gcs.arm(force=True, timeout=15.0, rc_override={8: 1000})
+            gcs.send_rc_override({3: 1700, 8: 2000})
+            rc_thread = threading.Thread(
+                target=_rc_keepalive,
+                args=(gcs, {3: 1700, 8: 2000}, rc_stop),
+                daemon=True, name="rc_keepalive",
+            )
+            rc_thread.start()
+            _log.info("[3] PASS — armed")
+
+            start_ev.set()
+            _log.info("[4] Orbital motion started — waiting for GPS fusion ...")
+            _wait_statustext(gcs, ["is using gps"], timeout=90.0, log=_log, label="4-gps")
+            _log.info("[4] PASS — GPS fused")
+
+        finally:
+            rc_stop.set()
+            stop_ev.set()
+            worker.join(timeout=2.0)
+            try:
+                gcs.close()
+            except Exception:
+                pass
+            if tel_rows:
+                tel_path = ctx.test_log_dir / "telemetry.csv"
+                write_csv(tel_rows, tel_path)
+                _log.info("Telemetry: %d rows -> %s", len(tel_rows), tel_path)
+
+
+# ---------------------------------------------------------------------------
+# test_gps_fusion_fast_circle
+# ---------------------------------------------------------------------------
+
+def _fast_circle_level_worker(
+    stop_event: threading.Event,
+    anchor:     np.ndarray,
+    p_eq:       np.ndarray,
+    v_orb_eq:   float,
+    orbit_dir:  int   = +1,
+    v_fast:     float = 5.0,
+    r_circle:   float = 5.0,
+    n_fast:     int   = 1,
+    T_lead:     float = 10.0,
+    t_hold:     float = 15.0,
+) -> None:
+    """Sensor worker: fast-circle trajectory, level body (BZ_LEVEL=[0,0,1]).
+
+    Uses the identical trajectory as test_kinematic_gps (via
+    make_fast_circle_orbit_kinematics) but replaces the tilted
+    tether-direction body_z with BZ_LEVEL=[0,0,1].  This means:
+      - gravity always reads as [0, 0, -9.81] in body frame (EKF-friendly)
+      - body Z is vertical so yaw IS the heading; no tilt-induced coupling
+      - gyro is purely the heading rate, not mixed with tilt rotation
+
+    If GPS fuses cleanly here but not in test_kinematic_gps, the problem lies
+    in the tilted body_z path in sensor.py, not in the trajectory itself.
+    """
+    from frames import build_vel_aligned_frame
+    from kinematic import make_fast_circle_orbit_kinematics
+
+    GRAVITY_NED = np.array([0.0, 0.0, _GRAVITY])
+    BZ_LEVEL    = np.array([0.0, 0.0, 1.0])
+    DT_FD       = 1e-3
+
+    traj_fn, _ = make_fast_circle_orbit_kinematics(
+        anchor_pos = anchor,
+        p_eq       = p_eq,
+        v_orb_eq   = v_orb_eq,
+        v_fast     = v_fast,
+        n_fast     = n_fast,
+        T_lead     = T_lead,
+        r_circle   = r_circle,
+        orbit_dir  = orbit_dir,
+        t_hold     = t_hold,
+    )
+
+    # Pre-compute the tangential direction at t=t_hold so the hold-phase body
+    # heading matches the first moving step -- prevents yaw jump at t_hold.
+    _, vel_start_ref_raw = traj_fn(t_hold + 0.05)
+    spd = float(np.hypot(vel_start_ref_raw[0], vel_start_ref_raw[1]))
+    vel_start_ref = (vel_start_ref_raw / spd) if spd > 0.01 else np.array([0.0, 1.0, 0.0])
+
+    def _R_for_vel(v: np.ndarray) -> np.ndarray:
+        vh = float(np.hypot(v[0], v[1]))
+        vref = v if vh >= 0.1 else vel_start_ref
+        return build_vel_aligned_frame(BZ_LEVEL, vref)
+
+    sitl = SITLInterface(recv_port=StackConfig.SITL_JSON_PORT)
+    sitl.bind()
+    try:
+        while not stop_event.is_set():
+            servos = sitl.recv_servos()
+            if servos is None:
+                continue
+
+            t_sim       = sitl.sim_now()
+            pos, vel    = traj_fn(t_sim)
+            accel_world = traj_fn.accel(t_sim)
+
+            R    = _R_for_vel(vel)
+            rpy  = _rpy_from_R(R)
+
+            # Gyro from finite-diff of R -- consistent with velocity-heading rotation
+            _, vel1 = traj_fn(t_sim + DT_FD)
+            R1      = _R_for_vel(vel1)
+            S       = R.T @ ((R1 - R) / DT_FD)
+            gyro    = np.array([S[2, 1], S[0, 2], S[1, 0]])
+
+            accel_body = R.T @ (accel_world - GRAVITY_NED)
+
+            sitl.send_state(
+                pos_ned    = pos,
+                vel_ned    = vel,
+                rpy_rad    = rpy,
+                accel_body = accel_body,
+                gyro_body  = gyro,
+            )
+    finally:
+        sitl.close()
+
+
+def test_gps_fusion_fast_circle(tmp_path, request):
+    """
+    GPS fusion via fast-circle trajectory using level body (BZ_LEVEL=[0,0,1]).
+
+    Identical trajectory to test_kinematic_gps (hold 15 s -> accel circle
+    r=5 m v=5 m/s -> 1 const circle -> decel -> large orbit lead-in) but
+    using a level body instead of the tether-direction body_z.
+
+    Purpose: isolate whether GPS glitch in test_kinematic_gps is caused by
+    the trajectory (too fast / too jerky for EKF) or by the tilted body frame
+    in sensor.py.
+
+    Pass condition: "EKF3 IMU0 is using GPS" within 70 s AND no GPS glitch
+    flag (0x8000) in EKF_STATUS_REPORT for 10 s after fusion.
+    """
+    ss     = json.loads(_STEADY_STATE_JSON.read_text())
+    p_eq   = np.array(ss["pos"], dtype=float)
+    anchor = np.array([0.0, 0.0, 0.0])
+    v_orb  = 0.96
+
+    with _sitl_stack(
+        tmp_path,
+        log_name   = "gps_fc_level",
+        log_prefix = "gps_fc",
+        test_name  = request.node.name,
+    ) as ctx:
+        _log    = ctx.log
+        stop_ev = threading.Event()
+
+        worker = threading.Thread(
+            target = _fast_circle_level_worker,
+            args   = (stop_ev, anchor, p_eq, v_orb),
+            kwargs = dict(orbit_dir=1, v_fast=5.0, r_circle=5.0,
+                          n_fast=1, T_lead=10.0, t_hold=15.0),
+            daemon = True,
+            name   = "fc_level_worker",
+        )
+        worker.start()
+
+        rc_stop = threading.Event()
+        try:
+            gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+            gcs.connect(timeout=30.0)
+            gcs.start_heartbeat(rate_hz=1.0)
+            gcs.request_stream(0, 10)
+
+            _log.info("[1] EKF tilt alignment ...")
+            if not gcs.wait_ekf_attitude(timeout=20.0):
+                pytest.fail("EKF tilt alignment timed out")
+            _log.info("[1] PASS")
+
+            _log.info("[2] GPS origin ...")
+            _wait_statustext(gcs, ["origin set"], timeout=35.0, log=_log, label="2-origin")
+            _log.info("[2] PASS")
+
+            _log.info("[3] Arming in ACRO ...")
+            gcs.set_mode(1, timeout=10.0)
+            gcs.send_rc_override({8: 1000})
+            gcs.arm(force=True, timeout=15.0, rc_override={8: 1000})
+            gcs.send_rc_override({3: 1700, 8: 2000})
+            rc_thread = threading.Thread(
+                target = _rc_keepalive,
+                args   = (gcs, {3: 1700, 8: 2000}, rc_stop),
+                daemon = True, name = "rc_keepalive",
+            )
+            rc_thread.start()
+            _log.info("[3] PASS -- armed")
+
+            _log.info("[4] Waiting for GPS fusion (70 s) ...")
+            _wait_statustext(gcs, ["is using gps"], timeout=70.0,
+                             log=_log, label="4-gps")
+            t_fused = gcs.sim_now()
+            _log.info("[4] PASS -- GPS fused at t=%.1f s", t_fused)
+
+            # [5] GPS must stay stable (no 0x8000 glitch) for 10 s after fusion
+            _log.info("[5] Checking GPS stability for 10 s ...")
+            t0_check     = gcs.sim_now()
+            glitch_count = 0
+            GPS_GLITCH   = 0x8000
+            while gcs.sim_now() - t0_check < 10.0:
+                msg = gcs._recv(type="EKF_STATUS_REPORT", blocking=True, timeout=0.2)
+                if msg is not None and (msg.flags & GPS_GLITCH):
+                    glitch_count += 1
+                    _log.warning("[5] GPS glitch at t=%.1f s  flags=0x%04x",
+                                 gcs.sim_now(), msg.flags)
+            _log.info("[5] GPS glitch frames in 10 s window: %d", glitch_count)
+            assert glitch_count == 0, (
+                f"GPS glitch fired {glitch_count} times in 10 s after fusion "
+                f"(t_fused={t_fused:.1f} s).  Level body, same trajectory as "
+                f"test_kinematic_gps -- glitch is NOT trajectory-caused."
+            )
+            _log.info("[5] PASS -- GPS stable after fusion")
+
+        finally:
+            rc_stop.set()
+            stop_ev.set()
+            worker.join(timeout=2.0)
+            try:
+                gcs.close()
+            except Exception:
+                pass

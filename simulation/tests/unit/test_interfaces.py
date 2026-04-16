@@ -26,7 +26,7 @@ def _make_servo_pkt_16(pwm: list[int], frame_rate: int = 400, frame_count: int =
 
 def test_sitl_interface_recv_servos_normalizes_binary_payload():
     recv_port = _get_free_udp_port()
-    interface = SITLInterface(recv_port=recv_port, recv_timeout_ms=50.0)
+    interface = SITLInterface(recv_port=recv_port, watchdog_timeout=0.05)
     interface.bind()
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -47,7 +47,7 @@ def test_sitl_interface_recv_servos_normalizes_binary_payload():
 def test_sitl_interface_send_state_replies_to_servo_source():
     """send_state must reply to the source address of the last servo packet."""
     recv_port = _get_free_udp_port()
-    interface = SITLInterface(recv_port=recv_port, recv_timeout_ms=200.0)
+    interface = SITLInterface(recv_port=recv_port, watchdog_timeout=0.2)
     interface.bind()
 
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -58,7 +58,6 @@ def test_sitl_interface_send_state_replies_to_servo_source():
         interface.recv_servos()
 
         interface.send_state(
-            timestamp=1.5,
             pos_ned=np.array([1.0, 2.0, -3.0]),
             vel_ned=np.array([4.0, 5.0, -6.0]),
             rpy_rad=np.array([0.1, 0.2, 0.3]),
@@ -69,7 +68,8 @@ def test_sitl_interface_send_state_replies_to_servo_source():
         raw, _addr = sender.recvfrom(4096)
         message = json.loads(raw.decode("utf-8").strip())
 
-        assert message["timestamp"] == 1.5
+        # timestamp = sim_now() = frame_count/frame_rate = 1/400
+        assert message["timestamp"] == pytest.approx(1 / 400)
         assert message["position"] == [1.0, 2.0, -3.0]
         assert message["velocity"] == [4.0, 5.0, -6.0]
         assert message["attitude"] == [0.1, 0.2, 0.3]
@@ -83,11 +83,10 @@ def test_sitl_interface_send_state_replies_to_servo_source():
 def test_sitl_interface_send_state_no_op_before_first_servo():
     """send_state should silently do nothing before any servo packet arrives."""
     recv_port = _get_free_udp_port()
-    interface = SITLInterface(recv_port=recv_port, recv_timeout_ms=50.0)
+    interface = SITLInterface(recv_port=recv_port, watchdog_timeout=0.05)
     interface.bind()
     try:
         interface.send_state(
-            timestamp=0.0,
             pos_ned=np.zeros(3),
             vel_ned=np.zeros(3),
             rpy_rad=np.zeros(3),
@@ -100,7 +99,7 @@ def test_sitl_interface_send_state_no_op_before_first_servo():
 
 def test_sitl_interface_recv_servos_returns_none_for_wrong_size():
     recv_port = _get_free_udp_port()
-    interface = SITLInterface(recv_port=recv_port, recv_timeout_ms=50.0)
+    interface = SITLInterface(recv_port=recv_port, watchdog_timeout=0.05)
     interface.bind()
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -113,7 +112,7 @@ def test_sitl_interface_recv_servos_returns_none_for_wrong_size():
 
 def test_sitl_interface_recv_servos_keeps_last_good_packet_on_bad_packet():
     recv_port = _get_free_udp_port()
-    interface = SITLInterface(recv_port=recv_port, recv_timeout_ms=50.0)
+    interface = SITLInterface(recv_port=recv_port, watchdog_timeout=0.05)
     interface.bind()
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -132,7 +131,7 @@ def test_sitl_interface_recv_servos_keeps_last_good_packet_on_bad_packet():
 def test_sitl_interface_recv_servos_32ch_reads_first_16():
     from sitl_interface import _SERVO_FMT_32, _SERVO_MAGIC_32
     recv_port = _get_free_udp_port()
-    interface = SITLInterface(recv_port=recv_port, recv_timeout_ms=50.0)
+    interface = SITLInterface(recv_port=recv_port, watchdog_timeout=0.05)
     interface.bind()
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

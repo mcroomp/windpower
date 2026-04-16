@@ -109,8 +109,9 @@ class PhysicalSensor:
 
     Physically faithful: reports exactly what the real sensors would read.
       - Attitude (rpy): Euler angles of the electronics platform (R_orb).
-      - Gyro: orbital angular velocity projected into the electronics body frame.
-        Rotor spin is stripped (GB4008 keeps electronics non-rotating).
+      - Gyro: full body angular velocity projected into the electronics body frame.
+        The GB4008 physically damps spin via K_YAW torque in the dynamics model,
+        keeping the body near-zero spin. No stripping is applied here.
       - Accel: specific force projected into the electronics body frame.
 
     The electronics hub is the fuselage: ``R_hub`` is the full 3-DOF rotation
@@ -154,7 +155,6 @@ class PhysicalSensor:
 
         # Electronics hub is the fuselage: R_hub is its full orientation.
         # Use it directly — no separate yaw state or x_orb reconstruction needed.
-        disk_normal = R_hub[:, 2]
         R_orb = R_hub
         rpy   = _rotation_matrix_to_euler_zyx(R_hub)
 
@@ -163,12 +163,14 @@ class PhysicalSensor:
         accel_body = R_orb.T @ a_specific_ned
         accel_body = accel_body + self._rng.normal(0.0, self._accel_sigma, 3)
 
-        # Gyroscope: orbital angular velocity in electronics body frame.
-        # GB4008 keeps electronics non-rotating relative to rotor spin — strip
-        # the spin component before projecting into the electronics frame.
-        omega_spin_world    = np.dot(omega_body, disk_normal) * disk_normal
-        omega_orbital_world = omega_body - omega_spin_world
-        gyro_body = R_orb.T @ omega_orbital_world
+        # Gyroscope: full body angular velocity in electronics body frame.
+        # omega_body is world-frame angular velocity (dynamics._omega convention).
+        # No spin stripping: the GB4008 anti-rotation motor counteracts yaw via a
+        # physical torque in the dynamics (K_YAW damping), keeping spin near zero
+        # in free flight.  The sensor reads whatever angular velocity the body has —
+        # just like a helicopter IMU reads the full body rate regardless of the
+        # tail rotor.  Stripping here would double-count the motor's effect.
+        gyro_body = R_orb.T @ omega_body
         gyro_body = gyro_body + self._rng.normal(0.0, self._gyro_sigma, 3)
 
         v_horiz = math.hypot(vel_ned[0], vel_ned[1])

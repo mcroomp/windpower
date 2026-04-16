@@ -69,4 +69,4 @@ def test_lua_yaw_trim(torque_armed_lua):
     )
 
     save_telemetry(rows, "lua", ctx.log)
-    assert_physics_yaw_rate(ctx.mediator_log, _THRESHOLD, _SETTLE_S, _OBSERVE_S, ctx.log)
+    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, _SETTLE_S, _OBSERVE_S, ctx.log)

@@ -109,11 +109,8 @@ def test_stack_integration_smoke(tmp_path, request):
             ctx.gcs.connect(timeout=30.0)
             _assert_procs_alive()
 
-            # Run for 15 s so mediator loop accumulates >= 10 per-second log lines
-            deadline = time.monotonic() + 15.0
-            while time.monotonic() < deadline:
-                _assert_procs_alive()
-                time.sleep(1.0)
+            # Run for 15 s sim-time so mediator accumulates >= 10 per-second log lines
+            ctx.gcs.sim_sleep(15.0, check=_assert_procs_alive)
 
             log_text = ctx.mediator_log.read_text(encoding="utf-8", errors="replace") if ctx.mediator_log.exists() else ""
             loop_lines = [l for l in log_text.splitlines() if "pos_NED" in l]

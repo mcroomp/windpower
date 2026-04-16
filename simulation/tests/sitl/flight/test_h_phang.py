@@ -40,7 +40,6 @@ Values above 0.80 would indicate a servo swap, wrong H_SW_TYPE, or firmware bug.
 import logging
 import math
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -109,9 +108,10 @@ def _collect_servo_samples(
     rc_channels must include Ch8=2000 (motor interlock keepalive).
     """
     samples: list[tuple[float, int, int, int]] = []
-    t_start = time.monotonic()
+    t_start  = gcs.sim_now()
+    deadline = t_start + duration_s
 
-    while (t_now := time.monotonic()) - t_start < duration_s:
+    while gcs.sim_now() < deadline:
         for name, proc, lp in [
             ("mediator", ctx.mediator_proc, ctx.mediator_log),
             ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
@@ -121,9 +121,9 @@ def _collect_servo_samples(
                 pytest.fail(f"{name} exited during {label} (rc={proc.returncode}):\n{txt[-2000:]}")
 
         gcs.send_rc_override(rc_channels)
-        msg = gcs._mav.recv_match(type=["SERVO_OUTPUT_RAW"], blocking=True, timeout=0.05)
+        msg = gcs._recv(type=["SERVO_OUTPUT_RAW"], blocking=True, timeout=0.05)
         if msg is not None:
-            t_rel = t_now - t_start
+            t_rel = gcs.sim_now() - t_start
             samples.append((t_rel, msg.servo1_raw, msg.servo2_raw, msg.servo3_raw))
 
     return samples

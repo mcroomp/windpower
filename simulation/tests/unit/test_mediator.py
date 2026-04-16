@@ -59,7 +59,10 @@ class FakeSITL:
     def recv_servos(self):
         if self.servo_packets:
             return self.servo_packets.pop(0)
-        return None
+        raise KeyboardInterrupt  # lockstep: no more packets → clean exit
+
+    def sim_now(self): return 0.0
+    def dt(self): return 1.0 / 400.0
 
     def send_state(self, **kwargs):
         self.sent_states.append(kwargs)
@@ -121,12 +124,6 @@ def _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor
     # Gyro noise is small (sigma=0.003 rad/s); assertions use atol=0.05 to accommodate it.
 
 
-def _install_time(monkeypatch, values, sleep_behavior):
-    values_iter = iter(values)
-    monkeypatch.setattr(mediator.time, "monotonic", lambda: next(values_iter))
-    monkeypatch.setattr(mediator.time, "sleep", sleep_behavior)
-
-
 def _args(tmp_path=None):
     """Build a minimal args Namespace for run_mediator unit tests.
 
@@ -160,8 +157,6 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
     fake_sensor   = FakeSensor()
 
     _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor)
-    _install_time(monkeypatch, [10.0, 10.1, 10.1005, 10.1010, 10.1015],
-                  lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     mediator.run_mediator(_args())
 
@@ -193,11 +188,12 @@ def test_run_mediator_single_iteration_sends_forces_and_state(monkeypatch):
         stepped_state["pos"][1],
         stepped_state["pos"][2] - home_ned_z,
     ])
-    # gyro_body should be near-zero: omega=[0,0,28], body_z=[0,0,1] → omega_nospin=0.
+    # gyro_body = R.T @ omega_body (no spin stripping — sensor is physically faithful).
+    # With R=eye(3) and omega=[0,0,28]: gyro_body = [0,0,28].
     # PhysicalSensor adds MEMS noise (sigma=0.003 rad/s); allow atol=0.05 for noise.
     assert len(fake_sitl.sent_states) == 1
     np.testing.assert_allclose(fake_sitl.sent_states[0]["pos_ned"],   expected_pos_ned)
-    np.testing.assert_allclose(fake_sitl.sent_states[0]["gyro_body"], np.zeros(3), atol=0.05)
+    np.testing.assert_allclose(fake_sitl.sent_states[0]["gyro_body"], np.array([0.0, 0.0, 28.0]), atol=0.05)
 
     assert fake_sitl.closed is True
 
@@ -213,8 +209,6 @@ def test_run_mediator_uses_separate_omega_spin_for_aero(monkeypatch):
     fake_sensor = FakeSensor()
 
     _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor)
-    _install_time(monkeypatch, [5.0, 5.1, 5.1005, 5.1010, 5.1015],
-                  lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     mediator.run_mediator(_args())
 
@@ -223,7 +217,8 @@ def test_run_mediator_uses_separate_omega_spin_for_aero(monkeypatch):
     assert fake_sitl.closed is True
 
 
-def test_run_mediator_reuses_last_servo_packet(monkeypatch):
+def test_run_mediator_consistent_collective_across_iterations(monkeypatch):
+    # Same servo packet on both iterations → aero must receive identical collective/tilt.
     servo_packet = np.zeros(16, dtype=np.float64)
     servo_packet[0:3] = 0.5
 
@@ -231,24 +226,16 @@ def test_run_mediator_reuses_last_servo_packet(monkeypatch):
         _state([0.0, 0.0, 50.0], [0.0, 0.0, 0.0], [0.0, 0.0, 28.0]),
         _state([1.0, 1.0, 50.0], [0.0, 0.0, 0.0], [0.0, 0.0, 28.0]),
     ])
-    fake_sitl   = FakeSITL([servo_packet, None])
+    fake_sitl   = FakeSITL([servo_packet, servo_packet])
     fake_aero   = FakeAero()
     fake_sensor = FakeSensor()
 
-    sleep_calls = {"count": 0}
-
-    def fake_sleep(_seconds):
-        sleep_calls["count"] += 1
-        if sleep_calls["count"] >= 2:
-            raise KeyboardInterrupt()
-
     _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor)
-    _install_time(monkeypatch, [0.0, 0.01, 0.0105, 0.0110, 0.0115, 0.02, 0.0205, 0.0210, 0.0215], fake_sleep)
 
     mediator.run_mediator(_args())
 
     assert len(fake_aero.compute_calls) == 2
     assert fake_aero.compute_calls[0]["collective_rad"] == fake_aero.compute_calls[1]["collective_rad"]
-    assert fake_aero.compute_calls[0]["tilt_lon"]      == fake_aero.compute_calls[1]["tilt_lon"]
-    assert fake_aero.compute_calls[0]["tilt_lat"]      == fake_aero.compute_calls[1]["tilt_lat"]
+    assert fake_aero.compute_calls[0]["tilt_lon"]       == fake_aero.compute_calls[1]["tilt_lon"]
+    assert fake_aero.compute_calls[0]["tilt_lat"]       == fake_aero.compute_calls[1]["tilt_lat"]
     assert fake_sitl.closed is True

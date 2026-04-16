@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import math
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -89,21 +88,21 @@ def test_yaw_regulation(torque_armed):
 
     # -- Collect ATTITUDE messages --------------------------------------------
     observe_samples: list[dict] = []
-    t_start   = time.monotonic()
+    t_start   = gcs.sim_now()
     deadline  = t_start + _TEST_TIMEOUT_S
-    t_last_rc = time.monotonic()
+    t_last_rc = gcs.sim_now()
 
-    while time.monotonic() < deadline:
-        if time.monotonic() - t_last_rc >= 0.5:
+    while gcs.sim_now() < deadline:
+        if gcs.sim_now() - t_last_rc >= 0.5:
             ctx.gcs.send_rc_override({8: 2000})
-            t_last_rc = time.monotonic()
+            t_last_rc = gcs.sim_now()
 
         for name, proc in [("mediator", ctx.mediator_proc), ("SITL", ctx.sitl_proc)]:
             if proc.poll() is not None:
                 write_csv(rows, _TELEMETRY_OUT)
                 pytest.fail(f"{name} exited during test (rc={proc.returncode})")
 
-        msg = gcs._mav.recv_match(
+        msg = gcs._recv(
             type=["ATTITUDE", "STATUSTEXT"],
             blocking=True,
             timeout=0.5,
@@ -111,7 +110,7 @@ def test_yaw_regulation(torque_armed):
         if msg is None:
             continue
 
-        t_rel = time.monotonic() - t_start
+        t_rel = gcs.sim_now() - t_start
 
         if msg.get_type() == "STATUSTEXT":
             log.debug("SITL t=%.1fs: %s", t_rel, msg.text.rstrip("\x00").strip())
