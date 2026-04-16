@@ -504,6 +504,206 @@ def _diag_motor(mav) -> None:
     print(sep)
 
 
+def _dshot_blheli_test(mav, motors: list[int] | None = None,
+                       timeout_per_motor: float = 25.0) -> None:
+    """
+    Run SERVO_BLH_TEST on each motor and interpret the results.
+
+    What this does under the hood
+    ──────────────────────────────
+    ArduPilot's AP_BLHeli::run_connection_test() temporarily repurposes the
+    DShot signal wire as a 19200-baud serial line and sends the BLHeli
+    bootloader handshake sequence.  For ARM ESCs (BLHeli32 / AM32) it then
+    reads the esc_status struct at flash address 0xEB00 which contains:
+        - protocol   (0=none  1=PWM  2=OneShot125  5=DShot)
+        - good_frames / bad_frames   (since last power cycle)
+
+    All intermediate results are sent as STATUSTEXT with prefix "ESC: " when
+    SERVO_BLH_DEBUG=1 (which this function sets and then restores).
+
+    motors
+        List of 1-indexed output channel numbers to test.
+        If None, derived automatically from the SERVO_BLH_MASK bitmask.
+    timeout_per_motor
+        Maximum seconds to wait for a single motor test to complete.
+        Each test can take up to 5 × 3 s = 15 s in the worst case.
+    """
+    sep = "-" * 60
+
+    # ── 0. Work out which motors to test ─────────────────────────────────
+    if motors is None:
+        mask_val = _recv_param(mav, "SERVO_BLH_MASK")
+        auto_val = _recv_param(mav, "SERVO_BLH_AUTO")
+        if mask_val is not None and int(mask_val) != 0:
+            motors = [i + 1 for i in range(32) if int(mask_val) & (1 << i)]
+        elif auto_val is not None and int(auto_val) == 1:
+            # AUTO mode: ArduPilot registers all multicopter motor outputs.
+            # We can't know exactly which channels without reading the motor
+            # map, so fall back to the one motor we know about.
+            print("  SERVO_BLH_MASK=0 but SERVO_BLH_AUTO=1 -- "
+                  "testing only SERVO_MOTOR channel")
+            motors = [SERVO_MOTOR]
+        else:
+            print("  [WARN] SERVO_BLH_MASK=0 and SERVO_BLH_AUTO=0")
+            print("         No BLHeli channels are registered.")
+            print("         Set SERVO_BLH_MASK or SERVO_BLH_AUTO=1 first.")
+            return
+
+    print(f"\n{sep}")
+    print(f"SERVO_BLH_TEST  --  DShot / AM32 bootloader connection test")
+    print(f"Motors to test: {motors}")
+    print(sep)
+
+    # ── 1. Enable verbose debug output ───────────────────────────────────
+    saved_debug = _recv_param(mav, "SERVO_BLH_DEBUG") or 0.0
+    if not _set_param(mav, "SERVO_BLH_DEBUG", 1):
+        print("  [WARN] Could not set SERVO_BLH_DEBUG=1 -- "
+              "esc_status detail will be missing")
+
+    results: dict[int, dict] = {}
+
+    for motor_num in motors:
+        print(f"\n  Testing motor {motor_num} (output channel {motor_num}) ...")
+
+        # Trigger the test.  SERVO_BLH_TEST is 1-indexed and self-clears.
+        if not _set_param(mav, "SERVO_BLH_TEST", float(motor_num)):
+            print(f"  [FAIL] Could not set SERVO_BLH_TEST={motor_num}")
+            results[motor_num] = {"passed": False, "error": "param set failed"}
+            continue
+
+        # Collect STATUSTEXT until we see the final "Test PASSED/FAILED"
+        # or the timeout expires.
+        collected: list[str] = []
+        deadline = time.monotonic() + timeout_per_motor
+        final_verdict = None
+
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            msg = mav.recv_match(type="STATUSTEXT", blocking=True,
+                                 timeout=min(0.3, remaining))
+            if msg is None:
+                continue
+            text = msg.text.rstrip("\x00").strip()
+            if not text.startswith("ESC:"):
+                continue
+            collected.append(text)
+            if "Test PASSED" in text:
+                final_verdict = "PASSED"
+                break
+            if "Test FAILED" in text:
+                final_verdict = "FAILED"
+                break
+
+        # ── Parse the collected messages ──────────────────────────────────
+        iface_type   = None   # imATM_BLB / imSIL_BLB / imARM_BLB
+        protocol     = None   # int: 0/1/2/5
+        good_frames  = None
+        bad_frames   = None
+        connect_chan = None
+
+        for line in collected:
+            # "ESC: BL_ConnectEx 0/1 at 3"
+            if "BL_ConnectEx" in line:
+                parts = line.split()
+                for j, p in enumerate(parts):
+                    if "/" in p:
+                        connect_chan = p   # e.g. "0/1"
+            # "ESC: Interface type imARM_BLB"
+            if "Interface type" in line:
+                iface_type = line.split("Interface type")[-1].strip()
+            # "ESC: Prot 5 Good 12483 Bad 0 ..."
+            if line.startswith("ESC: Prot"):
+                try:
+                    tokens = line.split()
+                    protocol    = int(tokens[2])
+                    good_frames = int(tokens[4])
+                    bad_frames  = int(tokens[6])
+                except (IndexError, ValueError):
+                    pass
+
+        # ── Interpret and display ─────────────────────────────────────────
+        PROTO_NAMES = {0: "NONE", 1: "PWM", 2: "OneShot125",
+                       5: "DShot", 99: "unknown"}
+
+        if final_verdict is None:
+            verdict_str = "TIMEOUT (no response within "
+            verdict_str += f"{timeout_per_motor:.0f} s)"
+            passed = False
+        else:
+            verdict_str = final_verdict
+            passed = (final_verdict == "PASSED")
+
+        results[motor_num] = {
+            "passed":      passed,
+            "verdict":     verdict_str,
+            "iface":       iface_type,
+            "protocol":    protocol,
+            "good_frames": good_frames,
+            "bad_frames":  bad_frames,
+            "raw":         collected,
+        }
+
+        print(f"  Result       : {verdict_str}")
+        if iface_type:
+            print(f"  MCU type     : {iface_type}")
+        if protocol is not None:
+            pname = PROTO_NAMES.get(protocol, f"unknown ({protocol})")
+            print(f"  ESC protocol : {protocol} = {pname}")
+            if protocol != 5:
+                print(f"  [WARN] ESC is not in DShot mode!")
+                print(f"         Check MOT_PWM_TYPE / SERVO_BLH_OTYPE "
+                      f"and BRD_IO_DSHOT")
+        if good_frames is not None:
+            print(f"  Good frames  : {good_frames}")
+            print(f"  Bad frames   : {bad_frames}")
+            if good_frames == 0:
+                print("  [WARN] ESC has received ZERO good DShot frames")
+                print("         DShot signal is not arriving at the ESC")
+                print("         Check: output channel, wiring, timer conflict")
+            elif bad_frames is not None and bad_frames > 0:
+                ratio = bad_frames / max(1, good_frames + bad_frames)
+                print(f"  [WARN] {ratio*100:.1f}% frame error rate -- "
+                      f"signal integrity problem (noise / marginal timing)")
+            else:
+                print("  [OK] Clean DShot frames -- signal path is good")
+                if not passed:
+                    print("       ESC receives frames but motor won't spin:")
+                    print("       Check arming state, MOT_SPIN_MIN, "
+                          "H_RSC_MODE, ESC calibration")
+
+        if not passed and protocol is None:
+            print("  No esc_status read (non-ARM MCU or connection failed)")
+            print("  Possible causes:")
+            print("    * Wrong output channel / SERVO_BLH_MASK")
+            print("    * ESC not powered")
+            print("    * Wiring fault on the signal wire")
+            print("    * SERVO_BLH_DEBUG=0 (re-run after confirming it's 1)")
+
+        # Raw log for deeper inspection
+        if collected:
+            print(f"  Raw STATUSTEXT ({len(collected)} lines):")
+            for line in collected:
+                print(f"    {line}")
+
+    # ── Restore SERVO_BLH_DEBUG ───────────────────────────────────────────
+    _set_param(mav, "SERVO_BLH_DEBUG", saved_debug)
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("SUMMARY")
+    print(sep)
+    for motor_num, r in results.items():
+        status = "PASS" if r["passed"] else "FAIL"
+        proto  = r.get("protocol")
+        good   = r.get("good_frames")
+        bad    = r.get("bad_frames")
+        proto_str = f"  proto={proto}" if proto is not None else ""
+        frames_str = (f"  good={good} bad={bad}"
+                      if good is not None else "")
+        print(f"  Motor {motor_num}: [{status}]{proto_str}{frames_str}")
+    print(sep)
+
+
 def _monitor_esc(mav, duration: float = 10.0) -> None:
     """
     Stream ESC telemetry continuously for `duration` seconds.
@@ -561,6 +761,9 @@ Commands:
   sweep <n> [step_ms]             Slowly sweep output n: 1000->2000->1000
   status                          Print SERVO_OUTPUT_RAW
   diag                            Full motor/ESC/DShot diagnostic dump
+  blhtest [motor ...]             BLHeli/AM32 bootloader connection test
+                                   (auto-detects from SERVO_BLH_MASK; or pass
+                                    specific 1-indexed output numbers)
   monitor [seconds]               Stream live ESC telemetry (default 10 s)
   scripts                         List files in /APM/scripts on SD card
   upload <file> [--no-restart]    Upload .lua file to /APM/scripts and restart
@@ -689,6 +892,15 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
     # ── diag ────────────────────────────────────────────────────────────────
     elif cmd == "diag":
         _diag_motor(mav)
+
+    # ── blhtest [motor ...] ──────────────────────────────────────────────────
+    elif cmd == "blhtest":
+        try:
+            motors = [int(t) for t in tokens[1:]] if len(tokens) > 1 else None
+        except ValueError:
+            print("  Usage: blhtest [motor ...]  (motor = 1-indexed output number)")
+            return True
+        _dshot_blheli_test(mav, motors=motors)
 
     # ── monitor [seconds] ────────────────────────────────────────────────────
     elif cmd == "monitor":
