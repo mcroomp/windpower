@@ -48,7 +48,6 @@ def torque_armed_profile(request, tmp_path):
         tmp_path,
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
         profile=profile,
-        log_name=f"torque_armed[{profile}]",
         test_name=request.node.name,
     ) as ctx:
         yield ctx
@@ -74,7 +73,6 @@ def torque_armed_lua(tmp_path, request):
         tail_channel=8,
         extra_params=_LUA_TORQUE_EXTRA_PARAMS,
         install_scripts=("rawes.lua",),
-        log_name="torque_armed_lua",
         test_name=request.node.name,
         # Boot-time params for the Lua fixture (merged on top of _BASE_TORQUE_BOOT_PARAMS):
         # - RPM1_TYPE=10: JSON RPM backend must be activated at boot (driver init).

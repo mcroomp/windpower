@@ -59,6 +59,8 @@ _retrieve_logs() {
 # Helpers
 # ---------------------------------------------------------------------------
 
+_log() { echo "$(date +%H:%M:%S) $*"; }
+
 _snap_procs() {
     # Snapshot PIDs of RAWES simulation processes inside all running containers.
     # Returns lines of "<container> <pid> <cmdline>" for each match.
@@ -233,7 +235,7 @@ case "$CMD" in
 
         _parallel_cleanup() {
             echo ""
-            echo "[INFO] Cleaning up parallel containers..."
+            _log "[INFO] Cleaning up parallel containers..."
             for _c in "${_CONTAINERS[@]+"${_CONTAINERS[@]}"}"; do
                 docker rm -f "$_c" 2>/dev/null || true
             done
@@ -242,6 +244,31 @@ case "$CMD" in
 
         # Discover test files from the host filesystem (no container needed)
         mapfile -t _ALL_FILES < <(find "$SCRIPT_DIR/tests/sitl" -name "test_*.py" | sort)
+
+        # Pre-filter: if -k EXPR is in the args, skip files that contain no
+        # matching test function names.  This avoids spinning up a container
+        # per file only for pytest to immediately deselect everything.
+        _K_EXPR=""
+        for _i in "${!_PASS_ARGS[@]}"; do
+            if [ "${_PASS_ARGS[$_i]}" = "-k" ]; then
+                _next=$(( _i + 1 ))
+                _K_EXPR="${_PASS_ARGS[$_next]:-}"
+            fi
+        done
+        if [ -n "$_K_EXPR" ]; then
+            declare -a _MATCHED=()
+            for _tf in "${_ALL_FILES[@]}"; do
+                if grep -qE "def (test_[a-zA-Z0-9_]*${_K_EXPR}[a-zA-Z0-9_]*|${_K_EXPR}[a-zA-Z0-9_]*)" "$_tf" 2>/dev/null \
+                   || grep -qF "def ${_K_EXPR}" "$_tf" 2>/dev/null; then
+                    _MATCHED+=("$_tf")
+                fi
+            done
+            if [ "${#_MATCHED[@]}" -gt 0 ]; then
+                _ALL_FILES=("${_MATCHED[@]}")
+                _log "[INFO] -k '${_K_EXPR}': pre-filtered to ${#_MATCHED[@]} file(s)"
+            fi
+        fi
+
         _N_FILES=${#_ALL_FILES[@]}
 
         # Clear host log dirs before the run so only this run's logs survive.
@@ -253,7 +280,7 @@ case "$CMD" in
         if [ "$_FRESH" = "1" ]; then
             # Fresh mode: each test file gets its own brand-new container (clean EEPROM,
             # no stale processes).  Run up to _N_WORKERS containers concurrently.
-            echo "[INFO] Fresh mode: $_N_FILES tests, max $_N_WORKERS concurrent (run=$_RUN_ID)"
+            _log "[INFO] Fresh mode: $_N_FILES tests, max $_N_WORKERS concurrent (run=$_RUN_ID)"
 
             # Parallel arrays: _ACTIVE_PIDS[i] is the subshell PID for
             # _ACTIVE_CTRS[i].  The parent shell removes containers here so cleanup
@@ -293,7 +320,7 @@ case "$CMD" in
                 _WORKER_LOGS+=("$_log")
                 _label="$(basename "${_ALL_FILES[$j]}" .py)"
 
-                echo "[t${j}] starting: $_label"
+                _log "[t${j}] starting: $_label"
                 (
                     docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
                     _sync_code "$_c" >/dev/null 2>&1
@@ -311,7 +338,7 @@ case "$CMD" in
                         ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
                     | tee "$_log" \
                     | grep --line-buffered -E "PASSED|FAILED|ERROR|passed|failed|error" \
-                    | sed "s/^/[${_label}] /" \
+                    | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}' \
                     || _test_rc=$?
                     _retrieve_logs "$_c"
                     # Best-effort in-subshell removal; parent also removes via _reap_finished.
@@ -416,7 +443,7 @@ case "$CMD" in
         fi
 
         _WIN_LOGS=$(cygpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
-        echo "[LOGS] ${_WIN_LOGS}"
+        _log "[LOGS] ${_WIN_LOGS}"
         exit $_RC
         ;;
 

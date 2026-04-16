@@ -441,8 +441,6 @@ class SitlContext:
 @contextlib.contextmanager
 def _sitl_stack(
     tmp_path, *,
-    log_name:           str = "sitl",
-    log_prefix:         str = "",
     test_name:          str = "",
     extra_boot_params:  "dict[str, float] | None" = None,
     base_params:        "ParamSetup | None" = None,
@@ -488,7 +486,7 @@ def _sitl_stack(
     gcs_log  = tmp_path / "gcs.log"
 
     _configure_logging(gcs_log)
-    log = logging.getLogger(log_name)
+    log = logging.getLogger(test_name or "sitl")
     logging.getLogger("gcs").setLevel(logging.DEBUG)
 
     # ── Boot param file ────────────────────────────────────────────────────────
@@ -508,8 +506,7 @@ def _sitl_stack(
     log.info("Boot params: %d entries", len(_boot_setup))
 
     # ── Per-test log directory ─────────────────────────────────────────────────
-    label = "_".join(filter(None, [log_prefix, test_name]))
-    test_log_dir = make_test_log_dir(sim_dir, label) if label else sim_dir / "logs"
+    test_log_dir = make_test_log_dir(sim_dir, test_name) if test_name else sim_dir / "logs"
 
     # ── Launch SITL ───────────────────────────────────────────────────────────
     sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
@@ -559,7 +556,7 @@ def _sitl_stack(
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefix="",
+def _acro_stack(tmp_path, *, extra_config=None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
                 extra_boot_params: "dict[str, float] | None" = None,
                 internal_controller: bool | None = None):
@@ -578,14 +575,12 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
     ----------
     tmp_path       : pytest tmp_path fixture value
     extra_config   : optional dict merged into mediator config (pumping cycle)
-    log_name       : logger name (shown in log output)
-    log_prefix     : prefix component for persistent log file names
     arm            : if False, skip _run_acro_setup — yield with procs running
                      but GCS not connected and vehicle not armed.  Callers may
                      call ctx.gcs.connect() manually (e.g. smoke tests).
     with_mediator  : if False, skip mediator launch (pure SITL connectivity tests)
-    test_name      : pytest test node name; included in persistent log file names
-                     so each test run produces uniquely-named files in logs/
+    test_name      : pytest test node name; used as logger name and for persistent
+                     log file names so each test run produces uniquely-named files.
     """
     # ── Initial state ──────────────────────────────────────────────────────────
     initial_state = None
@@ -609,8 +604,6 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
 
     with _sitl_stack(
         tmp_path,
-        log_name          = log_name,
-        log_prefix        = log_prefix,
         test_name         = test_name,
         extra_boot_params = _extra,
     ) as sitl_ctx:
@@ -626,7 +619,7 @@ def _acro_stack(tmp_path, *, extra_config=None, log_name="acro_armed", log_prefi
         # ── Launch mediator ────────────────────────────────────────────────────
         _run_id = int(time.time())
         log.info("RUN_ID=%d", _run_id)
-        log.info("%s: launching%s SITL ...", log_name, " mediator +" if with_mediator else "")
+        log.info("launching%s SITL ...", " mediator +" if with_mediator else "")
         _use_internal = internal_controller if internal_controller is not None else StackConfig.INTERNAL_CONTROLLER
         if with_mediator:
             _k_ang = StackConfig.BASE_K_ANG_INTERNAL if _use_internal else StackConfig.BASE_K_ANG
@@ -1357,7 +1350,6 @@ def _torque_stack(
     lua_mode: bool = False,
     tail_channel: int = 3,
     extra_params=(),
-    log_name: str = "torque_armed",
     test_name: str = "",
     install_scripts: tuple = (),
     boot_params: "dict | None" = None,
@@ -1381,8 +1373,7 @@ def _torque_stack(
     lua_mode        : if True, pass --lua-mode to mediator (linear mapping, no trim)
     tail_channel    : ArduPilot tail servo channel read by mediator
     extra_params    : ParamSetup merged into torque params before boot-file write
-    log_name        : logger name shown in log output
-    test_name       : pytest test node name; used for per-test log directory
+    test_name       : pytest test node name; used as logger name and for per-test log directory
     install_scripts : tuple of Lua script names to install from simulation/scripts/
     boot_params     : dict of {param_name: value} merged on top of torque_setup
                       (for params only known at fixture call time, e.g. RPM1_TYPE).
@@ -1405,7 +1396,6 @@ def _torque_stack(
 
     with _sitl_stack(
         tmp_path,
-        log_name    = log_name,
         test_name   = test_name,
         base_params = torque_setup,
     ) as sitl_ctx:

@@ -75,7 +75,7 @@ DEFAULTS: dict = {
     #                   Phase 3: kinematic_orbit_lead_s on large orbit before exit.
     #                   Requires kinematic_orbital_dir, kinematic_fast_speed,
     #                   kinematic_circle_radius, kinematic_fast_circles,
-    #                   kinematic_orbit_lead_s.
+    #                   kinematic_orbit_lead_s, kinematic_exit_speed.
     #
     # kinematic_vel_ramp_s: vel taper window at end of kinematic (0 = no taper).
     # NOTE: ramp > 0 reduces GPS horizontal position change → slower EKF fusion.
@@ -91,6 +91,7 @@ DEFAULTS: dict = {
     "kinematic_circle_radius":       5.0,   # fast_circle: circle radius [m]
     "kinematic_fast_circles":        0,     # fast_circle: additional constant-speed circles after accel circle (0 = just accel+decel)
     "kinematic_orbit_lead_s":       10.0,   # fast_circle: seconds on large orbit before exit [s]
+    "kinematic_exit_speed":         0.96,   # fast_circle: orbital speed [m/s] at kinematic exit (v_orb_eq for Phase 4)
     "startup_damp_k_ang":          500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
 
     # ── Attitude damping ──────────────────────────────────────────────────────

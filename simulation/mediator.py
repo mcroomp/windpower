@@ -197,6 +197,8 @@ def run_mediator(args, trajectory=None):
     _kin_duration    = max(0.0, float(cfg["startup_damp_seconds"]))
     _traj_type       = cfg["kinematic_traj_type"]
     _phase3_start_t  = float("inf")   # set below for fast_circle; sentinel for other types
+    _phase_at_fn     = None            # set below for fast_circle only
+    _last_kin_phase  = ""              # set below for fast_circle only
 
     if _traj_type == "min_jerk":
         # 5th-order minimum-jerk from home [0,0,0] at rest → pos0 at rest.
@@ -281,7 +283,7 @@ def run_mediator(args, trajectory=None):
             cfg.get("kinematic_orbital_anchor_ned", [0.0, 0.0, 0.0]), dtype=float
         )
         _orb_dir      = int(cfg.get("kinematic_orbital_dir", 1))
-        _v_orb_eq     = float(np.linalg.norm(_vel0_arr[:2]))
+        _v_orb_eq     = float(cfg["kinematic_exit_speed"])
         _v_fast       = float(cfg.get("kinematic_fast_speed", 5.0))
         _r_circle     = float(cfg.get("kinematic_circle_radius", 10.0))
         _n_fast       = int(cfg.get("kinematic_fast_circles", 0))
@@ -299,9 +301,9 @@ def run_mediator(args, trajectory=None):
             t_hold     = _t_hold,
         )
         _dyn_pos0, _dyn_vel0 = _traj_fn(0.0)
-        # Override _R0 so initial orientation matches trajectory start, not vel0.
-        # vel0 = equilibrium velocity (East), but fast circle starts at p_start
-        # with NW-pointing velocity — ~158° yaw gap → DCM inconsistency at boot.
+        # Override _R0 so initial orientation matches trajectory start.
+        # Fast circle starts at p_start with NW-pointing velocity — use R_fn(0)
+        # so body yaw aligns with trajectory heading, not with vel0 from config.
         _R0 = _R_fn(0.0)
         _startup = KinematicStartup(
             traj_fn  = _traj_fn,

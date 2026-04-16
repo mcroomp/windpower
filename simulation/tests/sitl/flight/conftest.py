@@ -89,7 +89,6 @@ def acro_armed_pumping_lua(tmp_path, request):
         },
     }
     with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_pumping_lua", log_prefix="pumping_lua",
                      test_name=request.node.name,
 
                      # internal_controller=False: SITL stack tests must let ArduPilot
@@ -201,7 +200,6 @@ def acro_armed_landing_lua(tmp_path, request):
         },
     }
     with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_landing_lua", log_prefix="landing_lua",
                      test_name=request.node.name,
 
                      # internal_controller=False: SITL stack tests must let
@@ -321,12 +319,11 @@ def acro_armed_lua_full(tmp_path, request):
         "kinematic_circle_radius":   5.0,    # r_circle [m]: omega_fast = 57 deg/s
         "kinematic_fast_circles":    1,      # 1 constant-speed circle after accel
         "kinematic_orbit_lead_s":    10.0,   # T_lead [s] on large orbit before t_total
-        "vel0":                      [0.0, 0.96, 0.0],
+        "kinematic_exit_speed":      0.96,   # v_orb_eq [m/s]: large-orbit + free-flight speed
         # startup_damp=80 s > t_total=54.4 s: kinematic exits at t=80 s in Phase 4.
         "startup_damp_seconds":      80.0,
     }
     with _acro_stack(tmp_path, extra_config=extra,
-                     log_name="acro_armed_lua_full", log_prefix="",
                      test_name=request.node.name,
 
                      # CLAUDE.md critical rule: internal_controller=False for all

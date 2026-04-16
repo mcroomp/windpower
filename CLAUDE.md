@@ -6,7 +6,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 
 **Current phase:** Phase 3, Milestone 3. `rawes.lua` orbit-tracking under full ArduPilot control (`internal_controller=False`) achieved: `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3 runs). Three root causes fixed: (1) `vel0=[0,0.96,0]` (East) so GPS fuses at t≈23 s during kinematic → orbit tracking active before exit; (2) gyro feedthrough removed from Lua cyclic (EKF-yaw-sensitive, caused ~33% flakiness); (3) pre-GPS collective bypass in rawes.lua (col=cruise while `_tdir0==nil`). **Next: test_pumping_cycle_lua, then test_landing_lua.**
 
-**Stack test status (parallel -n 8, 9 PASS):** test_arm_minimal, test_stack_integration_smoke, test_gust_recovery, test_lua_yaw_trim, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle_lua` and `test_landing_lua`: in development.
+**Stack test status (parallel -n 8, 8 PASS):** test_arm_minimal, test_gust_recovery, test_lua_yaw_trim, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle_lua` and `test_landing_lua`: in development.
 
 **Test infrastructure:** Stack tests moved from `tests/stack/` to `tests/sitl/flight/` + `tests/sitl/torque/`. Shared code extracted into `stack_infra.py` (context managers `_sitl_stack`, `_acro_stack`, `_torque_stack`). `conftest.py` is now a thin re-exporter only.
 
@@ -131,8 +131,7 @@ simulation/
         │   ├── test_kinematic_gps.py        GPS fusion during kinematic (parametrized)
         │   ├── test_lua_flight_steady.py    steady orbit under full ArduPilot/Lua control
         │   ├── test_pumping_cycle.py        pumping cycle under Lua (test_pumping_cycle_lua)
-        │   ├── test_landing_stack.py        landing under Lua (test_landing_lua)
-        │   └── test_stack_integration.py   smoke test (test_stack_integration_smoke)
+        │   └── test_landing_stack.py        landing under Lua (test_landing_lua)
         └── torque/              torque/anti-rotation tests
             ├── conftest.py      torque fixtures: torque_armed, torque_armed_profile, etc.
             └── ...
@@ -263,12 +262,13 @@ simulation/.venv/Scripts/python.exe simulation/analysis/analyse_mavlink.py test_
 # Note: analyse_run.py can also run inside the container via dev.sh exec; analyse_mavlink.py runs on Windows.
 ```
 
-**Per-test logs:** `simulation/logs/{log_prefix}_{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. The directory name is `"{log_prefix}_{test_name}"` when both are set, or just `"{test_name}"` when no prefix. Always read these with the Read tool using the local Windows path (`e:/repos/windpower/simulation/logs/.../arducopter.log`); never use `docker exec cat /tmp/ArduCopter.log` (stale across tests, requires container access). **`Loaded defaults from ...` prints once per parameter group — multiple repetitions are normal ArduPilot startup behavior, not a crash indicator.**
+**Per-test logs:** `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. The directory name is always `request.node.name` (the pytest test node name, which includes parametrize brackets). Always read these with the Read tool using the local Windows path (`e:/repos/windpower/simulation/logs/.../arducopter.log`); never use `docker exec cat /tmp/ArduCopter.log` (stale across tests, requires container access). **`Loaded defaults from ...` prints once per parameter group — multiple repetitions are normal ArduPilot startup behavior, not a crash indicator.**
 
 Example log paths:
-- `simulation/logs/test_lua_flight_steady/` — steady flight test (no prefix)
-- `simulation/logs/gps_fusion_test_gps_fusion_armed/` — GPS diagnostic (prefix=`gps_fusion`)
-- `simulation/logs/gps_layers_test_gps_fusion_layers[L0_baseline]/` — parametrized layer test
+- `simulation/logs/test_lua_flight_steady/` — steady flight test
+- `simulation/logs/test_gps_fusion_armed/` — GPS diagnostic
+- `simulation/logs/test_gps_fusion_layers[L0_baseline]/` — parametrized layer test
+- `simulation/logs/test_slow_rpm[slow_vary]/` — parametrized torque test
 
 **Suite summary:** `simulation/logs/suite_summary.json` — pass/fail counts + failed list.
 

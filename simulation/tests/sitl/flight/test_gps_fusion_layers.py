@@ -330,8 +330,6 @@ def test_gps_fusion_layers(tmp_path, request, layer_id, description, alt_ned):
 
     with _sitl_stack(
         tmp_path,
-        log_name   = f"gps_layers_{layer_id}",
-        log_prefix = "gps_layers",
         test_name  = request.node.name,
     ) as ctx:
         _log = ctx.log
@@ -423,8 +421,6 @@ def test_gps_fusion_armed(tmp_path, request):
 
     with _sitl_stack(
         tmp_path,
-        log_name   = "gps_fusion_armed",
-        log_prefix = "gps_fusion",
         test_name  = request.node.name,
     ) as ctx:
         _log = ctx.log
@@ -524,8 +520,6 @@ def test_gps_fusion_trajectory(tmp_path, request):
 
     with _sitl_stack(
         tmp_path,
-        log_name   = "gps_fusion_trajectory",
-        log_prefix = "gps_fusion",
         test_name  = request.node.name,
     ) as ctx:
         _log = ctx.log
@@ -707,8 +701,6 @@ def test_gps_fusion_fast_circle(tmp_path, request):
 
     with _sitl_stack(
         tmp_path,
-        log_name   = "gps_fc_level",
-        log_prefix = "gps_fc",
         test_name  = request.node.name,
     ) as ctx:
         _log    = ctx.log

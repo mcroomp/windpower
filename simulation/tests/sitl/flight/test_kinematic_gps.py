@@ -63,13 +63,12 @@ def test_kinematic_gps(tmp_path, request):
         "kinematic_circle_radius": 5.0,
         "kinematic_fast_circles":  1,
         "kinematic_orbit_lead_s":  10.0,
+        "kinematic_exit_speed":    0.96,
         "startup_damp_seconds":    80.0,
     }
 
     with _acro_stack(
         tmp_path,
-        log_name     = "kin_gps",
-        log_prefix   = "kin_gps",
         test_name    = request.node.name,
         extra_config = extra,
     ) as ctx:
@@ -114,6 +113,13 @@ def test_kinematic_gps(tmp_path, request):
         assert exit_ev is not None, "kinematic_exit event not in events log"
         t_exit_s = float(exit_ev["t_sim"])
         log.info("Kinematic exit at t=%.1f s", t_exit_s)
+
+        # Stop the mediator before validation — free flight with no controller
+        # causes tether tension runaway that crashes SITL.  validate_ekf_window
+        # only reads the already-written MAVLink log, so the mediator is not needed.
+        log.info("Kinematic exit confirmed — stopping mediator before EKF validation.")
+        if ctx.mediator_proc is not None:
+            ctx.mediator_proc.terminate()
 
         # Validate EKF was clean from GPS fusion to kinematic exit
         issues = validate_ekf_window(ctx.mavlink_log, t_gps_fused_s[0], t_exit_s)
