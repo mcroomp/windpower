@@ -431,6 +431,7 @@ class SitlContext:
     sitl_proc:    subprocess.Popen  # type: ignore[type-arg]
     sitl_log:     Path
     gcs_log:      Path
+    mavlink_log:  Path              # pass as mavlog_path= to RawesGCS to enable logging
     sim_dir:      Path
     repo_root:    Path
     log:          logging.Logger
@@ -482,8 +483,9 @@ def _sitl_stack(
     sim_dir   = repo_root / "simulation"
 
     # ── Paths ──────────────────────────────────────────────────────────────────
-    sitl_log = tmp_path / "sitl.log"
-    gcs_log  = tmp_path / "gcs.log"
+    sitl_log    = tmp_path / "sitl.log"
+    gcs_log     = tmp_path / "gcs.log"
+    mavlink_log = tmp_path / "mavlink.jsonl"
 
     _configure_logging(gcs_log)
     log = logging.getLogger(test_name or "sitl")
@@ -516,6 +518,7 @@ def _sitl_stack(
         sitl_proc    = sitl_proc,
         sitl_log     = sitl_log,
         gcs_log      = gcs_log,
+        mavlink_log  = mavlink_log,
         sim_dir      = sim_dir,
         repo_root    = repo_root,
         log          = log,
@@ -538,10 +541,10 @@ def _sitl_stack(
             ["bash", "-c", "pgrep -f /sim_vehicle.py | xargs -r kill -9"],
             capture_output=True,
         )
-        copy_logs_to_dir(test_log_dir, {
-            "sitl.log": sitl_log,
-            "gcs.log":  gcs_log,
-        })
+        _copy_map: dict[str, Path] = {"sitl.log": sitl_log, "gcs.log": gcs_log}
+        if mavlink_log.exists():
+            _copy_map["mavlink.jsonl"] = mavlink_log
+        copy_logs_to_dir(test_log_dir, _copy_map)
         _ardupilot_log = Path("/tmp/ArduCopter.log")
         if _ardupilot_log.exists():
             shutil.copy2(_ardupilot_log, test_log_dir / "arducopter.log")

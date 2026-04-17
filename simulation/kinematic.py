@@ -794,17 +794,15 @@ class KinematicStartup:
         the tether direction on a curved trajectory).
         Otherwise: ``R = R0`` (fixed equilibrium orientation, original behaviour).
 
-        Angular velocity override
-        -------------------------
-        If ``R_fn`` was provided: orbital component of ``_omega_body_at(t_sim)``
-        (GPS-heading spin stripped).  This is required for EKFGSF convergence:
-        with zero gyro and a rotating R_fn, the EKFGSF sees contradictory
-        measurements (gyro says "no rotation" but GPS velocity heading rotates at
-        omega_orb rad/s) and never converges.  By reporting the correct orbital
-        gyro, the EKFGSF can track the rotating heading and assign correct weights
-        to hypotheses → yawAlignComplete is set in ~10–20 s after GPS origin.
-        If ``R_fn`` is None (fixed orientation): omega is held at zero (original
-        behaviour for linear/ramp trajectories).
+        Angular velocity
+        ----------------
+        ``hub_state["omega"]`` is set to the full world-frame omega of R_fn so
+        that the gyro reported to SITL is consistent with the rotating R trajectory.
+        This prevents the EKF from estimating a spurious gyro bias.
+
+        ``dynamics._omega`` is zeroed: the physical hub has no angular velocity in
+        steady orbit (GB4008 damps it), so zero is the correct free-flight IC at
+        kinematic exit.
 
         Parameters
         ----------
@@ -828,27 +826,22 @@ class KinematicStartup:
         hub_state["R"] = R.copy()
         dynamics._R[:] = R
 
-        # Angular velocity: orbital component only (GPS-heading spin stripped).
+        # Angular velocity.
         #
-        # _omega_body_at returns world-frame angular velocity of R_fn.  R_fn
-        # includes artificial GPS-heading spin: build_vel_aligned_frame aligns
-        # x_orb with velocity heading, which rotates at omega_fast rad/s during
-        # fast circles.  Near the fast-circle closure (~t_b) this spin reaches
-        # ~1 rad/s while the hub is at ~99 m radius — far larger than the
-        # physical orbital angular velocity (~0.01–0.19 rad/s).
+        # hub_state["omega"] → sensor.py → gyro_body reported to SITL.
+        # Must be the FULL world-frame omega of R_fn so that gyro is consistent
+        # with the R trajectory.  If we strip the GPS-heading spin here, the EKF
+        # sees R rotating at ~1 rad/s but gyro reporting a smaller rate → it
+        # estimates a large gyro bias → delAngBiasLearned stays false → GPS
+        # fusion blocked or arrives with a large innovation → GPS glitch.
         #
-        # sensor.py passes omega_body directly to the IMU (no stripping).  But
-        # dynamics._omega is used as the initial condition for free-flight
-        # integration at kinematic exit.
-        # Injecting 1 rad/s horizontal angular velocity causes immediate
-        # tumbling.  Strip the GPS-heading spin here so free flight begins
-        # with only the physical orbital angular velocity.
+        # dynamics._omega → free-flight initial condition at kinematic exit.
+        # R_fn includes an artificial GPS-heading spin (~1 rad/s near fast-circle
+        # closure) that does not represent real hub rotation.  Strip this
+        # component (along disk_normal) from the free-flight IC only, so physics
+        # starts with the true orbital angular velocity (~0.01–0.19 rad/s).
         omega_world = self._omega_body_at(t_sim)
-        if self._R_fn is not None:
-            disk_normal = R[:, 2]            # world-frame body_z (R set above)
-            spin = np.dot(omega_world, disk_normal) * disk_normal
-            omega_world = omega_world - spin  # remove GPS-tracking spin
-        hub_state["omega"] = omega_world
-        dynamics._omega[:] = omega_world
+        hub_state["omega"] = omega_world   # full omega → sensors, consistent with R_fn
+        dynamics._omega[:] = 0.0          # free-flight IC: hub has no physical angular velocity
 
         return True

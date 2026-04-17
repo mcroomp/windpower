@@ -1653,6 +1653,242 @@ def validate_ekf_window(
 
 
 # ---------------------------------------------------------------------------
+# Brief AI-optimised summary
+# ---------------------------------------------------------------------------
+
+def print_brief_diagnosis(
+    records: list[dict],
+    t0_wall: float,
+    t0_boot: float,
+    log_dir: "Path",
+    crashes: list[dict],
+    crash_t: "float | None",
+    df: "dict | None",
+    t_stable_end: "float | None",
+) -> None:
+    """~50-line targeted summary for AI diagnosis.  Skips verbose tables."""
+
+    # ---- collect key STATUSTEXT and EKF events ----------------------------
+    arm_t: float | None = None
+    acro_t: float | None = None
+    gps_fix_t: float | None = None
+    origin_t: float | None = None
+    yaw_align_t: float | None = None
+    gps_fuse_t: float | None = None
+    gps_glitch_t: float | None = None
+    const_pos_start: float | None = None
+    const_pos_end: float | None = None
+    lua_capture_t: float | None = None
+    lua_gps_t: float | None = None
+    lua_gps_tlen: str = ""
+    lua_gps_bz: str = ""
+
+    key_statustext: list[tuple[float, str]] = []  # (t, text) for events we want to show
+    prev_ekf = 0
+    prev_armed = False
+
+    for d in records:
+        mt = d.get("mavpackettype", "")
+        st = to_sim(d["_t_wall"], t0_wall, t0_boot)
+
+        if mt == "HEARTBEAT":
+            armed = bool(d.get("base_mode", 0) & _MAV_MODE_ARMED)
+            mode  = d.get("custom_mode", 0)
+            if armed and not prev_armed and arm_t is None:
+                arm_t = st
+            if armed and mode == 1 and acro_t is None:
+                acro_t = st
+            prev_armed = armed
+
+        elif mt == "GPS_RAW_INT":
+            if gps_fix_t is None and d.get("fix_type", 0) >= 3:
+                gps_fix_t = st
+
+        elif mt == "EKF_STATUS_REPORT":
+            flags = d.get("flags", 0)
+            was_cpm = bool(prev_ekf & 0x0080)
+            is_cpm  = bool(flags   & 0x0080)
+            if is_cpm and not was_cpm and const_pos_start is None:
+                const_pos_start = st
+            if not is_cpm and was_cpm and const_pos_end is None:
+                const_pos_end = st
+            prev_ekf = flags
+
+        elif mt == "STATUSTEXT":
+            txt = d.get("text", "").rstrip("\x00").strip()
+            tl  = txt.lower()
+            if "origin set" in tl:
+                origin_t = st
+                key_statustext.append((st, txt))
+            elif "yaw aligned using gps" in tl:
+                yaw_align_t = st
+                key_statustext.append((st, txt))
+            elif "is using gps" in tl:
+                gps_fuse_t = st
+                key_statustext.append((st, txt))
+            elif "gps glitch" in tl or "compass error" in tl:
+                if gps_glitch_t is None:
+                    gps_glitch_t = st
+                key_statustext.append((st, f"[!!] {txt}"))
+            elif "rawes flight: captured" in tl:
+                lua_capture_t = st
+                key_statustext.append((st, txt))
+            elif "rawes flight: gps" in tl:
+                lua_gps_t = st
+                # extract tlen and bz from message
+                import re as _re
+                m = _re.search(r"tlen=([\d.]+)", txt)
+                if m:
+                    lua_gps_tlen = m.group(1)
+                m2 = _re.search(r"bz=\(([^)]+)\)", txt)
+                if m2:
+                    lua_gps_bz = m2.group(1)
+                key_statustext.append((st, txt))
+            elif "arming motors" in tl:
+                key_statustext.append((st, txt))
+
+    # ---- GSF summary from DataFlash ---------------------------------------
+    gsf_line = "n/a (no DataFlash)"
+    gyro_line = "n/a"
+    df_root_cause = ""
+    if df is not None:
+        def _clip(lst: list) -> list:
+            if t_stable_end is None:
+                return lst
+            return [r for r in lst if r[0] < t_stable_end]
+        xky0 = _clip(df.get("xky0", []))
+        if xky0:
+            ycs_vals = [ycs for _, _, ycs in xky0]
+            med_ycs  = sorted(ycs_vals)[len(ycs_vals)//2]
+            min_ycs  = min(ycs_vals)
+            yc_vals  = [yc for _, yc, _ in xky0]
+            yc_range = max(yc_vals) - min(yc_vals)
+            conv     = med_ycs < 3.0
+            gsf_line = (
+                f"[OK] converged (median YCS={med_ycs:.2f})" if conv
+                else f"[!!] NEVER converged  median_YCS={med_ycs:.2f}  min={min_ycs:.2f}  YC_range={yc_range:.0f}deg"
+            )
+        xkf1 = _clip(df.get("xkf1", []))
+        if xkf1:
+            mags = [(gx**2+gy**2+gz**2)**0.5 for _, gx, gy, gz, _ in xkf1]
+            med  = sorted(mags)[len(mags)//2]
+            _, gx0,gy0,gz0,_ = xkf1[0]
+            _, gxm,gym,gzm,_ = xkf1[-1]
+            chg  = max(abs(gxm-gx0), abs(gym-gy0), abs(gzm-gz0))
+            ok   = med < 1.0 and chg < 0.5
+            gyro_line = (
+                f"[OK] converged (median={med:.3f} deg/s)" if ok
+                else f"[!!] large/not converged  median={med:.3f} deg/s  change={chg:.3f} deg/s"
+            )
+            if not ok:
+                df_root_cause = "delAngBiasLearned=false: gyro bias too large or still drifting"
+        if not df_root_cause:
+            xky0_all = df.get("xky0", [])
+            if xky0_all:
+                ycs_all = [ycs for _, _, ycs in xky0_all]
+                if sorted(ycs_all)[len(ycs_all)//2] >= 3.0:
+                    df_root_cause = "yawAlignComplete=false: GSF yaw never converged (no compass, heading unresolved)"
+            if not df_root_cause:
+                df_root_cause = "all known blockers OK in DataFlash -- check GPS gate sizes"
+
+    # ---- peak attitude rates (tumble detection) ---------------------------
+    peak_rp = 0.0
+    peak_rp_t = 0.0
+    for d in records:
+        if d["mavpackettype"] != "ATTITUDE":
+            continue
+        st = to_sim(d["_t_wall"], t0_wall, t0_boot)
+        rp = max(abs(math.degrees(d.get("rollspeed", 0))),
+                 abs(math.degrees(d.get("pitchspeed", 0))))
+        if rp > peak_rp:
+            peak_rp, peak_rp_t = rp, st
+
+    # ---- print -------------------------------------------------------------
+    print("=" * 70)
+    print("  BRIEF DIAGNOSIS")
+    print("=" * 70)
+
+    print()
+    print("KEY EVENTS:")
+    if arm_t is not None:
+        print(f"  t={arm_t:6.1f}s  armed")
+    if acro_t is not None:
+        print(f"  t={acro_t:6.1f}s  ACRO mode")
+    if gps_fix_t is not None:
+        print(f"  t={gps_fix_t:6.1f}s  GPS first good fix")
+    if origin_t is not None:
+        delay = (origin_t - gps_fix_t) if gps_fix_t else 0.0
+        print(f"  t={origin_t:6.1f}s  EKF origin set  (+{delay:.1f}s after fix)")
+    for t, txt in sorted(key_statustext, key=lambda x: x[0]):
+        # skip ones we already printed above
+        tl = txt.lower()
+        if any(k in tl for k in ("origin set", "arming")):
+            continue
+        print(f"  t={t:6.1f}s  {txt}")
+    if crash_t is not None:
+        fn = crashes[0]["function"] if crashes else "unknown"
+        print(f"  t={crash_t:6.1f}s  [!!] CRASH: SIGFPE in {fn}")
+
+    print()
+    print("GPS FUSION:")
+    if const_pos_start is not None and const_pos_end is not None:
+        total_blocked = const_pos_end - const_pos_start
+        delay_after_fix = (const_pos_end - gps_fix_t) if gps_fix_t else 0.0
+        print(f"  const_pos_mode: t={const_pos_start:.1f}s .. t={const_pos_end:.1f}s  ({total_blocked:.1f}s total)")
+        print(f"  GPS fused at t={const_pos_end:.1f}s  ({delay_after_fix:.1f}s after first fix)")
+    elif const_pos_start is not None:
+        print(f"  [!!] const_pos_mode never cleared (started t={const_pos_start:.1f}s)")
+    if gps_glitch_t is not None and gps_fuse_t is not None:
+        gap = gps_glitch_t - gps_fuse_t
+        print(f"  GPS glitch at t={gps_glitch_t:.1f}s  ({gap:.2f}s after fusion)  [!!]" if gap < 1.0
+              else f"  GPS glitch at t={gps_glitch_t:.1f}s  ({gap:.1f}s after fusion)")
+
+    print()
+    print("EKF INTERNALS (DataFlash):")
+    print(f"  GSF yaw:    {gsf_line}")
+    print(f"  Gyro bias:  {gyro_line}")
+    if df_root_cause:
+        print(f"  Root cause: {df_root_cause}")
+
+    if lua_gps_tlen:
+        tlen_f = float(lua_gps_tlen)
+        flag = "  [!!] expected ~100m" if tlen_f > 150 or tlen_f < 20 else ""
+        print()
+        print(f"LUA GPS CAPTURE:")
+        print(f"  tlen={lua_gps_tlen} m{flag}")
+        print(f"  bz=({lua_gps_bz})")
+
+    # ---- first failure event: GPS glitch or SIGFPE, whichever is earlier ----
+    # crash_t is tumble onset (consequence); the root failure is usually the
+    # GPS glitch that precedes it.  Report the earliest failure event.
+    first_failure_t: float | None = None
+    first_failure_label = ""
+    if gps_glitch_t is not None:
+        first_failure_t = gps_glitch_t
+        first_failure_label = "GPS glitch"
+    if crash_t is not None:
+        if first_failure_t is None or crash_t < first_failure_t:
+            first_failure_t = crash_t
+            first_failure_label = "SIGFPE/tumble"
+
+    print()
+    print("OUTCOME:")
+    if first_failure_t is not None:
+        fn = crashes[0]["function"] if crashes else None
+        if gps_glitch_t is not None and crash_t is not None and gps_glitch_t <= crash_t:
+            fn_str = f"  -> SIGFPE {crashes[0]['function']} at t={crash_t:.1f}s" if fn else ""
+            print(f"  FAILURE start t={gps_glitch_t:.1f}s  (GPS glitch){fn_str}")
+        elif crash_t is not None:
+            fn_str = f" in {fn}" if fn else ""
+            print(f"  CRASH at t={crash_t:.1f}s  (SIGFPE{fn_str})")
+        print(f"  Peak attitude rate: {peak_rp:.0f} deg/s at t={peak_rp_t:.1f}s" +
+              ("  [!!] tumbling" if peak_rp > 200 else "  [OK]"))
+    else:
+        print(f"  No failure detected  peak_rate={peak_rp:.0f} deg/s  [OK]")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1663,8 +1899,10 @@ def main() -> int:
     )
     ap.add_argument("test", nargs="?",
                     help="Test name (in simulation/logs/) or absolute path to mavlink.jsonl")
+    ap.add_argument("--full", action="store_true",
+                    help="Print full verbose report (default is brief AI-optimised summary)")
     ap.add_argument("--ekf-all", action="store_true",
-                    help="Print every EKF_STATUS_REPORT row, not just transitions")
+                    help="Print every EKF_STATUS_REPORT row, not just transitions (--full only)")
     ap.add_argument("--no-gps-detail",    action="store_true", help="Skip GPS timeline table")
     ap.add_argument("--no-simstate",      action="store_true", help="Skip GPS vs SIMSTATE section")
     ap.add_argument("--no-sensor-simstate", action="store_true", help="Skip sensor vs SIMSTATE section")
@@ -1700,7 +1938,6 @@ def main() -> int:
         print(f"       Tried: {mav_path}", file=sys.stderr)
         return 1
 
-    print(f"MAVLink log : {mav_path}")
     records = _load(mav_path)
     if not records:
         print("ERROR: No records loaded.", file=sys.stderr)
@@ -1725,10 +1962,30 @@ def main() -> int:
     _df_data: "dict | None" = None
     if not args.no_dataflash:
         _df_data = load_dataflash(_log_dir)
+
+    if not args.full:
+        # Brief mode (default): ~50-line AI-optimised summary
+        print(f"Log: {mav_path}")
         if _df_data is not None:
-            print(f"DataFlash   : {_df_data['path'].name}  ({sum(len(v) for _, v in _df_data.items() if isinstance(v, list))} EKF records)")
-        else:
-            print("DataFlash   : not found (add dataflash.BIN for definitive EKF diagnosis)")
+            print(f"DataFlash: {_df_data['path'].name}  ({sum(len(v) for _, v in _df_data.items() if isinstance(v, list))} EKF records)")
+        print(f"Full report: analyse_mavlink.py {args.test} --full")
+        print()
+        print_brief_diagnosis(
+            records, t0_wall, t0_boot,
+            log_dir=_log_dir,
+            crashes=_crashes,
+            crash_t=_crash_t,
+            df=_df_data,
+            t_stable_end=_t_stable_end,
+        )
+        return 0
+
+    # Full verbose report
+    print(f"MAVLink log : {mav_path}")
+    if _df_data is not None:
+        print(f"DataFlash   : {_df_data['path'].name}  ({sum(len(v) for _, v in _df_data.items() if isinstance(v, list))} EKF records)")
+    else:
+        print("DataFlash   : not found (add dataflash.BIN for definitive EKF diagnosis)")
 
     print_inventory(records, t0_wall, t0_boot)
     if not args.no_flight_state:

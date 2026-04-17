@@ -240,99 +240,41 @@ def acro_armed_lua_full(tmp_path, request):
     Full-stack ACRO fixture with rawes.lua in flight mode (SCR_USER6=1),
     internal_controller=False.
 
-    Uses the same initial conditions as every other passing stack test:
-    pos0/body_z/omega_spin/rest_length from steady_state_starting.json
-    (natural orbit equilibrium at xi~8 deg, 100 m tether, altitude~14 m);
-    vel0 from config.py defaults (~0.96 m/s orbital velocity).
-
-    This mirrors test_closed_loop_60s.py (the validating simtest) exactly:
-    same position, same orbit, but Lua owns cyclic + collective instead of
-    the internal Python controller.
+    With dual GPS (EK3_SRC1_YAW=2, default in rawes_sitl_defaults.parm) yaw
+    is known from the first GPS fix — no fast circles or EKFGSF motion needed.
+    The kinematic is a plain min_jerk trajectory from origin to the orbital
+    equilibrium position (pos0/vel0 from steady_state_starting.json).
 
     Key design points:
       - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
-      - kinematic_traj_type=fast_circle (n_fast=1, v_fast=5 m/s, r=5 m):
-        Phases 1-3 (hold→accel→const→decel) complete at t=44.4 s.
-        Phase 4 (large orbit at 0.96 m/s) runs from t=44.4 s until kinematic exit
-        at t=80 s.  Hub exits at the large orbit with omega~0.01 rad/s (tiny).
-        Orbital kinematic alone (0.56 deg/s) causes EKFGSF to run for 60-97 s
-        without converging, leading to FPE in EKFGSF_yaw::predict() → GPS Glitch
-        → hub crashes at kinematic exit.
-      - v_fast=5 m/s: Phase 1/2/3 heading rotates at 1 rad/s → EKFGSF converges
-        quickly.  But velNEDdiff=5 m/s > 1 m/s during Phase 1/2/3 so GPS cannot
-        fuse yet.  GPS fuses in Phase 4 (v=0.96 m/s, velNEDdiff=0.96<1 m/s) at
-        t~76 s after ~32 s of slow heading rotation (0.0097 rad/s).
-      - SCR_USER6=0 during fast circles and decel (hub near level, wrong equilibrium).
-        SCR_USER6=1 set at Phase 4 start (t~45 s): hub is in large-orbit tether
-        orientation.  Pre-GPS bypass holds col_cruise while _tdir0=nil.
-        GPS tether recapture fires at t~76 s (_tdir0 set, orbit tracking active).
-        Hub exits kinematic at t=80 s with 4 s of active orbit tracking.
-      - COL_CRUISE_FLIGHT_RAD=-0.18 rad in rawes.lua matches stack_coll_eq.
-      - Lua VZ altitude-hold (vz_sp=0): bidirectional P controller around
-        COL_CRUISE_FLIGHT_RAD.  Mediator decode is asymmetric (col_min=-0.28,
-        col_max=0.10) matching Lua's encoding exactly.
+      - SCR_USER6=1 set immediately after arm; Lua pre-GPS bypass holds
+        col_cruise and zero cyclic until _tdir0 fires (GPS fusion).
+      - GPS fuses at ~44 s (delAngBiasLearned); _tdir0 fires; orbit tracking
+        active from ~44 s until kinematic exits at 80 s (~36 s of tracking).
+      - Fixture waits for GPS fusion before yielding so the test only needs a
+        short timeout to observe kinematic exit.
 
     Timeline (from mediator start, speedup=1):
-      t=0..15 s    Phase 0: stationary hold.
-      t=15..27.6 s Phase 1: accel circle (v 0→5 m/s, r=5 m, omega up to 57 deg/s).
-      t=27.6..33.9 s Phase 2: constant-speed circle (v=5 m/s).
-      t=33.9..44.4 s Phase 3: decel circle (v 5→0.96 m/s).
-      t~11 s       GPS first fix.
-      t~10 s       arm complete; fixture sets SCR_USER1-6 (SCR_USER6=0).
-      t~19 s       GPS origin set.
-      t=44.4..80 s Phase 4: large orbit (r=99 m, v=0.96 m/s, omega=0.56 deg/s).
-      t~45 s       fixture wait expires; SCR_USER6=1 set.
-                   Lua pre-GPS bypass: col=col_cruise, _tdir0=nil.
-      t~76 s       GPS fuses (yawAlignComplete + delAngBiasLearned in Phase 4).
-                   GPS tether recapture: _tdir0 set, orbit tracking active.
-      t=80 s       kinematic exits at large-orbit position; omega~0.01 rad/s.
-      t~80+        free flight under ArduPilot + Lua; Lua already tracking orbit.
-
-    Fixture yields at Phase 4 start (~t=45 s).  wait_kinematic_done() in the test
-    waits for the remaining ~35 s of Phase 4.  STATUSTEXTs from the kinematic
-    (GPS fusion at t~76 s, Lua capture) are in ctx.all_statustext.
+      t=0..~40 s  kinematic min_jerk: hub travels from origin to pos0 at vel0.
+      t~15 s      arm complete; SCR_USER6=1 set; Lua pre-GPS bypass active.
+      t~44 s      GPS fuses; _tdir0 fires; Lua orbit tracking active.
+      t~44 s      fixture yields (GPS fusion confirmed).
+      t=80 s      kinematic exits; Lua already tracking orbit for ~36 s.
+      t~80+       free flight under ArduPilot + Lua.
     """
     extra = {
-        # Fast-circle kinematic for reliable EKFGSF convergence + clean kinematic exit.
-        #
-        # v_fast=5 m/s (57 deg/s heading): fast EKFGSF convergence during Phase 1/2/3.
-        # velNEDdiff=5 m/s > 1 m/s threshold → GPS cannot fuse during Phase 1/2/3.
-        # Phase 4 (large orbit, v=0.96 m/s, velNEDdiff=0.96 < 1 m/s): GPS fuses ~32 s
-        # into Phase 4 (t~76 s) after EKFGSF converges from slow heading rotation.
-        #
-        # CRITICAL: kinematic must exit during Phase 4 (large orbit, omega~0.01 rad/s).
-        # Phase timings with v_fast=5, r=5, n_fast=1, T_lead=10, t_hold=15:
-        #   T_accel = 4pi*5/5 = 12.6 s     (Phase 1: 0→5 m/s over 2pi)
-        #   T_per   = 2pi*5/5 =  6.3 s     (Phase 2: constant 5 m/s, n_fast=1 circle)
-        #   T_decel = 2pi*5/2.98 = 10.5 s  (Phase 3: 5→0.96 m/s, mean=2.98)
-        #   t_d     = 15+12.6+6.3+10.5 = 44.4 s  (Phase 4 start)
-        #   t_total = 44.4+10 = 54.4 s     (trajectory end, but kinematic keeps running
-        #                                    in Phase 4 beyond t_total until duration=80 s)
-        # startup_damp_seconds=80 s → kinematic exits at t=80 s (35.6 s into Phase 4).
-        # At exit: position = large-orbit point (r=99 m), omega~0.01 rad/s (tiny). ✓
-        #
-        # Contrast: v_fast=0.96 m/s gives t_d=145.8 s >> startup_damp=80 s, so the
-        # kinematic exits during Phase 1 (accel) with omega~0.19 rad/s → hub tumbles.
-        "kinematic_traj_type":       "fast_circle",
-        "kinematic_orbital_dir":     1,
-        "kinematic_fast_speed":      5.0,    # v_fast [m/s]: fast EKFGSF convergence
-        "kinematic_circle_radius":   5.0,    # r_circle [m]: omega_fast = 57 deg/s
-        "kinematic_fast_circles":    1,      # 1 constant-speed circle after accel
-        "kinematic_orbit_lead_s":    10.0,   # T_lead [s] on large orbit before t_total
-        "kinematic_exit_speed":      0.96,   # v_orb_eq [m/s]: large-orbit + free-flight speed
-        # startup_damp=80 s > t_total=54.4 s: kinematic exits at t=80 s in Phase 4.
-        "startup_damp_seconds":      80.0,
+        # Stationary hold at pos0 (tether equilibrium from steady_state_starting.json).
+        # vel0=0: hub does not move; tether tension holds it at equilibrium.
+        # linear kinematic with vel=0 keeps launch_pos=pos0 throughout.
+        "kinematic_traj_type":  "linear",
+        "vel0":                 [0.0, 0.0, 0.0],
+        "kinematic_vel_ramp_s": 0.0,
+        "startup_damp_seconds": 80.0,
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name,
-
-                     # CLAUDE.md critical rule: internal_controller=False for all
-                     # full-stack flight tests.  ArduPilot + Lua own the physics.
                      internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua params.  SCR_USER6=0 (Lua inactive) until
-        # Phase 3 (large orbit) starts — avoids Lua capturing wrong equilibrium
-        # while hub is level during fast circles (Phases 1 and 2).
-        ctx.log.info("Setting SCR_USER params for rawes.lua (SCR_USER6=0 until Phase 3) ...")
+        ctx.log.info("Setting SCR_USER params for rawes.lua ...")
         lua_params = {
             "SCR_ENABLE": 1,              # persist scripting in EEPROM
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
@@ -340,30 +282,34 @@ def acro_armed_lua_full(tmp_path, request):
             "SCR_USER3": 0.0,             # anchor North   [m]
             "SCR_USER4": 0.0,             # anchor East    [m]
             "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 0,               # inactive during fast circles
+            "SCR_USER6": 1,               # active immediately; pre-GPS bypass handles the wait
         }
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
         ctx.wait_drain(timeout=1.0, label="post-param")
 
-        # Wait for fast circles + decel circle to finish before enabling Lua.
-        # Phase boundary timing (deterministic at speedup=1):
-        #   T_accel  = 4*pi*5/5.0 = 12.6 s  (Phase 1: accel circle, v_fast=5)
-        #   T_per    = 2*pi*5/5.0 =  6.3 s  (Phase 2: constant circle, n_fast=1)
-        #   T_decel  = 2*pi*5/2.98 = 10.5 s (Phase 3: decel 5→0.96, mean=2.98)
-        #   t_d      = 15+12.6+6.3+10.5 = 44.4 s from mediator start (Phase 4 start)
-        #   Arm fires  ~ 10 s from mediator start
-        #   Wait after arm: 44.4 - 10 = 34.4 s -> use 35 s
-        _PHASE3_WAIT_S = 35.0
-        ctx.log.info(
-            "Waiting %.0f s for fast circle + decel to finish before enabling Lua ...",
-            _PHASE3_WAIT_S,
-        )
-        ctx.wait_drain(timeout=_PHASE3_WAIT_S, check_procs=True, label="circles-wait")
-        ok = ctx.gcs.set_param("SCR_USER6", 1, timeout=5.0)
-        ctx.log.info("SCR_USER6=1 enabled (Phase 3 started)  ACK=%s", ok)
+        # Wait for GPS fusion before yielding.
+        # Lua needs _tdir0 (fires on GPS fusion) to begin orbit tracking.
+        # With dual GPS the wait is ~44 s (delAngBiasLearned bottleneck).
+        ctx.log.info("Waiting for GPS fusion before yielding (up to 60 s) ...")
+        _gps_seen: list[bool] = [False]
 
-        ctx.wait_drain(timeout=1.0, label="post-lua-enable")
+        def _gps_fused(text: str | None) -> bool:
+            if text and "is using GPS" in text:
+                _gps_seen[0] = True
+                return True
+            return False
+
+        ctx.wait_drain(
+            until       = _gps_fused,
+            timeout     = 60.0,
+            drain_s     = 1.0,
+            check_procs = True,
+            label       = "gps-fuse",
+        )
+        if not _gps_seen[0]:
+            raise RuntimeError("GPS did not fuse within 60 s — cannot start orbit tracking")
+        ctx.log.info("GPS fused — Lua orbit tracking active; yielding to test")
+
         yield ctx
