@@ -48,19 +48,35 @@ _PHASE2 = [
     ("ATC_RAT_PIT_IMAX",  0.0),
     # ACRO: disable auto-leveling (tether pulls hub to ~65 deg, trainer would fight it)
     ("ACRO_TRAINER",      0),
-    # Boot into ACRO so rawes_hw.lua yaw-trim runs immediately after arm
+    # Boot into ACRO so rawes.lua yaw-trim runs immediately after arm
     ("INITIAL_MODE",      1),
     # Failsafes: disable for bench work (no RC transmitter, no GCS radio)
     ("FS_THR_ENABLE",     0),
     ("FS_GCS_ENABLE",     0),
     ("FS_EKF_ACTION",     0),
-    # RPM sensor: DSHOT bidirectional telemetry from AM32 ESC
-    ("RPM1_TYPE",         5),
+    # RPM sensor: disabled until AM32 EDT is enabled on the ESC.
+    # After enabling EDT via BLHeli passthrough: set RPM1_TYPE=5 and SERVO_BLH_BDMASK=256.
+    ("RPM1_TYPE",         0),
     ("RPM1_MIN",          0),
-    # Script 1 servo output: Lua writes motor PWM to SERVO9 (AUX1 on Pixhawk 6C)
-    ("SERVO9_FUNCTION",   94),
-    # rawes_hw.lua mode: 2 = yaw-trim only
-    # Hardware firmware only has SCR_USER1..6; SCR_USER6 is the mode selector.
+    # Output 9 (AUX OUT 1, FMU): GB4008 under Lua Script 1 control
+    # SERVO9_MIN=800: motor off at 800 us, full throttle at 2000 us (matches rawes.lua range)
+    # Default 1100 clamps the DShot signal and keeps motor silent.
+    ("SERVO9_FUNCTION",   94),  # Script 1: Lua writes GB4008 PWM via SRV_Channels
+    ("SERVO9_MIN",        800),
+    ("SERVO9_MAX",        2000),
+    ("SERVO9_TRIM",       800),   # trim = off
+    # DShot300 on output 9 (AUX OUT 1, FMU processor -- BRD_IO_DSHOT not needed)
+    ("SERVO_BLH_MASK",    256),  # bit 8 = output 9
+    ("SERVO_BLH_OTYPE",   5),    # DShot300
+    ("SERVO_BLH_POLES",   22),   # GB4008 24N22P; default 14 is wrong
+    ("SERVO_BLH_TRATE",   10),   # telemetry request rate
+    ("SERVO_BLH_AUTO",    0),    # manual mask config
+    ("SERVO_BLH_BDMASK",  0),    # one-way DShot; set to 256 after AM32 EDT enabled
+    ("SERVO_DSHOT_ESC",   3),    # AM32 (REVVitRC)
+    ("SERVO_DSHOT_RATE",  0),    # 1 kHz (default)
+    ("BRD_SAFETY_DEFLT",  0),    # safety switch disabled -- outputs live on boot
+    # rawes.lua mode: 2 = yaw (yaw-trim only)
+    # SCR_USER6 is the mode selector.
     ("SCR_USER6",         2),
 ]
 
@@ -227,8 +243,8 @@ def main() -> None:
 
     print()
     print("  Action required -- copy the Lua script to the Pixhawk SD card:")
-    print("    Source : simulation\\scripts\\rawes_hw.lua")
-    print("    SD card: APM\\scripts\\rawes_hw.lua")
+    print("    Source : simulation\\scripts\\rawes.lua")
+    print("    SD card: APM\\scripts\\rawes.lua")
     print()
     print("  Options:")
     print("    A) Remove the microSD card, copy the file, reinsert, power on.")

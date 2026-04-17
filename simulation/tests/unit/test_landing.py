@@ -37,7 +37,7 @@ from tether         import TetherModel
 from controller     import AcroController
 from winch          import WinchController
 from frames         import build_orb_frame
-from simtest_log    import SimtestLog
+from simtest_log    import SimtestLog, BadEventLog
 from simtest_ic     import load_ic
 from landing_planner import LandingPlanner
 from tel             import make_tel
@@ -114,6 +114,7 @@ def _run_landing() -> dict:
     tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
     tension_now = tether._last_info.get("tension", 0.0)
 
+    events         = BadEventLog()
     floor_hit      = False
     t_final_start  = None
 
@@ -193,6 +194,14 @@ def _run_landing() -> dict:
         F_net       = result.F_world + tf
         M_orbital   = result.M_orbital + tm
 
+        # ── Bad-event tracking ────────────────────────────────────────────────
+        if tether._last_info.get("slack", False):
+            events.record("slack", t_sim, phase, altitude)
+        if tension_now > BREAK_LOAD_N:
+            events.record("tension_spike", t_sim, phase, altitude, tension=tension_now)
+        if phase == "descent":
+            events.check_floor(hub_state["pos"][2], t_sim, phase, FLOOR_ALT_M)
+
         # ── Spin & dynamics ───────────────────────────────────────────────────
         omega_spin = max(OMEGA_SPIN_MIN,
                          omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
@@ -238,6 +247,7 @@ def _run_landing() -> dict:
 
     return dict(
         t_end           = t_sim,
+        events          = events,
         floor_hit       = floor_hit,
         touchdown_time  = touchdown_time,
         vz_at_floor     = vz_at_floor,
@@ -249,73 +259,22 @@ def _run_landing() -> dict:
     )
 
 
-import functools
-
-@functools.lru_cache(maxsize=None)
-def _results():
-    return _run_landing()
-
-
 # ---------------------------------------------------------------------------
-# Tests
+# Test
 # ---------------------------------------------------------------------------
 
-def test_no_tension_spikes():
-    """Tension stays below tether break load throughout descent."""
-    r = _results()
-    T_max = r["max_tension"]
-    print(f"\n  Max descent tension: {T_max:.0f} N  (break load {BREAK_LOAD_N:.0f} N)"
-          if T_max is not None else "\n  No tension samples")
-    assert T_max is None or T_max < BREAK_LOAD_N, f"Tension spike {T_max:.0f} N during descent"
-
-
-def test_altitude_maintained():
-    """Hub stays above floor during controlled descent (before final_drop)."""
-    r = _results()
-    val = r["min_altitude"]
-    if val is not None:
-        print(f"\n  Descent min altitude: {val:.2f} m")
-        assert val > 1.1, f"Hub hit floor during controlled descent (min alt {val:.2f} m)"
-
-
-def test_leveling_completes():
-    """Tether-aligned descent reaches final_drop phase (no leveling needed)."""
-    r = _results()
-    print(f"\n  Floor hit: {r['floor_hit']}  (tether-aligned descent, no leveling phase)")
-    assert r["floor_hit"], "Hub did not reach floor during final_drop"
-
-
-def test_touchdown_over_anchor():
-    """Hub lands within ANCHOR_LAND_RADIUS_M of the anchor."""
-    r = _results()
-    dist = r["anchor_dist"]
-    if dist is None:
-        pytest.skip("Hub did not reach floor")
-    print(f"\n  Anchor distance at touchdown: {dist:.2f} m")
-    assert dist < ANCHOR_LAND_RADIUS_M, \
-        f"Hub landed {dist:.1f} m from anchor (limit {ANCHOR_LAND_RADIUS_M} m)"
-
-
-def test_touchdown_orientation():
-    """Disk is within 15 deg of horizontal at touchdown."""
-    r = _results()
-    tilt = r["touchdown_tilt"]
-    if tilt is None:
-        pytest.skip("Hub did not reach floor")
-    print(f"\n  Disk tilt at touchdown: {tilt:.1f} deg from horizontal")
-    # Blade tips strike ground when tilt > arcsin(altitude/R) = arcsin(1/2.5) = 23 deg.
-    # Allow 20 deg for margin; tether restoring torque may drift body_z ~5 deg during final drop.
-    assert tilt < 20.0, f"Rotor tilted {tilt:.1f} deg -- blade tips risk ground contact"
-
-
-def test_touchdown_speed():
-    """Touchdown descent rate is survivable."""
-    r = _results()
+def test_landing():
+    """Descent + final_drop: no bad events, floor reached, touchdown within limits."""
+    r = _run_landing()
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
     if not r["floor_hit"]:
-        pytest.skip("Hub did not reach floor")
-    vz = r["vz_at_floor"]
-    print(f"\n  Touchdown time: {r['touchdown_time']:.1f} s")
-    print(f"  Touchdown vz:   {vz:.2f} m/s  (NED, + = downward)")
-    print(f"  Anchor dist:    {r['anchor_dist']:.2f} m")
-    print(f"  Disk tilt:      {r['touchdown_tilt']:.1f} deg")
-    assert vz < 10.0, f"Touchdown {vz:.1f} m/s"
+        failures.append("hub did not reach floor during final_drop")
+    if r["anchor_dist"] is not None and r["anchor_dist"] >= ANCHOR_LAND_RADIUS_M:
+        failures.append(f"anchor_dist={r['anchor_dist']:.1f}m >= {ANCHOR_LAND_RADIUS_M}m")
+    if r["touchdown_tilt"] is not None and r["touchdown_tilt"] >= 20.0:
+        failures.append(f"touchdown_tilt={r['touchdown_tilt']:.1f}deg >= 20 deg")
+    if r["vz_at_floor"] is not None and r["vz_at_floor"] >= 10.0:
+        failures.append(f"touchdown_vz={r['vz_at_floor']:.2f} m/s >= 10 m/s")
+    assert not failures, "\n  ".join(failures)

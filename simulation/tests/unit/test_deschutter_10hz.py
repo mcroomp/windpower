@@ -41,7 +41,7 @@ from controller  import (OrbitTracker, col_min_for_altitude_rad,
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
-from simtest_log import SimtestLog
+from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 from tel         import make_tel
 
@@ -172,7 +172,7 @@ def _run_10hz() -> dict:
     tensions_in  = []
     energy_out   = 0.0
     energy_in    = 0.0
-    floor_hits   = 0
+    events       = BadEventLog()
     telemetry    = []
 
     for i in range(n_steps):
@@ -245,9 +245,8 @@ def _run_10hz() -> dict:
         M_orbital += -50.0 * hub_state["omega"]
         hub_state  = dyn.step(F_net, M_orbital, DT_INNER, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] >= -1.05:
-            floor_hits += 1
-            if floor_hits > 200:
+        if events.check_floor(hub_state["pos"][2], t, phase, 1.05):
+            if events.count("floor_hit") > 200:
                 break
 
         if i % tel_every == 0:
@@ -265,7 +264,7 @@ def _run_10hz() -> dict:
     peak     = max(tensions_out + tensions_in) if tensions_out or tensions_in else 0.0
 
     return dict(
-        floor_hits  = floor_hits,
+        events      = events,
         energy_out  = energy_out,
         energy_in   = energy_in,
         net_energy  = energy_out - energy_in,
@@ -276,54 +275,25 @@ def _run_10hz() -> dict:
     )
 
 
-import functools
-
-@functools.lru_cache(maxsize=None)
-def _results():
-    return _run_10hz()
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-def _print_results(r: dict) -> None:
-    print(f"\n  Planner rate: {1.0/DT_OUTER:.0f} Hz (inner physics: {1.0/DT_INNER:.0f} Hz)")
-    print(f"  Reel-out mean tension: {r['mean_out']:.1f} N")
-    print(f"  Reel-in  mean tension: {r['mean_in']:.1f} N  (steady, skip={int(T_TRANSITION/DT_OUTER)} steps)")
-    print(f"  Peak tension:          {r['peak']:.1f} N  (break load {BREAK_LOAD_N:.0f} N)")
-    print(f"  Net energy:            {r['net_energy']:.0f} J")
-    print(f"  Floor hits:            {r['floor_hits']}")
-
-
-def test_10hz_no_crash():
-    """Hub stays above z_floor at 10 Hz planner rate."""
-    r = _results()
-    _print_results(r)
-    assert r["floor_hits"] == 0, \
-        f"Hub hit z_floor {r['floor_hits']} times at 10 Hz planner rate"
-
-
-def test_10hz_deschutter_mechanism():
-    """Reel-in steady tension < reel-out tension at 10 Hz (De Schutter mechanism works)."""
-    r = _results()
-    assert r["mean_in"] < r["mean_out"], (
-        f"De Schutter mechanism failed at 10 Hz: "
-        f"reel-in {r['mean_in']:.1f} N >= reel-out {r['mean_out']:.1f} N"
-    )
-
-
-def test_10hz_net_energy_positive():
-    """Net energy positive at 10 Hz (pumping cycle generates power)."""
-    r = _results()
-    assert r["net_energy"] > 0, \
-        f"Net energy negative at 10 Hz: {r['net_energy']:.0f} J"
-
-
-def test_10hz_peak_tension_safe():
-    """Peak tension stays below 80% tether break load at 10 Hz."""
-    r = _results()
-    assert r["peak"] < TENSION_SAFETY_N, (
-        f"Peak tension {r['peak']:.0f} N exceeds safety limit {TENSION_SAFETY_N:.0f} N "
-        f"(80% break load) at 10 Hz planner rate"
-    )
+def test_10hz():
+    """10 Hz planner rate: no bad events, De Schutter mechanism works, net energy positive."""
+    r = _run_10hz()
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
+    if r["mean_in"] >= r["mean_out"]:
+        failures.append(
+            f"De Schutter mechanism failed at 10 Hz: "
+            f"reel-in {r['mean_in']:.1f}N >= reel-out {r['mean_out']:.1f}N"
+        )
+    if r["net_energy"] <= 0:
+        failures.append(f"net_energy={r['net_energy']:.0f}J <= 0")
+    if r["peak"] >= TENSION_SAFETY_N:
+        failures.append(
+            f"peak_tension={r['peak']:.0f}N >= safety limit {TENSION_SAFETY_N:.0f}N"
+        )
+    assert not failures, "\n  ".join(failures)

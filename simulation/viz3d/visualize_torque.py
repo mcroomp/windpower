@@ -1,5 +1,5 @@
 """
-torque/visualize_torque.py — 3D playback of counter-torque motor telemetry.
+viz3d/visualize_torque.py — 3D playback of counter-torque motor telemetry.
 
 Scene (ENU, Z up)
 ------------------
@@ -28,8 +28,8 @@ Controls
 
 Usage
 -----
-  python simulation/torque/visualize_torque.py simulation/logs/torque_telemetry.csv
-  python simulation/torque/visualize_torque.py telemetry.csv --export out.gif --fps 15
+  python simulation/viz3d/visualize_torque.py simulation/logs/torque_telemetry.csv
+  python simulation/viz3d/visualize_torque.py telemetry.csv --export out.gif --fps 15
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ import dataclasses as _dc
 from torque_telemetry import TorqueTelemetryFrame
 from telemetry_csv import read_csv as _read_csv
 from mediator_torque import PROFILES as _MEDIATOR_PROFILES
-from model import HubParams as _HubParams, equilibrium_throttle as _eq_throttle
+from torque_model import HubParams as _HubParams, equilibrium_throttle as _eq_throttle
 
 _MODEL_PARAMS = _HubParams()   # default GB4008 params (same as mediator default)
 

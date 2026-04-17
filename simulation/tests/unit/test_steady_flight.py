@@ -32,6 +32,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
+
 import mediator as _mediator_module
 from aero        import create_aero
 import rotor_definition as _rd

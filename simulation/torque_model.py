@@ -1,5 +1,5 @@
 """
-torque/model.py — Counter-torque motor simulation model
+torque_model.py — Counter-torque motor simulation model
 
 Simulates the RAWES stationary inner assembly + spinning rotor hub + GB4008 motor.
 Goal: verify that ArduPilot's SITL can regulate yaw using the tail-rotor control

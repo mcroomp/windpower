@@ -24,7 +24,7 @@ flowchart TB
 
     subgraph PX["Pixhawk 6C (in air)"]
         direction TB
-        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 1=flight 50 Hz, 2=yaw 100 Hz, 3=both<BR/>4=landing 50 Hz, 5=pumping 50 Hz<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim · VZ collective (modes 4,5) · Ch1/Ch2/Ch3+Ch9 overrides"]
+        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 1=steady_noyaw 50 Hz, 2=yaw 100 Hz, 3=steady<BR/>4=landing_noyaw 50 Hz, 5=pumping_noyaw 50 Hz, 6=arm_hold_noyaw<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim · VZ collective (modes 4,5) · Ch1/Ch2/Ch3+Ch9 overrides"]
         ACRO["<b>ACRO_Heli</b>  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
         LUA --> ACRO
     end
@@ -122,7 +122,7 @@ The orbit is not a problem to be corrected -- it is the expected flight conditio
 attitude setpoint rotates with the orbit automatically (orbit tracking), and the trajectory
 planner only needs to command deviations.
 
-> **Sim:** `test_steady_flight.py` (unit) runs the open-loop physics to equilibrium and writes `steady_state_starting.json`. `test_closed_loop_60s.py` (simtest) runs a 60 s orbit using the two-loop attitude controller (RatePID) with no ArduPilot.
+> **Sim:** `test_steady_flight.py` (unit) runs the open-loop physics to equilibrium and writes `steady_state_starting.json`. `test_closed_loop_90s.py` (simtest) runs a 90 s orbit using the two-loop attitude controller (RatePID) with no ArduPilot.
 
 ### 3.3 Pumping Cycle
 
@@ -295,9 +295,8 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 
 **SITL Validation Status:**
 
-- test_lua_flight_rc_overrides PASSES -- script loads in SITL, captures equilibrium at t~=0.5 s
-  after ACRO arm, generates cyclic RC overrides (max cyclic activity 227 PWM).
-- test_h_swash_phang PASSES -- confirms H_SW_PHANG=0 and H_SWASH_TYPE=3 correct for RAWES servo
+- test_lua_flight_steady PASSES -- rawes.lua stable orbit 86-110 s, internal_controller=False, no EKF yaw reset.
+- test_h_phang PASSES -- confirms H_SW_PHANG=0 and H_SWASH_TYPE=3 correct for RAWES servo
   layout. See section 6 ArduPilot Configuration.
 
 **Parameters (SCR_USER slots):**
@@ -309,7 +308,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 | RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
 | RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
 | RAWES_ANCHOR_D | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=flight, 2=yaw, 3=both, 4=landing, 5=pumping. |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw. |
 
 Cyclic output rate limiter is hardcoded at 30 PWM/step (~0.67 s full-stick traverse).
 No further SCR_USER params are available on hardware (firmware exposes only SCR_USER1..6).
@@ -335,7 +334,7 @@ adds phase delay that reduces the stability margin vs. direct blade pitch.
 factor maps the computed rate command to PWM so the ACRO PID sees the correct physical rate.
 If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 
-> **Sim:** The script runs unchanged inside the ArduPilot SITL Docker container. `mediator.py` provides physics via the SITL UDP JSON protocol. `test_lua_flight_rc_overrides` (stack) validates equilibrium capture at t~0.5 s and cyclic RC override output. `test_lua_flight_logic.py` (31 unit tests) covers Rodrigues rotation, orbit tracking, slerp, and cyclic projection independently of SITL.
+> **Sim:** The script runs unchanged inside the ArduPilot SITL Docker container. `mediator.py` provides physics via the SITL UDP JSON protocol. `test_lua_flight_steady` (stack) validates rawes.lua stable orbit under full ArduPilot control (internal_controller=False). Unit tests in `simulation/tests/unit/` (`test_math_lua.py`, `test_steady_flight_lua.py`) cover Rodrigues rotation, orbit tracking, slerp, and cyclic projection independently of SITL.
 
 ### 4.1.1 rawes.lua -- Landing Mode (SCR_USER6=4)
 
@@ -378,8 +377,8 @@ If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 
 ### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2 or 3)
 
-The counter-torque script is already validated (15/15 tests pass). Full documentation in
-simulation/torque/README.md. Summary:
+The counter-torque script is already validated (15/15 tests pass). Physics model in
+`simulation/torque_model.py`; stack mediator in `simulation/mediator_torque.py`. Summary:
 
 ```
 motor_rpm  <- battery:voltage(0)   [SITL: mediator encodes RPM as voltage]
@@ -574,7 +573,7 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 
 ---
 
-> **Sim:** Full physics model in `simulation/torque/model.py` (hub yaw ODE, GB4008 motor, RK4 integrator). `mediator_torque.py` runs a standalone SITL co-simulation with configurable RPM profiles (constant, slow/fast sinusoidal, gust, pitch-roll). 9 unit tests + 6 stack tests all pass. See `simulation/torque/README.md` for full detail.
+> **Sim:** Full physics model in `simulation/torque_model.py` (hub yaw ODE, GB4008 motor, RK4 integrator). `simulation/mediator_torque.py` runs a standalone SITL co-simulation with configurable RPM profiles (constant, slow/fast sinusoidal, gust, pitch-roll). 9 unit tests + 6 stack tests all pass.
 
 ## 6. ArduPilot Configuration
 
@@ -633,7 +632,7 @@ lever -- start at 0.3 and increase slowly. The ATC_RAT_RLL/PIT_D term provides d
 
 | Risk                                       | Impact                                          | Mitigation                                                                                 |      |                                                 |
 | ------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------ | ---- | ----------------------------------------------- |
-| H_SW_PHANG cyclic phase                    | Resolved -- H_SW_PHANG=0 confirmed              | test_h_swash_phang measured cross_ch1=1.5%, cross_ch2=19.7% (both <20%).                   |      |                                                 |
+| H_SW_PHANG cyclic phase                    | Resolved -- H_SW_PHANG=0 confirmed              | test_h_phang measured cross_ch1=1.5%, cross_ch2=19.7% (both <20%).                         |      |                                                 |
 | Kaman flap lag                             | Medium -- phase margin loss                     | Start KP_CYC=0.3; increase slowly; D-term in ATC_RAT_RLL/PIT damps oscillation             |      |                                                 |
 | Load cell hardware (tension feedback)      | High -- critical path                           | Validate ground PI in simulation before hardware; load cell must be on winch before flight |      |                                                 |
 | Orbit tracking before first tether tension | Medium -- no tether direction during free climb | Equilibrium capture guard (                                                                | diff | < 0.5 m) prevents tracking until tether is taut |
@@ -1061,7 +1060,7 @@ Parameters that **do NOT exist** in this build (4.8.0-dev heli):
 
 **Real RAWES mediator (kinematic_vel_ramp_s=15, startup_damp_seconds=65, EK3_SRC1_YAW=1):**
 
-Empirically measured from passing stack tests (acro_armed_lua, test_lua_flight_rc_overrides):
+Empirically measured from passing stack tests (acro_armed_lua, test_lua_flight_steady):
 
 | Event | Time from mediator start |
 |---|---|
@@ -1168,9 +1167,10 @@ SCR_USER5 = -home_z_enu (negate).
 
 | File                                         | Description                                                                   |
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=flight, 2=yaw, 3=both, 4=landing, 5=pumping) |
-| simulation/torque/scripts/lua_defaults.parm  | SITL param overrides for Lua tests                                            |
-| simulation/torque/README.md                  | Full counter-torque documentation and test results                            |
+| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw) |
+| simulation/scripts/torque/lua_defaults.parm  | SITL param overrides for Lua torque tests                                     |
+| simulation/torque_model.py                   | Hub yaw ODE — HubParams, HubState, motor_torque(), step(), equilibrium_throttle() |
+| simulation/mediator_torque.py                | Standalone torque SITL mediator (RPM profiles, hub yaw physics)               |
 | simulation/controller.py                     | orbit_tracked_body_z_eq(), compute_swashplate_from_state(), TensionController |
 | simulation/mediator.py                       | Rate-limited slerp, STATE/COMMAND packet assembly                             |
 | simulation/sensor.py                         | SpinSensor (omega_spin noise model)                                           |

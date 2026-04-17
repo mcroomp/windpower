@@ -17,7 +17,7 @@ by negating the projection: `tilt_lon = -dot(corr_enu, disk_x) / tilt_max_rad`.
 
 The tilt_lat sign was already correct (aero uses `My_body = +K × tilt_lat × T`).
 
-### 60 s closed-loop stability proven (`test_closed_loop_60s.py`)
+### 60 s closed-loop stability proven (`test_closed_loop_90s.py`)
 
 Four tests, all passing:
 - `test_60s_altitude_maintained` — 0 floor hits, z rises from 12.5 m → 13.3 m over 60 s
@@ -239,9 +239,9 @@ Min physics altitude    :   5.7 m (> 2.0 m limit)
 
 ### test_acro_hold known failure (not a regression)
 
-`test_acro_hold` fails with "Hub crashed: altitude < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick ACRO hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_60s`) passes.
+`test_acro_hold` fails with "Hub crashed: altitude < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick ACRO hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_90s`) passes.
 
-**Root cause:** Kinematic phase ends with ~0.9 m/s orbital velocity. `HoldPlanner` → `thrust=0.0 → collective=col_min=−0.28 rad` provides barely-positive lift at shallow tether elevation (~8°). Hub spirals down. `test_closed_loop_60s` starts from near-zero IC velocity so lift is sufficient.
+**Root cause:** Kinematic phase ends with ~0.9 m/s orbital velocity. `HoldPlanner` → `thrust=0.0 → collective=col_min=−0.28 rad` provides barely-positive lift at shallow tether elevation (~8°). Hub spirals down. `test_closed_loop_90s` starts from near-zero IC velocity so lift is sufficient.
 
 ### Output paths moved to simulation/logs/
 

@@ -1,11 +1,11 @@
 """
-torque/test_model.py — Unit tests for the counter-torque motor model.
+tests/unit/test_torque_model.py — Unit tests for the counter-torque motor model.
 
 Runs natively on Windows with the existing unit-test venv (pure Python, no
 Docker, no ArduPilot SITL required).
 
 Run with:
-    simulation/tests/unit/.venv/Scripts/python.exe -m pytest simulation/torque/test_model.py -v
+    simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_torque_model.py -v
 
 Tests
 -----
@@ -26,9 +26,9 @@ from pathlib import Path
 
 import pytest
 
-# Make model importable regardless of working directory
-sys.path.insert(0, str(Path(__file__).parent))
-import model as m
+# simulation/ is two levels up from tests/unit/
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import torque_model as m
 
 
 # ── Simulation helpers ────────────────────────────────────────────────────────

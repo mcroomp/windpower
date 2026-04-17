@@ -1,5 +1,5 @@
 """
-torque/torque_test_utils.py — Shared base utilities for all torque stack tests.
+tests/sitl/torque/torque_test_utils.py — Shared base utilities for all torque stack tests.
 
 All torque stack tests follow the same structure:
   1. Acquire the ``torque_armed_profile`` fixture (ACRO-armed, profile running)
@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-_SIM_DIR = Path(__file__).resolve().parents[1]
+_SIM_DIR = Path(__file__).resolve().parents[3]  # tests/sitl/torque/ -> simulation/
 
-# telemetry_csv lives in simulation/ (one level up from torque/)
+# telemetry_csv lives in simulation/
 import sys as _sys
 if str(_SIM_DIR) not in _sys.path:
     _sys.path.insert(0, str(_SIM_DIR))
@@ -152,7 +152,7 @@ def save_telemetry(rows: list,
     path = _SIM_DIR / "logs" / f"{stem}.csv"
     write_csv(rows, path)
     log.info("Telemetry saved -> %s  (%d frames)", path, len(rows))
-    log.info("Visualise with:  python simulation/torque/visualize_torque.py %s", path)
+    log.info("Visualise with:  python simulation/viz3d/visualize_torque.py %s", path)
 
 
 def assert_yaw_rate(

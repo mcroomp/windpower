@@ -13,8 +13,8 @@ Tests four scenarios that differ only in how body_z is captured at t=0:
 All scenarios use:
   - Exact Lua collective: col = COL_CRUISE + KP_VZ * vz_err (slew-limited)
   - Exact Lua gyro feedthrough: rate_sp = kp*err_body + gyro
-  - Same inner ACRO RatePID as test_closed_loop_60s
-  - Same physics / tether / aero as test_closed_loop_60s
+  - Same inner ACRO RatePID as test_closed_loop_90s
+  - Same physics / tether / aero as test_closed_loop_90s
 
 Run with:
     simulation/.venv/Scripts/python.exe -m pytest \
@@ -45,6 +45,9 @@ from controller  import (
 from swashplate  import SwashplateServoModel
 from frames      import build_orb_frame
 from simtest_ic  import load_ic
+from simtest_log import SimtestLog, BadEventLog
+
+_log = SimtestLog(__file__)
 
 _IC = load_ic()
 
@@ -71,7 +74,7 @@ ACRO_RP_DEG     = 360.0              # must match ACRO_RP_RATE
 I_SPIN_KGMS2    = 10.0
 OMEGA_SPIN_MIN  = 0.5
 
-# Inner ACRO PID gain (same as test_closed_loop_60s.py)
+# Inner ACRO PID gain (same as test_closed_loop_90s.py)
 KP_INNER = RatePID.DEFAULT_KP
 
 
@@ -175,9 +178,10 @@ def _run(label, t_sim=T_SIM, dt_lua=DT):
     _lua_roll_sp  = 0.0
     _lua_pitch_sp = 0.0
 
-    log      = [f"t=0  bz_eq0={bz_eq0}  tdir0={tdir0}"]
-    hist     = []
-    crash_t  = None
+    events    = BadEventLog()
+    log       = [f"t=0  bz_eq0={bz_eq0}  tdir0={tdir0}"]
+    hist      = []
+    crash_t   = None
     lua_timer = 0.0
 
     n_phys = int(t_sim / INNER_DT)
@@ -238,9 +242,10 @@ def _run(label, t_sim=T_SIM, dt_lua=DT):
             hist.append({"t": t, "alt": alt, "tension": tension,
                          "col": col_state, "vel_mag": float(np.linalg.norm(hub["vel"]))})
 
-        if crash_t is None and alt < 1.0:
-            crash_t = t
-            log.append(f"CRASH at t={t:.1f}s  alt={alt:.2f}m  tension={tension:.0f}N")
+        if events.check_floor(hub["pos"][2], t, "flight"):
+            if crash_t is None:
+                crash_t = t
+                log.append(f"CRASH at t={t:.1f}s  alt={alt:.2f}m  tension={tension:.0f}N")
 
         if t >= t_sim - INNER_DT:
             log.append(f"t={t:.1f}  alt={alt:.2f}m  col={col_state:.3f}rad  "
@@ -254,6 +259,7 @@ def _run(label, t_sim=T_SIM, dt_lua=DT):
         "max_alt":     max(alts),
         "max_tension": max(tensions),
         "crash_t":     crash_t,
+        "events":      events,
         "log":         log,
         "hist":        hist,
     }
@@ -283,7 +289,8 @@ def _run_python(t_sim=T_SIM):
     tdir0      = POS0 / np.linalg.norm(POS0)
     bz_eq0     = BODY_Z0.copy()
 
-    hist = []
+    events  = BadEventLog()
+    hist    = []
     crash_t = None
 
     for i in range(int(t_sim / INNER_DT)):
@@ -318,16 +325,20 @@ def _run_python(t_sim=T_SIM):
         alt = -hub["pos"][2]
         if i % int(10.0 / INNER_DT) == 0:
             hist.append({"t": t, "alt": alt, "tension": tension})
-        if crash_t is None and alt < 1.0:
-            crash_t = t
+        if events.check_floor(hub["pos"][2], t, "flight"):
+            if crash_t is None:
+                crash_t = t
 
     alts     = [h["alt"] for h in hist]
     tensions = [h["tension"] for h in hist]
     return {
-        "label": "python_ctrl",
-        "min_alt": min(alts), "max_alt": max(alts),
-        "max_tension": max(tensions), "crash_t": crash_t,
-        "hist": hist,
+        "label":       "python_ctrl",
+        "min_alt":     min(alts),
+        "max_alt":     max(alts),
+        "max_tension": max(tensions),
+        "crash_t":     crash_t,
+        "events":      events,
+        "hist":        hist,
     }
 
 
@@ -348,40 +359,18 @@ def _print_result(r):
             prev_t = h["t"]
 
 
-def test_lua_exact_capture():
-    """
-    Python math at 50 Hz (Lua rate) + Lua collective.
-    Must stay above 3 m for 90 s — this is the goal.
-    """
-    r = _run("lua_exact")
-    _print_result(r)
-    assert r["crash_t"] is None, (
-        f"Hub crashed at t={r['crash_t']:.1f}s -- Python math at 50 Hz fails"
-    )
-    assert r["min_alt"] >= 3.0, (
-        f"Min altitude {r['min_alt']:.2f}m < 3m"
-    )
-
-
-def test_python_baseline():
-    """
-    Python internal controller (known-good baseline at 400 Hz).
-    Must pass: validates sim infrastructure is correct.
-    """
-    r = _run_python()
-    _print_result(r)
-    assert r["crash_t"] is None, f"Python baseline crashed at t={r['crash_t']:.1f}s"
-    assert r["min_alt"] >= 3.0, f"Python baseline min_alt={r['min_alt']:.2f}m"
-
-
-def test_comparison():
-    """Compare 50 Hz Python math vs 400 Hz Python baseline."""
-    r_50  = _run("python_at_50Hz")
-    r_400 = _run_python()
-    print("\n\n=== 50 Hz vs 400 Hz comparison ===")
-    for r in [r_400, r_50]:
-        crash  = f"{r['crash_t']:.1f}s" if r["crash_t"] else "none"
-        stable = "YES" if r["crash_t"] is None and r["min_alt"] >= 3.0 else "NO"
-        print(f"  {r['label']:<18}  min_alt={r['min_alt']:6.2f}m  "
-              f"max_tension={r['max_tension']:6.0f}N  crash={crash}  stable={stable}")
-        _print_result(r)
+def test_lua_orbit_sim():
+    """Python orbit math at 50 Hz (Lua rate): no bad events, hub stable above 3 m for 90 s."""
+    r_lua = _run("lua_exact")
+    r_py  = _run_python()
+    _print_result(r_lua)
+    failures = []
+    if r_lua["events"]:
+        failures.append(f"lua_exact: {r_lua['events'].summary()}")
+    if r_lua["min_alt"] < 3.0:
+        failures.append(f"lua_exact: min_alt={r_lua['min_alt']:.2f}m < 3m")
+    if r_py["events"]:
+        failures.append(f"python_baseline: {r_py['events'].summary()}")
+    if r_py["min_alt"] < 3.0:
+        failures.append(f"python_baseline: min_alt={r_py['min_alt']:.2f}m < 3m")
+    assert not failures, "\n  ".join(failures)

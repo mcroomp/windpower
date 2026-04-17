@@ -43,7 +43,7 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 Rotates `body_z_eq0` azimuthally to track the hub's horizontal orbit. The Z-component of the setpoint is preserved from the initial equilibrium — it does not change when the hub gains or loses altitude. Safe to call at 400 Hz with no rate limiting downstream.
 
-Used by: `test_steady_flight.py`, `test_closed_loop_60s.py` — inner-loop physics tests where collective is not separately controlled. The Z-preserving property prevents positive altitude feedback (hub sinks → setpoint stays at same elevation → no extra tilt → stable).
+Used by: `test_steady_flight.py`, `test_closed_loop_90s.py` — inner-loop physics tests where collective is not separately controlled. The Z-preserving property prevents positive altitude feedback (hub sinks → setpoint stays at same elevation → no extra tilt → stable).
 
 **`orbit_tracked_body_z_eq_3d(cur_pos, tether_dir0, body_z_eq0)`** — 3D Rodrigues (Lua-equivalent)
 

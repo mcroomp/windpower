@@ -1,10 +1,9 @@
 """
-test_closed_loop_60s.py — 60-second closed-loop simulation, no ArduPilot.
+test_closed_loop_90s.py — 90-second closed-loop simulation, no ArduPilot.
 
-Mirrors what the stack test requires: 60 seconds of free flight from the
-steady-state equilibrium initial conditions, using the orbit-tracking
-internal controller at 400 Hz.  Fails if the hub crashes (z <= 1 m) or
-spin collapses.
+Mirrors test_steady_flight_lua.py (same IC, same duration) using the Python
+orbit-tracking controller instead of rawes.lua.  Both tests write telemetry.csv
+so trajectories can be compared directly.
 
 Key design decisions replicated from mediator.py:
   - axle_attachment_length from rotor definition (0.3 m): matches mediator;
@@ -17,6 +16,7 @@ Key design decisions replicated from mediator.py:
     zero tilt, which is the correct output at equilibrium.
 
 This is the unit-level equivalent of test_acro_hold without SITL/ArduPilot.
+Non-Lua reference for test_steady_flight_lua.py.
 """
 import sys
 from pathlib import Path
@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(180)]
 
 import rotor_definition as rd
 from dynamics   import RigidBodyDynamics
@@ -36,15 +36,16 @@ from controller import orbit_tracked_body_z_eq, compute_rate_cmd, RatePID
 from swashplate import SwashplateServoModel
 from planner import HoldPlanner
 from frames     import build_orb_frame
-from simtest_log import SimtestLog
-from simtest_ic  import load_ic
-from tel         import make_tel
+from simtest_log   import SimtestLog, BadEventLog
+from simtest_ic    import load_ic
+from tel           import make_tel
+from telemetry_csv import TelRow, write_csv
 
 _log = SimtestLog(__file__)
 _IC  = load_ic()
 
 DT            = 1.0 / 400.0
-T_SIM         = 60.0
+T_SIM         = 90.0
 T_AERO_OFFSET = 45.0   # 45 s kinematic phase → 5 s aero ramp already done
 ANCHOR        = np.zeros(3)
 POS0          = _IC.pos
@@ -64,8 +65,7 @@ KP_INNER = RatePID.DEFAULT_KP  # inner P gain — calibrated to legacy kd=0.2 be
 WIND = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 
 
-
-def _run(t_sim: float = T_SIM):
+def _run(t_sim: float = T_SIM) -> dict:
     dyn = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
@@ -78,8 +78,10 @@ def _run(t_sim: float = T_SIM):
 
     hub_state  = dyn.state
     omega_spin = OMEGA_SPIN0
+    events     = BadEventLog()
+    max_drift  = 0.0
+    min_spin   = float("inf")
     history    = []
-    floor_hits = 0
     telemetry  = []   # 20 Hz rich frames for 3D visualizer
     tel_every  = max(1, int(0.05 / DT))   # 20 Hz
 
@@ -108,7 +110,6 @@ def _run(t_sim: float = T_SIM):
             "t_free":     t,
         }
         trajectory.step(state_pkt, DT)
-        # cmd["attitude_q"] == identity → Mode_RAWES stays at tether-aligned natural equilibrium
 
         # Mode_RAWES outer loop: orbit tracking → body_z_eq → rate setpoint
         body_z_eq = orbit_tracked_body_z_eq(hub_state["pos"], ic_tether_dir0, ic_body_z_eq0)
@@ -146,15 +147,17 @@ def _run(t_sim: float = T_SIM):
 
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] >= -1.05:  # NED: Z >= -1.05 m means altitude <= 1.05 m
-            floor_hits += 1
+        events.check_floor(hub_state["pos"][2], t, "flight", 1.05)
+
+        drift = float(np.linalg.norm(hub_state["pos"]))
+        max_drift = max(max_drift, drift)
+        min_spin  = min(min_spin, omega_spin)
 
         if i % (int(10.0 / DT)) == 0:
             history.append({
                 "t":          t,
                 "pos":        hub_state["pos"].copy(),
                 "omega_spin": omega_spin,
-                "floor_hits": floor_hits,
             })
 
         if i % tel_every == 0:
@@ -168,36 +171,31 @@ def _run(t_sim: float = T_SIM):
         "t":          t_sim,
         "pos":        hub_state["pos"].copy(),
         "omega_spin": omega_spin,
-        "floor_hits": floor_hits,
     })
-    return history, telemetry
 
-
-def test_60s_altitude_maintained():
-    """Hub must stay above z_floor=1 m for the full 60 s."""
-    history, _ = _run()
-    lines = ["t(s)      z(m)  spin(rad/s)  floor_hits"]
+    lines = ["t(s)      z(m)  spin(rad/s)"]
     for snap in history:
-        lines.append(f"  {snap['t']:5.1f}  {snap['pos'][2]:7.2f}  "
-                     f"{snap['omega_spin']:10.1f}  {snap['floor_hits']}")
-    floor_hits = history[-1]["floor_hits"]
-    min_z = min(s["pos"][2] for s in history)
-    _log.write(lines, f"floor_hits={floor_hits}  min_z={min_z:.2f}m")
-    assert floor_hits == 0, f"Hub hit z_floor {floor_hits} times in 60 s"
+        lines.append(f"  {snap['t']:5.1f}  {snap['pos'][2]:7.2f}  {snap['omega_spin']:10.1f}")
+    summary = (f"floor_hits={events.count('floor_hit')}  max_drift={max_drift:.1f}m"
+               f"  min_spin={min_spin:.2f}  {events.summary()}")
+    write_csv([TelRow.from_tel(r) for r in telemetry], _log.log_dir / "telemetry.csv")
+    _log.write(lines, summary)
+
+    return dict(events=events, max_drift=max_drift, min_spin=min_spin,
+                history=history, telemetry=telemetry)
 
 
-def test_60s_no_runaway():
-    """Hub must not drift more than 200 m from anchor over 60 s."""
-    history, _ = _run()
-    drifts = [float(np.linalg.norm(s["pos"])) for s in history]
-    assert max(drifts) <= 200.0, f"Hub runaway: max drift={max(drifts):.1f} m"
-
-
-def test_60s_spin_maintained():
-    """Rotor must stay above 5 rad/s for full 60 s (autorotation sustained)."""
-    history, _ = _run()
-    spins = [s["omega_spin"] for s in history]
-    assert min(spins) >= 5.0, f"Spin collapsed: min={min(spins):.2f} rad/s"
+def test_90s_orbit():
+    """Hub must orbit 90 s without crash, runaway, or spin collapse."""
+    r = _run()
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
+    if r["max_drift"] > 200.0:
+        failures.append(f"runaway: max_drift={r['max_drift']:.1f}m > 200m")
+    if r["min_spin"] < 5.0:
+        failures.append(f"spin collapsed: min_spin={r['min_spin']:.2f} rad/s < 5 rad/s")
+    assert not failures, "\n  ".join(failures)
 
 
 def test_zero_tilt_at_equilibrium():
@@ -231,7 +229,7 @@ def test_zero_tilt_at_equilibrium():
 # ── CLI: generate telemetry CSV for 3D visualizer ────────────────────────────
 if __name__ == "__main__":
     import argparse as _ap
-    p = _ap.ArgumentParser(description="Run 60 s closed-loop sim and save telemetry")
+    p = _ap.ArgumentParser(description="Run 90 s closed-loop sim and save telemetry")
     p.add_argument("--save-telemetry", metavar="PATH",
                    default="telemetry_closed_loop.csv",
                    help="Output CSV path (default: telemetry_closed_loop.csv)")
@@ -239,7 +237,7 @@ if __name__ == "__main__":
 
     from telemetry_csv import TelRow as _TelRow, write_csv as _write_csv  # type: ignore
 
-    _, tel = _run()
-    _write_csv([_TelRow.from_tel(d) for d in tel], args.save_telemetry)
+    r = _run()
+    _write_csv([_TelRow.from_tel(d) for d in r["telemetry"]], args.save_telemetry)
     print(f"\nRun visualizer:")
     print(f"  python simulation/viz3d/visualize_3d.py {args.save_telemetry}")

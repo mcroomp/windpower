@@ -35,11 +35,10 @@ import pytest
 
 _SIM_DIR    = Path(__file__).resolve().parents[2]
 _SITL_DIR   = Path(__file__).resolve().parent
-_TORQUE_DIR = _SIM_DIR / "torque"
+_TORQUE_DIR = _SIM_DIR   # mediator_torque.py now lives in simulation/
 
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
-sys.path.insert(0, str(_TORQUE_DIR))
 
 import numpy as _np
 import rotor_definition as _rd
@@ -1326,7 +1325,10 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "RPM1_TYPE":        10,    # SITL: read rpm from JSON sensor packet
     "RPM1_MIN":         0,
     "SERVO9_FUNCTION":  94,    # Script 1 -- Lua writes exclusively to Ch9
-    "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw trim only)
+    "SERVO9_MIN":       800,   # PWM off = 800 us (matches rawes.lua _set_throttle_pct range)
+    "SERVO9_MAX":       2000,  # PWM full = 2000 us
+    "SERVO9_TRIM":      800,   # trim = off
+    "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw)
 })
 
 
@@ -1488,7 +1490,7 @@ def _torque_stack(
                     log.info("SITL: %s", text)
                     if "EKF3 active" in text or "EKF3 IMU" in text:
                         gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
-                    if lua_mode and "rawes yaw trim" in text.lower():
+                    if lua_mode and "rawes" in text.lower() and "mode=2" in text.lower():
                         log.info("Lua script confirmed loaded: %s", text)
                     if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
                         ekf_ok = True

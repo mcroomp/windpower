@@ -39,15 +39,15 @@ DEFAULTS: dict = {
     "wind": [0.0, 10.0, 0.0],          # ambient wind NED [m/s]  (East = NED Y axis)
 
     # ── Initial hub state ─────────────────────────────────────────────────────
-    # Warmup-settled equilibrium from test_steady_flight.py.
-    # 50 m tether at ~30° elevation; body_z aligned with tether direction.
-    "pos0":       [14.241, 46.258, -12.530],       # NED [m]  (T @ ENU)
-    "vel0":       [ 0.916, -0.257,   0.093],       # NED [m/s]
-    "body_z":     [0.305391, 0.851018, -0.427206], # unit vector (axle direction, NED)
-    "omega_spin": 20.148,                           # rotor spin [rad/s]
+    # Warmup-settled equilibrium from test_steady_flight.py / steady_state_starting.json.
+    # 100 m tether at ~8° elevation; body_z aligned with tether direction.
+    "pos0":       [27.900, 95.005, -14.122],        # NED [m]
+    "vel0":       [-0.005,  -0.001,  -0.014],        # NED [m/s]
+    "body_z":     [0.27676, 0.87748, -0.39170],      # unit vector (axle direction, NED)
+    "omega_spin": 20.289,                             # rotor spin [rad/s]
 
     # ── Tether & Winch ────────────────────────────────────────────────────────
-    "tether_rest_length": 99.949,   # unstretched tether length [m]
+    "rest_length": 99.949,          # unstretched tether length [m]
     "anchor_ned": [0.0, 0.0, 0.0],  # tether anchor position NED [m]
                                      # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local NED
     "tension_safety_n":  496.0,     # WinchController: stop paying out above this tension [N]

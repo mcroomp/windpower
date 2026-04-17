@@ -1,5 +1,5 @@
 """
-torque/test_lua_yaw_trim.py — Lua feedforward yaw regulation test.
+torque/test_lua_yaw_trim.py — Lua PI yaw regulation test.
 
 This test validates the full hardware-equivalent control architecture:
 
@@ -8,23 +8,24 @@ This test validates the full hardware-equivalent control architecture:
   Hub yaw dynamics    <--- SERVO9 PWM  (Ch9, Script 1)
   Bearing drag model        ^
   Motor torque model        rawes.lua (SCR_USER6=2, yaw mode):
-  Sends JSON sensors -----> rpm:get_rpm(1)   <- motor RPM from "rpm" field
-  (pos, vel, att,            compute trim(RPM, V_bat)
-   gyro, accel, RPM)        + Kp x gyro.z
-                             write PWM to Ch9
+  Sends JSON sensors -----> ahrs:get_gyro().z
+  (pos, vel, att,            PI: throttle = BASE + KP*gyro_z + I_term
+   gyro, accel)              write PWM to Ch9 via SRV_Channels
 
 Key differences from test_yaw_regulation (which uses mediator adaptive trim):
-  - Mediator is pure physics -- no feedforward computation, linear PWM->throttle
-  - rawes.lua (yaw mode) runs inside SITL, reads motor RPM, computes feedforward
+  - Mediator is pure physics -- no feedforward, linear PWM->throttle
+  - rawes.lua (yaw mode) runs inside SITL, reads gyro.z, runs PI controller
   - The Lua script is identical to what would run on the Pixhawk 6C hardware
-  - RPM1_TYPE=10 reads motor RPM from the JSON sensor packet (SITL equivalent
-    of DSHOT bidirectional telemetry from the AM32 ESC on hardware)
+  - No RPM feedback: RPM1_TYPE=0 on hardware until AM32 EDT is enabled
   - SERVO9_FUNCTION=94 gives Lua exclusive control of Ch9 (tail motor)
 
 Pass criterion
 --------------
-  After 40 s settle: max |psi_dot| < 1 deg/s over 20 s observation window.
-  Same threshold as the adaptive-trim baseline -- Lua should match it.
+  After 65 s settle: max |psi_dot| < 5 deg/s over 10 s observation window.
+  The PI-only controller (no RPM feedforward) takes ~50 s from arm for the
+  I term to ramp up and brake the hub, then settles to ~3 deg/s residual.
+  5 deg/s matches the stability watchdog threshold and is realistic for
+  hardware where the ESC manages RPM internally.
 
 Telemetry -> simulation/logs/torque_telemetry_lua.csv
 """
@@ -37,27 +38,26 @@ from torque_test_utils  import (
     assert_physics_yaw_rate,
 )
 
-_SETTLE_S   = 40.0
-_OBSERVE_S  = 20.0
-_THRESHOLD  = math.radians(2.0)   # [rad/s] physics ground truth; 2 deg/s limit
+_SETTLE_S   = 65.0
+_OBSERVE_S  = 10.0
+_THRESHOLD  = math.radians(5.0)   # [rad/s] physics ground truth; 5 deg/s (matches stability watchdog)
 
 
 def test_lua_yaw_trim(torque_armed_lua):
     """
     Yaw rate regulated by rawes.lua (SCR_USER6=2) running inside ArduPilot SITL.
 
-    The Lua script reads motor RPM (via SITL JSON -> RPM1_TYPE=10), computes
-    the equilibrium throttle feedforward, adds a PI yaw rate correction from
-    the onboard gyro, and writes the result directly to SERVO9 (Ch9).
-    The mediator applies this as a pure motor torque command with no additional
-    feedforward of its own.
+    The Lua script reads gyro.z and runs a PI controller: the I term builds up
+    the ~70% equilibrium throttle offset during startup spin-up, compensating
+    the bearing drag without RPM feedback.  The mediator applies the throttle
+    as a pure motor torque command with no additional feedforward.
 
     Pass criterion: actual physics psi_dot (from mediator log) stays within
-    2 deg/s after 40 s settle.  Uses mediator log rather than ArduPilot
-    ATTITUDE.yawspeed to avoid EKF compass-tilt artefacts.
+    5 deg/s after 65 s settle.  The I term takes ~50 s from arm to ramp up
+    through the startup spin-up phase; steady-state residual is ~3 deg/s.
 
     This is the closest SITL equivalent to the hardware deployment:
-      RPM1_TYPE=5 (DSHOT ESC telemetry) on the Pixhawk 6C.
+      RPM1_TYPE=0 (RPM unavailable until AM32 EDT enabled).
     """
     ctx = torque_armed_lua
     rows: list = []
@@ -65,7 +65,7 @@ def test_lua_yaw_trim(torque_armed_lua):
     run_observation_loop(
         ctx=ctx, rows=rows,
         settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
-        timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
+        timeout_s=_SETTLE_S + _OBSERVE_S + 10.0,
     )
 
     save_telemetry(rows, "lua", ctx.log)

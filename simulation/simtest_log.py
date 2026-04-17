@@ -51,6 +51,19 @@ class BadEventLog:
         """Append one bad event."""
         self._events.append(dict(kind=kind, t=t, phase=phase, alt=alt, **extra))
 
+    def check_floor(self, ned_z: float, t: float, phase: str,
+                    floor_alt_m: float = 1.0) -> bool:
+        """Record a floor_hit if NED Z ≥ -floor_alt_m (altitude ≤ floor_alt_m).
+
+        Returns True if the event was recorded so callers can use it in a
+        conditional: ``if events.check_floor(...): break``
+        """
+        alt = -ned_z
+        if alt <= floor_alt_m:
+            self.record("floor_hit", t, phase, alt)
+            return True
+        return False
+
     # ----------------------------------------------------------------- query
     def of_kind(self, kind: str, phase: str = None) -> list[dict]:
         evs = [e for e in self._events if e["kind"] == kind]
@@ -60,6 +73,9 @@ class BadEventLog:
 
     def count(self, kind: str, phase: str = None) -> int:
         return len(self.of_kind(kind, phase))
+
+    def __bool__(self) -> bool:
+        return bool(self._events)
 
     # ------------------------------------------------------------ diagnostics
     def summary(self) -> str:

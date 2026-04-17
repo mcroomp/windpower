@@ -17,7 +17,7 @@ RAWES output channel mapping (ArduCopter Heli)
   Output 1  S1  (swashplate, 0 deg   / East)     SERVO1_FUNCTION = 33
   Output 2  S2  (swashplate, 120 deg)              SERVO2_FUNCTION = 34
   Output 3  S3  (swashplate, 240 deg)              SERVO3_FUNCTION = 35
-  Output 4  GB4008 anti-rotation motor             SERVO4_FUNCTION = 36 (DDFP tail)
+  Output 9  GB4008 anti-rotation motor             SERVO9_FUNCTION = 36 (Motor4, AUX OUT 1)
 
 PWM range: 1000 us (min) ... 1500 us (neutral) ... 2000 us (max)
 
@@ -75,7 +75,8 @@ GB4008_KT = 60.0 / (2.0 * math.pi * GB4008_KV)  # ~0.144 N*m/A
 SERVO_S1     = 1
 SERVO_S2     = 2
 SERVO_S3     = 3
-SERVO_MOTOR  = 4   # GB4008 anti-rotation motor — MAIN OUT 4
+SERVO_MOTOR         = 9   # GB4008 physical output channel — AUX OUT 1 (output 9)
+MOTOR_TEST_INSTANCE = 4   # Rover logical motor instance — MOTOR_TEST_THROTTLE_RIGHT (drives k_motor4)
 
 SWASH_SERVOS = (SERVO_S1, SERVO_S2, SERVO_S3)
 
@@ -150,6 +151,64 @@ def _send_motor_test(mav, instance: int, throttle_pct: float, timeout_s: float =
     )
 
 
+_COPTER_MODES = {
+    0: "STABILIZE", 1: "ACRO", 2: "ALT_HOLD", 3: "AUTO", 4: "GUIDED",
+    5: "LOITER", 6: "RTL", 7: "CIRCLE", 9: "LAND", 11: "DRIFT",
+    13: "SPORT", 14: "FLIP", 15: "AUTOTUNE", 16: "POSHOLD", 17: "BRAKE",
+    18: "THROW", 19: "AVOID_ADSB", 20: "GUIDED_NOGPS", 21: "SMART_RTL",
+}
+
+_SYS_STATUS = {0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
+               4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY", 7: "POWEROFF"}
+
+
+def _get_mav_type(mav) -> int:
+    """Return MAV_TYPE from the next HEARTBEAT (0 if none received)."""
+    hb = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=5.0)
+    return hb.type if hb is not None else 0
+
+
+def _is_rover(mav) -> bool:
+    return _get_mav_type(mav) == mavutil.mavlink.MAV_TYPE_GROUND_ROVER
+
+
+def _print_vehicle_status(mav) -> None:
+    """Print armed state, flight mode, EKF health, and battery from live MAVLink."""
+    hb = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=5.0)
+    if hb is None:
+        print("  No HEARTBEAT received"); return
+
+    armed   = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    mode_id = hb.custom_mode
+    mode    = _COPTER_MODES.get(mode_id, f"MODE_{mode_id}")
+    status  = _SYS_STATUS.get(hb.system_status, str(hb.system_status))
+
+    print(f"  Armed        : {'YES  <--' if armed else 'no'}")
+    print(f"  Mode         : {mode} ({mode_id})")
+    print(f"  Sys status   : {status}")
+
+    sys_status = mav.recv_match(type="SYS_STATUS", blocking=True, timeout=2.0)
+    if sys_status:
+        v = sys_status.voltage_battery / 1000.0 if sys_status.voltage_battery != 65535 else None
+        i = sys_status.current_battery / 100.0  if sys_status.current_battery >= 0    else None
+        r = sys_status.battery_remaining
+        batt = f"{v:.2f} V" if v else "n/a"
+        if i is not None and i >= 0:
+            batt += f"  {i:.2f} A"
+        if r >= 0:
+            batt += f"  {r}%"
+        print(f"  Battery      : {batt}")
+
+    ekf = mav.recv_match(type="EKF_STATUS_REPORT", blocking=True, timeout=2.0)
+    if ekf:
+        flags   = ekf.flags
+        att_ok  = bool(flags & 0x01)
+        vel_ok  = bool(flags & 0x02)
+        pos_ok  = bool(flags & 0x04)
+        healthy = att_ok and vel_ok
+        print(f"  EKF flags    : 0x{flags:04X}  att={att_ok}  vel={vel_ok}  pos_rel={pos_ok}  {'OK' if healthy else 'DEGRADED'}")
+
+
 def _print_status(mav) -> None:
     """Print the most recent SERVO_OUTPUT_RAW message."""
     msg = mav.recv_match(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
@@ -217,9 +276,39 @@ def _list_scripts(mav) -> None:
             target_system=mav.target_system,
             target_component=mav.target_component,
         )
-        ftp.cmd_list([SCRIPTS_DIR])
+        result = ftp.cmd_list([SCRIPTS_DIR])
+        if ftp.list_result:
+            for entry in ftp.list_result:
+                if entry.is_dir:
+                    print(f"    D {entry.name}/")
+                else:
+                    print(f"    F {entry.name}  ({entry.size_b} bytes)")
+        else:
+            print(f"  (no files found or directory does not exist; result={result})")
     except Exception as exc:
         print(f"  FTP list failed: {exc}")
+
+
+def _remove_script(mav, filename: str) -> None:
+    """Remove a single file from /APM/scripts via MAVLink FTP."""
+    if not _HAS_MAVFTP:
+        print("  ERROR: pymavlink.mavftp not available -- upgrade pymavlink")
+        return
+    remote = f"{SCRIPTS_DIR}/{os.path.basename(filename)}"
+    print(f"  Removing {remote} ...")
+    try:
+        ftp = _mavftp_mod.MAVFTP(
+            mav,
+            target_system=mav.target_system,
+            target_component=mav.target_component,
+        )
+        result = ftp.cmd_rm([remote])
+        if result.error_code == 0:
+            print(f"  [OK] Removed.")
+        else:
+            print(f"  [FAIL] {result}")
+    except Exception as exc:
+        print(f"  FTP operation failed: {exc}")
 
 
 def _upload_script(mav, local_path: str, restart: bool = True) -> None:
@@ -240,16 +329,30 @@ def _upload_script(mav, local_path: str, restart: bool = True) -> None:
     remote_path = f"{SCRIPTS_DIR}/{os.path.basename(local_path)}"
     print(f"  Uploading {local_path}")
     print(f"         -> {remote_path} ...")
-    try:
-        ftp = _mavftp_mod.MAVFTP(
-            mav,
-            target_system=mav.target_system,
-            target_component=mav.target_component,
-        )
-        ftp.cmd_put([local_path, remote_path])
-        print("  Upload complete.")
-    except Exception as exc:
-        print(f"  FTP upload failed: {exc}")
+
+    for attempt in range(1, 4):
+        try:
+            time.sleep(1.0)  # let connection settle before FTP
+            ftp = _mavftp_mod.MAVFTP(
+                mav,
+                target_system=mav.target_system,
+                target_component=mav.target_component,
+            )
+            put_ret = ftp.cmd_put([local_path, remote_path])
+            if put_ret.error_code != 0:
+                print(f"  Attempt {attempt}: cmd_put rejected: {put_ret}")
+                continue
+            # Pump the message loop until all write blocks are ACKed and the
+            # session is terminated.  timeout must be > idle_detection_time (3.7 s).
+            result = ftp.process_ftp_reply('CreateFile', timeout=30)
+            if result.error_code == 0:
+                print(f"  Upload OK (attempt {attempt}).")
+                break
+            print(f"  Attempt {attempt}: transfer incomplete: {result}")
+        except Exception as exc:
+            print(f"  Attempt {attempt} failed: {exc}")
+    else:
+        print("  WARNING: upload may not have completed -- verify with Mission Planner MAVFtp.")
         return
 
     if restart:
@@ -262,8 +365,8 @@ def _upload_script(mav, local_path: str, restart: bool = True) -> None:
 
 # Parameters that must be correct for DShot to reach the motor
 _DSHOT_PARAMS = [
-    ("SERVO4_FUNCTION",    "Must be 36 (DDFP tail) for GB4008 on output 4"),
-    ("SERVO_BLH_MASK",     "Must include bit 3 (=8) to enable DShot on output 4"),
+    ("SERVO9_FUNCTION",    "Must be 36 (Motor4) for GB4008 on AUX OUT 1 (output 9)"),
+    ("SERVO_BLH_MASK",     "Must be 256 (bit 8) to enable DShot on output 9 (AUX OUT 1)"),
     ("SERVO_BLH_OTYPE",    "DShot type: 5=DShot300  6=DShot600  (0=PWM, won't work)"),
     ("SERVO_BLH_AUTO",     "1 = auto-configure BLHeli outputs"),
     ("H_TAIL_TYPE",        "Must be 4 (DDFP) for GB4008"),
@@ -329,11 +432,11 @@ def _diag_motor(mav) -> None:
     print()
     issues = []
     v = params.get
-    if v("SERVO4_FUNCTION") not in (36.0, 38.0):
-        issues.append("SERVO4_FUNCTION is not 36 (DDFP) -- output 4 not mapped to tail motor")
+    if v("SERVO9_FUNCTION") not in (36.0, 38.0):
+        issues.append("SERVO9_FUNCTION is not 36 (Motor4) -- output 9 not mapped to GB4008")
     blh_mask = v("SERVO_BLH_MASK")
-    if blh_mask is not None and not (int(blh_mask) & 8):
-        issues.append("SERVO_BLH_MASK does not include bit 3 (=8) -- DShot not enabled on output 4")
+    if blh_mask is not None and not (int(blh_mask) & 256):
+        issues.append("SERVO_BLH_MASK does not include bit 8 (=256) -- DShot not enabled on output 9 (AUX OUT 1)")
     blh_type = v("SERVO_BLH_OTYPE")
     if blh_type is not None and blh_type < 4:
         issues.append(f"SERVO_BLH_OTYPE={blh_type:.0f} -- not a DShot type (need 5=DShot300 or 6=DShot600)")
@@ -392,7 +495,7 @@ def _diag_motor(mav) -> None:
     print("4. MOTOR TEST COMMAND ACK  (5% throttle, 3 s)")
     print(sep)
     print("  Sending MAV_CMD_DO_MOTOR_TEST at 5% ...")
-    _send_motor_test(mav, SERVO_MOTOR, 5.0, timeout_s=3.0)
+    _send_motor_test(mav, MOTOR_TEST_INSTANCE, 5.0, timeout_s=3.0)
     ack = mav.recv_match(type="COMMAND_ACK", blocking=True, timeout=3.0)
     if ack and ack.command == mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST:
         result_names = {0: "ACCEPTED", 1: "TEMP_REJECTED", 2: "DENIED",
@@ -450,8 +553,8 @@ def _diag_motor(mav) -> None:
             print("         Check: DShot signal reaching ESC? ESC armed?")
     else:
         print("  [WARN] No ESC telemetry received")
-        print("         Check: SERVO_BLH_MASK includes bit 3 (=8) for output 4, ESC powered,")
-        print("         DShot signal wire on MAIN OUT 4, and AM32 Extended Telemetry enabled")
+        print("         Check: SERVO_BLH_MASK=256 (output 9 AUX OUT 1), ESC powered,")
+        print("         DShot signal wire on AUX OUT 1, and AM32 Extended Telemetry enabled")
         print("         Note: bidirectional DShot is auto-detected in ArduPilot 4.6+")
         print("         (SERVO_BLH_BDSHOT parameter does not exist in this firmware)")
 
@@ -467,7 +570,7 @@ def _diag_motor(mav) -> None:
               f"  failure_flags=0x{last_info.failure_flags:04X}")
 
     # Stop motor test
-    _send_motor_test(mav, SERVO_MOTOR, 0.0, timeout_s=0.0)
+    _send_motor_test(mav, MOTOR_TEST_INSTANCE, 0.0, timeout_s=0.0)
 
     # ── 6. STATUSTEXT drain ──────────────────────────────────────────────
     print(f"\n{sep}")
@@ -499,6 +602,42 @@ def _diag_motor(mav) -> None:
         print(f"  CPU load: {ss.load/10.0:.1f}%  Voltage: {ss.voltage_battery/1000.0:.2f} V")
     else:
         print("  (no SYS_STATUS received)")
+
+    # ── 8. Battery status ────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("8. BATTERY STATUS")
+    print(sep)
+    batt = mav.recv_match(type="BATTERY_STATUS", blocking=True, timeout=2.0)
+    if batt:
+        # voltages[] is per-cell in mV; UINT16_MAX (65535) = not populated
+        cells = [v for v in batt.voltages if v != 65535]
+        total_v = sum(cells) / 1000.0 if cells else None
+        current_a = batt.current_battery / 100.0 if batt.current_battery >= 0 else None
+        remaining = batt.battery_remaining
+        consumed_mah = batt.current_consumed if batt.current_consumed >= 0 else None
+        print(f"  Voltage      : {total_v:.2f} V" if total_v else "  Voltage      : n/a")
+        if len(cells) > 1:
+            cell_str = "  ".join(f"{v/1000.0:.3f}V" for v in cells)
+            print(f"  Cells ({len(cells)}S)   : {cell_str}")
+        print(f"  Current      : {current_a:.2f} A" if current_a is not None else "  Current      : n/a")
+        print(f"  Remaining    : {remaining} %" if remaining >= 0 else "  Remaining    : n/a")
+        if consumed_mah is not None:
+            print(f"  Consumed     : {consumed_mah} mAh")
+        if total_v and len(cells) >= 3:
+            cell_avg = total_v / len(cells)
+            if cell_avg < 3.5:
+                print(f"  [WARN] Average cell voltage {cell_avg:.3f} V -- battery low")
+    else:
+        ss = mav.recv_match(type="SYS_STATUS", blocking=True, timeout=1.0)
+        if ss and ss.voltage_battery != 65535:
+            v = ss.voltage_battery / 1000.0
+            i = ss.current_battery / 100.0 if ss.current_battery >= 0 else None
+            r = ss.battery_remaining
+            print(f"  Voltage      : {v:.2f} V")
+            print(f"  Current      : {i:.2f} A" if i is not None else "  Current      : n/a")
+            print(f"  Remaining    : {r} %" if r >= 0 else "  Remaining    : n/a")
+        else:
+            print("  (no battery data received)")
 
     print(f"\n{sep}")
     print("Diagnostic complete.")
@@ -532,27 +671,37 @@ def _dshot_blheli_test(mav, motors: list[int] | None = None,
     sep = "-" * 60
 
     # ── 0. Work out which motors to test ─────────────────────────────────
+    # SERVO_BLH_TEST takes a 1-indexed position within the BLHeli-registered
+    # channel list (ordered by bit position in SERVO_BLH_MASK), NOT the raw
+    # output number.  E.g. SERVO_BLH_MASK=8 (only output 4) → motor index 1.
     if motors is None:
         mask_val = _recv_param(mav, "SERVO_BLH_MASK")
         auto_val = _recv_param(mav, "SERVO_BLH_AUTO")
         if mask_val is not None and int(mask_val) != 0:
-            motors = [i + 1 for i in range(32) if int(mask_val) & (1 << i)]
+            # Build output→blheli_index mapping (1-indexed)
+            output_channels = [i + 1 for i in range(32) if int(mask_val) & (1 << i)]
+            # SERVO_BLH_TEST wants the 1-based index within registered channels
+            motors = list(range(1, len(output_channels) + 1))
+            # Keep display mapping handy
+            _blh_channel_map = {blh_idx: out for blh_idx, out in
+                                enumerate(output_channels, start=1)}
         elif auto_val is not None and int(auto_val) == 1:
-            # AUTO mode: ArduPilot registers all multicopter motor outputs.
-            # We can't know exactly which channels without reading the motor
-            # map, so fall back to the one motor we know about.
-            print("  SERVO_BLH_MASK=0 but SERVO_BLH_AUTO=1 -- "
-                  "testing only SERVO_MOTOR channel")
-            motors = [SERVO_MOTOR]
+            print("  SERVO_BLH_MASK=0 but SERVO_BLH_AUTO=1 -- testing motor 1")
+            motors = [1]
+            _blh_channel_map = {1: SERVO_MOTOR}
         else:
             print("  [WARN] SERVO_BLH_MASK=0 and SERVO_BLH_AUTO=0")
             print("         No BLHeli channels are registered.")
             print("         Set SERVO_BLH_MASK or SERVO_BLH_AUTO=1 first.")
             return
+    else:
+        _blh_channel_map = {m: m for m in motors}  # user passed indices directly
 
     print(f"\n{sep}")
     print(f"SERVO_BLH_TEST  --  DShot / AM32 bootloader connection test")
-    print(f"Motors to test: {motors}")
+    motor_desc = ", ".join(
+        f"BLH#{m}->OUT{_blh_channel_map.get(m, '?')}" for m in motors)
+    print(f"Motors to test: {motor_desc}")
     print(sep)
 
     # ── 1. Enable verbose debug output ───────────────────────────────────
@@ -564,7 +713,8 @@ def _dshot_blheli_test(mav, motors: list[int] | None = None,
     results: dict[int, dict] = {}
 
     for motor_num in motors:
-        print(f"\n  Testing motor {motor_num} (output channel {motor_num}) ...")
+        out_ch = _blh_channel_map.get(motor_num, motor_num)
+        print(f"\n  Testing BLHeli motor {motor_num} (output channel {out_ch}) ...")
 
         # Trigger the test.  SERVO_BLH_TEST is 1-indexed and self-clears.
         if not _set_param(mav, "SERVO_BLH_TEST", float(motor_num)):
@@ -652,8 +802,7 @@ def _dshot_blheli_test(mav, motors: list[int] | None = None,
             print(f"  ESC protocol : {protocol} = {pname}")
             if protocol != 5:
                 print(f"  [WARN] ESC is not in DShot mode!")
-                print(f"         Check MOT_PWM_TYPE / SERVO_BLH_OTYPE "
-                      f"and BRD_IO_DSHOT")
+                print(f"         Check MOT_PWM_TYPE (Rover) / SERVO_BLH_OTYPE (Heli)")
         if good_frames is not None:
             print(f"  Good frames  : {good_frames}")
             print(f"  Bad frames   : {bad_frames}")
@@ -728,8 +877,9 @@ def _monitor_esc(mav, duration: float = 10.0) -> None:
                 continue
             last_print = now
 
-            # Use ESC index 3 (0-based) = output 4 = GB4008
-            i = SERVO_MOTOR - 1
+            # Use ESC index 0 = first BLHeli-registered motor = GB4008
+            # SERVO_BLH_MASK=256 (only output 9) -> GB4008 is BLHeli motor #1 -> index 0
+            i = 0
             try:
                 rpm_e    = msg.rpm[i]
                 volt     = msg.voltage[i] / 100.0
@@ -761,21 +911,26 @@ Commands:
   motor off                       Stop motor test
   sweep <n> [step_ms]             Slowly sweep output n: 1000->2000->1000
   status                          Print SERVO_OUTPUT_RAW
+  vehicle                         Print armed state, mode, EKF health, battery
   diag                            Full motor/ESC/DShot diagnostic dump
   blhtest [motor ...]             BLHeli/AM32 bootloader connection test
                                    (auto-detects from SERVO_BLH_MASK; or pass
                                     specific 1-indexed output numbers)
   monitor [seconds]               Stream live ESC telemetry (default 10 s)
-  arm                             Send throttle=1000 RC override then force-arm vehicle
+  listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
+  mode <0-8>                      Set SCR_USER6 mode and listen 10 s to confirm active
+  arm                             Send throttle=800 RC override (PWM) then force-arm vehicle
   disarm                          Disarm vehicle
-  hold <pwm> [seconds]            Arm, set output 4 to pwm, keep alive (Ctrl-C to stop)
+  hold <pwm> [seconds]            Arm, set output 9 (AUX OUT 1) to pwm, keep alive (Ctrl-C to stop)
   reboot                          Reboot ArduPilot
-  bench-mode                      Output 4: RCPassThru (direct PWM, no ArduPilot control)
-  flight-mode                     Output 4: DDFP tail (ArduPilot yaw controller)
+  bench-mode                      Output 9: RCPassThru (direct PWM, no ArduPilot control)
+  flight-mode                     Output 9: Script 1 / Motor4 (Lua or direct DShot)
+  config dshot|pwm [--apply]      Diff (or apply) full RAWES param set; --apply writes + reboots
   getparam <name>                 Read a parameter value
   setparam <name> <value>         Write a parameter value
-  scripts                         List files in /APM/scripts on SD card
-  upload <file> [--no-restart]    Upload .lua file to /APM/scripts and restart
+  ftp-list                        List files in /APM/scripts on SD card
+  ftp-remove <file>               Remove a file from /APM/scripts
+  ftp-upload <file> [--no-restart] Upload .lua file to /APM/scripts and restart
   help                            Show this list
   quit                            Exit
 """
@@ -844,31 +999,20 @@ def _arm(mav, force: bool = False, timeout: float = 15.0) -> bool:
         print("  [FAIL] Arm timed out.")
         return False
 
-    # ESC arming sequence.
+    # ESC arming sequence — PWM only.
+    # DShot auto-arms on the first valid packet; no sequence needed.
     blh_mask = _recv_param(mav, "SERVO_BLH_MASK") or 0.0
     dshot_active = int(blh_mask) & (1 << (SERVO_MOTOR - 1))
 
-    if dshot_active:
-        # DShot arming: neutral first, then minimum
-        print("  ESC arm (DShot): output 4 -> 1500 us for 2 s ...")
-        t_end = time.monotonic() + 2.0
-        while time.monotonic() < t_end:
-            _send_set_servo(mav, SERVO_MOTOR, 1500)
-            time.sleep(0.1)
-        print("  ESC arm (DShot): output 4 -> 1000 us for 5 s ...")
+    if not dshot_active:
+        # PWM arming: hold 800 us so ESC recognises the low endpoint (AM32 minimum = 800 us)
+        print(f"  ESC arm (PWM): output {SERVO_MOTOR} -> 800 us for 5 s ...")
         t_end = time.monotonic() + 5.0
         while time.monotonic() < t_end:
-            _send_set_servo(mav, SERVO_MOTOR, 1000)
+            _send_set_servo(mav, SERVO_MOTOR, 800)
             time.sleep(0.1)
-    else:
-        # PWM arming: hold minimum throttle so ESC recognises the low endpoint
-        print("  ESC arm (PWM): output 4 -> 1000 us for 5 s ...")
-        t_end = time.monotonic() + 5.0
-        while time.monotonic() < t_end:
-            _send_set_servo(mav, SERVO_MOTOR, 1000)
-            time.sleep(0.1)
+        print("  ESC arm sequence complete -- motor ready.")
 
-    print("  ESC arm sequence complete -- motor ready.")
     return True
 
 
@@ -932,6 +1076,10 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
     if cmd == "status":
         _print_status(mav)
 
+    # ── vehicle ──────────────────────────────────────────────────────────────
+    elif cmd == "vehicle":
+        _print_vehicle_status(mav)
+
     # ── servo <n> <pwm> ─────────────────────────────────────────────────────
     elif cmd == "servo":
         if len(tokens) < 3:
@@ -984,7 +1132,7 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
             print("  Usage: motor <pct>  OR  motor off"); return True
         arg = tokens[1].lower()
         if arg in ("off", "stop", "0"):
-            _send_motor_test(mav, SERVO_MOTOR, 0.0, timeout_s=0.0)
+            _send_motor_test(mav, MOTOR_TEST_INSTANCE, 0.0, timeout_s=0.0)
             print("  Motor test stopped")
         else:
             try:
@@ -997,7 +1145,7 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
                 confirm = input(f"  WARNING: {pct:.0f}% throttle on GB4008. Confirm (y/N): ")
                 if confirm.strip().lower() != "y":
                     print("  Cancelled."); return True
-            _send_motor_test(mav, SERVO_MOTOR, pct, timeout_s=5.0)
+            _send_motor_test(mav, MOTOR_TEST_INSTANCE, pct, timeout_s=5.0)
             print(f"  Motor test: {pct:.0f}% for 5 s  (send 'motor off' to stop early)")
 
     # ── sweep <n> [step_ms] ──────────────────────────────────────────────────
@@ -1034,6 +1182,75 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
             print("  Usage: monitor [seconds]"); return True
         _monitor_esc(mav, duration=secs)
 
+    # ── mode <n> ─────────────────────────────────────────────────────────────
+    elif cmd == "mode":
+        _MODE_NAMES = {
+            0: "none", 1: "steady_noyaw", 2: "yaw", 3: "steady",
+            4: "landing_noyaw", 5: "pumping_noyaw", 6: "arm_hold_noyaw",
+            7: "yaw_test", 8: "yaw_limited",
+        }
+        if len(tokens) < 2:
+            print("  Usage: mode <0-8>")
+            print("  Modes: " + "  ".join(f"{k}={v}" for k, v in _MODE_NAMES.items()))
+            return True
+        try:
+            n = int(tokens[1])
+        except ValueError:
+            print("  Error: mode must be an integer 0-8"); return True
+        if n not in _MODE_NAMES:
+            print(f"  Error: mode must be 0-8"); return True
+        if not _set_param(mav, "SCR_USER6", float(n)):
+            print("  [FAIL] Could not set SCR_USER6"); return True
+        name = _MODE_NAMES[n]
+        print(f"  [OK] SCR_USER6={n} ({name}) -- listening 10 s for STATUSTEXT ...")
+        t0 = time.monotonic()
+        seen = []
+        try:
+            while time.monotonic() - t0 < 10.0:
+                msg = mav.recv_match(type="STATUSTEXT", blocking=True, timeout=0.5)
+                if msg is None:
+                    continue
+                text = msg.text.rstrip()
+                t = time.monotonic() - t0
+                print(f"  [{t:5.1f}s] {text}")
+                seen.append(text)
+        except KeyboardInterrupt:
+            print()
+        if seen:
+            print(f"  [OK] {len(seen)} message(s) received -- mode appears active.")
+        else:
+            print("  [WARN] No STATUSTEXT received -- script may not be running.")
+
+    # ── listen [seconds] ─────────────────────────────────────────────────────
+    elif cmd == "listen":
+        try:
+            secs = float(tokens[1]) if len(tokens) > 1 else None
+        except ValueError:
+            print("  Usage: listen [seconds]"); return True
+        print("  Listening for STATUSTEXT (Ctrl-C to stop) ...")
+        t0 = time.monotonic()
+        last_armed = None
+        try:
+            while True:
+                if secs and (time.monotonic() - t0) >= secs:
+                    break
+                msg = mav.recv_match(type=["STATUSTEXT", "HEARTBEAT"],
+                                     blocking=True, timeout=1.0)
+                if msg is None:
+                    continue
+                mt = msg.get_type()
+                t = time.monotonic() - t0
+                if mt == "STATUSTEXT":
+                    print(f"  [{t:6.1f}s] {msg.text.rstrip()}")
+                elif mt == "HEARTBEAT":
+                    armed = bool(msg.base_mode & 0x80)
+                    if armed != last_armed:
+                        state = "ARMED" if armed else "DISARMED"
+                        print(f"  [{t:6.1f}s] *** {state} ***")
+                        last_armed = armed
+        except KeyboardInterrupt:
+            print()
+
     # ── hold <pwm> [seconds] ─────────────────────────────────────────────────
     elif cmd == "hold":
         if len(tokens) < 2:
@@ -1043,14 +1260,20 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
             duration = float(tokens[2]) if len(tokens) > 2 else None
         except ValueError:
             print("  Error: pwm must be an integer"); return True
-        if not (PWM_MIN <= pwm <= PWM_MAX):
-            print(f"  Error: pwm must be {PWM_MIN}-{PWM_MAX}"); return True
+        # In PWM mode (no DShot) the stop value is 800; in DShot it is 1000.
+        blh_mask = _recv_param(mav, "SERVO_BLH_MASK") or 0.0
+        dshot_active = int(blh_mask) & (1 << (SERVO_MOTOR - 1))
+        stop_pwm = PWM_MIN if dshot_active else 800
+        low = stop_pwm
+        if not (low <= pwm <= PWM_MAX):
+            print(f"  Error: pwm must be {low}-{PWM_MAX}"); return True
         # Arm first
         if not _arm(mav, force=True):
             return True
-        print(f"  Holding output 4 at {pwm} us  (Ctrl-C to stop) ...")
+        print(f"  Holding output {SERVO_MOTOR} at {pwm} us  (Ctrl-C to stop) ...")
         _send_set_servo(mav, SERVO_MOTOR, pwm)
         t0 = time.monotonic()
+        last_armed = True
         try:
             while True:
                 if duration and (time.monotonic() - t0) >= duration:
@@ -1058,13 +1281,25 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
                 _send_rc_override(mav, {3: 1000})
                 _send_set_servo(mav, SERVO_MOTOR, pwm)
                 elapsed = time.monotonic() - t0
-                # Drain any incoming messages (keeps connection alive)
-                mav.recv_match(blocking=True, timeout=0.2)
-                print(f"  t={elapsed:5.1f}s  output4={pwm} us", end="\r")
+                # Drain all pending messages; print interesting ones
+                while True:
+                    msg = mav.recv_match(blocking=True, timeout=0.1)
+                    if msg is None:
+                        break
+                    mt = msg.get_type()
+                    if mt == "STATUSTEXT":
+                        print(f"\r  [{elapsed:5.1f}s] STATUSTEXT: {msg.text}")
+                    elif mt == "HEARTBEAT":
+                        armed = bool(msg.base_mode & 0x80)
+                        if armed != last_armed:
+                            state = "ARMED" if armed else "DISARMED"
+                            print(f"\r  [{elapsed:5.1f}s] *** {state} ***")
+                            last_armed = armed
+                print(f"  t={elapsed:5.1f}s  output{SERVO_MOTOR}={pwm} us", end="\r")
         except KeyboardInterrupt:
             print()
-        _send_set_servo(mav, SERVO_MOTOR, PWM_MIN)
-        print(f"  Output 4 -> {PWM_MIN} us (safe)")
+        _send_set_servo(mav, SERVO_MOTOR, stop_pwm)
+        print(f"  Output {SERVO_MOTOR} -> {stop_pwm} us (safe)")
 
     # ── reboot ───────────────────────────────────────────────────────────────
     elif cmd == "reboot":
@@ -1087,20 +1322,174 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
 
     # ── bench-mode / flight-mode ─────────────────────────────────────────────
     elif cmd == "bench-mode":
-        ok = _set_param(mav, "SERVO4_FUNCTION", 1)   # RCPassThru
+        # Full PWM mode: disable DShot on output 9 and use RCPassThru
+        rover = _is_rover(mav)
+        steps = [
+            ("SERVO9_FUNCTION",  1),   # RCPassThru — direct PWM control
+            ("SERVO_BLH_MASK",   0),   # no DShot output
+            ("SERVO_BLH_OTYPE",  0),   # PWM (not DShot)
+            ("BRD_IO_DSHOT",     0),   # not needed (FMU output) — set explicitly for safety
+            ("SERVO9_MIN",       800), # AM32 PWM minimum
+        ]
+        if rover:
+            steps.append(("MOT_PWM_TYPE", 0))  # normal PWM
+        ok = all(_set_param(mav, name, val) for name, val in steps)
         if ok:
-            print("  [OK] Bench mode: output 4 = RCPassThru (direct PWM)")
-            print("       MAV_CMD_DO_SET_SERVO and 'servo 4 <pwm>' now work directly.")
-            print("       Run 'flight-mode' before flying.")
+            print("  [OK] Bench/PWM mode set:")
+            extra = "  MOT_PWM_TYPE=0" if rover else ""
+            print(f"       SERVO9_FUNCTION=1  SERVO_BLH_MASK=0  SERVO_BLH_OTYPE=0  BRD_IO_DSHOT=0{extra}")
+            print("  Rebooting (SERVO9_FUNCTION/SERVO_BLH_MASK changes require reboot) ...")
+            mav.mav.command_long_send(
+                mav.target_system, mav.target_component,
+                mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                0, 1, 0, 0, 0, 0, 0, 0,
+            )
+            print("  Pixhawk rebooting -- reconnect in ~5 s then run 'arm' + 'hold'.")
         else:
-            print("  [FAIL] Could not set SERVO4_FUNCTION")
+            print("  [FAIL] Could not set all params")
 
     elif cmd == "flight-mode":
-        ok = _set_param(mav, "SERVO4_FUNCTION", 36)  # DDFP tail
-        if ok:
-            print("  [OK] Flight mode: output 4 = DDFP tail (ArduPilot yaw controller)")
+        # Restore DShot300 for flight.
+        # Rover uses MOT_PWM_TYPE=6 (DShot300) instead of SERVO_BLH_OTYPE.
+        # SERVO_BLH_BDMASK is left at 0 (one-way DShot) -- do NOT set to 256
+        # until AM32 EDT is enabled on the ESC; bidir without EDT causes bad-frame
+        # accumulation in ArduPilot and silently suppresses motor output.
+        rover = _is_rover(mav)
+        if rover:
+            steps = [
+                ("SERVO9_FUNCTION",  36),  # Motor4 on AUX 1 (Rover motor test path)
+                ("SERVO_BLH_MASK",   256), # DShot on output 9 (AUX 1)
+                ("SERVO_BLH_BDMASK", 0),   # one-way DShot (enable after AM32 EDT active)
+                ("SERVO_BLH_POLES",  22),  # GB4008 24N22P
+                ("SERVO_DSHOT_ESC",  3),   # AM32
+                ("MOT_PWM_TYPE",     6),   # DShot300 (Rover motor driver)
+            ]
+            summary = ("SERVO9_FUNCTION=36  SERVO_BLH_MASK=256  SERVO_BLH_BDMASK=0"
+                       "  SERVO_BLH_POLES=22  SERVO_DSHOT_ESC=3  MOT_PWM_TYPE=6")
         else:
-            print("  [FAIL] Could not set SERVO4_FUNCTION")
+            # Heli/Copter + rawes.lua: Lua owns output 9 via Script 1 (SERVO9_FUNCTION=94).
+            # SERVO9_FUNCTION=36 (Motor4) would bypass Lua -- never use for Lua-controlled flight.
+            steps = [
+                ("SERVO9_FUNCTION",  94),  # Script 1: Lua writes GB4008 PWM via SRV_Channels
+                ("SERVO_BLH_MASK",   256), # DShot on output 9 (AUX 1, FMU -- no BRD_IO_DSHOT needed)
+                ("SERVO_BLH_BDMASK", 0),   # one-way DShot (enable after AM32 EDT active)
+                ("SERVO_BLH_OTYPE",  5),   # DShot300
+                ("SERVO_BLH_POLES",  22),  # GB4008 24N22P
+                ("SERVO_DSHOT_ESC",  3),   # AM32
+            ]
+            summary = ("SERVO9_FUNCTION=94  SERVO_BLH_MASK=256  SERVO_BLH_BDMASK=0"
+                       "  SERVO_BLH_OTYPE=5  SERVO_BLH_POLES=22  SERVO_DSHOT_ESC=3")
+        ok = all(_set_param(mav, name, val) for name, val in steps)
+        if ok:
+            print(f"  [OK] Flight/DShot mode set ({'Rover' if rover else 'Heli/Copter'}):")
+            print(f"       {summary}")
+            print("  Rebooting ...")
+            mav.mav.command_long_send(
+                mav.target_system, mav.target_component,
+                mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                0, 1, 0, 0, 0, 0, 0, 0,
+            )
+            print("  Pixhawk rebooting -- reconnect in ~5 s.")
+        else:
+            print("  [FAIL] Could not set all params")
+
+    # ── config dshot|pwm [--apply] ───────────────────────────────────────────
+    elif cmd == "config":
+        # Usage: config dshot [--apply]   -- DShot/Lua flight config
+        #        config pwm   [--apply]   -- PWM bench config
+        # Without --apply: read-only diff (shows what would change, touches nothing).
+        # With    --apply: writes params then reboots.
+        remaining = [t.lower() for t in tokens[1:]]
+        apply = "--apply" in remaining
+        sub = next((t for t in remaining if t != "--apply"), "")
+        if sub not in ("dshot", "pwm"):
+            print("  Usage: config dshot [--apply] | config pwm [--apply]")
+            print("  --apply writes params and reboots; omit to preview diff only.")
+            return True
+
+        rover = _is_rover(mav)
+
+        common = [
+            ("BRD_SAFETY_DEFLT", 0),
+            ("ARMING_CHECK",     0),
+            ("BRD_IO_DSHOT",     0),
+            ("H_COL_ANG_MIN",    -10),
+            ("H_COL_ANG_MAX",    10),
+            ("GPS1_TYPE",        0),
+            ("GPS2_TYPE",        0),
+            ("SCR_ENABLE",       1),  # scripting on -- script loaded but inactive until SCR_USER6 set
+            ("SCR_USER6",        0),  # Lua mode 0 = none -- safe default
+        ]
+
+        if sub == "dshot":
+            specific = [
+                ("SERVO9_FUNCTION",  36  if rover else 94),
+                ("SERVO9_MIN",       1000),
+                ("SERVO9_MAX",       2000),
+                ("SERVO9_TRIM",      1000),
+                ("SERVO_BLH_MASK",   256),
+                ("SERVO_BLH_BDMASK", 0),
+                ("SERVO_BLH_OTYPE",  5),
+                ("SERVO_BLH_POLES",  22),
+                ("SERVO_BLH_TRATE",  10),
+                ("SERVO_BLH_AUTO",   0),
+                ("SERVO_DSHOT_ESC",  3),
+                ("SERVO_DSHOT_RATE", 0),
+            ]
+            if rover:
+                specific.append(("MOT_PWM_TYPE", 6))
+        else:  # pwm
+            specific = [
+                ("SERVO9_FUNCTION",  1),
+                ("SERVO9_MIN",       800),
+                ("SERVO9_MAX",       2000),
+                ("SERVO9_TRIM",      1500),
+                ("SERVO_BLH_MASK",   0),
+                ("SERVO_BLH_OTYPE",  0),
+            ]
+            if rover:
+                specific.append(("MOT_PWM_TYPE", 0))
+
+        steps = specific + common
+        frame_str = "Rover" if rover else "Heli/Copter"
+        action = "Applying" if apply else "Preview (read-only -- add --apply to write)"
+        print(f"  Mode: {sub.upper()}  Frame: {frame_str}  [{action}]")
+        print()
+        print(f"  {'Parameter':<25} {'Expected':>8}  {'Actual':>8}  Status")
+        print(f"  {'-'*25}  {'-'*8}  {'-'*8}  ------")
+        any_diff = False
+        any_fail = False
+        for name, expected in steps:
+            actual = _recv_param(mav, name)
+            if actual is None:
+                row_status = "[FAIL] not found"
+                any_fail = True
+            elif abs(actual - float(expected)) < 0.5:
+                row_status = "[OK]"
+            else:
+                row_status = f"[DIFF] {actual:.0f} -> {expected}"
+                any_diff = True
+            actual_str = f"{actual:.0f}" if actual is not None else "N/A"
+            print(f"  {name:<25} {expected:>8}  {actual_str:>8}  {row_status}")
+
+        print()
+        if any_fail:
+            print("  [FAIL] One or more parameters not found on this firmware.")
+        elif not any_diff:
+            print("  [OK] All parameters already correct.")
+        elif not apply:
+            print("  [DIFF] Run with --apply to write changes.")
+        else:
+            print("  Writing changes ...")
+            for name, val in steps:
+                _set_param(mav, name, val)
+            print("  [OK] Parameters written. Rebooting ...")
+            mav.mav.command_long_send(
+                mav.target_system, mav.target_component,
+                mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                0, 1, 0, 0, 0, 0, 0, 0,
+            )
+            print("  Pixhawk rebooting -- reconnect in ~5 s.")
 
     # ── arm ──────────────────────────────────────────────────────────────────
     elif cmd == "arm":
@@ -1139,14 +1528,20 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
         else:
             print(f"  [FAIL] {name}: no ACK within timeout")
 
-    # ── scripts ──────────────────────────────────────────────────────────────
-    elif cmd == "scripts":
+    # ── ftp-list ─────────────────────────────────────────────────────────────
+    elif cmd == "ftp-list":
         _list_scripts(mav)
 
-    # ── upload <file> [--no-restart] ─────────────────────────────────────────
-    elif cmd == "upload":
+    # ── ftp-remove <file> ────────────────────────────────────────────────────
+    elif cmd == "ftp-remove":
         if len(tokens) < 2:
-            print("  Usage: upload <file> [--no-restart]"); return True
+            print("  Usage: ftp-remove <file>"); return True
+        _remove_script(mav, tokens[1])
+
+    # ── ftp-upload <file> [--no-restart] ─────────────────────────────────────
+    elif cmd == "ftp-upload":
+        if len(tokens) < 2:
+            print("  Usage: ftp-upload <file> [--no-restart]"); return True
         local_path = tokens[1]
         restart    = "--no-restart" not in tokens
         _upload_script(mav, local_path, restart=restart)

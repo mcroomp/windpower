@@ -28,12 +28,12 @@ Telemetry
 ---------
   The test writes a CSV log to simulation/logs/torque_telemetry.csv
   after each run.  Load and play back with:
-      python simulation/torque/visualize_torque.py
+      python simulation/viz3d/visualize_torque.py
              simulation/logs/torque_telemetry.csv
 
 Run with (inside Docker)
 ------------------------
-  RAWES_RUN_STACK_INTEGRATION=1 pytest simulation/torque/test_yaw_regulation.py -v
+  RAWES_RUN_STACK_INTEGRATION=1 pytest simulation/tests/sitl/torque/test_yaw_regulation.py -v
 """
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ def test_yaw_regulation(torque_armed):
     write_csv(rows, _TELEMETRY_OUT)
     log.info("Telemetry saved -> %s  (%d frames)", _TELEMETRY_OUT, len(rows))
     log.info(
-        "Visualise with:  python simulation/torque/visualize_torque.py %s",
+        "Visualise with:  python simulation/viz3d/visualize_torque.py %s",
         _TELEMETRY_OUT,
     )
 

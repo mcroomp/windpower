@@ -280,11 +280,13 @@ class TestDefaultParametersNumerical:
         """Regression: verify the specific launch position for default parameters (NED)."""
         launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
         expected_launch = _TARGET_POS - _TARGET_VEL * _T
-        # NED: _TARGET_POS=[14.241, 46.258, -12.530], _TARGET_VEL=[0.916, -0.257, 0.093]
-        # With T=30: offset = [0.916, -0.257, 0.093]*30 = [27.48, -7.71, 2.79]
-        # launch_pos = [14.241-27.48, 46.258+7.71, -12.530-2.79] = [-13.239, 53.968, -15.320]
         np.testing.assert_allclose(launch_pos, expected_launch, atol=1e-12)
-        # v_N > 0 → hub moving North → launch is SOUTH of target (NED X=North, smaller value)
-        assert launch_pos[0] < _TARGET_POS[0], "launch N should be south of target (v_N > 0)"
-        # v_E < 0 → hub moving West → launch is EAST of target (NED Y=East, larger value)
-        assert launch_pos[1] > _TARGET_POS[1], "launch E should be east of target (v_E < 0)"
+        # Directional sanity: launch_pos = target - vel*T, so launch is offset opposite to velocity.
+        for axis in range(3):
+            if abs(_TARGET_VEL[axis]) > 1e-6:
+                expected_sign = -1 if _TARGET_VEL[axis] > 0 else 1
+                actual_sign   = np.sign(launch_pos[axis] - _TARGET_POS[axis])
+                assert actual_sign == expected_sign, (
+                    f"axis {axis}: vel={_TARGET_VEL[axis]:.4f}, "
+                    f"launch[{axis}]={launch_pos[axis]:.3f}, target[{axis}]={_TARGET_POS[axis]:.3f}"
+                )

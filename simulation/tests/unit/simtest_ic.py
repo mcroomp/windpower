@@ -62,8 +62,8 @@ def load_ic() -> IC:
         vel         = np.array(d["vel"],    dtype=float),
         body_z      = np.array(d["body_z"], dtype=float),
         omega_spin  = float(d["omega_spin"]),
-        rest_length = float(d.get("rest_length", d.get("tether_rest_length", 50.0))),
-        coll_eq_rad  = float(d.get("coll_eq_rad", -0.28)),
-        stack_coll_eq = float(d.get("stack_coll_eq", -0.18)),
-        home_z_ned   = float(d.get("home_z_ned", d.get("home_z_enu", 0.0))),
+        rest_length  = float(d["rest_length"]),
+        coll_eq_rad  = float(d["coll_eq_rad"]),
+        stack_coll_eq = float(d["stack_coll_eq"]),
+        home_z_ned   = float(d["home_z_ned"]),
     )

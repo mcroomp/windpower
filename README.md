@@ -108,7 +108,7 @@ running inside a computer. It has three interconnected layers:
 | [simulation/README.md](simulation/README.md) | Simulation architecture, module summary, coordinate frames, sensor design, initial state, running tests, analysis tools index |
 | [simulation/internals.md](simulation/internals.md) | Sensor design, controller functions, dynamics model, aero model (SkewedWakeBEM), tether, pumping cycle architecture, known gaps |
 | [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions -- why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
-| [simulation/torque/README.md](simulation/torque/README.md) | Counter-torque motor simulation -- physics model, motor specs, gear efficiency, ArduPilot integration, all 6 tests, Lua feedforward controller, hardware deployment |
+| [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw physics model -- HubParams, GB4008 motor torque, RK4 integrator, equilibrium throttle |
 | [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, known gaps vs SkewedWakeBEM |
 
 ---

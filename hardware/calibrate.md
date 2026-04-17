@@ -24,7 +24,7 @@ python simulation/scripts/calibrate.py --port COM4 <command>      # non-interact
 | 1 | S1 — swashplate 0 deg (East) | 33 |
 | 2 | S2 — swashplate 120 deg | 34 |
 | 3 | S3 — swashplate 240 deg | 35 |
-| 4 | GB4008 anti-rotation motor | 36 (DDFP tail) |
+| 9 | GB4008 anti-rotation motor (AUX OUT 1) | 36 (Motor4) |
 
 PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max).
 
@@ -185,9 +185,35 @@ the Lua script reloads from SD and begins executing immediately.
 
 ---
 
+### `config`
+Set and validate the complete RAWES DShot parameter set, then reboot. Auto-detects
+Heli/Copter vs Rover frame and applies the correct values. Covers every DShot-chain
+param including `BRD_SAFETY_DEFLT=0` (required — safety switch blocks outputs).
+
+```bash
+python calibrate.py --port COM4 config
+```
+
+Prints a pass/fail table for every parameter. Reboots on success; reports `[FAIL]` and
+skips reboot if any value is wrong.
+
+| Frame | `SERVO9_FUNCTION` | DShot protocol param |
+|-------|-------------------|---------------------|
+| Heli/Copter | 94 (Script 1 / Lua) | `SERVO_BLH_OTYPE=5` |
+| Rover | 36 (Motor4) | `MOT_PWM_TYPE=6` |
+
+Always set: `SERVO9_MIN/MAX/TRIM=1000/2000/1000`, `SERVO_BLH_MASK=256`,
+`SERVO_BLH_POLES=22`, `SERVO_BLH_BDMASK=0`, `SERVO_DSHOT_ESC=3`,
+`BRD_IO_DSHOT=0`, `BRD_SAFETY_DEFLT=0`, `ARMING_CHECK=0`.
+
+---
+
 ## Typical calibration sequence
 
 ```bash
+# 0. Apply full DShot configuration (first time or after EEPROM wipe)
+python calibrate.py --port COM4 config
+
 # 1. Verify parameter chain
 python calibrate.py --port COM4 diag
 

@@ -367,7 +367,7 @@ def run_mediator(args, trajectory=None):
     anchor_ned = np.array(cfg["anchor_ned"], dtype=float)
     tether = TetherModel(
         anchor_ned             = anchor_ned,
-        rest_length            = float(cfg["tether_rest_length"]),
+        rest_length            = float(cfg["rest_length"]),
         hub_mass               = rotor.mass_kg,
         axle_attachment_length = rotor.axle_attachment_length_m,
     )
@@ -431,7 +431,7 @@ def run_mediator(args, trajectory=None):
     # The mediator calls update_sensors() to feed physics outputs in.
     _winch_node = WinchNode(
         winch=WinchController(
-            rest_length      = float(cfg["tether_rest_length"]),
+            rest_length      = float(cfg["rest_length"]),
             tension_safety_n = float(cfg["tension_safety_n"]),
         ),
         anemometer=Anemometer(height_m=3.0),
@@ -508,7 +508,7 @@ def run_mediator(args, trajectory=None):
             #   Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = ESC
             #   Servos arrive normalised [-1,1] from SITLInterface
             # ----------------------------------------------------------------
-            esc_norm   = float(np.clip(servos[3], -1.0, 1.0))
+            esc_norm   = float(np.clip(servos[8], -1.0, 1.0))  # output 9 (AUX OUT 1)
 
             # ----------------------------------------------------------------
             # Step 2a: Tether force (pre-computed before the planner call)

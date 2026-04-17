@@ -19,82 +19,112 @@ The Pixhawk 6C has two output processors:
 
 | Processor | Outputs | DShot support |
 |-----------|---------|---------------|
-| IOMCU (IO, STM32F1) | MAIN OUT 1–8 | One-way **and bidirectional** DShot — requires `BRD_IO_DSHOT=1` (ArduPilot 4.5+) |
-| FMU (STM32H7) | AUX OUT 1–6 (outputs 9–14) | One-way and bidirectional DShot natively |
+| IOMCU (IO, STM32F1) | MAIN OUT 1–8 | Requires `BRD_IO_DSHOT=1` (ArduPilot 4.5+) |
+| FMU (STM32H7) | AUX OUT 1–6 (outputs 9–14) | One-way and bidirectional DShot natively — no extra param needed |
 
-**Key point:** ArduPilot 4.5 added bidirectional DShot support to the IOMCU on Pixhawk 6C.
-`BRD_IO_DSHOT=1` enables this. MAIN OUT 4 supports bidirectional DShot with `SERVO_BLH_BDMASK=8`.
-Moving to AUX OUT is NOT required for telemetry on Pixhawk 6C 4.5+.
-
-Source: ArduPilot docs (common-dshot-escs.html) + ArduPilot Discourse
-"Bi-directional DShot on IOMCU - it's here!" (4.5 release discussion).
+**Motor is wired to AUX OUT 1 (output 9, FMU).** `BRD_IO_DSHOT` is not needed.
 
 ---
 
-## Confirmed Working Parameters (ArduPilot 4.6.3, Pixhawk 6C)
+## Confirmed Working Parameters (ArduPilot 4.6.3, Pixhawk 6C, Rover frame)
+
+Confirmed working 2026-04-17: motor spins at 20% via DO_MOTOR_TEST.
+
+### Frame
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| `BRD_IO_DSHOT` | 1 | Enable DShot on IO processor — critical |
-| `SERVO_BLH_MASK` | 8 | Bit 3 = output 4 — enables DShot on MAIN OUT 4 |
-| `SERVO_BLH_BDMASK` | 8 | Bit 3 = output 4 — bidirectional DShot on MAIN OUT 4 |
-| `SERVO_BLH_OTYPE` | 5 | DShot300 protocol |
-| `SERVO_BLH_POLES` | 22 | GB4008 24N22P motor (11 pole-pairs); default 14 is WRONG |
-| `SERVO_BLH_AUTO` | 1 | Auto-configure BLHeli outputs |
-| `SERVO_BLH_TRATE` | 10 | Telemetry request rate 10 Hz |
-| `SERVO_DSHOT_ESC` | 1 | ESC type = BLHeli32 / Kiss / AM32 |
-| `SERVO_DSHOT_RATE` | 0 | 1 kHz command rate (default) |
-| `RPM1_TYPE` | 5 | RPM sensor = ESC telemetry (bidirectional DShot) |
-| `SERVO4_FUNCTION` | 36 | DDFP tail — maps output 4 to GB4008 yaw motor |
+| `FRAME_CLASS` | 1 | Rover ground frame — required for DO_MOTOR_TEST (Heli frame blocks it) |
+| `FRAME_TYPE` | 0 | Default |
 
-Note: `SERVO_BLH_BDSHOT` does not exist in ArduPilot 4.6+. Bidirectional DShot
-is controlled by `SERVO_BLH_BDMASK` only.
+### Motor output (AUX OUT 1 = output 9)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `SERVO9_FUNCTION` | 36 | Motor4 — maps AUX OUT 1 to GB4008 |
+| `SERVO9_MIN` | 1000 | DShot min (must not be 1100 default — clamps signal) |
+| `SERVO9_MAX` | 2000 | DShot max |
+| `SERVO9_TRIM` | 1000 | DShot idle |
+| `MOT_PWM_TYPE` | 6 | DShot300 — Rover frame uses this instead of `SERVO_BLH_OTYPE` |
+
+### BLHeli / DShot subsystem
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `SERVO_BLH_MASK` | 256 | Bit 8 = output 9 — registers AUX OUT 1 with BLHeli subsystem |
+| `SERVO_BLH_BDMASK` | 0 | **One-way DShot** — do NOT set to 256 until AM32 EDT is enabled on ESC; bidir without EDT causes bad-frame accumulation and suppresses motor output |
+| `SERVO_BLH_OTYPE` | 5 | DShot300 — used by BLHeli passthrough / test features |
+| `SERVO_BLH_POLES` | 22 | GB4008 24N22P (11 pole-pairs); default 14 is WRONG |
+| `SERVO_BLH_TRATE` | 10 | Telemetry request rate 10 Hz |
+| `SERVO_BLH_AUTO` | 0 | Manual mask config |
+| `SERVO_DSHOT_ESC` | 3 | ESC type = AM32 (not 1=BLHeli32) |
+| `SERVO_DSHOT_RATE` | 0 | 1 kHz command rate (default) |
+
+### Safety / arming
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `BRD_SAFETY_DEFLT` | 0 | Safety switch disabled — outputs live immediately on boot |
+| `BRD_IO_DSHOT` | 0 | Not needed — motor is on AUX OUT (FMU), not MAIN OUT (IOMCU) |
+| `ARMING_CHECK` | 0 | Skip pre-arm checks (bench use) |
+
+### RPM telemetry (NOT YET ACTIVE — requires AM32 EDT)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `RPM1_TYPE` | 0 | Currently disabled — set to 5 after enabling AM32 EDT |
+| `SERVO_BLH_BDMASK` | 0 | Currently disabled — set to 256 after enabling AM32 EDT |
 
 ---
 
-## AM32 ESC — Extended Telemetry (EDT)
+## RPM index mapping
 
-The REVVitRC AM32 ESC must have **Extended DShot Telemetry (EDT)** enabled for
-ArduPilot to receive RPM back over the bidirectional DShot wire.
+With `SERVO_BLH_MASK=256` (only output 9 registered), the GB4008 is
+BLHeli motor #1 → index 0 in `ESC_TELEMETRY_1_TO_4` → feeds `RPM1`.
 
-AM32 ESCs do NOT always have EDT enabled by default. It must be configured via
-the ESC's firmware configuration tool.
+If you add more ESCs to the mask, they map to RPM2, RPM3 etc. in
+bitmask order (lowest bit first).
 
-### How to enable EDT on AM32 via ArduPilot BLHeli Passthrough
+---
 
-ArduPilot has a BLHeli passthrough feature that lets you configure the ESC over
-the DShot signal wire without opening the ESC or using a separate USB programmer.
+## Enabling AM32 EDT (to activate RPM telemetry)
 
-**Steps:**
+The REVVitRC AM32 ESC must have **Extended DShot Telemetry (EDT)** enabled
+before bidir DShot is turned on in ArduPilot. Setting `SERVO_BLH_BDMASK=256`
+without EDT active causes ArduPilot to accumulate bad frames on the receive
+window and eventually suppress the motor output entirely.
+
+**Step 1 — Enable EDT on the ESC (do this first):**
 1. Connect Pixhawk to Mission Planner via USB
 2. Go to **Optional Hardware → ESC Calibration / BLHeli**
-3. Click **Connect** — ArduPilot puts the ESC into passthrough mode
-4. The AM32 configurator (or BLHeli32 Suite) will enumerate the ESC
-5. Enable **Extended Telemetry** (or "Bidirectional DShot") in the ESC settings
-6. Write settings, disconnect passthrough
+3. Click **Connect** — ArduPilot puts the ESC into BLHeli passthrough mode
+4. In the AM32 configurator, enable **Extended Telemetry** (or "Bidirectional DShot")
+5. Click **Write**, then power-cycle the ESC (disconnect battery briefly)
 
-After EDT is enabled on the AM32 firmware, `ESC_TELEMETRY_1_TO_4` MAVLink
-messages will appear and `RPM1` will report actual motor eRPM.
-
-### Verifying telemetry is working
-
+**Step 2 — Enable bidir in ArduPilot (only after Step 1):**
 ```bash
-# After arming with battery connected:
+python calibrate.py --port COM4 setparam SERVO_BLH_BDMASK 256
+python calibrate.py --port COM4 setparam RPM1_TYPE 5
+```
+
+**Step 3 — Verify:**
+```bash
+python calibrate.py --port COM4 arm
 python calibrate.py --port COM4 monitor 10
 ```
 
-Expected output columns: `elapsed  eRPM  motor_RPM  rotor_RPM  current_A  torque_Nm  voltage_V  temp_C`
+Expected columns: `elapsed  eRPM  motor_RPM  rotor_RPM  current_A  torque_Nm  voltage_V  temp_C`
 
-At idle (motor running at minimum throttle): eRPM > 0, current ~ 0.5-2 A.
+At idle (minimum throttle): eRPM > 0, current ~0.5–2 A.
 
 ---
 
 ## ESC Wiring
 
 ```
-Pixhawk MAIN OUT 4 (3-pin servo header)
+Pixhawk AUX OUT 1 (output 9, 3-pin servo header)
   Pin 1 (S)  ─────────────────────────  ESC signal input
-  Pin 2 (+)  (servo rail 8.5 V)         NOT connected to ESC power
+  Pin 2 (+)  (servo rail, not used)     NOT connected to ESC power
   Pin 3 (-)  ─────────────────────────  ESC signal ground (common GND)
 
 4S LiPo battery  ─── XT30 ──────────── ESC power input (separate wire)
@@ -109,13 +139,12 @@ Both connections are required — missing the ground wire means no DShot signal.
 ## DShot Arming Behaviour
 
 In DShot mode, the ESC auto-arms from the first valid DShot packet.
-**No PWM arming sequence** (1000 us hold) is needed. The ESC:
+No PWM arming sequence is needed. The ESC:
 1. Powers up, listens for DShot frames
 2. Detects DShot300 from the signal line
 3. Arms immediately when it receives a valid command
 
 When ArduPilot is disarmed, it sends DShot value 0 (motor stop command).
-The ESC is powered and listening, but the motor does not spin.
 When ArduPilot arms, it starts sending throttle-proportional DShot values.
 
 ---
@@ -137,9 +166,11 @@ When ArduPilot arms, it starts sending throttle-proportional DShot values.
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| ESC beeps on power-up but no telemetry | AM32 EDT not enabled | Enable via BLHeli passthrough in Mission Planner |
-| No ESC beep, motor silent | DShot signal not reaching ESC | Check signal wire on MAIN OUT 4 pin 1; check common ground on pin 3 |
-| ESC beeps but motor doesn't spin when armed | `H_RSC_MODE` or DDFP gating | Check `H_TAIL_TYPE=4`, `H_RSC_MODE=1`, RSC runup timer |
-| `SERVO_BLH_BDSHOT` not found | Removed in ArduPilot 4.6+ | Use `SERVO_BLH_BDMASK=8` instead |
-| `RPM1` always 0 | EDT not enabled on ESC, or `RPM1_TYPE != 5` | Enable AM32 EDT; verify `RPM1_TYPE=5` |
-| Motor test rejected ("Disabled on heli") | ArduPilot heli frame blocks motor test | Use `calibrate.py arm` + `hold` or `monitor` instead |
+| Motor worked then stopped, no error | `SERVO_BLH_BDMASK=256` set without AM32 EDT | Set `SERVO_BLH_BDMASK=0`; enable AM32 EDT first before re-enabling |
+| Motor silent, no beep | DShot signal not reaching ESC | Check signal wire on AUX OUT 1 pin 1; check common GND on pin 3 |
+| Motor test command sent but motor silent | `BRD_SAFETY_DEFLT=1` blocking outputs | Set `BRD_SAFETY_DEFLT=0`, reboot |
+| Motor silent, `SERVO9_MIN=1100` | Default min clamps 800 µs signal | Set `SERVO9_MIN=1000` |
+| DO_MOTOR_TEST rejected ("Disabled on heli") | ArduPilot heli frame blocks motor test | Switch to Rover frame (`FRAME_CLASS=1`), reboot |
+| `RPM1` always 0 | AM32 EDT not enabled on ESC | Enable via BLHeli passthrough in Mission Planner, then set `SERVO_BLH_BDMASK=256`, `RPM1_TYPE=5` |
+| `SERVO_BLH_BDSHOT` not found | Removed in ArduPilot 4.6+ | Use `SERVO_BLH_BDMASK` instead |
+| No ESC beep on power-up | ESC not receiving DShot or not powered | Check battery connected; check signal + GND wires |

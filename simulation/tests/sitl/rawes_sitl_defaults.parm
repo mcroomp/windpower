@@ -53,3 +53,22 @@ H_COL_MIN       1000   # minimum collective servo output (us) -- full range
 H_COL_MAX       2000   # maximum collective servo output (us) -- full range
 H_RSC_MODE      1      # 1=Passthrough: no main rotor motor (autorotation only).
                        # Motor interlock HIGH (RC8=2000) -> THROTTLE_UNLIMITED immediately.
+
+# GB4008 anti-rotation motor — AUX OUT 1 (output 9)
+# Lua writes PWM via SRV_Channels:set_output_pwm(94, pwm_us) -> SERVO9.
+# Mediator reads servos[8] (0-indexed) = output 9.
+SERVO9_FUNCTION  94    # Script 1: Lua owns output 9 for GB4008 yaw trim
+SERVO9_MIN       800   # PWM off = 800 us; default 1100 clamps signal (motor silent)
+SERVO9_MAX       2000  # PWM full = 2000 us
+SERVO9_TRIM      800   # trim = off; rawes.lua _set_throttle_pct(0) = 800 us
+SERVO_BLH_MASK   256   # bit 8 = output 9 — DShot enabled on AUX OUT 1 (FMU, no BRD_IO_DSHOT needed)
+SERVO_BLH_OTYPE  5     # DShot300 (Heli/Copter frame uses SERVO_BLH_OTYPE, not MOT_PWM_TYPE)
+SERVO_BLH_POLES  22    # GB4008 24N22P (11 pole-pairs); default 14 is wrong
+SERVO_DSHOT_ESC  3     # ESC type = AM32 (REVVitRC)
+# SERVO_BLH_BDMASK left at 0: enable only after AM32 EDT is active on the ESC.
+# Setting BDMASK=256 without EDT causes bad-frame accumulation -> motor suppressed.
+
+# RPM source: SITL reads rpm.rpm_1 from mediator JSON (RPM1_TYPE=10).
+# On hardware: set RPM1_TYPE=5 (bidir DShot ESC telemetry) after enabling AM32 EDT.
+RPM1_TYPE        10    # 10=SITL JSON field rpm.rpm_1 (mediator sends omega_spin)
+RPM1_MIN         0     # no minimum filter

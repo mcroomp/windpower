@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-torque/mediator_torque.py — Counter-torque motor stack-test mediator
+mediator_torque.py — Counter-torque motor stack-test mediator
 
 Bridges ArduPilot SITL ↔ hub yaw dynamics for the counter-torque motor test
 using SITLInterface for all binary servo I/O and JSON state serialisation.
@@ -50,11 +50,10 @@ from pathlib import Path
 
 import numpy as np
 
-# simulation/ is one directory up; add it so SITLInterface and model are importable.
-sys.path.insert(0, str(Path(__file__).resolve().parent))           # torque/ → model
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # simulation/ → sitl_interface
+# simulation/ — add so SITLInterface, torque_model, mediator_events are importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import model as _m
+import torque_model as _m
 from sitl_interface import SITLInterface
 from mediator_events import MediatorEventLog
 
@@ -308,11 +307,8 @@ def run(
                 current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor))
 
                 if lua_mode:
-                    raw_throttle = max(0.0, min(1.0, (last_pwm_ch4 - 1000.0) / 1000.0))
-                    if raw_throttle <= 0.05:
-                        throttle = _m.equilibrium_throttle(current_omega, params)
-                    else:
-                        throttle = raw_throttle
+                    # PWM range 800 (off) to 2000 (full): matches SERVO9_MIN=800, SERVO9_MAX=2000
+                    throttle = max(0.0, min(1.0, (last_pwm_ch4 - 800.0) / 1200.0))
                 else:
                     current_trim = _m.equilibrium_throttle(current_omega, params)
                     throttle     = _pwm_to_throttle(last_pwm_ch4, current_trim)

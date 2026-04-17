@@ -1,5 +1,5 @@
 """
-torque/torque_telemetry.py — TorqueTelemetryFrame: internal display type.
+viz3d/torque_telemetry.py — TorqueTelemetryFrame: internal display type.
 
 Used only by visualize_torque.py for rendering.
 Telemetry is written/read as canonical TelRow CSV via telemetry_csv.py.

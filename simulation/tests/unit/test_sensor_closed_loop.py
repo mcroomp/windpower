@@ -5,7 +5,7 @@ Fills the validation gap between:
   - test_sensor.py          (unit tests at static/hand-crafted states)
   - full stack tests        (Docker required)
 
-The control loop uses truth state (same as test_closed_loop_60s) to keep the
+The control loop uses truth state (same as test_closed_loop_90s) to keep the
 flight stable.  PhysicalSensor runs as a shadow computation alongside it,
 receiving the same physics state at 400 Hz.  Sensor outputs are checked for
 consistency properties that the EKF depends on.
@@ -68,7 +68,7 @@ from swashplate  import SwashplateServoModel
 from planner     import HoldPlanner
 from frames      import build_orb_frame
 from sensor      import PhysicalSensor
-from simtest_log import SimtestLog
+from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 
 _log = SimtestLog(__file__)
@@ -142,6 +142,7 @@ def _run(t_sim: float = T_SIM):
     pid_lat = RatePID(kp=KP_INNER)
     servo   = SwashplateServoModel.from_rotor(rd.default())
 
+    events     = BadEventLog()
     history    = []
     sensor_log = []   # 10 Hz
 
@@ -163,7 +164,7 @@ def _run(t_sim: float = T_SIM):
         )
 
         # ----------------------------------------------------------------
-        # Truth-state control (same as test_closed_loop_60s.py)
+        # Truth-state control (same as test_closed_loop_90s.py)
         # ----------------------------------------------------------------
         state_pkt = {
             "pos_ned":    hub_state["pos"],
@@ -206,6 +207,7 @@ def _run(t_sim: float = T_SIM):
 
         prev_vel  = hub_state["vel"].copy()
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
+        events.check_floor(hub_state["pos"][2], t, "flight")
 
         # 10 Hz snapshot
         if i % int(10.0 / DT) == 0:
@@ -228,73 +230,58 @@ def _run(t_sim: float = T_SIM):
         "pos":        hub_state["pos"].copy(),
         "omega_spin": omega_spin,
     })
-    return history, sensor_log
+    return dict(events=events, history=history, sensor_log=sensor_log)
 
 
 # ---------------------------------------------------------------------------
-# Flight stability (truth-state control — baseline sanity)
+# Tests
 # ---------------------------------------------------------------------------
 
-def test_sensor_loop_altitude_maintained():
-    """Flight must stay above z_floor for the full 60 s."""
-    history, _ = _run()
-    min_alt = min(-s["pos"][2] for s in history)   # altitude = -NED Z
+def test_sensor_stable():
+    """Flight must stay above floor and maintain spin throughout 60 s."""
+    r = _run()
+    history = r["history"]
+    min_alt = min(-s["pos"][2] for s in history)
+    min_spin = min(s["omega_spin"] for s in history)
     _log.write(
         [f"t={s['t']:.1f}  alt={-s['pos'][2]:.2f} m  spin={s['omega_spin']:.1f}" for s in history],
-        f"min_alt={min_alt:.2f} m",
+        f"min_alt={min_alt:.2f} m  min_spin={min_spin:.2f} rad/s  {r['events'].summary()}",
     )
-    assert min_alt >= 1.0, \
-        f"Hub altitude dropped below 1 m: min_alt={min_alt:.2f} m"
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
+    if min_alt < 1.0:
+        failures.append(f"altitude dropped below 1 m: min_alt={min_alt:.2f} m")
+    if min_spin < 5.0:
+        failures.append(f"spin collapsed: min={min_spin:.2f} rad/s")
+    assert not failures, "\n  ".join(failures)
 
 
-def test_sensor_loop_spin_maintained():
-    """Rotor must stay above 5 rad/s throughout (autorotation sustained)."""
-    history, _ = _run()
-    spins = [s["omega_spin"] for s in history]
-    assert min(spins) >= 5.0, \
-        f"Spin collapsed: min={min(spins):.2f} rad/s"
+def test_sensor_properties():
+    """PhysicalSensor outputs must satisfy physical consistency constraints during flight."""
+    r = _run()
+    sensor_log = r["sensor_log"]
+    failures = []
 
-
-# ---------------------------------------------------------------------------
-# Sensor property tests (PhysicalSensor outputs during realistic flight)
-# ---------------------------------------------------------------------------
-
-def test_sensor_yaw_equals_orb_yaw():
-    """
-    rpy[2] from PhysicalSensor must equal orb_yaw_rad (actual R_orb yaw).
-
-    Physical faithfulness: sensor reports the actual hub orientation yaw —
-    no velocity-heading override.  orb_yaw_rad and rpy[2] are derived from
-    the same R_orb, so they must be identical to floating-point precision.
-    """
-    _, sensor_log = _run()
-    violations = []
+    # 1. rpy[2] must equal orb_yaw_rad (no velocity-heading override)
+    yaw_violations = []
     for s in sensor_log:
         diff = abs(s["yaw_sensor"] - s["orb_yaw"])
-        # Wrap to [-pi, pi]
         diff = (diff + math.pi) % (2 * math.pi) - math.pi
         if abs(diff) > 1e-9:
-            violations.append(f"t={s['t']:.1f}s  rpy[2]={math.degrees(s['yaw_sensor']):.3f}  "
-                              f"orb_yaw={math.degrees(s['orb_yaw']):.3f}  diff={math.degrees(diff):.4f} deg")
-    _log.write(violations or ["(all match to floating-point precision)"],
-               f"violations={len(violations)}")
-    assert not violations, (
-        f"rpy[2] != orb_yaw_rad in {len(violations)} samples "
-        "(velocity-heading override crept back in?):\n" + "\n".join(violations[:10])
-    )
+            yaw_violations.append(
+                f"t={s['t']:.1f}s  rpy[2]={math.degrees(s['yaw_sensor']):.3f}  "
+                f"orb_yaw={math.degrees(s['orb_yaw']):.3f}  diff={math.degrees(diff):.4f} deg"
+            )
+    if yaw_violations:
+        failures.append(
+            f"rpy[2] != orb_yaw_rad in {len(yaw_violations)} samples:\n    "
+            + "\n    ".join(yaw_violations[:5])
+        )
 
-
-def test_sensor_yaw_changes_slowly():
-    """
-    Sensor yaw (orb_yaw from R_orb) must change slowly — at orbital rate only.
-
-    The orbital frame yaw changes as disk_normal rotates during orbit.
-    Typical rate is ~0.01-0.05 rad/s.  A rate > 1 rad/s indicates a frame
-    singularity or sensor frame bug.
-    """
-    _, sensor_log = _run()
-    YAW_RATE_MAX = 1.0   # rad/s — generous; orbital rate is ~0.02 rad/s
-    violations = []
+    # 2. Orbital yaw rate must stay below 1 rad/s
+    YAW_RATE_MAX = 1.0
+    yaw_rate_violations = []
     prev = None
     for s in sensor_log:
         if prev is not None:
@@ -304,118 +291,70 @@ def test_sensor_yaw_changes_slowly():
                 delta = (delta + math.pi) % (2 * math.pi) - math.pi
                 rate = abs(delta) / dt_snap
                 if rate > YAW_RATE_MAX:
-                    violations.append(f"t={s['t']:.1f}s  yaw_rate={math.degrees(rate):.1f} deg/s")
+                    yaw_rate_violations.append(f"t={s['t']:.1f}s  yaw_rate={math.degrees(rate):.1f} deg/s")
         prev = s
-    _log.write(violations or ["(all within 1 rad/s)"],
-               f"violations={len(violations)}  limit=1.0 rad/s")
-    assert not violations, (
-        f"Orbital yaw rate exceeded 1 rad/s in {len(violations)} samples:\n"
-        + "\n".join(violations[:10])
-    )
-
-
-def test_sensor_gyro_bounded():
-    """
-    gyro_body norm must stay below GYRO_MAX_RAD_S.
-
-    260 rad/s in an earlier run indicated a sensor modeling failure.  The
-    orbital rate during normal flight is ~0.2-0.3 rad/s; 5 rad/s catches
-    anomalies with margin for short transients.
-    """
-    _, sensor_log = _run()
-    peak = max(s["gyro_norm"] for s in sensor_log)
-    _log.write(
-        [f"t={s['t']:.1f}  gyro_norm={s['gyro_norm']:.4f} rad/s" for s in sensor_log],
-        f"peak_gyro={peak:.4f} rad/s  limit={GYRO_MAX_RAD_S} rad/s",
-    )
-    assert peak <= GYRO_MAX_RAD_S, (
-        f"gyro_body peak {peak:.3f} rad/s exceeded {GYRO_MAX_RAD_S} rad/s "
-        "(sensor or K_YAW dynamics bug?)"
-    )
-
-
-def test_sensor_gyro_spin_isolated():
-    """
-    Gyro must be well below rotor spin rate.
-
-    The GB4008 K_YAW damping keeps the electronics body from spinning in
-    free flight.  Ratio omega_spin / gyro_norm must exceed SPIN_ISOLATION_FACTOR
-    at every sample.  A failure indicates K_YAW dynamics or sensor model issues.
-    """
-    _, sensor_log = _run()
-    min_ratio = float("inf")
-    lines = ["t(s)   gyro_norm(rad/s)  omega_spin(rad/s)  ratio"]
-    for s in sensor_log:
-        if s["gyro_norm"] < 1e-6:
-            continue   # near-zero gyro; ratio is infinite, skip
-        ratio = s["omega_spin"] / s["gyro_norm"]
-        min_ratio = min(min_ratio, ratio)
-        lines.append(
-            f"  {s['t']:5.1f}  {s['gyro_norm']:16.4f}  "
-            f"{s['omega_spin']:17.2f}  {ratio:.1f}"
+    if yaw_rate_violations:
+        failures.append(
+            f"orbital yaw rate exceeded 1 rad/s in {len(yaw_rate_violations)} samples:\n    "
+            + "\n    ".join(yaw_rate_violations[:5])
         )
 
-    _log.write(lines,
-               f"min_ratio={min_ratio:.1f}  required={SPIN_ISOLATION_FACTOR}")
-    assert min_ratio >= SPIN_ISOLATION_FACTOR, (
-        f"Body spin in gyro: min(omega_spin/gyro_norm)={min_ratio:.1f} "
-        f"(required >= {SPIN_ISOLATION_FACTOR})"
-    )
+    # 3. Gyro norm bounded
+    peak_gyro = max(s["gyro_norm"] for s in sensor_log)
+    if peak_gyro > GYRO_MAX_RAD_S:
+        failures.append(
+            f"gyro_body peak {peak_gyro:.3f} rad/s exceeded {GYRO_MAX_RAD_S} rad/s"
+        )
 
+    # 4. Gyro well below rotor spin
+    min_ratio = float("inf")
+    for s in sensor_log:
+        if s["gyro_norm"] >= 1e-6:
+            min_ratio = min(min_ratio, s["omega_spin"] / s["gyro_norm"])
+    if min_ratio < SPIN_ISOLATION_FACTOR:
+        failures.append(
+            f"body spin in gyro: min(omega_spin/gyro_norm)={min_ratio:.1f} "
+            f"(required >= {SPIN_ISOLATION_FACTOR})"
+        )
 
-def test_electronics_yaw_changes_slowly():
-    """
-    Electronics x-axis (R_hub[:, 0], the yaw DOF) must change slowly during flight.
-
-    The GB4008 keeps the electronics hub from spinning around disk_normal.
-    R_hub[:, 0] changes only at the orbital rate (~0.01-0.02 rad/s) as the
-    tether direction rotates.  A rapid change indicates a yaw-stability failure.
-    """
-    _, sensor_log = _run()
-    YAW_RATE_MAX = 1.0   # rad/s — generous; orbital rate is ~0.02 rad/s
-    violations = []
+    # 5. Electronics x-axis (yaw DOF) changes slowly
+    elec_yaw_violations = []
     prev = None
     for s in sensor_log:
         if prev is not None:
             dt_snap = s["t"] - prev["t"]
             if dt_snap > 0:
-                # angle between consecutive R[:, 0] vectors
                 cos_a = float(np.clip(np.dot(s["R"][:, 0], prev["R"][:, 0]), -1.0, 1.0))
-                delta = math.acos(cos_a)
-                rate  = delta / dt_snap
+                rate  = math.acos(cos_a) / dt_snap
                 if rate > YAW_RATE_MAX:
-                    violations.append(
+                    elec_yaw_violations.append(
                         f"t={s['t']:.1f}s  yaw_rate={math.degrees(rate):.1f} deg/s"
                     )
         prev = s
-    _log.write(violations or ["(all within 1 rad/s)"],
-               f"violations={len(violations)}  limit=1.0 rad/s")
-    assert not violations, (
-        f"Electronics yaw (R_hub[:,0]) changed too rapidly in {len(violations)} samples "
-        "(GB4008 yaw stability failure?):\n" + "\n".join(violations[:10])
-    )
+    if elec_yaw_violations:
+        failures.append(
+            f"electronics yaw R[:,0] changed too rapidly in {len(elec_yaw_violations)} samples:\n    "
+            + "\n    ".join(elec_yaw_violations[:5])
+        )
 
-
-def test_R_hub_is_valid_rotation_matrix():
-    """
-    R_hub must remain a valid rotation matrix throughout flight.
-
-    det(R_hub) == 1 and R_hub.T @ R_hub == I to near machine precision.
-    Failure indicates numerical drift in the dynamics integrator corrupting R.
-    """
-    _, sensor_log = _run()
-    violations = []
+    # 6. R_hub must remain a valid rotation matrix
+    R_violations = []
     for s in sensor_log:
         R = s["R"]
         det  = float(np.linalg.det(R))
         orth = float(np.max(np.abs(R.T @ R - np.eye(3))))
         if abs(det - 1.0) > 1e-6 or orth > 1e-6:
-            violations.append(
-                f"t={s['t']:.1f}s  det={det:.8f}  max_orth_err={orth:.2e}"
-            )
-    _log.write(violations or ["(all valid)"],
-               f"violations={len(violations)}")
-    assert not violations, (
-        f"R_hub not a valid rotation matrix in {len(violations)} samples:\n"
-        + "\n".join(violations[:10])
+            R_violations.append(f"t={s['t']:.1f}s  det={det:.8f}  max_orth_err={orth:.2e}")
+    if R_violations:
+        failures.append(
+            f"R_hub not a valid rotation matrix in {len(R_violations)} samples:\n    "
+            + "\n    ".join(R_violations[:5])
+        )
+
+    _log.write(
+        [f"peak_gyro={peak_gyro:.4f} rad/s  min_ratio={min_ratio:.1f}  "
+         f"yaw_violations={len(yaw_violations)}  yaw_rate_violations={len(yaw_rate_violations)}  "
+         f"R_violations={len(R_violations)}"],
+        f"failures={len(failures)}",
     )
+    assert not failures, "\n  ".join(failures)

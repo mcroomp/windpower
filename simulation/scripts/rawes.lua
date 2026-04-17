@@ -3,12 +3,15 @@ rawes.lua -- Unified RAWES flight + yaw-trim controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via SCR_USER6:
-  0  none    -- script loaded but both subsystems disabled
-  1  flight  -- cyclic orbit-tracking only (Ch1, Ch2)                     50 Hz
-  2  yaw     -- counter-torque yaw trim only (Ch9/SERVO9)                100 Hz
-  3  both    -- flight + yaw trim active simultaneously
-  4  landing -- cyclic orbit-tracking + VZ collective + auto final_drop  50 Hz
-  5  pumping -- De Schutter pumping cycle (cyclic + per-phase collective) 50 Hz
+  0  none     -- script loaded but both subsystems disabled
+  1  steady_noyaw  -- cyclic orbit-tracking only, no yaw trim (Ch1, Ch2)   50 Hz
+  2  yaw           -- counter-torque yaw trim only (Ch9/SERVO9)           100 Hz
+  3  steady        -- cyclic orbit-tracking + yaw trim simultaneously
+  4  landing_noyaw -- cyclic + VZ collective + auto final_drop, no yaw   50 Hz
+  5  pumping_noyaw -- De Schutter pumping cycle, no yaw trim              50 Hz
+  6  arm_hold_noyaw -- hold Ch3=1000 Ch8=2000 only; no flight/yaw control
+  7  yaw_test       -- motor ON at 25% for 20 s then off; resets on re-entry  100 Hz
+  8  yaw_limited    -- same as yaw (PI) but motor hard-stops 30 s after first throttle; resets on re-entry
 
 Parameters (SCR_USER1..6):
   SCR_USER1   RAWES_KP_CYC    Cyclic P gain            [rad/s / rad]  default 1.0
@@ -16,7 +19,7 @@ Parameters (SCR_USER1..6):
   SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]         default 0.0
   SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]         default 0.0
   SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]         default 0.0
-  SCR_USER6   RAWES_MODE      Mode selector (0..5 -- see above)        default 0
+  SCR_USER6   RAWES_MODE      Mode selector (0..6 -- see above)        default 0
 
 All pumping cycle parameters (phase timing, xi angle, collective limits) are
 hardcoded constants below -- no free SCR_USER slots remain.
@@ -33,28 +36,23 @@ Division of labour (pumping mode):
   Synchronisation:     Lua detects tether paying-out / reeling-in to follow the
                        ground planner's actual winch motion -- no RC channel bridge needed.
 
-Yaw-trim subsystem constants (compile-time):
-  GEAR_RATIO   80:44 spur gear between GB4008 pinion and rotor hub
-  KV_RAD       66 KV converted to rad/s/V
-  R_MOTOR      7.5 ohm phase resistance
-  K_BEARING    0.005 N*m*s/rad bearing drag
-  KP_YAW       0.001 rad/s -> throttle proportional yaw correction
-
-RPM source:
-  SITL: mediator sends motor_rpm via JSON "rpm.rpm_1" field; ArduPilot maps
-        this to RPM:get_rpm(0).
-  Hardware: DSHOT bidirectional ESC telemetry (RPM1_TYPE=5, AM32 firmware).
-  The script tries both 'rpm' and 'RPM' library names for firmware compatibility.
-
-Battery voltage:
-  Read from onboard sensor (battery:voltage(0)).  Falls back to V_BAT_NOM if
-  the sensor is not ready or reads below V_BAT_MIN (early boot / bench testing).
+Yaw-trim control (PI on gyro_z, no RPM feedforward):
+  BASE_THROTTLE_PCT  5 %            -- floor; DShot arms on first frame
+  KP_YAW             3.0 %/(rad/s) -- proportional; provides motor torque during spin-up
+  KI_YAW             2.0 %/(rad/s*s) -- integral; accumulates ~70% equilibrium offset
+  YAW_I_MAX          80 %           -- anti-windup; above bearing-drag equilibrium ~75%
+  RPM sensor not used (RPM1_TYPE=0 on hardware until AM32 EDT enabled).
 
 Required ArduPilot parameters:
-  SCR_ENABLE      1   -- reboot required after first set
-  RPM1_TYPE       5   -- DSHOT bidirectional (hardware) or 10 (SITL JSON)
-  RPM1_MIN        0
-  SERVO9_FUNCTION 94  -- Script 1: Lua writes motor command to Ch9 (AUX1)
+  SCR_ENABLE        1    -- reboot required after first set
+  SERVO9_FUNCTION   94   -- Script 1: Lua writes motor command to output 9 (AUX OUT 1)
+  SERVO_BLH_MASK    256  -- DShot enabled on output 9 (bit 8)
+  SERVO_BLH_OTYPE   5    -- DShot300 (Heli/Copter frame)
+  SERVO_BLH_POLES   22   -- GB4008 24N22P (11 pole-pairs; default 14 is wrong)
+  SERVO_DSHOT_ESC   3    -- AM32 ESC type
+  SERVO_BLH_BDMASK  0    -- one-way DShot; set to 256 only after AM32 EDT enabled on ESC
+  RPM1_TYPE         10   -- SITL: JSON rpm.rpm_1; hardware: 5 (bidir DShot, after EDT enabled)
+  RPM1_MIN          0
 
 Deployment:
   Copy rawes.lua to APM/scripts/ on the Pixhawk SD card.
@@ -67,10 +65,40 @@ local BASE_PERIOD_MS    = 10        -- 100 Hz base tick (yaw trim native rate)
 local FLIGHT_PERIOD_MS  = 20        -- 50 Hz  flight subsystem
 local ACRO_MODE_NUM     = 1         -- ACRO mode number (ArduCopter ACRO = 1)
 
+-- ── Mode numbers (SCR_USER6 = mode_num * 1000 + substate) ────────────────────
+-- Ground planner writes the full SCR_USER6 value; Lua decodes mode + substate.
+-- Mode numbers are identical to the old single-digit values.
+local MODE_NONE       = 0
+local MODE_STEADY     = 1   -- cyclic orbit-tracking only (no yaw)
+local MODE_YAW        = 2   -- counter-torque yaw trim only
+local MODE_STEADY_YAW = 3   -- cyclic + yaw trim
+local MODE_LANDING    = 4   -- cyclic + VZ descent + auto final_drop
+local MODE_PUMPING    = 5   -- De Schutter pumping cycle
+local MODE_ARM_HOLD   = 6   -- hold Ch3=1000 Ch8=2000 keepalive
+local MODE_YAW_TEST   = 7   -- motor at 25% for 20 s (bench)
+local MODE_YAW_LTD    = 8   -- PI with 30 s motor hard-stop
+
+-- ── Landing substates (mode=4, substate = SCR_USER6 % 1000) ──────────────────
+local LAND_DESCEND    = 0   -- VZ controller active; ground planner reels in tether
+local LAND_FINAL_DROP = 1   -- collective → 0, neutral cyclic, drop to floor
+
+-- ── Pumping substates (mode=5, substate = SCR_USER6 % 1000) ──────────────────
+-- Ground planner owns the phase state machine; Lua executes the correct
+-- collective and body_z slerp goal for each substate.
+--
+-- Transition timing mirrors DeschutterPlanner:
+--   TRANSITION      starts when winch REVERSES (at T_reel_out), lasts T_TRANSITION.
+--   TRANSITION_BACK starts at cycle start for cycles >0, lasts T_TRANSITION.
+-- Collective ramps are synchronised with body_z slerp via _submode_ms timer.
+local PUMP_HOLD            = 0   -- waiting; reel-out collective, orbit tracking
+local PUMP_REEL_OUT        = 1   -- paying out; reel-out collective, orbit tracking
+local PUMP_TRANSITION      = 2   -- winch just reversed; col ramps to reel-in, bz slews to xi=80
+local PUMP_REEL_IN         = 3   -- reeling in; reel-in collective, body_z at xi=80 deg
+local PUMP_TRANSITION_BACK = 4   -- winch just started out; col ramps back, bz slews to orbit
+
 -- ── Flight subsystem constants ───────────────────────────────────────────────
 
 local MIN_TETHER_M      = 0.5       -- minimum tether length before orbit tracking activates
-local LAND_MIN_TETHER_M = 2.0       -- landing mode: final_drop below this tether length [m]
 local ACRO_RP_RATE_DEG  = 360.0     -- must match ACRO_RP_RATE ArduPilot parameter
 local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
 
@@ -118,36 +146,40 @@ local PUMP_LEN_THRESH =  0.05  -- tether length change threshold to detect motio
 
 -- ── Yaw-trim subsystem constants ─────────────────────────────────────────────
 
-local GEAR_RATIO    = 80.0 / 44.0
-local KV_RAD        = 66.0 * math.pi / 30.0
-local R_MOTOR       = 7.5
-local K_BEARING     = 0.005
-local KP_YAW        = 0.001
-local KI_YAW        = 0.05             -- integrator gain; corrects load-dependent bearing friction
-local YAW_I_MAX     = 0.2              -- anti-windup clamp [throttle fraction]
-local YAW_I_GATE    = math.rad(3.0)    -- only integrate when |gyro_z| < 3 deg/s (prevents startup windup)
-local MIN_RPM       = 50            -- RPM below this = no signal from ESC telemetry
-local STARTUP_PWM   = 1050          -- ~5% throttle: arms DShot ESC and primes telemetry
-local V_BAT_NOM     = 15.2          -- nominal 4S LiPo voltage
-local V_BAT_MIN     = 10.0          -- below this = battery sensor not ready; use V_BAT_NOM
-local YAW_SRV_FUNC  = 94            -- ArduPilot servo function for Script 1 output (SERVO9)
-local YAW_STABLE_RAD_S     = math.rad(5.0)  -- stable band: |yaw_rate| < 5 deg/s [rad/s]
-local YAW_STABLE_TIMEOUT_MS = 30000         -- cut motor if not stable for this long [ms]
+-- RPM telemetry is not available on hardware (RPM1_TYPE=0 until AM32 EDT enabled).
+-- Control is throttle-percentage based: PI on gyro_z drives hub yaw rate to zero.
+-- Physics: bearing drag at omega_rotor=28 rad/s needs ~75% throttle to hold psi_dot=0.
+-- BASE_THROTTLE_PCT alone is insufficient (motor below back-EMF threshold); the I term
+-- accumulates during startup spin-up and brings throttle to the equilibrium operating point.
 
--- RPM library binding.  SITL (mcroomp fork) exposes 'RPM' (uppercase).
--- Some hardware firmware builds use 'rpm' (lowercase) instead.
--- Try RPM first; fall back to rpm if RPM is nil.
-local _rpm_lib = RPM or rpm
+local BASE_THROTTLE_PCT = 5.0          -- base throttle [%]; I term compensates the rest
+local KP_YAW        = 3.0              -- P gain [% / (rad/s)]; strong enough to recover from neg overshoot
+local KI_YAW        = 2.0              -- I gain [% / (rad/s * s)]; builds equilibrium offset (~70%)
+local YAW_I_MAX     = 80.0             -- anti-windup clamp [%]; above equilibrium ~75%
+local YAW_SRV_FUNC  = 94               -- Script 1 output (SERVO9)
+local YAW_STABLE_RAD_S     = math.rad(5.0)
+local YAW_STABLE_TIMEOUT_MS = 30000
+local YAW_DEAD_ZONE_RAD_S  = math.rad(2.0)    -- motor stays off until hub exceeds this rotation rate
 
 local _yaw_not_stable_ms  = nil    -- millis() when yaw first exceeded stable band; nil when stable
 local _yaw_stopped        = false  -- latched; motor cut due to sustained yaw instability
-local _yaw_i              = 0.0    -- integrator state [throttle fraction]
+local _yaw_i              = 0.0    -- integrator state [throttle %]
+local _yaw_last_throttle  = 0.0    -- last throttle output [%]; dead zone re-applies when this is 0
+local _yaw_in_dead_zone   = true   -- current dead zone state; true = motor off, waiting for movement
+local _yaw_status_ms      = 0      -- millis() of last periodic status message
+local _yaw_test_start_ms    = nil    -- millis() when mode 7 (yaw_test) began; nil = not started
+local _yaw_limited_start_ms = nil    -- millis() when mode 8 (yaw_limited) began; nil = not started
 
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
 local _diag             = 0         -- global diagnostic counter (every tick)
 local _last_flight_ms   = 0         -- millis() when flight subsystem last ran
-local _active_mode      = -1        -- last mode seen; -1 = uninitialised (triggers _on_mode_enter)
+
+-- Mode / substate tracking (SCR_USER6 = mode_num * 1000 + substate)
+local _prev_mode        = -1        -- last decoded mode number (-1 = uninitialised)
+local _prev_sub         = 0         -- last decoded substate
+local _mode_ms          = 0         -- millis() when current mode was entered
+local _submode_ms       = 0         -- millis() when current substate was entered
 
 -- Cache RC channel objects at module load (rc:get_channel() is the correct API)
 local _rc_ch1 = rc:get_channel(1)   -- roll rate override (flight)
@@ -168,15 +200,8 @@ local _plan_ms          = 0               -- millis() when _bz_target was last c
 local _prev_ch1         = 1500            -- last sent Ch1 PWM (for output rate limiting)
 local _prev_ch2         = 1500            -- last sent Ch2 PWM (for output rate limiting)
 
--- Landing state
-local _land_final_drop  = false           -- true after tether <= LAND_MIN_TETHER_M
-
--- Pumping cycle state (reset on mode entry)
-local _pump_phase       = "hold"  -- "hold" | "reel_out" | "transition" | "reel_in"
-local _pump_t_phase     = 0.0     -- time in current phase [s]
-local _pump_bz_ri       = nil     -- reel-in body_z setpoint (computed after capture)
-local _pump_tlen_ref    = nil     -- tether length reference for phase transition detection [m]
-local _pump_cycle       = 0       -- pumping cycle counter (for logging)
+-- Pumping state (reset on mode entry; substate + timers owned by ground planner)
+local _pump_bz_ri       = nil     -- reel-in body_z setpoint (computed internally from tether dir)
 
 -- ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -280,135 +305,155 @@ end
 -- switches (hub position hasn't moved).
 
 local function _on_mode_enter(mode)
-    _yaw_i            = 0.0
-    _yaw_not_stable_ms = nil
-    if mode == 4 then
-        -- Landing: clear final_drop latch so a re-entry works correctly
-        _land_final_drop = false
-
-    elseif mode == 5 then
-        -- Pumping: reset phase state machine
-        _pump_phase     = "hold"
-        _pump_t_phase   = 0.0
-        _pump_bz_ri     = nil     -- recomputed after capture
-        _pump_tlen_ref  = nil
-        _pump_cycle     = 0
+    _yaw_i              = 0.0
+    _yaw_last_throttle  = 0.0
+    _yaw_in_dead_zone   = true
+    _yaw_status_ms      = 0
+    _yaw_not_stable_ms  = nil
+    _yaw_test_start_ms    = nil
+    _yaw_limited_start_ms = nil
+    if mode == MODE_PUMPING then
+        -- Ground planner owns substate; Lua resets only the internally-derived target.
+        _pump_bz_ri = nil   -- recomputed from tether direction after first GPS capture
     end
 end
 
 -- ── Yaw-trim subsystem ───────────────────────────────────────────────────────
 
-local function compute_trim(motor_rpm, v_bat)
-    local omega_m    = motor_rpm * math.pi / 30.0
-    local omega_a    = omega_m / GEAR_RATIO
-    local omega_0    = KV_RAD * v_bat
-    local tau_stall  = v_bat / (KV_RAD * R_MOTOR)
-    local tau_needed = K_BEARING * omega_a / GEAR_RATIO
-    return math.max(0.0, math.min(1.0, tau_needed / tau_stall + omega_m / omega_0))
+local function _set_throttle_pct(pct)
+    -- Convert 0-100% throttle to PWM us (range 800-2000) and send to Script 1 output.
+    -- 800 us = off (SERVO9_TRIM), 2000 us = full throttle.
+    local pwm = math.floor(800.0 + pct * 12.0 + 0.5)
+    SRV_Channels:set_output_pwm(YAW_SRV_FUNC, pwm)
 end
 
-local function run_yaw_trim()
-    -- Stability watchdog latch: once triggered, keep motor at minimum and don't recover.
-    -- Ensures the vehicle stops without needing a radio/MAVLink connection.
+-- run_yaw_trim(hard_stop_ms)
+--   hard_stop_ms: if non-nil (mode 8), motor hard-cuts this many ms after hub first moves.
+local function run_yaw_trim(hard_stop_ms)
+    local now_ms = millis()
+
+    if not arming:is_armed() then
+        _yaw_last_throttle = 0.0; _yaw_in_dead_zone = true
+        _set_throttle_pct(0); return
+    end
+
+    -- Stability watchdog latch: motor off permanently after 30 s of instability.
     if _yaw_stopped then
-        SRV_Channels:set_output_pwm(YAW_SRV_FUNC, 1000)
-        return
+        _yaw_last_throttle = 0.0
+        _set_throttle_pct(0); return
     end
 
-    if not _rpm_lib then
-        if _diag % 500 == 1 then
-            gcs:send_text(3, "RAWES yaw: rpm library not available on this firmware")
-        end
-        return
-    end
-    local motor_rpm = _rpm_lib:get_rpm(0)
-
-    -- Battery voltage from onboard sensor; fall back to nominal if not ready
-    -- or if the battery binding is not available in this firmware build.
-    local v_bat = V_BAT_NOM
-    pcall(function()
-        local raw = battery:voltage(0)
-        if raw and raw >= V_BAT_MIN then v_bat = raw end
-    end)
-
-    if _diag % 500 == 1 then
-        gcs:send_text(6, string.format(
-            "RAWES yaw: rpm=%.0f  v_bat=%.1f V  diag=%d",
-            motor_rpm or -1, v_bat, _diag))
-    end
-
-    -- If the RPM driver is not active (returns nil), the sensor is unavailable
-    -- (e.g. RPM1_TYPE set post-boot in SITL before the driver has initialised).
-    -- Do nothing; the mediator safety fallback will maintain hub stability.
-    -- Do NOT send STARTUP_PWM in this case -- it would cause the hub to spin freely.
-    if motor_rpm == nil then return end
-
-    -- Cold-start: output a small startup throttle so the DShot ESC arms and
-    -- begins returning telemetry.  Once RPM exceeds MIN_RPM the trim loop takes
-    -- over.  No output if disarmed (safe bench default).
-    if motor_rpm < MIN_RPM then
-        if arming:is_armed() then
-            SRV_Channels:set_output_pwm(YAW_SRV_FUNC, STARTUP_PWM)
-        end
-        return
-    end
-
-    -- Read gyro once; reused for both the stability watchdog and the yaw correction.
     local gyro_z = 0.0
     local gyro = ahrs:get_gyro()
     if gyro then gyro_z = gyro:z() end
 
-    -- Stability watchdog: track how long yaw has been outside the stable band.
-    -- The 30 s clock only starts once RPM > MIN_RPM (motor actively running).
+    -- Stability watchdog.
     if math.abs(gyro_z) > YAW_STABLE_RAD_S then
-        if _yaw_not_stable_ms == nil then _yaw_not_stable_ms = millis() end
-        if millis() - _yaw_not_stable_ms >= YAW_STABLE_TIMEOUT_MS then
-            _yaw_i       = 0.0
-            _yaw_stopped = true
-            SRV_Channels:set_output_pwm(YAW_SRV_FUNC, 1000)
-            gcs:send_text(0, "RAWES: yaw unstable 30s - motor off")
-            arming:disarm()
-            return
+        if _yaw_not_stable_ms == nil then _yaw_not_stable_ms = now_ms end
+        if now_ms - _yaw_not_stable_ms >= YAW_STABLE_TIMEOUT_MS then
+            _yaw_i = 0.0; _yaw_stopped = true; _yaw_last_throttle = 0.0
+            _set_throttle_pct(0)
+            gcs:send_text(0, "RAWES yaw: unstable 30s - motor off")
+            arming:disarm(); return
         end
     else
         _yaw_not_stable_ms = nil
     end
 
-    -- Wrong rotation direction: motor can only make it worse, so do nothing.
-    -- Threshold is set well below any physical overshoot (~2 deg/s) so that
-    -- brief PI over-corrections don't trigger this guard.  A truly reversed
-    -- rotor produces psi_dot many times larger in magnitude.
-    -- The stability watchdog will disarm after 30 s if this persists.
-    local REVERSED_THRESHOLD = -math.rad(30.0)   -- -30 deg/s
-    if gyro_z < REVERSED_THRESHOLD then
-        _yaw_i = 0.0
-        SRV_Channels:set_output_pwm(YAW_SRV_FUNC, 1000)
-        return
+    -- Wrong rotation direction: cut motor; watchdog will disarm after 30 s.
+    if gyro_z < -math.rad(30.0) then
+        _yaw_i = 0.0; _yaw_last_throttle = 0.0
+        _set_throttle_pct(0); return
     end
 
-    -- PI controller: feedforward + P + I (all positive — NED convention).
-    -- Only integrate when near steady state (|gyro_z| < YAW_I_GATE = 3 deg/s).
-    -- This prevents I-term windup during the startup hold period (forced +5 deg/s)
-    -- and during large disturbances.
-    if math.abs(gyro_z) < YAW_I_GATE then
-        _yaw_i = math.max(-YAW_I_MAX, math.min(YAW_I_MAX,
-                 _yaw_i + KI_YAW * gyro_z * 0.01))   -- 0.01 s = 100 Hz tick
+    -- Hard-stop countdown (mode 8): timer starts on first movement out of dead zone.
+    local time_left_s = nil
+    if hard_stop_ms then
+        if _yaw_limited_start_ms == nil and math.abs(gyro_z) >= YAW_DEAD_ZONE_RAD_S then
+            _yaw_limited_start_ms = now_ms
+            gcs:send_text(6, string.format("RAWES yaw: limited PI started - stops in %ds",
+                math.floor(hard_stop_ms / 1000)))
+        end
+        if _yaw_limited_start_ms ~= nil then
+            local elapsed = now_ms - _yaw_limited_start_ms
+            time_left_s = math.max(0, math.floor((hard_stop_ms - elapsed) / 1000))
+            if elapsed >= hard_stop_ms then
+                _yaw_last_throttle = 0.0
+                _set_throttle_pct(0)
+                if now_ms - _yaw_status_ms >= 5000 then
+                    _yaw_status_ms = now_ms
+                    gcs:send_text(6, "RAWES yaw: hard stop - motor off")
+                end
+                return
+            end
+        end
     end
-    local trim = compute_trim(motor_rpm, v_bat)
-    local throttle = math.max(0.0, math.min(1.0, trim + KP_YAW * gyro_z + _yaw_i))
-    local pwm_us   = math.floor(1000.0 + throttle * 1000.0 + 0.5)
 
-    if _diag % 500 == 1 then
+    -- Dead zone: motor stays off until hub rotation exceeds threshold.
+    -- Once running, PI continues uninterrupted (handles the natural return-to-zero case).
+    local in_dead_zone = _yaw_last_throttle == 0.0 and math.abs(gyro_z) < YAW_DEAD_ZONE_RAD_S
+    if in_dead_zone ~= _yaw_in_dead_zone then
+        _yaw_in_dead_zone = in_dead_zone
+        if in_dead_zone then
+            gcs:send_text(6, string.format("RAWES yaw: dead zone  gyro=%.1f deg/s - motor off",
+                math.deg(gyro_z)))
+        else
+            gcs:send_text(6, string.format("RAWES yaw: leaving dead zone  gyro=%.1f deg/s - PI starting",
+                math.deg(gyro_z)))
+        end
+    end
+    if in_dead_zone then
+        _set_throttle_pct(0); return
+    end
+
+    -- PI controller.
+    _yaw_i = math.max(-YAW_I_MAX, math.min(YAW_I_MAX,
+             _yaw_i + KI_YAW * gyro_z * 0.01))
+    local throttle_pct = math.max(0.0, math.min(100.0,
+        BASE_THROTTLE_PCT + KP_YAW * gyro_z + _yaw_i))
+    _yaw_last_throttle = throttle_pct
+    _set_throttle_pct(throttle_pct)
+
+    -- Periodic status every 5 s.
+    if now_ms - _yaw_status_ms >= 5000 then
+        _yaw_status_ms = now_ms
+        local suffix = (time_left_s ~= nil)
+            and string.format("  left=%ds", time_left_s) or ""
         gcs:send_text(6, string.format(
-            "RAWES ACTIVE: trim=%.3f  thr=%.3f  pwm=%d",
-            trim, throttle, pwm_us))
+            "RAWES yaw: gyro=%.1f deg/s  thr=%.1f%%  I=%.1f%%%s",
+            math.deg(gyro_z), throttle_pct, _yaw_i, suffix))
+    end
+end
+
+local function run_yaw_test()
+    -- Mode 7: run motor at fixed throttle for 20 s then off.  Bench verification only.
+    if not arming:is_armed() then _set_throttle_pct(0); return end
+
+    local YAW_TEST_THROTTLE_PCT = 25.0
+    local YAW_TEST_DURATION_MS  = 20000
+    local now_ms = millis()
+
+    if _yaw_test_start_ms == nil then
+        _yaw_test_start_ms = now_ms
+        gcs:send_text(6, string.format("RAWES yaw test: motor at %.0f%% for %ds",
+            YAW_TEST_THROTTLE_PCT, YAW_TEST_DURATION_MS / 1000))
     end
 
-    local ok, err = pcall(function()
-        SRV_Channels:set_output_pwm(YAW_SRV_FUNC, pwm_us)
-    end)
-    if not ok and _diag % 500 == 1 then
-        gcs:send_text(3, "RAWES: servo err: " .. tostring(err))
+    local elapsed = now_ms - _yaw_test_start_ms
+    if elapsed < YAW_TEST_DURATION_MS then
+        _set_throttle_pct(YAW_TEST_THROTTLE_PCT)
+        if now_ms - _yaw_status_ms >= 5000 then
+            _yaw_status_ms = now_ms
+            gcs:send_text(6, string.format("RAWES yaw test: thr=%.0f%%  %ds left",
+                YAW_TEST_THROTTLE_PCT,
+                math.floor((YAW_TEST_DURATION_MS - elapsed) / 1000)))
+        end
+    else
+        _set_throttle_pct(0)
+        if now_ms - _yaw_status_ms >= 5000 then
+            _yaw_status_ms = now_ms
+            gcs:send_text(6, "RAWES yaw test: done - motor off")
+        end
     end
 end
 
@@ -418,9 +463,11 @@ local function run_flight()
     -- Only run in ACRO_Heli mode
     if vehicle:get_mode() ~= ACRO_MODE_NUM then return end
 
-    local mode_now    = math.floor(p("SCR_USER6", 0) + 0.5)
-    local _is_landing = mode_now == 4
-    local _is_pumping = mode_now == 5
+    local mode_now    = _prev_mode          -- decoded from SCR_USER6 in update()
+    local substate    = _prev_sub
+    local dt          = FLIGHT_PERIOD_MS * 0.001   -- 50 Hz step [s]
+    local _is_landing = mode_now == MODE_LANDING
+    local _is_pumping = mode_now == MODE_PUMPING
     -- Select altitude-neutral collective for the current mode.
     local col_cruise  = _is_landing and COL_CRUISE_LAND_RAD or COL_CRUISE_FLIGHT_RAD
 
@@ -463,15 +510,17 @@ local function run_flight()
     -- kinematic exit.  GPS tether recapture (below) corrects bz_eq0 once GPS
     -- fuses (~35 s after kinematic exit).
     if not _captured and mode_now ~= 0 then
-        _bz_eq0   = disk_normal_ned()
-        _bz_orbit = v3_copy(_bz_eq0)
-        _bz_slerp = v3_copy(_bz_eq0)
-        _tdir0    = nil   -- set by GPS tether recapture when GPS fuses
-        _captured = true
-        local label = _is_landing and "land" or (_is_pumping and "pump" or "flight")
+        _bz_eq0       = disk_normal_ned()
+        _bz_orbit     = v3_copy(_bz_eq0)
+        _bz_slerp     = v3_copy(_bz_eq0)
+        _tdir0        = nil   -- set by GPS tether recapture when GPS fuses
+        _last_col_rad = col_cruise  -- start at mode-appropriate cruise; avoids thrust
+                                    -- dropout when entering landing/pumping from orbit
+        _captured     = true
+        local label = _is_landing and "land" or (_is_pumping and "pump" or "steady")
         gcs:send_text(6, string.format(
-            "RAWES %s: captured  bz=(%.2f %.2f %.2f)",
-            label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z()))
+            "RAWES %s: captured  bz=(%.2f %.2f %.2f)  sub=%d",
+            label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z(), substate))
     end
 
     -- ── GPS tether vector + synchronized capture ──────────────────────────
@@ -498,7 +547,7 @@ local function run_flight()
             _bz_eq0   = disk_normal_ned()   -- capture from DCM at GPS fire time
             _bz_orbit = v3_copy(_bz_eq0)    -- bz_orbit was already tracking bz_now
             _bz_slerp = v3_copy(_bz_eq0)    -- no step change in slerp
-            local label = _is_landing and "land" or (_is_pumping and "pump" or "flight")
+            local label = _is_landing and "land" or (_is_pumping and "pump" or "steady")
             gcs:send_text(6, string.format(
                 "RAWES %s: GPS  bz=(%.2f %.2f %.2f)  tlen=%.1f m",
                 label, _bz_eq0:x(), _bz_eq0:y(), _bz_eq0:z(), tlen))
@@ -523,98 +572,19 @@ local function run_flight()
         gcs:send_text(6, string.format(
             "RAWES pump: bz_ri=(%.2f %.2f %.2f)  xi=%.0f deg",
             _pump_bz_ri:x(), _pump_bz_ri:y(), _pump_bz_ri:z(), XI_REEL_IN_DEG))
-        if tlen then _pump_tlen_ref = tlen end
     end
 
-    -- ── Landing: final_drop transition ────────────────────────────────────
-    -- Use altitude estimate (anchor.z - hub.z) rather than 3D tlen.
-    -- With vel0 pointing horizontally, EKF origin Z = 0, so:
-    --   altitude_est = anch:z() - pos_ned:z() = anchor_local_z - hub_local_z
-    -- This is independent of EKF horizontal origin offset.
-    if _is_landing and pos_ned then
-        local anch = anchor_ned()
-        local alt_est = anch:z() - pos_ned:z()
-        if (not _land_final_drop) and alt_est <= LAND_MIN_TETHER_M then
-            _land_final_drop = true
-            gcs:send_text(6, string.format(
-                "RAWES land: final_drop  alt_est=%.2f m", alt_est))
-        end
-        if _land_final_drop then
-            -- Zero collective (0 rad), neutral cyclic, stop
-            local col_thrust = (0.0 - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-            local ch3_fd = math.floor(1000.0 + col_thrust * 1000.0 + 0.5)
-            if _rc_ch1 then _rc_ch1:set_override(1500) end
-            if _rc_ch2 then _rc_ch2:set_override(1500) end
-            if _rc_ch3 then _rc_ch3:set_override(ch3_fd) end
-            _prev_ch1 = 1500
-            _prev_ch2 = 1500
-            return
-        end
-    end
-
-    -- ── Pumping: phase state machine (requires GPS tlen) ─────────────────
-    -- Phases follow the ground planner's actual winch motion (tether length
-    -- change), not a local timer, so Lua stays synchronised regardless of
-    -- kinematic startup timing.
-    --
-    -- hold      -> reel_out  : tether pays out (mediator starts reel_out)
-    -- reel_out  -> transition: tether reels in (mediator ends reel_out)
-    -- transition-> reel_in   : time-based (T_TRANSITION seconds)
-    -- reel_in   -> reel_out  : tether pays out (mediator starts next cycle)
-    local dt = FLIGHT_PERIOD_MS * 0.001
-
-    if _is_pumping and tlen then
-        _pump_t_phase = _pump_t_phase + dt
-
-        if _pump_phase == "hold" then
-            -- Detect cumulative reel-out: tlen must increase PUMP_LEN_THRESH above
-            -- the minimum tlen seen since GPS became available.  Track minimum so
-            -- the reference follows the hub to equilibrium after kinematic exit.
-            if _pump_tlen_ref == nil or tlen < _pump_tlen_ref then
-                _pump_tlen_ref = tlen
-            end
-            if _pump_tlen_ref ~= nil and tlen > _pump_tlen_ref + PUMP_LEN_THRESH then
-                _pump_phase    = "reel_out"
-                _pump_t_phase  = 0.0
-                _pump_cycle    = _pump_cycle + 1
-                _pump_tlen_ref = tlen
-                gcs:send_text(6, string.format(
-                    "RAWES pump: reel_out  cycle=%d  tlen=%.1f m",
-                    _pump_cycle, tlen))
-            end
-
-        elseif _pump_phase == "reel_out" then
-            -- Track peak tether length; detect start of reel-in (tlen drops from peak)
-            if _pump_tlen_ref == nil or tlen > _pump_tlen_ref then _pump_tlen_ref = tlen end
-            if tlen < _pump_tlen_ref - PUMP_LEN_THRESH then
-                _pump_phase    = "transition"
-                _pump_t_phase  = 0.0
-                _pump_tlen_ref = tlen
-                gcs:send_text(6, string.format(
-                    "RAWES pump: transition  tlen=%.1f m", tlen))
-            end
-
-        elseif _pump_phase == "transition" then
-            if _pump_t_phase >= T_TRANSITION then
-                _pump_phase   = "reel_in"
-                _pump_t_phase = 0.0
-                gcs:send_text(6, string.format(
-                    "RAWES pump: reel_in  tlen=%.1f m", tlen))
-            end
-
-        elseif _pump_phase == "reel_in" then
-            -- Track trough tether length; detect start of next reel-out (tlen rises)
-            if _pump_tlen_ref == nil or tlen < _pump_tlen_ref then _pump_tlen_ref = tlen end
-            if tlen > _pump_tlen_ref + PUMP_LEN_THRESH then
-                _pump_phase    = "reel_out"
-                _pump_t_phase  = 0.0
-                _pump_cycle    = _pump_cycle + 1
-                _pump_tlen_ref = tlen
-                gcs:send_text(6, string.format(
-                    "RAWES pump: reel_out  cycle=%d  tlen=%.1f m",
-                    _pump_cycle, tlen))
-            end
-        end
+    -- ── Landing: final_drop (substate commanded by ground planner) ────────
+    if _is_landing and substate == LAND_FINAL_DROP then
+        -- Zero collective (0 rad), neutral cyclic, drop to floor.
+        local col_thrust = (0.0 - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+        local ch3_fd = math.floor(1000.0 + col_thrust * 1000.0 + 0.5)
+        if _rc_ch1 then _rc_ch1:set_override(1500) end
+        if _rc_ch2 then _rc_ch2:set_override(1500) end
+        if _rc_ch3 then _rc_ch3:set_override(ch3_fd) end
+        _prev_ch1 = 1500
+        _prev_ch2 = 1500
+        return
     end
 
     -- ── Orbit tracking update (requires GPS tether direction) ─────────────
@@ -663,17 +633,18 @@ local function run_flight()
     -- Pumping uses _pump_bz_ri as the slerp goal directly; not affected here.
     if _bz_target and (millis() - _plan_ms) > PLANNER_TIMEOUT then
         _bz_target = nil
-        gcs:send_text(6, "RAWES flight: planner timeout -- reverting to orbit")
+        gcs:send_text(6, "RAWES steady: planner timeout -- reverting to orbit")
     end
 
     -- ── Rate-limited slerp toward goal ────────────────────────────────────
-    -- Pumping reel-in/transition: slerp toward fixed xi=80 deg orientation.
+    -- Pumping transition/reel_in: slerp toward xi=80 deg orientation.
     -- All other modes: slerp toward external planner override or orbit tracking.
     local bz_slew = p("SCR_USER2", 0.40)
     local goal
-    if _is_pumping and (_pump_phase == "transition" or _pump_phase == "reel_in") then
+    if _is_pumping and (substate == PUMP_TRANSITION or substate == PUMP_REEL_IN) then
         goal = _pump_bz_ri or _bz_orbit  -- fallback if _pump_bz_ri not yet computed
     else
+        -- PUMP_REEL_OUT, PUMP_TRANSITION_BACK, PUMP_HOLD: slerp toward orbit
         goal = _bz_target or _bz_orbit
     end
 
@@ -688,14 +659,17 @@ local function run_flight()
     end
 
     -- ── Cyclic P loop ─────────────────────────────────────────────────────
-    -- Error: bz_now × _bz_orbit (NOT _bz_slerp).
-    -- _bz_slerp moves at 0.40 rad/s; orbit rate is ~4 rad/s.  When slerp
-    -- lags behind orbit, bz_now × bz_slerp pushes BACKWARD, fighting the
-    -- natural precession.  Using _bz_orbit (the advancing orbit target)
-    -- gives the correct restoring direction.
-    local kp      = p("SCR_USER1", 1.0)
-    local bz_now  = disk_normal_ned()
-    local err_ned = bz_now:cross(_bz_orbit)
+    -- Orbit modes (HOLD/REEL_OUT): use _bz_orbit (azimuthal tracker).
+    -- Pumping transitions (TRANSITION/REEL_IN/TRANSITION_BACK): use _bz_slerp.
+    --   _bz_orbit is azimuthal-only (z fixed at orbit xi~23 deg). Using it
+    --   during TRANSITION resists xi=80 rotation → hub stays at xi~23 with
+    --   col=0.079 → massive over-thrust → tether slack → crash.
+    local kp  = p("SCR_USER1", 1.0)
+    local bz_now = disk_normal_ned()
+    local _use_slerp = _is_pumping and (
+        substate == PUMP_TRANSITION or substate == PUMP_REEL_IN
+        or substate == PUMP_TRANSITION_BACK)
+    local err_ned = bz_now:cross(_use_slerp and _bz_slerp or _bz_orbit)
 
     local err_body = ahrs:earth_to_body(err_ned)
     local err_bx   = err_body:x()    -- body X (roll)
@@ -741,10 +715,27 @@ local function run_flight()
     -- Landing / flight: VZ descent-rate controller (hardcoded vz_sp per mode).
     local col_cmd
     if _is_pumping then
-        if _pump_phase == "hold" or _pump_phase == "reel_out" then
+        if substate == PUMP_HOLD or substate == PUMP_REEL_OUT then
             col_cmd = COL_REEL_OUT
-        else   -- transition or reel_in
+        elseif substate == PUMP_TRANSITION then
+            -- Ramp collective from reel-out to reel-in over T_TRANSITION.
+            -- Starts when winch reverses (substate set by ground planner at T_reel_out).
+            -- body_z slerps toward bz_ri simultaneously via the slerp goal above.
+            -- Ramp is synchronised with slerp: at progress=1, both reach reel-in targets.
+            local t_in_sub = (millis() - _submode_ms) * 0.001
+            local progress = math.min(1.0, t_in_sub / T_TRANSITION)
+            col_cmd = COL_REEL_OUT + progress * (COL_REEL_IN - COL_REEL_OUT)
+        elseif substate == PUMP_REEL_IN then
             col_cmd = COL_REEL_IN
+        else  -- PUMP_TRANSITION_BACK
+            -- Ramp collective from reel-in back to reel-out over T_TRANSITION.
+            -- Starts at cycle boundary when winch reverses to pay-out direction.
+            -- body_z slerps toward _bz_orbit simultaneously (via slerp goal above).
+            -- Without this ramp: at xi=80 deg, COL_REEL_OUT=-0.20 produces near-zero
+            -- lift → hub drops immediately at cycle start.
+            local t_in_sub = (millis() - _submode_ms) * 0.001
+            local progress = math.min(1.0, t_in_sub / T_TRANSITION)
+            col_cmd = COL_REEL_IN + progress * (COL_REEL_OUT - COL_REEL_IN)
         end
     elseif _tdir0 == nil then
         -- Pre-GPS: EKF vz is biased (GPS altitude noise during horizontal kinematic flight).
@@ -793,8 +784,7 @@ local function run_flight()
         local err_mag  = math.sqrt(err_bx * err_bx + err_by * err_by)
         local pump_info = ""
         if _is_pumping and tlen then
-            pump_info = string.format("  pump=%s/c%d  tlen=%.1f m",
-                _pump_phase, _pump_cycle, tlen)
+            pump_info = string.format("  pump=%d  tlen=%.1f m", substate, tlen)
         end
         gcs:send_text(6, string.format(
             "RAWES: ch1=%d ch2=%d ch3=%d |err|=%.3f rad  col=%.3f rad%s",
@@ -813,26 +803,50 @@ local function update()
         _rc_ch8:set_override(2000)
     end
 
-    local mode = math.floor(p("SCR_USER6", 0) + 0.5)
+    -- ── Decode SCR_USER6 = mode_num * 1000 + substate ────────────────────
+    local raw  = math.floor(p("SCR_USER6", 0) + 0.5)
+    local mode = math.floor(raw / 1000)
+    local sub  = raw % 1000
+    local now  = millis()
 
-    -- Mode-change detection: reset per-mode state on entry.
-    -- Fires on the very first tick (_active_mode = -1) and on any subsequent change.
-    if mode ~= _active_mode then
+    -- Track mode and substate changes; reset state on mode entry.
+    if mode ~= _prev_mode then
         _on_mode_enter(mode)
-        _active_mode = mode
+        _prev_mode  = mode
+        _prev_sub   = sub
+        _mode_ms    = now
+        _submode_ms = now
+    elseif sub ~= _prev_sub then
+        _prev_sub   = sub
+        _submode_ms = now
     end
 
     -- mode 0: both subsystems disabled
-    if mode == 0 then return update, BASE_PERIOD_MS end
+    if mode == MODE_NONE then return update, BASE_PERIOD_MS end
 
-    -- Yaw-trim subsystem: runs every tick (100 Hz) when mode 2 or 3
-    if mode == 2 or mode == 3 then
-        run_yaw_trim()
+    -- MODE_ARM_HOLD: hold RC overrides to prevent failsafe / auto-disarm
+    if mode == MODE_ARM_HOLD then
+        if _rc_ch3 then _rc_ch3:set_override(1000) end
+        if _rc_ch8 then _rc_ch8:set_override(2000) end
+        if _diag % 200 == 1 then
+            local armed = arming:is_armed() and "ARMED" or "disarmed"
+            gcs:send_text(6, "RAWES arm_hold: " .. armed .. "  ch3=1000 ch8=2000")
+        end
+        return update, BASE_PERIOD_MS
     end
 
-    -- Flight subsystem: runs at 50 Hz sub-step for modes 1, 3, 4, 5
-    if mode == 1 or mode == 3 or mode == 4 or mode == 5 then
-        local now = millis()
+    -- Yaw-trim subsystem: runs every tick (100 Hz)
+    if mode == MODE_YAW or mode == MODE_STEADY_YAW then
+        run_yaw_trim()
+    elseif mode == MODE_YAW_TEST then
+        run_yaw_test()
+    elseif mode == MODE_YAW_LTD then
+        run_yaw_trim(30000)
+    end
+
+    -- Flight subsystem: runs at 50 Hz sub-step
+    if mode == MODE_STEADY or mode == MODE_STEADY_YAW
+    or mode == MODE_LANDING or mode == MODE_PUMPING then
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
             _last_flight_ms = now
             run_flight()
@@ -844,15 +858,20 @@ end
 
 -- ── Entry point ──────────────────────────────────────────────────────────────
 
-local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="flight", [2]="yaw",
-                     [3]="both", [4]="landing", [5]="pumping"}
+local _raw_init   = math.floor(p("SCR_USER6", 0) + 0.5)
+local _mode_init  = math.floor(_raw_init / 1000)
+local _sub_init   = _raw_init % 1000
+local _mode_names = {[0]="none",         [1]="steady_noyaw",  [2]="yaw",
+                     [3]="steady",       [4]="landing_noyaw", [5]="pumping_noyaw",
+                     [6]="arm_hold_noyaw", [7]="yaw_test",    [8]="yaw_limited"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
-    "RAWES: loaded  mode=%d (%s)  kp=%.2f  slew=%.2f  anchor=(%.1f %.1f %.1f)",
-    _mode_init, _mode_str,
+    "RAWES: loaded  mode=%d (%s)  sub=%d  kp=%.2f  slew=%.2f  anchor=(%.1f %.1f %.1f)",
+    _mode_init, _mode_str, _sub_init,
     p("SCR_USER1", 1.0), p("SCR_USER2", 0.40),
     p("SCR_USER3", 0.0), p("SCR_USER4", 0.0), p("SCR_USER5", 0.0)))
+
+-- @@UNIT_TEST_HOOK
 
 return update, BASE_PERIOD_MS

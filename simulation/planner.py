@@ -58,7 +58,7 @@ Available controllers
     HoldPlanner()
         Returns natural equilibrium command every step.
         attitude_q = identity → Mode_RAWES stays tether-aligned through orbit tracking.
-        Use for: test_closed_loop_60s.py
+        Use for: test_closed_loop_90s.py
 
     DeschutterPlanner(t_reel_out, t_reel_in, t_transition,
                          v_reel_out, v_reel_in, tension_out, tension_in,

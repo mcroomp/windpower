@@ -112,6 +112,28 @@ class SimClock:
         return self._t_ms
 
 
+class WallClock:
+    """
+    Wall-clock drop-in for SimClock — for use outside SITL (e.g. hardware calibration).
+
+    Uses ``time.monotonic()`` so all deadline arithmetic in RawesGCS works correctly
+    on a real serial connection where ``time_boot_ms`` starts at an arbitrary uptime
+    value rather than near zero.
+    """
+
+    def __init__(self) -> None:
+        self._t0 = time.monotonic()
+
+    def update(self, time_boot_ms: int) -> None:  # noqa: ARG002
+        pass  # wall clock is self-advancing; ignore MAVLink timestamps
+
+    def now(self) -> float:
+        return time.monotonic() - self._t0
+
+    def now_ms(self) -> int:
+        return int((time.monotonic() - self._t0) * 1000)
+
+
 class RawesGCS:
     """
     Minimal MAVLink GCS client for RAWES SITL control.
@@ -123,6 +145,12 @@ class RawesGCS:
         output port (udpin = we listen, SITL sends).
     source_system : int
         MAVLink system ID to use for outgoing messages (GCS = 255).
+    baud : int
+        Baud rate for serial connections (ignored for UDP).  Default 115200.
+    clock : SimClock | WallClock | None
+        Clock to use for all deadline arithmetic.  Pass a ``WallClock()``
+        instance when connecting to real hardware over USB/serial; omit (or
+        pass None) for SITL where the sim clock is driven by ``time_boot_ms``.
     """
 
     def __init__(
@@ -130,15 +158,18 @@ class RawesGCS:
         address: str = "udpin:localhost:14550",
         source_system: int = 255,
         mavlog_path: "str | Path | None" = None,
+        baud: int = 115200,
+        clock: "SimClock | WallClock | None" = None,
     ):
         self._address = address
         self._source_system = source_system
+        self._baud = baud
         self._mav = None
         self._target_system = 1
         self._target_component = 1
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
-        self._sim_clock = SimClock()
+        self._sim_clock = clock if clock is not None else SimClock()
         # Internal receive buffer — messages drained from the network socket but
         # not yet returned to a caller.  Populated by _recv; popped in FIFO order.
         # Clock is advanced only when a message is popped, so sim_now() stays
@@ -292,6 +323,7 @@ class RawesGCS:
             try:
                 self._mav = mavutil.mavlink_connection(
                     self._address,
+                    baud=self._baud,
                     source_system=self._source_system,
                 )
                 hb = self._mav.wait_heartbeat(timeout=5.0)

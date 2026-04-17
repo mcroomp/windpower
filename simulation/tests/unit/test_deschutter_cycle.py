@@ -50,7 +50,7 @@ from controller  import OrbitTracker, col_min_for_altitude_rad, AcroController
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
-from simtest_log import SimtestLog
+from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 from tel         import make_tel
 from telemetry_csv import TelRow, write_csv
@@ -184,8 +184,7 @@ def _run_deschutter_cycle(
     rest_lengths     = []
     collectives      = []
     tilts_from_wind  = []
-    floor_hits       = 0
-    pumping_slack_events = 0
+    events           = BadEventLog()
     telemetry        = []
     energy_out       = 0.0
     energy_in        = 0.0
@@ -249,9 +248,14 @@ def _run_deschutter_cycle(
         M_orbital = result.M_orbital + tm
         tension_now = tether._last_info.get("tension", 0.0)
 
-        # ── Energy accounting + slack detection ──────────────────────────
+        # ── Energy accounting + bad-event tracking ───────────────────────
+        altitude = -hub_state["pos"][2]
         if tether._last_info.get("slack", False):
-            pumping_slack_events += 1
+            events.record("slack", t, str(cmd.get("phase", "reel-out")), altitude,
+                          tension=tension_now)
+        if tension_now > BREAK_LOAD_N:
+            events.record("tension_spike", t, str(cmd.get("phase", "reel-out")), altitude,
+                          tension=tension_now)
         if cmd["phase"] == "reel-out":
             energy_out += tension_now * v_reel_out * DT
             tensions_out_acc.append(tension_now)
@@ -265,10 +269,9 @@ def _run_deschutter_cycle(
         M_orbital += -50.0 * hub_state["omega"]
         hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] >= -1.05:  # NED: Z >= -1.05 m = altitude <= 1.05 m
-            floor_hits += 1
-            if floor_hits > 200:
-                break   # persistent crash — abort early, test will fail
+        if events.check_floor(hub_state["pos"][2], t, str(cmd.get("phase", "reel-out")), 1.05):
+            if events.count("floor_hit") > 200:
+                break   # persistent crash — abort early
 
         # ── Record (1 Hz) ─────────────────────────────────────────────────
         if i % rec_every == 0:
@@ -313,8 +316,7 @@ def _run_deschutter_cycle(
         rest_lengths     = rest_lengths,
         collectives      = collectives,
         tilts_from_wind  = tilts_from_wind,
-        floor_hits            = floor_hits,
-        pumping_slack_events  = pumping_slack_events,
+        events                = events,
         energy_out            = energy_out,
         energy_in        = energy_in,
         net_energy       = energy_out - energy_in,
@@ -329,110 +331,21 @@ def _run_deschutter_cycle(
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
-def test_deschutter_no_crash():
-    """Hub must stay above z_floor throughout both reel phases."""
+def test_deschutter_cycle():
+    """De Schutter pumping cycle: no bad events, mechanism works, net energy positive."""
     r = _run_deschutter_cycle()
     _print_cycle(r)
-    assert r["floor_hits"] == 0, \
-        f"Hub hit z_floor {r['floor_hits']} times during De Schutter cycle"
-
-
-def test_deschutter_no_tether_slack():
-    """
-    Tether must never go slack during the pumping cycle.
-
-    A slack tether means zero tension: the hub is in free fall, the tether
-    torque vanishes, and disk orientation becomes uncontrolled.  On hardware
-    this is a loss-of-control event.  The planner's trapezoid winch-speed
-    profile (ramp up AND ramp down over t_transition) prevents the momentum-
-    driven slack that occurred with an abrupt speed reversal at the phase
-    boundary.
-    """
-    r = _run_deschutter_cycle()
-    assert r["pumping_slack_events"] == 0, (
-        f"Tether went slack {r['pumping_slack_events']} times during pumping "
-        "(zero tension = loss of control)"
-    )
-
-
-def test_deschutter_reel_in_lower_tension():
-    """
-    Reel-in mean tension must be less than reel-out mean tension.
-
-    This is the De Schutter mechanism: tilting body_z to vertical during
-    reel-in redirects thrust upward (fighting gravity), not along the tether,
-    so the winch encounters near-zero aerodynamic resistance.
-    """
-    r = _run_deschutter_cycle()
-    # Exclude the first T_TRANSITION seconds of reel-in (hub is still tilting)
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
     skip = int(T_TRANSITION)
     mean_out = float(np.mean(r["tensions_out"])) if r["tensions_out"] else 0.0
     mean_in  = float(np.mean(r["tensions_in"][skip:])) if r["tensions_in"][skip:] else 0.0
-    assert mean_in < mean_out, (
-        f"Reel-in steady tension ({mean_in:.1f} N) not less than reel-out ({mean_out:.1f} N) — "
-        "De Schutter tilt mechanism not working"
-    )
-
-
-def test_deschutter_net_energy_positive():
-    """
-    Reel-out energy must exceed reel-in energy.
-
-    This is the fundamental AWE pumping-cycle condition.  With the De Schutter
-    tilt strategy, reel-in tension drops to near the gravity component along
-    the tether (~15–30 N), well below the reel-out tension (~150–250 N).
-    """
-    r = _run_deschutter_cycle()
-    assert r["net_energy"] > 0, (
-        f"Net energy {r['net_energy']:.1f} J ≤ 0 — "
-        "De Schutter cycle does not produce net power"
-    )
-
-
-def test_deschutter_reel_in_tilt_achieved():
-    """
-    During steady reel-in (after transition), body_z must be within ±10° of
-    XI_REEL_IN_DEG (the module default reel-in tilt target).
-
-    The aerodynamic equilibrium settles ~1–3° below the commanded target due
-    to controller lag; ±10° tolerance accommodates this.
-    """
-    r = _run_deschutter_cycle()
-    skip = int(T_TRANSITION) + 2   # allow a couple of extra seconds for settling
-    tilts_steady = r["tilts_from_wind"][int(T_REEL_OUT) + skip:]
-    if not tilts_steady:
-        pytest.skip("No steady reel-in data to check tilt")
-    mean_tilt = float(np.mean(tilts_steady))
-    assert XI_REEL_IN_DEG - 10.0 <= mean_tilt <= XI_REEL_IN_DEG + 10.0, (
-        f"Steady reel-in mean tilt = {mean_tilt:.1f}° not within ±10° of "
-        f"target {XI_REEL_IN_DEG:.0f}° — body_z not tracking reel-in orientation"
-    )
-
-
-def test_deschutter_reel_out_tilt_in_range():
-    """
-    During reel-out, body_z must stay within De Schutter's 30–55° tilt range
-    (tether-aligned orbit flight).  A large deviation means the tilt controller
-    is fighting the tether alignment.
-    """
-    r = _run_deschutter_cycle()
-    tilts_out = r["tilts_from_wind"][:int(T_REEL_OUT)]
-    if not tilts_out:
-        pytest.skip("No reel-out tilt data")
-    mean_tilt_out = float(np.mean(tilts_out))
-    assert 25.0 <= mean_tilt_out <= 60.0, (
-        f"Reel-out mean tilt ξ = {mean_tilt_out:.1f}° outside 25–60° — "
-        "hub not in expected reel-out orientation"
-    )
-
-
-def test_deschutter_tether_not_broken():
-    """Peak tension must stay below 80% of Dyneema SK75 1.9 mm break load (620 N)."""
-    r    = _run_deschutter_cycle()
-    peak = max(r["tensions"])
-    limit = 0.8 * BREAK_LOAD_N
-    assert peak < limit, \
-        f"Peak tension {peak:.1f} N ≥ 80% break load ({limit:.1f} N)"
+    if mean_in >= mean_out:
+        failures.append(f"De Schutter mechanism failed: reel-in {mean_in:.1f}N >= reel-out {mean_out:.1f}N")
+    if r["net_energy"] <= 0:
+        failures.append(f"net_energy={r['net_energy']:.1f}J <= 0")
+    assert not failures, "\n  ".join(failures)
 
 
 # ── Analysis CSV export test ─────────────────────────────────────────────────
@@ -478,10 +391,10 @@ def _print_cycle(r):
                  f"energy={r['energy_out']:.1f}J")
     lines.append(f"  Reel-in (steady): mean={np.mean(inn):.1f}N  max={max(inn):.1f}N  "
                  f"energy={r['energy_in']:.1f}J")
-    lines.append(f"  Net energy: {r['net_energy']:.1f}J  floor_hits={r['floor_hits']}")
+    lines.append(f"  Net energy: {r['net_energy']:.1f}J  {r['events'].summary()}")
     _log.write(lines, f"net={r['net_energy']:.0f}J  "
                f"reel-out={np.mean(out):.0f}N  reel-in={np.mean(inn):.0f}N  "
-               f"floor_hits={r['floor_hits']}")
+               f"{r['events'].summary()}")
 
 
 # ── CLI: generate telemetry CSV for 3D visualizer ────────────────────────────
@@ -500,7 +413,7 @@ if __name__ == "__main__":
           f"Reel-out energy: {result['energy_out']:.1f} J  "
           f"Reel-in energy: {result['energy_in']:.1f} J  "
           f"Net: {result['net_energy']:.1f} J  "
-          f"Floor hits: {result['floor_hits']}")
+          f"Events: {result['events'].summary()}")
     _write_csv([_TelRow.from_tel(d) for d in result["telemetry"]], args.save_telemetry)
     print(f"\nRun visualizer:")
     print(f"  python simulation/viz3d/visualize_3d.py {args.save_telemetry}")

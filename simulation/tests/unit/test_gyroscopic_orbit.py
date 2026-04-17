@@ -39,14 +39,14 @@ from aero       import create_aero
 from tether     import TetherModel
 from controller import OrbitTracker, AcroController
 from frames     import build_orb_frame
-from simtest_log import SimtestLog
+from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 
 _log = SimtestLog(__file__)
 _IC  = load_ic()
 
 # ---------------------------------------------------------------------------
-# Shared simulation constants (match test_closed_loop_60s.py)
+# Shared simulation constants (match test_closed_loop_90s.py)
 # ---------------------------------------------------------------------------
 DT        = 1.0 / 400.0     # 400 Hz
 T_SIM     = 60.0            # seconds
@@ -91,7 +91,7 @@ def _run_orbit(
         min_z         : minimum altitude [m]
         max_drift     : maximum horizontal distance from POS0 [m]
         final_bz_z    : final body_z[2] (should be ~0.43 at equilibrium)
-        floor_hits    : steps where z < 1 m
+        events        : BadEventLog (floor_hit events)
         spin_final    : final omega_spin [rad/s]
     """
     rotor = rd.default()
@@ -118,7 +118,7 @@ def _run_orbit(
                                  rd.default().body_z_slew_rate_rad_s)
     acro = AcroController.from_rotor(rd.default())
     pos_history = []
-    floor_hits  = 0
+    events      = BadEventLog()
 
     n_steps = int(t_sim / DT)
     for i in range(n_steps):
@@ -159,8 +159,7 @@ def _run_orbit(
         hub_state = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
 
         pos_history.append(hub_state["pos"].copy())
-        if hub_state["pos"][2] > -1.0:  # NED: Z > -1 m = altitude < 1 m
-            floor_hits += 1
+        events.check_floor(hub_state["pos"][2], t, "flight")
 
     pos_arr    = np.array(pos_history)
     drifts     = np.linalg.norm(pos_arr[:, :2] - POS0[:2], axis=1)
@@ -171,7 +170,7 @@ def _run_orbit(
         "min_z":        float(-pos_arr[:, 2].max()),   # minimum altitude [m] = -(max NED Z)
         "max_drift":    float(drifts.max()),
         "final_bz_z":   float(final_bz_z),
-        "floor_hits":   floor_hits,
+        "events":       events,
         "spin_final":   float(omega_spin),
     }
 
@@ -185,7 +184,7 @@ def _run_orbit(
 def test_gyro_baseline_stable():
     """I_spin = 0 (gyroscopic coupling disabled) — reference baseline."""
     r = _run_orbit(I_spin_kgm2=0.0, swashplate_phase_deg=0.0)
-    assert r["floor_hits"] == 0,              f"floor hits with I_spin=0: {r['floor_hits']}"
+    assert not r["events"],                    f"bad events with I_spin=0: {r['events'].summary()}"
     assert r["max_drift"]  < 200.0,           f"excessive drift: {r['max_drift']:.1f} m"
     assert r["min_z"]      >  MIN_Z_OK,       f"too low: {r['min_z']:.1f} m (need > {MIN_Z_OK:.1f})"
     assert r["spin_final"] > 10.0,            f"spin stalled: {r['spin_final']:.2f} rad/s"
@@ -216,8 +215,8 @@ def test_gyro_no_phase_destabilised():
 
     # With strong angular damping, gyroscopic coupling at I_spin~4 kg·m² does not
     # significantly degrade orbit stability.  Both runs should stay stable.
-    assert r_gyro["floor_hits"] == 0, (
-        f"Floor hits with I_spin={I_spin:.2f} kg·m²: {r_gyro['floor_hits']}")
+    assert not r_gyro["events"], (
+        f"Bad events with I_spin={I_spin:.2f} kg·m²: {r_gyro['events'].summary()}")
     assert r_gyro["max_drift"] < 200.0, (
         f"Excessive drift with I_spin={I_spin:.2f}: {r_gyro['max_drift']:.1f} m")
     assert r_gyro["min_z"] > MIN_Z_OK, (
@@ -228,7 +227,8 @@ def test_gyro_no_phase_destabilised():
     _log.write(
         [f"gyro_0deg  I_spin={I_spin:.2f} kg*m^2  phase=0deg",
          f"  baseline_drift={r_base['max_drift']:.1f}m  gyro_drift={r_gyro['max_drift']:.1f}m  "
-         f"drift_ratio={drift_ratio:.2f}x"],
+         f"drift_ratio={drift_ratio:.2f}x",
+         f"  base_events={r_base['events'].summary()}  gyro_events={r_gyro['events'].summary()}"],
         f"drift_ratio={drift_ratio:.2f}x  baseline={r_base['max_drift']:.1f}m  "
         f"gyro={r_gyro['max_drift']:.1f}m  I_spin={I_spin:.2f}kg*m^2",
     )
@@ -257,8 +257,8 @@ def test_gyro_90deg_not_helpful():
     r_90 = _run_orbit(I_spin_kgm2=I_spin, swashplate_phase_deg=90.0)
 
     # Phase=0 (no compensation) should be stable with high angular damping
-    assert r_0["floor_hits"] == 0, (
-        f"phase=0 should be stable with high angular damping: {r_0['floor_hits']} floor hits")
+    assert not r_0["events"], (
+        f"phase=0 should be stable with high angular damping: {r_0['events'].summary()}")
     assert r_0["min_z"] > MIN_Z_OK, (
         f"phase=0 too low: {r_0['min_z']:.1f} m")
 
@@ -271,9 +271,9 @@ def test_gyro_90deg_not_helpful():
     _log.write(
         [f"gyro_90deg  I_spin={I_spin:.2f} kg*m^2",
          f"  phase=0:  drift={r_0['max_drift']:.1f}m  min_z={r_0['min_z']:.1f}m  "
-         f"floor_hits={r_0['floor_hits']}",
+         f"{r_0['events'].summary()}",
          f"  phase=90: drift={r_90['max_drift']:.1f}m  min_z={r_90['min_z']:.1f}m  "
-         f"floor_hits={r_90['floor_hits']}  (degraded, as expected)"],
+         f"{r_90['events'].summary()}  (degraded, as expected)"],
         f"I_spin={I_spin:.2f}  phase0_drift={r_0['max_drift']:.1f}m  "
         f"phase90_drift={r_90['max_drift']:.1f}m",
     )
@@ -302,7 +302,7 @@ def test_gyro_phase_sweep():
     for phase_deg in range(0, 181, 30):
         r = _run_orbit(I_spin_kgm2=I_spin, swashplate_phase_deg=float(phase_deg),
                        t_sim=30.0)   # 30 s for sweep speed
-        stable = (r["floor_hits"] == 0 and r["max_drift"] < 200.0 and r["min_z"] > MIN_Z_OK)
+        stable = (not r["events"] and r["max_drift"] < 200.0 and r["min_z"] > MIN_Z_OK)
         results[phase_deg] = {"stable": stable, **r}
 
     # Phase=0 must be stable: high angular damping keeps the orbit stable without
@@ -329,6 +329,6 @@ def test_gyro_phase_sweep():
     for p, v in sorted(results.items()):
         mark = "OK" if v["stable"] else "--"
         lines.append(f"  [{mark}] phase={p:3d} deg  drift={v['max_drift']:6.1f}m  "
-                     f"min_z={v['min_z']:5.1f}m  floor_hits={v['floor_hits']}")
+                     f"min_z={v['min_z']:5.1f}m  {v['events'].summary()}")
     stable_phases = [p for p, v in results.items() if v["stable"]]
     _log.write(lines, f"stable_phases={stable_phases}  I_spin={I_spin:.2f}kg*m^2")

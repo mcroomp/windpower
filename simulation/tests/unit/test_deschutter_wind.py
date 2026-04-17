@@ -39,7 +39,7 @@ from controller  import OrbitTracker, col_min_for_altitude_rad, AcroController
 from planner     import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from winch       import WinchController
 from frames      import build_orb_frame
-from simtest_log import SimtestLog
+from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 from tel         import make_tel
 
@@ -88,18 +88,6 @@ def _wind(pos_ned: np.ndarray) -> np.ndarray:
     """Power-law wind at hub NED position.  v(z) = v_ref * (z / z_ref)^alpha."""
     z = max(-float(pos_ned[2]), 0.1)
     return _WIND_DIR_NED * _WIND_SPEED_REF * (z / _WIND_Z_REF) ** _WIND_ALPHA
-
-
-# ── Simulation (run once, cached for all tests) ────────────────────────────────
-
-_cached_result: "dict | None" = None
-
-
-def _get_result() -> dict:
-    global _cached_result
-    if _cached_result is None:
-        _cached_result = _run()
-    return _cached_result
 
 
 def _run() -> dict:
@@ -165,7 +153,7 @@ def _run() -> dict:
     wind_est_azimuths    = []
     wind_est_ready_log   = []
     telemetry        = []
-    floor_hits  = 0
+    events      = BadEventLog()
     energy_out  = 0.0
     energy_in   = 0.0
 
@@ -231,9 +219,8 @@ def _run() -> dict:
         M_net = result.M_orbital + tm + (-50.0 * hub_state["omega"])
         hub_state = dyn.step(result.F_world + tf, M_net, DT, omega_spin=omega_spin)
 
-        if hub_state["pos"][2] >= -1.05:
-            floor_hits += 1
-            if floor_hits > 200:
+        if events.check_floor(hub_state["pos"][2], t, str(cmd.get("phase", "reel-out")), 1.05):
+            if events.count("floor_hit") > 200:
                 break
 
         if i % rec_every == 0:
@@ -289,7 +276,7 @@ def _run() -> dict:
         shear_alpha      = estimator.shear_alpha,
         veer_rate        = estimator.veer_rate_deg_per_m,
         telemetry        = telemetry,
-        floor_hits       = floor_hits,
+        events           = events,
         energy_out       = energy_out,
         energy_in        = energy_in,
         net_energy       = energy_out - energy_in,
@@ -319,7 +306,7 @@ def _print_result(r: dict) -> None:
         "",
         f"  Reel-out: mean={np.mean(out):.1f}N  max={max(out):.1f}N  energy={r['energy_out']:.1f}J",
         f"  Reel-in (steady): mean={np.mean(inn):.1f}N  max={max(inn):.1f}N  energy={r['energy_in']:.1f}J",
-        f"  Net energy: {r['net_energy']:.1f}J  floor_hits={r['floor_hits']}",
+        f"  Net energy: {r['net_energy']:.1f}J  {r['events'].summary()}",
         f"  Wind actual: mean={np.mean(r['wind_actual_speeds']):.2f}m/s  "
         f"anemometer@3m={float(np.linalg.norm(_wind(ANEMOMETER_POS_NED))):.2f}m/s",
         f"  Wind est:    mean={np.mean(r['wind_est_speeds']):.2f}m/s  "
@@ -329,43 +316,29 @@ def _print_result(r: dict) -> None:
     ]
     _log.write(lines, f"net={r['net_energy']:.0f}J  "
                f"reel-out={np.mean(out):.0f}N  reel-in={np.mean(inn):.0f}N  "
-               f"floor_hits={r['floor_hits']}")
+               f"{r['events'].summary()}")
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
-def test_deschutter_wind_no_crash():
-    """Hub must stay above z_floor throughout both reel phases."""
-    r = _get_result()
+def test_deschutter_wind():
+    """Power-law wind De Schutter cycle: no bad events, mechanism works, net energy positive."""
+    r = _run()
     _print_result(r)
-    assert r["floor_hits"] == 0, \
-        f"Hub hit z_floor {r['floor_hits']} times"
-
-
-def test_deschutter_wind_net_energy_positive():
-    """Reel-out energy must exceed reel-in energy."""
-    r = _get_result()
-    assert r["net_energy"] > 0, \
-        f"Net energy {r['net_energy']:.1f} J <= 0"
-
-
-def test_deschutter_wind_reel_in_lower_tension():
-    """Reel-in steady tension must be below reel-out mean tension."""
-    r    = _get_result()
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
     skip = int(T_TRANSITION)
     mean_out = float(np.mean(r["tensions_out"])) if r["tensions_out"] else 0.0
     mean_in  = float(np.mean(r["tensions_in"][skip:])) if r["tensions_in"][skip:] else 0.0
-    assert mean_in < mean_out, \
-        f"Reel-in tension ({mean_in:.1f} N) not below reel-out ({mean_out:.1f} N)"
-
-
-def test_deschutter_wind_tether_not_broken():
-    """Peak tension must stay below 80% of break load."""
-    r    = _get_result()
+    if mean_in >= mean_out:
+        failures.append(f"De Schutter mechanism failed: reel-in {mean_in:.1f}N >= reel-out {mean_out:.1f}N")
+    if r["net_energy"] <= 0:
+        failures.append(f"net_energy={r['net_energy']:.1f}J <= 0")
     peak = max(r["tensions"])
-    limit = 0.8 * BREAK_LOAD_N
-    assert peak < limit, \
-        f"Peak tension {peak:.1f} N >= 80% break load ({limit:.1f} N)"
+    if peak >= 0.8 * BREAK_LOAD_N:
+        failures.append(f"peak_tension={peak:.1f}N >= 80% break load ({0.8 * BREAK_LOAD_N:.1f}N)")
+    assert not failures, "\n  ".join(failures)
 
 
 # ── CLI: generate telemetry JSON for 3D visualizer ────────────────────────────
@@ -388,7 +361,7 @@ if __name__ == "__main__":
     print(f"  Reel-out energy: {r['energy_out']:.1f} J")
     print(f"  Reel-in energy:  {r['energy_in']:.1f} J")
     print(f"  Net:             {r['net_energy']:.1f} J")
-    print(f"  Floor hits:      {r['floor_hits']}")
+    print(f"  Events:          {r['events'].summary()}")
     _write_csv([_TelRow.from_tel(d) for d in r["telemetry"]], _args.save_telemetry)
     print(f"\nRun visualizer:")
     print(f"  python simulation/viz3d/visualize_3d.py {_args.save_telemetry}")

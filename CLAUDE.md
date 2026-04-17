@@ -44,8 +44,9 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 | [simulation/internals.md](simulation/internals.md) | Sensor design, aero model, tether, COL_MIN rules, known gaps |
 | [simulation/history.md](simulation/history.md) | Phase 2 + Phase 3 decisions |
 | [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter Eq. 25–31 validation vs. implementation |
-| [simulation/torque/README.md](simulation/torque/README.md) | Counter-torque motor physics, GB4008, Lua feedforward |
-| [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER6 modes 0–5) |
+| [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw ODE — `HubParams`, `HubState`, `motor_torque()`, `step()`, `equilibrium_throttle()` |
+| [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER6 modes 0–8) |
+| [simulation/tests/unit/README.md](simulation/tests/unit/README.md) | **Unit test guide** — test catalogue, Lua harness API, SCR_USER6 encoding, IC loading, telemetry |
 
 ---
 
@@ -58,7 +59,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **body_z_slew_rate** = 0.40 rad/s (`rotor.body_z_slew_rate_rad_s`). Faster → oscillation; slower → wastes reel-in time.
 - **RotorDefinition YAML fields:** `swashplate_pitch_gain_rad` (measurable via flap deflection); `CD_structural` (beaupoil_2026=0.0, de_schutter_2018=0.021).
 - **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line. **CSV files are always regenerated — never worry about backward compatibility for the CSV schema.**
-- **rawes.lua SCR_USER6 modes:** 0=none, 1=flight cyclic (50 Hz), 2=yaw trim (100 Hz), 3=both, 4=landing (cyclic + VZ descent + auto final_drop, 50 Hz), 5=pumping (De Schutter cyclic + per-phase collective, 50 Hz). Modes 4+5 own Ch3 entirely.
+- **rawes.lua SCR_USER6 modes:** 0=none, 1=steady_noyaw (cyclic orbit-tracking only, 50 Hz), 2=yaw (counter-torque yaw trim only, Ch9/SERVO9, 100 Hz), 3=steady (cyclic + yaw trim simultaneously), 4=landing_noyaw (cyclic + VZ descent + auto final_drop, 50 Hz), 5=pumping_noyaw (De Schutter pumping cycle, 50 Hz), 6=arm_hold_noyaw (Ch3=1000 Ch8=2000 keepalive only), 7=yaw_test (motor ON at 25% for 20 s then off, resets on re-entry, 100 Hz), 8=yaw_limited (yaw PI but motor hard-stops 30 s after first throttle, resets on re-entry). Modes 4+5 own Ch3 entirely.
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) are required boot params (in `rawes_sitl_defaults.parm`). GPS origin sets during arm; "EKF3 IMU0 is using GPS" appears once EKF innovations settle. Without widened gates, GPS fusion fails.
 - **EK3_SRC1_YAW=8** (GPS velocity yaw) — `rawes_sitl_defaults.parm` boot default. `COMPASS_USE=0`, `COMPASS_ENABLE=0`. Compass is physically useless near the GB4008 motor on hardware, and SITL's 3 synthetic compasses cycle every 10 s (EKF3 `magFailTimeLimit_ms`) when innovations fail, blocking GPS fusion. GPS velocity yaw uses EKFGSF (Gaussian Sum Filter) with N=5 heading hypotheses. **EKFGSF requires turning motion to converge**: a constant straight-line velocity makes all hypotheses predict identical NED velocities → zero innovation divergence → YCS stays at maximum → `yawAlignComplete` never set → EKF stays in const_pos_mode forever.
 - **rawes.lua landing (SCR_USER6=4):** captures body_z on `ahrs:healthy()`; VZ descent controller (`col_cmd = COL_CRUISE + KP_VZ*(vz_actual - VZ_LAND_SP)`, VZ_LAND_SP=0.5 m/s); `final_drop` (collective→0) when alt ≤ 2.0 m. Fixture: `acro_armed_landing_lua` (`internal_controller=False`, `kinematic_vel_ramp_s=20` so hub exits kinematic at vel=0 — eliminates linear tether jolt without internal controller).
@@ -75,7 +76,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **WinchNode** (`winch_node.py`): mediator calls `update_sensors(tension, wind_world)` (physics only); planner calls `get_telemetry()` + `receive_command()`. Wind seed from `Anemometer.measure()` at 3 m height.
 - **Vertical landing:** direct drop above anchor (not spiral). Descent rate controller replaces TensionPI. Floor hit during DESCENT phase is expected; crash-guard `floor_hits>200` restricted to pumping phase only. Validated: +1857 J, 92 s (`test_pump_and_land.py`).
 - **Gyroscopic phase NOT needed:** H_SW_PHANG=0. BASE_K_ANG=50 N·m·s/rad → τ≈0.08 s (damped before one orbit). `swashplate_phase_deg≠0` degrades orbit stability.
-- **`AcroController use_servo=True`** required for De Schutter simtests (25 ms servo lag). Inner-loop tests (`test_steady_flight`, `test_closed_loop_60s`) do not need it.
+- **`AcroController use_servo=True`** required for De Schutter simtests (25 ms servo lag). Inner-loop tests (`test_steady_flight`, `test_closed_loop_90s`) do not need it.
 - **Power-law wind tension:** tension_out=250 N (not 200 N) at hub altitude ~15 m (10.6 m/s wind). `col_min_reel_in` must use actual wind speed at hub altitude.
 - **De Schutter aero:** `C_{D,T}=0.021` structural drag; induction bootstrap uses `abs(T)` not `max(T, 0.01)`. See `simulation/aero/deschutter.md`.
 
@@ -111,12 +112,17 @@ simulation/
 │                        col_min_for_altitude_rad), orbit_tracked_body_z_eq,
 │                        orbit_tracked_body_z_eq_3d, OrbitTracker
 ├── mediator.py          400 Hz co-simulation loop (SITL <-> physics)
+├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw ODE)
+├── torque_model.py      Hub yaw physics — HubParams, HubState, motor_torque(), step(), equilibrium_throttle()
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
 ├── gcs.py               MAVLink GCS client (arm, mode, RC override, params)
 ├── telemetry_csv.py     Canonical 67-column CSV schema (TelRow, COLUMNS, heartbeat)
+├── viz3d/
+│   ├── visualize_torque.py  Torque telemetry 3-panel replay (psi_dot, motor throttle, PWM)
+│   └── torque_telemetry.py  TorqueTelemetryFrame dataclass for torque replay
 └── tests/
-    ├── unit/            Windows native, no Docker (~460 tests)
+    ├── unit/            Windows native, no Docker (~490 tests)
     └── sitl/            Docker; all SITL/stack tests live here
         ├── conftest.py          thin re-exporter — pytest_addoption + pytest_configure only
         ├── stack_infra.py       ALL shared infrastructure: StackConfig, SitlContext,
@@ -128,13 +134,14 @@ simulation/
         │   ├── conftest.py      flight fixtures: acro_armed, acro_armed_*_lua, etc.
         │   ├── test_arm_minimal.py          no mediator; static sensor; arm only
         │   ├── test_gps_fusion_layers.py    GPS fusion diagnostic (layers + armed + trajectory)
-        │   ├── test_h_phang.py              H_SW_PHANG calibration (test_h_swash_phang)
+        │   ├── test_h_phang.py              H_SW_PHANG calibration
         │   ├── test_kinematic_gps.py        GPS fusion during kinematic (parametrized)
         │   ├── test_lua_flight_steady.py    steady orbit under full ArduPilot/Lua control
         │   ├── test_pumping_cycle.py        pumping cycle under Lua (test_pumping_cycle_lua)
         │   └── test_landing_stack.py        landing under Lua (test_landing_lua)
         └── torque/              torque/anti-rotation tests
             ├── conftest.py      torque fixtures: torque_armed, torque_armed_profile, etc.
+            ├── torque_test_utils.py  shared loop/assert helpers for torque stack tests
             └── ...
 ```
 
@@ -151,6 +158,14 @@ simulation/
 ---
 
 ## Workflow Rules
+
+**CRITICAL — Keep Lua unit tests in sync with rawes.lua.** `simulation/tests/unit/test_yaw_lua.py` runs the actual rawes.lua yaw-trim code via `RawesLua` harness (lupa). It copies the constants at the top for use in assertions. Whenever any of the following change in rawes.lua, the constants in `test_yaw_lua.py` MUST be updated in the same commit:
+- Yaw constants (`BASE_THROTTLE_PCT`, `KP_YAW`, `KI_YAW`, `YAW_I_MAX`, `YAW_DEAD_ZONE_RAD_S`, `YAW_STABLE_RAD_S`, `YAW_STABLE_TIMEOUT_MS`)
+- `run_yaw_trim()` logic (dead zone, watchdog, wrong-direction guard, PI formula)
+- `run_yaw_test()` constants (`YAW_TEST_THROTTLE_PCT`, `YAW_TEST_DURATION_MS`)
+- Hard-stop countdown logic (`run_yaw_trim(hard_stop_ms)`, mode 8)
+
+Similarly, `simulation/tests/unit/test_math_lua.py` mirrors the cyclic/slerp/orbit logic — update it whenever the corresponding rawes.lua functions change. A failing unit test after a Lua edit means the Python constant copy or assertion is stale; fix it, then fix the test.
 
 **No silent defaults for physics parameters.** Raise `KeyError`/`ValueError` if a required config key is absent. Never use `dict.get("key", fallback)` or `x = x or default` for physical constants, control gains, or rotor/airfoil properties.
 
@@ -321,19 +336,30 @@ Example log paths:
 
 ## Hardware DShot Configuration (Pixhawk 6C, ArduPilot 4.6.3)
 
-Five parameters required to enable DShot300 + bidirectional telemetry on output 4 (GB4008 via REVVitRC AM32 ESC). All default to 0 — must be set explicitly. Confirmed working 2026-04-15.
+GB4008 is wired to **AUX OUT 1 (output 9, FMU processor)**. `BRD_IO_DSHOT` is NOT needed — that is for MAIN OUT (IO processor) only. Confirmed working 2026-04-17: motor spins at 20% via DO_MOTOR_TEST (Rover frame).
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| `BRD_IO_DSHOT` | 1 | Enable DShot on IO processor — the critical one |
-| `SERVO_BLH_BDMASK` | 8 | Bidirectional DShot on output 4 — replaces `SERVO_BLH_BDSHOT` (removed in 4.6+) |
-| `SERVO_BLH_OTYPE` | 5 | DShot300 protocol |
-| `SERVO_DSHOT_ESC` | 1 | ESC type = BLHeli32/Kiss/AM32 |
-| `SERVO_DSHOT_RATE` | 0 | 1 kHz (leave at default) |
+| `SERVO9_FUNCTION` | 94 | Script 1 — Lua writes GB4008 PWM via `SRV_Channels` (Heli/flight mode) |
+| `SERVO9_MIN` | 800 | PWM off — 800 us = motor off; default 1100 clamps signal, motor stays silent |
+| `SERVO9_MAX` | 2000 | PWM max |
+| `SERVO9_TRIM` | 800 | trim = off (800 us); rawes.lua `_set_throttle_pct(0)` outputs 800 us |
+| `SERVO_BLH_MASK` | 256 | Bit 8 = output 9 — registers AUX OUT 1 with BLHeli subsystem |
+| `SERVO_BLH_OTYPE` | 5 | DShot300 (Heli/Copter frame uses this; Rover uses `MOT_PWM_TYPE=6`) |
+| `SERVO_BLH_POLES` | 22 | GB4008 24N22P (11 pole-pairs) — default 14 is wrong |
+| `SERVO_BLH_TRATE` | 10 | Telemetry request rate 10 Hz |
+| `SERVO_BLH_AUTO` | 0 | Manual mask config |
+| `SERVO_BLH_BDMASK` | 0 | One-way DShot initially — set to 256 only after AM32 EDT is enabled on ESC |
+| `SERVO_DSHOT_ESC` | 3 | ESC type = AM32 (REVVitRC) |
+| `SERVO_DSHOT_RATE` | 0 | 1 kHz command rate (default) |
+| `BRD_IO_DSHOT` | 0 | Not needed — motor is on AUX OUT (FMU), not MAIN OUT (IO) |
+| `BRD_SAFETY_DEFLT` | 0 | Safety switch disabled — outputs live immediately on boot |
+| `RPM1_TYPE` | 0 | Disabled initially — set to 5 after enabling AM32 EDT on ESC |
+| `RPM1_MIN` | 0 | No minimum filter |
 
-Additional required: `SERVO_BLH_MASK=8` (DShot on output 4), `SERVO_BLH_POLES=22` (GB4008 24N22P — default 14 is wrong).
 In DShot mode the ESC auto-arms from the first valid DShot packet — no PWM arming sequence needed.
-Use `calibrate.py bench-mode` / `flight-mode` to toggle `SERVO4_FUNCTION` between 1 (direct PWM bench) and 36 (DDFP flight).
+Use `calibrate.py bench-mode` / `flight-mode` to toggle `SERVO9_FUNCTION` between 1 (direct PWM bench) and 94 (Script 1 flight).
+Enable bidir RPM telemetry: enable AM32 EDT via BLHeli passthrough in Mission Planner, then set `SERVO_BLH_BDMASK=256` and `RPM1_TYPE=5`.
 
 ---
 
