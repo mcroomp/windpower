@@ -36,6 +36,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 | [hardware/design.md](hardware/design.md) | Assembly layout, rotor geometry, swashplate, Kaman flap mechanism |
 | [hardware/components.md](hardware/components.md) | Component specs: GB4008, REVVitRC ESC, DS113MG servos |
 | [hardware/calibrate.md](hardware/calibrate.md) | **calibrate.py CLI reference** — servo/motor/ESC/Lua upload over MAVLink |
+| [hardware/dshot.md](hardware/dshot.md) | **DShot reference** — protocol, IOMCU bidir support, AM32 EDT setup, wiring, troubleshooting |
 | [theory/pumping_cycle.md](theory/pumping_cycle.md) | De Schutter 2018 — pumping cycle, aero, structural constraints |
 | [theory/orbit_mechanics.md](theory/orbit_mechanics.md) | Beaupoil 2026 — orbit characteristics, gyroscopic analysis |
 | [theory/flap_dynamics.md](theory/flap_dynamics.md) | Weyel 2025 — flap state-space, feed-forward + PID, N4SID ID |
@@ -315,6 +316,24 @@ Example log paths:
 3. Tether: tension-only elastic — no sag, no distributed mass, no reel dynamics
 4. Aero: steady-state BEM — no dynamic inflow; Coleman skewed wake handles non-uniform induction
 5. Controller: 10 Hz in stack test (MAVLink RC override); 400 Hz in unit tests / internal controller
+
+---
+
+## Hardware DShot Configuration (Pixhawk 6C, ArduPilot 4.6.3)
+
+Five parameters required to enable DShot300 + bidirectional telemetry on output 4 (GB4008 via REVVitRC AM32 ESC). All default to 0 — must be set explicitly. Confirmed working 2026-04-15.
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `BRD_IO_DSHOT` | 1 | Enable DShot on IO processor — the critical one |
+| `SERVO_BLH_BDMASK` | 8 | Bidirectional DShot on output 4 — replaces `SERVO_BLH_BDSHOT` (removed in 4.6+) |
+| `SERVO_BLH_OTYPE` | 5 | DShot300 protocol |
+| `SERVO_DSHOT_ESC` | 1 | ESC type = BLHeli32/Kiss/AM32 |
+| `SERVO_DSHOT_RATE` | 0 | 1 kHz (leave at default) |
+
+Additional required: `SERVO_BLH_MASK=8` (DShot on output 4), `SERVO_BLH_POLES=22` (GB4008 24N22P — default 14 is wrong).
+In DShot mode the ESC auto-arms from the first valid DShot packet — no PWM arming sequence needed.
+Use `calibrate.py bench-mode` / `flight-mode` to toggle `SERVO4_FUNCTION` between 1 (direct PWM bench) and 36 (DDFP flight).
 
 ---
 

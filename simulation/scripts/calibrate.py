@@ -75,7 +75,7 @@ GB4008_KT = 60.0 / (2.0 * math.pi * GB4008_KV)  # ~0.144 N*m/A
 SERVO_S1     = 1
 SERVO_S2     = 2
 SERVO_S3     = 3
-SERVO_MOTOR  = 4   # GB4008 anti-rotation motor
+SERVO_MOTOR  = 4   # GB4008 anti-rotation motor — MAIN OUT 4
 
 SWASH_SERVOS = (SERVO_S1, SERVO_S2, SERVO_S3)
 
@@ -265,7 +265,6 @@ _DSHOT_PARAMS = [
     ("SERVO4_FUNCTION",    "Must be 36 (DDFP tail) for GB4008 on output 4"),
     ("SERVO_BLH_MASK",     "Must include bit 3 (=8) to enable DShot on output 4"),
     ("SERVO_BLH_OTYPE",    "DShot type: 5=DShot300  6=DShot600  (0=PWM, won't work)"),
-    ("SERVO_BLH_BDSHOT",   "1 = bidirectional DShot enabled (needed for RPM telemetry)"),
     ("SERVO_BLH_AUTO",     "1 = auto-configure BLHeli outputs"),
     ("H_TAIL_TYPE",        "Must be 4 (DDFP) for GB4008"),
     ("H_RSC_MODE",         "RSC mode: 0=servo  3=setpoint  4=passthrough  (0 means motor may be gated)"),
@@ -334,7 +333,7 @@ def _diag_motor(mav) -> None:
         issues.append("SERVO4_FUNCTION is not 36 (DDFP) -- output 4 not mapped to tail motor")
     blh_mask = v("SERVO_BLH_MASK")
     if blh_mask is not None and not (int(blh_mask) & 8):
-        issues.append("SERVO_BLH_MASK does not include bit 3 -- DShot not enabled on output 4")
+        issues.append("SERVO_BLH_MASK does not include bit 3 (=8) -- DShot not enabled on output 4")
     blh_type = v("SERVO_BLH_OTYPE")
     if blh_type is not None and blh_type < 4:
         issues.append(f"SERVO_BLH_OTYPE={blh_type:.0f} -- not a DShot type (need 5=DShot300 or 6=DShot600)")
@@ -451,8 +450,10 @@ def _diag_motor(mav) -> None:
             print("         Check: DShot signal reaching ESC? ESC armed?")
     else:
         print("  [WARN] No ESC telemetry received")
-        print("         Either SERVO_BLH_BDSHOT=0, SERVO_BLH_MASK wrong,")
-        print("         or ESC not responding to DShot (wiring/power issue)")
+        print("         Check: SERVO_BLH_MASK includes bit 3 (=8) for output 4, ESC powered,")
+        print("         DShot signal wire on MAIN OUT 4, and AM32 Extended Telemetry enabled")
+        print("         Note: bidirectional DShot is auto-detected in ArduPilot 4.6+")
+        print("         (SERVO_BLH_BDSHOT parameter does not exist in this firmware)")
 
     if rpm_msgs:
         last_rpm = rpm_msgs[-1]
@@ -765,11 +766,134 @@ Commands:
                                    (auto-detects from SERVO_BLH_MASK; or pass
                                     specific 1-indexed output numbers)
   monitor [seconds]               Stream live ESC telemetry (default 10 s)
+  arm                             Send throttle=1000 RC override then force-arm vehicle
+  disarm                          Disarm vehicle
+  hold <pwm> [seconds]            Arm, set output 4 to pwm, keep alive (Ctrl-C to stop)
+  reboot                          Reboot ArduPilot
+  bench-mode                      Output 4: RCPassThru (direct PWM, no ArduPilot control)
+  flight-mode                     Output 4: DDFP tail (ArduPilot yaw controller)
+  getparam <name>                 Read a parameter value
+  setparam <name> <value>         Write a parameter value
   scripts                         List files in /APM/scripts on SD card
   upload <file> [--no-restart]    Upload .lua file to /APM/scripts and restart
   help                            Show this list
   quit                            Exit
 """
+
+
+def _send_rc_override(mav, channels: dict) -> None:
+    """Send RC_CHANNELS_OVERRIDE. Channels not listed are set to 0 (no override)."""
+    pwm = [0] * 8
+    for ch, val in channels.items():
+        if 1 <= ch <= 8:
+            pwm[ch - 1] = val
+    mav.mav.rc_channels_override_send(
+        mav.target_system, mav.target_component,
+        *pwm,  # channels 1-8
+    )
+
+
+def _arm(mav, force: bool = False, timeout: float = 15.0) -> bool:
+    """
+    Arm sequence:
+      1. Set throttle RC override to 1000 (pre-arm requirement).
+      2. Send MAV_CMD_COMPONENT_ARM_DISARM; wait for armed heartbeat.
+      3. ESC arming sequence on output 4: 1500 us for 2 s, then 1000 us for 5 s.
+    Returns True if vehicle confirms armed.
+    """
+    print("  Setting throttle (CH3) override to 1000 ...")
+    _send_rc_override(mav, {3: 1000})
+    time.sleep(0.5)
+
+    print("  Sending arm command ...")
+    param2 = 21196.0 if force else 0.0
+    mav.mav.command_long_send(
+        mav.target_system, mav.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0,
+        1.0,     # param1: 1 = arm
+        param2,  # param2: 21196 = force-arm (bypass pre-arm checks)
+        0, 0, 0, 0, 0,
+    )
+
+    deadline = time.monotonic() + timeout
+    armed = False
+    while time.monotonic() < deadline:
+        # Keep refreshing throttle override so ArduPilot doesn't expire it
+        _send_rc_override(mav, {3: 1000})
+        msg = mav.recv_match(type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
+                             blocking=True, timeout=0.5)
+        if msg is None:
+            continue
+        t = msg.get_type()
+        if t == "STATUSTEXT":
+            print(f"  [FC] {msg.text.rstrip()}")
+        elif t == "COMMAND_ACK" and msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+            if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                print("  Arm command accepted -- waiting for armed heartbeat ...")
+            elif msg.result == mavutil.mavlink.MAV_RESULT_DENIED:
+                print("  [FAIL] Arm denied -- check pre-arm messages above")
+                return False
+        elif t == "HEARTBEAT":
+            if bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                print("  [OK] Vehicle armed.")
+                armed = True
+                break
+
+    if not armed:
+        print("  [FAIL] Arm timed out.")
+        return False
+
+    # ESC arming sequence.
+    blh_mask = _recv_param(mav, "SERVO_BLH_MASK") or 0.0
+    dshot_active = int(blh_mask) & (1 << (SERVO_MOTOR - 1))
+
+    if dshot_active:
+        # DShot arming: neutral first, then minimum
+        print("  ESC arm (DShot): output 4 -> 1500 us for 2 s ...")
+        t_end = time.monotonic() + 2.0
+        while time.monotonic() < t_end:
+            _send_set_servo(mav, SERVO_MOTOR, 1500)
+            time.sleep(0.1)
+        print("  ESC arm (DShot): output 4 -> 1000 us for 5 s ...")
+        t_end = time.monotonic() + 5.0
+        while time.monotonic() < t_end:
+            _send_set_servo(mav, SERVO_MOTOR, 1000)
+            time.sleep(0.1)
+    else:
+        # PWM arming: hold minimum throttle so ESC recognises the low endpoint
+        print("  ESC arm (PWM): output 4 -> 1000 us for 5 s ...")
+        t_end = time.monotonic() + 5.0
+        while time.monotonic() < t_end:
+            _send_set_servo(mav, SERVO_MOTOR, 1000)
+            time.sleep(0.1)
+
+    print("  ESC arm sequence complete -- motor ready.")
+    return True
+
+
+def _disarm(mav, timeout: float = 10.0) -> bool:
+    """Send disarm command. Returns True if vehicle confirms disarmed."""
+    print("  Sending disarm command ...")
+    mav.mav.command_long_send(
+        mav.target_system, mav.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0,
+        0.0,    # param1: 0 = disarm
+        0, 0, 0, 0, 0, 0,
+    )
+    # Clear throttle override
+    _send_rc_override(mav, {})
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        msg = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+        if msg:
+            armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            if not armed:
+                print("  [OK] Vehicle disarmed.")
+                return True
+    print("  [FAIL] Disarm timed out.")
+    return False
 
 
 def _sweep(mav, instance: int, step_ms: int = 5) -> None:
@@ -910,6 +1034,111 @@ def _run_command(mav, tokens: list[str], force: bool = False) -> bool:
             print("  Usage: monitor [seconds]"); return True
         _monitor_esc(mav, duration=secs)
 
+    # ── hold <pwm> [seconds] ─────────────────────────────────────────────────
+    elif cmd == "hold":
+        if len(tokens) < 2:
+            print("  Usage: hold <pwm> [seconds]"); return True
+        try:
+            pwm = int(tokens[1])
+            duration = float(tokens[2]) if len(tokens) > 2 else None
+        except ValueError:
+            print("  Error: pwm must be an integer"); return True
+        if not (PWM_MIN <= pwm <= PWM_MAX):
+            print(f"  Error: pwm must be {PWM_MIN}-{PWM_MAX}"); return True
+        # Arm first
+        if not _arm(mav, force=True):
+            return True
+        print(f"  Holding output 4 at {pwm} us  (Ctrl-C to stop) ...")
+        _send_set_servo(mav, SERVO_MOTOR, pwm)
+        t0 = time.monotonic()
+        try:
+            while True:
+                if duration and (time.monotonic() - t0) >= duration:
+                    break
+                _send_rc_override(mav, {3: 1000})
+                _send_set_servo(mav, SERVO_MOTOR, pwm)
+                elapsed = time.monotonic() - t0
+                # Drain any incoming messages (keeps connection alive)
+                mav.recv_match(blocking=True, timeout=0.2)
+                print(f"  t={elapsed:5.1f}s  output4={pwm} us", end="\r")
+        except KeyboardInterrupt:
+            print()
+        _send_set_servo(mav, SERVO_MOTOR, PWM_MIN)
+        print(f"  Output 4 -> {PWM_MIN} us (safe)")
+
+    # ── reboot ───────────────────────────────────────────────────────────────
+    elif cmd == "reboot":
+        print("  Sending reboot command ...")
+        mav.mav.command_long_send(
+            mav.target_system, mav.target_component,
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+            0, 1, 0, 0, 0, 0, 0, 0,
+        )
+        # USB will drop -- swallow the serial error
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                msg = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+                if msg is None:
+                    break
+            except Exception:
+                break
+        print("  Pixhawk rebooting -- reconnect in a few seconds.")
+
+    # ── bench-mode / flight-mode ─────────────────────────────────────────────
+    elif cmd == "bench-mode":
+        ok = _set_param(mav, "SERVO4_FUNCTION", 1)   # RCPassThru
+        if ok:
+            print("  [OK] Bench mode: output 4 = RCPassThru (direct PWM)")
+            print("       MAV_CMD_DO_SET_SERVO and 'servo 4 <pwm>' now work directly.")
+            print("       Run 'flight-mode' before flying.")
+        else:
+            print("  [FAIL] Could not set SERVO4_FUNCTION")
+
+    elif cmd == "flight-mode":
+        ok = _set_param(mav, "SERVO4_FUNCTION", 36)  # DDFP tail
+        if ok:
+            print("  [OK] Flight mode: output 4 = DDFP tail (ArduPilot yaw controller)")
+        else:
+            print("  [FAIL] Could not set SERVO4_FUNCTION")
+
+    # ── arm ──────────────────────────────────────────────────────────────────
+    elif cmd == "arm":
+        # Always force-arm: calibrate.py is a bench tool; blades/collective
+        # calibration (H_COL_ANG_MIN/MAX) will not be set on the bench.
+        _arm(mav, force=True)
+
+    # ── disarm ───────────────────────────────────────────────────────────────
+    elif cmd == "disarm":
+        _disarm(mav)
+
+    # ── getparam <name> ──────────────────────────────────────────────────────
+    elif cmd == "getparam":
+        if len(tokens) < 2:
+            print("  Usage: getparam <name>"); return True
+        name = tokens[1].upper()
+        val = _recv_param(mav, name)
+        if val is None:
+            print(f"  {name}: no response (parameter not found?)")
+        else:
+            print(f"  {name} = {val}")
+
+    # ── setparam <name> <value> ───────────────────────────────────────────────
+    elif cmd == "setparam":
+        if len(tokens) < 3:
+            print("  Usage: setparam <name> <value>"); return True
+        name = tokens[1].upper()
+        try:
+            value = float(tokens[2])
+        except ValueError:
+            print("  Error: value must be a number"); return True
+        ok = _set_param(mav, name, value)
+        if ok:
+            actual = _recv_param(mav, name)
+            print(f"  [OK]   {name} = {actual}")
+        else:
+            print(f"  [FAIL] {name}: no ACK within timeout")
+
     # ── scripts ──────────────────────────────────────────────────────────────
     elif cmd == "scripts":
         _list_scripts(mav)
@@ -1006,21 +1235,27 @@ def main() -> None:
     args = _build_parser().parse_args()
 
     mav = _connect(args.port, args.baud)
+    exit_code = 0
+    try:
+        if args.command:
+            # Non-interactive: run one command and exit
+            tokens = [args.command] + list(args.args)
+            ok = _run_command(mav, tokens, force=args.force)
+            if not ok:
+                print(f"Unknown command: {args.command!r}")
+                _build_parser().print_help()
+                exit_code = 1
+        else:
+            # Interactive REPL
+            _repl(mav)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    finally:
+        mav.close()
+        print("Disconnected.")
 
-    if args.command:
-        # Non-interactive: run one command and exit
-        tokens = [args.command] + list(args.args)
-        ok = _run_command(mav, tokens, force=args.force)
-        if not ok:
-            print(f"Unknown command: {args.command!r}")
-            _build_parser().print_help()
-            sys.exit(1)
-    else:
-        # Interactive REPL
-        _repl(mav)
-
-    mav.close()
-    print("Disconnected.")
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

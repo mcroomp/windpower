@@ -1,6 +1,6 @@
 # RAWES Pixhawk 6C Hardware Profile
 
-Captured: 2026-04-08 15:42
+Captured: 2026-04-15 15:17
 Port: COM4  Baud: 115200
 
 ## Firmware
@@ -40,14 +40,14 @@ Port: COM4  Baud: 115200
 | 3D Mag 2 | yes | no | **NO** |
 | Battery | yes | no | yes |
 
-CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
+CPU load: 20.1%  Battery voltage: 15.43 V  Current: 0.46 A  Remaining: 99%
 
 ## Power Rails
 
 | Rail | Voltage |
 |------|---------|
-| Vcc (5V) | 5.233 V |
-| Vservo | 8.519 V |
+| Vcc (5V) | 5.228 V |
+| Vservo | 8.514 V |
 
 | Flag | State |
 |------|-------|
@@ -60,16 +60,16 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | Field | Value |
 |-------|-------|
 | Free RAM | 65535 bytes |
-| Free RAM (32-bit) | 370024 bytes |
+| Free RAM (32-bit) | 365584 bytes |
 
 ## MCU
 
 | Field | Value |
 |-------|-------|
-| Temperature | 35.2 deg C |
+| Temperature | 33.9 deg C |
 | Voltage | 3.329 V |
 | Voltage min | 3.321 V |
-| Voltage max | 3.335 V |
+| Voltage max | 3.337 V |
 
 ## GPS
 
@@ -91,29 +91,29 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | Pos horiz abs valid | False |
 | Pos vert abs valid | False |
 | Velocity variance | 0.0000 |
-| Pos horiz variance | 0.0373 |
-| Pos vert variance | 0.2141 |
-| Compass variance | 0.0459 |
+| Pos horiz variance | 0.0035 |
+| Pos vert variance | 0.0007 |
+| Compass variance | 0.0073 |
 | Terrain alt variance | 0.0000 |
 
 ## Attitude (bench, stationary)
 
 | Axis | Value |
 |------|-------|
-| Roll | -47.8 deg |
-| Pitch | 4.7 deg |
-| Yaw | 119.5 deg |
-| Roll rate | -0.04 deg/s |
-| Pitch rate | 0.70 deg/s |
-| Yaw rate | -0.21 deg/s |
+| Roll | -91.4 deg |
+| Pitch | -6.1 deg |
+| Yaw | 41.7 deg |
+| Roll rate | -0.01 deg/s |
+| Pitch rate | 0.05 deg/s |
+| Yaw rate | 0.14 deg/s |
 
 ## IMU (raw)
 
 | Axis | Accel (mg) | Gyro (mrad/s) | Mag (mGauss) |
 |------|-----------|--------------|-------------|
-| X | 69 | -1 | -181 |
-| Y | 750 | -5 | -363 |
-| Z | -681 | 0 | -139 |
+| X | -106 | 0 | 310 |
+| Y | 995 | -10 | -173 |
+| Z | 23 | 1 | -255 |
 
 ## Servo Outputs (current)
 
@@ -122,9 +122,8 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | 1 | 1008 |
 | 2 | 1314 |
 | 3 | 1426 |
-| 4 | 1465 |
+| 4 | 1000 |
 | 8 | 1100 |
-| 9 | 1050 |
 
 ## RAWES Parameters
 
@@ -133,7 +132,7 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | Parameter | Value |
 |-----------|-------|
 | FRAME_CLASS | 6.0 |
-| FRAME_TYPE | 1.0 |
+| FRAME_TYPE | 2.0 |
 
 ### Swashplate
 
@@ -149,7 +148,7 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | Parameter | Value |
 |-----------|-------|
 | H_RSC_MODE | 1.0 |
-| H_RSC_RUNUP_TIME | 1.0 |
+| H_RSC_RUNUP_TIME | 10.0 |
 | H_RSC_SETPOINT | 70.0 |
 | H_RSC_RAMP_TIME | 1.0 |
 | H_RSC_CLDWN_TIME | 0.0 |
@@ -158,7 +157,7 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 
 | Parameter | Value |
 |-----------|-------|
-| H_TAIL_TYPE | 0.0 |
+| H_TAIL_TYPE | 4.0 |
 | H_COL2YAW | 0.0 |
 | ATC_RAT_YAW_P | 0.0010000000474974513 |
 | ATC_RAT_YAW_I | 0.0 |
@@ -202,9 +201,14 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 
 | Parameter | Value |
 |-----------|-------|
-| SERVO_BLH_MASK | 256.0 |
+| SERVO_BLH_MASK | 8.0 |
+| SERVO_BLH_BDMASK | 8.0 |
 | SERVO_BLH_OTYPE | 5.0 |
 | SERVO_BLH_AUTO | 1.0 |
+| SERVO_BLH_POLES | 22.0 |
+| SERVO_BLH_TRATE | 10.0 |
+| SERVO_DSHOT_ESC | 1.0 |
+| BRD_IO_DSHOT | 1.0 |
 
 ### Servo functions
 
@@ -246,4 +250,4 @@ CPU load: 22.7%  Battery voltage: 15.80 V  Current: 0.44 A  Remaining: 97%
 | SCR_USER params | SCR_USER1..9 | SCR_USER1..6 only |
 | H_SW_PHANG | Exists (set to 0) | Does not exist; phase implicit in H_SW_TYPE |
 | RPM source in Lua | battery:voltage(0) (mediator hack) | rpm:get_rpm(0) (DSHOT telemetry) |
-| Mode selector param | SCR_USER6 | SCR_USER6 (rawes_hw.lua) |
+| Mode selector param | SCR_USER6 | SCR_USER6 |

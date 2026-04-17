@@ -127,7 +127,9 @@ python calibrate.py --port COM4 diag
 - `H_TAIL_TYPE != 4` → motor not mapped as DDFP tail
 - `BRD_SAFETYENABLE=1` → safety switch not pressed
 - `H_RSC_MODE=0` → RSC gating motor output
-- No ESC telemetry → ESC wiring, power, or bidirectional DShot config issue
+- No ESC telemetry → ESC not powered, DShot signal wire not connected to output 4,
+  or ESC not responding. Note: `SERVO_BLH_BDSHOT` does not exist in ArduPilot 4.6+;
+  bidirectional DShot is auto-detected when `SERVO_BLH_OTYPE >= 4`.
 
 ---
 
