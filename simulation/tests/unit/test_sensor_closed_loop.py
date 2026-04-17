@@ -188,7 +188,7 @@ def _run(t_sim: float = T_SIM):
         tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
 
         result = aero.compute_forces(
-            collective_rad = _IC.coll_eq_rad,
+            collective_rad = _IC.stack_coll_eq,
             tilt_lon       = tilt_lon,
             tilt_lat       = tilt_lat,
             R_hub          = hub_state["R"],
@@ -243,8 +243,9 @@ def test_sensor_stable():
     history = r["history"]
     min_alt = min(-s["pos"][2] for s in history)
     min_spin = min(s["omega_spin"] for s in history)
+    lines = [f"t={s['t']:.1f}  alt={-s['pos'][2]:.2f} m  spin={s['omega_spin']:.1f}" for s in history]
     _log.write(
-        [f"t={s['t']:.1f}  alt={-s['pos'][2]:.2f} m  spin={s['omega_spin']:.1f}" for s in history],
+        lines,
         f"min_alt={min_alt:.2f} m  min_spin={min_spin:.2f} rad/s  {r['events'].summary()}",
     )
     failures = []
