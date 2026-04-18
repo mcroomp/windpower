@@ -6,36 +6,30 @@ internal_controller=False — ArduPilot + Lua own the physics entirely.
 
 This is M3 Step 1: the foundational gate for pumping and landing tests.
 
-Uses the acro_armed_lua_full fixture (orbital kinematic, vel0=East):
-  - kinematic_traj_type=orbital, vel0=[0, 0.96, 0]: hub circles anchor at
-    r_h~99 m, alt~14 m, v=0.96 m/s.  GPS velocity heading rotates at 0.56 deg/s,
-    giving EKFGSF enough heading variation to converge; straight-line (linear)
-    velocity is degenerate for EKFGSF (all hypotheses predict identical NED vel).
-    GPS tether recapture fires when GPS origin sets (~t=21 s); orbit tracking
-    starts then (attitude-based, robust to EKF const_pos_mode until t~41 s).
+Uses the acro_armed_lua_full fixture (stationary kinematic hold, vel0=[0,0,0]):
+  - Hub holds at tether equilibrium for 80 s; no motion required.
+  - With dual GPS (EK3_SRC1_YAW=2), yaw is known from the first RELPOSNED fix.
+    delAngBiasLearned converges with constant-zero gyro at ~34 s after start.
+    GPS fuses at ~34 s; _tdir0 fires; Lua orbit tracking active ~46 s before exit.
   - internal_controller=False (Lua RC overrides drive physics at 50 Hz)
-  - SCR_USER6=1 set immediately in fixture (Lua active from t~15 s).
-  - COL_CRUISE_FLIGHT_RAD=-0.18 rad (matches stack_coll_eq from simtest)
+  - SCR_USER6=1 set immediately in fixture (Lua pre-GPS bypass active until fusion).
 
 No RC overrides are sent by this test — Lua owns Ch1/Ch2/Ch3 (cyclic +
 collective) and Ch8 (motor interlock keepalive at 100 Hz).
 
 Timing from mediator start (speedup=1):
-  t=0..65 s   kinematic orbital phase (v=0.96 m/s, r_h~99 m)
-  t~11 s      GPS first fix
-  t~13 s      arm complete; SCR_USER6=1 set
-  t~15 s      AHRS healthy; Lua DCM capture fires
+  t=0..80 s   kinematic stationary hold at pos0 (vel=0)
+  t~6 s       GPS first fix; EKF3 origin set
+  t~12 s      arm complete; SCR_USER6=1 set; Lua pre-GPS bypass active
+  t~12 s      AHRS healthy; Lua DCM capture fires
               "RAWES flight: captured" sent; bz_eq0 = disk_normal_ned()
-  t~21 s      EKF3 origin set; GPS tether recapture fires
-              "RAWES flight: GPS bz=(...)" sent; orbit tracking begins
-  t~41 s      delAngBiasLearned; GPS position/velocity fusion starts
-  t=65 s      kinematic exits mid-orbit at v=0.96 m/s (no vel ramp)
-  t~71 s      fixture yields (6 s after kinematic end)
-  t=65+       free flight under ArduPilot + Lua; Lua already tracking orbit
+  t~34 s      GPS fuses; "RAWES flight: GPS bz=(...)" sent; orbit tracking begins
+  t~34 s      fixture yields (GPS fusion confirmed)
+  t=80 s      kinematic exits; Lua has been tracking orbit for ~46 s
+  t~80+       free flight under ArduPilot + Lua
 
-Fixture yields at ~t=71 s (after kinematic ends).  STATUSTEXTs from the
-kinematic phase are in ctx.all_statustext.  wait_kinematic_done() returns
-immediately (transition already logged).  Test observes 120 s of free flight.
+Fixture yields at ~t=34 s (GPS fusion).  Test waits for kinematic to end
+(t=80 s), then observes 120 s of free flight.
 
 Pass criteria (all from physics telemetry CSV, not EKF estimates)
 -----------------------------------------------------------------

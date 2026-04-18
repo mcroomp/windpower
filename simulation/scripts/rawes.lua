@@ -160,6 +160,8 @@ local YAW_SRV_FUNC  = 94               -- Script 1 output (SERVO9)
 local YAW_STABLE_RAD_S     = math.rad(5.0)
 local YAW_STABLE_TIMEOUT_MS = 30000
 local YAW_DEAD_ZONE_RAD_S  = math.rad(2.0)    -- motor stays off until hub exceeds this rotation rate
+local YAW_TEST_THROTTLE_PCT = 25.0             -- mode 7 bench test: fixed throttle [%]
+local YAW_TEST_DURATION_MS  = 20000            -- mode 7 bench test: run duration [ms]
 
 local _yaw_not_stable_ms  = nil    -- millis() when yaw first exceeded stable band; nil when stable
 local _yaw_stopped        = false  -- latched; motor cut due to sustained yaw instability
@@ -429,8 +431,6 @@ local function run_yaw_test()
     -- Mode 7: run motor at fixed throttle for 20 s then off.  Bench verification only.
     if not arming:is_armed() then _set_throttle_pct(0); return end
 
-    local YAW_TEST_THROTTLE_PCT = 25.0
-    local YAW_TEST_DURATION_MS  = 20000
     local now_ms = millis()
 
     if _yaw_test_start_ms == nil then

@@ -338,3 +338,44 @@ All 32 pass. Validation doc at `simulation/aero/deschutter.md`.
 At ξ=55°, the vertical thrust component from the rotor must exceed hub weight (5 kg × 9.81 = 49 N) plus tether downward component. Testing showed tension_in=20 N (matching unit test default) was insufficient — the TensionPI reduced collective to near col_min=−0.20 where vertical thrust ≈ 38 N < gravity → hub fell.
 
 **Rule:** `tension_in ≥ 80 N` for altitude maintenance at ξ=55°. This matches `test_deschutter_cycle.py`'s `DEFAULT_TENSION_IN=80 N` which documents the same constraint in its source comment.
+
+---
+
+## Phase 3 M3 Step 1 — Dual GPS Steady Flight
+
+### Why dual GPS (EK3_SRC1_YAW=2) replaced EKFGSF
+
+Previous designs relied on EKFGSF yaw estimation (`EK3_SRC1_YAW=8`), which requires the hub to move at ≥0.5 m/s for the EKF Ground Speed Fusion to accumulate enough heading discriminating signal (~3–5 full circles). This forced an orbital kinematic trajectory (vel0=East, circular motion) purely for EKFGSF convergence.
+
+Switching to dual-antenna GPS yaw (`EK3_SRC1_YAW=2`, RELPOSNED) eliminates all of this:
+- Two F9P antennas 50 cm apart (±25 cm along body X) give yaw from the NED baseline vector.
+- Yaw is known from the **first GPS fix** — no motion, no EKFGSF rotation needed.
+- `delAngBiasLearned` converges with constant-zero gyro at ~21 s after arm.
+- GPS fuses at ~34 s total from startup.
+- A stationary hold (vel0=[0,0,0]) is the standard kinematic pattern.
+
+Key parameters required (in `rawes_sitl_defaults.parm`):
+- `GPS_AUTO_CONFIG=0` — **critical**: prevents ArduPilot reconfiguring UBLOX chips over serial, which corrupts the RELPOSNED stream in SITL.
+- `COMPASS_USE=0`, `COMPASS_ENABLE=0` — SITL synthetic compasses cycle every 10 s, blocking GPS fusion.
+- `EK3_GPS_CHECK=0` + `EK3_POS_I_GATE=50` + `EK3_VEL_I_GATE=50` — widened gates required for fusion.
+
+### Three root causes fixed for test_lua_flight_steady
+
+**1. Pre-GPS collective bypass** (`elseif _tdir0 == nil then col_cmd = col_cruise`):
+
+Before GPS fuses, GPS altitude noise biases EKF vz ≈ 0.24 m/s. Without the bypass, the VZ controller commands col=-0.168 → T_aero=249 N > T_tether=199 N → 50 N net outward force → tether tension runaway → crash at kinematic exit. Bypass holds collective at `col_cruise` (-0.18 rad) until `_tdir0` fires.
+
+**2. No gyro feedthrough in Lua cyclic** (`roll_rads = kp*err_bx`, pure P):
+
+Gyro feedthrough (`kd * gyro_body`) is sensitive to EKF yaw error. Any constant EKF yaw offset `Δψ` maps through `R_ekf` and produces a spurious rate correction. With ~33% flakiness before removal. Orbital body_z precession ~0.01 rad/s; pure P + azimuthal orbit tracking handles it with negligible steady-state error.
+
+EKF yaw cancellation in the error term: `err_body = R_ekf.T @ (bz_now × bz_orbit)`. Both `bz_now` and `bz_orbit` live in the same EKF frame, so a constant yaw offset `Δψ` cancels exactly. Stable (even if wrong) EKF yaw is sufficient for the P-gain error term.
+
+**3. Pre-GPS orbit tracking** (`_bz_orbit` tracks `bz_now` every step before `_tdir0` fires):
+
+Before GPS fuses, `_bz_orbit = bz_now` (err=0, pure neutral stick). When GPS fuses (yawAlignComplete via RELPOSNED + delAngBiasLearned), GPS tether recapture fires: `_bz_eq0` and `_bz_orbit` reset to `disk_normal_ned()` (zero step change) and `_tdir0 = normalize(diff)` anchors the orbit reference. Orbit tracking runs ~46 s before kinematic exit — hub has active cyclic control at the kinematic-to-physics transition.
+
+### Results
+
+test_lua_flight_steady: stable=86–110 s, 3/3 runs, max_activity≤1000 PWM, no EKF yaw reset.
+Orbit quality: orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s.

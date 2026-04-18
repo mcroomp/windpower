@@ -241,32 +241,28 @@ def acro_armed_lua_full(tmp_path, request):
     internal_controller=False.
 
     With dual GPS (EK3_SRC1_YAW=2, default in rawes_sitl_defaults.parm) yaw
-    is known from the first GPS fix — no fast circles or EKFGSF motion needed.
-    The kinematic is a plain min_jerk trajectory from origin to the orbital
-    equilibrium position (pos0/vel0 from steady_state_starting.json).
+    is known from the first GPS fix — no motion is needed.  The kinematic is a
+    stationary hold at pos0 (vel0=[0,0,0], linear trajectory) for 80 s.
 
     Key design points:
       - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
       - SCR_USER6=1 set immediately after arm; Lua pre-GPS bypass holds
         col_cruise and zero cyclic until _tdir0 fires (GPS fusion).
-      - GPS fuses at ~44 s (delAngBiasLearned); _tdir0 fires; orbit tracking
-        active from ~44 s until kinematic exits at 80 s (~36 s of tracking).
-      - Fixture waits for GPS fusion before yielding so the test only needs a
-        short timeout to observe kinematic exit.
+      - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro).
+        _tdir0 fires; orbit tracking active ~46 s before kinematic exits.
+      - Fixture waits for GPS fusion before yielding.
 
     Timeline (from mediator start, speedup=1):
-      t=0..~40 s  kinematic min_jerk: hub travels from origin to pos0 at vel0.
-      t~15 s      arm complete; SCR_USER6=1 set; Lua pre-GPS bypass active.
-      t~44 s      GPS fuses; _tdir0 fires; Lua orbit tracking active.
-      t~44 s      fixture yields (GPS fusion confirmed).
-      t=80 s      kinematic exits; Lua already tracking orbit for ~36 s.
+      t=0..80 s   kinematic stationary hold at pos0 (vel=0).
+      t~12 s      arm complete; SCR_USER6=1 set; Lua pre-GPS bypass active.
+      t~34 s      GPS fuses; _tdir0 fires; Lua orbit tracking active.
+      t~34 s      fixture yields (GPS fusion confirmed).
+      t=80 s      kinematic exits; Lua already tracking orbit for ~46 s.
       t~80+       free flight under ArduPilot + Lua.
     """
     extra = {
         # Stationary hold at pos0 (tether equilibrium from steady_state_starting.json).
-        # vel0=0: hub does not move; tether tension holds it at equilibrium.
-        # linear kinematic with vel=0 keeps launch_pos=pos0 throughout.
-        "kinematic_traj_type":  "linear",
+        # vel0=0 + ramp_s=0: hub stays at pos0 throughout the 80 s kinematic.
         "vel0":                 [0.0, 0.0, 0.0],
         "kinematic_vel_ramp_s": 0.0,
         "startup_damp_seconds": 80.0,

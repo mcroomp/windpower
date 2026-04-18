@@ -32,6 +32,18 @@ _rawes_fns = {
     KP_VZ                  = KP_VZ,
     VZ_LAND_SP             = VZ_LAND_SP,
 
+    -- ── Yaw-trim constants ───────────────────────────────────────────────
+    BASE_THROTTLE_PCT      = BASE_THROTTLE_PCT,
+    KP_YAW                 = KP_YAW,
+    KI_YAW                 = KI_YAW,
+    YAW_I_MAX              = YAW_I_MAX,
+    YAW_SRV_FUNC           = YAW_SRV_FUNC,
+    YAW_STABLE_RAD_S       = YAW_STABLE_RAD_S,
+    YAW_STABLE_TIMEOUT_MS  = YAW_STABLE_TIMEOUT_MS,
+    YAW_DEAD_ZONE_RAD_S    = YAW_DEAD_ZONE_RAD_S,
+    YAW_TEST_THROTTLE_PCT  = YAW_TEST_THROTTLE_PCT,
+    YAW_TEST_DURATION_MS   = YAW_TEST_DURATION_MS,
+
     -- ── Pure math / geometry ─────────────────────────────────────────────
 
     rodrigues              = rodrigues,

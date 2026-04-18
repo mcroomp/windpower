@@ -38,20 +38,23 @@ from rawes_lua_harness import RawesLua
 from rawes_modes import MODE_YAW, MODE_YAW_LTD
 
 # ---------------------------------------------------------------------------
-# Constants -- must match rawes.lua EXACTLY (used in assertions, not in logic)
+# Constants -- read directly from rawes.lua via _rawes_fns so they never
+# drift out of sync.  rawes_test_surface.lua exposes them; if a constant is
+# missing here, add it to the _rawes_fns table in that file first.
 # ---------------------------------------------------------------------------
 
-BASE_THROTTLE_PCT     = 5.0
-KP_YAW                = 3.0
-KI_YAW                = 2.0
-YAW_I_MAX             = 80.0
-YAW_DEAD_ZONE_RAD_S   = math.radians(2.0)
-YAW_STABLE_RAD_S      = math.radians(5.0)
-YAW_STABLE_TIMEOUT_MS = 30000
-YAW_SRV_FUNC          = 94
-
-DT_S  = 0.01   # 100 Hz yaw tick (BASE_PERIOD_MS in rawes.lua)
-DT_MS = 10
+_c = RawesLua()
+BASE_THROTTLE_PCT     = float(_c.fns.BASE_THROTTLE_PCT)
+KP_YAW                = float(_c.fns.KP_YAW)
+KI_YAW                = float(_c.fns.KI_YAW)
+YAW_I_MAX             = float(_c.fns.YAW_I_MAX)
+YAW_DEAD_ZONE_RAD_S   = float(_c.fns.YAW_DEAD_ZONE_RAD_S)
+YAW_STABLE_RAD_S      = float(_c.fns.YAW_STABLE_RAD_S)
+YAW_STABLE_TIMEOUT_MS = int(_c.fns.YAW_STABLE_TIMEOUT_MS)
+YAW_SRV_FUNC          = int(_c.fns.YAW_SRV_FUNC)
+DT_MS                 = int(_c.fns.BASE_PERIOD_MS)
+DT_S                  = DT_MS / 1000.0
+del _c
 
 
 # ---------------------------------------------------------------------------

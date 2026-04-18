@@ -5,6 +5,7 @@ pytest
 pytest-timeout
 pyyaml
 numba
+lupa
 pyvista
 imageio
 imageio-ffmpeg

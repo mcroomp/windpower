@@ -46,7 +46,7 @@ from tether          import TetherModel
 from frames          import build_orb_frame, build_vel_aligned_frame
 from sensor          import make_sensor, SpinSensor
 from controller      import compute_swashplate_from_state, OrbitTracker
-from kinematic       import KinematicStartup, compute_launch_position, make_min_jerk_traj, make_orbital_kinematics, make_fast_circle_orbit_kinematics  # noqa: F401
+from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 from planner         import quat_apply, quat_is_identity
@@ -194,145 +194,28 @@ def run_mediator(args, trajectory=None):
     _R0 = build_vel_aligned_frame(_bz, _vel0_arr)
 
     # -- Kinematic startup trajectory -----------------------------------------
+    # Only "linear" is supported: constant vel0 from launch_pos, optional ramp
+    # to zero.  With dual GPS (EK3_SRC1_YAW=2) yaw is known from the first fix;
+    # no circular motion or EKFGSF convergence is needed.
     _kin_duration    = max(0.0, float(cfg["startup_damp_seconds"]))
-    _traj_type       = cfg["kinematic_traj_type"]
-    _phase3_start_t  = float("inf")   # set below for fast_circle; sentinel for other types
-    _phase_at_fn     = None            # set below for fast_circle only
-    _last_kin_phase  = ""              # set below for fast_circle only
+    _last_kin_phase  = ""  # no phase transitions in linear trajectory
 
-    if _traj_type == "min_jerk":
-        # 5th-order minimum-jerk from home [0,0,0] at rest → pos0 at rest.
-        # T_traj = duration - margin.  After T_traj the hub holds at pos0 for
-        # margin seconds so GPS can fuse before free flight begins.
-        _margin_s = float(cfg["kinematic_min_jerk_margin_s"])
-        _T_traj   = max(5.0, _kin_duration - _margin_s)
-        _traj_fn  = make_min_jerk_traj(
-            p0 = [0.0, 0.0, 0.0],
-            v0 = [0.0, 0.0, 0.0],
-            pf = _pos0_arr,
-            vf = _vel0_arr,          # arrive at orbital velocity → smooth hand-off
-            T  = _T_traj,
-        )
-        _startup = KinematicStartup(
-            traj_fn  = _traj_fn,
-            duration = _kin_duration,
-            R0       = _R0,
-        )
+    _startup = KinematicStartup(
+        target_pos = _pos0_arr,
+        target_vel = _vel0_arr,
+        duration   = _kin_duration,
+        ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
+        R0         = _R0,
+    )
+    if _startup.duration > 0.0:
         ev.write("kinematic_config", t_sim=0.0,
-                 traj_type="min_jerk",
-                 T_traj=round(_T_traj, 1), margin_s=round(_margin_s, 1),
-                 total_s=round(_kin_duration, 1),
-                 target_pos=_pos0_arr.tolist(), target_vel=_vel0_arr.tolist())
-        _dyn_pos0 = np.zeros(3)
-        _dyn_vel0 = np.zeros(3)
-    elif _traj_type == "linear":
-        _startup = KinematicStartup(
-            target_pos = _pos0_arr,
-            target_vel = _vel0_arr,
-            duration   = _kin_duration,
-            ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
-            R0         = _R0,
-        )
-        if _startup.duration > 0.0:
-            ev.write("kinematic_config", t_sim=0.0,
-                     traj_type="linear",
-                     total_s=round(_startup.duration, 1),
-                     ramp_s=round(_startup.ramp_s, 1),
-                     launch_pos=[round(v, 3) for v in _startup.launch_pos],
-                     vel=_vel0_arr.tolist())
-        _dyn_pos0 = _startup.launch_pos
-        _dyn_vel0 = _vel0_arr
-    elif _traj_type == "orbital":
-        # Circular orbit around the anchor.  Gives a continuously rotating GPS
-        # velocity heading so EKFGSF can discriminate its yaw hypotheses and set
-        # yawAlignComplete — which a constant straight-line velocity cannot do.
-        _orb_anchor = np.array(
-            cfg.get("kinematic_orbital_anchor_ned", [0.0, 0.0, 0.0]), dtype=float
-        )
-        _orb_dir    = int(cfg.get("kinematic_orbital_dir", 1))
-        _v_orb      = float(np.linalg.norm(_vel0_arr[:2]))   # horizontal speed
-        _traj_fn, _R_fn = make_orbital_kinematics(
-            anchor_pos = _orb_anchor,
-            p0         = _pos0_arr,
-            v_orb      = _v_orb,
-            orbit_dir  = _orb_dir,
-        )
-        _startup = KinematicStartup(
-            traj_fn  = _traj_fn,
-            duration = _kin_duration,
-            R0       = _R0,    # unused when R_fn is set; kept for completeness
-            R_fn     = _R_fn,
-        )
-        _dyn_pos0, _dyn_vel0 = _traj_fn(0.0)
-        _r_h = float(np.hypot(_pos0_arr[0] - _orb_anchor[0],
-                               _pos0_arr[1] - _orb_anchor[1]))
-        ev.write("kinematic_config", t_sim=0.0,
-                 traj_type="orbital",
-                 total_s=round(_kin_duration, 1),
-                 r_h_m=round(_r_h, 1),
-                 omega_rad_s=round(_v_orb / _r_h, 4),
-                 orbit_dir=_orb_dir,
-                 start_pos=[round(v, 1) for v in _dyn_pos0],
-                 start_vel=[round(v, 3) for v in _dyn_vel0])
-    elif _traj_type == "fast_circle":
-        # Fast-circle EKFGSF convergence trajectory:
-        #   Phase 1: n_fast tight circles (v=v_fast, r=r_circle) → EKFGSF converges
-        #   Phase 2: 1 decel circle (v → v_orb_eq) → return to orbital speed
-        #   Phase 3: T_lead s on large orbit → Lua captures, kinematic exits at p_eq
-        _orb_anchor = np.array(
-            cfg.get("kinematic_orbital_anchor_ned", [0.0, 0.0, 0.0]), dtype=float
-        )
-        _orb_dir      = int(cfg.get("kinematic_orbital_dir", 1))
-        _v_orb_eq     = float(cfg["kinematic_exit_speed"])
-        _v_fast       = float(cfg.get("kinematic_fast_speed", 5.0))
-        _r_circle     = float(cfg.get("kinematic_circle_radius", 10.0))
-        _n_fast       = int(cfg.get("kinematic_fast_circles", 0))
-        _T_lead       = float(cfg.get("kinematic_orbit_lead_s", 10.0))
-        _t_hold       = float(cfg.get("kinematic_hold_s", 15.0))
-        _traj_fn, _R_fn = make_fast_circle_orbit_kinematics(
-            anchor_pos = _orb_anchor,
-            p_eq       = _pos0_arr,
-            v_orb_eq   = _v_orb_eq,
-            v_fast     = _v_fast,
-            n_fast     = _n_fast,
-            T_lead     = _T_lead,
-            r_circle   = _r_circle,
-            orbit_dir  = _orb_dir,
-            t_hold     = _t_hold,
-        )
-        _dyn_pos0, _dyn_vel0 = _traj_fn(0.0)
-        # Override _R0 so initial orientation matches trajectory start.
-        # Fast circle starts at p_start with NW-pointing velocity — use R_fn(0)
-        # so body yaw aligns with trajectory heading, not with vel0 from config.
-        _R0 = _R_fn(0.0)
-        _startup = KinematicStartup(
-            traj_fn  = _traj_fn,
-            duration = _kin_duration,
-            R0       = _R0,
-            R_fn     = _R_fn,
-        )
-        _total_dur        = float(getattr(_traj_fn, "total_duration",   _kin_duration))
-        _phase3_start_t   = float(getattr(_traj_fn, "phase3_start_t",   _kin_duration))
-        _phase3_start_pos = getattr(_traj_fn, "phase3_start_pos", _pos0_arr)
-        _phase3_logged    = False
-        _phase_at_fn      = getattr(_traj_fn, "phase_at", None)
-        _last_kin_phase   = ""
-        ev.write("kinematic_config", t_sim=0.0,
-                 traj_type="fast_circle",
-                 hold_s=round(_t_hold, 1),
-                 v_fast_m_s=round(_v_fast, 2),
-                 r_circle_m=round(_r_circle, 1),
-                 n_fast=_n_fast,
-                 T_lead_s=round(_T_lead, 1),
-                 total_s=round(_total_dur, 1),
-                 phase3_start_t=round(_phase3_start_t, 1),
-                 start_pos=[round(v, 1) for v in _dyn_pos0],
-                 exit_pos=[round(v, 1) for v in _pos0_arr])
-    else:
-        raise ValueError(
-            f"kinematic_traj_type must be 'linear', 'min_jerk', 'orbital', or 'fast_circle', "
-            f"got {_traj_type!r}"
-        )
+                 traj_type="linear",
+                 total_s=round(_startup.duration, 1),
+                 ramp_s=round(_startup.ramp_s, 1),
+                 launch_pos=[round(v, 3) for v in _startup.launch_pos],
+                 vel=_vel0_arr.tolist())
+    _dyn_pos0 = _startup.launch_pos
+    _dyn_vel0 = _vel0_arr
 
     rotor  = _rd.load(cfg["rotor_definition"])
     log.info("Rotor: %s", rotor.summary())
@@ -406,7 +289,6 @@ def run_mediator(args, trajectory=None):
     _body_z_eq         = np.zeros(3)   # body_z setpoint (IC path only; zeros in ArduPilot path)
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
-    _phase3_logged     = False         # one-shot: fast_circle phase 3 start (for Lua enable)
     _tel_note          = ""            # single-frame event marker written to telemetry CSV; cleared after write
     _prev_phase        = ""            # detect phase changes for tel note
     omega_spin         = _omega_spin_init
@@ -723,21 +605,7 @@ def run_mediator(args, trajectory=None):
             # ----------------------------------------------------------------
             if _startup.apply(hub_state, dynamics, t_sim):
                 new_vel = hub_state["vel"]
-                # Log each phase transition and populate _last_kin_phase for heartbeats.
-                if _phase_at_fn is not None:
-                    _cur_phase = _phase_at_fn(t_sim)
-                    if _cur_phase != _last_kin_phase:
-                        _last_kin_phase = _cur_phase
-                        ev.write("kinematic_phase", t_sim=t_sim, phase=_cur_phase,
-                                 pos_ned=[round(v, 1) for v in hub_state["pos"].tolist()])
-                # One-shot: log when fast_circle trajectory enters Phase 3 (large orbit).
-                # Conftest uses this marker to know when to enable Lua (SCR_USER6=1).
-                if (_traj_type == "fast_circle"
-                        and not _phase3_logged
-                        and t_sim >= _phase3_start_t):
-                    _phase3_logged = True
-                    ev.write("kinematic_phase3_start", t_sim=t_sim,
-                             pos_ned=[round(v, 1) for v in hub_state["pos"].tolist()])
+                # No phase transitions in the linear trajectory.
             elif not _logged_transition:
                 # ── First free-flight step — one-shot transition diagnostic ────
                 # Logs the full hub state at the kinematic→free-flight boundary

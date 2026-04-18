@@ -298,24 +298,20 @@ def main() -> None:
     print()
 
     # ------------------------------------------------------------------ #
-    # CHECK H -- centripetal acceleration during fast circles             #
+    # CHECK H -- horizontal acceleration during kinematic motion          #
     # ------------------------------------------------------------------ #
     print("=" * 70)
-    print("CHECK H: horizontal accel_world magnitude during fast circles")
-    print("  (at v=5 m/s, r=5 m: centripetal = v^2/r = 5.00 m/s^2)")
+    print("CHECK H: horizontal accel_world magnitude during kinematic motion")
     print("=" * 70)
     accel_horiz = np.sqrt(accel_world[:, 0]**2 + accel_world[:, 1]**2)
     if circ_mask.any():
-        # expected centripetal: v^2 / r; we don't know r directly, report magnitude
-        # look for max-speed region (const circles, v~5 m/s)
         fast_mask = circ_mask & (speed > 3.0)
         if fast_mask.any():
             ac = accel_horiz[fast_mask]
-            print(f"  fast circle rows ({fast_mask.sum()}):  "
+            print(f"  moving rows v>3 m/s ({fast_mask.sum()}):  "
                   f"median={np.median(ac):.3f}  min={ac.min():.3f}  max={ac.max():.3f}  m/s^2")
-            exp_centripetal = 5.0**2 / 5.0   # v^2 / r
-            _fmt("fast: |accel_horiz| - v^2/r (5.0 m/s^2)", ac - exp_centripetal,
-                 "m/s^2", 0.5, 2.0)
+    else:
+        print("  (no moving kinematic rows found -- stationary hold)")
     print()
 
     # ------------------------------------------------------------------ #
@@ -364,7 +360,7 @@ def main() -> None:
     print(f"  Kinematic (alpha>0) : {kin_mask.sum()} rows  "
           f"t=[{t[kin_mask].min():.1f}, {t[kin_mask].max():.1f}]s")
     print(f"  Hold (speed<0.05)   : {hold_mask.sum()} rows")
-    print(f"  Moving circles      : {circ_mask.sum()} rows")
+    print(f"  Moving kinematic    : {circ_mask.sum()} rows")
     print(f"  Free flight         : {(~kin_mask).sum()} rows  "
           f"t=[{t[~kin_mask].min():.1f}, {t[~kin_mask].max():.1f}]s" if (~kin_mask).any() else "")
     print()

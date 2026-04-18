@@ -102,7 +102,7 @@ def _args(recv_port, send_port):
     import tempfile, os as _os
     cfg = _mcfg.defaults()
     cfg["startup_damp_seconds"] = 0.0   # disable damping → immediate free flight
-    cfg["tether_rest_length"]   = 200.0
+    cfg["rest_length"]          = 200.0
     tmp = tempfile.mkdtemp()
     cfg_path = _os.path.join(tmp, "transport_test_config.json")
     _mcfg.save(cfg, cfg_path)

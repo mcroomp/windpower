@@ -134,7 +134,7 @@ def _args(tmp_path=None):
     import tempfile, os as _os
     cfg = _mcfg.defaults()
     cfg["startup_damp_seconds"] = 0.0   # disable damping → immediate free flight
-    cfg["tether_rest_length"]   = 200.0  # hub starts inside tether envelope
+    cfg["rest_length"]          = 200.0  # hub starts inside tether envelope
     if tmp_path is None:
         tmp_path = tempfile.mkdtemp()
     cfg_path = _os.path.join(str(tmp_path), "test_mediator_config.json")

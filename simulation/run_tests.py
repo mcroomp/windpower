@@ -24,6 +24,7 @@ Examples:
     python simulation/run_tests.py simulation/tests/unit -k test_aero
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -33,8 +34,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VENV_PYTHON   = "simulation/tests/unit/.venv/Scripts/python.exe"
-DEFAULT_SUMMARY = "simulation/logs/suite_summary.json"
+VENV_PYTHON      = "simulation/.venv/Scripts/python.exe"
+REQUIREMENTS     = "simulation/requirements.txt"
+DEFAULT_SUMMARY  = "simulation/logs/suite_summary.json"
 
 # ANSI colours
 RED    = "\033[31m"
@@ -46,6 +48,34 @@ BOLD   = "\033[1m"
 DIM    = "\033[2m"
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _ensure_venv_fresh(python: str) -> None:
+    """Install/upgrade packages if requirements.txt changed since the last run.
+
+    Uses a hash stamp stored alongside the venv so the check is near-instant
+    (~0 ms) when nothing has changed, and auto-installs only when needed.
+    """
+    req = Path(REQUIREMENTS)
+    if not req.exists():
+        return
+
+    digest = hashlib.sha256(req.read_bytes()).hexdigest()
+    stamp  = Path(python).parent / ".requirements_hash"
+
+    if stamp.exists() and stamp.read_text().strip() == digest:
+        return  # already up to date
+
+    print(f"{YELLOW}[env] requirements.txt changed — running pip install...{RESET}", flush=True)
+    result = subprocess.run(
+        [python, "-m", "pip", "install", "-q", "-r", str(req)],
+        capture_output=False,
+    )
+    if result.returncode != 0:
+        print(f"{RED}[env] pip install failed (exit {result.returncode}){RESET}", flush=True)
+    else:
+        stamp.write_text(digest)
+        print(f"{GREEN}[env] venv up to date{RESET}", flush=True)
 
 def _strip(line: str) -> str:
     return _ANSI_RE.sub('', line)
@@ -114,6 +144,7 @@ def main() -> int:
 
     _venv  = Path(VENV_PYTHON)
     python = str(_venv.resolve()) if _venv.exists() else sys.executable
+    _ensure_venv_fresh(python)
     cmd    = [python, "-u", "-m", "pytest"] + pytest_args
 
     print(f"{CYAN}{'-'*70}{RESET}")

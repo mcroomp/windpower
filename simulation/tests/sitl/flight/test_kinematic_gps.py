@@ -2,10 +2,10 @@
 test_kinematic_gps.py -- GPS fusion during kinematic startup with dual GPS.
 
 With EK3_SRC1_YAW=2 (dual-antenna RELPOSNED) yaw is known from the first GPS
-fix — no circular motion or EKFGSF convergence needed.  The kinematic is a
-simple straight-line hold at orbital velocity (vel0 from steady_state_starting.json).
+fix — no vehicle motion needed.  The kinematic is a stationary hold at the
+tether equilibrium (vel0=[0,0,0]).
 
-Expected timeline (dual GPS, straight-line kinematic):
+Expected timeline (dual GPS, stationary hold):
   t~0.3 s  yaw aligned (RELPOSNED available immediately)
   t~8 s    arm complete
   t~34 s   delAngBiasLearned; GPS fuses ("EKF3 IMU0 is using GPS")
@@ -32,25 +32,20 @@ from analyse_mavlink import validate_ekf_window
 
 def test_kinematic_gps(tmp_path, request):
     """
-    GPS fuses during a straight-line kinematic hold; EKF stays clean for 40 s.
+    GPS fuses during a stationary kinematic hold; EKF stays clean for 40 s.
 
     With dual GPS (EK3_SRC1_YAW=2, default in rawes_sitl_defaults.parm):
-      - Yaw aligns at ~0.3 s from RELPOSNED — no trajectory needed.
-      - delAngBiasLearned converges at ~34 s — the only remaining wait.
+      - Yaw aligns at ~0.3 s from RELPOSNED — no motion needed.
+      - delAngBiasLearned converges at ~34 s with constant-zero gyro.
       - GPS fuses at ~34 s; validate_ekf_window checks 40 s from that point.
 
-    The kinematic is a plain straight-line hold at vel0 from
-    steady_state_starting.json (~0.96 m/s East).  No fast circles, no orbital
-    trajectory — any motion (or none) works with dual GPS.
+    The kinematic is a stationary hold at the tether equilibrium (vel0=[0,0,0]).
+    startup_damp=160 gives ~126 s after GPS fusion before free-flight exit.
     """
     extra = {
         # Stationary hold at pos0 (tether equilibrium).
-        # linear + vel0=0: hub stays at pos0 throughout; no trajectory.
-        "kinematic_traj_type":  "linear",
         "vel0":                 [0.0, 0.0, 0.0],
         "kinematic_vel_ramp_s": 0.0,
-        # Stationary hold: delAngBiasLearned with zero motion takes ~60-90 s.
-        # startup_damp=160 gives >=70 s after GPS fusion before free-flight exit.
         "startup_damp_seconds": 160.0,
     }
 

@@ -444,3 +444,61 @@ Additional physics limitations in the current simulation:
 1. **Felix Weyel (2025)** — "Modeling and Closed Loop Control of a Cyclic Pitch Actuated Rotary Airborne Wind Energy System", Bachelor's Thesis, Uni Freiburg.
 2. **De Schutter, Leuthold, Diehl (2018)** — "Optimal Control of a Rigid-Wing Rotary Kite System for Airborne Wind Energy".
 3. **US Patent US3217809** (Kaman/Bossler, 1965) — Canonical servo-flap rotor control system.
+
+---
+
+## SITL Lockstep Protocol
+
+### How lockstep works
+
+ArduPilot SITL uses a **lockstep** physics protocol:
+
+1. ArduPilot sends a binary servo packet (UDP port 9002) and then **blocks** waiting for a state reply.
+2. The physics backend (mediator) receives the packet, integrates one timestep (400 Hz = 2.5 ms), and sends back a JSON state packet.
+3. ArduPilot unblocks, processes the state, and emits MAVLink messages with the new `time_boot_ms`.
+
+Because ArduPilot cannot advance until it receives a reply, the physics worker must **reply to every servo packet without exception**. Any attempt to rate-limit the physics loop using sim time will cause ArduPilot to stall permanently.
+
+### sim_now() — ArduPilot's internal clock, not wall-clock
+
+`gcs.sim_now()` returns `time_boot_ms / 1000.0` from the most recently **processed** MAVLink message. This is ArduPilot's internal simulation clock:
+
+- It advances only when MAVLink messages are received (which requires the physics loop to be running).
+- At SITL speedup=1 (default), sim time ≈ wall time (roughly 1:1), but they are **not** guaranteed equal.
+- Returns 0.0 before the first MAVLink message is received.
+- All test timeouts and deadlines (arm, set_mode, wait_ekf_attitude, etc.) are expressed in sim seconds.
+- **`sim_now()` is always consistent with the message that caused `_recv` to return.**
+
+### `_recv` internal buffer — clock consistency guarantee
+
+`_recv` drains all available network bytes into an internal deque, then pops and processes messages one at a time. It returns on the first match, leaving the rest for the next call. **Result: `sim_now()` always equals the `time_boot_ms` of the message that caused `_recv` to return** — never a later timestamp from the same network burst. `SimClock.update()` asserts non-decreasing timestamps (zero skipped); out-of-order delivery surfaces immediately as `AssertionError`.
+
+### sim_sleep(N) — waits N sim-seconds, not N wall-seconds
+
+`gcs.sim_sleep(N)` loops calling `_recv(blocking=True, timeout=0.1)` until sim time has advanced by N seconds. It does **not** call `time.sleep()`. Key properties:
+
+- **The physics worker must keep running** while `sim_sleep` is active — otherwise ArduPilot stalls, no MAVLink messages arrive, and `sim_sleep` never returns.
+- Every received message — whether it matches a type filter or not — advances the sim-clock and is written to the MAVLink log. The type filter in `_recv` only controls what is *returned* to the caller; discarded messages still tick the clock.
+- At speedup=1, `sim_sleep(70)` takes ~70 seconds of real time.
+
+### Anti-pattern: rate-limiting inside a physics worker
+
+```python
+# WRONG — deadlock if worker skips replies
+def worker():
+    while True:
+        servos = sitl.recv_servos()
+        if sitl.sim_now() - last_send > 0.1:   # rate limiting = skipping replies
+            sitl.send_state(...)
+            last_send = sitl.sim_now()
+
+# CORRECT — reply to every servo packet
+def worker():
+    while True:
+        servos = sitl.recv_servos()
+        if servos is None:
+            break
+        sitl.send_state(...)   # always reply
+```
+
+If the worker skips replying in order to "wait for sim time to advance", ArduPilot blocks, `time_boot_ms` stops advancing, `sim_now()` never crosses the threshold, and the test deadlocks permanently.

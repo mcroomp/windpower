@@ -57,41 +57,13 @@ DEFAULTS: dict = {
     # Hub moves at vel0 from launch_pos for startup_damp_seconds, then physics
     # takes over.  Gives EKF time to lock on GPS before free flight.
     #
-    # kinematic_traj_type selects the trajectory shape:
-    #   "linear"      — constant vel0 from launch_pos, optional linear ramp to zero.
-    #                   Hub starts at pos0 - vel0*duration; vel unchanged unless ramp_s>0.
-    #   "min_jerk"    — 5th-order polynomial from [0,0,0] at rest to pos0 at vel0.
-    #                   Zero accel at both ends; accel_body computed analytically.
-    #                   Kinematic ends immediately on arrival (startup_damp_seconds
-    #                   must be long enough for GPS to fuse before arrival — 65 s
-    #                   gives ~11 s after fusion at ~54 s).
-    #                   kinematic_min_jerk_margin_s: optional extra hold at
-    #                   (pos0, vel0) before free flight (0 = hand over on arrival).
-    #   "orbital"     — constant-speed circular orbit around anchor at r_h, alt.
-    #                   Requires kinematic_orbital_dir.
-    #   "fast_circle" — Phase 1: n_fast tight circles (v=kinematic_fast_speed,
-    #                   r=kinematic_circle_radius) for EKFGSF yaw convergence.
-    #                   Phase 2: 1 decel circle back to orbital speed.
-    #                   Phase 3: kinematic_orbit_lead_s on large orbit before exit.
-    #                   Requires kinematic_orbital_dir, kinematic_fast_speed,
-    #                   kinematic_circle_radius, kinematic_fast_circles,
-    #                   kinematic_orbit_lead_s, kinematic_exit_speed.
+    # With dual GPS (EK3_SRC1_YAW=2), yaw is known from the first GPS fix and
+    # delAngBiasLearned converges with constant-zero gyro (~21 s after arm).
+    # A stationary hold (vel0=[0,0,0], ramp_s=0) is the standard pattern.
     #
     # kinematic_vel_ramp_s: vel taper window at end of kinematic (0 = no taper).
-    # NOTE: ramp > 0 reduces GPS horizontal position change → slower EKF fusion.
-    # Default 0.0 keeps vel0 constant so GPS fuses quickly (within kinematic window).
     "startup_damp_seconds":         30.0,   # kinematic duration [s]
-    "kinematic_vel_ramp_s":         15.0,   # linear: vel ramp-to-zero window [s]
-    "kinematic_traj_type":          "min_jerk",  # "linear", "min_jerk", "orbital", or "fast_circle"
-    "kinematic_min_jerk_margin_s":   0.0,   # min_jerk: extra hold after trajectory [s]; 0 = hand over immediately on arrival
-    "kinematic_orbital_dir":              1,          # orbital/fast_circle: +1=CCW, -1=CW
-    "kinematic_orbital_anchor_ned":  [0.0, 0.0, 0.0],  # orbital/fast_circle: anchor NED [m]
-    "kinematic_hold_s":             15.0,   # fast_circle: stationary hold before acceleration [s]; allows arming
-    "kinematic_fast_speed":          5.0,   # fast_circle: peak circle speed [m/s]; ≥3 m/s for EKFGSF (57 deg/s at 5 m/s, r=5 m)
-    "kinematic_circle_radius":       5.0,   # fast_circle: circle radius [m]
-    "kinematic_fast_circles":        0,     # fast_circle: additional constant-speed circles after accel circle (0 = just accel+decel)
-    "kinematic_orbit_lead_s":       10.0,   # fast_circle: seconds on large orbit before exit [s]
-    "kinematic_exit_speed":         0.96,   # fast_circle: orbital speed [m/s] at kinematic exit (v_orb_eq for Phase 4)
+    "kinematic_vel_ramp_s":         15.0,   # vel ramp-to-zero window at end [s]; 0 = constant vel throughout
     "startup_damp_k_ang":          500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
 
     # ── Attitude damping ──────────────────────────────────────────────────────

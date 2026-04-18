@@ -268,10 +268,18 @@ to write human-readable summaries alongside the CSV.
 
 ## Key Lua Sync Rules
 
-- `test_yaw_lua.py` runs the actual rawes.lua yaw-trim code via `RawesLua` harness.
-  It copies the key constants at the top for use in assertions — update them
-  whenever yaw constants or `run_yaw_trim()` logic change in rawes.lua.
-- `test_math_lua.py` mirrors the cyclic/slerp/orbit logic.
-  Update it whenever the corresponding rawes.lua functions change.
+**CRITICAL — `rawes_test_surface.lua` must be updated when rawes.lua gains new locals.**
+The harness splices `rawes_test_surface.lua` inside rawes.lua's anonymous function wrapper,
+giving it access to all module-level locals. Constants and functions are exposed through
+`_rawes_fns`; Python tests read them via `sim.fns.*` — no Python copies to maintain.
+
+- When adding a **module-level** `local` constant or function that tests need, add it to
+  `_rawes_fns` in `rawes_test_surface.lua` in the same commit.
+- When adding a **function-local** constant that tests need, hoist it to module level
+  first, then add it to `_rawes_fns`. Function-locals are out of scope for the splice.
+- `test_yaw_lua.py` reads all yaw constants (`KP_YAW`, `YAW_DEAD_ZONE_RAD_S`, etc.)
+  from `sim.fns.*` — no manual copies.
+- `test_math_lua.py` runs actual rawes.lua functions via `_rawes_fns` and cross-checks
+  against `controller.py`. A failing test means `controller.py` diverged; fix that.
 - A failing Lua unit test after a rawes.lua edit means the Python assertion constants
   are stale. Fix the constants, then fix the test.
