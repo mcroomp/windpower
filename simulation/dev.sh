@@ -337,7 +337,7 @@ case "$CMD" in
                         /rawes/.venv/bin/python -m pytest "$_f" -s -v \
                         ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
                     | tee "$_log" \
-                    | grep --line-buffered -E "PASSED|FAILED|ERROR|passed|failed|error" \
+                    | grep --line-buffered -E "PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error" \
                     | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}' \
                     || _test_rc=$?
                     _retrieve_logs "$_c"
@@ -411,7 +411,7 @@ case "$CMD" in
                         /rawes/.venv/bin/python -m pytest $_files -s -v \
                         ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
                     | tee "$_log" \
-                    | grep --line-buffered -E "PASSED|FAILED|ERROR|passed|failed|error" \
+                    | grep --line-buffered -E "PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error" \
                     | sed "s/^/[w${i}] /"
                 ) &
                 _PIDS+=($!)
@@ -458,7 +458,7 @@ case "$CMD" in
                 _PASS_ARGS+=("$_arg")
             fi
         done
-        _STATUS_PAT='PASS|FAIL|PASSED|FAILED|ERROR|passed|failed|error|warning'
+        _STATUS_PAT='PASS|FAIL|PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error|warning'
         if [ "$_FILTER" = "1" ]; then
             docker exec -t "$CONTAINER" bash /rawes/simulation/test_unit.sh "${_PASS_ARGS[@]}" \
                 | grep -E "$_STATUS_PAT" --line-buffered
@@ -477,7 +477,7 @@ case "$CMD" in
                 _PASS_ARGS+=("$_arg")
             fi
         done
-        _STATUS_PAT='PASS|FAIL|PASSED|FAILED|ERROR|passed|failed|error|warning'
+        _STATUS_PAT='PASS|FAIL|PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error|warning'
         if [ "$_FILTER" = "1" ]; then
             docker exec -t "$CONTAINER" bash /rawes/simulation/test_simtest.sh "${_PASS_ARGS[@]}" \
                 | grep -E "$_STATUS_PAT" --line-buffered
