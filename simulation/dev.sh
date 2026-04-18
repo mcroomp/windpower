@@ -259,7 +259,8 @@ case "$CMD" in
             declare -a _MATCHED=()
             for _tf in "${_ALL_FILES[@]}"; do
                 if grep -qE "def (test_[a-zA-Z0-9_]*${_K_EXPR}[a-zA-Z0-9_]*|${_K_EXPR}[a-zA-Z0-9_]*)" "$_tf" 2>/dev/null \
-                   || grep -qF "def ${_K_EXPR}" "$_tf" 2>/dev/null; then
+                   || grep -qF "def ${_K_EXPR}" "$_tf" 2>/dev/null \
+                   || [[ "$(basename "$_tf" .py)" == *"${_K_EXPR}"* ]]; then
                     _MATCHED+=("$_tf")
                 fi
             done
