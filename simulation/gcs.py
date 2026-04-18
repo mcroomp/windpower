@@ -175,6 +175,7 @@ class RawesGCS:
         # Clock is advanced only when a message is popped, so sim_now() stays
         # consistent with the message that caused _recv to return.
         self._recv_buf: collections.deque = collections.deque()
+        self._armed: bool = False
         # JSON message log — every received MAVLink message written as one line
         self._mavlog: MavlinkLogWriter | None = None
         if mavlog_path is not None:
@@ -183,6 +184,11 @@ class RawesGCS:
     # ------------------------------------------------------------------
     # Simulation time
     # ------------------------------------------------------------------
+
+    @property
+    def is_armed(self) -> bool:
+        """True when the last received HEARTBEAT had MAV_MODE_FLAG_SAFETY_ARMED set."""
+        return self._armed
 
     def sim_now(self) -> float:
         """
@@ -299,6 +305,11 @@ class RawesGCS:
                 self._sim_clock.update(getattr(msg, 'time_boot_ms', 0))
                 if self._mavlog is not None:
                     self._mavlog.write(msg, self._sim_clock.now_ms())
+                if msg.get_type() == "HEARTBEAT":
+                    self._armed = bool(msg.base_mode & 128)  # MAV_MODE_FLAG_SAFETY_ARMED
+                    if hasattr(msg, '_header'):
+                        self._target_system    = msg._header.srcSystem
+                        self._target_component = msg._header.srcComponent
                 if type_set is None or msg.get_type() in type_set:
                     return msg
                 # Non-matching: clock updated + logged; discard and continue.
@@ -311,6 +322,22 @@ class RawesGCS:
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def connect_nowait(self) -> None:
+        """Open the MAVLink socket without blocking for a heartbeat.
+
+        Use this in single-threaded lockstep tests where the main loop must
+        drive SITL sensor packets before ArduPilot can send any MAVLink.
+        Target system/component default to 1/1 and are corrected automatically
+        when the first HEARTBEAT is processed by _recv().
+        """
+        self._mav = mavutil.mavlink_connection(
+            self._address,
+            baud=self._baud,
+            source_system=self._source_system,
+        )
+        log.info("GCS socket open (no heartbeat wait) — target sys=%d comp=%d",
+                 self._target_system, self._target_component)
 
     def connect(self, timeout: float = 30.0) -> None:
         """Connect and wait for the first heartbeat from the vehicle.
@@ -401,18 +428,27 @@ class RawesGCS:
     def set_param(
         self,
         name: str,
-        value: float,
+        value: "int | float",
         timeout: float = 5.0,
         retries: int = 3,
     ) -> bool:
         """
         Set a parameter and confirm via PARAM_VALUE acknowledgement.
 
+        Pass an ``int`` value to send MAV_PARAM_TYPE_INT32 (required for bitmask
+        and enum params such as SERVO_BLH_MASK).  Pass a ``float`` for AP_Float
+        params.  ArduPilot silently ignores a REAL32 set on an INT32 param.
+
         If no ACK arrives within *timeout* seconds, verifies the current value
         with a PARAM_REQUEST_READ and retries the set up to *retries* times.
         Returns True if the parameter is confirmed at the requested value.
         """
         name_bytes = name.encode("utf-8")
+        param_type = (
+            mavutil.mavlink.MAV_PARAM_TYPE_INT32
+            if isinstance(value, int)
+            else mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+        )
 
         for attempt in range(retries):
             if attempt > 0:
@@ -423,7 +459,7 @@ class RawesGCS:
                 self._target_component,
                 name_bytes,
                 float(value),
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+                param_type,
             )
 
             deadline = self.sim_now() + timeout

@@ -66,7 +66,6 @@ from tether      import TetherModel
 from controller  import orbit_tracked_body_z_eq, compute_rate_cmd, RatePID
 from swashplate  import SwashplateServoModel
 from planner     import HoldPlanner
-from frames      import build_orb_frame
 from sensor      import PhysicalSensor
 from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
@@ -80,7 +79,7 @@ T_AERO_OFFSET = 45.0
 ANCHOR        = np.zeros(3)
 POS0          = _IC.pos
 VEL0          = _IC.vel
-BODY_Z0       = _IC.body_z
+BODY_Z0       = _IC.R0[:, 2]
 OMEGA_SPIN0   = _IC.omega_spin
 
 I_SPIN_KGMS2   = 10.0
@@ -116,7 +115,7 @@ def _run(t_sim: float = T_SIM):
     dyn = RigidBodyDynamics(
         mass=5.0, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS0.tolist(), vel0=VEL0.tolist(),
-        R0=build_orb_frame(BODY_Z0), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
+        R0=_IC.R0, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(rd.default())
     tether = TetherModel(anchor_ned=ANCHOR,

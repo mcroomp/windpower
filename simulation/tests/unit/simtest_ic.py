@@ -13,7 +13,8 @@ Usage
     ic = load_ic()
     POS0   = ic.pos
     VEL0   = ic.vel
-    BODY_Z0 = ic.body_z
+    R0     = ic.R0               # full body-to-NED rotation (GPS-consistent yaw)
+    BODY_Z0 = ic.R0[:, 2]       # rotor axle unit vector = third column of R0
     OMEGA_SPIN0 = ic.omega_spin
     REST_LENGTH0 = ic.rest_length
     collective_rad = ic.coll_eq_rad   # equilibrium collective [rad]
@@ -35,7 +36,7 @@ class IC:
     """Steady-state initial conditions loaded from steady_state_starting.json."""
     pos:          np.ndarray   # NED hub position [m]
     vel:          np.ndarray   # NED hub velocity [m/s]
-    body_z:       np.ndarray   # rotor axle unit vector in world NED
+    R0:           np.ndarray   # full body-to-NED rotation matrix (3x3); GPS-consistent yaw; body_z = R0[:, 2]
     omega_spin:   float        # equilibrium spin rate [rad/s]
     rest_length:  float        # tether rest length [m]
     coll_eq_rad:  float        # equilibrium collective [rad] — static balance with full restoring torque
@@ -60,7 +61,7 @@ def load_ic() -> IC:
     return IC(
         pos         = np.array(d["pos"],    dtype=float),
         vel         = np.array(d["vel"],    dtype=float),
-        body_z      = np.array(d["body_z"], dtype=float),
+        R0          = np.array(d["R0"],     dtype=float).reshape(3, 3),
         omega_spin  = float(d["omega_spin"]),
         rest_length  = float(d["rest_length"]),
         coll_eq_rad  = float(d["coll_eq_rad"]),

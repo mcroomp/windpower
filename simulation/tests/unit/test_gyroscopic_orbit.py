@@ -38,7 +38,6 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
 from controller import OrbitTracker, AcroController
-from frames     import build_orb_frame
 from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 
@@ -55,7 +54,7 @@ WIND      = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
 
 POS0          = _IC.pos
 VEL0          = _IC.vel
-BODY_Z0       = _IC.body_z
+BODY_Z0       = _IC.R0[:, 2]
 OMEGA_SPIN0   = _IC.omega_spin
 OMEGA_SPIN_MIN = 0.5
 REST_LEN      = _IC.rest_length
@@ -96,8 +95,7 @@ def _run_orbit(
     """
     rotor = rd.default()
 
-    # Build initial rotation matrix from BODY_Z0
-    R0    = build_orb_frame(BODY_Z0)
+    R0    = _IC.R0
 
     dyn = RigidBodyDynamics(
         mass   = rotor.mass_kg,

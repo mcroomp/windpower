@@ -187,11 +187,7 @@ def run_mediator(args, trajectory=None):
     _pos0_arr        = np.array(cfg["pos0"],     dtype=float)
     _vel0_arr        = np.array(cfg["vel0"],     dtype=float)
     _omega_spin_init = float(cfg["omega_spin"])
-    _bz_raw          = np.array(cfg["body_z"],   dtype=float)
-    _bz = _bz_raw / np.linalg.norm(_bz_raw)
-
-    # Build _R0: x_orb aligned to vel0 so ZYX yaw == GPS velocity heading from t=0.
-    _R0 = build_vel_aligned_frame(_bz, _vel0_arr)
+    _R0 = np.array(cfg["R0"], dtype=float).reshape(3, 3)
 
     # -- Kinematic startup trajectory -----------------------------------------
     # Only "linear" is supported: constant vel0 from launch_pos, optional ramp

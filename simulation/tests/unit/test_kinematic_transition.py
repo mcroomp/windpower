@@ -47,7 +47,6 @@ from controller  import (OrbitTracker,
                          col_min_for_altitude_rad,
                          AcroController)
 from dynamics    import RigidBodyDynamics
-from frames      import build_orb_frame
 from kinematic   import KinematicStartup
 from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat_apply
 from simtest_ic  import load_ic
@@ -73,7 +72,7 @@ WIND             = np.array([0.0, 10.0, 0.0])  # NED: 10 m/s East
 # Steady-state initial conditions
 POS0         = _IC.pos
 VEL0_JSON    = _IC.vel          # ~0 m/s (true equilibrium velocity)
-BODY_Z0      = _IC.body_z
+BODY_Z0      = _IC.R0[:, 2]
 OMEGA_SPIN0  = _IC.omega_spin
 REST_LENGTH0 = _IC.rest_length
 
@@ -137,7 +136,7 @@ def _run_pumping_cycle(
         4. aero.compute_forces() + tether.compute()
         5. dynamics.step()
     """
-    R0       = build_orb_frame(BODY_Z0)
+    R0       = _IC.R0
     _startup = KinematicStartup(
         target_pos = POS0,
         target_vel = vel_at_start,

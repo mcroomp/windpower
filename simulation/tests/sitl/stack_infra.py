@@ -427,15 +427,16 @@ class SitlContext:
     Use this directly when you need SITL + your own sensor worker without
     the full mediator + arm sequence (e.g. GPS fusion layer tests).
     """
-    sitl_proc:    subprocess.Popen  # type: ignore[type-arg]
-    sitl_log:     Path
-    gcs_log:      Path
-    mavlink_log:  Path              # pass as mavlog_path= to RawesGCS to enable logging
-    sim_dir:      Path
-    repo_root:    Path
-    log:          logging.Logger
-    test_log_dir: Path
-    boot_setup:   object    # ParamSetup
+    sitl_proc:     subprocess.Popen  # type: ignore[type-arg]
+    sitl_log:      Path
+    gcs_log:       Path
+    mavlink_log:   Path              # pass as mavlog_path= to RawesGCS to enable logging
+    telemetry_log: Path              # write telemetry CSV here; copied to test_log_dir on teardown
+    sim_dir:       Path
+    repo_root:     Path
+    log:           logging.Logger
+    test_log_dir:  Path
+    boot_setup:    object    # ParamSetup
 
 
 @contextlib.contextmanager
@@ -482,9 +483,10 @@ def _sitl_stack(
     sim_dir   = repo_root / "simulation"
 
     # ── Paths ──────────────────────────────────────────────────────────────────
-    sitl_log    = tmp_path / "sitl.log"
-    gcs_log     = tmp_path / "gcs.log"
-    mavlink_log = tmp_path / "mavlink.jsonl"
+    sitl_log      = tmp_path / "sitl.log"
+    gcs_log       = tmp_path / "gcs.log"
+    mavlink_log   = tmp_path / "mavlink.jsonl"
+    telemetry_log = tmp_path / "telemetry.csv"
 
     _configure_logging(gcs_log)
     log = logging.getLogger(test_name or "sitl")
@@ -514,15 +516,16 @@ def _sitl_stack(
                              add_param_file=boot_parm_file)
 
     ctx = SitlContext(
-        sitl_proc    = sitl_proc,
-        sitl_log     = sitl_log,
-        gcs_log      = gcs_log,
-        mavlink_log  = mavlink_log,
-        sim_dir      = sim_dir,
-        repo_root    = repo_root,
-        log          = log,
-        test_log_dir = test_log_dir,
-        boot_setup   = _boot_setup,
+        sitl_proc     = sitl_proc,
+        sitl_log      = sitl_log,
+        gcs_log       = gcs_log,
+        mavlink_log   = mavlink_log,
+        telemetry_log = telemetry_log,
+        sim_dir       = sim_dir,
+        repo_root     = repo_root,
+        log           = log,
+        test_log_dir  = test_log_dir,
+        boot_setup    = _boot_setup,
     )
 
     try:
@@ -543,6 +546,8 @@ def _sitl_stack(
         _copy_map: dict[str, Path] = {"sitl.log": sitl_log, "gcs.log": gcs_log}
         if mavlink_log.exists():
             _copy_map["mavlink.jsonl"] = mavlink_log
+        if telemetry_log.exists():
+            _copy_map["telemetry.csv"] = telemetry_log
         copy_logs_to_dir(test_log_dir, _copy_map)
         _ardupilot_log = Path("/tmp/ArduCopter.log")
         if _ardupilot_log.exists():

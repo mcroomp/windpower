@@ -17,16 +17,16 @@
 
 # ACRO rate controller I-term limits.
 # Zero I-term prevents windup during the kinematic phase.
-ATC_RAT_RLL_IMAX  0    # roll  rate I-term limit = 0 -> no I windup during kinematic
-ATC_RAT_PIT_IMAX  0    # pitch rate I-term limit = 0 -> no I windup during kinematic
-ATC_RAT_YAW_IMAX  0    # yaw   rate I-term limit = 0 -> no I windup during kinematic
+ATC_RAT_RLL_IMAX  0.0  # roll  rate I-term limit = 0 -> no I windup during kinematic
+ATC_RAT_PIT_IMAX  0.0  # pitch rate I-term limit = 0 -> no I windup during kinematic
+ATC_RAT_YAW_IMAX  0.0  # yaw   rate I-term limit = 0 -> no I windup during kinematic
 
 EK3_IMU_MASK    1      # bit 0 only = IMU0 only = single EKF3 core (no Roll/Pitch inconsistency)
 EK3_SRC1_YAW    2      # 2=GPS dual-antenna yaw (RELPOSNED from F9P moving baseline)
 EK3_MAG_CAL     0      # 0=Never
 EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks (SITL JSON GPS has no quality fields)
-EK3_POS_I_GATE  50     # position innovation gate (sigma) — widened for extreme attitude
-EK3_VEL_I_GATE  50     # velocity innovation gate (sigma) — widened for extreme attitude
+EK3_POS_I_GATE  50.0   # position innovation gate (sigma) — widened for extreme attitude
+EK3_VEL_I_GATE  50.0   # velocity innovation gate (sigma) — widened for extreme attitude
 
 # Dual GPS moving-baseline heading (F9P GPS-for-yaw)
 GPS_AUTO_CONFIG  0     # disable GPS auto-config: required in SITL to preserve RELPOSNED stream
@@ -61,14 +61,11 @@ SERVO9_FUNCTION  94    # Script 1: Lua owns output 9 for GB4008 yaw trim
 SERVO9_MIN       800   # PWM off = 800 us; default 1100 clamps signal (motor silent)
 SERVO9_MAX       2000  # PWM full = 2000 us
 SERVO9_TRIM      800   # trim = off; rawes.lua _set_throttle_pct(0) = 800 us
-SERVO_BLH_MASK   256   # bit 8 = output 9 — DShot enabled on AUX OUT 1 (FMU, no BRD_IO_DSHOT needed)
-SERVO_BLH_OTYPE  5     # DShot300 (Heli/Copter frame uses SERVO_BLH_OTYPE, not MOT_PWM_TYPE)
-SERVO_BLH_POLES  22    # GB4008 24N22P (11 pole-pairs); default 14 is wrong
-SERVO_DSHOT_ESC  3     # ESC type = AM32 (REVVitRC)
-# SERVO_BLH_BDMASK left at 0: enable only after AM32 EDT is active on the ESC.
-# Setting BDMASK=256 without EDT causes bad-frame accumulation -> motor suppressed.
+# SERVO_BLH_* and SERVO_DSHOT_ESC are hardware-only (DShot/BLHeli on Pixhawk 6C).
+# They are not recognised by the SITL binary and must NOT be in this file.
+# Set them in rawes_params.parm (the hardware parameter file) instead.
 
 # RPM source: SITL reads rpm.rpm_1 from mediator JSON (RPM1_TYPE=10).
 # On hardware: set RPM1_TYPE=5 (bidir DShot ESC telemetry) after enabling AM32 EDT.
 RPM1_TYPE        10    # 10=SITL JSON field rpm.rpm_1 (mediator sends omega_spin)
-RPM1_MIN         0     # no minimum filter
+RPM1_MIN         0.0   # no minimum filter

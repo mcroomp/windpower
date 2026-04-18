@@ -32,7 +32,6 @@ from tether        import TetherModel
 from controller    import RatePID
 from swashplate    import SwashplateServoModel
 from winch         import WinchController
-from frames        import build_orb_frame
 from simtest_ic    import load_ic
 from simtest_log   import SimtestLog, BadEventLog
 from tel           import make_tel
@@ -59,7 +58,7 @@ I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 
 # ── Starting state — steady-flight IC (identical to test_landing.py) ─────────
-BZ_INIT       = _IC.body_z
+R0_INIT       = _IC.R0
 POS_INIT      = _IC.pos
 VEL_INIT      = _IC.vel
 LAND_TETHER_M = _IC.rest_length
@@ -101,13 +100,13 @@ def _run_landing() -> dict:
     sim.vehicle_mode = 1
     sim.pos_ned      = POS_INIT.tolist()
     sim.vel_ned      = VEL_INIT.tolist()
-    sim.R            = build_orb_frame(BZ_INIT)
+    sim.R            = R0_INIT
     sim.gyro         = [0.0, 0.0, 0.0]
 
     dyn    = RigidBodyDynamics(
         mass=_ROTOR.mass_kg, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=POS_INIT.tolist(), vel0=VEL_INIT.tolist(),
-        R0=build_orb_frame(BZ_INIT), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
+        R0=R0_INIT, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(_ROTOR)
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=LAND_TETHER_M,

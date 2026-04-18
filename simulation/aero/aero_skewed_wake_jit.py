@@ -36,9 +36,6 @@ from aero_skewed_wake import SkewedWakeBEM
 
 log = logging.getLogger(__name__)
 
-# NED axis unit vectors — module-level constants to avoid per-call allocation
-_NED_EAST  = np.array([0.0, 1.0, 0.0])
-_NED_NORTH = np.array([1.0, 0.0, 0.0])
 
 # ---------------------------------------------------------------------------
 # JIT kernel 1 — uniform induced velocity bootstrap (3-iteration Newton)
@@ -276,19 +273,15 @@ class SkewedWakeBEMJit(SkewedWakeBEM):
 
         if v_inplane > 0.01:
             v_ip_unit = v_inplane_vec / v_inplane
-            dn0_ = float(disk_normal[0]); dn1_ = float(disk_normal[1]); dn2_ = float(disk_normal[2])
-            _ep = _NED_EAST  - np.dot(_NED_EAST,  disk_normal) * disk_normal
-            if np.linalg.norm(_ep) < 1e-6:
-                _ep = _NED_NORTH - np.dot(_NED_NORTH, disk_normal) * disk_normal
-            _bx = _ep / np.linalg.norm(_ep)
-            # inline np.cross(disk_normal, _bx) to avoid numpy dispatch overhead
-            bx0_ = float(_bx[0]); bx1_ = float(_bx[1]); bx2_ = float(_bx[2])
-            by0_ = dn1_ * bx2_ - dn2_ * bx1_
-            by1_ = dn2_ * bx0_ - dn0_ * bx2_
-            by2_ = dn0_ * bx1_ - dn1_ * bx0_
+            # Use hub body frame (R_hub[:,0], R_hub[:,1]) so psi_skew is in the same
+            # frame as the blade azimuth phi_az (which starts at body_x = R_hub[:,0]).
+            # This makes the Coleman correction yaw-invariant: the same in-plane wind
+            # maps to the same blade-relative psi_skew regardless of hub yaw.
+            bx0_ = float(R_hub[0, 0]); bx1_ = float(R_hub[1, 0]); bx2_ = float(R_hub[2, 0])
+            by0_ = float(R_hub[0, 1]); by1_ = float(R_hub[1, 1]); by2_ = float(R_hub[2, 1])
             psi_skew = math.atan2(
                 float(v_ip_unit[0]) * by0_ + float(v_ip_unit[1]) * by1_ + float(v_ip_unit[2]) * by2_,
-                float(np.dot(v_ip_unit, _bx)),
+                float(v_ip_unit[0]) * bx0_ + float(v_ip_unit[1]) * bx1_ + float(v_ip_unit[2]) * bx2_,
             )
         else:
             psi_skew = 0.0

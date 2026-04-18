@@ -321,16 +321,10 @@ class GlauertStateBEM:
         tilt_lon_rad = tilt_lon * self.pitch_gain_rad
         tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
-        _EAST = np.array([0.0, 1.0, 0.0])   # NED: East = Y axis
-        _ep   = _EAST - np.dot(_EAST, disk_normal) * disk_normal
-        if np.linalg.norm(_ep) > 1e-6:
-            _bx = _ep / np.linalg.norm(_ep)
-        else:
-            _NORTH = np.array([1.0, 0.0, 0.0])  # NED: North = X axis
-            _np2   = _NORTH - np.dot(_NORTH, disk_normal) * disk_normal
-            _bx    = _np2 / np.linalg.norm(_np2)
-        R_orb       = np.column_stack([_bx, np.cross(disk_normal, _bx), disk_normal])
-        M_cyc_world = R_orb @ np.array([-self.K_cyc * tilt_lon_rad * T,
+        # Use hub body frame (R_hub[:,0], R_hub[:,1]) for the cyclic moment so that
+        # tilt_lon/tilt_lat are interpreted in the same frame as the blade azimuth
+        # convention used by the strip-integration models.
+        M_cyc_world = R_hub @ np.array([-self.K_cyc * tilt_lon_rad * T,
                                           self.K_cyc * tilt_lat_rad * T,
                                           0.0])
 

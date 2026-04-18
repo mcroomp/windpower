@@ -23,7 +23,6 @@ from aero          import create_aero
 from tether        import TetherModel
 from controller    import RatePID
 from swashplate    import SwashplateServoModel
-from frames        import build_orb_frame
 from simtest_ic    import load_ic
 from simtest_log   import SimtestLog, BadEventLog
 from tel           import make_tel
@@ -70,13 +69,13 @@ def _run_steady() -> dict:
     sim.vehicle_mode = 1
     sim.pos_ned      = _IC.pos.tolist()
     sim.vel_ned      = _IC.vel.tolist()
-    sim.R            = build_orb_frame(_IC.body_z)
+    sim.R            = _IC.R0
     sim.gyro         = [0.0, 0.0, 0.0]
 
     dyn    = RigidBodyDynamics(
         mass=_ROTOR.mass_kg, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=_IC.pos.tolist(), vel0=_IC.vel.tolist(),
-        R0=build_orb_frame(_IC.body_z), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
+        R0=_IC.R0, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(_ROTOR)
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=_IC.rest_length,

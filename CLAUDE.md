@@ -202,9 +202,9 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 
 **CRITICAL:** Use Bash tool directly — do NOT use `wsl.exe`. Always use absolute paths.
 
-**CRITICAL:** NEVER call `docker exec` directly to run stack tests. Use `bash simulation/dev.sh test-stack-parallel [...]`. If stuck: `bash simulation/dev.sh stop && bash simulation/dev.sh start`.
+**CRITICAL:** NEVER call `docker exec` directly to run stack tests. Use `bash simulation/dev.sh test-stack [...]`. If stuck: `bash simulation/dev.sh stop && bash simulation/dev.sh start`.
 
-**Stack test isolation:** Each stack test runs in its own isolated Docker container — no port conflicts between tests are possible. Always pass `--fresh` (the default) to ensure each container starts from a clean EEPROM state; without it, a previous run's EEPROM state can cause spurious failures.
+**Stack test isolation:** Each stack test always runs in its own fresh Docker container — clean EEPROM, no stale processes, no port conflicts between tests.
 
 **CRITICAL:** Unit/simtests run via the Windows venv directly — NOT via `dev.sh test-unit` (which routes to Docker and fails because `tests/unit` is excluded from the container sync).
 
@@ -212,11 +212,11 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 |------|---------|
 | Unit tests (~483) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
 | Simtests (14) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
-| Stack test (single) | `bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_foo` |
-| Stack test (full suite) | `bash simulation/dev.sh test-stack-parallel --fresh -n 8` |
+| Stack test (single) | `bash simulation/dev.sh test-stack -n 1 -k test_foo` |
+| Stack test (full suite) | `bash simulation/dev.sh test-stack -n 8` |
 | **Post-failure: physics** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
 | **Post-failure: EKF/GPS** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_mavlink.py <test_name>` |
-| Regenerate steady state | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight` |
+| Regenerate `steady_state_starting.json` | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_steady_flight.py::test_steady_state_hub_does_not_drift -s` — written by that test only; used by all stack tests as initial conditions |
 | Container start/stop | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |
 | Run inside container | `bash simulation/dev.sh exec 'python3 /rawes/simulation/...'` |

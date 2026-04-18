@@ -34,6 +34,31 @@ T_ENU_NED = np.array([
 ], dtype=float)
 
 
+def build_gps_yaw_frame(body_z: np.ndarray) -> np.ndarray:
+    """
+    Build a rotation matrix with body_x purely horizontal (NED z-component = 0).
+
+    body_x = normalize(body_z x NED_down) = normalize([body_z_y, -body_z_x, 0])
+
+    This gives a RELPOSNED baseline vector that is completely horizontal regardless
+    of tether tilt, so ArduPilot accepts the heading at any tether angle.
+    Use this (not build_orb_frame) wherever GPS fusion is required.
+
+    Falls back to build_orb_frame when body_z is vertical (tether pointing straight
+    up or down — pathological case that never occurs in normal flight).
+    """
+    body_z = np.asarray(body_z, dtype=float)
+    body_z = body_z / float(np.linalg.norm(body_z))
+    _DOWN  = np.array([0.0, 0.0, 1.0])   # NED down
+    x_orb  = cross3(body_z, _DOWN)
+    norm   = float(np.linalg.norm(x_orb))
+    if norm < 1e-6:
+        return build_orb_frame(body_z)   # degenerate: body_z is vertical
+    x_orb /= norm
+    y_orb  = cross3(body_z, x_orb)
+    return np.column_stack([x_orb, y_orb, body_z])
+
+
 def build_vel_aligned_frame(body_z: np.ndarray, vel_ned: np.ndarray) -> np.ndarray:
     """
     Build an orbital rotation matrix whose ZYX yaw matches the GPS velocity heading.

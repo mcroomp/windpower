@@ -392,17 +392,12 @@ class SkewedWakeBEM:
         # basis {_bx, _by} constructed in the disk plane.
         if v_inplane > 0.01:
             v_ip_unit = v_inplane_vec / v_inplane
-            # Primary disk-plane x-axis: project East onto the disk plane.
-            # Fall back to North if the disk is facing East (East is nearly normal to disk).
-            _EAST = np.array([0.0, 1.0, 0.0])   # NED: East = Y axis
-            _ep   = _EAST - np.dot(_EAST, disk_normal) * disk_normal
-            if np.linalg.norm(_ep) > 1e-6:
-                _bx = _ep / np.linalg.norm(_ep)
-            else:
-                _NORTH = np.array([1.0, 0.0, 0.0])  # NED: North = X axis
-                _ep    = _NORTH - np.dot(_NORTH, disk_normal) * disk_normal
-                _bx    = _ep / np.linalg.norm(_ep)
-            _by      = np.cross(disk_normal, _bx)   # completes the right-hand disk frame
+            # Use hub body frame (R_hub[:,0], R_hub[:,1]) so psi_skew is in the same
+            # frame as the blade azimuth phi_az (which starts at body_x = R_hub[:,0]).
+            # This makes the Coleman correction yaw-invariant: the same in-plane wind
+            # maps to the same blade-relative psi_skew regardless of hub yaw.
+            _bx = R_hub[:, 0]   # body X axis in world frame (azimuth φ=0 reference)
+            _by = R_hub[:, 1]   # body Y axis in world frame
             psi_skew = math.atan2(float(np.dot(v_ip_unit, _by)),
                                   float(np.dot(v_ip_unit, _bx)))
         else:

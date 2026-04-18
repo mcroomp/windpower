@@ -19,8 +19,9 @@ starting directly above the anchor and letting wind + tether drive equilibrium.
 
 Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 
-Output artefacts (written alongside this file on every run):
+Output artefacts (written by test_steady_state_hub_does_not_drift):
   steady_state_starting.json  — equilibrium initial conditions (read by stack tests)
+  Regenerate: simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_steady_flight.py::test_steady_state_hub_does_not_drift -s
 """
 import json
 import math
@@ -334,11 +335,10 @@ def _save_starting_json(data: dict, path: Path) -> None:
                    error at equilibrium and headroom in both directions.
     """
     R0 = data["R0"]
-    body_z = R0[:, 2].tolist()   # third column = body Z in world frame
     out = {
         "pos":          data["pos0"].tolist(),
         "vel":          data["vel0"].tolist(),
-        "body_z":       body_z,
+        "R0":           R0.tolist(),  # equilibrium rotation matrix; stack tests apply build_gps_yaw_frame themselves
         "omega_spin":   float(data["omega_spin_eq"]),
         "rest_length":  float(data["rest_length"]),
         "coll_eq_rad":    float(data["coll_eq"]),        # unit-test equilibrium collective

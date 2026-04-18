@@ -11,9 +11,7 @@
 #   ./dev.sh sync                         re-sync code into running container
 #   ./dev.sh shell                        interactive bash shell
 #   ./dev.sh exec <cmd...>               run a command in the container
-#   ./dev.sh test-stack [...]            run stack tests sequentially
-#   ./dev.sh test-stack-parallel [-n N]  run stack tests in parallel (default: 4 workers)
-#   ./dev.sh test-stack-parallel --fresh [-n N]  one fresh container per test (fully isolated)
+#   ./dev.sh test-stack [-n N] [...]     run stack tests (default: 4 workers, one container per test)
 #   ./dev.sh test-unit  [...]            run unit tests
 #   ./dev.sh test-simtest [...]          run simtests
 #
@@ -188,42 +186,17 @@ case "$CMD" in
         docker exec "$CONTAINER" bash -c "$*"
         ;;
     test-stack)
-        ensure_running
-        health_check
-        _FILTER_MODE=summary
-        _PASS_ARGS=()
-        for _arg in "$@"; do
-            case "$_arg" in
-                --filterstatus) _FILTER_MODE=failures ;;
-                --raw)          _FILTER_MODE=all ;;
-                *)              _PASS_ARGS+=("$_arg") ;;
-            esac
-        done
-        # Clear host and container log dirs before the run so only this run's
-        # logs are present after retrieval.
-        rm -rf "$SCRIPT_DIR/logs"/*/
-        docker exec "$CONTAINER" bash -c "rm -rf /rawes/simulation/logs && mkdir -p /rawes/simulation/logs"
-        _rc=0
-        docker exec "$CONTAINER" \
-            env RAWES_FILTER_MODE="$_FILTER_MODE" \
-            bash /rawes/simulation/test_stack.sh ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} || _rc=$?
-        _retrieve_logs "$CONTAINER"
-        _WIN_LOGS=$(cygpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
-        echo ""
-        echo "[LOGS] summary: ${_WIN_LOGS}\\suite_summary.json"
-        exit $_rc
+        bash "$SCRIPT_DIR/dev.sh" test-stack-parallel "$@"
         ;;
 
     test-stack-parallel)
-        # Parse args: -n N sets worker count, --fresh = one container per test, rest forwarded to pytest
+        # Parse args: -n N sets worker count, rest forwarded to pytest
         _N_WORKERS=4
-        _FRESH=0
         _PASS_ARGS=()
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -n) shift; _N_WORKERS="$1" ;;
                 -n[0-9]*) _N_WORKERS="${1#-n}" ;;
-                --fresh) _FRESH=1 ;;
                 *) _PASS_ARGS+=("$1") ;;
             esac
             shift
@@ -272,176 +245,96 @@ case "$CMD" in
 
         _N_FILES=${#_ALL_FILES[@]}
 
-        # Clear host log dirs before the run so only this run's logs survive.
-        rm -rf "$SCRIPT_DIR/logs"/*/
-
         # Snapshot any simulation processes already running before we start
         _PROCS_BEFORE=$(_snap_procs)
 
-        if [ "$_FRESH" = "1" ]; then
-            # Fresh mode: each test file gets its own brand-new container (clean EEPROM,
-            # no stale processes).  Run up to _N_WORKERS containers concurrently.
-            _log "[INFO] Fresh mode: $_N_FILES tests, max $_N_WORKERS concurrent (run=$_RUN_ID)"
+        _log "[INFO] $_N_FILES tests, max $_N_WORKERS concurrent (run=$_RUN_ID)"
 
-            # Parallel arrays: _ACTIVE_PIDS[i] is the subshell PID for
-            # _ACTIVE_CTRS[i].  The parent shell removes containers here so cleanup
-            # is guaranteed even when the subshell's docker rm -f fails silently.
-            declare -a _ACTIVE_PIDS=()
-            declare -a _ACTIVE_CTRS=()
-            _RC=0
+        # Each test gets its own fresh container (clean EEPROM, no stale processes).
+        # _ACTIVE_PIDS[i] / _ACTIVE_CTRS[i] track running subshells; the parent
+        # reaps them via _reap_finished so cleanup is guaranteed even if a subshell's
+        # docker rm -f fails silently.
+        declare -a _ACTIVE_PIDS=()
+        declare -a _ACTIVE_CTRS=()
+        _RC=0
 
-            _reap_finished() {
-                local _still_pids=() _still_ctrs=() _p _pc i
-                for i in "${!_ACTIVE_PIDS[@]}"; do
-                    _p="${_ACTIVE_PIDS[$i]}"
-                    _pc="${_ACTIVE_CTRS[$i]}"
-                    if kill -0 "$_p" 2>/dev/null; then
-                        _still_pids+=("$_p")
-                        _still_ctrs+=("$_pc")
-                    else
-                        wait "$_p" || _RC=1
-                        docker rm -f "$_pc" >/dev/null 2>&1 || true
-                    fi
-                done
-                _ACTIVE_PIDS=("${_still_pids[@]+"${_still_pids[@]}"}")
-                _ACTIVE_CTRS=("${_still_ctrs[@]+"${_still_ctrs[@]}"}")
-            }
-
-            for j in $(seq 0 $((_N_FILES-1))); do
-                # Throttle: poll until a concurrency slot opens.
-                while [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ]; do
-                    _reap_finished
-                    [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ] && sleep 0.5
-                done
-
-                _c="rawes-parallel-${_RUN_ID}-${j}"
-                _CONTAINERS+=("$_c")
-                _f="/rawes/simulation/${_ALL_FILES[$j]#${SCRIPT_DIR}/}"
-                _log="/tmp/rawes-parallel-${_RUN_ID}-t${j}.log"
-                _WORKER_LOGS+=("$_log")
-                _label="$(basename "${_ALL_FILES[$j]}" .py)"
-
-                _log "[t${j}] starting: $_label"
-                (
-                    docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
-                    _sync_code "$_c" >/dev/null 2>&1
-                    # Clear container logs so each test starts with a blank slate.
-                    docker exec "$_c" bash -c "rm -rf /rawes/simulation/logs && mkdir -p /rawes/simulation/logs"
-                    # Run pytest, capturing exit code without letting set -e abort the subshell on
-                    # test failure (docker exec returns 1 when pytest finds failures; pipefail would
-                    # propagate that and skip _retrieve_logs).
-                    _test_rc=0
-                    docker exec \
-                        -e RAWES_RUN_STACK_INTEGRATION=1 \
-                        -e RAWES_SIM_VEHICLE=/ardupilot/Tools/autotest/sim_vehicle.py \
-                        "$_c" \
-                        /rawes/.venv/bin/python -m pytest "$_f" -s -v \
-                        ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
-                    | tee "$_log" \
-                    | grep --line-buffered -E "PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error" \
-                    | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}' \
-                    || _test_rc=$?
-                    _retrieve_logs "$_c"
-                    # Best-effort in-subshell removal; parent also removes via _reap_finished.
-                    docker rm -f "$_c" >/dev/null 2>&1 || true
-                    exit $_test_rc
-                ) &
-                _ACTIVE_PIDS+=($!)
-                _ACTIVE_CTRS+=("$_c")
+        _reap_finished() {
+            local _still_pids=() _still_ctrs=() _p _pc i
+            for i in "${!_ACTIVE_PIDS[@]}"; do
+                _p="${_ACTIVE_PIDS[$i]}"
+                _pc="${_ACTIVE_CTRS[$i]}"
+                if kill -0 "$_p" 2>/dev/null; then
+                    _still_pids+=("$_p")
+                    _still_ctrs+=("$_pc")
+                else
+                    wait "$_p" || _RC=1
+                    docker rm -f "$_pc" >/dev/null 2>&1 || true
+                fi
             done
+            _ACTIVE_PIDS=("${_still_pids[@]+"${_still_pids[@]}"}")
+            _ACTIVE_CTRS=("${_still_ctrs[@]+"${_still_ctrs[@]}"}")
+        }
 
-            # Drain remaining jobs, removing their containers as they finish.
-            while [ "${#_ACTIVE_PIDS[@]}" -gt 0 ]; do
+        for j in $(seq 0 $((_N_FILES-1))); do
+            # Throttle: poll until a concurrency slot opens.
+            while [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ]; do
                 _reap_finished
-                [ "${#_ACTIVE_PIDS[@]}" -gt 0 ] && sleep 0.5
+                [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ] && sleep 0.5
             done
 
-            _warn_new_procs "$_PROCS_BEFORE"
+            _c="rawes-parallel-${_RUN_ID}-${j}"
+            _CONTAINERS+=("$_c")
+            _f="/rawes/simulation/${_ALL_FILES[$j]#${SCRIPT_DIR}/}"
+            _wlog="/tmp/rawes-parallel-${_RUN_ID}-t${j}.log"
+            _WORKER_LOGS+=("$_wlog")
+            _label="$(basename "${_ALL_FILES[$j]}" .py)"
 
-            # Print per-test summary
-            echo ""
-            echo "----------------------------------------------------------------------"
-            for j in $(seq 0 $((_N_FILES-1))); do
-                _log="${_WORKER_LOGS[$j]}"
-                _label="$(basename "${_ALL_FILES[$j]}" .py)"
-                _summary=$(grep -E "^=+ .* in [0-9]" "$_log" 2>/dev/null | tail -1 || echo "(no summary)")
-                printf "[%-42s] %s\n" "$_label" "$_summary"
-            done
-            echo "----------------------------------------------------------------------"
-
-        else
-            # Round-robin mode: N workers share all test files.
-            _ACTUAL_WORKERS=$(( _N_WORKERS < _N_FILES ? _N_WORKERS : _N_FILES ))
-            echo "[INFO] $_N_FILES test files / $_ACTUAL_WORKERS workers (run=$_RUN_ID)"
-
-            # Start containers
-            for i in $(seq 0 $((_ACTUAL_WORKERS-1))); do
-                _c="rawes-parallel-${_RUN_ID}-${i}"
-                _CONTAINERS+=("$_c")
-                docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null
-            done
-
-            # Sync code to all containers in parallel
-            for _c in "${_CONTAINERS[@]}"; do
-                _sync_code "$_c" &
-            done
-            wait
-            echo "[INFO] All $_ACTUAL_WORKERS containers ready."
-
-            # Distribute test files round-robin across workers
-            declare -a _WORKER_FILE_ARGS
-            for i in $(seq 0 $((_ACTUAL_WORKERS-1))); do
-                _WORKER_FILE_ARGS[$i]=""
-            done
-            for j in $(seq 0 $((_N_FILES-1))); do
-                _w=$(( j % _ACTUAL_WORKERS ))
-                _f="/rawes/simulation/${_ALL_FILES[$j]#${SCRIPT_DIR}/}"
-                _WORKER_FILE_ARGS[$_w]+=" $_f"
-            done
-
-            # Launch workers — stream PASS/FAIL lines with worker prefix for progress
-            declare -a _PIDS=()
-            for i in $(seq 0 $((_ACTUAL_WORKERS-1))); do
-                _c="${_CONTAINERS[$i]}"
-                _files="${_WORKER_FILE_ARGS[$i]}"
-                _log="/tmp/rawes-parallel-${_RUN_ID}-w${i}.log"
-                _WORKER_LOGS+=("$_log")
-                echo "[w${i}] starting:$(echo "$_files" | xargs -n1 basename | tr '\n' ' ')"
-                (
-                    docker exec "$_c" \
-                        /rawes/.venv/bin/python -m pytest $_files -s -v \
-                        ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
-                    | tee "$_log" \
-                    | grep --line-buffered -E "PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error" \
-                    | sed "s/^/[w${i}] /"
-                ) &
-                _PIDS+=($!)
-            done
-
-            # Wait for all workers
-            _RC=0
-            for _pid in "${_PIDS[@]}"; do
-                wait "$_pid" || _RC=1
-            done
-
-            # Retrieve logs from all containers
-            for _c in "${_CONTAINERS[@]}"; do
+            _log "[t${j}] starting: $_label"
+            (
+                docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
+                _sync_code "$_c" >/dev/null 2>&1
+                docker exec "$_c" bash -c "rm -rf /rawes/simulation/logs && mkdir -p /rawes/simulation/logs"
+                # Run pytest; capture exit code without letting set -e abort the subshell on
+                # test failure (docker exec returns 1 on failures; pipefail would skip _retrieve_logs).
+                _test_rc=0
+                docker exec \
+                    -e RAWES_RUN_STACK_INTEGRATION=1 \
+                    -e RAWES_SIM_VEHICLE=/ardupilot/Tools/autotest/sim_vehicle.py \
+                    "$_c" \
+                    /rawes/.venv/bin/python -m pytest "$_f" -s -v \
+                    ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
+                | tee "$_wlog" \
+                | grep --line-buffered -E "PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error" \
+                | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}' \
+                || _test_rc=$?
+                # Remove stale host logs for this test only, then retrieve fresh ones.
+                rm -rf "$SCRIPT_DIR/logs/${_label}"
                 _retrieve_logs "$_c"
-            done
+                docker rm -f "$_c" >/dev/null 2>&1 || true
+                exit $_test_rc
+            ) &
+            _ACTIVE_PIDS+=($!)
+            _ACTIVE_CTRS+=("$_c")
+        done
 
-            _warn_new_procs "$_PROCS_BEFORE"
+        # Drain remaining jobs, removing their containers as they finish.
+        while [ "${#_ACTIVE_PIDS[@]}" -gt 0 ]; do
+            _reap_finished
+            [ "${#_ACTIVE_PIDS[@]}" -gt 0 ] && sleep 0.5
+        done
 
-            # Print per-worker summary lines
-            echo ""
-            echo "----------------------------------------------------------------------"
-            for i in $(seq 0 $((_ACTUAL_WORKERS-1))); do
-                _log="${_WORKER_LOGS[$i]}"
-                _summary=$(grep -E "^=+ .* in [0-9]" "$_log" 2>/dev/null | tail -1 || echo "(no summary)")
-                echo "[w${i}] $_summary"
-            done
-            echo "----------------------------------------------------------------------"
+        _warn_new_procs "$_PROCS_BEFORE"
 
-        fi
+        # Print per-test summary
+        echo ""
+        echo "----------------------------------------------------------------------"
+        for j in $(seq 0 $((_N_FILES-1))); do
+            _wlog="${_WORKER_LOGS[$j]}"
+            _label="$(basename "${_ALL_FILES[$j]}" .py)"
+            _summary=$(grep -E "^=+ .* in [0-9]" "$_wlog" 2>/dev/null | tail -1 || echo "(no summary)")
+            printf "[%-42s] %s\n" "$_label" "$_summary"
+        done
+        echo "----------------------------------------------------------------------"
 
         _WIN_LOGS=$(cygpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
         _log "[LOGS] ${_WIN_LOGS}"
@@ -490,7 +383,7 @@ case "$CMD" in
         bash "$SCRIPT_DIR/dev.sh" test-stack "$@"
         ;;
     "")
-        echo "Usage: $0 start|stop|sync|shell|exec <cmd>|test-stack [...]|test-stack-parallel [-n N] [--fresh] [...]|test-unit [...]|test-simtest [...]"
+        echo "Usage: $0 start|stop|sync|shell|exec <cmd>|test-stack [-n N] [...]|test-unit [...]|test-simtest [...]"
         exit 0
         ;;
     *)

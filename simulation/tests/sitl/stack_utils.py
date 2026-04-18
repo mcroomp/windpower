@@ -13,6 +13,9 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+from frames import build_gps_yaw_frame
+
 # ---------------------------------------------------------------------------
 # Environment variable names
 # ---------------------------------------------------------------------------
@@ -52,8 +55,11 @@ class ParamSetup:
         extended = base_setup.update({"NEW_PARAM": 1.0})
     """
 
-    def __init__(self, params: "dict[str, float]"):
-        self._params: dict[str, float] = {k: float(v) for k, v in params.items()}
+    def __init__(self, params: "dict[str, int | float]"):
+        self._params: "dict[str, int | float]" = {
+            k: (int(v) if isinstance(v, int) else float(v))
+            for k, v in params.items()
+        }
 
     # ── public API ───────────────────────────────────────────────────────────
 
@@ -140,7 +146,7 @@ class ParamSetup:
 
         Comment lines (starting with ``#``) and blank lines are ignored.
         """
-        params: dict[str, float] = {}
+        params: "dict[str, int | float]" = {}
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -148,7 +154,11 @@ class ParamSetup:
             parts = stripped.split()
             if len(parts) >= 2:
                 try:
-                    params[parts[0]] = float(parts[1])
+                    raw = parts[1]
+                    if "." in raw or "e" in raw.lower():
+                        params[parts[0]] = float(raw)
+                    else:
+                        params[parts[0]] = int(raw)
                 except ValueError:
                     pass
         return cls(params)
@@ -471,7 +481,7 @@ def _launch_mediator(
         # vel0 intentionally NOT overridden from initial_state: the kinematic
         # startup ramp needs vel0 from config.py defaults (~0.96 m/s) so the EKF
         # gets a velocity-derived yaw heading from frame 0.
-        cfg["body_z"]     = list(initial_state["body_z"])
+        cfg["R0"]         = build_gps_yaw_frame(np.array(initial_state["R0"], dtype=float).reshape(3, 3)[:, 2]).tolist()
         cfg["omega_spin"] = float(initial_state["omega_spin"])
         if tether_rest_length is None and "rest_length" in initial_state:
             cfg["tether_rest_length"] = float(initial_state["rest_length"])

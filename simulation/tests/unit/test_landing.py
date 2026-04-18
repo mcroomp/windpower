@@ -42,7 +42,6 @@ from controller      import (
 from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from landing_planner import LandingPlanner
 from winch           import WinchController
-from frames          import build_orb_frame
 from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
 from tel             import make_tel
@@ -103,7 +102,7 @@ def _run_landing() -> dict:
     dyn    = RigidBodyDynamics(
         mass=_ROTOR.mass_kg, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
         pos0=_IC.pos.tolist(), vel0=_IC.vel.tolist(),
-        R0=build_orb_frame(_IC.body_z), omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
+        R0=_IC.R0, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
     )
     aero   = create_aero(rd.default())
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=_IC.rest_length,
@@ -127,7 +126,7 @@ def _run_landing() -> dict:
         col_min_reel_in_rad     = COL_MIN_REEL_IN_RAD,
     )
 
-    orbit_tracker = OrbitTracker(_IC.body_z, _IC.pos / np.linalg.norm(_IC.pos),
+    orbit_tracker = OrbitTracker(_IC.R0[:, 2], _IC.pos / np.linalg.norm(_IC.pos),
                                  BODY_Z_SLEW_RATE)
     acro          = AcroController.from_rotor(rd.default(), use_servo=True)
 
