@@ -26,7 +26,6 @@ _rawes_fns = {
     COL_MAX_RAD            = COL_MAX_RAD,
     COL_SLEW_MAX           = COL_SLEW_MAX,
     MIN_TETHER_M           = MIN_TETHER_M,
-    PUMP_LEN_THRESH        = PUMP_LEN_THRESH,
     T_TRANSITION           = T_TRANSITION,
     XI_REEL_IN_DEG         = XI_REEL_IN_DEG,
     KP_VZ                  = KP_VZ,

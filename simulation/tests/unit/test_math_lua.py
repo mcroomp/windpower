@@ -76,7 +76,6 @@ def test_constants_have_expected_values(sim):
     assert float(f.COL_CRUISE_FLIGHT_RAD) == pytest.approx(-0.18)
     assert float(f.COL_MIN_RAD)           == pytest.approx(-0.28)
     assert float(f.COL_MAX_RAD)           == pytest.approx(0.10)
-    assert float(f.PUMP_LEN_THRESH)       == pytest.approx(0.05)
     assert float(f.KP_VZ)                 == pytest.approx(0.05)
     assert float(f.VZ_LAND_SP)            == pytest.approx(0.5)
     assert float(f.XI_REEL_IN_DEG)        == pytest.approx(80.0)

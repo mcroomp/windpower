@@ -360,22 +360,21 @@ If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 **Division of labour:**
 - Lua (50 Hz): cyclic orbit tracking + per-phase body_z slerp + per-phase collective
 - Ground planner (mediator): DeschutterPlanner owns phase timing and winch commands
-- Synchronisation: Lua detects tether paying-out/reeling-in from tether length change. No separate communication channel needed.
+- Synchronisation: ground planner sends `NAMED_VALUE_FLOAT("RAWES_SUB", N)` to signal each phase transition. Lua executes the correct collective and body_z slerp for each substate.
 
 **Algorithm:**
 1. Gates on `ahrs:healthy()`. Until healthy, returns immediately.
-2. On first healthy call: captures `_bz_eq0` and `_tdir0`. Sets `_pump_bz_ri` (reel-in body_z at xi=80 deg from wind). Sets `_pump_tlen_ref = tlen` (current tether length). Sends "RAWES pump: bz_ri=..." STATUSTEXT. Starts in "hold" phase.
-3. Phase state machine (tether-length driven):
-   - **hold**: Tracks minimum tlen (follows hub inward to orbit equilibrium after kinematic exit). Transitions to reel_out when `tlen > min_tlen_seen + PUMP_LEN_THRESH`. Sends "RAWES pump: reel_out" STATUSTEXT.
-   - **reel_out**: Tracks peak tlen. Transitions to transition when `tlen < peak - PUMP_LEN_THRESH`.
-   - **transition**: Time-based (T_TRANSITION seconds). Sends "RAWES pump: transition". Transitions to reel_in.
-   - **reel_in**: Tracks trough tlen. Transitions to reel_out when `tlen > trough + PUMP_LEN_THRESH`.
-4. PUMP_LEN_THRESH=0.05 m. Per-iteration Dtlen (~0.0024 m at 0.12 m/s over 20 ms) is far below the threshold; only cumulative change from phase reference correctly detects motion.
-5. Hold phase uses minimum-tracking (not fixed-at-capture): Lua may capture during or just after kinematic when tlen is at launch-phase value; hub then moves inward to orbit equilibrium (smaller tlen). The minimum follows, so reel_out detection fires correctly when the winch starts paying out from equilibrium.
+2. On first healthy call: captures `_bz_eq0` and `_tdir0`. Sets `_pump_bz_ri` (reel-in body_z at xi=80 deg from wind). Sends "RAWES pump: bz_ri=..." STATUSTEXT. Starts in "hold" phase.
+3. Phase state machine (RAWES_SUB-driven):
+   - **hold** (RAWES_SUB=0): reel-out collective, orbit tracking. Sends "RAWES pump: hold" STATUSTEXT.
+   - **reel_out** (RAWES_SUB=1): reel-out collective, orbit tracking. Sends "RAWES pump: reel_out" STATUSTEXT.
+   - **transition** (RAWES_SUB=2): collective ramps up, body_z slews to xi=80 deg. Sends "RAWES pump: transition".
+   - **reel_in** (RAWES_SUB=3): reel-in collective, body_z at xi=80 deg.
+   - **transition_back** (RAWES_SUB=4): collective ramps down, body_z slews back to orbit.
 
 > **Sim fixture:** `acro_armed_pumping_lua` in `conftest.py`. `internal_controller=True`. DeschutterPlanner trajectory (t_hold_s=10 s, then reel_out starts). Validates: "RAWES pump: reel_out" STATUSTEXT fires. Stack test: `test_pumping_cycle.py::test_pumping_cycle_lua`.
 
-### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2 or 3)
+### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2, or RAWES_YAW=1 alongside any flight mode)
 
 The counter-torque script is already validated (15/15 tests pass). Physics model in
 `simulation/torque_model.py`; stack mediator in `simulation/mediator_torque.py`. Summary:

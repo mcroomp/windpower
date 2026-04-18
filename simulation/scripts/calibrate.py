@@ -1103,8 +1103,8 @@ def _run_command(session: RawesGCS, tokens: list[str],
     # -- mode <n> -----------------------------------------------------------
     elif cmd == "mode":
         _MODE_NAMES = {
-            0: "none", 1: "steady_noyaw", 2: "yaw", 3: "steady",
-            4: "landing_noyaw", 5: "pumping_noyaw", 6: "arm_hold_noyaw",
+            0: "none", 1: "steady", 2: "yaw",
+            4: "landing", 5: "pumping", 6: "arm_hold",
             7: "yaw_test", 8: "yaw_limited",
         }
         if len(tokens) < 2:
@@ -1116,7 +1116,7 @@ def _run_command(session: RawesGCS, tokens: list[str],
         except ValueError:
             print("  Error: mode must be an integer 0-8"); return True
         if n not in _MODE_NAMES:
-            print(f"  Error: mode must be 0-8"); return True
+            print(f"  Error: unknown mode {n}  (valid: {sorted(_MODE_NAMES)})"); return True
         if not session.set_param("SCR_USER6", float(n)):
             print("  [FAIL] Could not set SCR_USER6"); return True
         name = _MODE_NAMES[n]

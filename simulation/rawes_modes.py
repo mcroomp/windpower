@@ -3,6 +3,7 @@ rawes_modes.py — SCR_USER6 mode constants and NAMED_VALUE_FLOAT substate const
 
 SCR_USER6 encoding: plain integer 0..8 (mode only).
 Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N) -- never encoded in SCR_USER6.
+Yaw trim alongside a flight mode is enabled via NAMED_VALUE_FLOAT("RAWES_YAW", 1.0).
 
 Keep this file in sync with the constant definitions in rawes.lua.
 Used by simtests, SITL stack tests, and calibrate.py.
@@ -13,19 +14,25 @@ Usage
 
     gcs.set_param("SCR_USER6", MODE_PUMPING)           # set mode
     gcs.send_named_float("RAWES_SUB", PUMP_REEL_OUT)   # set substate
+    gcs.send_named_float("RAWES_YAW", 1.0)             # enable yaw trim alongside flight
 """
 
 # ── Mode numbers (written directly to SCR_USER6) ──────────────────────────────
 
-MODE_NONE       = 0   # scripting loaded but both subsystems idle
-MODE_STEADY     = 1   # cyclic orbit-tracking only (no yaw)
-MODE_YAW        = 2   # counter-torque yaw trim only
-MODE_STEADY_YAW = 3   # cyclic + yaw trim simultaneously
-MODE_LANDING    = 4   # cyclic + VZ descent; ground planner sends RAWES_SUB substate
-MODE_PUMPING    = 5   # De Schutter pumping; ground planner sends RAWES_SUB substate
-MODE_ARM_HOLD   = 6   # hold Ch3=1000 Ch8=2000 keepalive only
-MODE_YAW_TEST   = 7   # motor at 25% for 20 s (bench verification)
-MODE_YAW_LTD    = 8   # yaw PI with 30 s motor hard-stop
+MODE_NONE     = 0   # script passive: no RC overrides; logs every 5 s + any NV message
+MODE_STEADY   = 1   # cyclic orbit-tracking
+MODE_YAW      = 2   # counter-torque yaw trim only
+# mode 3 reserved
+MODE_LANDING  = 4   # cyclic + VZ descent; ground planner sends RAWES_SUB substate
+MODE_PUMPING  = 5   # De Schutter pumping; ground planner sends RAWES_SUB substate
+MODE_ARM_HOLD = 6   # hold Ch3=1000 Ch8=2000 keepalive only
+MODE_YAW_TEST = 7   # motor at 25% for 20 s (bench verification)
+MODE_YAW_LTD  = 8   # yaw PI with 30 s motor hard-stop
+
+# ── Named-float control values ────────────────────────────────────────────────
+
+NV_YAW_ENABLE  = 1.0   # send as RAWES_YAW to enable yaw trim alongside any flight mode
+NV_YAW_DISABLE = 0.0   # send as RAWES_YAW to disable yaw trim (default after mode change)
 
 # ── Landing substates (sent as NAMED_VALUE_FLOAT "RAWES_SUB" when mode=MODE_LANDING) ─
 

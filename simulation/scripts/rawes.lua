@@ -3,15 +3,19 @@ rawes.lua -- Unified RAWES flight + yaw-trim controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via SCR_USER6 (plain integer 0..8):
-  0  none     -- script loaded but both subsystems disabled
-  1  steady_noyaw  -- cyclic orbit-tracking only, no yaw trim (Ch1, Ch2)   50 Hz
-  2  yaw           -- counter-torque yaw trim only (Ch9/SERVO9)           100 Hz
-  3  steady        -- cyclic orbit-tracking + yaw trim simultaneously
-  4  landing_noyaw -- cyclic + VZ collective + auto final_drop, no yaw   50 Hz
-  5  pumping_noyaw -- De Schutter pumping cycle, no yaw trim              50 Hz
-  6  arm_hold_noyaw -- hold Ch3=1000 Ch8=2000 only; no flight/yaw control
-  7  yaw_test       -- motor ON at 25% for 20 s then off; resets on re-entry  100 Hz
-  8  yaw_limited    -- same as yaw (PI) but motor hard-stops 30 s after first throttle; resets on re-entry
+  0  none        -- script passive: no RC overrides, no keepalive; logs every 5 s + any NV message
+  1  steady      -- cyclic orbit-tracking only (Ch1, Ch2)                  50 Hz
+  2  yaw         -- counter-torque yaw trim only (Ch9/SERVO9)             100 Hz
+  3  (reserved)
+  4  landing     -- cyclic + VZ collective + auto final_drop               50 Hz
+  5  pumping     -- De Schutter pumping cycle                              50 Hz
+  6  arm_hold    -- hold Ch3=1000 Ch8=2000 keepalive only; no flight/yaw control
+  7  yaw_test    -- motor ON at 25% for 20 s then off; resets on re-entry  100 Hz
+  8  yaw_limited -- same as yaw (PI) but motor hard-stops 30 s after first throttle; resets on re-entry
+
+Yaw trim alongside any flight mode: send NAMED_VALUE_FLOAT("RAWES_YAW", 1) to enable,
+  NAMED_VALUE_FLOAT("RAWES_YAW", 0) to disable.  Cleared on every mode change.
+  MODE_YAW (2) runs yaw-only regardless of RAWES_YAW.
 
 Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N) -- not encoded in SCR_USER6.
   Landing substates  (mode=4): 0=descend, 1=final_drop
@@ -71,9 +75,9 @@ local FLIGHT_PERIOD_MS  = 20        -- 50 Hz  flight subsystem
 local ACRO_MODE_NUM     = 1         -- ACRO mode number (ArduCopter ACRO = 1)
 
 -- ── MAVLink named-float receive ───────────────────────────────────────────────
--- Registers for NAMED_VALUE_FLOAT (msgid 251).  Any received message is stored
--- in _nv_floats[name] and echoed as a STATUSTEXT so callers can verify receipt.
--- This is the first step of migrating SCR_USER substate to named-float messages.
+-- NAMED_VALUE_FLOAT (msgid 251) is the sole runtime signalling channel from the
+-- ground planner to Lua (SCR_USER params are boot-time only).
+-- All modes including mode 0 drain this inbox every tick.
 
 local _NVF_MSG_ID = 251   -- NAMED_VALUE_FLOAT
 
@@ -85,10 +89,11 @@ local _nv_floats = {}     -- received named float values:  name -> value
 -- ── Mode numbers (SCR_USER6 = plain integer 0..8) ────────────────────────────
 -- Ground planner writes SCR_USER6 = mode (0..8 only).
 -- Substate is delivered separately via NAMED_VALUE_FLOAT("RAWES_SUB", N).
+-- Yaw trim alongside a flight mode is enabled by NAMED_VALUE_FLOAT("RAWES_YAW", 1).
 local MODE_NONE       = 0
-local MODE_STEADY     = 1   -- cyclic orbit-tracking only (no yaw)
+local MODE_STEADY     = 1   -- cyclic orbit-tracking
 local MODE_YAW        = 2   -- counter-torque yaw trim only
-local MODE_STEADY_YAW = 3   -- cyclic + yaw trim
+-- mode 3 reserved
 local MODE_LANDING    = 4   -- cyclic + VZ descent + auto final_drop
 local MODE_PUMPING    = 5   -- De Schutter pumping cycle
 local MODE_ARM_HOLD   = 6   -- hold Ch3=1000 Ch8=2000 keepalive
@@ -149,17 +154,14 @@ local VZ_LAND_SP     = 0.5     -- landing descent rate [m/s] (positive NED = dow
 --   reel_out: col near equilibrium so TensionPI (ground) controls tension via winch
 --   reel_in:  col_min_reel_in_rad = altitude-neutral at xi=80 deg (keeps hub aloft)
 --
--- Phase synchronisation: Lua detects tether motion to follow ground planner winch.
---   hold     -> reel_out : tether length increases by > PUMP_LEN_THRESH m
---   reel_out -> transition: tether length decreases by > PUMP_LEN_THRESH m
---   transition-> reel_in : time-based (T_TRANSITION seconds; body_z slerp window)
---   reel_in  -> reel_out : tether length increases by > PUMP_LEN_THRESH m
+-- Phase synchronisation: ground planner owns the state machine and sends
+--   NAMED_VALUE_FLOAT("RAWES_SUB", N) to signal each phase transition.
+--   Lua executes the correct collective and body_z slerp for each substate.
 
 local XI_REEL_IN_DEG  = 80.0   -- reel-in disk tilt from wind direction [deg]
 local COL_REEL_OUT    = -0.20  -- collective during hold/reel-out [rad]
 local COL_REEL_IN     =  0.079 -- collective during transition/reel-in [rad]
 local T_TRANSITION    =  3.7   -- body_z slerp window [s] (from config default)
-local PUMP_LEN_THRESH =  0.05  -- tether length change threshold to detect motion [m]
 
 -- ── Yaw-trim subsystem constants ─────────────────────────────────────────────
 
@@ -193,6 +195,7 @@ local _yaw_limited_start_ms = nil    -- millis() when mode 8 (yaw_limited) began
 
 local _diag             = 0         -- global diagnostic counter (every tick)
 local _last_flight_ms   = 0         -- millis() when flight subsystem last ran
+local _none_status_ms   = 0         -- millis() of last mode-0 periodic status log
 
 -- Mode tracking (SCR_USER6 = plain integer 0..8); substate via NAMED_VALUE_FLOAT "RAWES_SUB"
 local _prev_mode        = -1        -- last decoded mode number (-1 = uninitialised)
@@ -332,6 +335,7 @@ local function _on_mode_enter(mode)
     _yaw_not_stable_ms  = nil
     _yaw_test_start_ms    = nil
     _yaw_limited_start_ms = nil
+    _none_status_ms     = 0     -- fire mode-0 log immediately on entry
     if mode == MODE_PUMPING then
         -- Ground planner owns substate; Lua resets only the internally-derived target.
         _pump_bz_ri = nil   -- recomputed from tether direction after first GPS capture
@@ -815,15 +819,9 @@ end
 local function update()
     _diag = _diag + 1
 
-    -- Motor interlock keepalive: RC overrides expire after ~1 s; 100 Hz keeps Ch8 HIGH.
-    -- Tests must NOT send Ch8 -- Lua owns the interlock once scripting is active.
-    if arming:is_armed() and _rc_ch8 then
-        _rc_ch8:set_override(2000)
-    end
-
     -- ── Drain MAVLink named-float inbox ──────────────────────────────────
-    -- Receive all queued NAMED_VALUE_FLOAT messages this tick, store in
-    -- _nv_floats, and echo each as a STATUSTEXT so senders can verify receipt.
+    -- Runs first (before mode check) so NV messages are visible in mode 0 too.
+    -- Each received message is echoed as STATUSTEXT so senders can verify receipt.
     local nvf_raw = mavlink.receive_chan()
     while nvf_raw do
         local _, nv_val, nv_name = string.unpack("<Ifc10", nvf_raw, 13)
@@ -850,8 +848,23 @@ local function update()
         _submode_ms = now
     end
 
-    -- mode 0: both subsystems disabled
-    if mode == MODE_NONE then return update, BASE_PERIOD_MS end
+    -- mode 0: completely passive -- no RC overrides, no keepalive.
+    -- NV inbox was drained above so any received messages are already logged.
+    -- Periodic status every 5 s so the GCS always knows the script is alive.
+    if mode == MODE_NONE then
+        if now - _none_status_ms >= 5000 then
+            _none_status_ms = now
+            local armed = arming:is_armed() and "ARMED" or "disarmed"
+            gcs:send_text(6, "RAWES: mode 0 (none)  " .. armed)
+        end
+        return update, BASE_PERIOD_MS
+    end
+
+    -- Motor interlock keepalive: RC overrides expire after ~1 s; 100 Hz keeps Ch8 HIGH.
+    -- Not sent in mode 0 -- use mode 6 (arm_hold) to stay armed without flying.
+    if arming:is_armed() and _rc_ch8 then
+        _rc_ch8:set_override(2000)
+    end
 
     -- MODE_ARM_HOLD: hold RC overrides to prevent failsafe / auto-disarm
     if mode == MODE_ARM_HOLD then
@@ -864,18 +877,20 @@ local function update()
         return update, BASE_PERIOD_MS
     end
 
-    -- Yaw-trim subsystem: runs every tick (100 Hz)
-    if mode == MODE_YAW or mode == MODE_STEADY_YAW then
-        run_yaw_trim()
-    elseif mode == MODE_YAW_TEST then
+    -- Yaw-trim subsystem: runs every tick (100 Hz).
+    -- MODE_YAW_TEST / MODE_YAW_LTD are diagnostic-only modes that take priority.
+    -- For all other modes: RAWES_YAW=1 NV float enables yaw trim alongside flight.
+    -- MODE_YAW (2) always runs yaw regardless of RAWES_YAW.
+    if mode == MODE_YAW_TEST then
         run_yaw_test()
     elseif mode == MODE_YAW_LTD then
         run_yaw_trim(30000)
+    elseif mode == MODE_YAW or (_nv_floats["RAWES_YAW"] or 0) >= 1 then
+        run_yaw_trim()
     end
 
     -- Flight subsystem: runs at 50 Hz sub-step
-    if mode == MODE_STEADY or mode == MODE_STEADY_YAW
-    or mode == MODE_LANDING or mode == MODE_PUMPING then
+    if mode == MODE_STEADY or mode == MODE_LANDING or mode == MODE_PUMPING then
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
             _last_flight_ms = now
             run_flight()
@@ -889,9 +904,9 @@ end
 
 local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
 local _sub_init   = 0   -- substate arrives via NAMED_VALUE_FLOAT "RAWES_SUB", not SCR_USER6
-local _mode_names = {[0]="none",         [1]="steady_noyaw",  [2]="yaw",
-                     [3]="steady",       [4]="landing_noyaw", [5]="pumping_noyaw",
-                     [6]="arm_hold_noyaw", [7]="yaw_test",    [8]="yaw_limited"}
+local _mode_names = {[0]="none",      [1]="steady",    [2]="yaw",
+                     [4]="landing",   [5]="pumping",   [6]="arm_hold",
+                     [7]="yaw_test",  [8]="yaw_limited"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

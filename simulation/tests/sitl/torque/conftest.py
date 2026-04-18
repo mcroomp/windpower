@@ -4,7 +4,7 @@ torque/conftest.py — pytest fixtures for RAWES counter-torque motor stack test
 Fixtures:
   torque_armed         — constant-RPM torque stack fixture.
   torque_armed_profile — parametrised torque fixture (profile name via request.param).
-  torque_armed_lua     — torque fixture with rawes.lua in yaw mode (SCR_USER6=2).
+  torque_armed_lua     — torque fixture with rawes.lua in yaw-only mode (SCR_USER6=2, MODE_YAW).
 """
 import pytest
 
@@ -22,7 +22,7 @@ from stack_infra import (
 @pytest.fixture
 def torque_armed(tmp_path, request):
     """Counter-torque stack fixture (constant RPM). Yields TorqueStackContext."""
-    import model as _m
+    import torque_model as _m
     with _torque_stack(
         tmp_path,
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
@@ -42,7 +42,7 @@ def torque_armed_profile(request, tmp_path):
         def test_foo(torque_armed_profile):
             ...
     """
-    import model as _m
+    import torque_model as _m
     profile = getattr(request, "param", "constant")
     with _torque_stack(
         tmp_path,
@@ -56,16 +56,16 @@ def torque_armed_profile(request, tmp_path):
 @pytest.fixture
 def torque_armed_lua(tmp_path, request):
     """
-    Like torque_armed but with rawes.lua active in yaw mode (SCR_USER6=2).
+    Like torque_armed but with rawes.lua active in yaw-only mode (SCR_USER6=2, MODE_YAW).
 
     Key differences from torque_armed:
       - rawes.lua installed to /ardupilot/scripts/ before boot
       - EEPROM wiped so copter-heli.parm defaults apply cleanly
-      - SCR_ENABLE=1, SCR_USER6=2, RPM1_TYPE=10, SERVO9_FUNCTION=94
+      - SCR_ENABLE=1, SCR_USER6=2 (MODE_YAW), RPM1_TYPE=10, SERVO9_FUNCTION=94
       - mediator_torque.py --lua-mode --tail-channel 8 (reads Ch9, linear mapping)
       - ATC_RAT_YAW_P=0 (Lua is sole feedforward provider, no ArduPilot yaw PID)
     """
-    import model as _m
+    import torque_model as _m
     with _torque_stack(
         tmp_path,
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
