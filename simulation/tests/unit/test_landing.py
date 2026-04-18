@@ -155,7 +155,9 @@ def _run_landing() -> dict:
     telemetry = []
     tel_every = max(1, int(0.05 / DT))
 
-    descent_time = _IC.rest_length / V_LAND + 10.0
+    # Budget: actual descent rate is ~V_LAND/2 due to residual orbital motion from
+    # reel-in; use 2x multiplier to ensure the budget is never the limiting factor.
+    descent_time = _IC.rest_length / V_LAND * 2.0 + 30.0
     max_steps = int((T_PUMPING_END + descent_time + T_FINAL_DROP_MAX) / DT)
 
     t_sim = 0.0

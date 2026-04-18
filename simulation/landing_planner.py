@@ -105,8 +105,13 @@ class LandingPlanner:
     v_pay_out        : float   maximum pay-out speed [m/s].  Limits how fast the
                                winch can lengthen the tether to shed tension.
     kp_vz            : float   descent-rate proportional gain [rad/(m/s)].
-                               collective_rad = col_cruise + kp_vz * (vz - v_land)
+    ki_vz            : float   descent-rate integral gain [rad/(m/s)/s].
+                               collective_rad = col_i + kp_vz * (vz - v_land)
+                               d(col_i)/dt    = ki_vz * (vz - v_land)
                                where vz = vel_ned[2] (positive = downward in NED).
+                               The integrator replaces the fixed col_cruise bias,
+                               winding up to whatever collective keeps vz = v_land.
+                               col_cruise is still used as the initial integrator value.
     col_min_rad      : float   collective floor [rad] for collective_rad output.
     col_max_rad      : float   collective ceiling [rad] for collective_rad output.
     """
@@ -122,6 +127,7 @@ class LandingPlanner:
         k_winch:          float = 0.005,
         v_pay_out:        float = 0.5,
         kp_vz:            float = 0.05,
+        ki_vz:            float = 0.005,
         col_min_rad:      float = -0.28,
         col_max_rad:      float =  0.10,
         # Ignored (kept for API compatibility with old callers)
@@ -138,6 +144,7 @@ class LandingPlanner:
 
         self._v_land        = float(v_land)
         self._col_cruise    = float(col_cruise)
+        self._col_i         = float(col_cruise)   # integrator state, starts at col_cruise
         self._min_tether    = float(min_tether_m)
         self._anchor        = (np.asarray(anchor_ned, dtype=float)
                                if anchor_ned is not None else None)
@@ -146,6 +153,7 @@ class LandingPlanner:
         self._v_pay_out     = float(v_pay_out)
         self._v_land_max    = 3.0 * self._v_land   # geometry feed-forward cap
         self._kp_vz         = float(kp_vz)
+        self._ki_vz         = float(ki_vz)
         self._col_min_rad   = float(col_min_rad)
         self._col_max_rad   = float(col_max_rad)
 
@@ -258,13 +266,18 @@ class LandingPlanner:
         else:   # final_drop
             winch_speed_ms = 0.0
 
-        # ── Collective (descent rate controller) ─────────────────────────
+        # ── Collective (descent rate PI controller) ──────────────────────
         # vz_error > 0: hub descending faster than v_land -> raise collective to brake
         # vz_error < 0: hub descending slower than v_land -> lower collective to speed up
+        # Integrator winds up to the trim collective needed for vz = v_land,
+        # so COL_CRUISE only sets the initial value and needn't be accurate.
         if self._phase == "descent":
-            vz_error       = float(vel_ned[2]) - self._v_land
-            collective_rad = float(np.clip(
-                self._col_cruise + self._kp_vz * vz_error,
+            vz_error        = float(vel_ned[2]) - self._v_land
+            self._col_i     = float(np.clip(
+                self._col_i + self._ki_vz * vz_error * dt,
+                self._col_min_rad, self._col_max_rad))
+            collective_rad  = float(np.clip(
+                self._col_i + self._kp_vz * vz_error,
                 self._col_min_rad, self._col_max_rad))
         else:   # final_drop: zero collective, hub free-falls
             collective_rad = 0.0
@@ -277,6 +290,7 @@ class LandingPlanner:
         return {
             "vz_setpoint_ms": self._v_land,
             "col_cruise_rad": self._col_cruise,
+            "col_i_rad":      self._col_i,
             "collective_rad": collective_rad,
             "attitude_q":     attitude_q,
             "winch_speed_ms": winch_speed_ms,

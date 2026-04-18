@@ -135,8 +135,11 @@ local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
 -- pumping (mode 5) uses open-loop collective per phase; this controller is bypassed.
 
 local KP_VZ               = 0.05   -- collective gain [rad/(m/s)]
+local KI_VZ               = 0.005  -- collective integrator gain [rad/(m/s)/s]
+                                    -- winds up from COL_CRUISE_LAND_RAD to the actual
+                                    -- trim collective, so COL_CRUISE_LAND_RAD need not be exact.
 local COL_CRUISE_FLIGHT_RAD = -0.18  -- altitude-neutral at natural orbit (xi~8 deg, 100 m tether)
-local COL_CRUISE_LAND_RAD   =  0.079 -- altitude-neutral at reel-in position (xi~80 deg, 20 m tether)
+local COL_CRUISE_LAND_RAD   =  0.079 -- initial integrator value for landing PI (not critical)
 local COL_MIN_RAD    = -0.28   -- hardware collective floor  [rad]
 local COL_MAX_RAD    =  0.10   -- hardware collective ceiling [rad]
 -- DS113MG at 6 V: 545 deg/s over 100 deg travel.
@@ -212,6 +215,7 @@ local _rc_ch8 = rc:get_channel(8)   -- motor interlock keepalive (H_RSC_MODE=1 p
 -- ── Flight subsystem state ───────────────────────────────────────────────────
 
 local _last_col_rad     = COL_CRUISE_FLIGHT_RAD  -- collective slew state [rad]
+local _col_i_land       = COL_CRUISE_LAND_RAD    -- landing VZ integrator state [rad]
 local _captured         = false           -- true once equilibrium has been snapped
 local _bz_eq0           = nil             -- body_z_ned at equilibrium capture (from DCM)
 local _tdir0            = nil             -- tether direction at equilibrium capture
@@ -538,6 +542,7 @@ local function run_flight()
         _tdir0        = nil   -- set by GPS tether recapture when GPS fuses
         _last_col_rad = col_cruise  -- start at mode-appropriate cruise; avoids thrust
                                     -- dropout when entering landing/pumping from orbit
+        _col_i_land   = COL_CRUISE_LAND_RAD  -- reset integrator to initial guess on every capture
         _captured     = true
         local label = _is_landing and "land" or (_is_pumping and "pump" or "steady")
         gcs:send_text(6, string.format(
@@ -766,20 +771,24 @@ local function run_flight()
         col_cmd = col_cruise
     else
         -- VZ controller: hardcoded setpoint per mode (no RC receiver in this system).
-        -- Landing: descend at VZ_LAND_SP = 0.5 m/s.  Flight/yaw: hold altitude (0.0).
+        -- Landing: PI descent-rate controller; integrator winds to trim collective.
+        -- Flight/yaw: P-only altitude hold at 0.0 m/s.
         local vz_sp = 0.0
         if _is_landing then vz_sp = VZ_LAND_SP end
         local vz_actual = 0.0
         local vel_ned = ahrs:get_velocity_NED()
         if vel_ned then vz_actual = vel_ned:z() end
         local vz_error = vz_actual - vz_sp
-        col_cmd = col_cruise + KP_VZ * vz_error
-        -- Landing only: never reduce collective below cruise so the winch
-        -- controls descent rate; collective only corrects overshoot.
-        -- Flight mode: allow collective below col_cruise to correct upward drift
-        -- (bidirectional P controller; hard floor is COL_MIN_RAD below).
         if _is_landing then
-            col_cmd = math.max(col_cmd, col_cruise)
+            -- PI: integrator accumulates trim collective; P term corrects transients.
+            -- dt = 1/50 s (50 Hz flight loop).
+            _col_i_land = _col_i_land + KI_VZ * vz_error * 0.02
+            if _col_i_land < COL_MIN_RAD then _col_i_land = COL_MIN_RAD end
+            if _col_i_land > COL_MAX_RAD then _col_i_land = COL_MAX_RAD end
+            col_cmd = _col_i_land + KP_VZ * vz_error
+        else
+            -- Flight/yaw: P-only altitude hold (bidirectional; floor is COL_MIN_RAD).
+            col_cmd = col_cruise + KP_VZ * vz_error
         end
     end
 
