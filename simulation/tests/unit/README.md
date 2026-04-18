@@ -9,21 +9,22 @@ They cover the full simulation stack: physics, aero, controller maths, and the a
 ## Running Tests
 
 ```bash
-# Fast unit tests (~460, ~65 s) — exclude slow simtests
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
+# Fast unit tests (~483) — exclude slow simtests
+simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m "not simtest" -q
 
-# Slow simtests (~29, ~5 min) — full physics loops
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q
+# Slow simtests (14, 12 pass) — full physics loops
+simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m simtest -q
 
 # Single test
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_steady_flight_lua.py -q
+simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit/test_steady_flight_lua.py -q
 
-# Regenerate steady-state IC (needed after aero model changes)
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight
+# Regenerate steady-state IC (required after any aero model change)
+simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit/test_steady_flight.py -q
 ```
 
 **CRITICAL:** Never use `dev.sh test-unit` — it routes to Docker which excludes `tests/unit`.
-Always use the Windows venv path above.
+**CRITICAL:** Always use `simulation/run_tests.py` (not `python -m pytest` directly) — it checks
+the venv is up to date and saves structured logs.
 
 ---
 
@@ -47,9 +48,6 @@ Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
 | `test_aero_trajectory_points.py` | BEM aero at specific trajectory sample points |
 | `test_deschutter_equations.py` | De Schutter Eq. 25–31 formula correctness |
 | `test_deschutter_validation.py` | Numerical validation vs. reference values |
-| `test_deschutter_cycle.py` | Full De Schutter pumping cycle (simtest) |
-| `test_deschutter_10hz.py` | 10 Hz planner timing compatibility |
-| `test_deschutter_wind.py` | Wind-speed sensitivity of the pumping cycle |
 | `test_skewed_wake_jit.py` | SkewedWakeBEMJit vs. reference (18 equivalence cases, atol=1e-10) |
 | `test_force_balance.py` | Static force balance at equilibrium |
 | `test_physical_validation.py` | Physical consistency checks (mass, inertia, geometry) |
@@ -60,13 +58,22 @@ Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
 
 ### Simulation Loops (simtests)
 
+Three scenario pairs — each has a Python-only version and a Python+Lua version.
+All three start from the same `steady_state_starting.json` IC (written by `test_steady_flight.py`).
+
+| Python | Lua | Scenario |
+|--------|-----|----------|
+| `test_steady_flight.py` | `test_steady_flight_lua.py` | 90 s orbit from IC; Python also writes IC |
+| `test_pump_cycle.py` | `test_pump_cycle_lua.py` | N De Schutter reel-out/reel-in cycles from IC |
+| `test_landing.py` | `test_landing_lua.py` | reel-in only (no reel-out) swings hub to xi~80°, then VZ descent + final drop |
+
+Supporting simtests (no Lua pair):
+
 | File | What it tests |
 |------|--------------|
-| `test_steady_flight.py` | 90 s orbit from equilibrium; writes `steady_state_starting.json` IC |
-| `test_closed_loop_90s.py` | 90 s closed-loop orbit with internal Python controller — non-Lua reference for `test_steady_flight_lua.py` |
-| `test_landing.py` | Landing sequence with Python VZ controller |
-| `test_pumping_repeated.py` | N De Schutter cycles with Python planner |
-| `test_pump_and_land.py` | Pumping + landing combined (Python controllers) |
+| `test_gyroscopic_orbit.py` | Gyroscopic coupling during orbital flight |
+| `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
+| `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
 
 ### Controller & Sensor
 
@@ -90,16 +97,15 @@ Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
 
 ### Lua Controller Tests
 
-Naming convention: `test_<name>_lua.py` mirrors `test_<name>.py` (same physics, Lua controller instead of Python).
+`test_<name>_lua.py` mirrors `test_<name>.py` — same physics and IC, Lua controller instead of Python.
 
 | File | Non-Lua reference | What it tests |
 |------|------------------|--------------|
 | `test_math_lua.py` | — | Lua math: `rodrigues`, `orbit_track_azimuthal`, `slerp_step`, cyclic error |
-| `test_yaw_lua.py` | — | Yaw-trim: runs rawes.lua via `RawesLua` harness (PI, dead zone, watchdog, hard-stop, closed-loop equilibrium) — constants at top must match rawes.lua |
-| `test_orbit_sim_lua.py` | `test_closed_loop_90s.py` | 90 s orbit diagnostic: 4 scenarios (exact Lua math, sign variants, EKF error, Python baseline) |
-| `test_steady_flight_lua.py` | `test_closed_loop_90s.py` | rawes.lua mode=1: 90 s orbit from IC via harness |
-| `test_landing_lua.py` | `test_landing.py` | rawes.lua mode=4: landing from xi=80 deg hover via harness |
-| `test_pumping_repeated_lua.py` | `test_pumping_repeated.py` | rawes.lua mode=5: N De Schutter cycles via harness |
+| `test_yaw_lua.py` | — | Yaw-trim: runs rawes.lua via `RawesLua` harness (PI, dead zone, watchdog, hard-stop, closed-loop equilibrium) |
+| `test_steady_flight_lua.py` | `test_steady_flight.py` | rawes.lua mode=1: 90 s orbit from IC via harness |
+| `test_pump_cycle_lua.py` | `test_pump_cycle.py` | rawes.lua mode=5: N De Schutter cycles from IC via harness |
+| `test_landing_lua.py` | `test_landing.py` | rawes.lua mode=4: landing from IC via harness |
 
 ---
 

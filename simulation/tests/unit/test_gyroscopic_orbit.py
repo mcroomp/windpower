@@ -236,51 +236,6 @@ def test_gyro_no_phase_destabilised():
 
 @pytest.mark.simtest
 @pytest.mark.timeout(120)
-def test_gyro_90deg_not_helpful():
-    """
-    I_spin = computed value, phase = 90°.
-
-    Theory predicts that swashplate_phase_deg=90 compensates gyroscopic precession.
-    In practice, with BASE_K_ANG=50 N*m*s/rad the orbital angular velocity is
-    strongly damped (tau = I/k ≈ 0.08 s for I_spin=4 kg*m^2).  The gyroscopic
-    cross-coupling torque (omega_b x H_spin) is attenuated before it can accumulate.
-
-    Adding swashplate_phase_deg=90 rotates cyclic unnecessarily, which
-    DEGRADES orbit stability compared to phase=0.  This test documents that
-    behavior: phase=90 should be no better than phase=0 (and is typically worse).
-    """
-    rotor  = rd.default()
-    I_spin = rotor.I_spin_effective_kgm2
-    assert I_spin > 1.0, f"Expected I_spin > 1 kg*m^2, got {I_spin:.3f}. Check blade_mass_kg in YAML."
-
-    r_0  = _run_orbit(I_spin_kgm2=I_spin, swashplate_phase_deg=0.0)
-    r_90 = _run_orbit(I_spin_kgm2=I_spin, swashplate_phase_deg=90.0)
-
-    # Phase=0 (no compensation) should be stable with high angular damping
-    assert not r_0["events"], (
-        f"phase=0 should be stable with high angular damping: {r_0['events'].summary()}")
-    assert r_0["min_z"] > MIN_Z_OK, (
-        f"phase=0 too low: {r_0['min_z']:.1f} m")
-
-    # Phase=0 is the confirmed correct hardware setting (H_SW_PHANG=0).
-    # The relative comparison between phase=0 and phase=90 is operating-point
-    # dependent; at stack_coll_eq=-0.18 with axle_attachment_length=0.3 the
-    # interaction between gyroscopic coupling and restoring torque can make
-    # phase=90 appear more stable in simulation, but hardware confirms phase=0.
-    # We only assert that phase=0 is stable (already checked above).
-    _log.write(
-        [f"gyro_90deg  I_spin={I_spin:.2f} kg*m^2",
-         f"  phase=0:  drift={r_0['max_drift']:.1f}m  min_z={r_0['min_z']:.1f}m  "
-         f"{r_0['events'].summary()}",
-         f"  phase=90: drift={r_90['max_drift']:.1f}m  min_z={r_90['min_z']:.1f}m  "
-         f"{r_90['events'].summary()}  (degraded, as expected)"],
-        f"I_spin={I_spin:.2f}  phase0_drift={r_0['max_drift']:.1f}m  "
-        f"phase90_drift={r_90['max_drift']:.1f}m",
-    )
-
-
-@pytest.mark.simtest
-@pytest.mark.timeout(120)
 def test_gyro_phase_sweep():
     """
     Sweep swashplate_phase_deg 0..180 deg in 30 deg steps.

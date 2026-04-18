@@ -4,9 +4,11 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) — a tethered, 4-blade autogyro kite. Wind drives autorotation; cyclic pitch control steers; tether tension during reel-out drives a ground generator. No motor drives rotation.
 
-**Current phase:** Phase 3, Milestone 3. `rawes.lua` orbit-tracking under full ArduPilot control (`internal_controller=False`) achieved: `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3 runs). GPS fusion uses dual GPS (EK3_SRC1_YAW=2, RELPOSNED heading): stationary hold, yaw known from first fix, GPS fuses at ~34 s. **Next: test_pumping_cycle_lua, then test_landing_lua.**
+**Current phase:** Phase 3, Milestone 3. `rawes.lua` orbit-tracking under full ArduPilot control (`internal_controller=False`) achieved: `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3 runs). GPS fusion uses dual GPS (EK3_SRC1_YAW=2, RELPOSNED heading): stationary hold, yaw known from first fix, GPS fuses at ~34 s. **Next: test_pump_cycle_lua, then test_landing_lua (stack).**
 
-**Stack test status (parallel -n 8, 8 PASS):** test_arm_minimal, test_gust_recovery, test_lua_yaw_trim, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle_lua` and `test_landing_lua`: in development.
+**Simtest status (14 simtests, 12 PASS):** All Python-only simtests pass: `test_steady_flight`, `test_pump_cycle`, `test_landing` (reel-in → xi~80° → descent → floor), gyroscopic, kinematic, sensor, deschutter. Lua simtests `test_pump_cycle_lua` and `test_landing_lua`: in development (never passed).
+
+**Stack test status (parallel -n 8, 8 PASS):** test_arm_minimal, test_gust_recovery, test_lua_yaw_trim, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pump_cycle_lua` and `test_landing_lua` (stack): in development.
 
 **Test infrastructure:** Stack tests in `tests/sitl/flight/` + `tests/sitl/torque/`. Shared code in `stack_infra.py` (`_sitl_stack`, `_acro_stack`, `_torque_stack`). `conftest.py` is a thin re-exporter only.
 
@@ -74,9 +76,9 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **SCR_ENABLE bootstrap:** After EEPROM wipe, scripting only starts if `SCR_ENABLE=1` is already in EEPROM. `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).
 - **Two orbit-tracking algorithms:** `orbit_tracked_body_z_eq` (azimuthal, inner-loop tests); `orbit_tracked_body_z_eq_3d` (3D Rodrigues, Lua-equivalent). `OrbitTracker` = stateful 3D + slerp, mirrors Lua state machine; `update(pos, dt, bz_target=None)`.
 - **WinchNode** (`winch_node.py`): mediator calls `update_sensors(tension, wind_world)` (physics only); planner calls `get_telemetry()` + `receive_command()`. Wind seed from `Anemometer.measure()` at 3 m height.
-- **Vertical landing:** direct drop above anchor (not spiral). Descent rate controller replaces TensionPI. Floor hit during DESCENT phase is expected; crash-guard `floor_hits>200` restricted to pumping phase only. Validated: +1857 J, 92 s (`test_pump_and_land.py`).
+- **Vertical landing:** direct drop above anchor (not spiral). Descent rate controller replaces TensionPI. Sequence: reel-in only (no reel-out, `T_REEL_OUT=0`) via `DeschutterPlanner` swings hub from xi~8° to xi~48° in 30 s with no slack/spikes; hub reaches ~67 m altitude. `LandingPlanner` then descends from ~89 m tether to 2 m, final_drop. Validated in `test_landing.py` (22 s run, floor hit, descent slack=0).
 - **Gyroscopic phase NOT needed:** H_SW_PHANG=0. BASE_K_ANG=50 N·m·s/rad → τ≈0.08 s (damped before one orbit). `swashplate_phase_deg≠0` degrades orbit stability.
-- **`AcroController use_servo=True`** required for De Schutter simtests (25 ms servo lag). Inner-loop tests (`test_steady_flight`, `test_closed_loop_90s`) do not need it.
+- **`AcroController use_servo=True`** required for De Schutter simtests (25 ms servo lag). `test_steady_flight` and pure-orbit tests do not need it.
 - **Power-law wind tension:** tension_out=250 N (not 200 N) at hub altitude ~15 m (10.6 m/s wind). `col_min_reel_in` must use actual wind speed at hub altitude.
 - **De Schutter aero:** `C_{D,T}=0.021` structural drag; induction bootstrap uses `abs(T)` not `max(T, 0.01)`. See `simulation/aero/deschutter.md`.
 
@@ -122,7 +124,7 @@ simulation/
 │   ├── visualize_torque.py  Torque telemetry 3-panel replay (psi_dot, motor throttle, PWM)
 │   └── torque_telemetry.py  TorqueTelemetryFrame dataclass for torque replay
 └── tests/
-    ├── unit/            Windows native, no Docker (~490 tests)
+    ├── unit/            Windows native, no Docker (~497 tests: 483 fast + 14 simtests)
     └── sitl/            Docker; all SITL/stack tests live here
         ├── conftest.py          thin re-exporter — pytest_addoption + pytest_configure only
         ├── stack_infra.py       ALL shared infrastructure: StackConfig, SitlContext,
@@ -137,7 +139,7 @@ simulation/
         │   ├── test_h_phang.py              H_SW_PHANG calibration
         │   ├── test_kinematic_gps.py        GPS fusion during kinematic (parametrized)
         │   ├── test_lua_flight_steady.py    steady orbit under full ArduPilot/Lua control
-        │   ├── test_pumping_cycle.py        pumping cycle under Lua (test_pumping_cycle_lua)
+        │   ├── test_pump_cycle_lua.py       pumping cycle under Lua (in dev)
         │   └── test_landing_stack.py        landing under Lua (test_landing_lua)
         └── torque/              torque/anti-rotation tests
             ├── conftest.py      torque fixtures: torque_armed, torque_armed_profile, etc.
@@ -167,6 +169,8 @@ simulation/
 
 **Do NOT consult git history** (`git log`, `git diff`, `git show`, `git blame`) when diagnosing problems unless you first ask the user.
 
+**CRITICAL — Fix telemetry/logging before diagnosing test failures.** When a simtest or stack test fails, inspect the telemetry CSV and logs first. If any columns are zero, missing, or clearly wrong (e.g. tether_m=0 throughout, tension_n=0, phase never changes), fix the logging bug before attempting to diagnose the physics failure. Diagnosing from bad telemetry produces wrong conclusions.
+
 **Stack tests must not violate physics.** Never add artificial mechanisms just to stabilise a test. Acceptable: `lock_orientation=False`, `internal_controller=False`, `base_k_ang=50`.
 
 **CRITICAL — `internal_controller` MUST be `False` for all full stack flight tests.** The entire purpose of SITL stack tests is to validate that ArduPilot + Lua actually fly the vehicle. Using `internal_controller=True` means the Python controller drives physics and ArduPilot/Lua outputs are ignored — the SITL test becomes meaningless. There are NO exceptions to this rule for stack tests. `internal_controller=True` is only valid in unit tests and simtests where Lua/ArduPilot are not involved.
@@ -192,7 +196,7 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 **Unit tests and simtests: Windows native, no Docker. Stack tests: Docker required. Never mix.**
 
 **Two venvs — one per environment:**
-- **`simulation/.venv`** — Windows venv for all unit tests and simtests. Packages: numpy, scipy, numba, lupa, pyvista, pymavlink, pytest, etc. Install/update with `simulation/.venv/Scripts/pip install -r simulation/requirements.txt`.
+- **`simulation/.venv`** — Windows venv for all unit tests and simtests. Packages: numpy, scipy, numba, lupa, pyvista, pymavlink, pytest, etc. `run_tests.py` auto-installs when `requirements.txt` changes (SHA-256 hash stamp). Manual update: `simulation/.venv/Scripts/pip install -r simulation/requirements.txt`.
 - **Docker container** — the container has its own Python env (never use the Windows venv inside Docker). Managed by `dev.sh build`.
 
 **CRITICAL:** Use Bash tool directly — do NOT use `wsl.exe`. Always use absolute paths.
@@ -203,8 +207,8 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 
 | Task | Command |
 |------|---------|
-| Unit tests (~460) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| Simtests (~29) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
+| Unit tests (~483) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| Simtests (14) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
 | Stack test (single) | `bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_foo` |
 | Stack test (full suite) | `bash simulation/dev.sh test-stack-parallel --fresh -n 8` |
 | **Post-failure: physics** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
@@ -259,14 +263,15 @@ GB4008 wired to **AUX OUT 1 (output 9, FMU)**. In flight mode (`SERVO9_FUNCTION=
 
 See [simulation/history.md](simulation/history.md) for full decision history (M1/M2 results, Step 1 root causes and fixes).
 
-**CRITICAL — Test progression: steady → pumping → landing.** Fix `test_lua_flight_steady` before debugging pumping or landing. A broken steady orbit makes downstream failures uninformative. Do not debug `test_pumping_cycle_lua` or `test_landing_lua` until `test_lua_flight_steady` passes cleanly (orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s).
+**CRITICAL — Test progression: steady → pumping → landing.** Fix `test_lua_flight_steady` (stack) before debugging pumping or landing Lua stack tests. A broken steady orbit makes downstream failures uninformative. Do not debug `test_pump_cycle_lua` or `test_landing_lua` (stack) until `test_lua_flight_steady` passes cleanly (orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s).
 
 | Milestone | Status | Gate |
 |-----------|--------|------|
 | M1 Wire Pumping Cycle | done | — |
 | M2 Force Balance & Rotor Abstraction | done | — |
-| M3 Step 1 — test_lua_flight_steady | done: stable=86–110 s, 3/3 runs | orbit_r < 5 m, no EKF yaw reset, ≥ 60 s stable |
-| M3 Step 2 — test_pumping_cycle_lua (SCR_USER6=5) | in dev | "RAWES pump: reel_out" + net_energy > 0 + peak_tension < 496 N |
-| M3 Step 3 — test_landing_lua (SCR_USER6=4) | in dev | "RAWES land: captured" + "final_drop" + hub alt ≤ 2.5 m |
+| M3 Step 1 — test_lua_flight_steady (stack) | done: stable=86–110 s, 3/3 runs | orbit_r < 5 m, no EKF yaw reset, ≥ 60 s stable |
+| M3 Step 1b — test_landing.py (simtest) | done: reel-in → xi~80° → descent → floor | descent slack=0, floor hit, anchor_dist < 20 m |
+| M3 Step 2 — test_pump_cycle_lua (stack, SCR_USER6=5) | in dev | "RAWES pump: reel_out" + net_energy > 0 + peak_tension < 496 N |
+| M3 Step 3 — test_landing_lua (stack, SCR_USER6=4) | in dev | "RAWES land: captured" + "final_drop" + hub alt ≤ 2.5 m |
 | M3 Step 4 — rawes_params.parm (Pixhawk 6C) | not started | file exists + H_PHANG determined |
 | M4 — Hardware-in-the-Loop (Pixhawk 6C) | not started | test_hil_interface.py passes + 60 s HIL log |

@@ -1,7 +1,7 @@
 """
-test_pumping_repeated_lua.py -- Lua-controlled De Schutter pumping cycle, N repeats.
+test_pump_cycle_lua.py -- Lua-controlled De Schutter pumping cycle, N repeats.
 
-Mirrors test_pumping_repeated.py, replacing the Python DeschutterPlanner +
+Mirrors test_pump_cycle.py, replacing the Python DeschutterPlanner +
 AcroController with rawes.lua (mode=5) running in-process via lupa (Lua 5.4).
 
 Division of labour (mirrors real stack):
@@ -9,7 +9,7 @@ Division of labour (mirrors real stack):
   Lua:    phase detection (tlen threshold), collective per phase,
           body_z orbit tracking (reel-out) + slerp to xi=80 deg (reel-in)
 
-Non-Lua reference: test_pumping_repeated.py
+Non-Lua reference: test_pump_cycle.py
 """
 import math
 import sys

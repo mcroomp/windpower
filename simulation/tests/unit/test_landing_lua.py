@@ -1,12 +1,12 @@
 """
-test_landing_lua.py -- Lua-controlled landing from high-elevation hover.
+test_landing_lua.py -- Lua-controlled landing from steady-flight equilibrium.
 
 Mirrors test_landing.py, replacing the Python LandingPlanner + AcroController
 with rawes.lua (mode=4) running in-process via lupa (Lua 5.4).  The physics loop,
 IC, aero, tether, and starting state are identical to the non-Lua reference.
 
-Starting point: hub at xi=80 deg from wind (East), 20 m tether, 19.7 m altitude,
-nearly stationary -- mirrors test_landing.py exactly.
+Starting point: hub at the aerodynamic equilibrium from steady_state_starting.json
+(same IC as test_steady_flight_lua.py and test_pump_cycle_lua.py).
 
 Division of labour (mirrors real stack):
   Python: WinchController reels in at V_REEL; writes final_drop substate to Lua
@@ -58,14 +58,11 @@ WIND   = np.array([0.0, 10.0, 0.0])   # 10 m/s East (NED Y)
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 
-# ── High-elevation starting state (identical to test_landing.py) ──────────────
-XI_START_DEG  = 80.0
-LAND_TETHER_M = 20.0
-_XI_R         = np.radians(XI_START_DEG)
-BZ_INIT       = np.array([0.0, np.cos(_XI_R), -np.sin(_XI_R)])
-BZ_INIT       = BZ_INIT / np.linalg.norm(BZ_INIT)
-POS_INIT      = LAND_TETHER_M * BZ_INIT
-VEL_INIT      = np.zeros(3)
+# ── Starting state — steady-flight IC (identical to test_landing.py) ─────────
+BZ_INIT       = _IC.body_z
+POS_INIT      = _IC.pos
+VEL_INIT      = _IC.vel
+LAND_TETHER_M = _IC.rest_length
 OMEGA_SPIN_IC = _IC.omega_spin
 
 # ── Landing parameters (identical to test_landing.py) ────────────────────────

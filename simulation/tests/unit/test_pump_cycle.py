@@ -1,5 +1,5 @@
 """
-test_pumping_repeated.py -- De Schutter pumping cycle repeated N times, no landing.
+test_pump_cycle.py -- De Schutter pumping cycle repeated N times, no landing.
 
 Sequence
 --------
