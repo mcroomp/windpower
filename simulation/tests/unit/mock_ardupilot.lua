@@ -196,3 +196,29 @@ function arming:disarm()    _mock.armed = false end
 vehicle = {}
 
 function vehicle:get_mode()  return _mock.mode end
+
+-- ── mavlink ──────────────────────────────────────────────────────────────────
+-- Minimal stub for mavlink.init / register_rx_msgid / receive_chan.
+-- Python injects raw byte strings into _mock.mavlink_inbox; receive_chan()
+-- pops them one at a time in FIFO order, matching ArduPilot's queue semantics.
+-- The raw string layout mirrors mavlink_message_t: 12 header bytes followed
+-- by the message payload, so string.unpack("<If10s", raw, 13) works correctly.
+
+_mock.mavlink_inbox = {}   -- queue of raw byte strings
+
+mavlink = {}
+
+function mavlink.init(_tx_slots, _rx_slots)
+    -- no-op in mock
+end
+
+function mavlink.register_rx_msgid(_msgid)
+    -- no-op in mock
+end
+
+function mavlink.receive_chan()
+    local inbox = _mock.mavlink_inbox
+    if #inbox == 0 then return nil end
+    local raw = table.remove(inbox, 1)   -- pop front (FIFO)
+    return raw, 0, 0                     -- raw, chan, timestamp
+end

@@ -201,10 +201,10 @@ sim.vec_to_list(bz)            # -> [x, y, z]
 
 ## SCR_USER6 Mode/Substate Encoding
 
-`SCR_USER6 = mode_num * 1000 + substate`
+`SCR_USER6` is a **plain integer 0–8** (mode only). Substate is delivered separately via
+`NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6.
 
-Constants are in `simulation/rawes_modes.py` (Python) and `rawes.lua` (Lua).
-**Keep both in sync.**
+Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lua` (Lua).
 
 ```python
 from rawes_modes import (
@@ -213,20 +213,44 @@ from rawes_modes import (
     LAND_DESCEND, LAND_FINAL_DROP,
     PUMP_HOLD, PUMP_REEL_OUT, PUMP_TRANSITION, PUMP_REEL_IN, PUMP_TRANSITION_BACK,
 )
-# e.g. SCR_USER6 = 5001  ->  MODE_PUMPING + PUMP_REEL_OUT
 ```
 
-| Mode | Value | Substates |
-|------|-------|-----------|
+| Mode | SCR_USER6 | Substates (RAWES_SUB) |
+|------|-----------|----------------------|
 | `MODE_NONE` | 0 | — |
-| `MODE_STEADY` | 1000 | — |
-| `MODE_YAW` | 2000 | — |
-| `MODE_STEADY_YAW` | 3000 | — |
-| `MODE_LANDING` | 4000 | 0=DESCEND, 1=FINAL_DROP |
-| `MODE_PUMPING` | 5000 | 0=HOLD, 1=REEL_OUT, 2=TRANSITION (after winch reverses), 3=REEL_IN, 4=TRANSITION_BACK (cycle>0 start) |
-| `MODE_ARM_HOLD` | 6000 | — |
-| `MODE_YAW_TEST` | 7000 | — |
-| `MODE_YAW_LTD` | 8000 | — |
+| `MODE_STEADY` | 1 | — |
+| `MODE_YAW` | 2 | — |
+| `MODE_STEADY_YAW` | 3 | — |
+| `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP |
+| `MODE_PUMPING` | 5 | 0=HOLD, 1=REEL_OUT, 2=TRANSITION, 3=REEL_IN, 4=TRANSITION_BACK |
+| `MODE_ARM_HOLD` | 6 | — |
+| `MODE_YAW_TEST` | 7 | — |
+| `MODE_YAW_LTD` | 8 | — |
+
+**Sending substates in simtests** (via `RawesLua.send_named_float`):
+
+```python
+sim = RawesLua(mode=MODE_PUMPING)          # SCR_USER6 = 5
+
+# Only send on transitions — Lua drains the inbox each update tick
+prev_sub = None
+for i in range(max_steps):
+    sub_now = _compute_substate(t_sim)
+    if sub_now != prev_sub:
+        sim.send_named_float("RAWES_SUB", sub_now)
+        prev_sub = sub_now
+    sim._update_fn()
+```
+
+**Sending substates in stack tests** (via `gcs.send_named_float`):
+
+```python
+gcs.send_named_float("RAWES_SUB", LAND_FINAL_DROP)
+```
+
+**`_nv_floats` reset:** Lua resets its internal `_nv_floats` table to `{}` on every mode
+entry (`_on_mode_enter`). This prevents stale substates from a previous mode bleeding into
+a newly entered mode.
 
 **Timers in Lua:** `_mode_ms` resets on mode change; `_submode_ms` resets on substate change.
 Ground planner owns the pumping + landing phase state machine; Lua executes per-substate

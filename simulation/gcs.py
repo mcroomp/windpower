@@ -835,6 +835,27 @@ class RawesGCS:
         )
         log.debug("RC override sent: %s", channels)
 
+    def send_named_float(self, name: str, value: float) -> None:
+        """Send a NAMED_VALUE_FLOAT MAVLink message to the vehicle.
+
+        ArduPilot Lua scripts that have called mavlink.register_rx_msgid(251)
+        will receive this message via mavlink.receive_chan() on their next tick.
+
+        Parameters
+        ----------
+        name : str
+            Message name, up to 10 ASCII characters (truncated + null-padded).
+        value : float
+            Floating-point value carried by the message.
+        """
+        name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
+        self._mav.mav.named_value_float_send(
+            0,       # time_boot_ms — not meaningful for GCS-to-vehicle messages
+            name_b,
+            float(value),
+        )
+        log.debug("NAMED_VALUE_FLOAT sent: %s=%.4g", name, value)
+
     # ------------------------------------------------------------------
     # Telemetry receive
     # ------------------------------------------------------------------

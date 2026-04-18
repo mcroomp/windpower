@@ -38,7 +38,7 @@ from simtest_log   import SimtestLog, BadEventLog
 from tel           import make_tel
 from telemetry_csv import TelRow, write_csv
 from rawes_lua_harness import RawesLua
-from rawes_modes   import MODE_LANDING, LAND_DESCEND, LAND_FINAL_DROP
+from rawes_modes   import MODE_LANDING, LAND_FINAL_DROP
 
 _IC    = load_ic()
 _ROTOR = rd.default()
@@ -95,7 +95,7 @@ def _run_landing() -> dict:
     Mirrors _run_landing() in test_landing.py.
     Python WinchController reels in at V_REEL; Lua drives collective + cyclic.
     """
-    sim = RawesLua(mode=MODE_LANDING + LAND_DESCEND)
+    sim = RawesLua(mode=MODE_LANDING)
     sim.armed        = True
     sim.healthy      = True
     sim.vehicle_mode = 1
@@ -170,7 +170,7 @@ def _run_landing() -> dict:
         # ── Ground planner: trigger final_drop when tether short enough ───
         if not floor_hit and t_final_start is None:
             if tether.rest_length <= MIN_TETHER_M:
-                sim.set_param("mode", MODE_LANDING + LAND_FINAL_DROP)
+                sim.send_named_float("RAWES_SUB", LAND_FINAL_DROP)
                 t_final_start = t_sim
 
         final_drop = (t_final_start is not None)

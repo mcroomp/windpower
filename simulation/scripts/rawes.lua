@@ -2,7 +2,7 @@
 rawes.lua -- Unified RAWES flight + yaw-trim controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
-Mode is selected at runtime via SCR_USER6:
+Mode is selected at runtime via SCR_USER6 (plain integer 0..8):
   0  none     -- script loaded but both subsystems disabled
   1  steady_noyaw  -- cyclic orbit-tracking only, no yaw trim (Ch1, Ch2)   50 Hz
   2  yaw           -- counter-torque yaw trim only (Ch9/SERVO9)           100 Hz
@@ -13,13 +13,18 @@ Mode is selected at runtime via SCR_USER6:
   7  yaw_test       -- motor ON at 25% for 20 s then off; resets on re-entry  100 Hz
   8  yaw_limited    -- same as yaw (PI) but motor hard-stops 30 s after first throttle; resets on re-entry
 
+Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N) -- not encoded in SCR_USER6.
+  Landing substates  (mode=4): 0=descend, 1=final_drop
+  Pumping substates  (mode=5): 0=hold, 1=reel_out, 2=transition, 3=reel_in, 4=transition_back
+The _nv_floats table is reset to {} on every mode change so stale values cannot bleed through.
+
 Parameters (SCR_USER1..6):
   SCR_USER1   RAWES_KP_CYC    Cyclic P gain            [rad/s / rad]  default 1.0
   SCR_USER2   RAWES_BZ_SLEW   body_z slerp rate limit  [rad/s]        default 0.40
   SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]         default 0.0
   SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]         default 0.0
   SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]         default 0.0
-  SCR_USER6   RAWES_MODE      Mode selector (0..6 -- see above)        default 0
+  SCR_USER6   RAWES_MODE      Mode selector (0..8 -- see above)        default 0
 
 All pumping cycle parameters (phase timing, xi angle, collective limits) are
 hardcoded constants below -- no free SCR_USER slots remain.
@@ -65,9 +70,21 @@ local BASE_PERIOD_MS    = 10        -- 100 Hz base tick (yaw trim native rate)
 local FLIGHT_PERIOD_MS  = 20        -- 50 Hz  flight subsystem
 local ACRO_MODE_NUM     = 1         -- ACRO mode number (ArduCopter ACRO = 1)
 
--- ── Mode numbers (SCR_USER6 = mode_num * 1000 + substate) ────────────────────
--- Ground planner writes the full SCR_USER6 value; Lua decodes mode + substate.
--- Mode numbers are identical to the old single-digit values.
+-- ── MAVLink named-float receive ───────────────────────────────────────────────
+-- Registers for NAMED_VALUE_FLOAT (msgid 251).  Any received message is stored
+-- in _nv_floats[name] and echoed as a STATUSTEXT so callers can verify receipt.
+-- This is the first step of migrating SCR_USER substate to named-float messages.
+
+local _NVF_MSG_ID = 251   -- NAMED_VALUE_FLOAT
+
+mavlink.init(1, 10)
+mavlink.register_rx_msgid(_NVF_MSG_ID)
+
+local _nv_floats = {}     -- received named float values:  name -> value
+
+-- ── Mode numbers (SCR_USER6 = plain integer 0..8) ────────────────────────────
+-- Ground planner writes SCR_USER6 = mode (0..8 only).
+-- Substate is delivered separately via NAMED_VALUE_FLOAT("RAWES_SUB", N).
 local MODE_NONE       = 0
 local MODE_STEADY     = 1   -- cyclic orbit-tracking only (no yaw)
 local MODE_YAW        = 2   -- counter-torque yaw trim only
@@ -78,11 +95,11 @@ local MODE_ARM_HOLD   = 6   -- hold Ch3=1000 Ch8=2000 keepalive
 local MODE_YAW_TEST   = 7   -- motor at 25% for 20 s (bench)
 local MODE_YAW_LTD    = 8   -- PI with 30 s motor hard-stop
 
--- ── Landing substates (mode=4, substate = SCR_USER6 % 1000) ──────────────────
+-- ── Landing substates (mode=4; sent via NAMED_VALUE_FLOAT "RAWES_SUB") ────────
 local LAND_DESCEND    = 0   -- VZ controller active; ground planner reels in tether
 local LAND_FINAL_DROP = 1   -- collective → 0, neutral cyclic, drop to floor
 
--- ── Pumping substates (mode=5, substate = SCR_USER6 % 1000) ──────────────────
+-- ── Pumping substates (mode=5; sent via NAMED_VALUE_FLOAT "RAWES_SUB") ────────
 -- Ground planner owns the phase state machine; Lua executes the correct
 -- collective and body_z slerp goal for each substate.
 --
@@ -177,9 +194,9 @@ local _yaw_limited_start_ms = nil    -- millis() when mode 8 (yaw_limited) began
 local _diag             = 0         -- global diagnostic counter (every tick)
 local _last_flight_ms   = 0         -- millis() when flight subsystem last ran
 
--- Mode / substate tracking (SCR_USER6 = mode_num * 1000 + substate)
+-- Mode tracking (SCR_USER6 = plain integer 0..8); substate via NAMED_VALUE_FLOAT "RAWES_SUB"
 local _prev_mode        = -1        -- last decoded mode number (-1 = uninitialised)
-local _prev_sub         = 0         -- last decoded substate
+local _prev_sub         = 0         -- last decoded substate (from _nv_floats["RAWES_SUB"])
 local _mode_ms          = 0         -- millis() when current mode was entered
 local _submode_ms       = 0         -- millis() when current substate was entered
 
@@ -307,6 +324,7 @@ end
 -- switches (hub position hasn't moved).
 
 local function _on_mode_enter(mode)
+    _nv_floats          = {}    -- clear named-float inbox on mode change so stale substates cannot bleed through
     _yaw_i              = 0.0
     _yaw_last_throttle  = 0.0
     _yaw_in_dead_zone   = true
@@ -803,10 +821,21 @@ local function update()
         _rc_ch8:set_override(2000)
     end
 
-    -- ── Decode SCR_USER6 = mode_num * 1000 + substate ────────────────────
-    local raw  = math.floor(p("SCR_USER6", 0) + 0.5)
-    local mode = math.floor(raw / 1000)
-    local sub  = raw % 1000
+    -- ── Drain MAVLink named-float inbox ──────────────────────────────────
+    -- Receive all queued NAMED_VALUE_FLOAT messages this tick, store in
+    -- _nv_floats, and echo each as a STATUSTEXT so senders can verify receipt.
+    local nvf_raw = mavlink.receive_chan()
+    while nvf_raw do
+        local _, nv_val, nv_name = string.unpack("<Ifc10", nvf_raw, 13)
+        nv_name = nv_name:gsub("\0", "")
+        _nv_floats[nv_name] = nv_val
+        gcs:send_text(6, string.format("RAWES: rcvd %s=%.0f", nv_name, nv_val))
+        nvf_raw = mavlink.receive_chan()
+    end
+
+    -- ── Decode mode (SCR_USER6 plain 0..8) + substate (NAMED_VALUE_FLOAT) ─
+    local mode = math.floor(p("SCR_USER6", 0) + 0.5)
+    local sub  = math.floor((_nv_floats["RAWES_SUB"] or 0) + 0.5)
     local now  = millis()
 
     -- Track mode and substate changes; reset state on mode entry.
@@ -858,9 +887,8 @@ end
 
 -- ── Entry point ──────────────────────────────────────────────────────────────
 
-local _raw_init   = math.floor(p("SCR_USER6", 0) + 0.5)
-local _mode_init  = math.floor(_raw_init / 1000)
-local _sub_init   = _raw_init % 1000
+local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
+local _sub_init   = 0   -- substate arrives via NAMED_VALUE_FLOAT "RAWES_SUB", not SCR_USER6
 local _mode_names = {[0]="none",         [1]="steady_noyaw",  [2]="yaw",
                      [3]="steady",       [4]="landing_noyaw", [5]="pumping_noyaw",
                      [6]="arm_hold_noyaw", [7]="yaw_test",    [8]="yaw_limited"}

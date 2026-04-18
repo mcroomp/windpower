@@ -86,7 +86,7 @@ def _pwm_to_col(pwm: int) -> float:
 
 
 def _pump_substate(t: float) -> int:
-    """Ground planner phase substate written to SCR_USER6 each step."""
+    """Ground planner phase substate sent via NAMED_VALUE_FLOAT on transitions."""
     if t < T_PUMP_HOLD:
         return PUMP_HOLD
     t_into = t - T_PUMP_HOLD
@@ -126,7 +126,7 @@ def _winch_speed_at(t: float) -> float:
 
 def _run_pumping() -> dict:
     """rawes.lua mode=5 (pumping_noyaw): N_PUMP_CYCLES De Schutter reel-out/reel-in."""
-    sim = RawesLua(mode=MODE_PUMPING + PUMP_HOLD)
+    sim = RawesLua(mode=MODE_PUMPING)
     sim.armed        = True
     sim.healthy      = True
     sim.vehicle_mode = 1
@@ -168,7 +168,8 @@ def _run_pumping() -> dict:
 
     max_steps = int((_PUMP_T_END + 5.0) / DT)
 
-    t_sim = 0.0
+    t_sim    = 0.0
+    prev_sub = None   # track last-sent substate; only send on transitions
     for i in range(max_steps):
         t_sim = i * DT
         if t_sim >= _PUMP_T_END:
@@ -179,7 +180,9 @@ def _run_pumping() -> dict:
 
         speed_now = _winch_speed_at(t_sim)
         sub_now   = _pump_substate(t_sim)
-        sim.set_param("mode", MODE_PUMPING + sub_now)
+        if sub_now != prev_sub:
+            sim.send_named_float("RAWES_SUB", sub_now)
+            prev_sub = sub_now
         if t_sim >= T_PUMP_HOLD:
             t_into = t_sim - T_PUMP_HOLD
             cycle_idx = min(int(t_into / _PUMP_T_CYCLE), N_PUMP_CYCLES - 1)

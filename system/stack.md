@@ -308,7 +308,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 | RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
 | RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
 | RAWES_ANCHOR_D | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw. |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: plain integer 0–8. 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw, 7=yaw_test, 8=yaw_limited. Substates for modes 4+5 are sent separately via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. |
 
 Cyclic output rate limiter is hardcoded at 30 PWM/step (~0.67 s full-stick traverse).
 No further SCR_USER params are available on hardware (firmware exposes only SCR_USER1..6).

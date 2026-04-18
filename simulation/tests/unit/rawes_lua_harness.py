@@ -328,3 +328,31 @@ class RawesLua:
     def clear_messages(self):
         """Discard all accumulated gcs:send_text messages."""
         self._lua.execute("_mock.gcs_msgs = {}")
+
+    # ── MAVLink named-float inject ─────────────────────────────────────────
+
+    def send_named_float(self, name: str, value: float) -> None:
+        """Inject a NAMED_VALUE_FLOAT into the Lua mavlink inbox.
+
+        Builds the message with pymavlink (same serialiser used by the real GCS)
+        and extracts the wire payload (bytes 6..6+len), then prepends 12 null
+        bytes to match the mavlink_message_t internal-struct layout that
+        ArduPilot's mavlink.receive_chan() returns.  Lua unpacks the payload
+        starting at byte 13 (1-indexed) with string.unpack("<If10s", raw, 13).
+        """
+        from pymavlink import mavutil as _mu  # local import — not always needed
+
+        _mav = _mu.mavlink.MAVLink(None, srcSystem=255, srcComponent=0)
+        name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
+        msg = _mu.mavlink.MAVLink_named_value_float_message(
+            time_boot_ms=0, name=name_b, value=float(value)
+        )
+        wire = msg.pack(_mav)
+        # Extract payload from wire packet (skip 6-byte MAVLink v1 header and
+        # 2-byte trailing CRC; payload length is wire[1]).
+        payload = wire[6 : 6 + wire[1]]
+        # Prepend 12-byte internal-struct header so payload lands at offset 13.
+        raw = b"\x00" * 12 + payload
+        # Push as a Lua string using hex escapes — safe for all byte values.
+        lua_str = "".join(f"\\x{b:02x}" for b in raw)
+        self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
