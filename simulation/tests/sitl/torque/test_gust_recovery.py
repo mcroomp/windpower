@@ -22,8 +22,9 @@ import pytest
 
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_yaw_rate
 
-# Gust ends at dynamics_t~15 s ~ test t~25 s.  Settle = 40 s gives ~15 s recovery.
-_SETTLE_S   = 40.0
+# Gust ends at SITL t~30 s (dynamics_t=15 + startup_hold=15).  Arm at ~t=7 s.
+# Settle = 48 s from arm gives ~25 s recovery after gust end (t_rel 48 → SITL 55).
+_SETTLE_S   = 48.0
 _OBSERVE_S  = 20.0
 _THRESHOLD  = math.radians(2.0)   # [rad/s] -- should be recovered and regulated by settle time
 

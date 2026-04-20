@@ -606,6 +606,7 @@ def _launch_mediator_static(
     accel_body: "np.ndarray",
     gyro:       "np.ndarray",
     port: int = 9002,
+    events_log: "Path | None" = None,
 ) -> subprocess.Popen:
     """Launch mediator_static.py as a subprocess with fixed sensor values.
 
@@ -625,6 +626,8 @@ def _launch_mediator_static(
         "--gyro",  *_fmt(gyro),
         "--port",  str(port),
     ]
+    if events_log is not None:
+        cmd += ["--events-log", str(events_log)]
     return subprocess.Popen(
         cmd,
         cwd=str(repo_root),

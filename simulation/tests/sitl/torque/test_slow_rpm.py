@@ -15,7 +15,7 @@ import pytest
 
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_physics_yaw_rate
 
-_SETTLE_S   = 50.0                  # s  -- EKF settle + give PID time to adapt to varying RPM
+_SETTLE_S   = 65.0                  # absolute SITL: startup_hold(15) + 50 s dynamics settle
 _OBSERVE_S  = 30.0                  # s  -- longer window because RPM variation is slow
 # P=0.015 cannot fully track 0.25 Hz RPM oscillation; steady-state psi_dot error ~100 deg/s.
 # Threshold verifies that psi_dot is bounded -- tuning can tighten this later.

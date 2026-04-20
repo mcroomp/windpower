@@ -42,10 +42,10 @@ def test_ddfp_zero_yaw(torque_armed_ddfp_zero):
     """
     ctx = torque_armed_ddfp_zero
 
-    _, rows = run_observation_loop(ctx, settle_s=5.0, observe_s=_OBSERVE_S, timeout_margin_s=15.0)
+    _, rows = run_observation_loop(ctx, settle_s=20.0, observe_s=_OBSERVE_S, timeout_margin_s=15.0)
 
     save_telemetry(rows, "ddfp_zero", ctx.log)
-    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 5.0, _OBSERVE_S, ctx.log)
+    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 20.0, _OBSERVE_S, ctx.log)
 
 
 def test_ddfp_yaw_ramp(torque_armed_ddfp_ramp):
@@ -60,10 +60,10 @@ def test_ddfp_yaw_ramp(torque_armed_ddfp_ramp):
     """
     ctx = torque_armed_ddfp_ramp
 
-    _, rows = run_observation_loop(ctx, settle_s=25.0, observe_s=_OBSERVE_S, timeout_margin_s=25.0)
+    _, rows = run_observation_loop(ctx, settle_s=40.0, observe_s=_OBSERVE_S, timeout_margin_s=25.0)
 
     save_telemetry(rows, "ddfp_ramp", ctx.log)
-    assert_motor_throttle_response(ctx.events_log, 0.05, 25.0, _OBSERVE_S, ctx.log)
+    assert_motor_throttle_response(ctx.events_log, 0.05, 40.0, _OBSERVE_S, ctx.log)
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +80,10 @@ def test_ddfp_no_action_at_rest(torque_armed_ddfp_zero):
     """
     ctx = torque_armed_ddfp_zero
 
-    _, rows = run_observation_loop(ctx, settle_s=2.0, observe_s=_OBSERVE_S, timeout_margin_s=13.0)
+    _, rows = run_observation_loop(ctx, settle_s=17.0, observe_s=_OBSERVE_S, timeout_margin_s=13.0)
 
     save_telemetry(rows, "ddfp_no_action", ctx.log)
-    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 2.0, _OBSERVE_S, ctx.log)
+    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 17.0, _OBSERVE_S, ctx.log)
 
 
 def test_ddfp_responds_to_drift(torque_armed_ddfp):
@@ -95,10 +95,10 @@ def test_ddfp_responds_to_drift(torque_armed_ddfp):
     """
     ctx = torque_armed_ddfp
 
-    _, rows = run_observation_loop(ctx, settle_s=0.0, observe_s=_OBSERVE_S, timeout_margin_s=15.0)
+    _, rows = run_observation_loop(ctx, settle_s=15.0, observe_s=_OBSERVE_S, timeout_margin_s=15.0)
 
     save_telemetry(rows, "ddfp_responds", ctx.log)
-    assert_motor_throttle_response(ctx.events_log, 0.05, 0.0, _OBSERVE_S, ctx.log)
+    assert_motor_throttle_response(ctx.events_log, 0.05, 15.0, _OBSERVE_S, ctx.log)
 
 
 def test_ddfp_kinematic_regulation(torque_armed_ddfp):
@@ -111,7 +111,7 @@ def test_ddfp_kinematic_regulation(torque_armed_ddfp):
     """
     ctx = torque_armed_ddfp
 
-    _, rows = run_observation_loop(ctx, settle_s=50.0, observe_s=_OBSERVE_S, timeout_margin_s=15.0)
+    _, rows = run_observation_loop(ctx, settle_s=65.0, observe_s=_OBSERVE_S, timeout_margin_s=15.0)
 
     save_telemetry(rows, "ddfp_kinematic", ctx.log)
-    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 50.0, _OBSERVE_S, ctx.log)
+    assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 65.0, _OBSERVE_S, ctx.log)

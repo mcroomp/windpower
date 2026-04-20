@@ -40,7 +40,7 @@ from torque_test_utils import (
     assert_physics_yaw_rate,
 )
 
-_SETTLE_S          = 60.0
+_SETTLE_S          = 75.0   # absolute SITL: startup_hold(15) + 60 s dynamics settle
 _OBSERVE_S         = 20.0
 _MAX_PSI_DOT_RAD_S = math.radians(5.0)   # [rad/s]
 

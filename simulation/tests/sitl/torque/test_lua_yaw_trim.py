@@ -38,7 +38,7 @@ from torque_test_utils  import (
     assert_physics_yaw_rate,
 )
 
-_SETTLE_S   = 65.0
+_SETTLE_S   = 80.0   # absolute SITL: startup_hold(15) + 65 s dynamics settle
 _OBSERVE_S  = 10.0
 _THRESHOLD  = math.radians(5.0)   # [rad/s] physics ground truth; 5 deg/s (matches stability watchdog)
 

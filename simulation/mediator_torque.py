@@ -61,7 +61,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torque_model as _m
-from mediator_base import install_sigterm_handler, setup_logging
+from mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from mediator_events import MediatorEventLog
 from sitl_interface import SITLInterface
 
@@ -81,9 +81,6 @@ _CH_YAW_DEFAULT = 3
 # and rawes.lua _set_throttle_pct (800 + pct * 12).
 MOTOR_PWM_MIN = 800.0   # µs — motor off
 MOTOR_PWM_MAX = 2000.0  # µs — full throttle
-
-# Log interval [s]
-_LOG_INTERVAL = 1.0
 
 
 def _pwm_to_throttle(pwm_us: float) -> float:
@@ -251,10 +248,7 @@ def run(
     ev  = MediatorEventLog(events_log_path)
     ev.open()
 
-    params  = _m.HubParams()
-    state   = _m.HubState()
-    t       = 0.0
-
+    params = _m.HubParams()
     _STARTUP_YAW_RATE = startup_yaw_rate
 
     _profile_entry = PROFILES.get(profile, PROFILES["constant"])
@@ -272,109 +266,92 @@ def run(
              profile=profile,
              tail_channel=ch_yaw)
 
-    throttle      = 0.0
-    n_sent        = 0
-    last_log      = 0.0
-    prev_roll     = 0.0
-    prev_pitch    = 0.0
-    last_pwm_ch4  = MOTOR_PWM_MIN   # motor off until first servo packet
-    throttle      = _pwm_to_throttle(last_pwm_ch4)
+    # -- Mutable step state (closed over by step_fn) --------------------------
+    hub_state  = _m.HubState()
+    prev_roll  = 0.0
+    prev_pitch = 0.0
+    _dynamics_started = False
+    _hb_state  = {"phase": "STARTUP", "psi_dot_deg_s": 0.0, "throttle": 0.0}
 
     iface = SITLInterface(recv_port=_RECV_PORT)
     iface.bind()
     log.info("Bound to UDP port %d", _RECV_PORT)
 
-    try:
-        while not is_stopped():
-            # ── Receive servo packet from SITL ─────────────────────────────
-            # Read raw PWM for the motor channel (SERVO9_MIN=800, SERVO9_MAX=2000).
-            # Do NOT use the normalised [-1,1] array — it clips values below 1000 µs.
-            servos = iface.recv_servos()
-            if servos is not None:
-                last_pwm_ch4 = iface.last_pwm_raw[ch_yaw]
+    def step_fn(_servos, t):
+        nonlocal hub_state, prev_roll, prev_pitch, _dynamics_started
 
-            in_startup = (t < startup_hold_s)
-            dynamics_t = max(0.0, t - startup_hold_s)
+        # Motor PWM: read raw µs from interface to avoid -1.0 clipping at 800 µs idle.
+        # This is physics input — throttle drives the counter-torque motor model.
+        throttle = _pwm_to_throttle(iface.last_pwm_raw[ch_yaw])
 
-            if in_startup:
-                # Rotor and motor are both at rest during startup.
-                # Hub is stationary — ArduPilot sees no yaw and commands 0 PWM.
-                psi_send      = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
-                psi_dot_send  = _STARTUP_YAW_RATE
-                roll_send     = 0.0
-                pitch_send    = 0.0
-                roll_dot      = 0.0
-                pitch_dot     = 0.0
-                current_omega = 0.0
-                throttle      = _pwm_to_throttle(last_pwm_ch4)
+        in_startup = t < startup_hold_s
+        dynamics_t = max(0.0, t - startup_hold_s)
+
+        if in_startup:
+            psi_send     = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
+            psi_dot_send = _STARTUP_YAW_RATE
+            roll_send = pitch_send = roll_dot = pitch_dot = 0.0
+            current_omega = 0.0
+        else:
+            # Universal spin-up ramp: prevents discontinuous omega jump at DYNAMIC start.
+            _SPINUP_S    = 10.0
+            spinup_scale  = min(1.0, dynamics_t / _SPINUP_S)
+            current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor) * spinup_scale)
+
+            roll_send, pitch_send = tilt_fn(dynamics_t)
+            roll_dot  = (roll_send  - prev_roll)  / DT
+            pitch_dot = (pitch_send - prev_pitch) / DT
+
+            if psi_dot_fn is not None:
+                # Prescribed yaw: bypass ODE, drive psi_dot directly from profile.
+                psi_dot_send   = psi_dot_fn(dynamics_t)
+                hub_state.psi  = (hub_state.psi + psi_dot_send * DT) % (2.0 * math.pi)
+                hub_state.psi_dot = psi_dot_send
+                psi_send       = hub_state.psi
             else:
-                # Universal spin-up ramp: rotor accelerates from 0 over _SPINUP_S seconds
-                # at the start of every DYNAMIC phase, regardless of profile.  This prevents
-                # a discontinuous jump from omega=0 (STARTUP) to nominal, which would be
-                # physically unrealistic (rotor inertia limits acceleration).
-                _SPINUP_S = 10.0
-                spinup_scale  = min(1.0, dynamics_t / _SPINUP_S)
-                current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor) * spinup_scale)
-                throttle      = _pwm_to_throttle(last_pwm_ch4)
+                if hub_state.psi == 0.0 and hub_state.psi_dot == 0.0:
+                    hub_state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
+                hub_state    = _m.step(hub_state, current_omega, throttle, params, DT)
+                psi_send     = math.atan2(math.sin(hub_state.psi), math.cos(hub_state.psi))
+                psi_dot_send = hub_state.psi_dot
 
-                roll_send, pitch_send = tilt_fn(dynamics_t)
-                roll_dot  = (roll_send  - prev_roll)  / DT
-                pitch_dot = (pitch_send - prev_pitch) / DT
+        # Safety clamp: cap yaw rate to prevent ArduPilot SIGFPE
+        _MAX_PSI_DOT = math.radians(500.0)
+        psi_dot_send = max(-_MAX_PSI_DOT, min(_MAX_PSI_DOT, psi_dot_send))
 
-                if psi_dot_fn is not None:
-                    # Prescribed yaw: skip ODE, drive psi_dot directly from profile.
-                    psi_dot_send = psi_dot_fn(dynamics_t)
-                    state.psi    = (state.psi + psi_dot_send * DT) % (2.0 * math.pi)
-                    state.psi_dot = psi_dot_send
-                    psi_send     = state.psi
-                else:
-                    if state.psi == 0.0 and state.psi_dot == 0.0:
-                        state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
-                    state = _m.step(state, current_omega, throttle, params, DT)
-                    psi_send     = math.atan2(math.sin(state.psi), math.cos(state.psi))
-                    psi_dot_send = state.psi_dot
+        prev_roll, prev_pitch = roll_send, pitch_send
 
-            # Safety clamp: cap yaw rate to prevent ArduPilot SIGFPE
-            _MAX_PSI_DOT = math.radians(500.0)
-            psi_dot_send = max(-_MAX_PSI_DOT, min(_MAX_PSI_DOT, psi_dot_send))
+        # One-shot: record when DYNAMIC phase begins
+        if not in_startup and not _dynamics_started:
+            _dynamics_started = True
+            log.info("DYNAMIC phase started at t=%.1f s  throttle=%.3f  omega=%.1f rad/s",
+                     t, throttle, current_omega)
+            ev.write("dynamics_start", t_sim=round(t, 1))
 
-            prev_roll, prev_pitch = roll_send, pitch_send
-            t += DT
+        _hb_state["phase"]          = "STARTUP" if in_startup else "DYNAMIC"
+        _hb_state["psi_dot_deg_s"]  = round(math.degrees(psi_dot_send), 3)
+        _hb_state["throttle"]       = round(throttle, 4)
 
-            # ── Send state back to SITL via SITLInterface ──────────────────
-            gyro_body, accel_body = _body_vectors(
-                roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot,
-            )
-            iface.send_state(
-                pos_ned         = np.array([0.0, 0.0, 0.0]),
-                vel_ned         = np.array([0.0, 0.0, 0.0]),
-                rpy_rad         = np.array([roll_send, pitch_send, psi_send]),
-                accel_body      = np.asarray(accel_body),
-                gyro_body       = np.asarray(gyro_body),
-                # rpm_rad_s omitted: PWM-only mode, no RPM feedback to ArduPilot.
-                battery_voltage = _BATTERY_V,
-            )
-            n_sent += 1
+        gyro_body, accel_body = _body_vectors(
+            roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot)
 
-            # ── Periodic log ───────────────────────────────────────────────
-            if t - last_log >= _LOG_INTERVAL:
-                last_log = t
-                phase = "STARTUP" if in_startup else "DYNAMIC"
-                ev.write("heartbeat", t_sim=round(t, 1),
-                         phase=phase,
-                         psi_deg=round(math.degrees(psi_send), 2),
-                         psi_dot_deg_s=round(math.degrees(psi_dot_send), 3),
-                         throttle=round(throttle, 3),
-                         omega_rad_s=round(current_omega, 1),
-                         roll_deg=round(math.degrees(roll_send), 1),
-                         pitch_deg=round(math.degrees(pitch_send), 1))
-                if not in_startup and t - startup_hold_s < 2.0:
-                    ev.write("dynamics_start", t_sim=round(t, 1))
+        return dict(
+            pos_ned         = np.array([0.0, 0.0, 0.0]),
+            vel_ned         = np.array([0.0, 0.0, 0.0]),
+            rpy_rad         = np.array([roll_send, pitch_send, psi_send]),
+            accel_body      = np.asarray(accel_body),
+            gyro_body       = np.asarray(gyro_body),
+            battery_voltage = _BATTERY_V,
+        )
 
+    n = 0
+    try:
+        n = run_lockstep(iface, step_fn, is_stopped, log=log, ev=ev,
+                         heartbeat_fields=lambda: dict(_hb_state))
     except KeyboardInterrupt:
-        log.info("Interrupted — shutting down")
+        log.info("Interrupted -- shutting down")
     finally:
-        ev.write("shutdown", t_sim=round(t, 1), n_sent=n_sent)
+        ev.write("shutdown", t_sim=round(iface.sim_now(), 1), n_sent=n)
         ev.close()
         iface.close()
 

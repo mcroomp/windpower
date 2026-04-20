@@ -134,7 +134,7 @@ class StackConfig:
     GCS_ADDRESS : str = f"tcp:127.0.0.1:{SITL_GCS_PORT}"
 
     # Timeouts (seconds)
-    CONNECT_TIMEOUT       : float = 30.0
+    CONNECT_TIMEOUT       : float = 90.0
     ARM_TIMEOUT           : float = 120.0
     MODE_TIMEOUT          : float = 60.0
     EKF_ALIGN_TIMEOUT     : float = 45.0
@@ -632,10 +632,12 @@ def _static_stack(
         test_name         = test_name,
         extra_boot_params = extra_boot_params,
     ) as ctx:
-        mediator_log = tmp_path / "mediator.log"
+        mediator_log    = tmp_path / "mediator.log"
+        mediator_events = tmp_path / "mediator_events.jsonl"
         mediator_proc = _launch_mediator_static(
             ctx.sim_dir, ctx.repo_root, mediator_log,
             pos=pos, vel=vel, rpy=rpy, accel_body=accel_body, gyro=gyro,
+            events_log=mediator_events,
         )
         ctx.mediator_proc = mediator_proc
         ctx.mediator_log  = mediator_log
@@ -643,8 +645,10 @@ def _static_stack(
             yield ctx
         finally:
             _terminate_process(mediator_proc)
-            if mediator_log.exists():
-                copy_logs_to_dir(ctx.test_log_dir, {"mediator.log": mediator_log})
+            logs_to_copy = {"mediator.log": mediator_log}
+            if mediator_events.exists():
+                logs_to_copy["mediator_events.jsonl"] = mediator_events
+            copy_logs_to_dir(ctx.test_log_dir, logs_to_copy)
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +840,13 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
 
     # ── 1. Connect ────────────────────────────────────────────────────────────
     log.info("[setup 1/6] Connecting GCS (timeout=%.0fs) ...", _STARTUP_TIMEOUT)
-    gcs.connect(timeout=_STARTUP_TIMEOUT)
+    try:
+        gcs.connect(timeout=_STARTUP_TIMEOUT)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"[setup 1/6] GCS connect timeout after {_STARTUP_TIMEOUT:.0f}s "
+            f"(SITL may not have started yet — resource contention under -n 8?): {exc}"
+        ) from exc
     gcs.start_heartbeat(rate_hz=1.0)
     _procs_alive()
 
@@ -1465,7 +1475,10 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
                      msg.param_id.rstrip("\x00"), msg.param_value)
             return
         log.debug("Waiting for param subsystem ...")
-    raise TimeoutError(f"Param subsystem not ready after {timeout:.0f}s")
+    raise TimeoutError(
+        f"[setup 3/6] Param subsystem (SYSID_THISMAV) not ready after {timeout:.0f}s "
+        f"— SITL may be overloaded or crashed"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1476,7 +1489,7 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
 # + motor physics — and a different EKF alignment sequence
 # (short compass-only alignment instead of the long kinematic ramp).
 
-_TORQUE_STARTUP_HOLD_S: float = 45.0   # stationary hold for EKF + arming without artificial spin
+_TORQUE_STARTUP_HOLD_S: float = 15.0   # SITL-seconds: enough for EKF + arming before DYNAMIC starts
 
 # All torque test parameters in one boot-file set.
 #

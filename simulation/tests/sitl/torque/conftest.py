@@ -91,9 +91,10 @@ def torque_armed_ddfp_zero(tmp_path, request):
     DDFP fixture with prescribed zero yaw throughout DYNAMIC.
 
     Hub never rotates — tests that the motor stays near 800 µs (off) with no
-    integrator activity.  startup_hold_s=45 ensures arming completes before
-    DYNAMIC starts.  startup_yaw_rate_deg_s=0 — no artificial spin during
-    startup (ArduPilot can arm without it in the torque SITL environment).
+    integrator activity.  startup_hold_s=15 (SITL-seconds) ensures EKF and
+    arming complete before DYNAMIC starts.  startup_yaw_rate_deg_s=0 — no
+    artificial spin during startup (ArduPilot can arm without it in the torque
+    SITL environment).
     """
     import torque_model as _m
     with _torque_stack(
@@ -104,7 +105,7 @@ def torque_armed_ddfp_zero(tmp_path, request):
         tail_channel=3,
         extra_params=_DDFP_TORQUE_EXTRA_PARAMS,
         test_name=request.node.name,
-        startup_hold_s=45.0,
+        startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
     ) as ctx:
         yield ctx
@@ -131,7 +132,7 @@ def torque_armed_ddfp_ramp(tmp_path, request):
         tail_channel=3,
         extra_params=_DDFP_TORQUE_EXTRA_PARAMS,   # H_YAW_TRIM=-0.419, P=0.5, I=0
         test_name=request.node.name,
-        startup_hold_s=45.0,
+        startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
     ) as ctx:
         yield ctx
@@ -157,7 +158,7 @@ def torque_armed_ddfp(tmp_path, request):
         tail_channel=3,
         extra_params=_DDFP_TORQUE_EXTRA_PARAMS,
         test_name=request.node.name,
-        startup_hold_s=45.0,
+        startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
         # omega_motor=0 at DYNAMIC start (not updated during STARTUP).
         # Safety clamp caps psi_dot at 500 deg/s (8.727 rad/s) sent to ArduPilot.

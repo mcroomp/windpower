@@ -160,19 +160,11 @@ def read_physics_psi_dot(
 
     Returns a list of {"t": float [s dynamics], "psi_dot": float [rad/s]}.
     """
-    # Find DYNAMIC start time from the dynamics_start event.
-    t_dynamic_start: float | None = None
-    for ev in events_log.get_events("dynamics_start"):
-        t_dynamic_start = float(ev.get("t_sim", 0.0))
-        break
-
     samples: list[dict] = []
     for ev in events_log.get_events("heartbeat"):
         if ev.get("phase") != "DYNAMIC":
             continue
-        t_abs = float(ev.get("t_sim", 0.0))
-        # Use dynamics-relative time if we found the anchor; else fall back to absolute.
-        t = (t_abs - t_dynamic_start) if t_dynamic_start is not None else t_abs
+        t = float(ev.get("t_sim", 0.0))
         if settle_s <= t <= settle_s + observe_s:
             psi_dot_deg_s = float(ev.get("psi_dot_deg_s", 0.0))
             samples.append({"t": t, "psi_dot": math.radians(psi_dot_deg_s)})
@@ -265,17 +257,11 @@ def assert_motor_throttle_response(
     observe_s       : length of observation window [s]
     log             : test logger
     """
-    t_dynamic_start: float | None = None
-    for ev in events_log.get_events("dynamics_start"):
-        t_dynamic_start = float(ev.get("t_sim", 0.0))
-        break
-
     samples: list[dict] = []
     for ev in events_log.get_events("heartbeat"):
         if ev.get("phase") != "DYNAMIC":
             continue
-        t_abs = float(ev.get("t_sim", 0.0))
-        t = (t_abs - t_dynamic_start) if t_dynamic_start is not None else t_abs
+        t = float(ev.get("t_sim", 0.0))
         if settle_s <= t <= settle_s + observe_s:
             throttle = float(ev.get("throttle", 0.0))
             psi_dot  = float(ev.get("psi_dot_deg_s", 0.0))

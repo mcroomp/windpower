@@ -51,7 +51,7 @@ from torque_test_utils  import (
     assert_physics_yaw_rate,
 )
 
-_SETTLE_S   = 80.0
+_SETTLE_S   = 95.0   # absolute SITL: startup_hold(15) + 80 s dynamics settle
 _OBSERVE_S  = 20.0
 # P=0.015 responds to tilt-induced apparent yaw, causing ~8-9 deg/s real hub rotation.
 # This is acceptable during aggressive ±20° wobble; the hub is not drifting uncontrolled.

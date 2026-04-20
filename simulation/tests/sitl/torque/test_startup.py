@@ -32,7 +32,7 @@ import pytest
 from torque_test_utils  import run_observation_loop, save_telemetry, assert_physics_yaw_rate
 
 #: Settle long enough for the 10 s spinup ramp + PID integrator wind-up
-_SETTLE_S   = 70.0
+_SETTLE_S   = 85.0   # absolute SITL: startup_hold(15) + 70 s dynamics settle
 _OBSERVE_S  = 20.0
 _THRESHOLD  = math.radians(10.0)  # [rad/s] -- allows transients during spin-up
 
