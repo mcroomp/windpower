@@ -251,9 +251,15 @@ Control feel is light and consistent regardless of rotor loading.
 
 The **EMAX GB4008** gimbal motor is mechanically geared to the spinning outer rotor hub
 via an 80:44 spur gear (80 teeth on the hub, 44 on the motor pinion). The motor stator
-is fixed to the stationary inner assembly; the motor rotor spins with the gear. By driving
-the motor, the inner assembly produces a counter-torque that cancels the bearing drag from
-the spinning rotor hub, keeping the inner assembly at a fixed heading.
+is fixed to the stationary inner assembly; the motor rotor spins with the gear.
+
+The ESC maintains the commanded motor RPM (proportional to commanded PWM) regardless of
+mechanical load. Bearing drag and swashplate friction only affect **power consumption** —
+the ESC draws more current to compensate and they have no direct effect on yaw dynamics.
+The inner assembly stays at a fixed heading when the motor RPM matches the hub rotation
+rate scaled by the gear ratio. Yaw drift occurs when the commanded motor RPM deviates from
+the hub speed: too low and the inner assembly rotates with the hub (CW); too high and it
+counter-rotates against it (CCW).
 
 | Parameter      | Value                          |
 |----------------|--------------------------------|

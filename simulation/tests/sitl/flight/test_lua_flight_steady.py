@@ -56,8 +56,11 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 sys.path.insert(0, str(_ANALYSIS_DIR))
 
-from stack_infra import StackContext, dump_startup_diagnostics
-from analyse_run import compute_steady_metrics, print_flight_report, parse_arducopter, RunReport
+from stack_infra import (
+    StackContext, dump_startup_diagnostics,
+    observe, assert_no_mediator_criticals, get_arducopter_crash_info,
+)
+from analyse_run import compute_steady_metrics, print_flight_report
 
 # -- Timing -------------------------------------------------------------------
 _KINEMATIC_TIMEOUT_S = 45.0   # s from fixture yield to kinematic end (fixture yields at GPS fusion ~44s, kinematic exits ~80s → 36s gap; 45s has margin)
@@ -75,24 +78,6 @@ _MIN_CYCLIC_ACTIVITY_PWM = 50    # |servo1-1500| + |servo2-1500| minimum peak
 
 _POS_LOG_INTERVAL        = 5.0   # s between periodic log lines
 
-
-def _get_crash_info(ctx: "StackContext") -> str:
-    """Return a formatted crash block from arducopter.log, or empty string."""
-    acp = ctx.telemetry_log.parent / "arducopter.log"
-    if not acp.exists():
-        return ""
-    rpt = RunReport()
-    parse_arducopter(acp, rpt)
-    if rpt.sitl_crash is None:
-        return ""
-    lines = [
-        "",
-        "--- ArduPilot crash ---",
-        f"  {rpt.sitl_crash.error_line}",
-    ]
-    for frame in rpt.sitl_crash.stack:
-        lines.append(f"  {frame}")
-    return "\n".join(lines)
 
 
 def test_lua_flight_steady(acro_armed_lua_full: StackContext):
@@ -139,69 +124,60 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
 
     log.info("=== test_lua_flight_steady: observing %.0f s of free flight ===", _OBS_SECONDS)
 
-    try:
-        while gcs.sim_now() < deadline:
-            for name, proc, lp in [
-                ("mediator", ctx.mediator_proc, ctx.mediator_log),
-                ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
-            ]:
-                if proc.poll() is not None:
-                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                    crash = _get_crash_info(ctx)
-                    pytest.fail(
-                        f"{name} exited during observation "
-                        f"(rc={proc.returncode}):\n{txt[-3000:]}"
-                        f"{crash}"
-                    )
+    state = {
+        "lua_captured":      lua_captured,
+        "ekf_yaw_reset":     ekf_yaw_reset,
+        "max_cyclic":        max_cyclic_activity,
+        "t_last_log":        t_obs_start,
+    }
 
-            msg = gcs._recv(
-                type=["SERVO_OUTPUT_RAW", "STATUSTEXT", "ATTITUDE",
-                      "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"],
-                blocking=True, timeout=0.2,
+    def _handle(msg, t_rel):
+        now = gcs.sim_now()
+        if msg is not None:
+            mt = msg.get_type()
+            if mt == "SERVO_OUTPUT_RAW":
+                activity = abs(msg.servo1_raw - 1500) + abs(msg.servo2_raw - 1500)
+                if activity > state["max_cyclic"]:
+                    state["max_cyclic"] = activity
+            elif mt == "STATUSTEXT":
+                text = msg.text.rstrip("\x00").strip()
+                log.info("STATUSTEXT [t=%.1fs]: %s", t_rel, text)
+                all_statustext.append(text)
+                tl = text.lower()
+                if "rawes flight" in tl and "captured" in tl:
+                    state["lua_captured"] = True
+                    ctx.flight_events["Lua captured"] = t_rel
+                if "emergency yaw" in tl or "yaw reset" in tl:
+                    state["ekf_yaw_reset"] = True
+                    log.warning("EKF yaw reset at t=%.1fs: %s", t_rel, text)
+
+        if not state["lua_captured"] and now > t_capture_deadline:
+            pytest.fail(
+                f"rawes.lua did not capture within {_CAPTURE_TIMEOUT_S:.0f} s.\n"
+                f"STATUSTEXT: {all_statustext[-20:]}\n"
+                "Checklist:\n"
+                "  * SCR_ENABLE=1 baked into eeprom (prime_eeprom=True in fixture)\n"
+                "  * rawes.lua installed to /ardupilot/scripts/\n"
+                "  * SCR_USER5 (anchor Down) = home_alt_m correct\n"
+                "  * SITL log for Lua load errors"
             )
-            t_rel = gcs.sim_now() - t_obs_start
-            now   = gcs.sim_now()
+        if now - state["t_last_log"] >= _POS_LOG_INTERVAL:
+            log.info("  t=%.0fs  max_activity=%d PWM  captured=%s  yaw_reset=%s",
+                     t_rel, state["max_cyclic"], state["lua_captured"], state["ekf_yaw_reset"])
+            state["t_last_log"] = now
+        return None
 
-            if msg is not None:
-                mt = msg.get_type()
-                if mt == "SERVO_OUTPUT_RAW":
-                    ch1      = msg.servo1_raw
-                    ch2      = msg.servo2_raw
-                    activity = abs(ch1 - 1500) + abs(ch2 - 1500)
-                    if activity > max_cyclic_activity:
-                        max_cyclic_activity = activity
-                elif mt == "STATUSTEXT":
-                    text = msg.text.rstrip("\x00").strip()
-                    log.info("STATUSTEXT [t=%.1fs]: %s", t_rel, text)
-                    all_statustext.append(text)
-                    tl = text.lower()
-                    if "rawes flight" in tl and "captured" in tl:
-                        lua_captured = True
-                        ctx.flight_events["Lua captured"] = t_rel
-                    if "emergency yaw" in tl or "yaw reset" in tl:
-                        ekf_yaw_reset = True
-                        log.warning("EKF yaw reset at t=%.1fs: %s", t_rel, text)
+    observe(ctx, _OBS_SECONDS, _handle,
+            msg_types=["SERVO_OUTPUT_RAW", "STATUSTEXT", "ATTITUDE",
+                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"],
+            label="observation")
 
-            if not lua_captured and now > t_capture_deadline:
-                pytest.fail(
-                    f"rawes.lua did not capture within {_CAPTURE_TIMEOUT_S:.0f} s.\n"
-                    f"STATUSTEXT: {all_statustext[-20:]}\n"
-                    "Checklist:\n"
-                    "  * SCR_ENABLE=1 baked into eeprom (prime_eeprom=True in fixture)\n"
-                    "  * rawes.lua installed to /ardupilot/scripts/\n"
-                    "  * SCR_USER5 (anchor Down) = home_alt_m correct\n"
-                    "  * SITL log for Lua load errors"
-                )
+    lua_captured      = state["lua_captured"]
+    ekf_yaw_reset     = state["ekf_yaw_reset"]
+    max_cyclic_activity = state["max_cyclic"]
+    log.info("Observation complete: max_activity=%d PWM", max_cyclic_activity)
 
-            if now - t_last_log >= _POS_LOG_INTERVAL:
-                log.info(
-                    "  t=%.0fs  max_activity=%d PWM  captured=%s  yaw_reset=%s",
-                    t_rel, max_cyclic_activity, lua_captured, ekf_yaw_reset,
-                )
-                t_last_log = now
-
-        log.info("Observation complete: max_activity=%d PWM", max_cyclic_activity)
-
+    try:
         # -- Physics-based pass/fail from telemetry CSV -----------------------
         # print_steady_report also loads telemetry, but we load separately here
         # so we can assert before printing the full report.
@@ -266,12 +242,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
             f"STATUSTEXT: {all_statustext}"
         )
 
-        if ctx.mediator_log.exists():
-            med_text = ctx.mediator_log.read_text(encoding="utf-8", errors="replace")
-            critical = [ln for ln in med_text.splitlines() if "CRITICAL" in ln]
-            assert not critical, (
-                "CRITICAL errors in mediator:\n" + "\n".join(critical[:10])
-            )
+        assert_no_mediator_criticals(ctx.mediator_log)
 
         stable_s = metrics.max_stable_s if metrics is not None else 0.0
         log.info(
@@ -287,7 +258,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
 
     except Exception as exc:
         dump_startup_diagnostics(ctx)
-        crash = _get_crash_info(ctx)
+        crash = get_arducopter_crash_info(ctx)
         if crash:
             raise type(exc)(f"{exc}{crash}") from exc
         raise

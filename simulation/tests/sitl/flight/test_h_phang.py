@@ -49,7 +49,7 @@ _SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
-from stack_infra import StackContext, dump_startup_diagnostics
+from stack_infra import StackContext, dump_startup_diagnostics, observe, assert_procs_alive
 from swashplate import h3_inverse_mix
 
 # -- Timing --------------------------------------------------------------------
@@ -112,13 +112,7 @@ def _collect_servo_samples(
     deadline = t_start + duration_s
 
     while gcs.sim_now() < deadline:
-        for name, proc, lp in [
-            ("mediator", ctx.mediator_proc, ctx.mediator_log),
-            ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
-        ]:
-            if proc.poll() is not None:
-                txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                pytest.fail(f"{name} exited during {label} (rc={proc.returncode}):\n{txt[-2000:]}")
+        assert_procs_alive(ctx, label)
 
         gcs.send_rc_override(rc_channels)
         msg = gcs._recv(type=["SERVO_OUTPUT_RAW"], blocking=True, timeout=0.05)

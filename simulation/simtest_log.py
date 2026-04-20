@@ -81,11 +81,13 @@ class BadEventLog:
     def summary(self) -> str:
         if not self._events:
             return "no bad events"
+        # Gather all unique kinds in insertion order
+        seen: dict[str, None] = {}
+        for e in self._events:
+            seen[e["kind"]] = None
         parts = []
-        for kind in ("slack", "floor_hit", "tension_spike"):
+        for kind in seen:
             evs = self.of_kind(kind)
-            if not evs:
-                continue
             by_phase: dict[str, int] = {}
             for e in evs:
                 by_phase[e["phase"]] = by_phase.get(e["phase"], 0) + 1

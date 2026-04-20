@@ -11,7 +11,7 @@ Timeline (approximate test time):
   t = 40 s+    : observation window starts (25 s recovery time)
 
 Pass criterion: max |psi_dot| < 2 deg/s in the observation window, confirming
-that the PID recovered from the bearing-drag spike within 25 s of gust end.
+that the PID recovered from the RPM-mismatch transient within 25 s of gust end.
 
 Telemetry -> simulation/logs/torque_telemetry_gust.csv
 """
@@ -32,17 +32,13 @@ _THRESHOLD  = math.radians(2.0)   # [rad/s] -- should be recovered and regulated
 def test_gust_recovery(torque_armed_profile):
     """
     At dynamics_t=10 s the rotor hub suddenly spins at 150% nominal for 5 seconds
-    (gust), then returns to nominal.  The yaw rate PID must reject the bearing-drag
-    shock and recover to |psi_dot| < 2 deg/s within 25 s of gust end.
+    (gust), then returns to nominal.  The higher RPM shifts the back-EMF equilibrium;
+    the adaptive trim and yaw rate PID must track the change and recover to
+    |psi_dot| < 2 deg/s within 25 s of gust end.
     """
     ctx = torque_armed_profile
-    rows: list = []
 
-    obs = run_observation_loop(
-        ctx=ctx, rows=rows,
-        settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
-        timeout_s=_SETTLE_S + _OBSERVE_S + 20.0,
-    )
+    obs, rows = run_observation_loop(ctx, _SETTLE_S, _OBSERVE_S)
 
     save_telemetry(rows, "gust", ctx.log)
     assert_yaw_rate(obs, _THRESHOLD, _SETTLE_S, ctx.log)

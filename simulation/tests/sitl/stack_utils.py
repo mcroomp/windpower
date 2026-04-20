@@ -570,21 +570,20 @@ def _launch_mediator_torque(
     omega_rotor: float,
     profile: str = "constant",
     tail_channel: int = 3,
-    lua_mode: bool = False,
-    startup_hold_s: float = 10.0,
+    startup_hold_s: float = 45.0,
     events_log_path: "str | None" = None,
+    startup_yaw_rate_deg_s: float = 0.0,
 ) -> subprocess.Popen:
     """Launch mediator_torque.py as a subprocess."""
     cmd = [
         sys.executable, str(torque_dir / "mediator_torque.py"),
-        "--omega-rotor",  str(omega_rotor),
-        "--startup-hold", str(startup_hold_s),
-        "--profile",      profile,
-        "--tail-channel", str(tail_channel),
-        "--log-level",    "INFO",
+        "--omega-rotor",       str(omega_rotor),
+        "--startup-hold",      str(startup_hold_s),
+        "--profile",           profile,
+        "--tail-channel",      str(tail_channel),
+        "--startup-yaw-rate",  str(startup_yaw_rate_deg_s),
+        "--log-level",         "INFO",
     ]
-    if lua_mode:
-        cmd.append("--lua-mode")
     if events_log_path is not None:
         cmd += ["--events-log", events_log_path]
     return subprocess.Popen(

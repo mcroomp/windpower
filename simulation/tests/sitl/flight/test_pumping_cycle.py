@@ -23,7 +23,10 @@ _SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
-from stack_infra import StackContext, dump_startup_diagnostics
+from stack_infra import (
+    StackContext, dump_startup_diagnostics,
+    observe, assert_no_mediator_criticals, assert_procs_alive,
+)
 from telemetry_csv import read_csv
 
 # ---------------------------------------------------------------------------
@@ -136,13 +139,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
             # Motor interlock keepalive; Lua owns Ch1/Ch2/Ch3
             gcs.send_rc_override({8: 2000})
 
-            for name, proc, lp in [
-                ("mediator", ctx.mediator_proc, ctx.mediator_log),
-                ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
-            ]:
-                if proc.poll() is not None:
-                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                    pytest.fail(f"{name} exited during pumping_lua (rc={proc.returncode}):\n{txt[-3000:]}")
+            assert_procs_alive(ctx, "pumping_lua")
 
             msg = gcs._recv(
                 type=["LOCAL_POSITION_NED", "STATUSTEXT"],
@@ -234,13 +231,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
             f"Net energy {net_energy:.1f} J <= 0 -- pumping cycle does not produce net power"
         )
 
-        # -- CRITICAL log check -----------------------------------------------
-        if ctx.mediator_log.exists():
-            med_text = ctx.mediator_log.read_text(encoding="utf-8", errors="replace")
-            critical = [l for l in med_text.splitlines() if "CRITICAL" in l]
-            assert not critical, (
-                "CRITICAL errors in mediator log:\n" + "\n".join(critical[:10])
-            )
+        assert_no_mediator_criticals(ctx.mediator_log)
 
         log.info(
             "--- test_pumping_cycle_lua PASSED  (net_energy=%.1f J  peak=%.1f N) ---",

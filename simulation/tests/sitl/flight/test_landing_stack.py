@@ -31,7 +31,10 @@ _SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
-from stack_infra import StackContext, dump_startup_diagnostics
+from stack_infra import (
+    StackContext, dump_startup_diagnostics,
+    observe, assert_no_mediator_criticals, assert_procs_alive,
+)
 from telemetry_csv import read_csv
 
 # ---------------------------------------------------------------------------
@@ -95,16 +98,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
 
     try:
         while gcs.sim_now() < deadline:
-            # Check processes haven't died
-            for name, proc, lp in [
-                ("mediator", ctx.mediator_proc, ctx.mediator_log),
-                ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
-            ]:
-                if proc.poll() is not None:
-                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                    raise RuntimeError(
-                        f"{name} exited during landing_lua test (rc={proc.returncode}):\n{txt[-3000:]}"
-                    )
+            assert_procs_alive(ctx, "landing_lua")
 
             msg = gcs._recv(
                 type=["STATUSTEXT", "LOCAL_POSITION_NED"],
@@ -182,11 +176,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
         else:
             log.warning("No descent rows in telemetry -- tension check skipped.")
 
-        # -- CRITICAL log check -----------------------------------------------
-        if ctx.mediator_log.exists():
-            lines = ctx.mediator_log.read_text(encoding="utf-8", errors="replace").splitlines()
-            critical = [l for l in lines if "CRITICAL" in l]
-            assert not critical, "CRITICAL errors in mediator log:\n" + "\n".join(critical[:10])
+        assert_no_mediator_criticals(ctx.mediator_log)
 
         log.info(
             "--- test_landing_lua PASSED  (min_alt=%.1f m  peak_descent_tension=%.0f N) ---",

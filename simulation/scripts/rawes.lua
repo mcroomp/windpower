@@ -45,12 +45,11 @@ Division of labour (pumping mode):
   Synchronisation:     Lua detects tether paying-out / reeling-in to follow the
                        ground planner's actual winch motion -- no RC channel bridge needed.
 
-Yaw-trim control (PI on gyro_z, no RPM feedforward):
+Yaw-trim control (PI on gyro_z):
   BASE_THROTTLE_PCT  5 %            -- floor; DShot arms on first frame
   KP_YAW             3.0 %/(rad/s) -- proportional; provides motor torque during spin-up
-  KI_YAW             2.0 %/(rad/s*s) -- integral; accumulates ~70% equilibrium offset
-  YAW_I_MAX          80 %           -- anti-windup; above bearing-drag equilibrium ~75%
-  RPM sensor not used (RPM1_TYPE=0 on hardware until AM32 EDT enabled).
+  KI_YAW             2.0 %/(rad/s*s) -- integral; accumulates ~48.5% back-EMF equilibrium offset
+  YAW_I_MAX          80 %           -- anti-windup; well above back-EMF equilibrium ~48.5%
 
 Required ArduPilot parameters:
   SCR_ENABLE        1    -- reboot required after first set
@@ -60,8 +59,6 @@ Required ArduPilot parameters:
   SERVO_BLH_POLES   22   -- GB4008 24N22P (11 pole-pairs; default 14 is wrong)
   SERVO_DSHOT_ESC   3    -- AM32 ESC type
   SERVO_BLH_BDMASK  0    -- one-way DShot; set to 256 only after AM32 EDT enabled on ESC
-  RPM1_TYPE         10   -- SITL: JSON rpm.rpm_1; hardware: 5 (bidir DShot, after EDT enabled)
-  RPM1_MIN          0
 
 Deployment:
   Copy rawes.lua to APM/scripts/ on the Pixhawk SD card.
@@ -125,21 +122,22 @@ local ACRO_RP_RATE_DEG  = 360.0     -- must match ACRO_RP_RATE ArduPilot paramet
 local PLANNER_TIMEOUT   = 2000      -- ms: revert to natural orbit after this
 
 -- ── VZ collective controller ─────────────────────────────────────────────────
--- Pixhawk-side descent-rate controller: mirrors AcroController.step_vz() in
--- controller.py.  Runs at 50 Hz inside run_flight().  Computes collective from
--- NED vz feedback and writes Ch3 RC override.
+-- Pixhawk-side PI VZ controller for all non-pumping modes.  Runs at 50 Hz
+-- inside run_flight().  The integrator starts at col_cruise (mode-appropriate
+-- value, set at capture) and winds to the actual trim collective regardless of
+-- how well col_cruise is calibrated.
 --
--- vz_setpoint is hardcoded per mode (no RC receiver in the system):
---   landing (mode 4): 0.5 m/s descent
---   flight / both (modes 1, 3): 0.0 m/s (altitude hold)
--- pumping (mode 5) uses open-loop collective per phase; this controller is bypassed.
+-- vz_setpoint (hardcoded per mode; no RC receiver in this system):
+--   landing (mode 4): VZ_LAND_SP = 0.5 m/s descent
+--   cruise  (mode 1): 0.0 m/s altitude hold
+-- pumping (mode 5): open-loop per phase; this controller is bypassed.
 
 local KP_VZ               = 0.05   -- collective gain [rad/(m/s)]
 local KI_VZ               = 0.005  -- collective integrator gain [rad/(m/s)/s]
                                     -- winds up from COL_CRUISE_LAND_RAD to the actual
                                     -- trim collective, so COL_CRUISE_LAND_RAD need not be exact.
-local COL_CRUISE_FLIGHT_RAD = -0.18  -- altitude-neutral at natural orbit (xi~8 deg, 100 m tether)
-local COL_CRUISE_LAND_RAD   =  0.079 -- initial integrator value for landing PI (not critical)
+local COL_CRUISE_FLIGHT_RAD = -0.18  -- VZ integrator initial value for cruise (xi~8 deg, 100 m tether)
+local COL_CRUISE_LAND_RAD   =  0.079 -- VZ integrator initial value for landing (xi~80 deg)
 local COL_MIN_RAD    = -0.28   -- hardware collective floor  [rad]
 local COL_MAX_RAD    =  0.10   -- hardware collective ceiling [rad]
 -- DS113MG at 6 V: 545 deg/s over 100 deg travel.
@@ -168,16 +166,15 @@ local T_TRANSITION    =  3.7   -- body_z slerp window [s] (from config default)
 
 -- ── Yaw-trim subsystem constants ─────────────────────────────────────────────
 
--- RPM telemetry is not available on hardware (RPM1_TYPE=0 until AM32 EDT enabled).
--- Control is throttle-percentage based: PI on gyro_z drives hub yaw rate to zero.
--- Physics: bearing drag at omega_rotor=28 rad/s needs ~75% throttle to hold psi_dot=0.
+-- PI on gyro_z drives hub yaw rate to zero.
+-- Physics: back-EMF equilibrium at omega_rotor=28 rad/s is ~48.5% throttle (psi_dot=0).
 -- BASE_THROTTLE_PCT alone is insufficient (motor below back-EMF threshold); the I term
 -- accumulates during startup spin-up and brings throttle to the equilibrium operating point.
 
 local BASE_THROTTLE_PCT = 5.0          -- base throttle [%]; I term compensates the rest
 local KP_YAW        = 3.0              -- P gain [% / (rad/s)]; strong enough to recover from neg overshoot
-local KI_YAW        = 2.0              -- I gain [% / (rad/s * s)]; builds equilibrium offset (~70%)
-local YAW_I_MAX     = 80.0             -- anti-windup clamp [%]; above equilibrium ~75%
+local KI_YAW        = 2.0              -- I gain [% / (rad/s * s)]; builds back-EMF equilibrium offset (~48.5%)
+local YAW_I_MAX     = 80.0             -- anti-windup clamp [%]; well above back-EMF equilibrium ~48.5%
 local YAW_SRV_FUNC  = 94               -- Script 1 output (SERVO9)
 local YAW_STABLE_RAD_S     = math.rad(5.0)
 local YAW_STABLE_TIMEOUT_MS = 30000
@@ -215,7 +212,7 @@ local _rc_ch8 = rc:get_channel(8)   -- motor interlock keepalive (H_RSC_MODE=1 p
 -- ── Flight subsystem state ───────────────────────────────────────────────────
 
 local _last_col_rad     = COL_CRUISE_FLIGHT_RAD  -- collective slew state [rad]
-local _col_i_land       = COL_CRUISE_LAND_RAD    -- landing VZ integrator state [rad]
+local _col_i            = COL_CRUISE_FLIGHT_RAD  -- VZ integrator state [rad]; reset to col_cruise at capture
 local _captured         = false           -- true once equilibrium has been snapped
 local _bz_eq0           = nil             -- body_z_ned at equilibrium capture (from DCM)
 local _tdir0            = nil             -- tether direction at equilibrium capture
@@ -542,7 +539,7 @@ local function run_flight()
         _tdir0        = nil   -- set by GPS tether recapture when GPS fuses
         _last_col_rad = col_cruise  -- start at mode-appropriate cruise; avoids thrust
                                     -- dropout when entering landing/pumping from orbit
-        _col_i_land   = COL_CRUISE_LAND_RAD  -- reset integrator to initial guess on every capture
+        _col_i        = col_cruise  -- reset integrator to mode-appropriate initial value
         _captured     = true
         local label = _is_landing and "land" or (_is_pumping and "pump" or "steady")
         gcs:send_text(6, string.format(
@@ -693,10 +690,7 @@ local function run_flight()
     --   col=0.079 → massive over-thrust → tether slack → crash.
     local kp  = p("SCR_USER1", 1.0)
     local bz_now = disk_normal_ned()
-    local _use_slerp = _is_pumping and (
-        substate == PUMP_TRANSITION or substate == PUMP_REEL_IN
-        or substate == PUMP_TRANSITION_BACK)
-    local err_ned = bz_now:cross(_use_slerp and _bz_slerp or _bz_orbit)
+    local err_ned = bz_now:cross(_bz_slerp)
 
     local err_body = ahrs:earth_to_body(err_ned)
     local err_bx   = err_body:x()    -- body X (roll)
@@ -742,27 +736,23 @@ local function run_flight()
     -- Landing / flight: VZ descent-rate controller (hardcoded vz_sp per mode).
     local col_cmd
     if _is_pumping then
+        local t_in_sub = (millis() - _submode_ms) * 0.001
+        local progress = math.min(1.0, t_in_sub / T_TRANSITION)
         if substate == PUMP_HOLD or substate == PUMP_REEL_OUT then
             col_cmd = COL_REEL_OUT
         elseif substate == PUMP_TRANSITION then
-            -- Ramp collective from reel-out to reel-in over T_TRANSITION.
-            -- Starts when winch reverses (substate set by ground planner at T_reel_out).
-            -- body_z slerps toward bz_ri simultaneously via the slerp goal above.
-            -- Ramp is synchronised with slerp: at progress=1, both reach reel-in targets.
-            local t_in_sub = (millis() - _submode_ms) * 0.001
-            local progress = math.min(1.0, t_in_sub / T_TRANSITION)
+            -- Ramp from reel-out to reel-in over T_TRANSITION; body_z slerps toward
+            -- bz_ri simultaneously.  At progress=1 both reach reel-in targets.
             col_cmd = COL_REEL_OUT + progress * (COL_REEL_IN - COL_REEL_OUT)
         elseif substate == PUMP_REEL_IN then
             col_cmd = COL_REEL_IN
-        else  -- PUMP_TRANSITION_BACK
-            -- Ramp collective from reel-in back to reel-out over T_TRANSITION.
-            -- Starts at cycle boundary when winch reverses to pay-out direction.
-            -- body_z slerps toward _bz_orbit simultaneously (via slerp goal above).
-            -- Without this ramp: at xi=80 deg, COL_REEL_OUT=-0.20 produces near-zero
-            -- lift → hub drops immediately at cycle start.
-            local t_in_sub = (millis() - _submode_ms) * 0.001
-            local progress = math.min(1.0, t_in_sub / T_TRANSITION)
+        elseif substate == PUMP_TRANSITION_BACK then
+            -- Ramp from reel-in back to reel-out over T_TRANSITION; body_z slerps
+            -- toward _bz_orbit simultaneously.  Without this ramp: at xi=80 deg,
+            -- COL_REEL_OUT=-0.20 produces near-zero lift -> hub drops at cycle start.
             col_cmd = COL_REEL_IN + progress * (COL_REEL_OUT - COL_REEL_IN)
+        else
+            col_cmd = COL_REEL_OUT  -- fallback: unknown substate
         end
     elseif _tdir0 == nil then
         -- Pre-GPS: EKF vz is biased (GPS altitude noise during horizontal kinematic flight).
@@ -770,26 +760,17 @@ local function run_flight()
         -- Hold at cruise collective until GPS recapture fires (_tdir0 becomes non-nil).
         col_cmd = col_cruise
     else
-        -- VZ controller: hardcoded setpoint per mode (no RC receiver in this system).
-        -- Landing: PI descent-rate controller; integrator winds to trim collective.
-        -- Flight/yaw: P-only altitude hold at 0.0 m/s.
-        local vz_sp = 0.0
-        if _is_landing then vz_sp = VZ_LAND_SP end
+        -- PI VZ controller: integrator starts at col_cruise (mode-appropriate initial
+        -- value set at capture) and winds to the actual trim collective.
+        --   landing: vz_sp = VZ_LAND_SP (0.5 m/s descent)
+        --   cruise:  vz_sp = 0.0 m/s (altitude hold)
+        local vz_sp     = _is_landing and VZ_LAND_SP or 0.0
         local vz_actual = 0.0
-        local vel_ned = ahrs:get_velocity_NED()
+        local vel_ned   = ahrs:get_velocity_NED()
         if vel_ned then vz_actual = vel_ned:z() end
-        local vz_error = vz_actual - vz_sp
-        if _is_landing then
-            -- PI: integrator accumulates trim collective; P term corrects transients.
-            -- dt = 1/50 s (50 Hz flight loop).
-            _col_i_land = _col_i_land + KI_VZ * vz_error * 0.02
-            if _col_i_land < COL_MIN_RAD then _col_i_land = COL_MIN_RAD end
-            if _col_i_land > COL_MAX_RAD then _col_i_land = COL_MAX_RAD end
-            col_cmd = _col_i_land + KP_VZ * vz_error
-        else
-            -- Flight/yaw: P-only altitude hold (bidirectional; floor is COL_MIN_RAD).
-            col_cmd = col_cruise + KP_VZ * vz_error
-        end
+        local vz_error  = vz_actual - vz_sp
+        _col_i = math.max(COL_MIN_RAD, math.min(COL_MAX_RAD, _col_i + KI_VZ * vz_error * dt))
+        col_cmd = _col_i + KP_VZ * vz_error
     end
 
     if col_cmd < COL_MIN_RAD then col_cmd = COL_MIN_RAD end

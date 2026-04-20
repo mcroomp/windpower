@@ -26,7 +26,7 @@ _SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
-from stack_infra import StackContext, dump_startup_diagnostics  # noqa: E402
+from stack_infra import StackContext, dump_startup_diagnostics, observe, assert_procs_alive  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Test parameters
@@ -60,15 +60,7 @@ def test_nvf_receive(acro_armed_lua_full: StackContext):
 
     try:
         while gcs.sim_now() < deadline:
-            for name, proc, lp in [
-                ("mediator", ctx.mediator_proc, ctx.mediator_log),
-                ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
-            ]:
-                if proc.poll() is not None:
-                    txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
-                    raise RuntimeError(
-                        f"{name} exited during nvf_receive test (rc={proc.returncode}):\n{txt[-2000:]}"
-                    )
+            assert_procs_alive(ctx, "nvf_receive")
 
             msg = gcs._recv(type=["STATUSTEXT"], blocking=True, timeout=0.2)
             if msg is None:

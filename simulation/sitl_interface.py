@@ -73,9 +73,10 @@ class SITLInterface:
         self._sock: socket.socket | None = None
         self._sitl_addr: tuple[str, int] | None = None   # filled on first recv
 
-        self._last_servos: np.ndarray = np.zeros(16, dtype=np.float64)
-        self._sim_time_s:  float      = 0.0
-        self._frame_rate:  int        = 400   # updated from servo packets; default 400 Hz
+        self._last_servos:  np.ndarray = np.zeros(16, dtype=np.float64)
+        self._last_pwm_raw: np.ndarray = np.full(16, 1500.0, dtype=np.float64)
+        self._sim_time_s:   float      = 0.0
+        self._frame_rate:   int        = 400   # updated from servo packets; default 400 Hz
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -184,12 +185,14 @@ class SITLInterface:
         Returns
         -------
         np.ndarray, shape (16,), dtype float64
-            Servo values normalised to [-1, 1].
+            Servo values normalised to [-1, 1] via (pwm_us - 1500) / 500,
+            clipped to [-1, 1].  Values outside 1000–2000 µs are clipped:
+            e.g. 800 µs → -1.0 (same as 1000 µs).
 
-        PWM → normalised mapping: (pwm_us - 1500) / 500
-            1000 µs → -1.0
-            1500 µs →  0.0
-            2000 µs → +1.0
+        Note
+        ----
+        For channels with non-standard PWM ranges (e.g. SERVO9_MIN=800), use
+        ``last_pwm_raw[channel]`` to read the true PWM without clipping.
         """
         if self._sock is None:
             raise RuntimeError("Not bound — call bind() first.")
@@ -228,6 +231,7 @@ class SITLInterface:
             self._sim_time_s  = frame_count / frame_rate
 
         pwm = np.array(pwm_raw[:16], dtype=np.float64)
+        self._last_pwm_raw = pwm
         normalised = (pwm - 1500.0) / 500.0
         normalised = np.clip(normalised, -1.0, 1.0)
         self._last_servos = normalised
@@ -236,6 +240,13 @@ class SITLInterface:
     def last_servos(self) -> np.ndarray:
         """Return the most recently received servo array (never None)."""
         return self._last_servos.copy()
+
+    @property
+    def last_pwm_raw(self) -> np.ndarray:
+        """Raw PWM microseconds from the most recent servo packet (16 channels).
+        Use this for channels with non-standard ranges (e.g. SERVO9_MIN=800)
+        where the normalised [-1,1] representation clips values below 1000 µs."""
+        return self._last_pwm_raw
 
     def sim_now(self) -> float:
         """Sim time [s] derived from the most recent servo packet (frame_count / frame_rate).

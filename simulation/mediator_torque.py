@@ -8,11 +8,10 @@ using SITLInterface for all binary servo I/O and JSON state serialisation.
 Physical scenario
 -----------------
   • Hub sits stationary at NED = [0, 0, 0], roll = 0, pitch = 0.
-  • The rotor hub spins at ``--omega-rotor`` rad/s (simulated autorotation).
-  • The motor counter-rotates via the 80:44 gear to maintain inner assembly heading.
-  • Bearing and swashplate friction is the load the motor works against.
-  • ArduPilot sees the yaw rate in the gyro and commands the tail-rotor
-    channel (Ch4) to hold the counter-rotation speed via the GB4008 motor.
+  • STARTUP phase: rotor and motor are both at rest (omega = 0).  Hub does not
+    rotate.  ArduPilot arms and EKF initialises with no yaw disturbance.
+  • DYNAMIC phase: rotor spins up per the selected profile.  ArduPilot commands
+    Ch4 PWM to drive the GB4008 motor via the 80:44 gear and counteract yaw.
 
 Sensor data sent to ArduPilot (via SITLInterface.send_state)
 ---------------------------------------------------------------------------
@@ -21,24 +20,32 @@ Sensor data sent to ArduPilot (via SITLInterface.send_state)
   attitude    [roll, pitch, −ψ]   — hub attitude (NED convention)
   gyro_body   [p, q, r]           — body-frame angular velocity [rad/s]
   accel_body  [ax, ay, az]        — gravity only [m/s²] projected into body frame
-  rpm         ω_axle × gear → RPM — rotor RPM for ArduPilot RSC (RPM1_TYPE=10)
+  (no RPM field — PWM-only mode, no feedback channel from ESC to ArduPilot)
 
 ArduPilot → mediator (binary servo packet over UDP 9002)
 ---------------------------------------------------------------------------
   Ch4 (index 3) → tail/yaw → motor throttle → hub yaw dynamics
 
-  PWM → throttle mapping (H_TAIL_TYPE = 2, DDFP unidirectional):
-      throttle = (pwm_us − 1000) / 1000   ∈ [0, 1]
-      1000 µs → 0%, 2000 µs → 100%
+  PWM → throttle mapping (SERVO4_MIN=800, SERVO4_MAX=2000):
+      throttle = (pwm_us − 800) / 1200   ∈ [0, 1]
+       800 µs → 0%, 2000 µs → 100%
+
+  Motor speed follows commanded throttle with first-order lag (MOTOR_TAU=0.02 s):
+      d(omega_motor)/dt = (throttle × RPM_SCALE − omega_motor) / MOTOR_TAU
 
 Usage (Docker / WSL)
 --------------------
-    python3 mediator_torque.py [--omega-rotor FLOAT] [--log-level LEVEL]
+    python3 mediator_torque.py [OPTIONS]
 
 Options
 -------
-    --omega-rotor  FLOAT   Rotor hub spin rate [rad/s] (default: 28.0)
-    --log-level    LEVEL   Logging level (default: INFO)
+    --omega-rotor       FLOAT   Rotor hub spin rate [rad/s] (default: 28.0)
+    --startup-hold      FLOAT   EKF-init spin phase duration [s] (default: 5.0)
+    --profile           STR     Axle speed / tilt profile name (default: constant)
+    --tail-channel      INT     0-based servo channel for motor (default: 3=Ch4, Lua: 8=Ch9)
+    --log-level         LEVEL   Logging level (default: INFO)
+    --events-log        PATH    Path for structured JSONL event log (default: none)
+    --startup-yaw-rate  FLOAT   Yaw rate [deg/s] during startup hold (default: 5.0; 0=stationary)
 """
 from __future__ import annotations
 
@@ -61,44 +68,33 @@ from mediator_events import MediatorEventLog
 # Timing / port constants
 # ---------------------------------------------------------------------------
 
-_RECV_PORT = 9002        # must match ArduPilot SITL JSON backend default
+_RECV_PORT   = 9002      # must match ArduPilot SITL JSON backend default
+_BATTERY_V   = 15.2     # V — nominal 4S LiPo; sent to SITL to override battery simulation
 DT         = 1.0 / 400.0  # 400 Hz loop target [s]
 
 # Default ArduPilot channel for yaw/tail-rotor (0-based index → Ch4).
 # When --tail-channel 9 is passed (Lua scripting mode), reads Ch9 (index 8).
 _CH_YAW_DEFAULT = 3
 
+# GB4008 motor PWM range — must match SERVO9_MIN/SERVO9_MAX in ArduPilot params
+# and rawes.lua _set_throttle_pct (800 + pct * 12).
+MOTOR_PWM_MIN = 800.0   # µs — motor off
+MOTOR_PWM_MAX = 2000.0  # µs — full throttle
+
 # Log interval [s]
 _LOG_INTERVAL = 1.0
 
-# Gear ratio: motor axle speed → RPM sent to ArduPilot RSC
-_GEAR_RATIO = 80.0 / 44.0
 
+def _pwm_to_throttle(pwm_us: float) -> float:
+    """Convert motor PWM microseconds to throttle [0, 1].
 
-def _pwm_to_throttle(pwm_us: float, trim: float = 0.0) -> float:
+    Linear mapping over the GB4008 ESC range:
+      800 µs → 0.0  (motor off)
+     2000 µs → 1.0  (full throttle)
+
+    Matches SERVO4_MIN=800 / SERVO4_MAX=2000 set in ArduPilot params for all tests.
     """
-    Convert PWM microseconds to throttle [0, 1].
-
-    Biased mapping so that neutral PWM (1500 µs) corresponds to the
-    equilibrium throttle ``trim`` rather than to 50%:
-
-        pwm = 1000 µs  →  0.0
-        pwm = 1500 µs  →  trim      (neutral = equilibrium)
-        pwm = 2000 µs  →  1.0
-
-    This lets ArduPilot's PID operate symmetrically around zero output
-    (neutral stick = equilibrium = no yaw rate error), so no I-term
-    wind-up is required to overcome the motor's back-EMF dead zone.
-
-    If trim = 0 (default), the mapping collapses to the linear
-    (pwm − 1000) / 1000 form used by standard DDFP.
-    """
-    trim = max(0.0, min(1.0, trim))
-    if pwm_us >= 1500.0:
-        t = trim + (1.0 - trim) * (pwm_us - 1500.0) / 500.0
-    else:
-        t = trim * (pwm_us - 1000.0) / 500.0
-    return max(0.0, min(1.0, t))
+    return max(0.0, min(1.0, (pwm_us - MOTOR_PWM_MIN) / (MOTOR_PWM_MAX - MOTOR_PWM_MIN)))
 
 
 def _body_vectors(
@@ -156,18 +152,10 @@ def _omega_fast_vary(dt: float, nom: float) -> float:
 
 def _omega_gust(dt: float, nom: float) -> float:
     """Steady until dynamics_t=10 s; then a 5-second 20% overspeed gust.
-    150% was too large for motor authority (eq_throttle > 1.0 at 42 rad/s).
-    120% keeps eq_throttle ≈ 0.90 — within motor range with adaptive trim."""
+    120% nominal keeps eq_throttle ≈ 0.58 — comfortable headroom for adaptive trim."""
     if 10.0 <= dt <= 15.0:
         return nom * 1.20
     return nom
-
-def _omega_startup(dt: float, nom: float) -> float:
-    """Linear spin-up from 0 to nominal over 30 s, then hold.
-    Simulates the rotor accelerating from rest to autorotation speed.
-    The adaptive trim tracks the changing counter-rotation speed at every RPM point."""
-    T_RAMP = 30.0
-    return nom * min(1.0, dt / T_RAMP)
 
 def _tilt_flat(dt: float) -> tuple[float, float]:
     return 0.0, 0.0
@@ -193,26 +181,43 @@ def _tilt_wobble(dt: float) -> tuple[float, float]:
     pitch += math.radians(4.0) * math.sin(2 * math.pi * 0.17 * dt + 0.5)
     return roll, pitch
 
+# ---------------------------------------------------------------------------
+# Prescribed-yaw profiles  —  psi_dot_fn(dynamics_t) -> float [rad/s]
+# When a profile tuple has a 3rd element, psi_dot is directly prescribed
+# (ODE bypassed). omega is still sent as RPM for the RSC.
+# ---------------------------------------------------------------------------
+
+def _yaw_zero(dt: float) -> float:
+    """No yaw at all — tests that the motor stays at 800 µs."""
+    return 0.0
+
+def _yaw_slow_ramp(dt: float) -> float:
+    """Ramp 0 → 10 deg/s over 30 s — tests that the DDFP PI winds up to cancel it."""
+    return math.radians(10.0 * min(1.0, dt / 30.0))
+
+
 PROFILES: dict[str, tuple] = {
-    "startup":    (_omega_startup,   _tilt_flat),
+    "startup":    (_omega_constant,  _tilt_flat),   # shared 10 s spinup ramp in DYNAMIC loop
     "constant":   (_omega_constant, _tilt_flat),
     "slow_vary":  (_omega_slow_vary, _tilt_flat),
     "fast_vary":  (_omega_fast_vary, _tilt_flat),
     "gust":       (_omega_gust,      _tilt_flat),
     "pitch_roll": (_omega_constant,  _tilt_pitch_roll),
     "wobble":     (_omega_constant,  _tilt_wobble),
+    # Prescribed-yaw profiles (3rd element = psi_dot_fn, ODE bypassed)
+    "yaw_zero":      (_omega_constant, _tilt_flat, _yaw_zero),
+    "yaw_slow_ramp": (_omega_constant, _tilt_flat, _yaw_slow_ramp),
 }
 
 
 def run(
     omega_rotor: float,
     startup_hold_s: float = 5.0,
-    trim_throttle: float | None = None,
     profile: str = "constant",
     tail_channel: int = _CH_YAW_DEFAULT,
-    lua_mode: bool = False,
     log_level: str = "INFO",
     events_log_path: "str | None" = None,
+    startup_yaw_rate: float = 0.0,
 ) -> None:
     """
     Main mediator loop.
@@ -226,14 +231,18 @@ def run(
     Dynamic phase (startup_hold_s … ∞)
     ------------------------------------
     Real hub yaw dynamics: the motor counter-rotates via the 80:44 gear to
-    maintain hub heading; ArduPilot's tail-rotor PID (Ch4) controls the
-    GB4008 motor speed.
+    maintain hub heading; ArduPilot's tail-rotor PID controls the GB4008 motor
+    speed via the channel selected by ``tail_channel``.
 
     Parameters
     ----------
-    omega_rotor    : rotor hub spin rate [rad/s] (nominal autorotation speed)
-    startup_hold_s : duration of EKF-initialisation spin phase [s]
-    log_level      : Python logging level string
+    omega_rotor      : rotor hub spin rate [rad/s] (nominal autorotation speed)
+    startup_hold_s   : duration of EKF-initialisation spin phase [s]
+    profile          : axle speed / tilt profile name (key in PROFILES dict)
+    tail_channel     : 0-based servo channel index for the motor (3=Ch4, 8=Ch9)
+    log_level        : Python logging level string
+    events_log_path  : path for structured JSONL event log (None = disabled)
+    startup_yaw_rate : yaw rate [rad/s] sent to SITL during startup hold
     """
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
@@ -247,36 +256,30 @@ def run(
     state   = _m.HubState()
     t       = 0.0
 
-    _STARTUP_YAW_RATE = math.radians(5.0)
+    _STARTUP_YAW_RATE = startup_yaw_rate
 
-    if trim_throttle is None:
-        trim_throttle = _m.equilibrium_throttle(omega_rotor, params)
-
-    eq_throttle = _m.equilibrium_throttle(omega_rotor, params)
-    omega_fn, tilt_fn = PROFILES.get(profile, PROFILES["constant"])
+    _profile_entry = PROFILES.get(profile, PROFILES["constant"])
+    omega_fn, tilt_fn = _profile_entry[0], _profile_entry[1]
+    psi_dot_fn = _profile_entry[2] if len(_profile_entry) > 2 else None
     ch_yaw = tail_channel
 
     ev.write("startup", t_sim=0.0,
              omega_rotor_rad_s=round(omega_rotor, 2),
              omega_rotor_rpm=round(omega_rotor * 60.0 / (2.0 * math.pi)),
-             k_bearing=round(params.k_bearing, 4),
+             rpm_scale=round(params.rpm_scale, 1),
              gear_ratio=round(params.gear_ratio, 3),
-             tau_stall_nm=round(params.tau_stall, 2),
-             eq_throttle=round(eq_throttle, 4),
-             trim_throttle=round(trim_throttle, 4),
+             motor_tau_ms=round(params.motor_tau * 1000, 1),
              startup_hold_s=round(startup_hold_s, 1),
              profile=profile,
-             tail_channel=ch_yaw,
-             lua_mode=lua_mode)
+             tail_channel=ch_yaw)
 
     throttle      = 0.0
     n_sent        = 0
     last_log      = 0.0
     prev_roll     = 0.0
     prev_pitch    = 0.0
-    trim_fixed    = float(trim_throttle)
-    last_pwm_ch4  = 1500.0   # neutral default
-    throttle      = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
+    last_pwm_ch4  = MOTOR_PWM_MIN   # motor off until first servo packet
+    throttle      = _pwm_to_throttle(last_pwm_ch4)
 
     iface = SITLInterface(recv_port=_RECV_PORT)
     iface.bind()
@@ -285,43 +288,52 @@ def run(
     try:
         while True:
             # ── Receive servo packet from SITL ─────────────────────────────
-            # recv_servos() returns None on timeout; servos are normalised [-1, 1].
-            # Convert the relevant channel back to PWM µs for _pwm_to_throttle.
+            # Read raw PWM for the motor channel (SERVO9_MIN=800, SERVO9_MAX=2000).
+            # Do NOT use the normalised [-1,1] array — it clips values below 1000 µs.
             servos = iface.recv_servos()
             if servos is not None:
-                last_pwm_ch4 = 1500.0 + servos[ch_yaw] * 500.0
+                last_pwm_ch4 = iface.last_pwm_raw[ch_yaw]
 
             in_startup = (t < startup_hold_s)
             dynamics_t = max(0.0, t - startup_hold_s)
 
             if in_startup:
+                # Rotor and motor are both at rest during startup.
+                # Hub is stationary — ArduPilot sees no yaw and commands 0 PWM.
                 psi_send      = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
                 psi_dot_send  = _STARTUP_YAW_RATE
                 roll_send     = 0.0
                 pitch_send    = 0.0
                 roll_dot      = 0.0
                 pitch_dot     = 0.0
-                current_omega = omega_rotor
-                throttle      = _pwm_to_throttle(last_pwm_ch4, trim_fixed)
+                current_omega = 0.0
+                throttle      = _pwm_to_throttle(last_pwm_ch4)
             else:
-                current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor))
-
-                if lua_mode:
-                    # PWM range 800 (off) to 2000 (full): matches SERVO9_MIN=800, SERVO9_MAX=2000
-                    throttle = max(0.0, min(1.0, (last_pwm_ch4 - 800.0) / 1200.0))
-                else:
-                    current_trim = _m.equilibrium_throttle(current_omega, params)
-                    throttle     = _pwm_to_throttle(last_pwm_ch4, current_trim)
+                # Universal spin-up ramp: rotor accelerates from 0 over _SPINUP_S seconds
+                # at the start of every DYNAMIC phase, regardless of profile.  This prevents
+                # a discontinuous jump from omega=0 (STARTUP) to nominal, which would be
+                # physically unrealistic (rotor inertia limits acceleration).
+                _SPINUP_S = 10.0
+                spinup_scale  = min(1.0, dynamics_t / _SPINUP_S)
+                current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor) * spinup_scale)
+                throttle      = _pwm_to_throttle(last_pwm_ch4)
 
                 roll_send, pitch_send = tilt_fn(dynamics_t)
                 roll_dot  = (roll_send  - prev_roll)  / DT
                 pitch_dot = (pitch_send - prev_pitch) / DT
 
-                if state.psi == 0.0 and state.psi_dot == 0.0:
-                    state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
-                state = _m.step(state, current_omega, throttle, params, DT)
-                psi_send     = math.atan2(math.sin(state.psi), math.cos(state.psi))
-                psi_dot_send = state.psi_dot
+                if psi_dot_fn is not None:
+                    # Prescribed yaw: skip ODE, drive psi_dot directly from profile.
+                    psi_dot_send = psi_dot_fn(dynamics_t)
+                    state.psi    = (state.psi + psi_dot_send * DT) % (2.0 * math.pi)
+                    state.psi_dot = psi_dot_send
+                    psi_send     = state.psi
+                else:
+                    if state.psi == 0.0 and state.psi_dot == 0.0:
+                        state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
+                    state = _m.step(state, current_omega, throttle, params, DT)
+                    psi_send     = math.atan2(math.sin(state.psi), math.cos(state.psi))
+                    psi_dot_send = state.psi_dot
 
             # Safety clamp: cap yaw rate to prevent ArduPilot SIGFPE
             _MAX_PSI_DOT = math.radians(500.0)
@@ -340,11 +352,8 @@ def run(
                 rpy_rad         = np.array([roll_send, pitch_send, psi_send]),
                 accel_body      = np.asarray(accel_body),
                 gyro_body       = np.asarray(gyro_body),
-                rpm_rad_s       = current_omega * _GEAR_RATIO,
-                # Override SITL battery simulation with the nominal voltage used
-                # by the Python physics model so that rawes.lua's compute_trim()
-                # sees the same voltage and produces the same equilibrium throttle.
-                battery_voltage = _m.BATTERY_V,
+                # rpm_rad_s omitted: PWM-only mode, no RPM feedback to ArduPilot.
+                battery_voltage = _BATTERY_V,
             )
             n_sent += 1
 
@@ -357,7 +366,7 @@ def run(
                          psi_deg=round(math.degrees(psi_send), 2),
                          psi_dot_deg_s=round(math.degrees(psi_dot_send), 3),
                          throttle=round(throttle, 3),
-                         omega_rad_s=round(current_omega if not in_startup else omega_rotor, 1),
+                         omega_rad_s=round(current_omega, 1),
                          roll_deg=round(math.degrees(roll_send), 1),
                          pitch_deg=round(math.degrees(pitch_send), 1))
                 if not in_startup and t - startup_hold_s < 2.0:
@@ -384,10 +393,6 @@ if __name__ == "__main__":
         help="Duration of EKF-initialisation spin phase [s] (default: 5.0)",
     )
     parser.add_argument(
-        "--trim-throttle", type=float, default=None,
-        help="Neutral-PWM throttle bias (default: computed from equilibrium)",
-    )
-    parser.add_argument(
         "--profile", default="constant",
         choices=list(PROFILES.keys()),
         help="Axle speed / hub tilt profile (default: constant)",
@@ -397,10 +402,6 @@ if __name__ == "__main__":
         help="0-based servo channel index for tail motor (default: 3=Ch4, lua: 8=Ch9)",
     )
     parser.add_argument(
-        "--lua-mode", action="store_true",
-        help="Disable adaptive trim — Lua script provides feedforward instead",
-    )
-    parser.add_argument(
         "--log-level", default="INFO",
         help="Logging level (default: INFO)",
     )
@@ -408,7 +409,12 @@ if __name__ == "__main__":
         "--events-log", default=None,
         help="Path for structured JSONL event log",
     )
+    parser.add_argument(
+        "--startup-yaw-rate", type=float, default=0.0,
+        help="Yaw rate [deg/s] sent to SITL during startup hold (default: 0 = stationary)",
+    )
     args = parser.parse_args()
-    run(args.omega_rotor, args.startup_hold, args.trim_throttle,
-        args.profile, args.tail_channel, args.lua_mode, args.log_level,
-        events_log_path=args.events_log)
+    run(args.omega_rotor, args.startup_hold,
+        args.profile, args.tail_channel, args.log_level,
+        events_log_path=args.events_log,
+        startup_yaw_rate=math.radians(args.startup_yaw_rate))

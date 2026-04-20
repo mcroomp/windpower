@@ -328,13 +328,43 @@ case "$CMD" in
         # Print per-test summary
         echo ""
         echo "----------------------------------------------------------------------"
+        declare -a _FAILED_LABELS=()
+        declare -a _FAILED_WLOGS=()
         for j in $(seq 0 $((_N_FILES-1))); do
             _wlog="${_WORKER_LOGS[$j]}"
             _label="$(basename "${_ALL_FILES[$j]}" .py)"
             _summary=$(grep -E "^=+ .* in [0-9]" "$_wlog" 2>/dev/null | tail -1 || echo "(no summary)")
             printf "[%-42s] %s\n" "$_label" "$_summary"
+            if echo "$_summary" | grep -qiE "failed|error"; then
+                _FAILED_LABELS+=("$_label")
+                _FAILED_WLOGS+=("$_wlog")
+            fi
         done
         echo "----------------------------------------------------------------------"
+
+        # Print full failure/error details so tracebacks are visible
+        if [ "${#_FAILED_LABELS[@]}" -gt 0 ]; then
+            echo ""
+            echo "============================== FAILURE DETAILS =============================="
+            for _fi in "${!_FAILED_LABELS[@]}"; do
+                _fl="${_FAILED_LABELS[$_fi]}"
+                _fw="${_FAILED_WLOGS[$_fi]}"
+                echo ""
+                echo "--- $_fl ---"
+                # Extract everything between FAILURES/ERRORS header and the
+                # "short test summary info" footer that follows it.
+                awk '
+                    /^=+[ ]+(FAILURES|ERRORS)[ ]=+/ { in_s=1; print; next }
+                    /^=+[ ]+short test summary/ { in_s=0 }
+                    in_s { print }
+                ' "$_fw" 2>/dev/null | head -100 || true
+                # Also print the one-liner FAILED/ERROR summary lines
+                grep -E "^(FAILED|ERROR) " "$_fw" 2>/dev/null || true
+                echo "---"
+            done
+            echo ""
+            echo "============================================================================="
+        fi
 
         _WIN_LOGS=$(cygpath -w "$SCRIPT_DIR/logs" 2>/dev/null || echo "simulation\\logs")
         _log "[LOGS] ${_WIN_LOGS}"

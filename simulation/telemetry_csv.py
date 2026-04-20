@@ -173,7 +173,7 @@ class TelRow:
     servo_esc: float = 0.0
 
     # Counter-torque motor (torque tests; 0.0 in flight tests)
-    q_bearing_nm: float = 0.0
+    q_bearing_nm: float = 0.0   # reserved; always 0 (bearing drag absorbed by ESC)
     q_motor_nm:   float = 0.0
     throttle:     float = 0.0
 

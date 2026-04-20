@@ -139,6 +139,15 @@ def main() -> int:
         print(f"Unknown --filter '{filter_mode}'. Use all|summary|failures.", file=sys.stderr)
         return 2
 
+    if pytest_args and pytest_args[0] == "bash":
+        print(
+            f"{RED}ERROR: run_tests.py does not wrap shell commands.{RESET}\n"
+            f"{RED}Run stack tests directly:{RESET}\n"
+            f"{CYAN}  bash simulation/dev.sh test-stack [options]{RESET}",
+            file=sys.stderr,
+        )
+        return 2
+
     if not pytest_args:
         pytest_args = ["simulation/tests/unit", "-m", "not simtest", "-q"]
 

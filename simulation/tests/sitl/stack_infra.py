@@ -5,12 +5,13 @@ Contains all non-pytest code: imports, constants, classes, context managers,
 and helper functions.  Pytest fixtures and hooks live in conftest.py.
 
 Exported names (imported by conftest.py via ``from stack_infra import *``):
-    StackConfig, SitlContext, StackContext, TorqueStackContext
+    StackConfig, SitlContext, StackContext
     _sitl_stack, _acro_stack, _torque_stack
     _BASE_ACRO_PARAMS, _BASE_TORQUE_BOOT_PARAMS
     _LUA_TORQUE_EXTRA_PARAMS
     assert_stack_ports_free, dump_startup_diagnostics
     analyze_startup_logs, wait_for_acro_stability, drain_statustext
+    observe, assert_procs_alive, assert_no_mediator_criticals, get_arducopter_crash_info
     _run_acro_setup, _wait_params_ready, _install_lua_scripts
     SITL_GCS_PORT, SITL_JSON_PORT
     _STARTING_STATE, _RAWES_DEFAULTS_PARM
@@ -272,41 +273,60 @@ class StackContext:
     """
     Everything a stack test needs after the shared setup has run.
 
-    Attributes
-    ----------
+    Used by both flight tests (full mediator + physics + ArduPilot) and torque
+    tests (mediator_torque + hub yaw ODE + ArduPilot).  Flight-only fields
+    default to None/empty so torque fixtures can construct without them.
+
+    Required for all tests
+    ----------------------
     gcs            : connected, heartbeating RawesGCS (armed, in ACRO mode)
     mediator_proc  : running mediator subprocess
     sitl_proc      : running SITL subprocess
     mediator_log   : path to mediator stdout/stderr log
     sitl_log       : path to SITL stdout/stderr log
     gcs_log        : path to GCS/test structured log
+    events_log     : MediatorEventLog wrapping the events.jsonl path
+    log            : logger scoped to the running fixture/test
+
+    Flight tests only (default None/empty for torque tests)
+    --------------------------------------------------------
     telemetry_log  : path to mediator telemetry CSV
+    mavlink_log    : path to MAVLink JSON log
     initial_state  : dict from steady_state_starting.json (vel overridden to 0)
-    home_alt_m     : hub altitude above anchor [m] at launch (positive = above ground)
+    home_alt_m     : hub altitude above anchor [m] at launch
     flight_events  : timing checkpoints; setup populates, tests add their own
     all_statustext : all STATUSTEXT messages seen during setup
     setup_samples  : list of dicts — EKF/ATTITUDE samples captured during setup
-    log            : logger scoped to the running fixture/test
     sim_dir        : simulation/ directory (for writing outputs)
+    controller     : PhysicalHoldController instance
+    internal_controller : True = mediator runs truth-state controller at 400 Hz
+
+    Torque tests only (default 0.0 for flight tests)
+    -------------------------------------------------
+    omega_rotor    : rotor hub angular velocity [rad/s] used by the profile
     """
-    gcs:            RawesGCS
-    mediator_proc:  object
-    sitl_proc:      object
-    mediator_log:   Path
-    sitl_log:       Path
-    gcs_log:        Path
-    telemetry_log:  Path
-    mavlink_log:    Path
-    events_log:     MediatorEventLog
-    initial_state:  dict | None
-    home_alt_m:     float
-    flight_events:  dict
-    all_statustext: list
-    setup_samples:  list      # EKF/ATTITUDE samples collected during setup
-    log:            logging.Logger
-    sim_dir:        Path
-    controller:          object    # PhysicalHoldController
-    internal_controller: bool      # True = mediator runs truth-state controller at 400 Hz
+    # ── required for all stack tests ──────────────────────────────────────────
+    gcs:           RawesGCS
+    mediator_proc: object
+    sitl_proc:     object
+    mediator_log:  Path
+    sitl_log:      Path
+    gcs_log:       Path
+    events_log:    MediatorEventLog
+    log:           logging.Logger
+    # ── flight tests (default empty for torque) ───────────────────────────────
+    telemetry_log:       Path | None  = None
+    mavlink_log:         Path | None  = None
+    initial_state:       dict | None  = None
+    home_alt_m:          float        = 0.0
+    flight_events:       dict         = dataclasses.field(default_factory=dict)
+    all_statustext:      list         = dataclasses.field(default_factory=list)
+    setup_samples:       list         = dataclasses.field(default_factory=list)
+    sim_dir:             Path | None  = None
+    controller:          object       = None
+    internal_controller: bool         = False
+    # ── torque tests (default 0.0 for flight) ─────────────────────────────────
+    omega_rotor:         float        = 0.0
 
     def wait_drain(
         self,
@@ -1240,6 +1260,125 @@ def drain_statustext(gcs, log) -> list[str]:
     return texts
 
 
+def observe(
+    ctx: "StackContext",
+    duration_s: float,
+    on_message,
+    *,
+    msg_types: "list[str]",
+    label: str = "observation",
+    recv_timeout: float = 0.2,
+    keepalive: "dict | None" = None,
+    keepalive_interval_s: float = 0.5,
+) -> None:
+    """
+    Run a SITL observation loop for ``duration_s`` sim-seconds.
+
+    On every iteration:
+      1. ``assert_procs_alive(ctx, label)`` — pytest.fail if a process exited.
+      2. Optional RC keepalive: if ``keepalive`` is set, ``send_rc_override``
+         is called once every ``keepalive_interval_s`` sim-seconds.
+      3. ``gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)``
+      4. ``on_message(msg, t_rel)`` — ``msg`` may be ``None`` on recv timeout.
+         Return ``True`` from the callback to exit the loop early.
+
+    Parameters
+    ----------
+    ctx                  : StackContext (flight or torque)
+    duration_s           : how many sim-seconds to run
+    on_message           : callable(msg, t_rel) -> bool | None
+    msg_types            : MAVLink message types to pass to _recv
+    label                : label forwarded to assert_procs_alive / logs
+    recv_timeout         : wall-clock seconds _recv waits for a message
+    keepalive            : RC channel dict for send_rc_override, or None
+    keepalive_interval_s : minimum sim-seconds between keepalive sends;
+                           0.0 sends on every iteration
+    """
+    gcs      = ctx.gcs
+    t_start  = gcs.sim_now()
+    deadline = t_start + duration_s
+    t_rc     = gcs.sim_now()
+
+    while gcs.sim_now() < deadline:
+        assert_procs_alive(ctx, label)
+
+        if keepalive is not None and gcs.sim_now() - t_rc >= keepalive_interval_s:
+            gcs.send_rc_override(keepalive)
+            t_rc = gcs.sim_now()
+
+        msg   = gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)
+        t_rel = gcs.sim_now() - t_start
+        if on_message(msg, t_rel):
+            break
+
+
+def get_arducopter_crash_info(ctx) -> str:
+    """
+    Extract ArduPilot crash details from arducopter.log if present.
+
+    Returns a formatted multi-line string, or '' if no crash was found or the
+    log is absent.  Returns '' when telemetry_log is None (torque tests).
+    """
+    try:
+        log_path = getattr(ctx, "telemetry_log", None)
+        if log_path is None:
+            return ""
+        acp = Path(log_path).parent / "arducopter.log"
+        if not acp.exists():
+            return ""
+        _analysis = Path(__file__).resolve().parents[2] / "analysis"
+        if str(_analysis) not in sys.path:
+            sys.path.insert(0, str(_analysis))
+        from analyse_run import parse_arducopter, RunReport  # type: ignore[import]
+        rpt = RunReport()
+        parse_arducopter(acp, rpt)
+        if rpt.sitl_crash is None:
+            return ""
+        lines = ["", "--- ArduPilot crash ---", f"  {rpt.sitl_crash.error_line}"]
+        for frame in rpt.sitl_crash.stack:
+            lines.append(f"  {frame}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def assert_procs_alive(ctx, label: str = "observation") -> None:
+    """
+    pytest.fail() immediately if either mediator or SITL process has exited.
+
+    Appends the last 3000 chars of the relevant process log to the fail message.
+    For flight-test StackContext, also appends ArduPilot crash info if present.
+
+    Works with both flight and torque StackContext instances.
+
+    Call once per receive loop iteration, before gcs._recv().
+    """
+    for name, proc, lp in [
+        ("mediator", ctx.mediator_proc, ctx.mediator_log),
+        ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
+    ]:
+        if proc.poll() is not None:
+            txt   = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
+            crash = get_arducopter_crash_info(ctx)
+            pytest.fail(
+                f"{name} exited during {label} (rc={proc.returncode}):\n{txt[-3000:]}"
+                + crash
+            )
+
+
+def assert_no_mediator_criticals(mediator_log: Path) -> None:
+    """Assert there are no CRITICAL lines in the mediator log.
+
+    Call at the end of a test to catch any unhandled exceptions or
+    misconfigured logging levels in mediator.py / mediator_torque.py.
+    """
+    if not mediator_log.exists():
+        return
+    lines    = mediator_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    critical = [ln for ln in lines if "CRITICAL" in ln]
+    assert not critical, "CRITICAL errors in mediator:\n" + "\n".join(critical[:10])
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -1264,11 +1403,11 @@ def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
 # Counter-torque motor stack fixtures
 # ---------------------------------------------------------------------------
 # These fixtures test the GB4008 anti-rotation motor (yaw stabilisation).
-# They use mediator_torque.py instead of mediator.py — stationary hub model
-# with bearing drag + motor physics — and a different EKF alignment sequence
+# They use mediator_torque.py instead of mediator.py — stationary hub yaw ODE
+# + motor physics — and a different EKF alignment sequence
 # (short compass-only alignment instead of the long kinematic ramp).
 
-_TORQUE_STARTUP_HOLD_S: float = 10.0   # mediator yaw-spin duration for EKF bias alignment
+_TORQUE_STARTUP_HOLD_S: float = 45.0   # stationary hold for EKF + arming without artificial spin
 
 # All torque test parameters in one boot-file set.
 #
@@ -1304,31 +1443,48 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "EK3_SRC1_YAW":    1,     # compass yaw (default, but be explicit so boot is consistent)
     "EK3_MAG_CAL":     0,     # no magnetometer calibration
     "EK3_GPS_CHECK":   0,     # no GPS pre-arm check (GPS not used in torque tests)
-    # EKF source config: disable GPS position/velocity (see comment above).
+    # EKF source config: disable GPS position/velocity.
     "EK3_SRC1_POSXY":  0,
     "EK3_SRC1_VELXY":  0,
-    # Yaw PID — tiny P to avoid oscillation during boot (see comment above).
-    "ATC_RAT_YAW_P":   0.001,
-    "ATC_RAT_YAW_I":   0.0,
+    # Yaw PID — P=0.015 for transient response.
+    # Equilibrium: throttle_eq = omega_rotor * GEAR_RATIO / RPM_SCALE = 0.485.
+    # With H_YAW_TRIM=0.02: I_integral_eq = throttle_eq + H_YAW_TRIM = 0.505.
+    # slow_vary profile: omega up to 33 rad/s → I_eq = 33*1.818/105 + 0.02 = 0.592.
+    # IMAX=0.7 > 0.592 so the integrator can reach zero error across all RPM profiles.
+    # I=0.01 winds up to 0.5 in ~14 s at 3-4 rad/s residual error (within 40 s settle).
+    "ATC_RAT_YAW_P":   0.015,
+    "ATC_RAT_YAW_I":   0.01,
     "ATC_RAT_YAW_D":   0.0,
-    "ATC_RAT_YAW_IMAX": 0.0,
+    "ATC_RAT_YAW_IMAX": 0.7,
     # Roll/pitch I-term — disable to prevent swashplate wind-up on neutral sticks
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
-    # Frame/tail config — must be correct before first ACRO command
-    "H_TAIL_TYPE":     0,     # servo tail: neutral at 1500 µs (default may be DDVP)
+    # DDFP tail type: H_TAIL_TYPE=4 (DDFP CCW) matches the GB4008 hardware.
+    # H_TAIL_TYPE=0 (servo tail) is NOT used — it requires a mediator-side
+    # adaptive-trim hack to map 1500 µs to the equilibrium throttle, which has
+    # no hardware equivalent.  DDFP + H_YAW_TRIM is the correct model.
+    "H_TAIL_TYPE":     4,
     "H_COL2YAW":      0.0,
+    # SERVO4 range matches GB4008 hardware: 800 µs = off, 2000 µs = full throttle.
+    "SERVO4_MIN":       800,
+    "SERVO4_MAX":       2000,
+    "SERVO4_TRIM":      800,   # DDFP: trim = off (motor off at neutral stick)
+    # H_YAW_TRIM ≈ 0: near-zero feedforward so the motor stays off during the STARTUP
+    # phase (no overshoot when the rotor spins up from rest).  The integrator carries
+    # the full equilibrium throttle (~0.42) once DYNAMIC begins — requires IMAX >= 0.44.
+    "H_YAW_TRIM":      0.02,
     # RSC — enable CH8 passthrough (instant runup when CH8=2000)
     "H_RSC_MODE":      1,
     "H_RSC_RUNUP_TIME": 1,
 })
 
 # Extra params for the Lua feedforward fixture, merged on top of _BASE_TORQUE_BOOT_PARAMS.
+# Lua controls Ch9 (SERVO9) exclusively; the ArduPilot DDFP controller on Ch4 is
+# disabled by setting H_TAIL_TYPE=0 so it does not fight the Lua output.
 _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
+    "H_TAIL_TYPE":      0,     # disable DDFP on Ch4; Lua owns Ch9 entirely
     "ATC_RAT_YAW_P":    0.0,   # override: Lua is the sole feedforward provider
     "SCR_ENABLE":       1,
-    "RPM1_TYPE":        10,    # SITL: read rpm from JSON sensor packet
-    "RPM1_MIN":         0,
     "SERVO9_FUNCTION":  94,    # Script 1 -- Lua writes exclusively to Ch9
     "SERVO9_MIN":       800,   # PWM off = 800 us (matches rawes.lua _set_throttle_pct range)
     "SERVO9_MAX":       2000,  # PWM full = 2000 us
@@ -1336,19 +1492,57 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw)
 })
 
+# Extra params for the ArduPilot DDFP (H_TAIL_TYPE=2) yaw PI fixture.
+# ArduPilot's built-in ATC_RAT_YAW controller drives SERVO4 (Ch4) directly
+# as a unidirectional motor (0% = off, 100% = full throttle).
+# Motor range: 800 us = off, 2000 us = max (GB4008 66KV on REVVitRC ESC).
+_DDFP_TORQUE_EXTRA_PARAMS = ParamSetup({
+    # DDFP tail type: ArduPilot outputs 0-100 % motor throttle on SERVO4.
+    # H_TAIL_TYPE=4 (DDFP CCW, enum value 4): hub under-speed causes CW drift
+    # (positive psi_dot) → yaw error = 0 - positive = negative → PID output negative.
+    # CCW mode applies _servo4_out *= -1 before thrust_to_actuator, mapping the
+    # negative PID output to positive motor throttle → CCW reaction counters CW drift.
+    # H_TAIL_TYPE=3 (DDFP CW, enum value 3) is wrong: no sign flip → negative output
+    # → thrust_to_actuator clamps to 0 → motor stays off at 800 us.
+    "H_TAIL_TYPE":          4,
+    # SERVO4 range matches GB4008 hardware (800 us = off, 2000 us = max)
+    "SERVO4_MIN":           800,
+    "SERVO4_MAX":           2000,
+    "SERVO4_TRIM":          800,   # DDFP: trim = off (motor off at neutral)
+    # H_YAW_TRIM ≈ 0: near-zero feedforward; motor stays off during STARTUP (no overshoot).
+    # Prescribed-yaw tests bypass the ODE so equilibrium isn't needed from the integrator.
+    # P=0.5 provides the torque response; I=0 / IMAX=0 for open-loop prescribed tests.
+    "H_YAW_TRIM":           0.02,
+    # Yaw rate P-only for prescribed-yaw tests.  I=0 keeps the integrator inactive so
+    # motor output is determined solely by P * psi_dot_error from the prescribed yaw signal.
+    "ATC_RAT_YAW_P":        0.5,
+    "ATC_RAT_YAW_I":        0.0,
+    "ATC_RAT_YAW_D":        0.0,
+    "ATC_RAT_YAW_IMAX":     0.0,
+    # No Lua script; ArduPilot's built-in controller is the sole yaw actuator
+    "SCR_ENABLE":           0,
+})
 
-@dataclasses.dataclass
-class TorqueStackContext:
-    """Everything a torque stack test needs after setup."""
-    gcs:           object
-    mediator_proc: subprocess.Popen
-    sitl_proc:     subprocess.Popen
-    mediator_log:  Path
-    sitl_log:      Path
-    gcs_log:       Path
-    events_log:    MediatorEventLog
-    omega_rotor:   float
-    log:           logging.Logger
+
+# NOTE: _DDFP_RAMP_TORQUE_EXTRA_PARAMS is retained for reference but currently unused.
+# torque_armed_ddfp_ramp uses _DDFP_TORQUE_EXTRA_PARAMS + yaw_slow_ramp profile
+# (prescribed yaw) rather than the kinematic model driven by ArduPilot throttle.
+#
+# If kinematic DDFP ramp is needed in future: eq_throttle = 0.485 (RPM_SCALE=105, GEAR_RATIO=1.818).
+# Pre-loading at H_YAW_TRIM=-0.35 gives throttle ≈ 0.44, below the equilibrium point.
+# The I term accumulates from t=0 (psi_dot > 0 immediately due to motor under-speed).
+_DDFP_RAMP_TORQUE_EXTRA_PARAMS = ParamSetup({
+    "H_TAIL_TYPE":          4,
+    "SERVO4_MIN":           800,
+    "SERVO4_MAX":           2000,
+    "SERVO4_TRIM":          800,
+    "H_YAW_TRIM":           -0.419,  # eq_throttle = 0.485
+    "ATC_RAT_YAW_P":        0.5,
+    "ATC_RAT_YAW_I":        0.1,
+    "ATC_RAT_YAW_D":        0.0,
+    "ATC_RAT_YAW_IMAX":     1.0,
+    "SCR_ENABLE":           0,
+})
 
 
 @contextlib.contextmanager
@@ -1357,19 +1551,20 @@ def _torque_stack(
     *,
     omega_rotor: float,
     profile: str = "constant",
-    lua_mode: bool = False,
     tail_channel: int = 3,
     extra_params=(),
     test_name: str = "",
     install_scripts: tuple = (),
     boot_params: "dict | None" = None,
+    startup_hold_s: float = _TORQUE_STARTUP_HOLD_S,
+    startup_yaw_rate_deg_s: float = 0.0,
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
 
     Built on top of _sitl_stack which handles pre-checks, EEPROM wipe, boot params,
     SITL launch, logging, and teardown.  This context manager adds:
-      - mediator_torque.py launch (stationary hub + bearing drag + motor physics)
+      - mediator_torque.py launch (stationary hub yaw ODE + motor physics)
       - EKF compass-yaw alignment (short, ~3-10 s)
       - arm + ACRO mode entry
 
@@ -1378,15 +1573,15 @@ def _torque_stack(
 
     Parameters
     ----------
-    omega_rotor     : rotor hub angular velocity [rad/s]
-    profile         : mediator_torque.py --profile value
-    lua_mode        : if True, pass --lua-mode to mediator (linear mapping, no trim)
-    tail_channel    : ArduPilot tail servo channel read by mediator
-    extra_params    : ParamSetup merged into torque params before boot-file write
-    test_name       : pytest test node name; used as logger name and for per-test log directory
-    install_scripts : tuple of Lua script names to install from simulation/scripts/
-    boot_params     : dict of {param_name: value} merged on top of torque_setup
-                      (for params only known at fixture call time, e.g. RPM1_TYPE).
+    omega_rotor            : rotor hub angular velocity [rad/s]
+    profile                : mediator_torque.py --profile value
+    tail_channel           : ArduPilot tail servo channel read by mediator
+    extra_params           : ParamSetup merged into torque params before boot-file write
+    test_name              : pytest test node name; used as logger name and for per-test log directory
+    install_scripts        : tuple of Lua script names to install from simulation/scripts/
+    boot_params            : dict of {param_name: value} merged on top of torque_setup
+                             (for params only known at fixture call time, e.g. RPM1_TYPE).
+    startup_yaw_rate_deg_s : yaw rate [deg/s] sent during startup hold for EKF init (0=stationary).
     """
     # Pre-launch: install Lua scripts before SITL starts
     if install_scripts:
@@ -1421,9 +1616,10 @@ def _torque_stack(
 
         mediator_proc = _launch_mediator_torque(
             _TORQUE_DIR, sitl_ctx.repo_root, mediator_log, omega_rotor,
-            profile=profile, tail_channel=tail_channel, lua_mode=lua_mode,
-            startup_hold_s=_TORQUE_STARTUP_HOLD_S,
+            profile=profile, tail_channel=tail_channel,
+            startup_hold_s=startup_hold_s,
             events_log_path=str(events_path),
+            startup_yaw_rate_deg_s=startup_yaw_rate_deg_s,
         )
 
         def _assert_alive() -> None:
@@ -1436,7 +1632,7 @@ def _torque_stack(
                     pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
         gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log)
-        ctx = TorqueStackContext(
+        ctx = StackContext(
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
             mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
             gcs_log=sitl_ctx.gcs_log,
@@ -1495,7 +1691,7 @@ def _torque_stack(
                     log.info("SITL: %s", text)
                     if "EKF3 active" in text or "EKF3 IMU" in text:
                         gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
-                    if lua_mode and "rawes" in text.lower() and "mode=2" in text.lower():
+                    if "rawes" in text.lower() and "mode=2" in text.lower():
                         log.info("Lua script confirmed loaded: %s", text)
                     if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
                         ekf_ok = True

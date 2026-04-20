@@ -10,7 +10,7 @@ Scene (ENU, Z up)
   Rotor indicator     — 4 small blade stubs representing the outer rotor hub;
                         spin fast to show autorotation speed
   Yaw pointer         — amber arrow showing current hub heading direction
-  Torque arcs         — orange = bearing drag (CCW), blue = motor (CW)
+  Torque arcs         — blue = motor reaction torque (CCW opposing hub)
   Throttle bar        — vertical green bar at left (with equilibrium line)
   Ground disc         — dark translucent ground plane
   Event log panel     — scrolling highlighted events (upper-left)
@@ -101,7 +101,7 @@ _R_MOTOR    = 7.5                # winding resistance [Ω]
 _GEAR_RATIO = 80.0 / 44.0        # ω_motor / ω_axle
 _POLE_PAIRS = 11                 # GB4008 24N22P → 22 poles → 11 pole pairs
 _I_MAX      = _V_BAT / _R_MOTOR  # stall current [A] = 2.03 A
-_I_EQ       = (_V_BAT * 0.747 - (28.0 * _GEAR_RATIO / _KV_RAD)) / _R_MOTOR  # ≈ 0.53 A
+_I_EQ       = (_V_BAT * 0.485 - (28.0 * _GEAR_RATIO / _KV_RAD)) / _R_MOTOR  # ≈ 0.07 A at back-EMF eq
 
 _THRESHOLD  = 1.0     # ψ_dot warning threshold [deg/s]
 
@@ -112,7 +112,7 @@ C_HUB_SIDE  = (0.40, 0.45, 0.55)   # dark steel for hub side
 C_AXLE      = (0.15, 0.15, 0.18)   # near-black axle rod
 C_ROTOR     = (0.85, 0.55, 0.10)   # amber blades
 C_POINTER   = (0.95, 0.80, 0.20)   # amber yaw arrow
-C_DRAG      = (0.90, 0.40, 0.20)   # orange bearing drag arc
+C_DRAG      = (0.90, 0.40, 0.20)   # orange (unused; kept for palette consistency)
 C_MOTOR_T   = (0.30, 0.65, 0.90)   # blue motor torque arc
 C_GROUND    = (0.15, 0.15, 0.15)   # dark ground
 C_THROTTLE  = (0.25, 0.80, 0.45)   # green throttle bar
@@ -790,7 +790,6 @@ def play(frames: List[TorqueTelemetryFrame],
             om_motor    = om * (80 / 44)
             tau_motor   = 0.293 * max(0.0, thr - om_motor / 105.1)
             q_motor     = 1.818 * tau_motor
-            q_bearing   = 0.005 * om
             # DSHOT telemetry chain: eRPM → RPM → axle RPM → current → torque
             v_applied = thr * _V_BAT
             v_backemf = om_motor / _KV_RAD
@@ -810,9 +809,8 @@ def play(frames: List[TorqueTelemetryFrame],
                 f" I      = {i_motor:8.3f}  A",
                 f" P      = {p_motor:8.2f}  W",
                 "hub torques",
-                f" Q_bear = {q_bearing:+.4f}  Nm",
                 f" Q_mot  = {-q_motor:+.4f}  Nm",
-                f" Q_net  = {q_bearing-q_motor:+.4f}  Nm",
+                f" Q_net  = {-q_motor:+.4f}  Nm",
             ]))
         else:
             wall_t0[0] = t_frame_start

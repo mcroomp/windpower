@@ -29,7 +29,7 @@ class TorqueTelemetryFrame:
 
     # Physics model state
     omega_rotor_rads: float = 0.0    # rotor hub spin rate [rad/s]
-    q_bearing_nm: float = 0.0        # bearing drag torque on hub [N.m]
+    q_bearing_nm: float = 0.0        # reserved; always 0 (bearing drag absorbed by ESC)
     q_motor_nm: float = 0.0          # motor reaction torque on hub [N.m]
 
     # Phase flag
@@ -45,5 +45,5 @@ class TorqueTelemetryFrame:
 
     @property
     def net_torque_nm(self) -> float:
-        """Net torque on hub = bearing - motor [N.m]."""
-        return self.q_bearing_nm - self.q_motor_nm
+        """Net torque on hub = motor reaction [N.m] (bearing drag absorbed by ESC)."""
+        return -self.q_motor_nm

@@ -6,8 +6,8 @@ This test validates the full hardware-equivalent control architecture:
   mediator_torque.py       ArduPilot SITL
   -----------------        -----------------------------------------
   Hub yaw dynamics    <--- SERVO9 PWM  (Ch9, Script 1)
-  Bearing drag model        ^
-  Motor torque model        rawes.lua (SCR_USER6=2, MODE_YAW):
+  Motor torque model        ^
+  (no bearing drag)         rawes.lua (SCR_USER6=2, MODE_YAW):
   Sends JSON sensors -----> ahrs:get_gyro().z
   (pos, vel, att,            PI: throttle = BASE + KP*gyro_z + I_term
    gyro, accel)              write PWM to Ch9 via SRV_Channels
@@ -48,9 +48,9 @@ def test_lua_yaw_trim(torque_armed_lua):
     Yaw rate regulated by rawes.lua (SCR_USER6=2) running inside ArduPilot SITL.
 
     The Lua script reads gyro.z and runs a PI controller: the I term builds up
-    the ~70% equilibrium throttle offset during startup spin-up, compensating
-    the bearing drag without RPM feedback.  The mediator applies the throttle
-    as a pure motor torque command with no additional feedforward.
+    to the ~48.5% back-EMF equilibrium throttle during startup spin-up without
+    RPM feedback.  The mediator applies the throttle as a pure motor torque
+    command with no additional feedforward.
 
     Pass criterion: actual physics psi_dot (from mediator log) stays within
     5 deg/s after 65 s settle.  The I term takes ~50 s from arm to ramp up
@@ -60,13 +60,8 @@ def test_lua_yaw_trim(torque_armed_lua):
       RPM1_TYPE=0 (RPM unavailable until AM32 EDT enabled).
     """
     ctx = torque_armed_lua
-    rows: list = []
 
-    run_observation_loop(
-        ctx=ctx, rows=rows,
-        settle_s=_SETTLE_S, observe_s=_OBSERVE_S,
-        timeout_s=_SETTLE_S + _OBSERVE_S + 10.0,
-    )
+    _, rows = run_observation_loop(ctx, _SETTLE_S, _OBSERVE_S, timeout_margin_s=10.0)
 
     save_telemetry(rows, "lua", ctx.log)
     assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, _SETTLE_S, _OBSERVE_S, ctx.log)

@@ -383,8 +383,8 @@ The counter-torque script is already validated (15/15 tests pass). Physics model
 motor_rpm  <- battery:voltage(0)   [SITL: mediator encodes RPM as voltage]
            or RPM:get_rpm(0)       [hardware: DSHOT telemetry from AM32]
 
-trim       = tau_bearing / (tau_stall x (1 - omega_motor/omega_0))
-           ~= 0.747 at nominal 28 rad/s axle speed
+trim       = (omega_rotor x GEAR_RATIO) / RPM_SCALE
+           ~= 0.485 at nominal 28 rad/s axle speed  [equilibrium: inner assembly stationary]
 
 yaw_corr   = -Kp_yaw x gyro:z()   [Kp_yaw = 0.001]
 
@@ -392,9 +392,9 @@ throttle   = clamp(trim + yaw_corr, 0, 1)
 Ch4 PWM    <- 1000 + throttle x 1000
 ```
 
-The trim feedforward sets the steady-state counter-rotation speed. The Kp_yaw correction handles transient
-disturbances. ArduPilot's ATC_RAT_YAW is still active and provides additional correction on top
-of the Lua trim.
+The trim feedforward sets the motor to the equilibrium throttle (inner assembly stationary).
+The Kp_yaw correction handles transient disturbances. ArduPilot's ATC_RAT_YAW is still active
+and provides additional correction on top of the Lua trim.
 
 > **Sim:** `mediator_torque.py` encodes motor RPM as battery voltage (`battery:voltage(0)`) since the ArduPilot JSON backend does not parse the `rpm` field. The Lua script reads this and computes feedforward trim identically to hardware. `test_lua_yaw_trim.py` (stack) confirms 0.27 deg/s max yaw rate. On hardware, replace with `RPM:get_rpm(0)` from DSHOT telemetry.
 
@@ -440,68 +440,65 @@ The motor stator is fixed to the stationary inner assembly. The motor rotor is g
 spinning outer rotor hub via an **80:44 spur gear** (hub side has 80 teeth; motor pinion has
 44 teeth). The motor therefore spins at `80/44 ~= 1.82x` the rotor hub speed.
 
-Because the motor is geared to the spinning rotor hub, driving the motor produces a
-counter-torque on the inner assembly that cancels the bearing drag from the rotor hub,
-keeping the inner assembly at a fixed heading. The work the motor does is overcoming bearing
-and swashplate friction -- in a frictionless system the inner assembly would stay stationary
-on its own inertia.
+The ESC maintains the commanded motor RPM proportional to commanded PWM, drawing whatever
+current is needed to hold that speed. Bearing drag and swashplate friction only affect
+**power consumption** — the ESC compensates for them and they have no direct effect on yaw
+dynamics. The inner assembly remains at a fixed heading when motor RPM equals the hub rotation rate
+times the gear ratio. Yaw drift occurs when RPM deviates: too low and the inner assembly
+rotates with the hub (CW); too high and it counter-rotates against it (CCW).
 
-The GB4008 behaves as a standard DC motor:
-
-```
-tau = tau_stall x max(0, throttle - omega_motor / omega_0)
-
-tau_stall  = V_bat / (KV_rad x R)
-           = 15.2 / (6.91 x 7.5) ~= 0.293 N*m   (at full throttle, zero speed)
-
-omega_0    = KV_rad x V_bat = 6.91 x 15.2 ~= 105 rad/s   (no-load speed at full throttle)
-```
-
-The motor only produces torque when `throttle > omega_motor / omega_0` (above the back-EMF
-threshold). At nominal rotor hub speed (28 rad/s), `omega_motor ~= 51 rad/s` and the back-EMF
-threshold is `51/105 ~= 48.5%`. **Equilibrium throttle is ~= 75%.**
-
-Hub yaw dynamics:
+The ESC targets the motor shaft at a speed proportional to commanded PWM, but the motor
+shaft speed responds with a first-order lag (MOTOR_TAU = 20 ms, representing ESC + motor
+electrical/mechanical inertia):
 
 ```
-I_hub x psi_ddot = Q_bearing + Q_motor
-
-Q_bearing = k_bearing x (omega_rotor - psi_dot)          [viscous bearing drag]
-Q_motor   = -(80/44) x tau_motor(throttle, omega_rel)    [reaction on hub, maintains heading]
-omega_rel = (omega_rotor - psi_dot) x (80/44)            [motor speed relative to inner assembly]
+d(omega_motor)/dt = (throttle x RPM_SCALE - omega_motor) / MOTOR_TAU
 ```
 
-Default parameters:
+The gear coupling is instantaneous — once omega_motor is known, the inner assembly yaw rate
+follows directly:
+
+```
+psi_dot = omega_rotor - omega_motor / GEAR_RATIO
+```
+
+There is no torque equation and no hub inertia term. Bearing drag and swashplate friction only
+affect how much current the ESC draws to hold the commanded RPM — they have no effect on
+yaw dynamics.
+
+**Equilibrium throttle** (psi_dot = 0 at steady state, omega_motor = throttle x RPM_SCALE):
+
+```
+throttle_eq = omega_rotor x GEAR_RATIO / RPM_SCALE
+            = 28 x 1.818 / 105 ~= 0.485  (48.5%)
+```
+
+Model parameters:
 
 | Symbol     | Value           | Source                                    |
 | ---------- | --------------- | ----------------------------------------- |
-| I_hub      | 0.007 kg*m^2    | ~1 kg stationary assembly, r~=0.12 m     |
-| k_bearing  | 0.005 N*m*s/rad | Tunable; start here                       |
-| tau_stall  | 0.293 N*m       | From hardware specs (R=7.5 ohm)           |
-| omega_0    | 105 rad/s       | KV x V_bat                                |
-| Gear ratio | 80/44 ~= 1.818  | Motor pinion faster than rotor hub        |
+| RPM_SCALE  | 105 rad/s       | GB4008 66KV x 15.2V (4S LiPo)            |
+| GEAR_RATIO | 80/44 ~= 1.818  | Motor pinion faster than rotor hub        |
+| MOTOR_TAU  | 0.02 s          | Typical small BLDC + ESC step response    |
 
-**Gear Efficiency Analysis:**
+**Gear Efficiency Analysis** (omega_rotor = 28 rad/s):
 
-At nominal operating point (omega_rotor = 28 rad/s, k_bearing = 0.005):
+| Gear ratio     | Motor speed % | eq_throttle | Headroom |
+| -------------- | ------------- | ----------- | -------- |
+| 1.0  (no gear) | 26.7%         | 26.7%       | 73%      |
+| 1.818 (80:44)  | 48.5%         | 48.5%       | 52%      |
+| 3.191 (max)    | 85.0%         | 85.0%       | 15%      |
 
-| Gear ratio     | Motor speed % | Throttle | Current | Input power | Efficiency |
-| -------------- | ------------- | -------- | ------- | ----------- | ---------- |
-| 1.0  (no gear) | 26.7%         | 74.4%    | 0.97 A  | 10.9 W      | 35.8%      |
-| 1.818 (80:44)  | 48.5%         | 74.7%    | 0.53 A  | 6.0 W       | 64.9%      |
-| 3.191 (max)    | 85.0%         | 100%     | 0.30 A  | 4.6 W       | 85.0%      |
-
-The current 80:44 gear gives 65% efficiency with 25% throttle headroom for disturbances.
-A higher ratio (e.g. 3:1) would give 80%+ efficiency but leave almost no headroom.
+The current 80:44 gear leaves 52% throttle headroom for disturbances. A higher ratio
+approaches full throttle at equilibrium, leaving no headroom.
 
 ### 5.3 Control Architecture
 
 Three layers operate in series:
 
 1. **Feedforward trim (rawes.lua):** Computes the equilibrium throttle from motor RPM
-   and applies it as a base command. At nominal 28 rad/s axle speed the trim is ~=74.7%.
-   This sets the counter-rotation speed needed to maintain heading against bearing and
-   swashplate friction.
+   and applies it as a base command. At nominal 28 rad/s axle speed the trim is ~=48.5%
+   (throttle x RPM_SCALE / GEAR_RATIO = omega_rotor). This holds psi_dot = 0.
 
 2. **Kp yaw rate correction (rawes.lua):** A proportional correction `yaw_corr = -Kp_yaw x gyro.z()` (Kp_yaw = 0.001) is added to the trim. Handles transient disturbances before
    the ArduPilot PID loop can respond.
@@ -519,7 +516,7 @@ stick (1500 us) corresponds exactly to the equilibrium trim throttle:
 ```
 pwm <= 1500 us:  throttle = trim x (pwm - 1000) / 500
 pwm >  1500 us:  throttle = trim + (1 - trim) x (pwm - 1500) / 500
-trim = equilibrium_throttle(omega_rotor, params) ~= 0.747
+trim = equilibrium_throttle(omega_rotor, params) ~= 0.485
 ```
 
 On hardware (Pixhawk 6C), H_TAIL_TYPE = 0 (servo output) gives symmetric output around
@@ -543,13 +540,10 @@ biased throttle curve.
 
 Four-step procedure for commissioning the GB4008 on the physical rotor:
 
-1. **Measure k_bearing:** Spin axle at known RPM with motor disconnected; measure torque
-   on hub with a torque wrench or force gauge at known radius. Update `HubParams.k_bearing`
-   in `model.py`.
-
-2. **Verify equilibrium throttle:** At nominal autorotation RPM, command motor until
-   psi_dot = 0 with no PID active. Record the throttle percentage. Compare to
-   `equilibrium_throttle()` prediction; adjust `k_bearing` if they disagree.
+1. **Verify equilibrium throttle:** At nominal autorotation RPM, command motor until
+   psi_dot = 0 with no PID active. Record the throttle percentage. It should be close to
+   `omega_rotor x GEAR_RATIO / RPM_SCALE` (~48.5% at 28 rad/s). Any deviation indicates
+   the RPM_SCALE constant needs updating (e.g. different battery voltage or motor KV).
 
 3. **Set trim:** Update `--trim-throttle` (mediator) or H_TRIM_THROTTLE (hardware) to
    the measured equilibrium throttle so neutral stick = exact equilibrium.
@@ -617,7 +611,7 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 | SERVO4_MAX      | 2000        | ESC maximum                                                          |
 | SERVO4_TRIM     | ~1150       | Idle torque at rest                                                  |
 | ATC_RAT_YAW_P   | 0.20        | Starting value (feedforward sets counter-rotation)                   |
-| ATC_RAT_YAW_I   | 0.05        | Absorbs steady-state bearing/swashplate friction                     |
+| ATC_RAT_YAW_I   | 0.05        | Corrects residual yaw rate not cancelled by feedforward trim         |
 | ATC_RAT_YAW_D   | 0.0         | Start at zero                                                        |
 | H_COL2YAW       | TBD         | Feedforward: collective changes alter drag -> GB4008 must compensate |
 
@@ -821,8 +815,8 @@ simulation/scripts/rawes.lua for the exact implementation.
 motor_rpm  <- battery:voltage(0)   [SITL: mediator encodes RPM as voltage]
            or RPM:get_rpm(0)       [hardware: DSHOT telemetry from AM32]
 
-trim       = tau_bearing / (tau_stall x (1 - omega_motor/omega_0))
-           ~= 0.747 at nominal 28 rad/s axle speed
+trim       = (omega_rotor x GEAR_RATIO) / RPM_SCALE
+           ~= 0.485 at nominal 28 rad/s axle speed  [equilibrium: inner assembly stationary]
 
 yaw_corr   = -Kp_yaw x gyro:z()   [Kp_yaw = 0.001]
 
@@ -1168,7 +1162,7 @@ SCR_USER5 = -home_z_enu (negate).
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
 | simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw) |
 | simulation/scripts/torque/lua_defaults.parm  | SITL param overrides for Lua torque tests                                     |
-| simulation/torque_model.py                   | Hub yaw ODE — HubParams, HubState, motor_torque(), step(), equilibrium_throttle() |
+| simulation/torque_model.py                   | Hub yaw kinematics — HubParams, HubState, step(), equilibrium_throttle() |
 | simulation/mediator_torque.py                | Standalone torque SITL mediator (RPM profiles, hub yaw physics)               |
 | simulation/controller.py                     | orbit_tracked_body_z_eq(), compute_swashplate_from_state(), TensionController |
 | simulation/mediator.py                       | Rate-limited slerp, STATE/COMMAND packet assembly                             |

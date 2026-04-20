@@ -46,7 +46,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 | [simulation/internals.md](simulation/internals.md) | Sensor design, aero model, tether, COL_MIN rules, SITL lockstep timing, known gaps |
 | [simulation/history.md](simulation/history.md) | Phase 2 + Phase 3 decisions, root causes, and test results |
 | [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter Eq. 25–31 validation vs. implementation |
-| [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw ODE — `HubParams`, `HubState`, `motor_torque()`, `step()`, `equilibrium_throttle()` |
+| [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw model — `HubParams` (rpm_scale, gear_ratio, motor_tau), `HubState` (psi, psi_dot, omega_motor), `step()`, `equilibrium_throttle()` |
 | [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER6 modes 0–8) |
 | [simulation/tests/unit/README.md](simulation/tests/unit/README.md) | **Unit test guide** — test catalogue, Lua harness API, SCR_USER6 encoding, IC loading, telemetry |
 
@@ -81,6 +81,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **`AcroController use_servo=True`** required for De Schutter simtests (25 ms servo lag). `test_steady_flight` and pure-orbit tests do not need it.
 - **Power-law wind tension:** tension_out=250 N (not 200 N) at hub altitude ~15 m (10.6 m/s wind). `col_min_reel_in` must use actual wind speed at hub altitude.
 - **De Schutter aero:** `C_{D,T}=0.021` structural drag; induction bootstrap uses `abs(T)` not `max(T, 0.01)`. See `simulation/aero/deschutter.md`.
+- **Torque model — kinematic with first-order motor lag:** Motor shaft speed tracks the PWM command with a first-order lag (`MOTOR_TAU=0.02 s`): `d(omega_motor)/dt = (throttle × RPM_SCALE − omega_motor) / MOTOR_TAU`. Gear coupling is instantaneous: `psi_dot = omega_rotor − omega_motor / GEAR_RATIO`. The ESC holds RPM proportional to PWM at steady state; bearing/swashplate drag only affects power draw. `RPM_SCALE=105 rad/s` (GB4008 66KV × 15.2V), `GEAR_RATIO=80/44≈1.818`, `MOTOR_TAU=0.02 s`. Equilibrium: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE ≈ 0.485` at 28 rad/s. H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419. `HubState` has `psi`, `psi_dot`, `omega_motor`. `HubParams` has `rpm_scale`, `gear_ratio`, `motor_tau` — no `I_hub`, no `tau_stall`, no `k_yaw`.
 
 ---
 
@@ -114,8 +115,8 @@ simulation/
 │                        col_min_for_altitude_rad), orbit_tracked_body_z_eq,
 │                        orbit_tracked_body_z_eq_3d, OrbitTracker
 ├── mediator.py          400 Hz co-simulation loop (SITL <-> physics)
-├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw ODE)
-├── torque_model.py      Hub yaw physics — HubParams, HubState, motor_torque(), step(), equilibrium_throttle()
+├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw kinematics)
+├── torque_model.py      Hub yaw model (kinematic + motor lag) — HubParams (rpm_scale, gear_ratio, motor_tau), HubState (psi, psi_dot, omega_motor), step(), equilibrium_throttle()
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
 ├── gcs.py               MAVLink GCS client (arm, mode, RC override, params)

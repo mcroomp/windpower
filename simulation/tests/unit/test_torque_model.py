@@ -9,14 +9,16 @@ Run with:
 
 Tests
 -----
-1. test_bearing_drag_alone          — zero throttle → hub spins in rotor hub direction
-2. test_equilibrium_throttle_holds  — computed feedforward keeps ψ = ψ_dot = 0
-3. test_p_controller_convergence    — P-controller on yaw rate converges within 15 s
-4. test_rpm_step_recovery           — step in ω_axle is rejected within 10 s
-5. test_zero_axle_no_drift          — stopped axle → hub stays at rest
-6. test_motor_reaction_direction    — motor torque must oppose bearing friction on hub
-7. test_motor_saturation            — throttle clamped; torque always >= 0
-8. test_gear_ratio_authority        — motor at full throttle must overcome bearing friction
+1. test_low_throttle_causes_cw_drift    — throttle=0 -> hub spins CW at omega_rotor
+2. test_high_throttle_causes_ccw_drift  — throttle=1 -> hub counter-rotates CCW after spin-up
+3. test_equilibrium_throttle_holds      — computed feedforward keeps psi_dot = 0 at steady state
+4. test_p_controller_convergence        — P-controller on yaw rate nulls drift
+5. test_rpm_step_recovery               — step in omega_rotor recovered by feedforward + P
+6. test_zero_axle_no_drift              — stopped axle, throttle=0 -> hub stays at rest
+7. test_full_throttle_ccw_capability    — full throttle has significant CCW authority at steady state
+8. test_throttle_clamping               — throttle outside [0,1] clamped gracefully
+9. test_equilibrium_throttle_scales_with_rpm — higher RPM needs higher throttle
+10. test_lua_p_controller               — mirrors rawes.lua run_yaw_trim() P gains
 """
 from __future__ import annotations
 
@@ -43,89 +45,112 @@ def _simulate(
     params: m.HubParams | None = None,
     t_end: float = TMAX,
     dt: float = DT,
+    initial_state: m.HubState | None = None,
 ) -> list[tuple[float, m.HubState]]:
-    """
-    Run the hub yaw dynamics and collect (time, state) samples.
-
-    Returns a list of (t, HubState) tuples from t=0 to t=t_end inclusive.
-    """
+    """Run the hub yaw dynamics and collect (time, state) samples."""
     if params is None:
         params = m.HubParams()
-    state   = m.HubState()
-    history = [(0.0, m.HubState(state.psi, state.psi_dot))]
+    state   = initial_state if initial_state is not None else m.HubState()
+    history = [(0.0, m.HubState(state.psi, state.psi_dot, state.omega_motor))]
     t = 0.0
     while t < t_end:
         omega    = omega_rotor_fn(t)
         throttle = throttle_fn(state, t)
         state    = m.step(state, omega, throttle, params, dt)
         t       += dt
-        history.append((t, m.HubState(state.psi, state.psi_dot)))
+        history.append((t, m.HubState(state.psi, state.psi_dot, state.omega_motor)))
     return history
+
+
+def _warm_up(
+    omega_rotor: float,
+    throttle: float,
+    params: m.HubParams | None = None,
+    t_warmup: float = 0.3,
+    dt: float = DT,
+) -> m.HubState:
+    """
+    Run the motor at a fixed throttle until omega_motor reaches steady state
+    (~15 x MOTOR_TAU).  Returns the final HubState with omega_motor settled.
+    """
+    if params is None:
+        params = m.HubParams()
+    state = m.HubState()
+    t = 0.0
+    while t < t_warmup:
+        state = m.step(state, omega_rotor, throttle, params, dt)
+        t += dt
+    return state
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-def test_bearing_drag_alone():
+def test_low_throttle_causes_cw_drift():
     """
-    With no motor (throttle=0), bearing drag alone accelerates the inner assembly
-    in the same direction as the rotor hub rotation.  After 5 s, ψ_dot and ψ must
-    both be clearly positive.
+    With throttle=0 the motor is commanded to zero speed.  The outer hub still
+    spins at omega_rotor, so the inner assembly is dragged CW with it.
+
+    omega_motor starts at 0 and stays at 0 (commanded=0), so psi_dot = omega_rotor > 0.
     """
-    hist = _simulate(
-        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
-        throttle_fn=lambda s, t: 0.0,
-        t_end=5.0,
+    params = m.HubParams()
+    state  = m.step(m.HubState(), m.OMEGA_ROTOR_NOMINAL, 0.0, params, DT)
+    assert state.psi_dot > 0.1, (
+        f"Throttle=0 should cause CW drift (psi_dot > 0); got {state.psi_dot:.4f} rad/s"
     )
-    final = hist[-1][1]
-    assert final.psi_dot > 0.05, (
-        f"Hub should spin up from bearing drag; got ψ_dot={final.psi_dot:.4f} rad/s"
-    )
-    assert final.psi > 0.001, (
-        f"Hub should accumulate yaw; got ψ={math.degrees(final.psi):.3f}°"
+
+
+def test_high_throttle_causes_ccw_drift():
+    """
+    With throttle=1 the motor is commanded above equilibrium speed.
+    After the motor spins up (>> MOTOR_TAU), the inner assembly counter-rotates CCW.
+
+    psi_dot = omega_rotor - omega_motor / GEAR_RATIO < 0 once omega_motor -> RPM_SCALE.
+    """
+    params = m.HubParams()
+    # warm up to steady state at throttle=1
+    state = _warm_up(m.OMEGA_ROTOR_NOMINAL, 1.0, params)
+    assert state.psi_dot < -0.1, (
+        f"Throttle=1 should cause CCW drift (psi_dot < 0) at steady state; "
+        f"got {state.psi_dot:.4f} rad/s (omega_motor={state.omega_motor:.2f})"
     )
 
 
 def test_equilibrium_throttle_holds():
     """
-    The feedforward throttle from equilibrium_throttle() must hold ψ = ψ_dot = 0
-    for all time when started from rest.  Any deviation is a modelling error.
+    The feedforward throttle from equilibrium_throttle() must hold psi_dot = 0
+    once the motor has reached steady state.
+
+    During the startup transient (t < ~5 x MOTOR_TAU = 0.1 s), omega_motor is
+    still spinning up and psi_dot will be nonzero.  Check only late-time values.
     """
     params      = m.HubParams()
     eq_throttle = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
 
-    # Throttle must be physically realizable
-    assert 0.0 < eq_throttle < 1.0, (
-        f"Equilibrium throttle out of range: {eq_throttle:.4f}"
-    )
+    assert 0.0 < eq_throttle < 1.0, f"Equilibrium throttle out of range: {eq_throttle:.4f}"
 
     hist = _simulate(
         omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
         throttle_fn=lambda s, t: eq_throttle,
         t_end=10.0,
     )
-    max_psi_dot = max(abs(s.psi_dot) for _, s in hist)
-    max_psi_deg = math.degrees(max(abs(s.psi) for _, s in hist))
-
-    assert max_psi_dot < 1e-6, (
-        f"ψ_dot not held to zero by equilibrium throttle; max={max_psi_dot:.2e} rad/s"
-    )
-    assert max_psi_deg < 1e-4, (
-        f"ψ not held to zero by equilibrium throttle; max={max_psi_deg:.4f}°"
+    # skip the motor spin-up transient (first 0.5 s >> 25 x MOTOR_TAU)
+    late = [(t, s) for t, s in hist if t > 0.5]
+    max_psi_dot = max(abs(s.psi_dot) for _, s in late)
+    assert max_psi_dot < 1e-9, (
+        f"Equilibrium throttle should hold psi_dot=0 at steady state; "
+        f"max={max_psi_dot:.2e} rad/s"
     )
 
 
 def test_p_controller_convergence():
     """
-    A proportional yaw-rate controller (feedforward + P-gain on ψ_dot) must
-    drive ψ_dot to near-zero and keep accumulated yaw below 5° after settling.
+    A proportional controller (feedforward + P-gain on psi_dot) must null yaw rate.
 
-    This models the ideal ArduPilot behaviour: neutral sticks → rate command = 0
-    → tail motor corrects yaw drift.
+    Kp must be small enough to avoid throttle saturation during the motor-lag
+    transient (< (1-eq) / omega_rotor_nominal ~= 0.018).  Kp=0.01 is used here.
     """
     params = m.HubParams()
-    # Kp stability limit at 400 Hz: Kp_max ≈ 2.7 (eigenvalue × dt < 2.8 for RK4).
-    # Use 1.0 for a comfortable safety margin while still being a meaningful P gain.
-    Kp     = 1.0
+    Kp     = 0.01
 
     def throttle_fn(state: m.HubState, t: float) -> float:
         eq  = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
@@ -138,29 +163,22 @@ def test_p_controller_convergence():
         t_end=TMAX,
     )
 
-    # Check only the settled region (t > 5 s — controller has had time to act)
     late = [(t, s) for t, s in hist if t > 5.0]
-    max_psi_dot      = max(abs(s.psi_dot) for _, s in late)
-    max_psi_deg      = math.degrees(max(abs(s.psi) for _, s in late))
-
+    max_psi_dot = max(abs(s.psi_dot) for _, s in late)
     assert max_psi_dot < 0.01, (
-        f"P-controller should null yaw rate; settled max ψ_dot={max_psi_dot:.4f} rad/s"
-    )
-    assert max_psi_deg < 5.0, (
-        f"Accumulated yaw should stay small; settled max ψ={max_psi_deg:.2f}°"
+        f"P-controller should null yaw rate; settled max psi_dot={max_psi_dot:.4f} rad/s"
     )
 
 
 def test_rpm_step_recovery():
     """
     Axle speed steps from 80% to 120% of nominal at t=5 s.  A feedforward +
-    proportional controller should recover ψ_dot < 0.02 rad/s within 10 s of
-    the step.
+    proportional controller should recover psi_dot < 0.02 rad/s after the step.
     """
     params     = m.HubParams()
     omega_low  = m.OMEGA_ROTOR_NOMINAL * 0.8
     omega_high = m.OMEGA_ROTOR_NOMINAL * 1.2
-    Kp         = 1.0   # numerically stable at 400 Hz (see test_p_controller_convergence)
+    Kp         = 0.01
 
     def omega_fn(t: float) -> float:
         return omega_high if t >= 5.0 else omega_low
@@ -172,18 +190,17 @@ def test_rpm_step_recovery():
 
     hist = _simulate(omega_rotor_fn=omega_fn, throttle_fn=throttle_fn, t_end=20.0)
 
-    # Check 10 s after the step (t > 15 s) — should be re-settled
     late = [(t, s) for t, s in hist if t > 15.0]
     max_psi_dot = max(abs(s.psi_dot) for _, s in late)
     assert max_psi_dot < 0.02, (
-        f"Should recover after RPM step; late max ψ_dot={max_psi_dot:.4f} rad/s"
+        f"Should recover after RPM step; late max psi_dot={max_psi_dot:.4f} rad/s"
     )
 
 
 def test_zero_axle_no_drift():
     """
-    With axle stopped (ω_axle = 0), there is no bearing drag.  The hub must
-    remain perfectly at rest regardless of throttle.
+    With axle stopped (omega_rotor=0) and throttle=0, psi_dot = 0 - 0 = 0.
+    The hub must remain perfectly at rest.
     """
     hist = _simulate(
         omega_rotor_fn=lambda t: 0.0,
@@ -192,69 +209,60 @@ def test_zero_axle_no_drift():
     )
     max_psi_dot = max(abs(s.psi_dot) for _, s in hist)
     max_psi     = max(abs(s.psi)     for _, s in hist)
-    assert max_psi_dot < 1e-12, f"Hub should be at rest; ψ_dot={max_psi_dot}"
-    assert max_psi     < 1e-12, f"Hub should be at rest; ψ={max_psi}"
+    assert max_psi_dot < 1e-12, f"Hub should be at rest; psi_dot={max_psi_dot}"
+    assert max_psi     < 1e-12, f"Hub should be at rest; psi={max_psi}"
 
 
-def test_motor_reaction_direction():
+def test_full_throttle_ccw_capability():
     """
-    Increasing throttle must produce a torque on the hub that OPPOSES the
-    direction of bearing friction (not adds to it).
+    At steady state, full throttle must produce significant CCW authority above
+    the equilibrium point — otherwise disturbance rejection range is too narrow.
 
-    If this fails it means the gear-ratio sign is wrong — the motor would make
-    things worse instead of better, and yaw regulation would be impossible.
+    Both states are warmed up to their respective steady-state omega_motor before
+    comparing, so the lag transient does not obscure the authority comparison.
+
+    Check: |psi_dot(throttle=1)| > |psi_dot(throttle=eq)| + 10 deg/s
     """
-    params      = m.HubParams()
-    omega_rotor = m.OMEGA_ROTOR_NOMINAL
-    omega_motor = omega_rotor * params.gear_ratio
+    params = m.HubParams()
+    eq     = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
 
-    tau_shaft       = m.motor_torque(0.5, omega_motor, params)
-    Q_motor_on_hub  = -params.gear_ratio * tau_shaft   # same calc as in _derivatives
+    state_full = _warm_up(m.OMEGA_ROTOR_NOMINAL, 1.0,  params)
+    state_eq   = _warm_up(m.OMEGA_ROTOR_NOMINAL, eq,   params)
 
-    # Bearing friction is positive (NED: CW from above); motor reaction must oppose it
-    assert Q_motor_on_hub < 0.0, (
-        f"Motor reaction on hub must be negative (opposing bearing friction); "
-        f"got {Q_motor_on_hub:.4f} N·m"
+    ccw_range = abs(state_full.psi_dot) - abs(state_eq.psi_dot)
+    assert ccw_range > math.radians(10.0), (
+        f"Full-throttle CCW range = {math.degrees(ccw_range):.1f} deg/s, need > 10 deg/s"
     )
 
 
-def test_gear_ratio_authority():
+def test_throttle_clamping():
     """
-    At full throttle the motor reaction must exceed the bearing friction at nominal
-    axle speed — otherwise yaw is uncontrollable at design-point RPM.
+    Throttle values outside [0, 1] must be clamped gracefully.
+    psi_dot must equal the clamped result.
     """
-    params      = m.HubParams()
-    omega_rotor = m.OMEGA_ROTOR_NOMINAL
-    omega_motor = omega_rotor * params.gear_ratio
-
-    Q_bearing_magnitude = params.k_bearing * omega_rotor        # N·m, magnitude
-    tau_full            = m.motor_torque(1.0, omega_motor, params)
-    Q_motor_magnitude   = params.gear_ratio * tau_full         # N·m, magnitude
-
-    assert Q_motor_magnitude > Q_bearing_magnitude, (
-        f"Motor at full throttle ({Q_motor_magnitude:.3f} N·m) must exceed bearing "
-        f"drag ({Q_bearing_magnitude:.3f} N·m) — otherwise yaw is uncontrollable"
-    )
-
-
-def test_motor_saturation():
-    """
-    Motor torque must always be ≥ 0 and must never increase beyond the valid
-    throttle range.  Clamping must be graceful.
-    """
-    params      = m.HubParams()
-    omega_motor = m.OMEGA_ROTOR_NOMINAL * params.gear_ratio
-
-    for throttle in [-2.0, -1.0, -0.001, 0.0, 0.5, 1.0, 1.5, 2.0]:
-        tau = m.motor_torque(throttle, omega_motor, params)
-        assert tau >= 0.0, (
-            f"Motor torque must be ≥ 0 for any input; got τ={tau:.4f} at throttle={throttle}"
+    params = m.HubParams()
+    for throttle_raw, throttle_clamped in [(-1.0, 0.0), (2.0, 1.0)]:
+        s_raw     = m.step(m.HubState(), m.OMEGA_ROTOR_NOMINAL, throttle_raw,     params, DT)
+        s_clamped = m.step(m.HubState(), m.OMEGA_ROTOR_NOMINAL, throttle_clamped, params, DT)
+        assert abs(s_raw.psi_dot - s_clamped.psi_dot) < 1e-12, (
+            f"throttle={throttle_raw} should clamp to {throttle_clamped}; "
+            f"psi_dot={s_raw.psi_dot:.6f} vs {s_clamped.psi_dot:.6f}"
         )
 
-    # Monotonic: higher valid throttle → higher (or equal) torque
-    tau_half = m.motor_torque(0.5, omega_motor, params)
-    tau_full = m.motor_torque(1.0, omega_motor, params)
-    assert tau_full >= tau_half, "Full throttle must give at least as much torque as half"
+
+def test_equilibrium_throttle_scales_with_rpm():
+    """
+    Higher axle speed needs proportionally more throttle to maintain psi_dot = 0.
+    """
+    params  = m.HubParams()
+    thr_low = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL * 0.5, params)
+    thr_nom = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL,       params)
+    thr_hi  = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL * 1.5, params)
+
+    assert thr_low < thr_nom < thr_hi, (
+        f"Equilibrium throttle should increase with RPM: "
+        f"low={thr_low:.4f}, nom={thr_nom:.4f}, hi={thr_hi:.4f}"
+    )
 
 
 def test_lua_p_controller():
@@ -264,8 +272,6 @@ def test_lua_p_controller():
     Constants must match rawes.lua exactly:
       KP_YAW = 0.001
       feedforward = equilibrium_throttle (mirrors compute_trim)
-
-    Prints steady-state psi_dot so we can see how well pure P holds yaw.
     """
     KP_YAW = 0.001
     params  = m.HubParams()
@@ -288,94 +294,4 @@ def test_lua_p_controller():
     print(f"\n[lua_p] max psi_dot={max_psi_dot_dgs:.3f} deg/s  max psi={max_psi_deg:.2f} deg  (60 s)")
     assert max_psi_dot < math.radians(2.0), (
         f"Lua P controller: settled psi_dot={max_psi_dot_dgs:.3f} deg/s > 2 deg/s"
-    )
-
-
-def test_lua_p_controller_k_bearing_error():
-    """
-    Same Lua P controller, but k_bearing is 20% higher than the model expects
-    (simulating swashplate load adding bearing friction).
-
-    Feedforward is computed with nominal k_bearing; physics runs with actual.
-    Prints the steady-state psi_dot to show how much error pure P leaves.
-    """
-    KP_YAW          = 0.001
-    nominal_params   = m.HubParams()                    # what Lua thinks
-    actual_params    = m.HubParams(k_bearing=0.006)     # reality (+20%)
-
-    def throttle_fn(state: m.HubState, t: float) -> float:
-        trim = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, nominal_params)
-        return max(0.0, min(1.0, trim - KP_YAW * state.psi_dot))
-
-    hist = _simulate(
-        omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
-        throttle_fn=throttle_fn,
-        params=actual_params,
-        t_end=60.0,
-    )
-
-    late = [(t, s) for t, s in hist if t > 30.0]
-    final_psi_dot     = hist[-1][1].psi_dot
-    max_psi_dot_dgs   = math.degrees(max(abs(s.psi_dot) for _, s in late))
-    final_psi_dot_dgs = math.degrees(final_psi_dot)
-
-    print(f"\n[lua_p +20% k_bearing] settled psi_dot={final_psi_dot_dgs:.3f} deg/s  "
-          f"max={max_psi_dot_dgs:.3f} deg/s  (30-60 s window)")
-
-
-def test_lua_pi_controller_k_bearing_error():
-    """
-    Lua PI controller (+20% k_bearing disturbance).
-
-    KI_YAW and YAW_I_MAX must match rawes.lua exactly once the I-term is added.
-    Prints convergence behaviour so we can tune KI_YAW by running this test.
-    """
-    KP_YAW    = 0.001
-    YAW_I_MAX = 0.2
-
-    nominal_params = m.HubParams()
-    actual_params  = m.HubParams(k_bearing=0.006)   # +20%
-
-    for KI_YAW in [0.005, 0.01, 0.05, 0.1]:
-        integral = [0.0]
-
-        def throttle_fn(state: m.HubState, t: float, ki=KI_YAW) -> float:
-            integral[0] = max(-YAW_I_MAX, min(YAW_I_MAX,
-                              integral[0] + ki * state.psi_dot * DT))
-            trim = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, nominal_params)
-            return max(0.0, min(1.0, trim + KP_YAW * state.psi_dot + integral[0]))
-
-        hist = _simulate(
-            omega_rotor_fn=lambda t: m.OMEGA_ROTOR_NOMINAL,
-            throttle_fn=throttle_fn,
-            params=actual_params,
-            t_end=60.0,
-        )
-
-        sample_times = [5, 10, 20, 30, 60]
-        snapshots = []
-        for target_t in sample_times:
-            closest = min(hist, key=lambda x, tt=target_t: abs(x[0] - tt))
-            snapshots.append((target_t, math.degrees(closest[1].psi_dot)))
-
-        late = [s for t, s in hist if t > 30.0]
-        settled = math.degrees(max(abs(s.psi_dot) for s in late))
-
-        print(f"\n[lua_pi KI={KI_YAW} +20% k_bearing]  settled={settled:.3f} deg/s")
-        for t, v in snapshots:
-            print(f"  t={t:2d}s  {v:+.3f} deg/s")
-
-
-def test_equilibrium_throttle_scales_with_rpm():
-    """
-    Higher axle speed needs proportionally more throttle to maintain ψ_dot = 0.
-    """
-    params  = m.HubParams()
-    thr_low = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL * 0.5, params)
-    thr_nom = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL,       params)
-    thr_hi  = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL * 1.5, params)
-
-    assert thr_low < thr_nom < thr_hi, (
-        f"Equilibrium throttle should increase with RPM: "
-        f"low={thr_low:.4f}, nom={thr_nom:.4f}, hi={thr_hi:.4f}"
     )
