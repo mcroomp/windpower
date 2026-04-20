@@ -1,7 +1,7 @@
 """
 rawes_modes.py — SCR_USER6 mode constants and NAMED_VALUE_FLOAT substate constants for rawes.lua.
 
-SCR_USER6 encoding: plain integer 0..8 (mode only).
+SCR_USER6 encoding: plain integer, valid values 0,1,2,4,5 (mode only).
 Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N) -- never encoded in SCR_USER6.
 Yaw trim alongside a flight mode is enabled via NAMED_VALUE_FLOAT("RAWES_YAW", 1.0).
 
@@ -21,18 +21,18 @@ Usage
 
 MODE_NONE     = 0   # script passive: no RC overrides; logs every 5 s + any NV message
 MODE_STEADY   = 1   # cyclic orbit-tracking
-MODE_YAW      = 2   # counter-torque yaw trim only
+MODE_YAW_LUA  = 2   # counter-torque yaw trim only (Lua PI on Ch9/SERVO9)
 # mode 3 reserved
 MODE_LANDING  = 4   # cyclic + VZ descent; ground planner sends RAWES_SUB substate
 MODE_PUMPING  = 5   # De Schutter pumping; ground planner sends RAWES_SUB substate
-MODE_ARM_HOLD = 6   # hold Ch3=1000 Ch8=2000 keepalive only
-MODE_YAW_TEST = 7   # motor at 25% for 20 s (bench verification)
-MODE_YAW_LTD  = 8   # yaw PI with 30 s motor hard-stop
 
 # ── Named-float control values ────────────────────────────────────────────────
 
 NV_YAW_ENABLE  = 1.0   # send as RAWES_YAW to enable yaw trim alongside any flight mode
 NV_YAW_DISABLE = 0.0   # send as RAWES_YAW to disable yaw trim (default after mode change)
+
+NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm countdown
+                                  # value = countdown milliseconds; re-send to refresh
 
 # ── Landing substates (sent as NAMED_VALUE_FLOAT "RAWES_SUB" when mode=MODE_LANDING) ─
 

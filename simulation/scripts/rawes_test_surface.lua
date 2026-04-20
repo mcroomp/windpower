@@ -40,9 +40,6 @@ _rawes_fns = {
     YAW_STABLE_RAD_S       = YAW_STABLE_RAD_S,
     YAW_STABLE_TIMEOUT_MS  = YAW_STABLE_TIMEOUT_MS,
     YAW_DEAD_ZONE_RAD_S    = YAW_DEAD_ZONE_RAD_S,
-    YAW_TEST_THROTTLE_PCT  = YAW_TEST_THROTTLE_PCT,
-    YAW_TEST_DURATION_MS   = YAW_TEST_DURATION_MS,
-
     -- ── Pure math / geometry ─────────────────────────────────────────────
 
     rodrigues              = rodrigues,
@@ -72,7 +69,6 @@ _rawes_fns = {
     yaw_stopped          = function() return _yaw_stopped end,
     yaw_in_dead_zone     = function() return _yaw_in_dead_zone end,
     yaw_not_stable_ms    = function() return _yaw_not_stable_ms end,
-    yaw_limited_start_ms = function() return _yaw_limited_start_ms end,
 
     -- PWM formula mirror of _set_throttle_pct() for conversion tests.
     pwm_for_pct = function(pct)

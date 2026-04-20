@@ -75,7 +75,7 @@ _PHASE2 = [
     ("SERVO_DSHOT_ESC",   3),    # AM32 (REVVitRC)
     ("SERVO_DSHOT_RATE",  0),    # 1 kHz (default)
     ("BRD_SAFETY_DEFLT",  0),    # safety switch disabled -- outputs live on boot
-    # rawes.lua mode: 2 = yaw (yaw-trim only)
+    # rawes.lua mode: 2 = yaw_lua (yaw-trim only)
     # SCR_USER6 is the mode selector.
     ("SCR_USER6",         2),
 ]

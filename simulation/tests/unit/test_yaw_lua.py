@@ -3,7 +3,7 @@ test_yaw_lua.py -- Unit tests for rawes.lua yaw-trim controller logic.
 
 Runs the actual rawes.lua Lua code via the RawesLua harness (lupa + Lua 5.4),
 with a mock ArduPilot API.  Tests inject gyro values and read SRV_Channels
-output to verify every branch of run_yaw_trim() and run_yaw_test().
+output to verify every branch of run_yaw_trim().
 
 Covered:
   1.  PWM conversion (_set_throttle_pct)
@@ -16,10 +16,7 @@ Covered:
   8.  Stability watchdog: latches _yaw_stopped after 30 s of |gyro_z| > 5 deg/s
   9.  Stability watchdog resets while stable
   10. Wrong-direction guard: immediate motor cut at gyro_z < -30 deg/s
-  11. Hard-stop (mode 8): timer starts on first movement, cuts at 30 s
-  12. Hard-stop: timer never starts when hub is stationary
-  13. Hard-stop: motor stays off after cutoff even if hub starts moving again
-  14. Disarm: motor cuts and dead zone re-latches
+  11. Disarm: motor cuts and dead zone re-latches
 
 No SITL, no Docker.  Runs natively with the unit-test venv.
 """
@@ -35,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torque_model as m
 from rawes_lua_harness import RawesLua
-from rawes_modes import MODE_YAW, MODE_YAW_LTD
+from rawes_modes import MODE_YAW_LUA
 
 # ---------------------------------------------------------------------------
 # Constants -- read directly from rawes.lua via _rawes_fns so they never
@@ -61,7 +58,7 @@ del _c
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_sim(mode: int = MODE_YAW) -> RawesLua:
+def _make_sim(mode: int = MODE_YAW_LUA) -> RawesLua:
     sim = RawesLua(mode=mode)
     sim.armed   = True
     sim.healthy = True
@@ -234,7 +231,7 @@ class TestIntegrator:
         # Switch to mode 0 then back to mode 2 to trigger two _on_mode_enter calls
         sim.set_param("mode", 0)
         sim.tick()
-        sim.set_param("mode", MODE_YAW)
+        sim.set_param("mode", MODE_YAW_LUA)
         sim.tick()
         assert float(sim.fns.yaw_i()) == 0.0
 
@@ -377,65 +374,7 @@ class TestWrongDirectionGuard:
 
 
 # ===========================================================================
-# 7. Hard-stop countdown (mode 8)
-# ===========================================================================
-
-class TestHardStop:
-
-    HARD_STOP_MS = 30_000
-
-    def test_timer_not_started_when_stationary(self):
-        """If hub never moves past dead zone, hard-stop timer never starts."""
-        sim = _make_sim(mode=MODE_YAW_LTD)
-        _run_n(sim, math.radians(1.0), 1000)
-        assert sim.fns.yaw_limited_start_ms() is None
-
-    def test_timer_starts_on_first_movement(self):
-        """Timer starts on the first step where |gyro_z| >= dead zone threshold."""
-        sim = _make_sim(mode=MODE_YAW_LTD)
-        _step(sim, math.radians(1.0))
-        assert sim.fns.yaw_limited_start_ms() is None
-        _step(sim, YAW_DEAD_ZONE_RAD_S * 1.5)
-        assert sim.fns.yaw_limited_start_ms() is not None
-
-    def test_motor_runs_before_cutoff(self):
-        """Motor must run normally before the hard-stop deadline."""
-        sim = _make_sim(mode=MODE_YAW_LTD)
-        outputs = _run_n(sim, math.radians(5.0), 20)
-        assert any(t > 0.0 for t in outputs)
-
-    def test_motor_cuts_at_deadline(self):
-        """Motor must cut at hard_stop_ms from first movement."""
-        sim = _make_sim(mode=MODE_YAW_LTD)
-        gyro = math.radians(5.0)
-        steps = self.HARD_STOP_MS // DT_MS + 10
-        _run_n(sim, gyro, steps)
-        out = _step(sim, gyro)
-        assert out == 0.0, "Motor must be off after hard-stop deadline"
-
-    def test_motor_stays_off_after_cutoff(self):
-        """After the hard-stop fires, motor stays off regardless of gyro."""
-        sim = _make_sim(mode=MODE_YAW_LTD)
-        gyro = math.radians(5.0)
-        steps = self.HARD_STOP_MS // DT_MS + 100
-        _run_n(sim, gyro, steps)
-        for _ in range(50):
-            out = _step(sim, math.radians(20.0))
-            assert out == 0.0, "Motor must stay off after hard-stop"
-
-    def test_mode2_has_no_hard_stop(self):
-        """Without hard-stop (mode 2), motor runs indefinitely."""
-        sim = _make_sim(mode=MODE_YAW)
-        gyro = math.radians(5.0)
-        steps = (self.HARD_STOP_MS * 2) // DT_MS
-        outputs = _run_n(sim, gyro, steps)
-        late = outputs[self.HARD_STOP_MS // DT_MS:]
-        assert any(t > 0.0 for t in late), \
-            "Mode 2 (no hard_stop_ms) must not cut motor after 30 s"
-
-
-# ===========================================================================
-# 8. Disarm
+# 7. Disarm
 # ===========================================================================
 
 class TestDisarm:

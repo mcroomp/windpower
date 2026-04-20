@@ -2,20 +2,22 @@
 rawes.lua -- Unified RAWES flight + yaw-trim controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
-Mode is selected at runtime via SCR_USER6 (plain integer 0..8):
+Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,4,5):
   0  none        -- script passive: no RC overrides, no keepalive; logs every 5 s + any NV message
   1  steady      -- cyclic orbit-tracking only (Ch1, Ch2)                  50 Hz
-  2  yaw         -- counter-torque yaw trim only (Ch9/SERVO9)             100 Hz
+  2  yaw_lua     -- counter-torque yaw trim only (Ch9/SERVO9)             100 Hz
   3  (reserved)
   4  landing     -- cyclic + VZ collective + auto final_drop               50 Hz
   5  pumping     -- De Schutter pumping cycle                              50 Hz
-  6  arm_hold    -- hold Ch3=1000 Ch8=2000 keepalive only; no flight/yaw control
-  7  yaw_test    -- motor ON at 25% for 20 s then off; resets on re-entry  100 Hz
-  8  yaw_limited -- same as yaw (PI) but motor hard-stops 30 s after first throttle; resets on re-entry
 
 Yaw trim alongside any flight mode: send NAMED_VALUE_FLOAT("RAWES_YAW", 1) to enable,
   NAMED_VALUE_FLOAT("RAWES_YAW", 0) to disable.  Cleared on every mode change.
-  MODE_YAW (2) runs yaw-only regardless of RAWES_YAW.
+  MODE_YAW_LUA (2) runs yaw-only regardless of RAWES_YAW.
+
+RAWES_ARM: arm vehicle and set a timed disarm countdown.
+  Send NAMED_VALUE_FLOAT("RAWES_ARM", ms) to arm and start a countdown of <ms> milliseconds.
+  When the countdown expires the vehicle is disarmed and a STATUSTEXT is sent.
+  Re-sending refreshes the countdown.  Works in any mode.
 
 Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N) -- not encoded in SCR_USER6.
   Landing substates  (mode=4): 0=descend, 1=final_drop
@@ -28,7 +30,7 @@ Parameters (SCR_USER1..6):
   SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]         default 0.0
   SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]         default 0.0
   SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]         default 0.0
-  SCR_USER6   RAWES_MODE      Mode selector (0..8 -- see above)        default 0
+  SCR_USER6   RAWES_MODE      Mode selector (0,1,2,4,5 -- see above)   default 0
 
 All pumping cycle parameters (phase timing, xi angle, collective limits) are
 hardcoded constants below -- no free SCR_USER slots remain.
@@ -83,19 +85,17 @@ mavlink.register_rx_msgid(_NVF_MSG_ID)
 
 local _nv_floats = {}     -- received named float values:  name -> value
 
--- ── Mode numbers (SCR_USER6 = plain integer 0..8) ────────────────────────────
--- Ground planner writes SCR_USER6 = mode (0..8 only).
+-- ── Mode numbers (SCR_USER6 = plain integer 0,1,2,4,5) ──────────────────────
+-- Ground planner writes SCR_USER6 = mode.
 -- Substate is delivered separately via NAMED_VALUE_FLOAT("RAWES_SUB", N).
 -- Yaw trim alongside a flight mode is enabled by NAMED_VALUE_FLOAT("RAWES_YAW", 1).
+-- Timed arm/disarm is controlled by NAMED_VALUE_FLOAT("RAWES_ARM", ms).
 local MODE_NONE       = 0
 local MODE_STEADY     = 1   -- cyclic orbit-tracking
-local MODE_YAW        = 2   -- counter-torque yaw trim only
+local MODE_YAW_LUA    = 2   -- counter-torque yaw trim only
 -- mode 3 reserved
 local MODE_LANDING    = 4   -- cyclic + VZ descent + auto final_drop
 local MODE_PUMPING    = 5   -- De Schutter pumping cycle
-local MODE_ARM_HOLD   = 6   -- hold Ch3=1000 Ch8=2000 keepalive
-local MODE_YAW_TEST   = 7   -- motor at 25% for 20 s (bench)
-local MODE_YAW_LTD    = 8   -- PI with 30 s motor hard-stop
 
 -- ── Landing substates (mode=4; sent via NAMED_VALUE_FLOAT "RAWES_SUB") ────────
 local LAND_DESCEND    = 0   -- VZ controller active; ground planner reels in tether
@@ -179,8 +179,6 @@ local YAW_SRV_FUNC  = 94               -- Script 1 output (SERVO9)
 local YAW_STABLE_RAD_S     = math.rad(5.0)
 local YAW_STABLE_TIMEOUT_MS = 30000
 local YAW_DEAD_ZONE_RAD_S  = math.rad(2.0)    -- motor stays off until hub exceeds this rotation rate
-local YAW_TEST_THROTTLE_PCT = 25.0             -- mode 7 bench test: fixed throttle [%]
-local YAW_TEST_DURATION_MS  = 20000            -- mode 7 bench test: run duration [ms]
 
 local _yaw_not_stable_ms  = nil    -- millis() when yaw first exceeded stable band; nil when stable
 local _yaw_stopped        = false  -- latched; motor cut due to sustained yaw instability
@@ -188,16 +186,17 @@ local _yaw_i              = 0.0    -- integrator state [throttle %]
 local _yaw_last_throttle  = 0.0    -- last throttle output [%]; dead zone re-applies when this is 0
 local _yaw_in_dead_zone   = true   -- current dead zone state; true = motor off, waiting for movement
 local _yaw_status_ms      = 0      -- millis() of last periodic status message
-local _yaw_test_start_ms    = nil    -- millis() when mode 7 (yaw_test) began; nil = not started
-local _yaw_limited_start_ms = nil    -- millis() when mode 8 (yaw_limited) began; nil = not started
 
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
 local _diag             = 0         -- global diagnostic counter (every tick)
 local _last_flight_ms   = 0         -- millis() when flight subsystem last ran
 local _none_status_ms   = 0         -- millis() of last mode-0 periodic status log
+local _armon_deadline_ms = nil      -- millis() deadline for RAWES_ARM disarm; nil = inactive
+local _armon_armed_sent  = false    -- true once "RAWES arm-on: armed" STATUSTEXT has been sent
+local _armon_secs        = 0        -- integer seconds of the last RAWES_ARM countdown (for log)
 
--- Mode tracking (SCR_USER6 = plain integer 0..8); substate via NAMED_VALUE_FLOAT "RAWES_SUB"
+-- Mode tracking (SCR_USER6); substate via NAMED_VALUE_FLOAT "RAWES_SUB"
 local _prev_mode        = -1        -- last decoded mode number (-1 = uninitialised)
 local _prev_sub         = 0         -- last decoded substate (from _nv_floats["RAWES_SUB"])
 local _mode_ms          = 0         -- millis() when current mode was entered
@@ -334,8 +333,6 @@ local function _on_mode_enter(mode)
     _yaw_in_dead_zone   = true
     _yaw_status_ms      = 0
     _yaw_not_stable_ms  = nil
-    _yaw_test_start_ms    = nil
-    _yaw_limited_start_ms = nil
     _none_status_ms     = 0     -- fire mode-0 log immediately on entry
     if mode == MODE_PUMPING then
         -- Ground planner owns substate; Lua resets only the internally-derived target.
@@ -352,9 +349,7 @@ local function _set_throttle_pct(pct)
     SRV_Channels:set_output_pwm(YAW_SRV_FUNC, pwm)
 end
 
--- run_yaw_trim(hard_stop_ms)
---   hard_stop_ms: if non-nil (mode 8), motor hard-cuts this many ms after hub first moves.
-local function run_yaw_trim(hard_stop_ms)
+local function run_yaw_trim()
     local now_ms = millis()
 
     if not arming:is_armed() then
@@ -391,29 +386,6 @@ local function run_yaw_trim(hard_stop_ms)
         _set_throttle_pct(0); return
     end
 
-    -- Hard-stop countdown (mode 8): timer starts on first movement out of dead zone.
-    local time_left_s = nil
-    if hard_stop_ms then
-        if _yaw_limited_start_ms == nil and math.abs(gyro_z) >= YAW_DEAD_ZONE_RAD_S then
-            _yaw_limited_start_ms = now_ms
-            gcs:send_text(6, string.format("RAWES yaw: limited PI started - stops in %ds",
-                math.floor(hard_stop_ms / 1000)))
-        end
-        if _yaw_limited_start_ms ~= nil then
-            local elapsed = now_ms - _yaw_limited_start_ms
-            time_left_s = math.max(0, math.floor((hard_stop_ms - elapsed) / 1000))
-            if elapsed >= hard_stop_ms then
-                _yaw_last_throttle = 0.0
-                _set_throttle_pct(0)
-                if now_ms - _yaw_status_ms >= 5000 then
-                    _yaw_status_ms = now_ms
-                    gcs:send_text(6, "RAWES yaw: hard stop - motor off")
-                end
-                return
-            end
-        end
-    end
-
     -- Dead zone: motor stays off until hub rotation exceeds threshold.
     -- Once running, PI continues uninterrupted (handles the natural return-to-zero case).
     local in_dead_zone = _yaw_last_throttle == 0.0 and math.abs(gyro_z) < YAW_DEAD_ZONE_RAD_S
@@ -442,41 +414,9 @@ local function run_yaw_trim(hard_stop_ms)
     -- Periodic status every 5 s.
     if now_ms - _yaw_status_ms >= 5000 then
         _yaw_status_ms = now_ms
-        local suffix = (time_left_s ~= nil)
-            and string.format("  left=%ds", time_left_s) or ""
         gcs:send_text(6, string.format(
-            "RAWES yaw: gyro=%.1f deg/s  thr=%.1f%%  I=%.1f%%%s",
-            math.deg(gyro_z), throttle_pct, _yaw_i, suffix))
-    end
-end
-
-local function run_yaw_test()
-    -- Mode 7: run motor at fixed throttle for 20 s then off.  Bench verification only.
-    if not arming:is_armed() then _set_throttle_pct(0); return end
-
-    local now_ms = millis()
-
-    if _yaw_test_start_ms == nil then
-        _yaw_test_start_ms = now_ms
-        gcs:send_text(6, string.format("RAWES yaw test: motor at %.0f%% for %ds",
-            YAW_TEST_THROTTLE_PCT, YAW_TEST_DURATION_MS / 1000))
-    end
-
-    local elapsed = now_ms - _yaw_test_start_ms
-    if elapsed < YAW_TEST_DURATION_MS then
-        _set_throttle_pct(YAW_TEST_THROTTLE_PCT)
-        if now_ms - _yaw_status_ms >= 5000 then
-            _yaw_status_ms = now_ms
-            gcs:send_text(6, string.format("RAWES yaw test: thr=%.0f%%  %ds left",
-                YAW_TEST_THROTTLE_PCT,
-                math.floor((YAW_TEST_DURATION_MS - elapsed) / 1000)))
-        end
-    else
-        _set_throttle_pct(0)
-        if now_ms - _yaw_status_ms >= 5000 then
-            _yaw_status_ms = now_ms
-            gcs:send_text(6, "RAWES yaw test: done - motor off")
-        end
+            "RAWES yaw: gyro=%.1f deg/s  thr=%.1f%%  I=%.1f%%",
+            math.deg(gyro_z), throttle_pct, _yaw_i))
     end
 end
 
@@ -821,10 +761,37 @@ local function update()
         nvf_raw = mavlink.receive_chan()
     end
 
-    -- ── Decode mode (SCR_USER6 plain 0..8) + substate (NAMED_VALUE_FLOAT) ─
+    -- ── Decode mode + substate ────────────────────────────────────────────
     local mode = math.floor(p("SCR_USER6", 0) + 0.5)
     local sub  = math.floor((_nv_floats["RAWES_SUB"] or 0) + 0.5)
     local now  = millis()
+
+    -- ── RAWES_ARM: timed arm/disarm (cross-mode) ──────────────────────────
+    -- GCS (Python) force-arms the vehicle before sending RAWES_ARM; Lua owns
+    -- the RC overrides and the countdown timer.  "armed" confirmation is sent
+    -- once arming:is_armed() is true.
+    -- Consumed on read so each send fires exactly once; re-sending refreshes timer.
+    local armon_ms = _nv_floats["RAWES_ARM"]
+    if armon_ms and armon_ms > 0 then
+        _nv_floats["RAWES_ARM"] = nil
+        _armon_deadline_ms = now + armon_ms
+        _armon_secs        = math.floor(armon_ms / 1000)   -- plain number, safe for format
+        _armon_armed_sent  = false
+    end
+    if _armon_deadline_ms ~= nil then
+        if _rc_ch3 then _rc_ch3:set_override(1000) end   -- throttle low
+        if _rc_ch8 then _rc_ch8:set_override(2000) end   -- motor interlock ON
+        if arming:is_armed() and not _armon_armed_sent then
+            _armon_armed_sent = true
+            gcs:send_text(6, string.format("RAWES arm-on: armed, expires in %ds", _armon_secs))
+        end
+        if now >= _armon_deadline_ms then
+            _armon_deadline_ms = nil
+            _armon_armed_sent  = false
+            arming:disarm()
+            gcs:send_text(6, "RAWES arm-on: expired, disarmed")
+        end
+    end
 
     -- Track mode and substate changes; reset state on mode entry.
     if mode ~= _prev_mode then
@@ -851,31 +818,14 @@ local function update()
     end
 
     -- Motor interlock keepalive: RC overrides expire after ~1 s; 100 Hz keeps Ch8 HIGH.
-    -- Not sent in mode 0 -- use mode 6 (arm_hold) to stay armed without flying.
     if arming:is_armed() and _rc_ch8 then
         _rc_ch8:set_override(2000)
     end
 
-    -- MODE_ARM_HOLD: hold RC overrides to prevent failsafe / auto-disarm
-    if mode == MODE_ARM_HOLD then
-        if _rc_ch3 then _rc_ch3:set_override(1000) end
-        if _rc_ch8 then _rc_ch8:set_override(2000) end
-        if _diag % 200 == 1 then
-            local armed = arming:is_armed() and "ARMED" or "disarmed"
-            gcs:send_text(6, "RAWES arm_hold: " .. armed .. "  ch3=1000 ch8=2000")
-        end
-        return update, BASE_PERIOD_MS
-    end
-
     -- Yaw-trim subsystem: runs every tick (100 Hz).
-    -- MODE_YAW_TEST / MODE_YAW_LTD are diagnostic-only modes that take priority.
+    -- MODE_YAW_LUA (2) always runs yaw regardless of RAWES_YAW.
     -- For all other modes: RAWES_YAW=1 NV float enables yaw trim alongside flight.
-    -- MODE_YAW (2) always runs yaw regardless of RAWES_YAW.
-    if mode == MODE_YAW_TEST then
-        run_yaw_test()
-    elseif mode == MODE_YAW_LTD then
-        run_yaw_trim(30000)
-    elseif mode == MODE_YAW or (_nv_floats["RAWES_YAW"] or 0) >= 1 then
+    if mode == MODE_YAW_LUA or (_nv_floats["RAWES_YAW"] or 0) >= 1 then
         run_yaw_trim()
     end
 
@@ -894,9 +844,8 @@ end
 
 local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
 local _sub_init   = 0   -- substate arrives via NAMED_VALUE_FLOAT "RAWES_SUB", not SCR_USER6
-local _mode_names = {[0]="none",      [1]="steady",    [2]="yaw",
-                     [4]="landing",   [5]="pumping",   [6]="arm_hold",
-                     [7]="yaw_test",  [8]="yaw_limited"}
+local _mode_names = {[0]="none", [1]="steady", [2]="yaw_lua",
+                     [4]="landing", [5]="pumping"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

@@ -1516,6 +1516,8 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     # (ARMING_SKIPCHK was removed in ArduPilot 4.6; force-arm bypasses checks)
     "FS_EKF_ACTION":    0,
     "FS_THR_ENABLE":    0,
+    # Scripting — off by default; Lua fixtures override with SCR_ENABLE=1.
+    "SCR_ENABLE":       0,
     # Compass — enable and do not auto-calibrate.  Default EK3_MAG_CAL=3 (auto) causes
     # the EKF to distrust compass during calibration; when the wobble profile starts at
     # t=10 s the EKF has no yaw reference → diverges badly.  Set =0 (no calibration) so
@@ -1557,7 +1559,7 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "H_YAW_TRIM":      0.02,
     # RSC — enable CH8 passthrough (instant runup when CH8=2000)
     "H_RSC_MODE":      1,
-    "H_RSC_RUNUP_TIME": 1,
+    "H_RSC_RUNUP_TIME": 2,   # must be > H_RSC_RAMP_TIME (default 1) to pass prearm check
 })
 
 # Extra params for the Lua feedforward fixture, merged on top of _BASE_TORQUE_BOOT_PARAMS.
@@ -1566,12 +1568,15 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
 _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "H_TAIL_TYPE":      0,     # disable DDFP on Ch4; Lua owns Ch9 entirely
     "ATC_RAT_YAW_P":    0.0,   # override: Lua is the sole feedforward provider
+    "ARMING_CHECK":     0,     # disable prearm checks so arming:arm() succeeds in Lua
+                               # (ATC_RAT_YAW_P=0, accels-inconsistent, and motor-interlock
+                               # prearm checks all block regular arm in SITL)
     "SCR_ENABLE":       1,
     "SERVO9_FUNCTION":  94,    # Script 1 -- Lua writes exclusively to Ch9
     "SERVO9_MIN":       800,   # PWM off = 800 us (matches rawes.lua _set_throttle_pct range)
     "SERVO9_MAX":       2000,  # PWM full = 2000 us
     "SERVO9_TRIM":      800,   # trim = off
-    "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw)
+    "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw_lua)
 })
 
 # Extra params for the ArduPilot DDFP (H_TAIL_TYPE=2) yaw PI fixture.
@@ -1640,6 +1645,7 @@ def _torque_stack(
     boot_params: "dict | None" = None,
     startup_hold_s: float = _TORQUE_STARTUP_HOLD_S,
     startup_yaw_rate_deg_s: float = 0.0,
+    armon_ms: "int | None" = None,
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
@@ -1664,6 +1670,11 @@ def _torque_stack(
     boot_params            : dict of {param_name: value} merged on top of torque_setup
                              (for params only known at fixture call time, e.g. RPM1_TYPE).
     startup_yaw_rate_deg_s : yaw rate [deg/s] sent during startup hold for EKF init (0=stationary).
+    armon_ms               : if set, arm via RAWES_ARM named float instead of GCS arm.
+                             > 0: send RAWES_ARM(armon_ms) and wait for "RAWES arm-on: armed"
+                                  STATUSTEXT (hard fail if not received); no RC override sent.
+                             0: skip arming entirely; yield unarmed (test controls arming).
+                             None (default): GCS force-arm with Ch8=2000 RC override.
     """
     # Pre-launch: install Lua scripts before SITL starts
     if install_scripts:
@@ -1747,10 +1758,14 @@ def _torque_stack(
             else:
                 pytest.fail("Param subsystem never responded within 20 s")
 
-            # Motor interlock HIGH + EKF alignment
-            # Keep CH8 alive every 0.5 s (ArduPilot expires RC override after ~1 s).
-            log.info("Waiting for EKF yaw alignment (CH8=2000, up to 45 s) ...")
-            gcs.send_rc_override({8: 2000})
+            # EKF alignment.
+            # For non-Lua tests (armon_ms=None): keep CH8=2000 alive so RSC is ready
+            # when GCS arms.  For Lua tests (armon_ms set): RAWES_ARM sets Ch8 right
+            # before arming; no RC override needed here.
+            _use_rc_keepalive = armon_ms is None
+            log.info("Waiting for EKF yaw alignment (up to 45 s) ...")
+            if _use_rc_keepalive:
+                gcs.send_rc_override({8: 2000})
             ekf_ok  = False
             t_start = gcs.sim_now()
             t_rc    = gcs.sim_now()
@@ -1759,7 +1774,7 @@ def _torque_stack(
 
             while gcs.sim_now() < deadline:
                 _assert_alive()
-                if gcs.sim_now() - t_rc >= 0.5:
+                if _use_rc_keepalive and gcs.sim_now() - t_rc >= 0.5:
                     gcs.send_rc_override({8: 2000})
                     t_rc = gcs.sim_now()
                 msg = gcs._recv(
@@ -1773,7 +1788,7 @@ def _torque_stack(
                     log.info("SITL: %s", text)
                     if "EKF3 active" in text or "EKF3 IMU" in text:
                         gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
-                    if "rawes" in text.lower() and "mode=2" in text.lower():
+                    if "rawes" in text.lower() and "mode=" in text.lower():
                         log.info("Lua script confirmed loaded: %s", text)
                     if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
                         ekf_ok = True
@@ -1796,10 +1811,38 @@ def _torque_stack(
             torque_setup.verify(gcs, log=log, read_timeout=1.0)
             _assert_alive()
 
-            gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
-            log.info("Armed")
-            gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
-            log.info("ACRO active -- profile=%s", profile)
+            if armon_ms is None:
+                # Non-Lua path: GCS force-arm + Ch8 keepalive.
+                gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
+                log.info("Armed via GCS")
+                gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
+                log.info("ACRO active -- profile=%s", profile)
+            elif armon_ms > 0:
+                # Lua ARMON path: GCS force-arms (bypasses SITL prearm checks), then
+                # sends RAWES_ARM so Lua owns Ch3/Ch8 overrides and the timer.
+                gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
+                log.info("Force-armed via GCS for RAWES_ARM timer")
+                gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
+                gcs.send_named_float("RAWES_ARM", float(armon_ms))
+                log.info("Sent RAWES_ARM=%d ms -- waiting for Lua arm confirmation ...", armon_ms)
+                arm_deadline = gcs.sim_now() + 15.0
+                armed_ok = False
+                while gcs.sim_now() < arm_deadline:
+                    _assert_alive()
+                    msg = gcs._recv(type=["STATUSTEXT"], blocking=True, timeout=0.5)
+                    if msg and msg.get_type() == "STATUSTEXT":
+                        text = msg.text.rstrip("\x00").strip()
+                        log.info("SITL: %s", text)
+                        if "RAWES arm-on: armed" in text:
+                            armed_ok = True
+                            break
+                if not armed_ok:
+                    pytest.fail("RAWES_ARM arm confirmation not received within 15 s")
+                log.info("Armed via RAWES_ARM -- profile=%s", profile)
+            else:
+                # armon_ms == 0: yield unarmed; test controls arming.
+                gcs.set_mode(ACRO, timeout=10.0)
+                log.info("ACRO active (unarmed) -- profile=%s  [test will send RAWES_ARM]", profile)
 
             yield ctx
 

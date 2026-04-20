@@ -4,7 +4,8 @@ torque/conftest.py — pytest fixtures for RAWES counter-torque motor stack test
 Fixtures:
   torque_armed              — constant-RPM torque stack fixture.
   torque_armed_profile      — parametrised torque fixture (profile name via request.param).
-  torque_armed_lua          — torque fixture with rawes.lua in yaw-only mode (SCR_USER6=2, MODE_YAW).
+  torque_armed_lua          — torque fixture with rawes.lua, armed via RAWES_ARMON (1 hour).
+  torque_unarmed_lua        — torque fixture with rawes.lua, unarmed; test controls RAWES_ARMON.
   torque_armed_ddfp_zero    — DDFP fixture with prescribed zero yaw (motor should stay off).
   torque_armed_ddfp_ramp    — DDFP fixture with prescribed 0→10 deg/s yaw ramp (PI must cancel it).
   torque_armed_ddfp         — DDFP fixture with kinematic yaw model (closed-loop regulation).
@@ -57,23 +58,12 @@ def torque_armed_profile(request, tmp_path):
         yield ctx
 
 
-@pytest.fixture
-def torque_armed_lua(tmp_path, request):
-    """
-    Like torque_armed but with rawes.lua active in yaw-only mode (SCR_USER6=2, MODE_YAW).
-
-    Key differences from torque_armed:
-      - rawes.lua installed to /ardupilot/scripts/ before boot
-      - EEPROM wiped so copter-heli.parm defaults apply cleanly
-      - SCR_ENABLE=1, SCR_USER6=2 (MODE_YAW), RPM1_TYPE=10, SERVO9_FUNCTION=94
-      - mediator_torque.py --tail-channel 8 (reads Ch9)
-      - ATC_RAT_YAW_P=0 (Lua is sole feedforward provider, no ArduPilot yaw PID)
-    """
+def _lua_torque_stack(tmp_path, request, armon_ms):
+    """Shared setup for Lua torque fixtures."""
     import torque_model as _m
-    with _torque_stack(
+    return _torque_stack(
         tmp_path,
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
-
         tail_channel=8,
         extra_params=_LUA_TORQUE_EXTRA_PARAMS,
         install_scripts=("rawes.lua",),
@@ -81,7 +71,31 @@ def torque_armed_lua(tmp_path, request):
         # ATC_RAT_YAW_P=0.0: Lua is the sole feedforward provider; ArduPilot yaw PID
         # must be inactive so it doesn't fight the Lua trim output.
         boot_params={"ATC_RAT_YAW_P": 0.0},
-    ) as ctx:
+        armon_ms=armon_ms,
+    )
+
+
+@pytest.fixture
+def torque_armed_lua(tmp_path, request):
+    """
+    Torque stack with rawes.lua in yaw-only mode (SCR_USER6=2, MODE_YAW_LUA).
+
+    Armed via RAWES_ARMON(1 hour) — Lua owns Ch3/Ch8; no GCS RC override.
+    Yields StackContext with vehicle armed and ACRO active.
+    """
+    with _lua_torque_stack(tmp_path, request, armon_ms=3_600_000) as ctx:
+        yield ctx
+
+
+@pytest.fixture
+def torque_unarmed_lua(tmp_path, request):
+    """
+    Torque stack with rawes.lua in yaw-only mode (SCR_USER6=2, MODE_YAW_LUA).
+
+    Yields StackContext with vehicle UNARMED and ACRO active.
+    The test is responsible for sending RAWES_ARMON to arm.
+    """
+    with _lua_torque_stack(tmp_path, request, armon_ms=0) as ctx:
         yield ctx
 
 
@@ -130,7 +144,7 @@ def torque_armed_ddfp_ramp(tmp_path, request):
         profile="yaw_slow_ramp",     # prescribed psi_dot 0→10 deg/s over 30 s
 
         tail_channel=3,
-        extra_params=_DDFP_TORQUE_EXTRA_PARAMS,   # H_YAW_TRIM=-0.419, P=0.5, I=0
+        extra_params=_DDFP_TORQUE_EXTRA_PARAMS,   # H_YAW_TRIM=0.02, P=0.5, I=0
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,

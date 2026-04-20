@@ -7,14 +7,14 @@ This test validates the full hardware-equivalent control architecture:
   -----------------        -----------------------------------------
   Hub yaw dynamics    <--- SERVO9 PWM  (Ch9, Script 1)
   Motor torque model        ^
-  (no bearing drag)         rawes.lua (SCR_USER6=2, MODE_YAW):
+  (no bearing drag)         rawes.lua (SCR_USER6=2, MODE_YAW_LUA):
   Sends JSON sensors -----> ahrs:get_gyro().z
   (pos, vel, att,            PI: throttle = BASE + KP*gyro_z + I_term
    gyro, accel)              write PWM to Ch9 via SRV_Channels
 
 Key differences from test_yaw_regulation (which uses mediator adaptive trim):
   - Mediator is pure physics -- no feedforward, linear PWM->throttle
-  - rawes.lua (MODE_YAW (SCR_USER6=2)) runs inside SITL, reads gyro.z, runs PI controller
+  - rawes.lua (MODE_YAW_LUA (SCR_USER6=2)) runs inside SITL, reads gyro.z, runs PI controller
   - The Lua script is identical to what would run on the Pixhawk 6C hardware
   - No RPM feedback: RPM1_TYPE=0 on hardware until AM32 EDT is enabled
   - SERVO9_FUNCTION=94 gives Lua exclusive control of Ch9 (tail motor)

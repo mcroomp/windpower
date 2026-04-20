@@ -847,7 +847,7 @@ Commands:
                                     specific 1-indexed output numbers)
   monitor [seconds]               Stream live ESC telemetry (default 10 s)
   listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
-  mode <0-8>                      Set SCR_USER6 mode and listen 10 s to confirm active
+  mode <0-6>                      Set SCR_USER6 mode and listen 10 s to confirm active
   arm                             Send throttle=800 RC override (PWM) then force-arm vehicle
   disarm                          Disarm vehicle
   hold <pwm> [seconds]            Arm, set output 9 (AUX OUT 1) to pwm, keep alive (Ctrl-C to stop)
@@ -1103,12 +1103,11 @@ def _run_command(session: RawesGCS, tokens: list[str],
     # -- mode <n> -----------------------------------------------------------
     elif cmd == "mode":
         _MODE_NAMES = {
-            0: "none", 1: "steady", 2: "yaw",
-            4: "landing", 5: "pumping", 6: "arm_hold",
-            7: "yaw_test", 8: "yaw_limited",
+            0: "none", 1: "steady", 2: "yaw_lua",
+            4: "landing", 5: "pumping",
         }
         if len(tokens) < 2:
-            print("  Usage: mode <0-8>")
+            print("  Usage: mode <0,1,2,4,5>")
             print("  Modes: " + "  ".join(f"{k}={v}" for k, v in _MODE_NAMES.items()))
             return True
         try:
