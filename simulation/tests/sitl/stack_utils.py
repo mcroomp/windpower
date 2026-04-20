@@ -595,6 +595,45 @@ def _launch_mediator_torque(
     )
 
 
+def _launch_mediator_static(
+    sim_dir: Path,
+    repo_root: Path,
+    log_path: Path,
+    *,
+    pos:        "np.ndarray",
+    vel:        "np.ndarray",
+    rpy:        "np.ndarray",
+    accel_body: "np.ndarray",
+    gyro:       "np.ndarray",
+    port: int = 9002,
+) -> subprocess.Popen:
+    """Launch mediator_static.py as a subprocess with fixed sensor values.
+
+    The subprocess runs the SITL lockstep loop (recv_servos -> send_state)
+    with constant sensor values.  No physics, no threading in the test.
+    Used by test_arm_minimal and test_gps_fusion_layers.
+    """
+    def _fmt(arr) -> "list[str]":
+        return [str(float(v)) for v in arr]
+
+    cmd = [
+        sys.executable, str(sim_dir / "mediator_static.py"),
+        "--pos",   *_fmt(pos),
+        "--vel",   *_fmt(vel),
+        "--rpy",   *_fmt(rpy),
+        "--accel", *_fmt(accel_body),
+        "--gyro",  *_fmt(gyro),
+        "--port",  str(port),
+    ]
+    return subprocess.Popen(
+        cmd,
+        cwd=str(repo_root),
+        stdout=log_path.open("w", encoding="utf-8"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+
 def check_ports_free(retry_s: float = 15.0, poll_interval: float = 0.5) -> None:
     """Raise RuntimeError if SITL or mediator ports are in use after retry_s seconds."""
     for host, port, proto, hint in _PORT_CHECKS:

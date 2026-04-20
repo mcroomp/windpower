@@ -53,6 +53,7 @@ from planner         import quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 from telemetry_csv import COLUMNS as _TEL_COLUMNS, TelRow as _TelRow
+from mediator_base import install_sigterm_handler, setup_logging
 from mediator_events import MediatorEventLog
 
 # ---------------------------------------------------------------------------
@@ -153,6 +154,7 @@ def run_mediator(args, trajectory=None):
     """
     import time as _time_mod
     log = logging.getLogger("mediator")
+    is_stopped = install_sigterm_handler()
     ev  = MediatorEventLog(getattr(args, "events_log", None))
     ev.open()
 
@@ -351,13 +353,15 @@ def run_mediator(args, trajectory=None):
     # -- Main loop ------------------------------------------------------------
 
     try:
-        while True:
+        while not is_stopped():
             # ----------------------------------------------------------------
             # Step 1: Block until ArduPilot sends servo values (lockstep).
             # Returns None only if the watchdog timeout (5 s) fires → SITL dead.
             # ----------------------------------------------------------------
             new_servos = sitl.recv_servos()
             if new_servos is None:
+                if is_stopped():
+                    break   # clean shutdown: SIGTERM arrived while waiting
                 log.error("SITL watchdog: no servo packet for 5 s — SITL has crashed. Exiting.")
                 sys.exit(1)
             last_servos = new_servos
@@ -842,11 +846,7 @@ def run_mediator(args, trajectory=None):
 # ---------------------------------------------------------------------------
 def main():
     args = _parse_args()
-    logging.basicConfig(
-        level    = getattr(logging, args.log_level.upper()),
-        format   = "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt  = "%H:%M:%S",
-    )
+    setup_logging(args.log_level)
     run_mediator(args)
 
 

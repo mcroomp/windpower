@@ -267,7 +267,12 @@ case "$CMD" in
                     _still_pids+=("$_p")
                     _still_ctrs+=("$_pc")
                 else
-                    wait "$_p" || _RC=1
+                    _wrc=0
+                    wait "$_p" || _wrc=$?
+                    # exit 0 = tests passed; exit 5 = no tests ran (all deselected by -k) -- not a failure
+                    if [ "$_wrc" -ne 0 ] && [ "$_wrc" -ne 5 ]; then
+                        _RC=1
+                    fi
                     docker rm -f "$_pc" >/dev/null 2>&1 || true
                 fi
             done
@@ -304,7 +309,7 @@ case "$CMD" in
                     /rawes/.venv/bin/python -m pytest "$_f" -s -v \
                     ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
                 | tee "$_wlog" \
-                | grep --line-buffered -E "PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error" \
+                | sed -n -E '/PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error/p' \
                 | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}' \
                 || _test_rc=$?
                 # Remove stale host logs for this test only, then retrieve fresh ones.

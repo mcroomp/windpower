@@ -61,8 +61,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torque_model as _m
-from sitl_interface import SITLInterface
+from mediator_base import install_sigterm_handler, setup_logging
 from mediator_events import MediatorEventLog
+from sitl_interface import SITLInterface
 
 # ---------------------------------------------------------------------------
 # Timing / port constants
@@ -244,11 +245,9 @@ def run(
     events_log_path  : path for structured JSONL event log (None = disabled)
     startup_yaw_rate : yaw rate [rad/s] sent to SITL during startup hold
     """
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    setup_logging(log_level)
     log = logging.getLogger("mediator_torque")
+    is_stopped = install_sigterm_handler()
     ev  = MediatorEventLog(events_log_path)
     ev.open()
 
@@ -286,7 +285,7 @@ def run(
     log.info("Bound to UDP port %d", _RECV_PORT)
 
     try:
-        while True:
+        while not is_stopped():
             # ── Receive servo packet from SITL ─────────────────────────────
             # Read raw PWM for the motor channel (SERVO9_MIN=800, SERVO9_MAX=2000).
             # Do NOT use the normalised [-1,1] array — it clips values below 1000 µs.

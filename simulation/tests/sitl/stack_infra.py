@@ -17,6 +17,7 @@ Exported names (imported by conftest.py via ``from stack_infra import *``):
     _STARTING_STATE, _RAWES_DEFAULTS_PARM
     _TORQUE_STARTUP_HOLD_S
     _STARTUP_TIMEOUT, _ARM_TIMEOUT, _MODE_TIMEOUT, _STARTUP_DAMP_S
+    _static_stack
 """
 import contextlib
 import dataclasses
@@ -51,6 +52,7 @@ from stack_utils import (
     ParamSetup,
     _launch_mediator,
     _launch_mediator_torque,
+    _launch_mediator_static,
     _launch_sitl,
     _prime_sitl_eeprom,
     _resolve_sim_vehicle,
@@ -444,6 +446,9 @@ class SitlContext:
     """
     What _sitl_stack yields: SITL process + log paths + derived config.
 
+    Use _static_stack (wraps this) when you need a static-sensor subprocess
+    instead of full physics — no threading in test files.
+
     Use this directly when you need SITL + your own sensor worker without
     the full mediator + arm sequence (e.g. GPS fusion layer tests).
     """
@@ -456,7 +461,10 @@ class SitlContext:
     repo_root:     Path
     log:           logging.Logger
     test_log_dir:  Path
-    boot_setup:    object    # ParamSetup
+    boot_setup:    object            # ParamSetup
+    # Set by _static_stack; None when using _sitl_stack directly
+    mediator_proc: object = None     # subprocess.Popen | None
+    mediator_log:  "Path | None" = None
 
 
 @contextlib.contextmanager
@@ -576,6 +584,67 @@ def _sitl_stack(
         _df_log = Path("/ardupilot/logs/00000001.BIN")
         if _df_log.exists():
             shutil.copy2(_df_log, test_log_dir / "dataflash.BIN")
+
+
+# ---------------------------------------------------------------------------
+# _static_stack — SITL + static-sensor mediator subprocess (no threading)
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _static_stack(
+    tmp_path,
+    *,
+    pos:        "_np.ndarray",
+    vel:        "_np.ndarray",
+    rpy:        "_np.ndarray",
+    accel_body: "_np.ndarray",
+    gyro:       "_np.ndarray",
+    test_name:          str = "",
+    extra_boot_params:  "dict[str, float] | None" = None,
+):
+    """
+    SITL + static-sensor mediator: pre-checks -> boot params -> SITL ->
+    mediator_static.py subprocess -> yield -> teardown.
+
+    Drop-in replacement for manually managing a background sensor thread.
+    The mediator_static.py subprocess handles the lockstep loop
+    (recv_servos -> send_state with fixed values) exactly like the full
+    mediator but with no physics.
+
+    Built on top of _sitl_stack.  Populates ctx.mediator_proc and
+    ctx.mediator_log so tests can check liveness with::
+
+        if ctx.mediator_proc.poll() is not None:
+            pytest.fail(...)
+
+    Caller is responsible for connecting and driving RawesGCS.
+
+    Parameters
+    ----------
+    pos        : NED position [m]
+    vel        : NED velocity [m/s]
+    rpy        : roll/pitch/yaw [rad]
+    accel_body : body-frame specific force [m/s^2]  (include gravity: [0,0,-g] for level)
+    gyro       : body-frame angular rate [rad/s]
+    """
+    with _sitl_stack(
+        tmp_path,
+        test_name         = test_name,
+        extra_boot_params = extra_boot_params,
+    ) as ctx:
+        mediator_log = tmp_path / "mediator.log"
+        mediator_proc = _launch_mediator_static(
+            ctx.sim_dir, ctx.repo_root, mediator_log,
+            pos=pos, vel=vel, rpy=rpy, accel_body=accel_body, gyro=gyro,
+        )
+        ctx.mediator_proc = mediator_proc
+        ctx.mediator_log  = mediator_log
+        try:
+            yield ctx
+        finally:
+            _terminate_process(mediator_proc)
+            if mediator_log.exists():
+                copy_logs_to_dir(ctx.test_log_dir, {"mediator.log": mediator_log})
 
 
 # ---------------------------------------------------------------------------
