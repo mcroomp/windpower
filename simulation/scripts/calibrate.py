@@ -15,11 +15,12 @@ Usage
 RAWES output channel mapping (ArduCopter Heli)
 -----------------------------------------------
   Output 1  S1  (swashplate, 0 deg   / East)     SERVO1_FUNCTION = 33
-  Output 2  S2  (swashplate, 120 deg)              SERVO2_FUNCTION = 34
-  Output 3  S3  (swashplate, 240 deg)              SERVO3_FUNCTION = 35
-  Output 9  GB4008 anti-rotation motor             SERVO9_FUNCTION = 36 (Motor4, AUX OUT 1)
+  Output 2  S2  (swashplate, 120 deg)             SERVO2_FUNCTION = 34
+  Output 3  S3  (swashplate, 240 deg)             SERVO3_FUNCTION = 35
+  Output 4  GB4008 anti-rotation motor            H_TAIL_TYPE = 4 (DDFP CCW)
 
-PWM range: 1000 us (min) ... 1500 us (neutral) ... 2000 us (max)
+SERVO4 PWM range: 800 us (off) ... 2000 us (full throttle)
+Swashplate PWM range: 1000 us (min) ... 1500 us (neutral) ... 2000 us (max)
 
 Commands
 --------
@@ -80,8 +81,8 @@ GB4008_KT = 60.0 / (2.0 * math.pi * GB4008_KV)  # ~0.144 N*m/A
 SERVO_S1     = 1
 SERVO_S2     = 2
 SERVO_S3     = 3
-SERVO_MOTOR         = 9   # GB4008 physical output channel -- AUX OUT 1 (output 9)
-MOTOR_TEST_INSTANCE = 4   # Rover logical motor instance -- MOTOR_TEST_THROTTLE_RIGHT
+SERVO_MOTOR         = 4   # GB4008 anti-rotation motor -- MAIN OUT 4 (DDFP tail)
+MOTOR_TEST_INSTANCE = 4   # Motor test instance for SERVO4 (heli tail output)
 
 SWASH_SERVOS = (SERVO_S1, SERVO_S2, SERVO_S3)
 
@@ -168,10 +169,6 @@ _SYS_STATUS = {0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
                4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY", 7: "POWEROFF"}
 
 
-def _is_rover(session: RawesGCS) -> bool:
-    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=5.0)
-    return (hb is not None and
-            hb.type == mavutil.mavlink.MAV_TYPE_GROUND_ROVER)
 
 
 def _print_vehicle_status(session: RawesGCS) -> None:
@@ -261,6 +258,94 @@ def _restart_scripting(session: RawesGCS) -> None:
     time.sleep(0.5)
     session.set_param("SCR_ENABLE", 1)
     print("  Scripting engine restarted.")
+
+
+def _download_latest_log(session: RawesGCS, dest_dir: str = ".") -> "str | None":
+    """
+    Download the most recent dataflash log using the MAVLink log-download protocol
+    (LOG_REQUEST_LIST / LOG_REQUEST_DATA / LOG_DATA).
+
+    Avoids pymavlink mavftp which uses /tmp/ internally (broken on Windows).
+    Sends LOG_REQUEST_DATA with count=0xFFFFFFFF, reassembles out-of-order
+    LOG_DATA packets, re-requests any gaps, and writes a .BIN file to dest_dir.
+    """
+    mav = session._mav
+    sys_id  = session._target_system
+    comp_id = session._target_component
+
+    # -- 1. Enumerate logs ----------------------------------------------------
+    print("  Requesting log list ...")
+    mav.mav.log_request_list_send(sys_id, comp_id, 0, 0xFFFF)
+    entries: dict[int, object] = {}
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        msg = session._recv(type="LOG_ENTRY", blocking=True, timeout=0.5)
+        if msg is None:
+            continue
+        entries[msg.id] = msg
+        if msg.id == msg.last_log_num:
+            break
+    if not entries:
+        print("  No log entries returned.")
+        return None
+
+    latest   = entries[max(entries)]
+    log_id   = latest.id
+    log_size = latest.size
+    print(f"  Latest log: id={log_id}  size={log_size} bytes")
+
+    # -- 2. Download ----------------------------------------------------------
+    os.makedirs(dest_dir, exist_ok=True)
+    local = os.path.join(dest_dir, f"{log_id:08d}.BIN")
+
+    def _request(ofs: int, count: int) -> None:
+        mav.mav.log_request_data_send(sys_id, comp_id, log_id, ofs, count)
+
+    print(f"  Downloading log {log_id} -> {local} ...")
+    data = bytearray(log_size)
+    received: set[int] = set()   # set of offsets written
+    write_ptr = 0                # contiguous bytes confirmed written
+    pending: dict[int, bytes] = {}  # out-of-order chunks: ofs -> bytes
+
+    _request(0, 0xFFFFFFFF)
+    last_progress = -1
+    deadline = time.monotonic() + 120.0
+
+    while write_ptr < log_size and time.monotonic() < deadline:
+        msg = session._recv(type="LOG_DATA", blocking=True, timeout=2.0)
+        if msg is None:
+            _request(write_ptr, log_size - write_ptr)
+            continue
+        if msg.id != log_id or msg.count == 0:
+            continue
+        chunk = bytes(msg.data[:msg.count])
+        ofs   = msg.ofs
+        end   = ofs + len(chunk)
+        if end <= log_size:
+            data[ofs:end] = chunk
+            pending[ofs] = chunk
+
+        # Advance write_ptr over contiguous chunks
+        while write_ptr in pending:
+            write_ptr += len(pending.pop(write_ptr))
+
+        pct = write_ptr * 100 // log_size
+        if pct != last_progress and pct % 5 == 0:
+            print(f"    {pct}%  ({write_ptr}/{log_size} bytes)", end="\r")
+            last_progress = pct
+
+    mav.mav.log_request_end_send(sys_id, comp_id)
+    print()
+
+    if write_ptr < log_size:
+        print(f"  [WARN] Incomplete: {write_ptr}/{log_size} bytes")
+
+    with open(local, "wb") as fh:
+        fh.write(data[:write_ptr])
+
+    size = os.path.getsize(local)
+    print(f"  [OK] {size} bytes -> {local}")
+    return local
 
 
 def _list_scripts(session: RawesGCS) -> None:
@@ -363,61 +448,59 @@ def _upload_script(session: RawesGCS, local_path: str,
 # Motor / ESC diagnostic helpers
 # ---------------------------------------------------------------------------
 
-# Parameters that must be correct for DShot to reach the motor
-_DSHOT_PARAMS = [
-    ("SERVO9_FUNCTION",    "Must be 36 (Motor4) for GB4008 on AUX OUT 1 (output 9)"),
-    ("SERVO_BLH_MASK",     "Must be 256 (bit 8) to enable DShot on output 9 (AUX OUT 1)"),
-    ("SERVO_BLH_OTYPE",    "DShot type: 5=DShot300  6=DShot600  (0=PWM, won't work)"),
-    ("SERVO_BLH_AUTO",     "1 = auto-configure BLHeli outputs"),
-    ("H_TAIL_TYPE",        "Must be 4 (DDFP) for GB4008"),
-    ("H_RSC_MODE",         "RSC mode: 0=servo  3=setpoint  4=passthrough  (0 means motor may be gated)"),
-    ("H_RSC_SETPOINT",     "RSC setpoint [0-100%] when H_RSC_MODE=3"),
+# Parameters audited by _diag_motor
+_MOTOR_PARAMS = [
+    ("H_TAIL_TYPE",        "Must be 4 (DDFP CCW) for GB4008 on output 4"),
+    ("SERVO4_MIN",         "Must be 800 (off)"),
+    ("SERVO4_MAX",         "Must be 2000 (full throttle)"),
+    ("SERVO4_TRIM",        "Must be 800 (DDFP: trim = off)"),
+    ("H_YAW_TRIM",         "Near-zero feedforward (~0.02); integrator carries equilibrium"),
+    ("ATC_RAT_YAW_P",      "Yaw rate P gain (0.015)"),
+    ("ATC_RAT_YAW_I",      "Yaw rate I gain (0.01)"),
+    ("ATC_RAT_YAW_IMAX",   "Yaw I clamp (0.7 > equilibrium throttle ~0.505)"),
+    ("H_RSC_MODE",         "Must be 1 (setpoint); CH8 controls motor interlock"),
     ("H_RSC_RUNUP_TIME",   "Motor runup time [s] -- motor won't respond until elapsed"),
-    ("BRD_SAFETYENABLE",   "1=safety switch required  0=disabled  (if 1, press safety before any output)"),
-    ("ARMING_SKIPCHK",     "Skip arming checks flag"),
-    ("SERVO_BLH_TELE_PORT","UART port for KISS telemetry wire (-1=disabled)"),
+    ("BRD_SAFETYENABLE",   "1=safety switch required  0=disabled"),
+    ("SCR_ENABLE",         "1 = Lua scripting enabled (rawes.lua)"),
+    ("SCR_USER6",          "Lua mode: 0=none (arming only)"),
+    ("ARMING_CHECK",       "0 = prearm checks disabled (Lua arming:arm() is not force-arm)"),
     ("RPM1_TYPE",          "RPM sensor type: 5=ESC telemetry"),
-    ("RPM1_MIN",           "Minimum RPM to report"),
 ]
 
 
 def _diag_motor(session: RawesGCS) -> None:
     """
-    Full motor / AM32 / DShot diagnostic dump.
+    Motor / DDFP diagnostic dump.
 
-    Checks every layer from ArduPilot parameter configuration through to
-    live ESC telemetry.  Reports a likely cause for each failure condition.
+    Checks ArduPilot parameter configuration and live servo output for the
+    GB4008 anti-rotation motor on output 4 (DDFP CCW, H_TAIL_TYPE=4).
     """
     sep = "-" * 60
 
     # -- 1. Parameter audit -------------------------------------------------
     print(f"\n{sep}")
-    print("1. PARAMETER AUDIT  (DShot / motor chain)")
+    print("1. PARAMETER AUDIT  (DDFP / motor chain)")
     print(sep)
     params = {}
-    for name, note in _DSHOT_PARAMS:
+    for name, note in _MOTOR_PARAMS:
         val = session.get_param(name)
         params[name] = val
-        val_str = f"{val:.0f}" if val is not None else "NOT FOUND"
-        print(f"  {name:<26} = {val_str:<8}  ({note})")
+        val_str = f"{val:.3f}" if val is not None else "NOT FOUND"
+        print(f"  {name:<26} = {val_str:<10}  ({note})")
 
     print()
     issues = []
     v = params.get
-    if v("SERVO9_FUNCTION") not in (36.0, 38.0):
-        issues.append("SERVO9_FUNCTION is not 36 (Motor4) -- output 9 not mapped to GB4008")
-    blh_mask = v("SERVO_BLH_MASK")
-    if blh_mask is not None and not (int(blh_mask) & 256):
-        issues.append("SERVO_BLH_MASK does not include bit 8 (=256) -- DShot not enabled on output 9 (AUX OUT 1)")
-    blh_type = v("SERVO_BLH_OTYPE")
-    if blh_type is not None and blh_type < 4:
-        issues.append(f"SERVO_BLH_OTYPE={blh_type:.0f} -- not a DShot type (need 5=DShot300 or 6=DShot600)")
     if v("H_TAIL_TYPE") != 4.0:
-        issues.append(f"H_TAIL_TYPE={v('H_TAIL_TYPE')} -- expected 4 (DDFP); motor may not be driven")
+        issues.append(f"H_TAIL_TYPE={v('H_TAIL_TYPE')} -- expected 4 (DDFP CCW); motor not driven")
+    if v("SERVO4_MIN") != 800.0:
+        issues.append(f"SERVO4_MIN={v('SERVO4_MIN')} -- expected 800 (off)")
+    if v("SERVO4_MAX") != 2000.0:
+        issues.append(f"SERVO4_MAX={v('SERVO4_MAX')} -- expected 2000")
+    if v("H_RSC_MODE") != 1.0:
+        issues.append(f"H_RSC_MODE={v('H_RSC_MODE')} -- expected 1 (setpoint); CH8 interlock won't work")
     if v("BRD_SAFETYENABLE") == 1.0:
         issues.append("BRD_SAFETYENABLE=1 -- safety switch must be pressed before outputs are active")
-    if v("H_RSC_MODE") == 0.0:
-        issues.append("H_RSC_MODE=0 (servo PWM) -- motor output gated by RSC; won't run via motor test")
 
     if issues:
         print("  [WARN] Likely configuration issues:")
@@ -443,7 +526,7 @@ def _diag_motor(session: RawesGCS) -> None:
 
     # -- 3. Servo output snapshot -------------------------------------------
     print(f"\n{sep}")
-    print("3. SERVO OUTPUT RAW  (what ArduPilot is sending to the ESC)")
+    print("3. SERVO OUTPUT RAW  (what ArduPilot is sending to outputs)")
     print(sep)
     srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
     if srv:
@@ -451,13 +534,14 @@ def _diag_motor(session: RawesGCS) -> None:
             val = getattr(srv, f"servo{i}_raw", 0)
             if val:
                 note = ""
-                if i == 4:
-                    if val == 0:
-                        note = "  <-- ZERO: ESC receiving no signal"
-                    elif val < 1100:
-                        note = "  <-- below DShot min (ESC may not arm)"
+                if i in (1, 2, 3):
+                    note = "  <-- swashplate servo"
+                elif i == 4:
+                    if val <= 800:
+                        note = "  <-- GB4008 off (800 us)"
                     else:
-                        note = f"  <-- GB4008 motor ({(val-1000)/10:.0f}% throttle range)"
+                        pct = (val - 800) / (2000 - 800) * 100
+                        note = f"  <-- GB4008 motor ({pct:.0f}% of 800-2000 range)"
                 print(f"  Output {i}: {val} us{note}")
     else:
         print("  (no SERVO_OUTPUT_RAW received -- check data stream rate)")
@@ -477,68 +561,22 @@ def _diag_motor(session: RawesGCS) -> None:
         if ack.result != 0:
             print("  [WARN] Motor test not accepted -- check arming state or H_RSC_MODE")
         else:
-            print("  Command accepted -- listening for ESC telemetry for 3 s ...")
+            print("  Command accepted -- motor should spin briefly at 5%")
     else:
         print("  (no COMMAND_ACK received within 3 s)")
 
-    # -- 5. ESC telemetry ---------------------------------------------------
+    # -- 5. RPM telemetry ---------------------------------------------------
     print(f"\n{sep}")
-    print("5. ESC TELEMETRY  (listening 3 s for ESC_TELEMETRY_1_TO_4 and RPM)")
+    print("5. RPM TELEMETRY  (listening 3 s)")
     print(sep)
-    msgs = _drain(session, ["ESC_TELEMETRY_1_TO_4", "ESC_TELEMETRY_5_TO_8",
-                             "RPM", "ESC_INFO"], duration=3.0)
-    esc_msgs    = [m for m in msgs if "ESC_TELEMETRY" in m.get_type()]
-    rpm_msgs    = [m for m in msgs if m.get_type() == "RPM"]
-    info_msgs   = [m for m in msgs if m.get_type() == "ESC_INFO"]
-
-    if esc_msgs:
-        last = esc_msgs[-1]
-        print(f"  ESC telemetry received ({len(esc_msgs)} msgs in 3 s)")
-        for i in range(4):
-            try:
-                rpm_e  = last.rpm[i]
-                volt   = last.voltage[i] / 100.0
-                curr   = last.current[i] / 100.0
-                temp   = last.temperature[i]
-                if rpm_e == 0 and volt == 0 and curr == 0:
-                    continue
-                mech_rpm   = rpm_e / GB4008_POLE_PAIRS if rpm_e else 0
-                rotor_rpm  = mech_rpm / GB4008_GEAR_RATIO
-                torque_nm  = curr * GB4008_KT / GB4008_GEAR_RATIO
-                print(f"  ESC {i+1}:")
-                print(f"    eRPM       = {rpm_e}  -> motor {mech_rpm:.0f} RPM"
-                      f"  -> rotor {rotor_rpm:.1f} RPM")
-                print(f"    Voltage    = {volt:.2f} V")
-                print(f"    Current    = {curr:.2f} A"
-                      f"  -> shaft torque ~{torque_nm:.3f} N*m")
-                print(f"    Temp (ESC) = {temp} deg C")
-            except (IndexError, TypeError):
-                pass
-        if all(
-            (esc_msgs[-1].rpm[i] == 0 and esc_msgs[-1].current[i] == 0)
-            for i in range(4)
-            if esc_msgs[-1].voltage[i] != 0
-        ):
-            print("  [WARN] Telemetry received but RPM=0 and current=0")
-            print("         Motor is not spinning despite ESC communication OK")
-            print("         Check: DShot signal reaching ESC? ESC armed?")
-    else:
-        print("  [WARN] No ESC telemetry received")
-        print("         Check: SERVO_BLH_MASK=256 (output 9 AUX OUT 1), ESC powered,")
-        print("         DShot signal wire on AUX OUT 1, and AM32 Extended Telemetry enabled")
-        print("         Note: bidirectional DShot is auto-detected in ArduPilot 4.6+")
-        print("         (SERVO_BLH_BDSHOT parameter does not exist in this firmware)")
-
+    msgs = _drain(session, ["RPM"], duration=3.0)
+    rpm_msgs = [m for m in msgs if m.get_type() == "RPM"]
     if rpm_msgs:
         last_rpm = rpm_msgs[-1]
         print(f"  RPM sensor: rpm1={last_rpm.rpm1:.0f}  rpm2={last_rpm.rpm2:.0f}")
+        print(f"  ({len(rpm_msgs)} RPM messages in 3 s)")
     else:
-        print("  RPM message: none (RPM1_TYPE may not be set to 5)")
-
-    if info_msgs:
-        last_info = info_msgs[-1]
-        print(f"  ESC_INFO: error_count={last_info.error_count}"
-              f"  failure_flags=0x{last_info.failure_flags:04X}")
+        print("  (no RPM messages -- RPM1_TYPE may not be set)")
 
     # Stop motor test
     _send_motor_test(session, MOTOR_TEST_INSTANCE, 0.0, timeout_s=0.0)
@@ -614,175 +652,6 @@ def _diag_motor(session: RawesGCS) -> None:
     print(sep)
 
 
-def _dshot_blheli_test(session: RawesGCS, motors: list[int] | None = None,
-                       timeout_per_motor: float = 25.0) -> None:
-    """
-    Run SERVO_BLH_TEST on each motor and interpret the results.
-    """
-    sep = "-" * 60
-
-    # -- 0. Work out which motors to test -----------------------------------
-    if motors is None:
-        mask_val = session.get_param("SERVO_BLH_MASK")
-        auto_val = session.get_param("SERVO_BLH_AUTO")
-        if mask_val is not None and int(mask_val) != 0:
-            output_channels = [i + 1 for i in range(32) if int(mask_val) & (1 << i)]
-            motors = list(range(1, len(output_channels) + 1))
-            _blh_channel_map = {blh_idx: out for blh_idx, out in
-                                enumerate(output_channels, start=1)}
-        elif auto_val is not None and int(auto_val) == 1:
-            print("  SERVO_BLH_MASK=0 but SERVO_BLH_AUTO=1 -- testing motor 1")
-            motors = [1]
-            _blh_channel_map = {1: SERVO_MOTOR}
-        else:
-            print("  [WARN] SERVO_BLH_MASK=0 and SERVO_BLH_AUTO=0")
-            print("         No BLHeli channels are registered.")
-            print("         Set SERVO_BLH_MASK or SERVO_BLH_AUTO=1 first.")
-            return
-    else:
-        _blh_channel_map = {m: m for m in motors}
-
-    print(f"\n{sep}")
-    print(f"SERVO_BLH_TEST  --  DShot / AM32 bootloader connection test")
-    motor_desc = ", ".join(
-        f"BLH#{m}->OUT{_blh_channel_map.get(m, '?')}" for m in motors)
-    print(f"Motors to test: {motor_desc}")
-    print(sep)
-
-    # -- 1. Enable verbose debug output -------------------------------------
-    saved_debug = session.get_param("SERVO_BLH_DEBUG") or 0.0
-    if not session.set_param("SERVO_BLH_DEBUG", 1):
-        print("  [WARN] Could not set SERVO_BLH_DEBUG=1 -- "
-              "esc_status detail will be missing")
-
-    results: dict[int, dict] = {}
-
-    for motor_num in motors:
-        out_ch = _blh_channel_map.get(motor_num, motor_num)
-        print(f"\n  Testing BLHeli motor {motor_num} (output channel {out_ch}) ...")
-
-        if not session.set_param("SERVO_BLH_TEST", float(motor_num)):
-            print(f"  [FAIL] Could not set SERVO_BLH_TEST={motor_num}")
-            results[motor_num] = {"passed": False, "error": "param set failed"}
-            continue
-
-        collected: list[str] = []
-        deadline = time.monotonic() + timeout_per_motor
-        final_verdict = None
-
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            msg = session._recv(type="STATUSTEXT", blocking=True,
-                                timeout=min(0.3, remaining))
-            if msg is None:
-                continue
-            text = msg.text.rstrip("\x00").strip()
-            if not text.startswith("ESC:"):
-                continue
-            collected.append(text)
-            if "Test PASSED" in text:
-                final_verdict = "PASSED"
-                break
-            if "Test FAILED" in text:
-                final_verdict = "FAILED"
-                break
-
-        iface_type   = None
-        protocol     = None
-        good_frames  = None
-        bad_frames   = None
-
-        for line in collected:
-            if "BL_ConnectEx" in line:
-                pass  # connect channel info; not currently used
-            if "Interface type" in line:
-                iface_type = line.split("Interface type")[-1].strip()
-            if line.startswith("ESC: Prot"):
-                try:
-                    tokens = line.split()
-                    protocol    = int(tokens[2])
-                    good_frames = int(tokens[4])
-                    bad_frames  = int(tokens[6])
-                except (IndexError, ValueError):
-                    pass
-
-        PROTO_NAMES = {0: "NONE", 1: "PWM", 2: "OneShot125",
-                       5: "DShot", 99: "unknown"}
-
-        if final_verdict is None:
-            verdict_str = f"TIMEOUT (no response within {timeout_per_motor:.0f} s)"
-            passed = False
-        else:
-            verdict_str = final_verdict
-            passed = (final_verdict == "PASSED")
-
-        results[motor_num] = {
-            "passed":      passed,
-            "verdict":     verdict_str,
-            "iface":       iface_type,
-            "protocol":    protocol,
-            "good_frames": good_frames,
-            "bad_frames":  bad_frames,
-            "raw":         collected,
-        }
-
-        print(f"  Result       : {verdict_str}")
-        if iface_type:
-            print(f"  MCU type     : {iface_type}")
-        if protocol is not None:
-            pname = PROTO_NAMES.get(protocol, f"unknown ({protocol})")
-            print(f"  ESC protocol : {protocol} = {pname}")
-            if protocol != 5:
-                print(f"  [WARN] ESC is not in DShot mode!")
-                print(f"         Check MOT_PWM_TYPE (Rover) / SERVO_BLH_OTYPE (Heli)")
-        if good_frames is not None:
-            print(f"  Good frames  : {good_frames}")
-            print(f"  Bad frames   : {bad_frames}")
-            if good_frames == 0:
-                print("  [WARN] ESC has received ZERO good DShot frames")
-                print("         DShot signal is not arriving at the ESC")
-                print("         Check: output channel, wiring, timer conflict")
-            elif bad_frames is not None and bad_frames > 0:
-                ratio = bad_frames / max(1, good_frames + bad_frames)
-                print(f"  [WARN] {ratio*100:.1f}% frame error rate -- "
-                      f"signal integrity problem (noise / marginal timing)")
-            else:
-                print("  [OK] Clean DShot frames -- signal path is good")
-                if not passed:
-                    print("       ESC receives frames but motor won't spin:")
-                    print("       Check arming state, MOT_SPIN_MIN, "
-                          "H_RSC_MODE, ESC calibration")
-
-        if not passed and protocol is None:
-            print("  No esc_status read (non-ARM MCU or connection failed)")
-            print("  Possible causes:")
-            print("    * Wrong output channel / SERVO_BLH_MASK")
-            print("    * ESC not powered")
-            print("    * Wiring fault on the signal wire")
-            print("    * SERVO_BLH_DEBUG=0 (re-run after confirming it's 1)")
-
-        if collected:
-            print(f"  Raw STATUSTEXT ({len(collected)} lines):")
-            for line in collected:
-                print(f"    {line}")
-
-    # -- Restore SERVO_BLH_DEBUG -------------------------------------------
-    session.set_param("SERVO_BLH_DEBUG", saved_debug)
-
-    # -- Summary -----------------------------------------------------------
-    print(f"\n{sep}")
-    print("SUMMARY")
-    print(sep)
-    for motor_num, r in results.items():
-        status = "PASS" if r["passed"] else "FAIL"
-        proto  = r.get("protocol")
-        good   = r.get("good_frames")
-        bad    = r.get("bad_frames")
-        proto_str = f"  proto={proto}" if proto is not None else ""
-        frames_str = (f"  good={good} bad={bad}"
-                      if good is not None else "")
-        print(f"  Motor {motor_num}: [{status}]{proto_str}{frames_str}")
-    print(sep)
 
 
 def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
@@ -841,20 +710,16 @@ Commands:
   sweep <n> [step_ms]             Slowly sweep output n: 1000->2000->1000
   status                          Print SERVO_OUTPUT_RAW
   vehicle                         Print armed state, mode, EKF health, battery
-  diag                            Full motor/ESC/DShot diagnostic dump
-  blhtest [motor ...]             BLHeli/AM32 bootloader connection test
-                                   (auto-detects from SERVO_BLH_MASK; or pass
-                                    specific 1-indexed output numbers)
-  monitor [seconds]               Stream live ESC telemetry (default 10 s)
+  diag                            DDFP motor diagnostic dump (params + output + motor test)
+  monitor [seconds]               Stream live RPM telemetry (default 10 s)
   listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
-  mode <0-6>                      Set SCR_USER6 mode and listen 10 s to confirm active
-  arm                             Send throttle=800 RC override (PWM) then force-arm vehicle
+  mode <0,1,4,5>                  Set SCR_USER6 mode and listen 10 s to confirm active
+  arm [seconds]                   Send RAWES_ARM NV command (default 10 s), then print
+                                   yaw rate + SERVO4 PWM each second until expiry
   disarm                          Disarm vehicle
-  hold <pwm> [seconds]            Arm, set output 9 (AUX OUT 1) to pwm, keep alive (Ctrl-C to stop)
+  hold <pwm> [seconds]            Arm, hold output 4 (GB4008) at pwm us (Ctrl-C to stop)
   reboot                          Reboot ArduPilot
-  bench-mode                      Output 9: RCPassThru (direct PWM, no ArduPilot control)
-  flight-mode                     Output 9: Script 1 / Motor4 (Lua or direct DShot)
-  config dshot|pwm [--apply]      Diff (or apply) full RAWES param set; --apply writes + reboots
+  config [--apply]                Diff (or apply) full RAWES param set; --apply writes + reboots
   getparam <name>                 Read a parameter value
   setparam <name> <value>         Write a parameter value
   ftp-list                        List files in /APM/scripts on SD card
@@ -869,9 +734,9 @@ def _arm(session: RawesGCS, force: bool = False,
          timeout: float = 15.0) -> bool:
     """
     Arm sequence:
-      1. Set throttle RC override to 1000 (pre-arm requirement).
+      1. Set throttle RC override to 1000 (CH3 interlock low).
       2. Send MAV_CMD_COMPONENT_ARM_DISARM; wait for armed heartbeat.
-      3. ESC arming sequence on output 9: 800 us for 5 s (PWM mode only).
+      3. ESC arm: hold output 4 at 800 us for 5 s so the REVVitRC arms.
     Returns True if vehicle confirms armed.
     """
     print("  Setting throttle (CH3) override to 1000 ...")
@@ -918,18 +783,12 @@ def _arm(session: RawesGCS, force: bool = False,
         print("  [FAIL] Arm timed out.")
         return False
 
-    # ESC arming sequence -- PWM only.
-    # DShot auto-arms on the first valid packet; no sequence needed.
-    blh_mask = session.get_param("SERVO_BLH_MASK") or 0.0
-    dshot_active = int(blh_mask) & (1 << (SERVO_MOTOR - 1))
-
-    if not dshot_active:
-        print(f"  ESC arm (PWM): output {SERVO_MOTOR} -> 800 us for 5 s ...")
-        t_end = time.monotonic() + 5.0
-        while time.monotonic() < t_end:
-            _send_set_servo(session, SERVO_MOTOR, 800)
-            time.sleep(0.1)
-        print("  ESC arm sequence complete -- motor ready.")
+    print(f"  ESC arm: output {SERVO_MOTOR} -> 800 us for 5 s ...")
+    t_end = time.monotonic() + 5.0
+    while time.monotonic() < t_end:
+        _send_set_servo(session, SERVO_MOTOR, 800)
+        time.sleep(0.1)
+    print("  ESC arm sequence complete -- motor ready.")
 
     return True
 
@@ -1083,15 +942,6 @@ def _run_command(session: RawesGCS, tokens: list[str],
     elif cmd == "diag":
         _diag_motor(session)
 
-    # -- blhtest [motor ...] ------------------------------------------------
-    elif cmd == "blhtest":
-        try:
-            motors = [int(t) for t in tokens[1:]] if len(tokens) > 1 else None
-        except ValueError:
-            print("  Usage: blhtest [motor ...]  (motor = 1-indexed output number)")
-            return True
-        _dshot_blheli_test(session, motors=motors)
-
     # -- monitor [seconds] --------------------------------------------------
     elif cmd == "monitor":
         try:
@@ -1103,11 +953,10 @@ def _run_command(session: RawesGCS, tokens: list[str],
     # -- mode <n> -----------------------------------------------------------
     elif cmd == "mode":
         _MODE_NAMES = {
-            0: "none", 1: "steady", 2: "yaw_lua",
-            4: "landing", 5: "pumping",
+            0: "none", 1: "steady", 4: "landing", 5: "pumping",
         }
         if len(tokens) < 2:
-            print("  Usage: mode <0,1,2,4,5>")
+            print("  Usage: mode <0,1,4,5>")
             print("  Modes: " + "  ".join(f"{k}={v}" for k, v in _MODE_NAMES.items()))
             return True
         try:
@@ -1179,12 +1028,8 @@ def _run_command(session: RawesGCS, tokens: list[str],
             duration = float(tokens[2]) if len(tokens) > 2 else None
         except ValueError:
             print("  Error: pwm must be an integer"); return True
-        blh_mask = session.get_param("SERVO_BLH_MASK") or 0.0
-        dshot_active = int(blh_mask) & (1 << (SERVO_MOTOR - 1))
-        stop_pwm = PWM_MIN if dshot_active else 800
-        low = stop_pwm
-        if not (low <= pwm <= PWM_MAX):
-            print(f"  Error: pwm must be {low}-{PWM_MAX}"); return True
+        if not (800 <= pwm <= PWM_MAX):
+            print(f"  Error: pwm must be 800-{PWM_MAX}"); return True
         if not _arm(session, force=True):
             return True
         print(f"  Holding output {SERVO_MOTOR} at {pwm} us  (Ctrl-C to stop) ...")
@@ -1198,7 +1043,6 @@ def _run_command(session: RawesGCS, tokens: list[str],
                 session.send_rc_override({3: 1000})
                 _send_set_servo(session, SERVO_MOTOR, pwm)
                 elapsed = time.monotonic() - t0
-                # Drain pending messages; print interesting ones
                 while True:
                     msg = session._recv(blocking=True, timeout=0.1)
                     if msg is None:
@@ -1215,8 +1059,8 @@ def _run_command(session: RawesGCS, tokens: list[str],
                 print(f"  t={elapsed:5.1f}s  output{SERVO_MOTOR}={pwm} us", end="\r")
         except KeyboardInterrupt:
             print()
-        _send_set_servo(session, SERVO_MOTOR, stop_pwm)
-        print(f"  Output {SERVO_MOTOR} -> {stop_pwm} us (safe)")
+        _send_set_servo(session, SERVO_MOTOR, 800)
+        print(f"  Output {SERVO_MOTOR} -> 800 us (safe)")
 
     # -- reboot -------------------------------------------------------------
     elif cmd == "reboot":
@@ -1236,131 +1080,45 @@ def _run_command(session: RawesGCS, tokens: list[str],
                 break
         print("  Pixhawk rebooting -- reconnect in a few seconds.")
 
-    # -- bench-mode / flight-mode -------------------------------------------
-    elif cmd == "bench-mode":
-        rover = _is_rover(session)
-        steps = [
-            ("SERVO9_FUNCTION",  1),
-            ("SERVO_BLH_MASK",   0),
-            ("SERVO_BLH_OTYPE",  0),
-            ("BRD_IO_DSHOT",     0),
-            ("SERVO9_MIN",       800),
-        ]
-        if rover:
-            steps.append(("MOT_PWM_TYPE", 0))
-        ok = all(session.set_param(name, val) for name, val in steps)
-        if ok:
-            print("  [OK] Bench/PWM mode set:")
-            extra = "  MOT_PWM_TYPE=0" if rover else ""
-            print(f"       SERVO9_FUNCTION=1  SERVO_BLH_MASK=0  SERVO_BLH_OTYPE=0  BRD_IO_DSHOT=0{extra}")
-            print("  Rebooting (SERVO9_FUNCTION/SERVO_BLH_MASK changes require reboot) ...")
-            session._mav.mav.command_long_send(
-                session._target_system, session._target_component,
-                mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-                0, 1, 0, 0, 0, 0, 0, 0,
-            )
-            print("  Pixhawk rebooting -- reconnect in ~5 s then run 'arm' + 'hold'.")
-        else:
-            print("  [FAIL] Could not set all params")
-
-    elif cmd == "flight-mode":
-        rover = _is_rover(session)
-        if rover:
-            steps = [
-                ("SERVO9_FUNCTION",  36),
-                ("SERVO_BLH_MASK",   256),
-                ("SERVO_BLH_BDMASK", 0),
-                ("SERVO_BLH_POLES",  22),
-                ("SERVO_DSHOT_ESC",  3),
-                ("MOT_PWM_TYPE",     6),
-            ]
-            summary = ("SERVO9_FUNCTION=36  SERVO_BLH_MASK=256  SERVO_BLH_BDMASK=0"
-                       "  SERVO_BLH_POLES=22  SERVO_DSHOT_ESC=3  MOT_PWM_TYPE=6")
-        else:
-            steps = [
-                ("SERVO9_FUNCTION",  94),
-                ("SERVO_BLH_MASK",   256),
-                ("SERVO_BLH_BDMASK", 0),
-                ("SERVO_BLH_OTYPE",  5),
-                ("SERVO_BLH_POLES",  22),
-                ("SERVO_DSHOT_ESC",  3),
-            ]
-            summary = ("SERVO9_FUNCTION=94  SERVO_BLH_MASK=256  SERVO_BLH_BDMASK=0"
-                       "  SERVO_BLH_OTYPE=5  SERVO_BLH_POLES=22  SERVO_DSHOT_ESC=3")
-        ok = all(session.set_param(name, val) for name, val in steps)
-        if ok:
-            print(f"  [OK] Flight/DShot mode set ({'Rover' if rover else 'Heli/Copter'}):")
-            print(f"       {summary}")
-            print("  Rebooting ...")
-            session._mav.mav.command_long_send(
-                session._target_system, session._target_component,
-                mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-                0, 1, 0, 0, 0, 0, 0, 0,
-            )
-            print("  Pixhawk rebooting -- reconnect in ~5 s.")
-        else:
-            print("  [FAIL] Could not set all params")
-
-    # -- config dshot|pwm [--apply] -----------------------------------------
+    # -- config [--apply] ---------------------------------------------------
     elif cmd == "config":
-        remaining = [t.lower() for t in tokens[1:]]
-        apply = "--apply" in remaining
-        sub = next((t for t in remaining if t != "--apply"), "")
-        if sub not in ("dshot", "pwm"):
-            print("  Usage: config dshot [--apply] | config pwm [--apply]")
-            print("  --apply writes params and reboots; omit to preview diff only.")
-            return True
-
-        rover = _is_rover(session)
-
-        common = [
-            ("BRD_SAFETY_DEFLT", 0),
-            ("ARMING_CHECK",     0),
-            ("BRD_IO_DSHOT",     0),
-            ("H_COL_ANG_MIN",    -10),
-            ("H_COL_ANG_MAX",    10),
-            ("GPS1_TYPE",        0),
-            ("GPS2_TYPE",        0),
-            ("SCR_ENABLE",       1),
-            ("SCR_USER6",        0),
+        apply = "--apply" in [t.lower() for t in tokens[1:]]
+        # Full RAWES hardware parameter set matching the SITL torque test stack.
+        # GB4008 on output 4, PWM 800-2000, DDFP CCW (H_TAIL_TYPE=4).
+        # Lua rawes.lua handles arming (RAWES_ARM); ArduPilot DDFP PID drives yaw.
+        steps = [
+            # DDFP tail: H_TAIL_TYPE=4 (DDFP CCW) drives SERVO4 for yaw.
+            ("H_TAIL_TYPE",       4),
+            ("H_COL2YAW",         0),
+            # SERVO4: GB4008 on output 4.  800 us = off, 2000 us = full throttle.
+            ("SERVO4_MIN",        800),
+            ("SERVO4_MAX",        2000),
+            ("SERVO4_TRIM",       800),
+            # Yaw PID matching SITL torque tests.
+            ("H_YAW_TRIM",        0.02),
+            ("ATC_RAT_YAW_P",     0.015),
+            ("ATC_RAT_YAW_I",     0.01),
+            ("ATC_RAT_YAW_D",     0.0),
+            ("ATC_RAT_YAW_IMAX",  0.7),
+            # RSC: CH8 interlock (instant runup when CH8=2000).
+            ("H_RSC_MODE",        1),
+            ("H_RSC_RUNUP_TIME",  2),
+            # Swashplate collective limits.
+            ("H_COL_ANG_MIN",     -10),
+            ("H_COL_ANG_MAX",     10),
+            # Lua scripting: rawes.lua loaded, mode 0 (arming only).
+            ("SCR_ENABLE",        1),
+            ("SCR_USER6",         0),
+            # Arming: disable prearm checks so Lua arming:arm() succeeds.
+            ("ARMING_CHECK",      0),
+            ("BRD_SAFETY_DEFLT",  0),
         ]
 
-        if sub == "dshot":
-            specific = [
-                ("SERVO9_FUNCTION",  36  if rover else 94),
-                ("SERVO9_MIN",       1000),
-                ("SERVO9_MAX",       2000),
-                ("SERVO9_TRIM",      1000),
-                ("SERVO_BLH_MASK",   256),
-                ("SERVO_BLH_BDMASK", 0),
-                ("SERVO_BLH_OTYPE",  5),
-                ("SERVO_BLH_POLES",  22),
-                ("SERVO_BLH_TRATE",  10),
-                ("SERVO_BLH_AUTO",   0),
-                ("SERVO_DSHOT_ESC",  3),
-                ("SERVO_DSHOT_RATE", 0),
-            ]
-            if rover:
-                specific.append(("MOT_PWM_TYPE", 6))
-        else:  # pwm
-            specific = [
-                ("SERVO9_FUNCTION",  1),
-                ("SERVO9_MIN",       800),
-                ("SERVO9_MAX",       2000),
-                ("SERVO9_TRIM",      1500),
-                ("SERVO_BLH_MASK",   0),
-                ("SERVO_BLH_OTYPE",  0),
-            ]
-            if rover:
-                specific.append(("MOT_PWM_TYPE", 0))
-
-        steps = specific + common
-        frame_str = "Rover" if rover else "Heli/Copter"
         action = "Applying" if apply else "Preview (read-only -- add --apply to write)"
-        print(f"  Mode: {sub.upper()}  Frame: {frame_str}  [{action}]")
+        print(f"  RAWES config  [{action}]")
         print()
-        print(f"  {'Parameter':<25} {'Expected':>8}  {'Actual':>8}  Status")
-        print(f"  {'-'*25}  {'-'*8}  {'-'*8}  ------")
+        print(f"  {'Parameter':<25} {'Expected':>8}  {'Actual':>10}  Status")
+        print(f"  {'-'*25}  {'-'*8}  {'-'*10}  ------")
         any_diff = False
         any_fail = False
         for name, expected in steps:
@@ -1368,13 +1126,15 @@ def _run_command(session: RawesGCS, tokens: list[str],
             if actual is None:
                 row_status = "[FAIL] not found"
                 any_fail = True
-            elif abs(actual - float(expected)) < 0.5:
+                actual_str = "N/A"
+            elif abs(actual - float(expected)) < 1e-4:
                 row_status = "[OK]"
+                actual_str = f"{actual:.4g}"
             else:
-                row_status = f"[DIFF] {actual:.0f} -> {expected}"
+                row_status = f"[DIFF] {actual:.4g} -> {expected}"
                 any_diff = True
-            actual_str = f"{actual:.0f}" if actual is not None else "N/A"
-            print(f"  {name:<25} {expected:>8}  {actual_str:>8}  {row_status}")
+                actual_str = f"{actual:.4g}"
+            print(f"  {name:<25} {str(expected):>8}  {actual_str:>10}  {row_status}")
 
         print()
         if any_fail:
@@ -1382,7 +1142,7 @@ def _run_command(session: RawesGCS, tokens: list[str],
         elif not any_diff:
             print("  [OK] All parameters already correct.")
         elif not apply:
-            print("  [DIFF] Run with --apply to write changes.")
+            print("  [DIFF] Run 'config --apply' to write changes.")
         else:
             print("  Writing changes ...")
             for name, val in steps:
@@ -1395,9 +1155,63 @@ def _run_command(session: RawesGCS, tokens: list[str],
             )
             print("  Pixhawk rebooting -- reconnect in ~5 s.")
 
-    # -- arm ----------------------------------------------------------------
+    # -- arm [seconds] ------------------------------------------------------
     elif cmd == "arm":
-        _arm(session, force=True)
+        try:
+            secs = float(tokens[1]) if len(tokens) > 1 else 10.0
+        except ValueError:
+            print("  Usage: arm [seconds]"); return True
+        armon_ms = int(secs * 1000)
+        print(f"  Sending RAWES_ARM={armon_ms} ms -- Lua will arm and hold for {secs:.0f} s ...")
+        session.send_named_float("RAWES_ARM", float(armon_ms))
+        # Request ATTITUDE + SERVO_OUTPUT_RAW streams
+        session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)  # ATTITUDE
+        session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+        print()
+        print(f"  {'t(s)':<6} {'armed':<6} {'yaw_rate(deg/s)':>16}  {'SERVO4(us)':>10}  STATUSTEXT")
+        print(f"  {'-'*6}  {'-'*6}  {'-'*16}  {'-'*10}  ----------")
+        t0        = time.monotonic()
+        deadline  = t0 + secs + 5.0   # extra 5 s margin past armon expiry
+        last_print  = -1.0
+        yaw_rate    = None
+        servo4_pwm  = None
+        armed_state = False
+        pending_text: list[str] = []
+        try:
+            while time.monotonic() < deadline:
+                msg = session._recv(
+                    type=["ATTITUDE", "SERVO_OUTPUT_RAW", "HEARTBEAT", "STATUSTEXT"],
+                    blocking=True, timeout=0.1,
+                )
+                if msg is not None:
+                    mt = msg.get_type()
+                    if mt == "ATTITUDE":
+                        yaw_rate = math.degrees(msg.yawspeed)
+                    elif mt == "SERVO_OUTPUT_RAW":
+                        servo4_pwm = getattr(msg, "servo4_raw", None)
+                    elif mt == "HEARTBEAT":
+                        armed_state = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    elif mt == "STATUSTEXT":
+                        text = msg.text.rstrip("\x00").strip()
+                        if text:
+                            pending_text.append(text)
+                elapsed = time.monotonic() - t0
+                if elapsed - last_print >= 1.0:
+                    last_print = elapsed
+                    yr_str  = f"{yaw_rate:+.2f}" if yaw_rate  is not None else "   n/a"
+                    pw_str  = f"{servo4_pwm}"     if servo4_pwm is not None else "n/a"
+                    ar_str  = "YES" if armed_state else "no"
+                    txt_str = "  " + pending_text.pop(0) if pending_text else ""
+                    print(f"  {elapsed:<6.1f}  {ar_str:<6}  {yr_str:>16}  {pw_str:>10}{txt_str}")
+                    # Drain remaining pending texts on separate lines
+                    while pending_text:
+                        print(f"  {'':<6}  {'':<6}  {'':>16}  {'':>10}  {pending_text.pop(0)}")
+        except KeyboardInterrupt:
+            print()
+        print(f"  Done.")
+        print()
+        dest = os.path.join(os.path.dirname(__file__), "..", "..", "simulation", "logs", "hardware")
+        _download_latest_log(session, dest_dir=os.path.normpath(dest))
 
     # -- disarm -------------------------------------------------------------
     elif cmd == "disarm":

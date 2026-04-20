@@ -185,11 +185,26 @@ function gcs:send_text(level, msg)
 end
 
 -- ── arming ───────────────────────────────────────────────────────────────────
+-- arm_fail_n: number of arming:arm() calls that will silently fail before the
+-- next call succeeds.  Set from Python to test retry behaviour.
+-- arm_call_count: total calls to arming:arm() since last reset.
+
+_mock.arm_fail_n    = 0   -- how many arm() calls to silently reject before succeeding
+_mock.arm_call_count = 0  -- total arm() calls (for test assertions)
 
 arming = {}
 
 function arming:is_armed()  return _mock.armed end
 function arming:disarm()    _mock.armed = false end
+
+function arming:arm()
+    _mock.arm_call_count = _mock.arm_call_count + 1
+    if _mock.arm_fail_n > 0 then
+        _mock.arm_fail_n = _mock.arm_fail_n - 1
+        return  -- prearm failure: do not set armed
+    end
+    _mock.armed = true
+end
 
 -- ── vehicle ──────────────────────────────────────────────────────────────────
 

@@ -24,7 +24,7 @@ flowchart TB
 
     subgraph PX["Pixhawk 6C (in air)"]
         direction TB
-        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 1=steady_noyaw 50 Hz, 2=yaw 100 Hz, 3=steady<BR/>4=landing_noyaw 50 Hz, 5=pumping_noyaw 50 Hz, 6=arm_hold_noyaw<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim · VZ collective (modes 4,5) · Ch1/Ch2/Ch3+Ch9 overrides"]
+        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 0=none, 1=steady 50 Hz, 2=yaw_lua 100 Hz<BR/>4=landing 50 Hz, 5=pumping 50 Hz<BR/>RAWES_ARM (named float): timed arm/disarm<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim · VZ collective (modes 4,5) · Ch1/Ch2/Ch3+Ch9 overrides"]
         ACRO["<b>ACRO_Heli</b>  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
         LUA --> ACRO
     end
@@ -308,7 +308,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 | RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
 | RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
 | RAWES_ANCHOR_D | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: plain integer 0–8. 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw, 7=yaw_test, 8=yaw_limited. Substates for modes 4+5 are sent separately via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: plain integer, valid values 0,1,2,4,5. 0=none (passive), 1=steady (cyclic orbit-tracking, 50 Hz), 2=yaw_lua (counter-torque yaw trim only, 100 Hz), 3=reserved, 4=landing (cyclic + VZ descent, 50 Hz), 5=pumping (De Schutter pumping cycle, 50 Hz). Substates for modes 4+5 are sent separately via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. |
 
 Cyclic output rate limiter is hardcoded at 30 PWM/step (~0.67 s full-stick traverse).
 No further SCR_USER params are available on hardware (firmware exposes only SCR_USER1..6).
@@ -374,7 +374,24 @@ If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 
 > **Sim fixture:** `acro_armed_pumping_lua` in `conftest.py`. `internal_controller=True`. DeschutterPlanner trajectory (t_hold_s=10 s, then reel_out starts). Validates: "RAWES pump: reel_out" STATUSTEXT fires. Stack test: `test_pumping_cycle.py::test_pumping_cycle_lua`.
 
-### 4.2 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2, or RAWES_YAW=1 alongside any flight mode)
+### 4.2 rawes.lua -- RAWES_ARM: Timed Arm/Disarm (cross-mode)
+
+`NAMED_VALUE_FLOAT("RAWES_ARM", ms)` arms the vehicle and starts a disarm countdown. Re-sending refreshes the timer. Works in any mode.
+
+**Sequence (SITL):**
+1. GCS force-arms the vehicle (bypasses SITL-specific prearm failures: motor interlock timing race, ATC_RAT_YAW_P=0, accels inconsistent).
+2. GCS sends `NAMED_VALUE_FLOAT("RAWES_ARM", ms)`.
+3. Lua receives it, sets Ch3=1000 (throttle low) and Ch8=2000 (motor interlock ON), starts countdown.
+4. Once `arming:is_armed()` is true, Lua sends `"RAWES arm-on: armed, expires in Xs"` STATUSTEXT.
+5. On expiry: Lua calls `arming:disarm()` and sends `"RAWES arm-on: expired, disarmed"`.
+
+**On hardware:** `arming:arm()` can be called directly from Lua (no force arm needed; hardware prearm checks pass normally). Ch3/Ch8 RC overrides are held for the full duration of the countdown.
+
+**Re-send:** Sending a new `RAWES_ARM` value refreshes the deadline. Sending with `ms > 0` while already armed extends the timer. The "armed" confirmation is only sent once per receive (tracked by `_armon_armed_sent`).
+
+> **SITL fixture:** `torque_armed_lua` — GCS force-arms, sends `RAWES_ARM(3_600_000 ms)`, waits for "RAWES arm-on: armed" confirmation. `torque_unarmed_lua` — yields unarmed; test controls arm timing. Stack test: `test_armon.py` validates regulation (psi_dot < 5 deg/s for 10 s) then expiry (motor to 800 µs, psi_dot > 10 deg/s).
+
+### 4.3 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2 `yaw_lua`, or RAWES_YAW=1 alongside any flight mode)
 
 The counter-torque script is already validated (15/15 tests pass). Physics model in
 `simulation/torque_model.py`; stack mediator in `simulation/mediator_torque.py`. Summary:
@@ -398,16 +415,17 @@ and provides additional correction on top of the Lua trim.
 
 > **Sim:** `mediator_torque.py` encodes motor RPM as battery voltage (`battery:voltage(0)`) since the ArduPilot JSON backend does not parse the `rpm` field. The Lua script reads this and computes feedforward trim identically to hardware. `test_lua_yaw_trim.py` (stack) confirms 0.27 deg/s max yaw rate. On hardware, replace with `RPM:get_rpm(0)` from DSHOT telemetry.
 
-### 4.3 Channel Ownership
+### 4.4 Channel Ownership
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
 | Ch1 -- roll rate | rawes.lua | 50 Hz | body_z error (roll) -> ATC_RAT_RLL PID -> swashplate |
 | Ch2 -- pitch rate | rawes.lua | 50 Hz | body_z error (pitch) -> ATC_RAT_PIT PID -> swashplate |
-| Ch3 -- collective | ground PI via MAVLink (modes 1-3) OR rawes.lua (modes 4-5) | ~10 Hz / 50 Hz | Modes 1-3: normalized thrust [0..1] from load cell -> Ch3 RC override. Modes 4 (landing) and 5 (pumping): Lua owns Ch3 entirely -- VZ descent-rate controller or per-phase collective. No ground RC override on Ch3 in modes 4/5. |
-| Ch4 -- yaw rate | rawes.lua | 100 Hz | Torque trim + correction -> ATC_RAT_YAW -> GB4008 |
+| Ch3 -- collective | ground PI via MAVLink (modes 1-3) OR rawes.lua (modes 4-5) OR RAWES_ARM | ~10 Hz / 50 Hz / 100 Hz | Modes 1-3: normalized thrust [0..1] from load cell -> Ch3 RC override. Modes 4 (landing) and 5 (pumping): Lua owns Ch3 entirely. RAWES_ARM active: Lua holds Ch3=1000 (throttle low) for the full countdown duration. |
+| Ch8 -- motor interlock | rawes.lua (RAWES_ARM active) | 100 Hz | Lua holds Ch8=2000 (interlock ON, motor enabled) for the full countdown duration. Released on disarm. |
+| Ch9 -- GB4008 throttle | rawes.lua (mode=yaw_lua or RAWES_YAW=1) | 100 Hz | Torque trim + Kp_yaw correction -> SERVO9 PWM |
 
-### 4.4 Simulation Mapping
+### 4.5 Simulation Mapping
 
 | Lua component                            | Python equivalent                                    | File               |
 | ---------------------------------------- | ---------------------------------------------------- | ------------------ |
@@ -830,7 +848,7 @@ Ch4 PWM    <- 1000 + throttle x 1000
 
 ### B.1 Working SITL Arm Sequence
 
-Confirmed working (tested test_arm_minimal.py, ArduPilot 4.7+):
+**Direct arm (non-Lua tests):** Confirmed working (tested test_arm_minimal.py, ArduPilot 4.7+):
 
 ```python
 # Parameters that must be set before arming:
@@ -844,7 +862,7 @@ params = {
 
 # Sequence:
 # 1. Set params above
-# 2. Wait for ATTITUDE messages (EKF attitude aligned -- gcs.wait_ekf_attitude())
+# 2. Wait for ATTITUDE messages (EKF attitude aligned)
 # 3. Send CH8=2000 (motor interlock ON, RSC at setpoint for mode 1)
 # 4. Send force arm (param2=21196)
 # 5. HEARTBEAT shows armed=True immediately (mode 1 has instant runup_complete)
@@ -852,6 +870,23 @@ params = {
 
 Note: In ArduPilot 4.7+ the parameter was renamed from ARMING_CHECK to ARMING_SKIPCHK.
 Setting ARMING_CHECK silently fails -- no ACK, no error. Always use ARMING_SKIPCHK.
+
+**RAWES_ARM Lua timer (Lua torque tests):** Used when rawes.lua must own Ch3/Ch8 and manage the disarm countdown.
+
+```python
+# Additional params required in _LUA_TORQUE_EXTRA_PARAMS:
+#   "ARMING_CHECK": 0   -- disable prearm checks so the fixture's force-arm is not
+#                          fighting the motor-interlock mandatory check in some AP builds
+#   "H_RSC_RUNUP_TIME": 2  -- must be > H_RSC_RAMP_TIME (default 1) to pass prearm
+
+# Sequence:
+# 1. GCS force-arms the vehicle (bypasses SITL prearm failures)
+# 2. GCS sends NAMED_VALUE_FLOAT("RAWES_ARM", ms)
+# 3. Lua receives it, holds Ch3=1000 + Ch8=2000, starts countdown timer
+# 4. Lua sends "RAWES arm-on: armed, expires in Xs" STATUSTEXT (once arming:is_armed())
+# 5. On timer expiry: Lua calls arming:disarm(), sends "RAWES arm-on: expired, disarmed"
+# Re-sending RAWES_ARM refreshes the deadline without re-arming.
+```
 
 ### B.2 Common Failure Modes
 
@@ -1160,7 +1195,7 @@ SCR_USER5 = -home_z_enu (negate).
 
 | File                                         | Description                                                                   |
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=steady_noyaw, 2=yaw, 3=steady, 4=landing_noyaw, 5=pumping_noyaw, 6=arm_hold_noyaw) |
+| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=steady, 2=yaw_lua, 4=landing, 5=pumping; RAWES_ARM named float for timed arm/disarm) |
 | simulation/scripts/torque/lua_defaults.parm  | SITL param overrides for Lua torque tests                                     |
 | simulation/torque_model.py                   | Hub yaw kinematics — HubParams, HubState, step(), equilibrium_throttle() |
 | simulation/mediator_torque.py                | Standalone torque SITL mediator (RPM profiles, hub yaw physics)               |

@@ -1562,21 +1562,21 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "H_RSC_RUNUP_TIME": 2,   # must be > H_RSC_RAMP_TIME (default 1) to pass prearm check
 })
 
-# Extra params for the Lua feedforward fixture, merged on top of _BASE_TORQUE_BOOT_PARAMS.
-# Lua controls Ch9 (SERVO9) exclusively; the ArduPilot DDFP controller on Ch4 is
-# disabled by setting H_TAIL_TYPE=0 so it does not fight the Lua output.
+# Extra params for Lua-armed torque fixtures (RAWES_ARM state machine only).
+# ArduPilot's built-in DDFP yaw PID (H_TAIL_TYPE=4) drives SERVO4 for yaw control.
+# Lua only handles arming (RAWES_ARM) and motor interlock (Ch8); SCR_USER6=0 (none).
 _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
-    "H_TAIL_TYPE":      0,     # disable DDFP on Ch4; Lua owns Ch9 entirely
-    "ATC_RAT_YAW_P":    0.0,   # override: Lua is the sole feedforward provider
-    "ARMING_CHECK":     0,     # disable prearm checks so arming:arm() succeeds in Lua
-                               # (ATC_RAT_YAW_P=0, accels-inconsistent, and motor-interlock
-                               # prearm checks all block regular arm in SITL)
-    "SCR_ENABLE":       1,
-    "SERVO9_FUNCTION":  94,    # Script 1 -- Lua writes exclusively to Ch9
-    "SERVO9_MIN":       800,   # PWM off = 800 us (matches rawes.lua _set_throttle_pct range)
-    "SERVO9_MAX":       2000,  # PWM full = 2000 us
-    "SERVO9_TRIM":      800,   # trim = off
-    "SCR_USER6":        2,     # RAWES_MODE = 2 (yaw_lua)
+    "H_TAIL_TYPE":      4,     # DDFP CCW — ArduPilot yaw PID drives SERVO4
+    "SERVO4_MIN":       800,
+    "SERVO4_MAX":       2000,
+    "SERVO4_TRIM":      800,
+    "H_YAW_TRIM":       0.02,
+    "ATC_RAT_YAW_P":    0.015,
+    "ATC_RAT_YAW_I":    0.01,
+    "ATC_RAT_YAW_IMAX": 0.7,
+    "SCR_ENABLE":       1,     # load rawes.lua for RAWES_ARM arming state machine
+    "SCR_USER6":        0,     # MODE_NONE: Lua does arming only, no flight control
+    "ARMING_CHECK":     0,     # disable prearm checks — Lua arming:arm() is not force-arm
 })
 
 # Extra params for the ArduPilot DDFP (H_TAIL_TYPE=2) yaw PI fixture.
@@ -1818,11 +1818,8 @@ def _torque_stack(
                 gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
                 log.info("ACRO active -- profile=%s", profile)
             elif armon_ms > 0:
-                # Lua ARMON path: GCS force-arms (bypasses SITL prearm checks), then
-                # sends RAWES_ARM so Lua owns Ch3/Ch8 overrides and the timer.
-                gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
-                log.info("Force-armed via GCS for RAWES_ARM timer")
-                gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
+                # Lua ARMON path: Lua owns arming via state machine (Ch8 LOW→arm→HIGH).
+                gcs.set_mode(ACRO, timeout=10.0)
                 gcs.send_named_float("RAWES_ARM", float(armon_ms))
                 log.info("Sent RAWES_ARM=%d ms -- waiting for Lua arm confirmation ...", armon_ms)
                 arm_deadline = gcs.sim_now() + 15.0

@@ -5,14 +5,10 @@ Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,4,5):
   0  none        -- script passive: no RC overrides, no keepalive; logs every 5 s + any NV message
   1  steady      -- cyclic orbit-tracking only (Ch1, Ch2)                  50 Hz
-  2  yaw_lua     -- counter-torque yaw trim only (Ch9/SERVO9)             100 Hz
+  2  (reserved)
   3  (reserved)
   4  landing     -- cyclic + VZ collective + auto final_drop               50 Hz
   5  pumping     -- De Schutter pumping cycle                              50 Hz
-
-Yaw trim alongside any flight mode: send NAMED_VALUE_FLOAT("RAWES_YAW", 1) to enable,
-  NAMED_VALUE_FLOAT("RAWES_YAW", 0) to disable.  Cleared on every mode change.
-  MODE_YAW_LUA (2) runs yaw-only regardless of RAWES_YAW.
 
 RAWES_ARM: arm vehicle and set a timed disarm countdown.
   Send NAMED_VALUE_FLOAT("RAWES_ARM", ms) to arm and start a countdown of <ms> milliseconds.
@@ -92,8 +88,7 @@ local _nv_floats = {}     -- received named float values:  name -> value
 -- Timed arm/disarm is controlled by NAMED_VALUE_FLOAT("RAWES_ARM", ms).
 local MODE_NONE       = 0
 local MODE_STEADY     = 1   -- cyclic orbit-tracking
-local MODE_YAW_LUA    = 2   -- counter-torque yaw trim only
--- mode 3 reserved
+-- modes 2,3 reserved
 local MODE_LANDING    = 4   -- cyclic + VZ descent + auto final_drop
 local MODE_PUMPING    = 5   -- De Schutter pumping cycle
 
@@ -164,37 +159,19 @@ local COL_REEL_OUT    = -0.20  -- collective during hold/reel-out [rad]
 local COL_REEL_IN     =  0.079 -- collective during transition/reel-in [rad]
 local T_TRANSITION    =  3.7   -- body_z slerp window [s] (from config default)
 
--- ── Yaw-trim subsystem constants ─────────────────────────────────────────────
-
--- PI on gyro_z drives hub yaw rate to zero.
--- Physics: back-EMF equilibrium at omega_rotor=28 rad/s is ~48.5% throttle (psi_dot=0).
--- BASE_THROTTLE_PCT alone is insufficient (motor below back-EMF threshold); the I term
--- accumulates during startup spin-up and brings throttle to the equilibrium operating point.
-
-local BASE_THROTTLE_PCT = 5.0          -- base throttle [%]; I term compensates the rest
-local KP_YAW        = 3.0              -- P gain [% / (rad/s)]; strong enough to recover from neg overshoot
-local KI_YAW        = 2.0              -- I gain [% / (rad/s * s)]; builds back-EMF equilibrium offset (~48.5%)
-local YAW_I_MAX     = 80.0             -- anti-windup clamp [%]; well above back-EMF equilibrium ~48.5%
-local YAW_SRV_FUNC  = 94               -- Script 1 output (SERVO9)
-local YAW_STABLE_RAD_S     = math.rad(5.0)
-local YAW_STABLE_TIMEOUT_MS = 30000
-local YAW_DEAD_ZONE_RAD_S  = math.rad(2.0)    -- motor stays off until hub exceeds this rotation rate
-
-local _yaw_not_stable_ms  = nil    -- millis() when yaw first exceeded stable band; nil when stable
-local _yaw_stopped        = false  -- latched; motor cut due to sustained yaw instability
-local _yaw_i              = 0.0    -- integrator state [throttle %]
-local _yaw_last_throttle  = 0.0    -- last throttle output [%]; dead zone re-applies when this is 0
-local _yaw_in_dead_zone   = true   -- current dead zone state; true = motor off, waiting for movement
-local _yaw_status_ms      = 0      -- millis() of last periodic status message
-
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
 local _diag             = 0         -- global diagnostic counter (every tick)
 local _last_flight_ms   = 0         -- millis() when flight subsystem last ran
 local _none_status_ms   = 0         -- millis() of last mode-0 periodic status log
+-- RAWES_ARM state machine.
+-- States: nil=inactive  "interlock_low"=Ch8 set LOW, waiting 1 tick before arm attempt
+--         "arming"=retrying arming:arm() each tick until is_armed()
+--         "armed"=armed, Ch8 HIGH, holding overrides until deadline
 local _armon_deadline_ms = nil      -- millis() deadline for RAWES_ARM disarm; nil = inactive
+local _armon_state       = nil      -- current RAWES_ARM state (see above)
 local _armon_armed_sent  = false    -- true once "RAWES arm-on: armed" STATUSTEXT has been sent
-local _armon_secs        = 0        -- integer seconds of the last RAWES_ARM countdown (for log)
+local _armon_secs        = 0        -- integer seconds from last RAWES_ARM (for confirmation log)
 
 -- Mode tracking (SCR_USER6); substate via NAMED_VALUE_FLOAT "RAWES_SUB"
 local _prev_mode        = -1        -- last decoded mode number (-1 = uninitialised)
@@ -206,6 +183,7 @@ local _submode_ms       = 0         -- millis() when current substate was entere
 local _rc_ch1 = rc:get_channel(1)   -- roll rate override (flight)
 local _rc_ch2 = rc:get_channel(2)   -- pitch rate override (flight)
 local _rc_ch3 = rc:get_channel(3)   -- collective override (vz controller)
+local _rc_ch4 = rc:get_channel(4)   -- yaw rate override (always neutral; no RC receiver)
 local _rc_ch8 = rc:get_channel(8)   -- motor interlock keepalive (H_RSC_MODE=1 passthrough)
 
 -- ── Flight subsystem state ───────────────────────────────────────────────────
@@ -328,95 +306,10 @@ end
 
 local function _on_mode_enter(mode)
     _nv_floats          = {}    -- clear named-float inbox on mode change so stale substates cannot bleed through
-    _yaw_i              = 0.0
-    _yaw_last_throttle  = 0.0
-    _yaw_in_dead_zone   = true
-    _yaw_status_ms      = 0
-    _yaw_not_stable_ms  = nil
     _none_status_ms     = 0     -- fire mode-0 log immediately on entry
     if mode == MODE_PUMPING then
         -- Ground planner owns substate; Lua resets only the internally-derived target.
         _pump_bz_ri = nil   -- recomputed from tether direction after first GPS capture
-    end
-end
-
--- ── Yaw-trim subsystem ───────────────────────────────────────────────────────
-
-local function _set_throttle_pct(pct)
-    -- Convert 0-100% throttle to PWM us (range 800-2000) and send to Script 1 output.
-    -- 800 us = off (SERVO9_TRIM), 2000 us = full throttle.
-    local pwm = math.floor(800.0 + pct * 12.0 + 0.5)
-    SRV_Channels:set_output_pwm(YAW_SRV_FUNC, pwm)
-end
-
-local function run_yaw_trim()
-    local now_ms = millis()
-
-    if not arming:is_armed() then
-        _yaw_last_throttle = 0.0; _yaw_in_dead_zone = true
-        _set_throttle_pct(0); return
-    end
-
-    -- Stability watchdog latch: motor off permanently after 30 s of instability.
-    if _yaw_stopped then
-        _yaw_last_throttle = 0.0
-        _set_throttle_pct(0); return
-    end
-
-    local gyro_z = 0.0
-    local gyro = ahrs:get_gyro()
-    if gyro then gyro_z = gyro:z() end
-
-    -- Stability watchdog.
-    if math.abs(gyro_z) > YAW_STABLE_RAD_S then
-        if _yaw_not_stable_ms == nil then _yaw_not_stable_ms = now_ms end
-        if now_ms - _yaw_not_stable_ms >= YAW_STABLE_TIMEOUT_MS then
-            _yaw_i = 0.0; _yaw_stopped = true; _yaw_last_throttle = 0.0
-            _set_throttle_pct(0)
-            gcs:send_text(0, "RAWES yaw: unstable 30s - motor off")
-            arming:disarm(); return
-        end
-    else
-        _yaw_not_stable_ms = nil
-    end
-
-    -- Wrong rotation direction: cut motor; watchdog will disarm after 30 s.
-    if gyro_z < -math.rad(30.0) then
-        _yaw_i = 0.0; _yaw_last_throttle = 0.0
-        _set_throttle_pct(0); return
-    end
-
-    -- Dead zone: motor stays off until hub rotation exceeds threshold.
-    -- Once running, PI continues uninterrupted (handles the natural return-to-zero case).
-    local in_dead_zone = _yaw_last_throttle == 0.0 and math.abs(gyro_z) < YAW_DEAD_ZONE_RAD_S
-    if in_dead_zone ~= _yaw_in_dead_zone then
-        _yaw_in_dead_zone = in_dead_zone
-        if in_dead_zone then
-            gcs:send_text(6, string.format("RAWES yaw: dead zone  gyro=%.1f deg/s - motor off",
-                math.deg(gyro_z)))
-        else
-            gcs:send_text(6, string.format("RAWES yaw: leaving dead zone  gyro=%.1f deg/s - PI starting",
-                math.deg(gyro_z)))
-        end
-    end
-    if in_dead_zone then
-        _set_throttle_pct(0); return
-    end
-
-    -- PI controller.
-    _yaw_i = math.max(-YAW_I_MAX, math.min(YAW_I_MAX,
-             _yaw_i + KI_YAW * gyro_z * 0.01))
-    local throttle_pct = math.max(0.0, math.min(100.0,
-        BASE_THROTTLE_PCT + KP_YAW * gyro_z + _yaw_i))
-    _yaw_last_throttle = throttle_pct
-    _set_throttle_pct(throttle_pct)
-
-    -- Periodic status every 5 s.
-    if now_ms - _yaw_status_ms >= 5000 then
-        _yaw_status_ms = now_ms
-        gcs:send_text(6, string.format(
-            "RAWES yaw: gyro=%.1f deg/s  thr=%.1f%%  I=%.1f%%",
-            math.deg(gyro_z), throttle_pct, _yaw_i))
     end
 end
 
@@ -744,6 +637,59 @@ local function run_flight()
     end
 end
 
+-- ── RAWES_ARM: timed arm/disarm state machine ────────────────────────────────
+-- States: nil → interlock_low → arming → armed → nil (on expiry/disarm)
+-- Arming sequence avoids "Motor Interlock Enabled" prearm failure by holding
+-- Ch8 LOW for one tick before calling arming:arm(), then retrying each tick
+-- until is_armed().  Re-sending refreshes the deadline; while already armed
+-- it only refreshes the deadline (no re-arm cycle needed).
+
+local function run_armon(now)
+    local armon_ms = _nv_floats["RAWES_ARM"]
+    if armon_ms and armon_ms > 0 then
+        _nv_floats["RAWES_ARM"] = nil
+        _armon_deadline_ms = now + armon_ms
+        _armon_secs        = math.floor(armon_ms / 1000)
+        _armon_armed_sent  = false
+        if _armon_state ~= "armed" then
+            _armon_state = "interlock_low"
+        end
+    end
+
+    if _armon_state == "interlock_low" then
+        -- Step 1: set interlock LOW and wait one tick so ArduPilot sees it before arm().
+        if _rc_ch3 then _rc_ch3:set_override(1000) end
+        if _rc_ch8 then _rc_ch8:set_override(1000) end  -- LOW: prearm check will pass
+        _armon_state = "arming"
+
+    elseif _armon_state == "arming" then
+        -- Step 2: keep interlock LOW, retry arm() each tick until is_armed().
+        if _rc_ch3 then _rc_ch3:set_override(1000) end
+        if _rc_ch8 then _rc_ch8:set_override(1000) end
+        if arming:is_armed() then
+            _armon_state = "armed"
+        else
+            arming:arm()
+        end
+
+    elseif _armon_state == "armed" then
+        -- Step 3: armed — interlock HIGH so motor can spin; hold overrides.
+        if _rc_ch3 then _rc_ch3:set_override(1000) end
+        if _rc_ch8 then _rc_ch8:set_override(2000) end
+        if not _armon_armed_sent then
+            _armon_armed_sent = true
+            gcs:send_text(6, string.format("RAWES arm-on: armed, expires in %ds", _armon_secs))
+        end
+        if _armon_deadline_ms and now >= _armon_deadline_ms then
+            _armon_state       = nil
+            _armon_deadline_ms = nil
+            _armon_armed_sent  = false
+            arming:disarm()
+            gcs:send_text(6, "RAWES arm-on: expired, disarmed")
+        end
+    end
+end
+
 -- ── Main update ──────────────────────────────────────────────────────────────
 
 local function update()
@@ -766,32 +712,11 @@ local function update()
     local sub  = math.floor((_nv_floats["RAWES_SUB"] or 0) + 0.5)
     local now  = millis()
 
-    -- ── RAWES_ARM: timed arm/disarm (cross-mode) ──────────────────────────
-    -- GCS (Python) force-arms the vehicle before sending RAWES_ARM; Lua owns
-    -- the RC overrides and the countdown timer.  "armed" confirmation is sent
-    -- once arming:is_armed() is true.
-    -- Consumed on read so each send fires exactly once; re-sending refreshes timer.
-    local armon_ms = _nv_floats["RAWES_ARM"]
-    if armon_ms and armon_ms > 0 then
-        _nv_floats["RAWES_ARM"] = nil
-        _armon_deadline_ms = now + armon_ms
-        _armon_secs        = math.floor(armon_ms / 1000)   -- plain number, safe for format
-        _armon_armed_sent  = false
-    end
-    if _armon_deadline_ms ~= nil then
-        if _rc_ch3 then _rc_ch3:set_override(1000) end   -- throttle low
-        if _rc_ch8 then _rc_ch8:set_override(2000) end   -- motor interlock ON
-        if arming:is_armed() and not _armon_armed_sent then
-            _armon_armed_sent = true
-            gcs:send_text(6, string.format("RAWES arm-on: armed, expires in %ds", _armon_secs))
-        end
-        if now >= _armon_deadline_ms then
-            _armon_deadline_ms = nil
-            _armon_armed_sent  = false
-            arming:disarm()
-            gcs:send_text(6, "RAWES arm-on: expired, disarmed")
-        end
-    end
+    -- ── CH4 yaw always neutral (no RC receiver; prevents ACRO yaw wind-up) ──
+    if _rc_ch4 then _rc_ch4:set_override(1500) end
+
+    -- ── RAWES_ARM state machine (cross-mode) ─────────────────────────────
+    run_armon(now)
 
     -- Track mode and substate changes; reset state on mode entry.
     if mode ~= _prev_mode then
@@ -818,15 +743,10 @@ local function update()
     end
 
     -- Motor interlock keepalive: RC overrides expire after ~1 s; 100 Hz keeps Ch8 HIGH.
+    -- run_armon() already sets Ch8=2000 each tick while in "armed" state; this is the
+    -- fallback for vehicles armed via other means (non-ARMON paths).
     if arming:is_armed() and _rc_ch8 then
         _rc_ch8:set_override(2000)
-    end
-
-    -- Yaw-trim subsystem: runs every tick (100 Hz).
-    -- MODE_YAW_LUA (2) always runs yaw regardless of RAWES_YAW.
-    -- For all other modes: RAWES_YAW=1 NV float enables yaw trim alongside flight.
-    if mode == MODE_YAW_LUA or (_nv_floats["RAWES_YAW"] or 0) >= 1 then
-        run_yaw_trim()
     end
 
     -- Flight subsystem: runs at 50 Hz sub-step
@@ -844,8 +764,7 @@ end
 
 local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
 local _sub_init   = 0   -- substate arrives via NAMED_VALUE_FLOAT "RAWES_SUB", not SCR_USER6
-local _mode_names = {[0]="none", [1]="steady", [2]="yaw_lua",
-                     [4]="landing", [5]="pumping"}
+local _mode_names = {[0]="none", [1]="steady", [4]="landing", [5]="pumping"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

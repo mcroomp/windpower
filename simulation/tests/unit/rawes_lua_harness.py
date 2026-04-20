@@ -151,6 +151,20 @@ class RawesLua:
         self._mock.armed = bool(v)
 
     @property
+    def arm_fail_n(self) -> int:
+        """Number of arming:arm() calls that will silently fail before succeeding."""
+        return int(self._mock.arm_fail_n)
+
+    @arm_fail_n.setter
+    def arm_fail_n(self, n: int):
+        self._mock.arm_fail_n = int(n)
+
+    @property
+    def arm_call_count(self) -> int:
+        """Total number of arming:arm() calls since last reset."""
+        return int(self._mock.arm_call_count)
+
+    @property
     def healthy(self) -> bool:
         """AHRS health flag -- script skips attitude maths when False."""
         return bool(self._mock.healthy)

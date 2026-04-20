@@ -59,18 +59,19 @@ def torque_armed_profile(request, tmp_path):
 
 
 def _lua_torque_stack(tmp_path, request, armon_ms):
-    """Shared setup for Lua torque fixtures."""
+    """Shared setup for Lua torque fixtures.
+
+    ArduPilot DDFP yaw PID (H_TAIL_TYPE=4) drives SERVO4 (tail_channel=3).
+    Lua (rawes.lua, SCR_USER6=0) handles only RAWES_ARM arming and Ch8 keepalive.
+    """
     import torque_model as _m
     return _torque_stack(
         tmp_path,
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
-        tail_channel=8,
+        tail_channel=3,
         extra_params=_LUA_TORQUE_EXTRA_PARAMS,
         install_scripts=("rawes.lua",),
         test_name=request.node.name,
-        # ATC_RAT_YAW_P=0.0: Lua is the sole feedforward provider; ArduPilot yaw PID
-        # must be inactive so it doesn't fight the Lua trim output.
-        boot_params={"ATC_RAT_YAW_P": 0.0},
         armon_ms=armon_ms,
     )
 

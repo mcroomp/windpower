@@ -31,15 +31,6 @@ _rawes_fns = {
     KP_VZ                  = KP_VZ,
     VZ_LAND_SP             = VZ_LAND_SP,
 
-    -- ── Yaw-trim constants ───────────────────────────────────────────────
-    BASE_THROTTLE_PCT      = BASE_THROTTLE_PCT,
-    KP_YAW                 = KP_YAW,
-    KI_YAW                 = KI_YAW,
-    YAW_I_MAX              = YAW_I_MAX,
-    YAW_SRV_FUNC           = YAW_SRV_FUNC,
-    YAW_STABLE_RAD_S       = YAW_STABLE_RAD_S,
-    YAW_STABLE_TIMEOUT_MS  = YAW_STABLE_TIMEOUT_MS,
-    YAW_DEAD_ZONE_RAD_S    = YAW_DEAD_ZONE_RAD_S,
     -- ── Pure math / geometry ─────────────────────────────────────────────
 
     rodrigues              = rodrigues,
@@ -59,21 +50,13 @@ _rawes_fns = {
     -- ── Subsystem entry points ───────────────────────────────────────────
 
     run_flight   = run_flight,
-    run_yaw_trim = run_yaw_trim,
+    run_armon    = run_armon,
 
-    -- ── Yaw subsystem state accessors (for test_yaw_lua.py) ─────────────
-    -- Return the current value of each module-level yaw state variable.
-    -- Lua nil is returned as-is; lupa maps it to Python None.
-
-    yaw_i                = function() return _yaw_i end,
-    yaw_stopped          = function() return _yaw_stopped end,
-    yaw_in_dead_zone     = function() return _yaw_in_dead_zone end,
-    yaw_not_stable_ms    = function() return _yaw_not_stable_ms end,
-
-    -- PWM formula mirror of _set_throttle_pct() for conversion tests.
-    pwm_for_pct = function(pct)
-        return math.floor(800.0 + pct * 12.0 + 0.5)
-    end,
+    -- ── RAWES_ARM state accessors (for test_armon_lua.py) ─────────────
+    armon_state       = function() return _armon_state end,
+    armon_deadline_ms = function() return _armon_deadline_ms end,
+    armon_armed_sent  = function() return _armon_armed_sent end,
+    armon_secs        = function() return _armon_secs end,
 
     -- ── Inline logic extracted for unit testing ──────────────────────────
     -- These mirror code that is inlined inside run_flight() so that tests

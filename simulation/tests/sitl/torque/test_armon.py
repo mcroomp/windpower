@@ -69,13 +69,11 @@ def test_armon(torque_unarmed_lua):
     log = ctx.log
     gcs = ctx.gcs
 
-    # ── Phase 1 setup: arm via GCS (force), then hand ownership to RAWES_ARM ────
-    # SITL prearm checks (motor interlock, ATC_RAT_YAW_P=0, accels) block Lua
-    # arming:arm().  GCS force-arm bypasses them; Lua then owns Ch3/Ch8 and timer.
-    log.info("Force-arming via GCS ...")
-    gcs.arm(timeout=10.0, force=True, rc_override={8: 2000})
-
-    log.info("Sending RAWES_ARM=%d ms to start Lua timer ...", _ARMED_ARMON_MS)
+    # ── Phase 1 setup: send RAWES_ARM — Lua state machine arms the vehicle ─────
+    # Lua handles the full arming sequence autonomously:
+    #   interlock_low → arming (retry until accels settle) → armed.
+    # No GCS force-arm; Lua owns Ch3/Ch8 and the countdown timer.
+    log.info("Sending RAWES_ARM=%d ms — Lua state machine will arm ...", _ARMED_ARMON_MS)
     gcs.send_named_float(NV_ARMON_KEY, float(_ARMED_ARMON_MS))
 
     # Wait for Lua to confirm it sees the arm state (hard fail — ARMON must work).
@@ -118,7 +116,7 @@ def test_armon(torque_unarmed_lua):
                 return True
 
         elif mt == "SERVO_OUTPUT_RAW":
-            ch9 = getattr(msg, "servo9_raw", 0) or 0
+            ch9 = getattr(msg, "servo4_raw", 0) or 0
             pwm[0] = ch9
 
         elif mt == "ATTITUDE":
@@ -185,7 +183,7 @@ def test_armon(torque_unarmed_lua):
         if mt == "STATUSTEXT":
             log.info("t=%.1f  SITL: %s", t_rel, msg.text.rstrip("\x00").strip())
         elif mt == "SERVO_OUTPUT_RAW":
-            ch9 = getattr(msg, "servo9_raw", 0) or 0
+            ch9 = getattr(msg, "servo4_raw", 0) or 0
             pwm[0] = ch9
         elif mt == "ATTITUDE":
             elapsed = gcs.sim_now() - t_drift_start
