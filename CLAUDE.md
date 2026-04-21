@@ -259,7 +259,7 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 
 See [hardware/dshot.md](hardware/dshot.md) for bench and flight-mode parameter tables, AM32 EDT setup, wiring, and troubleshooting.
 
-GB4008 wired to **AUX OUT 1 (output 9, FMU)**. In flight mode (`SERVO9_FUNCTION=94`): Lua writes GB4008 PWM via `SRV_Channels` (Heli frame). In bench mode (`SERVO9_FUNCTION=36`): direct PWM via Rover frame (`MOT_PWM_TYPE=6`). Use `calibrate.py bench-mode` / `flight-mode` to toggle. In DShot mode the ESC auto-arms from the first valid DShot packet — no PWM arming sequence needed.
+GB4008 wired to **AUX OUT 1 (output 9, FMU)**. In flight mode (`SERVO9_FUNCTION=94`): Lua writes GB4008 PWM via `SRV_Channels` (Heli frame). In bench mode (`SERVO9_FUNCTION=36`): direct PWM via Rover frame (`MOT_PWM_TYPE=6`). Toggle with `setparam SERVO9_FUNCTION 36/94` in the calibrate REPL. In DShot mode the ESC auto-arms from the first valid DShot packet — no PWM arming sequence needed.
 
 ---
 

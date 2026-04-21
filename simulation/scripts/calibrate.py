@@ -24,17 +24,14 @@ Swashplate PWM range: 1000 us (min) ... 1500 us (neutral) ... 2000 us (max)
 
 Commands
 --------
-  servo <n> <pwm>                 Set output n (1-16) to pwm us directly
-  neutral [n]                     Set output n (or all of 1-3) to 1500 us
-  swash <coll_%> [lon_%] [lat_%]  Set S1/S2/S3 via H3-120 mixer
-                                   coll/lon/lat are -100..+100 (% of full throw)
-  motor <pct>                     Run GB4008 motor test at pct % (0-100)
-  motor off                       Stop motor test
-  sweep <n> [step_ms]             Slowly sweep output n: 1000->2000->1000
-  status                          Print current SERVO_OUTPUT_RAW
-  ping [baud]                     Scan all COM ports and report which have ArduPilot
-  help                            Show this list
-  quit                            Exit
+  See 'help' for the full list. Key commands:
+  servo/neutral/swash/motor/sweep  -- hardware calibration
+  status                           -- vehicle state, battery, EKF, servo outputs, key params
+  monitor/listen                   -- live telemetry streams
+  arm/disarm/reboot/mode           -- operations
+  getparam/setparam                -- parameter R/W
+  ftp-upload/ftp-list/ftp-remove   -- Lua script deployment
+  ping                             -- COM port discovery
 
 Notes
 -----
@@ -175,60 +172,131 @@ _SYS_STATUS = {0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
 
 
 
-def _print_vehicle_status(session: RawesGCS) -> None:
-    """Print armed state, flight mode, EKF health, and battery from live MAVLink."""
-    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=5.0)
-    if hb is None:
-        print("  No HEARTBEAT received"); return
+_KEY_PARAMS = [
+    ("H_TAIL_TYPE",      4,   "DDFP CCW for GB4008"),
+    ("SCR_ENABLE",       1,   "Lua scripting on"),
+    ("SCR_USER6",        None, "Lua mode (0=none 1=steady 4=landing 5=pumping)"),
+    ("ARMING_CHECK",     0,   "prearm checks disabled"),
+    ("BRD_SAFETY_DEFLT", 0,   "safety switch disabled"),
+]
 
-    armed   = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-    mode_id = hb.custom_mode
-    mode    = _COPTER_MODES.get(mode_id, f"MODE_{mode_id}")
-    status  = _SYS_STATUS.get(hb.system_status, str(hb.system_status))
-
-    print(f"  Armed        : {'YES  <--' if armed else 'no'}")
-    print(f"  Mode         : {mode} ({mode_id})")
-    print(f"  Sys status   : {status}")
-
-    sys_status = session._recv(type="SYS_STATUS", blocking=True, timeout=2.0)
-    if sys_status:
-        v = sys_status.voltage_battery / 1000.0 if sys_status.voltage_battery != 65535 else None
-        i = sys_status.current_battery / 100.0  if sys_status.current_battery >= 0    else None
-        r = sys_status.battery_remaining
-        batt = f"{v:.2f} V" if v else "n/a"
-        if i is not None and i >= 0:
-            batt += f"  {i:.2f} A"
-        if r >= 0:
-            batt += f"  {r}%"
-        print(f"  Battery      : {batt}")
-
-    ekf = session._recv(type="EKF_STATUS_REPORT", blocking=True, timeout=2.0)
-    if ekf:
-        flags   = ekf.flags
-        att_ok  = bool(flags & 0x01)
-        vel_ok  = bool(flags & 0x02)
-        pos_ok  = bool(flags & 0x04)
-        healthy = att_ok and vel_ok
-        print(f"  EKF flags    : 0x{flags:04X}  att={att_ok}  vel={vel_ok}  pos_rel={pos_ok}  {'OK' if healthy else 'DEGRADED'}")
+_LUA_MODES = {0: "none", 1: "steady", 4: "landing", 5: "pumping"}
 
 
 def _print_status(session: RawesGCS) -> None:
-    """Print the most recent SERVO_OUTPUT_RAW message."""
-    msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
-    if msg is None:
+    """Unified status: vehicle, battery, EKF, servo outputs, key params."""
+    sep = "-" * 50
+
+    # --- vehicle -------------------------------------------------------------
+    print(f"\n{sep}")
+    print("VEHICLE")
+    print(sep)
+    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=5.0)
+    if hb is None:
+        print("  (no HEARTBEAT received)")
+    else:
+        armed   = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+        mode_id = hb.custom_mode
+        mode    = _COPTER_MODES.get(mode_id, f"MODE_{mode_id}")
+        status  = _SYS_STATUS.get(hb.system_status, str(hb.system_status))
+        print(f"  Armed      : {'YES  <--' if armed else 'no'}")
+        print(f"  Mode       : {mode} ({mode_id})")
+        print(f"  Sys status : {status}")
+
+    # --- battery -------------------------------------------------------------
+    print(f"\n{sep}")
+    print("BATTERY")
+    print(sep)
+    batt = session._recv(type="BATTERY_STATUS", blocking=True, timeout=2.0)
+    if batt:
+        cells = [v for v in batt.voltages if v != 65535]
+        total_v   = sum(cells) / 1000.0 if cells else None
+        current_a = batt.current_battery / 100.0 if batt.current_battery >= 0 else None
+        remaining = batt.battery_remaining
+        v_str = f"{total_v:.2f} V" if total_v else "n/a"
+        i_str = f"  {current_a:.2f} A" if current_a is not None else ""
+        r_str = f"  {remaining}%" if remaining >= 0 else ""
+        print(f"  {v_str}{i_str}{r_str}")
+        if len(cells) > 1:
+            print("  cells: " + "  ".join(f"{v/1000.0:.3f}V" for v in cells))
+        if total_v and len(cells) >= 3 and total_v / len(cells) < 3.5:
+            print(f"  [WARN] avg cell {total_v/len(cells):.3f} V -- low")
+    else:
+        ss = session._recv(type="SYS_STATUS", blocking=True, timeout=1.0)
+        if ss and ss.voltage_battery != 65535:
+            v = ss.voltage_battery / 1000.0
+            i = ss.current_battery / 100.0 if ss.current_battery >= 0 else None
+            r = ss.battery_remaining
+            print(f"  {v:.2f} V" + (f"  {i:.2f} A" if i is not None else "") +
+                  (f"  {r}%" if r >= 0 else ""))
+        else:
+            print("  (no battery data)")
+
+    # --- EKF -----------------------------------------------------------------
+    print(f"\n{sep}")
+    print("EKF")
+    print(sep)
+    ekf = session._recv(type="EKF_STATUS_REPORT", blocking=True, timeout=2.0)
+    if ekf:
+        flags  = ekf.flags
+        att_ok = bool(flags & 0x01)
+        vel_ok = bool(flags & 0x02)
+        pos_ok = bool(flags & 0x04)
+        health = "OK" if (att_ok and vel_ok) else "DEGRADED"
+        print(f"  Flags: 0x{flags:04X}  att={att_ok}  vel={vel_ok}  pos_rel={pos_ok}  {health}")
+    else:
+        print("  (no EKF_STATUS_REPORT received)")
+
+    # --- servo outputs -------------------------------------------------------
+    print(f"\n{sep}")
+    print("SERVO OUTPUTS")
+    print(sep)
+    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
+    if srv:
+        for i in range(1, 9):
+            val = getattr(srv, f"servo{i}_raw", 0)
+            if not val:
+                continue
+            tag = {SERVO_S1: "  <- S1 (0 deg)", SERVO_S2: "  <- S2 (120 deg)",
+                   SERVO_S3: "  <- S3 (240 deg)"}.get(i, "")
+            if i == SERVO_MOTOR:
+                if val <= 800:
+                    tag = "  <- GB4008 off"
+                else:
+                    pct = (val - 800) / (2000 - 800) * 100
+                    tag = f"  <- GB4008 {pct:.0f}%"
+            print(f"  Ch {i}: {val} us{tag}")
+    else:
         print("  (no SERVO_OUTPUT_RAW received)")
-        return
-    print(f"  {'Ch':<4} {'PWM (us)':<10}")
-    print(f"  {'-'*14}")
-    for i in range(1, 9):
-        val = getattr(msg, f"servo{i}_raw", 0)
-        if val:
-            tag = ""
-            if i == SERVO_S1:    tag = "  <- S1 (0 deg)"
-            elif i == SERVO_S2:  tag = "  <- S2 (120 deg)"
-            elif i == SERVO_S3:  tag = "  <- S3 (240 deg)"
-            elif i == SERVO_MOTOR: tag = "  <- GB4008 motor"
-            print(f"  {i:<4} {val:<10}{tag}")
+
+    # --- key params ----------------------------------------------------------
+    print(f"\n{sep}")
+    print("KEY PARAMS")
+    print(sep)
+    for name, expected, note in _KEY_PARAMS:
+        val = session.get_param(name)
+        if val is None:
+            print(f"  {name:<22} NOT FOUND  ({note})")
+            continue
+        if name == "SCR_USER6":
+            lua_name = _LUA_MODES.get(int(val), f"mode_{int(val)}")
+            print(f"  {name:<22} {val:<8.4g}  {lua_name}  ({note})")
+        elif expected is not None and abs(val - float(expected)) > 1e-4:
+            print(f"  {name:<22} {val:<8.4g}  [DIFF] expected {expected}")
+        else:
+            print(f"  {name:<22} {val:<8.4g}  OK  ({note})")
+
+    ss2 = session._recv(type="SYS_STATUS", blocking=True, timeout=2.0)
+    if ss2:
+        motor_bit = 0x000200
+        present = bool(ss2.onboard_control_sensors_present & motor_bit)
+        enabled = bool(ss2.onboard_control_sensors_enabled & motor_bit)
+        healthy = bool(ss2.onboard_control_sensors_health  & motor_bit)
+        health  = "OK" if healthy else "[WARN] unhealthy"
+        print(f"  {'motor outputs':<22} present={present}  enabled={enabled}  {health}")
+        print(f"  {'CPU load':<22} {ss2.load/10.0:.1f}%")
+
+    print(f"\n{sep}")
 
 
 # ---------------------------------------------------------------------------
@@ -452,10 +520,33 @@ def _upload_script(session: RawesGCS, local_path: str,
 # COM port scanner
 # ---------------------------------------------------------------------------
 
+_FALLBACK_BAUDS = [57600, 38400, 19200, 9600]
+
+
+def _probe_port(port: str, baud: int, timeout: float) -> tuple:
+    """Try one port at one baud. Returns (ok, sysid) — closes connection before returning."""
+    conn = None
+    try:
+        conn = mavutil.mavlink_connection(port, baud=baud, autoreconnect=False)
+        hb = conn.wait_heartbeat(timeout=timeout)
+        if hb:
+            return True, conn.target_system
+        return False, None
+    except Exception:
+        return False, None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _ping_ports(baud: int = 115200, timeout: float = 3.0) -> list:
     """
     Enumerate all COM ports and probe each for a MAVLink HEARTBEAT.
-    Returns list of dicts: {port, description, ok, sysid, detail}.
+    If the primary baud yields no heartbeat, retries with lower baud rates.
+    Returns list of dicts: {port, description, ok, sysid, baud, detail}.
     """
     try:
         import serial.tools.list_ports as _list_ports
@@ -468,34 +559,33 @@ def _ping_ports(baud: int = 115200, timeout: float = 3.0) -> list:
         print("  No COM ports found.")
         return []
 
+    fallbacks = [b for b in _FALLBACK_BAUDS if b < baud]
+    all_bauds = [baud] + fallbacks
     print(f"  Scanning {len(ports)} port(s) at {baud} baud ({timeout:.0f} s each) ...")
+    if fallbacks:
+        print(f"  Fallback baud rates if no heartbeat: {fallbacks}")
     print()
     results = []
     for info in sorted(ports, key=lambda p: p.device):
         port = info.device
         desc = (info.description or "").strip()
         print(f"  {port:<12} {desc:<40} ", end="", flush=True)
-        entry = {"port": port, "description": desc, "ok": False, "sysid": None, "detail": ""}
-        conn = None
-        try:
-            conn = mavutil.mavlink_connection(port, baud=baud, autoreconnect=False)
-            hb = conn.wait_heartbeat(timeout=timeout)
-            if hb:
-                sysid = conn.target_system
-                entry.update(ok=True, sysid=sysid, detail=f"sysid={sysid}")
-                print(f"[OK]  ArduPilot  sysid={sysid}")
-            else:
-                entry["detail"] = "no HEARTBEAT"
-                print("[--]  no HEARTBEAT")
-        except Exception as exc:
-            entry["detail"] = str(exc)
-            print(f"[ERR] {str(exc)[:60]}")
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+        entry = {"port": port, "description": desc, "ok": False, "sysid": None, "baud": None, "detail": ""}
+        found = False
+        for try_baud in all_bauds:
+            ok, sysid = _probe_port(port, try_baud, timeout)
+            if ok:
+                entry.update(ok=True, sysid=sysid, baud=try_baud, detail=f"sysid={sysid} baud={try_baud}")
+                marker = f"({try_baud})" if try_baud != baud else ""
+                print(f"[OK]  ArduPilot  sysid={sysid}  {try_baud} baud {marker}".rstrip())
+                found = True
+                break
+            if try_baud != baud:
+                print(f"\n  {port:<12} {'':40} retry {try_baud} baud ... ", end="", flush=True)
+        if not found:
+            tried = "/".join(str(b) for b in all_bauds)
+            entry["detail"] = f"no HEARTBEAT (tried {tried})"
+            print(f"[--]  no HEARTBEAT (tried {tried})")
         results.append(entry)
 
     print()
@@ -509,212 +599,6 @@ def _ping_ports(baud: int = 115200, timeout: float = 3.0) -> list:
     return results
 
 
-# ---------------------------------------------------------------------------
-# Motor / ESC diagnostic helpers
-# ---------------------------------------------------------------------------
-
-# Parameters audited by _diag_motor
-_MOTOR_PARAMS = [
-    ("H_TAIL_TYPE",        "Must be 4 (DDFP CCW) for GB4008 on output 4"),
-    ("SERVO4_MIN",         "Must be 800 (off)"),
-    ("SERVO4_MAX",         "Must be 2000 (full throttle)"),
-    ("SERVO4_TRIM",        "Must be 800 (DDFP: trim = off)"),
-    ("H_YAW_TRIM",         "Near-zero feedforward (~0.02); integrator carries equilibrium"),
-    ("ATC_RAT_YAW_P",      "Yaw rate P gain (0.015)"),
-    ("ATC_RAT_YAW_I",      "Yaw rate I gain (0.01)"),
-    ("ATC_RAT_YAW_IMAX",   "Yaw I clamp (0.7 > equilibrium throttle ~0.505)"),
-    ("H_RSC_MODE",         "Must be 1 (setpoint); CH8 controls motor interlock"),
-    ("H_RSC_RUNUP_TIME",   "Motor runup time [s] -- motor won't respond until elapsed"),
-    ("BRD_SAFETYENABLE",   "1=safety switch required  0=disabled"),
-    ("SCR_ENABLE",         "1 = Lua scripting enabled (rawes.lua)"),
-    ("SCR_USER6",          "Lua mode: 0=none (arming only)"),
-    ("ARMING_CHECK",       "0 = prearm checks disabled (Lua arming:arm() is not force-arm)"),
-    ("RPM1_TYPE",          "RPM sensor type: 5=ESC telemetry"),
-]
-
-
-def _diag_motor(session: RawesGCS) -> None:
-    """
-    Motor / DDFP diagnostic dump.
-
-    Checks ArduPilot parameter configuration and live servo output for the
-    GB4008 anti-rotation motor on output 4 (DDFP CCW, H_TAIL_TYPE=4).
-    """
-    sep = "-" * 60
-
-    # -- 1. Parameter audit -------------------------------------------------
-    print(f"\n{sep}")
-    print("1. PARAMETER AUDIT  (DDFP / motor chain)")
-    print(sep)
-    params = {}
-    for name, note in _MOTOR_PARAMS:
-        val = session.get_param(name)
-        params[name] = val
-        val_str = f"{val:.3f}" if val is not None else "NOT FOUND"
-        print(f"  {name:<26} = {val_str:<10}  ({note})")
-
-    print()
-    issues = []
-    v = params.get
-    if v("H_TAIL_TYPE") != 4.0:
-        issues.append(f"H_TAIL_TYPE={v('H_TAIL_TYPE')} -- expected 4 (DDFP CCW); motor not driven")
-    if v("SERVO4_MIN") != 800.0:
-        issues.append(f"SERVO4_MIN={v('SERVO4_MIN')} -- expected 800 (off)")
-    if v("SERVO4_MAX") != 2000.0:
-        issues.append(f"SERVO4_MAX={v('SERVO4_MAX')} -- expected 2000")
-    if v("H_RSC_MODE") != 1.0:
-        issues.append(f"H_RSC_MODE={v('H_RSC_MODE')} -- expected 1 (setpoint); CH8 interlock won't work")
-    if v("BRD_SAFETYENABLE") == 1.0:
-        issues.append("BRD_SAFETYENABLE=1 -- safety switch must be pressed before outputs are active")
-
-    if issues:
-        print("  [WARN] Likely configuration issues:")
-        for iss in issues:
-            print(f"    * {iss}")
-    else:
-        print("  [OK] No obvious parameter misconfigurations found")
-
-    # -- 2. Safety switch / arming state ------------------------------------
-    print(f"\n{sep}")
-    print("2. SAFETY SWITCH / ARMING STATE")
-    print(sep)
-    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=3.0)
-    if hb:
-        armed   = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-        enabled = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_DECODE_POSITION_SAFETY)
-        print(f"  Armed         : {armed}")
-        print(f"  Safety active : {enabled}")
-        print(f"  Custom mode   : {hb.custom_mode}  (1=ACRO)")
-        print(f"  System status : {hb.system_status}  (3=STANDBY  4=ACTIVE)")
-    else:
-        print("  (no HEARTBEAT received)")
-
-    # -- 3. Servo output snapshot -------------------------------------------
-    print(f"\n{sep}")
-    print("3. SERVO OUTPUT RAW  (what ArduPilot is sending to outputs)")
-    print(sep)
-    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
-    if srv:
-        for i in range(1, 9):
-            val = getattr(srv, f"servo{i}_raw", 0)
-            if val:
-                note = ""
-                if i in (1, 2, 3):
-                    note = "  <-- swashplate servo"
-                elif i == 4:
-                    if val <= 800:
-                        note = "  <-- GB4008 off (800 us)"
-                    else:
-                        pct = (val - 800) / (2000 - 800) * 100
-                        note = f"  <-- GB4008 motor ({pct:.0f}% of 800-2000 range)"
-                print(f"  Output {i}: {val} us{note}")
-    else:
-        print("  (no SERVO_OUTPUT_RAW received -- check data stream rate)")
-
-    # -- 4. Motor test + ACK ------------------------------------------------
-    print(f"\n{sep}")
-    print("4. MOTOR TEST COMMAND ACK  (5% throttle, 3 s)")
-    print(sep)
-    print("  Sending MAV_CMD_DO_MOTOR_TEST at 5% ...")
-    _send_motor_test(session, MOTOR_TEST_INSTANCE, 5.0, timeout_s=3.0)
-    ack = session._recv(type="COMMAND_ACK", blocking=True, timeout=3.0)
-    if ack and ack.command == mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST:
-        result_names = {0: "ACCEPTED", 1: "TEMP_REJECTED", 2: "DENIED",
-                        3: "UNSUPPORTED", 4: "FAILED", 5: "IN_PROGRESS"}
-        rname = result_names.get(ack.result, f"code={ack.result}")
-        print(f"  ACK result: {rname}")
-        if ack.result != 0:
-            print("  [WARN] Motor test not accepted -- check arming state or H_RSC_MODE")
-        else:
-            print("  Command accepted -- motor should spin briefly at 5%")
-    else:
-        print("  (no COMMAND_ACK received within 3 s)")
-
-    # -- 5. RPM telemetry ---------------------------------------------------
-    print(f"\n{sep}")
-    print("5. RPM TELEMETRY  (listening 3 s)")
-    print(sep)
-    msgs = _drain(session, ["RPM"], duration=3.0)
-    rpm_msgs = [m for m in msgs if m.get_type() == "RPM"]
-    if rpm_msgs:
-        last_rpm = rpm_msgs[-1]
-        print(f"  RPM sensor: rpm1={last_rpm.rpm1:.0f}  rpm2={last_rpm.rpm2:.0f}")
-        print(f"  ({len(rpm_msgs)} RPM messages in 3 s)")
-    else:
-        print("  (no RPM messages -- RPM1_TYPE may not be set)")
-
-    # Stop motor test
-    _send_motor_test(session, MOTOR_TEST_INSTANCE, 0.0, timeout_s=0.0)
-
-    # -- 6. STATUSTEXT drain ------------------------------------------------
-    print(f"\n{sep}")
-    print("6. STATUSTEXT  (error/warning messages from ArduPilot, last 3 s)")
-    print(sep)
-    status_msgs = _drain(session, ["STATUSTEXT"], duration=3.0)
-    if status_msgs:
-        for m in status_msgs:
-            sev_names = {0:"EMERGENCY", 1:"ALERT", 2:"CRITICAL", 3:"ERROR",
-                         4:"WARNING",   5:"NOTICE", 6:"INFO",    7:"DEBUG"}
-            sev = sev_names.get(m.severity, str(m.severity))
-            print(f"  [{sev}] {m.text.rstrip(chr(0)).strip()}")
-    else:
-        print("  (none)")
-
-    # -- 7. SYS_STATUS motor health -----------------------------------------
-    print(f"\n{sep}")
-    print("7. SYS_STATUS  (motor outputs health)")
-    print(sep)
-    ss = session._recv(type="SYS_STATUS", blocking=True, timeout=2.0)
-    if ss:
-        motor_bit = 0x000200
-        present = bool(ss.onboard_control_sensors_present & motor_bit)
-        enabled = bool(ss.onboard_control_sensors_enabled & motor_bit)
-        healthy = bool(ss.onboard_control_sensors_health  & motor_bit)
-        print(f"  Motor outputs: present={present}  enabled={enabled}  healthy={healthy}")
-        if not healthy:
-            print("  [WARN] Motor outputs NOT healthy -- ESC communication failure")
-        print(f"  CPU load: {ss.load/10.0:.1f}%  Voltage: {ss.voltage_battery/1000.0:.2f} V")
-    else:
-        print("  (no SYS_STATUS received)")
-
-    # -- 8. Battery status --------------------------------------------------
-    print(f"\n{sep}")
-    print("8. BATTERY STATUS")
-    print(sep)
-    batt = session._recv(type="BATTERY_STATUS", blocking=True, timeout=2.0)
-    if batt:
-        cells = [v for v in batt.voltages if v != 65535]
-        total_v = sum(cells) / 1000.0 if cells else None
-        current_a = batt.current_battery / 100.0 if batt.current_battery >= 0 else None
-        remaining = batt.battery_remaining
-        consumed_mah = batt.current_consumed if batt.current_consumed >= 0 else None
-        print(f"  Voltage      : {total_v:.2f} V" if total_v else "  Voltage      : n/a")
-        if len(cells) > 1:
-            cell_str = "  ".join(f"{v/1000.0:.3f}V" for v in cells)
-            print(f"  Cells ({len(cells)}S)   : {cell_str}")
-        print(f"  Current      : {current_a:.2f} A" if current_a is not None else "  Current      : n/a")
-        print(f"  Remaining    : {remaining} %" if remaining >= 0 else "  Remaining    : n/a")
-        if consumed_mah is not None:
-            print(f"  Consumed     : {consumed_mah} mAh")
-        if total_v and len(cells) >= 3:
-            cell_avg = total_v / len(cells)
-            if cell_avg < 3.5:
-                print(f"  [WARN] Average cell voltage {cell_avg:.3f} V -- battery low")
-    else:
-        ss = session._recv(type="SYS_STATUS", blocking=True, timeout=1.0)
-        if ss and ss.voltage_battery != 65535:
-            v = ss.voltage_battery / 1000.0
-            i = ss.current_battery / 100.0 if ss.current_battery >= 0 else None
-            r = ss.battery_remaining
-            print(f"  Voltage      : {v:.2f} V")
-            print(f"  Current      : {i:.2f} A" if i is not None else "  Current      : n/a")
-            print(f"  Remaining    : {r} %" if r >= 0 else "  Remaining    : n/a")
-        else:
-            print("  (no battery data received)")
-
-    print(f"\n{sep}")
-    print("Diagnostic complete.")
-    print(sep)
 
 
 
@@ -773,23 +657,15 @@ Commands:
   motor <pct>                     Run GB4008 motor test at pct % (0-100)
   motor off                       Stop motor test
   sweep <n> [step_ms]             Slowly sweep output n: 1000->2000->1000
-  status                          Print SERVO_OUTPUT_RAW
-  vehicle                         Print armed state, mode, EKF health, battery
-  diag                            DDFP motor diagnostic dump (params + output + motor test)
-  monitor [seconds]               Stream live RPM telemetry (default 10 s)
+  status                          Vehicle state, battery, EKF, servo outputs, key params
+  monitor [seconds]               Stream live ESC telemetry (default 10 s)
   listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
   mode <0,1,4,5>                  Set SCR_USER6 mode and listen 10 s to confirm active
-  arm [seconds] [--download]      Send RAWES_ARM NV command (default 10 s), then print
-                                   yaw rate + SERVO4 PWM each second until expiry;
-                                   add --download to fetch the .BIN log afterwards
+  arm [seconds]                   Set ACRO mode, send RAWES_ARM (default 10 s)
   disarm                          Disarm vehicle
-  hold <pwm> [seconds]            Arm via RAWES_ARM, hold output 4 (GB4008) at pwm us (Ctrl-C to stop)
   reboot                          Reboot ArduPilot
-  config [--apply]                Diff (or apply) full RAWES param set; --apply writes + reboots
   getparam <name>                 Read a parameter value
   setparam <name> <value>         Write a parameter value
-  release [n]                     Zero SERVO{n}_FUNCTION so output n is free for manual servo cmds
-  restore [n]                     Restore SERVO{n}_FUNCTION saved by release
   ftp-list                        List files in /APM/scripts on SD card
   ftp-remove <file>               Remove a file from /APM/scripts
   ftp-upload <file> [--no-restart] Upload .lua file to /APM/scripts and restart
@@ -922,10 +798,6 @@ def _run_command(session: RawesGCS, tokens: list[str],
     if cmd == "status":
         _print_status(session)
 
-    # -- vehicle ------------------------------------------------------------
-    elif cmd == "vehicle":
-        _print_vehicle_status(session)
-
     # -- servo <n> <pwm> ----------------------------------------------------
     elif cmd == "servo":
         if len(tokens) < 3:
@@ -1006,10 +878,6 @@ def _run_command(session: RawesGCS, tokens: list[str],
         if not (1 <= n <= 16):
             print("  Error: n must be 1-16"); return True
         _sweep(session, n, step_ms)
-
-    # -- diag ---------------------------------------------------------------
-    elif cmd == "diag":
-        _diag_motor(session)
 
     # -- monitor [seconds] --------------------------------------------------
     elif cmd == "monitor":
@@ -1259,12 +1127,12 @@ def _run_command(session: RawesGCS, tokens: list[str],
 
     # -- arm [seconds] [--download] -----------------------------------------
     elif cmd == "arm":
-        download = "--download" in tokens
-        non_flag = [t for t in tokens[1:] if not t.startswith("--")]
         try:
-            secs = float(non_flag[0]) if non_flag else 10.0
+            secs = float(tokens[1]) if len(tokens) > 1 else 10.0
         except ValueError:
-            print("  Usage: arm [seconds] [--download]"); return True
+            print("  Usage: arm [seconds]"); return True
+        print("  Setting ACRO mode ...")
+        session.set_mode(1)   # ACRO = 1 in ArduCopter
         armon_ms = int(secs * 1000)
         print(f"  Sending RAWES_ARM={armon_ms} ms -- Lua will arm and hold for {secs:.0f} s ...")
         session.send_named_float("RAWES_ARM", float(armon_ms))
@@ -1313,10 +1181,6 @@ def _run_command(session: RawesGCS, tokens: list[str],
         except KeyboardInterrupt:
             print()
         print(f"  Done.")
-        if download:
-            print()
-            dest = os.path.join(os.path.dirname(__file__), "..", "..", "simulation", "logs", "hardware")
-            _download_latest_log(session, dest_dir=os.path.normpath(dest))
 
     # -- disarm -------------------------------------------------------------
     elif cmd == "disarm":
@@ -1443,8 +1307,8 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_HELP,
     )
-    p.add_argument("--port", "-p", default="COM4",
-                   help="Serial port or MAVLink URL (default: COM4)")
+    p.add_argument("--port", "-p", default=None,
+                   help="Serial port (e.g. COM4); omit to auto-detect")
     p.add_argument("--baud", "-b", type=int, default=115200,
                    help="Baud rate (default: 115200)")
     p.add_argument("--force", "-f", action="store_true",
@@ -1460,7 +1324,50 @@ def _build_parser() -> argparse.ArgumentParser:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _connect(port: str, baud: int) -> RawesGCS:
+def _resolve_port(port: "str | None", baud: int) -> tuple:
+    """
+    Return (port, baud) to use for the connection.
+
+    If port is None, scans all COM ports and returns the first that gives a
+    heartbeat (trying baud then _FALLBACK_BAUDS in order).
+    If port is given, probes that port with baud fallbacks until a heartbeat
+    is received, then returns the working (port, baud).
+    Raises SystemExit if nothing responds.
+    """
+    try:
+        import serial.tools.list_ports as _list_ports
+    except ImportError:
+        raise SystemExit("pyserial not installed -- cannot scan COM ports")
+
+    if port is None:
+        ports = sorted(_list_ports.comports(), key=lambda p: p.device)
+        if not ports:
+            raise SystemExit("No COM ports found.")
+        candidates = [(info.device, (info.description or "").strip()) for info in ports]
+        print(f"No port specified -- scanning {len(candidates)} COM port(s) ...")
+    else:
+        candidates = [(port, "")]
+
+    all_bauds = [baud] + [b for b in _FALLBACK_BAUDS if b < baud]
+    for dev, desc in candidates:
+        label = f"{dev}  {desc}".strip()
+        for try_baud in all_bauds:
+            suffix = f" (fallback)" if try_baud != baud else ""
+            print(f"  {label:<50} {try_baud} baud{suffix} ... ", end="", flush=True)
+            ok, sysid = _probe_port(dev, try_baud, timeout=3.0)
+            if ok:
+                print(f"[OK] sysid={sysid}")
+                return dev, try_baud
+            print("--")
+
+    tried = "/".join(str(b) for b in all_bauds)
+    if port is None:
+        raise SystemExit(f"No ArduPilot heartbeat on any COM port (tried {tried}).")
+    raise SystemExit(f"No heartbeat from {port} at {tried}.")
+
+
+def _connect(port: "str | None", baud: int) -> RawesGCS:
+    port, baud = _resolve_port(port, baud)
     print(f"Connecting to {port} at {baud} baud ...")
     session = RawesGCS(address=port, baud=baud, clock=WallClock())
     session.connect(timeout=15.0)

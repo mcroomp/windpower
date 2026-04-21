@@ -207,5 +207,4 @@ Confirmed working in SITL stack tests (`test_lua_yaw_trim`, `test_lua_flight_ste
 | `RPM1_TYPE` | 0 | Disabled initially — set to 5 after enabling AM32 EDT on ESC |
 | `RPM1_MIN` | 0 | No minimum filter |
 
-Use `calibrate.py bench-mode` to switch to `SERVO9_FUNCTION=36` (Rover frame, `MOT_PWM_TYPE=6`)
-for bench testing. Use `calibrate.py flight-mode` to restore `SERVO9_FUNCTION=94` (Heli frame).
+To switch between bench and flight mode, use `setparam SERVO9_FUNCTION 36` (bench, Rover frame, `MOT_PWM_TYPE=6`) or `setparam SERVO9_FUNCTION 94` (flight, Heli frame) in the calibrate REPL.
