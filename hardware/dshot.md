@@ -1,5 +1,8 @@
 # DShot Configuration — Pixhawk 6C + REVVitRC AM32 + GB4008
 
+> **ESC hardware note:** REVVitRC 50A ships with IFlight_50A firmware (`IFLIGHT_F051` target, STM32F051 MCU).
+> It was flashed to AM32 as an upgrade. MCU signature 0x1F06, EEPROM at 0x7C00.
+
 ## What is DShot?
 
 DShot (Digital Shot) is a digital ESC protocol that replaces analogue PWM.

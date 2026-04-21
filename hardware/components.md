@@ -32,7 +32,9 @@ Pixhawk             --------------------------------> REVVitRC ESC --> GB4008 Mo
 - **Voltage range:** 3-6S (9-26V)
 - **Dimensions:** 44x18x14mm
 - **Weight:** ~23g (without motor wires)
-- **Firmware:** AM32 (native port, not converted from BlHeli32)
+- **MCU:** STM32F051 (signature 0x1F06, confirmed via am32config.py probe)
+- **Original firmware:** IFlight_50A (iFlight 50A ESC firmware, `IFLIGHT_F051` target) — shipped on the REVVitRC hardware
+- **Current firmware:** AM32 (native port, not converted from BlHeli32) — flashed as upgrade over the original IFlight_50A
 - **Built-in BEC:** 7.4V or 8.4V (switchable), can power receivers and servos
 - **Telemetry:** Yes -- voltage, current, temperature
 - **Cutoffs:** Low voltage, current limit, thermal

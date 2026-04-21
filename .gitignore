@@ -27,6 +27,9 @@ simulation/logs/
 # Logs
 *.log
 
+# Node
+node_modules/
+
 # OS / editor
 .DS_Store
 Thumbs.db

@@ -32,6 +32,7 @@ Commands
   motor off                       Stop motor test
   sweep <n> [step_ms]             Slowly sweep output n: 1000->2000->1000
   status                          Print current SERVO_OUTPUT_RAW
+  ping [baud]                     Scan all COM ports and report which have ArduPilot
   help                            Show this list
   quit                            Exit
 
@@ -95,6 +96,9 @@ _SIN240 = math.sin(math.radians(240.0))   # -0.866
 PWM_MIN     = 1000
 PWM_NEUTRAL = 1500
 PWM_MAX     = 2000
+
+# Per-session saved SERVO{n}_FUNCTION values for release/restore.
+_saved_servo_functions: dict[int, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +449,67 @@ def _upload_script(session: RawesGCS, local_path: str,
 
 
 # ---------------------------------------------------------------------------
+# COM port scanner
+# ---------------------------------------------------------------------------
+
+def _ping_ports(baud: int = 115200, timeout: float = 3.0) -> list:
+    """
+    Enumerate all COM ports and probe each for a MAVLink HEARTBEAT.
+    Returns list of dicts: {port, description, ok, sysid, detail}.
+    """
+    try:
+        import serial.tools.list_ports as _list_ports
+        ports = list(_list_ports.comports())
+    except ImportError:
+        print("  ERROR: pyserial not installed")
+        return []
+
+    if not ports:
+        print("  No COM ports found.")
+        return []
+
+    print(f"  Scanning {len(ports)} port(s) at {baud} baud ({timeout:.0f} s each) ...")
+    print()
+    results = []
+    for info in sorted(ports, key=lambda p: p.device):
+        port = info.device
+        desc = (info.description or "").strip()
+        print(f"  {port:<12} {desc:<40} ", end="", flush=True)
+        entry = {"port": port, "description": desc, "ok": False, "sysid": None, "detail": ""}
+        conn = None
+        try:
+            conn = mavutil.mavlink_connection(port, baud=baud, autoreconnect=False)
+            hb = conn.wait_heartbeat(timeout=timeout)
+            if hb:
+                sysid = conn.target_system
+                entry.update(ok=True, sysid=sysid, detail=f"sysid={sysid}")
+                print(f"[OK]  ArduPilot  sysid={sysid}")
+            else:
+                entry["detail"] = "no HEARTBEAT"
+                print("[--]  no HEARTBEAT")
+        except Exception as exc:
+            entry["detail"] = str(exc)
+            print(f"[ERR] {str(exc)[:60]}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        results.append(entry)
+
+    print()
+    ok = [r for r in results if r["ok"]]
+    if ok:
+        print(f"  [OK] Found {len(ok)} ArduPilot device(s):")
+        for r in ok:
+            print(f"       {r['port']}  {r['description']}  ({r['detail']})")
+    else:
+        print("  No ArduPilot devices found on any port.")
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Motor / ESC diagnostic helpers
 # ---------------------------------------------------------------------------
 
@@ -714,17 +779,21 @@ Commands:
   monitor [seconds]               Stream live RPM telemetry (default 10 s)
   listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
   mode <0,1,4,5>                  Set SCR_USER6 mode and listen 10 s to confirm active
-  arm [seconds]                   Send RAWES_ARM NV command (default 10 s), then print
-                                   yaw rate + SERVO4 PWM each second until expiry
+  arm [seconds] [--download]      Send RAWES_ARM NV command (default 10 s), then print
+                                   yaw rate + SERVO4 PWM each second until expiry;
+                                   add --download to fetch the .BIN log afterwards
   disarm                          Disarm vehicle
-  hold <pwm> [seconds]            Arm, hold output 4 (GB4008) at pwm us (Ctrl-C to stop)
+  hold <pwm> [seconds]            Arm via RAWES_ARM, hold output 4 (GB4008) at pwm us (Ctrl-C to stop)
   reboot                          Reboot ArduPilot
   config [--apply]                Diff (or apply) full RAWES param set; --apply writes + reboots
   getparam <name>                 Read a parameter value
   setparam <name> <value>         Write a parameter value
+  release [n]                     Zero SERVO{n}_FUNCTION so output n is free for manual servo cmds
+  restore [n]                     Restore SERVO{n}_FUNCTION saved by release
   ftp-list                        List files in /APM/scripts on SD card
   ftp-remove <file>               Remove a file from /APM/scripts
   ftp-upload <file> [--no-restart] Upload .lua file to /APM/scripts and restart
+  ping [baud]                     Scan all COM ports and report which have ArduPilot
   help                            Show this list
   quit                            Exit
 """
@@ -1030,8 +1099,39 @@ def _run_command(session: RawesGCS, tokens: list[str],
             print("  Error: pwm must be an integer"); return True
         if not (800 <= pwm <= PWM_MAX):
             print(f"  Error: pwm must be 800-{PWM_MAX}"); return True
-        if not _arm(session, force=True):
+
+        # Arm via RAWES_ARM (same mechanism as the arm command).
+        # Give Lua enough countdown to cover the hold duration plus a 10 s buffer.
+        arm_ms = int((duration + 10.0) * 1000) if duration else 300_000
+        print(f"  Sending RAWES_ARM={arm_ms} ms ...")
+        session.send_named_float("RAWES_ARM", float(arm_ms))
+        print("  Waiting for armed state ...")
+        arm_deadline = time.monotonic() + 15.0
+        armed_now = False
+        while time.monotonic() < arm_deadline:
+            msg = session._recv(type=["HEARTBEAT", "STATUSTEXT"], blocking=True, timeout=0.5)
+            if msg is None:
+                continue
+            if msg.get_type() == "STATUSTEXT":
+                print(f"  [FC] {msg.text.rstrip()}")
+            elif msg.get_type() == "HEARTBEAT":
+                if bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                    armed_now = True
+                    print("  [OK] Vehicle armed.")
+                    break
+        if not armed_now:
+            print("  [FAIL] Did not arm within 15 s.")
             return True
+
+        # Release ArduPilot's ownership of the output for the duration of the hold.
+        servo_key = f"SERVO{SERVO_MOTOR}_FUNCTION"
+        saved_fn = session.get_param(servo_key)
+        if saved_fn is not None and saved_fn != 0:
+            session.set_param(servo_key, 0)
+            print(f"  {servo_key} {saved_fn:.0f} -> 0 (released)")
+        else:
+            saved_fn = None  # nothing to restore
+
         print(f"  Holding output {SERVO_MOTOR} at {pwm} us  (Ctrl-C to stop) ...")
         _send_set_servo(session, SERVO_MOTOR, pwm)
         t0 = time.monotonic()
@@ -1040,7 +1140,6 @@ def _run_command(session: RawesGCS, tokens: list[str],
             while True:
                 if duration and (time.monotonic() - t0) >= duration:
                     break
-                session.send_rc_override({3: 1000})
                 _send_set_servo(session, SERVO_MOTOR, pwm)
                 elapsed = time.monotonic() - t0
                 while True:
@@ -1061,6 +1160,9 @@ def _run_command(session: RawesGCS, tokens: list[str],
             print()
         _send_set_servo(session, SERVO_MOTOR, 800)
         print(f"  Output {SERVO_MOTOR} -> 800 us (safe)")
+        if saved_fn is not None:
+            session.set_param(servo_key, saved_fn)
+            print(f"  {servo_key} restored to {saved_fn:.0f}")
 
     # -- reboot -------------------------------------------------------------
     elif cmd == "reboot":
@@ -1155,12 +1257,14 @@ def _run_command(session: RawesGCS, tokens: list[str],
             )
             print("  Pixhawk rebooting -- reconnect in ~5 s.")
 
-    # -- arm [seconds] ------------------------------------------------------
+    # -- arm [seconds] [--download] -----------------------------------------
     elif cmd == "arm":
+        download = "--download" in tokens
+        non_flag = [t for t in tokens[1:] if not t.startswith("--")]
         try:
-            secs = float(tokens[1]) if len(tokens) > 1 else 10.0
+            secs = float(non_flag[0]) if non_flag else 10.0
         except ValueError:
-            print("  Usage: arm [seconds]"); return True
+            print("  Usage: arm [seconds] [--download]"); return True
         armon_ms = int(secs * 1000)
         print(f"  Sending RAWES_ARM={armon_ms} ms -- Lua will arm and hold for {secs:.0f} s ...")
         session.send_named_float("RAWES_ARM", float(armon_ms))
@@ -1209,9 +1313,10 @@ def _run_command(session: RawesGCS, tokens: list[str],
         except KeyboardInterrupt:
             print()
         print(f"  Done.")
-        print()
-        dest = os.path.join(os.path.dirname(__file__), "..", "..", "simulation", "logs", "hardware")
-        _download_latest_log(session, dest_dir=os.path.normpath(dest))
+        if download:
+            print()
+            dest = os.path.join(os.path.dirname(__file__), "..", "..", "simulation", "logs", "hardware")
+            _download_latest_log(session, dest_dir=os.path.normpath(dest))
 
     # -- disarm -------------------------------------------------------------
     elif cmd == "disarm":
@@ -1261,6 +1366,45 @@ def _run_command(session: RawesGCS, tokens: list[str],
         local_path = tokens[1]
         restart    = "--no-restart" not in tokens
         _upload_script(session, local_path, restart=restart)
+
+    # -- release [n] --------------------------------------------------------
+    elif cmd == "release":
+        try:
+            n = int(tokens[1]) if len(tokens) > 1 else SERVO_MOTOR
+        except ValueError:
+            print("  Usage: release [n]"); return True
+        key = f"SERVO{n}_FUNCTION"
+        val = session.get_param(key)
+        if val is None:
+            print(f"  [FAIL] Could not read {key}"); return True
+        _saved_servo_functions[n] = val
+        if not session.set_param(key, 0):
+            print(f"  [FAIL] Could not set {key}=0"); return True
+        print(f"  [OK] {key} was {val:.0f}, now 0 -- output {n} released for manual control")
+        print(f"       Run 'restore {n}' to give it back to ArduPilot")
+
+    # -- restore [n] --------------------------------------------------------
+    elif cmd == "restore":
+        try:
+            n = int(tokens[1]) if len(tokens) > 1 else SERVO_MOTOR
+        except ValueError:
+            print("  Usage: restore [n]"); return True
+        if n not in _saved_servo_functions:
+            print(f"  [WARN] No saved function for output {n} -- use 'restore {n}' after 'release {n}'")
+            return True
+        val = _saved_servo_functions.pop(n)
+        key = f"SERVO{n}_FUNCTION"
+        if not session.set_param(key, val):
+            print(f"  [FAIL] Could not restore {key}={val:.0f}"); return True
+        print(f"  [OK] {key} restored to {val:.0f}")
+
+    # -- ping [baud] --------------------------------------------------------
+    elif cmd == "ping":
+        try:
+            baud = int(tokens[1]) if len(tokens) > 1 else 115200
+        except ValueError:
+            print("  Usage: ping [baud]"); return True
+        _ping_ports(baud=baud)
 
     else:
         return False
@@ -1328,6 +1472,10 @@ def _connect(port: str, baud: int) -> RawesGCS:
 
 def main() -> None:
     args = _build_parser().parse_args()
+
+    if args.command == "ping":
+        _ping_ports(baud=args.baud)
+        return
 
     session = _connect(args.port, args.baud)
     exit_code = 0
