@@ -24,7 +24,7 @@ flowchart TB
 
     subgraph PX["Pixhawk 6C (in air)"]
         direction TB
-        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 0=none, 1=steady 50 Hz, 2=yaw_lua 100 Hz<BR/>4=landing 50 Hz, 5=pumping 50 Hz<BR/>RAWES_ARM (named float): timed arm/disarm<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>Yaw trim · VZ collective (modes 4,5) · Ch1/Ch2/Ch3+Ch9 overrides"]
+        LUA["<b>rawes.lua</b>  100 Hz base<BR/>SCR_USER6: 0=none, 1=steady 50 Hz, 4=landing 50 Hz, 5=pumping 50 Hz<BR/>RAWES_ARM (named float): timed arm/disarm<BR/>Orbit tracking · Rate-limited slerp · Cyclic P loop<BR/>VZ collective (modes 4,5) · Ch1/Ch2/Ch3 overrides · Ch4 neutral (no yaw wind-up)"]
         ACRO["<b>ACRO_Heli</b>  400 Hz  (ArduPilot main loop)<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
         LUA --> ACRO
     end
@@ -308,7 +308,7 @@ position, so it naturally tracks wherever the hub flies without wind knowledge o
 | RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North offset from EKF origin (m) |
 | RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East offset from EKF origin (m) |
 | RAWES_ANCHOR_D | SCR_USER5 | 0.0 | Anchor Down offset from EKF origin (m) |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: plain integer, valid values 0,1,2,4,5. 0=none (passive), 1=steady (cyclic orbit-tracking, 50 Hz), 2=yaw_lua (counter-torque yaw trim only, 100 Hz), 3=reserved, 4=landing (cyclic + VZ descent, 50 Hz), 5=pumping (De Schutter pumping cycle, 50 Hz). Substates for modes 4+5 are sent separately via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: plain integer, valid values 0,1,4,5. 0=none (passive), 1=steady (cyclic orbit-tracking, 50 Hz), 2=reserved, 3=reserved, 4=landing (cyclic + VZ descent, 50 Hz), 5=pumping (De Schutter pumping cycle, 50 Hz). Substates for modes 4+5 are sent separately via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. |
 
 Cyclic output rate limiter is hardcoded at 30 PWM/step (~0.67 s full-stick traverse).
 No further SCR_USER params are available on hardware (firmware exposes only SCR_USER1..6).
@@ -391,29 +391,25 @@ If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 
 > **SITL fixture:** `torque_armed_lua` — GCS force-arms, sends `RAWES_ARM(3_600_000 ms)`, waits for "RAWES arm-on: armed" confirmation. `torque_unarmed_lua` — yields unarmed; test controls arm timing. Stack test: `test_armon.py` validates regulation (psi_dot < 5 deg/s for 10 s) then expiry (motor to 800 µs, psi_dot > 10 deg/s).
 
-### 4.3 rawes.lua -- Yaw-Trim Subsystem (SCR_USER6=2 `yaw_lua`, or RAWES_YAW=1 alongside any flight mode)
+### 4.3 Yaw Regulation — ArduPilot ATC_RAT_YAW (DDFP)
 
-The counter-torque script is already validated (15/15 tests pass). Physics model in
-`simulation/torque_model.py`; stack mediator in `simulation/mediator_torque.py`. Summary:
+Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID.  rawes.lua writes
+**no** commands to SERVO9 or Ch9.  Ch4 (ACRO yaw rate override) is held at 1500 µs every
+tick to prevent integrator wind-up from neutral sticks.
 
 ```
-motor_rpm  <- battery:voltage(0)   [SITL: mediator encodes RPM as voltage]
-           or RPM:get_rpm(0)       [hardware: DSHOT telemetry from AM32]
-
-trim       = (omega_rotor x GEAR_RATIO) / RPM_SCALE
-           ~= 0.485 at nominal 28 rad/s axle speed  [equilibrium: inner assembly stationary]
-
-yaw_corr   = -Kp_yaw x gyro:z()   [Kp_yaw = 0.001]
-
-throttle   = clamp(trim + yaw_corr, 0, 1)
-Ch4 PWM    <- 1000 + throttle x 1000
+Sensing:    gyro.z (from EKF attitude, ACRO_Heli)
+Control:    ATC_RAT_YAW P/I/D -> tail-channel PWM (SERVO4, H_TAIL_TYPE=4 DDFP)
+Actuator:   GB4008 motor via DShot300 on SERVO9 output
+              SERVO9_FUNCTION=94 (Script 1) is NOT used; set SERVO9_FUNCTION=TBD for DDFP
 ```
 
-The trim feedforward sets the motor to the equilibrium throttle (inner assembly stationary).
-The Kp_yaw correction handles transient disturbances. ArduPilot's ATC_RAT_YAW is still active
-and provides additional correction on top of the Lua trim.
+Pass criterion (stack): `test_yaw_regulation.py` — max |psi_dot| < 5 deg/s over the
+last 20 s after a 75 s SITL settle period.
 
-> **Sim:** `mediator_torque.py` encodes motor RPM as battery voltage (`battery:voltage(0)`) since the ArduPilot JSON backend does not parse the `rpm` field. The Lua script reads this and computes feedforward trim identically to hardware. `test_lua_yaw_trim.py` (stack) confirms 0.27 deg/s max yaw rate. On hardware, replace with `RPM:get_rpm(0)` from DSHOT telemetry.
+> **Future work:** A Lua feedforward trim (`throttle ≈ omega_rotor × GEAR_RATIO / RPM_SCALE`)
+> could reduce the load on ATC_RAT_YAW by pre-commanding the back-EMF equilibrium.
+> Not currently implemented; mode 2 is reserved for this purpose.
 
 ### 4.4 Channel Ownership
 
@@ -423,7 +419,7 @@ and provides additional correction on top of the Lua trim.
 | Ch2 -- pitch rate | rawes.lua | 50 Hz | body_z error (pitch) -> ATC_RAT_PIT PID -> swashplate |
 | Ch3 -- collective | ground PI via MAVLink (modes 1-3) OR rawes.lua (modes 4-5) OR RAWES_ARM | ~10 Hz / 50 Hz / 100 Hz | Modes 1-3: normalized thrust [0..1] from load cell -> Ch3 RC override. Modes 4 (landing) and 5 (pumping): Lua owns Ch3 entirely. RAWES_ARM active: Lua holds Ch3=1000 (throttle low) for the full countdown duration. |
 | Ch8 -- motor interlock | rawes.lua (RAWES_ARM active) | 100 Hz | Lua holds Ch8=2000 (interlock ON, motor enabled) for the full countdown duration. Released on disarm. |
-| Ch9 -- GB4008 throttle | rawes.lua (mode=yaw_lua or RAWES_YAW=1) | 100 Hz | Torque trim + Kp_yaw correction -> SERVO9 PWM |
+| Ch9 -- GB4008 throttle | ArduPilot (H_TAIL_TYPE=4 DDFP) | 400 Hz | ATC_RAT_YAW PID output -> SERVO4 -> SERVO9 (DShot). rawes.lua does NOT write to Ch9. |
 
 ### 4.5 Simulation Mapping
 
@@ -435,7 +431,7 @@ and provides additional correction on top of the Lua trim.
 | rawes.lua cyclic P loop           | compute_swashplate_from_state()                      | controller.py      |
 | ACRO ATC_RAT_RLL/PIT (rate damping)      | RatePID(kp=2/3) inner loop                           | controller.py      |
 | Ch3 collective (from ground RC override) | TensionController PI output -> normalized collective | controller.py      |
-| rawes.lua trim + correction     | mediator_torque.py compute_trim + Kp                 | mediator_torque.py |
+| ArduPilot ATC_RAT_YAW (yaw regulation)   | torque_model.py hub yaw ODE + mediator_torque.py     | mediator_torque.py |
 | ESC_STATUS rpm (planner reads)           | SpinSensor.measure() -- models AM32 eRPM jitter      | sensor.py          |
 
 ---
@@ -512,24 +508,17 @@ approaches full throttle at equilibrium, leaving no headroom.
 
 ### 5.3 Control Architecture
 
-Three layers operate in series:
+Yaw regulation uses a single loop:
 
-1. **Feedforward trim (rawes.lua):** Computes the equilibrium throttle from motor RPM
-   and applies it as a base command. At nominal 28 rad/s axle speed the trim is ~=48.5%
-   (throttle x RPM_SCALE / GEAR_RATIO = omega_rotor). This holds psi_dot = 0.
+1. **ArduPilot ATC_RAT_YAW PID (ACRO_Heli):** ACRO mode commands a desired yaw rate (zero
+   with neutral stick). The yaw rate PID outputs a tail-channel command (SERVO4, H_TAIL_TYPE=4
+   DDFP) that drives the GB4008 anti-rotation motor.  rawes.lua holds Ch4 at 1500 µs (neutral)
+   every tick; the DDFP mapping sends the PID output directly to SERVO9 (output 9, DShot).
 
-2. **Kp yaw rate correction (rawes.lua):** A proportional correction `yaw_corr = -Kp_yaw x gyro.z()` (Kp_yaw = 0.001) is added to the trim. Handles transient disturbances before
-   the ArduPilot PID loop can respond.
+**Biased throttle mapping in SITL:**
 
-3. **ArduPilot ATC_RAT_YAW PID (ACRO_Heli):** ACRO mode commands a desired yaw rate (zero with
-   neutral stick). The yaw rate PID outputs a tail-rotor command (Ch4) to null the sensed yaw
-   rate. Because the Lua feedforward already supplies the bulk of the required counter-rotation,
-   the PID only corrects deviations -- no integrator wind-up is needed for steady-state balance.
-
-**Biased throttle mapping:**
-
-In SITL the mediator maps Ch4 PWM to motor throttle using a biased mapping so that neutral
-stick (1500 us) corresponds exactly to the equilibrium trim throttle:
+`mediator_torque.py` maps the tail-channel PWM to motor throttle with a biased curve so that
+1500 µs corresponds exactly to the equilibrium trim throttle:
 
 ```
 pwm <= 1500 us:  throttle = trim x (pwm - 1000) / 500
@@ -537,9 +526,9 @@ pwm >  1500 us:  throttle = trim + (1 - trim) x (pwm - 1500) / 500
 trim = equilibrium_throttle(omega_rotor, params) ~= 0.485
 ```
 
-On hardware (Pixhawk 6C), H_TAIL_TYPE = 0 (servo output) gives symmetric output around
-neutral PWM (1500 us), which the ESC mapping should be calibrated to reproduce the same
-biased throttle curve.
+This pre-biases the operating point so the PID corrects deviations rather than driving the
+motor from zero to equilibrium.  On hardware the same bias should be encoded in the ESC
+throttle curve calibration.
 
 ### 5.4 Key Parameters
 
@@ -547,12 +536,12 @@ biased throttle curve.
 | --------------- | ------ | -------------------------------------- |
 | ARMING_SKIPCHK  | 0xFFFF | Skip all pre-arm checks                |
 | H_RSC_MODE      | 1      | CH8 passthrough -- instant runup       |
-| H_TAIL_TYPE     | 0      | Servo output, symmetric +/-1500 us     |
+| H_TAIL_TYPE     | 4      | DDFP -- tail-channel output to SERVO4  |
 | H_COL2YAW       | 0      | No collective->yaw feedforward         |
-| ATC_RAT_YAW_P   | 0.001  | Very small P -- feedforward sets counter-rotation |
-| ATC_RAT_YAW_I/D | 0      | No integrator (feedforward handles it) |
-| EK3_SRC1_YAW    | 1      | Compass yaw source                     |
-| COMPASS_USE     | 1      | Compass enabled                        |
+| ATC_RAT_YAW_P   | 0.20   | Starting P gain (SITL validated)       |
+| ATC_RAT_YAW_I   | 0.05   | Corrects residual yaw not cancelled by PID |
+| ATC_RAT_YAW_D   | 0.0    | Start at zero                          |
+| ATC_RAT_YAW_IMAX| 0      | No integrator windup                   |
 
 ### 5.5 Hardware Tuning
 
@@ -596,7 +585,7 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 | SCR_USER1    | 1.0   | RAWES_KP_CYC -- cyclic P gain; start at 0.3                               |
 | SCR_USER2    | 0.40  | RAWES_BZ_SLEW -- body_z slew rate (rad/s)                                 |
 | SCR_USER3..5 | 0.0   | Anchor N/E/D offsets (m) -- set to anchor NED from EKF origin             |
-| SCR_USER6    | 30    | RAWES_MAX_CYC_DELTA -- max cyclic PWM change per 20 ms step; 0 = disabled |
+| SCR_USER6    | 0/1/4/5 | RAWES_MODE -- mode selector: 0=none, 1=steady, 4=landing, 5=pumping    |
 
 ### 6.2 Swashplate and RSC
 
@@ -819,7 +808,7 @@ flowchart TD
 
     CYCLIC --> RC["<b>8. RC override</b><BR/>scale = 500 / (ACRO_RP_RATE * pi/180)<BR/>Ch1 = clamp(1500 + scale * roll_rate,  1000, 2000)<BR/>Ch2 = clamp(1500 + scale * pitch_rate, 1000, 2000)"]
 
-    RC --> RLIMIT["<b>9. Output rate limiter</b> (SCR_USER6 = 30 PWM/step)<BR/>Ch1 = prev_ch1 + clamp(Ch1-prev_ch1, -delta, +delta)<BR/>Ch2 = prev_ch2 + clamp(Ch2-prev_ch2, -delta, +delta)<BR/>rc:get_channel(1):set_override(Ch1)<BR/>rc:get_channel(2):set_override(Ch2)"]
+    RC --> RLIMIT["<b>9. Output rate limiter</b> (hardcoded 100 PWM/step)<BR/>Ch1 = prev_ch1 + clamp(Ch1-prev_ch1, -delta, +delta)<BR/>Ch2 = prev_ch2 + clamp(Ch2-prev_ch2, -delta, +delta)<BR/>rc:get_channel(1):set_override(Ch1)<BR/>rc:get_channel(2):set_override(Ch2)"]
     RLIMIT --> START
 ```
 
@@ -827,20 +816,21 @@ Note on Rodrigues: Lua's Vector3f operator overloading (* , +) is not available 
 build. rodrigues() in the actual script uses explicit component arithmetic. See
 simulation/scripts/rawes.lua for the exact implementation.
 
-### A.3 Yaw Trim Formula
+### A.3 Yaw Regulation
+
+Yaw regulation is handled by ArduPilot's ATC_RAT_YAW PID (not by rawes.lua).
+rawes.lua holds Ch4 at 1500 µs (neutral) every tick to prevent ACRO integrator wind-up.
+The PID output goes to the tail channel (SERVO4, H_TAIL_TYPE=4 DDFP) which drives
+the GB4008 anti-rotation motor via DShot300 on output 9.
 
 ```
-motor_rpm  <- battery:voltage(0)   [SITL: mediator encodes RPM as voltage]
-           or RPM:get_rpm(0)       [hardware: DSHOT telemetry from AM32]
-
-trim       = (omega_rotor x GEAR_RATIO) / RPM_SCALE
-           ~= 0.485 at nominal 28 rad/s axle speed  [equilibrium: inner assembly stationary]
-
-yaw_corr   = -Kp_yaw x gyro:z()   [Kp_yaw = 0.001]
-
-throttle   = clamp(trim + yaw_corr, 0, 1)
-Ch4 PWM    <- 1000 + throttle x 1000
+Sensing:   gyro.z -> ATC_RAT_YAW PID
+Output:    SERVO4 (tail channel, H_TAIL_TYPE=4)
+Actuator:  GB4008 motor via DShot300 (SERVO9 output 9, SERVO_BLH_MASK=256)
 ```
+
+Equilibrium throttle for reference (not used by Lua):
+  throttle_eq = omega_rotor x GEAR_RATIO / RPM_SCALE ~= 0.485 at 28 rad/s
 
 ---
 
@@ -1195,7 +1185,7 @@ SCR_USER5 = -home_z_enu (negate).
 
 | File                                         | Description                                                                   |
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=steady, 2=yaw_lua, 4=landing, 5=pumping; RAWES_ARM named float for timed arm/disarm) |
+| simulation/scripts/rawes.lua                 | Unified Lua controller (SCR_USER6: 0=none, 1=steady, 4=landing, 5=pumping; RAWES_ARM named float for timed arm/disarm; yaw via ArduPilot ATC_RAT_YAW) |
 | simulation/scripts/torque/lua_defaults.parm  | SITL param overrides for Lua torque tests                                     |
 | simulation/torque_model.py                   | Hub yaw kinematics — HubParams, HubState, step(), equilibrium_throttle() |
 | simulation/mediator_torque.py                | Standalone torque SITL mediator (RPM profiles, hub yaw physics)               |

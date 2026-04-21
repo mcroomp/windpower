@@ -79,9 +79,11 @@ def _lua_torque_stack(tmp_path, request, armon_ms):
 @pytest.fixture
 def torque_armed_lua(tmp_path, request):
     """
-    Torque stack with rawes.lua in yaw-only mode (SCR_USER6=2, MODE_YAW_LUA).
+    Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
 
-    Armed via RAWES_ARMON(1 hour) — Lua owns Ch3/Ch8; no GCS RC override.
+    Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=4);
+    Lua handles only RAWES_ARM arming and Ch8 motor interlock keepalive.
+    Armed via RAWES_ARM(1 hour) — Lua owns Ch3/Ch8; no GCS RC override.
     Yields StackContext with vehicle armed and ACRO active.
     """
     with _lua_torque_stack(tmp_path, request, armon_ms=3_600_000) as ctx:
@@ -91,10 +93,12 @@ def torque_armed_lua(tmp_path, request):
 @pytest.fixture
 def torque_unarmed_lua(tmp_path, request):
     """
-    Torque stack with rawes.lua in yaw-only mode (SCR_USER6=2, MODE_YAW_LUA).
+    Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
 
+    Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=4);
+    Lua handles only RAWES_ARM arming and Ch8 motor interlock keepalive.
     Yields StackContext with vehicle UNARMED and ACRO active.
-    The test is responsible for sending RAWES_ARMON to arm.
+    The test is responsible for sending RAWES_ARM to arm.
     """
     with _lua_torque_stack(tmp_path, request, armon_ms=0) as ctx:
         yield ctx

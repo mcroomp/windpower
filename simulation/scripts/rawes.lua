@@ -1,8 +1,8 @@
 --[[
-rawes.lua -- Unified RAWES flight + yaw-trim controller
+rawes.lua -- Unified RAWES flight controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
-Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,4,5):
+Mode is selected at runtime via SCR_USER6 (plain integer 0,1,4,5):
   0  none        -- script passive: no RC overrides, no keepalive; logs every 5 s + any NV message
   1  steady      -- cyclic orbit-tracking only (Ch1, Ch2)                  50 Hz
   2  (reserved)
@@ -26,12 +26,12 @@ Parameters (SCR_USER1..6):
   SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]         default 0.0
   SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]         default 0.0
   SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]         default 0.0
-  SCR_USER6   RAWES_MODE      Mode selector (0,1,2,4,5 -- see above)   default 0
+  SCR_USER6   RAWES_MODE      Mode selector (0,1,4,5 -- see above)     default 0
 
 All pumping cycle parameters (phase timing, xi angle, collective limits) are
 hardcoded constants below -- no free SCR_USER slots remain.
 
-Cyclic output rate limiter is hardcoded at 30 PWM/step (0.67 s full-stick traverse).
+Cyclic output rate limiter is hardcoded at 100 PWM/step (0.2 s full-stick traverse).
 
 No RC receiver: all channel overrides (Ch1, Ch2, Ch3) are owned entirely by Lua.
   The ground planner communicates via SCR_USER params only (MAVLink params, not RC).
@@ -43,15 +43,13 @@ Division of labour (pumping mode):
   Synchronisation:     Lua detects tether paying-out / reeling-in to follow the
                        ground planner's actual winch motion -- no RC channel bridge needed.
 
-Yaw-trim control (PI on gyro_z):
-  BASE_THROTTLE_PCT  5 %            -- floor; DShot arms on first frame
-  KP_YAW             3.0 %/(rad/s) -- proportional; provides motor torque during spin-up
-  KI_YAW             2.0 %/(rad/s*s) -- integral; accumulates ~48.5% back-EMF equilibrium offset
-  YAW_I_MAX          80 %           -- anti-windup; well above back-EMF equilibrium ~48.5%
+Yaw regulation is handled entirely by ArduPilot's ATC_RAT_YAW PID (ACRO_Heli,
+H_TAIL_TYPE=4 DDFP).  Lua writes no motor commands to SERVO9.  Ch4 (ACRO yaw)
+is held neutral (1500 us) to prevent integrator wind-up; the yaw PID output is
+on the tail channel (SERVO4 / H_TAIL_TYPE=4) routed to the GB4008 ESC.
 
 Required ArduPilot parameters:
   SCR_ENABLE        1    -- reboot required after first set
-  SERVO9_FUNCTION   94   -- Script 1: Lua writes motor command to output 9 (AUX OUT 1)
   SERVO_BLH_MASK    256  -- DShot enabled on output 9 (bit 8)
   SERVO_BLH_OTYPE   5    -- DShot300 (Heli/Copter frame)
   SERVO_BLH_POLES   22   -- GB4008 24N22P (11 pole-pairs; default 14 is wrong)
@@ -65,7 +63,7 @@ Deployment:
 
 -- ── Shared constants ─────────────────────────────────────────────────────────
 
-local BASE_PERIOD_MS    = 10        -- 100 Hz base tick (yaw trim native rate)
+local BASE_PERIOD_MS    = 10        -- 100 Hz base tick (NV inbox drain + armon state machine)
 local FLIGHT_PERIOD_MS  = 20        -- 50 Hz  flight subsystem
 local ACRO_MODE_NUM     = 1         -- ACRO mode number (ArduCopter ACRO = 1)
 
@@ -81,11 +79,11 @@ mavlink.register_rx_msgid(_NVF_MSG_ID)
 
 local _nv_floats = {}     -- received named float values:  name -> value
 
--- ── Mode numbers (SCR_USER6 = plain integer 0,1,2,4,5) ──────────────────────
+-- ── Mode numbers (SCR_USER6 = plain integer 0,1,4,5) ────────────────────────
 -- Ground planner writes SCR_USER6 = mode.
 -- Substate is delivered separately via NAMED_VALUE_FLOAT("RAWES_SUB", N).
--- Yaw trim alongside a flight mode is enabled by NAMED_VALUE_FLOAT("RAWES_YAW", 1).
 -- Timed arm/disarm is controlled by NAMED_VALUE_FLOAT("RAWES_ARM", ms).
+-- Yaw regulation is handled by ArduPilot ATC_RAT_YAW; rawes.lua does not control SERVO9.
 local MODE_NONE       = 0
 local MODE_STEADY     = 1   -- cyclic orbit-tracking
 -- modes 2,3 reserved

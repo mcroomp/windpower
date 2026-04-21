@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-setup_pixhawk.py -- RAWES Pixhawk 6C yaw-trim bench setup.
+setup_pixhawk.py -- RAWES Pixhawk 6C yaw-regulation bench setup.
 
 Connects to the Pixhawk over USB, sets the parameters required to run the
-GB4008 counter-torque motor under rawes.lua yaw-trim control (SCR_USER6=2).
+GB4008 counter-torque motor under ArduPilot ATC_RAT_YAW DDFP control (SCR_USER6=0).
 Prompts before each reboot.
 
 Usage (Windows Git Bash):
@@ -75,9 +75,8 @@ _PHASE2 = [
     ("SERVO_DSHOT_ESC",   3),    # AM32 (REVVitRC)
     ("SERVO_DSHOT_RATE",  0),    # 1 kHz (default)
     ("BRD_SAFETY_DEFLT",  0),    # safety switch disabled -- outputs live on boot
-    # rawes.lua mode: 2 = yaw_lua (yaw-trim only)
-    # SCR_USER6 is the mode selector.
-    ("SCR_USER6",         2),
+    # rawes.lua mode: 0 = none (passive; ArduPilot ATC_RAT_YAW handles yaw regulation)
+    ("SCR_USER6",         0),
 ]
 
 # ---------------------------------------------------------------------------
