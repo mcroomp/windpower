@@ -662,6 +662,7 @@ Commands:
   listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
   mode <0,1,4,5>                  Set SCR_USER6 mode and listen 10 s to confirm active
   arm [seconds]                   Set ACRO mode, send RAWES_ARM (default 10 s)
+  hold <pwm> [seconds]            Arm, hold GB4008 output at pwm us (Ctrl-C to stop)
   disarm                          Disarm vehicle
   reboot                          Reboot ArduPilot
   getparam <name>                 Read a parameter value
