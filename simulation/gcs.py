@@ -339,14 +339,27 @@ class RawesGCS:
         log.info("GCS socket open (no heartbeat wait) — target sys=%d comp=%d",
                  self._target_system, self._target_component)
 
-    def connect(self, timeout: float = 30.0) -> None:
+    def connect(self, timeout: float = 30.0, watchdog=None) -> None:
         """Connect and wait for the first heartbeat from the vehicle.
 
         Uses wall-clock time: no MAVLink messages have been received yet,
         so the sim-clock is unavailable.
+
+        Args:
+            timeout:  wall-clock seconds to keep retrying before raising TimeoutError.
+            watchdog: optional callable checked every ~5 s during the retry loop.
+                      Should raise (e.g. pytest.fail or RuntimeError) if the
+                      process being connected to has crashed.  Called with no
+                      arguments; any exception it raises propagates immediately
+                      out of connect() so the caller gets a crash message rather
+                      than a generic timeout.
         """
-        deadline = time.monotonic() + timeout
+        deadline      = time.monotonic() + timeout
+        last_watchdog = time.monotonic()
         while time.monotonic() < deadline:
+            if watchdog is not None and time.monotonic() - last_watchdog >= 5.0:
+                watchdog()
+                last_watchdog = time.monotonic()
             try:
                 self._mav = mavutil.mavlink_connection(
                     self._address,

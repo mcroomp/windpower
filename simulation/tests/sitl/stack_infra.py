@@ -841,11 +841,12 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     # ── 1. Connect ────────────────────────────────────────────────────────────
     log.info("[setup 1/6] Connecting GCS (timeout=%.0fs) ...", _STARTUP_TIMEOUT)
     try:
-        gcs.connect(timeout=_STARTUP_TIMEOUT)
+        gcs.connect(timeout=_STARTUP_TIMEOUT, watchdog=_procs_alive)
     except TimeoutError as exc:
+        _procs_alive()   # last-chance crash check before reporting a plain timeout
         raise TimeoutError(
             f"[setup 1/6] GCS connect timeout after {_STARTUP_TIMEOUT:.0f}s "
-            f"(SITL may not have started yet — resource contention under -n 8?): {exc}"
+            f"(SITL may not have started yet): {exc}"
         ) from exc
     gcs.start_heartbeat(rate_hz=1.0)
     _procs_alive()

@@ -297,6 +297,60 @@ local function anchor_ned()
     return a
 end
 
+-- Rate-limited slerp step: advance bz_src toward goal by at most slew_rate*dt rad.
+-- Returns a new Vector3f.
+local function slerp_step(bz_src, goal, slew_rate, dt)
+    local dot    = math.max(-1.0, math.min(1.0, bz_src:dot(goal)))
+    local remain = math.acos(dot)
+    if remain > 1e-4 then
+        local ax = bz_src:cross(goal)
+        if ax:length() > 1e-6 then
+            local step = math.min(slew_rate * dt, remain)
+            return rodrigues(bz_src, v3_normalize(ax), step)
+        end
+    end
+    return v3_copy(bz_src)
+end
+
+-- Map angular rate [rad/s] to RC PWM [1000..2000].
+-- acro_rp_rate_deg defaults to ACRO_RP_RATE_DEG.
+local function rate_to_pwm(rate_rads, acro_rp_rate_deg)
+    acro_rp_rate_deg = acro_rp_rate_deg or ACRO_RP_RATE_DEG
+    local scale = 500.0 / (acro_rp_rate_deg * math.pi / 180.0)
+    local ch = math.floor(1500.0 + scale * rate_rads + 0.5)
+    if ch < 1000 then ch = 1000 end
+    if ch > 2000 then ch = 2000 end
+    return ch
+end
+
+-- Per-step PWM slew limiter: clamp (desired - prev) to ±max_delta.
+-- max_delta == 0 disables clamping.
+local function output_rate_limit(desired, prev, max_delta)
+    if max_delta == 0 then return desired end
+    local d = desired - prev
+    if d >  max_delta then d =  max_delta end
+    if d < -max_delta then d = -max_delta end
+    return prev + d
+end
+
+-- Body-frame cyclic error: err_ned = bz_now × bz_target; project to body frame.
+-- Returns table {err_bx, err_by}.
+local function cyclic_error_body(bz_now, bz_target_arg)
+    local err_ned  = bz_now:cross(bz_target_arg)
+    local err_body = ahrs:earth_to_body(err_ned)
+    return {err_body:x(), err_body:y()}
+end
+
+-- Full cyclic rate command: bz error → roll/pitch rates → ch1/ch2 PWM.
+-- Returns table {roll_rads, pitch_rads, ch1_pwm, ch2_pwm}.
+local function cyclic_rates(bz_now, bz_target_arg, kp)
+    kp = kp or 1.0
+    local err        = cyclic_error_body(bz_now, bz_target_arg)
+    local roll_rads  = kp * err[1]
+    local pitch_rads = kp * err[2]
+    return {roll_rads, pitch_rads, rate_to_pwm(roll_rads), rate_to_pwm(pitch_rads)}
+end
+
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 -- Called from update() when SCR_USER6 changes value.
 -- Resets per-mode state so stale flags from a previous mode don't bleed through.
@@ -341,9 +395,8 @@ local function run_flight()
             local gyro_pre = ahrs:get_gyro()
             local gx = gyro_pre and gyro_pre:x() or 0.0
             local gy = gyro_pre and gyro_pre:y() or 0.0
-            local sc = 500.0 / (ACRO_RP_RATE_DEG * math.pi / 180.0)
-            local c1 = math.max(1000, math.min(2000, math.floor(1500.0 + sc * gx + 0.5)))
-            local c2 = math.max(1000, math.min(2000, math.floor(1500.0 + sc * gy + 0.5)))
+            local c1 = rate_to_pwm(gx)
+            local c2 = rate_to_pwm(gy)
             if _rc_ch1 then _rc_ch1:set_override(c1) end
             if _rc_ch2 then _rc_ch2:set_override(c2) end
         else
@@ -505,15 +558,7 @@ local function run_flight()
         goal = _bz_target or _bz_orbit
     end
 
-    local dot    = math.max(-1.0, math.min(1.0, _bz_slerp:dot(goal)))
-    local remain = math.acos(dot)
-    if remain > 1e-4 then
-        local ax = _bz_slerp:cross(goal)
-        if ax:length() > 1e-6 then
-            local step = math.min(bz_slew * dt, remain)
-            _bz_slerp = rodrigues(_bz_slerp, v3_normalize(ax), step)
-        end
-    end
+    _bz_slerp = slerp_step(_bz_slerp, goal, bz_slew, dt)
 
     -- ── Cyclic P loop ─────────────────────────────────────────────────────
     -- Orbit modes (HOLD/REEL_OUT): use _bz_orbit (azimuthal tracker).
@@ -521,14 +566,6 @@ local function run_flight()
     --   _bz_orbit is azimuthal-only (z fixed at orbit xi~23 deg). Using it
     --   during TRANSITION resists xi=80 rotation → hub stays at xi~23 with
     --   col=0.079 → massive over-thrust → tether slack → crash.
-    local kp  = p("SCR_USER1", 1.0)
-    local bz_now = disk_normal_ned()
-    local err_ned = bz_now:cross(_bz_slerp)
-
-    local err_body = ahrs:earth_to_body(err_ned)
-    local err_bx   = err_body:x()    -- body X (roll)
-    local err_by   = err_body:y()    -- body Y (pitch)
-
     -- Pure P control (no gyro feedthrough).
     -- The orbital body_z precession rate is ~0.01 rad/s; the P gain corrects
     -- any lag with a negligible steady-state error.  Gyro feedthrough was
@@ -536,26 +573,17 @@ local function run_flight()
     -- EKF yaw ~46 deg off from physical yaw, gyro_x/y in EKF body frame are
     -- rotated versions of physical rates -> feedthrough applies corrective
     -- torque in the wrong body axes -> hub tumbles at kinematic exit.
+    local kp      = p("SCR_USER1", 1.0)
+    local bz_now  = disk_normal_ned()
+    local err     = cyclic_error_body(bz_now, _bz_slerp)
+    local err_bx  = err[1]   -- body X (roll)
+    local err_by  = err[2]   -- body Y (pitch)
     local roll_rads  = kp * err_bx
     local pitch_rads = kp * err_by
 
-    -- Map rate to RC PWM; full stick (+/-500 us) = +/-ACRO_RP_RATE_DEG deg/s
-    local scale = 500.0 / (ACRO_RP_RATE_DEG * math.pi / 180.0)
-
-    local ch1 = math.floor(1500.0 + scale * roll_rads  + 0.5)
-    local ch2 = math.floor(1500.0 + scale * pitch_rads + 0.5)
-    ch1 = math.max(1000, math.min(2000, ch1))
-    ch2 = math.max(1000, math.min(2000, ch2))
-
-    -- Output rate limiter (100 PWM/step = 1.26 rad/s/step at 50 Hz)
-    local d1 = ch1 - _prev_ch1
-    local d2 = ch2 - _prev_ch2
-    if d1 >  100 then d1 =  100 end
-    if d1 < -100 then d1 = -100 end
-    if d2 >  100 then d2 =  100 end
-    if d2 < -100 then d2 = -100 end
-    ch1 = _prev_ch1 + d1
-    ch2 = _prev_ch2 + d2
+    -- Map rate to RC PWM and apply output rate limiter (100 PWM/step)
+    local ch1 = output_rate_limit(rate_to_pwm(roll_rads),  _prev_ch1, 100)
+    local ch2 = output_rate_limit(rate_to_pwm(pitch_rads), _prev_ch2, 100)
     _prev_ch1 = ch1
     _prev_ch2 = ch2
 

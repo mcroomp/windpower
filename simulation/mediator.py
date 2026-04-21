@@ -275,6 +275,7 @@ def run_mediator(args, trajectory=None):
     # -- State ----------------------------------------------------------------
     step            = 0
     last_log_time   = -LOG_INTERVAL       # ensure immediate first log
+    _t_step0        = None                # sim time of first step_fn call
     hub_state       = {
         "pos":   _dyn_pos0.copy(),
         "vel":   _dyn_vel0.copy(),
@@ -353,9 +354,11 @@ def run_mediator(args, trajectory=None):
     # and mutable state declared above. Returns the state dict for send_state().
 
     def step_fn(servos, t_sim):
-        nonlocal step, last_log_time, hub_state
+        nonlocal step, last_log_time, hub_state, _t_step0
         nonlocal s1, s2, s3, _body_z_eq, _traj_cmd, _logged_transition
         nonlocal _tel_note, _prev_phase, omega_spin, _orbit_tracker
+        if _t_step0 is None:
+            _t_step0 = t_sim
         _dt   = sitl.dt()
 
         # ── Startup kinematic phase ───────────────────────────────────────
@@ -739,12 +742,17 @@ def run_mediator(args, trajectory=None):
         # ----------------------------------------------------------------
         # Step 9: Return sensor packet to run_lockstep for send_state()
         # ----------------------------------------------------------------
-        # Delay GPS velocity for the first 2 s so EKFGSF can run
-        # alignTilt() from IMU data before fuseVelData() is called.
+        # Delay GPS velocity for the first 2 sim-seconds (relative to
+        # when step_fn first ran) so EKFGSF can run alignTilt() from
+        # IMU data before fuseVelData() is called.  Using elapsed time
+        # rather than absolute t_sim avoids the case where ArduPilot
+        # has been running before the mediator connected and t_sim is
+        # already large on the first packet we receive.
+        _gps_ready = (t_sim - _t_step0) >= 2.0
         step += 1
         return dict(
             pos_ned    = sensor_data["pos_ned"],
-            vel_ned    = sensor_data["vel_ned"] if t_sim >= 2.0 else np.zeros(3),
+            vel_ned    = sensor_data["vel_ned"] if _gps_ready else np.zeros(3),
             rpy_rad    = sensor_data["rpy"],
             accel_body = sensor_data["accel_body"],
             gyro_body  = sensor_data["gyro_body"],
