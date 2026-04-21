@@ -42,6 +42,7 @@ Notes
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -172,13 +173,18 @@ _SYS_STATUS = {0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
 
 
 
-_KEY_PARAMS = [
-    ("H_TAIL_TYPE",      4,   "DDFP CCW for GB4008"),
-    ("SCR_ENABLE",       1,   "Lua scripting on"),
-    ("SCR_USER6",        None, "Lua mode (0=none 1=steady 4=landing 5=pumping)"),
-    ("ARMING_CHECK",     0,   "prearm checks disabled"),
-    ("BRD_SAFETY_DEFLT", 0,   "safety switch disabled"),
-]
+_PARAMS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rawes_params.json")
+
+def _load_params_json() -> dict:
+    with open(_PARAMS_JSON_PATH) as fh:
+        return json.load(fh)
+
+def _params_as_tuples(entries: list) -> list:
+    return [(e["name"], e["expected"], e["note"]) for e in entries]
+
+_PARAMS_JSON   = _load_params_json()
+_KEY_PARAMS    = _params_as_tuples(_PARAMS_JSON["key"])
+_TAIL_PARAMS   = _params_as_tuples(_PARAMS_JSON["tail_pid"])
 
 _LUA_MODES = {0: "none", 1: "steady", 4: "landing", 5: "pumping"}
 
@@ -295,6 +301,19 @@ def _print_status(session: RawesGCS) -> None:
         health  = "OK" if healthy else "[WARN] unhealthy"
         print(f"  {'motor outputs':<22} present={present}  enabled={enabled}  {health}")
         print(f"  {'CPU load':<22} {ss2.load/10.0:.1f}%")
+
+    # --- tail PID ------------------------------------------------------------
+    print(f"\n{sep}")
+    print("TAIL PID  (GB4008 yaw / DDFP)")
+    print(sep)
+    for name, expected, note in _TAIL_PARAMS:
+        val = session.get_param(name)
+        if val is None:
+            print(f"  {name:<22} NOT FOUND  ({note})")
+        elif abs(val - float(expected)) > 1e-4:
+            print(f"  {name:<22} {val:<10.4g}  [DIFF] expected {expected}  ({note})")
+        else:
+            print(f"  {name:<22} {val:<10.4g}  ({note})")
 
     print(f"\n{sep}")
 
@@ -664,6 +683,7 @@ Commands:
   arm [seconds]                   Set ACRO mode, send RAWES_ARM (default 10 s)
   hold <pwm> [seconds]            Arm, hold GB4008 output at pwm us (Ctrl-C to stop)
   disarm                          Disarm vehicle
+  config [--apply]                Diff (or write) all params from rawes_params.json; --apply writes + reboots
   reboot                          Reboot ArduPilot
   getparam <name>                 Read a parameter value
   setparam <name> <value>         Write a parameter value
@@ -1053,59 +1073,33 @@ def _run_command(session: RawesGCS, tokens: list[str],
 
     # -- config [--apply] ---------------------------------------------------
     elif cmd == "config":
-        apply = "--apply" in [t.lower() for t in tokens[1:]]
-        # Full RAWES hardware parameter set matching the SITL torque test stack.
-        # GB4008 on output 4, PWM 800-2000, DDFP CCW (H_TAIL_TYPE=4).
-        # Lua rawes.lua handles arming (RAWES_ARM); ArduPilot DDFP PID drives yaw.
-        steps = [
-            # DDFP tail: H_TAIL_TYPE=4 (DDFP CCW) drives SERVO4 for yaw.
-            ("H_TAIL_TYPE",       4),
-            ("H_COL2YAW",         0),
-            # SERVO4: GB4008 on output 4.  800 us = off, 2000 us = full throttle.
-            ("SERVO4_MIN",        800),
-            ("SERVO4_MAX",        2000),
-            ("SERVO4_TRIM",       800),
-            # Yaw PID matching SITL torque tests.
-            ("H_YAW_TRIM",        0.02),
-            ("ATC_RAT_YAW_P",     0.015),
-            ("ATC_RAT_YAW_I",     0.01),
-            ("ATC_RAT_YAW_D",     0.0),
-            ("ATC_RAT_YAW_IMAX",  0.7),
-            # RSC: CH8 interlock (instant runup when CH8=2000).
-            ("H_RSC_MODE",        1),
-            ("H_RSC_RUNUP_TIME",  2),
-            # Swashplate collective limits.
-            ("H_COL_ANG_MIN",     -10),
-            ("H_COL_ANG_MAX",     10),
-            # Lua scripting: rawes.lua loaded, mode 0 (arming only).
-            ("SCR_ENABLE",        1),
-            ("SCR_USER6",         0),
-            # Arming: disable prearm checks so Lua arming:arm() succeeds.
-            ("ARMING_CHECK",      0),
-            ("BRD_SAFETY_DEFLT",  0),
-        ]
+        apply = "--apply" in tokens
+        # Collect all entries with a non-null expected value from rawes_params.json.
+        all_entries = []
+        for group in _PARAMS_JSON.values():
+            for e in group:
+                if e["expected"] is not None:
+                    all_entries.append(e)
 
-        action = "Applying" if apply else "Preview (read-only -- add --apply to write)"
+        action = "Applying" if apply else "Preview -- add --apply to write"
         print(f"  RAWES config  [{action}]")
+        print(f"  Source: {_PARAMS_JSON_PATH}")
         print()
         print(f"  {'Parameter':<25} {'Expected':>8}  {'Actual':>10}  Status")
         print(f"  {'-'*25}  {'-'*8}  {'-'*10}  ------")
         any_diff = False
         any_fail = False
-        for name, expected in steps:
+        for e in all_entries:
+            name, expected = e["name"], e["expected"]
             actual = session.get_param(name)
             if actual is None:
-                row_status = "[FAIL] not found"
+                print(f"  {name:<25} {str(expected):>8}  {'N/A':>10}  [FAIL] not found")
                 any_fail = True
-                actual_str = "N/A"
             elif abs(actual - float(expected)) < 1e-4:
-                row_status = "[OK]"
-                actual_str = f"{actual:.4g}"
+                print(f"  {name:<25} {str(expected):>8}  {f'{actual:.4g}':>10}  [OK]")
             else:
-                row_status = f"[DIFF] {actual:.4g} -> {expected}"
+                print(f"  {name:<25} {str(expected):>8}  {f'{actual:.4g}':>10}  [DIFF]")
                 any_diff = True
-                actual_str = f"{actual:.4g}"
-            print(f"  {name:<25} {str(expected):>8}  {actual_str:>10}  {row_status}")
 
         print()
         if any_fail:
@@ -1116,8 +1110,8 @@ def _run_command(session: RawesGCS, tokens: list[str],
             print("  [DIFF] Run 'config --apply' to write changes.")
         else:
             print("  Writing changes ...")
-            for name, val in steps:
-                session.set_param(name, val)
+            for e in all_entries:
+                session.set_param(e["name"], e["expected"])
             print("  [OK] Parameters written. Rebooting ...")
             session._mav.mav.command_long_send(
                 session._target_system, session._target_component,

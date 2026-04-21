@@ -1,0 +1,81 @@
+{
+  "key": [
+    {
+      "name": "H_TAIL_TYPE",
+      "expected": 4,
+      "note": "4=DDFP CCW; tells ArduPilot GB4008 on output 4 provides yaw by varying throttle"
+    },
+    {
+      "name": "SCR_ENABLE",
+      "expected": 1,
+      "note": "1=Lua scripting on; rawes.lua is loaded and running after boot"
+    },
+    {
+      "name": "SCR_USER6",
+      "expected": null,
+      "note": "active Lua flight mode: 0=none  1=steady  4=landing  5=pumping"
+    },
+    {
+      "name": "ARMING_CHECK",
+      "expected": 0,
+      "note": "0=prearm checks disabled; required for Lua arming:arm() to succeed"
+    },
+    {
+      "name": "BRD_SAFETY_DEFLT",
+      "expected": 0,
+      "note": "0=safety switch disabled; servo outputs are live immediately on boot"
+    }
+  ],
+  "tail_pid": [
+    {
+      "name": "H_YAW_TRIM",
+      "expected": 0.02,
+      "note": "feedforward throttle added to I-term output to compensate rotor drag at cruise RPM"
+    },
+    {
+      "name": "ATC_RAT_YAW_P",
+      "expected": 0.015,
+      "note": "yaw rate P gain; scales measured yaw rate error into throttle correction"
+    },
+    {
+      "name": "ATC_RAT_YAW_I",
+      "expected": 0.01,
+      "note": "yaw rate I gain; integrates steady-state yaw drift (carries equilibrium torque)"
+    },
+    {
+      "name": "ATC_RAT_YAW_D",
+      "expected": 0.0,
+      "note": "yaw rate D gain; zero -- D is too noisy on this airframe to be useful"
+    },
+    {
+      "name": "ATC_RAT_YAW_IMAX",
+      "expected": 0.7,
+      "note": "I-term clamp (0-1 throttle scale); must exceed equilibrium throttle ~0.485"
+    },
+    {
+      "name": "H_RSC_MODE",
+      "expected": 1,
+      "note": "1=setpoint mode; CH8 RC channel acts as motor interlock (2000=enabled)"
+    },
+    {
+      "name": "H_RSC_RUNUP_TIME",
+      "expected": 2,
+      "note": "seconds ArduPilot waits for motor to reach speed before allowing flight modes"
+    },
+    {
+      "name": "SERVO4_MIN",
+      "expected": 800,
+      "note": "minimum PWM sent to GB4008 ESC; 800 us = motor off / ESC armed"
+    },
+    {
+      "name": "SERVO4_MAX",
+      "expected": 2000,
+      "note": "maximum PWM sent to GB4008 ESC; 2000 us = full throttle"
+    },
+    {
+      "name": "SERVO4_TRIM",
+      "expected": 800,
+      "note": "trim PWM = min for DDFP tail; ArduPilot outputs trim when disarmed"
+    }
+  ]
+}
