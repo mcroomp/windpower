@@ -124,7 +124,7 @@ def test_armon(torque_unarmed_lua):
                 t_sim=t_rel, phase="DYNAMIC",
                 rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
                 omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
-                servo_esc=float(pwm[0]),
+                servo4_us=float(pwm[0]),
             ))
 
             in_window = _SETTLE_S <= t_rel < _SETTLE_S + _REGULATE_S
@@ -191,7 +191,7 @@ def test_armon(torque_unarmed_lua):
                 t_sim=t_rel, phase="DRIFT",
                 rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
                 omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
-                servo_esc=float(pwm[0]),
+                servo4_us=float(pwm[0]),
             ))
             drift.append({"t": t_rel, "psi_dot": msg.yawspeed, "pwm": pwm[0]})
             if len(drift) % 20 == 1:

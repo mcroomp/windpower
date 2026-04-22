@@ -54,26 +54,17 @@ _PHASE2 = [
     ("FS_THR_ENABLE",     0),
     ("FS_GCS_ENABLE",     0),
     ("FS_EKF_ACTION",     0),
-    # RPM sensor: disabled until AM32 EDT is enabled on the ESC.
-    # After enabling EDT via BLHeli passthrough: set RPM1_TYPE=5 and SERVO_BLH_BDMASK=256.
+    # RPM sensor: not active (PWM ESC has no telemetry).
+    # Future: set RPM1_TYPE=5 + SERVO_BLH_BDMASK=8 after enabling AM32 EDT on ESC.
     ("RPM1_TYPE",         0),
     ("RPM1_MIN",          0),
-    # Output 9 (AUX OUT 1, FMU): GB4008 under Lua Script 1 control
-    # SERVO9_MIN=800: motor off at 800 us, full throttle at 2000 us (matches rawes.lua range)
-    # Default 1100 clamps the DShot signal and keeps motor silent.
-    ("SERVO9_FUNCTION",   94),  # Script 1: Lua writes GB4008 PWM via SRV_Channels
-    ("SERVO9_MIN",        800),
-    ("SERVO9_MAX",        2000),
-    ("SERVO9_TRIM",       800),   # trim = off
-    # DShot300 on output 9 (AUX OUT 1, FMU processor -- BRD_IO_DSHOT not needed)
-    ("SERVO_BLH_MASK",    256),  # bit 8 = output 9
-    ("SERVO_BLH_OTYPE",   5),    # DShot300
-    ("SERVO_BLH_POLES",   22),   # GB4008 24N22P; default 14 is wrong
-    ("SERVO_BLH_TRATE",   10),   # telemetry request rate
-    ("SERVO_BLH_AUTO",    0),    # manual mask config
-    ("SERVO_BLH_BDMASK",  0),    # one-way DShot; set to 256 after AM32 EDT enabled
-    ("SERVO_DSHOT_ESC",   3),    # AM32 (REVVitRC)
-    ("SERVO_DSHOT_RATE",  0),    # 1 kHz (default)
+    # Output 4 (MAIN OUT 4, IOMCU): GB4008 under ArduPilot ATC_RAT_YAW DDFP control.
+    # H_TAIL_TYPE=4 routes yaw PID output to SERVO4 as standard PWM.
+    # SERVO4_MIN=800: motor off at 800 us, full throttle at 2000 us.
+    ("H_TAIL_TYPE",       4),    # DDFP CCW: ArduPilot yaw PID drives SERVO4
+    ("SERVO4_MIN",        800),
+    ("SERVO4_MAX",        2000),
+    ("SERVO4_TRIM",       800),   # trim = off (motor off at neutral stick)
     ("BRD_SAFETY_DEFLT",  0),    # safety switch disabled -- outputs live on boot
     # rawes.lua mode: 0 = none (passive; ArduPilot ATC_RAT_YAW handles yaw regulation)
     ("SCR_USER6",         0),

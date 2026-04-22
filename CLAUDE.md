@@ -60,7 +60,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above xi≈85°.
 - **body_z_slew_rate** = 0.40 rad/s (`rotor.body_z_slew_rate_rad_s`). Faster → oscillation; slower → wastes reel-in time.
 - **RotorDefinition YAML fields:** `swashplate_pitch_gain_rad` (measurable via flap deflection); `CD_structural` (beaupoil_2026=0.0, de_schutter_2018=0.021).
-- **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line. **CSV files are always regenerated — never worry about backward compatibility for the CSV schema.**
+- **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `flight_log.py` / `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line. **CSV files are always regenerated — never worry about backward compatibility for the CSV schema.** `flight_log.FlightLog.load(log_dir)` reads all log sources (telemetry CSV + mavlink.jsonl + mediator.log + arducopter.log) into one structure; `FlightLog.buckets(bucket_s)` returns parameterized time-window aggregates with physics, MAVLink attitude/EKF, and `FlightEvent` list per window. `validate_ekf_window(mavlink_path, t_start_s, t_end_s)` is in `analyse_run` (imported by `test_kinematic_gps.py`).
 - **rawes.lua SCR_USER6 modes (valid values 0,1,4,5):** 0=none (passive: no RC overrides, logs every 5 s + any NV message), 1=steady (cyclic orbit-tracking, 50 Hz), 2=reserved, 3=reserved, 4=landing (cyclic + VZ descent + auto final_drop, 50 Hz), 5=pumping (De Schutter pumping cycle, 50 Hz). Modes 4+5 own Ch3 entirely. **Yaw regulation** is handled entirely by ArduPilot's ATC_RAT_YAW PID (ACRO_Heli, H_TAIL_TYPE=4 DDFP); rawes.lua writes no commands to SERVO9/Ch9. **RAWES_ARM:** send `NAMED_VALUE_FLOAT("RAWES_ARM", ms)` to arm the vehicle and start a disarm countdown of `ms` milliseconds; re-sending refreshes the timer; Lua disarms and sends a STATUSTEXT when the countdown expires. Works in any mode. Default state is unarmed. **Substates** (landing: 0=descend/1=final_drop; pumping: 0=hold/1=reel_out/2=transition/3=reel_in/4=transition_back) are delivered via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. `_nv_floats` resets to `{}` on every mode change. Constants in `simulation/rawes_modes.py`; send via `gcs.send_named_float("RAWES_SUB", N)` or `sim.send_named_float("RAWES_SUB", N)` (unit harness).
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) are required boot params (in `rawes_sitl_defaults.parm`). GPS origin sets during arm; "EKF3 IMU0 is using GPS" appears once EKF innovations settle. Without widened gates, GPS fusion fails.
 - **EK3_SRC1_YAW=2** (dual-antenna GPS yaw, RELPOSNED) — `rawes_sitl_defaults.parm` boot default. Two F9P antennas 50 cm apart (±25 cm along body X) give yaw from the NED baseline vector. Yaw is known from the first GPS fix — no motion, no EKFGSF rotation needed. `delAngBiasLearned` converges with constant-zero gyro (~21 s after arm). `COMPASS_USE=0`, `COMPASS_ENABLE=0` — compass is physically useless near the GB4008 motor on hardware and SITL synthetic compasses cycle every 10 s blocking GPS fusion. `GPS_AUTO_CONFIG=0` is **critical**: prevents ArduPilot from reconfiguring the UBLOX chips over serial, which corrupts the RELPOSNED stream in SITL. See `rawes_sitl_defaults.parm` for the full parameter list.
@@ -121,6 +121,11 @@ simulation/
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
 ├── gcs.py               MAVLink GCS client (arm, mode, RC override, params)
 ├── telemetry_csv.py     Canonical 67-column CSV schema (TelRow, COLUMNS, heartbeat)
+├── analysis/
+│   ├── flight_log.py    Unified data loader — FlightLog.load(log_dir), FlightLog.buckets(bucket_s),
+│   │                    FlightEvent, Bucket; reads all log sources into one structure
+│   └── analyse_run.py   Post-run report: print_flight_report(log_dir, bucket_s=5.0),
+│                        compute_steady_metrics, validate_ekf_window; CLI: --bucket S
 ├── viz3d/
 │   ├── visualize_torque.py  Torque telemetry 3-panel replay (psi_dot, motor throttle, PWM)
 │   └── torque_telemetry.py  TorqueTelemetryFrame dataclass for torque replay
@@ -215,14 +220,14 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 | Simtests (14) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
 | Stack test (single) | `bash simulation/dev.sh test-stack -n 1 -k test_foo` |
 | Stack test (full suite) | `bash simulation/dev.sh test-stack -n 8` |
-| **Post-failure: physics** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
-| **Post-failure: EKF/GPS** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_mavlink.py <test_name>` |
+| **Post-failure analysis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
+| Post-failure (coarser view) | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name> --bucket 10` |
 | Regenerate `steady_state_starting.json` | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_steady_flight.py::test_steady_state_hub_does_not_drift -s` — written by that test only; used by all stack tests as initial conditions |
 | Container start/stop | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |
 | Run inside container | `bash simulation/dev.sh exec 'python3 /rawes/simulation/...'` |
 
-**Always run BOTH** `analyse_run.py` (physics telemetry) and `analyse_mavlink.py` (ArduPilot/EKF/GPS) after a stack test failure before reading raw logs.
+**Run `analyse_run.py` first after any stack test failure.** It loads all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) into a unified `FlightLog` and prints a single bucketed report covering physics, EKF/GPS events, attitude tracking, and sensor consistency. Use `--bucket 10` for a high-level overview, `--bucket 1` for frame-level detail. `analyse_mavlink.py` no longer exists — everything is in `analyse_run.py`.
 
 **Stack test logs:** `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. Always read with the Windows path (`e:/repos/windpower/simulation/logs/...`). Suite summary: `simulation/logs/suite_summary.json`.
 
@@ -259,7 +264,9 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 
 See [hardware/dshot.md](hardware/dshot.md) for bench and flight-mode parameter tables, AM32 EDT setup, wiring, and troubleshooting.
 
-GB4008 wired to **AUX OUT 1 (output 9, FMU)**. In flight mode (`SERVO9_FUNCTION=94`): Lua writes GB4008 PWM via `SRV_Channels` (Heli frame). In bench mode (`SERVO9_FUNCTION=36`): direct PWM via Rover frame (`MOT_PWM_TYPE=6`). Toggle with `setparam SERVO9_FUNCTION 36/94` in the calibrate REPL. In DShot mode the ESC auto-arms from the first valid DShot packet — no PWM arming sequence needed.
+GB4008 wired to **MAIN OUT 4 (output 4, IOMCU)**. Motor is controlled via **standard PWM** (800–2000 µs). ArduPilot controls yaw via `H_TAIL_TYPE=4` (DDFP CCW): `ATC_RAT_YAW` PID output → `SERVO4`. Lua writes no commands to the motor. No DShot or BLHeli subsystem is active (`RPM1_TYPE=0`). DShot (REVVitRC AM32 supports it) is a future option — see [hardware/dshot.md](hardware/dshot.md) for the enable procedure.
+
+**H_TAIL_TYPE enum** (values used in this project): `0`=servo (bidirectional, SERVO4_TRIM=1500 µs, no sign flip), `3`=DDFP CW (positive PID → more throttle — wrong for GB4008), `4`=DDFP CCW (sign flip: negative PID → more throttle — correct; CW hub drift produces negative yaw-error → negative PID → CCW sign flip → positive throttle → GB4008 counters drift). Full table in [system/stack.md §4.3](system/stack.md) and [hardware/dshot.md](hardware/dshot.md).
 
 ---
 

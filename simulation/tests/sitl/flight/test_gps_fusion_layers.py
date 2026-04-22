@@ -127,7 +127,8 @@ def test_gps_fusion_dual_gps(tmp_path, request):
                     + (f"\n{tail}" if tail else "")
                 )
 
-        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=ctx.mavlink_log)
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=ctx.mavlink_log,
+                       watchdog=_assert_alive)
         try:
             # connect() blocks until the first heartbeat from ArduPilot.
             # The mediator subprocess keeps SITL alive so ArduPilot can boot.

@@ -45,6 +45,10 @@ _LOG_DIR = _SIM_DIR / "logs"
 sys.path.insert(0, str(_SIM_DIR))
 from telemetry_csv import TelRow, read_csv  # noqa: E402
 from mavlink_log import iter_messages as _iter_mavlink  # noqa: E402
+from ekf_flags import has_warn as _ekf_has_warn  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).parent))
+from flight_log import FlightLog  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -121,31 +125,33 @@ def compute_steady_metrics(
     )
 
 
-def print_flight_report(log_dir: Path) -> None:
+def print_flight_report(log_dir: Path, bucket_s: float = 5.0) -> None:
     """Load logs from log_dir and print the full flight analysis report.
 
-    Covers physics health (altitude, tension, tumbling), EKF timeline, sensor
-    consistency, yaw divergence, and per-phase diagnostics.  Works for any
-    flight type: steady orbit, pumping cycle, or landing.
+    Produces a unified per-bucket analysis covering physics, attitude tracking,
+    EKF health, and important events (GPS fusion, EKF transitions, arming).
+    bucket_s controls the time-window size: larger = higher-level overview,
+    smaller = fine-grained debugging.
 
-    Called from stack tests after the observation window so the log shows the
-    complete picture of what happened in the run.
+    Called from stack tests after the observation window.
     """
-    tel_path  = log_dir / "telemetry.csv"
-    med_path  = log_dir / "mediator.log"
-    gcs_path  = log_dir / "gcs.log"
-    ekf_path  = log_dir / "mavlink.jsonl"
+    log_dir  = Path(log_dir)
+    ekf_path = log_dir / "mavlink.jsonl"
 
+    # Load FlightLog (all sources)
+    fl = FlightLog.load(log_dir)
+
+    # Also build RunReport for sections that still use it
     report = RunReport()
-    load_telemetry(tel_path, report)
-    parse_mediator(med_path, report)
-    parse_pytest(gcs_path, report)
+    load_telemetry(log_dir / "telemetry.csv", report)
+    parse_mediator(log_dir / "mediator.log", report)
+    parse_pytest(log_dir / "gcs.log", report)
     parse_arducopter(log_dir / "arducopter.log", report)
 
     _print_mediator(report)
     _print_sitl_crash(report)
     _print_tel_events(report)
-    _print_free_flight_quality(report)
+    _print_bucketed_report(fl, bucket_s)
     _print_sensor_consistency(report)
     _print_yaw_divergence(report)
     _print_ekf_state(ekf_path)
@@ -604,115 +610,59 @@ def _print_ekf(r: RunReport) -> None:
         print(f"    GPS yaw valid        : {'[OK]' if final_f & 0x0080 else '[!!]'}")
 
 
-def _print_free_flight_quality(r: RunReport) -> None:
+def _print_mode_check(fl: FlightLog) -> None:
     """
-    Per-10s bucket analysis of free-flight orbit quality.
+    Verify that ArduPilot was in ACRO mode at arm and stayed there.
 
-    Detects:
-      - Floor hits (alt <= 1.05 m)
-      - Tether slack/taut oscillations (chatter)
-      - Altitude instability (high std within bucket)
-      - Attitude tumbling (large rpy_yaw change rate)
-      - Orbit radius drift
+    Reads MODE messages from dataflash.BIN.  Prints a single [OK] line if
+    ACRO was the first mode after arm and was never left.  If a violation is
+    found, prints [!!] plus the full mode timeline so the cause is obvious.
     """
-    rows = [
-        row for row in r.tel_rows
-        if row.damp_alpha == 0.0
-        and row.phase not in ("reel-out", "reel-in", "descent", "final_drop")
-    ]
+    _header("ACRO MODE CHECK")
+
+    rows = fl._df_mode_rows
     if not rows:
+        print("  (no MODE messages in dataflash.BIN -- cannot verify)")
         return
 
-    _header("FREE-FLIGHT QUALITY")
+    # Find arm time from events (category="ARM")
+    arm_t = None
+    for ev in fl.events:
+        if ev.category == "ARM":
+            arm_t = ev.t_sim
+            break
 
-    t0        = rows[0].t_sim
-    t1        = rows[-1].t_sim
-    alts      = [-row.pos_z              for row in rows]
-    orbit_rs  = [(row.pos_x**2 + row.pos_y**2)**0.5 for row in rows]
-    tensions  = [row.tether_tension      for row in rows]
-    slacks    = [row.tether_slack        for row in rows]
+    # Always print the full mode timeline (compact)
+    print("  Mode timeline (dataflash MODE messages):")
+    for r in rows:
+        marker = ""
+        if arm_t is not None and abs(r["t_s"] - arm_t) < 0.5:
+            marker = "  <-- arm"
+        tag = "" if r["mode"] == 1 else "  [!!] NOT ACRO"
+        print(f"    t={r['t_s']:7.2f}s  {r['mode_name']:12s} (mode={r['mode']:2d}){marker}{tag}")
 
-    total_floor_hits = sum(1 for a in alts if a <= 1.05)
-    # Tether oscillation: count slack->taut transitions
-    tether_transitions = sum(
-        1 for i in range(1, len(slacks))
-        if slacks[i-1] != slacks[i]
-    ) // 2   # each oscillation = 2 transitions
+    # Check: after arm, was mode always ACRO?
+    if arm_t is not None:
+        post_arm = [r for r in rows if r["t_s"] >= arm_t - 0.5]
+    else:
+        post_arm = rows  # no arm event found -- check everything
 
-    dt = (t1 - t0) / max(len(rows) - 1, 1)
+    non_acro = [r for r in post_arm if r["mode"] != 1]
 
-    # Attitude change rate: |delta rpy_yaw| / dt per step, capped at pi
-    att_rates = []
-    for i in range(1, len(rows)):
-        dy = abs(rows[i].rpy_yaw - rows[i-1].rpy_yaw)
-        if dy > math.pi:
-            dy = 2 * math.pi - dy
-        att_rates.append(dy / max(dt, 1e-6))
-    peak_att_rate = max(att_rates) if att_rates else 0.0
-
-    # Summary
-    mean_alt    = sum(alts) / len(alts)
-    std_alt     = (sum((a - mean_alt)**2 for a in alts) / len(alts))**0.5
-    mean_orbit  = sum(orbit_rs) / len(orbit_rs)
-    mean_tens   = sum(tensions) / len(tensions)
-    max_tens    = max(tensions)
-
-    print(f"  Duration       : t={t0:.1f}s .. t={t1:.1f}s  ({t1-t0:.0f}s, {len(rows)} rows)")
-    print(f"  Altitude       : mean={mean_alt:.1f} m  std={std_alt:.1f} m  "
-          f"range=[{min(alts):.1f}, {max(alts):.1f}] m  "
-          + ("[OK]" if min(alts) > 3.0 else "[!!] below 3 m"))
-    print(f"  Orbit radius   : mean={mean_orbit:.1f} m  "
-          f"range=[{min(orbit_rs):.1f}, {max(orbit_rs):.1f}] m")
-    print(f"  Tether tension : mean={mean_tens:.0f} N  max={max_tens:.0f} N  "
-          + ("[OK]" if max_tens < 500 else "[!!] near break load"))
-    print(f"  Floor hits     : {total_floor_hits} frames  "
-          + ("[OK]" if total_floor_hits == 0 else "[!!] hub hit floor"))
-    print(f"  Tether chatter : {tether_transitions} slack/taut cycles  "
-          + ("[OK]" if tether_transitions < 5 else "[!!] oscillating tether"))
-    print(f"  Peak att. rate : {math.degrees(peak_att_rate):.0f} deg/s  "
-          + ("[OK]" if peak_att_rate < 1.0 else "[!!] tumbling"))
-
-    # Per-10s bucket table
-    BUCKET_S = 10.0
     print()
-    print(f"  {'t_start':>7}  {'alt_mean':>8}  {'alt_std':>7}  {'orbit_r':>7}  "
-          f"{'T_mean':>6}  {'T_max':>6}  {'floor':>5}  {'chatter':>7}")
-    print(f"  {'(s)':>7}  {'(m)':>8}  {'(m)':>7}  {'(m)':>7}  "
-          f"{'(N)':>6}  {'(N)':>6}  {'hits':>5}  {'cycles':>7}")
-    print("  " + "-" * 68)
-
-    bucket_start = t0
-    while bucket_start < t1 - 0.5:
-        bucket_end = bucket_start + BUCKET_S
-        br = [row for row in rows if bucket_start <= row.t_sim < bucket_end]
-        if not br:
-            bucket_start = bucket_end
-            continue
-
-        b_alts    = [-row.pos_z for row in br]
-        b_orbits  = [(row.pos_x**2 + row.pos_y**2)**0.5 for row in br]
-        b_tens    = [row.tether_tension for row in br]
-        b_slacks  = [row.tether_slack for row in br]
-        b_floor   = sum(1 for a in b_alts if a <= 1.05)
-        b_chat    = sum(1 for i in range(1, len(b_slacks))
-                        if b_slacks[i-1] != b_slacks[i]) // 2
-        b_alt_m   = sum(b_alts) / len(b_alts)
-        b_alt_s   = (sum((a - b_alt_m)**2 for a in b_alts) / len(b_alts))**0.5
-        b_orb_m   = sum(b_orbits) / len(b_orbits)
-        b_t_m     = sum(b_tens) / len(b_tens)
-        b_t_max   = max(b_tens)
-
-        flag = ""
-        if b_floor > 0:
-            flag = " [!!]floor"
-        elif b_alt_m < 3.0:
-            flag = " [!] low"
-        elif b_chat >= 3:
-            flag = " [!] chatter"
-
-        print(f"  {bucket_start:7.0f}  {b_alt_m:8.1f}  {b_alt_s:7.2f}  {b_orb_m:7.1f}  "
-              f"{b_t_m:6.0f}  {b_t_max:6.0f}  {b_floor:5d}  {b_chat:7d}{flag}")
-        bucket_start = bucket_end
+    if not non_acro:
+        if arm_t is not None:
+            print(f"  [OK] ACRO mode active at arm (t={arm_t:.1f}s) and maintained throughout.")
+        else:
+            print("  [OK] ACRO mode throughout (no arm event found to anchor check).")
+    else:
+        print(f"  [!!] NON-ACRO mode detected after arm:")
+        for r in non_acro:
+            print(f"       t={r['t_s']:.2f}s  {r['mode_name']} (mode={r['mode']})")
+        print()
+        print("  This is the tilt contamination root cause: ArduPilot in STABILIZE")
+        print("  actively commands roll/pitch toward 0 deg, driving constant cyclic")
+        print("  at 65-deg tether equilibrium. Fix: set ACRO before arm.")
 
 
 def _print_landing(r: RunReport) -> None:
@@ -1030,6 +980,220 @@ def _print_sensor_consistency(r: RunReport) -> None:
 
 
 # ---------------------------------------------------------------------------
+# validate_ekf_window (migrated from analyse_mavlink.py)
+# Public API: imported by test_kinematic_gps.py
+# ---------------------------------------------------------------------------
+
+_POST_FUSION_SETTLE_S = 5.0
+_CONST_POS_SETTLE_S   = 2.0
+
+
+def _mavlink_load(path: Path) -> list[dict]:
+    records = []
+    with path.open(encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return records
+
+
+def _mavlink_time_anchor(records: list[dict]) -> tuple:
+    """Return (t0_wall, t0_boot_s) from the first SYSTEM_TIME record, or (None, None)."""
+    for d in records:
+        if d.get("mavpackettype") == "SYSTEM_TIME":
+            return d["_t_wall"], d.get("time_boot_ms", 0) / 1000.0
+    return None, None
+
+
+def _to_sim(t_wall: float, t0_wall: float, t0_boot_s: float) -> float:
+    return (t_wall - t0_wall) + t0_boot_s
+
+
+def _check_ekf_records(
+    records: list[dict],
+    t0_wall: float,
+    t0_boot_s: float,
+    t_start_s: float,
+    t_end_s: float,
+) -> list[str]:
+    """Check EKF health in window [t_start_s, t_end_s] (boot-seconds).
+
+    gps_glitching and related STATUSTEXT within _POST_FUSION_SETTLE_S of
+    t_start_s are treated as a normal post-fusion transient.
+    Returns a list of failure strings. Empty = clean.
+    """
+    settle_end       = t_start_s + _POST_FUSION_SETTLE_S
+    const_settle_end = t_start_s + _CONST_POS_SETTLE_S
+
+    failures:      list[str] = []
+    glitch_late:   list[float] = []
+    const_times:   list[float] = []
+    att_loss:      list[float] = []
+
+    for d in records:
+        st = _to_sim(d["_t_wall"], t0_wall, t0_boot_s)
+        if st < t_start_s or st > t_end_s:
+            continue
+        mt = d.get("mavpackettype", "")
+        if mt == "EKF_STATUS_REPORT":
+            flags = d.get("flags", 0)
+            if (flags & 0x8000) and st > settle_end:
+                glitch_late.append(st)
+            if (flags & 0x0080) and st > const_settle_end:
+                const_times.append(st)
+            if not (flags & 0x0001):
+                att_loss.append(st)
+        elif mt == "STATUSTEXT":
+            txt = d.get("text", "").rstrip("\x00").strip()
+            if "yaw reset" in txt.lower():
+                failures.append(f"t={st:.1f}s  EKF yaw reset: {txt!r}")
+            if st > settle_end and ("gps glitch" in txt.lower()
+                                    or "compass error" in txt.lower()):
+                failures.append(f"t={st:.1f}s  GPS/compass problem: {txt!r}")
+
+    if glitch_late:
+        t0f, t1f = glitch_late[0], glitch_late[-1]
+        failures.append(
+            f"gps_glitching (0x8000) active after {_POST_FUSION_SETTLE_S:.0f}s settle window: "
+            f"{len(glitch_late)} frames  (first t={t0f:.1f}s, last t={t1f:.1f}s)"
+        )
+    if const_times:
+        t0f, t1f = const_times[0], const_times[-1]
+        failures.append(
+            f"const_pos_mode (0x0080) active for {len(const_times)} EKF frames in window "
+            f"(first t={t0f:.1f}s, last t={t1f:.1f}s)"
+        )
+    if att_loss:
+        t0f, t1f = att_loss[0], att_loss[-1]
+        failures.append(
+            f"attitude flag (0x0001) lost for {len(att_loss)} EKF frames in window "
+            f"(first t={t0f:.1f}s, last t={t1f:.1f}s)"
+        )
+    return failures
+
+
+def validate_ekf_window(
+    mavlink_path: "Path | str",
+    t_start_s: float,
+    t_end_s: float,
+) -> list[str]:
+    """Check EKF health in a sim-time window [t_start_s, t_end_s] (boot seconds).
+
+    t_start_s should be the GPS fusion time (e.g. sim_now() when 'is using GPS'
+    STATUSTEXT arrives).  gps_glitching and related STATUSTEXT within the first
+    _POST_FUSION_SETTLE_S seconds are treated as a normal post-fusion transient.
+
+    Returns a list of failure strings.  Empty = clean.
+
+    Example
+    -------
+    issues = validate_ekf_window(ctx.mavlink_log, t_gps_fused_s, t_exit_s)
+    assert not issues, "EKF problems:\\n" + "\\n".join(issues)
+    """
+    mavlink_path = Path(mavlink_path)
+    if mavlink_path.is_dir():
+        mavlink_path = mavlink_path / "mavlink.jsonl"
+    if not mavlink_path.exists():
+        return [f"mavlink.jsonl not found: {mavlink_path}"]
+    records = _mavlink_load(mavlink_path)
+    if not records:
+        return ["mavlink.jsonl is empty"]
+    t0_wall, t0_boot_s = _mavlink_time_anchor(records)
+    if t0_wall is None or t0_boot_s is None:
+        return ["cannot determine time origin (no SYSTEM_TIME packet)"]
+    return _check_ekf_records(records, t0_wall, t0_boot_s, t_start_s, t_end_s)
+
+
+# ---------------------------------------------------------------------------
+# Bucketed flight analysis report
+# ---------------------------------------------------------------------------
+
+def _print_bucketed_report(fl: FlightLog, bucket_s: float = 5.0) -> None:
+    """Print a per-bucket flight analysis table with events interleaved.
+
+    Each row covers bucket_s seconds of simulation time and shows:
+      physics (altitude, tension, collective, aero thrust),
+      actual attitude (from ATTITUDE MAVLink),
+      attitude error vs target (from ATTITUDE_TARGET MAVLink),
+      heading gap (sensor consistency),
+      EKF flags.
+
+    Important events (EKF transitions, GPS fusion, arm/disarm, crashes) are
+    printed between the row they fall in and the next row.
+    """
+    buckets = fl.buckets(bucket_s)
+    if not buckets:
+        print("  (no data)")
+        return
+
+    _header(f"FLIGHT ANALYSIS  (bucket={bucket_s:.1f}s, {len(buckets)} windows)")
+
+    has_att = any(b.att_roll_deg is not None for b in buckets)
+    has_tgt = any(b.tgt_roll_deg is not None for b in buckets)
+    has_ekf = any(b.ekf_flags is not None for b in buckets)
+
+    # Build header
+    hdr = (f"  {'t(s)':>8}  {'phase':<12}  {'alt':>5}  {'T_N':>5}  "
+           f"{'col_r':>6}  {'aeroN':>5}")
+    if has_att:
+        hdr += f"  {'roll':>5}  {'pit':>5}  {'yaw':>5}"
+    if has_tgt:
+        hdr += f"  {'t_err':>5}"
+    hdr += f"  {'hdg':>4}"
+    if has_ekf:
+        hdr += f"  {'EKF':>8}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    SEV_CHAR = {"OK": "+", "WARN": "!", "ERROR": "!!", "INFO": " "}
+
+    for b in buckets:
+        # Build data row
+        if b.n_rows > 0:
+            phase_str = f"[{b.phase}]" if b.is_kinematic else b.phase
+            row = (f"  {b.t_start:8.1f}  {phase_str:<12}  {b.alt_mean:5.1f}  "
+                   f"{b.tether_tension_mean:5.0f}  {b.collective_rad_mean:6.3f}  "
+                   f"{b.aero_T_mean:5.0f}")
+        else:
+            row = (f"  {b.t_start:8.1f}  {'--':<12}  {'--':>5}  {'--':>5}  "
+                   f"{'--':>6}  {'--':>5}")
+
+        if has_att:
+            if b.att_roll_deg is not None:
+                row += (f"  {b.att_roll_deg:5.1f}  {b.att_pitch_deg:5.1f}  "
+                        f"{b.att_yaw_deg:5.1f}")
+            else:
+                row += f"  {'--':>5}  {'--':>5}  {'--':>5}"
+        if has_tgt:
+            row += (f"  {b.att_err_deg:5.1f}" if b.att_err_deg is not None
+                    else f"  {'--':>5}")
+        row += (f"  {b.heading_gap_deg_mean:4.1f}" if b.n_rows > 0
+                else f"  {'--':>4}")
+        if has_ekf:
+            if b.ekf_flags is not None:
+                flag_s = f"0x{b.ekf_flags:04x}"
+                if _ekf_has_warn(b.ekf_flags):
+                    flag_s += "!"
+                row += f"  {flag_s:>8}"
+            else:
+                row += f"  {'--':>8}"
+
+        print(row)
+
+        # Events in this bucket
+        for ev in b.events:
+            sc  = SEV_CHAR.get(ev.severity, " ")
+            cat = f"[{ev.category}]"
+            txt = ev.text[:64]
+            print(f"    {cat:<8} t={ev.t_sim:7.1f}s  [{sc}] {txt}")
+
+
+# ---------------------------------------------------------------------------
 # EKF telemetry (from mavlink.jsonl written by RawesGCS)
 # ---------------------------------------------------------------------------
 
@@ -1246,6 +1410,98 @@ def _plot(r: RunReport) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Attitude focus report (--focus attitude)
+# ---------------------------------------------------------------------------
+
+def _fmt(v: Optional[float], w: int = 7, d: int = 1, signed: bool = False) -> str:
+    if v is None:
+        return (" " * (w - 2) + "--").rjust(w)
+    fmt = f"{'+' if signed else ''}{w}.{d}f"
+    return format(v, fmt)
+
+
+def _print_attitude_focus(fl: FlightLog, bucket_s: float) -> None:
+    """Per-bucket attitude vs desired, swashplate outputs, and rate PID breakdown.
+
+    Table 1 — ATT + SWSH:
+      t_s, DesRoll, Roll, dR, DesPitch, Pitch, dP, DesYaw, Yaw, Col%, PCyc%, RCyc%
+
+    Table 2 — PIDR/PIDP rate PID breakdown (roll / pitch):
+      t_s, RateTar, RateAct, P, FF, I, D  (roll then pitch)
+      Identifies which PID term drives swashplate contamination.
+      FF ≈ 0 means the contamination is pure P-on-rate-error;
+      FF >> P means the attitude error is generating a rate FF term.
+    """
+    buckets = fl.buckets(bucket_s)
+    has_df = any(b.df_roll_deg is not None for b in buckets)
+    if not has_df:
+        print("  (no dataflash ATT data -- dataflash.BIN absent or no ATT messages)")
+        return
+
+    _header(f"ATTITUDE FOCUS  (bucket={bucket_s:.1f}s, dataflash ATT + SWSH + PID)")
+
+    # ── Table 1: ATT + SWSH ──────────────────────────────────────────────────
+    print()
+    print("  Table 1: Attitude error vs swashplate output")
+    print("  Roll/Pitch in degrees.  dR/dP = actual - desired.  SWSH outputs in %.")
+    print()
+    hdr = (f"  {'t_s':>6}  "
+           f"{'DesRoll':>7}  {'Roll':>7}  {'dR':>7}  "
+           f"{'DesPitch':>8}  {'Pitch':>7}  {'dP':>7}  "
+           f"{'DesYaw':>7}  {'Yaw':>7}  "
+           f"{'Col%':>6}  {'PCyc%':>6}  {'RCyc%':>6}")
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    for b in buckets:
+        if b.df_roll_deg is None:
+            continue
+        col_s  = f"{b.df_swsh_col:6.1f}" if b.df_swsh_col is not None else "  --  "
+        pcyc_s = f"{b.df_swsh_pcyc:6.1f}" if b.df_swsh_pcyc is not None else "  --  "
+        rcyc_s = f"{b.df_swsh_rcyc:6.1f}" if b.df_swsh_rcyc is not None else "  --  "
+        dr = b.df_roll_err_deg  or 0.0
+        dp = b.df_pitch_err_deg or 0.0
+        flag = "  [!!]" if abs(dr) > 30.0 or abs(dp) > 30.0 else ""
+        print(f"  {b.t_start:6.1f}  "
+              f"{b.df_des_roll_deg:7.1f}  {b.df_roll_deg:7.1f}  {dr:+7.1f}  "
+              f"{b.df_des_pitch_deg:8.1f}  {b.df_pitch_deg:7.1f}  {dp:+7.1f}  "
+              f"{b.df_des_yaw_deg:7.1f}  {b.df_yaw_deg:7.1f}  "
+              f"{col_s}  {pcyc_s}  {rcyc_s}{flag}")
+        for ev in b.events:
+            print(f"    [{ev.category}] t={ev.t_sim:.1f}s  {ev.text[:60]}")
+
+    # ── Table 2: Rate PID breakdown ──────────────────────────────────────────
+    has_pidr = any(b.df_pidr_tar is not None for b in buckets)
+    has_pidp = any(b.df_pidp_tar is not None for b in buckets)
+    if not has_pidr and not has_pidp:
+        print()
+        print("  (no PIDR/PIDP dataflash messages -- PID breakdown unavailable)")
+        return
+
+    print()
+    print("  Table 2: Rate PID breakdown (PIDR=roll, PIDP=pitch)")
+    print("  Tar=target rate (deg/s), Act=actual rate.  P/FF/I/D are PID terms.")
+    print("  If FF dominates: contamination = attitude_error -> rate_FF_feedforward.")
+    print("  If P dominates:  contamination = rate_error -> P gain.")
+    print()
+    hdr2 = (f"  {'t_s':>6}  "
+            f"{'R.Tar':>6}  {'R.Act':>6}  {'R.P':>6}  {'R.FF':>6}  {'R.I':>6}  {'R.D':>6}  "
+            f"{'P.Tar':>6}  {'P.Act':>6}  {'P.P':>6}  {'P.FF':>6}  {'P.I':>6}  {'P.D':>6}")
+    print(hdr2)
+    print("  " + "-" * (len(hdr2) - 2))
+    for b in buckets:
+        if b.df_pidr_tar is None and b.df_pidp_tar is None:
+            continue
+        print(f"  {b.t_start:6.1f}  "
+              f"{_fmt(b.df_pidr_tar)}  {_fmt(b.df_pidr_act)}  "
+              f"{_fmt(b.df_pidr_p,6,3)}  {_fmt(b.df_pidr_ff,6,3)}  "
+              f"{_fmt(b.df_pidr_i,6,3)}  {_fmt(b.df_pidr_d,6,3)}  "
+              f"{_fmt(b.df_pidp_tar)}  {_fmt(b.df_pidp_act)}  "
+              f"{_fmt(b.df_pidp_p,6,3)}  {_fmt(b.df_pidp_ff,6,3)}  "
+              f"{_fmt(b.df_pidp_i,6,3)}  {_fmt(b.df_pidp_d,6,3)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1275,6 +1531,14 @@ def main() -> None:
                         help="Save + show a 4-panel position/attitude/spin plot")
     parser.add_argument("--all-statustext", action="store_true",
                         help="Print every STATUSTEXT line (not just EKF/GPS)")
+    parser.add_argument("--bucket", type=float, default=5.0, metavar="S",
+                        help="Bucket size in seconds for the per-window analysis "
+                             "table (default: 5.0). Use a larger value for a "
+                             "high-level overview, smaller for detailed debugging.")
+    parser.add_argument("--focus", default=None, metavar="MODE",
+                        help="Focus mode: 'attitude' shows per-bucket "
+                             "DesRoll/Roll/dR, DesPitch/Pitch/dP, and "
+                             "swashplate PCyc/RCyc/Col from dataflash.BIN.")
     args = parser.parse_args()
 
     if args.test_name is None:
@@ -1302,58 +1566,61 @@ def main() -> None:
             print("Available:", ", ".join(d.name for d in dirs[:5]))
         return
 
-    telemetry_path = Path(args.telemetry) if args.telemetry else test_dir / "telemetry.csv"
-    mediator_path  = Path(args.mediator)  if args.mediator  else test_dir / "mediator.log"
+    print(f"\nTest dir : {test_dir}")
 
-    gcs_path = test_dir / "gcs.log"
+    # Load unified FlightLog
+    fl = FlightLog.load(test_dir)
 
+    # Also build RunReport for sections that still use it
     report = RunReport()
-    print(f"\nTest dir      : {test_dir}")
-    print(f"Loading telemetry CSV : {telemetry_path}")
-    load_telemetry(telemetry_path, report)
-    print(f"Parsing mediator log  : {mediator_path}")
-    parse_mediator(mediator_path, report)
-    print(f"Parsing gcs log       : {gcs_path}")
-    parse_pytest(gcs_path, report)
-    acp_path = test_dir / "arducopter.log"
-    parse_arducopter(acp_path, report)
-    print(f"  telemetry rows     : {len(report.tel_rows)}")
-    print(f"  STATUSTEXT lines   : {len(report.statustext)}")
-    print(f"  EKF_STATUS lines   : {len(report.ekf_flags)}")
+    tel_path = Path(args.telemetry) if args.telemetry else test_dir / "telemetry.csv"
+    med_path = Path(args.mediator)  if args.mediator  else test_dir / "mediator.log"
+    load_telemetry(tel_path, report)
+    parse_mediator(med_path, report)
+    parse_pytest(test_dir / "gcs.log", report)
+    parse_arducopter(test_dir / "arducopter.log", report)
+
+    print(f"  telemetry rows   : {len(report.tel_rows)}")
+    print(f"  MAVLink events   : {len(fl.events)}")
+    print(f"  EKF_STATUS lines : {len(report.ekf_flags)}")
 
     # RUN_ID cross-validation
     m_id = report.mediator_run_id
     p_id = report.pytest_run_id
     if m_id is None and p_id is None:
-        print("  RUN_ID             : not found in either log (old run?)")
+        print("  RUN_ID           : not found in either log (old run?)")
     elif m_id is None:
-        print(f"  RUN_ID             : pytest={p_id}  mediator=MISSING")
+        print(f"  RUN_ID           : pytest={p_id}  mediator=MISSING")
     elif p_id is None:
-        print(f"  RUN_ID             : mediator={m_id}  pytest=MISSING")
+        print(f"  RUN_ID           : mediator={m_id}  pytest=MISSING")
     elif m_id == p_id:
-        print(f"  RUN_ID             : {m_id}  [OK] logs match")
+        print(f"  RUN_ID           : {m_id}  [OK] logs match")
     else:
-        print(f"  RUN_ID             : MISMATCH -- mediator={m_id}  pytest={p_id}")
+        print(f"  RUN_ID           : MISMATCH -- mediator={m_id}  pytest={p_id}")
         print("  WARNING: logs are from different runs -- analysis may be misleading!")
 
-    _print_mediator(report)
-    _print_sitl_crash(report)
-    _print_tel_events(report)
-    _print_ekf(report)
-    _print_sensor_consistency(report)
-    _print_yaw_divergence(report)
-    _print_free_flight_quality(report)
-    _print_ekf_state(test_dir / "mavlink.jsonl")
-    _print_landing(report)
-    _print_setup(report)
-    _print_hold(report)
-    _print_results(report)
+    if args.focus == "attitude":
+        _print_attitude_focus(fl, args.bucket)
+    else:
+        _print_mediator(report)
+        _print_sitl_crash(report)
+        _print_tel_events(report)
+        _print_bucketed_report(fl, args.bucket)
+        _print_ekf(report)
+        _print_mode_check(fl)
+        _print_sensor_consistency(report)
+        _print_yaw_divergence(report)
+        _print_ekf_state(test_dir / "mavlink.jsonl")
+        _print_landing(report)
+        _print_setup(report)
+        _print_hold(report)
+        _print_results(report)
 
-    if args.all_statustext:
-        _print_all_statustext(report)
+        if args.all_statustext:
+            _print_all_statustext(report)
 
-    if args.plot:
-        _plot(report)
+        if args.plot:
+            _plot(report)
 
     print()
     _rule()

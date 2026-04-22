@@ -42,7 +42,7 @@ Options
     --omega-rotor       FLOAT   Rotor hub spin rate [rad/s] (default: 28.0)
     --startup-hold      FLOAT   EKF-init spin phase duration [s] (default: 5.0)
     --profile           STR     Axle speed / tilt profile name (default: constant)
-    --tail-channel      INT     0-based servo channel for motor (default: 3=Ch4, Lua: 8=Ch9)
+    --tail-channel      INT     0-based servo channel for motor (default: 3=Ch4)
     --log-level         LEVEL   Logging level (default: INFO)
     --events-log        PATH    Path for structured JSONL event log (default: none)
     --startup-yaw-rate  FLOAT   Yaw rate [deg/s] during startup hold (default: 5.0; 0=stationary)
@@ -63,6 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torque_model as _m
 from mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from mediator_events import MediatorEventLog
+from servo_pwm import MOTOR_PWM_MIN, MOTOR_PWM_MAX
 from sitl_interface import SITLInterface
 
 # ---------------------------------------------------------------------------
@@ -74,13 +75,10 @@ _BATTERY_V   = 15.2     # V — nominal 4S LiPo; sent to SITL to override batter
 DT         = 1.0 / 400.0  # 400 Hz loop target [s]
 
 # Default ArduPilot channel for yaw/tail-rotor (0-based index → Ch4).
-# When --tail-channel 9 is passed (Lua scripting mode), reads Ch9 (index 8).
+# H_TAIL_TYPE=4 DDFP routes ATC_RAT_YAW PID output to SERVO4 (output 4, MAIN OUT 4).
 _CH_YAW_DEFAULT = 3
 
-# GB4008 motor PWM range — must match SERVO9_MIN/SERVO9_MAX in ArduPilot params
-# and rawes.lua _set_throttle_pct (800 + pct * 12).
-MOTOR_PWM_MIN = 800.0   # µs — motor off
-MOTOR_PWM_MAX = 2000.0  # µs — full throttle
+# GB4008 motor PWM range — imported from servo_pwm.py (single source of truth).
 
 
 def _pwm_to_throttle(pwm_us: float) -> float:
@@ -237,7 +235,7 @@ def run(
     omega_rotor      : rotor hub spin rate [rad/s] (nominal autorotation speed)
     startup_hold_s   : duration of EKF-initialisation spin phase [s]
     profile          : axle speed / tilt profile name (key in PROFILES dict)
-    tail_channel     : 0-based servo channel index for the motor (3=Ch4, 8=Ch9)
+    tail_channel     : 0-based servo channel index for the motor (default: 3=Ch4)
     log_level        : Python logging level string
     events_log_path  : path for structured JSONL event log (None = disabled)
     startup_yaw_rate : yaw rate [rad/s] sent to SITL during startup hold
@@ -375,7 +373,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tail-channel", type=int, default=_CH_YAW_DEFAULT,
-        help="0-based servo channel index for tail motor (default: 3=Ch4, lua: 8=Ch9)",
+        help="0-based servo channel index for tail motor (default: 3=Ch4)",
     )
     parser.add_argument(
         "--log-level", default="INFO",

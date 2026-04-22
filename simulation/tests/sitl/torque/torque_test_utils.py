@@ -70,7 +70,7 @@ def run_observation_loop(
                 t_sim=t_rel, phase="DYNAMIC",
                 rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
                 omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
-                servo_esc=float(pwm[0]),
+                servo4_us=float(pwm[0]),
             ))
             if t_rel >= settle_s:
                 obs.append({"t": t_rel, "yaw": msg.yaw, "yaw_rate": msg.yawspeed})

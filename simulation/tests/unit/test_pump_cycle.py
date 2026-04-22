@@ -213,6 +213,7 @@ def _run_pumping_repeated() -> dict:
                 t_sim, hub_state, omega_spin, tether, tension_now,
                 collective_rad, tilt_lon, tilt_lat, WIND,
                 body_z_eq=body_z_eq, phase=tel_phase_label,
+                aero_result=result, aero_obj=aero, tether_force=tf, tether_moment=tm,
             ))
 
     # ── Results ───────────────────────────────────────────────────────────────

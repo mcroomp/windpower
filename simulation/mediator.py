@@ -379,10 +379,9 @@ def run_mediator(args, trajectory=None):
         #   ArduPilot servo outputs are ignored; SITL still runs for EKF.
         #
         # Normal path (ArduPilot servo PWM → H3-120 inverse mix):
-        #   Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = ESC
+        #   Servo channels 0,1,2 = S1,S2,S3 (swashplate); channel 3 = GB4008 (SERVO4, H_TAIL_TYPE=4)
         #   Servos arrive normalised [-1,1] from SITLInterface
         # ----------------------------------------------------------------
-        esc_norm   = float(np.clip(servos[8], -1.0, 1.0))  # output 9 (AUX OUT 1)
 
         # ----------------------------------------------------------------
         # Step 2a: Tether force (pre-computed before the planner call)
@@ -677,6 +676,15 @@ def run_mediator(args, trajectory=None):
                 "tether_fx":       tether_force[0],
                 "tether_fy":       tether_force[1],
                 "tether_fz":       tether_force[2],
+                "aero_fx":         result.F_world[0],
+                "aero_fy":         result.F_world[1],
+                "aero_fz":         result.F_world[2],
+                "aero_mx":         result.M_orbital[0],
+                "aero_my":         result.M_orbital[1],
+                "aero_mz":         result.M_orbital[2],
+                "tether_mx":       tether_moment[0],
+                "tether_my":       tether_moment[1],
+                "tether_mz":       tether_moment[2],
                 "collective_rad":  collective_rad,
                 "collective_norm": collective_norm,
                 "tilt_lon":        tilt_lon,
@@ -717,10 +725,10 @@ def run_mediator(args, trajectory=None):
                      - np.degrees(np.arctan2(
                          sensor_data["vel_ned"][1], sensor_data["vel_ned"][0]))
                      + 180.0) % 360.0 - 180.0),
-                "servo_s1":        s1,
-                "servo_s2":        s2,
-                "servo_s3":        s3,
-                "servo_esc":       esc_norm,
+                "servo_s1_us":     float(sitl.last_pwm_raw[0]),
+                "servo_s2_us":     float(sitl.last_pwm_raw[1]),
+                "servo_s3_us":     float(sitl.last_pwm_raw[2]),
+                "servo4_us":       float(sitl.last_pwm_raw[3]),
                 "wind_x":          wind_world[0],
                 "wind_y":          wind_world[1],
                 "wind_z":          wind_world[2],

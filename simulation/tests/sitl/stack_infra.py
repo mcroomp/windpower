@@ -12,7 +12,7 @@ Exported names (imported by conftest.py via ``from stack_infra import *``):
     assert_stack_ports_free, dump_startup_diagnostics
     analyze_startup_logs, wait_for_acro_stability, drain_statustext
     observe, assert_procs_alive, assert_no_mediator_criticals, get_arducopter_crash_info
-    _run_acro_setup, _wait_params_ready, _install_lua_scripts
+    _arm_sequence, _run_acro_setup, _wait_params_ready, _install_lua_scripts
     SITL_GCS_PORT, SITL_JSON_PORT
     _STARTING_STATE, _RAWES_DEFAULTS_PARM
     _TORQUE_STARTUP_HOLD_S
@@ -747,7 +747,8 @@ def _acro_stack(tmp_path, *, extra_config=None,
                     txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                     pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
-        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log)
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log,
+                       watchdog=_procs_alive)
 
         ctx = StackContext(
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
@@ -809,6 +810,120 @@ def _install_lua_scripts(*names: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Canonical arm state machine
+# ---------------------------------------------------------------------------
+
+def _arm_sequence(
+    gcs: "RawesGCS",
+    log,
+    *,
+    armon_ms: "int | None" = None,
+    rc_override: "dict[int, int] | None" = None,
+    rc_override_post_arm: "dict[int, int] | None" = None,
+    procs_alive=None,
+    fail=None,
+    mode_timeout: float = _MODE_TIMEOUT,
+    arm_timeout: float = _ARM_TIMEOUT,
+) -> None:
+    """
+    Canonical ACRO mode + arm sequence for all SITL stack tests.
+
+    Always runs in this order:
+      1. Set ACRO mode (with optional RC override keepalive).
+      2. Hard-assert ACRO confirmed via HEARTBEAT; refuse to arm in any other mode.
+      3a. armon_ms=None  — GCS force-arm; raise rc_override_post_arm after confirmation.
+      3b. armon_ms > 0   — send RAWES_ARM named float; wait for "RAWES arm-on: armed" STATUSTEXT.
+      3c. armon_ms = 0   — set ACRO only; return without arming (test owns arming).
+
+    Parameters
+    ----------
+    rc_override          : RC channel overrides sent during ACRO mode set and arm.
+                           None = no RC override (e.g. RAWES_ARM Lua path).
+    rc_override_post_arm : RC overrides sent after arm confirmation.
+                           None = same as rc_override (no additional change).
+                           Set to e.g. {8: 2000} to raise the motor interlock
+                           after arm when rc_override was {8: 1000}.
+    fail                 : callable(msg) invoked on unrecoverable failure.
+                           None raises RuntimeError instead (use in non-pytest
+                           helpers like _run_acro_setup).
+    procs_alive          : nullary callable checked after each blocking step.
+    """
+    def _fail(msg: str) -> None:
+        if fail is not None:
+            fail(msg)
+        else:
+            raise RuntimeError(msg)
+
+    def _check_alive() -> None:
+        if procs_alive is not None:
+            procs_alive()
+
+    # -- 1. Set ACRO mode -------------------------------------------------
+    log.info("[arm] Setting ACRO mode (timeout=%.0fs) ...", mode_timeout)
+    _ro = rc_override or {}
+    try:
+        gcs.set_mode(ACRO, timeout=mode_timeout, rc_override=_ro if _ro else None)
+    except Exception as exc:
+        _fail(f"ACRO mode set failed: {exc}")
+        return
+
+    # -- 2. Hard-assert ACRO confirmed ------------------------------------
+    _hb = gcs._recv(type="HEARTBEAT", blocking=True, timeout=3.0)
+    if _hb is None or int(_hb.custom_mode) != ACRO:
+        _actual = int(_hb.custom_mode) if _hb else -1
+        _fail(
+            f"ACRO mode not confirmed before arm (custom_mode={_actual}). "
+            f"Running in wrong mode would corrupt the swashplate attitude target."
+        )
+        return
+    log.info("[arm] ACRO confirmed (custom_mode=%d) — attitude target seeds from EKF.", ACRO)
+    _check_alive()
+
+    # -- 3. Arm -----------------------------------------------------------
+    if armon_ms == 0:
+        log.info("[arm] armon_ms=0 — yielding unarmed in ACRO mode.")
+        return
+
+    if armon_ms is None:
+        # GCS force-arm with optional motor-interlock RC cycle.
+        if rc_override:
+            gcs.send_rc_override(rc_override)
+            gcs.sim_sleep(0.3)
+            gcs.send_rc_override(rc_override)
+        log.info("[arm] Arming (force=True, timeout=%.0fs) ...", arm_timeout)
+        try:
+            gcs.arm(timeout=arm_timeout, force=True,
+                    rc_override=rc_override if rc_override else None)
+        except Exception as exc:
+            _fail(f"Arm failed: {exc}")
+            return
+        log.info("[arm] Armed.")
+        _check_alive()
+        if rc_override_post_arm:
+            gcs.send_rc_override(rc_override_post_arm)
+            gcs.sim_sleep(0.3)
+            gcs.send_rc_override(rc_override_post_arm)
+            log.info("[arm] RC raised post-arm: %s", rc_override_post_arm)
+    else:
+        # RAWES_ARM: Lua state machine owns arming (ch8 LOW→arm→HIGH).
+        gcs.send_named_float("RAWES_ARM", float(armon_ms))
+        log.info("[arm] Sent RAWES_ARM=%d ms — waiting for Lua arm confirmation ...", armon_ms)
+        arm_deadline = gcs.sim_now() + 15.0
+        armed_ok = False
+        while gcs.sim_now() < arm_deadline:
+            _check_alive()
+            msg = gcs._recv(type=["STATUSTEXT"], blocking=True, timeout=0.5)
+            if msg and msg.get_type() == "STATUSTEXT":
+                text = msg.text.rstrip("\x00").strip()
+                log.info("[arm] SITL: %s", text)
+                if "RAWES arm-on: armed" in text:
+                    armed_ok = True
+                    break
+        if not armed_ok:
+            _fail("RAWES_ARM arm confirmation not received within 15 s")
+
+
+# ---------------------------------------------------------------------------
 # Setup sequence
 # ---------------------------------------------------------------------------
 
@@ -841,7 +956,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     # ── 1. Connect ────────────────────────────────────────────────────────────
     log.info("[setup 1/6] Connecting GCS (timeout=%.0fs) ...", _STARTUP_TIMEOUT)
     try:
-        gcs.connect(timeout=_STARTUP_TIMEOUT, watchdog=_procs_alive)
+        gcs.connect(timeout=_STARTUP_TIMEOUT)
     except TimeoutError as exc:
         _procs_alive()   # last-chance crash check before reporting a plain timeout
         raise TimeoutError(
@@ -1102,39 +1217,28 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
         log.warning("[stabilise] EKF3 attitude confidence not seen within 20 s; "
                     "proceeding with flags=0x%04x", last_flags)
 
-    # ── 5. Arm ────────────────────────────────────────────────────────────────
-    # Arm with CH8=1000 (motor interlock LOW).  In H_RSC_MODE=1 passthrough,
-    # motor_interlock_switch = (pilot_rotor_speed > 0.01): CH8=1000 → false →
-    # "Motor Interlock Enabled" check passes → arm command accepted.
-    # After HEARTBEAT confirms armed, raise CH8=2000 so the rotor interlock
-    # engages and the RSC output matches the passthrough value.
-    log.info("[setup 5/6] Arming with CH8=1000 (motor interlock LOW) ...")
-    gcs.send_rc_override({8: 1000})
-    gcs.sim_sleep(0.3)
-    gcs.send_rc_override({8: 1000})
-    try:
-        gcs.arm(timeout=_ARM_TIMEOUT, force=True, rc_override={8: 1000})
-        ctx.flight_events["arm_t"] = gcs.sim_now()
-        log.info("[setup 5/6] Armed — raising motor interlock (CH8=2000) ...")
-        gcs.send_rc_override({8: 2000})
-        gcs.sim_sleep(0.3)
-        gcs.send_rc_override({8: 2000})
-    except Exception as exc:
-        all_statustext += drain_statustext(gcs, log)
-        dump_startup_diagnostics(ctx)
-        raise RuntimeError(f"Arm failed: {exc}") from exc
+    # ── 5+6. ACRO mode (before arm) + arm ────────────────────────────────────
+    # ACRO must be active before arm so that while disarmed ArduPilot
+    # continuously seeds the attitude target from the actual EKF attitude.
+    # At arm the rate controller starts from the correct target — not from
+    # wings-level as STABILIZE would leave it.
+    # CH8=1000 (motor interlock LOW) during arm; raised to 2000 after.
     all_statustext += drain_statustext(gcs, log)
-    _procs_alive()
-
-    # ── 6. ACRO mode ──────────────────────────────────────────────────────────
-    log.info("[setup 6/6] Setting ACRO mode (timeout=%.0fs) ...", _MODE_TIMEOUT)
     try:
-        gcs.set_mode(ACRO, timeout=_MODE_TIMEOUT, rc_override={8: 2000})
-        log.info("[setup 6/6] ACRO mode confirmed.")
+        _arm_sequence(
+            gcs, log,
+            rc_override={8: 1000},
+            rc_override_post_arm={8: 2000},
+            procs_alive=_procs_alive,
+            fail=None,   # RuntimeError (propagated to fixture finally-block)
+            mode_timeout=_MODE_TIMEOUT,
+            arm_timeout=_ARM_TIMEOUT,
+        )
     except Exception as exc:
         all_statustext += drain_statustext(gcs, log)
         dump_startup_diagnostics(ctx)
-        raise RuntimeError(f"Mode set failed: {exc}") from exc
+        raise
+    ctx.flight_events["arm_t"] = gcs.sim_now()
     all_statustext += drain_statustext(gcs, log)
     _procs_alive()
 
@@ -1544,10 +1648,10 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     # Roll/pitch I-term — disable to prevent swashplate wind-up on neutral sticks
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
-    # DDFP tail type: H_TAIL_TYPE=4 (DDFP CCW) matches the GB4008 hardware.
-    # H_TAIL_TYPE=0 (servo tail) is NOT used — it requires a mediator-side
-    # adaptive-trim hack to map 1500 µs to the equilibrium throttle, which has
-    # no hardware equivalent.  DDFP + H_YAW_TRIM is the correct model.
+    # H_TAIL_TYPE=4 (DDFP CCW): CCW sign flip maps CW-drift's negative PID output
+    # to positive GB4008 throttle.  See H_TAIL_TYPE enum table in _DDFP_TORQUE_EXTRA_PARAMS.
+    # H_TAIL_TYPE=0 (servo) is NOT used — requires SERVO4_TRIM=1500 µs neutral which
+    # maps poorly to the GB4008's unidirectional 800–2000 µs range.
     "H_TAIL_TYPE":     4,
     "H_COL2YAW":      0.0,
     # SERVO4 range matches GB4008 hardware: 800 µs = off, 2000 µs = full throttle.
@@ -1580,18 +1684,28 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "ARMING_CHECK":     0,     # disable prearm checks — Lua arming:arm() is not force-arm
 })
 
-# Extra params for the ArduPilot DDFP (H_TAIL_TYPE=2) yaw PI fixture.
+# Extra params for the ArduPilot DDFP (H_TAIL_TYPE=4 CCW) yaw PI fixture.
 # ArduPilot's built-in ATC_RAT_YAW controller drives SERVO4 (Ch4) directly
 # as a unidirectional motor (0% = off, 100% = full throttle).
 # Motor range: 800 us = off, 2000 us = max (GB4008 66KV on REVVitRC ESC).
+#
+# H_TAIL_TYPE enum (AP_MotorsHeli_Single):
+#   0  Servo          — bidirectional servo; SERVO4 centred at SERVO4_TRIM (1500 µs),
+#                       PID maps ±1 directly to servo range.  No sign flip.
+#   1  Servo+ExtGyro  — servo tail with external heading-hold gyro on Ch7.
+#   2  DDFP           — Direct Drive Fixed Pitch, bidirectional PWM mapping.
+#   3  DDFP CW        — unidirectional motor spinning CW; positive PID → more throttle.
+#   4  DDFP CCW       — unidirectional motor spinning CCW; applies _servo4_out *= -1
+#                       so negative PID output (CW drift → negative error) maps to
+#                       positive motor throttle.  GB4008 correct mode.
+#
+# Why CCW (4) and not CW (3) for GB4008:
+#   CW hub drift → positive psi_dot → yaw error = 0 − positive = negative PID output.
+#   CCW sign flip: −PID → +throttle → GB4008 spins up → CCW counter-torque. ✓
+#   CW (type 3) no sign flip: −PID → clamps to 0 → motor off → drift uncorrected. ✗
 _DDFP_TORQUE_EXTRA_PARAMS = ParamSetup({
-    # DDFP tail type: ArduPilot outputs 0-100 % motor throttle on SERVO4.
-    # H_TAIL_TYPE=4 (DDFP CCW, enum value 4): hub under-speed causes CW drift
-    # (positive psi_dot) → yaw error = 0 - positive = negative → PID output negative.
-    # CCW mode applies _servo4_out *= -1 before thrust_to_actuator, mapping the
-    # negative PID output to positive motor throttle → CCW reaction counters CW drift.
-    # H_TAIL_TYPE=3 (DDFP CW, enum value 3) is wrong: no sign flip → negative output
-    # → thrust_to_actuator clamps to 0 → motor stays off at 800 us.
+    # H_TAIL_TYPE=4 (DDFP CCW): CCW sign flip maps negative yaw error to positive throttle.
+    # See enum table in the comment above.
     "H_TAIL_TYPE":          4,
     # SERVO4 range matches GB4008 hardware (800 us = off, 2000 us = max)
     "SERVO4_MIN":           800,
@@ -1609,6 +1723,27 @@ _DDFP_TORQUE_EXTRA_PARAMS = ParamSetup({
     "ATC_RAT_YAW_IMAX":     0.0,
     # No Lua script; ArduPilot's built-in controller is the sole yaw actuator
     "SCR_ENABLE":           0,
+})
+
+
+# Extra params for H_TAIL_TYPE=0 (conventional servo tail) torque fixture.
+# Servo mode maps PID output symmetrically around SERVO4_TRIM (no sign flip):
+#   PID=0  → SERVO4_TRIM (1500 µs neutral)
+#   PID=+1 → SERVO4_MAX  (2000 µs)
+#   PID=-1 → SERVO4_MIN  (1000 µs)
+# CW hub drift → positive yaw rate error → positive PID → servo above 1500 → motor on.
+# See H_TAIL_TYPE enum table in _DDFP_TORQUE_EXTRA_PARAMS for full value list.
+_SERVO_TAIL_TORQUE_EXTRA_PARAMS = ParamSetup({
+    "H_TAIL_TYPE":      0,     # conventional servo tail (no DDFP sign flip)
+    "SERVO4_MIN":       1000,  # standard servo range
+    "SERVO4_MAX":       2000,
+    "SERVO4_TRIM":      1500,  # neutral = midpoint; PID drives +/- from here
+    "H_COL2YAW":       0.0,   # no collective-to-yaw feedforward
+    "H_YAW_TRIM":      0.0,
+    "ATC_RAT_YAW_P":   0.015,
+    "ATC_RAT_YAW_I":   0.01,
+    "ATC_RAT_YAW_IMAX": 0.7,
+    "SCR_ENABLE":      0,
 })
 
 
@@ -1725,7 +1860,8 @@ def _torque_stack(
                     txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                     pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
-        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log)
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=mavlink_log,
+                       watchdog=_assert_alive)
         ctx = StackContext(
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
             mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
@@ -1812,35 +1948,24 @@ def _torque_stack(
             torque_setup.verify(gcs, log=log, read_timeout=1.0)
             _assert_alive()
 
+            _arm_sequence(
+                gcs, log,
+                armon_ms=armon_ms,
+                # Non-Lua path: CH8=2000 throughout (rotor already at speed).
+                # Lua paths (armon_ms set): no RC override — Lua handles ch8.
+                rc_override={8: 2000} if armon_ms is None else None,
+                procs_alive=_assert_alive,
+                fail=pytest.fail,
+                mode_timeout=10.0,
+                arm_timeout=15.0,
+            )
             if armon_ms is None:
-                # Non-Lua path: GCS force-arm + Ch8 keepalive.
-                gcs.arm(timeout=15.0, force=True, rc_override={8: 2000})
-                log.info("Armed via GCS")
-                gcs.set_mode(ACRO, timeout=10.0, rc_override={8: 2000})
-                log.info("ACRO active -- profile=%s", profile)
+                log.info("Armed via GCS -- profile=%s", profile)
             elif armon_ms > 0:
-                # Lua ARMON path: Lua owns arming via state machine (Ch8 LOW→arm→HIGH).
-                gcs.set_mode(ACRO, timeout=10.0)
-                gcs.send_named_float("RAWES_ARM", float(armon_ms))
-                log.info("Sent RAWES_ARM=%d ms -- waiting for Lua arm confirmation ...", armon_ms)
-                arm_deadline = gcs.sim_now() + 15.0
-                armed_ok = False
-                while gcs.sim_now() < arm_deadline:
-                    _assert_alive()
-                    msg = gcs._recv(type=["STATUSTEXT"], blocking=True, timeout=0.5)
-                    if msg and msg.get_type() == "STATUSTEXT":
-                        text = msg.text.rstrip("\x00").strip()
-                        log.info("SITL: %s", text)
-                        if "RAWES arm-on: armed" in text:
-                            armed_ok = True
-                            break
-                if not armed_ok:
-                    pytest.fail("RAWES_ARM arm confirmation not received within 15 s")
                 log.info("Armed via RAWES_ARM -- profile=%s", profile)
             else:
-                # armon_ms == 0: yield unarmed; test controls arming.
-                gcs.set_mode(ACRO, timeout=10.0)
-                log.info("ACRO active (unarmed) -- profile=%s  [test will send RAWES_ARM]", profile)
+                log.info("ACRO active (unarmed) -- profile=%s  [test will send RAWES_ARM]",
+                         profile)
 
             yield ctx
 

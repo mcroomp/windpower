@@ -53,7 +53,9 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SIM_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, '..'))
 if _SIM_DIR not in sys.path:
     sys.path.insert(0, _SIM_DIR)
-from gcs import RawesGCS, WallClock  # noqa: E402
+from gcs       import RawesGCS, WallClock   # noqa: E402
+from servo_pwm import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,
+                        MOTOR_PWM_MIN, MOTOR_PWM_MAX)  # noqa: E402
 
 from pymavlink import mavutil
 
@@ -91,9 +93,10 @@ _SIN120 = math.sin(math.radians(120.0))   #  0.866
 _COS240 = math.cos(math.radians(240.0))   # -0.5
 _SIN240 = math.sin(math.radians(240.0))   # -0.866
 
-PWM_MIN     = 1000
-PWM_NEUTRAL = 1500
-PWM_MAX     = 2000
+# PWM range constants — imported from servo_pwm.py; local aliases for brevity.
+PWM_MIN     = SWASH_PWM_MIN
+PWM_NEUTRAL = SWASH_PWM_NEUTRAL
+PWM_MAX     = SWASH_PWM_MAX
 
 # Per-session saved SERVO{n}_FUNCTION values for release/restore.
 _saved_servo_functions: dict[int, float] = {}

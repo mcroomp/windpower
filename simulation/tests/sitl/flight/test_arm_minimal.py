@@ -73,7 +73,7 @@ def test_arm_minimal(tmp_path, request):
                     + (f"\n{tail}" if tail else "")
                 )
 
-        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS)
+        gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, watchdog=_assert_alive)
         try:
             gcs.connect(timeout=20.0)
             gcs.start_heartbeat()

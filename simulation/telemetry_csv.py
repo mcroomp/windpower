@@ -54,6 +54,9 @@ COLUMNS: list[str] = [
     "tether_length", "tether_extension", # [m]
     "tether_tension", "tether_rest_length", "tether_slack",
     "tether_fx", "tether_fy", "tether_fz",  # tether force NED [N]
+    "aero_fx", "aero_fy", "aero_fz",        # aero force NED [N] (before tether)
+    "aero_mx", "aero_my", "aero_mz",        # aero orbital moment NED [N·m]
+    "tether_mx", "tether_my", "tether_mz",  # tether moment NED [N·m]
     "collective_rad", "collective_norm",
     "tilt_lon", "tilt_lat",
     "tension_setpoint", "collective_from_tension_ctrl",
@@ -76,7 +79,7 @@ COLUMNS: list[str] = [
     "sens_gyro_x", "sens_gyro_y", "sens_gyro_z",      # IMU gyro sent to SITL (body) [rad/s]
     "vel_heading_deg",   # atan2(vel_E, vel_N) in degrees — GPS velocity heading
     "heading_gap_deg",   # |compass_deg - vel_heading_deg| wrapped to (-180,180] deg
-    "servo_s1", "servo_s2", "servo_s3", "servo_esc",
+    "servo_s1_us", "servo_s2_us", "servo_s3_us", "servo4_us",  # raw PWM [µs]
     "q_bearing_nm", "q_motor_nm", "throttle",
     "wind_x", "wind_y", "wind_z",
     "bz_eq_x", "bz_eq_y", "bz_eq_z",
@@ -124,6 +127,18 @@ class TelRow:
     tether_fy: float = 0.0
     tether_fz: float = 0.0
 
+    aero_fx: float = 0.0
+    aero_fy: float = 0.0
+    aero_fz: float = 0.0
+
+    aero_mx: float = 0.0
+    aero_my: float = 0.0
+    aero_mz: float = 0.0
+
+    tether_mx: float = 0.0
+    tether_my: float = 0.0
+    tether_mz: float = 0.0
+
     collective_rad:  float = 0.0
     collective_norm: float = 0.0
     tilt_lon:        float = 0.0
@@ -167,10 +182,10 @@ class TelRow:
     vel_heading_deg:  float = 0.0  # atan2(vel_E, vel_N) [deg] — GPS heading
     heading_gap_deg:  float = 0.0  # compass - vel_heading wrapped to (-180,180] [deg]
 
-    servo_s1:  float = 0.0
-    servo_s2:  float = 0.0
-    servo_s3:  float = 0.0
-    servo_esc: float = 0.0
+    servo_s1_us: float = 0.0   # S1 swashplate servo PWM [µs]
+    servo_s2_us: float = 0.0   # S2 swashplate servo PWM [µs]
+    servo_s3_us: float = 0.0   # S3 swashplate servo PWM [µs]
+    servo4_us:   float = 0.0   # SERVO4 / GB4008 motor PWM [µs]
 
     # Counter-torque motor (torque tests; 0.0 in flight tests)
     q_bearing_nm: float = 0.0   # reserved; always 0 (bearing drag absorbed by ESC)
@@ -287,6 +302,15 @@ class TelRow:
         tl   = math.sqrt(float(pos[0])**2 + float(pos[1])**2 + float(pos[2])**2)
         R_raw = d.get("R")
         R_mat = np.asarray(R_raw, dtype=float).reshape(3, 3) if R_raw is not None else np.eye(3)
+
+        rpy  = d.get("rpy",        [0.0, 0.0, 0.0])
+        om   = d.get("omega_body", [0.0, 0.0, 0.0])
+        acc  = d.get("accel_world",[0.0, 0.0, 0.0])
+        tf   = d.get("tether_force",[0.0, 0.0, 0.0])
+        af   = d.get("aero_F",     [0.0, 0.0, 0.0])
+        nf   = d.get("net_F",      [0.0, 0.0, 0.0])
+        nm   = d.get("net_M",      [0.0, 0.0, 0.0])
+
         return cls(
             t_sim               = float(d.get("t_sim", 0.0)),
             phase               = str(d.get("phase", "")),
@@ -296,16 +320,49 @@ class TelRow:
             vel_x               = float(vel[0]),
             vel_y               = float(vel[1]),
             vel_z               = float(vel[2]),
+            omega_x             = float(om[0]),
+            omega_y             = float(om[1]),
+            omega_z             = float(om[2]),
+            accel_x             = float(acc[0]),
+            accel_y             = float(acc[1]),
+            accel_z             = float(acc[2]),
             omega_rotor         = float(d.get("omega_rotor",      0.0)),
             tether_length       = tl,
             tether_extension    = tl - trl,
             tether_tension      = float(d.get("tether_tension",   0.0)),
             tether_rest_length  = trl,
             tether_slack        = int(d.get("tether_slack",       0)),
+            tether_fx           = float(tf[0]),
+            tether_fy           = float(tf[1]),
+            tether_fz           = float(tf[2]),
+            aero_fx             = float(af[0]),
+            aero_fy             = float(af[1]),
+            aero_fz             = float(af[2]),
+            aero_mx             = float(d.get("aero_mx",           0.0)),
+            aero_my             = float(d.get("aero_my",           0.0)),
+            aero_mz             = float(d.get("aero_mz",           0.0)),
+            tether_mx           = float(d.get("tether_mx",         0.0)),
+            tether_my           = float(d.get("tether_my",         0.0)),
+            tether_mz           = float(d.get("tether_mz",         0.0)),
             collective_rad      = float(d.get("collective_rad",   0.0)),
             tilt_lon            = float(d.get("tilt_lon",         0.0)),
             tilt_lat            = float(d.get("tilt_lat",         0.0)),
             tension_setpoint    = float(d.get("tension_setpoint", 0.0)),
+            aero_T              = float(d.get("aero_T",           0.0)),
+            aero_v_axial        = float(d.get("aero_v_axial",     0.0)),
+            aero_v_inplane      = float(d.get("aero_v_inplane",   0.0)),
+            aero_v_i            = float(d.get("aero_v_i",         0.0)),
+            aero_Q_drag         = float(d.get("aero_Q_drag",      0.0)),
+            aero_Q_drive        = float(d.get("aero_Q_drive",     0.0)),
+            F_x                 = float(nf[0]),
+            F_y                 = float(nf[1]),
+            F_z                 = float(nf[2]),
+            M_x                 = float(nm[0]),
+            M_y                 = float(nm[1]),
+            M_z                 = float(nm[2]),
+            rpy_roll            = float(rpy[0]),
+            rpy_pitch           = float(rpy[1]),
+            rpy_yaw             = float(rpy[2]),
             wind_x              = float(wind[0]),
             wind_y              = float(wind[1]),
             wind_z              = float(wind[2]),

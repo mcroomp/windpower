@@ -17,6 +17,7 @@ from stack_infra import (
     _torque_stack,
     _LUA_TORQUE_EXTRA_PARAMS,
     _DDFP_TORQUE_EXTRA_PARAMS,
+    _SERVO_TAIL_TORQUE_EXTRA_PARAMS,
 )
 
 
@@ -101,6 +102,28 @@ def torque_unarmed_lua(tmp_path, request):
     The test is responsible for sending RAWES_ARM to arm.
     """
     with _lua_torque_stack(tmp_path, request, armon_ms=0) as ctx:
+        yield ctx
+
+
+@pytest.fixture
+def torque_armed_servo_tail(tmp_path, request):
+    """
+    Torque stack with H_TAIL_TYPE=0 (conventional servo tail).
+
+    SERVO4_MIN=1000 / SERVO4_TRIM=1500 / SERVO4_MAX=2000: symmetric servo range.
+    ATC_RAT_YAW PID drives SERVO4 away from 1500 µs neutral in response to hub drift.
+    No DDFP sign flip.  Yields StackContext with vehicle armed and ACRO active.
+    """
+    import torque_model as _m
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=-_m.OMEGA_ROTOR_NOMINAL,   # negative = CCW drift → PID positive → servo above trim
+        tail_channel=3,
+        extra_params=_SERVO_TAIL_TORQUE_EXTRA_PARAMS,
+        test_name=request.node.name,
+        startup_hold_s=15.0,
+        startup_yaw_rate_deg_s=0.0,
+    ) as ctx:
         yield ctx
 
 

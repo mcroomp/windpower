@@ -160,6 +160,7 @@ class RawesGCS:
         mavlog_path: "str | Path | None" = None,
         baud: int = 115200,
         clock: "SimClock | WallClock | None" = None,
+        watchdog=None,
     ):
         self._address = address
         self._source_system = source_system
@@ -167,6 +168,7 @@ class RawesGCS:
         self._mav = None
         self._target_system = 1
         self._target_component = 1
+        self._watchdog = watchdog  # nullary callable; raises if process is dead
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
         self._sim_clock = clock if clock is not None else SimClock()
@@ -345,29 +347,51 @@ class RawesGCS:
         Uses wall-clock time: no MAVLink messages have been received yet,
         so the sim-clock is unavailable.
 
+        Each attempt tries for up to 1 s.  After every failed attempt the
+        watchdog is called — if the process is already dead we get an
+        immediate failure rather than waiting out the full timeout.
+
+        The watchdog defaults to ``self._watchdog`` set at construction time
+        (via the ``watchdog=`` argument to ``__init__``).  Passing a different
+        callable here overrides it for this call only.
+
         Args:
             timeout:  wall-clock seconds to keep retrying before raising TimeoutError.
-            watchdog: optional callable checked every ~5 s during the retry loop.
-                      Should raise (e.g. pytest.fail or RuntimeError) if the
-                      process being connected to has crashed.  Called with no
-                      arguments; any exception it raises propagates immediately
-                      out of connect() so the caller gets a crash message rather
-                      than a generic timeout.
+            watchdog: liveness callable; overrides the instance watchdog for this
+                      call.  Pass ``None`` to suppress liveness checks entirely.
         """
-        deadline      = time.monotonic() + timeout
-        last_watchdog = time.monotonic()
+        _wd = watchdog if watchdog is not None else self._watchdog
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if watchdog is not None and time.monotonic() - last_watchdog >= 5.0:
-                watchdog()
-                last_watchdog = time.monotonic()
+            # Open the TCP connection.  ECONNREFUSED = SITL not up yet; retry.
+            # ECONNTIMEDOUT can happen in Docker when no process holds the port;
+            # it is caught the same way.
             try:
                 self._mav = mavutil.mavlink_connection(
                     self._address,
                     baud=self._baud,
                     source_system=self._source_system,
                 )
-                hb = self._mav.wait_heartbeat(timeout=5.0)
-                if hb:
+            except Exception as exc:
+                log.debug("Connect attempt failed: %s", exc)
+                if _wd is not None:
+                    _wd()
+                time.sleep(0.5)
+                continue
+
+            # Connection open — poll for the first heartbeat in 0.5 s chunks,
+            # calling the watchdog between each chunk so a crashed process is
+            # detected within ~0.5 s rather than after the full timeout.
+            hb_deadline = min(deadline, time.monotonic() + 5.0)
+            while time.monotonic() < hb_deadline:
+                if _wd is not None:
+                    _wd()
+                try:
+                    hb = self._mav.recv_match(type="HEARTBEAT", blocking=True, timeout=0.5)
+                except Exception as exc:
+                    log.debug("Heartbeat recv failed: %s", exc)
+                    hb = None
+                if hb is not None:
                     self._target_system    = self._mav.target_system
                     self._target_component = self._mav.target_component
                     log.info(
@@ -375,9 +399,14 @@ class RawesGCS:
                         self._target_system, self._target_component,
                     )
                     return
-            except Exception as exc:
-                log.debug("Connect attempt failed: %s", exc)
-                time.sleep(0.5)
+
+            # No heartbeat within 5 s on this connection — close and retry.
+            try:
+                self._mav.close()
+            except Exception:
+                pass
+            self._mav = None
+
         raise TimeoutError(
             f"Could not connect to vehicle at {self._address!r} within {timeout:.0f}s"
         )

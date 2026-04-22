@@ -67,7 +67,7 @@ def _row_to_frame(r) -> TorqueTelemetryFrame:
         roll_deg        = _math.degrees(r.rpy_roll),
         pitch_deg       = _math.degrees(r.rpy_pitch),
         throttle        = r.throttle,
-        servo_pwm_us    = int(r.servo_esc),
+        servo_pwm_us    = int(r.servo4_us),
         omega_rotor_rads = r.omega_rotor,
         q_bearing_nm    = r.q_bearing_nm,
         q_motor_nm      = r.q_motor_nm,

@@ -24,7 +24,7 @@ python simulation/scripts/calibrate.py --port COM4 <command>      # non-interact
 | 1 | S1 — swashplate 0 deg (East) | 33 |
 | 2 | S2 — swashplate 120 deg | 34 |
 | 3 | S3 — swashplate 240 deg | 35 |
-| 9 | GB4008 anti-rotation motor (AUX OUT 1) | 36 (Motor4) |
+| 4 | GB4008 anti-rotation motor (MAIN OUT 4) | H_TAIL_TYPE=4 (DDFP) |
 
 PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max).
 

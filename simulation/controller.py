@@ -16,7 +16,8 @@ controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 import math
 
 import numpy as np
-from frames    import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
+from frames     import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
+from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE, INTERLOCK_PWM_HIGH
 from swashplate import SwashplateServoModel
 
 
@@ -66,7 +67,7 @@ def compute_rc_rates(
     tether = pos - anch
     t_len  = float(np.linalg.norm(tether))
     if t_len < 0.1:
-        return {1: 1500, 2: 1500, 4: 1500, 8: 2000}
+        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
 
     # Desired body_z = tether direction (pointing away from anchor)
     body_z_eq  = tether / t_len
@@ -96,13 +97,13 @@ def compute_rc_rates(
     max_rate = np.radians(rate_max_deg)
 
     def _pwm(w: float) -> int:
-        return int(round(1500.0 + 500.0 * float(np.clip(w / max_rate, -1.0, 1.0))))
+        return int(round(SWASH_PWM_NEUTRAL + SWASH_PWM_RANGE * float(np.clip(w / max_rate, -1.0, 1.0))))
 
     return {
         1: _pwm(omega_body[0]),   # roll rate
         2: _pwm(omega_body[1]),   # pitch rate
         4: _pwm(omega_body[2]),   # yaw rate
-        8: 2000,                  # motor interlock always on
+        8: INTERLOCK_PWM_HIGH,    # motor interlock always on
     }
 
 
@@ -245,7 +246,7 @@ def compute_rc_from_attitude(
     max_rate = np.radians(rate_max_deg)
 
     def _pwm(w: float) -> int:
-        return int(round(1500.0 + 500.0 * float(np.clip(w / max_rate, -1.0, 1.0))))
+        return int(round(SWASH_PWM_NEUTRAL + SWASH_PWM_RANGE * float(np.clip(w / max_rate, -1.0, 1.0))))
 
     cmd_roll  = -kp * float(roll)  - kd * float(rollspeed)
     cmd_pitch = -kp * float(pitch) - kd * float(pitchspeed)
@@ -255,7 +256,7 @@ def compute_rc_from_attitude(
         1: _pwm(cmd_roll),
         2: _pwm(cmd_pitch),
         4: _pwm(cmd_yaw),
-        8: 2000,
+        8: INTERLOCK_PWM_HIGH,
     }
 
 
@@ -301,7 +302,7 @@ def compute_rc_from_physical_attitude(
     max_rate = np.radians(rate_max_deg)
 
     def _pwm(w: float) -> int:
-        return int(round(1500.0 + 500.0 * float(np.clip(w / max_rate, -1.0, 1.0))))
+        return int(round(SWASH_PWM_NEUTRAL + SWASH_PWM_RANGE * float(np.clip(w / max_rate, -1.0, 1.0))))
 
     # Body→NED rotation matrix from ZYX Euler angles.
     # Column j = j-th body axis expressed in NED.
@@ -321,7 +322,7 @@ def compute_rc_from_physical_attitude(
     tether_ned = np.asarray(pos_ned, dtype=float) - np.asarray(anchor_ned, dtype=float)
     t_len = float(np.linalg.norm(tether_ned))
     if t_len < 0.1:
-        return {1: 1500, 2: 1500, 4: 1500, 8: 2000}
+        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
     body_z_eq = tether_ned / t_len
 
     # Attitude error: rotation axis needed to align body_z with body_z_eq.
@@ -345,7 +346,7 @@ def compute_rc_from_physical_attitude(
         1: _pwm(omega_corr[0]),   # roll rate
         2: _pwm(omega_corr[1]),   # pitch rate
         4: _pwm(omega_corr[2]),   # yaw rate
-        8: 2000,
+        8: INTERLOCK_PWM_HIGH,
     }
 
 
@@ -409,7 +410,8 @@ class PhysicalHoldController:
 
         Sends neutral sticks when equilibrium has not been set yet.
         """
-        _neutral = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 8: 2000}
+        _neutral = {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL,
+                    3: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
 
         if self._roll_eq is None or self._pitch_eq is None:
             gcs.send_rc_override(_neutral)
@@ -425,8 +427,8 @@ class PhysicalHoldController:
             pitchspeed = att["pitchspeed"],
             yawspeed   = att["yawspeed"],
         )
-        rc[3] = 1500   # neutral collective
-        rc[8] = 2000   # motor interlock on
+        rc[3] = SWASH_PWM_NEUTRAL   # neutral collective
+        rc[8] = INTERLOCK_PWM_HIGH  # motor interlock on
         gcs.send_rc_override(rc)
         return rc
 

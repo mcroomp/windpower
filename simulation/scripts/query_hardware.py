@@ -288,7 +288,8 @@ param_groups = {
         "SERVO_BLH_MASK", "SERVO_BLH_OTYPE", "SERVO_BLH_AUTO",
     ],
     "Servo functions": [
-        "SERVO9_FUNCTION",
+        "SERVO4_FUNCTION", "SERVO4_MIN", "SERVO4_MAX", "SERVO4_TRIM",
+        "BRD_IO_DSHOT",
     ],
     "RPM sensor": [
         "RPM1_TYPE", "RPM1_MIN",

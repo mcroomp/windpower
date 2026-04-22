@@ -394,15 +394,29 @@ If ACRO_RP_RATE is changed, update the constant in rawes.lua.
 ### 4.3 Yaw Regulation — ArduPilot ATC_RAT_YAW (DDFP)
 
 Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID.  rawes.lua writes
-**no** commands to SERVO9 or Ch9.  Ch4 (ACRO yaw rate override) is held at 1500 µs every
+**no** commands to the GB4008 motor.  Ch4 (ACRO yaw rate override) is held at 1500 µs every
 tick to prevent integrator wind-up from neutral sticks.
 
 ```
 Sensing:    gyro.z (from EKF attitude, ACRO_Heli)
-Control:    ATC_RAT_YAW P/I/D -> tail-channel PWM (SERVO4, H_TAIL_TYPE=4 DDFP)
-Actuator:   GB4008 motor via DShot300 on SERVO9 output
-              SERVO9_FUNCTION=94 (Script 1) is NOT used; set SERVO9_FUNCTION=TBD for DDFP
+Control:    ATC_RAT_YAW P/I/D -> tail-channel PWM (SERVO4, H_TAIL_TYPE=4 DDFP CCW)
+Actuator:   GB4008 motor via standard PWM on MAIN OUT 4 (output 4, IOMCU)
 ```
+
+**H_TAIL_TYPE enum** (AP_MotorsHeli_Single — relevant values only):
+
+| Value | Name | Output mapping | Notes |
+|-------|------|----------------|-------|
+| 0 | Servo | Bidirectional — SERVO4 centred at SERVO4_TRIM (1500 µs); PID ±1 maps to servo range | No sign flip; used for conventional tail rotor servos |
+| 1 | Servo+ExtGyro | Same as 0 but with external heading-hold gyro on Ch7 | Not used |
+| 2 | DDFP | Unidirectional motor; bidirectional PWM mapping | Not used |
+| 3 | DDFP CW | Unidirectional motor, CW rotation; positive PID → more throttle | **Wrong for GB4008** — see below |
+| 4 | DDFP CCW | Unidirectional motor, CCW rotation; applies sign flip (`×−1`) before thrust mapping | **Correct for GB4008** |
+
+**Why CCW (4) and not CW (3):**
+CW hub drift → positive psi_dot → yaw error = 0 − positive = **negative** PID output.
+CCW sign flip maps −PID → +throttle → GB4008 spins up → CCW counter-torque opposes drift. ✓
+Type 3 (no sign flip): −PID → clamps to 0 → motor stays off → drift uncorrected. ✗
 
 Pass criterion (stack): `test_yaw_regulation.py` — max |psi_dot| < 5 deg/s over the
 last 20 s after a 75 s SITL settle period.
@@ -419,7 +433,7 @@ last 20 s after a 75 s SITL settle period.
 | Ch2 -- pitch rate | rawes.lua | 50 Hz | body_z error (pitch) -> ATC_RAT_PIT PID -> swashplate |
 | Ch3 -- collective | ground PI via MAVLink (modes 1-3) OR rawes.lua (modes 4-5) OR RAWES_ARM | ~10 Hz / 50 Hz / 100 Hz | Modes 1-3: normalized thrust [0..1] from load cell -> Ch3 RC override. Modes 4 (landing) and 5 (pumping): Lua owns Ch3 entirely. RAWES_ARM active: Lua holds Ch3=1000 (throttle low) for the full countdown duration. |
 | Ch8 -- motor interlock | rawes.lua (RAWES_ARM active) | 100 Hz | Lua holds Ch8=2000 (interlock ON, motor enabled) for the full countdown duration. Released on disarm. |
-| Ch9 -- GB4008 throttle | ArduPilot (H_TAIL_TYPE=4 DDFP) | 400 Hz | ATC_RAT_YAW PID output -> SERVO4 -> SERVO9 (DShot). rawes.lua does NOT write to Ch9. |
+| SERVO4 -- GB4008 throttle | ArduPilot (H_TAIL_TYPE=4 DDFP) | 400 Hz | ATC_RAT_YAW PID output -> SERVO4 (MAIN OUT 4, DShot300). rawes.lua does NOT write to SERVO4. |
 
 ### 4.5 Simulation Mapping
 
@@ -536,7 +550,7 @@ throttle curve calibration.
 | --------------- | ------ | -------------------------------------- |
 | ARMING_SKIPCHK  | 0xFFFF | Skip all pre-arm checks                |
 | H_RSC_MODE      | 1      | CH8 passthrough -- instant runup       |
-| H_TAIL_TYPE     | 4      | DDFP -- tail-channel output to SERVO4  |
+| H_TAIL_TYPE     | 4      | DDFP CCW — sign-flip maps negative yaw error to positive GB4008 throttle |
 | H_COL2YAW       | 0      | No collective->yaw feedforward         |
 | ATC_RAT_YAW_P   | 0.20   | Starting P gain (SITL validated)       |
 | ATC_RAT_YAW_I   | 0.05   | Corrects residual yaw not cancelled by PID |
@@ -612,7 +626,7 @@ anti-rotation at nominal autorotation RPM -- well within flight duration limits.
 
 | Parameter       | Value       | Reason                                                               |
 | --------------- | ----------- | -------------------------------------------------------------------- |
-| H_TAIL_TYPE     | 4 (DDFP)    | Assigns yaw rate PID output to SERVO4                                |
+| H_TAIL_TYPE     | 4 (DDFP CCW) | Routes yaw rate PID to SERVO4 with CCW sign flip (see §4.3)       |
 | SERVO4_FUNCTION | 36 (Motor4) | GB4008 ESC                                                           |
 | SERVO4_MIN      | 1000        | ESC disarm                                                           |
 | SERVO4_MAX      | 2000        | ESC maximum                                                          |

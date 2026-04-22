@@ -185,11 +185,11 @@ def plot_report(data: dict, out_path: Path) -> None:
     ax.legend(fontsize=7, loc="upper right")
 
     # ── Panel 9: Raw servo inputs ─────────────────────────────────────────────
-    ax = _ax(8, "Raw servo inputs from ArduPilot SITL (normalised −1…+1)", "")
-    ax.plot(t, _get("servo_s1"),  linewidth=0.8, label="S1")
-    ax.plot(t, _get("servo_s2"),  linewidth=0.8, label="S2")
-    ax.plot(t, _get("servo_s3"),  linewidth=0.8, label="S3")
-    ax.plot(t, _get("servo_esc"), linewidth=0.8, linestyle="--", label="ESC (anti-rotation motor)")
+    ax = _ax(8, "Raw servo outputs from ArduPilot SITL [us PWM]", "")
+    ax.plot(t, _get("servo_s1_us"),  linewidth=0.8, label="S1 [us]")
+    ax.plot(t, _get("servo_s2_us"),  linewidth=0.8, label="S2 [us]")
+    ax.plot(t, _get("servo_s3_us"),  linewidth=0.8, label="S3 [us]")
+    ax.plot(t, _get("servo4_us"),   linewidth=0.8, linestyle="--", label="SERVO4 / GB4008 [us]")
     ax.axhline(0, color="black", linewidth=0.5, alpha=0.4)
     ax.set_xlabel("Simulation time (s)", fontsize=8)
     ax.legend(fontsize=7, loc="upper right")

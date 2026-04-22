@@ -17,8 +17,8 @@ while time.monotonic() - t0 < 10:
     elif len(params) > 0:
         break
 
-# Print SCR_* and RPM* and SERVO9*
+# Print SCR_* and RPM* and SERVO4*
 for k in sorted(params):
-    if any(k.startswith(p) for p in ('SCR', 'RPM', 'SERVO9')):
+    if any(k.startswith(p) for p in ('SCR', 'RPM', 'SERVO4')):
         print(f"  {k} = {params[k]}")
 print(f"Total params: {len(params)}")

@@ -44,17 +44,16 @@ Division of labour (pumping mode):
                        ground planner's actual winch motion -- no RC channel bridge needed.
 
 Yaw regulation is handled entirely by ArduPilot's ATC_RAT_YAW PID (ACRO_Heli,
-H_TAIL_TYPE=4 DDFP).  Lua writes no motor commands to SERVO9.  Ch4 (ACRO yaw)
+H_TAIL_TYPE=4 DDFP).  Lua writes no motor commands to the GB4008.  Ch4 (ACRO yaw)
 is held neutral (1500 us) to prevent integrator wind-up; the yaw PID output is
-on the tail channel (SERVO4 / H_TAIL_TYPE=4) routed to the GB4008 ESC.
+on the tail channel (SERVO4 / H_TAIL_TYPE=4) routed to the GB4008 ESC on MAIN OUT 4.
 
 Required ArduPilot parameters:
   SCR_ENABLE        1    -- reboot required after first set
-  SERVO_BLH_MASK    256  -- DShot enabled on output 9 (bit 8)
-  SERVO_BLH_OTYPE   5    -- DShot300 (Heli/Copter frame)
-  SERVO_BLH_POLES   22   -- GB4008 24N22P (11 pole-pairs; default 14 is wrong)
-  SERVO_DSHOT_ESC   3    -- AM32 ESC type
-  SERVO_BLH_BDMASK  0    -- one-way DShot; set to 256 only after AM32 EDT enabled on ESC
+  H_TAIL_TYPE       4    -- DDFP CCW: ATC_RAT_YAW PID drives SERVO4
+  SERVO4_MIN        800  -- motor off at 800 us
+  SERVO4_MAX        2000 -- motor full throttle at 2000 us
+  SERVO4_TRIM       800  -- trim = off
 
 Deployment:
   Copy rawes.lua to APM/scripts/ on the Pixhawk SD card.

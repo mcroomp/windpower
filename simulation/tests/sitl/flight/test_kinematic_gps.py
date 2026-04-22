@@ -27,7 +27,7 @@ sys.path.insert(0, str(_SITL_DIR))
 from stack_infra import _acro_stack
 
 sys.path.insert(0, str(_SIM_DIR / "analysis"))
-from analyse_mavlink import validate_ekf_window
+from analyse_run import validate_ekf_window
 
 
 def test_kinematic_gps(tmp_path, request):

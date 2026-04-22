@@ -36,14 +36,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-from aero        import create_aero
+from aero          import create_aero
 import rotor_definition as _rd
-from dynamics    import RigidBodyDynamics
-from controller  import compute_swashplate_from_state, orbit_tracked_body_z_eq, TensionPI
-from swashplate  import SwashplateServoModel
-from frames      import build_orb_frame
+from dynamics      import RigidBodyDynamics
+from controller    import compute_swashplate_from_state, orbit_tracked_body_z_eq, TensionPI
+from swashplate    import SwashplateServoModel
+from frames        import build_orb_frame
+from simtest_log   import SimtestLog
+from tel           import make_tel
+from telemetry_csv import TelRow, write_csv
 
 TetherModel = _mediator_module.TetherModel
+_log = SimtestLog(__file__)
 
 # Design tether equilibrium orientation (from beaupoil_2026.yaml) in NED
 _BODY_Z_DESIGN = np.array([0.305391, 0.851018, -0.427206])  # NED: T @ ENU
@@ -158,8 +162,11 @@ def _equilibrium_setup():
     return coll_eq, omega_spin_eq, R0, pos0, rest, coll_eq_target, T_tether_target
 
 
+_TEL_STRIDE = 20   # log every 20 steps = 20 Hz at 400 Hz
+
+
 def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
-                  ic_dir0=None, ic_bz0=None, tension_ctrl=None):
+                  ic_dir0=None, ic_bz0=None, tension_ctrl=None, tel_rows=None):
     """
     Run `steps` physics steps and return per-step telemetry arrays plus the
     final omega_spin scalar.  Used for both warmup and the recorded run.
@@ -170,10 +177,13 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
     If tension_ctrl is provided, collective is controlled by the TensionPI
     rather than the fixed coll_eq value.  This finds the natural operational
     equilibrium altitude under closed-loop tension control.
+
+    If tel_rows is a list, one TelRow is appended every _TEL_STRIDE steps.
     """
     omega_spin  = omega_spin_start
     anchor      = np.zeros(3)
     tension_now = 0.0   # initial tether tension for TensionPI feedback
+    prev_vel    = dyn.state["vel"].copy()
 
     t_arr      = np.zeros(steps)
     pos_arr    = np.zeros((steps, 3))
@@ -233,6 +243,30 @@ def _physics_loop(dyn, aero, tether, coll_eq, omega_spin_start, steps,
 
         F_net = result.F_world + f_teth
         M_net = result.M_orbital + m_teth - _BASE_K_ANG * state["omega"]
+
+        if tel_rows is not None and step % _TEL_STRIDE == 0:
+            accel = (state["vel"] - prev_vel) / DT
+            tel_rows.append(make_tel(
+                t_sim          = step * DT,
+                hub_state      = state,
+                omega_spin     = omega_spin,
+                tether         = tether,
+                tension_now    = tension_now,
+                collective_rad = collective,
+                tilt_lon       = tilt_lon,
+                tilt_lat       = tilt_lat,
+                wind_ned       = WIND,
+                body_z_eq      = body_z_eq,
+                aero_result    = result,
+                aero_obj       = aero,
+                tether_force   = f_teth,
+                tether_moment  = m_teth,
+                omega_body     = state["omega"],
+                accel_world    = accel,
+                net_moment     = M_net,
+            ))
+
+        prev_vel = state["vel"].copy()
         dyn.step(F_net, M_net, DT)
 
     return (t_arr, pos_arr, vel_arr, ten_arr, angle_arr, body_z_arr, spin_arr,
@@ -288,10 +322,11 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
         mass=MASS, I_body=[5.0, 5.0, 10.0],
         pos0=pos_s.tolist(), vel0=vel_s.tolist(), R0=R_s, omega0=omega_s.tolist(),
     )
+    tel_rows: list = []
     (t_arr, pos_arr, vel_arr, ten_arr, angle_arr, body_z_arr, spin_arr,
-     _final_spin) = _physics_loop(
+     omega_spin_final) = _physics_loop(
         dyn, aero, tether, coll_eq, omega_spin_settled, steps,
-        tension_ctrl=tension_ctrl_rec)
+        tension_ctrl=tension_ctrl_rec, tel_rows=tel_rows)
 
     return {
         "coll_deg":       math.degrees(coll_eq),
@@ -313,6 +348,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
         "axle_deg":       angle_arr,
         "body_z":         body_z_arr,
         "omega_spin":     spin_arr,
+        "tel_rows":       tel_rows,
     }
 
 
@@ -371,6 +407,13 @@ def test_steady_state_hub_does_not_drift():
 
     # Save artefacts regardless of pass/fail
     _save_starting_json(data, Path(__file__).resolve().parents[2] / "steady_state_starting.json")
+    if data["tel_rows"]:
+        write_csv([TelRow.from_tel(d) for d in data["tel_rows"]],
+                  _log.log_dir / "telemetry.csv")
+    _log.write(
+        [f"drift_E={drift[1]:.3f}m  drift_Z={drift[2]:.3f}m  steps={STEPS}"],
+        f"drift_E={drift[1]:.3f}m  drift_Z={drift[2]:.3f}m",
+    )
 
     assert np.all(np.isfinite(data["pos"])), "NaN/inf in position history"
     assert np.all(np.isfinite(data["vel"])), "NaN/inf in velocity history"

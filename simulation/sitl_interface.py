@@ -31,6 +31,8 @@ from typing import Optional
 
 import numpy as np
 
+from servo_pwm import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
+
 log = logging.getLogger(__name__)
 
 # ArduPilot SITL JSON physics protocol — listen port only (reply is to source)
@@ -191,7 +193,7 @@ class SITLInterface:
 
         Note
         ----
-        For channels with non-standard PWM ranges (e.g. SERVO9_MIN=800), use
+        For channels with non-standard PWM ranges (e.g. SERVO4_MIN=800), use
         ``last_pwm_raw[channel]`` to read the true PWM without clipping.
         """
         if self._sock is None:
@@ -232,7 +234,7 @@ class SITLInterface:
 
         pwm = np.array(pwm_raw[:16], dtype=np.float64)
         self._last_pwm_raw = pwm
-        normalised = (pwm - 1500.0) / 500.0
+        normalised = (pwm - SWASH_PWM_NEUTRAL) / SWASH_PWM_RANGE
         normalised = np.clip(normalised, -1.0, 1.0)
         self._last_servos = normalised
         return normalised
@@ -244,7 +246,7 @@ class SITLInterface:
     @property
     def last_pwm_raw(self) -> np.ndarray:
         """Raw PWM microseconds from the most recent servo packet (16 channels).
-        Use this for channels with non-standard ranges (e.g. SERVO9_MIN=800)
+        Use this for channels with non-standard ranges (e.g. SERVO4_MIN=800)
         where the normalised [-1,1] representation clips values below 1000 µs."""
         return self._last_pwm_raw
 
