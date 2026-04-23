@@ -577,6 +577,34 @@ class RawesGCS:
         log.warning("get_param %s: no response within %.1f s", name, timeout)
         return None
 
+    def fetch_all_params(self, timeout: float = 30.0) -> "dict[str, float]":
+        """Fetch all parameters via PARAM_REQUEST_LIST.
+
+        Returns a dict mapping param name to value.  Completes when the full
+        param_count is received or *timeout* expires (whichever comes first).
+        """
+        self._mav.mav.param_request_list_send(
+            self._target_system,
+            self._target_component,
+        )
+        params: "dict[str, float]" = {}
+        total: "int | None" = None
+        deadline = self.sim_now() + timeout
+        while self.sim_now() < deadline:
+            msg = self._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
+            if msg is None:
+                if total is not None and len(params) >= total:
+                    break
+                continue
+            pid = msg.param_id.rstrip("\x00")
+            params[pid] = float(msg.param_value)
+            if total is None:
+                total = msg.param_count
+            if len(params) >= total:
+                break
+        log.debug("fetch_all_params: got %d/%s params", len(params), total)
+        return params
+
     # ------------------------------------------------------------------
     # EKF health
     # ------------------------------------------------------------------

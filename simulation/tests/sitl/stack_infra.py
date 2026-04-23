@@ -96,7 +96,7 @@ _BASE_ACRO_PARAMS = ParamSetup({
     "ATC_RAT_PIT_IMAX": 0.0,
     "ATC_RAT_YAW_IMAX": 0.0,
     "H_SW_TYPE":        3,      # H3_120 swashplate
-    "H_SW_H3_PHANG":    0,      # no phase correction (RAWES geometry)
+    "H_SW_PHANG":       0,      # no phase correction (RAWES geometry)
 })
 
 
@@ -641,6 +641,21 @@ def _static_stack(
         )
         ctx.mediator_proc = mediator_proc
         ctx.mediator_log  = mediator_log
+        # Brief GCS connection to dump params before yielding to the test.
+        _static_gcs_log = tmp_path / "static_gcs_params.jsonl"
+        _static_gcs = RawesGCS(address=StackConfig.GCS_ADDRESS, mavlog_path=_static_gcs_log)
+        try:
+            _static_gcs.connect(timeout=_STARTUP_TIMEOUT)
+            _static_gcs.start_heartbeat(rate_hz=1.0)
+            _wait_params_ready(_static_gcs, ctx.log)
+            _dump_params_to_log(_static_gcs, ctx.test_log_dir, ctx.log)
+        except Exception as _exc:
+            ctx.log.warning("_static_stack: param dump skipped: %s", _exc)
+        finally:
+            try:
+                _static_gcs.close()
+            except Exception:
+                pass
         try:
             yield ctx
         finally:
@@ -927,6 +942,18 @@ def _arm_sequence(
 # Setup sequence
 # ---------------------------------------------------------------------------
 
+def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
+    """Fetch all ArduPilot params and write params.json to log_dir."""
+    log.info("[params] Fetching full param dump for log ...")
+    try:
+        params = gcs.fetch_all_params(timeout=30.0)
+        out = log_dir / "params.json"
+        out.write_text(json.dumps(params, sort_keys=True, indent=2))
+        log.info("[params] Wrote %d params to %s", len(params), out)
+    except Exception as exc:
+        log.warning("[params] Could not dump params: %s", exc)
+
+
 def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | None" = None) -> None:
     """
     Shared ACRO setup sequence.
@@ -998,6 +1025,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     # ── 2. Param subsystem ────────────────────────────────────────────────────
     log.info("[setup 2/6] Waiting for param subsystem ...")
     _wait_params_ready(gcs, log)
+    _dump_params_to_log(gcs, ctx.test_log_dir, log)
     _procs_alive()
 
     # ── 3 / 4. EKF alignment then boot-param verify ───────────────────────────
@@ -1132,11 +1160,9 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
 
     # ── 3. Verify boot parameters (after EKF ready — non-critical path) ───────
     # EKF alignment is done, so verifying params here doesn't delay kinematic.
-    # Use a short per-param timeout (1 s): params respond instantly once SITL
-    # is running; anything that doesn't respond in 1 s is a genuine problem.
     if boot_setup is not None:
         log.info("[setup 3/6] Verifying boot parameters ...")
-        boot_setup.verify(gcs, log=log, read_timeout=1.0)
+        boot_setup.verify(gcs, log=log)
     _procs_alive()
 
     # Stabilisation wait: arm immediately when EKF3 first reports attitude
@@ -1894,6 +1920,7 @@ def _torque_stack(
                     break
             else:
                 pytest.fail("Param subsystem never responded within 20 s")
+            _dump_params_to_log(gcs, sitl_ctx.test_log_dir, log)
 
             # EKF alignment.
             # For non-Lua tests (armon_ms=None): keep CH8=2000 alive so RSC is ready

@@ -85,9 +85,13 @@ class ParamSetup:
         gcs,
         log: "logging.Logger | None" = None,
         tol: float = 1e-4,
-        read_timeout: float = 5.0,
+        read_timeout: float = 30.0,
     ) -> None:
-        """Read back every param and ``pytest.fail()`` on any mismatch.
+        """Verify all params via a single PARAM_REQUEST_LIST dump.
+
+        Fetches the full param table once, then checks every expected param
+        against it.  Params absent from the dump are reported as unknown to
+        ArduPilot (not a timeout artefact).
 
         Use this (without ``apply``) for params set via the boot param file
         that cannot be reliably set via MAVLink (e.g. ARMING_SKIPCHK INT32).
@@ -95,32 +99,50 @@ class ParamSetup:
         import pytest
 
         _log = log or logging.getLogger("ParamSetup")
-        mismatches: list[str] = []
+        _log.info("verify: fetching full param dump ...")
+        all_params = gcs.fetch_all_params(timeout=read_timeout)
+        _log.info("verify: got %d params from ArduPilot", len(all_params))
 
+        mismatches: list[str] = []
         for name, expected in sorted(self._params.items()):
-            actual = gcs.get_param(name, timeout=read_timeout)
-            if actual is None:
+            if name not in all_params:
                 mismatches.append(
-                    f"  {name:<30s}  expected={expected}  got=NO_RESPONSE"
+                    f"  {name:<30s}  expected={expected}  got=NOT_IN_DUMP"
                 )
-                _log.error("verify: %s — no response", name)
-            elif abs(actual - expected) > tol:
-                mismatches.append(
-                    f"  {name:<30s}  expected={expected}  got={actual}"
-                )
-                _log.error(
-                    "verify: %s expected=%g got=%g (delta=%g)",
-                    name, expected, actual, abs(actual - expected),
-                )
+                _log.error("verify: %s — not in param dump (unknown param)", name)
             else:
-                _log.debug("verify: %s = %g OK", name, actual)
+                actual = all_params[name]
+                if abs(actual - expected) > tol:
+                    mismatches.append(
+                        f"  {name:<30s}  expected={expected}  got={actual}"
+                    )
+                    _log.error(
+                        "verify: %s expected=%g got=%g (delta=%g)",
+                        name, expected, actual, abs(actual - expected),
+                    )
+                else:
+                    _log.debug("verify: %s = %g OK", name, actual)
 
         if mismatches:
+            # For each NOT_IN_DUMP param, log all known params whose name contains
+            # any token from the missing name — helps identify renamed params.
+            missing_names = [
+                m.split()[0]
+                for m in mismatches if "NOT_IN_DUMP" in m
+            ]
+            if missing_names:
+                tokens = {tok for name in missing_names for tok in name.split("_") if len(tok) >= 3}
+                _log.info("verify: scanning dump for params containing tokens %s:", sorted(tokens))
+                for pname in sorted(all_params):
+                    if any(tok in pname for tok in tokens):
+                        _log.info("  %s = %g", pname, all_params[pname])
             pytest.fail(
                 f"Parameter mismatch after setup"
                 f" ({len(mismatches)}/{len(self._params)} wrong):\n"
                 + "\n".join(mismatches)
                 + "\n\nLikely causes:\n"
+                + "  - NOT_IN_DUMP: param name unknown to this ArduPilot build\n"
+                + "    (see 'matching prefixes' lines in gcs.log for actual names)\n"
                 + "  - Docker EEPROM contamination from a previous sequential test\n"
                 + "  - Boot param file value ignored (EEPROM already has a value)\n"
                 + "  - MAVLink set_param silently failed (INT32 sent as REAL32)\n"

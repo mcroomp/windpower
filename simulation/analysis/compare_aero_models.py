@@ -272,3 +272,38 @@ plt.tight_layout()
 out = Path(__file__).parent / "compare_aero_models.png"
 fig.savefig(out, dpi=150, bbox_inches="tight")
 print(f"Saved: {out}")
+
+# ---------------------------------------------------------------------------
+# Per-operating-point divergence table (RAWES cruise collectives)
+# PetersHeBEM assumes uniform (minimum-power) disk induction; SkewedWakeBEM
+# uses Coleman non-uniform induction (higher v_i, less thrust for same collective).
+# The two models diverge 2-5x in the autorotation regime (tilt 0-55 deg).
+# SkewedWakeBEM is correct for tilt 0-55 deg; PetersHeBEM for hover (tilt >= 80 deg).
+# ---------------------------------------------------------------------------
+_CRUISE_COL = {0: -0.20, 15: -0.20, 30: -0.18, 45: -0.05, 60: 0.02}
+_OMEGA_CMP  = 28.0
+_WIND_CMP   = np.array([0.0, 10.0, 0.0])
+_T_CMP      = 10.0
+
+print()
+print("Per-operating-point thrust divergence (RAWES cruise collectives, 10 m/s East wind):")
+print(f"  {'tilt':>6}  {'col':>6}  {'T_glauert':>10}  {'T_skewed':>10}  {'ratio G/S':>10}  note")
+print(f"  {'-'*6}  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}  ----")
+
+_rotor = rd.default()
+_peters = PetersHeBEM(_rotor)
+_skewed_cmp = create_aero(_rotor, model="skewed_wake_numpy")
+
+for _td, _col in sorted(_CRUISE_COL.items()):
+    _bz    = _body_z(float(_td))
+    _R_hub = build_orb_frame(_bz)
+    _kwargs = dict(collective_rad=_col, tilt_lon=0.0, tilt_lat=0.0,
+                   R_hub=_R_hub, v_hub_world=np.zeros(3),
+                   omega_rotor=_OMEGA_CMP, wind_world=_WIND_CMP, t=_T_CMP)
+    _fp = _peters.compute_forces(**_kwargs)
+    _fs = _skewed_cmp.compute_forces(**_kwargs)
+    _T_g = float(np.dot(_fp[:3], _bz))
+    _T_s = float(np.dot(_fs[:3], _bz))
+    _ratio = _T_g / _T_s if abs(_T_s) > 0.1 else float("nan")
+    _note = "within 40%" if 0.6 < _ratio < 1.4 else "DIVERGE (expected in autorotation)"
+    print(f"  {_td:>6}  {_col:>6.2f}  {_T_g:>10.1f}  {_T_s:>10.1f}  {_ratio:>10.2f}  {_note}")

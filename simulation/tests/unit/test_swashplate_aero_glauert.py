@@ -264,60 +264,6 @@ def test_glauert_encode_decode_roundtrip(aero, tilt_deg):
 
 
 # ---------------------------------------------------------------------------
-# Model comparison — where Glauert and SkewedWake agree
-# ---------------------------------------------------------------------------
-
-@pytest.mark.xfail(
-    reason=(
-        "PetersHeBEM assumes uniform (minimum-power) induction across the disk. "
-        "SkewedWakeBEM uses Coleman non-uniform induction, which is less efficient "
-        "and therefore requires a higher v_i for the same CT — producing 2–5x less "
-        "thrust at the same collective in the autorotation regime. "
-        "The two models are complementary, not interchangeable: SkewedWakeBEM is "
-        "correct for tilt 0–55°; PetersHeBEM is correct for hover (tilt>=80°). "
-        "This test documents the known divergence; it is expected to fail."
-    ),
-    strict=True,
-)
-@pytest.mark.parametrize("tilt_deg", [0, 15, 30, 45, 60])
-def test_glauert_vs_skewedwake_thrust_within_30pct(aero, tilt_deg):
-    """
-    At RAWES operating tilts (0–60°, wind present), PetersHeBEM and SkewedWakeBEM
-    must agree on axial thrust to within 30%.
-
-    KNOWN FAILURE: PetersHeBEM over-estimates thrust 2–5x in the autorotation
-    regime because it assumes uniform (most efficient) disk induction, while
-    SkewedWakeBEM uses Coleman non-uniform induction.  Marked xfail to document
-    the known limitation rather than silently skip.
-    """
-    col = _CRUISE_COL[tilt_deg]
-
-    T_glauert = _thrust(aero, tilt_deg, col)
-
-    skewed = create_aero(_rd.default())
-    bz = _body_z(tilt_deg)
-    f_sk = skewed.compute_forces(
-        collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=build_orb_frame(bz),
-        v_hub_world=np.zeros(3),
-        omega_rotor=_OMEGA,
-        wind_world=_WIND,
-        t=_T,
-    )
-    T_skewed = float(np.dot(f_sk[:3], bz))
-
-    assert T_glauert > 0 and T_skewed > 0, (
-        f"tilt={tilt_deg}: both models must produce positive thrust; "
-        f"Glauert={T_glauert:.1f} N  Skewed={T_skewed:.1f} N"
-    )
-    ratio = T_glauert / T_skewed
-    assert 0.7 < ratio < 1.4, (
-        f"tilt={tilt_deg}: Glauert/Skewed thrust ratio {ratio:.2f} outside [0.70, 1.40]; "
-        f"Glauert={T_glauert:.1f} N  Skewed={T_skewed:.1f} N"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Hover in wind — H-force and cyclic trim (tilt=90°, horizontal wind)
 # ---------------------------------------------------------------------------
 # At tilt=90° the disk faces up and wind is entirely in-plane (advance ratio μ>0),
