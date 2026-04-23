@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from aero import create_aero
 import rotor_definition as _rd
 from dynamics import RigidBodyDynamics
-from swashplate import collective_to_pitch, h3_inverse_mix, pwm_to_normalized
 from frames import build_orb_frame
 
 
@@ -35,14 +34,6 @@ DT     = 2.5e-3   # s  (mediator step size, 400 Hz)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-
-_COL_MAX_RAD = 0.35   # physical collective limit matching mediator trajectory config
-
-def _neutral_collective() -> float:
-    """collective_rad when all swashplate servos are at neutral (1500 µs)."""
-    s = pwm_to_normalized(1500.0)              # = 0.0
-    coll_norm, _, _ = h3_inverse_mix(s, s, s)  # = 0.0
-    return collective_to_pitch(coll_norm, _COL_MAX_RAD)   # = 0.0 rad
 
 
 def _R_tilt_30() -> np.ndarray:
@@ -80,11 +71,6 @@ def _aero_forces_after_ramp(collective_rad: float, R_hub: np.ndarray = None) -> 
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
-
-def test_neutral_collective_is_zero_rad():
-    """1500 µs on all servos → collective = 0 rad (not negative)."""
-    coll = _neutral_collective()
-    assert coll == 0.0, f"Expected 0.0 rad, got {coll}"
 
 
 def test_aero_thrust_exceeds_weight_at_neutral_collective():

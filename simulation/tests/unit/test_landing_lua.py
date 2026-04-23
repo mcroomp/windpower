@@ -43,7 +43,6 @@ from rawes_modes     import MODE_LANDING, LAND_FINAL_DROP
 
 _IC    = load_ic()
 _ROTOR = rd.default()
-_AERO  = create_aero(_ROTOR)
 _log   = SimtestLog(__file__)
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -54,7 +53,9 @@ T_AERO_OFFSET = 45.0
 
 # ── Environment ───────────────────────────────────────────────────────────────
 ANCHOR = np.zeros(3)
+ANCHOR.flags.writeable = False
 WIND   = np.array([0.0, 10.0, 0.0])   # 10 m/s East (NED Y)
+WIND.flags.writeable = False
 
 # ── Spin ──────────────────────────────────────────────────────────────────────
 I_SPIN_KGMS2   = 10.0
@@ -79,7 +80,7 @@ TENSION_OUT   = 200.0
 TENSION_IN    =  55.0
 COL_MIN_RAD         = -0.28
 COL_MAX_RAD         =  0.10
-COL_MIN_REEL_IN_RAD = col_min_for_altitude_rad(_AERO, XI_REEL_IN_DEG, _ROTOR.mass_kg)
+COL_MIN_REEL_IN_RAD = col_min_for_altitude_rad(create_aero(_ROTOR), XI_REEL_IN_DEG, _ROTOR.mass_kg)
 TENSION_SAFETY_N    = 496.0
 T_PUMPING_END = T_REEL_OUT + T_REEL_IN
 

@@ -77,6 +77,7 @@ DT            = 1.0 / 400.0
 T_SIM         = 60.0
 T_AERO_OFFSET = 45.0
 ANCHOR        = np.zeros(3)
+ANCHOR.flags.writeable = False
 POS0          = _IC.pos
 VEL0          = _IC.vel
 BODY_Z0       = _IC.R0[:, 2]
@@ -89,6 +90,7 @@ KP_OUTER = 2.5
 KP_INNER = RatePID.DEFAULT_KP
 
 WIND = np.array([0.0, 10.0, 0.0])   # NED: East wind
+WIND.flags.writeable = False
 
 # Maximum plausible gyro_body norm [rad/s].  Orbital rate is ~0.2-0.3 rad/s;
 # 5 rad/s is a generous upper bound that catches body-rate anomalies without

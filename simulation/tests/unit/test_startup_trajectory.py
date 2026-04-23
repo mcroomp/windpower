@@ -41,7 +41,9 @@ DEFAULT_VEL0 = _mcfg.DEFAULTS["vel0"]
 # Constants
 # ---------------------------------------------------------------------------
 _TARGET_POS = np.array(DEFAULT_POS0, dtype=float)
+_TARGET_POS.flags.writeable = False
 _TARGET_VEL = np.array(DEFAULT_VEL0, dtype=float)
+_TARGET_VEL.flags.writeable = False
 _T          = 30.0   # s — default startup damping window
 
 

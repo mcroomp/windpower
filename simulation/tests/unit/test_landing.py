@@ -50,16 +50,16 @@ from telemetry_csv   import TelRow, write_csv
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
 _ROTOR = rd.default()
-_AERO  = create_aero(_ROTOR)
-
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT            = 1.0 / 400.0
 ANCHOR        = np.zeros(3)
+ANCHOR.flags.writeable = False
 T_AERO_OFFSET = 45.0
 
 I_SPIN_KGMS2   = 10.0
 OMEGA_SPIN_MIN = 0.5
 WIND           = np.array([0.0, 10.0, 0.0])   # NED: East wind
+WIND.flags.writeable = False
 BREAK_LOAD_N   = 620.0
 
 # ── Reel-in phase parameters (no reel-out: reel-in alone swings hub to xi~80 deg) ─
@@ -78,7 +78,7 @@ TENSION_IN     =  55.0   # N
 
 COL_MIN_RAD         = -0.28
 COL_MAX_RAD         =  0.10
-COL_MIN_REEL_IN_RAD = col_min_for_altitude_rad(_AERO, XI_REEL_IN_DEG, _ROTOR.mass_kg)
+COL_MIN_REEL_IN_RAD = col_min_for_altitude_rad(create_aero(_ROTOR), XI_REEL_IN_DEG, _ROTOR.mass_kg)
 TENSION_SAFETY_N    = 496.0   # N (~80% break load)
 
 # ── Landing parameters ─────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ from planner import WindEstimator, DeschutterPlanner, quat_apply, Q_IDENTITY
 # ---------------------------------------------------------------------------
 
 _SEED_EAST = np.array([0.0, 1.0, 0.0])   # NED: East — default seed for tests that don't care about direction
+_SEED_EAST.flags.writeable = False
 
 
 def _state(pos_ned, omega_spin=0.0, vel_ned=None):

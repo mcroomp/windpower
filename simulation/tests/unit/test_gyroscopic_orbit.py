@@ -50,7 +50,9 @@ _IC  = load_ic()
 DT        = 1.0 / 400.0     # 400 Hz
 T_SIM     = 60.0            # seconds
 ANCHOR    = np.zeros(3)
+ANCHOR.flags.writeable = False
 WIND      = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
+WIND.flags.writeable = False
 
 POS0          = _IC.pos
 VEL0          = _IC.vel

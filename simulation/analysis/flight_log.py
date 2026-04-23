@@ -28,15 +28,6 @@ from ekf_flags import (
 
 
 # ---------------------------------------------------------------------------
-# Time alignment
-# ---------------------------------------------------------------------------
-
-def to_sim(t_wall: float, t0_wall: float, t0_boot_s: float) -> float:
-    """Convert MAVLink wall time to sim time (boot seconds)."""
-    return (t_wall - t0_wall) + t0_boot_s
-
-
-# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -124,8 +115,6 @@ class FlightLog:
     """All per-test log data in one structure."""
     log_dir: Path
     tel_rows: list = field(default_factory=list)  # list[TelRow]
-    t0_wall: Optional[float] = None       # wall time of first SYSTEM_TIME msg
-    t0_boot_s: Optional[float] = None    # boot seconds of first SYSTEM_TIME msg
     # Run metadata
     run_id_mediator: Optional[int] = None
     run_id_pytest: Optional[int] = None
@@ -149,11 +138,6 @@ class FlightLog:
     _df_pidr_rows: list = field(default_factory=list, repr=False)  # PIDR: {t_s, tar, act, err, p, i, d, ff}
     _df_pidp_rows: list = field(default_factory=list, repr=False)  # PIDP: {t_s, tar, act, err, p, i, d, ff}
     _df_mode_rows: list = field(default_factory=list, repr=False)  # MODE: {t_s, mode, mode_name, reason}
-
-    def to_sim_mav(self, t_wall: float) -> float:
-        if self.t0_wall is None or self.t0_boot_s is None:
-            return 0.0
-        return to_sim(t_wall, self.t0_wall, self.t0_boot_s)
 
     @classmethod
     def load(cls, log_dir: "Path | str") -> "FlightLog":
@@ -190,23 +174,16 @@ class FlightLog:
                     continue
         self._mavlink_records = records
 
-        # Locate SYSTEM_TIME anchor for wall→sim conversion
-        for d in records:
-            if d.get("mavpackettype") == "SYSTEM_TIME":
-                self.t0_wall = d["_t_wall"]
-                self.t0_boot_s = d.get("time_boot_ms", 0) / 1000.0
-                break
-        if self.t0_wall is None or self.t0_boot_s is None:
-            return  # cannot time-align MAVLink data
-
-        t0_wall, t0_boot_s = self.t0_wall, self.t0_boot_s
+        # SITL is lockstep: time_boot_ms IS the sim time. Use it directly.
+        # Wall-clock anchoring introduces growing drift (observed ~2-4 s over 80 s)
+        # because the GCS log wall clock is not coupled to the SITL lockstep clock.
         prev_ekf: Optional[int] = None
         prev_arm: Optional[bool] = None
         prev_mode: Optional[int] = None
 
         for d in records:
             mt = d.get("mavpackettype", "")
-            ts = to_sim(d["_t_wall"], t0_wall, t0_boot_s)
+            ts = d.get("time_boot_ms", 0) / 1000.0
 
             if mt == "ATTITUDE":
                 self._att_rows.append({
@@ -436,6 +413,9 @@ class FlightLog:
         Each bucket contains physics aggregates, MAVLink attitude/EKF data,
         dataflash ATT/SWSH data, and FlightEvents in that window.
 
+        Forced bucket boundaries are inserted at the arm time and kinematic
+        exit time so those transitions never straddle a bucket edge.
+
         Args:
             bucket_s: bucket width in simulation seconds (default 1.0).
                       Use larger values (e.g. 5.0, 10.0) for a high-level
@@ -449,12 +429,35 @@ class FlightLog:
             t_end   = self._df_att_rows[-1]["t_s"]
         else:
             return []
-        n_bkts  = max(1, math.ceil((t_end - t_start) / bucket_s))
+
+        # Build bucket-boundary list: uniform intervals + forced splits.
+        n_bkts = max(1, math.ceil((t_end - t_start) / bucket_s))
+        boundaries = [t_start + i * bucket_s for i in range(n_bkts + 1)]
+
+        # Forced splits: arm time and kinematic exit time.
+        _forced: list[float] = []
+        for ev in self.events:
+            if ev.category == "ARM" and ev.text.strip() == "ARMED":
+                _forced.append(ev.t_sim)
+        kin_exit_rows = [r for r in self.tel_rows if r.note == "kinematic_exit"]
+        if kin_exit_rows:
+            _forced.append(kin_exit_rows[0].t_sim)
+        elif self.tel_rows:
+            # Fall back: first row where damp_alpha drops to 0
+            for i in range(1, len(self.tel_rows)):
+                if self.tel_rows[i - 1].damp_alpha > 0 and self.tel_rows[i].damp_alpha == 0:
+                    _forced.append(self.tel_rows[i].t_sim)
+                    break
+
+        for ft in _forced:
+            if t_start < ft < t_end:
+                boundaries.append(ft)
+        boundaries = sorted(set(round(b, 6) for b in boundaries))
 
         result: list[Bucket] = []
-        for bi in range(n_bkts):
-            bs = t_start + bi * bucket_s
-            be = t_start + (bi + 1) * bucket_s
+        for bi in range(len(boundaries) - 1):
+            bs = boundaries[bi]
+            be = boundaries[bi + 1]
 
             brows = [r for r in self.tel_rows if bs <= r.t_sim < be]
 

@@ -5,11 +5,17 @@ Re-exports all model implementations and provides a single factory function
 so callers only need to change one argument to swap models:
 
     rotor = rd.default()
-    aero  = create_aero(rotor)                            # SkewedWakeBEMJit (default, ~4x faster)
+    aero  = create_aero(rotor)                            # SkewedWakeBEMJit (default)
     aero  = create_aero(rotor, model="skewed_wake_numpy") # SkewedWakeBEM (numpy fallback)
+    aero  = create_aero(rotor, model="peters_he")         # PetersHeBEMJit
+    aero  = create_aero(rotor, model="peters_he_numpy")   # PetersHeBEM (numpy fallback)
     aero  = create_aero(rotor, model="deschutter")        # DeSchutterAero (per-blade)
     aero  = create_aero(rotor, model="prandtl")           # PrandtlBEM (tip-loss)
     aero  = create_aero(rotor, model="glauert")           # GlauertStateBEM (inflow states)
+
+Warm-start (PetersHe models only):
+    state = aero.to_dict()                                # serialize inflow states
+    aero  = create_aero(rotor, model="peters_he", state_dict=state)  # restore inflow states
 
 All models expose the same interface:
     result = aero.compute_forces(collective_rad, tilt_lon, tilt_lat,
@@ -19,10 +25,12 @@ All models expose the same interface:
     M_orbital   = result.M_orbital              # orbital moments only
 
 Model implementations:
-    aero_deschutter.py         — DeSchutterAero:   per-blade, natural H-force + cyclic
-    aero/aero_prandtl_bem.py   — PrandtlBEM:       DeSchutter + Prandtl tip/root loss
-    aero/aero_skewed_wake.py   — SkewedWakeBEM:    PrandtlBEM + Coleman skewed-wake (DEFAULT)
-    aero/aero_glauert_states.py — GlauertStateBEM: lumped + Glauert inflow states
+    aero_deschutter.py          — DeSchutterAero:    per-blade, natural H-force + cyclic
+    aero/aero_prandtl_bem.py    — PrandtlBEM:        DeSchutter + Prandtl tip/root loss
+    aero/aero_skewed_wake.py    — SkewedWakeBEM:     PrandtlBEM + Coleman skewed-wake
+    aero/aero_peters_he.py      — PetersHeBEM:       Peters-He 3-state dynamic inflow
+    aero/aero_peters_he_jit.py  — PetersHeBEMJit:   Peters-He + Numba JIT (DEFAULT)
+    aero/aero_glauert_states.py — GlauertStateBEM:   lumped + Glauert inflow states
 """
 
 from dataclasses import dataclass
@@ -82,37 +90,51 @@ from aero_prandtl_bem     import PrandtlBEM          # noqa: F401  (re-exported)
 from aero_skewed_wake     import SkewedWakeBEM        # noqa: F401  (re-exported)
 from aero_skewed_wake_jit import SkewedWakeBEMJit     # noqa: F401  (re-exported)
 from aero_glauert_states  import GlauertStateBEM      # noqa: F401  (re-exported)
+from aero_peters_he       import PetersHeBEM           # noqa: F401  (re-exported)
+from aero_peters_he_jit   import PetersHeBEMJit         # noqa: F401  (re-exported)
 
 __all__ = [
     "AeroResult",
     "DeSchutterAero",
-    "PrandtlBEM", "SkewedWakeBEM", "SkewedWakeBEMJit", "GlauertStateBEM",
+    "PrandtlBEM", "SkewedWakeBEM", "SkewedWakeBEMJit",
+    "GlauertStateBEM", "PetersHeBEM", "PetersHeBEMJit",
     "create_aero",
 ]
 
 _MODELS = {
-    "deschutter":       DeSchutterAero,
-    "prandtl":          PrandtlBEM,
-    "skewed_wake":      SkewedWakeBEMJit,   # JIT is now the default
-    "skewed_wake_numpy": SkewedWakeBEM,     # pure-numpy fallback
-    "glauert":          GlauertStateBEM,
+    "deschutter":        DeSchutterAero,
+    "prandtl":           PrandtlBEM,
+    "skewed_wake":       SkewedWakeBEMJit,
+    "skewed_wake_numpy": SkewedWakeBEM,
+    "glauert":           GlauertStateBEM,
+    "peters_he":         PetersHeBEMJit,
+    "peters_he_numpy":   PetersHeBEM,
 }
 
+# Models that support state_dict serialization
+_STATEFUL_MODELS = {"peters_he", "peters_he_numpy"}
 
-def create_aero(defn=None, model: str = "skewed_wake"):
+
+def create_aero(defn=None, model: str = "skewed_wake",
+                state_dict: dict | None = None):
     """
     Factory: create an aero model from a RotorDefinition.
 
     Parameters
     ----------
-    defn  : RotorDefinition, optional
+    defn       : RotorDefinition, optional
         Rotor geometry and aerodynamic parameters.  If None, uses rd.default().
-    model : str
-        "skewed_wake"        (default) — SkewedWakeBEMJit: JIT-compiled, ~4x faster
-        "skewed_wake_numpy"          — SkewedWakeBEM: pure-numpy reference
-        "prandtl"                    — PrandtlBEM: per-blade + Prandtl tip/root loss
-        "deschutter"                 — DeSchutterAero: per-blade strip theory
-        "glauert"                    — GlauertStateBEM: lumped + Glauert inflow states
+    model      : str
+        "skewed_wake"        (default) — SkewedWakeBEMJit: Coleman + Numba JIT
+        "skewed_wake_numpy"            — SkewedWakeBEM: pure-numpy reference
+        "peters_he"                    — PetersHeBEMJit: Peters-He + Numba JIT
+        "peters_he_numpy"              — PetersHeBEM: pure-numpy reference
+        "prandtl"                      — PrandtlBEM: per-blade + Prandtl tip/root loss
+        "deschutter"                   — DeSchutterAero: per-blade strip theory
+        "glauert"                      — GlauertStateBEM: lumped + Glauert inflow states
+    state_dict : dict, optional
+        Inflow state from a previous model.to_dict() call.  Only supported for
+        "peters_he" and "peters_he_numpy".  Raises ValueError for other models.
 
     Returns
     -------
@@ -123,7 +145,9 @@ def create_aero(defn=None, model: str = "skewed_wake"):
     >>> import rotor_definition as rd
     >>> from aero import create_aero
     >>> rotor = rd.default()
-    >>> aero = create_aero(rotor)                      # SkewedWakeBEM (default)
+    >>> aero = create_aero(rotor)                      # PetersHeBEMJit (default)
+    >>> state = aero.to_dict()
+    >>> aero2 = create_aero(rotor, state_dict=state)   # warm-start from saved state
     """
     if defn is None:
         import rotor_definition as rd
@@ -134,6 +158,13 @@ def create_aero(defn=None, model: str = "skewed_wake"):
         raise ValueError(
             f"Unknown aero model {model!r} — choose one of: {list(_MODELS)}"
         )
+    if state_dict is not None and model not in _STATEFUL_MODELS:
+        raise ValueError(
+            f"state_dict is not supported for model {model!r}; "
+            f"only {sorted(_STATEFUL_MODELS)} support serialization"
+        )
+    if state_dict is not None:
+        return cls.from_definition(defn, state_dict=state_dict)
     return cls.from_definition(defn)
 
 

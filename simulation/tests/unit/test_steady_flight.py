@@ -49,25 +49,29 @@ from telemetry_csv import TelRow, write_csv
 TetherModel = _mediator_module.TetherModel
 _log = SimtestLog(__file__)
 
+# Load rotor definition — single source of truth for all physical constants.
+_ROTOR = _rd.default()
+_DYN_KW = _ROTOR.dynamics_kwargs()   # mass, I_body, I_spin
+
 # Design tether equilibrium orientation (from beaupoil_2026.yaml) in NED
 _BODY_Z_DESIGN = np.array([0.305391, 0.851018, -0.427206])  # NED: T @ ENU
+_BODY_Z_DESIGN.flags.writeable = False
 _BASE_K_ANG    = 50.0   # N·m·s/rad — angular damping (matches mediator default)
 _T_AERO_OFFSET = 45.0   # s — aero ramp already done
 
-# ── Physical constants ────────────────────────────────────────────────────────
-MASS   = 5.0                        # kg
-G      = 9.81                       # m/s²
-WEIGHT = MASS * G                   # N
-OMEGA  = 28.0                       # rad/s  initial spin (autorotation at 10 m/s wind)
-WIND   = np.array([0.0, 10.0, 0.0]) # NED: 10 m/s East = Y axis
+# ── Physical constants (all from rotor definition) ────────────────────────────
+MASS          = _DYN_KW["mass"]           # kg
+G             = 9.81                       # m/s²
+WEIGHT        = MASS * G                   # N
+K_DRIVE_SPIN  = _ROTOR.K_drive_Nms_m      # N·m·s/m
+K_DRAG_SPIN   = _ROTOR.K_drag_Nms2_rad2   # N·m·s²/rad²
+I_SPIN_KGMS2  = _ROTOR.I_ode_kgm2         # kg·m²
+OMEGA_SPIN_MIN = _ROTOR.omega_min_rad_s   # rad/s
+OMEGA  = math.sqrt(K_DRIVE_SPIN * 10.0 / K_DRAG_SPIN)  # autorotation eq at 10 m/s
+WIND   = np.array([0.0, 10.0, 0.0])       # NED: 10 m/s East = Y axis
+WIND.flags.writeable = False
 
-DT     = 2.5e-3                     # s  (400 Hz)
-
-# ── Spin dynamics constants (from mediator.py) ────────────────────────────────
-K_DRIVE_SPIN  = 1.4      # N·m·s/m   autorotation drive per unit in-plane wind speed
-K_DRAG_SPIN   = 0.01786  # N·m·s²/rad²  profile drag
-I_SPIN_KGMS2  = 10.0     # kg·m²  rotor spin-axis inertia
-OMEGA_SPIN_MIN = 0.5     # rad/s  minimum clamp
+DT     = 2.5e-3                            # s  (400 Hz)
 
 # ── Tether geometry ───────────────────────────────────────────────────────────
 ELEV_DEG = 30.0
@@ -298,7 +302,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
 
     tether_wu = TetherModel(anchor_ned=np.zeros(3), rest_length=rest)
     dyn_wu    = RigidBodyDynamics(
-        mass=MASS, I_body=[5.0, 5.0, 10.0],
+        **_DYN_KW,
         pos0=pos0.tolist(), vel0=[0., 0., 0.], R0=R0, omega0=[0., 0., 0.],
     )
     *_, omega_spin_settled = _physics_loop(
@@ -319,7 +323,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
     tension_ctrl_rec = TensionPI(setpoint_n=tension_out)
     tether = TetherModel(anchor_ned=np.zeros(3), rest_length=rest)
     dyn    = RigidBodyDynamics(
-        mass=MASS, I_body=[5.0, 5.0, 10.0],
+        **_DYN_KW,
         pos0=pos_s.tolist(), vel0=vel_s.tolist(), R0=R_s, omega0=omega_s.tolist(),
     )
     tel_rows: list = []
@@ -358,29 +362,60 @@ def _save_starting_json(data: dict, path: Path) -> None:
     the ArduPilot stack flight test can pass identical initial conditions to
     the mediator via CLI args.
 
-    Fields
-    ------
-    pos          : NED position [m]
-    vel          : NED velocity [m/s]
-    body_z       : body-Z axis in world NED frame (unit vector; R0 derived from this)
-    omega_spin   : rotor spin rate [rad/s]
-    rest_length  : tether rest length [m]
-    coll_eq_rad  : equilibrium collective [rad] — TensionPI warm-start value
-    tension_eq_n : equilibrium tether tension [N] — TensionPI setpoint (tension_out)
-                   at this collective.  Set tension_out=tension_eq_n so PI has zero
-                   error at equilibrium and headroom in both directions.
+    Also writes an 'eq_physics' block with the expected force balance at the
+    settled state so analyse_run.py can verify the stack test sees the same
+    forces at kinematic exit.
     """
-    R0 = data["R0"]
+    R0  = data["R0"]
+    pos = data["pos0"]
+    vel = data["vel0"]
+    omega_spin = float(data["omega_spin_eq"])
+    coll_eq_target = float(data["stack_coll_eq"])
+
+    # Compute expected force balance at settled state using stack-test collective.
+    aero = create_aero(_ROTOR)
+    tether = TetherModel(anchor_ned=np.zeros(3), rest_length=float(data["rest_length"]))
+    f_aero = aero.compute_forces(
+        collective_rad=coll_eq_target, tilt_lon=0.0, tilt_lat=0.0,
+        R_hub=R0, v_hub_world=np.asarray(vel),
+        omega_rotor=omega_spin, wind_world=WIND, t=_T_AERO_OFFSET,
+    )
+    f_teth, m_teth = tether.compute(np.asarray(pos), np.asarray(vel), R0)
+    f_net = f_aero.F_world + f_teth
+
     out = {
-        "pos":          data["pos0"].tolist(),
-        "vel":          data["vel0"].tolist(),
-        "R0":           R0.tolist(),  # equilibrium rotation matrix; stack tests apply build_gps_yaw_frame themselves
-        "omega_spin":   float(data["omega_spin_eq"]),
+        "pos":          pos.tolist(),
+        "vel":          np.asarray(vel).tolist(),
+        "R0":           R0.tolist(),
+        "omega_spin":   omega_spin,
         "rest_length":  float(data["rest_length"]),
-        "coll_eq_rad":    float(data["coll_eq"]),        # unit-test equilibrium collective
-        "tension_eq_n":   float(data["tension_eq_n"]),   # stack-test tension_out
-        "stack_coll_eq":  float(data["stack_coll_eq"]),  # stack-test TensionPI warm-start
-        "home_z_ned":   0.0,   # GPS home at ground level
+        "coll_eq_rad":    float(data["coll_eq"]),
+        "tension_eq_n":   float(data["tension_eq_n"]),
+        "stack_coll_eq":  coll_eq_target,
+        "home_z_ned":   0.0,
+        "eq_physics": {
+            "mass_kg":        MASS,
+            "wind_ned":       WIND.tolist(),
+            "collective_rad": coll_eq_target,
+            "tilt_lon":       0.0,
+            "tilt_lat":       0.0,
+            "omega_spin":     omega_spin,
+            "aero_fx":   float(f_aero.F_world[0]),
+            "aero_fy":   float(f_aero.F_world[1]),
+            "aero_fz":   float(f_aero.F_world[2]),
+            "tether_fx": float(f_teth[0]),
+            "tether_fy": float(f_teth[1]),
+            "tether_fz": float(f_teth[2]),
+            "F_net_x":   float(f_net[0]),
+            "F_net_y":   float(f_net[1]),
+            "F_net_z":   float(f_net[2]),
+            "aero_mx":   float(f_aero.M_orbital[0]),
+            "aero_my":   float(f_aero.M_orbital[1]),
+            "aero_mz":   float(f_aero.M_orbital[2]),
+            "tether_mx": float(m_teth[0]),
+            "tether_my": float(m_teth[1]),
+            "tether_mz": float(m_teth[2]),
+        },
     }
     path.write_text(json.dumps(out, indent=2))
 

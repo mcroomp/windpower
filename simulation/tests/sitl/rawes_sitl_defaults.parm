@@ -54,16 +54,15 @@ H_COL_MAX       2000   # maximum collective servo output (us) -- full range
 H_RSC_MODE      1      # 1=Passthrough: no main rotor motor (autorotation only).
                        # Motor interlock HIGH (RC8=2000) -> THROTTLE_UNLIMITED immediately.
 
-# GB4008 anti-rotation motor — AUX OUT 1 (output 9)
-# Lua writes PWM via SRV_Channels:set_output_pwm(94, pwm_us) -> SERVO9.
-# Mediator reads servos[8] (0-indexed) = output 9.
-SERVO9_FUNCTION  94    # Script 1: Lua owns output 9 for GB4008 yaw trim
-SERVO9_MIN       800   # PWM off = 800 us; default 1100 clamps signal (motor silent)
-SERVO9_MAX       2000  # PWM full = 2000 us
-SERVO9_TRIM      800   # trim = off; rawes.lua _set_throttle_pct(0) = 800 us
-# SERVO_BLH_* and SERVO_DSHOT_ESC are hardware-only (DShot/BLHeli on Pixhawk 6C).
-# They are not recognised by the SITL binary and must NOT be in this file.
-# Set them in rawes_params.parm (the hardware parameter file) instead.
+# GB4008 anti-rotation motor — MAIN OUT 4 (SERVO4, H_TAIL_TYPE=4 DDFP CCW).
+# ArduPilot's ATC_RAT_YAW PID drives SERVO4 directly via the DDFP CCW path.
+# CCW sign flip: CW hub drift -> negative yaw error -> negative PID -> positive throttle.
+# Lua writes no commands to the motor.
+H_TAIL_TYPE      4     # DDFP CCW: ATC_RAT_YAW PID output -> SERVO4 (sign-flipped)
+H_COL2YAW       0.0   # no collective-to-yaw feedforward
+SERVO4_MIN       800   # PWM off = 800 us (motor silent)
+SERVO4_MAX       2000  # PWM full = 2000 us
+SERVO4_TRIM      800   # DDFP trim = off; motor silent at neutral stick
 
 # RPM source: SITL reads rpm.rpm_1 from mediator JSON (RPM1_TYPE=10).
 # On hardware: set RPM1_TYPE=5 (bidir DShot ESC telemetry) after enabling AM32 EDT.

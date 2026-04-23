@@ -148,7 +148,7 @@ def print_flight_report(log_dir: Path, bucket_s: float = 5.0) -> None:
     parse_pytest(log_dir / "gcs.log", report)
     parse_arducopter(log_dir / "arducopter.log", report)
 
-    _print_mediator(report)
+    _print_mediator(report, fl)
     _print_sitl_crash(report)
     _print_tel_events(report)
     _print_bucketed_report(fl, bucket_s)
@@ -431,7 +431,7 @@ def _header(title: str):
     _rule("=")
 
 
-def _print_mediator(r: RunReport) -> None:
+def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
     rows = r.tel_rows
     if not rows:
         print("  (no telemetry rows loaded)")
@@ -494,6 +494,28 @@ def _print_mediator(r: RunReport) -> None:
         print(f"    final thrust at damp end       : {last_damp.aero_T:.1f} N")
         print(f"    final tether tension           : {last_damp.tether_tension:.0f} N")
 
+        # Swashplate tilt post-arm — must stay near zero in ACRO.
+        # Use the arm timestamp from MAVLink events (most precise); fall back to
+        # a 30 s fixed offset if no arm event is recorded (e.g. static mediator tests).
+        _TILT_WARN = 0.10   # normalised [-1,1]; same threshold as test_tail_tilt
+        arm_t: "float | None" = None
+        if fl is not None:
+            for ev in fl.events:
+                if ev.category == "ARM" and ev.text.strip() == "ARMED":
+                    arm_t = ev.t_sim
+                    break
+        _SETTLE_S   = 30.0
+        t0_damp     = damp_rows[0].t_sim
+        window_start = arm_t if arm_t is not None else t0_damp + _SETTLE_S
+        post_arm_rows = [row for row in damp_rows if row.t_sim >= window_start]
+        if post_arm_rows:
+            max_tilt_lon = max(abs(row.tilt_lon) for row in post_arm_rows)
+            max_tilt_lat = max(abs(row.tilt_lat) for row in post_arm_rows)
+            _tilt_ok = max_tilt_lon < _TILT_WARN and max_tilt_lat < _TILT_WARN
+            label = f"post-arm (t>={window_start:.0f}s)"
+            print(f"    max swashplate tilt ({label}): lon={max_tilt_lon:.3f}  lat={max_tilt_lat:.3f}  "
+                  + ("[OK]" if _tilt_ok else f"[!!] exceeds {_TILT_WARN} -- ACRO/I-term issue?"))
+
     # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV;
     # fall back to first free-flight row (damp_alpha==0) for older logs.
     _tr_rows = [r for r in rows if r.note == "kinematic_exit"]
@@ -513,6 +535,126 @@ def _print_mediator(r: RunReport) -> None:
         print(f"    altitude         : {-tr.pos_z:.2f} m")
         print(f"    vel_z (down+)    : {tr.vel_z:.3f} m/s  "
               + ("[OK]" if tr.vel_z < 1.0 else "[!!] falling fast at exit"))
+
+    # Sensor discontinuity at kinematic exit
+    # Compare last kinematic row vs first free-flight row.
+    # EKF uses sens_accel/gyro for IMU integration and rpy/vel/pos for GPS.
+    # Any discontinuity in these values at the boundary is a physics bug.
+    if damp_rows and free_rows:
+        last_kin  = damp_rows[-1]
+        first_flt = free_rows[0]
+        print()
+        print(f"  -- Sensor continuity at kinematic exit --")
+        def _ang_deg(a: float, b: float) -> float:
+            import math as _m
+            d = _m.degrees(b - a)
+            # wrap to (-180, 180]
+            while d >  180.0: d -= 360.0
+            while d <= -180.0: d += 360.0
+            return d
+        def _ck(label: str, delta: float, warn: float, unit: str = "") -> None:
+            tag = "[OK]" if abs(delta) <= warn else "[!!]"
+            print(f"    d({label:<18}) = {delta:+8.4f}{unit:5}  {tag}")
+
+        # Position: should be continuous (stationary hold → pos unchanged)
+        dp = ((first_flt.pos_x - last_kin.pos_x)**2 +
+              (first_flt.pos_y - last_kin.pos_y)**2 +
+              (first_flt.pos_z - last_kin.pos_z)**2) ** 0.5
+        tag = "[OK]" if dp <= 0.01 else "[!!]"
+        print(f"    d(pos_ned)           = {dp:+8.4f} m       {tag}")
+
+        # Velocity: should be continuous (stationary hold → vel=0 initially)
+        dv = ((first_flt.vel_x - last_kin.vel_x)**2 +
+              (first_flt.vel_y - last_kin.vel_y)**2 +
+              (first_flt.vel_z - last_kin.vel_z)**2) ** 0.5
+        tag = "[OK]" if dv <= 0.05 else "[!!]"
+        print(f"    d(vel_ned)           = {dv:+8.4f} m/s     {tag}")
+
+        # Attitude (rpy): equilibrium hold should have zero change
+        _ck("rpy_roll  (deg)",  _ang_deg(last_kin.rpy_roll,  first_flt.rpy_roll),  2.0, " deg")
+        _ck("rpy_pitch (deg)",  _ang_deg(last_kin.rpy_pitch, first_flt.rpy_pitch), 2.0, " deg")
+        _ck("rpy_yaw   (deg)",  _ang_deg(last_kin.rpy_yaw,   first_flt.rpy_yaw),   2.0, " deg")
+
+        # Body-frame accelerometer (what EKF integrates for attitude/velocity)
+        _ck("sens_accel_x(m/s2)", first_flt.sens_accel_x - last_kin.sens_accel_x, 1.0, " m/s2")
+        _ck("sens_accel_y(m/s2)", first_flt.sens_accel_y - last_kin.sens_accel_y, 1.0, " m/s2")
+        _ck("sens_accel_z(m/s2)", first_flt.sens_accel_z - last_kin.sens_accel_z, 1.0, " m/s2")
+
+        # Body-frame gyroscope (what EKF integrates for attitude)
+        _ck("sens_gyro_x(rad/s)", first_flt.sens_gyro_x - last_kin.sens_gyro_x, 0.05, " rad/s")
+        _ck("sens_gyro_y(rad/s)", first_flt.sens_gyro_y - last_kin.sens_gyro_y, 0.05, " rad/s")
+        _ck("sens_gyro_z(rad/s)", first_flt.sens_gyro_z - last_kin.sens_gyro_z, 0.05, " rad/s")
+
+        # Heading gap (should not spike at transition)
+        dhdg = abs(first_flt.heading_gap_deg) - abs(last_kin.heading_gap_deg)
+        tag = "[OK]" if abs(dhdg) <= 15.0 else "[!!] heading gap spike at exit"
+        print(f"    d(heading_gap  (deg)) = {dhdg:+8.3f} deg     {tag}")
+
+        # Force and moment balance at boundary vs equilibrium snapshot
+        # Load expected values from steady_state_starting.json (generated by
+        # test_steady_flight.py — same rotor/wind/collective as the stack test).
+        import json as _json
+        _ic_path = Path(__file__).resolve().parents[1] / "steady_state_starting.json"
+        _eq = {}
+        if _ic_path.exists():
+            try:
+                _eq = _json.loads(_ic_path.read_text()).get("eq_physics", {})
+            except Exception:
+                pass
+
+        print()
+        if _eq:
+            print(f"    eq_physics: collective={_eq.get('collective_rad',0):.4f} rad  "
+                  f"tilt_lon={_eq.get('tilt_lon',0):.3f}  tilt_lat={_eq.get('tilt_lat',0):.3f}  "
+                  f"omega_spin={_eq.get('omega_spin',0):.2f} rad/s")
+            print(f"    stack exit: collective={first_flt.collective_rad:.4f} rad  "
+                  f"tilt_lon={first_flt.tilt_lon:.3f}  tilt_lat={first_flt.tilt_lat:.3f}  "
+                  f"omega_spin={first_flt.omega_rotor:.2f} rad/s")
+            d_col = first_flt.collective_rad - _eq.get("collective_rad", 0)
+            d_om  = first_flt.omega_rotor    - _eq.get("omega_spin", 0)
+            print(f"    delta:      collective={d_col:+.4f} rad  "
+                  f"omega_spin={d_om:+.2f} rad/s"
+                  + ("  [!!] spin mismatch — forces will differ" if abs(d_om) > 2.0 else ""))
+
+        hdr = f"    {'':20}  {'last_kin':>10}  {'first_flt':>10}  {'delta':>10}"
+        if _eq:
+            hdr += f"  {'eq_expect':>10}  {'err_flt':>10}"
+        print(hdr)
+
+        def _frow(label, a, b, eq_val=None, warn=5.0):
+            delta = b - a
+            tag = "[!!]" if abs(delta) > warn else ""
+            row = f"    {label:<20}  {a:>10.1f}  {b:>10.1f}  {delta:>+10.1f}  {tag}"
+            if eq_val is not None:
+                err = b - eq_val
+                etag = "[!!]" if abs(err) > warn else ""
+                row += f"  {eq_val:>10.1f}  {err:>+10.1f}  {etag}"
+            print(row)
+
+        print(f"    -- translational (N) --")
+        for label, a, b, ek in [
+            ("aero_fx",   last_kin.aero_fx,   first_flt.aero_fx,   _eq.get("aero_fx")),
+            ("aero_fy",   last_kin.aero_fy,   first_flt.aero_fy,   _eq.get("aero_fy")),
+            ("aero_fz",   last_kin.aero_fz,   first_flt.aero_fz,   _eq.get("aero_fz")),
+            ("tether_fx", last_kin.tether_fx, first_flt.tether_fx, _eq.get("tether_fx")),
+            ("tether_fy", last_kin.tether_fy, first_flt.tether_fy, _eq.get("tether_fy")),
+            ("tether_fz", last_kin.tether_fz, first_flt.tether_fz, _eq.get("tether_fz")),
+            ("F_net_x",   last_kin.F_x,       first_flt.F_x,       _eq.get("F_net_x")),
+            ("F_net_y",   last_kin.F_y,       first_flt.F_y,       _eq.get("F_net_y")),
+            ("F_net_z",   last_kin.F_z,       first_flt.F_z,       _eq.get("F_net_z")),
+        ]:
+            _frow(label, a, b, ek)
+
+        print(f"    -- rotational (N*m) --")
+        for label, a, b, ek in [
+            ("aero_mx",   last_kin.aero_mx,   first_flt.aero_mx,   _eq.get("aero_mx")),
+            ("aero_my",   last_kin.aero_my,   first_flt.aero_my,   _eq.get("aero_my")),
+            ("aero_mz",   last_kin.aero_mz,   first_flt.aero_mz,   _eq.get("aero_mz")),
+            ("tether_mx", last_kin.tether_mx, first_flt.tether_mx, _eq.get("tether_mx")),
+            ("tether_my", last_kin.tether_my, first_flt.tether_my, _eq.get("tether_my")),
+            ("tether_mz", last_kin.tether_mz, first_flt.tether_mz, _eq.get("tether_mz")),
+        ]:
+            _frow(label, a, b, ek, warn=2.0)
 
     # Free-flight phase
     if free_rows:
@@ -625,10 +767,11 @@ def _print_mode_check(fl: FlightLog) -> None:
         print("  (no MODE messages in dataflash.BIN -- cannot verify)")
         return
 
-    # Find arm time from events (category="ARM")
+    # Find arm time from events (category="ARM", text exactly "ARMED").
+    # Must match exactly to avoid "DISARMED" (which contains "ARMED").
     arm_t = None
     for ev in fl.events:
-        if ev.category == "ARM":
+        if ev.category == "ARM" and ev.text.strip() == "ARMED":
             arm_t = ev.t_sim
             break
 
@@ -663,6 +806,26 @@ def _print_mode_check(fl: FlightLog) -> None:
         print("  This is the tilt contamination root cause: ArduPilot in STABILIZE")
         print("  actively commands roll/pitch toward 0 deg, driving constant cyclic")
         print("  at 65-deg tether equilibrium. Fix: set ACRO before arm.")
+
+    # Time-alignment cross-check: first dataflash MODE=ACRO vs MAVLink ACRO event.
+    # Both are ArduPilot boot seconds so they should agree within ~1 s.
+    # A large gap means the SYSTEM_TIME anchor conversion is off.
+    mav_acro = next(
+        (ev.t_sim for ev in fl.events
+         if ev.category == "MODE" and "ACRO" in ev.text and arm_t is not None and ev.t_sim >= arm_t - 1.0),
+        None,
+    )
+    df_acro = next(
+        (r["t_s"] for r in rows if r["mode"] == 1 and arm_t is not None and r["t_s"] >= arm_t - 1.0),
+        None,
+    )
+    if mav_acro is not None and df_acro is not None:
+        delta = abs(df_acro - mav_acro)
+        ok = delta < 2.0
+        print(f"\n  Time alignment (MAVLink vs dataflash, post-arm ACRO):")
+        print(f"    MAVLink ACRO : t={mav_acro:.2f}s")
+        print(f"    Dataflash ACRO: t={df_acro:.2f}s")
+        print(f"    delta        : {delta:.2f}s  " + ("[OK]" if ok else "[!!] >2 s -- SYSTEM_TIME anchor may be off"))
 
 
 def _print_landing(r: RunReport) -> None:
@@ -1002,22 +1165,8 @@ def _mavlink_load(path: Path) -> list[dict]:
     return records
 
 
-def _mavlink_time_anchor(records: list[dict]) -> tuple:
-    """Return (t0_wall, t0_boot_s) from the first SYSTEM_TIME record, or (None, None)."""
-    for d in records:
-        if d.get("mavpackettype") == "SYSTEM_TIME":
-            return d["_t_wall"], d.get("time_boot_ms", 0) / 1000.0
-    return None, None
-
-
-def _to_sim(t_wall: float, t0_wall: float, t0_boot_s: float) -> float:
-    return (t_wall - t0_wall) + t0_boot_s
-
-
 def _check_ekf_records(
     records: list[dict],
-    t0_wall: float,
-    t0_boot_s: float,
     t_start_s: float,
     t_end_s: float,
 ) -> list[str]:
@@ -1036,7 +1185,7 @@ def _check_ekf_records(
     att_loss:      list[float] = []
 
     for d in records:
-        st = _to_sim(d["_t_wall"], t0_wall, t0_boot_s)
+        st = d.get("time_boot_ms", 0) / 1000.0
         if st < t_start_s or st > t_end_s:
             continue
         mt = d.get("mavpackettype", "")
@@ -1103,10 +1252,7 @@ def validate_ekf_window(
     records = _mavlink_load(mavlink_path)
     if not records:
         return ["mavlink.jsonl is empty"]
-    t0_wall, t0_boot_s = _mavlink_time_anchor(records)
-    if t0_wall is None or t0_boot_s is None:
-        return ["cannot determine time origin (no SYSTEM_TIME packet)"]
-    return _check_ekf_records(records, t0_wall, t0_boot_s, t_start_s, t_end_s)
+    return _check_ekf_records(records, t_start_s, t_end_s)
 
 
 # ---------------------------------------------------------------------------
@@ -1602,7 +1748,7 @@ def main() -> None:
     if args.focus == "attitude":
         _print_attitude_focus(fl, args.bucket)
     else:
-        _print_mediator(report)
+        _print_mediator(report, fl)
         _print_sitl_crash(report)
         _print_tel_events(report)
         _print_bucketed_report(fl, args.bucket)

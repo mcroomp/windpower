@@ -50,7 +50,7 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
 from stack_infra import StackContext, dump_startup_diagnostics, observe, assert_procs_alive
-from swashplate import h3_inverse_mix
+from swashplate import ardupilot_h3_120_inverse, pwm_to_normalized
 
 # -- Timing --------------------------------------------------------------------
 _BASELINE_S = 4.0   # s -- neutral sticks before measurement
@@ -68,15 +68,15 @@ _MIN_ALT_M          = 0.5    # m -- physics crash guard
 
 # Cross-coupling bounds at H_SW_PHANG=0.
 #
-# ArduPilot H3_120 assumes CH_1 at -60 deg, CH_2 at +60 deg, CH_3 at 180 deg.
-# RAWES physical layout has S1 at 0 deg (East), S2 at 120 deg, S3 at 240 deg.
-# This 60 deg geometric offset produces inherent cross-coupling even at PHANG=0;
-# empirically measured values are ~0.55 for both axes.
+# ardupilot_h3_120_inverse is a faithful clone of the ArduPilot H3-120 mixer, so
+# a pure roll RC command decodes to (roll_norm != 0, pitch_norm ~= 0) with no
+# geometric cross-coupling.  Any residual cross-coupling reflects physical servo
+# mis-wiring, wrong H_SW_TYPE, or ArduPilot's attitude controller adding a
+# correction on the off-axis.
 #
-# _CROSS_COUPLING_MAX is intentionally loose (< 0.80) to tolerate the known
-# geometric mismatch while still catching major wiring errors (cross > 1.0 would
-# mean the off-axis response dominates, indicating a servo swap or wrong SW_TYPE).
-_CROSS_COUPLING_MAX = 0.80   # < 0.80 with correct H3_120 + RAWES layout
+# Limit is loose (< 0.30) to flag major wiring errors while tolerating small
+# attitude-controller corrections during the measurement window.
+_CROSS_COUPLING_MAX = 0.30
 
 # -- Expected parameter values -------------------------------------------------
 _EXPECTED_PARAMS = {
@@ -124,20 +124,27 @@ def _collect_servo_samples(
 
 
 def _mean_tilt(samples: list[tuple[float, int, int, int]]) -> tuple[float, float]:
-    """Decode samples via h3_inverse_mix, discard first _DISCARD_S, return mean tilt."""
+    """
+    Decode SERVO_OUTPUT_RAW samples, return mean (roll_norm, pitch_norm).
+
+    Uses ardupilot_h3_120_inverse — the faithful ArduPilot H3-120 clone —
+    so roll_norm and pitch_norm are clean axis readings with no cross-coupling.
+    Returns: (mean_roll_norm, mean_pitch_norm), both in [-1..+1].
+    """
     late = [(s1, s2, s3) for t, s1, s2, s3 in samples if t >= _DISCARD_S]
     if not late:
         raise ValueError(f"No samples after {_DISCARD_S}s discard (total={len(samples)})")
-    tilts_lat, tilts_lon = [], []
+    rolls, pitches = [], []
     for s1_raw, s2_raw, s3_raw in late:
-        s1 = (s1_raw - 1500) / 500.0
-        s2 = (s2_raw - 1500) / 500.0
-        s3 = (s3_raw - 1500) / 500.0
-        _, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
-        tilts_lat.append(tilt_lat)
-        tilts_lon.append(tilt_lon)
-    n = len(tilts_lat)
-    return sum(tilts_lat) / n, sum(tilts_lon) / n
+        _, roll_norm, pitch_norm = ardupilot_h3_120_inverse(
+            pwm_to_normalized(s1_raw),
+            pwm_to_normalized(s2_raw),
+            pwm_to_normalized(s3_raw),
+        )
+        rolls.append(roll_norm)
+        pitches.append(pitch_norm)
+    n = len(rolls)
+    return sum(rolls) / n, sum(pitches) / n
 
 
 def _measure_response(gcs, ctx: StackContext) -> dict:
@@ -150,18 +157,18 @@ def _measure_response(gcs, ctx: StackContext) -> dict:
 
     _log.info("--- baseline (%gs) ---", _BASELINE_S)
     base_samples = _collect_servo_samples(gcs, ctx, _BASELINE_S, neutral, "baseline")
-    base_lat, base_lon = _mean_tilt(base_samples)
-    _log.info("  tilt_lat=%.4f  tilt_lon=%.4f  n=%d", base_lat, base_lon, len(base_samples))
+    base_roll, base_pitch = _mean_tilt(base_samples)
+    _log.info("  roll_norm=%.4f  pitch_norm=%.4f  n=%d", base_roll, base_pitch, len(base_samples))
 
     _log.info("--- Ch1=1700 roll step (%gs) ---", _STEP_S)
     ch1_samples = _collect_servo_samples(
         gcs, ctx, _STEP_S,
         {1: _PWM_STEP, 2: _PWM_NEUTRAL, 3: _PWM_NEUTRAL, 8: 2000}, "Ch1 step")
-    ch1_lat, ch1_lon = _mean_tilt(ch1_samples)
-    d_lat_ch1 = ch1_lat - base_lat
-    d_lon_ch1 = ch1_lon - base_lon
-    _log.info("  delta: tilt_lat=%.4f  tilt_lon=%.4f  n=%d",
-              d_lat_ch1, d_lon_ch1, len(ch1_samples))
+    ch1_roll, ch1_pitch = _mean_tilt(ch1_samples)
+    d_roll_ch1  = ch1_roll  - base_roll
+    d_pitch_ch1 = ch1_pitch - base_pitch
+    _log.info("  delta: roll_norm=%.4f  pitch_norm=%.4f  n=%d",
+              d_roll_ch1, d_pitch_ch1, len(ch1_samples))
 
     _collect_servo_samples(gcs, ctx, _SETTLE_S, neutral, "settle-1")
 
@@ -169,28 +176,28 @@ def _measure_response(gcs, ctx: StackContext) -> dict:
     ch2_samples = _collect_servo_samples(
         gcs, ctx, _STEP_S,
         {1: _PWM_NEUTRAL, 2: _PWM_STEP, 3: _PWM_NEUTRAL, 8: 2000}, "Ch2 step")
-    ch2_lat, ch2_lon = _mean_tilt(ch2_samples)
-    d_lat_ch2 = ch2_lat - base_lat
-    d_lon_ch2 = ch2_lon - base_lon
-    _log.info("  delta: tilt_lat=%.4f  tilt_lon=%.4f  n=%d",
-              d_lat_ch2, d_lon_ch2, len(ch2_samples))
+    ch2_roll, ch2_pitch = _mean_tilt(ch2_samples)
+    d_roll_ch2  = ch2_roll  - base_roll
+    d_pitch_ch2 = ch2_pitch - base_pitch
+    _log.info("  delta: roll_norm=%.4f  pitch_norm=%.4f  n=%d",
+              d_roll_ch2, d_pitch_ch2, len(ch2_samples))
 
     _collect_servo_samples(gcs, ctx, _SETTLE_S, neutral, "settle-2")
 
     eps = 1e-6
-    phase_ch1  = math.degrees(math.atan2(d_lon_ch1, d_lat_ch1))
-    phase_ch2  = math.degrees(math.atan2(d_lat_ch2, d_lon_ch2))
-    cross_ch1  = abs(d_lon_ch1) / (abs(d_lat_ch1) + eps)
-    cross_ch2  = abs(d_lat_ch2) / (abs(d_lon_ch2) + eps)
+    phase_ch1  = math.degrees(math.atan2(d_pitch_ch1, d_roll_ch1))
+    phase_ch2  = math.degrees(math.atan2(d_roll_ch2,  d_pitch_ch2))
+    cross_ch1  = abs(d_pitch_ch1) / (abs(d_roll_ch1)  + eps)
+    cross_ch2  = abs(d_roll_ch2)  / (abs(d_pitch_ch2) + eps)
 
     _log.info("  phase_ch1=%.1f deg  phase_ch2=%.1f deg  cross_ch1=%.3f  cross_ch2=%.3f",
               phase_ch1, phase_ch2, cross_ch1, cross_ch2)
 
     return {
-        "phase_ch1_deg": phase_ch1, "phase_ch2_deg": phase_ch2,
-        "cross_ch1": cross_ch1,     "cross_ch2": cross_ch2,
-        "tilt_lat_ch1": d_lat_ch1,  "tilt_lon_ch1": d_lon_ch1,
-        "tilt_lat_ch2": d_lat_ch2,  "tilt_lon_ch2": d_lon_ch2,
+        "phase_ch1_deg":  phase_ch1,    "phase_ch2_deg":  phase_ch2,
+        "cross_ch1":      cross_ch1,    "cross_ch2":      cross_ch2,
+        "tilt_lat_ch1":   d_roll_ch1,   "tilt_lon_ch1":   d_pitch_ch1,
+        "tilt_lat_ch2":   d_roll_ch2,   "tilt_lon_ch2":   d_pitch_ch2,
     }
 
 
@@ -242,11 +249,11 @@ def test_h_swash_phang(acro_armed: StackContext):
         # Reliable measurement requires internal_controller=False (not yet wired).
         # Expected geometric value at H_SW_PHANG=0: ~0.55 (60-deg H3_120 offset).
         _log.info(
-            "  cross_ch1 = %.3f  (diagnostic, not asserted; expected ~0.55)",
+            "  cross_ch1 = %.3f  (diagnostic, not asserted; expected ~0 with faithful inverse)",
             m["cross_ch1"],
         )
         _log.info(
-            "  cross_ch2 = %.3f  (diagnostic, not asserted; expected ~0.55)",
+            "  cross_ch2 = %.3f  (diagnostic, not asserted; expected ~0 with faithful inverse)",
             m["cross_ch2"],
         )
 
@@ -268,8 +275,8 @@ def test_h_swash_phang(acro_armed: StackContext):
         _log.info("  H_SW_PHANG = 0            [OK]")
         _log.info("  phase_ch1  = %.1f deg  (ideal: 0 deg)", m["phase_ch1_deg"])
         _log.info("  phase_ch2  = %.1f deg  (ideal: 0 deg)", m["phase_ch2_deg"])
-        _log.info("  cross_ch1  = %.3f       (~0.55 expected at PHANG=0; limit=%.2f)", m["cross_ch1"], _CROSS_COUPLING_MAX)
-        _log.info("  cross_ch2  = %.3f       (~0.55 expected at PHANG=0; limit=%.2f)", m["cross_ch2"], _CROSS_COUPLING_MAX)
+        _log.info("  cross_ch1  = %.3f       (~0 expected with faithful inverse; limit=%.2f)", m["cross_ch1"], _CROSS_COUPLING_MAX)
+        _log.info("  cross_ch2  = %.3f       (~0 expected with faithful inverse; limit=%.2f)", m["cross_ch2"], _CROSS_COUPLING_MAX)
         _log.info("  rawes_params.parm: H_SW_TYPE 3  H_SW_PHANG 0")
 
     except Exception:

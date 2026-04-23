@@ -63,11 +63,11 @@ from telemetry_csv import TelRow, write_csv, read_csv
 _log    = SimtestLog(__file__)
 _IC     = load_ic()
 _ROTOR  = rd.default()
-_AERO   = create_aero(_ROTOR)
-
 DT               = 1.0 / 400.0
 ANCHOR           = np.zeros(3)
+ANCHOR.flags.writeable = False
 WIND             = np.array([0.0, 10.0, 0.0])  # NED: 10 m/s East
+WIND.flags.writeable = False
 
 # Steady-state initial conditions
 POS0         = _IC.pos
@@ -100,6 +100,8 @@ _CSV_BASELINE   = _log.log_dir / "telemetry_baseline.csv"
 # ---------------------------------------------------------------------------
 
 def _run_pumping_cycle(
+    # --- Aero model ---
+    aero,
     # --- Starting conditions ---
     vel_at_start:        np.ndarray,     # hub velocity at the start of free physics
     kinematic_seconds:   float,          # 0 = no kinematic; >0 = run kinematic first
@@ -244,7 +246,7 @@ def _run_pumping_cycle(
 
         # 6. Aerodynamics (two-loop attitude + servo emulates ArduPilot ACRO)
         tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
-        result = _AERO.compute_forces(
+        result = aero.compute_forces(
             collective_rad=collective_rad,
             tilt_lon=tilt_lon,
             tilt_lat=tilt_lat,
@@ -304,8 +306,8 @@ def test_stack_mirror_vs_baseline():
 
     All three scenarios must pass the same De Schutter checks.
     """
-    _COL_MIN_REEL_IN_80 = col_min_for_altitude_rad(_AERO, 80.0, _ROTOR.mass_kg)
-    _COL_MIN_REEL_IN_55 = col_min_for_altitude_rad(_AERO, 55.0, _ROTOR.mass_kg)
+    _aero = create_aero(_ROTOR)
+    _COL_MIN_REEL_IN_80 = col_min_for_altitude_rad(_aero, 80.0, _ROTOR.mass_kg)
 
     # Use the same operating point as the unit test (xi=80°, tension_in=55N)
     # so that the stack test is directly comparable to the unit test.
@@ -314,6 +316,7 @@ def test_stack_mirror_vs_baseline():
 
     # --- Stack-mirror: kinematic startup + mediator parameters ---
     stack = _run_pumping_cycle(
+        _aero,
         vel_at_start         = VEL0_STACK,              # 0.96 m/s — kinematic entry vel
         kinematic_seconds    = DAMP_T,                   # 45 s kinematic startup
         col_max_rad          = float(_D["col_max_rad"]),         # 0.10
@@ -331,6 +334,7 @@ def test_stack_mirror_vs_baseline():
 
     # --- Unit-baseline: exactly what test_deschutter_cycle does ---
     baseline = _run_pumping_cycle(
+        _aero,
         vel_at_start         = VEL0_JSON,       # ~0 m/s (steady-state)
         kinematic_seconds    = 0.0,             # no kinematic phase
         col_max_rad          = 0.10,            # COL_MAX_RAD from unit test
@@ -352,6 +356,7 @@ def test_stack_mirror_vs_baseline():
     # differences (kp, col_max, xi, etc.) are responsible.
     # If this scenario also fails, vel0 is the direct cause.
     vel0_isolation = _run_pumping_cycle(
+        _aero,
         vel_at_start         = VEL0_STACK,      # 0.96 m/s — the kinematic kick
         kinematic_seconds    = DAMP_T,           # include the kinematic phase
         col_max_rad          = 0.10,            # unit test params (not mediator)

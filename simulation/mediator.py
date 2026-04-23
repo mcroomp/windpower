@@ -40,7 +40,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics        import RigidBodyDynamics
 from sitl_interface  import SITLInterface
-from swashplate      import h3_inverse_mix, collective_to_pitch
+from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from aero            import SkewedWakeBEMJit
 from tether          import TetherModel
 from frames          import build_orb_frame, build_vel_aligned_frame
@@ -169,15 +169,7 @@ def run_mediator(args, trajectory=None):
     ev.write("startup", t_sim=0.0, run_id=_run_id, wind_ned=wind_world.tolist())
 
     # -- Instantiate subsystems -----------------------------------------------
-    # Mass 30 kg: the blade geometry (4 × 2 m, chord 0.15 m) was scaled from
-    # the De Schutter (2018) 40 kg reference design.  At the design tip-speed
-    # ratio (λ = 7, v_wind = 10 m/s → ω = 28 rad/s) the BEM model produces
-    # ~300 N of thrust at neutral collective — consistent with a ~30 kg rotor
-    # hovering near its natural autorotation equilibrium.  Using 5 kg (actual
-    # hardware mass) causes 6× over-thrust and makes the altitude controller
-    # saturate.  TODO: either retune the blade geometry to the actual mass, or
-    # verify the hardware mass is correct (5 kg seems very light for this blade
-    # area and tip speed).
+    # Mass comes from beaupoil_2026.yaml (currently 5.0 kg hardware mass).
     # I_spin=0: do NOT include rotor gyroscopic coupling in the orbital dynamics.
     # The lumped single-body model uses ArduPilot's cyclic commands directly as
     # tilting moments (no blade flapping model).  The 90° gyroscopic precession
@@ -478,19 +470,16 @@ def run_mediator(args, trajectory=None):
                 kd=float(cfg["cyclic_kd"]))
             tilt_lon        = swash["tilt_lon"]
             tilt_lat        = swash["tilt_lat"]
-            collective_norm = 0.0   # for telemetry logging
+            collective_out = 0.5   # for telemetry logging
         else:
             s1 = float(servos[0])
             s2 = float(servos[1])
             s3 = float(servos[2])
-            collective_norm, tilt_lon, tilt_lat = h3_inverse_mix(s1, s2, s3)
-            # Asymmetric decode: Lua encodes col_rad in [col_min, col_max] as
-            # thrust = (col_rad - col_min) / (col_max - col_min), ch3 = 1000 + thrust*1000.
-            # With H_COL_MIN=1000/H_COL_MAX=2000: servo_norm = thrust*2 - 1.
-            # Inverse: thrust = (collective_norm + 1) / 2.
-            _col_thrust = (collective_norm + 1.0) / 2.0
+            collective_out, roll_norm, pitch_norm = ardupilot_h3_120_inverse(s1, s2, s3)
+            tilt_lat = roll_norm    # ArduPilot roll  → lateral  cyclic
+            tilt_lon = pitch_norm   # ArduPilot pitch → longitudinal cyclic
             collective_rad = float(np.clip(
-                _col_min_rad + _col_thrust * (_col_max_rad - _col_min_rad),
+                collective_out_to_rad(collective_out, _col_min_rad, _col_max_rad),
                 _col_min_rad, _col_max_rad,
             ))
 
@@ -686,7 +675,7 @@ def run_mediator(args, trajectory=None):
                 "tether_my":       tether_moment[1],
                 "tether_mz":       tether_moment[2],
                 "collective_rad":  collective_rad,
-                "collective_norm": collective_norm,
+                "collective_norm": collective_out,
                 "tilt_lon":        tilt_lon,
                 "tilt_lat":        tilt_lat,
                 "tension_setpoint":           _traj_cmd.get("tension_setpoint", 0.0),
