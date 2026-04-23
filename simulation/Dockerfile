@@ -66,8 +66,8 @@ RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
 USER sim
 ENV USER=sim
 RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        git clone --recurse-submodules --branch sitl-json-rpm-feedback-4.6.3 \
-            https://github.com/mcroomp/ardupilot.git "$ARDUPILOT_PATH" \
+        git clone --recurse-submodules --branch Copter-4.6.3 \
+            https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
         && cd "$ARDUPILOT_PATH" \
         && unset VIRTUAL_ENV \
         && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -81,7 +81,7 @@ USER root
 
 # =============================================================================
 # 3b. ArduPilot post-build configuration
-#     Append SCR_ENABLE=1 and RPM sensor defaults to copter-heli.parm, then
+#     Append SCR_ENABLE=1 to copter-heli.parm, then
 #     boot ArduPilot once to flush those defaults into eeprom.bin.
 #
 #     WHY the boot is needed:
@@ -98,7 +98,7 @@ USER root
 #     backend needed) so this runs cleanly in a Docker build layer.
 # =============================================================================
 RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        printf '\n# RAWES: Lua scripting + RPM sensor on by default\nSCR_ENABLE 1\nRPM1_TYPE 10\nRPM1_MIN 0\n' \
+        printf '\n# RAWES: Lua scripting on by default\nSCR_ENABLE 1\n' \
             >> "$ARDUPILOT_PATH/Tools/autotest/default_params/copter-heli.parm" \
         && mkdir -p "$ARDUPILOT_PATH/scripts" \
         && cd "$ARDUPILOT_PATH" \
