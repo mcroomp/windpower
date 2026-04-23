@@ -34,14 +34,14 @@ EK3_VEL_I_GATE  50.0   # velocity innovation gate (sigma) — widened for extrem
 # real serial RTCM flow which SITL does not simulate — SITL heading injection only works
 # with plain UBLOX type 1 on both instances.
 GPS_AUTO_CONFIG  0     # disable GPS auto-config: required in SITL to preserve RELPOSNED stream
-GPS1_TYPE        1     # UBLOX: SITL heading injection (SIM_GPS2_HDG=1) needs plain UBLOX
-GPS2_TYPE        1     # UBLOX: SITL heading injection target (SIM_GPS2_HDG=1)
+GPS1_TYPE        17    # F9P RTK_BASE: sends RTCM corrections to GPS2
+GPS2_TYPE        18    # F9P RTK_ROVER: receives RTCM, outputs RELPOSNED heading
 GPS1_POS_X       0.25  # GPS1 lever arm: +25 cm along body X from hub centre
 GPS2_POS_X      -0.25  # GPS2 lever arm: -25 cm along body X from hub centre
-SIM_GPS2_ENABLE  1     # enable second SITL GPS instance
+SIM_GPS2_DISABLE 0     # enable second SITL GPS instance (param renamed from SIM_GPS2_ENABLE in 4.6)
 SIM_GPS2_TYPE    1     # GPS2 sim type = UBLOX (generates RELPOSNED when SIM_GPS2_HDG=1)
 SIM_GPS2_HDG     1     # generate RELPOSNED heading on GPS2 (the rover instance)
-SIM_GPS1_POS_X   0.25  # GPS1 simulated body-frame X offset: +25 cm
+SIM_GPS_POS_X    0.25  # GPS1 simulated body-frame X offset: +25 cm (renamed from SIM_GPS1_POS_X in 4.6)
 SIM_GPS2_POS_X  -0.25  # GPS2 simulated body-frame X offset: -25 cm
 
 COMPASS_USE     0      # disable compass: GB4008 motor swamps magnetometer on hardware
@@ -62,7 +62,7 @@ H_RSC_MODE      1      # 1=Passthrough: no main rotor motor (autorotation only).
 # ArduPilot's ATC_RAT_YAW PID drives SERVO4 directly via the DDFP CCW path.
 # CCW sign flip: CW hub drift -> negative yaw error -> negative PID -> positive throttle.
 # Lua writes no commands to the motor.
-H_TAIL_TYPE      0     # TEST: using servo mode to check if DDFP=4 causes boot crash
+H_TAIL_TYPE      4     # DDFP CCW: ATC_RAT_YAW PID output -> SERVO4 (sign-flipped)
 H_COL2YAW       0.0   # no collective-to-yaw feedforward
 SERVO4_MIN       800   # PWM off = 800 us (motor silent)
 SERVO4_MAX       2000  # PWM full = 2000 us

@@ -200,6 +200,41 @@ class ParamSetup:
 # Process helpers
 # ---------------------------------------------------------------------------
 
+EXPECTED_ARDUPILOT_VERSION = "4.6.3"
+
+
+def _check_ardupilot_version(sim_vehicle: Path) -> None:
+    """
+    Extract the version string embedded in the arducopter-heli binary and assert
+    it matches EXPECTED_ARDUPILOT_VERSION.  Uses `strings` on the binary — no
+    source file required and reflects exactly what will run.
+
+    Raises RuntimeError with a clear message if the version does not match or
+    cannot be determined.
+    """
+    import re
+    arducopter = sim_vehicle.parent.parent.parent / "build" / "sitl" / "bin" / "arducopter-heli"
+    if not arducopter.exists():
+        raise RuntimeError(
+            f"ArduPilot version check failed: binary not found at {arducopter}"
+        )
+    result = subprocess.run(
+        ["strings", str(arducopter)],
+        capture_output=True, text=True,
+    )
+    m = re.search(r"ArduCopter V([\d.]+)", result.stdout)
+    if not m:
+        raise RuntimeError(
+            f"ArduPilot version check failed: could not find version string in {arducopter}"
+        )
+    actual = m.group(1)
+    if actual != EXPECTED_ARDUPILOT_VERSION:
+        raise RuntimeError(
+            f"ArduPilot version mismatch: expected {EXPECTED_ARDUPILOT_VERSION}, "
+            f"got {actual}. Rebuild the Docker image or update EXPECTED_ARDUPILOT_VERSION."
+        )
+
+
 def _resolve_sim_vehicle() -> "Path | None":
     explicit = os.environ.get(SIM_VEHICLE_ENV)
     if explicit:
