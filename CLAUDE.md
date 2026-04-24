@@ -6,7 +6,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 
 **Current phase:** Phase 3, Milestone 3. `rawes.lua` rewritten to use **AltitudeHoldController** (`bz_altitude_hold`): elevation rate-limited toward `RAWES_ALT` target, gravity-compensated disk tilt, replaces orbit tracking. Pumping uses **TensionPI** inside rawes.lua (mirrors Python `controller.TensionPI`). Pre-GPS: gyro feedthrough only. GPS fusion uses dual GPS (EK3_SRC1_YAW=2, RELPOSNED heading): `_el_initialized` fires on first valid position fix. **Next: validate `test_lua_flight_steady` (stack) with new algorithm, then `test_pumping_cycle` (stack).**
 
-**Simtest status (17 simtests, 16 PASS):** All Python-only simtests pass. `test_steady_flight_lua` (3 tests) and `test_pump_cycle_lua` pass. `test_landing_lua` and `test_kinematic_transition` (pre-existing failures). `test_landing` (Python): pre-existing failure under investigation.
+**Simtest status (~16 simtests, ~13 PASS):** All Python-only simtests pass (9 in `-m simtest` run). `test_steady_flight_lua` (3 tests) and `test_pump_cycle_lua` pass. `test_landing_lua`, `test_kinematic_transition` (pre-existing failures). `test_landing` (Python): pre-existing failure under investigation. `test_gyroscopic_orbit.py` deleted (tested settled design decision, had backwards assertion).
 
 **Stack test status (parallel -n 8, 9 PASS):** test_arm_minimal, test_armon, test_gps_fusion_layers, test_gust_recovery, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle` and `test_landing_stack` (stack): in development.
 
@@ -72,11 +72,11 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **rawes.lua pumping (SCR_USER6=5):** phase driven entirely by `NAMED_VALUE_FLOAT("RAWES_SUB", N)` (0=hold, 1=reel_out, 2=transition, 3=reel_in, 4=transition_back). **Collective: TensionPI** (mirrors Python `TensionPI`; `KP_TEN=5e-4, KI_TEN=1e-4, COL_MAX_TEN=0.0`); setpoint `TEN_REEL_OUT=435 N` during hold/reel-out/transition-back, `TEN_REEL_IN=226 N` during transition/reel-in; integrator warm-starts at `COL_REEL_OUT / KI_TEN`; feedback via `RAWES_TEN`. **Cyclic: altitude hold;** planner sends `RAWES_ALT = IC_altitude` (constant — the Python simtest holds constant altitude, body_z tracks tether direction at that elevation). Planner sends `RAWES_TEN` each tick for gravity compensation. Phase state machine and winch timing owned by ground planner; `xi_reel_in_deg=None` (no disk tilt change, simtest only).
 - **Anchor in `LOCAL_POSITION_NED`:** `SCR_USER5 = -initial_state["pos"][2]` (NED Z negated). Anchor at `[0, 0, -pos0[2]]` in EKF frame.
 - **SCR_ENABLE bootstrap:** After EEPROM wipe, scripting only starts if `SCR_ENABLE=1` is already in EEPROM. `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).
-- **Python orbit-tracking (legacy, Python simtests only):** `orbit_tracked_body_z_eq` (azimuthal), `orbit_tracked_body_z_eq_3d` (3D Rodrigues), `OrbitTracker` (stateful 3D + slerp). Used by `test_steady_flight.py` and `test_generate_ic.py`. **Not used in rawes.lua** — Lua uses `bz_altitude_hold` (AltitudeHoldController logic).
-- **AltitudeHoldController** (`controller.py`): primary cyclic controller for altitude-holding flight (pumping cycle, landing approach). Converts a target altitude setpoint to `body_z_eq` with gravity compensation. `from_pos(ic.pos, slew_rate_rad_s)` → initialized at IC elevation. `update(pos, target_alt_m, tension_n, mass_kg, dt)` → rate-limited `body_z_eq`. Uses `compute_bz_altitude_hold` internally (stateless primitive: pos + target_el_rad + tension + mass → body_z_eq). Replaces OrbitTracker for scenarios where orbit tracking is not needed.
+- **Python orbit-tracking (legacy, Python simtests only):** `orbit_tracked_body_z_eq` (azimuthal), `orbit_tracked_body_z_eq_3d` (3D Rodrigues). Used only by Python-only simtests. **`OrbitTracker` class is removed** — replaced by `AltitudeHoldController` in all callers including `mediator.py`. **Not used in rawes.lua** — Lua uses `bz_altitude_hold` (AltitudeHoldController logic).
+- **AltitudeHoldController** (`controller.py`): primary cyclic controller for altitude-holding flight (pumping cycle, landing approach, mediator internal_controller path). Converts a target altitude setpoint to `body_z_eq` with gravity compensation. `from_pos(ic.pos, slew_rate_rad_s)` → initialized at IC elevation. `update(pos, target_alt_m, tension_n, mass_kg, dt)` → rate-limited `body_z_eq`. Uses `compute_bz_altitude_hold` internally (stateless primitive: pos + target_el_rad + tension + mass → body_z_eq).
 - **TensionPI runs at 400 Hz (physics loop); DeschutterPlanner runs at 10 Hz.** Planner provides `tension_setpoint` and `col_min_rad` to TensionPI at 10 Hz; TensionPI adjusts collective every physics step. `planner.step()` returns `col_min_rad` key for this purpose. Correct pattern: `if i % planner_every == 0: pump_cmd = planner.step(state, DT_PLANNER); tension_pi.setpoint = ...; tension_pi.coll_min = pump_cmd["col_min_rad"]`. Then every step: `col = tension_pi.update(tension_now, DT)`.
 - **IC generation targets 300 N tension.** `test_generate_ic.py::test_create_ic` runs 60 s warmup with TensionPI targeting 300 N (midway between TENSION_IN=226 N and TENSION_OUT=435 N). `coll_eq_rad` in the IC is the TensionPI-settled collective at that tension — not a hardcoded constant. TensionPI warm-starts at this collective in all simtests.
-- **PhysicsRunner** (`tests/unit/simtest_runner.py`): shared 400 Hz physics core. Owns `RigidBodyDynamics(**rotor.dynamics_kwargs())`, `create_aero`, `TetherModel`, `AcroController(use_servo=True)`, spin ODE. `step(dt, col, body_z_eq)` for Python-controlled tests (AcroController drives tilts); `step_raw(dt, col, tilt_lon, tilt_lat)` for Lua-controlled tests (caller drives tilts via RatePID+SwashplateServoModel). `for_warmup(rotor, pos, R0, rest_length, coll_eq_rad, omega_spin, wind)` classmethod for IC generation.
+- **PhysicsCore** (`simulation/physics_core.py`): shared 400 Hz physics integration used by both `mediator.py` and simtests. Owns `RigidBodyDynamics`, `create_aero`, `TetherModel`, `AcroController(use_servo=True)`, spin ODE, angular damping (`base_k_ang` + `k_yaw`), `KinematicStartup`, `lock_orientation`. `step(dt, col, tilt_lon, tilt_lat)` for raw-tilt callers (mediator/Lua path); `step_acro(dt, col, body_z_eq)` for AcroController path (Python simtests). **PhysicsRunner** (`tests/unit/simtest_runner.py`): thin testing wrapper around `PhysicsCore`. `step(dt, col, body_z_eq)` → `core.step_acro()`; `step_raw(dt, col, tilt_lon, tilt_lat)` → `core.step()`. `for_warmup(rotor, pos, R0, rest_length, coll_eq_rad, omega_spin, wind)` classmethod for IC generation.
 - **WinchNode** (`winch_node.py`): mediator calls `update_sensors(tension, wind_world)` (physics only); planner calls `get_telemetry()` + `receive_command()`. Wind seed from `Anemometer.measure()` at 3 m height.
 - **Vertical landing:** direct drop above anchor (not spiral). Descent rate controller replaces TensionPI. Sequence: reel-in only (no reel-out, `T_REEL_OUT=0`) via `DeschutterPlanner` swings hub from xi~8° to xi~48° in 30 s with no slack/spikes; hub reaches ~67 m altitude. `LandingPlanner` then descends from ~89 m tether to 2 m, final_drop. Validated in `test_landing.py` (22 s run, floor hit, descent slack=0).
 - **Gyroscopic phase NOT needed:** H_SW_PHANG=0. BASE_K_ANG=50 N·m·s/rad → τ≈0.08 s (damped before one orbit). `swashplate_phase_deg≠0` degrades orbit stability.
@@ -112,13 +112,16 @@ simulation/
 ├── frames.py            build_orb_frame(), T_ENU_NED (legacy external-data utility only)
 ├── sensor.py            PhysicalSensor — honest R_orb sensors, NED throughout
 ├── sitl_interface.py    ArduPilot SITL UDP binary protocol
+├── physics_core.py      PhysicsCore — shared 400 Hz physics (dynamics, aero, tether, spin ODE,
+│                        angular damping, KinematicStartup, lock_orientation). Used by both
+│                        mediator.py and PhysicsRunner (simtests).
 ├── controller.py        compute_swashplate_from_state, compute_rc_from_attitude, RatePID,
 │                        portable core (compute_bz_tether/slerp_body_z/compute_rate_cmd/
 │                        col_min_for_altitude_rad), orbit_tracked_body_z_eq,
-│                        orbit_tracked_body_z_eq_3d, OrbitTracker,
+│                        orbit_tracked_body_z_eq_3d,
 │                        compute_bz_altitude_hold, AltitudeHoldController,
 │                        TensionPI (collective PI at 400 Hz)
-├── mediator.py          400 Hz co-simulation loop (SITL <-> physics)
+├── mediator.py          SITL co-simulation loop — thin wrapper around PhysicsCore
 ├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw kinematics)
 ├── torque_model.py      Hub yaw model (kinematic + motor lag) — HubParams (rpm_scale, gear_ratio, motor_tau), HubState (psi, psi_dot, omega_motor), step(), equilibrium_throttle()
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
@@ -131,14 +134,21 @@ simulation/
 │   └── analyse_run.py   Post-run report: print_flight_report(log_dir, bucket_s=5.0),
 │                        compute_steady_metrics, validate_ekf_window; CLI: --bucket S
 ├── viz3d/
+│   ├── visualize_3d.py      **Default viz tool** — interactive 3D playback of any telemetry.csv.
+│   │                        Space=play/pause, +/-=speed, left/right=step, mouse=orbit/pan/zoom.
+│   │                        CLI: `python simulation/viz3d/visualize_3d.py simulation/logs/<test>/telemetry.csv`
+│   ├── scrub.py             Interactive frame scrubber (large slider, no auto-play required).
+│   │                        CLI: `python simulation/viz3d/scrub.py simulation/logs/<test>/telemetry.csv`
+│   ├── render_cycle.py      Off-screen render to MP4 or GIF (no display needed).
+│   │                        CLI: `python simulation/viz3d/render_cycle.py telemetry.csv [--out cycle.mp4] [--speed 2]`
+│   ├── telemetry.py         TelemetryFrame dataclass + CSVSource / LiveQueueSource protocol
 │   ├── visualize_torque.py  Torque telemetry 3-panel replay (psi_dot, motor throttle, PWM)
 │   └── torque_telemetry.py  TorqueTelemetryFrame dataclass for torque replay
 └── tests/
-    ├── unit/            Windows native, no Docker (~497 tests: 483 fast + 14 simtests)
-    │   ├── simtest_runner.py    PhysicsRunner — shared 400 Hz physics core for all Python
-    │   │                        simtests. step(dt, col, body_z_eq) for Python-controlled;
-    │   │                        step_raw(dt, col, tilt_lon, tilt_lat) for Lua-controlled.
-    │   │                        Owns: RigidBodyDynamics, aero, TetherModel, AcroController.
+    ├── unit/            Windows native, no Docker (~494 tests: 483 fast + ~11 simtests)
+    │   ├── simtest_runner.py    PhysicsRunner — thin wrapper around PhysicsCore for simtests.
+    │   │                        step(dt, col, body_z_eq) → core.step_acro() [Python-controlled];
+    │   │                        step_raw(dt, col, tilt_lon, tilt_lat) → core.step() [Lua-controlled].
     │   │                        Caller owns: DeschutterPlanner, TensionPI, WinchController.
     │   ├── simtest_ic.py        load_ic() — loads steady_state_starting.json
     │   └── simtest_log.py       SimtestLog, BadEventLog
@@ -165,7 +175,7 @@ simulation/
             └── ...
 ```
 
-**Data flow (400 Hz):** SITL servo PWM → swashplate mix → aero → tether → RK4 dynamics → sensor packet → SITL
+**Data flow (400 Hz):** SITL servo PWM → swashplate mix → **PhysicsCore** (aero + tether + RK4 + spin ODE) → sensor packet → SITL. `mediator.py` is a thin wrapper; `PhysicsCore` (`physics_core.py`) owns the integration loop.
 
 ---
 
@@ -233,6 +243,9 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 | Stack test (full suite) | `bash simulation/dev.sh test-stack -n 8` |
 | **Post-failure analysis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
 | Post-failure (coarser view) | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name> --bucket 10` |
+| **Visualize any test result** | `simulation/.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv` — **default tool for all simtest and stack test telemetry** |
+| Scrub to specific frame | `simulation/.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
+| Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py simulation/logs/<test_name>/telemetry.csv [--out cycle.mp4] [--speed 2]` |
 | **Regenerate `steady_state_starting.json`** | **`simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s`** — **CRITICAL: this is the ONLY test that writes the file.** `test_steady_flight.py` reads it but never writes it. Run after any aero model change. Used by all simtests and stack tests as initial conditions. |
 | Container start/stop | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |

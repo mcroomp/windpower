@@ -33,7 +33,7 @@ from swashplate    import SwashplateServoModel
 from winch         import WinchController
 from simtest_ic    import load_ic
 from simtest_log   import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner
+from simtest_runner import PhysicsRunner, feed_obs
 from tel           import make_tel
 from telemetry_csv import TelRow, write_csv
 from rawes_lua_harness import RawesLua
@@ -178,13 +178,8 @@ def _run_pumping() -> dict:
             cycle_idx = 0
 
         if i % LUA_EVERY == 0:
-            omega_body = hub_state["R"].T @ hub_state["omega"]
-
             sim._mock.millis_val = int(t_sim * 1000)
-            sim.R       = hub_state["R"]
-            sim.pos_ned = hub_state["pos"].tolist()
-            sim.vel_ned = hub_state["vel"].tolist()
-            sim.gyro    = omega_body.tolist()
+            feed_obs(sim, runner.observe())
             sim.send_named_float("RAWES_TEN", tension_now)
             sim.send_named_float("RAWES_ALT", _IC_ALT_M)
             sim._update_fn()

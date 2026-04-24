@@ -12,7 +12,7 @@ They cover the full simulation stack: physics, aero, controller maths, and the a
 # Fast unit tests (~483) — exclude slow simtests
 simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m "not simtest" -q
 
-# Slow simtests (14, 12 pass) — full physics loops
+# Slow simtests (~11, 9 pass) — full physics loops
 simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m simtest -q
 
 # Single test
@@ -51,7 +51,6 @@ Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
 | `test_skewed_wake_jit.py` | SkewedWakeBEMJit vs. reference (18 equivalence cases, atol=1e-10) |
 | `test_force_balance.py` | Static force balance at equilibrium |
 | `test_physical_validation.py` | Physical consistency checks (mass, inertia, geometry) |
-| `test_gyroscopic_orbit.py` | Gyroscopic coupling during orbital flight |
 | `test_swashplate.py` | H3-120 inverse mixing, cyclic blade pitch |
 | `test_tether_stability.py` | Tether elastic model — tension, slack, snap |
 | `test_rotor_definition.py` | RotorDefinition YAML loading and validation |
@@ -77,7 +76,6 @@ Supporting simtests (no Lua pair):
 
 | File | What it tests |
 |------|--------------|
-| `test_gyroscopic_orbit.py` | Gyroscopic coupling during orbital flight |
 | `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
 | `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
 
@@ -85,7 +83,7 @@ Supporting simtests (no Lua pair):
 
 | File | What it tests |
 |------|--------------|
-| `test_controller.py` | `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `RatePID`, `OrbitTracker`, `AltitudeHoldController`, `compute_bz_altitude_hold` |
+| `test_controller.py` | `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `RatePID`, `AltitudeHoldController`, `compute_bz_altitude_hold` |
 | `test_sensor.py` | `PhysicalSensor` output consistency (gyro, accel, body_to_earth) |
 | `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
 | `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
@@ -288,11 +286,13 @@ simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generat
 
 ---
 
-## PhysicsRunner — Shared 400 Hz Physics Core
+## PhysicsRunner — 400 Hz Physics Interface for Simtests
 
-`simtest_runner.py` provides `PhysicsRunner`, used by all Python simtests and Lua simtests.
-It owns `RigidBodyDynamics`, `create_aero`, `TetherModel`, `AcroController(use_servo=True)`,
-and the spin ODE. Callers own `DeschutterPlanner`, `TensionPI`, `WinchController`.
+`simtest_runner.py` provides `PhysicsRunner`, a thin wrapper around `PhysicsCore`
+(`simulation/physics_core.py`). `PhysicsCore` owns `RigidBodyDynamics`, `create_aero`,
+`TetherModel`, `AcroController(use_servo=True)`, the spin ODE, and angular damping.
+`PhysicsRunner` exposes `step()` / `step_raw()` for simtest callers.
+Callers own `DeschutterPlanner`, `TensionPI`, `WinchController`.
 
 ```python
 from simtest_runner import PhysicsRunner

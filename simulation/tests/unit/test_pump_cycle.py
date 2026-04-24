@@ -124,11 +124,12 @@ def _run_pumping_repeated() -> dict:
 
         # ── DeschutterPlanner at 10 Hz: provides setpoint + winch + altitude target ─
         if pump_cmd is None or i % planner_every == 0:
+            obs = runner.observe()
             state_pkt = {
-                "pos_ned":         hub_state["pos"],
-                "vel_ned":         hub_state["vel"],
-                "omega_spin":      runner.omega_spin,
-                "body_z":          hub_state["R"][:, 2],
+                "pos_ned":         obs.pos,
+                "vel_ned":         obs.vel,
+                "omega_spin":      obs.omega_spin,
+                "body_z":          obs.body_z,
                 "tension_n":       tension_now,
                 "tether_length_m": winch.tether_length_m,
             }

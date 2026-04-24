@@ -34,7 +34,7 @@ from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_i
 from landing_planner import LandingPlanner
 from simtest_ic      import load_ic
 from simtest_log     import SimtestLog, BadEventLog
-from simtest_runner  import PhysicsRunner
+from simtest_runner  import PhysicsRunner, feed_obs
 from tel             import make_tel
 from telemetry_csv   import TelRow, write_csv
 from rawes_lua_harness import RawesLua
@@ -171,15 +171,11 @@ def _run_landing() -> dict:
 
     # ── Phase 2: Lua landing ──────────────────────────────────────────────
     # Initialise Lua harness with the post-pumping hub state
-    hub_state = runner.hub_state
     sim = RawesLua(mode=MODE_LANDING)
     sim.armed        = True
     sim.healthy      = True
     sim.vehicle_mode = 1
-    sim.pos_ned      = hub_state["pos"].tolist()
-    sim.vel_ned      = hub_state["vel"].tolist()
-    sim.R            = hub_state["R"]
-    sim.gyro         = [0.0, 0.0, 0.0]
+    feed_obs(sim, runner.observe())
 
     landing_planner = LandingPlanner(
         initial_body_z=bz_slerp,
@@ -219,12 +215,8 @@ def _run_landing() -> dict:
 
         # ── Lua update at 100 Hz ──────────────────────────────────────────
         if i % LUA_EVERY == 0:
-            omega_body = hub_state["R"].T @ hub_state["omega"]
             sim._mock.millis_val = int(t_sim * 1000)
-            sim.R       = hub_state["R"]
-            sim.pos_ned = hub_state["pos"].tolist()
-            sim.vel_ned = hub_state["vel"].tolist()
-            sim.gyro    = omega_body.tolist()
+            feed_obs(sim, runner.observe())
             sim._update_fn()
 
             ch1 = sim.ch_out[1]

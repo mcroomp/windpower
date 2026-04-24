@@ -168,11 +168,12 @@ def _run_landing() -> dict:
 
         # ── Pumping phase: DeschutterPlanner controls everything ──────────────
         if outer_phase == "pumping":
+            obs = runner.observe()
             state_pkt = {
-                "pos_ned":         hub_state["pos"],
-                "vel_ned":         hub_state["vel"],
-                "omega_spin":      runner.omega_spin,
-                "body_z":          hub_state["R"][:, 2],
+                "pos_ned":         obs.pos,
+                "vel_ned":         obs.vel,
+                "omega_spin":      obs.omega_spin,
+                "body_z":          obs.body_z,
                 "tension_n":       tension_now,
                 "tether_length_m": winch.tether_length_m,
             }
@@ -198,10 +199,11 @@ def _run_landing() -> dict:
         # ── Landing phase: LandingPlanner controls everything ─────────────────
         else:
             assert landing_planner is not None
+            obs = runner.observe()
             land_state = {
-                "body_z":          hub_state["R"][:, 2],
-                "vel_ned":         hub_state["vel"],
-                "pos_ned":         hub_state["pos"],
+                "body_z":          obs.body_z,
+                "vel_ned":         obs.vel,
+                "pos_ned":         obs.pos,
                 "tether_length_m": winch.rest_length,
                 "tension_n":       tension_now,
             }

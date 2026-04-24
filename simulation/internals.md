@@ -53,26 +53,15 @@ Used by: `test_steady_flight.py`, `test_closed_loop_90s.py` — inner-loop physi
 
 Rotates `body_z_eq0` by the full 3D rotation that maps `tether_dir0` onto the current tether direction `cur_pos/|cur_pos|`. The setpoint tracks the altitude component of the tether direction — requires a rate-limited slerp downstream to be stable.
 
-Used by: `OrbitTracker` (below), `mediator.py`, pumping cycle tests.
+Used by: Python-only simtests where collective provides independent altitude control.
 
 **Why two functions exist:** In Python inner-loop tests without a separate altitude controller, the Z-preserving azimuthal algorithm is required. The 3D version is used where collective provides independent altitude control.
-
-### `OrbitTracker` — stateful orbit tracker (3D + slerp)
-
-```python
-OrbitTracker(body_z_eq0, tether_dir0, slew_rate_rad_s)
-orbit_tracker.update(pos, dt, bz_target=None) -> body_z_slerped
-```
-
-Encapsulates `orbit_tracked_body_z_eq_3d` + `slerp_body_z` with a rate-limited slerp. When `bz_target` is provided (e.g., planner attitude override during landing), slerps toward that target instead of the natural orbit setpoint.
-
-Used by: `mediator.py`, `test_gyroscopic_orbit.py`, `test_pumping_cycle.py`, `test_deschutter_cycle.py`, `test_deschutter_wind.py`, `test_kinematic_transition.py`, `test_pump_and_land.py`, `compare_rotors.py`.
 
 ### `compute_swashplate_from_state(hub_state, anchor_pos, ...)` — truth-state controller
 
 Takes hub NED state (pos, R, omega) directly. Computes attitude error as `cross(body_z_cur, body_z_eq)` and damps orbital rates. Returns `{collective_rad, tilt_lon, tilt_lat}` to feed directly into `aero.compute_forces()`. **No ArduPilot involved.**
 
-Used by: `test_closed_loop.py` (closed-loop physics validation), mediator internal controller.
+Used by: `test_closed_loop.py` (closed-loop physics validation).
 
 **Sign convention (SkewedWakeBEM):** SkewedWakeBEM's per-blade physics gives the opposite cyclic sign to RotorAero's empirical K_cyc formula. With SkewedWakeBEM, `tilt_lat > 0` produces `-My` (opposite to the old model). Controller projections negate accordingly:
 ```python
@@ -111,7 +100,7 @@ Anti-windup: conditional integration (stop integrating when saturated and error 
 
 | Parameter | Value | Location |
 |-----------|-------|----------|
-| Timestep | 2.5e-3 s (400 Hz) | `DT_TARGET` in mediator.py |
+| Timestep | 2.5e-3 s (400 Hz) | `DT_TARGET` in `mediator.py`; integration in `physics_core.py` |
 | Mass | 5.0 kg | `beaupoil_2026.yaml` |
 | Ixx = Iyy | 5.0 kg·m² | `beaupoil_2026.yaml` |
 | Izz | 10.0 kg·m² | `beaupoil_2026.yaml` |
@@ -144,7 +133,7 @@ by the dynamics ODE like any other orientation component. The sensor reads `R_hu
 to build the attitude packet sent to ArduPilot; no separate yaw state is needed.
 
 **GB4008 as tail rotor.** The GB4008 provides a torque around `disk_normal` on the electronics
-hub to counteract the aerodynamic spin-up torque from the rotor drag. In the mediator this is
+hub to counteract the aerodynamic spin-up torque from the rotor drag. In `PhysicsCore._integrate()` this is
 modelled as:
 
 ```python
@@ -276,7 +265,7 @@ Tether offset moment (`M = r_attach × F_tether`) is **enabled**: `axle_attachme
 
 ## Initial State and `steady_state_starting.json`
 
-The mediator's default initial state is the warmup-settled equilibrium from `test_steady_flight.py`, which runs the TensionPI warmup sequence with SkewedWakeBEM:
+The default initial state is the warmup-settled equilibrium produced by `test_generate_ic.py::test_create_ic`, which runs a 60 s TensionPI warmup sequence with SkewedWakeBEM:
 
 | Parameter | Value (SkewedWakeBEM) | Notes |
 |-----------|----------------------|-------|
@@ -291,9 +280,9 @@ The mediator's default initial state is the warmup-settled equilibrium from `tes
 **IMPORTANT:** The `vel` in this file is the near-zero physics velocity at settled state. The stack test does **NOT** use it as `vel0` for the kinematic startup ramp. `vel0 = [-0.257, 0.916, -0.093]` from `config.py` DEFAULTS is always used for the ramp — it provides a non-zero heading so the EKF gets a velocity-derived yaw from frame 0.
 
 **Workflow for regenerating:**
-1. `pytest simulation/tests/unit/test_steady_flight.py` — writes `simulation/steady_state_starting.json`
-2. Stack test reads this file and passes `pos0`, `body_z`, `omega_spin`, `rest_length` to mediator
-3. If absent, mediator uses the built-in config defaults
+1. `pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s` — writes `simulation/steady_state_starting.json`
+2. Stack test reads this file and passes `pos0`, `body_z`, `omega_spin`, `rest_length` to mediator via config
+3. `test_steady_flight.py` reads the file but never writes it
 
 ---
 
