@@ -531,6 +531,111 @@ def orbit_tracked_body_z_eq(
     return result / np.linalg.norm(result)
 
 
+def compute_bz_altitude_hold(
+    pos:           np.ndarray,
+    target_el_rad: float,
+    tension_n:     float,
+    mass_kg:       float,
+    G:             float = 9.81,
+) -> np.ndarray:
+    """
+    Compute body_z_eq for altitude-holding flight at a target elevation angle.
+
+    Points the disk at (target_elevation, current_azimuth) and adds a gravity-
+    compensation tilt so the thrust has an elevation-upward component equal to
+    mass_kg * G, exactly counteracting gravity's pull to lower elevation.
+
+    Stateless — no orbit reference, no history.  Works at any azimuth or
+    disturbance: a gust that changes azimuth is handled because azimuth is
+    read from pos each call; a gust that drops elevation generates an immediate
+    corrective tilt.
+
+    Parameters
+    ----------
+    pos           : hub NED position [m]
+    target_el_rad : target elevation angle above horizontal [rad]
+    tension_n     : current tether tension [N] — scales the gravity compensation
+    mass_kg       : hub mass [kg]
+    G             : gravitational acceleration [m/s^2]
+
+    Returns
+    -------
+    body_z_eq : NED unit vector — desired disk normal
+    """
+    az        = float(np.arctan2(pos[1], pos[0]))
+    cos_el    = float(np.cos(target_el_rad))
+    sin_el    = float(np.sin(target_el_rad))
+    cos_az    = float(np.cos(az))
+    sin_az    = float(np.sin(az))
+
+    tdir = np.array([cos_el * cos_az, cos_el * sin_az, -sin_el])
+    e_up = np.array([-sin_el * cos_az, -sin_el * sin_az, -cos_el])
+
+    # Gravity's tangential component in the elevation direction = mg·cos(el).
+    # At low elevation this is nearly mg; at 90° (vertical) it is zero.
+    g_tangential = mass_kg * G * float(np.cos(target_el_rad))
+    raw = tdir + (g_tangential / max(tension_n, 1.0)) * e_up
+    return raw / np.linalg.norm(raw)
+
+
+class AltitudeHoldController:
+    """
+    Elevation-holding cyclic controller.
+
+    Converts a target altitude setpoint into a body_z_eq for the swashplate.
+    The elevation angle is rate-limited so disk transitions are smooth.
+
+    Replaces OrbitTracker for altitude-holding flight — stateless geometry,
+    no orbit reference, no quaternion slerp.  The planner sets target_alt_m;
+    the controller handles how fast to get there.
+
+    Usage
+    -----
+        ctrl = AltitudeHoldController.from_pos(ic.pos, rotor.body_z_slew_rate_rad_s)
+        # each physics step:
+        body_z_eq = ctrl.update(pos, target_alt_m, tension_n, mass_kg, dt)
+        # then: compute_swashplate_from_state(state, omega, body_z_eq)
+    """
+
+    def __init__(self, initial_el_rad: float,
+                 slew_rate_rad_s: float = 0.40) -> None:
+        self._el       = float(initial_el_rad)
+        self._slew     = float(slew_rate_rad_s)
+
+    @classmethod
+    def from_pos(cls, pos: np.ndarray,
+                 slew_rate_rad_s: float = 0.40) -> "AltitudeHoldController":
+        """Initialise elevation from the hub's starting NED position."""
+        tlen = float(np.linalg.norm(pos))
+        el   = float(np.arcsin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 0.1)))))
+        return cls(el, slew_rate_rad_s)
+
+    @property
+    def elevation_rad(self) -> float:
+        return self._el
+
+    def update(self, pos: np.ndarray, target_alt_m: float,
+               tension_n: float, mass_kg: float, dt: float,
+               G: float = 9.81) -> np.ndarray:
+        """
+        Step the controller.  Returns body_z_eq (NED unit vector).
+
+        Parameters
+        ----------
+        pos          : current hub NED position [m]
+        target_alt_m : desired altitude above anchor [m]  (positive = up)
+        tension_n    : current tether tension [N]
+        mass_kg      : hub mass [kg]
+        dt           : timestep [s]
+        """
+        tlen       = float(np.linalg.norm(pos))
+        target_el  = float(np.arcsin(max(-1.0, min(1.0,
+                          target_alt_m / max(tlen, 0.1)))))
+        max_step   = self._slew * dt
+        self._el  += max(-max_step, min(max_step, target_el - self._el))
+        return compute_bz_altitude_hold(pos, self._el, tension_n, mass_kg, G)
+
+
 def orbit_tracked_body_z_eq_3d(
     cur_pos:     np.ndarray,
     tether_dir0: np.ndarray,

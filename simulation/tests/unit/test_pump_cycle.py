@@ -29,11 +29,10 @@ from dynamics        import RigidBodyDynamics
 from aero            import create_aero
 from tether          import TetherModel
 from controller      import (
-    OrbitTracker,
-    col_min_for_altitude_rad,
+    AltitudeHoldController,
     AcroController,
 )
-from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
+from planner         import DeschutterPlanner, WindEstimator
 from winch           import WinchController
 from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
@@ -69,12 +68,11 @@ BODY_Z_SLEW_RATE = _ROTOR.body_z_slew_rate_rad_s
 _xi_start_deg = 30.0
 T_TRANSITION  = math.radians(XI_REEL_IN_DEG - _xi_start_deg) / BODY_Z_SLEW_RATE + 1.5
 
-TENSION_OUT    = 200.0   # N
-TENSION_IN     =  55.0   # N
+TENSION_OUT    = 435.0   # N  (near equilibrium at IC elevation ~16 deg)
+TENSION_IN     = 226.0   # N  (achievable minimum at ~16 deg elevation with AltHoldCtrl)
 
 COL_MIN_RAD         = -0.28
 COL_MAX_RAD         =  0.10
-COL_MIN_REEL_IN_RAD = col_min_for_altitude_rad(create_aero(_ROTOR), XI_REEL_IN_DEG, _ROTOR.mass_kg)
 TENSION_SAFETY_N    = 496.0   # N (~80% break load)
 
 FLOOR_ALT_M  = 1.0
@@ -109,19 +107,17 @@ def _run_pumping_repeated() -> dict:
         wind_estimator      = WindEstimator(seed_wind_ned=WIND),
         col_min_rad              = COL_MIN_RAD,
         col_max_rad              = COL_MAX_RAD,
-        xi_reel_in_deg           = XI_REEL_IN_DEG,
-        col_min_reel_in_rad      = COL_MIN_REEL_IN_RAD,
+        xi_reel_in_deg           = None,
     )
 
-    orbit_tracker = OrbitTracker(_IC.R0[:, 2], _IC.pos / np.linalg.norm(_IC.pos), BODY_Z_SLEW_RATE)
-    acro          = AcroController.from_rotor(rd.default(), use_servo=True)
+    alt_ctrl = AltitudeHoldController.from_pos(_IC.pos, BODY_Z_SLEW_RATE)
+    acro     = AcroController.from_rotor(rd.default(), use_servo=True)
 
     hub_state   = dyn.state
     omega_spin  = _IC.omega_spin
     tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
     tension_now    = tether._last_info.get("tension", 0.0)
     collective_rad = _IC.coll_eq_rad
-    body_z_eq      = orbit_tracker.bz_slerp
 
     t_end_sim = N_CYCLES * T_CYCLE
     max_steps = int(t_end_sim / DT) + 1
@@ -161,12 +157,9 @@ def _run_pumping_repeated() -> dict:
             COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
         )
 
-        _aq = pump_cmd["attitude_q"]
-        _bz_target = (None if quat_is_identity(_aq)
-                      else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
-        body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
-
         pump_phase = pump_cmd["phase"]   # "reel-out" | "reel-in" | "hold"
+        body_z_eq = alt_ctrl.update(hub_state["pos"], pump_cmd["target_alt_m"],
+                                    tension_now, _ROTOR.mass_kg, DT)
         if pump_phase == "reel-out":
             cycle_energy_out[cycle_idx] += tension_now * V_REEL_OUT * DT
         elif pump_phase == "reel-in":
@@ -214,6 +207,9 @@ def _run_pumping_repeated() -> dict:
                 collective_rad, tilt_lon, tilt_lat, WIND,
                 body_z_eq=body_z_eq, phase=tel_phase_label,
                 aero_result=result, aero_obj=aero, tether_force=tf, tether_moment=tm,
+                tension_setpoint=pump_cmd.get("tension_setpoint", 0.0),
+                collective_from_tension_ctrl=pump_cmd.get("collective_rad", collective_rad),
+                target_alt_m=pump_cmd.get("target_alt_m", 0.0),
             ))
 
     # ── Results ───────────────────────────────────────────────────────────────

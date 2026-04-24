@@ -59,7 +59,7 @@ COLUMNS: list[str] = [
     "tether_mx", "tether_my", "tether_mz",  # tether moment NED [N·m]
     "collective_rad", "collective_norm",
     "tilt_lon", "tilt_lat",
-    "tension_setpoint", "collective_from_tension_ctrl",
+    "tension_setpoint", "collective_from_tension_ctrl", "target_alt_m",
     "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
     "aero_Q_drag", "aero_Q_drive",
     "F_x", "F_y", "F_z",                # net aero force NED [N]
@@ -145,6 +145,7 @@ class TelRow:
     tilt_lat:        float = 0.0
     tension_setpoint:             float = 0.0
     collective_from_tension_ctrl: float = 0.0
+    target_alt_m:                 float = 0.0
 
     aero_T:         float = 0.0
     aero_v_axial:   float = 0.0
@@ -347,7 +348,9 @@ class TelRow:
             collective_rad      = float(d.get("collective_rad",   0.0)),
             tilt_lon            = float(d.get("tilt_lon",         0.0)),
             tilt_lat            = float(d.get("tilt_lat",         0.0)),
-            tension_setpoint    = float(d.get("tension_setpoint", 0.0)),
+            tension_setpoint             = float(d.get("tension_setpoint",             0.0)),
+            collective_from_tension_ctrl = float(d.get("collective_from_tension_ctrl", 0.0)),
+            target_alt_m                 = float(d.get("target_alt_m",                 0.0)),
             aero_T              = float(d.get("aero_T",           0.0)),
             aero_v_axial        = float(d.get("aero_v_axial",     0.0)),
             aero_v_inplane      = float(d.get("aero_v_inplane",   0.0)),

@@ -40,12 +40,13 @@ class IC:
     pos:           np.ndarray   # NED hub position [m]
     vel:           np.ndarray   # NED hub velocity [m/s]
     R0:            np.ndarray   # body-to-NED rotation (3x3); body_z = R0[:, 2]
+    R0_kinematic:  np.ndarray   # R0 with body_x North-aligned for GPS/RELPOSNED lock (pure spin around body_z)
     R0_orbit:      np.ndarray   # R0 pre-tilted to cancel gravity_perp at IC; body_z = R0_orbit[:, 2]
     orbit_bz:      np.ndarray   # disk normal for orbit tracking start (= R0_orbit[:, 2])
     omega_spin:    float        # equilibrium rotor spin [rad/s]
     rest_length:   float        # tether rest length [m]
-    coll_eq_rad:   float        # equilibrium collective [rad] (= stack_coll_eq = -0.18 rad)
-    stack_coll_eq: float        # same as coll_eq_rad; kept for clarity in stack-test configs
+    coll_eq_rad:   float        # warmup collective [rad]; IC is settled at this value (-0.18 rad)
+    stack_coll_eq: float        # Lua col_cruise [rad]; equals coll_eq_rad (-0.18 rad)
     home_z_ned:    float        # GPS home NED Z [m] — 0 = ground level
 
 
@@ -65,8 +66,12 @@ def load_ic() -> IC:
 
     R0 = np.array(d["R0"], dtype=float).reshape(3, 3)
 
-    # R0_orbit and orbit_bz were added by test_generate_ic.py; fall back to R0
-    # when loading an older JSON written by test_steady_flight.py.
+    # Fall back gracefully when loading older JSON lacking these fields.
+    R0_kinematic = (
+        np.array(d["R0_kinematic"], dtype=float).reshape(3, 3)
+        if "R0_kinematic" in d
+        else R0.copy()
+    )
     R0_orbit = (
         np.array(d["R0_orbit"], dtype=float).reshape(3, 3)
         if "R0_orbit" in d
@@ -84,6 +89,7 @@ def load_ic() -> IC:
         pos           = np.array(d["pos"], dtype=float),
         vel           = np.array(d["vel"], dtype=float),
         R0            = R0,
+        R0_kinematic  = R0_kinematic,
         R0_orbit      = R0_orbit,
         orbit_bz      = orbit_bz,
         omega_spin    = float(d["omega_spin"]),

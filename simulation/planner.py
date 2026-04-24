@@ -645,9 +645,11 @@ class DeschutterPlanner(TrajectoryPlanner):
         self._col_min_reel_in_rad = float(col_min_reel_in_rad) if col_min_reel_in_rad is not None else float(col_min_rad)
         self._col_max_rad   = float(col_max_rad)
         self._xi_reel_in_deg: "float | None" = float(xi_reel_in_deg) if xi_reel_in_deg is not None else None
+        self._xi_reel_in_rad: "float | None" = math.radians(float(xi_reel_in_deg)) if xi_reel_in_deg is not None else None
         self._wind_estimator = wind_estimator
         self._t_hold_s       = float(max(t_hold_s, 0.0))  # hold phase before first reel-out
         self._t_free         = 0.0   # internal elapsed free-flight time [s]
+        self._initial_alt_m: "float | None" = None  # captured from first state packet
 
         # Tension PI — owned by the planner (raws_mode.md §3.2)
         # Single controller whose setpoint changes at the phase boundary so the
@@ -723,17 +725,24 @@ class DeschutterPlanner(TrajectoryPlanner):
             (collective_rad - self._col_min_rad) / col_range if col_range > 1e-9 else 0.5
         )))
         self._prev_collective = collective_rad
+        pos_ned = np.asarray(state["pos_ned"], dtype=float)
         return {
-            "attitude_q":     Q_IDENTITY.copy(),
-            "thrust":         thrust,
-            "collective_rad": collective_rad,
-            "winch_speed_ms": 0.0,
-            "phase":          "hold",
+            "attitude_q":       Q_IDENTITY.copy(),
+            "thrust":           thrust,
+            "collective_rad":   collective_rad,
+            "winch_speed_ms":   0.0,
+            "phase":            "hold",
+            "target_alt_m":     self._initial_alt_m if self._initial_alt_m is not None else float(-pos_ned[2]),
+            "tension_setpoint": self._tension_ctrl.setpoint,
         }
 
     # ------------------------------------------------------------------
     def step(self, state: dict, dt: float, **kwargs) -> dict:
         self._t_free += dt
+
+        pos_ned = np.asarray(state["pos_ned"], dtype=float)
+        if self._initial_alt_m is None:
+            self._initial_alt_m = float(-pos_ned[2])
 
         # Initial hold phase: orbit-track without winch movement, letting the hub
         # settle into its natural orbit before the pumping cycle starts.
@@ -765,7 +774,7 @@ class DeschutterPlanner(TrajectoryPlanner):
         self._wind_step_count += 1
         if self._wind_step_count >= self._wind_update_every:
             self._wind_step_count = 0
-            hub_alt  = -float(np.asarray(state["pos_ned"])[2])
+            hub_alt  = float(-pos_ned[2])
             wind_dir = self._wind_estimator.wind_dir_at(hub_alt)
             v_wind   = self._wind_estimator.wind_speed_at(hub_alt) or self._wind_estimator.v_inplane_ms
             new_wind_vec = wind_dir * v_wind if (v_wind is not None and v_wind > 0.5) else wind_dir
@@ -886,10 +895,17 @@ class DeschutterPlanner(TrajectoryPlanner):
 
         self._prev_collective = collective_rad
 
+        # target_alt_m: always hold IC altitude.
+        # Body_z tilt for reel-in tension reduction is handled via attitude_q (xi setpoint),
+        # not by commanding an unreachable altitude — hub cannot climb from 25m to 109m.
+        target_alt_m = self._initial_alt_m
+
         return {
-            "attitude_q":     attitude_q,
-            "thrust":         thrust,
-            "collective_rad": collective_rad,  # raw collective [rad] for direct use by internal controller
-            "winch_speed_ms": winch_speed,
-            "phase":          "reel-out" if phase_out else "reel-in",
+            "attitude_q":       attitude_q,
+            "thrust":           thrust,
+            "collective_rad":   collective_rad,
+            "winch_speed_ms":   winch_speed,
+            "phase":            "reel-out" if phase_out else "reel-in",
+            "target_alt_m":     target_alt_m,
+            "tension_setpoint": self._tension_ctrl.setpoint,
         }
