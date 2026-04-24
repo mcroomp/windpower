@@ -156,11 +156,7 @@ def test_run_mediator_uses_real_sitl_interface_with_fake_dynamics(monkeypatch):
 
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: real_sitl)
-    class _FakeSkewedWakeBEMJit:
-        @classmethod
-        def from_definition(cls, defn):
-            return fake_aero
-    monkeypatch.setattr(mediator, "SkewedWakeBEMJit", _FakeSkewedWakeBEMJit)
+    monkeypatch.setattr(mediator, "create_aero", lambda *a, **kw: fake_aero)
     monkeypatch.setattr(mediator, "make_sensor",       lambda *a, **kw: fake_sensor)
 
     # After one packet is processed the mediator blocks on recv_servos() again.

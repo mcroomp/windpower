@@ -26,16 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import rotor_definition as rd
-from dynamics        import RigidBodyDynamics
 from aero            import create_aero
-from tether          import TetherModel
-from controller      import RatePID, OrbitTracker, col_min_for_altitude_rad, AcroController
+from controller      import RatePID, AltitudeHoldController, compute_bz_altitude_hold, slerp_body_z, col_min_for_altitude_rad, AcroController
 from swashplate      import SwashplateServoModel
 from winch           import WinchController
 from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from landing_planner import LandingPlanner
 from simtest_ic      import load_ic
 from simtest_log     import SimtestLog, BadEventLog
+from simtest_runner  import PhysicsRunner
 from tel             import make_tel
 from telemetry_csv   import TelRow, write_csv
 from rawes_lua_harness import RawesLua
@@ -46,20 +45,13 @@ _ROTOR = rd.default()
 _log   = SimtestLog(__file__)
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-DT            = 1.0 / 400.0
-LUA_PERIOD    = 0.010
-LUA_EVERY     = round(LUA_PERIOD / DT)
-T_AERO_OFFSET = 45.0
+DT         = 1.0 / 400.0
+LUA_PERIOD = 0.010
+LUA_EVERY  = round(LUA_PERIOD / DT)
 
 # ── Environment ───────────────────────────────────────────────────────────────
-ANCHOR = np.zeros(3)
-ANCHOR.flags.writeable = False
-WIND   = np.array([0.0, 10.0, 0.0])   # 10 m/s East (NED Y)
+WIND = np.array([0.0, 10.0, 0.0])   # 10 m/s East (NED Y)
 WIND.flags.writeable = False
-
-# ── Spin ──────────────────────────────────────────────────────────────────────
-I_SPIN_KGMS2   = 10.0
-OMEGA_SPIN_MIN = 0.5
 
 # ── Starting state ────────────────────────────────────────────────────────────
 R0_INIT       = _IC.R0
@@ -120,26 +112,14 @@ def _run_landing() -> dict:
       LandingPlanner tension-PI winch (ground station).
       rawes.lua VZ PI collective + cyclic (flight controller).
     """
-    # ── Physics objects ───────────────────────────────────────────────────
-    dyn    = RigidBodyDynamics(
-        mass=_ROTOR.mass_kg, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
-        pos0=POS_INIT.tolist(), vel0=VEL_INIT.tolist(),
-        R0=R0_INIT, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
-    )
-    aero   = create_aero(_ROTOR)
-    tether = TetherModel(anchor_ned=ANCHOR, rest_length=LAND_TETHER_M,
-                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
-    winch  = WinchController(rest_length=LAND_TETHER_M,
-                              tension_safety_n=TENSION_SAFETY_N,
-                              min_length=MIN_TETHER_M)
+    # ── Physics runner (shared across both phases) ────────────────────────
+    runner  = PhysicsRunner(_ROTOR, _IC, WIND)
+    winch   = WinchController(rest_length=LAND_TETHER_M,
+                               tension_safety_n=TENSION_SAFETY_N,
+                               min_length=MIN_TETHER_M)
     pid_lon = RatePID(kp=KP_INNER)
     pid_lat = RatePID(kp=KP_INNER)
     servo   = SwashplateServoModel.from_rotor(_ROTOR)
-
-    omega_spin  = OMEGA_SPIN_IC
-    hub_state   = dyn.state
-    tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-    tension_now = tether._last_info.get("tension", 0.0)
 
     # ── Phase 1: pumping reel-in (Python only) ────────────────────────────
     trajectory    = DeschutterPlanner(
@@ -151,22 +131,24 @@ def _run_landing() -> dict:
         xi_reel_in_deg=XI_REEL_IN_DEG,
         col_min_reel_in_rad=COL_MIN_REEL_IN_RAD,
     )
-    orbit_tracker = OrbitTracker(_IC.R0[:, 2], _IC.pos / np.linalg.norm(_IC.pos),
-                                 BODY_Z_SLEW_RATE)
-    acro          = AcroController.from_rotor(_ROTOR, use_servo=True)
+    alt_ctrl       = AltitudeHoldController.from_pos(_IC.pos, BODY_Z_SLEW_RATE)
+    bz_slerp       = _IC.R0[:, 2].copy()
+    target_alt_m   = float(-_IC.pos[2])
+    acro           = AcroController.from_rotor(_ROTOR, use_servo=True)
     collective_rad = _IC.coll_eq_rad
+    tension_now_p1 = 0.0
 
     pump_steps = int(T_PUMPING_END / DT)
     for i in range(pump_steps):
-        t_sim = i * DT
+        t_sim     = i * DT
+        hub_state = runner.hub_state
         state_pkt = {
             "pos_ned": hub_state["pos"], "vel_ned": hub_state["vel"],
-            "omega_spin": omega_spin, "body_z": hub_state["R"][:, 2],
-            "tension_n": tension_now, "tether_length_m": winch.tether_length_m,
+            "omega_spin": runner.omega_spin, "body_z": hub_state["R"][:, 2],
+            "tension_n": runner.tension_now, "tether_length_m": winch.tether_length_m,
         }
         pump_cmd = trajectory.step(state_pkt, DT)
-        winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
-        tether.rest_length = winch.rest_length
+        winch.step(pump_cmd["winch_speed_ms"], runner.tension_now, DT)
 
         collective_rad = acro.slew_collective(
             COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
@@ -174,25 +156,22 @@ def _run_landing() -> dict:
         _aq = pump_cmd["attitude_q"]
         _bz_target = (None if quat_is_identity(_aq)
                       else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
-        body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
+        if _bz_target is not None:
+            bz_slerp = slerp_body_z(bz_slerp, np.asarray(_bz_target, dtype=float),
+                                    BODY_Z_SLEW_RATE, DT)
+        else:
+            bz_slerp = alt_ctrl.update(hub_state["pos"], target_alt_m, tension_now_p1,
+                                       _ROTOR.mass_kg, DT)
+        tension_now_p1 = runner.tension_now
+        body_z_eq  = bz_slerp
         tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT,
                                          swashplate_phase_deg=0.0)
-        result = aero.compute_forces(
-            collective_rad=collective_rad,
-            tilt_lon=tilt_lon, tilt_lat=tilt_lat,
-            R_hub=hub_state["R"], v_hub_world=hub_state["vel"],
-            omega_rotor=omega_spin, wind_world=WIND,
-            t=T_AERO_OFFSET + t_sim,
-        )
-        tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        tension_now = tether._last_info.get("tension", 0.0)
-        M_orbital = result.M_orbital + tm - 50.0 * hub_state["omega"]
-        omega_spin = max(OMEGA_SPIN_MIN,
-                         omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
-        hub_state = dyn.step(result.F_world + tf, M_orbital, DT, omega_spin=omega_spin)
+        runner.step_raw(DT, collective_rad, tilt_lon, tilt_lat,
+                        rest_length=winch.rest_length)
 
     # ── Phase 2: Lua landing ──────────────────────────────────────────────
     # Initialise Lua harness with the post-pumping hub state
+    hub_state = runner.hub_state
     sim = RawesLua(mode=MODE_LANDING)
     sim.armed        = True
     sim.healthy      = True
@@ -203,11 +182,11 @@ def _run_landing() -> dict:
     sim.gyro         = [0.0, 0.0, 0.0]
 
     landing_planner = LandingPlanner(
-        initial_body_z=orbit_tracker.bz_slerp,
+        initial_body_z=bz_slerp,
         v_land=V_REEL,
         col_cruise=0.079,
         min_tether_m=MIN_TETHER_M,
-        anchor_ned=ANCHOR,
+        anchor_ned=np.zeros(3),
     )
 
     col_rad  = collective_rad   # continue from pumping collective
@@ -235,7 +214,7 @@ def _run_landing() -> dict:
     t_sim    = t_offset
     for i in range(max_steps):
         t_sim     = t_offset + i * DT
-        hub_state = dyn.state
+        hub_state = runner.hub_state
         altitude  = -hub_state["pos"][2]
 
         # ── Lua update at 100 Hz ──────────────────────────────────────────
@@ -259,11 +238,11 @@ def _run_landing() -> dict:
         land_cmd = landing_planner.step(
             {"pos_ned": hub_state["pos"], "vel_ned": hub_state["vel"],
              "body_z": hub_state["R"][:, 2],
-             "tension_n": tension_now, "tether_length_m": winch.rest_length},
+             "tension_n": runner.tension_now,
+             "tether_length_m": winch.rest_length},
             DT,
         )
-        winch.step(land_cmd["winch_speed_ms"], tension_now, DT)
-        tether.rest_length = winch.rest_length
+        winch.step(land_cmd["winch_speed_ms"], runner.tension_now, DT)
 
         # Send final_drop substate to Lua when planner transitions
         if not floor_hit and t_final_start is None and land_cmd["phase"] == "final_drop":
@@ -284,51 +263,36 @@ def _run_landing() -> dict:
             if t_final_start is not None and (t_sim - t_final_start) >= T_FINAL_DROP_MAX:
                 break
 
-        # ── Inner ACRO rate PID at 400 Hz ────────────────────────────────
+        # ── Inner ACRO rate PID + physics step ───────────────────────────
         omega_body    = hub_state["R"].T @ hub_state["omega"]
         omega_body[2] = 0.0
         tilt_lon_cmd  =  pid_lon.update(roll_sp,  omega_body[0], DT)
         tilt_lat_cmd  = -pid_lat.update(pitch_sp, omega_body[1], DT)
         tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
 
-        # ── Aerodynamics ──────────────────────────────────────────────────
-        result = aero.compute_forces(
-            collective_rad=col_rad,
-            tilt_lon=tilt_lon, tilt_lat=tilt_lat,
-            R_hub=hub_state["R"], v_hub_world=hub_state["vel"],
-            omega_rotor=omega_spin, wind_world=WIND,
-            t=T_AERO_OFFSET + t_sim,
-        )
-
-        # ── Tether ────────────────────────────────────────────────────────
-        tf, tm      = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        tension_now = tether._last_info.get("tension", 0.0)
-        F_net       = result.F_world + tf
-        M_orbital   = result.M_orbital + tm
+        runner.step_raw(DT, col_rad, tilt_lon, tilt_lat,
+                        rest_length=winch.rest_length)
 
         # ── Bad-event tracking ────────────────────────────────────────────
         phase_str = "final_drop" if final_drop else "descent"
-        if tether._last_info.get("slack", False):
+        if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, phase_str, altitude)
-        if tension_now > BREAK_LOAD_N:
-            events.record("tension_spike", t_sim, phase_str, altitude, tension=tension_now)
+        if runner.tension_now > BREAK_LOAD_N:
+            events.record("tension_spike", t_sim, phase_str, altitude,
+                          tension=runner.tension_now)
         if not final_drop:
-            events.check_floor(hub_state["pos"][2], t_sim, phase_str, FLOOR_ALT_M)
-
-        # ── Spin & dynamics ───────────────────────────────────────────────
-        omega_spin = max(OMEGA_SPIN_MIN,
-                         omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
-        hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
+            events.check_floor(runner.hub_state["pos"][2], t_sim, phase_str, FLOOR_ALT_M)
 
         # ── Per-phase metrics (descent only) ─────────────────────────────
         if not final_drop:
-            tensions.append(tension_now)
+            tensions.append(runner.tension_now)
             altitudes.append(altitude)
 
         if i % tel_every == 0:
             phase_str = "final_drop" if final_drop else "descent"
             telemetry.append(make_tel(
-                t_sim, hub_state, omega_spin, tether, tension_now,
+                t_sim, runner.hub_state, runner.omega_spin,
+                runner.tether, runner.tension_now,
                 col_rad, tilt_lon, tilt_lat, WIND,
                 body_z_eq=None, phase=phase_str,
             ))

@@ -1,68 +1,73 @@
 --[[
 rawes_test_surface.lua  --  Unit-test surface for rawes.lua.
 
-This file is NOT loaded on hardware.  The Python test harness splices its
-content in place of the  -- @@UNIT_TEST_HOOK  comment in rawes.lua before
-executing the script.  Because the splice happens inside the anonymous
-function wrapper the harness uses to load rawes.lua, every local defined
-in rawes.lua is in scope here -- constants, helpers, and the private logic
-extracted into testable wrappers below.
-
-After load, the global _rawes_fns table gives tests direct access to the
-internal functions without polluting the global namespace during normal flight.
-
-Multi-value returns are wrapped in tables so lupa sees a single Lua value.
+Spliced in place of  -- @@UNIT_TEST_HOOK  before the script executes.
+All rawes.lua module-level locals are in scope here.
 --]]
 
 _rawes_fns = {
-    -- ── Constants ────────────────────────────────────────────────────────
+    -- ── Constants ────────────────────────────────────────────────────────────
 
-    ACRO_RP_RATE_DEG       = ACRO_RP_RATE_DEG,
-    BASE_PERIOD_MS         = BASE_PERIOD_MS,
-    FLIGHT_PERIOD_MS       = FLIGHT_PERIOD_MS,
-    COL_CRUISE_FLIGHT_RAD  = COL_CRUISE_FLIGHT_RAD,
-    COL_CRUISE_LAND_RAD    = COL_CRUISE_LAND_RAD,
-    COL_MIN_RAD            = COL_MIN_RAD,
-    COL_MAX_RAD            = COL_MAX_RAD,
-    COL_SLEW_MAX           = COL_SLEW_MAX,
-    MIN_TETHER_M           = MIN_TETHER_M,
-    T_TRANSITION           = T_TRANSITION,
-    XI_REEL_IN_DEG         = XI_REEL_IN_DEG,
-    KP_VZ                  = KP_VZ,
-    VZ_LAND_SP             = VZ_LAND_SP,
+    ACRO_RP_RATE_DEG        = ACRO_RP_RATE_DEG,
+    BASE_PERIOD_MS          = BASE_PERIOD_MS,
+    FLIGHT_PERIOD_MS        = FLIGHT_PERIOD_MS,
+    COL_CRUISE_FLIGHT_RAD   = COL_CRUISE_FLIGHT_RAD,
+    COL_MIN_RAD             = COL_MIN_RAD,
+    COL_MAX_RAD             = COL_MAX_RAD,
+    COL_SLEW_MAX            = COL_SLEW_MAX,
+    COL_REEL_OUT            = COL_REEL_OUT,
+    T_PUMP_TRANSITION       = T_PUMP_TRANSITION,
+    MIN_TETHER_M            = MIN_TETHER_M,
+    MASS_KG                 = MASS_KG,
+    G_ACCEL                 = G_ACCEL,
+    KP_VZ                   = KP_VZ,
+    KI_VZ                   = KI_VZ,
+    KP_TEN                  = KP_TEN,
+    KI_TEN                  = KI_TEN,
+    COL_MAX_TEN             = COL_MAX_TEN,
+    TEN_REEL_OUT            = TEN_REEL_OUT,
+    TEN_REEL_IN             = TEN_REEL_IN,
 
-    -- ── Pure math / geometry ─────────────────────────────────────────────
+    -- ── Pure geometry ────────────────────────────────────────────────────────
 
-    rodrigues              = rodrigues,
-    orbit_track_azimuthal  = orbit_track_azimuthal,
+    bz_altitude_hold  = bz_altitude_hold,
 
-    -- ── Vector3f helpers ────────────────────────────────────────────────
+    -- ── Vector3f helpers ─────────────────────────────────────────────────────
 
-    v3_copy      = v3_copy,
-    v3_normalize = v3_normalize,
-    v3_body_z    = v3_body_z,
+    v3_copy    = v3_copy,
+    v3_body_z  = v3_body_z,
 
-    -- ── Param / anchor ───────────────────────────────────────────────────
+    -- ── Param / anchor ───────────────────────────────────────────────────────
 
     p          = p,
     anchor_ned = anchor_ned,
 
-    -- ── Subsystem entry points ───────────────────────────────────────────
+    -- ── Cyclic helpers ───────────────────────────────────────────────────────
 
-    run_flight   = run_flight,
-    run_armon    = run_armon,
+    cyclic_error_body = cyclic_error_body,
+    output_rate_limit = output_rate_limit,
+    rate_to_pwm       = rate_to_pwm,
 
-    -- ── RAWES_ARM state accessors (for test_armon_lua.py) ─────────────
+    -- ── Subsystem entry points ───────────────────────────────────────────────
+
+    run_flight = run_flight,
+    run_armon  = run_armon,
+
+    -- ── RAWES_ARM state accessors ─────────────────────────────────────────────
+
     armon_state       = function() return _armon_state end,
     armon_deadline_ms = function() return _armon_deadline_ms end,
     armon_armed_sent  = function() return _armon_armed_sent end,
     armon_secs        = function() return _armon_secs end,
 
-    -- ── Cyclic / slerp helpers (defined in rawes.lua; referenced directly) ──
+    -- ── Altitude hold state accessors ─────────────────────────────────────────
 
-    slerp_step        = slerp_step,
-    cyclic_error_body = cyclic_error_body,
-    cyclic_rates      = cyclic_rates,
-    output_rate_limit = output_rate_limit,
-    rate_to_pwm       = rate_to_pwm,
+    el_initialized = function() return _el_initialized end,
+    el_rad         = function() return _el_rad end,
+    target_alt     = function() return _target_alt end,
+    tension_n      = function() return _tension_n end,
+
+    -- ── TensionPI state accessors ─────────────────────────────────────────────
+
+    col_i_ten      = function() return _col_i_ten end,
 }

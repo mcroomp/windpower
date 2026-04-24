@@ -37,7 +37,11 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 `simulation/controller.py` provides several functions and classes with different use cases:
 
-### Orbit tracking — two algorithms, two purposes
+### Orbit tracking — legacy Python-only (not used in rawes.lua)
+
+> **Note:** `rawes.lua` does NOT use any of these orbit-tracking functions. The Lua
+> controller uses `bz_altitude_hold` (AltitudeHoldController) instead — see CLAUDE.md.
+> The functions below are used by Python-only simtests and the internal mediator controller.
 
 **`orbit_tracked_body_z_eq(cur_pos, tether_dir0, body_z_eq0)`** — azimuthal (Z-preserving)
 
@@ -45,13 +49,13 @@ Rotates `body_z_eq0` azimuthally to track the hub's horizontal orbit. The Z-comp
 
 Used by: `test_steady_flight.py`, `test_closed_loop_90s.py` — inner-loop physics tests where collective is not separately controlled. The Z-preserving property prevents positive altitude feedback (hub sinks → setpoint stays at same elevation → no extra tilt → stable).
 
-**`orbit_tracked_body_z_eq_3d(cur_pos, tether_dir0, body_z_eq0)`** — 3D Rodrigues (Lua-equivalent)
+**`orbit_tracked_body_z_eq_3d(cur_pos, tether_dir0, body_z_eq0)`** — 3D Rodrigues
 
-Rotates `body_z_eq0` by the full 3D rotation that maps `tether_dir0` onto the current tether direction `cur_pos/|cur_pos|`. Matches `rawes.lua`'s `orbit_track_3d()` exactly. The setpoint tracks the altitude component of the tether direction — requires a rate-limited slerp downstream to be stable.
+Rotates `body_z_eq0` by the full 3D rotation that maps `tether_dir0` onto the current tether direction `cur_pos/|cur_pos|`. The setpoint tracks the altitude component of the tether direction — requires a rate-limited slerp downstream to be stable.
 
 Used by: `OrbitTracker` (below), `mediator.py`, pumping cycle tests.
 
-**Why two functions exist:** In the Lua/SITL, altitude is controlled by the ground PI (winch speed → tether tension), so the 3D setpoint changing with altitude is safe — collective compensates. In Python inner-loop tests, there is no separate altitude controller, so the Z-preserving azimuthal algorithm is required.
+**Why two functions exist:** In Python inner-loop tests without a separate altitude controller, the Z-preserving azimuthal algorithm is required. The 3D version is used where collective provides independent altitude control.
 
 ### `OrbitTracker` — stateful orbit tracker (3D + slerp)
 
@@ -60,7 +64,7 @@ OrbitTracker(body_z_eq0, tether_dir0, slew_rate_rad_s)
 orbit_tracker.update(pos, dt, bz_target=None) -> body_z_slerped
 ```
 
-Encapsulates `orbit_tracked_body_z_eq_3d` + `slerp_body_z` in one object, mirroring `rawes.lua`'s `_bz_orbit`/`_bz_slerp` state machine. When `bz_target` is provided (e.g., planner attitude override during landing), slerps toward that target instead of the natural orbit setpoint.
+Encapsulates `orbit_tracked_body_z_eq_3d` + `slerp_body_z` with a rate-limited slerp. When `bz_target` is provided (e.g., planner attitude override during landing), slerps toward that target instead of the natural orbit setpoint.
 
 Used by: `mediator.py`, `test_gyroscopic_orbit.py`, `test_pumping_cycle.py`, `test_deschutter_cycle.py`, `test_deschutter_wind.py`, `test_kinematic_transition.py`, `test_pump_and_land.py`, `compare_rotors.py`.
 

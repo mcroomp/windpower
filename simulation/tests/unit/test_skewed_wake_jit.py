@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import SkewedWakeBEM, SkewedWakeBEMJit
+from aero import SkewedWakeBEM, SkewedWakeBEMJit, SkewedWakeBEM2Jit
 import rotor_definition as rd
 
 # ---------------------------------------------------------------------------
@@ -192,11 +192,11 @@ def test_diagnostics_match(ref, jit):
 # ---------------------------------------------------------------------------
 
 def test_create_aero_default_is_jit(rotor):
-    """create_aero() with no model arg must return SkewedWakeBEMJit."""
+    """create_aero() with no model arg must return SkewedWakeBEM2Jit (current default)."""
     from aero import create_aero
     aero = create_aero(rotor)
-    assert isinstance(aero, SkewedWakeBEMJit), \
-        f"Expected SkewedWakeBEMJit, got {type(aero).__name__}"
+    assert isinstance(aero, SkewedWakeBEM2Jit), \
+        f"Expected SkewedWakeBEM2Jit, got {type(aero).__name__}"
 
 
 def test_create_aero_numpy_fallback(rotor):

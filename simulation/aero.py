@@ -90,6 +90,7 @@ from aero_prandtl_bem     import PrandtlBEM          # noqa: F401  (re-exported)
 from aero_skewed_wake     import SkewedWakeBEM        # noqa: F401  (re-exported)
 from aero_skewed_wake_jit import SkewedWakeBEMJit     # noqa: F401  (re-exported)
 from aero_skewed_wake2    import SkewedWakeBEM2        # noqa: F401  (re-exported)
+from aero_skewed_wake2_jit import SkewedWakeBEM2Jit   # noqa: F401  (re-exported)
 from aero_glauert_states  import GlauertStateBEM      # noqa: F401  (re-exported)
 from aero_peters_he       import PetersHeBEM           # noqa: F401  (re-exported)
 from aero_peters_he_jit   import PetersHeBEMJit         # noqa: F401  (re-exported)
@@ -98,6 +99,7 @@ __all__ = [
     "AeroResult",
     "DeSchutterAero",
     "PrandtlBEM", "SkewedWakeBEM", "SkewedWakeBEMJit",
+    "SkewedWakeBEM2", "SkewedWakeBEM2Jit",
     "GlauertStateBEM", "PetersHeBEM", "PetersHeBEMJit",
     "create_aero",
 ]
@@ -105,15 +107,17 @@ __all__ = [
 _MODELS = {
     "deschutter":        DeSchutterAero,
     "prandtl":           PrandtlBEM,
-    "skewed_wake":       SkewedWakeBEMJit,
+    "skewed_wake":       SkewedWakeBEM2Jit,
     "skewed_wake_numpy": SkewedWakeBEM,
+    "skewed_wake2":      SkewedWakeBEM2,
+    "skewed_wake2_jit":  SkewedWakeBEM2Jit,
     "glauert":           GlauertStateBEM,
     "peters_he":         PetersHeBEMJit,
     "peters_he_numpy":   PetersHeBEM,
 }
 
 # Models that support state_dict serialization
-_STATEFUL_MODELS = {"peters_he", "peters_he_numpy"}
+_STATEFUL_MODELS = {"peters_he", "peters_he_numpy", "skewed_wake2", "skewed_wake2_jit"}
 
 
 def create_aero(defn=None, model: str = "skewed_wake",
@@ -126,8 +130,8 @@ def create_aero(defn=None, model: str = "skewed_wake",
     defn       : RotorDefinition, optional
         Rotor geometry and aerodynamic parameters.  If None, uses rd.default().
     model      : str
-        "skewed_wake"        (default) — SkewedWakeBEMJit: Coleman + Numba JIT
-        "skewed_wake_numpy"            — SkewedWakeBEM: pure-numpy reference
+        "skewed_wake"        (default) — SkewedWakeBEM2Jit: reimplemented Coleman + Numba JIT
+        "skewed_wake_numpy"            — SkewedWakeBEM: pure-numpy reference (original)
         "peters_he"                    — PetersHeBEMJit: Peters-He + Numba JIT
         "peters_he_numpy"              — PetersHeBEM: pure-numpy reference
         "prandtl"                      — PrandtlBEM: per-blade + Prandtl tip/root loss
@@ -185,8 +189,8 @@ if __name__ == "__main__":
     v_h   = np.zeros(3)
     R     = np.eye(3)
 
-    for label, aero in [("DeSchutterAero",  create_aero(rotor, "deschutter")),
-                        ("SkewedWakeBEM",   create_aero(rotor, "skewed_wake"))]:
+    for label, aero in [("DeSchutterAero",   create_aero(rotor, "deschutter")),
+                        ("SkewedWakeBEM2Jit", create_aero(rotor, "skewed_wake"))]:
         print(f"\n--- {label} ---")
         f0 = aero.compute_forces(0.0, 0.0, 0.0, R, v_h, 28.0, wind, t=0.0)
         assert np.allclose(f0, 0.0, atol=1e-10), f"t=0 forces not zero: {np.array(f0)}"

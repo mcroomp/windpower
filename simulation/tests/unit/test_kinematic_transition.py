@@ -43,7 +43,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import rotor_definition as rd
 from aero        import create_aero
 from config      import DEFAULTS
-from controller  import (OrbitTracker,
+from controller  import (AltitudeHoldController, compute_bz_altitude_hold, slerp_body_z,
                          col_min_for_altitude_rad,
                          AcroController)
 from dynamics    import RigidBodyDynamics
@@ -134,7 +134,7 @@ def _run_pumping_cycle(
       Exactly the mediator's internal_controller=True path:
         1. DeschutterPlanner.step() -> collective_rad, winch_speed, phase
         2. WinchController.step()
-        3. OrbitTracker.update() + compute_swashplate_from_state()
+        3. AltitudeHoldController / slerp_body_z body_z setpoint
         4. aero.compute_forces() + tether.compute()
         5. dynamics.step()
     """
@@ -183,7 +183,9 @@ def _run_pumping_cycle(
     collective_rad    = col_min_rad
     ic_tether_dir0    = None
     ic_body_z_eq0     = None
-    orbit_tracker     = None
+    bz_slerp          = None
+    alt_ctrl          = None
+    target_alt_m      = float(-POS0[2])
     acro              = AcroController.from_rotor(_ROTOR, use_servo=True)
     total_t     = kinematic_seconds + 60.0   # kinematic + 30s reel-out + 30s reel-in
     n_steps     = int(total_t / DT)
@@ -210,11 +212,12 @@ def _run_pumping_cycle(
 
         # ── Free physics phase ─────────────────────────────────────────────
 
-        # 1. Capture orbit-tracking ICs on first free step
+        # 1. Capture altitude-hold ICs on first free step
         if ic_tether_dir0 is None:
             ic_tether_dir0   = hub_state["pos"] / np.linalg.norm(hub_state["pos"])
             ic_body_z_eq0    = hub_state["R"][:, 2].copy()
-            orbit_tracker    = OrbitTracker(ic_body_z_eq0, ic_tether_dir0, body_z_slew)
+            alt_ctrl         = AltitudeHoldController.from_pos(hub_state["pos"], body_z_slew)
+            bz_slerp         = ic_body_z_eq0.copy()
 
         # 2. Planner: tension PI drives collective; winch speed for phase
         state_pkt = {
@@ -238,11 +241,17 @@ def _run_pumping_cycle(
             raw_col = col_min_rad + cmd["thrust"] * (col_max_rad - col_min_rad)
         collective_rad = acro.slew_collective(raw_col, DT)
 
-        # 5. Orbit-tracking body_z setpoint + rate-limited slew (mediator path)
+        # 5. Altitude-hold body_z setpoint + rate-limited slew
         aq = cmd["attitude_q"]
         _bz_target = (None if quat_is_identity(aq)
                       else quat_apply(aq, np.array([0.0, 0.0, -1.0])))
-        body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
+        if _bz_target is not None:
+            bz_slerp = slerp_body_z(bz_slerp, np.asarray(_bz_target, dtype=float),
+                                    body_z_slew, DT)
+        else:
+            bz_slerp = alt_ctrl.update(hub_state["pos"], target_alt_m, tension_now,
+                                       _ROTOR.mass_kg, DT)
+        body_z_eq = bz_slerp
 
         # 6. Aerodynamics (two-loop attitude + servo emulates ArduPilot ACRO)
         tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)

@@ -25,17 +25,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
-from dynamics        import RigidBodyDynamics
-from aero            import create_aero
-from tether          import TetherModel
 from controller      import (
     AltitudeHoldController,
-    AcroController,
+    TensionPI,
 )
 from planner         import DeschutterPlanner, WindEstimator
 from winch           import WinchController
 from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
+from simtest_runner  import PhysicsRunner
 from tel             import make_tel
 from telemetry_csv   import TelRow, write_csv
 
@@ -43,16 +41,11 @@ _log   = SimtestLog(__file__)
 _IC    = load_ic()
 _ROTOR = rd.default()
 # ── Simulation constants ───────────────────────────────────────────────────────
-DT            = 1.0 / 400.0
-ANCHOR        = np.zeros(3)
-ANCHOR.flags.writeable = False
-T_AERO_OFFSET = 45.0
-
-I_SPIN_KGMS2   = 10.0
-OMEGA_SPIN_MIN = 0.5
-WIND           = np.array([0.0, 10.0, 0.0])   # NED: East wind
+DT         = 1.0 / 400.0
+DT_PLANNER = 1.0 / 10.0   # planner runs at 10 Hz (matches MAVLink RC override rate)
+WIND       = np.array([0.0, 10.0, 0.0])   # NED: East wind
 WIND.flags.writeable = False
-BREAK_LOAD_N   = 620.0
+BREAK_LOAD_N = 620.0
 
 # ── Pumping cycle parameters (De Schutter) ────────────────────────────────────
 N_CYCLES    = 3
@@ -84,40 +77,26 @@ T_CYCLE      = T_REEL_OUT + T_REEL_IN
 # ---------------------------------------------------------------------------
 
 def _run_pumping_repeated() -> dict:
-    dyn    = RigidBodyDynamics(
-        mass=_ROTOR.mass_kg, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
-        pos0=_IC.pos.tolist(), vel0=_IC.vel.tolist(),
-        R0=_IC.R0, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
-    )
-    aero   = create_aero(rd.default())
-    tether = TetherModel(anchor_ned=ANCHOR, rest_length=_IC.rest_length,
-                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND)
     winch  = WinchController(rest_length=_IC.rest_length,
                               tension_safety_n=TENSION_SAFETY_N,
                               min_length=2.0)
-
     trajectory = DeschutterPlanner(
-        t_reel_out          = T_REEL_OUT,
-        t_reel_in           = T_REEL_IN,
-        t_transition        = T_TRANSITION,
-        v_reel_out          = V_REEL_OUT,
-        v_reel_in           = V_REEL_IN,
-        tension_out         = TENSION_OUT,
-        tension_in          = TENSION_IN,
-        wind_estimator      = WindEstimator(seed_wind_ned=WIND),
-        col_min_rad              = COL_MIN_RAD,
-        col_max_rad              = COL_MAX_RAD,
-        xi_reel_in_deg           = None,
+        t_reel_out     = T_REEL_OUT,
+        t_reel_in      = T_REEL_IN,
+        t_transition   = T_TRANSITION,
+        v_reel_out     = V_REEL_OUT,
+        v_reel_in      = V_REEL_IN,
+        tension_out    = TENSION_OUT,
+        tension_in     = TENSION_IN,
+        wind_estimator = WindEstimator(seed_wind_ned=WIND),
+        col_min_rad    = COL_MIN_RAD,
+        col_max_rad    = COL_MAX_RAD,
+        xi_reel_in_deg = None,
     )
-
-    alt_ctrl = AltitudeHoldController.from_pos(_IC.pos, BODY_Z_SLEW_RATE)
-    acro     = AcroController.from_rotor(rd.default(), use_servo=True)
-
-    hub_state   = dyn.state
-    omega_spin  = _IC.omega_spin
-    tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-    tension_now    = tether._last_info.get("tension", 0.0)
-    collective_rad = _IC.coll_eq_rad
+    alt_ctrl   = AltitudeHoldController.from_pos(_IC.pos, BODY_Z_SLEW_RATE)
+    # TensionPI runs at full physics rate (400 Hz) — planner supplies setpoint at 10 Hz.
+    tension_pi = TensionPI(setpoint_n=TENSION_OUT, warm_coll_rad=_IC.coll_eq_rad)
 
     t_end_sim = N_CYCLES * T_CYCLE
     max_steps = int(t_end_sim / DT) + 1
@@ -125,90 +104,78 @@ def _run_pumping_repeated() -> dict:
     # Per-cycle energy tracking
     cycle_energy_out = [0.0] * N_CYCLES
     cycle_energy_in  = [0.0] * N_CYCLES
-    events = BadEventLog()
-
+    events    = BadEventLog()
     telemetry = []
-    tel_every = max(1, int(0.05 / DT))
+    tel_every     = max(1, int(0.05 / DT))
+    planner_every = max(1, round(DT_PLANNER / DT))   # steps between planner calls
+    pump_cmd: "dict | None" = None
+    collective_rad = _IC.coll_eq_rad
 
     t_sim = 0.0
     for i in range(max_steps):
-        t_sim  = i * DT
+        t_sim = i * DT
         if t_sim >= t_end_sim:
             break
 
-        altitude = -hub_state["pos"][2]
-        cycle_idx = min(int(t_sim / T_CYCLE), N_CYCLES - 1)
+        hub_state   = runner.hub_state
+        tension_now = runner.tension_now
+        altitude    = -hub_state["pos"][2]
+        cycle_idx   = min(int(t_sim / T_CYCLE), N_CYCLES - 1)
 
-        # ── DeschutterPlanner drives all N cycles ─────────────────────────────
-        state_pkt = {
-            "pos_ned":         hub_state["pos"],
-            "vel_ned":         hub_state["vel"],
-            "omega_spin":      omega_spin,
-            "body_z":          hub_state["R"][:, 2],
-            "tension_n":       tension_now,
-            "tether_length_m": winch.tether_length_m,
-        }
-        pump_cmd = trajectory.step(state_pkt, DT)
+        # ── DeschutterPlanner at 10 Hz: provides setpoint + winch + altitude target ─
+        if pump_cmd is None or i % planner_every == 0:
+            state_pkt = {
+                "pos_ned":         hub_state["pos"],
+                "vel_ned":         hub_state["vel"],
+                "omega_spin":      runner.omega_spin,
+                "body_z":          hub_state["R"][:, 2],
+                "tension_n":       tension_now,
+                "tether_length_m": winch.tether_length_m,
+            }
+            pump_cmd = trajectory.step(state_pkt, DT_PLANNER)
+            # Propagate tension setpoint and collective floor to TensionPI
+            tension_pi.setpoint = pump_cmd["tension_setpoint"]
+            tension_pi.coll_min = pump_cmd["col_min_rad"]
 
         winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
-        tether.rest_length = winch.rest_length
 
-        collective_rad = acro.slew_collective(
-            COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
-        )
+        # TensionPI at 400 Hz: reads actual tension, outputs collective target
+        collective_rad = tension_pi.update(tension_now, DT)
 
         pump_phase = pump_cmd["phase"]   # "reel-out" | "reel-in" | "hold"
-        body_z_eq = alt_ctrl.update(hub_state["pos"], pump_cmd["target_alt_m"],
-                                    tension_now, _ROTOR.mass_kg, DT)
+        body_z_eq  = alt_ctrl.update(hub_state["pos"], pump_cmd["target_alt_m"],
+                                     tension_now, _ROTOR.mass_kg, DT)
         if pump_phase == "reel-out":
             cycle_energy_out[cycle_idx] += tension_now * V_REEL_OUT * DT
         elif pump_phase == "reel-in":
             cycle_energy_in[cycle_idx]  += tension_now * V_REEL_IN  * DT
 
-        # ── Attitude controller + servo ───────────────────────────────────────
-        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
-        result = aero.compute_forces(
-            collective_rad = collective_rad,
-            tilt_lon       = tilt_lon,
-            tilt_lat       = tilt_lat,
-            R_hub          = hub_state["R"],
-            v_hub_world    = hub_state["vel"],
-            omega_rotor    = omega_spin,
-            wind_world     = WIND,
-            t              = T_AERO_OFFSET + t_sim,
-        )
-
-        # ── Tether ────────────────────────────────────────────────────────────
-        tf, tm      = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        tension_now = tether._last_info.get("tension", 0.0)
-        F_net       = result.F_world + tf
-        M_orbital   = result.M_orbital + tm
-
-        # ── Spin & dynamics ───────────────────────────────────────────────────
-        omega_spin = max(OMEGA_SPIN_MIN,
-                         omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
-        hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
+        # ── 400 Hz physics step (tether + attitude + aero + spin + dynamics) ──
+        sr = runner.step(DT, collective_rad, body_z_eq,
+                         rest_length=winch.rest_length)
 
         # ── Bad-event tracking ────────────────────────────────────────────────
         tel_phase_label = f"cycle{cycle_idx+1}_{pump_phase}"
-        if tether._last_info.get("slack", False):
+        if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, tel_phase_label, altitude,
-                          tension=tension_now)
-        if tension_now > BREAK_LOAD_N:
+                          tension=runner.tension_now)
+        if runner.tension_now > BREAK_LOAD_N:
             events.record("tension_spike", t_sim, tel_phase_label, altitude,
-                          tension=tension_now)
-        if hub_state["pos"][2] >= -FLOOR_ALT_M:
+                          tension=runner.tension_now)
+        if runner.hub_state["pos"][2] >= -FLOOR_ALT_M:
             events.record("floor_hit", t_sim, tel_phase_label, altitude)
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────────
         if i % tel_every == 0:
             telemetry.append(make_tel(
-                t_sim, hub_state, omega_spin, tether, tension_now,
-                collective_rad, tilt_lon, tilt_lat, WIND,
+                t_sim, runner.hub_state, runner.omega_spin,
+                runner.tether, runner.tension_now,
+                collective_rad, sr["tilt_lon"], sr["tilt_lat"], WIND,
                 body_z_eq=body_z_eq, phase=tel_phase_label,
-                aero_result=result, aero_obj=aero, tether_force=tf, tether_moment=tm,
+                aero_result=sr["aero_result"], aero_obj=runner.aero,
+                tether_force=sr["tether_force"], tether_moment=sr["tether_moment"],
                 tension_setpoint=pump_cmd.get("tension_setpoint", 0.0),
-                collective_from_tension_ctrl=pump_cmd.get("collective_rad", collective_rad),
+                collective_from_tension_ctrl=collective_rad,
                 target_alt_m=pump_cmd.get("target_alt_m", 0.0),
             ))
 

@@ -31,14 +31,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
-from dynamics        import RigidBodyDynamics
 from aero            import create_aero
-from tether          import TetherModel
 from controller      import (
-    OrbitTracker,
+    AltitudeHoldController, slerp_body_z,
     col_min_for_altitude_rad,
     AcroController,
 )
+from simtest_runner  import PhysicsRunner
 from planner         import DeschutterPlanner, WindEstimator, quat_apply, quat_is_identity
 from landing_planner import LandingPlanner
 from winch           import WinchController
@@ -54,10 +53,7 @@ _ROTOR = rd.default()
 DT            = 1.0 / 400.0
 ANCHOR        = np.zeros(3)
 ANCHOR.flags.writeable = False
-T_AERO_OFFSET = 45.0
 
-I_SPIN_KGMS2   = 10.0
-OMEGA_SPIN_MIN = 0.5
 WIND           = np.array([0.0, 10.0, 0.0])   # NED: East wind
 WIND.flags.writeable = False
 BREAK_LOAD_N   = 620.0
@@ -99,14 +95,7 @@ T_PUMPING_END        = T_REEL_OUT + T_REEL_IN
 # ---------------------------------------------------------------------------
 
 def _run_landing() -> dict:
-    dyn    = RigidBodyDynamics(
-        mass=_ROTOR.mass_kg, I_body=[5.0, 5.0, 10.0], I_spin=0.0,
-        pos0=_IC.pos.tolist(), vel0=_IC.vel.tolist(),
-        R0=_IC.R0, omega0=[0.0, 0.0, 0.0], z_floor=-1.0,
-    )
-    aero   = create_aero(rd.default())
-    tether = TetherModel(anchor_ned=ANCHOR, rest_length=_IC.rest_length,
-                         axle_attachment_length=_ROTOR.axle_attachment_length_m)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND)
     winch  = WinchController(rest_length=_IC.rest_length,
                               tension_safety_n=TENSION_SAFETY_N,
                               min_length=MIN_TETHER_M)
@@ -126,16 +115,15 @@ def _run_landing() -> dict:
         col_min_reel_in_rad     = COL_MIN_REEL_IN_RAD,
     )
 
-    orbit_tracker = OrbitTracker(_IC.R0[:, 2], _IC.pos / np.linalg.norm(_IC.pos),
-                                 BODY_Z_SLEW_RATE)
-    acro          = AcroController.from_rotor(rd.default(), use_servo=True)
+    acro       = AcroController.from_rotor(rd.default(), use_servo=True)
+    alt_ctrl   = AltitudeHoldController.from_pos(_IC.pos, BODY_Z_SLEW_RATE)
+    bz_slerp   = _IC.R0[:, 2].copy()
+    target_alt = float(-_IC.pos[2])
 
-    hub_state   = dyn.state
-    omega_spin  = _IC.omega_spin
-    tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-    tension_now    = tether._last_info.get("tension", 0.0)
+    hub_state      = runner.hub_state
+    tension_now    = runner.tension_now
     collective_rad = _IC.coll_eq_rad
-    body_z_eq      = orbit_tracker.bz_slerp
+    body_z_eq      = bz_slerp
 
     outer_phase     = "pumping"
     landing_planner = None
@@ -162,14 +150,16 @@ def _run_landing() -> dict:
 
     t_sim = 0.0
     for i in range(max_steps):
-        t_sim    = i * DT
-        altitude = -hub_state["pos"][2]
+        t_sim       = i * DT
+        hub_state   = runner.hub_state   # state from previous step
+        altitude    = -hub_state["pos"][2]
+        tension_now = runner.tension_now
 
         # ── Switch from pumping to landing once one cycle is complete ─────────
         if outer_phase == "pumping" and t_sim >= T_PUMPING_END:
             outer_phase     = "landing"
             landing_planner = LandingPlanner(
-                initial_body_z   = orbit_tracker.bz_slerp,
+                initial_body_z   = bz_slerp,
                 v_land           = V_LAND,
                 col_cruise       = COL_CRUISE,
                 min_tether_m     = MIN_TETHER_M,
@@ -181,7 +171,7 @@ def _run_landing() -> dict:
             state_pkt = {
                 "pos_ned":         hub_state["pos"],
                 "vel_ned":         hub_state["vel"],
-                "omega_spin":      omega_spin,
+                "omega_spin":      runner.omega_spin,
                 "body_z":          hub_state["R"][:, 2],
                 "tension_n":       tension_now,
                 "tether_length_m": winch.tether_length_m,
@@ -189,7 +179,6 @@ def _run_landing() -> dict:
             pump_cmd = trajectory.step(state_pkt, DT)
 
             winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
-            tether.rest_length = winch.rest_length
 
             collective_rad = acro.slew_collective(
                 COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
@@ -198,7 +187,13 @@ def _run_landing() -> dict:
             _aq = pump_cmd["attitude_q"]
             _bz_target = (None if quat_is_identity(_aq)
                           else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
-            body_z_eq = orbit_tracker.update(hub_state["pos"], DT, _bz_target)
+            if _bz_target is not None:
+                bz_slerp = slerp_body_z(bz_slerp, np.asarray(_bz_target, dtype=float),
+                                        BODY_Z_SLEW_RATE, DT)
+            else:
+                bz_slerp = alt_ctrl.update(hub_state["pos"], target_alt, tension_now,
+                                           _ROTOR.mass_kg, DT)
+            body_z_eq = bz_slerp
 
         # ── Landing phase: LandingPlanner controls everything ─────────────────
         else:
@@ -225,7 +220,6 @@ def _run_landing() -> dict:
             body_z_eq = land_cmd["body_z_eq"]
 
             winch.step(land_cmd["winch_speed_ms"], tension_now, DT)
-            tether.rest_length = winch.rest_length
 
             if land_phase in ("descent",):
                 tensions_land.append(tension_now)
@@ -242,50 +236,30 @@ def _run_landing() -> dict:
             if t_final_start is not None and (t_sim - t_final_start) >= T_FINAL_DROP_MAX:
                 break
 
-        # ── Attitude controller ────────────────────────────────────────────────
-        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
-
-        # ── Aerodynamics ──────────────────────────────────────────────────────
-        result = aero.compute_forces(
-            collective_rad = collective_rad,
-            tilt_lon       = tilt_lon,
-            tilt_lat       = tilt_lat,
-            R_hub          = hub_state["R"],
-            v_hub_world    = hub_state["vel"],
-            omega_rotor    = omega_spin,
-            wind_world     = WIND,
-            t              = T_AERO_OFFSET + t_sim,
-        )
-
-        # ── Tether ────────────────────────────────────────────────────────────
-        tf, tm      = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
-        tension_now = tether._last_info.get("tension", 0.0)
-        F_net       = result.F_world + tf
-        M_orbital   = result.M_orbital + tm
+        # ── Physics step ──────────────────────────────────────────────────────
+        sr = runner.step(DT, collective_rad, body_z_eq, rest_length=winch.rest_length)
+        hub_state   = runner.hub_state
+        tension_now = runner.tension_now
 
         # ── Bad-event tracking ────────────────────────────────────────────────
         current_phase = (land_phase or "pumping") if outer_phase == "landing" else "pumping"
-        if tether._last_info.get("slack", False):
+        if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, current_phase, altitude)
-        if tension_now > BREAK_LOAD_N:
+        if runner.tension_now > BREAK_LOAD_N:
             events.record("tension_spike", t_sim, current_phase, altitude,
-                          tension=tension_now)
+                          tension=runner.tension_now)
         if outer_phase == "landing" and land_phase == "descent":
-            events.check_floor(hub_state["pos"][2], t_sim, current_phase, FLOOR_ALT_M)
-
-        # ── Spin & dynamics ───────────────────────────────────────────────────
-        omega_spin = max(OMEGA_SPIN_MIN,
-                         omega_spin + aero.last_Q_spin / I_SPIN_KGMS2 * DT)
-        hub_state  = dyn.step(F_net, M_orbital, DT, omega_spin=omega_spin)
+            events.check_floor(runner.hub_state["pos"][2], t_sim, current_phase, FLOOR_ALT_M)
 
         # ── Telemetry (20 Hz) ─────────────────────────────────────────────────
         if i % tel_every == 0:
             tel_phase = (land_phase or "pumping") if outer_phase == "landing" else "pumping"
             telemetry.append(make_tel(
-                t_sim, hub_state, omega_spin, tether, tension_now,
-                collective_rad, tilt_lon, tilt_lat, WIND,
+                t_sim, runner.hub_state, runner.omega_spin, runner.tether, runner.tension_now,
+                collective_rad, sr["tilt_lon"], sr["tilt_lat"], WIND,
                 body_z_eq=body_z_eq, phase=tel_phase,
-                aero_result=result, aero_obj=aero, tether_force=tf, tether_moment=tm,
+                aero_result=sr["aero_result"], aero_obj=runner.aero,
+                tether_force=sr["tether_force"], tether_moment=sr["tether_moment"],
             ))
 
     # ── Results ───────────────────────────────────────────────────────────────

@@ -882,20 +882,25 @@ class AcroController:
     def __init__(
         self,
         rotor,
-        kp_outer:  float = DEFAULT_KP_OUTER,
-        kp_inner:  float = RatePID.DEFAULT_KP,
-        use_servo: bool  = False,
+        kp_outer:        float = DEFAULT_KP_OUTER,
+        kp_inner:        float = RatePID.DEFAULT_KP,
+        use_servo:       bool  = False,
+        collective_rad:  float = 0.0,
     ) -> None:
         self._kp_outer = float(kp_outer)
         self._pid_lon  = RatePID(kp=kp_inner)
         self._pid_lat  = RatePID(kp=kp_inner)
         self._servo    = SwashplateServoModel.from_rotor(rotor) if use_servo else None
+        if self._servo is not None and collective_rad != 0.0:
+            self._servo.reset(collective_rad=collective_rad)
 
     @classmethod
     def from_rotor(cls, rotor, kp_outer: float = DEFAULT_KP_OUTER,
                    kp_inner: float = RatePID.DEFAULT_KP,
-                   use_servo: bool = False) -> "AcroController":
-        return cls(rotor, kp_outer=kp_outer, kp_inner=kp_inner, use_servo=use_servo)
+                   use_servo: bool = False,
+                   collective_rad: float = 0.0) -> "AcroController":
+        return cls(rotor, kp_outer=kp_outer, kp_inner=kp_inner,
+                   use_servo=use_servo, collective_rad=collective_rad)
 
     def update(
         self,

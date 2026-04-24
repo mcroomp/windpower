@@ -23,19 +23,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller import (
     compute_rate_cmd,
-    orbit_tracked_body_z_eq,
-    slerp_body_z,
+    compute_bz_altitude_hold,
 )
 from rawes_lua_harness import RawesLua
 
 # ── Module-level harness ──────────────────────────────────────────────────────
-# One Lua runtime for the whole module.  Math functions are stateless;
-# tests that need a specific R matrix set it explicitly.
 
 @pytest.fixture(scope="module")
 def sim():
     s = RawesLua()
-    s.R = np.eye(3)   # identity default: body = NED
+    s.R = np.eye(3)
     return s
 
 
@@ -76,252 +73,122 @@ def test_constants_have_expected_values(sim):
     assert float(f.COL_CRUISE_FLIGHT_RAD) == pytest.approx(-0.18)
     assert float(f.COL_MIN_RAD)           == pytest.approx(-0.28)
     assert float(f.COL_MAX_RAD)           == pytest.approx(0.10)
+    assert float(f.COL_REEL_OUT)          == pytest.approx(-0.20)
+    assert float(f.T_PUMP_TRANSITION)     == pytest.approx(3.7)
     assert float(f.KP_VZ)                 == pytest.approx(0.05)
-    assert float(f.VZ_LAND_SP)            == pytest.approx(0.5)
-    assert float(f.XI_REEL_IN_DEG)        == pytest.approx(80.0)
+    assert float(f.MASS_KG)               == pytest.approx(5.0)
+    assert float(f.G_ACCEL)               == pytest.approx(9.81)
+    assert float(f.KP_TEN)               == pytest.approx(5e-4)
+    assert float(f.KI_TEN)               == pytest.approx(1e-4)
+    assert float(f.COL_MAX_TEN)          == pytest.approx(0.0)
+    assert float(f.TEN_REEL_OUT)         == pytest.approx(435.0)
+    assert float(f.TEN_REEL_IN)          == pytest.approx(226.0)
 
 
-# ── rodrigues ─────────────────────────────────────────────────────────────────
+# ── bz_altitude_hold ─────────────────────────────────────────────────────────
 
-class TestRodrigues:
-
-    def test_zero_angle_identity(self, sim):
-        v    = sim.lua_vec(1, 0, 0)
-        axis = sim.lua_vec(0, 0, 1)
-        r    = sim.fns.rodrigues(v, axis, 0.0)
-        assert sim.vec_to_list(r) == pytest.approx([1, 0, 0], abs=1e-12)
-
-    def test_90deg_around_z(self, sim):
-        v    = sim.lua_vec(1, 0, 0)
-        axis = sim.lua_vec(0, 0, 1)
-        r    = sim.fns.rodrigues(v, axis, math.pi / 2)
-        assert sim.vec_to_list(r) == pytest.approx([0, 1, 0], abs=1e-12)
-
-    def test_180deg_around_z(self, sim):
-        v    = sim.lua_vec(1, 0, 0)
-        axis = sim.lua_vec(0, 0, 1)
-        r    = sim.fns.rodrigues(v, axis, math.pi)
-        assert sim.vec_to_list(r) == pytest.approx([-1, 0, 0], abs=1e-12)
-
-    def test_preserves_vector_length(self, sim):
-        v    = sim.lua_vec(0.5, 0.3, 0.8)
-        axis = sim.lua_vec(*_unit([1, 1, 1]))
-        r    = sim.fns.rodrigues(v, axis, 0.7)
-        orig_len = math.sqrt(0.5**2 + 0.3**2 + 0.8**2)
-        result   = sim.vec_to_list(r)
-        assert math.sqrt(sum(x**2 for x in result)) == pytest.approx(orig_len, abs=1e-12)
-
-    def test_parallel_vector_unchanged(self, sim):
-        """Rotating a vector parallel to the axis leaves it unchanged."""
-        axis = sim.lua_vec(0, 0, 1)
-        v    = sim.lua_vec(0, 0, 2.5)
-        r    = sim.fns.rodrigues(v, axis, 1.5)
-        assert sim.vec_to_list(r) == pytest.approx([0, 0, 2.5], abs=1e-12)
-
-    def test_inverse_is_negative_angle(self, sim):
-        """rodrigues(rodrigues(v, axis, a), axis, -a) == v."""
-        v    = sim.lua_vec(*_unit([0.4, -0.3, 0.8]))
-        axis = sim.lua_vec(*_unit([1, 2, -1]))
-        for angle in [0.1, 0.5, 1.0, -0.8, -math.pi / 3]:
-            fwd = sim.fns.rodrigues(v,   axis,  angle)
-            bwd = sim.fns.rodrigues(fwd, axis, -angle)
-            assert sim.vec_to_list(bwd) == pytest.approx(sim.vec_to_list(v), abs=1e-11)
-
-    def test_matches_rotation_matrix(self, sim):
-        """rodrigues(v, axis, a) == scipy-style R @ v."""
-        angle = 0.4
-        axis  = _unit([1, 2, 3])
-        v_np  = np.array([0.6, -0.2, 0.7])
-        # Rodrigues rotation matrix formula
-        K = np.array([[0, -axis[2], axis[1]],
-                      [axis[2], 0, -axis[0]],
-                      [-axis[1], axis[0], 0]])
-        R = np.eye(3) + math.sin(angle)*K + (1 - math.cos(angle))*(K @ K)
-        expected = R @ v_np
-        v_lua   = sim.lua_vec(*v_np)
-        axis_lua = sim.lua_vec(*axis)
-        result  = sim.vec_to_list(sim.fns.rodrigues(v_lua, axis_lua, angle))
-        assert result == pytest.approx(expected.tolist(), abs=1e-12)
-
-
-# ── orbit_track_azimuthal ─────────────────────────────────────────────────────
-
-class TestOrbitTrackAzimuthal:
+class TestBzAltitudeHold:
     """
-    Tests for the azimuthal orbit tracking function used in rawes.lua.
+    Tests for bz_altitude_hold(pos, el_rad, tension_n).
 
-    orbit_track_azimuthal(bz_eq0, tdir0, diff):
-      - diff is the raw pos-anchor vector (not normalised)
-      - applies a 2D horizontal rotation from tdir0 to diff/|diff|
-      - preserves the Z component of bz_eq0 before normalising
-      - output is always a unit vector
+    Lua equivalent of Python compute_bz_altitude_hold:
+      - points the disk at (el_rad, azimuth-from-pos) in NED
+      - adds a gravity-compensation tilt: raw = tdir + (mass*g*cos(el)/tension) * e_up
+      - normalises to a unit vector
     """
-
-    def test_no_movement_returns_bz_eq0(self, sim):
-        """When diff points the same direction as tdir0, no rotation is applied."""
-        bz_eq0 = sim.lua_vec(*_unit([0.5, 0.2, 0.8]))
-        tdir0  = sim.lua_vec(1, 0, 0)
-        diff   = sim.lua_vec(5, 0, 0)      # same direction, arbitrary length
-        r = sim.fns.orbit_track_azimuthal(bz_eq0, tdir0, diff)
-        assert sim.vec_to_list(r) == pytest.approx(sim.vec_to_list(bz_eq0), abs=1e-10)
-
-    def test_short_diff_guard(self, sim):
-        """dh < 0.01 m: horizontal component too small → returns bz_eq0."""
-        bz_eq0 = sim.lua_vec(*_unit([0.5, 0.2, 0.8]))
-        tdir0  = sim.lua_vec(1, 0, 0)
-        diff   = sim.lua_vec(0, 0.005, 0)  # dh = 0.005 < 0.01
-        r = sim.fns.orbit_track_azimuthal(bz_eq0, tdir0, diff)
-        assert sim.vec_to_list(r) == pytest.approx(sim.vec_to_list(bz_eq0), abs=1e-10)
-
-    def test_vertical_tdir0_guard(self, sim):
-        """n0 (horizontal norm of tdir0) < 0.01 → returns bz_eq0."""
-        bz_eq0 = sim.lua_vec(*_unit([0.5, 0.2, 0.8]))
-        tdir0  = sim.lua_vec(0, 0, 1)      # vertical: horizontal norm = 0
-        diff   = sim.lua_vec(5, 0, 0)
-        r = sim.fns.orbit_track_azimuthal(bz_eq0, tdir0, diff)
-        assert sim.vec_to_list(r) == pytest.approx(sim.vec_to_list(bz_eq0), abs=1e-10)
 
     def test_output_is_unit_vector(self, sim):
-        """Result is normalised regardless of input magnitudes."""
-        bz_eq0 = sim.lua_vec(*_unit([0.3, 0.4, 0.8]))
-        tdir0  = sim.lua_vec(1, 0, 0)
-        diff   = sim.lua_vec(0, 10, -3)   # arbitrary
-        r = sim.fns.orbit_track_azimuthal(bz_eq0, tdir0, diff)
-        rv = sim.vec_to_list(r)
+        """Result is always a unit vector."""
+        pos = sim.lua_vec(10.0, 5.0, -8.0)
+        r   = sim.fns.bz_altitude_hold(pos, 0.3, 200.0)
+        rv  = sim.vec_to_list(r)
         assert math.sqrt(sum(x**2 for x in rv)) == pytest.approx(1.0, abs=1e-12)
 
-    def test_90deg_rotation_z_preserved(self, sim):
+    def test_vertical_tether_points_up(self, sim):
+        """At el=pi/2 (vertical), body_z should point nearly straight up (NED z ~ -1)."""
+        pos = sim.lua_vec(0.0, 0.0, -50.0)   # directly above anchor
+        r   = sim.fns.bz_altitude_hold(pos, math.pi / 2, 300.0)
+        rv  = sim.vec_to_list(r)
+        # At el=90 deg, tdir = [0,0,-1] (up in NED), gravity comp = 0 → result = [0,0,-1]
+        assert rv[0] == pytest.approx(0.0, abs=1e-6)
+        assert rv[1] == pytest.approx(0.0, abs=1e-6)
+        assert rv[2] == pytest.approx(-1.0, abs=1e-6)
+
+    def test_azimuth_from_position(self, sim):
+        """Changing azimuth of pos rotates the output body_z horizontally."""
+        el = 0.3
+        r  = 30.0
+        alt = r * math.sin(el)
+        # North position → body_z should have X-dominant horizontal component
+        pos_n = sim.lua_vec(r * math.cos(el), 0.0, -alt)
+        rv_n  = sim.vec_to_list(sim.fns.bz_altitude_hold(pos_n, el, 200.0))
+        # East position → body_z should have Y-dominant horizontal component
+        pos_e = sim.lua_vec(0.0, r * math.cos(el), -alt)
+        rv_e  = sim.vec_to_list(sim.fns.bz_altitude_hold(pos_e, el, 200.0))
+        # North case: X component dominant, Y small
+        assert abs(rv_n[0]) > abs(rv_n[1])
+        # East case: Y component dominant, X small
+        assert abs(rv_e[1]) > abs(rv_e[0])
+
+    def test_gravity_comp_increases_with_lower_elevation(self, sim):
         """
-        Tether moves 90° in horizontal plane.  The z component of bz_eq0
-        is preserved before normalisation, so it should only change due to
-        re-normalisation of the rotated horizontal components.
+        The angular deviation of body_z from the tether direction is larger
+        at low elevation: k = mass*g*cos(el)/tension is larger when el is small.
         """
-        bz_eq0_np = _unit([0.5, 0.0, 0.8])   # tilted North + slightly down
-        bz_eq0 = sim.lua_vec(*bz_eq0_np)
-        tdir0  = sim.lua_vec(1, 0, 0)          # initial tether: North
-        diff   = sim.lua_vec(0, 5, 0)           # tether now: East (90° rotation)
-        r = sim.fns.orbit_track_azimuthal(bz_eq0, tdir0, diff)
-        rv = sim.vec_to_list(r)
+        r = 30.0
+        tension = 200.0
 
-        # After 90° CW rotation around Z: bx→by, by→-bx
-        bx0, by0, bz0 = bz_eq0_np
-        expected_raw = np.array([-by0, bx0, bz0])    # sin(90)*bx + cos(90)*by...
-        # Actually: cos_phi=0, sin_phi=1 for 90deg: r:x = -by, r:y = bx
-        # Wait: cos_phi = t0x*thx + t0y*thy = 1*0 + 0*1 = 0
-        #       sin_phi = t0x*thy - t0y*thx = 1*1 - 0*0 = 1
-        # r:x = cos*bx - sin*by = 0*0.5 - 1*0 = 0
-        # r:y = sin*bx + cos*by = 1*0.5 + 0*0 = 0.5
-        # r:z = bz0 = 0.8
-        expected_raw = np.array([0.0, 0.5, 0.8])
-        expected = expected_raw / np.linalg.norm(expected_raw)
-        assert rv == pytest.approx(expected.tolist(), abs=1e-10)
+        def deviation_angle(el_deg):
+            el  = math.radians(el_deg)
+            pos = sim.lua_vec(r * math.cos(el), 0.0, -r * math.sin(el))
+            bz  = sim.vec_to_list(sim.fns.bz_altitude_hold(pos, el, tension))
+            tdir = [math.cos(el), 0.0, -math.sin(el)]
+            dot  = sum(bz[i] * tdir[i] for i in range(3))
+            return math.acos(max(-1.0, min(1.0, dot)))
 
-    def test_matches_controller_orbit_tracked_body_z_eq(self, sim):
+        assert deviation_angle(10.0) > deviation_angle(70.0)
+
+    @pytest.mark.parametrize("el_deg,az_deg,tension", [
+        (10.0, 0.0,   150.0),
+        (25.0, 45.0,  200.0),
+        (40.0, 90.0,  300.0),
+        (70.0, 180.0, 250.0),
+        (80.0, 270.0, 400.0),
+        (15.0, 30.0,  180.0),
+    ])
+    def test_matches_python_compute_bz_altitude_hold(self, sim, el_deg, az_deg, tension):
         """
-        Cross-check: Lua azimuthal track agrees with controller.py
-        orbit_tracked_body_z_eq() across a full 360° orbit.
+        Cross-check: Lua bz_altitude_hold matches controller.py
+        compute_bz_altitude_hold across a sweep of elevations and azimuths.
         """
-        bz_eq0_np = _unit([0.6, 0.3, 0.7])
-        tdir0_np  = _unit([1, 0, 0])
-        bz_eq0    = sim.lua_vec(*bz_eq0_np)
-        tdir0     = sim.lua_vec(*tdir0_np)
+        MASS_KG = float(sim.fns.MASS_KG)
+        el_rad  = math.radians(el_deg)
+        az_rad  = math.radians(az_deg)
+        r       = 40.0
+        pos_np  = np.array([
+            r * math.cos(el_rad) * math.cos(az_rad),
+            r * math.cos(el_rad) * math.sin(az_rad),
+            -r * math.sin(el_rad),
+        ])
+        expected = compute_bz_altitude_hold(pos_np, el_rad, tension, MASS_KG).tolist()
 
-        for az_deg in range(0, 360, 30):
-            az = math.radians(az_deg)
-            pos = np.array([50 * math.cos(az), 50 * math.sin(az), -14.0])
-            diff_np = pos   # anchor = [0,0,0]
-            diff = sim.lua_vec(*diff_np)
+        pos_lua = sim.lua_vec(*pos_np)
+        result  = sim.vec_to_list(sim.fns.bz_altitude_hold(pos_lua, el_rad, tension))
 
-            lua_r = sim.vec_to_list(
-                sim.fns.orbit_track_azimuthal(bz_eq0, tdir0, diff))
-            py_r  = orbit_tracked_body_z_eq(
-                pos, tdir0_np, bz_eq0_np).tolist()
-
-            assert lua_r == pytest.approx(py_r, abs=1e-10), \
-                f"Mismatch at az={az_deg} deg"
-
-
-# ── slerp_step ────────────────────────────────────────────────────────────────
-
-class TestSlerpStep:
-    """
-    Tests for the rate-limited slerp step used in rawes.lua.
-    This is the inline code in run_flight() that advances _bz_slerp toward goal.
-    """
-
-    def test_already_at_goal_unchanged(self, sim):
-        """When bz_slerp == goal (remain < 1e-4), output equals input."""
-        bz = sim.lua_vec(*_unit([0.3, 0.4, 0.8]))
-        r  = sim.fns.slerp_step(bz, bz, 0.4, 0.02)
-        assert sim.vec_to_list(r) == pytest.approx(sim.vec_to_list(bz), abs=1e-12)
-
-    def test_step_limited_to_slew_rate(self, sim):
-        """Angular advance per step <= slew_rate * dt."""
-        bz   = sim.lua_vec(0, 0, 1)
-        goal = sim.lua_vec(1, 0, 0)   # 90° away
-        slew, dt = 0.4, 0.02
-        r    = sim.fns.slerp_step(bz, goal, slew, dt)
-        bv, rv = np.array([0, 0, 1]), np.array(sim.vec_to_list(r))
-        step_taken = math.acos(float(np.clip(np.dot(bv, rv), -1, 1)))
-        assert step_taken == pytest.approx(slew * dt, abs=1e-10)
-
-    def test_converges_to_goal(self, sim):
-        """Repeated steps reach goal within expected number of steps."""
-        bz_np   = np.array([0., 0., 1.])
-        goal_np = _unit([0.5, 0.5, 0.7])
-        bz      = sim.lua_vec(*bz_np)
-        goal    = sim.lua_vec(*goal_np)
-        slew, dt = 0.4, 0.02
-        angle0   = math.acos(float(np.dot(bz_np, goal_np)))
-        max_steps = int(angle0 / (slew * dt)) + 5
-
-        for _ in range(max_steps):
-            bz = sim.fns.slerp_step(bz, goal, slew, dt)
-            remaining = math.acos(float(np.clip(
-                np.dot(sim.vec_to_list(bz), goal_np), -1, 1)))
-            if remaining < 1e-4:
-                break
-        assert remaining < 1e-4
-
-    def test_preserves_unit_length(self, sim):
-        """slerp_step output is always a unit vector."""
-        bz   = sim.lua_vec(*_unit([0.3, -0.5, 0.8]))
-        goal = sim.lua_vec(*_unit([-0.2, 0.7, 0.6]))
-        for _ in range(30):
-            bz = sim.fns.slerp_step(bz, goal, 0.5, 0.02)
-            rv = sim.vec_to_list(bz)
-            assert math.sqrt(sum(x**2 for x in rv)) == pytest.approx(1.0, abs=1e-12)
-
-    @pytest.mark.parametrize("slew", [0.1, 0.4, 1.0, 2.0])
-    def test_matches_controller_slerp_body_z(self, sim, slew):
-        """
-        Cross-check: Lua slerp_step matches controller.py slerp_body_z
-        for all slew rates across a multi-step trajectory.
-        """
-        bz_lua_np = np.array([0., 0., 1.])
-        bz_py     = bz_lua_np.copy()
-        goal_np   = _unit([0.5, 0.5, 0.7])
-        bz_lua    = sim.lua_vec(*bz_lua_np)
-        goal_lua  = sim.lua_vec(*goal_np)
-        dt = 0.02
-
-        for step in range(50):
-            bz_lua = sim.fns.slerp_step(bz_lua, goal_lua, slew, dt)
-            bz_py  = slerp_body_z(bz_py, goal_np, slew_rate_rad_s=slew, dt=dt)
-            assert sim.vec_to_list(bz_lua) == pytest.approx(bz_py.tolist(), abs=1e-10), \
-                f"Diverged at step {step}, slew={slew}"
+        assert result == pytest.approx(expected, abs=1e-10), \
+            f"Mismatch at el={el_deg} az={az_deg} T={tension}"
 
 
 # ── cyclic_error_body ─────────────────────────────────────────────────────────
 
 class TestCyclicErrorBody:
     """
-    Tests for the body-frame cyclic error: err_ned = bz_now × bz_orbit,
+    Tests for the body-frame cyclic error: err_ned = bz_now × bz_target,
     projected into body frame via ahrs:earth_to_body().
     """
 
     def test_equilibrium_is_zero(self, sim):
-        """When bz_now == bz_orbit the error is identically zero."""
+        """When bz_now == bz_target the error is identically zero."""
         sim.R = np.eye(3)
         bz = sim.lua_vec(0, 0, 1)
         result = sim.fns.cyclic_error_body(bz, bz)
@@ -330,13 +197,13 @@ class TestCyclicErrorBody:
 
     def test_north_tilt_drives_pitch(self, sim):
         """
-        bz_now tilted North from bz_orbit (NED down): err_ned has Y component
+        bz_now tilted North from bz_target (NED down): err_ned has Y component
         → body-Y (pitch) error is nonzero; body-X (roll) is near zero.
         """
-        sim.R = np.eye(3)   # body = NED
-        bz_orbit = sim.lua_vec(0, 0, 1)
-        bz_now   = sim.lua_vec(*_unit([0.15, 0, 1]))  # tilted N
-        result   = sim.fns.cyclic_error_body(bz_now, bz_orbit)
+        sim.R = np.eye(3)
+        bz_target = sim.lua_vec(0, 0, 1)
+        bz_now    = sim.lua_vec(*_unit([0.15, 0, 1]))
+        result    = sim.fns.cyclic_error_body(bz_now, bz_target)
         err_bx, err_by = float(result[1]), float(result[2])
         assert abs(err_bx) < 1e-10
         assert err_by < -1e-6
@@ -344,9 +211,9 @@ class TestCyclicErrorBody:
     def test_east_tilt_drives_roll(self, sim):
         """bz_now tilted East: body-X (roll) error nonzero; pitch near zero."""
         sim.R = np.eye(3)
-        bz_orbit = sim.lua_vec(0, 0, 1)
-        bz_now   = sim.lua_vec(*_unit([0, 0.15, 1]))  # tilted E
-        result   = sim.fns.cyclic_error_body(bz_now, bz_orbit)
+        bz_target = sim.lua_vec(0, 0, 1)
+        bz_now    = sim.lua_vec(*_unit([0, 0.15, 1]))
+        result    = sim.fns.cyclic_error_body(bz_now, bz_target)
         err_bx, err_by = float(result[1]), float(result[2])
         assert err_bx > 1e-6
         assert abs(err_by) < 1e-10
@@ -356,16 +223,15 @@ class TestCyclicErrorBody:
         Rotating R around Z (yaw) must not change |err_bx|^2 + |err_by|^2.
         The total cyclic correction magnitude depends only on the tilt angle.
         """
-        bz_orbit = sim.lua_vec(0, 0, 1)
-        bz_now   = sim.lua_vec(*_unit([0.1, 0.2, 0.9]))
-        # Reference magnitude with identity R
+        bz_target = sim.lua_vec(0, 0, 1)
+        bz_now    = sim.lua_vec(*_unit([0.1, 0.2, 0.9]))
         sim.R = np.eye(3)
-        r0 = sim.fns.cyclic_error_body(bz_now, bz_orbit)
+        r0    = sim.fns.cyclic_error_body(bz_now, bz_target)
         ref_mag = math.sqrt(float(r0[1])**2 + float(r0[2])**2)
 
         for yaw in [0.4, 1.2, -0.7, math.pi / 4]:
             sim.R = _rot_z(yaw)
-            r = sim.fns.cyclic_error_body(bz_now, bz_orbit)
+            r   = sim.fns.cyclic_error_body(bz_now, bz_target)
             mag = math.sqrt(float(r[1])**2 + float(r[2])**2)
             assert mag == pytest.approx(ref_mag, abs=1e-10), \
                 f"Magnitude changed at yaw={math.degrees(yaw):.1f} deg"
@@ -376,15 +242,15 @@ class TestCyclicErrorBody:
         Cross-check: Lua cyclic_error_body (kp=1) matches controller.py
         compute_rate_cmd(kp=1, kd=0) roll and pitch outputs.
         """
-        bz_orbit_np = _unit([0.0, 0.0, 1.0])
-        bz_now_np   = _unit([0.1, 0.2, 0.9])
-        R           = _rot_z(yaw)
+        bz_target_np = _unit([0.0, 0.0, 1.0])
+        bz_now_np    = _unit([0.1, 0.2, 0.9])
+        R            = _rot_z(yaw)
         sim.R = R
 
-        result = sim.fns.cyclic_error_body(
-            sim.lua_vec(*bz_now_np), sim.lua_vec(*bz_orbit_np))
+        result   = sim.fns.cyclic_error_body(
+            sim.lua_vec(*bz_now_np), sim.lua_vec(*bz_target_np))
         py_rates = compute_rate_cmd(
-            bz_now_np, bz_orbit_np, R, kp=1.0, kd=0.0)
+            bz_now_np, bz_target_np, R, kp=1.0, kd=0.0)
 
         assert float(result[1]) == pytest.approx(py_rates[0], abs=1e-12)
         assert float(result[2]) == pytest.approx(py_rates[1], abs=1e-12)

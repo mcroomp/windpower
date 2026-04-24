@@ -37,7 +37,7 @@ import rotor_definition as rd
 from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
-from controller import OrbitTracker, AcroController
+from controller import AltitudeHoldController, AcroController
 from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
 
@@ -112,10 +112,11 @@ def _run_orbit(
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LEN,
                          axle_attachment_length=rotor.axle_attachment_length_m)
 
-    omega_spin    = float(OMEGA_SPIN0)
-    hub_state     = dyn.state
-    orbit_tracker = OrbitTracker(BODY_Z0, POS0 / np.linalg.norm(POS0),
-                                 rd.default().body_z_slew_rate_rad_s)
+    omega_spin   = float(OMEGA_SPIN0)
+    hub_state    = dyn.state
+    alt_ctrl     = AltitudeHoldController.from_pos(POS0, rd.default().body_z_slew_rate_rad_s)
+    target_alt   = float(-POS0[2])
+    tension_now  = 0.0
     acro = AcroController.from_rotor(rd.default())
     pos_history = []
     events      = BadEventLog()
@@ -124,8 +125,8 @@ def _run_orbit(
     for i in range(n_steps):
         t = i * DT
 
-        # Orbit-tracked attitude setpoint
-        body_z_eq = orbit_tracker.update(hub_state["pos"], DT)
+        # Altitude-hold attitude setpoint
+        body_z_eq = alt_ctrl.update(hub_state["pos"], target_alt, tension_now, rotor.mass_kg, DT)
 
         # Two-loop attitude controller + servo (emulates ArduPilot ACRO)
         tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT,
@@ -145,6 +146,7 @@ def _run_orbit(
 
         # Tether force/moment
         tf, tm = tether.compute(hub_state["pos"], hub_state["vel"], hub_state["R"])
+        tension_now = float(tether._last_info.get("tension", 0.0))
         F_net     = result.F_world + tf
         M_orbital = result.M_orbital + tm
 
@@ -273,7 +275,9 @@ def test_gyro_phase_sweep():
 
     # Phase=90 should NOT be more stable than phase=0: with strong damping,
     # gyroscopic compensation adds wrong cyclic and degrades the orbit.
-    assert not results[90]["stable"] or results[0]["min_z"] <= results[90]["min_z"], (
+    # "More stable" = higher min_z (hub stays higher). phase=0 min_z >= phase=90 min_z means
+    # phase=0 is as good or better, confirming gyroscopic compensation is not needed.
+    assert not results[90]["stable"] or results[0]["min_z"] >= results[90]["min_z"], (
         f"phase=90 unexpectedly more stable than phase=0: "
         f"min_z_0={results[0]['min_z']:.1f}m vs min_z_90={results[90]['min_z']:.1f}m"
     )

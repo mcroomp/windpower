@@ -42,10 +42,9 @@ Two packet types cross the MAVLink boundary:
             Passed to WinchController.step() — the Pixhawk is not involved.
 
 Mode_RAWES responsibilities (NOT in this file):
-    - Orbit tracking: compute tether-aligned body_z_eq at 400 Hz from current pos
-    - Slew body_z_eq toward attitude_q target at body_z_slew_rate_rad_s
+    - AltitudeHoldController: rate-limit elevation toward asin(target_alt/tlen), compute body_z_eq with gravity-compensation tilt
     - Attitude error → cyclic tilt  (compute_swashplate_from_state)
-    - Collective: set_throttle_out(thrust) — direct passthrough, no PI on Pixhawk
+    - Collective: TensionPI running on rawes.lua in SITL; set_throttle_out(thrust) passthrough on hardware
     - Counter-torque motor (inner loop, not commanded by planner)
 
 WinchController responsibilities (NOT in this file — see winch.py):
@@ -734,6 +733,7 @@ class DeschutterPlanner(TrajectoryPlanner):
             "phase":            "hold",
             "target_alt_m":     self._initial_alt_m if self._initial_alt_m is not None else float(-pos_ned[2]),
             "tension_setpoint": self._tension_ctrl.setpoint,
+            "col_min_rad":      self._tension_ctrl.coll_min,
         }
 
     # ------------------------------------------------------------------
@@ -908,4 +908,5 @@ class DeschutterPlanner(TrajectoryPlanner):
             "phase":            "reel-out" if phase_out else "reel-in",
             "target_alt_m":     target_alt_m,
             "tension_setpoint": self._tension_ctrl.setpoint,
+            "col_min_rad":      _col_min_now,
         }

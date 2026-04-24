@@ -294,9 +294,8 @@ class RawesLua:
         same mock AHRS/param state as the running script.
 
         Example:
-            v  = sim.lua_vec(0, 0, 1)
-            r  = sim.fns.rodrigues(v, sim.lua_vec(1, 0, 0), math.pi / 2)
-            bz = sim.fns.disk_normal_ned()
+            pos = sim.lua_vec(20, 0, -8)
+            bz  = sim.fns.bz_altitude_hold(pos, 0.3, 200.0)
         """
         return self._fns
 

@@ -113,13 +113,7 @@ def _install_fakes(monkeypatch, fake_dynamics, fake_sitl, fake_aero, fake_sensor
     monkeypatch.setattr(mediator, "RigidBodyDynamics", lambda **kwargs: fake_dynamics)
     monkeypatch.setattr(mediator, "SITLInterface",     lambda **kwargs: fake_sitl)
 
-    # Mediator calls SkewedWakeBEMJit.from_definition(rotor) — patch the classmethod.
-    class _FakeSkewedWakeBEMJit:
-        @classmethod
-        def from_definition(cls, defn):
-            return fake_aero
-
-    monkeypatch.setattr(mediator, "SkewedWakeBEMJit", _FakeSkewedWakeBEMJit)
+    monkeypatch.setattr(mediator, "create_aero", lambda *a, **kw: fake_aero)
     # PhysicalSensor is NOT mocked here — mediator uses the real sensor with the test hub state.
     # Gyro noise is small (sigma=0.003 rad/s); assertions use atol=0.05 to accommodate it.
 

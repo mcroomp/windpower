@@ -19,7 +19,7 @@ simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/uni
 simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit/test_steady_flight_lua.py -q
 
 # Regenerate steady-state IC (required after any aero model change)
-simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit/test_steady_flight.py -q
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s
 ```
 
 **CRITICAL:** Never use `dev.sh test-unit` — it routes to Docker which excludes `tests/unit`.
@@ -59,13 +59,19 @@ Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
 ### Simulation Loops (simtests)
 
 Three scenario pairs — each has a Python-only version and a Python+Lua version.
-All three start from the same `steady_state_starting.json` IC (written by `test_steady_flight.py`).
+All three start from the same `steady_state_starting.json` IC (written by `test_generate_ic.py::test_create_ic`).
 
 | Python | Lua | Scenario |
 |--------|-----|----------|
-| `test_steady_flight.py` | `test_steady_flight_lua.py` | 90 s orbit from IC; Python also writes IC |
+| `test_steady_flight.py` | `test_steady_flight_lua.py` | 90 s orbit from IC |
 | `test_pump_cycle.py` | `test_pump_cycle_lua.py` | N De Schutter reel-out/reel-in cycles from IC |
 | `test_landing.py` | `test_landing_lua.py` | reel-in only (no reel-out) swings hub to xi~80°, then VZ descent + final drop |
+
+IC generation is separate:
+
+| File | What it tests |
+|------|--------------|
+| `test_generate_ic.py` | **Writes** `steady_state_starting.json`; also verifies the IC is stable in 30 s steady flight |
 
 Supporting simtests (no Lua pair):
 
@@ -79,7 +85,7 @@ Supporting simtests (no Lua pair):
 
 | File | What it tests |
 |------|--------------|
-| `test_controller.py` | `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `RatePID`, `OrbitTracker` |
+| `test_controller.py` | `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `RatePID`, `OrbitTracker`, `AltitudeHoldController`, `compute_bz_altitude_hold` |
 | `test_sensor.py` | `PhysicalSensor` output consistency (gyro, accel, body_to_earth) |
 | `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
 | `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
@@ -101,11 +107,11 @@ Supporting simtests (no Lua pair):
 
 | File | Non-Lua reference | What it tests |
 |------|------------------|--------------|
-| `test_math_lua.py` | — | Lua math: `rodrigues`, `orbit_track_azimuthal`, `slerp_step`, cyclic error |
+| `test_math_lua.py` | — | Lua math: `bz_altitude_hold`, `cyclic_error_body`, `output_rate_limit`, `rate_to_pwm`, constants |
 | `test_yaw_lua.py` | — | Yaw-trim: runs rawes.lua via `RawesLua` harness (PI, dead zone, watchdog, hard-stop, closed-loop equilibrium) |
-| `test_steady_flight_lua.py` | `test_steady_flight.py` | rawes.lua mode=1: 90 s orbit from IC via harness |
-| `test_pump_cycle_lua.py` | `test_pump_cycle.py` | rawes.lua mode=5: N De Schutter cycles from IC via harness |
-| `test_landing_lua.py` | `test_landing.py` | rawes.lua mode=4: landing from IC via harness |
+| `test_steady_flight_lua.py` | `test_steady_flight.py` | rawes.lua mode=1: 90 s altitude-hold steady flight from IC via harness |
+| `test_pump_cycle_lua.py` | `test_pump_cycle.py` | rawes.lua mode=5: N De Schutter cycles from IC via harness (TensionPI collective) |
+| `test_landing_lua.py` | `test_landing.py` | rawes.lua mode=4: landing from IC via harness (in development) |
 
 ---
 
@@ -260,20 +266,69 @@ collective and body_z slerp logic.
 
 ## Steady-State Initial Conditions
 
-`simtest_ic.py` loads `steady_state_starting.json` (written by `test_steady_flight.py`).
+`simtest_ic.py` loads `steady_state_starting.json`.
+**Only `test_generate_ic.py::test_create_ic` writes this file** — all other tests read it.
 
 ```python
 from simtest_ic import load_ic
 ic = load_ic()
-# ic.pos, ic.vel, ic.body_z, ic.omega_spin, ic.rest_length
-# ic.coll_eq_rad     -- equilibrium collective [rad]
-# ic.stack_coll_eq   -- orbit collective (coll_eq + 0.10 rad)
+# ic.pos, ic.vel, ic.R0, ic.omega_spin, ic.rest_length
+# ic.coll_eq_rad     -- collective at which TensionPI settled (~300 N tension)
+# ic.stack_coll_eq   -- same value; used as TensionPI warm-start in stack tests
 # ic.home_z_ned      -- GPS home NED Z [m]
 ```
 
-Regenerate after aero model changes:
+`ic.coll_eq_rad` is determined by running 60 s warmup with `TensionPI(setpoint_n=300 N)`.
+300 N is midway between pumping reel-in (226 N) and reel-out (435 N) targets.
+
+Regenerate after any aero model change:
 ```bash
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -k test_steady_flight
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s
+```
+
+---
+
+## PhysicsRunner — Shared 400 Hz Physics Core
+
+`simtest_runner.py` provides `PhysicsRunner`, used by all Python simtests and Lua simtests.
+It owns `RigidBodyDynamics`, `create_aero`, `TetherModel`, `AcroController(use_servo=True)`,
+and the spin ODE. Callers own `DeschutterPlanner`, `TensionPI`, `WinchController`.
+
+```python
+from simtest_runner import PhysicsRunner
+
+# Python-controlled tests (AcroController drives tilts internally):
+runner = PhysicsRunner(rotor, ic, wind)
+sr = runner.step(DT, collective_rad, body_z_eq, rest_length=winch.rest_length)
+
+# Lua-controlled tests (caller drives tilts via RatePID + SwashplateServoModel):
+tilt_lon, tilt_lat = servo.step(pid_lon.update(...), ...)
+sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat, rest_length=winch.rest_length)
+
+# IC generation warmup (zero initial velocity):
+runner = PhysicsRunner.for_warmup(rotor, pos0, R0, rest_length, coll_eq_rad, omega_spin, wind)
+```
+
+After each `step()` / `step_raw()`:
+- `runner.hub_state` — dict: pos, vel, R, omega (state after integration)
+- `runner.tension_now` — tether tension [N] (computed at start of that step)
+- `runner.omega_spin` — rotor spin [rad/s]
+- `runner.tether` — TetherModel (inspect `_last_info` for slack/angle)
+- `runner.aero` — aero object (inspect `last_v_inplane`)
+- `sr["tilt_lon"], sr["tilt_lat"]` — tilts used in that step
+- `sr["aero_result"], sr["tether_force"], sr["tether_moment"]` — forces for telemetry
+
+**TensionPI/planner rate split** — planner at 10 Hz, TensionPI at 400 Hz:
+```python
+planner_every = max(1, round(DT_PLANNER / DT))   # 40 steps
+pump_cmd = None
+for i in range(max_steps):
+    if pump_cmd is None or i % planner_every == 0:
+        pump_cmd = planner.step(state_pkt, DT_PLANNER)
+        tension_pi.setpoint = pump_cmd["tension_setpoint"]
+        tension_pi.coll_min = pump_cmd["col_min_rad"]   # floor from planner
+    collective = tension_pi.update(runner.tension_now, DT)
+    sr = runner.step(DT, collective, body_z_eq)
 ```
 
 ---
@@ -310,6 +365,7 @@ giving it access to all module-level locals. Constants and functions are exposed
 - `test_yaw_lua.py` reads all yaw constants (`KP_YAW`, `YAW_DEAD_ZONE_RAD_S`, etc.)
   from `sim.fns.*` — no manual copies.
 - `test_math_lua.py` runs actual rawes.lua functions via `_rawes_fns` and cross-checks
-  against `controller.py`. A failing test means `controller.py` diverged; fix that.
+  against `controller.py` equivalents (currently `bz_altitude_hold` vs `compute_bz_altitude_hold`).
+  A failing test means `controller.py` diverged; fix that.
 - A failing Lua unit test after a rawes.lua edit means the Python assertion constants
   are stale. Fix the constants, then fix the test.

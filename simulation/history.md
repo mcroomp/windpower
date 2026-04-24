@@ -359,7 +359,11 @@ Key parameters required (in `rawes_sitl_defaults.parm`):
 - `COMPASS_USE=0`, `COMPASS_ENABLE=0` — SITL synthetic compasses cycle every 10 s, blocking GPS fusion.
 - `EK3_GPS_CHECK=0` + `EK3_POS_I_GATE=50` + `EK3_VEL_I_GATE=50` — widened gates required for fusion.
 
-### Three root causes fixed for test_lua_flight_steady
+### Three root causes fixed for test_lua_flight_steady (orbit-tracking era)
+
+> **Note:** These fixes applied to the orbit-tracking implementation of rawes.lua (since replaced
+> by AltitudeHoldController). They explain why the original orbit-tracking design had those
+> constraints; the new design resolves them differently.
 
 **1. Pre-GPS collective bypass** (`elseif _tdir0 == nil then col_cmd = col_cruise`):
 
@@ -375,7 +379,55 @@ EKF yaw cancellation in the error term: `err_body = R_ekf.T @ (bz_now × bz_orbi
 
 Before GPS fuses, `_bz_orbit = bz_now` (err=0, pure neutral stick). When GPS fuses (yawAlignComplete via RELPOSNED + delAngBiasLearned), GPS tether recapture fires: `_bz_eq0` and `_bz_orbit` reset to `disk_normal_ned()` (zero step change) and `_tdir0 = normalize(diff)` anchors the orbit reference. Orbit tracking runs ~46 s before kinematic exit — hub has active cyclic control at the kinematic-to-physics transition.
 
-### Results
+### Results (orbit-tracking era)
 
 test_lua_flight_steady: stable=86–110 s, 3/3 runs, max_activity≤1000 PWM, no EKF yaw reset.
 Orbit quality: orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s.
+
+---
+
+## Phase 3 M3 — AltitudeHoldController Rewrite of rawes.lua
+
+### Why orbit-tracking was replaced
+
+The orbit-tracking implementation (`rodrigues`, `slerp_step`, `orbit_track_azimuthal`, `_bz_orbit`/`_bz_slerp` state machine) was replaced with `bz_altitude_hold` (AltitudeHoldController). Key reasons:
+
+1. **Stateless geometry**: `bz_altitude_hold(pos, el_rad, tension_n)` needs no captured reference state (`_bz_eq0`, `_tdir0`). GPS init simply sets `_el_rad` and `_target_alt` once; subsequent updates are rate-limited toward `asin(target_alt / tlen)`.
+2. **Natural gravity compensation**: The function tilts the disk slightly inward (elevation-upward tangent direction) by `k = mass*g*cos(el)/tension` so the thrust vector counteracts the elevation-lowering component of gravity — no empirical tuning.
+3. **Simpler pre-GPS path**: Gyro feedthrough (desired_rate = measured_rate → ACRO rate_error = 0 → zero corrective torque) preserves the natural orbital rate. No need to track `_bz_orbit = bz_now` to synthesize neutral-stick behavior.
+4. **Pumping collective via TensionPI**: The open-loop collective schedule (`COL_REEL_OUT`, `COL_REEL_IN`) was replaced with a TensionPI running inside rawes.lua. TensionPI feedback on `RAWES_TEN` produces correct tension for each phase without requiring phase-specific collective tuning.
+
+### New algorithm (rawes.lua post-rewrite)
+
+```
+Pre-GPS (_el_initialized == false):
+  - Collective: hold at COL_CRUISE_FLIGHT_RAD = -0.18 rad
+  - Cyclic: gyro feedthrough (ch1/ch2 = rate_to_pwm(gyro_body_x/y))
+  - On first valid GPS fix with tlen >= 0.5 m:
+      _el_rad = asin(-rz / tlen)
+      _target_alt = -rz
+      _el_initialized = true
+
+Post-GPS:
+  - Rate-limit _el_rad toward asin(_target_alt / tlen) at SCR_USER2 rad/s
+  - bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n)
+  - err = cyclic_error_body(bz_now, bz_goal)
+  - ch1/ch2 = rate_to_pwm(kp * err_bx/by)
+  - Collective: VZ PI (steady) or TensionPI (pumping)
+```
+
+`RAWES_ALT` (NV float) updates `_target_alt` each tick; `RAWES_TEN` updates `_tension_n`.
+Simtest sends constant `RAWES_ALT = IC_altitude` for all pumping phases (no disk tilt change;
+energy differential comes entirely from TensionPI tension setpoint switching).
+
+### Deleted / removed from rawes.lua
+
+`rodrigues`, `orbit_track_azimuthal`, `slerp_step`, `v3_normalize`, `_bz_eq0`, `_tdir0`,
+`_bz_orbit`, `_bz_slerp`, `_bz_target`, `_plan_ms`, `_pump_bz_ri`, `_captured`,
+`XI_REEL_IN_DEG`, `T_TRANSITION`, `PLANNER_TIMEOUT`, `COL_REEL_IN`, `COL_CRUISE_LAND_RAD`,
+`VZ_LAND_SP`, `test_yaw_rotation_invariance.py`.
+
+### Simtest results (AltitudeHoldController era)
+
+- `test_steady_flight_lua`: 3/3 tests pass (min_alt=15.6 m, orbit_r_max=3.2 m, no bad events)
+- `test_pump_cycle_lua`: passes (total_net=560 J, 3 cycles each positive, no bad events)

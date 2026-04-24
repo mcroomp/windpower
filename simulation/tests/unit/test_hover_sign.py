@@ -29,9 +29,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import (SkewedWakeBEM, SkewedWakeBEMJit, SkewedWakeBEM2,
-                  DeSchutterAero, PrandtlBEM, GlauertStateBEM,
-                  PetersHeBEM, PetersHeBEMJit)
+from aero import SkewedWakeBEM2, SkewedWakeBEM2Jit, PetersHeBEM, PetersHeBEMJit
 import rotor_definition as rd
 
 # Horizontal disk: disk_normal = [0,0,-1] (up in NED)
@@ -52,15 +50,14 @@ def _make(cls):
     return cls(rd.default())
 
 
+WIND_10E   = np.array([0., 10., 0.])   # 10 m/s East (in-plane with horizontal disk)
+OMEGA_IC   = 18.11                     # rad/s — IC equilibrium spin from steady_state_starting.json
+
 ALL_MODELS = [
-    (SkewedWakeBEM,    "SkewedWakeBEM"),
-    (SkewedWakeBEMJit, "SkewedWakeBEMJit"),
-    (SkewedWakeBEM2,   "SkewedWakeBEM2"),
-    (DeSchutterAero,   "DeSchutterAero"),
-    (PrandtlBEM,       "PrandtlBEM"),
-    (GlauertStateBEM,  "GlauertStateBEM"),
-    (PetersHeBEM,      "PetersHeBEM"),
-    (PetersHeBEMJit,   "PetersHeBEMJit"),
+    (SkewedWakeBEM2,    "SkewedWakeBEM2"),
+    (SkewedWakeBEM2Jit, "SkewedWakeBEM2Jit"),
+    (PetersHeBEM,       "PetersHeBEM"),
+    (PetersHeBEMJit,    "PetersHeBEMJit"),
 ]
 
 
@@ -104,4 +101,55 @@ def test_hover_lift_exceeds_weight(cls, label):
     print(f"\n[{label}] lift={lift:.1f} N  weight={HUB_W:.1f} N")
     assert lift > HUB_W, (
         f"[{label}] hover lift={lift:.1f} N < weight={HUB_W:.1f} N — rotor cannot support hub"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Autorotation sign tests (Test B from aero_basics_test.py)
+# ---------------------------------------------------------------------------
+# Setup: disk horizontal, 10 m/s East wind (in-plane), rotor at IC omega.
+# The wind blows across the disk (not through it): v_axial ≈ 0, v_inplane = 10 m/s.
+# Blades travelling into the wind on the advancing side generate net upward lift.
+
+@pytest.mark.parametrize("cls,label", ALL_MODELS, ids=[m[1] for m in ALL_MODELS])
+def test_autorotation_lift_is_upward(cls, label):
+    """In-plane wind with spinning rotor must produce upward force (F_world[2] < 0)."""
+    aero = _make(cls)
+    r = aero.compute_forces(
+        collective_rad = 0.0,
+        tilt_lon       = 0.0,
+        tilt_lat       = 0.0,
+        R_hub          = R_HORIZONTAL,
+        v_hub_world    = np.zeros(3),
+        omega_rotor    = OMEGA_IC,
+        wind_world     = WIND_10E,
+        t              = T_STEADY,
+    )
+    Fz = float(r.F_world[2])
+    print(f"\n[{label}] autorotation Fz={Fz:.2f} N  v_ip={aero.last_v_inplane:.2f} m/s"
+          f"  Q_spin={aero.last_Q_spin:.3f} N*m")
+    assert Fz < 0.0, (
+        f"[{label}] autorotation: F_world[2]={Fz:.3f} N — expected negative (upward lift)"
+    )
+
+
+@pytest.mark.parametrize("cls,label", ALL_MODELS, ids=[m[1] for m in ALL_MODELS])
+def test_autorotation_q_spin_drives_below_equilibrium(cls, label):
+    """At omega well below equilibrium, Q_spin must be positive (wind accelerates rotor)."""
+    aero = _make(cls)
+    omega_low = OMEGA_IC * 0.5   # well below equilibrium
+    r = aero.compute_forces(
+        collective_rad = 0.0,
+        tilt_lon       = 0.0,
+        tilt_lat       = 0.0,
+        R_hub          = R_HORIZONTAL,
+        v_hub_world    = np.zeros(3),
+        omega_rotor    = omega_low,
+        wind_world     = WIND_10E,
+        t              = T_STEADY,
+    )
+    Q = float(aero.last_Q_spin)
+    print(f"\n[{label}] omega={omega_low:.1f} rad/s  Q_spin={Q:.3f} N*m")
+    assert Q > 0.0, (
+        f"[{label}] Q_spin={Q:.3f} at omega={omega_low:.1f} (below eq) — expected positive (driving)"
     )

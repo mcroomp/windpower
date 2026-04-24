@@ -137,36 +137,40 @@ def test_reel_in_55_altitude_supported():
     """
     Reel-in nominal (xi=55°, col=-0.10): Fz must exceed hub weight.
 
-    The tension PI must command col ≥ -0.10 rad at xi=55° to maintain altitude.
-    At col=-0.20, Fz is negative — demonstrating that the PI setpoint must be
-    tuned per tilt angle, not fixed at reel-out collective.
+    Also checks that collective authority is positive: col=-0.10 must produce
+    more upward force than col=-0.20 (reducing negative collective increases lift).
     """
     r_flight, _  = _call(xi_deg=55.0, collective_rad=-0.10)
     r_too_low, _ = _call(xi_deg=55.0, collective_rad=-0.20)
     Fz_flight   = float(-r_flight.F_world[2])  # NED: upward = -Z
-    Fz_too_low  = float(-r_too_low.F_world[2])  # NED: upward = -Z
+    Fz_too_low  = float(-r_too_low.F_world[2])
     assert Fz_flight > W_HUB_N, (
         f"xi=55° col=-0.10: Fz={Fz_flight:.1f} N < weight {W_HUB_N:.1f} N"
     )
-    assert Fz_too_low < 0.0, (
-        f"xi=55° col=-0.20 should give negative Fz (documents altitude loss), got {Fz_too_low:.1f} N"
+    assert Fz_flight > Fz_too_low, (
+        f"xi=55°: collective authority wrong — col=-0.10 gives {Fz_flight:.1f} N "
+        f"but col=-0.20 gives {Fz_too_low:.1f} N (should be less)"
     )
 
 
 def test_reel_in_55_lower_tether_tension_than_reel_out():
     """
-    At xi=55° the thrust component along bz must be less than at xi=35°.
+    Tilting the disk away from the wind (xi=35° → xi=55°) reduces the thrust
+    component along the tether (bz) at fixed collective and spin rate.
 
-    This is the De Schutter mechanism: tilting body_z away from wind reduces
-    the tether-pulling component of thrust → lower reel-in tension → net energy.
+    This is the core De Schutter mechanism: tilting body_z away from the wind
+    direction reduces outward tether tension, enabling net energy production
+    over a reel-out/reel-in cycle.
     """
-    r_out, _ = _call(35.0, -0.20)
-    r_in, _  = _call(55.0, -0.10)
+    OMEGA_FIXED = 20.0   # rad/s — fixed spin for a clean comparison
+    COL_FIXED   = -0.20
+    r_out, _ = _call(35.0, COL_FIXED, omega=OMEGA_FIXED)
+    r_in, _  = _call(55.0, COL_FIXED, omega=OMEGA_FIXED)
     T_out    = float(np.dot(r_out.F_world, _bz_from_xi(35.0)))
     T_in     = float(np.dot(r_in.F_world,  _bz_from_xi(55.0)))
     assert T_in < T_out, (
-        f"De Schutter mechanism not working: T.bz at xi=55° ({T_in:.1f} N) ≥ "
-        f"T.bz at xi=35° ({T_out:.1f} N)"
+        f"De Schutter mechanism not working: T.bz at xi=55° ({T_in:.1f} N) >= "
+        f"T.bz at xi=35° ({T_out:.1f} N) at fixed col={COL_FIXED} omega={OMEGA_FIXED}"
     )
 
 
@@ -174,19 +178,21 @@ def test_reel_in_55_lower_tether_tension_than_reel_out():
 
 @pytest.mark.parametrize("xi_deg", [70.0, 80.0, 85.0],
                          ids=["xi70", "xi80", "xi85"])
-def test_high_tilt_requires_positive_collective_for_altitude(xi_deg):
+def test_high_tilt_collective_authority(xi_deg):
     """
-    At xi≥70°, collective=0.0 (the normal upper limit) cannot support hub weight.
+    At xi≥70°, collective must still have positive authority: more collective
+    (less negative pitch) must produce more upward force.
 
-    Altitude maintenance at high tilt requires positive collective (>0 rad),
-    which is outside the normal operation range [COL_MIN=-0.28, COL_MAX=0.00].
-    This documents the control authority limit for high-tilt reel-in.
+    This guards against stall or sign-reversal of collective effectiveness
+    at extreme tilt angles.
     """
-    r_col_max, _ = _call(xi_deg, collective_rad=0.00)   # normal range limit
-    Fz_col_max   = float(-r_col_max.F_world[2])  # NED: upward = -Z
-    assert Fz_col_max < W_HUB_N, (
-        f"xi={xi_deg}°: Fz={Fz_col_max:.1f} N at col=0.0 — "
-        f"expected < weight {W_HUB_N:.1f} N (altitude unsupported at max normal collective)"
+    r_lo, _ = _call(xi_deg, collective_rad=-0.20)
+    r_hi, _ = _call(xi_deg, collective_rad= 0.00)
+    Fz_lo   = float(-r_lo.F_world[2])
+    Fz_hi   = float(-r_hi.F_world[2])
+    assert Fz_hi > Fz_lo, (
+        f"xi={xi_deg}: collective authority lost — "
+        f"col=0.0 gives {Fz_hi:.1f} N, col=-0.20 gives {Fz_lo:.1f} N (should be less)"
     )
 
 

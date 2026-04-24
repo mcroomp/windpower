@@ -33,8 +33,8 @@ from aero import create_aero
 import argparse
 _p = argparse.ArgumentParser()
 _p.add_argument("--model", default="skewed_wake_numpy",
-    choices=["skewed_wake","skewed_wake_numpy","peters_he","peters_he_numpy",
-             "deschutter","prandtl","glauert"])
+    choices=["skewed_wake","skewed_wake_numpy","skewed_wake2","skewed_wake2_jit",
+             "peters_he","peters_he_numpy","deschutter","prandtl","glauert"])
 _args = _p.parse_args()
 
 rotor  = rd.default()

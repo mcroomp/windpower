@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics        import RigidBodyDynamics
 from sitl_interface  import SITLInterface
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
-from aero            import SkewedWakeBEMJit
+from aero            import create_aero
 from tether          import TetherModel
 from frames          import build_orb_frame, build_vel_aligned_frame
 from sensor          import make_sensor, SpinSensor
@@ -236,7 +236,7 @@ def run_mediator(args, trajectory=None):
     sitl   = SITLInterface(
         recv_port=args.sitl_recv_port,
     )
-    aero   = SkewedWakeBEMJit.from_definition(rotor)
+    aero   = create_aero(rotor)
     anchor_ned = np.array(cfg["anchor_ned"], dtype=float)
     tether = TetherModel(
         anchor_ned             = anchor_ned,
