@@ -60,7 +60,7 @@ DEFAULTS: dict = {
     "rest_length": _ss["rest_length"],  # unstretched tether length [m]
     "anchor_ned": [0.0, 0.0, 0.0],  # tether anchor position NED [m]
                                      # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local NED
-    "tension_safety_n":  496.0,     # WinchController: stop paying out above this tension [N]
+    "tension_safety_n":  496.0,     # WinchController T_max_n: reel-out threshold [N]
                                      # ≈ 80% of Dyneema SK75 1.9 mm break load (620 N)
 
     # ── Startup kinematic ramp ────────────────────────────────────────────────

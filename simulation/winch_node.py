@@ -97,13 +97,13 @@ class WinchNode:
         self._wind_ned  = self._anemometer.measure(wind_world_ned)
 
     def receive_command(self, winch_speed_ms: float, dt: float) -> None:
-        """Execute a winch speed command from the planner.
+        """Step the winch tension regulator.
 
-        Delegates to WinchController which enforces tension safety limits.
-        winch_speed_ms -- reel speed [m/s]: +ve = pay out, -ve = reel in
-        dt             -- physics timestep [s]
+        winch_speed_ms is ignored — WinchController is self-contained and
+        decides its own reel direction from the stored tension reading.
+        dt -- physics timestep [s]
         """
-        self._winch.step(winch_speed_ms, self._tension_n, dt)
+        self._winch.step(self._tension_n, dt)
 
     @property
     def rest_length(self) -> float:

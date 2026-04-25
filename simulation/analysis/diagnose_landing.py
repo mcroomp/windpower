@@ -109,7 +109,7 @@ def run():
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=_IC.rest_length,
                          axle_attachment_length=_ROTOR.axle_attachment_length_m)
     winch  = WinchController(rest_length=_IC.rest_length,
-                              tension_safety_n=TENSION_SAFETY_N,
+                              T_max_n=TENSION_SAFETY_N,
                               min_length=MIN_TETHER_M)
     trajectory = DeschutterPlanner(
         t_reel_out=T_REEL_OUT, t_reel_in=T_REEL_IN, t_transition=T_TRANSITION,
@@ -210,7 +210,7 @@ def run():
                 "tension_n": tension_now, "tether_length_m": winch.rest_length,
             }
             pump_cmd = trajectory.step(state_pkt, DT)
-            winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
+            winch.step(tension_now, DT)
             tether.rest_length = winch.rest_length
             _aq = pump_cmd["attitude_q"]
             _bz_target = (None if quat_is_identity(_aq)
@@ -226,7 +226,7 @@ def run():
                 "tension_n": tension_now, "tether_length_m": winch.rest_length,
             }
             land_cmd = landing_planner.step(state_pkt, DT)
-            winch.step(land_cmd["winch_speed_ms"], tension_now, DT)
+            winch.step(tension_now, DT)
             tether.rest_length = winch.rest_length
             land_phase = land_cmd["phase"]
             body_z_eq  = land_cmd["body_z_eq"]

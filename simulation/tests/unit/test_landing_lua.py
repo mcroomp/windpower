@@ -115,7 +115,7 @@ def _run_landing() -> dict:
     # ── Physics runner (shared across both phases) ────────────────────────
     runner  = PhysicsRunner(_ROTOR, _IC, WIND)
     winch   = WinchController(rest_length=LAND_TETHER_M,
-                               tension_safety_n=TENSION_SAFETY_N,
+                               T_max_n=TENSION_SAFETY_N,
                                min_length=MIN_TETHER_M)
     pid_lon = RatePID(kp=KP_INNER)
     pid_lat = RatePID(kp=KP_INNER)
@@ -148,7 +148,7 @@ def _run_landing() -> dict:
             "tension_n": runner.tension_now, "tether_length_m": winch.tether_length_m,
         }
         pump_cmd = trajectory.step(state_pkt, DT)
-        winch.step(pump_cmd["winch_speed_ms"], runner.tension_now, DT)
+        winch.step(runner.tension_now, DT)
 
         collective_rad = acro.slew_collective(
             COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
@@ -234,7 +234,7 @@ def _run_landing() -> dict:
              "tether_length_m": winch.rest_length},
             DT,
         )
-        winch.step(land_cmd["winch_speed_ms"], runner.tension_now, DT)
+        winch.step(runner.tension_now, DT)
 
         # Send final_drop substate to Lua when planner transitions
         if not floor_hit and t_final_start is None and land_cmd["phase"] == "final_drop":

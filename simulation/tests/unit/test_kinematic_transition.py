@@ -161,7 +161,7 @@ def _run_pumping_cycle(
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=axle_attach)
     winch  = WinchController(rest_length=REST_LENGTH0,
-                             tension_safety_n=TENSION_SAFETY_N)
+                             T_max_n=TENSION_SAFETY_N)
     trajectory = DeschutterPlanner(
         t_reel_out          = 30.0,
         t_reel_in           = 30.0,
@@ -231,7 +231,7 @@ def _run_pumping_cycle(
         cmd = trajectory.step(state_pkt, DT)
 
         # 3. WinchController
-        winch.step(cmd["winch_speed_ms"], tension_now, DT)
+        winch.step(tension_now, DT)
         tether.rest_length = winch.rest_length
 
         # 4. Collective (DeschutterPlanner returns collective_rad directly); servo-slewed

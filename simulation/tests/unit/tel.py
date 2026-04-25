@@ -28,6 +28,10 @@ tether_force        [3]        tether force NED [N] (zeros if slack)
 body_z_eq           [3]|null   orbit body-z setpoint (NED unit vec), or null
 wind_ned            [3]        ambient wind NED [m/s]
 tension_setpoint    float      tension PI setpoint [N] (0 if not applicable)
+thrust_cmd          float      ThrustCommand.thrust [0..1] (0 if N/A)
+winch_speed_ms      float      winch reel speed [m/s] +ve=out, -ve=in (0 if N/A)
+raw_coll            float      AP unclamped collective integrator state [rad] (0 if N/A)
+tilt_frac           float      AP tilt fraction 0..1 (0=alt-hold, 1=full tether tilt)
 aero_F              [3]        aero force NED [N]
 aero_T              float      aero thrust magnitude [N]
 aero_v_axial        float      axial inflow velocity [m/s]
@@ -70,6 +74,10 @@ def make_tel(
     body_z_eq: Optional[np.ndarray] = None,
     phase: str = "",
     tension_setpoint: float = 0.0,
+    thrust_cmd: float = 0.0,
+    winch_speed_ms: float = 0.0,
+    raw_coll: float = 0.0,
+    tilt_frac: float = 0.0,
     aero_result=None,
     aero_obj=None,
     tether_force: Optional[np.ndarray] = None,
@@ -131,6 +139,10 @@ def make_tel(
                                if body_z_eq is not None else None),
         "wind_ned":           [float(v) for v in wind_ned],
         "tension_setpoint":   float(tension_setpoint),
+        "thrust_cmd":         float(thrust_cmd),
+        "winch_speed_ms":     float(winch_speed_ms),
+        "raw_coll":           float(raw_coll),
+        "tilt_frac":          float(tilt_frac),
         # rotation and attitude
         "rpy":                [roll, pitch, yaw],
         "omega_body":         om.tolist(),

@@ -60,6 +60,7 @@ COLUMNS: list[str] = [
     "collective_rad", "collective_norm",
     "tilt_lon", "tilt_lat",
     "tension_setpoint", "collective_from_tension_ctrl", "target_alt_m",
+    "thrust_cmd", "winch_speed_ms", "raw_coll", "tilt_frac",
     "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
     "aero_Q_drag", "aero_Q_drive",
     "F_x", "F_y", "F_z",                # net aero force NED [N]
@@ -146,6 +147,10 @@ class TelRow:
     tension_setpoint:             float = 0.0
     collective_from_tension_ctrl: float = 0.0
     target_alt_m:                 float = 0.0
+    thrust_cmd:                   float = 0.0   # ThrustCommand.thrust [0..1]
+    winch_speed_ms:               float = 0.0   # winch reel speed [m/s] +ve=out -ve=in
+    raw_coll:                     float = 0.0   # AP unclamped integrator [rad]
+    tilt_frac:                    float = 0.0   # AP tilt fraction 0..1
 
     aero_T:         float = 0.0
     aero_v_axial:   float = 0.0
@@ -351,6 +356,10 @@ class TelRow:
             tension_setpoint             = float(d.get("tension_setpoint",             0.0)),
             collective_from_tension_ctrl = float(d.get("collective_from_tension_ctrl", 0.0)),
             target_alt_m                 = float(d.get("target_alt_m",                 0.0)),
+            thrust_cmd                   = float(d.get("thrust_cmd",                   0.0)),
+            winch_speed_ms               = float(d.get("winch_speed_ms",               0.0)),
+            raw_coll                     = float(d.get("raw_coll",                     0.0)),
+            tilt_frac                    = float(d.get("tilt_frac",                    0.0)),
             aero_T              = float(d.get("aero_T",           0.0)),
             aero_v_axial        = float(d.get("aero_v_axial",     0.0)),
             aero_v_inplane      = float(d.get("aero_v_inplane",   0.0)),

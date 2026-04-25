@@ -136,7 +136,7 @@ def _run_pumping() -> dict:
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND)
     winch   = WinchController(rest_length=_IC.rest_length,
-                               tension_safety_n=PUMP_SAFETY_N,
+                               T_max_n=PUMP_SAFETY_N,
                                min_length=2.0)
     pid_lon = RatePID(kp=KP_INNER)
     pid_lat = RatePID(kp=KP_INNER)
@@ -191,7 +191,7 @@ def _run_pumping() -> dict:
             if ch2 is not None: pitch_sp = _pwm_to_rate(ch2)
             if ch3 is not None: col_rad  = _pwm_to_col(ch3)
 
-        winch.step(speed_now, tension_now, DT)
+        winch.step(tension_now, DT)
 
         omega_body    = hub_state["R"].T @ hub_state["omega"]
         omega_body[2] = 0.0

@@ -97,7 +97,7 @@ T_PUMPING_END        = T_REEL_OUT + T_REEL_IN
 def _run_landing() -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
     winch  = WinchController(rest_length=_IC.rest_length,
-                              tension_safety_n=TENSION_SAFETY_N,
+                              T_max_n=TENSION_SAFETY_N,
                               min_length=MIN_TETHER_M)
 
     trajectory = DeschutterPlanner(
@@ -179,7 +179,7 @@ def _run_landing() -> dict:
             }
             pump_cmd = trajectory.step(state_pkt, DT)
 
-            winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
+            winch.step(tension_now, DT)
 
             collective_rad = acro.slew_collective(
                 COL_MIN_RAD + pump_cmd["thrust"] * (COL_MAX_RAD - COL_MIN_RAD), DT
@@ -221,7 +221,7 @@ def _run_landing() -> dict:
 
             body_z_eq = land_cmd["body_z_eq"]
 
-            winch.step(land_cmd["winch_speed_ms"], tension_now, DT)
+            winch.step(tension_now, DT)
 
             if land_phase in ("descent",):
                 tensions_land.append(tension_now)

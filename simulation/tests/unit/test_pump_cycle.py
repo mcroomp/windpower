@@ -79,7 +79,7 @@ T_CYCLE      = T_REEL_OUT + T_REEL_IN
 def _run_pumping_repeated() -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
     winch  = WinchController(rest_length=_IC.rest_length,
-                              tension_safety_n=TENSION_SAFETY_N,
+                              T_max_n=TENSION_SAFETY_N,
                               min_length=2.0)
     trajectory = DeschutterPlanner(
         t_reel_out     = T_REEL_OUT,
@@ -138,7 +138,7 @@ def _run_pumping_repeated() -> dict:
             tension_pi.setpoint = pump_cmd["tension_setpoint"]
             tension_pi.coll_min = pump_cmd["col_min_rad"]
 
-        winch.step(pump_cmd["winch_speed_ms"], tension_now, DT)
+        winch.step(tension_now, DT)
 
         # TensionPI at 400 Hz: reads actual tension, outputs collective target
         collective_rad = tension_pi.update(tension_now, DT)
