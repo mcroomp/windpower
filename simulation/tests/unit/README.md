@@ -63,7 +63,8 @@ All three start from the same `steady_state_starting.json` IC (written by `test_
 | Python | Lua | Scenario |
 |--------|-----|----------|
 | `test_steady_flight.py` | `test_steady_flight_lua.py` | 90 s orbit from IC |
-| `test_pump_cycle.py` | `test_pump_cycle_lua.py` | N De Schutter reel-out/reel-in cycles from IC |
+| `test_pump_cycle.py` | `test_pump_cycle_lua.py` | N De Schutter cycles — TensionPI collective (mirrors Lua) |
+| `test_pump_cycle_unified.py` | — | N De Schutter cycles — ThrustCommand/ThrustApController architecture |
 | `test_landing.py` | `test_landing_lua.py` | reel-in only (no reel-out) swings hub to xi~80°, then VZ descent + final drop |
 
 IC generation is separate:

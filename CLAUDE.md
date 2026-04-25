@@ -6,7 +6,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 
 **Current phase:** Phase 3, Milestone 3. `rawes.lua` rewritten to use **AltitudeHoldController** (`bz_altitude_hold`): elevation rate-limited toward `RAWES_ALT` target, gravity-compensated disk tilt, replaces orbit tracking. Pumping uses **TensionPI** inside rawes.lua (mirrors Python `controller.TensionPI`). Pre-GPS: gyro feedthrough only. GPS fusion uses dual GPS (EK3_SRC1_YAW=2, RELPOSNED heading): `_el_initialized` fires on first valid position fix. **Next: validate `test_lua_flight_steady` (stack) with new algorithm, then `test_pumping_cycle` (stack).**
 
-**Simtest status (~16 simtests, ~13 PASS):** All Python-only simtests pass (9 in `-m simtest` run). `test_steady_flight_lua` (3 tests) and `test_pump_cycle_lua` pass. `test_landing_lua`, `test_kinematic_transition` (pre-existing failures). `test_landing` (Python): pre-existing failure under investigation. `test_gyroscopic_orbit.py` deleted (tested settled design decision, had backwards assertion).
+**Simtest status (~16 simtests, ~13 PASS):** All Python-only simtests pass (9 in `-m simtest` run). `test_steady_flight_lua` (3 tests) and `test_pump_cycle_lua` pass. `test_landing_lua`, `test_kinematic_transition` (pre-existing failures). `test_landing` (Python): pre-existing failure under investigation. `test_gyroscopic_orbit.py` deleted (tested settled design decision, had backwards assertion). `test_pump_cycle_unified.py` uses ThrustCommand/ThrustApController architecture (replaces TensionRateCommand/PumpingApController).
 
 **Stack test status (parallel -n 8, 9 PASS):** test_arm_minimal, test_armon, test_gps_fusion_layers, test_gust_recovery, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle` and `test_landing_stack` (stack): in development.
 
@@ -74,7 +74,8 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **SCR_ENABLE bootstrap:** After EEPROM wipe, scripting only starts if `SCR_ENABLE=1` is already in EEPROM. `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).
 - **Python orbit-tracking (legacy, Python simtests only):** `orbit_tracked_body_z_eq` (azimuthal), `orbit_tracked_body_z_eq_3d` (3D Rodrigues). Used only by Python-only simtests. **`OrbitTracker` class is removed** — replaced by `AltitudeHoldController` in all callers including `mediator.py`. **Not used in rawes.lua** — Lua uses `bz_altitude_hold` (AltitudeHoldController logic).
 - **AltitudeHoldController** (`controller.py`): primary cyclic controller for altitude-holding flight (pumping cycle, landing approach, mediator internal_controller path). Converts a target altitude setpoint to `body_z_eq` with gravity compensation. `from_pos(ic.pos, slew_rate_rad_s)` → initialized at IC elevation. `update(pos, target_alt_m, tension_n, mass_kg, dt)` → rate-limited `body_z_eq`. Uses `compute_bz_altitude_hold` internally (stateless primitive: pos + target_el_rad + tension + mass → body_z_eq).
-- **TensionPI runs at 400 Hz (physics loop); DeschutterPlanner runs at 10 Hz.** Planner provides `tension_setpoint` and `col_min_rad` to TensionPI at 10 Hz; TensionPI adjusts collective every physics step. `planner.step()` returns `col_min_rad` key for this purpose. Correct pattern: `if i % planner_every == 0: pump_cmd = planner.step(state, DT_PLANNER); tension_pi.setpoint = ...; tension_pi.coll_min = pump_cmd["col_min_rad"]`. Then every step: `col = tension_pi.update(tension_now, DT)`.
+- **TensionPI runs at 400 Hz (physics loop); DeschutterPlanner runs at 10 Hz.** Planner provides `tension_setpoint` and `col_min_rad` to TensionPI at 10 Hz; TensionPI adjusts collective every physics step. `planner.step()` returns `col_min_rad` key for this purpose. Correct pattern: `if i % planner_every == 0: pump_cmd = planner.step(state, DT_PLANNER); tension_pi.setpoint = ...; tension_pi.coll_min = pump_cmd["col_min_rad"]`. Then every step: `col = tension_pi.update(tension_now, DT)`. **Note:** TensionPI is used by Lua stack tests (`test_pump_cycle_lua`) and the Python `test_pump_cycle.py`. The newer `test_pump_cycle_unified.py` uses ThrustCommand instead — see below.
+- **ThrustCommand protocol (Python simtest pumping):** `pumping_planner.PumpingGroundController` emits `ThrustCommand(thrust=0..1, alt_m, phase)` at 10 Hz. `thrust=0` = minimum tension (AP tilts body_z to tether direction, collective at `coll_min`); `thrust=1` = maximum tension (AP uses altitude-hold body_z, collective at `coll_max`). Reel-out: thrust ramps 0 → `target_thrust` over `thrust_ramp_s` seconds. Transition/reel-in/hold: thrust=0. `ThrustApController` maps thrust directly to body_z (slerp between tether_dir and alt_hold) and collective (linear map, slewed at `coll_slew_rate`). No tension measurement needed on the AP side. `WinchController` adds `T_reel_in_start` threshold — reel-in waits until `T < T_reel_in_start` before moving, ensuring AP has reached low-tension mode. Telemetry column: `thrust_cmd` (replaces `tension_rate_cmd`).
 - **IC generation targets 300 N tension.** `test_generate_ic.py::test_create_ic` runs 60 s warmup with TensionPI targeting 300 N (midway between TENSION_IN=226 N and TENSION_OUT=435 N). `coll_eq_rad` in the IC is the TensionPI-settled collective at that tension — not a hardcoded constant. TensionPI warm-starts at this collective in all simtests.
 - **PhysicsCore** (`simulation/physics_core.py`): shared 400 Hz physics integration used by both `mediator.py` and simtests. Owns `RigidBodyDynamics`, `create_aero`, `TetherModel`, `AcroController(use_servo=True)`, spin ODE, angular damping (`base_k_ang` + `k_yaw`), `KinematicStartup`, `lock_orientation`. `step(dt, col, tilt_lon, tilt_lat)` for raw-tilt callers (mediator/Lua path); `step_acro(dt, col, body_z_eq)` for AcroController path (Python simtests). **PhysicsRunner** (`tests/unit/simtest_runner.py`): thin testing wrapper around `PhysicsCore`. `step(dt, col, body_z_eq)` → `core.step_acro()`; `step_raw(dt, col, tilt_lon, tilt_lat)` → `core.step()`. `for_warmup(rotor, pos, R0, rest_length, coll_eq_rad, omega_spin, wind)` classmethod for IC generation.
 - **WinchNode** (`winch_node.py`): mediator calls `update_sensors(tension, wind_world)` (physics only); planner calls `get_telemetry()` + `receive_command()`. Wind seed from `Anemometer.measure()` at 3 m height.
@@ -127,7 +128,13 @@ simulation/
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
 ├── gcs.py               MAVLink GCS client (arm, mode, RC override, params)
-├── telemetry_csv.py     Canonical 67-column CSV schema (TelRow, COLUMNS, heartbeat)
+├── pumping_planner.py   ThrustCommand dataclass + PumpingGroundController (10 Hz phase schedule,
+│                        thrust ramp 0→target during reel-out, 0 during transition/reel-in/hold)
+├── ap_controller.py     ThrustApController (400 Hz AP side): maps ThrustCommand.thrust [0..1]
+│                        to body_z (slerp tether_dir↔alt_hold) + collective (linear map, slewed)
+├── winch.py             WinchController — two-layer program mode (symmetric ΔL, T_reel_in_start
+│                        wait) + legacy 3-zone mode; set_phase() at 10 Hz, step() at 400 Hz
+├── telemetry_csv.py     Canonical 67-column CSV schema (TelRow, COLUMNS, heartbeat); thrust_cmd column
 ├── analysis/
 │   ├── flight_log.py    Unified data loader — FlightLog.load(log_dir), FlightLog.buckets(bucket_s),
 │   │                    FlightEvent, Bucket; reads all log sources into one structure
@@ -145,11 +152,12 @@ simulation/
 │   ├── visualize_torque.py  Torque telemetry 3-panel replay (psi_dot, motor throttle, PWM)
 │   └── torque_telemetry.py  TorqueTelemetryFrame dataclass for torque replay
 └── tests/
-    ├── unit/            Windows native, no Docker (~494 tests: 483 fast + ~11 simtests)
+    ├── unit/            Windows native, no Docker (~500 tests: ~487 fast + ~11 simtests + 2 simtest pumping)
     │   ├── simtest_runner.py    PhysicsRunner — thin wrapper around PhysicsCore for simtests.
     │   │                        step(dt, col, body_z_eq) → core.step_acro() [Python-controlled];
     │   │                        step_raw(dt, col, tilt_lon, tilt_lat) → core.step() [Lua-controlled].
-    │   │                        Caller owns: DeschutterPlanner, TensionPI, WinchController.
+    │   │                        Caller owns: PumpingGroundController/ThrustApController/WinchController
+    │   │                        (unified simtest) or DeschutterPlanner/TensionPI/WinchController (Lua simtest).
     │   ├── simtest_ic.py        load_ic() — loads steady_state_starting.json
     │   └── simtest_log.py       SimtestLog, BadEventLog
     └── sitl/            Docker; all SITL/stack tests live here
