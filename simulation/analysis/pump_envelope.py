@@ -429,7 +429,7 @@ def pump_cycle_report(csv_path: str) -> None:
             colls    = np.array([r.collective_rad   for r in grp])
             alts     = np.array([-r.pos_z           for r in grp])
             tsps     = np.array([r.tension_setpoint for r in grp])
-            tgts     = np.array([r.target_alt_m     for r in grp])
+            tgts     = np.array([r.gnd_alt_cmd_m     for r in grp])
 
             # Energy via rest_length trapezoidal integration
             rls   = np.array([r.tether_rest_length for r in grp])
@@ -517,28 +517,24 @@ def pump_cycle_report(csv_path: str) -> None:
         print(f"  Gap to optimal:                +{gap:.0f} J{pct_s}")
         print()
 
-    # ── TensionPI saturation ───────────────────────────────────────────────────
-    COL_EPS = 0.005
-    print(f"  TensionPI SATURATION (collective pinned at floor/ceiling, all cycles)")
-    print(f"  {'phase':>10}  {'n_rows':>7}  {'floor_%':>9}  {'ceil_%':>8}  note")
-    print(f"  {'-'*10}  {'-'*7}  {'-'*9}  {'-'*8}  {'-'*36}")
-    for ph in ("reel-out", "reel-in"):
-        colls = []
+    # ── AP controller diagnostics (TensionApController) ───────────────────────
+    print(f"  AP CONTROLLER DIAGNOSTICS (TensionApController + AcroControllerSitl)")
+    print(f"  {'phase':>10}  {'n_rows':>7}  {'sat_%':>7}  note")
+    print(f"  {'-'*10}  {'-'*7}  {'-'*7}  {'-'*36}")
+    for ph in ("reel-out", "transition", "reel-in"):
+        sat_vals = []
         for cy in range(1, n_cycles + 1):
-            colls.extend([r.collective_rad for r in groups.get((cy, ph), [])])
-        if not colls:
+            sat_vals.extend([r.coll_saturated for r in groups.get((cy, ph), [])])
+        if not sat_vals:
             continue
-        n         = len(colls)
-        n_floor   = sum(1 for c in colls if c <= COL_MIN + COL_EPS)
-        n_ceil    = sum(1 for c in colls if c >= COL_MAX - COL_EPS)
-        pct_floor = 100.0 * n_floor / n
-        pct_ceil  = 100.0 * n_ceil  / n
+        n       = len(sat_vals)
+        pct_sat = 100.0 * sum(sat_vals) / n
         note = ""
-        if ph == "reel-in"  and pct_floor > 50:
-            note = "pinned: actual T_in limited by aero floor"
-        elif ph == "reel-out" and pct_ceil > 50:
-            note = "pinned: actual T_out limited by aero ceiling"
-        print(f"  {ph:>10}  {n:>7}  {pct_floor:>9.1f}  {pct_ceil:>8.1f}  {note}")
+        if ph == "reel-in"  and pct_sat > 50:
+            note = "collective pinned: T_in limited by aero floor"
+        elif ph == "reel-out" and pct_sat > 50:
+            note = "collective pinned: T_out limited by aero ceiling"
+        print(f"  {ph:>10}  {n:>7}  {pct_sat:>7.1f}  {note}")
     print()
 
     # ── Altitude hold quality ─────────────────────────────────────────────────
@@ -551,7 +547,7 @@ def pump_cycle_report(csv_path: str) -> None:
         for cy in range(1, n_cycles + 1):
             grp = pruned_groups.get((cy, ph), [])
             alts.extend([-r.pos_z      for r in grp])
-            tgts.extend([r.target_alt_m for r in grp])
+            tgts.extend([r.gnd_alt_cmd_m for r in grp])
         if not alts:
             continue
         alts_arr = np.array(alts)
@@ -565,58 +561,42 @@ def pump_cycle_report(csv_path: str) -> None:
               f"{alts_arr.std():>7.2f}  {bias_s:>7}")
     print()
 
-    # ── Orbital trajectory ────────────────────────────────────────────────────
-    # bz_outward: horizontal component of body_z_eq in the outward direction
-    # (= dot([pos_x,pos_y]/r_horiz, [bz_eq_x,bz_eq_y])).
-    # +1 = fully outward (cyclic pushes hub away from anchor).
-    # 0  = no horizontal outward component (vertical disk, no resistance).
-    # -1 = fully inward (cyclic pulls hub toward anchor).
-    # During reel-in, a high positive value means the cyclic is fighting the
-    # tether's inward pull; more tension is needed to maintain the reel-in rate.
+    # ── Orbital trajectory + elevation tracking ───────────────────────────────
 
     def _r_horiz(r) -> float:
         return math.sqrt(r.pos_x**2 + r.pos_y**2)
 
-    def _el_deg(r) -> float:
+    def _el_actual_deg(r) -> float:
         tlen = math.sqrt(r.pos_x**2 + r.pos_y**2 + r.pos_z**2)
         return math.degrees(math.asin(max(-1.0, min(1.0, -r.pos_z / tlen)))) if tlen > 0.1 else 0.0
 
-    def _bz_outward(r) -> "float | None":
-        rh = math.sqrt(r.pos_x**2 + r.pos_y**2)
-        bh = math.sqrt(r.bz_eq_x**2 + r.bz_eq_y**2)
-        if rh < 1.0 or bh < 1e-6:
-            return None
-        return (r.pos_x * r.bz_eq_x + r.pos_y * r.bz_eq_y) / rh   # dot(outward_hat, bzeq_h)
-
-    print(f"  ORBITAL TRAJECTORY  (bz_outward: +1=cyclic pushes outward, 0=vertical, -1=inward)")
-    print(f"  {'cy':>2}  {'phase':>10}  {'r_start':>8}  {'r_end':>6}  {'dr_m':>6}  "
-          f"{'dr/dt':>6}  {'el_s':>5}  {'el_e':>5}  {'bz_out':>7}  note")
-    print(f"  {'--':>2}  {'-'*10}  {'-'*8}  {'-'*6}  {'-'*6}  "
-          f"{'-'*6}  {'-'*5}  {'-'*5}  {'-'*7}  {'-'*28}")
-
-    reel_in_bz_out_vals: "list[float]" = []
+    print(f"  ORBITAL TRAJECTORY + ELEVATION TRACKING")
+    print(f"  {'cy':>2}  {'phase':>10}  {'r_s':>6}  {'r_e':>6}  {'dr_m':>6}  "
+          f"{'dr/dt':>6}  {'el_s':>5}  {'el_e':>5}  {'el_tgt':>7}  {'el_err':>7}  note")
+    print(f"  {'--':>2}  {'-'*10}  {'-'*6}  {'-'*6}  {'-'*6}  "
+          f"{'-'*6}  {'-'*5}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*22}")
 
     for cy in range(1, n_cycles + 1):
-        for ph in ("reel-out", "hold", "reel-in"):
+        for ph in ("reel-out", "transition", "reel-in"):
             grp = pruned_groups.get((cy, ph), [])
             if len(grp) < 2:
                 continue
 
-            r0, r1     = grp[0], grp[-1]
-            r_start    = _r_horiz(r0)
-            r_end      = _r_horiz(r1)
-            dr         = r_end - r_start
-            duration   = r1.t_sim - r0.t_sim
-            dr_dt      = dr / duration if duration > 0.01 else math.nan
+            r0, r1   = grp[0], grp[-1]
+            r_start  = _r_horiz(r0)
+            r_end    = _r_horiz(r1)
+            dr       = r_end - r_start
+            duration = r1.t_sim - r0.t_sim
+            dr_dt    = dr / duration if duration > 0.01 else math.nan
 
-            el_s = _el_deg(r0)
-            el_e = _el_deg(r1)
+            el_s = _el_actual_deg(r0)
+            el_e = _el_actual_deg(r1)
 
-            bz_vals = [v for v in (_bz_outward(r) for r in grp) if v is not None]
-            bz_mean = float(np.mean(bz_vals)) if bz_vals else math.nan
-
-            if ph == "reel-in" and not math.isnan(bz_mean):
-                reel_in_bz_out_vals.append(bz_mean)
+            # AP elevation target (from TensionApController.elevation_rad)
+            el_tgt_vals = [math.degrees(r.elevation_rad) for r in grp if r.elevation_rad != 0.0]
+            el_tgt      = float(np.mean(el_tgt_vals)) if el_tgt_vals else math.nan
+            el_err      = float(np.mean([_el_actual_deg(r) - math.degrees(r.elevation_rad)
+                                          for r in grp if r.elevation_rad != 0.0])) if el_tgt_vals else math.nan
 
             note = ""
             if ph == "reel-out" and dr > 0:
@@ -624,51 +604,39 @@ def pump_cycle_report(csv_path: str) -> None:
             elif ph == "reel-out" and dr <= 0:
                 note = "WARN: hub not expanding"
             elif ph == "reel-in" and dr < 0:
-                if not math.isnan(bz_mean) and bz_mean > 0.5:
-                    note = "hub retracts but cyclic resists"
-                else:
-                    note = "OK: hub retracts"
+                note = "OK: hub retracts"
             elif ph == "reel-in" and dr >= 0:
                 note = "WARN: hub not retracting"
 
             dr_s    = f"{dr:+.1f}"
             drdt_s  = f"{dr_dt:+.2f}" if not math.isnan(dr_dt) else "  ---"
-            bz_s    = f"{bz_mean:+.3f}" if not math.isnan(bz_mean) else "  ---"
+            tgt_s   = f"{el_tgt:.1f}" if not math.isnan(el_tgt) else "  ---"
+            err_s   = f"{el_err:+.2f}" if not math.isnan(el_err) else "  ---"
 
-            print(f"  {cy:>2}  {ph:>10}  {r_start:>8.1f}  {r_end:>6.1f}  {dr_s:>6}  "
-                  f"{drdt_s:>6}  {el_s:>5.1f}  {el_e:>5.1f}  {bz_s:>7}  {note}")
+            print(f"  {cy:>2}  {ph:>10}  {r_start:>6.1f}  {r_end:>6.1f}  {dr_s:>6}  "
+                  f"{drdt_s:>6}  {el_s:>5.1f}  {el_e:>5.1f}  {tgt_s:>7}  {err_s:>7}  {note}")
     print()
 
-    # ── Reel-in cyclic resistance analysis ────────────────────────────────────
-    if reel_in_bz_out_vals:
-        mean_bz_out = float(np.mean(reel_in_bz_out_vals))
-        print(f"  REEL-IN CYCLIC RESISTANCE ANALYSIS")
-        print(f"  Mean bz_outward during reel-in: {mean_bz_out:+.3f}")
-        if mean_bz_out > 0.1:
-            pct = 100.0 * mean_bz_out
-            print(f"  The cyclic horizontal thrust is {pct:.0f}% in the outward direction,")
-            print(f"  opposing the tether's inward pull.  Higher bz_outward -> higher")
-            print(f"  minimum tension needed to maintain reel-in rate.")
+    # ── Daisy-chain elevation correction ──────────────────────────────────────
+    has_correction = any(
+        r.el_correction_rad != 0.0
+        for grp in pruned_groups.values() for r in grp
+    )
+    if has_correction:
+        print(f"  DAISY-CHAIN ELEVATION CORRECTION (el_corr_ki > 0)")
+        print(f"  {'phase':>10}  {'mean_deg':>9}  {'max_deg':>8}  note")
+        print(f"  {'-'*10}  {'-'*9}  {'-'*8}  {'-'*30}")
+        for ph in ("reel-out", "reel-in"):
+            corrs = []
+            for cy in range(1, n_cycles + 1):
+                corrs.extend([math.degrees(r.el_correction_rad)
+                               for r in pruned_groups.get((cy, ph), [])])
+            if not corrs:
+                continue
+            corr_arr = np.array(corrs)
+            note = "tilting down to reduce tension" if corr_arr.mean() < -0.5 else ""
+            print(f"  {ph:>10}  {corr_arr.mean():>+9.2f}  {corr_arr.min():>+8.2f}  {note}")
         print()
-        # Show tilt options: what bz_outward would be at each xi_reel_in_deg
-        # At xi deg elevation, outward component = cos(xi_rad) (disk points along xi axis)
-        # This is an approximation; actual value includes gravity compensation tilt.
-        print(f"  Estimated bz_outward vs xi_reel_in_deg (approx, ignores gravity comp tilt):")
-        print(f"  {'xi_deg':>7}  {'bz_outward':>11}  {'T_min_N':>9}  delta_T_min")
-        print(f"  {'-'*7}  {'-'*11}  {'-'*9}  {'-'*12}")
-        t_min_now = t_min_at_elevation(el, t_min_aero) or math.nan
-        for xi_deg in (IC_EL, 30, 40, 50, 60, 70, 80):
-            xi_rad      = math.radians(xi_deg)
-            bz_out_est  = math.cos(xi_rad)   # horizontal component of unit disk normal at xi deg elevation
-            t_min_xi    = t_min_at_elevation(xi_rad, t_min_aero)
-            t_min_s     = f"{t_min_xi:.1f}" if t_min_xi is not None else "  ---"
-            dt_s        = f"{t_min_xi - t_min_now:+.1f}" if t_min_xi is not None and not math.isnan(t_min_now) else ""
-            marker      = " <-- current (no tilt)" if abs(xi_deg - IC_EL) < 1.0 else ""
-            print(f"  {xi_deg:>7.1f}  {bz_out_est:>11.3f}  {t_min_s:>9}  {dt_s:>12}  {marker}")
-        print()
-        print(f"  Recommendation: set xi_reel_in_deg=80 to reduce bz_outward from")
-        print(f"  {mean_bz_out:.2f} to ~0.17, lowering T_min by ~21.6 N.")
-        print(f"  Lower TENSION_IN setpoint to T_min+20 N after implementing tilt.")
         print()
 
 

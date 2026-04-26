@@ -636,6 +636,90 @@ class AltitudeHoldController:
         return compute_bz_altitude_hold(pos, self._el, tension_n, mass_kg, G)
 
 
+class ElevationHoldController:
+    """
+    Outer cyclic loop: altitude target → body-frame rate commands.
+
+    Combines AltitudeHoldController (elevation rate-limiting + gravity-compensated
+    body_z_eq) with compute_rate_cmd (body_z error → rate setpoint).  The output
+    feeds directly into AcroControllerSitl (or the ArduPilot ACRO rate PIDs on
+    hardware), giving a clean two-level split:
+
+        ElevationHoldController  →  (rate_roll_sp, rate_pitch_sp)
+        AcroControllerSitl       →  (tilt_lon, tilt_lat)
+
+    This mirrors the rawes.lua architecture where the outer loop sends rate
+    commands via RC override and the firmware ACRO PIDs close the inner loop.
+
+    Usage
+    -----
+        ctrl = ElevationHoldController.from_pos(ic.pos, slew_rate_rad_s, mass_kg)
+        # each 400 Hz step:
+        rate_roll, rate_pitch = ctrl.update(pos, R, target_alt_m, tension_n, dt)
+    """
+
+    DEFAULT_KP_OUTER: float = 2.5
+
+    def __init__(
+        self,
+        initial_el_rad : float,
+        slew_rate_rad_s: float = 0.40,
+        mass_kg        : float = 5.0,
+        kp_outer       : float = DEFAULT_KP_OUTER,
+    ) -> None:
+        self._el       = float(initial_el_rad)
+        self._slew     = float(slew_rate_rad_s)
+        self._mass_kg  = float(mass_kg)
+        self._kp_outer = float(kp_outer)
+
+    @classmethod
+    def from_pos(
+        cls,
+        pos            : np.ndarray,
+        slew_rate_rad_s: float = 0.40,
+        mass_kg        : float = 5.0,
+        kp_outer       : float = DEFAULT_KP_OUTER,
+    ) -> "ElevationHoldController":
+        tlen = float(np.linalg.norm(pos))
+        el   = float(np.arcsin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 0.1)))))
+        return cls(el, slew_rate_rad_s, mass_kg, kp_outer)
+
+    @property
+    def elevation_rad(self) -> float:
+        return self._el
+
+    def update(
+        self,
+        pos         : np.ndarray,
+        R           : np.ndarray,
+        target_alt_m: float,
+        tension_n   : float,
+        dt          : float,
+        G           : float = 9.81,
+    ) -> "tuple[float, float]":
+        """
+        Step the controller.  Returns (rate_roll_sp, rate_pitch_sp) in [rad/s].
+
+        Parameters
+        ----------
+        pos          : current hub NED position [m]
+        R            : current hub rotation matrix (3×3, body→world)
+        target_alt_m : desired altitude above anchor [m]
+        tension_n    : current tether tension [N]
+        dt           : timestep [s]
+        """
+        tlen      = float(np.linalg.norm(pos))
+        target_el = float(np.arcsin(max(-1.0, min(1.0,
+                         target_alt_m / max(tlen, 0.1)))))
+        max_step  = self._slew * dt
+        self._el += max(-max_step, min(max_step, target_el - self._el))
+
+        R        = np.asarray(R, dtype=float)
+        bz_goal  = compute_bz_altitude_hold(pos, self._el, tension_n, self._mass_kg, G)
+        rate_sp  = compute_rate_cmd(R[:, 2], bz_goal, R, kp=self._kp_outer, kd=0.0)
+        return float(rate_sp[0]), float(rate_sp[1])
+
+
 def orbit_tracked_body_z_eq_3d(
     cur_pos:     np.ndarray,
     tether_dir0: np.ndarray,
@@ -850,6 +934,56 @@ class RatePID:
 # ---------------------------------------------------------------------------
 # ACRO attitude controller emulator
 # ---------------------------------------------------------------------------
+
+
+class AcroControllerSitl:
+    """
+    Inner rate-loop emulator for ArduPilot ACRO mode.
+
+    Accepts body-frame rate commands (as rawes.lua sends via RC override) and
+    applies RatePID to produce normalised swashplate tilt, mirroring what
+    ArduPilot's AC_AttitudeControl does internally.
+
+    Both rawes.lua (hardware/SITL) and TensionApController (Python simtest)
+    output rate commands; this class is the Python-side stand-in for the
+    firmware rate PIDs so both paths share the same interface.
+
+    Usage::
+
+        sitl = AcroControllerSitl()
+        tilt_lon, tilt_lat = sitl.update(rate_roll_sp, rate_pitch_sp,
+                                          omega_body, dt)
+    """
+
+    def __init__(self, kp: float = RatePID.DEFAULT_KP) -> None:
+        self._pid_lon = RatePID(kp=kp)
+        self._pid_lat = RatePID(kp=kp)
+
+    def update(
+        self,
+        rate_roll_sp : float,
+        rate_pitch_sp: float,
+        omega_body   : np.ndarray,
+        dt           : float,
+    ) -> "tuple[float, float]":
+        """
+        Advance one timestep.
+
+        Parameters
+        ----------
+        rate_roll_sp  : desired roll  rate [rad/s] in body frame
+        rate_pitch_sp : desired pitch rate [rad/s] in body frame
+        omega_body    : current body-frame angular velocity [rad/s] (3,)
+        dt            : timestep [s]
+
+        Returns
+        -------
+        (tilt_lon, tilt_lat) : normalised swashplate tilt in [-1, 1]
+        """
+        omega_body = np.asarray(omega_body, dtype=float)
+        tilt_lon =  self._pid_lon.update(rate_roll_sp,  omega_body[0], dt)
+        tilt_lat = -self._pid_lat.update(rate_pitch_sp, omega_body[1], dt)
+        return float(tilt_lon), float(tilt_lat)
 
 class AcroController:
     """

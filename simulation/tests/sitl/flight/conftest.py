@@ -39,63 +39,35 @@ def acro_armed_pumping_lua(tmp_path, request):
     """
     Pumping-cycle stack fixture with rawes.lua active in pumping mode (SCR_USER6=5).
 
-    Division of labour:
-      - Mediator: DeschutterPlanner owns phase state machine, winch, TensionPI.
-      - Lua (Pixhawk, 50 Hz): cyclic orbit tracking + per-phase body_z slerp +
-        per-phase collective (fixed open-loop: COL_REEL_OUT / COL_REEL_IN).
-      - Synchronisation: Lua detects tether paying-out / reeling-in to follow
-        the mediator's winch motion without any RC channel bridge.
+    Division of labour (mirrors test_pump_cycle_lua.py):
+      - Test process: PumpingGroundController (10 Hz) — phase state machine.
+          * Sends winch set_target commands to mediator via UDP socket.
+          * Sends NVF (RAWES_TSP, RAWES_TEN, RAWES_ALT, RAWES_SUB) to Lua via GCS.
+      - Mediator: WinchController (400 Hz) — owns tether rest_length physics.
+          * Listens on winch_cmd_port for {target_length, target_tension} commands.
+          * Sends back {tension_n, rest_length, hub_alt_m} at ~10 Hz.
+      - Lua (50 Hz): TensionPI collective + bz_altitude_hold cyclic.
 
-    The mediator trajectory=deschutter config matches acro_armed_pumping
-    (same phase timing, tension targets, winch speeds).
+    This mirrors the real hardware architecture: ground station manages phase
+    logic and MAVLink NVF delivery; winch node owns motor control.
 
-    internal_controller=True (same as acro_armed_pumping): at the orbital
-    equilibrium the tether acts mostly HORIZONTALLY and slightly DOWNWARD
-    (anchor is 8 deg below the hub, not above it), so tether tension at
-    kinematic exit gives a NET DOWNWARD force on the hub (~22 m/s^2), not
-    upward support.  Lua's 50 Hz RC overrides cannot recover from this
-    kinematic-exit jolt; the internal 400 Hz controller provides the
-    stability needed.  This matches CLAUDE.md exception (2): "Pumping cycle
-    fixture -- ArduPilot RC overrides at 10 Hz cannot stabilize the hub
-    after the kinematic-exit tether jolt."
-
-    What is validated here vs acro_armed_pumping (no Lua):
-      - Lua SCR_USER6=5 starts without error.
-      - Lua detects winch reel-out from tether length change ->
-        "RAWES pump: reel_out" STATUSTEXT appears.
-      - Pumping cycle physics (TensionPI + OrbitTracker) remain unchanged.
-    Lua's cyclic orbit tracking and collective logic (COL_REEL_OUT / COL_REEL_IN)
-    are validated separately by test_lua_flight_steady (cyclic) and unit
-    tests (collective formula).
+    internal_controller=False: SITL stack tests must let ArduPilot + Lua drive
+    physics (CLAUDE.md critical rule).
     """
-    import config as _mcfg
-    _dcfg = _mcfg.DEFAULTS["trajectory"]["deschutter"]
+    import socket as _socket
+
+    # Find a free UDP port for the winch command socket.
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as _s:
+        _s.bind(("127.0.0.1", 0))
+        _winch_port = _s.getsockname()[1]
+
     extra = {
-        # kinematic_vel_ramp_s=0: keep vel0 constant throughout the 65 s kinematic
-        # so GPS innovations stay small and EKF fuses GPS during kinematic (~37-54 s).
-        # rawes_sitl_defaults.parm is tuned for this constant-velocity pattern
-        # (EK3_GPS_CHECK=0, widened gates).  Lua captures ~2 s after GPS fuses.
         "kinematic_vel_ramp_s": 0.0,
-        "trajectory": {
-            "type": "deschutter",
-            "hold": {},
-            "deschutter": {
-                **{k: _dcfg[k] for k in (
-                    "t_reel_out", "t_reel_in", "t_transition",
-                    "v_reel_out", "v_reel_in", "tension_out", "tension_in",
-                )},
-                "t_hold_s": 10.0,
-            },
-        },
+        "winch_cmd_port":       _winch_port,
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name,
-
-                     # internal_controller=False: SITL stack tests must let ArduPilot
-                     # + Lua drive physics (CLAUDE.md critical rule).  Lua RC overrides
-                     # at 50 Hz control cyclic; collective is also via Lua Ch3.
                      internal_controller=False) as ctx:
-        # Post-arm: configure rawes.lua via SCR_USER params.
         ctx.log.info("Setting SCR_USER params for rawes.lua (pumping mode) ...")
         lua_params = {
             "SCR_ENABLE": 1,
@@ -109,9 +81,6 @@ def acro_armed_pumping_lua(tmp_path, request):
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
-        # Lua owns Ch1/Ch2/Ch3/Ch8 -- rawes.lua sends Ch8=2000 keepalive when armed.
-        # Tests must NOT send RC overrides.
 
         ctx.wait_drain(timeout=1.0, label="post-param")
         yield ctx
@@ -137,7 +106,7 @@ def acro_armed_landing_lua(tmp_path, request):
               ("RAWES land: captured" STATUSTEXT at t~62 s).
           (b) Lua alt_est computation is correct: "RAWES land: final_drop"
               STATUSTEXT fires when alt_est <= LAND_MIN_TETHER_M=2 m.
-          (c) Hub descends to floor and tension stays safe (Lua + LandingPlanner).
+          (c) Hub descends to floor and tension stays safe (Lua + WinchController).
         Lua's VZ descent and orbit-tracking formulas are covered by unit tests
         and test_lua_flight_steady.
 
@@ -161,7 +130,7 @@ def acro_armed_landing_lua(tmp_path, request):
       t~62 s      Lua KINEMATIC_SETTLE_MS (62 s) expires; captures body_z
       t~62..65 s  Lua sends RC overrides; kinematic still ramps vel to 0
       t=65 s      kinematic exits; hub at pos0 with vel=0, tension~0
-      t~65..102 s Lua VZ controller descends hub; LandingPlanner reels in winch
+      t~65..102 s Lua VZ controller descends hub; WinchController reels in tether
       t~102 s     Lua triggers final_drop STATUSTEXT (alt_est <= 2 m)
       fixture yields at t~15 s; test observes for 165 s (until t~180 s SITL)
     """

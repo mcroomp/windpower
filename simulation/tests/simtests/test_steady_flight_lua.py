@@ -31,7 +31,6 @@ from swashplate    import SwashplateServoModel
 from simtest_ic    import load_ic
 from simtest_log   import SimtestLog, BadEventLog
 from simtest_runner import PhysicsRunner, feed_obs
-from tel           import make_tel
 from telemetry_csv import TelRow, write_csv
 from rawes_lua_harness import RawesLua
 from rawes_modes   import MODE_STEADY
@@ -112,7 +111,7 @@ def _run_steady() -> dict:
         tilt_lat_cmd  = -pid_lat.update(pitch_sp, omega_body[1], DT)
         tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
 
-        runner.step_raw(DT, col_rad, tilt_lon, tilt_lat)
+        sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat)
 
         altitude    = -runner.hub_state["pos"][2]
         tension_now = runner.tension_now
@@ -134,10 +133,8 @@ def _run_steady() -> dict:
         pos_hist.append(runner.hub_state["pos"].copy())
 
         if i % tel_every == 0:
-            telemetry.append(make_tel(
-                t, runner.hub_state, runner.omega_spin,
-                runner.tether, tension_now,
-                col_rad, tilt_lon, tilt_lat, WIND,
+            telemetry.append(TelRow.from_physics(
+                runner, sr, col_rad, WIND,
                 body_z_eq=None,
             ))
 
@@ -164,8 +161,7 @@ def _run_steady() -> dict:
     for level, msg in sim.messages[:10]:
         lines.append(f"  [GCS {level}] {msg}")
     if telemetry:
-        write_csv([TelRow.from_tel(d) for d in telemetry],
-                  _log.log_dir / "telemetry.csv")
+        write_csv(telemetry, _log.log_dir / "telemetry.csv")
     _log.write(lines, "lua_steady")
 
     return dict(

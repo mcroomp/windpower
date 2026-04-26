@@ -37,10 +37,10 @@ from lupa import lua54
 
 # ── File paths ────────────────────────────────────────────────────────────────
 
-_UNIT_DIR    = Path(__file__).resolve().parent
-_SCRIPTS_DIR = _UNIT_DIR.parent.parent / "scripts"
+_SIM_DIR     = Path(__file__).resolve().parent
+_SCRIPTS_DIR = _SIM_DIR / "scripts"
 
-_MOCK_LUA     = (_UNIT_DIR    / "mock_ardupilot.lua"   ).read_text(encoding="utf-8")
+_MOCK_LUA     = (_SIM_DIR     / "mock_ardupilot.lua"   ).read_text(encoding="utf-8")
 _RAWES_LUA    = (_SCRIPTS_DIR / "rawes.lua"            ).read_text(encoding="utf-8")
 _SURFACE_LUA  = (_SCRIPTS_DIR / "rawes_test_surface.lua").read_text(encoding="utf-8")
 

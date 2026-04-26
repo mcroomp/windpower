@@ -28,7 +28,6 @@ baseline) yield the same ro_alt_sd ~4.2 m — the 4 m altitude oscillation is an
 intrinsic property of the De Schutter cycle, not a kinematic artifact.
 """
 
-import math
 import sys
 from pathlib import Path
 from statistics import mean, stdev
@@ -40,10 +39,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
+from types import SimpleNamespace
+
 import rotor_definition as rd
 from aero        import create_aero
 from config      import DEFAULTS
-from controller  import (AltitudeHoldController, compute_bz_altitude_hold, slerp_body_z,
+from controller  import (AltitudeHoldController, slerp_body_z,
                          col_min_for_altitude_rad,
                          AcroController)
 from dynamics    import RigidBodyDynamics
@@ -53,8 +54,19 @@ from simtest_ic  import load_ic
 from simtest_log import SimtestLog
 from tether      import TetherModel
 from winch       import WinchController
-from tel           import make_tel
 from telemetry_csv import TelRow, write_csv, read_csv
+
+
+def _make_runner_ns(hub_state, omega_spin, tether, tension_now, t_sim, aero=None):
+    """Minimal runner-like namespace for TelRow.from_physics in raw-physics loops."""
+    return SimpleNamespace(
+        hub_state   = hub_state,
+        omega_spin  = omega_spin,
+        tether      = tether,
+        tension_now = tension_now,
+        t_sim       = t_sim,
+        aero        = aero,
+    )
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -156,12 +168,11 @@ def _run_pumping_cycle(
         vel0   = vel_at_start.tolist(),
         R0     = R0.copy(),
         omega0 = [0.0, 0.0, 0.0],
-        z_floor= z_floor,
+        z_floor= z_floor if z_floor is not None else -1.0,
     )
     tether = TetherModel(anchor_ned=ANCHOR, rest_length=REST_LENGTH0,
                          axle_attachment_length=axle_attach)
-    winch  = WinchController(rest_length=REST_LENGTH0,
-                             T_max_n=TENSION_SAFETY_N)
+    winch  = WinchController(rest_length=REST_LENGTH0)
     trajectory = DeschutterPlanner(
         t_reel_out          = 30.0,
         t_reel_in           = 30.0,
@@ -183,8 +194,8 @@ def _run_pumping_cycle(
     collective_rad    = col_min_rad
     ic_tether_dir0    = None
     ic_body_z_eq0     = None
-    bz_slerp          = None
-    alt_ctrl          = None
+    bz_slerp: np.ndarray = POS0 / np.linalg.norm(POS0)  # overwritten on first free-flight step
+    alt_ctrl          = AltitudeHoldController.from_pos(POS0, _ROTOR.body_z_slew_rate_rad_s)
     target_alt_m      = float(-POS0[2])
     acro              = AcroController.from_rotor(_ROTOR, use_servo=True)
     total_t     = kinematic_seconds + 60.0   # kinematic + 30s reel-out + 30s reel-in
@@ -202,9 +213,9 @@ def _run_pumping_cycle(
         if _startup.apply(hub_state, dyn, t_sim):
             # Tether, planner, and tension controller are inactive during kinematic
             if i % tel_every == 0:
-                telemetry.append(make_tel(
-                    t_sim, hub_state, omega_spin, tether, 0.0,
-                    col_min_rad, 0.0, 0.0, WIND,
+                _rns = _make_runner_ns(hub_state, omega_spin, tether, 0.0, t_sim)
+                telemetry.append(TelRow.from_physics(
+                    _rns, {}, col_min_rad, WIND,
                     body_z_eq=hub_state["R"][:, 2],
                     phase="kinematic",
                 ))
@@ -226,7 +237,7 @@ def _run_pumping_cycle(
             "omega_spin":      omega_spin,
             "body_z":          hub_state["R"][:, 2],
             "tension_n":       tension_now,
-            "tether_length_m": winch.tether_length_m,
+            "tether_length_m": winch.rest_length,
         }
         cmd = trajectory.step(state_pkt, DT)
 
@@ -280,12 +291,14 @@ def _run_pumping_cycle(
 
         # 9. Telemetry (20 Hz)
         if i % tel_every == 0:
-            telemetry.append(make_tel(
-                t_sim, hub_state, omega_spin, tether, tension_now,
-                collective_rad, tilt_lon, tilt_lat, WIND,
-                body_z_eq=body_z_eq,
-                phase=str(cmd.get("phase", "")),
-                tension_setpoint=float(cmd.get("tension_setpoint_n", 0.0)),
+            _rns = _make_runner_ns(hub_state, omega_spin, tether, tension_now, t_sim, aero)
+            _sr  = {"tilt_lon": tilt_lon, "tilt_lat": tilt_lat,
+                    "aero_result": result, "tether_force": tf, "tether_moment": tm}
+            telemetry.append(TelRow.from_physics(
+                _rns, _sr, collective_rad, WIND,
+                body_z_eq        = body_z_eq,
+                phase            = str(cmd.get("phase", "")),
+                tension_setpoint = float(cmd.get("tension_setpoint_n", 0.0)),
             ))
 
     return {"label": label, "telemetry": telemetry}
@@ -383,9 +396,9 @@ def test_stack_mirror_vs_baseline():
 
     # Write CSVs for downstream analysis
     _CSV_VEL0 = _log.log_dir / "telemetry_vel0_isolation.csv"
-    write_csv([TelRow.from_tel(d) for d in stack["telemetry"]],          _CSV_STACK)
-    write_csv([TelRow.from_tel(d) for d in baseline["telemetry"]],       _CSV_BASELINE)
-    write_csv([TelRow.from_tel(d) for d in vel0_isolation["telemetry"]], _CSV_VEL0)
+    write_csv(stack["telemetry"],          _CSV_STACK)
+    write_csv(baseline["telemetry"],       _CSV_BASELINE)
+    write_csv(vel0_isolation["telemetry"], _CSV_VEL0)
 
     # ── Compare ────────────────────────────────────────────────────────────
     def _metrics(rows: list[TelRow]) -> dict:

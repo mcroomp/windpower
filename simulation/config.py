@@ -111,6 +111,12 @@ DEFAULTS: dict = {
     # Simulation noise: set 0 to use true omega_spin (ideal, recommended for unit tests).
     "spin_sensor_sigma": 0.0,           # Gaussian noise sigma [rad/s]; 0 = ideal
 
+    # ── Winch command socket (pumping stack tests) ────────────────────────────
+    # When > 0, mediator opens a UDP server on this port so the test process can
+    # send winch set_target commands and receive physics state at ~10 Hz.
+    # 0 = disabled (default: trajectory planner owns the winch).
+    "winch_cmd_port": 0,
+
     # ── Trajectory controller ─────────────────────────────────────────────────
     # "type" selects the active controller.  Each type has its own sub-dict so
     # all parameters are self-contained and callers only touch one section.
@@ -123,20 +129,6 @@ DEFAULTS: dict = {
     "trajectory": {
         "type": "hold",
         "hold": {},
-        "landing": {
-            # Vertical descent from high-tilt reel-in position directly above anchor.
-            # Hub holds body_z fixed at the orientation captured at planner start
-            # (initial_body_z=None → captured from first step's state_pkt["body_z"]).
-            "v_land":           0.5,    # target descent rate [m/s]
-            "col_cruise":       0.079,  # altitude-neutral collective at xi=80 deg [rad]
-            "min_tether_m":     2.0,    # tether length at which final_drop begins [m]
-            "tension_target_n": 80.0,   # winch PI tension setpoint [N]
-            "k_winch":          0.005,  # winch PI gain [m/s per N]
-            "v_pay_out":        0.5,    # max pay-out speed [m/s]
-            "kp_vz":            0.05,   # descent-rate P gain [rad/(m/s)]
-            "col_min_rad":     -0.28,   # collective floor [rad]
-            "col_max_rad":      0.10,   # collective ceiling [rad]
-        },
         "deschutter": {
             "t_hold_s":         0.0,   # hold phase before first reel-out [s]; use ~20s in stack test to settle orbit
             "t_reel_out":      30.0,   # reel-out phase duration [s]
@@ -280,24 +272,6 @@ def make_trajectory(cfg: dict, wind_ned):
             col_max_rad         = float(p["col_max_rad"]),
             t_hold_s            = float(p.get("t_hold_s", 0.0)),
             warm_coll_rad       = float(p.get("warm_coll_rad", -0.20)),
-        )
-
-    if traj_type == "landing":
-        from landing_planner import LandingPlanner
-        p = traj_cfg["landing"]
-        anchor = cfg.get("anchor_ned", [0.0, 0.0, 0.0])
-        return LandingPlanner(
-            initial_body_z   = None,   # captured from first step's state_pkt["body_z"]
-            v_land           = float(p["v_land"]),
-            col_cruise       = float(p["col_cruise"]),
-            min_tether_m     = float(p["min_tether_m"]),
-            anchor_ned       = _np.asarray(anchor, dtype=float),
-            tension_target_n = float(p["tension_target_n"]),
-            k_winch          = float(p["k_winch"]),
-            v_pay_out        = float(p["v_pay_out"]),
-            kp_vz            = float(p["kp_vz"]),
-            col_min_rad      = float(p["col_min_rad"]),
-            col_max_rad      = float(p["col_max_rad"]),
         )
 
     return HoldPlanner()

@@ -76,16 +76,16 @@ local COL_CRUISE_FLIGHT_RAD = -0.18    -- VZ integrator initial value (xi~8 deg,
 
 -- ── Pumping collective constants ──────────────────────────────────────────────
 
-local COL_REEL_OUT      = -0.20   -- TensionPI warm-start; also reel-out equilibrium reference
+local COL_REEL_OUT      = -0.20   -- TensionPI warm-start collective [rad]
 local T_PUMP_TRANSITION =  3.7    -- ramp window used for logging/diagnostics [s]
 
--- TensionPI for pumping collective: feedback on _tension_n (from RAWES_TEN).
--- Mirrors Python controller.TensionPI defaults exactly.
-local KP_TEN       = 5e-4    -- rad/N
-local KI_TEN       = 1e-4    -- rad/(N·s)
-local COL_MAX_TEN  = 0.0     -- TensionPI collective ceiling (neutral pitch)
-local TEN_REEL_OUT = 435.0   -- N tension setpoint during hold/reel-out/transition-back
-local TEN_REEL_IN  = 226.0   -- N tension setpoint during transition/reel-in
+-- TensionPI for pumping collective.
+-- Setpoint and measured tension come from ground via RAWES_TSP / RAWES_TEN
+-- at ~10 Hz (UnifiedGroundController).  Mirrors Python TensionApController defaults.
+local KP_TEN      = 2e-4    -- rad/N   (10 Hz-tuned proportional gain)
+local KI_TEN      = 1e-3    -- rad/(N·s)  (10 Hz-tuned integral gain)
+local COL_MAX_TEN = 0.0     -- TensionPI collective ceiling [rad]
+local DT_CMD      = 0.1     -- command period [s] used for integrator step
 
 -- ── VZ collective controller (steady mode) ───────────────────────────────────
 
@@ -125,8 +125,13 @@ local _prev_ch2 = 1500
 local _last_col_rad = COL_CRUISE_FLIGHT_RAD
 local _col_i        = COL_CRUISE_FLIGHT_RAD
 
--- TensionPI integrator for pumping mode (warm-start maps to COL_REEL_OUT output)
+-- TensionPI state for pumping mode.
+-- Setpoint arrives from ground via RAWES_TSP; measured via RAWES_TEN.
+-- Integrator warm-starts so initial output = COL_REEL_OUT at zero error.
 local _col_i_ten    = COL_REEL_OUT / math.max(KI_TEN, 1e-12)
+local _col_held     = COL_REEL_OUT   -- collective held between 10 Hz commands
+local _ten_setpoint = 300.0          -- tension setpoint [N]; updated from RAWES_TSP
+local _ten_sp_fresh = false          -- true when a new RAWES_TEN_SP has arrived
 
 -- Altitude hold state
 local _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
@@ -298,8 +303,10 @@ local function run_flight()
     if el_step < -max_step then el_step = -max_step end
     _el_rad = _el_rad + el_step
 
-    -- Cyclic P loop
-    local bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n)
+    -- Cyclic P loop — use setpoint tension (not measured) to keep gravity
+    -- compensation stable when tether goes slack (_tension_n → 0).
+    local ten_bz  = _is_pumping and _ten_setpoint or _tension_n
+    local bz_goal = bz_altitude_hold(rel, _el_rad, ten_bz)
     local bz_now  = disk_normal_ned()
     local err     = cyclic_error_body(bz_now, bz_goal)
     local err_bx  = err[1]
@@ -316,25 +323,24 @@ local function run_flight()
     -- ── Collective ────────────────────────────────────────────────────────
     local col_cmd
     if _is_pumping then
-        -- TensionPI: feedback on _tension_n (from RAWES_TEN).
-        -- High setpoint during reel-out (pay tether), low during reel-in (haul back).
-        local ten_sp
-        if substate == PUMP_HOLD or substate == PUMP_REEL_OUT
-                or substate == PUMP_TRANSITION_BACK then
-            ten_sp = TEN_REEL_OUT
-        else   -- PUMP_TRANSITION, PUMP_REEL_IN
-            ten_sp = TEN_REEL_IN
-        end
-        local ten_err = ten_sp - _tension_n
-        local raw_pre = KP_TEN * ten_err + KI_TEN * _col_i_ten
-        -- Conditional anti-windup (mirrors Python TensionPI)
-        if not (raw_pre <= COL_MIN_RAD and ten_err < 0) then
-            if not (raw_pre >= COL_MAX_TEN and ten_err > 0) then
-                _col_i_ten = _col_i_ten + ten_err * dt
+        -- TensionPI: setpoint from RAWES_TSP, measured from RAWES_TEN (both at ~10 Hz).
+        -- Step integrator only on fresh command; hold collective between commands.
+        if _ten_sp_fresh then
+            _ten_sp_fresh = false
+            local ten_err = _ten_setpoint - _tension_n
+            local raw_pre = KP_TEN * ten_err + KI_TEN * _col_i_ten
+            -- Conditional anti-windup (mirrors Python TensionPI)
+            if not (raw_pre <= COL_MIN_RAD and ten_err < 0) then
+                if not (raw_pre >= COL_MAX_TEN and ten_err > 0) then
+                    _col_i_ten = _col_i_ten + ten_err * DT_CMD
+                end
             end
+            local out = KP_TEN * ten_err + KI_TEN * _col_i_ten
+            if out > COL_MAX_TEN then out = COL_MAX_TEN end
+            if out < COL_MIN_RAD then out = COL_MIN_RAD end
+            _col_held = out
         end
-        col_cmd = KP_TEN * ten_err + KI_TEN * _col_i_ten
-        if col_cmd > COL_MAX_TEN then col_cmd = COL_MAX_TEN end
+        col_cmd = _col_held
     else
         -- Steady mode: VZ PI altitude hold (vz setpoint = 0)
         local vz_actual = 0.0
@@ -438,8 +444,13 @@ local function update()
     local now  = millis()
 
     -- Update altitude and tension targets from NV messages (persistent last value)
-    if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
-    if _nv_floats["RAWES_TEN"] then _tension_n  = _nv_floats["RAWES_TEN"] end
+    if _nv_floats["RAWES_ALT"]    then _target_alt   = _nv_floats["RAWES_ALT"]    end
+    if _nv_floats["RAWES_TEN"]    then _tension_n    = _nv_floats["RAWES_TEN"]    end
+    if _nv_floats["RAWES_TSP"] then
+        _ten_setpoint = _nv_floats["RAWES_TSP"]
+        _ten_sp_fresh = true
+        _nv_floats["RAWES_TSP"] = nil   -- consume so it triggers once per command
+    end
 
     -- Ch4 yaw always neutral (no RC receiver; prevents ACRO yaw wind-up)
     if _rc_ch4 then _rc_ch4:set_override(1500) end

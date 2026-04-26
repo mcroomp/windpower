@@ -128,6 +128,11 @@ def _parse_args():
                         help="Path for per-step CSV telemetry log")
     parser.add_argument("--events-log", default=None,
                         help="Path for structured JSONL event log")
+    parser.add_argument("--winch-cmd-port", type=int, default=0,
+                        help="UDP port for remote winch control (0 = disabled). "
+                             "When set, the mediator listens for {target_length, "
+                             "target_tension} JSON datagrams from the test process "
+                             "and sends back {tension_n, rest_length, hub_alt_m}.")
     return parser.parse_args()
 
 
@@ -296,7 +301,6 @@ def run_mediator(args, trajectory=None):
     _winch_node = WinchNode(
         winch=WinchController(
             rest_length = float(cfg["rest_length"]),
-            T_max_n     = float(cfg["tension_safety_n"]),
         ),
         anemometer=Anemometer(height_m=3.0),
     )
@@ -312,6 +316,32 @@ def run_mediator(args, trajectory=None):
         _trajectory = _mcfg.make_trajectory(
             cfg, wind_ned=_pc_telemetry["wind_ned"])
     ev.write("config", t_sim=0.0, trajectory=type(_trajectory).__name__)
+
+    # -- Winch command socket (pumping mode: test process controls planner) ---
+    # When --winch-cmd-port is set the test process runs PumpingGroundController
+    # and sends winch commands here.  The mediator owns WinchController physics;
+    # the test owns phase management and NVF delivery to Lua via MAVLink GCS.
+    #
+    # Protocol (UDP JSON, all on one socket):
+    #   test  -> mediator: {"target_length": L, "target_tension": T}
+    #   mediator -> test:  {"tension_n": T, "rest_length": L, "hub_alt_m": H}
+    #
+    # State is sent every ~10 Hz (every DT_WINCH_SEND steps).  Commands are
+    # received non-blocking every step so they are applied within one lockstep
+    # cycle (~2.5 ms latency).
+    import socket as _socket_mod
+    import json   as _json_mod
+    _winch_cmd_port = int(cfg.get("winch_cmd_port", 0)) or getattr(args, "winch_cmd_port", 0)
+    _winch_sock     = None
+    _winch_peer     = None   # (host, port) of the test process — learned on first recv
+    _winch_send_ctr = 0
+    DT_WINCH_SEND   = 40    # send state every 40 steps ≈ 10 Hz at 400 Hz loop
+
+    if _winch_cmd_port > 0:
+        _winch_sock = _socket_mod.socket(_socket_mod.AF_INET, _socket_mod.SOCK_DGRAM)
+        _winch_sock.bind(("127.0.0.1", _winch_cmd_port))
+        _winch_sock.setblocking(False)
+        log.info("Winch command socket listening on 127.0.0.1:%d", _winch_cmd_port)
 
     # -- Mode_RAWES inner loops -----------------------------------------------
     _body_z_slew_rate     = float(cfg["body_z_slew_rate_rad_s"])
@@ -330,6 +360,7 @@ def run_mediator(args, trajectory=None):
         nonlocal step, last_log_time, _t_step0
         nonlocal s1, s2, s3, _body_z_eq, _traj_cmd, _logged_transition
         nonlocal _tel_note, _prev_phase, _alt_ctrl, _body_z_slerp
+        nonlocal _winch_peer, _winch_send_ctr
         if _t_step0 is None:
             _t_step0 = t_sim
         _dt = sitl.dt()
@@ -349,6 +380,33 @@ def run_mediator(args, trajectory=None):
             _winch_node.update_sensors(core.tension_now, wind_world)
             _pc_telemetry = _winch_node.get_telemetry()
 
+            # ── Winch command socket: receive set_target commands from test ──
+            _socket_phase = None  # ground-planner phase label (applied after trajectory.step)
+            if _winch_sock is not None:
+                try:
+                    _data, _addr = _winch_sock.recvfrom(256)
+                    _cmd = _json_mod.loads(_data)
+                    _winch_node.set_target(
+                        float(_cmd["target_length"]),
+                        float(_cmd["target_tension"]),
+                    )
+                    if "phase" in _cmd:
+                        _socket_phase = _cmd["phase"]
+                    _winch_peer = _addr
+                except BlockingIOError:
+                    pass
+
+                # Send winch state back to test at ~10 Hz
+                _winch_send_ctr += 1
+                if _winch_send_ctr >= DT_WINCH_SEND and _winch_peer is not None:
+                    _winch_send_ctr = 0
+                    _state_bytes = _json_mod.dumps({
+                        "tension_n":   core.tension_now,
+                        "rest_length": _winch_node.rest_length,
+                        "hub_alt_m":   float(-core.hub_state["pos"][2]),
+                    }).encode()
+                    _winch_sock.sendto(_state_bytes, _winch_peer)
+
             _state_pkt = {
                 "pos_ned":    core.hub_state["pos"],
                 "vel_ned":    core.hub_state["vel"],
@@ -360,6 +418,11 @@ def run_mediator(args, trajectory=None):
                 tension_n       = _pc_telemetry["tension_n"],
                 tether_length_m = _pc_telemetry["tether_length_m"],
             )
+            # Mirror the ground planner phase AFTER trajectory.step() so the
+            # HoldPlanner's "hold" label doesn't overwrite the socket phase.
+            if _socket_phase is not None:
+                _traj_cmd = dict(_traj_cmd)
+                _traj_cmd["phase"] = _socket_phase
             _winch_node.receive_command(_traj_cmd["winch_speed_ms"], _dt)
 
         # ── Physics step ──────────────────────────────────────────────────

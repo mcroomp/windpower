@@ -29,6 +29,31 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 
 **Critical:** Only the spinning outer hub shell + blades contribute to `I_spin`. Motor torque is an **internal** force — never add as external couple.
 
+### Ground Winch Motor/Generator
+
+Separate from the GB4008. Sized to deliver 435 N at 0.40 m/s reel-out and 226 N at 0.80 m/s reel-in with ~200 W continuous.
+
+| Parameter | Value | Derivation |
+|-----------|-------|------------|
+| Motor type | 400 W BLDC servo, 48 V | P = 435 N × 0.40 m/s = 174 W, add 15% margin |
+| Rated speed | 3000 RPM | — |
+| Rated torque | 1.27 N·m | P / ω = 400 / (3000 × 2π/60) |
+| Peak torque | 3.8 N·m | 3× rated, typical BLDC |
+| Gearbox | 20:1 planetary, η = 0.85 | — |
+| Drum radius | 50 mm | — |
+| Reel-out speed | 0.40 m/s → 1528 RPM motor | v / r / (2π/60) / gear_ratio |
+| Reel-in speed | 0.80 m/s → 3056 RPM motor | near rated speed |
+| T_reel_out (435 N) | drum 21.75 N·m → motor 1.28 N·m | ≈ rated torque ✓ |
+| T_hard_max (496 N) | drum 24.8 N·m → motor 1.46 N·m | 115% rated → current-limit here |
+| T_reel_in (226 N) | drum 11.3 N·m → motor 0.66 N·m | 52% rated, ample margin |
+
+**Winch simulation parameters derived from this spec:**
+
+- `T_soft_max = 470 N`, `T_hard_max = 496 N` — reel-out generator taper (matches motor 115% current-limit ceiling)
+- `T_reel_in_start = 250 N` — gate: AP must reduce tension before reel-in motor engages
+- `T_soft_reel_in = 350 N`, `T_hard_reel_in = 496 N` — reel-in upper taper: motor current-limits and tapers to stop as tension rises toward 496 N (same ceiling as reel-out; shared hardware limit)
+- `T_soft_min = 30 N`, `T_hard_min = 10 N` — slack boost: below 30 N reel-in speed increases toward 2× nominal to take up slack; models the drum coasting freely when tether goes slack
+
 ---
 
 ## Reference Documents
@@ -48,7 +73,9 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 | [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter Eq. 25–31 validation vs. implementation |
 | [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw model — `HubParams` (rpm_scale, gear_ratio, motor_tau), `HubState` (psi, psi_dot, omega_motor), `step()`, `equilibrium_throttle()` |
 | [simulation/scripts/rawes.lua](simulation/scripts/rawes.lua) | Unified Lua controller (SCR_USER6 modes 0–8) |
-| [simulation/tests/unit/README.md](simulation/tests/unit/README.md) | **Unit test guide** — test catalogue, Lua harness API, SCR_USER6 encoding, IC loading, telemetry |
+| [simulation/rawes_lua_harness.py](simulation/rawes_lua_harness.py) | `RawesLua` class — runs rawes.lua in-process via lupa; shared by unit and simtests |
+| [simulation/rawes_modes.py](simulation/rawes_modes.py) | Python constants mirroring rawes.lua mode/substate numbers |
+| [simulation/tests/unit/README.md](simulation/tests/unit/README.md) | **Unit & simtest guide** — test catalogue, Lua harness API, SCR_USER6 encoding, IC loading, telemetry |
 
 ---
 
@@ -60,7 +87,7 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above xi≈85°.
 - **body_z_slew_rate** = 0.40 rad/s (`rotor.body_z_slew_rate_rad_s`). Faster → oscillation; slower → wastes reel-in time.
 - **RotorDefinition YAML fields:** `swashplate_pitch_gain_rad` (measurable via flap deflection); `CD_structural` (beaupoil_2026=0.0, de_schutter_2018=0.021).
-- **Canonical telemetry** (`simulation/telemetry_csv.py`): 67 columns, `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `flight_log.py` / `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line. **CSV files are always regenerated — never worry about backward compatibility for the CSV schema.** `flight_log.FlightLog.load(log_dir)` reads all log sources (telemetry CSV + mavlink.jsonl + mediator.log + arducopter.log) into one structure; `FlightLog.buckets(bucket_s)` returns parameterized time-window aggregates with physics, MAVLink attitude/EKF, and `FlightEvent` list per window. `validate_ekf_window(mavlink_path, t_start_s, t_end_s)` is in `analyse_run` (imported by `test_kinematic_gps.py`).
+- **Canonical telemetry** (`simulation/telemetry_csv.py`): `TelRow` dataclass. `damp_alpha`=0.0 in free flight; used by `flight_log.py` / `analyse_run.py` to split kinematic vs. free-flight phases. `TelRow.heartbeat()` = mediator 1 Hz status line. **CSV files are always regenerated — never worry about backward compatibility for the CSV schema.** Altitude command chain (three columns, each owned by a different component): `gnd_alt_cmd_m` = `TensionCommand.alt_m` set by `PumpingGroundController`; `elevation_rad` = AP's internally rate-limited elevation (`TensionApController._el`); `pos_z` = actual hub altitude from physics. Comparing these three reveals who is at fault when altitude tracking fails. `flight_log.FlightLog.load(log_dir)` reads all log sources (telemetry CSV + mavlink.jsonl + mediator.log + arducopter.log) into one structure; `FlightLog.buckets(bucket_s)` returns parameterized time-window aggregates with physics, MAVLink attitude/EKF, and `FlightEvent` list per window. `validate_ekf_window(mavlink_path, t_start_s, t_end_s)` is in `analyse_run` (imported by `test_kinematic_gps.py`).
 - **rawes.lua SCR_USER6 modes (valid values 0,1,5):** 0=none (passive: no RC overrides, logs every 5 s + any NV message), 1=steady (cyclic altitude hold + VZ PI collective, 50 Hz), 4=landing (reserved, not yet implemented), 5=pumping (De Schutter pumping cycle, 50 Hz). Modes 1+5 own Ch3 entirely. **Yaw regulation** is handled entirely by ArduPilot's ATC_RAT_YAW PID (ACRO_Heli, H_TAIL_TYPE=4 DDFP); rawes.lua writes no commands to SERVO9/Ch9. **RAWES_ARM:** send `NAMED_VALUE_FLOAT("RAWES_ARM", ms)` to arm the vehicle and start a disarm countdown of `ms` milliseconds; re-sending refreshes the timer; Lua disarms and sends a STATUSTEXT when the countdown expires. Works in any mode. Default state is unarmed. **Substates** (pumping: 0=hold/1=reel_out/2=transition/3=reel_in/4=transition_back) are delivered via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6. `_nv_floats` resets to `{}` on every mode change. **`RAWES_ALT`**: target altitude [m] above anchor; Lua rate-limits elevation toward `asin(RAWES_ALT/tlen)` at `SCR_USER2` rad/s. **`RAWES_TEN`**: tether tension estimate [N] for gravity compensation. Constants in `simulation/rawes_modes.py`; send via `gcs.send_named_float("RAWES_SUB", N)` or `sim.send_named_float("RAWES_SUB", N)` (unit harness).
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) are required boot params (in `rawes_sitl_defaults.parm`). GPS origin sets during arm; "EKF3 IMU0 is using GPS" appears once EKF innovations settle. Without widened gates, GPS fusion fails.
 - **EK3_SRC1_YAW=2** (dual-antenna GPS yaw, RELPOSNED) — `rawes_sitl_defaults.parm` boot default. Two F9P antennas 50 cm apart (±25 cm along body X) give yaw from the NED baseline vector. Yaw is known from the first GPS fix — no motion, no EKFGSF rotation needed. `delAngBiasLearned` converges with constant-zero gyro (~21 s after arm). `COMPASS_USE=0`, `COMPASS_ENABLE=0` — compass is physically useless near the GB4008 motor on hardware and SITL synthetic compasses cycle every 10 s blocking GPS fusion. `GPS_AUTO_CONFIG=0` is **critical**: prevents ArduPilot from reconfiguring the UBLOX chips over serial, which corrupts the RELPOSNED stream in SITL. See `rawes_sitl_defaults.parm` for the full parameter list.
@@ -75,9 +102,11 @@ Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy
 - **Python orbit-tracking (legacy, Python simtests only):** `orbit_tracked_body_z_eq` (azimuthal), `orbit_tracked_body_z_eq_3d` (3D Rodrigues). Used only by Python-only simtests. **`OrbitTracker` class is removed** — replaced by `AltitudeHoldController` in all callers including `mediator.py`. **Not used in rawes.lua** — Lua uses `bz_altitude_hold` (AltitudeHoldController logic).
 - **AltitudeHoldController** (`controller.py`): primary cyclic controller for altitude-holding flight (pumping cycle, landing approach, mediator internal_controller path). Converts a target altitude setpoint to `body_z_eq` with gravity compensation. `from_pos(ic.pos, slew_rate_rad_s)` → initialized at IC elevation. `update(pos, target_alt_m, tension_n, mass_kg, dt)` → rate-limited `body_z_eq`. Uses `compute_bz_altitude_hold` internally (stateless primitive: pos + target_el_rad + tension + mass → body_z_eq).
 - **TensionPI runs at 400 Hz (physics loop); DeschutterPlanner runs at 10 Hz.** Planner provides `tension_setpoint` and `col_min_rad` to TensionPI at 10 Hz; TensionPI adjusts collective every physics step. `planner.step()` returns `col_min_rad` key for this purpose. Correct pattern: `if i % planner_every == 0: pump_cmd = planner.step(state, DT_PLANNER); tension_pi.setpoint = ...; tension_pi.coll_min = pump_cmd["col_min_rad"]`. Then every step: `col = tension_pi.update(tension_now, DT)`. **Note:** TensionPI is used by Lua stack tests (`test_pump_cycle_lua`) and the Python `test_pump_cycle.py`. The newer `test_pump_cycle_unified.py` uses ThrustCommand instead — see below.
-- **ThrustCommand protocol (Python simtest pumping):** `pumping_planner.PumpingGroundController` emits `ThrustCommand(thrust=0..1, alt_m, phase)` at 10 Hz. `thrust=0` = minimum tension (AP tilts body_z to tether direction, collective at `coll_min`); `thrust=1` = maximum tension (AP uses altitude-hold body_z, collective at `coll_max`). Reel-out: thrust ramps 0 → `target_thrust` over `thrust_ramp_s` seconds. Transition/reel-in/hold: thrust=0. `ThrustApController` maps thrust directly to body_z (slerp between tether_dir and alt_hold) and collective (linear map, slewed at `coll_slew_rate`). No tension measurement needed on the AP side. `WinchController` adds `T_reel_in_start` threshold — reel-in waits until `T < T_reel_in_start` before moving, ensuring AP has reached low-tension mode. Telemetry column: `thrust_cmd` (replaces `tension_rate_cmd`).
+- **TensionCommand protocol (Python simtest pumping):** `pumping_planner.PumpingGroundController` emits `TensionCommand(tension_setpoint_n, tension_measured_n, alt_m, phase)` at 10 Hz. Ground reads the load cell and packs both the setpoint and measurement so the AP's `TensionPI` can close the loop using ground-transmitted feedback. `alt_m` is smoothly ramped at phase boundaries (using `hub_alt_m` telemetry received from the kite at 10 Hz): ramps UP over `t_transition` seconds when entering "transition", ramps DOWN over `t_transition` seconds at the start of the next "reel-out". `TensionApController` (AP side, 400 Hz) caches its own `pos_ned` from `step()` and validates each received command via `BadEventLog`: `ap_impossible_alt` (alt_m > tether_length), `ap_unreachable_alt` (elevation gap > `slew_rate × FEASIBILITY_WINDOW_S = 1 s`). Blame rule: `ap_*` events → ground planner sent unreachable commands; slack/tension_spike without `ap_*` → AP tracking failure. `WinchController` is tension-controlled (no `T_reel_in_start` gate in unified test). Telemetry: `gnd_alt_cmd_m` (ground-commanded alt), `elevation_rad` (AP's rate-limited internal target), `pos_z` (actual hub).
 - **IC generation targets 300 N tension.** `test_generate_ic.py::test_create_ic` runs 60 s warmup with TensionPI targeting 300 N (midway between TENSION_IN=226 N and TENSION_OUT=435 N). `coll_eq_rad` in the IC is the TensionPI-settled collective at that tension — not a hardcoded constant. TensionPI warm-starts at this collective in all simtests.
 - **PhysicsCore** (`simulation/physics_core.py`): shared 400 Hz physics integration used by both `mediator.py` and simtests. Owns `RigidBodyDynamics`, `create_aero`, `TetherModel`, `AcroController(use_servo=True)`, spin ODE, angular damping (`base_k_ang` + `k_yaw`), `KinematicStartup`, `lock_orientation`. `step(dt, col, tilt_lon, tilt_lat)` for raw-tilt callers (mediator/Lua path); `step_acro(dt, col, body_z_eq)` for AcroController path (Python simtests). **PhysicsRunner** (`tests/unit/simtest_runner.py`): thin testing wrapper around `PhysicsCore`. `step(dt, col, body_z_eq)` → `core.step_acro()`; `step_raw(dt, col, tilt_lon, tilt_lat)` → `core.step()`. `for_warmup(rotor, pos, R0, rest_length, coll_eq_rad, omega_spin, wind)` classmethod for IC generation.
+- **WinchController design — `winch_target_tension = tension_ic` during reel-out (critical).** The generator's load point is `tension_ic` (300 N). The AP drives tension up to `tension_out` (435 N), giving cruise speed `kp * (435 − 300) = 0.675 m/s → capped at v_max_out = 0.40 m/s`. If you mistakenly set `winch_target_tension = tension_out` (435 N) during reel-out, the AP tension never significantly exceeds the target so `v_cruise ≈ 0` and the winch barely moves. During reel-in, `winch_target_tension = tension_in` (226 N): motor boosts when slack (T < 226 N) and backs off when kite resists (T > 226 N). Parameters: `kp = 0.005 (m/s)/N`, `v_max_out = 0.40 m/s`, `v_max_in = 0.80 m/s`, `accel_limit_ms2 = 0.5 m/s²`. Tested in `test_winch_tension_control.py` (23 tests: reel-out, reel-in, motion profile, bounds, landing).
+- **Ground owns altitude smoothing; AP must not add a second layer.** The AP already rate-limits elevation at `slew_rate_rad_s = 0.40 rad/s` — that is its smoothing. Adding a second smoothing layer in the AP would create two competing integrators. Instead, `PumpingGroundController` smoothly ramps `alt_m` across every phase boundary using `hub_alt_m` telemetry it receives at 10 Hz: ramp up over `t_transition` seconds entering "transition", ramp down over `t_transition` seconds at the start of each subsequent "reel-out". Sudden `alt_m` jumps are ground-controller bugs, not AP limitations — detected by `ap_unreachable_alt` events (`FEASIBILITY_WINDOW_S = 1.0 s`: if the elevation gap > `slew_rate × 1 s`, the command is flagged as unreachable).
 - **WinchNode** (`winch_node.py`): mediator calls `update_sensors(tension, wind_world)` (physics only); planner calls `get_telemetry()` + `receive_command()`. Wind seed from `Anemometer.measure()` at 3 m height.
 - **Vertical landing:** direct drop above anchor (not spiral). Descent rate controller replaces TensionPI. Sequence: reel-in only (no reel-out, `T_REEL_OUT=0`) via `DeschutterPlanner` swings hub from xi~8° to xi~48° in 30 s with no slack/spikes; hub reaches ~67 m altitude. `LandingPlanner` then descends from ~89 m tether to 2 m, final_drop. Validated in `test_landing.py` (22 s run, floor hit, descent slack=0).
 - **Gyroscopic phase NOT needed:** H_SW_PHANG=0. BASE_K_ANG=50 N·m·s/rad → τ≈0.08 s (damped before one orbit). `swashplate_phase_deg≠0` degrades orbit stability.
@@ -128,13 +157,26 @@ simulation/
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
 ├── gcs.py               MAVLink GCS client (arm, mode, RC override, params)
-├── pumping_planner.py   ThrustCommand dataclass + PumpingGroundController (10 Hz phase schedule,
-│                        thrust ramp 0→target during reel-out, 0 during transition/reel-in/hold)
-├── ap_controller.py     ThrustApController (400 Hz AP side): maps ThrustCommand.thrust [0..1]
-│                        to body_z (slerp tether_dir↔alt_hold) + collective (linear map, slewed)
-├── winch.py             WinchController — two-layer program mode (symmetric ΔL, T_reel_in_start
-│                        wait) + legacy 3-zone mode; set_phase() at 10 Hz, step() at 400 Hz
-├── telemetry_csv.py     Canonical 67-column CSV schema (TelRow, COLUMNS, heartbeat); thrust_cmd column
+├── pumping_planner.py   TensionCommand dataclass + PumpingGroundController (10 Hz phase schedule).
+│                        step(t_sim, tension_measured_n, rest_length, hub_alt_m) → TensionCommand.
+│                        alt_m is smoothly ramped at every phase boundary using hub_alt_m telemetry:
+│                        up over t_transition on reel-out→transition, down at next reel-out start.
+│                        winch_target_length / winch_target_tension properties for WinchController.
+├── ap_controller.py     TensionApController (400 Hz AP side): TensionPI collective + rate-limited
+│                        elevation hold. receive_command(cmd, dt) validates alt_m against cached
+│                        pos_ned (updated each step): ap_impossible_alt (alt > tether_length),
+│                        ap_unreachable_alt (elevation gap > slew_rate × 1 s). Pass BadEventLog
+│                        to constructor to capture these; use them to distinguish ground vs. AP fault.
+├── winch.py             WinchController — tension-controlled motion profile. set_target(length_m,
+│                        tension_n) at 10 Hz; step(tension_measured, dt) at 400 Hz. Cruise speed
+│                        proportional to tension error; trapezoidal accel/decel profile.
+├── telemetry_csv.py     Canonical CSV schema (TelRow, COLUMNS, heartbeat). Altitude command chain:
+│                        gnd_alt_cmd_m (ground cmd) / elevation_rad (AP internal) / pos_z (actual).
+│                        TelRow.from_physics(runner, step_result, col, wind, **kwargs) is the single
+│                        telemetry factory for all simtests — extracts state from PhysicsRunner +
+│                        step result dict; optional kwargs add ground-side columns.
+├── simtest_log.py       SimtestLog (per-test log dir + human-readable summary), BadEventLog (slack/
+│                        tension_spike/floor_hit event tracking with phase tagging).
 ├── analysis/
 │   ├── flight_log.py    Unified data loader — FlightLog.load(log_dir), FlightLog.buckets(bucket_s),
 │   │                    FlightEvent, Bucket; reads all log sources into one structure
@@ -152,14 +194,15 @@ simulation/
 │   ├── visualize_torque.py  Torque telemetry 3-panel replay (psi_dot, motor throttle, PWM)
 │   └── torque_telemetry.py  TorqueTelemetryFrame dataclass for torque replay
 └── tests/
-    ├── unit/            Windows native, no Docker (~500 tests: ~487 fast + ~11 simtests + 2 simtest pumping)
+    ├── unit/            Windows native, no Docker (~480 fast unit tests; no simtests)
+    │   └── README.md    Unit & simtest reference guide (Lua harness API, IC loading, telemetry)
+    ├── simtests/        Windows native, no Docker (~11 full physics simulation tests; marker: simtest)
+    │   ├── conftest.py      simtest marker registration; 600 s auto-timeout (from simulation/pytest.ini)
     │   ├── simtest_runner.py    PhysicsRunner — thin wrapper around PhysicsCore for simtests.
     │   │                        step(dt, col, body_z_eq) → core.step_acro() [Python-controlled];
     │   │                        step_raw(dt, col, tilt_lon, tilt_lat) → core.step() [Lua-controlled].
-    │   │                        Caller owns: PumpingGroundController/ThrustApController/WinchController
-    │   │                        (unified simtest) or DeschutterPlanner/TensionPI/WinchController (Lua simtest).
-    │   ├── simtest_ic.py        load_ic() — loads steady_state_starting.json
-    │   └── simtest_log.py       SimtestLog, BadEventLog
+    │   │                        Caller owns: PumpingGroundController/TensionApController/WinchController.
+    │   └── simtest_ic.py        load_ic() — loads steady_state_starting.json
     └── sitl/            Docker; all SITL/stack tests live here
         ├── conftest.py          thin re-exporter — pytest_addoption + pytest_configure only
         ├── stack_infra.py       ALL shared infrastructure: StackConfig, SitlContext,
@@ -245,8 +288,8 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 
 | Task | Command |
 |------|---------|
-| Unit tests (~483) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| Simtests (14) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m simtest -q` |
+| Unit tests (~480) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| Simtests (~11) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q` |
 | Stack test (single) | `bash simulation/dev.sh test-stack -n 1 -k test_foo` |
 | Stack test (full suite) | `bash simulation/dev.sh test-stack -n 8` |
 | **Post-failure analysis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
@@ -255,7 +298,7 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 | **Pumping cycle envelope** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` — **go-to tool for any pumping cycle parameter analysis**: tension setpoints, net energy vs TENSION_IN sweep, reel-in tilt cost/benefit, wind speed sensitivity. Use `--wind 8 10 12` to sweep wind speeds. Add `--telemetry simulation/logs/test_pump_cycle/telemetry.csv` to compare an actual run against the optimal envelope: per-cycle tension tracking, TensionPI saturation %, altitude hold bias, energy gap to optimal. |
 | Scrub to specific frame | `simulation/.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
 | Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py simulation/logs/<test_name>/telemetry.csv [--out cycle.mp4] [--speed 2]` |
-| **Regenerate `steady_state_starting.json`** | **`simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s`** — **CRITICAL: this is the ONLY test that writes the file.** `test_steady_flight.py` reads it but never writes it. Run after any aero model change. Used by all simtests and stack tests as initial conditions. |
+| **Regenerate `steady_state_starting.json`** | **`simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s`** — **CRITICAL: this is the ONLY test that writes the file.** `test_steady_flight.py` reads it but never writes it. Run after any aero model change. Used by all simtests and stack tests as initial conditions. |
 | Container start/stop | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |
 | Run inside container | `bash simulation/dev.sh exec 'python3 /rawes/simulation/...'` |

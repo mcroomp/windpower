@@ -5,13 +5,13 @@ Single source of truth for the flat CSV schema used by simtests and analysis.
 COLUMNS is the canonical ordered column list.  TelRow is the typed row object.
 write_csv / read_csv handle I/O.
 
-Unit tests build rows via TelRow.from_tel(make_tel(...)) and call write_csv().
+Simtests build rows via TelRow.from_physics(...) and call write_csv().
 analyse_pumping_cycle.py reads via read_csv() instead of its own TelRow + loader.
 
 Mediator-only columns (aero_*, servo_*, forces, rpy) default to 0.0 in rows
-built from unit-test telemetry.  tether_length and tether_extension are derived
-from pos_ned in from_tel() so analysis scripts get correct geometry without the
-mediator's tether model internals.
+built from simtest telemetry.  tether_length and tether_extension are derived
+from pos_ned so analysis scripts get correct geometry without the mediator's
+tether model internals.
 
 Array-valued properties
 -----------------------
@@ -59,8 +59,9 @@ COLUMNS: list[str] = [
     "tether_mx", "tether_my", "tether_mz",  # tether moment NED [N·m]
     "collective_rad", "collective_norm",
     "tilt_lon", "tilt_lat",
-    "tension_setpoint", "collective_from_tension_ctrl", "target_alt_m",
-    "thrust_cmd", "winch_speed_ms", "raw_coll", "tilt_frac",
+    # Ground-commanded altitude [m] (TensionCommand.alt_m, set by PumpingGroundController)
+    "tension_setpoint", "collective_from_tension_ctrl", "gnd_alt_cmd_m",
+    "winch_speed_ms",
     "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
     "aero_Q_drag", "aero_Q_drive",
     "F_x", "F_y", "F_z",                # net aero force NED [N]
@@ -84,6 +85,11 @@ COLUMNS: list[str] = [
     "q_bearing_nm", "q_motor_nm", "throttle",
     "wind_x", "wind_y", "wind_z",
     "bz_eq_x", "bz_eq_y", "bz_eq_z",
+    # TensionApController diagnostics (0.0 when not using that architecture)
+    "elevation_rad",      # rate-limited elevation angle tracked by AP [rad]
+    "el_correction_rad",  # daisy-chain elevation correction [rad]
+    "coll_saturated",     # collective pinned at floor or ceiling (0/1)
+    "comms_ok",           # ground comms healthy (0=dropout, 1=ok)
     # body-to-NED rotation matrix (row-major: r00=R[0,0], r01=R[0,1], ...)
     "r00", "r01", "r02",
     "r10", "r11", "r12",
@@ -146,11 +152,8 @@ class TelRow:
     tilt_lat:        float = 0.0
     tension_setpoint:             float = 0.0
     collective_from_tension_ctrl: float = 0.0
-    target_alt_m:                 float = 0.0
-    thrust_cmd:                   float = 0.0   # ThrustCommand.thrust [0..1]
+    gnd_alt_cmd_m:                float = 0.0   # ground-commanded altitude [m] (TensionCommand.alt_m)
     winch_speed_ms:               float = 0.0   # winch reel speed [m/s] +ve=out -ve=in
-    raw_coll:                     float = 0.0   # AP unclamped integrator [rad]
-    tilt_frac:                    float = 0.0   # AP tilt fraction 0..1
 
     aero_T:         float = 0.0
     aero_v_axial:   float = 0.0
@@ -205,6 +208,12 @@ class TelRow:
     bz_eq_x: float = 0.0
     bz_eq_y: float = 0.0
     bz_eq_z: float = 0.0
+
+    # TensionApController diagnostics
+    elevation_rad:     float = 0.0
+    el_correction_rad: float = 0.0
+    coll_saturated:    int   = 0
+    comms_ok:          int   = 1
 
     # Body-to-NED rotation matrix (row-major)
     r00: float = 1.0
@@ -355,11 +364,8 @@ class TelRow:
             tilt_lat            = float(d.get("tilt_lat",         0.0)),
             tension_setpoint             = float(d.get("tension_setpoint",             0.0)),
             collective_from_tension_ctrl = float(d.get("collective_from_tension_ctrl", 0.0)),
-            target_alt_m                 = float(d.get("target_alt_m",                 0.0)),
-            thrust_cmd                   = float(d.get("thrust_cmd",                   0.0)),
+            gnd_alt_cmd_m                = float(d.get("gnd_alt_cmd_m",                0.0)),
             winch_speed_ms               = float(d.get("winch_speed_ms",               0.0)),
-            raw_coll                     = float(d.get("raw_coll",                     0.0)),
-            tilt_frac                    = float(d.get("tilt_frac",                    0.0)),
             aero_T              = float(d.get("aero_T",           0.0)),
             aero_v_axial        = float(d.get("aero_v_axial",     0.0)),
             aero_v_inplane      = float(d.get("aero_v_inplane",   0.0)),
@@ -381,9 +387,186 @@ class TelRow:
             bz_eq_x             = float(bzeq[0]),
             bz_eq_y             = float(bzeq[1]),
             bz_eq_z             = float(bzeq[2]),
+            elevation_rad       = float(d.get("elevation_rad",     0.0)),
+            el_correction_rad   = float(d.get("el_correction_rad", 0.0)),
+            coll_saturated      = int(bool(d.get("coll_saturated", False))),
+            comms_ok            = int(bool(d.get("comms_ok",        True))),
             r00=float(R_mat[0, 0]), r01=float(R_mat[0, 1]), r02=float(R_mat[0, 2]),
             r10=float(R_mat[1, 0]), r11=float(R_mat[1, 1]), r12=float(R_mat[1, 2]),
             r20=float(R_mat[2, 0]), r21=float(R_mat[2, 1]), r22=float(R_mat[2, 2]),
+        )
+
+    @classmethod
+    def from_physics(
+        cls,
+        runner,
+        step_result: dict,
+        collective_rad: float,
+        wind_ned,
+        *,
+        body_z_eq=None,
+        phase: str = "",
+        tension_setpoint: float = 0.0,
+        gnd_alt_cmd_m: float = 0.0,
+        winch_speed_ms: float = 0.0,
+        elevation_rad: float = 0.0,
+        el_correction_rad: float = 0.0,
+        coll_saturated: bool = False,
+        comms_ok: bool = True,
+        net_moment=None,
+        **extra,
+    ) -> "TelRow":
+        """Build a TelRow from a PhysicsRunner and its step result (simtest use).
+
+        Parameters
+        ----------
+        runner       PhysicsRunner — provides hub_state, omega_spin, tether,
+                     tension_now, t_sim, aero.
+        step_result  dict returned by runner.step() or runner.step_raw() —
+                     provides tilt_lon, tilt_lat, aero_result, tether_force,
+                     tether_moment, omega_body, accel_world.
+        collective_rad  collective blade pitch used this step [rad].
+        wind_ned     3-element array-like [vN, vE, vD] m/s.
+        body_z_eq    optional NED unit vector (body-z setpoint).
+        extra        ignored (forward-compat for test-specific diagnostics).
+        """
+        hub_state   = runner.hub_state
+        tether      = runner.tether
+        tension_now = runner.tension_now
+        omega_spin  = runner.omega_spin
+        t_sim       = runner.t_sim
+        aero_obj    = runner.aero
+
+        tilt_lon    = float(step_result.get("tilt_lon",  0.0))
+        tilt_lat    = float(step_result.get("tilt_lat",  0.0))
+        aero_result = step_result.get("aero_result")
+        tether_force  = step_result.get("tether_force")
+        tether_moment = step_result.get("tether_moment")
+        omega_body  = step_result.get("omega_body")
+        accel_world = step_result.get("accel_world")
+
+        pos = np.asarray(hub_state["pos"], dtype=float)
+        vel = np.asarray(hub_state["vel"], dtype=float)
+        R   = np.asarray(hub_state["R"],   dtype=float)
+        ti  = tether._last_info
+
+        roll  = math.atan2(float(R[2, 1]), float(R[2, 2]))
+        pitch = -math.asin(float(np.clip(R[2, 0], -1.0, 1.0)))
+        yaw   = math.atan2(float(R[1, 0]), float(R[0, 0]))
+
+        if omega_body is not None:
+            om = np.asarray(omega_body, dtype=float)
+        elif "omega" in hub_state:
+            om = np.asarray(hub_state["omega"], dtype=float)
+        else:
+            om = np.zeros(3)
+
+        acc = np.asarray(accel_world, dtype=float) if accel_world is not None else np.zeros(3)
+        bzeq = np.asarray(body_z_eq, dtype=float).tolist() if body_z_eq is not None else [0.0, 0.0, 0.0]
+
+        tf_raw = ti.get("force")
+        if tether_force is not None:
+            tf = np.asarray(tether_force, dtype=float)
+        elif tf_raw is not None:
+            tf = np.asarray(tf_raw, dtype=float)
+        else:
+            tf = np.zeros(3)
+
+        aero_fx = aero_fy = aero_fz = 0.0
+        aero_mx = aero_my = aero_mz = 0.0
+        aero_T = aero_v_axial = aero_v_inplane = aero_v_i = aero_Q_drag = aero_Q_drive = 0.0
+        net_F = np.zeros(3)
+        net_M = np.zeros(3)
+        if aero_result is not None:
+            F = np.asarray(aero_result.F_world, dtype=float)
+            M = np.asarray(aero_result.M_orbital, dtype=float)
+            aero_fx, aero_fy, aero_fz = float(F[0]), float(F[1]), float(F[2])
+            aero_mx, aero_my, aero_mz = float(M[0]), float(M[1]), float(M[2])
+            net_F = F + tf
+            if net_moment is not None:
+                net_M = np.asarray(net_moment, dtype=float)
+            if aero_obj is not None:
+                aero_T         = float(aero_obj.last_T)
+                aero_v_axial   = float(aero_obj.last_v_axial)
+                aero_v_inplane = float(aero_obj.last_v_inplane)
+                aero_v_i       = float(aero_obj.last_v_i)
+                aero_Q_drag    = float(aero_obj.last_Q_drag)
+                aero_Q_drive   = float(aero_obj.last_Q_drive)
+
+        tm = np.asarray(tether_moment, dtype=float) if tether_moment is not None else np.zeros(3)
+
+        trl = float(tether.rest_length)
+        tl  = float(np.linalg.norm(pos))
+        wind = [float(v) for v in wind_ned]
+
+        return cls(
+            t_sim               = float(t_sim),
+            phase               = str(phase),
+            pos_x               = float(pos[0]),
+            pos_y               = float(pos[1]),
+            pos_z               = float(pos[2]),
+            vel_x               = float(vel[0]),
+            vel_y               = float(vel[1]),
+            vel_z               = float(vel[2]),
+            omega_x             = float(om[0]),
+            omega_y             = float(om[1]),
+            omega_z             = float(om[2]),
+            accel_x             = float(acc[0]),
+            accel_y             = float(acc[1]),
+            accel_z             = float(acc[2]),
+            omega_rotor         = float(omega_spin),
+            tether_length       = tl,
+            tether_extension    = tl - trl,
+            tether_tension      = float(tension_now),
+            tether_rest_length  = trl,
+            tether_slack        = int(bool(ti.get("slack", False))),
+            tether_fx           = float(tf[0]),
+            tether_fy           = float(tf[1]),
+            tether_fz           = float(tf[2]),
+            aero_fx             = aero_fx,
+            aero_fy             = aero_fy,
+            aero_fz             = aero_fz,
+            aero_mx             = aero_mx,
+            aero_my             = aero_my,
+            aero_mz             = aero_mz,
+            tether_mx           = float(tm[0]),
+            tether_my           = float(tm[1]),
+            tether_mz           = float(tm[2]),
+            collective_rad      = float(collective_rad),
+            tilt_lon            = float(tilt_lon),
+            tilt_lat            = float(tilt_lat),
+            tension_setpoint             = float(tension_setpoint),
+            collective_from_tension_ctrl = 0.0,
+            gnd_alt_cmd_m                = float(gnd_alt_cmd_m),
+            winch_speed_ms               = float(winch_speed_ms),
+            aero_T              = aero_T,
+            aero_v_axial        = aero_v_axial,
+            aero_v_inplane      = aero_v_inplane,
+            aero_v_i            = aero_v_i,
+            aero_Q_drag         = aero_Q_drag,
+            aero_Q_drive        = aero_Q_drive,
+            F_x                 = float(net_F[0]),
+            F_y                 = float(net_F[1]),
+            F_z                 = float(net_F[2]),
+            M_x                 = float(net_M[0]),
+            M_y                 = float(net_M[1]),
+            M_z                 = float(net_M[2]),
+            rpy_roll            = roll,
+            rpy_pitch           = pitch,
+            rpy_yaw             = yaw,
+            wind_x              = wind[0],
+            wind_y              = wind[1],
+            wind_z              = wind[2],
+            bz_eq_x             = float(bzeq[0]),
+            bz_eq_y             = float(bzeq[1]),
+            bz_eq_z             = float(bzeq[2]),
+            elevation_rad       = float(elevation_rad),
+            el_correction_rad   = float(el_correction_rad),
+            coll_saturated      = int(bool(coll_saturated)),
+            comms_ok            = int(bool(comms_ok)),
+            r00=float(R[0, 0]), r01=float(R[0, 1]), r02=float(R[0, 2]),
+            r10=float(R[1, 0]), r11=float(R[1, 1]), r12=float(R[1, 2]),
+            r20=float(R[2, 0]), r21=float(R[2, 1]), r22=float(R[2, 2]),
         )
 
     def to_dict(self) -> dict:
@@ -422,7 +605,7 @@ def read_csv(path: "Path | str") -> "list[TelRow]":
 # ---------------------------------------------------------------------------
 
 _STR_COLS   = frozenset({"phase", "note"})
-_INT_COLS   = frozenset({"tether_slack"})
+_INT_COLS   = frozenset({"tether_slack", "coll_saturated", "comms_ok"})
 _FLOAT_COLS = [c for c in COLUMNS if c not in _STR_COLS and c not in _INT_COLS and c != "t_sim"]
 
 

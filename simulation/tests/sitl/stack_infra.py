@@ -329,6 +329,8 @@ class StackContext:
     controller:          object       = None
     internal_controller: bool         = False
     test_log_dir:        Path | None  = None
+    # ── pumping socket (default 0 = disabled) ────────────────────────────────
+    winch_cmd_port:      int          = 0
     # ── torque tests (default 0.0 for flight) ─────────────────────────────────
     omega_rotor:         float        = 0.0
 
@@ -781,6 +783,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
             controller=controller,
             internal_controller=_use_internal,
             test_log_dir=sitl_ctx.test_log_dir,
+            winch_cmd_port=int((extra_config or {}).get("winch_cmd_port", 0)),
         )
 
         try:

@@ -1,21 +1,20 @@
 """
 test_pump_cycle_unified.py -- De Schutter pumping cycle using PumpingGroundController
-and ThrustApController (clean ground/AP boundary).
+and TensionApController (clean ground/AP boundary).
 
-Ground (10 Hz):  PumpingGroundController  -> ThrustCommand(thrust 0..1)
+Ground (10 Hz):  PumpingGroundController  -> TensionCommand(setpoint + measurement + alt + phase)
 Winch  (400 Hz): WinchController          -> tether length
-AP     (400 Hz): ThrustApController       -> collective + body_z_eq
-                 thrust=0: tether-tilt (minimum tension, coll_min)
-                 thrust=1: altitude-hold (maximum tension, coll_max)
+AP     (400 Hz): TensionApController      -> collective + body_z_eq
+                 TensionPI tracks tension_setpoint using tension_measured from ground.
+                 AltitudeHoldController tracks alt_m for body_z.
 
 Communication boundary:
-  - Ground sends ThrustCommand to AP at 10 Hz
-  - ThrustCommand carries (thrust 0..1, alt_m, phase)
-  - AP slerps body_z between tether_dir and alt_hold, slews collective
+  - Ground reads load cell, computes setpoint, packs TensionCommand at 10 Hz
+  - AP has no tension sensor; uses ground-transmitted measurement as PI feedback
+  - AP holds last received measurement between 10 Hz updates
 
-Reel-out: ground ramps thrust 0->target_thrust over thrust_ramp_s
-Transition: ground sends thrust=0; AP drives to minimum tension
-Reel-in: ground sends thrust=0; winch waits for T < T_reel_in_start, then reels in
+Reel-out: ground ramps setpoint from tension_ic (~300N) to tension_out (435N) over ramp_s
+Transition/reel-in: ground sends tension_in (226N); winch waits for T < T_reel_in_start
 """
 import math
 import sys
@@ -33,10 +32,10 @@ from winch            import WinchController
 from simtest_log      import SimtestLog, BadEventLog
 from simtest_ic       import load_ic
 from simtest_runner   import PhysicsRunner
-from tel              import make_tel
 from telemetry_csv    import TelRow, write_csv
 from pumping_planner  import PumpingGroundController
-from ap_controller    import ThrustApController
+from ap_controller    import TensionApController
+from controller       import AcroControllerSitl
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -50,23 +49,29 @@ WIND.flags.writeable = False
 BREAK_LOAD_N = 620.0
 
 # ── Pumping cycle parameters ──────────────────────────────────────────────────
-N_CYCLES     = 3
-T_REEL_OUT   = 30.0
-T_REEL_IN    = 30.0
+N_CYCLES         = 3
+DELTA_L          = 12.0    # tether length paid out per cycle [m]
 
-# T_TRANSITION: trapezoid ramp at phase boundaries (matches DeschutterPlanner)
 _XI_START_DEG    = 30.0
-_XI_REEL_IN_DEG  = 80.0
+_XI_REEL_IN_DEG  = 50.0
 T_TRANSITION = (
-    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / _ROTOR.body_z_slew_rate_rad_s + 1.5
+    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / _ROTOR.body_z_slew_rate_rad_s + 3.0
 )
 
-COL_MIN_RAD   = -0.28
-COL_MAX_RAD   =  0.10   # collective upper bound (test-level)
+TENSION_OUT      = 435.0
+TENSION_IN       = 240.0   # winch threshold during reel-in
+TENSION_IN_AP    = 213.0   # AP setpoint: natural tension at 50° coll=0 is ~226N; oscillation dip 213-16=197N>0
+TENSION_IC       = 300.0   # IC targets 300 N (midway between min and max)
 
+EL_REEL_IN_RAD   = math.radians(_XI_REEL_IN_DEG)
 TENSION_SAFETY_N = 496.0
 FLOOR_ALT_M      = 1.0
-T_CYCLE          = T_REEL_OUT + T_REEL_IN
+
+# Safety timeouts — phases exit on tether length, but these cap runaway phases.
+T_REEL_OUT_MAX = 120.0
+T_REEL_IN_MAX  = 120.0
+# Generous simulation budget: 3 cycles × (60 s reel-out + transition + 60 s reel-in)
+T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.2
 
 
 # ---------------------------------------------------------------------------
@@ -76,85 +81,94 @@ T_CYCLE          = T_REEL_OUT + T_REEL_IN
 def _run_pumping() -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
-    T_INIT = 300.0   # IC targets 300 N tension (midway between min and max)
-
     # ── Ground: PumpingGroundController (10 Hz outer loop) ────────────────
     ground = PumpingGroundController(
-        t_reel_out   = T_REEL_OUT,
-        t_reel_in    = T_REEL_IN,
-        t_transition = T_TRANSITION,
-        target_alt_m = float(-_IC.pos[2]),
-        n_cycles     = N_CYCLES,
-        target_thrust= 0.9,
-        thrust_ramp_s= 8.0,
+        t_transition   = T_TRANSITION,
+        target_alt_m   = float(-_IC.pos[2]),
+        delta_l        = DELTA_L,
+        el_reel_in_rad = EL_REEL_IN_RAD,
+        n_cycles       = N_CYCLES,
+        tension_out    = TENSION_OUT,
+        tension_in     = TENSION_IN,
+        tension_in_ap  = TENSION_IN_AP,
+        tension_ic     = TENSION_IC,
+        tension_ramp_s = 8.0,
+        t_reel_out_max = T_REEL_OUT_MAX,
+        t_reel_in_max  = T_REEL_IN_MAX,
     )
 
-    # ── Ground: WinchController (program mode, phase-driven) ─────────────
+    # ── Ground: WinchController (tension-controlled motion profile) ──────
     winch = WinchController(
         rest_length     = _IC.rest_length,
-        delta_l         = 12.0,    # reel out 12 m, reel back in 12 m (symmetric)
-        v_reel_out      = 0.40,    # generator optimal speed [m/s]
-        v_reel_in       = 0.80,    # fast reel-in to maximise cycle rate [m/s]
-        T_soft_max      = 470.0,   # start slowing on reel-out [N]
-        T_hard_max      = 496.0,   # stop on reel-out (~80% break load) [N]
-        T_soft_min      =  30.0,   # start slowing on reel-in (slack warning) [N]
-        T_hard_min      =  10.0,   # stop on reel-in (slack) [N]
-        T_reel_in_start = 200.0,   # wait for AP to reach low-tension before reeling in
-        min_length      =   2.0,
+        kp_tension      = 0.005,
+        v_max_out       = 0.40,
+        v_max_in        = 0.80,
+        accel_limit_ms2 = 0.05,
+        min_length      = 2.0,
     )
 
-    # ── AP: ThrustApController (400 Hz, maps thrust -> collective + body_z) ──
-    ap = ThrustApController(
+    events    = BadEventLog()
+
+    # ── AP: TensionApController + AcroControllerSitl (mirrors rawes.lua + ArduPilot ACRO) ──
+    ap        = TensionApController(
         ic_pos          = _IC.pos,
         mass_kg         = _ROTOR.mass_kg,
         slew_rate_rad_s = _ROTOR.body_z_slew_rate_rad_s,
         warm_coll_rad   = _IC.coll_eq_rad,
-        T_tension_est   = T_INIT,
-        coll_min        = COL_MIN_RAD,
-        coll_max        = COL_MAX_RAD,
+        tension_ic      = TENSION_IC,
+        el_corr_ki      = 0.0,   # daisy-chain disabled until gain is tuned
+        events          = events,
     )
+    acro_sitl = AcroControllerSitl()
 
-    t_end_sim = N_CYCLES * T_CYCLE
-    max_steps = int(t_end_sim / DT) + 1
+    max_steps = int(T_END_SIM / DT) + 1
 
     cycle_energy_out = [0.0] * N_CYCLES
     cycle_energy_in  = [0.0] * N_CYCLES
-    events    = BadEventLog()
     telemetry = []
     tel_every     = max(1, int(0.05 / DT))
     planner_every = max(1, round(DT_PLANNER / DT))
 
     collective_rad = _IC.coll_eq_rad
-    body_z_eq      = _IC.R0[:, 2].copy()
+    tilt_lon       = 0.0
+    tilt_lat       = 0.0
+    cmd            = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
+                                 hub_alt_m=float(-_IC.pos[2]))  # sentinel for t=0
 
     t_sim = 0.0
     for i in range(max_steps):
         t_sim = i * DT
-        if t_sim >= t_end_sim:
+        if ground.phase == "hold":
             break
 
         hub_state   = runner.hub_state
         tension_now = runner.tension_now
         altitude    = -hub_state["pos"][2]
-        cycle_idx   = min(int(t_sim / T_CYCLE), N_CYCLES - 1)
+        cycle_idx   = min(ground.cycle_count, N_CYCLES - 1)
 
-        # ── Ground 10 Hz outer: compute phase + thrust, send to AP ──────────
+        # ── Ground 10 Hz: read load cell, compute setpoint, send to AP ──────
         if i % planner_every == 0:
-            cmd = ground.step(t_sim)
-            ap.receive_command(cmd)
-            winch.set_phase(ground.phase)
+            cmd = ground.step(t_sim, tension_now,
+                              rest_length=winch.rest_length, hub_alt_m=altitude)
+            if ground.phase == "hold":
+                break   # all cycles done; don't apply hold command to AP
+            ap.receive_command(cmd, DT_PLANNER)
+            winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
-        # ── Winch 400 Hz: execute program + safety layer ──────────────────
+        # ── Winch 400 Hz ──────────────────────────────────────────────────
         len_before = winch.rest_length
         winch.step(tension_now, DT)
         speed_now = (winch.rest_length - len_before) / DT
 
-        # ── AP 400 Hz: collective + body_z from thrust ────────────────────
-        obs = runner.observe()
-        collective_rad, body_z_eq = ap.step(obs.pos, obs.body_z, DT)
+        # ── AP 400 Hz: TensionApController → rate commands → AcroControllerSitl ──
+        R          = np.asarray(hub_state["R"], dtype=float)
+        omega_body = R.T @ np.asarray(hub_state["omega"], dtype=float)
+        collective_rad, rate_roll, rate_pitch = ap.step(hub_state["pos"], R, DT)
+        tilt_lon, tilt_lat = acro_sitl.update(rate_roll, rate_pitch, omega_body, DT)
 
-        # ── Physics 400 Hz ───────────────────────────────────────────────
-        sr = runner.step(DT, collective_rad, body_z_eq, rest_length=winch.rest_length)
+        # ── Physics 400 Hz ────────────────────────────────────────────────
+        sr = runner.step_raw(DT, collective_rad, tilt_lon, tilt_lat,
+                             rest_length=winch.rest_length)
 
         # ── Per-cycle energy accounting ───────────────────────────────────
         if speed_now > 0.0:
@@ -175,23 +189,17 @@ def _run_pumping() -> dict:
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
         if i % tel_every == 0:
-            telemetry.append(make_tel(
-                t_sim, runner.hub_state, runner.omega_spin,
-                runner.tether, runner.tension_now,
-                collective_rad, sr["tilt_lon"], sr["tilt_lat"], WIND,
-                body_z_eq         = body_z_eq,
+            telemetry.append(TelRow.from_physics(
+                runner, sr, collective_rad, WIND,
+                body_z_eq         = R[:, 2],
                 phase             = phase_label,
-                aero_result       = sr["aero_result"],
-                aero_obj          = runner.aero,
-                tether_force      = sr["tether_force"],
-                tether_moment     = sr["tether_moment"],
-                tension_setpoint  = ap.drive,
-                collective_from_tension_ctrl = collective_rad,
-                target_alt_m      = ap._target_alt,
-                thrust_cmd        = ap.thrust,
+                tension_setpoint  = ap.tension_setpoint,
+                gnd_alt_cmd_m     = cmd.alt_m,
                 winch_speed_ms    = speed_now,
-                raw_coll          = ap.raw_coll,
-                tilt_frac         = ap.tilt_frac,
+                elevation_rad     = ap.elevation_rad,
+                el_correction_rad = ap.el_correction_rad,
+                coll_saturated    = ap.coll_saturated,
+                comms_ok          = ap.comms_ok,
             ))
 
     # ── Results ───────────────────────────────────────────────────────────────
@@ -209,8 +217,7 @@ def _run_pumping() -> dict:
     ]
 
     if telemetry:
-        write_csv([TelRow.from_tel(d) for d in telemetry],
-                  _log.log_dir / "telemetry.csv")
+        write_csv(telemetry, _log.log_dir / "telemetry.csv")
     _log.write(["(telemetry: telemetry.csv)"],
                "  ".join(p for p in parts if p))
 
@@ -233,7 +240,7 @@ def _run_pumping() -> dict:
 # ---------------------------------------------------------------------------
 
 def test_pumping_unified():
-    """3 pumping cycles via PumpingGroundController/ThrustApController: no bad events, net > 0."""
+    """3 pumping cycles via PumpingGroundController/TensionApController: no bad events, net > 0."""
     r = _run_pumping()
     failures = []
     if r["events"]:

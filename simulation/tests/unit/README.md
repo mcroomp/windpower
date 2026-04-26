@@ -1,45 +1,49 @@
-# Unit Tests — Reference Guide
+# Unit & Simtest Reference Guide
 
-Unit tests live in `simulation/tests/unit/` and run **Windows-native** (no Docker).
-They cover the full simulation stack: physics, aero, controller maths, and the actual
-`rawes.lua` Lua controller running in-process via lupa.
+Tests are split across two directories, both running **Windows-native** (no Docker):
+
+| Directory | Contents | Marker |
+|-----------|----------|--------|
+| `tests/unit/` | Fast algebraic/protocol tests — no physics loop | *(none)* |
+| `tests/simtests/` | Full time-domain physics loops — seconds of compute | `simtest` |
 
 ---
 
 ## Running Tests
 
 ```bash
-# Fast unit tests (~483) — exclude slow simtests
-simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m "not simtest" -q
+# Fast unit tests only (~480)
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
 
-# Slow simtests (~11, 9 pass) — full physics loops
-simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m simtest -q
+# Simtests only (~11)
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
+
+# Both together
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit simulation/tests/simtests -q
 
 # Single test
-simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit/test_steady_flight_lua.py -q
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_steady_flight.py -q
 
 # Regenerate steady-state IC (required after any aero model change)
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
 **CRITICAL:** Never use `dev.sh test-unit` — it routes to Docker which excludes `tests/unit`.
-**CRITICAL:** Always use `simulation/run_tests.py` (not `python -m pytest` directly) — it checks
-the venv is up to date and saves structured logs.
 
 ---
 
 ## Test Markers
 
-| Marker | Meaning | Default run |
-|--------|---------|-------------|
-| *(none)* | Fast unit test, no physics loop | Included |
-| `simtest` | Full time-domain physics loop — seconds of compute | Excluded |
+| Marker | Meaning |
+|--------|---------|
+| *(none)* | Fast unit test, no physics loop |
+| `simtest` | Full time-domain physics loop — seconds of compute (auto-timeout 600 s) |
 
-Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
+The `simtest` timeout is set globally in `simulation/pytest.ini`.
 
 ---
 
-## Test Files
+## Unit Tests (`tests/unit/`)
 
 ### Physics & Aero
 
@@ -52,33 +56,10 @@ Defined in `conftest.py`. Mark slow tests with `@pytest.mark.simtest`.
 | `test_force_balance.py` | Static force balance at equilibrium |
 | `test_physical_validation.py` | Physical consistency checks (mass, inertia, geometry) |
 | `test_swashplate.py` | H3-120 inverse mixing, cyclic blade pitch |
+| `test_swashplate_aero.py` | Swashplate + aero integrated checks |
+| `test_swashplate_aero_glauert.py` | Glauert correction in swashplate+aero path |
 | `test_tether_stability.py` | Tether elastic model — tension, slack, snap |
 | `test_rotor_definition.py` | RotorDefinition YAML loading and validation |
-
-### Simulation Loops (simtests)
-
-Three scenario pairs — each has a Python-only version and a Python+Lua version.
-All three start from the same `steady_state_starting.json` IC (written by `test_generate_ic.py::test_create_ic`).
-
-| Python | Lua | Scenario |
-|--------|-----|----------|
-| `test_steady_flight.py` | `test_steady_flight_lua.py` | 90 s orbit from IC |
-| `test_pump_cycle.py` | `test_pump_cycle_lua.py` | N De Schutter cycles — TensionPI collective (mirrors Lua) |
-| `test_pump_cycle_unified.py` | — | N De Schutter cycles — ThrustCommand/ThrustApController architecture |
-| `test_landing.py` | `test_landing_lua.py` | reel-in only (no reel-out) swings hub to xi~80°, then VZ descent + final drop |
-
-IC generation is separate:
-
-| File | What it tests |
-|------|--------------|
-| `test_generate_ic.py` | **Writes** `steady_state_starting.json`; also verifies the IC is stable in 30 s steady flight |
-
-Supporting simtests (no Lua pair):
-
-| File | What it tests |
-|------|--------------|
-| `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
-| `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
 
 ### Controller & Sensor
 
@@ -86,31 +67,61 @@ Supporting simtests (no Lua pair):
 |------|--------------|
 | `test_controller.py` | `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `RatePID`, `AltitudeHoldController`, `compute_bz_altitude_hold` |
 | `test_sensor.py` | `PhysicalSensor` output consistency (gyro, accel, body_to_earth) |
-| `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
-| `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
 | `test_startup_trajectory.py` | KinematicStartup orbit trajectory validation |
 | `test_wind_estimator.py` | Wind estimator accuracy vs. ground truth |
+| `test_ap_controller.py` | `TensionApController` — bad-event detection, elevation clamping |
+| `test_winch_tension_control.py` | `WinchController` — reel-out, reel-in, motion profile, bounds, landing (23 tests) |
 
 ### Mediator & Protocol
 
 | File | What it tests |
 |------|--------------|
-| `test_mediator.py` | 400 Hz co-simulation loop, sensor packet format |
-| `test_mediator_transport.py` | UDP send/receive, lockstep compliance |
 | `test_interfaces.py` | `sitl_interface.py` binary protocol encoding |
 | `test_planner_protocol.py` | `WinchNode` planner/physics protocol boundary |
+| `test_torque_model.py` | `HubParams` / `HubState` motor lag ODE |
 
 ### Lua Controller Tests
-
-`test_<name>_lua.py` mirrors `test_<name>.py` — same physics and IC, Lua controller instead of Python.
 
 | File | Non-Lua reference | What it tests |
 |------|------------------|--------------|
 | `test_math_lua.py` | — | Lua math: `bz_altitude_hold`, `cyclic_error_body`, `output_rate_limit`, `rate_to_pwm`, constants |
-| `test_yaw_lua.py` | — | Yaw-trim: runs rawes.lua via `RawesLua` harness (PI, dead zone, watchdog, hard-stop, closed-loop equilibrium) |
-| `test_steady_flight_lua.py` | `test_steady_flight.py` | rawes.lua mode=1: 90 s altitude-hold steady flight from IC via harness |
-| `test_pump_cycle_lua.py` | `test_pump_cycle.py` | rawes.lua mode=5: N De Schutter cycles from IC via harness (TensionPI collective) |
-| `test_landing_lua.py` | `test_landing.py` | rawes.lua mode=4: landing from IC via harness (in development) |
+| `test_yaw_lua.py` | — | Yaw-trim: PI, dead zone, watchdog, hard-stop, closed-loop equilibrium |
+| `test_armon_lua.py` | — | `RAWES_ARM` countdown and disarm logic |
+
+---
+
+## Simtests (`tests/simtests/`)
+
+All simtests start from the same `steady_state_starting.json` IC (written by `test_generate_ic.py::test_create_ic`).
+
+### Physics Scenarios
+
+| Python simtest | Lua simtest | Scenario |
+|----------------|-------------|----------|
+| `test_steady_flight.py` | `test_steady_flight_lua.py` | 10 s orbit from IC — drift, tether, axle angle |
+| `test_pump_cycle_unified.py` | `test_pump_cycle_lua.py` | N De Schutter cycles — `PumpingGroundController` / `TensionApController` |
+| `test_landing.py` | `test_landing_lua.py` | reel-in only (xi~30° → ~80°) then VZ descent + final drop |
+
+IC generation:
+
+| File | What it tests |
+|------|--------------|
+| `test_generate_ic.py` | **Writes** `steady_state_starting.json`; verifies the IC is stable in 30 s flight |
+
+Supporting simtests:
+
+| File | What it tests |
+|------|--------------|
+| `test_kinematic_transition.py` | Kinematic → free-flight hand-off (pos, vel, R continuity) |
+| `test_sensor_closed_loop.py` | Sensor feeding EKF-equivalent closed loop |
+
+### Simtest Support Machinery
+
+| File | Purpose |
+|------|---------|
+| `simtest_ic.py` | `load_ic()` — loads `steady_state_starting.json` |
+| `simtest_runner.py` | `PhysicsRunner` — thin wrapper around `PhysicsCore` for simtests |
+| `conftest.py` | `simtest` marker registration; 600 s auto-timeout |
 
 ---
 
@@ -121,12 +132,15 @@ embedded in Python). No SITL, no Docker, no real sleeping.
 
 ### Key Files
 
-| File | Purpose |
-|------|---------|
-| `rawes_lua_harness.py` | `RawesLua` class — Python interface to rawes.lua |
-| `mock_ardupilot.lua` | ArduPilot API stub (AHRS, RC, SRV_Channels, param, gcs, arming, vehicle) |
-| `simulation/scripts/rawes_test_surface.lua` | Test surface spliced into rawes.lua — exposes internal functions via `_rawes_fns` |
-| `simulation/rawes_modes.py` | Central Python constants mirroring rawes.lua mode/substate numbers |
+| File | Location | Purpose |
+|------|----------|---------|
+| `rawes_lua_harness.py` | `simulation/` root | `RawesLua` class — Python interface to rawes.lua |
+| `mock_ardupilot.lua` | `simulation/` root | ArduPilot API stub (AHRS, RC, SRV_Channels, param, gcs, arming, vehicle) |
+| `rawes_test_surface.lua` | `simulation/scripts/` | Test surface spliced into rawes.lua — exposes internals via `_rawes_fns` |
+| `rawes_modes.py` | `simulation/` root | Central Python constants mirroring rawes.lua mode/substate numbers |
+
+`rawes_lua_harness.py` lives in `simulation/` (not in a test subdirectory) because it is imported
+by both `tests/unit/` Lua tests and `tests/simtests/` Lua simtests.
 
 ### How the Harness Works
 
@@ -282,7 +296,7 @@ ic = load_ic()
 
 Regenerate after any aero model change:
 ```bash
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s
+simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
 ---
@@ -293,7 +307,7 @@ simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generat
 (`simulation/physics_core.py`). `PhysicsCore` owns `RigidBodyDynamics`, `create_aero`,
 `TetherModel`, `AcroController(use_servo=True)`, the spin ODE, and angular damping.
 `PhysicsRunner` exposes `step()` / `step_raw()` for simtest callers.
-Callers own `DeschutterPlanner`, `TensionPI`, `WinchController`.
+Callers own `PumpingGroundController`, `TensionApController`, `WinchController`.
 
 ```python
 from simtest_runner import PhysicsRunner
@@ -319,36 +333,50 @@ After each `step()` / `step_raw()`:
 - `sr["tilt_lon"], sr["tilt_lat"]` — tilts used in that step
 - `sr["aero_result"], sr["tether_force"], sr["tether_moment"]` — forces for telemetry
 
-**TensionPI/planner rate split** — planner at 10 Hz, TensionPI at 400 Hz:
+**Ground/AP rate split** — ground controller at 10 Hz, `TensionApController` at 400 Hz:
 ```python
-planner_every = max(1, round(DT_PLANNER / DT))   # 40 steps
-pump_cmd = None
+gnd_every = max(1, round(DT_GND / DT))   # 40 steps
+gnd_cmd = None
 for i in range(max_steps):
-    if pump_cmd is None or i % planner_every == 0:
-        pump_cmd = planner.step(state_pkt, DT_PLANNER)
-        tension_pi.setpoint = pump_cmd["tension_setpoint"]
-        tension_pi.coll_min = pump_cmd["col_min_rad"]   # floor from planner
-    collective = tension_pi.update(runner.tension_now, DT)
-    sr = runner.step(DT, collective, body_z_eq)
+    if gnd_cmd is None or i % gnd_every == 0:
+        gnd_cmd = ground_ctrl.step(t_sim, tension_now, winch.rest_length, hub_alt_m)
+        winch.set_target(gnd_cmd.winch_target_length, gnd_cmd.winch_target_tension)
+        ap_ctrl.receive_command(gnd_cmd, DT_GND)
+    collective_rad, body_z_eq = ap_ctrl.step(runner.hub_state, runner.tension_now, DT)
+    winch.step(runner.tension_now, DT)
+    sr = runner.step(DT, collective_rad, body_z_eq, rest_length=winch.rest_length)
 ```
 
 ---
 
 ## Telemetry in Simtests
 
-All simtests that emit telemetry use `make_tel()` from `tel.py`. Rows are written to CSV
-via `TelRow.from_tel()` + `write_csv()` from `telemetry_csv.py`.
+All simtests emit telemetry via `TelRow.from_physics()` from `telemetry_csv.py`.
 
 ```python
-from tel import make_tel
 from telemetry_csv import TelRow, write_csv
 
-row = make_tel(t, hub_state, omega_spin, tether, tension, col, tilt_lon, tilt_lat, wind)
-write_csv([TelRow.from_tel(r) for r in rows], path / "telemetry.csv")
+# After each step:
+if step % TEL_STRIDE == 0:
+    tel_rows.append(TelRow.from_physics(
+        runner, sr, collective_rad, WIND,
+        body_z_eq=body_z_eq,
+        phase=current_phase,
+        tension_setpoint=setpoint_n,
+    ))
+
+# At end of test:
+write_csv(tel_rows, _log.log_dir / "telemetry.csv")
 ```
 
-Log output goes to `simulation/logs/test_<name>/`.  Use `SimtestLog` from `simtest_log.py`
-to write human-readable summaries alongside the CSV.
+`TelRow.from_physics(runner, step_result, collective_rad, wind_ned, **kwargs)` extracts all
+physics state from the runner (`hub_state`, `tension_now`, `omega_spin`, `t_sim`, `aero`)
+and from the step result dict (`tilt_lon`, `tilt_lat`, `aero_result`, `tether_force`,
+`tether_moment`, `omega_body`, `accel_world`). Optional keyword args add ground-side
+telemetry columns (`phase`, `tension_setpoint`, `gnd_alt_cmd_m`, `elevation_rad`, etc.).
+
+`SimtestLog` from `simulation/simtest_log.py` writes human-readable summaries alongside
+the CSV. Log output goes to `simulation/logs/test_<name>/`.
 
 ---
 
@@ -363,10 +391,8 @@ giving it access to all module-level locals. Constants and functions are exposed
   `_rawes_fns` in `rawes_test_surface.lua` in the same commit.
 - When adding a **function-local** constant that tests need, hoist it to module level
   first, then add it to `_rawes_fns`. Function-locals are out of scope for the splice.
-- `test_yaw_lua.py` reads all yaw constants (`KP_YAW`, `YAW_DEAD_ZONE_RAD_S`, etc.)
-  from `sim.fns.*` — no manual copies.
+- `test_yaw_lua.py` reads all yaw constants from `sim.fns.*` — no manual copies.
 - `test_math_lua.py` runs actual rawes.lua functions via `_rawes_fns` and cross-checks
-  against `controller.py` equivalents (currently `bz_altitude_hold` vs `compute_bz_altitude_hold`).
-  A failing test means `controller.py` diverged; fix that.
+  against `controller.py` equivalents. A failing test means `controller.py` diverged; fix that.
 - A failing Lua unit test after a rawes.lua edit means the Python assertion constants
   are stale. Fix the constants, then fix the test.

@@ -3,7 +3,7 @@ test_landing_stack.py -- Lua landing mode full-stack test (SITL + ArduPilot).
 
 rawes.lua SCR_USER6=4 landing mode: Lua controls cyclic (orbit tracking) and
 collective (VZ descent-rate controller) entirely via ArduPilot RC overrides.
-The mediator runs the winch only (LandingPlanner.step for winch_speed_ms).
+The mediator runs the winch only (LandingGroundController + WinchController).
 
 Landing sequence:
   descent   -- body_z fixed at capture orientation (xi~80 deg); winch reels in
@@ -72,7 +72,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
 
     rawes.lua controls cyclic (orbit tracking) and collective (VZ descent-rate
     controller) entirely via ArduPilot RC overrides.  The mediator only runs
-    the winch (LandingPlanner.step for winch_speed_ms); collective+attitude
+    the winch (LandingGroundController + WinchController); collective+attitude
     come from Lua.
 
     Asserts (same as test_landing but via the Lua path):

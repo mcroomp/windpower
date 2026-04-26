@@ -96,6 +96,14 @@ class WinchNode:
         self._tension_n = float(tension_n)
         self._wind_ned  = self._anemometer.measure(wind_world_ned)
 
+    def set_target(self, length_m: float, tension_n: float) -> None:
+        """Set the winch target length and tension setpoint.
+
+        Called by the mediator when a remote winch command arrives (e.g. via
+        the pumping socket).  Delegates to WinchController.set_target().
+        """
+        self._winch.set_target(float(length_m), float(tension_n))
+
     def receive_command(self, winch_speed_ms: float, dt: float) -> None:
         """Step the winch tension regulator.
 
@@ -127,6 +135,6 @@ class WinchNode:
         """
         return {
             "tension_n":       self._tension_n,
-            "tether_length_m": self._winch.tether_length_m,
+            "tether_length_m": self._winch.rest_length,
             "wind_ned":        self._wind_ned.copy(),
         }

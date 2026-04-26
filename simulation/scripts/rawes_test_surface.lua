@@ -25,8 +25,6 @@ _rawes_fns = {
     KP_TEN                  = KP_TEN,
     KI_TEN                  = KI_TEN,
     COL_MAX_TEN             = COL_MAX_TEN,
-    TEN_REEL_OUT            = TEN_REEL_OUT,
-    TEN_REEL_IN             = TEN_REEL_IN,
 
     -- ── Pure geometry ────────────────────────────────────────────────────────
 
@@ -70,4 +68,7 @@ _rawes_fns = {
     -- ── TensionPI state accessors ─────────────────────────────────────────────
 
     col_i_ten      = function() return _col_i_ten end,
+    col_held       = function() return _col_held end,
+    ten_setpoint   = function() return _ten_setpoint end,
+    ten_sp_fresh   = function() return _ten_sp_fresh end,
 }

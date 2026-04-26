@@ -562,7 +562,7 @@ def _launch_mediator(
                         )
                         _merged.update(_v[_sub])
                         cfg["trajectory"][_sub] = _merged
-            else:
+            elif _k in _mcfg.DEFAULTS:
                 cfg[_k] = _v
 
     # Apply equilibrium collective AFTER extra_config merge so it isn't overridden.

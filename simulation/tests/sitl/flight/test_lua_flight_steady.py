@@ -10,9 +10,10 @@ Uses the acro_armed_lua_full fixture (stationary kinematic hold, vel0=[0,0,0]):
   - Hub holds at tether equilibrium for 80 s; no motion required.
   - With dual GPS (EK3_SRC1_YAW=2), yaw is known from the first RELPOSNED fix.
     delAngBiasLearned converges with constant-zero gyro at ~34 s after start.
-    GPS fuses at ~34 s; _tdir0 fires; Lua orbit tracking active ~46 s before exit.
+    GPS fuses at ~34 s; _el_initialized fires; altitude hold active ~46 s before exit.
   - internal_controller=False (Lua RC overrides drive physics at 50 Hz)
   - SCR_USER6=1 set immediately in fixture (Lua pre-GPS bypass active until fusion).
+  - IC altitude ~38 m (tether rest length ~100 m); hub orbits near IC altitude.
 
 No RC overrides are sent by this test — Lua owns Ch1/Ch2/Ch3 (cyclic +
 collective) and Ch8 (motor interlock keepalive at 100 Hz).
@@ -71,7 +72,7 @@ _OBS_SECONDS         = 120.0  # s of free-flight observation after kinematic end
 _MIN_ALT_M               = 3.0   # m -- hard floor (no crash; 1 m = sim floor, use 3 m)
 _STABLE_ALT_M            = 5.0   # m -- floor for continuous-stable window
 _MIN_STABLE_FLIGHT_S     = 60.0  # s -- required continuous sim-time above _STABLE_ALT_M
-_MAX_ALT_M               = 40.0  # m -- hub must not escape to unrealistic altitude
+_MAX_ALT_M               = 70.0  # m -- hub must not escape; IC altitude ~38 m (tether ~100 m)
 _MAX_FLOOR_HITS          = 0     # floor hits at altitude <= 1.05 m
 _MAX_TENSION_N           = 1000.0  # N -- tether must not spike (break load = 620 N)
 _MIN_CYCLIC_ACTIVITY_PWM = 50    # |servo1-1500| + |servo2-1500| minimum peak
@@ -106,8 +107,9 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
     lua_captured   = False
 
     # all_statustext already includes everything drained during wait_kinematic_done()
+    # Lua sends "RAWES steady: captured" for mode 1 (steady).
     for _prior in all_statustext:
-        if "rawes flight" in _prior.lower() and "captured" in _prior.lower():
+        if "rawes" in _prior.lower() and "captured" in _prior.lower():
             lua_captured = True
             ctx.flight_events["Lua captured"] = -1.0
             log.info("Lua DCM capture (in kinematic): %s", _prior)
@@ -144,7 +146,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
                 log.info("STATUSTEXT [t=%.1fs]: %s", t_rel, text)
                 all_statustext.append(text)
                 tl = text.lower()
-                if "rawes flight" in tl and "captured" in tl:
+                if "rawes" in tl and "captured" in tl:
                     state["lua_captured"] = True
                     ctx.flight_events["Lua captured"] = t_rel
                 if "emergency yaw" in tl or "yaw reset" in tl:
@@ -196,6 +198,19 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
             log.warning("No telemetry CSV -- physics checks skipped")
 
         # -- Assertions -------------------------------------------------------
+        log.info(
+            "=== ASSERTION CHECK: captured=%s  cyclic=%d  yaw_reset=%s"
+            "  min_alt=%.2f  mean_alt=%.1f  max_alt=%.0f"
+            "  max_tension=%.0f  stable=%.0f  floor_hits=%d ===",
+            lua_captured, max_cyclic_activity, ekf_yaw_reset,
+            metrics.min_phys_alt if metrics else float("nan"),
+            metrics.mean_alt     if metrics else float("nan"),
+            _MAX_ALT_M,
+            metrics.max_tension  if metrics else float("nan"),
+            metrics.max_stable_s if metrics else float("nan"),
+            metrics.floor_hits   if metrics else -1,
+        )
+
         assert lua_captured, (
             "rawes.lua never captured equilibrium.\n"
             f"STATUSTEXT: {all_statustext}"
@@ -215,7 +230,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
             )
             assert metrics.mean_alt <= _MAX_ALT_M, (
                 f"Hub escaped to unrealistic altitude: mean_alt={metrics.mean_alt:.1f} m"
-                f" > {_MAX_ALT_M:.0f} m (expected ~14 m orbital altitude)\n"
+                f" > {_MAX_ALT_M:.0f} m (IC altitude ~38 m, tether ~100 m)\n"
                 f"STATUSTEXT: {all_statustext}"
             )
             assert metrics.max_tension <= _MAX_TENSION_N, (

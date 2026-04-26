@@ -40,12 +40,11 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import mediator as _mediator_module
 from aero            import create_aero
 import rotor_definition as _rd
-from controller      import (AltitudeHoldController, TensionPI,
-                              compute_bz_altitude_hold)
+from controller      import (ElevationHoldController, TensionPI,
+                              AcroControllerSitl)
 from frames          import build_orb_frame
 from simtest_log     import SimtestLog
 from simtest_runner  import PhysicsRunner
-from tel             import make_tel
 from telemetry_csv   import TelRow, write_csv
 
 TetherModel = _mediator_module.TetherModel
@@ -123,14 +122,19 @@ def _compute_ic() -> dict:
     runner     = PhysicsRunner.for_warmup(_ROTOR, pos0, R0, rest_length,
                                            STACK_COLL, omega_spin, WIND)
     tension_pi = TensionPI(setpoint_n=IC_TARGET_TENSION_N, warm_coll_rad=STACK_COLL)
-    _alt_ctrl    = AltitudeHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s)
+    _el_ctrl   = ElevationHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s, MASS)
+    _acro      = AcroControllerSitl()
     coll_settled = STACK_COLL
 
+    target_alt = float(-pos0[2])
     for _ in range(WARMUP_STEPS):
-        pos          = runner.hub_state["pos"]
-        body_z_eq    = _alt_ctrl.update(pos, float(-pos0[2]), runner.tension_now, MASS, _DT)
+        hub          = runner.hub_state
+        R            = np.asarray(hub["R"], dtype=float)
+        omega_b      = R.T @ np.asarray(hub["omega"], dtype=float)
         coll_settled = tension_pi.update(runner.tension_now, _DT)
-        runner.step(_DT, coll_settled, body_z_eq)
+        rate_roll, rate_pitch = _el_ctrl.update(hub["pos"], R, target_alt, runner.tension_now, _DT)
+        tilt_lon, tilt_lat    = _acro.update(rate_roll, rate_pitch, omega_b, _DT)
+        runner.step_raw(_DT, coll_settled, tilt_lon, tilt_lat)
 
     # Settled state
     s     = runner.hub_state
@@ -329,8 +333,7 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
 
     Returns orbit characteristic metrics dict.
     """
-    tlen0         = float(np.linalg.norm(pos0))
-    target_el_rad = math.asin(max(-1.0, min(1.0, float(-pos0[2]) / max(tlen0, 0.1))))
+    target_alt = float(-pos0[2])
 
     ic = SimpleNamespace(
         pos=np.asarray(pos0, dtype=float),
@@ -342,6 +345,8 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     )
     runner     = PhysicsRunner(_ROTOR, ic, WIND)
     tension_pi = TensionPI(setpoint_n=tension_sp, warm_coll_rad=stack_coll)
+    el_ctrl    = ElevationHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s, MASS)
+    acro       = AcroControllerSitl()
 
     tlen_arr  = np.zeros(_STEADY_STEPS)
     alt_arr   = np.zeros(_STEADY_STEPS)
@@ -353,7 +358,6 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     telemetry = []
 
     for step in range(_STEADY_STEPS):
-        t_sim = step * _DT
         hub   = runner.hub_state
         pos   = hub["pos"]
         tlen  = float(np.linalg.norm(pos))
@@ -364,22 +368,22 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
             max(-1.0, min(1.0, -pos[2] / max(tlen, 0.1))))))
         az_arr[step]    = float(math.degrees(math.atan2(pos[1], pos[0])))
 
+        R           = np.asarray(hub["R"], dtype=float)
+        omega_b     = R.T @ np.asarray(hub["omega"], dtype=float)
         tension_now = runner.tension_now
         collective  = tension_pi.update(tension_now, _DT)
-        body_z_eq   = compute_bz_altitude_hold(pos, target_el_rad, tension_now, MASS, G)
-        sr          = runner.step(_DT, collective, body_z_eq)
+        rate_roll, rate_pitch = el_ctrl.update(pos, R, target_alt, tension_now, _DT)
+        tilt_lon, tilt_lat    = acro.update(rate_roll, rate_pitch, omega_b, _DT)
+        sr          = runner.step_raw(_DT, collective, tilt_lon, tilt_lat)
 
         if step % tel_every == 0:
-            telemetry.append(make_tel(
-                t_sim, hub, runner.omega_spin, runner.tether, tension_now,
-                collective, sr["tilt_lon"], sr["tilt_lat"], WIND,
-                body_z_eq=body_z_eq, phase=label,
+            telemetry.append(TelRow.from_physics(
+                runner, sr, collective, WIND,
+                body_z_eq=R[:, 2], phase=label,
                 tension_setpoint=tension_sp,
-                aero_result=sr["aero_result"], aero_obj=runner.aero,
-                tether_force=sr["tether_force"], tether_moment=sr["tether_moment"],
             ))
 
-    write_csv([TelRow.from_tel(r) for r in telemetry], csv_path)
+    write_csv(telemetry, csv_path)
 
     mean_tlen    = float(np.mean(tlen_arr))
     max_tlen_dev = float(np.max(np.abs(tlen_arr - mean_tlen)))
