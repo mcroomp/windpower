@@ -7,7 +7,7 @@ Two tests:
                           (serialize + deserialize round-trip)
 
 Regenerate:
-    simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py -s
+    .venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py -s
 
 WHY WARMUP-BASED (not purely analytical)
 -----------------------------------------
@@ -40,11 +40,10 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import mediator as _mediator_module
 from aero            import create_aero
 import rotor_definition as _rd
-from controller      import (ElevationHoldController, TensionPI,
-                              AcroControllerSitl)
+from controller      import (ElevationHoldController, TensionPI)
 from frames          import build_orb_frame
 from simtest_log     import SimtestLog
-from simtest_runner  import PhysicsRunner
+from simtest_runner  import PhysicsRunner, tel_every_from_env
 from telemetry_csv   import TelRow, write_csv
 
 TetherModel = _mediator_module.TetherModel
@@ -123,7 +122,6 @@ def _compute_ic() -> dict:
                                            STACK_COLL, omega_spin, WIND)
     tension_pi = TensionPI(setpoint_n=IC_TARGET_TENSION_N, warm_coll_rad=STACK_COLL)
     _el_ctrl   = ElevationHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s, MASS)
-    _acro      = AcroControllerSitl()
     coll_settled = STACK_COLL
 
     target_alt = float(-pos0[2])
@@ -133,8 +131,7 @@ def _compute_ic() -> dict:
         omega_b      = R.T @ np.asarray(hub["omega"], dtype=float)
         coll_settled = tension_pi.update(runner.tension_now, _DT)
         rate_roll, rate_pitch = _el_ctrl.update(hub["pos"], R, target_alt, runner.tension_now, _DT)
-        tilt_lon, tilt_lat    = _acro.update(rate_roll, rate_pitch, omega_b, _DT)
-        runner.step_raw(_DT, coll_settled, tilt_lon, tilt_lat)
+        runner.step(_DT, coll_settled, rate_roll, rate_pitch, omega_b)
 
     # Settled state
     s     = runner.hub_state
@@ -346,15 +343,13 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     runner     = PhysicsRunner(_ROTOR, ic, WIND)
     tension_pi = TensionPI(setpoint_n=tension_sp, warm_coll_rad=stack_coll)
     el_ctrl    = ElevationHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s, MASS)
-    acro       = AcroControllerSitl()
-
     tlen_arr  = np.zeros(_STEADY_STEPS)
     alt_arr   = np.zeros(_STEADY_STEPS)
     speed_arr = np.zeros(_STEADY_STEPS)
     elev_arr  = np.zeros(_STEADY_STEPS)
     az_arr    = np.zeros(_STEADY_STEPS)
 
-    tel_every = max(1, int(0.05 / _DT))
+    tel_every = tel_every_from_env(_DT)
     telemetry = []
 
     for step in range(_STEADY_STEPS):
@@ -373,8 +368,7 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         tension_now = runner.tension_now
         collective  = tension_pi.update(tension_now, _DT)
         rate_roll, rate_pitch = el_ctrl.update(pos, R, target_alt, tension_now, _DT)
-        tilt_lon, tilt_lat    = acro.update(rate_roll, rate_pitch, omega_b, _DT)
-        sr          = runner.step_raw(_DT, collective, tilt_lon, tilt_lat)
+        sr          = runner.step(_DT, collective, rate_roll, rate_pitch, omega_b)
 
         if step % tel_every == 0:
             telemetry.append(TelRow.from_physics(

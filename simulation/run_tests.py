@@ -34,7 +34,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VENV_PYTHON      = "simulation/.venv/Scripts/python.exe"
+VENV_PYTHON      = ".venv/Scripts/python.exe"
 REQUIREMENTS     = "simulation/requirements.txt"
 DEFAULT_SUMMARY  = "simulation/logs/suite_summary.json"
 

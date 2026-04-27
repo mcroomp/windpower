@@ -25,11 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
-from controller      import AcroControllerSitl
 from winch           import WinchController
 from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
-from simtest_runner  import PhysicsRunner
+from simtest_runner  import PhysicsRunner, tel_every_from_env
 from telemetry_csv   import TelRow, write_csv
 from landing_planner import LandingGroundController
 from ap_controller   import LandingApController
@@ -51,8 +50,8 @@ COL_REEL_IN_RAD = 0.079    # col_min at xi=80 deg: feedforward seed for VZ PI
 COL_CRUISE      = 0.079    # same; VZ PI seed during descent
 
 # Winch: kp*(tension_descent - natural_tension) ≈ v_land
-# natural tension during descent ≈ 80 N; kp=0.005 → tension_descent = 80 + 0.5/0.005 = 180 N
-TENSION_DESCENT = 180.0    # N
+# natural tension during descent at xi=80° ≈ 40 N; kp=0.005 → tension_descent = 40 + 0.5/0.005 = 140 N
+TENSION_DESCENT = 140.0    # N
 
 V_LAND       = 0.5    # m/s NED descent rate
 MIN_TETHER_M = 2.0    # m   descent → final_drop transition
@@ -92,15 +91,14 @@ def _run_landing() -> dict:
         kp_tension      = 0.005,
         v_max_out       = 0.40,
         v_max_in        = 0.80,
-        accel_limit_ms2 = 0.05,
+        accel_limit_ms2 = 0.5,
         min_length      = MIN_TETHER_M,
     )
 
     events    = BadEventLog()
-    acro_sitl = AcroControllerSitl()
 
     planner_every = max(1, round(DT_PLANNER / DT))
-    tel_every     = max(1, int(0.05 / DT))
+    tel_every     = tel_every_from_env(DT)
 
     floor_hit      = False
     t_final_start  = None
@@ -146,11 +144,8 @@ def _run_landing() -> dict:
         omega_body = R.T @ np.asarray(hub_state["omega"], dtype=float)
         vel_ned    = np.asarray(hub_state["vel"], dtype=float)
         collective_rad, rate_roll, rate_pitch = ap.step(hub_state["pos"], R, vel_ned, DT)
-        tilt_lon, tilt_lat = acro_sitl.update(rate_roll, rate_pitch, omega_body, DT)
-
-        # ── Physics 400 Hz ────────────────────────────────────────────────
-        sr = runner.step_raw(DT, collective_rad, tilt_lon, tilt_lat,
-                             rest_length=winch.rest_length)
+        sr = runner.step(DT, collective_rad, rate_roll, rate_pitch, omega_body,
+                         rest_length=winch.rest_length)
 
         # ── Floor detection (final_drop only) ────────────────────────────
         phase = cmd.phase

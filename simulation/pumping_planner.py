@@ -104,6 +104,8 @@ class PumpingGroundController:
         el_reel_in_rad   : float = 0.0,
         t_reel_out_max   : float = 300.0,
         t_reel_in_max    : float = 300.0,
+        k_ff_winch       : float = 0.0,
+        k_ff_vel         : float = 0.0,
     ) -> None:
         self._t_tr         = float(t_transition)
         self._alt_m        = float(target_alt_m)
@@ -117,6 +119,8 @@ class PumpingGroundController:
         self._ramp_s       = max(float(tension_ramp_s), 1e-9)
         self._t_out_max    = float(t_reel_out_max)
         self._t_in_max     = float(t_reel_in_max)
+        self._k_ff_winch   = float(k_ff_winch)
+        self._k_ff_vel     = float(k_ff_vel)
 
         # State machine
         self._phase        : str   = "reel-out"
@@ -134,6 +138,12 @@ class PumpingGroundController:
         self._alt_ramp_start  : float = float(target_alt_m)
         self._alt_ramp_end    : float = float(target_alt_m)
         self._reel_out_ramp_s : float = float(t_transition)  # may extend to limit descent rate
+
+        # Feedforward state: previous values for rate estimation
+        self._ff_prev_rest_length : float = 0.0
+        self._ff_prev_t_sim       : float = 0.0
+        # EMA-smoothed altitude used for derivative (τ=10s removes 5 Hz alias)
+        self._ff_alt_smooth       : float = float(target_alt_m)
 
     # ── public properties ──────────────────────────────────────────────────
 
@@ -213,6 +223,30 @@ class PumpingGroundController:
             self._winch_target_length  = self._start_length
             self._winch_target_tension = self._tension_in
 
+            # ── Feedforward: fold winch speed + altitude rate into setpoint ──
+            # Skip the first 10 s of reel-in while the hub is still climbing
+            # rapidly from the transition — feedforward is only meaningful once
+            # the altitude has roughly settled.
+            if (self._initialized
+                    and t_in_phase >= 10.0
+                    and (self._k_ff_winch != 0.0 or self._k_ff_vel != 0.0)):
+                dt_ff = t_sim - self._ff_prev_t_sim
+                if dt_ff > 1e-6:
+                    # v_reel_in > 0 when tether shortening (reeling in)
+                    v_reel_in = (self._ff_prev_rest_length - rest_length) / dt_ff
+                    # EMA-smoothed altitude derivative (τ=10 s removes 5 Hz alias).
+                    # Raw 10 Hz derivative of a 5 Hz signal amplifies by 20×; the
+                    # EMA attenuates 5 Hz by ~300× before we differentiate.
+                    _FF_EMA_TAU = 10.0
+                    alpha = dt_ff / (_FF_EMA_TAU + dt_ff)
+                    prev_smooth = self._ff_alt_smooth
+                    self._ff_alt_smooth = alpha * hub_alt_m + (1.0 - alpha) * self._ff_alt_smooth
+                    dalt_dt = (self._ff_alt_smooth - prev_smooth) / dt_ff
+                    ff = self._k_ff_winch * v_reel_in - self._k_ff_vel * dalt_dt
+                    setpoint = max(self._tension_in_ap * 0.5,
+                                   min(self._tension_in_ap * 2.0,
+                                       setpoint + ff))
+
         else:  # hold
             setpoint = self._tension_ic
             self._winch_target_length  = rest_length
@@ -236,6 +270,9 @@ class PumpingGroundController:
                 alt_m = self._alt_m
         else:
             alt_m = self._alt_m
+
+        self._ff_prev_rest_length = rest_length
+        self._ff_prev_t_sim       = t_sim
 
         return TensionCommand(
             tension_setpoint_n = setpoint,

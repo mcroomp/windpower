@@ -4,9 +4,9 @@
 
 Build an **ArduPilot flight controller model** for a Rotary Airborne Wind Energy System (RAWES) — a tethered, 4-blade autogyro kite. Wind drives autorotation; cyclic pitch control steers; tether tension during reel-out drives a ground generator. No motor drives rotation.
 
-**Current phase:** Phase 3, Milestone 3. `rawes.lua` rewritten to use **AltitudeHoldController** (`bz_altitude_hold`): elevation rate-limited toward `RAWES_ALT` target, gravity-compensated disk tilt, replaces orbit tracking. Pumping uses **TensionPI** inside rawes.lua (mirrors Python `controller.TensionPI`). Pre-GPS: gyro feedthrough only. GPS fusion uses dual GPS (EK3_SRC1_YAW=2, RELPOSNED heading): `_el_initialized` fires on first valid position fix. **Next: validate `test_lua_flight_steady` (stack) with new algorithm, then `test_pumping_cycle` (stack).**
+**Current phase:** Phase 3, Milestone 3. `rawes.lua` rewritten to use **AltitudeHoldController** (`bz_altitude_hold`): elevation rate-limited toward `RAWES_ALT` target, gravity-compensated disk tilt, replaces orbit tracking. Pumping uses **TensionPI** inside rawes.lua (mirrors Python `controller.TensionPI`). Pre-GPS: gyro feedthrough only. GPS fusion uses dual GPS (EK3_SRC1_YAW=2, RELPOSNED heading): `_el_initialized` fires on first valid position fix. **Next: validate `test_pumping_cycle` (stack), then `test_landing_stack` (stack).**
 
-**Simtest status (~16 simtests, ~13 PASS):** All Python-only simtests pass (9 in `-m simtest` run). `test_steady_flight_lua` (3 tests) and `test_pump_cycle_lua` pass. `test_landing_lua`, `test_kinematic_transition` (pre-existing failures). `test_landing` (Python): pre-existing failure under investigation. `test_gyroscopic_orbit.py` deleted (tested settled design decision, had backwards assertion). `test_pump_cycle_unified.py` uses ThrustCommand/ThrustApController architecture (replaces TensionRateCommand/PumpingApController).
+**Simtest status (12 simtests, 10 PASS):** 9 Python-only simtests pass. `test_steady_flight_lua` and `test_pump_cycle_lua` pass. `test_landing` and `test_landing_lua` failing (winch control during descent — under investigation). `test_kinematic_transition` pre-existing failure. `test_pump_cycle_unified.py` uses `TensionCommand`/`TensionApController` architecture. Landing uses unified architecture: `LandingGroundController` (10 Hz) → `LandingCommand` → `LandingApController` (400 Hz) + `WinchController` (400 Hz). Old `LandingPlanner` deleted.
 
 **Stack test status (parallel -n 8, 9 PASS):** test_arm_minimal, test_armon, test_gps_fusion_layers, test_gust_recovery, test_pitch_roll, test_slow_rpm, test_startup, test_wobble, test_yaw_regulation. `test_lua_flight_steady` passes reliably (stable=86–110 s, 3/3). `test_pumping_cycle` and `test_landing_stack` (stack): in development.
 
@@ -81,7 +81,8 @@ Separate from the GB4008. Sized to deliver 435 N at 0.40 m/s reel-out and 226 N 
 
 ## Key Design Decisions
 
-- **Production aero:** `SkewedWakeBEMJit` (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in. 18-test equivalence suite vs. reference (atol=1e-10). `create_aero(model="jit")`. Non-JIT version is human-readable reference only.
+- **Production aero:** `SkewedWakeBEMJit` (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in. 18-test equivalence suite vs. reference (atol=1e-10). `create_aero(model="jit")`. Non-JIT version is human-readable reference only. **Validity limit: xi ≲ 85° from horizontal (Coleman skewed-wake correction degenerates at chi→90°; disk horizontal = invalid).**
+- **Peters-He aero:** `PetersHeBEMJit` (`aero/aero_peters_he_jit.py`) — 3-state dynamic inflow (v0, v1c, v1s). `create_aero(model="peters_he")`. Pure-numpy reference: `model="peters_he_numpy"`. **No skew-angle validity limit** — uses momentum ODE (`V_T = sqrt(v_inplane² + v_axial²)`) valid from hover through axial descent and forward flight. Required for near-vertical descent (hub above anchor, disk horizontal, xi ≳ 85°). Stateful model: serialize/restore inflow states via `aero.to_dict()` / `create_aero(model="peters_he", state_dict=d)`. Refs: Pitt & Peters 1981, Peters & He 1991.
 - **Two-loop attitude:** `compute_rate_cmd(kp, kd=0)` → rate setpoint; `RatePID(kp=2/3)` → swashplate tilt.
 - **Portable core** in `controller.py`: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad` — map 1:1 to Lua.
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above xi≈85°.
@@ -108,7 +109,7 @@ Separate from the GB4008. Sized to deliver 435 N at 0.40 m/s reel-out and 226 N 
 - **WinchController design — `winch_target_tension = tension_ic` during reel-out (critical).** The generator's load point is `tension_ic` (300 N). The AP drives tension up to `tension_out` (435 N), giving cruise speed `kp * (435 − 300) = 0.675 m/s → capped at v_max_out = 0.40 m/s`. If you mistakenly set `winch_target_tension = tension_out` (435 N) during reel-out, the AP tension never significantly exceeds the target so `v_cruise ≈ 0` and the winch barely moves. During reel-in, `winch_target_tension = tension_in` (226 N): motor boosts when slack (T < 226 N) and backs off when kite resists (T > 226 N). Parameters: `kp = 0.005 (m/s)/N`, `v_max_out = 0.40 m/s`, `v_max_in = 0.80 m/s`, `accel_limit_ms2 = 0.5 m/s²`. Tested in `test_winch_tension_control.py` (23 tests: reel-out, reel-in, motion profile, bounds, landing).
 - **Ground owns altitude smoothing; AP must not add a second layer.** The AP already rate-limits elevation at `slew_rate_rad_s = 0.40 rad/s` — that is its smoothing. Adding a second smoothing layer in the AP would create two competing integrators. Instead, `PumpingGroundController` smoothly ramps `alt_m` across every phase boundary using `hub_alt_m` telemetry it receives at 10 Hz: ramp up over `t_transition` seconds entering "transition", ramp down over `t_transition` seconds at the start of each subsequent "reel-out". Sudden `alt_m` jumps are ground-controller bugs, not AP limitations — detected by `ap_unreachable_alt` events (`FEASIBILITY_WINDOW_S = 1.0 s`: if the elevation gap > `slew_rate × 1 s`, the command is flagged as unreachable).
 - **WinchNode** (`winch_node.py`): mediator calls `update_sensors(tension, wind_world)` (physics only); planner calls `get_telemetry()` + `receive_command()`. Wind seed from `Anemometer.measure()` at 3 m height.
-- **Vertical landing:** direct drop above anchor (not spiral). Descent rate controller replaces TensionPI. Sequence: reel-in only (no reel-out, `T_REEL_OUT=0`) via `DeschutterPlanner` swings hub from xi~8° to xi~48° in 30 s with no slack/spikes; hub reaches ~67 m altitude. `LandingPlanner` then descends from ~89 m tether to 2 m, final_drop. Validated in `test_landing.py` (22 s run, floor hit, descent slack=0).
+- **Vertical landing — unified architecture:** `LandingGroundController` (10 Hz) emits `LandingCommand`; `LandingApController` (400 Hz) tracks it; `WinchController` (400 Hz) tension-controlled. Three phases: `reel_in` (body_z slerps xi~30°→80°, winch holds at IC length, VZ PI vz_sp=0), `descent` (body_z fixed, winch tension target=180 N so kp*(180−natural_T)≈v_land, VZ PI vz_sp=0.5 m/s), `final_drop` (collective=0). `LandingPlanner` deleted — all landing logic now in `LandingGroundController` + `LandingApController`. Lua landing (mode=4): `RAWES_SUB=LAND_FINAL_DROP` (value 1) sent by ground when `cmd.phase=="final_drop"`. Use `analyse_landing.py` to diagnose descent winch/tension/VZ behaviour.
 - **Gyroscopic phase NOT needed:** H_SW_PHANG=0. BASE_K_ANG=50 N·m·s/rad → τ≈0.08 s (damped before one orbit). `swashplate_phase_deg≠0` degrades orbit stability.
 - **`AcroController use_servo=True`** required for De Schutter simtests (25 ms servo lag). `test_steady_flight` and pure-orbit tests do not need it.
 - **Power-law wind tension:** tension_out=250 N (not 200 N) at hub altitude ~15 m (10.6 m/s wind). `col_min_reel_in` must use actual wind speed at hub altitude.
@@ -136,7 +137,8 @@ Separate from the GB4008. Sized to deliver 435 N at 0.40 m/s reel-out and 226 N 
 simulation/
 ├── dynamics.py          RK4 6-DOF rigid-body integrator
 ├── aero.py              Facade → create_aero() factory (default: SkewedWakeBEMJit)
-├── aero/                SkewedWakeBEMJit (production), SkewedWakeBEM (reference), DeSchutterAero
+├── aero/                SkewedWakeBEMJit (production, xi<85°), SkewedWakeBEM (reference), DeSchutterAero,
+│                        PetersHeBEMJit (model="peters_he", all skew angles), PetersHeBEM (numpy ref)
 ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 ├── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 ├── frames.py            build_orb_frame(), T_ENU_NED (legacy external-data utility only)
@@ -275,7 +277,7 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 **Unit tests and simtests: Windows native, no Docker. Stack tests: Docker required. Never mix.**
 
 **Two venvs — one per environment:**
-- **`simulation/.venv`** — Windows venv for all unit tests and simtests. Packages: numpy, scipy, numba, lupa, pyvista, pymavlink, pytest, etc. `run_tests.py` auto-installs when `requirements.txt` changes (SHA-256 hash stamp). Manual update: `simulation/.venv/Scripts/pip install -r simulation/requirements.txt`.
+- **`.venv`** — Windows venv for all unit tests and simtests. Packages: numpy, scipy, numba, lupa, pyvista, pymavlink, pytest, etc. `run_tests.py` auto-installs when `requirements.txt` changes (SHA-256 hash stamp). Manual update: `.venv/Scripts/pip install -r simulation/requirements.txt`.
 - **Docker container** — the container has its own Python env (never use the Windows venv inside Docker). Managed by `dev.sh build`.
 
 **CRITICAL:** Use Bash tool directly — do NOT use `wsl.exe`. Always use absolute paths.
@@ -288,17 +290,19 @@ See [simulation/internals.md](simulation/internals.md) (`## SITL Lockstep Protoc
 
 | Task | Command |
 |------|---------|
-| Unit tests (~480) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| Simtests (~11) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q` |
+| Unit tests (~480) | `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| Simtests (~11) | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q` |
 | Stack test (single) | `bash simulation/dev.sh test-stack -n 1 -k test_foo` |
 | Stack test (full suite) | `bash simulation/dev.sh test-stack -n 8` |
-| **Post-failure analysis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
-| Post-failure (coarser view) | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name> --bucket 10` |
-| **Visualize any test result** | `simulation/.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv` — **default tool for all simtest and stack test telemetry** |
-| **Pumping cycle envelope** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` — **go-to tool for any pumping cycle parameter analysis**: tension setpoints, net energy vs TENSION_IN sweep, reel-in tilt cost/benefit, wind speed sensitivity. Use `--wind 8 10 12` to sweep wind speeds. Add `--telemetry simulation/logs/test_pump_cycle/telemetry.csv` to compare an actual run against the optimal envelope: per-cycle tension tracking, TensionPI saturation %, altitude hold bias, energy gap to optimal. |
-| Scrub to specific frame | `simulation/.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
-| Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py simulation/logs/<test_name>/telemetry.csv [--out cycle.mp4] [--speed 2]` |
-| **Regenerate `steady_state_starting.json`** | **`simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s`** — **CRITICAL: this is the ONLY test that writes the file.** `test_steady_flight.py` reads it but never writes it. Run after any aero model change. Used by all simtests and stack tests as initial conditions. |
+| **Post-failure analysis** | `.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` |
+| Post-failure (coarser view) | `.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name> --bucket 10` |
+| **Visualize any test result** | `.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv` — **default tool for all simtest and stack test telemetry** |
+| **Pumping cycle envelope** | `.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` — **go-to tool for any pumping cycle parameter analysis**: tension setpoints, net energy vs TENSION_IN sweep, reel-in tilt cost/benefit, wind speed sensitivity. Use `--wind 8 10 12` to sweep wind speeds. Add `--telemetry simulation/logs/test_pump_cycle/telemetry.csv` to compare an actual run against the optimal envelope: per-cycle tension tracking, TensionPI saturation %, altitude hold bias, energy gap to optimal. |
+| **Landing diagnosis** | `.venv/Scripts/python.exe simulation/analysis/analyse_landing.py` — per-bucket table of alt/vz/winch/tension/collective; phase timeline; slack event list with before/after tension and winch speed; tension spike list; descent summary. Use `--test test_landing_lua` or `--bucket 2` for finer resolution. |
+| **Pump cycle diagnosis** | `.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py` — controller decision audit: altitude tracking, TensionPI feasibility, slack/spike flags per bucket. |
+| Scrub to specific frame | `.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
+| Render to MP4/GIF | `.venv/Scripts/python.exe simulation/viz3d/render_cycle.py simulation/logs/<test_name>/telemetry.csv [--out cycle.mp4] [--speed 2]` |
+| **Regenerate `steady_state_starting.json`** | **`.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s`** — **CRITICAL: this is the ONLY test that writes the file.** `test_steady_flight.py` reads it but never writes it. Run after any aero model change. Used by all simtests and stack tests as initial conditions. |
 | Container start/stop | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |
 | Run inside container | `bash simulation/dev.sh exec 'python3 /rawes/simulation/...'` |

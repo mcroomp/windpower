@@ -17,7 +17,7 @@ Section B: 4 cyclic corners at a fixed collective
 
 Usage
 -----
-    simulation/.venv/Scripts/python.exe simulation/analysis/aero_xi80_test.py
+    .venv/Scripts/python.exe simulation/analysis/aero_xi80_test.py
 """
 import sys, math
 from pathlib import Path

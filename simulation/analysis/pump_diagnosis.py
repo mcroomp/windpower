@@ -20,8 +20,8 @@ Columns per time bucket:
 
 Usage
 -----
-    simulation/.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py
-    simulation/.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle --bucket 2
+    .venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py
+    .venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle --bucket 2
 """
 
 import sys, math, csv, argparse
@@ -216,7 +216,7 @@ def diagnose(csv_path, bucket_s=5.0):
            f"{'el':>5}  {'d_eq':>5}  {'d_act':>5}  "
            f"{'T_need':>6}  {'feas':>6}  "
            f"{'T_set':>6}  {'T_act':>6}  "
-           f"{'col_tpi':>7}  {'col_act':>7}  flags")
+           f"{'col_tpi':>7}  {'col_act':>7}  {'col_sd':>6}  {'col_pp':>7}  flags")
     print(hdr)
     print("  " + "-" * (len(hdr) + 30))
 
@@ -228,6 +228,16 @@ def diagnose(csv_path, bucket_s=5.0):
             vals = [r[key] for r in grp
                     if key in r and not math.isnan(r[key])]
             return float(np.mean(vals)) if vals else float("nan")
+
+        def std(key):
+            vals = [r[key] for r in grp
+                    if key in r and not math.isnan(r[key])]
+            return float(np.std(vals)) if len(vals) > 1 else float("nan")
+
+        def peak_to_peak(key):
+            vals = [r[key] for r in grp
+                    if key in r and not math.isnan(r[key])]
+            return float(np.max(vals) - np.min(vals)) if len(vals) > 1 else float("nan")
 
         def frac(pred):
             n = sum(1 for r in grp if pred(r))
@@ -255,10 +265,12 @@ def diagnose(csv_path, bucket_s=5.0):
         else:
             feas = "OK"
 
-        t_set   = avg("tension_setpoint")
-        t_act   = avg("tether_tension")
-        col_tpi = avg("collective_from_tension_ctrl")
-        col_act = avg("collective_rad")
+        t_set    = avg("tension_setpoint")
+        t_act    = avg("tether_tension")
+        col_tpi  = avg("collective_from_tension_ctrl")
+        col_act  = avg("collective_rad")
+        col_std  = std("collective_rad")
+        col_pp   = peak_to_peak("collective_rad")
 
         # Per-row event counts (as fraction of bucket)
         slack_f  = frac(lambda r: r.get("tether_slack", 0) > 0.5)
@@ -275,6 +287,8 @@ def diagnose(csv_path, bucket_s=5.0):
             flags.append(f"ALT_LOW({alt_err:+.0f}m)")
         if not math.isnan(alt_err) and alt_err > 10:
             flags.append(f"ALT_HIGH({alt_err:+.0f}m)")
+        if not math.isnan(col_std) and col_std > 0.010:
+            flags.append(f"COL_OSC(sd={col_std:.3f})")
         if feas not in ("OK",):
             flags.append(f"T_{feas}")
         t_min_ach = _t_min_achievable(el)
@@ -288,7 +302,7 @@ def diagnose(csv_path, bucket_s=5.0):
               f"{el:>5.1f}  {f(d_eq,'5.1f')}  {f(d_act,'5.1f')}  "
               f"{f(t_need,'6.0f')}  {feas:>6}  "
               f"{f(t_set,'6.0f')}  {f(t_act,'6.0f')}  "
-              f"{f(col_tpi,'7.3f')}  {f(col_act,'7.3f')}  "
+              f"{f(col_tpi,'7.3f')}  {f(col_act,'7.3f')}  {f(col_std,'6.4f')}  {f(col_pp,'7.4f')}  "
               + "  ".join(flags))
 
     # ── Phase transition timeline ─────────────────────────────────────────────
@@ -327,7 +341,98 @@ def diagnose(csv_path, bucket_s=5.0):
         print()
         print("No slack events.")
 
+    # ── Oscillation analysis ──────────────────────────────────────────────────
+    _oscillation_analysis(rows)
+
     print()
+
+
+# ── Oscillation analysis ───────────────────────────────────────────────────────
+
+# Signals to analyse and their display labels
+_OSC_SIGNALS = [
+    ("tether_tension",              "tension_N"),
+    ("collective_rad",              "col_act"),
+    ("collective_from_tension_ctrl","col_tpi"),
+    ("aero_T",                      "aero_T_N"),
+    ("aero_v_i",                    "v_inflow"),
+    ("aero_v_axial",                "v_axial"),
+    ("pos_z",                       "alt_m"),
+    ("vel_z",                       "vel_z"),
+    ("tether_length",               "t_len"),
+]
+
+_MIN_SEGMENT_ROWS = 40   # ~2 s at 20 Hz — minimum for meaningful FFT
+
+
+def _dominant_freq(sig, dt):
+    """Return (freq_hz, amplitude_pp) of the dominant FFT component after detrending."""
+    if len(sig) < _MIN_SEGMENT_ROWS:
+        return float("nan"), float("nan")
+    x = np.asarray(sig, dtype=float)
+    x = x - np.polyval(np.polyfit(np.arange(len(x)), x, 1), np.arange(len(x)))  # detrend
+    if np.std(x) < 1e-10:
+        return 0.0, 0.0
+    n     = len(x)
+    freqs = np.fft.rfftfreq(n, d=dt)
+    amps  = np.abs(np.fft.rfft(x)) * 2.0 / n
+    # ignore DC (index 0)
+    idx = int(np.argmax(amps[1:])) + 1
+    return float(freqs[idx]), float(amps[idx] * 2.0)   # amplitude in peak-to-peak
+
+
+def _oscillation_analysis(rows):
+    if not rows:
+        return
+
+    # Estimate telemetry dt from first two rows
+    t0 = rows[0].get("t_sim", 0.0)
+    t1 = rows[1].get("t_sim", 0.0) if len(rows) > 1 else t0 + 0.05
+    dt = max(t1 - t0, 1e-6)
+
+    # Split into contiguous phase segments
+    segments = []
+    cur_phase = rows[0].get("phase", "")
+    seg_rows  = [rows[0]]
+    for r in rows[1:]:
+        ph = r.get("phase", "")
+        if ph != cur_phase:
+            segments.append((cur_phase, seg_rows))
+            cur_phase = ph
+            seg_rows  = []
+        seg_rows.append(r)
+    segments.append((cur_phase, seg_rows))
+
+    print()
+    print("Oscillation analysis  (dominant frequency per phase segment)")
+    print(f"  dt={dt*1000:.1f}ms  fs={1/dt:.0f}Hz  min_seg={_MIN_SEGMENT_ROWS} rows")
+    print(f"  {'phase':<24}  {'dur_s':>5}  {'signal':<18}  "
+          f"{'f_dom_Hz':>8}  {'pp_amp':>8}  {'rms':>8}")
+    print("  " + "-" * 80)
+
+    for phase, seg in segments:
+        dur = seg[-1].get("t_sim", 0.0) - seg[0].get("t_sim", 0.0)
+        if len(seg) < _MIN_SEGMENT_ROWS:
+            continue
+
+        first = True
+        for col, label in _OSC_SIGNALS:
+            vals = [r[col] for r in seg if col in r and not math.isnan(r.get(col, float("nan")))]
+            if len(vals) < _MIN_SEGMENT_ROWS:
+                continue
+            # flip pos_z so positive = altitude
+            if col == "pos_z":
+                vals = [-v for v in vals]
+            f_hz, pp = _dominant_freq(vals, dt)
+            arr  = np.asarray(vals, dtype=float)
+            arr -= np.mean(arr)
+            rms  = float(np.sqrt(np.mean(arr ** 2)))
+            ph_label = phase if first else ""
+            dur_s    = f"{dur:5.1f}" if first else "     "
+            first    = False
+            print(f"  {ph_label:<24}  {dur_s}  {label:<18}  "
+                  f"{f_hz:>8.3f}  {pp:>8.4f}  {rms:>8.4f}")
+        print()
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

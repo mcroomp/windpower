@@ -5,7 +5,7 @@ Uses only momentum theory (actuator disk) + simple blade element theory.
 No BEM iteration, no Coleman correction.  Goal: validate direction of forces.
 
 Usage:
-    simulation/.venv/Scripts/python.exe simulation/analysis/simple_landing_physics.py
+    .venv/Scripts/python.exe simulation/analysis/simple_landing_physics.py
 """
 import math
 

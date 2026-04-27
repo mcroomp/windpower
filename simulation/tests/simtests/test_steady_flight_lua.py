@@ -9,8 +9,7 @@ _el_initialized on the first tick and starts bz_altitude_hold cyclic +
 VZ-PI collective immediately.  RAWES_TEN is fed from the live physics tension
 each Lua tick for gravity compensation.
 
-The test uses PhysicsRunner.step_raw(): Lua ch1/ch2 → RatePID + SwashplateServoModel
-→ tilt_lon/tilt_lat into physics (no internal Python controller).
+Lua ch1/ch2/ch3 → decoded to rate setpoints + collective → PhysicsRunner.step().
 
 Non-Lua reference: test_steady_flight.py
 """
@@ -26,11 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import rotor_definition as rd
-from controller    import RatePID
-from swashplate    import SwashplateServoModel
 from simtest_ic    import load_ic
 from simtest_log   import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner, feed_obs
+from simtest_runner import PhysicsRunner, feed_obs, tel_every_from_env
 from telemetry_csv import TelRow, write_csv
 from rawes_lua_harness import RawesLua
 from rawes_modes   import MODE_STEADY
@@ -48,8 +45,6 @@ WIND         = np.array([0.0, 10.0, 0.0])
 _COL_MIN    = -0.28
 _COL_MAX    =  0.10
 _ACRO_SCALE = 500.0 / (360.0 * math.pi / 180.0)
-
-KP_INNER = RatePID.DEFAULT_KP
 
 FLOOR_ALT_M  = 1.0
 
@@ -74,9 +69,6 @@ def _run_steady() -> dict:
     sim.gyro         = [0.0, 0.0, 0.0]
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND)
-    pid_lon = RatePID(kp=KP_INNER)
-    pid_lat = RatePID(kp=KP_INNER)
-    servo   = SwashplateServoModel.from_rotor(_ROTOR)
 
     col_rad  = _IC.coll_eq_rad
     roll_sp  = 0.0
@@ -84,7 +76,7 @@ def _run_steady() -> dict:
 
     events           = BadEventLog()
     max_axle_err_deg = 0.0
-    tel_every        = max(1, int(0.05 / DT))
+    tel_every        = tel_every_from_env(DT)
     telemetry        = []
     pos_hist         = []
 
@@ -107,11 +99,7 @@ def _run_steady() -> dict:
 
         omega_body    = hub_state["R"].T @ hub_state["omega"]
         omega_body[2] = 0.0
-        tilt_lon_cmd  =  pid_lon.update(roll_sp,  omega_body[0], DT)
-        tilt_lat_cmd  = -pid_lat.update(pitch_sp, omega_body[1], DT)
-        tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
-
-        sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat)
+        sr = runner.step(DT, col_rad, roll_sp, pitch_sp, omega_body)
 
         altitude    = -runner.hub_state["pos"][2]
         tension_now = runner.tension_now
@@ -144,7 +132,7 @@ def _run_steady() -> dict:
 
     pos_arr    = np.array(pos_hist)
     alts       = -pos_arr[:, 2]
-    tensions   = [tel["tether_tension"] for tel in telemetry]
+    tensions   = [tel.tether_tension for tel in telemetry]
 
     # Orbit radius over last 30 s (steady state)
     steady_pos = pos_arr[int(60.0 / DT):]

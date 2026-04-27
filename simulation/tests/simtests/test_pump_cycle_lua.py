@@ -24,12 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
-from controller     import RatePID
-from swashplate     import SwashplateServoModel
 from winch          import WinchController
 from simtest_ic     import load_ic
 from simtest_log    import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner, feed_obs
+from simtest_runner import PhysicsRunner, feed_obs, tel_every_from_env
 from telemetry_csv  import TelRow, write_csv
 from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
@@ -129,18 +127,13 @@ def _run_pumping() -> dict:
         dt_plan = DT_PLANNER,
     )
 
-    # ── Inner loop (mirrors AcroControllerSitl) ───────────────────────────────
-    pid_lon = RatePID(kp=RatePID.DEFAULT_KP)
-    pid_lat = RatePID(kp=RatePID.DEFAULT_KP)
-    servo   = SwashplateServoModel.from_rotor(_ROTOR)
-
     col_rad  = _IC.coll_eq_rad
     roll_sp  = 0.0
     pitch_sp = 0.0
 
     events   = BadEventLog()
     telemetry = []
-    tel_every = max(1, int(0.05 / DT))
+    tel_every = tel_every_from_env(DT)
 
     cycle_energy_out = [0.0] * N_CYCLES
     cycle_energy_in  = [0.0] * N_CYCLES
@@ -177,12 +170,8 @@ def _run_pumping() -> dict:
         # ── Inner rate loop 400 Hz ────────────────────────────────────────────
         omega_body    = hub_state["R"].T @ hub_state["omega"]
         omega_body[2] = 0.0
-        tilt_lon_cmd  =  pid_lon.update(roll_sp,  omega_body[0], DT)
-        tilt_lat_cmd  = -pid_lat.update(pitch_sp, omega_body[1], DT)
-        tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
-
-        sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat,
-                             rest_length=ground_ctrl.rest_length)
+        sr = runner.step(DT, col_rad, roll_sp, pitch_sp, omega_body,
+                         rest_length=ground_ctrl.rest_length)
 
         # ── Energy accounting ─────────────────────────────────────────────────
         speed_now = ground_ctrl.winch_speed_ms

@@ -59,8 +59,12 @@ from aero import AeroResult
 log = logging.getLogger(__name__)
 
 # Pitt-Peters apparent-mass coefficients (non-dimensional, × ρAR gives kg/m²)
-_M0_COEFF = 8.0  / (3.0 * math.pi)   # uniform:    ≈ 0.849
-_M1_COEFF = 16.0 / (45.0 * math.pi)  # harmonic:   ≈ 0.113  (τ1 ≈ τ0/7.5)
+_M0_COEFF = 8.0  / (3.0  * math.pi)  # uniform:       ≈ 0.849
+_M1_COEFF = 16.0 / (45.0 * math.pi)  # 1st harmonic:  ≈ 0.113  (τ1 ≈ τ0/7.5)
+_M2_COEFF = 16.0 / (105.0 * math.pi) # 2nd harmonic:  ≈ 0.048  (τ2 ≈ τ1/2.3)
+# _M2_COEFF is approximate — the exact value follows from the Peters-He (1991)
+# finite-state Galerkin expansion (Table I).  This value gives τ2 < τ1, i.e.
+# the second harmonic adapts faster than the first, which improves damping.
 
 
 class PetersHeBEM:
@@ -113,11 +117,15 @@ class PetersHeBEM:
             self._v0     = float(state_dict["v0"])
             self._v1c    = float(state_dict["v1c"])
             self._v1s    = float(state_dict["v1s"])
+            self._v2c    = float(state_dict.get("v2c", 0.0))
+            self._v2s    = float(state_dict.get("v2s", 0.0))
             self._last_t = float(state_dict.get("last_t", 0.0))
         else:
             self._v0     = 0.0   # uniform induced velocity [m/s]
-            self._v1c    = 0.0   # longitudinal harmonic    [m/s]
-            self._v1s    = 0.0   # lateral harmonic         [m/s]
+            self._v1c    = 0.0   # longitudinal 1st harmonic [m/s]
+            self._v1s    = 0.0   # lateral      1st harmonic [m/s]
+            self._v2c    = 0.0   # longitudinal 2nd harmonic [m/s]
+            self._v2s    = 0.0   # lateral      2nd harmonic [m/s]
             self._last_t = -1.0  # sentinel: triggers cold start on first call
 
         # ── Diagnostics (same names as GlauertBEM / DeSchutterAero) ─────────
@@ -145,6 +153,8 @@ class PetersHeBEM:
             "v0":     self._v0,
             "v1c":    self._v1c,
             "v1s":    self._v1s,
+            "v2c":    self._v2c,
+            "v2s":    self._v2s,
             "last_t": self._last_t,
         }
 
@@ -174,6 +184,8 @@ class PetersHeBEM:
         v0: float,
         v1c: float,
         v1s: float,
+        v2c: float,
+        v2s: float,
         v_rel_world: np.ndarray,
         disk_normal: np.ndarray,
         R_hub: np.ndarray,
@@ -184,25 +196,32 @@ class PetersHeBEM:
         spin_angle: float,
     ):
         """
-        Strip integration with Peters-He non-uniform inflow.
+        Strip integration with Peters-He 5-state non-uniform inflow.
 
         Inflow at element (r, ψ):
-            v_i = v0 + v1c·(r/R)·cos(ψ) + v1s·(r/R)·sin(ψ)
+            v_i = v0
+                + v1c·(r/R)·cos(ψ)  + v1s·(r/R)·sin(ψ)
+                + v2c·(r/R)²·cos(2ψ) + v2s·(r/R)²·sin(2ψ)
 
-        Returns (F_acc, M_acc) in world frame.
+        Returns (F_acc, M_acc, M2c_disk, M2s_disk) in world frame.
+        M2c_disk / M2s_disk are the 2nd-harmonic disk moments used to
+        drive the v2c / v2s ODE states.
         """
         omega_abs = abs(float(omega_rotor))
         F_acc = np.zeros(3)
         M_acc = np.zeros(3)
+        M2c_disk = 0.0
+        M2s_disk = 0.0
         F_prandtl_sum = 0.0
 
-        # Use uniform component for Prandtl inflow angle (standard approximation)
         v_ax_eff = abs(float(np.dot(v_rel_world, disk_normal)) + v0)
 
         for i in range(self.N_AB):
             phi_az = spin_angle + self._phi_offsets[i]
-            ca = math.cos(phi_az)   # cos(ψ) — disk azimuth
-            sa = math.sin(phi_az)   # sin(ψ)
+            ca  = math.cos(phi_az)
+            sa  = math.sin(phi_az)
+            cos2 = 2.0 * ca * ca - 1.0   # cos(2ψ)
+            sin2 = 2.0 * sa * ca          # sin(2ψ)
 
             p_k  = collective_rad + tilt_lon_rad * sa + tilt_lat_rad * ca
             cp_k = math.cos(p_k)
@@ -225,9 +244,11 @@ class PetersHeBEM:
                 if i == 0:
                     F_prandtl_sum += F_p
 
-                # ── Peters-He non-uniform inflow ─────────────────────────────
                 r_norm    = r / self.R_TIP
-                v_i_local = v0 + v1c * r_norm * ca + v1s * r_norm * sa
+                r_norm_sq = r_norm * r_norm
+                v_i_local = (v0
+                             + v1c * r_norm * ca  + v1s * r_norm * sa
+                             + v2c * r_norm_sq * cos2 + v2s * r_norm_sq * sin2)
                 v_induced = v_i_local * disk_normal
 
                 v_rot = omega_rotor * r * e_tang
@@ -260,36 +281,47 @@ class PetersHeBEM:
                 F_acc += F_strip
                 M_acc += np.cross(r_cp, F_strip)
 
+                # 2nd-harmonic disk moment accumulators
+                f_axial   = float(np.dot(F_strip, disk_normal))
+                M2c_disk += f_axial * r_norm_sq * cos2
+                M2s_disk += f_axial * r_norm_sq * sin2
+
         if self.N_RADIAL > 0:
             self.last_F_prandtl = F_prandtl_sum / self.N_RADIAL
 
-        return F_acc, M_acc
+        return F_acc, M_acc, M2c_disk, M2s_disk
 
     def _ode_step(
         self,
         T: float,
         Mx_disk: float,
         My_disk: float,
+        M2c_disk: float,
+        M2s_disk: float,
         v_axial: float,
         v_inplane: float,
         dt: float,
     ) -> None:
         """
-        Integrate Peters-He inflow ODE one step.
+        Integrate Peters-He 5-state inflow ODE one step.
 
         Uses implicit (backward) Euler — unconditionally stable for any dt.
         """
         V_T = math.sqrt(v_inplane**2 + (v_axial + self._v0)**2 + 1e-6)
         rho_A = self.RHO * self.disk_area
+        R2    = self.R_TIP ** 2
 
         # Steady-state targets
-        v0_ss  = T  / (2.0 * rho_A * V_T)
-        v1c_ss = My_disk / (rho_A * self.R_TIP * V_T)
+        v0_ss  = T        / (2.0 * rho_A * V_T)
+        v1c_ss = My_disk  / (rho_A * self.R_TIP * V_T)
         v1s_ss = -Mx_disk / (rho_A * self.R_TIP * V_T)
+        v2c_ss = M2c_disk / (rho_A * R2 * V_T)
+        v2s_ss = -M2s_disk / (rho_A * R2 * V_T)
 
-        # Time constants (Pitt-Peters)
+        # Time constants (Pitt-Peters apparent mass)
         tau0 = _M0_COEFF * self.R_TIP / max(V_T, 0.1)
         tau1 = _M1_COEFF * self.R_TIP / max(V_T, 0.1)
+        tau2 = _M2_COEFF * self.R_TIP / max(V_T, 0.1)
 
         self.last_tau0 = tau0
 
@@ -299,9 +331,12 @@ class PetersHeBEM:
         # Implicit Euler: v_new = (v_old + dt/τ · v_ss) / (1 + dt/τ)
         α0 = dt / (tau0 + dt)
         α1 = dt / (tau1 + dt)
+        α2 = dt / (tau2 + dt)
         self._v0  += α0 * (v0_ss  - self._v0)
         self._v1c += α1 * (v1c_ss - self._v1c)
         self._v1s += α1 * (v1s_ss - self._v1s)
+        self._v2c += α2 * (v2c_ss - self._v2c)
+        self._v2s += α2 * (v2s_ss - self._v2s)
 
     def _cold_start(
         self,
@@ -326,8 +361,8 @@ class PetersHeBEM:
         rho_A = self.RHO * self.disk_area
 
         # Step 1: get strip thrust at zero induction to bootstrap v0
-        F0, _ = self._strip_forces(
-            0.0, 0.0, 0.0,
+        F0, _, _, _ = self._strip_forces(
+            0.0, 0.0, 0.0, 0.0, 0.0,
             v_rel_world, disk_normal, R_hub, omega_rotor,
             collective_rad, tilt_lon_rad, tilt_lat_rad, spin_angle=0.0,
         )
@@ -335,27 +370,34 @@ class PetersHeBEM:
         # Hover formula gives a safe non-zero starting point
         self._v0 = math.sqrt(max(abs(T0), 0.1) / (2.0 * rho_A))
 
-        # Step 2: relax all states to fixed point (0.1 step = conservative)
+        # Step 2: relax all 5 states to fixed point (0.1 step = conservative)
+        R2 = self.R_TIP ** 2
         for _ in range(60):
-            F_acc, M_acc = self._strip_forces(
-                self._v0, self._v1c, self._v1s,
+            F_acc, M_acc, M2c, M2s = self._strip_forces(
+                self._v0, self._v1c, self._v1s, self._v2c, self._v2s,
                 v_rel_world, disk_normal, R_hub, omega_rotor,
                 collective_rad, tilt_lon_rad, tilt_lat_rad, spin_angle=0.0,
             )
-            T_raw   = float(np.dot(F_acc / self.N_AZ, disk_normal))
-            Mx_disk = float(np.dot(M_acc / self.N_AZ, R_hub[:, 0]))
-            My_disk = float(np.dot(M_acc / self.N_AZ, R_hub[:, 1]))
+            T_raw    = float(np.dot(F_acc / self.N_AZ, disk_normal))
+            Mx_disk  = float(np.dot(M_acc / self.N_AZ, R_hub[:, 0]))
+            My_disk  = float(np.dot(M_acc / self.N_AZ, R_hub[:, 1]))
+            M2c_disk = M2c / self.N_AZ
+            M2s_disk = M2s / self.N_AZ
 
             V_T = math.sqrt(v_inplane**2 + (v_axial + self._v0)**2 + 1e-6)
             V_T = max(V_T, self._v0 * 0.5 + 0.01)   # guard against V_T shrinking to 0
 
-            v0_ss  = T_raw   / (2.0 * rho_A * V_T)
-            v1c_ss = My_disk / (rho_A * self.R_TIP * V_T)
+            v0_ss  = T_raw    / (2.0 * rho_A * V_T)
+            v1c_ss = My_disk  / (rho_A * self.R_TIP * V_T)
             v1s_ss = -Mx_disk / (rho_A * self.R_TIP * V_T)
+            v2c_ss = M2c_disk / (rho_A * R2 * V_T)
+            v2s_ss = -M2s_disk / (rho_A * R2 * V_T)
 
             self._v0  += 0.1 * (v0_ss  - self._v0)
             self._v1c += 0.1 * (v1c_ss - self._v1c)
             self._v1s += 0.1 * (v1s_ss - self._v1s)
+            self._v2c += 0.1 * (v2c_ss - self._v2c)
+            self._v2s += 0.1 * (v2s_ss - self._v2s)
 
     def compute_forces(
         self,
@@ -390,8 +432,8 @@ class PetersHeBEM:
             )
 
         # ── Strip integration with current inflow states ─────────────────────
-        F_acc, M_acc = self._strip_forces(
-            self._v0, self._v1c, self._v1s,
+        F_acc, M_acc, M2c_raw, M2s_raw = self._strip_forces(
+            self._v0, self._v1c, self._v1s, self._v2c, self._v2s,
             v_rel_world, disk_normal, R_hub, omega_rotor,
             collective_rad, tilt_lon_rad, tilt_lat_rad, spin_angle,
         )
@@ -404,10 +446,13 @@ class PetersHeBEM:
         T_disk   = float(np.dot(F_total, disk_normal))
         Mx_disk  = float(np.dot(M_total, R_hub[:, 0]))
         My_disk  = float(np.dot(M_total, R_hub[:, 1]))
+        M2c_disk = float(M2c_raw * scale)
+        M2s_disk = float(M2s_raw * scale)
 
         # ── ODE step ─────────────────────────────────────────────────────────
         dt = max(0.0, t - self._last_t) if self._last_t >= 0.0 else 0.0
-        self._ode_step(T_disk, Mx_disk, My_disk, v_axial, v_inplane, dt)
+        self._ode_step(T_disk, Mx_disk, My_disk, M2c_disk, M2s_disk,
+                       v_axial, v_inplane, dt)
         self._last_t = t
 
         # ── Decompose into spin and orbital moments ───────────────────────────

@@ -7,7 +7,7 @@ GB4008 counter-torque motor under ArduPilot ATC_RAT_YAW DDFP control (SCR_USER6=
 Prompts before each reboot.
 
 Usage (Windows Git Bash):
-    RAWES_HIL_PORT=COM4 simulation/.venv/Scripts/python.exe simulation/scripts/setup_pixhawk.py
+    RAWES_HIL_PORT=COM4 .venv/Scripts/python.exe simulation/scripts/setup_pixhawk.py
 
 Environment variables:
     RAWES_HIL_PORT   Serial port (required). Windows: COM3, COM4, ...

@@ -60,7 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 
 import rotor_definition as rd
-from controller  import AltitudeHoldController
+from controller  import AltitudeHoldController, compute_rate_cmd
 from sensor      import PhysicalSensor
 from simtest_log import SimtestLog, BadEventLog
 from simtest_ic  import load_ic
@@ -139,7 +139,14 @@ def _run(t_sim: float = T_SIM):
         prev_vel   = hub_state["vel"].copy()
         body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, rd.default().mass_kg, DT)
 
-        runner.step(DT, _IC.stack_coll_eq, body_z_eq)
+        bz_now         = hub_state["R"][:, 2]
+        R              = hub_state["R"]
+        omega_world    = hub_state["omega"]
+        omega_body     = R.T @ omega_world
+        rate_roll, rate_pitch = (
+            compute_rate_cmd(bz_now, body_z_eq, R, kp=2.5, kd=0.0)[:2]
+        )
+        runner.step(DT, _IC.stack_coll_eq, rate_roll, rate_pitch, omega_body)
         events.check_floor(runner.hub_state["pos"][2], t, "flight")
 
         if i % int(10.0 / DT) == 0:

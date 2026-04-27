@@ -5,7 +5,7 @@
 # Works on any drive — no hardcoded paths.
 #
 # Usage:
-#   bash sim.sh setup                     create simulation/.venv and install requirements.txt (Windows)
+#   bash sim.sh setup                     create .venv and install requirements.txt (Windows)
 #   bash sim.sh test-unit [...]           run unit tests (Windows, no Docker)
 #   bash sim.sh test-simtest [...]        run simtests (Windows, no Docker)
 #   bash sim.sh test-hil [...]            run HIL smoke tests (Windows, Pixhawk on USB)
@@ -41,7 +41,7 @@ case "$CMD" in
         py -3 -m venv "$(_winpath "$VENV")"
         "$PYTHON" -m pip install --upgrade pip --quiet
         "$PYTHON" -m pip install -r "$(_winpath "$SIM_DIR/requirements.txt")"
-        echo "[INFO] Done. Venv ready at simulation/.venv"
+        echo "[INFO] Done. Venv ready at .venv"
         ;;
     test-unit)
         "$PYTHON" -m pytest "$(_winpath "$SIM_DIR/tests/unit")" -m "not simtest" "$@"

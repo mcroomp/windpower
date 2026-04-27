@@ -297,69 +297,119 @@ def _slew_limit(current: float, target: float, max_step: float) -> float:
 
 class SwashplateServoModel:
     """
-    Stateful swashplate servo model with physical slew rate limiting.
+    Physical 3-servo swashplate model with per-servo slew rate and position limits.
 
-    Models the DS113MG V6.0 servo speed through the H3-120 swashplate
-    geometry to limit how fast tilt_lon, tilt_lat, and collective can change
-    each step.
+    All three DS113MG servos share the same hardware limits.  Collective and
+    cyclic are NOT rate-limited independently — instead, the commanded
+    (collective, tilt_lon, tilt_lat) is forward-mixed into the three servo
+    positions, each servo is slew-limited and clamped to [-1, +1], and the
+    result is inverse-mixed back.  This correctly captures the coupling: a
+    large collective + large cyclic can saturate individual servos even if
+    neither channel alone would.
 
-    Mirrors ArduPilot's SIM_SERVO_SPEED constraint so simtests and SITL
-    apply identical servo bandwidth.  Both are derived from the same
-    RotorDefinition fields (servo_slew_rate_deg_s, servo_travel_deg):
+    Per-servo slew rate mirrors ArduPilot SIM_SERVO_SPEED:
+        max_rate [norm/s] = 2 * slew_rate_deg_s / travel_deg
 
-        SIM_SERVO_SPEED         = slew_rate_deg_s / travel_deg     [full-range/s]
-        max_rate_norm [norm/s]  = 2 * SIM_SERVO_SPEED
-
-    The factor of 2 converts ArduPilot's [0, 1] output range to our
-    normalised tilt range [-1, +1].
+    Parameters
+    ----------
+    slew_rate_deg_s : DS113MG angular speed [deg/s] at operating voltage
+    travel_deg      : DS113MG total angular travel [deg]
+    col_min_rad     : physical collective floor [rad]
+    col_max_rad     : physical collective ceiling [rad]
+    h_col_min       : ArduPilot H_COL_MIN parameter [µs]  (default 1000)
+    h_col_max       : ArduPilot H_COL_MAX parameter [µs]  (default 2000)
     """
 
     def __init__(
         self,
-        slew_rate_deg_s:    float,
-        travel_deg:         float,
-        col_pitch_gain_rad: float,
+        slew_rate_deg_s: float,
+        travel_deg:      float,
+        col_min_rad:     float,
+        col_max_rad:     float,
+        h_col_min:       float = 1000.0,
+        h_col_max:       float = 2000.0,
     ):
-        self._max_rate     = 2.0 * slew_rate_deg_s / travel_deg
-        self._max_col_rate = self._max_rate * col_pitch_gain_rad
-        self._tilt_lon     = 0.0
-        self._tilt_lat     = 0.0
-        self._collective_rad = 0.0
+        self._max_servo_rate = 2.0 * slew_rate_deg_s / travel_deg  # [norm/s]
+        self._col_min  = float(col_min_rad)
+        self._col_max  = float(col_max_rad)
+        self._h_col_min = float(h_col_min)
+        self._h_col_max = float(h_col_max)
+        # Initialise servo positions at zero collective, zero cyclic
+        self._s = list(ardupilot_h3_120_forward(
+            collective_rad_to_out(col_min_rad, col_min_rad, col_max_rad),
+            0.0, 0.0, h_col_min, h_col_max,
+        ))
 
     @classmethod
-    def from_rotor(cls, rotor) -> "SwashplateServoModel":
+    def from_rotor(cls, rotor,
+                   col_min_rad: float = -0.28,
+                   col_max_rad: float =  0.10,
+                   h_col_min:   float = 1000.0,
+                   h_col_max:   float = 2000.0) -> "SwashplateServoModel":
         return cls(
             slew_rate_deg_s=rotor.servo_slew_rate_deg_s,
             travel_deg=rotor.servo_travel_deg,
-            col_pitch_gain_rad=rotor.swashplate_pitch_gain_rad,
+            col_min_rad=col_min_rad,
+            col_max_rad=col_max_rad,
+            h_col_min=h_col_min,
+            h_col_max=h_col_max,
         )
 
-    def step(self, tilt_lon_cmd: float, tilt_lat_cmd: float, dt: float):
-        max_step = self._max_rate * dt
-        self._tilt_lon = _slew_limit(self._tilt_lon, float(tilt_lon_cmd), max_step)
-        self._tilt_lat = _slew_limit(self._tilt_lat, float(tilt_lat_cmd), max_step)
-        return self._tilt_lon, self._tilt_lat
+    def step(self, collective_rad_cmd: float, tilt_lon_cmd: float,
+             tilt_lat_cmd: float, dt: float) -> "tuple[float, float, float]":
+        """
+        Advance one timestep.
 
-    def step_collective(self, collective_rad_cmd: float, dt: float) -> float:
-        max_step = self._max_col_rate * dt
-        self._collective_rad = _slew_limit(
-            self._collective_rad, float(collective_rad_cmd), max_step
+        Forward-mix (col, tilt_lon, tilt_lat) → 3 servo commands, slew-limit
+        and clamp each servo to [-1, +1], inverse-mix back.
+
+        Returns
+        -------
+        (collective_rad, tilt_lon, tilt_lat) : slew-limited actual values
+        """
+        col_out_cmd = collective_rad_to_out(
+            float(collective_rad_cmd), self._col_min, self._col_max)
+        s_cmd = ardupilot_h3_120_forward(
+            col_out_cmd, float(tilt_lon_cmd), float(tilt_lat_cmd),
+            self._h_col_min, self._h_col_max,
         )
-        return self._collective_rad
+        max_step = self._max_servo_rate * dt
+        for i in range(3):
+            target = max(-1.0, min(1.0, s_cmd[i]))
+            self._s[i] = _slew_limit(self._s[i], target, max_step)
+        col_out, tlon, tlat = ardupilot_h3_120_inverse(
+            self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max,
+        )
+        col_rad = collective_out_to_rad(col_out, self._col_min, self._col_max)
+        return float(col_rad), float(tlon), float(tlat)
 
-    def reset(self, tilt_lon=0.0, tilt_lat=0.0, collective_rad=0.0):
-        self._tilt_lon       = float(tilt_lon)
-        self._tilt_lat       = float(tilt_lat)
-        self._collective_rad = float(collective_rad)
+    def reset(self, collective_rad: float = None, tilt_lon: float = 0.0,
+              tilt_lat: float = 0.0) -> None:
+        if collective_rad is None:
+            collective_rad = self._col_min
+        col_out = collective_rad_to_out(float(collective_rad), self._col_min, self._col_max)
+        self._s = list(ardupilot_h3_120_forward(
+            col_out, float(tilt_lon), float(tilt_lat),
+            self._h_col_min, self._h_col_max,
+        ))
 
     @property
-    def tilt_lon(self): return self._tilt_lon
+    def collective_rad(self) -> float:
+        col_out, _, _ = ardupilot_h3_120_inverse(
+            self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max)
+        return collective_out_to_rad(col_out, self._col_min, self._col_max)
 
     @property
-    def tilt_lat(self): return self._tilt_lat
+    def tilt_lon(self) -> float:
+        _, tlon, _ = ardupilot_h3_120_inverse(
+            self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max)
+        return float(tlon)
 
     @property
-    def collective_rad(self): return self._collective_rad
+    def tilt_lat(self) -> float:
+        _, _, tlat = ardupilot_h3_120_inverse(
+            self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max)
+        return float(tlat)
 
 
 # ---------------------------------------------------------------------------

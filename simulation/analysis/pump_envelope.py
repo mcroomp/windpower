@@ -29,11 +29,11 @@ Net energy per pumping cycle:
 Usage
 -----
     # Static envelope analysis only:
-    simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py
-    simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py --wind 8 12 15
+    .venv/Scripts/python.exe simulation/analysis/pump_envelope.py
+    .venv/Scripts/python.exe simulation/analysis/pump_envelope.py --wind 8 12 15
 
     # Static envelope + actual vs optimal from a telemetry CSV:
-    simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py \\
+    .venv/Scripts/python.exe simulation/analysis/pump_envelope.py \\
         --telemetry simulation/logs/test_pump_cycle/telemetry.csv
 """
 

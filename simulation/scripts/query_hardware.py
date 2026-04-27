@@ -3,7 +3,7 @@
 query_hardware.py -- Query Pixhawk 6C over MAVLink and write hardware.md.
 
 Usage:
-    RAWES_HIL_PORT=COM4 simulation/.venv/Scripts/python.exe simulation/scripts/query_hardware.py
+    RAWES_HIL_PORT=COM4 .venv/Scripts/python.exe simulation/scripts/query_hardware.py
 """
 from __future__ import annotations
 import datetime, math, os, struct, sys, threading, time

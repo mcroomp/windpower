@@ -18,7 +18,7 @@ Conventions (NED):
 
 Usage
 -----
-    simulation/.venv/Scripts/python.exe simulation/analysis/aero_basics_test.py
+    .venv/Scripts/python.exe simulation/analysis/aero_basics_test.py
 """
 import sys, math, json
 from pathlib import Path

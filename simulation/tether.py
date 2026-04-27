@@ -42,6 +42,7 @@ class TetherModel:
     This keeps ζ constant regardless of tether length, correctly scaling
     with the 4× stiffness change between L=200 m and L=50 m.
     UHMWPE material loss tangent: δ ≈ 0.04 → ζ_material ≈ 0.02.
+    UHMWPE material loss tangent: δ ≈ 0.04 → ζ_material ≈ 0.02.
     Default ζ = 0.05 adds a small aerodynamic-drag contribution not
     otherwise captured in the single-body model.
     Damping is applied only while tether is extending (no negative damping).

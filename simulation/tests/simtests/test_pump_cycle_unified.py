@@ -31,11 +31,10 @@ import rotor_definition as rd
 from winch            import WinchController
 from simtest_log      import SimtestLog, BadEventLog
 from simtest_ic       import load_ic
-from simtest_runner   import PhysicsRunner
+from simtest_runner   import PhysicsRunner, tel_every_from_env
 from telemetry_csv    import TelRow, write_csv
 from pumping_planner  import PumpingGroundController
 from ap_controller    import TensionApController
-from controller       import AcroControllerSitl
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -78,8 +77,8 @@ T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_pumping() -> dict:
-    runner = PhysicsRunner(_ROTOR, _IC, WIND)
+def _run_pumping(aero_model: str = "skewed_wake") -> dict:
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)
 
     # ── Ground: PumpingGroundController (10 Hz outer loop) ────────────────
     ground = PumpingGroundController(
@@ -95,6 +94,8 @@ def _run_pumping() -> dict:
         tension_ramp_s = 8.0,
         t_reel_out_max = T_REEL_OUT_MAX,
         t_reel_in_max  = T_REEL_IN_MAX,
+        k_ff_winch     = 75.0,
+        k_ff_vel       = 40.0,
     )
 
     # ── Ground: WinchController (tension-controlled motion profile) ──────
@@ -119,19 +120,15 @@ def _run_pumping() -> dict:
         el_corr_ki      = 0.0,   # daisy-chain disabled until gain is tuned
         events          = events,
     )
-    acro_sitl = AcroControllerSitl()
-
     max_steps = int(T_END_SIM / DT) + 1
 
     cycle_energy_out = [0.0] * N_CYCLES
     cycle_energy_in  = [0.0] * N_CYCLES
     telemetry = []
-    tel_every     = max(1, int(0.05 / DT))
+    tel_every     = tel_every_from_env(DT)
     planner_every = max(1, round(DT_PLANNER / DT))
 
     collective_rad = _IC.coll_eq_rad
-    tilt_lon       = 0.0
-    tilt_lat       = 0.0
     cmd            = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
                                  hub_alt_m=float(-_IC.pos[2]))  # sentinel for t=0
 
@@ -160,15 +157,12 @@ def _run_pumping() -> dict:
         winch.step(tension_now, DT)
         speed_now = (winch.rest_length - len_before) / DT
 
-        # ── AP 400 Hz: TensionApController → rate commands → AcroControllerSitl ──
+        # ── AP 400 Hz: TensionApController → rate commands → physics ─────
         R          = np.asarray(hub_state["R"], dtype=float)
         omega_body = R.T @ np.asarray(hub_state["omega"], dtype=float)
         collective_rad, rate_roll, rate_pitch = ap.step(hub_state["pos"], R, DT)
-        tilt_lon, tilt_lat = acro_sitl.update(rate_roll, rate_pitch, omega_body, DT)
-
-        # ── Physics 400 Hz ────────────────────────────────────────────────
-        sr = runner.step_raw(DT, collective_rad, tilt_lon, tilt_lat,
-                             rest_length=winch.rest_length)
+        sr = runner.step(DT, collective_rad, rate_roll, rate_pitch, omega_body,
+                         rest_length=winch.rest_length)
 
         # ── Per-cycle energy accounting ───────────────────────────────────
         if speed_now > 0.0:
@@ -191,15 +185,16 @@ def _run_pumping() -> dict:
         if i % tel_every == 0:
             telemetry.append(TelRow.from_physics(
                 runner, sr, collective_rad, WIND,
-                body_z_eq         = R[:, 2],
-                phase             = phase_label,
-                tension_setpoint  = ap.tension_setpoint,
-                gnd_alt_cmd_m     = cmd.alt_m,
-                winch_speed_ms    = speed_now,
-                elevation_rad     = ap.elevation_rad,
-                el_correction_rad = ap.el_correction_rad,
-                coll_saturated    = ap.coll_saturated,
-                comms_ok          = ap.comms_ok,
+                body_z_eq                    = R[:, 2],
+                phase                        = phase_label,
+                tension_setpoint             = ap.tension_setpoint,
+                collective_from_tension_ctrl = collective_rad,
+                gnd_alt_cmd_m                = cmd.alt_m,
+                winch_speed_ms               = speed_now,
+                elevation_rad                = ap.elevation_rad,
+                el_correction_rad            = ap.el_correction_rad,
+                coll_saturated               = ap.coll_saturated,
+                comms_ok                     = ap.comms_ok,
             ))
 
     # ── Results ───────────────────────────────────────────────────────────────
@@ -242,6 +237,20 @@ def _run_pumping() -> dict:
 def test_pumping_unified():
     """3 pumping cycles via PumpingGroundController/TensionApController: no bad events, net > 0."""
     r = _run_pumping()
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
+    for k, net in enumerate(r["net_per_cycle"]):
+        if net <= 0:
+            failures.append(f"cycle {k+1} net={net:.1f}J <= 0")
+    if r["total_net"] <= 0:
+        failures.append(f"total_net={r['total_net']:.1f}J <= 0")
+    assert not failures, "\n  ".join(failures)
+
+
+def test_pumping_unified_peters_he():
+    """Same pumping cycle as test_pumping_unified but with Peters-He aero (no xi limit)."""
+    r = _run_pumping(aero_model="peters_he")
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())

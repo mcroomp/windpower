@@ -407,6 +407,7 @@ class TelRow:
         body_z_eq=None,
         phase: str = "",
         tension_setpoint: float = 0.0,
+        collective_from_tension_ctrl: float = 0.0,
         gnd_alt_cmd_m: float = 0.0,
         winch_speed_ms: float = 0.0,
         elevation_rad: float = 0.0,
@@ -422,7 +423,7 @@ class TelRow:
         ----------
         runner       PhysicsRunner — provides hub_state, omega_spin, tether,
                      tension_now, t_sim, aero.
-        step_result  dict returned by runner.step() or runner.step_raw() —
+        step_result  dict returned by runner.step() —
                      provides tilt_lon, tilt_lat, aero_result, tether_force,
                      tether_moment, omega_body, accel_world.
         collective_rad  collective blade pitch used this step [rad].
@@ -536,7 +537,7 @@ class TelRow:
             tilt_lon            = float(tilt_lon),
             tilt_lat            = float(tilt_lat),
             tension_setpoint             = float(tension_setpoint),
-            collective_from_tension_ctrl = 0.0,
+            collective_from_tension_ctrl = float(collective_from_tension_ctrl),
             gnd_alt_cmd_m                = float(gnd_alt_cmd_m),
             winch_speed_ms               = float(winch_speed_ms),
             aero_T              = aero_T,

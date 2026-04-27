@@ -6,7 +6,7 @@ every intermediate quantity so we can see where the sign diverges between
 SkewedWakeBEM (gives downforce) and PetersHeBEM (gives upward force).
 
 Usage:
-    simulation/.venv/Scripts/python.exe simulation/analysis/aero_strip_debug.py
+    .venv/Scripts/python.exe simulation/analysis/aero_strip_debug.py
 """
 import sys, math, json
 from pathlib import Path

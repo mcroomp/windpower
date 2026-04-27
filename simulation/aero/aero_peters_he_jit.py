@@ -44,7 +44,7 @@ def _jit_peters_he_strip_loop(
     omega_rotor,    # signed [rad/s]
     spin_angle,     # current rotor spin angle [rad]
     ramp,           # start-up ramp factor [0..1]
-    v0, v1c, v1s,   # Peters-He inflow states [m/s]
+    v0, v1c, v1s, v2c, v2s,   # Peters-He 5-state inflow [m/s]
     vb0, vb1, vb2,  # v_base = wind - v_hub  (world NED)
     dn0, dn1, dn2,  # disk_normal             (world NED)
     CL0, CL_ALPHA, CD0, AOA_LIMIT, AR_pi_e, RHO, S_elem,
@@ -56,6 +56,7 @@ def _jit_peters_he_strip_loop(
     N_RADIAL = r_stations.shape[0]
     Fx = 0.0; Fy = 0.0; Fz = 0.0
     Mx = 0.0; My = 0.0; Mz = 0.0
+    M2cx = 0.0; M2sx = 0.0   # 2nd-harmonic disk moment accumulators
 
     # Prandtl tip/root loss per radial strip (azimuth-independent)
     F_prandtl = np.empty(N_RADIAL)
@@ -78,6 +79,8 @@ def _jit_peters_he_strip_loop(
         phi_az = spin_angle + phi_offsets[i]
         ca     = math.cos(phi_az)
         sa     = math.sin(phi_az)
+        cos2   = 2.0 * ca * ca - 1.0   # cos(2ψ)
+        sin2   = 2.0 * sa * ca          # sin(2ψ)
 
         p_k  = collective_rad + tilt_lon_rad * sa + tilt_lat_rad * ca
         cp_k = math.cos(p_k)
@@ -107,10 +110,14 @@ def _jit_peters_he_strip_loop(
         etw2 = dn0*esw1 - dn1*esw0
 
         for j in range(N_RADIAL):
-            r_j = r_stations[j]
+            r_j      = r_stations[j]
+            rn_j     = r_norm[j]
+            rn_sq_j  = rn_j * rn_j
 
-            # Peters-He non-uniform induction (replaces Coleman)
-            vi_j = v0 + v1c * r_norm[j] * ca + v1s * r_norm[j] * sa
+            # Peters-He 5-state non-uniform induction
+            vi_j = (v0
+                    + v1c * rn_j * ca  + v1s * rn_j * sa
+                    + v2c * rn_sq_j * cos2 + v2s * rn_sq_j * sin2)
 
             rc0 = r_j * esw0; rc1 = r_j * esw1; rc2 = r_j * esw2
 
@@ -152,10 +159,15 @@ def _jit_peters_he_strip_loop(
             My += rc2*fs0 - rc0*fs2
             Mz += rc0*fs1 - rc1*fs0
 
+            # 2nd-harmonic disk-moment accumulators (axial strip force × r²)
+            f_axial = fs0*dn0 + fs1*dn1 + fs2*dn2
+            M2cx += f_axial * rn_sq_j * cos2
+            M2sx += f_axial * rn_sq_j * sin2
+
     s = ramp / N_AZ
-    F_out = np.empty(3); F_out[0] = Fx*s; F_out[1] = Fy*s; F_out[2] = Fz*s
-    M_out = np.empty(3); M_out[0] = Mx*s; M_out[1] = My*s; M_out[2] = Mz*s
-    return F_out, M_out, F_prandtl_sum / N_RADIAL
+    F_out  = np.empty(3); F_out[0]  = Fx*s;   F_out[1]  = Fy*s;   F_out[2]  = Fz*s
+    M_out  = np.empty(3); M_out[0]  = Mx*s;   M_out[1]  = My*s;   M_out[2]  = Mz*s
+    return F_out, M_out, M2cx*s, M2sx*s, F_prandtl_sum / N_RADIAL
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +197,7 @@ class PetersHeBEMJit(PetersHeBEM):
             self._phi_offsets, self._r_stations, self._r_norm,
             np.eye(3),
             0.05, 0.0, 0.0, 3.0, 0.0, 1.0,
-            0.1, 0.0, 0.0,
+            0.1, 0.0, 0.0, 0.0, 0.0,
             0.0, 5.0, 0.0,
             0.0, 0.0, 1.0,
             self.CL0, self.CL_ALPHA, self.CD0, self.AOA_LIMIT,
@@ -215,11 +227,11 @@ class PetersHeBEMJit(PetersHeBEM):
         dn = disk_normal
 
         # Step 1: bootstrap v0 from zero-induction strip thrust
-        F0, _, _ = _jit_peters_he_strip_loop(
+        F0, _, _, _, _ = _jit_peters_he_strip_loop(
             self._phi_offsets, self._r_stations, self._r_norm, R_hub_c,
             float(collective_rad), float(tilt_lon_rad), float(tilt_lat_rad),
-            float(omega_rotor), 0.0, 1.0,   # spin_angle=0, ramp=1.0 (no ramp scaling)
-            0.0, 0.0, 0.0,                   # v0=v1c=v1s=0
+            float(omega_rotor), 0.0, 1.0,   # spin_angle=0, ramp=1.0
+            0.0, 0.0, 0.0, 0.0, 0.0,        # v0=v1c=v1s=v2c=v2s=0
             float(vb[0]), float(vb[1]), float(vb[2]),
             float(dn[0]), float(dn[1]), float(dn[2]),
             self.CL0, self.CL_ALPHA, self.CD0, self.AOA_LIMIT,
@@ -230,14 +242,16 @@ class PetersHeBEMJit(PetersHeBEM):
         T0 = float(np.dot(F0, dn))   # JIT already divides by N_AZ (ramp=1)
         self._v0 = math.sqrt(max(abs(T0), 0.1) / (2.0 * rho_A))
 
-        # Step 2: iterate to fixed point using JIT kernel
+        # Step 2: iterate all 5 states to fixed point using JIT kernel
+        R2 = self.R_TIP ** 2
         for _ in range(60):
             v_ax_eff = abs(v_axial + self._v0)
-            F_acc, M_acc, _ = _jit_peters_he_strip_loop(
+            F_acc, M_acc, M2c, M2s, _ = _jit_peters_he_strip_loop(
                 self._phi_offsets, self._r_stations, self._r_norm, R_hub_c,
                 float(collective_rad), float(tilt_lon_rad), float(tilt_lat_rad),
                 float(omega_rotor), 0.0, 1.0,
                 float(self._v0), float(self._v1c), float(self._v1s),
+                float(self._v2c), float(self._v2s),
                 float(vb[0]), float(vb[1]), float(vb[2]),
                 float(dn[0]), float(dn[1]), float(dn[2]),
                 self.CL0, self.CL_ALPHA, self.CD0, self.AOA_LIMIT,
@@ -245,20 +259,26 @@ class PetersHeBEMJit(PetersHeBEM):
                 float(self.N_BLADES), self.R_TIP, max(self.R_ROOT, 0.01),
                 float(v_ax_eff), float(omega_abs),
             )
-            T_raw   = float(np.dot(F_acc, dn))
-            Mx_disk = float(np.dot(M_acc, R_hub_c[:, 0]))
-            My_disk = float(np.dot(M_acc, R_hub_c[:, 1]))
+            T_raw    = float(np.dot(F_acc, dn))
+            Mx_disk  = float(np.dot(M_acc, R_hub_c[:, 0]))
+            My_disk  = float(np.dot(M_acc, R_hub_c[:, 1]))
+            M2c_disk = float(M2c)
+            M2s_disk = float(M2s)
 
             V_T = math.sqrt(v_inplane**2 + (v_axial + self._v0)**2 + 1e-6)
             V_T = max(V_T, self._v0 * 0.5 + 0.01)
 
-            v0_ss  = T_raw   / (2.0 * rho_A * V_T)
-            v1c_ss = My_disk / (rho_A * self.R_TIP * V_T)
+            v0_ss  = T_raw    / (2.0 * rho_A * V_T)
+            v1c_ss = My_disk  / (rho_A * self.R_TIP * V_T)
             v1s_ss = -Mx_disk / (rho_A * self.R_TIP * V_T)
+            v2c_ss = M2c_disk / (rho_A * R2 * V_T)
+            v2s_ss = -M2s_disk / (rho_A * R2 * V_T)
 
             self._v0  += 0.1 * (v0_ss  - self._v0)
             self._v1c += 0.1 * (v1c_ss - self._v1c)
             self._v1s += 0.1 * (v1s_ss - self._v1s)
+            self._v2c += 0.1 * (v2c_ss - self._v2c)
+            self._v2s += 0.1 * (v2s_ss - self._v2s)
 
     def compute_forces(
         self,
@@ -298,12 +318,13 @@ class PetersHeBEMJit(PetersHeBEM):
         dn = disk_normal
         vb = v_rel_world
 
-        F_total, M_total, F_prandtl_mean = _jit_peters_he_strip_loop(
+        F_total, M_total, M2c_raw, M2s_raw, F_prandtl_mean = _jit_peters_he_strip_loop(
             self._phi_offsets, self._r_stations, self._r_norm,
             R_hub_c,
             float(collective_rad), float(tilt_lon_rad), float(tilt_lat_rad),
             float(omega_rotor), float(spin_angle), float(ramp),
             float(self._v0), float(self._v1c), float(self._v1s),
+            float(self._v2c), float(self._v2s),
             float(vb[0]), float(vb[1]), float(vb[2]),
             float(dn[0]), float(dn[1]), float(dn[2]),
             self.CL0, self.CL_ALPHA, self.CD0, self.AOA_LIMIT,
@@ -314,12 +335,15 @@ class PetersHeBEMJit(PetersHeBEM):
         self.last_F_prandtl = float(F_prandtl_mean)
 
         # Extract disk-frame moments for ODE forcing
-        T_disk  = float(np.dot(F_total, disk_normal))
-        Mx_disk = float(np.dot(M_total, R_hub[:, 0]))
-        My_disk = float(np.dot(M_total, R_hub[:, 1]))
+        T_disk   = float(np.dot(F_total, disk_normal))
+        Mx_disk  = float(np.dot(M_total, R_hub[:, 0]))
+        My_disk  = float(np.dot(M_total, R_hub[:, 1]))
+        M2c_disk = float(M2c_raw)
+        M2s_disk = float(M2s_raw)
 
         dt = max(0.0, t - self._last_t) if self._last_t >= 0.0 else 0.0
-        self._ode_step(T_disk, Mx_disk, My_disk, v_axial, v_inplane, dt)
+        self._ode_step(T_disk, Mx_disk, My_disk, M2c_disk, M2s_disk,
+                       v_axial, v_inplane, dt)
         self._last_t = t
 
         Q_spin_scalar = float(np.dot(M_total, disk_normal))

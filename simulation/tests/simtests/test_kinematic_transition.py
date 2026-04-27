@@ -9,13 +9,13 @@ with two configurations side by side:
                   - Free physics starts at t=45 s with vel ~ 0, R = R0, omega = 0
                   - DeschutterPlanner: col_max=0.10, xi=80 deg, tension_in=55 N
                   - axle_attachment_length from rotor definition (0.3 m, matches mediator)
-                  - AcroController (two-loop + servo, same as SITL)
+                  - AcroControllerSitl (inner rate loop, same as SITL)
 
   Unit-baseline Exactly mirrors test_deschutter_cycle (unit test):
                   - Starts directly from steady-state JSON (vel ~ 0)
                   - No kinematic phase at all
                   - DeschutterPlanner: col_max=0.10, xi=80 deg, tension_in=55 N
-                  - AcroController (two-loop + servo, same as SITL)
+                  - AcroControllerSitl (inner rate loop, same as SITL)
                   - T_AERO_OFFSET=45 to match aero warmup state
 
 Both run one full pumping cycle (30 s reel-out + 30 s reel-in) and write
@@ -46,11 +46,12 @@ from aero        import create_aero
 from config      import DEFAULTS
 from controller  import (AltitudeHoldController, slerp_body_z,
                          col_min_for_altitude_rad,
-                         AcroController)
+                         AcroControllerSitl, compute_rate_cmd)
 from dynamics    import RigidBodyDynamics
 from kinematic   import KinematicStartup
 from planner     import DeschutterPlanner, WindEstimator, quat_is_identity, quat_apply
-from simtest_ic  import load_ic
+from simtest_ic      import load_ic
+from simtest_runner  import tel_every_from_env
 from simtest_log import SimtestLog
 from tether      import TetherModel
 from winch       import WinchController
@@ -197,10 +198,10 @@ def _run_pumping_cycle(
     bz_slerp: np.ndarray = POS0 / np.linalg.norm(POS0)  # overwritten on first free-flight step
     alt_ctrl          = AltitudeHoldController.from_pos(POS0, _ROTOR.body_z_slew_rate_rad_s)
     target_alt_m      = float(-POS0[2])
-    acro              = AcroController.from_rotor(_ROTOR, use_servo=True)
+    acro_sitl         = AcroControllerSitl(_ROTOR, col_min_rad=col_min_rad, col_max_rad=col_max_rad)
     total_t     = kinematic_seconds + 60.0   # kinematic + 30s reel-out + 30s reel-in
     n_steps     = int(total_t / DT)
-    tel_every   = max(1, int(0.05 / DT))     # 20 Hz telemetry
+    tel_every   = tel_every_from_env(DT)
     body_z_slew = _ROTOR.body_z_slew_rate_rad_s
 
     telemetry = []
@@ -245,12 +246,11 @@ def _run_pumping_cycle(
         winch.step(tension_now, DT)
         tether.rest_length = winch.rest_length
 
-        # 4. Collective (DeschutterPlanner returns collective_rad directly); servo-slewed
+        # 4. Collective (DeschutterPlanner returns collective_rad directly)
         if "collective_rad" in cmd:
-            raw_col = float(cmd["collective_rad"])
+            collective_rad = float(cmd["collective_rad"])
         else:
-            raw_col = col_min_rad + cmd["thrust"] * (col_max_rad - col_min_rad)
-        collective_rad = acro.slew_collective(raw_col, DT)
+            collective_rad = col_min_rad + cmd["thrust"] * (col_max_rad - col_min_rad)
 
         # 5. Altitude-hold body_z setpoint + rate-limited slew
         aq = cmd["attitude_q"]
@@ -264,8 +264,12 @@ def _run_pumping_cycle(
                                        _ROTOR.mass_kg, DT)
         body_z_eq = bz_slerp
 
-        # 6. Aerodynamics (two-loop attitude + servo emulates ArduPilot ACRO)
-        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, DT)
+        # 6. Aerodynamics (two-loop attitude emulates ArduPilot ACRO inner loop)
+        bz_now     = hub_state["R"][:, 2]
+        omega_body = hub_state["R"].T @ hub_state["omega"]
+        rate_sp    = compute_rate_cmd(bz_now, body_z_eq, hub_state["R"], kp=2.5, kd=0.0)
+        tilt_lon, tilt_lat, col_actual = acro_sitl.step(collective_rad, rate_sp[0], rate_sp[1], omega_body, DT)
+        collective_rad = col_actual
         result = aero.compute_forces(
             collective_rad=collective_rad,
             tilt_lon=tilt_lon,

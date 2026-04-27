@@ -10,7 +10,7 @@ Data flow (each 400 Hz step):
     1. recv_servos()     — from SITL UDP port 9002
     2. planner step      — free flight only; updates winch + provides traj_cmd
     3. core.step()       — PhysicsCore: aero + tether + RK4 + spin ODE + angular damping
-                          OR core.step_acro() if --internal-controller (AcroController drives tilts)
+                          (AcroControllerSitl drives tilts if --internal-controller)
     4. sensor packet     — NED state for ACRO mode (gyro + accel + GPS vel)
     5. send_state()      — to SITL UDP port 9003
 
@@ -41,7 +41,8 @@ from tether          import TetherModel   # noqa: F401 — re-exported for test 
 from sitl_interface  import SITLInterface
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from sensor          import make_sensor, SpinSensor
-from controller      import AltitudeHoldController, slerp_body_z
+from controller      import (AltitudeHoldController, slerp_body_z,
+                              AcroControllerSitl, compute_rate_cmd)
 from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
@@ -347,6 +348,7 @@ def run_mediator(args, trajectory=None):
     _body_z_slew_rate     = float(cfg["body_z_slew_rate_rad_s"])
     _swashplate_phase_deg = float(cfg["swashplate_phase_deg"])
     _alt_ctrl             = None   # AltitudeHoldController, created on first free-flight step
+    _acro_sitl            = AcroControllerSitl(rotor)  # inner rate loop for internal_controller
     _body_z_slerp         = None   # rate-limited body_z for internal_controller
     _target_alt           = -float(_pos0_arr[2])   # IC altitude [m] for altitude hold
 
@@ -456,7 +458,13 @@ def run_mediator(args, trajectory=None):
             _body_z_eq = _body_z_slerp
 
             core.tether.rest_length = _winch_node.rest_length
-            result = core.step_acro(_dt, collective_rad, _body_z_eq)
+            _bz_now     = core.hub_state["R"][:, 2]
+            _R          = core.hub_state["R"]
+            _omega_body = _R.T @ core.hub_state["omega"]
+            _rate_sp    = compute_rate_cmd(_bz_now, _body_z_eq, _R, kp=2.5, kd=0.0)
+            _tilt_lon_ic, _tilt_lat_ic, collective_rad = _acro_sitl.step(
+                collective_rad, _rate_sp[0], _rate_sp[1], _omega_body, _dt)
+            result = core.step(_dt, collective_rad, _tilt_lon_ic, _tilt_lat_ic)
             collective_out = 0.5
         else:
             s1 = float(servos[0])

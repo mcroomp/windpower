@@ -7,7 +7,7 @@ should call `load_ic()` rather than hardcoding position/velocity/spin values.
 The JSON is generated (and regenerated) by test_generate_ic.py.  When the
 aero model or rotor geometry changes, run test_generate_ic.py once to update it:
 
-    simulation/.venv/Scripts/python.exe -m pytest
+    .venv/Scripts/python.exe -m pytest
         simulation/tests/unit/test_generate_ic.py::test_create_ic -s
 
 Usage

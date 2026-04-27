@@ -37,7 +37,7 @@ from types import SimpleNamespace
 import mediator as _mediator_module
 from aero          import create_aero
 import rotor_definition as _rd
-from controller    import ElevationHoldController, TensionPI, AcroControllerSitl
+from controller    import ElevationHoldController, TensionPI
 from frames        import build_orb_frame
 from simtest_runner import PhysicsRunner
 from simtest_log   import SimtestLog
@@ -160,7 +160,6 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
     runner_wu   = PhysicsRunner.for_warmup(_ROTOR, pos0, R0, rest, coll_eq, omega_spin_eq, WIND)
     el_ctrl_wu  = ElevationHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s, MASS)
     ten_ctrl_wu = TensionPI(setpoint_n=tension_out)
-    acro_wu     = AcroControllerSitl()
     for _ in range(warmup_steps):
         hub_wu  = runner_wu.hub_state
         R_wu    = np.asarray(hub_wu["R"], dtype=float)
@@ -168,8 +167,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
         coll    = ten_ctrl_wu.update(runner_wu.tension_now, DT)
         rate_roll, rate_pitch = el_ctrl_wu.update(hub_wu["pos"], R_wu, target_alt,
                                                    runner_wu.tension_now, DT)
-        tilt_lon, tilt_lat = acro_wu.update(rate_roll, rate_pitch, omega_b, DT)
-        runner_wu.step_raw(DT, coll, tilt_lon, tilt_lat)
+        runner_wu.step(DT, coll, rate_roll, rate_pitch, omega_b)
 
     # ── Settled state ─────────────────────────────────────────────────────────
     s  = runner_wu.hub_state
@@ -186,7 +184,6 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
     runner    = PhysicsRunner(_ROTOR, ic, WIND)
     el_ctrl   = ElevationHoldController.from_pos(ic.pos, _ROTOR.body_z_slew_rate_rad_s, MASS)
     ten_ctrl  = TensionPI(setpoint_n=tension_out)
-    acro_sitl = AcroControllerSitl()
     tel_rows: list = []
 
     t_arr     = np.zeros(steps)
@@ -212,8 +209,7 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
         coll    = ten_ctrl.update(runner.tension_now, DT)
         rate_roll, rate_pitch = el_ctrl.update(pos, R, target_alt, runner.tension_now, DT)
         omega_b = R.T @ np.asarray(hub["omega"], dtype=float)
-        tilt_lon, tilt_lat = acro_sitl.update(rate_roll, rate_pitch, omega_b, DT)
-        sr      = runner.step_raw(DT, coll, tilt_lon, tilt_lat)
+        sr      = runner.step(DT, coll, rate_roll, rate_pitch, omega_b)
 
         if step % _TEL_STRIDE == 0:
             tel_rows.append(TelRow.from_physics(

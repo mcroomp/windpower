@@ -941,213 +941,51 @@ class AcroControllerSitl:
     Inner rate-loop emulator for ArduPilot ACRO mode.
 
     Accepts body-frame rate commands (as rawes.lua sends via RC override) and
-    applies RatePID to produce normalised swashplate tilt, mirroring what
-    ArduPilot's AC_AttitudeControl does internally.
+    applies RatePID + SwashplateServoModel to produce slew-limited swashplate
+    outputs, mirroring what ArduPilot's AC_AttitudeControl + DS113MG servos do.
 
-    Both rawes.lua (hardware/SITL) and TensionApController (Python simtest)
-    output rate commands; this class is the Python-side stand-in for the
-    firmware rate PIDs so both paths share the same interface.
+    All three channels (collective + cyclic) pass through the shared servo model
+    so that coupling and slew limits are correct.
 
     Usage::
 
-        sitl = AcroControllerSitl()
-        tilt_lon, tilt_lat = sitl.update(rate_roll_sp, rate_pitch_sp,
-                                          omega_body, dt)
+        acro = AcroControllerSitl(rotor)
+        tilt_lon, tilt_lat, col_actual = acro.step(
+            collective_rad, rate_roll_sp, rate_pitch_sp, omega_body, dt)
     """
 
-    def __init__(self, kp: float = RatePID.DEFAULT_KP) -> None:
+    def __init__(self, rotor,
+                 col_min_rad: float = -0.28,
+                 col_max_rad: float =  0.10,
+                 kp: float = RatePID.DEFAULT_KP) -> None:
         self._pid_lon = RatePID(kp=kp)
         self._pid_lat = RatePID(kp=kp)
+        self._servo   = SwashplateServoModel.from_rotor(
+            rotor, col_min_rad=col_min_rad, col_max_rad=col_max_rad)
 
-    def update(
+    def step(
         self,
-        rate_roll_sp : float,
-        rate_pitch_sp: float,
-        omega_body   : np.ndarray,
-        dt           : float,
-    ) -> "tuple[float, float]":
+        collective_cmd: float,
+        rate_roll_sp  : float,
+        rate_pitch_sp : float,
+        omega_body    : np.ndarray,
+        dt            : float,
+    ) -> "tuple[float, float, float]":
         """
         Advance one timestep.
 
-        Parameters
-        ----------
-        rate_roll_sp  : desired roll  rate [rad/s] in body frame
-        rate_pitch_sp : desired pitch rate [rad/s] in body frame
-        omega_body    : current body-frame angular velocity [rad/s] (3,)
-        dt            : timestep [s]
+        All three channels pass through the SwashplateServoModel so collective
+        and cyclic share the same 3 physical servos with coupled slew limits.
 
-        Returns
-        -------
-        (tilt_lon, tilt_lat) : normalised swashplate tilt in [-1, 1]
+        Returns (tilt_lon, tilt_lat, col_actual) — use col_actual (not the
+        commanded value) as the collective input to PhysicsCore.
         """
-        omega_body = np.asarray(omega_body, dtype=float)
-        tilt_lon =  self._pid_lon.update(rate_roll_sp,  omega_body[0], dt)
-        tilt_lat = -self._pid_lat.update(rate_pitch_sp, omega_body[1], dt)
-        return float(tilt_lon), float(tilt_lat)
-
-class AcroController:
-    """
-    Emulates ArduPilot ACRO mode: two-loop attitude control + optional servo slew.
-
-    In SITL stack tests, ArduPilot handles attitude control internally and the
-    mediator only receives the resulting servo PWM.  In unit simtests this class
-    provides identical behaviour so the same physics code runs without Docker.
-
-    Architecture (mirrors AC_AttitudeControl + AC_PID):
-        outer loop : compute_rate_cmd(kp_outer, kd=0) -> angular rate setpoint
-        inner loop : RatePID                           -> normalised tilt command
-        servo      : SwashplateServoModel              -> slew-limited tilt (optional)
-
-    The servo model is optional because its 25 ms slew lag destabilises 400 Hz
-    feedback loops that lack a separate altitude controller.  In SITL the servo
-    runs inside ArduPilot between a 10 Hz outer loop and the plant, so the
-    lag-to-period ratio is 10x smaller.  Tests that include altitude floor
-    protection (test_deschutter_cycle) can safely enable use_servo=True.
-
-    Usage::
-
-        acro = AcroController.from_rotor(rotor)         # no servo
-        acro = AcroController.from_rotor(rotor, use_servo=True)  # with servo
-        tilt_lon, tilt_lat = acro.update(hub_state, body_z_eq, dt)
-    """
-
-    DEFAULT_KP_OUTER: float = 2.5
-
-    def __init__(
-        self,
-        rotor,
-        kp_outer:        float = DEFAULT_KP_OUTER,
-        kp_inner:        float = RatePID.DEFAULT_KP,
-        use_servo:       bool  = False,
-        collective_rad:  float = 0.0,
-    ) -> None:
-        self._kp_outer = float(kp_outer)
-        self._pid_lon  = RatePID(kp=kp_inner)
-        self._pid_lat  = RatePID(kp=kp_inner)
-        self._servo    = SwashplateServoModel.from_rotor(rotor) if use_servo else None
-        if self._servo is not None and collective_rad != 0.0:
-            self._servo.reset(collective_rad=collective_rad)
-
-    @classmethod
-    def from_rotor(cls, rotor, kp_outer: float = DEFAULT_KP_OUTER,
-                   kp_inner: float = RatePID.DEFAULT_KP,
-                   use_servo: bool = False,
-                   collective_rad: float = 0.0) -> "AcroController":
-        return cls(rotor, kp_outer=kp_outer, kp_inner=kp_inner,
-                   use_servo=use_servo, collective_rad=collective_rad)
-
-    def update(
-        self,
-        hub_state:            dict,
-        body_z_eq:            np.ndarray,
-        dt:                   float,
-        swashplate_phase_deg: float = 0.0,
-    ) -> "tuple[float, float]":
-        """
-        Compute slew-limited tilt commands for one timestep.
-
-        Parameters
-        ----------
-        hub_state            : dict with R (3x3) and omega (3,) in world frame
-        body_z_eq            : desired rotor axis unit vector (world frame)
-        dt                   : timestep [s]
-        swashplate_phase_deg : gyroscopic phase advance [deg]; 0 = no compensation
-
-        Returns
-        -------
-        (tilt_lon, tilt_lat) : normalised swashplate tilt in [-1, 1]
-        """
-        bz_now   = np.asarray(hub_state["R"], dtype=float)[:, 2]
-        rate_sp  = compute_rate_cmd(bz_now, body_z_eq,
-                                    np.asarray(hub_state["R"], dtype=float),
-                                    kp=self._kp_outer, kd=0.0)
-        omega_body    = np.asarray(hub_state["R"], dtype=float).T @ np.asarray(hub_state["omega"], dtype=float)
-        omega_body[2] = 0.0   # strip spin axis — rate PID ignores yaw
-
-        tilt_lon_cmd =  self._pid_lon.update(rate_sp[0], omega_body[0], dt)
-        tilt_lat_cmd = -self._pid_lat.update(rate_sp[1], omega_body[1], dt)
-
-        if swashplate_phase_deg != 0.0:
-            phi = math.radians(swashplate_phase_deg)
-            c, s = math.cos(phi), math.sin(phi)
-            tilt_lon_cmd, tilt_lat_cmd = (
-                c * tilt_lon_cmd - s * tilt_lat_cmd,
-                s * tilt_lon_cmd + c * tilt_lat_cmd,
-            )
-
-        if self._servo is not None:
-            return self._servo.step(tilt_lon_cmd, tilt_lat_cmd, dt)
-        return float(tilt_lon_cmd), float(tilt_lat_cmd)
-
-    def slew_collective(self, collective_rad_cmd: float, dt: float) -> float:
-        """
-        Rate-limit collective_rad using the servo model (if enabled).
-
-        Parameters
-        ----------
-        collective_rad_cmd : float   Desired collective blade pitch [rad]
-        dt                 : float   Timestep [s]
-
-        Returns
-        -------
-        float   Slew-limited collective [rad]; unchanged if use_servo=False.
-        """
-        if self._servo is None:
-            return float(collective_rad_cmd)
-        return self._servo.step_collective(collective_rad_cmd, dt)
-
-    def step_vz(
-        self,
-        vz_setpoint_ms: float,
-        vz_actual:      float,
-        col_cruise_rad: float,
-        col_min_rad:    float,
-        col_max_rad:    float,
-        kp_vz:          float,
-        dt:             float,
-    ) -> float:
-        """
-        Pixhawk-side descent-rate controller: compute and slew-limit collective.
-
-        Mirrors the rawes.lua vz control loop.  The ground station supplies
-        vz_setpoint_ms; this method runs on the Pixhawk (AcroController) and
-        outputs collective_rad.  Replaces direct collective computation on the
-        ground station, making comms-loss failsafe trivial (hold last setpoint).
-
-        NED convention: positive vz = downward.
-
-        Parameters
-        ----------
-        vz_setpoint_ms : float  desired NED vz [m/s]; positive = descend
-        vz_actual      : float  current NED vz from EKF vel[2] [m/s]
-        col_cruise_rad : float  altitude-neutral feedforward = col_min_for_altitude
-                                at the current xi angle [rad]
-        col_min_rad    : float  hardware collective floor (servo limit) [rad]
-        col_max_rad    : float  hardware collective ceiling [rad]
-        kp_vz          : float  gain [rad/(m/s)]; pos error = descending too fast
-                                = increase collective to brake
-        dt             : float  timestep [s]
-
-        Returns
-        -------
-        float   Slew-limited collective [rad]
-        """
-        # NED: positive vz_error means hub is descending faster than setpoint
-        # -> increase collective to brake.  Negative means too slow -> reduce
-        # collective to let gravity win.
-        vz_error       = vz_actual - vz_setpoint_ms
-        collective_cmd = float(np.clip(
-            col_cruise_rad + kp_vz * vz_error,
-            col_min_rad, col_max_rad))
-        return self.slew_collective(collective_cmd, dt)
-
-    def reset(self) -> None:
-        """Reset all stateful components (call on phase transitions)."""
-        self._pid_lon.reset()
-        self._pid_lat.reset()
-        if self._servo is not None:
-            self._servo.reset()
-
+        omega_body   = np.asarray(omega_body, dtype=float)
+        tilt_lon_cmd =  self._pid_lon.update(rate_roll_sp,  omega_body[0], dt)
+        tilt_lat_cmd = -self._pid_lat.update(rate_pitch_sp, omega_body[1], dt)
+        col_act, tlon, tlat = self._servo.step(
+            float(collective_cmd), tilt_lon_cmd, tilt_lat_cmd, dt)
+        return float(tlon), float(tlat), float(col_act)
 
 # ---------------------------------------------------------------------------
 # Aero-model utilities

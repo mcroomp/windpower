@@ -44,12 +44,12 @@ Run pytest via `simulation/run_tests.py`, streaming filtered output and saving s
 ## Execution
 
 ```
-simulation/.venv/Scripts/python.exe simulation/run_tests.py $ARGUMENTS
+.venv/Scripts/python.exe simulation/run_tests.py $ARGUMENTS
 ```
 
 Default when `$ARGUMENTS` is empty:
 ```
-simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m "not simtest" -q
+.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/unit -m "not simtest" -q
 ```
 
 ## After the run

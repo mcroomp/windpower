@@ -17,7 +17,7 @@ Set the serial port and run with the existing unit-test venv:
         RAWES_HIL_PORT=COM3 bash sim.sh test-hil -v
 
     Or directly:
-        RAWES_HIL_PORT=COM3 simulation/.venv/Scripts/python.exe -m pytest \\
+        RAWES_HIL_PORT=COM3 .venv/Scripts/python.exe -m pytest \\
             simulation/tests/hil/test_hil_smoke.py -v
 
 Environment variables

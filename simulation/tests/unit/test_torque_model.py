@@ -5,7 +5,7 @@ Runs natively on Windows with the existing unit-test venv (pure Python, no
 Docker, no ArduPilot SITL required).
 
 Run with:
-    simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit/test_torque_model.py -v
+    .venv/Scripts/python.exe -m pytest simulation/tests/unit/test_torque_model.py -v
 
 Tests
 -----

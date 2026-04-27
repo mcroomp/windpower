@@ -25,12 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
-from controller      import RatePID
-from swashplate      import SwashplateServoModel
 from winch           import WinchController
 from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
-from simtest_runner  import PhysicsRunner, feed_obs
+from simtest_runner  import PhysicsRunner, feed_obs, tel_every_from_env
 from telemetry_csv   import TelRow, write_csv
 from landing_planner import LandingGroundController
 from rawes_lua_harness import RawesLua
@@ -55,7 +53,7 @@ BREAK_LOAD_N         = 620.0
 XI_REEL_IN_DEG  = 80.0
 COL_REEL_IN_RAD = 0.079
 COL_CRUISE      = 0.079
-TENSION_DESCENT = 180.0
+TENSION_DESCENT = 140.0    # N  (natural~40N + V_LAND/kp = 40+100 = 140N)
 V_LAND          = 0.5
 MIN_TETHER_M    = 2.0
 
@@ -67,7 +65,6 @@ T_FINAL_DROP_MAX     = 15.0
 _COL_MIN    = -0.28
 _COL_MAX    =  0.10
 _ACRO_SCALE = 500.0 / (360.0 * math.pi / 180.0)
-KP_INNER    = RatePID.DEFAULT_KP
 
 
 def _pwm_to_rate(pwm: int) -> float:
@@ -101,7 +98,7 @@ def _run_landing() -> dict:
         kp_tension      = 0.005,
         v_max_out       = 0.40,
         v_max_in        = 0.80,
-        accel_limit_ms2 = 0.05,
+        accel_limit_ms2 = 0.5,
         min_length      = MIN_TETHER_M,
     )
 
@@ -112,13 +109,9 @@ def _run_landing() -> dict:
     sim.vehicle_mode = 1   # ACRO
     feed_obs(sim, runner.observe())
 
-    pid_lon = RatePID(kp=KP_INNER)
-    pid_lat = RatePID(kp=KP_INNER)
-    servo   = SwashplateServoModel.from_rotor(_ROTOR)
-
     events    = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
-    tel_every     = max(1, int(0.05 / DT))
+    tel_every     = tel_every_from_env(DT)
 
     col_rad         = _IC.coll_eq_rad
     roll_sp         = 0.0
@@ -180,12 +173,8 @@ def _run_landing() -> dict:
         # ── Inner ACRO rate PID + physics step ───────────────────────────
         omega_body    = hub_state["R"].T @ hub_state["omega"]
         omega_body[2] = 0.0
-        tilt_lon_cmd  =  pid_lon.update(roll_sp,  omega_body[0], DT)
-        tilt_lat_cmd  = -pid_lat.update(pitch_sp, omega_body[1], DT)
-        tilt_lon, tilt_lat = servo.step(tilt_lon_cmd, tilt_lat_cmd, DT)
-
-        sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat,
-                             rest_length=winch.rest_length)
+        sr = runner.step(DT, col_rad, roll_sp, pitch_sp, omega_body,
+                         rest_length=winch.rest_length)
 
         # ── Floor detection + phase metrics ───────────────────────────────
         phase = cmd.phase

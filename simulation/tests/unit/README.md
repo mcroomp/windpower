@@ -13,19 +13,19 @@ Tests are split across two directories, both running **Windows-native** (no Dock
 
 ```bash
 # Fast unit tests only (~480)
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
+.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
 
 # Simtests only (~11)
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
+.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
 
 # Both together
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit simulation/tests/simtests -q
+.venv/Scripts/python.exe -m pytest simulation/tests/unit simulation/tests/simtests -q
 
 # Single test
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_steady_flight.py -q
+.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_steady_flight.py -q
 
 # Regenerate steady-state IC (required after any aero model change)
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
+.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
 **CRITICAL:** Never use `dev.sh test-unit` — it routes to Docker which excludes `tests/unit`.
@@ -296,7 +296,7 @@ ic = load_ic()
 
 Regenerate after any aero model change:
 ```bash
-simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
+.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
 ---
@@ -305,18 +305,16 @@ simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_gen
 
 `simtest_runner.py` provides `PhysicsRunner`, a thin wrapper around `PhysicsCore`
 (`simulation/physics_core.py`). `PhysicsCore` owns `RigidBodyDynamics`, `create_aero`,
-`TetherModel`, `AcroController(use_servo=True)`, the spin ODE, and angular damping.
-`PhysicsRunner` exposes `step()` / `step_raw()` for simtest callers.
-Callers own `PumpingGroundController`, `TensionApController`, `WinchController`.
+`TetherModel`, the spin ODE, and angular damping.
+`PhysicsRunner` exposes `step_raw()` for simtest callers.
+Callers own `PumpingGroundController`, `TensionApController`, `WinchController`,
+and any attitude controller (`AcroControllerSitl`, `ElevationHoldController`).
 
 ```python
 from simtest_runner import PhysicsRunner
 
-# Python-controlled tests (AcroController drives tilts internally):
-runner = PhysicsRunner(rotor, ic, wind)
-sr = runner.step(DT, collective_rad, body_z_eq, rest_length=winch.rest_length)
-
-# Lua-controlled tests (caller drives tilts via RatePID + SwashplateServoModel):
+# All tests (caller drives tilts via AcroControllerSitl + compute_rate_cmd,
+# or directly from Lua PWM decode + RatePID + SwashplateServoModel):
 tilt_lon, tilt_lat = servo.step(pid_lon.update(...), ...)
 sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat, rest_length=winch.rest_length)
 
@@ -344,7 +342,12 @@ for i in range(max_steps):
         ap_ctrl.receive_command(gnd_cmd, DT_GND)
     collective_rad, body_z_eq = ap_ctrl.step(runner.hub_state, runner.tension_now, DT)
     winch.step(runner.tension_now, DT)
-    sr = runner.step(DT, collective_rad, body_z_eq, rest_length=winch.rest_length)
+    bz_now = runner.hub_state["R"][:, 2]
+    R      = runner.hub_state["R"]
+    omega_body = R.T @ runner.hub_state["omega"]
+    rate_sp    = compute_rate_cmd(bz_now, body_z_eq, R, kp=2.5)
+    tilt_lon, tilt_lat = acro_sitl.update(rate_sp[0], rate_sp[1], omega_body, DT)
+    sr = runner.step_raw(DT, collective_rad, tilt_lon, tilt_lat, rest_length=winch.rest_length)
 ```
 
 ---

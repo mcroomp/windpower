@@ -9,7 +9,6 @@ PhysicsCore owns
 - RigidBodyDynamics (6-DOF RK4)
 - Aero model (SkewedWakeBEMJit)
 - TetherModel (elastic, tension-only)
-- AcroController (two-loop attitude + servo, for step_acro)
 - Spin ODE (autorotation equilibrium)
 - Angular damping: base_k_ang (omnidirectional) + k_yaw (GB4008 yaw axis)
 - KinematicStartup: state override + tether gating + extra startup damping
@@ -23,12 +22,11 @@ Callers own
 - SITL interface and sensor building (mediator only)
 - Telemetry logging
 
-Two step methods
-----------------
+Step method
+-----------
 step(dt, collective_rad, tilt_lon, tilt_lat)   raw tilts  — mediator / Lua-test path
-step_acro(dt, collective_rad, body_z_eq)        AcroController — Python-controller path
 
-Both return the same result dict.
+Returns a result dict.
 """
 from __future__ import annotations
 
@@ -43,7 +41,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
-from controller import AcroController
 from frames     import build_orb_frame
 
 
@@ -120,6 +117,8 @@ class PhysicsCore:
         startup_damp_k_ang: float = 0.0,
         lock_orientation:   bool  = False,
         z_floor:            float = -1.0,
+        aero_model:         str   = "skewed_wake",
+        aero_override             = None,
     ):
         self._rotor              = rotor
         self._wind               = np.asarray(wind, dtype=float).copy()
@@ -138,14 +137,11 @@ class PhysicsCore:
             omega0 = [0.0, 0.0, 0.0],
             z_floor= z_floor,
         )
-        self._aero   = create_aero(rotor)
+        self._aero   = aero_override if aero_override is not None else create_aero(rotor, model=aero_model)
         self._tether = TetherModel(
             anchor_ned             = np.zeros(3),
             rest_length            = float(ic.rest_length),
             axle_attachment_length = rotor.axle_attachment_length_m,
-        )
-        self._acro = AcroController.from_rotor(
-            rotor, use_servo=True, collective_rad=float(ic.coll_eq_rad),
         )
         self._omega_spin = float(ic.omega_spin)
         self._t_sim      = 0.0
@@ -254,19 +250,6 @@ class PhysicsCore:
         Use for mediator (ArduPilot servo decode) and Lua-controlled simtests
         (RatePID + SwashplateServoModel produce tilt_lon/tilt_lat).
         """
-        return self._integrate(dt, collective_rad, tilt_lon, tilt_lat, rest_length)
-
-    def step_acro(self, dt: float, collective_rad: float,
-                  body_z_eq: np.ndarray,
-                  rest_length: "float | None" = None) -> dict:
-        """
-        400 Hz step with AcroController-driven tilts.
-
-        Use for Python-controlled simtests (AltitudeHoldController + TensionPI).
-        AcroController converts body_z_eq into tilt_lon/tilt_lat internally.
-        """
-        hub = self._dyn.state
-        tilt_lon, tilt_lat = self._acro.update(hub, body_z_eq, dt)
         return self._integrate(dt, collective_rad, tilt_lon, tilt_lat, rest_length)
 
     # ── Internal integration ──────────────────────────────────────────────────
