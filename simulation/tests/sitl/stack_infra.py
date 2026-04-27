@@ -162,11 +162,6 @@ class StackConfig:
     # ArduPilot's 400 Hz ACRO rate PIDs provide the real angular control;
     # k_ang=50 is a background stabiliser, not a workaround.
     BASE_K_ANG            : float = 50.0
-    # ArduPilot servo outputs drive the physics (full stack).
-    # internal_controller=True is reserved for the Lua fixture where Lua only
-    # controls cyclic and the mediator provides collective.
-    INTERNAL_CONTROLLER   : bool  = False
-    BASE_K_ANG_INTERNAL   : float = 50.0   # same physical value; used when internal_controller=True
 
     # Port descriptions for diagnostics
     _PORT_CHECKS = [
@@ -302,7 +297,6 @@ class StackContext:
     setup_samples  : list of dicts — EKF/ATTITUDE samples captured during setup
     sim_dir        : simulation/ directory (for writing outputs)
     controller     : PhysicalHoldController instance
-    internal_controller : True = mediator runs truth-state controller at 400 Hz
 
     Torque tests only (default 0.0 for flight tests)
     -------------------------------------------------
@@ -327,7 +321,6 @@ class StackContext:
     setup_samples:       list         = dataclasses.field(default_factory=list)
     sim_dir:             Path | None  = None
     controller:          object       = None
-    internal_controller: bool         = False
     test_log_dir:        Path | None  = None
     # ── pumping socket (default 0 = disabled) ────────────────────────────────
     winch_cmd_port:      int          = 0
@@ -679,8 +672,7 @@ def _static_stack(
 @contextlib.contextmanager
 def _acro_stack(tmp_path, *, extra_config=None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
-                extra_boot_params: "dict[str, float] | None" = None,
-                internal_controller: bool | None = None):
+                extra_boot_params: "dict[str, float] | None" = None):
     """
     Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
@@ -741,9 +733,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
         _run_id = int(time.time())
         log.info("RUN_ID=%d", _run_id)
         log.info("launching%s SITL ...", " mediator +" if with_mediator else "")
-        _use_internal = internal_controller if internal_controller is not None else StackConfig.INTERNAL_CONTROLLER
         if with_mediator:
-            _k_ang = StackConfig.BASE_K_ANG_INTERNAL if _use_internal else StackConfig.BASE_K_ANG
             mediator_proc = _launch_mediator(
                 sitl_ctx.sim_dir, sitl_ctx.repo_root, mediator_log,
                 telemetry_log_path   = str(telemetry_log),
@@ -752,8 +742,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
                 startup_damp_seconds = _STARTUP_DAMP_S,
                 lock_orientation     = StackConfig.LOCK_ORIENTATION,
                 run_id               = _run_id,
-                base_k_ang           = _k_ang,
-                internal_controller  = _use_internal,
+                base_k_ang           = StackConfig.BASE_K_ANG,
                 extra_config         = extra_config,
             )
         else:
@@ -781,7 +770,6 @@ def _acro_stack(tmp_path, *, extra_config=None,
             flight_events={}, all_statustext=[], setup_samples=[],
             log=log, sim_dir=sitl_ctx.sim_dir,
             controller=controller,
-            internal_controller=_use_internal,
             test_log_dir=sitl_ctx.test_log_dir,
             winch_cmd_port=int((extra_config or {}).get("winch_cmd_port", 0)),
         )

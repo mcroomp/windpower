@@ -10,7 +10,6 @@ Data flow (each 400 Hz step):
     1. recv_servos()     — from SITL UDP port 9002
     2. planner step      — free flight only; updates winch + provides traj_cmd
     3. core.step()       — PhysicsCore: aero + tether + RK4 + spin ODE + angular damping
-                          (AcroControllerSitl drives tilts if --internal-controller)
     4. sensor packet     — NED state for ACRO mode (gyro + accel + GPS vel)
     5. send_state()      — to SITL UDP port 9003
 
@@ -41,12 +40,9 @@ from tether          import TetherModel   # noqa: F401 — re-exported for test 
 from sitl_interface  import SITLInterface
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from sensor          import make_sensor, SpinSensor
-from controller      import (AltitudeHoldController, slerp_body_z,
-                              AcroControllerSitl, compute_rate_cmd)
 from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
-from planner         import quat_apply, quat_is_identity
 import config as _mcfg
 import rotor_definition as _rd
 from telemetry_csv import COLUMNS as _TEL_COLUMNS
@@ -275,8 +271,7 @@ def run_mediator(args, trajectory=None):
     last_log_time   = -LOG_INTERVAL       # ensure immediate first log
     _t_step0        = None                # sim time of first step_fn call
 
-    s1 = s2 = s3       = 0.0           # servo values (updated in ArduPilot path; stale OK in IC path)
-    _body_z_eq         = np.zeros(3)   # body_z setpoint (IC path only; zeros in ArduPilot path)
+    s1 = s2 = s3       = 0.0           # servo values
     _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
     _tel_note          = ""            # single-frame event marker written to telemetry CSV; cleared after write
@@ -345,12 +340,6 @@ def run_mediator(args, trajectory=None):
         log.info("Winch command socket listening on 127.0.0.1:%d", _winch_cmd_port)
 
     # -- Mode_RAWES inner loops -----------------------------------------------
-    _body_z_slew_rate     = float(cfg["body_z_slew_rate_rad_s"])
-    _swashplate_phase_deg = float(cfg["swashplate_phase_deg"])
-    _alt_ctrl             = None   # AltitudeHoldController, created on first free-flight step
-    _acro_sitl            = AcroControllerSitl(rotor)  # inner rate loop for internal_controller
-    _body_z_slerp         = None   # rate-limited body_z for internal_controller
-    _target_alt           = -float(_pos0_arr[2])   # IC altitude [m] for altitude hold
 
     log.info("Entering main loop at %.0f Hz target.", 1.0 / DT_TARGET)
 
@@ -360,8 +349,8 @@ def run_mediator(args, trajectory=None):
 
     def step_fn(servos, t_sim):
         nonlocal step, last_log_time, _t_step0
-        nonlocal s1, s2, s3, _body_z_eq, _traj_cmd, _logged_transition
-        nonlocal _tel_note, _prev_phase, _alt_ctrl, _body_z_slerp
+        nonlocal s1, s2, s3, _traj_cmd, _logged_transition
+        nonlocal _tel_note, _prev_phase
         nonlocal _winch_peer, _winch_send_ctr
         if _t_step0 is None:
             _t_step0 = t_sim
@@ -430,56 +419,19 @@ def run_mediator(args, trajectory=None):
         # ── Physics step ──────────────────────────────────────────────────
         prev_vel = core.hub_state["vel"].copy()
 
-        if cfg["internal_controller"] and _damp_alpha == 0.0:
-            # Initialize AltitudeHoldController on first free-flight step
-            if _alt_ctrl is None:
-                _alt_ctrl = AltitudeHoldController.from_pos(
-                    core.hub_state["pos"], _body_z_slew_rate)
-                _body_z_slerp = core.hub_state["R"][:, 2].copy()
-
-            # Collective from planner
-            if "collective_rad" in _traj_cmd:
-                collective_rad = float(_traj_cmd["collective_rad"])
-            else:
-                collective_rad = _col_min_rad + _traj_cmd["thrust"] * (_col_max_rad - _col_min_rad)
-
-            # Attitude: slerp toward attitude_q target, or altitude hold
-            _aq = _traj_cmd["attitude_q"]
-            _bz_target = (None if quat_is_identity(_aq)
-                          else quat_apply(_aq, np.array([0.0, 0.0, -1.0])))
-            if _bz_target is not None:
-                _body_z_slerp = slerp_body_z(
-                    _body_z_slerp, np.asarray(_bz_target, float),
-                    _body_z_slew_rate, _dt)
-            else:
-                _body_z_slerp = _alt_ctrl.update(
-                    core.hub_state["pos"], _target_alt,
-                    core.tension_now, rotor.mass_kg, _dt)
-            _body_z_eq = _body_z_slerp
-
+        s1 = float(servos[0])
+        s2 = float(servos[1])
+        s3 = float(servos[2])
+        collective_out, roll_norm, pitch_norm = ardupilot_h3_120_inverse(s1, s2, s3)
+        _tilt_lat = roll_norm
+        _tilt_lon = pitch_norm
+        collective_rad = float(np.clip(
+            collective_out_to_rad(collective_out, _col_min_rad, _col_max_rad),
+            _col_min_rad, _col_max_rad,
+        ))
+        if _damp_alpha == 0.0:
             core.tether.rest_length = _winch_node.rest_length
-            _bz_now     = core.hub_state["R"][:, 2]
-            _R          = core.hub_state["R"]
-            _omega_body = _R.T @ core.hub_state["omega"]
-            _rate_sp    = compute_rate_cmd(_bz_now, _body_z_eq, _R, kp=2.5, kd=0.0)
-            _tilt_lon_ic, _tilt_lat_ic, collective_rad = _acro_sitl.step(
-                collective_rad, _rate_sp[0], _rate_sp[1], _omega_body, _dt)
-            result = core.step(_dt, collective_rad, _tilt_lon_ic, _tilt_lat_ic)
-            collective_out = 0.5
-        else:
-            s1 = float(servos[0])
-            s2 = float(servos[1])
-            s3 = float(servos[2])
-            collective_out, roll_norm, pitch_norm = ardupilot_h3_120_inverse(s1, s2, s3)
-            _tilt_lat = roll_norm
-            _tilt_lon = pitch_norm
-            collective_rad = float(np.clip(
-                collective_out_to_rad(collective_out, _col_min_rad, _col_max_rad),
-                _col_min_rad, _col_max_rad,
-            ))
-            if _damp_alpha == 0.0:
-                core.tether.rest_length = _winch_node.rest_length
-            result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat)
+        result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat)
 
         # ── Unpack physics results ────────────────────────────────────────
         hub_state     = result["hub_state"]
@@ -615,9 +567,6 @@ def run_mediator(args, trajectory=None):
                 "wind_x":          wind_world[0],
                 "wind_y":          wind_world[1],
                 "wind_z":          wind_world[2],
-                "bz_eq_x":         _body_z_eq[0],
-                "bz_eq_y":         _body_z_eq[1],
-                "bz_eq_z":         _body_z_eq[2],
                 "r00": float(hub_state["R"][0, 0]),
                 "r01": float(hub_state["R"][0, 1]),
                 "r02": float(hub_state["R"][0, 2]),

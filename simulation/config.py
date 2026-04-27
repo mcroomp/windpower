@@ -14,7 +14,6 @@ Use ``defaults()`` to get a fresh copy of the defaults dict.
 Example (test fixture):
     import config as mcfg
     cfg = mcfg.defaults()
-    cfg["internal_controller"] = True
     cfg["base_k_ang"] = 50.0
     cfg_path = tmp_path / "mediator_config.json"
     mcfg.save(cfg, cfg_path)
@@ -81,9 +80,6 @@ DEFAULTS: dict = {
                                     # τ = I/k = 5/50 = 0.1 s settling time
                                     # Increase to 300 for 10 Hz MAVLink controller
 
-    # ── Internal controller ───────────────────────────────────────────────────
-    "internal_controller":      False,  # truth-state swashplate at 400 Hz
-    "internal_controller_ramp":   3.0,  # ramp-in time after kinematic end [s]
     "lock_orientation":         False,  # debug: lock R to initial value every step
 
     # ── Swashplate phase compensation ─────────────────────────────────────────
@@ -125,7 +121,6 @@ DEFAULTS: dict = {
     #   "hold"        — orbit-track tether direction, zero collective, no winch.
     #                   No parameters required.
     #   "deschutter"  — De Schutter (2018) reel-out/reel-in pumping cycle.
-    #                   Requires internal_controller=True.
     "trajectory": {
         "type": "hold",
         "hold": {},

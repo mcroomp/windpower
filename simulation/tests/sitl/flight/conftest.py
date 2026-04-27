@@ -5,8 +5,7 @@ Fixtures:
   acro_armed              — full ACRO stack (mediator + arm).
   acro_armed_pumping_lua  — ACRO stack with rawes.lua in pumping mode (SCR_USER6=5).
   acro_armed_landing_lua  — ACRO stack with rawes.lua in landing mode (SCR_USER6=4).
-  acro_armed_lua_full     — ACRO stack with rawes.lua in flight mode (SCR_USER6=1),
-                            internal_controller=False.
+  acro_armed_lua_full     — ACRO stack with rawes.lua in flight mode (SCR_USER6=1).
 """
 import math
 import os
@@ -51,8 +50,6 @@ def acro_armed_pumping_lua(tmp_path, request):
     This mirrors the real hardware architecture: ground station manages phase
     logic and MAVLink NVF delivery; winch node owns motor control.
 
-    internal_controller=False: SITL stack tests must let ArduPilot + Lua drive
-    physics (CLAUDE.md critical rule).
     """
     import socket as _socket
 
@@ -66,8 +63,7 @@ def acro_armed_pumping_lua(tmp_path, request):
         "winch_cmd_port":       _winch_port,
     }
     with _acro_stack(tmp_path, extra_config=extra,
-                     test_name=request.node.name,
-                     internal_controller=False) as ctx:
+                     test_name=request.node.name) as ctx:
         ctx.log.info("Setting SCR_USER params for rawes.lua (pumping mode) ...")
         lua_params = {
             "SCR_ENABLE": 1,
@@ -92,11 +88,8 @@ def acro_armed_landing_lua(tmp_path, request):
     Landing stack fixture with rawes.lua active in landing mode (SCR_USER6=4).
 
     Extends acro_armed_landing:
-      - internal_controller=False: ArduPilot + Lua own the physics (CLAUDE.md
-        critical rule -- SITL tests must validate the actual control loop).
       - kinematic_vel_ramp_s=20: hub exits kinematic at vel=0, eliminating the
-        linear tether jolt that required internal_controller=True in prior attempts.
-        Tether extension at exit ~ 0 m, tension ~ 0 N; Lua's 50 Hz is sufficient.
+        linear tether jolt. Tether extension at exit ~ 0 m, tension ~ 0 N.
       - rawes.lua installed before SITL starts.
       - SCR_USER1..5 configured post-arm immediately; SCR_USER6=4 set so Lua
         starts in landing mode; KINEMATIC_SETTLE_MS=62000 delays body_z capture
@@ -169,14 +162,7 @@ def acro_armed_landing_lua(tmp_path, request):
         },
     }
     with _acro_stack(tmp_path, extra_config=extra,
-                     test_name=request.node.name,
-
-                     # internal_controller=False: SITL stack tests must let
-                     # ArduPilot + Lua drive physics (CLAUDE.md critical rule).
-                     # kinematic_vel_ramp_s=20 ensures vel=0 at kinematic exit,
-                     # eliminating the linear tether jolt.  Lua's 50 Hz is
-                     # sufficient for the residual angular perturbations.
-                     internal_controller=False) as ctx:
+                     test_name=request.node.name) as ctx:
         # Post-arm: configure rawes.lua via SCR_USER params.
         # SCR_USER5 = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
         # vel0[2]=0 => altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
@@ -214,7 +200,6 @@ def acro_armed_lua_full(tmp_path, request):
     stationary hold at pos0 (vel0=[0,0,0], linear trajectory) for 80 s.
 
     Key design points:
-      - internal_controller=False: ArduPilot + Lua own physics (CLAUDE.md rule).
       - SCR_USER6=1 set immediately after arm; Lua pre-GPS bypass holds
         col_cruise and zero cyclic until _tdir0 fires (GPS fusion).
       - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro).
@@ -237,8 +222,7 @@ def acro_armed_lua_full(tmp_path, request):
         "startup_damp_seconds": 80.0,
     }
     with _acro_stack(tmp_path, extra_config=extra,
-                     test_name=request.node.name,
-                     internal_controller=False) as ctx:
+                     test_name=request.node.name) as ctx:
         ctx.log.info("Setting SCR_USER params for rawes.lua ...")
         lua_params = {
             "SCR_ENABLE": 1,              # persist scripting in EEPROM

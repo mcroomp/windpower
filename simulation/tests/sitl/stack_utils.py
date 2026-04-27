@@ -523,7 +523,6 @@ def _launch_mediator(
     lock_orientation: bool = False,
     run_id: "int | None" = None,
     base_k_ang: "float | None" = None,
-    internal_controller: bool = False,
     extra_config: "dict | None" = None,
 ) -> subprocess.Popen:
     # Lazy import: config lives in simulation/, which must be on sys.path.
@@ -548,7 +547,6 @@ def _launch_mediator(
         cfg["startup_damp_seconds"] = float(startup_damp_seconds)
     if base_k_ang is not None:
         cfg["base_k_ang"] = float(base_k_ang)
-    cfg["internal_controller"] = internal_controller
     cfg["lock_orientation"]    = lock_orientation
     if extra_config:
         import copy as _copy
