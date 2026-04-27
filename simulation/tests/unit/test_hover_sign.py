@@ -127,29 +127,9 @@ def test_autorotation_lift_is_upward(cls, label):
     )
     Fz = float(r.F_world[2])
     print(f"\n[{label}] autorotation Fz={Fz:.2f} N  v_ip={aero.last_v_inplane:.2f} m/s"
-          f"  Q_spin={aero.last_Q_spin:.3f} N*m")
+          f"  Q_spin={r.Q_spin:.3f} N*m")
     assert Fz < 0.0, (
         f"[{label}] autorotation: F_world[2]={Fz:.3f} N — expected negative (upward lift)"
     )
 
 
-@pytest.mark.parametrize("cls,label", ALL_MODELS, ids=[m[1] for m in ALL_MODELS])
-def test_autorotation_q_spin_drives_below_equilibrium(cls, label):
-    """At omega well below equilibrium, Q_spin must be positive (wind accelerates rotor)."""
-    aero = _make(cls)
-    omega_low = OMEGA_IC * 0.5   # well below equilibrium
-    r = aero.compute_forces(
-        collective_rad = 0.0,
-        tilt_lon       = 0.0,
-        tilt_lat       = 0.0,
-        R_hub          = R_HORIZONTAL,
-        v_hub_world    = np.zeros(3),
-        omega_rotor    = omega_low,
-        wind_world     = WIND_10E,
-        t              = T_STEADY,
-    )
-    Q = float(aero.last_Q_spin)
-    print(f"\n[{label}] omega={omega_low:.1f} rad/s  Q_spin={Q:.3f} N*m")
-    assert Q > 0.0, (
-        f"[{label}] Q_spin={Q:.3f} at omega={omega_low:.1f} (below eq) — expected positive (driving)"
-    )

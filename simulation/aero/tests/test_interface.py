@@ -151,14 +151,13 @@ def test_AeroResult_M_orbital_plus_M_spin_equals_total_moment(AeroClass):
 # ────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])
-def test_last_Q_spin_attribute_exists_and_is_float(AeroClass):
-    """last_Q_spin must exist and be a Python float after compute_forces."""
+def test_result_Q_spin_is_float(AeroClass):
+    """result.Q_spin must be a Python float after compute_forces."""
     rotor = rd.default()
     model = AeroClass(rotor)
-    model.compute_forces(**HOVER_KWARGS)
-    assert hasattr(model, "last_Q_spin"), f"{AeroClass.__name__}: missing last_Q_spin"
-    assert isinstance(model.last_Q_spin, float), \
-        f"{AeroClass.__name__}: last_Q_spin is {type(model.last_Q_spin)}, expected float"
+    result = model.compute_forces(**HOVER_KWARGS)
+    assert isinstance(result.Q_spin, float), \
+        f"{AeroClass.__name__}: result.Q_spin is {type(result.Q_spin)}, expected float"
 
 
 @pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])

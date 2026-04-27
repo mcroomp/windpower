@@ -140,6 +140,10 @@ class UnifiedGroundController:
         return self._winch.speed_ms
 
     @property
+    def net_energy_j(self) -> float:
+        return self._winch.net_energy_j
+
+    @property
     def last_cmd(self) -> TensionCommand | None:
         return self._last_cmd
 

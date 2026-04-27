@@ -617,27 +617,6 @@ def pump_cycle_report(csv_path: str) -> None:
                   f"{drdt_s:>6}  {el_s:>5.1f}  {el_e:>5.1f}  {tgt_s:>7}  {err_s:>7}  {note}")
     print()
 
-    # ── Daisy-chain elevation correction ──────────────────────────────────────
-    has_correction = any(
-        r.el_correction_rad != 0.0
-        for grp in pruned_groups.values() for r in grp
-    )
-    if has_correction:
-        print(f"  DAISY-CHAIN ELEVATION CORRECTION (el_corr_ki > 0)")
-        print(f"  {'phase':>10}  {'mean_deg':>9}  {'max_deg':>8}  note")
-        print(f"  {'-'*10}  {'-'*9}  {'-'*8}  {'-'*30}")
-        for ph in ("reel-out", "reel-in"):
-            corrs = []
-            for cy in range(1, n_cycles + 1):
-                corrs.extend([math.degrees(r.el_correction_rad)
-                               for r in pruned_groups.get((cy, ph), [])])
-            if not corrs:
-                continue
-            corr_arr = np.array(corrs)
-            note = "tilting down to reduce tension" if corr_arr.mean() < -0.5 else ""
-            print(f"  {ph:>10}  {corr_arr.mean():>+9.2f}  {corr_arr.min():>+8.2f}  {note}")
-        print()
-        print()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

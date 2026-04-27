@@ -26,9 +26,8 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 import rotor_definition as rd
 from winch          import WinchController
 from simtest_ic     import load_ic
-from simtest_log    import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner, LuaAP, tel_every_from_env
-from telemetry_csv  import TelRow, write_csv
+from simtest_log    import BadEventLog
+from simtest_runner import PhysicsRunner, LuaAP
 from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes    import MODE_PUMPING
@@ -36,7 +35,6 @@ from unified_ground import UnifiedGroundController, LuaComms
 
 _IC    = load_ic()
 _ROTOR = rd.default()
-_log   = SimtestLog(__file__)
 
 # ── Simulation constants ──────────────────────────────────────────────────────
 DT         = 1.0 / 400.0
@@ -71,7 +69,7 @@ T_REEL_IN_MAX  = 120.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.2
 
 
-def _run_pumping() -> dict:
+def _run_pumping(log, aero_model: str = "skewed_wake") -> dict:
     # ── Lua AP ───────────────────────────────────────────────────────────────
     sim = RawesLua(mode=MODE_PUMPING)
     sim.armed        = True
@@ -83,7 +81,7 @@ def _run_pumping() -> dict:
     sim.gyro         = [0.0, 0.0, 0.0]
 
     # ── Physics ───────────────────────────────────────────────────────────────
-    runner = PhysicsRunner(_ROTOR, _IC, WIND)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
 
     # ── Ground: UnifiedGroundController with LuaComms ─────────────────────────
     ground = PumpingGroundController(
@@ -115,17 +113,28 @@ def _run_pumping() -> dict:
         dt_plan = DT_PLANNER,
     )
 
-    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad)
+    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua.tel_fn = lambda r, sr: dict(
+        body_z_eq                    = None,
+        phase                        = phase_label,
+        winch_speed_ms               = ground_ctrl.winch_speed_ms,
+        tension_setpoint             = sim.fns.ten_setpoint(),
+        collective_from_tension_ctrl = sim.fns.col_held(),
+        vib_corr                     = sim.fns.vib_corr_last(),
+        ten_pi_integral              = sim.fns.col_i_ten(),
+        elevation_rad                = 0.0,
+        el_correction_rad            = 0.0,
+        coll_saturated               = 0,
+        comms_ok                     = 1,
+    )
 
-    events   = BadEventLog()
-    telemetry = []
-    tel_every = tel_every_from_env(DT)
+    events         = BadEventLog()
+    cycle_net_start = [0.0] * N_CYCLES
+    prev_cycle_idx  = -1
 
-    cycle_energy_out = [0.0] * N_CYCLES
-    cycle_energy_in  = [0.0] * N_CYCLES
-
-    max_steps = int(T_END_SIM / DT) + 1
-    t_sim = 0.0
+    max_steps      = int(T_END_SIM / DT) + 1
+    t_sim          = 0.0
+    prev_accel_ned = None   # one-step lagged IMU specific force for vibration damper
 
     for i in range(max_steps):
         t_sim = i * DT
@@ -141,23 +150,20 @@ def _run_pumping() -> dict:
 
         # ── Lua 50 Hz ─────────────────────────────────────────────────────────
         if i % LUA_EVERY == 0:
-            lua.tick(t_sim, runner)
+            lua.tick(t_sim, runner, accel_ned=prev_accel_ned)
 
         # ── Inner rate loop 400 Hz ────────────────────────────────────────────
         omega_body    = runner.omega_body
         omega_body[2] = 0.0
         sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
                          rest_length=ground_ctrl.rest_length)
-
-        # ── Energy accounting ─────────────────────────────────────────────────
-        speed_now = ground_ctrl.winch_speed_ms
-        if speed_now > 0.0:
-            cycle_energy_out[cycle_idx] += runner.tension_now * speed_now * DT
-        elif speed_now < 0.0:
-            cycle_energy_in[cycle_idx]  += runner.tension_now * abs(speed_now) * DT
+        prev_accel_ned = sr.get("accel_specific_world")
 
         # ── Bad events ────────────────────────────────────────────────────────
         phase_label = f"cycle{cycle_idx+1}_{ground_ctrl.phase}"
+        if cycle_idx != prev_cycle_idx:
+            cycle_net_start[cycle_idx] = ground_ctrl.net_energy_j
+            prev_cycle_idx = cycle_idx
         if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
@@ -168,15 +174,10 @@ def _run_pumping() -> dict:
             events.record("floor_hit", t_sim, phase_label, altitude)
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────────
-        if i % tel_every == 0:
-            telemetry.append(TelRow.from_physics(
-                runner, sr, lua.col_rad, WIND,
-                body_z_eq = None,
-                phase     = phase_label,
-            ))
+        lua.log(runner, sr)
 
-    net_per_cycle = [cycle_energy_out[k] - cycle_energy_in[k] for k in range(N_CYCLES)]
-    total_net     = sum(net_per_cycle)
+    net_per_cycle = [ground_ctrl.net_energy_j - cycle_net_start[k] for k in range(N_CYCLES)]
+    total_net     = ground_ctrl.net_energy_j
 
     cycle_summary = "  ".join(
         f"c{k+1}={net_per_cycle[k]:.0f}J" for k in range(N_CYCLES)
@@ -191,22 +192,18 @@ def _run_pumping() -> dict:
     for level, msg in lua_msgs[:10]:
         parts.append(f"  [GCS {level}] {msg}")
 
-    if telemetry:
-        write_csv(telemetry, _log.log_dir / "telemetry.csv")
-    _log.write(["  ".join(p for p in parts if p)], "lua_pumping_unified")
+    lua.write_telemetry(log.log_dir / "telemetry.csv")
+    log.write(["  ".join(p for p in parts if p)], "lua_pumping_unified")
 
     return dict(
-        t_end            = t_sim,
-        cycle_energy_out = cycle_energy_out,
-        cycle_energy_in  = cycle_energy_in,
-        net_per_cycle    = net_per_cycle,
-        total_net        = total_net,
-        events           = events,
-        floor_hits       = events.count("floor_hit"),
-        slack_events     = events.count("slack"),
-        tension_spikes   = events.count("tension_spike"),
-        messages         = lua_msgs,
-        telemetry        = telemetry,
+        t_end         = t_sim,
+        net_per_cycle = net_per_cycle,
+        total_net     = total_net,
+        events        = events,
+        floor_hits    = events.count("floor_hit"),
+        slack_events  = events.count("slack"),
+        tension_spikes= events.count("tension_spike"),
+        messages      = lua_msgs,
     )
 
 
@@ -253,9 +250,24 @@ def test_lua_pumping_constants():
     assert float(sim.fns.ten_setpoint()) == pytest.approx(300.0, rel=1e-3)
 
 
-def test_lua_pumping_unified():
+def test_lua_pumping_unified(simtest_log):
     """rawes.lua mode=5 via UnifiedGroundController/LuaComms: no bad events, net > 0."""
-    r = _run_pumping()
+    r = _run_pumping(simtest_log)
+    failures = []
+    if r["events"]:
+        failures.append(r["events"].summary())
+    for k, net in enumerate(r["net_per_cycle"]):
+        if net <= 0:
+            failures.append(f"cycle {k+1} net={net:.1f}J <= 0")
+    if r["total_net"] <= 0:
+        failures.append(f"total_net={r['total_net']:.1f}J <= 0")
+    assert not failures, "\n  ".join(failures)
+
+
+def test_lua_pumping_unified_peters_he(simtest_log):
+    """rawes.lua mode=5 with Peters-He dynamic inflow: vibration damper suppresses
+    tether spring resonance (~5 Hz) that the skewed-wake model does not excite."""
+    r = _run_pumping(simtest_log, aero_model="peters_he")
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())

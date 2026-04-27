@@ -82,10 +82,11 @@ local T_PUMP_TRANSITION =  3.7    -- ramp window used for logging/diagnostics [s
 -- TensionPI for pumping collective.
 -- Setpoint and measured tension come from ground via RAWES_TSP / RAWES_TEN
 -- at ~10 Hz (UnifiedGroundController).  Mirrors Python TensionApController defaults.
-local KP_TEN      = 2e-4    -- rad/N   (10 Hz-tuned proportional gain)
-local KI_TEN      = 1e-3    -- rad/(N·s)  (10 Hz-tuned integral gain)
-local COL_MAX_TEN = 0.0     -- TensionPI collective ceiling [rad]
-local DT_CMD      = 0.1     -- command period [s] used for integrator step
+local KP_TEN      = 2e-4    -- rad/N        (10 Hz-tuned proportional gain)
+local KI_TEN      = 1e-3    -- rad/(N·s)    (10 Hz-tuned integral gain)
+local KD_TEN      = 0.0     -- rad·s/N      (derivative gain; try ~2e-5 to damp tension oscillations)
+local COL_MAX_TEN = 0.10    -- TensionPI collective ceiling [rad]
+local DT_CMD      = 0.1     -- command period [s] used for integrator/derivative step
 
 -- ── VZ collective controller (steady mode) ───────────────────────────────────
 
@@ -125,13 +126,41 @@ local _prev_ch2 = 1500
 local _last_col_rad = COL_CRUISE_FLIGHT_RAD
 local _col_i        = COL_CRUISE_FLIGHT_RAD
 
--- TensionPI state for pumping mode.
+-- TensionPID state for pumping mode.
 -- Setpoint arrives from ground via RAWES_TSP; measured via RAWES_TEN.
 -- Integrator warm-starts so initial output = COL_REEL_OUT at zero error.
-local _col_i_ten    = COL_REEL_OUT / math.max(KI_TEN, 1e-12)
-local _col_held     = COL_REEL_OUT   -- collective held between 10 Hz commands
+local _col_i_ten       = COL_REEL_OUT / math.max(KI_TEN, 1e-12)
+local _col_d_prev_err  = 0.0         -- previous error for derivative term
+local _col_held        = COL_REEL_OUT   -- collective held between 10 Hz commands
 local _ten_setpoint = 300.0          -- tension setpoint [N]; updated from RAWES_TSP
 local _ten_sp_fresh = false          -- true when a new RAWES_TEN_SP has arrived
+local _vib_corr_last   = 0.0         -- last vibration damper correction [rad]
+
+-- Accelerometer-based tether spring-mode vibration damper.
+-- Passes the 1.5-10 Hz resonance band (above altitude controller, below Nyquist),
+-- estimates oscillatory hub velocity, opposes it via collective.
+-- Works at 400 Hz with on-board IMU only -- no ground comms dependency.
+local K_VIB        = 0.008   -- rad / (m/s) velocity feedback gain
+local VIB_HP_TAU   = 1.0 / (2.0 * math.pi * 1.5)  -- 1/(2*pi*1.5 Hz)
+local VIB_VEL_TAU  = 0.5     -- leaky integrator time constant [s]
+local VIB_COL_MAX  = 0.04    -- max collective correction magnitude [rad]
+local _vib_acc_hp   = 0.0    -- HP filter state
+local _vib_acc_prev = 0.0    -- previous raw accel for HP derivative
+local _vib_vel_est  = 0.0    -- estimated oscillatory velocity [m/s]
+
+local function vib_damper_step(accel_z, dt_s)
+    -- First-order high-pass: y[n] = alpha*(y[n-1] + x[n] - x[n-1])
+    local alpha = VIB_HP_TAU / (VIB_HP_TAU + dt_s)
+    _vib_acc_hp   = alpha * (_vib_acc_hp + accel_z - _vib_acc_prev)
+    _vib_acc_prev = accel_z
+    -- Leaky integrator: v[n] = exp(-dt/tau)*v[n-1] + dt*a_hp[n]
+    local leak = math.exp(-dt_s / VIB_VEL_TAU)
+    _vib_vel_est  = leak * _vib_vel_est + dt_s * _vib_acc_hp
+    local corr = -K_VIB * _vib_vel_est
+    if corr >  VIB_COL_MAX then corr =  VIB_COL_MAX end
+    if corr < -VIB_COL_MAX then corr = -VIB_COL_MAX end
+    return corr
+end
 
 -- Altitude hold state
 local _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
@@ -328,19 +357,27 @@ local function run_flight()
         if _ten_sp_fresh then
             _ten_sp_fresh = false
             local ten_err = _ten_setpoint - _tension_n
-            local raw_pre = KP_TEN * ten_err + KI_TEN * _col_i_ten
-            -- Conditional anti-windup (mirrors Python TensionPI)
+            local d_term  = KD_TEN * (ten_err - _col_d_prev_err) / DT_CMD
+            local raw_pre = KP_TEN * ten_err + KI_TEN * _col_i_ten + d_term
+            -- Conditional anti-windup (mirrors Python TensionPID)
             if not (raw_pre <= COL_MIN_RAD and ten_err < 0) then
                 if not (raw_pre >= COL_MAX_TEN and ten_err > 0) then
                     _col_i_ten = _col_i_ten + ten_err * DT_CMD
                 end
             end
-            local out = KP_TEN * ten_err + KI_TEN * _col_i_ten
+            _col_d_prev_err = ten_err
+            local out = KP_TEN * ten_err + KI_TEN * _col_i_ten + d_term
             if out > COL_MAX_TEN then out = COL_MAX_TEN end
             if out < COL_MIN_RAD then out = COL_MIN_RAD end
             _col_held = out
         end
         col_cmd = _col_held
+        -- Vibration damper: body-Z accel → HP filter → velocity estimate → collective
+        local imu_a = ahrs:get_accel()
+        if imu_a then
+            _vib_corr_last = vib_damper_step(imu_a:z(), dt)
+            col_cmd = col_cmd + _vib_corr_last
+        end
     else
         -- Steady mode: VZ PI altitude hold (vz setpoint = 0)
         local vz_actual = 0.0

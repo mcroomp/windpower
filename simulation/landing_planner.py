@@ -6,14 +6,22 @@ Unified architecture (mirrors pumping_planner.py):
   WinchController (400 Hz) set_target at 10 Hz from LandingGroundController.
 
 Phase sequence (LandingGroundController):
-  reel_in     -- body_z slerps from IC orientation to xi_reel_in_deg.
-                 Winch holds at IC rest_length.  AP VZ PI holds altitude (vz_sp=0).
-                 Exits after body_z slew time + settle margin.
+  reel_in      -- winch reels in from IC length to target_length_m.  body_z slerps
+                  to [0,0,-1] simultaneously, shedding tension so the winch can pull.
+                  Hub may rise in altitude — VZ PI vz_sp=0 is a soft hold.
+                  Exits when rest_length <= target_length_m.
 
-  descent     -- body_z fixed at xi_reel_in; AP VZ PI descends at vz_sp=v_land;
-                 winch tension-PI reels in to min_tether_m.
+  get_vertical -- winch holds at target_length_m.  body_z slerps to [0,0,-1]
+                  (horizontal disk, xi=90 deg).  AP holds altitude (vz_sp=0).
+                  Requires Peters-He aero (SkewedWakeBEM invalid above xi~85 deg).
+                  Exits after slew time + settle.
 
-  final_drop  -- collective=0; winch holds; hub drops onto catch pad.
+  descent      -- horizontal disk fixed.  Winch tension-PI reels in to min_tether_m,
+                  pulling hub down.  AP VZ PI descends at vz_sp=v_land.
+                  Exits when rest_length <= min_tether_m.
+
+  flare        -- winch holds.  AP VZ PI holds vz_sp=0, seeded at col_descent +
+                  col_flare_delta to arrest descent.  Terminal phase.
 """
 from __future__ import annotations
 
@@ -24,7 +32,7 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# LandingCommand — ground → AP at 10 Hz (new unified protocol)
+# LandingCommand — ground → AP at 10 Hz
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -32,12 +40,10 @@ class LandingCommand:
     """
     Command sent from LandingGroundController to LandingApController at 10 Hz.
 
-    phase           : "reel_in" | "descent" | "final_drop"
+    phase           : "reel_in" | "get_vertical" | "descent" | "flare"
     body_z_target   : target disk orientation (NED unit vector); AP slerps toward it
     vz_setpoint_ms  : NED descent rate setpoint [m/s], positive = downward
-                       0 during reel_in (hold altitude), v_land during descent
-    col_cruise_rad  : VZ PI integrator seed [rad]
-                       IC collective during reel_in; col_min_reel_in during descent
+    col_cruise_rad  : VZ PI integrator seed [rad] — applied on phase entry
     """
     phase:          str
     body_z_target:  np.ndarray
@@ -46,72 +52,78 @@ class LandingCommand:
 
 
 # ---------------------------------------------------------------------------
-# LandingGroundController — 10 Hz ground side (new unified architecture)
+# LandingGroundController — 10 Hz ground side
 # ---------------------------------------------------------------------------
 
 class LandingGroundController:
     """
     Ground-side landing controller (10 Hz).
 
-    Manages the reel_in → descent → final_drop phase sequence and emits
-    LandingCommand for LandingApController.  Also exposes winch_target_length
-    and winch_target_tension for WinchController.set_target().
+    Phase sequence: reel_in → get_vertical → descent → flare.
 
     Parameters
     ----------
-    initial_body_z   : IC body_z NED unit vector (xi ~ 30 deg at steady flight)
-    xi_reel_in_deg   : target disk tilt; fixed body_z orientation during descent [deg]
-    slew_rate_rad_s  : body_z slew rate [rad/s] — used to compute reel_in duration
-    col_reel_in_rad  : VZ PI seed collective during reel_in [rad]
-    col_cruise_rad   : VZ PI seed collective during descent [rad]
+    initial_body_z   : IC body_z NED unit vector (~30 deg elevation at steady flight)
+    target_length_m  : tether rest length at end of reel_in [m]
+    slew_rate_rad_s  : body_z slew rate [rad/s] — used to compute get_vertical duration
+    col_reel_in_rad  : VZ PI seed during reel_in [rad]
+    col_vertical_rad : VZ PI seed during get_vertical [rad]
+    col_descent_rad  : VZ PI seed during descent [rad]
+    col_flare_delta  : collective bump above col_descent_rad at flare entry [rad]
+    tension_reel_in  : winch tension target during reel_in [N]
     tension_descent  : winch tension target during descent [N]
-                       set so that kp*(tension_descent - natural_tension) ≈ v_land
-    v_land           : VZ descent rate setpoint [m/s]
-    min_tether_m     : rest_length threshold for descent → final_drop [m]
+                       kp*(tension_descent - natural_tension) ≈ v_land
+    v_land           : NED descent rate setpoint during descent [m/s]
+    min_tether_m     : rest_length threshold for descent → flare [m]
     t_reel_in_max    : safety timeout for reel_in phase [s]
+    t_vertical_max   : safety timeout for get_vertical phase [s]
     t_descent_max    : safety timeout for descent phase [s]
     """
 
+    _BZ_VERTICAL = np.array([0.0, 0.0, -1.0])   # disk horizontal, pointing up in NED
+
     def __init__(
         self,
-        initial_body_z:  np.ndarray,
-        xi_reel_in_deg:  float = 80.0,
-        slew_rate_rad_s: float = 0.40,
-        col_reel_in_rad: float = 0.079,
-        col_cruise_rad:  float = 0.079,
-        tension_descent: float = 180.0,
-        v_land:          float = 0.5,
-        min_tether_m:    float = 2.0,
-        t_reel_in_max:   float = 120.0,
-        t_descent_max:   float = 600.0,
+        initial_body_z:   np.ndarray,
+        target_length_m:  float = 50.0,
+        slew_rate_rad_s:  float = 0.40,
+        col_reel_in_rad:  float = -0.23,
+        col_vertical_rad: float = -0.23,
+        col_descent_rad:  float = -0.23,
+        col_flare_delta:  float = 0.05,
+        tension_reel_in:  float = 300.0,
+        tension_descent:  float = 100.0,
+        v_land:           float = 1.0,
+        min_tether_m:     float = 5.0,
+        t_reel_in_max:    float = 120.0,
+        t_vertical_max:   float = 30.0,
+        t_descent_max:    float = 300.0,
     ) -> None:
         bz_ic = np.asarray(initial_body_z, dtype=float)
         bz_ic = bz_ic / np.linalg.norm(bz_ic)
 
-        self._col_reel_in   = float(col_reel_in_rad)
-        self._col_cruise    = float(col_cruise_rad)
-        self._tension_desc  = float(tension_descent)
-        self._v_land        = float(v_land)
-        self._min_tether    = float(min_tether_m)
-        self._t_reel_max    = float(t_reel_in_max)
-        self._t_desc_max    = float(t_descent_max)
+        self._bz_ic          = bz_ic.copy()
+        self._target_len     = float(target_length_m)
+        self._col_reel_in    = float(col_reel_in_rad)
+        self._col_vertical   = float(col_vertical_rad)
+        self._col_descent    = float(col_descent_rad)
+        self._col_flare      = float(col_descent_rad) + float(col_flare_delta)
+        self._tension_ri     = float(tension_reel_in)
+        self._tension_desc   = float(tension_descent)
+        self._v_land         = float(v_land)
+        self._min_tether     = float(min_tether_m)
+        self._t_reel_max     = float(t_reel_in_max)
+        self._t_vertical_max = float(t_vertical_max)
+        self._t_desc_max     = float(t_descent_max)
 
-        # Body_z target at xi_reel_in, same azimuth as IC
-        xi_rad    = math.radians(xi_reel_in_deg)
-        horiz     = np.array([bz_ic[0], bz_ic[1], 0.0])
-        horiz_len = float(np.linalg.norm(horiz))
-        az_unit   = horiz / horiz_len if horiz_len > 1e-6 else np.array([0.0, 1.0, 0.0])
-        bz_tgt    = az_unit * math.cos(xi_rad) + np.array([0.0, 0.0, -math.sin(xi_rad)])
-        self._bz_target = bz_tgt / np.linalg.norm(bz_tgt)
+        # get_vertical duration: slew from IC xi to 90 deg + 2 s settle
+        xi_ic_rad         = float(np.arcsin(np.clip(-bz_ic[2], -1.0, 1.0)))
+        angle_to_vertical = abs(math.radians(90.0) - xi_ic_rad)
+        self._t_vertical  = angle_to_vertical / max(slew_rate_rad_s, 1e-6) + 2.0
 
-        # Reel-in duration = time to slew from IC xi to xi_reel_in + 2 s settle
-        xi_ic = float(np.degrees(np.arcsin(max(-1.0, min(1.0, float(-bz_ic[2]))))))
-        self._t_reel_in = abs(math.radians(xi_reel_in_deg - xi_ic)) / slew_rate_rad_s + 2.0
-
-        self._phase         = "reel_in"
-        self._phase_start   = 0.0
-        self._start_length  = 0.0
-        self._initialized   = False
+        self._phase        = "reel_in"
+        self._phase_start  = 0.0
+        self._initialized  = False
 
         self._winch_tgt_len = 0.0
         self._winch_tgt_ten = 0.0
@@ -141,9 +153,8 @@ class LandingGroundController:
     ) -> LandingCommand:
         """10 Hz step. Returns LandingCommand for LandingApController."""
         if not self._initialized:
-            self._initialized  = True
-            self._start_length = rest_length
-            self._phase_start  = t_sim
+            self._initialized = True
+            self._phase_start = t_sim
 
         prev_phase = self._phase
         self._advance_phase(t_sim, rest_length)
@@ -151,24 +162,33 @@ class LandingGroundController:
             self._phase_start = t_sim
 
         if self._phase == "reel_in":
-            self._winch_tgt_len = self._start_length   # hold
-            self._winch_tgt_ten = self._tension_desc   # irrelevant (remaining≈0)
+            self._winch_tgt_len = self._target_len
+            self._winch_tgt_ten = self._tension_ri
+            bz_tgt              = self._BZ_VERTICAL   # tilt toward horizontal to shed tension
             col_cruise          = self._col_reel_in
+            vz_sp               = 0.0
+        elif self._phase == "get_vertical":
+            self._winch_tgt_len = self._target_len
+            self._winch_tgt_ten = self._tension_ri      # irrelevant (no motion)
+            bz_tgt              = self._BZ_VERTICAL
+            col_cruise          = self._col_vertical
             vz_sp               = 0.0
         elif self._phase == "descent":
             self._winch_tgt_len = self._min_tether
             self._winch_tgt_ten = self._tension_desc
-            col_cruise          = self._col_cruise
+            bz_tgt              = self._BZ_VERTICAL
+            col_cruise          = self._col_descent
             vz_sp               = self._v_land
-        else:  # final_drop
-            self._winch_tgt_len = rest_length          # hold wherever we are
+        else:  # flare
+            self._winch_tgt_len = rest_length           # hold wherever we are
             self._winch_tgt_ten = self._tension_desc
-            col_cruise          = self._col_cruise
+            bz_tgt              = self._BZ_VERTICAL
+            col_cruise          = self._col_flare
             vz_sp               = 0.0
 
         return LandingCommand(
             phase          = self._phase,
-            body_z_target  = self._bz_target.copy(),
+            body_z_target  = bz_tgt.copy(),
             vz_setpoint_ms = vz_sp,
             col_cruise_rad = col_cruise,
         )
@@ -178,9 +198,12 @@ class LandingGroundController:
     def _advance_phase(self, t_sim: float, rest_length: float) -> None:
         t_in = t_sim - self._phase_start
         if self._phase == "reel_in":
-            if t_in >= self._t_reel_in or t_in >= self._t_reel_max:
+            if rest_length <= self._target_len + 0.5 or t_in >= self._t_reel_max:
+                self._phase = "get_vertical"
+        elif self._phase == "get_vertical":
+            if t_in >= self._t_vertical or t_in >= self._t_vertical_max:
                 self._phase = "descent"
         elif self._phase == "descent":
-            if rest_length <= self._min_tether + 0.05 or t_in >= self._t_desc_max:
-                self._phase = "final_drop"
-        # final_drop: terminal phase
+            if rest_length <= self._min_tether + 0.1 or t_in >= self._t_desc_max:
+                self._phase = "flare"
+        # flare: terminal phase

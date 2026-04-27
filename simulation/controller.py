@@ -439,44 +439,37 @@ class PhysicalHoldController:
 
 class TensionPI:
     """
-    PI controller: adjusts collective_rad to maintain requested tether tension.
+    PID controller: adjusts collective_rad to maintain requested tether tension.
 
     Owned by the Trajectory Planner (ground station) — raws_mode.md §3.2.
     Runs on fresh load cell data at planner rate (~10 Hz or 400 Hz in simulation).
     Anti-windup clamps the integrator so output stays within [coll_min, coll_max].
 
-    Defaults are tuned for the beaupoil_2026 rotor (4-blade, 2 m, SG6042):
-      coll_min = -0.28 rad (−16°) — safe floor for SkewedWakeBEM (zero-thrust ≈ -0.34 rad)
-      coll_max =  0.00 rad (  0°) — neutral; positive collective gives >1 kN thrust
-      warm_coll_rad = −20° — pre-seeds the integrator so the first output is near
-          the reel-out equilibrium collective instead of clamping at 0° and spiking
-          to ~1718 N tether tension at t=0.
+    kd = 0.0 by default (pure PI); try ~2e-5 to damp tension oscillations.
+    warm_coll_rad = None cold-starts the integrator at zero; pass the equilibrium
+    collective to pre-seed the integrator and avoid a tension spike at t=0.
     """
 
-    # Physical limits for the beaupoil_2026 rotor (SkewedWakeBEM)
-    # Zero-thrust collective ≈ -0.34 rad; at -0.44 rad thrust = -472 N (downforce → crash).
-    # Safe floor is -0.28 rad (≈ -16°) where thrust ≈ 130 N (hub supported against gravity).
-    COLL_MIN_RAD: float = -0.28    # −16°
-    COLL_MAX_RAD: float =  0.00    #   0°
-    WARM_COLL_RAD: float = -0.20   # ≈ −11°  (initial integrator seed near reel-out equilibrium)
-
-    def __init__(self, setpoint_n: float, kp: float = 5e-4, ki: float = 1e-4,
-                 coll_min: float = COLL_MIN_RAD,
-                 coll_max: float = COLL_MAX_RAD,
-                 warm_coll_rad: "float | None" = WARM_COLL_RAD):
+    def __init__(self, setpoint_n: float, kp: float, ki: float,
+                 coll_min: float, coll_max: float,
+                 warm_coll_rad: "float | None",
+                 kd: float = 0.0):
         self.setpoint  = float(setpoint_n)
         self.kp        = float(kp)
         self.ki        = float(ki)
+        self.kd        = float(kd)
         self.coll_min  = float(coll_min)
         self.coll_max  = float(coll_max)
         if warm_coll_rad is not None:
-            self._integral = float(warm_coll_rad) / max(self.ki, 1e-12)
+            self._integral  = float(warm_coll_rad) / max(self.ki, 1e-12)
         else:
-            self._integral = 0.0
+            self._integral  = 0.0
+        self._prev_error = 0.0
 
     def update(self, tension_actual: float, dt: float) -> float:
         error = self.setpoint - tension_actual
-        raw_before = self.kp * error + self.ki * self._integral
+        d_term = self.kd * (error - self._prev_error) / max(dt, 1e-6)
+        raw_before = self.kp * error + self.ki * self._integral + d_term
 
         # Conditional anti-windup: only integrate when output is not already
         # saturated in the same direction as the error.  This prevents the
@@ -486,7 +479,8 @@ class TensionPI:
             if not (raw_before >= self.coll_max and error > 0):
                 self._integral += error * dt
 
-        raw = self.kp * error + self.ki * self._integral
+        self._prev_error = error
+        raw = self.kp * error + self.ki * self._integral + d_term
         return float(np.clip(raw, self.coll_min, self.coll_max))
 
 
@@ -598,13 +592,13 @@ class AltitudeHoldController:
     """
 
     def __init__(self, initial_el_rad: float,
-                 slew_rate_rad_s: float = 0.40) -> None:
+                 slew_rate_rad_s: float) -> None:
         self._el       = float(initial_el_rad)
         self._slew     = float(slew_rate_rad_s)
 
     @classmethod
     def from_pos(cls, pos: np.ndarray,
-                 slew_rate_rad_s: float = 0.40) -> "AltitudeHoldController":
+                 slew_rate_rad_s: float) -> "AltitudeHoldController":
         """Initialise elevation from the hub's starting NED position."""
         tlen = float(np.linalg.norm(pos))
         el   = float(np.arcsin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 0.1)))))
@@ -663,9 +657,9 @@ class ElevationHoldController:
     def __init__(
         self,
         initial_el_rad : float,
-        slew_rate_rad_s: float = 0.40,
-        mass_kg        : float = 5.0,
-        kp_outer       : float = DEFAULT_KP_OUTER,
+        slew_rate_rad_s: float,
+        mass_kg        : float,
+        kp_outer       : float,
     ) -> None:
         self._el       = float(initial_el_rad)
         self._slew     = float(slew_rate_rad_s)
@@ -676,9 +670,9 @@ class ElevationHoldController:
     def from_pos(
         cls,
         pos            : np.ndarray,
-        slew_rate_rad_s: float = 0.40,
-        mass_kg        : float = 5.0,
-        kp_outer       : float = DEFAULT_KP_OUTER,
+        slew_rate_rad_s: float,
+        mass_kg        : float,
+        kp_outer       : float,
     ) -> "ElevationHoldController":
         tlen = float(np.linalg.norm(pos))
         el   = float(np.arcsin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 0.1)))))
@@ -881,11 +875,11 @@ class RatePID:
 
     def __init__(
         self,
-        kp:         float = DEFAULT_KP,
-        ki:         float = 0.0,
-        kd:         float = 0.0,
-        imax:       float = 0.0,
-        output_max: float = 1.0,
+        kp:         float,
+        ki:         float,
+        kd:         float,
+        imax:       float,
+        output_max: float,
     ):
         self.kp         = float(kp)
         self.ki         = float(ki)
@@ -955,11 +949,11 @@ class AcroControllerSitl:
     """
 
     def __init__(self, rotor,
-                 col_min_rad: float = -0.28,
-                 col_max_rad: float =  0.10,
+                 col_min_rad: float,
+                 col_max_rad: float,
                  kp: float = RatePID.DEFAULT_KP) -> None:
-        self._pid_lon = RatePID(kp=kp)
-        self._pid_lat = RatePID(kp=kp)
+        self._pid_lon = RatePID(kp=kp, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
+        self._pid_lat = RatePID(kp=kp, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
         self._servo   = SwashplateServoModel.from_rotor(
             rotor, col_min_rad=col_min_rad, col_max_rad=col_max_rad)
 
@@ -1157,3 +1151,91 @@ def make_hold_controller(
     anchor_ned : tether anchor in NED [m] relative to LOCAL_POSITION_NED origin.
     """
     return PhysicalHoldController(anchor_ned)
+
+
+class AccelVibrationDamper:
+    """
+    Accelerometer-based tether spring-mode vibration damper.
+
+    Uses body-Z specific force (the dominant axis of tether spring oscillation)
+    to estimate oscillatory hub velocity along the disk-normal / tether direction,
+    then feeds back a collective correction opposing that velocity.
+
+    Works independently of ground comms — only requires IMU data, which is
+    available at AP sample rate regardless of MAVLink state.
+
+    Design
+    ------
+    1. High-pass filter body-Z acceleration to remove DC (gravity projection
+       on body-Z changes slowly with attitude; the HP removes it cleanly).
+    2. Leaky-integrate the HP-filtered signal to estimate oscillatory velocity.
+       The leak term prevents drift from accumulating over long segments.
+    3. Return -k_vib * vel_est, clamped to ±col_damp_max.
+
+    The sign: body-Z points along disk normal.  When the tether stretches
+    (tension spike), the hub accelerates toward the anchor → body-Z accel
+    becomes more negative.  The HP+integrate gives negative velocity →
+    correction is positive (more collective) → pushes hub back = damping.
+
+    Frequency range
+    ---------------
+    Tether spring-mass resonance: f = sqrt(EA / (m * L)) / (2π)
+    With EA=281 kN, m=5 kg, L=50–200 m → f ≈ 3–8 Hz.
+
+    Default hp_freq_hz=1.5 passes this band while blocking attitude-change
+    contributions (bandwidth ~0.1–0.5 Hz) and high-frequency noise above ~25 Hz
+    (where the leaky integrator provides natural roll-off).
+
+    Parameters
+    ----------
+    k_vib        : collective correction per m/s of estimated velocity [rad/(m/s)]
+    hp_freq_hz   : high-pass filter cutoff [Hz]
+    vel_tau_s    : leaky integrator decay time constant [s]
+    col_damp_max : clamp on correction magnitude [rad]
+    """
+
+    def __init__(
+        self,
+        k_vib:        float = 0.008,
+        hp_freq_hz:   float = 1.5,
+        vel_tau_s:    float = 0.5,
+        col_damp_max: float = 0.04,
+    ) -> None:
+        self._k_vib        = float(k_vib)
+        self._hp_freq      = float(hp_freq_hz)
+        self._vel_tau      = float(vel_tau_s)
+        self._col_damp_max = float(col_damp_max)
+        self._acc_hp   = 0.0
+        self._acc_prev = 0.0
+        self._vel_est  = 0.0
+
+    def reset(self) -> None:
+        self._acc_hp   = 0.0
+        self._acc_prev = 0.0
+        self._vel_est  = 0.0
+
+    def step(self, accel_body_z: float, dt: float) -> float:
+        """
+        Update with one body-Z specific force sample.
+
+        Parameters
+        ----------
+        accel_body_z : body-Z specific force [m/s²]  (R.T @ accel_specific_world)[2]
+        dt           : timestep [s]
+
+        Returns
+        -------
+        Collective correction [rad], clamped to ±col_damp_max.
+        """
+        # First-order high-pass: y[n] = alpha*(y[n-1] + x[n] - x[n-1])
+        tau_hp   = 1.0 / (2.0 * math.pi * self._hp_freq)
+        alpha_hp = tau_hp / (tau_hp + dt)
+        self._acc_hp   = alpha_hp * (self._acc_hp + accel_body_z - self._acc_prev)
+        self._acc_prev = accel_body_z
+
+        # Leaky integrator: v[n] = exp(-dt/tau) * v[n-1] + dt * a_hp[n]
+        leak          = math.exp(-dt / max(self._vel_tau, 1e-6))
+        self._vel_est = leak * self._vel_est + dt * self._acc_hp
+
+        correction = -self._k_vib * self._vel_est
+        return float(max(-self._col_damp_max, min(self._col_damp_max, correction)))

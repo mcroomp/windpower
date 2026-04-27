@@ -322,7 +322,6 @@ class SkewedWakeBEMJit(SkewedWakeBEM):
         self.last_v_i       = v_i0
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        self.last_Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs ** 2)
         self.last_M_spin    = M_spin_world.copy()
         self.last_M_cyc     = M_cyc_world.copy()
         self.last_H_force   = float(np.linalg.norm(F_total - self.last_T * disk_normal))
@@ -333,6 +332,6 @@ class SkewedWakeBEMJit(SkewedWakeBEM):
         return AeroResult(
             F_world   = F_total.copy(),
             M_orbital = M_cyc_world.copy(),
-            Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs ** 2),
+            Q_spin    = Q_spin_scalar,
             M_spin    = M_spin_world.copy(),
         )

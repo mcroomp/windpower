@@ -32,159 +32,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
-from types import SimpleNamespace
-
 import mediator as _mediator_module
-from aero          import create_aero
 import rotor_definition as _rd
-from controller    import ElevationHoldController, TensionPI
-from frames        import build_orb_frame
-from simtest_runner import PhysicsRunner
-from simtest_log   import SimtestLog
-from telemetry_csv import TelRow, write_csv
+from simtest_runner import PhysicsRunner, PythonAP
+from ap_controller import TensionApController
+from pumping_planner import TensionCommand
+from simtest_ic import load_ic
 
 TetherModel = _mediator_module.TetherModel
-_log = SimtestLog(__file__)
 
 # Load rotor definition — single source of truth for all physical constants.
 _ROTOR = _rd.default()
 _DYN_KW = _ROTOR.dynamics_kwargs()   # mass, I_body, I_spin
 
 # Design tether equilibrium orientation (from beaupoil_2026.yaml) in NED
-_BODY_Z_DESIGN = np.array([0.305391, 0.851018, -0.427206])  # NED: T @ ENU
-_BODY_Z_DESIGN.flags.writeable = False
-_T_AERO_OFFSET = 45.0   # s — aero ramp already done
-
 # ── Physical constants (all from rotor definition) ────────────────────────────
-MASS          = _DYN_KW["mass"]           # kg
-G             = 9.81                       # m/s²
-WEIGHT        = MASS * G                   # N
+MASS   = _DYN_KW["mass"]
 WIND   = np.array([0.0, 10.0, 0.0])       # NED: 10 m/s East = Y axis
 WIND.flags.writeable = False
 
 DT     = 2.5e-3                            # s  (400 Hz)
 
-# ── Tether geometry ───────────────────────────────────────────────────────────
-ELEV_DEG = 30.0
-ELEV_RAD = math.radians(ELEV_DEG)
-L_TETHER = 100.0                     # m  tether length at this flight point
+
+_DT_CMD        = 0.1   # 10 Hz ground commands
+_PLANNER_EVERY = max(1, round(_DT_CMD / DT))                   # 40
+_AP_EVERY      = max(1, round(1.0 / (PythonAP.AP_HZ * DT)))   # 8
 
 
-def _equilibrium_setup():
+def _run_simulation(log, steps: int = 4000):
     """
-    Compute the self-consistent equilibrium for steady-state orbit with attitude control.
-
-    Uses the design tether orientation (body_z=[0.851, 0.305, 0.427]) and the
-    TensionPI minimum collective (COL_MIN_RAD) as the hold collective — matching
-    what the HoldPlanner outputs (thrust=0 → COL_MIN).
-
-    Iterates omega_spin to the autorotation equilibrium at this collective, then
-    computes the tether rest length from the expected thrust.
-
-    Returns (coll_rad, omega_spin_eq, R0, pos0, rest_length).
-    """
-    aero  = create_aero(_rd.default())
-    t_dir = _BODY_Z_DESIGN / np.linalg.norm(_BODY_Z_DESIGN)
-    R0    = build_orb_frame(t_dir)
-    pos0  = L_TETHER * t_dir   # hub at design orientation, radius = tether length
-
-    # Collective = TensionPI minimum (what HoldPlanner thrust=0 gives).
-    # The warmup physics is computed at this collective to find the unit-test equilibrium.
-    # The stack test uses coll_eq_target (below) for warm_coll_rad — giving TensionPI
-    # 0.10 rad of downward headroom during the pumping cycle.
-    coll_eq = TensionPI.COLL_MIN_RAD   # -0.28 rad (unit-test equilibrium)
-
-    # Stack-test target collective: 0.10 rad above col_min for PI headroom.
-    # At this collective, compute the equilibrium tether tension so the stack test
-    # can set tension_out=tension_eq_n.  The TensionPI then operates at coll_eq_target
-    # (above col_min) with room to decrease if tension rises.
-    coll_eq_target = TensionPI.COLL_MIN_RAD + 0.10   # -0.18 rad
-
-    # Converge omega_spin to autorotation equilibrium at this collective
-    k_drive = _ROTOR.K_drive_Nms_m
-    k_drag  = _ROTOR.K_drag_Nms2_rad2
-    omega_spin_eq = math.sqrt(k_drive * 10.0 / k_drag)   # initial estimate at 10 m/s
-    for _ in range(30):
-        aero.compute_forces(coll_eq, 0.0, 0.0, R0, np.zeros(3),
-                            omega_spin_eq, WIND, t=_T_AERO_OFFSET)
-        v_ip = float(aero.last_v_inplane)
-        omega_new = math.sqrt(max(1e-6, k_drive * v_ip / k_drag))
-        if abs(omega_new - omega_spin_eq) < 1e-4:
-            omega_spin_eq = omega_new
-            break
-        omega_spin_eq = omega_new
-
-    # Estimate tether tension ≈ thrust (for orbit: T_tether ≈ T along tether)
-    f = aero.compute_forces(coll_eq, 0.0, 0.0, R0, np.zeros(3),
-                            omega_spin_eq, WIND, t=_T_AERO_OFFSET)
-    T_est = float(np.dot(f.F_world, t_dir))   # thrust component along tether
-    T_t_est = max(T_est, 10.0)                # tether tension ≈ thrust
-
-    k_eff = TetherModel.EA_N / L_TETHER
-    ext   = T_t_est / k_eff
-    rest  = L_TETHER - max(ext, 0.001)
-
-    # Compute equilibrium tension at the stack-test target collective (coll_eq_target).
-    # This is what the stack test's TensionPI should target so it operates at
-    # coll_eq_target rather than col_min.
-    f_target = aero.compute_forces(coll_eq_target, 0.0, 0.0, R0, np.zeros(3),
-                                   omega_spin_eq, WIND, t=_T_AERO_OFFSET)
-    T_est_target = float(np.dot(f_target.F_world, t_dir))
-    T_gravity_along_tether = MASS * G * math.sin(ELEV_RAD)
-    T_tether_target = max(T_est_target - T_gravity_along_tether, 10.0)
-
-    return coll_eq, omega_spin_eq, R0, pos0, rest, coll_eq_target, T_tether_target
-
-
-_TEL_STRIDE = 20   # log every 20 steps = 20 Hz at 400 Hz
-
-
-def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
-    """
-    Run the steady-state physics for `steps` iterations.
-
-    A warmup pass of `warmup_steps` steps runs first.  The final state of the
-    warmup (position, velocity, rotation, orbital omega, spin, tether angle) is
-    used as the initial condition for the recorded run.  This means the recorded
-    run starts from the system's natural settled state rather than the analytic
-    equilibrium estimate — eliminating the initial transient.
+    Run the steady-state physics for `steps` iterations starting from the
+    settled IC in steady_state_starting.json.  No warmup needed — the IC is
+    already the physics-settled state from test_generate_ic.py.
 
     Returns a dict of per-step arrays plus scalars.
     """
-    coll_eq, omega_spin_eq, R0, pos0, rest, coll_eq_target, T_tether_target = _equilibrium_setup()
-
-    tension_out = 200.0
-    target_alt  = float(-pos0[2])
-
-    # ── Warmup pass ───────────────────────────────────────────────────────────
-    runner_wu   = PhysicsRunner.for_warmup(_ROTOR, pos0, R0, rest, coll_eq, omega_spin_eq, WIND)
-    el_ctrl_wu  = ElevationHoldController.from_pos(pos0, _ROTOR.body_z_slew_rate_rad_s, MASS)
-    ten_ctrl_wu = TensionPI(setpoint_n=tension_out)
-    for _ in range(warmup_steps):
-        hub_wu  = runner_wu.hub_state
-        R_wu    = np.asarray(hub_wu["R"], dtype=float)
-        omega_b = R_wu.T @ np.asarray(hub_wu["omega"], dtype=float)
-        coll    = ten_ctrl_wu.update(runner_wu.tension_now, DT)
-        rate_roll, rate_pitch = el_ctrl_wu.update(hub_wu["pos"], R_wu, target_alt,
-                                                   runner_wu.tension_now, DT)
-        runner_wu.step(DT, coll, rate_roll, rate_pitch, omega_b)
-
-    # ── Settled state ─────────────────────────────────────────────────────────
-    s  = runner_wu.hub_state
-    ic = SimpleNamespace(
-        pos         = s["pos"].copy(),
-        vel         = s["vel"].copy(),
-        R0          = s["R"].copy(),
-        rest_length = rest,
-        coll_eq_rad = coll_eq,
-        omega_spin  = runner_wu.omega_spin,
-    )
+    ic         = load_ic()
+    tension_out = 300.0   # IC targets 300 N midway between reel-in (226 N) and reel-out (435 N)
+    target_alt = float(-ic.pos[2])
 
     # ── Recorded run ──────────────────────────────────────────────────────────
-    runner    = PhysicsRunner(_ROTOR, ic, WIND)
-    el_ctrl   = ElevationHoldController.from_pos(ic.pos, _ROTOR.body_z_slew_rate_rad_s, MASS)
-    ten_ctrl  = TensionPI(setpoint_n=tension_out)
-    tel_rows: list = []
+    runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    _ap    = TensionApController(
+        ic_pos=ic.pos, mass_kg=MASS,
+        slew_rate_rad_s=_ROTOR.body_z_slew_rate_rad_s,
+        warm_coll_rad=ic.coll_eq_rad, tension_ic=tension_out,
+    )
+    ap     = PythonAP(_ap, wind=WIND, dt=DT)
+    ap.tel_fn = lambda r, sr: {
+        **ap.log_fields(),
+        "body_z_eq":  r.hub_state["R"][:, 2],
+        "net_moment": np.zeros(3),
+    }
+    _ap.receive_command(TensionCommand(
+        tension_setpoint_n=tension_out, tension_measured_n=runner.tension_now,
+        alt_m=target_alt, phase="reel-out",
+    ), _DT_CMD)
 
     t_arr     = np.zeros(steps)
     pos_arr   = np.zeros((steps, 3))
@@ -200,62 +103,53 @@ def _run_simulation(steps: int = 4000, warmup_steps: int = 24000):
         vel_arr[step] = hub["vel"]
         ten_arr[step] = runner.tension_now
 
-        R       = np.asarray(hub["R"], dtype=float)
-        body_z  = R[:, 2]
-        tlen    = np.linalg.norm(pos)
-        tdir    = pos / max(tlen, 0.1)
+        R      = np.asarray(hub["R"], dtype=float)
+        body_z = R[:, 2]
+        tlen   = np.linalg.norm(pos)
+        tdir   = pos / max(tlen, 0.1)
         angle_arr[step] = math.degrees(math.acos(float(np.clip(np.dot(body_z, tdir), -1.0, 1.0))))
 
-        coll    = ten_ctrl.update(runner.tension_now, DT)
-        rate_roll, rate_pitch = el_ctrl.update(pos, R, target_alt, runner.tension_now, DT)
-        omega_b = R.T @ np.asarray(hub["omega"], dtype=float)
-        sr      = runner.step(DT, coll, rate_roll, rate_pitch, omega_b)
+        if step % _PLANNER_EVERY == 0:
+            _ap.receive_command(TensionCommand(
+                tension_setpoint_n=tension_out, tension_measured_n=runner.tension_now,
+                alt_m=target_alt, phase="reel-out",
+            ), _DT_CMD)
+        if step % _AP_EVERY == 0:
+            ap.tick(step * DT, runner)
+        sr = runner.step(DT, ap.col_rad, ap.roll_sp, ap.pitch_sp, runner.omega_body)
+        ap.log(runner, sr)
 
-        if step % _TEL_STRIDE == 0:
-            tel_rows.append(TelRow.from_physics(
-                runner, sr, coll, WIND,
-                body_z_eq  = body_z,
-                net_moment = np.zeros(3),
-            ))
-
+    ap.write_telemetry(log.log_dir / "telemetry.csv")
     return {
-        "coll_deg":      math.degrees(coll_eq),
-        "coll_eq":       coll_eq,
+        "coll_deg":      math.degrees(ic.coll_eq_rad),
         "omega_spin_eq": runner.omega_spin,
         "pos0":          ic.pos,
         "vel0":          ic.vel,
         "R0":            ic.R0,
-        "omega0":        s["omega"],
-        "rest_length":   rest,
-        "tension_eq_n":  T_tether_target,
-        "stack_coll_eq": coll_eq_target,
+        "rest_length":   ic.rest_length,
         "t":             t_arr,
         "pos":           pos_arr,
         "vel":           vel_arr,
         "tension":       ten_arr,
         "axle_deg":      angle_arr,
-        "tel_rows":      tel_rows,
     }
 
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-def test_steady_flight():
+def test_steady_flight(simtest_log):
     """Hub stays aloft, tether taut, axle aligned for 10 s from tether equilibrium IC."""
     STEPS     = 4000    # 10 s at 400 Hz
     DRIFT_MAX = 15.0    # m
     AXLE_MAX  = 20.0    # deg
 
-    data = _run_simulation(STEPS)
-
-    if data["tel_rows"]:
-        write_csv(data["tel_rows"], _log.log_dir / "telemetry.csv")
+    data = _run_simulation(simtest_log, STEPS)
 
     pos0  = data["pos0"]
     final = data["pos"][-1]
     drift = np.abs(final - pos0)
 
-    _log.write(
+    simtest_log.write(
         [f"drift_E={drift[1]:.3f}m  drift_Z={drift[2]:.3f}m  steps={STEPS}"],
         f"drift_E={drift[1]:.3f}m  drift_Z={drift[2]:.3f}m",
     )

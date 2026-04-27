@@ -134,7 +134,6 @@ class PetersHeBEM:
         self.last_v_i       = self._v0
         self.last_v_inplane = 0.0
         self.last_ramp      = 0.0
-        self.last_Q_spin    = 0.0
         self.last_Q_drive   = 0.0   # k_drive_spin * v_inplane
         self.last_Q_drag    = 0.0   # k_drag_spin  * omega^2
         self.last_M_spin    = np.zeros(3)
@@ -468,7 +467,6 @@ class PetersHeBEM:
         self.last_v_i       = self._v0        # uniform component — comparable to GlauertBEM
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        self.last_Q_spin    = Q_drive - Q_drag
         self.last_Q_drive   = Q_drive
         self.last_Q_drag    = Q_drag
         self.last_M_spin    = np.array(M_spin_world)
@@ -490,6 +488,6 @@ class PetersHeBEM:
         return AeroResult(
             F_world   = np.array(F_total),
             M_orbital = np.array(M_cyc_world),
-            Q_spin    = self.last_Q_spin,
+            Q_spin    = Q_spin_scalar,
             M_spin    = np.array(M_spin_world),
         )

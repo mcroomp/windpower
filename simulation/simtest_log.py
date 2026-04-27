@@ -65,13 +65,13 @@ class BadEventLog:
         return False
 
     # ----------------------------------------------------------------- query
-    def of_kind(self, kind: str, phase: str = None) -> list[dict]:
+    def of_kind(self, kind: str, phase: "str | None" = None) -> list[dict]:
         evs = [e for e in self._events if e["kind"] == kind]
         if phase is not None:
             evs = [e for e in evs if e["phase"] == phase]
         return evs
 
-    def count(self, kind: str, phase: str = None) -> int:
+    def count(self, kind: str, phase: "str | None" = None) -> int:
         return len(self.of_kind(kind, phase))
 
     def __bool__(self) -> bool:
@@ -102,32 +102,33 @@ class SimtestLog:
     """
     Per-test log directory and diagnostic file for simtests.
 
-    Creates simulation/logs/<module_stem>/ on construction and writes
+    Creates simulation/logs/<name>/ on construction and writes
     a simtest.log file into it when write() is called.  The log_dir
     property gives callers the directory path so they can co-locate
     telemetry.csv and other outputs in the same place.
 
-    Usage::
+    Usage (via the simtest_log fixture in conftest.py)::
 
-        _log = SimtestLog(__file__)
+        def test_foo(simtest_log):
+            r = _run(simtest_log)
+            ...
 
-        # write telemetry alongside the log
-        write_csv(rows, _log.log_dir / "telemetry.csv")
-
-        # flush diagnostic text and print summary line
-        _log.write(lines, summary)
+        def _run(log):
+            ...
+            ap.write_telemetry(log.log_dir / "telemetry.csv")
+            log.write(lines, summary)
     """
 
-    def __init__(self, caller_file: str) -> None:
+    def __init__(self, name: str) -> None:
         _LOG_DIR.mkdir(exist_ok=True)
-        self.name = Path(caller_file).stem          # e.g. "test_deschutter_cycle"
-        self._log_dir = _LOG_DIR / self.name
+        self.name = name
+        self._log_dir = _LOG_DIR / name
         self._log_dir.mkdir(exist_ok=True)
         self.path = self._log_dir / "simtest.log"
 
     @property
     def log_dir(self) -> Path:
-        """Per-test output directory: simulation/logs/<module_stem>/"""
+        """Per-test output directory: simulation/logs/<name>/"""
         return self._log_dir
 
     def write(self, lines: list[str], summary: str) -> None:

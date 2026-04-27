@@ -357,7 +357,6 @@ class PetersHeBEMJit(PetersHeBEM):
         self.last_v_i       = self._v0
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        self.last_Q_spin    = Q_drive - Q_drag
         self.last_Q_drive   = Q_drive
         self.last_Q_drag    = Q_drag
         self.last_M_spin    = M_spin_world.copy()
@@ -375,6 +374,6 @@ class PetersHeBEMJit(PetersHeBEM):
         return AeroResult(
             F_world   = F_total.copy(),
             M_orbital = M_cyc_world.copy(),
-            Q_spin    = self.last_Q_spin,
+            Q_spin    = Q_spin_scalar,
             M_spin    = M_spin_world.copy(),
         )

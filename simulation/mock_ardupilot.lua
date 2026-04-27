@@ -14,6 +14,7 @@ Inputs (write before tick):
   _mock.pos_ned        {x, y, z} m  or nil (nil = GPS not yet fused)
   _mock.vel_ned        {x, y, z} m/s
   _mock.R              flat row-major 3x3, indices 1..9  (body_to_NED)
+  _mock.accel          {x, y, z} m/s^2  body-frame specific force (gravity excluded)
   _mock.params         {SCR_USER1..6, ...}
 
 Outputs (read after tick):
@@ -28,6 +29,7 @@ _mock = {
     healthy     = false,
     millis_val  = 0,
     gyro        = {x=0.0, y=0.0, z=0.0},
+    accel       = {x=0.0, y=0.0, z=0.0},  -- body-frame specific force [m/s^2]
     pos_ned     = nil,           -- nil until GPS fuses
     vel_ned     = {x=0.0, y=0.0, z=0.0},
     -- R: flat row-major body_to_NED 3x3, 1-indexed.  Default = identity.
@@ -106,6 +108,12 @@ end
 function ahrs:get_gyro()
     local v = Vector3f()
     v:x(_mock.gyro.x); v:y(_mock.gyro.y); v:z(_mock.gyro.z)
+    return v
+end
+
+function ahrs:get_accel()
+    local v = Vector3f()
+    v:x(_mock.accel.x); v:y(_mock.accel.y); v:z(_mock.accel.z)
     return v
 end
 

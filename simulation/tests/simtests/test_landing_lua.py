@@ -25,15 +25,13 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
 from winch           import WinchController
-from simtest_log     import SimtestLog, BadEventLog
+from simtest_log     import BadEventLog
 from simtest_ic      import load_ic
-from simtest_runner  import PhysicsRunner, LuaAP, tel_every_from_env
-from telemetry_csv   import TelRow, write_csv
+from simtest_runner  import PhysicsRunner, LuaAP
 from landing_planner import LandingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes       import MODE_LANDING, LAND_FINAL_DROP
 
-_log   = SimtestLog(__file__)
 _IC    = load_ic()
 _ROTOR = rd.default()
 
@@ -64,8 +62,8 @@ T_FINAL_DROP_MAX     = 15.0
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_landing() -> dict:
-    runner = PhysicsRunner(_ROTOR, _IC, WIND)
+def _run_landing(log) -> dict:
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
 
     ground = LandingGroundController(
         initial_body_z   = _IC.R0[:, 2],
@@ -93,11 +91,11 @@ def _run_landing() -> dict:
     sim.healthy      = True
     sim.vehicle_mode = 1   # ACRO
 
-    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad)
+    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase)
 
     events    = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
-    tel_every     = tel_every_from_env(DT)
 
     floor_hit       = False
     t_final_start   = None
@@ -109,7 +107,6 @@ def _run_landing() -> dict:
     bz_at_floor   = None
     pos_at_floor  = None
     touchdown_time= None
-    telemetry     = []
 
     # Prime first ground command
     cmd = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
@@ -174,11 +171,7 @@ def _run_landing() -> dict:
                           tension=runner.tension_now)
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
-        if i % tel_every == 0:
-            telemetry.append(TelRow.from_physics(
-                runner, sr, lua.col_rad, WIND,
-                body_z_eq=None, phase=phase,
-            ))
+        lua.log(runner, sr)
 
     # ── Results ───────────────────────────────────────────────────────────────
     anchor_dist    = None
@@ -202,10 +195,9 @@ def _run_landing() -> dict:
     for level, msg in sim.messages:
         parts.append(f"[GCS {level}] {msg}")
 
-    if telemetry:
-        write_csv(telemetry, _log.log_dir / "telemetry.csv")
-    _log.write(["(telemetry: telemetry.csv)"],
-               "  ".join(p for p in parts if p))
+    lua.write_telemetry(log.log_dir / "telemetry.csv")
+    log.write(["(telemetry: telemetry.csv)"],
+              "  ".join(p for p in parts if p))
 
     return dict(
         t_end            = t_sim,
@@ -218,7 +210,6 @@ def _run_landing() -> dict:
         max_desc_tension = max(tensions_desc) if tensions_desc else None,
         min_altitude     = min(altitudes)     if altitudes     else None,
         messages         = sim.messages,
-        telemetry        = telemetry,
     )
 
 
@@ -226,9 +217,9 @@ def _run_landing() -> dict:
 # Test
 # ---------------------------------------------------------------------------
 
-def test_landing_lua():
+def test_landing_lua(simtest_log):
     """rawes.lua mode=4: floor reached within anchor radius, no descent bad events."""
-    r = _run_landing()
+    r = _run_landing(simtest_log)
     failures = []
 
     for kind in ("slack", "tension_spike"):

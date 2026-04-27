@@ -607,26 +607,26 @@ def test_rate_cmd_transforms_into_body_frame():
 
 def test_rate_pid_zero_error_zero_output():
     """setpoint == actual → output is 0."""
-    pid = RatePID(kp=1.0)
+    pid = RatePID(kp=1.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
     assert pid.update(0.0, 0.0, 0.01) == 0.0
     assert pid.update(0.5, 0.5, 0.01) == 0.0
 
 
 def test_rate_pid_positive_error_positive_output():
     """setpoint > actual → positive correction."""
-    pid = RatePID(kp=1.0)
+    pid = RatePID(kp=1.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
     assert pid.update(1.0, 0.0, 0.01) > 0.0
 
 
 def test_rate_pid_negative_error_negative_output():
     """setpoint < actual → negative correction."""
-    pid = RatePID(kp=1.0)
+    pid = RatePID(kp=1.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
     assert pid.update(-1.0, 0.0, 0.01) < 0.0
 
 
 def test_rate_pid_proportional_to_error():
     """Output scales linearly with error magnitude (P-only)."""
-    pid = RatePID(kp=0.5)
+    pid = RatePID(kp=0.5, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
     out_small = pid.update(0.1, 0.0, 0.01)
     pid.reset()
     out_large = pid.update(0.4, 0.0, 0.01)
@@ -635,20 +635,20 @@ def test_rate_pid_proportional_to_error():
 
 def test_rate_pid_output_clipped_to_output_max():
     """Very large error saturates at output_max."""
-    pid = RatePID(kp=10.0, output_max=1.0)
+    pid = RatePID(kp=10.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
     assert pid.update(100.0, 0.0, 0.01) == pytest.approx(1.0)
     assert pid.update(-100.0, 0.0, 0.01) == pytest.approx(-1.0)
 
 
 def test_rate_pid_output_max_respected():
     """Custom output_max is respected."""
-    pid = RatePID(kp=10.0, output_max=0.5)
+    pid = RatePID(kp=10.0, ki=0.0, kd=0.0, imax=0.0, output_max=0.5)
     assert abs(pid.update(100.0, 0.0, 0.01)) <= 0.5
 
 
 def test_rate_pid_integrator_accumulates():
     """With ki > 0 and persistent error, output grows across steps."""
-    pid = RatePID(kp=0.0, ki=1.0, imax=10.0)
+    pid = RatePID(kp=0.0, ki=1.0, kd=0.0, imax=10.0, output_max=1.0)
     out1 = pid.update(1.0, 0.0, 0.1)
     out2 = pid.update(1.0, 0.0, 0.1)
     assert out2 > out1
@@ -656,7 +656,7 @@ def test_rate_pid_integrator_accumulates():
 
 def test_rate_pid_integrator_anti_windup():
     """Integrator is clamped so output does not exceed imax."""
-    pid = RatePID(kp=0.0, ki=1.0, imax=0.5)
+    pid = RatePID(kp=0.0, ki=1.0, kd=0.0, imax=0.5, output_max=1.0)
     for _ in range(1000):
         pid.update(1.0, 0.0, 0.1)
     out = pid.update(1.0, 0.0, 0.1)
@@ -665,7 +665,7 @@ def test_rate_pid_integrator_anti_windup():
 
 def test_rate_pid_reset_clears_state():
     """reset() zeros integrator and derivative history."""
-    pid = RatePID(kp=0.5, ki=1.0, imax=1.0)
+    pid = RatePID(kp=0.5, ki=1.0, kd=0.0, imax=1.0, output_max=1.0)
     for _ in range(50):
         pid.update(1.0, 0.0, 0.01)
     pid.reset()

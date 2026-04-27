@@ -79,9 +79,27 @@ Works directly with ArduPilot ATTITUDE message fields. Since `sensor.build_sitl_
 
 Used by: `test_guided_flight.py` (ACRO hold loop via RC override, ~10 Hz from MAVLink)
 
-### `TensionPI` — tension-to-collective PI controller
+### `TensionPI` — tension-to-collective PID controller
 
 Owned by the trajectory planner (runs on ground station). Adjusts `collective_rad` to maintain requested tether tension.
+
+Output: `col = kp*err + ki*∫err + kd*(err − prev_err)/dt`, clamped to `[coll_min, coll_max]`.
+
+**Gains (controller.py defaults, 400 Hz):**
+
+| Gain | Default | Notes |
+|------|---------|-------|
+| `kp` | 5e-4 | rad/N |
+| `ki` | 1e-4 | rad/(N·s) |
+| `kd` | 0.0 | rad·s/N — derivative on error; try ~2e-5 to damp tension oscillations (Peters-He) |
+
+**Gains (rawes.lua / TensionApController, 10 Hz):**
+
+| Constant | Default | Notes |
+|----------|---------|-------|
+| `KP_TEN` | 2e-4 | rad/N |
+| `KI_TEN` | 1e-3 | rad/(N·s) at DT_CMD=0.1 s |
+| `KD_TEN` | 0.0 | rad·s/N; derivative step = DT_CMD |
 
 **Critical collective limits (SkewedWakeBEM, beaupoil_2026):**
 - Zero-thrust collective ≈ **−0.34 rad** when body_z is tether-aligned
@@ -90,7 +108,7 @@ Owned by the trajectory planner (runs on ground station). Adjusts `collective_ra
 - `col_min_reel_in_rad = −0.20` during reel-in (safe margin above −0.228)
 - Below zero-thrust, BEM gives downforce → hub falls regardless of tether
 
-Anti-windup: conditional integration (stop integrating when saturated and error pushes further). Prevents integral wind-up during kinematic startup.
+Anti-windup: conditional integration (stop integrating when saturated and error pushes further). Derivative term bypasses anti-windup — it is added after the clamp check and does not affect the integrator.
 
 ---
 

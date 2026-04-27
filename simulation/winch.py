@@ -49,11 +49,11 @@ class WinchController:
     def __init__(
         self,
         rest_length:     float,
-        kp_tension:      float = 0.005,
-        v_max_out:       float = 0.40,
-        v_max_in:        float = 0.80,
-        accel_limit_ms2: float = 0.5,
-        min_length:      float = 2.0,
+        kp_tension:      float,
+        v_max_out:       float,
+        v_max_in:        float,
+        accel_limit_ms2: float,
+        min_length:      float,
         max_length:      float = 300.0,
     ):
         self.rest_length       = float(rest_length)
@@ -65,8 +65,11 @@ class WinchController:
         self._max_length       = float(max_length)
 
         self._target_length    = float(rest_length)   # hold by default
-        self._target_tension   = 300.0                # nominal equilibrium [N]
+        self._target_tension   = 0.0                  # set by first set_target() call
         self._speed            = 0.0                  # current ramped speed [m/s]
+
+        self._energy_out_j     = 0.0   # cumulative generator harvest [J]
+        self._energy_in_j      = 0.0   # cumulative motor consumption [J]
 
     # ── command interface (10 Hz from ground planner) ──────────────────────
 
@@ -112,6 +115,12 @@ class WinchController:
 
         new_length = self.rest_length + self._speed * dt
         self.rest_length = max(self._min_length, min(self._max_length, new_length))
+
+        power = T * self._speed
+        if power > 0.0:
+            self._energy_out_j += power * dt
+        elif power < 0.0:
+            self._energy_in_j  += -power * dt
 
     # ── motion profile ─────────────────────────────────────────────────────
 
@@ -177,3 +186,22 @@ class WinchController:
     def target_tension(self) -> float:
         """Current target tension [N]."""
         return self._target_tension
+
+    @property
+    def energy_out_j(self) -> float:
+        """Cumulative generator harvest since construction [J]."""
+        return self._energy_out_j
+
+    @property
+    def energy_in_j(self) -> float:
+        """Cumulative motor consumption since construction [J]."""
+        return self._energy_in_j
+
+    @property
+    def net_energy_j(self) -> float:
+        """Cumulative net energy (harvest minus consumption) [J]."""
+        return self._energy_out_j - self._energy_in_j
+
+    def log_fields(self) -> dict:
+        """Standard winch state fields for telemetry kwargs."""
+        return dict(winch_speed_ms=self._speed)

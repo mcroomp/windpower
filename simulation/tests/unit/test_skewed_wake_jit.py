@@ -175,7 +175,7 @@ def test_diagnostics_match(ref, jit):
 
     scalar_attrs = [
         "last_T", "last_v_axial", "last_v_i", "last_v_inplane",
-        "last_ramp", "last_Q_spin", "last_H_force",
+        "last_ramp", "last_H_force",
         "last_skew_angle_deg", "last_K_skew", "last_F_prandtl",
     ]
     for attr in scalar_attrs:

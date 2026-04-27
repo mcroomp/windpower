@@ -296,7 +296,12 @@ def run_mediator(args, trajectory=None):
     # The mediator calls update_sensors() to feed physics outputs in.
     _winch_node = WinchNode(
         winch=WinchController(
-            rest_length = float(cfg["rest_length"]),
+            rest_length     = float(cfg["rest_length"]),
+            kp_tension      = float(cfg["winch_kp_tension"]),
+            v_max_out       = float(cfg["winch_v_max_out"]),
+            v_max_in        = float(cfg["winch_v_max_in"]),
+            accel_limit_ms2 = float(cfg["winch_accel_limit_ms2"]),
+            min_length      = float(cfg["winch_min_length"]),
         ),
         anemometer=Anemometer(height_m=3.0),
     )

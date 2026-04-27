@@ -16,7 +16,7 @@ PhysicsCore owns
 
 Callers own
 -----------
-- Trajectory planners (DeschutterPlanner, HoldPlanner, etc.)
+- Trajectory planners (HoldPlanner, etc.)
 - TensionPI / collective management
 - WinchController / tether rest-length updates
 - SITL interface and sensor building (mediator only)
@@ -42,6 +42,27 @@ from dynamics   import RigidBodyDynamics
 from aero       import create_aero
 from tether     import TetherModel
 from frames     import build_orb_frame
+
+
+def q_spin_from_aero(aero, R_hub: np.ndarray) -> float:
+    """
+    Extract spin torque [N*m] from the most recent aero.compute_forces() call.
+
+    Returns dot(last_M_spin, disk_normal) — positive = spin-up.
+    Must be called immediately after compute_forces(); uses cached last_M_spin.
+    Handles both in-plane (crosswind) and axial-flow (descent) autorotation.
+    """
+    return float(np.dot(aero.last_M_spin, R_hub[:, 2]))
+
+
+def step_spin_ode(omega: float, Q_spin: float,
+                  I_ode_kgm2: float, omega_min_rad_s: float, dt: float) -> float:
+    """
+    Single Euler step of the rotor spin ODE.
+
+    omega_new = max(omega_min, omega + Q_spin / I_ode * dt)
+    """
+    return max(omega_min_rad_s, omega + Q_spin / I_ode_kgm2 * dt)
 
 
 @dataclass
@@ -288,16 +309,13 @@ class PhysicsCore:
             t              = self.T_AERO_OFFSET + self._t_sim,
         )
 
-        # Spin ODE: dω/dt = (K_drive·v_inplane − K_drag·ω²) / I_ode
-        Q_spin = (r.K_drive_Nms_m * self._aero.last_v_inplane
-                  - r.K_drag_Nms2_rad2 * self._omega_spin ** 2)
-        self._omega_spin = max(
-            r.omega_min_rad_s,
-            self._omega_spin + Q_spin / r.I_ode_kgm2 * dt,
-        )
+        # Spin ODE: dω/dt = Q_aero / I_ode
+        disk_normal      = hub["R"][:, 2]
+        Q_spin           = q_spin_from_aero(self._aero, hub["R"])
+        self._omega_spin = step_spin_ode(self._omega_spin, Q_spin,
+                                         r.I_ode_kgm2, r.omega_min_rad_s, dt)
 
         # Angular damping / lock_orientation
-        disk_normal = hub["R"][:, 2]
         if self._lock_orientation:
             # Magic tether: zero moments so integrator never accelerates omega.
             M_net = np.zeros(3)
@@ -341,4 +359,8 @@ class PhysicsCore:
             "tilt_lat":     tilt_lat,
             "damp_alpha":   self._damp_alpha,
             "is_kinematic": self._damp_alpha > 0.0,
+            # Specific force in NED world frame: (F_aero + F_tether) / mass.
+            # Gravity is excluded — this is what the IMU accelerometer measures.
+            # Body frame: accel_body = R.T @ accel_specific_world
+            "accel_specific_world": F_net / self._dyn.mass,
         }

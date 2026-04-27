@@ -90,6 +90,8 @@ COLUMNS: list[str] = [
     "el_correction_rad",  # daisy-chain elevation correction [rad]
     "coll_saturated",     # collective pinned at floor or ceiling (0/1)
     "comms_ok",           # ground comms healthy (0=dropout, 1=ok)
+    "vib_corr",           # vibration damper collective correction [rad]
+    "ten_pi_integral",    # TensionPI integrator state [rad/N·s]
     # body-to-NED rotation matrix (row-major: r00=R[0,0], r01=R[0,1], ...)
     "r00", "r01", "r02",
     "r10", "r11", "r12",
@@ -214,6 +216,8 @@ class TelRow:
     el_correction_rad: float = 0.0
     coll_saturated:    int   = 0
     comms_ok:          int   = 1
+    vib_corr:          float = 0.0
+    ten_pi_integral:   float = 0.0
 
     # Body-to-NED rotation matrix (row-major)
     r00: float = 1.0
@@ -391,6 +395,8 @@ class TelRow:
             el_correction_rad   = float(d.get("el_correction_rad", 0.0)),
             coll_saturated      = int(bool(d.get("coll_saturated", False))),
             comms_ok            = int(bool(d.get("comms_ok",        True))),
+            vib_corr            = float(d.get("vib_corr",           0.0)),
+            ten_pi_integral     = float(d.get("ten_pi_integral",    0.0)),
             r00=float(R_mat[0, 0]), r01=float(R_mat[0, 1]), r02=float(R_mat[0, 2]),
             r10=float(R_mat[1, 0]), r11=float(R_mat[1, 1]), r12=float(R_mat[1, 2]),
             r20=float(R_mat[2, 0]), r21=float(R_mat[2, 1]), r22=float(R_mat[2, 2]),
@@ -414,8 +420,9 @@ class TelRow:
         el_correction_rad: float = 0.0,
         coll_saturated: bool = False,
         comms_ok: bool = True,
+        vib_corr: float = 0.0,
+        ten_pi_integral: float = 0.0,
         net_moment=None,
-        **extra,
     ) -> "TelRow":
         """Build a TelRow from a PhysicsRunner and its step result (simtest use).
 
@@ -429,7 +436,6 @@ class TelRow:
         collective_rad  collective blade pitch used this step [rad].
         wind_ned     3-element array-like [vN, vE, vD] m/s.
         body_z_eq    optional NED unit vector (body-z setpoint).
-        extra        ignored (forward-compat for test-specific diagnostics).
         """
         hub_state   = runner.hub_state
         tether      = runner.tether
@@ -444,7 +450,10 @@ class TelRow:
         tether_force  = step_result.get("tether_force")
         tether_moment = step_result.get("tether_moment")
         omega_body  = step_result.get("omega_body")
-        accel_world = step_result.get("accel_world")
+        # accel_specific_world: (F_aero + F_tether) / mass, gravity excluded.
+        # Falls back to legacy "accel_world" key if present (mediator path).
+        _asw = step_result.get("accel_specific_world")
+        accel_world = _asw if _asw is not None else step_result.get("accel_world")
 
         pos = np.asarray(hub_state["pos"], dtype=float)
         vel = np.asarray(hub_state["vel"], dtype=float)
@@ -463,6 +472,8 @@ class TelRow:
             om = np.zeros(3)
 
         acc = np.asarray(accel_world, dtype=float) if accel_world is not None else np.zeros(3)
+        # Body-frame specific force: what the Pixhawk IMU accelerometer measures.
+        acc_body = R.T @ acc
         bzeq = np.asarray(body_z_eq, dtype=float).tolist() if body_z_eq is not None else [0.0, 0.0, 0.0]
 
         tf_raw = ti.get("force")
@@ -552,6 +563,9 @@ class TelRow:
             M_x                 = float(net_M[0]),
             M_y                 = float(net_M[1]),
             M_z                 = float(net_M[2]),
+            sens_accel_x        = float(acc_body[0]),
+            sens_accel_y        = float(acc_body[1]),
+            sens_accel_z        = float(acc_body[2]),
             rpy_roll            = roll,
             rpy_pitch           = pitch,
             rpy_yaw             = yaw,
@@ -565,6 +579,8 @@ class TelRow:
             el_correction_rad   = float(el_correction_rad),
             coll_saturated      = int(bool(coll_saturated)),
             comms_ok            = int(bool(comms_ok)),
+            vib_corr            = float(vib_corr),
+            ten_pi_integral     = float(ten_pi_integral),
             r00=float(R[0, 0]), r01=float(R[0, 1]), r02=float(R[0, 2]),
             r10=float(R[1, 0]), r11=float(R[1, 1]), r12=float(R[1, 2]),
             r20=float(R[2, 0]), r21=float(R[2, 1]), r22=float(R[2, 2]),

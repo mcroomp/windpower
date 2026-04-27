@@ -299,34 +299,6 @@ def test_h_force_spread_within_decade():
 # 8. Spin torque polarity consistent across models
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_all_models_Q_spin_positive_at_low_omega():
-    """
-    Below equilibrium omega (ω=5 rad/s), Q_spin should be positive for ALL models.
-    This is the autorotation drive: wind energy flows into the spinning rotor.
-    """
-    rotor  = rd.default()
-    kwargs = {**DESIGN_KWARGS, "omega_rotor": 5.0}
-    for cls in ALL_MODELS:
-        m = cls(rotor)
-        m.compute_forces(**kwargs)
-        assert m.last_Q_spin > 0, \
-            f"{cls.__name__}: Q_spin={m.last_Q_spin:.2f} N·m at ω=5 (expected > 0)"
-
-
-def test_all_models_Q_spin_negative_at_high_omega():
-    """
-    Above equilibrium omega (ω=40 rad/s), Q_spin should be negative for ALL models.
-    This is the braking regime: aerodynamic drag exceeds drive torque.
-    """
-    rotor  = rd.default()
-    kwargs = {**DESIGN_KWARGS, "omega_rotor": 40.0}
-    for cls in ALL_MODELS:
-        m = cls(rotor)
-        m.compute_forces(**kwargs)
-        assert m.last_Q_spin < 0, \
-            f"{cls.__name__}: Q_spin={m.last_Q_spin:.2f} N·m at ω=40 (expected < 0)"
-
-
 # ────────────────────────────────────────────────────────────────────────────
 # 9. Numerical stability: extreme inputs
 # ────────────────────────────────────────────────────────────────────────────

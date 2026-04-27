@@ -26,15 +26,13 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import rotor_definition as rd
 from simtest_ic    import load_ic
-from simtest_log   import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner, LuaAP, tel_every_from_env
-from telemetry_csv import TelRow, write_csv
+from simtest_log   import BadEventLog
+from simtest_runner import PhysicsRunner, LuaAP
 from rawes_lua_harness import RawesLua
 from rawes_modes   import MODE_STEADY
 
 _IC    = load_ic()
 _ROTOR = rd.default()
-_log   = SimtestLog(__file__)
 
 DT           = 1.0 / 400.0
 LUA_PERIOD   = 0.010
@@ -45,7 +43,7 @@ WIND         = np.array([0.0, 10.0, 0.0])
 FLOOR_ALT_M  = 1.0
 
 
-def _run_steady() -> dict:
+def _run_steady(log) -> dict:
     """rawes.lua mode=1: 90 s altitude-hold steady flight from IC."""
     sim = RawesLua(mode=MODE_STEADY)
     sim.armed        = True
@@ -56,13 +54,12 @@ def _run_steady() -> dict:
     sim.R            = _IC.R0
     sim.gyro         = [0.0, 0.0, 0.0]
 
-    runner  = PhysicsRunner(_ROTOR, _IC, WIND)
-    lua     = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad)
+    runner  = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    lua     = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua.tel_fn = lambda r, sr: dict(body_z_eq=None)
 
     events           = BadEventLog()
     max_axle_err_deg = 0.0
-    tel_every        = tel_every_from_env(DT)
-    telemetry        = []
     pos_hist         = []
 
     for i in range(int(T_SIM / DT)):
@@ -75,6 +72,7 @@ def _run_steady() -> dict:
         omega_body    = runner.omega_body
         omega_body[2] = 0.0
         sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body)
+        lua.log(runner, sr)
 
         altitude    = runner.altitude
         tension_now = runner.tension_now
@@ -95,19 +93,13 @@ def _run_steady() -> dict:
 
         pos_hist.append(runner.hub_state["pos"].copy())
 
-        if i % tel_every == 0:
-            telemetry.append(TelRow.from_physics(
-                runner, sr, lua.col_rad, WIND,
-                body_z_eq=None,
-            ))
-
     if max_axle_err_deg > 45.0:
         events.record("axle_misaligned", 60.0, "steady_state", 0.0,
                       max_deg=round(max_axle_err_deg, 1))
 
     pos_arr    = np.array(pos_hist)
     alts       = -pos_arr[:, 2]
-    tensions   = [tel.tether_tension for tel in telemetry]
+    tensions   = [tel.tether_tension for tel in lua.telemetry]
 
     # Orbit radius over last 30 s (steady state)
     steady_pos = pos_arr[int(60.0 / DT):]
@@ -123,9 +115,8 @@ def _run_steady() -> dict:
     ]
     for level, msg in sim.messages[:10]:
         lines.append(f"  [GCS {level}] {msg}")
-    if telemetry:
-        write_csv(telemetry, _log.log_dir / "telemetry.csv")
-    _log.write(lines, "lua_steady")
+    lua.write_telemetry(log.log_dir / "telemetry.csv")
+    log.write(lines, "lua_steady")
 
     return dict(
         events      = events,
@@ -136,9 +127,9 @@ def _run_steady() -> dict:
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-def test_steady_flight_lua():
+def test_steady_flight_lua(simtest_log):
     """rawes.lua mode=1: hub aloft, orbit bounded, tether taut, axle aligned for 90 s."""
-    r = _run_steady()
+    r = _run_steady(simtest_log)
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())

@@ -21,8 +21,8 @@ All models expose the same interface:
     result = aero.compute_forces(collective_rad, tilt_lon, tilt_lat,
                                  R_hub, v_hub_world, omega_rotor,
                                  wind_world, t)
-    omega_spin += result.Q_spin / I_spin * dt   # spin ODE
-    M_orbital   = result.M_orbital              # orbital moments only
+    Q_spin     = q_spin_from_aero(aero, R_hub)  # BEM spin torque (use this, not result.Q_spin)
+    M_orbital  = result.M_orbital              # orbital moments only
 
 Model implementations:
     aero_deschutter.py          — DeSchutterAero:    per-blade, natural H-force + cyclic
@@ -200,7 +200,7 @@ if __name__ == "__main__":
         print(f"  F={f[:3].round(2)}  M={f[3:].round(2)}")
         assert f[2] > 0, f"Expected Fz > 0, got {f[2]:.2f}"
         print("  Fz > 0: OK")
-        print(f"  last_Q_spin={aero.last_Q_spin:.2f} N·m")
+        print(f"  result.Q_spin={f.Q_spin:.2f} N*m")
 
     print("\nAll smoke tests passed.")
     sys.exit(0)

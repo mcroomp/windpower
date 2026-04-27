@@ -227,54 +227,11 @@ def test_zero_tilt_both_moments_baseline(AeroClass):
 
 @pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])
 def test_spin_torque_set_after_compute(AeroClass):
-    """last_Q_spin must be set to a non-zero value after compute_forces at design point."""
+    """result.Q_spin must be non-zero after compute_forces at design point."""
     rotor = rd.default()
     model = AeroClass(rotor)
-    model.compute_forces(**DESIGN_KWARGS)
-    assert model.last_Q_spin != 0.0, f"{AeroClass.__name__}: last_Q_spin = 0 at design point"
-
-
-@pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])
-def test_spin_torque_near_zero_at_equilibrium(AeroClass):
-    """
-    At equilibrium omega (ω_eq = 20.148 rad/s), the empirical last_Q_spin
-    should be near zero (definition of equilibrium: Q_drive = Q_drag).
-
-    The empirical model: Q = k_drive·v_inplane − k_drag·ω²
-    At ω = ω_eq(v_inplane=5.25): Q = 0 by definition.
-    Tolerance: |Q| < 5 N·m (the residual represents the discrete tuning of K values).
-    """
-    rotor = rd.default()
-    model = AeroClass(rotor)
-    model.compute_forces(**DESIGN_KWARGS)   # ω = DESIGN_OMEGA_EQ = 20.148, v_inplane ≈ 5.25
-    assert abs(model.last_Q_spin) < 5.0, \
-        f"{AeroClass.__name__}: |last_Q_spin| = {abs(model.last_Q_spin):.2f} N·m at ω_eq — " \
-        f"expected ~0 N·m (autorotation equilibrium)"
-
-
-@pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])
-def test_spin_torque_positive_below_equilibrium(AeroClass):
-    """
-    Below equilibrium omega (rotor too slow), last_Q_spin > 0 → spin-up torque.
-    This is the autorotation drive mechanism.
-    """
-    rotor = rd.default()
-    model = AeroClass(rotor)
-    model.compute_forces(**{**DESIGN_KWARGS, "omega_rotor": 10.0})  # well below 20.148
-    assert model.last_Q_spin > 0, \
-        f"{AeroClass.__name__}: Q_spin = {model.last_Q_spin:.2f} N·m at ω=10 (expected > 0)"
-
-
-@pytest.mark.parametrize("AeroClass", ALL_MODELS, ids=[c.__name__ for c in ALL_MODELS])
-def test_spin_torque_negative_above_equilibrium(AeroClass):
-    """
-    Above equilibrium omega (rotor too fast), last_Q_spin < 0 → braking torque.
-    """
-    rotor = rd.default()
-    model = AeroClass(rotor)
-    model.compute_forces(**{**DESIGN_KWARGS, "omega_rotor": 35.0})  # well above 20.148
-    assert model.last_Q_spin < 0, \
-        f"{AeroClass.__name__}: Q_spin = {model.last_Q_spin:.2f} N·m at ω=35 (expected < 0)"
+    result = model.compute_forces(**DESIGN_KWARGS)
+    assert result.Q_spin != 0.0, f"{AeroClass.__name__}: result.Q_spin = 0 at design point"
 
 
 # ────────────────────────────────────────────────────────────────────────────

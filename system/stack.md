@@ -58,7 +58,7 @@ flowchart TB
 | body_z | Unit vector along the rotor axle (spin axis), NED frame |
 | bz_altitude_hold | Function: given hub position + target elevation + tension → body_z_eq that holds altitude. Mirrors Python `compute_bz_altitude_hold`. |
 | Elevation hold | Rate-limited azimuth-preserving slew of body_z toward the tether direction at `asin(target_alt / tether_len)`. |
-| TensionPI | Collective PI controller: error = tension_setpoint − tension_measured → collective_rad. Lives in rawes.lua (pumping) and Python TensionApController (simtests). |
+| TensionPI | Collective PID controller: `col = kp*err + ki*∫err + kd*(err−prev_err)/dt`, clamped to [coll_min, coll_max]. Lives in rawes.lua (pumping) and Python TensionApController (simtests). `kd=0` by default; set ~2e-5 to damp tension oscillations with Peters-He aero. |
 | TensionCommand | Ground→AP 10 Hz message: (tension_setpoint_n, tension_measured_n, alt_m, phase). AP's TensionPI feeds on the ground-transmitted tension_measured_n. |
 | NED | North-East-Down coordinate frame. Altitude = −pos[2]. Up = [0,0,−1]. |
 | Slerp | Spherical linear interpolation — moves body_z toward a target at a constant angular rate (rad/s). Uses Rodrigues rotation component-wise (no quaternion library in Lua). |
@@ -252,14 +252,15 @@ Post-GPS, each 50 Hz step:
 Phase driven by `NAMED_VALUE_FLOAT("RAWES_SUB", N)` from ground. Collective uses TensionPI
 (mirrors Python `TensionPI`); cyclic uses altitude hold.
 
-**TensionPI constants (rawes.lua):**
+**TensionPID constants (rawes.lua):**
 
 | Constant | Value | Meaning |
 |---|---|---|
 | KP_TEN | 2e-4 | Proportional gain [rad/N] |
-| KI_TEN | 1e-3 | Integral gain [rad/(N·step)] at DT_CMD=0.1 s steps |
-| COL_MAX_TEN | 0.0 | TensionPI collective ceiling [rad] |
-| DT_CMD | 0.1 s | Integration step for TensionPI (10 Hz command rate) |
+| KI_TEN | 1e-3 | Integral gain [rad/(N·s)] at DT_CMD=0.1 s steps |
+| KD_TEN | 0.0 | Derivative gain [rad·s/N]; try ~2e-5 to damp oscillations |
+| COL_MAX_TEN | 0.0 | Collective ceiling [rad] |
+| DT_CMD | 0.1 s | Step for integrator and derivative (10 Hz command rate) |
 
 **Setpoints by substate:**
 
@@ -574,7 +575,7 @@ flowchart TD
 
     CH12 --> COL{"Mode?"}
     COL -- "MODE_STEADY (1)" --> VZPI["VZ PI<BR/>col = COL_CRUISE + KP_VZ×(vz−0) + KI_VZ×∫<BR/>Ch3 = col_to_pwm(col)"]
-    COL -- "MODE_PUMPING (5)" --> TENPI["TensionPI<BR/>err = RAWES_TSP − RAWES_TEN<BR/>col += KP_TEN×err + KI_TEN×err×DT_CMD<BR/>col = clamp(col, COL_MIN, COL_MAX_TEN)<BR/>Ch3 = col_to_pwm(col)"]
+    COL -- "MODE_PUMPING (5)" --> TENPI["TensionPID<BR/>err = RAWES_TSP − RAWES_TEN<BR/>col = KP×err + KI×∫err + KD×Δerr/DT_CMD<BR/>col = clamp(col, COL_MIN, COL_MAX_TEN)<BR/>Ch3 = col_to_pwm(col)"]
     COL -- "MODE_LANDING (4)" --> VZLAND["VZ PI (descent)<BR/>col = COL_CRUISE + KP_VZ×(vz−VZ_SP)<BR/>final_drop: col=0<BR/>Ch3 = col_to_pwm(col)"]
 
     VZPI --> END(["apply RC overrides"])

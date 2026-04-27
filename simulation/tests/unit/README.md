@@ -349,11 +349,11 @@ runner = PhysicsRunner.for_warmup(rotor, pos0, R0, rest_length, coll_eq_rad, ome
 ### Lua simtest loop
 
 ```python
-from simtest_runner import PhysicsRunner, LuaAP, tel_every_from_env
+from simtest_runner import PhysicsRunner, LuaAP
 
-runner    = PhysicsRunner(rotor, ic, wind)
-lua       = LuaAP(sim, initial_col_rad=ic.coll_eq_rad)
-tel_every = tel_every_from_env(DT)
+runner = PhysicsRunner(rotor, ic, wind)
+lua    = LuaAP(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND, dt=DT)  # wind+dt mandatory
+lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase_label)     # set before loop
 
 for i in range(max_steps):
     t_sim = i * DT
@@ -372,9 +372,9 @@ for i in range(max_steps):
     omega_body[2] = 0.0          # yaw not controlled by Lua
     sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
                      rest_length=winch.rest_length)
+    lua.log(runner, sr)          # rate-gated telemetry append (uses tel_fn)
 
-    if i % tel_every == 0:
-        telemetry.append(TelRow.from_physics(runner, sr, lua.col_rad, WIND, ...))
+lua.write_telemetry(_log.log_dir / "telemetry.csv")
 ```
 
 ### Properties and methods
@@ -392,10 +392,11 @@ After each `step()`:
 
 ### LuaAP
 
-`LuaAP` wraps `RawesLua` for the standard Lua simtest tick:
+`LuaAP(sim, *, wind, dt, initial_col_rad=0.0)` wraps `RawesLua` for the standard Lua simtest tick.
+`wind` and `dt` are mandatory keyword arguments.
 
 ```python
-lua = LuaAP(sim, initial_col_rad=ic.coll_eq_rad)
+lua = LuaAP(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND, dt=DT)
 
 lua.tick(t_sim, runner)
 # lua.col_rad, lua.roll_sp, lua.pitch_sp now hold latest decoded PWM
@@ -408,27 +409,54 @@ lua.tick(t_sim, runner,
 PWM decoding constants are `LuaAP.COL_MIN`, `LuaAP.COL_MAX`, `LuaAP.ACRO_SCALE` — these
 match the constants baked into `rawes.lua` and must stay in sync.
 
+### PythonAP
+
+`PythonAP(ap, *, wind, dt)` mirrors `LuaAP` for Python AP controllers (`TensionApController`,
+`LandingApController`). `wind` and `dt` are mandatory.
+
+```python
+ap = PythonAP(_ap, wind=WIND, dt=DT)
+ap.tel_fn = lambda r, sr: {**ap.log_fields(), "phase": phase, "winch_speed_ms": speed}
+
+for i in range(steps):
+    if i % ap_every == 0:
+        ap.tick(t_sim, runner)
+    sr = runner.step(...)
+    ap.log(runner, sr)   # rate-gated; uses tel_fn kwargs
+
+ap.write_telemetry(_log.log_dir / "telemetry.csv")
+```
+
+`PythonAP.log_fields()` delegates to the wrapped controller's `log_fields()`:
+- `TensionApController.log_fields()` → `{tension_setpoint, elevation_rad, el_correction_rad, coll_saturated, comms_ok, collective_from_tension_ctrl}`
+- `LandingApController.log_fields()` → `{elevation_rad, body_z_eq}`
+
+`WinchController.log_fields()` → `{winch_speed_ms}`. Use `**winch.log_fields()` alongside
+`**ap.log_fields()` in the lambda; only test-specific context (phase, gnd_alt_cmd_m) goes directly.
+
 ---
 
 ## Telemetry in Simtests
 
-All simtests emit telemetry via `TelRow.from_physics()` from `telemetry_csv.py`.
+Telemetry is fully managed by `LuaAP`/`PythonAP` — no manual `TelRow` or `write_csv` needed.
 
 ```python
-from telemetry_csv import TelRow, write_csv
+# Set tel_fn once before the loop:
+ap.tel_fn = lambda r, sr: {
+    **ap.log_fields(),
+    **winch.log_fields(),
+    "phase": phase_label,
+    "gnd_alt_cmd_m": cmd.alt_m,
+}
 
-# After each step:
-if step % TEL_STRIDE == 0:
-    tel_rows.append(TelRow.from_physics(
-        runner, sr, collective_rad, WIND,
-        body_z_eq=body_z_eq,
-        phase=current_phase,
-        tension_setpoint=setpoint_n,
-    ))
+# In the loop, after runner.step():
+ap.log(runner, sr)   # rate-gated by RAWES_TEL_HZ env var (default 20 Hz)
 
-# At end of test:
-write_csv(tel_rows, _log.log_dir / "telemetry.csv")
+# After the loop:
+ap.write_telemetry(_log.log_dir / "telemetry.csv")
 ```
+
+`TelRow.from_physics(runner, step_result, collective_rad, wind_ned, **kwargs)` is called internally.
 
 `TelRow.from_physics(runner, step_result, collective_rad, wind_ned, **kwargs)` extracts all
 physics state from the runner (`hub_state`, `tension_now`, `omega_spin`, `t_sim`, `aero`)

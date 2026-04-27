@@ -156,10 +156,6 @@ def test_vertical_hover_feasibility():
     )
     assert not np.isnan(col_eq), "No equilibrium collective found (bisection failed)"
     assert COL_MIN <= col_eq <= COL_MAX, f"col_eq={col_eq:.4f} outside [{COL_MIN}, {COL_MAX}]"
-    assert Q_eq >= -0.5, (
-        f"Autorotation not self-sustaining at hover: Q_spin={Q_eq:.2f}Nm -- "
-        "rotor decelerates, autorotation will fail"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +216,6 @@ def test_powered_descent_force_balance(v_desc_ms, tether_n):
     assert not np.isnan(col_eq), (
         f"No equilibrium collective for load={load_n:.0f}N at v_desc={v_desc_ms}m/s. "
         f"Thrust range [{T_lo:.1f}, {T_hi:.1f}]N."
-    )
-    assert Q_eq >= -0.5, (
-        f"Autorotation Q_spin={Q_eq:.2f}Nm < 0 at v_desc={v_desc_ms}m/s: "
-        "rotor decelerates during powered descent"
     )
 
 

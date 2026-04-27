@@ -62,11 +62,10 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 import rotor_definition as rd
 from controller  import AltitudeHoldController, compute_rate_cmd
 from sensor      import PhysicalSensor
-from simtest_log import SimtestLog, BadEventLog
+from simtest_log import BadEventLog
 from simtest_ic  import load_ic
 from simtest_runner import PhysicsRunner
 
-_log = SimtestLog(__file__)
 _IC  = load_ic()
 
 DT            = 1.0 / 400.0
@@ -104,7 +103,7 @@ def _run(t_sim: float = T_SIM):
     sensor_log : list of 10 Hz sensor snapshots with yaw_sensor, yaw_true,
                  gyro_norm, omega_spin
     """
-    runner = PhysicsRunner(rd.default(), _IC, WIND)
+    runner = PhysicsRunner(rd.default(), _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
 
     sensor = PhysicalSensor(
         home_ned_z  = _IC.home_z_ned,
@@ -176,7 +175,7 @@ def _run(t_sim: float = T_SIM):
 # Test
 # ---------------------------------------------------------------------------
 
-def test_sensor_closed_loop():
+def test_sensor_closed_loop(simtest_log):
     """Flight stable and PhysicalSensor outputs physically consistent for 60 s."""
     r = _run()
     history    = r["history"]
@@ -185,7 +184,7 @@ def test_sensor_closed_loop():
     min_alt  = min(-s["pos"][2] for s in history)
     min_spin = min(s["omega_spin"] for s in history)
     lines = [f"t={s['t']:.1f}  alt={-s['pos'][2]:.2f} m  spin={s['omega_spin']:.1f}" for s in history]
-    _log.write(
+    simtest_log.write(
         lines,
         f"min_alt={min_alt:.2f} m  min_spin={min_spin:.2f} rad/s  {r['events'].summary()}",
     )
@@ -286,7 +285,7 @@ def test_sensor_closed_loop():
             + "\n    ".join(R_violations[:5])
         )
 
-    _log.write(
+    simtest_log.write(
         [f"peak_gyro={peak_gyro:.4f} rad/s  min_ratio={min_ratio:.1f}  "
          f"yaw_violations={len(yaw_violations)}  yaw_rate_violations={len(yaw_rate_violations)}  "
          f"R_violations={len(R_violations)}"],

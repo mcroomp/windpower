@@ -195,6 +195,18 @@ class RawesLua:
         self._mock.gyro.z = float(xyz[2])
 
     @property
+    def accel(self) -> list[float]:
+        """Body-frame specific force [x, y, z] m/s^2 (gravity excluded)."""
+        a = self._mock.accel
+        return [float(a.x), float(a.y), float(a.z)]
+
+    @accel.setter
+    def accel(self, xyz):
+        self._mock.accel.x = float(xyz[0])
+        self._mock.accel.y = float(xyz[1])
+        self._mock.accel.z = float(xyz[2])
+
+    @property
     def pos_ned(self):
         """Hub position in NED [x, y, z] m, or None when GPS is not fused."""
         p = self._mock.pos_ned

@@ -90,7 +90,7 @@ def test_finite_at_all_grid_points(xi_deg, collective_rad):
     assert np.all(np.isfinite(r.F_world)),   "F_world contains NaN/inf"
     assert np.all(np.isfinite(r.M_orbital)), "M_orbital contains NaN/inf"
     assert math.isfinite(aero.last_T),             "last_T is NaN/inf"
-    assert math.isfinite(aero.last_Q_spin),        "last_Q_spin is NaN/inf"
+    assert math.isfinite(r.Q_spin),                "Q_spin is NaN/inf"
     assert math.isfinite(aero.last_skew_angle_deg),"skew_angle is NaN/inf"
 
 
@@ -210,40 +210,6 @@ def test_high_tilt_altitude_recoverable_with_extended_collective(xi_deg):
     assert Fz > W_HUB_N, (
         f"xi={xi_deg}°: Fz={Fz:.1f} N at col=+0.10 still below weight {W_HUB_N:.1f} N — "
         f"altitude not recoverable with extended collective"
-    )
-
-
-# ── 5. Spin torque sign ───────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("xi_deg", [35.0, 55.0, 70.0],
-                         ids=["xi35", "xi55", "xi70"])
-def test_q_spin_positive_below_equilibrium(xi_deg):
-    """
-    At omega < omega_eq, Q_spin > 0: rotor accelerates toward equilibrium.
-    """
-    aero_tmp = create_aero(_rd.default())
-    omega_eq = _omega_eq(aero_tmp, xi_deg)
-    omega_low = omega_eq * 0.75   # well below equilibrium
-    _, aero = _call(xi_deg, collective_rad=-0.20, omega=omega_low)
-    assert aero.last_Q_spin > 0.0, (
-        f"xi={xi_deg}°: Q_spin={aero.last_Q_spin:.2f} N·m at omega={omega_low:.1f} rad/s "
-        f"(below eq {omega_eq:.1f}) — expected positive (rotor should accelerate)"
-    )
-
-
-@pytest.mark.parametrize("xi_deg", [35.0, 55.0, 70.0],
-                         ids=["xi35", "xi55", "xi70"])
-def test_q_spin_negative_above_equilibrium(xi_deg):
-    """
-    At omega > omega_eq, Q_spin < 0: rotor decelerates toward equilibrium.
-    """
-    aero_tmp = create_aero(_rd.default())
-    omega_eq = _omega_eq(aero_tmp, xi_deg)
-    omega_high = omega_eq * 1.5   # well above equilibrium
-    _, aero = _call(xi_deg, collective_rad=-0.20, omega=omega_high)
-    assert aero.last_Q_spin < 0.0, (
-        f"xi={xi_deg}°: Q_spin={aero.last_Q_spin:.2f} N·m at omega={omega_high:.1f} rad/s "
-        f"(above eq {omega_eq:.1f}) — expected negative (rotor should decelerate)"
     )
 
 

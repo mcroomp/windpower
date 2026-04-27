@@ -14,18 +14,6 @@ Architecture:
                     Collective is held constant between commands.
     AP (400 Hz):    elevation rate-limited toward altitude target.
 
-Daisy-chain tension control:
-    Primary actuator:   collective (TensionPI, 10 Hz update)
-    Secondary actuator: disk elevation (activates when collective saturates)
-
-    Low tension (reel-in): collective pins at floor; residual tension error
-    bleeds into an elevation correction that tilts the disk toward horizontal,
-    reducing tension below what collective alone can achieve.  Exploits wind
-    shear — lower elevation = lower altitude = weaker wind = less tension.
-
-    High tension (reel-out): collective has full range; elevation correction
-    is zero and decays to zero if previously active.
-
 10 Hz gain tuning:
     For a static plant T = K*(C - C_ref), the PI integral converges with
     time-constant τ = (1 + K*kp) / (dt * K * ki).  With K≈2000 N/rad,
@@ -39,7 +27,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from controller import TensionPI, compute_bz_altitude_hold, compute_rate_cmd, slerp_body_z
+from controller import (AccelVibrationDamper, TensionPI,
+                        compute_bz_altitude_hold, compute_rate_cmd, slerp_body_z)
+from physics_core   import HubObservation
 from pumping_planner import TensionCommand
 from landing_planner import LandingCommand
 
@@ -48,11 +38,8 @@ class TensionApController:
     """
     AP-side pumping controller driven by TensionCommand (10 Hz from ground).
 
-    Integrates TensionPI (collective) and elevation hold (body_z) into a
-    single controller with daisy-chain allocation: collective is the primary
-    tension actuator; when it saturates, residual tension error bleeds into
-    an elevation correction that tilts the disk to further reduce/increase
-    tension.
+    TensionPI adjusts collective to track tether tension; elevation is
+    rate-limited toward the altitude target from the ground command.
 
     Parameters
     ----------
@@ -64,9 +51,10 @@ class TensionApController:
     cmd_timeout_s   : float            comms dropout timeout [s]
     kp              : float            TensionPI proportional gain
     ki              : float            TensionPI integral gain (tuned for 10 Hz)
-    el_corr_ki      : float            elevation correction integrator gain [rad/(N·s)]
-    el_corr_max     : float            max elevation correction magnitude [rad]
-    el_corr_tau     : float            correction decay time constant when not saturated [s]
+    kd              : float            TensionPI derivative gain (0 = pure PI)
+    coll_min_rad    : float            collective floor [rad]
+    coll_max_rad    : float            collective ceiling [rad]
+    kp_outer        : float            body_z error → rate command gain [rad/s per rad]
     """
 
     CMD_TIMEOUT_S: float = 0.5
@@ -76,43 +64,60 @@ class TensionApController:
     # many seconds.  Exceeding this flags "ap_unreachable_alt" in the event log.
     FEASIBILITY_WINDOW_S: float = 1.0
 
+    # TensionPI gains — mirrors rawes.lua KP_TEN / KI_TEN / KD_TEN
+    KP_TEN: float = 2e-4    # rad/N        proportional gain (10 Hz-tuned)
+    KI_TEN: float = 1e-3    # rad/(N·s)    integral gain (10 Hz-tuned)
+    KD_TEN: float = 0.0     # rad·s/N      derivative (0 = pure PI)
+
+    # Collective limits — mirrors rawes.lua COL_MIN_RAD / COL_MAX_TEN
+    COL_MIN_RAD: float = -0.28   # rad  collective floor (autorotation lower bound)
+    COL_MAX_TEN: float =  0.10   # rad  TensionPI ceiling
+
+    # Vibration damper — mirrors rawes.lua K_VIB / VIB_HP_TAU / VIB_VEL_TAU / VIB_COL_MAX
+    K_VIB:       float = 0.008   # rad/(m/s)  velocity feedback gain
+    VIB_HP_HZ:   float = 1.5     # Hz         high-pass cutoff (Lua stores as VIB_HP_TAU = 1/(2π×Hz))
+    VIB_VEL_TAU: float = 0.5     # s          leaky integrator time constant
+    VIB_COL_MAX: float = 0.04    # rad        max correction magnitude
+
     def __init__(
         self,
         ic_pos         : np.ndarray,
         mass_kg        : float,
         slew_rate_rad_s: float,
         warm_coll_rad  : float,
-        tension_ic     : float = 300.0,
+        tension_ic     : float,
         cmd_timeout_s  : float = CMD_TIMEOUT_S,
-        kp             : float = 2e-4,
-        ki             : float = 1e-3,
-        el_corr_ki     : float = 5e-4,   # rad/(N·s)
-        el_corr_max    : float = 0.35,   # rad (~20°)
-        el_corr_tau    : float = 5.0,    # s
-        kp_outer       : float = 2.5,    # body_z error → rate cmd [rad/s per rad]
+        kp             : float = KP_TEN,
+        ki             : float = KI_TEN,
+        kd             : float = KD_TEN,
+        coll_min_rad   : float = COL_MIN_RAD,
+        coll_max_rad   : float = COL_MAX_TEN,
+        kp_outer       : float = 2.5,
         events         = None,           # optional BadEventLog
+        k_vib          : float = K_VIB,
+        vib_hp_hz      : float = VIB_HP_HZ,
+        vib_vel_tau_s  : float = VIB_VEL_TAU,
+        vib_col_max    : float = VIB_COL_MAX,
     ) -> None:
         self._mass_kg    = float(mass_kg)
         self._timeout    = float(cmd_timeout_s)
         self._tension_ic = float(tension_ic)
         self._slew       = float(slew_rate_rad_s)
-        self._el_corr_ki  = float(el_corr_ki)
-        self._el_corr_max = float(el_corr_max)
-        self._el_corr_tau = float(el_corr_tau)
-        self._kp_outer    = float(kp_outer)
-        self._events      = events   # BadEventLog | None
+        self._kp_outer   = float(kp_outer)
+        self._events     = events   # BadEventLog | None
 
-        # Elevation state (inlined from AltitudeHoldController)
+        # Elevation state
         tlen     = float(np.linalg.norm(ic_pos))
         self._el = float(np.arcsin(max(-1.0, min(1.0, float(-ic_pos[2]) / max(tlen, 0.1)))))
-        self._el_correction  = 0.0
-        self._coll_saturated = False
 
         self._tension_pi = TensionPI(
             setpoint_n    = tension_ic,
-            warm_coll_rad = warm_coll_rad,
             kp            = kp,
             ki            = ki,
+            coll_min      = coll_min_rad,
+            coll_max      = coll_max_rad,
+            warm_coll_rad = warm_coll_rad,
+            kd            = kd,
         )
 
         self._C_held      = float(warm_coll_rad)
@@ -121,6 +126,16 @@ class TensionApController:
         self._comms_ok    = True
         self._t_sim       = 0.0                           # accumulated sim time
         self._pos_ned     = np.asarray(ic_pos, dtype=float)  # updated each 400 Hz step
+
+        self._vib_damper  = (
+            AccelVibrationDamper(
+                k_vib        = float(k_vib),
+                hp_freq_hz   = float(vib_hp_hz),
+                vel_tau_s    = float(vib_vel_tau_s),
+                col_damp_max = float(vib_col_max),
+            ) if k_vib != 0.0 else None
+        )
+        self._last_vib_corr = 0.0
 
     # ── command reception (10 Hz from ground) ──────────────────────────────
 
@@ -181,68 +196,62 @@ class TensionApController:
             float(cmd.tension_measured_n), float(dt_cmd)
         )
 
-        # Daisy-chain: accumulate elevation correction when collective is pinned
-        coll_at_floor   = self._C_held <= self._tension_pi.coll_min + 1e-5
-        coll_at_ceiling = self._C_held >= self._tension_pi.coll_max - 1e-5
-        tension_error   = self._tension_pi.setpoint - float(cmd.tension_measured_n)
-
-        self._coll_saturated = (
-            (coll_at_floor   and tension_error < 0) or
-            (coll_at_ceiling and tension_error > 0)
-        )
-
-        if self._coll_saturated:
-            self._el_correction = float(np.clip(
-                self._el_correction + self._el_corr_ki * tension_error * float(dt_cmd),
-                -self._el_corr_max, self._el_corr_max,
-            ))
-
     # ── 400 Hz step ────────────────────────────────────────────────────────
 
     def step(
         self,
-        pos_ned: np.ndarray,
-        R_hub  : np.ndarray,
-        dt     : float,
+        obs      : HubObservation,
+        dt       : float,
+        *,
+        accel_ned: "np.ndarray | None" = None,
     ) -> "tuple[float, float, float]":
         """
-        400 Hz step.  Returns (collective_rad, rate_roll_sp, rate_pitch_sp).
+        AP step.  Returns (collective_rad, rate_roll_sp, rate_pitch_sp).
 
-        collective_rad  : held from last receive_command()
-        rate_roll_sp    : desired roll  rate [rad/s] — feed into AcroControllerSitl
-        rate_pitch_sp   : desired pitch rate [rad/s] — feed into AcroControllerSitl
+        obs       : current hub observation from runner.observe() or physics_core.hub_observe()
+        accel_ned : NED specific force [m/s²] from previous physics step (IMU measurement,
+                    gravity excluded).  When provided and k_vib != 0, the AccelVibrationDamper
+                    adds a collective correction opposing the estimated 3–8 Hz tether resonance
+                    velocity.  Uses the previous step's accel (one-step lag) because accel is
+                    computed by physics after collective is applied; this matches the hardware
+                    latency between IMU measurement and actuator output.
 
-        Elevation is rate-limited toward the altitude target plus any active
-        daisy-chain correction.  The correction decays when collective is not
-        saturated.  Rate commands are computed with kd=0 — damping is supplied
-        by AcroControllerSitl's RatePID, mirroring the hardware architecture.
+        Rate commands use kd=0 — damping is supplied by AcroControllerSitl's
+        RatePID, mirroring the hardware architecture.
         """
-        self._pos_ned  = np.asarray(pos_ned, dtype=float)
+        self._pos_ned  = obs.pos
         self._cmd_age += dt
         self._t_sim   += dt
         if self._comms_ok and self._cmd_age > self._timeout:
             self._comms_ok = False
             self._tension_pi.setpoint = self._tension_ic
 
-        # Decay correction when collective is not saturated
-        if not self._coll_saturated:
-            self._el_correction *= (1.0 - dt / self._el_corr_tau)
-
-        # Rate-limit elevation toward altitude target + daisy-chain correction
-        tlen      = float(np.linalg.norm(pos_ned))
+        # Rate-limit elevation toward altitude target
+        tlen      = float(np.linalg.norm(obs.pos))
         target_el = float(np.arcsin(max(-1.0, min(1.0, self._target_alt / max(tlen, 0.1)))))
-        el_cmd    = float(np.clip(target_el + self._el_correction, -np.pi / 2, np.pi / 2))
-        delta     = float(np.clip(el_cmd - self._el, -self._slew * dt, self._slew * dt))
+        delta     = float(np.clip(target_el - self._el, -self._slew * dt, self._slew * dt))
         self._el += delta
 
         bz_goal = compute_bz_altitude_hold(
-            pos_ned, self._el, self._tension_pi.setpoint, self._mass_kg
+            obs.pos, self._el, self._tension_pi.setpoint, self._mass_kg
         )
-        R       = np.asarray(R_hub, dtype=float)
+        R       = obs.R
         bz_now  = R[:, 2]
         rate_sp = compute_rate_cmd(bz_now, bz_goal, R, kp=self._kp_outer, kd=0.0)
 
-        return self._C_held, float(rate_sp[0]), float(rate_sp[1])
+        # Vibration damper: HP-filter body-Z accel → estimate resonance velocity → oppose it
+        col_out = self._C_held
+        self._last_vib_corr = 0.0
+        if accel_ned is not None and self._vib_damper is not None:
+            accel_body_z = float((R.T @ np.asarray(accel_ned, dtype=float))[2])
+            self._last_vib_corr = self._vib_damper.step(accel_body_z, dt)
+            col_out  = float(np.clip(
+                col_out + self._last_vib_corr,
+                self._tension_pi.coll_min,
+                self._tension_pi.coll_max,
+            ))
+
+        return col_out, float(rate_sp[0]), float(rate_sp[1])
 
     # ── diagnostics ────────────────────────────────────────────────────────
 
@@ -259,15 +268,16 @@ class TensionApController:
         """Current rate-limited elevation angle [rad]."""
         return self._el
 
-    @property
-    def el_correction_rad(self) -> float:
-        """Active daisy-chain elevation correction [rad]."""
-        return self._el_correction
-
-    @property
-    def coll_saturated(self) -> bool:
-        """True when collective is pinned at floor or ceiling."""
-        return self._coll_saturated
+    def log_fields(self) -> dict:
+        """Standard AP state fields for telemetry kwargs."""
+        return dict(
+            tension_setpoint             = self.tension_setpoint,
+            elevation_rad                = self.elevation_rad,
+            comms_ok                     = self.comms_ok,
+            collective_from_tension_ctrl = self._C_held,
+            vib_corr                     = self._last_vib_corr,
+            ten_pi_integral              = self._tension_pi._integral,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +288,16 @@ class LandingApController:
     """
     AP-side landing controller driven by LandingCommand (10 Hz from ground).
 
+    Class constants mirror rawes.lua module-level constants for landing mode.
+
     Control laws per phase:
-      reel_in     -- body_z slerps toward body_z_target;
-                     VZ PI with vz_sp=0 holds altitude while disk tilts.
-      descent     -- body_z held fixed; VZ PI descends at vz_sp=v_land.
-      final_drop  -- collective=0; body_z held fixed.
+      reel_in      -- body_z slerps toward body_z_target (held at IC);
+                      VZ PI with vz_sp=0 holds altitude while winch reels in.
+      get_vertical -- body_z slerps toward [0,0,-1] (horizontal disk, xi=90°);
+                      VZ PI with vz_sp=0 holds altitude. Requires Peters-He aero.
+      descent      -- body_z fixed at [0,0,-1]; VZ PI descends at vz_sp=v_land.
+      flare        -- body_z fixed at [0,0,-1]; VZ PI at vz_sp=0, integrator
+                      seeded at col_descent + col_flare_delta on phase entry.
 
     Parameters
     ----------
@@ -296,16 +311,24 @@ class LandingApController:
     kp_outer        : body_z error → rate command gain [rad/s per rad]
     """
 
+    # Collective limits — mirrors rawes.lua COL_MIN_RAD / COL_MAX_RAD
+    COL_MIN_RAD: float = -0.28   # rad
+    COL_MAX_RAD: float =  0.10   # rad
+
+    # VZ PI gains — mirrors rawes.lua KP_VZ / KI_VZ
+    KP_VZ: float = 0.05    # rad/(m/s)
+    KI_VZ: float = 0.005   # rad/(m/s)/s
+
     def __init__(
         self,
         ic_body_z:       np.ndarray,
         slew_rate_rad_s: float,
         warm_coll_rad:   float,
-        kp_vz:           float = 0.05,
-        ki_vz:           float = 0.005,
-        col_min_rad:     float = -0.28,
-        col_max_rad:     float =  0.10,
-        kp_outer:        float = 2.5,
+        kp_vz:           float,
+        ki_vz:           float,
+        col_min_rad:     float,
+        col_max_rad:     float,
+        kp_outer:        float,
     ) -> None:
         bz = np.asarray(ic_body_z, dtype=float)
         self._bz_current = bz / np.linalg.norm(bz)
@@ -334,27 +357,22 @@ class LandingApController:
         if cmd.phase != prev_phase:
             self._col_i = float(np.clip(cmd.col_cruise_rad, self._col_min, self._col_max))
 
-        if cmd.phase == "final_drop":
-            self._C_held = 0.0
-
     # ── 400 Hz step ────────────────────────────────────────────────────────
 
     def step(
         self,
-        pos_ned: np.ndarray,  # noqa: ARG002
-        R_hub:   np.ndarray,
-        vel_ned: np.ndarray,
-        dt:      float,
+        obs: HubObservation,
+        dt:  float,
+        *,
+        accel_ned: "np.ndarray | None" = None,  # noqa: ARG002 — unused; accepted for API symmetry
     ) -> "tuple[float, float, float]":
         """
-        400 Hz step.  Returns (collective_rad, rate_roll_sp, rate_pitch_sp).
+        AP step.  Returns (collective_rad, rate_roll_sp, rate_pitch_sp).
 
-        pos_ned  : hub NED position (accepted for API symmetry; not used directly)
-        R_hub    : body-to-NED rotation matrix
-        vel_ned  : hub NED velocity [m/s]
-        dt       : timestep [s]
+        obs : current hub observation from runner.observe() or physics_core.hub_observe()
+        dt  : timestep [s]
         """
-        R      = np.asarray(R_hub, dtype=float)
+        R      = obs.R
         bz_now = R[:, 2]
 
         # Slerp body_z toward target at slew_rate
@@ -363,19 +381,16 @@ class LandingApController:
         # Body_z rate command (kd=0; damping supplied by AcroControllerSitl RatePID)
         rate_sp = compute_rate_cmd(bz_now, self._bz_current, R, kp=self._kp_outer, kd=0.0)
 
-        # Collective
-        if self._phase == "final_drop":
-            self._C_held = 0.0
-        else:
-            vz_err       = float(vel_ned[2]) - self._vz_sp
-            self._col_i  = float(np.clip(
-                self._col_i + self._ki_vz * vz_err * dt,
-                self._col_min, self._col_max,
-            ))
-            self._C_held = float(np.clip(
-                self._col_i + self._kp_vz * vz_err,
-                self._col_min, self._col_max,
-            ))
+        # VZ PI: all phases use the PI; phase entry seeds the integrator via receive_command
+        vz_err       = float(obs.vel[2]) - self._vz_sp
+        self._col_i  = float(np.clip(
+            self._col_i + self._ki_vz * vz_err * dt,
+            self._col_min, self._col_max,
+        ))
+        self._C_held = float(np.clip(
+            self._col_i + self._kp_vz * vz_err,
+            self._col_min, self._col_max,
+        ))
 
         return self._C_held, float(rate_sp[0]), float(rate_sp[1])
 
@@ -394,3 +409,10 @@ class LandingApController:
     def elevation_rad(self) -> float:
         """Elevation angle of current body_z [rad] — for telemetry."""
         return float(np.arcsin(np.clip(-self._bz_current[2], -1.0, 1.0)))
+
+    def log_fields(self) -> dict:
+        """Standard AP state fields for telemetry kwargs."""
+        return dict(
+            elevation_rad = self.elevation_rad,
+            body_z_eq     = self.bz_current,
+        )

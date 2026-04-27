@@ -6,7 +6,6 @@ Tests cover:
   - wind_dir_ned tracks mean horizontal hub position (→ wind direction)
   - v_inplane_ms tracks omega_spin via autorotation torque balance
   - Rolling window evicts old samples
-  - DeschutterPlanner updates reel-in quaternion from live wind estimate
 
 All positions use NED frame (X=North, Y=East, Z=Down).
 """
@@ -18,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from planner import WindEstimator, DeschutterPlanner, quat_apply, Q_IDENTITY
+from planner import WindEstimator
 
 
 # ---------------------------------------------------------------------------
@@ -157,62 +156,3 @@ def test_rolling_window_evicts_old_samples():
     remaining_ts = [e[0] for e in est._buf]
     assert all(t >= 5.0 for t in remaining_ts), f"stale samples remain: {remaining_ts}"
 
-
-# ---------------------------------------------------------------------------
-# DeschutterPlanner with wind_estimator
-# ---------------------------------------------------------------------------
-
-def test_deschutter_uses_initial_wind_before_estimator_ready():
-    """Before estimator is ready, reel-in quaternion comes from the seed direction."""
-    wind_ned = np.array([0.0, 10.0, 0.0])  # NED: East wind
-    # high min_samples threshold — estimator never reaches ready in this test
-    est = WindEstimator(seed_wind_ned=wind_ned, min_samples=100)
-    traj = DeschutterPlanner(
-        t_reel_out=30, t_reel_in=30, t_transition=5,
-        v_reel_out=0.4, v_reel_in=0.4,
-        tension_out=200, tension_in=20,
-        wind_estimator=est,
-        xi_reel_in_deg=55,
-    )
-    # Step into reel-in phase (advance internal clock past t_reel_out=30 s)
-    for _ in range(310):   # 310 × 0.1 s = 31 s
-        cmd = traj.step(_state([14.0, 46.0, -12.0]), 0.1)  # NED: T @ ENU [46,14,12]
-    q = cmd["attitude_q"]
-    # Must not be identity — reel-in q should be applied
-    assert not (abs(q[0] - 1.0) < 1e-6 and np.linalg.norm(q[1:]) < 1e-6)
-
-
-def test_deschutter_updates_reel_in_q_when_estimator_ready():
-    """After estimator converges on a different wind direction, reel-in q updates."""
-    wind_initial = np.array([0.0, 10.0, 0.0])  # NED: East wind
-    est = WindEstimator(seed_wind_ned=wind_initial, min_samples=5)
-    traj = DeschutterPlanner(
-        t_reel_out=30, t_reel_in=30, t_transition=5,
-        v_reel_out=0.4, v_reel_in=0.4,
-        tension_out=200, tension_in=20,
-        wind_estimator=est,
-        xi_reel_in_deg=55,
-    )
-    # Record initial reel-in quaternion (from wind_initial = East)
-    q_before = traj._attitude_q_reel_in.copy()
-
-    # Feed estimator with hub positions indicating wind from north (NED X).
-    # Run enough steps for: estimator to reach ready (min_samples=5) AND
-    # at least one wind-update cycle to fire after that.
-    # DeschutterPlanner refreshes wind estimate every 10 steps (initialised
-    # to fire on step 1, then every 10 thereafter → next fire at step 11).
-    for i in range(20):
-        angle = i * 2 * np.pi / 20
-        pos = np.array([46.0 + 10.0 * np.sin(angle), 10.0 * np.cos(angle), -12.0])
-        traj.step(_state(pos, omega_spin=20.0), 0.1)
-
-    q_after = traj._attitude_q_reel_in
-    assert q_after is not None
-    # The quaternion should have changed — wind direction has changed
-    assert not np.allclose(q_before, q_after, atol=1e-3), \
-        "reel-in quaternion did not update after wind estimator converged"
-
-    # The new body_z from q_after should point roughly north+up in NED
-    # NED up = [0,0,-1]; q_after rotates from [0,0,-1] toward the new wind direction
-    body_z = quat_apply(q_after, np.array([0.0, 0.0, -1.0]))  # NED up
-    assert body_z[0] > 0.3, f"expected northward tilt in body_z (NED X), got {body_z}"

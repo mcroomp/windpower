@@ -113,6 +113,15 @@ DEFAULTS: dict = {
     # 0 = disabled (default: trajectory planner owns the winch).
     "winch_cmd_port": 0,
 
+    # ── Winch hardware parameters ─────────────────────────────────────────────
+    # Derived from RAWES ground winch motor spec (400 W BLDC, 20:1, 50 mm drum).
+    # kp_tension: cruise speed per tension error [(m/s)/N]; 0.005 → 0.675 m/s at 435 N vs 300 N IC
+    "winch_kp_tension":      0.005,   # (m/s)/N
+    "winch_v_max_out":       0.40,    # m/s  generator rated reel-out speed
+    "winch_v_max_in":        0.80,    # m/s  motor rated reel-in speed
+    "winch_accel_limit_ms2": 0.5,     # m/s²
+    "winch_min_length":      2.0,     # m    hard floor (drum stop)
+
     # ── Trajectory controller ─────────────────────────────────────────────────
     # "type" selects the active controller.  Each type has its own sub-dict so
     # all parameters are self-contained and callers only touch one section.
@@ -147,7 +156,7 @@ DEFAULTS: dict = {
             # TensionPI warm-start: collective output at zero error on first step.
             # Overridden by initial_state["coll_eq_rad"] when available so PI
             # starts at the exact equilibrium collective after kinematic exit.
-            "warm_coll_rad":       -0.20,  # [rad] default from TensionPI.WARM_COLL_RAD
+            "warm_coll_rad":       -0.20,  # [rad] integrator seed near reel-out equilibrium
         },
     },
 }
@@ -224,49 +233,9 @@ def make_trajectory(cfg: dict, wind_ned):
 
     Note: body_z_eq0 is no longer a parameter — orbit tracking runs inside
     Mode_RAWES (mediator), not in the trajectory planner.
-
-    Example
-    -------
-    >>> cfg = defaults()
-    >>> cfg["trajectory"]["type"] = "deschutter"
-    >>> traj = make_trajectory(cfg, [0,10,0])  # East wind in NED
     """
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from planner import HoldPlanner, DeschutterPlanner, WindEstimator
-
-    import numpy as _np
-    traj_cfg  = cfg.get("trajectory", {})
-    traj_type = traj_cfg.get("type", "hold")
-
-    if traj_type == "deschutter":
-        # config.load() always starts from DEFAULTS so every key is guaranteed
-        # present.  Use direct key access — no fallback values here so that
-        # a misconfigured (incomplete) dict produces a clear KeyError rather
-        # than silently using a wrong default.
-        p = traj_cfg["deschutter"]
-        _xi = p["xi_reel_in_deg"]
-        # WindEstimator seeded from the ground station anemometer reading.
-        # Provides wind direction immediately (seed), then converges toward
-        # the orbital GPS estimate over the first few pumping cycles.
-        estimator = WindEstimator(seed_wind_ned=_np.asarray(wind_ned, dtype=float))
-        return DeschutterPlanner(
-            t_reel_out          = float(p["t_reel_out"]),
-            t_reel_in           = float(p["t_reel_in"]),
-            t_transition        = float(p["t_transition"]),
-            v_reel_out          = float(p["v_reel_out"]),
-            v_reel_in           = float(p["v_reel_in"]),
-            tension_out         = float(p["tension_out"]),
-            tension_in          = float(p["tension_in"]),
-            wind_estimator      = estimator,
-            xi_reel_in_deg      = float(_xi) if _xi is not None else None,
-            tension_kp          = float(p["tension_kp"]),
-            tension_ki          = float(p["tension_ki"]),
-            col_min_rad         = float(p["col_min_rad"]),
-            col_min_reel_in_rad = float(p["col_min_reel_in_rad"]),
-            col_max_rad         = float(p["col_max_rad"]),
-            t_hold_s            = float(p.get("t_hold_s", 0.0)),
-            warm_coll_rad       = float(p.get("warm_coll_rad", -0.20)),
-        )
+    from planner import HoldPlanner
 
     return HoldPlanner()

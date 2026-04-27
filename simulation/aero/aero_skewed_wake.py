@@ -105,7 +105,6 @@ class SkewedWakeBEM:
     last_skew_angle_deg — wake skew angle chi [deg] (0 = axial, 90 = edgewise)
     last_K_skew         — Coleman K = tan(chi/2) — induction asymmetry factor
     last_F_prandtl      — mean Prandtl tip/root loss factor across radial strips
-    last_Q_spin         — empirical spin ODE torque [N·m]
     last_M_spin         — spin-axis moment vector [N·m]
     last_M_cyc          — cyclic (tilt-producing) moment vector [N·m]
     last_H_force        — in-plane force magnitude [N]
@@ -182,7 +181,6 @@ class SkewedWakeBEM:
         self.last_v_i            = 0.0
         self.last_v_inplane      = 0.0
         self.last_ramp           = 0.0
-        self.last_Q_spin         = 0.0
         self.last_Q_drive        = 0.0
         self.last_Q_drag         = 0.0
         self.last_M_spin         = np.zeros(3)
@@ -548,10 +546,6 @@ class SkewedWakeBEM:
         self.last_v_i       = v_i0
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        # Q_spin for the rotor ODE uses an empirical model rather than the BEM moment,
-        # because BEM spin torque is sensitive to inflow-angle sign near stall.
-        # k_drive scales with v_inplane (wind drives spin); k_drag opposes spin quadratically.
-        self.last_Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs ** 2)
         self.last_M_spin    = M_spin_world.copy()
         self.last_M_cyc     = M_cyc_world.copy()
         self.last_H_force   = float(np.linalg.norm(F_total - self.last_T * disk_normal))
@@ -562,6 +556,6 @@ class SkewedWakeBEM:
         return AeroResult(
             F_world   = F_total.copy(),
             M_orbital = M_cyc_world.copy(),
-            Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs ** 2),
+            Q_spin    = Q_spin_scalar,
             M_spin    = M_spin_world.copy(),
         )

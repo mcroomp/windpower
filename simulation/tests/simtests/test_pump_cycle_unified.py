@@ -29,15 +29,13 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 import rotor_definition as rd
 from winch            import WinchController
-from simtest_log      import SimtestLog, BadEventLog
+from simtest_log      import BadEventLog
 from simtest_ic       import load_ic
-from simtest_runner   import PhysicsRunner, tel_every_from_env
-from telemetry_csv    import TelRow, write_csv
+from simtest_runner   import PhysicsRunner, PythonAP
 from pumping_planner  import PumpingGroundController
 from ap_controller    import TensionApController
 from comms            import VirtualComms
 
-_log   = SimtestLog(__file__)
 _IC    = load_ic()
 _ROTOR = rd.default()
 
@@ -78,8 +76,8 @@ T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_pumping(aero_model: str = "skewed_wake") -> dict:
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)
+def _run_pumping(log, aero_model: str = "skewed_wake") -> dict:
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
 
     # ── Ground: PumpingGroundController (10 Hz outer loop) ────────────────
     ground = PumpingGroundController(
@@ -111,27 +109,33 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
 
     events    = BadEventLog()
 
-    # ── AP: TensionApController + AcroControllerSitl (mirrors rawes.lua + ArduPilot ACRO) ──
-    ap        = TensionApController(
+    # ── AP: TensionApController wrapped in PythonAP (mirrors LuaAP interface) ──
+    _ap       = TensionApController(
         ic_pos          = _IC.pos,
         mass_kg         = _ROTOR.mass_kg,
         slew_rate_rad_s = _ROTOR.body_z_slew_rate_rad_s,
         warm_coll_rad   = _IC.coll_eq_rad,
         tension_ic      = TENSION_IC,
-        el_corr_ki      = 0.0,   # daisy-chain disabled until gain is tuned
         events          = events,
     )
+    ap        = PythonAP(_ap, wind=WIND, dt=DT)
+    ap.tel_fn = lambda r, sr: {
+        **ap.log_fields(),
+        **winch.log_fields(),
+        "body_z_eq":    r.hub_state["R"][:, 2],
+        "phase":        phase_label,
+        "gnd_alt_cmd_m": cmd.alt_m,
+    }
     comms     = VirtualComms()   # zero latency/noise; set latency_s/alt_noise_m to model radio
     max_steps = int(T_END_SIM / DT) + 1
 
-    cycle_energy_out = [0.0] * N_CYCLES
-    cycle_energy_in  = [0.0] * N_CYCLES
-    telemetry = []
-    tel_every     = tel_every_from_env(DT)
+    cycle_net_start  = [0.0] * N_CYCLES   # winch.net_energy_j snapshot at cycle start
+    prev_cycle_idx   = -1
+    ap_every     = max(1, round(1.0 / (PythonAP.AP_HZ * DT)))
     planner_every = max(1, round(DT_PLANNER / DT))
 
-    collective_rad = _IC.coll_eq_rad
     prev_alt       = float(-_IC.pos[2])
+    prev_accel_ned = None   # one-step lagged IMU specific force for vibration damper
     cmd            = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
                                  hub_alt_m=prev_alt)  # sentinel for t=0
 
@@ -159,33 +163,32 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
                 break   # all cycles done; don't apply hold command to AP
             comms.send_command(t_sim, cmd)
 
-        # ── Uplink: deliver any arrived command to AP ─────────────────────
+        # ── Uplink: deliver arrived command to AP (mirrors NV float injection) ─
         ap_cmd = comms.poll_ap_command(t_sim)
-        if ap_cmd is not None:
-            ap.receive_command(ap_cmd, DT_PLANNER)
+
+        # ── AP 50 Hz: attitude hold + vibration damper → rate/collective cmds ─
+        if i % ap_every == 0:
+            ap.tick(t_sim, runner,
+                    accel_ned=prev_accel_ned,
+                    inject=(lambda _ap, __: _ap.receive_command(ap_cmd, DT_PLANNER))
+                           if ap_cmd is not None else None)
 
         # ── Winch 400 Hz (wired local sensor — no radio limit) ────────────
         winch.set_target(ground.winch_target_length, ground.winch_target_tension)
-        len_before = winch.rest_length
         winch.step(tension_now, DT)
-        speed_now = (winch.rest_length - len_before) / DT
 
-        # ── AP 400 Hz: TensionApController → rate commands → physics ─────
-        hub_state  = runner.hub_state
-        omega_body = runner.omega_body
-        collective_rad, rate_roll, rate_pitch = ap.step(
-            hub_state["pos"], hub_state["R"], DT)
-        sr = runner.step(DT, collective_rad, rate_roll, rate_pitch, omega_body,
+        # ── Physics 400 Hz ────────────────────────────────────────────────
+        omega_body    = runner.omega_body
+        omega_body[2] = 0.0
+        sr = runner.step(DT, ap.col_rad, ap.roll_sp, ap.pitch_sp, omega_body,
                          rest_length=winch.rest_length)
+        prev_accel_ned = sr.get("accel_specific_world")
 
-        # ── Per-cycle energy accounting ───────────────────────────────────
-        if speed_now > 0.0:
-            cycle_energy_out[cycle_idx] += runner.tension_now * speed_now * DT
-        elif speed_now < 0.0:
-            cycle_energy_in[cycle_idx]  += runner.tension_now * abs(speed_now) * DT
-
-        # ── Bad-event tracking ────────────────────────────────────────────
+        # ── Per-cycle energy snapshot ─────────────────────────────────────
         phase_label = f"cycle{cycle_idx+1}_{ground.phase}"
+        if cycle_idx != prev_cycle_idx:
+            cycle_net_start[cycle_idx] = winch.net_energy_j
+            prev_cycle_idx = cycle_idx
         if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
@@ -196,24 +199,11 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
             events.record("floor_hit", t_sim, phase_label, altitude)
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
-        if i % tel_every == 0:
-            telemetry.append(TelRow.from_physics(
-                runner, sr, collective_rad, WIND,
-                body_z_eq                    = hub_state["R"][:, 2],
-                phase                        = phase_label,
-                tension_setpoint             = ap.tension_setpoint,
-                collective_from_tension_ctrl = collective_rad,
-                gnd_alt_cmd_m                = cmd.alt_m,
-                winch_speed_ms               = speed_now,
-                elevation_rad                = ap.elevation_rad,
-                el_correction_rad            = ap.el_correction_rad,
-                coll_saturated               = ap.coll_saturated,
-                comms_ok                     = ap.comms_ok,
-            ))
+        ap.log(runner, sr)
 
     # ── Results ───────────────────────────────────────────────────────────────
-    net_per_cycle = [cycle_energy_out[k] - cycle_energy_in[k] for k in range(N_CYCLES)]
-    total_net     = sum(net_per_cycle)
+    net_per_cycle = [winch.net_energy_j - cycle_net_start[k] for k in range(N_CYCLES)]
+    total_net     = winch.net_energy_j
 
     cycle_summary = "  ".join(
         f"c{k+1}={net_per_cycle[k]:.0f}J" for k in range(N_CYCLES)
@@ -225,22 +215,18 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
         events.summary(),
     ]
 
-    if telemetry:
-        write_csv(telemetry, _log.log_dir / "telemetry.csv")
-    _log.write(["(telemetry: telemetry.csv)"],
+    ap.write_telemetry(log.log_dir / "telemetry.csv")
+    log.write(["(telemetry: telemetry.csv)"],
                "  ".join(p for p in parts if p))
 
     return dict(
-        t_end            = t_sim,
-        cycle_energy_out = cycle_energy_out,
-        cycle_energy_in  = cycle_energy_in,
-        net_per_cycle    = net_per_cycle,
-        total_net        = total_net,
-        events           = events,
-        floor_hits       = events.count("floor_hit"),
-        slack_events     = events.count("slack"),
-        tension_spikes   = events.count("tension_spike"),
-        telemetry        = telemetry,
+        t_end         = t_sim,
+        net_per_cycle = net_per_cycle,
+        total_net     = total_net,
+        events        = events,
+        floor_hits    = events.count("floor_hit"),
+        slack_events  = events.count("slack"),
+        tension_spikes= events.count("tension_spike"),
     )
 
 
@@ -248,9 +234,9 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
 # Test
 # ---------------------------------------------------------------------------
 
-def test_pumping_unified():
+def test_pumping_unified(simtest_log):
     """3 pumping cycles via PumpingGroundController/TensionApController: no bad events, net > 0."""
-    r = _run_pumping()
+    r = _run_pumping(simtest_log)
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())
@@ -262,9 +248,9 @@ def test_pumping_unified():
     assert not failures, "\n  ".join(failures)
 
 
-def test_pumping_unified_peters_he():
+def test_pumping_unified_peters_he(simtest_log):
     """Same pumping cycle as test_pumping_unified but with Peters-He aero (no xi limit)."""
-    r = _run_pumping(aero_model="peters_he")
+    r = _run_pumping(simtest_log, aero_model="peters_he")
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())

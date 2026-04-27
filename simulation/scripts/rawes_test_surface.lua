@@ -24,7 +24,9 @@ _rawes_fns = {
     KI_VZ                   = KI_VZ,
     KP_TEN                  = KP_TEN,
     KI_TEN                  = KI_TEN,
+    KD_TEN                  = KD_TEN,
     COL_MAX_TEN             = COL_MAX_TEN,
+    DT_CMD                  = DT_CMD,
 
     -- ── Pure geometry ────────────────────────────────────────────────────────
 
@@ -65,10 +67,21 @@ _rawes_fns = {
     target_alt     = function() return _target_alt end,
     tension_n      = function() return _tension_n end,
 
-    -- ── TensionPI state accessors ─────────────────────────────────────────────
+    -- ── TensionPID state accessors ────────────────────────────────────────────
 
-    col_i_ten      = function() return _col_i_ten end,
-    col_held       = function() return _col_held end,
-    ten_setpoint   = function() return _ten_setpoint end,
-    ten_sp_fresh   = function() return _ten_sp_fresh end,
+    col_i_ten        = function() return _col_i_ten end,
+    col_d_prev_err   = function() return _col_d_prev_err end,
+    col_held         = function() return _col_held end,
+    ten_setpoint     = function() return _ten_setpoint end,
+    ten_sp_fresh     = function() return _ten_sp_fresh end,
+
+    -- ── Vibration damper constants + function ─────────────────────────────────
+
+    K_VIB           = K_VIB,
+    VIB_HP_TAU      = VIB_HP_TAU,
+    VIB_VEL_TAU     = VIB_VEL_TAU,
+    VIB_COL_MAX     = VIB_COL_MAX,
+    vib_damper_step = vib_damper_step,
+    vib_vel_est     = function() return _vib_vel_est end,
+    vib_corr_last   = function() return _vib_corr_last end,
 }
