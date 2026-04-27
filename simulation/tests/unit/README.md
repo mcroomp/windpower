@@ -12,10 +12,10 @@ Tests are split across two directories, both running **Windows-native** (no Dock
 ## Running Tests
 
 ```bash
-# Fast unit tests only (~480)
+# Fast unit tests only (~685)
 .venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
 
-# Simtests only (~11)
+# Simtests only (~13)
 .venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
 
 # Both together
@@ -305,50 +305,108 @@ Regenerate after any aero model change:
 
 `simtest_runner.py` provides `PhysicsRunner`, a thin wrapper around `PhysicsCore`
 (`simulation/physics_core.py`). `PhysicsCore` owns `RigidBodyDynamics`, `create_aero`,
-`TetherModel`, the spin ODE, and angular damping.
-`PhysicsRunner` exposes `step_raw()` for simtest callers.
-Callers own `PumpingGroundController`, `TensionApController`, `WinchController`,
-and any attitude controller (`AcroControllerSitl`, `ElevationHoldController`).
+`TetherModel`, the spin ODE, and angular damping. `AcroControllerSitl` (RatePID + servo model)
+is baked into `PhysicsRunner` — callers produce `(col, rate_roll, rate_pitch)` and
+`runner.step()` handles the rest. Callers own `PumpingGroundController`,
+`TensionApController`, `WinchController` at their own rates.
+
+### Python-AP simtest loop
 
 ```python
-from simtest_runner import PhysicsRunner
+from simtest_runner import PhysicsRunner, tel_every_from_env
 
-# All tests (caller drives tilts via AcroControllerSitl + compute_rate_cmd,
-# or directly from Lua PWM decode + RatePID + SwashplateServoModel):
-tilt_lon, tilt_lat = servo.step(pid_lon.update(...), ...)
-sr = runner.step_raw(DT, col_rad, tilt_lon, tilt_lat, rest_length=winch.rest_length)
+runner    = PhysicsRunner(rotor, ic, wind)
+tel_every = tel_every_from_env(DT)
+
+for i in range(max_steps):
+    t_sim      = i * DT
+    tension    = runner.tension_now
+    altitude   = runner.altitude          # -pos_z [m]
+
+    # Ground 10 Hz
+    if i % planner_every == 0:
+        cmd = ground.step(t_sim, tension, rest_length=winch.rest_length, hub_alt_m=altitude)
+        ap.receive_command(cmd, DT_PLANNER)
+        winch.set_target(ground.winch_target_length, ground.winch_target_tension)
+
+    # Winch 400 Hz
+    winch.step(tension, DT)
+
+    # AP 400 Hz
+    hub_state  = runner.hub_state
+    omega_body = runner.omega_body        # mutable R.T @ omega copy
+    col, rate_roll, rate_pitch = ap.step(hub_state["pos"], hub_state["R"], DT)
+    sr = runner.step(DT, col, rate_roll, rate_pitch, omega_body,
+                     rest_length=winch.rest_length)
+
+    if i % tel_every == 0:
+        telemetry.append(TelRow.from_physics(runner, sr, col, WIND, ...))
 
 # IC generation warmup (zero initial velocity):
 runner = PhysicsRunner.for_warmup(rotor, pos0, R0, rest_length, coll_eq_rad, omega_spin, wind)
 ```
 
-After each `step()` / `step_raw()`:
+### Lua simtest loop
+
+```python
+from simtest_runner import PhysicsRunner, LuaAP, tel_every_from_env
+
+runner    = PhysicsRunner(rotor, ic, wind)
+lua       = LuaAP(sim, initial_col_rad=ic.coll_eq_rad)
+tel_every = tel_every_from_env(DT)
+
+for i in range(max_steps):
+    t_sim = i * DT
+
+    # Ground 10 Hz
+    if i % planner_every == 0:
+        ground_ctrl.step(t_sim, runner.tension_now, runner.altitude, DT)
+
+    # Lua tick (50–100 Hz depending on LUA_PERIOD)
+    if i % lua_every == 0:
+        lua.tick(t_sim, runner)
+        # or: lua.tick(t_sim, runner, inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
+
+    # Physics 400 Hz
+    omega_body    = runner.omega_body
+    omega_body[2] = 0.0          # yaw not controlled by Lua
+    sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
+                     rest_length=winch.rest_length)
+
+    if i % tel_every == 0:
+        telemetry.append(TelRow.from_physics(runner, sr, lua.col_rad, WIND, ...))
+```
+
+### Properties and methods
+
+After each `step()`:
 - `runner.hub_state` — dict: pos, vel, R, omega (state after integration)
-- `runner.tension_now` — tether tension [N] (computed at start of that step)
+- `runner.tension_now` — tether tension [N]
+- `runner.altitude` — hub altitude [m] = `-pos_z`
+- `runner.omega_body` — `R.T @ omega`, mutable copy (caller may zero `[2]` for yaw)
 - `runner.omega_spin` — rotor spin [rad/s]
-- `runner.tether` — TetherModel (inspect `_last_info` for slack/angle)
-- `runner.aero` — aero object (inspect `last_v_inplane`)
+- `runner.tether` — TetherModel (inspect `_last_info["slack"]`)
+- `runner.aero` — aero object
 - `sr["tilt_lon"], sr["tilt_lat"]` — tilts used in that step
 - `sr["aero_result"], sr["tether_force"], sr["tether_moment"]` — forces for telemetry
 
-**Ground/AP rate split** — ground controller at 10 Hz, `TensionApController` at 400 Hz:
+### LuaAP
+
+`LuaAP` wraps `RawesLua` for the standard Lua simtest tick:
+
 ```python
-gnd_every = max(1, round(DT_GND / DT))   # 40 steps
-gnd_cmd = None
-for i in range(max_steps):
-    if gnd_cmd is None or i % gnd_every == 0:
-        gnd_cmd = ground_ctrl.step(t_sim, tension_now, winch.rest_length, hub_alt_m)
-        winch.set_target(gnd_cmd.winch_target_length, gnd_cmd.winch_target_tension)
-        ap_ctrl.receive_command(gnd_cmd, DT_GND)
-    collective_rad, body_z_eq = ap_ctrl.step(runner.hub_state, runner.tension_now, DT)
-    winch.step(runner.tension_now, DT)
-    bz_now = runner.hub_state["R"][:, 2]
-    R      = runner.hub_state["R"]
-    omega_body = R.T @ runner.hub_state["omega"]
-    rate_sp    = compute_rate_cmd(bz_now, body_z_eq, R, kp=2.5)
-    tilt_lon, tilt_lat = acro_sitl.update(rate_sp[0], rate_sp[1], omega_body, DT)
-    sr = runner.step_raw(DT, collective_rad, tilt_lon, tilt_lat, rest_length=winch.rest_length)
+lua = LuaAP(sim, initial_col_rad=ic.coll_eq_rad)
+
+lua.tick(t_sim, runner)
+# lua.col_rad, lua.roll_sp, lua.pitch_sp now hold latest decoded PWM
+
+# inject= pushes NV floats between feed_obs and update_fn:
+lua.tick(t_sim, runner,
+         inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
 ```
+
+PWM decoding constants are `LuaAP.COL_MIN`, `LuaAP.COL_MAX`, `LuaAP.ACRO_SCALE` — these
+match the constants baked into `rawes.lua` and must stay in sync.
 
 ---
 

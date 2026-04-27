@@ -979,6 +979,22 @@ class RawesGCS:
             return (msg.x, msg.y, msg.z)
         return None
 
+    def recv_local_position_latest(self) -> tuple[float, float, float] | None:
+        """
+        Non-blocking poll: drain buffered LOCAL_POSITION_NED messages and
+        return the most recent one, or None if none are buffered.
+        Used by MavlinkComms.receive_telemetry() in the 10 Hz ground loop.
+        """
+        latest = None
+        while True:
+            msg = self._recv(type="LOCAL_POSITION_NED", blocking=False)
+            if msg is None:
+                break
+            latest = msg
+        if latest is not None:
+            return (latest.x, latest.y, latest.z)
+        return None
+
     def recv_attitude(
         self, timeout: float = 2.0
     ) -> tuple[float, float, float] | None:

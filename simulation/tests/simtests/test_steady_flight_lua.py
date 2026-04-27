@@ -27,7 +27,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import rotor_definition as rd
 from simtest_ic    import load_ic
 from simtest_log   import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner, feed_obs, tel_every_from_env
+from simtest_runner import PhysicsRunner, LuaAP, tel_every_from_env
 from telemetry_csv import TelRow, write_csv
 from rawes_lua_harness import RawesLua
 from rawes_modes   import MODE_STEADY
@@ -42,19 +42,7 @@ LUA_EVERY    = round(LUA_PERIOD / DT)
 T_SIM        = 90.0
 WIND         = np.array([0.0, 10.0, 0.0])
 
-_COL_MIN    = -0.28
-_COL_MAX    =  0.10
-_ACRO_SCALE = 500.0 / (360.0 * math.pi / 180.0)
-
 FLOOR_ALT_M  = 1.0
-
-
-def _pwm_to_rate(pwm: int) -> float:
-    return (pwm - 1500) / _ACRO_SCALE
-
-
-def _pwm_to_col(pwm: int) -> float:
-    return _COL_MIN + (pwm - 1000) / 1000.0 * (_COL_MAX - _COL_MIN)
 
 
 def _run_steady() -> dict:
@@ -69,10 +57,7 @@ def _run_steady() -> dict:
     sim.gyro         = [0.0, 0.0, 0.0]
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND)
-
-    col_rad  = _IC.coll_eq_rad
-    roll_sp  = 0.0
-    pitch_sp = 0.0
+    lua     = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad)
 
     events           = BadEventLog()
     max_axle_err_deg = 0.0
@@ -81,27 +66,17 @@ def _run_steady() -> dict:
     pos_hist         = []
 
     for i in range(int(T_SIM / DT)):
-        t         = i * DT
-        hub_state = runner.hub_state
+        t = i * DT
 
         if i % LUA_EVERY == 0:
-            sim._mock.millis_val = int(t * 1000)
-            feed_obs(sim, runner.observe())
-            sim.send_named_float("RAWES_TEN", runner.tension_now)
-            sim._update_fn()
+            lua.tick(t, runner,
+                     inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
 
-            ch1 = sim.ch_out[1]
-            ch2 = sim.ch_out[2]
-            ch3 = sim.ch_out[3]
-            if ch1 is not None: roll_sp  = _pwm_to_rate(ch1)
-            if ch2 is not None: pitch_sp = _pwm_to_rate(ch2)
-            if ch3 is not None: col_rad  = _pwm_to_col(ch3)
-
-        omega_body    = hub_state["R"].T @ hub_state["omega"]
+        omega_body    = runner.omega_body
         omega_body[2] = 0.0
-        sr = runner.step(DT, col_rad, roll_sp, pitch_sp, omega_body)
+        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body)
 
-        altitude    = -runner.hub_state["pos"][2]
+        altitude    = runner.altitude
         tension_now = runner.tension_now
 
         if runner.tether._last_info.get("slack", False):
@@ -122,7 +97,7 @@ def _run_steady() -> dict:
 
         if i % tel_every == 0:
             telemetry.append(TelRow.from_physics(
-                runner, sr, col_rad, WIND,
+                runner, sr, lua.col_rad, WIND,
                 body_z_eq=None,
             ))
 

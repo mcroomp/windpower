@@ -27,7 +27,7 @@ import rotor_definition as rd
 from winch          import WinchController
 from simtest_ic     import load_ic
 from simtest_log    import SimtestLog, BadEventLog
-from simtest_runner import PhysicsRunner, feed_obs, tel_every_from_env
+from simtest_runner import PhysicsRunner, LuaAP, tel_every_from_env
 from telemetry_csv  import TelRow, write_csv
 from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
@@ -46,10 +46,6 @@ LUA_EVERY  = round(LUA_PERIOD / DT)
 WIND       = np.array([0.0, 10.0, 0.0])
 WIND.flags.writeable = False
 BREAK_LOAD_N = 620.0
-
-_COL_MIN    = -0.28
-_COL_MAX    =  0.10
-_ACRO_SCALE = 500.0 / (360.0 * math.pi / 180.0)
 
 # ── Pumping parameters (mirror test_pump_cycle_unified.py exactly) ────────────
 N_CYCLES         = 3
@@ -73,14 +69,6 @@ FLOOR_ALT_M      = 1.0
 T_REEL_OUT_MAX = 120.0
 T_REEL_IN_MAX  = 120.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.2
-
-
-def _pwm_to_rate(pwm: int) -> float:
-    return (pwm - 1500) / _ACRO_SCALE
-
-
-def _pwm_to_col(pwm: int) -> float:
-    return _COL_MIN + (pwm - 1000) / 1000.0 * (_COL_MAX - _COL_MIN)
 
 
 def _run_pumping() -> dict:
@@ -127,9 +115,7 @@ def _run_pumping() -> dict:
         dt_plan = DT_PLANNER,
     )
 
-    col_rad  = _IC.coll_eq_rad
-    roll_sp  = 0.0
-    pitch_sp = 0.0
+    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad)
 
     events   = BadEventLog()
     telemetry = []
@@ -146,9 +132,8 @@ def _run_pumping() -> dict:
         if ground_ctrl.phase == "hold":
             break
 
-        hub_state   = runner.hub_state
         tension_now = runner.tension_now
-        altitude    = -hub_state["pos"][2]
+        altitude    = runner.altitude
         cycle_idx   = min(ground_ctrl.cycle_count, N_CYCLES - 1)
 
         # ── Ground 10 Hz (internal to UnifiedGroundController) ────────────────
@@ -156,21 +141,12 @@ def _run_pumping() -> dict:
 
         # ── Lua 50 Hz ─────────────────────────────────────────────────────────
         if i % LUA_EVERY == 0:
-            sim._mock.millis_val = int(t_sim * 1000)
-            feed_obs(sim, runner.observe())
-            sim._update_fn()
-
-            ch1 = sim.ch_out[1]
-            ch2 = sim.ch_out[2]
-            ch3 = sim.ch_out[3]
-            if ch1 is not None: roll_sp  = _pwm_to_rate(ch1)
-            if ch2 is not None: pitch_sp = _pwm_to_rate(ch2)
-            if ch3 is not None: col_rad  = _pwm_to_col(ch3)
+            lua.tick(t_sim, runner)
 
         # ── Inner rate loop 400 Hz ────────────────────────────────────────────
-        omega_body    = hub_state["R"].T @ hub_state["omega"]
+        omega_body    = runner.omega_body
         omega_body[2] = 0.0
-        sr = runner.step(DT, col_rad, roll_sp, pitch_sp, omega_body,
+        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
                          rest_length=ground_ctrl.rest_length)
 
         # ── Energy accounting ─────────────────────────────────────────────────
@@ -194,7 +170,7 @@ def _run_pumping() -> dict:
         # ── Telemetry 20 Hz ───────────────────────────────────────────────────
         if i % tel_every == 0:
             telemetry.append(TelRow.from_physics(
-                runner, sr, col_rad, WIND,
+                runner, sr, lua.col_rad, WIND,
                 body_z_eq = None,
                 phase     = phase_label,
             ))

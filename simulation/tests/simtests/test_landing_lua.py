@@ -13,7 +13,6 @@ Phase sequence from steady_state_starting.json IC:
   descent    -- body_z fixed; winch tension-PI reels in; Lua VZ PI descends at v_land.
   final_drop -- collective=0; winch holds; hub drops onto catch pad.
 """
-import math
 import sys
 from pathlib import Path
 
@@ -28,7 +27,7 @@ import rotor_definition as rd
 from winch           import WinchController
 from simtest_log     import SimtestLog, BadEventLog
 from simtest_ic      import load_ic
-from simtest_runner  import PhysicsRunner, feed_obs, tel_every_from_env
+from simtest_runner  import PhysicsRunner, LuaAP, tel_every_from_env
 from telemetry_csv   import TelRow, write_csv
 from landing_planner import LandingGroundController
 from rawes_lua_harness import RawesLua
@@ -60,20 +59,6 @@ MIN_TETHER_M    = 2.0
 FLOOR_ALT_M          = 1.0
 ANCHOR_LAND_RADIUS_M = 20.0
 T_FINAL_DROP_MAX     = 15.0
-
-# ── PWM decoding (must match rawes.lua constants) ─────────────────────────────
-_COL_MIN    = -0.28
-_COL_MAX    =  0.10
-_ACRO_SCALE = 500.0 / (360.0 * math.pi / 180.0)
-
-
-def _pwm_to_rate(pwm: int) -> float:
-    return (pwm - 1500) / _ACRO_SCALE
-
-
-def _pwm_to_col(pwm: int) -> float:
-    return _COL_MIN + (pwm - 1000) / 1000.0 * (_COL_MAX - _COL_MIN)
-
 
 # ---------------------------------------------------------------------------
 # Simulation
@@ -107,15 +92,13 @@ def _run_landing() -> dict:
     sim.armed        = True
     sim.healthy      = True
     sim.vehicle_mode = 1   # ACRO
-    feed_obs(sim, runner.observe())
+
+    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad)
 
     events    = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
     tel_every     = tel_every_from_env(DT)
 
-    col_rad         = _IC.coll_eq_rad
-    roll_sp         = 0.0
-    pitch_sp        = 0.0
     floor_hit       = False
     t_final_start   = None
     final_drop_sent = False
@@ -138,9 +121,8 @@ def _run_landing() -> dict:
 
     t_sim = 0.0
     for i in range(max_steps):
-        t_sim     = i * DT
-        hub_state = runner.hub_state
-        altitude  = -hub_state["pos"][2]
+        t_sim    = i * DT
+        altitude = runner.altitude
 
         # ── Ground 10 Hz ─────────────────────────────────────────────────
         if i % planner_every == 0:
@@ -153,16 +135,7 @@ def _run_landing() -> dict:
 
         # ── Lua 100 Hz ────────────────────────────────────────────────────
         if i % LUA_EVERY == 0:
-            sim._mock.millis_val = int(t_sim * 1000)
-            feed_obs(sim, runner.observe())
-            sim._update_fn()
-
-            ch1 = sim.ch_out[1]
-            ch2 = sim.ch_out[2]
-            ch3 = sim.ch_out[3]
-            if ch1 is not None: roll_sp  = _pwm_to_rate(ch1)
-            if ch2 is not None: pitch_sp = _pwm_to_rate(ch2)
-            if ch3 is not None: col_rad  = _pwm_to_col(ch3)
+            lua.tick(t_sim, runner)
 
         # ── Send final_drop substate to Lua once ──────────────────────────
         if cmd.phase == "final_drop" and not final_drop_sent:
@@ -171,13 +144,14 @@ def _run_landing() -> dict:
             t_final_start   = t_sim
 
         # ── Inner ACRO rate PID + physics step ───────────────────────────
-        omega_body    = hub_state["R"].T @ hub_state["omega"]
+        omega_body    = runner.omega_body
         omega_body[2] = 0.0
-        sr = runner.step(DT, col_rad, roll_sp, pitch_sp, omega_body,
+        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
                          rest_length=winch.rest_length)
 
         # ── Floor detection + phase metrics ───────────────────────────────
         phase = cmd.phase
+        hub_state = runner.hub_state
         if phase == "final_drop":
             if not floor_hit and altitude <= FLOOR_ALT_M:
                 floor_hit      = True
@@ -202,7 +176,7 @@ def _run_landing() -> dict:
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
         if i % tel_every == 0:
             telemetry.append(TelRow.from_physics(
-                runner, sr, col_rad, WIND,
+                runner, sr, lua.col_rad, WIND,
                 body_z_eq=None, phase=phase,
             ))
 

@@ -9,7 +9,15 @@ PhysicsRunner is a thin wrapper around PhysicsCore (simulation/physics_core.py).
 PhysicsCore owns all physics constants (base_k_ang, k_yaw, T_AERO_OFFSET) and
 the integration loop (dynamics, aero, tether, spin ODE, angular damping).
 Callers own planners, TensionPI, WinchController — at their own rates.
+
+LuaAP
+-----
+Helper for Lua simtests.  Wraps the 50-100 Hz tick pattern that every Lua test
+repeats: millis update → feed_obs → update_fn → PWM decode.  After tick() the
+decoded (col_rad, roll_sp, pitch_sp) are held on the instance and forwarded to
+runner.step() at 400 Hz.
 """
+import math
 import os
 import sys
 from pathlib import Path
@@ -105,6 +113,17 @@ class PhysicsRunner:
     def tether(self):
         return self._core.tether
 
+    @property
+    def omega_body(self) -> np.ndarray:
+        """Body-frame angular velocity (mutable copy). Caller may zero yaw channel."""
+        hs = self._core.hub_state
+        return np.asarray(hs["R"], dtype=float).T @ np.asarray(hs["omega"], dtype=float)
+
+    @property
+    def altitude(self) -> float:
+        """Hub altitude above anchor [m] = -pos_z (NED)."""
+        return -float(self._core.hub_state["pos"][2])
+
     # ── Physics steps ─────────────────────────────────────────────────────────
 
     def step(self, dt: float, collective_rad: float,
@@ -151,3 +170,59 @@ def feed_obs(sim, obs: HubObservation) -> None:
     sim.pos_ned = obs.pos.tolist()
     sim.vel_ned = obs.vel.tolist()
     sim.gyro    = obs.gyro.tolist()
+
+
+class LuaAP:
+    """
+    Lua AP tick helper for simtests.
+
+    Encapsulates the 50-100 Hz tick pattern common to all Lua simtests:
+    millis update → feed_obs → update_fn → PWM decode.
+
+    After tick(), col_rad/roll_sp/pitch_sp hold the latest decoded channel
+    values and can be forwarded to runner.step() at 400 Hz between ticks.
+
+    Usage
+    -----
+    lua = LuaAP(sim, initial_col_rad=ic.coll_eq_rad)
+    for i in range(max_steps):
+        if i % lua_every == 0:
+            lua.tick(t_sim, runner)
+        omega_body    = runner.omega_body
+        omega_body[2] = 0.0   # yaw not controlled by Lua AP
+        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body)
+    """
+
+    COL_MIN    = -0.28
+    COL_MAX    =  0.10
+    ACRO_SCALE = 500.0 / (360.0 * math.pi / 180.0)
+
+    def __init__(self, sim, *, initial_col_rad: float = 0.0) -> None:
+        self._sim     = sim
+        self.col_rad  = float(initial_col_rad)
+        self.roll_sp  = 0.0
+        self.pitch_sp = 0.0
+
+    def tick(self, t_sim: float, runner: PhysicsRunner, *,
+             inject=None) -> None:
+        """
+        Feed physics obs into Lua, run update_fn, decode PWM channels.
+
+        inject : optional callable(sim, runner) called between feed_obs and
+                 update_fn — used to push NV floats (e.g. RAWES_TEN) into Lua
+                 before the update runs.
+        """
+        self._sim._mock.millis_val = int(t_sim * 1000)
+        feed_obs(self._sim, runner.observe())
+        if inject is not None:
+            inject(self._sim, runner)
+        self._sim._update_fn()
+        ch1 = self._sim.ch_out[1]
+        ch2 = self._sim.ch_out[2]
+        ch3 = self._sim.ch_out[3]
+        if ch1 is not None:
+            self.roll_sp = (ch1 - 1500) / self.ACRO_SCALE
+        if ch2 is not None:
+            self.pitch_sp = (ch2 - 1500) / self.ACRO_SCALE
+        if ch3 is not None:
+            self.col_rad = self.COL_MIN + (ch3 - 1000) / 1000.0 * (self.COL_MAX - self.COL_MIN)

@@ -123,9 +123,8 @@ def _run_landing() -> dict:
     for i in range(max_steps):
         t_sim = i * DT
 
-        hub_state   = runner.hub_state
-        altitude    = -hub_state["pos"][2]
         tension_now = runner.tension_now
+        altitude    = runner.altitude
 
         # ── Ground 10 Hz ─────────────────────────────────────────────────
         if i % planner_every == 0:
@@ -140,10 +139,11 @@ def _run_landing() -> dict:
         speed_now = (winch.rest_length - len_before) / DT
 
         # ── AP 400 Hz ─────────────────────────────────────────────────────
-        R          = np.asarray(hub_state["R"], dtype=float)
-        omega_body = R.T @ np.asarray(hub_state["omega"], dtype=float)
+        hub_state  = runner.hub_state
+        omega_body = runner.omega_body
         vel_ned    = np.asarray(hub_state["vel"], dtype=float)
-        collective_rad, rate_roll, rate_pitch = ap.step(hub_state["pos"], R, vel_ned, DT)
+        collective_rad, rate_roll, rate_pitch = ap.step(
+            hub_state["pos"], hub_state["R"], vel_ned, DT)
         sr = runner.step(DT, collective_rad, rate_roll, rate_pitch, omega_body,
                          rest_length=winch.rest_length)
 

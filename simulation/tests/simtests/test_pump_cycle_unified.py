@@ -35,6 +35,7 @@ from simtest_runner   import PhysicsRunner, tel_every_from_env
 from telemetry_csv    import TelRow, write_csv
 from pumping_planner  import PumpingGroundController
 from ap_controller    import TensionApController
+from comms            import VirtualComms
 
 _log   = SimtestLog(__file__)
 _IC    = load_ic()
@@ -120,6 +121,7 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
         el_corr_ki      = 0.0,   # daisy-chain disabled until gain is tuned
         events          = events,
     )
+    comms     = VirtualComms()   # zero latency/noise; set latency_s/alt_noise_m to model radio
     max_steps = int(T_END_SIM / DT) + 1
 
     cycle_energy_out = [0.0] * N_CYCLES
@@ -129,8 +131,9 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
     planner_every = max(1, round(DT_PLANNER / DT))
 
     collective_rad = _IC.coll_eq_rad
+    prev_alt       = float(-_IC.pos[2])
     cmd            = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
-                                 hub_alt_m=float(-_IC.pos[2]))  # sentinel for t=0
+                                 hub_alt_m=prev_alt)  # sentinel for t=0
 
     t_sim = 0.0
     for i in range(max_steps):
@@ -138,29 +141,40 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
         if ground.phase == "hold":
             break
 
-        hub_state   = runner.hub_state
         tension_now = runner.tension_now
-        altitude    = -hub_state["pos"][2]
+        altitude    = runner.altitude
         cycle_idx   = min(ground.cycle_count, N_CYCLES - 1)
 
-        # ── Ground 10 Hz: read load cell, compute setpoint, send to AP ──────
+        # ── Downlink: inject physics truth into comms (400 Hz) ────────────
+        comms.inject(t_sim, altitude)
+
+        # ── Ground 10 Hz: receive telemetry, compute setpoint, send to AP ─
         if i % planner_every == 0:
+            tel = comms.receive_telemetry(t_sim)
+            if tel is not None:
+                prev_alt = tel.hub_alt_m
             cmd = ground.step(t_sim, tension_now,
-                              rest_length=winch.rest_length, hub_alt_m=altitude)
+                              rest_length=winch.rest_length, hub_alt_m=prev_alt)
             if ground.phase == "hold":
                 break   # all cycles done; don't apply hold command to AP
-            ap.receive_command(cmd, DT_PLANNER)
-            winch.set_target(ground.winch_target_length, ground.winch_target_tension)
+            comms.send_command(t_sim, cmd)
 
-        # ── Winch 400 Hz ──────────────────────────────────────────────────
+        # ── Uplink: deliver any arrived command to AP ─────────────────────
+        ap_cmd = comms.poll_ap_command(t_sim)
+        if ap_cmd is not None:
+            ap.receive_command(ap_cmd, DT_PLANNER)
+
+        # ── Winch 400 Hz (wired local sensor — no radio limit) ────────────
+        winch.set_target(ground.winch_target_length, ground.winch_target_tension)
         len_before = winch.rest_length
         winch.step(tension_now, DT)
         speed_now = (winch.rest_length - len_before) / DT
 
         # ── AP 400 Hz: TensionApController → rate commands → physics ─────
-        R          = np.asarray(hub_state["R"], dtype=float)
-        omega_body = R.T @ np.asarray(hub_state["omega"], dtype=float)
-        collective_rad, rate_roll, rate_pitch = ap.step(hub_state["pos"], R, DT)
+        hub_state  = runner.hub_state
+        omega_body = runner.omega_body
+        collective_rad, rate_roll, rate_pitch = ap.step(
+            hub_state["pos"], hub_state["R"], DT)
         sr = runner.step(DT, collective_rad, rate_roll, rate_pitch, omega_body,
                          rest_length=winch.rest_length)
 
@@ -185,7 +199,7 @@ def _run_pumping(aero_model: str = "skewed_wake") -> dict:
         if i % tel_every == 0:
             telemetry.append(TelRow.from_physics(
                 runner, sr, collective_rad, WIND,
-                body_z_eq                    = R[:, 2],
+                body_z_eq                    = hub_state["R"][:, 2],
                 phase                        = phase_label,
                 tension_setpoint             = ap.tension_setpoint,
                 collective_from_tension_ctrl = collective_rad,
