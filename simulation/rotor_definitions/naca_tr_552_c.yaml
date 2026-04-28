@@ -44,7 +44,6 @@ airfoil:
   # induced velocity pushes effective inflow angle to ≥ 14° regardless of collective.
   # The lumped single-point BEM requires a much lower effective slope to keep AoA in
   # the linear range.  0.87/rad is from De Schutter 2018 Table I (SG6040 approximation).
-  CL_alpha_per_rad:  0.87   # De Schutter 2018 simulation value [/rad]
                              # (represents whole-rotor effective lift response in the
                              #  lumped single-point autorotation BEM approximation)
   # Drag polar:  CD = CD0 + CL²/(π·AR·e)
@@ -68,8 +67,6 @@ control:
 # Autorotation parameters estimated for 99.6 RPM equilibrium
 # (used by spin ODE, not by the quasi-static BEM comparison)
 autorotation:
-  K_drive_Nms_m:       2.0    # estimated to give ~100 RPM at μ=0.20
-  K_drag_Nms2_rad2:    0.02
   I_ode_kgm2:          20.0   # estimated for aluminium blade assembly
   omega_min_rad_s:     0.5
   omega_eq_rad_s:      10.43  # 99.6 RPM = 10.43 rad/s

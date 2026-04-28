@@ -85,5 +85,5 @@ for coll in np.arange(-0.30, 0.15, 0.01):
           f"{aero.last_K_skew:7.4f}  {aero.last_v_i:6.3f}")
 
 print()
-print(f"col_min_for_altitude_rad(xi=80): {col_min_for_altitude_rad(aero, XI_DEG, MASS_KG):.4f} rad")
+print(f"col_min_for_altitude_rad(xi=80): {col_min_for_altitude_rad(aero, XI_DEG, MASS_KG, omega=OMEGA_SPIN):.4f} rad")
 print(f"COL_CRUISE hardcoded:             0.0790 rad")

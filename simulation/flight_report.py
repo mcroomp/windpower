@@ -75,8 +75,6 @@ def plot_flight_report(
                 telem["v_axial"]     = [r.aero_v_axial        for r in rows]
                 telem["v_inplane"]   = [r.aero_v_inplane      for r in rows]
                 telem["omega_rotor"] = [r.omega_rotor         for r in rows]
-                telem["Q_drag"]      = [r.aero_Q_drag         for r in rows]
-                telem["Q_drive"]     = [r.aero_Q_drive        for r in rows]
                 telem["pos_z"]       = [r.pos_z               for r in rows]
                 telem["F_z"]         = [r.F_z                 for r in rows]
                 telem["collective"]  = [math.degrees(r.collective_rad) for r in rows]

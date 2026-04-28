@@ -63,7 +63,6 @@ COLUMNS: list[str] = [
     "tension_setpoint", "collective_from_tension_ctrl", "gnd_alt_cmd_m",
     "winch_speed_ms",
     "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
-    "aero_Q_drag", "aero_Q_drive",
     "F_x", "F_y", "F_z",                # net aero force NED [N]
     "M_x", "M_y", "M_z",                # net aero moment NED [N·m]
     "rpy_roll", "rpy_pitch", "rpy_yaw",
@@ -161,8 +160,6 @@ class TelRow:
     aero_v_axial:   float = 0.0
     aero_v_inplane: float = 0.0
     aero_v_i:       float = 0.0
-    aero_Q_drag:    float = 0.0
-    aero_Q_drive:   float = 0.0
 
     F_x: float = 0.0
     F_y: float = 0.0
@@ -374,8 +371,6 @@ class TelRow:
             aero_v_axial        = float(d.get("aero_v_axial",     0.0)),
             aero_v_inplane      = float(d.get("aero_v_inplane",   0.0)),
             aero_v_i            = float(d.get("aero_v_i",         0.0)),
-            aero_Q_drag         = float(d.get("aero_Q_drag",      0.0)),
-            aero_Q_drive        = float(d.get("aero_Q_drive",     0.0)),
             F_x                 = float(nf[0]),
             F_y                 = float(nf[1]),
             F_z                 = float(nf[2]),
@@ -486,7 +481,7 @@ class TelRow:
 
         aero_fx = aero_fy = aero_fz = 0.0
         aero_mx = aero_my = aero_mz = 0.0
-        aero_T = aero_v_axial = aero_v_inplane = aero_v_i = aero_Q_drag = aero_Q_drive = 0.0
+        aero_T = aero_v_axial = aero_v_inplane = aero_v_i = 0.0
         net_F = np.zeros(3)
         net_M = np.zeros(3)
         if aero_result is not None:
@@ -502,8 +497,6 @@ class TelRow:
                 aero_v_axial   = float(aero_obj.last_v_axial)
                 aero_v_inplane = float(aero_obj.last_v_inplane)
                 aero_v_i       = float(aero_obj.last_v_i)
-                aero_Q_drag    = float(aero_obj.last_Q_drag)
-                aero_Q_drive   = float(aero_obj.last_Q_drive)
 
         tm = np.asarray(tether_moment, dtype=float) if tether_moment is not None else np.zeros(3)
 
@@ -555,8 +548,6 @@ class TelRow:
             aero_v_axial        = aero_v_axial,
             aero_v_inplane      = aero_v_inplane,
             aero_v_i            = aero_v_i,
-            aero_Q_drag         = aero_Q_drag,
-            aero_Q_drive        = aero_Q_drive,
             F_x                 = float(net_F[0]),
             F_y                 = float(net_F[1]),
             F_z                 = float(net_F[2]),

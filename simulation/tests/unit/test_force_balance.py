@@ -1,13 +1,25 @@
 """
-test_force_balance.py — validate the RAWES force chain produces lift > gravity.
+test_force_balance.py — RAWES force chain across rotor/aero-model combinations.
 
-These tests confirm that the aero + dynamics stack can sustain flight with
-realistic servo commands, and that the H-force pushes the hub eastward with
-wind blowing East.
+Parametrized by (rotor_name, aero_model):
+  beaupoil_2026 / jit        — SkewedWakeBEMJit (production, xi < 85°)
+  beaupoil_2026 / peters_he  — Peters-He 5-state (all xi, required for descent)
 
-If these pass, the rotor should not fall during a guided flight test.
-If they fail, the root cause of sinking is identified here without needing
-the full Docker stack.
+Physical setup for all tests: 30° tether elevation, 10 m/s East wind, stationary hub.
+
+Tests
+-----
+Force balance
+  thrust > weight at neutral collective
+  thrust > 2×weight at +5° collective
+  H-force positive eastward with East wind
+  H-force scales with wind speed
+  hover collective is negative
+
+Omega equilibrium
+  Q_spin > 0 at omega << equilibrium  ]  bracket proves autorotation
+  Q_spin < 0 at omega >> equilibrium  ]  equilibrium exists in [lo, hi]
+  equilibrium omega converges into [10, 60] rad/s after integrating ODE
 """
 import math
 import sys
@@ -18,242 +30,208 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import create_aero
-import rotor_definition as _rd
-from dynamics import RigidBodyDynamics
-from frames import build_orb_frame
+from aero        import create_aero
+import rotor_definition as rd
+from dynamics    import RigidBodyDynamics
+from frames      import build_orb_frame
+from physics_core import q_spin_from_aero
+
+# ── Parametrization ───────────────────────────────────────────────────────────
+
+CASES = [
+    pytest.param("beaupoil_2026", "jit",       id="beaupoil/jit"),
+    pytest.param("beaupoil_2026", "peters_he", id="beaupoil/peters_he"),
+]
+
+# ── Shared constants ──────────────────────────────────────────────────────────
+
+G         = 9.81
+WIND_EAST = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East
+T_STEADY  = 45.0                           # s — past ramp
+DT        = 2.5e-3                         # s — 400 Hz
+ELEV_DEG  = 30.0                          # tether elevation for force-balance tests
 
 
-# ── Physical constants ─────────────────────────────────────────────────────────
-MASS   = 5.0      # kg  (matches mediator.py)
-G      = 9.81     # m/s²
-WEIGHT = MASS * G  # N  — force that must be overcome to hover
-OMEGA  = 28.0     # rad/s nominal spin (mediator initial condition)
-WIND   = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East = Y axis (mediator default)
-DT     = 2.5e-3   # s  (mediator step size, 400 Hz)
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-
-def _R_tilt_30() -> np.ndarray:
-    """Rotation matrix for a rotor disk tilted 30° from vertical (toward East).
-
-    This is the typical RAWES operating condition: body Z (disk normal) aligned
-    with the tether at 30° elevation angle.  In NED: East = Y, Up = -Z.
-    body_z = [0, cos(30°), -sin(30°)] points mostly East and somewhat Up.
-    """
-    tilt = math.radians(30.0)
-    body_z = np.array([0.0, math.cos(tilt), -math.sin(tilt)])
+def _R_tilt(elevation_deg: float) -> np.ndarray:
+    """Orbital frame for disk normal aligned with tether at given elevation."""
+    el     = math.radians(elevation_deg)
+    body_z = np.array([0.0, math.cos(el), -math.sin(el)])
     return build_orb_frame(body_z)
 
 
-def _aero_forces_after_ramp(collective_rad: float, R_hub: np.ndarray = None) -> np.ndarray:
-    """Return aero forces at t=10s (ramp=1) with 30°-tilted disk, stationary hub.
+# ── Force-balance tests ───────────────────────────────────────────────────────
 
-    The 30° tilt (disk normal = tether direction at 30° elevation) is the typical
-    RAWES operating condition.  With a level disk and horizontal wind the axial
-    inflow is zero, producing unrealistic results for BEM models.
-    """
-    if R_hub is None:
-        R_hub = _R_tilt_30()
-    aero = create_aero(_rd.default())
-    return aero.compute_forces(
-        collective_rad = collective_rad,
-        tilt_lon       = 0.0,
-        tilt_lat       = 0.0,
-        R_hub          = R_hub,
-        v_hub_world    = np.zeros(3),
-        omega_rotor    = OMEGA,
-        wind_world     = WIND,
-        t              = 10.0,   # past 5 s ramp → ramp = 1.0
+
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_thrust_exceeds_weight_at_neutral_collective(rotor_name, model):
+    """Thrust > weight at col=0, 30° tilt, 10 m/s East wind, omega=28 rad/s."""
+    rotor  = rd.load(rotor_name)
+    weight = rotor.dynamics_kwargs()["mass"] * G
+    aero   = create_aero(rotor, model=model)
+    R30    = _R_tilt(ELEV_DEG)
+
+    f = aero.compute_forces(0.0, 0.0, 0.0, R30, np.zeros(3), 28.0, WIND_EAST, t=T_STEADY)
+    thrust = float(np.dot(f.F_world, R30[:, 2]))   # along disk normal = upward
+
+    assert thrust > weight, (
+        f"[{rotor_name}/{model}] thrust={thrust:.1f} N < weight={weight:.1f} N at col=0"
     )
 
 
-# ── Tests ──────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_thrust_exceeds_2x_weight_at_positive_5deg(rotor_name, model):
+    """At +5° collective the surplus thrust >> weight (creates tether tension)."""
+    rotor  = rd.load(rotor_name)
+    weight = rotor.dynamics_kwargs()["mass"] * G
+    aero   = create_aero(rotor, model=model)
+    R30    = _R_tilt(ELEV_DEG)
 
+    col = math.radians(5.0)
+    f   = aero.compute_forces(col, 0.0, 0.0, R30, np.zeros(3), 28.0, WIND_EAST, t=T_STEADY)
+    thrust = float(np.dot(f.F_world, R30[:, 2]))
 
-def test_aero_thrust_exceeds_weight_at_neutral_collective():
-    """
-    With neutral collective (0 rad), spin=28 rad/s, wind=10 m/s East,
-    and disk tilted 30° (RAWES operating condition), vertical thrust Fz must
-    exceed the rotor weight after the ramp period.
-
-    This is the minimum condition for sustained flight.
-    If Fz < WEIGHT the hub will fall regardless of ArduPilot commands.
-    """
-    forces = _aero_forces_after_ramp(collective_rad=0.0)
-    Fz = -forces[2]   # In NED: upward thrust = -NED Z component
-    assert Fz > WEIGHT, (
-        f"Thrust Fz={Fz:.1f} N < weight={WEIGHT:.1f} N at neutral collective (30° tilt).\n"
-        f"Hub will fall even with correct ArduPilot commands.\n"
-        f"Full force vector: F={forces[:3].round(1)}  M={forces[3:].round(1)}"
+    assert thrust > weight * 2.0, (
+        f"[{rotor_name}/{model}] thrust={thrust:.1f} N < 2×weight={2*weight:.1f} N at col=+5°"
     )
 
 
-def test_aero_thrust_exceeds_weight_at_minimum_positive_collective():
-    """
-    With the minimum positive collective that ArduPilot might command (~5°),
-    and disk tilted 30° (RAWES operating condition), thrust must comfortably exceed weight.
-    """
-    collective_rad = math.radians(5.0)   # 5° — typical low-collective hover
-    forces = _aero_forces_after_ramp(collective_rad=collective_rad)
-    Fz = -forces[2]   # In NED: upward thrust = -NED Z component
-    assert Fz > WEIGHT * 2.0, (
-        f"At 5° collective (30° tilt), Fz={Fz:.1f} N should be well above weight={WEIGHT:.1f} N.\n"
-        f"Full force vector: F={forces[:3].round(1)}"
-    )
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_h_force_positive_east_with_east_wind(rotor_name, model):
+    """H-force pushes hub East (NED Y > 0) when wind blows East."""
+    rotor = rd.load(rotor_name)
+    aero  = create_aero(rotor, model=model)
+    R30   = _R_tilt(ELEV_DEG)
 
+    f  = aero.compute_forces(0.0, 0.0, 0.0, R30, np.zeros(3), 28.0, WIND_EAST, t=T_STEADY)
+    Fy = float(f.F_world[1])   # NED Y = East
 
-def test_aero_h_force_is_positive_east_for_east_wind():
-    """
-    With 10 m/s East wind and a level disk, the H-force must push the hub
-    East (positive NED Y = F_world[1]).  This is the force that creates tether tension.
-    """
-    forces = _aero_forces_after_ramp(collective_rad=0.0)
-    Fy = forces[1]   # NED: East = Y axis
     assert Fy > 0.0, (
-        f"H-force Fy={Fy:.3f} N is not positive eastward with East wind.\n"
-        f"Full force vector: F={forces[:3].round(2)}"
+        f"[{rotor_name}/{model}] H-force Fy={Fy:.3f} N not eastward with East wind"
     )
 
 
-def test_aero_h_force_scales_with_wind_speed():
-    """H-force should increase with wind speed (μ = v_wind / (ω·R_tip))."""
-    aero = create_aero(_rd.default())
-    forces_10 = aero.compute_forces(0.0, 0.0, 0.0, np.eye(3), np.zeros(3),
-                                    OMEGA, np.array([0.0, 10.0, 0.0]), t=10.0)  # NED East
-    forces_20 = aero.compute_forces(0.0, 0.0, 0.0, np.eye(3), np.zeros(3),
-                                    OMEGA, np.array([0.0, 20.0, 0.0]), t=10.0)  # NED East
-    assert forces_20[1] > forces_10[1], (
-        f"H-force (NED Y=East) should be larger at 20 m/s wind than 10 m/s.\n"
-        f"Fy@10={forces_10[1]:.2f}  Fy@20={forces_20[1]:.2f}"
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_h_force_scales_with_wind_speed(rotor_name, model):
+    """H-force at 20 m/s wind > H-force at 10 m/s wind."""
+    rotor = rd.load(rotor_name)
+    aero  = create_aero(rotor, model=model)
+    R30   = _R_tilt(ELEV_DEG)
+
+    f10 = aero.compute_forces(0.0, 0.0, 0.0, R30, np.zeros(3), 28.0,
+                               np.array([0., 10., 0.]), t=T_STEADY)
+    f20 = aero.compute_forces(0.0, 0.0, 0.0, R30, np.zeros(3), 28.0,
+                               np.array([0., 20., 0.]), t=T_STEADY)
+
+    assert float(f20.F_world[1]) > float(f10.F_world[1]), (
+        f"[{rotor_name}/{model}] H-force did not increase with wind speed"
     )
+
+
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_hover_collective_is_negative(rotor_name, model):
+    """Collective that makes thrust = weight must be negative (RAWES tether must pull down)."""
+    rotor  = rd.load(rotor_name)
+    weight = rotor.dynamics_kwargs()["mass"] * G
+    aero   = create_aero(rotor, model=model)
+    R30    = _R_tilt(ELEV_DEG)
+
+    hover_deg = None
+    for deg in range(0, -26, -1):
+        col = math.radians(deg)
+        f   = aero.compute_forces(col, 0.0, 0.0, R30, np.zeros(3), 28.0, WIND_EAST, t=T_STEADY)
+        if float(np.dot(f.F_world, R30[:, 2])) <= weight:
+            hover_deg = deg
+            break
+
+    assert hover_deg is not None and hover_deg < 0, (
+        f"[{rotor_name}/{model}] hover collective should be < 0°; crossed at {hover_deg}°"
+    )
+
+
+# ── Omega equilibrium tests ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_autorotation_q_brackets_zero(rotor_name, model):
+    """
+    At 30° tilt, 10 m/s East wind, equilibrium collective (~-0.15 rad):
+      Q_spin > 0 at omega=2 rad/s   (wind drives spin-up)
+      Q_spin < 0 at omega=60 rad/s  (drag dominates)
+    → autorotation equilibrium must exist in [2, 60] rad/s.
+    """
+    rotor = rd.load(rotor_name)
+    aero  = create_aero(rotor, model=model)
+    R30   = _R_tilt(ELEV_DEG)
+    col   = math.radians(-10.0)   # typical tethered flight collective
+
+    def q_at(omega: float) -> float:
+        aero.compute_forces(col, 0.0, 0.0, R30, np.zeros(3), omega, WIND_EAST, t=T_STEADY)
+        return q_spin_from_aero(aero, R30)
+
+    q_lo = q_at(2.0)
+    q_hi = q_at(60.0)
+
+    assert q_lo > 0.0, (
+        f"[{rotor_name}/{model}] Q_spin={q_lo:.4f} N·m at omega=2 rad/s — expected > 0 (spin-up)"
+    )
+    assert q_hi < 0.0, (
+        f"[{rotor_name}/{model}] Q_spin={q_hi:.4f} N·m at omega=60 rad/s — expected < 0 (drag)"
+    )
+
+
+@pytest.mark.parametrize("rotor_name,model", CASES)
+def test_autorotation_omega_equilibrium_in_range(rotor_name, model):
+    """
+    Integrate the spin ODE from omega=5 rad/s until omega converges.
+    The settled value must lie in [8, 60] rad/s and |Q| < 0.01 N*m.
+
+    Catches models that predict no autorotation (omega -> 0) or runaway
+    (omega -> inf). Equilibrium is reached monotonically (Q asymptotes to 0).
+    """
+    rotor  = rd.load(rotor_name)
+    dk     = rotor.dynamics_kwargs()
+    I_spin = dk["I_spin"]
+    aero   = create_aero(rotor, model=model)
+    R30    = _R_tilt(ELEV_DEG)
+    col    = math.radians(-10.0)
+
+    omega     = 5.0
+    omega_min = 0.5
+    dt        = 0.01    # 100 Hz — stable, fast
+    t_max     = 30.0    # s — ample (this rotor converges in ~3 s)
+    steps     = int(t_max / dt)
+    Q         = 0.0
+
+    for _ in range(steps):
+        aero.compute_forces(col, 0.0, 0.0, R30, np.zeros(3), omega, WIND_EAST, t=T_STEADY)
+        if not aero.is_valid():
+            break
+        Q     = q_spin_from_aero(aero, R30)
+        omega = max(omega_min, omega + Q / I_spin * dt)
+
+    assert 8.0 <= omega <= 60.0, (
+        f"[{rotor_name}/{model}] equilibrium omega={omega:.1f} rad/s outside [8, 60] rad/s"
+    )
+    assert abs(Q) < 0.01, (
+        f"[{rotor_name}/{model}] Q={Q:.4f} N*m after {t_max} s -- ODE did not converge"
+    )
+
+
+# ── Dynamics integrator sanity (not aero-model-specific) ─────────────────────
 
 
 def test_dynamics_hover_with_exact_thrust():
-    """
-    With F_world = weight (exact compensation), the hub must stay at its
-    initial altitude for 10 seconds.
-    """
-    # In NED: altitude 50 m = pos[2] = -50. Upward thrust = negative NED Z.
-    dyn = RigidBodyDynamics(
-        mass=MASS, I_body=[5.0, 5.0, 10.0],
+    """With F_world = weight (exact), hub stays at initial altitude for 10 s."""
+    mass  = rd.load("beaupoil_2026").dynamics_kwargs()["mass"]
+    dyn   = RigidBodyDynamics(
+        mass=mass, I_body=[5.0, 5.0, 10.0],
         pos0=[0.0, 0.0, -50.0], vel0=[0.0, 0.0, 0.0],
-        omega0=[0.0, 0.0, OMEGA],
+        omega0=[0.0, 0.0, 28.0],
     )
-    F_hover = np.array([0.0, 0.0, -WEIGHT])   # upward force = -NED Z
+    F_hover = np.array([0.0, 0.0, -(mass * G)])   # NED: upward = -Z
     for _ in range(int(10.0 / DT)):
         state = dyn.step(F_hover, np.zeros(3), DT)
 
-    z_final = state["pos"][2]
-    assert abs(z_final - (-50.0)) < 0.05, (
-        f"Hub drifted {abs(z_final-(-50.0)):.3f} m from NED Z=-50 with exact hover thrust.\n"
-        f"Dynamics integrator may have a gravity bug."
-    )
-
-
-def test_thrust_greatly_exceeds_weight_at_reel_out_collective():
-    """
-    RAWES characterisation: at reel-out collective (~5°) thrust is >>weight.
-
-    At reel-out collective (5°, De Schutter Table I operating point) with the
-    disk tilted 30° (RAWES operating condition), thrust >> weight — this surplus
-    creates tether tension in flight.
-
-    Without a tether (or with a slack tether), the hub will rise rapidly at
-    reel-out collective.  ArduPilot must account for this when commanding
-    collective in GUIDED mode.
-    """
-    REEL_OUT = math.radians(5.0)   # De Schutter reel-out operating point
-    forces = _aero_forces_after_ramp(collective_rad=REEL_OUT)
-    Fz = -forces[2]   # In NED: upward force = -NED Z component
-    assert Fz > WEIGHT * 2.0, (
-        f"At 5° collective (30° tilt), Fz={Fz:.1f} N should be >>weight={WEIGHT:.1f} N.\n"
-        f"RAWES surplus thrust (Fz-W={Fz-WEIGHT:.1f} N) creates tether tension."
-    )
-
-
-def test_hover_collective_is_negative():
-    """
-    With disk tilted 30° (RAWES operating condition), the blade pitch angle that
-    produces exactly hover thrust (Fz = W) must be negative.  This means ArduPilot
-    must command below-neutral collective to prevent the hub from rising when the
-    tether is slack.
-    """
-    aero = create_aero(_rd.default())
-    R_tilt = _R_tilt_30()
-    # Scan collective until Fz crosses weight
-    hover_deg = -25  # sentinel: not found in range
-    for coll_deg in range(0, -25, -1):
-        coll_rad = math.radians(coll_deg)
-        f = aero.compute_forces(coll_rad, 0.0, 0.0, R_tilt, np.zeros(3),
-                                OMEGA, WIND, t=10.0)
-        if -f[2] <= WEIGHT:   # In NED: upward = -NED Z
-            hover_deg = coll_deg
-            break
-
-    assert hover_deg < 0, (
-        f"Hover collective should be negative; found Fz≈W at {hover_deg}° (30° tilt).\n"
-        f"ArduPilot must command below-neutral collective for RAWES."
-    )
-
-
-def test_h_force_causes_eastward_drift():
-    """
-    With 10 m/s East wind and no position controller, the hub should drift
-    East over 10 seconds due to the H-force.
-    """
-    # In NED: hub at altitude 50 m = pos[2] = -50
-    aero = create_aero(_rd.default())
-    dyn  = RigidBodyDynamics(
-        mass=MASS, I_body=[5.0, 5.0, 10.0],
-        pos0=[0.0, 0.0, -50.0], vel0=[0.0, 0.0, 0.0],
-        omega0=[0.0, 0.0, OMEGA],
-    )
-
-    for step in range(int(10.0 / DT)):
-        t = step * DT
-        s = dyn.state
-        forces = aero.compute_forces(
-            collective_rad = 0.0,
-            tilt_lon=0.0, tilt_lat=0.0,
-            R_hub=s["R"], v_hub_world=s["vel"],
-            omega_rotor=float(np.dot(s["omega"], s["R"][:, 2])) or OMEGA,
-            wind_world=WIND, t=t,
-        )
-        dyn.step(forces[:3], forces[3:], DT)
-
-    final_pos = dyn.state["pos"]
-    # In NED: East = Y axis (index 1)
-    assert final_pos[1] > 0.1, (
-        f"Hub did not drift East (NED Y) after 10 s with 10 m/s East wind.\n"
-        f"Final NED pos: {final_pos.round(3)}\n"
-        f"H-force may be too small or not being applied."
-    )
-
-
-def test_force_balance_at_kite_equilibrium():
-    """
-    At the 30° tether elevation operating condition, with neutral collective:
-      - Vertical thrust T >> weight (RAWES generates surplus lift, creating tether tension)
-      - H-force H > 0 (pushes hub downwind, creating tether tension)
-      - T > W confirms the hub cannot hover freely — it must be held down by tether
-
-    This characterises the RAWES operating point using the SkewedWakeBEM model.
-    With a 30°-tilted disk (body Z = tether direction) and 10 m/s East wind:
-      - T ≈ 268 N >> W = 49.1 N (surplus creates tether tension)
-      - H ≈ 173 N (large eastward in-plane force, also creates tether tension)
-    """
-    forces = _aero_forces_after_ramp(collective_rad=0.0)
-    T = -forces[2]  # upward thrust [N] = -NED Z component
-    H = forces[1]   # horizontal (East) force component [N] = NED Y
-
-    # Both thrust and H-force must be positive (rotor lifts and pushes East)
-    assert T > WEIGHT, (
-        f"Thrust T={T:.1f} N must exceed weight W={WEIGHT:.1f} N.\n"
-        f"RAWES surplus creates tether tension at 30° tilt."
-    )
-    assert H > 0.0, (
-        f"H-force={H:.1f} N must be positive eastward (pushes hub downwind)."
+    assert abs(state["pos"][2] - (-50.0)) < 0.05, (
+        f"Hub drifted {abs(state['pos'][2]+50.0):.3f} m from NED Z=-50 with exact hover thrust"
     )

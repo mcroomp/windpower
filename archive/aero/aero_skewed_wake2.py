@@ -82,8 +82,6 @@ class SkewedWakeBEM2:
         self.CL_ALPHA   = float(p["CL_alpha"])
         self.AOA_LIMIT  = float(p["aoa_limit"])
         self.ramp_time  = float(ramp_time)
-        self.k_drive_spin   = float(p["k_drive_spin"])
-        self.k_drag_spin    = float(p["k_drag_spin"])
         self.pitch_gain_rad = float(p["pitch_gain_rad"])
 
         span = self.R_TIP - self.R_ROOT
@@ -120,9 +118,6 @@ class SkewedWakeBEM2:
         self.last_v_i            = self._v0
         self.last_v_inplane      = 0.0
         self.last_ramp           = 0.0
-        self.last_Q_spin         = 0.0
-        self.last_Q_drive        = 0.0
-        self.last_Q_drag         = 0.0
         self.last_M_spin         = np.zeros(3)
         self.last_M_cyc          = np.zeros(3)
         self.last_H_force        = 0.0
@@ -366,7 +361,6 @@ class SkewedWakeBEM2:
         ramp = self._ramp_factor(t)
 
         disk_normal  = R_hub[:, 2]
-        omega_abs    = abs(float(omega_rotor))
         tilt_lon_rad = tilt_lon * self.pitch_gain_rad
         tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
@@ -397,8 +391,6 @@ class SkewedWakeBEM2:
 
         # ── Disk-frame scalars ────────────────────────────────────────────────
         T_disk  = float(np.dot(F_total, disk_normal))
-        Mx_disk = float(np.dot(M_total, R_hub[:, 0]))
-        My_disk = float(np.dot(M_total, R_hub[:, 1]))   # noqa: F841 (available for callers)
 
         # ── Spin / cyclic decomposition ───────────────────────────────────────
         Q_spin_scalar = float(np.dot(M_total, disk_normal))
@@ -406,8 +398,6 @@ class SkewedWakeBEM2:
         M_cyc_world   = M_total - M_spin_world
 
         # ── Diagnostics ────────────────────────────────────────────────────────
-        Q_drive = float(self.k_drive_spin * v_inplane)
-        Q_drag  = float(self.k_drag_spin  * omega_abs**2)
         _, chi  = self._coleman_kx(self._v0, v_axial, v_inplane)
 
         self.last_T              = T_disk
@@ -415,9 +405,6 @@ class SkewedWakeBEM2:
         self.last_v_i            = self._v0
         self.last_v_inplane      = v_inplane
         self.last_ramp           = ramp
-        self.last_Q_spin         = Q_drive - Q_drag
-        self.last_Q_drive        = Q_drive
-        self.last_Q_drag         = Q_drag
         self.last_M_spin         = np.array(M_spin_world)
         self.last_M_cyc          = np.array(M_cyc_world)
         self.last_H_force        = float(np.linalg.norm(F_total - T_disk * disk_normal))
@@ -435,6 +422,6 @@ class SkewedWakeBEM2:
         return AeroResult(
             F_world   = np.array(F_total),
             M_orbital = np.array(M_cyc_world),
-            Q_spin    = self.last_Q_spin,
+            Q_spin    = Q_spin_scalar,
             M_spin    = np.array(M_spin_world),
         )

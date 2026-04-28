@@ -80,7 +80,7 @@ def test_constants_have_expected_values(sim):
     assert float(f.G_ACCEL)               == pytest.approx(9.81)
     assert float(f.KP_TEN)               == pytest.approx(2e-4)
     assert float(f.KI_TEN)               == pytest.approx(1e-3)
-    assert float(f.COL_MAX_TEN)          == pytest.approx(0.0)
+    assert float(f.COL_MAX_TEN)          == pytest.approx(0.10)
 
 
 # ── bz_altitude_hold ─────────────────────────────────────────────────────────

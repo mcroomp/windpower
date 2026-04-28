@@ -141,7 +141,12 @@ def simulate_point(
     conv_steps = max(1, int(round(conv_window_s / dt)))
 
     for i in range(n_steps):
-        f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(), omega, wind, t=45.0)
+        try:
+            f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(), omega, wind, t=45.0)
+        except (OverflowError, ValueError, FloatingPointError):
+            break
+        if not aero.is_valid():
+            break
 
         thrust     = float(np.dot(f.F_world, bz))
         Q_net      = float(np.dot(aero.last_M_spin, bz))

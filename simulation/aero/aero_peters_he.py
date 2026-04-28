@@ -75,8 +75,9 @@ class PetersHeBEM:
     compute_forces() signature.  Adds three inflow ODE states.
     """
 
-    N_AZ     = 12
-    N_RADIAL = 10
+    N_AZ          = 12
+    N_RADIAL      = 10
+    INFLOW_MAX_MS = 50.0   # plausible upper bound on any inflow state [m/s]
 
     def __init__(self, rotor, ramp_time: float = 5.0,
                  state_dict: dict | None = None, **overrides):
@@ -161,6 +162,13 @@ class PetersHeBEM:
     def from_definition(cls, defn, state_dict: dict | None = None,
                         **overrides) -> "PetersHeBEM":
         return cls(defn, state_dict=state_dict, **overrides)
+
+    def is_valid(self) -> bool:
+        """True when all inflow states are within physical bounds and last_T is finite."""
+        if not math.isfinite(self.last_T):
+            return False
+        m = self.INFLOW_MAX_MS
+        return abs(self._v0) <= m and abs(self._v1c) <= m and abs(self._v1s) <= m
 
     def _ramp_factor(self, t: float) -> float:
         if t >= self.ramp_time:

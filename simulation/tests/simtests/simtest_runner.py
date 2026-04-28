@@ -54,7 +54,7 @@ class PhysicsRunner:
     T_AERO_OFFSET = PhysicsCore.T_AERO_OFFSET
 
     def __init__(self, rotor, ic, wind, *, z_floor: float = -1.0,
-                 aero_model: str = "skewed_wake", aero_override=None,
+                 aero_model: str = "jit", aero_override=None,
                  col_min_rad: float, col_max_rad: float):
         """
         Parameters
@@ -63,7 +63,7 @@ class PhysicsRunner:
         ic            : object with .pos, .vel, .R0, .rest_length, .coll_eq_rad, .omega_spin
         wind          : NED wind vector [m/s]
         z_floor       : NED Z floor for dynamics (default -1.0 m = 1 m altitude floor)
-        aero_model    : aero model key passed to create_aero() (default "skewed_wake")
+        aero_model    : aero model key passed to create_aero() (default "jit" = PetersHeBEMJit)
         aero_override : if provided, used directly instead of create_aero()
         col_min_rad   : collective floor for AcroControllerSitl servo model
         col_max_rad   : collective ceiling for AcroControllerSitl servo model

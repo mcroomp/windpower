@@ -67,7 +67,6 @@ class GlauertStateBEM:
 
     Diagnostic attributes (set after each compute_forces call)
     ----------------------------------------------------------
-    last_Q_spin       — empirical spin ODE torque [N·m]
     last_a_mean       — mean axial induction factor across strips
     last_state        — dominant inflow state ('windmill','turbulent','vortex_ring','climb')
     last_CT_bem       — mean BEM thrust coefficient CT = T/(ρ·A·v_eff²)
@@ -90,8 +89,6 @@ class GlauertStateBEM:
         self.K_cyc        = float(p["K_cyc"])
         self.aoa_limit    = float(p["aoa_limit"])
         self.ramp_time    = float(ramp_time)
-        self.k_drive_spin   = float(p["k_drive_spin"])
-        self.k_drag_spin    = float(p["k_drag_spin"])
         self.pitch_gain_rad = float(p["pitch_gain_rad"])
 
         span             = self.r_tip - self.r_root
@@ -111,7 +108,6 @@ class GlauertStateBEM:
         self.last_v_i        = 0.0
         self.last_v_inplane  = 0.0
         self.last_ramp       = 0.0
-        self.last_Q_spin     = 0.0
         self.last_M_spin     = np.zeros(3)
         self.last_M_cyc      = np.zeros(3)
         self.last_H_force    = 0.0
@@ -328,8 +324,6 @@ class GlauertStateBEM:
                                           self.K_cyc * tilt_lat_rad * T,
                                           0.0])
 
-        M_world = M_spin_world + M_cyc_world
-
         # ── CT diagnostic  ────────────────────────────────────────────────────
         v_ref = max(abs(v_axial), 0.5)
         self.last_CT_bem = T / max(0.5 * self.rho * v_ref ** 2 * self.disk_area, 1e-6)
@@ -342,15 +336,14 @@ class GlauertStateBEM:
         self.last_v_inplane  = v_inplane
         self.last_ramp       = ramp
         self.last_H_force    = float(H)
-        self.last_Q_spin     = float(self.k_drive_spin * v_inplane
-                                     - self.k_drag_spin * omega_abs ** 2)
 
         log.debug("t=%.3f T=%.2fN a=%.3f state=%s F_glauert=%.3f",
                   t, T, self.last_a_mean, self.last_state, self.last_F_glauert)
 
+        Q_spin_scalar = float(np.dot(M_spin_world, disk_normal))
         return AeroResult(
             F_world   = F_world.copy(),
             M_orbital = M_cyc_world.copy(),
-            Q_spin    = self.last_Q_spin,
+            Q_spin    = Q_spin_scalar,
             M_spin    = M_spin_world.copy(),
         )

@@ -198,34 +198,22 @@ class SpinSensor:
     This class adds optional Gaussian noise to simulate measurement uncertainty.
     On hardware, omega_spin is derived from the GB4008 counter-torque motor eRPM
     reported by the AM32 ESC via telemetry, converted using the 80:44 gear ratio
-    and 11 pole pairs: ``omega_spin = eRPM × 2π/60 / 11 × 44/80``.
-
-    Physical model validation (optional)
-    -------------------------------------
-    ``validate(omega_measured, v_inplane)`` checks the measured spin rate
-    against the autorotation torque-balance prediction:
-
-        omega_expected = sqrt(K_drive × v_inplane / K_drag)
+    and 11 pole pairs: ``omega_spin = eRPM * 2pi/60 / 11 * 44/80``.
 
     Parameters
     ----------
-    sigma    : float — Gaussian noise std dev [rad/s].  0 = ideal (default).
-    K_drive  : float — autorotation drive constant [N·m·s/m].
-    K_drag   : float — autorotation drag constant [N·m·s²/rad²].
-    rng_seed : int or None — random seed for reproducibility.
+    sigma    : float -- Gaussian noise std dev [rad/s].  0 = ideal (default).
+    rng_seed : int or None -- random seed for reproducibility.
     """
 
     def __init__(
         self,
         sigma:    float = 0.0,
-        K_drive:  float = 1.4,
-        K_drag:   float = 0.01786,
         rng_seed: "int | None" = None,
+        **_ignored,
     ):
-        self._sigma   = float(sigma)
-        self._K_drive = float(K_drive)
-        self._K_drag  = float(K_drag)
-        self._rng     = np.random.default_rng(rng_seed)
+        self._sigma = float(sigma)
+        self._rng   = np.random.default_rng(rng_seed)
 
     def measure(self, omega_true: float) -> float:
         """
@@ -235,40 +223,6 @@ class SpinSensor:
         if self._sigma > 0.0:
             return float(max(0.0, omega_true + self._rng.normal(0.0, self._sigma)))
         return float(max(0.0, omega_true))
-
-    def validate(
-        self,
-        omega_measured: float,
-        v_inplane:      float,
-        warn_threshold: float = 0.15,
-    ) -> dict:
-        """
-        Cross-check *omega_measured* against the autorotation torque-balance model.
-
-        Uses: omega_expected = sqrt(K_drive × v_inplane / K_drag)
-
-        Parameters
-        ----------
-        omega_measured  : float — measured spin rate [rad/s]
-        v_inplane       : float — estimated in-plane wind speed [m/s]
-        warn_threshold  : float — fractional deviation that triggers a warning (default 15 %)
-
-        Returns
-        -------
-        dict with keys:
-            "omega_expected"  float — model prediction [rad/s]
-            "deviation_frac"  float — |measured - expected| / expected
-            "ok"              bool  — True if deviation < warn_threshold
-        """
-        if v_inplane <= 0.0:
-            return {"omega_expected": 0.0, "deviation_frac": float("inf"), "ok": False}
-        omega_expected  = math.sqrt(self._K_drive * v_inplane / self._K_drag)
-        deviation_frac  = abs(omega_measured - omega_expected) / max(omega_expected, 1e-9)
-        return {
-            "omega_expected": omega_expected,
-            "deviation_frac": deviation_frac,
-            "ok":             deviation_frac < warn_threshold,
-        }
 
 
 # ---------------------------------------------------------------------------

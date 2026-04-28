@@ -59,7 +59,6 @@ airfoil:
   # optimisation study.  The paper contains no airfoil designation.
 
   CL0:               0.0    # zero — thin airfoil, symmetric wing assumption (Eq. 25)
-  CL_alpha_per_rad:  5.385  # 2π/(1+2/12) = 12π/7  (De Schutter Eq. 25, A=12)
   CD0:               0.01   # C_{D,0} = 0.01  (De Schutter Table I)
   CD_structural:     0.021  # C_{D,T} — structural parasitic drag from connecting cable (Eq. 29, 31)
                              # Estimated: C_D_cyl(1.0) * d_ck(0.0015 m) * L_ck(2.60 m) / S_w(0.1875 m²)
@@ -97,9 +96,6 @@ control:
 autorotation:
   # De Schutter does not use an autorotation spin ODE — ω_θ is prescribed.
   # The paper gives ω_θ = 15π ≈ 47.12 rad/s (Weyel Table 1, for tip-speed-ratio λ=7).
-  # K values below are order-of-magnitude estimates carried over from beaupoil_2026.
-  K_drive_Nms_m:    1.4
-  K_drag_Nms2_rad2: 0.01786
   I_ode_kgm2:       10.0
   omega_min_rad_s:  0.5
   omega_eq_rad_s:   null    # not calibrated for this rotor geometry

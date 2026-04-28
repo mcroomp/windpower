@@ -48,7 +48,6 @@ airfoil:
   #   Re=200,000:   CL=0.4975 → a ≈ 5.70/rad
   #   Re=2,000,000: CL=0.5405 → a ≈ 6.19/rad
   CL0:               0.0    # symmetrical airfoil
-  CL_alpha_per_rad:  5.7    # a — conservative (Re≈200k; actual operating Re≈1.96M gives 6.19)
   # Drag polar: CD = CD0 + CL²/(π·AR·e)
   # From Harris C81 table at α=0°:
   #   Re=2,000,000: CD0 = 0.01020
@@ -79,9 +78,6 @@ autorotation:
   # Calibration: ω_eq at ~99.6 RPM = 10.43 rad/s
   # At test condition μ=0.341, αs=4.0°: V = 0.341×10.43×6.858/cos(4°) = 24.37 m/s
   # v_inplane = V × cos(4°) = 24.31 m/s
-  # ω_eq² = K_drive / K_drag × v_inplane  →  K_drive/K_drag = 10.43²/24.31 = 4.47 m/s
-  K_drive_Nms_m:      50.0    # K_drive [N·m·s/m] — drive torque per (m/s) in-plane wind
-  K_drag_Nms2_rad2:   11.19   # K_drag = K_drive / (ω_eq²/v_inplane) = 50/4.47 [N·m·s²/rad²]
   I_ode_kgm2:         453.0   # I_ode = I_blade_flap for spin ODE
   omega_min_rad_s:    1.0     # ω_min — lower clamp
   omega_eq_rad_s:     10.43   # ~99.6 RPM design point

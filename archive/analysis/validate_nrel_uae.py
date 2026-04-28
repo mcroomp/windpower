@@ -85,8 +85,6 @@ uae_rotor = RotorDefinition(
     oswald_efficiency        = 0.95,
     alpha_stall_deg          = 14.0,
     rho_kg_m3                = RHO,
-    K_drive_Nms_m            = 1.0,           # dummy — not used for CP/CT
-    K_drag_Nms2_rad2         = 0.001,
     swashplate_pitch_gain_rad = 1.0,           # identity: tilt*1.0 = blade pitch
 )
 
@@ -192,7 +190,7 @@ uae_2d = RotorDefinition(
     name="nrel_uae_2d", n_blades=N_BLADES, radius_m=R_TIP, root_cutout_m=R_ROOT,
     chord_m=CHORD, CL0=0.0, CL_alpha_per_rad=CL_ALPHA_2D, CD0=0.0074,
     oswald_efficiency=0.95, alpha_stall_deg=14.0, rho_kg_m3=RHO,
-    K_drive_Nms_m=1.0, K_drag_Nms2_rad2=0.001, swashplate_pitch_gain_rad=1.0,
+    swashplate_pitch_gain_rad=1.0,
 )
 sweep_2d = run_sweep(uae_2d, collective_deg=-3.0)
 

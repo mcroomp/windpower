@@ -138,7 +138,7 @@ class PhysicsCore:
         startup_damp_k_ang: float = 0.0,
         lock_orientation:   bool  = False,
         z_floor:            float = -1.0,
-        aero_model:         str   = "skewed_wake",
+        aero_model:         str   = "jit",
         aero_override             = None,
     ):
         self._rotor              = rotor

@@ -161,8 +161,8 @@ def test_ds_CL_alpha(ds_rotor):
     NOT 0.87/rad — that was Weyel's SG6040 approximation, not the De Schutter formula.
     """
     expected = DS_CL_ALPHA_EXACT
-    assert math.isclose(ds_rotor.CL_alpha_per_rad, expected, rel_tol=0.005), \
-        (f"CL_alpha = {ds_rotor.CL_alpha_per_rad:.4f} /rad, "
+    assert math.isclose(ds_rotor.CL_alpha_3D_per_rad, expected, rel_tol=0.005), \
+        (f"CL_alpha = {ds_rotor.CL_alpha_3D_per_rad:.4f} /rad, "
          f"expected {expected:.4f} /rad  (2π/(1+2/12) from Eq. 25)")
 
 

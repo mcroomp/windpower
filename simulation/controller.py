@@ -989,8 +989,8 @@ def col_min_for_altitude_rad(
     aero,
     xi_deg:        float,
     mass_kg:       float,
+    omega:         float,
     wind_m_s:      float = 10.0,
-    omega:         float = None,
     safety_rad:    float = 0.01,
 ) -> float:
     """
@@ -1007,7 +1007,7 @@ def col_min_for_altitude_rad(
     xi_deg    : disk tilt from wind direction [°]  (0°=into wind, 90°=vertical)
     mass_kg   : hub mass [kg]
     wind_m_s  : wind speed [m/s]
-    omega     : rotor spin rate [rad/s]; None → equilibrium from aero.k_drive_spin
+    omega     : rotor spin rate [rad/s]
     safety_rad: margin added above the exact floor [rad]
     """
     import math as _math
@@ -1020,10 +1020,6 @@ def col_min_for_altitude_rad(
     R    = _build_orb_frame(bz)
     wind = _np.array([0.0, wind_m_s, 0.0])   # NED: East wind = Y axis
     W    = mass_kg * 9.81
-
-    if omega is None:
-        v_ip = wind_m_s * _math.sin(xi_r)
-        omega = _math.sqrt(aero.k_drive_spin * max(v_ip, 0.01) / aero.k_drag_spin)
 
     lo, hi = -0.35, 0.20
     for _ in range(50):

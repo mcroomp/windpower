@@ -34,10 +34,9 @@ Built-in definitions
 """
 
 import math
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 try:
     import yaml as _yaml
@@ -177,16 +176,24 @@ class RotorDefinition:
     # ── Airfoil section ───────────────────────────────────────────────────────
     airfoil_name:        str           = "SG6042"
     airfoil_source:      str           = ""
-    CL0:                 float         = 0.11
-    CL_alpha_per_rad:    float         = 0.87
-    CD0:                 float         = 0.01
+    polar_csv:           Optional[str] = None   # filename relative to rotor_definitions/; loads CL/CD table
     CD_structural:       float         = 0.0   # C_{D,T} — parasitic drag from connecting beams/cables
                                                 # De Schutter 2018 Eq. 29, 31.  Added to blade CD.
                                                 # Normalised to blade planform area S_w.
-    oswald_efficiency:   float         = 0.8
-    alpha_stall_deg:     float         = 15.0
     Re_design:           Optional[int] = None
     Re_operating:        Optional[int] = None
+
+    # ── Linear lift model (used by Peters-He BEM) ────────────────────────────
+    # CL = CL0 + CL_alpha_per_rad · alpha,  CD = CD0 + CL²/(π·AR·oswald_efficiency)
+    CL0:               Optional[float] = None   # zero-AoA lift coefficient  [–]
+    CL_alpha_per_rad:  Optional[float] = None   # lift slope [/rad]
+    CD0:               Optional[float] = None   # zero-lift drag coefficient [–]
+    oswald_efficiency: Optional[float] = None   # Oswald span efficiency factor [–]
+    alpha_stall_deg:   Optional[float] = None   # AoA clamp for linear model [°]
+
+    # ── Autorotation ODE torque coefficients ─────────────────────────────────
+    K_drive_Nms_m:    Optional[float] = None   # drive torque per (m/s) in-plane wind [N·m·s/m]
+    K_drag_Nms2_rad2: Optional[float] = None   # spin braking torque coefficient [N·m·s²/rad²]
 
     # ── Inertia ───────────────────────────────────────────────────────────────
     mass_kg:           float          = 5.0
@@ -219,8 +226,6 @@ class RotorDefinition:
     kaman_flap:               KamanFlap = field(default_factory=KamanFlap)
 
     # ── Autorotation ODE ─────────────────────────────────────────────────────
-    K_drive_Nms_m:      float          = 1.4
-    K_drag_Nms2_rad2:   float          = 0.01786
     I_ode_kgm2:         float          = 10.0
     omega_min_rad_s:    float          = 0.5
     omega_eq_rad_s:     Optional[float] = None
@@ -329,7 +334,7 @@ class RotorDefinition:
         """
         if self.I_blade_flap_kgm2 is None or self.I_blade_flap_kgm2 <= 0:
             return None
-        return (self.rho_kg_m3 * self.CL_alpha_per_rad * self.chord_m *
+        return (self.rho_kg_m3 * self.CL_alpha_3D_per_rad * self.chord_m *
                 self.radius_m**4 / self.I_blade_flap_kgm2)
 
     @property
@@ -343,28 +348,6 @@ class RotorDefinition:
         tip losses.  Actual measured value should be below this.
         """
         return 2.0 * math.pi / (1.0 + 2.0 / self.aspect_ratio)
-
-    # Design-point v_inplane used for K_drive/K_drag consistency checks.
-    # Derived from 10 m/s headwind and DEFAULT_BODY_Z = [0.851, 0.305, 0.427]
-    # with hub stationary:
-    #   v_axial    = dot([10,0,0], body_z) = 8.51 m/s
-    #   v_inplane  = |[10,0,0] - 8.51·body_z| = 5.25 m/s
-    # Equivalently: v_inplane = V_wind · sin(θ) where θ = angle(wind, body_z) = 31.7°.
-    _V_INPLANE_DESIGN_MS: float = 5.25
-
-    @property
-    def omega_eq_from_K_rad_s(self) -> float:
-        """
-        Equilibrium spin from K_drive/K_drag at the design-point v_inplane.
-
-        ω_eq = √(K_drive · v_inplane_design / K_drag)
-
-        Uses _V_INPLANE_DESIGN_MS = 5.25 m/s — the in-plane wind component at the
-        default tether orientation (body_z=[0.851,0.305,0.427]) and 10 m/s headwind
-        with hub stationary.  Gives ~20.3 rad/s vs the simulation-measured 20.148 rad/s.
-        """
-        return math.sqrt(self.K_drive_Nms_m * self._V_INPLANE_DESIGN_MS
-                         / self.K_drag_Nms2_rad2)
 
     @property
     def max_cyclic_moment_Nm(self) -> float:
@@ -381,13 +364,15 @@ class RotorDefinition:
         Overestimates the BEM result by ~25% because it omits Prandtl tip loss
         and induction effects.  Use as a conservative upper bound.
         """
-        omega = self.omega_eq_from_K_rad_s
+        if self.omega_eq_rad_s is None:
+            raise ValueError("omega_eq_rad_s must be set to compute max_cyclic_moment_Nm")
+        omega = self.omega_eq_rad_s
         return (
             (self.n_blades / 4.0)
             * self.rho_kg_m3
             * omega ** 2
             * self.chord_m
-            * self.CL_alpha_per_rad
+            * self.CL_alpha_3D_per_rad
             * self.swashplate_pitch_gain_rad
             * (self.radius_m ** 4 - self.root_cutout_m ** 4)
             / 4.0
@@ -423,7 +408,9 @@ class RotorDefinition:
         I = self.I_spin_effective_kgm2
         if I <= 0.0:
             return float("inf")
-        return self.max_cyclic_moment_Nm / (I * self.omega_eq_from_K_rad_s)
+        if self.omega_eq_rad_s is None:
+            raise ValueError("omega_eq_rad_s must be set to compute max_body_z_rate_rad_s")
+        return self.max_cyclic_moment_Nm / (I * self.omega_eq_rad_s)
 
     @property
     def body_z_slew_rate_rad_s(self) -> float:
@@ -456,6 +443,44 @@ class RotorDefinition:
         return self.servo_slew_rate_deg_s / self.servo_travel_deg
 
     # =========================================================================
+    # Polar table loader
+    # =========================================================================
+
+    def polar_arrays(self) -> Optional[Tuple]:
+        """
+        Load and return (alpha_rad, CL, CD) numpy arrays from polar_csv.
+
+        Returns None if polar_csv is not set.  The arrays are sorted by alpha
+        and cover the full range present in the CSV file.
+        """
+        if self.polar_csv is None:
+            return None
+        try:
+            import numpy as _np
+        except ImportError:
+            return None
+        csv_path = _DEFS_DIR / self.polar_csv
+        alphas, CLs, CDs = [], [], []
+        with csv_path.open() as fh:
+            for line in fh:
+                if line.strip().startswith("Alpha"):
+                    break
+            for line in fh:
+                parts = line.strip().split(",")
+                if len(parts) < 3:
+                    continue
+                try:
+                    alphas.append(float(parts[0]))
+                    CLs.append(float(parts[1]))
+                    CDs.append(float(parts[2]))
+                except ValueError:
+                    continue
+        if not alphas:
+            return None
+        alpha_rad = _np.radians(_np.array(alphas, dtype=_np.float64))
+        return alpha_rad, _np.array(CLs, dtype=_np.float64), _np.array(CDs, dtype=_np.float64)
+
+    # =========================================================================
     # Factory helpers
     # =========================================================================
 
@@ -464,25 +489,34 @@ class RotorDefinition:
         Return kwargs for RotorAero(**rotor.aero_kwargs()).
 
         Maps RotorDefinition fields to the RotorAero constructor parameter names.
+        When polar_csv is set, also includes polar_alpha_rad / polar_CL / polar_CD
+        arrays for Peters-He table lookup.
         """
-        return dict(
+        d = dict(
             n_blades         = self.n_blades,
             r_root           = self.root_cutout_m,
             r_tip            = self.radius_m,
             chord            = self.chord_m,
             rho              = self.rho_kg_m3,
             aspect_ratio     = self.aspect_ratio,
-            oswald_eff       = self.oswald_efficiency,
-            CD0              = self.CD0,
             CD_structural    = self.CD_structural,
-            CL0              = self.CL0,
-            CL_alpha         = self.CL_alpha_per_rad,
             K_cyc            = self.K_cyc,
-            aoa_limit        = math.radians(self.alpha_stall_deg),
-            k_drive_spin     = self.K_drive_Nms_m,
-            k_drag_spin      = self.K_drag_Nms2_rad2,
             pitch_gain_rad   = self.swashplate_pitch_gain_rad,
         )
+        polar = self.polar_arrays()
+        if polar is not None:
+            d["polar_alpha_rad"] = polar[0]
+            d["polar_CL"]        = polar[1]
+            d["polar_CD"]        = polar[2]
+        # Linear lift model fields (required by Peters-He BEM)
+        if self.CL0               is not None: d["CL0"]          = self.CL0
+        if self.CL_alpha_per_rad  is not None: d["CL_alpha"]     = self.CL_alpha_per_rad
+        if self.CD0               is not None: d["CD0"]          = self.CD0
+        if self.oswald_efficiency is not None: d["oswald_eff"]   = self.oswald_efficiency
+        if self.alpha_stall_deg   is not None: d["aoa_limit"]    = math.radians(self.alpha_stall_deg)
+        if self.K_drive_Nms_m     is not None: d["k_drive_spin"] = self.K_drive_Nms_m
+        if self.K_drag_Nms2_rad2  is not None: d["k_drag_spin"]  = self.K_drag_Nms2_rad2
+        return d
 
     def dynamics_kwargs(self) -> dict:
         """
@@ -508,7 +542,7 @@ class RotorDefinition:
             f"{self.name}: {self.n_blades}×{self.span_m:.1f}m blades  "
             f"R={self.radius_m:.2f}m  σ={self.solidity:.4f}  "
             f"AR={self.aspect_ratio:.1f}  S_w={self.S_w_m2:.3f}m²  "
-            f"mass={self.mass_kg:.1f}kg  CL_α={self.CL_alpha_per_rad:.3f}/rad"
+            f"mass={self.mass_kg:.1f}kg  CL_α_3D={self.CL_alpha_3D_per_rad:.3f}/rad"
         )
 
     def report(self) -> str:
@@ -543,11 +577,8 @@ class RotorDefinition:
             f"    AR={self.aspect_ratio:.3f}  σ={self.solidity:.4f}\n"
             f"\n"
             f"  Airfoil: {self.airfoil_name} ({self.airfoil_source})\n"
-            f"    CL_alpha={self.CL_alpha_per_rad:.3f}/rad  "
-            f"(3D theory: {self.CL_alpha_3D_per_rad:.3f}/rad, ratio: "
-            f"{self.CL_alpha_3D_per_rad/self.CL_alpha_per_rad:.1f}×)\n"
-            f"    CL0={self.CL0}  CD0={self.CD0}  e={self.oswald_efficiency}  "
-            f"α_stall=±{self.alpha_stall_deg}°\n"
+            f"    CL_alpha_3D={self.CL_alpha_3D_per_rad:.3f}/rad  (Prandtl lifting-line, AR={self.aspect_ratio:.1f})\n"
+            f"    polar_csv={self.polar_csv or '(none)'}\n"
             f"\n"
             f"  Inertia:\n"
             f"    mass={self.mass_kg}kg  I_body={self.I_body_kgm2}kg·m²\n"
@@ -560,9 +591,8 @@ class RotorDefinition:
             f"Kaman flap: {kf_str}\n"
             f"\n"
             f"  Autorotation:\n"
-            f"    K_drive={self.K_drive_Nms_m}  K_drag={self.K_drag_Nms2_rad2}  "
-            f"ω_eq_theory={self.omega_eq_from_K_rad_s:.3f}rad/s\n"
-            f"    ω_eq_nominal={'TBD' if self.omega_eq_rad_s is None else f'{self.omega_eq_rad_s}rad/s'}\n"
+            f"    I_ode={self.I_ode_kgm2}kg*m2  omega_min={self.omega_min_rad_s}rad/s\n"
+            f"    omega_eq_nominal={'TBD' if self.omega_eq_rad_s is None else f'{self.omega_eq_rad_s}rad/s'}\n"
             f"\n"
             f"  Validation ({len(issues)} issue{'s' if len(issues)!=1 else ''}):\n"
             f"{issue_lines}\n"
@@ -588,12 +618,7 @@ class RotorDefinition:
           G6  r_cp > r_eff_T (De Schutter overestimate direction)
 
         Airfoil:
-          A1  CL_alpha > 0
-          A2  CL_alpha ≤ CL_alpha_3D × 1.5 (cannot exceed theory + 50%)
-          A3  CD0 > 0
-          A4  oswald_efficiency in (0.5, 1.0]
-          A5  alpha_stall_deg in [5, 25]
-          A6  If Re_operating and Re_design given: warn if operating Re > 2× design Re
+          A1  If Re_operating and Re_design given: warn if operating Re > 2× design Re
 
         Inertia:
           I1  mass > 0
@@ -608,9 +633,7 @@ class RotorDefinition:
           K5  If span_end_m > radius_m: ERROR (flap beyond tip)
 
         Autorotation:
-          S1  K_drive > 0, K_drag > 0
-          S2  If omega_eq_rad_s given: check consistency with K values (±15%)
-          S3  omega_min > 0
+          S1  omega_min > 0
 
         Completeness (INFO only):
           C1  I_blade_flap_kgm2 not set → Lock number unknown
@@ -649,34 +672,11 @@ class RotorDefinition:
                  f"the low empirical CL_alpha")
 
         # ── A: Airfoil ────────────────────────────────────────────────────────
-        if self.CL_alpha_per_rad <= 0:
-            err("airfoil.CL_alpha_per_rad", f"CL_alpha={self.CL_alpha_per_rad:.3f} ≤ 0")
-        cl3d = self.CL_alpha_3D_per_rad
-        if self.CL_alpha_per_rad > cl3d * 1.5:
-            err("airfoil.CL_alpha_per_rad",
-                f"CL_alpha={self.CL_alpha_per_rad:.3f}/rad > 1.5 × 3D theory "
-                f"({cl3d:.3f}/rad) — physically impossible")
-        if cl3d > 0:
-            ratio = cl3d / self.CL_alpha_per_rad
-            if ratio > 10.0:
-                warn("airfoil.CL_alpha_per_rad",
-                     f"CL_alpha={self.CL_alpha_per_rad:.3f}/rad is {ratio:.1f}× below "
-                     f"3D thin-airfoil theory ({cl3d:.3f}/rad). This is an empirically "
-                     f"calibrated value — model is conservative vs first principles.")
-        if self.CD0 <= 0:
-            err("airfoil.CD0", f"CD0={self.CD0} ≤ 0 — drag cannot be negative")
-        if not (0.5 < self.oswald_efficiency <= 1.0):
-            warn("airfoil.oswald_efficiency",
-                 f"e={self.oswald_efficiency:.2f} outside (0.5, 1.0]")
-        if not (5.0 <= self.alpha_stall_deg <= 25.0):
-            warn("airfoil.alpha_stall_deg",
-                 f"α_stall={self.alpha_stall_deg}° outside typical range [5°, 25°]")
         if (self.Re_design is not None and self.Re_operating is not None
                 and self.Re_operating > 2.0 * self.Re_design):
             warn("airfoil.Re_operating",
                  f"Operating Re={self.Re_operating} is "
-                 f"{self.Re_operating/self.Re_design:.1f}× calibration Re={self.Re_design}. "
-                 f"Higher Re → higher CL_alpha in reality; model is conservative.")
+                 f"{self.Re_operating/self.Re_design:.1f}× calibration Re={self.Re_design}.")
 
         # ── I: Inertia ────────────────────────────────────────────────────────
         if self.mass_kg <= 0:
@@ -727,21 +727,8 @@ class RotorDefinition:
                      "designed to provide significant swashplate load reduction")
 
         # ── S: Autorotation ───────────────────────────────────────────────────
-        if self.K_drive_Nms_m <= 0:
-            err("autorotation.K_drive_Nms_m", f"K_drive={self.K_drive_Nms_m} ≤ 0")
-        if self.K_drag_Nms2_rad2 <= 0:
-            err("autorotation.K_drag_Nms2_rad2", f"K_drag={self.K_drag_Nms2_rad2} ≤ 0")
         if self.omega_min_rad_s <= 0:
             err("autorotation.omega_min_rad_s", f"omega_min={self.omega_min_rad_s} ≤ 0")
-        if self.omega_eq_rad_s is not None:
-            omega_theory = self.omega_eq_from_K_rad_s
-            err_pct = abs(omega_theory - self.omega_eq_rad_s) / self.omega_eq_rad_s
-            if err_pct > 0.15:
-                warn("autorotation",
-                     f"Nominal ω_eq={self.omega_eq_rad_s:.3f}rad/s differs by "
-                     f"{err_pct:.0%} from K-derived ω_eq={omega_theory:.3f}rad/s "
-                     f"at v_inplane={self._V_INPLANE_DESIGN_MS}m/s. "
-                     f"K constants may not match design point.")
 
         # ── C: Completeness ───────────────────────────────────────────────────
         if self.I_blade_flap_kgm2 is None:
@@ -839,14 +826,18 @@ def load(path_or_name: str) -> RotorDefinition:
 
         airfoil_name      = str(af.get("designation",      "unknown")),
         airfoil_source    = str(af.get("source",           "")),
-        CL0               = float(af.get("CL0",            0.11)),
-        CL_alpha_per_rad  = float(af.get("CL_alpha_per_rad", 0.87)),
-        CD0               = float(af.get("CD0",            0.01)),
+        polar_csv         = af.get("polar_csv"),
         CD_structural     = float(af.get("CD_structural",  0.0)),
-        oswald_efficiency = float(af.get("oswald_efficiency", 0.8)),
-        alpha_stall_deg   = float(af.get("alpha_stall_deg", 15.0)),
         Re_design         = _m_int(af.get("Re_design")),
         Re_operating      = _m_int(af.get("Re_operating")),
+
+        CL0               = _m_float(af.get("CL0")),
+        CL_alpha_per_rad  = _m_float(af.get("CL_alpha_per_rad")),
+        CD0               = _m_float(af.get("CD0")),
+        oswald_efficiency = _m_float(af.get("oswald_efficiency")),
+        alpha_stall_deg   = _m_float(af.get("alpha_stall_deg")),
+        K_drive_Nms_m     = _m_float(ar.get("K_drive_Nms_m")),
+        K_drag_Nms2_rad2  = _m_float(ar.get("K_drag_Nms2_rad2")),
 
         mass_kg           = _load_mass_kg(_m, n_blades=int(ro.get("n_blades", 4))),
         I_body_kgm2       = [float(v) for v in _m.get("I_body_kgm2", [5.0, 5.0, 10.0])],
@@ -865,8 +856,6 @@ def load(path_or_name: str) -> RotorDefinition:
         servo_travel_deg      = float(ct.get("servo_travel_deg",       60.0)),
         kaman_flap           = kaman,
 
-        K_drive_Nms_m     = float(ar.get("K_drive_Nms_m",    1.4)),
-        K_drag_Nms2_rad2  = float(ar.get("K_drag_Nms2_rad2", 0.01786)),
         I_ode_kgm2        = float(ar.get("I_ode_kgm2",       10.0)),
         omega_min_rad_s   = float(ar.get("omega_min_rad_s",  0.5)),
         omega_eq_rad_s    = _m_float(ar.get("omega_eq_rad_s")),

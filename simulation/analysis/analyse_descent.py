@@ -256,10 +256,6 @@ def simulate_descent_physics(
     PhysicsRunner is intentionally avoided — it bakes in AcroControllerSitl (rate PID
     + servo lag) which would process c_lon/c_lat as rate setpoints rather than tilt
     angles, making comparison with the other two functions meaningless.
-
-    PhysicsCore is used with lock_orientation=True so the disk stays horizontal
-    (body_z tracks tether direction = [0,0,-1] for vertical descent from altitude).
-    Constant tether force T_tether [N downward in NED] replaces the elastic model.
     """
     from types import SimpleNamespace
     from physics_core import PhysicsCore, q_spin_from_aero

@@ -149,8 +149,6 @@ class SkewedWakeBEM:
         self.CL_ALPHA = float(p["CL_alpha"])
         self.AOA_LIMIT = float(p["aoa_limit"])
         self.ramp_time = float(ramp_time)
-        self.k_drive_spin  = float(p["k_drive_spin"])
-        self.k_drag_spin   = float(p["k_drag_spin"])
         self.pitch_gain_rad = float(p["pitch_gain_rad"])
 
         span = self.R_TIP - self.R_ROOT
@@ -181,8 +179,6 @@ class SkewedWakeBEM:
         self.last_v_i            = 0.0
         self.last_v_inplane      = 0.0
         self.last_ramp           = 0.0
-        self.last_Q_drive        = 0.0
-        self.last_Q_drag         = 0.0
         self.last_M_spin         = np.zeros(3)
         self.last_M_cyc          = np.zeros(3)
         self.last_H_force        = 0.0
@@ -333,7 +329,7 @@ class SkewedWakeBEM:
             .F_world   : (3,) total aerodynamic force in NED [N]
             .M_orbital : (3,) cyclic (tilt-producing) moment in NED [N·m]
             .Q_spin    : spin-axis drive torque for the rotor ODE [N·m]
-                         Uses empirical model: k_drive * v_inplane - k_drag * omega^2
+                         BEM aerodynamic torque = dot(M_total, disk_normal)
             .M_spin    : (3,) spin-axis moment vector in NED [N·m]
         """
         ramp = self._ramp_factor(t)

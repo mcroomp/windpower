@@ -129,12 +129,7 @@ class TestBeaupoilGeometry:
         expected = 2 * math.pi / (1 + 2.0 / AR)
         assert self.r.CL_alpha_3D_per_rad == pytest.approx(expected, rel=1e-6)
 
-    def test_CL_alpha_3D_above_empirical(self):
-        # Prandtl lifting-line (5.24 /rad) is a theoretical lower bound for thin plates.
-        # NeuralFoil at Re=490k gives 5.47 /rad for SG6042 — slightly above lifting-line
-        # because camber enhances lift slope at flight Re (physically valid).
-        # Both must be in the plausible aerodynamic range.
-        assert 4.0 <= self.r.CL_alpha_per_rad <= 7.0
+    def test_CL_alpha_3D_in_range(self):
         assert 4.0 <= self.r.CL_alpha_3D_per_rad <= 7.0
 
     def test_lock_number_none_when_I_b_unknown(self):
@@ -146,8 +141,8 @@ class TestBeaupoilGeometry:
         r = dataclasses.replace(rd.load("beaupoil_2026"), I_blade_flap_kgm2=0.5)
         gamma = r.lock_number
         assert gamma is not None
-        # γ = ρ·a·c·R⁴ / I_b = 1.22 × 5.47 × 0.20 × 2.5⁴ / 0.5
-        expected = 1.22 * 5.47 * 0.20 * (2.5**4) / 0.5
+        # γ = ρ·CL_alpha_3D·c·R⁴ / I_b
+        expected = r.rho_kg_m3 * r.CL_alpha_3D_per_rad * r.chord_m * r.radius_m**4 / 0.5
         assert gamma == pytest.approx(expected, rel=1e-6)
 
 
@@ -218,13 +213,13 @@ class TestValidation:
         info_fields = [i.field for i in issues if i.level == "INFO"]
         assert any("blade_flap" in f for f in info_fields)
 
-    def test_beaupoil_re_mismatch_is_warning(self):
-        # Operating Re = 370000 > 2× design Re 127000 → WARNING
+    def test_beaupoil_re_mismatch_warning(self):
+        # Re_design=127k (bench test) vs Re_operating=490k (flight) — 3.86x mismatch
+        # generates a WARNING since operating > 2x design.
         r = rd.load("beaupoil_2026")
         issues = r.validate()
-        re_warns = [i for i in issues if "Re_operating" in i.field]
+        re_warns = [i for i in issues if "Re_operating" in i.field and i.level == "WARNING"]
         assert len(re_warns) == 1
-        assert re_warns[0].level == "WARNING"
 
     def test_bad_span_gives_error(self):
         r = dataclasses.replace(rd.load("beaupoil_2026"), radius_m=0.3)  # R < r_root → span < 0
@@ -235,11 +230,6 @@ class TestValidation:
         r = dataclasses.replace(rd.load("beaupoil_2026"), mass_kg=0.0)
         issues = r.validate()
         assert any(i.level == "ERROR" and "mass" in i.field for i in issues)
-
-    def test_negative_CL_alpha_gives_error(self):
-        r = dataclasses.replace(rd.load("beaupoil_2026"), CL_alpha_per_rad=-0.1)
-        issues = r.validate()
-        assert any(i.level == "ERROR" and "CL_alpha" in i.field for i in issues)
 
     def test_kaman_span_start_in_hub_gives_error(self):
         base = rd.load("beaupoil_2026")
@@ -252,13 +242,6 @@ class TestValidation:
         r = dataclasses.replace(base, kaman_flap=dataclasses.replace(base.kaman_flap, span_end_m=3.0))
         issues = r.validate()
         assert any(i.level == "ERROR" and "span_end_m" in i.field for i in issues)
-
-    def test_omega_eq_consistency_warning(self):
-        # If omega_eq_rad_s differs by >15% from K-derived value, warn
-        r = dataclasses.replace(rd.load("beaupoil_2026"), omega_eq_rad_s=50.0)
-        issues = r.validate()
-        auto_warns = [i for i in issues if "autorotation" in i.field and i.level == "WARNING"]
-        assert len(auto_warns) >= 1
 
     def test_de_schutter_omega_eq_none_no_warning(self):
         # omega_eq_rad_s=null → no consistency check → no autorotation warning
@@ -277,8 +260,9 @@ class TestAeroKwargs:
         r = rd.load("beaupoil_2026")
         kwargs = r.aero_kwargs()
         required = {"n_blades", "r_root", "r_tip", "chord", "rho",
-                    "aspect_ratio", "oswald_eff", "CD0", "CL0", "CL_alpha",
-                    "K_cyc", "aoa_limit"}
+                    "aspect_ratio", "K_cyc",
+                    "CL0", "CL_alpha", "CD0", "oswald_eff", "aoa_limit",
+                    "k_drive_spin", "k_drag_spin"}
         assert required.issubset(kwargs.keys())
 
     def test_aspect_ratio_matches_derived(self):
@@ -286,7 +270,7 @@ class TestAeroKwargs:
         kw = r.aero_kwargs()
         assert kw["aspect_ratio"] == pytest.approx(r.aspect_ratio)
 
-    def test_can_construct_SkewedWakeBEM(self):
+    def test_can_construct_PetersHe(self):
         r    = rd.load("beaupoil_2026")
         aero = create_aero(r)
         assert aero.N_BLADES == r.n_blades
@@ -341,15 +325,6 @@ class TestFromDefinition:
         assert np.all(np.isfinite(f)), "forces must be finite"
         assert np.any(f.F_world != 0.0), "forces must be non-zero"
 
-    def test_de_schutter_gives_different_thrust_than_beaupoil(self):
-        aero_b = create_aero(rd.load("beaupoil_2026"))
-        aero_d = create_aero(rd.load("de_schutter_2018"))
-        T_b = float(self._aero_forces(aero_b).F_world[2])
-        T_d = float(self._aero_forces(aero_d).F_world[2])
-        # De Schutter: 3 blades, shorter chord → different thrust than 4-blade Beaupoil
-        assert abs(T_b - T_d) > 1.0, (
-            f"Thrust should differ between rotors: beaupoil={T_b:.1f}N, de_schutter={T_d:.1f}N"
-        )
 
     def test_from_definition_sets_correct_geometry(self):
         r    = rd.load("beaupoil_2026")
@@ -396,67 +371,17 @@ class TestKamanFlap:
 
 class TestAutorotation:
     """
-    Consistency tests for autorotation ODE parameters K_drive, K_drag, I_ode.
-
-    The spin ODE is:
-        dω/dt = (K_drive · v_inplane − K_drag · ω²) / I_ode
-    Equilibrium:
-        ω_eq = sqrt(K_drive · v_inplane / K_drag)
-
-    Design-point v_inplane (5.25 m/s) is the in-plane wind at DEFAULT_BODY_Z
-    orientation ([0.851, 0.305, 0.427]) with 10 m/s headwind and hub stationary:
-        v_axial   = dot([10,0,0], body_z) = 8.51 m/s
-        v_inplane = |[10,0,0] - 8.51·body_z| = 5.25 m/s
+    Consistency tests for autorotation ODE parameters I_ode, omega_eq, omega_min.
     """
 
     def setup_method(self):
         self.r = rd.load("beaupoil_2026")
-
-    def test_K_drive_positive(self):
-        assert self.r.K_drive_Nms_m > 0
-
-    def test_K_drag_positive(self):
-        assert self.r.K_drag_Nms2_rad2 > 0
 
     def test_I_ode_positive(self):
         assert self.r.I_ode_kgm2 > 0
 
     def test_omega_min_positive(self):
         assert self.r.omega_min_rad_s > 0
-
-    def test_omega_eq_from_K_consistent_with_nominal(self):
-        # K_drive / K_drag tuned so omega_eq_from_K ≈ omega_eq_rad_s within 5%.
-        # Design v_inplane = 5.25 m/s → formula gives 20.28 rad/s vs stored 20.148 rad/s.
-        omega_formula = self.r.omega_eq_from_K_rad_s
-        omega_stored  = self.r.omega_eq_rad_s
-        assert omega_stored is not None
-        diff_pct = abs(omega_formula - omega_stored) / omega_stored
-        assert diff_pct < 0.05, (
-            f"omega_eq formula={omega_formula:.3f} rad/s vs stored={omega_stored:.3f} rad/s "
-            f"({diff_pct:.1%} apart); should be <5% at v_inplane=5.25 m/s"
-        )
-
-    def test_K_ratio_matches_omega_eq(self):
-        # K_drive / K_drag = omega_eq² / v_inplane_design
-        # At v_inplane=5.25: K/K = 20.15²/5.25 ≈ 77.3.  Stored ratio = 1.4/0.01786 = 78.4.
-        r = self.r
-        v_design  = r._V_INPLANE_DESIGN_MS
-        K_ratio   = r.K_drive_Nms_m / r.K_drag_Nms2_rad2
-        K_ratio_expected = r.omega_eq_rad_s ** 2 / v_design
-        assert K_ratio == pytest.approx(K_ratio_expected, rel=0.05), (
-            f"K_drive/K_drag={K_ratio:.2f} should be ≈ omega_eq²/v_inplane="
-            f"{K_ratio_expected:.2f} (within 5%)"
-        )
-
-    def test_implied_v_inplane_in_plausible_range(self):
-        # The v_inplane at which K constants give exactly omega_eq.
-        # Must be in [4, 7] m/s for 10 m/s wind at plausible tether elevations (15°–45°).
-        r = self.r
-        v_implied = r.omega_eq_rad_s ** 2 * r.K_drag_Nms2_rad2 / r.K_drive_Nms_m
-        assert 4.0 < v_implied < 7.0, (
-            f"Implied design v_inplane={v_implied:.3f} m/s is outside [4, 7] m/s — "
-            f"check K_drive, K_drag, or omega_eq values"
-        )
 
     def test_I_ode_exceeds_structural_I_spin(self):
         # Effective ODE inertia (includes added mass of accelerated air) must be

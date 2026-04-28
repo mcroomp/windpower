@@ -1,6 +1,0 @@
-# ArduPilot parameter defaults for RAWES Lua feedforward test.
-# Loaded at SITL startup via --add-param-file.
-# Only include params that are safe to set before full init.
-# Note: SCR_ENABLE=1 is now baked into copter-heli.parm via the Dockerfile,
-# so this file is kept minimal to avoid triggering SIGFPE during param init.
-SCR_ENABLE 1

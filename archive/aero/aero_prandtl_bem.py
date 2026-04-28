@@ -59,7 +59,6 @@ class PrandtlBEM:
 
     Spin diagnostics
     ----------------
-    last_Q_spin    — empirical spin ODE torque: k_drive·v_inplane − k_drag·ω²
     last_F_prandtl — mean Prandtl F across radial strips (1.0 = no correction)
     """
 
@@ -79,8 +78,6 @@ class PrandtlBEM:
         self.CL_ALPHA   = float(p["CL_alpha"])
         self.AOA_LIMIT  = float(p["aoa_limit"])
         self.ramp_time  = float(ramp_time)
-        self.k_drive_spin   = float(p["k_drive_spin"])
-        self.k_drag_spin    = float(p["k_drag_spin"])
         self.pitch_gain_rad = float(p["pitch_gain_rad"])
 
         span          = self.R_TIP - self.R_ROOT
@@ -107,7 +104,6 @@ class PrandtlBEM:
         self.last_v_i          = 0.0
         self.last_v_inplane    = 0.0
         self.last_ramp         = 0.0
-        self.last_Q_spin       = 0.0
         self.last_M_spin       = np.zeros(3)
         self.last_M_cyc        = np.zeros(3)
         self.last_H_force      = 0.0
@@ -183,7 +179,6 @@ class PrandtlBEM:
         ramp = self._ramp_factor(t)
 
         disk_normal = R_hub[:, 2]
-        spin_sign   = float(np.sign(omega_rotor)) if omega_rotor != 0.0 else 1.0
         omega_abs   = abs(float(omega_rotor))
 
         tilt_lon_rad = tilt_lon * self.pitch_gain_rad
@@ -256,7 +251,6 @@ class PrandtlBEM:
         if not np.any(valid):
             self.last_M_spin = np.zeros(3)
             self.last_M_cyc  = np.zeros(3)
-            self.last_Q_spin = 0.0
             return AeroResult(
                 F_world=np.zeros(3), M_orbital=np.zeros(3), Q_spin=0.0, M_spin=np.zeros(3)
             )
@@ -285,15 +279,9 @@ class PrandtlBEM:
         F_strip  = q_dyn[..., None] * (CL[..., None] * e_lift + CD[..., None] * ua_unit)
         M_strip  = np.cross(r_cp_world, F_strip)
 
-        Q_strip  = (np.einsum('ijk,ik->ij', F_strip, e_tang)
-                    * self._r_stations[None, :] * spin_sign)
-
         # ── Accumulate  ───────────────────────────────────────────────────────
         F_acc  = F_strip.sum(axis=(0, 1))
         M_acc  = M_strip.sum(axis=(0, 1))
-        Q_drive_acc = float(Q_strip[Q_strip >= 0].sum())
-        Q_drag_acc  = float(Q_strip[Q_strip  < 0].sum())
-
         scale   = ramp / self.N_AZ
         F_total = F_acc * scale
         M_total = M_acc * scale
@@ -308,7 +296,6 @@ class PrandtlBEM:
         self.last_v_i       = v_i
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        self.last_Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs ** 2)
         self.last_M_spin    = M_spin_world.copy()
         self.last_M_cyc     = M_cyc_world.copy()
         self.last_H_force   = float(np.linalg.norm(F_total - self.last_T * disk_normal))
@@ -319,6 +306,6 @@ class PrandtlBEM:
         return AeroResult(
             F_world   = F_total.copy(),
             M_orbital = M_cyc_world.copy(),
-            Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs**2),
+            Q_spin    = Q_spin_scalar,
             M_spin    = M_spin_world.copy(),
         )

@@ -180,9 +180,9 @@ class WindEstimator:
                   physics rate (400 Hz) rather than the planner rate (~10 Hz).
                   Default: 600 (60 s at 10 Hz).
     K_drive     : float — autorotation drive constant [N·m·s/m].
-                  Default matches beaupoil_2026 rotor (K_DRIVE_SPIN in mediator).
+                  Default: beaupoil_2026 rotor value (1.4).
     K_drag      : float — autorotation drag constant [N·m·s²/rad²].
-                  Default matches beaupoil_2026 rotor (K_DRAG_SPIN in mediator).
+                  Default: beaupoil_2026 rotor value (0.01786).
     """
 
     def __init__(

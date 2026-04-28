@@ -155,7 +155,7 @@ def check_results(r, label: str):
       RAWES autorotation is driven by IN-PLANE wind (disk tilted relative to wind).
       In pure axial inflow at col=0, the aerodynamic torque Q_BEM ≈ 0 because the
       angle of attack at each blade section is tiny (TSR >> 1 means rotational speed
-      dominates relative wind).  Q_spin = Q_BEM - K_drag * omega^2 ≈ -K_drag * omega^2 < 0.
+      dominates relative wind).  Q_spin < 0 is expected in pure axial flow.
       This is expected physics — NOT a bug.  The rotor would decelerate in pure axial
       flow; it needs tilted disk (in-plane wind) to sustain autorotation.
 
@@ -163,20 +163,16 @@ def check_results(r, label: str):
       - Thrust downwind (CT > 0): wind exerts a drag force on the disk
       - H-force ≈ 0: axial symmetry means no net in-plane force
     """
-    K_drag_omega2 = ROTOR.K_drag_Nms2_rad2 * OMEGA**2   # structural drag contribution
-
     print(f"\n--- {label} ---")
-    print(f"  NOTE: Q_spin < 0 expected (axial flow does not drive RAWES; "
-          f"K_drag*omega^2 = {K_drag_omega2:.2f} N*m)")
+    print(f"  NOTE: Q_spin < 0 expected (axial flow does not drive RAWES)")
     print(f"  {'V':>6}  {'TSR':>5}  {'CT':>7}  {'CP':>7}  "
-          f"{'Q_BEM':>8}  {'H_force':>8}  checks")
+          f"{'Q_spin':>8}  {'H_force':>8}  checks")
     all_pass = True
     for i, V in enumerate(r["V"]):
         tsr = r["TSR"][i]
         CT  = r["CT"][i]
         CP  = r["CP"][i]
-        Q   = r["Q_spin"][i]        # includes -K_drag*omega^2
-        Q_BEM = Q + K_drag_omega2   # aerodynamic torque alone
+        Q_BEM = r["Q_spin"][i]
         H   = r["H_force"][i]
         T_aero = CT * 0.5 * RHO * DISK_AREA * V**2
 

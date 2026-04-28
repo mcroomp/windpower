@@ -78,22 +78,21 @@ R_CP      = R_ROOT + (2.0/3.0) * SPAN
 DISK_AREA = math.pi * (R_TIP**2 - R_ROOT**2)
 
 # Airfoil data — sourced from beaupoil_2026.yaml
-CL0       = _AERO_KW["CL0"]
-CL_ALPHA  = _AERO_KW["CL_alpha"]
-CD0       = _AERO_KW["CD0"]
+CL_ALPHA  = _ROTOR.CL_alpha_3D_per_rad
 AR        = _AERO_KW["aspect_ratio"]
-OE        = _AERO_KW["oswald_eff"]
-AOA_LIMIT = _AERO_KW["aoa_limit"]
+
+# Linear lift model coefficients from YAML (NeuralFoil at Re=490k)
+assert _ROTOR.CL0            is not None, "beaupoil_2026 must have CL0 set"
+assert _ROTOR.CD0            is not None, "beaupoil_2026 must have CD0 set"
+assert _ROTOR.alpha_stall_deg is not None, "beaupoil_2026 must have alpha_stall_deg set"
+CL0       = float(_ROTOR.CL0)          # zero-AoA lift coefficient [–]
+CD0       = float(_ROTOR.CD0)          # zero-lift drag coefficient [–]
+OE        = 1.0                        # near-elliptic span assumption for cross-validation
+AOA_LIMIT = math.radians(float(_ROTOR.alpha_stall_deg))   # AoA clamp [rad]
 
 # Thin-airfoil theory CL_alpha for cross-validation
 CL_ALPHA_2D = 2.0 * math.pi           # thin-plate theory: 6.283 /rad
 CL_ALPHA_3D = CL_ALPHA_2D / (1.0 + 2.0 / AR)  # finite-wing 3D: ≈5.46 /rad
-
-# Autorotation spin model (mediator K_DRIVE_SPIN / K_DRAG_SPIN)
-K_DRIVE_SPIN  = 1.4     # [N·m·s/m]  drive torque gain
-K_DRAG_SPIN   = 0.01786 # [N·m·s²/rad²]  drag torque coefficient
-I_SPIN        = 10.0    # [kg·m²]  effective spin inertia
-
 
 # ---------------------------------------------------------------------------
 # Alternative aerodynamic models
@@ -696,9 +695,10 @@ class TestBetzEfficiency:
         The Betz limit uses the full disk area swept by the rotor in the wind
         direction. In edgewise flow this is the disk projected area A_proj = A.
         """
+        import numpy as _np
         aero, forces = _primary_forces(collective_rad=0.0)
-        Q_drive = abs(aero.last_Q_drive)
-        P_drive = Q_drive * OMEGA
+        Q_spin = float(_np.linalg.norm(aero.last_M_spin))
+        P_drive = Q_spin * OMEGA
 
         # Betz limit on full disk area
         P_wind = 0.5 * RHO * DISK_AREA * V_WIND**3
@@ -706,15 +706,15 @@ class TestBetzEfficiency:
 
         efficiency = P_drive / P_betz if P_betz > 0 else 0.0
         print(
-            f"\n  Q_drive           = {Q_drive:.2f} N·m\n"
-            f"  P_drive (Q·ω)     = {P_drive:.1f} W\n"
-            f"  P_wind (½ρAV³)    = {P_wind:.1f} W\n"
-            f"  P_Betz (16/27×P)  = {P_betz:.1f} W\n"
+            f"\n  Q_spin (BEM)      = {Q_spin:.2f} N*m\n"
+            f"  P_drive (Q*omega) = {P_drive:.1f} W\n"
+            f"  P_wind (0.5*rho*A*V^3) = {P_wind:.1f} W\n"
+            f"  P_Betz (16/27*P)  = {P_betz:.1f} W\n"
             f"  Efficiency        = {efficiency:.3f}  ({efficiency*100:.1f}% of Betz)"
         )
         assert P_drive < P_betz, (
             f"Drive power {P_drive:.1f} W exceeds Betz limit {P_betz:.1f} W.\n"
-            f"This violates momentum conservation — check model."
+            f"This violates momentum conservation -- check model."
         )
 
     def test_power_coefficient_physically_reasonable(self):
@@ -725,14 +725,15 @@ class TestBetzEfficiency:
         Autorotating rotor (edgewise): Cp typically 0.05–0.25 (different flow).
         Any Cp > 0.6 would exceed the Betz limit and is unphysical.
         """
+        import numpy as _np
         aero, _ = _primary_forces(collective_rad=0.0)
-        P_drive = abs(aero.last_Q_drive) * OMEGA
+        P_drive = float(_np.linalg.norm(aero.last_M_spin)) * OMEGA
         P_wind  = 0.5 * RHO * DISK_AREA * V_WIND**3
         Cp = P_drive / P_wind if P_wind > 0 else 0.0
         print(f"\n  Cp = {Cp:.4f}  ({Cp*100:.2f}% of available wind power)")
         assert 0.0 <= Cp < 0.593, (
-            f"Power coefficient Cp={Cp:.4f} ≥ Betz limit (16/27=0.593).\n"
-            f"Unphysical — momentum conservation violated."
+            f"Power coefficient Cp={Cp:.4f} >= Betz limit (16/27=0.593).\n"
+            f"Unphysical -- momentum conservation violated."
         )
 
 
@@ -807,151 +808,6 @@ class TestHForceLaw:
 # Section 7 — Autorotation torque balance
 # ===========================================================================
 
-class TestAutorotationTorqueBalance:
-    """
-    Validate the autorotation spin dynamics.
-
-    The mediator maintains spin via:
-        ω_eq = sqrt(K_DRIVE · v_inplane / K_DRAG)
-    where K_DRIVE=1.4 and K_DRAG=0.01786 are the drive/drag torque coefficients.
-
-    This is not directly calibrated to the BEM model — it's a separate simplified
-    spin ODE. The BEM model's Q_drive and Q_drag are computed but not used to
-    evolve ω (only last_v_inplane feeds the spin ODE).
-
-    IMPORTANT: v_inplane at the RAWES equilibrium is NOT equal to V_wind.
-    The rotor disk is tilted — its normal (body_z) points along the tether
-    at ~30° elevation.  Most of the wind flows AXIALLY through the disk, not
-    in-plane.  The in-plane component at equilibrium is only ~5.8 m/s even
-    though V_wind=10 m/s.
-
-    Equilibrium v_inplane is computed from the known pos0/vel0/body_z/wind
-    initial conditions.
-    """
-
-    # Equilibrium state from config defaults
-    _POS0    = np.array([46.258, 14.241, 12.530])
-    _VEL0    = np.array([-0.257,  0.916, -0.093])
-    _BODY_Z0 = np.array([0.851018, 0.305391, 0.427206])
-
-    @classmethod
-    def _equilibrium_v_inplane(cls) -> float:
-        """
-        Compute v_inplane at the equilibrium state.
-
-        v_rel = wind − hub_vel
-        v_axial = dot(v_rel, body_z)
-        v_inplane = |v_rel − v_axial · body_z|
-        """
-        v_rel     = WIND_VEC - cls._VEL0
-        v_axial   = float(np.dot(v_rel, cls._BODY_Z0))
-        v_inp_vec = v_rel - v_axial * cls._BODY_Z0
-        return float(np.linalg.norm(v_inp_vec))
-
-    def test_spin_equilibrium_is_self_consistent(self):
-        """
-        At ω_eq = 20.148 rad/s and the actual equilibrium v_inplane ≈ 5.8 m/s:
-            K_DRIVE × v_inplane should ≈ K_DRAG × ω_eq²
-
-        The equilibrium v_inplane is ~5.8 m/s (not 10 m/s) because the rotor
-        disk is tilted ~30° from the vertical — most wind flows axially through
-        the disk, not in the rotor plane.
-        """
-        v_inplane = self._equilibrium_v_inplane()
-        Q_drive = K_DRIVE_SPIN * v_inplane
-        Q_drag  = K_DRAG_SPIN * OMEGA**2
-
-        ratio = Q_drive / Q_drag
-        print(
-            f"\n  Equilibrium v_inplane = {v_inplane:.3f} m/s  (not V_wind={V_WIND} — "
-            f"disk tilted to tether angle)\n"
-            f"  Q_drive = K_DRIVE × v_inplane = {K_DRIVE_SPIN} × {v_inplane:.3f} = {Q_drive:.3f} N·m\n"
-            f"  Q_drag  = K_DRAG  × ω²        = {K_DRAG_SPIN} × {OMEGA:.3f}² = {Q_drag:.3f} N·m\n"
-            f"  Q_drive / Q_drag = {ratio:.3f}  (should be ≈1.0 at equilibrium)"
-        )
-        assert 0.7 < ratio < 1.3, (
-            f"Spin equilibrium not satisfied: Q_drive/Q_drag = {ratio:.3f}.\n"
-            f"The K_DRIVE and K_DRAG constants are inconsistent with ω_eq={OMEGA:.1f} rad/s "
-            f"at v_inplane={v_inplane:.3f} m/s (actual equilibrium, not V_wind)."
-        )
-
-    def test_equilibrium_omega_formula(self):
-        """
-        Equilibrium spin: ω_eq = sqrt(K_DRIVE × v_inplane / K_DRAG)
-
-        Should match the stored default OMEGA = 20.148 rad/s within 10%.
-        Uses the actual equilibrium v_inplane (wind projected into disk plane).
-        """
-        v_inplane = self._equilibrium_v_inplane()
-        omega_eq = math.sqrt(K_DRIVE_SPIN * v_inplane / K_DRAG_SPIN)
-        print(
-            f"\n  v_inplane at equilibrium = {v_inplane:.3f} m/s\n"
-            f"  ω_eq = sqrt({K_DRIVE_SPIN} × {v_inplane:.3f} / {K_DRAG_SPIN}) "
-            f"= {omega_eq:.3f} rad/s\n"
-            f"  DEFAULT OMEGA = {OMEGA:.3f} rad/s"
-        )
-        assert abs(omega_eq - OMEGA) / OMEGA < 0.10, (
-            f"Computed ω_eq={omega_eq:.3f} differs from DEFAULT OMEGA={OMEGA:.3f} by "
-            f"{abs(omega_eq-OMEGA)/OMEGA:.1%} > 10%.\n"
-            f"K_DRIVE/K_DRAG may not be calibrated to the default equilibrium.\n"
-            f"(v_inplane={v_inplane:.3f} m/s from geometry; check POS0/BODY_Z0.)"
-        )
-
-    def test_spin_perturbation_is_stable(self):
-        """
-        A positive ω perturbation should increase Q_drag more than Q_drive,
-        causing ω to return toward ω_eq (stable equilibrium).
-
-        Stability condition: dQ_net/dω < 0
-            Q_net = K_DRIVE × v_inplane − K_DRAG × ω²
-            dQ_net/dω = −2 × K_DRAG × ω < 0  for ω > 0  → always stable ✓
-
-        Uses the actual equilibrium v_inplane ≈ 5.8 m/s.
-        """
-        v_inplane = self._equilibrium_v_inplane()
-        # Check at ω_eq + Δ: Q_net should be negative (restoring)
-        delta_omega = 2.0
-        omega_perturbed = OMEGA + delta_omega
-        Q_net = K_DRIVE_SPIN * v_inplane - K_DRAG_SPIN * omega_perturbed**2
-        print(
-            f"\n  v_inplane = {v_inplane:.3f} m/s\n"
-            f"  At ω = ω_eq + {delta_omega:.1f} = {omega_perturbed:.1f} rad/s:\n"
-            f"  Q_net = {Q_net:.3f} N·m  (should be < 0 → restoring)"
-        )
-        assert Q_net < 0.0, (
-            f"Perturbed spin is NOT restoring: Q_net={Q_net:.3f} > 0 at ω={omega_perturbed:.1f}.\n"
-            f"The autorotation equilibrium is unstable at v_inplane={v_inplane:.3f} m/s.\n"
-            f"Check K_DRIVE={K_DRIVE_SPIN}, K_DRAG={K_DRAG_SPIN}, OMEGA={OMEGA}."
-        )
-
-    def test_bems_q_drive_consistent_with_spin_ode(self):
-        """
-        The BEM model's Q_drive at equilibrium conditions should be in the same
-        order of magnitude as K_DRIVE × v_inplane.
-
-        These are different models (BEM torque vs linearised K_DRIVE ODE), so
-        exact agreement is not expected.  Order-of-magnitude consistency confirms
-        neither has a gross error.
-        """
-        aero, _ = _primary_forces(collective_rad=0.0)
-        Q_drive_bem = abs(aero.last_Q_drive)
-        Q_drive_ode = K_DRIVE_SPIN * aero.last_v_inplane
-
-        if Q_drive_bem > 1e-6:
-            ratio = Q_drive_bem / Q_drive_ode
-            print(
-                f"\n  Q_drive (BEM)       = {Q_drive_bem:.3f} N·m\n"
-                f"  Q_drive (K_DRIVE)   = {Q_drive_ode:.3f} N·m\n"
-                f"  ratio (BEM / K_ODE) = {ratio:.3f}  "
-                f"(expect same order of magnitude, not exact match)"
-            )
-            # Allow a factor of 10 — these are different models of the same phenomenon
-            assert 0.01 < ratio < 100.0, (
-                f"BEM Q_drive and K_DRIVE ODE differ by more than 2 orders of magnitude "
-                f"(ratio={ratio:.3f}). One of the models may have a unit error."
-            )
-
-
 # ===========================================================================
 # Section 8 — Blade geometry and parameter consistency
 # ===========================================================================
@@ -1001,9 +857,9 @@ class TestGeometryConsistency:
             f"S_w mismatch: defn={sw_from_defn:.6f}  expected={sw_expected:.6f}"
         )
 
-    def test_disk_area_matches_annulus(self):
-        """A = π(R_tip² − R_root²) — annular disk."""
-        a_expected = math.pi * (R_TIP**2 - R_ROOT**2)
+    def test_disk_area_matches_full_disk(self):
+        """Peters-He uses full disk A = π·R_tip² for momentum theory (Glauert convention)."""
+        a_expected = math.pi * R_TIP**2
         aero = create_aero(_rd.default())
         assert abs(aero.disk_area - a_expected) < 1e-4, (
             f"Disk area mismatch: model={aero.disk_area:.4f}  expected={a_expected:.4f}"

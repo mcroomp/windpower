@@ -21,8 +21,7 @@ Precomputed in __init__ (layout-invariant quantities):
 Runtime array dimensions: (N_AB, N_RADIAL) or (N_AB, N_RADIAL, 3).
 
 Spin dynamics:
-  last_Q_spin uses an empirical model:  Q = k_drive × v_inplane − k_drag × ω²
-  Equilibrium: ω_eq = sqrt(k_drive × v_inplane / k_drag)
+  Q_spin = dot(M_total, disk_normal) — BEM aerodynamic torque about spin axis.
 """
 
 import math
@@ -44,9 +43,6 @@ class DeSchutterAero:
     """
     Per-blade strip-theory aerodynamic model — De Schutter et al. 2018.
     NumPy-vectorized: all strip evaluations run as batched array ops.
-
-    Spin: last_Q_spin = k_drive_spin * v_inplane - k_drag_spin * omega²
-    Use:  omega_spin += aero.last_Q_spin / I_spin * dt
     """
 
     N_AZ          = 8
@@ -66,8 +62,6 @@ class DeSchutterAero:
         self.CL_ALPHA   = float(p["CL_alpha"])
         self.AOA_LIMIT  = float(p["aoa_limit"])
         self.ramp_time  = float(ramp_time)
-        self.k_drive_spin = float(p["k_drive_spin"])
-        self.k_drag_spin  = float(p["k_drag_spin"])
         self.CD_T         = float(p["CD_structural"])  # structural parasitic drag (Eq. 29, 31)
 
         span            = self.R_TIP - self.R_ROOT
@@ -103,11 +97,8 @@ class DeSchutterAero:
         self.last_collective_rad = 0.0
         self.last_tilt_lon       = 0.0
         self.last_tilt_lat       = 0.0
-        self.last_Q_spin            = 0.0
         self.last_M_spin            = np.zeros(3)
         self.last_M_cyc             = np.zeros(3)
-        self.last_Q_drive           = 0.0
-        self.last_Q_drag            = 0.0
         self.last_H_force           = 0.0
         self.last_sideslip_mean_deg = 0.0  # mean |β| across valid strips [deg]
 
@@ -145,14 +136,12 @@ class DeSchutterAero:
         Vectorized over all (N_AB × N_RADIAL) strips — no Python strip loop.
 
         After the call:
-          last_Q_spin   — empirical spin torque; use for spin ODE
           last_M_spin   — spin-axis moment vector
           last_v_inplane — in-plane wind speed [m/s]
         """
         ramp = self._ramp_factor(t)
 
         disk_normal = R_hub[:, 2]                                    # (3,)
-        spin_sign   = float(np.sign(omega_rotor)) if omega_rotor != 0.0 else 1.0
         omega_abs   = abs(float(omega_rotor))
 
         tilt_lon_rad = tilt_lon * self.pitch_gain_rad
@@ -240,7 +229,6 @@ class DeSchutterAero:
         if not np.any(valid):
             self.last_M_spin = np.zeros(3)
             self.last_M_cyc  = np.zeros(3)
-            self.last_Q_spin = 0.0
             return AeroResult(
                 F_world=np.zeros(3), M_orbital=np.zeros(3), Q_spin=0.0, M_spin=np.zeros(3)
             )
@@ -276,21 +264,13 @@ class DeSchutterAero:
                                       + CD_total[..., None] * ua_unit)  # (N_AB, N_RADIAL, 3)
         M_strip = np.cross(r_cp_world, F_strip)                      # (N_AB, N_RADIAL, 3)
 
-        # Torque component along spin axis per strip: (N_AB, N_RADIAL)
-        Q_strip = (np.einsum('ijk,ik->ij', F_strip, e_tang)
-                   * self._r_stations[None, :] * spin_sign)
-
         # ── Accumulate ───────────────────────────────────────────────────────
-        F_acc       = F_strip.sum(axis=(0, 1))                        # (3,)
-        M_acc       = M_strip.sum(axis=(0, 1))                        # (3,)
-        Q_drive_acc = float(Q_strip[Q_strip >= 0].sum())
-        Q_drag_acc  = float(Q_strip[Q_strip  < 0].sum())
+        F_acc   = F_strip.sum(axis=(0, 1))                            # (3,)
+        M_acc   = M_strip.sum(axis=(0, 1))                            # (3,)
 
         scale   = ramp / self.N_AZ
         F_total = F_acc * scale
         M_total = M_acc * scale
-        Q_drive = Q_drive_acc * scale
-        Q_drag  = Q_drag_acc  * scale
 
         # Decompose moment into spin-axis and orbital components
         Q_spin_scalar = float(np.dot(M_total, disk_normal))
@@ -306,10 +286,6 @@ class DeSchutterAero:
         self.last_collective_rad = collective_rad
         self.last_tilt_lon       = tilt_lon
         self.last_tilt_lat       = tilt_lat
-        self.last_Q_spin         = float(self.k_drive_spin * v_inplane
-                                         - self.k_drag_spin * omega_abs ** 2)
-        self.last_Q_drive        = Q_drive
-        self.last_Q_drag         = Q_drag
         self.last_H_force           = float(np.linalg.norm(
             F_total - self.last_T * disk_normal))
         self.last_M_spin            = M_spin_world.copy()
@@ -323,6 +299,6 @@ class DeSchutterAero:
         return AeroResult(
             F_world   = F_total.copy(),
             M_orbital = M_cyc_world.copy(),
-            Q_spin    = float(self.k_drive_spin * v_inplane - self.k_drag_spin * omega_abs**2),
+            Q_spin    = Q_spin_scalar,
             M_spin    = M_spin_world.copy(),
         )

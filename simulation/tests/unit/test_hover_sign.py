@@ -16,11 +16,8 @@ Physics
   -> wind flows through disk in disk_normal direction -> rotor sees upward inflow
   -> blades generate lift along disk_normal = [0,0,-1]
   -> F_world[2] < 0  (upward = negative Z in NED)  -- arrests the fall
-
-Both SkewedWakeBEM (original) and SkewedWakeBEM2 (reimplementation) are tested.
 """
 
-import math
 import sys
 from pathlib import Path
 
@@ -29,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import SkewedWakeBEM2, SkewedWakeBEM2Jit, PetersHeBEM, PetersHeBEMJit
+from aero import PetersHeBEM, PetersHeBEMJit
 import rotor_definition as rd
 
 # Horizontal disk: disk_normal = [0,0,-1] (up in NED)
@@ -54,10 +51,8 @@ WIND_10E   = np.array([0., 10., 0.])   # 10 m/s East (in-plane with horizontal d
 OMEGA_IC   = 18.11                     # rad/s — IC equilibrium spin from steady_state_starting.json
 
 ALL_MODELS = [
-    (SkewedWakeBEM2,    "SkewedWakeBEM2"),
-    (SkewedWakeBEM2Jit, "SkewedWakeBEM2Jit"),
-    (PetersHeBEM,       "PetersHeBEM"),
-    (PetersHeBEMJit,    "PetersHeBEMJit"),
+    (PetersHeBEM,    "PetersHeBEM"),
+    (PetersHeBEMJit, "PetersHeBEMJit"),
 ]
 
 

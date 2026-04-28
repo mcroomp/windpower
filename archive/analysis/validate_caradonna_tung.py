@@ -12,6 +12,16 @@ Experimental CT values (Table I, Mt=0.439 case):
   theta=8 deg  -> CT=0.00461
   theta=12 deg -> CT=0.00814
 
+Note on CQ/FM: Caradonna & Tung (1981) did not measure torque — the paper is a
+blade-pressure and tip-vortex benchmark only.  No experimental CQ is available
+from this dataset.  The CQ and figure-of-merit (FM) columns below are therefore
+model-only outputs, validated analytically against the ideal actuator-disk bound:
+  FM_ideal = 1.0  (Betz limit)
+  FM_typical = 0.70-0.80 for a clean, untwisted rotor at moderate loading
+
+CQ definition: CQ = Q / (rho * A * (Omega*R)^2 * R)
+FM definition: FM = CT^(3/2) / (sqrt(2) * CQ)
+
 Run:
     python simulation/analysis/validate_caradonna_tung.py
 """
@@ -60,9 +70,6 @@ ct_rotor = RotorDefinition(
     oswald_efficiency = 0.97,
     alpha_stall_deg = 15.0,
     rho_kg_m3      = RHO,
-    # spin ODE parameters not used in this static test
-    K_drive_Nms_m  = 0.0,
-    K_drag_Nms2_rad2 = 0.001,
     swashplate_pitch_gain_rad = 1.0,  # irrelevant (zero cyclic)
 )
 
@@ -79,38 +86,59 @@ R_HUB = build_orb_frame(BZ)
 WIND  = np.zeros(3)
 T_RUN = 10.0   # past ramp
 
+CQ_SCALE = RHO * DISK_AREA * TIP_SPEED**2 * R  # CQ = Q / CQ_SCALE
+
 def run(model, theta_deg):
     col = math.radians(theta_deg)
     model.compute_forces(col, 0.0, 0.0, R_HUB, np.zeros(3), OMEGA, WIND, T_RUN)
     T  = model.last_T
     CT = T / (RHO * DISK_AREA * TIP_SPEED**2)
-    return T, CT
+    Q  = abs(float(np.dot(model.last_M_spin, BZ)))  # spin-axis torque magnitude
+    CQ = Q / CQ_SCALE
+    FM = CT**1.5 / (math.sqrt(2.0) * CQ) if CQ > 0 else float("nan")
+    return CT, CQ, FM
 
 # ---------------------------------------------------------------------------
-# Print comparison table
+# Table 1: CT validation (vs experiment)
 # ---------------------------------------------------------------------------
 THETAS = [5, 8, 12]
 
 print(f"\nCaradonna-Tung (1981) hover validation  Mt={MT}, Omega={OMEGA:.1f} rad/s")
-print(f"{'':>6}  {'CT_exp':>9}  {'CT_Glauert':>10}  {'err_G%':>7}  {'CT_PetersHe':>12}  {'err_PH%':>8}  {'CT_Skewed':>10}  {'err_S%':>7}")
-print("-" * 82)
+print(f"\n--- Thrust coefficient CT (vs experiment) ---")
+print(f"{'':>6}  {'CT_exp':>9}  {'CT_PetersHe':>12}  {'err_PH%':>8}  {'CT_Skewed':>10}  {'err_S%':>7}")
+print("-" * 62)
 
+ph_results = {}
 for theta in THETAS:
-    gl = PetersHeBEM(ct_rotor)
     ph = PetersHeBEM(ct_rotor)
     sw = create_aero(ct_rotor, model="skewed_wake_numpy")
 
-    _, CT_g  = run(gl, theta)
-    _, CT_ph = run(ph, theta)
-    _, CT_s  = run(sw, theta)
-    CT_exp   = EXP[theta]
+    CT_ph, CQ_ph, FM_ph = run(ph, theta)
+    CT_s,  _,     _     = run(sw, theta)
+    CT_exp = EXP[theta]
 
-    err_g  = (CT_g  - CT_exp) / CT_exp * 100
+    ph_results[theta] = (CT_ph, CQ_ph, FM_ph)
+
     err_ph = (CT_ph - CT_exp) / CT_exp * 100
     err_s  = (CT_s  - CT_exp) / CT_exp * 100
 
-    print(f"  {theta:2d} deg  {CT_exp:9.5f}  {CT_g:10.5f}  {err_g:+7.1f}%  {CT_ph:12.5f}  {err_ph:+8.1f}%  {CT_s:10.5f}  {err_s:+7.1f}%")
+    print(f"  {theta:2d} deg  {CT_exp:9.5f}  {CT_ph:12.5f}  {err_ph:+8.1f}%  {CT_s:10.5f}  {err_s:+7.1f}%")
+
+# ---------------------------------------------------------------------------
+# Table 2: CQ and figure of merit (Peters-He, no experimental reference)
+# ---------------------------------------------------------------------------
+print(f"\n--- Torque coefficient CQ and figure of merit FM (Peters-He, no exp reference) ---")
+print(f"{'':>6}  {'CT':>9}  {'CQ':>10}  {'FM':>8}  {'FM_bound':>10}")
+print("-" * 52)
+
+for theta in THETAS:
+    CT_ph, CQ_ph, FM_ph = ph_results[theta]
+    # Ideal FM upper bound from actuator disk: FM <= 1.0
+    # Practical bound for untwisted blade: ~0.70-0.80
+    print(f"  {theta:2d} deg  {CT_ph:9.5f}  {CQ_ph:10.6f}  {FM_ph:8.3f}  {'0.70-0.80':>10}")
 
 print()
-print("Reference: Caradonna & Tung (1981) NASA TM-81232, Table I, Mt=0.439")
-print("Note: exp values may have +/-5% uncertainty; no Mach correction applied to CL_alpha here.")
+print("CT ref: Caradonna & Tung (1981) NASA TM-81232, Table I, Mt=0.439")
+print("CQ/FM:  no experimental data available from this paper (pressure/wake study only)")
+print("FM=1.0 is the Betz ideal; clean untwisted rotors typically achieve 0.70-0.80")
+print("Note: no Mach correction applied to CL_alpha; CT uncertainty +/-5%")

@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import PetersHeBEMJit, create_aero
+from aero import PetersHeBEMJit
 import rotor_definition as _rd
 from frames import build_orb_frame
 from swashplate import (
@@ -287,27 +287,6 @@ def test_hover_wind_creates_eastward_h_force(aero):
         f"10 m/s East wind on level disk should create >5 N eastward H-force; got {h_force:.2f} N"
     )
 
-
-def test_hover_wind_h_force_both_models_agree(aero):
-    """PetersHeBEM and SkewedWakeBEM must agree on H-force magnitude to within 50%."""
-    bz   = np.array([0.0, 0.0, -1.0])
-    R    = build_orb_frame(bz)
-    col  = 0.05
-
-    fg = aero.compute_forces(col, 0.0, 0.0, R, np.zeros(3), _OMEGA, _WIND, _T)
-    fs = create_aero(_rd.default()).compute_forces(
-        col, 0.0, 0.0, R, np.zeros(3), _OMEGA, _WIND, _T)
-
-    h_glauert = float(fg[1])
-    h_skewed  = float(fs[1])
-
-    assert h_glauert > 0, f"PetersHeBEM H-force should be eastward, got {h_glauert:.1f} N"
-    assert h_skewed  > 0, f"SkewedWakeBEM H-force should be eastward, got {h_skewed:.1f} N"
-    ratio = h_glauert / h_skewed
-    assert 0.5 < ratio < 2.0, (
-        f"H-force ratio Glauert/Skewed={ratio:.2f} — models disagree by more than 2x; "
-        f"Glauert={h_glauert:.1f} N  Skewed={h_skewed:.1f} N"
-    )
 
 
 def test_negative_tilt_lon_reduces_eastward_force_in_hover_wind(aero):
