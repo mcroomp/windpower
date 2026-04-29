@@ -45,24 +45,23 @@ rotor:
                              # Confirm: calipers at root and tip.
 
 airfoil:
-  designation:       SG6042
-  source:            "NeuralFoil XFOIL surrogate at Re=490k (flight operating condition); sg6042.dat from aerosandbox database"
+  designation:       SG6040
+  source:            "XFOIL polar from airfoiltools.com (xf-sg6040-il-500000), Re=500000, Ncrit=9; sg6040_re500k.csv"
   # ── Lift model:  CL = CL0 + CL_alpha · α ────────────────────────────────
 
-  CL0:               0.524  # zero-AoA lift coefficient  [–]
-                             # SOURCE: NeuralFoil at Re=490k (r_cp=1.833m, ω=20 rad/s, c=0.20m).
-                             # NF fit over −4° to +9° linear range: CL(0°)=0.524.
-                             # Previous value (0.43) was from bench-test Re=127k — too low for flight.
-                             # MEASURE: XFOIL run on SG6042 at Re=490k; y-intercept of linear CL-α fit.
+  CL0:               0.393  # zero-AoA lift coefficient  [–]
+                             # SOURCE: sg6040_re500k.csv — CL at α=0° reads 0.3925 directly.
+                             # Least-squares fit over −4° to +9° gives intercept 0.379; direct
+                             # read at 0° (0.393) preferred as it is not sensitive to fit range.
+                             # MEASURE: XFOIL run on SG6040 at Re~490k; CL at α=0°.
 
-  CL_alpha_per_rad:  5.47   # a = ∂CL/∂α  [/rad]
-                             # SOURCE: NeuralFoil at Re=490k, least-squares fit over −4° to +9°.
-                             # 5.47/rad is consistent with finite-wing lifting-line theory:
+  CL_alpha_per_rad:  5.79   # a = ∂CL/∂α  [/rad]
+                             # SOURCE: sg6040_re500k.csv — least-squares fit over −4° to +9°: 5.788/rad.
+                             # Consistent with finite-wing lifting-line theory:
                              #   CL_alpha_3D = 2π / (1 + 2/AR) = 2π/1.2 ≈ 5.24/rad (AR=10)
-                             # NF slightly exceeds lifting-line because SG6042 is cambered and
-                             # moderately thick (10%).  Previous value 4.71 was conservative (−14%).
-                             # MEASURE: slope of CL-α line from SG6042 XFOIL polar at Re=490k
-                             # over linear range (≈ −5° to +10°).  Most important parameter —
+                             # SG6040 slightly exceeds lifting-line due to camber.
+                             # MEASURE: slope of CL-α line from SG6040 XFOIL polar at Re~490k
+                             # over linear range (≈ −4° to +8°).  Most important parameter —
                              # thrust scales linearly with CL_alpha.
 
   # ── Drag polar:  CD = CD0 + CL²/(π·AR·e) ───────────────────────────────
@@ -70,13 +69,11 @@ airfoil:
   CD_structural:     0.0    # C_{D,T} — no thin connecting cables in beaupoil design
                              # Blade roots attach directly to hub via rigid spar attachment.
 
-  CD0:               0.018  # zero-lift drag coefficient  [–]
-                             # SOURCE: NeuralFoil at Re=490k: CD at zero lift ≈ 0.0181.
-                             # Previous value (0.010) was from bench-test Re=127k — lower Re
-                             # has higher skin-friction drag; flight Re gives lower CD0.
-                             # Note: 0.018 is still higher than the bench-test value (0.026)
-                             # because flight Re=490k gives cleaner attached-flow drag.
-                             # MEASURE: CD at zero lift (α ≈ −5°) from SG6042 XFOIL polar at Re=490k.
+  CD0:               0.0079 # zero-lift drag coefficient  [–]
+                             # SOURCE: sg6040_re500k.csv — CD at zero-lift α=−3.54° reads 0.00793.
+                             # CD at α=0° is 0.00852; minimum CD is 0.00793 at α=−3.75°.
+                             # At Re=500k, SG6040 has very low profile drag (attached laminar flow).
+                             # MEASURE: CD at zero lift from SG6040 XFOIL polar at Re~490k.
 
   oswald_efficiency: 0.8    # e — Oswald span efficiency factor  [–]
                              # SOURCE: standard engineering assumption for rectangular untwisted blades
@@ -85,9 +82,11 @@ airfoil:
                              # relative to CD0 at operating AoA (~5°).  Acceptable as-is.
 
   # Stall
-  alpha_stall_deg:   14.4   # α_stall — AoA clamp for linear model validity [°]
-                             # SOURCE: NeuralFoil at Re=490k shows CL peak at α≈14.4° (vs 12° at Re=127k).
-                             # Higher Re delays stall onset; 14.4° is the upper end of the linear range.
+  alpha_stall_deg:   13.0   # α_stall — AoA clamp for linear model validity [°]
+                             # SOURCE: sg6040_re500k.csv — CL slope drops to ~35% of linear rate by
+                             # α=13°; conservative clip for the linear BEM model.
+                             # SG6040 at Re=500k has no sharp stall — CL rises slowly past 15°,
+                             # so 13° marks the practical upper bound of the linear CL-α regime.
                              # ASSUMPTION: model clips at this value (does not simulate post-stall).
 
   # Empirical Re range — documentation only, NOT USED IN CURRENT MODEL
@@ -98,7 +97,7 @@ airfoil:
 
   Re_operating:      490000 # Re at r_cp in flight (= Ω·r_cp·c/ν ≈ 20×1.833×0.20/1.5e-5)
                              # NOT USED IN MODEL — documentation only.
-                             # Model coefficients above are taken at this Re (NeuralFoil fit).
+                             # CSV polar is at Re=500k — within 2% of this value; coefficients apply.
 
 inertia:
   # mass_kg is NOT set here — it is computed by the loader as:
@@ -281,44 +280,12 @@ control:
 # I_spin excludes the stationary assembly mass, reflecting that the electronics hub does
 # not rotate with the rotor.
 
-# Autorotation spin dynamics (simplified ODE, separate from 6-DOF body)
+# Autorotation spin dynamics (ODE, separate from 6-DOF body)
 #
-# dω_spin/dt = (Q_drive − Q_drag) / I_ode
-# Q_drive = K_drive · v_inplane   [wind energy drives rotor]
-# Q_drag  = K_drag  · ω_spin²    [profile drag brakes rotor]
-# Equilibrium: ω_eq = √(K_drive · v_inplane / K_drag)
+# dω_spin/dt = Q_spin / I_ode
+# Q_spin = aerodynamic spin torque from BEM (aero.compute_forces().Q_spin)
 #
-# v_inplane is the component of (wind − hub_velocity) perpendicular to the rotor disk normal.
-#
-# Derivation of K_drive and K_drag:
-#   1. Pick the design-point equilibrium: ω_eq and the corresponding v_inplane.
-#   2. At equilibrium: K_drive / K_drag = ω_eq² / v_inplane.
-#   3. K_drag can be estimated from blade profile drag:
-#        K_drag_physical = CD0 · ρ/2 · c · N · (R⁴ − r_root⁴) / 4
-#                        ≈ 0.010 × 0.61 × 0.20 × 4 × (39.06 − 0.06) / 4 ≈ 0.0476 N·m·s²/rad²
-#      The tuned value (0.01786) is lower: the BEM model already captures most blade drag
-#      aerodynamically; K_drag only represents residual spin decay not covered by the BEM.
-#   4. Once K_drag is set: K_drive = K_drag · ω_eq² / v_inplane.
-#
-# Design-point used for tuning:
-#   - V_wind = 10 m/s (default simulation wind)
-#   - hub stationary, body_z = [0.851, 0.305, 0.427] (default tether equilibrium orientation)
-#   - v_inplane ≈ 5.25 m/s (wind projected onto disk plane at that orientation, hub at rest)
-#   - ω_eq = 20.15 rad/s → K_drive/K_drag = 20.15²/5.25 ≈ 77.3
-#   - Tuned: K_drive=1.4, K_drag=0.01786 → K_drive/K_drag = 78.4, ω_eq(5.25) ≈ 20.3 rad/s ✓
 autorotation:
-  K_drive_Nms_m:       1.4      # K_drive [N·m·s/m] — drive torque per (m/s) in-plane wind speed
-                                 # SOURCE: empirically tuned — see derivation above.
-                                 # MEASURE: spin-up test at known steady wind: record dω/dt vs v_inplane
-                                 # at several wind speeds; K_drive = (dω/dt · I_ode + K_drag·ω²) / v_inplane.
-
-  K_drag_Nms2_rad2:    0.01786  # K_drag [N·m·s²/rad²] — spin braking torque coefficient
-                                 # SOURCE: empirically tuned — see derivation above.  Lower than the
-                                 # physical blade profile drag estimate (~0.048) because the BEM model
-                                 # already accounts for most blade drag; K_drag is only the residual.
-                                 # MEASURE: spin-down test (wind off, no collective): record ω(t) decay;
-                                 # fit K_drag = −I_ode · (dω/dt) / ω² from the decay curve.
-
   I_ode_kgm2:          10.0     # I_ode [kg·m²] — effective rotational inertia for spin ODE
                                  # SOURCE: rough estimate, ≈ 2.5× the structural I_spin (3.94 kg·m²).
                                  # Larger than I_spin because it captures added-mass effects of
@@ -333,8 +300,6 @@ autorotation:
   omega_eq_rad_s:      20.148   # ω_eq at design point — NOT USED IN MODEL, validation only.
                                  # Measured from simulation: settled spin at V_wind=10 m/s, default
                                  # tether orientation (test_steady_flight.py output).
-                                 # Cross-check: sqrt(K_drive · v_inplane / K_drag) with v_inplane≈5.25
-                                 # gives 20.3 rad/s, within 1% of this value.
                                  # MEASURE: optical tachometer or video at steady known wind speed.
 
 environment:

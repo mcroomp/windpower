@@ -46,7 +46,7 @@ from telemetry_csv import read_csv
 from pumping_planner import PumpingGroundController
 from unified_ground import _cmd_to_nv
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 _ROTOR = rd.default()
 
 # ---------------------------------------------------------------------------

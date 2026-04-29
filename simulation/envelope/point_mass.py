@@ -27,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from aero   import create_aero
 from frames import build_orb_frame
 

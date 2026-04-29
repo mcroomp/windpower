@@ -23,16 +23,11 @@ Buhl M.L. (2005) "A New Empirical Relationship between Thrust Coefficient and
 
 import math
 import logging
-import sys
-import os
 import numpy as np
 from scipy.optimize import brentq
 
-_SIM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SIM_DIR not in sys.path:
-    sys.path.insert(0, _SIM_DIR)
-
-from aero import AeroResult
+from . import AeroResult, AeroBase
+from .rotor_definition import RotorDefinition
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +157,10 @@ def _solve_phi_brent(
     Returns (phi, a, ap).  Falls back to geometric phi with a=ap=0 if solve fails.
     """
     def airfoil(phi: float) -> tuple[float, float]:
+        # Wind-turbine sign convention (phi − pitch): positive pitch = feathered = less AoA.
+        # The Brent residual and momentum equations below are co-designed with this convention;
+        # flipping to helicopter (pitch − phi) changes the residual sign structure and breaks
+        # the solver's search regions.  Do not flip alpha here in isolation.
         alpha = max(-AOA_LIMIT, min(AOA_LIMIT, phi - pitch))
         CL = CL0 + CL_alpha * alpha
         CD = CD0 + CL * CL / (math.pi * AR * OSWALD)
@@ -211,7 +210,7 @@ def _solve_phi_brent(
 
 # ── Main class ───────────────────────────────────────────────────────────────
 
-class OpenFASTBEM:
+class OpenFASTBEM(AeroBase):
     """
     Quasi-static BEM with OpenFAST inductionFactors0 algorithm.
 
@@ -222,26 +221,23 @@ class OpenFASTBEM:
     N_AZ     = 12
     N_RADIAL = 10
 
-    def __init__(self, rotor, ramp_time: float = 5.0,
-                 state_dict: dict | None = None, **overrides):
-        p = {**rotor.aero_kwargs(), **overrides}
-        self.N_BLADES       = int(p["n_blades"])
-        self.R_ROOT         = float(p["r_root"])
-        self.R_TIP          = float(p["r_tip"])
-        self.CHORD          = float(p["chord"])
-        self.RHO            = float(p["rho"])
-        self.OSWALD         = float(p["oswald_eff"])
-        self.CD0            = float(p["CD0"])
-        self.CL0            = float(p["CL0"])
-        self.CL_ALPHA       = float(p["CL_alpha"])
-        self.AOA_LIMIT      = float(p["aoa_limit"])
+    def __init__(self, rotor: RotorDefinition, ramp_time: float = 5.0,
+                 state_dict: dict | None = None):
+        self.N_BLADES       = rotor.n_blades
+        self.R_ROOT         = rotor.root_cutout_m
+        self.R_TIP          = rotor.radius_m
+        self.CHORD          = rotor.chord_m
+        self.RHO            = rotor.rho_kg_m3
+        self.OSWALD         = rotor.oswald_efficiency
+        self.CD0            = rotor.CD0
+        self.CL0            = rotor.CL0
+        self.CL_ALPHA       = rotor.CL_alpha_per_rad
+        self.AOA_LIMIT      = math.radians(rotor.alpha_stall_deg)
         self.ramp_time      = float(ramp_time)
-        self.k_drive_spin   = float(p["k_drive_spin"])
-        self.k_drag_spin    = float(p["k_drag_spin"])
-        self.pitch_gain_rad = float(p["pitch_gain_rad"])
+        self.pitch_gain_rad = rotor.swashplate_pitch_gain_rad
 
         span = self.R_TIP - self.R_ROOT
-        self.AR        = float(p["aspect_ratio"])
+        self.AR        = rotor.aspect_ratio
         self.R_CP      = self.R_ROOT + (2.0 / 3.0) * span
         self.disk_area = math.pi * self.R_TIP ** 2
 
@@ -263,8 +259,6 @@ class OpenFASTBEM:
         self.last_v_i            = 0.0
         self.last_v_inplane      = 0.0
         self.last_ramp           = 0.0
-        self.last_Q_drive        = 0.0
-        self.last_Q_drag         = 0.0
         self.last_M_spin         = np.zeros(3)
         self.last_M_cyc          = np.zeros(3)
         self.last_H_force        = 0.0
@@ -274,13 +268,14 @@ class OpenFASTBEM:
         self.last_tau0           = 0.0   # no ODE time constant
         self.last_skew_angle_deg = 0.0
 
+    def cl_cd(self, alpha_rad: float) -> tuple[float, float]:
+        alpha_c = max(-self.AOA_LIMIT, min(self.AOA_LIMIT, alpha_rad))
+        CL = self.CL0 + self.CL_ALPHA * alpha_c
+        CD = self.CD0 + CL ** 2 / (math.pi * self.AR * self.OSWALD)
+        return CL, CD
+
     def to_dict(self) -> dict:
         return {"type": "OpenFASTBEM", "last_t": self._last_t}
-
-    @classmethod
-    def from_definition(cls, defn, state_dict: dict | None = None,
-                        **overrides) -> "OpenFASTBEM":
-        return cls(defn, state_dict=state_dict, **overrides)
 
     def is_valid(self) -> bool:
         return math.isfinite(self.last_T)
@@ -368,7 +363,7 @@ class OpenFASTBEM:
                 if Vrel_sq < 0.25:
                     continue
 
-                # Airfoil coefficients at the solved phi
+                # Airfoil coefficients at the solved phi (wind-turbine sign: phi - pitch)
                 alpha = max(-self.AOA_LIMIT,
                             min(self.AOA_LIMIT, phi_sol - pitch))
                 CL = self.CL0 + self.CL_ALPHA * alpha
@@ -419,9 +414,12 @@ class OpenFASTBEM:
         v_inplane_vec = v_rel_world - v_axial * disk_normal
         v_inplane     = float(np.linalg.norm(v_inplane_vec))
 
+        # Internal solver uses wind-turbine sign convention (alpha = phi - pitch).
+        # Negate pitch inputs so the external interface behaves like the helicopter
+        # convention (alpha = collective - phi_he): more collective → higher AoA → more thrust.
         F_acc, M_acc = self._strip_forces(
             v_rel_world, disk_normal, R_hub, omega_rotor,
-            collective_rad, tilt_lon_rad, tilt_lat_rad, spin_angle,
+            -collective_rad, -tilt_lon_rad, -tilt_lat_rad, spin_angle,
         )
 
         scale   = ramp / self.N_AZ
@@ -445,8 +443,6 @@ class OpenFASTBEM:
         self.last_v_i            = v_i
         self.last_v_inplane      = v_inplane
         self.last_ramp           = ramp
-        self.last_Q_drive        = float(self.k_drive_spin * v_inplane)
-        self.last_Q_drag         = float(self.k_drag_spin * omega_abs ** 2)
         self.last_M_spin         = np.array(M_spin_world)
         self.last_M_cyc          = np.array(M_cyc_world)
         self.last_H_force        = float(np.linalg.norm(F_total - T_disk * disk_normal))

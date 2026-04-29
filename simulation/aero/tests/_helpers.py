@@ -20,11 +20,11 @@ for _p in [str(_SIM_DIR), str(_AERO_DIR), str(_HERE)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import rotor_definition as rd
-from aero import DeSchutterAero
-from aero_prandtl_bem    import PrandtlBEM
-from aero_skewed_wake    import SkewedWakeBEM
-from aero_glauert_states import GlauertStateBEM
+from aero import rotor_definition as rd
+from aero.aero_peters_he     import PetersHeBEM
+from aero.aero_peters_he_jit import PetersHeBEMJit
+from aero.aero_simple_bem    import SimpleBEM
+from aero.aero_openfast_bem  import OpenFASTBEM
 
 # ── RAWES design-point constants ──────────────────────────────────────────────
 # body_z = [0.305, 0.851, -0.427]: tether-equilibrium disk orientation at 10 m/s (NED)
@@ -70,7 +70,7 @@ HOVER_KWARGS = dict(
     R_hub          = np.eye(3),
     v_hub_world    = np.zeros(3),
     omega_rotor    = 20.0,
-    wind_world     = np.array([0.0, 8.66, -5.0]),   # NED: East=Y, Up=-Z
+    wind_world     = np.array([8.66, 0.0, -5.0]),   # NED: North=X, upward=-Z
     t              = 10.0,
 )
 
@@ -90,5 +90,5 @@ EDGEWISE_KWARGS = dict(
     t              = 10.0,
 )
 
-ALL_MODELS = [DeSchutterAero, PrandtlBEM, SkewedWakeBEM, GlauertStateBEM]
+ALL_MODELS = [PetersHeBEM, PetersHeBEMJit, OpenFASTBEM]
 ALL_MODEL_NAMES = [c.__name__ for c in ALL_MODELS]

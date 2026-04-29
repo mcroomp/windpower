@@ -31,7 +31,7 @@ for _p in [str(_SIM_DIR), str(_AERO_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from frames import build_orb_frame
 from aero import create_aero, PetersHeBEM
 
@@ -39,10 +39,9 @@ from aero import create_aero, PetersHeBEM
 # Beaupoil rotor parameters
 # ---------------------------------------------------------------------------
 rotor   = rd.default()          # beaupoil_2026
-kw      = rotor.aero_kwargs()
-R_TIP   = float(kw["r_tip"])    # 2.5 m
-R_ROOT  = float(kw["r_root"])   # 0.5 m
-RHO     = float(kw["rho"])      # 1.22 kg/m3
+R_TIP   = rotor.radius_m        # 2.5 m
+R_ROOT  = rotor.root_cutout_m   # 0.5 m
+RHO     = rotor.rho_kg_m3       # 1.22 kg/m3
 A_DISK  = math.pi * (R_TIP**2 - R_ROOT**2)
 
 OMEGA       = 20.15             # rad/s  (omega_eq at V=10 m/s)

@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 from simtest_runner import PhysicsRunner, PythonAP
 from ap_controller import TensionApController
 from pumping_planner import TensionCommand

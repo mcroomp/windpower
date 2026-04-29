@@ -167,7 +167,7 @@ M_orbital += disk_normal * T_GB4008
 ```
 omega_spin += result.Q_spin / I_SPIN_KGMS2 × dt
 ```
-`Q_spin` comes from `SkewedWakeBEM.compute_forces()` which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium without manual K_drive/K_drag constants.
+`Q_spin` comes from `PetersHeBEMJit.compute_forces()` which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium — no empirical K_drive/K_drag constants needed.
 
 **Gyroscopic coupling** is included in Euler's equations (`dynamics.py`):
 ```
@@ -211,23 +211,25 @@ The cyclic controller (`AcroController`, or ArduPilot ACRO + `rawes.lua` on hard
 
 ## Aerodynamic Model
 
-**Production model:** `simulation/aero/aero_skewed_wake.py` — `SkewedWakeBEM`
+**Production model:** `PetersHeBEMJit` (`simulation/aero/aero_peters_he_jit.py`)
 
-All simulation code, tests, and the mediator use `SkewedWakeBEM` (imported via `simulation/aero.py`'s `create_aero()` factory). The old `RotorAero` empirical model is archived in `simulation/aero/` for comparison only.
+All simulation code, tests, and the mediator use `PetersHeBEMJit` (imported via the `simulation/aero` package's `create_aero()` factory, or instantiated directly as `PetersHeBEMJit(rotor)`).
 
-### Why SkewedWakeBEM (not RotorAero)
+### Why PetersHeBEM (not the old RotorAero)
 
 `RotorAero` had three fundamental physics errors:
 1. **Wrong cyclic**: empirical `K_cyc × tilt × T` scaling with sign tuned for the old model; per-blade physics gives the opposite sign.
 2. **Wrong H-force**: `0.5 × μ × T` formula wildly overestimates (~105 N vs ~13 N actual).
-3. **Wrong spin torque**: `K_drive × v_inplane − K_drag × omega²` are empirical constants with no physical basis.
+3. **Wrong spin torque**: `K_drive × v_inplane − K_drag × omega²` empirical constants with no physical basis; replaced by `Q_spin` from BEM strip integration.
 
-### SkewedWakeBEM architecture
+### PetersHeBEMJit architecture
 
-Per-blade strip BEM with:
-- **Prandtl tip and root loss** factors on each radial strip
-- **Coleman skewed-wake induction** factor: non-uniform induction across the disk at high inflow angle (pumping cycle reel-out has ξ≈31°, strongly non-uniform)
+3-state dynamic inflow ODE (v0, v1c, v1s) with per-blade BEM strip integration:
+- **Peters-He induction**: `v_i(r, ψ) = v0 + v1c·(r/R)·cos(ψ) + v1s·(r/R)·sin(ψ)` — non-uniform induction evolved dynamically via implicit-Euler ODE
+- **Numba `@njit` hot loop**: strip accumulation compiled to native SIMD
+- **No skew-angle validity limit** — momentum ODE valid from hover through axial descent (xi up to 90°)
 - **5-second aero startup ramp** to avoid impulse loads at t=0
+- **Stateful**: serialize/restore inflow states via `aero.to_dict()` / `create_aero(model="jit", state_dict=d)`
 
 Returns `AeroResult(F_world, M_orbital, Q_spin, M_spin)`:
 - `F_world` — net aerodynamic force in NED world frame [N]
@@ -235,28 +237,33 @@ Returns `AeroResult(F_world, M_orbital, Q_spin, M_spin)`:
 - `Q_spin` — net rotor torque (drive − drag) for the omega_spin ODE [N·m]
 - `M_spin` — gyroscopic couple for rigid-body dynamics [N·m]
 
-### Alternative models (for comparison / testing)
+### AeroBase interface
 
-All located in `simulation/aero/` and importable via `simulation/aero.py`:
+All models in `simulation/aero/` inherit from `AeroBase` (ABC defined in `aero/__init__.py`).
+Instantiate any model directly — no factory required:
+
+```python
+from aero import PetersHeBEMJit, PetersHeBEM, create_aero
+aero = PetersHeBEMJit(rotor)                         # direct (preferred)
+aero = create_aero(rotor, model="jit")               # factory shim
+aero = PetersHeBEMJit(rotor, state_dict=prev.to_dict())  # warm-start
+```
+
+Every subclass inherits `AeroBase.from_definition(rotor, state_dict=None)` — identical to calling the constructor directly.
+
+### Available models
+
+All in `simulation/aero/`, importable via the package:
 
 | Class | File | Description |
 |-------|------|-------------|
-| `SkewedWakeBEM` | `aero_skewed_wake.py` | **Production reference** — Prandtl + Coleman; explicit loops, full docstrings |
-| `SkewedWakeBEMJit` | `aero_skewed_wake_jit.py` | **Fast path** — Numba `@njit` drop-in; select via `create_aero(model="jit")` |
-| `PrandtlBEM` | `aero_prandtl_bem.py` | BEM + Prandtl tip/root loss, no skewed wake |
-| `GlauertStateBEM` | `aero_glauert_states.py` | BEM + Glauert inflow-state detection |
-| `RotorAero` | `aero_rotor.py` | Archived empirical model (do not use in simulation) |
-| `DeSchutterAero` | `aero_deschutter.py` | De Schutter 2018 lumped-blade BEM (equation validation only) |
+| `PetersHeBEMJit` | `aero_peters_he_jit.py` | **Production** — Numba JIT, 3-state dynamic inflow; `model="jit"` |
+| `PetersHeBEM` | `aero_peters_he.py` | Pure-numpy reference; `model="numpy"` |
+| `OpenFASTBEM` | `aero_openfast_bem.py` | Quasi-static BEM with Brent phi-solve, Prandtl + Buhl correction |
+| `CCBladeBEM` | `aero_ccblade_bem.py` | Tabulated XFOIL/AeroDyn polar (Re-dependent CL/CD); requires ccblade |
+| `SimpleBEM` | `aero_simple_bem.py` | Minimal textbook BEM — sanity cross-check only |
 
-`SkewedWakeBEM` is the human-readable reference; `SkewedWakeBEMJit` inherits from it and
-overrides `compute_forces` with two Numba kernels. Equivalence verified to `atol=1e-10`.
-
-`DeSchutterAero` implements the paper's thin-airfoil model (Eq. 25–31) including:
-- β side-slip diagnostic (`last_sideslip_mean_deg`) — validity check, not a force modifier
-- C_{D,T} structural parasitic drag (cable drag, Eq. 29, 31) — 0.021 for de_schutter_2018
-- See `simulation/aero/deschutter.md` for the full equation-level validation
-
-Test framework in `simulation/aero/tests/` validates all models against each other.
+Test framework in `simulation/aero/tests/` validates models against each other.
 
 ---
 
@@ -354,9 +361,8 @@ Peak tension 455 N < 496 N (80% break load limit). Min physics altitude 5.7 m.
 
 **WinchNode protocol boundary:** The planner communicates with the winch node exclusively
 through `WinchNode.get_telemetry()` and `WinchNode.receive_command()`. It has no direct
-access to `tether._last_info`, `wind_world`, or `WinchController`. Wind direction for
-`WindEstimator` is seeded from `Anemometer.measure()` (3 m height) -- not the raw wind
-vector. This mirrors the hardware MAVLink boundary and prevents simulation cheating.
+access to `tether._last_info`, `wind_world`, or `WinchController`. Wind is kept constant
+in simulation; `Anemometer.measure()` (3 m height) is available for future wind estimation.
 
 ---
 

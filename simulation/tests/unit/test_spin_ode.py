@@ -11,7 +11,6 @@ Two regimes:
 1. Axial descent (zero crosswind)
    - Hub descending creates upward axial inflow through horizontal disk
    - q_spin_from_aero must return positive Q at low omega (spin-up torque)
-   - The old K_drive*v_inplane formula would give Q~0 here (wrong; v_inplane=0)
    - Note: pure crosswind (horizontal wind, horizontal disk) does NOT drive
      autorotation — flow is in-plane with zero axial component.
 
@@ -34,7 +33,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from aero        import create_aero
 from frames      import build_orb_frame
 from physics_core import q_spin_from_aero, step_spin_ode
@@ -73,7 +72,7 @@ def test_axial_descent_q_spin_positive(v_desc):
 
 
 def test_axial_descent_v_inplane_near_zero():
-    """With zero crosswind, v_inplane ~ 0 — old K_drive*v_inplane formula would give Q~0."""
+    """With zero crosswind, v_inplane ~ 0; BEM spin torque still positive from axial inflow."""
     aero = _aero()
     aero.compute_forces(
         collective_rad = 0.02,

@@ -278,10 +278,6 @@ def plot_flight_report(
         ax6 = fig.add_subplot(gs[5])
         ax6b = ax6.twinx()
         ax6.plot(telem["t"], telem["omega_rotor"],  color="#9467bd", linewidth=1.0, label="ω rotor (rad/s)")
-        ax6b.plot(telem["t"], telem["Q_drag"],   color="#e377c2", linewidth=0.8,
-                  linestyle="--", label="Q drag (N·m)")
-        ax6b.plot(telem["t"], telem["Q_drive"],  color="#bcbd22", linewidth=0.8,
-                  linestyle="-.", label="Q drive (N·m)")
         ax6b.plot(telem["t"], telem["v_axial"],  color="#17becf", linewidth=0.8,
                   linestyle=":",  label="v_axial (m/s)")
         ax6b.plot(telem["t"], telem["v_inplane"],color="#8c564b", linewidth=0.8,

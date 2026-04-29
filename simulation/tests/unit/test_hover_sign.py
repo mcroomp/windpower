@@ -27,7 +27,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import PetersHeBEM, PetersHeBEMJit
-import rotor_definition as rd
+from aero.aero_openfast_bem import OpenFASTBEM
+from aero.aero_simple_bem   import SimpleBEM
+from aero import rotor_definition as rd
 
 # Horizontal disk: disk_normal = [0,0,-1] (up in NED)
 # R_hub[:,2] must equal [0,0,-1].  Use the same convention as _R_tilted(0):
@@ -53,6 +55,8 @@ OMEGA_IC   = 18.11                     # rad/s — IC equilibrium spin from stea
 ALL_MODELS = [
     (PetersHeBEM,    "PetersHeBEM"),
     (PetersHeBEMJit, "PetersHeBEMJit"),
+    (OpenFASTBEM,    "OpenFASTBEM"),
+    (SimpleBEM,      "SimpleBEM"),
 ]
 
 
@@ -105,6 +109,41 @@ def test_hover_lift_exceeds_weight(cls, label):
 # Setup: disk horizontal, 10 m/s East wind (in-plane), rotor at IC omega.
 # The wind blows across the disk (not through it): v_axial ≈ 0, v_inplane = 10 m/s.
 # Blades travelling into the wind on the advancing side generate net upward lift.
+
+def test_zero_lift_alpha_gives_zero_thrust():
+    """At the zero-lift pitch, SimpleBEM produces zero axial thrust.
+
+    Convention: phi = atan2(Vx*(1-a), Vy), alpha = phi - pitch.
+    With no wind and no hub motion: Vx = 0, so phi = 0 and alpha = -pitch.
+    Setting pitch = +CL0/CL_alpha makes alpha = -CL0/CL_alpha -> CL = 0 -> T = 0.
+
+    Scoped to SimpleBEM because the quasi-static a=0 starting point is needed;
+    Peters-He and OpenFAST BEM include dynamic induction that shifts the
+    self-consistent operating point away from this analytic fixed point.
+    """
+    rotor = rd.default()
+    # phi=0 when Vx=0, so alpha = pitch; zero CL requires pitch = -CL0/CL_alpha
+    collective_zero_lift = -rotor.CL0 / rotor.CL_alpha_per_rad
+
+    aero = SimpleBEM(rotor)
+    r = aero.compute_forces(
+        collective_rad = collective_zero_lift,
+        tilt_lon       = 0.0,
+        tilt_lat       = 0.0,
+        R_hub          = R_HORIZONTAL,
+        v_hub_world    = np.zeros(3),
+        omega_rotor    = OMEGA,
+        wind_world     = NO_WIND,
+        t              = T_STEADY,
+    )
+    disk_normal = R_HORIZONTAL[:, 2]               # [0, 0, -1] in NED
+    thrust = float(np.dot(r.F_world, disk_normal))
+    print(f"\n[SimpleBEM] zero-lift: collective={np.degrees(collective_zero_lift):.2f} deg"
+          f"  thrust={thrust:.4f} N  F_world={r.F_world}")
+    assert abs(thrust) < 1.0, (
+        f"SimpleBEM thrust at zero-lift pitch = {thrust:.4f} N (expected ~0)"
+    )
+
 
 @pytest.mark.parametrize("cls,label", ALL_MODELS, ids=[m[1] for m in ALL_MODELS])
 def test_autorotation_lift_is_upward(cls, label):

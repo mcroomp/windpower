@@ -52,7 +52,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import create_aero
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 
 # ---------------------------------------------------------------------------
 # Physical constants (same as mediator defaults)
@@ -67,7 +67,6 @@ WIND_VEC  = np.array([V_WIND, 0.0, 0.0])
 
 # Rotor geometry — sourced from beaupoil_2026.yaml via RotorDefinition
 _ROTOR    = _rd.default()
-_AERO_KW  = _ROTOR.aero_kwargs()
 N_BLADES  = _ROTOR.n_blades
 R_ROOT    = _ROTOR.root_cutout_m
 R_TIP     = _ROTOR.radius_m
@@ -79,16 +78,13 @@ DISK_AREA = math.pi * (R_TIP**2 - R_ROOT**2)
 
 # Airfoil data — sourced from beaupoil_2026.yaml
 CL_ALPHA  = _ROTOR.CL_alpha_3D_per_rad
-AR        = _AERO_KW["aspect_ratio"]
+AR        = _ROTOR.aspect_ratio
 
 # Linear lift model coefficients from YAML (NeuralFoil at Re=490k)
-assert _ROTOR.CL0            is not None, "beaupoil_2026 must have CL0 set"
-assert _ROTOR.CD0            is not None, "beaupoil_2026 must have CD0 set"
-assert _ROTOR.alpha_stall_deg is not None, "beaupoil_2026 must have alpha_stall_deg set"
-CL0       = float(_ROTOR.CL0)          # zero-AoA lift coefficient [–]
-CD0       = float(_ROTOR.CD0)          # zero-lift drag coefficient [–]
+CL0       = _ROTOR.CL0          # zero-AoA lift coefficient [–]
+CD0       = _ROTOR.CD0          # zero-lift drag coefficient [–]
 OE        = 1.0                        # near-elliptic span assumption for cross-validation
-AOA_LIMIT = math.radians(float(_ROTOR.alpha_stall_deg))   # AoA clamp [rad]
+AOA_LIMIT = math.radians(_ROTOR.alpha_stall_deg)   # AoA clamp [rad]
 
 # Thin-airfoil theory CL_alpha for cross-validation
 CL_ALPHA_2D = 2.0 * math.pi           # thin-plate theory: 6.283 /rad

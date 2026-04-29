@@ -72,7 +72,7 @@ from viz3d.telemetry import TelemetryFrame, CSVSource
 # Rotor geometry — sourced from beaupoil_2026.yaml via RotorDefinition
 # ---------------------------------------------------------------------------
 import sys as _sys; _sys.path.insert(0, str(__import__('pathlib').Path(__file__).parents[1]))
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 _ROTOR           = _rd.default()
 N_BLADES         = _ROTOR.n_blades
 R_ROOT           = _ROTOR.root_cutout_m

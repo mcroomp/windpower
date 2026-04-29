@@ -5,7 +5,7 @@ Run to check whether autorotation zero-crossing exists in the BEM model.
 import sys, math
 import numpy as np
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from aero import create_aero
 
 rotor = rd.load("pca2_1934")

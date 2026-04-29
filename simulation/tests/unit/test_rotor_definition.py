@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from aero import create_aero
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ class TestLoad:
     def test_load_by_explicit_path(self, tmp_path):
         # Copy beaupoil yaml to a temp path and load by path
         import shutil
-        src = Path(rd.__file__).parent / "rotor_definitions" / "beaupoil_2026.yaml"
+        src = rd.BUILTIN["beaupoil_2026"]
         dst = tmp_path / "my_rotor.yaml"
         shutil.copy(src, dst)
         r = rd.load(str(dst))
@@ -252,32 +252,6 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
-# aero_kwargs factory
-# ---------------------------------------------------------------------------
-
-class TestAeroKwargs:
-    def test_all_required_keys_present(self):
-        r = rd.load("beaupoil_2026")
-        kwargs = r.aero_kwargs()
-        required = {"n_blades", "r_root", "r_tip", "chord", "rho",
-                    "aspect_ratio", "K_cyc",
-                    "CL0", "CL_alpha", "CD0", "oswald_eff", "aoa_limit",
-                    "k_drive_spin", "k_drag_spin"}
-        assert required.issubset(kwargs.keys())
-
-    def test_aspect_ratio_matches_derived(self):
-        r = rd.load("beaupoil_2026")
-        kw = r.aero_kwargs()
-        assert kw["aspect_ratio"] == pytest.approx(r.aspect_ratio)
-
-    def test_can_construct_PetersHe(self):
-        r    = rd.load("beaupoil_2026")
-        aero = create_aero(r)
-        assert aero.N_BLADES == r.n_blades
-        assert aero.R_TIP    == pytest.approx(r.radius_m, rel=1e-6)
-
-
-# ---------------------------------------------------------------------------
 # dynamics_kwargs factory
 # ---------------------------------------------------------------------------
 
@@ -422,3 +396,119 @@ class TestReportAndSummary:
         r = rd.load("beaupoil_2026")
         rep = r.report()
         assert "Validation" in rep
+
+
+# ---------------------------------------------------------------------------
+# SG6040 airfoil CSV validation — coefficients must match the polar source
+# ---------------------------------------------------------------------------
+
+class TestSG6040AirfoilCSV:
+    """
+    Re-derive CL0, CL_alpha, and CD0 directly from sg6040_re500k.csv and assert
+    that beaupoil_2026.yaml agrees to within measurement precision.
+
+    Fit range: -4 deg to +9 deg (clearly linear region of the polar).
+    CD0: evaluated at the zero-lift alpha (interpolated from adjacent rows).
+    """
+
+    CSV_PATH = Path(__file__).resolve().parents[2] / "rotor_definitions" / "sg6040_re500k.csv"
+
+    # Tolerances chosen to match the precision of the derived YAML values.
+    CL0_TOL          = 0.005   # direct read at 0 deg, rounded to 3 decimal places
+    CL_ALPHA_TOL     = 0.05    # /rad — least-squares fit rounding
+    CD0_TOL          = 0.0003  # interpolated at zero-lift alpha
+
+    # Fit range for CL_alpha / CL0
+    FIT_ALPHA_MIN_DEG = -4.0
+    FIT_ALPHA_MAX_DEG =  9.0
+
+    @classmethod
+    def _load_polar(cls):
+        """Return lists of (alpha_deg, CL, CD) from the CSV."""
+        alphas, cls_list, cds = [], [], []
+        in_data = False
+        with open(cls.CSV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("Alpha,Cl,Cd"):
+                    in_data = True
+                    continue
+                if not in_data or not line:
+                    continue
+                parts = line.split(",")
+                alphas.append(float(parts[0]))
+                cls_list.append(float(parts[1]))
+                cds.append(float(parts[2]))
+        return alphas, cls_list, cds
+
+    @classmethod
+    def _ls_fit(cls, alphas_deg, cl_vals):
+        """Least-squares linear fit: CL = CL0 + CL_alpha * alpha_rad."""
+        xa = [a * math.pi / 180.0 for a in alphas_deg]
+        n = len(xa)
+        sx  = sum(xa)
+        sy  = sum(cl_vals)
+        sxx = sum(x * x for x in xa)
+        sxy = sum(x * y for x, y in zip(xa, cl_vals))
+        slope     = (n * sxy - sx * sy) / (n * sxx - sx * sx)
+        intercept = (sy - slope * sx) / n
+        return intercept, slope   # (CL0, CL_alpha_per_rad)
+
+    @classmethod
+    def _cd_at_zero_lift(cls, alphas_deg, cl_vals, cd_vals):
+        """Interpolate CD at the zero-lift alpha."""
+        for i in range(len(cl_vals) - 1):
+            if cl_vals[i] <= 0.0 <= cl_vals[i + 1]:
+                t = (0.0 - cl_vals[i]) / (cl_vals[i + 1] - cl_vals[i])
+                return cd_vals[i] + t * (cd_vals[i + 1] - cd_vals[i])
+        raise ValueError("zero-lift alpha not found in polar data")
+
+    def setup_method(self):
+        self.r = rd.load("beaupoil_2026")
+        alphas, cl_vals, cd_vals = self._load_polar()
+
+        fit_a  = [a for a, c in zip(alphas, cl_vals)
+                  if self.FIT_ALPHA_MIN_DEG <= a <= self.FIT_ALPHA_MAX_DEG]
+        fit_cl = [c for a, c in zip(alphas, cl_vals)
+                  if self.FIT_ALPHA_MIN_DEG <= a <= self.FIT_ALPHA_MAX_DEG]
+
+        self.csv_CL0_fit, self.csv_CL_alpha = self._ls_fit(fit_a, fit_cl)
+        self.csv_CL0_direct = cl_vals[alphas.index(0.0)]
+        self.csv_CD0        = self._cd_at_zero_lift(alphas, cl_vals, cd_vals)
+
+    def test_csv_exists(self):
+        assert self.CSV_PATH.exists(), f"Polar CSV not found: {self.CSV_PATH}"
+
+    def test_airfoil_name_is_sg6040(self):
+        assert "SG6040" in self.r.airfoil_name.upper()
+
+    def test_CL0_matches_csv_direct(self):
+        # CL0 derived from CL at alpha=0 in the polar
+        assert self.r.CL0 == pytest.approx(self.csv_CL0_direct, abs=self.CL0_TOL), (
+            f"CL0={self.r.CL0:.4f} vs CSV direct {self.csv_CL0_direct:.4f}"
+        )
+
+    def test_CL_alpha_matches_csv_fit(self):
+        # CL_alpha from least-squares fit over the linear range
+        assert self.r.CL_alpha_per_rad is not None
+        assert self.r.CL_alpha_per_rad == pytest.approx(self.csv_CL_alpha, abs=self.CL_ALPHA_TOL), (
+            f"CL_alpha={self.r.CL_alpha_per_rad:.3f} vs CSV fit {self.csv_CL_alpha:.3f} /rad"
+        )
+
+    def test_CD0_matches_csv_zero_lift(self):
+        # CD0 interpolated at the zero-lift alpha from the polar
+        assert self.r.CD0 is not None
+        assert self.r.CD0 == pytest.approx(self.csv_CD0, abs=self.CD0_TOL), (
+            f"CD0={self.r.CD0:.5f} vs CSV zero-lift {self.csv_CD0:.5f}"
+        )
+
+    def test_CL_alpha_in_expected_range(self):
+        # SG6040 at Re~500k: slope must lie between lifting-line lower bound
+        # (2pi/(1+2/AR) = 5.24 /rad) and 2pi (thin-airfoil upper bound).
+        assert self.r.CL_alpha_per_rad is not None
+        assert 5.0 <= self.r.CL_alpha_per_rad <= 6.5
+
+    def test_CD0_plausible_for_re500k(self):
+        # At Re=500k a well-behaved airfoil has CD0 well below 0.015
+        assert self.r.CD0 is not None
+        assert self.r.CD0 < 0.015

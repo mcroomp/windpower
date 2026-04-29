@@ -68,7 +68,6 @@ The `simtest` timeout is set globally in `simulation/pytest.ini`.
 | `test_controller.py` | `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `RatePID`, `AltitudeHoldController`, `compute_bz_altitude_hold` |
 | `test_sensor.py` | `PhysicalSensor` output consistency (gyro, accel, body_to_earth) |
 | `test_startup_trajectory.py` | KinematicStartup orbit trajectory validation |
-| `test_wind_estimator.py` | Wind estimator accuracy vs. ground truth |
 | `test_ap_controller.py` | `TensionApController` — bad-event detection, elevation clamping |
 | `test_winch_tension_control.py` | `WinchController` — reel-out, reel-in, motion profile, bounds, landing (23 tests) |
 

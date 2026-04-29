@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero        import create_aero
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from dynamics    import RigidBodyDynamics
 from frames      import build_orb_frame
 from physics_core import q_spin_from_aero

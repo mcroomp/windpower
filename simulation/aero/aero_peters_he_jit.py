@@ -12,19 +12,11 @@ The Peters-He induction replaces the Coleman skewed-wake term:
 
 import math
 import logging
-import sys
-import os
 import numpy as np
 from numba import njit
 
-_AERO_DIR = os.path.dirname(os.path.abspath(__file__))
-_SIM_DIR  = os.path.dirname(_AERO_DIR)
-for _p in (_SIM_DIR, _AERO_DIR):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from aero import AeroResult
-from aero_peters_he import PetersHeBEM
+from . import AeroResult
+from .aero_peters_he import PetersHeBEM
 
 log = logging.getLogger(__name__)
 
@@ -184,8 +176,8 @@ class PetersHeBEMJit(PetersHeBEM):
     """
 
     def __init__(self, rotor, ramp_time: float = 5.0,
-                 state_dict: dict | None = None, **overrides):
-        super().__init__(rotor, ramp_time, state_dict=state_dict, **overrides)
+                 state_dict: dict | None = None):
+        super().__init__(rotor, ramp_time, state_dict=state_dict)
         self._r_norm  = self._r_stations / self.R_TIP
         self._AR_pi_e = math.pi * self.AR * self.OSWALD
         self._warmup()
@@ -350,15 +342,11 @@ class PetersHeBEMJit(PetersHeBEM):
         M_spin_world  = Q_spin_scalar * disk_normal
         M_cyc_world   = M_total - M_spin_world
 
-        Q_drive = float(self.k_drive_spin * v_inplane)
-        Q_drag  = float(self.k_drag_spin * omega_abs**2)
         self.last_T         = T_disk
         self.last_v_axial   = v_axial
         self.last_v_i       = self._v0
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        self.last_Q_drive   = Q_drive
-        self.last_Q_drag    = Q_drag
         self.last_M_spin    = M_spin_world.copy()
         self.last_M_cyc     = M_cyc_world.copy()
         self.last_H_force   = float(np.linalg.norm(F_total - T_disk * disk_normal))

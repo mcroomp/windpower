@@ -44,7 +44,7 @@ from kinematic       import KinematicStartup, compute_launch_position  # noqa: F
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 import config as _mcfg
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 from telemetry_csv import COLUMNS as _TEL_COLUMNS
 from mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from mediator_events import MediatorEventLog

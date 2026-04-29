@@ -43,7 +43,7 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
 import numpy as _np
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 
 from stack_utils import (
     ARDUPILOT_ENV,

@@ -20,7 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from swashplate import SwashplateServoModel, collective_rad_to_out
-import rotor_definition as rd
+from aero import rotor_definition as rd
 
 # Physical limits matching test_pump_cycle_unified defaults
 _COL_MIN = -0.28  # rad

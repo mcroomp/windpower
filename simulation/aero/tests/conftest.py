@@ -17,7 +17,7 @@ for _p in [str(_SIM_DIR), str(_AERO_DIR), str(_HERE)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 
 
 @pytest.fixture(scope="session")

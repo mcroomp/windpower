@@ -4,16 +4,16 @@ rotor_definition.py — RAWES rotor configuration loader and validated geometry 
 A RotorDefinition holds all blade geometry, mass, airfoil, control, and
 autorotation parameters for one rotor variant.  Load from a YAML file:
 
-    import rotor_definition as rd
+    from aero import rotor_definition as rd
     rotor = rd.load("beaupoil_2026")          # built-in name
     rotor = rd.load("/path/to/my_rotor.yaml") # explicit path
     rotor = rd.default()                       # Beaupoil 2026
 
 The object pre-computes derived geometry and non-dimensional parameters
 (r_cp, S_w, disk_area, σ, AR, …) as properties, and exposes factory
-helpers for RotorAero and RigidBodyDynamics:
+helpers for aero models and RigidBodyDynamics:
 
-    aero     = RotorAero(**rotor.aero_kwargs())
+    aero     = PetersHeBEMJit(rotor)
     dynamics = RigidBodyDynamics(**rotor.dynamics_kwargs(), pos0=…, vel0=…)
 
 Built-in validation
@@ -44,8 +44,7 @@ try:
 except ImportError:  # pragma: no cover
     _YAML_AVAILABLE = False
 
-_HERE     = Path(__file__).parent
-_DEFS_DIR = _HERE / "rotor_definitions"
+_DEFS_DIR = Path(__file__).parent.parent / "rotor_definitions"
 
 BUILTIN: dict = {
     "beaupoil_2026":    _DEFS_DIR / "beaupoil_2026.yaml",
@@ -161,15 +160,30 @@ class RotorDefinition:
     solidity       σ  = N·c / (π·R)
     """
 
+    # ── Required: core geometry ──────────────────────────────────────────────
+    n_blades:      int    # number of blades
+    radius_m:      float  # R — tip radius [m]
+    root_cutout_m: float  # r_root — blade start radius [m]
+    chord_m:       float  # c — blade chord [m]
+
+    # ── Required: airfoil ────────────────────────────────────────────────────
+    Re_design:         int     # calibration Reynolds number [–]
+
+    # CL = CL0 + CL_alpha_per_rad · alpha,  CD = CD0 + CL²/(π·AR·oswald_efficiency)
+    CL0:               float   # zero-AoA lift coefficient  [–]
+    CL_alpha_per_rad:  float   # lift slope [/rad]
+    CD0:               float   # zero-lift drag coefficient [–]
+    oswald_efficiency: float   # Oswald span efficiency factor [–]
+    alpha_stall_deg:   float   # AoA clamp for linear model [°]
+
+    # ── Required: control ────────────────────────────────────────────────────
+    swashplate_pitch_gain_rad: float   # max blade pitch per unit normalised tilt [rad]
+
     # ── Identity ──────────────────────────────────────────────────────────────
     name:        str = "unknown"
     description: str = ""
 
-    # ── Rotor geometry ────────────────────────────────────────────────────────
-    n_blades:       int   = 4
-    radius_m:       float = 2.5      # R — tip radius
-    root_cutout_m:  float = 0.5      # r_root
-    chord_m:        float = 0.15     # c
+    # ── Rotor geometry (optional) ─────────────────────────────────────────────
     twist_deg:      float = 0.0      # θ_tw
     taper_ratio:    float = 1.0      # c_tip / c_root
 
@@ -180,20 +194,7 @@ class RotorDefinition:
     CD_structural:       float         = 0.0   # C_{D,T} — parasitic drag from connecting beams/cables
                                                 # De Schutter 2018 Eq. 29, 31.  Added to blade CD.
                                                 # Normalised to blade planform area S_w.
-    Re_design:           Optional[int] = None
     Re_operating:        Optional[int] = None
-
-    # ── Linear lift model (used by Peters-He BEM) ────────────────────────────
-    # CL = CL0 + CL_alpha_per_rad · alpha,  CD = CD0 + CL²/(π·AR·oswald_efficiency)
-    CL0:               Optional[float] = None   # zero-AoA lift coefficient  [–]
-    CL_alpha_per_rad:  Optional[float] = None   # lift slope [/rad]
-    CD0:               Optional[float] = None   # zero-lift drag coefficient [–]
-    oswald_efficiency: Optional[float] = None   # Oswald span efficiency factor [–]
-    alpha_stall_deg:   Optional[float] = None   # AoA clamp for linear model [°]
-
-    # ── Autorotation ODE torque coefficients ─────────────────────────────────
-    K_drive_Nms_m:    Optional[float] = None   # drive torque per (m/s) in-plane wind [N·m·s/m]
-    K_drag_Nms2_rad2: Optional[float] = None   # spin braking torque coefficient [N·m·s²/rad²]
 
     # ── Inertia ───────────────────────────────────────────────────────────────
     mass_kg:           float          = 5.0
@@ -217,13 +218,12 @@ class RotorDefinition:
                                              # that passively aligns body_z with tether (pendulum).
                                              # beaupoil_2026: 0.3 m (bottom of axle).
 
-    # ── Control ───────────────────────────────────────────────────────────────
-    K_cyc:                    float     = 0.4
-    swashplate_phase_deg:     float     = 0.0   # cyclic phase advance for gyroscopic comp [°]
-    swashplate_pitch_gain_rad: float = 0.3    # max blade pitch per unit normalised tilt [rad]
-    servo_slew_rate_deg_s:    float     = 1200.0  # DS113MG at 6 V: 60 deg in 0.05 s
-    servo_travel_deg:         float     = 60.0    # DS113MG total angular travel [deg]
-    kaman_flap:               KamanFlap = field(default_factory=KamanFlap)
+    # ── Control (optional) ────────────────────────────────────────────────────
+    K_cyc:                 float     = 0.4
+    swashplate_phase_deg:  float     = 0.0   # cyclic phase advance for gyroscopic comp [°]
+    servo_slew_rate_deg_s: float     = 1200.0  # DS113MG at 6 V: 60 deg in 0.05 s
+    servo_travel_deg:      float     = 60.0    # DS113MG total angular travel [deg]
+    kaman_flap:            KamanFlap = field(default_factory=KamanFlap)
 
     # ── Autorotation ODE ─────────────────────────────────────────────────────
     I_ode_kgm2:         float          = 10.0
@@ -484,40 +484,6 @@ class RotorDefinition:
     # Factory helpers
     # =========================================================================
 
-    def aero_kwargs(self) -> dict:
-        """
-        Return kwargs for RotorAero(**rotor.aero_kwargs()).
-
-        Maps RotorDefinition fields to the RotorAero constructor parameter names.
-        When polar_csv is set, also includes polar_alpha_rad / polar_CL / polar_CD
-        arrays for Peters-He table lookup.
-        """
-        d = dict(
-            n_blades         = self.n_blades,
-            r_root           = self.root_cutout_m,
-            r_tip            = self.radius_m,
-            chord            = self.chord_m,
-            rho              = self.rho_kg_m3,
-            aspect_ratio     = self.aspect_ratio,
-            CD_structural    = self.CD_structural,
-            K_cyc            = self.K_cyc,
-            pitch_gain_rad   = self.swashplate_pitch_gain_rad,
-        )
-        polar = self.polar_arrays()
-        if polar is not None:
-            d["polar_alpha_rad"] = polar[0]
-            d["polar_CL"]        = polar[1]
-            d["polar_CD"]        = polar[2]
-        # Linear lift model fields (required by Peters-He BEM)
-        if self.CL0               is not None: d["CL0"]          = self.CL0
-        if self.CL_alpha_per_rad  is not None: d["CL_alpha"]     = self.CL_alpha_per_rad
-        if self.CD0               is not None: d["CD0"]          = self.CD0
-        if self.oswald_efficiency is not None: d["oswald_eff"]   = self.oswald_efficiency
-        if self.alpha_stall_deg   is not None: d["aoa_limit"]    = math.radians(self.alpha_stall_deg)
-        if self.K_drive_Nms_m     is not None: d["k_drive_spin"] = self.K_drive_Nms_m
-        if self.K_drag_Nms2_rad2  is not None: d["k_drag_spin"]  = self.K_drag_Nms2_rad2
-        return d
-
     def dynamics_kwargs(self) -> dict:
         """
         Return partial kwargs for RigidBodyDynamics.
@@ -637,7 +603,6 @@ class RotorDefinition:
 
         Completeness (INFO only):
           C1  I_blade_flap_kgm2 not set → Lock number unknown
-          C2  Re_design not set → cannot check regime mismatch
         """
         issues: List[ValidationIssue] = []
 
@@ -672,7 +637,7 @@ class RotorDefinition:
                  f"the low empirical CL_alpha")
 
         # ── A: Airfoil ────────────────────────────────────────────────────────
-        if (self.Re_design is not None and self.Re_operating is not None
+        if (self.Re_operating is not None
                 and self.Re_operating > 2.0 * self.Re_design):
             warn("airfoil.Re_operating",
                  f"Operating Re={self.Re_operating} is "
@@ -735,9 +700,6 @@ class RotorDefinition:
             info("inertia.I_blade_flap_kgm2",
                  "Blade flap inertia I_b not set — Lock number cannot be computed. "
                  "Measure or estimate from CAD for complete specification.")
-        if self.Re_design is None:
-            info("airfoil.Re_design",
-                 "Design Reynolds number not set — cannot check regime mismatch.")
 
         return issues
 
@@ -818,9 +780,9 @@ def load(path_or_name: str) -> RotorDefinition:
         description = str(data.get("description", "")),
 
         n_blades       = _require_int(ro, "n_blades", p),
-        radius_m       = float(ro.get("radius_m",    2.5)),
-        root_cutout_m  = float(ro.get("root_cutout_m", 0.5)),
-        chord_m        = float(ro.get("chord_m",     0.15)),
+        radius_m       = _require_float(ro, "radius_m",      "rotor", p),
+        root_cutout_m  = _require_float(ro, "root_cutout_m", "rotor", p),
+        chord_m        = _require_float(ro, "chord_m",       "rotor", p),
         twist_deg      = float(ro.get("twist_deg",   0.0)),
         taper_ratio    = float(ro.get("taper_ratio", 1.0)),
 
@@ -828,17 +790,14 @@ def load(path_or_name: str) -> RotorDefinition:
         airfoil_source    = str(af.get("source",           "")),
         polar_csv         = af.get("polar_csv"),
         CD_structural     = float(af.get("CD_structural",  0.0)),
-        Re_design         = _m_int(af.get("Re_design")),
+        Re_design         = _require_int(af, "Re_design", p),
         Re_operating      = _m_int(af.get("Re_operating")),
 
-        CL0               = _m_float(af.get("CL0")),
-        CL_alpha_per_rad  = _m_float(af.get("CL_alpha_per_rad")),
-        CD0               = _m_float(af.get("CD0")),
-        oswald_efficiency = _m_float(af.get("oswald_efficiency")),
-        alpha_stall_deg   = _m_float(af.get("alpha_stall_deg")),
-        K_drive_Nms_m     = _m_float(ar.get("K_drive_Nms_m")),
-        K_drag_Nms2_rad2  = _m_float(ar.get("K_drag_Nms2_rad2")),
-
+        CL0               = _require_float(af, "CL0",               "airfoil", p),
+        CL_alpha_per_rad  = _require_float(af, "CL_alpha_per_rad",  "airfoil", p),
+        CD0               = _require_float(af, "CD0",               "airfoil", p),
+        oswald_efficiency = _require_float(af, "oswald_efficiency", "airfoil", p),
+        alpha_stall_deg   = _require_float(af, "alpha_stall_deg",   "airfoil", p),
         mass_kg           = _load_mass_kg(_m, n_blades=int(ro.get("n_blades", 4))),
         I_body_kgm2       = [float(v) for v in _m.get("I_body_kgm2", [5.0, 5.0, 10.0])],
         I_spin_kgm2                  = _m_float(_m.get("I_spin_kgm2")),
@@ -864,7 +823,6 @@ def load(path_or_name: str) -> RotorDefinition:
     )
     _LOAD_CACHE[cache_key] = _rotor
     return _rotor
-
 
 
 def default() -> RotorDefinition:

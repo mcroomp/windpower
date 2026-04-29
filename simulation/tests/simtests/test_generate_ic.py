@@ -39,7 +39,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
 from aero            import create_aero
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 from frames          import build_orb_frame
 from simtest_runner  import PhysicsRunner, PythonAP
 from ap_controller   import TensionApController

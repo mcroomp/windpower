@@ -46,15 +46,10 @@ Leishman J.G. (2006) Principles of Helicopter Aerodynamics, §10.5.
 
 import math
 import logging
-import sys
-import os
 import numpy as np
 
-_SIM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SIM_DIR not in sys.path:
-    sys.path.insert(0, _SIM_DIR)
-
-from aero import AeroResult
+from . import AeroResult, AeroBase
+from .rotor_definition import RotorDefinition
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +62,7 @@ _M2_COEFF = 16.0 / (105.0 * math.pi) # 2nd harmonic:  ≈ 0.048  (τ2 ≈ τ1/2.
 # the second harmonic adapts faster than the first, which improves damping.
 
 
-class PetersHeBEM:
+class PetersHeBEM(AeroBase):
     """
     BEM with Peters-He 3-state dynamic inflow.
 
@@ -79,26 +74,23 @@ class PetersHeBEM:
     N_RADIAL      = 10
     INFLOW_MAX_MS = 50.0   # plausible upper bound on any inflow state [m/s]
 
-    def __init__(self, rotor, ramp_time: float = 5.0,
-                 state_dict: dict | None = None, **overrides):
-        p = {**rotor.aero_kwargs(), **overrides}
-        self.N_BLADES   = int(p["n_blades"])
-        self.R_ROOT     = float(p["r_root"])
-        self.R_TIP      = float(p["r_tip"])
-        self.CHORD      = float(p["chord"])
-        self.RHO        = float(p["rho"])
-        self.OSWALD     = float(p["oswald_eff"])
-        self.CD0        = float(p["CD0"])
-        self.CL0        = float(p["CL0"])
-        self.CL_ALPHA   = float(p["CL_alpha"])
-        self.AOA_LIMIT  = float(p["aoa_limit"])
+    def __init__(self, rotor: RotorDefinition, ramp_time: float = 5.0,
+                 state_dict: dict | None = None):
+        self.N_BLADES   = rotor.n_blades
+        self.R_ROOT     = rotor.root_cutout_m
+        self.R_TIP      = rotor.radius_m
+        self.CHORD      = rotor.chord_m
+        self.RHO        = rotor.rho_kg_m3
+        self.OSWALD     = rotor.oswald_efficiency
+        self.CD0        = rotor.CD0
+        self.CL0        = rotor.CL0
+        self.CL_ALPHA   = rotor.CL_alpha_per_rad
+        self.AOA_LIMIT  = math.radians(rotor.alpha_stall_deg)
         self.ramp_time  = float(ramp_time)
-        self.k_drive_spin  = float(p["k_drive_spin"])
-        self.k_drag_spin   = float(p["k_drag_spin"])
-        self.pitch_gain_rad = float(p["pitch_gain_rad"])
+        self.pitch_gain_rad = rotor.swashplate_pitch_gain_rad
 
         span = self.R_TIP - self.R_ROOT
-        self.AR        = float(p["aspect_ratio"])
+        self.AR        = rotor.aspect_ratio
         self.R_CP      = self.R_ROOT + (2.0 / 3.0) * span   # representative radius (diagnostic)
         self.disk_area = math.pi * self.R_TIP**2   # full disk; consistent with Glauert
 
@@ -135,8 +127,6 @@ class PetersHeBEM:
         self.last_v_i       = self._v0
         self.last_v_inplane = 0.0
         self.last_ramp      = 0.0
-        self.last_Q_drive   = 0.0   # k_drive_spin * v_inplane
-        self.last_Q_drag    = 0.0   # k_drag_spin  * omega^2
         self.last_M_spin    = np.zeros(3)
         self.last_M_cyc     = np.zeros(3)
         self.last_H_force   = 0.0
@@ -145,6 +135,12 @@ class PetersHeBEM:
         self.last_v1s            = self._v1s
         self.last_tau0           = 0.0
         self.last_skew_angle_deg = 0.0
+
+    def cl_cd(self, alpha_rad: float) -> tuple[float, float]:
+        alpha_c = max(-self.AOA_LIMIT, min(self.AOA_LIMIT, alpha_rad))
+        CL = self.CL0 + self.CL_ALPHA * alpha_c
+        CD = self.CD0 + CL ** 2 / (math.pi * self.AR * self.OSWALD)
+        return CL, CD
 
     def to_dict(self) -> dict:
         """Serialize inflow state to a plain dict (JSON-safe)."""
@@ -157,11 +153,6 @@ class PetersHeBEM:
             "v2s":    self._v2s,
             "last_t": self._last_t,
         }
-
-    @classmethod
-    def from_definition(cls, defn, state_dict: dict | None = None,
-                        **overrides) -> "PetersHeBEM":
-        return cls(defn, state_dict=state_dict, **overrides)
 
     def is_valid(self) -> bool:
         """True when all inflow states are within physical bounds and last_T is finite."""
@@ -421,7 +412,6 @@ class PetersHeBEM:
         ramp = self._ramp_factor(t)
 
         disk_normal  = R_hub[:, 2]
-        omega_abs    = abs(float(omega_rotor))
         tilt_lon_rad = tilt_lon * self.pitch_gain_rad
         tilt_lat_rad = tilt_lat * self.pitch_gain_rad
 
@@ -468,15 +458,11 @@ class PetersHeBEM:
         M_cyc_world   = M_total - M_spin_world
 
         # ── Diagnostics ───────────────────────────────────────────────────────
-        Q_drive = float(self.k_drive_spin * v_inplane)
-        Q_drag  = float(self.k_drag_spin * omega_abs**2)
         self.last_T         = T_disk
         self.last_v_axial   = v_axial
         self.last_v_i       = self._v0        # uniform component — comparable to GlauertBEM
         self.last_v_inplane = v_inplane
         self.last_ramp      = ramp
-        self.last_Q_drive   = Q_drive
-        self.last_Q_drag    = Q_drag
         self.last_M_spin    = np.array(M_spin_world)
         self.last_M_cyc     = np.array(M_cyc_world)
         self.last_H_force   = float(np.linalg.norm(

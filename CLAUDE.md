@@ -81,8 +81,7 @@ Separate from the GB4008. Sized to deliver 435 N at 0.40 m/s reel-out and 226 N 
 
 ## Key Design Decisions
 
-- **Production aero:** `SkewedWakeBEMJit` (`aero/aero_skewed_wake_jit.py`) — Numba `@njit` drop-in. 18-test equivalence suite vs. reference (atol=1e-10). `create_aero(model="jit")`. Non-JIT version is human-readable reference only. **Validity limit: xi ≲ 85° from horizontal (Coleman skewed-wake correction degenerates at chi→90°; disk horizontal = invalid).**
-- **Peters-He aero:** `PetersHeBEMJit` (`aero/aero_peters_he_jit.py`) — 3-state dynamic inflow (v0, v1c, v1s). `create_aero(model="peters_he")`. Pure-numpy reference: `model="peters_he_numpy"`. **No skew-angle validity limit** — uses momentum ODE (`V_T = sqrt(v_inplane² + v_axial²)`) valid from hover through axial descent and forward flight. Required for near-vertical descent (hub above anchor, disk horizontal, xi ≳ 85°). Stateful model: serialize/restore inflow states via `aero.to_dict()` / `create_aero(model="peters_he", state_dict=d)`. Refs: Pitt & Peters 1981, Peters & He 1991.
+- **Production aero:** `PetersHeBEMJit` (`aero/aero_peters_he_jit.py`) — 3-state dynamic inflow (v0, v1c, v1s), Numba `@njit` hot loop. `create_aero(model="jit")` or `PetersHeBEMJit(rotor)` directly. Pure-numpy reference: `PetersHeBEM` (`model="numpy"`). **No skew-angle validity limit** — momentum ODE (`V_T = sqrt(v_inplane² + v_axial²)`) valid from hover through axial descent and forward flight; required for near-vertical descent (xi ≳ 85°). Stateful: serialize/restore inflow states via `aero.to_dict()` / `create_aero(model="jit", state_dict=d)`. Refs: Pitt & Peters 1981, Peters & He 1991.
 - **Two-loop attitude:** `compute_rate_cmd(kp, kd=0)` → rate setpoint; `RatePID(kp=2/3)` → swashplate tilt.
 - **Portable core** in `controller.py`: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad` — map 1:1 to Lua.
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10 rad`, `col_min_reel_in=0.079 rad`. BEM invalid above xi≈85°.
@@ -134,9 +133,10 @@ Separate from the GB4008. Sized to deliver 435 N at 0.40 m/s reel-out and 226 N 
 ```
 simulation/
 ├── dynamics.py          RK4 6-DOF rigid-body integrator
-├── aero.py              Facade → create_aero() factory (default: SkewedWakeBEMJit)
-├── aero/                SkewedWakeBEMJit (production, xi<85°), SkewedWakeBEM (reference), DeSchutterAero,
-│                        PetersHeBEMJit (model="peters_he", all skew angles), PetersHeBEM (numpy ref)
+├── aero/                Package: AeroBase (ABC) + AeroResult dataclass + create_aero() factory.
+│                        PetersHeBEMJit (default, model="jit"), PetersHeBEM (numpy ref),
+│                        CCBladeBEM (tabulated polar), OpenFASTBEM (Brent phi-solve), SimpleBEM (sanity ref).
+│                        Instantiate directly: PetersHeBEMJit(rotor). All inherit AeroBase.from_definition.
 ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 ├── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 ├── frames.py            build_orb_frame(), T_ENU_NED (legacy external-data utility only)

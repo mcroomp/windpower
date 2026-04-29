@@ -59,7 +59,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from controller  import AltitudeHoldController, compute_rate_cmd
 from sensor      import PhysicalSensor
 from simtest_log import BadEventLog

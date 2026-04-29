@@ -26,7 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import create_aero
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 from frames import build_orb_frame
 from swashplate import (
     ardupilot_h3_120_forward,

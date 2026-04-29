@@ -29,7 +29,7 @@ for _p in [str(_SIM_DIR), str(_AERO_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from frames import build_orb_frame
 from aero import create_aero, PetersHeBEM
 
@@ -53,8 +53,8 @@ def _body_z(tilt_deg: float) -> np.ndarray:
 def _run_sweep(model_factory):
     """Return arrays (tilt_deg, T, v_i, v_axial, v_inplane, CT, mu_z, mu, lambda_i)."""
     rotor = rd.default()
-    R = rotor.aero_kwargs()["r_tip"]
-    RHO = float(rotor.aero_kwargs()["rho"])
+    R   = rotor.radius_m
+    RHO = rotor.rho_kg_m3
     A   = math.pi * R**2
 
     results = []

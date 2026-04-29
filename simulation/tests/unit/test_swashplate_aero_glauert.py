@@ -21,7 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import PetersHeBEMJit
-import rotor_definition as _rd
+from aero import rotor_definition as _rd
 from frames import build_orb_frame
 from swashplate import (
     ardupilot_h3_120_forward,
@@ -125,8 +125,8 @@ def _forces_hover_wind(aero, col: float, tilt_lon: float = 0.0, tilt_lat: float 
     )
 
 
-def _q_empirical(aero, tilt_deg: float, col: float, omega: float,
-                 wind: np.ndarray) -> float:
+def _q_spin(aero, tilt_deg: float, col: float, omega: float,
+            wind: np.ndarray) -> float:
     bz = _body_z(tilt_deg)
     r  = build_orb_frame(bz)
     f  = aero.compute_forces(col, 0.0, 0.0, r, np.zeros(3), omega, wind, _T)
@@ -334,15 +334,8 @@ def test_cyclic_can_trim_hover_against_wind(aero):
 # ---------------------------------------------------------------------------
 # Spin torque — autorotation speeds rotor up, hover slows it down
 # ---------------------------------------------------------------------------
-# Two distinct spin torques are available in each result:
-#
-#   result.Q_spin  — empirical ODE torque: k_drive*v_inplane - k_drag*omega²
-#                    This drives the rotor speed ODE in the mediator.
-#                    Sign: positive = speeds rotor up; negative = slows it.
-#
-#   dot(result.M_spin, disk_normal)  — aerodynamic spin torque from BEM strip forces.
-#                    This is the raw moment about the spin axis computed from
-#                    blade element lift/drag.  Not used in the ODE but diagnostic.
+# result.Q_spin = BEM aerodynamic spin torque (dot(M_total, disk_normal)).
+# Sign: positive = speeds rotor up; negative = slows it.
 #
 # Physical expectations:
 #   Autorotation (wind through disk, tilt=0–30°): in-plane wind drives spin → Q_spin > 0
@@ -351,33 +344,28 @@ def test_cyclic_can_trim_hover_against_wind(aero):
 #   More in-plane wind → larger Q_spin (more spin energy from wind)
 # ---------------------------------------------------------------------------
 
-def test_hover_empirical_spin_torque_is_negative(aero):
-    """With no wind (pure hover) the empirical Q_spin must be negative — rotor decelerates.
-
-    Empirical formula: Q_spin = k_drive*v_inplane - k_drag*omega².
-    With v_inplane=0 this reduces to -k_drag*omega² < 0 always.
-    """
-    Q = _q_empirical(aero, 90, 0.05, _OMEGA, np.zeros(3))
+def test_hover_spin_torque_is_negative(aero):
+    """With no wind (pure hover) Q_spin must be negative — rotor decelerates."""
+    Q = _q_spin(aero, 90, 0.05, _OMEGA, np.zeros(3))
     assert Q < 0.0, f"Hover Q_spin should be negative (rotor decelerates); got {Q:.2f} N*m"
 
 
-def test_autorotation_empirical_spin_torque_increases_with_wind(aero):
-    """More in-plane wind → larger empirical Q_spin (more spin energy delivered to rotor)."""
-    # tilt=30°: v_inplane = wind * sin(30°).  Double wind doubles v_inplane.
-    Q_10 = _q_empirical(aero, 30, -0.18, _OMEGA, _WIND)           # 10 m/s
-    Q_20 = _q_empirical(aero, 30, -0.18, _OMEGA, _WIND * 2.0)     # 20 m/s
+def test_autorotation_spin_torque_increases_with_wind(aero):
+    """More in-plane wind → larger Q_spin (more spin energy delivered to rotor)."""
+    Q_10 = _q_spin(aero, 30, -0.18, _OMEGA, _WIND)           # 10 m/s
+    Q_20 = _q_spin(aero, 30, -0.18, _OMEGA, _WIND * 2.0)     # 20 m/s
     assert Q_20 > Q_10, (
         f"Q_spin should increase with wind speed; Q@10m/s={Q_10:.2f}  Q@20m/s={Q_20:.2f} N*m"
     )
 
 
-def test_autorotation_empirical_spin_torque_positive_below_equilibrium(aero):
+def test_autorotation_spin_torque_positive_below_equilibrium(aero):
     """Below equilibrium RPM, Q_spin must be positive (wind accelerates the rotor).
 
     Equilibrium omega ≈ 20 rad/s for v_inplane ≈ 5 m/s (tilt=30°, wind=10 m/s).
     At omega=10 rad/s (below equilibrium) Q_spin must be positive.
     """
-    Q = _q_empirical(aero, 30, -0.18, 10.0, _WIND)   # omega=10, well below equilibrium
+    Q = _q_spin(aero, 30, -0.18, 10.0, _WIND)   # omega=10, well below equilibrium
     assert Q > 0.0, (
         f"Below-equilibrium autorotation Q_spin should be positive; got {Q:.2f} N*m"
     )

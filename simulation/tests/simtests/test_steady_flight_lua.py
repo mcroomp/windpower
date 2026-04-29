@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from simtest_ic    import load_ic
 from simtest_log   import BadEventLog
 from simtest_runner import PhysicsRunner, LuaAP

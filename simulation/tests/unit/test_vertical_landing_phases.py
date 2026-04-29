@@ -7,8 +7,7 @@ Force-balance feasibility tests for 3-phase vertical landing
 Uses Peters-He aero (no xi validity limit; SkewedWakeBEM degenerate at xi > 85 deg).
 
 Key insight about autorotation:
-    omega_eq = sqrt(K_drive * v_inplane / K_drag)
-             = sqrt(1.4 * 10 / 0.01786) = 28 rad/s  (= IC omega at v_inplane=10 m/s)
+    omega_eq = 28 rad/s at 10 m/s in-plane crosswind (from BEM equilibrium).
     The rotor self-sustains at IC spin rate with 10 m/s in-plane crosswind at ANY disk
     orientation — including horizontal disk (xi=90 deg) directly above the anchor.
 
@@ -34,7 +33,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import rotor_definition as rd
+from aero import rotor_definition as rd
 from aero import create_aero
 
 _ROTOR = rd.default()
@@ -125,8 +124,7 @@ def test_vertical_hover_feasibility():
     Disk horizontal (xi=90 deg), hub stationary above anchor, 10 m/s crosswind.
 
     Autorotation at omega=28 rad/s is self-sustaining: the crosswind provides
-    v_inplane=10 m/s regardless of disk angle, and omega_eq = sqrt(K_drive*10/K_drag)
-    = 28 rad/s exactly.
+    v_inplane=10 m/s regardless of disk angle, and BEM equilibrium gives omega_eq = 28 rad/s.
 
     Asserts:
       (a) T(COL_MIN) < weight < T(COL_MAX)  -- equilibrium collective exists.

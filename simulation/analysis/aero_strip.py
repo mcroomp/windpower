@@ -173,16 +173,15 @@ class StripThrust:
 
 def from_rotor(rotor, n_strips: int = 20) -> "StripThrust":
     """Build a StripThrust from a RotorDefinition."""
-    p = rotor.aero_kwargs()
     return StripThrust(
-        n_blades      = int(p["n_blades"]),
-        r_root        = float(p["r_root"]),
-        r_tip         = float(p["r_tip"]),
-        chord         = float(p["chord"]),
-        rho           = float(p["rho"]),
-        CL0           = float(p["CL0"]),
-        CL_alpha      = float(p["CL_alpha"]),
-        CD0           = float(p["CD0"]),
-        aoa_limit_deg = math.degrees(float(p["aoa_limit"])),
+        n_blades      = rotor.n_blades,
+        r_root        = rotor.root_cutout_m,
+        r_tip         = rotor.radius_m,
+        chord         = rotor.chord_m,
+        rho           = rotor.rho_kg_m3,
+        CL0           = rotor.CL0,
+        CL_alpha      = rotor.CL_alpha_per_rad,
+        CD0           = rotor.CD0,
+        aoa_limit_deg = rotor.alpha_stall_deg,
         n_strips      = n_strips,
     )
