@@ -13,7 +13,7 @@
     {
       "name": "SCR_USER6",
       "expected": null,
-      "note": "active Lua flight mode: 0=none  1=steady  4=landing  5=pumping"
+      "note": "active Lua flight mode: 0=none (default)  1=steady  2=yaw  4=landing  5=pumping"
     },
     {
       "name": "ARMING_CHECK",
@@ -35,12 +35,12 @@
     {
       "name": "ATC_RAT_YAW_P",
       "expected": 0.015,
-      "note": "yaw rate P gain; scales measured yaw rate error into throttle correction"
+      "note": "yaw rate P gain; scales measured yaw rate error into throttle correction. Tuning starting point -- raise only if response is sluggish on a real disturbance."
     },
     {
       "name": "ATC_RAT_YAW_I",
-      "expected": 0.01,
-      "note": "yaw rate I gain; integrates steady-state yaw drift (carries equilibrium torque)"
+      "expected": 0.0,
+      "note": "yaw rate I gain; disabled while characterizing P alone (one-sided actuator + asymmetric integrator makes I aggressive). After P is settled, re-enable at ~P/10 (~0.0015) to remove steady-state drift."
     },
     {
       "name": "ATC_RAT_YAW_D",
@@ -76,6 +76,11 @@
       "name": "SERVO4_TRIM",
       "expected": 800,
       "note": "trim PWM = min for DDFP tail; ArduPilot outputs trim when disarmed"
+    },
+    {
+      "name": "SERVO4_FUNCTION",
+      "expected": 0,
+      "note": "0=disabled so ArduPilot does NOT drive SERVO4; Lua mode 2 (yaw) writes SERVO4 directly via set_output_pwm_chan_timeout. AP's ATC_RAT_YAW PID still computes but has no output channel."
     }
   ]
 }

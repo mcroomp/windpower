@@ -1,19 +1,24 @@
 # calibrate.py — Hardware Calibration Tool
 
 `simulation/scripts/calibrate.py` connects to the Pixhawk 6C over USB (or SiK radio)
-and provides servo control, motor testing, ESC diagnostics, and Lua script upload —
-all over MAVLink, with no arming required.
+and provides servo control, motor testing, ESC diagnostics, arming, and Lua script
+upload — all over MAVLink, with no arming required for most commands.
 
 ## Connection
 
 ```bash
-python simulation/scripts/calibrate.py                      # default COM4 115200, interactive
+python simulation/scripts/calibrate.py                          # auto-detect port
 python simulation/scripts/calibrate.py --port COM3
 python simulation/scripts/calibrate.py --port COM4 --baud 57600   # SiK radio
 python simulation/scripts/calibrate.py --port COM4 <command>      # non-interactive
 ```
 
-`--force` / `-f` skips interactive confirmation prompts (safe for scripted use at low throttle).
+If `--port` is omitted, the tool scans all COM ports and connects to the first one
+that responds with a MAVLink heartbeat (tries 115200, then 57600/38400/19200/9600 as
+fallbacks). Use `ping` to survey ports without connecting.
+
+`--force` / `-f` skips interactive confirmation prompts (safe for scripted use at low
+throttle).
 
 ---
 
@@ -26,14 +31,17 @@ python simulation/scripts/calibrate.py --port COM4 <command>      # non-interact
 | 3 | S3 — swashplate 240 deg | 35 |
 | 4 | GB4008 anti-rotation motor (MAIN OUT 4) | H_TAIL_TYPE=4 (DDFP) |
 
-PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max).
+Swashplate PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max).
+Motor PWM range: 800 µs (off) … 2000 µs (full throttle).
 
 ---
 
 ## Commands
 
 ### `status`
-Print current `SERVO_OUTPUT_RAW` for all active outputs.
+Comprehensive vehicle snapshot: armed state, flight mode, battery voltage/current/cells,
+EKF flags (attitude/velocity/position), SERVO_OUTPUT_RAW for all active outputs, and a
+pass/fail table for key RAWES parameters + tail PID values.
 
 ```bash
 python calibrate.py --port COM4 status
@@ -102,37 +110,6 @@ python calibrate.py --port COM4 motor off         # stop immediately
 
 ---
 
-### `diag`
-Full motor / AM32 / DShot diagnostic dump. Runs automatically through 7 checks:
-
-1. **Parameter audit** — verifies `SERVO4_FUNCTION`, `SERVO_BLH_MASK`, `SERVO_BLH_OTYPE`,
-   `H_TAIL_TYPE`, `BRD_SAFETYENABLE`, `H_RSC_MODE`, and other DShot-chain params;
-   flags likely misconfigurations with plain-English explanations.
-2. **Safety/arming state** — decodes heartbeat: armed, safety switch, mode, system status.
-3. **SERVO_OUTPUT_RAW** — what ArduPilot is actually sending to output 4.
-4. **Motor test ACK** — sends 5% motor test and reports whether it was accepted or rejected.
-5. **ESC telemetry** — listens 3 s for `ESC_TELEMETRY_1_TO_4`; if received, reports:
-   eRPM → motor RPM → rotor RPM (via 80:44 gear, 11 pole-pairs),
-   current → shaft torque (via Kt = 0.144 N·m/A). If absent, explains why.
-6. **STATUSTEXT drain** — captures ArduPilot error/warning messages emitted during the test.
-7. **SYS_STATUS motor health bit** — whether ArduPilot considers motor outputs healthy.
-
-```bash
-python calibrate.py --port COM4 diag
-```
-
-**Common failure causes diagnosed:**
-- `SERVO_BLH_MASK` not including bit 3 → DShot not enabled on output 4
-- `SERVO_BLH_OTYPE < 4` → PWM mode, not DShot
-- `H_TAIL_TYPE != 4` → motor not mapped as DDFP tail
-- `BRD_SAFETYENABLE=1` → safety switch not pressed
-- `H_RSC_MODE=0` → RSC gating motor output
-- No ESC telemetry → ESC not powered, DShot signal wire not connected to output 4,
-  or ESC not responding. Note: `SERVO_BLH_BDSHOT` does not exist in ArduPilot 4.6+;
-  bidirectional DShot is auto-detected when `SERVO_BLH_OTYPE >= 4`.
-
----
-
 ### `monitor [seconds]`
 Stream live ESC telemetry at ~4 Hz for `seconds` seconds (default 10).
 Columns: elapsed time, eRPM, motor RPM, rotor RPM, current (A), shaft torque (N·m),
@@ -146,11 +123,114 @@ Use while running motor tests to validate RPM, current draw, and torque estimate
 
 ---
 
-### `scripts`
+### `listen [seconds]`
+Stream all STATUSTEXT messages and armed-state changes. No time limit unless `seconds`
+is given; Ctrl-C stops early.
+
+```bash
+python calibrate.py --port COM4 listen            # indefinite
+python calibrate.py --port COM4 listen 30         # 30 s
+```
+
+Useful after changing `SCR_USER6` to watch Lua startup messages.
+
+---
+
+### `mode <0|1|2|4|5>`
+Set `SCR_USER6` to the given Lua mode number, then listen 10 s for STATUSTEXT confirmation.
+
+| Value | Mode    | Description |
+|-------|---------|-------------|
+| 0     | none    | Passive: no RC overrides; periodic logging of STATUSTEXT / NV floats only. **Default on boot.** |
+| 1     | steady  | Steady flight at 50 Hz: cyclic altitude hold (`RAWES_ALT`) + VZ PI collective. Owns Ch1/Ch2/Ch3. **No yaw control** -- AP's `ATC_RAT_YAW` tail PID is disabled in hardware config (`SERVO4_FUNCTION=0`); needs Lua-side yaw integration before yaw drift is countered. |
+| 2     | yaw     | Manual Lua yaw PID: holds yaw rate = 0 by driving `SERVO4` directly via `set_output_pwm_chan_timeout`. **No SERVO4_FUNCTION shuffle needed** -- the hardware default is already `SERVO4_FUNCTION=0` so Lua owns SERVO4 exclusively. `H_TAIL_TYPE` stays at 4 but its DDFP output has no channel to write to. |
+| 4     | landing | Reserved -- not yet implemented in `rawes.lua`. Will run the landing controller (`reel_in` -> `descent` -> `final_drop` triggered by `RAWES_SUB=1`). |
+| 5     | pumping | De Schutter pumping cycle at 50 Hz: phase advance is ground-driven via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` (0=hold, 1=reel_out, 2=transition, 3=reel_in, 4=transition_back); TensionPID on collective using `RAWES_TEN` feedback; cyclic altitude hold via `RAWES_ALT`. **No yaw control** (AP tail PID disabled). |
+
+```bash
+python calibrate.py --port COM4 mode 1           # steady mode
+python calibrate.py --port COM4 mode 0           # back to passive
+```
+
+---
+
+### `arm [seconds]`
+Set ACRO mode, send `RAWES_ARM=<ms>` (default 10 s countdown), then display a live table
+of elapsed time, armed state, yaw rate, SERVO4 PWM, and STATUSTEXT for the duration.
+
+```bash
+python calibrate.py --port COM4 arm              # 10 s arm window
+python calibrate.py --port COM4 arm 30           # 30 s arm window
+```
+
+Lua arms the vehicle and starts a disarm countdown; re-sending `RAWES_ARM` refreshes it.
+
+---
+
+### `hold <pwm> [seconds]`
+Arm via `RAWES_ARM`, then hold output 4 (GB4008) at a fixed PWM for `seconds` seconds
+(or indefinitely until Ctrl-C). Temporarily sets `SERVO4_FUNCTION=0` to release the
+output from ArduPilot mixing, and restores it on exit.
+
+```bash
+python calibrate.py --port COM4 hold 900         # ~8% indefinitely
+python calibrate.py --port COM4 hold 1000 20     # hold for 20 s
+```
+
+Use to characterise motor/ESC at a constant setpoint without Lua running.
+
+---
+
+### `disarm`
+Send `MAV_CMD_COMPONENT_ARM_DISARM` (param1=0) and clear all RC overrides.
+Waits up to 10 s for the disarmed heartbeat.
+
+```bash
+python calibrate.py --port COM4 disarm
+```
+
+---
+
+### `reboot`
+Send `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`. Reconnect in ~5 s.
+
+```bash
+python calibrate.py --port COM4 reboot
+```
+
+---
+
+### `config [--apply]`
+Diff the current ArduPilot parameters against the canonical RAWES values in
+`simulation/scripts/rawes_params.json`. Without `--apply`, prints a preview table
+(`[OK]` / `[DIFF]` / `[FAIL]`) and makes no changes. With `--apply`, writes all
+differing parameters and reboots.
+
+```bash
+python calibrate.py --port COM4 config            # preview only
+python calibrate.py --port COM4 config --apply    # write + reboot
+```
+
+All expected values are read from `rawes_params.json` (keys: `key`, `tail_pid`).
+Entries with `"expected": null` are informational only and are not written.
+
+---
+
+### `getparam <name>` / `setparam <name> <value>`
+Read or write a single ArduPilot parameter.
+
+```bash
+python calibrate.py --port COM4 getparam ATC_RAT_YAW_P
+python calibrate.py --port COM4 setparam SCR_USER6 1
+```
+
+---
+
+### `ftp-list`
 List files currently on the SD card in `/APM/scripts/` via MAVLink FTP.
 
 ```bash
-python calibrate.py --port COM4 scripts
+python calibrate.py --port COM4 ftp-list
 ```
 
 Requires `pymavlink >= 2.4` with the `mavftp` module. If unavailable, use Mission Planner
@@ -158,13 +238,13 @@ Requires `pymavlink >= 2.4` with the `mavftp` module. If unavailable, use Missio
 
 ---
 
-### `upload <file> [--no-restart]`
+### `ftp-upload <file> [--no-restart]`
 Upload a `.lua` file to `/APM/scripts/` via MAVLink FTP, then restart the scripting engine
 by toggling `SCR_ENABLE` (no reboot needed). Pass `--no-restart` to skip the restart.
 
 ```bash
-python calibrate.py --port COM4 upload simulation/scripts/rawes.lua
-python calibrate.py --port COM4 upload simulation/scripts/rawes.lua --no-restart
+python calibrate.py --port COM4 ftp-upload simulation/scripts/rawes.lua
+python calibrate.py --port COM4 ftp-upload simulation/scripts/rawes.lua --no-restart
 ```
 
 The remote path is always `/APM/scripts/<basename>`. The scripting restart takes ~1 s;
@@ -172,7 +252,40 @@ the Lua script reloads from SD and begins executing immediately.
 
 ---
 
-## GB4008 motor constants (used in diag / monitor)
+### `ftp-remove <file>`
+Remove a file from `/APM/scripts/` via MAVLink FTP.
+
+```bash
+python calibrate.py --port COM4 ftp-remove rawes.lua
+```
+
+---
+
+### `release [n]` / `restore [n]`
+Temporarily set `SERVO{n}_FUNCTION=0` to release output `n` (default: output 4, the
+GB4008) from ArduPilot mixing so it can be driven manually with `servo`. `restore`
+sets `SERVO{n}_FUNCTION` back to the value saved by the most recent `release`.
+
+```bash
+python calibrate.py --port COM4 release          # release output 4
+python calibrate.py --port COM4 servo 4 1000     # drive it manually
+python calibrate.py --port COM4 restore          # give it back to ArduPilot
+```
+
+---
+
+### `ping [baud]`
+Scan all COM ports and report which ones respond to a MAVLink heartbeat.
+Tries `baud` (default 115200), then lower fallback rates.
+
+```bash
+python calibrate.py ping                          # no connection needed
+python calibrate.py ping 57600
+```
+
+---
+
+## GB4008 motor constants (used in monitor)
 
 | Constant | Value | Source |
 |----------|-------|--------|
@@ -185,53 +298,38 @@ the Lua script reloads from SD and begins executing immediately.
 
 ---
 
-### `config`
-Set and validate the complete RAWES DShot parameter set, then reboot. Auto-detects
-Heli/Copter vs Rover frame and applies the correct values. Covers every DShot-chain
-param including `BRD_SAFETY_DEFLT=0` (required — safety switch blocks outputs).
-
-```bash
-python calibrate.py --port COM4 config
-```
-
-Prints a pass/fail table for every parameter. Reboots on success; reports `[FAIL]` and
-skips reboot if any value is wrong.
-
-| Frame | `SERVO9_FUNCTION` | DShot protocol param |
-|-------|-------------------|---------------------|
-| Heli/Copter | 94 (Script 1 / Lua) | `SERVO_BLH_OTYPE=5` |
-| Rover | 36 (Motor4) | `MOT_PWM_TYPE=6` |
-
-Always set: `SERVO9_MIN/MAX/TRIM=1000/2000/1000`, `SERVO_BLH_MASK=256`,
-`SERVO_BLH_POLES=22`, `SERVO_BLH_BDMASK=0`, `SERVO_DSHOT_ESC=3`,
-`BRD_IO_DSHOT=0`, `BRD_SAFETY_DEFLT=0`, `ARMING_CHECK=0`.
-
----
-
 ## Typical calibration sequence
 
 ```bash
-# 0. Apply full DShot configuration (first time or after EEPROM wipe)
+# 0. Survey ports (first time)
+python calibrate.py ping
+
+# 1. Diff against canonical params; apply if needed
 python calibrate.py --port COM4 config
+python calibrate.py --port COM4 config --apply   # if any [DIFF] shown
 
-# 1. Verify parameter chain
-python calibrate.py --port COM4 diag
+# 2. Verify live state after reboot
+python calibrate.py --port COM4 status
 
-# 2. Swashplate neutral + mixing check
+# 3. Swashplate neutral + mixing check
 python calibrate.py --port COM4 neutral
 python calibrate.py --port COM4 swash 50 0 0    # all servos rise equally?
 python calibrate.py --port COM4 swash 0 0 50    # S1 differential?
 
-# 3. Flap deflection measurement — sweep each servo, record angle vs PWM
+# 4. Flap deflection measurement — sweep each servo, record angle vs PWM
 python calibrate.py --port COM4 sweep 1
 python calibrate.py --port COM4 sweep 2
 python calibrate.py --port COM4 sweep 3
 
-# 4. Motor spin check
+# 5. Motor spin check
 python calibrate.py --port COM4 motor 5
 python calibrate.py --port COM4 monitor 10
 
-# 5. Upload updated Lua script
-python calibrate.py --port COM4 upload simulation/scripts/rawes.lua
-python calibrate.py --port COM4 scripts         # verify file appeared
+# 6. Upload updated Lua script
+python calibrate.py --port COM4 ftp-upload simulation/scripts/rawes.lua
+python calibrate.py --port COM4 ftp-list        # verify file appeared
+
+# 7. Test arm / Lua mode
+python calibrate.py --port COM4 mode 1          # set steady mode
+python calibrate.py --port COM4 arm 30          # arm for 30 s, watch yaw rate + SERVO4
 ```

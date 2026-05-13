@@ -42,11 +42,23 @@ Notes
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
 import sys
 import time
+from datetime import datetime, timezone
+
+# msvcrt is Windows stdlib -- used by yawmanual for non-blocking ESC-key abort.
+# Falls back to a stub on non-Windows so the rest of the script still imports.
+try:
+    import msvcrt
+except ImportError:
+    class _MsvcrtStub:
+        def kbhit(self):    return False
+        def getch(self):    return b""
+    msvcrt = _MsvcrtStub()
 
 # Allow importing gcs.py from the parent directory (simulation/)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -189,7 +201,17 @@ _PARAMS_JSON   = _load_params_json()
 _KEY_PARAMS    = _params_as_tuples(_PARAMS_JSON["key"])
 _TAIL_PARAMS   = _params_as_tuples(_PARAMS_JSON["tail_pid"])
 
-_LUA_MODES = {0: "none", 1: "steady", 4: "landing", 5: "pumping"}
+_LUA_MODES = {0: "none", 1: "steady", 2: "yaw", 4: "landing", 5: "pumping"}
+
+# Short explanation of what each Lua mode does.  Kept next to _LUA_MODES so the
+# two never drift apart.  Used by `mode` and `help` commands.
+_LUA_MODE_DOC = {
+    0: "passive (default on boot): no RC overrides; periodic logging only",
+    1: "steady flight: cyclic altitude hold (RAWES_ALT) + VZ PI collective at 50 Hz. No yaw control -- AP tail PID is disabled in hardware config (SERVO4_FUNCTION=0)",
+    2: "Lua yaw PID: holds yaw rate = 0 by driving SERVO4 directly. Hardware default SERVO4_FUNCTION=0 means no `yawmanual` SERVO4_FUNCTION shuffle needed",
+    4: "landing (reserved -- not yet implemented in rawes.lua)",
+    5: "De Schutter pumping cycle: phase via NAMED_VALUE_FLOAT('RAWES_SUB',N), tension PID on collective. No yaw control (AP tail PID disabled)",
+}
 
 
 def _print_status(session: RawesGCS) -> None:
@@ -682,10 +704,18 @@ Commands:
   status                          Vehicle state, battery, EKF, servo outputs, key params
   monitor [seconds]               Stream live ESC telemetry (default 10 s)
   listen [seconds]                Stream STATUSTEXT + armed state (Ctrl-C to stop)
-  mode <0,1,4,5>                  Set SCR_USER6 mode and listen 10 s to confirm active
+  mode <n>                        Set SCR_USER6 Lua mode and listen 10 s to confirm active
+                                    0=none (passive)   1=steady (alt hold + VZ PI)
+                                    2=yaw  (manual Lua yaw PID, drives SERVO4 directly)
+                                    4=landing (reserved)   5=pumping (De Schutter cycle)
   arm [seconds]                   Set ACRO mode, send RAWES_ARM (default 10 s)
   hold <pwm> [seconds]            Arm, hold GB4008 output at pwm us (Ctrl-C to stop)
+  yawmanual [s] [key=V ...]       Arm, set mode 2 (Lua yaw PID); logs tuning_<ts>.csv.
+                                    Per-run overrides (restored on exit): p, i, d, ff, imax, trim,
+                                    flte, fltt, fltd, accelmax, servo_min, servo_max.
+                                    e.g. yawmanual 30 p=0.015 i=0 servo_max=1100
   disarm                          Disarm vehicle
+  pidtune [key=V ...]   Read or set yaw PID params (keys: p i d ff imax trim flte fltt fltd accelmax)
   config [--apply]                Diff (or write) all params from rawes_params.json; --apply writes + reboots
   reboot                          Reboot ArduPilot
   getparam <name>                 Read a parameter value
@@ -913,23 +943,23 @@ def _run_command(session: RawesGCS, tokens: list[str],
 
     # -- mode <n> -----------------------------------------------------------
     elif cmd == "mode":
-        _MODE_NAMES = {
-            0: "none", 1: "steady", 4: "landing", 5: "pumping",
-        }
         if len(tokens) < 2:
-            print("  Usage: mode <0,1,4,5>")
-            print("  Modes: " + "  ".join(f"{k}={v}" for k, v in _MODE_NAMES.items()))
+            print("  Usage: mode <n>   (valid: " +
+                  ", ".join(str(k) for k in sorted(_LUA_MODES)) + ")")
+            for k in sorted(_LUA_MODES):
+                print(f"    {k} = {_LUA_MODES[k]:<8} -- {_LUA_MODE_DOC[k]}")
             return True
         try:
             n = int(tokens[1])
         except ValueError:
-            print("  Error: mode must be an integer 0-8"); return True
-        if n not in _MODE_NAMES:
-            print(f"  Error: unknown mode {n}  (valid: {sorted(_MODE_NAMES)})"); return True
+            print("  Error: mode must be an integer"); return True
+        if n not in _LUA_MODES:
+            print(f"  Error: unknown mode {n}  (valid: {sorted(_LUA_MODES)})"); return True
         if not session.set_param("SCR_USER6", float(n)):
             print("  [FAIL] Could not set SCR_USER6"); return True
-        name = _MODE_NAMES[n]
-        print(f"  [OK] SCR_USER6={n} ({name}) -- listening 10 s for STATUSTEXT ...")
+        name = _LUA_MODES[n]
+        print(f"  [OK] SCR_USER6={n} ({name}) -- {_LUA_MODE_DOC[n]}")
+        print(f"  Listening 10 s for STATUSTEXT ...")
         t0 = time.monotonic()
         seen = []
         try:
@@ -1056,6 +1086,382 @@ def _run_command(session: RawesGCS, tokens: list[str],
             session.set_param(servo_key, saved_fn)
             print(f"  {servo_key} restored to {saved_fn:.0f}")
 
+    # -- yawmanual [seconds] [key=value ...] -------------------------------
+    elif cmd == "yawmanual":
+        # Per-run parameter overrides.  Keys mirror `pidtune` plus SERVO4_MIN/MAX
+        # for PWM caps.  Each override is restored on exit (normal, ESC, Ctrl-C,
+        # exception) via the same safety-shutdown path that handles disarm.
+        _YAW_OVERRIDES = {
+            "p":         "ATC_RAT_YAW_P",
+            "i":         "ATC_RAT_YAW_I",
+            "d":         "ATC_RAT_YAW_D",
+            "ff":        "ATC_RAT_YAW_FF",
+            "imax":      "ATC_RAT_YAW_IMAX",
+            "trim":      "H_YAW_TRIM",
+            "flte":      "ATC_RAT_YAW_FLTE",
+            "fltt":      "ATC_RAT_YAW_FLTT",
+            "fltd":      "ATC_RAT_YAW_FLTD",
+            "accelmax":  "ATC_ACCEL_Y_MAX",
+            "servo_min": "SERVO4_MIN",
+            "servo_max": "SERVO4_MAX",
+        }
+        secs: float | None = None
+        overrides: dict[str, float] = {}
+        args = tokens[1:]
+        # First positional arg may be a duration (no "=").  Everything else
+        # must be key=value.
+        if args and "=" not in args[0]:
+            try:
+                secs = float(args[0])
+                args = args[1:]
+            except ValueError:
+                print("  Usage: yawmanual [seconds] [key=value ...]")
+                print(f"  Keys: {', '.join(sorted(_YAW_OVERRIDES))}")
+                return True
+        for tok in args:
+            if "=" not in tok:
+                print("  Usage: yawmanual [seconds] [key=value ...]")
+                print(f"  Keys: {', '.join(sorted(_YAW_OVERRIDES))}")
+                return True
+            key, _, val_str = tok.partition("=")
+            key = key.lower()
+            if key not in _YAW_OVERRIDES:
+                print(f"  Unknown key {key!r}  (valid: {', '.join(sorted(_YAW_OVERRIDES))})")
+                return True
+            try:
+                overrides[_YAW_OVERRIDES[key]] = float(val_str)
+            except ValueError:
+                print(f"  Error: value for {key!r} must be a number")
+                return True
+
+        # Apply overrides BEFORE the gains snapshot so the CSV metadata header
+        # reflects the values actually used during the run.
+        saved_overrides: dict[str, float] = {}
+        if overrides:
+            print("  Per-run overrides:")
+            for param, new_val in overrides.items():
+                orig = session.get_param(param)
+                if orig is None:
+                    print(f"    [WARN] {param}: could not read current value -- skipping override")
+                    continue
+                saved_overrides[param] = float(orig)
+                ok = session.set_param(param, new_val)
+                tag = "[OK]  " if ok else "[FAIL]"
+                print(f"    {tag} {param}: {orig:.6g} -> {new_val:.6g}")
+
+        # Release SERVO4 from DDFP ownership so Lua owns it exclusively
+        servo_key = f"SERVO{SERVO_MOTOR}_FUNCTION"
+        saved_fn = session.get_param(servo_key)
+        if saved_fn is not None and saved_fn != 0:
+            session.set_param(servo_key, 0)
+            print(f"  {servo_key} {saved_fn:.0f} -> 0 (released from DDFP)")
+        else:
+            saved_fn = None
+
+        # Activate yaw mode
+        session.set_param("SCR_USER6", 2)
+        print("  SCR_USER6 -> 2 (yaw mode)")
+
+        # Arm via RAWES_ARM
+        arm_ms = int((secs + 10.0) * 1000) if secs else 300_000
+        print(f"  Sending RAWES_ARM={arm_ms} ms ...")
+        session.send_named_float("RAWES_ARM", float(arm_ms))
+
+        arm_deadline = time.monotonic() + 15.0
+        armed_now = False
+        while time.monotonic() < arm_deadline:
+            msg = session._recv(type=["HEARTBEAT", "STATUSTEXT"],
+                                blocking=True, timeout=0.5)
+            if msg is None:
+                continue
+            if msg.get_type() == "STATUSTEXT":
+                print(f"  [FC] {msg.text.rstrip()}")
+            elif msg.get_type() == "HEARTBEAT":
+                if bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                    armed_now = True
+                    print("  [OK] Armed.")
+                    break
+        if not armed_now:
+            print("  [FAIL] Did not arm within 15 s.")
+            # Mirror the post-run safety shutdown.  Vehicle is unarmed already
+            # but we still stop Lua, force the motor PWM to 800, and restore
+            # SERVO4_FUNCTION so the next command starts from a known state.
+            print("  [SAFETY] shutting down ...")
+            try:
+                session.set_param("SCR_USER6", 0)
+                print("  [SAFETY] SCR_USER6 -> 0 (Lua mode none)")
+            except Exception as e:
+                print(f"  [SAFETY] failed to set SCR_USER6=0: {e}")
+            time.sleep(0.30)
+            try:
+                _send_set_servo(session, SERVO_MOTOR, 800)
+                print(f"  [SAFETY] SERVO{SERVO_MOTOR} -> 800 us (motor off)")
+            except Exception as e:
+                print(f"  [SAFETY] failed to drive SERVO{SERVO_MOTOR} off: {e}")
+            if saved_fn is not None:
+                try:
+                    session.set_param(servo_key, saved_fn)
+                    print(f"  [SAFETY] {servo_key} restored to {saved_fn:.0f}")
+                except Exception as e:
+                    print(f"  [SAFETY] failed to restore {servo_key}: {e}")
+            for param, orig in saved_overrides.items():
+                try:
+                    session.set_param(param, orig)
+                    print(f"  [SAFETY] {param} restored to {orig:.6g}")
+                except Exception as e:
+                    print(f"  [SAFETY] failed to restore {param}: {e}")
+            return True
+
+        # Snapshot Lua yaw-PID gains so the CSV records the gains that produced
+        # the captured input/output trace.  rawes.lua reads these every tick, so
+        # if the user changes them with `pidtune` during the run the trace will
+        # mix gain values -- run a fresh `yawmanual` after retuning for a clean
+        # dataset.  Gains are re-read once at exit and the final values printed.
+        def _read_yaw_gains() -> dict:
+            return {
+                "kp":         session.get_param("ATC_RAT_YAW_P")    or 0.0,
+                "ki":         session.get_param("ATC_RAT_YAW_I")    or 0.0,
+                "kd":         session.get_param("ATC_RAT_YAW_D")    or 0.0,
+                "imax":       session.get_param("ATC_RAT_YAW_IMAX") or 0.0,
+                "h_yaw_trim": session.get_param("H_YAW_TRIM")       or 0.0,
+            }
+        gains = _read_yaw_gains()
+        print(f"  Gains snapshot: P={gains['kp']:.4f} I={gains['ki']:.4f} "
+              f"D={gains['kd']:.4f} IMAX={gains['imax']:.3f} "
+              f"H_YAW_TRIM={gains['h_yaw_trim']:.3f}")
+
+        # Timestamped filename so consecutive runs accumulate instead of
+        # clobbering.  UTC stamp avoids local-time / DST ambiguity in archives.
+        ts_local = datetime.now()
+        ts_utc   = datetime.now(timezone.utc)
+        ts_tag   = ts_local.strftime("%Y%m%d_%H%M%S")
+        csv_path = os.path.abspath(f"tuning_{ts_tag}.csv")
+
+        # Snapshot a wider parameter set for the metadata header.  These are the
+        # values that determine the loop behaviour but don't change inside the
+        # run -- captured here once so the analyzer can find them without
+        # querying the FC.  Anything that CAN change tick-to-tick (yaw_i,
+        # output_unclamp) is logged per row from NAMED_VALUE_FLOAT.
+        def _safe_param(name: str) -> float | None:
+            try:
+                v = session.get_param(name)
+                return None if v is None else float(v)
+            except Exception:
+                return None
+        meta = {
+            "run_start_local":   ts_local.isoformat(timespec="seconds"),
+            "run_start_utc":     ts_utc.isoformat(timespec="seconds"),
+            "duration_arg_s":    secs if secs is not None else "",
+            "ATC_RAT_YAW_P":     gains["kp"],
+            "ATC_RAT_YAW_I":     gains["ki"],
+            "ATC_RAT_YAW_D":     gains["kd"],
+            "ATC_RAT_YAW_IMAX":  gains["imax"],
+            "H_YAW_TRIM":        gains["h_yaw_trim"],
+            "SERVO4_MIN":        _safe_param("SERVO4_MIN"),
+            "SERVO4_MAX":        _safe_param("SERVO4_MAX"),
+            "SERVO4_TRIM":       _safe_param("SERVO4_TRIM"),
+            "SERVO4_FUNCTION":   _safe_param("SERVO4_FUNCTION"),
+            "SCR_USER6":         _safe_param("SCR_USER6"),
+            "H_TAIL_TYPE":       _safe_param("H_TAIL_TYPE"),
+        }
+
+        csv_fh = open(csv_path, "w", newline="")
+        # Metadata header: one "# key: value" line per parameter.  Lines start
+        # with "#" so the analyzer can split metadata from data, and pandas /
+        # csv.reader can skip them via comment='#' (or filter in the loader).
+        csv_fh.write("# tuning.csv -- written by calibrate.py yawmanual\n")
+        for k, v in meta.items():
+            csv_fh.write(f"# {k}: {v}\n")
+        csv_fh.write("#\n")
+        csv_w = csv.writer(csv_fh)
+        csv_w.writerow([
+            "t_s", "armed", "yaw_rate_dps", "target_dps", "servo4_pwm",
+            "vbat_v", "current_a", "power_w",
+            "yaw_i_lua", "yaw_out_unclamp_lua",
+            "kp", "ki", "kd", "imax", "h_yaw_trim",
+        ])
+        print(f"  Logging to {csv_path}")
+
+        # ATTITUDE comes from EXTRA1; BATTERY_STATUS / SYS_STATUS from
+        # EXTENDED_STATUS.  Battery is whole-pack (not per-motor) -- on a
+        # static bench rig the GB4008 dominates draw, so this is a good
+        # proxy for yaw-actuator power.
+        session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 50)            # ATTITUDE
+        session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 50)       # SERVO_OUTPUT_RAW
+        session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 10)   # BATTERY_STATUS / SYS_STATUS
+        print()
+        print(f"  {'t(s)':<6}  {'armed':<5}  {'yaw(d/s)':>9}  {'S4(us)':>6}  {'V':>5}  {'A':>5}  {'W':>5}  STATUSTEXT")
+        print(f"  {'-'*6}  {'-'*5}  {'-'*9}  {'-'*6}  {'-'*5}  {'-'*5}  {'-'*5}  ----------")
+
+        t0           = time.monotonic()
+        deadline     = (t0 + secs + 5.0) if secs else None
+        last_print   = -1.0
+        yaw_rate     = None
+        servo4_pwm   = None
+        vbat_v       = None
+        current_a    = None
+        yaw_i_lua    = None    # cached from NAMED_VALUE_FLOAT "YAW_I"
+        yaw_out_lua  = None    # cached from NAMED_VALUE_FLOAT "YAW_OUT"
+        armed_state  = True
+        pending_text: list[str] = []
+        n_rows = 0
+        aborted = False
+        print("  Press ESC (or Ctrl-C) to abort.")
+        try:
+            while True:
+                if deadline and time.monotonic() >= deadline:
+                    break
+                # Non-blocking ESC check.  Polled every loop iteration (~10 Hz
+                # given the 0.1 s _recv timeout below), so abort latency is
+                # bounded by that timeout.  Drains any other queued keys
+                # silently so they don't accumulate in the console buffer.
+                while msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key == b"\x1b":
+                        aborted = True
+                        break
+                if aborted:
+                    print("\n  [ESC] abort -- running safety shutdown ...")
+                    break
+                msg = session._recv(
+                    type=["ATTITUDE", "SERVO_OUTPUT_RAW", "HEARTBEAT", "STATUSTEXT",
+                          "BATTERY_STATUS", "SYS_STATUS", "NAMED_VALUE_FLOAT"],
+                    blocking=True, timeout=0.1,
+                )
+                if msg is not None:
+                    mt = msg.get_type()
+                    if mt == "ATTITUDE":
+                        yaw_rate = math.degrees(msg.yawspeed)
+                        # Log one CSV row per ATTITUDE sample (50 Hz stream).
+                        # SERVO_OUTPUT_RAW and ATTITUDE arrive on the same
+                        # cadence; battery updates at ~10 Hz so we use the
+                        # most recent cached vbat/current for the row.
+                        # yaw_i_lua / yaw_out_lua arrive at 50 Hz from
+                        # rawes.lua's NAMED_VALUE_FLOAT emissions.
+                        elapsed_now = time.monotonic() - t0
+                        power_w = (vbat_v * current_a) if (vbat_v is not None and current_a is not None) else None
+                        csv_w.writerow([
+                            f"{elapsed_now:.4f}",
+                            int(armed_state),
+                            f"{yaw_rate:.4f}",
+                            "0.0",   # target rate for mode-2 yaw hold
+                            servo4_pwm if servo4_pwm is not None else "",
+                            f"{vbat_v:.3f}"    if vbat_v    is not None else "",
+                            f"{current_a:.3f}" if current_a is not None else "",
+                            f"{power_w:.2f}"   if power_w   is not None else "",
+                            f"{yaw_i_lua:.6f}"   if yaw_i_lua   is not None else "",
+                            f"{yaw_out_lua:.6f}" if yaw_out_lua is not None else "",
+                            f"{gains['kp']:.6f}",
+                            f"{gains['ki']:.6f}",
+                            f"{gains['kd']:.6f}",
+                            f"{gains['imax']:.6f}",
+                            f"{gains['h_yaw_trim']:.6f}",
+                        ])
+                        n_rows += 1
+                    elif mt == "SERVO_OUTPUT_RAW":
+                        servo4_pwm = getattr(msg, "servo4_raw", None)
+                    elif mt == "NAMED_VALUE_FLOAT":
+                        # Internal PID state from rawes.lua mode 2.  Caches by
+                        # name; unrecognized names are ignored so this is safe
+                        # if other components emit named floats on the bus.
+                        nv_name = msg.name.rstrip("\x00").strip() if isinstance(msg.name, str) else \
+                                  msg.name.decode("ascii", errors="replace").rstrip("\x00").strip()
+                        if nv_name == "YAW_I":
+                            yaw_i_lua = float(msg.value)
+                        elif nv_name == "YAW_OUT":
+                            yaw_out_lua = float(msg.value)
+                    elif mt == "BATTERY_STATUS":
+                        # voltages[] in mV; sum the cells that are reported.
+                        # current_battery is cA (centi-amperes); -1 means n/a.
+                        cells = [v for v in msg.voltages if v != 65535]
+                        if cells:
+                            vbat_v = sum(cells) / 1000.0
+                        if msg.current_battery >= 0:
+                            current_a = msg.current_battery / 100.0
+                    elif mt == "SYS_STATUS":
+                        # Fallback path -- only used if BATTERY_STATUS is
+                        # absent.  Same scaling: voltage_battery in mV,
+                        # current_battery in cA.
+                        if vbat_v is None and msg.voltage_battery != 65535:
+                            vbat_v = msg.voltage_battery / 1000.0
+                        if current_a is None and msg.current_battery >= 0:
+                            current_a = msg.current_battery / 100.0
+                    elif mt == "HEARTBEAT":
+                        armed_state = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    elif mt == "STATUSTEXT":
+                        text = msg.text.rstrip("\x00").strip()
+                        if text:
+                            pending_text.append(text)
+                elapsed = time.monotonic() - t0
+                if elapsed - last_print >= 1.0:
+                    last_print   = elapsed
+                    yr_str  = f"{yaw_rate:+.2f}" if yaw_rate   is not None else "    n/a"
+                    pw_str  = f"{servo4_pwm}"     if servo4_pwm is not None else "  n/a"
+                    ar_str  = "YES" if armed_state else "no"
+                    v_str   = f"{vbat_v:.2f}"    if vbat_v    is not None else "  n/a"
+                    a_str   = f"{current_a:.2f}" if current_a is not None else "  n/a"
+                    p_w_val = (vbat_v * current_a) if (vbat_v is not None and current_a is not None) else None
+                    p_str   = f"{p_w_val:.1f}"   if p_w_val   is not None else "  n/a"
+                    txt_str = pending_text.pop(0) if pending_text else ""
+                    print(f"  {elapsed:<6.1f}  {ar_str:<5}  {yr_str:>9}  {pw_str:>6}  "
+                          f"{v_str:>5}  {a_str:>5}  {p_str:>5}  {txt_str}")
+                    while pending_text:
+                        print(f"  {'':6}  {'':5}  {'':9}  {'':6}  {'':5}  {'':5}  {'':5}  {pending_text.pop(0)}")
+        except KeyboardInterrupt:
+            print()
+        finally:
+            csv_fh.close()
+            gains_end = _read_yaw_gains()
+            if gains_end != gains:
+                print(f"  [WARN] Gains changed during run -- CSV holds the "
+                      f"start snapshot. End values: P={gains_end['kp']:.4f} "
+                      f"I={gains_end['ki']:.4f} D={gains_end['kd']:.4f} "
+                      f"IMAX={gains_end['imax']:.3f} "
+                      f"H_YAW_TRIM={gains_end['h_yaw_trim']:.3f}")
+            print(f"  Wrote {n_rows} rows to {csv_path}")
+
+            # Safety shutdown -- runs whether the loop exited normally,
+            # via Ctrl-C, or via an exception.  Order matters:
+            #   1. Stop Lua first so it cannot re-assert SERVO4 between commands.
+            #   2. Wait > 200 ms so the SRV_Channels override timeout expires.
+            #   3. Force SERVO4 to 800 us via DO_SET_SERVO (works while
+            #      SERVO4_FUNCTION is still 0 -- we restore it after).
+            #   4. Disarm the vehicle.
+            #   5. Restore the saved SERVO4_FUNCTION.
+            # Every step is best-effort: a failure in one does not skip the next.
+            print("  [SAFETY] shutting down ...")
+            try:
+                session.set_param("SCR_USER6", 0)
+                print("  [SAFETY] SCR_USER6 -> 0 (Lua mode none)")
+            except Exception as e:
+                print(f"  [SAFETY] failed to set SCR_USER6=0: {e}")
+            time.sleep(0.30)
+            try:
+                _send_set_servo(session, SERVO_MOTOR, 800)
+                print(f"  [SAFETY] SERVO{SERVO_MOTOR} -> 800 us (motor off)")
+            except Exception as e:
+                print(f"  [SAFETY] failed to drive SERVO{SERVO_MOTOR} off: {e}")
+            try:
+                if not _disarm(session, timeout=5.0):
+                    print("  [SAFETY] disarm not confirmed within 5 s")
+            except Exception as e:
+                print(f"  [SAFETY] disarm command failed: {e}")
+            if saved_fn is not None:
+                try:
+                    session.set_param(servo_key, saved_fn)
+                    print(f"  [SAFETY] {servo_key} restored to {saved_fn:.0f}")
+                except Exception as e:
+                    print(f"  [SAFETY] failed to restore {servo_key}: {e}")
+            # Restore per-run parameter overrides so they don't leak into the
+            # next command or persist after a Ctrl-C / ESC.
+            for param, orig in saved_overrides.items():
+                try:
+                    session.set_param(param, orig)
+                    print(f"  [SAFETY] {param} restored to {orig:.6g}")
+                except Exception as e:
+                    print(f"  [SAFETY] failed to restore {param}: {e}")
+        print("  Done.")
+
     # -- reboot -------------------------------------------------------------
     elif cmd == "reboot":
         print("  Sending reboot command ...")
@@ -1137,20 +1543,25 @@ def _run_command(session: RawesGCS, tokens: list[str],
         # Request ATTITUDE + SERVO_OUTPUT_RAW streams
         session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)  # ATTITUDE
         session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+        # Enable yaw PID_TUNING stream (GCS_PID_MASK bit 2 = yaw rate); restore on exit
+        old_pid_mask = session.get_param("GCS_PID_MASK")
+        session.set_param("GCS_PID_MASK", 4)
         print()
-        print(f"  {'t(s)':<6} {'armed':<6} {'yaw_rate(deg/s)':>16}  {'SERVO4(us)':>10}  STATUSTEXT")
-        print(f"  {'-'*6}  {'-'*6}  {'-'*16}  {'-'*10}  ----------")
+        print(f"  {'t(s)':<6}  {'armed':<5}  {'sp(d/s)':>8}  {'act(d/s)':>8}  {'P':>7}  {'I':>7}  {'D':>7}  {'FF':>7}  {'S4(us)':>6}  STATUSTEXT")
+        print(f"  {'-'*6}  {'-'*5}  {'-'*8}  {'-'*8}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*6}  ----------")
         t0        = time.monotonic()
         deadline  = t0 + secs + 5.0   # extra 5 s margin past armon expiry
         last_print  = -1.0
         yaw_rate    = None
         servo4_pwm  = None
+        pid_p = pid_i = pid_d = pid_ff = pid_sp = pid_act = None
         armed_state = False
         pending_text: list[str] = []
         try:
             while time.monotonic() < deadline:
                 msg = session._recv(
-                    type=["ATTITUDE", "SERVO_OUTPUT_RAW", "HEARTBEAT", "STATUSTEXT"],
+                    type=["ATTITUDE", "SERVO_OUTPUT_RAW", "HEARTBEAT", "STATUSTEXT",
+                          "PID_TUNING"],
                     blocking=True, timeout=0.1,
                 )
                 if msg is not None:
@@ -1165,20 +1576,85 @@ def _run_command(session: RawesGCS, tokens: list[str],
                         text = msg.text.rstrip("\x00").strip()
                         if text:
                             pending_text.append(text)
+                    elif mt == "PID_TUNING" and msg.axis == 3:  # 3 = yaw
+                        pid_sp  = math.degrees(msg.desired)
+                        pid_act = math.degrees(msg.achieved)
+                        pid_p   = msg.P
+                        pid_i   = msg.I
+                        pid_d   = msg.D
+                        pid_ff  = msg.FF
                 elapsed = time.monotonic() - t0
                 if elapsed - last_print >= 1.0:
                     last_print = elapsed
-                    yr_str  = f"{yaw_rate:+.2f}" if yaw_rate  is not None else "   n/a"
-                    pw_str  = f"{servo4_pwm}"     if servo4_pwm is not None else "n/a"
+                    # act falls back to ATTITUDE yawspeed until PID_TUNING arrives
+                    act_val = pid_act if pid_act is not None else yaw_rate
+                    sp_str  = f"{pid_sp:+.2f}"  if pid_sp  is not None else "     n/a"
+                    act_str = f"{act_val:+.2f}" if act_val is not None else "     n/a"
+                    p_str   = f"{pid_p:+.4f}"   if pid_p   is not None else "    n/a"
+                    i_str   = f"{pid_i:+.4f}"   if pid_i   is not None else "    n/a"
+                    d_str   = f"{pid_d:+.4f}"   if pid_d   is not None else "    n/a"
+                    ff_str  = f"{pid_ff:+.4f}"  if pid_ff  is not None else "    n/a"
+                    pw_str  = f"{servo4_pwm}"    if servo4_pwm is not None else "   n/a"
                     ar_str  = "YES" if armed_state else "no"
-                    txt_str = "  " + pending_text.pop(0) if pending_text else ""
-                    print(f"  {elapsed:<6.1f}  {ar_str:<6}  {yr_str:>16}  {pw_str:>10}{txt_str}")
-                    # Drain remaining pending texts on separate lines
+                    txt_str = pending_text.pop(0) if pending_text else ""
+                    print(f"  {elapsed:<6.1f}  {ar_str:<5}  {sp_str:>8}  {act_str:>8}  {p_str:>7}  {i_str:>7}  {d_str:>7}  {ff_str:>7}  {pw_str:>6}  {txt_str}")
                     while pending_text:
-                        print(f"  {'':<6}  {'':<6}  {'':>16}  {'':>10}  {pending_text.pop(0)}")
+                        print(f"  {'':6}  {'':5}  {'':8}  {'':8}  {'':7}  {'':7}  {'':7}  {'':7}  {'':6}  {pending_text.pop(0)}")
         except KeyboardInterrupt:
             print()
+        finally:
+            if old_pid_mask is not None:
+                session.set_param("GCS_PID_MASK", old_pid_mask)
         print(f"  Done.")
+
+    # -- pidtune [p=V] [i=V] [d=V] [imax=V] [trim=V] ----------------------
+    elif cmd == "pidtune":
+        _YAW_PID_PARAMS = [
+            ("p",      "ATC_RAT_YAW_P"),
+            ("i",      "ATC_RAT_YAW_I"),
+            ("d",      "ATC_RAT_YAW_D"),
+            ("ff",     "ATC_RAT_YAW_FF"),
+            ("imax",   "ATC_RAT_YAW_IMAX"),
+            ("trim",   "H_YAW_TRIM"),
+            ("flte",    "ATC_RAT_YAW_FLTE"),
+            ("fltt",    "ATC_RAT_YAW_FLTT"),
+            ("fltd",    "ATC_RAT_YAW_FLTD"),
+            ("accelmax","ATC_ACCEL_Y_MAX"),
+        ]
+        valid_keys = {k for k, _ in _YAW_PID_PARAMS}
+        updates = {}
+        parse_ok = True
+        for tok in tokens[1:]:
+            if "=" not in tok:
+                print(f"  Usage: pidtune [p=V] [i=V] [d=V] [imax=V] [trim=V]")
+                print(f"  No args = show current values.")
+                parse_ok = False
+                break
+            key, _, val_str = tok.partition("=")
+            key = key.lower()
+            if key not in valid_keys:
+                print(f"  Unknown key {key!r}  (valid: {', '.join(sorted(valid_keys))})")
+                parse_ok = False
+                break
+            try:
+                updates[key] = float(val_str)
+            except ValueError:
+                print(f"  Error: value for {key!r} must be a number")
+                parse_ok = False
+                break
+        if not parse_ok:
+            return True
+        for key, param in _YAW_PID_PARAMS:
+            if key in updates:
+                session.set_param(param, updates[key])
+        print(f"\n  {'Key':<6}  {'Parameter':<22}  {'Value':>10}")
+        print(f"  {'-'*6}  {'-'*22}  {'-'*10}")
+        for key, param in _YAW_PID_PARAMS:
+            val = session.get_param(param)
+            marker = "  <-- updated" if key in updates else ""
+            val_str = f"{val:.6g}" if val is not None else "NOT FOUND"
+            print(f"  {key:<6}  {param:<22}  {val_str:>10}{marker}")
+        print()
 
     # -- disarm -------------------------------------------------------------
     elif cmd == "disarm":

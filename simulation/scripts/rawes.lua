@@ -2,9 +2,10 @@
 rawes.lua -- Unified RAWES flight controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
-Mode is selected at runtime via SCR_USER6 (plain integer 0,1,5):
+Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,5):
   0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
   1  steady      -- cyclic altitude hold (Ch1, Ch2) + VZ collective PI             50 Hz
+  2  yaw         -- manual Lua yaw PID only; holds yaw rate = 0 via SERVO4         100 Hz
   4  landing     -- (reserved, not yet implemented)
   5  pumping     -- De Schutter pumping cycle                                       50 Hz
 
@@ -46,6 +47,7 @@ local _nv_floats = {}
 
 local MODE_NONE    = 0
 local MODE_STEADY  = 1
+local MODE_YAW     = 2   -- manual Lua yaw PID; holds yaw rate = 0 via SERVO4 direct
 local MODE_LANDING = 4   -- reserved; not implemented here
 local MODE_PUMPING = 5
 
@@ -248,11 +250,95 @@ local function cyclic_error_body(bz_now, bz_target_arg)
     return {err_body:x(), err_body:y()}
 end
 
+-- ── MODE_YAW: manual Lua yaw PID ─────────────────────────────────────────────
+-- Reads ATC_RAT_YAW_P/I/D/IMAX and H_YAW_TRIM each tick so pidtune takes effect
+-- immediately.  Drives SERVO4 directly via set_output_pwm_chan_timeout, bypassing
+-- ArduPilot's internal DDFP yaw mixer.
+-- Sign convention: err = -gyro_z.  gyro_z > 0 = CW spin (NED right-hand z-down).
+-- Positive error (CCW spin) → higher output → more GB4008 throttle → CW torque.
+
+local _yaw_i      = 0.0
+local _yaw_prev_e = 0.0
+
+local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
+
+local function run_yaw_pid(dt)
+    local gyro = ahrs:get_gyro()
+    if not gyro then return end
+
+    local yaw_rate = gyro:z()
+    local err = -yaw_rate   -- setpoint = 0
+
+    local kp        = p("ATC_RAT_YAW_P",    0.1)
+    local ki        = p("ATC_RAT_YAW_I",    0.0)
+    local kd        = p("ATC_RAT_YAW_D",    0.0)
+    local imax      = p("ATC_RAT_YAW_IMAX", 0.7)
+    local trim      = p("H_YAW_TRIM",       0.0)
+    -- SERVO4_MIN/MAX are read each tick so setparam SERVO4_MAX <x> takes effect
+    -- immediately -- useful as a tuning safety cap (drop SERVO4_MAX to limit motor
+    -- authority during gain trials, raise it as confidence grows).
+    local servo_min = p("SERVO4_MIN", 800)
+    local servo_max = p("SERVO4_MAX", 2000)
+
+    local p_out = kp * err
+    local d_out = kd * (err - _yaw_prev_e) / dt
+    _yaw_prev_e = err
+
+    -- One-directional actuator (motor throttle >= 0): integrate when err > 0 (we
+    -- have authority to counter the drift) and bleed off symmetrically when err < 0
+    -- so a stuck I-term cannot persist across disturbances or runs.  Clamped to
+    -- [0, imax].  Same |ki*err*dt| step in both directions -- the asymmetry is only
+    -- in which sign of err winds up vs. bleeds.
+    if err > 0 then
+        _yaw_i = _yaw_i + ki * err * dt
+        if _yaw_i > imax then _yaw_i = imax end
+    else
+        _yaw_i = _yaw_i - ki * (-err) * dt
+        if _yaw_i < 0.0 then _yaw_i = 0.0 end
+    end
+
+    local output_unclamp = p_out + _yaw_i + d_out + trim
+    local output = output_unclamp
+    if output > 1.0 then output = 1.0 end
+    if output < 0.0 then output = 0.0 end
+
+    -- Stream internal PID state as NAMED_VALUE_FLOAT for offline tuning analysis.
+    -- Higher rate ceiling than STATUSTEXT and structured (no string parsing).
+    -- YAW_I       : integrator state (clamped to [0, imax])
+    -- YAW_OUT     : pre-clamp output -- shows when PID wants to exceed [0,1]
+    -- Clamped output is derivable from the SERVO_OUTPUT_RAW PWM stream.
+    gcs:send_named_float("YAW_I",   _yaw_i)
+    gcs:send_named_float("YAW_OUT", output_unclamp)
+
+    local pwm = math.floor(servo_min + output * (servo_max - servo_min) + 0.5)
+    -- Defensive clamp on top of the [0,1] clamp upstream -- guards against
+    -- servo_max < servo_min (misconfig) and rounding drift past the bounds.
+    if pwm > servo_max then pwm = servo_max end
+    if pwm < servo_min then pwm = servo_min end
+    SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, pwm, 200)
+
+    -- Neutral cyclic; cruise collective (no rotor pitch command)
+    if _rc_ch1 then _rc_ch1:set_override(1500) end
+    if _rc_ch2 then _rc_ch2:set_override(1500) end
+    local ct = (COL_CRUISE_FLIGHT_RAD - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+    if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + ct * 1000.0 + 0.5)) end
+
+    if _diag % 100 == 1 then
+        gcs:send_text(6, string.format(
+            "RAWES yaw: rate=%+.1fdeg/s  P=%+.3f  I=%+.3f  D=%+.3f  out=%.3f  pwm=%d",
+            math.deg(yaw_rate), p_out, _yaw_i, d_out, output, pwm))
+    end
+end
+
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 
 local function _on_mode_enter(mode)
     _nv_floats      = {}   -- clear NV inbox so stale substates cannot bleed through
     _none_status_ms = 0
+    if mode == MODE_YAW then
+        _yaw_i      = 0.0
+        _yaw_prev_e = 0.0
+    end
 end
 
 -- ── Flight subsystem ─────────────────────────────────────────────────────────
@@ -525,6 +611,11 @@ local function update()
             run_flight()
         end
     end
+
+    if mode == MODE_YAW then
+        run_yaw_pid(BASE_PERIOD_MS * 0.001)
+    end
+
     -- MODE_LANDING (4): not yet implemented
 
     return update, BASE_PERIOD_MS
@@ -533,7 +624,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="steady", [4]="landing", [5]="pumping"}
+local _mode_names = {[0]="none", [1]="steady", [2]="yaw", [4]="landing", [5]="pumping"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

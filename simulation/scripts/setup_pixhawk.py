@@ -58,15 +58,19 @@ _PHASE2 = [
     # Future: set RPM1_TYPE=5 + SERVO_BLH_BDMASK=8 after enabling AM32 EDT on ESC.
     ("RPM1_TYPE",         0),
     ("RPM1_MIN",          0),
-    # Output 4 (MAIN OUT 4, IOMCU): GB4008 under ArduPilot ATC_RAT_YAW DDFP control.
-    # H_TAIL_TYPE=4 routes yaw PID output to SERVO4 as standard PWM.
+    # Output 4 (MAIN OUT 4, IOMCU): GB4008 anti-rotation motor.
+    # H_TAIL_TYPE=4 is kept for heli-mixer consistency, but SERVO4_FUNCTION=0
+    # disables AP's output assignment so ATC_RAT_YAW has no channel to write to.
+    # Lua mode 2 (yaw) writes SERVO4 directly via set_output_pwm_chan_timeout;
+    # in any other mode SERVO4 holds at SERVO4_TRIM (motor off).
     # SERVO4_MIN=800: motor off at 800 us, full throttle at 2000 us.
-    ("H_TAIL_TYPE",       4),    # DDFP CCW: ArduPilot yaw PID drives SERVO4
+    ("H_TAIL_TYPE",       4),    # DDFP CCW (output channel disabled below)
+    ("SERVO4_FUNCTION",   0),    # 0=disabled -- AP cannot drive SERVO4
     ("SERVO4_MIN",        800),
     ("SERVO4_MAX",        2000),
     ("SERVO4_TRIM",       800),   # trim = off (motor off at neutral stick)
     ("BRD_SAFETY_DEFLT",  0),    # safety switch disabled -- outputs live on boot
-    # rawes.lua mode: 0 = none (passive; ArduPilot ATC_RAT_YAW handles yaw regulation)
+    # rawes.lua mode: 0 = none (passive); select mode 2 via `calibrate.py mode 2` or yawmanual
     ("SCR_USER6",         0),
 ]
 
