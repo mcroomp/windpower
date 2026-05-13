@@ -83,33 +83,32 @@ running inside a computer. It has three interconnected layers:
 
 | File | Description |
 |------|-------------|
-| [hardware/design.md](hardware/design.md) | Full assembly layout, rotor geometry, blade design (SG6042), swashplate, Kaman servo flap mechanism (US3217809), anti-rotation motor, electronics and power architecture |
-| [hardware/components.md](hardware/components.md) | Detailed component specs: GB4008 motor, REVVitRC ESC, AM32 firmware, DS113MG servos, SiK radio, RP3-H receiver, Boxer M2 transmitter |
-| [hardware/flap_sensor_bench.md](hardware/flap_sensor_bench.md) | Bench measurement system for swashplate-to-flap deflection characterisation (ESP32 + MPU-6050 WiFi rig + manual digital level procedure) |
+| [design/hardware.md](design/hardware.md) | Full assembly layout, rotor geometry, blade design (SG6042), swashplate, Kaman servo flap mechanism (US3217809), anti-rotation motor, electronics and power architecture |
+| [design/components.md](design/components.md) | Detailed component specs: GB4008 motor, REVVitRC ESC, AM32 firmware, DS113MG servos, SiK radio, RP3-H receiver, Boxer M2 transmitter |
+| [design/flap_sensor_bench.md](design/flap_sensor_bench.md) | Bench measurement system for swashplate-to-flap deflection characterisation (ESP32 + MPU-6050 WiFi rig + manual digital level procedure) |
 
 ### Theory
 
 | File | Description |
 |------|-------------|
-| [theory/pumping_cycle.md](theory/pumping_cycle.md) | De Schutter et al. 2018 -- pumping cycle OCP, state variables, aerodynamics (Eq. 25-31), structural constraints, system parameters (Table I) |
-| [theory/orbit_mechanics.md](theory/orbit_mechanics.md) | Beaupoil 2026 -- orbit characteristics, gyroscopic angular momentum, five control design requirements from orbit mechanics, pumping cycle energy results |
-| [theory/flap_dynamics.md](theory/flap_dynamics.md) | Weyel 2025 thesis summary -- flap state-space model, feed-forward + PID controller, N4SID identification, performance results |
+| [design/theory_pumping.md](design/theory_pumping.md) | De Schutter et al. 2018 -- pumping cycle OCP, state variables, aerodynamics (Eq. 25-31), structural constraints, system parameters (Table I) |
+| [design/theory_flap.md](design/theory_flap.md) | Weyel 2025 thesis summary -- flap state-space model, feed-forward + PID controller, N4SID identification, performance results |
 
 ### System / Flight Stack
 
 | File | Description |
 |------|-------------|
-| [system/stack.md](system/stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Pixhawk orbit tracker (rawes.lua), yaw trim (rawes.lua), ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
+| [design/flight_stack.md](design/flight_stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Pixhawk orbit tracker (rawes.lua), yaw trim (rawes.lua), ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
 
 ### Simulation
 
 | File | Description |
 |------|-------------|
 | [simulation/README.md](simulation/README.md) | Simulation architecture, module summary, coordinate frames, sensor design, initial state, running tests, analysis tools index |
-| [simulation/internals.md](simulation/internals.md) | Sensor design, controller functions, dynamics model, aero model (SkewedWakeBEM), tether, pumping cycle architecture, known gaps |
-| [simulation/history.md](simulation/history.md) | Phase 2 and Phase 3 M3 decisions -- why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
+| [design/simulation.md](design/simulation.md) | Sensor design, controller functions, dynamics model, aero model (SkewedWakeBEM), tether, pumping cycle architecture, known gaps |
+| [design/history.md](design/history.md) | Phase 2 and Phase 3 M3 decisions -- why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
 | [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw physics model -- HubParams, GB4008 motor torque, RK4 integrator, equilibrium throttle |
-| [simulation/aero/deschutter.md](simulation/aero/deschutter.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, known gaps vs SkewedWakeBEM |
+| [design/aero.md](design/aero.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, known gaps vs SkewedWakeBEM |
 
 ---
 

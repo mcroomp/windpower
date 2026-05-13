@@ -134,7 +134,7 @@ Sources:
 | C_D rise | Steep above alpha ~10 deg | |
 
 **Note:** C_L at alpha=0 of ~0.4-0.5 does NOT match the Weyel thesis C_L,0=0.11 (read from SG6040
-polar at different Re). See theory/flap_dynamics.md for Weyel model parameters.
+polar at different Re). See theory_flap.md for Weyel model parameters.
 
 ### Material
 

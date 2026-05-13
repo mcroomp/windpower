@@ -4,7 +4,7 @@ swashplate.py — ArduPilot H3-120 swashplate mixing (faithful Python clone)
 Mirrors AP_MotorsHeli_Swash.cpp and AP_MotorsHeli_Single.cpp exactly so that
 simtests and the SITL mediator use identical swashplate arithmetic.
 
-Reference: hardware/ardupilot_swashplate.md
+Reference: design/ardupilot_swashplate.md
 
 ArduPilot H3-120 servo layout (AP_MotorsHeli_Swash.cpp:151-153):
     SERVO1 (CH_1) at -60 deg

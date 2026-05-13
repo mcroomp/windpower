@@ -7,45 +7,61 @@ controller, Pixhawk Lua scripts, ArduPilot configuration, and startup/arming pro
 
 ## 1. System Architecture
 
-Three nodes, two communication boundaries. The Pixhawk runs two loops: the 400 Hz ArduPilot
-main loop (ACRO_Heli) and the Lua scripting scheduler (50 Hz). Lua writes RC overrides that
-the main loop consumes at full rate. rawes.lua owns all cyclic and collective control — the
-ground station only sends NV floats (RAWES_SUB, RAWES_ALT, RAWES_TEN) and reads telemetry.
+Three physical nodes — **winch**, **ground station**, **Pixhawk**. The winch (motor + drum + load cell + tension sensor) is a standalone unit connected to the ground station by a fixed wired link; the ground station talks to the Pixhawk over MAVLink radio. rawes.lua on the Pixhawk owns all flight control; the ground station only schedules phases and forwards tension to the AP.
 
 ```mermaid
-flowchart TB
-    subgraph WC["Winch / Ground (400 Hz physics, 10 Hz planner)"]
-        WCI["<b>WinchController</b> (400 Hz)<BR/>Tension-controlled reel speed<BR/>Load cell · Encoder"]
-        GPC["<b>PumpingGroundController</b> (10 Hz)<BR/>Phase state machine<BR/>Emits TensionCommand"]
-        LGC["<b>LandingGroundController</b> (10 Hz)<BR/>Emits LandingCommand"]
-    end
-
-    subgraph PX["Pixhawk 6C (in air)"]
+flowchart LR
+    subgraph WIN["<b>Winch</b> <sub>on ground</sub>"]
         direction TB
-        LUA["<b>rawes.lua</b>  50 Hz<BR/>SCR_USER6: 0=none, 1=steady, 4=landing, 5=pumping<BR/>RAWES_ARM: timed arm/disarm<BR/>Pre-GPS: gyro feedthrough + COL_CRUISE_FLIGHT_RAD hold<BR/>Post-GPS: bz_altitude_hold (cyclic) + TensionPI/VZ-PI (collective)<BR/>Owns Ch1/Ch2/Ch3 entirely in modes 1/4/5"]
-        ACRO["<b>ACRO_Heli</b>  400 Hz<BR/>Rate PIDs · H3-120 mix · Spool guards · Servo PWM"]
-        LUA --> ACRO
+        WSEN(["load cell"]):::sensor
+        WCTRL["WinchController"]:::ctrl
+        WMOT(["motor + drum"]):::actuator
+        WSEN --> WCTRL --> WMOT
     end
 
-    GPC -->|"RAWES_SUB · RAWES_ALT · RAWES_TEN (NV float, MAVLink)"| LUA
-    LGC -->|"RAWES_SUB=1 (LAND_FINAL_DROP, NV float)"| LUA
-    PX -->|"LOCAL_POSITION_NED (10 Hz)"| GPC
-    WCI <-->|"tension · rest_length (direct / WinchNode)"| GPC
+    subgraph GND["<b>Ground station</b>"]
+        direction TB
+        WEST["WindEstimator"]:::ctrl
+        PLN["Phase planners"]:::ctrl
+        WEST --> PLN
+    end
+
+    subgraph PIX["<b>Pixhawk</b> <sub>airborne</sub>"]
+        direction TB
+        SENS(["GPS + IMU"]):::sensor
+        EKF["EKF3"]:::ctrl
+        LUA["rawes.lua"]:::ctrl
+        ACRO["ACRO_Heli<br/>rate PIDs"]:::ctrl
+        ACT(["swashplate +<br/>anti-rotation motor"]):::actuator
+        SENS --> EKF --> LUA --> ACRO --> ACT
+    end
+
+    WIN <== "wired:&nbsp; tension, length" ==> GND
+    GND <== "MAVLink radio:&nbsp; setpoints &nbsp;⇄&nbsp; telemetry" ==> PIX
+
+    classDef sensor fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px
+    classDef ctrl fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px
+    classDef actuator fill:#fff3e0,stroke:#e65100,color:#bf360c,stroke-width:2px
 ```
+
+**Reading guide.** Three boxes — three physical nodes. Inside each box, read top-to-bottom: **green = sensors, blue = controllers, orange = actuators**. The two thick edges between boxes are the only physical links: a **wired** cable from the winch to the ground station, and a **MAVLink radio** link from the ground station to the airborne Pixhawk.
+
+**What flows on each link:**
+
+- **Wired (winch ↔ ground):** tether tension and current length up to the ground station; reel-speed commands down to the winch.
+- **MAVLink radio (ground ↔ Pixhawk):** three setpoints up (phase, target altitude, tension); telemetry down (hub position, attitude, anti-rotation motor PWM — the WindEstimator uses the last two to solve for wind, see §3.5).
+
+**Roles of the three nodes.** The **winch** is a self-contained ground unit (motor + drum + load cell on one chassis) that closes its own tension-control loop at 400 Hz. The **ground station** runs the pumping/landing phase planners at 10 Hz, the WindEstimator at 50 Hz, and bridges the wired winch link to the radio link; it never commands attitude. On the **Pixhawk**, rawes.lua handles cyclic and collective at 50 Hz; ArduPilot's ACRO_Heli rate loop runs underneath at 400 Hz and drives two actuator paths — the H3-120 swashplate (cyclic + collective via S1/S2/S3) and the **anti-rotation motor** (yaw correction via SERVO4 PWM, speed-controlled ESC; current hardware: EMAX GB4008 — see [components.md](components.md)).
 
 **Key design principles:**
 
-- **rawes.lua owns all flight control.** Cyclic (Ch1/Ch2) and collective (Ch3) are written by
-  Lua in modes 1, 4, and 5. The ground station never sends SET_ATTITUDE_TARGET.
-- **Altitude hold is tether-geometry based.** `bz_altitude_hold` computes a body_z setpoint
-  that holds elevation angle toward the target altitude, with gravity-compensation tilt. It is
-  derived purely from hub position and tether geometry — no barometer, no vz feedback for cyclic.
-- **TensionPI lives in rawes.lua (pumping).** Lua closes the collective loop on tether tension
-  feedback received via `RAWES_TEN`. The ground planner manages phase timing and winch.
-- **WinchController is tension-controlled.** Cruise speed is proportional to tension error
-  (`kp*(T_measured - T_target)`); reel-out drives energy generation; reel-in holds target length.
-- **Dual GPS for yaw.** EK3_SRC1_YAW=2 (RELPOSNED moving-baseline, two F9P antennas 50 cm
-  apart). Compass disabled. Yaw known from first GPS fix — no motion required.
+- **rawes.lua owns all flight control.** Cyclic (Ch1/Ch2) and collective (Ch3) are written by Lua in modes 1, 4, and 5. The ground station never sends `SET_ATTITUDE_TARGET`.
+- **Altitude hold is tether-geometry based.** `bz_altitude_hold` computes a body_z setpoint that holds elevation angle toward the target altitude, with gravity-compensation tilt. Derived purely from hub position and tether geometry — no barometer, no vz feedback for cyclic.
+- **TensionPI lives in rawes.lua (pumping).** Lua closes the collective loop on tether tension feedback received via `RAWES_TEN`. The ground planner manages phase timing and winch.
+- **WinchController is tension-controlled.** Cruise speed proportional to tension error (`kp·(T_measured − T_target)`); reel-out drives energy generation; reel-in holds target length.
+- **Dual GPS for yaw.** `EK3_SRC1_YAW=2` (RELPOSNED moving-baseline, two F9P antennas 50 cm apart). Compass disabled. Yaw known from the first GPS fix — no motion required.
+
+For detail on individual blocks see §3 (ground), §4 (rawes.lua modes / pre-GPS behaviour / channel ownership), §6 (ArduPilot configuration).
 
 ---
 
@@ -123,28 +139,61 @@ Transition-back: altitude ramp back down; body_z slews back to tether alignment.
 already rate-limits elevation at 0.40 rad/s. Sudden jumps are ground-controller bugs, detected
 by `ap_unreachable_alt` in `BadEventLog` (gap > slew_rate × 1 s flagged).
 
-**WinchController (400 Hz, tension-controlled):**
+**WinchController control loop (400 Hz, tension-following):**
 
-```
-reel-out: winch_target_tension = tension_ic (300 N)
-   v_cruise = kp × (T_measured − 300 N). At T=435 N: v = 0.005 × 135 = 0.675 m/s → capped at 0.40 m/s.
-   Setting target=435 N instead would give near-zero speed — wrong.
+The winch has one job: drive the reel motor so that the load-cell tension tracks a per-phase target. Every 2.5 ms it does:
 
-reel-in: winch_target_tension = tension_in (226 N)
-   v_cruise = kp × (226 N − T_measured). Slack boost below 30 N: speed approaches 2× nominal.
+```mermaid
+flowchart LR
+    LC(["load cell"]):::sensor
+    PHASE["phase<br/><sub>from ground planner</sub>"]:::input
+    TGT[["T_target"]]:::param
+    SUM(("−")):::sum
+    KP["× kp"]:::ctrl
+    SMOOTH["motion profile<br/><sub>accel limit</sub>"]:::ctrl
+    MOT(["reel motor"]):::actuator
+
+    LC -->|"T_measured"| SUM
+    PHASE --> TGT
+    TGT -->|"T_target"| SUM
+    SUM -->|"tension error"| KP
+    KP -->|"v_cruise"| SMOOTH
+    SMOOTH -->|"speed cmd"| MOT
+
+    classDef sensor fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px
+    classDef ctrl fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px
+    classDef actuator fill:#fff3e0,stroke:#e65100,color:#bf360c,stroke-width:2px
+    classDef sum fill:#fff,stroke:#444,color:#000
+    classDef input fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef param fill:#fafafa,stroke:#9e9e9e,color:#212121
 ```
+
+So the controller is a **single proportional gain on tension error**, followed by a motion-profile smoother that respects an acceleration limit. The phase chosen by the ground planner sets only two things: the **tension target** and the **allowed speed sign and magnitude**.
+
+| Phase | Tension target | Allowed motion | What's happening physically |
+|---|---|---|---|
+| reel-out | **300 N** (the IC / "load point" the generator is sized for) | pay-out only, max **0.40 m/s** | Kite pulls hard (AP holds T ≈ 435 N). Measured ≫ target → cable pays out fast against tension → generator extracts power. |
+| reel-in | **226 N** | reel-in only, max **0.80 m/s** | Kite is at low-thrust attitude (AP holds T ≈ 226 N). Measured ≈ target → coast in. If tether goes slack (T → 0) → reel in faster to take up slack before it snags. |
+| hold / transition | reel-out target (300 N) with zero allowed motion at first | clamped near 0 until phase tells it otherwise | Bridge between phases; motion profile prevents abrupt speed jumps. |
+
+**Why reel-out target is 300 N, not 435 N.** The AP's TensionPI commands the *kite* to produce 435 N tension. The winch sees that tension at the load cell and uses the gap above its own 300 N "load point" to drive cable-out speed (`kp · (435 − 300) = 0.675 m/s`, capped at 0.40 m/s). If the winch target were also 435 N, the gap would shrink to zero and the cable would barely move.
+
+**Safety tapers** (applied on top of the proportional law):
+
+| Limit | Value | Effect |
+|---|---|---|
+| `T_soft_max` / `T_hard_max` | 470 N / 496 N | Generator output tapers toward zero as tension approaches motor current limit (80 % of tether break load). |
+| `T_reel_in_start` | 250 N | Hard gate: winch stays still until the AP has brought tension below 250 N. Prevents reel-in motor engaging against a hard-pulling kite. |
+| `T_soft_min` / `T_hard_min` | 30 N / 10 N | Slack boost: as tension falls toward zero, reel-in speed ramps up to 2× nominal so a slack tether is recovered before it loops or snags. |
+
+**Tuning constants:**
 
 | Parameter | Value | Purpose |
 |---|---|---|
-| kp | 0.005 (m/s)/N | Cruise speed per tension error |
-| v_max_out | 0.40 m/s | Reel-out cap |
-| v_max_in | 0.80 m/s | Reel-in cap |
-| accel_limit | 0.5 m/s² | Trapezoidal motion profile |
-| T_soft_max | 470 N | Generator taper starts |
-| T_hard_max | 496 N | Motor current limit (80% break load) |
-| T_reel_in_start | 250 N | Gate: AP must reduce tension before reel-in motor engages |
-| T_soft_min | 30 N | Slack boost start |
-| T_hard_min | 10 N | Maximum slack boost speed |
+| `kp` | 0.005 (m/s)/N | Cruise speed per newton of tension error |
+| `v_max_out` | 0.40 m/s | Reel-out cap |
+| `v_max_in` | 0.80 m/s | Reel-in cap |
+| `accel_limit` | 0.5 m/s² | Trapezoidal motion-profile smoothing |
 
 ### 3.3 TensionCommand Protocol
 
@@ -179,14 +228,92 @@ tracking failure.
 - Wind seed for `WindEstimator` (if used) comes from `Anemometer.measure()` at 3 m height,
   not the raw wind vector.
 
+### 3.5 Wind Estimation
+
+The ground station runs a model-based estimator that recovers wind speed and disk-tilt angle from two signals it already receives, with no extra hardware.
+
+**Rotor speed from anti-rotation motor PWM.** The anti-rotation motor uses a closed-loop speed-controlled ESC: PWM commands motor RPM, and the ESC regulates current to maintain it. The motor is gear-coupled to the rotor, and the AP holds electronics yaw rate `ψ̇ ≈ 0`, so the loop converges when motor speed matches the gear-determined rotor speed. The AP's equilibrium throttle therefore tracks rotor speed:
+
+```
+ω_motor   =  throttle · RPM_SCALE          (ESC speed control)
+ω_motor   =  GEAR_RATIO · ω_rotor          (gear at ψ̇ ≈ 0)
+
+→ ω_rotor ≈ throttle · RPM_SCALE / GEAR_RATIO
+```
+
+For the current hardware (GB4008 + 80:44 spur gear): `RPM_SCALE = 105 rad/s`, `GEAR_RATIO ≈ 1.818`, so `ω_rotor ≈ throttle × 57.8 rad/s`. `throttle` is recovered from PWM by inverting the H_TAIL_TYPE=4 biased mapping (§4.8). Valid for τ > ~0.5 s averaging — long enough for the AP yaw-rate loop to settle out of transients.
+
+**Inputs (all already on the wire):**
+
+| Signal | Source | Rate |
+|---|---|---|
+| Tether tension `T` | winch load cell (wired) | 400 Hz |
+| Anti-rotation motor PWM → `ω_rotor` | Pixhawk → `SERVO_OUTPUT_RAW` (MAVLink) | 50 Hz |
+| Hub attitude (`body_z`) | Pixhawk → `ATTITUDE` (MAVLink) | 50 Hz |
+| Collective `θ_col` | from `RAWES_TEN` round-trip / `RC_CHANNELS_RAW` Ch3 | 10 Hz |
+
+**Two-equation solve.** For a given collective, BEM gives both tension and rotor speed as smooth monotonic functions of `(V_wind, ξ)`:
+
+```
+T        =  ½ · ρ · V² · A · C_T(ξ, θ_col)
+ω_rotor  =  V · g_ω(ξ, θ_col) / R
+```
+
+Two equations in two unknowns → solve for `(V, ξ)` per tick. Implementation: precompute a LUT `(ξ, θ_col, V) → (T, ω)` from PetersHeBEM; at runtime invert via 2D Newton or bilinear lookup (2–3 iterations).
+
+**Wind-axis disambiguation.** ξ alone defines a cone of possible wind directions around `body_z`. Break the 2-fold ambiguity by averaging hub horizontal position over one orbit (~60 s, slow LPF). The orbit sits downwind of the anchor; mean horizontal position points downwind.
+
+**Cross-validation as a fault detector.** Solving each equation alone for `V` produces two estimates. Disagreement > 20 % flags blade fouling, ice, BEM model drift, or load-cell calibration error — any of which would otherwise silently corrupt a single-sensor estimate.
+
+**Why this beats tension-only.** At ξ ≈ 80° during reel-in, tension is intentionally low (~58 N) — a poor V estimator. Rotor speed at ξ=80° has `v_inplane ≈ 0.98·V`, so ω stays a clean signal. The two-signal solve works across the whole pumping cycle.
+
+**Implementation sketch.**
+
+```python
+# Offline (once):
+#   LUT: (xi_grid, col_grid, V_grid) -> (T_pred, omega_pred)  from PetersHeBEM
+
+# Online (50 Hz, on ground side):
+def estimate_wind(T_meas, anti_rot_pwm, body_z, theta_col, hub_pos_lpf):
+    throttle  = pwm_to_throttle(anti_rot_pwm)         # invert H_TAIL_TYPE=4 mapping
+    omega     = throttle * RPM_SCALE / GEAR_RATIO     # rotor speed
+    V, xi     = solve_lut(T_meas, omega, theta_col)    # 2D Newton on LUT
+    wind_dir  = unit(hub_pos_lpf[:2])                  # downwind direction (slow LPF)
+    return V, wind_dir
+```
+
+**Calibration.** The LUT is generated from PetersHeBEM at the current rotor definition — the same map `pump_envelope.py` already sweeps. No separate calibration pass.
+
 ---
 
 ## 4. Pixhawk Lua Scripts
 
 ### 4.1 rawes.lua Overview
 
-Single unified controller (`simulation/scripts/rawes.lua`) running at 50 Hz (FLIGHT_PERIOD_MS=20)
-on a 100 Hz base tick (BASE_PERIOD_MS=10).
+Single unified controller (`simulation/scripts/rawes.lua`) running at 50 Hz (FLIGHT_PERIOD_MS=20) on a 100 Hz base tick (BASE_PERIOD_MS=10).
+
+#### How one 50 Hz tick works
+
+The loop is the same in every mode. Each tick it asks two questions, and both answers depend only on the mode:
+
+```
+   where is the hub  →   where should the rotor axle point?   →   tilt the rotor that way
+   and how is it          how hard should the blades pull?         set the blade pitch
+   oriented?                                                       send commands to ArduPilot
+```
+
+Mode picks two things — *where the rotor axle should aim* and *how hard the blades should pull*:
+
+| Mode | Where to aim the rotor axle | How hard the blades pull | Used for |
+|---|---|---|---|
+| 0 — none | (controller off) | (controller off) | passive logging |
+| 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
+| 5 — pumping | along the tether, at the per-phase altitude the ground gave us | whatever keeps the measured tether tension on target (435 N during reel-out, 226 N during reel-in) | pumping cycle |
+| 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
+
+**Before the first GPS fix:** we don't know where the hub is yet, so the loop runs degenerately — blade pitch is held at a safe cruise value, and tilt commands are pass-throughs of the gyro so the rotor doesn't fight its natural orbital precession. On the first fix, the elevation target initialises and the mode-specific loop above takes over (§4.2).
+
+Sections 4.2–4.5 give the per-mode detail and gain values.
 
 **SCR_USER parameter slots:**
 
@@ -333,24 +460,25 @@ Re-sending refreshes the timer. Works in any mode.
 | Ch3 — collective | rawes.lua (modes 1/4/5) | 50 Hz | VZ PI (mode 1), VZ descent (mode 4), TensionPI (mode 5). Mode 0: not overridden. |
 | Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives SERVO4 independently. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
-| SERVO4 — GB4008 | ArduPilot ATC_RAT_YAW | 400 Hz | DDFP CCW (H_TAIL_TYPE=4): sign flip → positive throttle counters CW hub drift. rawes.lua does NOT write SERVO4. |
+| SERVO4 — anti-rotation motor | ArduPilot ATC_RAT_YAW | 400 Hz | DDFP CCW (H_TAIL_TYPE=4): sign flip → positive throttle counters CW hub drift. rawes.lua does NOT write SERVO4. |
 
 ### 4.8 Yaw Regulation — ArduPilot ATC_RAT_YAW
 
 Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID. rawes.lua writes
-no commands to the GB4008 motor.
+no commands to the anti-rotation motor.
 
 ```
 Sensing:    gyro.z (from ACRO_Heli EKF attitude)
 Control:    ATC_RAT_YAW P/I/D → SERVO4 (H_TAIL_TYPE=4 DDFP CCW)
-Actuator:   GB4008 motor via standard PWM on MAIN OUT 4 (IOMCU)
+Actuator:   anti-rotation motor via standard PWM on MAIN OUT 4 (IOMCU)
+            (current hardware: GB4008 + 80:44 spur gear — see components.md)
 ```
 
 **H_TAIL_TYPE=4 (DDFP CCW):** applies sign flip before thrust mapping.
 
 ```
 CW hub drift → positive psi_dot → yaw error = 0 − positive = negative PID
-CCW sign flip: −PID → +throttle → GB4008 counters drift. ✓
+CCW sign flip: −PID → +throttle → motor counters drift. ✓
 Type 3 (no flip): −PID → clamped to 0 → motor stays off → drift uncorrected. ✗
 ```
 
@@ -385,7 +513,7 @@ Equilibrium throttle: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE = 28 
 
 The RAWES rotor (blades + outer hub shell) spins freely in autorotation. The stationary inner
 assembly (flight controller, battery, servos) must maintain a fixed heading while the outer shell
-spins. The GB4008 anti-rotation motor counters the reaction torque from rotor drag.
+spins. The anti-rotation motor counters the reaction torque from rotor drag. Current hardware: EMAX GB4008 — see §5.2 and [components.md](components.md).
 
 ### 5.2 Actuator: GB4008 + 80:44 Gear
 
@@ -415,7 +543,7 @@ H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419
 
 | Parameter | Value | Purpose |
 |---|---|---|
-| H_TAIL_TYPE | 4 (DDFP CCW) | Sign flip: negative yaw error → positive GB4008 throttle |
+| H_TAIL_TYPE | 4 (DDFP CCW) | Sign flip: negative yaw error → positive motor throttle |
 | ATC_RAT_YAW_P | 0.20 | Starting P gain |
 | ATC_RAT_YAW_I | 0.05 | Corrects residual yaw not cancelled by trim |
 | ATC_RAT_YAW_D | 0.0 | Start at zero |
@@ -498,12 +626,14 @@ With dual GPS (EK3_SRC1_YAW=2): yaw is known from the first GPS fix. No motion r
 `delAngBiasLearned` converges at ~21 s with constant-zero gyro (stationary hold). GPS fuses
 at ~34 s — well before kinematic exit at 80 s.
 
-### 6.4 GB4008 Anti-Rotation Motor
+### 6.4 Anti-Rotation Motor (SERVO4)
+
+Current hardware: GB4008 + 80:44 spur gear. See §5.2 and [components.md](components.md) for the actual motor + ESC. The ArduPilot parameters below configure SERVO4 for whatever motor is wired there.
 
 | Parameter | Value | Reason |
 |---|---|---|
 | H_TAIL_TYPE | 4 (DDFP CCW) | Routes ATC_RAT_YAW PID to SERVO4 with CCW sign flip |
-| SERVO4_FUNCTION | 36 (Motor4) | GB4008 ESC on MAIN OUT 4 |
+| SERVO4_FUNCTION | 36 (Motor4) | Anti-rotation motor ESC on MAIN OUT 4 |
 | SERVO4_MIN | 800 µs | ESC disarm |
 | SERVO4_MAX | 2000 µs | ESC maximum |
 | ATC_RAT_YAW_P | 0.20 | Starting value |
@@ -558,30 +688,25 @@ than winch → slack → near-zero tension → TensionPI commands max collective
 
 ```mermaid
 flowchart TD
-    START(["Every 20 ms (50 Hz)"]) --> GUARD{"ACRO mode?\nvehicle:get_mode() == 1\nAND mode != MODE_NONE"}
-    GUARD -- No --> SKIP(["return early"])
-    GUARD -- Yes --> GPS{"_el_initialized?\n(first valid GPS fix\nwith tlen >= MIN_TETHER_M)"}
+    START(["Every 20 ms (50 Hz)"]) --> GPS{"Got a GPS fix yet?"}
 
-    GPS -- No --> PREGPS["<b>Pre-GPS hold</b><BR/>Ch3 = COL_CRUISE_FLIGHT_RAD<BR/>Ch1/Ch2 = gyro feedthrough<BR/>(desired_rate = measured_rate → zero error)"]
-    PREGPS --> START
+    GPS -- "No" --> PRE["<b>Hold steady</b><br/>blades at safe cruise pitch;<br/>tilt commands mirror the gyro<br/>(don't fight the natural orbit)"]
 
-    GPS -- Yes --> ELIM["<b>Rate-limit elevation</b><BR/>el_target = asin(RAWES_ALT / tlen)<BR/>_el_rad += clamp(el_target − _el_rad, ±SCR_USER2 × dt)"]
+    GPS -- "Yes" --> AIM["<b>Aim the rotor axle</b><br/>along the tether,<br/>at the target altitude"]
+    AIM --> TILT["<b>Tilt correction</b><br/>nudge the rotor toward that aim"]
+    TILT --> PITCH{"What mode<br/>are we in?"}
 
-    ELIM --> BZ["<b>Compute bz_goal</b><BR/>bz_goal = bz_altitude_hold(pos, _el_rad, RAWES_TEN)<BR/>= tether_dir_at_el + gravity_compensation_tilt"]
+    PITCH -- "steady" --> P1["<b>Blade pitch</b><br/>hold vertical speed at zero"]
+    PITCH -- "pumping" --> P2["<b>Blade pitch</b><br/>hit the tether tension target<br/>(set by ground)"]
+    PITCH -- "landing" --> P3["<b>Blade pitch</b><br/>descend at 0.5 m/s;<br/>drop to zero on final-drop"]
 
-    BZ --> CYCLIC["<b>Cyclic P loop</b><BR/>err_ned = bz_now × bz_goal<BR/>err_body = ahrs:earth_to_body(err_ned)<BR/>roll_rate = KP_CYC × err_body.x<BR/>pitch_rate = KP_CYC × err_body.y"]
-
-    CYCLIC --> CH12["<b>Ch1/Ch2 RC override</b><BR/>scale = 500 / (ACRO_RP_RATE × π/180)<BR/>Ch1 = clamp(1500 + scale × roll_rate, 1000, 2000)<BR/>Ch2 = clamp(1500 + scale × pitch_rate, 1000, 2000)"]
-
-    CH12 --> COL{"Mode?"}
-    COL -- "MODE_STEADY (1)" --> VZPI["VZ PI<BR/>col = COL_CRUISE + KP_VZ×(vz−0) + KI_VZ×∫<BR/>Ch3 = col_to_pwm(col)"]
-    COL -- "MODE_PUMPING (5)" --> TENPI["TensionPID<BR/>err = RAWES_TSP − RAWES_TEN<BR/>col = KP×err + KI×∫err + KD×Δerr/DT_CMD<BR/>col = clamp(col, COL_MIN, COL_MAX_TEN)<BR/>Ch3 = col_to_pwm(col)"]
-    COL -- "MODE_LANDING (4)" --> VZLAND["VZ PI (descent)<BR/>col = COL_CRUISE + KP_VZ×(vz−VZ_SP)<BR/>final_drop: col=0<BR/>Ch3 = col_to_pwm(col)"]
-
-    VZPI --> END(["apply RC overrides"])
-    TENPI --> END
-    VZLAND --> END
+    PRE --> OUT(["Send tilt + pitch commands<br/>to ArduPilot"])
+    P1 --> OUT
+    P2 --> OUT
+    P3 --> OUT
 ```
+
+(See §4.2–§4.5 for the actual formulas, gain values, and channel-level PWM mapping.)
 
 ---
 
@@ -818,6 +943,6 @@ level first.
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
 | `simulation/analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
 | `simulation/analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |
-| `hardware/design.md` | Assembly layout, rotor geometry, swashplate, Kaman flap mechanism |
-| `hardware/dshot.md` | DShot reference, AM32 EDT, GB4008 wiring |
-| `theory/pumping_cycle.md` | De Schutter 2018 — pumping cycle, aero, structural constraints |
+| `hardware.md` | Assembly layout, rotor geometry, swashplate, Kaman flap mechanism |
+| `dshot.md` | DShot reference, AM32 EDT, GB4008 wiring |
+| `theory_pumping.md` | De Schutter 2018 — pumping cycle, aero, structural constraints |

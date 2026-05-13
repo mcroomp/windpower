@@ -1,6 +1,6 @@
 # RAWES Simulation — Development History
 
-Phase 2, Phase 3 M3 architecture decisions, and Phase 3 M3 SkewedWakeBEM production switch. See [CLAUDE.md](../CLAUDE.md) for current status and [system/stack.md](../system/stack.md) for the full flight control stack spec.
+Phase 2, Phase 3 M3 architecture decisions, and Phase 3 M3 SkewedWakeBEM production switch. See [CLAUDE.md](../CLAUDE.md) for current status and [flight_stack.md](flight_stack.md) for the full flight control stack spec.
 
 ---
 
@@ -112,7 +112,7 @@ not collective.  Collective provides fine-grained tension tuning within a phase.
 
 ## Phase 3 M3 — ModeRAWES Architecture: What Was Decided
 
-Full spec in `system/stack.md`. Key settled decisions:
+Full spec in `flight_stack.md`. Key settled decisions:
 
 ### ModeRAWES inherits ModeAcro_Heli (not Mode directly)
 ```
@@ -331,7 +331,7 @@ New test file mapping paper equations to implementation and YAML values:
 
 Module-level constants mirror paper symbols exactly (`N`, `L_w`, `L_b`, `R`,
 `A_aspect`, `chord`, `S_w`, `r_cp`, `CL_alpha`, `omega_paper`, `v_tan_cp`, `q_cp`).
-All 32 pass. Validation doc at `simulation/aero/deschutter.md`.
+All 32 pass. Validation doc at `aero.md`.
 
 ### Minimum tension_in for altitude maintenance at ξ=55°
 

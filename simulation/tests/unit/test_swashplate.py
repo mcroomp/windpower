@@ -3,7 +3,7 @@ test_swashplate.py — unit tests for the ArduPilot H3-120 swashplate clone.
 
 Verifies that ardupilot_h3_120_forward and ardupilot_h3_120_inverse are exact
 inverses of each other and produce values that match the ArduPilot signal flow
-documented in hardware/ardupilot_swashplate.md.
+documented in design/ardupilot_swashplate.md.
 """
 import math
 import sys

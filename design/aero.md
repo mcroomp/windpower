@@ -263,4 +263,4 @@ implementation closest to the paper and is used for equation-level validation.
 | `rotor_definitions/de_schutter_2018.yaml`      | Geometry + aerodynamics from paper   |
 | `tests/unit/test_deschutter_equations.py`      | Equation-level validation (32 tests) |
 | `aero/tests/test_deschutter_validation.py`     | Geometry + behavior validation       |
-| `theory/pumping_cycle.md` (repo root docs)     | Control theory overview              |
+| `theory_pumping.md` (repo root docs)     | Control theory overview              |
