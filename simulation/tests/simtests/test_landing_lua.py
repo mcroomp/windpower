@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
-from aero import rotor_definition as rd
 from winch           import WinchController
 from simtest_log     import BadEventLog
 from simtest_ic      import load_ic
@@ -31,9 +30,10 @@ from simtest_runner  import PhysicsRunner, LuaAP
 from landing_planner import LandingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes       import MODE_LANDING, LAND_FINAL_DROP
+from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 _IC    = load_ic()
-_ROTOR = rd.default()
+_ROTOR = load_default_rotor()
 
 # ── Timing ─────────────────────────────────────────────────────────────────────
 DT         = 1.0 / 400.0
@@ -65,12 +65,18 @@ T_FINAL_DROP_MAX     = 15.0
 def _run_landing(log) -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
 
+    # Note: xi_reel_in_deg / col_cruise_rad were dropped from the planner
+    # API.  The current LandingGroundController uses tether-length targets
+    # (target_length_m) instead.  This test predates that refactor; the
+    # call site here is updated mechanically so it collects — physics
+    # tuning of the landing phases is its own task.
     ground = LandingGroundController(
         initial_body_z   = _IC.R0[:, 2],
-        xi_reel_in_deg   = XI_REEL_IN_DEG,
-        slew_rate_rad_s  = _ROTOR.body_z_slew_rate_rad_s,
+        target_length_m  = 50.0,
+        slew_rate_rad_s  = BODY_Z_SLEW_RATE_RAD_S,
         col_reel_in_rad  = COL_REEL_IN_RAD,
-        col_cruise_rad   = COL_CRUISE,
+        col_vertical_rad = COL_REEL_IN_RAD,
+        col_descent_rad  = COL_CRUISE,
         tension_descent  = TENSION_DESCENT,
         v_land           = V_LAND,
         min_tether_m     = MIN_TETHER_M,
@@ -179,7 +185,7 @@ def _run_landing(log) -> dict:
     if pos_at_floor is not None:
         anchor_dist = float(np.linalg.norm(pos_at_floor[:2]))
     if bz_at_floor is not None:
-        bz_level       = np.array([0.0, 0.0, -1.0])
+        bz_level       = np.array([0.0, 0.0, 1.0])   # FRD: down through disk for level hover
         touchdown_tilt = float(np.degrees(np.arccos(
             np.clip(np.dot(bz_at_floor, bz_level), -1.0, 1.0))))
 

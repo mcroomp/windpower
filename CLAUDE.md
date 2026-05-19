@@ -58,8 +58,35 @@ These are the rules that, if violated, silently destroy correctness. Read every 
 
 ### Coordinates & signs
 
-- **NED everywhere.** X=North, Y=East, Z=Down. Gravity = `[0, 0, +9.81·m]`. Altitude = `-pos[2]`. `T_ENU_NED` in `frames.py` is for legacy external data only — never used in the simulation loop. Any `pos_enu`, `altitude = pos[2]` (without negation), or ENU-style arithmetic is a bug.
-- **Thrust sign:** for body_z = disk_normal = `[0,0,-1]` (horizontal disk in NED), upward thrust = `dot(F_world, body_z) = -F_world[2]`. **Never negate `body_z` when projecting thrust** — `dot(F_world, -body_z) = +F_world[2]` gives the *downward* component. Rule: **upward thrust = `dot(F_world, disk_normal)`** regardless of disk orientation. Verified by `test_hover_sign.py`.
+#### Frames used in the project
+
+The whole simulation loop runs in **one frame: NED world + FRD body**. ENU only appears at the edges (visualization, legacy ingest, paper-reproduction scripts) and never inside the physics.
+
+| Frame | Where it lives | Axes |
+|-------|----------------|------|
+| **NED world** | `dynamics`, `tether`, `controller`, `physics_core`, `mediator`, `sensor`, `aero`, `rawes.lua` | X=North, Y=East, Z=Down. Gravity = `[0, 0, +9.81·m]`. Altitude = `−pos[2]`. |
+| **FRD body** | Columns of any `R_hub` / `R_body` matrix in the project | `R[:,0]` = forward (nose), `R[:,1]` = right, **`R[:,2]` = hub axis pointing DOWN through the disk** (toward the ground for level hover; toward the anchor in tethered hover). Matches ArduPilot / EKF / `aero` package end-to-end. |
+| **ENU** (legacy / external only) | `frames.T_ENU_NED` (ingest only), `viz3d/visualize_3d.py` (PyVista is Z-up), a handful of `analysis/` and `references/` scripts that follow paper conventions | X=East, Y=North, Z=Up. **Never** used inside the simulation loop. |
+
+There is exactly one body-frame rotation convention. The body axes are described as vectors in NED via the columns of `R`; ENU never enters the physics path.
+
+#### Origin conventions
+
+The world frame is NED, but the **origin** can differ between subsystems. Same axes, only the translation changes — there is no rotation between origins.
+
+| Origin | Used by | Anchor location | Notes |
+|--------|---------|-----------------|-------|
+| **Anchor-origin NED** | Physics, simtests, unit tests | `anchor_ned = [0, 0, 0]` | `pos` is hub-relative-to-anchor; `tdir = -pos / |pos|` gives FRD body_z directly. |
+| **GPS / EKF-home NED** | Mediator, ArduPilot, stack tests | Anchor at `(SCR_USER3, SCR_USER4, SCR_USER5)` | `LOCAL_POSITION_NED` origin is the GPS first-fix home, not the anchor. Code that derives tether direction must use the actual anchor offset, not zero. |
+
+Because only the origin translates (no rotation), any vector that comes from a difference (velocity, gyro, body_z) is identical in both origins. Only `pos` and `anchor_pos` care which origin the caller is using. Anywhere you see `pos / np.linalg.norm(pos)` is silently assuming anchor-at-origin and is fragile in the mediator path.
+
+#### Signs
+
+- **`body_z` is "down through the disk", not "up".** For a level hover, `R[:,2] = [0, 0, +1]` in NED. For tethered hover, `body_z = (anchor − pos) / |anchor − pos|`.
+- **Thrust sign:** upward thrust = `−F_world[2]` (NED Z is down). The aero returns `F_world = −T·R[:,2]`, so for `T > 0` and `R[:,2] = [0,0,+1]`, `F_world = [0,0,−T]` ⇒ `F_world[2] < 0` is upward. Verified by `test_hover_sign.py`.
+- **Cyclic (helicopter signs, new `aero`):** `tilt_lon > 0` ⇒ nose-down disk (forward stick); `tilt_lat > 0` ⇒ roll right. `AcroControllerSitl` maps body-rate-roll → `tilt_lat` and body-rate-pitch → `−tilt_lon`.
+- **Pitch / roll body rates (FRD standard):** `+roll_rate` = right wing drops, `+pitch_rate` = nose up, `+yaw_rate` = nose right. So "nose-down" command is `−pitch_rate`, matched in `compute_swashplate_from_state` and `AcroControllerSitl`.
 
 ### Sensors & EKF (physically faithful, no overrides)
 
@@ -102,6 +129,7 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 - **Run `analyse_run.py` first after any stack test failure.** It loads all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) into a unified `FlightLog` and prints a single bucketed report. `--bucket 10` for overview, `--bucket 1` for frame-level detail.
 - **Keep `rawes_test_surface.lua` in sync with `rawes.lua`.** Lua unit tests access constants and functions through `_rawes_fns`, which is spliced inside `rawes.lua`'s anonymous function wrapper and so can see module-level locals only. Whenever you add a local constant or function to `rawes.lua` that tests need, add it to `_rawes_fns` in `rawes_test_surface.lua` in the same commit. Function-local variables are not accessible — hoist them to module level first.
 - **`controller.py` follows `rawes.lua`.** `test_math_lua.py` cross-checks `rawes.lua` against `controller.py`; a failure there means `controller.py` diverged — fix `controller.py`.
+- **One-off / diagnostic scripts go in `simulation/tests/oneoff/`, never in `tests/unit/`.** Any script run with `python -c "..."` for a gain sweep, Bode probe, plant identification, debug trace, etc. that isn't a pytest-discoverable unit test must be saved as a standalone script in `simulation/tests/oneoff/`. Reasons: (1) keeps the unit-test discovery clean — these scripts are not regression guards; (2) makes the diagnostic reproducible without scrolling chat history; (3) tools-required for the next person who hits the same problem. Prefix file names with the date or topic (e.g. `phase_sweep.py`, `bode_attitude.py`). Add a one-line header `"""<topic> — one-off diagnostic, not a unit test."""`.
 
 ---
 

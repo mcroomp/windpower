@@ -33,17 +33,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-from aero import rotor_definition as _rd
 from simtest_runner import PhysicsRunner, PythonAP
 from ap_controller import TensionApController
 from pumping_planner import TensionCommand
 from simtest_ic import load_ic
+from tests.simtests._rotor_helpers import (
+    load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
+)
 
 TetherModel = _mediator_module.TetherModel
 
 # Load rotor definition — single source of truth for all physical constants.
-_ROTOR = _rd.default()
-_DYN_KW = _ROTOR.dynamics_kwargs()   # mass, I_body, I_spin
+_ROTOR  = load_default_rotor()
+_DYN_KW = dynamics_kwargs(_ROTOR)   # mass, I_body, I_spin
 
 # Design tether equilibrium orientation (from beaupoil_2026.yaml) in NED
 # ── Physical constants (all from rotor definition) ────────────────────────────
@@ -73,10 +75,19 @@ def _run_simulation(log, steps: int = 4000):
 
     # ── Recorded run ──────────────────────────────────────────────────────────
     runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    # Tuned for elastic tether + wind (see tests/oneoff/warmup_gain_sweep.py).
+    from controller import HeliCyclicController as _Heli
+    runner._acro = _Heli(
+        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        P=0.67, I=0.15, D=0.02, IMAX=0.30,
+        FLTT=40.0, FLTE=0.0, FLTD=40.0,
+    )
+    runner._acro._servo.reset(ic.coll_eq_rad)
     _ap    = TensionApController(
         ic_pos=ic.pos, mass_kg=MASS,
-        slew_rate_rad_s=_ROTOR.body_z_slew_rate_rad_s,
+        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
         warm_coll_rad=ic.coll_eq_rad, tension_ic=tension_out,
+        kd_lat=50.0,
     )
     ap     = PythonAP(_ap, wind=WIND, dt=DT)
     ap.tel_fn = lambda r, sr: {
@@ -95,6 +106,11 @@ def _run_simulation(log, steps: int = 4000):
     ten_arr   = np.zeros(steps)
     angle_arr = np.zeros(steps)
 
+    # Ground-side tension-regulating winch (matches real flight stack).
+    rest_now    = float(ic.rest_length)
+    _WINCH_KP   = 0.01
+    _WINCH_VMAX = 1.0
+
     for step in range(steps):
         hub = runner.hub_state
         pos = hub["pos"]
@@ -106,7 +122,8 @@ def _run_simulation(log, steps: int = 4000):
         R      = np.asarray(hub["R"], dtype=float)
         body_z = R[:, 2]
         tlen   = np.linalg.norm(pos)
-        tdir   = pos / max(tlen, 0.1)
+        # FRD body_z points hub→anchor (down through disk).
+        tdir   = -pos / max(tlen, 0.1)
         angle_arr[step] = math.degrees(math.acos(float(np.clip(np.dot(body_z, tdir), -1.0, 1.0))))
 
         if step % _PLANNER_EVERY == 0:
@@ -116,7 +133,11 @@ def _run_simulation(log, steps: int = 4000):
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             ap.tick(step * DT, runner)
-        sr = runner.step(DT, ap.col_rad, ap.roll_sp, ap.pitch_sp, runner.omega_body)
+        dT       = runner.tension_now - tension_out
+        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
+        rest_now += v_winch * DT
+        sr = runner.step(DT, ap.col_rad, ap.roll_sp, ap.pitch_sp,
+                         runner.omega_body, rest_length=rest_now)
         ap.log(runner, sr)
 
     ap.write_telemetry(log.log_dir / "telemetry.csv")

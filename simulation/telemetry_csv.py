@@ -493,10 +493,13 @@ class TelRow:
             if net_moment is not None:
                 net_M = np.asarray(net_moment, dtype=float)
             if aero_obj is not None:
-                aero_T         = float(aero_obj.last_T)
-                aero_v_axial   = float(aero_obj.last_v_axial)
-                aero_v_inplane = float(aero_obj.last_v_inplane)
-                aero_v_i       = float(aero_obj.last_v_i)
+                # New aero package doesn't expose these as model attributes —
+                # they live in the per-step result/state.  Telemetry-only,
+                # safe to default to 0 when unavailable.
+                aero_T         = float(getattr(aero_obj, "last_T",         0.0))
+                aero_v_axial   = float(getattr(aero_obj, "last_v_axial",   0.0))
+                aero_v_inplane = float(getattr(aero_obj, "last_v_inplane", 0.0))
+                aero_v_i       = float(getattr(aero_obj, "last_v_i",       0.0))
 
         tm = np.asarray(tether_moment, dtype=float) if tether_moment is not None else np.zeros(3)
 

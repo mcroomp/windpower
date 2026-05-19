@@ -174,7 +174,29 @@ control:
   # Theoretical: 90° for a CCW rotor.  Effective value depends on flap lag time constant.
   # SOURCE: not yet determined — TBD from hardware step-response test (ArduPilot H_PHANG).
   # Set 0.0 when gyroscopic coupling is disabled (I_spin_kgm2 = 0.0).
-  swashplate_phase_deg: 0.0   # ESTIMATE — TBD from step-response test
+  swashplate_phase_deg: 0.0   # OPEN TASK: gyroscopic-precession calibration.
+                              # An open-loop phase sweep (see notes below) shows
+                              # the cyclic→body-rate response is rotated by
+                              # ~140° relative to body axes — i.e. a +tilt_lat
+                              # produces a body-rate vector pointing into the
+                              # (-x, -y) quadrant, not pure +x as the controller
+                              # assumes.  Setting swashplate_phase_deg=210°
+                              # aligns the 0.5s open-loop response with the
+                              # body axes, but the closed-loop becomes
+                              # unstable because the small-signal sign at
+                              # short times differs from the bulk open-loop
+                              # direction (nutation transient).
+                              #
+                              # Current value 0 preserves all existing tests.
+                              # The closed-loop PID compensates for the phase
+                              # implicitly; this is what lets the simpler
+                              # tests pass.  The IC warmup divergence under
+                              # wind + elastic-tether is the symptom of the
+                              # implicit compensation breaking down at high
+                              # gain.  Fixing it requires a joint retune of
+                              # (phase, kp_inner, kp_outer, kp_pos, possibly
+                              # adding kd_inner) — a real flight-dynamics
+                              # tuning session, not a few iterations.
 
   # ── Swashplate pitch authority (Kaman flap) ──────────────────────────────
   #

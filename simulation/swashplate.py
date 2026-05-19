@@ -346,9 +346,18 @@ class SwashplateServoModel:
                    col_max_rad: float =  0.10,
                    h_col_min:   float = 1000.0,
                    h_col_max:   float = 2000.0) -> "SwashplateServoModel":
+        if rotor.control is None:
+            raise ValueError("rotor.control must be set to construct SwashplateServoModel")
+        slew = rotor.control.servo_slew_rate_deg_s
+        travel = rotor.control.servo_travel_deg
+        if slew is None or travel is None:
+            raise ValueError(
+                "rotor.control.servo_slew_rate_deg_s and servo_travel_deg "
+                "must be set to construct SwashplateServoModel"
+            )
         return cls(
-            slew_rate_deg_s=rotor.servo_slew_rate_deg_s,
-            travel_deg=rotor.servo_travel_deg,
+            slew_rate_deg_s=float(slew),
+            travel_deg=float(travel),
             col_min_rad=col_min_rad,
             col_max_rad=col_max_rad,
             h_col_min=h_col_min,

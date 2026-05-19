@@ -253,7 +253,7 @@ def simulate_descent_physics(
     """
     Same scenario as simulate_descent() but using PhysicsCore directly + Peters-He.
 
-    PhysicsRunner is intentionally avoided — it bakes in AcroControllerSitl (rate PID
+    PhysicsRunner is intentionally avoided — it bakes in HeliCyclicController (rate PID
     + servo lag) which would process c_lon/c_lat as rate setpoints rather than tilt
     angles, making comparison with the other two functions meaningless.
     """

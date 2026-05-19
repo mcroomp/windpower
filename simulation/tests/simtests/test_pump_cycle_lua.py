@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
-from aero import rotor_definition as rd
 from winch          import WinchController
 from simtest_ic     import load_ic
 from simtest_log    import BadEventLog
@@ -32,9 +31,10 @@ from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes    import MODE_PUMPING
 from unified_ground import UnifiedGroundController, LuaComms
+from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 _IC    = load_ic()
-_ROTOR = rd.default()
+_ROTOR = load_default_rotor()
 
 # ── Simulation constants ──────────────────────────────────────────────────────
 DT         = 1.0 / 400.0
@@ -52,7 +52,7 @@ DELTA_L          = 12.0
 _XI_START_DEG    = 30.0
 _XI_REEL_IN_DEG  = 50.0
 T_TRANSITION = (
-    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / _ROTOR.body_z_slew_rate_rad_s + 3.0
+    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / BODY_Z_SLEW_RATE_RAD_S + 3.0
 )
 
 TENSION_OUT      = 435.0
@@ -69,7 +69,7 @@ T_REEL_IN_MAX  = 120.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.2
 
 
-def _run_pumping(log, aero_model: str = "skewed_wake") -> dict:
+def _run_pumping(log, aero_model: str = "oye") -> dict:
     # ── Lua AP ───────────────────────────────────────────────────────────────
     sim = RawesLua(mode=MODE_PUMPING)
     sim.armed        = True

@@ -187,6 +187,12 @@ local function disk_normal_ned()
     return ahrs:body_to_earth(v3_body_z())
 end
 
+-- Lateral-velocity damping gain [N*s/m] for damp_bz_eq_lateral.  Same value
+-- as the Python TensionApController(kd_lat=...) used in test_create_ic
+-- warmup.  Damps the tether pendulum mode so steady-flight oscillation
+-- doesn't grow over the minute timescale.
+local KD_LAT = 50.0
+
 -- Compute body_z_eq for altitude-holding flight.
 -- Points the disk at (el_rad, current_azimuth) and adds a gravity-compensation
 -- tilt so thrust has an upward-elevation component equal to mass*g*cos(el).
@@ -198,10 +204,10 @@ local function bz_altitude_hold(pos, el_rad, tension_n)
     local sin_el = math.sin(el_rad)
     local cos_az = math.cos(az)
     local sin_az = math.sin(az)
-    -- Tether direction at (el, az)
-    local tx, ty, tz = cos_el * cos_az, cos_el * sin_az, -sin_el
-    -- Elevation-upward tangent: d(tdir)/d(el)
-    local ex, ey, ez = -sin_el * cos_az, -sin_el * sin_az, -cos_el
+    -- FRD: body_z points DOWN through the disk = hub→anchor in tethered hover.
+    -- tdir = hub→anchor direction at (el, az); e_dn = elevation-downward tangent.
+    local tx, ty, tz = -cos_el * cos_az, -cos_el * sin_az,  sin_el
+    local ex, ey, ez =  sin_el * cos_az,  sin_el * sin_az,  cos_el
     -- Gravity compensation: k = mass*g*cos(el) / tension
     local k = MASS_KG * G_ACCEL * cos_el / math.max(tension_n, 1.0)
     local rx, ry, rz = tx + k * ex, ty + k * ey, tz + k * ez
@@ -209,6 +215,28 @@ local function bz_altitude_hold(pos, el_rad, tension_n)
     if rn < 1e-6 then rn = 1.0 end
     local r = Vector3f()
     r:x(rx / rn); r:y(ry / rn); r:z(rz / rn)
+    return r
+end
+
+-- Add lateral-velocity damping to a body_z target.  Mirrors Python
+-- controller.damp_bz_eq_lateral.  Tilts bz toward the hub's lateral
+-- velocity (component perpendicular to the tether) by kd_lat*v_lat/T,
+-- so thrust = -T*bz gains a -kd_lat*v_lat component (viscous damping).
+-- Anchor at origin (NED).  bz_eq, pos, vel : Vector3f.  Returns Vector3f.
+local function damp_bz_eq_lateral(bz_eq, pos, vel, tension_n, kd_lat)
+    local tlen = pos:length()
+    if tlen < 0.1 then return bz_eq end
+    local tx, ty, tz = pos:x() / tlen, pos:y() / tlen, pos:z() / tlen
+    local v_along    = vel:x() * tx + vel:y() * ty + vel:z() * tz
+    local vlx        = vel:x() - v_along * tx
+    local vly        = vel:y() - v_along * ty
+    local vlz        = vel:z() - v_along * tz
+    local k          = kd_lat / math.max(tension_n, 1.0)
+    local nx, ny, nz = bz_eq:x() + k * vlx, bz_eq:y() + k * vly, bz_eq:z() + k * vlz
+    local n          = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if n < 1e-6 then return bz_eq end
+    local r = Vector3f()
+    r:x(nx / n); r:y(ny / n); r:z(nz / n)
     return r
 end
 
@@ -422,6 +450,11 @@ local function run_flight()
     -- compensation stable when tether goes slack (_tension_n → 0).
     local ten_bz  = _is_pumping and _ten_setpoint or _tension_n
     local bz_goal = bz_altitude_hold(rel, _el_rad, ten_bz)
+    -- Add lateral-velocity damping to suppress the tether pendulum mode.
+    local vel_ned_d = ahrs:get_velocity_NED()
+    if vel_ned_d then
+        bz_goal = damp_bz_eq_lateral(bz_goal, rel, vel_ned_d, ten_bz, KD_LAT)
+    end
     local bz_now  = disk_normal_ned()
     local err     = cyclic_error_body(bz_now, bz_goal)
     local err_bx  = err[1]

@@ -24,15 +24,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
-from aero import rotor_definition as rd
 from simtest_ic    import load_ic
 from simtest_log   import BadEventLog
 from simtest_runner import PhysicsRunner, LuaAP
 from rawes_lua_harness import RawesLua
 from rawes_modes   import MODE_STEADY
+from tests.simtests._rotor_helpers import load_default_rotor
 
 _IC    = load_ic()
-_ROTOR = rd.default()
+_ROTOR = load_default_rotor()
 
 DT           = 1.0 / 400.0
 LUA_PERIOD   = 0.010
@@ -62,6 +62,12 @@ def _run_steady(log) -> dict:
     max_axle_err_deg = 0.0
     pos_hist         = []
 
+    # Ground-side tension-regulating winch (mirrors real flight stack).
+    tension_target = 300.0
+    rest_now       = float(_IC.rest_length)
+    _WINCH_KP      = 0.01
+    _WINCH_VMAX    = 1.0
+
     for i in range(int(T_SIM / DT)):
         t = i * DT
 
@@ -71,7 +77,11 @@ def _run_steady(log) -> dict:
 
         omega_body    = runner.omega_body
         omega_body[2] = 0.0
-        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body)
+        dT       = runner.tension_now - tension_target
+        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
+        rest_now += v_winch * DT
+        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
+                         rest_length=rest_now)
         lua.log(runner, sr)
 
         altitude    = runner.altitude
@@ -83,9 +93,10 @@ def _run_steady(log) -> dict:
             events.record("floor_hit", t, "flight", altitude)
 
         if t >= 60.0:
+            # FRD: body_z points hub→anchor (= −pos/|pos| in anchor-origin frame).
             bz   = runner.hub_state["R"][:, 2]
             pos  = runner.hub_state["pos"]
-            tdir = pos / max(np.linalg.norm(pos), 0.1)
+            tdir = -pos / max(np.linalg.norm(pos), 0.1)
             dot  = float(np.dot(bz, tdir))
             err  = math.degrees(math.acos(max(-1.0, min(1.0, dot))))
             if err > max_axle_err_deg:

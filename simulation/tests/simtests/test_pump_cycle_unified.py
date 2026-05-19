@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
-from aero import rotor_definition as rd
 from winch            import WinchController
 from simtest_log      import BadEventLog
 from simtest_ic       import load_ic
@@ -35,9 +34,10 @@ from simtest_runner   import PhysicsRunner, PythonAP
 from pumping_planner  import PumpingGroundController
 from ap_controller    import TensionApController
 from comms            import VirtualComms
+from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 _IC    = load_ic()
-_ROTOR = rd.default()
+_ROTOR = load_default_rotor()
 
 # ── Simulation constants ──────────────────────────────────────────────────────
 DT         = 1.0 / 400.0
@@ -53,7 +53,7 @@ DELTA_L          = 12.0    # tether length paid out per cycle [m]
 _XI_START_DEG    = 30.0
 _XI_REEL_IN_DEG  = 50.0
 T_TRANSITION = (
-    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / _ROTOR.body_z_slew_rate_rad_s + 3.0
+    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / BODY_Z_SLEW_RATE_RAD_S + 3.0
 )
 
 TENSION_OUT      = 435.0
@@ -76,7 +76,7 @@ T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_pumping(log, aero_model: str = "skewed_wake") -> dict:
+def _run_pumping(log, aero_model: str = "oye") -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
 
     # ── Ground: PumpingGroundController (10 Hz outer loop) ────────────────
@@ -112,8 +112,8 @@ def _run_pumping(log, aero_model: str = "skewed_wake") -> dict:
     # ── AP: TensionApController wrapped in PythonAP (mirrors LuaAP interface) ──
     _ap       = TensionApController(
         ic_pos          = _IC.pos,
-        mass_kg         = _ROTOR.mass_kg,
-        slew_rate_rad_s = _ROTOR.body_z_slew_rate_rad_s,
+        mass_kg         = float(_ROTOR.inertia.mass_kg),
+        slew_rate_rad_s = BODY_Z_SLEW_RATE_RAD_S,
         warm_coll_rad   = _IC.coll_eq_rad,
         tension_ic      = TENSION_IC,
         events          = events,

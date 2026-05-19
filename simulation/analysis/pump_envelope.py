@@ -518,7 +518,7 @@ def pump_cycle_report(csv_path: str) -> None:
         print()
 
     # ── AP controller diagnostics (TensionApController) ───────────────────────
-    print(f"  AP CONTROLLER DIAGNOSTICS (TensionApController + AcroControllerSitl)")
+    print(f"  AP CONTROLLER DIAGNOSTICS (TensionApController + HeliCyclicController)")
     print(f"  {'phase':>10}  {'n_rows':>7}  {'sat_%':>7}  note")
     print(f"  {'-'*10}  {'-'*7}  {'-'*7}  {'-'*36}")
     for ph in ("reel-out", "transition", "reel-in"):

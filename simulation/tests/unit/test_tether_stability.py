@@ -24,9 +24,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mediator as _mediator_module
-from aero     import create_aero
-from aero import rotor_definition as _rd
-from dynamics import RigidBodyDynamics
+from tests.unit._aero_probe import make_probe, probe_steady
 
 TetherModel = _mediator_module.TetherModel
 
@@ -86,18 +84,25 @@ def _compute_equilibrium_collective(
 
     Returns (coll_rad, T_z_req, T_t_est, H_y).
     """
-    aero = create_aero(_rd.default())
+    aero = make_probe()
     W = mass * 9.81
 
-    tether_dir = np.array([0.0, math.cos(elev_rad), -math.sin(elev_rad)])
+    # FRD: body_z (= hub axis DOWN through disk) points hub→anchor in tethered
+    # hover, i.e. opposite of the anchor→hub tether direction.
+    tether_dir = np.array([0.0, -math.cos(elev_rad), math.sin(elev_rad)])
     R_hub = _R_from_body_z(tether_dir)
 
     _MAX_TETHER_TENSION_N = 496.0
 
+    def _probe(coll_rad):
+        r = probe_steady(aero, collective_rad=coll_rad,
+                         R_hub=R_hub, v_hub_world=np.zeros(3),
+                         omega_rotor=omega, wind_world=wind, t=10.0)
+        return r.F_world
+
     for half_deg in range(0, -81, -1):
         coll_rad = math.radians(half_deg * 0.5)
-        f = aero.compute_forces(coll_rad, 0.0, 0.0, R_hub, np.zeros(3),
-                                omega, wind, t=10.0)
+        f = _probe(coll_rad)
         H_y     = float(f[1])
         T_z     = float(-f[2])
         T_t     = H_y / math.cos(elev_rad) if H_y > 0 else 0.0
@@ -106,8 +111,7 @@ def _compute_equilibrium_collective(
             return coll_rad, T_z_req, T_t, H_y
 
     coll_rad = math.radians(-17.0)
-    f   = aero.compute_forces(coll_rad, 0.0, 0.0, R_hub, np.zeros(3),
-                              omega, wind, t=10.0)
+    f   = _probe(coll_rad)
     H_y = float(f[1])
     T_t = H_y / math.cos(elev_rad) if H_y > 0 else 0.0
     return coll_rad, W + T_t * math.sin(elev_rad), T_t, H_y
@@ -158,13 +162,17 @@ def test_restoring_moment_nonzero_when_axle_misaligned():
 
 def test_restoring_moment_tilts_axle_toward_anchor():
     """
-    With the hub East of the anchor and an upright disk, the restoring
-    moment must tilt body Z toward East (My > 0 in world frame = rotation
-    from body Z toward body X = East), which pulls the axle bottom toward
-    the anchor as required by the tether constraint.
+    With the hub East of the anchor and an upright FRD disk (body_z = Down),
+    the tether restoring moment must rotate body_z toward the hub→anchor
+    direction (West + Up).
+
+    The required rotation axis is bz_now × bz_target.  With bz_now = [0,0,1]
+    and the hub at East elevation 30° (so hub→anchor = [0, −cos30°, sin30°]),
+    the cross product is along +North.  The tether moment must therefore
+    have a positive X (North) component.
     """
-    pos    = _hub_pos()                  # East=43.3 m, Alt=25 m
-    R_vert = np.eye(3)                   # upright
+    pos    = _hub_pos()                  # East=cos30°·L, Alt=sin30°·L
+    R_vert = np.eye(3)                   # FRD: body_z = [0,0,1] = Down (level disk)
 
     tether = TetherModel(
         anchor_ned  = np.zeros(3),
@@ -172,13 +180,38 @@ def test_restoring_moment_tilts_axle_toward_anchor():
     )
     _, moment = tether.compute(pos, np.zeros(3), R_vert)
 
-    # In NED: hub East (Y), body Z = Down (R=I). Tether pulls axle bottom (at +Z)
-    # toward anchor (toward -Y and +Z). Restoring torque about North axis (NED X).
-    # cross([0,0,-0.3], force_toward_anchor) has a non-zero X component.
-    assert np.linalg.norm(moment) > 1e-4, (
-        f"Restoring moment must be non-zero for misaligned axle. "
-        f"Got |M| = {np.linalg.norm(moment):.2e} N·m, full moment = {moment.round(4)}"
+    # Expected rotation axis (from kinematics): bz_now × bz_target.
+    bz_now    = R_vert[:, 2]
+    bz_target = -pos / np.linalg.norm(pos)       # FRD: hub→anchor
+    axis_expected = np.cross(bz_now, bz_target)
+    axis_expected /= np.linalg.norm(axis_expected)
+
+    assert np.linalg.norm(moment) > 1e-4, "Restoring moment is zero for misaligned axle"
+    # Moment must point along the same direction as the required rotation axis.
+    # cos(angle) = dot(moment_unit, axis_expected); should be ~+1.
+    cos_align = float(np.dot(moment / np.linalg.norm(moment), axis_expected))
+    assert cos_align > 0.99, (
+        f"Restoring moment direction is wrong: cos(angle)={cos_align:.3f} "
+        f"(expected ~+1).  moment={moment.round(3)}, expected axis={axis_expected.round(3)}"
     )
+
+
+def test_restoring_moment_sign_for_horizontal_offset():
+    """Pure-East hub offset with FRD-level disk ⇒ moment about +North.
+
+    Geometry: hub at [0, 50, 0] (East, level with anchor).  bz_now = [0,0,1]
+    (down).  Tether pulls hub west (force = [0, -T, 0]).  Attach point is at
+    +axle_attach·bz_now = [0, 0, +0.3] (FRD: below CoM in the gravity sense).
+    Moment = r × F = [0,0,0.3] × [0,-T,0] = [+0.3T, 0, 0] → +North. This is
+    the axis along which body_z must rotate to align with anchor direction.
+    """
+    pos = np.array([0.0, 50.0, 0.0])     # East, level
+    R_vert = np.eye(3)                   # body_z = [0,0,1] (down)
+    tether = TetherModel(anchor_ned=np.zeros(3), rest_length=49.99)
+    _, moment = tether.compute(pos, np.zeros(3), R_vert)
+    assert moment[0] > 0.0, f"Moment X must be > 0 (toward +North) — got {moment.round(3)}"
+    assert abs(moment[1]) < 1e-6
+    assert abs(moment[2]) < 1e-6
 
 
 def test_equilibrium_collective_is_at_or_below_neutral():

@@ -121,10 +121,11 @@ class RigidBodyDynamics:
         tau_b    = R.T @ M_ext
 
         # Gyroscopic coupling from the spinning rotor.
-        # The rotor carries angular momentum H_spin = I_spin * omega_spin along body Z.
-        # Euler's equation for the orbital DOF:
-        #   I_b * domega_b = tau_b − omega_b × (I_b * omega_b + H_spin_b)
-        H_spin_b = np.array([0.0, 0.0, self._I_spin * omega_spin])
+        # omega_spin is the rotor angular speed (positive = CCW from above,
+        # matching the aero package).  In FRD body axes (body_z = DOWN through
+        # disk), "CCW from above" is rotation about −body_z, so the rotor's
+        # angular momentum vector in body frame is H_spin = −I_spin·omega_spin·ẑ_b.
+        H_spin_b = np.array([0.0, 0.0, -self._I_spin * omega_spin])
         Ih = self._I_b @ omega_b + H_spin_b
         gyro = np.array([
             omega_b[1]*Ih[2] - omega_b[2]*Ih[1],

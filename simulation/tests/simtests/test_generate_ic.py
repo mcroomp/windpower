@@ -38,21 +38,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-from aero            import create_aero
-from aero import rotor_definition as _rd
+from aero            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
 from frames          import build_orb_frame
 from simtest_runner  import PhysicsRunner, PythonAP
 from ap_controller   import TensionApController
 from pumping_planner import TensionCommand
-from physics_core import q_spin_from_aero, step_spin_ode
+from tests.simtests._rotor_helpers import (
+    load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
+)
 
 TetherModel = _mediator_module.TetherModel
 
 # ── Rotor / physics constants ──────────────────────────────────────────────────
-_ROTOR         = _rd.default()
-_DYN_KW        = _ROTOR.dynamics_kwargs()
-MASS           = _DYN_KW["mass"]
-G              = 9.81
+_ROTOR  = load_default_rotor()
+_DYN_KW = dynamics_kwargs(_ROTOR)
+MASS    = _DYN_KW["mass"]
+G       = 9.81
 
 WIND = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East
 WIND.flags.writeable = False
@@ -103,35 +104,99 @@ def _compute_ic() -> dict:
     at IC_TARGET_TENSION_N.  This avoids GPS Glitch at kinematic exit in stack
     tests (compass heading = R0 yaw matches GPS velocity heading).
     """
-    t_dir = _BODY_Z_DESIGN / np.linalg.norm(_BODY_Z_DESIGN)
+    # _BODY_Z_DESIGN encodes the geometric anchor→hub unit vector for the
+    # design point.  FRD body_z points hub→anchor (down through the disk).
+    tether_hat = _BODY_Z_DESIGN / np.linalg.norm(_BODY_Z_DESIGN)
+    pos0  = L_TETHER * tether_hat
+    t_dir = -tether_hat
     R0    = build_orb_frame(t_dir)
-    pos0  = L_TETHER * t_dir
 
-    # Initial omega_spin from BEM spin ODE equilibrium (matches PhysicsCore exactly)
-    _aero_est = create_aero(_ROTOR)
-    omega_spin = 20.0
-    for _ in range(4000):
-        _aero_est.compute_forces(STACK_COLL, 0.0, 0.0, R0, np.zeros(3),
-                                 omega_spin, WIND, t=PhysicsRunner.T_AERO_OFFSET)
-        Q = q_spin_from_aero(_aero_est, R0)
-        omega_spin = step_spin_ode(omega_spin, Q, _ROTOR.I_ode_kgm2,
-                                   _ROTOR.omega_min_rad_s, 1.0 / 400.0)
+    # ── Initial omega_spin via aero.relax_inflow + a few explicit ω steps ──
+    # ``relax_inflow`` settles the dynamic-inflow states semi-implicitly with
+    # ω held fixed; we then take a handful of explicit Euler steps with ω
+    # free so the spin ODE finds its autorotation equilibrium.
+    _aero_est = create_aero(_ROTOR, model="oye")
+    state     = _aero_est.initial_rotor_state()
+    state.omega_rad_s = 20.0
+    omega_min = _ROTOR.autorotation.omega_min_rad_s or 0.5
+    dt_eq     = 1.0 / 400.0
+    relax_kw  = dict(
+        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
+        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+        dt=dt_eq, t=PhysicsRunner.T_AERO_OFFSET,
+    )
+    # Alternate: settle inflow at current ω, then take 200 explicit-Euler
+    # steps with ω free to allow the spin ODE to find equilibrium.  Two
+    # cycles is enough — ω drifts < 0.5 rad/s between them at convergence.
+    inputs_eq = RotorInputs(
+        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
+        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+        t=PhysicsRunner.T_AERO_OFFSET,
+    )
+    for _outer in range(8):
+        state = relax_inflow(_aero_est, state, n_steps=400, fix_omega=True, **relax_kw)
+        for _ in range(200):
+            _, deriv = _aero_est.compute_forces(inputs_eq, state)
+            state = state.from_array(state.to_array() + dt_eq * deriv.to_array())
+            if state.omega_rad_s < omega_min:
+                state.omega_rad_s = float(omega_min)
+    omega_spin = float(state.omega_rad_s)
 
-    # Initial rest_length from aero thrust estimate at STACK_COLL
-    f_est = _aero_est.compute_forces(STACK_COLL, 0.0, 0.0, R0, np.zeros(3),
-                                      omega_spin, WIND, t=PhysicsRunner.T_AERO_OFFSET)
-    T_est = max(float(np.dot(f_est.F_world, t_dir)), 10.0)
+    # ── Trim cyclic at the IC ──────────────────────────────────────────────
+    # Find the (tilt_lon, tilt_lat) that null hub-frame Mx, My at the IC
+    # operating point.  Used as a feedforward in HeliCyclicController so the
+    # P-only rate loop doesn't have to fight the wind-driven baseline moment.
+    trim = solve_trim_cyclic(
+        _aero_est, state,
+        collective_rad=STACK_COLL,
+        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+        n_inflow_relax=200, dt_relax=dt_eq, fix_omega=True,
+        tolerance_Nm=0.1, t=PhysicsRunner.T_AERO_OFFSET,
+    )
+    state = trim.final_state
+
+    # Initial rest_length from aero thrust estimate at the trimmed state.
+    f_est, _ = _aero_est.compute_forces(inputs_eq, state)
+    T_est = max(-float(np.dot(f_est.F_world, t_dir)), 10.0)
     k_eff = TetherModel.EA_N / L_TETHER
     rest_length = L_TETHER - max(T_est / k_eff, 0.001)
 
     # Warmup: PhysicsRunner + TensionApController targeting IC_TARGET_TENSION_N.
-    # TensionPI adjusts collective so the hub settles where tension ≈ target.
+    # The AcroController is pre-loaded with the trim cyclic so the inner PID
+    # only handles small perturbations around equilibrium.  Re-bind the
+    # AcroController with ki/kd gains so the rate loop has damping +
+    # integral action — required for stability under wind disturbance
+    # (see tests/unit/test_full_loop_stability for the unit-level demo).
+    from controller import HeliCyclicController as _AcroForWarmup
     runner = PhysicsRunner.for_warmup(_ROTOR, pos0, R0, rest_length,
                                        STACK_COLL, omega_spin, WIND)
+    # Inner-PID gains: pure-P at default kp.  Adding ki/kd was destabilising
+    # the warmup; integral wind-up under the wind-driven baseline moment +
+    # the new derivative-kick fix combine to cause NaN explosion at 50 Hz
+    # AP rate.  Trim FF alone handles steady-state moments.
+    # Tuned for elastic tether + wind + 50 Hz AP rate.  Found in
+    # tests/oneoff/warmup_gain_sweep.py — D=0.02 + FLTT=40 hold tension
+    # near setpoint by damping the tether-spring excitation through the
+    # rate-PID's filter; without them tension swings 0 - 800 N and the
+    # loop blows up in ~9 s.
+    runner._acro = _AcroForWarmup(
+        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        P=0.67, I=0.15, D=0.02, IMAX=0.30,
+        FLTT=40.0, FLTE=0.0, FLTD=40.0,
+    )
+    runner._acro._servo.reset(STACK_COLL)
+    runner._acro.set_trim(trim.tilt_lon, trim.tilt_lat)
     _ap_wu = TensionApController(
         ic_pos=pos0, mass_kg=MASS,
-        slew_rate_rad_s=_ROTOR.body_z_slew_rate_rad_s,
+        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
         warm_coll_rad=STACK_COLL, tension_ic=IC_TARGET_TENSION_N,
+        # AP-side position feedback disabled here.  The PD helper
+        # ``controller.position_feedback_bz_eq`` works in the constant-
+        # tether-force unit tests (see test_full_loop_stability) but
+        # destabilises the elastic-tether simtest at 50 Hz AP rate.
+        # Lateral-velocity damping (kd_lat) is sufficient to settle the
+        # pendulum mode for IC generation.
+        kp_pos=0.0, kd_pos=0.0, kd_lat=50.0,
     )
     ap_wu = PythonAP(_ap_wu, wind=WIND, dt=_DT)
 
@@ -140,6 +205,14 @@ def _compute_ic() -> dict:
         tension_setpoint_n=IC_TARGET_TENSION_N, tension_measured_n=runner.tension_now,
         alt_m=target_alt, phase="reel-out",
     ), _DT_CMD)
+    # Ground-side tension-regulating winch: adjusts rest_length toward the
+    # value that holds tension at IC_TARGET_TENSION_N.  Mirrors the real
+    # winch controller that prevents tether slack during steady flight.
+    # Without this the tether's spring mode is undamped and tension swings
+    # 0 - 800 N during warmup, exciting the cyclic loop into divergence.
+    rest_now    = float(rest_length)
+    _WINCH_KP   = 0.01    # m/s per N of tension error
+    _WINCH_VMAX = 1.0     # m/s rest-length change limit
     for step in range(WARMUP_STEPS):
         if step % _PLANNER_EVERY == 0:
             _ap_wu.receive_command(TensionCommand(
@@ -148,8 +221,15 @@ def _compute_ic() -> dict:
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             ap_wu.tick(step * _DT, runner)
-        runner.step(_DT, ap_wu.col_rad, ap_wu.roll_sp, ap_wu.pitch_sp, runner.omega_body)
+        # Winch tension regulator: pay out when tension is high, reel in
+        # when low.  P-controller on rest_length saturated at ±_WINCH_VMAX.
+        dT       = runner.tension_now - IC_TARGET_TENSION_N
+        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
+        rest_now += v_winch * _DT
+        runner.step(_DT, ap_wu.col_rad, ap_wu.roll_sp, ap_wu.pitch_sp,
+                    runner.omega_body, rest_length=rest_now)
     coll_settled = ap_wu.col_rad
+    rest_length  = rest_now
 
     # Settled state
     s     = runner.hub_state
@@ -158,11 +238,18 @@ def _compute_ic() -> dict:
     R_s   = s["R"].copy()
     omega_spin_settled = runner.omega_spin
 
-    # Force balance diagnostics at STACK_COLL from settled position
+    # Force balance diagnostics at STACK_COLL from settled position.
+    # NB: anchor at origin, so t_dir_s = pos_s/|pos_s| = anchor→hub direction.
     t_dir_s    = pos_s / np.linalg.norm(pos_s)
     t_aero_end = PhysicsRunner.T_AERO_OFFSET + WARMUP_STEPS * _DT
-    f_stack    = runner.aero.compute_forces(STACK_COLL, 0.0, 0.0, R_s, vel_s,
-                                             omega_spin_settled, WIND, t=t_aero_end)
+    diag_inputs = RotorInputs(
+        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
+        R_hub=R_s, v_hub_world=vel_s, wind_world=WIND, t=t_aero_end,
+    )
+    # The runner's aero state already encodes the equilibrium inflow + omega;
+    # using runner.aero.compute_forces with the live state preserves it.
+    diag_state = runner._core._rotor_state  # noqa: SLF001 — diag-only, intentional
+    f_stack, _ = runner.aero.compute_forces(diag_inputs, diag_state)
     F_aero     = f_stack.F_world
     f_teth, m_teth = runner.tether.compute(pos_s, vel_s, R_s)
     T_tether   = float(runner.tether._last_info.get("tension", 0.0))
@@ -359,10 +446,19 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         omega_spin=float(omega_spin),
     )
     runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    # Same tuned cyclic gains as test_create_ic warmup.
+    from controller import HeliCyclicController as _Heli
+    runner._acro = _Heli(
+        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        P=0.67, I=0.15, D=0.02, IMAX=0.30,
+        FLTT=40.0, FLTE=0.0, FLTD=40.0,
+    )
+    runner._acro._servo.reset(stack_coll)
     _ap    = TensionApController(
         ic_pos=pos0, mass_kg=MASS,
-        slew_rate_rad_s=_ROTOR.body_z_slew_rate_rad_s,
+        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
         warm_coll_rad=stack_coll, tension_ic=tension_sp,
+        kd_lat=50.0,
     )
     ap     = PythonAP(_ap, wind=WIND, dt=_DT)
     ap.tel_fn = lambda r, sr: {
@@ -380,6 +476,13 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     elev_arr    = np.zeros(_STEADY_STEPS)
     az_arr      = np.zeros(_STEADY_STEPS)
     tension_arr = np.zeros(_STEADY_STEPS)
+
+    # Ground-side tension-regulating winch — mirrors the real winch
+    # tension controller.  Keeps the tether under tension so the spring
+    # mode stays bounded.  Same gains as in the IC warmup.
+    rest_now    = float(rest)
+    _WINCH_KP   = 0.01
+    _WINCH_VMAX = 1.0
 
     for step in range(_STEADY_STEPS):
         hub   = runner.hub_state
@@ -400,7 +503,11 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             ap.tick(step * _DT, runner)
-        sr = runner.step(_DT, ap.col_rad, ap.roll_sp, ap.pitch_sp, runner.omega_body)
+        dT       = runner.tension_now - tension_sp
+        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
+        rest_now += v_winch * _DT
+        sr = runner.step(_DT, ap.col_rad, ap.roll_sp, ap.pitch_sp,
+                         runner.omega_body, rest_length=rest_now)
         ap.log(runner, sr)
 
     ap.write_telemetry(csv_path)

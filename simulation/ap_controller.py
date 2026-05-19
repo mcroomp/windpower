@@ -28,7 +28,9 @@ from __future__ import annotations
 import numpy as np
 
 from controller import (AccelVibrationDamper, TensionPI,
-                        compute_bz_altitude_hold, compute_rate_cmd, slerp_body_z)
+                        compute_bz_altitude_hold, compute_rate_cmd,
+                        position_feedback_bz_eq, damp_bz_eq_lateral,
+                        slerp_body_z)
 from physics_core   import HubObservation
 from pumping_planner import TensionCommand
 from landing_planner import LandingCommand
@@ -98,6 +100,9 @@ class TensionApController:
         vib_hp_hz      : float = VIB_HP_HZ,
         vib_vel_tau_s  : float = VIB_VEL_TAU,
         vib_col_max    : float = VIB_COL_MAX,
+        kp_pos         : float = 0.0,    # position feedback gain [N/m]; 0 = disabled
+        kd_pos         : float = 0.0,    # velocity feedback gain [N·s/m]
+        kd_lat         : float = 0.0,    # lateral-velocity damping gain [N·s/m]; 0 = disabled
     ) -> None:
         self._mass_kg    = float(mass_kg)
         self._timeout    = float(cmd_timeout_s)
@@ -126,6 +131,14 @@ class TensionApController:
         self._comms_ok    = True
         self._t_sim       = 0.0                           # accumulated sim time
         self._pos_ned     = np.asarray(ic_pos, dtype=float)  # updated each 400 Hz step
+        # Position feedback (lateral-position regulator).  ``_target_pos`` is
+        # the design hub position used as the position setpoint for the PD
+        # feedback below; it's set to the IC by default and can be updated
+        # via ``set_target_pos`` if the ground commands a different point.
+        self._kp_pos      = float(kp_pos)
+        self._kd_pos      = float(kd_pos)
+        self._kd_lat      = float(kd_lat)
+        self._target_pos  = np.asarray(ic_pos, dtype=float).copy()
 
         self._vib_damper  = (
             AccelVibrationDamper(
@@ -136,6 +149,13 @@ class TensionApController:
             ) if k_vib != 0.0 else None
         )
         self._last_vib_corr = 0.0
+
+    def set_target_pos(self, target_pos_ned: np.ndarray) -> None:
+        """Update the position setpoint used by the PD position-feedback.
+
+        No-op when position feedback is disabled (kp_pos = kd_pos = 0).
+        """
+        self._target_pos = np.asarray(target_pos_ned, dtype=float).copy()
 
     # ── command reception (10 Hz from ground) ──────────────────────────────
 
@@ -216,8 +236,8 @@ class TensionApController:
                     computed by physics after collective is applied; this matches the hardware
                     latency between IMU measurement and actuator output.
 
-        Rate commands use kd=0 — damping is supplied by AcroControllerSitl's
-        RatePID, mirroring the hardware architecture.
+        Rate commands use kd=0 — damping is supplied by HeliCyclicController's
+        rate PID, mirroring the hardware architecture.
         """
         self._pos_ned  = obs.pos
         self._cmd_age += dt
@@ -235,6 +255,20 @@ class TensionApController:
         bz_goal = compute_bz_altitude_hold(
             obs.pos, self._el, self._tension_pi.setpoint, self._mass_kg
         )
+        if self._kd_lat != 0.0:
+            bz_goal = damp_bz_eq_lateral(
+                bz_goal, obs.pos, obs.vel, np.zeros(3),
+                self._tension_pi.setpoint, self._kd_lat,
+            )
+        # PD position-feedback: tilt body_z further so thrust opposes any
+        # lateral displacement / velocity from the design point.  This is
+        # the outer position loop on top of the open-loop gravity-comp tilt
+        # in compute_bz_altitude_hold.  Disabled when gains are zero.
+        if self._kp_pos != 0.0 or self._kd_pos != 0.0:
+            bz_goal = position_feedback_bz_eq(
+                bz_goal, obs.pos, obs.vel, self._target_pos,
+                self._tension_pi.setpoint, self._kp_pos, self._kd_pos,
+            )
         R       = obs.R
         bz_now  = R[:, 2]
         rate_sp = compute_rate_cmd(bz_now, bz_goal, R, kp=self._kp_outer, kd=0.0)
@@ -378,7 +412,7 @@ class LandingApController:
         # Slerp body_z toward target at slew_rate
         self._bz_current = slerp_body_z(self._bz_current, self._bz_target, self._slew, dt)
 
-        # Body_z rate command (kd=0; damping supplied by AcroControllerSitl RatePID)
+        # Body_z rate command (kd=0; damping supplied by HeliCyclicController rate PID)
         rate_sp = compute_rate_cmd(bz_now, self._bz_current, R, kp=self._kp_outer, kd=0.0)
 
         # VZ PI: all phases use the PI; phase entry seeds the integrator via receive_command

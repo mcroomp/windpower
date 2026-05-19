@@ -80,7 +80,7 @@ class LandingGroundController:
     t_descent_max    : safety timeout for descent phase [s]
     """
 
-    _BZ_VERTICAL = np.array([0.0, 0.0, -1.0])   # disk horizontal, pointing up in NED
+    _BZ_VERTICAL = np.array([0.0, 0.0, 1.0])    # FRD: disk horizontal, hub axis down through disk
 
     def __init__(
         self,

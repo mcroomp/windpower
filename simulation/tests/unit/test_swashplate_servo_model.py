@@ -58,7 +58,8 @@ class TestInstantiation:
         assert math.isclose(m.tilt_lat, 0.0, abs_tol=1e-9)
 
     def test_from_rotor_constructs(self):
-        rotor = rd.default()
+        from tests.unit._aero_probe import load_rotor
+        rotor = load_rotor("beaupoil_2026")
         m = SwashplateServoModel.from_rotor(rotor, col_min_rad=_COL_MIN, col_max_rad=_COL_MAX)
         assert isinstance(m, SwashplateServoModel)
         assert math.isclose(m.collective_rad, _COL_MIN, abs_tol=1e-9)

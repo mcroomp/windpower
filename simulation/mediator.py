@@ -182,7 +182,8 @@ def run_mediator(args, trajectory=None):
     _dyn_vel0 = _vel0_arr
 
     rotor  = _rd.load(cfg["rotor_definition"])
-    log.info("Rotor: %s", rotor.summary())
+    log.info("Rotor: %s (N=%d, R=%.2fm)",
+             rotor.name, rotor.blade.n_blades, rotor.blade.radius_m)
     issues = rotor.validate()
     for issue in issues:
         if issue.level == "ERROR":
@@ -191,8 +192,8 @@ def run_mediator(args, trajectory=None):
             log.warning("Rotor validation: %s", issue)
 
     # Shadow module-level constants with rotor-definition values
-    I_SPIN_KGMS2  = rotor.I_ode_kgm2
-    OMEGA_SPIN_MIN = rotor.omega_min_rad_s
+    I_SPIN_KGMS2   = rotor.autorotation.I_ode_kgm2
+    OMEGA_SPIN_MIN = rotor.autorotation.omega_min_rad_s
 
     # Collective denormalisation range (must precede _ic which uses _col_min_rad)
     _traj_cfg    = cfg["trajectory"]["deschutter"]
@@ -503,10 +504,10 @@ def run_mediator(args, trajectory=None):
                 "tilt_lat":        tilt_lat,
                 "tension_setpoint":            _traj_cmd.get("tension_setpoint", 0.0),
                 "collective_from_tension_ctrl": collective_rad,
-                "aero_T":          core.aero.last_T,
-                "aero_v_axial":    core.aero.last_v_axial,
-                "aero_v_inplane":  core.aero.last_v_inplane,
-                "aero_v_i":        core.aero.last_v_i,
+                # Note: new aero (Pitt-Peters Level 2) does not expose internal
+                # axial/inplane/induced velocity diagnostics. Drop them from
+                # telemetry rather than fake values.
+                "aero_Q_spin":     float(aero_result.Q_spin),
                 "F_x":             forces[0],
                 "F_y":             forces[1],
                 "F_z":             forces[2],

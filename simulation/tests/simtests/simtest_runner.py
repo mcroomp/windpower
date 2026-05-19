@@ -4,7 +4,7 @@ simtest_runner.py — Shared 400 Hz physics core for simtests.
 PhysicsRunner is a thin wrapper around PhysicsCore (simulation/physics_core.py).
 
     step(dt, collective, rate_roll, rate_pitch, omega_body)
-        → runs AcroControllerSitl (baked in) then core.step()
+        → runs HeliCyclicController (baked in) then core.step()
 
 PhysicsCore owns all physics constants (base_k_ang, k_yaw, T_AERO_OFFSET) and
 the integration loop (dynamics, aero, tether, spin ODE, angular damping).
@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from physics_core  import PhysicsCore, HubObservation
-from controller    import AcroControllerSitl
+from controller    import HeliCyclicController
 from telemetry_csv import TelRow, write_csv
 
 
@@ -65,12 +65,12 @@ class PhysicsRunner:
         z_floor       : NED Z floor for dynamics (default -1.0 m = 1 m altitude floor)
         aero_model    : aero model key passed to create_aero() (default "jit" = PetersHeBEMJit)
         aero_override : if provided, used directly instead of create_aero()
-        col_min_rad   : collective floor for AcroControllerSitl servo model
-        col_max_rad   : collective ceiling for AcroControllerSitl servo model
+        col_min_rad   : collective floor for HeliCyclicController servo model
+        col_max_rad   : collective ceiling for HeliCyclicController servo model
         """
         self._core = PhysicsCore(rotor, ic, wind, z_floor=z_floor,
                                  aero_model=aero_model, aero_override=aero_override)
-        self._acro = AcroControllerSitl(rotor, col_min_rad=col_min_rad,
+        self._acro = HeliCyclicController(rotor, col_min_rad=col_min_rad,
                                         col_max_rad=col_max_rad)
         self._acro._servo.reset(ic.coll_eq_rad)
 
@@ -135,7 +135,7 @@ class PhysicsRunner:
         """
         400 Hz step for Python-AP tests.
 
-        Runs AcroControllerSitl (baked-in RatePID + servo model) then physics.
+        Runs HeliCyclicController (arduloop rate PID + servo model) then physics.
         Use when a Python AP controller produces (collective, rate_roll, rate_pitch).
         """
         tlon, tlat, col_act = self._acro.step(

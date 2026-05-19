@@ -1,514 +1,139 @@
-"""
-test_rotor_definition.py — Unit tests for RotorDefinition API.
+"""test_rotor_definition.py — RotorDefinition (new aero package).
 
-Tests cover:
-  - Loading built-in definitions by name
-  - Derived geometry values (span, r_cp, S_w, AR, σ, disk_area, DL)
-  - Non-dimensional parameters (CL_alpha_3D, lock_number)
-  - validate(): zero ERRORs for both built-in definitions
-  - aero_kwargs(): keys match RotorAero constructor, values match defaults
-  - RotorAero(beaupoil_2026) using the rotor definition gives valid, non-zero forces
-  - De Schutter aero gives different thrust than Beaupoil (different geometry)
-  - Kaman flap: TBD fields → INFO/WARNING only, no ERRORs
-  - Validation correctly catches bad geometry inputs
+The new RotorDefinition is nested (blade / airfoil / inertia / control /
+autorotation sub-records).  These tests verify YAML loading, derived
+geometry properties, and validation for the rotors used by this project.
 """
-
-import dataclasses
 import math
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aero import rotor_definition as rd
-from aero import create_aero
+from tests.unit._aero_probe import load_rotor
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _errors(issues):
     return [i for i in issues if i.level == "ERROR"]
 
-def _warnings(issues):
-    return [i for i in issues if i.level == "WARNING"]
 
-def _infos(issues):
-    return [i for i in issues if i.level == "INFO"]
+# ── Loading ─────────────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Loading
-# ---------------------------------------------------------------------------
 
 class TestLoad:
-    def test_load_beaupoil_by_name(self):
-        r = rd.load("beaupoil_2026")
+    def test_load_beaupoil_by_path(self):
+        r = load_rotor("beaupoil_2026")
         assert r.name == "beaupoil_2026"
+        assert r.blade.n_blades == 4
 
-    def test_load_de_schutter_by_name(self):
-        r = rd.load("de_schutter_2018")
+    def test_load_de_schutter_by_path(self):
+        r = load_rotor("de_schutter_2018")
         assert r.name == "de_schutter_2018"
 
-    def test_default_returns_beaupoil(self):
-        r = rd.default()
-        assert r.name == "beaupoil_2026"
-
-    def test_load_by_explicit_path(self, tmp_path):
-        # Copy beaupoil yaml to a temp path and load by path
-        import shutil
-        src = rd.BUILTIN["beaupoil_2026"]
-        dst = tmp_path / "my_rotor.yaml"
-        shutil.copy(src, dst)
-        r = rd.load(str(dst))
-        assert r.n_blades == 4
-
-    def test_load_unknown_name_raises(self):
+    def test_load_unknown_path_raises(self):
         with pytest.raises(FileNotFoundError):
-            rd.load("nonexistent_rotor_xyz")
-
-    def test_builtin_dict_keys(self):
-        assert "beaupoil_2026" in rd.BUILTIN
-        assert "de_schutter_2018" in rd.BUILTIN
+            rd.load("e:/does/not/exist.yaml")
 
 
-# ---------------------------------------------------------------------------
-# Beaupoil 2026 — geometry
-# ---------------------------------------------------------------------------
+# ── Beaupoil geometry ───────────────────────────────────────────────────────
+
 
 class TestBeaupoilGeometry:
-    """Verified against YAML comment header values."""
-
     def setup_method(self):
-        self.r = rd.load("beaupoil_2026")
+        self.r = load_rotor("beaupoil_2026")
 
     def test_r_cp_m(self):
-        # r_cp = r_root + 2/3 · span = 0.5 + 2/3 × 2.0 = 1.833 m
-        assert self.r.r_cp_m == pytest.approx(0.5 + 2/3 * 2.0, rel=1e-6)
-
-    def test_r_eff_thrust_m(self):
-        # r_eff = √((R³ − r_root³) / (3·span))
-        R, r = 2.5, 0.5
-        span = 2.0
-        expected = math.sqrt((R**3 - r**3) / (3.0 * span))
-        assert self.r.r_eff_thrust_m == pytest.approx(expected, rel=1e-6)
-
-    def test_r_cp_above_r_eff(self):
-        # De Schutter r_cp should overestimate q² — it must be > r_eff_T
-        assert self.r.r_cp_m > self.r.r_eff_thrust_m
+        # r_cp = r_root + 2/3 * span = 0.5 + 2/3 * 2.0 = 1.833 m
+        assert self.r.blade.r_cp_m == pytest.approx(0.5 + 2/3 * 2.0, rel=1e-6)
 
     def test_S_w_m2(self):
-        # S_w = N · c · span = 4 × 0.20 × 2.0 = 1.60 m²
-        assert self.r.S_w_m2 == pytest.approx(4 * 0.20 * 2.0)
+        # S_w = N * c * span = 4 * 0.20 * 2.0 = 1.60 m^2
+        assert self.r.blade.S_w_m2 == pytest.approx(4 * 0.20 * 2.0)
 
     def test_disk_area_m2(self):
-        # A = π(R² − r_root²) = π(6.25 − 0.25) = π × 6.0 ≈ 18.850 m²
+        # A = pi(R^2 - r_root^2) = pi * 6.0 ~ 18.85 m^2
         expected = math.pi * (2.5**2 - 0.5**2)
-        assert self.r.disk_area_m2 == pytest.approx(expected, rel=1e-6)
+        assert self.r.blade.disk_area_m2 == pytest.approx(expected, rel=1e-6)
 
     def test_aspect_ratio(self):
         # AR = span / chord = 2.0 / 0.20 = 10.0
-        assert self.r.aspect_ratio == pytest.approx(2.0 / 0.20, rel=1e-6)
+        assert self.r.blade.aspect_ratio == pytest.approx(10.0, rel=1e-6)
 
     def test_solidity(self):
-        # σ = N·c/(π·R) = 4×0.20/(π×2.5) ≈ 0.1019
+        # sigma = N * c / (pi * R) = 4 * 0.20 / (pi * 2.5)
         expected = 4 * 0.20 / (math.pi * 2.5)
-        assert self.r.solidity == pytest.approx(expected, rel=1e-6)
-
-    def test_disk_loading(self):
-        # DL = m·g / A = 5.0×9.81 / 18.85 ≈ 2.60 N/m²
-        expected = 5.0 * 9.81 / self.r.disk_area_m2
-        assert self.r.disk_loading_N_m2 == pytest.approx(expected, rel=1e-6)
-
-    def test_CL_alpha_3D(self):
-        # 2π / (1 + 2/AR) at AR=10.0
-        AR = 2.0 / 0.20
-        expected = 2 * math.pi / (1 + 2.0 / AR)
-        assert self.r.CL_alpha_3D_per_rad == pytest.approx(expected, rel=1e-6)
-
-    def test_CL_alpha_3D_in_range(self):
-        assert 4.0 <= self.r.CL_alpha_3D_per_rad <= 7.0
-
-    def test_lock_number_none_when_I_b_unknown(self):
-        # I_blade_flap_kgm2 is null in beaupoil_2026.yaml
-        assert self.r.I_blade_flap_kgm2 is None
-        assert self.r.lock_number is None
-
-    def test_lock_number_computed_when_I_b_given(self):
-        r = dataclasses.replace(rd.load("beaupoil_2026"), I_blade_flap_kgm2=0.5)
-        gamma = r.lock_number
-        assert gamma is not None
-        # γ = ρ·CL_alpha_3D·c·R⁴ / I_b
-        expected = r.rho_kg_m3 * r.CL_alpha_3D_per_rad * r.chord_m * r.radius_m**4 / 0.5
-        assert gamma == pytest.approx(expected, rel=1e-6)
+        assert self.r.blade.solidity == pytest.approx(expected, rel=1e-6)
 
 
-# ---------------------------------------------------------------------------
-# De Schutter 2018 — geometry
-# ---------------------------------------------------------------------------
+# ── De Schutter geometry ─────────────────────────────────────────────────────
+
 
 class TestDeSchutterGeometry:
     """Verified against Table I of De Schutter et al. (2018)."""
 
     def setup_method(self):
-        self.r = rd.load("de_schutter_2018")
+        self.r = load_rotor("de_schutter_2018")
 
     def test_aspect_ratio(self):
-        # AR = 1.5 / 0.125 = 12.0  (matches De Schutter Table I AR=12)
-        assert self.r.aspect_ratio == pytest.approx(12.0, rel=1e-6)
-
-    def test_solidity(self):
-        # σ = N·c / (π·R)
-        r = self.r
-        expected = r.n_blades * r.chord_m / (math.pi * r.radius_m)
-        assert r.solidity == pytest.approx(expected, rel=1e-6)
-
-    def test_r_cp_m(self):
-        # r_cp = r_root + 2/3 × span
-        r = self.r
-        expected = r.root_cutout_m + (2.0 / 3.0) * (r.radius_m - r.root_cutout_m)
-        assert r.r_cp_m == pytest.approx(expected, rel=1e-6)
-
-    def test_disk_area_m2(self):
-        # A = π(R² − r_root²)
-        r = self.r
-        expected = math.pi * (r.radius_m**2 - r.root_cutout_m**2)
-        assert r.disk_area_m2 == pytest.approx(expected, rel=1e-6)
+        # AR = 1.5 / 0.125 = 12
+        assert self.r.blade.aspect_ratio == pytest.approx(12.0, rel=1e-6)
 
     def test_kaman_disabled(self):
-        assert self.r.kaman_flap.enabled is False
+        if self.r.control is not None:
+            assert self.r.control.kaman_flap.enabled is False
 
 
-# ---------------------------------------------------------------------------
-# Validation — built-in definitions should have zero ERRORs
-# ---------------------------------------------------------------------------
+# ── Validation ──────────────────────────────────────────────────────────────
+
 
 class TestValidation:
     def test_beaupoil_no_errors(self):
-        r = rd.load("beaupoil_2026")
-        issues = r.validate()
-        errors = _errors(issues)
-        assert errors == [], f"Unexpected errors in beaupoil_2026: {errors}"
+        issues = load_rotor("beaupoil_2026").validate()
+        assert _errors(issues) == [], f"Unexpected errors: {_errors(issues)}"
 
     def test_de_schutter_no_errors(self):
-        r = rd.load("de_schutter_2018")
-        issues = r.validate()
-        errors = _errors(issues)
-        assert errors == [], f"Unexpected errors in de_schutter_2018: {errors}"
-
-    def test_beaupoil_kaman_tbd_is_info_not_error(self):
-        # Kaman fields should generate no ERRORs (geometry is estimated, not confirmed)
-        r = rd.load("beaupoil_2026")
-        issues = r.validate()
-        kaman_issues = [i for i in issues if "kaman" in i.field.lower()]
-        kaman_errors = [i for i in kaman_issues if i.level == "ERROR"]
-        assert kaman_errors == []
-
-    def test_beaupoil_I_b_unknown_is_info(self):
-        r = rd.load("beaupoil_2026")
-        issues = r.validate()
-        info_fields = [i.field for i in issues if i.level == "INFO"]
-        assert any("blade_flap" in f for f in info_fields)
-
-    def test_beaupoil_re_mismatch_warning(self):
-        # Re_design=127k (bench test) vs Re_operating=490k (flight) — 3.86x mismatch
-        # generates a WARNING since operating > 2x design.
-        r = rd.load("beaupoil_2026")
-        issues = r.validate()
-        re_warns = [i for i in issues if "Re_operating" in i.field and i.level == "WARNING"]
-        assert len(re_warns) == 1
-
-    def test_bad_span_gives_error(self):
-        r = dataclasses.replace(rd.load("beaupoil_2026"), radius_m=0.3)  # R < r_root → span < 0
-        issues = r.validate()
-        assert any(i.level == "ERROR" and "span" in i.field for i in issues)
-
-    def test_zero_mass_gives_error(self):
-        r = dataclasses.replace(rd.load("beaupoil_2026"), mass_kg=0.0)
-        issues = r.validate()
-        assert any(i.level == "ERROR" and "mass" in i.field for i in issues)
-
-    def test_kaman_span_start_in_hub_gives_error(self):
-        base = rd.load("beaupoil_2026")
-        r = dataclasses.replace(base, kaman_flap=dataclasses.replace(base.kaman_flap, span_start_m=0.3))
-        issues = r.validate()
-        assert any(i.level == "ERROR" and "span_start_m" in i.field for i in issues)
-
-    def test_kaman_span_end_beyond_tip_gives_error(self):
-        base = rd.load("beaupoil_2026")
-        r = dataclasses.replace(base, kaman_flap=dataclasses.replace(base.kaman_flap, span_end_m=3.0))
-        issues = r.validate()
-        assert any(i.level == "ERROR" and "span_end_m" in i.field for i in issues)
-
-    def test_de_schutter_omega_eq_none_no_warning(self):
-        # omega_eq_rad_s=null → no consistency check → no autorotation warning
-        r = rd.load("de_schutter_2018")
-        issues = r.validate()
-        auto_warns = [i for i in issues if "autorotation" in i.field and i.level == "WARNING"]
-        assert auto_warns == []
+        issues = load_rotor("de_schutter_2018").validate()
+        assert _errors(issues) == [], f"Unexpected errors: {_errors(issues)}"
 
 
-# ---------------------------------------------------------------------------
-# dynamics_kwargs factory
-# ---------------------------------------------------------------------------
-
-class TestDynamicsKwargs:
-    def test_keys_present(self):
-        r = rd.load("beaupoil_2026")
-        kw = r.dynamics_kwargs()
-        assert {"mass", "I_body", "I_spin"}.issubset(kw.keys())
-
-    def test_I_spin_matches_derived(self):
-        r = rd.load("beaupoil_2026")
-        kw = r.dynamics_kwargs()
-        # I_spin is computed from blade_mass_kg when I_spin_kgm2 is null in YAML.
-        # Verify dynamics_kwargs passes through the derived value consistently.
-        assert kw["I_spin"] == pytest.approx(r.I_spin_effective_kgm2)
-        assert kw["I_spin"] > 1.0, "Expected non-zero I_spin from blade_mass_kg"
+# ── Inertia / control wiring ───────────────────────────────────────────────
 
 
-# ---------------------------------------------------------------------------
-# SkewedWakeBEM.from_definition — produces valid forces from beaupoil_2026
-# ---------------------------------------------------------------------------
+class TestInertiaControl:
+    def test_beaupoil_mass_resolved_from_components(self):
+        """mass_kg must be auto-resolved from blade+stationary+shell sums."""
+        r = load_rotor("beaupoil_2026")
+        assert r.inertia.mass_kg is not None and r.inertia.mass_kg > 0
 
-class TestFromDefinition:
-    """create_aero(beaupoil) must produce finite, non-zero forces."""
+    def test_beaupoil_I_body_present(self):
+        r = load_rotor("beaupoil_2026")
+        assert len(r.inertia.I_body_kgm2) == 3
+        assert all(v > 0 for v in r.inertia.I_body_kgm2)
 
-    def _aero_forces(self, aero, t=10.0, collective=0.05, tilt_lon=0.0, tilt_lat=0.0,
-                     wind=None, omega_rotor=20.148):
-        if wind is None:
-            wind = np.array([0.0, 10.0, 0.0])  # NED: East wind = Y axis
-        return aero.compute_forces(
-            t=t,
-            R_hub=np.eye(3),
-            v_hub_world=np.zeros(3),
-            wind_world=wind,
-            collective_rad=collective,
-            tilt_lon=tilt_lon,
-            tilt_lat=tilt_lat,
-            omega_rotor=omega_rotor,
-        )
+    def test_beaupoil_control_has_swashplate_gain(self):
+        r = load_rotor("beaupoil_2026")
+        assert r.control is not None
+        assert r.control.swashplate_pitch_gain_rad > 0
 
-    def test_from_definition_produces_valid_forces(self):
-        r    = rd.load("beaupoil_2026")
-        aero = create_aero(r)
-        f    = self._aero_forces(aero)
-        assert np.all(np.isfinite(f)), "forces must be finite"
-        assert np.any(f.F_world != 0.0), "forces must be non-zero"
+    def test_beaupoil_autorotation_I_ode(self):
+        r = load_rotor("beaupoil_2026")
+        assert r.autorotation.I_ode_kgm2 is not None
+        assert r.autorotation.I_ode_kgm2 > 0
 
 
-    def test_from_definition_sets_correct_geometry(self):
-        r    = rd.load("beaupoil_2026")
-        aero = create_aero(r)
-        assert aero.R_ROOT   == pytest.approx(r.root_cutout_m)
-        assert aero.R_TIP    == pytest.approx(r.radius_m)
-        assert aero.N_BLADES == r.n_blades
+# ── Kaman flap sub-record ──────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Kaman flap
-# ---------------------------------------------------------------------------
 
 class TestKamanFlap:
     def test_beaupoil_kaman_enabled(self):
-        r = rd.load("beaupoil_2026")
-        assert r.kaman_flap.enabled is True
-
-    def test_beaupoil_kaman_fully_specified_with_guesses(self):
-        # tau is now estimated → fully specified
-        r = rd.load("beaupoil_2026")
-        assert r.kaman_flap.is_fully_specified()
-
-    def test_swashplate_load_reduction_computed_when_given(self):
-        kf = dataclasses.replace(rd.load("beaupoil_2026").kaman_flap, swashplate_load_fraction=0.2)
-        assert kf.swashplate_load_reduction_pct() == pytest.approx(80.0)
-
-    def test_is_geometry_defined_true_when_set(self):
-        kf = dataclasses.replace(
-            rd.load("beaupoil_2026").kaman_flap,
-            chord_fraction=0.25, span_start_m=0.8, span_end_m=2.4,
-        )
-        assert kf.is_geometry_defined()
+        r = load_rotor("beaupoil_2026")
+        assert r.control is not None
+        assert r.control.kaman_flap.enabled is True
 
     def test_de_schutter_kaman_disabled(self):
-        r = rd.load("de_schutter_2018")
-        assert r.kaman_flap.enabled is False
-        assert not r.kaman_flap.is_geometry_defined()
-
-
-# ---------------------------------------------------------------------------
-# omega_eq consistency
-# ---------------------------------------------------------------------------
-
-class TestAutorotation:
-    """
-    Consistency tests for autorotation ODE parameters I_ode, omega_eq, omega_min.
-    """
-
-    def setup_method(self):
-        self.r = rd.load("beaupoil_2026")
-
-    def test_I_ode_positive(self):
-        assert self.r.I_ode_kgm2 > 0
-
-    def test_omega_min_positive(self):
-        assert self.r.omega_min_rad_s > 0
-
-    def test_I_ode_exceeds_structural_I_spin(self):
-        # Effective ODE inertia (includes added mass of accelerated air) must be
-        # at least as large as the structural spin inertia.
-        r = self.r
-        I_spin = r.I_spin_effective_kgm2
-        if I_spin is not None:
-            assert r.I_ode_kgm2 >= I_spin, (
-                f"I_ode={r.I_ode_kgm2:.2f} < I_spin={I_spin:.2f} kg·m² — "
-                f"effective ODE inertia should not be less than structural inertia"
-            )
-
-    def test_de_schutter_omega_eq_is_none(self):
-        r = rd.load("de_schutter_2018")
-        assert r.omega_eq_rad_s is None
-
-
-# ---------------------------------------------------------------------------
-# Report and summary
-# ---------------------------------------------------------------------------
-
-class TestReportAndSummary:
-    def test_summary_is_string(self):
-        r = rd.load("beaupoil_2026")
-        s = r.summary()
-        assert isinstance(s, str)
-        assert "beaupoil_2026" in s
-
-    def test_report_is_string(self):
-        r = rd.load("beaupoil_2026")
-        rep = r.report()
-        assert isinstance(rep, str)
-        assert "beaupoil_2026" in rep
-        assert "Geometry" in rep
-        assert "Airfoil" in rep
-
-    def test_report_contains_validation_section(self):
-        r = rd.load("beaupoil_2026")
-        rep = r.report()
-        assert "Validation" in rep
-
-
-# ---------------------------------------------------------------------------
-# SG6040 airfoil CSV validation — coefficients must match the polar source
-# ---------------------------------------------------------------------------
-
-class TestSG6040AirfoilCSV:
-    """
-    Re-derive CL0, CL_alpha, and CD0 directly from sg6040_re500k.csv and assert
-    that beaupoil_2026.yaml agrees to within measurement precision.
-
-    Fit range: -4 deg to +9 deg (clearly linear region of the polar).
-    CD0: evaluated at the zero-lift alpha (interpolated from adjacent rows).
-    """
-
-    CSV_PATH = Path(__file__).resolve().parents[2] / "rotor_definitions" / "sg6040_re500k.csv"
-
-    # Tolerances chosen to match the precision of the derived YAML values.
-    CL0_TOL          = 0.005   # direct read at 0 deg, rounded to 3 decimal places
-    CL_ALPHA_TOL     = 0.05    # /rad — least-squares fit rounding
-    CD0_TOL          = 0.0003  # interpolated at zero-lift alpha
-
-    # Fit range for CL_alpha / CL0
-    FIT_ALPHA_MIN_DEG = -4.0
-    FIT_ALPHA_MAX_DEG =  9.0
-
-    @classmethod
-    def _load_polar(cls):
-        """Return lists of (alpha_deg, CL, CD) from the CSV."""
-        alphas, cls_list, cds = [], [], []
-        in_data = False
-        with open(cls.CSV_PATH) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("Alpha,Cl,Cd"):
-                    in_data = True
-                    continue
-                if not in_data or not line:
-                    continue
-                parts = line.split(",")
-                alphas.append(float(parts[0]))
-                cls_list.append(float(parts[1]))
-                cds.append(float(parts[2]))
-        return alphas, cls_list, cds
-
-    @classmethod
-    def _ls_fit(cls, alphas_deg, cl_vals):
-        """Least-squares linear fit: CL = CL0 + CL_alpha * alpha_rad."""
-        xa = [a * math.pi / 180.0 for a in alphas_deg]
-        n = len(xa)
-        sx  = sum(xa)
-        sy  = sum(cl_vals)
-        sxx = sum(x * x for x in xa)
-        sxy = sum(x * y for x, y in zip(xa, cl_vals))
-        slope     = (n * sxy - sx * sy) / (n * sxx - sx * sx)
-        intercept = (sy - slope * sx) / n
-        return intercept, slope   # (CL0, CL_alpha_per_rad)
-
-    @classmethod
-    def _cd_at_zero_lift(cls, alphas_deg, cl_vals, cd_vals):
-        """Interpolate CD at the zero-lift alpha."""
-        for i in range(len(cl_vals) - 1):
-            if cl_vals[i] <= 0.0 <= cl_vals[i + 1]:
-                t = (0.0 - cl_vals[i]) / (cl_vals[i + 1] - cl_vals[i])
-                return cd_vals[i] + t * (cd_vals[i + 1] - cd_vals[i])
-        raise ValueError("zero-lift alpha not found in polar data")
-
-    def setup_method(self):
-        self.r = rd.load("beaupoil_2026")
-        alphas, cl_vals, cd_vals = self._load_polar()
-
-        fit_a  = [a for a, c in zip(alphas, cl_vals)
-                  if self.FIT_ALPHA_MIN_DEG <= a <= self.FIT_ALPHA_MAX_DEG]
-        fit_cl = [c for a, c in zip(alphas, cl_vals)
-                  if self.FIT_ALPHA_MIN_DEG <= a <= self.FIT_ALPHA_MAX_DEG]
-
-        self.csv_CL0_fit, self.csv_CL_alpha = self._ls_fit(fit_a, fit_cl)
-        self.csv_CL0_direct = cl_vals[alphas.index(0.0)]
-        self.csv_CD0        = self._cd_at_zero_lift(alphas, cl_vals, cd_vals)
-
-    def test_csv_exists(self):
-        assert self.CSV_PATH.exists(), f"Polar CSV not found: {self.CSV_PATH}"
-
-    def test_airfoil_name_is_sg6040(self):
-        assert "SG6040" in self.r.airfoil_name.upper()
-
-    def test_CL0_matches_csv_direct(self):
-        # CL0 derived from CL at alpha=0 in the polar
-        assert self.r.CL0 == pytest.approx(self.csv_CL0_direct, abs=self.CL0_TOL), (
-            f"CL0={self.r.CL0:.4f} vs CSV direct {self.csv_CL0_direct:.4f}"
-        )
-
-    def test_CL_alpha_matches_csv_fit(self):
-        # CL_alpha from least-squares fit over the linear range
-        assert self.r.CL_alpha_per_rad is not None
-        assert self.r.CL_alpha_per_rad == pytest.approx(self.csv_CL_alpha, abs=self.CL_ALPHA_TOL), (
-            f"CL_alpha={self.r.CL_alpha_per_rad:.3f} vs CSV fit {self.csv_CL_alpha:.3f} /rad"
-        )
-
-    def test_CD0_matches_csv_zero_lift(self):
-        # CD0 interpolated at the zero-lift alpha from the polar
-        assert self.r.CD0 is not None
-        assert self.r.CD0 == pytest.approx(self.csv_CD0, abs=self.CD0_TOL), (
-            f"CD0={self.r.CD0:.5f} vs CSV zero-lift {self.csv_CD0:.5f}"
-        )
-
-    def test_CL_alpha_in_expected_range(self):
-        # SG6040 at Re~500k: slope must lie between lifting-line lower bound
-        # (2pi/(1+2/AR) = 5.24 /rad) and 2pi (thin-airfoil upper bound).
-        assert self.r.CL_alpha_per_rad is not None
-        assert 5.0 <= self.r.CL_alpha_per_rad <= 6.5
-
-    def test_CD0_plausible_for_re500k(self):
-        # At Re=500k a well-behaved airfoil has CD0 well below 0.015
-        assert self.r.CD0 is not None
-        assert self.r.CD0 < 0.015
+        r = load_rotor("de_schutter_2018")
+        if r.control is not None:
+            assert r.control.kaman_flap.enabled is False

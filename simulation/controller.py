@@ -69,8 +69,8 @@ def compute_rc_rates(
     if t_len < 0.1:
         return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
 
-    # Desired body_z = tether direction (pointing away from anchor)
-    body_z_eq  = tether / t_len
+    # FRD body_z points DOWN through the disk → hub→anchor in tethered hover.
+    body_z_eq  = -tether / t_len
 
     # Actual body_z = third column of rotation matrix
     body_z_cur = R[:, 2]
@@ -152,12 +152,13 @@ def compute_swashplate_from_state(
     if t_len < 0.1:
         return {"collective_rad": 0.0, "tilt_lon": 0.0, "tilt_lat": 0.0}
 
+    # FRD body_z points DOWN through the disk → hub→anchor in tethered hover.
     if body_z_eq is not None:
         body_z_eq = np.asarray(body_z_eq, dtype=float)
         n = float(np.linalg.norm(body_z_eq))
-        body_z_eq = body_z_eq / n if n > 1e-6 else tether / t_len
+        body_z_eq = body_z_eq / n if n > 1e-6 else -tether / t_len
     else:
-        body_z_eq = tether / t_len
+        body_z_eq = -tether / t_len
     body_z_cur = R[:, 2]
 
     error_world = cross3(body_z_cur, body_z_eq)
@@ -168,27 +169,18 @@ def compute_swashplate_from_state(
     # Correction in world NED frame
     corr_ned = kp * error_world - kd * omega_orbital
 
-    # Project onto disk-plane axes (tilt_lon = along disk X, tilt_lat = along disk Y)
-    disk_x = R[:, 0]
-    disk_y = R[:, 1]
-
-    # Sign convention — per-blade physics (SkewedWakeBEM / DeSchutterAero):
+    # Project the correction into FRD body frame.  Sign convention from
+    # the new aero (aero/cyclic.py):
     #
-    #   tilt_lat_rad > 0 → max pitch at ψ=0 (East/disk_x blade position)
-    #     moment arm = r·disk_x,  lift = F·disk_z
-    #     M = cross(r·disk_x, F·disk_z) = r·F·(disk_x × disk_z) = −r·F·disk_y
-    #     → moment in −disk_y  (NEGATIVE My for positive tilt_lat)
+    #   tilt_lat > 0  ⇒  roll right       (+rotation about body_x)
+    #   tilt_lon > 0  ⇒  nose-down disk   (−rotation about body_y; positive pitch is nose-up)
     #
-    #   tilt_lon_rad > 0 → max pitch at ψ=90° (North/disk_y blade position)
-    #     moment arm = r·disk_y,  lift = F·disk_z
-    #     M = cross(r·disk_y, F·disk_z) = r·F·(disk_y × disk_z) = +r·F·disk_x
-    #     → moment in +disk_x  (POSITIVE Mx for positive tilt_lon)
-    #
-    # corr_ned is the required rotation axis (= direction to apply moment).
-    # To get M in +disk_x: need tilt_lon > 0 → tilt_lon = +dot(corr_ned, disk_x)
-    # To get M in +disk_y: need tilt_lat < 0 → tilt_lat = −dot(corr_ned, disk_y)
-    tilt_lon = float(np.clip( np.dot(corr_ned, disk_x) / tilt_max_rad, -1.0, 1.0))
-    tilt_lat = float(np.clip(-np.dot(corr_ned, disk_y) / tilt_max_rad, -1.0, 1.0))
+    # So a desired body-frame rate (roll, pitch, yaw) = R.T @ corr_ned maps to
+    #   tilt_lat = +corr_body[0]   (roll)
+    #   tilt_lon = -corr_body[1]   (negative pitch = nose-down)
+    corr_body = R.T @ corr_ned
+    tilt_lat  = float(np.clip( corr_body[0] / tilt_max_rad, -1.0, 1.0))
+    tilt_lon  = float(np.clip(-corr_body[1] / tilt_max_rad, -1.0, 1.0))
 
     # Gyroscopic phase compensation.
     # A spinning rotor precesses 90° off-axis from an applied cyclic torque.
@@ -318,8 +310,8 @@ def compute_rc_from_physical_attitude(
     # Actual rotor axle (body Z) in NED
     body_z_ned = R_body[:, 2]
 
-    # Tether equilibrium direction: anchor → hub, normalised, in NED
-    tether_ned = np.asarray(pos_ned, dtype=float) - np.asarray(anchor_ned, dtype=float)
+    # FRD body_z_eq points DOWN through the disk → hub→anchor direction.
+    tether_ned = np.asarray(anchor_ned, dtype=float) - np.asarray(pos_ned, dtype=float)
     t_len = float(np.linalg.norm(tether_ned))
     if t_len < 0.1:
         return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
@@ -525,6 +517,131 @@ def orbit_tracked_body_z_eq(
     return result / np.linalg.norm(result)
 
 
+def position_feedback_bz_eq(
+    bz_eq:      np.ndarray,
+    pos:        np.ndarray,
+    vel:        np.ndarray,
+    target_pos: np.ndarray,
+    tension_n:  float,
+    kp_pos:     float,
+    kd_pos:     float,
+    max_tilt_rad: float = math.radians(80.0),
+) -> np.ndarray:
+    """PD position-feedback correction added to a base body_z target.
+
+    The base ``bz_eq`` (e.g. from ``compute_bz_tether`` or
+    ``compute_bz_altitude_hold``) is an *open-loop* setpoint based on the
+    target position.  When the hub is displaced from the target, this
+    function tilts ``bz_eq`` in the direction of the displacement —
+    because thrust is along ``−body_z`` in FRD, that tilt produces a
+    thrust component **opposing** the displacement, restoring the hub.
+
+    Physics
+    -------
+    With FRD body_z pointing hub→anchor, thrust = −T·body_z.  Tilting
+    body_z toward Δp = pos − target_pos rotates thrust by −Δp/(T/|F|),
+    producing a force ≈ −T·(Δp/T) = −Δp.  Stiffness gain ``kp_pos`` is
+    the desired N per metre of position error; ``kd_pos`` is the N per
+    m/s of velocity (viscous damping on lateral motion).
+
+    Parameters
+    ----------
+    bz_eq       Base body_z target (FRD unit vector, world frame).
+    pos, vel    Current hub position and velocity (world frame).
+    target_pos  Desired hub position (world frame).
+    tension_n   Current tether tension [N], for force→tilt conversion.
+    kp_pos      Position gain [N/m].  Typical 5–30 for the beaupoil
+                hub on a 100 m tether (pendulum period ~22 s, critical
+                stiffness ~mω²·L ≈ 1 N/m; use 5–30× critical for fast
+                settling without over-correction).
+    kd_pos      Velocity gain [N·s/m].  Pick ~2·√(kp_pos·m) for
+                critical damping (mass m ≈ 5 kg).
+
+    Returns
+    -------
+    Corrected (normalised) body_z unit vector.
+    """
+    pos        = np.asarray(pos,        dtype=float)
+    vel        = np.asarray(vel,        dtype=float)
+    target_pos = np.asarray(target_pos, dtype=float)
+    delta_pos  = pos - target_pos
+    correction = (kp_pos * delta_pos + kd_pos * vel) / max(tension_n, 1.0)
+    # Saturate the correction magnitude so a large transient excursion
+    # doesn't request a disk tilt that flips body_z past the equator
+    # (which destabilises the attitude loop) or overwhelms the gravity-
+    # comp baseline.  ``max_tilt_rad`` is the cap on the additional tilt
+    # beyond ``bz_eq``; the correction vector's magnitude is the small-
+    # angle approximation of that tilt for unit ``bz_eq``.
+    mag = float(np.linalg.norm(correction))
+    if mag > max_tilt_rad:
+        correction = correction * (max_tilt_rad / mag)
+    bz_new     = np.asarray(bz_eq, dtype=float) + correction
+    return bz_new / float(np.linalg.norm(bz_new))
+
+
+def damp_bz_eq_lateral(
+    bz_eq:     np.ndarray,
+    pos:       np.ndarray,
+    vel:       np.ndarray,
+    anchor:    np.ndarray,
+    tension_n: float,
+    kd_lat:    float,
+) -> np.ndarray:
+    """Add a lateral-velocity damping correction to ``body_z_eq``.
+
+    The open-loop gravity-comp tilt in ``compute_bz_altitude_hold`` only
+    knows the *target* operating point — once the hub drifts perpendicular
+    to the tether, the disk tilt doesn't adapt and the pendulum mode is
+    undamped.  This function adds a small disk-tilt proportional to the
+    hub's lateral velocity (the component of velocity perpendicular to
+    the anchor→hub direction), so the rotor thrust gains a component that
+    opposes that velocity.
+
+    Physics
+    -------
+    FRD body_z points hub→anchor; thrust = −T·body_z (toward anchor).
+    Tilting body_z **toward** v_lat produces a thrust component **against**
+    v_lat with magnitude ≈ T·|Δb|.  Setting Δb = kd_lat·v_lat/T yields a
+    damping force F_damp = −kd_lat·v_lat — viscous damping on lateral
+    motion at gain ``kd_lat`` [N·s/m].
+
+    Parameters
+    ----------
+    bz_eq      : current body_z target (FRD unit vector, world frame)
+    pos        : hub position [m]
+    vel        : hub velocity [m/s]
+    anchor     : tether anchor position [m] (same NED origin as ``pos``)
+    tension_n  : current tether tension [N], used to convert force →
+                 disk-tilt magnitude.  Floored at 1 N for safety.
+    kd_lat     : lateral velocity damping gain [N·s/m].  Typical values
+                 ~5–30 for a 5 kg hub on a 100 m tether (pendulum mode
+                 period ~22 s ⇒ critical damping coefficient ~3 N·s/m;
+                 use 2–10× critical for fast settling).
+
+    Returns
+    -------
+    Corrected (normalised) body_z unit vector.
+    """
+    pos     = np.asarray(pos,    dtype=float)
+    vel     = np.asarray(vel,    dtype=float)
+    anchor  = np.asarray(anchor, dtype=float)
+    tether  = pos - anchor
+    t_len   = float(np.linalg.norm(tether))
+    if t_len < 0.1:
+        return bz_eq
+    tether_hat = tether / t_len
+
+    # Lateral velocity: drop the along-tether component.
+    v_along = float(np.dot(vel, tether_hat))
+    v_lat   = vel - v_along * tether_hat
+
+    # Tilt body_z toward v_lat by kd_lat · v_lat / T_safe.  Thrust = −T·body_z
+    # therefore gains a component −kd_lat·v_lat ⇒ viscous damping.
+    correction = kd_lat * v_lat / max(tension_n, 1.0)
+    bz_new = np.asarray(bz_eq, dtype=float) + correction
+    return bz_new / float(np.linalg.norm(bz_new))
+
+
 def compute_bz_altitude_hold(
     pos:           np.ndarray,
     target_el_rad: float,
@@ -562,13 +679,16 @@ def compute_bz_altitude_hold(
     cos_az    = float(np.cos(az))
     sin_az    = float(np.sin(az))
 
-    tdir = np.array([cos_el * cos_az, cos_el * sin_az, -sin_el])
-    e_up = np.array([-sin_el * cos_az, -sin_el * sin_az, -cos_el])
+    # FRD: body_z points DOWN through the disk, i.e. from hub toward anchor.
+    # tdir = hub→anchor direction at the target elevation (toward the ground).
+    # e_dn = elevation-downward direction (perpendicular to tdir, toward Earth).
+    tdir = np.array([-cos_el * cos_az, -cos_el * sin_az,  sin_el])
+    e_dn = np.array([ sin_el * cos_az,  sin_el * sin_az,  cos_el])
 
     # Gravity's tangential component in the elevation direction = mg·cos(el).
     # At low elevation this is nearly mg; at 90° (vertical) it is zero.
     g_tangential = mass_kg * G * float(np.cos(target_el_rad))
-    raw = tdir + (g_tangential / max(tension_n, 1.0)) * e_up
+    raw = tdir + (g_tangential / max(tension_n, 1.0)) * e_dn
     return raw / np.linalg.norm(raw)
 
 
@@ -636,11 +756,11 @@ class ElevationHoldController:
 
     Combines AltitudeHoldController (elevation rate-limiting + gravity-compensated
     body_z_eq) with compute_rate_cmd (body_z error → rate setpoint).  The output
-    feeds directly into AcroControllerSitl (or the ArduPilot ACRO rate PIDs on
+    feeds directly into HeliCyclicController (or the ArduPilot ACRO rate PIDs on
     hardware), giving a clean two-level split:
 
         ElevationHoldController  →  (rate_roll_sp, rate_pitch_sp)
-        AcroControllerSitl       →  (tilt_lon, tilt_lat)
+        HeliCyclicController       →  (tilt_lon, tilt_lat)
 
     This mirrors the rawes.lua architecture where the outer loop sends rate
     commands via RC override and the firmware ACRO PIDs close the inner loop.
@@ -840,122 +960,79 @@ def blend_body_z(
 
 
 # ---------------------------------------------------------------------------
-# Simulated ACRO rate PID — mirrors ArduPilot AC_AttitudeControl inner loop.
-# ---------------------------------------------------------------------------
-
-class RatePID:
-    """
-    Single-axis rate PID: rate error (rad/s) → normalised tilt output [-1, 1].
-
-    Mirrors ArduPilot's AC_AttitudeControl inner rate loop so the simulation
-    uses the same two-loop architecture as the hardware:
-
-        outer: compute_rate_cmd(kp_outer, kd=0) → rate setpoint
-        inner: RatePID.update(setpoint, actual, dt) → normalised tilt
-
-    On hardware, ArduPilot's rate PIDs supply all damping, so compute_rate_cmd
-    is called with kd=0.  In simulation, RatePID provides the equivalent
-    damping via its kp term (setpoint=0 at equilibrium → tilt = -kp * omega).
-
-    Default gains are calibrated to match the legacy single-loop behaviour
-    (kp=0.5, kd=0.2, tilt_max_rad=0.3) so existing tests pass unchanged:
-        kp_inner * kp_outer = kp_old / tilt_max_rad  →  0.67 * 2.5 = 1.67
-        kp_inner             = kd_old / tilt_max_rad  →  0.2  / 0.3 = 0.67
-
-    ArduPilot parameter mapping (helicopter ACRO):
-        kp    ↔  ATC_RAT_RLL_P  /  ATC_RAT_PIT_P
-        ki    ↔  ATC_RAT_RLL_I  /  ATC_RAT_PIT_I   (set 0 in our config)
-        kd    ↔  ATC_RAT_RLL_D  /  ATC_RAT_PIT_D
-        imax  ↔  ATC_RAT_RLL_IMAX / ATC_RAT_PIT_IMAX (set 0 in our config)
-    """
-
-    # Gain calibrated to match legacy kd=0.2, tilt_max_rad=0.3 behaviour:
-    #   kd_old / tilt_max_rad = 0.2 / 0.3 = 2/3
-    DEFAULT_KP: float = 2.0 / 3.0
-
-    def __init__(
-        self,
-        kp:         float,
-        ki:         float,
-        kd:         float,
-        imax:       float,
-        output_max: float,
-    ):
-        self.kp         = float(kp)
-        self.ki         = float(ki)
-        self.kd         = float(kd)
-        self.imax       = float(imax)
-        self.output_max = float(output_max)
-        self._integral  = 0.0
-        self._last_err  = 0.0
-
-    def update(self, setpoint: float, actual: float, dt: float) -> float:
-        """
-        Advance the PID by one step.
-
-        Parameters
-        ----------
-        setpoint : desired angular rate [rad/s]
-        actual   : measured angular rate [rad/s]
-        dt       : time step [s]
-
-        Returns
-        -------
-        float — normalised tilt command in [-output_max, +output_max]
-        """
-        error  = float(setpoint) - float(actual)
-        output = self.kp * error
-
-        if self.ki != 0.0:
-            self._integral += error * float(dt)
-            if self.imax > 0.0:
-                limit = self.imax / self.ki
-                self._integral = float(np.clip(self._integral, -limit, limit))
-            output += self.ki * self._integral
-
-        if self.kd != 0.0 and dt > 0.0:
-            output += self.kd * (error - self._last_err) / float(dt)
-
-        self._last_err = error
-        return float(np.clip(output, -self.output_max, self.output_max))
-
-    def reset(self) -> None:
-        """Reset integrator and derivative state (call on mode entry)."""
-        self._integral = 0.0
-        self._last_err = 0.0
-
-
-# ---------------------------------------------------------------------------
-# ACRO attitude controller emulator
+# Heli cyclic controller — ArduPilot-compatible rate loop + servo model
 # ---------------------------------------------------------------------------
 
 
-class AcroControllerSitl:
-    """
-    Inner rate-loop emulator for ArduPilot ACRO mode.
+class HeliCyclicController:
+    """ArduPilot-compatible rate / cyclic controller wrapping the
+    ``simulation.arduloop`` package.
 
-    Accepts body-frame rate commands (as rawes.lua sends via RC override) and
-    applies RatePID + SwashplateServoModel to produce slew-limited swashplate
-    outputs, mirroring what ArduPilot's AC_AttitudeControl + DS113MG servos do.
+    The rate PID, target/error/derivative low-pass filters, optional
+    notch slots, FF and D_FF terms, and the swashplate phase rotation
+    all use ArduPilot's traditional-heli structure 1:1, so any gain
+    tuned in simulation transfers directly to ATC_RAT_RLL_* /
+    ATC_RAT_PIT_* / H_SW_H3_PHANG on hardware.
 
-    All three channels (collective + cyclic) pass through the shared servo model
-    so that coupling and slew limits are correct.
+    The ``SwashplateServoModel`` (DS113MG slew + 3-servo H3-120 coupling)
+    is applied to the controller output so the closed-loop bandwidth in
+    sim matches the bandwidth limited by the actual servos.
 
     Usage::
 
-        acro = AcroControllerSitl(rotor)
+        acro = HeliCyclicController(rotor, col_min_rad=-0.28, col_max_rad=0.10)
         tilt_lon, tilt_lat, col_actual = acro.step(
-            collective_rad, rate_roll_sp, rate_pitch_sp, omega_body, dt)
+            collective_rad, rate_roll_sp, rate_pitch_sp, omega_body, dt,
+        )
+
+    Parameters mapped to ArduPilot (per axis — roll & pitch identical):
+        P, I, D, FF, IMAX, FLTT, FLTE, FLTD  ↔  ATC_RAT_xxx_P/I/D/FF/IMAX/FLTT/FLTE/FLTD
+        h_sw_h3_phang                        ↔  H_SW_H3_PHANG
     """
 
-    def __init__(self, rotor,
-                 col_min_rad: float,
-                 col_max_rad: float,
-                 kp: float = RatePID.DEFAULT_KP) -> None:
-        self._pid_lon = RatePID(kp=kp, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-        self._pid_lat = RatePID(kp=kp, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-        self._servo   = SwashplateServoModel.from_rotor(
+    def __init__(
+        self,
+        rotor,
+        col_min_rad:    float,
+        col_max_rad:    float,
+        P:              float = 0.30,
+        I:              float = 0.10,
+        D:              float = 0.005,
+        FF:             float = 0.00,
+        IMAX:           float = 0.30,
+        FLTT:           float = 20.0,
+        FLTE:           float = 0.0,
+        FLTD:           float = 20.0,
+        h_sw_h3_phang:  float = 0.0,
+        loop_rate_hz:   float = 400.0,
+    ) -> None:
+        # Local imports keep arduloop optional for environments that don't
+        # need it (e.g. analysis scripts that don't run the controller).
+        from arduloop import HeliRateController, HeliParams, RateAxisParams
+        params = HeliParams(loop_rate_hz=loop_rate_hz, H_SW_H3_PHANG=h_sw_h3_phang)
+        rate_cfg = RateAxisParams(
+            P=P, I=I, D=D, FF=FF, IMAX=IMAX,
+            FLTT=FLTT, FLTE=FLTE, FLTD=FLTD,
+        )
+        params.roll  = rate_cfg
+        params.pitch = rate_cfg
+        self._ctrl  = HeliRateController(params)
+        self._servo = SwashplateServoModel.from_rotor(
             rotor, col_min_rad=col_min_rad, col_max_rad=col_max_rad)
+        self._tilt_lon_trim = 0.0
+        self._tilt_lat_trim = 0.0
+
+    def set_trim(self, tilt_lon: float, tilt_lat: float) -> None:
+        """Static cyclic feedforward added to the controller output.
+
+        Equivalent to pre-loading the PID integrators with the
+        steady-state cyclic from ``aero.solve_trim_cyclic`` — the inner
+        loop then only handles small perturbations around equilibrium.
+        Optional; arduloop's integral term reaches the same trim through
+        feedback, but the FF makes the warmup transient cleaner.
+        """
+        self._tilt_lon_trim = float(tilt_lon)
+        self._tilt_lat_trim = float(tilt_lat)
 
     def step(
         self,
@@ -964,19 +1041,33 @@ class AcroControllerSitl:
         rate_pitch_sp : float,
         omega_body    : np.ndarray,
         dt            : float,
+        collective_norm: float = 0.0,
     ) -> "tuple[float, float, float]":
-        """
-        Advance one timestep.
+        """Advance one timestep.
 
-        All three channels pass through the SwashplateServoModel so collective
-        and cyclic share the same 3 physical servos with coupled slew limits.
+        Returns ``(tilt_lon, tilt_lat, col_actual)``.  All three channels
+        pass through the SwashplateServoModel so collective and cyclic
+        share the same physical servos and slew limits.
 
-        Returns (tilt_lon, tilt_lat, col_actual) — use col_actual (not the
-        commanded value) as the collective input to PhysicsCore.
+        Sign mapping between arduloop and windpower's FRD aero (empirically
+        verified — see tests/oneoff/arduloop_vs_acro.py):
+
+          * arduloop ``roll_cyclic``  → ``tilt_lat``   (positive roll-right
+            command → positive +M_body_x in the aero)
+          * arduloop ``pitch_cyclic`` → ``−tilt_lon``  (positive pitch-up
+            command negates because ``tilt_lon>0`` produces ``M_body[1]<0``
+            in the new aero's convention, i.e. nose-down)
         """
-        omega_body   = np.asarray(omega_body, dtype=float)
-        tilt_lon_cmd =  self._pid_lon.update(rate_roll_sp,  omega_body[0], dt)
-        tilt_lat_cmd = -self._pid_lat.update(rate_pitch_sp, omega_body[1], dt)
+        omega_body = np.asarray(omega_body, dtype=float)
+        out = self._ctrl.update(
+            rate_target_rads=(float(rate_roll_sp), float(rate_pitch_sp), 0.0),
+            gyro_rate_rads  =(float(omega_body[0]), float(omega_body[1]),
+                              float(omega_body[2])),
+            dt              =float(dt),
+            collective_norm =float(collective_norm),
+        )
+        tilt_lat_cmd =  out.roll_cyclic  + self._tilt_lat_trim
+        tilt_lon_cmd = -out.pitch_cyclic + self._tilt_lon_trim
         col_act, tlon, tlat = self._servo.step(
             float(collective_cmd), tilt_lon_cmd, tilt_lat_cmd, dt)
         return float(tlon), float(tlat), float(col_act)
@@ -1013,6 +1104,7 @@ def col_min_for_altitude_rad(
     import math as _math
     import numpy as _np
     from frames import build_orb_frame as _build_orb_frame
+    from aero   import RotorInputs as _RotorInputs
 
     xi_r = _math.radians(xi_deg)
     # bz in NED: East = Y axis.  xi from East direction toward Down (negative NED Z = Up).
@@ -1021,12 +1113,22 @@ def col_min_for_altitude_rad(
     wind = _np.array([0.0, wind_m_s, 0.0])   # NED: East wind = Y axis
     W    = mass_kg * 9.81
 
+    state = aero.initial_rotor_state()
+    state.omega_rad_s = float(omega)
+
+    def _thrust_at(col: float) -> float:
+        inputs = _RotorInputs(
+            collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
+            R_hub=R, v_hub_world=_np.zeros(3), wind_world=wind, t=50.0,
+        )
+        result, _deriv = aero.compute_forces(inputs, state)
+        # In NED, upward force is negative Z.
+        return float(-result.F_world[2])
+
     lo, hi = -0.35, 0.20
     for _ in range(50):
         mid = (lo + hi) / 2.0
-        r   = aero.compute_forces(mid, 0.0, 0.0, R, _np.zeros(3), omega, wind, 50.0)
-        # In NED, upward force is negative Z; hub stays aloft when -F_world[2] >= W
-        if float(-r.F_world[2]) > W:
+        if _thrust_at(mid) > W:
             hi = mid
         else:
             lo = mid
@@ -1050,16 +1152,21 @@ def compute_bz_tether(
     anchor: np.ndarray,
 ) -> "np.ndarray | None":
     """
-    Tether direction unit vector (anchor → hub).
+    Equilibrium body_z (FRD: hub axis pointing DOWN through the disk).
+
+    In tethered flight, the tether pulls the bottom of the axle toward the
+    anchor, so the rotor's down-axis points from hub toward anchor.  This
+    returns the unit vector (anchor − hub), matching the FRD convention
+    used end-to-end with the aero package and ArduPilot's EKF.
 
     Returns None when the hub is at or inside the anchor (degenerate).
     Frame-agnostic: pass ENU or NED; the returned vector is in the same frame.
     """
-    tether = np.asarray(pos, dtype=float) - np.asarray(anchor, dtype=float)
-    t_len  = float(np.linalg.norm(tether))
-    if t_len < 0.1:
+    delta = np.asarray(anchor, dtype=float) - np.asarray(pos, dtype=float)
+    d_len = float(np.linalg.norm(delta))
+    if d_len < 0.1:
         return None
-    return tether / t_len
+    return delta / d_len
 
 
 def slerp_body_z(

@@ -26,7 +26,6 @@ from controller import (
     compute_bz_tether,
     slerp_body_z,
     compute_rate_cmd,
-    RatePID,
 )
 
 
@@ -458,15 +457,15 @@ def test_bz_tether_unit_vector():
 
 
 def test_bz_tether_direction():
-    """Hub along +X from anchor → returns [1,0,0]."""
+    """FRD body_z points hub→anchor.  Hub along +X from anchor → [-1,0,0]."""
     bz = compute_bz_tether([10., 0., 0.], [0., 0., 0.])
-    np.testing.assert_allclose(bz, [1., 0., 0.], atol=1e-12)
+    np.testing.assert_allclose(bz, [-1., 0., 0.], atol=1e-12)
 
 
 def test_bz_tether_with_nonzero_anchor():
-    """Hub 5 m above anchor at [10,10,0] → result points straight up."""
+    """Hub 5 m above anchor at [10,10,0] → FRD body_z points DOWN (anchor side)."""
     bz = compute_bz_tether([10., 10., 5.], [10., 10., 0.])
-    np.testing.assert_allclose(bz, [0., 0., 1.], atol=1e-12)
+    np.testing.assert_allclose(bz, [0., 0., -1.], atol=1e-12)
 
 
 def test_bz_tether_degenerate_returns_none():
@@ -476,9 +475,9 @@ def test_bz_tether_degenerate_returns_none():
 
 
 def test_bz_tether_ned_frame():
-    """Works in NED equally: hub 30 m north of anchor → [1,0,0] in NED."""
+    """FRD body_z points hub→anchor: hub 30 m north of anchor → [-1,0,0]."""
     bz = compute_bz_tether([30., 0., 0.], [0., 0., 0.])
-    np.testing.assert_allclose(bz, [1., 0., 0.], atol=1e-12)
+    np.testing.assert_allclose(bz, [-1., 0., 0.], atol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -599,85 +598,6 @@ def test_rate_cmd_transforms_into_body_frame():
     np.testing.assert_allclose(np.linalg.norm(r_world), np.linalg.norm(r_rot90), atol=1e-10)
     # But directions differ (frame has rotated)
     assert not np.allclose(r_world, r_rot90, atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# RatePID tests
-# ---------------------------------------------------------------------------
-
-def test_rate_pid_zero_error_zero_output():
-    """setpoint == actual → output is 0."""
-    pid = RatePID(kp=1.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-    assert pid.update(0.0, 0.0, 0.01) == 0.0
-    assert pid.update(0.5, 0.5, 0.01) == 0.0
-
-
-def test_rate_pid_positive_error_positive_output():
-    """setpoint > actual → positive correction."""
-    pid = RatePID(kp=1.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-    assert pid.update(1.0, 0.0, 0.01) > 0.0
-
-
-def test_rate_pid_negative_error_negative_output():
-    """setpoint < actual → negative correction."""
-    pid = RatePID(kp=1.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-    assert pid.update(-1.0, 0.0, 0.01) < 0.0
-
-
-def test_rate_pid_proportional_to_error():
-    """Output scales linearly with error magnitude (P-only)."""
-    pid = RatePID(kp=0.5, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-    out_small = pid.update(0.1, 0.0, 0.01)
-    pid.reset()
-    out_large = pid.update(0.4, 0.0, 0.01)
-    np.testing.assert_allclose(out_large / out_small, 4.0, rtol=1e-6)
-
-
-def test_rate_pid_output_clipped_to_output_max():
-    """Very large error saturates at output_max."""
-    pid = RatePID(kp=10.0, ki=0.0, kd=0.0, imax=0.0, output_max=1.0)
-    assert pid.update(100.0, 0.0, 0.01) == pytest.approx(1.0)
-    assert pid.update(-100.0, 0.0, 0.01) == pytest.approx(-1.0)
-
-
-def test_rate_pid_output_max_respected():
-    """Custom output_max is respected."""
-    pid = RatePID(kp=10.0, ki=0.0, kd=0.0, imax=0.0, output_max=0.5)
-    assert abs(pid.update(100.0, 0.0, 0.01)) <= 0.5
-
-
-def test_rate_pid_integrator_accumulates():
-    """With ki > 0 and persistent error, output grows across steps."""
-    pid = RatePID(kp=0.0, ki=1.0, kd=0.0, imax=10.0, output_max=1.0)
-    out1 = pid.update(1.0, 0.0, 0.1)
-    out2 = pid.update(1.0, 0.0, 0.1)
-    assert out2 > out1
-
-
-def test_rate_pid_integrator_anti_windup():
-    """Integrator is clamped so output does not exceed imax."""
-    pid = RatePID(kp=0.0, ki=1.0, kd=0.0, imax=0.5, output_max=1.0)
-    for _ in range(1000):
-        pid.update(1.0, 0.0, 0.1)
-    out = pid.update(1.0, 0.0, 0.1)
-    assert abs(out) <= 0.5 + 1e-9
-
-
-def test_rate_pid_reset_clears_state():
-    """reset() zeros integrator and derivative history."""
-    pid = RatePID(kp=0.5, ki=1.0, kd=0.0, imax=1.0, output_max=1.0)
-    for _ in range(50):
-        pid.update(1.0, 0.0, 0.01)
-    pid.reset()
-    out = pid.update(0.0, 0.0, 0.01)
-    assert out == 0.0
-
-
-def test_rate_pid_default_kp_matches_legacy():
-    """Default kp matches the calibrated legacy value (kd_old / tilt_max_rad)."""
-    np.testing.assert_allclose(RatePID.DEFAULT_KP,
-                               0.2 / 0.3,    # kd_old=0.2, tilt_max_rad=0.3
-                               rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------

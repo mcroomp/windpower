@@ -30,7 +30,9 @@ _rawes_fns = {
 
     -- ── Pure geometry ────────────────────────────────────────────────────────
 
-    bz_altitude_hold  = bz_altitude_hold,
+    bz_altitude_hold    = bz_altitude_hold,
+    damp_bz_eq_lateral  = damp_bz_eq_lateral,
+    KD_LAT              = KD_LAT,
 
     -- ── Vector3f helpers ─────────────────────────────────────────────────────
 

@@ -74,7 +74,7 @@ class TetherModel:
         EA:                    float      = None,    # override axial stiffness [N]
         zeta:                  float      = 0.05,    # damping ratio (fraction of critical)
         hub_mass:              float      = 5.0,     # hub mass [kg] — sets critical damping scale
-        axle_attachment_length: float     = 0.3,     # distance from CoM to tether attach point along -body_Z [m]
+        axle_attachment_length: float     = 0.3,     # distance from CoM to tether attach point along +body_Z (FRD) [m]
     ):
         if rest_length is None:
             raise ValueError("TetherModel requires rest_length — no default (mission-specific parameter)")
@@ -103,7 +103,8 @@ class TetherModel:
 
         When R_hub is provided and tether is taut, also computes a restoring moment
         M = r_attach × F_tether that aligns the hub axle (body Z) with the tether.
-        The attachment point is 'axle_attachment_length' below the CoM along -body Z.
+        FRD: the attachment point is 'axle_attachment_length' from the CoM along
+        +body Z (toward the anchor when level).
 
         Stores diagnostic info in self._last_info for telemetry logging.
         """
@@ -143,11 +144,12 @@ class TetherModel:
         force = -T_total * unit
 
         # Restoring moment: tether pulls on the axle bottom, not the CoM.
-        # r_attach = offset from CoM to tether attachment point in world frame.
-        # body Z = R_hub[:,2]; attachment is 'axle_attach' metres below CoM.
+        # FRD: body_z = R_hub[:,2] points DOWN through the disk (toward the
+        # anchor in tethered hover), so the axle bottom — where the tether
+        # attaches — is at +axle_attach·body_z from the CoM.
         if R_hub is not None:
-            body_z_world = R_hub[:, 2]              # disk normal in world frame
-            r_attach = -self.axle_attach * body_z_world   # toward axle bottom
+            body_z_world = R_hub[:, 2]
+            r_attach = self.axle_attach * body_z_world
             moment = cross3(r_attach, force)
         else:
             moment = _zero3

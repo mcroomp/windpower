@@ -5,7 +5,7 @@ Mirrors test_pump_cycle_unified.py architecture:
   Ground (10 Hz): LandingGroundController -> LandingCommand
   Winch  (400 Hz): WinchController (set_target at 10 Hz)
   AP     (400 Hz): LandingApController -> (collective, rate_roll, rate_pitch)
-                   AcroControllerSitl  -> (tilt_lon, tilt_lat)
+                   HeliCyclicController -> (tilt_lon, tilt_lat)
 
 Phase sequence from steady_state_starting.json IC:
   reel_in      -- winch reels in from IC rest_length (~97m) to target_length_m (50m).
@@ -28,16 +28,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
-from aero import rotor_definition as rd
 from winch           import WinchController
 from simtest_log     import BadEventLog
 from simtest_ic      import load_ic
 from simtest_runner  import PhysicsRunner, PythonAP
 from landing_planner import LandingGroundController
 from ap_controller   import LandingApController
+from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 _IC    = load_ic()
-_ROTOR = rd.default()
+_ROTOR = load_default_rotor()
 
 # ── Simulation constants ───────────────────────────────────────────────────────
 DT         = 1.0 / 400.0
@@ -75,12 +75,12 @@ T_FLARE_MAX          = 30.0   # s   max time in flare before timeout
 # ---------------------------------------------------------------------------
 
 def _run_landing(log) -> "tuple[dict, PythonAP]":
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model="peters_he", col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model="oye", col_min_rad=-0.28, col_max_rad=0.10)
 
     ground = LandingGroundController(
         initial_body_z   = _IC.R0[:, 2],
         target_length_m  = TARGET_LENGTH_M,
-        slew_rate_rad_s  = _ROTOR.body_z_slew_rate_rad_s,
+        slew_rate_rad_s  = BODY_Z_SLEW_RATE_RAD_S,
         col_reel_in_rad  = COL_REEL_IN_RAD,
         col_vertical_rad = COL_REEL_IN_RAD,
         col_descent_rad  = COL_DESCENT_RAD,
@@ -93,7 +93,7 @@ def _run_landing(log) -> "tuple[dict, PythonAP]":
 
     _ap = LandingApController(
         ic_body_z       = _IC.R0[:, 2],
-        slew_rate_rad_s = _ROTOR.body_z_slew_rate_rad_s,
+        slew_rate_rad_s = BODY_Z_SLEW_RATE_RAD_S,
         warm_coll_rad   = _IC.coll_eq_rad,
         kp_vz           = LandingApController.KP_VZ,
         ki_vz           = LandingApController.KI_VZ,
@@ -233,7 +233,7 @@ def _run_landing(log) -> "tuple[dict, PythonAP]":
     if pos_at_floor is not None:
         anchor_dist = float(np.linalg.norm(pos_at_floor[:2]))
     if bz_at_floor is not None:
-        bz_level       = np.array([0.0, 0.0, -1.0])
+        bz_level       = np.array([0.0, 0.0, 1.0])   # FRD: down through disk for level hover
         touchdown_tilt = float(np.degrees(np.arccos(
             np.clip(np.dot(bz_at_floor, bz_level), -1.0, 1.0))))
 

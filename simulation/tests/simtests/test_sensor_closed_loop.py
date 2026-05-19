@@ -59,8 +59,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
 
-from aero import rotor_definition as rd
-from controller  import AltitudeHoldController, compute_rate_cmd
+from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
+
+_ROTOR_S = load_default_rotor()
+from controller  import (AltitudeHoldController, compute_rate_cmd,
+                          damp_bz_eq_lateral, HeliCyclicController)
 from sensor      import PhysicalSensor
 from simtest_log import BadEventLog
 from simtest_ic  import load_ic
@@ -103,7 +106,21 @@ def _run(t_sim: float = T_SIM):
     sensor_log : list of 10 Hz sensor snapshots with yaw_sensor, yaw_true,
                  gyro_norm, omega_spin
     """
-    runner = PhysicsRunner(rd.default(), _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR_S, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    # Tuned cyclic gains (see tests/oneoff/warmup_gain_sweep.py).
+    runner._acro = HeliCyclicController(
+        _ROTOR_S, col_min_rad=-0.28, col_max_rad=0.10,
+        P=0.67, I=0.15, D=0.02, IMAX=0.30,
+        FLTT=40.0, FLTE=0.0, FLTD=40.0,
+    )
+    runner._acro._servo.reset(_IC.stack_coll_eq)
+
+    # Ground-side tension-regulating winch.
+    tension_target = 300.0
+    rest_now       = float(_IC.rest_length)
+    _WINCH_KP      = 0.01
+    _WINCH_VMAX    = 1.0
+    KD_LAT         = 50.0
 
     sensor = PhysicalSensor(
         home_ned_z  = _IC.home_z_ned,
@@ -112,7 +129,7 @@ def _run(t_sim: float = T_SIM):
         rng_seed    = 0,
     )
 
-    alt_ctrl   = AltitudeHoldController.from_pos(_IC.pos, rd.default().body_z_slew_rate_rad_s)
+    alt_ctrl   = AltitudeHoldController.from_pos(_IC.pos, BODY_Z_SLEW_RATE_RAD_S)
     target_alt = float(-_IC.pos[2])
 
     events     = BadEventLog()
@@ -136,7 +153,11 @@ def _run(t_sim: float = T_SIM):
         )
 
         prev_vel   = hub_state["vel"].copy()
-        body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, rd.default().mass_kg, DT)
+        body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, float(_ROTOR_S.inertia.mass_kg), DT)
+        body_z_eq  = damp_bz_eq_lateral(
+            body_z_eq, hub_state["pos"], hub_state["vel"], ANCHOR,
+            runner.tension_now, KD_LAT,
+        )
 
         bz_now         = hub_state["R"][:, 2]
         R              = hub_state["R"]
@@ -145,7 +166,11 @@ def _run(t_sim: float = T_SIM):
         rate_roll, rate_pitch = (
             compute_rate_cmd(bz_now, body_z_eq, R, kp=2.5, kd=0.0)[:2]
         )
-        runner.step(DT, _IC.stack_coll_eq, rate_roll, rate_pitch, omega_body)
+        dT       = runner.tension_now - tension_target
+        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
+        rest_now += v_winch * DT
+        runner.step(DT, _IC.stack_coll_eq, rate_roll, rate_pitch, omega_body,
+                    rest_length=rest_now)
         events.check_floor(runner.hub_state["pos"][2], t, "flight")
 
         if i % int(10.0 / DT) == 0:

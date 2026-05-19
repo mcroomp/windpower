@@ -33,10 +33,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import rotor_definition as rd
-from aero import create_aero
+from tests.unit._aero_probe import load_rotor, make_probe, probe_steady
 
-_ROTOR = rd.default()
+_ROTOR = load_rotor("beaupoil_2026")
+_AERO  = make_probe(_ROTOR)
 
 MASS_KG  = 5.0
 G        = 9.81
@@ -54,20 +54,9 @@ COL_MAX =  0.10   # collective ceiling [rad]
 # ---------------------------------------------------------------------------
 
 def _R_disk_horizontal() -> np.ndarray:
-    """
-    Rotation matrix for a horizontal disk (body_z = [0,0,-1] NED = pointing UP).
-
-    Construction (det=1, verified):
-      bz = [0,0,-1],  ref=[1,0,0]
-      bx = cross(ref, bz) = [0, 1, 0]  (East)
-      by = cross(bz,  bx) = [1, 0, 0]  (North)
-      R  = [bx | by | bz]
-    """
-    return np.array([
-        [0.0, 1.0,  0.0],
-        [1.0, 0.0,  0.0],
-        [0.0, 0.0, -1.0],
-    ], dtype=float)
+    """FRD: body_z = [0,0,+1] (down through the disk) for level hover."""
+    from frames import build_orb_frame
+    return build_orb_frame(np.array([0.0, 0.0, 1.0]))
 
 
 def _aero(col: float, v_hub_ned: np.ndarray,
@@ -81,14 +70,14 @@ def _aero(col: float, v_hub_ned: np.ndarray,
     thrust_up_N : float  upward force in NED [N]; positive = resisting gravity
     Q_spin_Nm   : float  net spin torque [N·m]; positive = rotor accelerating
     """
-    aero  = create_aero(_ROTOR, model="peters_he")
     R_hub = _R_disk_horizontal()
-    res   = aero.compute_forces(
-        collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
+    res   = probe_steady(
+        _AERO,
+        collective_rad=col,
         R_hub=R_hub, v_hub_world=v_hub_ned,
         omega_rotor=omega, wind_world=WIND_NED, t=10.0,
     )
-    thrust_up = float(-res.F_world[2])   # NED: up = -z component
+    thrust_up = float(-res.F_world[2])
     return thrust_up, float(res.Q_spin)
 
 

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from controller import (
     compute_rate_cmd,
     compute_bz_altitude_hold,
+    damp_bz_eq_lateral,
 )
 from rawes_lua_harness import RawesLua
 
@@ -102,15 +103,15 @@ class TestBzAltitudeHold:
         rv  = sim.vec_to_list(r)
         assert math.sqrt(sum(x**2 for x in rv)) == pytest.approx(1.0, abs=1e-12)
 
-    def test_vertical_tether_points_up(self, sim):
-        """At el=pi/2 (vertical), body_z should point nearly straight up (NED z ~ -1)."""
+    def test_vertical_tether_points_down(self, sim):
+        """FRD: at el=pi/2 (vertical) the hub is straight up, so body_z (= hub→
+        anchor = down through disk) points straight down: NED z = +1."""
         pos = sim.lua_vec(0.0, 0.0, -50.0)   # directly above anchor
         r   = sim.fns.bz_altitude_hold(pos, math.pi / 2, 300.0)
         rv  = sim.vec_to_list(r)
-        # At el=90 deg, tdir = [0,0,-1] (up in NED), gravity comp = 0 → result = [0,0,-1]
         assert rv[0] == pytest.approx(0.0, abs=1e-6)
         assert rv[1] == pytest.approx(0.0, abs=1e-6)
-        assert rv[2] == pytest.approx(-1.0, abs=1e-6)
+        assert rv[2] == pytest.approx(1.0, abs=1e-6)
 
     def test_azimuth_from_position(self, sim):
         """Changing azimuth of pos rotates the output body_z horizontally."""
@@ -140,7 +141,8 @@ class TestBzAltitudeHold:
             el  = math.radians(el_deg)
             pos = sim.lua_vec(r * math.cos(el), 0.0, -r * math.sin(el))
             bz  = sim.vec_to_list(sim.fns.bz_altitude_hold(pos, el, tension))
-            tdir = [math.cos(el), 0.0, -math.sin(el)]
+            # FRD body_z = hub→anchor direction (= -anchor→hub)
+            tdir = [-math.cos(el), 0.0, math.sin(el)]
             dot  = sum(bz[i] * tdir[i] for i in range(3))
             return math.acos(max(-1.0, min(1.0, dot)))
 
@@ -175,6 +177,44 @@ class TestBzAltitudeHold:
 
         assert result == pytest.approx(expected, abs=1e-10), \
             f"Mismatch at el={el_deg} az={az_deg} T={tension}"
+
+
+# ── damp_bz_eq_lateral ────────────────────────────────────────────────────────
+
+
+class TestDampBzEqLateral:
+    """Cross-check: Lua damp_bz_eq_lateral matches Python damp_bz_eq_lateral."""
+
+    @pytest.mark.parametrize("vel_xyz, tension", [
+        ((0.0, 0.0,  0.0), 300.0),   # no velocity → no correction
+        ((1.0, 0.0,  0.0), 300.0),
+        ((0.0, 2.0, -0.5), 200.0),
+        ((1.5, 0.5,  0.0), 100.0),
+        ((0.0, 0.0,  3.0), 400.0),   # purely along-tether (full cancel)
+    ])
+    def test_matches_python(self, sim, vel_xyz, tension):
+        """Lua matches controller.damp_bz_eq_lateral across velocity / tension grid."""
+        kd_lat  = float(sim.fns.KD_LAT)
+        # Hub position at 30 deg elevation, east of anchor.
+        pos_np  = np.array([0.0, 86.6025, -50.0])
+        # Use the gravity-comped altitude-hold body_z as the base target.
+        MASS_KG = float(sim.fns.MASS_KG)
+        bz_np   = compute_bz_altitude_hold(pos_np, math.radians(30.0), tension, MASS_KG)
+        vel_np  = np.array(vel_xyz, dtype=float)
+
+        expected = damp_bz_eq_lateral(
+            bz_np, pos_np, vel_np, np.zeros(3), tension, kd_lat,
+        ).tolist()
+
+        bz_lua  = sim.lua_vec(*bz_np)
+        pos_lua = sim.lua_vec(*pos_np)
+        vel_lua = sim.lua_vec(*vel_np)
+        result  = sim.vec_to_list(sim.fns.damp_bz_eq_lateral(
+            bz_lua, pos_lua, vel_lua, tension, kd_lat,
+        ))
+
+        assert result == pytest.approx(expected, abs=1e-10), \
+            f"Mismatch at vel={vel_xyz} T={tension}"
 
 
 # ── cyclic_error_body ─────────────────────────────────────────────────────────
