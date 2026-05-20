@@ -25,6 +25,13 @@ from stack_infra import (
 # Counter-torque motor stack fixtures
 # ---------------------------------------------------------------------------
 
+# Non-trivial trim cyclic + IC collective values sent to MODE_YAW so the
+# test_lua_yaw_regulation test can verify the cyclic / collective hold path.
+# Both fixture (sender) and test (asserter) read these.
+LUA_YAW_TRIM_LON: float = 0.020   # rad, body-frame at arming yaw
+LUA_YAW_TRIM_LAT: float = 0.050
+LUA_YAW_IC_COL:   float = -0.150  # rad
+
 @pytest.fixture
 def torque_armed(tmp_path, request):
     """Counter-torque stack fixture (constant RPM). Yields StackContext."""
@@ -138,6 +145,16 @@ def torque_armed_lua_yaw(tmp_path, request):
         test_name=request.node.name,
         armon_ms=3_600_000,
     ) as ctx:
+        # Inject non-trivial trim cyclic + IC collective so the test
+        # exercises the cyclic-hold / collective-hold path of MODE_YAW
+        # (otherwise ch1/ch2/ch3 would all sit at their neutral defaults
+        # and we couldn't verify that the trim is being applied).
+        ctx.gcs.send_named_float("RAWES_TLN", LUA_YAW_TRIM_LON)
+        ctx.gcs.send_named_float("RAWES_TLT", LUA_YAW_TRIM_LAT)
+        ctx.gcs.send_named_float("RAWES_COL", LUA_YAW_IC_COL)
+        ctx.log.info("Sent trim cyclic + IC collective to Lua: "
+                     "tlon=%+.4f tlat=%+.4f col=%+.4f",
+                     LUA_YAW_TRIM_LON, LUA_YAW_TRIM_LAT, LUA_YAW_IC_COL)
         yield ctx
 
 

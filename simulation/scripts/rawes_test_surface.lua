@@ -73,6 +73,14 @@ _rawes_fns = {
     ic_col           = function() return _ic_col end,
     yaw_since_trim   = function() return _yaw_since_trim end,
     effective_trim_body = effective_trim_body,
+    -- Unit-test setters: required for unit tests that exercise the
+    -- rotation math directly (production code only writes these via the
+    -- NVF receive + gyro-integration path inside update()).
+    set_trim_state   = function(tlon, tlat, dyaw)
+        _trim_lon       = tlon
+        _trim_lat       = tlat
+        _yaw_since_trim = dyaw
+    end,
 
     -- ── TensionPID state accessors ────────────────────────────────────────────
 
