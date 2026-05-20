@@ -6,7 +6,7 @@
 ## Current Setup: Standard PWM
 
 The GB4008 is currently controlled via **standard PWM** on **MAIN OUT 4 (output 4, IOMCU)**.
-ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=4`, DDFP CCW) drives SERVO4 directly.
+ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=3`, DDFP CW) drives SERVO4 directly.
 No DShot, no BLHeli subsystem, no RPM telemetry is active.
 
 **H_TAIL_TYPE** — relevant values for this project:
@@ -14,10 +14,10 @@ No DShot, no BLHeli subsystem, no RPM telemetry is active.
 | Value | Mode | Output behaviour |
 |-------|------|-----------------|
 | 0 | Servo | Bidirectional servo; SERVO4_TRIM=1500 µs neutral; no sign flip |
-| 3 | DDFP CW | Unidirectional motor, CW; positive PID → more throttle |
-| **4** | **DDFP CCW** | Unidirectional motor, CCW; applies ×−1 so CW-drift (neg PID) → more throttle |
+| **3** | **DDFP CW** | Unidirectional motor; positive PID → more throttle (NO sign flip) |
+| 4 | DDFP CCW | Unidirectional motor; applies ×−1 (sign-flipped path) |
 
-Use **4** (CCW) for the GB4008: CW hub drift produces a negative yaw-error PID output; the CCW sign flip converts that to positive throttle — GB4008 spins up and counters the drift.  Type 3 (CW) would clamp the negative PID to zero, leaving the motor off.
+Use **3** (CW) for the GB4008: under the US-convention rotor (CCW from above, see [CLAUDE.md](../CLAUDE.md) "Rotor spin direction"), body drifts CCW (`gyro:z() < 0`) → yaw error = `−gyro:z()` > 0 → positive PID output → positive SERVO4 throttle → motor counters the drift.  Type 4 (CCW with ×−1 flip) would clamp the positive PID to zero, leaving the motor off.
 
 ---
 
@@ -27,7 +27,7 @@ Use **4** (CCW) for the GB4008: CW hub drift produces a negative yaw-error PID o
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| `H_TAIL_TYPE` | 4 | DDFP CCW — ArduPilot yaw PID output routed to SERVO4 |
+| `H_TAIL_TYPE` | 3 | DDFP CW (no sign flip) — ArduPilot yaw PID output routed to SERVO4. US-convention rotor: positive PID error (from CCW body drift) → positive throttle. |
 | `SERVO4_MIN` | 800 | Motor off at 800 µs |
 | `SERVO4_MAX` | 2000 | Motor full throttle at 2000 µs |
 | `SERVO4_TRIM` | 800 | Trim = off (motor off at neutral stick) |

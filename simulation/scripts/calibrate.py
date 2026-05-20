@@ -711,9 +711,17 @@ Commands:
   arm [seconds]                   Set ACRO mode, send RAWES_ARM (default 10 s)
   hold <pwm> [seconds]            Arm, hold GB4008 output at pwm us (Ctrl-C to stop)
   yawmanual [s] [key=V ...]       Arm, set mode 2 (Lua yaw PID); logs tuning_<ts>.csv.
-                                    Per-run overrides (restored on exit): p, i, d, ff, imax, trim,
-                                    flte, fltt, fltd, accelmax, servo_min, servo_max.
-                                    e.g. yawmanual 30 p=0.015 i=0 servo_max=1100
+                                    Per-run param overrides (restored on exit):
+                                      p, i, d, ff, imax, trim, flte, fltt, fltd,
+                                      accelmax, servo_min, servo_max
+                                    Cyclic + collective trim (sent as NAMED_VALUE_FLOAT
+                                    so MODE_YAW holds the IC operating point and rotates
+                                    the cyclic to stay aligned with world-down as the
+                                    body yaws):
+                                      tlon=<rad>  -> RAWES_TLN  (cyclic trim longitudinal)
+                                      tlat=<rad>  -> RAWES_TLT  (cyclic trim lateral)
+                                      col=<rad>   -> RAWES_COL  (IC collective)
+                                    e.g. yawmanual 30 p=0.015 servo_max=1100 tlon=0.02 col=-0.15
   disarm                          Disarm vehicle
   pidtune [key=V ...]   Read or set yaw PID params (keys: p i d ff imax trim flte fltt fltd accelmax)
   config [--apply]                Diff (or write) all params from rawes_params.json; --apply writes + reboots
@@ -1105,8 +1113,17 @@ def _run_command(session: RawesGCS, tokens: list[str],
             "servo_min": "SERVO4_MIN",
             "servo_max": "SERVO4_MAX",
         }
+        # Lua-side trim values sent via NAMED_VALUE_FLOAT (NOT params).
+        # Consumed by rawes.lua MODE_YAW's set_trim_ic_rc_overrides for
+        # cyclic + collective hold, rotated to current body yaw each tick.
+        _YAW_NVF_TRIM = {
+            "tlon": "RAWES_TLN",   # cyclic trim longitudinal [rad]
+            "tlat": "RAWES_TLT",   # cyclic trim lateral      [rad]
+            "col":  "RAWES_COL",   # IC collective            [rad]
+        }
         secs: float | None = None
         overrides: dict[str, float] = {}
+        nvf_trim:  dict[str, float] = {}
         args = tokens[1:]
         # First positional arg may be a duration (no "=").  Everything else
         # must be key=value.
@@ -1116,20 +1133,29 @@ def _run_command(session: RawesGCS, tokens: list[str],
                 args = args[1:]
             except ValueError:
                 print("  Usage: yawmanual [seconds] [key=value ...]")
-                print(f"  Keys: {', '.join(sorted(_YAW_OVERRIDES))}")
+                print(f"  Param keys: {', '.join(sorted(_YAW_OVERRIDES))}")
+                print(f"  NVF trim keys (rad): {', '.join(sorted(_YAW_NVF_TRIM))}")
                 return True
         for tok in args:
             if "=" not in tok:
                 print("  Usage: yawmanual [seconds] [key=value ...]")
-                print(f"  Keys: {', '.join(sorted(_YAW_OVERRIDES))}")
+                print(f"  Param keys: {', '.join(sorted(_YAW_OVERRIDES))}")
+                print(f"  NVF trim keys (rad): {', '.join(sorted(_YAW_NVF_TRIM))}")
                 return True
             key, _, val_str = tok.partition("=")
             key = key.lower()
-            if key not in _YAW_OVERRIDES:
-                print(f"  Unknown key {key!r}  (valid: {', '.join(sorted(_YAW_OVERRIDES))})")
+            if key in _YAW_OVERRIDES:
+                target = overrides
+                map_to = _YAW_OVERRIDES[key]
+            elif key in _YAW_NVF_TRIM:
+                target = nvf_trim
+                map_to = _YAW_NVF_TRIM[key]
+            else:
+                valid = sorted(list(_YAW_OVERRIDES) + list(_YAW_NVF_TRIM))
+                print(f"  Unknown key {key!r}  (valid: {', '.join(valid)})")
                 return True
             try:
-                overrides[_YAW_OVERRIDES[key]] = float(val_str)
+                target[map_to] = float(val_str)
             except ValueError:
                 print(f"  Error: value for {key!r} must be a number")
                 return True
@@ -1161,6 +1187,17 @@ def _run_command(session: RawesGCS, tokens: list[str],
         # Activate yaw mode
         session.set_param("SCR_USER6", 2)
         print("  SCR_USER6 -> 2 (yaw mode)")
+
+        # Send any cyclic-trim / collective NVFs the user requested.  These
+        # populate _trim_lon / _trim_lat / _ic_col in rawes.lua so MODE_YAW
+        # holds cyclic + collective at the operating point (rotated by
+        # accumulated gyro:z() since the NVF arrived, so the world-frame
+        # disk-tilt direction stays constant regardless of body yaw).
+        if nvf_trim:
+            print("  Sending trim NVFs:")
+            for nv_name, nv_val in nvf_trim.items():
+                session.send_named_float(nv_name, nv_val)
+                print(f"    {nv_name} = {nv_val:+.4f} rad")
 
         # Arm via RAWES_ARM
         arm_ms = int((secs + 10.0) * 1000) if secs else 300_000

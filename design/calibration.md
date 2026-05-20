@@ -29,7 +29,7 @@ throttle).
 | 1 | S1 — swashplate 0 deg (East) | 33 |
 | 2 | S2 — swashplate 120 deg | 34 |
 | 3 | S3 — swashplate 240 deg | 35 |
-| 4 | GB4008 anti-rotation motor (MAIN OUT 4) | H_TAIL_TYPE=4 (DDFP) |
+| 4 | GB4008 anti-rotation motor (MAIN OUT 4) | H_TAIL_TYPE=3 (DDFP CW, no sign flip — US-convention rotor) |
 
 Swashplate PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max).
 Motor PWM range: 800 µs (off) … 2000 µs (full throttle).
@@ -143,7 +143,7 @@ Set `SCR_USER6` to the given Lua mode number, then listen 10 s for STATUSTEXT co
 |-------|---------|-------------|
 | 0     | none    | Passive: no RC overrides; periodic logging of STATUSTEXT / NV floats only. **Default on boot.** |
 | 1     | steady  | Steady flight at 50 Hz: cyclic altitude hold (`RAWES_ALT`) + VZ PI collective. Owns Ch1/Ch2/Ch3. **No yaw control** -- AP's `ATC_RAT_YAW` tail PID is disabled in hardware config (`SERVO4_FUNCTION=0`); needs Lua-side yaw integration before yaw drift is countered. |
-| 2     | yaw     | Manual Lua yaw PID: holds yaw rate = 0 by driving `SERVO4` directly via `set_output_pwm_chan_timeout`. **No SERVO4_FUNCTION shuffle needed** -- the hardware default is already `SERVO4_FUNCTION=0` so Lua owns SERVO4 exclusively. `H_TAIL_TYPE` stays at 4 but its DDFP output has no channel to write to. |
+| 2     | yaw     | Manual Lua yaw PID: holds yaw rate = 0 by driving `SERVO4` directly via `set_output_pwm_chan_timeout`. Also holds cyclic trim (`RAWES_TLN`/`RAWES_TLT`) and IC collective (`RAWES_COL`), with the cyclic rotated by accumulated `gyro:z()` so the world-frame disk-tilt direction stays constant as the body yaws. **No SERVO4_FUNCTION shuffle needed** -- the hardware default is already `SERVO4_FUNCTION=0` so Lua owns SERVO4 exclusively. |
 | 4     | landing | Reserved -- not yet implemented in `rawes.lua`. Will run the landing controller (`reel_in` -> `descent` -> `final_drop` triggered by `RAWES_SUB=1`). |
 | 5     | pumping | De Schutter pumping cycle at 50 Hz: phase advance is ground-driven via `NAMED_VALUE_FLOAT("RAWES_SUB", N)` (0=hold, 1=reel_out, 2=transition, 3=reel_in, 4=transition_back); TensionPID on collective using `RAWES_TEN` feedback; cyclic altitude hold via `RAWES_ALT`. **No yaw control** (AP tail PID disabled). |
 
@@ -178,6 +178,44 @@ python calibrate.py --port COM4 hold 1000 20     # hold for 20 s
 ```
 
 Use to characterise motor/ESC at a constant setpoint without Lua running.
+
+---
+
+### `yawmanual [seconds] [key=value ...]`
+Arm via `RAWES_ARM`, set `SCR_USER6=2` (MODE_YAW), and log live tuning data
+to `tuning_<ts>.csv` until the seconds timer expires or ESC is pressed. The
+Lua's manual yaw PID drives SERVO4 directly (bypassing ArduPilot's DDFP
+mixer); the command also pins cyclic + collective at the IC operating
+point so the bench rig sees the full flight-mode actuator set.
+
+**Per-run param overrides** (restored on exit, normal or aborted):
+
+| Key | Maps to | Notes |
+|-----|---------|-------|
+| `p`, `i`, `d`, `ff`, `imax` | `ATC_RAT_YAW_*` | Yaw rate PID gains |
+| `trim` | `H_YAW_TRIM` | Feedforward |
+| `flte`, `fltt`, `fltd` | `ATC_RAT_YAW_FLT*` | Target / error / derivative filters |
+| `accelmax` | `ATC_ACCEL_Y_MAX` | Yaw accel limit |
+| `servo_min`, `servo_max` | `SERVO4_MIN/MAX` | Motor PWM range cap (drop SERVO4_MAX to limit motor authority during early tuning) |
+
+**Cyclic + collective trim** (sent as `NAMED_VALUE_FLOAT` so `rawes.lua`
+MODE_YAW's `set_trim_ic_rc_overrides` holds them at the IC and rotates
+the cyclic by accumulated `gyro:z()` so the world-frame disk-tilt
+direction stays constant as the body yaws):
+
+| Key | NVF | Units |
+|-----|-----|-------|
+| `tlon` | `RAWES_TLN` | rad (cyclic trim longitudinal) |
+| `tlat` | `RAWES_TLT` | rad (cyclic trim lateral) |
+| `col`  | `RAWES_COL` | rad (IC collective) |
+
+```bash
+# 30 s session, lower max throttle as a safety cap, gentler P:
+python calibrate.py --port COM4 yawmanual 30 p=0.015 i=0 servo_max=1100
+
+# Tune yaw with IC operating point loaded:
+python calibrate.py --port COM4 yawmanual 60 tlon=0.02 tlat=0.05 col=-0.15
+```
 
 ---
 

@@ -241,7 +241,7 @@ The ground station runs a model-based estimator that recovers wind speed and dis
 → ω_rotor ≈ throttle · RPM_SCALE / GEAR_RATIO
 ```
 
-For the current hardware (GB4008 + 80:44 spur gear): `RPM_SCALE = 105 rad/s`, `GEAR_RATIO ≈ 1.818`, so `ω_rotor ≈ throttle × 57.8 rad/s`. `throttle` is recovered from PWM by inverting the H_TAIL_TYPE=4 biased mapping (§4.8). Valid for τ > ~0.5 s averaging — long enough for the AP yaw-rate loop to settle out of transients.
+For the current hardware (GB4008 + 80:44 spur gear): `RPM_SCALE = 105 rad/s`, `GEAR_RATIO ≈ 1.818`, so `ω_rotor ≈ throttle × 57.8 rad/s`. `throttle` is recovered from PWM by inverting the H_TAIL_TYPE=3 mapping (§4.8) — no sign flip, positive PID → positive throttle (US-convention rotor; see [CLAUDE.md](../CLAUDE.md) "Rotor spin direction"). Valid for τ > ~0.5 s averaging — long enough for the AP yaw-rate loop to settle out of transients.
 
 **Inputs (all already on the wire):**
 
@@ -275,7 +275,7 @@ Two equations in two unknowns → solve for `(V, ξ)` per tick. Implementation: 
 
 # Online (50 Hz, on ground side):
 def estimate_wind(T_meas, anti_rot_pwm, body_z, theta_col, hub_pos_lpf):
-    throttle  = pwm_to_throttle(anti_rot_pwm)         # invert H_TAIL_TYPE=4 mapping
+    throttle  = pwm_to_throttle(anti_rot_pwm)         # invert H_TAIL_TYPE=3 mapping
     omega     = throttle * RPM_SCALE / GEAR_RATIO     # rotor speed
     V, xi     = solve_lut(T_meas, omega, theta_col)    # 2D Newton on LUT
     wind_dir  = unit(hub_pos_lpf[:2])                  # downwind direction (slow LPF)
@@ -495,7 +495,7 @@ Re-sending refreshes the timer. Works in any mode.
 | Ch3 — collective | rawes.lua (modes 1/4/5) | 50 Hz | VZ PI (mode 1), VZ descent (mode 4), TensionPI (mode 5). Mode 0: not overridden. |
 | Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives SERVO4 independently. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
-| SERVO4 — anti-rotation motor | ArduPilot ATC_RAT_YAW | 400 Hz | DDFP CCW (H_TAIL_TYPE=4): sign flip → positive throttle counters CW hub drift. rawes.lua does NOT write SERVO4. |
+| SERVO4 — anti-rotation motor | ArduPilot ATC_RAT_YAW | 400 Hz | DDFP CW (H_TAIL_TYPE=3, NO sign flip): US-convention rotor (CCW from above) → body drifts CCW → positive yaw error → positive SERVO4 throttle. rawes.lua MODE_STEADY/PUMPING does NOT write SERVO4; MODE_YAW does (bypasses ATC_RAT_YAW). |
 
 ### 4.8 Yaw Regulation — ArduPilot ATC_RAT_YAW
 
@@ -504,12 +504,12 @@ no commands to the anti-rotation motor.
 
 ```
 Sensing:    gyro.z (from ACRO_Heli EKF attitude)
-Control:    ATC_RAT_YAW P/I/D → SERVO4 (H_TAIL_TYPE=4 DDFP CCW)
+Control:    ATC_RAT_YAW P/I/D → SERVO4 (H_TAIL_TYPE=3 DDFP CW, no sign flip)
 Actuator:   anti-rotation motor via standard PWM on MAIN OUT 4 (IOMCU)
             (current hardware: GB4008 + 80:44 spur gear — see components.md)
 ```
 
-**H_TAIL_TYPE=4 (DDFP CCW):** applies sign flip before thrust mapping.
+**H_TAIL_TYPE=3 (DDFP CW):** NO sign flip — under the US-convention rotor body drifts CCW (gyro:z() < 0) → error positive → PID positive → throttle positive → motor on.
 
 ```
 CW hub drift → positive psi_dot → yaw error = 0 − positive = negative PID
@@ -578,7 +578,7 @@ H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419
 
 | Parameter | Value | Purpose |
 |---|---|---|
-| H_TAIL_TYPE | 4 (DDFP CCW) | Sign flip: negative yaw error → positive motor throttle |
+| H_TAIL_TYPE | 3 (DDFP CW) | NO sign flip: positive yaw error (from US-convention CCW body drift) → positive motor throttle |
 | ATC_RAT_YAW_P | 0.20 | Starting P gain |
 | ATC_RAT_YAW_I | 0.05 | Corrects residual yaw not cancelled by trim |
 | ATC_RAT_YAW_D | 0.0 | Start at zero |
