@@ -22,7 +22,7 @@ All design docs live under `design/`. CLAUDE.md is intentionally lean — most a
 | File | Purpose |
 |------|---------|
 | [design/physical.md](design/physical.md) | Physical system parameters — rotor, tether, motor, servos, winch motor/generator spec |
-| [design/flight_stack.md](design/flight_stack.md) | **Complete flight control reference** — architecture, GCS, rawes.lua modes 0/1/4/5, EKF3, arming, channel ownership, ArduPilot configuration |
+| [design/flight_stack.md](design/flight_stack.md) | **Complete flight control reference** — architecture, GCS, rawes.lua modes 0/1/3/4/5, EKF3, arming, channel ownership, ArduPilot configuration |
 | [design/ardupilot_pids.md](design/ardupilot_pids.md) | ArduPilot heli rate-PID stack — `AC_AttitudeControl_Heli`, Python re-implementation |
 | [design/ardupilot_swashplate.md](design/ardupilot_swashplate.md) | Swashplate signal flow: RC3 collective → servo PWM (H3-120) |
 | [design/ekf_const_pos_mode.md](design/ekf_const_pos_mode.md) | EKF3 `const_pos_mode` — causes and log diagnostics |
@@ -192,7 +192,8 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 - **Production aero:** `PetersHeBEMJit` (3-state dynamic inflow, Numba). No skew-angle validity limit; momentum ODE valid hover→axial descent. Pure-numpy reference: `PetersHeBEM`. See [design/simulation.md](design/simulation.md) Aerodynamic Model + [design/aero.md](design/aero.md).
 - **Two-loop attitude:** `compute_rate_cmd(kp)` → rate setpoint; `RatePID(kp=2/3)` → swashplate tilt. **Portable core** in `controller.py` maps 1:1 to Lua: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`, `compute_bz_altitude_hold`.
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10`, `col_min_reel_in=0.079`. BEM invalid above xi≈85°. `body_z_slew_rate = 0.40 rad/s`.
-- **rawes.lua modes (valid: 0, 1, 4, 5):** 0=none, 1=steady, 4=landing, 5=pumping. Modes 1/4/5 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).
+- **rawes.lua modes (valid: 0, 1, 3, 4, 5):** 0=none, 1=steady, 3=passive (armed-but-quiet, holds trim cyclic + IC collective during kinematic), 4=landing, 5=pumping. Modes 1/3/4/5 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).
+- **Lua MAVLink rx queue:** `mavlink:init(20, 10)` — first arg is the per-tick rx buffer depth. `mavlink:init(1, 10)` (a common copy-paste default) drops back-to-back NAMED_VALUE_FLOAT messages — only the first survives until the next update() drains it.
 - **Yaw regulation** lives entirely in ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=4` DDFP CCW → SERVO4 → anti-rotation motor). **rawes.lua writes no commands to SERVO9/Ch9.** No DShot active (`RPM1_TYPE=0`); anti-rotation motor on standard PWM, MAIN OUT 4. Current hardware: GB4008 + 80:44 gear. See [design/dshot.md](design/dshot.md), [design/flight_stack.md §4.7–§5](design/flight_stack.md).
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) — required boot params in `rawes_sitl_defaults.parm`. `GPS_AUTO_CONFIG=0` is critical (prevents ArduPilot from corrupting RELPOSNED in SITL). See [design/flight_stack.md Appendix D](design/flight_stack.md).
 - **Anchor in `LOCAL_POSITION_NED`:** `SCR_USER5 = −initial_state["pos"][2]`. Anchor at `[0, 0, −pos0[2]]` in EKF frame.
@@ -231,7 +232,7 @@ See [design/history.md](design/history.md) for full decision history.
 |-----------|--------|------|
 | M1 Wire Pumping Cycle | done | — |
 | M2 Force Balance & Rotor Abstraction | done | — |
-| M3 Step 1 — test_lua_flight_steady (stack) | done: stable=86–110 s, 3/3 runs | orbit_r < 5 m, no EKF yaw reset, ≥ 60 s stable |
+| M3 Step 1 — test_lua_flight_steady (stack) | regressed by aero migration; kinematic_exit clean (MODE_PASSIVE + trim cyclic + IC collective); body rate runs away from ATC PID + saturated cyclic ~250 ms after release | orbit_r < 5 m, no EKF yaw reset, ≥ 60 s stable |
 | M3 Step 1b — test_landing.py + test_landing_lua (simtest) | failing: winch control during descent | descent slack=0, floor hit, anchor_dist < 20 m |
 | M3 Step 2 — test_pumping_cycle (stack, SCR_USER6=5) | in dev | "RAWES pump: reel_out" + net_energy > 0 + peak_tension < 496 N |
 | M3 Step 3 — test_landing_stack (stack, SCR_USER6=4) | in dev | "RAWES land: captured" + "final_drop" + hub alt ≤ 2.5 m |

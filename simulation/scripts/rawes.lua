@@ -38,7 +38,11 @@ local FLIGHT_PERIOD_MS  = 20        -- 50 Hz flight subsystem
 local ACRO_MODE_NUM     = 1         -- ArduCopter ACRO = 1
 
 local _NVF_MSG_ID = 251
-mavlink.init(1, 10)
+-- mavlink:init(queue_size, num_msgs).  queue_size = max messages buffered
+-- between Lua ticks; with queue=1 (the old default) back-to-back NVFs from
+-- the ground get dropped because only the first survives until update()
+-- drains it.  20 is plenty for our ~5 named-floats / tick max rate.
+mavlink.init(20, 10)
 mavlink.register_rx_msgid(_NVF_MSG_ID)
 
 local _nv_floats = {}
@@ -48,6 +52,9 @@ local _nv_floats = {}
 local MODE_NONE    = 0
 local MODE_STEADY  = 1
 local MODE_YAW     = 2   -- manual Lua yaw PID; holds yaw rate = 0 via SERVO4 direct
+local MODE_PASSIVE = 3   -- armed but no commands: keep ch8 high, do nothing else.
+                         -- Used by stack tests during kinematic so the rate-PID
+                         -- has no setpoint to wind up against before release.
 local MODE_LANDING = 4   -- reserved; not implemented here
 local MODE_PUMPING = 5
 
@@ -169,6 +176,19 @@ local _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETH
 local _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 local _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
 local _tension_n      = 200.0   -- tether tension estimate [N]; updated from RAWES_TEN
+
+-- Trim cyclic feedforward [rad] — ground sends via RAWES_TLN / RAWES_TLT
+-- (NAMED_VALUE_FLOAT, max 10-char name).  These cancel the wind-driven
+-- baseline hub moment at the IC operating point so the rate PID doesn't
+-- have to fight it after kinematic_exit.  Computed by aero.solve_trim_cyclic
+-- in the test fixture.  Default 0 = no feedforward.
+local _trim_lon       = 0.0
+local _trim_lat       = 0.0
+
+-- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
+-- to pin ch3 at the IC value so omega_spin doesn't droop while the body
+-- is kinematically locked.  Defaults to the cruise-flight value.
+local _ic_col         = COL_CRUISE_FLIGHT_RAD
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -461,8 +481,22 @@ local function run_flight()
     local err_by  = err[2]
     local kp      = p("SCR_USER1", 1.0)
 
-    local ch1 = output_rate_limit(rate_to_pwm(kp * err_bx), _prev_ch1, 100)
-    local ch2 = output_rate_limit(rate_to_pwm(kp * err_by), _prev_ch2, 100)
+    -- Convert trim cyclic [rad] to ATC rate-setpoint bias [rad/s].
+    -- ArduPilot's rate PID maps rate_error -> cyclic angle.  At steady
+    -- state with body rate = rate target (zero error), the output is
+    -- FF*rate_target.  When rate target ramps from zero, the output is
+    -- approximately (P+FF)*rate_target until the I-term takes over.
+    -- Use the (P+FF) sum so the steady-state cyclic = trim regardless of
+    -- which term dominates.  Sign convention matches HeliCyclicController:
+    --   tilt_lat ==  roll_cyclic  -> +bias on err_bx (roll)
+    --   tilt_lon == -pitch_cyclic -> -bias on err_by (pitch)
+    local _g_rll = math.max(p("ATC_RAT_RLL_P", 0.18) + p("ATC_RAT_RLL_FF", 0.0), 0.01)
+    local _g_pit = math.max(p("ATC_RAT_PIT_P", 0.18) + p("ATC_RAT_PIT_FF", 0.0), 0.01)
+    local _bias_rll =  _trim_lat / _g_rll
+    local _bias_pit = -_trim_lon / _g_pit
+
+    local ch1 = output_rate_limit(rate_to_pwm(kp * err_bx + _bias_rll), _prev_ch1, 100)
+    local ch2 = output_rate_limit(rate_to_pwm(kp * err_by + _bias_pit), _prev_ch2, 100)
     _prev_ch1 = ch1
     _prev_ch2 = ch2
     if _rc_ch1 then _rc_ch1:set_override(ch1) end
@@ -602,6 +636,9 @@ local function update()
     -- Update altitude and tension targets from NV messages (persistent last value)
     if _nv_floats["RAWES_ALT"]    then _target_alt   = _nv_floats["RAWES_ALT"]    end
     if _nv_floats["RAWES_TEN"]    then _tension_n    = _nv_floats["RAWES_TEN"]    end
+    if _nv_floats["RAWES_TLN"]    then _trim_lon     = _nv_floats["RAWES_TLN"]    end
+    if _nv_floats["RAWES_TLT"]    then _trim_lat     = _nv_floats["RAWES_TLT"]    end
+    if _nv_floats["RAWES_COL"]    then _ic_col       = _nv_floats["RAWES_COL"]    end
     if _nv_floats["RAWES_TSP"] then
         _ten_setpoint = _nv_floats["RAWES_TSP"]
         _ten_sp_fresh = true
@@ -636,6 +673,36 @@ local function update()
 
     if arming:is_armed() and _rc_ch8 then
         _rc_ch8:set_override(2000)
+    end
+
+    if mode == MODE_PASSIVE then
+        -- Armed-but-quiet: hold the IC operating point so the kinematic
+        -- release transitions smoothly.  Cyclic rate setpoints are sized
+        -- so ArduPilot's rate PID produces _trim_lon / _trim_lat at
+        -- steady state; ch3 pins collective at _ic_col.  No state
+        -- changes here -- when the test promotes to MODE_STEADY the
+        -- outputs continue uninterrupted.
+        local _g_rll = math.max(p("ATC_RAT_RLL_P", 0.18) + p("ATC_RAT_RLL_FF", 0.0), 0.01)
+        local _g_pit = math.max(p("ATC_RAT_PIT_P", 0.18) + p("ATC_RAT_PIT_FF", 0.0), 0.01)
+        local _ch1 = rate_to_pwm( _trim_lat / _g_rll)
+        local _ch2 = rate_to_pwm(-_trim_lon / _g_pit)
+        if _rc_ch1 then _rc_ch1:set_override(_ch1) end
+        if _rc_ch2 then _rc_ch2:set_override(_ch2) end
+
+        local _col_thrust = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+        if _col_thrust < 0.0 then _col_thrust = 0.0 end
+        if _col_thrust > 1.0 then _col_thrust = 1.0 end
+        local _ch3 = math.floor(1000.0 + _col_thrust * 1000.0 + 0.5)
+        if _rc_ch3 then _rc_ch3:set_override(_ch3) end
+        -- Diagnostic: every ~5 s, report what's being sent so we can see
+        -- if the trim values reached the Lua and were converted to PWM.
+        if now - _none_status_ms >= 5000 then
+            _none_status_ms = now
+            gcs:send_text(6, string.format(
+                "RAWES PASS: ch1=%d ch2=%d ch3=%d  tlon=%.4f tlat=%.4f col=%.3f",
+                _ch1, _ch2, _ch3, _trim_lon, _trim_lat, _ic_col))
+        end
+        return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_STEADY or mode == MODE_PUMPING then

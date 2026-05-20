@@ -63,6 +63,7 @@ COLUMNS: list[str] = [
     "tension_setpoint", "collective_from_tension_ctrl", "gnd_alt_cmd_m",
     "winch_speed_ms",
     "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
+    "aero_Q_spin",                      # rotor shaft torque [N·m] from aero
     "F_x", "F_y", "F_z",                # net aero force NED [N]
     "M_x", "M_y", "M_z",                # net aero moment NED [N·m]
     "rpy_roll", "rpy_pitch", "rpy_yaw",

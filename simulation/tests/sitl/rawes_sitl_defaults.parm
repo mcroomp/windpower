@@ -15,11 +15,31 @@
 #   1. The GB4008 motor swamps the magnetometer on real hardware.
 #   2. SITL has 3 synthetic compasses; with dual GPS yaw they are not needed.
 
-# ACRO rate controller I-term limits.
-# Zero I-term prevents windup during the kinematic phase.
-ATC_RAT_RLL_IMAX  0.0  # roll  rate I-term limit = 0 -> no I windup during kinematic
-ATC_RAT_PIT_IMAX  0.0  # pitch rate I-term limit = 0 -> no I windup during kinematic
-ATC_RAT_YAW_IMAX  0.0  # yaw   rate I-term limit = 0 -> no I windup during kinematic
+# ACRO rate controller — tuned for the beaupoil_2026 rotor.
+#
+# Why these values:
+#   The default heli rate PID (P=0.06, I=0.105, D=0.002, FF=0.21, FLTD=0)
+#   saturates cyclic within ~80 ms of kinematic_exit.  The PIDP dataflash
+#   trace shows D-term contributions ~-1.06 (3-4x larger than P or FF)
+#   during the rotation-onset transient because FLTD=0 has no filter on
+#   the derivative.  Lower FF (this rotor has high cyclic-to-moment gain
+#   so the default is too aggressive at small body rates) and a non-zero
+#   FLTD shape the response so the loop stays in the linear region.
+#
+# I-term limits stay at 0 to prevent windup during the kinematic phase
+# (body held fixed; rate setpoint nonzero -> integrator races without
+# IMAX cap).  Promoted by the test post-kinematic_exit if needed.
+ATC_RAT_RLL_P     0.02
+ATC_RAT_PIT_P     0.02
+ATC_RAT_RLL_FF    0.0
+ATC_RAT_PIT_FF    0.0
+ATC_RAT_RLL_D     0.0
+ATC_RAT_PIT_D     0.0
+ATC_RAT_RLL_FLTD  10.0
+ATC_RAT_PIT_FLTD  10.0
+ATC_RAT_RLL_IMAX  0.0
+ATC_RAT_PIT_IMAX  0.0
+ATC_RAT_YAW_IMAX  0.0
 
 EK3_IMU_MASK    1      # bit 0 only = IMU0 only = single EKF3 core (no Roll/Pitch inconsistency)
 EK3_SRC1_YAW    2      # 2=GPS dual-antenna yaw (RELPOSNED from F9P moving baseline)

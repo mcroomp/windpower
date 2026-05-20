@@ -41,6 +41,24 @@ _sync_code() {
         --exclude="./.venv" \
         -cf - . \
     | docker exec -i "$_c" tar -xf - -C /rawes/simulation/
+    # Sync the sibling aero package (editable-installed on host from
+    # ../aero).  The container can't share the host's editable install,
+    # so we sync the package directory and rely on PYTHONPATH=/rawes
+    # (set on each docker exec) to make `import aero` work.
+    local _AERO_DIR="$SCRIPT_DIR/../../aero"
+    if [ -d "$_AERO_DIR" ]; then
+        docker exec "$_c" mkdir -p /rawes
+        tar -C "$_AERO_DIR" \
+            --exclude="./__pycache__" \
+            --exclude="*/__pycache__" \
+            --exclude="./.venv" \
+            --exclude="./tests" \
+            --exclude="./out" \
+            --exclude="./Research" \
+            --exclude="./envelope" \
+            -cf - aero \
+        | docker exec -i "$_c" tar -xf - -C /rawes/
+    fi
     echo "[INFO] Code sync complete."
 }
 
@@ -305,6 +323,7 @@ case "$CMD" in
                 docker exec \
                     -e RAWES_RUN_STACK_INTEGRATION=1 \
                     -e RAWES_SIM_VEHICLE=/ardupilot/Tools/autotest/sim_vehicle.py \
+                    -e PYTHONPATH=/rawes \
                     "$_c" \
                     /rawes/.venv/bin/python -m pytest "$_f" -s -v \
                     ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \

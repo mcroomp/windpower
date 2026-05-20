@@ -540,9 +540,9 @@ def _launch_mediator(
         cfg["R0"]         = build_gps_yaw_frame(np.array(initial_state["R0"], dtype=float).reshape(3, 3)[:, 2]).tolist()
         cfg["omega_spin"] = float(initial_state["omega_spin"])
         if tether_rest_length is None and "rest_length" in initial_state:
-            cfg["tether_rest_length"] = float(initial_state["rest_length"])
+            cfg["rest_length"] = float(initial_state["rest_length"])
     if tether_rest_length is not None:
-        cfg["tether_rest_length"] = float(tether_rest_length)
+        cfg["rest_length"] = float(tether_rest_length)
     if startup_damp_seconds is not None:
         cfg["startup_damp_seconds"] = float(startup_damp_seconds)
     if base_k_ang is not None:

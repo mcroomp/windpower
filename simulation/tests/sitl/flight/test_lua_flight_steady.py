@@ -10,10 +10,19 @@ Uses the acro_armed_lua_full fixture (stationary kinematic hold, vel0=[0,0,0]):
   - Hub holds at tether equilibrium for 80 s; no motion required.
   - With dual GPS (EK3_SRC1_YAW=2), yaw is known from the first RELPOSNED fix.
     delAngBiasLearned converges with constant-zero gyro at ~34 s after start.
-    GPS fuses at ~34 s; _el_initialized fires; altitude hold active ~46 s before exit.
+    GPS fuses at ~34 s; fixture yields.
   - internal_controller=False (Lua RC overrides drive physics at 50 Hz)
-  - SCR_USER6=1 set immediately in fixture (Lua pre-GPS bypass active until fusion).
-  - IC altitude ~38 m (tether rest length ~100 m); hub orbits near IC altitude.
+  - SCR_USER6=3 (MODE_PASSIVE) set immediately in fixture; the test
+    promotes to SCR_USER6=1 (MODE_STEADY) right after kinematic_exit.
+    MODE_PASSIVE keeps the Lua quiet (only ch8 keepalive + trim cyclic
+    + IC collective via NVFs) so ArduPilot's rate PID does not wind
+    up against a kinematically-locked body during the 80 s hold.
+  - IC altitude ~43 m (tether rest length ~100 m); hub orbits near IC altitude.
+
+The fixture also computes the IC trim cyclic via aero.solve_trim_cyclic
+and streams it to the Lua as RAWES_TLN / RAWES_TLT / RAWES_COL named
+floats so MODE_PASSIVE can hold cyclic + collective at the IC operating
+point during kinematic.
 
 No RC overrides are sent by this test — Lua owns Ch1/Ch2/Ch3 (cyclic +
 collective) and Ch8 (motor interlock keepalive at 100 Hz).
@@ -21,12 +30,13 @@ collective) and Ch8 (motor interlock keepalive at 100 Hz).
 Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
-  t~12 s      arm complete; SCR_USER6=1 set; Lua pre-GPS bypass active
-  t~12 s      AHRS healthy; Lua DCM capture fires
-              "RAWES flight: captured" sent; bz_eq0 = disk_normal_ned()
-  t~34 s      GPS fuses; "RAWES flight: GPS bz=(...)" sent; orbit tracking begins
-  t~34 s      fixture yields (GPS fusion confirmed)
-  t=80 s      kinematic exits; Lua has been tracking orbit for ~46 s
+  t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; trim cyclic
+              + IC collective NVFs streamed; Lua holds ch1/ch2/ch3 at
+              the IC operating point but does NOT run altitude hold.
+  t~34 s      GPS fuses; fixture yields
+  t=80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY)
+              and Lua's altitude-hold loop takes over with cyclic
+              already at the trim value.
   t~80+       free flight under ArduPilot + Lua
 
 Fixture yields at ~t=34 s (GPS fusion).  Test waits for kinematic to end
@@ -94,14 +104,21 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
     log = logging.getLogger("test_lua_flight_steady")
 
     log.info("=== test_lua_flight_steady: waiting for kinematic phase to end ===")
-    log.info("(SCR_USER6=1 active from fixture; GPS capture fires during kinematic ~23 s)")
+    log.info("(Lua is in MODE_PASSIVE during kinematic; promotes to MODE_STEADY after kinematic_exit)")
 
     if not ctx.wait_kinematic_done(timeout=_KINEMATIC_TIMEOUT_S):
         pytest.fail(
             f"Kinematic phase did not end within {_KINEMATIC_TIMEOUT_S:.0f} s.\n"
             "Check mediator log for 'TRANSITION kinematic->free-flight'."
         )
-    log.info("Kinematic phase ended -- Lua orbit tracking already active")
+    log.info("Kinematic phase ended -- promoting Lua to MODE_STEADY")
+
+    # Promote Lua from MODE_PASSIVE (3) to MODE_STEADY (1) now that the body
+    # is free.  Doing this AFTER kinematic_exit prevents ArduPilot's rate
+    # PID from winding up against a kinematically-locked body during the
+    # hold phase.
+    ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
+    log.info("  SCR_USER6 -> 1 (MODE_STEADY)  ACK=%s", ok)
 
     all_statustext = ctx.all_statustext
     lua_captured   = False

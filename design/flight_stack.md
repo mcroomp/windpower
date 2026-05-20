@@ -324,7 +324,7 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 | RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North from EKF origin [m] |
 | RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East from EKF origin [m] |
 | RAWES_ANCHOR_D | SCR_USER5 | varies | Anchor altitude above EKF origin [m]. Set to `−initial_state["pos"][2]` (NED Z negated). |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady, 4=landing, 5=pumping |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady, 2=yaw, 3=passive, 4=landing, 5=pumping |
 
 **Named float inputs (ground → Lua, via `gcs.send_named_float`):**
 
@@ -334,6 +334,15 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
 | RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at SCR_USER2 rad/s. |
 | RAWES_TEN | N | Tether tension estimate from load cell. Used as TensionPI feedback in mode 5. |
+| RAWES_TLN | rad | Trim cyclic `tilt_lon` from `aero.solve_trim_cyclic` — applied as ATC rate-setpoint bias to null wind-driven baseline hub moment. |
+| RAWES_TLT | rad | Trim cyclic `tilt_lat` (companion to RAWES_TLN). |
+| RAWES_COL | rad | IC collective `[COL_MIN_RAD, COL_MAX_RAD]` — held by MODE_PASSIVE to preserve rotor RPM during kinematic. |
+
+**MAVLink rx queue:** `mavlink:init(queue_size, num_msgs)` is called as
+`(20, 10)` at module load.  The first arg is the per-tick rx buffer depth;
+with `1` (the prior default) multiple back-to-back NAMED_VALUE_FLOATs sent
+by the ground get dropped — only the first survives until the next
+update() drains it.  20 is safe for the typical ~5 NVFs/tick burst.
 
 `_nv_floats` dict resets to `{}` on every mode change.
 
@@ -360,6 +369,32 @@ Before `_el_initialized` is set (first valid GPS position fix with tlen ≥ MIN_
 
 On first valid GPS fix: initialize `_el_rad` and `_target_alt` from position, set
 `_el_initialized = true`, send STATUSTEXT.
+
+### 4.2b Mode 3 — Passive (SCR_USER6=3)
+
+Armed-but-quiet mode used during the kinematic hold of stack tests.  The
+vehicle stays armed (motor interlock ch8 high) but the Lua emits **no rate
+commands**, only the IC trim cyclic + IC collective:
+
+1. ch1/ch2 carry the rate-setpoint bias that ArduPilot's ATC_RAT_RLL/PIT
+   PID will turn into the trim cyclic at steady state.  Bias is computed
+   from `_trim_lat / (ATC_RAT_RLL_P + ATC_RAT_RLL_FF)` and the matching
+   pitch term (sign-flipped because `tilt_lon == -pitch_cyclic`).
+2. ch3 holds the IC collective `_ic_col` via the standard
+   `(col − COL_MIN_RAD)/(COL_MAX_RAD − COL_MIN_RAD)` PWM mapping.
+3. No body_z error computation, no altitude hold, no winch interaction —
+   the body is kinematically locked by the mediator so any control output
+   based on bz_now-vs-bz_goal error would just wind up the rate-PID's
+   internal state until kinematic_exit kicks the body.
+
+The test promotes MODE_PASSIVE → MODE_STEADY immediately after the
+mediator's `kinematic_exit` event, at which point ch3 hand-off is seamless
+(`_last_col_rad` is re-seeded by run_flight's first tick) and the rate
+PIDs continue from the trim cyclic they were already producing.
+
+`_trim_lon`, `_trim_lat`, `_ic_col` are populated by RAWES_TLN/TLT/COL
+NVFs.  Defaults (0, 0, COL_CRUISE_FLIGHT_RAD) are used until the ground
+sends real values.
 
 ### 4.3 Mode 1 — Steady (SCR_USER6=1)
 

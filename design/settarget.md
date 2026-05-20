@@ -157,7 +157,138 @@ graph ATTITUDE.roll ATTITUDE.pitch ATTITUDE.yaw
 graph NAV_CONTROLLER_OUTPUT.nav_roll NAV_CONTROLLER_OUTPUT.nav_pitch
 ```
 
-## Closing the outer loop in Lua (radial-velocity sketch)
+## Available Guided setpoint APIs (and why we pick the attitude one)
+
+| API | Sets | Bypasses `AC_PosControl`? | Steep-tilt friendly? |
+|---|---|---|---|
+| `set_target_location` | a single waypoint | no | no |
+| `set_target_pos_NED` | position | no | no |
+| `set_target_posvel_NED` | position + velocity ffwd | no | no |
+| `set_target_posvelaccel_NED` | pos + vel + accel + yaw | no | no |
+| `set_target_velocity_NED` | full 3D earth-frame velocity vector | no | no |
+| `set_target_velaccel_NED` | velocity + accel ffwd + yaw | no | no |
+| **`set_target_angle_and_climbrate`** | earth-frame attitude + Z-velocity | **yes (horizontal)** | **yes** |
+| `set_target_rate_and_throttle` | body rates + throttle | yes (fully open loop) | yes, no closed loop |
+
+All `*_NED` velocity-bearing APIs route through `AC_PosControl`, which is linearized around small tilt — gain grows as `g/cos²(θ)`, becomes 2× at 45°, 4× at 60°. For a tethered heli sitting at a steep equilibrium attitude, the position controller's tuning is wrong and `ANGLE_MAX` / lean-limit clips bite.
+
+For zero climb with `set_target_angle_and_climbrate`, just pass `climb_rate_ms = 0`. The Z controller will hold altitude against whatever lateral tilt you command.
+
+## Closing the outer loop in Lua — earth-frame velocity input
+
+If you want to drive the heli with a desired earth-frame velocity `(vN, vE, vD)` instead of a radial scalar, the structure is the same — only the input changes. The Lua script takes `(vN, vE)` as input, turns it into a desired earth-frame tilt vector, and commands attitude. `vD` becomes the `climb_rate_ms` argument directly (signed; 0 = hold altitude).
+
+```lua
+-- vel_ne_attitude.lua
+-- Earth-frame velocity vector → attitude command, for use at steep equilibrium tilt.
+-- Inputs: desired (vN, vE, vD) from elsewhere (RC channel, MAVLink, another script).
+-- Output: attitude commands via set_target_angle_and_climbrate.
+
+-- ---- inputs (replace with real source) ----
+local function get_desired_velocity()
+    -- vN, vE, vD in m/s, NED earth frame
+    return 0.5, 0.0, 0.0
+end
+
+-- ---- gains ----
+local KP_VEL    = 5.0    -- deg per m/s velocity error
+local KI_VEL    = 1.0    -- deg per (m/s · s) — integral
+local I_LIMIT   = 60.0   -- deg, integrator clamp per axis
+local TILT_MAX  = 70.0   -- deg, total horizontal tilt magnitude clamp
+local UPDATE_HZ = 25
+
+-- ---- state ----
+local i_n = 0.0
+local i_e = 0.0
+local last_us = nil
+
+local function clamp(x, lo, hi)
+    if x < lo then return lo end
+    if x > hi then return hi end
+    return x
+end
+
+local function update_integrator(err, i_state, dt)
+    i_state = i_state + err * dt * KI_VEL
+    return clamp(i_state, -I_LIMIT, I_LIMIT)
+end
+
+function update()
+    local now_us = micros():tofloat()
+    local dt = 0.0
+    if last_us ~= nil then
+        dt = (now_us - last_us) * 1e-6
+        if dt > 0.5 then dt = 0.0 end  -- pause / restart safety
+    end
+    last_us = now_us
+
+    local vN_des, vE_des, vD_des = get_desired_velocity()
+
+    local vel = ahrs:get_velocity_NED()
+    if vel == nil then
+        return update, 1000 / UPDATE_HZ
+    end
+
+    local vN_err = vN_des - vel:x()
+    local vE_err = vE_des - vel:y()
+
+    i_n = update_integrator(vN_err, i_n, dt)
+    i_e = update_integrator(vE_err, i_e, dt)
+
+    -- desired earth-frame tilt vector (deg): + tilt_n means nose-down toward north,
+    -- + tilt_e means right-roll toward east, in a level-frame sense
+    local tilt_n = KP_VEL * vN_err + i_n
+    local tilt_e = KP_VEL * vE_err + i_e
+
+    -- magnitude clamp so a transient never commands 90°
+    local mag = math.sqrt(tilt_n * tilt_n + tilt_e * tilt_e)
+    if mag > TILT_MAX then
+        local s = TILT_MAX / mag
+        tilt_n = tilt_n * s
+        tilt_e = tilt_e * s
+    end
+
+    -- rotate earth-frame tilt into body roll/pitch using current yaw
+    local yaw = ahrs:get_yaw()
+    local c = math.cos(yaw)
+    local s = math.sin(yaw)
+    local pitch_deg =  tilt_n * c + tilt_e * s
+    local roll_deg  = -tilt_n * s + tilt_e * c
+
+    local ok = vehicle:set_target_angle_and_climbrate(
+        roll_deg,
+        pitch_deg,
+        0,
+        -vD_des,    -- climb_rate is +Z-up while NED vD is +Z-down
+        true,       -- use yaw rate
+        0)          -- no yaw rotation; change if you want pirouettes
+
+    if not ok then
+        gcs:send_text(6, "set_target_angle failed (not GUIDED?)")
+    end
+
+    return update, 1000 / UPDATE_HZ
+end
+
+gcs:send_text(6, "vel_ne_attitude.lua loaded")
+return update()
+```
+
+What this gives you for the tethered steep-tilt case:
+
+- The PSC is bypassed entirely on the horizontal axes — no small-angle assumption, no `ANGLE_MAX` clip, no I-windup against the tether at the PSC layer.
+- The I-term *here* (in Lua) is what absorbs the tether load. It builds up to whatever steady tilt holds the heli still against the tether, with `vN_des = vE_des = 0`. You can pre-load it from a tether-geometry estimate if you want faster convergence.
+- Yaw is independent: pass `use_yaw_rate=true, yaw_rate_degs=0` to let the heli sit on whatever heading it has, or pass a non-zero rate to pirouette while flight direction is held by your outer loop.
+- Altitude is closed-loop in C++ via the climb-rate argument; you don't manage it.
+
+Tuning notes:
+
+- Start with `KP_VEL = 2–3` and `KI_VEL = 0`, fly stationary, watch how quickly attitude responds to a step velocity request. Raise KP until oscillation starts, back off ~30%.
+- Add KI only after KP is good. KI is needed for steady-state against the tether; without it the heli will sit at some steady velocity offset.
+- `TILT_MAX` should be larger than your expected tether equilibrium tilt plus headroom for transients.
+- `UPDATE_HZ = 25` is fine for slow tethered ops. Don't push past ~50 Hz — Lua overhead grows and you gain little because the attitude controller already runs at 400 Hz internally.
+
+## Closing the outer loop in Lua — radial-velocity sketch (tether-aware)
 
 For the tether use-case — moving at steady speed along the tether axis while letting the attitude controller handle the steep tilt:
 

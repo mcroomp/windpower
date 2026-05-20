@@ -43,7 +43,13 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
 import numpy as _np
-from aero import rotor_definition as _rd
+from aero import rotor_definition as _rd  # noqa: F401 — re-exported for callers
+
+# Project default rotor (the new aero package leaves ``default()`` undefined;
+# we load it here from the project's YAML).
+def _project_default_rotor():
+    from tests.simtests._rotor_helpers import load_default_rotor
+    return load_default_rotor()
 
 from stack_utils import (
     ARDUPILOT_ENV,
@@ -524,7 +530,12 @@ def _sitl_stack(
         # Caller supplied a complete param base (e.g. torque stack) — use as-is.
         _boot_setup = base_params.merge(ParamSetup(extra_boot_params or {}))
     else:
-        _servo_speed = _rd.default().sim_servo_speed
+        # SIM_SERVO_SPEED = travel-fraction-per-second = slew/travel.
+        # Both fields live on the new RotorDefinition control block; the
+        # project YAML carries 545 deg/s / 100 deg ≈ 5.45.
+        _rotor = _project_default_rotor()
+        _servo_speed = (_rotor.control.servo_slew_rate_deg_s
+                        / _rotor.control.servo_travel_deg)
         _boot_setup = (
             ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
             .merge(_BASE_ACRO_PARAMS)

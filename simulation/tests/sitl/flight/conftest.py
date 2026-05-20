@@ -220,23 +220,75 @@ def acro_armed_lua_full(tmp_path, request):
         "vel0":                 [0.0, 0.0, 0.0],
         "kinematic_vel_ramp_s": 0.0,
         "startup_damp_seconds": 80.0,
+        # Enable the mediator's winch command socket so we can run a
+        # ground-side tension regulator (mirrors test_create_ic warmup).
+        "winch_cmd_port":       14570,
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name) as ctx:
         ctx.log.info("Setting SCR_USER params for rawes.lua ...")
+        # The anchor is at world origin; the EKF origin is the hub's first
+        # GPS fix = launch position pos0.  So anchor-in-EKF-frame = -pos0.
+        # SCR_USER3/4 must encode the horizontal offset (negated launch x/y)
+        # or the Lua sees the anchor directly below the hub and computes
+        # elevation = 90 deg, producing a saturated cyclic that kicks the
+        # body at kinematic_exit.
+        _pos0 = ctx.initial_state["pos"] if ctx.initial_state else [0.0, 0.0, -ctx.home_alt_m]
         lua_params = {
             "SCR_ENABLE": 1,              # persist scripting in EEPROM
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
             "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,             # anchor North   [m]
-            "SCR_USER4": 0.0,             # anchor East    [m]
-            "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 1,               # active immediately; pre-GPS bypass handles the wait
+            "SCR_USER3": -float(_pos0[0]),   # anchor North in EKF frame [m]
+            "SCR_USER4": -float(_pos0[1]),   # anchor East  in EKF frame [m]
+            "SCR_USER5":  ctx.home_alt_m,    # anchor Down  in EKF frame [m]
+            # MODE_PASSIVE (3): vehicle stays armed (motor interlock kept
+            # high) but Lua emits no rate commands.  ArduPilot's rate PID
+            # therefore has no setpoint to wind up against while the body
+            # is kinematically locked.  The test must promote to
+            # MODE_STEADY (1) immediately after kinematic_exit.
+            "SCR_USER6": 3,
         }
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
         ctx.wait_drain(timeout=1.0, label="post-param")
+
+        # Compute trim cyclic at the IC operating point and stream it to the
+        # Lua via NAMED_VALUE_FLOAT (RAWES_TLN / RAWES_TLT — 10-char names).
+        # Without this the wind-driven baseline hub moment kicks the body at
+        # kinematic_exit before ArduPilot's rate PID can catch up.
+        _ic = ctx.initial_state
+        if _ic is not None:
+            try:
+                import numpy as _np_trim
+                from aero import create_aero, solve_trim_cyclic
+                from tests.simtests._rotor_helpers import load_default_rotor
+                _rotor_trim = load_default_rotor()
+                _aero_trim  = create_aero(_rotor_trim, model="oye")
+                _state_trim = _aero_trim.initial_rotor_state()
+                _state_trim.omega_rad_s = float(_ic["omega_spin"])
+                _R0_trim    = _np_trim.array(_ic["R0"], dtype=float).reshape(3, 3)
+                _wind_trim  = _np_trim.array([0.0, 10.0, 0.0])
+                _coll_trim  = float(_ic.get("stack_coll_eq", _ic.get("coll_eq_rad", -0.18)))
+                _trim_out   = solve_trim_cyclic(
+                    _aero_trim, _state_trim,
+                    collective_rad=_coll_trim,
+                    R_hub=_R0_trim, v_hub_world=_np_trim.zeros(3),
+                    wind_world=_wind_trim,
+                    n_inflow_relax=200, dt_relax=1.0/400.0,
+                    fix_omega=True, tolerance_Nm=0.2,
+                )
+                ctx.log.info("Trim cyclic: tlon=%+.5f tlat=%+.5f converged=%s",
+                             _trim_out.tilt_lon, _trim_out.tilt_lat, _trim_out.converged)
+                ctx.gcs.send_named_float("RAWES_TLN", float(_trim_out.tilt_lon))
+                ctx.gcs.send_named_float("RAWES_TLT", float(_trim_out.tilt_lat))
+                # IC collective: pinned during MODE_PASSIVE so omega_spin
+                # doesn't droop while the body is kinematically locked.
+                ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
+                ctx.log.info("IC collective: coll=%+.4f rad", _coll_trim)
+            except Exception as e:    # noqa: BLE001
+                ctx.log.warning("Trim cyclic computation failed: %s", e)
+        ctx.wait_drain(timeout=0.5, label="post-trim")
 
         # Wait for GPS fusion before yielding.
         # Lua needs _tdir0 (fires on GPS fusion) to begin orbit tracking.
@@ -261,4 +313,80 @@ def acro_armed_lua_full(tmp_path, request):
             raise RuntimeError("GPS did not fuse within 60 s — cannot start orbit tracking")
         ctx.log.info("GPS fused — Lua orbit tracking active; yielding to test")
 
-        yield ctx
+        # ── Ground-side tension-regulating winch ─────────────────────────────
+        # Mirrors the test_create_ic warmup pattern: a slow integrator on
+        # ``rest_length`` driven by tension error.  Without this the tether
+        # spring mode is undamped after kinematic_exit and the kinematic→
+        # free-flight transient blows up within ~700 ms (tension peaks
+        # >1000 N, SITL crashes).
+        #
+        # The mediator's WinchController interprets ``target_length`` as
+        # a destination; for tension regulation we set it slightly above /
+        # below the current ``rest_length`` based on the sign of the
+        # tension error, exploiting the WinchController's asymmetric
+        # reel-out / reel-in tension-controlled cruise speed.
+        import socket as _sock
+        import json as _json_w
+        import threading as _thr
+        import time as _time_w
+
+        _winch_stop = _thr.Event()
+        _tension_target_n = 300.0
+        _winch_addr  = ("127.0.0.1", 14570)
+        _winch_sock  = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        _winch_sock.bind(("127.0.0.1", 0))
+        _winch_sock.settimeout(0.05)
+
+        # Seed the mediator with an initial command so it knows our address
+        # and starts streaming state back.
+        _winch_sock.sendto(_json_w.dumps({
+            "target_length":  float(_ic.get("rest_length", 100.0)) if _ic else 100.0,
+            "target_tension": _tension_target_n,
+        }).encode(), _winch_addr)
+
+        def _winch_regulator():
+            _rest_local = float(_ic.get("rest_length", 100.0)) if _ic else 100.0
+            _tension_now = _tension_target_n
+            while not _winch_stop.is_set():
+                # Pull any pending state updates from mediator
+                try:
+                    while True:
+                        _data, _ = _winch_sock.recvfrom(256)
+                        _state = _json_w.loads(_data)
+                        _tension_now = float(_state["tension_n"])
+                        _rest_local  = float(_state["rest_length"])
+                except (TimeoutError, _sock.timeout, BlockingIOError):
+                    pass
+
+                # Asymmetric set-point: target_length above or below current
+                # rest_length depending on which way we need to push tension.
+                # WinchController reel-out speed = kp*(T-T_target), reel-in
+                # speed = kp*(T_target-T) — non-zero only in the matching
+                # direction, so flipping the sign of ``target_length - rest``
+                # selects the right mode each tick.
+                _dT = _tension_now - _tension_target_n
+                _target_len = _rest_local + (1.0 if _dT > 0 else -1.0)
+                try:
+                    _winch_sock.sendto(_json_w.dumps({
+                        "target_length":  _target_len,
+                        "target_tension": _tension_target_n,
+                    }).encode(), _winch_addr)
+                except OSError:
+                    pass
+                _time_w.sleep(0.1)   # 10 Hz
+
+        _winch_thread = _thr.Thread(target=_winch_regulator, daemon=True,
+                                     name="winch-regulator")
+        _winch_thread.start()
+        ctx.log.info("Ground winch tension regulator started (target=%.0f N)",
+                     _tension_target_n)
+
+        try:
+            yield ctx
+        finally:
+            _winch_stop.set()
+            _winch_thread.join(timeout=2.0)
+            try:
+                _winch_sock.close()
+            except OSError:
+                pass

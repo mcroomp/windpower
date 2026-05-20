@@ -30,6 +30,7 @@ import csv
 import logging
 import sys
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -181,7 +182,14 @@ def run_mediator(args, trajectory=None):
     _dyn_pos0 = _startup.launch_pos
     _dyn_vel0 = _vel0_arr
 
-    rotor  = _rd.load(cfg["rotor_definition"])
+    # New aero's _rd.load takes a file path; allow the historical "name"
+    # form (e.g. "beaupoil_2026") by resolving against the project's
+    # rotor_definitions/ directory.
+    _rotor_spec = str(cfg["rotor_definition"])
+    if not _rotor_spec.endswith(".yaml") and not os.path.sep in _rotor_spec:
+        _rotor_spec = str(Path(__file__).resolve().parent
+                          / "rotor_definitions" / f"{_rotor_spec}.yaml")
+    rotor  = _rd.load(_rotor_spec)
     log.info("Rotor: %s (N=%d, R=%.2fm)",
              rotor.name, rotor.blade.n_blades, rotor.blade.radius_m)
     issues = rotor.validate()
