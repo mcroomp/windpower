@@ -92,6 +92,56 @@ def torque_armed_lua(tmp_path, request):
 
 
 @pytest.fixture
+def torque_armed_lua_yaw(tmp_path, request):
+    """
+    Torque stack with rawes.lua in MODE_YAW (SCR_USER6=2).
+
+    Bench setup: ArduPilot rides on a motor with a horizontal axle and
+    no other motion.  The motor spins the rotor hub at OMEGA_ROTOR_NOMINAL,
+    so the body experiences a constant reaction torque about its yaw axis.
+    The GB4008 counter-rotation motor on SERVO4 must compensate to hold
+    yaw rate ~ 0.
+
+    MODE_YAW differs from the default torque_armed_lua fixture:
+      - rawes.lua's run_yaw_pid() bypasses ArduPilot's internal DDFP mixer
+        and writes SERVO4 directly via SRV_Channels:set_output_pwm_chan_timeout
+      - ATC_RAT_YAW_P/I/D/IMAX + H_YAW_TRIM + SERVO4_MIN/MAX are read by
+        the Lua each tick (NOT by ArduPilot's PID); pidtune-by-PARAM_SET
+        takes effect immediately
+      - cyclic channels held at neutral, collective at COL_CRUISE_FLIGHT_RAD
+
+    Arming: the torque rig has no GPS — armed via RAWES_ARM(1 hour) after
+    EKF attitude alignment (no GPS fix required).  See
+    ``stack_infra._launch_mediator_torque`` for the no-GPS configuration.
+    """
+    import math
+    # Override SCR_USER6 from the default 0 (MODE_NONE) used by the
+    # shared _LUA_TORQUE_EXTRA_PARAMS to 2 (MODE_YAW).
+    _yaw_extras = _LUA_TORQUE_EXTRA_PARAMS.update({"SCR_USER6": 2})
+    # Bench setpoint: motor stationary during STARTUP (rig won't drive the
+    # rotor before ArduPilot arms via RAWES_ARM), then spins up to 120 RPM
+    # = 4*pi rad/s (= 12.566 rad/s).  The mediator's universal 10 s ramp
+    # at DYNAMIC start (mediator_torque.py:_SPINUP_S) provides the smooth
+    # accelerate-from-zero; the test_lua_yaw_regulation observes the
+    # subsequent 30 s of constant-RPM hold.
+    # Positive omega_rotor: the GB4008 (positive-throttle-only motor) has
+    # authority to zero psi_dot when omega_rotor > 0 -- the equilibrium is
+    # omega_motor = omega_rotor * gear_ratio = positive throttle.  With
+    # negative omega_rotor the motor can only worsen the drift (no reverse).
+    _OMEGA_120_RPM = 120.0 * 2.0 * math.pi / 60.0   # rad/s
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=_OMEGA_120_RPM,
+        tail_channel=3,
+        extra_params=_yaw_extras,
+        install_scripts=("rawes.lua",),
+        test_name=request.node.name,
+        armon_ms=3_600_000,
+    ) as ctx:
+        yield ctx
+
+
+@pytest.fixture
 def torque_unarmed_lua(tmp_path, request):
     """
     Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
@@ -113,11 +163,14 @@ def torque_armed_servo_tail(tmp_path, request):
     SERVO4_MIN=1000 / SERVO4_TRIM=1500 / SERVO4_MAX=2000: symmetric servo range.
     ATC_RAT_YAW PID drives SERVO4 away from 1500 µs neutral in response to hub drift.
     No DDFP sign flip.  Yields StackContext with vehicle armed and ACRO active.
+
+    omega_rotor positive: US-convention rotor (CCW from above) drives body CCW;
+    PID error positive -> servo above 1500 us.
     """
     import torque_model as _m
     with _torque_stack(
         tmp_path,
-        omega_rotor=-_m.OMEGA_ROTOR_NOMINAL,   # negative = CCW drift → PID positive → servo above trim
+        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
         tail_channel=3,
         extra_params=_SERVO_TAIL_TORQUE_EXTRA_PARAMS,
         test_name=request.node.name,

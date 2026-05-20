@@ -78,11 +78,12 @@ H_COL_MAX       2000   # maximum collective servo output (us) -- full range
 H_RSC_MODE      1      # 1=Passthrough: no main rotor motor (autorotation only).
                        # Motor interlock HIGH (RC8=2000) -> THROTTLE_UNLIMITED immediately.
 
-# GB4008 anti-rotation motor — MAIN OUT 4 (SERVO4, H_TAIL_TYPE=4 DDFP CCW).
-# ArduPilot's ATC_RAT_YAW PID drives SERVO4 directly via the DDFP CCW path.
-# CCW sign flip: CW hub drift -> negative yaw error -> negative PID -> positive throttle.
-# Lua writes no commands to the motor.
-H_TAIL_TYPE      4     # DDFP CCW: ATC_RAT_YAW PID output -> SERVO4 (sign-flipped)
+# GB4008 anti-rotation motor -- MAIN OUT 4 (SERVO4, H_TAIL_TYPE=3 DDFP CW).
+# US-convention rotor spins CCW from above => body drifts CCW (gyro:z() < 0)
+# under drag.  yaw error = 0 - gyro:z() = positive => positive PID output.
+# H_TAIL_TYPE=3 passes positive PID straight to SERVO4 throttle (no sign flip).
+# Lua MODE_YAW bypasses this path and writes SERVO4 directly via SRV_Channels.
+H_TAIL_TYPE      3     # DDFP CW: ATC_RAT_YAW PID output -> SERVO4 (no flip)
 H_COL2YAW       0.0   # no collective-to-yaw feedforward
 SERVO4_MIN       800   # PWM off = 800 us (motor silent)
 SERVO4_MAX       2000  # PWM full = 2000 us

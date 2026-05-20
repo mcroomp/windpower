@@ -68,9 +68,11 @@ _rawes_fns = {
     el_rad         = function() return _el_rad end,
     target_alt     = function() return _target_alt end,
     tension_n      = function() return _tension_n end,
-    trim_lon       = function() return _trim_lon end,
-    trim_lat       = function() return _trim_lat end,
-    ic_col         = function() return _ic_col end,
+    trim_lon         = function() return _trim_lon end,
+    trim_lat         = function() return _trim_lat end,
+    ic_col           = function() return _ic_col end,
+    yaw_since_trim   = function() return _yaw_since_trim end,
+    effective_trim_body = effective_trim_body,
 
     -- ── TensionPID state accessors ────────────────────────────────────────────
 

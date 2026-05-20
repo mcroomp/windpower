@@ -161,6 +161,7 @@ class TelRow:
     aero_v_axial:   float = 0.0
     aero_v_inplane: float = 0.0
     aero_v_i:       float = 0.0
+    aero_Q_spin:    float = 0.0
 
     F_x: float = 0.0
     F_y: float = 0.0
@@ -372,6 +373,7 @@ class TelRow:
             aero_v_axial        = float(d.get("aero_v_axial",     0.0)),
             aero_v_inplane      = float(d.get("aero_v_inplane",   0.0)),
             aero_v_i            = float(d.get("aero_v_i",         0.0)),
+            aero_Q_spin         = float(d.get("aero_Q_spin",      0.0)),
             F_x                 = float(nf[0]),
             F_y                 = float(nf[1]),
             F_z                 = float(nf[2]),

@@ -188,8 +188,12 @@ def _yaw_zero(dt: float) -> float:
     return 0.0
 
 def _yaw_slow_ramp(dt: float) -> float:
-    """Ramp 0 → 10 deg/s over 30 s — tests that the DDFP PI winds up to cancel it."""
-    return math.radians(10.0 * min(1.0, dt / 30.0))
+    """Ramp 0 -> -10 deg/s over 30 s -- tests that the DDFP PI winds up to cancel
+    a CCW drift.  Negative sign matches the US-convention rotor's natural body
+    drift direction (see CLAUDE.md "Rotor spin direction"); under H_TAIL_TYPE=3
+    a negative gyro yields positive error -> positive PID -> motor throttle up.
+    """
+    return -math.radians(10.0 * min(1.0, dt / 30.0))
 
 
 PROFILES: dict[str, tuple] = {

@@ -88,6 +88,26 @@ Because only the origin translates (no rotation), any vector that comes from a d
 - **Cyclic (helicopter signs, new `aero`):** `tilt_lon > 0` ⇒ nose-down disk (forward stick); `tilt_lat > 0` ⇒ roll right. `AcroControllerSitl` maps body-rate-roll → `tilt_lat` and body-rate-pitch → `−tilt_lon`.
 - **Pitch / roll body rates (FRD standard):** `+roll_rate` = right wing drops, `+pitch_rate` = nose up, `+yaw_rate` = nose right. So "nose-down" command is `−pitch_rate`, matched in `compute_swashplate_from_state` and `AcroControllerSitl`.
 
+#### Rotor spin direction (US helicopter convention — baked into the whole stack)
+
+**Main rotor spins CCW viewed from above.** This is the US convention (Sikorsky / Bell / Robinson); European / Russian (Eurocopter / Kamov / Mil) typically spin CW. The whole stack — `rawes.lua` `MODE_YAW`, `mediator_torque.torque_model`, `H_TAIL_TYPE`, the GB4008 anti-rotation motor wiring — assumes US convention.
+
+What it implies in NED with body-z DOWN:
+
+| Quantity | Sign | Why |
+|----------|------|-----|
+| Rotor angular velocity vector | along **−body_z** (UP) | Right-hand rule: thumb up ⇒ CCW from above |
+| `omega_spin` (scalar, in code) | **positive** | Magnitude only; the −body_z direction is implicit (see `H_spin_b = [0, 0, −I_spin·omega_spin]` in `dynamics.py`) |
+| Body drift under rotor drag (no motor) | **CCW from above** | Newton 3rd: drag on rotor is CW, reaction on body is CCW |
+| `gyro:z()` when body drifting unhindered | **negative** | CCW from above = −Z rotation in NED RH-rule |
+| GB4008 motor reaction needed | **CW on body** | To counter the CCW drift |
+| `ATC_RAT_YAW` setpoint = 0 | error = `−gyro:z()` > 0 | When body drifting CCW |
+| `H_TAIL_TYPE` | **3** (DDFP CW, no sign flip) | Positive PID → positive throttle → motor on. `H_TAIL_TYPE=4` (CCW with `_servo4_out *= −1`) would clamp positive PID to 0 and let the body drift unopposed. |
+| `MODE_YAW` Lua `err = −gyro:z()` | matches | err > 0 when body drifting CCW → PID winds up → SERVO4 PWM goes high → motor on. No sign flip needed in `MODE_YAW` because it writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`. |
+| `torque_model.step` formula | `psi_dot = −omega_rotor + omega_motor / GEAR_RATIO` | Body drifts negative (CCW) under positive `omega_rotor` magnitude; positive motor throttle pushes `psi_dot` back toward 0 |
+
+**Don't flip the sign of `omega_rotor` to "fix" a symptom in a test.** The whole stack assumes a positive `omega_rotor` is the CCW-from-above spin magnitude. If a test breaks, the bug is upstream (sign convention violation), not in the rotor input.
+
 ### Sensors & EKF (physically faithful, no overrides)
 
 `sensor.py` must report exactly what the real Pixhawk hardware would see. The electronics hub is the fuselage; `R_hub` is its full 3-DOF orientation, integrated by the dynamics ODE.

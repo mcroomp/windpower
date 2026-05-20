@@ -1680,11 +1680,14 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     # Roll/pitch I-term — disable to prevent swashplate wind-up on neutral sticks
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
-    # H_TAIL_TYPE=4 (DDFP CCW): CCW sign flip maps CW-drift's negative PID output
-    # to positive GB4008 throttle.  See H_TAIL_TYPE enum table in _DDFP_TORQUE_EXTRA_PARAMS.
-    # H_TAIL_TYPE=0 (servo) is NOT used — requires SERVO4_TRIM=1500 µs neutral which
-    # maps poorly to the GB4008's unidirectional 800–2000 µs range.
-    "H_TAIL_TYPE":     4,
+    # H_TAIL_TYPE=3 (DDFP CW, NO sign flip): with US-convention rotor (CCW from
+    # above, body drifts CCW = negative gyro:z()), ATC_RAT_YAW PID outputs
+    # positive (error = -gyro:z() > 0).  H_TAIL_TYPE=3 passes positive PID
+    # straight to SERVO4 throttle -> motor on.  See enum table in
+    # _DDFP_TORQUE_EXTRA_PARAMS.  H_TAIL_TYPE=0 (servo) is NOT used --
+    # requires SERVO4_TRIM=1500 us neutral which maps poorly to the GB4008's
+    # unidirectional 800-2000 us range.
+    "H_TAIL_TYPE":     3,
     "H_COL2YAW":      0.0,
     # SERVO4 range matches GB4008 hardware: 800 µs = off, 2000 µs = full throttle.
     "SERVO4_MIN":       800,
@@ -1700,10 +1703,10 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
 })
 
 # Extra params for Lua-armed torque fixtures (RAWES_ARM state machine only).
-# ArduPilot's built-in DDFP yaw PID (H_TAIL_TYPE=4) drives SERVO4 for yaw control.
+# ArduPilot's built-in DDFP yaw PID (H_TAIL_TYPE=3) drives SERVO4 for yaw control.
 # Lua only handles arming (RAWES_ARM) and motor interlock (Ch8); SCR_USER6=0 (none).
 _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
-    "H_TAIL_TYPE":      4,     # DDFP CCW — ArduPilot yaw PID drives SERVO4
+    "H_TAIL_TYPE":      3,     # DDFP CW (no sign flip) -- US convention rotor
     "SERVO4_MIN":       800,
     "SERVO4_MAX":       2000,
     "SERVO4_TRIM":      800,
@@ -1716,7 +1719,7 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "ARMING_CHECK":     0,     # disable prearm checks — Lua arming:arm() is not force-arm
 })
 
-# Extra params for the ArduPilot DDFP (H_TAIL_TYPE=4 CCW) yaw PI fixture.
+# Extra params for the ArduPilot DDFP yaw PI fixture (US-convention rotor).
 # ArduPilot's built-in ATC_RAT_YAW controller drives SERVO4 (Ch4) directly
 # as a unidirectional motor (0% = off, 100% = full throttle).
 # Motor range: 800 us = off, 2000 us = max (GB4008 66KV on REVVitRC ESC).
@@ -1726,19 +1729,19 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
 #                       PID maps ±1 directly to servo range.  No sign flip.
 #   1  Servo+ExtGyro  — servo tail with external heading-hold gyro on Ch7.
 #   2  DDFP           — Direct Drive Fixed Pitch, bidirectional PWM mapping.
-#   3  DDFP CW        — unidirectional motor spinning CW; positive PID → more throttle.
-#   4  DDFP CCW       — unidirectional motor spinning CCW; applies _servo4_out *= -1
-#                       so negative PID output (CW drift → negative error) maps to
-#                       positive motor throttle.  GB4008 correct mode.
+#   3  DDFP CW        — unidirectional motor; positive PID → more throttle (NO flip).
+#   4  DDFP CCW       — unidirectional motor; applies _servo4_out *= -1 so negative
+#                       PID output (CW drift) maps to positive throttle.
 #
-# Why CCW (4) and not CW (3) for GB4008:
-#   CW hub drift → positive psi_dot → yaw error = 0 − positive = negative PID output.
-#   CCW sign flip: −PID → +throttle → GB4008 spins up → CCW counter-torque. ✓
-#   CW (type 3) no sign flip: −PID → clamps to 0 → motor off → drift uncorrected. ✗
+# Why CW (3) for the US-convention rotor:
+#   Main rotor spins CCW from above; body drifts CCW (negative gyro:z()) under drag.
+#   yaw error = 0 - gyro:z() = positive.  PID output positive.  H_TAIL_TYPE=3 passes
+#   positive PID straight to SERVO4 throttle -> motor on -> CW counter-torque on body. ✓
+#   H_TAIL_TYPE=4 (CCW with -1 flip) would clamp positive PID to 0 -> motor off. ✗
 _DDFP_TORQUE_EXTRA_PARAMS = ParamSetup({
-    # H_TAIL_TYPE=4 (DDFP CCW): CCW sign flip maps negative yaw error to positive throttle.
+    # H_TAIL_TYPE=3 (DDFP CW): no sign flip; positive PID -> positive throttle.
     # See enum table in the comment above.
-    "H_TAIL_TYPE":          4,
+    "H_TAIL_TYPE":          3,
     # SERVO4 range matches GB4008 hardware (800 us = off, 2000 us = max)
     "SERVO4_MIN":           800,
     "SERVO4_MAX":           2000,

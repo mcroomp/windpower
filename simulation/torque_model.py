@@ -5,14 +5,26 @@ Simulates the RAWES stationary inner assembly + spinning rotor hub + GB4008 moto
 Goal: verify that ArduPilot's SITL can regulate yaw using the tail-rotor control
 channel while the motor counter-rotates to maintain hub heading.
 
+Rotation convention (US helicopter, baked into the whole stack)
+---------------------------------------------------------------
+Main rotor spins CCW viewed from above.  In NED with body-z DOWN, right-hand
+rule gives CCW-from-above = angular-velocity vector along -body_z (UP), i.e.
+NEGATIVE gyro:z().  Under aerodynamic drag the body experiences a CCW
+reaction torque, so left to itself the inner assembly drifts CCW (gyro:z() < 0).
+The GB4008 motor counters by applying CW torque to the body — controlled by
+ATC_RAT_YAW PID with setpoint = 0.
+
 Physical setup
 --------------
   Rotor hub : outer spinning shell (blades + hub) in autorotation; omega_rotor [rad/s]
+              is the SIGNED scalar spin rate.  omega_rotor > 0 = CCW from above
+              (US convention).
   Hub       : stationary inner assembly (~1 kg); yaw DOF psi [rad], psi_dot [rad/s]
   Axle      : stationary central shaft; tether attaches at bottom -- does NOT rotate
-  Gear      : 80:44 (rotor hub : motor pinion), so omega_motor = omega_rotor x (80/44)
+  Gear      : 80:44 (rotor hub : motor pinion), so omega_motor = |omega_rotor| x (80/44)
   Motor     : GB4008 66KV BLDC; stator fixed to inner assembly, rotor geared to
-              spinning outer rotor hub
+              spinning outer rotor hub.  Motor throttle in [0, 1]; positive
+              throttle produces CW counter-torque on the body.
 
 Hub yaw model
 --------------
@@ -22,10 +34,11 @@ speed with a first-order lag (time constant MOTOR_TAU):
 
     d(omega_motor)/dt = (throttle x RPM_SCALE - omega_motor) / MOTOR_TAU
 
-The mechanical gear coupling is instantaneous.  Once omega_motor is known, the
-inner assembly yaw rate follows directly from the kinematic constraint:
+The mechanical gear coupling is instantaneous.  With US-convention rotor spinning
+CCW (omega_rotor > 0), the body wants to drift CCW; the motor (throttle > 0)
+adds CW torque that pushes psi_dot back toward zero:
 
-    psi_dot = omega_rotor - omega_motor / GEAR_RATIO
+    psi_dot = -omega_rotor + omega_motor / GEAR_RATIO
 
 psi_dot is an algebraic function of omega_motor and omega_rotor -- no hub inertia
 term appears.  The ESC absorbs all load (bearing drag, swashplate friction) by
@@ -41,8 +54,11 @@ At omega_rotor = 28 rad/s: throttle_eq = 28 x 1.818 / 105 ~= 0.485.
 
 Yaw drift
 ---------
-  throttle < throttle_eq  -->  psi_dot > 0  (CW drift -- inner assembly follows hub)
-  throttle > throttle_eq  -->  psi_dot < 0  (CCW drift -- inner assembly counter-rotates)
+  throttle < throttle_eq  -->  psi_dot < 0  (CCW drift -- body lags the motor's
+                                              counter-CW push, rotor wins)
+  throttle > throttle_eq  -->  psi_dot > 0  (CW drift -- motor pushes harder
+                                              than needed)
+  throttle = throttle_eq  -->  psi_dot = 0  (steady, body held against drag)
 """
 from __future__ import annotations
 
@@ -127,7 +143,9 @@ def step(
     omega_commanded = throttle * params.rpm_scale
     d_omega         = (omega_commanded - state.omega_motor) / params.motor_tau
     omega_motor_new = state.omega_motor + d_omega * dt
-    psi_dot         = omega_rotor - omega_motor_new / params.gear_ratio
+    # US convention: rotor CCW -> body drifts CCW (psi_dot < 0).  Motor
+    # produces CW counter-torque (+psi_dot direction).
+    psi_dot         = -omega_rotor + omega_motor_new / params.gear_ratio
     psi             = state.psi + psi_dot * dt
     return HubState(psi=psi, psi_dot=psi_dot, omega_motor=omega_motor_new)
 
