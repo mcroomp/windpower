@@ -667,7 +667,7 @@ Current hardware: GB4008 + 80:44 spur gear. See §5.2 and [components.md](compon
 
 | Parameter | Value | Reason |
 |---|---|---|
-| H_TAIL_TYPE | 4 (DDFP CCW) | Routes ATC_RAT_YAW PID to SERVO4 with CCW sign flip |
+| H_TAIL_TYPE | 3 (DDFP CW) | Routes ATC_RAT_YAW PID to SERVO4 directly (no sign flip) — matches US-convention rotor |
 | SERVO4_FUNCTION | 36 (Motor4) | Anti-rotation motor ESC on MAIN OUT 4 |
 | SERVO4_MIN | 800 µs | ESC disarm |
 | SERVO4_MAX | 2000 µs | ESC maximum |
