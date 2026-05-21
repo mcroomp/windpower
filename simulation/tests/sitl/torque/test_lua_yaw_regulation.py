@@ -84,11 +84,10 @@ _SETTLE_S          = 45.0   # startup_hold(15) + spinup(10) + 20 s for I-term to
 _OBSERVE_S         = 10.0   # tail end of the 30 s constant-RPM hold
 _MAX_PSI_DOT_RAD_S = math.radians(5.0)
 
-# RAWES collective range + ACRO rate scaling from rawes.lua (kept in sync
-# with COL_MIN_RAD / COL_MAX_RAD / ACRO_RP_RATE_DEG there).
+# RAWES collective range from rawes.lua (kept in sync with COL_MIN_RAD /
+# COL_MAX_RAD).
 _COL_MIN_RAD      = -0.28
 _COL_MAX_RAD      =  0.10
-_ACRO_RP_RATE_DEG = 360.0
 
 # Tolerance on the predicted SERVO PWM.  The Lua rounds to an integer PWM,
 # and the rate PID's small integral term contributes a few PWM of noise on
@@ -96,24 +95,19 @@ _ACRO_RP_RATE_DEG = 360.0
 _PWM_TOL          = 15
 
 
-def _world_to_body_trim(tlon_ref: float, tlat_ref: float, dyaw: float
-                        ) -> tuple[float, float]:
-    """Mirror rawes.lua effective_trim_body(): rotate the body-frame
-    trim (computed at the reference yaw, here taken at arming time) by
-    -dyaw into the current body frame.  Used to predict the cyclic the
-    Lua should emit at a given accumulated yaw drift."""
-    c, s = math.cos(-dyaw), math.sin(-dyaw)
-    return (tlon_ref * c - tlat_ref * s,
-            tlon_ref * s + tlat_ref * c)
-
-
-def _expected_pwm_for_cyclic(tilt_rad: float, atc_p_plus_ff: float,
+def _expected_pwm_for_cyclic(tilt_rad: float, h_cyc_max_cd: float,
                               sign: float) -> int:
     """Predicted ch1 / ch2 PWM for a given body-frame cyclic tilt.
-    Mirrors set_trim_ic_rc_overrides + rate_to_pwm in rawes.lua."""
-    bias_rad_s = sign * tilt_rad / max(atc_p_plus_ff, 0.01)
-    scale = 500.0 / math.radians(_ACRO_RP_RATE_DEG)
-    return int(round(1500.0 + scale * bias_rad_s))
+    Mirrors set_trim_ic_rc_overrides + trim_rad_to_pwm in rawes.lua.
+
+    With H_FLYBAR_MODE=1 (required by MODE_PASSIVE and MODE_YAW),
+    ACRO heli uses passthrough_bf_roll_pitch_rate_yaw: the RC pulse maps
+    directly to a fraction of H_CYC_MAX (centidegrees of swash tilt at
+    full stick)."""
+    stick_cd = sign * math.degrees(tilt_rad) * 100.0
+    stick_fraction = stick_cd / max(h_cyc_max_cd, 100.0)
+    stick_fraction = max(-1.0, min(1.0, stick_fraction))
+    return int(round(1500.0 + stick_fraction * 500.0))
 
 
 def _expected_pwm_for_collective(col_rad: float) -> int:
@@ -162,11 +156,11 @@ def test_lua_yaw_regulation(torque_armed_lua_yaw):
     )
 
     # ── Secondary: cyclic trim + IC collective are held throughout HOLD ───
-    # MODE_YAW must keep ch1/ch2 at the IC trim values (rotated into the
-    # current body frame by the integrated gyro:z() since the trim NVFs
-    # arrived) and ch3 at the IC collective.  Verify that the SERVO PWMs
-    # match the predicted values from rawes.lua's set_trim_ic_rc_overrides,
-    # accounting for any yaw drift that accumulated during the hold.
+    # MODE_YAW must keep ch1/ch2 at the IC trim values (held in the body
+    # frame the RAWES_TLN/TLT messages arrived in -- yaw drift does NOT
+    # rotate the cyclic) and ch3 at the IC collective.  Verify that the
+    # SERVO PWMs match the predicted values from rawes.lua's
+    # set_trim_ic_rc_overrides.
     _assert_trim_holding(ctx, servo_samples)
 
 
@@ -234,9 +228,11 @@ def _run_yaw_and_servo_loop(ctx, settle_s, observe_s):
 
 
 def _assert_trim_holding(ctx, servo_samples) -> None:
-    """Assert SERVO1/2 reflect the trim cyclic (rotated by accumulated
-    yaw) and SERVO3 reflects the IC collective.  Skips silently when
-    we have too few samples to be meaningful."""
+    """Assert SERVO1/2 reflect the (body-frame, no yaw rotation) trim
+    cyclic and SERVO3 reflects the IC collective.  rawes.lua holds the
+    trim in the body frame the RAWES_TLN/TLT values arrived in -- yaw
+    drift does not adjust swashplate cyclic.  Skips silently when we
+    have too few samples to be meaningful."""
     if len(servo_samples) < 5:
         ctx.log.warning(
             "Only %d SERVO+ATTITUDE samples in the HOLD window -- skipping "
@@ -244,29 +240,26 @@ def _assert_trim_holding(ctx, servo_samples) -> None:
             len(servo_samples))
         return
 
-    # Read the ATC rate-PID gains the Lua used at this run.
-    p_plus_ff_rll = float(ctx.gcs.get_param("ATC_RAT_RLL_P", 5.0) or 0.18) \
-                  + float(ctx.gcs.get_param("ATC_RAT_RLL_FF", 5.0) or 0.0)
-    p_plus_ff_pit = float(ctx.gcs.get_param("ATC_RAT_PIT_P", 5.0) or 0.18) \
-                  + float(ctx.gcs.get_param("ATC_RAT_PIT_FF", 5.0) or 0.0)
+    # Read H_CYC_MAX (centidegrees of swash tilt at full stick) -- the
+    # parameter that scales the flybar passthrough's RC -> swash command.
+    h_cyc_max = float(ctx.gcs.get_param("H_CYC_MAX", 5.0) or 2500.0)
 
     yaw_ref     = servo_samples[0]["yaw"]
     expected_s3 = _expected_pwm_for_collective(LUA_YAW_IC_COL)
+    # rawes.lua trim_rad_to_pwm: ch1 = passthrough(  _trim_lat, H_CYC_MAX)
+    #                            ch2 = passthrough( -_trim_lon, H_CYC_MAX)
+    # Trim is held in the body frame, so the expected PWMs are constant
+    # across the hold regardless of accumulated yaw drift.
+    expected_s1 = _expected_pwm_for_cyclic(LUA_YAW_TRIM_LAT, h_cyc_max, +1.0)
+    expected_s2 = _expected_pwm_for_cyclic(LUA_YAW_TRIM_LON, h_cyc_max, -1.0)
 
     diffs_s1, diffs_s2, diffs_s3 = [], [], []
     max_dyaw_deg = 0.0
     for s in servo_samples:
         d_yaw = s["yaw"] - yaw_ref
         max_dyaw_deg = max(max_dyaw_deg, abs(math.degrees(d_yaw)))
-        tlon_b, tlat_b = _world_to_body_trim(
-            LUA_YAW_TRIM_LON, LUA_YAW_TRIM_LAT, d_yaw,
-        )
-        # rawes.lua: ch1 = rate_to_pwm( tlat_b / (P+FF))
-        #            ch2 = rate_to_pwm(-tlon_b / (P+FF))
-        exp_s1 = _expected_pwm_for_cyclic(tlat_b, p_plus_ff_rll, +1.0)
-        exp_s2 = _expected_pwm_for_cyclic(tlon_b, p_plus_ff_pit, -1.0)
-        diffs_s1.append(s["s1"] - exp_s1)
-        diffs_s2.append(s["s2"] - exp_s2)
+        diffs_s1.append(s["s1"] - expected_s1)
+        diffs_s2.append(s["s2"] - expected_s2)
         diffs_s3.append(s["s3"] - expected_s3)
 
     ctx.log.info(
@@ -290,5 +283,5 @@ def _assert_trim_holding(ctx, servo_samples) -> None:
         failures.append(f"SERVO3: max |actual - expected| = {max_abs_s3} > {_PWM_TOL} PWM")
     assert not failures, (
         "MODE_YAW trim-hold violation (cyclic trim or collective not held "
-        "at the expected rotated value):\n  " + "\n  ".join(failures)
+        "at the expected body-frame value):\n  " + "\n  ".join(failures)
     )

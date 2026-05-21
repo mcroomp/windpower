@@ -217,59 +217,6 @@ class TestDampBzEqLateral:
             f"Mismatch at vel={vel_xyz} T={tension}"
 
 
-# ── effective_trim_body (yaw-rotated trim cyclic) ─────────────────────────────
-
-
-class TestEffectiveTrimBody:
-    """
-    The Lua's ``effective_trim_body`` rotates (_trim_lon, _trim_lat) by
-    ``-_yaw_since_trim`` so the world-frame disk-tilt direction stays
-    constant as the body yaws.  This is what makes MODE_YAW's cyclic
-    feedforward remain aligned with gravity / world-down regardless of
-    where the hub is pointing.
-
-    Rotation formula (body-frame trim at current yaw):
-        tlon_eff = tlon * cos(-d_yaw) - tlat * sin(-d_yaw)
-        tlat_eff = tlon * sin(-d_yaw) + tlat * cos(-d_yaw)
-    """
-
-    def _set_state(self, sim, tlon, tlat, dyaw):
-        sim.fns.set_trim_state(tlon, tlat, dyaw)
-
-    @pytest.mark.parametrize("tlon, tlat, dyaw_deg", [
-        ( 0.05,  0.02,    0.0),   # zero rotation -> identity
-        ( 0.05,  0.02,   90.0),   # 90 deg rotation: swap with sign
-        ( 0.05,  0.02,  -90.0),   # -90 deg
-        ( 0.05,  0.02,  180.0),   # 180 deg: negate both
-        ( 0.03,  0.00,   30.0),
-        ( 0.00,  0.04,   45.0),
-        (-0.02,  0.03,   60.0),
-    ])
-    def test_rotation_matches_python(self, sim, tlon, tlat, dyaw_deg):
-        """Lua ``effective_trim_body`` matches the closed-form rotation by -dyaw."""
-        dyaw = math.radians(dyaw_deg)
-        self._set_state(sim, tlon, tlat, dyaw)
-        tlon_lua, tlat_lua = sim.fns.effective_trim_body()
-        # Reference: rotate the (tlon, tlat) body-frame vector by -dyaw
-        c, s = math.cos(-dyaw), math.sin(-dyaw)
-        tlon_expect = tlon * c - tlat * s
-        tlat_expect = tlon * s + tlat * c
-        assert tlon_lua == pytest.approx(tlon_expect, abs=1e-10), \
-            f"tlon mismatch at dyaw={dyaw_deg} deg"
-        assert tlat_lua == pytest.approx(tlat_expect, abs=1e-10), \
-            f"tlat mismatch at dyaw={dyaw_deg} deg"
-
-    def test_world_frame_norm_preserved(self, sim):
-        """Rotation is unitary: ||(tlon, tlat)|| is invariant under any yaw drift."""
-        tlon, tlat = 0.04, -0.03
-        norm_ref = math.hypot(tlon, tlat)
-        for dyaw_deg in (-180.0, -90.0, -30.0, 0.0, 30.0, 90.0, 180.0):
-            self._set_state(sim, tlon, tlat, math.radians(dyaw_deg))
-            t1, t2 = sim.fns.effective_trim_body()
-            assert math.hypot(t1, t2) == pytest.approx(norm_ref, abs=1e-10), \
-                f"norm changed at dyaw={dyaw_deg} deg"
-
-
 # ── cyclic_error_body ─────────────────────────────────────────────────────────
 
 class TestCyclicErrorBody:

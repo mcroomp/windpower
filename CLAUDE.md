@@ -108,6 +108,40 @@ What it implies in NED with body-z DOWN:
 
 **Don't flip the sign of `omega_rotor` to "fix" a symptom in a test.** The whole stack assumes a positive `omega_rotor` is the CCW-from-above spin magnitude. If a test breaks, the bug is upstream (sign convention violation), not in the rotor input.
 
+#### Swashplate geometry (H3-120 — physically canonical layout)
+
+The bench rig's swashplate is a non-standard H3-120: **two front servos and one rear servo**. The Pixhawk sits between them; its nose points the same direction as the airframe nose (`AHRS_ORIENTATION = 0`). Servo azimuths are measured CCW from the FC's forward axis looking down:
+
+| Servo | Azimuth | Physical position |
+|---|---|---|
+| **S1** | -60° | front-right |
+| **S2** | +60° | front-left |
+| **S3** | 180° | back (on the longitudinal axis) |
+
+`H_SW_TYPE = 3` (H3 generic), `H_SW_H3_PHANG = 0`. The single source of truth in code is [simulation/swashplate.py:43](simulation/swashplate.py#L43) (`_AZIMUTHS_DEG = (-60.0, 60.0, 180.0)`).
+
+ArduPilot's swash mixer derives roll/pitch factors from azimuth via [AP_MotorsHeli_Swash::add_servo_angle](C:/repos/ardupilot/libraries/AP_Motors/AP_MotorsHeli_Swash.cpp#L180):
+
+| Servo | roll_factor = -sin(az) × 0.45 | pitch_factor = cos(az) × 0.45 |
+|---|---|---|
+| S1 | +0.390 | +0.225 |
+| S2 | -0.390 | +0.225 |
+| S3 | 0.000 | -0.450 |
+
+Verified empirically by `run passive --trim oscillate=1` ([logs/calibrate/run_passive_*.csv](simulation/logs/calibrate/)):
+
+| Command | S1 (front-R) | S2 (front-L) | S3 (back) |
+|---|---|---|---|
+| `tlon +` (nose-down disk) | ↓ | ↓ | ↑ |
+| `tlat +` (roll-right disk) | ↑ | ↓ | — |
+| `col +` (collective up) | ↑ | ↑ | ↑ |
+
+**Consistency rules:**
+- The four params `H_SW_H3_SV1_POS`, `H_SW_H3_SV2_POS`, `H_SW_H3_SV3_POS`, `AHRS_ORIENTATION` form a coupled set. **Never change one without checking the other three** — a 180° mismatch silently inverts all cyclic commands.
+- If the FC is ever physically rotated (e.g. mounted facing backward), update `AHRS_ORIENTATION` (e.g. `4` = YAW_180) rather than swapping individual servo positions.
+- If servos are physically swapped on the swashplate, update `H_SW_H3_SV{1,2,3}_POS` to match — do NOT compensate via SERVO reversal flags (works for direction but not for the geometric mixer math).
+- [simulation/scripts/calibrate.py](simulation/scripts/calibrate.py)'s `_h3_forward_mix` (used by the `swash <coll%> <lon%> <lat%>` calibration command) must use the SAME azimuths (-60° / +60° / 180°). The function bypasses the heli mixer (direct DO_SET_SERVO), so it has its own copy of the geometry — keep it in sync.
+
 ### Sensors & EKF (physically faithful, no overrides)
 
 `sensor.py` must report exactly what the real Pixhawk hardware would see. The electronics hub is the fuselage; `R_hub` is its full 3-DOF orientation, integrated by the dynamics ODE.
@@ -170,14 +204,14 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 **Unit tests and simtests: Windows native, no Docker. Stack tests: Docker required. Never mix.**
 
-- **`.venv`** — Windows venv for unit tests and simtests. `run_tests.py` auto-installs when `requirements.txt` changes (SHA-256 hash stamp).
+- **`simulation/.venv`** — Windows venv for unit tests and simtests. `run_tests.py` auto-installs when `requirements.txt` changes (SHA-256 hash stamp).
 - **Docker container** — has its own Python env (never use the Windows venv inside Docker). Managed by `dev.sh build`.
 
 ### Rules
 
 - **Use Bash tool directly — never `wsl.exe`. Always absolute paths.**
 - **Always pass an explicit test path to `run_tests.py`** (e.g. `simulation/tests/unit` or `simulation/tests/simtests`). Running without a path lets pytest wander into `simulation/analysis/` and other non-test scripts using `argparse`, causing collection errors.
-- **Scope `Grep` to `e:/repos/windpower/simulation/`** — the repo root contains `.venv/` with hundreds of thousands of third-party files.
+- **Scope `Grep` to source dirs (e.g. `simulation/scripts/`, `simulation/tests/`)** — `simulation/.venv/` contains hundreds of thousands of third-party files.
 - **NEVER call `docker exec` directly to run stack tests. Use `bash simulation/dev.sh test-stack`.** Each stack test always runs in its own fresh Docker container.
 - **Unit/simtests run via the Windows venv directly — NOT via `dev.sh test-unit`** (which routes to Docker and fails because `tests/unit` is excluded from the container sync).
 
@@ -185,20 +219,20 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 | Task | Command |
 |------|---------|
-| Unit tests (~685) | `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| Simtests (~13) | `.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
-| Simtest (single) | `.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
+| Unit tests (~685) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| Simtests (~13) | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
+| Simtest (single) | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
 | Stack test (single) | `bash simulation/dev.sh test-stack -n 1 -k test_foo` |
 | Stack test (full) | `bash simulation/dev.sh test-stack -n 8` |
-| **Post-failure analysis** | `.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` (add `--bucket 10` for coarser view) |
-| **Visualize result** | `.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv` |
-| Scrub frames | `.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
-| Render to MP4/GIF | `.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
-| **Pumping envelope** | `.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` (add `--wind 8 10 12`, `--telemetry <csv>`) |
-| **Pump cycle diagnosis** | `.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
-| **Landing diagnosis** | `.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua] [--bucket 2]` |
-| **High-freq telemetry** | `RAWES_TEL_HZ=400 .venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k <name> -s` (default 20 Hz) |
-| **Regenerate `steady_state_starting.json`** | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s` — **the ONLY test that writes the file.** Run after any aero model change. |
+| **Post-failure analysis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` (add `--bucket 10` for coarser view) |
+| **Visualize result** | `simulation/.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv` |
+| Scrub frames | `simulation/.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
+| Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
+| **Pumping envelope** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` (add `--wind 8 10 12`, `--telemetry <csv>`) |
+| **Pump cycle diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
+| **Landing diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua] [--bucket 2]` |
+| **High-freq telemetry** | `RAWES_TEL_HZ=400 simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k <name> -s` (default 20 Hz) |
+| **Regenerate `steady_state_starting.json`** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s` — **the ONLY test that writes the file.** Run after any aero model change. |
 | Container start/stop | `bash simulation/dev.sh start` / `bash simulation/dev.sh stop` |
 | Docker build | `bash simulation/dev.sh build` (~30–60 min; use `run_in_background=true`, no trailing `&`) |
 | Run inside container | `bash simulation/dev.sh exec 'python3 /rawes/simulation/...'` |

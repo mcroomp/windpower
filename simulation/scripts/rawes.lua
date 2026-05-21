@@ -183,14 +183,11 @@ local _tension_n      = 200.0   -- tether tension estimate [N]; updated from RAW
 -- have to fight it after kinematic_exit.  Computed by aero.solve_trim_cyclic
 -- in the test fixture.  Default 0 = no feedforward.
 --
--- The trim values are body-frame at the moment the ground sent them.
--- _yaw_since_trim integrates gyro:z() since the most recent trim update so
--- the body-frame command can be rotated to keep the world-frame disk-tilt
--- direction constant as the body yaws -- making the cyclic effectively
--- "aligned with world-down" regardless of which way the hub is pointing.
+-- Held in the body frame the values arrived in.  We do NOT rotate the cyclic
+-- by accumulated body yaw -- the disk-tilt direction follows the hub as it
+-- yaws (yaw orientation never adjusts swashplate cyclic).
 local _trim_lon       = 0.0
 local _trim_lat       = 0.0
-local _yaw_since_trim = 0.0     -- gyro:z() integrated since last RAWES_TLN/TLT [rad]
 
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
@@ -305,30 +302,36 @@ local function cyclic_error_body(bz_now, bz_target_arg)
     return {err_body:x(), err_body:y()}
 end
 
--- Return the trim cyclic in the CURRENT body frame, rotated by
--- -_yaw_since_trim so the world-frame disk-tilt direction stays constant
--- as the body yaws.  The trim values arrive in the body frame at the
--- moment they were sent; _yaw_since_trim integrates gyro:z() since then.
-local function effective_trim_body()
-    local c = math.cos(-_yaw_since_trim)
-    local s = math.sin(-_yaw_since_trim)
-    return _trim_lon * c - _trim_lat * s,
-           _trim_lon * s + _trim_lat * c
+-- Compute the RC1/RC2/RC3 PWM overrides for holding the IC operating
+-- point.  Used by MODE_PASSIVE and MODE_YAW, both of which require
+-- H_FLYBAR_MODE=1 (calibrate.py's `run` command sets this on entry and
+-- restores on exit).
+--
+-- With H_FLYBAR_MODE=1 ArduPilot's ACRO heli takes the passthrough branch
+-- (passthrough_bf_roll_pitch_rate_yaw in mode_acro_heli.cpp) -- RC1/RC2
+-- stick deflection becomes a direct cyclic command, scaled against
+-- H_CYC_MAX (centidegrees of swash tilt at full stick).
+--
+--   stick_fraction = trim_rad_in_deg / (H_CYC_MAX / 100)
+--   RC_offset_us   = stick_fraction * 500
+--   PWM            = 1500 + RC_offset_us
+--
+-- The trim is held in the body frame the RAWES_TLN/TLT values arrived in --
+-- yaw orientation does not adjust swashplate cyclic.
+local function trim_rad_to_pwm(trim_rad, h_cyc_max_cd)
+    local stick_cd = math.deg(trim_rad) * 100.0
+    local stick_fraction = stick_cd / math.max(h_cyc_max_cd, 100.0)
+    if stick_fraction >  1.0 then stick_fraction =  1.0 end
+    if stick_fraction < -1.0 then stick_fraction = -1.0 end
+    return math.floor(1500.0 + stick_fraction * 500.0 + 0.5)
 end
 
--- Compute the RC1/RC2/RC3 PWM overrides for holding the IC operating
--- point: cyclic = trim (rotated to current body yaw) expressed as the
--- ATC rate-PID setpoint bias that produces the desired cyclic angle at
--- steady state; collective = _ic_col mapped through the standard
--- collective_rad -> PWM formula.  Shared by MODE_PASSIVE and MODE_YAW.
 local function set_trim_ic_rc_overrides()
-    local _g_rll = math.max(p("ATC_RAT_RLL_P", 0.18) + p("ATC_RAT_RLL_FF", 0.0), 0.01)
-    local _g_pit = math.max(p("ATC_RAT_PIT_P", 0.18) + p("ATC_RAT_PIT_FF", 0.0), 0.01)
-    local tlon_b, tlat_b = effective_trim_body()
+    local h_cyc_max = p("H_CYC_MAX", 2500.0)
     -- HeliCyclicController sign mapping (controller.py): tilt_lat == roll_cyclic,
     -- tilt_lon == -pitch_cyclic.  Match that here.
-    local _ch1 = rate_to_pwm( tlat_b / _g_rll)
-    local _ch2 = rate_to_pwm(-tlon_b / _g_pit)
+    local _ch1 = trim_rad_to_pwm( _trim_lat, h_cyc_max)
+    local _ch2 = trim_rad_to_pwm(-_trim_lon, h_cyc_max)
     if _rc_ch1 then _rc_ch1:set_override(_ch1) end
     if _rc_ch2 then _rc_ch2:set_override(_ch2) end
 
@@ -406,10 +409,9 @@ local function run_yaw_pid(dt)
     if pwm < servo_min then pwm = servo_min end
     SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, pwm, 200)
 
-    -- Hold cyclic at IC trim (rotated by -_yaw_since_trim so the world-
-    -- frame disk-tilt direction stays constant regardless of body yaw) and
-    -- collective at _ic_col.  When the trim NVFs are unset they default to
-    -- 0 (neutral cyclic) / COL_CRUISE_FLIGHT_RAD, matching the prior
+    -- Hold cyclic at IC trim (body frame, no yaw-drift rotation) and
+    -- collective at _ic_col.  When the trim NVFs are unset they default
+    -- to 0 (neutral cyclic) / COL_CRUISE_FLIGHT_RAD, matching the prior
     -- neutral/cruise behaviour.
     set_trim_ic_rc_overrides()
 
@@ -679,13 +681,11 @@ local function update()
     if _nv_floats["RAWES_ALT"]    then _target_alt   = _nv_floats["RAWES_ALT"]    end
     if _nv_floats["RAWES_TEN"]    then _tension_n    = _nv_floats["RAWES_TEN"]    end
     if _nv_floats["RAWES_TLN"] then
-        _trim_lon       = _nv_floats["RAWES_TLN"]
-        _yaw_since_trim = 0.0   -- new reference yaw = current body yaw
+        _trim_lon = _nv_floats["RAWES_TLN"]
         _nv_floats["RAWES_TLN"] = nil
     end
     if _nv_floats["RAWES_TLT"] then
-        _trim_lat       = _nv_floats["RAWES_TLT"]
-        _yaw_since_trim = 0.0
+        _trim_lat = _nv_floats["RAWES_TLT"]
         _nv_floats["RAWES_TLT"] = nil
     end
     if _nv_floats["RAWES_COL"]    then _ic_col       = _nv_floats["RAWES_COL"]    end
@@ -725,32 +725,24 @@ local function update()
         _rc_ch8:set_override(2000)
     end
 
-    -- Integrate gyro:z() so MODE_PASSIVE / MODE_YAW can rotate the trim
-    -- cyclic into the current body frame, keeping the world-frame disk-
-    -- tilt direction constant as the body yaws.
-    if mode == MODE_PASSIVE or mode == MODE_YAW then
-        local _gyro = ahrs:get_gyro()
-        if _gyro then
-            _yaw_since_trim = _yaw_since_trim + _gyro:z() * (BASE_PERIOD_MS * 0.001)
-        end
-    else
-        -- Other modes do not use trim cyclic; reset so the next entry
-        -- to PASSIVE/YAW starts from a clean reference yaw.
-        _yaw_since_trim = 0.0
-    end
-
     if mode == MODE_PASSIVE then
         -- Armed-but-quiet: hold the IC operating point so the kinematic
         -- release transitions smoothly.  Cyclic rate setpoints are sized
         -- so ArduPilot's rate PID produces _trim_lon / _trim_lat at
-        -- steady state (rotated by -_yaw_since_trim into the current
-        -- body frame); ch3 pins collective at _ic_col.
+        -- steady state (body frame, no yaw-drift rotation); ch3 pins
+        -- collective at _ic_col.
         set_trim_ic_rc_overrides()
+        -- Take ownership of SERVO4 and pin the GB4008 at 800 us (ESC armed
+        -- but motor off).  Matches the safety-shutdown PWM used by
+        -- calibrate.py so a PASSIVE session never spins the rotor.  Same
+        -- direct-write path MODE_YAW uses; needs SERVO4_FUNCTION=0 for the
+        -- override to stick (calibrate.py's `passive` command handles that).
+        SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, 800, 200)
         if now - _none_status_ms >= 5000 then
             _none_status_ms = now
             gcs:send_text(6, string.format(
-                "RAWES PASS: dyaw=%.2fdeg  tlon=%.4f tlat=%.4f col=%.3f",
-                math.deg(_yaw_since_trim), _trim_lon, _trim_lat, _ic_col))
+                "RAWES PASS: tlon=%.2fdeg tlat=%.2fdeg col=%.2fdeg s4=800",
+                math.deg(_trim_lon), math.deg(_trim_lat), math.deg(_ic_col)))
         end
         return update, BASE_PERIOD_MS
     end
@@ -763,12 +755,11 @@ local function update()
     end
 
     if mode == MODE_YAW then
-        -- Hold cyclic at IC trim (rotated to current body frame so the
-        -- world-frame disk-tilt direction stays aligned with the
-        -- gravity-comp reference regardless of how the hub has yawed)
-        -- and collective at _ic_col.  run_yaw_pid drives SERVO4 directly
-        -- via SRV_Channels and overrides ch1/ch2/ch3 at the end with
-        -- the IC trim values (see run_yaw_pid).
+        -- Hold cyclic at IC trim in the body frame it arrived in (no
+        -- yaw-drift rotation -- the disk-tilt direction follows the body
+        -- as it yaws) and collective at _ic_col.  run_yaw_pid drives
+        -- SERVO4 directly via SRV_Channels and overrides ch1/ch2/ch3 at
+        -- the end with the IC trim values (see run_yaw_pid).
         run_yaw_pid(BASE_PERIOD_MS * 0.001)
     end
 

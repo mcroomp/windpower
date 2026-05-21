@@ -7,8 +7,9 @@ Checks that:
   3. Hub stays above minimum altitude (no crash).
 
 Also measures and logs phase angles and cross-coupling ratios at H_PHANG=0.
-Cross-coupling is asserted to stay below _CROSS_COUPLING_MAX (0.80).
-The test does NOT attempt to modify H_PHANG.
+Cross-coupling is asserted to stay below _CROSS_COUPLING_MAX (0.30) since the
+bench-rig physical layout matches ArduPilot's expected H3-120 azimuths.  The
+test does NOT attempt to modify H_PHANG.
 
 Scope note: this test measures servo PWM -> swashplate tilt only (geometric
 decode via h3_inverse_mix).  It validates ArduPilot mixing (H_SW_TYPE,
@@ -26,15 +27,15 @@ Phase angle definitions
 -----------------------
   phase_ch1 = atan2(delta_tilt_lon, delta_tilt_lat)  [ideal: 0 deg for roll cmd]
   phase_ch2 = atan2(delta_tilt_lat, delta_tilt_lon)  [ideal: 0 deg for pitch cmd]
-  cross_coupling = |off-axis| / |on-axis|             [~0.55 expected at PHANG=0]
+  cross_coupling = |off-axis| / |on-axis|             [near 0 with matched layout]
 
 Cross-coupling at H_SW_PHANG=0
 -------------------------------
-ArduPilot H3_120 assumes servo angles of -60 deg/+60 deg/180 deg.
-RAWES physical layout is 0 deg/120 deg/240 deg (S1 East, S2 120 deg, S3 240 deg).
-The 60 deg geometric offset produces inherent cross-coupling of ~0.55 at PHANG=0.
-This is expected and is asserted to stay below _CROSS_COUPLING_MAX (0.80).
-Values above 0.80 would indicate a servo swap, wrong H_SW_TYPE, or firmware bug.
+ArduPilot H3_120 and the RAWES bench rig both use servo azimuths
+-60 deg / +60 deg / 180 deg (S1 front-right, S2 front-left, S3 back).
+With layouts matched, cross-coupling at PHANG=0 should be near zero.
+Asserted to stay below _CROSS_COUPLING_MAX (0.30); values above that
+indicate a servo swap, wrong H_SW_TYPE, or firmware bug.
 """
 
 import logging
@@ -247,7 +248,7 @@ def test_h_swash_phang(acro_armed: StackContext):
         # With internal_controller=True the mediator's 10 Hz RC overrides fight
         # any forced attitude step, contaminating the cross-axis servo reading.
         # Reliable measurement requires internal_controller=False (not yet wired).
-        # Expected geometric value at H_SW_PHANG=0: ~0.55 (60-deg H3_120 offset).
+        # Expected value at H_SW_PHANG=0 with matched layout: ~0.
         _log.info(
             "  cross_ch1 = %.3f  (diagnostic, not asserted; expected ~0 with faithful inverse)",
             m["cross_ch1"],
