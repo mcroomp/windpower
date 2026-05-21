@@ -112,7 +112,7 @@ def test_hover_collective_is_negative():
 
 def _d_omega(omega: float, col: float, R_hub: np.ndarray) -> float:
     """Run the aero forward to a settled inflow and read d_omega from the derivative."""
-    from aero import RotorInputs
+    from dynbem import RotorInputs
     state = _AERO.initial_rotor_state()
     state.omega_rad_s = float(omega)
     inputs = RotorInputs(
@@ -145,7 +145,7 @@ def test_autorotation_omega_equilibrium_in_range():
 
     Settled omega in [8, 60] rad/s and |d_omega| < 0.01 rad/s^2.
     """
-    from aero import RotorInputs
+    from dynbem import RotorInputs
     R30 = _R_tilt(ELEV_DEG)
     col = math.radians(-10.0)
     state = _AERO.initial_rotor_state()

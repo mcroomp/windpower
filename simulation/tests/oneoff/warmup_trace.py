@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests" / "simtests"))
 
-from aero            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
+from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
 from frames          import build_orb_frame
 from simtest_runner  import PhysicsRunner, PythonAP
 from ap_controller   import TensionApController

@@ -261,7 +261,7 @@ def acro_armed_lua_full(tmp_path, request):
         if _ic is not None:
             try:
                 import numpy as _np_trim
-                from aero import create_aero, solve_trim_cyclic
+                from dynbem import create_aero, solve_trim_cyclic
                 from tests.simtests._rotor_helpers import load_default_rotor
                 _rotor_trim = load_default_rotor()
                 _aero_trim  = create_aero(_rotor_trim, model="oye")

@@ -43,7 +43,7 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
 import numpy as _np
-from aero import rotor_definition as _rd  # noqa: F401 — re-exported for callers
+from dynbem import rotor_definition as _rd  # noqa: F401 — re-exported for callers
 
 # Project default rotor (the new aero package leaves ``default()`` undefined;
 # we load it here from the project's YAML).

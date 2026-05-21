@@ -11,8 +11,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "unit"))
 
-from aero import rotor_definition as rd
-from aero import create_aero
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
 from controller import col_min_for_altitude_rad
 from simtest_ic import load_ic
 

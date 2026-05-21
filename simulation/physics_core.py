@@ -39,7 +39,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dynamics   import RigidBodyDynamics
-from aero       import create_aero, RotorInputs
+from dynbem       import create_aero, RotorInputs
 from tether     import TetherModel
 from frames     import build_orb_frame
 

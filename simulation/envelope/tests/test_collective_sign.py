@@ -22,8 +22,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import rotor_definition as rd
-from aero import create_aero
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
 
 R_HORIZONTAL = np.array([[-1.,  0.,  0.],
                           [ 0.,  1.,  0.],

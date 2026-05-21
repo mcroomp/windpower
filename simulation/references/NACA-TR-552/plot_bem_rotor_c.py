@@ -31,8 +31,8 @@ HERE = Path(__file__).parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "simulation"))
 
-from aero import rotor_definition as rd
-from aero import create_aero
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
 
 # ---------------------------------------------------------------------------
 # Rotor and model setup

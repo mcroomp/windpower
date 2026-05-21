@@ -26,8 +26,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aero import rotor_definition as rd
-from aero import create_aero
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 import argparse

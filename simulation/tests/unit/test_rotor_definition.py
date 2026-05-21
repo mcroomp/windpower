@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import rotor_definition as rd
+from dynbem import rotor_definition as rd
 from tests.unit._aero_probe import load_rotor
 
 
@@ -51,7 +51,8 @@ class TestBeaupoilGeometry:
 
     def test_S_w_m2(self):
         # S_w = N * c * span = 4 * 0.20 * 2.0 = 1.60 m^2
-        assert self.r.blade.S_w_m2 == pytest.approx(4 * 0.20 * 2.0)
+        b = self.r.blade
+        assert b.n_blades * b.chord_m * b.span_m == pytest.approx(4 * 0.20 * 2.0)
 
     def test_disk_area_m2(self):
         # A = pi(R^2 - r_root^2) = pi * 6.0 ~ 18.85 m^2
@@ -60,7 +61,8 @@ class TestBeaupoilGeometry:
 
     def test_aspect_ratio(self):
         # AR = span / chord = 2.0 / 0.20 = 10.0
-        assert self.r.blade.aspect_ratio == pytest.approx(10.0, rel=1e-6)
+        b = self.r.blade
+        assert b.span_m / b.chord_m == pytest.approx(10.0, rel=1e-6)
 
     def test_solidity(self):
         # sigma = N * c / (pi * R) = 4 * 0.20 / (pi * 2.5)
@@ -79,7 +81,8 @@ class TestDeSchutterGeometry:
 
     def test_aspect_ratio(self):
         # AR = 1.5 / 0.125 = 12
-        assert self.r.blade.aspect_ratio == pytest.approx(12.0, rel=1e-6)
+        b = self.r.blade
+        assert b.span_m / b.chord_m == pytest.approx(12.0, rel=1e-6)
 
     def test_kaman_disabled(self):
         if self.r.control is not None:

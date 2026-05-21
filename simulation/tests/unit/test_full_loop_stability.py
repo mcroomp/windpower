@@ -175,7 +175,7 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
     from ap_controller   import TensionApController
     from pumping_planner import TensionCommand
     from controller      import HeliCyclicController
-    from aero            import solve_trim_cyclic
+    from dynbem            import solve_trim_cyclic
 
     ic_kwargs = _make_ic(elevation_deg, tether_length_m=100.0)
     from types import SimpleNamespace
@@ -325,7 +325,7 @@ def _run_alt_hold_fixed_collective(
     then the TensionPI / collective regulator (NOT the cyclic chain) is
     what's destabilising ``test_create_ic``.
     """
-    from aero            import solve_trim_cyclic
+    from dynbem            import solve_trim_cyclic
     from controller      import (
         HeliCyclicController, AltitudeHoldController,
         compute_rate_cmd, damp_bz_eq_lateral,
@@ -428,7 +428,7 @@ def _run_attitude_only_at_fixed_equilibrium(
     inside the windpower codebase.  Pass condition mirrors the aero test:
     the angle to the fixed body_z_eq decays to < 1° within t_total.
     """
-    from aero       import RotorInputs, solve_trim_cyclic
+    from dynbem       import RotorInputs, solve_trim_cyclic
     from controller import HeliCyclicController, compute_rate_cmd
 
     el          = math.radians(elevation_deg)
@@ -594,14 +594,14 @@ def _run_with_constant_tether_force(
 
     Force on hub from tether:  F_tether = T · (anchor − pos) / |anchor − pos|
     Force from gravity:        F_grav  = [0, 0, m·g]
-    Force from rotor:           F_aero from aero.compute_forces(...)
+    Force from rotor:           F_aero from dynbem.compute_forces(...)
 
     No restoring moment from the tether (the elastic TetherModel applies
     a tether-axis restoring moment via the axle attachment; in
     ``attitude_sim`` and here that's omitted — the rotor's own moments
     are the only torques on the body).
     """
-    from aero       import RotorInputs, solve_trim_cyclic
+    from dynbem       import RotorInputs, solve_trim_cyclic
     from controller import (
         HeliCyclicController, AltitudeHoldController,
         compute_rate_cmd, compute_bz_tether,

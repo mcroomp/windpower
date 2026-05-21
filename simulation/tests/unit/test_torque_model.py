@@ -85,32 +85,34 @@ def _warm_up(
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-def test_low_throttle_causes_cw_drift():
+def test_low_throttle_causes_ccw_drift():
     """
-    With throttle=0 the motor is commanded to zero speed.  The outer hub still
-    spins at omega_rotor, so the inner assembly is dragged CW with it.
+    US convention: rotor spins CCW (viewed from above), so under Newton's 3rd
+    law the body is dragged CCW (psi_dot < 0) absent any motor counter-torque.
+    With throttle=0 the motor is idle and the body drifts CCW freely.
 
-    omega_motor starts at 0 and stays at 0 (commanded=0), so psi_dot = omega_rotor > 0.
+    psi_dot = -omega_rotor + omega_motor / GEAR_RATIO; omega_motor=0 -> psi_dot = -omega_rotor < 0.
     """
     params = m.HubParams()
     state  = m.step(m.HubState(), m.OMEGA_ROTOR_NOMINAL, 0.0, params, DT)
-    assert state.psi_dot > 0.1, (
-        f"Throttle=0 should cause CW drift (psi_dot > 0); got {state.psi_dot:.4f} rad/s"
+    assert state.psi_dot < -0.1, (
+        f"Throttle=0 should cause CCW drift (psi_dot < 0); got {state.psi_dot:.4f} rad/s"
     )
 
 
-def test_high_throttle_causes_ccw_drift():
+def test_high_throttle_causes_cw_drift():
     """
-    With throttle=1 the motor is commanded above equilibrium speed.
-    After the motor spins up (>> MOTOR_TAU), the inner assembly counter-rotates CCW.
+    US convention: motor produces CW counter-torque to oppose CCW body drift.
+    With throttle=1 the motor is commanded above equilibrium speed, so the
+    net result is a CW (psi_dot > 0) drift at steady state.
 
-    psi_dot = omega_rotor - omega_motor / GEAR_RATIO < 0 once omega_motor -> RPM_SCALE.
+    psi_dot = -omega_rotor + omega_motor / GEAR_RATIO > 0 once omega_motor -> RPM_SCALE.
     """
     params = m.HubParams()
     # warm up to steady state at throttle=1
     state = _warm_up(m.OMEGA_ROTOR_NOMINAL, 1.0, params)
-    assert state.psi_dot < -0.1, (
-        f"Throttle=1 should cause CCW drift (psi_dot < 0) at steady state; "
+    assert state.psi_dot > 0.1, (
+        f"Throttle=1 should cause CW drift (psi_dot > 0) at steady state; "
         f"got {state.psi_dot:.4f} rad/s (omega_motor={state.omega_motor:.2f})"
     )
 

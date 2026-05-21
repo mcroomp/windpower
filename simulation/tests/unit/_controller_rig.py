@@ -56,7 +56,7 @@ from typing import Callable
 
 import numpy as np
 
-from aero import RotorInputs, OyeBEMModel
+from dynbem import RotorInputs, OyeBEMModel
 from controller import HeliCyclicController
 from dynamics import RigidBodyDynamics
 

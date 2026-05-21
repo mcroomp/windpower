@@ -1104,7 +1104,7 @@ def col_min_for_altitude_rad(
     import math as _math
     import numpy as _np
     from frames import build_orb_frame as _build_orb_frame
-    from aero   import RotorInputs as _RotorInputs
+    from dynbem   import RotorInputs as _RotorInputs
 
     xi_r = _math.radians(xi_deg)
     # bz in NED: East = Y axis.  xi from East direction toward Down (negative NED Z = Up).

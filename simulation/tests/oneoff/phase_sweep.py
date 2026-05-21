@@ -19,7 +19,7 @@ from dataclasses import replace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero import OyeBEMModel, RotorInputs, rotor_definition as rd
+from dynbem import OyeBEMModel, RotorInputs, rotor_definition as rd
 from dynamics import RigidBodyDynamics
 
 

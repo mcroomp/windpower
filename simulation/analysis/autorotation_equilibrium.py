@@ -22,8 +22,8 @@ from scipy.optimize import brentq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aero import rotor_definition as rd
-from aero.aero_peters_he_jit import PetersHeBEMJit
+from dynbem import rotor_definition as rd
+from dynbem.aero_peters_he_jit import PetersHeBEMJit
 
 WIND      = np.array([0.0, 10.0, 0.0])   # NED: East at 10 m/s
 COL       = 0.0                            # rad: free autorotation, no blade pitch

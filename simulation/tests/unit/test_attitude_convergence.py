@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aero        import RotorInputs
+from dynbem        import RotorInputs
 from controller  import HeliCyclicController, compute_rate_cmd
 from dynamics    import RigidBodyDynamics
 from frames      import build_orb_frame
@@ -40,7 +40,7 @@ _I_SPIN = float(_ROTOR.inertia.I_spin_kgm2
                 if _ROTOR.inertia.I_spin_kgm2 is not None else 0.0)
 
 DT          = 1.0 / 400.0
-# Most attitude-convergence tests isolate the control loop from aero
+# Most attitude-convergence tests isolate the control loop from dynbem
 # disturbances by using zero wind.  See `test_wind_creates_baseline_hub_moment`
 # below for the disturbance fact this isolation hides.
 WIND_NONE   = np.zeros(3)
@@ -194,7 +194,7 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
     With trim: the cyclic output equals the trim cyclic, which the aero
     package guarantees nulls the hub moment to within tolerance.
     """
-    from aero import solve_trim_cyclic
+    from dynbem import solve_trim_cyclic
     from controller import HeliCyclicController
 
     R = build_orb_frame(np.array([0.0, 0.0, 1.0]))

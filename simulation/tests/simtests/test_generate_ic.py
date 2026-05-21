@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-from aero            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
+from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
 from frames          import build_orb_frame
 from simtest_runner  import PhysicsRunner, PythonAP
 from ap_controller   import TensionApController

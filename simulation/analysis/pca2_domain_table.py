@@ -9,8 +9,8 @@ dominates and the model breaks down without blade flapping.
 import sys, math
 import numpy as np
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-from aero import rotor_definition as rd
-from aero import create_aero
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
 
 rotor = rd.load("pca2_1934")
 aero  = create_aero(rotor)

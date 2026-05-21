@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from aero import OyeBEMModel, RotorInputs, rotor_definition as _rd
+from dynbem import OyeBEMModel, RotorInputs, rotor_definition as _rd
 
 
 _ROTOR_DEFS = Path(__file__).resolve().parents[2] / "rotor_definitions"

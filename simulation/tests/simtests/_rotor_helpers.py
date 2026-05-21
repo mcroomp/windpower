@@ -10,7 +10,7 @@ those up from here so they have a single source of truth.
 from __future__ import annotations
 from pathlib import Path
 
-from aero import rotor_definition as _rd
+from dynbem import rotor_definition as _rd
 
 
 _ROTOR_DEFS = Path(__file__).resolve().parents[2] / "rotor_definitions"

@@ -42,7 +42,7 @@ def _ramp_full_column(args: tuple) -> list:
     """
     vi, wi, ai, v_target, wind, angle, v_tension_list, dt, tension_list_unified = args
     import rotor_definition as rd
-    from aero import create_aero
+    from dynbem import create_aero
     from frames import build_orb_frame
     from envelope.point_mass import tether_hat, balance_bz
 

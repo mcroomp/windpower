@@ -47,8 +47,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aero import create_aero
-from aero import rotor_definition as rd
+from dynbem import create_aero
+from dynbem import rotor_definition as rd
 
 # ── Current simtest parameters (shown as baseline in all tables) ──────────────
 TENSION_OUT_NOW  = 435.0   # N  reel-out TensionPI setpoint

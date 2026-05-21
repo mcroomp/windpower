@@ -29,9 +29,9 @@ for _p in [str(_SIM_DIR), str(_AERO_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from aero import rotor_definition as rd
+from dynbem import rotor_definition as rd
 from frames import build_orb_frame
-from aero import create_aero, PetersHeBEM
+from dynbem import create_aero, PetersHeBEM
 
 # ---------------------------------------------------------------------------
 # Sweep parameters
