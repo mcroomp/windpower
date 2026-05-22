@@ -2,8 +2,8 @@
   "key": [
     {
       "name": "H_TAIL_TYPE",
-      "expected": 4,
-      "note": "4=DDFP CCW; tells ArduPilot GB4008 on output 4 provides yaw by varying throttle"
+      "expected": 3,
+      "note": "3=DDFP CW (no sign flip); routes ATC_RAT_YAW PID to SERVO4. US-convention rotor (CCW from above) -> body drifts CCW -> positive yaw error -> positive throttle. H_TAIL_TYPE=4 would clamp positive PID to 0 and leave the body drifting unopposed."
     },
     {
       "name": "SCR_ENABLE",
@@ -24,6 +24,11 @@
       "name": "BRD_SAFETY_DEFLT",
       "expected": 0,
       "note": "0=safety switch disabled; servo outputs are live immediately on boot"
+    },
+    {
+      "name": "ACRO_TRAINER",
+      "expected": 0,
+      "note": "0=Off (raw rate passthrough); disable auto-leveling -- physical equilibrium is ~65 deg from vertical"
     }
   ],
   "tail_pid": [
@@ -81,6 +86,58 @@
       "name": "SERVO4_FUNCTION",
       "expected": 0,
       "note": "0=disabled so ArduPilot does NOT drive SERVO4; Lua mode 2 (yaw) writes SERVO4 directly via set_output_pwm_chan_timeout. AP's ATC_RAT_YAW PID still computes but has no output channel."
+    }
+  ],
+  "setup": [
+    {
+      "name": "FRAME_CLASS",
+      "expected": 6,
+      "note": "6=Traditional Helicopter; required before H_* params appear. setup_pixhawk.py sets this in Phase 1 (needs a reboot before H_* are visible)."
+    },
+    {
+      "name": "INITIAL_MODE",
+      "expected": 1,
+      "note": "1=ACRO; boot directly into ACRO so rawes.lua runs immediately after arm (STABILIZE causes yaw discontinuity at 65 deg tether equilibrium)."
+    },
+    {
+      "name": "ATC_RAT_RLL_IMAX",
+      "expected": 0.0,
+      "note": "roll rate I-term clamp; zero to prevent integrator windup at the orbital body rate (constant rate setpoint -> integrator races without IMAX cap)"
+    },
+    {
+      "name": "ATC_RAT_PIT_IMAX",
+      "expected": 0.0,
+      "note": "pitch rate I-term clamp; zero for the same orbital-rate-windup reason as ATC_RAT_RLL_IMAX"
+    },
+    {
+      "name": "H_COL2YAW",
+      "expected": 0.0,
+      "note": "collective-to-yaw mixer feedforward; zero -- the yaw motor is regulated independently by ATC_RAT_YAW, no static cross-coupling needed"
+    },
+    {
+      "name": "FS_THR_ENABLE",
+      "expected": 0,
+      "note": "RC throttle failsafe disabled (no RC transmitter on the bench / tethered rig)"
+    },
+    {
+      "name": "FS_GCS_ENABLE",
+      "expected": 0,
+      "note": "GCS heartbeat failsafe disabled (long tether runs can interrupt the radio link)"
+    },
+    {
+      "name": "FS_EKF_ACTION",
+      "expected": 0,
+      "note": "EKF failsafe disabled; the tethered attitude and dual-GPS yaw cause innovation spikes that would otherwise trigger unwanted mode changes"
+    },
+    {
+      "name": "RPM1_TYPE",
+      "expected": 0,
+      "note": "RPM sensor disabled; PWM ESC has no telemetry. Future: set to 5 with SERVO_BLH_BDMASK=8 after enabling AM32 EDT on the GB4008 ESC."
+    },
+    {
+      "name": "RPM1_MIN",
+      "expected": 0,
+      "note": "RPM sensor minimum -- not used while RPM1_TYPE=0"
     }
   ]
 }

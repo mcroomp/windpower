@@ -41,6 +41,8 @@ ATC_RAT_RLL_IMAX  0.0
 ATC_RAT_PIT_IMAX  0.0
 ATC_RAT_YAW_IMAX  0.0
 
+ACRO_TRAINER      0      # disable auto-leveling (physical tilt ~65 deg)
+
 EK3_IMU_MASK    1      # bit 0 only = IMU0 only = single EKF3 core (no Roll/Pitch inconsistency)
 EK3_SRC1_YAW    2      # 2=GPS dual-antenna yaw (RELPOSNED from F9P moving baseline)
 EK3_MAG_CAL     0      # 0=Never

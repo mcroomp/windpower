@@ -15,6 +15,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -22,57 +23,51 @@ import time
 from pymavlink import mavutil
 
 # ---------------------------------------------------------------------------
-# Parameter tables
+# Parameter tables -- single source of truth is rawes_params.json
 # ---------------------------------------------------------------------------
+#
+# rawes_params.json defines the canonical hardware configuration.  This script
+# applies it; calibrate.py's `config show / config apply` validates against it.
+#
+# Phase split:
+#   Phase 1 -- FRAME_CLASS only.  Must be written and the FC rebooted before
+#              any H_* parameter is visible.
+#   Phase 2 -- everything else, applied after the post-FRAME_CLASS reboot.
+#
+# Entries with "expected": null (e.g. SCR_USER6) are skipped -- the value is
+# selected at run time, not at setup.
 
-# Phase 1: set before first reboot.  FRAME_CLASS unlocks all H_* parameters.
-_PHASE1 = [
-    ("FRAME_CLASS", 6),   # Traditional Helicopter -- H_* params appear after reboot
-]
+_PARAMS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "rawes_params.json")
 
-# Phase 2: set after reboot (H_* parameters now exist).
-_PHASE2 = [
-    # RSC: CH8 passthrough -- arming does not wait for rotor spin-up
-    ("H_RSC_MODE",        1),
-    ("H_RSC_RUNUP_TIME",  1),
-    # Yaw motor: servo output, linear 1000-2000 us, neutral at 1500 us
-    ("H_TAIL_TYPE",       0),
-    ("H_COL2YAW",         0.0),
-    # Yaw PID: pure-P starting point; back-EMF provides inherent speed regulation
-    ("ATC_RAT_YAW_P",     0.001),
-    ("ATC_RAT_YAW_I",     0.0),
-    ("ATC_RAT_YAW_D",     0.0),
-    ("ATC_RAT_YAW_IMAX",  0.0),
-    # Roll/pitch IMAX: zero to prevent integrator windup on neutral sticks
-    ("ATC_RAT_RLL_IMAX",  0.0),
-    ("ATC_RAT_PIT_IMAX",  0.0),
-    # ACRO: disable auto-leveling (tether pulls hub to ~65 deg, trainer would fight it)
-    ("ACRO_TRAINER",      0),
-    # Boot into ACRO so rawes.lua yaw-trim runs immediately after arm
-    ("INITIAL_MODE",      1),
-    # Failsafes: disable for bench work (no RC transmitter, no GCS radio)
-    ("FS_THR_ENABLE",     0),
-    ("FS_GCS_ENABLE",     0),
-    ("FS_EKF_ACTION",     0),
-    # RPM sensor: not active (PWM ESC has no telemetry).
-    # Future: set RPM1_TYPE=5 + SERVO_BLH_BDMASK=8 after enabling AM32 EDT on ESC.
-    ("RPM1_TYPE",         0),
-    ("RPM1_MIN",          0),
-    # Output 4 (MAIN OUT 4, IOMCU): GB4008 anti-rotation motor.
-    # H_TAIL_TYPE=4 is kept for heli-mixer consistency, but SERVO4_FUNCTION=0
-    # disables AP's output assignment so ATC_RAT_YAW has no channel to write to.
-    # Lua mode 2 (yaw) writes SERVO4 directly via set_output_pwm_chan_timeout;
-    # in any other mode SERVO4 holds at SERVO4_TRIM (motor off).
-    # SERVO4_MIN=800: motor off at 800 us, full throttle at 2000 us.
-    ("H_TAIL_TYPE",       4),    # DDFP CCW (output channel disabled below)
-    ("SERVO4_FUNCTION",   0),    # 0=disabled -- AP cannot drive SERVO4
-    ("SERVO4_MIN",        800),
-    ("SERVO4_MAX",        2000),
-    ("SERVO4_TRIM",       800),   # trim = off (motor off at neutral stick)
-    ("BRD_SAFETY_DEFLT",  0),    # safety switch disabled -- outputs live on boot
-    # rawes.lua mode: 0 = none (passive); select mode 2 via `calibrate.py mode 2` or yawmanual
-    ("SCR_USER6",         0),
-]
+
+def _load_params() -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+    """Return (phase1, phase2) parameter lists sourced from rawes_params.json.
+
+    Phase 1 contains FRAME_CLASS only (it gates the rest behind a reboot).
+    Phase 2 contains every other entry with a non-null expected value, in the
+    order: setup -> key -> tail_pid (so H_* params are written after the heli
+    frame class has unlocked them, and PID/tuning lands last).
+    """
+    with open(_PARAMS_JSON_PATH) as fh:
+        groups = json.load(fh)
+
+    phase1: list[tuple[str, float]] = []
+    phase2: list[tuple[str, float]] = []
+    for group_name in ("setup", "key", "tail_pid"):
+        for entry in groups.get(group_name, []):
+            name = entry["name"]
+            expected = entry["expected"]
+            if expected is None:
+                continue   # runtime-selected (e.g. SCR_USER6)
+            if name == "FRAME_CLASS":
+                phase1.append((name, float(expected)))
+            else:
+                phase2.append((name, float(expected)))
+    return phase1, phase2
+
+
+_PHASE1, _PHASE2 = _load_params()
 
 # ---------------------------------------------------------------------------
 # MAVLink helpers
@@ -193,16 +188,20 @@ def main() -> None:
     # ── Phase 1: FRAME_CLASS ─────────────────────────────────────────────────
     print()
     print("[Phase 1] Frame type")
-    current_fc = _recv_param(mav, "FRAME_CLASS")
-    print(f"  Current FRAME_CLASS = {current_fc}")
+    if not _PHASE1:
+        print("  [FAIL] FRAME_CLASS missing from rawes_params.json 'setup' group.")
+        sys.exit(1)
+    fc_name, fc_target = _PHASE1[0]
+    current_fc = _recv_param(mav, fc_name)
+    print(f"  Current {fc_name} = {current_fc}  (target {fc_target})")
 
-    if current_fc != 6.0:
-        print("  Setting FRAME_CLASS=6 (Traditional Helicopter) ...")
-        ok, actual = _set_param(mav, "FRAME_CLASS", 6)
+    if current_fc != fc_target:
+        print(f"  Setting {fc_name}={fc_target} (Traditional Helicopter) ...")
+        ok, actual = _set_param(mav, fc_name, fc_target)
         if ok:
-            print(f"  [OK]   FRAME_CLASS = {actual}")
+            print(f"  [OK]   {fc_name} = {actual}")
         else:
-            print(f"  [FAIL] Could not set FRAME_CLASS.  Aborting.")
+            print(f"  [FAIL] Could not set {fc_name}.  Aborting.")
             sys.exit(1)
 
         print()
@@ -212,7 +211,7 @@ def main() -> None:
         mav.close()
         mav = _wait_reconnect(port)
     else:
-        print("  FRAME_CLASS already 6 -- skipping reboot.")
+        print(f"  {fc_name} already {fc_target} -- skipping reboot.")
 
     # ── Phase 2: Yaw-trim parameters ─────────────────────────────────────────
     print()
