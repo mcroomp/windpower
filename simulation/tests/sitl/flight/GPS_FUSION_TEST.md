@@ -209,11 +209,11 @@ frame kinematic accel), `sens_accel_z` = -9.81 (body-frame Z, pointing up).
 
 ```bash
 # Single run
-bash simulation/dev.sh test-stack -v -k test_gps_fusion_armed
+bash test.sh stack -v -k test_gps_fusion_armed
 
 # Also runs the layer-by-layer parametrized version
-bash simulation/dev.sh test-stack -v -k test_gps_fusion_layers
-bash simulation/dev.sh test-stack -v -k "test_gps_fusion_layers[L0"
+bash test.sh stack -v -k test_gps_fusion_layers
+bash test.sh stack -v -k "test_gps_fusion_layers[L0"
 ```
 
 Logs: `simulation/logs/gps_fusion_test_gps_fusion_armed/`

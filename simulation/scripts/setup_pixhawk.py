@@ -246,7 +246,7 @@ def main() -> None:
     print("  After copying, reboot the Pixhawk and check GCS Messages for:")
     print("    RAWES hw: loaded  mode=2 (yaw)")
     print()
-    print("  Then run:  RAWES_HIL_PORT=COM4 bash sim.sh test-hil -v")
+    print("  Then run:  RAWES_HIL_PORT=COM4 bash test.sh hil -v")
 
     print("Parameters saved.  Setup complete.")
 

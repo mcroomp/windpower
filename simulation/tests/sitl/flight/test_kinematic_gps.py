@@ -12,7 +12,7 @@ Expected timeline (dual GPS, stationary hold):
   t~34-74  40 s EKF validation window
 
 Run:
-  bash simulation/dev.sh test-stack-parallel --fresh -n 1 -k test_kinematic_gps
+  bash test.sh stack -n 1 -k test_kinematic_gps
 """
 from __future__ import annotations
 

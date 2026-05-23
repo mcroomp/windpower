@@ -228,12 +228,12 @@ class StackConfig:
                 s.close()
             except OSError as exc:
                 s.close()
-                # Step 5: last resort — restart the container via dev.sh
+                # Step 5: last resort — restart the container via test.sh
                 _clog.warning(
                     "Port %s:%d still busy after kill — restarting container", host, port
                 )
                 import os as _os
-                _script = _os.path.join(_os.path.dirname(__file__), "..", "..", "dev.sh")
+                _script = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "test.sh")
                 _sp.run(["bash", _script, "stop"], capture_output=True, check=False)
                 _sp.run(["bash", _script, "start"], capture_output=True, check=False)
                 _time.sleep(3.0)

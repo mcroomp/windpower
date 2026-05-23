@@ -55,7 +55,7 @@ Telemetry
 
 Run with (inside Docker)
 ------------------------
-  bash simulation/dev.sh test-stack -n 1 -k test_lua_yaw_regulation
+  bash test.sh stack -n 1 -k test_lua_yaw_regulation
 """
 from __future__ import annotations
 

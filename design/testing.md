@@ -29,7 +29,7 @@ Tests are split across three directories:
 .venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
-**CRITICAL:** Never use `dev.sh test-unit` — it routes to Docker which excludes `tests/unit`.
+**CRITICAL:** Unit tests run via the Windows venv (`bash test.sh unit`) — never inside Docker, which excludes `tests/unit`.
 
 ---
 

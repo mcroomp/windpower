@@ -12,7 +12,7 @@ static sensor values. The test drives GCS in the foreground with blocking calls
 (sim_sleep, arm, wait for STATUSTEXT). Same pattern as all other stack tests.
 
 Run:
-  bash simulation/dev.sh test-stack -n 1 -k test_gps_fusion_dual_gps
+  bash test.sh stack -n 1 -k test_gps_fusion_dual_gps
 """
 from __future__ import annotations
 

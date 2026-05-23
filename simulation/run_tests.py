@@ -143,7 +143,7 @@ def main() -> int:
         print(
             f"{RED}ERROR: run_tests.py does not wrap shell commands.{RESET}\n"
             f"{RED}Run stack tests directly:{RESET}\n"
-            f"{CYAN}  bash simulation/dev.sh test-stack [options]{RESET}",
+            f"{CYAN}  bash test.sh stack [options]{RESET}",
             file=sys.stderr,
         )
         return 2

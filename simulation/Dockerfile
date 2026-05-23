@@ -6,17 +6,18 @@ FROM ubuntu:22.04
 # Installs: system deps, Python venv (numpy/scipy/matplotlib/pytest/pymavlink)
 # Optional: ArduPilot SITL (set INSTALL_ARDUPILOT=true at build time)
 #
-# Build (Windows cmd):
-#   simulation\build.cmd
-#   simulation\build.cmd ardupilot
-#   simulation\build.cmd run
+# Build (any platform, via Git Bash):
+#   bash setup.sh build                                    (with ArduPilot)
 #
-# Build (Linux/macOS):
+# Or directly:
 #   docker build simulation/ -t rawes-sim
 #   docker build simulation/ -t rawes-sim --build-arg INSTALL_ARDUPILOT=true
 #
-# Run (Linux/macOS):
-#   docker run --rm -it -v "$(pwd)/simulation":/rawes/simulation rawes-sim
+# Manage the dev container:
+#   bash test.sh start | stop | shell | exec <cmd>
+#
+# Stack tests spin up their own ephemeral containers:
+#   bash test.sh stack [-n N] [pytest args]
 # =============================================================================
 
 ENV DEBIAN_FRONTEND=noninteractive

@@ -114,20 +114,26 @@ running inside a computer. It has three interconnected layers:
 
 ## Running Tests
 
-Tests run in three sequential stages. Always run them in order.
+First-time setup (creates `simulation/.venv`, idempotent):
+
+```cmd
+setup.cmd            (Windows)         or       bash setup.sh
+```
+
+Then run tests in three sequential stages. Always run them in order.
 
 ```bash
 # Stage 1 -- Unit tests (Windows, no Docker, ~460 tests, ~65 s)
-bash sim.sh test-unit -q
+bash test.sh unit -q
 
 # Stage 2 -- Simtests (Windows, no Docker, ~29 tests, ~5 min)
-bash sim.sh test-simtest -q
+bash test.sh simtest -q
 
 # Stage 3 -- Stack tests (Docker, ArduPilot SITL)
-bash sim.sh test-stack -v
+bash test.sh stack -v
 ```
 
-See CLAUDE.md for the full workflow, Docker setup, and troubleshooting.
+`test.cmd` is a Windows shim for the same commands. See CLAUDE.md for the full workflow, Docker setup, and troubleshooting.
 
 ---
 

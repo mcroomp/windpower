@@ -97,7 +97,7 @@ Regenerate: `pytest tests/unit/test_steady_flight.py` → writes `steady_state_s
 ### Unit tests (Windows, no Docker)
 
 ```bash
-bash sim.sh test-unit -q
+bash test.sh unit -q
 ```
 
 Key unit tests:
@@ -108,7 +108,7 @@ Key unit tests:
 ### Stack integration tests (Docker via WSL)
 
 ```bash
-bash sim.sh test-stack -v
+bash test.sh stack -v
 ```
 
 See `CLAUDE.md` in the repo root for full Docker setup and test commands.
@@ -124,10 +124,10 @@ Standalone scripts in `analysis/`. Not part of the simulation runtime; not impor
 
 ```bash
 # List available test runs (newest first)
-bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py'
+bash test.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py'
 # Analyse a specific test
-bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
-bash sim.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
+bash test.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
+bash test.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
 ```
 
 | Script | Purpose | Status |
