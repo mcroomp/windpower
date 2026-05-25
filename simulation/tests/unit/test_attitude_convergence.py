@@ -74,7 +74,6 @@ def _run_attitude_loop(
     )
     acro  = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
     state = _AERO.initial_rotor_state()
-    state.omega_rad_s = float(omega_spin)
     F_grav_cancel = np.array([0.0, 0.0, -_MASS * 9.81])
 
     history = []
@@ -95,10 +94,10 @@ def _run_attitude_loop(
         )
         inputs = RotorInputs(
             collective_rad=0.0, tilt_lon=tlon, tilt_lat=tlat,
-            R_hub=R, v_hub_world=s["vel"], wind_world=wind, t=10.0,
+            R_hub=R, v_hub_world=s["vel"], wind_world=wind,
+            omega_rad_s=float(omega_spin), t=10.0, rho_kg_m3=1.225,
         )
         result, _deriv = _AERO.compute_forces(inputs, state)
-        state.omega_rad_s = float(omega_spin)
 
         dyn.step(F_grav_cancel, result.M_orbital, DT, omega_spin=omega_spin)
 
@@ -202,17 +201,20 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
 
     # Solve trim at the operating point.
     state0 = _AERO.initial_rotor_state()
-    state0.omega_rad_s = OMEGA_SPIN
     trim = solve_trim_cyclic(
         _AERO, state0,
-        collective_rad=-0.05, R_hub=R, v_hub_world=np.zeros(3),
-        wind_world=wind, tolerance_Nm=0.5,
+        RotorInputs(
+            collective_rad=-0.05, tilt_lon=0.0, tilt_lat=0.0,
+            R_hub=R, v_hub_world=np.zeros(3), wind_world=wind,
+            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225, t=0.0,
+        ),
+        tolerance_Nm=0.5,
     )
     assert trim.converged
 
     # HeliCyclicController with zero rate command must reproduce the trim
     # cyclic at its output.
-    acro = HeliCyclicController(_AERO.defn, col_min_rad=-0.28, col_max_rad=0.10)
+    acro = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
     acro.set_trim(trim.tilt_lon, trim.tilt_lat)
     # Run a few steps with zero rate command so the servo settles to trim.
     omega_body_zero = np.zeros(3)
@@ -229,7 +231,8 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
     # hub moment must equal the trim residual (small).
     inputs = RotorInputs(
         collective_rad=-0.05, tilt_lon=tlon, tilt_lat=tlat,
-        R_hub=R, v_hub_world=np.zeros(3), wind_world=wind, t=10.0,
+        R_hub=R, v_hub_world=np.zeros(3), wind_world=wind,
+        omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
     )
     result, _ = _AERO.compute_forces(inputs, trim.final_state)
     M_mag = float(np.linalg.norm(result.M_orbital))
@@ -247,19 +250,18 @@ def test_wind_creates_baseline_hub_moment():
     standalone invariant so it's not lost when tuning the controller.
     """
     state = _AERO.initial_rotor_state()
-    state.omega_rad_s = OMEGA_SPIN
     R = build_orb_frame(np.array([0.0, 0.0, 1.0]))   # level FRD
 
     # Settle dynamic inflow
     inp = RotorInputs(
         collective_rad=0.0, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R, v_hub_world=np.zeros(3),
-        wind_world=np.array([0.0, 10.0, 0.0]), t=10.0,
+        wind_world=np.array([0.0, 10.0, 0.0]),
+        omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
     )
     for _ in range(200):
         r, d = _AERO.compute_forces(inp, state)
         state = state.from_array(state.to_array() + 0.02 * d.to_array())
-        state.omega_rad_s = OMEGA_SPIN
     r, _ = _AERO.compute_forces(inp, state)
 
     M_mag = float(np.linalg.norm(r.M_orbital))

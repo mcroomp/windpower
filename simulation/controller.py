@@ -1114,12 +1114,12 @@ def col_min_for_altitude_rad(
     W    = mass_kg * 9.81
 
     state = aero.initial_rotor_state()
-    state.omega_rad_s = float(omega)
 
     def _thrust_at(col: float) -> float:
         inputs = _RotorInputs(
             collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
-            R_hub=R, v_hub_world=_np.zeros(3), wind_world=wind, t=50.0,
+            R_hub=R, v_hub_world=_np.zeros(3), wind_world=wind,
+            omega_rad_s=float(omega), t=50.0, rho_kg_m3=1.225,
         )
         result, _deriv = aero.compute_forces(inputs, state)
         # In NED, upward force is negative Z.

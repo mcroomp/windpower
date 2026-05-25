@@ -112,22 +112,20 @@ def test_hover_collective_is_negative():
 
 def _d_omega(omega: float, col: float, R_hub: np.ndarray) -> float:
     """Run the aero forward to a settled inflow and read d_omega from the derivative."""
-    from dynbem import RotorInputs
+    from dynbem import RotorInputs, omega_derivative
     state = _AERO.initial_rotor_state()
-    state.omega_rad_s = float(omega)
+    I_ode = _ROTOR.autorotation.I_ode_kgm2 or 10.0
     inputs = RotorInputs(
         collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R_hub, v_hub_world=np.zeros(3),
-        wind_world=WIND_EAST, t=T_STEADY,
+        wind_world=WIND_EAST, omega_rad_s=float(omega), t=T_STEADY, rho_kg_m3=1.225,
     )
     dt = 0.02
     for _ in range(200):
         _r, deriv = _AERO.compute_forces(inputs, state)
-        new = state.to_array() + dt * deriv.to_array()
-        state = state.from_array(new)
-        state.omega_rad_s = float(omega)
-    _r, deriv = _AERO.compute_forces(inputs, state)
-    return float(deriv.omega_rad_s)
+        state = state.from_array(state.to_array() + dt * deriv.to_array())
+    _r, _ = _AERO.compute_forces(inputs, state)
+    return float(omega_derivative(_r.Q_spin, 0.0, I_ode))
 
 
 def test_autorotation_d_omega_brackets_zero():
@@ -145,28 +143,29 @@ def test_autorotation_omega_equilibrium_in_range():
 
     Settled omega in [8, 60] rad/s and |d_omega| < 0.01 rad/s^2.
     """
-    from dynbem import RotorInputs
+    from dynbem import RotorInputs, euler_step_omega, omega_derivative
     R30 = _R_tilt(ELEV_DEG)
     col = math.radians(-10.0)
     state = _AERO.initial_rotor_state()
-    state.omega_rad_s = 5.0
-    inputs = RotorInputs(
-        collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=R30, v_hub_world=np.zeros(3),
-        wind_world=WIND_EAST, t=T_STEADY,
-    )
-    dt = 0.01
+    omega_now = 5.0
+    spin_angle = 0.0
     omega_min = 0.5
+    I_ode = _ROTOR.autorotation.I_ode_kgm2 or 10.0
+    dt = 0.01
     d_omega = 0.0
     for _ in range(int(30.0 / dt)):
+        inputs = RotorInputs(
+            collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
+            R_hub=R30, v_hub_world=np.zeros(3),
+            wind_world=WIND_EAST, omega_rad_s=omega_now, t=T_STEADY, rho_kg_m3=1.225,
+        )
         _r, deriv = _AERO.compute_forces(inputs, state)
-        new = state.to_array() + dt * deriv.to_array()
-        state = state.from_array(new)
-        if state.omega_rad_s < omega_min:
-            state.omega_rad_s = omega_min
-        d_omega = float(deriv.omega_rad_s)
-    assert 8.0 <= state.omega_rad_s <= 60.0, (
-        f"equilibrium omega={state.omega_rad_s:.1f} rad/s outside [8, 60] rad/s"
+        state = state.from_array(state.to_array() + dt * deriv.to_array())
+        new_omega, spin_angle = euler_step_omega(omega_now, spin_angle, float(_r.Q_spin), 0.0, I_ode, dt)
+        omega_now = max(omega_min, new_omega)
+        d_omega = float(omega_derivative(_r.Q_spin, 0.0, I_ode))
+    assert 8.0 <= omega_now <= 60.0, (
+        f"equilibrium omega={omega_now:.1f} rad/s outside [8, 60] rad/s"
     )
     assert abs(d_omega) < 0.05, (
         f"d_omega={d_omega:.4f} rad/s^2 after 30 s -- did not converge"

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
+from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, euler_step_omega
 from frames          import build_orb_frame
 from simtest_runner  import PhysicsRunner, PythonAP
 from ap_controller   import TensionApController
@@ -117,30 +117,31 @@ def _compute_ic() -> dict:
     # free so the spin ODE finds its autorotation equilibrium.
     _aero_est = create_aero(_ROTOR, model="oye")
     state     = _aero_est.initial_rotor_state()
-    state.omega_rad_s = 20.0
+    omega_now = 20.0   # tracked externally (dynbem 0.2.0: omega removed from RotorState)
     omega_min = _ROTOR.autorotation.omega_min_rad_s or 0.5
+    I_ode     = _ROTOR.autorotation.I_ode_kgm2 or 10.0
     dt_eq     = 1.0 / 400.0
-    relax_kw  = dict(
-        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-        dt=dt_eq, t=PhysicsRunner.T_AERO_OFFSET,
-    )
+    spin_angle = 0.0
     # Alternate: settle inflow at current ω, then take 200 explicit-Euler
     # steps with ω free to allow the spin ODE to find equilibrium.  Two
     # cycles is enough — ω drifts < 0.5 rad/s between them at convergence.
-    inputs_eq = RotorInputs(
-        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-        t=PhysicsRunner.T_AERO_OFFSET,
-    )
     for _outer in range(8):
-        state = relax_inflow(_aero_est, state, n_steps=400, fix_omega=True, **relax_kw)
+        inputs_eq = RotorInputs(
+            collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
+            R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+            omega_rad_s=omega_now,
+            t=PhysicsRunner.T_AERO_OFFSET,
+            rho_kg_m3=1.225,
+        )
+        state = relax_inflow(_aero_est, state, inputs_eq, n_steps=400, dt=dt_eq)
         for _ in range(200):
-            _, deriv = _aero_est.compute_forces(inputs_eq, state)
+            result, deriv = _aero_est.compute_forces(inputs_eq, state)
             state = state.from_array(state.to_array() + dt_eq * deriv.to_array())
-            if state.omega_rad_s < omega_min:
-                state.omega_rad_s = float(omega_min)
-    omega_spin = float(state.omega_rad_s)
+            new_omega, spin_angle = euler_step_omega(
+                omega_now, spin_angle, float(result.Q_spin), 0.0, I_ode, dt_eq
+            )
+            omega_now = max(omega_min, new_omega)
+    omega_spin = omega_now
 
     # ── Trim cyclic at the IC ──────────────────────────────────────────────
     # Find the (tilt_lon, tilt_lat) that null hub-frame Mx, My at the IC
@@ -148,15 +149,23 @@ def _compute_ic() -> dict:
     # P-only rate loop doesn't have to fight the wind-driven baseline moment.
     trim = solve_trim_cyclic(
         _aero_est, state,
-        collective_rad=STACK_COLL,
-        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-        n_inflow_relax=200, dt_relax=dt_eq, fix_omega=True,
-        tolerance_Nm=0.1, t=PhysicsRunner.T_AERO_OFFSET,
+        RotorInputs(
+            collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
+            R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+            omega_rad_s=omega_now,
+            t=PhysicsRunner.T_AERO_OFFSET, rho_kg_m3=1.225,
+        ),
+        n_inflow_relax=200, dt_relax=dt_eq,
+        tolerance_Nm=0.1,
     )
     state = trim.final_state
 
     # Initial rest_length from aero thrust estimate at the trimmed state.
-    f_est, _ = _aero_est.compute_forces(inputs_eq, state)
+    f_est, _ = _aero_est.compute_forces(RotorInputs(
+        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
+        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+        omega_rad_s=omega_now, t=PhysicsRunner.T_AERO_OFFSET, rho_kg_m3=1.225,
+    ), state)
     T_est = max(-float(np.dot(f_est.F_world, t_dir)), 10.0)
     k_eff = TetherModel.EA_N / L_TETHER
     rest_length = L_TETHER - max(T_est / k_eff, 0.001)
@@ -244,7 +253,8 @@ def _compute_ic() -> dict:
     t_aero_end = PhysicsRunner.T_AERO_OFFSET + WARMUP_STEPS * _DT
     diag_inputs = RotorInputs(
         collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=R_s, v_hub_world=vel_s, wind_world=WIND, t=t_aero_end,
+        R_hub=R_s, v_hub_world=vel_s, wind_world=WIND,
+        omega_rad_s=runner.omega_spin, t=t_aero_end, rho_kg_m3=1.225,
     )
     # The runner's aero state already encodes the equilibrium inflow + omega;
     # using runner.aero.compute_forces with the live state preserves it.

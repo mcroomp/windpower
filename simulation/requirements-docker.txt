@@ -2,3 +2,4 @@
 pymavlink
 pexpect
 empy==3.3.4
+dynbem==0.3.0

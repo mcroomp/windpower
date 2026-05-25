@@ -11,4 +11,4 @@ imageio
 imageio-ffmpeg
 pymavlink
 pyserial
-dynbem==0.1.1
+dynbem==0.3.0

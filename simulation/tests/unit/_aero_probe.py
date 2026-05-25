@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dynbem import OyeBEMModel, RotorInputs, rotor_definition as _rd
+from dynbem import OyeBEMModel, RotorInputs, create_aero, rotor_definition as _rd
 
 
 _ROTOR_DEFS = Path(__file__).resolve().parents[2] / "rotor_definitions"
@@ -38,7 +38,7 @@ def make_probe(rotor=None) -> OyeBEMModel:
     """
     if rotor is None:
         rotor = load_rotor()
-    return OyeBEMModel(defn=rotor)
+    return create_aero(rotor, 'oye')
 
 
 def probe_steady(
@@ -60,7 +60,6 @@ def probe_steady(
     (Øye / Pitt-Peters) reach their quasi-steady state.  Cheap (~1 ms).
     """
     state = aero.initial_rotor_state()
-    state.omega_rad_s = float(omega_rotor)
     inputs = RotorInputs(
         collective_rad=collective_rad,
         tilt_lon=tilt_lon,
@@ -68,6 +67,7 @@ def probe_steady(
         R_hub=R_hub,
         v_hub_world=np.asarray(v_hub_world, dtype=float),
         wind_world=np.asarray(wind_world, dtype=float),
+        omega_rad_s=float(omega_rotor),
         t=t,
         rho_kg_m3=rho_kg_m3,
     )
@@ -75,6 +75,5 @@ def probe_steady(
     for _ in range(200):
         result, deriv = aero.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + dt * deriv.to_array())
-        state.omega_rad_s = float(omega_rotor)  # hold omega fixed during probe
     result, _ = aero.compute_forces(inputs, state)
     return result

@@ -175,7 +175,7 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
     from ap_controller   import TensionApController
     from pumping_planner import TensionCommand
     from controller      import HeliCyclicController
-    from dynbem            import solve_trim_cyclic
+    from dynbem            import RotorInputs, solve_trim_cyclic
 
     ic_kwargs = _make_ic(elevation_deg, tether_length_m=100.0)
     from types import SimpleNamespace
@@ -196,9 +196,12 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
     if use_trim:
         trim = solve_trim_cyclic(
             core._aero, core._rotor_state,
-            collective_rad=COL_FIXED,
-            R_hub=ic.R0, v_hub_world=np.zeros(3), wind_world=WIND,
-            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT, fix_omega=True,
+            RotorInputs(
+                collective_rad=COL_FIXED, tilt_lon=0.0, tilt_lat=0.0,
+                R_hub=ic.R0, v_hub_world=np.zeros(3), wind_world=WIND,
+                omega_rad_s=core.omega_spin, rho_kg_m3=1.225, t=0.0,
+            ),
+            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
         )
         core._acro.set_trim(trim.tilt_lon, trim.tilt_lat)
         core._rotor_state = trim.final_state
@@ -325,7 +328,7 @@ def _run_alt_hold_fixed_collective(
     then the TensionPI / collective regulator (NOT the cyclic chain) is
     what's destabilising ``test_create_ic``.
     """
-    from dynbem            import solve_trim_cyclic
+    from dynbem            import RotorInputs, solve_trim_cyclic
     from controller      import (
         HeliCyclicController, AltitudeHoldController,
         compute_rate_cmd, damp_bz_eq_lateral,
@@ -348,9 +351,12 @@ def _run_alt_hold_fixed_collective(
     if use_trim:
         trim = solve_trim_cyclic(
             core._aero, core._rotor_state,
-            collective_rad=col_fixed,
-            R_hub=ic.R0, v_hub_world=np.zeros(3), wind_world=WIND,
-            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT, fix_omega=True,
+            RotorInputs(
+                collective_rad=col_fixed, tilt_lon=0.0, tilt_lat=0.0,
+                R_hub=ic.R0, v_hub_world=np.zeros(3), wind_world=WIND,
+                omega_rad_s=core.omega_spin, rho_kg_m3=1.225, t=0.0,
+            ),
+            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
         )
         acro.set_trim(trim.tilt_lon, trim.tilt_lat)
         core._rotor_state = trim.final_state
@@ -449,14 +455,16 @@ def _run_attitude_only_at_fixed_equilibrium(
     from tests.unit._aero_probe import make_probe
     aero_model = make_probe(_ROTOR)
     state = aero_model.initial_rotor_state()
-    state.omega_rad_s = OMEGA_SPIN
 
     # Trim cyclic at the fixed equilibrium (no perturbation).
     trim = solve_trim_cyclic(
         aero_model, state,
-        collective_rad=col_fixed,
-        R_hub=R_eq, v_hub_world=np.zeros(3), wind_world=WIND,
-        tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT, fix_omega=True,
+        RotorInputs(
+            collective_rad=col_fixed, tilt_lon=0.0, tilt_lat=0.0,
+            R_hub=R_eq, v_hub_world=np.zeros(3), wind_world=WIND,
+            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225, t=0.0,
+        ),
+        tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
     )
     state = trim.final_state
 
@@ -500,11 +508,11 @@ def _run_attitude_only_at_fixed_equilibrium(
 
         inputs = RotorInputs(
             collective_rad=col_fixed, tilt_lon=tlon, tilt_lat=tlat,
-            R_hub=R, v_hub_world=np.zeros(3), wind_world=WIND, t=10.0,
+            R_hub=R, v_hub_world=np.zeros(3), wind_world=WIND,
+            omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
         )
         result, deriv = aero_model.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + DT * deriv.to_array())
-        state.omega_rad_s = OMEGA_SPIN   # hold spin fixed
 
         # Euler's equation with gyroscopic spin coupling.
         tau_b   = R.T @ result.M_orbital
@@ -621,14 +629,16 @@ def _run_with_constant_tether_force(
 
     aero_model = make_probe(_ROTOR)
     state = aero_model.initial_rotor_state()
-    state.omega_rad_s = OMEGA_SPIN
 
     if use_trim:
         trim = solve_trim_cyclic(
             aero_model, state,
-            collective_rad=COL_FIXED,
-            R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT, fix_omega=True,
+            RotorInputs(
+                collective_rad=COL_FIXED, tilt_lon=0.0, tilt_lat=0.0,
+                R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
+                omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225, t=0.0,
+            ),
+            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
         )
         state = trim.final_state
         trim_tlon, trim_tlat = trim.tilt_lon, trim.tilt_lat
@@ -692,11 +702,11 @@ def _run_with_constant_tether_force(
 
         inputs = RotorInputs(
             collective_rad=COL_FIXED, tilt_lon=tlon, tilt_lat=tlat,
-            R_hub=s["R"], v_hub_world=s["vel"], wind_world=WIND, t=10.0,
+            R_hub=s["R"], v_hub_world=s["vel"], wind_world=WIND,
+            omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
         )
         result, deriv = aero_model.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + DT * deriv.to_array())
-        state.omega_rad_s = OMEGA_SPIN
 
         # Constant-magnitude tether force pulling hub→anchor.
         tether_vec  = anchor - s["pos"]

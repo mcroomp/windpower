@@ -39,7 +39,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dynamics   import RigidBodyDynamics
-from dynbem       import create_aero, RotorInputs
+from dynbem       import create_aero, RotorInputs, euler_step_omega
 from tether     import TetherModel
 from frames     import build_orb_frame
 
@@ -143,10 +143,11 @@ class PhysicsCore:
         )
         self._aero = (aero_override if aero_override is not None
                       else create_aero(rotor, model=aero_model))
-        # New aero owns omega + spin angle + inflow as RotorState.  Initialise
-        # with the IC's spin and let the integrator advance it each step.
-        self._rotor_state = self._aero.initial_rotor_state()
-        self._rotor_state.omega_rad_s = float(ic.omega_spin)
+        # Inflow state owned by the aero model.  omega is tracked separately
+        # (moved out of RotorState in dynbem 0.2.0 — now an input).
+        self._rotor_state    = self._aero.initial_rotor_state()
+        self._omega_rad_s    = float(ic.omega_spin)
+        self._spin_angle_rad = 0.0
 
         if rotor.control is None or rotor.control.axle_attachment_length_m is None:
             raise ValueError("rotor.control.axle_attachment_length_m must be set")
@@ -191,7 +192,7 @@ class PhysicsCore:
 
     @property
     def omega_spin(self) -> float:
-        return float(self._rotor_state.omega_rad_s)
+        return self._omega_rad_s
 
     @property
     def t_sim(self) -> float:
@@ -227,7 +228,7 @@ class PhysicsCore:
             "pos":         hub["pos"],
             "vel":         hub["vel"],
             "omega_world": hub["omega"],
-            "omega_spin":  float(self._rotor_state.omega_rad_s),
+            "omega_spin":  self._omega_rad_s,
         }
 
     def hub_observe(self) -> HubObservation:
@@ -239,7 +240,7 @@ class PhysicsCore:
             vel        = hub["vel"],
             body_z     = hub["R"][:, 2],
             gyro       = hub["R"].T @ hub["omega"],
-            omega_spin = float(self._rotor_state.omega_rad_s),
+            omega_spin = self._omega_rad_s,
         )
 
     @property
@@ -296,18 +297,26 @@ class PhysicsCore:
             R_hub          = hub["R"],
             v_hub_world    = hub["vel"],
             wind_world     = self._wind,
+            omega_rad_s    = self._omega_rad_s,
             t              = self.T_AERO_OFFSET + self._t_sim,
+            rho_kg_m3      = 1.225,
         )
         result, rotor_deriv = self._aero.compute_forces(rotor_inputs, self._rotor_state)
 
-        # Forward-Euler integration of rotor state (omega, spin angle, inflow)
+        # Integrate inflow state only (omega removed from RotorState in dynbem 0.2.0)
         new_arr = self._rotor_state.to_array() + dt * rotor_deriv.to_array()
         self._rotor_state = self._rotor_state.from_array(new_arr)
-        # Clamp omega above the floor in autorotation.omega_min_rad_s
+        # Integrate omega externally using euler_step_omega
         omega_min = (r.autorotation.omega_min_rad_s
                      if r.autorotation.omega_min_rad_s is not None else 0.5)
-        if self._rotor_state.omega_rad_s < omega_min:
-            self._rotor_state.omega_rad_s = float(omega_min)
+        I_ode = (r.autorotation.I_ode_kgm2
+                 if r.autorotation.I_ode_kgm2 is not None else 10.0)
+        new_omega, new_spin = euler_step_omega(
+            self._omega_rad_s, self._spin_angle_rad,
+            float(result.Q_spin), 0.0, I_ode, dt,
+        )
+        self._omega_rad_s    = max(omega_min, new_omega)
+        self._spin_angle_rad = new_spin
 
         disk_normal = hub["R"][:, 2]
 
@@ -328,7 +337,7 @@ class PhysicsCore:
         # 6-DOF rigid-body integration (gravity applied internally)
         F_net   = result.F_world + tf
         new_hub = self._dyn.step(F_net, M_net, dt,
-                                 omega_spin=float(self._rotor_state.omega_rad_s))
+                                 omega_spin=self._omega_rad_s)
 
         # lock_orientation post-step: track tether direction, zero rotation
         if self._lock_orientation and self._damp_alpha == 0.0:
@@ -348,7 +357,7 @@ class PhysicsCore:
         return {
             "hub_state":    new_hub,
             "tension_now":  self._tension_now,
-            "omega_spin":   float(self._rotor_state.omega_rad_s),
+            "omega_spin":   self._omega_rad_s,
             "tether_force": tf,
             "tether_moment": tm,
             "aero_result":  result,

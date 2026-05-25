@@ -261,22 +261,25 @@ def acro_armed_lua_full(tmp_path, request):
         if _ic is not None:
             try:
                 import numpy as _np_trim
-                from dynbem import create_aero, solve_trim_cyclic
+                from dynbem import create_aero, solve_trim_cyclic, RotorInputs
                 from tests.simtests._rotor_helpers import load_default_rotor
                 _rotor_trim = load_default_rotor()
                 _aero_trim  = create_aero(_rotor_trim, model="oye")
                 _state_trim = _aero_trim.initial_rotor_state()
-                _state_trim.omega_rad_s = float(_ic["omega_spin"])
                 _R0_trim    = _np_trim.array(_ic["R0"], dtype=float).reshape(3, 3)
                 _wind_trim  = _np_trim.array([0.0, 10.0, 0.0])
                 _coll_trim  = float(_ic.get("stack_coll_eq", _ic.get("coll_eq_rad", -0.18)))
                 _trim_out   = solve_trim_cyclic(
                     _aero_trim, _state_trim,
-                    collective_rad=_coll_trim,
-                    R_hub=_R0_trim, v_hub_world=_np_trim.zeros(3),
-                    wind_world=_wind_trim,
+                    RotorInputs(
+                        collective_rad=_coll_trim, tilt_lon=0.0, tilt_lat=0.0,
+                        R_hub=_R0_trim, v_hub_world=_np_trim.zeros(3),
+                        wind_world=_wind_trim,
+                        omega_rad_s=float(_ic["omega_spin"]),
+                        rho_kg_m3=1.225, t=0.0,
+                    ),
                     n_inflow_relax=200, dt_relax=1.0/400.0,
-                    fix_omega=True, tolerance_Nm=0.2,
+                    tolerance_Nm=0.2,
                 )
                 ctx.log.info("Trim cyclic: tlon=%+.5f tlat=%+.5f converged=%s",
                              _trim_out.tilt_lon, _trim_out.tilt_lat, _trim_out.converged)

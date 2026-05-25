@@ -86,7 +86,13 @@ class TestDeSchutterGeometry:
 
     def test_kaman_disabled(self):
         if self.r.control is not None:
-            assert self.r.control.kaman_flap.enabled is False
+            # In dynbem 0.2.0, KamanFlap.enabled was removed; disabled is
+            # indicated by all key fields being None (chord_fraction, etc.)
+            kf = self.r.control.kaman_flap
+            if kf is not None:
+                assert kf.chord_fraction is None, (
+                    "Expected kaman_flap to be disabled (chord_fraction=None)"
+                )
 
 
 # ── Validation ──────────────────────────────────────────────────────────────
@@ -134,9 +140,14 @@ class TestKamanFlap:
     def test_beaupoil_kaman_enabled(self):
         r = load_rotor("beaupoil_2026")
         assert r.control is not None
-        assert r.control.kaman_flap.enabled is True
+        # dynbem 0.2.0: no .enabled field; enabled = chord_fraction is not None
+        assert r.control.kaman_flap is not None
+        assert r.control.kaman_flap.chord_fraction is not None
 
     def test_de_schutter_kaman_disabled(self):
         r = load_rotor("de_schutter_2018")
         if r.control is not None:
-            assert r.control.kaman_flap.enabled is False
+            # disabled = kaman_flap absent or chord_fraction is None
+            kf = r.control.kaman_flap
+            if kf is not None:
+                assert kf.chord_fraction is None
