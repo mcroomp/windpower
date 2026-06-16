@@ -1,25 +1,33 @@
 """
-arduloop — A Python port of ArduPilot's traditional-heli rate / attitude loop.
+arduloop — Python port of ArduPilot's traditional-heli attitude + rate stack.
 
-The block diagram, parameter names, and signal flow mirror
-`libraries/AC_PID/AC_PID.cpp` and `libraries/AC_AttitudeControl/AC_AttitudeControl_Heli.cpp`
-so that gains tuned here transfer directly to ArduPilot parameters
-(`ATC_RAT_RLL_*`, `ATC_RAT_PIT_*`, `H_SW_H3_PHANG`, ...).
+Two layers
+----------
+GuidedAttitudeController  (guided.py)
+    Outer attitude loop.  Faithfully ports AC_AttitudeControl::input_quaternion
+    including the slewed _attitude_target state, input_shaping_angle, and the
+    30/60-degree feedforward blending from attitude_controller_run_quat.
+    Use whenever rawes.lua calls vehicle:set_target_angle_and_climbrate().
+
+HeliRateController  (attitude_heli.py)
+    Inner rate loop.  Ports AC_AttitudeControl_Heli: per-axis AC_PID with
+    target/error notches + 3 LPFs, PIRO_COMP, hover-roll-trim, H_SW_H3_PHANG
+    phase rotation.  Driven by GuidedAttitudeController or directly.
+
+All parameter field names are 1:1 with ArduPilot so gains transfer directly
+to a .parm file.  See README.md for the full parameter table and usage guide.
 
 Public modules
 --------------
-- :mod:`arduloop.filters`        — first-order LPF, biquad notch (AP-style).
-- :mod:`arduloop.pid`            — AC_PID port with target / error / derivative
-                                   filters and target / error notches.
-- :mod:`arduloop.swash`          — H3 swashplate phase rotation.
-- :mod:`arduloop.attitude_heli`  — per-axis rate controller plus PIRO_COMP and
-                                   hover-roll-trim, matching the heli wrapper.
-- :mod:`arduloop.plant`          — coupled 2-axis rotational plant with optional
-                                   pendulum and tether-spring modes.
-- :mod:`arduloop.signals`        — chirp / multisine / step input generators.
-- :mod:`arduloop.analysis`       — Bode, stability margins, step-response score.
-- :mod:`arduloop.params`         — dataclass holding the full parameter set,
-                                   with one-to-one ArduPilot names.
+- :mod:`arduloop.guided`         — GuidedAttitudeController, GuidedAttitudeParams
+- :mod:`arduloop.attitude_heli`  — HeliRateController, HeliRateOutput
+- :mod:`arduloop.params`         — RateAxisParams, HeliParams (all AP param names)
+- :mod:`arduloop.pid`            — AC_PID port with target/error notches + FLTT/FLTE/FLTD
+- :mod:`arduloop.swash`          — SwashH3 H_SW_H3_PHANG phase rotation
+- :mod:`arduloop.filters`        — LowPassFilter1p, NotchFilter (AP biquad)
+- :mod:`arduloop.plant`          — HeliPlant — coupled rotational + pendulum + spring
+- :mod:`arduloop.signals`        — step, chirp, multisine, doublet generators
+- :mod:`arduloop.analysis`       — empirical FRF, stability margins, step-response score
 """
 
 from .params import RateAxisParams, HeliParams
@@ -27,6 +35,7 @@ from .filters import LowPassFilter1p, NotchFilter
 from .pid import AC_PID
 from .swash import SwashH3
 from .attitude_heli import HeliRateController
+from .guided import GuidedAttitudeController, GuidedAttitudeParams
 from .plant import HeliPlant
 from . import signals, analysis
 
@@ -38,6 +47,8 @@ __all__ = [
     "AC_PID",
     "SwashH3",
     "HeliRateController",
+    "GuidedAttitudeController",
+    "GuidedAttitudeParams",
     "HeliPlant",
     "signals",
     "analysis",

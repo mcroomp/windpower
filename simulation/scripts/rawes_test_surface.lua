@@ -8,7 +8,6 @@ All rawes.lua module-level locals are in scope here.
 _rawes_fns = {
     -- ── Constants ────────────────────────────────────────────────────────────
 
-    ACRO_RP_RATE_DEG        = ACRO_RP_RATE_DEG,
     BASE_PERIOD_MS          = BASE_PERIOD_MS,
     FLIGHT_PERIOD_MS        = FLIGHT_PERIOD_MS,
     COL_CRUISE_FLIGHT_RAD   = COL_CRUISE_FLIGHT_RAD,
@@ -37,23 +36,27 @@ _rawes_fns = {
     -- ── Vector3f helpers ─────────────────────────────────────────────────────
 
     v3_copy    = v3_copy,
-    v3_body_z  = v3_body_z,
 
     -- ── Param / anchor ───────────────────────────────────────────────────────
 
     p          = p,
     anchor_ned = anchor_ned,
 
-    -- ── Cyclic helpers ───────────────────────────────────────────────────────
+    -- ── GUIDED angle conversion ──────────────────────────────────────────────
 
-    cyclic_error_body = cyclic_error_body,
-    output_rate_limit = output_rate_limit,
-    rate_to_pwm       = rate_to_pwm,
+    bz_ned_to_roll_pitch = bz_ned_to_roll_pitch,
 
     -- ── Subsystem entry points ───────────────────────────────────────────────
 
     run_flight = run_flight,
     run_armon  = run_armon,
+    run_manual = run_manual,
+
+    -- ── Manual mode state accessors ──────────────────────────────────────────
+
+    MODE_MANUAL  = MODE_MANUAL,
+    man_tlon_rad = function() return _man_tlon_rad end,
+    man_tlat_rad = function() return _man_tlat_rad end,
 
     -- ── RAWES_ARM state accessors ─────────────────────────────────────────────
 
@@ -68,15 +71,7 @@ _rawes_fns = {
     el_rad         = function() return _el_rad end,
     target_alt     = function() return _target_alt end,
     tension_n      = function() return _tension_n end,
-    trim_lon         = function() return _trim_lon end,
-    trim_lat         = function() return _trim_lat end,
     ic_col           = function() return _ic_col end,
-    -- Unit-test setter: production code only writes _trim_lon/_trim_lat
-    -- via the NVF receive path inside update().
-    set_trim_state   = function(tlon, tlat)
-        _trim_lon = tlon
-        _trim_lat = tlat
-    end,
 
     -- ── TensionPID state accessors ────────────────────────────────────────────
 

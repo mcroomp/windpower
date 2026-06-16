@@ -4,17 +4,19 @@ Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,5):
   0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
-  1  steady      -- cyclic altitude hold (Ch1, Ch2) + VZ collective PI             50 Hz
-  2  yaw         -- manual Lua yaw PID only; holds yaw rate = 0 via SERVO4         100 Hz
+  1  steady      -- GUIDED attitude hold (set_target_angle_and_climbrate) + VZ collective PI  50 Hz
+  2  manual      -- yaw compensation (SERVO4 PID) + manually commanded cyclic/collective  100 Hz
+                    NVFs: RAWES_TLN (tlon rad), RAWES_TLT (tlat rad), RAWES_COL (col rad)
   4  landing     -- (reserved, not yet implemented)
   5  pumping     -- De Schutter pumping cycle                                       50 Hz
 
-Cyclic control (steady + pumping): AltitudeHoldController.
-  Compute body_z_eq = bz_altitude_hold(pos, el_rad, tension_n):
+Cyclic control (steady + pumping): GUIDED mode attitude target.
+  Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
     points the disk at (el_rad, current_azimuth) with a gravity-compensation tilt
     so thrust counteracts the elevation-lowering component of gravity.
-  Elevation angle el_rad is rate-limited toward asin(target_alt / tlen).
-  Before GPS fuses: gyro feedthrough (zero corrective cyclic) to preserve orbital rate.
+  Convert bz_goal + ahrs:get_yaw() to ZYX Euler via bz_ned_to_roll_pitch().
+  Call vehicle:set_target_angle_and_climbrate(roll, pitch, yaw) at 50 Hz.
+  Before GPS fuses: command current body attitude (zero corrective torque).
 
 Ground planner signals via NAMED_VALUE_FLOAT:
   RAWES_SUB (mode=5): pumping substate 0=hold 1=reel_out 2=transition 3=reel_in 4=transition_back
@@ -35,7 +37,7 @@ Parameters:
 
 local BASE_PERIOD_MS    = 10        -- 100 Hz base tick
 local FLIGHT_PERIOD_MS  = 20        -- 50 Hz flight subsystem
-local ACRO_MODE_NUM     = 1         -- ArduCopter ACRO = 1
+local GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
 
 local _NVF_MSG_ID = 251
 -- mavlink:init(queue_size, num_msgs).  queue_size = max messages buffered
@@ -51,7 +53,7 @@ local _nv_floats = {}
 
 local MODE_NONE    = 0
 local MODE_STEADY  = 1
-local MODE_YAW     = 2   -- manual Lua yaw PID; holds yaw rate = 0 via SERVO4 direct
+local MODE_MANUAL  = 2   -- yaw compensation + manually commanded cyclic/collective via NVFs
 local MODE_PASSIVE = 3   -- armed but no commands: keep ch8 high, do nothing else.
                          -- Used by stack tests during kinematic so the rate-PID
                          -- has no setpoint to wind up against before release.
@@ -71,9 +73,8 @@ local PUMP_TRANSITION_BACK = 4
 local MASS_KG  = 5.0
 local G_ACCEL  = 9.81
 
--- ── RC / attitude ─────────────────────────────────────────────────────────────
+-- ── GPS / attitude ──────────────────────────────────────────────────────────────────
 
-local ACRO_RP_RATE_DEG = 360.0
 local MIN_TETHER_M     = 0.5        -- minimum tether length before GPS init activates
 
 -- ── Collective limits and cruise values ───────────────────────────────────────
@@ -127,10 +128,6 @@ local _rc_ch3 = rc:get_channel(3)
 local _rc_ch4 = rc:get_channel(4)
 local _rc_ch8 = rc:get_channel(8)
 
--- Cyclic output rate-limiting state
-local _prev_ch1 = 1500
-local _prev_ch2 = 1500
-
 -- Collective state
 local _last_col_rad = COL_CRUISE_FLIGHT_RAD
 local _col_i        = COL_CRUISE_FLIGHT_RAD
@@ -177,18 +174,6 @@ local _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 local _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
 local _tension_n      = 200.0   -- tether tension estimate [N]; updated from RAWES_TEN
 
--- Trim cyclic feedforward [rad] -- ground sends via RAWES_TLN / RAWES_TLT
--- (NAMED_VALUE_FLOAT, max 10-char name).  These cancel the wind-driven
--- baseline hub moment at the IC operating point so the rate PID doesn't
--- have to fight it after kinematic_exit.  Computed by aero.solve_trim_cyclic
--- in the test fixture.  Default 0 = no feedforward.
---
--- Held in the body frame the values arrived in.  We do NOT rotate the cyclic
--- by accumulated body yaw -- the disk-tilt direction follows the hub as it
--- yaws (yaw orientation never adjusts swashplate cyclic).
-local _trim_lon       = 0.0
-local _trim_lat       = 0.0
-
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
 -- is kinematically locked.  Defaults to the cruise-flight value.
@@ -200,15 +185,6 @@ local function v3_copy(v)
     local r = Vector3f()
     r:x(v:x()); r:y(v:y()); r:z(v:z())
     return r
-end
-
-local function v3_body_z()
-    local v = Vector3f(); v:z(1.0); return v
-end
-
--- body_z in NED: R[:,2] = rotor axis in world frame
-local function disk_normal_ned()
-    return ahrs:body_to_earth(v3_body_z())
 end
 
 -- Lateral-velocity damping gain [N*s/m] for damp_bz_eq_lateral.  Same value
@@ -278,83 +254,46 @@ local function anchor_ned()
     return a
 end
 
-local function rate_to_pwm(rate_rads, acro_rp_rate_deg)
-    acro_rp_rate_deg = acro_rp_rate_deg or ACRO_RP_RATE_DEG
-    local scale = 500.0 / (acro_rp_rate_deg * math.pi / 180.0)
-    local ch = math.floor(1500.0 + scale * rate_rads + 0.5)
-    if ch < 1000 then ch = 1000 end
-    if ch > 2000 then ch = 2000 end
-    return ch
-end
-
-local function output_rate_limit(desired, prev, max_delta)
-    if max_delta == 0 then return desired end
-    local d = desired - prev
-    if d >  max_delta then d =  max_delta end
-    if d < -max_delta then d = -max_delta end
-    return prev + d
-end
-
--- Body-frame cyclic error: err_ned = bz_now x bz_target; projected to body frame.
-local function cyclic_error_body(bz_now, bz_target_arg)
-    local err_ned  = bz_now:cross(bz_target_arg)
-    local err_body = ahrs:earth_to_body(err_ned)
-    return {err_body:x(), err_body:y()}
+-- Convert a desired body_z direction (NED Vector3f) to ZYX Euler roll/pitch (degrees)
+-- given the current heading yaw_rad.  At RAWES tether elevation 65 deg the resulting
+-- pitch is ~25 deg from level -- well clear of the 90 deg gimbal-lock singularity.
+-- Derivation: in the yaw-aligned frame, body_z = [sin_p*cos_r, -sin_r, cos_p*cos_r].
+local function bz_ned_to_roll_pitch(bz_ned, yaw_rad)
+    local cy = math.cos(yaw_rad)
+    local sy = math.sin(yaw_rad)
+    local bz_fwd   =  cy * bz_ned:x() + sy * bz_ned:y()   -- sin_p * cos_r
+    local bz_right = -sy * bz_ned:x() + cy * bz_ned:y()   -- -sin_r
+    local bz_down  = bz_ned:z()                            -- cos_p * cos_r
+    local pitch_deg = math.deg(math.atan(bz_fwd, bz_down))
+    local roll_deg  = math.deg(math.asin(math.max(-1.0, math.min(1.0, -bz_right))))
+    return roll_deg, pitch_deg
 end
 
 -- Compute the RC1/RC2/RC3 PWM overrides for holding the IC operating
--- point.  Used by MODE_PASSIVE and MODE_YAW, both of which require
+-- point.  Used by MODE_PASSIVE and MODE_MANUAL, both of which require
 -- H_FLYBAR_MODE=1 (calibrate.py's `run` command sets this on entry and
 -- restores on exit).
 --
--- With H_FLYBAR_MODE=1 ArduPilot's ACRO heli takes the passthrough branch
--- (passthrough_bf_roll_pitch_rate_yaw in mode_acro_heli.cpp) -- RC1/RC2
--- stick deflection becomes a direct cyclic command, scaled against
--- H_CYC_MAX (centidegrees of swash tilt at full stick).
---
---   stick_fraction = trim_rad_in_deg / (H_CYC_MAX / 100)
---   RC_offset_us   = stick_fraction * 500
---   PWM            = 1500 + RC_offset_us
---
--- The trim is held in the body frame the RAWES_TLN/TLT values arrived in --
--- yaw orientation does not adjust swashplate cyclic.
-local function trim_rad_to_pwm(trim_rad, h_cyc_max_cd)
-    local stick_cd = math.deg(trim_rad) * 100.0
-    local stick_fraction = stick_cd / math.max(h_cyc_max_cd, 100.0)
-    if stick_fraction >  1.0 then stick_fraction =  1.0 end
-    if stick_fraction < -1.0 then stick_fraction = -1.0 end
-    return math.floor(1500.0 + stick_fraction * 500.0 + 0.5)
-end
-
-local function set_trim_ic_rc_overrides()
-    local h_cyc_max = p("H_CYC_MAX", 2500.0)
-    -- HeliCyclicController sign mapping (controller.py): tilt_lat == roll_cyclic,
-    -- tilt_lon == -pitch_cyclic.  Match that here.
-    local _ch1 = trim_rad_to_pwm( _trim_lat, h_cyc_max)
-    local _ch2 = trim_rad_to_pwm(-_trim_lon, h_cyc_max)
-    if _rc_ch1 then _rc_ch1:set_override(_ch1) end
-    if _rc_ch2 then _rc_ch2:set_override(_ch2) end
-
-    local _col_thrust = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-    if _col_thrust < 0.0 then _col_thrust = 0.0 end
-    if _col_thrust > 1.0 then _col_thrust = 1.0 end
-    local _ch3 = math.floor(1000.0 + _col_thrust * 1000.0 + 0.5)
-    if _rc_ch3 then _rc_ch3:set_override(_ch3) end
-end
-
--- ── MODE_YAW: manual Lua yaw PID ─────────────────────────────────────────────
--- Reads ATC_RAT_YAW_P/I/D/IMAX and H_YAW_TRIM each tick so pidtune takes effect
--- immediately.  Drives SERVO4 directly via set_output_pwm_chan_timeout, bypassing
--- ArduPilot's internal DDFP yaw mixer.
--- Sign convention: err = -gyro_z.  gyro_z > 0 = CW spin (NED right-hand z-down).
--- Positive error (CCW spin) → higher output → more GB4008 throttle → CW torque.
+-- ── MODE_MANUAL: yaw compensation + manual cyclic/collective ────────────────
+-- SERVO4 (GB4008): driven by yaw PID.  Same sign convention as the old MODE_YAW:
+--   err = -gyro_z; positive error (CCW drift) -> more motor throttle -> CW torque.
+-- RC1/RC2: set from _man_tlat_rad / _man_tlon_rad (updated via RAWES_TLT / RAWES_TLN).
+--   PWM = 1500 + (setpoint_rad / H_CYC_MAX_rad) * 500, clamped to [1000, 2000].
+--   Requires H_FLYBAR_MODE=1 so the RC override bypasses the rate PID.
+-- RC3: set from _ic_col (updated via RAWES_COL NVF).
+-- All three NVFs are persistent (last value holds until a new one arrives).
 
 local _yaw_i      = 0.0
 local _yaw_prev_e = 0.0
 
+-- Manual mode cyclic setpoints [rad].  Updated from RAWES_TLN / RAWES_TLT NVFs.
+-- tlon > 0 = nose-down disk;  tlat > 0 = roll-right.  Reset to 0 on mode entry.
+local _man_tlon_rad = 0.0
+local _man_tlat_rad = 0.0
+
 local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
 
-local function run_yaw_pid(dt)
+local function run_manual(dt)
     local gyro = ahrs:get_gyro()
     if not gyro then return end
 
@@ -409,16 +348,29 @@ local function run_yaw_pid(dt)
     if pwm < servo_min then pwm = servo_min end
     SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, pwm, 200)
 
-    -- Hold cyclic at IC trim (body frame, no yaw-drift rotation) and
-    -- collective at _ic_col.  When the trim NVFs are unset they default
-    -- to 0 (neutral cyclic) / COL_CRUISE_FLIGHT_RAD, matching the prior
-    -- neutral/cruise behaviour.
-    set_trim_ic_rc_overrides()
+    -- Set cyclic from NVF setpoints (tlon/tlat in rad) using H_CYC_MAX as the full-range.
+    -- With H_FLYBAR_MODE=1 the RC override bypasses the rate PID and goes straight to
+    -- the swash mixer.  H_CYC_MAX is in centidegrees (1000 cd = 10 deg).
+    local _cyc_max_rad = math.rad(p("H_CYC_MAX", 1000) / 100.0)
+    local _ch1_pwm = math.floor(1500.0 + _man_tlat_rad / _cyc_max_rad * 500.0 + 0.5)
+    local _ch2_pwm = math.floor(1500.0 + _man_tlon_rad / _cyc_max_rad * 500.0 + 0.5)
+    if _ch1_pwm > 2000 then _ch1_pwm = 2000 end
+    if _ch1_pwm < 1000 then _ch1_pwm = 1000 end
+    if _ch2_pwm > 2000 then _ch2_pwm = 2000 end
+    if _ch2_pwm < 1000 then _ch2_pwm = 1000 end
+    if _rc_ch1 then _rc_ch1:set_override(_ch1_pwm) end
+    if _rc_ch2 then _rc_ch2:set_override(_ch2_pwm) end
+    -- Collective from _ic_col (updated via RAWES_COL NVF).
+    local _col_thrust_man = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+    if _col_thrust_man < 0.0 then _col_thrust_man = 0.0 end
+    if _col_thrust_man > 1.0 then _col_thrust_man = 1.0 end
+    if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + _col_thrust_man * 1000.0 + 0.5)) end
 
     if _diag % 100 == 1 then
         gcs:send_text(6, string.format(
-            "RAWES yaw: rate=%+.1fdeg/s  P=%+.3f  I=%+.3f  D=%+.3f  out=%.3f  pwm=%d",
-            math.deg(yaw_rate), p_out, _yaw_i, d_out, output, pwm))
+            "RAWES man: yrate=%+.1fdeg/s  s4out=%.3f  s4pwm=%d  col=%.2fdeg  tlon=%.2fdeg  tlat=%.2fdeg",
+            math.deg(yaw_rate), output, pwm,
+            math.deg(_ic_col), math.deg(_man_tlon_rad), math.deg(_man_tlat_rad)))
     end
 end
 
@@ -427,43 +379,40 @@ end
 local function _on_mode_enter(mode)
     _nv_floats      = {}   -- clear NV inbox so stale substates cannot bleed through
     _none_status_ms = 0
-    if mode == MODE_YAW then
-        _yaw_i      = 0.0
-        _yaw_prev_e = 0.0
+    if mode == MODE_MANUAL then
+        _yaw_i        = 0.0
+        _yaw_prev_e   = 0.0
+        _man_tlon_rad = 0.0
+        _man_tlat_rad = 0.0
     end
 end
 
 -- ── Flight subsystem ─────────────────────────────────────────────────────────
 
 local function run_flight()
-    if vehicle:get_mode() ~= ACRO_MODE_NUM then return end
+    if vehicle:get_mode() ~= GUIDED_MODE_NUM then return end
 
     local mode_now    = _prev_mode
     local substate    = _prev_sub
     local dt          = FLIGHT_PERIOD_MS * 0.001
     local _is_pumping = mode_now == MODE_PUMPING
 
-    -- ── Before GPS initialization: stabilize only ─────────────────────────
-    -- Goal: keep the hub alive while EKF fuses (~30 s in kinematic, ~80 s total).
-    -- Gyro feedthrough → desired_rate = measured_rate → ACRO rate_error = 0 →
-    -- no corrective torque → natural orbital rate preserved.
+    -- ── Before GPS initialization: hold current body attitude ─────────────
+    -- Command the current AHRS attitude so ArduPilot holds it with zero
+    -- corrective torque, preserving the orbital rate from kinematic.
+    -- Also primes _attitude_target so there is no step transient at GPS init.
     if not _el_initialized then
         local ct = (COL_CRUISE_FLIGHT_RAD - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
         if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + ct * 1000.0 + 0.5)) end
 
-        if not ahrs:healthy() then
-            if _rc_ch1 then _rc_ch1:set_override(1500) end
-            if _rc_ch2 then _rc_ch2:set_override(1500) end
-            return
-        end
+        if not ahrs:healthy() then return end
 
-        local gyro = ahrs:get_gyro()
-        if gyro then
-            if _rc_ch1 then _rc_ch1:set_override(rate_to_pwm(gyro:x())) end
-            if _rc_ch2 then _rc_ch2:set_override(rate_to_pwm(gyro:y())) end
-        else
-            if _rc_ch1 then _rc_ch1:set_override(1500) end
-            if _rc_ch2 then _rc_ch2:set_override(1500) end
+        local roll_r  = ahrs:get_roll()
+        local pitch_r = ahrs:get_pitch()
+        local yaw_r   = ahrs:get_yaw()
+        if roll_r and pitch_r and yaw_r then
+            vehicle:set_target_angle_and_climbrate(
+                math.deg(roll_r), math.deg(pitch_r), math.deg(yaw_r), 0.0, false, 0.0)
         end
 
         -- Check for GPS position; initialize altitude hold on first valid fix
@@ -519,32 +468,9 @@ local function run_flight()
     if vel_ned_d then
         bz_goal = damp_bz_eq_lateral(bz_goal, rel, vel_ned_d, ten_bz, KD_LAT)
     end
-    local bz_now  = disk_normal_ned()
-    local err     = cyclic_error_body(bz_now, bz_goal)
-    local err_bx  = err[1]
-    local err_by  = err[2]
-    local kp      = p("SCR_USER1", 1.0)
-
-    -- Convert trim cyclic [rad] to ATC rate-setpoint bias [rad/s].
-    -- ArduPilot's rate PID maps rate_error -> cyclic angle.  At steady
-    -- state with body rate = rate target (zero error), the output is
-    -- FF*rate_target.  When rate target ramps from zero, the output is
-    -- approximately (P+FF)*rate_target until the I-term takes over.
-    -- Use the (P+FF) sum so the steady-state cyclic = trim regardless of
-    -- which term dominates.  Sign convention matches HeliCyclicController:
-    --   tilt_lat ==  roll_cyclic  -> +bias on err_bx (roll)
-    --   tilt_lon == -pitch_cyclic -> -bias on err_by (pitch)
-    local _g_rll = math.max(p("ATC_RAT_RLL_P", 0.18) + p("ATC_RAT_RLL_FF", 0.0), 0.01)
-    local _g_pit = math.max(p("ATC_RAT_PIT_P", 0.18) + p("ATC_RAT_PIT_FF", 0.0), 0.01)
-    local _bias_rll =  _trim_lat / _g_rll
-    local _bias_pit = -_trim_lon / _g_pit
-
-    local ch1 = output_rate_limit(rate_to_pwm(kp * err_bx + _bias_rll), _prev_ch1, 100)
-    local ch2 = output_rate_limit(rate_to_pwm(kp * err_by + _bias_pit), _prev_ch2, 100)
-    _prev_ch1 = ch1
-    _prev_ch2 = ch2
-    if _rc_ch1 then _rc_ch1:set_override(ch1) end
-    if _rc_ch2 then _rc_ch2:set_override(ch2) end
+    local yaw_rad  = ahrs:get_yaw() or 0.0
+    local roll_deg, pitch_deg = bz_ned_to_roll_pitch(bz_goal, yaw_rad)
+    vehicle:set_target_angle_and_climbrate(roll_deg, pitch_deg, math.deg(yaw_rad), 0.0, false, 0.0)
 
     -- ── Collective ────────────────────────────────────────────────────────
     local col_cmd
@@ -601,14 +527,13 @@ local function run_flight()
 
     -- Diagnostic log (every ~5 s at 50 Hz)
     if _diag % 250 == 1 then
-        local err_mag  = math.sqrt(err_bx * err_bx + err_by * err_by)
         local pump_info = ""
         if _is_pumping and tlen then
             pump_info = string.format("  pump=%d  tlen=%.1f m", substate, tlen)
         end
         gcs:send_text(6, string.format(
-            "RAWES: ch1=%d ch2=%d ch3=%d |err|=%.3f  el=%.1f deg  alt=%.1f m%s",
-            ch1, ch2, ch3, err_mag, math.deg(_el_rad), _target_alt, pump_info))
+            "RAWES: r=%.1f p=%.1f y=%.0f ch3=%d  el=%.1f deg  alt=%.1f m%s",
+            roll_deg, pitch_deg, math.deg(yaw_rad), ch3, math.deg(_el_rad), _target_alt, pump_info))
     end
 end
 
@@ -637,7 +562,7 @@ local function run_armon(now)
         if arming:is_armed() then
             _armon_state = "armed"
         else
-            arming:arm()
+            arming:arm_force()
         end
 
     elseif _armon_state == "armed" then
@@ -677,18 +602,12 @@ local function update()
     local sub  = math.floor((_nv_floats["RAWES_SUB"] or 0) + 0.5)
     local now  = millis()
 
-    -- Update altitude and tension targets from NV messages (persistent last value)
+    -- Update altitude, tension, cyclic and collective targets from NV messages
     if _nv_floats["RAWES_ALT"]    then _target_alt   = _nv_floats["RAWES_ALT"]    end
     if _nv_floats["RAWES_TEN"]    then _tension_n    = _nv_floats["RAWES_TEN"]    end
-    if _nv_floats["RAWES_TLN"] then
-        _trim_lon = _nv_floats["RAWES_TLN"]
-        _nv_floats["RAWES_TLN"] = nil
-    end
-    if _nv_floats["RAWES_TLT"] then
-        _trim_lat = _nv_floats["RAWES_TLT"]
-        _nv_floats["RAWES_TLT"] = nil
-    end
     if _nv_floats["RAWES_COL"]    then _ic_col       = _nv_floats["RAWES_COL"]    end
+    if _nv_floats["RAWES_TLN"]    then _man_tlon_rad = _nv_floats["RAWES_TLN"]    end
+    if _nv_floats["RAWES_TLT"]    then _man_tlat_rad = _nv_floats["RAWES_TLT"]    end
     if _nv_floats["RAWES_TSP"] then
         _ten_setpoint = _nv_floats["RAWES_TSP"]
         _ten_sp_fresh = true
@@ -727,22 +646,25 @@ local function update()
 
     if mode == MODE_PASSIVE then
         -- Armed-but-quiet: hold the IC operating point so the kinematic
-        -- release transitions smoothly.  Cyclic rate setpoints are sized
-        -- so ArduPilot's rate PID produces _trim_lon / _trim_lat at
-        -- steady state (body frame, no yaw-drift rotation); ch3 pins
+        -- release transitions smoothly.  Cyclic is neutral; ch3 pins
         -- collective at _ic_col.
-        set_trim_ic_rc_overrides()
+        if _rc_ch1 then _rc_ch1:set_override(1500) end
+        if _rc_ch2 then _rc_ch2:set_override(1500) end
+        local _col_thrust_p = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+        if _col_thrust_p < 0.0 then _col_thrust_p = 0.0 end
+        if _col_thrust_p > 1.0 then _col_thrust_p = 1.0 end
+        if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + _col_thrust_p * 1000.0 + 0.5)) end
         -- Take ownership of SERVO4 and pin the GB4008 at 800 us (ESC armed
         -- but motor off).  Matches the safety-shutdown PWM used by
         -- calibrate.py so a PASSIVE session never spins the rotor.  Same
-        -- direct-write path MODE_YAW uses; needs SERVO4_FUNCTION=0 for the
+        -- direct-write path MODE_MANUAL uses; needs SERVO4_FUNCTION=0 for the
         -- override to stick (calibrate.py's `passive` command handles that).
         SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, 800, 200)
         if now - _none_status_ms >= 5000 then
             _none_status_ms = now
             gcs:send_text(6, string.format(
-                "RAWES PASS: tlon=%.2fdeg tlat=%.2fdeg col=%.2fdeg s4=800",
-                math.deg(_trim_lon), math.deg(_trim_lat), math.deg(_ic_col)))
+                "RAWES PASS: col=%.2fdeg s4=800",
+                math.deg(_ic_col)))
         end
         return update, BASE_PERIOD_MS
     end
@@ -754,13 +676,10 @@ local function update()
         end
     end
 
-    if mode == MODE_YAW then
-        -- Hold cyclic at IC trim in the body frame it arrived in (no
-        -- yaw-drift rotation -- the disk-tilt direction follows the body
-        -- as it yaws) and collective at _ic_col.  run_yaw_pid drives
-        -- SERVO4 directly via SRV_Channels and overrides ch1/ch2/ch3 at
-        -- the end with the IC trim values (see run_yaw_pid).
-        run_yaw_pid(BASE_PERIOD_MS * 0.001)
+    if mode == MODE_MANUAL then
+        -- Manual mode: yaw compensation via SERVO4 PID + NVF-commanded cyclic/collective.
+        -- run_manual drives SERVO4 directly and sets RC1/RC2/RC3 via override.
+        run_manual(BASE_PERIOD_MS * 0.001)
     end
 
     -- MODE_LANDING (4): not yet implemented
@@ -771,7 +690,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="steady", [2]="yaw", [4]="landing", [5]="pumping"}
+local _mode_names = {[0]="none", [1]="steady", [2]="manual", [4]="landing", [5]="pumping"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

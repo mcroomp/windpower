@@ -22,7 +22,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller import (
-    compute_rate_cmd,
     compute_bz_altitude_hold,
     damp_bz_eq_lateral,
 )
@@ -50,27 +49,22 @@ def _rot_z(angle):
     return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
 
 
-def _build_R(body_z):
-    """Rotation matrix body→NED whose third column is body_z."""
-    bz = _unit(body_z)
-    ref = np.array([0., 1., 0.]) if abs(bz[1]) < 0.9 else np.array([1., 0., 0.])
-    bx = np.cross(ref, bz);  bx /= np.linalg.norm(bx)
-    by = np.cross(bz, bx);   by /= np.linalg.norm(by)
-    return np.column_stack([bx, by, bz])
-
-
-def _py_pwm(rate_rads, rate_max_deg=360.0):
-    """Python controller PWM formula (reference for cross-check)."""
-    max_rate = math.radians(rate_max_deg)
-    return int(round(1500.0 + 500.0 * max(-1.0, min(1.0, rate_rads / max_rate))))
+def _bz_ned_to_roll_pitch(bz_ned, yaw_rad):
+    """Python reference for bz_ned_to_roll_pitch (mirrors the Lua implementation)."""
+    cy, sy = math.cos(yaw_rad), math.sin(yaw_rad)
+    bz_fwd   =  cy * bz_ned[0] + sy * bz_ned[1]
+    bz_right = -sy * bz_ned[0] + cy * bz_ned[1]
+    bz_down  = bz_ned[2]
+    pitch_deg = math.degrees(math.atan2(bz_fwd, bz_down))
+    roll_deg  = math.degrees(math.asin(max(-1.0, min(1.0, -bz_right))))
+    return roll_deg, pitch_deg
 
 
 # ── Constants sanity ─────────────────────────────────────────────────────────
 
 def test_constants_have_expected_values(sim):
-    """Key rawes.lua constants match the values documented in CLAUDE.md."""
+    """Key rawes.lua constants match their documented values."""
     f = sim.fns
-    assert float(f.ACRO_RP_RATE_DEG)      == pytest.approx(360.0)
     assert float(f.COL_CRUISE_FLIGHT_RAD) == pytest.approx(-0.18)
     assert float(f.COL_MIN_RAD)           == pytest.approx(-0.28)
     assert float(f.COL_MAX_RAD)           == pytest.approx(0.10)
@@ -217,156 +211,101 @@ class TestDampBzEqLateral:
             f"Mismatch at vel={vel_xyz} T={tension}"
 
 
-# ── cyclic_error_body ─────────────────────────────────────────────────────────
+# ── bz_ned_to_roll_pitch ──────────────────────────────────────────────────────
 
-class TestCyclicErrorBody:
+class TestBzNedToRollPitch:
     """
-    Tests for the body-frame cyclic error: err_ned = bz_now × bz_target,
-    projected into body frame via ahrs:earth_to_body().
+    Tests for bz_ned_to_roll_pitch(bz_ned, yaw_rad).
+
+    This is the GUIDED-mode conversion: given a desired body_z vector in NED
+    and the current heading, produce the ZYX Euler roll/pitch (degrees) to
+    pass to vehicle:set_target_angle_and_climbrate.
     """
 
-    def test_equilibrium_is_zero(self, sim):
-        """When bz_now == bz_target the error is identically zero."""
-        sim.R = np.eye(3)
-        bz = sim.lua_vec(0, 0, 1)
-        result = sim.fns.cyclic_error_body(bz, bz)
-        assert float(result[1]) == pytest.approx(0.0, abs=1e-12)
-        assert float(result[2]) == pytest.approx(0.0, abs=1e-12)
+    def _call(self, sim, bz_ned, yaw_rad):
+        """Call Lua bz_ned_to_roll_pitch and return (roll_deg, pitch_deg)."""
+        bz = sim.lua_vec(*bz_ned)
+        r, p = sim.fns.bz_ned_to_roll_pitch(bz, yaw_rad)
+        return float(r), float(p)
 
-    def test_north_tilt_drives_pitch(self, sim):
+    def test_straight_down_is_zero_angles(self, sim):
+        """body_z straight down (level hover) -> roll=0, pitch=0 regardless of yaw."""
+        for yaw in [0.0, 0.5, math.pi, -1.2]:
+            roll, pitch = self._call(sim, [0.0, 0.0, 1.0], yaw)
+            assert roll  == pytest.approx(0.0, abs=1e-10), f"roll nonzero at yaw={yaw}"
+            assert pitch == pytest.approx(0.0, abs=1e-10), f"pitch nonzero at yaw={yaw}"
+
+    def test_north_tilt_at_zero_yaw_is_pure_pitch(self, sim):
         """
-        bz_now tilted North from bz_target (NED down): err_ned has Y component
-        → body-Y (pitch) error is nonzero; body-X (roll) is near zero.
+        bz tilted North at yaw=0: should produce nonzero pitch and zero roll.
+        (North tilt = nose-down = positive pitch in ZYX convention.)
         """
-        sim.R = np.eye(3)
-        bz_target = sim.lua_vec(0, 0, 1)
-        bz_now    = sim.lua_vec(*_unit([0.15, 0, 1]))
-        result    = sim.fns.cyclic_error_body(bz_now, bz_target)
-        err_bx, err_by = float(result[1]), float(result[2])
-        assert abs(err_bx) < 1e-10
-        assert err_by < -1e-6
+        bz = _unit([0.2, 0.0, 1.0])
+        roll, pitch = self._call(sim, bz, 0.0)
+        assert abs(roll) < 1e-10
+        assert pitch > 1e-6
 
-    def test_east_tilt_drives_roll(self, sim):
-        """bz_now tilted East: body-X (roll) error nonzero; pitch near zero."""
-        sim.R = np.eye(3)
-        bz_target = sim.lua_vec(0, 0, 1)
-        bz_now    = sim.lua_vec(*_unit([0, 0.15, 1]))
-        result    = sim.fns.cyclic_error_body(bz_now, bz_target)
-        err_bx, err_by = float(result[1]), float(result[2])
-        assert err_bx > 1e-6
-        assert abs(err_by) < 1e-10
+    def test_east_tilt_at_zero_yaw_is_pure_roll(self, sim):
+        """bz tilted East at yaw=0: should produce nonzero roll and zero pitch."""
+        bz = _unit([0.0, 0.2, 1.0])
+        roll, pitch = self._call(sim, bz, 0.0)
+        assert abs(pitch) < 1e-10
+        assert roll < -1e-6
 
-    def test_error_magnitude_invariant_under_yaw(self, sim):
+    def test_tilt_angle_invariant_under_yaw(self, sim):
         """
-        Rotating R around Z (yaw) must not change |err_bx|^2 + |err_by|^2.
-        The total cyclic correction magnitude depends only on the tilt angle.
+        The underlying tilt angle acos(cos(roll)*cos(pitch)) must not change as
+        yaw rotates. This is the actual geometric invariant: the same body_z
+        vector has the same angular separation from vertical regardless of yaw.
         """
-        bz_target = sim.lua_vec(0, 0, 1)
-        bz_now    = sim.lua_vec(*_unit([0.1, 0.2, 0.9]))
-        sim.R = np.eye(3)
-        r0    = sim.fns.cyclic_error_body(bz_now, bz_target)
-        ref_mag = math.sqrt(float(r0[1])**2 + float(r0[2])**2)
+        bz = _unit([0.15, 0.10, 1.0])
+        expected_tilt = math.degrees(math.acos(bz[2]))   # acos(bz_down) for unit bz
+        for yaw in [0.0, 0.4, 1.2, -0.7, math.pi / 3, math.pi]:
+            r, p = self._call(sim, bz, yaw)
+            actual_tilt = math.degrees(math.acos(
+                max(-1.0, min(1.0, math.cos(math.radians(r)) * math.cos(math.radians(p))))))
+            assert actual_tilt == pytest.approx(expected_tilt, abs=1e-4), \
+                f"Tilt angle changed at yaw={math.degrees(yaw):.1f} deg"
 
-        for yaw in [0.4, 1.2, -0.7, math.pi / 4]:
-            sim.R = _rot_z(yaw)
-            r   = sim.fns.cyclic_error_body(bz_now, bz_target)
-            mag = math.sqrt(float(r[1])**2 + float(r[2])**2)
-            assert mag == pytest.approx(ref_mag, abs=1e-10), \
-                f"Magnitude changed at yaw={math.degrees(yaw):.1f} deg"
-
-    @pytest.mark.parametrize("yaw", [0.0, 0.5, 1.2, -0.7, math.pi / 4])
-    def test_matches_compute_rate_cmd(self, sim, yaw):
+    def test_round_trip_via_rotation_matrix(self, sim):
         """
-        Cross-check: Lua cyclic_error_body (kp=1) matches controller.py
-        compute_rate_cmd(kp=1, kd=0) roll and pitch outputs.
+        R = Rz(yaw)*Ry(pitch)*Rx(roll) should reconstruct body_z = R[:,2]
+        matching the original bz_ned (up to floating-point rounding).
         """
-        bz_target_np = _unit([0.0, 0.0, 1.0])
-        bz_now_np    = _unit([0.1, 0.2, 0.9])
-        R            = _rot_z(yaw)
-        sim.R = R
+        for bz_raw, yaw in [
+            ([0.0,  0.0, 1.0], 0.0),
+            ([0.2,  0.0, 1.0], 0.3),
+            ([0.0,  0.2, 1.0], -0.8),
+            ([0.15, 0.1, 0.8], 1.2),
+        ]:
+            bz = _unit(bz_raw)
+            roll_d, pitch_d = self._call(sim, bz, yaw)
+            r, p = math.radians(roll_d), math.radians(pitch_d)
+            Rz = _rot_z(yaw)
+            cr, sr = math.cos(r), math.sin(r)
+            cp, sp = math.cos(p), math.sin(p)
+            Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+            Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+            R  = Rz @ Ry @ Rx
+            bz_rec = R[:, 2]
+            assert bz_rec == pytest.approx(bz, abs=1e-6), \
+                f"Round-trip failed for bz={bz_raw} yaw={math.degrees(yaw):.1f}"
 
-        result   = sim.fns.cyclic_error_body(
-            sim.lua_vec(*bz_now_np), sim.lua_vec(*bz_target_np))
-        py_rates = compute_rate_cmd(
-            bz_now_np, bz_target_np, R, kp=1.0, kd=0.0)
-
-        assert float(result[1]) == pytest.approx(py_rates[0], abs=1e-12)
-        assert float(result[2]) == pytest.approx(py_rates[1], abs=1e-12)
-
-
-# ── output_rate_limit ─────────────────────────────────────────────────────────
-
-class TestOutputRateLimit:
-
-    def test_no_change_needed(self, sim):
-        assert int(sim.fns.output_rate_limit(1600, 1600, 30)) == 1600
-
-    def test_small_step_passes_through(self, sim):
-        assert int(sim.fns.output_rate_limit(1520, 1500, 30)) == 1520
-
-    def test_large_positive_step_clamped(self, sim):
-        assert int(sim.fns.output_rate_limit(1700, 1500, 30)) == 1530
-
-    def test_large_negative_step_clamped(self, sim):
-        assert int(sim.fns.output_rate_limit(1300, 1500, 30)) == 1470
-
-    def test_max_delta_zero_disables(self, sim):
-        assert int(sim.fns.output_rate_limit(1000, 1500, 0)) == 1000
-        assert int(sim.fns.output_rate_limit(2000, 1500, 0)) == 2000
-
-    def test_convergence_steps(self, sim):
-        """Steps to reach target == ceil(|target - start| / max_delta)."""
-        start, target, max_delta = 1500, 1800, 30
-        expected = math.ceil(abs(target - start) / max_delta)
-        prev, steps = start, 0
-        for _ in range(200):
-            new = int(sim.fns.output_rate_limit(target, prev, max_delta))
-            steps += 1
-            if new == target:
-                break
-            prev = new
-        assert steps == expected
-
-
-# ── rate_to_pwm ───────────────────────────────────────────────────────────────
-
-class TestRateToPwm:
-
-    def test_zero_rate_is_neutral(self, sim):
-        assert int(sim.fns.rate_to_pwm(0.0)) == 1500
-
-    def test_full_positive_is_2000(self, sim):
-        max_rate = math.radians(360.0)
-        assert int(sim.fns.rate_to_pwm(max_rate)) == 2000
-
-    def test_full_negative_is_1000(self, sim):
-        max_rate = math.radians(360.0)
-        assert int(sim.fns.rate_to_pwm(-max_rate)) == 1000
-
-    def test_clamped_above_full_stick(self, sim):
-        assert int(sim.fns.rate_to_pwm(100.0)) == 2000
-
-    def test_clamped_below_full_stick(self, sim):
-        assert int(sim.fns.rate_to_pwm(-100.0)) == 1000
-
-    @pytest.mark.parametrize("rate_rads", [
-        0.0, 0.5, -0.5, 1.0, -1.0, math.pi, -math.pi
+    @pytest.mark.parametrize("bz_raw,yaw", [
+        ([0.0,  0.0, 1.0], 0.0),
+        ([0.2,  0.0, 1.0], 0.0),
+        ([0.0,  0.2, 1.0], 0.0),
+        ([0.15, 0.1, 0.8], 0.5),
+        ([0.15, 0.1, 0.8], -0.7),
+        ([0.3, -0.2, 0.9], math.pi / 4),
+        ([0.0,  0.3, 0.7], math.pi),
     ])
-    def test_matches_controller_py_pwm(self, sim, rate_rads):
-        """
-        Cross-check: Lua rate_to_pwm matches the Python controller PWM formula.
-        Both use ACRO_RP_RATE = 360 deg/s.
-        """
-        lua_pwm = int(sim.fns.rate_to_pwm(rate_rads))
-        py_pwm  = _py_pwm(rate_rads, rate_max_deg=360.0)
-        assert lua_pwm == py_pwm, \
-            f"PWM mismatch at rate={rate_rads:.4f}: lua={lua_pwm} py={py_pwm}"
-
-    @pytest.mark.parametrize("acro_rate_deg", [200.0, 360.0, 720.0])
-    def test_matches_py_pwm_various_acro_rates(self, sim, acro_rate_deg):
-        """Both formulas agree across a sweep of rates for various ACRO_RP_RATE settings."""
-        for rate_rads in np.linspace(-math.radians(acro_rate_deg),
-                                      math.radians(acro_rate_deg), 21):
-            lua_pwm = int(sim.fns.rate_to_pwm(rate_rads, acro_rate_deg))
-            py_pwm  = _py_pwm(rate_rads, rate_max_deg=acro_rate_deg)
-            assert lua_pwm == py_pwm
+    def test_matches_python_reference(self, sim, bz_raw, yaw):
+        """Cross-check: Lua result matches the Python reference formula."""
+        bz = _unit(bz_raw)
+        lua_r, lua_p = self._call(sim, bz, yaw)
+        py_r, py_p   = _bz_ned_to_roll_pitch(bz, yaw)
+        assert lua_r == pytest.approx(py_r, abs=1e-10), \
+            f"roll mismatch bz={bz_raw} yaw={math.degrees(yaw):.1f}"
+        assert lua_p == pytest.approx(py_p, abs=1e-10), \
+            f"pitch mismatch bz={bz_raw} yaw={math.degrees(yaw):.1f}"

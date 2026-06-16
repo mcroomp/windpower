@@ -62,3 +62,25 @@ class HeliParams:
 
     # Output limit per axis [-1, 1] like motor mixer normalised cyclic.
     output_limit: float = 1.0
+
+    # -----------------------------------------------------------------------
+    # Attitude (outer) P-loop gains — `ATC_ANG_RLL_P / PIT_P / YAW_P`
+    # Default 4.5 from AC_AttitudeControl.h AC_ATTITUDE_CONTROL_ANGLE_P.
+    # -----------------------------------------------------------------------
+    ATC_ANG_RLL_P: float = 4.5
+    ATC_ANG_PIT_P: float = 4.5
+    ATC_ANG_YAW_P: float = 4.5
+
+    # Angular acceleration limits for the sqrt-controller (centi-deg/s^2).
+    # 0 disables accel limiting (linear P only).
+    # ArduPilot defaults: 110000 cdss (roll/pitch), 27000 cdss (yaw).
+    # `ATC_ACCEL_R_MAX`, `ATC_ACCEL_P_MAX`, `ATC_ACCEL_Y_MAX`
+    ATC_ACCEL_R_MAX: float = 110000.0
+    ATC_ACCEL_P_MAX: float = 110000.0
+    ATC_ACCEL_Y_MAX: float = 27000.0
+
+    # Maximum body-frame angular velocity (deg/s). 0 = unlimited.
+    # `ATC_RATE_R_MAX`, `ATC_RATE_P_MAX`, `ATC_RATE_Y_MAX`
+    ATC_RATE_R_MAX: float = 0.0
+    ATC_RATE_P_MAX: float = 0.0
+    ATC_RATE_Y_MAX: float = 0.0

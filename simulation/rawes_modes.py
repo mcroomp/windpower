@@ -19,7 +19,8 @@ Usage
 
 MODE_NONE     = 0   # script passive: no RC overrides; logs every 5 s + any NV message
 MODE_STEADY   = 1   # bz_altitude_hold cyclic + VZ-PI collective
-# modes 2,3 reserved
+MODE_MANUAL   = 2   # yaw PID (SERVO4) + NVF-commanded cyclic/collective (RAWES_TLN/TLT/COL)
+# mode 3 reserved (passive)
 MODE_LANDING  = 4   # (reserved, not yet implemented)
 MODE_PUMPING  = 5   # bz_altitude_hold cyclic + TensionPI collective; planner sends RAWES_SUB
 

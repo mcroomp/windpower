@@ -164,3 +164,74 @@ class TetherModel:
             k_eff        = k_eff,
         )
         return force, moment
+
+
+class ConstantTensionTether:
+    """
+    Tether that applies a constant tension magnitude directed from hub toward anchor.
+
+    No spring, no damping, no slack threshold.  Tension magnitude is fixed at
+    ``tension_n`` regardless of tether length or velocity.  Direction follows the
+    actual hub→anchor geometry so the force rotates as the hub moves.
+
+    Intended for tests where the elastic dynamics of the tether are irrelevant
+    and only the steady-state load matters (e.g. ground-liftoff tests, constant-
+    load steady-flight investigations).
+
+    Implements the same interface as TetherModel:
+        compute(pos, vel, R) → (F_ned, M_ned)
+        ._last_info["tension"]
+        .rest_length (settable; ignored — no slack model)
+        .EA, .BREAK_LOAD_N, .damping  (for mediator event log)
+    """
+
+    def __init__(
+        self,
+        tension_n:              float,
+        anchor_ned:             "np.ndarray | None" = None,
+        axle_attachment_length: float = 0.3,
+    ) -> None:
+        self._tension_n         = float(tension_n)
+        self.anchor             = (np.asarray(anchor_ned, dtype=float)
+                                   if anchor_ned is not None
+                                   else np.zeros(3))
+        self._axle              = float(axle_attachment_length)
+        self.rest_length: float = 0.0        # settable by winch; unused here
+        self._last_info: dict   = {}
+        # Dummy stiffness / break fields for mediator event-log compatibility.
+        self.EA          = float(tension_n) * 1000.0
+        self.BREAK_LOAD_N = float(tension_n) * 2.0
+
+    @property
+    def damping(self) -> float:
+        return 0.0
+
+    def compute(
+        self,
+        hub_pos: np.ndarray,
+        hub_vel: np.ndarray,
+        R_hub:   "np.ndarray | None" = None,
+    ) -> tuple:
+        r = hub_pos - self.anchor          # anchor → hub
+        L = float(np.linalg.norm(r))
+
+        if L < 1e-6:
+            self._last_info = dict(slack=True, tension=0.0, extension=0.0, length=0.0)
+            return np.zeros(3), np.zeros(3)
+
+        unit  = r / L                      # unit vector pointing away from anchor
+        force = -self._tension_n * unit    # tension pulls hub toward anchor
+
+        moment = np.zeros(3)
+        if R_hub is not None and abs(self._axle) > 1e-9:
+            body_z_world = R_hub[:, 2]
+            r_attach     = self._axle * body_z_world
+            moment       = cross3(r_attach, force)
+
+        self._last_info = dict(
+            slack     = False,
+            tension   = self._tension_n,
+            extension = L,
+            length    = L,
+        )
+        return force, moment

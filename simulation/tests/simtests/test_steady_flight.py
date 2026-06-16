@@ -90,6 +90,12 @@ def _run_simulation(log, steps: int = 4000):
         kd_lat=50.0,
     )
     ap     = PythonAP(_ap, wind=WIND, dt=DT)
+    from arduloop import HeliParams, RateAxisParams
+    _rp = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTE=0.0, FLTD=40.0)
+    _hp = HeliParams()
+    _hp.roll = _rp
+    _hp.pitch = _rp
+    ap.enable_guided(_hp)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),
         "body_z_eq":  r.hub_state["R"][:, 2],
@@ -136,8 +142,7 @@ def _run_simulation(log, steps: int = 4000):
         dT       = runner.tension_now - tension_out
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
-        sr = runner.step(DT, ap.col_rad, ap.roll_sp, ap.pitch_sp,
-                         runner.omega_body, rest_length=rest_now)
+        sr = ap.step_physics(runner, DT, rest_length=rest_now)
         ap.log(runner, sr)
 
     ap.write_telemetry(log.log_dir / "telemetry.csv")

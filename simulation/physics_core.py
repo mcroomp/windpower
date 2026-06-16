@@ -119,6 +119,7 @@ class PhysicsCore:
         z_floor:            float = -1.0,
         aero_model:         str   = "oye",
         aero_override             = None,
+        tether_override           = None,
     ):
         self._rotor              = rotor
         self._wind               = np.asarray(wind, dtype=float).copy()
@@ -151,11 +152,14 @@ class PhysicsCore:
 
         if rotor.control is None or rotor.control.axle_attachment_length_m is None:
             raise ValueError("rotor.control.axle_attachment_length_m must be set")
-        self._tether = TetherModel(
-            anchor_ned             = np.zeros(3),
-            rest_length            = float(ic.rest_length),
-            axle_attachment_length = float(rotor.control.axle_attachment_length_m),
-        )
+        if tether_override is not None:
+            self._tether = tether_override
+        else:
+            self._tether = TetherModel(
+                anchor_ned             = np.zeros(3),
+                rest_length            = float(ic.rest_length),
+                axle_attachment_length = float(rotor.control.axle_attachment_length_m),
+            )
         self._t_sim      = 0.0
         self._damp_alpha = 0.0
 

@@ -14,15 +14,13 @@ Uses the acro_armed_lua_full fixture (stationary kinematic hold, vel0=[0,0,0]):
   - internal_controller=False (Lua RC overrides drive physics at 50 Hz)
   - SCR_USER6=3 (MODE_PASSIVE) set immediately in fixture; the test
     promotes to SCR_USER6=1 (MODE_STEADY) right after kinematic_exit.
-    MODE_PASSIVE keeps the Lua quiet (only ch8 keepalive + trim cyclic
-    + IC collective via NVFs) so ArduPilot's rate PID does not wind
-    up against a kinematically-locked body during the 80 s hold.
+    MODE_PASSIVE keeps the Lua quiet (only ch8 keepalive + IC collective
+    via NVF) so ArduPilot's rate PID does not wind up against a
+    kinematically-locked body during the 80 s hold.
   - IC altitude ~43 m (tether rest length ~100 m); hub orbits near IC altitude.
 
-The fixture also computes the IC trim cyclic via aero.solve_trim_cyclic
-and streams it to the Lua as RAWES_TLN / RAWES_TLT / RAWES_COL named
-floats so MODE_PASSIVE can hold cyclic + collective at the IC operating
-point during kinematic.
+The fixture streams the IC collective to the Lua as RAWES_COL so MODE_PASSIVE
+can pin collective at the IC operating point during kinematic.
 
 No RC overrides are sent by this test — Lua owns Ch1/Ch2/Ch3 (cyclic +
 collective) and Ch8 (motor interlock keepalive at 100 Hz).
@@ -30,13 +28,12 @@ collective) and Ch8 (motor interlock keepalive at 100 Hz).
 Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
-  t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; trim cyclic
-              + IC collective NVFs streamed; Lua holds ch1/ch2/ch3 at
-              the IC operating point but does NOT run altitude hold.
+  t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
+              NVF streamed; Lua pins ch3 at the IC collective but does
+              NOT run altitude hold.
   t~34 s      GPS fuses; fixture yields
   t=80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY)
-              and Lua's altitude-hold loop takes over with cyclic
-              already at the trim value.
+              and Lua's altitude-hold loop takes over.
   t~80+       free flight under ArduPilot + Lua
 
 Fixture yields at ~t=34 s (GPS fusion).  Test waits for kinematic to end

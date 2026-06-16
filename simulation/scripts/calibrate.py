@@ -54,8 +54,10 @@ import csv
 import json
 import math
 import os
+import queue
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 
 # msvcrt is Windows stdlib -- used by yawmanual for non-blocking ESC-key abort.
@@ -224,7 +226,7 @@ _PARAMS_JSON   = _load_params_json()
 _KEY_PARAMS    = _params_as_tuples(_PARAMS_JSON["key"])
 _TAIL_PARAMS   = _params_as_tuples(_PARAMS_JSON["tail_pid"])
 
-_LUA_MODES = {0: "none", 1: "steady", 2: "yaw", 3: "passive", 4: "landing", 5: "pumping"}
+_LUA_MODES = {0: "none", 1: "steady", 2: "manual", 3: "passive", 4: "landing", 5: "pumping"}
 
 
 def _print_status(session: RawesGCS) -> None:
@@ -766,8 +768,10 @@ Long-running (always log; ESC or Ctrl-C aborts):
           passive   armed but quiet -- pins ch1/ch2/ch3 at IC trim, SERVO4
                     at 800 us.  Sets H_FLYBAR_MODE=1 (RC passthrough),
                     H_CYC_MAX=1000 (10 deg cap), H_SV_MAN=0.
-          yaw       manual Lua yaw PID (SERVO4 direct).  Accepts --gain for
-                    full yaw PID + filters + servo limits.
+          manual    yaw compensation (SERVO4 PID) + NVF-commanded cyclic /
+                    collective.  Sets H_FLYBAR_MODE=1, H_CYC_MAX=1000,
+                    H_SV_MAN=0.  For an interactive session use the `manual`
+                    command instead (see below).
           steady    steady flight (alt hold + VZ PI collective)
           pumping   De Schutter pumping cycle
           landing   landing (reserved)
@@ -795,8 +799,25 @@ Long-running (always log; ESC or Ctrl-C aborts):
           # Isolated S2 swashplate-servo test (~25 s, S2 dominant up/down)
           run passive --osc s2
 
+  manual [--col VALUE] [--tlon VALUE] [--tlat VALUE] [--gain K=V,...] [--duration N]
+        Interactive manual control session (mode 2).  Arms the vehicle,
+        enables H_FLYBAR_MODE=1 / H_CYC_MAX=1000 / H_SV_MAN=0, and opens
+        a live '> ' prompt.  While running type:
+            col=VAL     collective [deg]  (-16 .. +5.7)
+            tlon=VAL    longitudinal cyclic [deg]; +ve = nose-down
+            tlat=VAL    lateral cyclic [deg]; +ve = roll-right
+            status      print current FC snapshot
+            quit        exit and run safety shutdown
+        ESC or Ctrl-C also trigger safety shutdown.
+        Logs every ATTITUDE tick to simulation/logs/calibrate/manual_ctrl_*.csv.
+
+        Examples (all values in DEGREES):
+          manual --col -8.6
+          manual --col -8.6 --tlon 1.15 --duration 120
+          manual --gain p=0.015,i=0.005 --col -8.6
+
   analyze yaw <csv> [--include-saturate]
-        Offline PID-tuning report on a saved run_yaw_*.csv (no FC connection
+        Offline PID-tuning report on a saved manual_ctrl_*.csv (no FC connection
         required).  Default: filters out samples where the PID output or
         integrator was saturated (the closed loop wasn't operating).  Pass
         --include-saturate to score all samples together.
@@ -1336,13 +1357,19 @@ _RUN_MODES = {
         },
         "doc":        "armed but quiet: pins ch1/ch2/ch3 at IC trim, pins SERVO4 at 800 us, H_FLYBAR_MODE=1, H_CYC_MAX=1000, H_SV_MAN=0",
     },
-    "yaw": {
+    "manual": {
         "scr_user6":  2,
         "take_servo4": True,
         "force_params": {
-            # Same passthrough requirement as passive: trim cyclic is set via
-            # direct RC override in the Lua, not via rate-PID bias.
+            # Flybar passthrough: RC1/RC2 overrides bypass the rate PID and
+            # go straight to the swash mixer -- manual cyclic commands land
+            # on the servos without PID filtering or rate-limiting.
             "H_FLYBAR_MODE": 1,
+            # Cap cyclic at 10 deg at full stick so the same NVF radians map
+            # to a predictable PWM offset.  Same cap as passive mode.
+            "H_CYC_MAX": 1000,
+            # Disable manual-setup servo override -- we want the live mixer.
+            "H_SV_MAN": 0,
         },
         "gain_keys": {
             "p":         "ATC_RAT_YAW_P",
@@ -1358,7 +1385,7 @@ _RUN_MODES = {
             "servo_min": "SERVO4_MIN",
             "servo_max": "SERVO4_MAX",
         },
-        "doc":        "manual Lua yaw PID (drives SERVO4 directly)",
+        "doc":        "yaw compensation (SERVO4 PID) + NVF-commanded cyclic/collective; H_FLYBAR_MODE=1",
     },
     "steady": {
         "scr_user6":  1,
@@ -1982,6 +2009,291 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
     print("")
 
 
+def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
+    """manual [--col VALUE] [--tlon VALUE] [--tlat VALUE] [--gain K=V,...] [--duration N]
+
+    Interactive manual control: arms the vehicle in mode 2 (manual), sets
+    H_FLYBAR_MODE=1 / H_CYC_MAX=1000 / H_SV_MAN=0, then enters a live
+    control loop.
+
+    While running, type commands at the '> ' prompt:
+        col=VALUE    collective [deg]; COL_MIN (-16) .. COL_MAX (+5.7)
+        tlon=VALUE   longitudinal cyclic [deg]; +ve = nose-down
+        tlat=VALUE   lateral cyclic [deg];      +ve = roll-right
+        status       print current FC snapshot
+        help         show this list
+        quit / q     ESC exit -- safety shutdown then return
+
+    Press ESC at any time to exit and run safety shutdown.
+    """
+
+    schema = {
+        "--col":      "float",
+        "--tlon":     "float",
+        "--tlat":     "float",
+        "--gain":     "kv",
+        "--duration": "float",
+    }
+    try:
+        pos, flags = _parse_flags(args, schema)
+    except ValueError as e:
+        print(f"  Error: {e}"); return
+    if pos:
+        print(f"  Unexpected positional argument(s): {pos}")
+        print("  Usage: manual [--col VALUE] [--tlon VALUE] [--tlat VALUE]"
+              " [--gain K=V,...] [--duration N]")
+        return
+
+    duration   = flags.get("--duration")
+    init_col   = math.radians(float(flags.get("--col",  -8.6)))
+    init_tlon  = math.radians(float(flags.get("--tlon",  0.0)))
+    init_tlat  = math.radians(float(flags.get("--tlat",  0.0)))
+    gain       = flags.get("--gain", {}) or {}
+
+    cfg = _RUN_MODES["manual"]
+    gain_map = cfg["gain_keys"]
+    bad = [k for k in gain if k not in gain_map]
+    if bad:
+        print(f"  Unknown --gain keys: {bad}  (valid: {list(gain_map)})")
+        return
+
+    # Apply mode-required and per-run param overrides
+    saved_overrides: dict[str, float] = {}
+    for ap_name, target in cfg.get("force_params", {}).items():
+        orig = session.get_param(ap_name)
+        if orig is None:
+            print(f"  [WARN] {ap_name}: could not read -- skipping")
+            continue
+        saved_overrides[ap_name] = float(orig)
+        ok = session.set_param(ap_name, float(target))
+        tag = "[OK]  " if ok else "[FAIL]"
+        print(f"  {tag} {ap_name}: {orig:.6g} -> {target}")
+    for k, v in gain.items():
+        ap_name = gain_map[k]
+        orig = session.get_param(ap_name)
+        if orig is None:
+            print(f"  [WARN] {ap_name}: could not read -- skipping")
+            continue
+        if ap_name not in saved_overrides:
+            saved_overrides[ap_name] = float(orig)
+        ok = session.set_param(ap_name, float(v))
+        tag = "[OK]  " if ok else "[FAIL]"
+        print(f"  {tag} {ap_name}: {orig:.6g} -> {v:.6g}")
+
+    saved_fn = _take_servo4(session)
+    session.set_param("SCR_USER6", cfg["scr_user6"])
+    print(f"  SCR_USER6 -> {cfg['scr_user6']} (manual mode)")
+
+    # Send initial setpoints
+    session.send_named_float("RAWES_COL", init_col)
+    session.send_named_float("RAWES_TLN", init_tlon)
+    session.send_named_float("RAWES_TLT", init_tlat)
+    print(f"  Initial setpoints: col={math.degrees(init_col):+.2f}d "
+          f"tlon={math.degrees(init_tlon):+.2f}d "
+          f"tlat={math.degrees(init_tlat):+.2f}d")
+
+    arm_ms = _rawes_arm_ms(duration)
+    print(f"  Sending RAWES_ARM={arm_ms} ms ...")
+    session.send_named_float("RAWES_ARM", float(arm_ms))
+    if not _wait_for_armed(session, timeout_s=15.0):
+        print("  [FAIL] Did not arm within 15 s.")
+        _safety_shutdown(session, saved_servo4_fn=saved_fn,
+                         saved_overrides=saved_overrides)
+        return
+    print("  [OK] Armed.")
+
+    # Open CSV log
+    meta = {
+        "verb":            "manual",
+        "duration_s":      duration if duration is not None else "",
+        "init_col_deg":    math.degrees(init_col),
+        "init_tlon_deg":   math.degrees(init_tlon),
+        "init_tlat_deg":   math.degrees(init_tlat),
+        "run_start_local": datetime.now().isoformat(timespec="seconds"),
+        "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "SCR_USER6":       cfg["scr_user6"],
+    }
+    log = _RunLog.open("manual", "ctrl", meta)
+    log.write_header(["t_s", "armed",
+                      "yaw_deg", "yaw_rate_dps", "roll_deg", "pitch_deg",
+                      "s1_us", "s2_us", "s3_us", "s4_us",
+                      "col_deg", "tlon_deg", "tlat_deg",
+                      "yaw_i_lua", "yaw_out_lua"])
+    print(f"  Logging to {log.path}")
+
+    # Shared state between threads
+    ctl = {
+        "col_rad":  init_col,
+        "tlon_rad": init_tlon,
+        "tlat_rad": init_tlat,
+        "armed":    True,
+        "yaw_deg":  None,
+        "yaw_rate_dps": None,
+        "roll_deg": None,
+        "pitch_deg": None,
+        "s1": None, "s2": None, "s3": None, "s4": None,
+        "yaw_i": None, "yaw_out": None,
+        "running": True,
+    }
+    cmd_q: queue.Queue = queue.Queue()
+
+    def _input_worker():
+        print("  Commands: col=VAL  tlon=VAL  tlat=VAL  status  help  quit  (ESC also exits)")
+        print("  Values in DEGREES.")
+        while ctl["running"]:
+            try:
+                line = input("> ").strip()
+            except (EOFError, OSError):
+                cmd_q.put("quit")
+                break
+            if line:
+                cmd_q.put(line)
+
+    input_thread = threading.Thread(target=_input_worker, daemon=True)
+    input_thread.start()
+
+    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,          25)
+    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,     25)
+    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 5)
+
+    t0 = time.monotonic()
+    deadline = (t0 + duration) if duration else None
+    last_status_t = -999.0
+    aborted = False
+
+    try:
+        while True:
+            if deadline and time.monotonic() >= deadline:
+                break
+            if _esc_check():
+                aborted = True
+                print("\n  [ESC] abort -- running safety shutdown ...")
+                break
+
+            # Drain command queue
+            while True:
+                try:
+                    cmd = cmd_q.get_nowait()
+                except _queue.Empty:
+                    break
+                cmd_lo = cmd.lower()
+                if cmd_lo in ("quit", "exit", "q"):
+                    aborted = True
+                    ctl["running"] = False
+                    break
+                elif cmd_lo in ("help", "h", "?"):
+                    print("  Commands: col=VAL  tlon=VAL  tlat=VAL  status  help  quit")
+                    print("  Values in DEGREES.  Range: col [-16..+5.7]  tlon/tlat [-10..+10]")
+                elif cmd_lo == "status":
+                    yaw_s = f"{ctl['yaw_deg']:+.1f}d" if ctl["yaw_deg"] is not None else "n/a"
+                    print(f"  setpoints: col={math.degrees(ctl['col_rad']):+.2f}d "
+                          f"tlon={math.degrees(ctl['tlon_rad']):+.2f}d "
+                          f"tlat={math.degrees(ctl['tlat_rad']):+.2f}d  "
+                          f"yaw={yaw_s}  "
+                          f"s1={ctl['s1']}  s2={ctl['s2']}  s3={ctl['s3']}  s4={ctl['s4']}")
+                elif "=" in cmd:
+                    key, _, val_s = cmd.partition("=")
+                    key = key.strip().lower()
+                    try:
+                        val_deg = float(val_s.strip())
+                        val_rad = math.radians(val_deg)
+                        if key == "col":
+                            ctl["col_rad"] = val_rad
+                            session.send_named_float("RAWES_COL", val_rad)
+                            print(f"  col -> {val_deg:+.2f} deg  ({val_rad:+.4f} rad)  sent")
+                        elif key in ("tlon", "lon"):
+                            ctl["tlon_rad"] = val_rad
+                            session.send_named_float("RAWES_TLN", val_rad)
+                            print(f"  tlon -> {val_deg:+.2f} deg  ({val_rad:+.4f} rad)  sent")
+                        elif key in ("tlat", "lat"):
+                            ctl["tlat_rad"] = val_rad
+                            session.send_named_float("RAWES_TLT", val_rad)
+                            print(f"  tlat -> {val_deg:+.2f} deg  ({val_rad:+.4f} rad)  sent")
+                        else:
+                            print(f"  Unknown key {key!r}.  Use: col  tlon  tlat")
+                    except ValueError:
+                        print(f"  Bad value {val_s!r} -- expected a number")
+                else:
+                    print(f"  Unknown command {cmd!r}.  Type 'help' for list.")
+            if aborted:
+                break
+
+            # Read FC messages
+            msg = session._recv(
+                type=["ATTITUDE", "RC_CHANNELS", "SERVO_OUTPUT_RAW",
+                      "BATTERY_STATUS", "SYS_STATUS",
+                      "NAMED_VALUE_FLOAT", "HEARTBEAT", "STATUSTEXT"],
+                blocking=True, timeout=0.1,
+            )
+            t_rel = time.monotonic() - t0
+
+            if msg is not None:
+                mt = msg.get_type()
+                if mt == "HEARTBEAT":
+                    ctl["armed"] = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                elif mt == "STATUSTEXT":
+                    text = msg.text.rstrip("\x00").strip()
+                    if text:
+                        print(f"  [FC] {text}")
+                elif mt == "ATTITUDE":
+                    ctl["yaw_deg"]      = math.degrees(msg.yaw)
+                    ctl["yaw_rate_dps"] = math.degrees(msg.yawspeed)
+                    ctl["roll_deg"]     = math.degrees(msg.roll)
+                    ctl["pitch_deg"]    = math.degrees(msg.pitch)
+                    # Emit CSV row on each ATTITUDE message
+                    log.row([
+                        f"{t_rel:.4f}", int(ctl["armed"]),
+                        f"{ctl['yaw_deg']:.3f}",
+                        f"{ctl['yaw_rate_dps']:.3f}",
+                        f"{ctl['roll_deg']:.3f}",
+                        f"{ctl['pitch_deg']:.3f}",
+                        ctl["s1"], ctl["s2"], ctl["s3"], ctl["s4"],
+                        f"{math.degrees(ctl['col_rad']):.3f}",
+                        f"{math.degrees(ctl['tlon_rad']):.3f}",
+                        f"{math.degrees(ctl['tlat_rad']):.3f}",
+                        _fmt(ctl["yaw_i"]), _fmt(ctl["yaw_out"]),
+                    ])
+                elif mt == "RC_CHANNELS":
+                    pass  # not needed; servos give us ground truth
+                elif mt == "SERVO_OUTPUT_RAW":
+                    ctl["s1"] = getattr(msg, "servo1_raw", None)
+                    ctl["s2"] = getattr(msg, "servo2_raw", None)
+                    ctl["s3"] = getattr(msg, "servo3_raw", None)
+                    ctl["s4"] = getattr(msg, "servo4_raw", None)
+                elif mt == "NAMED_VALUE_FLOAT":
+                    nm = (msg.name.decode("ascii", errors="replace")
+                          if isinstance(msg.name, bytes) else msg.name)
+                    nm = nm.rstrip("\x00").strip()
+                    if nm == "YAW_I":
+                        ctl["yaw_i"] = float(msg.value)
+                    elif nm == "YAW_OUT":
+                        ctl["yaw_out"] = float(msg.value)
+
+            # Periodic status line printed every 2 s (non-blocking, alongside prompt)
+            if t_rel - last_status_t >= 2.0:
+                last_status_t = t_rel
+                yaw_s   = f"{ctl['yaw_deg']:+6.1f}d" if ctl["yaw_deg"] is not None else "    n/a"
+                yrate_s = f"{ctl['yaw_rate_dps']:+6.1f}d/s" if ctl["yaw_rate_dps"] is not None else "      n/a"
+                s4_s    = f"{ctl['s4']}" if ctl["s4"] is not None else "n/a"
+                armed_s = "ARMED" if ctl["armed"] else " off "
+                print(f"  [{t_rel:6.1f}s] {armed_s}  yaw={yaw_s}  yrate={yrate_s}  "
+                      f"s4={s4_s}  |  "
+                      f"col={math.degrees(ctl['col_rad']):+.2f}d  "
+                      f"tlon={math.degrees(ctl['tlon_rad']):+.2f}d  "
+                      f"tlat={math.degrees(ctl['tlat_rad']):+.2f}d")
+
+    except KeyboardInterrupt:
+        print()
+        aborted = True
+    finally:
+        ctl["running"] = False
+        log.close()
+        print(f"  Wrote {log.n_rows} rows to {log.path}")
+        _safety_shutdown(session, saved_servo4_fn=saved_fn,
+                         saved_overrides=saved_overrides)
+    print("  Done.")
+
+
 def _cmd_analyze(args: list[str]) -> None:
     """analyze yaw <csv> [--include-saturate]
        Offline PID-tuning report on a saved run_yaw_*.csv."""
@@ -2256,6 +2568,7 @@ def _run_command(session: RawesGCS, tokens: list[str],
     elif verb == "servo":    _cmd_servo(session, args)
     elif verb == "motor":    _cmd_motor(session, args, force=force)
     elif verb == "run":      _cmd_run(session, args)
+    elif verb == "manual":   _cmd_manual_interactive(session, args)
     elif verb == "watch":    _cmd_watch(session, args)
     elif verb == "analyze":  _cmd_analyze(args)
     elif verb == "script":   _cmd_script(session, args)

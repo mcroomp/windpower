@@ -33,6 +33,9 @@ class HeliRateOutput:
     roll_cyclic:  float = 0.0   # [-1, 1]
     pitch_cyclic: float = 0.0
     yaw_cmd:      float = 0.0   # tail-rotor / yaw axis (no swash mixing)
+    # Optional collective command from outer controller (normalised [-1, 1]).
+    # None means "collective is controlled externally".
+    collective_norm_cmd: float | None = None
 
 
 class HeliRateController:

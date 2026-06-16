@@ -74,7 +74,7 @@ def _run_pumping(log, aero_model: str = "oye") -> dict:
     sim = RawesLua(mode=MODE_PUMPING)
     sim.armed        = True
     sim.healthy      = True
-    sim.vehicle_mode = 1
+    sim.vehicle_mode = 4   # GUIDED
     sim.pos_ned      = _IC.pos.tolist()
     sim.vel_ned      = _IC.vel.tolist()
     sim.R            = _IC.R0
@@ -152,11 +152,8 @@ def _run_pumping(log, aero_model: str = "oye") -> dict:
         if i % LUA_EVERY == 0:
             lua.tick(t_sim, runner, accel_ned=prev_accel_ned)
 
-        # ── Inner rate loop 400 Hz ────────────────────────────────────────────
-        omega_body    = runner.omega_body
-        omega_body[2] = 0.0
-        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
-                         rest_length=ground_ctrl.rest_length)
+        # ── Inner physics step driven by GuidedAttitudeController ────────────
+        sr = lua.step(runner, DT, rest_length=ground_ctrl.rest_length)
         prev_accel_ned = sr.get("accel_specific_world")
 
         # ── Bad events ────────────────────────────────────────────────────────
@@ -230,7 +227,7 @@ def test_lua_pumping_constants():
     # TensionPI gains must match Python TensionApController defaults
     assert float(f.KP_TEN)      == pytest.approx(2e-4,  rel=1e-3)
     assert float(f.KI_TEN)      == pytest.approx(1e-3,  rel=1e-3)
-    assert float(f.COL_MAX_TEN) == pytest.approx(0.0,   abs=1e-9)
+    assert float(f.COL_MAX_TEN) == pytest.approx(0.10,  rel=1e-3)
     assert float(f.COL_REEL_OUT) == pytest.approx(-0.20, rel=1e-3)
 
     # Integrator warm-starts so initial output = COL_REEL_OUT at zero error

@@ -37,7 +37,7 @@ import numpy as np
 # Local modules (same directory)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from physics_core    import PhysicsCore
-from tether          import TetherModel   # noqa: F401 — re-exported for test callers
+from tether          import TetherModel, ConstantTensionTether   # noqa: F401 — re-exported for test callers
 from sitl_interface  import SITLInterface
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from sensor          import make_sensor, SpinSensor
@@ -219,6 +219,21 @@ def run_mediator(args, trajectory=None):
         coll_eq_rad= _col_min_rad,
         omega_spin = _omega_spin_init,
     )
+    # Optional constant-tension tether: tether_model="constant_tension" in config.
+    # Direction toward anchor; magnitude fixed at tether_constant_tension_n [N].
+    _tether_override = None
+    if cfg.get("tether_model") == "constant_tension":
+        _tension_n = float(cfg.get("tether_constant_tension_n", 300.0))
+        _anchor    = np.array(cfg.get("anchor_ned", [0.0, 0.0, 0.0]), dtype=float)
+        _axle      = float(rotor.control.axle_attachment_length_m)
+        _tether_override = ConstantTensionTether(
+            tension_n              = _tension_n,
+            anchor_ned             = _anchor,
+            axle_attachment_length = _axle,
+        )
+        log.info("Using ConstantTensionTether: %.0f N toward anchor %s",
+                 _tension_n, _anchor.tolist())
+
     core = PhysicsCore(
         rotor, _ic, wind_world,
         base_k_ang         = float(cfg["base_k_ang"]),
@@ -227,6 +242,7 @@ def run_mediator(args, trajectory=None):
         startup_damp_k_ang = float(cfg["startup_damp_k_ang"]),
         lock_orientation   = bool(cfg["lock_orientation"]),
         z_floor            = -1.0,
+        tether_override    = _tether_override,
     )
     sensor_sim = make_sensor(
         home_ned_z = float(_pos0_arr[2]),

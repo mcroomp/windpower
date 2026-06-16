@@ -7,7 +7,7 @@ reads outputs from _mock after each tick.
 
 Inputs (write before tick):
   _mock.armed          bool
-  _mock.mode           int   (1 = ACRO)
+--  _mock.mode           int   (4 = GUIDED)
   _mock.healthy        bool
   _mock.millis_val     int   (fake milliseconds -- no real sleep needed)
   _mock.gyro           {x, y, z}  rad/s
@@ -20,12 +20,15 @@ Inputs (write before tick):
 Outputs (read after tick):
   _mock.ch_out[n]      RC channel n PWM override (nil if not set)
   _mock.srv_out[func]  SRV_Channels output for function number
+  _mock.srv_chan_out[n] SRV_Channels output by physical channel (1-indexed; chan 0-based+1)
   _mock.gcs_msgs       array of {level=int, msg=string}
+    _mock.guided_target  {roll_deg,pitch_deg,yaw_deg,climbrate,use_yaw_rate,yaw_rate_degs}
+                                             set by set_target_angle_and_climbrate (nil until first call)
 --]]
 
 _mock = {
     armed       = false,
-    mode        = 1,            -- 1 = ACRO
+    mode        = 4,            -- 4 = GUIDED
     healthy     = false,
     millis_val  = 0,
     gyro        = {x=0.0, y=0.0, z=0.0},
@@ -44,7 +47,9 @@ _mock = {
     },
     ch_out      = {},    -- [channel_n] = pwm
     srv_out     = {},    -- [func] = pwm
+    srv_chan_out = {},   -- [chan_1indexed] = pwm (set_output_pwm_chan_timeout; SERVO4_CHAN=3 -> key 4)
     gcs_msgs    = {},    -- array of {level, msg}
+    guided_target = nil, -- set_target_angle_and_climbrate payload (attitude + vertical)
 }
 
 -- ── Vector3f ────────────────────────────────────────────────────────────────
@@ -149,6 +154,25 @@ function ahrs:earth_to_body(v)  -- R^T @ v
     return r
 end
 
+-- ZYX Euler angles derived from _mock.R (row-major body-to-NED).
+-- R layout: rows are NED axes, so R[1..3]=row0, R[4..6]=row1, R[7..9]=row2.
+-- R[:,2] = body_z in NED = (R[3], R[6], R[9]).
+-- Standard ZYX decomposition: pitch = asin(-R[7]), roll = atan2(R[8],R[9]), yaw = atan2(R[4],R[1]).
+function ahrs:get_roll()
+    local R = _mock.R
+    return math.atan(R[8], R[9])
+end
+
+function ahrs:get_pitch()
+    local R = _mock.R
+    return math.asin(math.max(-1.0, math.min(1.0, -R[7])))
+end
+
+function ahrs:get_yaw()
+    local R = _mock.R
+    return math.atan(R[4], R[1])
+end
+
 -- ── rc ───────────────────────────────────────────────────────────────────────
 
 local _rc_channels = {}
@@ -176,6 +200,12 @@ function SRV_Channels:set_output_pwm(func, pwm)
     _mock.srv_out[func] = pwm
 end
 
+-- set_output_pwm_chan_timeout(chan_0based, pwm, timeout_ms)
+-- chan is 0-indexed in ArduPilot; store as 1-indexed for Lua table access.
+function SRV_Channels:set_output_pwm_chan_timeout(chan, pwm, timeout_ms)
+    _mock.srv_chan_out[chan + 1] = pwm
+end
+
 -- ── param ────────────────────────────────────────────────────────────────────
 
 param = {}
@@ -190,6 +220,10 @@ gcs = {}
 
 function gcs:send_text(level, msg)
     _mock.gcs_msgs[#_mock.gcs_msgs + 1] = {level = level, msg = msg}
+end
+
+function gcs:send_named_float(name, value)
+    -- no-op stub; telemetry NVFs are not consumed in unit tests
 end
 
 -- ── arming ───────────────────────────────────────────────────────────────────
@@ -219,6 +253,18 @@ end
 vehicle = {}
 
 function vehicle:get_mode()  return _mock.mode end
+
+function vehicle:set_target_angle_and_climbrate(roll_deg, pitch_deg, yaw_deg, climbrate, use_yaw_rate, yaw_rate_degs)
+    _mock.guided_target = {
+        roll_deg      = roll_deg,
+        pitch_deg     = pitch_deg,
+        yaw_deg       = yaw_deg,
+        climbrate     = climbrate,
+        use_yaw_rate  = use_yaw_rate,
+        yaw_rate_degs = yaw_rate_degs,
+    }
+    return true
+end
 
 -- ── mavlink ──────────────────────────────────────────────────────────────────
 -- Minimal stub for mavlink.init / register_rx_msgid / receive_chan.

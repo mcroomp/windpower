@@ -9,7 +9,9 @@ _el_initialized on the first tick and starts bz_altitude_hold cyclic +
 VZ-PI collective immediately.  RAWES_TEN is fed from the live physics tension
 each Lua tick for gravity compensation.
 
-Lua ch1/ch2/ch3 → decoded to rate setpoints + collective → PhysicsRunner.step().
+In GUIDED mode rawes.lua calls vehicle:set_target_angle_and_climbrate for
+cyclic (not ch1/ch2). LuaAP feeds that into GuidedAttitudeController; ch3
+is still decoded for collective.
 
 Non-Lua reference: test_steady_flight.py
 """
@@ -48,7 +50,7 @@ def _run_steady(log) -> dict:
     sim = RawesLua(mode=MODE_STEADY)
     sim.armed        = True
     sim.healthy      = True
-    sim.vehicle_mode = 1
+    sim.vehicle_mode = 4   # GUIDED
     sim.pos_ned      = _IC.pos.tolist()   # GPS available from t=0
     sim.vel_ned      = _IC.vel.tolist()
     sim.R            = _IC.R0
@@ -75,13 +77,10 @@ def _run_steady(log) -> dict:
             lua.tick(t, runner,
                      inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
 
-        omega_body    = runner.omega_body
-        omega_body[2] = 0.0
         dT       = runner.tension_now - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
-        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
-                         rest_length=rest_now)
+        sr = lua.step(runner, DT, rest_length=rest_now)
         lua.log(runner, sr)
 
         altitude    = runner.altitude

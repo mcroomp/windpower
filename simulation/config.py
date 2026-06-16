@@ -62,6 +62,14 @@ DEFAULTS: dict = {
     "tension_safety_n":  496.0,     # WinchController T_max_n: reel-out threshold [N]
                                      # ≈ 80% of Dyneema SK75 1.9 mm break load (620 N)
 
+    # Optional: replace the elastic tether with a constant-tension model.
+    # Set "tether_model": "constant_tension" and supply the desired load.
+    # Direction follows hub→anchor geometry; no spring, no damping, no slack.
+    # Useful for steady-flight sensitivity studies where tether elasticity is
+    # a disturbance rather than a feature under test.
+    # "tether_model": "constant_tension",
+    # "tether_constant_tension_n": 300.0,
+
     # ── Startup kinematic ramp ────────────────────────────────────────────────
     # Hub moves at vel0 from launch_pos for startup_damp_seconds, then physics
     # takes over.  Gives EKF time to lock on GPS before free flight.

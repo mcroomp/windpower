@@ -516,6 +516,77 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
             print(f"    max swashplate tilt ({label}): lon={max_tilt_lon:.3f}  lat={max_tilt_lat:.3f}  "
                   + ("[OK]" if _tilt_ok else f"[!!] exceeds {_TILT_WARN} -- ACRO/I-term issue?"))
 
+    # ── Kinematic-phase timeseries: omega_spin, collective, servo_s3 ──────────
+    # Diagnoses two failure modes:
+    #   (a) omega_spin decays during the hold — collective too low or wrong sign
+    #   (b) RAWES_COL NVF not received — Lua using wrong _ic_col
+    if damp_rows:
+        import json as _json2
+        _ic_path2 = Path(__file__).resolve().parents[1] / "steady_state_starting.json"
+        _ic_om = None
+        _ic_col = None
+        if _ic_path2.exists():
+            try:
+                _d = _json2.loads(_ic_path2.read_text())
+                _ic_om  = float(_d.get("omega_spin", 0))
+                _ic_col = float(_d.get("coll_eq_rad", _d.get("stack_coll_eq", 0)))
+            except Exception:
+                pass
+
+        print()
+        print(f"  -- Kinematic phase timeseries (omega / collective / servo_s3) --")
+        if _ic_om is not None:
+            print(f"    IC file: omega_spin={_ic_om:.2f} rad/s  coll_eq_rad={_ic_col:.4f} rad")
+
+        # Sample every ~10 s of sim time
+        t0_d = damp_rows[0].t_sim
+        t1_d = damp_rows[-1].t_sim
+        _SAMPLE_S = 10.0
+        _n_buckets = max(1, int((t1_d - t0_d) / _SAMPLE_S) + 1)
+        # Build one sample per bucket: first row with t >= bucket start
+        _samples: list[TelRow] = []
+        for b in range(_n_buckets + 1):
+            t_target = t0_d + b * _SAMPLE_S
+            row = next((r for r in damp_rows if r.t_sim >= t_target), None)
+            if row is not None and (not _samples or row.t_sim != _samples[-1].t_sim):
+                _samples.append(row)
+        _samples.append(damp_rows[-1])  # always include last
+
+        _HDR = f"    {'t_sim':>6}  {'omega_rotor':>12}  {'coll_rad':>10}  {'srv_s3':>7}  {'tlt_lon':>8}  {'tlt_lat':>8}"
+        if _ic_om is not None:
+            _HDR += f"  {'d_omega':>8}"
+        print(_HDR)
+        for s in _samples:
+            line = (f"    {s.t_sim:6.1f}  {s.omega_rotor:12.3f}  "
+                    f"{s.collective_rad:10.4f}  {s.servo_s3_us:7.0f}  "
+                    f"{s.tilt_lon:8.4f}  {s.tilt_lat:8.4f}")
+            if _ic_om is not None:
+                d_om = s.omega_rotor - _ic_om
+                flag = "  [!!] decay" if d_om < -2.0 else ""
+                line += f"  {d_om:+8.2f}{flag}"
+            print(line)
+
+        # Omega decay rate estimate (rad/s per second)
+        if len(_samples) >= 2:
+            dt_span = _samples[-1].t_sim - _samples[0].t_sim
+            d_omega  = _samples[-1].omega_rotor - _samples[0].omega_rotor
+            if dt_span > 0:
+                decay_rate = d_omega / dt_span
+                tag = "" if abs(decay_rate) < 0.1 else "  [!!] check collective sign/magnitude"
+                print(f"    omega decay rate : {decay_rate:+.3f} rad/s per sim-second{tag}")
+
+        # Check if RAWES_COL was acknowledged in the GCS log
+        _rawes_col_ack = None
+        if fl is not None:
+            for ev in fl.events:
+                if "rcvd RAWES_COL" in ev.text:
+                    _rawes_col_ack = ev
+                    break
+        if _rawes_col_ack is not None:
+            print(f"    RAWES_COL ack    : t={_rawes_col_ack.t_sim:.1f}s  '{_rawes_col_ack.text.strip()}'  [OK]")
+        else:
+            print(f"    RAWES_COL ack    : not found in GCS log  [!!] Lua may be using default _ic_col")
+
     # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV;
     # fall back to first free-flight row (damp_alpha==0) for older logs.
     _tr_rows = [r for r in rows if r.note == "kinematic_exit"]
@@ -1662,6 +1733,39 @@ def _list_test_dirs() -> list:
     )
 
 
+def _resolve_telemetry_path(test_dir: Path, override: Optional[str]) -> Path:
+    """Resolve telemetry CSV path with sane fallbacks for simtests.
+
+    Priority:
+      1) explicit --telemetry override
+      2) telemetry.csv (stack tests)
+      3) first telemetry_*.csv (simtests, e.g. telemetry_kinematic.csv)
+    """
+    if override:
+        return Path(override)
+
+    primary = test_dir / "telemetry.csv"
+    if primary.exists():
+        return primary
+
+    alt = sorted(test_dir.glob("telemetry_*.csv"))
+    if alt:
+        return alt[0]
+
+    return primary
+
+
+def _resolve_pytest_log_path(test_dir: Path) -> Path:
+    """Prefer gcs.log, but allow simtest.log in simtest directories."""
+    gcs = test_dir / "gcs.log"
+    if gcs.exists():
+        return gcs
+    simtest = test_dir / "simtest.log"
+    if simtest.exists():
+        return simtest
+    return gcs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1694,11 +1798,13 @@ def main() -> None:
         else:
             print(f"Available test runs in {_LOG_DIR}  (newest first):")
             for d in dirs:
-                has_tel = (d / "telemetry.csv").exists()
+                has_tel = (d / "telemetry.csv").exists() or any(d.glob("telemetry_*.csv"))
                 has_med = (d / "mediator.log").exists()
+                has_log = (d / "gcs.log").exists() or (d / "simtest.log").exists()
                 tags = " ".join(filter(None, [
-                    "telemetry.csv" if has_tel else "",
+                    "telemetry" if has_tel else "",
                     "mediator.log"  if has_med else "",
+                    "test.log" if has_log else "",
                 ]))
                 print(f"  {d.name:<45}  {tags}")
             print(f"\nUsage: python analyse_run.py <test_name>")
@@ -1719,11 +1825,12 @@ def main() -> None:
 
     # Also build RunReport for sections that still use it
     report = RunReport()
-    tel_path = Path(args.telemetry) if args.telemetry else test_dir / "telemetry.csv"
+    tel_path = _resolve_telemetry_path(test_dir, args.telemetry)
     med_path = Path(args.mediator)  if args.mediator  else test_dir / "mediator.log"
+    py_path = _resolve_pytest_log_path(test_dir)
     load_telemetry(tel_path, report)
     parse_mediator(med_path, report)
-    parse_pytest(test_dir / "gcs.log", report)
+    parse_pytest(py_path, report)
     parse_arducopter(test_dir / "arducopter.log", report)
 
     print(f"  telemetry rows   : {len(report.tel_rows)}")

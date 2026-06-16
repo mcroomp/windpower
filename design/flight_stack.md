@@ -308,6 +308,8 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 |---|---|---|---|
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
+| 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_COL` NVF → RC3 PWM direct | bench yaw-tuning + manual swash validation |
+| 3 — passive | neutral cyclic, IC collective | IC collective hold | armed-but-quiet during kinematic |
 | 5 — pumping | along the tether, at the per-phase altitude the ground gave us | whatever keeps the measured tether tension on target (435 N during reel-out, 226 N during reel-in) | pumping cycle |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
 
@@ -490,17 +492,38 @@ Re-sending refreshes the timer. Works in any mode.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1 — roll rate | rawes.lua | 50 Hz | body_z error (roll component) → ACRO ATC_RAT_RLL PID → swashplate |
-| Ch2 — pitch rate | rawes.lua | 50 Hz | body_z error (pitch component) → ACRO ATC_RAT_PIT PID → swashplate |
-| Ch3 — collective | rawes.lua (modes 1/4/5) | 50 Hz | VZ PI (mode 1), VZ descent (mode 4), TensionPI (mode 5). Mode 0: not overridden. |
+| Ch1 — roll cyclic | rawes.lua (modes 1/4/5) or NVF (mode 2) | 50 Hz | Modes 1/4/5: body_z error (roll). Mode 2 (MANUAL): `1500 + (_man_tlat_rad / cyc_max_rad) × 500` µs from `RAWES_TLT` NVF; `H_FLYBAR_MODE=1` routes RC1 directly to swash. Mode 0/3: neutral 1500. |
+| Ch2 — pitch cyclic | rawes.lua (modes 1/4/5) or NVF (mode 2) | 50 Hz | Modes 1/4/5: body_z error (pitch). Mode 2 (MANUAL): `1500 + (_man_tlon_rad / cyc_max_rad) × 500` µs from `RAWES_TLN` NVF. |
+| Ch3 — collective | rawes.lua (modes 1/2/4/5) | 50 Hz | VZ PI (mode 1), `RAWES_COL` NVF (mode 2), VZ descent (mode 4), TensionPI (mode 5). Mode 0: not overridden. |
 | Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives SERVO4 independently. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
-| SERVO4 — anti-rotation motor | ArduPilot ATC_RAT_YAW | 400 Hz | DDFP CW (H_TAIL_TYPE=3, NO sign flip): US-convention rotor (CCW from above) → body drifts CCW → positive yaw error → positive SERVO4 throttle. rawes.lua MODE_STEADY/PUMPING does NOT write SERVO4; MODE_YAW does (bypasses ATC_RAT_YAW). |
+| SERVO4 — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/3/4/5) or rawes.lua mode 2 | 400 Hz / 100 Hz | Normal: DDFP CW (H_TAIL_TYPE=3, NO sign flip) — CCW body drift → positive PID → positive throttle. Mode 2 (MANUAL): Lua `run_manual()` writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`, bypassing ATC_RAT_YAW. |
 
-### 4.8 Yaw Regulation — ArduPilot ATC_RAT_YAW
+### 4.8 Mode 2 — Manual (SCR_USER6=2)
 
-Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID. rawes.lua writes
-no commands to the anti-rotation motor.
+Bench mode for yaw tuning and manual swash validation.  Unlike flight modes, there is no
+body_z error loop — the operator commands cyclic and collective directly via GCS NVFs.
+
+```
+RAWES_TLN [rad]  →  _man_tlon_rad  →  RC2 = 1500 + (tlon / cyc_max_rad) × 500  (clamped 1000–2000)
+RAWES_TLT [rad]  →  _man_tlat_rad  →  RC1 = 1500 + (tlat / cyc_max_rad) × 500  (clamped 1000–2000)
+RAWES_COL [rad]  →  _ic_col        →  RC3 = (col − COL_MIN) / (COL_MAX − COL_MIN) × 1000 + 1000
+```
+
+Requires `H_FLYBAR_MODE=1` (RC overrides bypass rate PID, go straight to swash mixer) and
+`H_CYC_MAX=1000` (10 deg full-stick cap). These are applied by `calibrate manual` and by the
+`torque_armed_lua_manual` stack test fixture (both read `calibrate._RUN_MODES["manual"]["force_params"]`).
+
+Yaw is still regulated by the same P+I+D loop as before, reading `ATC_RAT_YAW_P/I/D/IMAX` +
+`H_YAW_TRIM` from params and writing SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`.
+
+Interactive use: `calibrate manual [--col DEG] [--tlon DEG] [--tlat DEG]`
+Stack test: `bash simulation/dev.sh test-stack -n 1 -k test_lua_manual_mode`
+
+### 4.9 Yaw Regulation — ArduPilot ATC_RAT_YAW
+
+Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes 0/1/3/4/5.
+In mode 2 (MANUAL) rawes.lua runs its own P+I+D loop and writes SERVO4 directly.
 
 ```
 Sensing:    gyro.z (from ACRO_Heli EKF attitude)
@@ -539,6 +562,7 @@ Equilibrium throttle: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE = 28 
 | ACRO ATC_RAT_RLL/PIT (rate damping) | `RatePID(kp=2/3)` | `controller.py` |
 | RAWES_ARM state machine | N/A — Lua only | `rawes.lua` |
 | ATC_RAT_YAW (yaw regulation) | `torque_model.py` hub ODE | `mediator_torque.py` |
+| `run_manual()` NVF→RC1/RC2/RC3 + SERVO4 PID (mode 2) | N/A — bench/hardware only | `rawes.lua` |
 
 ---
 
@@ -959,10 +983,13 @@ level first.
 
 | File | Description |
 |---|---|
-| `simulation/scripts/rawes.lua` | Unified Lua controller (modes 0/1/4/5, RAWES_ARM, TensionPI, bz_altitude_hold) |
+| `simulation/scripts/rawes.lua` | Unified Lua controller (modes 0/1/2/3/4/5, RAWES_ARM, TensionPI, bz_altitude_hold) |
 | `simulation/tests/sitl/rawes_sitl_defaults.parm` | Boot-time ArduPilot params (EKF3, GPS, compass, servos) |
 | `simulation/tests/sitl/flight/conftest.py` | Flight fixtures: `acro_armed`, `acro_armed_lua_full`, `acro_armed_pumping_lua`, `acro_armed_landing_lua` |
-| `simulation/tests/sitl/stack_infra.py` | Shared infrastructure: `_sitl_stack`, `_acro_stack`, `StackContext`, `SitlContext` |
+| `simulation/tests/sitl/torque/conftest.py` | Torque fixtures: `torque_armed_lua_yaw`, `torque_armed_lua_manual` (force_params from `calibrate._RUN_MODES`) |
+| `simulation/tests/sitl/torque/test_lua_manual_mode.py` | Stack test: MODE_MANUAL yaw PID + NVF→RC1/RC2/RC3 response + neutral restore |
+| `simulation/tests/sitl/stack_infra.py` | Shared infra: `_sitl_stack`, `_acro_stack`, `_torque_stack`, `StackContext`; `_arm_sequence(target_mode=ACRO)` for GPS-free torque tests |
+| `simulation/scripts/calibrate.py` | Interactive calibration CLI: `manual` command = MODE_MANUAL arm + live NVF control loop |
 | `simulation/controller.py` | `compute_bz_altitude_hold`, `AltitudeHoldController`, `TensionPI`, `RatePID`, `compute_rate_cmd`, `OrbitTracker` |
 | `simulation/ap_controller.py` | `TensionApController` (400 Hz AP side), `LandingApController` |
 | `simulation/pumping_planner.py` | `TensionCommand`, `PumpingGroundController` (10 Hz phase state machine) |

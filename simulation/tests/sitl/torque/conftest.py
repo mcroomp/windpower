@@ -9,7 +9,10 @@ Fixtures:
   torque_armed_ddfp_zero    — DDFP fixture with prescribed zero yaw (motor should stay off).
   torque_armed_ddfp_ramp    — DDFP fixture with prescribed 0→10 deg/s yaw ramp (PI must cancel it).
   torque_armed_ddfp         — DDFP fixture with kinematic yaw model (closed-loop regulation).
+  torque_armed_lua_manual   — MODE_MANUAL fixture; force_params sourced from calibrate._RUN_MODES.
 """
+import sys
+from pathlib import Path
 import pytest
 
 from stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
@@ -20,16 +23,20 @@ from stack_infra import (
     _SERVO_TAIL_TORQUE_EXTRA_PARAMS,
 )
 
+# Import calibrate._RUN_MODES so the manual-mode fixture uses the SAME
+# force_params as the interactive calibrate tool — a single source of truth.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[3] / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from calibrate import _RUN_MODES as _CALIBRATE_RUN_MODES  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Counter-torque motor stack fixtures
 # ---------------------------------------------------------------------------
 
-# Non-trivial trim cyclic + IC collective values sent to MODE_YAW so the
-# test_lua_yaw_regulation test can verify the cyclic / collective hold path.
-# Both fixture (sender) and test (asserter) read these.
-LUA_YAW_TRIM_LON: float = 0.020   # rad, body-frame at arming yaw
-LUA_YAW_TRIM_LAT: float = 0.050
+# IC collective value sent to MODE_YAW so the Lua pins ch3 at the right
+# collective while the test observes yaw regulation.
 LUA_YAW_IC_COL:   float = -0.150  # rad
 
 @pytest.fixture
@@ -145,16 +152,43 @@ def torque_armed_lua_yaw(tmp_path, request):
         test_name=request.node.name,
         armon_ms=3_600_000,
     ) as ctx:
-        # Inject non-trivial trim cyclic + IC collective so the test
-        # exercises the cyclic-hold / collective-hold path of MODE_YAW
-        # (otherwise ch1/ch2/ch3 would all sit at their neutral defaults
-        # and we couldn't verify that the trim is being applied).
-        ctx.gcs.send_named_float("RAWES_TLN", LUA_YAW_TRIM_LON)
-        ctx.gcs.send_named_float("RAWES_TLT", LUA_YAW_TRIM_LAT)
         ctx.gcs.send_named_float("RAWES_COL", LUA_YAW_IC_COL)
-        ctx.log.info("Sent trim cyclic + IC collective to Lua: "
-                     "tlon=%+.4f tlat=%+.4f col=%+.4f",
-                     LUA_YAW_TRIM_LON, LUA_YAW_TRIM_LAT, LUA_YAW_IC_COL)
+        ctx.log.info("Sent IC collective to Lua: col=%+.4f", LUA_YAW_IC_COL)
+        yield ctx
+
+
+@pytest.fixture
+def torque_armed_lua_manual(tmp_path, request):
+    """
+    Torque stack with rawes.lua in MODE_MANUAL (SCR_USER6=2).
+
+    force_params are sourced from calibrate._RUN_MODES["manual"]["force_params"]
+    so the stack test always exercises the exact same param set that the
+    interactive 'calibrate manual' command applies on hardware.
+
+    MODE_MANUAL: rawes.lua run_manual() drives SERVO4 via the yaw PID
+    (bypasses ArduPilot's DDFP mixer) and sets RC1/RC2 from RAWES_TLT/TLN
+    NVFs scaled by H_CYC_MAX.  H_FLYBAR_MODE=1 routes the RC overrides
+    directly to the swash mixer, skipping the rate PID.
+    """
+    import math as _math
+    _cal = _CALIBRATE_RUN_MODES["manual"]
+    _manual_extras = _LUA_TORQUE_EXTRA_PARAMS.update({
+        "SCR_USER6": float(_cal["scr_user6"]),
+        **{k: float(v) for k, v in _cal["force_params"].items()},
+    })
+    _OMEGA_120_RPM = 120.0 * 2.0 * _math.pi / 60.0   # 120 RPM in rad/s
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=_OMEGA_120_RPM,
+        tail_channel=3,
+        extra_params=_manual_extras,
+        install_scripts=("rawes.lua",),
+        test_name=request.node.name,
+        armon_ms=3_600_000,
+    ) as ctx:
+        ctx.gcs.send_named_float("RAWES_COL", LUA_YAW_IC_COL)
+        ctx.log.info("Sent IC collective to Lua: col=%+.4f", LUA_YAW_IC_COL)
         yield ctx
 
 

@@ -95,7 +95,7 @@ def _run_landing(log) -> dict:
     sim = RawesLua(mode=MODE_LANDING)
     sim.armed        = True
     sim.healthy      = True
-    sim.vehicle_mode = 1   # ACRO
+    sim.vehicle_mode = 4   # GUIDED
 
     lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
     lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase)
@@ -146,11 +146,8 @@ def _run_landing(log) -> dict:
             final_drop_sent = True
             t_final_start   = t_sim
 
-        # ── Inner ACRO rate PID + physics step ───────────────────────────
-        omega_body    = runner.omega_body
-        omega_body[2] = 0.0
-        sr = runner.step(DT, lua.col_rad, lua.roll_sp, lua.pitch_sp, omega_body,
-                         rest_length=winch.rest_length)
+        # ── Inner physics step driven by GuidedAttitudeController ────────
+        sr = lua.step(runner, DT, rest_length=winch.rest_length)
 
         # ── Floor detection + phase metrics ───────────────────────────────
         phase = cmd.phase

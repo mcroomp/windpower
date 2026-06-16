@@ -253,45 +253,15 @@ def acro_armed_lua_full(tmp_path, request):
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
         ctx.wait_drain(timeout=1.0, label="post-param")
 
-        # Compute trim cyclic at the IC operating point and stream it to the
-        # Lua via NAMED_VALUE_FLOAT (RAWES_TLN / RAWES_TLT — 10-char names).
-        # Without this the wind-driven baseline hub moment kicks the body at
-        # kinematic_exit before ArduPilot's rate PID can catch up.
+        # Stream IC collective to Lua so MODE_PASSIVE pins ch3 at the IC
+        # value and omega_spin doesn't droop while the body is kinematically
+        # locked.
         _ic = ctx.initial_state
         if _ic is not None:
-            try:
-                import numpy as _np_trim
-                from dynbem import create_aero, solve_trim_cyclic, RotorInputs
-                from tests.simtests._rotor_helpers import load_default_rotor
-                _rotor_trim = load_default_rotor()
-                _aero_trim  = create_aero(_rotor_trim, model="oye")
-                _state_trim = _aero_trim.initial_rotor_state()
-                _R0_trim    = _np_trim.array(_ic["R0"], dtype=float).reshape(3, 3)
-                _wind_trim  = _np_trim.array([0.0, 10.0, 0.0])
-                _coll_trim  = float(_ic.get("stack_coll_eq", _ic.get("coll_eq_rad", -0.18)))
-                _trim_out   = solve_trim_cyclic(
-                    _aero_trim, _state_trim,
-                    RotorInputs(
-                        collective_rad=_coll_trim, tilt_lon=0.0, tilt_lat=0.0,
-                        R_hub=_R0_trim, v_hub_world=_np_trim.zeros(3),
-                        wind_world=_wind_trim,
-                        omega_rad_s=float(_ic["omega_spin"]),
-                        rho_kg_m3=1.225, t=0.0,
-                    ),
-                    n_inflow_relax=200, dt_relax=1.0/400.0,
-                    tolerance_Nm=0.2,
-                )
-                ctx.log.info("Trim cyclic: tlon=%+.5f tlat=%+.5f converged=%s",
-                             _trim_out.tilt_lon, _trim_out.tilt_lat, _trim_out.converged)
-                ctx.gcs.send_named_float("RAWES_TLN", float(_trim_out.tilt_lon))
-                ctx.gcs.send_named_float("RAWES_TLT", float(_trim_out.tilt_lat))
-                # IC collective: pinned during MODE_PASSIVE so omega_spin
-                # doesn't droop while the body is kinematically locked.
-                ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
-                ctx.log.info("IC collective: coll=%+.4f rad", _coll_trim)
-            except Exception as e:    # noqa: BLE001
-                ctx.log.warning("Trim cyclic computation failed: %s", e)
-        ctx.wait_drain(timeout=0.5, label="post-trim")
+            _coll_trim = float(_ic.get("stack_coll_eq", _ic.get("coll_eq_rad", -0.18)))
+            ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
+            ctx.log.info("IC collective: coll=%+.4f rad", _coll_trim)
+        ctx.wait_drain(timeout=0.5, label="post-col")
 
         # Wait for GPS fusion before yielding.
         # Lua needs _tdir0 (fires on GPS fusion) to begin orbit tracking.

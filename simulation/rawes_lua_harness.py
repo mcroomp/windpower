@@ -175,7 +175,7 @@ class RawesLua:
 
     @property
     def vehicle_mode(self) -> int:
-        """ArduPilot flight mode number seen by vehicle:get_mode() (1 = ACRO)."""
+        """ArduPilot flight mode number seen by vehicle:get_mode() (4 = GUIDED)."""
         return int(self._mock.mode)
 
     @vehicle_mode.setter

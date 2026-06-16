@@ -1,11 +1,12 @@
 # Unit & Simtest Reference Guide
 
-Tests are split across two directories, both running **Windows-native** (no Docker):
+Tests are split across three directories:
 
-| Directory | Contents | Marker |
-|-----------|----------|--------|
-| `tests/unit/` | Fast algebraic/protocol tests — no physics loop | *(none)* |
-| `tests/simtests/` | Full time-domain physics loops — seconds of compute | `simtest` |
+| Directory | Host | Marker |
+|-----------|------|--------|
+| `tests/unit/` | Windows-native | *(none)* |
+| `tests/simtests/` | Windows-native | `simtest` |
+| `tests/sitl/` | Docker (Linux) | *(none)* |
 
 ---
 
@@ -85,6 +86,7 @@ The `simtest` timeout is set globally in `simulation/pytest.ini`.
 |------|------------------|--------------|
 | `test_math_lua.py` | — | Lua math: `bz_altitude_hold`, `cyclic_error_body`, `output_rate_limit`, `rate_to_pwm`, constants |
 | `test_yaw_lua.py` | — | Yaw-trim: PI, dead zone, watchdog, hard-stop, closed-loop equilibrium |
+| `test_manual_mode_lua.py` | — | MODE_MANUAL (SCR_USER6=2): RC1/RC2/RC3 from NVFs, SERVO4 yaw PID, clamp, persistence, mode-entry reset |
 | `test_armon_lua.py` | — | `RAWES_ARM` countdown and disarm logic |
 
 ---
@@ -121,6 +123,41 @@ Supporting simtests:
 | `simtest_ic.py` | `load_ic()` — loads `steady_state_starting.json` |
 | `simtest_runner.py` | `PhysicsRunner` — thin wrapper around `PhysicsCore` for simtests |
 | `conftest.py` | `simtest` marker registration; 600 s auto-timeout |
+
+---
+
+## SITL Stack Tests (`tests/sitl/`)
+
+Full ArduPilot SITL tests running in Docker. Require `bash simulation/dev.sh test-stack`.
+Never mix with Windows-native unit/simtests.
+
+### Torque Stack Tests (`tests/sitl/torque/`)
+
+Exercises the counter-torque motor stack (stationary hub, rotor spinning at constant RPM).
+No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt checks block arm without GPS).
+
+| File | Fixture | What it tests |
+|------|---------|--------------|
+| `test_yaw_regulation.py` | `torque_armed` | ArduPilot ATC_RAT_YAW DDFP PI holds yaw < 5 deg/s at 120 RPM |
+| `test_lua_yaw_regulation.py` | `torque_armed_lua_yaw` | rawes.lua MODE_MANUAL SERVO4 direct write holds yaw < 5 deg/s |
+| `test_lua_manual_mode.py` | `torque_armed_lua_manual` | MODE_MANUAL NVF→RC1/RC2 cyclic shifts + SERVO4 active + neutral restore |
+
+**`torque_armed_lua_manual` fixture:** `SCR_USER6`, `H_FLYBAR_MODE`, `H_CYC_MAX`, `H_SV_MAN` are
+sourced directly from `calibrate._RUN_MODES["manual"]["force_params"]` — single source of truth
+shared with the interactive `calibrate manual` command.
+
+**Torque arming note:** `_arm_sequence` passes `target_mode=ACRO` for all `_torque_stack` tests.
+ArduCopter's `mandatory_checks()` always runs `mandatory_gps_checks()` and `alt_checks()` regardless
+of `ARMING_CHECK=0` — these fail in GUIDED without GPS. ACRO has `has_manual_throttle()=True` so
+both pass.
+
+### Flight Stack Tests (`tests/sitl/flight/`)
+
+| File | Fixture | What it tests |
+|------|---------|--------------|
+| `test_lua_flight_steady.py` | `acro_armed_lua_full` | Orbit r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s |
+| `test_pumping_cycle.py` | `acro_armed_pumping_lua` | Reel-out + reel-in + net energy > 0 |
+| `test_landing_stack.py` | `acro_armed_landing_lua` | Descent + final drop + hub alt ≤ 2.5 m |
 
 ---
 
@@ -226,24 +263,21 @@ Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lu
 
 ```python
 from rawes_modes import (
-    MODE_NONE, MODE_STEADY, MODE_YAW, MODE_STEADY_YAW,
-    MODE_LANDING, MODE_PUMPING, MODE_ARM_HOLD, MODE_YAW_TEST, MODE_YAW_LTD,
+    MODE_NONE, MODE_STEADY, MODE_MANUAL,
+    MODE_LANDING, MODE_PUMPING,
     LAND_DESCEND, LAND_FINAL_DROP,
     PUMP_HOLD, PUMP_REEL_OUT, PUMP_TRANSITION, PUMP_REEL_IN, PUMP_TRANSITION_BACK,
 )
 ```
 
-| Mode | SCR_USER6 | Substates (RAWES_SUB) |
-|------|-----------|----------------------|
-| `MODE_NONE` | 0 | — |
-| `MODE_STEADY` | 1 | — |
-| `MODE_YAW` | 2 | — |
-| `MODE_STEADY_YAW` | 3 | — |
-| `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP |
-| `MODE_PUMPING` | 5 | 0=HOLD, 1=REEL_OUT, 2=TRANSITION, 3=REEL_IN, 4=TRANSITION_BACK |
-| `MODE_ARM_HOLD` | 6 | — |
-| `MODE_YAW_TEST` | 7 | — |
-| `MODE_YAW_LTD` | 8 | — |
+| Mode | SCR_USER6 | Substates (RAWES_SUB) | Notes |
+|------|-----------|----------------------|-------|
+| `MODE_NONE` | 0 | — | Logging only; RAWES_ARM still handled |
+| `MODE_STEADY` | 1 | — | Altitude hold + tether tracking |
+| `MODE_MANUAL` | 2 | — | Bench: yaw PID (SERVO4) + NVF cyclic/collective (`RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`). `H_FLYBAR_MODE=1`. |
+| `MODE_PASSIVE` | 3 | — | Armed-but-quiet: IC trim hold during kinematic |
+| `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP | |
+| `MODE_PUMPING` | 5 | 0=HOLD, 1=REEL_OUT, 2=TRANSITION, 3=REEL_IN, 4=TRANSITION_BACK | |
 
 **Sending substates in simtests** (via `RawesLua.send_named_float`):
 

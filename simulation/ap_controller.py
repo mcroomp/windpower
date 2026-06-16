@@ -272,6 +272,7 @@ class TensionApController:
         R       = obs.R
         bz_now  = R[:, 2]
         rate_sp = compute_rate_cmd(bz_now, bz_goal, R, kp=self._kp_outer, kd=0.0)
+        self._bz_goal = bz_goal  # stored for guided PythonAP (set_target_rotation at 50 Hz)
 
         # Vibration damper: HP-filter body-Z accel → estimate resonance velocity → oppose it
         col_out = self._C_held

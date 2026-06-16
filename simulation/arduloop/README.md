@@ -1,56 +1,43 @@
 # arduloop
 
-A self-contained Python port of ArduPilot's traditional-helicopter rate /
-attitude loop, intended for **early controller design and parameter tuning**
-before moving to ArduPilot SITL or hardware. The block diagram, signal flow,
-and parameter names mirror the C++ implementations so that every gain or
-filter tuned here transfers directly:
+A self-contained Python port of ArduPilot's traditional-helicopter attitude
+and rate-control stack. It has two layers:
 
-| arduloop field                       | ArduPilot parameter        |
-|--------------------------------------|----------------------------|
-| `RateAxisParams.P / I / D / FF`      | `ATC_RAT_xxx_P / I / D / FF` |
-| `RateAxisParams.IMAX / PDMX / D_FF`  | `ATC_RAT_xxx_IMAX / PDMX / D_FF` |
-| `RateAxisParams.FLTT / FLTE / FLTD`  | `ATC_RAT_xxx_FLTT / FLTE / FLTD` |
-| `RateAxisParams.NTF_*`               | `ATC_RAT_xxx_NTF` → `FILT*`  |
-| `RateAxisParams.NEF_*`               | `ATC_RAT_xxx_NEF` → `FILT*`  |
-| `HeliParams.HOVR_ROL_TRM_cd`         | `ATC_HOVR_ROL_TRM`          |
-| `HeliParams.PIRO_COMP_enabled`       | `ATC_PIRO_COMP`             |
-| `HeliParams.H_SW_H3_PHANG`           | `H_SW_H3_PHANG`             |
-| `HeliParams.loop_rate_hz`            | `SCHED_LOOP_RATE`           |
+| Layer | Class | ArduPilot equivalent |
+|-------|-------|----------------------|
+| **Outer (attitude)** | `GuidedAttitudeController` | `AC_AttitudeControl::input_quaternion` + `attitude_controller_run_quat` (GUIDED mode) |
+| **Inner (rate)** | `HeliRateController` | `AC_AttitudeControl_Heli` rate PID wrapper |
 
-C++ references:
-- `libraries/AC_PID/AC_PID.cpp` — `update_all` mirrored in
-  [`pid.py`](pid.py).
-- `libraries/AC_AttitudeControl/AC_AttitudeControl_Heli.cpp` — rate-loop
-  wrapper, PIRO_COMP, hover roll trim mirrored in
-  [`attitude_heli.py`](attitude_heli.py).
-- `libraries/AP_Motors/AP_MotorsHeli_Swash.cpp` — phase rotation in
-  [`swash.py`](swash.py).
-- `libraries/Filter/NotchFilter.cpp` and `LowPassFilter.cpp` — in
-  [`filters.py`](filters.py).
+Both layers use parameter names that are 1:1 with ArduPilot. Gains tuned here
+transfer directly to a `.parm` file.
 
-## Layout
+---
+
+## Module map
 
 ```
 arduloop/
-├── __init__.py
-├── filters.py         LowPassFilter1p, NotchFilter  (AP-compatible)
-├── pid.py             AC_PID port with FLTT/FLTE/FLTD + NTF/NEF
-├── swash.py           SwashH3 — phase rotation only
-├── attitude_heli.py   HeliRateController, PIRO_COMP, hover trim
-├── plant.py           Coupled rotational + pendulum + tether-spring plant
-├── signals.py         step, chirp, multisine, doublet
-├── analysis.py        empirical FRF, stability margins, step score
-├── params.py          RateAxisParams, HeliParams dataclasses
-└── run_demo.py        end-to-end tuning example
+├── __init__.py         public exports
+├── params.py           RateAxisParams, HeliParams  (all AP param names)
+├── guided.py           GuidedAttitudeController + GuidedAttitudeParams
+├── attitude_heli.py    HeliRateController, HeliRateOutput
+├── pid.py              AC_PID — target/error notch + 3 LPFs + PIDFFD
+├── swash.py            SwashH3 — H_SW_H3_PHANG phase rotation
+├── filters.py          LowPassFilter1p, NotchFilter  (AP biquad)
+├── plant.py            HeliPlant — coupled rotational + pendulum + spring
+├── signals.py          step, chirp, multisine, doublet generators
+├── analysis.py         empirical FRF, stability margins, step-response score
+└── run_demo.py         end-to-end example — rate loop + notch filter
 ```
 
-## Quick start
+---
+
+## Quick-start: rate loop only
 
 ```python
 from arduloop import HeliParams, RateAxisParams, HeliRateController, HeliPlant
 
-p = HeliParams(loop_rate_hz=400.0, H_SW_H3_PHANG=0.0)
+p = HeliParams(loop_rate_hz=400.0)
 p.roll = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05,
                         FLTT=1.5, FLTD=20.0,
                         NEF_center_hz=3.77, NEF_bandwidth_hz=0.5)
@@ -67,121 +54,264 @@ for _ in range(1600):
                             out.yaw_cmd, 0.5, dt)
 ```
 
-Run the bundled demo (no plotting needed):
+Run the bundled demo:
 
 ```
 python -m arduloop.run_demo
 ```
 
-It prints step-response metrics and the closed-loop magnitude at the
-tether-spring frequency, before and after enabling a 3.77 Hz error notch.
+---
 
-## Recommendations for controller design before ArduPilot
+## Quick-start: GUIDED attitude loop (RAWES / tethered hover)
 
-The package was built around a specific tuning workflow. The recommendations
-below apply to *any* heli with the dynamics characterised in the user
-analysis (inner rate loop crossover well above 1 Hz, pendulum mode near
-0.05 Hz, tether spring near 3.77 Hz that coincides with the rotor nutation
-crossover).
+`GuidedAttitudeController` is the class to use whenever `rawes.lua` calls
+`vehicle:set_target_angle_and_climbrate(...)` — i.e. any simtest or stack
+test that uses GUIDED mode.
 
-### 1. Match ArduPilot's loop topology, not just "a PID"
+```python
+from scipy.spatial.transform import Rotation
+from arduloop import HeliParams, GuidedAttitudeController, GuidedAttitudeParams
 
-The rate axis is *not* a textbook PID. Per axis it is:
+hp = HeliParams(loop_rate_hz=400.0)
+gp = GuidedAttitudeParams()              # AP defaults: ATC_INPUT_TC=0.15, etc.
+ctrl = GuidedAttitudeController(hp, gp)
+
+# -- 50 Hz outer tick (mirrors rawes.lua) --
+ctrl.set_target_angle_and_climbrate(
+    roll_deg=0.0, pitch_deg=-65.0, yaw_deg=0.0,
+    climbrate_ms=0.0, sim_time=t_outer)
+
+# Alternatively, from a 3×3 rotation matrix (body columns in NED):
+# ctrl.set_target_rotation(R_body_ned, sim_time=t_outer)
+
+# -- 400 Hz inner tick (mirrors physics runner) --
+out = ctrl.update(
+    q_body_ned=rot.as_quat(),        # [x,y,z,w] scipy passive body-to-NED
+    gyro_body_rads=(roll_rate, pitch_rate, yaw_rate),
+    dt=0.0025,
+    collective_norm=0.5,
+    sim_time=t_inner)
+
+# out.roll_cyclic  -> swashplate roll  [-1, 1]
+# out.pitch_cyclic -> swashplate pitch [-1, 1]
+# out.yaw_cmd      -> tail / yaw axis  [-1, 1]
+```
+
+### How `GuidedAttitudeController` maps to ArduPilot
+
+Every 400 Hz tick runs the same four steps as ArduPilot:
 
 ```
-target ──► [target notch] ──► [FLTT lowpass] ──┐
-                                                ├──► error ──► [error notch] ──► [FLTE LP] ──► _error
-gyro ────► [INS gyro filt] ─────────────────────┘
-                                                         │
-                                  P = kp·_error          │
-                                  D = kd·LP_FLTD(d_error)│   ── sum ──► [swash phase rot] ──► cyclic
-                                  I = ∫ki·_error  (anti-windup, IMAX)
-                                  FF = kff·_target
-                                  DFF = kdff·d_target
+set_target_angle_and_climbrate(roll, pitch, yaw)
+    stores _q_commanded
+
+400 Hz update():
+  Step 1  update_attitude_target()
+             _attitude_target *= from_rotvec(_ang_vel_target * dt)
+             [slews the internal target, NOT a jump to commanded]
+
+  Step 2  attitude error:
+             err_rot = _attitude_target.inv * _q_commanded
+             err_rotvec = axis_angle(err_rot)
+
+  Step 3  input_shaping_angle (per axis) -> update _ang_vel_target
+             shaped by ATC_INPUT_TC + ATC_ACCEL_R/P/Y_MAX
+
+  Step 4  attitude_controller_run_quat():
+    a. thrust_vector_rotation_angles(_attitude_target, q_body)
+          -> att_error (body-frame roll/pitch/yaw)
+    b. update_ang_vel_target_from_att_error(att_error)
+          -> P-correction via sqrt_controller
+    c. ang_vel_ff = rot_t2b * _ang_vel_target   (feedforward in body frame)
+    d. blend feedforward based on thrust_error_angle:
+          < 30 deg  : add full ff (roll+pitch+yaw)
+          30–60 deg : partial ff, yaw blends toward gyro
+          > 60 deg  : no roll/pitch ff; yaw rate target = gyro (locked)
+    e. (roll_rate_target, pitch_rate_target, yaw_rate_target) -> HeliRateController
 ```
 
-This is what `pid.py` implements. Use it instead of `scipy.signal.PID` or a
-hand-rolled `kp*e + ki*∫e + kd*de`.
+### The 30/60 degree feedforward blending threshold
 
-### 2. Tune in this order — each step is one ArduPilot parameter
+This is not intuitive and causes real SITL bugs if missed:
 
-1. **Inner rate loop, no notches, no outer loop**. Tune `P`, `D`, `FF` with
-   `FLTD ≈ 0.3 × loop_rate`. Validate with `signals.step` and
-   `analysis.step_response_score`. → `ATC_RAT_RLL_P / D / FF / FLTD`.
-2. **Add the tether-spring error notch**: `NEF_center_hz = 3.77`,
-   `NEF_bandwidth_hz = 0.4–0.6` (Q ≈ 7). Confirm via `empirical_frf` that
-   loop gain drops ≥ 25 dB at 3.77 Hz. → `ATC_RAT_RLL_NEF` pointing at a
-   `FILT*` slot.
-3. **Lowpass below pendulum coupling region**: set `FLTT = FLTE = 1.0–1.5
-   Hz`. Confirms the closed loop never excites the nutation crossover from
-   the outside. → `ATC_RAT_RLL_FLTT / FLTE`.
-4. **Swash phase**: sweep `H_SW_H3_PHANG ∈ [-30°, 30°]` and pick the value
-   that minimises off-axis (cross-coupled) response at high frequency — the
-   only frequency band where the phase is well-defined. → `H_SW_H3_PHANG`.
-5. **I and IMAX last**, on slow-drift signals only. → `ATC_RAT_RLL_I / IMAX`.
+- The threshold is on the angle between **`_attitude_target`** and **`q_body`**,
+  NOT between `_q_commanded` and `q_body`.
+- Because `_attitude_target` slews slowly (via `ATC_INPUT_TC`), it usually
+  stays close to the body. The `>60 deg` locked branch only fires when the
+  body has been physically pushed far from where AP last computed the target.
+- When locked: `yaw_rate_target = gyro[2]` — yaw PID error = 0, `yaw_cmd ≈ 0`.
+  This prevents yaw I-term windup while the thrust vector is being recovered.
+- For RAWES at 65° tether elevation: the slewed target should track the body
+  closely. If `_attitude_target` ever diverges (timeout reset, disturbance),
+  the locked branch will suppress yaw output until error < 60°.
 
-Repeat 1–5 for pitch. Do yaw independently — it does not couple through the
-swash.
+### Timeout behaviour
 
-### 3. Things to bake in from day one
+If `set_target_angle_and_climbrate` is not called for `timeout_s` (default 3 s),
+the next `update()` snap-resets `_q_commanded` and `_attitude_target` to the
+current body attitude, zeroes `_ang_vel_target`, and resets the rate PIDs.
+This matches ArduPilot re-init behaviour on GUIDED mode entry.
 
-- **Run at ArduPilot's real loop rate** (typically 400 Hz for heli). Notch
-  Q-factors and discretisation effects change a lot between 50 Hz and 400 Hz.
-- **Use the same sign conventions**: body-frame rates in rad/s, swash output
-  in `[-1, 1]`, phase angle in degrees with the sign convention from
-  `AP_MotorsHeli_Swash.cpp:125-127` (`servoN_pos − phase_angle`). The
-  `SwashH3` implementation here matches that convention so a value found in
-  Python ports directly.
-- **Probe with the same signals**: `signals.logarithmic_chirp`,
-  `signals.multisine` and `signals.step` are the same shapes that
-  `probe_open_loop_plant` / `probe_step_response` produce on the rig and
-  that `pymavlink` can decode from logs.
-- **Log everything** — `analysis.empirical_frf` and `step_response_score`
-  expect plain numpy arrays; dump them to `.npz` so you can overlay
-  Python-sim and decoded `.bin` traces on the same axes.
+### Quaternion convention
 
-### 4. What this package deliberately does **not** do
+`q_body_ned` throughout this module is `[x, y, z, w]` (scipy convention),
+passive body-to-NED rotation. This matches `ahrs:get_quaternion()` in Lua.
+To convert from a rotation matrix: `Rotation.from_matrix(R.T).as_quat()`.
 
-- **No exact bit-for-bit replica of `AC_PID`**. Structural equivalence is
-  enough for tuning to transfer; small numerical differences are absorbed by
-  the final retune on hardware. If you need bit-exact behaviour, run SITL.
-- **No 6-DOF heli model**. `HeliPlant` is a coupled rotational + pendulum +
-  tether-spring model calibrated to the modes the user identified
-  (inner-loop crossover, pendulum at ~0.05 Hz, tether spring at ~3.77 Hz at
-  the nutation crossover). It is sufficient to differentiate good tunings
-  from bad ones in the regimes that matter; it is not a fidelity model for
-  certification.
-- **No frequency-dependent decoupling matrix**. ArduPilot itself does not
-  expose one (only the static `H_SW_H3_PHANG` and `PIRO_COMP` for yaw rate).
-  If you decide a frequency-dependent decoupler is necessary, this package
-  is the right place to prototype it — see "Extending" below — but you will
-  also need to add the hook on the C++ side before flying.
+### `set_target_rotation` vs `set_target_angle_and_climbrate`
 
-### 5. Path to ArduPilot
+`set_target_rotation(R_body_ned)` takes a 3×3 matrix where the columns are
+body axes expressed in NED — the same `R_hub` used in the physics runner.
+It skips the Euler round-trip, which matters at extreme tilts (>80°) where
+gimbal lock degrades the ZYX decomposition. Always prefer this when you have
+the full rotation matrix.
 
-1. **Python-only tuning** — what this package supports today.
-2. **SITL with the JSON backend** (the user's current branch
-   `sitl-json-rpm-feedback-4.6.3` is suitable) — drive ArduPilot from
-   `HeliPlant` over the JSON socket. The tuned parameter set goes directly
-   into `params.parm`.
-3. **Hardware** — a final autotune-style refinement (`AUTOTUNE` mode or
-   manual frequency-sweep tuning) on the rig, starting from the SITL set.
+---
 
-### 6. Extending
+## Parameter reference
 
-To experiment with the things ArduPilot does *not* yet provide:
+### `GuidedAttitudeParams` (outer loop)
 
-- **Frequency-dependent decoupling**: add a method to `HeliRateController`
-  that runs a 2×2 dynamic mixer between `(roll_out, pitch_out)` before
-  `swash.mix`. Implement it as e.g. two complementary biquads producing the
-  high-frequency and low-frequency portions, each rotated by a different
-  phase angle. This is the algorithmic form of "swash phase is frequency-
-  dependent: ~0° at high freq, ~−90° at low freq, sliding through 180° at
-  the nutation crossover."
-- **MIMO loop shaping**: build the open-loop transfer matrix from
-  `analysis.empirical_frf` runs at multiple operating points, then design
-  the decoupler with `python-control` (`pip install control`).
+| Field | AP parameter | Default | Notes |
+|-------|-------------|---------|-------|
+| `ATC_ANG_RLL_P` | `ATC_ANG_RLL_P` | 4.5 | rad/s per rad |
+| `ATC_ANG_PIT_P` | `ATC_ANG_PIT_P` | 4.5 | |
+| `ATC_ANG_YAW_P` | `ATC_ANG_YAW_P` | 4.5 | |
+| `ATC_ACCEL_R_MAX` | `ATC_ACCEL_R_MAX` | 110000 | centi-deg/s², 0=linear P |
+| `ATC_ACCEL_P_MAX` | `ATC_ACCEL_P_MAX` | 110000 | |
+| `ATC_ACCEL_Y_MAX` | `ATC_ACCEL_Y_MAX` | 27000 | |
+| `ATC_RATE_R_MAX` | `ATC_RATE_R_MAX` | 0 | deg/s, 0=unlimited |
+| `ATC_RATE_P_MAX` | `ATC_RATE_P_MAX` | 0 | |
+| `ATC_RATE_Y_MAX` | `ATC_RATE_Y_MAX` | 0 | |
+| `ATC_INPUT_TC` | `ATC_INPUT_TC` | 0.15 | s; controls slew speed |
 
-The plant and controller modules are intentionally small and dataclass-driven,
-so live retuning is just mutation of `params.roll`, etc., followed by
-`ctrl.reload_params()`.
+Use `GuidedAttitudeParams.from_heli_params(hp)` to pull values from an
+existing `HeliParams` (avoids duplicating the same gains).
+
+### `HeliParams` (rate loop + shared attitude gains)
+
+| Field | AP parameter | Default |
+|-------|-------------|---------|
+| `roll / pitch / yaw` | per-axis `RateAxisParams` | see below |
+| `ATC_ANG_RLL_P / PIT_P / YAW_P` | `ATC_ANG_*_P` | 4.5 |
+| `ATC_ACCEL_R/P/Y_MAX` | `ATC_ACCEL_*_MAX` | 110000/110000/27000 cdss |
+| `ATC_RATE_R/P/Y_MAX` | `ATC_RATE_*_MAX` | 0 (unlimited) |
+| `HOVR_ROL_TRM_cd` | `ATC_HOVR_ROL_TRM` | 0 centi-deg |
+| `PIRO_COMP_enabled` | `ATC_PIRO_COMP` | False |
+| `H_SW_H3_PHANG` | `H_SW_H3_PHANG` | 0 deg |
+| `loop_rate_hz` | `SCHED_LOOP_RATE` | 400 Hz |
+| `output_limit` | — | 1.0 |
+
+### `RateAxisParams` (one axis)
+
+| Field | AP parameter | Default |
+|-------|-------------|---------|
+| `P / I / D / FF` | `ATC_RAT_xxx_P/I/D/FF` | 0.10/0.10/0.005/0.05 |
+| `IMAX` | `ATC_RAT_xxx_IMAX` | 0.3 |
+| `D_FF` | `ATC_RAT_xxx_D_FF` | 0 |
+| `PDMX` | `ATC_RAT_xxx_PDMX` | 0 (disabled) |
+| `FLTT / FLTE / FLTD` | `ATC_RAT_xxx_FLTT/FLTE/FLTD` | 20/0/20 Hz |
+| `NTF_center_hz / bandwidth_hz / attn_db` | `ATC_RAT_xxx_NTF → FILT*` | 0 (disabled) |
+| `NEF_center_hz / bandwidth_hz / attn_db` | `ATC_RAT_xxx_NEF → FILT*` | 0 (disabled) |
+
+Yaw defaults differ: `P=0.18, I=0.12, D=0.003, FF=0.024, IMAX=0.4, FLTT=20, FLTD=10`.
+
+---
+
+## `HeliRateController` — inner rate loop
+
+```python
+out = ctrl.update(
+    rate_target_rads=(roll_rate, pitch_rate, yaw_rate),
+    gyro_rate_rads=(gr, gp, gy),
+    dt=dt,
+    collective_norm=0.5,
+    saturated=(False, False, False))
+# out.roll_cyclic, out.pitch_cyclic, out.yaw_cmd
+```
+
+Signal path per axis (`pid.py` / `AC_PID::update_all`):
+
+```
+target  -> [NTF notch] -> [FLTT lowpass] -> _target
+                                              |
+gyro  ------------------------------------------+
+                           error = _target - gyro
+                                              |
+         +------ [NEF notch] -> [FLTE lowpass] -> _error
+         |
+         P  = p * _error
+         D  = d * FLTD(d(_error)/dt)
+         I  = integral(i * _error) clamped ±IMAX  [gated by saturated flag]
+         FF = ff * _target
+         DFF= d_ff * d(_target)/dt
+         sum -> [swash phase rotation H_SW_H3_PHANG] -> cyclic output
+```
+
+`reset()` clears all integrators and filter states. Call after a mode
+transition to prevent stale I-term from spiking the output.
+
+---
+
+## `HeliPlant` — design-time only
+
+A simple coupled plant for rate-loop tuning offline (not used in simtests).
+Modes: inner-loop flap response, pendulum (~0.05 Hz), tether spring (~3.77 Hz).
+Sufficient to distinguish good tunings from bad, not a physics-accurate model.
+
+---
+
+## AP-faithful design decisions
+
+### Why `_attitude_target` slews instead of jumping
+
+In ArduPilot, `set_target_angle_and_climbrate` stores the commanded quaternion
+but does NOT immediately set `_attitude_target` to it. Instead, every 400 Hz
+tick, `input_shaping_angle` advances `_attitude_target` a small step toward
+`_q_commanded`, capped by `ATC_ACCEL_*_MAX` and `ATC_INPUT_TC`. With AP
+defaults (`ATC_INPUT_TC=0.15 s`, `ATC_ACCEL_P_MAX=110000 cdss ≈ 19 rad/s²`),
+a 65° step takes roughly 1.5 s to ramp up. This is the correct closed-loop
+transient. A simplified controller that skips this will converge faster in
+simulation but slower in SITL — defeating the purpose of pre-SITL tuning.
+
+### Why `_attitude_target` is initialised to body attitude
+
+If `_attitude_target` started at identity and the body is at 65° tether
+equilibrium, the first tick would see a 65° step error → huge rate command →
+spike. `update()` sets `_attitude_target = q_body` on the very first call to
+avoid this. This matches ArduPilot's `input_quaternion` initialisation.
+
+### Why notches are applied before FLTE/FLTD
+
+ArduPilot applies notch filters on the raw signal before the smoothing
+low-passes. Reversing the order shifts the effective notch centre frequency
+and reduces its depth. `pid.py` preserves the AP ordering.
+
+---
+
+## Tuning workflow (rate loop)
+
+1. **No notches, no outer loop.** Tune `P`, `D`, `FF` with `FLTD ≈ 0.3 × Hz`.
+   Use `signals.step` + `analysis.step_response_score`.
+2. **Add tether-spring error notch.** `NEF_center_hz = 3.77`, `bandwidth = 0.4–0.6`.
+   Confirm ≥ 25 dB attenuation via `empirical_frf`.
+3. **Lowpass.** `FLTT = FLTE = 1.0–1.5 Hz`.
+4. **Swash phase.** Sweep `H_SW_H3_PHANG ∈ [-30°, 30°]`; minimise cross-axis
+   coupling at high frequency.
+5. **I + IMAX last**, on slow-drift signals only.
+
+Repeat for pitch. Yaw is independent.
+
+---
+
+## C++ source cross-references
+
+| Python | C++ source |
+|--------|-----------|
+| `guided.py` | `AC_AttitudeControl/AC_AttitudeControl.cpp` — `input_quaternion`, `update_attitude_target`, `attitude_controller_run_quat`, `thrust_vector_rotation_angles`, `input_shaping_angle`, `input_shaping_ang_vel` |
+| `guided.py` | `AP_Math/control.cpp` — `sqrt_controller` |
+| `guided.py` | `ArduCopter/mode_guided.cpp` — `set_angle`, `run_angle_control` |
+| `attitude_heli.py` | `AC_AttitudeControl/AC_AttitudeControl_Heli.cpp` — rate wrapper, PIRO_COMP, hover trim |
+| `pid.py` | `AC_PID/AC_PID.cpp` — `update_all` |
+| `swash.py` | `AP_Motors/AP_MotorsHeli_Swash.cpp` — phase rotation |
+| `filters.py` | `Filter/NotchFilter.cpp`, `Filter/LowPassFilter.cpp` |

@@ -72,7 +72,7 @@ from stack_utils import (
 )
 
 from pymavlink import mavutil as _mavutil
-from gcs import ACRO, STABILIZE, RawesGCS
+from gcs import ACRO, GUIDED, STABILIZE, RawesGCS
 from mediator_events import MediatorEventLog
 from controller import make_hold_controller
 
@@ -846,16 +846,24 @@ def _arm_sequence(
     fail=None,
     mode_timeout: float = _MODE_TIMEOUT,
     arm_timeout: float = _ARM_TIMEOUT,
+    target_mode: int = GUIDED,
 ) -> None:
     """
-    Canonical ACRO mode + arm sequence for all SITL stack tests.
+    Canonical arm sequence for all SITL stack tests.
 
     Always runs in this order:
-      1. Set ACRO mode (with optional RC override keepalive).
-      2. Hard-assert ACRO confirmed via HEARTBEAT; refuse to arm in any other mode.
+      1. Set target_mode (GUIDED for flight tests, ACRO for GPS-free torque tests).
+      2. Hard-assert target_mode confirmed via HEARTBEAT; refuse to arm in any other mode.
       3a. armon_ms=None  — GCS force-arm; raise rc_override_post_arm after confirmation.
       3b. armon_ms > 0   — send RAWES_ARM named float; wait for "RAWES arm-on: armed" STATUSTEXT.
-      3c. armon_ms = 0   — set ACRO only; return without arming (test owns arming).
+      3c. armon_ms = 0   — set target_mode only; return without arming (test owns arming).
+
+    Notes
+    -----
+    GUIDED is required for flight tests (swashplate attitude target seeds from EKF).
+    ACRO is required for GPS-free torque tests: GUIDED's mandatory_gps_checks and
+    alt_checks both fail without GPS regardless of ARMING_CHECK=0 or arm_force();
+    ACRO has has_manual_throttle()=True and requires_GPS()=False so both pass.
 
     Parameters
     ----------
@@ -880,30 +888,31 @@ def _arm_sequence(
         if procs_alive is not None:
             procs_alive()
 
-    # -- 1. Set ACRO mode -------------------------------------------------
-    log.info("[arm] Setting ACRO mode (timeout=%.0fs) ...", mode_timeout)
+    # -- 1. Set target mode ------------------------------------------------
+    _mode_name = {GUIDED: "GUIDED", ACRO: "ACRO"}.get(target_mode, str(target_mode))
+    log.info("[arm] Setting %s mode (timeout=%.0fs) ...", _mode_name, mode_timeout)
     _ro = rc_override or {}
     try:
-        gcs.set_mode(ACRO, timeout=mode_timeout, rc_override=_ro if _ro else None)
+        gcs.set_mode(target_mode, timeout=mode_timeout, rc_override=_ro if _ro else None)
     except Exception as exc:
-        _fail(f"ACRO mode set failed: {exc}")
+        _fail(f"{_mode_name} mode set failed: {exc}")
         return
 
-    # -- 2. Hard-assert ACRO confirmed ------------------------------------
+    # -- 2. Hard-assert target mode confirmed ------------------------------
     _hb = gcs._recv(type="HEARTBEAT", blocking=True, timeout=3.0)
-    if _hb is None or int(_hb.custom_mode) != ACRO:
+    if _hb is None or int(_hb.custom_mode) != target_mode:
         _actual = int(_hb.custom_mode) if _hb else -1
         _fail(
-            f"ACRO mode not confirmed before arm (custom_mode={_actual}). "
-            f"Running in wrong mode would corrupt the swashplate attitude target."
+            f"{_mode_name} mode not confirmed before arm (custom_mode={_actual}). "
+            f"Running in wrong mode would corrupt attitude control."
         )
         return
-    log.info("[arm] ACRO confirmed (custom_mode=%d) — attitude target seeds from EKF.", ACRO)
+    log.info("[arm] %s confirmed (custom_mode=%d).", _mode_name, target_mode)
     _check_alive()
 
     # -- 3. Arm -----------------------------------------------------------
     if armon_ms == 0:
-        log.info("[arm] armon_ms=0 — yielding unarmed in ACRO mode.")
+        log.info("[arm] armon_ms=0 -- yielding unarmed in %s mode.", _mode_name)
         return
 
     if armon_ms is None:
@@ -1649,6 +1658,10 @@ _TORQUE_STARTUP_HOLD_S: float = 15.0   # SITL-seconds: enough for EKF + arming b
 # fixture boot_params are merged on top and may override individual values (e.g.
 # ATC_RAT_YAW_P=0 for the Lua fixture where Lua is the sole feedforward provider).
 _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
+    # Boot directly into ACRO (mode 1).  Torque tests have no GPS so GUIDED
+    # mode's mandatory_gps_checks + alt_checks block arming regardless of
+    # ARMING_CHECK=0.  ACRO has has_manual_throttle()=True so both pass.
+    "INITIAL_MODE":     1,
     # Failsafe — disable EKF failsafe
     # (ARMING_SKIPCHK was removed in ArduPilot 4.6; force-arm bypasses checks)
     "FS_EKF_ACTION":    0,
@@ -1994,6 +2007,10 @@ def _torque_stack(
                 fail=pytest.fail,
                 mode_timeout=10.0,
                 arm_timeout=15.0,
+                # Torque rig has no GPS — GUIDED's mandatory_gps_checks and
+                # alt_checks fail regardless of ARMING_CHECK=0.  ACRO has
+                # has_manual_throttle()=True so both mandatory checks pass.
+                target_mode=ACRO,
             )
             if armon_ms is None:
                 log.info("Armed via GCS -- profile=%s", profile)
