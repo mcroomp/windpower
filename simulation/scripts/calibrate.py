@@ -849,6 +849,9 @@ One-shot:
   motor off                       SERVO4 -> 800 us + disarm immediately
   arm [--duration N]              ACRO + RAWES_ARM (no Lua mode change)
   disarm                          Disarm vehicle
+  manualtest [--col VALUE]        Swash servo validation: arm in MODE_MANUAL, step through
+                                  neutral / +tlon+tlat / neutral and check S1/S2/S3 move
+                                  as the H3-120 mixer predicts.  PASS/FAIL per assertion.
   script upload <file>            Upload .lua to /APM/scripts and restart engine
   script list                     List /APM/scripts
   script remove <name>            Remove from /APM/scripts
@@ -1345,17 +1348,21 @@ _RUN_MODES = {
             # the swash (passthrough_bf_roll_pitch_rate_yaw) instead of through
             # the rate PID -- trim becomes a direct cyclic command.
             "H_FLYBAR_MODE": 1,
-            # Cap cyclic at 10 deg of swash tilt at full stick.  Bench-safe
-            # bound (default 25 deg is too aggressive when servo travel is
-            # mechanically limited).  Trim_rad_to_pwm scales relative to this
-            # value, so the SAME trim NVF maps to a known PWM offset.
-            "H_CYC_MAX": 1000,
+            # Cap cyclic at 15 deg of swash tilt at full stick.
+            "H_CYC_MAX": 1500,
+            # Collective range matched to physical servo geometry.
+            "H_COL_MIN": 1400,
+            "H_COL_MAX": 1800,
+            # Servo trims: all three swash servos level at 1600 us.
+            "SERVO1_TRIM": 1600,
+            "SERVO2_TRIM": 1600,
+            "SERVO3_TRIM": 1600,
             # Disable manual servo override -- we want the live mixer driving
             # the swash, not a fixed pose.  H_SV_MAN > 0 is for setup only and
             # must be 0 during any actual run.
             "H_SV_MAN": 0,
         },
-        "doc":        "armed but quiet: pins ch1/ch2/ch3 at IC trim, pins SERVO4 at 800 us, H_FLYBAR_MODE=1, H_CYC_MAX=1000, H_SV_MAN=0",
+        "doc":        "armed but quiet: pins ch1/ch2/ch3 at IC trim, pins SERVO4 at 800 us, H_FLYBAR_MODE=1, H_CYC_MAX=1500, H_COL_MIN=1400, H_COL_MAX=1800, SERVO1/2/3_TRIM=1600, H_SV_MAN=0",
     },
     "manual": {
         "scr_user6":  2,
@@ -1365,9 +1372,15 @@ _RUN_MODES = {
             # go straight to the swash mixer -- manual cyclic commands land
             # on the servos without PID filtering or rate-limiting.
             "H_FLYBAR_MODE": 1,
-            # Cap cyclic at 10 deg at full stick so the same NVF radians map
-            # to a predictable PWM offset.  Same cap as passive mode.
-            "H_CYC_MAX": 1000,
+            # Cap cyclic at 15 deg at full stick.
+            "H_CYC_MAX": 1500,
+            # Collective range matched to physical servo geometry.
+            "H_COL_MIN": 1400,
+            "H_COL_MAX": 1800,
+            # Servo trims: all three swash servos level at 1600 us.
+            "SERVO1_TRIM": 1600,
+            "SERVO2_TRIM": 1600,
+            "SERVO3_TRIM": 1600,
             # Disable manual-setup servo override -- we want the live mixer.
             "H_SV_MAN": 0,
         },
@@ -2174,7 +2187,7 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
             while True:
                 try:
                     cmd = cmd_q.get_nowait()
-                except _queue.Empty:
+                except queue.Empty:
                     break
                 cmd_lo = cmd.lower()
                 if cmd_lo in ("quit", "exit", "q"):
@@ -2539,6 +2552,265 @@ def _watch_power(session, duration, log):
 
 
 # =============================================================================
+# manualtest -- swash servo validation against H3-120 mixer predictions
+# =============================================================================
+
+# H3-120 mixer factors (must match _h3_forward_mix and AGENTS.md §Swashplate)
+# roll_factor  = -sin(az) * 0.45:  S1=+0.390, S2=-0.390, S3= 0.000
+# pitch_factor =  cos(az) * 0.45:  S1=+0.225, S2=+0.225, S3=-0.450
+_MT_RF = {
+    "S1": -math.sin(_AZ_S1),   # +0.866 / 2 * 0.9 = ... actually just compute
+    "S2": -math.sin(_AZ_S2),
+    "S3": -math.sin(_AZ_S3),
+}
+_MT_PF = {
+    "S1":  math.cos(_AZ_S1),
+    "S2":  math.cos(_AZ_S2),
+    "S3":  math.cos(_AZ_S3),
+}
+# Scale by 0.45 (AP mixer normalisation factor)
+_MT_ROLL_FACTOR  = {k: v * 0.45 for k, v in _MT_RF.items()}
+_MT_PITCH_FACTOR = {k: v * 0.45 for k, v in _MT_PF.items()}
+
+# H_CYC_MAX = 1500 cd = 15 deg; 500 us per full stick
+_MT_CYC_MAX_DEG  = 15.0
+_MT_CYC_PWM_HALF = 500.0   # us for +-full stick (+-15 deg)
+
+# Test cyclic setpoints for the step phase
+_MT_TLON_DEG = 5.0    # nose-down
+_MT_TLAT_DEG = 3.0    # roll-right
+
+# Expected RC delta (us) from 1500 neutral
+_MT_RC2_DELTA = int(_MT_TLON_DEG / _MT_CYC_MAX_DEG * _MT_CYC_PWM_HALF)   # 250 us
+_MT_RC1_DELTA = int(_MT_TLAT_DEG / _MT_CYC_MAX_DEG * _MT_CYC_PWM_HALF)   # 150 us
+
+# Expected servo delta (us) from H3-120 mixer
+def _mt_servo_delta(key: str) -> int:
+    return int(_MT_ROLL_FACTOR[key] * _MT_RC1_DELTA
+               + _MT_PITCH_FACTOR[key] * _MT_RC2_DELTA)
+
+# Assertion margins (generous for MAVLink timing jitter)
+_MT_S1_MARGIN   = 30    # S1 must rise by at least this
+_MT_S3_MARGIN   = 50    # S3 must fall by at least this
+_MT_S2_TOL      = 40    # S2 must stay within this of baseline (expected delta ~-2 us)
+_MT_RESTORE_TOL = 50    # each servo must return within this of baseline
+# Expected deltas whose absolute value is below this threshold are treated as "stay"
+_MT_STAY_THRESH = 20    # us
+
+
+def _cmd_manualtest(session: RawesGCS, args: list[str]) -> None:
+    """manualtest [--col VALUE]
+
+    Swash servo validation test.  Arms in MODE_MANUAL (SCR_USER6=2,
+    H_FLYBAR_MODE=1), runs three phases and checks S1/S2/S3 against H3-120
+    mixer predictions:
+
+      Phase A (5 s): neutral cyclic -- record S1/S2/S3 baseline.
+      Phase B (5 s): tlon=+{tlon}deg  tlat=+{tlat}deg -- check servo shifts.
+      Phase C (5 s): restore neutral  -- check servos return to baseline.
+
+    H3-120 predictions (S1=-60deg, S2=+60deg, S3=180deg):
+      S1 delta = roll*{rf1:+.3f}*{rc1}us + pitch*{pf1:+.3f}*{rc2}us = {d1:+d}us  -> must rise
+      S2 delta = roll*{rf2:+.3f}*{rc1}us + pitch*{pf2:+.3f}*{rc2}us = {d2:+d}us  -> must stay ~0
+      S3 delta = roll*{rf3:+.3f}*{rc1}us + pitch*{pf3:+.3f}*{rc2}us = {d3:+d}us  -> must fall
+    """.format(
+        tlon=_MT_TLON_DEG, tlat=_MT_TLAT_DEG,
+        rf1=_MT_ROLL_FACTOR["S1"],  pf1=_MT_PITCH_FACTOR["S1"],
+        rf2=_MT_ROLL_FACTOR["S2"],  pf2=_MT_PITCH_FACTOR["S2"],
+        rf3=_MT_ROLL_FACTOR["S3"],  pf3=_MT_PITCH_FACTOR["S3"],
+        rc1=_MT_RC1_DELTA, rc2=_MT_RC2_DELTA,
+        d1=_mt_servo_delta("S1"), d2=_mt_servo_delta("S2"), d3=_mt_servo_delta("S3"),
+    )
+    schema = {"--col": "float"}
+    try:
+        pos, flags = _parse_flags(args, schema)
+    except ValueError as e:
+        print(f"  Error: {e}"); return
+    if pos:
+        print(f"  Unexpected positional arg(s): {pos}"); return
+
+    init_col_deg = float(flags.get("--col", -8.6))
+    init_col_rad = math.radians(init_col_deg)
+
+    PHASE_S = 5.0   # seconds per phase
+
+    # --- Setup: same as manual mode ---
+    cfg = _RUN_MODES["manual"]
+    saved_overrides: dict[str, float] = {}
+    for ap_name, target in cfg.get("force_params", {}).items():
+        orig = session.get_param(ap_name)
+        if orig is None:
+            print(f"  [WARN] {ap_name}: could not read -- skipping"); continue
+        saved_overrides[ap_name] = float(orig)
+        ok = session.set_param(ap_name, float(target))
+        print(f"  {'[OK]  ' if ok else '[FAIL]'} {ap_name}: {orig:.6g} -> {target}")
+
+    saved_fn = _take_servo4(session)
+    session.set_param("SCR_USER6", cfg["scr_user6"])
+    print(f"  SCR_USER6 -> {cfg['scr_user6']} (manual mode)")
+
+    session.send_named_float("RAWES_COL", init_col_rad)
+    session.send_named_float("RAWES_TLN", 0.0)
+    session.send_named_float("RAWES_TLT", 0.0)
+
+    arm_ms = _rawes_arm_ms(PHASE_S * 3 + 15)
+    print(f"  Sending RAWES_ARM={arm_ms} ms ...")
+    session.send_named_float("RAWES_ARM", float(arm_ms))
+    if not _wait_for_armed(session, timeout_s=15.0):
+        print("  [FAIL] Did not arm within 15 s.")
+        _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)
+        return
+    print("  [OK] Armed.")
+
+    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 25)
+    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER, 25)
+
+    state  = {"s1": None, "s2": None, "s3": None}
+    phase_a: list[dict] = []
+    phase_b: list[dict] = []
+    phase_c: list[dict] = []
+
+    nvf_b_sent = False
+    nvf_c_sent = False
+    t0 = time.monotonic()
+    t_phase_b = t0 + PHASE_S
+    t_phase_c = t0 + PHASE_S * 2
+    t_end     = t0 + PHASE_S * 3
+
+    print(f"\n  Phase A ({PHASE_S:.0f}s): neutral -- collecting servo baseline ...")
+
+    try:
+        while time.monotonic() < t_end:
+            t_rel = time.monotonic() - t0
+
+            if not nvf_b_sent and t_rel >= PHASE_S:
+                session.send_named_float("RAWES_TLN", math.radians(_MT_TLON_DEG))
+                session.send_named_float("RAWES_TLT", math.radians(_MT_TLAT_DEG))
+                nvf_b_sent = True
+                print(f"  Phase B ({PHASE_S:.0f}s): tlon=+{_MT_TLON_DEG}deg"
+                      f"  tlat=+{_MT_TLAT_DEG}deg -- checking servo shifts ...")
+
+            if not nvf_c_sent and t_rel >= PHASE_S * 2:
+                session.send_named_float("RAWES_TLN", 0.0)
+                session.send_named_float("RAWES_TLT", 0.0)
+                nvf_c_sent = True
+                print(f"  Phase C ({PHASE_S:.0f}s): neutral restore ...")
+
+            msg = session._recv(
+                type=["SERVO_OUTPUT_RAW", "STATUSTEXT"],
+                blocking=True, timeout=0.05,
+            )
+            if msg is None:
+                continue
+            if msg.get_type() == "STATUSTEXT":
+                text = msg.text.rstrip("\x00").strip()
+                if text:
+                    print(f"  [FC] {text}")
+                continue
+
+            # SERVO_OUTPUT_RAW
+            s1 = getattr(msg, "servo1_raw", None)
+            s2 = getattr(msg, "servo2_raw", None)
+            s3 = getattr(msg, "servo3_raw", None)
+            if s1 is None:
+                continue
+            state["s1"], state["s2"], state["s3"] = int(s1), int(s2), int(s3)
+            row = {"t": t_rel, "s1": state["s1"], "s2": state["s2"], "s3": state["s3"]}
+
+            if t_rel < PHASE_S:
+                phase_a.append(row)
+            elif t_rel < PHASE_S * 2:
+                phase_b.append(row)
+            else:
+                phase_c.append(row)
+
+    except KeyboardInterrupt:
+        print("\n  Interrupted.")
+    finally:
+        _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)
+
+    # --- Evaluate ---
+    def _mean(rows, key):
+        vals = [r[key] for r in rows if r[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    a_s1 = _mean(phase_a, "s1")
+    a_s2 = _mean(phase_a, "s2")
+    a_s3 = _mean(phase_a, "s3")
+    b_s1 = _mean(phase_b, "s1")
+    b_s2 = _mean(phase_b, "s2")
+    b_s3 = _mean(phase_b, "s3")
+    c_s1 = _mean(phase_c, "s1")
+    c_s2 = _mean(phase_c, "s2")
+    c_s3 = _mean(phase_c, "s3")
+
+    if a_s1 is None:
+        print("  [FAIL] No SERVO_OUTPUT_RAW data received -- check streams.")
+        return
+
+    expected_s1 = _mt_servo_delta("S1")
+    expected_s2 = _mt_servo_delta("S2")
+    expected_s3 = _mt_servo_delta("S3")
+
+    print()
+    print(f"  {'='*60}")
+    print(f"  manualtest results  (col={init_col_deg:+.1f}deg)")
+    print(f"  {'='*60}")
+    print(f"  {'Servo':<6} {'PhaseA':>8} {'PhaseB':>8} {'PhaseC':>8}"
+          f"  {'Delta':>7}  {'Expected':>9}  Result")
+    print(f"  {'-'*60}")
+
+    all_pass = True
+    results = []
+
+    def _check(name, a, b, c, expected_delta, margin, tol_b, restore_tol):
+        nonlocal all_pass
+        if a is None or b is None or c is None:
+            results.append(f"  {name:<6} {'n/a':>8}  -- no data")
+            all_pass = False
+            return
+
+        delta = b - a
+        restore_err = abs(c - a)
+
+        # Phase B assertion
+        if abs(expected_delta) <= _MT_STAY_THRESH:
+            b_ok = abs(delta) <= tol_b
+            b_label = f"must stay +-{tol_b}us"
+        elif expected_delta > 0:
+            b_ok = delta >= margin
+            b_label = f"must rise >={margin:+d}us"
+        else:
+            b_ok = delta <= -margin
+            b_label = f"must fall <={-margin:+d}us"
+
+        # Phase C assertion
+        c_ok = restore_err <= restore_tol
+
+        ok = b_ok and c_ok
+        if not ok:
+            all_pass = False
+
+        tag_b = "[PASS]" if b_ok else "[FAIL]"
+        tag_c = "[PASS]" if c_ok else "[FAIL]"
+        results.append(
+            f"  {name:<6} {a:>8.0f} {b:>8.0f} {c:>8.0f}"
+            f"  {delta:>+7.0f}us  {expected_delta:>+9d}us"
+            f"  B:{tag_b} ({b_label})  C:{tag_c} (restore<={restore_tol}us)"
+        )
+
+    _check("S1", a_s1, b_s1, c_s1, expected_s1, _MT_S1_MARGIN, _MT_S2_TOL, _MT_RESTORE_TOL)
+    _check("S2", a_s2, b_s2, c_s2, expected_s2, _MT_S1_MARGIN, _MT_S2_TOL, _MT_RESTORE_TOL)
+    _check("S3", a_s3, b_s3, c_s3, expected_s3, _MT_S3_MARGIN, _MT_S2_TOL, _MT_RESTORE_TOL)
+
+    for r in results:
+        print(r)
+    print(f"  {'='*60}")
+    print(f"  Overall: {'[PASS]' if all_pass else '[FAIL]'}")
+    print()
+
+
+# =============================================================================
 # Dispatch
 # =============================================================================
 
@@ -2568,7 +2840,8 @@ def _run_command(session: RawesGCS, tokens: list[str],
     elif verb == "servo":    _cmd_servo(session, args)
     elif verb == "motor":    _cmd_motor(session, args, force=force)
     elif verb == "run":      _cmd_run(session, args)
-    elif verb == "manual":   _cmd_manual_interactive(session, args)
+    elif verb == "manual":      _cmd_manual_interactive(session, args)
+    elif verb == "manualtest":  _cmd_manualtest(session, args)
     elif verb == "watch":    _cmd_watch(session, args)
     elif verb == "analyze":  _cmd_analyze(args)
     elif verb == "script":   _cmd_script(session, args)

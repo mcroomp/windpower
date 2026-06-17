@@ -241,6 +241,29 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 
 ---
 
+## Running calibrate.py (real hardware)
+
+**Venv:** `simulation/.venv` (not the root `.venv`). Use `--port` / `--baud` flags — positional args are parsed as commands.
+
+```powershell
+# Interactive REPL (SiK radio on COM7 at 57600)
+& "C:\repos\windpower\simulation\.venv\Scripts\python.exe" simulation/scripts/calibrate.py --port COM7 --baud 57600
+
+# USB direct (default 115200)
+& "C:\repos\windpower\simulation\.venv\Scripts\python.exe" simulation/scripts/calibrate.py --port COM4
+```
+
+**Key REPL commands:**
+| Command | Effect |
+|---------|--------|
+| `manual --col -8.6 --tlon 1.15 --duration 120` | Interactive manual mode (SCR_USER6=2, H_FLYBAR_MODE=1) |
+| `run passive --trim tlon=1.15,col=-8.6` | Armed-but-quiet, holds trim at IC |
+| `set H_FLYBAR_MODE 1` | Write param with ACK + readback verification |
+| `script upload simulation/scripts/rawes.lua` | Upload Lua to /APM/scripts, restart scripting engine |
+| `status` | Vehicle / battery / EKF / servos / key params snapshot |
+
+---
+
 ## Key Design Decisions (one-liners — see references for detail)
 
 - **Production aero:** `PetersHeBEMJit` (3-state dynamic inflow, Numba). No skew-angle validity limit; momentum ODE valid hover→axial descent. Pure-numpy reference: `PetersHeBEM`. See [design/simulation.md](design/simulation.md) Aerodynamic Model + [design/aero.md](design/aero.md).
