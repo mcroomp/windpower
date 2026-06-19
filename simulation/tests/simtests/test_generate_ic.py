@@ -2,25 +2,20 @@
 test_generate_ic.py — Create and verify steady-state initial conditions.
 
 Two tests:
-  test_create_ic        — warmup physics to find settled state; saves steady_state_starting.json
-  test_ic_steady_flight — loads the saved JSON; runs 10 s more physics; asserts hub stays steady
+    test_create_ic        — writes the static-tether IC to steady_state_starting.json
+    test_ic_steady_flight — loads the saved JSON; runs 30 s physics; asserts hub stays steady
                           (serialize + deserialize round-trip)
 
 Regenerate:
     .venv/Scripts/python.exe -m pytest simulation/tests/unit/test_generate_ic.py -s
 
-WHY WARMUP-BASED (not purely analytical)
------------------------------------------
-An analytical IC (pos, vel=0, rest_length from thrust estimate) encodes zero velocity and an
-orientation derived from build_orb_frame, whose yaw may not match the hub's natural free-flight
-heading.  The GPS Glitch detection in ArduPilot compares compass heading (= R0 yaw) against
-GPS velocity heading; a mismatch at kinematic exit triggers a GPS Glitch that collapses EKF
-fusion.
-
-Running a warmup with TensionPI + orbit-tracking lets the hub settle to a real physics state:
-real velocity, real R0 yaw, and a tether tension consistent with the collective.  That state
-is a valid starting point for both simtests (internal controller) and stack tests (ArduPilot +
-Lua), and the R0 yaw will be consistent with the hub's initial free-flight velocity direction.
+WHY STATIC-TETHER
+-----------------
+The IC represents a fixed paid-out tether: rest_length is chosen once from the
+target initial stretch and remains constant. The kinematic phase starts from a
+stationary wind-aligned downwind point with a body frame derived from the tether
+direction, then the steady replay test verifies that the serialized state is
+usable by the flight stack.
 
 NED coordinates throughout.  X=North, Y=East, Z=Down.
 """
@@ -40,8 +35,8 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import mediator as _mediator_module
 from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, euler_step_omega
 from frames          import build_orb_frame
-from simtest_runner  import PhysicsRunner, PythonAP
-from ap_controller   import TensionApController
+from simtest_runner  import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner import TensionCommand
 from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
@@ -63,7 +58,7 @@ STACK_COLL = -0.18  # rad — col_cruise used by Lua at kinematic exit (COL_MIN=
 
 # ── IC target tension ──────────────────────────────────────────────────────────
 # Midway between pumping reel-in (226 N) and reel-out (435 N) targets.
-# TensionPI adjusts collective during warmup until settled tension ≈ this value.
+# Used only to choose the initial tether stretch; IC warmup holds rest_length static.
 IC_TARGET_TENSION_N = 300.0   # N
 
 # ── IC quality bounds (asserted in test_create_ic) ────────────────────────────
@@ -76,9 +71,26 @@ IC_ELEV_MAX_DEG   =  55.0   # deg — must not be nearly vertical
 # ── Tether / geometry ──────────────────────────────────────────────────────────
 L_TETHER = 100.0   # m
 
-# Design orientation (from beaupoil_2026.yaml, NED): ~25 deg elevation, ~70 deg E-of-N
+# Design elevation from beaupoil_2026.yaml, NED.  The IC generator aligns the
+# horizontal component with the wind so steady-state tests start on the
+# downwind plane instead of the historical ~70 deg design azimuth.
 _BODY_Z_DESIGN = np.array([0.305391, 0.851018, -0.427206])
 _BODY_Z_DESIGN.flags.writeable = False
+
+
+def _wind_aligned_tether_hat() -> np.ndarray:
+    wind_h = np.asarray(WIND[:2], dtype=float)
+    wind_h_norm = float(np.linalg.norm(wind_h))
+    if wind_h_norm < 1e-6:
+        raise ValueError("IC generation requires nonzero horizontal wind")
+    z = float(_BODY_Z_DESIGN[2] / np.linalg.norm(_BODY_Z_DESIGN))
+    h = float(np.sqrt(max(0.0, 1.0 - z * z)))
+    tether_hat = np.array([
+        h * wind_h[0] / wind_h_norm,
+        h * wind_h[1] / wind_h_norm,
+        z,
+    ])
+    return tether_hat / np.linalg.norm(tether_hat)
 
 # ── Simulation parameters ──────────────────────────────────────────────────────
 _DT            = 2.5e-3  # s (400 Hz)
@@ -87,7 +99,7 @@ _STEADY_STEPS  = 12000   # 30 s steady-flight check
 _DRIFT_BOUND   = 15.0    # m — max 3-D drift in steady-flight check
 _DT_CMD        = 0.1     # 10 Hz ground commands
 _PLANNER_EVERY = max(1, round(_DT_CMD / _DT))                    # 40
-_AP_EVERY      = max(1, round(1.0 / (PythonAP.AP_HZ * _DT)))    # 8
+_AP_EVERY      = max(1, round(1.0 / (MockArdupilot.AP_HZ * _DT)))    # 8
 
 _JSON_PATH = Path(__file__).resolve().parents[2] / "steady_state_starting.json"
 
@@ -96,17 +108,17 @@ _JSON_PATH = Path(__file__).resolve().parents[2] / "steady_state_starting.json"
 
 def _compute_ic() -> dict:
     """
-    Run warmup physics (60 s, TensionPI at IC_TARGET_TENSION_N, orbit-tracking)
+    Run warmup physics (60 s, static tether, orbit-tracking)
     from the design orientation and return the settled state as the IC.
 
     The warmup lets the hub find its natural equilibrium: real velocity, real R0
     yaw consistent with the free-flight trajectory, and tether tension balanced
-    at IC_TARGET_TENSION_N.  This avoids GPS Glitch at kinematic exit in stack
-    tests (compass heading = R0 yaw matches GPS velocity heading).
+    by a fixed tether rest length.  This avoids GPS Glitch at kinematic exit in
+    stack tests (compass heading = R0 yaw matches GPS velocity heading).
     """
-    # _BODY_Z_DESIGN encodes the geometric anchor→hub unit vector for the
-    # design point.  FRD body_z points hub→anchor (down through the disk).
-    tether_hat = _BODY_Z_DESIGN / np.linalg.norm(_BODY_Z_DESIGN)
+    # Start on the wind-aligned downwind plane while preserving the design
+    # elevation.  FRD body_z points hub->anchor (down through the disk).
+    tether_hat = _wind_aligned_tether_hat()
     pos0  = L_TETHER * tether_hat
     t_dir = -tether_hat
     R0    = build_orb_frame(t_dir)
@@ -115,7 +127,7 @@ def _compute_ic() -> dict:
     # ``relax_inflow`` settles the dynamic-inflow states semi-implicitly with
     # ω held fixed; we then take a handful of explicit Euler steps with ω
     # free so the spin ODE finds its autorotation equilibrium.
-    _aero_est = create_aero(_ROTOR, model="oye")
+    _aero_est = create_aero(_ROTOR, model="quasi_static")
     state     = _aero_est.initial_rotor_state()
     omega_now = 20.0   # tracked externally (dynbem 0.2.0: omega removed from RotorState)
     omega_min = _ROTOR.autorotation.omega_min_rad_s or 0.5
@@ -160,109 +172,31 @@ def _compute_ic() -> dict:
     )
     state = trim.final_state
 
-    # Initial rest_length from aero thrust estimate at the trimmed state.
-    f_est, _ = _aero_est.compute_forces(RotorInputs(
-        collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-        omega_rad_s=omega_now, t=PhysicsRunner.T_AERO_OFFSET, rho_kg_m3=1.225,
-    ), state)
-    T_est = max(-float(np.dot(f_est.F_world, t_dir)), 10.0)
+    # Static paid-out length. Pick the unstretched length that gives the target
+    # initial tension at the design geometry; do not adjust it during IC setup.
     k_eff = TetherModel.EA_N / L_TETHER
-    rest_length = L_TETHER - max(T_est / k_eff, 0.001)
+    rest_length = L_TETHER - IC_TARGET_TENSION_N / k_eff
 
-    # Warmup: PhysicsRunner + TensionApController targeting IC_TARGET_TENSION_N.
-    # The AcroController is pre-loaded with the trim cyclic so the inner PID
-    # only handles small perturbations around equilibrium.  Re-bind the
-    # AcroController with ki/kd gains so the rate loop has damping +
-    # integral action — required for stability under wind disturbance
-    # (see tests/unit/test_full_loop_stability for the unit-level demo).
-    from controller import HeliCyclicController as _AcroForWarmup
-    runner = PhysicsRunner.for_warmup(_ROTOR, pos0, R0, rest_length,
-                                       STACK_COLL, omega_spin, WIND)
-    # Inner-PID gains: pure-P at default kp.  Adding ki/kd was destabilising
-    # the warmup; integral wind-up under the wind-driven baseline moment +
-    # the new derivative-kick fix combine to cause NaN explosion at 50 Hz
-    # AP rate.  Trim FF alone handles steady-state moments.
-    # Tuned for elastic tether + wind + 50 Hz AP rate.  Found in
-    # tests/oneoff/warmup_gain_sweep.py — D=0.02 + FLTT=40 hold tension
-    # near setpoint by damping the tether-spring excitation through the
-    # rate-PID's filter; without them tension swings 0 - 800 N and the
-    # loop blows up in ~9 s.
-    runner._acro = _AcroForWarmup(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        P=0.67, I=0.15, D=0.02, IMAX=0.30,
-        FLTT=40.0, FLTE=0.0, FLTD=40.0,
-    )
-    runner._acro._servo.reset(STACK_COLL)
-    runner._acro.set_trim(trim.tilt_lon, trim.tilt_lat)
-    _ap_wu = TensionApController(
-        ic_pos=pos0, mass_kg=MASS,
-        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=STACK_COLL, tension_ic=IC_TARGET_TENSION_N,
-        # AP-side position feedback disabled here.  The PD helper
-        # ``controller.position_feedback_bz_eq`` works in the constant-
-        # tether-force unit tests (see test_full_loop_stability) but
-        # destabilises the elastic-tether simtest at 50 Hz AP rate.
-        # Lateral-velocity damping (kd_lat) is sufficient to settle the
-        # pendulum mode for IC generation.
-        kp_pos=0.0, kd_pos=0.0, kd_lat=50.0,
-    )
-    ap_wu = PythonAP(_ap_wu, wind=WIND, dt=_DT)
-
-    target_alt = float(-pos0[2])
-    _ap_wu.receive_command(TensionCommand(
-        tension_setpoint_n=IC_TARGET_TENSION_N, tension_measured_n=runner.tension_now,
-        alt_m=target_alt, phase="reel-out",
-    ), _DT_CMD)
-    # Ground-side tension-regulating winch: adjusts rest_length toward the
-    # value that holds tension at IC_TARGET_TENSION_N.  Mirrors the real
-    # winch controller that prevents tether slack during steady flight.
-    # Without this the tether's spring mode is undamped and tension swings
-    # 0 - 800 N during warmup, exciting the cyclic loop into divergence.
-    rest_now    = float(rest_length)
-    _WINCH_KP   = 0.01    # m/s per N of tension error
-    _WINCH_VMAX = 1.0     # m/s rest-length change limit
-    for step in range(WARMUP_STEPS):
-        if step % _PLANNER_EVERY == 0:
-            _ap_wu.receive_command(TensionCommand(
-                tension_setpoint_n=IC_TARGET_TENSION_N, tension_measured_n=runner.tension_now,
-                alt_m=target_alt, phase="reel-out",
-            ), _DT_CMD)
-        if step % _AP_EVERY == 0:
-            ap_wu.tick(step * _DT, runner)
-        # Winch tension regulator: pay out when tension is high, reel in
-        # when low.  P-controller on rest_length saturated at ±_WINCH_VMAX.
-        dT       = runner.tension_now - IC_TARGET_TENSION_N
-        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
-        rest_now += v_winch * _DT
-        runner.step(_DT, ap_wu.col_rad, ap_wu.roll_sp, ap_wu.pitch_sp,
-                    runner.omega_body, rest_length=rest_now)
-    coll_settled = ap_wu.col_rad
-    rest_length  = rest_now
-
-    # Settled state
-    s     = runner.hub_state
-    pos_s = s["pos"].copy()
-    vel_s = s["vel"].copy()
-    R_s   = s["R"].copy()
-    omega_spin_settled = runner.omega_spin
+    # Static IC state
+    pos_s = pos0.copy()
+    vel_s = np.zeros(3)
+    R_s = R0.copy()
+    coll_settled = STACK_COLL
+    omega_spin_settled = omega_spin
 
     # Force balance diagnostics at STACK_COLL from settled position.
     # NB: anchor at origin, so t_dir_s = pos_s/|pos_s| = anchor→hub direction.
     t_dir_s    = pos_s / np.linalg.norm(pos_s)
-    t_aero_end = PhysicsRunner.T_AERO_OFFSET + WARMUP_STEPS * _DT
     diag_inputs = RotorInputs(
         collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R_s, v_hub_world=vel_s, wind_world=WIND,
-        omega_rad_s=runner.omega_spin, t=t_aero_end, rho_kg_m3=1.225,
+        omega_rad_s=omega_spin_settled, t=PhysicsRunner.T_AERO_OFFSET, rho_kg_m3=1.225,
     )
-    # The runner's aero state already encodes the equilibrium inflow + omega;
-    # using runner.aero.compute_forces with the live state preserves it.
-    diag_state = runner._core._rotor_state  # noqa: SLF001 — diag-only, intentional
-    f_stack, _ = runner.aero.compute_forces(diag_inputs, diag_state)
+    f_stack, _ = _aero_est.compute_forces(diag_inputs, state)
     F_aero     = f_stack.F_world
-    f_teth, m_teth = runner.tether.compute(pos_s, vel_s, R_s)
-    T_tether   = float(runner.tether._last_info.get("tension", 0.0))
+    tether = TetherModel(rest_length=rest_length, hub_mass=MASS)
+    f_teth, m_teth = tether.compute(pos_s, vel_s, R_s)
+    T_tether   = float(tether._last_info.get("tension", 0.0))
     gravity    = np.array([0.0, 0.0, MASS * G])
     F_net      = F_aero + f_teth
     F_residual  = F_net + gravity
@@ -302,6 +236,8 @@ def _compute_ic() -> dict:
         "F_res_along":   F_res_along,
         "grav_perp":     grav_perp,
         "elevation_deg": elevation_deg,
+        "trim_tilt_lon": float(trim.tilt_lon),
+        "trim_tilt_lat": float(trim.tilt_lat),
     }
 
 
@@ -325,11 +261,13 @@ def _save_ic(path: Path, ic: dict) -> None:
         "orbit_bz":      ic["orbit_bz"].tolist(),
         "omega_spin":    float(ic["omega_spin"]),
         "rest_length":   float(ic["rest_length"]),
-        # coll_eq_rad: collective at which TensionPI settled (≈ IC_TARGET_TENSION_N).
-        # IC is settled at this collective so TensionPI warm-starts at equilibrium.
+        # coll_eq_rad: collective used at the settled fixed-tether IC point.
+        # Stored so tests can warm-start from the same equilibrium command.
         "coll_eq_rad":   float(ic["coll_settled"]),
         "tension_eq_n":  float(ic["T_tether"]),
         "stack_coll_eq": float(ic["coll_settled"]),
+        "trim_tilt_lon": float(ic["trim_tilt_lon"]),
+        "trim_tilt_lat": float(ic["trim_tilt_lat"]),
         "home_z_ned":    0.0,
         "eq_physics": {
             "mass_kg":        float(MASS),
@@ -339,7 +277,7 @@ def _save_ic(path: Path, ic: dict) -> None:
             "tilt_lat":       0.0,
             "omega_spin":     float(ic["omega_spin"]),
             "note": (
-                "Forces evaluated at STACK_COLL from warmup-settled position. "
+                "Forces evaluated at STACK_COLL from the static fixed-tether IC. "
                 "Perpendicular residual (gravity_perp ~48 N) balanced by Lua cyclic in flight."
             ),
             "aero_fx":        float(F_aero[0]),
@@ -375,12 +313,11 @@ def _save_ic(path: Path, ic: dict) -> None:
 
 def test_create_ic(simtest_log):
     """
-    Run 60 s warmup physics (TensionPI at 200 N, orbit-tracking) from the design
-    orientation.  Save the settled state to steady_state_starting.json.
+    Write the static-tether IC at the wind-aligned design orientation to
+    steady_state_starting.json.
 
-    The settled state encodes real velocity, real R0 (yaw consistent with free-
-    flight heading), and tether tension at equilibrium — a valid starting point
-    for both simtests and stack tests.
+    The state encodes zero velocity, body_z aligned with the tether direction,
+    and static tether tension from the fixed rest_length.
     """
     ic = _compute_ic()
 
@@ -421,10 +358,10 @@ def test_create_ic(simtest_log):
     # ── IC quality assertions ─────────────────────────────────────────────────
     assert IC_TENSION_MIN_N <= T_tether <= IC_TENSION_MAX_N, (
         f"IC tension {T_tether:.1f} N outside [{IC_TENSION_MIN_N}, {IC_TENSION_MAX_N}] N — "
-        f"warmup did not converge to a reasonable tension point"
+        f"static rest_length did not produce a reasonable tension point"
     )
     assert speed <= IC_SPEED_MAX_MS, (
-        f"IC hub speed {speed:.3f} m/s > {IC_SPEED_MAX_MS} m/s — hub not settled"
+        f"IC hub speed {speed:.3f} m/s > {IC_SPEED_MAX_MS} m/s"
     )
     assert IC_ELEV_MIN_DEG <= elevation_deg <= IC_ELEV_MAX_DEG, (
         f"IC elevation {elevation_deg:.1f} deg outside [{IC_ELEV_MIN_DEG}, {IC_ELEV_MAX_DEG}] deg"
@@ -435,11 +372,12 @@ def test_create_ic(simtest_log):
 
 def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
                 omega_spin: float, rest: float, tension_sp: float,
-                stack_coll: float, label: str, csv_path: Path) -> dict:
+                stack_coll: float, label: str, csv_path: Path,
+                trim_tilt_lon: float = 0.0, trim_tilt_lat: float = 0.0) -> dict:
     """
     Run _STEADY_STEPS of altitude-holding physics from the given IC.
 
-    Collective: TensionPI at tension_sp.
+    Collective: fixed thrust command near the settled IC collective.
     Cyclic:     body_z_eq at (target_elevation, current_azimuth) — stateless,
                 no orbit reference needed.
 
@@ -464,20 +402,22 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         FLTT=40.0, FLTE=0.0, FLTD=40.0,
     )
     runner._acro._servo.reset(stack_coll)
-    _ap    = TensionApController(
-        ic_pos=pos0, mass_kg=MASS,
+    runner._acro.set_trim(trim_tilt_lon, trim_tilt_lat)
+    ap = MockArdupilot.for_pumping(
+        ic_pos=pos0,
+        mass_kg=MASS,
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=stack_coll, tension_ic=tension_sp,
-        kd_lat=50.0,
+        warm_coll_rad=stack_coll,
+        tension_ic=tension_sp,
+        wind=WIND,
+        dt=_DT,
     )
-    ap     = PythonAP(_ap, wind=WIND, dt=_DT)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),
-        "body_z_eq": r.hub_state["R"][:, 2],
         "phase":     label,
     }
-    _ap.receive_command(TensionCommand(
-        tension_setpoint_n=tension_sp, tension_measured_n=runner.tension_now,
+    ap.receive_command(TensionCommand(
+        tension_target_n=tension_sp,
         alt_m=target_alt, phase="reel-out",
     ), _DT_CMD)
     tlen_arr    = np.zeros(_STEADY_STEPS)
@@ -487,12 +427,7 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     az_arr      = np.zeros(_STEADY_STEPS)
     tension_arr = np.zeros(_STEADY_STEPS)
 
-    # Ground-side tension-regulating winch — mirrors the real winch
-    # tension controller.  Keeps the tether under tension so the spring
-    # mode stays bounded.  Same gains as in the IC warmup.
-    rest_now    = float(rest)
-    _WINCH_KP   = 0.01
-    _WINCH_VMAX = 1.0
+    rest_now = float(rest)
 
     for step in range(_STEADY_STEPS):
         hub   = runner.hub_state
@@ -507,15 +442,12 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         az_arr[step]      = float(math.degrees(math.atan2(pos[1], pos[0])))
 
         if step % _PLANNER_EVERY == 0:
-            _ap.receive_command(TensionCommand(
-                tension_setpoint_n=tension_sp, tension_measured_n=runner.tension_now,
+            ap.receive_command(TensionCommand(
+                tension_target_n=tension_sp,
                 alt_m=target_alt, phase="reel-out",
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             ap.tick(step * _DT, runner)
-        dT       = runner.tension_now - tension_sp
-        v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
-        rest_now += v_winch * _DT
         sr = runner.step(_DT, ap.col_rad, ap.roll_sp, ap.pitch_sp,
                          runner.omega_body, rest_length=rest_now)
         ap.log(runner, sr)
@@ -563,7 +495,7 @@ def _print_steady(log, m: dict, label: str) -> None:
 def test_ic_steady_flight(simtest_log):
     """
     Load steady_state_starting.json and run 30 s altitude-holding physics from
-    the warmup-settled R0.  Verifies the serialised IC is physically stable.
+    the static-tether R0.  Verifies the serialised IC is physically stable.
     """
     if not _JSON_PATH.exists():
         pytest.skip("steady_state_starting.json not found — run test_create_ic first")
@@ -576,10 +508,13 @@ def test_ic_steady_flight(simtest_log):
     rest       = float(d["rest_length"])
     tension_sp = float(d.get("tension_eq_n", 435.0))
     stack_coll = float(d["stack_coll_eq"])
+    trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0))
+    trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0))
 
     m = _run_steady(pos0, vel0, R0, omega_spin, rest, tension_sp, stack_coll,
                     label="ic_steady_flight",
-                    csv_path=simtest_log.log_dir / "telemetry.csv")
+                    csv_path=simtest_log.log_dir / "telemetry.csv",
+                    trim_tilt_lon=trim_tilt_lon, trim_tilt_lat=trim_tilt_lat)
     _print_steady(simtest_log, m, "ic_steady_flight")
 
     slack_steps = int(np.sum(m["tension_arr"] < 1.0))
@@ -618,8 +553,11 @@ def test_ic_r0_kinematic(simtest_log):
     R0_kinematic = ic.R0_kinematic   # shared: same body_z, body_x North-aligned
     omega_spin = ic.omega_spin
     rest       = ic.rest_length
-    tension_sp = float(json.loads(_JSON_PATH.read_text()).get("tension_eq_n", 435.0))
+    d = json.loads(_JSON_PATH.read_text())
+    tension_sp = float(d.get("tension_eq_n", 435.0))
     stack_coll = ic.stack_coll_eq
+    trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0))
+    trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0))
 
     spin_deg = float(math.degrees(math.acos(max(-1.0, min(1.0,
         float(np.dot(R0[:, 0], R0_kinematic[:, 0])))))))
@@ -631,7 +569,8 @@ def test_ic_r0_kinematic(simtest_log):
 
     m = _run_steady(pos0, vel0, R0_kinematic, omega_spin, rest, tension_sp, stack_coll,
                     label="ic_r0_kinematic",
-                    csv_path=simtest_log.log_dir / "telemetry_kinematic.csv")
+                    csv_path=simtest_log.log_dir / "telemetry_kinematic.csv",
+                    trim_tilt_lon=trim_tilt_lon, trim_tilt_lat=trim_tilt_lat)
     _print_steady(simtest_log, m, "ic_r0_kinematic")
 
     assert np.all(np.isfinite(m["tlen_arr"])), "NaN/inf in tether length"

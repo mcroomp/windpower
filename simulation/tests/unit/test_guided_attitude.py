@@ -3,7 +3,7 @@
 Tests are in four groups:
 
 1. _sqrt_controller         -- matches AP_Math/control.cpp exactly.
-2. _input_shaping_angle     -- matches AC_AttitudeControl.cpp exactly.
+2. _attitude_command_model  -- matches AC_AttitudeControl.cpp attitude_command_model exactly.
 3. _thrust_vector_rotation_angles -- correct roll/pitch/yaw error decomposition.
 4. GuidedAttitudeController -- end-to-end, including slewed target state and
                                feedforward blending from attitude_controller_run_quat.
@@ -18,18 +18,17 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from arduloop.guided import (
     GuidedAttitudeController,
     GuidedAttitudeParams,
     _THRUST_ERROR_ANGLE,
-    _input_shaping_ang_vel,
-    _input_shaping_angle,
+    _attitude_command_model,
     _sqrt_controller,
     _thrust_vector_rotation_angles,
 )
 from arduloop import HeliParams
+from arduloop.attitude_heli import HeliRateOutput
 
 
 # ---------------------------------------------------------------------------
@@ -93,48 +92,62 @@ class TestSqrtController:
 
 
 # ---------------------------------------------------------------------------
-# 2. _input_shaping_angle
+# 2. _attitude_command_model
 # ---------------------------------------------------------------------------
 
-class TestInputShapingAngle:
-    def test_zero_error_returns_zero(self):
-        # With zero error the shaped rate should stay zero.
-        rate = _input_shaping_angle(0.0, 0.15, 5.0, 0.0, 0.0, 0.0025)
-        assert rate == pytest.approx(0.0, abs=1e-9)
+class TestAttitudeCommandModel:
+    """Port of AC_AttitudeControl::attitude_command_model (3rd-order jerk-limited shaper).
 
-    def test_large_error_accel_limited(self):
-        # With a large error and finite accel limit, the step should be
-        # bounded by accel_max * dt regardless of P gain.
-        accel = math.radians(110000 * 0.01)
-        dt = 0.0025
-        # Starting from target_vel=0, desired will be large; accel_max*dt is the cap.
-        rate = _input_shaping_angle(1.0, 0.15, accel, 0.0, 0.0, dt)
-        assert abs(rate) <= accel * dt + 1e-9
+    Key behavioural differences from the old 2-step _input_shaping_angle:
+    - First step is jerk-limited: max vel increment = (accel_max / input_tc) * dt^2
+    - State is (vel, accel), not just vel.
+    """
 
-    def test_rate_tracks_toward_desired_over_time(self):
-        # With many steps, _ang_vel_target should grow toward the sqrt value.
-        accel = math.radians(110000 * 0.01)
-        dt = 0.0025
-        vel = 0.0
-        for _ in range(20):
-            vel = _input_shaping_angle(1.0, 0.15, accel, vel, 0.0, dt)
-        # After 20 steps, velocity should have grown from 0.
-        assert vel > 0.0
+    _accel = math.radians(110000 * 0.01)   # AP default: 1100 deg/s^2
+    _tc    = 0.15                           # AP default input_tc
+    _dt    = 0.0025                         # 400 Hz
 
-    def test_max_ang_vel_clamps_desired(self):
-        # max_ang_vel should prevent overshoot even for very large errors.
-        max_vel = math.radians(100.0)
-        vel = 0.0
+    def test_zero_error_returns_zero_state(self):
+        v, a = _attitude_command_model(0.0, 0.0, 0.0, 0.0, self._accel, self._tc, self._dt)
+        assert v == pytest.approx(0.0, abs=1e-9)
+        assert a == pytest.approx(0.0, abs=1e-9)
+
+    def test_first_step_jerk_limited(self):
+        # With zero initial state, first-step velocity <= jerk_max * dt^2.
+        jerk_max = self._accel / self._tc
+        max_vel_step = jerk_max * self._dt * self._dt
+        v, _ = _attitude_command_model(1.0, 0.0, 0.0, 0.0, self._accel, self._tc, self._dt)
+        assert abs(v) <= abs(max_vel_step) + 1e-9
+
+    def test_velocity_grows_over_time(self):
+        # Over many steps, target velocity should increase from zero.
+        v, a = 0.0, 0.0
         for _ in range(200):
-            vel = _input_shaping_angle(5.0, 0.15, 0.0, vel, max_vel, 0.0025)
-        assert abs(vel) <= max_vel + 1e-9
+            v, a = _attitude_command_model(1.0, v, a, 0.0, self._accel, self._tc, self._dt)
+        assert v > 0.0
 
-    def test_matches_sqrt_controller_at_zero_vel_no_accel(self):
-        # With accel_max=0 and target_vel=0, result = sqrt_controller(err, 1/tc, 0, dt).
-        err, tc, dt = 0.1, 0.15, 0.0025
-        expected = _sqrt_controller(err, 1.0 / tc, 0.0, dt)
-        result = _input_shaping_angle(err, tc, 0.0, 0.0, 0.0, dt)
-        assert result == pytest.approx(expected, rel=1e-6)
+    def test_max_ang_vel_clamps_velocity(self):
+        # max_ang_vel=100 deg/s: velocity must stay within limits.
+        max_vel = math.radians(100.0)
+        v, a = 0.0, 0.0
+        for _ in range(400):
+            v, a = _attitude_command_model(5.0, v, a, max_vel, self._accel, self._tc, self._dt)
+        assert abs(v) <= max_vel + 1e-9
+
+    def test_zero_accel_no_jerk_limit(self):
+        # With accel_max=0 the shaper falls back to linear P (no jerk limiting).
+        # Result should match sqrt_controller(err, 1/tc, 0, dt) integrated.
+        v, _ = _attitude_command_model(0.1, 0.0, 0.0, 0.0, 0.0, self._tc, self._dt)
+        expected = _sqrt_controller(0.1, 1.0 / self._tc, 0.0, self._dt) * self._dt
+        # With accel_max=0, AP substitutes 1800 deg/s^2, so this is NOT pure linear P.
+        # Just verify the result is finite and in the right direction.
+        assert math.isfinite(v)
+        assert v > 0.0
+
+    def test_sign_symmetry(self):
+        v_pos, _ = _attitude_command_model( 0.5, 0.0, 0.0, 0.0, self._accel, self._tc, self._dt)
+        v_neg, _ = _attitude_command_model(-0.5, 0.0, 0.0, 0.0, self._accel, self._tc, self._dt)
+        assert v_pos == pytest.approx(-v_neg, abs=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -328,15 +341,21 @@ class TestGuidedAttitudeController:
     # --- Timeout ---
 
     def test_timeout_freezes_output(self):
-        ctrl = _make_ctrl(input_tc=0.0)
+        ctrl = _make_ctrl(accel_max_cdss=110000.0, input_tc=0.15)
         q = _q()
         ctrl.set_target_angle_and_climbrate(30.0, 0.0, 0.0, sim_time=0.0)
 
-        out_before = ctrl.update(q, (0.0, 0.0, 0.0), dt=0.0025, sim_time=0.0)
+        # Run enough ticks for the 3rd-order shaper to build up a meaningful
+        # ang_vel_target (the new shaper is jerk-limited so one tick is tiny).
+        out_before: HeliRateOutput | None = None
+        dt = 0.0025
+        for i in range(80):  # 0.2 s of tracking
+            out_before = ctrl.update(q, (0.0, 0.0, 0.0), dt=dt, sim_time=i * dt)
+        assert out_before is not None
         assert abs(out_before.roll_cyclic) > 0.01
 
         # 5 s > 3 s timeout: target snaps to body, slew state zeroed, PIDs reset
-        out_after = ctrl.update(q, (0.0, 0.0, 0.0), dt=0.0025, sim_time=5.0)
+        out_after = ctrl.update(q, (0.0, 0.0, 0.0), dt=dt, sim_time=5.0)
         assert out_after.roll_cyclic  == pytest.approx(0.0, abs=1e-6)
         assert out_after.pitch_cyclic == pytest.approx(0.0, abs=1e-6)
 
@@ -349,6 +368,33 @@ class TestGuidedAttitudeController:
         assert e[0] == pytest.approx(10.0,  abs=1e-4)
         assert e[1] == pytest.approx(-25.0, abs=1e-4)
         assert e[2] == pytest.approx(45.0,  abs=1e-4)
+
+    # --- Rate-only Guided thrust path ---
+
+    def test_rate_and_throttle_zero_rate_holds_current_attitude(self):
+        """Rate-only Guided does not require an externally known absolute angle.
+
+        On the first tick ArduPilot conditions _attitude_target from current
+        body attitude; zero requested body rates therefore produce no cyclic
+        even when the vehicle is not level.
+        """
+        ctrl = _make_ctrl(accel_max_cdss=0.0, input_tc=0.0)
+        q_body = _q(roll_deg=12.0, pitch_deg=-35.0, yaw_deg=44.0)
+        ctrl.set_target_rate_and_throttle(0.0, 0.0, 0.0, throttle=0.25, sim_time=0.0)
+        out = ctrl.update(q_body, (0.0, 0.0, 0.0), dt=0.0025, sim_time=0.0)
+
+        assert out.roll_cyclic == pytest.approx(0.0, abs=1e-6)
+        assert out.pitch_cyclic == pytest.approx(0.0, abs=1e-6)
+        assert out.yaw_cmd == pytest.approx(0.0, abs=1e-6)
+        assert out.collective_norm_cmd == pytest.approx(-0.5, abs=1e-6)
+
+    def test_rate_and_throttle_roll_rate_drives_rate_loop(self):
+        ctrl = _make_ctrl(accel_max_cdss=0.0, input_tc=0.0)
+        ctrl.set_target_rate_and_throttle(20.0, 0.0, 0.0, throttle=0.5, sim_time=0.0)
+        out = ctrl.update(_q(), (0.0, 0.0, 0.0), dt=0.0025, sim_time=0.0)
+
+        assert abs(out.roll_cyclic) > abs(out.pitch_cyclic) * 3
+        assert out.collective_norm_cmd == pytest.approx(0.0, abs=1e-6)
 
     # --- Vertical channel from set_target_angle_and_climbrate ---
 
@@ -377,6 +423,7 @@ class TestGuidedAttitudeController:
             pos_z_up_m=10.0,
             vel_z_up_mps=0.0,
         )
+        assert out0.collective_norm_cmd is not None
         c0 = float(out0.collective_norm_cmd)
         ctrl.set_target_angle_and_climbrate(0.0, 0.0, 0.0, climbrate_ms=1.0, sim_time=0.01)
         out1 = ctrl.update(

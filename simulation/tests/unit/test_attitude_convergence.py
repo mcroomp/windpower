@@ -21,7 +21,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from dynbem        import RotorInputs
 from controller  import HeliCyclicController, compute_rate_cmd

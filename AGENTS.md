@@ -88,6 +88,12 @@ Because only the origin translates (no rotation), any vector that comes from a d
 - **Cyclic (helicopter signs, new `aero`):** `tilt_lon > 0` ⇒ nose-down disk (forward stick); `tilt_lat > 0` ⇒ roll right. `AcroControllerSitl` maps body-rate-roll → `tilt_lat` and body-rate-pitch → `−tilt_lon`.
 - **Pitch / roll body rates (FRD standard):** `+roll_rate` = right wing drops, `+pitch_rate` = nose up, `+yaw_rate` = nose right. So "nose-down" command is `−pitch_rate`, matched in `compute_swashplate_from_state` and `AcroControllerSitl`.
 
+#### Downwind-plane criteria
+
+- **The kite should remain on the wind-aligned downwind plane during pumping and steady flight.** Horizontal motion should be aligned with the wind direction and tether geometry, not an explicit sideways/orbital target around the anchor.
+- **Do not command an explicit horizontal radial/azimuthal velocity target as part of normal flight control.** Ground/AP controllers may command tension, tether length, altitude, and body-z orientation, but they must not add a separate off-plane horizontal motion setpoint.
+- **If a lateral correction is required, it must be for plane-keeping or damping only.** Any such correction must be minimal, physically justified, and must not introduce a new orbiting or crosswind motion objective.
+
 #### Rotor spin direction (US helicopter convention — baked into the whole stack)
 
 **Main rotor spins CCW viewed from above.** This is the US convention (Sikorsky / Bell / Robinson); European / Russian (Eurocopter / Kamov / Mil) typically spin CW. The whole stack — `rawes.lua` `MODE_YAW`, `mediator_torque.torque_model`, `H_TAIL_TYPE`, the GB4008 anti-rotation motor wiring — assumes US convention.
@@ -225,9 +231,11 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 | Stack test (single) | `bash simulation/dev.sh test-stack -n 1 -k test_foo` |
 | Stack test (full) | `bash simulation/dev.sh test-stack -n 8` |
 | **Post-failure analysis** | `.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` (add `--bucket 10` for coarser view) |
-| **Visualize result** | `.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv` |
+| **Visualize result** | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
 | Scrub frames | `.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
 | Render to MP4/GIF | `.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
+
+**Viz note:** Launch visualization with `visualize.cmd <telemetry.csv>` rather than running `visualize_3d.py` inline. The batch file uses `start` so PyVista/VTK output stays in a separate console and does not block or flood the agent terminal. Ignore VTK/OpenGL shader errors from `visualize_3d.py` such as `vtkShaderProgram: Could not create shader object` / `vtkOpenGLPolyDataMapper: Could not set shader program`. They are local rendering/OpenGL backend failures, not simulation or telemetry failures; inspect the CSV or use non-OpenGL analysis when they occur.
 | **Pumping envelope** | `.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` (add `--wind 8 10 12`, `--telemetry <csv>`) |
 | **Pump cycle diagnosis** | `.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
 | **Landing diagnosis** | `.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua] [--bucket 2]` |
@@ -266,7 +274,7 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 
 ## Key Design Decisions (one-liners — see references for detail)
 
-- **Production aero:** `PetersHeBEMJit` (3-state dynamic inflow, Numba). No skew-angle validity limit; momentum ODE valid hover→axial descent. Pure-numpy reference: `PetersHeBEM`. See [design/simulation.md](design/simulation.md) Aerodynamic Model + [design/aero.md](design/aero.md).
+- **Production/default flight aero:** `quasi_static` BEM. Use it for simtests, stack-facing physics, IC replay, pumping, landing, and diagnostics unless a test/script is explicitly comparing aero models or investigating dynamic-inflow behavior. Dynamic models (`oye`, `pitt_peters`, `peters_he`) are opt-in only.
 - **Two-loop attitude:** `compute_rate_cmd(kp)` → rate setpoint; `RatePID(kp=2/3)` → swashplate tilt. **Portable core** in `controller.py` maps 1:1 to Lua: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`, `compute_bz_altitude_hold`.
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10`, `col_min_reel_in=0.079`. BEM invalid above xi≈85°. `body_z_slew_rate = 0.40 rad/s`.
 - **rawes.lua modes (valid: 0, 1, 2, 3, 4, 5):** 0=none, 1=steady, 2=manual (bench yaw PID + NVF cyclic/collective — `RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`; `H_FLYBAR_MODE=1`), 3=passive (armed-but-quiet, holds trim cyclic + IC collective during kinematic), 4=landing, 5=pumping. Modes 1/2/3/4/5 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).

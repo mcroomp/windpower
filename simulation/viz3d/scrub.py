@@ -65,7 +65,9 @@ def main() -> None:
     print("Controls: drag slider | Left/Right step | Space play/pause | +/- speed")
 
     viz = RAWESVisualizer(frames, trail_len=args.trail, playback_fps=args.fps)
-    viz.scrub()
+    # play() uses interactive_update=True loop (reliable Space key, FPS counter,
+    # status text) rather than the timer-based scrub() path.
+    viz.play()
 
 
 if __name__ == "__main__":

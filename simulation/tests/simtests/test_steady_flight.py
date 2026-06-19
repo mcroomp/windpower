@@ -33,8 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import mediator as _mediator_module
-from simtest_runner import PhysicsRunner, PythonAP
-from ap_controller import TensionApController
+from simtest_runner import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner import TensionCommand
 from simtest_ic import load_ic
 from tests.simtests._rotor_helpers import (
@@ -58,7 +58,7 @@ DT     = 2.5e-3                            # s  (400 Hz)
 
 _DT_CMD        = 0.1   # 10 Hz ground commands
 _PLANNER_EVERY = max(1, round(_DT_CMD / DT))                   # 40
-_AP_EVERY      = max(1, round(1.0 / (PythonAP.AP_HZ * DT)))   # 8
+_AP_EVERY      = max(1, round(1.0 / (MockArdupilot.AP_HZ * DT)))   # 8
 
 
 def _run_simulation(log, steps: int = 4000):
@@ -83,13 +83,15 @@ def _run_simulation(log, steps: int = 4000):
         FLTT=40.0, FLTE=0.0, FLTD=40.0,
     )
     runner._acro._servo.reset(ic.coll_eq_rad)
-    _ap    = TensionApController(
-        ic_pos=ic.pos, mass_kg=MASS,
+    ap = MockArdupilot.for_pumping(
+        ic_pos=ic.pos,
+        mass_kg=MASS,
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=ic.coll_eq_rad, tension_ic=tension_out,
-        kd_lat=50.0,
+        warm_coll_rad=ic.coll_eq_rad,
+        tension_ic=tension_out,
+        wind=WIND,
+        dt=DT,
     )
-    ap     = PythonAP(_ap, wind=WIND, dt=DT)
     from arduloop import HeliParams, RateAxisParams
     _rp = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTE=0.0, FLTD=40.0)
     _hp = HeliParams()
@@ -98,11 +100,10 @@ def _run_simulation(log, steps: int = 4000):
     ap.enable_guided(_hp)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),
-        "body_z_eq":  r.hub_state["R"][:, 2],
         "net_moment": np.zeros(3),
     }
-    _ap.receive_command(TensionCommand(
-        tension_setpoint_n=tension_out, tension_measured_n=runner.tension_now,
+    ap.receive_command(TensionCommand(
+        tension_target_n=tension_out,
         alt_m=target_alt, phase="reel-out",
     ), _DT_CMD)
 
@@ -133,8 +134,8 @@ def _run_simulation(log, steps: int = 4000):
         angle_arr[step] = math.degrees(math.acos(float(np.clip(np.dot(body_z, tdir), -1.0, 1.0))))
 
         if step % _PLANNER_EVERY == 0:
-            _ap.receive_command(TensionCommand(
-                tension_setpoint_n=tension_out, tension_measured_n=runner.tension_now,
+            ap.receive_command(TensionCommand(
+                tension_target_n=tension_out,
                 alt_m=target_alt, phase="reel-out",
             ), _DT_CMD)
         if step % _AP_EVERY == 0:

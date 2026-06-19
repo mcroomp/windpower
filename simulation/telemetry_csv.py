@@ -59,8 +59,7 @@ COLUMNS: list[str] = [
     "tether_mx", "tether_my", "tether_mz",  # tether moment NED [N·m]
     "collective_rad", "collective_norm",
     "tilt_lon", "tilt_lat",
-    # Ground-commanded altitude [m] (TensionCommand.alt_m, set by PumpingGroundController)
-    "tension_setpoint", "collective_from_tension_ctrl", "gnd_alt_cmd_m",
+    "tension_feedforward_n", "tension_ic_n", "collective_from_alt_ctrl", "gnd_alt_cmd_m",
     "winch_speed_ms",
     "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
     "aero_Q_spin",                      # rotor shaft torque [N·m] from aero
@@ -85,13 +84,30 @@ COLUMNS: list[str] = [
     "q_bearing_nm", "q_motor_nm", "throttle",
     "wind_x", "wind_y", "wind_z",
     "bz_eq_x", "bz_eq_y", "bz_eq_z",
-    # TensionApController diagnostics (0.0 when not using that architecture)
+    # AP altitude/body-z controller diagnostics (0.0 when not using that architecture)
     "elevation_rad",      # rate-limited elevation angle tracked by AP [rad]
     "el_correction_rad",  # daisy-chain elevation correction [rad]
     "coll_saturated",     # collective pinned at floor or ceiling (0/1)
     "comms_ok",           # ground comms healthy (0=dropout, 1=ok)
     "vib_corr",           # vibration damper collective correction [rad]
-    "ten_pi_integral",    # TensionPI integrator state [rad/N·s]
+    "alt_pid_integral",   # altitude PID collective integrator [rad]
+    # AP rate commands and radial velocity diagnostics
+    "roll_sp_rads",          # AP roll rate setpoint [rad/s]
+    "pitch_sp_rads",         # AP pitch rate setpoint [rad/s]
+    "roll_rate_err_rads",    # roll_sp_rads - omega_x [rad/s]
+    "pitch_rate_err_rads",   # pitch_sp_rads - omega_y [rad/s]
+    "vel_radial_mps",        # actual hub radial velocity (outward +) [m/s]
+    "orbit_radius_m",        # horizontal radius from anchor [m]
+    "orbit_azimuth_rad",     # atan2(E, N) horizontal azimuth [rad]
+    "orbit_az_rate_rads",    # horizontal azimuth rate [rad/s]
+    "vel_tangential_mps",    # signed horizontal tangential speed [m/s]
+    "pos_downwind_m",        # horizontal position along wind direction [m]
+    "pos_crosswind_m",       # horizontal position perpendicular to wind [m]
+    "vel_downwind_mps",      # horizontal velocity along wind direction [m/s]
+    "vel_crosswind_mps",     # horizontal velocity perpendicular to wind [m/s]
+    "body_z_err_deg",        # angle between current and target body_z [deg]
+    "body_z_target_az_rad",  # target tether-plane azimuth implied by body_z_eq [rad]
+    "body_z_az_gap_deg",     # target azimuth - current orbit azimuth [deg]
     # body-to-NED rotation matrix (row-major: r00=R[0,0], r01=R[0,1], ...)
     "r00", "r01", "r02",
     "r10", "r11", "r12",
@@ -152,8 +168,9 @@ class TelRow:
     collective_norm: float = 0.0
     tilt_lon:        float = 0.0
     tilt_lat:        float = 0.0
-    tension_setpoint:             float = 0.0
-    collective_from_tension_ctrl: float = 0.0
+    tension_feedforward_n:        float = 0.0
+    tension_ic_n:                 float = 0.0
+    collective_from_alt_ctrl:     float = 0.0
     gnd_alt_cmd_m:                float = 0.0   # ground-commanded altitude [m] (TensionCommand.alt_m)
     winch_speed_ms:               float = 0.0   # winch reel speed [m/s] +ve=out -ve=in
 
@@ -210,13 +227,31 @@ class TelRow:
     bz_eq_y: float = 0.0
     bz_eq_z: float = 0.0
 
-    # TensionApController diagnostics
+    # AP altitude/body-z controller diagnostics
     elevation_rad:     float = 0.0
     el_correction_rad: float = 0.0
     coll_saturated:    int   = 0
     comms_ok:          int   = 1
     vib_corr:          float = 0.0
-    ten_pi_integral:   float = 0.0
+    alt_pid_integral:  float = 0.0
+
+    # AP rate commands and radial velocity diagnostics
+    roll_sp_rads:       float = 0.0   # AP roll rate setpoint [rad/s]
+    pitch_sp_rads:      float = 0.0   # AP pitch rate setpoint [rad/s]
+    roll_rate_err_rads: float = 0.0   # roll_sp_rads - omega_x [rad/s]
+    pitch_rate_err_rads: float = 0.0  # pitch_sp_rads - omega_y [rad/s]
+    vel_radial_mps:     float = 0.0   # actual hub radial velocity (outward +) [m/s]
+    orbit_radius_m:     float = 0.0   # horizontal radius from anchor [m]
+    orbit_azimuth_rad:  float = 0.0   # atan2(E, N) horizontal azimuth [rad]
+    orbit_az_rate_rads: float = 0.0   # horizontal azimuth rate [rad/s]
+    vel_tangential_mps: float = 0.0   # signed horizontal tangential speed [m/s]
+    pos_downwind_m:     float = 0.0   # horizontal position along wind direction [m]
+    pos_crosswind_m:    float = 0.0   # horizontal position perpendicular to wind [m]
+    vel_downwind_mps:   float = 0.0   # horizontal velocity along wind direction [m/s]
+    vel_crosswind_mps:  float = 0.0   # horizontal velocity perpendicular to wind [m/s]
+    body_z_err_deg:        float = 0.0   # current body_z vs body_z_eq [deg]
+    body_z_target_az_rad:  float = 0.0   # target tether-plane azimuth from body_z_eq [rad]
+    body_z_az_gap_deg:     float = 0.0   # target azimuth - current orbit azimuth [deg]
 
     # Body-to-NED rotation matrix (row-major)
     r00: float = 1.0
@@ -365,8 +400,9 @@ class TelRow:
             collective_rad      = float(d.get("collective_rad",   0.0)),
             tilt_lon            = float(d.get("tilt_lon",         0.0)),
             tilt_lat            = float(d.get("tilt_lat",         0.0)),
-            tension_setpoint             = float(d.get("tension_setpoint",             0.0)),
-            collective_from_tension_ctrl = float(d.get("collective_from_tension_ctrl", 0.0)),
+            tension_feedforward_n        = float(d.get("tension_feedforward_n",        0.0)),
+            tension_ic_n                 = float(d.get("tension_ic_n",                 0.0)),
+            collective_from_alt_ctrl     = float(d.get("collective_from_alt_ctrl",     0.0)),
             gnd_alt_cmd_m                = float(d.get("gnd_alt_cmd_m",                0.0)),
             winch_speed_ms               = float(d.get("winch_speed_ms",               0.0)),
             aero_T              = float(d.get("aero_T",           0.0)),
@@ -394,7 +430,22 @@ class TelRow:
             coll_saturated      = int(bool(d.get("coll_saturated", False))),
             comms_ok            = int(bool(d.get("comms_ok",        True))),
             vib_corr            = float(d.get("vib_corr",           0.0)),
-            ten_pi_integral     = float(d.get("ten_pi_integral",    0.0)),
+            alt_pid_integral    = float(d.get("alt_pid_integral",   0.0)),
+            roll_sp_rads        = float(d.get("roll_sp_rads",       0.0)),
+            pitch_sp_rads       = float(d.get("pitch_sp_rads",      0.0)),
+            roll_rate_err_rads  = float(d.get("roll_rate_err_rads", 0.0)),
+            pitch_rate_err_rads = float(d.get("pitch_rate_err_rads", 0.0)),
+            orbit_radius_m      = float(d.get("orbit_radius_m",      0.0)),
+            orbit_azimuth_rad   = float(d.get("orbit_azimuth_rad",   0.0)),
+            orbit_az_rate_rads  = float(d.get("orbit_az_rate_rads",  0.0)),
+            vel_tangential_mps  = float(d.get("vel_tangential_mps",  0.0)),
+            pos_downwind_m      = float(d.get("pos_downwind_m",      0.0)),
+            pos_crosswind_m     = float(d.get("pos_crosswind_m",     0.0)),
+            vel_downwind_mps    = float(d.get("vel_downwind_mps",    0.0)),
+            vel_crosswind_mps   = float(d.get("vel_crosswind_mps",   0.0)),
+            body_z_err_deg      = float(d.get("body_z_err_deg",      0.0)),
+            body_z_target_az_rad= float(d.get("body_z_target_az_rad", 0.0)),
+            body_z_az_gap_deg   = float(d.get("body_z_az_gap_deg",   0.0)),
             r00=float(R_mat[0, 0]), r01=float(R_mat[0, 1]), r02=float(R_mat[0, 2]),
             r10=float(R_mat[1, 0]), r11=float(R_mat[1, 1]), r12=float(R_mat[1, 2]),
             r20=float(R_mat[2, 0]), r21=float(R_mat[2, 1]), r22=float(R_mat[2, 2]),
@@ -410,8 +461,9 @@ class TelRow:
         *,
         body_z_eq=None,
         phase: str = "",
-        tension_setpoint: float = 0.0,
-        collective_from_tension_ctrl: float = 0.0,
+        tension_feedforward_n: float = 0.0,
+        tension_ic_n: float = 0.0,
+        collective_from_alt_ctrl: float = 0.0,
         gnd_alt_cmd_m: float = 0.0,
         winch_speed_ms: float = 0.0,
         elevation_rad: float = 0.0,
@@ -419,7 +471,10 @@ class TelRow:
         coll_saturated: bool = False,
         comms_ok: bool = True,
         vib_corr: float = 0.0,
-        ten_pi_integral: float = 0.0,
+        alt_pid_integral: float = 0.0,
+        roll_sp_rads: float = 0.0,
+        pitch_sp_rads: float = 0.0,
+        vel_radial_mps: float = 0.0,
         net_moment=None,
     ) -> "TelRow":
         """Build a TelRow from a PhysicsRunner and its step result (simtest use).
@@ -503,12 +558,59 @@ class TelRow:
                 aero_v_axial   = float(getattr(aero_obj, "last_v_axial",   0.0))
                 aero_v_inplane = float(getattr(aero_obj, "last_v_inplane", 0.0))
                 aero_v_i       = float(getattr(aero_obj, "last_v_i",       0.0))
+            # dynbem (PittPeters/Oye) doesn't expose last_T — fall back to
+            # the total aero force magnitude as a proxy for thrust.
+            if aero_T == 0.0:
+                aero_T = float(np.sqrt(aero_fx**2 + aero_fy**2 + aero_fz**2))
 
         tm = np.asarray(tether_moment, dtype=float) if tether_moment is not None else np.zeros(3)
 
         trl = float(tether.rest_length)
         tl  = float(np.linalg.norm(pos))
         wind = [float(v) for v in wind_ned]
+
+        pos_h = pos[:2]
+        vel_h = vel[:2]
+        orbit_radius = float(np.linalg.norm(pos_h))
+        if orbit_radius > 1e-9:
+            er_h = pos_h / orbit_radius
+            vel_radial_auto = float(np.dot(vel_h, er_h))
+            orbit_azimuth = float(math.atan2(pos[1], pos[0]))
+            orbit_az_rate = float((pos[0] * vel[1] - pos[1] * vel[0]) / (orbit_radius * orbit_radius))
+            vel_tangential = float(orbit_radius * orbit_az_rate)
+        else:
+            vel_radial_auto = 0.0
+            orbit_azimuth = 0.0
+            orbit_az_rate = 0.0
+            vel_tangential = 0.0
+
+        wind_h = np.asarray(wind[:2], dtype=float)
+        wind_h_norm = float(np.linalg.norm(wind_h))
+        if wind_h_norm > 1e-9:
+            e_downwind = wind_h / wind_h_norm
+            e_crosswind = np.array([-e_downwind[1], e_downwind[0]])
+            pos_downwind = float(np.dot(pos_h, e_downwind))
+            pos_crosswind = float(np.dot(pos_h, e_crosswind))
+            vel_downwind = float(np.dot(vel_h, e_downwind))
+            vel_crosswind = float(np.dot(vel_h, e_crosswind))
+        else:
+            pos_downwind = pos_crosswind = vel_downwind = vel_crosswind = 0.0
+
+        bz_now = R[:, 2]
+        bzeq_arr = np.asarray(bzeq, dtype=float)
+        bzeq_norm = float(np.linalg.norm(bzeq_arr))
+        if bzeq_norm > 1e-9:
+            bzeq_unit = bzeq_arr / bzeq_norm
+            body_z_err_deg = float(math.degrees(math.acos(float(np.clip(np.dot(bz_now, bzeq_unit), -1.0, 1.0)))))
+            body_z_target_az = float(math.atan2(-bzeq_unit[1], -bzeq_unit[0]))
+            body_z_az_gap = float(math.degrees(math.atan2(
+                math.sin(body_z_target_az - orbit_azimuth),
+                math.cos(body_z_target_az - orbit_azimuth),
+            )))
+        else:
+            body_z_err_deg = 0.0
+            body_z_target_az = 0.0
+            body_z_az_gap = 0.0
 
         return cls(
             t_sim               = float(t_sim),
@@ -546,8 +648,9 @@ class TelRow:
             collective_rad      = float(collective_rad),
             tilt_lon            = float(tilt_lon),
             tilt_lat            = float(tilt_lat),
-            tension_setpoint             = float(tension_setpoint),
-            collective_from_tension_ctrl = float(collective_from_tension_ctrl),
+            tension_feedforward_n        = float(tension_feedforward_n),
+            tension_ic_n                 = float(tension_ic_n),
+            collective_from_alt_ctrl     = float(collective_from_alt_ctrl),
             gnd_alt_cmd_m                = float(gnd_alt_cmd_m),
             winch_speed_ms               = float(winch_speed_ms),
             aero_T              = aero_T,
@@ -577,7 +680,23 @@ class TelRow:
             coll_saturated      = int(bool(coll_saturated)),
             comms_ok            = int(bool(comms_ok)),
             vib_corr            = float(vib_corr),
-            ten_pi_integral     = float(ten_pi_integral),
+            alt_pid_integral    = float(alt_pid_integral),
+            roll_sp_rads        = float(roll_sp_rads),
+            pitch_sp_rads       = float(pitch_sp_rads),
+            roll_rate_err_rads  = float(roll_sp_rads - om[0]),
+            pitch_rate_err_rads = float(pitch_sp_rads - om[1]),
+            vel_radial_mps      = float(vel_radial_mps if vel_radial_mps != 0.0 else vel_radial_auto),
+            orbit_radius_m      = orbit_radius,
+            orbit_azimuth_rad   = orbit_azimuth,
+            orbit_az_rate_rads  = orbit_az_rate,
+            vel_tangential_mps  = vel_tangential,
+            pos_downwind_m      = pos_downwind,
+            pos_crosswind_m     = pos_crosswind,
+            vel_downwind_mps    = vel_downwind,
+            vel_crosswind_mps   = vel_crosswind,
+            body_z_err_deg      = body_z_err_deg,
+            body_z_target_az_rad= body_z_target_az,
+            body_z_az_gap_deg   = body_z_az_gap,
             r00=float(R[0, 0]), r01=float(R[0, 1]), r02=float(R[0, 2]),
             r10=float(R[1, 0]), r11=float(R[1, 1]), r12=float(R[1, 2]),
             r20=float(R[2, 0]), r21=float(R[2, 1]), r22=float(R[2, 2]),

@@ -30,6 +30,18 @@ class RateAxisParams:
     FLTE: float = 0.0
     FLTD: float = 20.0
 
+    # Slew-rate limiter (SMAX).  0 = disabled.  `ATC_RAT_xxx_SMAX`
+    # When non-zero, limits the rate of change of P+D output to SMAX/s,
+    # reducing oscillation.  SlewLimiter port from Filter/SlewLimiter.cpp.
+    SMAX: float = 0.0
+    # Slew-rate filter time constant (s).  Matches AP default initial_srtau=1.0.
+    SRTAU: float = 1.0
+
+    # Integrator leak minimum (helicopter only).  `ATC_RAT_xxx_ILMI`
+    # The integrator leaks toward +-ILMI when there is no error.
+    # 0 = no leak (standard behaviour).
+    ILMI: float = 0.0
+
     # Target / error notch — `ATC_RAT_xxx_NTF / NEF`
     # In ArduPilot these are indices into the `FILT*` parameter bank.
     # Here we inline the notch configuration to keep the sim self-contained.
@@ -84,3 +96,6 @@ class HeliParams:
     ATC_RATE_R_MAX: float = 0.0
     ATC_RATE_P_MAX: float = 0.0
     ATC_RATE_Y_MAX: float = 0.0
+
+    # Input shaping time constant (s).  `ATC_INPUT_TC`  AP default: 0.15
+    ATC_INPUT_TC: float = 0.15

@@ -117,7 +117,7 @@ class PhysicsCore:
         startup_damp_k_ang: float = 0.0,
         lock_orientation:   bool  = False,
         z_floor:            float = -1.0,
-        aero_model:         str   = "oye",
+        aero_model:         str   = "quasi_static",
         aero_override             = None,
         tether_override           = None,
     ):
@@ -267,6 +267,40 @@ class PhysicsCore:
         (HeliCyclicController produces tilt_lon/tilt_lat).
         """
         return self._integrate(dt, collective_rad, tilt_lon, tilt_lat, rest_length)
+
+    def warm_inflow(self, collective_rad: float, n_steps: int = 500,
+                    dt: float = 1e-3) -> None:
+        """
+        Integrate the aero inflow state in-place with the hub FROZEN at its
+        current position/orientation/RPM.
+
+        Call once after construction (before the first real physics step) to
+        converge dynamic-inflow models from the zero initial condition to the
+        trim equilibrium.  Quasi-static aero has no meaningful inflow transient,
+        so this is effectively a no-op for the default flight model.
+
+        Parameters
+        ----------
+        collective_rad : equilibrium collective [rad] — use ic.coll_eq_rad
+        n_steps        : number of ODE steps (default 500 @ 1 ms = 0.5 s)
+        dt             : inflow ODE time step [s] (default 1e-3)
+        """
+        hub = self._dyn.state
+        inputs = RotorInputs(
+            collective_rad = collective_rad,
+            tilt_lon       = 0.0,
+            tilt_lat       = 0.0,
+            R_hub          = hub["R"],
+            v_hub_world    = hub["vel"],
+            wind_world     = self._wind,
+            omega_rad_s    = self._omega_rad_s,
+            t              = self._t_sim,
+            rho_kg_m3      = 1.225,
+        )
+        for _ in range(n_steps):
+            _, deriv = self._aero.compute_forces(inputs, self._rotor_state)
+            new_arr = self._rotor_state.to_array() + dt * deriv.to_array()
+            self._rotor_state = self._rotor_state.from_array(new_arr)
 
     # ── Internal integration ──────────────────────────────────────────────────
 

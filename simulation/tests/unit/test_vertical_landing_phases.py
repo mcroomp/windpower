@@ -31,7 +31,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.unit._aero_probe import load_rotor, make_probe, probe_steady
 

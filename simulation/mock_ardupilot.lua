@@ -24,6 +24,8 @@ Outputs (read after tick):
   _mock.gcs_msgs       array of {level=int, msg=string}
     _mock.guided_target  {roll_deg,pitch_deg,yaw_deg,climbrate,use_yaw_rate,yaw_rate_degs}
                                              set by set_target_angle_and_climbrate (nil until first call)
+    _mock.guided_rate_target {roll_rate,pitch_rate,yaw_rate}
+                                             set by set_target_rate_and_throttle
 --]]
 
 _mock = {
@@ -49,7 +51,9 @@ _mock = {
     srv_out     = {},    -- [func] = pwm
     srv_chan_out = {},   -- [chan_1indexed] = pwm (set_output_pwm_chan_timeout; SERVO4_CHAN=3 -> key 4)
     gcs_msgs    = {},    -- array of {level, msg}
-    guided_target = nil, -- set_target_angle_and_climbrate payload (attitude + vertical)
+    guided_target      = nil, -- set_target_angle_and_* payload (attitude)
+    guided_rate_target = nil, -- set_target_rate_and_throttle payload (body rates)
+    guided_throttle    = nil, -- throttle [0,1] from set_target_*_and_throttle
 }
 
 -- ── Vector3f ────────────────────────────────────────────────────────────────
@@ -248,6 +252,7 @@ function arming:arm()
     _mock.armed = true
 end
 
+
 -- ── vehicle ──────────────────────────────────────────────────────────────────
 
 vehicle = {}
@@ -263,6 +268,31 @@ function vehicle:set_target_angle_and_climbrate(roll_deg, pitch_deg, yaw_deg, cl
         use_yaw_rate  = use_yaw_rate,
         yaw_rate_degs = yaw_rate_degs,
     }
+    _mock.guided_rate_target = nil
+    _mock.guided_throttle = nil
+    return true
+end
+
+function vehicle:set_target_angle_and_rate_and_throttle(roll_deg, pitch_deg, yaw_deg, roll_rate, pitch_rate, yaw_rate, throttle)
+    _mock.guided_target = {
+        roll_deg  = roll_deg,
+        pitch_deg = pitch_deg,
+        yaw_deg   = yaw_deg,
+        climbrate = nil,
+    }
+    _mock.guided_rate_target = nil
+    _mock.guided_throttle = throttle
+    return true
+end
+
+function vehicle:set_target_rate_and_throttle(roll_rate, pitch_rate, yaw_rate, throttle)
+    _mock.guided_target = nil
+    _mock.guided_rate_target = {
+        roll_rate  = roll_rate,
+        pitch_rate = pitch_rate,
+        yaw_rate   = yaw_rate,
+    }
+    _mock.guided_throttle = throttle
     return true
 end
 

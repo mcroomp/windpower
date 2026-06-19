@@ -428,7 +428,7 @@ def pump_cycle_report(csv_path: str) -> None:
             tensions = np.array([r.tether_tension  for r in grp])
             colls    = np.array([r.collective_rad   for r in grp])
             alts     = np.array([-r.pos_z           for r in grp])
-            tsps     = np.array([r.tension_setpoint for r in grp])
+            tsps     = np.array([r.tension_feedforward_n for r in grp])
             tgts     = np.array([r.gnd_alt_cmd_m     for r in grp])
 
             # Energy via rest_length trapezoidal integration

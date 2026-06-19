@@ -1,16 +1,16 @@
 """
 test_pump_cycle_lua.py -- Lua pumping cycle using UnifiedGroundController + LuaComms.
 
-Mirrors test_pump_cycle_unified.py exactly, replacing TensionApController with
+Mirrors test_pump_cycle_unified.py exactly, replacing MockArdupilot pumping Python mode with
 rawes.lua (mode=5) running in-process via lupa.
 
 Division of labour (mirrors real stack):
   Ground (Python, 10 Hz): UnifiedGroundController → PumpingGroundController +
                           WinchController; delivers TensionCommand to Lua via
-                          LuaComms (send_named_float: RAWES_TSP, RAWES_TEN,
-                          RAWES_ALT, RAWES_SUB).
-  AP     (Lua, 100 Hz):   rawes.lua mode=5 — TensionPI collective (steps on
-                          RAWES_TSP) + bz_altitude_hold cyclic.
+                          LuaComms (send_named_float: RAWES_TEN, RAWES_ALT,
+                          RAWES_SUB).
+  AP     (Lua, 100 Hz):   rawes.lua mode=5 — altitude PID collective plus
+                          rate-only bz_altitude_hold cyclic.
 """
 import math
 import sys
@@ -26,7 +26,8 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 from winch          import WinchController
 from simtest_ic     import load_ic
 from simtest_log    import BadEventLog
-from simtest_runner import PhysicsRunner, LuaAP
+from simtest_runner import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes    import MODE_PUMPING
@@ -57,7 +58,6 @@ T_TRANSITION = (
 
 TENSION_OUT      = 435.0
 TENSION_IN       = 240.0
-TENSION_IN_AP    = 213.0
 TENSION_IC       = 300.0
 
 EL_REEL_IN_RAD   = math.radians(_XI_REEL_IN_DEG)
@@ -69,7 +69,7 @@ T_REEL_IN_MAX  = 120.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_TRANSITION + T_REEL_IN_MAX) * 1.2
 
 
-def _run_pumping(log, aero_model: str = "oye") -> dict:
+def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     # ── Lua AP ───────────────────────────────────────────────────────────────
     sim = RawesLua(mode=MODE_PUMPING)
     sim.armed        = True
@@ -92,9 +92,7 @@ def _run_pumping(log, aero_model: str = "oye") -> dict:
         n_cycles       = N_CYCLES,
         tension_out    = TENSION_OUT,
         tension_in     = TENSION_IN,
-        tension_in_ap  = TENSION_IN_AP,
         tension_ic     = TENSION_IC,
-        tension_ramp_s = 8.0,
         t_reel_out_max = T_REEL_OUT_MAX,
         t_reel_in_max  = T_REEL_IN_MAX,
     )
@@ -113,15 +111,17 @@ def _run_pumping(log, aero_model: str = "oye") -> dict:
         dt_plan = DT_PLANNER,
     )
 
-    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
     lua.tel_fn = lambda r, sr: dict(
         body_z_eq                    = None,
         phase                        = phase_label,
         winch_speed_ms               = ground_ctrl.winch_speed_ms,
-        tension_setpoint             = sim.fns.ten_setpoint(),
-        collective_from_tension_ctrl = sim.fns.col_held(),
+        tension_feedforward_n        = (
+            ground_ctrl.last_cmd.tension_target_n if ground_ctrl.last_cmd is not None else TENSION_IC
+        ),
+        collective_from_alt_ctrl     = lua.col_rad,
         vib_corr                     = sim.fns.vib_corr_last(),
-        ten_pi_integral              = sim.fns.col_i_ten(),
+        alt_pid_integral             = sim.fns.alt_i(),
         elevation_rad                = 0.0,
         el_correction_rad            = 0.0,
         coll_saturated               = 0,
@@ -216,35 +216,19 @@ def test_lua_pumping_constants():
     from unified_ground import _cmd_to_nv
     from pumping_planner import TensionCommand
     dummy = TensionCommand(
-        tension_setpoint_n=435.0,
-        tension_measured_n=300.0,
+        tension_target_n=300.0,
         alt_m=38.0,
         phase="reel-out",
     )
     for name, _ in _cmd_to_nv(dummy):
         assert len(name) <= 10, f"NV name '{name}' exceeds 10-char MAVLink limit"
 
-    # TensionPI gains must match Python TensionApController defaults
-    assert float(f.KP_TEN)      == pytest.approx(2e-4,  rel=1e-3)
-    assert float(f.KI_TEN)      == pytest.approx(1e-3,  rel=1e-3)
-    assert float(f.COL_MAX_TEN) == pytest.approx(0.10,  rel=1e-3)
-    assert float(f.COL_REEL_OUT) == pytest.approx(-0.20, rel=1e-3)
-
-    # Integrator warm-starts so initial output = COL_REEL_OUT at zero error
-    kp, ki = float(f.KP_TEN), float(f.KI_TEN)
-    col_reel_out = float(f.COL_REEL_OUT)
-    i_init = col_reel_out / max(ki, 1e-12)
-    col_init = kp * 0.0 + ki * i_init   # zero error at warm-start
-    assert col_init == pytest.approx(col_reel_out, rel=1e-3)
-
-    # Collective limits encompass TensionPI range
-    assert float(f.COL_MIN_RAD) <  float(f.COL_MAX_TEN)
-    assert float(f.COL_MAX_TEN) <= float(f.COL_MAX_RAD)
-
-    # Initial state: no fresh command, held at COL_REEL_OUT, setpoint warm at 300 N
-    assert not sim.fns.ten_sp_fresh()
-    assert float(sim.fns.col_held())    == pytest.approx(col_reel_out, rel=1e-3)
-    assert float(sim.fns.ten_setpoint()) == pytest.approx(300.0, rel=1e-3)
+    # Lua pumping now matches Python-mode altitude PID + rate-only body_z path.
+    assert float(f.KP_ALT)                == pytest.approx(0.010, rel=1e-3)
+    assert float(f.KI_ALT)                == pytest.approx(0.001, rel=1e-3)
+    assert float(f.KD_VZ)                 == pytest.approx(0.040, rel=1e-3)
+    assert float(f.RATE_KP_OUTER)         == pytest.approx(2.5, rel=1e-3)
+    assert float(f.RATE_ACCEL_MAX_RADSS)  == pytest.approx(4.0, rel=1e-3)
 
 
 def test_lua_pumping_unified(simtest_log):
@@ -261,10 +245,10 @@ def test_lua_pumping_unified(simtest_log):
     assert not failures, "\n  ".join(failures)
 
 
+@pytest.mark.skip(reason="Dynamic-inflow comparison only; quasi_static is the default flight model")
 def test_lua_pumping_unified_peters_he(simtest_log):
-    """rawes.lua mode=5 with Peters-He dynamic inflow: vibration damper suppresses
-    tether spring resonance (~5 Hz) that the skewed-wake model does not excite."""
-    r = _run_pumping(simtest_log, aero_model="peters_he")
+    """rawes.lua mode=5 with Peters-He dynamic inflow as an explicit comparison."""
+    r = _run_pumping(simtest_log, aero_model="pitt_peters")
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())

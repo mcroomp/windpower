@@ -4,28 +4,30 @@ Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,5):
   0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
-  1  steady      -- GUIDED attitude hold (set_target_angle_and_climbrate) + VZ collective PI  50 Hz
+    1  steady      -- GUIDED rate hold (set_target_rate_and_throttle) + altitude collective PID  50 Hz
   2  manual      -- yaw compensation (SERVO4 PID) + manually commanded cyclic/collective  100 Hz
                     NVFs: RAWES_TLN (tlon rad), RAWES_TLT (tlat rad), RAWES_COL (col rad)
   4  landing     -- (reserved, not yet implemented)
   5  pumping     -- De Schutter pumping cycle                                       50 Hz
 
-Cyclic control (steady + pumping): GUIDED mode attitude target.
+Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
     points the disk at (el_rad, current_azimuth) with a gravity-compensation tilt
     so thrust counteracts the elevation-lowering component of gravity.
-  Convert bz_goal + ahrs:get_yaw() to ZYX Euler via bz_ned_to_roll_pitch().
-  Call vehicle:set_target_angle_and_climbrate(roll, pitch, yaw) at 50 Hz.
+    Convert body_z error to body-frame roll/pitch rates with sqrt-shaped P.
+    Compute col_thrust in [0,1] from local altitude PID.
+    Call vehicle:set_target_rate_and_throttle(roll_rate, pitch_rate, 0, col_thrust) at 50 Hz.
+  RC ch3 is NO LONGER overridden by run_flight; collective flows through the AP
+  attitude controller's set_throttle_out path.
   Before GPS fuses: command current body attitude (zero corrective torque).
 
 Ground planner signals via NAMED_VALUE_FLOAT:
   RAWES_SUB (mode=5): pumping substate 0=hold 1=reel_out 2=transition 3=reel_in 4=transition_back
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
-  RAWES_TEN: tether tension estimate [N]; used for gravity compensation
+    RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
   RAWES_ARM: arm vehicle with timed disarm countdown (value = ms until disarm)
 
 Parameters:
-  SCR_USER1   RAWES_KP_CYC    Cyclic P gain           [rad/s / rad]  default 1.0
   SCR_USER2   RAWES_BZ_SLEW   elevation slew rate     [rad/s]        default 0.40
   SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]        default 0.0
   SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]        default 0.0
@@ -84,24 +86,13 @@ local COL_MAX_RAD           =  0.10
 local COL_SLEW_MAX          =  0.022   -- rad per 50 Hz step
 local COL_CRUISE_FLIGHT_RAD = -0.18    -- VZ integrator initial value (xi~8 deg, altitude hold)
 
--- ── Pumping collective constants ──────────────────────────────────────────────
+-- ── Altitude collective + body-rate controller constants ─────────────────────
 
-local COL_REEL_OUT      = -0.20   -- TensionPI warm-start collective [rad]
-local T_PUMP_TRANSITION =  3.7    -- ramp window used for logging/diagnostics [s]
-
--- TensionPI for pumping collective.
--- Setpoint and measured tension come from ground via RAWES_TSP / RAWES_TEN
--- at ~10 Hz (UnifiedGroundController).  Mirrors Python TensionApController defaults.
-local KP_TEN      = 2e-4    -- rad/N        (10 Hz-tuned proportional gain)
-local KI_TEN      = 1e-3    -- rad/(N·s)    (10 Hz-tuned integral gain)
-local KD_TEN      = 0.0     -- rad·s/N      (derivative gain; try ~2e-5 to damp tension oscillations)
-local COL_MAX_TEN = 0.10    -- TensionPI collective ceiling [rad]
-local DT_CMD      = 0.1     -- command period [s] used for integrator/derivative step
-
--- ── VZ collective controller (steady mode) ───────────────────────────────────
-
-local KP_VZ = 0.05
-local KI_VZ = 0.005
+local KP_ALT = 0.010
+local KI_ALT = 0.001
+local KD_VZ  = 0.040
+local RATE_KP_OUTER        = 2.5
+local RATE_ACCEL_MAX_RADSS = 4.0
 
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -130,16 +121,8 @@ local _rc_ch8 = rc:get_channel(8)
 
 -- Collective state
 local _last_col_rad = COL_CRUISE_FLIGHT_RAD
-local _col_i        = COL_CRUISE_FLIGHT_RAD
-
--- TensionPID state for pumping mode.
--- Setpoint arrives from ground via RAWES_TSP; measured via RAWES_TEN.
--- Integrator warm-starts so initial output = COL_REEL_OUT at zero error.
-local _col_i_ten       = COL_REEL_OUT / math.max(KI_TEN, 1e-12)
-local _col_d_prev_err  = 0.0         -- previous error for derivative term
-local _col_held        = COL_REEL_OUT   -- collective held between 10 Hz commands
-local _ten_setpoint = 300.0          -- tension setpoint [N]; updated from RAWES_TSP
-local _ten_sp_fresh = false          -- true when a new RAWES_TEN_SP has arrived
+local _col_trim     = COL_CRUISE_FLIGHT_RAD
+local _alt_i        = 0.0
 local _vib_corr_last   = 0.0         -- last vibration damper correction [rad]
 
 -- Accelerometer-based tether spring-mode vibration damper.
@@ -172,7 +155,7 @@ end
 local _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
 local _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 local _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
-local _tension_n      = 200.0   -- tether tension estimate [N]; updated from RAWES_TEN
+local _tension_n      = 200.0   -- target/feed-forward tether tension [N]; updated from RAWES_TEN
 
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
@@ -186,12 +169,6 @@ local function v3_copy(v)
     r:x(v:x()); r:y(v:y()); r:z(v:z())
     return r
 end
-
--- Lateral-velocity damping gain [N*s/m] for damp_bz_eq_lateral.  Same value
--- as the Python TensionApController(kd_lat=...) used in test_create_ic
--- warmup.  Damps the tether pendulum mode so steady-flight oscillation
--- doesn't grow over the minute timescale.
-local KD_LAT = 50.0
 
 -- Compute body_z_eq for altitude-holding flight.
 -- Points the disk at (el_rad, current_azimuth) and adds a gravity-compensation
@@ -215,28 +192,6 @@ local function bz_altitude_hold(pos, el_rad, tension_n)
     if rn < 1e-6 then rn = 1.0 end
     local r = Vector3f()
     r:x(rx / rn); r:y(ry / rn); r:z(rz / rn)
-    return r
-end
-
--- Add lateral-velocity damping to a body_z target.  Mirrors Python
--- controller.damp_bz_eq_lateral.  Tilts bz toward the hub's lateral
--- velocity (component perpendicular to the tether) by kd_lat*v_lat/T,
--- so thrust = -T*bz gains a -kd_lat*v_lat component (viscous damping).
--- Anchor at origin (NED).  bz_eq, pos, vel : Vector3f.  Returns Vector3f.
-local function damp_bz_eq_lateral(bz_eq, pos, vel, tension_n, kd_lat)
-    local tlen = pos:length()
-    if tlen < 0.1 then return bz_eq end
-    local tx, ty, tz = pos:x() / tlen, pos:y() / tlen, pos:z() / tlen
-    local v_along    = vel:x() * tx + vel:y() * ty + vel:z() * tz
-    local vlx        = vel:x() - v_along * tx
-    local vly        = vel:y() - v_along * ty
-    local vlz        = vel:z() - v_along * tz
-    local k          = kd_lat / math.max(tension_n, 1.0)
-    local nx, ny, nz = bz_eq:x() + k * vlx, bz_eq:y() + k * vly, bz_eq:z() + k * vlz
-    local n          = math.sqrt(nx * nx + ny * ny + nz * nz)
-    if n < 1e-6 then return bz_eq end
-    local r = Vector3f()
-    r:x(nx / n); r:y(ny / n); r:z(nz / n)
     return r
 end
 
@@ -267,6 +222,60 @@ local function bz_ned_to_roll_pitch(bz_ned, yaw_rad)
     local pitch_deg = math.deg(math.atan(bz_fwd, bz_down))
     local roll_deg  = math.deg(math.asin(math.max(-1.0, math.min(1.0, -bz_right))))
     return roll_deg, pitch_deg
+end
+
+local function sqrt_rate_from_error(error, kp, accel_max, dt)
+    local rate
+    if accel_max <= 0.0 then
+        rate = error * kp
+    elseif kp == 0.0 then
+        if error == 0.0 then
+            rate = 0.0
+        elseif error > 0.0 then
+            rate = math.sqrt(2.0 * accel_max * math.abs(error))
+        else
+            rate = -math.sqrt(2.0 * accel_max * math.abs(error))
+        end
+    else
+        local linear_dist = accel_max / (kp * kp)
+        if error > linear_dist then
+            rate = math.sqrt(2.0 * accel_max * (error - linear_dist / 2.0))
+        elseif error < -linear_dist then
+            rate = -math.sqrt(2.0 * accel_max * (-error - linear_dist / 2.0))
+        else
+            rate = error * kp
+        end
+    end
+
+    if dt > 0.0 then
+        local max_rate = math.abs(error) / dt
+        if rate >  max_rate then rate =  max_rate end
+        if rate < -max_rate then rate = -max_rate end
+    end
+    return rate
+end
+
+local function compute_rate_cmd_sqrt(bz_now, bz_goal, kp, accel_max, dt)
+    local cx = bz_now:y() * bz_goal:z() - bz_now:z() * bz_goal:y()
+    local cy = bz_now:z() * bz_goal:x() - bz_now:x() * bz_goal:z()
+    local cz = bz_now:x() * bz_goal:y() - bz_now:y() * bz_goal:x()
+    local cn = math.sqrt(cx*cx + cy*cy + cz*cz)
+    local dot = bz_now:x() * bz_goal:x() + bz_now:y() * bz_goal:y() + bz_now:z() * bz_goal:z()
+    if dot >  1.0 then dot =  1.0 end
+    if dot < -1.0 then dot = -1.0 end
+    local angle = math.atan(cn, dot)
+
+    local wx, wy, wz = 0.0, 0.0, 0.0
+    if cn > 1e-12 and angle > 1e-12 then
+        local rate_mag = sqrt_rate_from_error(angle, kp, accel_max, dt)
+        wx = cx / cn * rate_mag
+        wy = cy / cn * rate_mag
+        wz = cz / cn * rate_mag
+    end
+
+    local rate_world = Vector3f()
+    rate_world:x(wx); rate_world:y(wy); rate_world:z(wz)
+    return ahrs:earth_to_body(rate_world)
 end
 
 -- Compute the RC1/RC2/RC3 PWM overrides for holding the IC operating
@@ -401,19 +410,16 @@ local function run_flight()
     -- Command the current AHRS attitude so ArduPilot holds it with zero
     -- corrective torque, preserving the orbital rate from kinematic.
     -- Also primes _attitude_target so there is no step transient at GPS init.
+    -- Collective is passed as throttle so ArduPilot's set_throttle_out path
+    -- controls it directly -- no ch3 RC override needed.
     if not _el_initialized then
         local ct = (COL_CRUISE_FLIGHT_RAD - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-        if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + ct * 1000.0 + 0.5)) end
+        if ct < 0.0 then ct = 0.0 end
+        if ct > 1.0 then ct = 1.0 end
 
         if not ahrs:healthy() then return end
 
-        local roll_r  = ahrs:get_roll()
-        local pitch_r = ahrs:get_pitch()
-        local yaw_r   = ahrs:get_yaw()
-        if roll_r and pitch_r and yaw_r then
-            vehicle:set_target_angle_and_climbrate(
-                math.deg(roll_r), math.deg(pitch_r), math.deg(yaw_r), 0.0, false, 0.0)
-        end
+        vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, ct)
 
         -- Check for GPS position; initialize altitude hold on first valid fix
         local pos_ned = ahrs:get_relative_position_NED_origin()
@@ -426,8 +432,9 @@ local function run_flight()
             if tlen >= MIN_TETHER_M then
                 _el_rad       = math.asin(math.max(-1.0, math.min(1.0, -rz / math.max(tlen, 0.1))))
                 _target_alt   = -rz
+                _col_trim     = COL_CRUISE_FLIGHT_RAD
                 _last_col_rad = COL_CRUISE_FLIGHT_RAD
-                _col_i        = COL_CRUISE_FLIGHT_RAD
+                _alt_i        = 0.0
                 _el_initialized = true
                 local label = _is_pumping and "pump" or "steady"
                 gcs:send_text(6, string.format(
@@ -438,7 +445,7 @@ local function run_flight()
         return
     end
 
-    -- ── GPS initialized: altitude hold ────────────────────────────────────
+    -- ── GPS initialized: altitude hold ────────────────────────────────────+
 
     local pos_ned = ahrs:get_relative_position_NED_origin()
     if not pos_ned then return end
@@ -459,56 +466,33 @@ local function run_flight()
     if el_step < -max_step then el_step = -max_step end
     _el_rad = _el_rad + el_step
 
-    -- Cyclic P loop — use setpoint tension (not measured) to keep gravity
-    -- compensation stable when tether goes slack (_tension_n → 0).
-    local ten_bz  = _is_pumping and _ten_setpoint or _tension_n
-    local bz_goal = bz_altitude_hold(rel, _el_rad, ten_bz)
-    -- Add lateral-velocity damping to suppress the tether pendulum mode.
-    local vel_ned_d = ahrs:get_velocity_NED()
-    if vel_ned_d then
-        bz_goal = damp_bz_eq_lateral(bz_goal, rel, vel_ned_d, ten_bz, KD_LAT)
-    end
-    local yaw_rad  = ahrs:get_yaw() or 0.0
-    local roll_deg, pitch_deg = bz_ned_to_roll_pitch(bz_goal, yaw_rad)
-    vehicle:set_target_angle_and_climbrate(roll_deg, pitch_deg, math.deg(yaw_rad), 0.0, false, 0.0)
+    -- Body-z P/sqrt loop: target tension is feed-forward only.
+    local bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n)
+    local body_z_body = Vector3f()
+    body_z_body:x(0.0); body_z_body:y(0.0); body_z_body:z(1.0)
+    local bz_now = ahrs:body_to_earth(body_z_body)
+    local rate_cmd = compute_rate_cmd_sqrt(
+        bz_now, bz_goal, RATE_KP_OUTER, RATE_ACCEL_MAX_RADSS, dt)
 
-    -- ── Collective ────────────────────────────────────────────────────────
-    local col_cmd
-    if _is_pumping then
-        -- TensionPI: setpoint from RAWES_TSP, measured from RAWES_TEN (both at ~10 Hz).
-        -- Step integrator only on fresh command; hold collective between commands.
-        if _ten_sp_fresh then
-            _ten_sp_fresh = false
-            local ten_err = _ten_setpoint - _tension_n
-            local d_term  = KD_TEN * (ten_err - _col_d_prev_err) / DT_CMD
-            local raw_pre = KP_TEN * ten_err + KI_TEN * _col_i_ten + d_term
-            -- Conditional anti-windup (mirrors Python TensionPID)
-            if not (raw_pre <= COL_MIN_RAD and ten_err < 0) then
-                if not (raw_pre >= COL_MAX_TEN and ten_err > 0) then
-                    _col_i_ten = _col_i_ten + ten_err * DT_CMD
-                end
-            end
-            _col_d_prev_err = ten_err
-            local out = KP_TEN * ten_err + KI_TEN * _col_i_ten + d_term
-            if out > COL_MAX_TEN then out = COL_MAX_TEN end
-            if out < COL_MIN_RAD then out = COL_MIN_RAD end
-            _col_held = out
-        end
-        col_cmd = _col_held
-        -- Vibration damper: body-Z accel → HP filter → velocity estimate → collective
-        local imu_a = ahrs:get_accel()
-        if imu_a then
-            _vib_corr_last = vib_damper_step(imu_a:z(), dt)
-            col_cmd = col_cmd + _vib_corr_last
-        end
-    else
-        -- Steady mode: VZ PI altitude hold (vz setpoint = 0)
-        local vz_actual = 0.0
-        local vel_ned = ahrs:get_velocity_NED()
-        if vel_ned then vz_actual = vel_ned:z() end
-        local vz_error = vz_actual
-        _col_i = math.max(COL_MIN_RAD, math.min(COL_MAX_RAD, _col_i + KI_VZ * vz_error * dt))
-        col_cmd = _col_i + KP_VZ * vz_error
+    -- Local altitude PID controls collective; ground no longer commands thrust.
+    local alt_m = -rel:z()
+    local vz_up = 0.0
+    local vel_ned = ahrs:get_velocity_NED()
+    if vel_ned then vz_up = -vel_ned:z() end
+    local alt_err = _target_alt - alt_m
+    _alt_i = _alt_i + KI_ALT * alt_err * dt
+    local i_min = COL_MIN_RAD - _col_trim
+    local i_max = COL_MAX_RAD - _col_trim
+    if _alt_i < i_min then _alt_i = i_min end
+    if _alt_i > i_max then _alt_i = i_max end
+    local col_cmd = _col_trim + KP_ALT * alt_err - KD_VZ * vz_up + _alt_i
+
+    -- Vibration damper: body-Z accel, HP filter, velocity estimate, collective.
+    _vib_corr_last = 0.0
+    local imu_a = ahrs:get_accel()
+    if imu_a then
+        _vib_corr_last = vib_damper_step(imu_a:z(), dt)
+        col_cmd = col_cmd + _vib_corr_last
     end
 
     if col_cmd < COL_MIN_RAD then col_cmd = COL_MIN_RAD end
@@ -522,8 +506,11 @@ local function run_flight()
     local col_thrust = (_last_col_rad - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
     if col_thrust < 0.0 then col_thrust = 0.0 end
     if col_thrust > 1.0 then col_thrust = 1.0 end
-    local ch3 = math.floor(1000.0 + col_thrust * 1000.0 + 0.5)
-    if _rc_ch3 then _rc_ch3:set_override(ch3) end
+
+    -- Rate-only GUIDED call: body-frame rates + collective throttle.
+    -- ArduPilot routes the throttle through set_throttle_out; no ch3 RC override needed.
+    vehicle:set_target_rate_and_throttle(
+        math.deg(rate_cmd:x()), math.deg(rate_cmd:y()), 0.0, col_thrust)
 
     -- Diagnostic log (every ~5 s at 50 Hz)
     if _diag % 250 == 1 then
@@ -532,8 +519,8 @@ local function run_flight()
             pump_info = string.format("  pump=%d  tlen=%.1f m", substate, tlen)
         end
         gcs:send_text(6, string.format(
-            "RAWES: r=%.1f p=%.1f y=%.0f ch3=%d  el=%.1f deg  alt=%.1f m%s",
-            roll_deg, pitch_deg, math.deg(yaw_rad), ch3, math.deg(_el_rad), _target_alt, pump_info))
+            "RAWES: rr=%.1f pr=%.1f thr=%.2f  el=%.1f deg  alt=%.1f m%s",
+            math.deg(rate_cmd:x()), math.deg(rate_cmd:y()), col_thrust, math.deg(_el_rad), _target_alt, pump_info))
     end
 end
 
@@ -562,7 +549,7 @@ local function run_armon(now)
         if arming:is_armed() then
             _armon_state = "armed"
         else
-            arming:arm_force()
+            arming:arm()
         end
 
     elseif _armon_state == "armed" then
@@ -608,12 +595,6 @@ local function update()
     if _nv_floats["RAWES_COL"]    then _ic_col       = _nv_floats["RAWES_COL"]    end
     if _nv_floats["RAWES_TLN"]    then _man_tlon_rad = _nv_floats["RAWES_TLN"]    end
     if _nv_floats["RAWES_TLT"]    then _man_tlat_rad = _nv_floats["RAWES_TLT"]    end
-    if _nv_floats["RAWES_TSP"] then
-        _ten_setpoint = _nv_floats["RAWES_TSP"]
-        _ten_sp_fresh = true
-        _nv_floats["RAWES_TSP"] = nil   -- consume so it triggers once per command
-    end
-
     -- Ch4 yaw always neutral (no RC receiver; prevents ACRO yaw wind-up)
     if _rc_ch4 then _rc_ch4:set_override(1500) end
 
@@ -694,9 +675,9 @@ local _mode_names = {[0]="none", [1]="steady", [2]="manual", [4]="landing", [5]=
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
-    "RAWES: loaded  mode=%d (%s)  kp=%.2f  slew=%.2f  anchor=(%.1f %.1f %.1f)",
+    "RAWES: loaded  mode=%d (%s)  slew=%.2f  anchor=(%.1f %.1f %.1f)",
     _mode_init, _mode_str,
-    p("SCR_USER1", 1.0), p("SCR_USER2", 0.40),
+    p("SCR_USER2", 0.40),
     p("SCR_USER3", 0.0), p("SCR_USER4", 0.0), p("SCR_USER5", 0.0)))
 
 -- @@UNIT_TEST_HOOK

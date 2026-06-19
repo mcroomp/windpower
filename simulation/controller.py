@@ -648,6 +648,7 @@ def compute_bz_altitude_hold(
     tension_n:     float,
     mass_kg:       float,
     G:             float = 9.81,
+    az_ref_rad:    float | None = None,
 ) -> np.ndarray:
     """
     Compute body_z_eq for altitude-holding flight at a target elevation angle.
@@ -673,7 +674,7 @@ def compute_bz_altitude_hold(
     -------
     body_z_eq : NED unit vector — desired disk normal
     """
-    az        = float(np.arctan2(pos[1], pos[0]))
+    az        = float(az_ref_rad) if az_ref_rad is not None else float(np.arctan2(pos[1], pos[0]))
     cos_el    = float(np.cos(target_el_rad))
     sin_el    = float(np.sin(target_el_rad))
     cos_az    = float(np.cos(az))
@@ -1241,6 +1242,74 @@ def compute_rate_cmd(
         damping_world = kd * omega_orbital
 
     return R.T @ (kp * error_world - damping_world)
+
+
+def _sqrt_rate_from_error(error: float, kp: float, accel_max: float, dt: float) -> float:
+    """ArduPilot-style sqrt controller: angle error -> rate command."""
+    error = float(error)
+    kp = float(kp)
+    accel_max = float(accel_max)
+    dt = float(dt)
+
+    if accel_max <= 0.0:
+        rate = error * kp
+    elif kp == 0.0:
+        rate = math.copysign(math.sqrt(2.0 * accel_max * abs(error)), error) if error != 0.0 else 0.0
+    else:
+        linear_dist = accel_max / (kp * kp)
+        if error > linear_dist:
+            rate = math.sqrt(2.0 * accel_max * (error - linear_dist / 2.0))
+        elif error < -linear_dist:
+            rate = -math.sqrt(2.0 * accel_max * (-error - linear_dist / 2.0))
+        else:
+            rate = error * kp
+
+    if dt > 0.0:
+        rate = max(-abs(error) / dt, min(abs(error) / dt, rate))
+    return rate
+
+
+def compute_rate_cmd_sqrt(
+    bz_now:          np.ndarray,
+    bz_eq:           np.ndarray,
+    R_body_to_world: np.ndarray,
+    kp:              float,
+    accel_max:       float,
+    dt:              float,
+    kd:              float = 0.0,
+    omega_world:     "np.ndarray | None" = None,
+) -> np.ndarray:
+    """
+    Body_z alignment error -> sqrt-shaped body-frame angular rate command.
+
+    This is the rate-only equivalent of ArduPilot's angle-error shaping: the
+    error axis comes from ``bz_now x bz_eq`` and the error magnitude is shaped
+    by a sqrt controller so large target changes respect an angular acceleration
+    limit.  Small errors remain linear P.
+    """
+    bz_now = np.asarray(bz_now, dtype=float)
+    bz_eq = np.asarray(bz_eq, dtype=float)
+    R = np.asarray(R_body_to_world, dtype=float)
+
+    cross_world = cross3(bz_now, bz_eq)
+    cross_norm = float(np.linalg.norm(cross_world))
+    dot = float(np.clip(np.dot(bz_now, bz_eq), -1.0, 1.0))
+    angle = float(math.atan2(cross_norm, dot))
+
+    if cross_norm > 1e-12 and angle > 1e-12:
+        axis_world = cross_world / cross_norm
+        proportional_world = axis_world * _sqrt_rate_from_error(angle, kp, accel_max, dt)
+    else:
+        proportional_world = np.zeros(3)
+
+    damping_world = np.zeros(3)
+    if kd != 0.0 and omega_world is not None:
+        omega = np.asarray(omega_world, dtype=float)
+        omega_spin = np.dot(omega, bz_now) * bz_now
+        omega_orbital = omega - omega_spin
+        damping_world = kd * omega_orbital
+
+    return R.T @ (proportional_world - damping_world)
 
 
 def make_hold_controller(

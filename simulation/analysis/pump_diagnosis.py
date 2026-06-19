@@ -43,14 +43,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dynbem import create_aero
-from dynbem import rotor_definition as rd
+from dynbem import RotorInputs, create_aero
+from tests.simtests._rotor_helpers import load_default_rotor
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-_ROTOR  = rd.default()
-_AERO   = create_aero(_ROTOR)
-MASS    = _ROTOR.mass_kg
+_ROTOR  = load_default_rotor()
+_AERO   = create_aero(_ROTOR, model="quasi_static")
+MASS    = float(_ROTOR.inertia.mass_kg)
 G       = 9.81
 MG      = MASS * G
 WIND    = np.array([0.0, 10.0, 0.0])
@@ -66,7 +66,18 @@ FLOOR_ALT_M   = 1.5
 
 
 def _aero_thrust(col):
-    res = _AERO.compute_forces(col, 0.0, 0.0, _R0, np.zeros(3), OMEGA, WIND, t=45.0)
+    inputs = RotorInputs(
+        collective_rad=float(col),
+        tilt_lon=0.0,
+        tilt_lat=0.0,
+        R_hub=_R0,
+        v_hub_world=np.zeros(3),
+        wind_world=WIND,
+        omega_rad_s=OMEGA,
+        t=45.0,
+        rho_kg_m3=1.225,
+    )
+    res, _ = _AERO.compute_forces(inputs, _AERO.initial_rotor_state())
     return float(np.linalg.norm(res.F_world))
 
 
@@ -197,7 +208,7 @@ def _slack_events(rows, tension_window=5):
 _OSC_SIGNALS = [
     ("tether_tension",              "tension_N"),
     ("collective_rad",              "col_act"),
-    ("collective_from_tension_ctrl","col_tpi"),
+    ("collective_from_alt_ctrl","col_alt"),
     ("aero_T",                      "aero_T_N"),
     ("aero_v_i",                    "v_inflow"),
     ("aero_v_axial",                "v_axial"),
@@ -317,9 +328,9 @@ def _compute_buckets(rows, bucket_s):
         else:
             feas = "OK"
 
-        t_set   = avg("tension_setpoint")
+        t_set   = avg("tension_feedforward_n")
         t_act   = avg("tether_tension")
-        col_tpi = avg("collective_from_tension_ctrl")
+        col_alt = avg("collective_from_alt_ctrl")
         col_act = avg("collective_rad")
         col_std = std("collective_rad")
         col_pp  = peak_to_peak("collective_rad")
@@ -366,7 +377,7 @@ def _compute_buckets(rows, bucket_s):
             "feasible":feas,
             "T_set":   r1(t_set),
             "T_act":   r1(t_act),
-            "col_tpi": r4(col_tpi),
+            "col_alt": r4(col_alt),
             "col_act": r4(col_act),
             "col_sd":  r4(col_std),
             "col_pp":  r4(col_pp),
@@ -402,7 +413,7 @@ def _write_osc_csv(osc_rows, path):
 _CORR_SIGNALS = [
     ("tether_tension",               "tension_N"),
     ("collective_rad",               "col_act"),
-    ("collective_from_tension_ctrl", "col_tpi"),
+    ("collective_from_alt_ctrl", "col_alt"),
     ("aero_T",                       "aero_T"),
     ("aero_v_i",                     "v_inflow"),
     ("aero_v_axial",                 "v_axial"),
@@ -605,7 +616,7 @@ def _print_bucket_table(bucket_rows, dt, n_rows):
            f"{'el':>5}  {'d_eq':>5}  {'d_act':>5}  "
            f"{'T_need':>6}  {'feas':>6}  "
            f"{'T_set':>6}  {'T_act':>6}  "
-           f"{'col_tpi':>7}  {'col_act':>7}  {'col_sd':>6}  {'col_pp':>7}  flags")
+           f"{'col_alt':>7}  {'col_act':>7}  {'col_sd':>6}  {'col_pp':>7}  flags")
     print(hdr)
     print("  " + "-" * (len(hdr) + 30))
 
@@ -619,7 +630,7 @@ def _print_bucket_table(bucket_rows, dt, n_rows):
               f"{f(b['el'],'5.1f')}  {f(b['d_eq'],'5.1f')}  {f(b['d_act'],'5.1f')}  "
               f"{f(b['T_need'],'6.0f')}  {b['feasible']:>6}  "
               f"{f(b['T_set'],'6.0f')}  {f(b['T_act'],'6.0f')}  "
-              f"{f(b['col_tpi'],'7.3f')}  {f(b['col_act'],'7.3f')}  "
+              f"{f(b['col_alt'],'7.3f')}  {f(b['col_act'],'7.3f')}  "
               f"{f(b['col_sd'],'6.4f')}  {f(b['col_pp'],'7.4f')}  "
               + b["flags"])
 

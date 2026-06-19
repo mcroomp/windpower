@@ -8,14 +8,14 @@ Ground (10 Hz):
         -> TensionCommand (forwarded to AP)
 
     TensionCommand carries:
-        tension_setpoint_n : requested tether tension [N]
-        tension_measured_n : current load-cell reading [N]  (AP uses as PI feedback)
+        tension_target_n   : target/feed-forward tension [N] for AP body-z
         alt_m              : target altitude above anchor [m]
         phase              : phase label
 
-    The AP has no tension sensor of its own.  The ground reads the load cell and
-    packs both the setpoint and the measurement into each TensionCommand so the
-    AP's TensionPI can close the loop using ground-transmitted feedback at 10 Hz.
+    The AP has no tension sensor of its own.  The ground reads the load cell for
+    the winch/phase state machine, but sends the desired phase tension to the AP
+    so gravity-compensated body-z does not chase transient tether dynamics.
+    Collective is local AP altitude PID; ground does not command thrust.
 
 Phase state machine (length-driven):
     reel-out   : exit when rest_length >= start_length + delta_l  (or safety timeout)
@@ -53,13 +53,11 @@ class TensionCommand:
     """
     Command sent from ground to AP at ~10 Hz.
 
-    tension_setpoint_n : float  requested tether tension [N]
-    tension_measured_n : float  current load-cell reading [N]  (AP PI feedback)
+    tension_target_n   : float  target/feed-forward tension [N] for AP gravity comp
     alt_m              : float  target altitude above anchor [m]
     phase              : str    "hold" | "reel-out" | "transition" | "reel-in"
     """
-    tension_setpoint_n : float
-    tension_measured_n : float
+    tension_target_n   : float
     alt_m              : float
     phase              : str
 
@@ -84,10 +82,11 @@ class PumpingGroundController:
     tension_out     : float  reel-out tension setpoint [N]
     tension_in      : float  reel-in / transition tension setpoint [N]
     tension_ic      : float  IC equilibrium tension [N]
-    tension_ramp_s  : float  ramp from tension_ic to tension_out [s]
     el_reel_in_rad  : float  hub elevation target during reel-in [rad]
     t_reel_out_max  : float  safety timeout for reel-out phase [s]
     t_reel_in_max   : float  safety timeout for reel-in phase [s]
+    reel_in_winch_offset_n: float  winch target = T_ic + offset during reel-in [N];
+                                   ensures steady slow reel-in near IC flight state
     """
 
     def __init__(
@@ -98,14 +97,13 @@ class PumpingGroundController:
         n_cycles         : int   = 0,
         tension_out      : float = 435.0,
         tension_in       : float = 226.0,
-        tension_in_ap    : float = 150.0,
         tension_ic       : float = 300.0,
-        tension_ramp_s   : float = 8.0,
         el_reel_in_rad   : float = 0.0,
         t_reel_out_max   : float = 300.0,
         t_reel_in_max    : float = 300.0,
         k_ff_winch       : float = 0.0,
         k_ff_vel         : float = 0.0,
+        reel_in_winch_offset_n: float = 60.0,   # winch target = T_ic + offset during reel-in
     ) -> None:
         self._t_tr         = float(t_transition)
         self._alt_m        = float(target_alt_m)
@@ -114,13 +112,12 @@ class PumpingGroundController:
         self._ncyc         = int(n_cycles)
         self._tension_out  = float(tension_out)
         self._tension_in   = float(tension_in)        # winch threshold during reel-in
-        self._tension_in_ap = float(tension_in_ap)   # AP setpoint during reel-in (< tension_in)
         self._tension_ic   = float(tension_ic)
-        self._ramp_s       = max(float(tension_ramp_s), 1e-9)
         self._t_out_max    = float(t_reel_out_max)
         self._t_in_max     = float(t_reel_in_max)
         self._k_ff_winch   = float(k_ff_winch)
         self._k_ff_vel     = float(k_ff_vel)
+        self._reel_in_winch_offset = float(reel_in_winch_offset_n)
 
         # State machine
         self._phase        : str   = "reel-out"
@@ -206,49 +203,24 @@ class PumpingGroundController:
 
         t_in_phase = t_sim - self._phase_start
 
-        # ── tension setpoint & winch targets ──────────────────────────────
+        # ── winch targets ────────────────────────────────────────────────
         if phase == "reel-out":
-            frac     = min(1.0, t_in_phase / self._ramp_s)
-            setpoint = self._tension_ic + frac * (self._tension_out - self._tension_ic)
             self._winch_target_length  = self._reel_out_tgt
-            # Generator pays out when tension rises above tension_ic (not peak tension_out).
-            self._winch_target_tension = self._tension_ic
+            # Winch pays out only when T > tension_out (generator mode).
+            # AP collective is local altitude PID; ground commands altitude and
+            # the phase tension target as body-z feed-forward.
+            self._winch_target_tension = self._tension_out
 
-        elif phase in ("transition", "reel-in"):
-            # AP drives tension to tension_in_ap (< tension_in) so the winch has
-            # consistent headroom: v_cruise = kp*(tension_in - tension_in_ap) > 0.
-            # Winch reels in from transition start; tension is high at transition
-            # entry so winch is stopped until AP drives tension below tension_in.
-            setpoint = self._tension_in_ap
+        elif phase == "transition":
+            self._winch_target_length  = rest_length  # hold current length
+            self._winch_target_tension = self._tension_out  # still holds tension
+
+        elif phase == "reel-in":
             self._winch_target_length  = self._start_length
-            self._winch_target_tension = self._tension_in
-
-            # ── Feedforward: fold winch speed + altitude rate into setpoint ──
-            # Skip the first 10 s of reel-in while the hub is still climbing
-            # rapidly from the transition — feedforward is only meaningful once
-            # the altitude has roughly settled.
-            if (self._initialized
-                    and t_in_phase >= 10.0
-                    and (self._k_ff_winch != 0.0 or self._k_ff_vel != 0.0)):
-                dt_ff = t_sim - self._ff_prev_t_sim
-                if dt_ff > 1e-6:
-                    # v_reel_in > 0 when tether shortening (reeling in)
-                    v_reel_in = (self._ff_prev_rest_length - rest_length) / dt_ff
-                    # EMA-smoothed altitude derivative (τ=10 s removes 5 Hz alias).
-                    # Raw 10 Hz derivative of a 5 Hz signal amplifies by 20×; the
-                    # EMA attenuates 5 Hz by ~300× before we differentiate.
-                    _FF_EMA_TAU = 10.0
-                    alpha = dt_ff / (_FF_EMA_TAU + dt_ff)
-                    prev_smooth = self._ff_alt_smooth
-                    self._ff_alt_smooth = alpha * hub_alt_m + (1.0 - alpha) * self._ff_alt_smooth
-                    dalt_dt = (self._ff_alt_smooth - prev_smooth) / dt_ff
-                    ff = self._k_ff_winch * v_reel_in - self._k_ff_vel * dalt_dt
-                    setpoint = max(self._tension_in_ap * 0.5,
-                                   min(self._tension_in_ap * 2.0,
-                                       setpoint + ff))
+            # Reel in when T < target: maintain tension above T_ic + offset.
+            self._winch_target_tension = self._tension_ic + self._reel_in_winch_offset
 
         else:  # hold
-            setpoint = self._tension_ic
             self._winch_target_length  = rest_length
             self._winch_target_tension = self._tension_ic
 
@@ -275,8 +247,7 @@ class PumpingGroundController:
         self._ff_prev_t_sim       = t_sim
 
         return TensionCommand(
-            tension_setpoint_n = setpoint,
-            tension_measured_n = float(tension_measured_n),
+            tension_target_n   = float(self._winch_target_tension),
             alt_m              = alt_m,
             phase              = phase,
         )

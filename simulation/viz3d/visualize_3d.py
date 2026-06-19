@@ -69,15 +69,26 @@ if str(_SIM) not in sys.path:
 from viz3d.telemetry import TelemetryFrame, CSVSource
 
 # ---------------------------------------------------------------------------
-# Rotor geometry — sourced from beaupoil_2026.yaml via RotorDefinition
+# Rotor geometry — loaded from rotor_definitions/de_schutter_2018.yaml.
+# Falls back to the project default() if one is configured.
 # ---------------------------------------------------------------------------
 import sys as _sys; _sys.path.insert(0, str(__import__('pathlib').Path(__file__).parents[1]))
 from dynbem import rotor_definition as _rd
-_ROTOR           = _rd.default()
-N_BLADES         = _ROTOR.n_blades
-R_ROOT           = _ROTOR.root_cutout_m
-R_TIP            = _ROTOR.radius_m
-CHORD            = _ROTOR.chord_m
+try:
+    _ROTOR = _rd.default()
+except NotImplementedError:
+    # No project default configured — load the simulation reference rotor.
+    _ROTOR_YAML = _SIM / "rotor_definitions" / "de_schutter_2018.yaml"
+    if not _ROTOR_YAML.exists():
+        raise FileNotFoundError(
+            f"No default rotor and fallback not found: {_ROTOR_YAML}")
+    _ROTOR = _rd.load(str(_ROTOR_YAML))
+# Geometry attributes may be top-level or nested under .blade depending on version
+_BLADE           = getattr(_ROTOR, 'blade', _ROTOR)
+N_BLADES         = _BLADE.n_blades
+R_ROOT           = _BLADE.root_cutout_m
+R_TIP            = _BLADE.radius_m
+CHORD            = _BLADE.chord_m
 BLADE_THK        = 0.025  # m — slight thickness so blades are visible from the side
 TETHER_AXLE_OFFSET = 0.4  # m — tether attaches this far below CM along -body_z
                             #    (bottom of axle, toward anchor side)

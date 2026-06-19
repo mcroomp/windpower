@@ -268,7 +268,7 @@ def run_mediator(args, trajectory=None):
     _t_step0        = None                # sim time of first step_fn call
 
     s1 = s2 = s3       = 0.0           # servo values
-    _traj_cmd          = {"phase": "", "tension_setpoint": 0.0}  # last trajectory command
+    _traj_cmd          = {"phase": "", "tension_feedforward_n": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
     _tel_note          = ""            # single-frame event marker written to telemetry CSV; cleared after write
     _prev_phase        = ""            # detect phase changes for tel note
@@ -526,8 +526,8 @@ def run_mediator(args, trajectory=None):
                 "collective_norm": collective_out,
                 "tilt_lon":        tilt_lon,
                 "tilt_lat":        tilt_lat,
-                "tension_setpoint":            _traj_cmd.get("tension_setpoint", 0.0),
-                "collective_from_tension_ctrl": collective_rad,
+                "tension_feedforward_n":        _traj_cmd.get("tension_feedforward_n", 0.0),
+                "collective_from_alt_ctrl":     collective_rad,
                 # Note: new aero (Pitt-Peters Level 2) does not expose internal
                 # axial/inplane/induced velocity diagnostics. Drop them from
                 # telemetry rather than fake values.

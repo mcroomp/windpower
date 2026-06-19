@@ -15,7 +15,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller   import HeliCyclicController, compute_rate_cmd, compute_bz_tether
 from frames       import build_orb_frame
@@ -65,7 +64,7 @@ def _run_loop(elevation_deg: float, *, t_total: float = 10.0,
         _ROTOR,
         ic={"pos": ic_kwargs["pos"], "vel": ic_kwargs["vel"]},   # placeholder
         wind=WIND,
-        aero_model="oye",
+        aero_model="quasi_static",
         z_floor=-1.0,
     ) if False else None  # noqa — keep mypy happy
 
@@ -80,7 +79,7 @@ def _run_loop(elevation_deg: float, *, t_total: float = 10.0,
         coll_eq_rad = ic_kwargs["coll_eq_rad"],
         omega_spin  = ic_kwargs["omega_spin"],
     )
-    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="oye", z_floor=-1.0)
+    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="quasi_static", z_floor=-1.0)
     acro = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
     acro._servo.reset(COL_FIXED)
 
@@ -167,13 +166,13 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
                         kd_inner: float = 0.0,
                         kp_outer: float = 2.5,
                         use_trim: bool   = False) -> dict:
-    """Like _run_loop but with TensionApController driving collective.
+    """Like _run_loop but with MockArdupilot pumping Python mode driving collective.
 
     Reproduces the IC-warmup architecture at unit-test scale so we can
     iterate on controller gains without waiting for the 60 s simtest.
     """
-    from ap_controller   import TensionApController
     from pumping_planner import TensionCommand
+    from tests.common.mock_ardupilot import MockArdupilot
     from controller      import HeliCyclicController
     from dynbem            import RotorInputs, solve_trim_cyclic
 
@@ -186,7 +185,7 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
         coll_eq_rad= ic_kwargs["coll_eq_rad"],
         omega_spin = ic_kwargs["omega_spin"],
     )
-    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="oye", z_floor=-1.0)
+    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="quasi_static", z_floor=-1.0)
     # Replace HeliCyclicController with tuned-gain version.
     core._acro = HeliCyclicController(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
@@ -206,15 +205,18 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
         core._acro.set_trim(trim.tilt_lon, trim.tilt_lat)
         core._rotor_state = trim.final_state
 
-    _ap = TensionApController(
+    ap = MockArdupilot.for_python(
+        mode="pumping",
         ic_pos=ic.pos, mass_kg=_MASS,
         slew_rate_rad_s=0.40,
         warm_coll_rad=COL_FIXED, tension_ic=300.0,
         kp_outer=kp_outer,
+        wind=WIND,
+        dt=DT,
     )
     target_alt = float(-ic.pos[2])
-    _ap.receive_command(TensionCommand(
-        tension_setpoint_n=300.0, tension_measured_n=core.tension_now,
+    ap.receive_command(TensionCommand(
+        tension_target_n=300.0,
         alt_m=target_alt, phase="reel-out",
     ), 0.1)
 
@@ -226,15 +228,14 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
     col_hist   = []
     for i in range(n_total):
         if i % cmd_every == 0:
-            _ap.receive_command(TensionCommand(
-                tension_setpoint_n=300.0,
-                tension_measured_n=core.tension_now,
+            ap.receive_command(TensionCommand(
+                tension_target_n=300.0,
                 alt_m=target_alt, phase="reel-out",
             ), 0.1)
 
         s = core.hub_state
         obs = core.hub_observe()
-        col, rate_roll, rate_pitch = _ap.step(obs, DT)
+        col, rate_roll, rate_pitch = ap.controller_step(obs, DT)
         omega_b = obs.gyro
         tlon, tlat, col_act = core._acro.step(
             collective_cmd=col,
@@ -265,20 +266,14 @@ def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
     }
 
 
-def test_tensionpi_p_only_diverges_in_30s():
-    """Documents the P-only failure mode: TensionApController + AcroController
-    with kp=2/3 and ki=kd=0 cannot hold altitude over 30 s, even with the
-    trim feedforward applied.  Reproduces test_create_ic's instability at a
-    fast unit-test scale.
-
-    If this starts passing it means the controller has been re-tuned and
-    test_create_ic should be re-tried.
-    """
+def test_tensionpi_p_only_is_bounded_with_quasi_static_aero():
+    """Quasi-static aero keeps the old P-only loop bounded at this scale."""
     r = _run_with_tensionpi(elevation_deg=30.0, t_total=20.0, use_trim=True)
-    # Documents — we expect drift large enough to be visible
-    assert r["min_alt"] < 40.0 or math.degrees(r["max_angle"]) > 10.0, (
-        f"Loop unexpectedly stable: min_alt={r['min_alt']:.1f} m, "
-        f"max_angle={math.degrees(r['max_angle']):.1f} deg"
+    assert r["min_alt"] > 45.0, (
+        f"Loop lost too much altitude: min_alt={r['min_alt']:.1f} m"
+    )
+    assert math.degrees(r["max_angle"]) < 12.0, (
+        f"Loop attitude drift too large: max_angle={math.degrees(r['max_angle']):.1f} deg"
     )
 
 
@@ -317,7 +312,7 @@ def _run_alt_hold_fixed_collective(
     """Closed-loop run with AltitudeHoldController for cyclic and a FIXED
     collective for thrust (no TensionPI).
 
-    AltitudeHoldController is what TensionApController uses for the body_z
+    AltitudeHoldController is what MockArdupilot pumping mode uses for the body_z
     setpoint — it includes the gravity-perpendicular disk-tilt so the hub
     can hold against the perpendicular gravity component without orbiting.
     With collective held constant at the equilibrium value, this isolates
@@ -341,7 +336,7 @@ def _run_alt_hold_fixed_collective(
         rest_length=ic_kwargs["rest_length"],
         coll_eq_rad=col_fixed, omega_spin=ic_kwargs["omega_spin"],
     )
-    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="oye", z_floor=-1.0)
+    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="quasi_static", z_floor=-1.0)
     acro = HeliCyclicController(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
         P=kp_inner, I=ki_inner, D=kd_inner, IMAX=0.5,

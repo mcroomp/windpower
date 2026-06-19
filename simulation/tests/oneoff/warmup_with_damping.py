@@ -1,7 +1,7 @@
 """warmup_with_damping — one-off diagnostic, not a unit test.
 
 Adds lateral velocity damping (``controller.damp_bz_eq_lateral``) on top of the
-TensionApController's bz_goal before the rate-cmd is built.  Checks whether the
+MockArdupilot pumping Python mode's bz_goal before the rate-cmd is built.  Checks whether the
 pendulum mode that wouldn't settle in warmup_gain_sweep is damped by it.
 
 Run:
@@ -19,8 +19,8 @@ sys.path.insert(0, str(ROOT / "tests" / "simtests"))
 
 from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic
 from frames          import build_orb_frame
-from simtest_runner  import PhysicsRunner, PythonAP
-from ap_controller   import TensionApController
+from simtest_runner  import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner import TensionCommand
 from controller      import (HeliCyclicController, compute_bz_altitude_hold,
                               compute_rate_cmd, damp_bz_eq_lateral)
@@ -38,7 +38,7 @@ _BODY_Z_DESIGN = np.array([0.305391, 0.851018, -0.427206])
 _DT = 2.5e-3
 _DT_CMD = 0.1
 _PLANNER_EVERY = max(1, round(_DT_CMD / _DT))
-_AP_EVERY      = max(1, round(1.0 / (PythonAP.AP_HZ * _DT)))
+_AP_EVERY      = max(1, round(1.0 / (MockArdupilot.AP_HZ * _DT)))
 
 
 def _build_initial_state():
@@ -46,7 +46,7 @@ def _build_initial_state():
     pos0  = L_TETHER * tether_hat
     R0    = build_orb_frame(-tether_hat)
 
-    aero  = create_aero(_ROTOR, model="oye")
+    aero  = create_aero(_ROTOR, model="quasi_static")
     state = aero.initial_rotor_state()
     state.omega_rad_s = 20.0
     dt_eq = 1.0 / 400.0
@@ -92,16 +92,20 @@ def run(kd_lat, t_total, R0, pos0, omega_spin, rest_length, trim,
     runner._acro._servo.reset(STACK_COLL)
     runner._acro.set_trim(trim.tilt_lon, trim.tilt_lat)
 
-    _ap = TensionApController(
-        ic_pos=pos0, mass_kg=MASS,
+    ap = MockArdupilot.for_pumping(
+        ic_pos=pos0,
+        mass_kg=MASS,
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=STACK_COLL, tension_ic=IC_TENSION_N,
-        kp_outer=kp_outer, kp_pos=0.0, kd_pos=0.0,
+        warm_coll_rad=STACK_COLL,
+        tension_ic=IC_TENSION_N,
+        kp_outer=kp_outer,
+        kp_pos=0.0,
+        wind=WIND,
+        dt=_DT,
     )
-
     target_alt = float(-pos0[2])
-    _ap.receive_command(TensionCommand(
-        tension_setpoint_n=IC_TENSION_N, tension_measured_n=runner.tension_now,
+    ap.receive_command(TensionCommand(
+        tension_target_n=300.0,
         alt_m=target_alt, phase="reel-out",
     ), _DT_CMD)
 
@@ -118,21 +122,21 @@ def run(kd_lat, t_total, R0, pos0, omega_spin, rest_length, trim,
     log = []
     for step in range(n):
         if step % _PLANNER_EVERY == 0:
-            _ap.receive_command(TensionCommand(
-                tension_setpoint_n=IC_TENSION_N, tension_measured_n=runner.tension_now,
+            ap.receive_command(TensionCommand(
+                tension_target_n=300.0,
                 alt_m=target_alt, phase="reel-out",
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             # Build the rate setpoint ourselves with lateral damping added.
             obs = runner.observe()
-            # Advance the AP to update TensionPI / elevation state, but use the
+            # Advance the AP to update elevation state, but use the
             # collective only.
-            col_held, _, _ = _ap.step(obs, dt=1.0 / PythonAP.AP_HZ)
+            col_held, _, _ = ap.controller_step(obs, dt=1.0 / MockArdupilot.AP_HZ)
             # Now recompute the rate command with lateral velocity damping.
             tlen      = float(np.linalg.norm(obs.pos))
             target_el = float(np.arcsin(max(-1.0, min(1.0, target_alt / max(tlen, 0.1)))))
             # Use the AP's internal rate-limited elevation.
-            el_now = _ap.elevation_rad
+            el_now = ap.elevation_rad
             bz_goal = compute_bz_altitude_hold(obs.pos, el_now, runner.tension_now, MASS)
             if kd_lat > 0.0:
                 bz_goal = damp_bz_eq_lateral(

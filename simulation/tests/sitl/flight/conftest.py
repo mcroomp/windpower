@@ -41,11 +41,11 @@ def acro_armed_pumping_lua(tmp_path, request):
     Division of labour (mirrors test_pump_cycle_lua.py):
       - Test process: PumpingGroundController (10 Hz) — phase state machine.
           * Sends winch set_target commands to mediator via UDP socket.
-          * Sends NVF (RAWES_TSP, RAWES_TEN, RAWES_ALT, RAWES_SUB) to Lua via GCS.
+          * Sends NVF (RAWES_TEN, RAWES_ALT, RAWES_SUB) to Lua via GCS.
       - Mediator: WinchController (400 Hz) — owns tether rest_length physics.
           * Listens on winch_cmd_port for {target_length, target_tension} commands.
           * Sends back {tension_n, rest_length, hub_alt_m} at ~10 Hz.
-      - Lua (50 Hz): TensionPI collective + bz_altitude_hold cyclic.
+    - Lua (50 Hz): altitude PID collective + rate-only bz_altitude_hold cyclic.
 
     This mirrors the real hardware architecture: ground station manages phase
     logic and MAVLink NVF delivery; winch node owns motor control.

@@ -22,6 +22,7 @@ Usage
     OMEGA_SPIN0  = ic.omega_spin
     REST_LENGTH0 = ic.rest_length
     COLL_EQ      = ic.coll_eq_rad  # equilibrium collective (= stack_coll_eq = -0.18 rad)
+    TRIM_TLAT    = ic.trim_tilt_lat
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ class IC:
     rest_length:   float        # tether rest length [m]
     coll_eq_rad:   float        # warmup collective [rad]; IC is settled at this value (-0.18 rad)
     stack_coll_eq: float        # Lua col_cruise [rad]; equals coll_eq_rad (-0.18 rad)
+    trim_tilt_lon: float        # cyclic trim that nulls IC hub moment [rad]
+    trim_tilt_lat: float        # cyclic trim that nulls IC hub moment [rad]
     home_z_ned:    float        # GPS home NED Z [m] — 0 = ground level
 
 
@@ -96,5 +99,7 @@ def load_ic() -> IC:
         rest_length   = float(d["rest_length"]),
         coll_eq_rad   = coll_eq_rad,
         stack_coll_eq = float(d["stack_coll_eq"]),
+        trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0)),
+        trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0)),
         home_z_ned    = float(d["home_z_ned"]),
     )

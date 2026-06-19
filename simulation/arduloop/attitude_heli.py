@@ -65,6 +65,7 @@ class HeliRateController:
                dt: float,
                collective_norm: float = 0.0,
                saturated: tuple[bool, bool, bool] = (False, False, False),
+               sim_time_s: float = 0.0,
                ) -> HeliRateOutput:
         """Run one tick of the rate loop.
 
@@ -75,15 +76,25 @@ class HeliRateController:
         dt               : tick duration, seconds.
         collective_norm  : current collective in [-1, 1]; used by hover-roll-trim.
         saturated        : per-axis output saturation flags for anti-windup.
+        sim_time_s       : simulation time (s) for slew-rate limiter timestamps.
         """
         tr, tp, ty = rate_target_rads
         gr, gp, gy = gyro_rate_rads
         sr, sp, sy = saturated
         p = self.params
 
-        roll_out  = self.pid_roll.update_all(tr,  gr, dt, limit=sr)
-        pitch_out = self.pid_pitch.update_all(tp, gp, dt, limit=sp)
-        yaw_out   = self.pid_yaw.update_all(ty,  gy, dt, limit=sy)
+        # Leaky integrator: decay I toward ±ILMI before PID update.
+        # AP AC_AttitudeControl_Heli::rate_bf_to_motor_roll_pitch always applies
+        # leaky_i for roll/pitch (_flags_heli.leaky_i = true).  Yaw follows the
+        # same path here (ILMI=0 default means no decay when ILMI is not set).
+        _LEAK_RATE = 0.02  # AC_ATTITUDE_HELI_RATE_INTEGRATOR_LEAK_RATE
+        self.pid_roll.update_leaky_i(_LEAK_RATE)
+        self.pid_pitch.update_leaky_i(_LEAK_RATE)
+        self.pid_yaw.update_leaky_i(_LEAK_RATE)
+
+        roll_out  = self.pid_roll.update_all(tr,  gr, dt, limit=sr, sim_time_s=sim_time_s)
+        pitch_out = self.pid_pitch.update_all(tp, gp, dt, limit=sp, sim_time_s=sim_time_s)
+        yaw_out   = self.pid_yaw.update_all(ty,  gy, dt, limit=sy, sim_time_s=sim_time_s)
 
         # ------------------------------------------------------------------
         # PIRO_COMP — rotate roll & pitch I-terms by yaw rate (AP `_piro_comp`)
@@ -91,7 +102,7 @@ class HeliRateController:
         if p.PIRO_COMP_enabled and dt > 0.0:
             piro_roll_i  = self.pid_roll.get_i()
             piro_pitch_i = self.pid_pitch.get_i()
-            yaw_dtheta = gy * dt
+            yaw_dtheta = -gy * dt
             c = math.cos(yaw_dtheta)
             s = math.sin(yaw_dtheta)
             self.pid_roll.set_i( piro_roll_i  * c - piro_pitch_i * s)

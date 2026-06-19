@@ -14,24 +14,20 @@ _rawes_fns = {
     COL_MIN_RAD             = COL_MIN_RAD,
     COL_MAX_RAD             = COL_MAX_RAD,
     COL_SLEW_MAX            = COL_SLEW_MAX,
-    COL_REEL_OUT            = COL_REEL_OUT,
-    T_PUMP_TRANSITION       = T_PUMP_TRANSITION,
     MIN_TETHER_M            = MIN_TETHER_M,
     MASS_KG                 = MASS_KG,
     G_ACCEL                 = G_ACCEL,
-    KP_VZ                   = KP_VZ,
-    KI_VZ                   = KI_VZ,
-    KP_TEN                  = KP_TEN,
-    KI_TEN                  = KI_TEN,
-    KD_TEN                  = KD_TEN,
-    COL_MAX_TEN             = COL_MAX_TEN,
-    DT_CMD                  = DT_CMD,
+    KP_ALT                  = KP_ALT,
+    KI_ALT                  = KI_ALT,
+    KD_VZ                   = KD_VZ,
+    RATE_KP_OUTER           = RATE_KP_OUTER,
+    RATE_ACCEL_MAX_RADSS    = RATE_ACCEL_MAX_RADSS,
 
     -- ── Pure geometry ────────────────────────────────────────────────────────
 
     bz_altitude_hold    = bz_altitude_hold,
-    damp_bz_eq_lateral  = damp_bz_eq_lateral,
-    KD_LAT              = KD_LAT,
+    sqrt_rate_from_error = sqrt_rate_from_error,
+    compute_rate_cmd_sqrt = compute_rate_cmd_sqrt,
 
     -- ── Vector3f helpers ─────────────────────────────────────────────────────
 
@@ -73,13 +69,10 @@ _rawes_fns = {
     tension_n      = function() return _tension_n end,
     ic_col           = function() return _ic_col end,
 
-    -- ── TensionPID state accessors ────────────────────────────────────────────
+    -- ── Altitude PID state accessors ─────────────────────────────────────────
 
-    col_i_ten        = function() return _col_i_ten end,
-    col_d_prev_err   = function() return _col_d_prev_err end,
-    col_held         = function() return _col_held end,
-    ten_setpoint     = function() return _ten_setpoint end,
-    ten_sp_fresh     = function() return _ten_sp_fresh end,
+    col_trim         = function() return _col_trim end,
+    alt_i            = function() return _alt_i end,
 
     -- ── Vibration damper constants + function ─────────────────────────────────
 

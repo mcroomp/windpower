@@ -232,9 +232,9 @@ def _phase_detail(rows: list[TelRow]) -> dict:
         "tether_extension_m":  [r.tether_extension         for r in rows],
         "tether_rest_length_m":[r.tether_rest_length       for r in rows],
         "tether_tension_n":    [r.tether_tension           for r in rows],
-        "tension_setpoint_n":  [r.tension_setpoint         for r in rows],
+        "tension_feedforward_n": [r.tension_feedforward_n  for r in rows],
         "collective_rad":      [r.collective_rad       for r in rows],
-        "collective_ctrl":     [r.collective_from_tension_ctrl for r in rows],
+        "collective_alt_ctrl": [r.collective_from_alt_ctrl for r in rows],
         "orbit_radius_m":      [r.orbit_radius        for r in rows],
     }
 
@@ -326,14 +326,14 @@ def analyse(rows: list[TelRow]) -> dict:
         if not ph:
             continue
         tvals = [r.tether_tension for r in ph if r.tether_tension > 0]
-        tsets = [r.tension_setpoint for r in ph if r.tension_setpoint > 0]
+        tsets = [r.tension_feedforward_n for r in ph if r.tension_feedforward_n > 0]
         if tvals:
             print(f"\n  {label}:")
             print(f"    tension:    {_stats(tvals)}")
             if tsets:
                 print(f"    setpoint:   {_stats(tsets)}")
-            matching = [(r.tether_tension, r.tension_setpoint)
-                        for r in ph if r.tether_tension > 0 and r.tension_setpoint > 0]
+            matching = [(r.tether_tension, r.tension_feedforward_n)
+                        for r in ph if r.tether_tension > 0 and r.tension_feedforward_n > 0]
             if matching:
                 errs = [abs(t - s) for t, s in matching]
                 print(f"    |error|:    {_stats(errs)}")
@@ -371,13 +371,13 @@ def analyse(rows: list[TelRow]) -> dict:
     ri = phases["reel-in"]
     if ri:
         # Check if controller is saturating (collective at floor)
-        col_vals  = [r.collective_from_tension_ctrl for r in ri
-                     if r.collective_from_tension_ctrl != 0.0]
+        col_vals  = [r.collective_from_alt_ctrl for r in ri
+                 if r.collective_from_alt_ctrl != 0.0]
         tens_ri   = [r.tether_tension for r in ri]
         t_ri      = [r.t_sim for r in ri]
 
         if col_vals:
-            print(f"  collective_ctrl: {_stats(col_vals)}")
+            print(f"  collective_alt_ctrl: {_stats(col_vals)}")
             n_near_zero = sum(1 for c in col_vals if c < 0.02)
             print(f"  rows at floor (col<0.02): {n_near_zero}/{len(col_vals)} "
                   f"({100*n_near_zero/len(col_vals):.0f}%)")
@@ -544,7 +544,7 @@ def compare(rows_a: list[TelRow], label_a: str,
             "t_above_500":     sum(sp.duration for sp in find_tension_spikes(rows, 500.0)),
             "mean_t_out":      mean(out_t) if out_t else 0.0,
             "mean_t_in":       mean(in_t)  if in_t  else 0.0,
-            "col_saturated_%": (100.0 * sum(1 for r in ri if r.collective_from_tension_ctrl < 0.02)
+            "col_saturated_%": (100.0 * sum(1 for r in ri if r.collective_from_alt_ctrl < 0.02)
                                 / max(len(ri), 1)),
         }
 

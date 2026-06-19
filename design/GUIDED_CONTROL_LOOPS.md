@@ -4,7 +4,12 @@
 
 This document describes the control loop architecture for ArduPilot's **Guided mode** as used by the RAWES (Rotary Airborne Wind Energy System). It is intended for control system engineers who need to understand the signal flow from an attitude command down to swashplate and tail actuator outputs.
 
-RAWES uses the **Angle submode** of Guided mode, which bypasses all position, velocity, and altitude controllers. The active control chain is: **Lua attitude + thrust target → Attitude P → Rate PID+FF → Swashplate**, with collective commanded directly by the Lua script.
+RAWES uses the **Angle submode** of Guided mode, which bypasses all position, velocity, and altitude controllers. There are two relevant Angle-submode entry paths:
+
+- **Angle + rate + thrust**: Lua provides an absolute attitude target, optional body-rate feed-forward, and direct thrust.
+- **Rate-only + thrust**: Lua provides body-rate targets and direct thrust, but no absolute attitude target.
+
+Both paths use ArduPilot's attitude/rate machinery and both command collective directly from thrust. The difference is where the body-rate target comes from: either from quaternion attitude error plus feed-forward, or directly from the rate-only command shaper.
 
 ### High-Level Signal Flow
 
@@ -13,13 +18,17 @@ graph TD
     CMD[<b>Guided Mode Command</b><br/>Angle submode]
 
     CMD --> ANGLE
+    CMD --> RATEONLY
 
     subgraph "<b>Lua Script</b>"
         ANGLE["set_target_angle_and_rate_and_throttle<br/>roll, pitch, yaw, rates, thrust"]
+        RATEONLY["set_target_rate_and_throttle<br/>body rates, thrust"]
     end
 
     ANGLE -->|quaternion + rate FF| ATT
     ANGLE -->|thrust 0–1| MIX
+    RATEONLY -->|shaped body-rate target| RATE
+    RATEONLY -->|thrust 0–1| MIX
 
     ATT[<b>Attitude P</b><br/>ATC_ANG_RLL/PIT/YAW_P]
     RATE[<b>Rate PID + FF</b><br/>ATC_RAT_RLL/PIT/YAW<br/>Leaky I · Piro Comp]
@@ -72,11 +81,13 @@ Guided mode supports multiple submodes. **RAWES uses exclusively the Angle submo
 | Accel | 3D acceleration | No — routes through AC_PosControl |
 | VelAccel | Velocity + Acceleration | No — routes through AC_PosControl |
 | PosVelAccel | Position + Velocity + Accel | No — routes through AC_PosControl |
-| **Angle** | **Roll/Pitch/Yaw + Thrust** | **Yes** |
+| **Angle** | **Roll/Pitch/Yaw + Thrust** or **Body Rates + Thrust** | **Yes** |
 
 ### Angle Submode Entry
 
-The Lua API enters the Angle submode by calling `ModeGuided::set_angle()`, which feeds the attitude controller via `input_quaternion()` — no position, velocity, or altitude controller is involved.
+The Lua API enters the Angle submode by calling `ModeGuided::set_angle()`. No position, velocity, or altitude controller is involved. Inside `run_angle_control()`, ArduPilot chooses one of two attitude-controller inputs based on whether the stored quaternion is nonzero or zero.
+
+#### Angle + Rate + Thrust Entry
 
 **RAWES API**: `set_target_angle_and_rate_and_throttle(roll, pitch, yaw, roll_rate, pitch_rate, yaw_rate, throttle)`
 
@@ -84,6 +95,58 @@ This calls `set_angle(q, ang_vel_body, throttle, use_thrust=true)`:
 - Euler angles are converted to a quaternion and passed to the attitude controller
 - Body-rate feed-forward terms are added to the rate target (supply the known orbital angular velocity to reduce tracking lag)
 - Throttle (0–1) goes directly to collective output, bypassing the vertical PID chain entirely
+
+Control-chain summary:
+
+```
+roll/pitch/yaw + body-rate FF → set_angle(nonzero quaternion, rates, thrust, use_thrust=true)
+                                → input_quaternion()
+                                → attitude error + feed-forward blending
+                                → heli rate PID
+thrust                          → set_throttle_out(...)
+                                → direct collective output
+```
+
+#### Rate-Only + Thrust Entry
+
+**RAWES API**: `set_target_rate_and_throttle(roll_rate, pitch_rate, yaw_rate, throttle)`
+
+This calls the same `ModeGuided::set_angle(...)` storage path, but with a **zero quaternion**:
+
+```cpp
+Quaternion q;
+q.zero();
+mode_guided.set_angle(q, ang_vel_body, throttle, true);
+```
+
+At 400 Hz, `ModeGuided::run_angle_control()` detects that zero quaternion and switches from `input_quaternion(...)` to:
+
+```cpp
+attitude_control->input_rate_bf_roll_pitch_yaw(...);
+attitude_control->set_throttle_out(thrust, apply_angle_boost=true, filt);
+```
+
+Important behavior:
+- The caller does **not** provide an absolute attitude target.
+- ArduPilot conditions its internal `_attitude_target` from the current body attitude, then integrates that target using the shaped body-rate target.
+- Desired body rates are smoothed by `input_shaping_ang_vel(...)` using `ATC_INPUT_TC` and `ATC_ACCEL_R/P/Y_MAX`.
+- The normal quaternion attitude controller still runs afterward, so this is **stabilized rate control**, not a raw PID-only passthrough.
+- With requested rates `(0, 0, 0)`, the vehicle tries to settle body rates to zero while holding the internally conditioned attitude target.
+- Throttle remains the same direct-thrust path as angle+rate+throttle; the Z PID chain is still bypassed.
+
+Why this matters for RAWES: if the controller knows “stop rotating” but does not know the correct absolute roll/pitch/yaw for the current tether/wind state, rate-only Guided can avoid injecting a wrong absolute attitude command while still using ArduPilot's shaped rate and heli PID machinery.
+
+Control-chain summary:
+
+```
+body rates → set_angle(zero quaternion, rates, thrust, use_thrust=true)
+           → input_rate_bf_roll_pitch_yaw()
+           → input_shaping_ang_vel()
+           → internal attitude target conditioned from current attitude
+           → heli rate PID
+thrust     → set_throttle_out(...)
+           → direct collective output
+```
 
 ### Vertical Path: Raw Thrust
 
@@ -155,13 +218,13 @@ RAWES cannot use this approach — horizontal force comes from tilting the rotor
 
 ### 3.4 RAWES Solution
 
-RAWES uses Guided Angle submode to bypass `AC_PosControl` entirely. The Lua script closes its own horizontal position loop with full knowledge of the flight regime (steep tilt, tether forces, orbital dynamics) and commands attitude and thrust directly via `set_target_angle_and_rate_and_throttle()`.
+RAWES uses Guided Angle submode to bypass `AC_PosControl` entirely. The Lua script closes its own flight-regime logic with full knowledge of steep tilt, tether forces, and orbital dynamics, then commands either attitude+thrust via `set_target_angle_and_rate_and_throttle()` or body-rates+thrust via `set_target_rate_and_throttle()`.
 
 ---
 
 ## 4. Collective Path (Direct Thrust)
 
-With `set_target_angle_and_rate_and_throttle`, the thrust value (0–1) bypasses the entire Z PID chain and goes directly to the collective servo:
+With either `set_target_angle_and_rate_and_throttle` or `set_target_rate_and_throttle`, the thrust value (0–1) bypasses the entire Z PID chain and goes directly to the collective servo:
 
 ```
 thrust (from Lua) → set_throttle_out(thrust, apply_angle_boost)
@@ -443,14 +506,14 @@ While this doesn't directly inject yaw, it clips the maximum allowed attitude ba
 
 ## 11. Loop Execution Order (Per Control Cycle)
 
-For RAWES (Angle submode with direct thrust), the per-cycle execution is:
+For RAWES (Angle submode with direct thrust), the per-cycle execution has two symmetric entry paths:
 
 1. **Lua script** (~50 Hz or script-defined rate):
-   - Computes orbital trajectory → earth-frame attitude target
-   - Determines thrust based on flight phase / tether tension
-   - Calls `set_target_angle_and_rate_and_throttle(roll, pitch, yaw, rates..., thrust)`
+    - Determines thrust based on flight phase / tether tension
+    - Either computes an earth-frame attitude target and calls `set_target_angle_and_rate_and_throttle(roll, pitch, yaw, rates..., thrust)`
+    - Or computes body-rate targets and calls `set_target_rate_and_throttle(roll_rate, pitch_rate, yaw_rate, thrust)`
 
-2. **Attitude controller** (~400 Hz):
+2. **Angle + rate + thrust path** (~400 Hz):
    - Quaternion target from Lua
    - Input shaping: slew target toward command via `sqrt_controller`
    - Compute quaternion attitude error
@@ -458,7 +521,13 @@ For RAWES (Angle submode with direct thrust), the per-cycle execution is:
    - Add rate feedforward (from Lua rate arguments + attitude target rate of change)
    - Blend feedforward by thrust error angle (degrades at steep tilt transients)
 
-3. **Rate controller** (~400 Hz):
+3. **Rate-only + thrust path** (~400 Hz):
+    - Zero-quaternion sentinel selects `input_rate_bf_roll_pitch_yaw()`
+    - Shape requested body rates via `input_shaping_ang_vel()`
+    - Condition internal attitude target from current attitude
+    - Produce the same heli rate-controller target used by the normal rate stack
+
+4. **Rate controller** (~400 Hz):
    - Filter rate target (FLTT)
    - Compute rate error (target − gyro)
    - Filter error (FLTE)
@@ -467,11 +536,11 @@ For RAWES (Angle submode with direct thrust), the per-cycle execution is:
    - Apply slew limit (SMAX)
    - Output to motor mixing
 
-4. **Direct thrust** (same cycle):
+5. **Direct thrust** (same cycle):
    - Thrust value from Lua → `set_throttle_out()` → collective servo
    - Angle boost applied if `ATC_ANG_BOOST` enabled (scales by `1/cos(tilt)`)
 
-5. **Motor mixing**:
+6. **Motor mixing**:
    - Roll/Pitch/Collective → swashplate servo positions (phase-rotated by `H_SW_H3_PHANG`)
    - Yaw → anti-rotation motor
 
@@ -522,35 +591,34 @@ Key distinctions from a conventional helicopter:
 
 ### 14.2 Which Guided Submode RAWES Uses
 
-RAWES uses exclusively the **Angle submode** of Guided mode, via the Lua API:
+RAWES uses exclusively the **Angle submode** of Guided mode, via one of two Lua APIs:
 
 ```lua
 vehicle:set_target_angle_and_rate_and_throttle(roll_deg, pitch_deg, yaw_deg,
     roll_rate_dps, pitch_rate_dps, yaw_rate_dps, throttle)
+
+vehicle:set_target_rate_and_throttle(roll_rate_dps, pitch_rate_dps, yaw_rate_dps,
+    throttle)
 ```
 
-An outer Lua script owns the orbit-tracking and pumping-cycle logic, computing earth-frame attitude targets and thrust commands directly.
+An outer Lua script owns the pumping-cycle logic. It can either compute earth-frame attitude targets directly, or command body rates when the desired absolute attitude is unknown and the immediate objective is rate damping. In both cases, thrust commands collective directly.
 
 #### Why Not Position/Velocity Submodes?
 
 All `*_NED` position and velocity Guided APIs route through `AC_PosControl`, which is linearized around small tilt angles. The effective gain scales as **g / cos²(θ)** — doubling at 45° and quadrupling at 60°. At steep equilibrium tilt the position controller becomes unstable and `ANGLE_MAX` lean-limit clips engage.
 
-The Angle submode bypasses `AC_PosControl` entirely — both horizontal and vertical. The Lua script sends a full quaternion attitude target directly to `AC_AttitudeControl` and a thrust value directly to the collective servo.
+The Angle submode bypasses `AC_PosControl` entirely — both horizontal and vertical. The Lua script sends either a full quaternion attitude target or a body-rate target directly to `AC_AttitudeControl`, and sends thrust directly to the collective servo.
 
 ### 14.3 Resulting Control Loop Architecture for RAWES
 
 ```mermaid
 graph TD
-    LUA["<b>Lua Script</b><br/>Orbit tracker / pump cycle<br/>Computes earth-frame attitude"]
+    LUA["<b>Lua Script</b><br/>Orbit tracker / pump cycle"]
 
-    LUA -->|"roll, pitch, yaw, rates, thrust"| ANGLE
+    LUA -->|"[roll], [pitch], [yaw], rates, thrust"| ANGLE
 
-    subgraph "<b>Guided Angle Path</b>"
-        ANGLE["set_target_angle_and_rate_and_throttle<br/>→ quaternion + rate FF + thrust"]
-    end
-
-    ANGLE --> SHAPE
-    ANGLE -->|"thrust 0–1"| MIX
+    ANGLE["set_target_angle_and_rate_and_throttle<br/>→ quaternion + rate FF + thrust<br>or<br>set_target_rate_and_throttle<br/>→ zero quaternion + body rates + thrust"] --> SHAPE
+    ANGLE --> RATE_SHAPE
 
     subgraph "<b>Attitude Outer Loop</b>"
         SHAPE["Input Shaping<br/>sqrt_controller + accel limit"]
@@ -561,6 +629,14 @@ graph TD
     end
 
     FFBLEND -->|"rate_target"| RATE
+
+    subgraph "<b>Rate-Only Input Path</b>"
+        RATE_SHAPE["Rate Input Shaping<br/>input_shaping_ang_vel"]
+        RATE_COND["Condition Internal Attitude Target<br/>from current attitude"]
+        RATE_SHAPE --> RATE_COND
+    end
+
+    RATE_COND -->|"rate_target"| RATE
 
     subgraph "<b>Heli Rate Inner Loop</b>"
         RATE["AC_HELI_PID per axis<br/>P + D + FF"]
@@ -580,7 +656,7 @@ graph TD
     WIND -.->|"unmodeled disturbance"| MIX
 ```
 
-**Key difference from standard helicopter Guided**: the horizontal position and velocity loops (Sections 3.1–3.3) are entirely bypassed. Only the attitude → rate → motor chain is active for roll/pitch/yaw.
+**Key difference from standard helicopter Guided**: the horizontal position and velocity loops (Sections 3.1–3.3) are entirely bypassed. Roll/pitch/yaw enter either through the attitude → rate → motor chain or through the rate-only → rate → motor chain.
 
 ### 14.4 High Tilt Angle Implications
 
@@ -642,7 +718,7 @@ Because rotor angular momentum H is large relative to orbital moments of inertia
 ω_precession = M / H    (perpendicular to both M and spin axis)
 ```
 
-The swashplate phase angle `H_SW_H3_PHANG` compensates for this: it rotates the cyclic control axes so that a "pitch forward" command from the controller produces the correct 90°-advanced swashplate tilt that, after gyroscopic precession, results in actual forward pitch. **If this phase angle is wrong, the attitude controller tilts the disk in the wrong direction and the system crashes immediately.**
+The swashplate phase angle `H_SW_H3_PHANG` compensates for this: it rotates the cyclic control axes so that a "pitch forward" command from the controller produces the correct 90°-advanced swashplate tilt that (servoflaps complicate this), after gyroscopic precession, results in actual forward pitch. **If this phase angle is wrong, the attitude controller tilts the disk in the wrong direction and the system crashes immediately.**
 
 #### Stability Requires Active Angular Rate Damping
 

@@ -1,17 +1,17 @@
 """
-test_landing.py -- Vertical landing via LandingGroundController / LandingApController.
+test_landing.py -- Vertical landing via LandingGroundController / MockArdupilot landing mode.
 
 Mirrors test_pump_cycle_unified.py architecture:
   Ground (10 Hz): LandingGroundController -> LandingCommand
   Winch  (400 Hz): WinchController (set_target at 10 Hz)
-  AP     (400 Hz): LandingApController -> (collective, rate_roll, rate_pitch)
+    AP     (400 Hz): MockArdupilot landing Python mode -> (collective, rate_roll, rate_pitch)
                    HeliCyclicController -> (tilt_lon, tilt_lat)
 
 Phase sequence from steady_state_starting.json IC:
   reel_in      -- winch reels in from IC rest_length (~97m) to target_length_m (50m).
                   body_z stays at IC orientation.  VZ PI holds altitude.
-  get_vertical -- winch holds at 50m.  body_z slerps to [0,0,-1] (xi=90 deg, disk horizontal).
-                  VZ PI holds altitude.  Uses Peters-He aero (SkewedWakeBEM invalid at xi>85 deg).
+    get_vertical -- winch holds at 50m.  body_z slerps to [0,0,-1] (xi=90 deg, disk horizontal).
+                                    VZ PI holds altitude.
   descent      -- disk fixed horizontal.  Winch tension target pulls hub down.
                   VZ PI descends at v_land.  Exits when rest_length <= min_tether_m.
   flare        -- winch holds.  VZ PI at vz_sp=0, seeded at col_descent + col_flare_delta.
@@ -31,9 +31,9 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 from winch           import WinchController
 from simtest_log     import BadEventLog
 from simtest_ic      import load_ic
-from simtest_runner  import PhysicsRunner, PythonAP
+from simtest_runner  import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from landing_planner import LandingGroundController
-from ap_controller   import LandingApController
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 _IC    = load_ic()
@@ -74,8 +74,8 @@ T_FLARE_MAX          = 30.0   # s   max time in flare before timeout
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_landing(log) -> "tuple[dict, PythonAP]":
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model="oye", col_min_rad=-0.28, col_max_rad=0.10)
+def _run_landing(log) -> "tuple[dict, object]":
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
 
     ground = LandingGroundController(
         initial_body_z   = _IC.R0[:, 2],
@@ -91,17 +91,14 @@ def _run_landing(log) -> "tuple[dict, PythonAP]":
         min_tether_m     = MIN_TETHER_M,
     )
 
-    _ap = LandingApController(
+    ap = MockArdupilot.for_landing(
         ic_body_z       = _IC.R0[:, 2],
         slew_rate_rad_s = BODY_Z_SLEW_RATE_RAD_S,
         warm_coll_rad   = _IC.coll_eq_rad,
-        kp_vz           = LandingApController.KP_VZ,
-        ki_vz           = LandingApController.KI_VZ,
-        col_min_rad     = LandingApController.COL_MIN_RAD,
-        col_max_rad     = LandingApController.COL_MAX_RAD,
         kp_outer        = 2.5,
+        wind            = WIND,
+        dt              = DT,
     )
-    ap = PythonAP(_ap, wind=WIND, dt=DT)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),
         "phase":          phase,
@@ -119,7 +116,7 @@ def _run_landing(log) -> "tuple[dict, PythonAP]":
 
     events        = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
-    ap_every      = max(1, round(1.0 / (PythonAP.AP_HZ * DT)))
+    ap_every      = max(1, round(1.0 / (MockArdupilot.AP_HZ * DT)))
 
     # Per-phase exit snapshots: filled when the phase first transitions away
     phase_exit: "dict[str, dict]" = {}
@@ -138,7 +135,7 @@ def _run_landing(log) -> "tuple[dict, PythonAP]":
     # Prime first command
     cmd = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
                       hub_alt_m=float(-_IC.pos[2]))
-    ap.ap.receive_command(cmd, DT_PLANNER)
+    ap.receive_command(cmd, DT_PLANNER)
     winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
     descent_time = _IC.rest_length / V_LAND * 3.0 + 60.0
@@ -155,7 +152,7 @@ def _run_landing(log) -> "tuple[dict, PythonAP]":
         if i % planner_every == 0:
             cmd = ground.step(t_sim, tension_now,
                               rest_length=winch.rest_length, hub_alt_m=altitude)
-            ap.ap.receive_command(cmd, DT_PLANNER)
+            ap.receive_command(cmd, DT_PLANNER)
             winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
         # ── Winch 400 Hz ──────────────────────────────────────────────────

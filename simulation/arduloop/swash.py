@@ -34,6 +34,6 @@ class SwashH3:
         a = math.radians(self.phase_angle_deg)
         ca = math.cos(a)
         sa = math.sin(a)
-        roll_out  =  ca * roll_cmd + sa * pitch_cmd
-        pitch_out = -sa * roll_cmd + ca * pitch_cmd
+        roll_out  =  ca * roll_cmd - sa * pitch_cmd
+        pitch_out =  sa * roll_cmd + ca * pitch_cmd
         return roll_out, pitch_out

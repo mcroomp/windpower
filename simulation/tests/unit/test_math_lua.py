@@ -19,11 +19,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller import (
     compute_bz_altitude_hold,
-    damp_bz_eq_lateral,
+    compute_rate_cmd_sqrt,
 )
 from rawes_lua_harness import RawesLua
 
@@ -68,14 +67,13 @@ def test_constants_have_expected_values(sim):
     assert float(f.COL_CRUISE_FLIGHT_RAD) == pytest.approx(-0.18)
     assert float(f.COL_MIN_RAD)           == pytest.approx(-0.28)
     assert float(f.COL_MAX_RAD)           == pytest.approx(0.10)
-    assert float(f.COL_REEL_OUT)          == pytest.approx(-0.20)
-    assert float(f.T_PUMP_TRANSITION)     == pytest.approx(3.7)
-    assert float(f.KP_VZ)                 == pytest.approx(0.05)
     assert float(f.MASS_KG)               == pytest.approx(5.0)
     assert float(f.G_ACCEL)               == pytest.approx(9.81)
-    assert float(f.KP_TEN)               == pytest.approx(2e-4)
-    assert float(f.KI_TEN)               == pytest.approx(1e-3)
-    assert float(f.COL_MAX_TEN)          == pytest.approx(0.10)
+    assert float(f.KP_ALT)                == pytest.approx(0.010)
+    assert float(f.KI_ALT)                == pytest.approx(0.001)
+    assert float(f.KD_VZ)                 == pytest.approx(0.040)
+    assert float(f.RATE_KP_OUTER)         == pytest.approx(2.5)
+    assert float(f.RATE_ACCEL_MAX_RADSS)  == pytest.approx(4.0)
 
 
 # ── bz_altitude_hold ─────────────────────────────────────────────────────────
@@ -96,6 +94,7 @@ class TestBzAltitudeHold:
         r   = sim.fns.bz_altitude_hold(pos, 0.3, 200.0)
         rv  = sim.vec_to_list(r)
         assert math.sqrt(sum(x**2 for x in rv)) == pytest.approx(1.0, abs=1e-12)
+
 
     def test_vertical_tether_points_down(self, sim):
         """FRD: at el=pi/2 (vertical) the hub is straight up, so body_z (= hub→
@@ -173,43 +172,22 @@ class TestBzAltitudeHold:
             f"Mismatch at el={el_deg} az={az_deg} T={tension}"
 
 
-# ── damp_bz_eq_lateral ────────────────────────────────────────────────────────
-
-
-class TestDampBzEqLateral:
-    """Cross-check: Lua damp_bz_eq_lateral matches Python damp_bz_eq_lateral."""
-
-    @pytest.mark.parametrize("vel_xyz, tension", [
-        ((0.0, 0.0,  0.0), 300.0),   # no velocity → no correction
-        ((1.0, 0.0,  0.0), 300.0),
-        ((0.0, 2.0, -0.5), 200.0),
-        ((1.5, 0.5,  0.0), 100.0),
-        ((0.0, 0.0,  3.0), 400.0),   # purely along-tether (full cancel)
-    ])
-    def test_matches_python(self, sim, vel_xyz, tension):
-        """Lua matches controller.damp_bz_eq_lateral across velocity / tension grid."""
-        kd_lat  = float(sim.fns.KD_LAT)
-        # Hub position at 30 deg elevation, east of anchor.
-        pos_np  = np.array([0.0, 86.6025, -50.0])
-        # Use the gravity-comped altitude-hold body_z as the base target.
-        MASS_KG = float(sim.fns.MASS_KG)
-        bz_np   = compute_bz_altitude_hold(pos_np, math.radians(30.0), tension, MASS_KG)
-        vel_np  = np.array(vel_xyz, dtype=float)
-
-        expected = damp_bz_eq_lateral(
-            bz_np, pos_np, vel_np, np.zeros(3), tension, kd_lat,
-        ).tolist()
-
-        bz_lua  = sim.lua_vec(*bz_np)
-        pos_lua = sim.lua_vec(*pos_np)
-        vel_lua = sim.lua_vec(*vel_np)
-        result  = sim.vec_to_list(sim.fns.damp_bz_eq_lateral(
-            bz_lua, pos_lua, vel_lua, tension, kd_lat,
-        ))
-
-        assert result == pytest.approx(expected, abs=1e-10), \
-            f"Mismatch at vel={vel_xyz} T={tension}"
-
+class TestRateCmdSqrt:
+    def test_matches_python_reference(self, sim):
+        """Lua compute_rate_cmd_sqrt mirrors Python for identity body frame."""
+        bz_now = sim.lua_vec(0.0, 0.0, 1.0)
+        angle = math.radians(15.0)
+        bz_goal = sim.lua_vec(math.sin(angle), 0.0, math.cos(angle))
+        r_lua = sim.vec_to_list(sim.fns.compute_rate_cmd_sqrt(bz_now, bz_goal, 2.5, 4.0, 0.02))
+        r_py = compute_rate_cmd_sqrt(
+            np.array([0.0, 0.0, 1.0]),
+            np.array([math.sin(angle), 0.0, math.cos(angle)]),
+            np.eye(3),
+            kp=2.5,
+            accel_max=4.0,
+            dt=0.02,
+        )
+        np.testing.assert_allclose(r_lua, r_py, atol=1e-9)
 
 # ── bz_ned_to_roll_pitch ──────────────────────────────────────────────────────
 

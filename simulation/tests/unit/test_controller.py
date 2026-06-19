@@ -15,7 +15,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from controller import (
     compute_rc_rates,
@@ -26,6 +25,7 @@ from controller import (
     compute_bz_tether,
     slerp_body_z,
     compute_rate_cmd,
+    compute_rate_cmd_sqrt,
 )
 
 
@@ -597,6 +597,35 @@ def test_rate_cmd_transforms_into_body_frame():
     # Norms must be equal (same physical correction magnitude)
     np.testing.assert_allclose(np.linalg.norm(r_world), np.linalg.norm(r_rot90), atol=1e-10)
     # But directions differ (frame has rotated)
+    assert not np.allclose(r_world, r_rot90, atol=1e-6)
+
+
+def test_rate_cmd_sqrt_matches_linear_in_small_error_region():
+    """Inside sqrt controller's linear region, shaped rate is angle-P."""
+    bz_now = np.array([0., 0., 1.])
+    angle = np.radians(5.0)
+    bz_eq = np.array([np.sin(angle), 0., np.cos(angle)])
+    rates = compute_rate_cmd_sqrt(bz_now, bz_eq, _I3, kp=1.0, accel_max=10.0, dt=0.02)
+    assert np.linalg.norm(rates) == pytest.approx(angle, rel=1e-6)
+
+
+def test_rate_cmd_sqrt_limits_large_error_below_linear_rate():
+    """Large errors are sqrt-shaped below the raw kp*angle demand."""
+    bz_now = np.array([0., 0., 1.])
+    angle = np.radians(60.0)
+    bz_eq = np.array([np.sin(angle), 0., np.cos(angle)])
+    kp = 2.5
+    rates = compute_rate_cmd_sqrt(bz_now, bz_eq, _I3, kp=kp, accel_max=1.0, dt=0.02)
+    assert np.linalg.norm(rates) < kp * angle
+
+
+def test_rate_cmd_sqrt_transforms_into_body_frame():
+    """Sqrt-shaped helper still returns body-frame rates."""
+    bz_now = np.array([0., 0., 1.])
+    bz_eq = np.array([np.sin(np.radians(10.0)), 0., np.cos(np.radians(10.0))])
+    r_world = compute_rate_cmd_sqrt(bz_now, bz_eq, _I3, kp=1.0, accel_max=10.0, dt=0.02)
+    r_rot90 = compute_rate_cmd_sqrt(bz_now, bz_eq, _Rz(np.radians(90.0)), kp=1.0, accel_max=10.0, dt=0.02)
+    np.testing.assert_allclose(np.linalg.norm(r_world), np.linalg.norm(r_rot90), atol=1e-10)
     assert not np.allclose(r_world, r_rot90, atol=1e-6)
 
 

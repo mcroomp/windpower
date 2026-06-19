@@ -144,9 +144,8 @@ class MavlinkComms:
     send_command() sends RAWES_TEN + RAWES_ALT + RAWES_SUB via gcs.py.
     receive_telemetry() does a non-blocking poll of LOCAL_POSITION_NED.
 
-    tension_measured_n is not forwarded — rawes.lua's TensionPI runs on
-    RAWES_TEN (setpoint) only; the load-cell feedback path exists only in
-    the Python TensionApController used by simtests.
+    tension_target_n carries the target/feed-forward tension used by Lua
+    gravity compensation and by the local MockArdupilot Python equivalent.
 
     Parameters
     ----------
@@ -169,10 +168,10 @@ class MavlinkComms:
 
     def send_command(self, _t_sim: float, cmd: "TensionCommand") -> None:
         """
-        Send tension setpoint, altitude target, and phase substate to the AP.
+        Send target tension, altitude target, and phase substate to the AP.
         t_sim is accepted for API symmetry with VirtualComms but is not used.
         """
         sub = _PHASE_TO_SUB.get(cmd.phase, 0)
-        self._gcs.send_named_float("RAWES_TEN", cmd.tension_setpoint_n)
+        self._gcs.send_named_float("RAWES_TEN", cmd.tension_target_n)
         self._gcs.send_named_float("RAWES_ALT", cmd.alt_m)
         self._gcs.send_named_float("RAWES_SUB", float(sub))

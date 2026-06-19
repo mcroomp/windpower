@@ -1,7 +1,7 @@
 """
 test_landing_lua.py -- rawes.lua mode=4 landing from steady-flight IC.
 
-Mirrors test_landing.py: replaces LandingApController with rawes.lua (mode=4)
+Mirrors test_landing.py: replaces MockArdupilot landing Python mode with rawes.lua (mode=4)
 running in-process via lupa (Lua 5.4).
 
 Ground side (Python, 10 Hz): LandingGroundController + WinchController.
@@ -26,7 +26,8 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 from winch           import WinchController
 from simtest_log     import BadEventLog
 from simtest_ic      import load_ic
-from simtest_runner  import PhysicsRunner, LuaAP
+from simtest_runner  import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from landing_planner import LandingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes       import MODE_LANDING, LAND_FINAL_DROP
@@ -97,7 +98,7 @@ def _run_landing(log) -> dict:
     sim.healthy      = True
     sim.vehicle_mode = 4   # GUIDED
 
-    lua = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
     lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase)
 
     events    = BadEventLog()

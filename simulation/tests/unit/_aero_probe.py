@@ -4,9 +4,9 @@ The new aero (e:/repos/aero) exposes compute_forces(RotorInputs, RotorState)
 and integrates omega + inflow internally.  These helpers wrap the call so
 unit tests that only care about steady-state forces stay readable.
 
-Use ``probe_steady`` for quasi-steady probes — settles the OyeBEM dynamic
-inflow with a short forward-Euler loop at fixed omega and returns the
-converged AeroResult.
+Use ``probe_steady`` for quasi-steady probes.  Quasi-static aero returns
+immediately; dynamic-inflow models can still be passed explicitly and are
+settled with a short forward-Euler loop at fixed omega.
 
 All R_hub passed in must follow the project FRD convention: R[:,2] points
 DOWN through the disk (e.g. R[:,2] = [0,0,+1] for a level hover, or
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dynbem import OyeBEMModel, RotorInputs, create_aero, rotor_definition as _rd
+from dynbem import RotorInputs, create_aero, rotor_definition as _rd
 
 
 _ROTOR_DEFS = Path(__file__).resolve().parents[2] / "rotor_definitions"
@@ -29,16 +29,11 @@ def load_rotor(name: str = "beaupoil_2026"):
     return _rd.load(str(_ROTOR_DEFS / f"{name}.yaml"))
 
 
-def make_probe(rotor=None) -> OyeBEMModel:
-    """Build an OyeBEMModel for probing.
-
-    Øye is the project default — easier to control than Pitt-Peters at
-    edgewise wind / descent.  The dynamic inflow states are settled by
-    callers that need a true steady-state probe (see probe_steady_settled).
-    """
+def make_probe(rotor=None):
+    """Build the default quasi-static aero model for probing."""
     if rotor is None:
         rotor = load_rotor()
-    return create_aero(rotor, 'oye')
+    return create_aero(rotor, "quasi_static")
 
 
 def probe_steady(
@@ -54,10 +49,11 @@ def probe_steady(
     t: float = 0.0,
     rho_kg_m3: float = 1.225,
 ):
-    """Settle dynamic inflow then return AeroResult.
+    """Return a quasi-steady AeroResult.
 
-    Runs a short forward-Euler loop at fixed omega so dynamic-inflow models
-    (Øye / Pitt-Peters) reach their quasi-steady state.  Cheap (~1 ms).
+    Dynamic-inflow models are settled with a short forward-Euler loop at fixed
+    omega.  Quasi-static models have no meaningful transient state, so the loop
+    is effectively a no-op.
     """
     state = aero.initial_rotor_state()
     inputs = RotorInputs(

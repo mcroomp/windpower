@@ -6,11 +6,11 @@ Mirrors test_steady_flight.py, replacing the Python controller with rawes.lua
 
 GPS is available from t=0 (pos_ned set at IC position) so rawes.lua fires
 _el_initialized on the first tick and starts bz_altitude_hold cyclic +
-VZ-PI collective immediately.  RAWES_TEN is fed from the live physics tension
+VZ-PI collective immediately.  RAWES_TEN is fed from the 300 N target tension
 each Lua tick for gravity compensation.
 
 In GUIDED mode rawes.lua calls vehicle:set_target_angle_and_climbrate for
-cyclic (not ch1/ch2). LuaAP feeds that into GuidedAttitudeController; ch3
+cyclic (not ch1/ch2). MockArdupilot Lua backend feeds that into GuidedAttitudeController; ch3
 is still decoded for collective.
 
 Non-Lua reference: test_steady_flight.py
@@ -28,7 +28,8 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 from simtest_ic    import load_ic
 from simtest_log   import BadEventLog
-from simtest_runner import PhysicsRunner, LuaAP
+from simtest_runner import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from rawes_lua_harness import RawesLua
 from rawes_modes   import MODE_STEADY
 from tests.simtests._rotor_helpers import load_default_rotor
@@ -57,7 +58,7 @@ def _run_steady(log) -> dict:
     sim.gyro         = [0.0, 0.0, 0.0]
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
-    lua     = LuaAP(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua     = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
     lua.tel_fn = lambda r, sr: dict(body_z_eq=None)
 
     events           = BadEventLog()
@@ -75,7 +76,7 @@ def _run_steady(log) -> dict:
 
         if i % LUA_EVERY == 0:
             lua.tick(t, runner,
-                     inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
+                     inject=lambda s, r: s.send_named_float("RAWES_TEN", 300.0))
 
         dT       = runner.tension_now - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))

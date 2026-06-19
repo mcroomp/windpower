@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from swashplate import SwashplateServoModel, collective_rad_to_out
 from dynbem import rotor_definition as rd

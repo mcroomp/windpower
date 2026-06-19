@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
-from simtest_runner import PhysicsRunner, LuaAP
+from simtest_runner import PhysicsRunner
+from tests.common.mock_ardupilot import MockArdupilot
 from rawes_lua_harness import RawesLua
 from rawes_modes import MODE_STEADY
 from tests.simtests._rotor_helpers import load_default_rotor
@@ -126,7 +127,7 @@ def test_ground_liftoff():
     # Swap the elastic tether for a constant 200 N downward load.
     runner._core._tether = _ConstantDownforce(TETHER_FORCE_N)
 
-    lua         = LuaAP(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND_NED, dt=DT)
+    lua         = MockArdupilot.for_lua(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND_NED, dt=DT)
     total_steps = int(LIFTOFF_TIMEOUT / DT)
     liftoff_t   = None
     max_alt     = ic.pos[2] * -1.0   # start altitude

@@ -8,9 +8,8 @@ delivers TensionCommand to the AP via one of three comms adapters:
   LuaComms(inject)     Lua unit test: injects NV floats via send_named_float
   GcsComms(gcs)        SITL stack test: sends NAMED_VALUE_FLOAT via MAVLink
 
-LuaComms and GcsComms both marshal TensionCommand to the same four NV pairs:
-  RAWES_TSP   tension setpoint [N]
-  RAWES_TEN     tension measured [N]  (also used by Lua for gravity compensation)
+LuaComms and GcsComms both marshal TensionCommand to the same three NV pairs:
+    RAWES_TEN     target/feed-forward tension [N] for gravity compensation
   RAWES_ALT     altitude target [m]
   RAWES_SUB     phase as integer (0=hold 1=reel-out 2=transition 3=reel-in)
 """
@@ -31,10 +30,9 @@ _PHASE_TO_SUB: dict[str, int] = {
 def _cmd_to_nv(cmd: TensionCommand) -> list[tuple[str, float]]:
     """Convert a TensionCommand to a list of (name, value) NV float pairs."""
     return [
-        ("RAWES_TSP",  cmd.tension_setpoint_n),
-        ("RAWES_TEN",    cmd.tension_measured_n),
-        ("RAWES_ALT",    cmd.alt_m),
-        ("RAWES_SUB",    float(_PHASE_TO_SUB.get(cmd.phase, 0))),
+        ("RAWES_TEN",  cmd.tension_target_n),   # target tension for gravity comp
+        ("RAWES_ALT",  cmd.alt_m),
+        ("RAWES_SUB",  float(_PHASE_TO_SUB.get(cmd.phase, 0))),
     ]
 
 
@@ -43,7 +41,7 @@ def _cmd_to_nv(cmd: TensionCommand) -> list[tuple[str, float]]:
 # ---------------------------------------------------------------------------
 
 class DirectComms:
-    """Delivers TensionCommand directly to a Python TensionApController."""
+    """Delivers TensionCommand directly to a local MockArdupilot Python equivalent."""
 
     def __init__(self, ap) -> None:
         self._ap = ap

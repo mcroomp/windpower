@@ -6,14 +6,14 @@ Architecture (mirrors test_pump_cycle_lua.py unit test):
     - PumpingGroundController: phase state machine.
     - UDP socket: sends {target_length, target_tension} to mediator WinchController;
       receives {tension_n, rest_length, hub_alt_m} back at ~10 Hz.
-    - GCS (MAVLink): sends RAWES_TSP / RAWES_TEN / RAWES_ALT / RAWES_SUB NVF
-      to Lua so TensionPI + altitude hold run in-flight.
+        - GCS (MAVLink): sends RAWES_TEN / RAWES_ALT / RAWES_SUB NVF
+            to Lua so measured-tension feed-forward + altitude hold run in-flight.
   Mediator (400 Hz):
     - WinchController: applies set_target commands, steps at physics rate,
       owns core.tether.rest_length.
   rawes.lua (50 Hz):
-    - TensionPI collective controlled by RAWES_TSP / RAWES_TEN NVF.
-    - bz_altitude_hold cyclic controlled by RAWES_ALT NVF.
+        - Altitude PID collective controlled by RAWES_ALT NVF.
+        - Rate-only bz_altitude_hold cyclic uses RAWES_TEN feed-forward.
 
 Pass criteria:
   1. No crash (hub above MIN_ALT_M throughout).
@@ -62,7 +62,6 @@ N_CYCLES         = 3
 DELTA_L          = 12.0
 TENSION_OUT      = 435.0
 TENSION_IN       = 240.0
-TENSION_IN_AP    = 213.0
 TENSION_IC       = 300.0
 EL_REEL_IN_RAD   = math.radians(_XI_REEL_IN_DEG)
 T_REEL_OUT_MAX   = 120.0
@@ -85,7 +84,7 @@ _SOCK_TIMEOUT = 0.5
 def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
     """
     Pumping cycle stack test: PumpingGroundController in test process,
-    WinchController in mediator, TensionPI + altitude hold in rawes.lua.
+    WinchController in mediator, altitude PID + rate-only hold in rawes.lua.
     """
     ctx = acro_armed_pumping_lua
     gcs = ctx.gcs
@@ -107,9 +106,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
         n_cycles       = N_CYCLES,
         tension_out    = TENSION_OUT,
         tension_in     = TENSION_IN,
-        tension_in_ap  = TENSION_IN_AP,
         tension_ic     = TENSION_IC,
-        tension_ramp_s = 8.0,
         t_reel_out_max = T_REEL_OUT_MAX,
         t_reel_in_max  = T_REEL_IN_MAX,
     )
