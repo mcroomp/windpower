@@ -485,6 +485,133 @@ def _download_latest_log(session: RawesGCS, dest_dir: str = ".") -> "str | None"
     return local
 
 
+def _cmd_logs(session: RawesGCS, args: list[str]) -> None:
+    """logs [list] [fetch [--id N] [--dir PATH]]
+
+    list          Print all dataflash log entries (id, size, date) the FC
+                  reports via LOG_ENTRY.  No download.
+    fetch         Download one log via the MAVLink LOG_REQUEST_DATA protocol.
+                  --id N    log id to download (default: latest)
+                  --dir D   destination directory (default: simulation/logs/calibrate)
+    """
+    schema = {"--id": "int", "--dir": "str"}
+    sub = args[0].lower() if args else "fetch"
+    rest = args[1:] if args else []
+    try:
+        _pos, flags = _parse_flags(rest, schema)
+    except ValueError as e:
+        print(f"  Error: {e}"); return
+
+    mav     = session._mav
+    sys_id  = session._target_system
+    comp_id = session._target_component
+
+    # ── enumerate logs ────────────────────────────────────────────────────────
+    print("  [DBG] sending LOG_REQUEST_LIST (start=0 end=0xFFFF) ...")
+    mav.mav.log_request_list_send(sys_id, comp_id, 0, 0xFFFF)
+    entries: dict[int, object] = {}
+    deadline = time.monotonic() + 10.0
+    packets_seen = 0
+    while time.monotonic() < deadline:
+        msg = session._recv(type="LOG_ENTRY", blocking=True, timeout=0.5)
+        if msg is None:
+            print(f"  [DBG] timeout waiting for LOG_ENTRY (got {packets_seen} so far) "
+                  f"-- {10.0 - (time.monotonic() - (deadline - 10.0)):.1f}s left")
+            continue
+        packets_seen += 1
+        entries[msg.id] = msg
+        print(f"  [DBG] LOG_ENTRY id={msg.id}  size={msg.size}  "
+              f"last_log_num={msg.last_log_num}  "
+              f"num_logs={msg.num_logs}")
+        if msg.id == msg.last_log_num:
+            print(f"  [DBG] received final entry (id == last_log_num={msg.last_log_num})")
+            break
+
+    if not entries:
+        print("  [FAIL] No LOG_ENTRY messages received.")
+        print("  Check: FC armed? dataflash enabled? MAVLink log stream active?")
+        return
+
+    # ── print list ────────────────────────────────────────────────────────────
+    print(f"\n  {len(entries)} log(s) on FC:")
+    for eid in sorted(entries):
+        e = entries[eid]
+        print(f"    id={eid:4d}  size={e.size:>10,} bytes")
+
+    if sub == "list":
+        return
+
+    # ── select log to fetch ───────────────────────────────────────────────────
+    if "--id" in flags:
+        wanted = int(flags["--id"])
+        if wanted not in entries:
+            print(f"  [FAIL] Log id={wanted} not found (available: {sorted(entries)})")
+            return
+        entry = entries[wanted]
+    else:
+        entry = entries[max(entries)]
+
+    log_id   = entry.id
+    log_size = entry.size
+    dest_dir = str(flags.get("--dir", os.path.join("simulation", "logs", "calibrate")))
+
+    print(f"\n  Fetching log id={log_id}  size={log_size:,} bytes -> {dest_dir}/")
+    if log_size == 0:
+        print("  [FAIL] Log size is 0 -- nothing to download.")
+        return
+
+    os.makedirs(dest_dir, exist_ok=True)
+    local = os.path.join(dest_dir, f"{log_id:08d}.BIN")
+
+    def _request(ofs: int, count: int) -> None:
+        print(f"  [DBG] LOG_REQUEST_DATA id={log_id} ofs={ofs} count={count}")
+        mav.mav.log_request_data_send(sys_id, comp_id, log_id, ofs, count)
+
+    data     = bytearray(log_size)
+    pending: dict[int, bytes] = {}
+    write_ptr = 0
+    retries   = 0
+    last_pct  = -1
+    deadline  = time.monotonic() + 180.0
+
+    _request(0, 0xFFFFFFFF)
+
+    while write_ptr < log_size and time.monotonic() < deadline:
+        msg = session._recv(type="LOG_DATA", blocking=True, timeout=2.0)
+        if msg is None:
+            retries += 1
+            print(f"  [DBG] timeout waiting for LOG_DATA  write_ptr={write_ptr}  "
+                  f"retries={retries}")
+            _request(write_ptr, log_size - write_ptr)
+            continue
+        if msg.id != log_id or msg.count == 0:
+            print(f"  [DBG] skipping LOG_DATA id={msg.id} count={msg.count}")
+            continue
+        chunk = bytes(msg.data[:msg.count])
+        ofs   = msg.ofs
+        end   = ofs + len(chunk)
+        if end <= log_size:
+            data[ofs:end] = chunk
+            pending[ofs]  = chunk
+        while write_ptr in pending:
+            write_ptr += len(pending.pop(write_ptr))
+        pct = write_ptr * 100 // log_size
+        if pct != last_pct and pct % 10 == 0:
+            print(f"    {pct:3d}%  ({write_ptr:,}/{log_size:,} bytes)", end="\r")
+            last_pct = pct
+
+    mav.mav.log_request_end_send(sys_id, comp_id)
+    print()
+
+    if write_ptr < log_size:
+        print(f"  [WARN] Incomplete transfer: {write_ptr:,}/{log_size:,} bytes "
+              f"({retries} retries)")
+    with open(local, "wb") as fh:
+        fh.write(data[:write_ptr])
+    size = os.path.getsize(local)
+    print(f"  [OK] {size:,} bytes -> {local}")
+
+
 def _list_scripts(session: RawesGCS) -> None:
     """List files in /APM/scripts via MAVLink FTP."""
     if not _HAS_MAVFTP:
@@ -857,6 +984,10 @@ One-shot:
   script remove <name>            Remove from /APM/scripts
   config show                     Diff all params from rawes_params.json
   config apply                    Write the DIFFs
+  logs list                       List all dataflash logs on the FC (id / size)
+  logs fetch [--id N] [--dir D]   Download a dataflash .BIN log (default: latest)
+                                  --id N   specific log id; omit for latest
+                                  --dir D  destination dir (default: simulation/logs/calibrate)
   reboot                          Reboot ArduPilot
   ping [baud]                     Scan COM ports for ArduPilot heartbeats
   help                            Show this list
@@ -865,7 +996,7 @@ One-shot:
 
 
 def _arm(session: RawesGCS, force: bool = False,
-         timeout: float = 15.0) -> bool:
+         timeout: float = 15.0, esc_arm: bool = True) -> bool:
     """
     Arm sequence:
       1. Set throttle RC override to 1000 (CH3 interlock low).
@@ -917,12 +1048,13 @@ def _arm(session: RawesGCS, force: bool = False,
         print("  [FAIL] Arm timed out.")
         return False
 
-    print(f"  ESC arm: output {SERVO_MOTOR} -> 800 us for 5 s ...")
-    t_end = time.monotonic() + 5.0
-    while time.monotonic() < t_end:
-        _send_set_servo(session, SERVO_MOTOR, 800)
-        time.sleep(0.1)
-    print("  ESC arm sequence complete -- motor ready.")
+    if esc_arm:
+        print(f"  ESC arm: output {SERVO_MOTOR} -> 800 us for 5 s ...")
+        t_end = time.monotonic() + 5.0
+        while time.monotonic() < t_end:
+            _send_set_servo(session, SERVO_MOTOR, 800)
+            time.sleep(0.1)
+        print("  ESC arm sequence complete -- motor ready.")
 
     return True
 
@@ -1087,11 +1219,6 @@ class _RunLog:
 
 
 # -- Shared run engine: arm via RAWES_ARM, observe, safety shutdown ----
-
-def _rawes_arm_ms(duration_s: "float | None") -> int:
-    """ARM the Lua for duration+10s, or 5 min if unbounded."""
-    return int((duration_s + 10.0) * 1000) if duration_s else 300_000
-
 
 def _wait_for_armed(session: RawesGCS, timeout_s: float = 15.0) -> bool:
     """Block until armed heartbeat or timeout.  Prints STATUSTEXT inline."""
@@ -1338,6 +1465,23 @@ _OSCILLATE_STEP_S = 5.0
 #                    (e.g. H_FLYBAR_MODE=1 to bypass the rate PID for passive)
 _TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT", "col": "RAWES_COL"}
 
+# Normalisation helpers for the manual / manualtest commands.
+# Lua's run_manual() expects RAWES_COL in [0,1] and RAWES_TLN/TLT in [-1,1].
+_MAN_COL_MIN_RAD = -0.28          # must match COL_MIN_RAD in rawes.lua
+_MAN_COL_MAX_RAD =  0.10          # must match COL_MAX_RAD in rawes.lua
+_MAN_CYC_MAX_RAD = math.radians(15.0)   # H_CYC_MAX force param = 1500 cd
+
+
+def _col_nvf(col_rad: float) -> float:
+    """Blade-pitch radians -> [0,1] for RAWES_COL NVF (manual mode)."""
+    n = (col_rad - _MAN_COL_MIN_RAD) / (_MAN_COL_MAX_RAD - _MAN_COL_MIN_RAD)
+    return max(0.0, min(1.0, n))
+
+
+def _cyc_nvf(cyc_rad: float) -> float:
+    """Cyclic radians -> [-1,1] for RAWES_TLN/TLT NVF (manual mode)."""
+    return max(-1.0, min(1.0, cyc_rad / _MAN_CYC_MAX_RAD))
+
 _RUN_MODES = {
     "passive": {
         "scr_user6":  3,
@@ -1542,12 +1686,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
             session.send_named_float(_TRIM_NVF[k], v_rad)
             print(f"    {_TRIM_NVF[k]} = {v_deg:+7.3f} deg  ({v_rad:+.4f} rad)")
 
-    # Arm via RAWES_ARM
-    arm_ms = _rawes_arm_ms(duration)
-    print(f"  Sending RAWES_ARM={arm_ms} ms ...")
-    session.send_named_float("RAWES_ARM", float(arm_ms))
-    if not _wait_for_armed(session, timeout_s=15.0):
-        print("  [FAIL] Did not arm within 15 s.")
+    # Arm
+    if not _arm(session, force=True):
         _safety_shutdown(session, saved_servo4_fn=saved_fn,
                          saved_overrides=saved_overrides)
         return
@@ -2023,11 +2163,14 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
 
 
 def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
-    """manual [--col VALUE] [--tlon VALUE] [--tlat VALUE] [--gain K=V,...] [--duration N]
+    """manual [--col VALUE] [--tlon VALUE] [--tlat VALUE] [--gain K=V,...] [--duration N] [--fetch-logs]
 
     Interactive manual control: arms the vehicle in mode 2 (manual), sets
     H_FLYBAR_MODE=1 / H_CYC_MAX=1000 / H_SV_MAN=0, then enters a live
     control loop.
+
+    --fetch-logs  After the run completes, download the most recent Pixhawk
+                  dataflash log (.BIN) into the same directory as the CSV log.
 
     While running, type commands at the '> ' prompt:
         col=VALUE    collective [deg]; COL_MIN (-16) .. COL_MAX (+5.7)
@@ -2041,11 +2184,12 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
     """
 
     schema = {
-        "--col":      "float",
-        "--tlon":     "float",
-        "--tlat":     "float",
-        "--gain":     "kv",
-        "--duration": "float",
+        "--col":        "float",
+        "--tlon":       "float",
+        "--tlat":       "float",
+        "--gain":       "kv",
+        "--duration":   "float",
+        "--fetch-logs": "bool",
     }
     try:
         pos, flags = _parse_flags(args, schema)
@@ -2057,11 +2201,12 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
               " [--gain K=V,...] [--duration N]")
         return
 
-    duration   = flags.get("--duration")
-    init_col   = math.radians(float(flags.get("--col",  -8.6)))
+    duration   = flags.get("--duration", 10.0)
+    init_col   = math.radians(float(flags.get("--col",  0.0)))
     init_tlon  = math.radians(float(flags.get("--tlon",  0.0)))
     init_tlat  = math.radians(float(flags.get("--tlat",  0.0)))
     gain       = flags.get("--gain", {}) or {}
+    fetch_logs = bool(flags.get("--fetch-logs", False))
 
     cfg = _RUN_MODES["manual"]
     gain_map = cfg["gain_keys"]
@@ -2096,20 +2241,22 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
     saved_fn = _take_servo4(session)
     session.set_param("SCR_USER6", cfg["scr_user6"])
     print(f"  SCR_USER6 -> {cfg['scr_user6']} (manual mode)")
+    print("  Setting ACRO mode ...")
+    session.set_mode(1)
 
-    # Send initial setpoints
-    session.send_named_float("RAWES_COL", init_col)
-    session.send_named_float("RAWES_TLN", init_tlon)
-    session.send_named_float("RAWES_TLT", init_tlat)
-    print(f"  Initial setpoints: col={math.degrees(init_col):+.2f}d "
-          f"tlon={math.degrees(init_tlon):+.2f}d "
-          f"tlat={math.degrees(init_tlat):+.2f}d")
+    # Send initial setpoints and wait for Lua to process them before arming.
+    # Without the pause, RAWES_COL/TLN/TLT and RAWES_ARM may arrive in the
+    # same 20 ms Lua tick -- servos haven't moved yet when arming completes.
+    session.send_named_float("RAWES_COL", _col_nvf(init_col))
+    session.send_named_float("RAWES_TLN", _cyc_nvf(init_tlon))
+    session.send_named_float("RAWES_TLT", _cyc_nvf(init_tlat))
+    print(f"  Initial setpoints: col={math.degrees(init_col):+.2f}d ({_col_nvf(init_col):.3f}) "
+          f"tlon={math.degrees(init_tlon):+.2f}d ({_cyc_nvf(init_tlon):+.3f}) "
+          f"tlat={math.degrees(init_tlat):+.2f}d ({_cyc_nvf(init_tlat):+.3f})")
+    print("  Waiting 0.5 s for Lua to apply setpoints ...")
+    time.sleep(0.5)
 
-    arm_ms = _rawes_arm_ms(duration)
-    print(f"  Sending RAWES_ARM={arm_ms} ms ...")
-    session.send_named_float("RAWES_ARM", float(arm_ms))
-    if not _wait_for_armed(session, timeout_s=15.0):
-        print("  [FAIL] Did not arm within 15 s.")
+    if not _arm(session, force=True):
         _safety_shutdown(session, saved_servo4_fn=saved_fn,
                          saved_overrides=saved_overrides)
         return
@@ -2212,16 +2359,16 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
                         val_rad = math.radians(val_deg)
                         if key == "col":
                             ctl["col_rad"] = val_rad
-                            session.send_named_float("RAWES_COL", val_rad)
-                            print(f"  col -> {val_deg:+.2f} deg  ({val_rad:+.4f} rad)  sent")
+                            session.send_named_float("RAWES_COL", _col_nvf(val_rad))
+                            print(f"  col -> {val_deg:+.2f} deg  ({_col_nvf(val_rad):.3f})  sent")
                         elif key in ("tlon", "lon"):
                             ctl["tlon_rad"] = val_rad
-                            session.send_named_float("RAWES_TLN", val_rad)
-                            print(f"  tlon -> {val_deg:+.2f} deg  ({val_rad:+.4f} rad)  sent")
+                            session.send_named_float("RAWES_TLN", _cyc_nvf(val_rad))
+                            print(f"  tlon -> {val_deg:+.2f} deg  ({_cyc_nvf(val_rad):+.3f})  sent")
                         elif key in ("tlat", "lat"):
                             ctl["tlat_rad"] = val_rad
-                            session.send_named_float("RAWES_TLT", val_rad)
-                            print(f"  tlat -> {val_deg:+.2f} deg  ({val_rad:+.4f} rad)  sent")
+                            session.send_named_float("RAWES_TLT", _cyc_nvf(val_rad))
+                            print(f"  tlat -> {val_deg:+.2f} deg  ({_cyc_nvf(val_rad):+.3f})  sent")
                         else:
                             print(f"  Unknown key {key!r}.  Use: col  tlon  tlat")
                     except ValueError:
@@ -2304,6 +2451,10 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
         print(f"  Wrote {log.n_rows} rows to {log.path}")
         _safety_shutdown(session, saved_servo4_fn=saved_fn,
                          saved_overrides=saved_overrides)
+        if fetch_logs:
+            dest_dir = os.path.dirname(log.path) if log.path else "."
+            print("  Fetching dataflash log ...")
+            _download_latest_log(session, dest_dir=dest_dir)
     print("  Done.")
 
 
@@ -2648,16 +2799,16 @@ def _cmd_manualtest(session: RawesGCS, args: list[str]) -> None:
     saved_fn = _take_servo4(session)
     session.set_param("SCR_USER6", cfg["scr_user6"])
     print(f"  SCR_USER6 -> {cfg['scr_user6']} (manual mode)")
+    print("  Setting ACRO mode ...")
+    session.set_mode(1)
 
-    session.send_named_float("RAWES_COL", init_col_rad)
+    session.send_named_float("RAWES_COL", _col_nvf(init_col_rad))
     session.send_named_float("RAWES_TLN", 0.0)
     session.send_named_float("RAWES_TLT", 0.0)
+    print("  Waiting 0.5 s for Lua to apply setpoints ...")
+    time.sleep(0.5)
 
-    arm_ms = _rawes_arm_ms(PHASE_S * 3 + 15)
-    print(f"  Sending RAWES_ARM={arm_ms} ms ...")
-    session.send_named_float("RAWES_ARM", float(arm_ms))
-    if not _wait_for_armed(session, timeout_s=15.0):
-        print("  [FAIL] Did not arm within 15 s.")
+    if not _arm(session, force=True):
         _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)
         return
     print("  [OK] Armed.")
@@ -2684,8 +2835,8 @@ def _cmd_manualtest(session: RawesGCS, args: list[str]) -> None:
             t_rel = time.monotonic() - t0
 
             if not nvf_b_sent and t_rel >= PHASE_S:
-                session.send_named_float("RAWES_TLN", math.radians(_MT_TLON_DEG))
-                session.send_named_float("RAWES_TLT", math.radians(_MT_TLAT_DEG))
+                session.send_named_float("RAWES_TLN", _cyc_nvf(math.radians(_MT_TLON_DEG)))
+                session.send_named_float("RAWES_TLT", _cyc_nvf(math.radians(_MT_TLAT_DEG)))
                 nvf_b_sent = True
                 print(f"  Phase B ({PHASE_S:.0f}s): tlon=+{_MT_TLON_DEG}deg"
                       f"  tlat=+{_MT_TLAT_DEG}deg -- checking servo shifts ...")
@@ -2842,6 +2993,7 @@ def _run_command(session: RawesGCS, tokens: list[str],
     elif verb == "run":      _cmd_run(session, args)
     elif verb == "manual":      _cmd_manual_interactive(session, args)
     elif verb == "manualtest":  _cmd_manualtest(session, args)
+    elif verb == "logs":        _cmd_logs(session, args)
     elif verb == "watch":    _cmd_watch(session, args)
     elif verb == "analyze":  _cmd_analyze(args)
     elif verb == "script":   _cmd_script(session, args)
@@ -3114,11 +3266,7 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
         if not (800 <= pwm <= PWM_MAX):
             print(f"  Error: pwm must be 800-{PWM_MAX}"); return
         duration = flags.get("--duration", 60.0)
-        arm_ms = _rawes_arm_ms(duration)
-        print(f"  Sending RAWES_ARM={arm_ms} ms ...")
-        session.send_named_float("RAWES_ARM", float(arm_ms))
-        if not _wait_for_armed(session, timeout_s=15.0):
-            print("  [FAIL] Did not arm within 15 s.")
+        if not _arm(session, force=True):
             _safety_shutdown(session, skip_motor_off=(ch != SERVO_MOTOR))
             return
         print("  [OK] Armed.")
@@ -3217,16 +3365,8 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
         session.set_param("SCR_USER6", 0)
         print(f"  SCR_USER6 {int(saved_scr)} -> 0 (motor needs direct SERVO4 control)")
 
-    # Arm via Lua RAWES_ARM, same as `run`.  Total arm time covers ESC
-    # arming hold + driven duration + safety margin.
-    total_arm_s = arm_hold_s + secs
-    arm_ms = _rawes_arm_ms(total_arm_s)
-    print(f"  Sending RAWES_ARM={arm_ms} ms ...")
-    session.send_named_float("RAWES_ARM", float(arm_ms))
-    if not _wait_for_armed(session, timeout_s=15.0):
-        print("  [FAIL] Did not arm within 15 s.")
-        _safety_shutdown(session, saved_servo4_fn=saved_fn,
-                         saved_overrides=saved_overrides)
+    if not _arm(session, force=True):
+        _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)
         return
     print("  [OK] Armed.")
 
@@ -3283,21 +3423,17 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
 
 
 def _cmd_arm(session: RawesGCS, args: list[str]) -> None:
-    """arm [--duration N]   -- ACRO + RAWES_ARM (no Lua mode change)"""
+    """arm [--duration N]   -- ACRO + direct arm (no Lua mode change)"""
     try:
         pos, flags = _parse_flags(args, {"--duration": "float"})
     except ValueError as e:
         print(f"  Error: {e}"); return
     if pos:
         print("  Usage: arm [--duration N]  (use --duration, not positional)"); return
-    secs = flags.get("--duration", 10.0)
     print("  Setting ACRO mode ...")
     session.set_mode(1)
-    armon_ms = int(secs * 1000)
-    print(f"  Sending RAWES_ARM={armon_ms} ms ...")
-    session.send_named_float("RAWES_ARM", float(armon_ms))
-    if not _wait_for_armed(session, timeout_s=secs + 5.0):
-        print(f"  [WARN] Not armed within {secs+5:.0f}s.")
+    if not _arm(session, force=True):
+        print("  [WARN] Arm failed.")
     else:
         print("  [OK] Armed.")
 
@@ -3410,7 +3546,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=_HELP,
     )
     p.add_argument("--port", "-p", default=None,
-                   help="Serial port (e.g. COM4); omit to auto-detect")
+                   help="Serial port (e.g. COM4), or 'sitl' / 'tcp:localhost:5760' for SITL")
     p.add_argument("--baud", "-b", type=int, default=115200,
                    help="Baud rate (default: 115200)")
     p.add_argument("--force", "-f", action="store_true",
@@ -3430,12 +3566,20 @@ def _resolve_port(port: "str | None", baud: int) -> tuple:
     """
     Return (port, baud) to use for the connection.
 
+    TCP/UDP addresses and the 'sitl' shorthand bypass serial scanning entirely.
     If port is None, scans all COM ports and returns the first that gives a
     heartbeat (trying baud then _FALLBACK_BAUDS in order).
     If port is given, probes that port with baud fallbacks until a heartbeat
     is received, then returns the working (port, baud).
     Raises SystemExit if nothing responds.
     """
+    # SITL shorthand and raw TCP/UDP strings go straight to pymavlink.
+    if port is not None:
+        if port == "sitl":
+            print("Using SITL shorthand -> tcp:localhost:5760")
+            return "tcp:localhost:5760", baud
+        if port.startswith(("tcp:", "udp:", "udpin:", "tcpin:")):
+            return port, baud
     try:
         import serial.tools.list_ports as _list_ports
     except ImportError:
@@ -3470,7 +3614,11 @@ def _resolve_port(port: "str | None", baud: int) -> tuple:
 
 def _connect(port: "str | None", baud: int) -> RawesGCS:
     port, baud = _resolve_port(port, baud)
-    print(f"Connecting to {port} at {baud} baud ...")
+    is_tcp = port.startswith(("tcp:", "udp:", "udpin:", "tcpin:"))
+    if is_tcp:
+        print(f"Connecting to {port} ...")
+    else:
+        print(f"Connecting to {port} at {baud} baud ...")
     session = RawesGCS(address=port, baud=baud, clock=WallClock())
     session.connect(timeout=15.0)
     print(f"Connected: sysid={session._target_system} compid={session._target_component}")

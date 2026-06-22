@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dynbem import rotor_definition as _rd
+from rotor_physics import resolve_i_spin_kgm2
 
 
 _ROTOR_DEFS = Path(__file__).resolve().parents[2] / "rotor_definitions"
@@ -31,11 +32,10 @@ def dynamics_kwargs(rotor) -> dict:
     inertia = rotor.inertia
     if inertia.mass_kg is None:
         raise ValueError(f"rotor.inertia.mass_kg is None for {rotor.name}")
-    I_spin = inertia.I_spin_kgm2 if inertia.I_spin_kgm2 is not None else 0.0
     return dict(
         mass=float(inertia.mass_kg),
         I_body=list(inertia.I_body_kgm2),
-        I_spin=float(I_spin),
+        I_spin=resolve_i_spin_kgm2(rotor),
     )
 
 

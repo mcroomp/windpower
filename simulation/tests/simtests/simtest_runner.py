@@ -6,7 +6,7 @@ PhysicsRunner is a thin wrapper around PhysicsCore (simulation/physics_core.py).
     step(dt, collective, rate_roll, rate_pitch, omega_body)
         → runs HeliCyclicController (baked in) then core.step()
 
-PhysicsCore owns all physics constants (base_k_ang, k_yaw, T_AERO_OFFSET) and
+PhysicsCore owns all physics constants (k_yaw, T_AERO_OFFSET) and
 the integration loop (dynamics, aero, tether, spin ODE, angular damping).
 Callers own planners, TensionPI, WinchController — at their own rates.
 
@@ -57,7 +57,8 @@ class PhysicsRunner:
         hub = runner.hub_state
     """
 
-    # Expose constants so simtests that reference PhysicsRunner.BASE_K_ANG still work
+    # Expose constants so simtests that reference PhysicsRunner.BASE_K_ANG still work.
+    # Default is zero; nonzero values are diagnostic-only.
     BASE_K_ANG    = PhysicsCore.BASE_K_ANG
     T_AERO_OFFSET = PhysicsCore.T_AERO_OFFSET
 

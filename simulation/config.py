@@ -14,7 +14,7 @@ Use ``defaults()`` to get a fresh copy of the defaults dict.
 Example (test fixture):
     import config as mcfg
     cfg = mcfg.defaults()
-    cfg["base_k_ang"] = 50.0
+    cfg["base_k_ang"] = 0.0
     cfg_path = tmp_path / "mediator_config.json"
     mcfg.save(cfg, cfg_path)
     # pass --config str(cfg_path) to mediator subprocess
@@ -84,11 +84,8 @@ DEFAULTS: dict = {
     "startup_damp_k_ang":          500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
 
     # ── Attitude damping ──────────────────────────────────────────────────────
-    "base_k_ang": 50.0,             # permanent angular drag [N·m·s/rad]
-                                    # τ = I/k = 5/50 = 0.1 s settling time
-                                    # Increase to 300 for 10 Hz MAVLink controller
-
-    "lock_orientation":         False,  # debug: lock R to initial value every step
+    "base_k_ang": 0.0,              # optional diagnostic angular drag [N·m·s/rad]
+                                    # default is no artificial free-flight damping
 
     # ── Swashplate phase compensation ─────────────────────────────────────────
     # Rotates the (tilt_lon, tilt_lat) cyclic command before it reaches the aero model,

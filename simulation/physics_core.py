@@ -10,7 +10,7 @@ PhysicsCore owns
 - Aero model (SkewedWakeBEMJit)
 - TetherModel (elastic, tension-only)
 - Spin ODE (autorotation equilibrium)
-- Angular damping: base_k_ang (omnidirectional) + k_yaw (GB4008 yaw axis)
+- Yaw damping: k_yaw (GB4008 yaw axis)
 - KinematicStartup: state override + tether gating + extra startup damping
 - Time tracking (_t_sim)
 
@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dynamics   import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, euler_step_omega
 from tether     import TetherModel
-from frames     import build_orb_frame
+from rotor_physics import resolve_i_spin_kgm2
 
 
 @dataclass
@@ -94,14 +94,14 @@ class PhysicsCore:
     ic                  : object with .pos, .vel, .R0, .rest_length,
                           .coll_eq_rad, .omega_spin
     wind                : NED wind vector [m/s]
-    base_k_ang          : omnidirectional angular damping [N·m·s/rad]
+    base_k_ang          : optional diagnostic angular damping [N·m·s/rad]
     k_yaw               : GB4008 yaw damper around disk_normal [N·m·s/rad]
     kinematic           : KinematicStartup | None
     startup_damp_k_ang  : extra angular damping applied during kinematic ramp
     z_floor             : NED Z floor for dynamics (default -1.0 m = 1 m altitude floor)
     """
 
-    BASE_K_ANG    = 50.0    # N·m·s/rad — matches mediator default base_k_ang
+    BASE_K_ANG    = 0.0     # N·m·s/rad — no permanent artificial damping
     K_YAW_DEFAULT = 100.0   # N·m·s/rad — matches mediator _K_YAW_DEFAULT
     T_AERO_OFFSET = 45.0    # s — aero ramp already complete at simulation start
 
@@ -115,7 +115,6 @@ class PhysicsCore:
         k_yaw:              float = K_YAW_DEFAULT,
         kinematic                 = None,
         startup_damp_k_ang: float = 0.0,
-        lock_orientation:   bool  = False,
         z_floor:            float = -1.0,
         aero_model:         str   = "quasi_static",
         aero_override             = None,
@@ -128,10 +127,8 @@ class PhysicsCore:
         self._k_yaw              = float(k_yaw)
         self._kinematic          = kinematic
         self._startup_damp_k_ang = float(startup_damp_k_ang)
-        self._lock_orientation   = bool(lock_orientation)
 
-        I_spin = (rotor.inertia.I_spin_kgm2
-                  if rotor.inertia.I_spin_kgm2 is not None else 0.0)
+        I_spin = resolve_i_spin_kgm2(rotor)
         self._dyn = RigidBodyDynamics(
             mass   = float(rotor.inertia.mass_kg),
             I_body = list(rotor.inertia.I_body_kgm2),
@@ -358,33 +355,20 @@ class PhysicsCore:
 
         disk_normal = hub["R"][:, 2]
 
-        # Angular damping / lock_orientation
-        if self._lock_orientation:
-            # Magic tether: zero moments so integrator never accelerates omega.
-            M_net = np.zeros(3)
-        else:
-            # base term  : opposes all orbital angular velocity (prevents tumbling)
-            # startup extra: additional damping during kinematic ramp
-            # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle)
-            k_total   = self._base_k_ang + self._startup_damp_k_ang * self._damp_alpha
-            omega_yaw = float(np.dot(hub["omega"], disk_normal))
-            M_net = (result.M_orbital + tm
-                     - k_total * hub["omega"]
-                     - self._k_yaw * omega_yaw * disk_normal)
+        # Angular damping
+        # base term  : optional diagnostic damping; default 0 in free flight
+        # startup extra: additional damping during kinematic ramp
+        # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle)
+        k_total   = self._base_k_ang + self._startup_damp_k_ang * self._damp_alpha
+        omega_yaw = float(np.dot(hub["omega"], disk_normal))
+        M_net = (result.M_orbital + tm
+                 - k_total * hub["omega"]
+                 - self._k_yaw * omega_yaw * disk_normal)
 
         # 6-DOF rigid-body integration (gravity applied internally)
         F_net   = result.F_world + tf
         new_hub = self._dyn.step(F_net, M_net, dt,
                                  omega_spin=self._omega_rad_s)
-
-        # lock_orientation post-step: track tether direction, zero rotation
-        if self._lock_orientation and self._damp_alpha == 0.0:
-            cur_bz         = new_hub["pos"] / np.linalg.norm(new_hub["pos"])
-            R_lock         = build_orb_frame(cur_bz)
-            new_hub["R"]   = R_lock.copy()
-            self._dyn._R[:]     = R_lock
-            new_hub["omega"][:] = 0.0
-            self._dyn._omega[:] = 0.0
 
         # Kinematic state override — applied post-dynamics so t_sim is pre-advance
         if self._kinematic is not None:

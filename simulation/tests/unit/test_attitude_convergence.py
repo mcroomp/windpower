@@ -26,6 +26,7 @@ from dynbem        import RotorInputs
 from controller  import HeliCyclicController, compute_rate_cmd
 from dynamics    import RigidBodyDynamics
 from frames      import build_orb_frame
+from rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor, make_probe
 
 
@@ -35,8 +36,7 @@ _ROTOR  = load_rotor("beaupoil_2026")
 _AERO   = make_probe(_ROTOR)
 _MASS   = float(_ROTOR.inertia.mass_kg)
 _I_BODY = list(_ROTOR.inertia.I_body_kgm2)
-_I_SPIN = float(_ROTOR.inertia.I_spin_kgm2
-                if _ROTOR.inertia.I_spin_kgm2 is not None else 0.0)
+_I_SPIN = resolve_i_spin_kgm2(_ROTOR)
 
 DT          = 1.0 / 400.0
 # Most attitude-convergence tests isolate the control loop from dynbem

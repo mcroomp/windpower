@@ -66,7 +66,7 @@ CONFIGS = {
 def _make_runner(P, I, D, FF, FLTT, FLTE, FLTD, IMAX, ic, kin):
     core = PhysicsCore(
         _ROTOR, ic, WIND, kinematic=kin, z_floor=-1.0,
-        base_k_ang=50.0, startup_damp_k_ang=500.0,
+        base_k_ang=0.0, startup_damp_k_ang=500.0,
     )
     acro = HeliCyclicController(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,

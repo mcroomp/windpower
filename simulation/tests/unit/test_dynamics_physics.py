@@ -193,6 +193,58 @@ def test_gyroscopic_precession_reverses_with_reverse_spin():
     assert omega_neg[0] == pytest.approx(-expected_mag, rel=0.1)
 
 
+def test_gyroscopic_precession_reverses_with_reverse_torque():
+    """Reversing the transverse torque reverses the precession direction."""
+    omega_spin = 30.0
+    nutation_period = 2.0 * math.pi * I_BODY[0] / (I_SPIN * omega_spin)
+    t_avg = 4.0 * nutation_period
+    omega_pos = _time_average_omega(omega_spin, np.array([0.0, +1.0, 0.0]), t_avg)
+    omega_neg = _time_average_omega(omega_spin, np.array([0.0, -1.0, 0.0]), t_avg)
+    expected_mag = 1.0 / (I_SPIN * omega_spin)
+    assert omega_pos[0] == pytest.approx(+expected_mag, rel=0.1)
+    assert omega_neg[0] == pytest.approx(-expected_mag, rel=0.1)
+
+
+def test_gyroscopic_precession_rate_scales_inverse_with_spin_inertia():
+    """For fixed torque and spin speed, |Ω_p| scales as 1 / I_spin."""
+    omega_spin = 30.0
+    M = np.array([0.0, 1.0, 0.0])
+
+    measured = []
+    expected = []
+    for i_spin in (2.0, 4.0, 8.0):
+        nutation_period = 2.0 * math.pi * I_BODY[0] / (i_spin * omega_spin)
+        omega_avg = _time_average_omega(
+            omega_spin, M, 4.0 * nutation_period, I_spin=i_spin,
+        )
+        measured.append(omega_avg[0])
+        expected.append(1.0 / (i_spin * omega_spin))
+
+    np.testing.assert_allclose(measured, expected, rtol=0.10)
+
+
+def test_initial_angular_acceleration_is_direct_torque_before_precession():
+    """At t=0, with zero orbital rate, the gyro cross-term is zero.
+
+    The first instant therefore follows Euler's direct angular acceleration
+    τ/I about the applied torque axis.  Gyroscopic precession appears only
+    after that small angular velocity exists and couples with H_spin.
+    """
+    omega_spin = 30.0
+    M_amp = 1.0
+    M = np.array([0.0, M_amp, 0.0])
+    dyn = _fresh(I_spin=I_SPIN)
+    F_up = np.array([0.0, 0.0, -MASS * G])
+    s = dyn.step(F_up, M, DT, omega_spin=omega_spin)
+
+    omega_direct = (M_amp / I_BODY[1]) * DT
+    assert s["omega"][1] == pytest.approx(omega_direct, rel=0.01)
+    # RK4 samples mid-step states, so a tiny O(dt^2) precession component is
+    # already present.  It must remain much smaller than the direct torque kick.
+    assert abs(s["omega"][0]) < 0.02 * omega_direct
+    assert abs(s["omega"][2]) < 1e-9
+
+
 def test_no_spin_yields_no_precession_only_roll_about_torque_axis():
     """Control: with I_spin·ω_spin = 0 the body just rotates about the
     applied-torque axis (Euler with no gyro coupling)."""

@@ -126,11 +126,11 @@ def simulate_one(
         omega_spin  = omega_init,
     )
 
-    # lock_orientation=True pins the disk to R0 so it can't flip.
-    # We still get correct aero forces from the hub's translational velocity
-    # (descent inflow drives autorotation via the spin ODE inside PhysicsCore).
+    # NOTE: without an attitude controller the disk will tumble after ~0.1 s.
+    # This analysis script is only valid for short time windows or when R0 is
+    # already close to equilibrium and base_k_ang damps rotational divergence.
     core = PhysicsCore(rotor, ic, wind, aero_model="peters_he",
-                       z_floor=-500.0, lock_orientation=True)
+                       z_floor=-500.0)
 
     M_zero = np.zeros(3)
     core._tether.compute = lambda _p, _v, _R=None: (F_teth, M_zero)  # type: ignore[assignment]
@@ -153,7 +153,8 @@ def simulate_one(
         if core._omega_spin < omega_floor:
             core._omega_spin = omega_floor
 
-        # lock_orientation=True: disk stays fixed; no cyclic needed
+        # Disk stays near equilibrium for short runs due to base_k_ang damping;
+        # no cyclic needed for quasi-static descent analysis.
         sr = core.step(dt, col, 0.0, 0.0)
         core._tension_now = float(tension_n)
 

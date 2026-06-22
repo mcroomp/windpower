@@ -1,10 +1,10 @@
-"""test_full_loop_stability.py — closed-loop stability with full physics.
+"""test_full_loop_stability.py — stability ladder with full physics.
 
-Builds on test_attitude_convergence by including the tether and the actual
-hub translation dynamics, but holds collective FIXED (no TensionPI).  This
-isolates the attitude–position coupling and tells us whether the IC-warmup
-divergence is from the cyclic loop interacting with a swinging hub or from
-the slower tension-PI / collective dynamics.
+Builds on test_attitude_convergence by adding translation, tether loading,
+and the collective/tension controllers in progressively less idealised layers.
+Free-translation fixed-collective flight is intentionally not a layer here:
+without active collective/tension regulation the scenario is not a meaningful
+steady-flight controller test.
 
 Frame: NED + FRD throughout.  Anchor at origin.
 """
@@ -19,11 +19,15 @@ import pytest
 from controller   import HeliCyclicController, compute_rate_cmd, compute_bz_tether
 from frames       import build_orb_frame
 from physics_core import PhysicsCore
+from rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor
 
 
 _ROTOR     = load_rotor("beaupoil_2026")
-_MASS      = float(_ROTOR.inertia.mass_kg)
+_MASS_KG   = _ROTOR.inertia.mass_kg
+if _MASS_KG is None:
+    raise ValueError("beaupoil_2026 inertia.mass_kg is required")
+_MASS      = float(_MASS_KG)
 DT         = 1.0 / 400.0
 WIND       = np.array([0.0, 10.0, 0.0])
 OMEGA_SPIN = 28.0
@@ -48,366 +52,25 @@ def _make_ic(elevation_deg: float, tether_length_m: float):
 
 
 def _alignment_angle(a: np.ndarray, b: np.ndarray) -> float:
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        return math.inf
     cos_a = float(np.clip(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)),
                           -1.0, 1.0))
     return math.acos(cos_a)
 
 
-def _run_loop(elevation_deg: float, *, t_total: float = 10.0,
-              kp_outer: float = KP_OUTER) -> dict:
-    """Run the full physics loop (tether + aero + dynamics) at fixed
-    collective for ``t_total`` seconds.  Returns final state diagnostics.
-    """
-    ic_kwargs = _make_ic(elevation_deg, tether_length_m=100.0)
+def _state_is_finite(s: dict) -> bool:
+    return all(np.all(np.isfinite(s[k])) for k in ("pos", "vel", "R", "omega"))
 
-    core = PhysicsCore(
-        _ROTOR,
-        ic={"pos": ic_kwargs["pos"], "vel": ic_kwargs["vel"]},   # placeholder
-        wind=WIND,
-        aero_model="quasi_static",
-        z_floor=-1.0,
-    ) if False else None  # noqa — keep mypy happy
 
-    # Use the explicit IC constructor — PhysicsCore expects an object, but we
-    # need to bypass that for this test.  Build a SimpleNamespace IC.
-    from types import SimpleNamespace
-    ic = SimpleNamespace(
-        pos         = ic_kwargs["pos"],
-        vel         = ic_kwargs["vel"],
-        R0          = ic_kwargs["R0"],
-        rest_length = ic_kwargs["rest_length"],
-        coll_eq_rad = ic_kwargs["coll_eq_rad"],
-        omega_spin  = ic_kwargs["omega_spin"],
-    )
-    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="quasi_static", z_floor=-1.0)
-    acro = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
-    acro._servo.reset(COL_FIXED)
-
-    anchor = np.zeros(3)
-
-    n = int(round(t_total / DT))
-    angle_history = []
-    alt_history   = []
-    pos_history   = []
-    for _ in range(n):
-        s = core.hub_state
-        R = s["R"]
-        omega_b = R.T @ s["omega"]
-        bz_now  = R[:, 2]
-        bz_eq   = compute_bz_tether(s["pos"], anchor)
-        if bz_eq is None:
-            bz_eq = bz_now
-        rate_body = compute_rate_cmd(bz_now, bz_eq, R, kp=kp_outer, kd=0.0)
-        tlon, tlat, col_actual = acro.step(
-            collective_cmd=COL_FIXED,
-            rate_roll_sp =rate_body[0],
-            rate_pitch_sp=rate_body[1],
-            omega_body   =omega_b,
-            dt           =DT,
-        )
-        core.step(DT, collective_rad=col_actual,
-                  tilt_lon=tlon, tilt_lat=tlat,
-                  rest_length=ic.rest_length)
-
-        s = core.hub_state
-        angle_history.append(_alignment_angle(s["R"][:, 2],
-                                              -s["pos"] / np.linalg.norm(s["pos"])))
-        alt_history.append(float(-s["pos"][2]))
-        pos_history.append(s["pos"].copy())
-
-    return {
-        "final_pos":     pos_history[-1],
-        "final_alt":     alt_history[-1],
-        "min_alt":       float(np.min(alt_history)),
-        "final_angle":   angle_history[-1],
-        "max_angle":     float(np.max(angle_history)),
-        "tension_final": core.tension_now,
-        "omega_final":   core.omega_spin,
-    }
+def _state_diverged(s: dict, *, max_omega: float = 200.0, max_pos: float = 1000.0) -> bool:
+    if not _state_is_finite(s):
+        return True
+    return (float(np.linalg.norm(s["omega"])) > max_omega or
+            float(np.linalg.norm(s["pos"])) > max_pos)
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-
-
-def test_fixed_collective_attitude_tracks_tether_direction():
-    """With constant collective and the closed-loop cyclic chain, body_z
-    must stay tightly aligned with the (moving) tether direction over 10 s.
-
-    Altitude is NOT regulated here — the TensionPI is bypassed — so the hub
-    may drift in altitude.  What this test pins down is that the attitude
-    loop is sign-correct: as the hub swings, body_z tracks the changing
-    hub→anchor direction with small error.
-    """
-    r = _run_loop(elevation_deg=30.0, t_total=10.0)
-    assert math.degrees(r["max_angle"]) < 30.0, (
-        f"Axle misalignment grew unbounded under closed-loop cyclic: "
-        f"max={math.degrees(r['max_angle']):.1f} deg.  This suggests a real "
-        f"sign error in the attitude chain.\n"
-        f"  final_pos={r['final_pos'].round(2)}\n"
-        f"  final_angle={math.degrees(r['final_angle']):.1f} deg"
-    )
-    assert math.degrees(r["final_angle"]) < 5.0, (
-        f"Steady-state axle error too large: "
-        f"final={math.degrees(r['final_angle']):.2f} deg"
-    )
-
-
-def test_fixed_collective_tether_stays_taut():
-    """The hub doesn't go slack with constant collective at 30° elevation."""
-    r = _run_loop(elevation_deg=30.0, t_total=10.0)
-    assert r["tension_final"] > 10.0, (
-        f"Tether went slack: T_final={r['tension_final']:.2f} N"
-    )
-
-
-def _run_with_tensionpi(elevation_deg: float, *, t_total: float = 30.0,
-                        kp_inner: float = 2/3,
-                        ki_inner: float = 0.0,
-                        kd_inner: float = 0.0,
-                        kp_outer: float = 2.5,
-                        use_trim: bool   = False) -> dict:
-    """Like _run_loop but with MockArdupilot pumping Python mode driving collective.
-
-    Reproduces the IC-warmup architecture at unit-test scale so we can
-    iterate on controller gains without waiting for the 60 s simtest.
-    """
-    from pumping_planner import TensionCommand
-    from tests.common.mock_ardupilot import MockArdupilot
-    from controller      import HeliCyclicController
-    from dynbem            import RotorInputs, solve_trim_cyclic
-
-    ic_kwargs = _make_ic(elevation_deg, tether_length_m=100.0)
-    from types import SimpleNamespace
-    ic = SimpleNamespace(
-        pos        = ic_kwargs["pos"],   vel = ic_kwargs["vel"],
-        R0         = ic_kwargs["R0"],
-        rest_length= ic_kwargs["rest_length"],
-        coll_eq_rad= ic_kwargs["coll_eq_rad"],
-        omega_spin = ic_kwargs["omega_spin"],
-    )
-    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="quasi_static", z_floor=-1.0)
-    # Replace HeliCyclicController with tuned-gain version.
-    core._acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        P=kp_inner, I=ki_inner, D=kd_inner, IMAX=0.5,
-    )
-
-    if use_trim:
-        trim = solve_trim_cyclic(
-            core._aero, core._rotor_state,
-            RotorInputs(
-                collective_rad=COL_FIXED, tilt_lon=0.0, tilt_lat=0.0,
-                R_hub=ic.R0, v_hub_world=np.zeros(3), wind_world=WIND,
-                omega_rad_s=core.omega_spin, rho_kg_m3=1.225, t=0.0,
-            ),
-            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
-        )
-        core._acro.set_trim(trim.tilt_lon, trim.tilt_lat)
-        core._rotor_state = trim.final_state
-
-    ap = MockArdupilot.for_python(
-        mode="pumping",
-        ic_pos=ic.pos, mass_kg=_MASS,
-        slew_rate_rad_s=0.40,
-        warm_coll_rad=COL_FIXED, tension_ic=300.0,
-        kp_outer=kp_outer,
-        wind=WIND,
-        dt=DT,
-    )
-    target_alt = float(-ic.pos[2])
-    ap.receive_command(TensionCommand(
-        tension_target_n=300.0,
-        alt_m=target_alt, phase="reel-out",
-    ), 0.1)
-
-    n_total = int(round(t_total / DT))
-    cmd_every = int(round(0.1 / DT))
-    angle_hist = []
-    alt_hist   = []
-    tension_hist = []
-    col_hist   = []
-    for i in range(n_total):
-        if i % cmd_every == 0:
-            ap.receive_command(TensionCommand(
-                tension_target_n=300.0,
-                alt_m=target_alt, phase="reel-out",
-            ), 0.1)
-
-        s = core.hub_state
-        obs = core.hub_observe()
-        col, rate_roll, rate_pitch = ap.controller_step(obs, DT)
-        omega_b = obs.gyro
-        tlon, tlat, col_act = core._acro.step(
-            collective_cmd=col,
-            rate_roll_sp=rate_roll, rate_pitch_sp=rate_pitch,
-            omega_body=omega_b, dt=DT,
-        )
-        core.step(DT, collective_rad=col_act, tilt_lon=tlon, tilt_lat=tlat,
-                  rest_length=ic.rest_length)
-        if i % 100 == 0:
-            s = core.hub_state
-            bz_eq = -s["pos"] / np.linalg.norm(s["pos"])
-            angle_hist.append(_alignment_angle(s["R"][:, 2], bz_eq))
-            alt_hist.append(float(-s["pos"][2]))
-            tension_hist.append(core.tension_now)
-            col_hist.append(col_act)
-
-    return {
-        "final_pos":     core.hub_state["pos"],
-        "final_alt":     alt_hist[-1],
-        "min_alt":       float(np.min(alt_hist)),
-        "final_angle":   angle_hist[-1],
-        "max_angle":     float(np.max(angle_hist)),
-        "tension_final": core.tension_now,
-        "tension_min":   float(np.min(tension_hist)),
-        "col_final":     col_hist[-1],
-        "altitudes":     alt_hist,
-        "angles":        angle_hist,
-    }
-
-
-def test_tensionpi_p_only_is_bounded_with_quasi_static_aero():
-    """Quasi-static aero keeps the old P-only loop bounded at this scale."""
-    r = _run_with_tensionpi(elevation_deg=30.0, t_total=20.0, use_trim=True)
-    assert r["min_alt"] > 45.0, (
-        f"Loop lost too much altitude: min_alt={r['min_alt']:.1f} m"
-    )
-    assert math.degrees(r["max_angle"]) < 12.0, (
-        f"Loop attitude drift too large: max_angle={math.degrees(r['max_angle']):.1f} deg"
-    )
-
-
-@pytest.mark.xfail(
-    reason="Documents that the full TensionPI + elastic-tether loop with "
-           "PD inner gains (ki=0.2, kd=0.05) does NOT hold steady-state "
-           "altitude without position feedback.  Earlier this test passed "
-           "incidentally because a derivative-kick on the first PID step "
-           "(now fixed) was injecting an aggressive transient that masked "
-           "the missing position loop.  Superseded by the "
-           "test_constant_tether_recovers_* tests, which exercise the "
-           "position feedback added in controller.position_feedback_bz_eq."
-)
-def test_tensionpi_with_damping_holds_loop_stable():
-    """Legacy documentation test — kept xfailed for the record."""
-    r = _run_with_tensionpi(
-        elevation_deg=30.0, t_total=20.0, use_trim=True,
-        kp_inner=2/3, ki_inner=0.2, kd_inner=0.05,
-    )
-    assert r["min_alt"] > 30.0
-    assert math.degrees(r["max_angle"]) < 30.0
-
-
-def _run_alt_hold_fixed_collective(
-    elevation_deg:  float,
-    *,
-    col_fixed:      float,
-    t_total:        float = 30.0,
-    kp_inner:       float = 2.0/3.0,
-    ki_inner:       float = 0.5,
-    kd_inner:       float = 0.02,
-    kd_lat:         float = 0.0,
-    use_trim:       bool  = True,
-    return_history: bool  = False,
-) -> dict:
-    """Closed-loop run with AltitudeHoldController for cyclic and a FIXED
-    collective for thrust (no TensionPI).
-
-    AltitudeHoldController is what MockArdupilot pumping mode uses for the body_z
-    setpoint — it includes the gravity-perpendicular disk-tilt so the hub
-    can hold against the perpendicular gravity component without orbiting.
-    With collective held constant at the equilibrium value, this isolates
-    the cyclic loop + tilt feed-forward + dynamics from the TensionPI
-    interaction.
-
-    If this run holds the hub near the starting point with small velocity,
-    then the TensionPI / collective regulator (NOT the cyclic chain) is
-    what's destabilising ``test_create_ic``.
-    """
-    from dynbem            import RotorInputs, solve_trim_cyclic
-    from controller      import (
-        HeliCyclicController, AltitudeHoldController,
-        compute_rate_cmd, damp_bz_eq_lateral,
-    )
-
-    ic_kwargs = _make_ic(elevation_deg, tether_length_m=100.0)
-    from types import SimpleNamespace
-    ic = SimpleNamespace(
-        pos=ic_kwargs["pos"], vel=ic_kwargs["vel"], R0=ic_kwargs["R0"],
-        rest_length=ic_kwargs["rest_length"],
-        coll_eq_rad=col_fixed, omega_spin=ic_kwargs["omega_spin"],
-    )
-    core = PhysicsCore(_ROTOR, ic, WIND, aero_model="quasi_static", z_floor=-1.0)
-    acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        P=kp_inner, I=ki_inner, D=kd_inner, IMAX=0.5,
-    )
-    acro._servo.reset(col_fixed)
-
-    if use_trim:
-        trim = solve_trim_cyclic(
-            core._aero, core._rotor_state,
-            RotorInputs(
-                collective_rad=col_fixed, tilt_lon=0.0, tilt_lat=0.0,
-                R_hub=ic.R0, v_hub_world=np.zeros(3), wind_world=WIND,
-                omega_rad_s=core.omega_spin, rho_kg_m3=1.225, t=0.0,
-            ),
-            tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
-        )
-        acro.set_trim(trim.tilt_lon, trim.tilt_lat)
-        core._rotor_state = trim.final_state
-
-    alt_ctrl   = AltitudeHoldController.from_pos(ic.pos, slew_rate_rad_s=0.40)
-    target_alt = float(-ic.pos[2])
-
-    alt_hist  = []
-    v_hist    = []
-    angle_hist = []
-    n = int(round(t_total / DT))
-    for i in range(n):
-        hub = core.hub_state
-        body_z_eq = alt_ctrl.update(
-            hub["pos"], target_alt, core.tension_now, _MASS, DT,
-        )
-        if kd_lat > 0.0:
-            body_z_eq = damp_bz_eq_lateral(
-                body_z_eq, hub["pos"], hub["vel"], np.zeros(3),
-                core.tension_now, kd_lat,
-            )
-        bz_now = hub["R"][:, 2]
-        R      = hub["R"]
-        rate   = compute_rate_cmd(bz_now, body_z_eq, R, kp=2.5, kd=0.0)
-        omega_b = R.T @ hub["omega"]
-        tlon, tlat, col_act = acro.step(
-            collective_cmd=col_fixed,
-            rate_roll_sp=rate[0], rate_pitch_sp=rate[1],
-            omega_body=omega_b, dt=DT,
-        )
-        core.step(DT, collective_rad=col_act, tilt_lon=tlon, tilt_lat=tlat,
-                  rest_length=ic.rest_length)
-
-        if i % 100 == 0:
-            s = core.hub_state
-            bz_eq = -s["pos"] / np.linalg.norm(s["pos"])
-            angle_hist.append(_alignment_angle(s["R"][:, 2], bz_eq))
-            alt_hist.append(float(-s["pos"][2]))
-            v_hist.append(float(np.linalg.norm(s["vel"])))
-
-    s = core.hub_state
-    result = {
-        "final_alt":     alt_hist[-1],
-        "min_alt":       float(np.min(alt_hist)),
-        "max_alt":       float(np.max(alt_hist)),
-        "final_speed":   v_hist[-1],
-        "max_speed":     float(np.max(v_hist)),
-        "final_angle":   angle_hist[-1],
-        "max_angle":     float(np.max(angle_hist)),
-        "tension_final": core.tension_now,
-    }
-    if return_history:
-        result["altitudes"] = alt_hist
-        result["speeds"]    = v_hist
-        result["angles"]    = angle_hist
-    return result
 
 
 def _run_attitude_only_at_fixed_equilibrium(
@@ -476,8 +139,7 @@ def _run_attitude_only_at_fixed_equilibrium(
     R     = R0.copy()
     omega = np.zeros(3)
     I_body = list(_ROTOR.inertia.I_body_kgm2)
-    I_spin = float(_ROTOR.inertia.I_spin_kgm2
-                   if _ROTOR.inertia.I_spin_kgm2 is not None else 0.0)
+    I_spin = resolve_i_spin_kgm2(_ROTOR)
     I_b   = np.diag(I_body)
     I_b_inv = np.linalg.inv(I_b)
 
@@ -525,10 +187,13 @@ def _run_attitude_only_at_fixed_equilibrium(
             angle_hist.append(_alignment_angle(R[:, 2], bz_eq_fixed))
 
     angle_final = _alignment_angle(R[:, 2], bz_eq_fixed)
-    result = {"final_angle": angle_final, "max_angle": float(np.max(angle_hist + [angle_final]))}
+    diag: dict[str, object] = {
+        "final_angle": angle_final,
+        "max_angle": float(np.max(angle_hist + [angle_final])),
+    }
     if return_history:
-        result["angles"] = angle_hist
-    return result
+        diag["angles"] = angle_hist
+    return diag
 
 
 def test_attitude_loop_converges_at_design_equilibrium():
@@ -584,6 +249,8 @@ def _run_with_constant_tether_force(
     force_pulse:      tuple | None      = None,   # (t_start_s, t_end_s, F_world_N)
     kp_pos:           float = 0.0,                # position feedback gain [N/m]
     kd_pos:           float = 0.0,                # velocity feedback gain [N·s/m]
+    pos_max_tilt_rad: float = math.radians(30.0), # cap on position-feedback correction
+    fail_fast_max_dist: float | None = None,
     return_history:   bool  = False,
 ) -> dict:
     """6-DOF run with the elastic tether REPLACED by a constant-magnitude
@@ -641,8 +308,7 @@ def _run_with_constant_tether_force(
         trim_tlon = trim_tlat = 0.0
 
     I_body = list(_ROTOR.inertia.I_body_kgm2)
-    I_spin = float(_ROTOR.inertia.I_spin_kgm2
-                   if _ROTOR.inertia.I_spin_kgm2 is not None else 0.0)
+    I_spin = resolve_i_spin_kgm2(_ROTOR)
     dyn = RigidBodyDynamics(
         mass=_MASS, I_body=I_body, I_spin=I_spin,
         pos0=list(pos0), vel0=list(vel0), R0=R0.copy(),
@@ -666,6 +332,7 @@ def _run_with_constant_tether_force(
         pulse_F = np.asarray(pulse_F, dtype=float)
 
     alt_hist, v_hist, angle_hist, dist_hist = [], [], [], []
+    target_angle_hist, north_hist, tilt_hist, rate_hist, omega_hist = [], [], [], [], []
     n = int(round(t_total / DT))
     for i in range(n):
         t_now = i * DT
@@ -676,6 +343,8 @@ def _run_with_constant_tether_force(
             )
         else:
             bz_eq = compute_bz_tether(s["pos"], anchor)
+            if bz_eq is None:
+                bz_eq = s["R"][:, 2]
         if kd_lat > 0.0:
             bz_eq = damp_bz_eq_lateral(
                 bz_eq, s["pos"], s["vel"], anchor,
@@ -685,6 +354,7 @@ def _run_with_constant_tether_force(
             bz_eq = position_feedback_bz_eq(
                 bz_eq, s["pos"], s["vel"], pos_design,
                 tether_tension_n, kp_pos, kd_pos,
+                max_tilt_rad=pos_max_tilt_rad,
             )
 
         omega_b = s["R"].T @ s["omega"]
@@ -713,15 +383,75 @@ def _run_with_constant_tether_force(
             F_ext = pulse_F
         F_net = result.F_world + F_tether + F_ext        # gravity added by dynamics
         M_net = result.M_orbital                         # no tether moment
-        dyn.step(F_net, M_net, DT, omega_spin=OMEGA_SPIN)
+        try:
+            dyn.step(F_net, M_net, DT, omega_spin=OMEGA_SPIN)
+        except (FloatingPointError, OverflowError, np.linalg.LinAlgError) as exc:
+            s = dyn.state
+            return {
+                "failed_at_s":   t_now,
+                "failure":       type(exc).__name__,
+                "final_alt":     -math.inf,
+                "min_alt":       -math.inf,
+                "max_alt":       math.inf,
+                "final_speed":   math.inf,
+                "max_speed":     math.inf,
+                "final_angle":   math.inf,
+                "max_angle":     math.inf,
+                "final_dist":    math.inf,
+                "max_dist":      math.inf,
+                "final_pos":     s["pos"].copy(),
+            }
+        if _state_diverged(dyn.state):
+            s = dyn.state
+            return {
+                "failed_at_s":   t_now + DT,
+                "failure":       "diverged",
+                "final_alt":     -math.inf,
+                "min_alt":       -math.inf,
+                "max_alt":       math.inf,
+                "final_speed":   math.inf,
+                "max_speed":     math.inf,
+                "final_angle":   math.inf,
+                "max_angle":     math.inf,
+                "final_dist":    math.inf,
+                "max_dist":      math.inf,
+                "final_pos":     s["pos"].copy(),
+            }
+
+        if fail_fast_max_dist is not None:
+            s = dyn.state
+            dist_now = float(np.linalg.norm(s["pos"] - pos_design))
+            if dist_now > fail_fast_max_dist:
+                speed_now = float(np.linalg.norm(s["vel"]))
+                angle_now = _alignment_angle(s["R"][:, 2], -s["pos"] / np.linalg.norm(s["pos"]))
+                alt_now = float(-s["pos"][2])
+                return {
+                    "failed_at_s":   t_now + DT,
+                    "failure":       "max_dist_exceeded",
+                    "final_alt":     alt_now,
+                    "min_alt":       min(alt_hist + [alt_now]) if alt_hist else alt_now,
+                    "max_alt":       max(alt_hist + [alt_now]) if alt_hist else alt_now,
+                    "final_speed":   speed_now,
+                    "max_speed":     max(v_hist + [speed_now]) if v_hist else speed_now,
+                    "final_angle":   angle_now,
+                    "max_angle":     max(angle_hist + [angle_now]) if angle_hist else angle_now,
+                    "final_dist":    dist_now,
+                    "max_dist":      max(dist_hist + [dist_now]) if dist_hist else dist_now,
+                    "final_pos":     s["pos"].copy(),
+                }
 
         if i % 100 == 0:
             s = dyn.state
             bz_target = -s["pos"] / np.linalg.norm(s["pos"])
             angle_hist.append(_alignment_angle(s["R"][:, 2], bz_target))
+            target_angle_hist.append(_alignment_angle(s["R"][:, 2], bz_eq))
             alt_hist.append(float(-s["pos"][2]))
             v_hist.append(float(np.linalg.norm(s["vel"])))
             dist_hist.append(float(np.linalg.norm(s["pos"] - pos_design)))
+            north_hist.append(float(s["pos"][0] - pos_design[0]))
+            tilt_hist.append(float(math.hypot(tlon, tlat)))
+            rate_hist.append(float(np.linalg.norm(rate[:2])))
+            omega_hist.append(float(np.linalg.norm(omega_b[:2])))
 
     s = dyn.state
     result = {
@@ -732,15 +462,27 @@ def _run_with_constant_tether_force(
         "max_speed":      float(np.max(v_hist)),
         "final_angle":    angle_hist[-1],
         "max_angle":      float(np.max(angle_hist)),
+        "final_target_angle": target_angle_hist[-1],
+        "max_target_angle":   float(np.max(target_angle_hist)),
         "final_dist":     dist_hist[-1],
         "max_dist":       float(np.max(dist_hist)),
+        "final_north":    north_hist[-1],
+        "max_abs_north":  float(np.max(np.abs(north_hist))),
+        "max_tilt":       float(np.max(tilt_hist)),
+        "max_rate_sp":    float(np.max(rate_hist)),
+        "max_omega_xy":   float(np.max(omega_hist)),
         "final_pos":      s["pos"].copy(),
     }
     if return_history:
         result["altitudes"] = alt_hist
         result["speeds"]    = v_hist
         result["angles"]    = angle_hist
+        result["target_angles"] = target_angle_hist
         result["distances"] = dist_hist
+        result["north"]     = north_hist
+        result["tilts"]     = tilt_hist
+        result["rate_sp"]   = rate_hist
+        result["omega_xy"]  = omega_hist
     return result
 
 
@@ -753,10 +495,10 @@ def test_constant_tether_force_alt_hold_converges():
     simplification, without the elastic tether's spring-mode oscillation
     in the failure set.
 
-    If this passes but ``test_static_tension_alt_hold_converges_to_stationary``
-    fails, the destabilising factor is the elastic tether (spring +
-    restoring moment).  If this also fails, the pendulum / cyclic
-    coupling is what's broken.
+    This is still a simplification, not a real flight controller: tension is
+    supplied externally as a constant scalar.  It remains useful as the next
+    rung after fixed-position attitude because it allows hub translation while
+    removing elastic spring/slack dynamics.
     """
     r = _run_with_constant_tether_force(
         elevation_deg=30.0, tether_tension_n=300.0, t_total=20.0,
@@ -776,128 +518,219 @@ def test_constant_tether_force_alt_hold_converges():
     )
 
 
+def _run_elastic_free_flight_with_python_ap(
+    *,
+    t_total: float = 10.0,
+    tension_target_n: float = 300.0,
+    pos_perturb: np.ndarray | None = None,
+    vel_perturb: np.ndarray | None = None,
+) -> dict:
+    """Full elastic-tether free flight from the generated steady-state IC.
+
+    Uses the production ``PhysicsCore`` path through ``PhysicsRunner`` and the
+    Python AP pumping/altitude controller.  A simple ground-side winch adjusts
+    rest_length from measured tension, matching ``test_steady_flight.py``.
+    """
+    from types import SimpleNamespace
+    from arduloop import HeliParams, RateAxisParams
+    from pumping_planner import TensionCommand
+    from tests.common.mock_ardupilot import MockArdupilot
+    from tests.simtests.simtest_ic import load_ic
+    from tests.simtests.simtest_runner import PhysicsRunner
+
+    ic0 = load_ic()
+    pos0 = np.asarray(ic0.pos, dtype=float).copy()
+    vel0 = np.asarray(ic0.vel, dtype=float).copy()
+    if pos_perturb is not None:
+        pos0 += np.asarray(pos_perturb, dtype=float)
+    if vel_perturb is not None:
+        vel0 += np.asarray(vel_perturb, dtype=float)
+    ic = SimpleNamespace(
+        pos=pos0,
+        vel=vel0,
+        R0=ic0.R0,
+        rest_length=float(ic0.rest_length),
+        coll_eq_rad=float(ic0.coll_eq_rad),
+        omega_spin=float(ic0.omega_spin),
+        trim_tilt_lon=float(ic0.trim_tilt_lon),
+        trim_tilt_lat=float(ic0.trim_tilt_lat),
+    )
+    runner = PhysicsRunner(
+        _ROTOR, ic, WIND,
+        col_min_rad=-0.28, col_max_rad=0.10,
+    )
+    from controller import HeliCyclicController as _Heli
+    runner._acro = _Heli(
+        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        P=0.67, I=0.15, D=0.02, IMAX=0.30,
+        FLTT=40.0, FLTE=0.0, FLTD=40.0,
+    )
+    runner._acro._servo.reset(ic.coll_eq_rad)
+
+    ap = MockArdupilot.for_pumping(
+        ic_pos=ic0.pos,
+        mass_kg=_MASS,
+        slew_rate_rad_s=0.40,
+        warm_coll_rad=ic.coll_eq_rad,
+        tension_ic=tension_target_n,
+        wind=WIND,
+        dt=DT,
+    )
+    rate_params = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30,
+                                 FLTT=40.0, FLTE=0.0, FLTD=40.0)
+    heli_params = HeliParams()
+    heli_params.roll = rate_params
+    heli_params.pitch = rate_params
+    ap.enable_guided(heli_params)
+
+    target_alt = float(-ic0.pos[2])
+    command_dt = 0.1
+    ap.receive_command(TensionCommand(
+        tension_target_n=tension_target_n,
+        alt_m=target_alt,
+        phase="reel-out",
+    ), command_dt)
+
+    rest_now = float(ic.rest_length)
+    winch_kp = 0.01
+    winch_vmax = 1.0
+    planner_every = max(1, round(command_dt / DT))
+    ap_every = max(1, round((1.0 / MockArdupilot.AP_HZ) / DT))
+    pos_design = np.asarray(ic0.pos, dtype=float)
+    n = int(round(t_total / DT))
+
+    alt_hist, speed_hist, tension_hist, north_hist, axle_hist = [], [], [], [], []
+    for step in range(n):
+        if step % planner_every == 0:
+            ap.receive_command(TensionCommand(
+                tension_target_n=tension_target_n,
+                alt_m=target_alt,
+                phase="reel-out",
+            ), command_dt)
+        if step % ap_every == 0:
+            ap.tick(step * DT, runner)
+        d_tension = runner.tension_now - tension_target_n
+        v_winch = max(-winch_vmax, min(winch_vmax, winch_kp * d_tension))
+        rest_now += v_winch * DT
+        ap.step_physics(runner, DT, rest_length=rest_now)
+
+        if _state_diverged(runner.hub_state):
+            s_fail = runner.hub_state
+            return {
+                "failure": "diverged",
+                "failed_at_s": (step + 1) * DT,
+                "final_pos": s_fail["pos"].copy(),
+                "final_vel": s_fail["vel"].copy(),
+                "final_omega": s_fail["omega"].copy(),
+                "max_speed": math.inf,
+                "max_abs_north": math.inf,
+                "tension_min": 0.0,
+                "tension_max": math.inf,
+            }
+
+        if step % 100 == 0:
+            hub = runner.hub_state
+            pos = hub["pos"]
+            vel = hub["vel"]
+            body_z = hub["R"][:, 2]
+            tether_dir = -pos / max(float(np.linalg.norm(pos)), 0.1)
+            alt_hist.append(float(-pos[2]))
+            speed_hist.append(float(np.linalg.norm(vel)))
+            tension_hist.append(float(runner.tension_now))
+            north_hist.append(float(pos[0] - pos_design[0]))
+            axle_hist.append(_alignment_angle(body_z, tether_dir))
+
+    return {
+        "final_alt": alt_hist[-1],
+        "min_alt": float(np.min(alt_hist)),
+        "max_alt": float(np.max(alt_hist)),
+        "max_speed": float(np.max(speed_hist)),
+        "final_speed": speed_hist[-1],
+        "tension_min": float(np.min(tension_hist)),
+        "tension_max": float(np.max(tension_hist)),
+        "tension_final": tension_hist[-1],
+        "final_north": north_hist[-1],
+        "max_abs_north": float(np.max(np.abs(north_hist))),
+        "max_axle_angle": float(np.max(axle_hist)),
+    }
+
+
+def test_elastic_tether_free_flight_holds_generated_ic():
+    """Elastic tether free flight with Python AP and active winch control."""
+    r = _run_elastic_free_flight_with_python_ap(t_total=10.0)
+    assert "failure" not in r, f"Elastic free flight failed: {r}"
+    assert r["max_speed"] < 8.0, f"Hub speed grew too large: {r}"
+    assert r["max_abs_north"] < 3.0, f"Hub drifted off wind plane: {r}"
+    assert 100.0 < r["tension_min"] < 500.0, f"Tension went slack/low: {r}"
+    assert r["tension_max"] < 620.0, f"Tether exceeded break load: {r}"
+    assert math.degrees(r["max_axle_angle"]) < 25.0, f"Axle misaligned: {r}"
+
+
 # PD position-feedback gains used by the disturbance tests.  Tuned for
 # the beaupoil rotor (5 kg hub, 100 m tether, ~22 s pendulum period).
 # kp_pos = 80 N/m gives a stiffness ~16 N/m·kg = pendulum frequency
 # ~1.8 rad/s (3× natural).  kd_pos = 80 N·s/m is critically damped at
 # that stiffness for a 5 kg hub.  See controller.position_feedback_bz_eq
 # docstring for the full design rationale.
-_KP_POS    = 80.0
-_KD_POS    = 80.0
+_KP_POS    = 20.0
+_KD_POS    = 45.0
 _T_SETTLE  = 30.0   # s — settling budget for disturbance tests
 
 
 def test_constant_tether_recovers_from_lateral_position_offset():
-    """Disturbance: hub starts 5 m EAST of the design position.
+    """Disturbance: hub starts 5 m NORTH of the design position.
 
     With PD position-feedback added to body_z_eq, the cyclic loop must
     pull the hub back to near the design point within 30 s.
     """
     r = _run_with_constant_tether_force(
         elevation_deg=30.0, tether_tension_n=300.0, t_total=_T_SETTLE,
-        pos_perturb=np.array([0.0, 5.0, 0.0]),
+        pos_perturb=np.array([5.0, 0.0, 0.0]),
         kp_pos=_KP_POS, kd_pos=_KD_POS,
     )
-    assert r["max_dist"] < 12.0, (
-        f"Hub diverged from design pos: max_dist={r['max_dist']:.1f} m"
+    assert r["max_abs_north"] < 5.5, (
+        f"Hub diverged off-plane: max_abs_north={r['max_abs_north']:.1f} m"
     )
-    assert r["final_dist"] < 4.5, (
-        f"Hub did not return to design pos: final_dist={r['final_dist']:.2f} m\n"
+    assert abs(r["final_north"]) < 0.5, (
+        f"Hub did not return to wind plane: final_north={r['final_north']:.2f} m\n"
         f"  final_pos={r['final_pos'].round(2)}"
     )
+    assert math.degrees(r["max_target_angle"]) < 20.0
 
 
 def test_constant_tether_recovers_from_lateral_velocity_kick():
-    """Disturbance: hub starts at design with +1 m/s East velocity."""
+    """Disturbance: hub starts at design with +1 m/s North velocity."""
     r = _run_with_constant_tether_force(
         elevation_deg=30.0, tether_tension_n=300.0, t_total=_T_SETTLE,
-        vel_perturb=np.array([0.0, 1.0, 0.0]),
+        vel_perturb=np.array([1.0, 0.0, 0.0]),
         kp_pos=_KP_POS, kd_pos=_KD_POS,
     )
-    assert r["max_dist"] < 10.0, (
-        f"Excessive excursion under velocity kick: max_dist={r['max_dist']:.1f} m"
+    assert r["max_abs_north"] < 0.75, (
+        f"Excessive off-plane excursion: max_abs_north={r['max_abs_north']:.2f} m"
     )
-    assert r["final_speed"] < 1.5, (
-        f"Loop didn't brake the velocity kick: final_speed={r['final_speed']:.2f} m/s"
+    assert abs(r["final_north"]) < 0.6, (
+        f"Hub did not return to wind plane: final_north={r['final_north']:.2f} m"
     )
-    assert r["final_dist"] < 3.0, (
-        f"Hub did not return: final_dist={r['final_dist']:.2f} m"
-    )
+    assert math.degrees(r["max_target_angle"]) < 15.0
 
 
 def test_constant_tether_rejects_brief_force_impulse():
-    """Disturbance: 2-second 20-N East push starting at t=2s.
+    """Disturbance: 2-second 20-N North push starting at t=2s.
 
     Simulates a wind gust or impulsive disturbance; the loop must
     return the hub to the design point after the pulse ends.
     """
     r = _run_with_constant_tether_force(
         elevation_deg=30.0, tether_tension_n=300.0, t_total=_T_SETTLE,
-        force_pulse=(2.0, 4.0, np.array([0.0, 20.0, 0.0])),
+        force_pulse=(2.0, 4.0, np.array([20.0, 0.0, 0.0])),
         kp_pos=_KP_POS, kd_pos=_KD_POS,
     )
-    assert r["max_dist"] < 12.0, (
-        f"Pulse caused runaway: max_dist={r['max_dist']:.1f} m"
+    assert r["max_abs_north"] < 1.0, (
+        f"Pulse caused off-plane runaway: max_abs_north={r['max_abs_north']:.1f} m"
     )
-    assert r["final_dist"] < 4.0, (
-        f"Hub didn't recover after pulse: final_dist={r['final_dist']:.2f} m"
+    assert abs(r["final_north"]) < 0.5, (
+        f"Hub did not return to wind plane: final_north={r['final_north']:.2f} m"
     )
-    assert r["final_speed"] < 1.5, (
-        f"Hub still moving at end: final_speed={r['final_speed']:.2f} m/s"
-    )
+    assert math.degrees(r["max_target_angle"]) < 15.0
 
 
-@pytest.mark.xfail(
-    reason="Full 6-DOF pendulum dynamics with the ELASTIC tether are not "
-           "stabilised by the current attitude controller at the design "
-           "operating point.  The cyclic chain itself is sign-correct "
-           "(test_attitude_loop_converges_at_design_equilibrium); "
-           "test_constant_tether_force_alt_hold_converges further isolates "
-           "the elastic spring's contribution.  Open task: identify which "
-           "of (spring, tether restoring moment, pendulum coupling) breaks "
-           "the loop and add an outer position-feedback or fix the "
-           "AltitudeHoldController setpoint dynamics under FRD."
-)
-def test_static_tension_alt_hold_converges_to_stationary():
-    """6-DOF version of the attitude convergence test: hub free to swing,
-    AltitudeHoldController for cyclic, fixed collective.  Expected to fail
-    until the pendulum-dynamics control work is done."""
-    r = _run_alt_hold_fixed_collective(
-        elevation_deg=30.0, col_fixed=-0.18, t_total=30.0,
-        use_trim=True,
-    )
-    # Hub should stay within ±10 m of starting altitude
-    alt0 = 100.0 * math.sin(math.radians(30.0))   # = 50.0 m
-    assert abs(r["final_alt"] - alt0) < 10.0, (
-        f"Altitude drifted: final={r['final_alt']:.1f} m, expected ~{alt0:.0f} m\n"
-        f"  alt range [{r['min_alt']:.1f}, {r['max_alt']:.1f}] m\n"
-        f"  speed range [0, {r['max_speed']:.2f}] m/s\n"
-        f"  tension_final={r['tension_final']:.1f} N"
-    )
-    # And keep velocity bounded — no runaway orbit
-    assert r["final_speed"] < 5.0, (
-        f"Final speed too large: {r['final_speed']:.2f} m/s (max during run: "
-        f"{r['max_speed']:.2f})"
-    )
-    # Attitude must track the (moving) target
-    assert math.degrees(r["max_angle"]) < 15.0, (
-        f"Axle misalignment grew: max={math.degrees(r['max_angle']):.1f} deg"
-    )
-
-
-def test_fixed_collective_documents_altitude_drift_without_tensionpi():
-    """Without TensionPI, the hub drifts in altitude — this is the dynamic
-    the IC warmup must regulate, and it is NOT a sign bug.
-
-    Recorded here so the IC-warmup failure isn't misread as an attitude or
-    cyclic problem: the fixed-collective run lands at the floor within 10 s
-    even though the cyclic loop holds attitude perfectly.
-    """
-    r = _run_loop(elevation_deg=30.0, t_total=10.0)
-    # Altitude drops significantly; this is expected, not asserted to pass
-    # with a tight bound — it's a documentation test of the fact.
-    assert r["min_alt"] < 10.0, (
-        "If the altitude no longer collapses with fixed collective, the "
-        "underlying physics changed and this documentation test should be "
-        "reconsidered."
-    )

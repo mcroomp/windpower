@@ -520,7 +520,6 @@ def _launch_mediator(
     tether_rest_length: "float | None" = None,
     initial_state: "dict | None" = None,
     startup_damp_seconds: "float | None" = None,
-    lock_orientation: bool = False,
     run_id: "int | None" = None,
     base_k_ang: "float | None" = None,
     extra_config: "dict | None" = None,
@@ -547,7 +546,6 @@ def _launch_mediator(
         cfg["startup_damp_seconds"] = float(startup_damp_seconds)
     if base_k_ang is not None:
         cfg["base_k_ang"] = float(base_k_ang)
-    cfg["lock_orientation"]    = lock_orientation
     if extra_config:
         import copy as _copy
         for _k, _v in extra_config.items():

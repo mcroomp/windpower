@@ -162,12 +162,9 @@ class StackConfig:
     # 65 s gives 11 s margin: hub is still kinematic at arm time, GPS is healthy.
     # After arm (~54 s), kinematic runs 11 more seconds before physics starts.
     STARTUP_DAMP_S        : float = 65.0
-    LOCK_ORIENTATION      : bool  = False  # do not force body_z to tether direction each frame
-    # Permanent angular damping after startup ramp ends.
-    # 50 N·m·s/rad (mediator default) — physical bearing + air drag estimate.
-    # ArduPilot's 400 Hz ACRO rate PIDs provide the real angular control;
-    # k_ang=50 is a background stabiliser, not a workaround.
-    BASE_K_ANG            : float = 50.0
+    # Optional diagnostic angular damping after startup ramp ends.
+    # Default is zero: dynbem models the rotor attitude response directly.
+    BASE_K_ANG            : float = 0.0
 
     # Port descriptions for diagnostics
     _PORT_CHECKS = [
@@ -751,7 +748,6 @@ def _acro_stack(tmp_path, *, extra_config=None,
                 events_log_path      = str(events_path),
                 initial_state        = initial_state,
                 startup_damp_seconds = _STARTUP_DAMP_S,
-                lock_orientation     = StackConfig.LOCK_ORIENTATION,
                 run_id               = _run_id,
                 base_k_ang           = StackConfig.BASE_K_ANG,
                 extra_config         = extra_config,

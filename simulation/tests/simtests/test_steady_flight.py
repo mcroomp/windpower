@@ -61,7 +61,14 @@ _PLANNER_EVERY = max(1, round(_DT_CMD / DT))                   # 40
 _AP_EVERY      = max(1, round(1.0 / (MockArdupilot.AP_HZ * DT)))   # 8
 
 
-def _run_simulation(log, steps: int = 4000):
+def wind_azimuth_rad() -> float:
+    wind_h = np.asarray(WIND[:2], dtype=float)
+    if float(np.linalg.norm(wind_h)) < 1e-9:
+        raise ValueError("steady-flight fixed-azimuth mode requires horizontal wind")
+    return float(math.atan2(wind_h[1], wind_h[0]))
+
+
+def _run_simulation(log, steps: int = 4000, *, ic=None):
     """
     Run the steady-state physics for `steps` iterations starting from the
     settled IC in steady_state_starting.json.  No warmup needed — the IC is
@@ -69,7 +76,7 @@ def _run_simulation(log, steps: int = 4000):
 
     Returns a dict of per-step arrays plus scalars.
     """
-    ic         = load_ic()
+    ic         = load_ic() if ic is None else ic
     tension_out = 300.0   # IC targets 300 N midway between reel-in (226 N) and reel-out (435 N)
     target_alt = float(-ic.pos[2])
 
@@ -91,6 +98,10 @@ def _run_simulation(log, steps: int = 4000):
         tension_ic=tension_out,
         wind=WIND,
         dt=DT,
+        # Temporary sim-only oracle: choose the horizontal body-z azimuth from
+        # configured wind, while _PumpingPythonMode still derives elevation
+        # from tether length/current altitude.
+        az_ref_rad=wind_azimuth_rad(),
     )
     from arduloop import HeliParams, RateAxisParams
     _rp = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTE=0.0, FLTD=40.0)

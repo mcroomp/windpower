@@ -47,18 +47,28 @@ DELTA_L      = 12.0    # tether payout per cycle [m]
 V_REEL_OUT   = 0.5     # reel-out velocity [m/s]
 V_REEL_IN    = 0.5     # reel-in speed [m/s] (applied as -V_REEL_IN)
 
-# Winch tension limits
-T_MIN        = 200.0   # lower hard limit [N]
+# Winch tension limits. Keep the lower guard below the reel-in AP target; otherwise
+# the winch brakes throughout the intended low-tension reel-in phase.
+T_MIN        = 20.0    # lower hard limit [N]
 T_MAX        = 400.0   # upper hard limit [N]
 SOFT_ZONE_N  = 25.0    # braking zone width [N]
 
 TENSION_IC   = 300.0   # IC equilibrium tension
+TENSION_REEL_OUT = TENSION_IC
+TENSION_REEL_IN  = 100.0
 FLOOR_ALT_M  = 1.0
 
 # Safety timeouts
 T_REEL_OUT_MAX = 120.0
 T_REEL_IN_MAX  = 300.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
+
+
+def _wind_azimuth_rad() -> float:
+    wind_h = np.asarray(WIND[:2], dtype=float)
+    if float(np.linalg.norm(wind_h)) < 1e-9:
+        raise ValueError("unified pumping fixed-azimuth mode requires horizontal wind")
+    return float(math.atan2(wind_h[1], wind_h[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +87,7 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         rest_length     = _IC.rest_length,
         v_max_out       = V_REEL_OUT,
         v_max_in        = V_REEL_IN,
-        accel_limit_ms2 = 1.0,
+        accel_limit_ms2 = 2.0,
         T_min           = T_MIN,
         T_max           = T_MAX,
         soft_zone_n     = SOFT_ZONE_N,
@@ -99,6 +109,10 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         events=events,
         wind=WIND,
         dt=DT,
+        # Temporary sim-only oracle: choose horizontal body-z azimuth from the
+        # configured wind direction. The AP still derives elevation from the
+        # current tether length and ground altitude command.
+        az_ref_rad=_wind_azimuth_rad(),
     )
 
     # State machine
@@ -112,7 +126,9 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     phase_label = f"cycle1_{phase}"
 
     def _ap_tension_target() -> float:
-        return TENSION_IC
+        if phase == "reel_in":
+            return TENSION_REEL_IN
+        return TENSION_REEL_OUT
 
     def _tel_fn(r, sr):
         pos_h  = r.hub_state["pos"][:2]
@@ -155,8 +171,6 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         tension_now = runner.tension_now
         altitude    = runner.altitude
         t_in_phase  = t_sim - phase_start_t
-        phase_label = f"cycle{cycle_idx+1}_{phase}"
-
         # ── Phase transitions ─────────────────────────────────────────────
         prev_phase = phase
         if phase == "reel_out":
@@ -174,11 +188,13 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
                 phase_start_t = t_sim
                 cycle_net_start[cycle_idx] = winch.net_energy_j
 
+        phase_label = f"cycle{cycle_idx+1}_{phase}"
+
         # ── Downlink ──────────────────────────────────────────────────────
         comms.inject(t_sim, altitude)
 
         # ── Ground 10 Hz: update winch velocity + refresh AP command ─────
-        if i % planner_every == 0:
+        if i % planner_every == 0 or phase != prev_phase:
             tel = comms.receive_telemetry(t_sim)
             if tel is not None:
                 prev_alt = tel.hub_alt_m
@@ -194,7 +210,7 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         ap_cmd = comms.poll_ap_command(t_sim)
 
         # ── AP 50 Hz ──────────────────────────────────────────────────────
-        if i % ap_every == 0:
+        if i % ap_every == 0 or phase != prev_phase:
             ap.tick(t_sim, runner,
                     accel_ned=prev_accel_ned,
                     inject=(lambda _ap, __: _ap.receive_command(ap_cmd, DT_PLANNER))

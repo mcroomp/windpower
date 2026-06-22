@@ -144,14 +144,11 @@ def run_mediator(args, trajectory=None):
     ev.write("startup", t_sim=0.0, run_id=_run_id, wind_ned=wind_world.tolist())
 
     # -- Instantiate subsystems -----------------------------------------------
-    # Mass comes from beaupoil_2026.yaml (currently 5.0 kg hardware mass).
-    # I_spin=0: do NOT include rotor gyroscopic coupling in the orbital dynamics.
-    # The lumped single-body model uses ArduPilot's cyclic commands directly as
-    # tilting moments (no blade flapping model).  The 90° gyroscopic precession
-    # that a real spinning rotor would produce is already compensated by the
-    # swashplate phase angle in a real helicopter; adding it here without the
-    # corresponding phase compensation would cause ArduPilot's attitude
-    # controller to tilt the disk in the wrong direction.
+    # Mass and spin inertia come from beaupoil_2026.yaml.  If I_spin_kgm2 is
+    # null, PhysicsCore derives the spinning-parts inertia from blade and hub
+    # shell masses, so gyroscopic coupling is active unless explicitly set to
+    # 0.0 in the rotor definition.  Swashplate phase / controller tuning must
+    # account for that coupling.
     # ── Initial state ──────────────────────────────────────────────────────────
     _pos0_arr        = np.array(cfg["pos0"],     dtype=float)
     _vel0_arr        = np.array(cfg["vel0"],     dtype=float)
@@ -240,7 +237,6 @@ def run_mediator(args, trajectory=None):
         k_yaw              = float(cfg.get("k_yaw", _K_YAW_DEFAULT)),
         kinematic          = _startup,
         startup_damp_k_ang = float(cfg["startup_damp_k_ang"]),
-        lock_orientation   = bool(cfg["lock_orientation"]),
         z_floor            = -1.0,
         tether_override    = _tether_override,
     )

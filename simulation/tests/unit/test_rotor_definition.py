@@ -12,6 +12,7 @@ import pytest
 
 
 from dynbem import rotor_definition as rd
+from rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor
 
 
@@ -120,6 +121,10 @@ class TestInertiaControl:
         r = load_rotor("beaupoil_2026")
         assert len(r.inertia.I_body_kgm2) == 3
         assert all(v > 0 for v in r.inertia.I_body_kgm2)
+
+    def test_beaupoil_I_spin_resolved_from_components(self):
+        r = load_rotor("beaupoil_2026")
+        assert math.isclose(resolve_i_spin_kgm2(r), 3.943, rel_tol=1e-3)
 
     def test_beaupoil_control_has_swashplate_gain(self):
         r = load_rotor("beaupoil_2026")

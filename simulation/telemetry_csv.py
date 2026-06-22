@@ -2,8 +2,13 @@
 telemetry_csv.py -- Unified telemetry row for CSV read/write.
 
 Single source of truth for the flat CSV schema used by simtests and analysis.
-COLUMNS is the canonical ordered column list.  TelRow is the typed row object.
+COLUMNS is the canonical ordered column list. TelRow is the typed row object.
 write_csv / read_csv handle I/O.
+
+When adding telemetry, add the column here first: update COLUMNS, the TelRow
+dataclass field, and the relevant constructor mapping (from_physics/from_tel).
+Telemetry producers must write through write_csv() or import COLUMNS directly;
+do not create per-test or per-module telemetry headers.
 
 Simtests build rows via TelRow.from_physics(...) and call write_csv().
 analyse_pumping_cycle.py reads via read_csv() instead of its own TelRow + loader.
@@ -717,7 +722,10 @@ def write_csv(rows: "list[TelRow]", path: "Path | str") -> None:
         w = csv.DictWriter(fh, fieldnames=COLUMNS)
         w.writeheader()
         for row in rows:
-            w.writerow(row.to_dict())
+            row_dict = row.to_dict()
+            if list(row_dict.keys()) != COLUMNS:
+                raise ValueError("TelRow.to_dict() keys must exactly match telemetry_csv.COLUMNS")
+            w.writerow(row_dict)
 
 
 def read_csv(path: "Path | str") -> "list[TelRow]":

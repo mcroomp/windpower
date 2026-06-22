@@ -573,9 +573,6 @@ class MockArdupilot:
         **kwargs,
     ):
         """Construct a Python-equivalent pumping backend."""
-        wind_h = np.asarray(wind, dtype=float)[:2]
-        if "az_ref_rad" not in kwargs and float(np.linalg.norm(wind_h)) > 1e-9:
-            kwargs["az_ref_rad"] = float(np.arctan2(wind_h[1], wind_h[0]))
         return cls.for_python(
             mode="pumping",
             ic_pos=ic_pos,
