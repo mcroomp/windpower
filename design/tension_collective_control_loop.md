@@ -1,4 +1,4 @@
-# Tension / Collective Control Loop
+# RAWES Outer Tension / Orientation / Altitude Control Loop
 
 **Reference:** De Schutter J., Leuthold R., Diehl M. (2018).
 "Optimal Control of a Rigid-Wing Rotary Kite System for Airborne Wind Energy."
@@ -6,144 +6,68 @@ IFAC Proceedings, Vol. 51, No. 13, pp. 523-528.
 
 ---
 
-## Problem
+## Overview
 
-Given:
-- Hub position $\vec{r}$ (NED) → determines tether direction and elevation angle $\theta_{\text{el}}$
-- Commanded tether tension $T_{\text{cmd}}$ [N], received from the winch
-- Vehicle mass $m$ [kg]
+Two subsystems cooperate across a **tether** under tension: a **ground winch** that sets how hard the tether is pulled, and a kite that produces lift via a rotor and has a fast inner-loop PID (as implemented by Ardupilot) that controls attitude and movement rates against its gyros, and slower outer control loop that controls altitude and target attitude. 
 
-Find: disk tilt angle $\xi$ (the angle of the *disk normal* relative to the tether) and disk normal vector $\vec{b}_z$ that hold steady altitude.
+The winch and the vehicle are coupled by a single shared number — the **commanded tension** $T_{\text{cmd}}$, the winch's own setpoint, also broadcast to the vehicle. The ground-to-air link carries only slow setpoints (this tension and the target altitude), never fast feedback, so the two ends can be designed and tuned independently. The work then splits into four tasks, deliberately kept decoupled so they never fight each other:
 
-**Assumptions:** quasi-static equilibrium (no translational acceleration), aerodynamic drag / in-plane H-force neglected. The result is an **equilibrium (trim) map**. Using a *static* map is justified by timescale separation: the inner attitude loop settles much faster than the operating point (tension, commanded elevation) drifts, so the kite is always near the instantaneous equilibrium. *Control consequence of 0-drag assumption:* Because real-world drag pushes the kite downwind, the zero-drag map systematically under-commands forward tilt. The vehicle compensates by settling at a slightly lower equilibrium elevation ($\theta_{\text{el}}$) than the pure kinematic model predicts.
+| Task | Where | Type | Output |
+|------|-------|------|--------|
+| Tension | Ground winch | Feedback | Reel speed |
+| Orientation | Kite | Feedforward | Direction of the lift |
+| Altitude | Kite | Feedback (PID) | Collective pitch |
+| Attitude | Kite | Feedback (PID 400hz) | Cyclic control |
 
----
+```mermaid
+flowchart LR
+    Planner[Ground planner] -->|commanded tension| WinchCtl
+    Planner -.commanded tension.-> Trim
+    Planner -.target altitude.-> Alt
 
-## Solution
+    subgraph Ground[Ground winch]
+        WinchCtl[Tension loop] -->|reel speed| Drum[Drum]
+        Drum -->|actual tension| Load[Load cell]
+        Load -->|measured tension| WinchCtl
+    end
 
-### Force Balance
-
-Three distinct quantities govern the map:
-- **Rotor thrust** $T_R$: The kite's aerodynamic force along the disk normal.
-- **Actual tension** $T_t$: The true mechanical load (measured by the winch load cell).
-- **Commanded tension** $T_{\text{cmd}}$: The reference value sent over MAVLink. The kite computes its tilt using $T_{\text{cmd}}$, assuming the winch will track it ($T_t \to T_{\text{cmd}}$).
-
-Resolve the steady-state force balance along and perpendicular to the tether (in the vertical plane). With gravity $m g$ down and elevation angle $\theta_{\text{el}}$:
-
-- **Perpendicular to tether:** $\;T_R \sin(\xi) = m g \cos(\theta_{\text{el}})$
-- **Along tether:** $\;T_R \cos(\xi) = T_t + m g \sin(\theta_{\text{el}})$
-
-Dividing eliminates the (unmeasured) rotor thrust and gives the equilibrium tilt angle in terms of tether tension:
-
-$$\boxed{\;\tan(\xi) = \frac{m g \cos(\theta_{\text{el}})}{T_t + m g \sin(\theta_{\text{el}})}\;}$$
-
-The kite evaluates this at the **commanded** tension $T_{\text{cmd}}$ (substitute $T_{\text{cmd}}$ for $T_t$); the substitution is exact whenever the winch has driven actual tension to its command.
-
-### Implementation Approximation
-
-When $T_{\text{cmd}} \gg m g \sin(\theta_{\text{el}})$ (high tension), the gravity-along-tether term is dropped:
-
-$$\tan(\xi) \approx \frac{m g \cos(\theta_{\text{el}})}{T_{\text{cmd}}}$$
-
-This is the form built by [`compute_bz_altitude_hold()`](../simulation/controller.py#L671) (a `tdir + (g·cosθ/T)·e_perp` construction — a **tangent**, not a sine). At the design point the dropped term is $m g \sin 60° \approx 21$ N, ~7% of 300 N.
-
-**Key insight:** as $T_{\text{cmd}}$ increases, $\xi$ decreases (disk stays closer to the tether); as $T_{\text{cmd}}$ decreases, $\xi$ must increase. The $1/T$ dependence means the angle command is highly sensitive at low tension — see [Robustness](#robustness-and-stability).
-
----
-
-## Disk Normal Vector
-
-From hub position $\vec{r} = [r_N, r_E, r_D]$ (NED), compute:
-
-**Elevation angle** (hub is above the anchor, so $r_D < 0$ in NED):
-$$\sin(\theta_{\text{el}}) = \frac{-r_D}{|\vec{r}|}$$
-
-**Tether direction** (hub to anchor at origin):
-$$\hat{\vec{t}} = -\frac{\vec{r}}{|\vec{r}|} = \begin{bmatrix} -\cos(\theta_{\text{el}}) \cos(\alpha) \\ -\cos(\theta_{\text{el}}) \sin(\alpha) \\ \sin(\theta_{\text{el}}) \end{bmatrix}$$
-
-where $\alpha = \arctan2(r_E, r_N)$ is azimuth.
-
-**Elevation-perpendicular direction** (in vertical plane):
-$$\hat{\vec{e}}_{\perp} = \begin{bmatrix} \sin(\theta_{\text{el}}) \cos(\alpha) \\ \sin(\theta_{\text{el}}) \sin(\alpha) \\ \cos(\theta_{\text{el}}) \end{bmatrix}$$
-
-**Disk normal** (tangent construction, gravity-along-tether dropped):
-$$\vec{b}_z = \frac{\hat{\vec{t}} + \frac{mg\cos(\theta_{\text{el}})}{T_{\text{cmd}}}\, \hat{\vec{e}}_{\perp}}{\left\|\,\hat{\vec{t}} + \frac{mg\cos(\theta_{\text{el}})}{T_{\text{cmd}}}\, \hat{\vec{e}}_{\perp}\right\|}$$
-
----
-
-## Example: Design Operating Point
-
-- $m = 2.5$ kg, $g = 9.81$ m/s², $\theta_{\text{el}} = 60°$, $T_{\text{cmd}} = 300$ N
-
-Exact (with gravity-along-tether term):
-$$\xi = \arctan\left(\frac{12.26}{300 + 21.2}\right) \approx 2.2°$$
-
-Approximate (implementation form):
-$$\xi = \arctan\left(\frac{12.26}{300}\right) \approx 2.3°$$
-
-Low tilt $\xi$ → efficient cyclic trim. The two forms agree to ~0.1° at high tension.
-
----
-
-## Control Architecture
-
-The angle map is an **equilibrium (trim) map**, not pure feedforward: it is *feedforward in the elevation command* (driven by the target altitude) and *feedforward in the commanded tension* $T_{\text{cmd}}$, but *feedback in the measured azimuth* (from position). The kite does **not** close any loop on tension — it consumes the commanded $T_{\text{cmd}}$ as a clean reference. The tension feedback lives entirely at the winch (below).
-
-### Ground Control: Winch Realizes the Commanded Tension
-
-The commanded tension $T_{\text{cmd}}$ is the shared setpoint: it is sent to the kite (to pick the angle) and is the winch's own target. The winch **modulates reel speed** $v_{\text{reel}}$ to drive *actual* tension $T_t$ toward $T_{\text{cmd}}$, closing a tension loop on its load cell:
-
-$$v_{\text{reel}} = \Pi\big(T_{\text{cmd}} - T_t\big) \quad\text{(reel out to shed tension, reel in to build it)}$$
-
-This is the single source of tension feedback in the system. The kite is fully insulated from load-cell noise because it only ever sees the commanded value.
-
-### Onboard Control: Disk Orientation (feedforward)
-
-The kite's autopilot runs **rawes.lua at 50 Hz**. Lua computes the disk normal `bz_goal` from measured position and the *commanded* tension (`bz_altitude_hold`), converts it to an absolute roll/pitch target (`bz_ned_to_roll_pitch`), and commands it through the GUIDED **set-angle** API:
-
-```
-vehicle:set_target_angle_and_rate_and_throttle(roll, pitch, yaw, 0, 0, 0, col_thrust)
+    subgraph Vehicle[Airborne vehicle]
+        Trim[Orientation force balance] -->|target tilt direction| Att[Attitude controller]
+        Att -->|tilt command| Dyn[Vehicle dynamics]
+        Alt[Altitude PID] -->|lift magnitude| Dyn
+        Dyn -->|position| Trim
+        Dyn -->|altitude| Alt
+    end
 ```
 
-Lua only *decides* the target angle. **ArduPilot's native attitude controller** (`ATC_ANG_*_P` outer loop + rate PIDs, 400 Hz) actually *holds* that angle against disturbances — Lua passes zero feedforward rate. This replaced an earlier rate-only cascade that diverged at the high-tilt / low-tension reel-in point.
+## Winch — tension feedback
 
-### Altitude Hold Loop (feedback, in Lua)
+The winch drives the *actual* tension $T_t$ (from its load cell) to the command by modulating reel speed, $v_{\text{reel}} = \Pi(T_{\text{cmd}} - T_t)$ — reel out to shed tension, reel in to build it. This is the only tension feedback anywhere in the system; the vehicle never sees the noisy load cell and simply trusts $T_{\text{cmd}}$.
 
-The altitude controller also lives in **rawes.lua**, separate from the attitude path. It is a PID on altitude error whose output is **collective pitch** (sent as the `col_thrust` argument above):
+## Kite orientation — a force balance (feedforward)
 
-$$\text{col} = \text{col}_{\text{trim}} + K_p\,e_{\text{alt}} + K_i\!\int e_{\text{alt}}\,dt - K_d\, v_{z}$$
+In steady state the vehicle is held by four forces — lift, gravity, tether tension, and aerodynamic drag — but this design deliberately ignores drag, leaving three that must sum to zero. The lift then has to cancel the other two:
 
-- $\text{col}_{\text{trim}}$ — equilibrium collective feedforward (anchors the loop so it does not rely on integral action for the gravity disturbance).
-- Integral state is clamped so that $\text{col}_{\text{trim}} + K_i\!\int e$ stays within $[\text{col}_{\min}, \text{col}_{\max}]$ (anti-windup against collective saturation).
-- Vertical-velocity damping $K_d v_z$ is derivative-on-measurement (rate feedback, no setpoint-derivative kick) and is **gain-scheduled** down while body rates are high (`vz_gate`), so attitude transients do not inject collective noise.
-- Output is slew-rate limited (`COL_SLEW_MAX`) before mapping to throttle.
+$$\vec{F}_{\text{lift}} = -\big(\vec{F}_{\text{gravity}} + \vec{F}_{\text{tension}}\big).$$
 
-### System Coupling & Robustness
+Writing gravity as $mg\,\hat{\vec{z}}$ (down) and tension as $T_{\text{cmd}}\,\hat{\vec{t}}$ (toward the anchor, with $\hat{\vec{t}} = -\vec{r}/|\vec{r}|$ from the vehicle position $\vec{r}$ in North-East-Down), the required lift points opposite to their sum. The disk axis the attitude controller must hold, $\vec{b}_z$, lies along that resultant (the lift is produced along $-\vec{b}_z$), and the lift magnitude the vehicle must produce is its length:
 
-$T_{\text{cmd}}$ is the shared variable tying the system together: the ground winch drives actual tension $T_t \to T_{\text{cmd}}$ via reel speed, while the kite assumes $T_t = T_{\text{cmd}}$ to calculate disk tilt and trims collective to hold altitude. This creates specific stability constraints:
+$$\vec{b}_z = \frac{T_{\text{cmd}}\,\hat{\vec{t}} + mg\,\hat{\vec{z}}}{\big\lVert\, T_{\text{cmd}}\,\hat{\vec{t}} + mg\,\hat{\vec{z}} \,\big\rVert}, \qquad T_R = \big\lVert\, T_{\text{cmd}}\,\hat{\vec{t}} + mg\,\hat{\vec{z}} \,\big\rVert.$$
 
-- **Positive-Feedback Altitude Path:** $\text{Altitude} \to \theta_{\text{el}} \to \text{tilt} \to \text{thrust} \to \text{altitude}$ is regenerative at high bounds. The deployed code breaks this algebraic loop by filtering the elevation input (`_el_rad` slewed at 0.40 rad/s). *Consequence:* The angle map is sluggish against sudden downdrafts, forcing the fast **collective PID** to handle all immediate transient altitude rejection.
-- **Bandwidth Separation:** To prevent limit cycles, the system enforces a strict hierarchy: $\omega_{\text{schedule}} \ll \omega_{\text{winch}} < \omega_{\text{attitude}}$. The winch must be fast enough to track schedule changes without lag, but slower than the kite's aerodynamic attitude loop so it doesn't "chase" rapid transients.
-- **Tracking Error & Singularity:** Winch tracking lag ($T_t \neq T_{\text{cmd}}$) directly injects a disk-angle bias into the kite. Furthermore, tilt sensitivity spikes at low tension ($1/T$ singularity), requiring the code to clamp tension at 1.0 N to prevent extreme tilt commands.
+The direction goes to the attitude controller; the magnitude is a ready-made feedforward for altitude. No feedback is needed — it is pure geometry at the current tension and position, and $\hat{\vec{t}}$ already carries the horizontal bearing, so the result automatically lies in the vertical plane through the tether. Equivalently, the lift's tilt off the tether is $\tan\xi = mg\cos\theta_{\text{el}}/(T_{\text{cmd}} + mg\sin\theta_{\text{el}}) \approx mg\cos\theta_{\text{el}}/T_{\text{cmd}}$; at our steady-cruise operating point ($m=5.0$ kg, hub at 100 m range so $\theta_{\text{el}}\approx 25°$, $T_{\text{cmd}}=300$ N) that is only ~8°, so very little steering effort is needed to trim. Ignoring drag costs only a small steady offset — the vehicle settles at a marginally lower equilibrium elevation, not an instability. Note the $1/T$ scaling: tilt grows fast as tension drops (see below).
 
----
+## Kite altitude — lift magnitude (PID feedback)
 
-## Proposed Enhancement: Tension Schedule (Shared S-Curve Reference)
+While orientation sets lift *direction*, a PID on altitude error sets its *magnitude*:
 
-Instead of broadcasting an *instantaneous* tension command, the winch sends a **tension schedule** — a segment $(T_1, \Delta t)$ giving the new commanded tension and the time over which to reach it. Both the winch and the kite evaluate the *same* smooth $T_{\text{cmd}}(\tau)$ profile against a synchronized clock: the kite re-aims its disk along the profile, while the winch drives actual tension along the same profile via reel speed.
+$$\text{lift} = \text{lift}_{\text{trim}} + K_p\,e_{\text{alt}} + K_i\!\int e_{\text{alt}}\,dt - K_d\, v_{z}.$$
 
-This is a **2-DOF structure**: the shared schedule is the *feedforward reference* that both ends track, and the winch's reel-speed tension loop (load-cell feedback) is what makes *actual* tension realize that reference (see [Robustness](#robustness-and-stability)). The kite stays feedforward-only on tension.
+The equilibrium feedforward $\text{lift}_{\text{trim}}$ (the $T_R$ above) carries the steady load so the integrator does not have to; the integral is clamped (anti-windup); the velocity damping $K_d v_z$ is taken from the measurement and gain-scheduled down while attitude is moving fast, so orientation transients don't bleed into lift; and the output is slew-limited. This loop is the system's fast disturbance rejector (gusts), while the orientation force balance only slowly re-trims. Fast feedback on magnitude, slow feedforward on direction — that division of labour is why the two are separate.
 
-### S-Curve Implementation
+## Why it should stay stable
 
-A bare linear tension ramp creates a step in $\dot{T}_{\text{cmd}}$, causing a jerk in the angle setpoint and cyclic torque. To prevent this, tensions should be interpolated using a **quintic smoothstep** (S-curve), which provides $C^2$ continuity (zero rate and acceleration at endpoints):
+The shared tension couples the loops, creating a few paths to manage: (1) a regenerative altitude path (altitude → tilt → lift → altitude) near the operating limits, broken by slewing the elevation that feeds the force balance so the fast altitude PID owns immediate rejection; (2) a bandwidth ordering $\omega_{\text{schedule}} \ll \omega_{\text{winch}} < \omega_{\text{attitude}}$ that keeps the winch tracking commands without chasing fast transients; and (3) the $1/T$ tilt sensitivity, which blows up at low tension, so the tension fed into the force balance is floored at a small positive value.
 
-$$T_{\text{cmd}}(\tau) = T_0 + (T_1 - T_0)\, s\left(\frac{\tau}{\Delta t}\right), \quad s(u) = 6u^5 - 15u^4 + 10u^3$$
+## Proposed enhancement — a shared tension schedule
 
-The peak transition rate is mathematically bounded to $\dot{T}_{\text{cmd},\max} = 1.875\, \frac{T_1 - T_0}{\Delta t}$.
-
-**Design Integration Limits:**
-- **Synchronization:** The winch and kite must share MAVLink time. If a new schedule arrives mid-transit, it must start from the *current* interpolated $T_{\text{cmd}}$ to avoid a jump.
-- **Actuator Limits:** The ground planner must pick a $\Delta t$ feasible for the winch motor. Tracking lag defeats the feedforward coordination.
-- **Rate Authority:** The schedule should own the transition rate. Local kite slews (`_el_rad`, `COL_SLEW_MAX`) become safety saturations only, avoiding double-filtering.
-- **Discrete Sampling:** Though 50 Hz/10 Hz loops slightly violate absolute $C^2$ precision, the quintic polynomial successfully eliminates the 1-tick jerk.
+Instead of an instantaneous command, the ground could send a short tension *schedule* — a target tension plus the time to reach it — that both ends evaluate against a synchronized clock: the winch drives actual tension along it while the vehicle re-aims its lift along the same profile (a two-degree-of-freedom structure). The profile should be smooth enough not to jerk the orientation command (a ramp with eased ends, bounding the peak tension rate), should resume from the current value if it is replaced mid-transition, and should own the transition rate so the vehicle's local slew limits act only as safety saturations.
