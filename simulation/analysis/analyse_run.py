@@ -494,7 +494,8 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         print(f"    final thrust at damp end       : {last_damp.aero_T:.1f} N")
         print(f"    final tether tension           : {last_damp.tether_tension:.0f} N")
 
-        # Swashplate tilt post-arm — must stay near zero in ACRO.
+        # Swashplate tilt post-arm — should remain near zero during the
+        # kinematic hold regardless of selected attitude-control mode.
         # Use the arm timestamp from MAVLink events (most precise); fall back to
         # a 30 s fixed offset if no arm event is recorded (e.g. static mediator tests).
         _TILT_WARN = 0.10   # normalised [-1,1]; same threshold as test_tail_tilt
@@ -514,7 +515,7 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
             _tilt_ok = max_tilt_lon < _TILT_WARN and max_tilt_lat < _TILT_WARN
             label = f"post-arm (t>={window_start:.0f}s)"
             print(f"    max swashplate tilt ({label}): lon={max_tilt_lon:.3f}  lat={max_tilt_lat:.3f}  "
-                  + ("[OK]" if _tilt_ok else f"[!!] exceeds {_TILT_WARN} -- ACRO/I-term issue?"))
+                  + ("[OK]" if _tilt_ok else f"[!!] exceeds {_TILT_WARN} -- mode/controller contamination?"))
 
     # ── Kinematic-phase timeseries: omega_spin, collective, servo_s3 ──────────
     # Diagnoses two failure modes:
@@ -525,11 +526,15 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         _ic_path2 = Path(__file__).resolve().parents[1] / "steady_state_starting.json"
         _ic_om = None
         _ic_col = None
+        _ic_tlon = None
+        _ic_tlat = None
         if _ic_path2.exists():
             try:
                 _d = _json2.loads(_ic_path2.read_text())
                 _ic_om  = float(_d.get("omega_spin", 0))
                 _ic_col = float(_d.get("coll_eq_rad", _d.get("stack_coll_eq", 0)))
+                _ic_tlon = float(_d.get("trim_tilt_lon", 0.0))
+                _ic_tlat = float(_d.get("trim_tilt_lat", 0.0))
             except Exception:
                 pass
 
@@ -586,6 +591,80 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
             print(f"    RAWES_COL ack    : t={_rawes_col_ack.t_sim:.1f}s  '{_rawes_col_ack.text.strip()}'  [OK]")
         else:
             print(f"    RAWES_COL ack    : not found in GCS log  [!!] Lua may be using default _ic_col")
+
+        # Rotor-equilibrium diagnostic during kinematic hold (post-arm).
+        # Goal: explain spin decay with measurable deviations from the IC point.
+        _arm_t = None
+        if fl is not None:
+            for ev in fl.events:
+                if ev.category == "ARM" and ev.text.strip() == "ARMED":
+                    _arm_t = ev.t_sim
+                    break
+        _post = [r for r in damp_rows if _arm_t is None or r.t_sim >= _arm_t]
+        _pre = [r for r in damp_rows if _arm_t is not None and r.t_sim < _arm_t]
+        if _post:
+            om0 = _post[0].omega_rotor
+            om1 = _post[-1].omega_rotor
+            dtp = max(1e-6, _post[-1].t_sim - _post[0].t_sim)
+            dom_dt = (om1 - om0) / dtp
+            col_mean = sum(r.collective_rad for r in _post) / len(_post)
+            tln_mean = sum(r.tilt_lon for r in _post) / len(_post)
+            tlt_mean = sum(r.tilt_lat for r in _post) / len(_post)
+            tmag_mean = (tln_mean * tln_mean + tlt_mean * tlt_mean) ** 0.5
+            q_vals = [r.aero_Q_spin for r in _post]
+            q_mean = sum(q_vals) / len(q_vals)
+            q_min = min(q_vals)
+            q_max = max(q_vals)
+
+            print()
+            print("  -- Rotor equilibrium check (post-arm kinematic hold) --")
+            print(f"    window                 : t={_post[0].t_sim:.1f}s .. {_post[-1].t_sim:.1f}s  ({len(_post)} rows)")
+            print(f"    omega change           : {om0:.2f} -> {om1:.2f} rad/s  (domega/dt={dom_dt:+.3f} rad/s^2)")
+            print(f"    aero_Q_spin            : mean={q_mean:+.3f} N*m  range=[{q_min:+.3f}, {q_max:+.3f}] N*m")
+            print(f"    hold collective mean   : {col_mean:+.4f} rad")
+            print(f"    hold tilt mean         : lon={tln_mean:+.4f}  lat={tlt_mean:+.4f}  |tilt|={tmag_mean:.4f}")
+
+            if _ic_col is not None:
+                dcol = col_mean - _ic_col
+                print(f"    vs IC collective       : dcol={dcol:+.4f} rad  (IC={_ic_col:+.4f})"
+                      + ("  [!!]" if abs(dcol) > 0.02 else "  [OK]"))
+            if _ic_tlon is not None and _ic_tlat is not None:
+                dtlon = tln_mean - _ic_tlon
+                dtlat = tlt_mean - _ic_tlat
+                dtilt = (dtlon * dtlon + dtlat * dtlat) ** 0.5
+                print(f"    vs IC trim tilt        : dlon={dtlon:+.4f}  dlat={dtlat:+.4f}  |dtilt|={dtilt:.4f}"
+                      + ("  [!!]" if dtilt > 0.05 else "  [OK]"))
+
+            # Heuristic root-cause hints.
+            if dom_dt < -0.02:
+                if q_mean < -0.05:
+                    print("    diagnosis              : aerodynamic spin torque is braking the rotor (Q_spin < 0),")
+                    print("                               so this hold point is not an autorotation equilibrium.")
+                else:
+                    print("    diagnosis              : rotor is decelerating despite weak/positive Q_spin;")
+                    print("                               check external drag/torque terms and spin ODE parameters.")
+                if _ic_col is not None and col_mean < (_ic_col - 0.02):
+                    print("    likely contributor     : collective is more negative than IC during hold, increasing drag.")
+                if tmag_mean > 0.10:
+                    print("    likely contributor     : sustained cyclic tilt during hold shifts aero away from IC point.")
+            else:
+                print("    diagnosis              : no significant rotor decay in post-arm hold window.")
+
+            if _pre:
+                pre0 = _pre[0].omega_rotor
+                pre1 = _pre[-1].omega_rotor
+                dt_pre = max(1e-6, _pre[-1].t_sim - _pre[0].t_sim)
+                dpre_dt = (pre1 - pre0) / dt_pre
+                pre_col_mean = sum(r.collective_rad for r in _pre) / len(_pre)
+                pre_q_mean = sum(r.aero_Q_spin for r in _pre) / len(_pre)
+                print("\n  -- Rotor equilibrium check (pre-arm kinematic window) --")
+                print(f"    window                 : t={_pre[0].t_sim:.1f}s .. {_pre[-1].t_sim:.1f}s  ({len(_pre)} rows)")
+                print(f"    omega change           : {pre0:.2f} -> {pre1:.2f} rad/s  (domega/dt={dpre_dt:+.3f} rad/s^2)")
+                print(f"    aero_Q_spin mean       : {pre_q_mean:+.3f} N*m")
+                print(f"    collective mean        : {pre_col_mean:+.4f} rad")
+                if abs(dpre_dt) > 0.05 and abs(dom_dt) <= 0.02:
+                    print("    diagnosis              : spin decay occurs primarily BEFORE arm/NVF hold capture,")
+                    print("                               then stabilizes post-arm. Investigate pre-arm collective/throttle state.")
 
     # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV;
     # fall back to first free-flight row (damp_alpha==0) for older logs.
@@ -823,15 +902,15 @@ def _print_ekf(r: RunReport) -> None:
         print(f"    GPS yaw valid        : {'[OK]' if final_f & 0x0080 else '[!!]'}")
 
 
-def _print_mode_check(fl: FlightLog) -> None:
+def _print_mode_check(fl: FlightLog, expected_mode: int = 20, expected_name: str = "GUIDED_NOGPS") -> None:
     """
-    Verify that ArduPilot was in ACRO mode at arm and stayed there.
+    Verify that ArduPilot was in the expected mode at arm and stayed there.
 
     Reads MODE messages from dataflash.BIN.  Prints a single [OK] line if
-    ACRO was the first mode after arm and was never left.  If a violation is
+    the expected mode was the first mode after arm and was never left. If a violation is
     found, prints [!!] plus the full mode timeline so the cause is obvious.
     """
-    _header("ACRO MODE CHECK")
+    _header(f"{expected_name} MODE CHECK")
 
     rows = fl._df_mode_rows
     if not rows:
@@ -852,50 +931,51 @@ def _print_mode_check(fl: FlightLog) -> None:
         marker = ""
         if arm_t is not None and abs(r["t_s"] - arm_t) < 0.5:
             marker = "  <-- arm"
-        tag = "" if r["mode"] == 1 else "  [!!] NOT ACRO"
+        tag = "" if r["mode"] == expected_mode else f"  [!!] NOT {expected_name}"
         print(f"    t={r['t_s']:7.2f}s  {r['mode_name']:12s} (mode={r['mode']:2d}){marker}{tag}")
 
-    # Check: after arm, was mode always ACRO?
+    # Check: after arm, was mode always expected_mode?
     if arm_t is not None:
         post_arm = [r for r in rows if r["t_s"] >= arm_t - 0.5]
     else:
         post_arm = rows  # no arm event found -- check everything
 
-    non_acro = [r for r in post_arm if r["mode"] != 1]
+    non_expected = [r for r in post_arm if r["mode"] != expected_mode]
 
     print()
-    if not non_acro:
+    if not non_expected:
         if arm_t is not None:
-            print(f"  [OK] ACRO mode active at arm (t={arm_t:.1f}s) and maintained throughout.")
+            print(f"  [OK] {expected_name} active at arm (t={arm_t:.1f}s) and maintained throughout.")
         else:
-            print("  [OK] ACRO mode throughout (no arm event found to anchor check).")
+            print(f"  [OK] {expected_name} throughout (no arm event found to anchor check).")
     else:
-        print(f"  [!!] NON-ACRO mode detected after arm:")
-        for r in non_acro:
+        print(f"  [!!] NON-{expected_name} mode detected after arm:")
+        for r in non_expected:
             print(f"       t={r['t_s']:.2f}s  {r['mode_name']} (mode={r['mode']})")
         print()
-        print("  This is the tilt contamination root cause: ArduPilot in STABILIZE")
-        print("  actively commands roll/pitch toward 0 deg, driving constant cyclic")
-        print("  at 65-deg tether equilibrium. Fix: set ACRO before arm.")
+        print("  Flight stack tests are expected to run in GUIDED_NOGPS (mode 20).")
+        print("  Any mode switch away from GUIDED_NOGPS changes control-path semantics")
+        print("  and invalidates the guided flight handover analysis.")
 
-    # Time-alignment cross-check: first dataflash MODE=ACRO vs MAVLink ACRO event.
+    # Time-alignment cross-check: first dataflash MODE=<expected> vs MAVLink event.
     # Both are ArduPilot boot seconds so they should agree within ~1 s.
     # A large gap means the SYSTEM_TIME anchor conversion is off.
+    _needle = expected_name.replace("_", " ")
     mav_acro = next(
         (ev.t_sim for ev in fl.events
-         if ev.category == "MODE" and "ACRO" in ev.text and arm_t is not None and ev.t_sim >= arm_t - 1.0),
+         if ev.category == "MODE" and _needle in ev.text.upper() and arm_t is not None and ev.t_sim >= arm_t - 1.0),
         None,
     )
     df_acro = next(
-        (r["t_s"] for r in rows if r["mode"] == 1 and arm_t is not None and r["t_s"] >= arm_t - 1.0),
+        (r["t_s"] for r in rows if r["mode"] == expected_mode and arm_t is not None and r["t_s"] >= arm_t - 1.0),
         None,
     )
     if mav_acro is not None and df_acro is not None:
         delta = abs(df_acro - mav_acro)
         ok = delta < 2.0
-        print(f"\n  Time alignment (MAVLink vs dataflash, post-arm ACRO):")
-        print(f"    MAVLink ACRO : t={mav_acro:.2f}s")
-        print(f"    Dataflash ACRO: t={df_acro:.2f}s")
+        print(f"\n  Time alignment (MAVLink vs dataflash, post-arm {expected_name}):")
+        print(f"    MAVLink {expected_name}: t={mav_acro:.2f}s")
+        print(f"    Dataflash {expected_name}: t={df_acro:.2f}s")
         print(f"    delta        : {delta:.2f}s  " + ("[OK]" if ok else "[!!] >2 s -- SYSTEM_TIME anchor may be off"))
 
 
@@ -1789,6 +1869,9 @@ def main() -> None:
                         help="Focus mode: 'attitude' shows per-bucket "
                              "DesRoll/Roll/dR, DesPitch/Pitch/dP, and "
                              "swashplate PCyc/RCyc/Col from dataflash.BIN.")
+    parser.add_argument("--expected-mode", default="guided_nogps", metavar="MODE",
+                        help="Expected post-arm flight mode for mode-check diagnostics: "
+                            "guided_nogps (default), guided, or acro.")
     args = parser.parse_args()
 
     if args.test_name is None:
@@ -1860,7 +1943,16 @@ def main() -> None:
         _print_tel_events(report)
         _print_bucketed_report(fl, args.bucket)
         _print_ekf(report)
-        _print_mode_check(fl)
+        _mode_map = {
+            "guided_nogps": (20, "GUIDED_NOGPS"),
+            "guided": (4, "GUIDED"),
+            "acro": (1, "ACRO"),
+        }
+        _key = str(args.expected_mode).strip().lower()
+        if _key not in _mode_map:
+            raise ValueError(f"Unsupported --expected-mode={args.expected_mode!r}; choose guided_nogps|guided|acro")
+        _mode_id, _mode_name = _mode_map[_key]
+        _print_mode_check(fl, expected_mode=_mode_id, expected_name=_mode_name)
         _print_sensor_consistency(report)
         _print_yaw_divergence(report)
         _print_ekf_state(test_dir / "mavlink.jsonl")

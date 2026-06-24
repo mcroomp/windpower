@@ -1,5 +1,16 @@
--r requirements.txt
+numpy
+matplotlib
+scipy
+pytest
+pytest-timeout
+pyyaml
+numba
+lupa
+pyvista
+imageio
+imageio-ffmpeg
 pymavlink
+pyserial
 pexpect
 empy==3.3.4
-dynbem==0.3.1
+dynbem==0.4.0

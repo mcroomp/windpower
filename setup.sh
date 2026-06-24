@@ -5,13 +5,15 @@
 # Subcommands:
 #   (no args)   create or refresh the Windows venv at simulation/.venv
 #                 hash-gated: requirements.txt is re-installed only when changed.
-#   build       build the rawes-sim Docker image with ArduPilot (~30-60 min)
+#   build       build rawes-sim runtime with ArduPilot (~30-60 min)
+#   build-lite  build rawes-sim runtime without ArduPilot (fast)
 #   hw          push canonical params to a real Pixhawk via MAVLink
 #                 requires:  RAWES_HIL_PORT=COMx
 #
 # Run from Git Bash on Windows:
 #   bash setup.sh                              # venv
 #   bash setup.sh build                        # Docker image
+#   bash setup.sh build-lite                   # Docker image without ArduPilot
 #   RAWES_HIL_PORT=COM4 bash setup.sh hw       # Pixhawk params
 #
 set -euo pipefail
@@ -60,8 +62,14 @@ _setup_venv() {
 
 # --- Docker image ------------------------------------------------------
 _setup_build() {
-    echo "[INFO] Building rawes-sim with ArduPilot -- expect ~30-60 min ..."
-    docker build "$SIM_DIR" -t rawes-sim --build-arg INSTALL_ARDUPILOT=true
+    echo "[INFO] Building rawes-sim (target=runtime-ardupilot) -- expect ~30-60 min ..."
+    docker build "$SIM_DIR" -t rawes-sim --target runtime-ardupilot
+    echo "[INFO] Build complete.  Run: bash test.sh start"
+}
+
+_setup_build_lite() {
+    echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot) ..."
+    docker build "$SIM_DIR" -t rawes-sim --target runtime
     echo "[INFO] Build complete.  Run: bash test.sh start"
 }
 
@@ -80,13 +88,14 @@ shift || true
 case "$CMD" in
     ""|venv)        _setup_venv ;;
     build)          _setup_build ;;
+    build-lite)     _setup_build_lite ;;
     hw)             _setup_hw "$@" ;;
     -h|--help)
         sed -n '3,17p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
         ;;
     *)
         echo "[ERROR] Unknown subcommand: $CMD" >&2
-        echo "Expected: (no args) | build | hw" >&2
+        echo "Expected: (no args) | build | build-lite | hw" >&2
         exit 1
         ;;
 esac

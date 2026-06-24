@@ -17,7 +17,7 @@ PhysicsCore owns
 Callers own
 -----------
 - Trajectory planners (HoldPlanner, etc.)
-- TensionPI / collective management
+- Altitude-PID collective management (commanded tension is feedforward only)
 - WinchController / tether rest-length updates
 - SITL interface and sensor building (mediator only)
 - Telemetry logging

@@ -358,3 +358,178 @@ class VelocityWinchController:
     def log_fields(self) -> dict:
         """Standard winch state fields for telemetry kwargs."""
         return dict(winch_speed_ms=self._speed)
+
+
+# ---------------------------------------------------------------------------
+# Tension-governed winch with jerk-limited (S-curve) speed
+# ---------------------------------------------------------------------------
+
+
+class GovernedWinchController:
+    """
+    Tension-governed winch with a jerk-limited speed response.
+
+    A nominal *cruise* velocity drives the pumping cycle so it always
+    progresses, while a proportional *tension governor* trims the commanded
+    speed to hold the tether tension near a per-phase target:
+
+        v_setpoint = cruise + kp_tension * (T_filt - T_target)
+
+      - Over-tension  (T > T_target): pay out faster on reel-out, or stop
+        reeling in on reel-in -> sheds tension before it spikes.
+      - Under-tension (T < T_target): slow pay-out on reel-out (let tension
+        rebuild), or reel in faster on reel-in (take up slack).
+
+    The setpoint is clamped *directionally* so reel-out never reverses into
+    reel-in and vice versa (the cycle keeps moving), then tracked by an
+    acceleration- and jerk-limited follower so the physical motion is smooth
+    (S-curve reversals, no chatter, no overshoot).
+
+    Because the tether is stiff (k = EA/L ~ 5.6 kN/m at 50 m), a small
+    governor gain (kp_tension ~ 3-4e-4 (m/s)/N) gives a ~0.5 s tension-settling
+    time while staying well-damped.
+
+    Sign convention: +speed = paying out (length grows), -speed = reeling in.
+
+    Interface
+    ---------
+    set_command(cruise_v, tension_target)   ~10 Hz from the ground planner
+    step(tension_measured, dt)              400 Hz
+
+    Parameters
+    ----------
+    rest_length      : float  initial tether rest length [m]
+    v_max_out        : float  max reel-out (pay-out) speed [m/s] (governor headroom)
+    v_max_in         : float  max reel-in speed [m/s] (governor headroom)
+    kp_tension       : float  speed-per-tension-error gain [(m/s)/N]
+    accel_limit_ms2  : float  acceleration limit [m/s^2]
+    jerk_limit_ms3   : float  jerk limit [m/s^3] (rate of change of acceleration)
+    tension_tau_s    : float  low-pass time constant on the load-cell reading [s]
+    min_length       : float  hard floor on rest_length [m]
+    max_length       : float  hard ceiling on rest_length [m]
+    """
+
+    def __init__(
+        self,
+        rest_length:     float,
+        v_max_out:       float,
+        v_max_in:        float,
+        kp_tension:      float,
+        accel_limit_ms2: float,
+        jerk_limit_ms3:  float,
+        tension_tau_s:   float = 0.08,
+        min_length:      float = 2.0,
+        max_length:      float = 300.0,
+    ):
+        self.rest_length = float(rest_length)
+        self._v_max_out  = float(v_max_out)
+        self._v_max_in   = float(v_max_in)
+        self._kp         = float(kp_tension)
+        self._accel_max  = float(accel_limit_ms2)
+        self._jerk_max   = float(jerk_limit_ms3)
+        self._tau        = max(1e-6, float(tension_tau_s))
+        self._min_length = float(min_length)
+        self._max_length = float(max_length)
+
+        self._cruise     = 0.0
+        self._T_target   = 0.0
+        self._T_filt     = None   # lazily initialised on first reading
+
+        self._speed      = 0.0    # current speed [m/s], signed
+        self._accel      = 0.0    # current acceleration [m/s^2], signed
+
+        self._energy_out_j = 0.0
+        self._energy_in_j  = 0.0
+
+    # ── command interface (10 Hz from ground planner) ──────────────────────
+
+    def set_command(self, cruise_v: float, tension_target: float) -> None:
+        """Set the cruise velocity (+out/-in/0=hold) and tension target [N]."""
+        self._cruise   = float(cruise_v)
+        self._T_target = float(tension_target)
+
+    # ── 400 Hz step ────────────────────────────────────────────────────────
+
+    def step(self, tension_measured: float, dt: float) -> None:
+        """Advance the winch by one step.  Updates rest_length and energy."""
+        T  = float(tension_measured)
+        dt = float(dt)
+
+        # Low-pass the load-cell reading so the governor does not chatter.
+        if self._T_filt is None:
+            self._T_filt = T
+        else:
+            a = dt / (self._tau + dt)
+            self._T_filt += a * (T - self._T_filt)
+
+        # Proportional tension governor about the cruise velocity.
+        err   = self._T_filt - self._T_target   # +ve = over-tension
+        v_set = self._cruise + self._kp * err
+
+        # Directional clamp on the *setpoint*: keep the intended reel direction
+        # (the integrated speed may still cross zero smoothly during a reversal).
+        if self._cruise > 0.0:
+            v_set = min(self._v_max_out, max(0.0, v_set))
+        elif self._cruise < 0.0:
+            v_set = max(-self._v_max_in, min(0.0, v_set))
+        else:
+            v_set = min(self._v_max_out, max(-self._v_max_in, v_set))
+
+        # Jerk-limited (S-curve) velocity tracker.  Decelerate the acceleration
+        # early -- based on the speed reached if jerk-ramped to zero now -- so the
+        # speed lands on the setpoint without overshoot.
+        if self._jerk_max > 0.0:
+            v_pred = self._speed + self._accel * abs(self._accel) / (2.0 * self._jerk_max)
+        else:
+            v_pred = self._speed
+        if abs(v_set - v_pred) < 1e-9:
+            a_cmd = 0.0
+        else:
+            a_cmd = self._accel_max if (v_set - v_pred) > 0.0 else -self._accel_max
+        da_max = self._jerk_max * dt
+        self._accel += max(-da_max, min(da_max, a_cmd - self._accel))
+        self._accel  = max(-self._accel_max, min(self._accel_max, self._accel))
+        self._speed += self._accel * dt
+        self._speed  = max(-self._v_max_in, min(self._v_max_out, self._speed))
+
+        # Integrate tether length.
+        new_length       = self.rest_length + self._speed * dt
+        self.rest_length = max(self._min_length, min(self._max_length, new_length))
+
+        # Energy accounting (mechanical, at the drum).
+        power = T * self._speed
+        if power > 0.0:
+            self._energy_out_j += power * dt
+        elif power < 0.0:
+            self._energy_in_j  += -power * dt
+
+    # ── properties ─────────────────────────────────────────────────────────
+
+    @property
+    def speed_ms(self) -> float:
+        """Current motor speed [m/s], signed (+ve = paying out)."""
+        return self._speed
+
+    @property
+    def tension_filt_n(self) -> float:
+        """Current low-passed tension estimate [N]."""
+        return 0.0 if self._T_filt is None else float(self._T_filt)
+
+    @property
+    def energy_out_j(self) -> float:
+        """Cumulative generator harvest since construction [J]."""
+        return self._energy_out_j
+
+    @property
+    def energy_in_j(self) -> float:
+        """Cumulative motor consumption since construction [J]."""
+        return self._energy_in_j
+
+    @property
+    def net_energy_j(self) -> float:
+        """Cumulative net energy (harvest minus consumption) [J]."""
+        return self._energy_out_j - self._energy_in_j
+
+    def log_fields(self) -> dict:
+        """Standard winch state fields for telemetry kwargs."""
+        return dict(winch_speed_ms=self._speed)

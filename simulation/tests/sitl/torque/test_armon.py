@@ -1,18 +1,18 @@
 """
-torque/test_armon.py — RAWES_ARMON timed arm/disarm test.
+torque/test_armon.py — RAWES_ARM timed disarm-timer test.
 
-Validates the full RAWES_ARMON lifecycle:
-  Phase 1 — while armed: Lua PI regulates hub yaw; psi_dot must stay small.
-  Phase 2 — after expiry: Lua disarms, motor drops to 800 µs, psi_dot grows.
+Validates RAWES_ARM disarm timer behavior with GCS arming:
+    Phase 1 — arm via GCS, optional long timer, Lua PI regulates yaw.
+    Phase 2 — set short timer, Lua disarms on expiry, psi_dot grows.
 
 Timeline (SITL seconds):
   t = 0..15 s   STARTUP hold — EKF alignment; vehicle unarmed.
-  fixture yields (ACRO mode, unarmed).
-  test sends RAWES_ARMON(3 600 000 ms) → Lua arms, Ch3/Ch8 set, countdown starts.
+    fixture yields (ACRO mode, unarmed).
+    test arms via GCS and sends RAWES_ARM(3 600 000 ms) to set countdown.
   t ~ 15 s      DYNAMIC begins — rotor spinning, Lua PI active.
   t ~ 55-65 s   PI settled; observation window 1 opens (psi_dot < threshold).
-  test sends RAWES_ARMON(5 000 ms) to shorten deadline to 5 s from now.
-  Lua disarms → "RAWES arm-on: expired, disarmed" STATUSTEXT.
+    test sends RAWES_ARM(5 000 ms) to shorten deadline to 5 s from now.
+    Lua disarms → "RAWES disarm timer expired, disarmed" STATUSTEXT.
   observation window 2 — motor at 800 µs, psi_dot growing beyond threshold.
 
 Pass criteria:
@@ -61,7 +61,7 @@ _ARMED_ARMON_MS = 3_600_000   # 1 hour: keep armed for settle + regulation phase
 
 def test_armon(torque_unarmed_lua):
     """
-    GCS force-arms; RAWES_ARM hands RC ownership + countdown timer to Lua.
+    GCS force-arms; RAWES_ARM sets an optional disarm countdown timer in Lua.
     While the timer is active: Lua PI regulates hub yaw (psi_dot < threshold).
     After a short-deadline re-send: Lua disarms, motor cuts, yaw drifts.
     """
@@ -69,24 +69,11 @@ def test_armon(torque_unarmed_lua):
     log = ctx.log
     gcs = ctx.gcs
 
-    # ── Phase 1 setup: send RAWES_ARM — Lua state machine arms the vehicle ─────
-    # Lua handles the full arming sequence autonomously:
-    #   interlock_low → arming (retry until accels settle) → armed.
-    # No GCS force-arm; Lua owns Ch3/Ch8 and the countdown timer.
-    log.info("Sending RAWES_ARM=%d ms — Lua state machine will arm ...", _ARMED_ARMON_MS)
+    # ── Phase 1 setup: arm via GCS, then set optional long disarm timer ──────
+    log.info("Arming via GCS ...")
+    gcs.arm(timeout=20.0, force=True)
+    log.info("Sending RAWES_ARM=%d ms disarm timer ...", _ARMED_ARMON_MS)
     gcs.send_named_float(NV_ARMON_KEY, float(_ARMED_ARMON_MS))
-
-    # Wait for Lua to confirm it sees the arm state (hard fail — ARMON must work).
-    arm_confirmed = False
-    arm_deadline  = gcs.sim_now() + 15.0
-    while gcs.sim_now() < arm_deadline:
-        msg = gcs._recv(type=["STATUSTEXT"], blocking=True, timeout=0.5)
-        if msg and "RAWES arm-on: armed" in msg.text.rstrip("\x00"):
-            arm_confirmed = True
-            log.info("Arm confirmed: %s", msg.text.strip())
-            break
-    if not arm_confirmed:
-        pytest.fail("RAWES_ARM arm confirmation not received within 15 s")
 
     # ── Phase 1 observation: regulation ──────────────────────────────────────
     # Collect psi_dot samples via ATTITUDE messages.  settle_s gives the PI
@@ -112,7 +99,7 @@ def test_armon(torque_unarmed_lua):
             text = msg.text.rstrip("\x00").strip()
             log.info("t=%.1f  SITL: %s", t_rel, text)
             # Disarm confirmation — end the loop so phase 2 check can begin.
-            if "RAWES arm-on: expired, disarmed" in text:
+            if "RAWES disarm timer expired, disarmed" in text:
                 return True
 
         elif mt == "SERVO_OUTPUT_RAW":
@@ -136,10 +123,10 @@ def test_armon(torque_unarmed_lua):
                         t_rel, math.degrees(msg.yawspeed), pwm[0],
                     )
 
-            # Once regulation window is complete, re-send ARMON with short deadline.
+            # Once regulation window is complete, re-send RAWES_ARM with short deadline.
             if t_rel >= _SETTLE_S + _REGULATE_S and not expire_sent:
                 expire_sent = True
-                log.info("Regulation window done -- sending RAWES_ARMON=%d ms to trigger expiry",
+                log.info("Regulation window done -- sending RAWES_ARM=%d ms to trigger expiry",
                          _EXPIRE_MS)
                 gcs.send_named_float(NV_ARMON_KEY, float(_EXPIRE_MS))
 
@@ -148,7 +135,7 @@ def test_armon(torque_unarmed_lua):
     observe(
         ctx, total_timeout, handle,
         msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW"],
-        keepalive={},    # no GCS RC override — Lua owns Ch3/Ch8 via ARMON
+        keepalive={},    # no GCS RC override needed
     )
 
     # ── Assert Phase 1: regulated psi_dot ────────────────────────────────────

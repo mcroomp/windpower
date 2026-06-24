@@ -1,17 +1,19 @@
-FROM ubuntu:22.04
+# syntax=docker/dockerfile:1.6
+
+FROM ubuntu:22.04 AS base
 
 # =============================================================================
 # RAWES simulation image
 #
 # Installs: system deps, Python venv (numpy/scipy/matplotlib/pytest/pymavlink)
-# Optional: ArduPilot SITL (set INSTALL_ARDUPILOT=true at build time)
+# Optional: ArduPilot SITL via dedicated runtime target
 #
 # Build (any platform, via Git Bash):
 #   bash setup.sh build                                    (with ArduPilot)
 #
 # Or directly:
-#   docker build simulation/ -t rawes-sim
-#   docker build simulation/ -t rawes-sim --build-arg INSTALL_ARDUPILOT=true
+#   docker build simulation/ -t rawes-sim --target runtime
+#   docker build simulation/ -t rawes-sim --target runtime-ardupilot
 #
 # Manage the dev container:
 #   bash test.sh start | stop | shell | exec <cmd>
@@ -31,7 +33,7 @@ ENV TZ=UTC
 # =============================================================================
 RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone \
     && apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git \
+        build-essential cmake git rustc cargo \
         pkg-config python3 python3-pip python3-venv python3-dev \
         libssl-dev wget curl sudo tzdata \
     && rm -rf /var/lib/apt/lists/* \
@@ -42,6 +44,8 @@ RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone \
 # =============================================================================
 # 2. Python virtual environment
 # =============================================================================
+FROM base AS pyenv
+
 ENV VENV_DIR=/rawes/.venv
 
 COPY requirements.txt requirements-docker.txt /tmp/
@@ -54,30 +58,28 @@ ENV PATH="$VENV_DIR/bin:/usr/local/bin:$PATH"
 ENV VIRTUAL_ENV="$VENV_DIR"
 
 # =============================================================================
-# 3. ArduPilot SITL (optional — large download, ~30 min build)
-#    Must run as non-root; switch to 'sim' user for this step.
+# 3. ArduPilot SITL build (expensive; isolated reusable stage)
 # =============================================================================
-ARG INSTALL_ARDUPILOT=false
+FROM base AS ardupilot-build
+
 ARG ARDUPILOT_PATH=/ardupilot
 
-RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        mkdir -p "$ARDUPILOT_PATH" && chown sim:sim "$ARDUPILOT_PATH"; \
-    fi
+RUN mkdir -p "$ARDUPILOT_PATH" && chown sim:sim "$ARDUPILOT_PATH"
 
 USER sim
 ENV USER=sim
-RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        git clone --recurse-submodules --branch Copter-4.6.3 \
-            https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
-        && cd "$ARDUPILOT_PATH" \
-        && unset VIRTUAL_ENV \
-        && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-        && Tools/environment_install/install-prereqs-ubuntu.sh -y \
-        && . ~/.profile \
-        && git config --global --add safe.directory "$ARDUPILOT_PATH" \
-        && ./waf configure --board sitl \
-        && ./waf --target bin/arducopter-heli; \
-    fi
+# ArduPilot-4.7 = the 4.7 beta line (currently V4.7.0-beta7). Required for the
+# vehicle:set_target_angle_and_rate_and_throttle scripting binding used by
+# rawes.lua, which does not exist in 4.6.x.
+RUN git clone --recurse-submodules --branch ArduPilot-4.7 \
+        https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
+    && cd "$ARDUPILOT_PATH" \
+    && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    && Tools/environment_install/install-prereqs-ubuntu.sh -y \
+    && . ~/.profile \
+    && git config --global --add safe.directory "$ARDUPILOT_PATH" \
+    && ./waf configure --board sitl \
+    && ./waf --target bin/arducopter-heli
 USER root
 
 # =============================================================================
@@ -98,20 +100,23 @@ USER root
 #     --model heli uses the built-in helicopter physics (no external JSON
 #     backend needed) so this runs cleanly in a Docker build layer.
 # =============================================================================
-RUN if [ "$INSTALL_ARDUPILOT" = "true" ]; then \
-        printf '\n# RAWES: Lua scripting on by default\nSCR_ENABLE 1\n' \
-            >> "$ARDUPILOT_PATH/Tools/autotest/default_params/copter-heli.parm" \
-        && mkdir -p "$ARDUPILOT_PATH/scripts" \
-        && cd "$ARDUPILOT_PATH" \
-        && timeout 8 build/sitl/bin/arducopter-heli \
-               --model heli --slave 0 \
-               --defaults "Tools/autotest/default_params/copter-heli.parm" \
-               -I0 --home 51.5074,-0.1278,50,0 \
-               2>/dev/null; true; \
-    fi
+RUN printf '\n# RAWES: Lua scripting on by default\nSCR_ENABLE 1\n' \
+        >> "$ARDUPILOT_PATH/Tools/autotest/default_params/copter-heli.parm" \
+    && mkdir -p "$ARDUPILOT_PATH/scripts" \
+    && cd "$ARDUPILOT_PATH" \
+    && timeout 8 build/sitl/bin/arducopter-heli \
+           --model heli --slave 0 \
+           --defaults "Tools/autotest/default_params/copter-heli.parm" \
+           -I0 --home 51.5074,-0.1278,50,0 \
+           2>/dev/null || true
 
 # =============================================================================
-# 4. Simulation files — mounted at runtime, not baked into the image
+# 4. Runtime image (no ArduPilot)
+# =============================================================================
+FROM pyenv AS runtime
+
+# =============================================================================
+# Simulation files — mounted at runtime, not baked into the image
 #
 #   docker run --rm -it -v "$(pwd)/simulation":/rawes/simulation rawes-sim
 #
@@ -126,7 +131,13 @@ EXPOSE 5760/tcp
 EXPOSE 5761/tcp
 EXPOSE 5762/tcp
 
-# =============================================================================
-# 5. Default shell with venv on PATH
-# =============================================================================
+# Default shell with venv on PATH
 CMD ["/bin/bash"]
+
+# =============================================================================
+# 5. Runtime image with ArduPilot copied from reusable build stage
+# =============================================================================
+FROM runtime AS runtime-ardupilot
+
+ARG ARDUPILOT_PATH=/ardupilot
+COPY --from=ardupilot-build ${ARDUPILOT_PATH} ${ARDUPILOT_PATH}

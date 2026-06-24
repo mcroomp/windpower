@@ -22,12 +22,15 @@ _rawes_fns = {
     KD_VZ                   = KD_VZ,
     RATE_KP_OUTER           = RATE_KP_OUTER,
     RATE_ACCEL_MAX_RADSS    = RATE_ACCEL_MAX_RADSS,
+    AZ_REF_TAU_S            = AZ_REF_TAU_S,
 
-    -- ── Pure geometry ────────────────────────────────────────────────────────
+    -- ── Pure geometry ───────────────────────────────────────────────────────
 
     bz_altitude_hold    = bz_altitude_hold,
     sqrt_rate_from_error = sqrt_rate_from_error,
     compute_rate_cmd_sqrt = compute_rate_cmd_sqrt,
+    wrap_pi              = wrap_pi,
+    update_plane_azimuth = update_plane_azimuth,
 
     -- ── Vector3f helpers ─────────────────────────────────────────────────────
 

@@ -40,9 +40,9 @@ Two packet types cross the MAVLink boundary:
             Passed to WinchController.step() — the Pixhawk is not involved.
 
 Mode_RAWES responsibilities (NOT in this file):
-    - AltitudeHoldController: rate-limit elevation toward asin(target_alt/tlen), compute body_z_eq with gravity-compensation tilt
-    - Attitude error → cyclic tilt  (compute_swashplate_from_state)
-    - Collective: TensionPI running on rawes.lua in SITL; set_throttle_out(thrust) passthrough on hardware
+    - Orientation force balance: body_z_eq from commanded tension (RAWES_TEN) + actual position + gravity
+    - Attitude error → cyclic tilt  (ArduPilot native rate PID)
+    - Collective: altitude PID running on rawes.lua; set_throttle_out(thrust) passthrough on hardware
     - Counter-torque motor (inner loop, not commanded by planner)
 
 WinchController responsibilities (NOT in this file — see winch.py):

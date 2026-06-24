@@ -38,7 +38,7 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
 from stack_infra import StackConfig, _static_stack
-from gcs import RawesGCS
+from gcs import GUIDED_NOGPS, RawesGCS
 
 log = logging.getLogger("test_arm_minimal")
 
@@ -91,11 +91,20 @@ def test_arm_minimal(tmp_path, request):
                 )
 
             _assert_alive()
+            ctx.log.info("Setting GUIDED_NOGPS mode before arming ...")
+            gcs.set_mode(GUIDED_NOGPS, timeout=10.0)
+
+            _hb = gcs._recv(type="HEARTBEAT", blocking=True, timeout=3.0)
+            if _hb is None or int(_hb.custom_mode) != GUIDED_NOGPS:
+                actual = int(_hb.custom_mode) if _hb is not None else -1
+                pytest.fail(
+                    f"GUIDED_NOGPS mode not confirmed before arm (custom_mode={actual})"
+                )
+
             ctx.log.info("Arming ...")
-            gcs.send_rc_override({8: 2000})
             time.sleep(0.2)
             try:
-                gcs.arm(timeout=20.0, force=True, rc_override={8: 2000})
+                gcs.arm(timeout=20.0, force=True)
             except Exception as exc:
                 sitl_tail = (
                     ctx.sitl_log.read_text(errors="replace")[-3000:]

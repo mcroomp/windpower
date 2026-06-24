@@ -200,7 +200,7 @@ class ParamSetup:
 # Process helpers
 # ---------------------------------------------------------------------------
 
-EXPECTED_ARDUPILOT_VERSION = "4.6.3"
+EXPECTED_ARDUPILOT_VERSION = "4.7.0"
 
 
 def _check_ardupilot_version(sim_vehicle: Path) -> None:

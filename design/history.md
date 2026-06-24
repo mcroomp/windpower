@@ -396,6 +396,7 @@ The orbit-tracking implementation (`rodrigues`, `slerp_step`, `orbit_track_azimu
 2. **Natural gravity compensation**: The function tilts the disk slightly inward (elevation-upward tangent direction) by `k = mass*g*cos(el)/tension` so the thrust vector counteracts the elevation-lowering component of gravity — no empirical tuning.
 3. **Simpler pre-GPS path**: Gyro feedthrough (desired_rate = measured_rate → ACRO rate_error = 0 → zero corrective torque) preserves the natural orbital rate. No need to track `_bz_orbit = bz_now` to synthesize neutral-stick behavior.
 4. **Pumping collective via TensionPI**: The open-loop collective schedule (`COL_REEL_OUT`, `COL_REEL_IN`) was replaced with a TensionPI running inside rawes.lua. TensionPI feedback on `RAWES_TEN` produces correct tension for each phase without requiring phase-specific collective tuning.
+   - **Superseded (Phase 3, M3):** the AP no longer runs any tension loop. `RAWES_TEN` is now the *commanded* tension (a feedforward into the orientation force balance), collective is owned by a 50 Hz altitude PID, and the only tension feedback lives on the ground winch. See [tension_collective_control_loop.md](tension_collective_control_loop.md).
 
 ### New algorithm (rawes.lua post-rewrite)
 

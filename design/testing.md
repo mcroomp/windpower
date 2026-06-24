@@ -202,9 +202,9 @@ _mock          = global state table (inputs/outputs bridged to Python)
 
 ```python
 from rawes_lua_harness import RawesLua
-from rawes_modes import MODE_PUMPING, PUMP_HOLD
+from rawes_modes import MODE_STEADY, PUMP_HOLD
 
-sim = RawesLua(mode=MODE_PUMPING + PUMP_HOLD)  # SCR_USER6 = 5000
+sim = RawesLua(mode=MODE_STEADY)  # SCR_USER6 = 1 (pumping schedule runs in steady)
 sim.armed        = True
 sim.healthy      = True
 sim.vehicle_mode = 1           # ACRO = 1
@@ -226,8 +226,8 @@ sim.srv_pwm(94)        # GB4008 motor PWM (func=94)
 sim.messages           # [(level, text), ...]
 sim.has_message("GPS") # bool
 
-# Ground planner: write mode + substate
-sim.set_param("mode", MODE_PUMPING + PUMP_REEL_OUT)  # SCR_USER6 = 5001
+# Ground planner: keep the vehicle in steady mode and send the substate via NVF
+sim.send_named_float("RAWES_SUB", PUMP_REEL_OUT)  # telemetry/diagnostics only
 
 # Access Lua internals (via rawes_test_surface)
 sim.fns.T_TRANSITION           # constant
@@ -264,7 +264,7 @@ Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lu
 ```python
 from rawes_modes import (
     MODE_NONE, MODE_STEADY, MODE_MANUAL,
-    MODE_LANDING, MODE_PUMPING,
+    MODE_LANDING,
     LAND_DESCEND, LAND_FINAL_DROP,
     PUMP_HOLD, PUMP_REEL_OUT, PUMP_TRANSITION, PUMP_REEL_IN, PUMP_TRANSITION_BACK,
 )
@@ -277,12 +277,15 @@ from rawes_modes import (
 | `MODE_MANUAL` | 2 | — | Bench: yaw PID (SERVO4) + NVF cyclic/collective (`RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`). `H_FLYBAR_MODE=1`. |
 | `MODE_PASSIVE` | 3 | — | Armed-but-quiet: IC trim hold during kinematic |
 | `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP | |
-| `MODE_PUMPING` | 5 | 0=HOLD, 1=REEL_OUT, 2=TRANSITION, 3=REEL_IN, 4=TRANSITION_BACK | |
+
+Pumping has **no dedicated mode**: it runs in `MODE_STEADY` (SCR_USER6=1) while the ground
+varies `RAWES_TEN` and sends the `RAWES_SUB` pumping substate (0=HOLD, 1=REEL_OUT,
+2=TRANSITION, 3=REEL_IN, 4=TRANSITION_BACK) for telemetry/diagnostics.
 
 **Sending substates in simtests** (via `RawesLua.send_named_float`):
 
 ```python
-sim = RawesLua(mode=MODE_PUMPING)          # SCR_USER6 = 5
+sim = RawesLua(mode=MODE_STEADY)          # SCR_USER6 = 1 (pumping schedule)
 
 # Only send on transitions — Lua drains the inbox each update tick
 prev_sub = None
@@ -338,7 +341,7 @@ Regenerate after any aero model change:
 
 `simtest_runner.py` provides `PhysicsRunner`, a thin wrapper around `PhysicsCore`
 (`simulation/physics_core.py`). `PhysicsCore` owns `RigidBodyDynamics`, `create_aero`,
-`TetherModel`, the spin ODE, and angular damping. `AcroControllerSitl` (RatePID + servo model)
+`TetherModel`, the spin ODE, and yaw damping. `AcroControllerSitl` (RatePID + servo model)
 is baked into `PhysicsRunner` — callers produce `(col, rate_roll, rate_pitch)` and
 `runner.step()` handles the rest. Callers own `PumpingGroundController`,
 `TensionApController`, `WinchController` at their own rates.

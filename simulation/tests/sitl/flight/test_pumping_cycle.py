@@ -1,5 +1,5 @@
 """
-test_pumping_cycle.py — Pumping cycle stack test with rawes.lua (SCR_USER6=5).
+test_pumping_cycle.py — Pumping cycle stack test with rawes.lua (SCR_USER6=1, steady mode).
 
 Architecture (mirrors test_pump_cycle_lua.py unit test):
   Test process (10 Hz):
@@ -17,7 +17,7 @@ Architecture (mirrors test_pump_cycle_lua.py unit test):
 
 Pass criteria:
   1. No crash (hub above MIN_ALT_M throughout).
-  2. "RAWES pump: captured" STATUSTEXT appears (Lua GPS fix + altitude hold init).
+  2. "RAWES steady: captured" STATUSTEXT appears (Lua GPS fix + altitude hold init).
   3. Reel-in steady tension < reel-out mean tension (De Schutter mechanism works).
   4. Net energy positive.
   5. Peak tension < 80% break load (496 N).
@@ -94,7 +94,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
         pytest.skip("winch_cmd_port not set — fixture did not configure socket")
 
     all_statustext = ctx.all_statustext
-    captured_seen  = any("RAWES pump: captured" in t for t in all_statustext)
+    captured_seen  = any("RAWES steady: captured" in t for t in all_statustext)
 
     # ── Ground controller (mirrors test_pump_cycle_lua.py) ─────────────────
     target_alt_m = ctx.home_alt_m
@@ -185,7 +185,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
                 text = msg.text.rstrip("\x00").strip()
                 all_statustext.append(text)
                 log.info("STATUSTEXT: %s", text)
-                if "RAWES pump: captured" in text:
+                if "RAWES steady: captured" in text:
                     captured_seen = True
 
         sock.close()
@@ -201,7 +201,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
 
         # ── Lua capture check ─────────────────────────────────────────────
         assert captured_seen, (
-            "STATUSTEXT 'RAWES pump: captured' never appeared. "
+            "STATUSTEXT 'RAWES steady: captured' never appeared. "
             f"All STATUSTEXT: {all_statustext}"
         )
 

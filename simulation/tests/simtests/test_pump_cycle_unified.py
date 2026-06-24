@@ -1,15 +1,18 @@
 """
-test_pump_cycle_unified.py -- Pumping cycle with VelocityWinchController.
+test_pump_cycle_unified.py -- Pumping cycle with GovernedWinchController.
 
 Architecture:
     Ground (10 Hz): simple reel_out/reel_in state machine.
                                     Sends altitude target and target tension feed-forward.
-  Winch  (400 Hz): VelocityWinchController -- velocity-commanded with soft tension limits.
-                   +V_REEL_OUT during reel_out, -V_REEL_IN during reel_in.
-                   Soft zone brakes as tension approaches T_MIN or T_MAX.
+  Winch  (400 Hz): GovernedWinchController -- a +/-V_CRUISE cruise drives the
+                   cycle while a proportional tension governor trims the speed
+                   to hold the per-phase tension target (pays out faster when
+                   over-tension, stops reel-in when over-tension). The speed is
+                   acceleration- and jerk-limited so motion is smooth.
     AP     (400 Hz): MockArdupilot Python equivalent -- altitude PID collective, rate-only body_z control.
 
-This test validates stable winch cycles without tension spikes, slack, or floor hits.
+This test validates smooth, tension-controlled winch cycles without tension
+spikes, slack, or floor hits.
 """
 import math
 import sys
@@ -22,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
-from winch            import VelocityWinchController
+from winch            import GovernedWinchController
 from simtest_log      import BadEventLog
 from simtest_ic       import load_ic
 from simtest_runner   import PhysicsRunner
@@ -44,14 +47,18 @@ BREAK_LOAD_N = 620.0
 # ── Pumping cycle parameters ──────────────────────────────────────────────────
 N_CYCLES     = 3
 DELTA_L      = 12.0    # tether payout per cycle [m]
-V_REEL_OUT   = 0.5     # reel-out velocity [m/s]
-V_REEL_IN    = 0.5     # reel-in speed [m/s] (applied as -V_REEL_IN)
+V_CRUISE_OUT = 0.5     # nominal reel-out cruise velocity [m/s]
+V_CRUISE_IN  = 0.5     # nominal reel-in cruise speed [m/s] (applied as -V_CRUISE_IN)
 
-# Winch tension limits. Keep the lower guard below the reel-in AP target; otherwise
-# the winch brakes throughout the intended low-tension reel-in phase.
-T_MIN        = 20.0    # lower hard limit [N]
-T_MAX        = 400.0   # upper hard limit [N]
-SOFT_ZONE_N  = 25.0    # braking zone width [N]
+# Governor headroom: the cruise is +/-0.5 m/s, but the tension governor may push
+# the speed up to these bounds to shed an over-tension transient (reel-out) or
+# pull in slack (reel-in). Keep above the cruise so the governor has authority.
+V_MAX_OUT    = 1.5     # max pay-out speed [m/s]
+V_MAX_IN     = 1.5     # max reel-in speed [m/s]
+KP_TENSION   = 4.0e-4  # governor gain [(m/s)/N] -- ~0.5 s tension settling
+ACCEL_MS2    = 2.0     # acceleration limit [m/s^2]
+JERK_MS3     = 10.0    # jerk limit [m/s^3] (S-curve smoothing)
+TENSION_TAU  = 0.08    # load-cell low-pass time constant [s]
 
 TENSION_IC   = 300.0   # IC equilibrium tension
 TENSION_REEL_OUT = TENSION_IC
@@ -62,13 +69,6 @@ FLOOR_ALT_M  = 1.0
 T_REEL_OUT_MAX = 120.0
 T_REEL_IN_MAX  = 300.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
-
-
-def _wind_azimuth_rad() -> float:
-    wind_h = np.asarray(WIND[:2], dtype=float)
-    if float(np.linalg.norm(wind_h)) < 1e-9:
-        raise ValueError("unified pumping fixed-azimuth mode requires horizontal wind")
-    return float(math.atan2(wind_h[1], wind_h[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -82,15 +82,15 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     thrust_ic = float((_IC.coll_eq_rad - COL_MIN) / (COL_MAX - COL_MIN))
     ic_alt    = float(-_IC.pos[2])
 
-    # ── Winch: velocity-commanded with soft tension limits ────────────────
-    winch = VelocityWinchController(
+    # ── Winch: tension-governed, jerk-limited speed ────────────────────
+    winch = GovernedWinchController(
         rest_length     = _IC.rest_length,
-        v_max_out       = V_REEL_OUT,
-        v_max_in        = V_REEL_IN,
-        accel_limit_ms2 = 2.0,
-        T_min           = T_MIN,
-        T_max           = T_MAX,
-        soft_zone_n     = SOFT_ZONE_N,
+        v_max_out       = V_MAX_OUT,
+        v_max_in        = V_MAX_IN,
+        kp_tension      = KP_TENSION,
+        accel_limit_ms2 = ACCEL_MS2,
+        jerk_limit_ms3  = JERK_MS3,
+        tension_tau_s   = TENSION_TAU,
         min_length      = 2.0,
     )
 
@@ -109,10 +109,8 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         events=events,
         wind=WIND,
         dt=DT,
-        # Temporary sim-only oracle: choose horizontal body-z azimuth from the
-        # configured wind direction. The AP still derives elevation from the
-        # current tether length and ground altitude command.
-        az_ref_rad=_wind_azimuth_rad(),
+        # Body-z azimuth is a plane-keeping estimate (low-pass of the kite's own
+        # position azimuth) inside the AP — no truth-wind oracle.
     )
 
     # State machine
@@ -198,7 +196,8 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
             tel = comms.receive_telemetry(t_sim)
             if tel is not None:
                 prev_alt = tel.hub_alt_m
-            winch.set_velocity(V_REEL_OUT if phase == "reel_out" else -V_REEL_IN)
+            cruise_v = V_CRUISE_OUT if phase == "reel_out" else -V_CRUISE_IN
+            winch.set_command(cruise_v, _ap_tension_target())
             cmd = TensionCommand(
                 tension_target_n   = _ap_tension_target(),
                 alt_m              = ic_alt,
@@ -272,8 +271,8 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
 # ---------------------------------------------------------------------------
 
 def test_pumping_unified(simtest_log):
-    """3 pumping cycles with VelocityWinchController at constant IC thrust.
-    Net energy not expected (constant collective) -- pass if no bad events."""
+    """3 pumping cycles with GovernedWinchController (tension-governed, jerk-limited).
+    Pass if no bad events (no tension spike, slack, or floor hit)."""
     r = _run_pumping(simtest_log)
     failures = []
     if r["events"]:

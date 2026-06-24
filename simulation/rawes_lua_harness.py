@@ -258,7 +258,7 @@ class RawesLua:
         """Set a SCR_USER parameter by ArduPilot name or shorthand alias.
 
         Example:
-            sim.set_param("mode", 5)          # SCR_USER6 = 5 (pumping)
+            sim.set_param("mode", 1)          # SCR_USER6 = 1 (steady)
             sim.set_param("SCR_USER1", 1.5)   # cyclic kp
         """
         self._mock.params[_PARAM_ALIAS.get(name, name)] = float(value)

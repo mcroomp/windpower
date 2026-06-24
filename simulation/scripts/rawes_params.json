@@ -13,7 +13,7 @@
     {
       "name": "SCR_USER6",
       "expected": null,
-      "note": "active Lua flight mode: 0=none (default)  1=steady  2=yaw  4=landing  5=pumping"
+      "note": "active Lua flight mode: 0=none (default)  1=steady  2=yaw  4=landing (pumping runs in steady)"
     },
     {
       "name": "ARMING_CHECK",

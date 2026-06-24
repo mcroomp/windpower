@@ -3,7 +3,7 @@ flight/conftest.py — pytest fixtures for RAWES flight stack integration tests.
 
 Fixtures:
   acro_armed              — full ACRO stack (mediator + arm).
-  acro_armed_pumping_lua  — ACRO stack with rawes.lua in pumping mode (SCR_USER6=5).
+  acro_armed_pumping_lua  - ACRO stack with rawes.lua in steady mode (SCR_USER6=1).
   acro_armed_landing_lua  — ACRO stack with rawes.lua in landing mode (SCR_USER6=4).
   acro_armed_lua_full     — ACRO stack with rawes.lua in flight mode (SCR_USER6=1).
 """
@@ -36,7 +36,8 @@ def acro_armed(tmp_path, request):
 @pytest.fixture
 def acro_armed_pumping_lua(tmp_path, request):
     """
-    Pumping-cycle stack fixture with rawes.lua active in pumping mode (SCR_USER6=5).
+    Pumping-cycle stack fixture with rawes.lua active in steady mode (SCR_USER6=1);
+    the pumping schedule is driven entirely from the ground via RAWES_TEN/RAWES_SUB.
 
     Division of labour (mirrors test_pump_cycle_lua.py):
       - Test process: PumpingGroundController (10 Hz) — phase state machine.
@@ -64,7 +65,7 @@ def acro_armed_pumping_lua(tmp_path, request):
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name) as ctx:
-        ctx.log.info("Setting SCR_USER params for rawes.lua (pumping mode) ...")
+        ctx.log.info("Setting SCR_USER params for rawes.lua (pumping schedule, steady mode) ...")
         lua_params = {
             "SCR_ENABLE": 1,
             "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
@@ -72,7 +73,7 @@ def acro_armed_pumping_lua(tmp_path, request):
             "SCR_USER3": 0.0,             # anchor North   [m]
             "SCR_USER4": 0.0,             # anchor East    [m]
             "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 5,               # RAWES_MODE = 5 (pumping)
+            "SCR_USER6": 1,               # RAWES_MODE = 1 (steady; pumping driven from ground)
         }
         for pname, pvalue in lua_params.items():
             ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
@@ -195,29 +196,43 @@ def acro_armed_lua_full(tmp_path, request):
     Full-stack ACRO fixture with rawes.lua in flight mode (SCR_USER6=1),
     internal_controller=False.
 
-    With dual GPS (EK3_SRC1_YAW=2, default in rawes_sitl_defaults.parm) yaw
-    is known from the first GPS fix — no motion is needed.  The kinematic is a
-    stationary hold at pos0 (vel0=[0,0,0], linear trajectory) for 80 s.
+    Uses kinematic startup ramp with velocity ~0.96 m/s (default from config.py)
+    to enable GPS yaw fusion at high body tilt (65°). Despite the non-zero velocity
+    ramp, the fixture waits for GPS fusion before yielding, allowing Lua to capture
+    orbit tracking well before kinematic exits at t=80s.
 
     Key design points:
-      - SCR_USER6=1 set immediately after arm; Lua pre-GPS bypass holds
-        col_cruise and zero cyclic until _tdir0 fires (GPS fusion).
+      - SCR_USER6=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
+        rate commands, preventing ArduPilot rate PID windup during kinematic hold.
+      - Velocity ~0.96 m/s (default from config.py) is applied from frame 0 to
+        provide EKF with velocity-derived yaw heading for GPS fusion.
       - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro).
-        _tdir0 fires; orbit tracking active ~46 s before kinematic exits.
+        _tdir0 fires; orbit tracking ready for activation.
       - Fixture waits for GPS fusion before yielding.
+      - Test promotes SCR_USER6 from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
+        kinematic_exit (t=80s) to activate altitude-hold orbit tracking.
 
     Timeline (from mediator start, speedup=1):
-      t=0..80 s   kinematic stationary hold at pos0 (vel=0).
-      t~12 s      arm complete; SCR_USER6=1 set; Lua pre-GPS bypass active.
-      t~34 s      GPS fuses; _tdir0 fires; Lua orbit tracking active.
-      t~34 s      fixture yields (GPS fusion confirmed).
-      t=80 s      kinematic exits; Lua already tracking orbit for ~46 s.
-      t~80+       free flight under ArduPilot + Lua.
+      t=0..80 s   kinematic with vel ~0.96 m/s (default orbit tangent).
+      t~6 s       GPS first fix; EKF3 origin set.
+      t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
+                  NVF streamed.
+      t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires;
+                  fixture yields.
+      t~80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY).
+      t~80+       free flight under ArduPilot + Lua with orbit tracking active.
     """
     extra = {
-        # Stationary hold at pos0 (tether equilibrium from steady_state_starting.json).
-        # vel0=0 + ramp_s=0: hub stays at pos0 throughout the 80 s kinematic.
-        "vel0":                 [0.0, 0.0, 0.0],
+        # Orbit tracking needs velocity for GPS yaw fusion at high body tilt (65°).
+        # Use default vel0 ~0.96 m/s from config.py (tangent to tether orbit)
+        # with ramp_s=0 so velocity is applied from frame 0.
+        # The hub will drift ~77 m over 80 s at ~0.96 m/s, but GPS fusion allows
+        # Lua to capture orbit tracking well before kinematic exits (t=80s).
+        # DO NOT set vel0=[0,0,0]: stationary hold prevents GPS yaw fusion.
+        #
+        # Default vel0 from config.py DEFAULTS: [-0.257, 0.916, -0.093] m/s
+        # (normalized orbit tangent ~0.96 m/s magnitude).
+        # kinematic_vel_ramp_s: 0.0 means velocity is applied from t=0 (frame 0).
         "kinematic_vel_ramp_s": 0.0,
         "startup_damp_seconds": 80.0,
         # Enable the mediator's winch command socket so we can run a
@@ -261,6 +276,23 @@ def acro_armed_lua_full(tmp_path, request):
             _coll_trim = float(_ic.get("stack_coll_eq", _ic.get("coll_eq_rad", -0.18)))
             ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
             ctx.log.info("IC collective: coll=%+.4f rad", _coll_trim)
+
+            # Stream the IC equilibrium tension so the gravity-compensation disk
+            # axis the Lua targets in MODE_STEADY matches the IC that generated
+            # this starting state.  Without it the Lua flies with its default
+            # _tension_n (200 N), which over-tilts the disk relative to the IC's
+            # 300 N equilibrium (k = m*g*cos(el)/tension) and injects an
+            # orientation step at the MODE_PASSIVE -> MODE_STEADY handover.
+            # Tension feeds the orientation force balance only -- it is position-
+            # independent, so this is safe to pin regardless of kinematic drift.
+            # (RAWES_ALT is deliberately NOT sent: the Lua captures the live
+            # altitude at handover so alt_err=0 with a warm-started collective,
+            # avoiding a collective step.  Pinning the IC altitude here would
+            # re-introduce that step because the hub drifts ~7 m up during the
+            # kinematic ramp.)
+            _tension_eq = float(_ic["tension_eq_n"])
+            ctx.gcs.send_named_float("RAWES_TEN", _tension_eq)
+            ctx.log.info("IC equilibrium tension: %.0f N", _tension_eq)
         ctx.wait_drain(timeout=0.5, label="post-col")
 
         # Wait for GPS fusion before yielding.
@@ -268,9 +300,21 @@ def acro_armed_lua_full(tmp_path, request):
         # With dual GPS the wait is ~44 s (delAngBiasLearned bottleneck).
         ctx.log.info("Waiting for GPS fusion before yielding (up to 60 s) ...")
         _gps_seen: list[bool] = [False]
+        _origin_seen: list[bool] = [False]
 
         def _gps_fused(text: str | None) -> bool:
-            if text and "is using GPS" in text:
+            if not text:
+                return False
+            if "is using GPS" in text:
+                _gps_seen[0] = True
+                return True
+            # ArduPilot 4.7 often reports "origin set" earlier than the
+            # legacy fusion text. Keep waiting until the historical ~34 s
+            # fusion epoch to avoid yielding too early and timing out
+            # kinematic_exit in the test body.
+            if "origin set" in text:
+                _origin_seen[0] = True
+            if _origin_seen[0] and ctx.gcs.sim_now() >= 34.0:
                 _gps_seen[0] = True
                 return True
             return False

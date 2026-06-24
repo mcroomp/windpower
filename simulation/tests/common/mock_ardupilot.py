@@ -13,10 +13,11 @@ from typing import Callable
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from arduloop import GuidedAttitudeController, HeliParams
-from controller import (AccelVibrationDamper,
+from arduloop import GuidedAttitudeController, HeliParams, RateAxisParams
+from controller import (AZ_REF_TAU_S, AccelVibrationDamper,
                         compute_bz_altitude_hold, compute_rate_cmd,
-                        compute_rate_cmd_sqrt, slerp_body_z)
+                        compute_rate_cmd_sqrt, slerp_body_z,
+                        update_plane_azimuth)
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
@@ -26,6 +27,30 @@ from telemetry_csv import TelRow, write_csv
 def _tel_every_from_env(dt: float, default_hz: float = 20.0) -> int:
     hz = float(os.environ.get("RAWES_TEL_HZ", default_hz))
     return max(1, round(1.0 / (hz * dt)))
+
+
+def rawes_sitl_heli_params(loop_rate_hz: float) -> HeliParams:
+    """HeliParams mirroring the flight-representative rate-PID gains in
+    tests/sitl/rawes_sitl_defaults.parm.
+
+    The Lua stack flies ArduPilot SITL with these gains; the in-process Lua
+    simtest must use the same so it predicts real-stack behaviour.  rawes.lua
+    uses the GUIDED angle path (set_target_angle_and_rate_and_throttle), so the
+    rate PID is the inner loop under the ATC_ANG_*_P attitude P-loop: P must be
+    high enough to track the attitude-controller rate demand at the high-tilt /
+    low-tension reel-in operating point.  Over a full multi-cycle pump P<=0.06
+    drifts off-plane and blows up by cycle 2; P>=0.10 tracks tightly enough to
+    keep crosswind drift bounded (P=0.15 -> max_cw ~34 m, comparable to the
+    Python pumping path) -- see tests/oneoff/tune_lua_reelin.py.
+    """
+    rate = RateAxisParams(
+        P=0.15, I=0.10, D=0.02, FF=0.0, IMAX=0.0,
+        FLTT=20.0, FLTE=0.0, FLTD=10.0,
+    )
+    hp = HeliParams(loop_rate_hz=loop_rate_hz)
+    hp.roll = rate
+    hp.pitch = rate
+    return hp
 
 
 def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
@@ -102,7 +127,7 @@ class _LuaBackend(_MockArdupilotBase):
         super().__init__(wind=wind, dt=dt, initial_col_rad=initial_col_rad)
         self._sim = sim
         hz = round(1.0 / dt)
-        self.enable_guided(HeliParams(loop_rate_hz=hz))
+        self.enable_guided(rawes_sitl_heli_params(hz))
         assert self._guided_ctrl is not None
         self._ctrl = self._guided_ctrl
 
@@ -180,6 +205,11 @@ class _PumpingPythonMode:
     KP_ALT: float = 0.010
     KI_ALT: float = 0.001
     KD_VZ:  float = 0.040
+    # Rate-stability gate on the collective vz-damping term (mirrors rawes.lua):
+    # fade KD_VZ when body rates are elevated so the derivative term does not
+    # react to vertical velocity produced by the attitude loop still slewing.
+    VZ_GATE_RATE_RADS: float = 1.0
+    VZ_GATE_MIN:       float = 0.0
     RATE_ACCEL_MAX_RADSS: float = 4.0
 
     def __init__(
@@ -197,7 +227,7 @@ class _PumpingPythonMode:
         ki_alt         : float = KI_ALT,
         kd_vz          : float = KD_VZ,
         rate_accel_max_radss: float = RATE_ACCEL_MAX_RADSS,
-        az_ref_rad     : "float | None" = None,
+        az_ref_tau_s   : float = AZ_REF_TAU_S,
         events         = None,
         k_vib          : float = K_VIB,
         vib_hp_hz      : float = VIB_HP_HZ,
@@ -209,7 +239,10 @@ class _PumpingPythonMode:
         self._slew       = float(slew_rate_rad_s)
         self._kp_outer   = float(kp_outer)
         self._events     = events
-        self._az_ref_rad = None if az_ref_rad is None else float(az_ref_rad)
+        # Plane-keeping azimuth estimate (low-pass of position azimuth); no
+        # truth-wind oracle.  Initialised from the IC position azimuth.
+        self._az_tau     = float(az_ref_tau_s)
+        self._az_ref     = float(np.arctan2(ic_pos[1], ic_pos[0]))
 
         tlen     = float(np.linalg.norm(ic_pos))
         self._el = float(np.arcsin(max(-1.0, min(1.0, float(-ic_pos[2]) / max(tlen, 0.1)))))
@@ -294,13 +327,18 @@ class _PumpingPythonMode:
             self._comms_ok = False
 
         tlen      = float(np.linalg.norm(obs.pos))
-        target_el = float(np.arcsin(max(-1.0, min(1.0, self._target_alt / max(tlen, 0.1)))))
+        # Force-balance orientation tracks the ACTUAL tether elevation (disk
+        # balances commanded tension + gravity where the hub is), NOT the
+        # altitude setpoint.  Altitude is held solely by the collective loop, so
+        # orientation (tension-driven) and altitude (collective) never fight.
+        target_el = float(np.arcsin(max(-1.0, min(1.0, -obs.pos[2] / max(tlen, 0.1)))))
         delta     = float(np.clip(target_el - self._el, -self._slew * dt, self._slew * dt))
         self._el += delta
 
+        self._az_ref = update_plane_azimuth(self._az_ref, obs.pos, self._az_tau, dt)
         bz_goal = compute_bz_altitude_hold(
             obs.pos, self._el, self._tension_for_bz, self._mass_kg,
-            az_ref_rad=self._az_ref_rad,
+            az_ref_rad=self._az_ref,
         )
         R       = obs.R
         bz_now  = R[:, 2]
@@ -323,8 +361,12 @@ class _PumpingPythonMode:
             self._col_min - self._col_trim,
             self._col_max - self._col_trim,
         ))
+        rate_mag = float(np.linalg.norm(obs.gyro))
+        vz_gate = float(np.clip(
+            1.0 - rate_mag / self.VZ_GATE_RATE_RADS, self.VZ_GATE_MIN, 1.0))
         col_out = float(np.clip(
-            self._col_trim + self._kp_alt * alt_err - self._kd_vz * vz_up + self._alt_i,
+            self._col_trim + self._kp_alt * alt_err
+            - self._kd_vz * vz_gate * vz_up + self._alt_i,
             self._col_min,
             self._col_max,
         ))

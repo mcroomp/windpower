@@ -4,8 +4,8 @@ torque/conftest.py — pytest fixtures for RAWES counter-torque motor stack test
 Fixtures:
   torque_armed              — constant-RPM torque stack fixture.
   torque_armed_profile      — parametrised torque fixture (profile name via request.param).
-  torque_armed_lua          — torque fixture with rawes.lua, armed via RAWES_ARMON (1 hour).
-  torque_unarmed_lua        — torque fixture with rawes.lua, unarmed; test controls RAWES_ARMON.
+    torque_armed_lua          — torque fixture with rawes.lua, armed via GCS.
+    torque_unarmed_lua        — torque fixture with rawes.lua, unarmed; test controls arm/timer.
   torque_armed_ddfp_zero    — DDFP fixture with prescribed zero yaw (motor should stay off).
   torque_armed_ddfp_ramp    — DDFP fixture with prescribed 0→10 deg/s yaw ramp (PI must cancel it).
   torque_armed_ddfp         — DDFP fixture with kinematic yaw model (closed-loop regulation).
@@ -77,7 +77,8 @@ def _lua_torque_stack(tmp_path, request, armon_ms):
     """Shared setup for Lua torque fixtures.
 
     ArduPilot DDFP yaw PID (H_TAIL_TYPE=4) drives SERVO4 (tail_channel=3).
-    Lua (rawes.lua, SCR_USER6=0) handles only RAWES_ARM arming and Ch8 keepalive.
+    Arming is handled by GCS; rawes.lua (SCR_USER6=0) provides optional
+    RAWES_ARM disarm timer behavior only.
     """
     import torque_model as _m
     return _torque_stack(
@@ -96,9 +97,9 @@ def torque_armed_lua(tmp_path, request):
     """
     Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
 
-    Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=4);
-    Lua handles only RAWES_ARM arming and Ch8 motor interlock keepalive.
-    Armed via RAWES_ARM(1 hour) — Lua owns Ch3/Ch8; no GCS RC override.
+    Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=4).
+    Armed via GCS in ACRO mode; no GCS RC override required for arming.
+    Lua RAWES_ARM remains available as an optional disarm timer.
     Yields StackContext with vehicle armed and ACRO active.
     """
     with _lua_torque_stack(tmp_path, request, armon_ms=3_600_000) as ctx:
@@ -124,7 +125,7 @@ def torque_armed_lua_yaw(tmp_path, request):
         takes effect immediately
       - cyclic channels held at neutral, collective at COL_CRUISE_FLIGHT_RAD
 
-    Arming: the torque rig has no GPS — armed via RAWES_ARM(1 hour) after
+    Arming: the torque rig has no GPS — armed via GCS after
     EKF attitude alignment (no GPS fix required).  See
     ``stack_infra._launch_mediator_torque`` for the no-GPS configuration.
     """
@@ -197,10 +198,10 @@ def torque_unarmed_lua(tmp_path, request):
     """
     Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
 
-    Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=4);
-    Lua handles only RAWES_ARM arming and Ch8 motor interlock keepalive.
+    Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=4).
     Yields StackContext with vehicle UNARMED and ACRO active.
-    The test is responsible for sending RAWES_ARM to arm.
+    The test is responsible for arming via GCS and may optionally set RAWES_ARM
+    disarm timer.
     """
     with _lua_torque_stack(tmp_path, request, armon_ms=0) as ctx:
         yield ctx

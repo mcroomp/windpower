@@ -155,19 +155,18 @@ thrust → attitude_control->set_throttle_out(thrust, apply_angle_boost=true)
        → directly to collective output (with angle boost)
 ```
 
-The vertical PID chain (Section 4) is **completely bypassed**. The thrust value goes directly to the collective servo (after angle boost scaling). No altitude hold, no velocity PID, no acceleration PID. The Lua script owns collective and commands thrust based on flight phase and tether tension requirements.
+The vertical PID chain (Section 4) is **completely bypassed**. The thrust value goes directly to the collective servo (after angle boost scaling). No ArduPilot altitude hold, no velocity PID, no acceleration PID. The Lua script owns collective and runs its **own** altitude PID (at 50 Hz) to set thrust.
 
 > **Note**: The equivalent MAVLink path is `SET_ATTITUDE_TARGET` with `GUID_OPTIONS` bit 3 set — both call the same `set_angle()` function with `use_thrust=true`.
 
 #### Why Direct Collective for RAWES?
 
-RAWES needs independent control of attitude and collective to manage tether tension across flight phases:
+RAWES decouples attitude and collective so the two flight tasks never fight (see [tension_collective_control_loop.md](tension_collective_control_loop.md)):
 
-- **Power generation (reel-out)**: high collective → high tether tension → power extraction
-- **Recovery (reel-in)**: low collective → minimal tether tension → efficient retraction
-- **Altitude stays approximately constant** in both phases (tether length determines altitude, not the Z controller)
+- **Orientation (attitude)** is a feedforward force balance: the **commanded** tension `RAWES_TEN` + actual position + gravity sets the disk-axis direction. A higher commanded tension aims the disk more tether-aligned (power phase, reel-out); a lower one tilts it back (recovery, reel-in). The actual tension is produced by the kite/winch interaction — the winch closes the only tension loop, on its own load cell.
+- **Collective (thrust)** is a closed-loop altitude PID running inside the Lua. It rejects gusts and holds the commanded altitude, while the force balance only slowly re-trims direction.
 
-A closed-loop altitude controller cannot distinguish these phases — it sees "altitude unchanged" and holds steady collective regardless of desired tether tension.
+The AP therefore receives only two slow setpoints — commanded tension and target altitude — and never the measured tension. ArduPilot's built-in Z controller is bypassed precisely so the Lua can own this decoupling.
 
 ---
 

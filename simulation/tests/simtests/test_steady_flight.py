@@ -98,10 +98,6 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
         tension_ic=tension_out,
         wind=WIND,
         dt=DT,
-        # Temporary sim-only oracle: choose the horizontal body-z azimuth from
-        # configured wind, while _PumpingPythonMode still derives elevation
-        # from tether length/current altitude.
-        az_ref_rad=wind_azimuth_rad(),
     )
     from arduloop import HeliParams, RateAxisParams
     _rp = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTE=0.0, FLTD=40.0)

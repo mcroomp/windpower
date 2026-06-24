@@ -71,7 +71,7 @@ from stack_infra import (
 from analyse_run import compute_steady_metrics, print_flight_report
 
 # -- Timing -------------------------------------------------------------------
-_KINEMATIC_TIMEOUT_S = 45.0   # s from fixture yield to kinematic end (fixture yields at GPS fusion ~44s, kinematic exits ~80s → 36s gap; 45s has margin)
+_KINEMATIC_TIMEOUT_S = 60.0   # s from fixture yield to kinematic end (4.7 timing jitter can reduce effective margin near the 80 s kinematic exit)
 _CAPTURE_TIMEOUT_S   = 30.0   # s from observation start -- Lua captures during kinematic
 _OBS_SECONDS         = 120.0  # s of free-flight observation after kinematic ends
 

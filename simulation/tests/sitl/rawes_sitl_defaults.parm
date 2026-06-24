@@ -18,23 +18,26 @@
 # ACRO rate controller — tuned for the beaupoil_2026 rotor.
 #
 # Why these values:
-#   The default heli rate PID (P=0.06, I=0.105, D=0.002, FF=0.21, FLTD=0)
-#   saturates cyclic within ~80 ms of kinematic_exit.  The PIDP dataflash
-#   trace shows D-term contributions ~-1.06 (3-4x larger than P or FF)
-#   during the rotation-onset transient because FLTD=0 has no filter on
-#   the derivative.  Lower FF (this rotor has high cyclic-to-moment gain
-#   so the default is too aggressive at small body rates) and a non-zero
-#   FLTD shape the response so the loop stays in the linear region.
+#   rawes.lua flies the GUIDED *angle* path (set_target_angle_and_rate_and_
+#   throttle), so this rate PID is the INNER loop beneath ArduPilot's attitude
+#   P-loop (ATC_ANG_*_P).  It must track the attitude controller's rate demand
+#   at the high-tilt / low-tension reel-in operating point.  The old rate-path
+#   gains (P=0.02) are too weak for the angle path: crosswind drift compounds and
+#   the pump blows up by cycle 2.  P=0.15 with light D=0.02 tracks tightly enough
+#   to keep multi-cycle drift bounded while staying in the linear region (a
+#   non-zero FLTD filters the derivative).  Validated in-process against the
+#   faithful GuidedAttitudeController by test_pump_cycle_lua /
+#   tests/oneoff/tune_lua_reelin.py (P>=0.10 stable, P=0.06 diverges).
 #
 # I-term limits stay at 0 to prevent windup during the kinematic phase
 # (body held fixed; rate setpoint nonzero -> integrator races without
 # IMAX cap).  Promoted by the test post-kinematic_exit if needed.
-ATC_RAT_RLL_P     0.02
-ATC_RAT_PIT_P     0.02
+ATC_RAT_RLL_P     0.15
+ATC_RAT_PIT_P     0.15
 ATC_RAT_RLL_FF    0.0
 ATC_RAT_PIT_FF    0.0
-ATC_RAT_RLL_D     0.0
-ATC_RAT_PIT_D     0.0
+ATC_RAT_RLL_D     0.02
+ATC_RAT_PIT_D     0.02
 ATC_RAT_RLL_FLTD  10.0
 ATC_RAT_PIT_FLTD  10.0
 ATC_RAT_RLL_IMAX  0.0
@@ -60,11 +63,8 @@ GPS1_TYPE        17    # F9P RTK_BASE: sends RTCM corrections to GPS2
 GPS2_TYPE        18    # F9P RTK_ROVER: receives RTCM, outputs RELPOSNED heading
 GPS1_POS_X       0.25  # GPS1 lever arm: +25 cm along body X from hub centre
 GPS2_POS_X      -0.25  # GPS2 lever arm: -25 cm along body X from hub centre
-SIM_GPS2_DISABLE 0     # enable second SITL GPS instance (param renamed from SIM_GPS2_ENABLE in 4.6)
-SIM_GPS2_TYPE    1     # GPS2 sim type = UBLOX (generates RELPOSNED when SIM_GPS2_HDG=1)
-SIM_GPS2_HDG     1     # generate RELPOSNED heading on GPS2 (the rover instance)
-SIM_GPS_POS_X    0.25  # GPS1 simulated body-frame X offset: +25 cm (renamed from SIM_GPS1_POS_X in 4.6)
-SIM_GPS2_POS_X  -0.25  # GPS2 simulated body-frame X offset: -25 cm
+# ArduPilot 4.7 SITL param set no longer exposes SIM_GPS* position/type toggles
+# used in older builds. Keep only GPS1_/GPS2_ params above for heading setup.
 
 COMPASS_USE     0      # disable compass: GB4008 motor swamps magnetometer on hardware
 COMPASS_ENABLE  0      # disable all SITL synthetic compasses

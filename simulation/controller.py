@@ -642,6 +642,32 @@ def damp_bz_eq_lateral(
     return bz_new / float(np.linalg.norm(bz_new))
 
 
+# Time constant [s] for the plane-keeping azimuth low-pass.  The body-z azimuth
+# reference is slowly slewed toward the kite's instantaneous position azimuth so
+# fast lateral excursions (e.g. low-tension reel-in) do not chase their own
+# position — that positive feedback drives the kite off the downwind plane.
+# This is a plane-keeping ESTIMATE derived from the kite's own position only; it
+# uses no truth-wind oracle (AGENTS.md no-truth-wind invariant).
+AZ_REF_TAU_S: float = 15.0
+
+
+def _wrap_pi(a: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return float(math.atan2(math.sin(a), math.cos(a)))
+
+
+def update_plane_azimuth(az_ref: float, pos: np.ndarray,
+                         tau_s: float, dt: float) -> float:
+    """Low-pass the downwind-plane azimuth toward the position azimuth.
+
+    Portable plane-keeping estimator mirrored 1:1 in rawes.lua
+    (update_plane_azimuth).  az_ref and the return are in (-pi, pi].
+    """
+    az_meas = float(math.atan2(pos[1], pos[0]))
+    alpha   = dt / tau_s
+    return _wrap_pi(az_ref + alpha * _wrap_pi(az_meas - az_ref))
+
+
 def compute_bz_altitude_hold(
     pos:           np.ndarray,
     target_el_rad: float,
@@ -713,9 +739,12 @@ class AltitudeHoldController:
     """
 
     def __init__(self, initial_el_rad: float,
-                 slew_rate_rad_s: float) -> None:
+                 slew_rate_rad_s: float,
+                 az_ref_tau_s: float = AZ_REF_TAU_S) -> None:
         self._el       = float(initial_el_rad)
         self._slew     = float(slew_rate_rad_s)
+        self._az_tau   = float(az_ref_tau_s)
+        self._az_ref   = None   # lazily initialised from the first pos
 
     @classmethod
     def from_pos(cls, pos: np.ndarray,
@@ -748,7 +777,12 @@ class AltitudeHoldController:
                           target_alt_m / max(tlen, 0.1)))))
         max_step   = self._slew * dt
         self._el  += max(-max_step, min(max_step, target_el - self._el))
-        return compute_bz_altitude_hold(pos, self._el, tension_n, mass_kg, G)
+        if self._az_ref is None:
+            self._az_ref = float(np.arctan2(pos[1], pos[0]))
+        else:
+            self._az_ref = update_plane_azimuth(self._az_ref, pos, self._az_tau, dt)
+        return compute_bz_altitude_hold(pos, self._el, tension_n, mass_kg, G,
+                                        az_ref_rad=self._az_ref)
 
 
 class ElevationHoldController:
@@ -781,11 +815,14 @@ class ElevationHoldController:
         slew_rate_rad_s: float,
         mass_kg        : float,
         kp_outer       : float,
+        az_ref_tau_s   : float = AZ_REF_TAU_S,
     ) -> None:
         self._el       = float(initial_el_rad)
         self._slew     = float(slew_rate_rad_s)
         self._mass_kg  = float(mass_kg)
         self._kp_outer = float(kp_outer)
+        self._az_tau   = float(az_ref_tau_s)
+        self._az_ref   = None   # lazily initialised from the first pos
 
     @classmethod
     def from_pos(
@@ -829,8 +866,14 @@ class ElevationHoldController:
         max_step  = self._slew * dt
         self._el += max(-max_step, min(max_step, target_el - self._el))
 
+        if self._az_ref is None:
+            self._az_ref = float(np.arctan2(pos[1], pos[0]))
+        else:
+            self._az_ref = update_plane_azimuth(self._az_ref, pos, self._az_tau, dt)
+
         R        = np.asarray(R, dtype=float)
-        bz_goal  = compute_bz_altitude_hold(pos, self._el, tension_n, self._mass_kg, G)
+        bz_goal  = compute_bz_altitude_hold(pos, self._el, tension_n, self._mass_kg, G,
+                                            az_ref_rad=self._az_ref)
         rate_sp  = compute_rate_cmd(R[:, 2], bz_goal, R, kp=self._kp_outer, kd=0.0)
         return float(rate_sp[0]), float(rate_sp[1])
 

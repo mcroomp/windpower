@@ -120,6 +120,19 @@ First-time setup (creates `simulation/.venv`, idempotent):
 setup.cmd            (Windows)         or       bash setup.sh
 ```
 
+Docker image builds:
+
+```bash
+# Full image (includes ArduPilot SITL build; cached in reusable Docker stage)
+bash setup.sh build
+
+# Fast image (no ArduPilot build)
+bash setup.sh build-lite
+```
+
+When running Python directly on Windows, always use `simulation/.venv/Scripts/python.exe`.
+Do not use system Python or a root `.venv` path.
+
 Then run tests in three sequential stages. Always run them in order.
 
 ```bash

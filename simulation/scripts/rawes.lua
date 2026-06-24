@@ -22,10 +22,11 @@ Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   Before GPS fuses: command current body attitude (zero corrective torque).
 
 Ground planner signals via NAMED_VALUE_FLOAT:
-  RAWES_SUB (mode=5): pumping substate 0=hold 1=reel_out 2=transition 3=reel_in 4=transition_back
+  RAWES_SUB: substate 0=hold 1=reel_out 2=transition 3=reel_in 4=transition_back
+             (set by the ground pumping schedule; the vehicle stays in MODE_STEADY)
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
     RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
-  RAWES_ARM: arm vehicle with timed disarm countdown (value = ms until disarm)
+    RAWES_ARM: optional disarm timer (value = ms until forced disarm)
 
 Parameters:
   SCR_USER2   RAWES_BZ_SLEW   elevation slew rate     [rad/s]        default 0.40
@@ -60,15 +61,11 @@ local MODE_PASSIVE = 3   -- armed but no commands: keep ch8 high, do nothing els
                          -- Used by stack tests during kinematic so the rate-PID
                          -- has no setpoint to wind up against before release.
 local MODE_LANDING = 4   -- reserved; not implemented here
-local MODE_PUMPING = 5
 
--- ── Pumping substates (mode=5; delivered via RAWES_SUB) ──────────────────────
-
-local PUMP_HOLD            = 0
-local PUMP_REEL_OUT        = 1
-local PUMP_TRANSITION      = 2
-local PUMP_REEL_IN         = 3
-local PUMP_TRANSITION_BACK = 4
+-- RAWES_SUB carries a generic substate index (delivered via NAMED_VALUE_FLOAT).
+-- The ground pumping schedule runs in MODE_STEADY and uses RAWES_SUB only for
+-- telemetry/diagnostics (0=hold 1=reel-out 2=transition 3=reel-in 4=transition-
+-- back).  RAWES_SUB is also reserved for future landing/takeoff sequencing.
 
 -- ── Physical constants ────────────────────────────────────────────────────────
 
@@ -91,8 +88,23 @@ local COL_CRUISE_FLIGHT_RAD = -0.18    -- VZ integrator initial value (xi~8 deg,
 local KP_ALT = 0.010
 local KI_ALT = 0.001
 local KD_VZ  = 0.040
+-- Rate-stability gate on the collective vz-damping term.  While the attitude
+-- loop is still slewing (flight start cyclic establishment, reel transitions),
+-- the measured vertical velocity is partly rotational coupling rather than a
+-- true altitude rate; reacting to it with collective injects a spurious thrust
+-- (tether-tension) spike.  Scale KD_VZ down when body rates are elevated -- the
+-- KP/KI altitude terms still hold altitude, only the derivative kick is gated.
+local VZ_GATE_RATE_RADS = 1.0          -- |gyro| at which the vz-damping fully fades
+local VZ_GATE_MIN       = 0.0          -- floor on the gate factor
 local RATE_KP_OUTER        = 2.5
 local RATE_ACCEL_MAX_RADSS = 4.0
+
+-- Plane-keeping azimuth low-pass time constant [s].  The body-z azimuth
+-- reference is slowly slewed toward the instantaneous position azimuth so fast
+-- lateral excursions do not chase their own position (positive feedback that
+-- pushes the kite off the downwind plane).  Plane-keeping ESTIMATE from the
+-- kite's own position only -- no truth-wind oracle (AGENTS.md invariant).
+local AZ_REF_TAU_S = 15.0
 
 -- ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -100,10 +112,8 @@ local _diag           = 0
 local _last_flight_ms = 0
 local _none_status_ms = 0
 
--- RAWES_ARM state machine
+-- RAWES_ARM disarm timer
 local _armon_deadline_ms = nil
-local _armon_state       = nil
-local _armon_armed_sent  = false
 local _armon_secs        = 0
 
 -- Mode / substate tracking
@@ -156,6 +166,8 @@ local _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETH
 local _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 local _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
 local _tension_n      = 200.0   -- target/feed-forward tether tension [N]; updated from RAWES_TEN
+local _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
+local _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
@@ -175,8 +187,8 @@ end
 -- tilt so thrust has an upward-elevation component equal to mass*g*cos(el).
 -- Mirrors Python compute_bz_altitude_hold exactly.
 -- pos: Vector3f NED relative to anchor; el_rad: target elevation [rad]
-local function bz_altitude_hold(pos, el_rad, tension_n)
-    local az     = math.atan(pos:y(), pos:x())
+local function bz_altitude_hold(pos, el_rad, tension_n, az_ref)
+    local az     = az_ref or math.atan(pos:y(), pos:x())
     local cos_el = math.cos(el_rad)
     local sin_el = math.sin(el_rad)
     local cos_az = math.cos(az)
@@ -193,6 +205,19 @@ local function bz_altitude_hold(pos, el_rad, tension_n)
     local r = Vector3f()
     r:x(rx / rn); r:y(ry / rn); r:z(rz / rn)
     return r
+end
+
+-- Wrap an angle to (-pi, pi].
+local function wrap_pi(a)
+    return math.atan(math.sin(a), math.cos(a))
+end
+
+-- Low-pass the downwind-plane azimuth toward the position azimuth.  Portable
+-- plane-keeping estimator mirrored 1:1 in controller.py (update_plane_azimuth).
+local function update_plane_azimuth(az_ref, pos, tau_s, dt)
+    local az_meas = math.atan(pos:y(), pos:x())
+    local alpha   = dt / tau_s
+    return wrap_pi(az_ref + alpha * wrap_pi(az_meas - az_ref))
 end
 
 local function p(name, default)
@@ -399,12 +424,14 @@ end
 -- ── Flight subsystem ─────────────────────────────────────────────────────────
 
 local function run_flight()
-    if vehicle:get_mode() ~= GUIDED_MODE_NUM then return end
+    -- Accept both GUIDED (4) and GUIDED_NOGPS (20) modes.
+    -- GUIDED_NOGPS allows arming without GPS; both support set_target_angle_and_rate_and_throttle.
+    local mode = vehicle:get_mode()
+    if mode ~= GUIDED_MODE_NUM and mode ~= 20 then return end
 
     local mode_now    = _prev_mode
     local substate    = _prev_sub
     local dt          = FLIGHT_PERIOD_MS * 0.001
-    local _is_pumping = mode_now == MODE_PUMPING
 
     -- ── Before GPS initialization: hold current body attitude ─────────────
     -- Command the current AHRS attitude so ArduPilot holds it with zero
@@ -413,7 +440,7 @@ local function run_flight()
     -- Collective is passed as throttle so ArduPilot's set_throttle_out path
     -- controls it directly -- no ch3 RC override needed.
     if not _el_initialized then
-        local ct = (COL_CRUISE_FLIGHT_RAD - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
+        local ct = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
         if ct < 0.0 then ct = 0.0 end
         if ct > 1.0 then ct = 1.0 end
 
@@ -432,14 +459,25 @@ local function run_flight()
             if tlen >= MIN_TETHER_M then
                 _el_rad       = math.asin(math.max(-1.0, math.min(1.0, -rz / math.max(tlen, 0.1))))
                 _target_alt   = -rz
-                _col_trim     = COL_CRUISE_FLIGHT_RAD
-                _last_col_rad = COL_CRUISE_FLIGHT_RAD
+                -- Warm-start the collective feedforward from the actual IC
+                -- equilibrium collective (TensionPI-settled, sent by ground via
+                -- RAWES_COL) instead of the nominal cruise constant.  This is the
+                -- Lua analog of TensionPI.warm_coll_rad in controller.py: it makes
+                -- col_cmd == _ic_col at capture (alt_err=vz=0), so there is no
+                -- thrust/tension step that the slow KI_ALT integrator must chase.
+                -- The I-term legitimately starts at 0 (no integrated error yet).
+                local col_ff  = _ic_col
+                if col_ff < COL_MIN_RAD then col_ff = COL_MIN_RAD end
+                if col_ff > COL_MAX_RAD then col_ff = COL_MAX_RAD end
+                _col_trim     = col_ff
+                _last_col_rad = col_ff
                 _alt_i        = 0.0
+                _az_ref         = math.atan(ry, rx)
+                _az_initialized = true
                 _el_initialized = true
-                local label = _is_pumping and "pump" or "steady"
                 gcs:send_text(6, string.format(
-                    "RAWES %s: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m",
-                    label, math.deg(_el_rad), _target_alt, tlen))
+                    "RAWES steady: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m",
+                    math.deg(_el_rad), _target_alt, tlen))
             end
         end
         return
@@ -457,22 +495,40 @@ local function run_flight()
     rel:z(pos_ned:z() - anch:z())
     local tlen = rel:length()
 
-    -- Rate-limit elevation toward target altitude
+    -- Force-balance orientation: the disk only balances commanded tension +
+    -- gravity at the ACTUAL position, so the elevation it tracks is the actual
+    -- tether elevation, NOT the altitude setpoint.  Altitude is held solely by
+    -- the collective PID below.  This decouples orientation (tension-driven,
+    -- feedforward) from altitude (collective, feedback) so the two never fight.
+    -- The elevation is still rate-limited to break the regenerative
+    -- position->tilt->lift->position path (design doc, "Why it should stay
+    -- stable", path 1).
     local bz_slew   = p("SCR_USER2", 0.40)
-    local target_el = math.asin(math.max(-1.0, math.min(1.0, _target_alt / math.max(tlen, 0.1))))
+    local target_el = math.asin(math.max(-1.0, math.min(1.0, -rel:z() / math.max(tlen, 0.1))))
     local max_step  = bz_slew * dt
     local el_step   = target_el - _el_rad
     if el_step >  max_step then el_step =  max_step end
     if el_step < -max_step then el_step = -max_step end
     _el_rad = _el_rad + el_step
 
-    -- Body-z P/sqrt loop: target tension is feed-forward only.
-    local bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n)
-    local body_z_body = Vector3f()
-    body_z_body:x(0.0); body_z_body:y(0.0); body_z_body:z(1.0)
-    local bz_now = ahrs:body_to_earth(body_z_body)
-    local rate_cmd = compute_rate_cmd_sqrt(
-        bz_now, bz_goal, RATE_KP_OUTER, RATE_ACCEL_MAX_RADSS, dt)
+    -- Plane-keeping: slowly slew the body-z azimuth reference toward the
+    -- position azimuth so fast lateral excursions don't chase their own pos.
+    if not _az_initialized then
+        _az_ref = math.atan(rel:y(), rel:x())
+        _az_initialized = true
+    else
+        _az_ref = update_plane_azimuth(_az_ref, rel, AZ_REF_TAU_S, dt)
+    end
+
+    -- Body-z altitude-hold target -> absolute roll/pitch attitude command.
+    -- The GUIDED angle path (set_target_angle_and_rate_and_throttle) runs
+    -- ArduPilot's native attitude controller (ATC_ANG_*_P + rate PID) against
+    -- this bounded target.  This replaces the earlier rate-only cascade, which
+    -- fed an outer-P rate into GUIDED's attitude integrator and diverged at the
+    -- high-tilt / low-tension reel-in operating point.
+    local bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n, _az_ref)
+    local yaw_now = ahrs:get_yaw()
+    local roll_deg, pitch_deg = bz_ned_to_roll_pitch(bz_goal, yaw_now)
 
     -- Local altitude PID controls collective; ground no longer commands thrust.
     local alt_m = -rel:z()
@@ -485,7 +541,18 @@ local function run_flight()
     local i_max = COL_MAX_RAD - _col_trim
     if _alt_i < i_min then _alt_i = i_min end
     if _alt_i > i_max then _alt_i = i_max end
-    local col_cmd = _col_trim + KP_ALT * alt_err - KD_VZ * vz_up + _alt_i
+    -- Rate-stability gate: fade the vz-damping term while body rates are high.
+    local vz_gate = 1.0
+    local gyro_b = ahrs:get_gyro()
+    if gyro_b then
+        local rate_mag = math.sqrt(gyro_b:x()*gyro_b:x()
+                                 + gyro_b:y()*gyro_b:y()
+                                 + gyro_b:z()*gyro_b:z())
+        vz_gate = 1.0 - rate_mag / VZ_GATE_RATE_RADS
+        if vz_gate < VZ_GATE_MIN then vz_gate = VZ_GATE_MIN end
+        if vz_gate > 1.0 then vz_gate = 1.0 end
+    end
+    local col_cmd = _col_trim + KP_ALT * alt_err - KD_VZ * vz_gate * vz_up + _alt_i
 
     -- Vibration damper: body-Z accel, HP filter, velocity estimate, collective.
     _vib_corr_last = 0.0
@@ -507,24 +574,24 @@ local function run_flight()
     if col_thrust < 0.0 then col_thrust = 0.0 end
     if col_thrust > 1.0 then col_thrust = 1.0 end
 
-    -- Rate-only GUIDED call: body-frame rates + collective throttle.
-    -- ArduPilot routes the throttle through set_throttle_out; no ch3 RC override needed.
-    vehicle:set_target_rate_and_throttle(
-        math.deg(rate_cmd:x()), math.deg(rate_cmd:y()), 0.0, col_thrust)
+    -- GUIDED angle path: absolute roll/pitch + held yaw, zero feedforward rate,
+    -- collective as direct throttle (set_throttle_out; no ch3 RC override).
+    vehicle:set_target_angle_and_rate_and_throttle(
+        roll_deg, pitch_deg, math.deg(yaw_now), 0.0, 0.0, 0.0, col_thrust)
 
     -- Diagnostic log (every ~5 s at 50 Hz)
     if _diag % 250 == 1 then
-        local pump_info = ""
-        if _is_pumping and tlen then
-            pump_info = string.format("  pump=%d  tlen=%.1f m", substate, tlen)
+        local sub_info = ""
+        if tlen then
+            sub_info = string.format("  sub=%d  tlen=%.1f m", substate, tlen)
         end
         gcs:send_text(6, string.format(
-            "RAWES: rr=%.1f pr=%.1f thr=%.2f  el=%.1f deg  alt=%.1f m%s",
-            math.deg(rate_cmd:x()), math.deg(rate_cmd:y()), col_thrust, math.deg(_el_rad), _target_alt, pump_info))
+            "RAWES: roll=%.1f pitch=%.1f thr=%.2f  el=%.1f deg  alt=%.1f m%s",
+            roll_deg, pitch_deg, col_thrust, math.deg(_el_rad), _target_alt, sub_info))
     end
 end
 
--- ── RAWES_ARM: timed arm/disarm state machine ────────────────────────────────
+-- ── RAWES_ARM: optional disarm timer (arming is handled by GCS) ─────────────
 
 local function run_armon(now)
     local armon_ms = _nv_floats["RAWES_ARM"]
@@ -532,40 +599,17 @@ local function run_armon(now)
         _nv_floats["RAWES_ARM"] = nil
         _armon_deadline_ms = now + armon_ms
         _armon_secs        = math.floor(armon_ms / 1000)
-        _armon_armed_sent  = false
-        if _armon_state ~= "armed" then
-            _armon_state = "interlock_low"
+        if arming:is_armed() then
+            gcs:send_text(6, string.format("RAWES disarm timer set: %ds", _armon_secs))
+        else
+            gcs:send_text(4, "RAWES disarm timer set while unarmed")
         end
     end
 
-    if _armon_state == "interlock_low" then
-        if _rc_ch3 then _rc_ch3:set_override(1000) end
-        if _rc_ch8 then _rc_ch8:set_override(1000) end
-        _armon_state = "arming"
-
-    elseif _armon_state == "arming" then
-        if _rc_ch3 then _rc_ch3:set_override(1000) end
-        if _rc_ch8 then _rc_ch8:set_override(1000) end
-        if arming:is_armed() then
-            _armon_state = "armed"
-        else
-            arming:arm()
-        end
-
-    elseif _armon_state == "armed" then
-        if _rc_ch3 then _rc_ch3:set_override(1000) end
-        if _rc_ch8 then _rc_ch8:set_override(2000) end
-        if not _armon_armed_sent then
-            _armon_armed_sent = true
-            gcs:send_text(6, string.format("RAWES arm-on: armed, expires in %ds", _armon_secs))
-        end
-        if _armon_deadline_ms and now >= _armon_deadline_ms then
-            _armon_state       = nil
-            _armon_deadline_ms = nil
-            _armon_armed_sent  = false
-            arming:disarm()
-            gcs:send_text(6, "RAWES arm-on: expired, disarmed")
-        end
+    if _armon_deadline_ms and arming:is_armed() and now >= _armon_deadline_ms then
+        _armon_deadline_ms = nil
+        arming:disarm()
+        gcs:send_text(6, "RAWES disarm timer expired, disarmed")
     end
 end
 
@@ -650,7 +694,7 @@ local function update()
         return update, BASE_PERIOD_MS
     end
 
-    if mode == MODE_STEADY or mode == MODE_PUMPING then
+    if mode == MODE_STEADY then
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
             _last_flight_ms = now
             run_flight()
@@ -671,7 +715,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 local _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="steady", [2]="manual", [4]="landing", [5]="pumping"}
+local _mode_names = {[0]="none", [1]="steady", [2]="manual", [4]="landing"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

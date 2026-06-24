@@ -43,7 +43,13 @@ sys.path.insert(0, str(_SIM_DIR))
 sys.path.insert(0, str(_SITL_DIR))
 
 import numpy as _np
-from dynbem import rotor_definition as _rd  # noqa: F401 — re-exported for callers
+
+# Optional: dynbem rotor_definition for test scripts that need it.
+# Stack tests use mediator_static.py and do not need dynbem.
+try:
+    from dynbem import rotor_definition as _rd  # noqa: F401 — re-exported for callers
+except ImportError:
+    _rd = None  # dynbem not installed (Rust build may have failed in container)
 
 # Project default rotor (the new aero package leaves ``default()`` undefined;
 # we load it here from the project's YAML).
@@ -72,12 +78,13 @@ from stack_utils import (
 )
 
 from pymavlink import mavutil as _mavutil
-from gcs import ACRO, GUIDED, STABILIZE, RawesGCS
+from gcs import ACRO, GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
 from mediator_events import MediatorEventLog
 from controller import make_hold_controller
 
 _STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
 _RAWES_DEFAULTS_PARM  = _SITL_DIR / "rawes_sitl_defaults.parm"
+_FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 control block
 
 # ── Flight fixture boot params ────────────────────────────────────────────────
 # All ACRO/flight fixtures boot SITL with this complete parameter set.
@@ -530,9 +537,19 @@ def _sitl_stack(
         # SIM_SERVO_SPEED = travel-fraction-per-second = slew/travel.
         # Both fields live on the new RotorDefinition control block; the
         # project YAML carries 545 deg/s / 100 deg ≈ 5.45.
-        _rotor = _project_default_rotor()
-        _servo_speed = (_rotor.control.servo_slew_rate_deg_s
-                        / _rotor.control.servo_travel_deg)
+        try:
+            _rotor = _project_default_rotor()
+            _servo_speed = (_rotor.control.servo_slew_rate_deg_s
+                            / _rotor.control.servo_travel_deg)
+        except Exception as _exc:
+            # Keep arm/connectivity stack tests runnable even if dynbem is
+            # unavailable in the container (e.g. Rust toolchain mismatch).
+            _servo_speed = _FALLBACK_SIM_SERVO_SPEED
+            log.warning(
+                "Rotor definition unavailable; using fallback SIM_SERVO_SPEED=%s (%s)",
+                _servo_speed,
+                _exc,
+            )
         _boot_setup = (
             ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
             .merge(_BASE_ACRO_PARAMS)
@@ -836,39 +853,32 @@ def _arm_sequence(
     log,
     *,
     armon_ms: "int | None" = None,
-    rc_override: "dict[int, int] | None" = None,
-    rc_override_post_arm: "dict[int, int] | None" = None,
     procs_alive=None,
     fail=None,
     mode_timeout: float = _MODE_TIMEOUT,
     arm_timeout: float = _ARM_TIMEOUT,
-    target_mode: int = GUIDED,
+    target_mode: int = GUIDED_NOGPS,
 ) -> None:
     """
     Canonical arm sequence for all SITL stack tests.
 
     Always runs in this order:
-      1. Set target_mode (GUIDED for flight tests, ACRO for GPS-free torque tests).
+      1. Set target_mode (GUIDED_NOGPS for flight tests, ACRO for GPS-free torque tests).
       2. Hard-assert target_mode confirmed via HEARTBEAT; refuse to arm in any other mode.
-      3a. armon_ms=None  — GCS force-arm; raise rc_override_post_arm after confirmation.
-      3b. armon_ms > 0   — send RAWES_ARM named float; wait for "RAWES arm-on: armed" STATUSTEXT.
+            3a. armon_ms=None  — GCS force-arm (no RC override required).
+            3b. armon_ms > 0   — GCS force-arm, then send RAWES_ARM as disarm timer (ms).
       3c. armon_ms = 0   — set target_mode only; return without arming (test owns arming).
 
     Notes
     -----
-    GUIDED is required for flight tests (swashplate attitude target seeds from EKF).
-    ACRO is required for GPS-free torque tests: GUIDED's mandatory_gps_checks and
-    alt_checks both fail without GPS regardless of ARMING_CHECK=0 or arm_force();
-    ACRO has has_manual_throttle()=True and requires_GPS()=False so both pass.
+    GUIDED_NOGPS (mode 20) is the default: it allows arming without GPS pre-checks,
+    while still supporting all guided-mode scripting bindings like
+    set_target_angle_and_rate_and_throttle. Both set_target_*() methods gate on
+    in_guided_mode(), which is true for both GUIDED (4) and GUIDED_NOGPS (20).
+    ACRO is still available for GPS-free torque tests via explicit target_mode parameter.
 
     Parameters
     ----------
-    rc_override          : RC channel overrides sent during ACRO mode set and arm.
-                           None = no RC override (e.g. RAWES_ARM Lua path).
-    rc_override_post_arm : RC overrides sent after arm confirmation.
-                           None = same as rc_override (no additional change).
-                           Set to e.g. {8: 2000} to raise the motor interlock
-                           after arm when rc_override was {8: 1000}.
     fail                 : callable(msg) invoked on unrecoverable failure.
                            None raises RuntimeError instead (use in non-pytest
                            helpers like _run_acro_setup).
@@ -887,9 +897,8 @@ def _arm_sequence(
     # -- 1. Set target mode ------------------------------------------------
     _mode_name = {GUIDED: "GUIDED", ACRO: "ACRO"}.get(target_mode, str(target_mode))
     log.info("[arm] Setting %s mode (timeout=%.0fs) ...", _mode_name, mode_timeout)
-    _ro = rc_override or {}
     try:
-        gcs.set_mode(target_mode, timeout=mode_timeout, rc_override=_ro if _ro else None)
+        gcs.set_mode(target_mode, timeout=mode_timeout)
     except Exception as exc:
         _fail(f"{_mode_name} mode set failed: {exc}")
         return
@@ -911,43 +920,19 @@ def _arm_sequence(
         log.info("[arm] armon_ms=0 -- yielding unarmed in %s mode.", _mode_name)
         return
 
-    if armon_ms is None:
-        # GCS force-arm with optional motor-interlock RC cycle.
-        if rc_override:
-            gcs.send_rc_override(rc_override)
-            gcs.sim_sleep(0.3)
-            gcs.send_rc_override(rc_override)
-        log.info("[arm] Arming (force=True, timeout=%.0fs) ...", arm_timeout)
-        try:
-            gcs.arm(timeout=arm_timeout, force=True,
-                    rc_override=rc_override if rc_override else None)
-        except Exception as exc:
-            _fail(f"Arm failed: {exc}")
-            return
-        log.info("[arm] Armed.")
-        _check_alive()
-        if rc_override_post_arm:
-            gcs.send_rc_override(rc_override_post_arm)
-            gcs.sim_sleep(0.3)
-            gcs.send_rc_override(rc_override_post_arm)
-            log.info("[arm] RC raised post-arm: %s", rc_override_post_arm)
-    else:
-        # RAWES_ARM: Lua state machine owns arming (ch8 LOW→arm→HIGH).
+    log.info("[arm] Arming (force=True, timeout=%.0fs) ...", arm_timeout)
+    try:
+        gcs.arm(timeout=arm_timeout, force=True)
+    except Exception as exc:
+        _fail(f"Arm failed: {exc}")
+        return
+    log.info("[arm] Armed.")
+    _check_alive()
+
+    # Optional Lua disarm timer (ms from now). This no longer controls arming.
+    if armon_ms is not None and armon_ms > 0:
         gcs.send_named_float("RAWES_ARM", float(armon_ms))
-        log.info("[arm] Sent RAWES_ARM=%d ms — waiting for Lua arm confirmation ...", armon_ms)
-        arm_deadline = gcs.sim_now() + 15.0
-        armed_ok = False
-        while gcs.sim_now() < arm_deadline:
-            _check_alive()
-            msg = gcs._recv(type=["STATUSTEXT"], blocking=True, timeout=0.5)
-            if msg and msg.get_type() == "STATUSTEXT":
-                text = msg.text.rstrip("\x00").strip()
-                log.info("[arm] SITL: %s", text)
-                if "RAWES arm-on: armed" in text:
-                    armed_ok = True
-                    break
-        if not armed_ok:
-            _fail("RAWES_ARM arm confirmation not received within 15 s")
+        log.info("[arm] Sent RAWES_ARM disarm timer=%d ms", armon_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -1243,25 +1228,20 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
                     ekf_att_ready = True
                     log.info("[stabilise] EKF3 attitude confidence (flags=0x%04x). "
                              "Proceeding to arm.", flags)
-        gcs.send_rc_override({8: 1000})   # keep interlock LOW until arm
         if ekf_att_ready:
             break
     if not ekf_att_ready:
         log.warning("[stabilise] EKF3 attitude confidence not seen within 20 s; "
                     "proceeding with flags=0x%04x", last_flags)
 
-    # ── 5+6. ACRO mode (before arm) + arm ────────────────────────────────────
-    # ACRO must be active before arm so that while disarmed ArduPilot
-    # continuously seeds the attitude target from the actual EKF attitude.
-    # At arm the rate controller starts from the correct target — not from
-    # wings-level as STABILIZE would leave it.
-    # CH8=1000 (motor interlock LOW) during arm; raised to 2000 after.
+    # ── 5+6. GUIDED_NOGPS mode (before arm) + arm ─────────────────────────────
+    # GUIDED_NOGPS (mode 20) must be active before arm for flight-stack tests.
+    # This keeps the control-path semantics consistent with rawes.lua's guided
+    # attitude targets during kinematic and free-flight handover.
     all_statustext += drain_statustext(gcs, log)
     try:
         _arm_sequence(
             gcs, log,
-            rc_override={8: 1000},
-            rc_override_post_arm={8: 2000},
             procs_alive=_procs_alive,
             fail=None,   # RuntimeError (propagated to fixture finally-block)
             mode_timeout=_MODE_TIMEOUT,
@@ -1279,7 +1259,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     ctx.flight_events["Setup complete"] = 0.0
     if t_ekf is not None:
         ctx.flight_events["EKF lock"] = t_ekf - t0
-    log.info("acro_armed setup complete — vehicle is armed in ACRO mode.")
+    log.info("acro_armed setup complete — vehicle is armed in GUIDED_NOGPS mode.")
 
 
 # ---------------------------------------------------------------------------
@@ -1711,9 +1691,9 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "H_RSC_RUNUP_TIME": 2,   # must be > H_RSC_RAMP_TIME (default 1) to pass prearm check
 })
 
-# Extra params for Lua-armed torque fixtures (RAWES_ARM state machine only).
+# Extra params for Lua torque fixtures.
 # ArduPilot's built-in DDFP yaw PID (H_TAIL_TYPE=3) drives SERVO4 for yaw control.
-# Lua only handles arming (RAWES_ARM) and motor interlock (Ch8); SCR_USER6=0 (none).
+# Arming is handled by GCS; Lua RAWES_ARM is an optional disarm timer only.
 _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "H_TAIL_TYPE":      3,     # DDFP CW (no sign flip) -- US convention rotor
     "SERVO4_MIN":       800,
@@ -1723,9 +1703,8 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
     "ATC_RAT_YAW_P":    0.015,
     "ATC_RAT_YAW_I":    0.01,
     "ATC_RAT_YAW_IMAX": 0.7,
-    "SCR_ENABLE":       1,     # load rawes.lua for RAWES_ARM arming state machine
-    "SCR_USER6":        0,     # MODE_NONE: Lua does arming only, no flight control
-    "ARMING_CHECK":     0,     # disable prearm checks — Lua arming:arm() is not force-arm
+    "SCR_ENABLE":       1,     # load rawes.lua for optional RAWES_ARM disarm timer
+    "SCR_USER6":        0,     # MODE_NONE: no Lua flight control; timer remains available
 })
 
 # Extra params for the ArduPilot DDFP yaw PI fixture (US-convention rotor).
@@ -1940,25 +1919,15 @@ def _torque_stack(
                 pytest.fail("Param subsystem never responded within 20 s")
             _dump_params_to_log(gcs, sitl_ctx.test_log_dir, log)
 
-            # EKF alignment.
-            # For non-Lua tests (armon_ms=None): keep CH8=2000 alive so RSC is ready
-            # when GCS arms.  For Lua tests (armon_ms set): RAWES_ARM sets Ch8 right
-            # before arming; no RC override needed here.
-            _use_rc_keepalive = armon_ms is None
+            # EKF alignment (no RC override keepalive required).
             log.info("Waiting for EKF yaw alignment (up to 45 s) ...")
-            if _use_rc_keepalive:
-                gcs.send_rc_override({8: 2000})
             ekf_ok  = False
             t_start = gcs.sim_now()
-            t_rc    = gcs.sim_now()
             deadline = gcs.sim_now() + 45.0
             _MIN_WAIT = 3.0
 
             while gcs.sim_now() < deadline:
                 _assert_alive()
-                if _use_rc_keepalive and gcs.sim_now() - t_rc >= 0.5:
-                    gcs.send_rc_override({8: 2000})
-                    t_rc = gcs.sim_now()
                 msg = gcs._recv(
                     type=["ATTITUDE", "STATUSTEXT"], blocking=True, timeout=0.5,
                 )
@@ -1996,9 +1965,6 @@ def _torque_stack(
             _arm_sequence(
                 gcs, log,
                 armon_ms=armon_ms,
-                # Non-Lua path: CH8=2000 throughout (rotor already at speed).
-                # Lua paths (armon_ms set): no RC override — Lua handles ch8.
-                rc_override={8: 2000} if armon_ms is None else None,
                 procs_alive=_assert_alive,
                 fail=pytest.fail,
                 mode_timeout=10.0,
@@ -2011,9 +1977,9 @@ def _torque_stack(
             if armon_ms is None:
                 log.info("Armed via GCS -- profile=%s", profile)
             elif armon_ms > 0:
-                log.info("Armed via RAWES_ARM -- profile=%s", profile)
+                log.info("Armed via GCS + RAWES_ARM disarm timer -- profile=%s", profile)
             else:
-                log.info("ACRO active (unarmed) -- profile=%s  [test will send RAWES_ARM]",
+                log.info("ACRO active (unarmed) -- profile=%s",
                          profile)
 
             yield ctx

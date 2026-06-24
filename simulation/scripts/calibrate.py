@@ -1551,10 +1551,10 @@ _RUN_MODES = {
         "doc":        "steady flight: altitude hold + VZ PI collective",
     },
     "pumping": {
-        "scr_user6":  5,
+        "scr_user6":  1,
         "take_servo4": False,
         "gain_keys":  {},
-        "doc":        "De Schutter pumping cycle",
+        "doc":        "De Schutter pumping cycle (runs in steady mode; ground varies tension)",
     },
     "landing": {
         "scr_user6":  4,

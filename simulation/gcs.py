@@ -32,12 +32,13 @@ from mavlink_log import MavlinkLogWriter
 log = logging.getLogger(__name__)
 
 # ArduCopter custom mode numbers
-STABILIZE  = 0
-ACRO       = 1
-ALT_HOLD   = 2
-AUTO       = 3
-GUIDED     = 4
-LOITER     = 5
+STABILIZE    = 0
+ACRO         = 1
+ALT_HOLD     = 2
+AUTO         = 3
+GUIDED       = 4
+LOITER       = 5
+GUIDED_NOGPS = 20
 
 # SET_POSITION_TARGET_LOCAL_NED type_mask: ignore everything except x, y, z
 # (bits set = ignore that field)

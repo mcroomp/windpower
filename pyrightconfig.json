@@ -1,11 +1,19 @@
 {
-  "include": ["simulation"],
+  "include": [
+    "simulation"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "simulation/.pytest_cache",
+    "simulation/.venv",
+    "simulation/logs"
+  ],
   "extraPaths": [
     "simulation",
-    "simulation/torque",
-    "simulation/tests/stack",
-    "simulation/tests/unit/.venv/Lib/site-packages"
+    "../aero/dynbem/python"
   ],
+  "venvPath": "simulation",
+  "venv": ".venv",
   "pythonVersion": "3.10",
   "typeCheckingMode": "basic",
   "reportMissingImports": "warning",

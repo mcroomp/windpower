@@ -51,36 +51,46 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 ### Higher-level Python wrappers (simtests + planners)
 
-- **`AltitudeHoldController`** — wraps `compute_bz_altitude_hold` with an internal elevation rate-limiter. `from_pos(pos, slew_rate_rad_s)` initialises `_el_rad` from the IC elevation; `update(pos, target_alt_m, tension_n, mass_kg, dt)` rate-limits `_el_rad` toward `asin(target_alt_m/tlen)` and returns the corresponding `body_z_eq`. Used by `TensionApController` and `LandingApController`.
-- **`ElevationHoldController`** — adds `compute_rate_cmd` on top of `AltitudeHoldController`, returning `(rate_roll_sp, rate_pitch_sp)` directly. Used inside `TensionApController`.
-- **`RatePID(kp=2/3)`** — inner rate loop. Maps to ArduPilot `ATC_RAT_RLL` / `ATC_RAT_PIT` PID on the stack side.
+- **`AltitudeHoldController`** — wraps `compute_bz_altitude_hold` with an internal elevation rate-limiter. `from_pos(pos, slew_rate_rad_s)` initialises `_el_rad` from the IC elevation; `update(pos, target_alt_m, tension_n, mass_kg, dt)` rate-limits `_el_rad` and returns the corresponding `body_z_eq`. Here `tension_n` is the **commanded** tension (force-balance feedforward), never a measurement. Used by the AP pumping mode (`_PumpingPythonMode`), `LandingApController`, and legacy hold tests.
+- **`ElevationHoldController`** — adds `compute_rate_cmd` on top of `AltitudeHoldController`, returning `(rate_roll_sp, rate_pitch_sp)` directly. Legacy; superseded by the GUIDED angle path on the AP.
+- **`HeliCyclicController`** — inner rate loop + servo lag model. Baked into `PhysicsRunner.step()`. Accepts `(collective_rad, rate_roll, rate_pitch, omega_body, dt)` and returns `(tilt_lon, tilt_lat, col_actual)` after applying the `SwashplateServoModel` (25 ms servo lag). Maps to ArduPilot `ATC_RAT_RLL` / `ATC_RAT_PIT` PID on the stack side.
 - **`compute_rc_from_attitude(roll, pitch, rollspeed, pitchspeed, yawspeed, ...)`** — MAVLink-side helper: takes ArduPilot ATTITUDE-message fields (which already encode tether-relative attitude error via `PhysicalSensor`) and returns RC PWM dict. Used by Python-side hold loops where the only feedback is a 10 Hz MAVLink stream.
+
+### arduloop/ — ArduPilot GUIDED mode Python port
+
+`simulation/arduloop/` is a self-contained Python port of ArduPilot's traditional-helicopter attitude and rate-control stack. Used by `MockArdupilot` (simtest adapter) and `_MockArdupilotBase.step_physics()` to close the GUIDED-mode control loop in-process without real ArduPilot SITL.
+
+| Layer | Class | ArduPilot equivalent |
+|-------|-------|----------------------|
+| Outer (attitude) | `GuidedAttitudeController` | `AC_AttitudeControl::input_quaternion` + `attitude_controller_run_quat` (GUIDED) |
+| Inner (rate) | `HeliRateController` | `AC_AttitudeControl_Heli` rate PID wrapper |
+
+Gain names are 1:1 with ArduPilot parameters. `GuidedAttitudeController.update(q_body, gyro, dt, collective_norm, ...)` returns a `HeliRateOutput` consumed by `runner.step_guided()`.
 
 ### Legacy / dead code (do not use)
 
-`controller.py` still contains `orbit_tracked_body_z_eq`, `orbit_tracked_body_z_eq_3d`, `compute_swashplate_from_state`, `compute_rc_rates`, and a `BodyZSlewedController` class from the Phase 2 orbit-tracking era. They are no longer referenced by `rawes.lua`, any simtest, or any production code. Treat them as candidates for deletion; do not add new callers. The replacement primitive is `compute_bz_altitude_hold` + `slerp_body_z`. See [history.md § Why orbit-tracking was replaced](history.md).
+`controller.py` still contains `orbit_tracked_body_z_eq`, `orbit_tracked_body_z_eq_3d`, `compute_swashplate_from_state`, `compute_rc_rates`, `OrbitTracker`, and `PhysicalHoldController` from the Phase 2 orbit-tracking era. They are no longer referenced by `rawes.lua`, any simtest, or any production code. Treat them as candidates for deletion; do not add new callers. The replacement primitive is `compute_bz_altitude_hold` + `slerp_body_z`. See [history.md § Why orbit-tracking was replaced](history.md).
 
-### `TensionPI` — tension-to-collective PID controller
+### `TensionPI` — collective PID (offline / winch only)
 
-Runs on the AP side. In Lua mode 5 it lives inside `rawes.lua` (TensionPID); in the Python unified pumping test it lives inside `TensionApController` at 400 Hz. The ground sends the setpoint + ground-measured tension via `TensionCommand` (10 Hz); the AP closes the loop using ground-transmitted feedback. Output: `collective_rad` clamped to `[coll_min, coll_max]`.
+`TensionPI` is **not** part of the AP flight loop. It is used only (a) offline by
+`test_generate_ic` to settle the IC equilibrium collective, and (b) as the form of the
+winch's own load-cell loop. On the flight AP there is **no tension feedback**: rawes.lua
+(steady mode) and the Python `_PumpingPythonMode` both use `bz_altitude_hold` with the
+**commanded** tension (`TensionCommand.tension_target_n`, sent as `RAWES_TEN`) as a
+force-balance feedforward, and hold altitude with an altitude PID on collective. The ground
+sends only the commanded tension + target altitude via `TensionCommand` (10 Hz); the vehicle
+never receives the measured/load-cell tension.
 
-Output: `col = kp*err + ki*∫err + kd*(err − prev_err)/dt`, clamped to `[coll_min, coll_max]`.
+Offline output: `col = kp*err + ki*∫err + kd*(err − prev_err)/dt`, clamped to `[coll_min, coll_max]`.
 
-**Gains (controller.py defaults, 400 Hz):**
+**Gains (controller.py defaults, used offline):**
 
 | Gain | Default | Notes |
 |------|---------|-------|
 | `kp` | 5e-4 | rad/N |
 | `ki` | 1e-4 | rad/(N·s) |
 | `kd` | 0.0 | rad·s/N — derivative on error; try ~2e-5 to damp tension oscillations (Peters-He) |
-
-**Gains (rawes.lua / TensionApController, 10 Hz):**
-
-| Constant | Default | Notes |
-|----------|---------|-------|
-| `KP_TEN` | 2e-4 | rad/N |
-| `KI_TEN` | 1e-3 | rad/(N·s) at DT_CMD=0.1 s |
-| `KD_TEN` | 0.0 | rad·s/N; derivative step = DT_CMD |
 
 **Critical collective limits (SkewedWakeBEM, beaupoil_2026):**
 - Zero-thrust collective ≈ **−0.34 rad** when body_z is tether-aligned
@@ -148,7 +158,7 @@ M_orbital += disk_normal * T_GB4008
 ```
 omega_spin += result.Q_spin / I_SPIN_KGMS2 × dt
 ```
-`Q_spin` comes from `PetersHeBEMJit.compute_forces()` which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium — no empirical K_drive/K_drag constants needed.
+`Q_spin` comes from `dynbem`'s `create_aero()` model (quasi_static BEM) which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium — no empirical K_drive/K_drag constants needed.
 
 **Gyroscopic coupling** is included in Euler's equations (`dynamics.py`):
 ```
@@ -206,7 +216,7 @@ Starting from rest with a 200 N tension setpoint at 10 m/s wind, the hub settles
 
 The orbit needs no active steering. The disk is tilted ξ ≈ 29° from the wind, producing a thrust component perpendicular to both tether and wind. That lateral component pushes the hub azimuthally; as the tether direction rotates, the disk precesses gyroscopically to track it; the hub's orbital velocity adds in-plane wind that sustains autorotation spin. Period and radius are set by the balance of centripetal force, tether stiffness, and gyroscopic precession rate.
 
-**Stability requires damping.** With `base_k_ang = 50 N·m·s/rad` (modelling the AcroController rate PIDs, τ = I_body/k_ang ≈ 0.1 s), gyroscopic cross-coupling `ω_orbital × H` is small and the orbit is stable for `H_SW_PHANG` values across 0°–180°. Without damping (k_ang = 0) the orbit diverges within seconds.
+With dynbem v0.4.0, the rotor attitude response is modelled directly. `base_k_ang` is no longer used as a permanent free-flight stabilizer; the default is `0 N·m·s/rad`. Startup kinematic damping and the yaw-axis GB4008 damping remain separate mechanisms.
 
 ### Five control implications
 
@@ -226,65 +236,48 @@ These follow directly from the orbit physics and pin down several CLAUDE.md inva
 | Rate-loop bias | `ATC_RAT_*_IMAX = 0` (boot params, `rawes_sitl_defaults.parm`) |
 | Reference body_z tracking | `rawes.lua`: `bz_altitude_hold(pos, _el_rad, tension)` at 50 Hz |
 | Slew rate limiting | `rawes.lua`: elevation slew `SCR_USER2 = 0.40 rad/s` |
-| Gyro phase compensation | `H_SW_PHANG = 0` (empirical; BASE_K_ANG damping τ ≈ 0.08 s « orbital period) |
+| Gyro phase compensation | `H_SW_PHANG = 0` (empirical with dynbem v0.4.0 rotor response) |
 
 ---
 
 ## Aerodynamic Model
 
-**Production model:** `PetersHeBEMJit` (`simulation/aero/aero_peters_he_jit.py`)
+**Production model:** `quasi_static` BEM from the `dynbem` external package (`create_aero(rotor, model="quasi_static")`).
 
-All simulation code, tests, and the mediator use `PetersHeBEMJit` (imported via the `simulation/aero` package's `create_aero()` factory, or instantiated directly as `PetersHeBEMJit(rotor)`).
+All simulation code, simtests, and the mediator use `dynbem.create_aero()` with `model="quasi_static"` (the default in `PhysicsCore` and `PhysicsRunner`). Dynamic inflow models (`oye`, `pitt_peters`, `jit`) are opt-in only and are not used in any production flight path.
 
-### Why PetersHeBEM (not the old RotorAero)
+### dynbem factory
 
-`RotorAero` had three fundamental physics errors:
-1. **Wrong cyclic**: empirical `K_cyc × tilt × T` scaling with sign tuned for the old model; per-blade physics gives the opposite sign.
-2. **Wrong H-force**: `0.5 × μ × T` formula wildly overestimates (~105 N vs ~13 N actual).
-3. **Wrong spin torque**: `K_drive × v_inplane − K_drag × omega²` empirical constants with no physical basis; replaced by `Q_spin` from BEM strip integration.
+`dynbem` is an external installed package (`C:/repos/aero/dynbem`). Import via:
 
-### PetersHeBEMJit architecture
+```python
+from dynbem import create_aero, rotor_definition as rd
+aero = create_aero(rotor, model="quasi_static")  # production default
+aero = create_aero(rotor, model="oye")            # dynamic inflow (opt-in)
+aero = create_aero(rotor, model="jit")            # Peters-He JIT (opt-in)
+```
 
-3-state dynamic inflow ODE (v0, v1c, v1s) with per-blade BEM strip integration:
-- **Peters-He induction**: `v_i(r, ψ) = v0 + v1c·(r/R)·cos(ψ) + v1s·(r/R)·sin(ψ)` — non-uniform induction evolved dynamically via implicit-Euler ODE
-- **Numba `@njit` hot loop**: strip accumulation compiled to native SIMD
-- **No skew-angle validity limit** — momentum ODE valid from hover through axial descent (xi up to 90°)
-- **5-second aero startup ramp** to avoid impulse loads at t=0
-- **Stateful**: serialize/restore inflow states via `aero.to_dict()` / `create_aero(model="jit", state_dict=d)`
+### Available model keys
 
-Returns `AeroResult(F_world, M_orbital, Q_spin, M_spin)`:
+| Key | Description |
+|-----|-------------|
+| `quasi_static` | **Production default** — quasi-static BEM, no inflow state; fastest and most numerically stable |
+| `oye` | Øye dynamic wake model — first-order filter on induced velocity |
+| `pitt_peters` | Pitt-Peters 3-state dynamic inflow |
+| `jit` | Peters-He 3-state inflow with Numba `@njit` hot loop; stateful via `to_dict()` / `from_dict()` |
+| `bem` | Minimal textbook BEM — sanity cross-check only |
+
+### AeroResult
+
+All models return `AeroResult(F_world, M_orbital, Q_spin, M_spin)`:
 - `F_world` — net aerodynamic force in NED world frame [N]
 - `M_orbital` — cyclic/drag moments in NED (drives hub attitude) [N·m]
 - `Q_spin` — net rotor torque (drive − drag) for the omega_spin ODE [N·m]
 - `M_spin` — gyroscopic couple for rigid-body dynamics [N·m]
 
-### AeroBase interface
+### Legacy simulation/aero/ package
 
-All models in `simulation/aero/` inherit from `AeroBase` (ABC defined in `aero/__init__.py`).
-Instantiate any model directly — no factory required:
-
-```python
-from aero import PetersHeBEMJit, PetersHeBEM, create_aero
-aero = PetersHeBEMJit(rotor)                         # direct (preferred)
-aero = create_aero(rotor, model="jit")               # factory shim
-aero = PetersHeBEMJit(rotor, state_dict=prev.to_dict())  # warm-start
-```
-
-Every subclass inherits `AeroBase.from_definition(rotor, state_dict=None)` — identical to calling the constructor directly.
-
-### Available models
-
-All in `simulation/aero/`, importable via the package:
-
-| Class | File | Description |
-|-------|------|-------------|
-| `PetersHeBEMJit` | `aero_peters_he_jit.py` | **Production** — Numba JIT, 3-state dynamic inflow; `model="jit"` |
-| `PetersHeBEM` | `aero_peters_he.py` | Pure-numpy reference; `model="numpy"` |
-| `OpenFASTBEM` | `aero_openfast_bem.py` | Quasi-static BEM with Brent phi-solve, Prandtl + Buhl correction |
-| `CCBladeBEM` | `aero_ccblade_bem.py` | Tabulated XFOIL/AeroDyn polar (Re-dependent CL/CD); requires ccblade |
-| `SimpleBEM` | `aero_simple_bem.py` | Minimal textbook BEM — sanity cross-check only |
-
-Test framework in `simulation/aero/tests/` validates models against each other.
+`simulation/aero/` (internal Python package) predates `dynbem` and contains `PetersHeBEMJit`, `PetersHeBEM`, `OpenFASTBEM`, `CCBladeBEM`, and `SimpleBEM`. **None of these are used by `PhysicsCore`, `PhysicsRunner`, or the mediator.** They remain for historical reference and one-off analysis scripts that import them directly. Do not add new callers — use `dynbem.create_aero()` instead.
 
 ---
 
@@ -360,15 +353,15 @@ The current design uses a **unified ground/AP split** with a `TensionCommand` pr
 ### Components
 
 ```
-PumpingGroundController (10 Hz)  ──TensionCommand──▶  TensionApController (400 Hz)
-                ▲                                                   │
-        load cell, hub alt                                    TensionPI collective
-                │                                                   ▼
-        WinchController (400 Hz, tension-controlled)         elevation rate-limited toward target
+PumpingGroundController (10 Hz)  ──TensionCommand──▶  _PumpingPythonMode (AP)
+                ▲                                  │
+        load cell, hub alt           force balance (commanded tension)
+                │                         + altitude-PID collective
+        WinchController (400 Hz, tension-controlled)
 ```
 
-- **`pumping_planner.PumpingGroundController`** (10 Hz) emits `TensionCommand(tension_setpoint_n, tension_measured_n, alt_m, phase)`. Ground reads the load cell and packs both the setpoint and the measurement so the AP's `TensionPI` can close the loop using ground-transmitted feedback. `alt_m` is smoothly ramped at phase boundaries using `hub_alt_m` telemetry received from the kite at 10 Hz: up over `t_transition` seconds entering "transition", down at the start of each next "reel_out". Sudden `alt_m` jumps are ground-controller bugs — detected by `ap_unreachable_alt`.
-- **`ap_controller.TensionApController`** (400 Hz, AP side) runs `TensionPI` collective + rate-limited elevation hold. Caches its own `pos_ned` from `step()` and validates each received command via `BadEventLog`: `ap_impossible_alt` (alt_m > tether_length), `ap_unreachable_alt` (elevation gap > `slew_rate × FEASIBILITY_WINDOW_S = 1 s`). **Blame rule:** `ap_*` events → ground planner sent unreachable commands; slack/tension_spike without `ap_*` → AP tracking failure.
+- **`pumping_planner.PumpingGroundController`** (10 Hz) emits `TensionCommand(tension_target_n, alt_m, phase)` — the **commanded** tension and target altitude only. The ground closes the tension loop itself on the winch's load cell; the AP never receives the measurement. `alt_m` is smoothly ramped at phase boundaries using `hub_alt_m` telemetry received from the kite at 10 Hz: up over `t_transition` seconds entering "transition", down at the start of each next "reel_out". Sudden `alt_m` jumps are ground-controller bugs — detected by `ap_unreachable_alt`.
+- **`_PumpingPythonMode`** (AP side, in `mock_ardupilot.py`) uses the commanded tension (`cmd.tension_target_n`) as a feedforward into the orientation force balance (`bz_altitude_hold`) and holds altitude with an altitude PID on collective — the same law as steady mode. There is **no TensionPI on the AP**. It validates each received command via `BadEventLog`: `ap_impossible_alt` (alt_m > tether_length), `ap_unreachable_alt` (elevation gap > `slew_rate × FEASIBILITY_WINDOW_S = 1 s`). **Blame rule:** `ap_*` events → ground planner sent unreachable commands; slack/tension_spike without `ap_*` → AP tracking failure.
 - **`winch.WinchController`** (400 Hz) is tension-controlled: cruise speed proportional to tension error, trapezoidal accel/decel profile, virtual battery accumulates energy_out_j / energy_in_j / net_energy_j.
 - **`unified_ground.UnifiedGroundController`** wraps the two with pluggable comms: `DirectComms` (Python AP), `LuaComms` (Lua simtest), `GcsComms` (SITL stack).
 
@@ -388,7 +381,7 @@ Three columns, each owned by a different component (see `telemetry_csv.py`):
 | Column | Owner | Meaning |
 |---|---|---|
 | `gnd_alt_cmd_m` | `PumpingGroundController` (10 Hz) | TensionCommand.alt_m sent to AP |
-| `elevation_rad` | `TensionApController._el` (400 Hz) | AP's internally rate-limited target |
+| `elevation_rad` | `_PumpingPythonMode._el` (AP) | AP's internally rate-limited elevation |
 | `pos_z` | physics | actual hub altitude |
 
 Comparing these three reveals who is at fault when altitude tracking fails.
@@ -456,21 +449,35 @@ Additional physics limitations in the current simulation:
 ```
 simulation/
 ├── dynamics.py          RK4 6-DOF rigid-body integrator
-├── aero/                Package: AeroBase (ABC) + AeroResult dataclass + create_aero() factory.
-│                        PetersHeBEMJit (default, model="jit"), PetersHeBEM (numpy ref),
-│                        CCBladeBEM (tabulated polar), OpenFASTBEM (Brent phi-solve), SimpleBEM (sanity ref).
+├── aero/                Legacy internal aero package — NOT used by PhysicsCore/PhysicsRunner.
+│                        PetersHeBEMJit, PetersHeBEM, CCBladeBEM, OpenFASTBEM, SimpleBEM.
+│                        Production code uses dynbem.create_aero() (external package at C:/repos/aero).
+├── arduloop/            ArduPilot GUIDED/rate control Python port (self-contained package).
+│                        guided.py: GuidedAttitudeController (input_quaternion + sqrt P-ctrl).
+│                        attitude_heli.py: HeliRateController (rate PIDs + swash output).
+│                        params.py: HeliParams, RateAxisParams (1:1 ArduPilot param names).
+│                        Used by MockArdupilot._LuaBackend and _MockArdupilotBase.step_physics().
 ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 ├── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 ├── frames.py            build_orb_frame(), T_ENU_NED (legacy external-data utility only)
 ├── sensor.py            PhysicalSensor — honest R_hub orientation, NED throughout
 ├── sitl_interface.py    ArduPilot SITL UDP binary protocol
 ├── physics_core.py      PhysicsCore — shared 400 Hz physics (dynamics, aero, tether, spin ODE,
-│                        angular damping, KinematicStartup, lock_orientation). Used by both
+│                        angular damping, KinematicStartup). Used by both
 │                        mediator.py and PhysicsRunner (simtests).
-├── controller.py        compute_swashplate_from_state, compute_rc_from_attitude, RatePID,
-│                        portable core (compute_bz_tether/slerp_body_z/compute_rate_cmd/
-│                        col_min_for_altitude_rad), compute_bz_altitude_hold, AltitudeHoldController,
-│                        ElevationHoldController, TensionPI (collective PID at 400 Hz; kd=0 default).
+├── controller.py        portable core (compute_bz_tether/slerp_body_z/compute_rate_cmd/
+│                        col_min_for_altitude_rad/compute_bz_altitude_hold), AltitudeHoldController,
+│                        ElevationHoldController, HeliCyclicController (rate PIDs + SwashplateServoModel
+│                        25 ms lag; baked into PhysicsRunner), TensionPI (collective PID at 400 Hz;
+│                        kd=0 default). Legacy dead code: compute_swashplate_from_state,
+│                        compute_rc_from_attitude, PhysicalHoldController, OrbitTracker.
+├── mock_ardupilot.lua   Minimal Lua stub of the ArduPilot API used by rawes.lua unit tests
+│                        (runs via lupa in RawesLua harness). Provides Vector3f, ahrs, rc,
+│                        SRV_Channels, param, gcs, arming, vehicle, mavlink stubs. State lives in
+│                        global `_mock` table; Python writes inputs and reads outputs each tick.
+│                        Notably: `vehicle:set_target_angle_and_climbrate` stores into
+│                        `_mock.guided_target`, which `MockArdupilot._LuaBackend.tick()` reads to
+│                        feed `GuidedAttitudeController`. Distinct from `tests/common/mock_ardupilot.py`.
 ├── mediator.py          SITL co-simulation loop — thin wrapper around PhysicsCore
 ├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw kinematics)
 ├── torque_model.py      Hub yaw model (kinematic + motor lag) — HubParams (rpm_scale, gear_ratio,
@@ -511,9 +518,10 @@ simulation/
 ├── simtest_log.py       SimtestLog (per-test log dir + human-readable summary), BadEventLog
 │                        (slack/tension_spike/floor_hit event tracking with phase tagging).
 ├── rawes_lua_harness.py RawesLua class — runs rawes.lua in-process via lupa; shared by unit
-│                        tests and simtests.
+│                        tests and simtests. Loads mock_ardupilot.lua then rawes.lua. Python writes
+│                        sensor inputs to `_mock` and calls `_update_fn()` each tick.
 ├── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.
-├── scripts/rawes.lua    Unified Lua controller (SCR_USER6 modes 0/1/4/5).
+├── scripts/rawes.lua    Unified Lua controller (SCR_USER6 modes 0/1/4).
 ├── scripts/rawes_test_surface.lua  Test-surface table (_rawes_fns) splicing internal locals
 │                        for Python unit tests via lupa.
 ├── analysis/
@@ -536,11 +544,23 @@ simulation/
     │   └── README.md    Unit & simtest reference guide.
     ├── simtests/        Windows native, no Docker (~13 full physics simulation tests; marker: simtest).
     │   ├── conftest.py            simtest marker registration; 600 s auto-timeout.
-    │   ├── simtest_runner.py      PhysicsRunner — thin wrapper around PhysicsCore. AcroControllerSitl
-    │   │                          baked in. step(dt, col, rate_roll, rate_pitch, omega_body).
-    │   │                          LuaAP(sim, wind, dt, initial_col_rad) / PythonAP(ap, wind, dt)
-    │   │                          tick helpers.
+    │   ├── simtest_runner.py      PhysicsRunner — thin wrapper around PhysicsCore.
+    │   │                          HeliCyclicController baked in. Two step methods:
+    │   │                            step(dt, col, rate_roll, rate_pitch, omega_body) — Python AP path;
+    │   │                            step_guided(dt, col, heli_out) — GUIDED path (HeliRateOutput from
+    │   │                            GuidedAttitudeController). Re-exports MockArdupilot from
+    │   │                            tests/common/mock_ardupilot.py.
     │   └── simtest_ic.py          load_ic() — loads steady_state_starting.json.
+    ├── common/
+    │   └── mock_ardupilot.py      MockArdupilot — public adapter for simtests. Two factory methods:
+    │                                MockArdupilot.for_lua(sim, wind, dt, initial_col_rad) — Lua backend
+    │                                  wraps RawesLua; reads guided_target/_rate_target/_throttle from
+    │                                  _mock and feeds GuidedAttitudeController each tick;
+    │                                MockArdupilot.for_python(ap, wind, dt, initial_col_rad) — Python
+    │                                  AP backend (calls ap.step() each tick).
+    │                              Shared base (_MockArdupilotBase): enable_guided(), step_physics(),
+    │                              log(), write_telemetry(). TelRow.from_physics() written at
+    │                              RAWES_TEL_HZ (default 20 Hz, override via env var).
     └── sitl/            Docker; all SITL/stack tests live here.
         ├── conftest.py                 thin re-exporter — pytest_addoption + pytest_configure only.
         ├── stack_infra.py              StackConfig, SitlContext, _sitl_stack, _acro_stack, _torque_stack.
@@ -550,7 +570,9 @@ simulation/
         └── torque/                     torque/anti-rotation tests.
 ```
 
-**Data flow (400 Hz):** SITL servo PWM → swashplate mix → **PhysicsCore** (aero + tether + RK4 + spin ODE) → sensor packet → SITL. `mediator.py` is a thin wrapper; `PhysicsCore` (`physics_core.py`) owns the integration loop.
+**Data flow (400 Hz):** SITL servo PWM → `ardupilot_h3_120_inverse` swashplate mix → **PhysicsCore** (`dynbem.create_aero` quasi_static + TetherModel + RK4 + spin ODE + yaw damping) → `sensor.py` packet → SITL. `mediator.py` is a thin wrapper; `PhysicsCore` (`physics_core.py`) owns the integration loop.
+
+**Simtest data flow (400 Hz):** `rawes.lua` Lua tick (via `RawesLua` + `mock_ardupilot.lua`) → `guided_target` stored in `_mock` → `MockArdupilot._LuaBackend.tick()` reads and feeds `GuidedAttitudeController` (arduloop) → `HeliRateOutput` → `PhysicsRunner.step_guided()` → `HeliCyclicController` servo model → **PhysicsCore** → `runner.observe()` → next tick.
 
 ---
 

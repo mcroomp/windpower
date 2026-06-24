@@ -23,8 +23,8 @@
 #   bash test.sh stack -n 1 -k test_foo      # one stack test
 #   bash test.sh stack -n 8                  # full stack suite, 8 workers
 #   RAWES_HIL_PORT=COM4 bash test.sh hil -v  # HIL smoke tests
+#   bash test.sh sitl                       # start SITL in Docker; connect with calibrate.py --port sitl
 #
-set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,8 +62,8 @@ _sync_code() {
         --exclude="./.venv" \
         -cf - . \
     | docker exec -i "$_c" tar -xf - -C /rawes/simulation/
-    # Sync the sibling aero package (editable-installed on host from ../aero
-    # relative to the repo root).
+    # Sync the sibling aero workspace (editable-installed on host from ../aero
+    # relative to the repo root) for local development convenience.
     local _AERO_DIR="$REPO_DIR/../aero"
     if [ -d "$_AERO_DIR" ]; then
         docker exec "$_c" mkdir -p /rawes
@@ -72,11 +72,70 @@ _sync_code() {
             --exclude="*/__pycache__" \
             --exclude="./.venv" \
             --exclude="./tests" \
+            --exclude="./target" \
             --exclude="./out" \
             --exclude="./Research" \
             --exclude="./envelope" \
-            -cf - aero \
+            -cf - Cargo.toml Cargo.lock pyproject.toml dynbem dynbem_rs aero \
         | docker exec -i "$_c" tar -xf - -C /rawes/
+        docker exec "$_c" bash -lc 'python - <<"PY"
+import importlib.metadata as m
+import pathlib
+import re
+import subprocess
+import sys
+
+req_path = pathlib.Path("/rawes/simulation/requirements.txt")
+if not req_path.exists():
+    print(f"[ERROR] requirements file not found: {req_path}", file=sys.stderr)
+    raise SystemExit(2)
+
+required = None
+for raw in req_path.read_text(encoding="utf-8").splitlines():
+    line = raw.split("#", 1)[0].strip()
+    if not line:
+        continue
+    m_req = re.match(r"^dynbem\s*==\s*([A-Za-z0-9_.+-]+)$", line)
+    if m_req:
+        required = m_req.group(1)
+        break
+
+if required is None:
+    print("[ERROR] dynbem exact pin (dynbem==<version>) missing in requirements.txt; aborting sync.", file=sys.stderr)
+    raise SystemExit(2)
+
+try:
+    version = m.version("dynbem")
+except m.PackageNotFoundError:
+    version = None
+
+if version != required:
+    try:
+        # Install dynbem from PyPI (wheel-only) to avoid local Rust builds in container.
+        subprocess.check_call([
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--upgrade",
+            "--only-binary=:all:",
+            f"dynbem=={required}",
+        ])
+    except subprocess.CalledProcessError as exc:
+        print(f"[ERROR] dynbem=={required} PyPI wheel install failed; aborting sync.", file=sys.stderr)
+        raise SystemExit(exc.returncode or 2)
+
+# Hard guard: abort if dynbem is still missing or wrong version.
+try:
+    installed = m.version("dynbem")
+except m.PackageNotFoundError:
+    installed = None
+
+if installed != required:
+    print(f"[ERROR] dynbem version check failed after install (required={required!r}, found={installed!r}); aborting sync.", file=sys.stderr)
+    raise SystemExit(2)
+PY'
     fi
     echo "[INFO] Code sync complete."
 }
@@ -280,6 +339,8 @@ _run_stack() {
             || _test_rc=$?
             rm -rf "$SIM_DIR/logs/${_label}"
             _retrieve_logs "$_c"
+            mkdir -p "$SIM_DIR/logs/${_label}"
+            cp -f "$_wlog" "$SIM_DIR/logs/${_label}/worker.log" 2>/dev/null || true
             docker rm -f "$_c" >/dev/null 2>&1 || true
             exit $_test_rc
         ) &
@@ -362,6 +423,23 @@ case "$CMD" in
         _require_venv
         "$VENV_PY" -m pytest "$(_winpath "$SIM_DIR/tests/hil")" "$@"
         ;;
+    sitl)
+        SITL_CONTAINER=rawes-sitl
+        _log "[INFO] Starting SITL bench environment ..."
+        docker rm -f "$SITL_CONTAINER" 2>/dev/null || true
+        # Expose MAVLink TCP port 5760 to the Windows host so calibrate.py can connect.
+        docker run -d --name "$SITL_CONTAINER" -p 5760:5760 "$IMAGE" sleep infinity >/dev/null
+        _sync_code "$SITL_CONTAINER"
+        # Cleanup on Ctrl-C: remove the container
+        trap "docker rm -f '$SITL_CONTAINER' >/dev/null 2>&1; echo ''; _log '[INFO] SITL container removed.'; exit 0" INT TERM
+        # Run sitl_bench.py in the foreground.
+        # It primes the EEPROM, launches SITL (--model JSON) + mediator_torque
+        # (omega_rotor=0), and streams SITL output to this terminal.
+        # Pass --omega-rotor to spin the rotor, e.g.:  bash test.sh sitl --omega-rotor 12.57
+        docker exec -it "$SITL_CONTAINER" \
+            /rawes/.venv/bin/python3 /rawes/simulation/scripts/sitl_bench.py "$@"
+        docker rm -f "$SITL_CONTAINER" >/dev/null 2>&1 || true
+        ;;
     start)
         ensure_running
         ;;
@@ -387,7 +465,7 @@ case "$CMD" in
         ;;
     *)
         echo "[ERROR] Unknown command: $CMD" >&2
-        echo "Expected: unit | simtest | stack | hil | start | stop | sync | shell | exec" >&2
+        echo "Expected: unit | simtest | stack | hil | sitl | start | stop | sync | shell | exec" >&2
         exit 1
         ;;
 esac
