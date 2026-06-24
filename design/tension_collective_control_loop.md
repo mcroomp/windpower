@@ -1,11 +1,5 @@
 # RAWES Outer Tension / Orientation / Altitude Control Loop
 
-**Reference:** De Schutter J., Leuthold R., Diehl M. (2018).
-"Optimal Control of a Rigid-Wing Rotary Kite System for Airborne Wind Energy."
-IFAC Proceedings, Vol. 51, No. 13, pp. 523-528.
-
----
-
 ## Overview
 
 Two subsystems cooperate across a **tether** under tension: a **ground winch** that sets how hard the tether is pulled, and a kite that produces lift via a rotor and has a fast inner-loop PID (as implemented by Ardupilot) that controls attitude and movement rates against its gyros, and slower outer control loop that controls altitude and target attitude. 
@@ -15,9 +9,9 @@ The winch and the vehicle are coupled by a single shared number — the **comman
 | Task | Where | Type | Output |
 |------|-------|------|--------|
 | Tension | Ground winch | Feedback | Reel speed |
-| Orientation | Kite | Feedforward | Direction of the lift |
-| Altitude | Kite | Feedback (PID) | Collective pitch |
-| Attitude | Kite | Feedback (PID 400hz) | Cyclic control |
+| Orientation | Kite (Ardupilot Lua script) | Feedforward | Direction of the lift |
+| Altitude | Kite (Ardupilot Lua script) | Feedback (PID 50hz) | Collective pitch |
+| Attitude | Kite (Ardupilot native) | Feedback (PID 400hz) | Cyclic control |
 
 ```mermaid
 flowchart LR
