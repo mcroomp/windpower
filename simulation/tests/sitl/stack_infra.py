@@ -78,7 +78,7 @@ from stack_utils import (
 )
 
 from pymavlink import mavutil as _mavutil
-from gcs import ACRO, GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
+from gcs import GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
 from mediator_events import MediatorEventLog
 from controller import make_hold_controller
 
@@ -87,12 +87,12 @@ _RAWES_DEFAULTS_PARM  = _SITL_DIR / "rawes_sitl_defaults.parm"
 _FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 control block
 
 # ── Flight fixture boot params ────────────────────────────────────────────────
-# All ACRO/flight fixtures boot SITL with this complete parameter set.
+# All GUIDED_NOGPS flight fixtures boot SITL with this complete parameter set.
 # Combined with always-wipe EEPROM in _launch_sitl, this is the single source
 # of truth — no EEPROM contamination from sequential tests is possible.
 #
 # rawes_sitl_defaults.parm provides EKF/compass/collective params.
-# _BASE_ACRO_PARAMS adds the MAVLink-side ACRO mode params.
+# _BASE_ACRO_PARAMS adds the MAVLink-side mode/failsafe params.
 # Per-fixture extras (e.g. SCR_USER6, COL_CRUISE_FLIGHT_RAD) are merged on top.
 #
 # EKF params (EK3_*, COMPASS_*) are ONLY in the boot file — never set via
@@ -100,7 +100,7 @@ _FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 contr
 _BASE_ACRO_PARAMS = ParamSetup({
     "SCR_ENABLE":       1,      # Lua scripting — always enabled; boot file avoids
                                 # the prime_eeprom bootstrap that was needed before
-    "INITIAL_MODE":     1,      # boot directly into ACRO (mode 1)
+    "INITIAL_MODE":     20,     # boot directly into GUIDED_NOGPS (mode 20)
     "FS_THR_ENABLE":    0,      # no RC throttle failsafe
     "FS_GCS_ENABLE":    0,      # no GCS heartbeat failsafe
     "FS_EKF_ACTION":    0,      # disable EKF failsafe
@@ -287,7 +287,7 @@ class StackContext:
 
     Required for all tests
     ----------------------
-    gcs            : connected, heartbeating RawesGCS (armed, in ACRO mode)
+    gcs            : connected, heartbeating RawesGCS (armed, in GUIDED_NOGPS mode)
     mediator_proc  : running mediator subprocess
     sitl_proc      : running SITL subprocess
     mediator_log   : path to mediator stdout/stderr log
@@ -486,7 +486,7 @@ def _sitl_stack(
 
     Handles everything that doesn't require the mediator or physics:
       - environment / port pre-checks
-      - boot param file (rawes_defaults + BASE_ACRO + servo_speed + extra_boot_params
+    - boot param file (rawes_defaults + guided-mode base + servo_speed + extra_boot_params
         when base_params is None; or base_params + extra_boot_params when provided)
       - SITL process launch
       - logging setup (writes to gcs_log)
@@ -499,8 +499,8 @@ def _sitl_stack(
     Parameters
     ----------
     base_params : ParamSetup | None
-        When provided, replaces the default rawes_defaults + BASE_ACRO + SIM_SERVO_SPEED
-        chain as the boot param set.  Use this for non-ACRO stacks (e.g. torque tests)
+        When provided, replaces the default rawes_defaults + guided-mode base + SIM_SERVO_SPEED
+        chain as the boot param set.  Use this for custom stacks (e.g. torque tests)
         that need a completely different parameter base.  extra_boot_params are merged
         on top regardless.
     """
@@ -691,7 +691,7 @@ def _static_stack(
 
 
 # ---------------------------------------------------------------------------
-# _acro_stack — full ACRO stack (mediator + arm) built on top of _sitl_stack
+# _acro_stack — full GUIDED_NOGPS stack (mediator + arm) built on top of _sitl_stack
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
@@ -699,7 +699,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
                 extra_boot_params: "dict[str, float] | None" = None):
     """
-    Core ACRO stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
+    Core GUIDED_NOGPS stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
     All fixtures call this.  Built on top of _sitl_stack which handles
     pre-checks, boot params, SITL launch, logging, and teardown.
@@ -858,12 +858,13 @@ def _arm_sequence(
     mode_timeout: float = _MODE_TIMEOUT,
     arm_timeout: float = _ARM_TIMEOUT,
     target_mode: int = GUIDED_NOGPS,
+    pre_arm_attitude_rpy: "tuple[float, float, float] | None" = None,
 ) -> None:
     """
     Canonical arm sequence for all SITL stack tests.
 
     Always runs in this order:
-      1. Set target_mode (GUIDED_NOGPS for flight tests, ACRO for GPS-free torque tests).
+    1. Set target_mode (GUIDED_NOGPS).
       2. Hard-assert target_mode confirmed via HEARTBEAT; refuse to arm in any other mode.
             3a. armon_ms=None  — GCS force-arm (no RC override required).
             3b. armon_ms > 0   — GCS force-arm, then send RAWES_ARM as disarm timer (ms).
@@ -875,7 +876,7 @@ def _arm_sequence(
     while still supporting all guided-mode scripting bindings like
     set_target_angle_and_rate_and_throttle. Both set_target_*() methods gate on
     in_guided_mode(), which is true for both GUIDED (4) and GUIDED_NOGPS (20).
-    ACRO is still available for GPS-free torque tests via explicit target_mode parameter.
+    All stack tests use GUIDED_NOGPS so script control paths remain consistent.
 
     Parameters
     ----------
@@ -895,7 +896,7 @@ def _arm_sequence(
             procs_alive()
 
     # -- 1. Set target mode ------------------------------------------------
-    _mode_name = {GUIDED: "GUIDED", ACRO: "ACRO"}.get(target_mode, str(target_mode))
+    _mode_name = {GUIDED: "GUIDED", GUIDED_NOGPS: "GUIDED_NOGPS"}.get(target_mode, str(target_mode))
     log.info("[arm] Setting %s mode (timeout=%.0fs) ...", _mode_name, mode_timeout)
     try:
         gcs.set_mode(target_mode, timeout=mode_timeout)
@@ -914,6 +915,47 @@ def _arm_sequence(
         return
     log.info("[arm] %s confirmed (custom_mode=%d).", _mode_name, target_mode)
     _check_alive()
+
+    # -- 2b. Seed attitude target (optional; before arm) ------------------
+    if pre_arm_attitude_rpy is not None:
+        roll, pitch, yaw = pre_arm_attitude_rpy
+
+        # MAVLink quaternion order: [w, x, y, z].
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+        q = [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ]
+
+        # Attitude-only target: ignore body-rate axes and throttle.
+        mask = (
+            _mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
+            | _mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
+            | _mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
+            | _mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
+        )
+        gcs._mav.mav.set_attitude_target_send(
+            0,
+            gcs._target_system,
+            gcs._target_component,
+            mask,
+            q,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+        log.info(
+            "[arm] Seeded SET_ATTITUDE_TARGET from EKF rpy=(%.2f, %.2f, %.2f) deg",
+            math.degrees(roll), math.degrees(pitch), math.degrees(yaw),
+        )
 
     # -- 3. Arm -----------------------------------------------------------
     if armon_ms == 0:
@@ -953,7 +995,7 @@ def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
 
 def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | None" = None) -> None:
     """
-    Shared ACRO setup sequence.
+    Shared GUIDED_NOGPS setup sequence.
 
     Timing contract: the mediator startup damping ramp is 30 s.  All steps
     here must complete inside that window so the hub is barely moving when
@@ -965,7 +1007,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
         3. Verify all boot params via MAVLink read-back (pytest.fail on mismatch)
         4. Wait for EKF tilt alignment — FAIL HARD if it doesn't arrive
         5. Arm with force=True (motor interlock low → arm → raise interlock)
-        6. Confirm ACRO mode
+        6. Confirm GUIDED_NOGPS mode
 
     Populates ctx.flight_events with timing checkpoints.
     Populates ctx.setup_samples with every EKF/ATTITUDE/position sample.
@@ -1043,6 +1085,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     ekf_att   = False   # seen a finite ATTITUDE
     ekf_pos   = False   # seen a LOCAL_POSITION_NED (optional, diagnostic only)
     ekf_ok    = False   # ATTITUDE ready
+    att_seed_rpy = None
     deadline  = gcs.sim_now() + 45.0
     while gcs.sim_now() < deadline and not ekf_ok:
         _procs_alive()
@@ -1073,6 +1116,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
                             "(will be flagged as known issue only if arm fails).")
 
         elif mt == "ATTITUDE":
+            att_seed_rpy = (float(msg.roll), float(msg.pitch), float(msg.yaw))
             r, p, y = math.degrees(msg.roll), math.degrees(msg.pitch), math.degrees(msg.yaw)
             rr, pr, yr = (math.degrees(msg.rollspeed),
                           math.degrees(msg.pitchspeed),
@@ -1246,6 +1290,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
             fail=None,   # RuntimeError (propagated to fixture finally-block)
             mode_timeout=_MODE_TIMEOUT,
             arm_timeout=_ARM_TIMEOUT,
+            pre_arm_attitude_rpy=att_seed_rpy,
         )
     except Exception as exc:
         all_statustext += drain_statustext(gcs, log)
@@ -1259,7 +1304,7 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     ctx.flight_events["Setup complete"] = 0.0
     if t_ekf is not None:
         ctx.flight_events["EKF lock"] = t_ekf - t0
-    log.info("acro_armed setup complete — vehicle is armed in GUIDED_NOGPS mode.")
+    log.info("guided_nogps_armed setup complete — vehicle is armed in GUIDED_NOGPS mode.")
 
 
 # ---------------------------------------------------------------------------
@@ -1280,7 +1325,7 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
       position_samples  : LOCAL_POSITION_NED samples from setup_samples
       ekf_aligned       : True if tilt-alignment STATUSTEXT was seen
       arm_attempted     : True if arm command was issued
-      acro_confirmed    : True if ACRO mode STATUSTEXT or heartbeat was seen
+    guided_confirmed  : True if GUIDED_NOGPS mode STATUSTEXT or heartbeat was seen
       known_issues      : list of str describing detected known failure patterns
     """
     result: dict = {
@@ -1293,7 +1338,7 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
         "position_samples":  [],
         "ekf_aligned":       False,
         "arm_attempted":     False,
-        "acro_confirmed":    False,
+        "guided_confirmed":  False,
         "known_issues":      [],
     }
 
@@ -1321,7 +1366,7 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
     all_text = " ".join(ctx.all_statustext).lower()
     result["ekf_aligned"]    = "tilt alignment" in all_text
     result["arm_attempted"]  = "setup complete" in " ".join(str(v) for v in ctx.flight_events)
-    result["acro_confirmed"] = any("acro" in t.lower() for t in ctx.all_statustext)
+    result["guided_confirmed"] = any("guided" in t.lower() for t in ctx.all_statustext)
 
     # ── Known-issue pattern matching ──────────────────────────────────────────
     issues = result["known_issues"]
@@ -1442,7 +1487,7 @@ def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
         p = math.degrees(msg.pitch)
         y = math.degrees(msg.yaw)
         if all(math.isfinite(v) for v in (r, p, y)):
-            log.info("ACRO stable: rpy=(%.2f°, %.2f°, %.2f°)", r, p, y)
+            log.info("GUIDED_NOGPS stable: rpy=(%.2f°, %.2f°, %.2f°)", r, p, y)
             return True
     log.warning("wait_for_acro_stability: no clean ATTITUDE within %.0fs", timeout)
     return False
@@ -1634,10 +1679,9 @@ _TORQUE_STARTUP_HOLD_S: float = 15.0   # SITL-seconds: enough for EKF + arming b
 # fixture boot_params are merged on top and may override individual values (e.g.
 # ATC_RAT_YAW_P=0 for the Lua fixture where Lua is the sole feedforward provider).
 _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
-    # Boot directly into ACRO (mode 1).  Torque tests have no GPS so GUIDED
-    # mode's mandatory_gps_checks + alt_checks block arming regardless of
-    # ARMING_CHECK=0.  ACRO has has_manual_throttle()=True so both pass.
-    "INITIAL_MODE":     1,
+    # Boot directly into GUIDED_NOGPS (mode 20) to keep mode usage consistent
+    # across flight and torque stacks.
+    "INITIAL_MODE":     20,
     # Failsafe — disable EKF failsafe
     # (ARMING_SKIPCHK was removed in ArduPilot 4.6; force-arm bypasses checks)
     "FS_EKF_ACTION":    0,
@@ -1813,7 +1857,7 @@ def _torque_stack(
     SITL launch, logging, and teardown.  This context manager adds:
       - mediator_torque.py launch (stationary hub yaw ODE + motor physics)
       - EKF compass-yaw alignment (short, ~3-10 s)
-      - arm + ACRO mode entry
+    - arm + GUIDED_NOGPS mode entry
 
     Logs written to simulation/logs/{test_name}/ (per-test directory,
     matching the flight stack convention).
@@ -1969,17 +2013,14 @@ def _torque_stack(
                 fail=pytest.fail,
                 mode_timeout=10.0,
                 arm_timeout=15.0,
-                # Torque rig has no GPS — GUIDED's mandatory_gps_checks and
-                # alt_checks fail regardless of ARMING_CHECK=0.  ACRO has
-                # has_manual_throttle()=True so both mandatory checks pass.
-                target_mode=ACRO,
+                target_mode=GUIDED_NOGPS,
             )
             if armon_ms is None:
                 log.info("Armed via GCS -- profile=%s", profile)
             elif armon_ms > 0:
                 log.info("Armed via GCS + RAWES_ARM disarm timer -- profile=%s", profile)
             else:
-                log.info("ACRO active (unarmed) -- profile=%s",
+                log.info("GUIDED_NOGPS active (unarmed) -- profile=%s",
                          profile)
 
             yield ctx

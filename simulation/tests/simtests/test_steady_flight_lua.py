@@ -112,7 +112,7 @@ def _run_steady(log) -> dict:
     alts       = -pos_arr[:, 2]
     tensions   = [tel.tether_tension for tel in lua.telemetry]
 
-    # Orbit radius over last 30 s (steady state)
+    # Horizontal radius over last 30 s (steady state)
     steady_pos = pos_arr[int(60.0 / DT):]
     centroid   = steady_pos.mean(axis=0)
     radii      = np.linalg.norm(steady_pos[:, :2] - centroid[:2], axis=1)
@@ -139,7 +139,7 @@ def _run_steady(log) -> dict:
 # ── Test ──────────────────────────────────────────────────────────────────────
 
 def test_steady_flight_lua(simtest_log):
-    """rawes.lua mode=1: hub aloft, orbit bounded, tether taut, axle aligned for 90 s."""
+    """rawes.lua mode=1: hub aloft, lateral motion bounded, tether taut, axle aligned for 90 s."""
     r = _run_steady(simtest_log)
     failures = []
     if r["events"]:

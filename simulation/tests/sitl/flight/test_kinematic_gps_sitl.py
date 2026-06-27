@@ -1,5 +1,5 @@
 """
-test_kinematic_gps.py -- GPS fusion during kinematic startup with dual GPS.
+test_kinematic_gps_sitl.py -- GPS fusion during kinematic startup with dual GPS.
 
 With EK3_SRC1_YAW=2 (dual-antenna RELPOSNED) yaw is known from the first GPS
 fix — no vehicle motion needed.  The kinematic is a stationary hold at the
@@ -12,7 +12,7 @@ Expected timeline (dual GPS, stationary hold):
   t~34-74  40 s EKF validation window
 
 Run:
-  bash test.sh stack -n 1 -k test_kinematic_gps
+  bash test.sh stack -n 1 -k test_kinematic_gps_sitl
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_SIM_DIR / "analysis"))
 from analyse_run import validate_ekf_window
 
 
-def test_kinematic_gps(tmp_path, request):
+def test_kinematic_gps_sitl(tmp_path, request):
     """
     GPS fuses during a stationary kinematic hold; EKF stays clean for 40 s.
 

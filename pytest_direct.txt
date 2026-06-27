@@ -1,0 +1,38 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0 -- C:\repos\windpower\simulation\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\repos\windpower\simulation
+configfile: pytest.ini
+plugins: timeout-2.4.0
+timeout: 600.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 440 items / 415 deselected / 25 selected
+
+simulation\tests\unit\test_math_lua.py::test_constants_have_expected_values PASSED [  4%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_output_is_unit_vector PASSED [  8%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_vertical_tether_points_down PASSED [ 12%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_azimuth_from_position PASSED [ 16%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_gravity_comp_increases_with_lower_elevation PASSED [ 20%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_matches_python_compute_bz_altitude_hold[10.0-0.0-150.0] PASSED [ 24%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_matches_python_compute_bz_altitude_hold[25.0-45.0-200.0] PASSED [ 28%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_matches_python_compute_bz_altitude_hold[40.0-90.0-300.0] PASSED [ 32%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_matches_python_compute_bz_altitude_hold[70.0-180.0-250.0] PASSED [ 36%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_matches_python_compute_bz_altitude_hold[80.0-270.0-400.0] PASSED [ 40%]
+simulation\tests\unit\test_math_lua.py::TestBzAltitudeHold::test_matches_python_compute_bz_altitude_hold[15.0-30.0-180.0] PASSED [ 44%]
+simulation\tests\unit\test_math_lua.py::TestRateCmdSqrt::test_matches_python_reference PASSED [ 48%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_straight_down_is_zero_angles PASSED [ 52%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_north_tilt_at_zero_yaw_is_pure_pitch PASSED [ 56%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_east_tilt_at_zero_yaw_is_pure_roll PASSED [ 60%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_tilt_angle_invariant_under_yaw PASSED [ 64%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_round_trip_via_rotation_matrix PASSED [ 68%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw0-0.0] PASSED [ 72%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw1-0.0] PASSED [ 76%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw2-0.0] PASSED [ 80%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw3-0.5] PASSED [ 84%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw4--0.7] PASSED [ 88%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw5-0.7853981633974483] PASSED [ 92%]
+simulation\tests\unit\test_math_lua.py::TestBzNedToRollPitch::test_matches_python_reference[bz_raw6-3.141592653589793] PASSED [ 96%]
+simulation\tests\unit\test_math_lua.py::TestLuaCaptureAgainstStartingIc::test_first_angle_command_is_close_to_ic_body_z PASSED [100%]
+
+===================== 25 passed, 415 deselected in 2.89s ======================

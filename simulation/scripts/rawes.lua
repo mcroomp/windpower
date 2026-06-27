@@ -41,6 +41,10 @@ Parameters:
 local BASE_PERIOD_MS    = 10        -- 100 Hz base tick
 local FLIGHT_PERIOD_MS  = 20        -- 50 Hz flight subsystem
 local GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
+-- Smooth handoff after kinematic release: keep plant physics unchanged, but
+-- phase in guidance/corrections over a longer window to avoid a command step.
+local POST_RELEASE_BLEND_S = 2.5    -- blend current->steady body_z after capture
+local POST_RELEASE_RECOVERY_S = 2.0 -- ramp-in for altitude/vibration corrections
 
 local _NVF_MSG_ID = 251
 -- mavlink:init(queue_size, num_msgs).  queue_size = max messages buffered
@@ -61,6 +65,12 @@ local MODE_PASSIVE = 3   -- armed but no commands: keep ch8 high, do nothing els
                          -- Used by stack tests during kinematic so the rate-PID
                          -- has no setpoint to wind up against before release.
 local MODE_LANDING = 4   -- reserved; not implemented here
+
+-- Temporary debug hold for MODE_PASSIVE: command fixed IC attitude.
+-- Set to false to restore live-attitude hold behavior.
+local PASSIVE_HOLD_IC_ATT = true
+local PASSIVE_IC_ROLL_DEG = -63.5
+local PASSIVE_IC_PITCH_DEG = 0.0
 
 -- RAWES_SUB carries a generic substate index (delivered via NAMED_VALUE_FLOAT).
 -- The ground pumping schedule runs in MODE_STEADY and uses RAWES_SUB only for
@@ -174,6 +184,15 @@ local _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 -- is kinematically locked.  Defaults to the cruise-flight value.
 local _ic_col         = COL_CRUISE_FLIGHT_RAD
 
+-- One-shot debug state for capture/first-command handoff diagnostics.
+local _dbg_cap_logged = false
+local _dbg_cmd_logged = false
+local _dbg_cap_bz_x   = 0.0
+local _dbg_cap_bz_y   = 0.0
+local _dbg_cap_bz_z   = 1.0
+local _capture_ms     = nil
+local _passive_hold_yaw_rad = nil
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local function v3_copy(v)
@@ -212,12 +231,59 @@ local function wrap_pi(a)
     return math.atan(math.sin(a), math.cos(a))
 end
 
+local function angle_between_deg(a, b)
+    local dot = a:x() * b:x() + a:y() * b:y() + a:z() * b:z()
+    if dot > 1.0 then dot = 1.0 end
+    if dot < -1.0 then dot = -1.0 end
+    return math.deg(math.acos(dot))
+end
+
+local function body_z_now_ned()
+    local z_b = Vector3f()
+    z_b:x(0.0); z_b:y(0.0); z_b:z(1.0)
+    return ahrs:body_to_earth(z_b)
+end
+
 -- Low-pass the downwind-plane azimuth toward the position azimuth.  Portable
 -- plane-keeping estimator mirrored 1:1 in controller.py (update_plane_azimuth).
 local function update_plane_azimuth(az_ref, pos, tau_s, dt)
     local az_meas = math.atan(pos:y(), pos:x())
     local alpha   = dt / tau_s
     return wrap_pi(az_ref + alpha * wrap_pi(az_meas - az_ref))
+end
+
+local function blend_bz(bz_now, bz_goal, alpha)
+    local a = alpha
+    if a < 0.0 then a = 0.0 end
+    if a > 1.0 then a = 1.0 end
+    local x = (1.0 - a) * bz_now:x() + a * bz_goal:x()
+    local y = (1.0 - a) * bz_now:y() + a * bz_goal:y()
+    local z = (1.0 - a) * bz_now:z() + a * bz_goal:z()
+    local n = math.sqrt(x*x + y*y + z*z)
+    if n < 1e-6 then
+        return bz_now
+    end
+    local r = Vector3f()
+    r:x(x / n); r:y(y / n); r:z(z / n)
+    return r
+end
+
+local function col_rad_to_thrust(col_rad)
+    local span = COL_MAX_RAD - COL_MIN_RAD
+    if span <= 1e-9 then
+        return 0.5
+    end
+    local t = (col_rad - COL_MIN_RAD) / span
+    if t < 0.0 then t = 0.0 end
+    if t > 1.0 then t = 1.0 end
+    return t
+end
+
+local function thrust_to_col_rad(thrust)
+    local t = thrust
+    if t < 0.0 then t = 0.0 end
+    if t > 1.0 then t = 1.0 end
+    return COL_MIN_RAD + t * (COL_MAX_RAD - COL_MIN_RAD)
 end
 
 local function p(name, default)
@@ -303,10 +369,7 @@ local function compute_rate_cmd_sqrt(bz_now, bz_goal, kp, accel_max, dt)
     return ahrs:earth_to_body(rate_world)
 end
 
--- Compute the RC1/RC2/RC3 PWM overrides for holding the IC operating
--- point.  Used by MODE_PASSIVE and MODE_MANUAL, both of which require
--- H_FLYBAR_MODE=1 (calibrate.py's `run` command sets this on entry and
--- restores on exit).
+-- Manual-mode RC override path.
 --
 -- ── MODE_MANUAL: yaw compensation + manual cyclic/collective ────────────────
 -- SERVO4 (GB4008): driven by yaw PID.  Same sign convention as the old MODE_YAW:
@@ -395,9 +458,7 @@ local function run_manual(dt)
     if _rc_ch1 then _rc_ch1:set_override(_ch1_pwm) end
     if _rc_ch2 then _rc_ch2:set_override(_ch2_pwm) end
     -- Collective from _ic_col (updated via RAWES_COL NVF).
-    local _col_thrust_man = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-    if _col_thrust_man < 0.0 then _col_thrust_man = 0.0 end
-    if _col_thrust_man > 1.0 then _col_thrust_man = 1.0 end
+    local _col_thrust_man = col_rad_to_thrust(_ic_col)
     if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + _col_thrust_man * 1000.0 + 0.5)) end
 
     if _diag % 100 == 1 then
@@ -413,11 +474,36 @@ end
 local function _on_mode_enter(mode)
     _nv_floats      = {}   -- clear NV inbox so stale substates cannot bleed through
     _none_status_ms = 0
+    if mode == MODE_STEADY then
+        _dbg_cap_logged = false
+        _dbg_cmd_logged = false
+        -- Start a fresh post-release recovery window at steady entry.
+        _capture_ms = millis()
+        -- Clear vibration states so stale kinematic-history residuals do not
+        -- inject a collective kick exactly at release.
+        _vib_acc_hp = 0.0
+        _vib_acc_prev = 0.0
+        _vib_vel_est = 0.0
+        _vib_corr_last = 0.0
+        local _thr_ic = col_rad_to_thrust(_ic_col)
+        local _col_back = thrust_to_col_rad(_thr_ic)
+        gcs:send_text(6, string.format(
+            "RAWES steady: IC col=%.2fdeg -> thr=%.3f -> col=%.2fdeg",
+            math.deg(_ic_col), _thr_ic, math.deg(_col_back)))
+    end
     if mode == MODE_MANUAL then
         _yaw_i        = 0.0
         _yaw_prev_e   = 0.0
         _man_tlon_rad = 0.0
         _man_tlat_rad = 0.0
+    end
+    if mode == MODE_PASSIVE then
+        local y = ahrs:get_yaw_rad()
+        if y ~= nil then
+            _passive_hold_yaw_rad = y
+        else
+            _passive_hold_yaw_rad = 0.0
+        end
     end
 end
 
@@ -432,21 +518,27 @@ local function run_flight()
     local mode_now    = _prev_mode
     local substate    = _prev_sub
     local dt          = FLIGHT_PERIOD_MS * 0.001
+    local now_ms      = millis()
 
     -- ── Before GPS initialization: hold current body attitude ─────────────
-    -- Command the current AHRS attitude so ArduPilot holds it with zero
-    -- corrective torque, preserving the orbital rate from kinematic.
-    -- Also primes _attitude_target so there is no step transient at GPS init.
+    -- Continuously command current AHRS roll/pitch/yaw through GUIDED angle
+    -- control so _attitude_target never times out back to level before capture.
+    -- This preserves kinematic continuity with near-zero corrective torque.
     -- Collective is passed as throttle so ArduPilot's set_throttle_out path
     -- controls it directly -- no ch3 RC override needed.
     if not _el_initialized then
-        local ct = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-        if ct < 0.0 then ct = 0.0 end
-        if ct > 1.0 then ct = 1.0 end
+        local ct = col_rad_to_thrust(_ic_col)
 
         if not ahrs:healthy() then return end
 
-        vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, ct)
+        local roll_now = ahrs:get_roll_rad()
+        local pitch_now = ahrs:get_pitch_rad()
+        local yaw_now = ahrs:get_yaw_rad()
+        if roll_now == nil or pitch_now == nil or yaw_now == nil then return end
+
+        vehicle:set_target_angle_and_rate_and_throttle(
+            math.deg(roll_now), math.deg(pitch_now), math.deg(yaw_now),
+            0.0, 0.0, 0.0, ct)
 
         -- Check for GPS position; initialize altitude hold on first valid fix
         local pos_ned = ahrs:get_relative_position_NED_origin()
@@ -475,6 +567,22 @@ local function run_flight()
                 _az_ref         = math.atan(ry, rx)
                 _az_initialized = true
                 _el_initialized = true
+                _capture_ms     = now_ms
+
+                local rel_cap = Vector3f()
+                rel_cap:x(rx); rel_cap:y(ry); rel_cap:z(rz)
+                local bz_goal_cap = bz_altitude_hold(rel_cap, _el_rad, _tension_n, _az_ref)
+                local bz_now_cap  = body_z_now_ned()
+                _dbg_cap_bz_x = bz_now_cap:x()
+                _dbg_cap_bz_y = bz_now_cap:y()
+                _dbg_cap_bz_z = bz_now_cap:z()
+                local d_cap = angle_between_deg(bz_now_cap, bz_goal_cap)
+                if not _dbg_cap_logged then
+                    _dbg_cap_logged = true
+                    gcs:send_text(6, string.format(
+                        "RAWES DBG cap: d_bz=%.2fdeg el=%.2f az=%.2f T=%.1f",
+                        d_cap, math.deg(_el_rad), math.deg(_az_ref), _tension_n))
+                end
                 gcs:send_text(6, string.format(
                     "RAWES steady: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m",
                     math.deg(_el_rad), _target_alt, tlen))
@@ -527,8 +635,34 @@ local function run_flight()
     -- fed an outer-P rate into GUIDED's attitude integrator and diverged at the
     -- high-tilt / low-tension reel-in operating point.
     local bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n, _az_ref)
-    local yaw_now = ahrs:get_yaw()
+    local recovery_alpha = 1.0
+    if _capture_ms ~= nil then
+        local t_rel_s = (now_ms - _capture_ms) * 0.001
+        local blend = t_rel_s / POST_RELEASE_BLEND_S
+        recovery_alpha = t_rel_s / POST_RELEASE_RECOVERY_S
+        if blend < 1.0 then
+            bz_goal = blend_bz(body_z_now_ned(), bz_goal, blend)
+        end
+        if recovery_alpha < 0.0 then recovery_alpha = 0.0 end
+        if recovery_alpha > 1.0 then recovery_alpha = 1.0 end
+    end
+    local yaw_now = ahrs:get_yaw_rad()
     local roll_deg, pitch_deg = bz_ned_to_roll_pitch(bz_goal, yaw_now)
+
+    local roll_now_deg = math.deg(ahrs:get_roll_rad())
+    local pitch_now_deg = math.deg(ahrs:get_pitch_rad())
+
+    if not _dbg_cmd_logged then
+        _dbg_cmd_logged = true
+        local bz_now = body_z_now_ned()
+        local bz_cap = Vector3f()
+        bz_cap:x(_dbg_cap_bz_x); bz_cap:y(_dbg_cap_bz_y); bz_cap:z(_dbg_cap_bz_z)
+        local d_now = angle_between_deg(bz_now, bz_goal)
+        local d_cap = angle_between_deg(bz_cap, bz_goal)
+        gcs:send_text(6, string.format(
+            "RAWES DBG cmd1: d_now=%.2fdeg d_cap=%.2fdeg cmd_rp=(%.2f,%.2f) now_rp=(%.2f,%.2f)",
+            d_now, d_cap, roll_deg, pitch_deg, roll_now_deg, pitch_now_deg))
+    end
 
     -- Local altitude PID controls collective; ground no longer commands thrust.
     local alt_m = -rel:z()
@@ -552,13 +686,16 @@ local function run_flight()
         if vz_gate < VZ_GATE_MIN then vz_gate = VZ_GATE_MIN end
         if vz_gate > 1.0 then vz_gate = 1.0 end
     end
-    local col_cmd = _col_trim + KP_ALT * alt_err - KD_VZ * vz_gate * vz_up + _alt_i
+    local col_pid = _col_trim + KP_ALT * alt_err - KD_VZ * vz_gate * vz_up + _alt_i
+    -- Expected release transient: keep collective close to IC initially, then
+    -- fade in altitude/vibration corrections over POST_RELEASE_RECOVERY_S.
+    local col_cmd = _ic_col + recovery_alpha * (col_pid - _ic_col)
 
     -- Vibration damper: body-Z accel, HP filter, velocity estimate, collective.
     _vib_corr_last = 0.0
     local imu_a = ahrs:get_accel()
     if imu_a then
-        _vib_corr_last = vib_damper_step(imu_a:z(), dt)
+        _vib_corr_last = recovery_alpha * vib_damper_step(imu_a:z(), dt)
         col_cmd = col_cmd + _vib_corr_last
     end
 
@@ -570,9 +707,7 @@ local function run_flight()
     if col_delta < -COL_SLEW_MAX then col_delta = -COL_SLEW_MAX end
     _last_col_rad = _last_col_rad + col_delta
 
-    local col_thrust = (_last_col_rad - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-    if col_thrust < 0.0 then col_thrust = 0.0 end
-    if col_thrust > 1.0 then col_thrust = 1.0 end
+    local col_thrust = col_rad_to_thrust(_last_col_rad)
 
     -- GUIDED angle path: absolute roll/pitch + held yaw, zero feedforward rate,
     -- collective as direct throttle (set_throttle_out; no ch3 RC override).
@@ -585,9 +720,12 @@ local function run_flight()
         if tlen then
             sub_info = string.format("  sub=%d  tlen=%.1f m", substate, tlen)
         end
+        local d_roll = roll_deg - roll_now_deg
+        local d_pitch = pitch_deg - pitch_now_deg
         gcs:send_text(6, string.format(
-            "RAWES: roll=%.1f pitch=%.1f thr=%.2f  el=%.1f deg  alt=%.1f m%s",
-            roll_deg, pitch_deg, col_thrust, math.deg(_el_rad), _target_alt, sub_info))
+            "RAWES: cmd_rp=(%.1f,%.1f) now_rp=(%.1f,%.1f) d_rp=(%.1f,%.1f) thr=%.2f el=%.1f alt=%.1f%s",
+            roll_deg, pitch_deg, roll_now_deg, pitch_now_deg,
+            d_roll, d_pitch, col_thrust, math.deg(_el_rad), _target_alt, sub_info))
     end
 end
 
@@ -639,7 +777,7 @@ local function update()
     if _nv_floats["RAWES_COL"]    then _ic_col       = _nv_floats["RAWES_COL"]    end
     if _nv_floats["RAWES_TLN"]    then _man_tlon_rad = _nv_floats["RAWES_TLN"]    end
     if _nv_floats["RAWES_TLT"]    then _man_tlat_rad = _nv_floats["RAWES_TLT"]    end
-    -- Ch4 yaw always neutral (no RC receiver; prevents ACRO yaw wind-up)
+    -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up)
     if _rc_ch4 then _rc_ch4:set_override(1500) end
 
     run_armon(now)
@@ -671,14 +809,30 @@ local function update()
 
     if mode == MODE_PASSIVE then
         -- Armed-but-quiet: hold the IC operating point so the kinematic
-        -- release transitions smoothly.  Cyclic is neutral; ch3 pins
-        -- collective at _ic_col.
-        if _rc_ch1 then _rc_ch1:set_override(1500) end
-        if _rc_ch2 then _rc_ch2:set_override(1500) end
-        local _col_thrust_p = (_ic_col - COL_MIN_RAD) / (COL_MAX_RAD - COL_MIN_RAD)
-        if _col_thrust_p < 0.0 then _col_thrust_p = 0.0 end
-        if _col_thrust_p > 1.0 then _col_thrust_p = 1.0 end
-        if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + _col_thrust_p * 1000.0 + 0.5)) end
+        -- release transitions smoothly.  Hold zero body-rate demand and
+        -- pass IC collective through GUIDED throttle (no H_FLYBAR_MODE
+        -- dependency).
+        local _col_thrust_p = col_rad_to_thrust(_ic_col)
+
+        local _mode_now = vehicle:get_mode()
+        if (_mode_now == GUIDED_MODE_NUM or _mode_now == 20) and ahrs:healthy() then
+            if PASSIVE_HOLD_IC_ATT then
+                local _yaw_cmd = _passive_hold_yaw_rad or 0.0
+                vehicle:set_target_angle_and_rate_and_throttle(
+                    PASSIVE_IC_ROLL_DEG, PASSIVE_IC_PITCH_DEG, math.deg(_yaw_cmd),
+                    0.0, 0.0, 0.0, _col_thrust_p)
+            else
+                local _roll_now = ahrs:get_roll_rad()
+                local _pitch_now = ahrs:get_pitch_rad()
+                local _yaw_now = ahrs:get_yaw_rad()
+                if _roll_now and _pitch_now and _yaw_now then
+                    vehicle:set_target_angle_and_rate_and_throttle(
+                        math.deg(_roll_now), math.deg(_pitch_now), math.deg(_yaw_now),
+                        0.0, 0.0, 0.0, _col_thrust_p)
+                end
+            end
+        end
+
         -- Take ownership of SERVO4 and pin the GB4008 at 800 us (ESC armed
         -- but motor off).  Matches the safety-shutdown PWM used by
         -- calibrate.py so a PASSIVE session never spins the rotor.  Same

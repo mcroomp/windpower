@@ -4,11 +4,11 @@
 
 Build an **ArduPilot flight controller** for a Rotary Airborne Wind Energy System (RAWES) — a tethered, 4-blade autogyro kite. Wind drives autorotation; cyclic pitch control steers; tether tension during reel-out drives a ground generator. No motor drives rotation.
 
-**Current phase:** Phase 3, Milestone 3. The ground-to-air link carries only two slow setpoints — **commanded tension** (`RAWES_TEN`) and **target altitude** (`RAWES_ALT`) — never measured/actual tension and never fast feedback. `rawes.lua` decouples flight control into: **orientation** (feedforward force balance from commanded tension + actual position + gravity → disk-axis direction), **altitude** (50 Hz PID on altitude error → collective), and **attitude** (ArduPilot native 400 Hz rate PID → cyclic). There is **no TensionPI on the AP**; the only tension feedback loop lives on the ground winch (its own load cell → reel speed). Pre-GPS: gyro feedthrough only. GPS fusion uses dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED heading). See [design/tension_collective_control_loop.md](design/tension_collective_control_loop.md). **Next: fix `test_lua_flight_steady` regression (stack), then validate `test_pumping_cycle_lua` and `test_landing_lua` (stack).**
+**Current phase:** Phase 3, Milestone 3. The ground-to-air link carries only two slow setpoints — **commanded tension** (`RAWES_TEN`) and **target altitude** (`RAWES_ALT`) — never measured/actual tension and never fast feedback. `rawes.lua` decouples flight control into: **orientation** (feedforward force balance from commanded tension + actual position + gravity → disk-axis direction), **altitude** (50 Hz PID on altitude error → collective), and **attitude** (ArduPilot native 400 Hz rate PID → cyclic). There is **no TensionPI on the AP**; the only tension feedback loop lives on the ground winch (its own load cell → reel speed). Pre-GPS: gyro feedthrough only. GPS fusion uses dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED heading). See [design/tension_collective_control_loop.md](design/tension_collective_control_loop.md). **Next: fix `test_lua_flight_steady_sitl` regression (stack), then validate `test_pumping_cycle_lua_sitl` and `test_landing_lua_sitl` (stack).**
 
 **Status:**
 - Simtests (13): 11 PASS. `test_landing` / `test_landing_lua` failing (winch control during descent).
-- Stack tests: `test_lua_flight_steady` **regressed** by aero migration (body rate runs away from ATC PID ~250 ms after kinematic exit). `test_pumping_cycle_lua` + `test_landing_lua` (stack) in dev.
+- Stack tests: `test_lua_flight_steady_sitl` **regressed** by aero migration (body rate runs away from ATC PID ~250 ms after kinematic exit). `test_pumping_cycle_lua_sitl` + `test_landing_lua_sitl` (stack) in dev.
 
 See [design/history.md](design/history.md) for milestone history and the milestone table at the end of this file for current gates.
 
@@ -90,10 +90,10 @@ Because only the origin translates (no rotation), any vector that comes from a d
 
 #### Downwind-plane criteria
 
-- **The kite should remain on the wind-aligned downwind plane during pumping and steady flight.** Horizontal motion should be aligned with the wind direction and tether geometry, not an explicit sideways/orbital target around the anchor.
+- **The kite should remain on the wind-aligned downwind plane during pumping and steady flight.** Horizontal motion should be aligned with the wind direction and tether geometry, not an explicit sideways circular target around the anchor.
 - **Controllers do not magically know the true wind direction.** The physics may use the configured ambient wind vector, but AP/Lua/Python controllers must not read that truth wind to choose a wind-plane azimuth. Use measured/estimated quantities (position, tether geometry, anemometer/winch-node telemetry, or an explicit estimator) only. Test helpers must not silently derive controller setpoints from the true `WIND` constant.
 - **Do not command an explicit horizontal radial/azimuthal velocity target as part of normal flight control.** Ground/AP controllers may command tension, tether length, altitude, and body-z orientation, but they must not add a separate off-plane horizontal motion setpoint.
-- **If a lateral correction is required, it must be for plane-keeping or damping only.** Any such correction must be minimal, physically justified, and must not introduce a new orbiting or crosswind motion objective.
+- **If a lateral correction is required, it must be for plane-keeping or damping only.** Any such correction must be minimal, physically justified, and must not introduce a new circling or crosswind motion objective.
 
 #### Rotor spin direction (US helicopter convention — baked into the whole stack)
 
@@ -177,7 +177,7 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 ### Other
 
-- **Use GUIDED. Never STABILIZE.** STABILIZE holds NED roll=0, fighting the 65° tether equilibrium; yaw discontinuity at unfreeze → EKF emergency reset → crash within 4 s. GUIDED + `vehicle:set_target_angle_and_climbrate` is the flight mode. Lua computes `bz_goal` (tether-equilibrium body\_z in NED) via `bz_altitude_hold`, converts to ZYX Euler via `bz_ned_to_roll_pitch(bz_goal, ahrs:get_yaw())`, and calls `set_target_angle_and_climbrate` at 50 Hz. ArduCopter GUIDED = mode **4** (ACRO = **1**, RTL = **6**). `ATC_RAT_RLL_IMAX = ATC_RAT_PIT_IMAX = ATC_RAT_YAW_IMAX = 0` to prevent orbital-rate I-windup. See [design/flight_stack.md §6](design/flight_stack.md).
+- **Use GUIDED. Never STABILIZE.** STABILIZE holds NED roll=0, fighting the 65° tether equilibrium; yaw discontinuity at unfreeze → EKF emergency reset → crash within 4 s. GUIDED + `vehicle:set_target_angle_and_climbrate` is the flight mode. Lua computes `bz_goal` (tether-equilibrium body\_z in NED) via `bz_altitude_hold`, converts to ZYX Euler via `bz_ned_to_roll_pitch(bz_goal, ahrs:get_yaw())`, and calls `set_target_angle_and_climbrate` at 50 Hz. ArduCopter GUIDED = mode **4** (RTL = **6**). `ATC_RAT_RLL_IMAX = ATC_RAT_PIT_IMAX = ATC_RAT_YAW_IMAX = 0` to prevent angular-rate I-windup. See [design/flight_stack.md §6](design/flight_stack.md).
 - **No silent defaults for physics parameters.** Raise `KeyError`/`ValueError` if a required config key is absent. Never use `dict.get("key", fallback)` or `x = x or default` for physical constants, control gains, or rotor/airfoil properties.
 - **NEVER use non-ASCII characters in Python `print()`.** Windows cp1252 → `UnicodeEncodeError`. Use 7-bit ASCII only: `-`, `[PASS]`/`[FAIL]`, `sd=` for sigma.
 
@@ -185,6 +185,7 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 ## Workflow Rules
 
+- **Use `rg` (ripgrep) for all text searches**, not `grep`/`findstr`/`Select-String`. It is faster, respects `.gitignore` by default (skips `.venv/` and build outputs), and supports `--glob` to scope to source dirs. Add `-q` for quiet mode (no output if no matches). Example: `rg -q "pattern" -g "simulation/scripts/**"`.
 - **Do NOT consult git history** (`git log`/`diff`/`show`/`blame`) when diagnosing problems unless you first ask the user.
 - **Fix telemetry/logging before diagnosing test failures.** When a simtest or stack test fails, inspect the telemetry CSV and logs first. If columns are zero/missing/wrong (e.g. `tether_m=0`, phase never changes), fix the logging bug before attempting to diagnose physics. Diagnosing from bad telemetry produces wrong conclusions.
 - **Run `analyse_run.py` first after any stack test failure.** It loads all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) into a unified `FlightLog` and prints a single bucketed report. `--bucket 10` for overview, `--bucket 1` for frame-level detail.
@@ -204,7 +205,7 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 | `v:normalized()` | Doesn't exist. Copy then `:normalize()` in-place |
 | `vec * scalar` or `vec + vec` | `*` not overloaded; `+` may silently fail. Use component arithmetic |
 | `rc:set_override(chan, pwm)` | Use `rc:get_channel(n):set_override(pwm)` (cache channel at module load) |
-| ArduCopter ACRO = 6 | GUIDED = **4**. ACRO = **1**, mode 6 is RTL |
+| ArduCopter mode numbering | GUIDED = **4**. Mode 6 is RTL |
 
 ---
 
@@ -226,6 +227,31 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 ### Commands
 
+**For agents: Use the filtered test wrapper (no piping needed)**
+
+| Task | Command |
+|------|---------|
+| **Unit tests (agent mode)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py unit` |
+| **Simtests (agent mode)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py simtest` |
+| **Simtest (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py simtest -k test_foo` |
+| **Unit test (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py unit -k test_math` |
+
+The `run_tests_filtered.py` wrapper provides:
+- Live-streamed test results (no buffering)
+- Automatic failure capture to temp file (`C:\Temp\pytest_YYYYMMDD_HHMMSS_XXXX.log`)
+- Clean output (no pytest headers or verbose noise)
+- Failure filenames printed in output for easy debugging
+- **Important: Do NOT pipe the output** — the wrapper handles filtering and saving already
+
+**Stack tests (SITL) use Docker — different entry point:**
+
+| Task | Command |
+|------|---------|
+| **Stack test (single)** | `bash test.sh stack -n 1 -k test_foo` |
+| **Stack test (full)** | `bash test.sh stack -n 8` |
+
+Stack tests run in isolated Docker containers, one per test file. Use `bash test.sh` commands, not the filtered wrapper.
+
 | Task | Command |
 |------|---------|
 | Unit tests (~685) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
@@ -239,16 +265,18 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 | Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
 
 **Viz note:** Launch visualization with `visualize.cmd <telemetry.csv>` rather than running `visualize_3d.py` inline. The batch file uses `start` so PyVista/VTK output stays in a separate console and does not block or flood the agent terminal. Ignore VTK/OpenGL shader errors from `visualize_3d.py` such as `vtkShaderProgram: Could not create shader object` / `vtkOpenGLPolyDataMapper: Could not set shader program`. They are local rendering/OpenGL backend failures, not simulation or telemetry failures; inspect the CSV or use non-OpenGL analysis when they occur.
+
+**Diagnosis**
+
+| Task | Command |
+|------|---------|
 | **Pumping envelope** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` (add `--wind 8 10 12`, `--telemetry <csv>`) |
 | **Pump cycle diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
-| **Landing diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua] [--bucket 2]` |
+| **Landing diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
 | **High-freq telemetry** | `RAWES_TEL_HZ=400 simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k <name> -s` (default 20 Hz) |
 | **Regenerate `steady_state_starting.json`** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s` — **the ONLY test that writes the file.** Run after any aero model change. |
-| Container start/stop | `bash test.sh start` / `bash test.sh stop` |
-| Docker image build (with ArduPilot) | `bash setup.sh build` (~30–60 min; ArduPilot is cached in stage `ardupilot-build`) |
-| Docker image build (lite) | `bash setup.sh build-lite` (fast; skips ArduPilot) |
-| Docker direct targets | `docker build simulation -t rawes-sim --target runtime` or `docker build simulation -t rawes-sim --target runtime-ardupilot` |
-| Run inside container | `bash test.sh exec 'python3 /rawes/simulation/...'` |
+
+**Docker & Infrastructure**
 
 Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. Suite summary: `simulation/logs/suite_summary.json`.
 
@@ -284,7 +312,7 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10`, `col_min_reel_in=0.079`. BEM invalid above xi≈85°. `body_z_slew_rate = 0.40 rad/s`.
 - **rawes.lua modes (valid: 0, 1, 2, 3, 4):** 0=none, 1=steady, 2=manual (bench yaw PID + NVF cyclic/collective — `RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`; `H_FLYBAR_MODE=1`), 3=passive (armed-but-quiet, holds trim cyclic + IC collective during kinematic), 4=landing. Pumping has **no dedicated mode** — it runs in steady (mode 1) with the ground varying `RAWES_TEN`/`RAWES_SUB`. Modes 1/2/3/4 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).
 - **Lua MAVLink rx queue:** `mavlink:init(20, 10)` — first arg is the per-tick rx buffer depth. `mavlink:init(1, 10)` (a common copy-paste default) drops back-to-back NAMED_VALUE_FLOAT messages — only the first survives until the next update() drains it.
-- **Yaw regulation** lives in ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=3` DDFP CW, no sign flip — matches US-convention rotor: positive yaw error from CCW body drift → positive SERVO4 throttle).  The Lua's `MODE_MANUAL` (SCR_USER6=2) bypasses this entirely and writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`; additionally it commands cyclic via `RAWES_TLN`/`RAWES_TLT` NVFs and collective via `RAWES_COL` with `H_FLYBAR_MODE=1` (RC passthrough, no rate PID). Used for bench yaw-tuning and manual swash validation. `calibrate manual` is the interactive interface; `test_lua_manual_mode` is the SITL stack test. No DShot active (`RPM1_TYPE=0`); anti-rotation motor on standard PWM, MAIN OUT 4. Current hardware: GB4008 + 80:44 gear. See [design/dshot.md](design/dshot.md), [design/flight_stack.md §4.7–§5](design/flight_stack.md).
+- **Yaw regulation** lives in ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=3` DDFP CW, no sign flip — matches US-convention rotor: positive yaw error from CCW body drift → positive SERVO4 throttle).  The Lua's `MODE_MANUAL` (SCR_USER6=2) bypasses this entirely and writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`; additionally it commands cyclic via `RAWES_TLN`/`RAWES_TLT` NVFs and collective via `RAWES_COL` with `H_FLYBAR_MODE=1` (RC passthrough, no rate PID). Used for bench yaw-tuning and manual swash validation. `calibrate manual` is the interactive interface; `test_lua_manual_mode_sitl` is the SITL stack test. No DShot active (`RPM1_TYPE=0`); anti-rotation motor on standard PWM, MAIN OUT 4. Current hardware: GB4008 + 80:44 gear. See [design/dshot.md](design/dshot.md), [design/flight_stack.md §4.7–§5](design/flight_stack.md).
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) — required boot params in `rawes_sitl_defaults.parm`. `GPS_AUTO_CONFIG=0` is critical (prevents ArduPilot from corrupting RELPOSNED in SITL). See [design/flight_stack.md Appendix D](design/flight_stack.md).
 - **Anchor in `LOCAL_POSITION_NED`:** `SCR_USER5 = −initial_state["pos"][2]`. Anchor at `[0, 0, −pos0[2]]` in EKF frame.
 - **Ground-to-air interface (all flight modes):** the AP receives ONLY commanded tension (`RAWES_TEN`) + target altitude (`RAWES_ALT`), plus the phase/substate (`RAWES_SUB`) for sequencing. Never actual/measured tension, never fast feedback. Commanded tension is feedforward into the orientation force balance (sets disk-axis direction + a lift-magnitude feedforward); it is NOT a tension feedback setpoint on the AP. The winch closes the only tension loop on its own load cell.
@@ -292,7 +320,7 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 - **Landing:** unified — `LandingGroundController` (10 Hz) → `LandingCommand` → `LandingApController` (400 Hz) + `WinchController`. Three phases: reel_in / descent / final_drop. Old `LandingPlanner` deleted. See [design/simulation.md](design/simulation.md) Landing Architecture.
 - **IC generation targets 300 N tension.** `test_generate_ic.py::test_create_ic` runs 60 s warmup with `TensionPI` targeting 300 N. This `TensionPI` is an **offline IC-generation tool only** (mirrors the ground winch's tension loop), NOT the AP flight loop. `coll_eq_rad` is the settled collective, not a hardcoded constant; the AP warm-starts its altitude-PID collective at this value (`RAWES_COL`) in all simtests.
 - **`HeliCyclicController` (25 ms servo lag) is baked into `PhysicsRunner` and always active for simtests.** `runner.step()` for Python-AP tests; `runner.step_guided()` for Lua/GUIDED tests (takes `HeliRateOutput` from `arduloop.GuidedAttitudeController`).
-- **Gyroscopic phase NOT needed:** `H_SW_PHANG=0` with dynbem v0.4.0 rotor response. `base_k_ang` defaults to 0; `swashplate_phase_deg≠0` degrades orbit stability.
+- **Gyroscopic phase NOT needed:** `H_SW_PHANG=0` with dynbem v0.4.0 rotor response. `base_k_ang` defaults to 0; `swashplate_phase_deg≠0` degrades steady-flight stability.
 - **Torque model:** kinematic + first-order motor lag. ESC holds RPM proportional to PWM at steady state; `MOTOR_TAU=0.02 s`. `equilibrium_throttle ≈ 0.485` at 28 rad/s. `H_YAW_TRIM = −0.419`. See [design/flight_stack.md §5](design/flight_stack.md).
 
 ---
@@ -317,15 +345,15 @@ The physics worker must reply to **every** SITL servo packet without exception �
 
 See [design/history.md](design/history.md) for full decision history.
 
-**Test progression: steady → pumping → landing.** Fix `test_lua_flight_steady` (stack) before debugging pumping or landing Lua stack tests. Do not debug `test_pumping_cycle_lua` or `test_landing_lua` (stack) until `test_lua_flight_steady` passes cleanly (orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s).
+**Test progression: steady → pumping → landing.** Fix `test_lua_flight_steady_sitl` (stack) before debugging pumping or landing Lua stack tests. Do not debug `test_pumping_cycle_lua_sitl` or `test_landing_lua_sitl` (stack) until `test_lua_flight_steady_sitl` passes cleanly (horizontal deviation < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s).
 
 | Milestone | Status | Gate |
 |-----------|--------|------|
 | M1 Wire Pumping Cycle | done | — |
 | M2 Force Balance & Rotor Abstraction | done | — |
-| M3 Step 1 — test_lua_flight_steady (stack) | **regressed** by aero migration; kinematic_exit clean (MODE_PASSIVE + trim cyclic + IC collective); body rate runs away from ATC PID + saturated cyclic ~250 ms after release | orbit_r < 5 m, no EKF yaw reset, ≥ 60 s stable |
+| M3 Step 1 — test_lua_flight_steady_sitl (stack) | **regressed** by aero migration; kinematic_exit clean (MODE_PASSIVE + trim cyclic + IC collective); body rate runs away from ATC PID + saturated cyclic ~250 ms after release | horizontal deviation < 5 m, no EKF yaw reset, ≥ 60 s stable |
 | M3 Step 1b — test_landing.py + test_landing_lua (simtest) | failing: winch control during descent | descent slack=0, floor hit, anchor_dist < 20 m |
-| M3 Step 2 — test_pumping_cycle_lua (stack, SCR_USER6=1 steady) | in dev | "RAWES steady: captured" + net_energy > 0 + peak_tension < 496 N |
-| M3 Step 3 — test_landing_lua (stack, SCR_USER6=4) | in dev | "RAWES land: captured" + "final_drop" + hub alt ≤ 2.5 m |
+| M3 Step 2 — test_pumping_cycle_lua_sitl (stack, SCR_USER6=1 steady) | in dev | "RAWES steady: captured" + net_energy > 0 + peak_tension < 496 N |
+| M3 Step 3 — test_landing_lua_sitl (stack, SCR_USER6=4) | in dev | "RAWES land: captured" + "final_drop" + hub alt ≤ 2.5 m |
 | M3 Step 4 — rawes_params.parm (Pixhawk 6C) | not started | file exists + H_PHANG determined |
 | M4 — Hardware-in-the-Loop (Pixhawk 6C) | not started | test_hil_interface.py passes + 60 s HIL log |

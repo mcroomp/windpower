@@ -266,6 +266,11 @@ def run_mediator(args, trajectory=None):
     s1 = s2 = s3       = 0.0           # servo values
     _traj_cmd          = {"phase": "", "tension_feedforward_n": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
+    _ff_t0             = None          # sim-time of first free-flight step (for cyclic blend)
+    _blend_logged      = False         # one-shot: report cyclic blend activation
+    _blend_s           = float(cfg["post_release_cyclic_blend_s"])
+    _ic_tilt_lon       = float(cfg["ic_tilt_lon_rad"])
+    _ic_tilt_lat       = float(cfg["ic_tilt_lat_rad"])
     _tel_note          = ""            # single-frame event marker written to telemetry CSV; cleared after write
     _prev_phase        = ""            # detect phase changes for tel note
     ev.write("config", t_sim=0.0,
@@ -347,18 +352,18 @@ def run_mediator(args, trajectory=None):
     def step_fn(servos, t_sim):
         nonlocal step, last_log_time, _t_step0
         nonlocal s1, s2, s3, _traj_cmd, _logged_transition
+        nonlocal _ff_t0, _blend_logged
         nonlocal _tel_note, _prev_phase
         nonlocal _winch_peer, _winch_send_ctr
         if _t_step0 is None:
             _t_step0 = t_sim
         _dt = sitl.dt()
 
-        # Pre-compute kinematic phase from core.t_sim so it matches what
-        # PhysicsCore uses internally — gates planner + tether sensor update.
-        _damp_alpha = _startup.damp_alpha(core.t_sim)
+        # Single source of truth for kinematic/free-flight gating.
+        _is_kinematic = core.is_kinematic
 
         # ── Ground-station planner + WinchNode (free flight only) ────────
-        if _damp_alpha == 0.0:
+        if not _is_kinematic:
             _ti_prev = core.tether._last_info
             if _ti_prev.get("tension", 0) > 0.8 * core.tether.BREAK_LOAD_N:
                 log.warning(
@@ -422,13 +427,36 @@ def run_mediator(args, trajectory=None):
         collective_out, roll_norm, pitch_norm = ardupilot_h3_120_inverse(s1, s2, s3)
         _tilt_lat = roll_norm
         _tilt_lon = pitch_norm
+
+        # Optional mediator-side handoff smoothing after kinematic release:
+        # blend from IC cyclic trim to AP cyclic command over _blend_s seconds.
+        if _blend_s > 0.0 and not _is_kinematic:
+            if _ff_t0 is None:
+                _ff_t0 = t_sim
+            _alpha = float(np.clip((t_sim - _ff_t0) / _blend_s, 0.0, 1.0))
+            _tilt_lat = (1.0 - _alpha) * _ic_tilt_lat + _alpha * _tilt_lat
+            _tilt_lon = (1.0 - _alpha) * _ic_tilt_lon + _alpha * _tilt_lon
+            if not _blend_logged:
+                _blend_logged = True
+                _tel_note = "cyclic_blend_start"
+                ev.write(
+                    "cyclic_blend_start",
+                    t_sim=t_sim,
+                    blend_s=round(_blend_s, 3),
+                    ic_tilt_lon_rad=round(_ic_tilt_lon, 6),
+                    ic_tilt_lat_rad=round(_ic_tilt_lat, 6),
+                )
         collective_rad = float(np.clip(
             collective_out_to_rad(collective_out, _col_min_rad, _col_max_rad),
             _col_min_rad, _col_max_rad,
         ))
-        if _damp_alpha == 0.0:
-            core.tether.rest_length = _winch_node.rest_length
+        # Update rest_length every step (kinematic or free-flight) to prevent
+        # tether strain mismatch at kinematic exit.  During kinematic, the position
+        # is prescribed externally; rest_length must be kept in sync so that when
+        # kinematic ends, the tether is pre-tensioned correctly without huge spike.
+        core.tether.rest_length = _winch_node.rest_length
         result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat)
+        _damp_alpha = float(result.get("damp_alpha", 0.0))
 
         # ── Unpack physics results ────────────────────────────────────────
         hub_state     = result["hub_state"]
@@ -446,7 +474,7 @@ def run_mediator(args, trajectory=None):
         T_est = max(0.0, float(np.dot(F_net, disk_normal)))
 
         # ── Kinematic → free-flight transition (one-shot log) ────────────
-        if _damp_alpha == 0.0 and not _logged_transition:
+        if (not bool(result.get("is_kinematic", False))) and not _logged_transition:
             _logged_transition = True
             _tel_note = "kinematic_exit"
             _ti = core.tether._last_info
@@ -485,6 +513,7 @@ def run_mediator(args, trajectory=None):
             _prev_phase = _cur_phase
             _telemetry_writer.writerow({
                 "t_sim":           core.t_sim,
+                "sitl_time":       t_sim,
                 "phase":           _cur_phase,
                 "note":            _tel_note,
                 "damp_alpha":      _damp_alpha,
@@ -512,6 +541,7 @@ def run_mediator(args, trajectory=None):
                 "aero_fx":         aero_result.F_world[0],
                 "aero_fy":         aero_result.F_world[1],
                 "aero_fz":         aero_result.F_world[2],
+                "aero_T":          float(np.linalg.norm(aero_result.F_world)),
                 "aero_mx":         aero_result.M_orbital[0],
                 "aero_my":         aero_result.M_orbital[1],
                 "aero_mz":         aero_result.M_orbital[2],
@@ -525,8 +555,7 @@ def run_mediator(args, trajectory=None):
                 "tension_feedforward_n":        _traj_cmd.get("tension_feedforward_n", 0.0),
                 "collective_from_alt_ctrl":     collective_rad,
                 # Note: new aero (Pitt-Peters Level 2) does not expose internal
-                # axial/inplane/induced velocity diagnostics. Drop them from
-                # telemetry rather than fake values.
+                # axial/inplane/induced velocity diagnostics. Keep them unset.
                 "aero_Q_spin":     float(aero_result.Q_spin),
                 "F_x":             forces[0],
                 "F_y":             forces[1],

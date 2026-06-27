@@ -48,6 +48,7 @@ import numpy as np
 
 COLUMNS: list[str] = [
     "t_sim",
+    "sitl_time",          # lockstep SITL clock [s] from servo frame_count/frame_rate
     "phase",               # "reel-out" | "reel-in" | "descent" | "final_drop" | ""
     "note",                # free-text event annotation (e.g. "kinematic_exit", "reel_out_start")
     "damp_alpha",          # startup damping blend factor [0..1]; 0.0 when not damping
@@ -127,6 +128,7 @@ COLUMNS: list[str] = [
 @dataclass
 class TelRow:
     t_sim: float = 0.0
+    sitl_time: float = 0.0
     phase: str   = ""
     note:  str   = ""          # free-text event marker stamped once per event frame
     damp_alpha: float = 0.0   # startup damping blend [0..1]; 0.0 when free-flying
@@ -371,6 +373,7 @@ class TelRow:
 
         return cls(
             t_sim               = float(d.get("t_sim", 0.0)),
+            sitl_time           = float(d.get("sitl_time", d.get("t_sim", 0.0))),
             phase               = str(d.get("phase", "")),
             pos_x               = float(pos[0]),
             pos_y               = float(pos[1]),
@@ -619,6 +622,7 @@ class TelRow:
 
         return cls(
             t_sim               = float(t_sim),
+            sitl_time           = float(t_sim),
             phase               = str(phase),
             pos_x               = float(pos[0]),
             pos_y               = float(pos[1]),

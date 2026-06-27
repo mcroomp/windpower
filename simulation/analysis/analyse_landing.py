@@ -18,7 +18,7 @@ Per-bucket table columns:
 Usage
 -----
     .venv/Scripts/python.exe simulation/analysis/analyse_landing.py
-    .venv/Scripts/python.exe simulation/analysis/analyse_landing.py --test test_landing_lua --bucket 2
+    .venv/Scripts/python.exe simulation/analysis/analyse_landing.py --test test_landing_lua_sitl --bucket 2
 """
 
 import sys, math, csv, argparse

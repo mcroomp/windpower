@@ -1,5 +1,5 @@
 """
-test_gps_fusion_layers.py -- GPS fusion diagnostic with dual-GPS moving-baseline.
+test_gps_fusion_layers_sitl.py -- GPS fusion diagnostic with dual-GPS moving-baseline.
 
 Two GPS antennas 50 cm apart (+-25 cm along body X) give heading from RELPOSNED.
 Yaw is known from first GPS fix -- no motion needed.
@@ -12,7 +12,7 @@ static sensor values. The test drives GCS in the foreground with blocking calls
 (sim_sleep, arm, wait for STATUSTEXT). Same pattern as all other stack tests.
 
 Run:
-  bash test.sh stack -n 1 -k test_gps_fusion_dual_gps
+  bash test.sh stack -n 1 -k test_gps_fusion_dual_gps_sitl
 """
 from __future__ import annotations
 
@@ -42,10 +42,10 @@ _FUSION_TIMEOUT = 40.0   # sim-seconds to wait for "is using gps" after arm
 
 
 # ---------------------------------------------------------------------------
-# test_gps_fusion_dual_gps
+# test_gps_fusion_dual_gps_sitl
 # ---------------------------------------------------------------------------
 
-def test_gps_fusion_dual_gps(tmp_path, request):
+def test_gps_fusion_dual_gps_sitl(tmp_path, request):
     """
     GPS fusion using dual-GPS moving-baseline heading (EK3_SRC1_YAW=2).
 
@@ -142,11 +142,11 @@ def test_gps_fusion_dual_gps(tmp_path, request):
             )
             gcs.sim_sleep(_T_WARMUP, check=_assert_alive)
 
-            # Switch to ACRO (mode 1) before arming.
+            # Switch to GUIDED_NOGPS (mode 20) before arming.
             gcs._mav.mav.command_long_send(
                 gcs._target_system, gcs._target_component,
                 mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 1.0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 20.0,
                 0, 0, 0, 0, 0,
             )
 

@@ -1,5 +1,5 @@
 """
-torque/test_startup.py — Rotor spin-up from rest test.
+torque/test_startup_sitl.py — Rotor spin-up from rest test.
 
 Simulates the RAWES rotor accelerating from zero to nominal autorotation
 speed (0 -> 28 rad/s over 30 s) and verifies the yaw regulation holds
@@ -38,7 +38,7 @@ _THRESHOLD  = math.radians(10.0)  # [rad/s] -- allows transients during spin-up
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["startup"], indirect=True)
-def test_startup(torque_armed_profile):
+def test_startup_sitl(torque_armed_profile):
     """
     Rotor spins up from rest (omega=0) to nominal autorotation (omega=28 rad/s)
     over 30 s, then holds for 40 s while the PID integrator winds up.

@@ -48,7 +48,7 @@ def _make_sim(*, yaw_rate_rads: float = 0.0) -> RawesLua:
     sim = RawesLua(mode=MODE_MANUAL)
     sim.armed        = True
     sim.healthy      = True
-    sim.vehicle_mode = 1   # ACRO (manual mode does not require GUIDED)
+    sim.vehicle_mode = 20  # GUIDED_NOGPS (project-default SITL mode)
     # Set identity rotation (level hover) so rpy=(0,0,0)
     import numpy as np
     sim.R            = np.eye(3)

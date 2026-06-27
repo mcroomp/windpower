@@ -1,5 +1,5 @@
 """
-diag_lua_steady.py -- Post-mortem analysis of test_lua_flight_steady.
+diag_lua_steady.py -- Post-mortem analysis of test_lua_flight_steady_sitl.
 
 Reads telemetry.csv + ekf_telemetry.csv from the lua_full_test_lua_flight_steady
 log directory and prints a second-by-second table showing what happens around
@@ -37,7 +37,7 @@ MED_LOG = LOG_DIR / "mediator.log"
 
 for f in [TEL_CSV]:
     if not f.exists():
-        print(f"ERROR: {f} not found. Run test_lua_flight_steady first.")
+        print(f"ERROR: {f} not found. Run test_lua_flight_steady_sitl first.")
         sys.exit(1)
 
 # ── Load telemetry.csv ───────────────────────────────────────────────────────

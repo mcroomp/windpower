@@ -1,5 +1,5 @@
 """
-test_pumping_cycle.py — Pumping cycle stack test with rawes.lua (SCR_USER6=1, steady mode).
+test_pumping_cycle_sitl.py — Pumping cycle stack test with rawes.lua (SCR_USER6=1, steady mode).
 
 Architecture (mirrors test_pump_cycle_lua.py unit test):
   Test process (10 Hz):
@@ -45,9 +45,9 @@ from stack_infra import (
 from telemetry_csv import read_csv
 from pumping_planner import PumpingGroundController
 from unified_ground import _cmd_to_nv
+from tests.simtests._rotor_helpers import BODY_Z_SLEW_RATE_RAD_S, load_default_rotor
 
-from dynbem import rotor_definition as rd
-_ROTOR = rd.default()
+_ROTOR = load_default_rotor()
 
 # ---------------------------------------------------------------------------
 # Pumping parameters — match test_pump_cycle_lua.py exactly
@@ -55,7 +55,7 @@ _ROTOR = rd.default()
 _XI_START_DEG   = 30.0
 _XI_REEL_IN_DEG = 50.0
 _T_TRANSITION = (
-    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / _ROTOR.body_z_slew_rate_rad_s + 3.0
+    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / BODY_Z_SLEW_RATE_RAD_S + 3.0
 )
 
 N_CYCLES         = 3
@@ -81,14 +81,14 @@ _TENSION_LIMIT_N = 0.8 * _BREAK_LOAD_N   # 496 N
 _SOCK_TIMEOUT = 0.5
 
 
-def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
+def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     """
     Pumping cycle stack test: PumpingGroundController in test process,
     WinchController in mediator, altitude PID + rate-only hold in rawes.lua.
     """
-    ctx = acro_armed_pumping_lua
+    ctx = guided_nogps_armed_pumping_lua
     gcs = ctx.gcs
-    log = logging.getLogger("test_pumping_cycle_lua")
+    log = logging.getLogger("test_pumping_cycle_lua_sitl")
 
     if not ctx.winch_cmd_port:
         pytest.skip("winch_cmd_port not set — fixture did not configure socket")
@@ -137,7 +137,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
     hub_alt_m    = target_alt_m
 
     deadline = gcs.sim_now() + _OBS_SECONDS
-    log.info("--- test_pumping_cycle_lua: observing %.0f s ---", _OBS_SECONDS)
+    log.info("--- test_pumping_cycle_lua_sitl: observing %.0f s ---", _OBS_SECONDS)
 
     try:
         while gcs.sim_now() < deadline:
@@ -263,7 +263,7 @@ def test_pumping_cycle_lua(acro_armed_pumping_lua: StackContext):
         assert_no_mediator_criticals(ctx.mediator_log)
 
         log.info(
-            "--- test_pumping_cycle_lua PASSED  (net=%.1f J  peak=%.1f N) ---",
+            "--- test_pumping_cycle_lua_sitl PASSED  (net=%.1f J  peak=%.1f N) ---",
             net_energy, peak_tension,
         )
 

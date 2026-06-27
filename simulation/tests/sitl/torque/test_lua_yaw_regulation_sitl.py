@@ -1,9 +1,9 @@
 """
-torque/test_lua_yaw_regulation.py — Lua MODE_YAW counter-torque stack test.
+torque/test_lua_yaw_regulation_sitl.py — Lua MODE_YAW counter-torque stack test.
 
 Verifies that rawes.lua's manual yaw PID (MODE_YAW, SCR_USER6=2) can hold
 hub yaw steady while the GB4008 anti-rotation motor counter-rotates against
-the spinning rotor hub.  Companion to test_yaw_regulation.py, which exercises
+the spinning rotor hub.  Companion to test_yaw_regulation_sitl.py, which exercises
 ArduPilot's built-in DDFP PID; this test exercises the Lua-managed path that
 will run on the bench rig and on hardware.
 
@@ -44,7 +44,7 @@ Pass criterion
 Tuning state in MODE_YAW
 ------------------------
   The same ATC_RAT_YAW_P/I/D/IMAX and H_YAW_TRIM params used by
-  test_yaw_regulation.py drive the Lua PID directly (read each tick via
+  test_yaw_regulation_sitl.py drive the Lua PID directly (read each tick via
   ``param:get``).  ``_LUA_TORQUE_EXTRA_PARAMS`` sets:
     P=0.015, I=0.01, IMAX=0.7, H_YAW_TRIM=0.02, D=0.
 
@@ -55,7 +55,7 @@ Telemetry
 
 Run with (inside Docker)
 ------------------------
-  bash test.sh stack -n 1 -k test_lua_yaw_regulation
+  bash test.sh stack -n 1 -k test_lua_yaw_regulation_sitl
 """
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ _SETTLE_S          = 45.0   # startup_hold(15) + spinup(10) + 20 s for I-term to
 _OBSERVE_S         = 10.0   # tail end of the 30 s constant-RPM hold
 _MAX_PSI_DOT_RAD_S = math.radians(5.0)
 
-def test_lua_yaw_regulation(torque_armed_lua_yaw):
+def test_lua_yaw_regulation_sitl(torque_armed_lua_yaw):
     """
     rawes.lua MODE_YAW (SCR_USER6=2) regulates hub yaw via SERVO4 direct write.
 

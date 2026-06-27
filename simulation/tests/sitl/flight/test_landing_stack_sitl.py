@@ -1,7 +1,7 @@
 """
-test_landing_stack.py -- Lua landing mode full-stack test (SITL + ArduPilot).
+test_landing_stack_sitl.py -- Lua landing mode full-stack test (SITL + ArduPilot).
 
-rawes.lua SCR_USER6=4 landing mode: Lua controls cyclic (orbit tracking) and
+rawes.lua SCR_USER6=4 landing mode: Lua controls cyclic (steady guidance) and
 collective (VZ descent-rate controller) entirely via ArduPilot RC overrides.
 The mediator runs the winch only (LandingGroundController + WinchController).
 
@@ -66,11 +66,11 @@ _TENSION_LIMIT_N  = 496.0
 # Lua landing test
 # ---------------------------------------------------------------------------
 
-def test_landing_lua(acro_armed_landing_lua: StackContext):
+def test_landing_lua_sitl(guided_nogps_armed_landing_lua: StackContext):
     """
     Lua landing mode (SCR_USER6=4) stack test.
 
-    rawes.lua controls cyclic (orbit tracking) and collective (VZ descent-rate
+    rawes.lua controls cyclic (steady guidance) and collective (VZ descent-rate
     controller) entirely via ArduPilot RC overrides.  The mediator only runs
     the winch (LandingGroundController + WinchController); collective+attitude
     come from Lua.
@@ -83,9 +83,9 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
       5. Hub does not rise above _MAX_ALT_M.
       6. No CRITICAL errors in mediator log.
     """
-    ctx = acro_armed_landing_lua
+    ctx = guided_nogps_armed_landing_lua
     gcs = ctx.gcs
-    log = logging.getLogger("test_landing_lua")
+    log = logging.getLogger("test_landing_lua_sitl")
 
     # Pre-populate from STATUSTEXT captured during fixture setup (e.g. drain loop)
     captured_seen   = any("RAWES land: captured"    in t for t in ctx.all_statustext)
@@ -94,7 +94,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
     t_obs_start = gcs.sim_now()
     deadline    = t_obs_start + _OBS_SECONDS
 
-    log.info("--- test_landing_lua: observing %.0f s ---", _OBS_SECONDS)
+    log.info("--- test_landing_lua_sitl: observing %.0f s ---", _OBS_SECONDS)
 
     try:
         while gcs.sim_now() < deadline:
@@ -154,7 +154,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
 
         assert max_alt <= _MAX_ALT_M, (
             f"Hub rose to {max_alt:.1f} m (limit {_MAX_ALT_M:.1f} m) during Lua landing. "
-            "Lua landing mode may be orbiting instead of descending."
+            "Lua landing mode may be circling instead of descending."
         )
 
         assert min_alt <= _FLOOR_ALT_M, (
@@ -179,7 +179,7 @@ def test_landing_lua(acro_armed_landing_lua: StackContext):
         assert_no_mediator_criticals(ctx.mediator_log)
 
         log.info(
-            "--- test_landing_lua PASSED  (min_alt=%.1f m  peak_descent_tension=%.0f N) ---",
+            "--- test_landing_lua_sitl PASSED  (min_alt=%.1f m  peak_descent_tension=%.0f N) ---",
             min_alt,
             max(r.tether_tension for r in descent_rows) if descent_rows else 0.0,
         )

@@ -151,7 +151,9 @@ def print_flight_report(log_dir: Path, bucket_s: float = 5.0) -> None:
     _print_mediator(report, fl)
     _print_sitl_crash(report)
     _print_tel_events(report)
+    _print_release_window(report, fl)
     _print_bucketed_report(fl, bucket_s)
+    _print_dataflash_target_attitude(fl)
     _print_sensor_consistency(report)
     _print_yaw_divergence(report)
     _print_ekf_state(ekf_path)
@@ -1295,7 +1297,7 @@ def _print_sensor_consistency(r: RunReport) -> None:
 
 # ---------------------------------------------------------------------------
 # validate_ekf_window (migrated from analyse_mavlink.py)
-# Public API: imported by test_kinematic_gps.py
+# Public API: imported by test_kinematic_gps_sitl.py
 # ---------------------------------------------------------------------------
 
 _POST_FUSION_SETTLE_S = 5.0
@@ -1488,6 +1490,215 @@ def _print_bucketed_report(fl: FlightLog, bucket_s: float = 5.0) -> None:
             cat = f"[{ev.category}]"
             txt = ev.text[:64]
             print(f"    {cat:<8} t={ev.t_sim:7.1f}s  [{sc}] {txt}")
+
+
+def _print_dataflash_target_attitude(fl: FlightLog, window_s: float = 12.0) -> None:
+    """Print DataFlash ATT desired-vs-actual attitude around disarm/crash.
+
+    Uses ATT message fields from dataflash.BIN:
+      Roll, Pitch, Yaw, DesRoll, DesPitch, DesYaw
+    This is the ArduPilot-internal attitude target path and is useful when
+    MAVLink ATTITUDE_TARGET is absent or sparse.
+    """
+    buckets = fl.buckets(1.0)
+    has_df = any(b.df_des_roll_deg is not None for b in buckets)
+    if not has_df:
+        _header("DATAFLASH TARGET ATTITUDE")
+        print("  (no dataflash ATT rows -- dataflash.BIN absent or no ATT messages)")
+        return
+
+    disarm_t = None
+    disarm_candidates = [
+        ev.t_sim for ev in fl.events
+        if ev.category == "ARM" and "DISARMED" in ev.text.upper() and ev.t_sim > 1.0
+    ]
+    if disarm_candidates:
+        disarm_t = max(disarm_candidates)
+    else:
+        crash_candidates = [
+            ev.t_sim for ev in fl.events
+            if ev.category == "CRASH" and ev.t_sim > 1.0
+        ]
+        if crash_candidates:
+            disarm_t = max(crash_candidates)
+
+    if disarm_t is not None:
+        lo = disarm_t - window_s
+        hi = disarm_t + 2.0
+        title = (
+            f"DATAFLASH TARGET ATTITUDE  (ATT, 1.0s buckets, "
+            f"t in [{lo:.1f}, {hi:.1f}] around disarm {disarm_t:.1f}s)"
+        )
+        focus = [b for b in buckets if lo <= b.t_start <= hi and b.df_des_roll_deg is not None]
+    else:
+        title = "DATAFLASH TARGET ATTITUDE  (ATT, 1.0s buckets, first 20s with ATT data)"
+        focus = [b for b in buckets if b.df_des_roll_deg is not None][:20]
+
+    _header(title)
+    if not focus:
+        print("  (no ATT rows in selected window)")
+        return
+
+    print("  Fields from dataflash ATT: DesRoll/DesPitch/DesYaw vs Roll/Pitch/Yaw")
+    hdr = (
+        f"  {'t_s':>7}  "
+        f"{'DesRoll':>8}  {'Roll':>8}  {'dR':>7}  "
+        f"{'DesPitch':>9}  {'Pitch':>8}  {'dP':>7}  "
+        f"{'DesYaw':>8}  {'Yaw':>8}"
+    )
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    for b in focus:
+        dr = (b.df_roll_err_deg if b.df_roll_err_deg is not None else 0.0)
+        dp = (b.df_pitch_err_deg if b.df_pitch_err_deg is not None else 0.0)
+        warn = "  [!!]" if abs(dr) > 30.0 or abs(dp) > 30.0 else ""
+        print(
+            f"  {b.t_start:7.1f}  "
+            f"{b.df_des_roll_deg:8.2f}  {b.df_roll_deg:8.2f}  {dr:+7.2f}  "
+            f"{b.df_des_pitch_deg:9.2f}  {b.df_pitch_deg:8.2f}  {dp:+7.2f}  "
+            f"{b.df_des_yaw_deg:8.2f}  {b.df_yaw_deg:8.2f}{warn}"
+        )
+        for ev in b.events:
+            if ev.category in ("ARM", "CRASH", "MODE", "RAWES"):
+                print(f"    [{ev.category}] t={ev.t_sim:7.1f}s  {ev.text[:72]}")
+
+
+def _print_release_window(
+    r: RunReport,
+    fl: FlightLog,
+    window_s: float = 1.0,
+    pre_s: float = 0.2,
+    sample_s: float = 0.05,
+) -> None:
+    """Print focused diagnostics around kinematic_exit to debug post-release instability."""
+    rows = r.tel_rows
+    if not rows:
+        return
+
+    tr_rows = [row for row in rows if row.note == "kinematic_exit"]
+    if tr_rows:
+        t_exit = tr_rows[0].t_sim
+    else:
+        free_rows = [row for row in rows if row.damp_alpha == 0.0]
+        if not free_rows:
+            return
+        t_exit = free_rows[0].t_sim
+
+    lo = max(rows[0].t_sim, t_exit - max(0.0, pre_s))
+    hi = t_exit + max(0.2, window_s)
+    win = [row for row in rows if lo <= row.t_sim <= hi]
+    if not win:
+        return
+
+    post = [row for row in win if row.t_sim >= t_exit]
+    if not post:
+        return
+
+    _header(
+        f"RELEASE WINDOW  (t_exit={t_exit:.2f}s, pre={pre_s:.2f}s, post={window_s:.2f}s)"
+    )
+
+    alt_post = [-row.pos_z for row in post]
+    max_vz_post = max(row.vel_z for row in post)
+    roll_deg = [math.degrees(row.rpy_roll) for row in post]
+    pitch_deg = [math.degrees(row.rpy_pitch) for row in post]
+    yaw_rate_deg = [math.degrees(row.sens_gyro_z) for row in post]
+    max_bz_err = max(abs(row.body_z_err_deg) for row in post)
+    aero_t_vals = [row.aero_T for row in post]
+
+    sat_rows = [
+        row for row in post
+        if (
+            row.servo_s1_us <= 1000.0 or row.servo_s1_us >= 2000.0
+            or row.servo_s2_us <= 1000.0 or row.servo_s2_us >= 2000.0
+            or row.servo_s3_us <= 1000.0 or row.servo_s3_us >= 2000.0
+        )
+    ]
+
+    print("  Post-exit extremes:")
+    print(f"    altitude range        : {min(alt_post):.2f} .. {max(alt_post):.2f} m")
+    print(
+        f"    max vel_z (down +)    : {max_vz_post:.2f} m/s"
+        + ("  [!!]" if max_vz_post > 3.0 else "  [OK]")
+    )
+    print(
+        f"    max |roll| / |pitch|  : {max(abs(v) for v in roll_deg):.1f} / {max(abs(v) for v in pitch_deg):.1f} deg"
+    )
+    print(f"    max |yaw_rate|        : {max(abs(v) for v in yaw_rate_deg):.1f} deg/s")
+    print(
+        f"    max |body_z_err|      : {max_bz_err:.1f} deg"
+        + ("  [!!]" if max_bz_err > 30.0 else "  [OK]")
+    )
+    print(f"    aero_T range          : {min(aero_t_vals):.1f} .. {max(aero_t_vals):.1f} N")
+    print(
+        f"    swash saturation rows : {len(sat_rows)}/{len(post)}"
+        + ("  [!!]" if sat_rows else "  [OK]")
+    )
+
+    # DataFlash desired/actual jump exactly across t_exit
+    if fl._df_att_rows:
+        pre_df = [d for d in fl._df_att_rows if (t_exit - 0.3) <= d["t_s"] < t_exit]
+        post_df = [d for d in fl._df_att_rows if t_exit <= d["t_s"] <= (t_exit + 0.3)]
+        if pre_df and post_df:
+            a = pre_df[-1]
+            b = post_df[0]
+
+            def _wrap_deg_diff(d_new: float, d_old: float) -> float:
+                d = d_new - d_old
+                while d > 180.0:
+                    d -= 360.0
+                while d <= -180.0:
+                    d += 360.0
+                return d
+
+            d_des_roll = _wrap_deg_diff(b["des_roll"], a["des_roll"])
+            d_des_pitch = _wrap_deg_diff(b["des_pitch"], a["des_pitch"])
+            d_des_yaw = _wrap_deg_diff(b["des_yaw"], a["des_yaw"])
+            d_roll = _wrap_deg_diff(b["roll"], a["roll"])
+            d_pitch = _wrap_deg_diff(b["pitch"], a["pitch"])
+
+            print()
+            print("  DataFlash ATT jump at release (first sample before/after t_exit):")
+            print(
+                f"    desired jump (deg)    : dRoll={d_des_roll:+.1f}  dPitch={d_des_pitch:+.1f}  dYaw={d_des_yaw:+.1f}"
+                + ("  [!!]" if abs(d_des_roll) > 20.0 or abs(d_des_pitch) > 20.0 else "  [OK]")
+            )
+            print(f"    actual jump  (deg)    : dRoll={d_roll:+.1f}  dPitch={d_pitch:+.1f}")
+
+    # Compact sampled timeline around release
+    print()
+    print("  Sampled timeline (relative to t_exit):")
+    print("      dt   phase      roll    pitch  yaw_rt  bz_err    s1    s2    s3   aeroT")
+    last_print_t = -1e9
+    printed = 0
+    max_rows = 28
+    for row in win:
+        must_print = (row.t_sim - last_print_t) >= max(0.01, sample_s)
+        is_edge = (row is win[0]) or (row is win[-1])
+        if (must_print or is_edge) and printed < max_rows:
+            dt_rel = row.t_sim - t_exit
+            print(
+                f"    {dt_rel:+6.3f}  {row.phase[:8]:<8}"
+                f"  {math.degrees(row.rpy_roll):7.1f}  {math.degrees(row.rpy_pitch):7.1f}"
+                f"  {math.degrees(row.sens_gyro_z):6.1f}  {row.body_z_err_deg:6.1f}"
+                f"  {row.servo_s1_us:4.0f}  {row.servo_s2_us:4.0f}  {row.servo_s3_us:4.0f}"
+                f"  {row.aero_T:6.1f}"
+            )
+            last_print_t = row.t_sim
+            printed += 1
+    if len(win) > printed:
+        print(f"    ... ({len(win) - printed} additional high-rate rows omitted)")
+
+    rel_events = [
+        ev for ev in fl.events
+        if lo <= ev.t_sim <= hi and ev.category in ("RAWES", "MODE", "CRASH", "ARM", "PHASE", "INFO")
+    ]
+    if rel_events:
+        print()
+        print("  Events in release window:")
+        for ev in rel_events[:12]:
+            print(f"    [{ev.category:<5}] dt={ev.t_sim - t_exit:+6.3f}s  {ev.text[:80]}")
 
 
 # ---------------------------------------------------------------------------
@@ -1865,6 +2076,12 @@ def main() -> None:
                         help="Bucket size in seconds for the per-window analysis "
                              "table (default: 5.0). Use a larger value for a "
                              "high-level overview, smaller for detailed debugging.")
+    parser.add_argument("--release-window", type=float, default=1.0, metavar="S",
+                        help="Seconds after kinematic_exit to include in the release diagnostics section (default: 1.0).")
+    parser.add_argument("--release-pre", type=float, default=0.2, metavar="S",
+                        help="Seconds before kinematic_exit to include in the release diagnostics section (default: 0.2).")
+    parser.add_argument("--release-sample", type=float, default=0.05, metavar="S",
+                        help="Sample stride in seconds for the printed release-window timeline (default: 0.05).")
     parser.add_argument("--focus", default=None, metavar="MODE",
                         help="Focus mode: 'attitude' shows per-bucket "
                              "DesRoll/Roll/dR, DesPitch/Pitch/dP, and "
@@ -1941,7 +2158,15 @@ def main() -> None:
         _print_mediator(report, fl)
         _print_sitl_crash(report)
         _print_tel_events(report)
+        _print_release_window(
+            report,
+            fl,
+            window_s=float(args.release_window),
+            pre_s=float(args.release_pre),
+            sample_s=float(args.release_sample),
+        )
         _print_bucketed_report(fl, args.bucket)
+        _print_dataflash_target_attitude(fl)
         _print_ekf(report)
         _mode_map = {
             "guided_nogps": (20, "GUIDED_NOGPS"),

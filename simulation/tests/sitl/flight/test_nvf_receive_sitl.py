@@ -1,5 +1,5 @@
 """
-test_nvf_receive.py -- Validate NAMED_VALUE_FLOAT receive in rawes.lua (SITL).
+test_nvf_receive_sitl.py -- Validate NAMED_VALUE_FLOAT receive in rawes.lua (SITL).
 
 Sends a NAMED_VALUE_FLOAT("RAWES_SUB", 99) from the Python GCS after the Lua
 script is active and asserts rawes.lua echoes it back as a STATUSTEXT within
@@ -13,7 +13,7 @@ This is the gate test for the named-float substate migration:
        RAWES: rcvd RAWES_SUB=99
   4. This test asserts that STATUSTEXT appears within _ACK_TIMEOUT_S.
 
-Uses the acro_armed_lua_full fixture (SCR_USER6=1, steady orbit, GPS fused)
+Uses the guided_nogps_armed_lua_full fixture (SCR_USER6=1, steady flight, GPS fused)
 because it is the simplest reliable Lua stack fixture and mode is irrelevant
 to the receive path.
 """
@@ -41,16 +41,16 @@ _ACK_TIMEOUT_S  = 20.0   # wall-clock seconds; ack should arrive within one Lua 
 # Test
 # ---------------------------------------------------------------------------
 
-def test_nvf_receive(acro_armed_lua_full: StackContext):
+def test_nvf_receive_sitl(guided_nogps_armed_lua_full: StackContext):
     """
     rawes.lua receives NAMED_VALUE_FLOAT and echoes it as STATUSTEXT.
 
     Validates the full GCS -> ArduPilot -> Lua mavlink.receive_chan() path
     before migrating SCR_USER6 substate to use named-float messages.
     """
-    ctx = acro_armed_lua_full
+    ctx = guided_nogps_armed_lua_full
     gcs = ctx.gcs
-    log = logging.getLogger("test_nvf_receive")
+    log = logging.getLogger("test_nvf_receive_sitl")
 
     log.info("Sending NAMED_VALUE_FLOAT %s=%.0f ...", _TEST_NAME, _TEST_VALUE)
     gcs.send_named_float(_TEST_NAME, _TEST_VALUE)
@@ -83,7 +83,7 @@ def test_nvf_receive(acro_armed_lua_full: StackContext):
             f"All STATUSTEXT seen: {ctx.all_statustext}"
         )
 
-        log.info("=== test_nvf_receive PASSED ===")
+        log.info("=== test_nvf_receive_sitl PASSED ===")
 
     except Exception:
         dump_startup_diagnostics(ctx)

@@ -1,5 +1,5 @@
 """
-torque/test_lua_manual_mode.py  --  rawes.lua MODE_MANUAL (SCR_USER6=2) stack test.
+torque/test_lua_manual_mode_sitl.py  --  rawes.lua MODE_MANUAL (SCR_USER6=2) stack test.
 
 Verifies that rawes.lua's MODE_MANUAL correctly:
   1. Drives SERVO4 via the yaw PID to counter rotor reaction torque.
@@ -10,7 +10,7 @@ Verifies that rawes.lua's MODE_MANUAL correctly:
 
 Physical scenario
 -----------------
-  Same torque-rig setup as test_lua_yaw_regulation.py:
+  Same torque-rig setup as test_lua_yaw_regulation_sitl.py:
     STARTUP (t=0..15 s)   : rotor stationary, arming.
     SPINUP  (t=15..25 s)  : 10 s ramp to 120 RPM.
     HOLD    (t=25..55 s)  : 30 s at 120 RPM; all assertions are made here.
@@ -58,7 +58,7 @@ Arming
 
 Run with (inside Docker)
 ------------------------
-  bash simulation/dev.sh test-stack -n 1 -k test_lua_manual_mode
+  bash simulation/dev.sh test-stack -n 1 -k test_lua_manual_mode_sitl
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ from stack_infra import observe
 from torque_test_utils import save_telemetry
 
 
-# Timing (SITL seconds) — mirrors test_lua_yaw_regulation.py timing.
+# Timing (SITL seconds) — mirrors test_lua_yaw_regulation_sitl.py timing.
 _SETTLE_S    = 45.0   # startup_hold(15) + spinup(10) + 20 s settle
 _PHASE_A_S   = 10.0   # observe neutral cyclic
 _PHASE_B_S   = 10.0   # observe after +tlon/+tlat NVF
@@ -105,7 +105,7 @@ _SERVO_S2_TOL_US     = 50   # S2 must stay within this of baseline in Phase B
 _SERVO_RESTORE_TOL   = 50   # each servo must return within this of Phase A baseline
 
 
-def test_lua_manual_mode(torque_armed_lua_manual):
+def test_lua_manual_mode_sitl(torque_armed_lua_manual):
     """
     rawes.lua MODE_MANUAL (SCR_USER6=2): yaw PID + NVF-commanded swash.
 

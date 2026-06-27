@@ -338,6 +338,40 @@ class RawesLua:
         return int(v) if v is not None else None
 
     @property
+    def guided_target(self) -> dict | None:
+        """Latest GUIDED absolute attitude target, or None if not set.
+
+        Populated by vehicle:set_target_angle_and_rate_and_throttle in the mock.
+        """
+        t = self._mock.guided_target
+        if t is None:
+            return None
+        return {
+            "roll_deg": float(t.roll_deg),
+            "pitch_deg": float(t.pitch_deg),
+            "yaw_deg": float(t.yaw_deg),
+            "climbrate": float(t.climbrate) if t.climbrate is not None else None,
+        }
+
+    @property
+    def guided_rate_target(self) -> dict | None:
+        """Latest GUIDED body-rate target, or None if not set."""
+        t = self._mock.guided_rate_target
+        if t is None:
+            return None
+        return {
+            "roll_rate": float(t.roll_rate),
+            "pitch_rate": float(t.pitch_rate),
+            "yaw_rate": float(t.yaw_rate),
+        }
+
+    @property
+    def guided_throttle(self) -> float | None:
+        """Latest GUIDED throttle command [0,1], or None if not set."""
+        t = self._mock.guided_throttle
+        return float(t) if t is not None else None
+
+    @property
     def messages(self) -> list[tuple[int, str]]:
         """All gcs:send_text calls as [(level, text), ...] since last clear."""
         n = len(self._mock.gcs_msgs)

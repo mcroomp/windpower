@@ -138,9 +138,9 @@ No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt chec
 
 | File | Fixture | What it tests |
 |------|---------|--------------|
-| `test_yaw_regulation.py` | `torque_armed` | ArduPilot ATC_RAT_YAW DDFP PI holds yaw < 5 deg/s at 120 RPM |
-| `test_lua_yaw_regulation.py` | `torque_armed_lua_yaw` | rawes.lua MODE_MANUAL SERVO4 direct write holds yaw < 5 deg/s |
-| `test_lua_manual_mode.py` | `torque_armed_lua_manual` | MODE_MANUAL NVF→RC1/RC2 cyclic shifts + SERVO4 active + neutral restore |
+| `test_yaw_regulation_sitl.py` | `torque_armed` | ArduPilot ATC_RAT_YAW DDFP PI holds yaw < 5 deg/s at 120 RPM |
+| `test_lua_yaw_regulation_sitl.py` | `torque_armed_lua_yaw` | rawes.lua MODE_MANUAL SERVO4 direct write holds yaw < 5 deg/s |
+| `test_lua_manual_mode_sitl.py` | `torque_armed_lua_manual` | MODE_MANUAL NVF→RC1/RC2 cyclic shifts + SERVO4 active + neutral restore |
 
 **`torque_armed_lua_manual` fixture:** `SCR_USER6`, `H_FLYBAR_MODE`, `H_CYC_MAX`, `H_SV_MAN` are
 sourced directly from `calibrate._RUN_MODES["manual"]["force_params"]` — single source of truth
@@ -155,9 +155,9 @@ both pass.
 
 | File | Fixture | What it tests |
 |------|---------|--------------|
-| `test_lua_flight_steady.py` | `acro_armed_lua_full` | Orbit r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s |
-| `test_pumping_cycle.py` | `acro_armed_pumping_lua` | Reel-out + reel-in + net energy > 0 |
-| `test_landing_stack.py` | `acro_armed_landing_lua` | Descent + final drop + hub alt ≤ 2.5 m |
+| `test_lua_flight_steady_sitl.py` | `acro_armed_lua_full` | Orbit r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s |
+| `test_pumping_cycle_sitl.py` | `acro_armed_pumping_lua` | Reel-out + reel-in + net energy > 0 |
+| `test_landing_stack_sitl.py` | `acro_armed_landing_lua` | Descent + final drop + hub alt ≤ 2.5 m |
 
 ---
 

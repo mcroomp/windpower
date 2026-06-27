@@ -13,6 +13,7 @@ No SITL, no Docker.  Runs with the existing unit-test venv.
 """
 
 import math
+import json
 import sys
 from pathlib import Path
 
@@ -57,6 +58,25 @@ def _bz_ned_to_roll_pitch(bz_ned, yaw_rad):
     pitch_deg = math.degrees(math.atan2(bz_fwd, bz_down))
     roll_deg  = math.degrees(math.asin(max(-1.0, min(1.0, -bz_right))))
     return roll_deg, pitch_deg
+
+
+def _body_z_from_attitude_target(roll_deg, pitch_deg, yaw_deg):
+    """Reconstruct body_z (NED) from ZYX roll/pitch/yaw attitude target."""
+    r = math.radians(roll_deg)
+    p = math.radians(pitch_deg)
+    y = math.radians(yaw_deg)
+    cy, sy = math.cos(y), math.sin(y)
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+
+    bz_fwd = sp * cr
+    bz_right = -sr
+    bz_down = cp * cr
+
+    bx = cy * bz_fwd - sy * bz_right
+    by = sy * bz_fwd + cy * bz_right
+    bz = bz_down
+    return np.array([bx, by, bz], dtype=float)
 
 
 # ── Constants sanity ─────────────────────────────────────────────────────────
@@ -287,3 +307,56 @@ class TestBzNedToRollPitch:
             f"roll mismatch bz={bz_raw} yaw={math.degrees(yaw):.1f}"
         assert lua_p == pytest.approx(py_p, abs=1e-10), \
             f"pitch mismatch bz={bz_raw} yaw={math.degrees(yaw):.1f}"
+
+
+class TestLuaCaptureAgainstStartingIc:
+    def test_first_angle_command_is_close_to_ic_body_z(self, sim):
+        """
+        Using steady_state_starting.json, once GPS capture occurs in Lua steady
+        mode, the first angle target should be close to the IC body_z.
+        """
+        ic_path = Path(__file__).resolve().parents[2] / "steady_state_starting.json"
+        ic = json.loads(ic_path.read_text(encoding="utf-8"))
+
+        pos0 = np.array(ic["pos"], dtype=float)
+        R0 = np.array(ic["R0"], dtype=float)
+        ic_bz = R0[:, 2]
+
+        sim.armed = True
+        sim.healthy = True
+        sim.vehicle_mode = 20
+        sim.R = R0
+        sim.gyro = [0.0, 0.0, 0.0]
+        sim.vel_ned = [0.0, 0.0, 0.0]
+        sim.clear_messages()
+
+        # Match the stack path: anchor encoded in EKF frame, GPS position at home.
+        sim.set_param("mode", 1)
+        sim.set_param("anchor_n", -float(pos0[0]))
+        sim.set_param("anchor_e", -float(pos0[1]))
+        sim.set_param("anchor_d", -float(pos0[2]))
+        sim.pos_ned = [0.0, 0.0, 0.0]
+
+        sim.send_named_float("RAWES_COL", float(ic.get("stack_coll_eq", ic["coll_eq_rad"])))
+        sim.send_named_float("RAWES_TEN", float(ic["tension_eq_n"]))
+
+        # Capture needs one run_flight call; angle command appears on the next.
+        sim.run(0.20)
+
+        assert bool(sim.fns.el_initialized()), "Lua did not capture GPS geometry"
+        tgt = sim.guided_target
+        assert tgt is not None, "Expected GUIDED angle target after capture"
+        assert sim.guided_rate_target is None, "Expected angle-path target, not rate-path"
+
+        cmd_bz = _body_z_from_attitude_target(
+            tgt["roll_deg"], tgt["pitch_deg"], tgt["yaw_deg"]
+        )
+        cmd_bz = _unit(cmd_bz)
+
+        dot = float(np.clip(np.dot(ic_bz, cmd_bz), -1.0, 1.0))
+        angle_deg = math.degrees(math.acos(dot))
+
+        assert angle_deg <= 10.0, (
+            "Post-capture Lua angle target is not close to IC body_z: "
+            f"angle={angle_deg:.2f} deg"
+        )

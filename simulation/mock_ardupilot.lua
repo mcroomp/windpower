@@ -167,14 +167,26 @@ function ahrs:get_roll()
     return math.atan(R[8], R[9])
 end
 
+function ahrs:get_roll_rad()
+    return self:get_roll()
+end
+
 function ahrs:get_pitch()
     local R = _mock.R
     return math.asin(math.max(-1.0, math.min(1.0, -R[7])))
 end
 
+function ahrs:get_pitch_rad()
+    return self:get_pitch()
+end
+
 function ahrs:get_yaw()
     local R = _mock.R
     return math.atan(R[4], R[1])
+end
+
+function ahrs:get_yaw_rad()
+    return self:get_yaw()
 end
 
 -- ── rc ───────────────────────────────────────────────────────────────────────

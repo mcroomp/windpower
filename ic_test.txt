@@ -1,0 +1,15 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0 -- C:\repos\windpower\simulation\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\repos\windpower\simulation
+configfile: pytest.ini
+plugins: timeout-2.4.0
+timeout: 600.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 1 item
+
+simulation\tests\simtests\test_generate_ic.py::test_create_ic [test_create_ic] elev=25.3 deg  |vel|=0.000 m/s  T=300 N  coll=-10.3 deg  log: C:\repos\windpower\simulation\logs\test_create_ic\simtest.log
+PASSED
+
+============================== 1 passed in 5.47s ==============================

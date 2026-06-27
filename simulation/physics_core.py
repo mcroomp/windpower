@@ -104,6 +104,7 @@ class PhysicsCore:
     BASE_K_ANG    = 0.0     # N·m·s/rad — no permanent artificial damping
     K_YAW_DEFAULT = 100.0   # N·m·s/rad — matches mediator _K_YAW_DEFAULT
     T_AERO_OFFSET = 45.0    # s — aero ramp already complete at simulation start
+    KINEMATIC_SPINUP_S = 5.0  # s — final kinematic window to blend omega to IC target
 
     def __init__(
         self,
@@ -145,6 +146,8 @@ class PhysicsCore:
         # (moved out of RotorState in dynbem 0.2.0 — now an input).
         self._rotor_state    = self._aero.initial_rotor_state()
         self._omega_rad_s    = float(ic.omega_spin)
+        self._omega_hold_start_rad_s = float(self._omega_rad_s)
+        self._omega_release_target_rad_s = float(ic.omega_spin)
         self._spin_angle_rad = 0.0
 
         if rotor.control is None or rotor.control.axle_attachment_length_m is None:
@@ -246,11 +249,41 @@ class PhysicsCore:
 
     @property
     def is_kinematic(self) -> bool:
-        return self._damp_alpha > 0.0
+        return self._kinematic is not None and self._kinematic.is_active(self._t_sim)
 
     @property
     def damp_alpha(self) -> float:
-        return self._damp_alpha
+        if self._kinematic is None:
+            return 0.0
+        return float(self._kinematic.damp_alpha(self._t_sim))
+
+    def _kinematic_omega_target(self, t_sim: float) -> float:
+        """Return commanded omega during kinematic hold.
+
+        Holds the startup omega, then blends to the IC release omega over the
+        final KINEMATIC_SPINUP_S seconds so free-flight starts without a jump.
+        """
+        if self._kinematic is None:
+            return self._omega_rad_s
+        duration = float(self._kinematic.duration)
+        if duration <= 0.0:
+            return self._omega_release_target_rad_s
+
+        spinup_s = min(self.KINEMATIC_SPINUP_S, duration)
+        if spinup_s <= 0.0:
+            return self._omega_release_target_rad_s
+
+        t_ramp_start = duration - spinup_s
+        if t_sim <= t_ramp_start:
+            return self._omega_hold_start_rad_s
+
+        u = np.clip((t_sim - t_ramp_start) / spinup_s, 0.0, 1.0)
+        # Smoothstep blend avoids a slope discontinuity at ramp boundaries.
+        u = u * u * (3.0 - 2.0 * u)
+        return float(
+            self._omega_hold_start_rad_s
+            + (self._omega_release_target_rad_s - self._omega_hold_start_rad_s) * u
+        )
 
     # ── Physics steps ─────────────────────────────────────────────────────────
 
@@ -311,64 +344,74 @@ class PhysicsCore:
         hub = self._dyn.state
         r   = self._rotor
 
-        # Kinematic blend factor: 1 at startup, ramps to 0, then 0 in free flight
-        self._damp_alpha = (self._kinematic.damp_alpha(self._t_sim)
-                            if self._kinematic is not None else 0.0)
+        kin_active = self.is_kinematic
+        self._damp_alpha = self.damp_alpha if kin_active else 0.0
 
-        # Tether — zeroed during kinematic (hub may be outside tether envelope)
-        if self._damp_alpha > 0.0:
-            tf, tm            = np.zeros(3), np.zeros(3)
+        if kin_active:
+            # Kinematic hold: bypass all physics contributions.
+            # No tether, no aero, no gravity-driven dynamics step, and no rotor spin update.
+            self._omega_rad_s = self._kinematic_omega_target(self._t_sim)
+            tf = np.zeros(3)
+            tm = np.zeros(3)
             self._tension_now = 0.0
+            result = SimpleNamespace(
+                F_world=np.zeros(3),
+                M_orbital=np.zeros(3),
+                M_spin=np.zeros(3),
+                Q_spin=0.0,
+            )
+            F_net = np.zeros(3)
+            new_hub = hub
         else:
             tf, tm            = self._tether.compute(hub["pos"], hub["vel"], hub["R"])
             self._tension_now = float(self._tether._last_info.get("tension", 0.0))
 
-        # Aerodynamic forces — new state-based API.  Aero model integrates
-        # omega, spin angle, and inflow states through the returned derivative.
-        rotor_inputs = RotorInputs(
-            collective_rad = collective_rad,
-            tilt_lon       = tilt_lon,
-            tilt_lat       = tilt_lat,
-            R_hub          = hub["R"],
-            v_hub_world    = hub["vel"],
-            wind_world     = self._wind,
-            omega_rad_s    = self._omega_rad_s,
-            t              = self.T_AERO_OFFSET + self._t_sim,
-            rho_kg_m3      = 1.225,
-        )
-        result, rotor_deriv = self._aero.compute_forces(rotor_inputs, self._rotor_state)
+            # Aerodynamic forces — new state-based API.  Aero model integrates
+            # omega, spin angle, and inflow states through the returned derivative.
+            rotor_inputs = RotorInputs(
+                collective_rad = collective_rad,
+                tilt_lon       = tilt_lon,
+                tilt_lat       = tilt_lat,
+                R_hub          = hub["R"],
+                v_hub_world    = hub["vel"],
+                wind_world     = self._wind,
+                omega_rad_s    = self._omega_rad_s,
+                t              = self.T_AERO_OFFSET + self._t_sim,
+                rho_kg_m3      = 1.225,
+            )
+            result, rotor_deriv = self._aero.compute_forces(rotor_inputs, self._rotor_state)
 
-        # Integrate inflow state only (omega removed from RotorState in dynbem 0.2.0)
-        new_arr = self._rotor_state.to_array() + dt * rotor_deriv.to_array()
-        self._rotor_state = self._rotor_state.from_array(new_arr)
-        # Integrate omega externally using euler_step_omega
-        omega_min = (r.autorotation.omega_min_rad_s
-                     if r.autorotation.omega_min_rad_s is not None else 0.5)
-        I_ode = (r.autorotation.I_ode_kgm2
-                 if r.autorotation.I_ode_kgm2 is not None else 10.0)
-        new_omega, new_spin = euler_step_omega(
-            self._omega_rad_s, self._spin_angle_rad,
-            float(result.Q_spin), 0.0, I_ode, dt,
-        )
-        self._omega_rad_s    = max(omega_min, new_omega)
-        self._spin_angle_rad = new_spin
+            # Integrate inflow state only (omega removed from RotorState in dynbem 0.2.0)
+            new_arr = self._rotor_state.to_array() + dt * rotor_deriv.to_array()
+            self._rotor_state = self._rotor_state.from_array(new_arr)
+            # Integrate omega externally using euler_step_omega
+            omega_min = (r.autorotation.omega_min_rad_s
+                         if r.autorotation.omega_min_rad_s is not None else 0.5)
+            I_ode = (r.autorotation.I_ode_kgm2
+                     if r.autorotation.I_ode_kgm2 is not None else 10.0)
+            new_omega, new_spin = euler_step_omega(
+                self._omega_rad_s, self._spin_angle_rad,
+                float(result.Q_spin), 0.0, I_ode, dt,
+            )
+            self._omega_rad_s    = max(omega_min, new_omega)
+            self._spin_angle_rad = new_spin
 
-        disk_normal = hub["R"][:, 2]
+            disk_normal = hub["R"][:, 2]
 
-        # Angular damping
-        # base term  : optional diagnostic damping; default 0 in free flight
-        # startup extra: additional damping during kinematic ramp
-        # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle)
-        k_total   = self._base_k_ang + self._startup_damp_k_ang * self._damp_alpha
-        omega_yaw = float(np.dot(hub["omega"], disk_normal))
-        M_net = (result.M_orbital + tm
-                 - k_total * hub["omega"]
-                 - self._k_yaw * omega_yaw * disk_normal)
+            # Angular damping
+            # base term  : optional diagnostic damping; default 0 in free flight
+            # startup extra: additional damping during kinematic ramp
+            # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle)
+            k_total   = self._base_k_ang + self._startup_damp_k_ang * self._damp_alpha
+            omega_yaw = float(np.dot(hub["omega"], disk_normal))
+            M_net = (result.M_orbital + tm
+                     - k_total * hub["omega"]
+                     - self._k_yaw * omega_yaw * disk_normal)
 
-        # 6-DOF rigid-body integration (gravity applied internally)
-        F_net   = result.F_world + tf
-        new_hub = self._dyn.step(F_net, M_net, dt,
-                                 omega_spin=self._omega_rad_s)
+            # 6-DOF rigid-body integration (gravity applied internally)
+            F_net   = result.F_world + tf
+            new_hub = self._dyn.step(F_net, M_net, dt,
+                                     omega_spin=self._omega_rad_s)
 
         # Kinematic state override — applied post-dynamics so t_sim is pre-advance
         if self._kinematic is not None:
@@ -386,7 +429,7 @@ class PhysicsCore:
             "tilt_lon":     tilt_lon,
             "tilt_lat":     tilt_lat,
             "damp_alpha":   self._damp_alpha,
-            "is_kinematic": self._damp_alpha > 0.0,
+            "is_kinematic": kin_active,
             # Specific force in NED world frame: (F_aero + F_tether) / mass.
             # Gravity is excluded — this is what the IMU accelerometer measures.
             # Body frame: accel_body = R.T @ accel_specific_world

@@ -1,14 +1,14 @@
 """
-torque/test_ddfp_yaw_regulation.py — ArduPilot DDFP (H_TAIL_TYPE=4) yaw regulation tests.
+torque/test_ddfp_yaw_regulation_sitl.py — ArduPilot DDFP (H_TAIL_TYPE=4) yaw regulation tests.
 
 Prescribed-yaw tests (open-loop plant, closed-loop control law):
-  test_ddfp_zero_yaw  — motor stays near trim when psi_dot=0
-  test_ddfp_yaw_ramp  — motor rises above trim when psi_dot ramps 0->10 deg/s
+  test_ddfp_zero_yaw_sitl  — motor stays near trim when psi_dot=0
+  test_ddfp_yaw_ramp_sitl  — motor rises above trim when psi_dot ramps 0->10 deg/s
 
 Kinematic closed-loop test (both plant and control in the loop):
-  test_ddfp_no_action_at_rest  — psi_dot=0 prescribed → motor near trim (does nothing)
-  test_ddfp_responds_to_drift  — kinematic start (psi_dot=28 rad/s) → motor throttle rises
-  test_ddfp_kinematic_regulation — kinematic, motor regulates psi_dot to < 5 deg/s
+  test_ddfp_no_action_at_rest_sitl  — psi_dot=0 prescribed → motor near trim (does nothing)
+  test_ddfp_responds_to_drift_sitl  — kinematic start (psi_dot=28 rad/s) → motor throttle rises
+  test_ddfp_kinematic_regulation_sitl — kinematic, motor regulates psi_dot to < 5 deg/s
 
 H_TAIL_TYPE=4 (DDFP CCW): hub under-speed (RPM < omega_hub*gear_ratio) causes CW drift
 → yaw error positive → DDFP CCW sign-flip → positive motor throttle → counters CW drift.
@@ -16,7 +16,7 @@ H_TAIL_TYPE=4 (DDFP CCW): hub under-speed (RPM < omega_hub*gear_ratio) causes CW
 Run with (inside Docker)
 ------------------------
   RAWES_RUN_STACK_INTEGRATION=1 pytest \\
-      simulation/tests/sitl/torque/test_ddfp_yaw_regulation.py -v
+      simulation/tests/sitl/torque/test_ddfp_yaw_regulation_sitl.py -v
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ _OBSERVE_S = 10.0
 _THRESHOLD = math.radians(5.0)   # 5 deg/s
 
 
-def test_ddfp_zero_yaw(torque_armed_ddfp_zero):
+def test_ddfp_zero_yaw_sitl(torque_armed_ddfp_zero):
     """
     Stationary hub — motor should stay near 800 µs (H_YAW_TRIM region).
 
@@ -48,7 +48,7 @@ def test_ddfp_zero_yaw(torque_armed_ddfp_zero):
     assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 20.0, _OBSERVE_S, ctx.log)
 
 
-def test_ddfp_yaw_ramp(torque_armed_ddfp_ramp):
+def test_ddfp_yaw_ramp_sitl(torque_armed_ddfp_ramp):
     """
     DDFP motor response to prescribed yaw ramp: psi_dot prescribed 0→10 deg/s
     over 30 s.  ArduPilot should drive motor throttle above the zero-yaw
@@ -70,7 +70,7 @@ def test_ddfp_yaw_ramp(torque_armed_ddfp_ramp):
 # Kinematic closed-loop tests  (torque_armed_ddfp fixture, profile="constant")
 # ---------------------------------------------------------------------------
 
-def test_ddfp_no_action_at_rest(torque_armed_ddfp_zero):
+def test_ddfp_no_action_at_rest_sitl(torque_armed_ddfp_zero):
     """
     When psi_dot=0 throughout DYNAMIC, motor throttle should stay near the
     equilibrium trim — ArduPilot does nothing extra.
@@ -86,7 +86,7 @@ def test_ddfp_no_action_at_rest(torque_armed_ddfp_zero):
     assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, 17.0, _OBSERVE_S, ctx.log)
 
 
-def test_ddfp_responds_to_drift(torque_armed_ddfp):
+def test_ddfp_responds_to_drift_sitl(torque_armed_ddfp):
     """
     Kinematic model starts with omega_motor=0 so psi_dot = omega_rotor = 28 rad/s.
     ArduPilot must raise motor throttle above zero in response.
@@ -101,7 +101,7 @@ def test_ddfp_responds_to_drift(torque_armed_ddfp):
     assert_motor_throttle_response(ctx.events_log, 0.05, 15.0, _OBSERVE_S, ctx.log)
 
 
-def test_ddfp_kinematic_regulation(torque_armed_ddfp):
+def test_ddfp_kinematic_regulation_sitl(torque_armed_ddfp):
     """
     Full closed-loop kinematic test: ArduPilot must regulate psi_dot to < 5 deg/s.
 

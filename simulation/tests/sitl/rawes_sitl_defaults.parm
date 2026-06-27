@@ -15,7 +15,7 @@
 #   1. The GB4008 motor swamps the magnetometer on real hardware.
 #   2. SITL has 3 synthetic compasses; with dual GPS yaw they are not needed.
 
-# ACRO rate controller — tuned for the beaupoil_2026 rotor.
+# Heli rate controller — tuned for the beaupoil_2026 rotor.
 #
 # Why these values:
 #   rawes.lua flies the GUIDED *angle* path (set_target_angle_and_rate_and_
@@ -28,6 +28,12 @@
 #   non-zero FLTD filters the derivative).  Validated in-process against the
 #   faithful GuidedAttitudeController by test_pump_cycle_lua /
 #   tests/oneoff/tune_lua_reelin.py (P>=0.10 stable, P=0.06 diverges).
+#
+# DataFlash logging:
+#   Enable Fast Attitude (bit 0) and Fast IMU (bit 18) in addition to the
+#   existing mask used by Copter heli defaults.
+LOG_BITMASK       442367
+
 #
 # I-term limits stay at 0 to prevent windup during the kinematic phase
 # (body held fixed; rate setpoint nonzero -> integrator races without
@@ -43,6 +49,9 @@ ATC_RAT_PIT_FLTD  10.0
 ATC_RAT_RLL_IMAX  0.0
 ATC_RAT_PIT_IMAX  0.0
 ATC_RAT_YAW_IMAX  0.0
+ATC_ANG_RLL_P     4.0
+ATC_ANG_PIT_P     6.0
+ATC_ANGLE_BOOST   0      # disable throttle boost at high tilt (RAWES commands fixed throttle -> no boost wanted)
 
 ACRO_TRAINER      0      # disable auto-leveling (physical tilt ~65 deg)
 
@@ -70,7 +79,7 @@ COMPASS_USE     0      # disable compass: GB4008 motor swamps magnetometer on ha
 COMPASS_ENABLE  0      # disable all SITL synthetic compasses
 COMPASS_USE2    0      # disable compass instance 2
 COMPASS_USE3    0      # disable compass instance 3
-SCR_ENABLE      1      # enable Lua scripting on first boot (required for acro_armed_lua)
+SCR_ENABLE      1      # enable Lua scripting on first boot (required for guided_nogps_armed_lua)
 
 # Collective servo range: full 1000-2000 us so Lua's ch3 encoding maps 1:1 to servos.
 # copter-heli.parm defaults to H_COL_MIN=1250/H_COL_MAX=1750 (0.5x gain).

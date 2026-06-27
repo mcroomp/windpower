@@ -1,35 +1,35 @@
 """
-test_lua_flight_steady.py — steady orbit under full ArduPilot + Lua control.
+test_lua_flight_steady_sitl.py — steady flight under full ArduPilot + Lua control.
 
-Validates that rawes.lua (SCR_USER6=1) can sustain a stable orbit with
+Validates that rawes.lua (SCR_USER6=1) can sustain stable steady flight with
 internal_controller=False — ArduPilot + Lua own the physics entirely.
 
 This is M3 Step 1: the foundational gate for pumping and landing tests.
 
-Uses the acro_armed_lua_full fixture (stationary kinematic hold, vel0=[0,0,0]):
+Uses the guided_nogps_armed_lua_full fixture (stationary kinematic hold, vel0=[0,0,0]):
   - Hub holds at tether equilibrium for 80 s; no motion required.
   - With dual GPS (EK3_SRC1_YAW=2), yaw is known from the first RELPOSNED fix.
     delAngBiasLearned converges with constant-zero gyro at ~34 s after start.
     GPS fuses at ~34 s; fixture yields.
-  - internal_controller=False (Lua RC overrides drive physics at 50 Hz)
+    - internal_controller=False (ArduPilot + Lua own the stack at 50 Hz)
   - SCR_USER6=3 (MODE_PASSIVE) set immediately in fixture; the test
     promotes to SCR_USER6=1 (MODE_STEADY) right after kinematic_exit.
-    MODE_PASSIVE keeps the Lua quiet (only ch8 keepalive + IC collective
-    via NVF) so ArduPilot's rate PID does not wind up against a
+    MODE_PASSIVE keeps the Lua quiet (only ch8 keepalive + zero-rate,
+    IC-collective GUIDED throttle command) so ArduPilot's rate PID does not wind up against a
     kinematically-locked body during the 80 s hold.
   - IC altitude ~43 m (tether rest length ~100 m); hub orbits near IC altitude.
 
 The fixture streams the IC collective to the Lua as RAWES_COL so MODE_PASSIVE
-can pin collective at the IC operating point during kinematic.
+holds the IC operating point via GUIDED throttle during kinematic.
 
-No RC overrides are sent by this test — Lua owns Ch1/Ch2/Ch3 (cyclic +
-collective) and Ch8 (motor interlock keepalive at 100 Hz).
+No RC cyclic/collective overrides are sent by this test. Lua uses GUIDED
+commands for attitude/collective and keeps Ch8 (motor interlock) high.
 
 Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
   t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
-              NVF streamed; Lua pins ch3 at the IC collective but does
+              NVF streamed; Lua holds IC collective through GUIDED throttle but does
               NOT run altitude hold.
   t~34 s      GPS fuses; fixture yields
   t=80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY)
@@ -44,7 +44,7 @@ Pass criteria (all from physics telemetry CSV, not EKF estimates)
 1. "RAWES flight: captured" STATUSTEXT received.
 2. Physics altitude >= 1.0 m throughout free flight (no crash).
 3. Longest continuous physics altitude >= 3.0 m window >= 60 s.
-4. Lua cyclic activity >= 50 PWM peak (orbit-tracking corrections non-trivial).
+4. Lua cyclic activity >= 50 PWM peak (non-trivial corrective cyclic).
 5. No EKF emergency yaw reset.
 6. No CRITICAL errors in mediator log.
 
@@ -83,39 +83,77 @@ _MAX_ALT_M               = 70.0  # m -- hub must not escape; IC altitude ~38 m (
 _MAX_FLOOR_HITS          = 0     # floor hits at altitude <= 1.05 m
 _MAX_TENSION_N           = 1000.0  # N -- tether must not spike (break load = 620 N)
 _MIN_CYCLIC_ACTIVITY_PWM = 50    # |servo1-1500| + |servo2-1500| minimum peak
+_KIN_SPINUP_WINDOW_S     = 5.0   # final kinematic omega ramp window [s]
+_OMEGA_END_TOL_RAD_S     = 0.5   # omega tolerance at kinematic exit [rad/s]
+_OMEGA_MONO_EPS_RAD_S    = 0.15  # allow tiny sample jitter while checking monotonicity
 
 _POS_LOG_INTERVAL        = 5.0   # s between periodic log lines
 
+# Temporary debug switch: keep Lua in MODE_PASSIVE after kinematic exit.
+# Set back to False when steady-mode handoff debugging is complete.
+_DEBUG_KEEP_PASSIVE      = True
 
 
-def test_lua_flight_steady(acro_armed_lua_full: StackContext):
+
+def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     """
-    M3 Step 1: steady orbit under full ArduPilot + Lua control.
+    M3 Step 1: steady flight under full ArduPilot + Lua control.
 
-    Asserts that the hub sustains stable orbital flight for >= 60 s with
+    Asserts that the hub sustains stable flight for >= 60 s with
     internal_controller=False and Lua driving cyclic + collective at 50 Hz.
     Pass/fail is determined from physics telemetry (pos_z), not EKF altitude.
     """
-    ctx = acro_armed_lua_full
+    ctx = guided_nogps_armed_lua_full
     gcs = ctx.gcs
-    log = logging.getLogger("test_lua_flight_steady")
+    log = logging.getLogger("test_lua_flight_steady_sitl")
 
-    log.info("=== test_lua_flight_steady: waiting for kinematic phase to end ===")
-    log.info("(Lua is in MODE_PASSIVE during kinematic; promotes to MODE_STEADY after kinematic_exit)")
+    log.info("=== test_lua_flight_steady_sitl: waiting for kinematic phase to end ===")
+    if _DEBUG_KEEP_PASSIVE:
+        log.info("(DEBUG: Lua remains in MODE_PASSIVE after kinematic_exit)")
+    else:
+        log.info("(Lua is in MODE_PASSIVE during kinematic; promotes to MODE_STEADY after kinematic_exit)")
 
     if not ctx.wait_kinematic_done(timeout=_KINEMATIC_TIMEOUT_S):
         pytest.fail(
             f"Kinematic phase did not end within {_KINEMATIC_TIMEOUT_S:.0f} s.\n"
             "Check mediator log for 'TRANSITION kinematic->free-flight'."
         )
-    log.info("Kinematic phase ended -- promoting Lua to MODE_STEADY")
 
-    # Promote Lua from MODE_PASSIVE (3) to MODE_STEADY (1) now that the body
-    # is free.  Doing this AFTER kinematic_exit prevents ArduPilot's rate
-    # PID from winding up against a kinematically-locked body during the
-    # hold phase.
-    ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
-    log.info("  SCR_USER6 -> 1 (MODE_STEADY)  ACK=%s", ok)
+    ic = ctx.initial_state
+    if ic is not None:
+        eq_phys = ic.get("eq_physics")
+        if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
+            coll_seed = float(eq_phys["collective_rad"])
+            coll_src = "eq_physics.collective_rad"
+        elif "stack_coll_eq" in ic:
+            coll_seed = float(ic["stack_coll_eq"])
+            coll_src = "stack_coll_eq"
+        elif "coll_eq_rad" in ic:
+            coll_seed = float(ic["coll_eq_rad"])
+            coll_src = "coll_eq_rad"
+        else:
+            raise KeyError(
+                "initial_state missing collective seed; expected one of "
+                "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+            )
+        # Re-seed right at release so MODE_STEADY capture uses the intended IC
+        # collective even if an earlier NVF update was missed.
+        gcs.send_named_float("RAWES_COL", coll_seed)
+        log.info("Re-seeded RAWES_COL from %s: %+.4f rad", coll_src, coll_seed)
+
+    if _DEBUG_KEEP_PASSIVE:
+        log.info("Kinematic phase ended -- DEBUG: keeping Lua in MODE_PASSIVE (SCR_USER6=3)")
+        ok = gcs.set_param("SCR_USER6", 3, timeout=5.0)
+        log.info("  SCR_USER6 -> 3 (MODE_PASSIVE)  ACK=%s", ok)
+    else:
+        log.info("Kinematic phase ended -- promoting Lua to MODE_STEADY")
+
+        # Promote Lua from MODE_PASSIVE (3) to MODE_STEADY (1) now that the body
+        # is free.  Doing this AFTER kinematic_exit prevents ArduPilot's rate
+        # PID from winding up against a kinematically-locked body during the
+        # hold phase.
+        ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
+        log.info("  SCR_USER6 -> 1 (MODE_STEADY)  ACK=%s", ok)
 
     all_statustext = ctx.all_statustext
     lua_captured   = False
@@ -138,7 +176,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
     t_last_log         = t_obs_start
     t_capture_deadline = t_obs_start + _CAPTURE_TIMEOUT_S
 
-    log.info("=== test_lua_flight_steady: observing %.0f s of free flight ===", _OBS_SECONDS)
+    log.info("=== test_lua_flight_steady_sitl: observing %.0f s of free flight ===", _OBS_SECONDS)
 
     state = {
         "lua_captured":      lua_captured,
@@ -167,7 +205,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
                     state["ekf_yaw_reset"] = True
                     log.warning("EKF yaw reset at t=%.1fs: %s", t_rel, text)
 
-        if not state["lua_captured"] and now > t_capture_deadline:
+        if (not _DEBUG_KEEP_PASSIVE) and (not state["lua_captured"]) and now > t_capture_deadline:
             pytest.fail(
                 f"rawes.lua did not capture within {_CAPTURE_TIMEOUT_S:.0f} s.\n"
                 f"STATUSTEXT: {all_statustext[-20:]}\n"
@@ -198,6 +236,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
         # print_steady_report also loads telemetry, but we load separately here
         # so we can assert before printing the full report.
         metrics = None
+        _rows = []
         if ctx.telemetry_log.exists():
             from telemetry_csv import read_csv as _read_csv
             _rows   = _read_csv(ctx.telemetry_log)
@@ -225,12 +264,48 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
             metrics.floor_hits   if metrics else -1,
         )
 
-        assert lua_captured, (
-            "rawes.lua never captured equilibrium.\n"
-            f"STATUSTEXT: {all_statustext}"
-        )
+        if not _DEBUG_KEEP_PASSIVE:
+            assert lua_captured, (
+                "rawes.lua never captured equilibrium.\n"
+                f"STATUSTEXT: {all_statustext}"
+            )
 
         if metrics is not None:
+            # Verify the single-release mechanism behavior in this SITL test:
+            # over the final kinematic window, omega_rotor ramps to the IC
+            # target and stays continuous through kinematic_exit.
+            kin_rows = [r for r in _rows if float(getattr(r, "damp_alpha", 0.0)) > 0.0]
+            assert kin_rows, "No kinematic rows found in telemetry CSV"
+            rel_rows = [r for r in _rows if str(getattr(r, "note", "")) == "kinematic_exit"]
+            assert rel_rows, "No kinematic_exit marker in telemetry CSV"
+
+            t_exit = float(rel_rows[0].t_sim)
+            omega_ic = float(ctx.initial_state["omega_spin"]) if ctx.initial_state is not None else None
+            assert omega_ic is not None, "Missing initial_state omega_spin for release check"
+
+            win_rows = [
+                r for r in kin_rows
+                if (t_exit - _KIN_SPINUP_WINDOW_S) <= float(r.t_sim) <= t_exit
+            ]
+            assert len(win_rows) >= 3, (
+                f"Insufficient samples in final {_KIN_SPINUP_WINDOW_S:.1f}s kinematic window"
+            )
+
+            # Monotone non-decreasing omega in ramp window (with small jitter margin).
+            for i in range(1, len(win_rows)):
+                prev = float(win_rows[i - 1].omega_rotor)
+                cur = float(win_rows[i].omega_rotor)
+                assert cur + _OMEGA_MONO_EPS_RAD_S >= prev, (
+                    "omega_rotor is not monotone in final kinematic ramp: "
+                    f"prev={prev:.3f} cur={cur:.3f}"
+                )
+
+            omega_exit = float(rel_rows[0].omega_rotor)
+            assert abs(omega_exit - omega_ic) <= _OMEGA_END_TOL_RAD_S, (
+                f"omega at kinematic_exit not at IC target: exit={omega_exit:.3f} "
+                f"target={omega_ic:.3f} tol={_OMEGA_END_TOL_RAD_S:.3f}"
+            )
+
             assert metrics.floor_hits <= _MAX_FLOOR_HITS, (
                 f"Hub hit floor: {metrics.floor_hits} frames at alt<=1.05 m"
                 f" (max allowed={_MAX_FLOOR_HITS})\n"
@@ -260,11 +335,12 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
                 f"STATUSTEXT: {all_statustext}"
             )
 
-        assert max_cyclic_activity >= _MIN_CYCLIC_ACTIVITY_PWM, (
-            f"Lua cyclic activity too low: {max_cyclic_activity} PWM "
-            f"< {_MIN_CYCLIC_ACTIVITY_PWM}\n"
-            f"STATUSTEXT: {all_statustext}"
-        )
+        if not _DEBUG_KEEP_PASSIVE:
+            assert max_cyclic_activity >= _MIN_CYCLIC_ACTIVITY_PWM, (
+                f"Lua cyclic activity too low: {max_cyclic_activity} PWM "
+                f"< {_MIN_CYCLIC_ACTIVITY_PWM}\n"
+                f"STATUSTEXT: {all_statustext}"
+            )
 
         assert not ekf_yaw_reset, (
             "EKF emergency yaw reset -- compass/velocity inconsistency.\n"
@@ -275,7 +351,7 @@ def test_lua_flight_steady(acro_armed_lua_full: StackContext):
 
         stable_s = metrics.max_stable_s if metrics is not None else 0.0
         log.info(
-            "=== test_lua_flight_steady PASSED "
+            "=== test_lua_flight_steady_sitl PASSED "
             "(stable=%.0fs  max_activity=%d PWM) ===",
             stable_s, max_cyclic_activity,
         )

@@ -22,9 +22,9 @@ Usage
     python simulation/analysis/diagnose_torque.py <test_name_or_log_dir> [settle_s [observe_s]]
 
 Examples
-    python simulation/analysis/diagnose_torque.py test_wobble[wobble]
-    python simulation/analysis/diagnose_torque.py test_wobble[wobble] 80 20
-    python simulation/analysis/diagnose_torque.py simulation/logs/test_slow_rpm[slow_vary] 50 30
+    python simulation/analysis/diagnose_torque.py test_wobble_sitl[wobble]
+    python simulation/analysis/diagnose_torque.py test_wobble_sitl[wobble] 80 20
+    python simulation/analysis/diagnose_torque.py simulation/logs/test_slow_rpm_sitl[slow_vary] 50 30
 """
 from __future__ import annotations
 

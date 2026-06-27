@@ -359,7 +359,7 @@ Key parameters required (in `rawes_sitl_defaults.parm`):
 - `COMPASS_USE=0`, `COMPASS_ENABLE=0` — SITL synthetic compasses cycle every 10 s, blocking GPS fusion.
 - `EK3_GPS_CHECK=0` + `EK3_POS_I_GATE=50` + `EK3_VEL_I_GATE=50` — widened gates required for fusion.
 
-### Three root causes fixed for test_lua_flight_steady (orbit-tracking era)
+### Three root causes fixed for test_lua_flight_steady_sitl (orbit-tracking era)
 
 > **Note:** These fixes applied to the orbit-tracking implementation of rawes.lua (since replaced
 > by AltitudeHoldController). They explain why the original orbit-tracking design had those
@@ -381,7 +381,7 @@ Before GPS fuses, `_bz_orbit = bz_now` (err=0, pure neutral stick). When GPS fus
 
 ### Results (orbit-tracking era)
 
-test_lua_flight_steady: stable=86–110 s, 3/3 runs, max_activity≤1000 PWM, no EKF yaw reset.
+test_lua_flight_steady_sitl: stable=86–110 s, 3/3 runs, max_activity≤1000 PWM, no EKF yaw reset.
 Orbit quality: orbit_r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s.
 
 ---

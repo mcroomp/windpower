@@ -1,5 +1,5 @@
 """
-torque/test_slow_rpm.py — Slow sinusoidal rotor hub RPM variation test.
+torque/test_slow_rpm_sitl.py — Slow sinusoidal rotor hub RPM variation test.
 
 Profile: omega_rotor = 28 + 5*sin(2*pi*0.05*t) rad/s  (+/-18%, 20 s period)
 
@@ -23,7 +23,7 @@ _THRESHOLD  = math.radians(120.0)   # [rad/s] -- bounded oscillation, not perfec
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["slow_vary"], indirect=True)
-def test_slow_rpm(torque_armed_profile):
+def test_slow_rpm_sitl(torque_armed_profile):
     """
     Rotor hub speed varies sinusoidally at 0.05 Hz (+/-18% of nominal).
     The yaw rate PID must reject the slowly varying RPM disturbance.

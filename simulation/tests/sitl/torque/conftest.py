@@ -137,7 +137,7 @@ def torque_armed_lua_yaw(tmp_path, request):
     # rotor before ArduPilot arms via RAWES_ARM), then spins up to 120 RPM
     # = 4*pi rad/s (= 12.566 rad/s).  The mediator's universal 10 s ramp
     # at DYNAMIC start (mediator_torque.py:_SPINUP_S) provides the smooth
-    # accelerate-from-zero; the test_lua_yaw_regulation observes the
+    # accelerate-from-zero; the test_lua_yaw_regulation_sitl observes the
     # subsequent 30 s of constant-RPM hold.
     # Positive omega_rotor: the GB4008 (positive-throttle-only motor) has
     # authority to zero psi_dot when omega_rotor > 0 -- the equilibrium is

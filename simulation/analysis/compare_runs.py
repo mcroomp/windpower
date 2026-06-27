@@ -2,7 +2,7 @@
 """
 compare_runs.py -- Compare two stack test runs telemetry-by-telemetry.
 
-Useful for finding where test_pumping_cycle_lua diverges from test_lua_flight_steady
+Useful for finding where test_pumping_cycle_lua_sitl diverges from test_lua_flight_steady_sitl
 when both share the same startup conditions.
 
 Usage (inside Docker):

@@ -523,7 +523,7 @@ Yaw is still regulated by the same P+I+D loop as before, reading `ATC_RAT_YAW_P/
 `H_YAW_TRIM` from params and writing SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`.
 
 Interactive use: `calibrate manual [--col DEG] [--tlon DEG] [--tlat DEG]`
-Stack test: `bash simulation/dev.sh test-stack -n 1 -k test_lua_manual_mode`
+Stack test: `bash simulation/dev.sh test-stack -n 1 -k test_lua_manual_mode_sitl`
 
 ### 4.9 Yaw Regulation — ArduPilot ATC_RAT_YAW
 
@@ -994,7 +994,7 @@ level first.
 | `simulation/tests/sitl/rawes_sitl_defaults.parm` | Boot-time ArduPilot params (EKF3, GPS, compass, servos) |
 | `simulation/tests/sitl/flight/conftest.py` | Flight fixtures: `acro_armed`, `acro_armed_lua_full`, `acro_armed_pumping_lua`, `acro_armed_landing_lua` |
 | `simulation/tests/sitl/torque/conftest.py` | Torque fixtures: `torque_armed_lua_yaw`, `torque_armed_lua_manual` (force_params from `calibrate._RUN_MODES`) |
-| `simulation/tests/sitl/torque/test_lua_manual_mode.py` | Stack test: MODE_MANUAL yaw PID + NVF→RC1/RC2/RC3 response + neutral restore |
+| `simulation/tests/sitl/torque/test_lua_manual_mode_sitl.py` | Stack test: MODE_MANUAL yaw PID + NVF→RC1/RC2/RC3 response + neutral restore |
 | `simulation/tests/sitl/stack_infra.py` | Shared infra: `_sitl_stack`, `_acro_stack`, `_torque_stack`, `StackContext`; `_arm_sequence(target_mode=ACRO)` for GPS-free torque tests |
 | `simulation/scripts/calibrate.py` | Interactive calibration CLI: `manual` command = MODE_MANUAL arm + live NVF control loop |
 | `simulation/controller.py` | `compute_bz_altitude_hold`, `AltitudeHoldController`, `TensionPI`, `RatePID`, `compute_rate_cmd`, `OrbitTracker` |

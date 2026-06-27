@@ -1,5 +1,5 @@
 """
-torque/test_armon.py — RAWES_ARM timed disarm-timer test.
+torque/test_armon_sitl.py — RAWES_ARM timed disarm-timer test.
 
 Validates RAWES_ARM disarm timer behavior with GCS arming:
     Phase 1 — arm via GCS, optional long timer, Lua PI regulates yaw.
@@ -21,7 +21,7 @@ Pass criteria:
 
 Run with (inside Docker):
   RAWES_RUN_STACK_INTEGRATION=1 pytest \\
-      simulation/tests/sitl/torque/test_armon.py -v
+      simulation/tests/sitl/torque/test_armon_sitl.py -v
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ _DRIFT_THRESHOLD_RAD_S    = math.radians(10.0)  # 10 deg/s — must exceed after
 _ARMED_ARMON_MS = 3_600_000   # 1 hour: keep armed for settle + regulation phases
 
 
-def test_armon(torque_unarmed_lua):
+def test_armon_sitl(torque_unarmed_lua):
     """
     GCS force-arms; RAWES_ARM sets an optional disarm countdown timer in Lua.
     While the timer is active: Lua PI regulates hub yaw (psi_dot < threshold).

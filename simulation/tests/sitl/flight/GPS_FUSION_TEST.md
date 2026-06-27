@@ -1,6 +1,6 @@
 # GPS Fusion Diagnostic Test — `test_gps_fusion_armed`
 
-Source: `simulation/tests/sitl/flight/test_gps_fusion_layers.py`
+Source: `simulation/tests/sitl/flight/test_gps_fusion_layers_sitl.py`
 
 ---
 
@@ -15,7 +15,7 @@ The test gates on five sequential milestones:
 ```
 [1] EKF tilt aligned        (pre-arm, ~3.5 s)
 [2] GPS origin set          (pre-arm, ~17.7 s after GPS detected)
-[3] Armed in ACRO           (~22.7 s sim time)
+[3] Armed in GUIDED_NOGPS   (~22.7 s sim time)
 [4] Yaw aligned             (pre-arm compass, already done at step [3])
 [5] EKF3 is using GPS       (~54.5 s into step [5], ~83 s total)
 ```
@@ -75,7 +75,7 @@ All times are **simulation seconds** (from `time_boot_ms`), relative to SITL sta
 | 7.5   | GPS 1: detected u-blox | — | SITL synthetic GPS detected |
 | 8.4   | GPS fix=6 (RTK fixed), 10 sats, HDOP=1.2 | — | |
 | 17.7  | **EKF3 IMU0 origin set** | 0x00a7 | ~10 s after GPS detect (`gpsGoodToAlign`) |
-| 22.7  | Armed in ACRO (CH8=1000 → interlock LOW) | — | force=True |
+| 22.7  | Armed in GUIDED_NOGPS (CH8=1000 → interlock LOW) | — | force=True |
 
 ### Post-arm phase
 
@@ -209,14 +209,13 @@ frame kinematic accel), `sens_accel_z` = -9.81 (body-frame Z, pointing up).
 
 ```bash
 # Single run
-bash test.sh stack -v -k test_gps_fusion_armed
+bash test.sh stack -v -k test_gps_fusion_dual_gps_sitl
 
 # Also runs the layer-by-layer parametrized version
-bash test.sh stack -v -k test_gps_fusion_layers
-bash test.sh stack -v -k "test_gps_fusion_layers[L0"
+bash test.sh stack -v -k test_gps_fusion_dual_gps_sitl
 ```
 
-Logs: `simulation/logs/gps_fusion_test_gps_fusion_armed/`
+Logs: `simulation/logs/test_gps_fusion_dual_gps_sitl/`
 - `gcs.log` — full EKF + GPS + ATTITUDE timeline
 - `telemetry.csv` — physics trajectory (756 rows, 10 Hz)
 - `dataflash.BIN` — ArduPilot DataFlash binary (XKF1/XKF3 for deep analysis)

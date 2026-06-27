@@ -1,5 +1,5 @@
 """
-torque/test_pitch_roll.py — Hub pitch/roll oscillation with yaw regulation.
+torque/test_pitch_roll_sitl.py — Hub pitch/roll oscillation with yaw regulation.
 
 Profile: axle speed constant at nominal; hub slowly oscillates in pitch
 (+/-8 deg, 0.05 Hz) and roll (+/-12 deg, 0.08 Hz) to simulate tether-induced swinging.
@@ -31,7 +31,7 @@ _THRESHOLD  = math.radians(4.0)   # [rad/s] -- raised from 2.0 to 4.0: EKF compa
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["pitch_roll"], indirect=True)
-def test_pitch_roll(torque_armed_profile):
+def test_pitch_roll_sitl(torque_armed_profile):
     """
     Hub tilts in pitch (+/-8 deg, 0.05 Hz) and roll (+/-12 deg, 0.08 Hz) while
     the rotor hub spins at constant nominal RPM.  Gravity projection changes

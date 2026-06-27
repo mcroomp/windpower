@@ -1,5 +1,5 @@
 """
-torque/test_gust_recovery.py — Gust shock and yaw recovery test.
+torque/test_gust_recovery_sitl.py — Gust shock and yaw recovery test.
 
 Profile: axle speed is nominal until dynamics_t=10 s, then a 5-second
 gust drives it to 120% of nominal, then it returns to nominal.
@@ -31,7 +31,7 @@ _THRESHOLD  = math.radians(2.0)   # [rad/s] physics ground truth
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["gust"], indirect=True)
-def test_gust_recovery(torque_armed_profile):
+def test_gust_recovery_sitl(torque_armed_profile):
     """
     At dynamics_t=10 s the rotor hub spins at 120% nominal for 5 seconds
     (gust), then returns to nominal.  The higher RPM shifts the back-EMF

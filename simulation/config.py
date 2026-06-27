@@ -104,6 +104,16 @@ DEFAULTS: dict = {
     #   Update when rotor changes: rd.default().body_z_slew_rate_rad_s.
     "body_z_slew_rate_rad_s":    0.40,
 
+    # ── Post-kinematic cyclic handoff (mediator-side) ───────────────────────
+    # Optional blend window after kinematic release to avoid an abrupt first
+    # cyclic command from AP. During the window, mediator applies:
+    #   tilt = (1-alpha)*IC_tilt + alpha*AP_tilt, alpha=t/blend_s
+    # 0.0 disables blending.
+    "post_release_cyclic_blend_s": 0.0,
+    # IC cyclic trim [rad] used as blend anchor.
+    "ic_tilt_lon_rad": float(_ss["trim_tilt_lon"]),
+    "ic_tilt_lat_rad": float(_ss["trim_tilt_lat"]),
+
     # ── Sensor model ──────────────────────────────────────────────────────────
     # Rotor spin speed is an internal simulation state (omega_spin ODE).
     # In hardware, rotor spin speed measurement is handled separately from
@@ -132,14 +142,14 @@ DEFAULTS: dict = {
     # all parameters are self-contained and callers only touch one section.
     #
     # Supported types:
-    #   "hold"        — orbit-track tether direction, zero collective, no winch.
+    #   "hold"        — hold tether direction, zero collective, no winch.
     #                   No parameters required.
     #   "deschutter"  — De Schutter (2018) reel-out/reel-in pumping cycle.
     "trajectory": {
         "type": "hold",
         "hold": {},
         "deschutter": {
-            "t_hold_s":         0.0,   # hold phase before first reel-out [s]; use ~20s in stack test to settle orbit
+            "t_hold_s":         0.0,   # hold phase before first reel-out [s]; use ~20s in stack test to settle guidance
             "t_reel_out":      30.0,   # reel-out phase duration [s]
             "t_reel_in":       30.0,   # reel-in phase duration [s]
             # t_transition derived: radians(xi_reel_in - 30) / body_z_slew_rate + 1.5 s margin.
@@ -236,7 +246,7 @@ def make_trajectory(cfg: dict, wind_ned):
     -------
     TrajectoryController instance (HoldTrajectory or DeschutterTrajectory).
 
-    Note: body_z_eq0 is no longer a parameter — orbit tracking runs inside
+    Note: body_z_eq0 is no longer a parameter — guidance runs inside
     Mode_RAWES (mediator), not in the trajectory planner.
     """
     import sys, os

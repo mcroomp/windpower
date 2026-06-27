@@ -665,7 +665,7 @@ def _launch_mediator_static(
 
     The subprocess runs the SITL lockstep loop (recv_servos -> send_state)
     with constant sensor values.  No physics, no threading in the test.
-    Used by test_arm_minimal and test_gps_fusion_layers.
+    Used by test_arm_minimal_sitl and test_gps_fusion_layers.
     """
     def _fmt(arr) -> "list[str]":
         return [str(float(v)) for v in arr]

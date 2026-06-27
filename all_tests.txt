@@ -1,0 +1,92 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0 -- C:\repos\windpower\simulation\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\repos\windpower\simulation
+configfile: pytest.ini
+plugins: timeout-2.4.0
+timeout: 600.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 30 items
+
+simulation\tests\simtests\test_generate_ic.py::test_create_ic PASSED     [  3%]
+simulation\tests\simtests\test_generate_ic.py::test_ic_matches_lua_bz_formula PASSED [  6%]
+simulation\tests\simtests\test_generate_ic.py::test_ic_steady_flight SKIPPED [ 10%]
+simulation\tests\simtests\test_generate_ic.py::test_ic_r0_kinematic PASSED [ 13%]
+simulation\tests\simtests\test_ground_liftoff.py::test_ground_liftoff PASSED [ 16%]
+simulation\tests\simtests\test_landing.py::test_landing FAILED           [ 20%]
+simulation\tests\simtests\test_landing_lua.py::test_landing_lua +++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++
+~~~~~~~~~~~~~~~~~~~~~~~~~ Stack of MainThread (41740) ~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pytest\__main__.py", line 9, in <module>
+    raise SystemExit(pytest.console_main())
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\config\__init__.py", line 223, in console_main
+    code = main()
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\config\__init__.py", line 199, in main
+    ret: ExitCode | int = config.hook.pytest_cmdline_main(config=config)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\main.py", line 318, in wrap_session
+    session.exitstatus = doit(config, session) or 0
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\main.py", line 372, in _main
+    config.hook.pytest_runtestloop(session=session)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\main.py", line 396, in pytest_runtestloop
+    item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\runner.py", line 118, in pytest_runtest_protocol
+    runtestprotocol(item, nextitem=nextitem)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\runner.py", line 137, in runtestprotocol
+    reports.append(call_and_report(item, "call", log))
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\runner.py", line 244, in call_and_report
+    call = CallInfo.from_call(
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\runner.py", line 353, in from_call
+    result: TResult | None = func()
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\runner.py", line 245, in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\runner.py", line 179, in pytest_runtest_call
+    item.runtest()
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\python.py", line 1720, in runtest
+    self.ihook.pytest_pyfunc_call(pyfuncitem=self)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\repos\windpower\simulation\.venv\Lib\site-packages\_pytest\python.py", line 166, in pytest_pyfunc_call
+    result = testfunction(**testargs)
+  File "C:\repos\windpower\simulation\tests\simtests\test_landing_lua.py", line 226, in test_landing_lua
+    r = _run_landing(simtest_log)
+  File "C:\repos\windpower\simulation\tests\simtests\test_landing_lua.py", line 142, in _run_landing
+    lua.tick(t_sim, runner)
+  File "C:\repos\windpower\simulation\tests\common\mock_ardupilot.py", line 138, in tick
+    _feed_obs(self._sim, obs, accel_body=accel_body)
+  File "C:\repos\windpower\simulation\tests\common\mock_ardupilot.py", line 60, in _feed_obs
+    sim.vel_ned = obs.vel.tolist()
+  File "C:\repos\windpower\simulation\rawes_lua_harness.py", line 234, in vel_ned
+    self._mock.vel_ned.x = float(xyz[0])
++++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++

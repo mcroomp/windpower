@@ -243,5 +243,5 @@ def main(log_dir):
 
 
 if __name__ == '__main__':
-    log_dir = sys.argv[1] if len(sys.argv) > 1 else 'simulation/logs/test_lua_flight_steady'
+    log_dir = sys.argv[1] if len(sys.argv) > 1 else 'simulation/logs/test_lua_flight_steady_sitl'
     main(log_dir)

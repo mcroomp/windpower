@@ -1,5 +1,5 @@
 """
-test_arm_minimal.py -- Minimal ArduCopter SITL arm test.
+test_arm_minimal_sitl.py -- Minimal ArduCopter SITL arm test.
 
 No mediator, no dynamics, no simulation dependencies.
 A static-sensor mediator subprocess (mediator_static.py) sends hard-coded
@@ -21,7 +21,7 @@ Sensor packet (NED body-frame, level hover at 50 m)
 
 Usage
 -----
-  bash test.sh stack -v -k test_arm_minimal
+  bash test.sh stack -v -k test_arm_minimal_sitl
 """
 
 import logging
@@ -40,7 +40,7 @@ sys.path.insert(0, str(_SITL_DIR))
 from stack_infra import StackConfig, _static_stack
 from gcs import GUIDED_NOGPS, RawesGCS
 
-log = logging.getLogger("test_arm_minimal")
+log = logging.getLogger("test_arm_minimal_sitl")
 
 _POS   = np.array([0.0,  0.0, -50.0])
 _VEL   = np.array([0.1,  0.0,   0.0])
@@ -49,7 +49,7 @@ _ACCEL = np.array([0.0,  0.0,  -9.81])
 _GYRO  = np.zeros(3)
 
 
-def test_arm_minimal(tmp_path, request):
+def test_arm_minimal_sitl(tmp_path, request):
     """
     Minimal arm test: SITL + static-sensor mediator subprocess.  No mediator.
 

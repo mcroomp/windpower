@@ -1,5 +1,5 @@
 """
-torque/test_servo_tail_yaw_regulation.py -- H_TAIL_TYPE=0 servo activation test.
+torque/test_servo_tail_yaw_regulation_sitl.py -- H_TAIL_TYPE=0 servo activation test.
 
 Checks that ArduPilot's ATC_RAT_YAW PID actually commands SERVO4 away from
 the 1500 µs neutral when the hub drifts (constant-RPM profile).
@@ -19,7 +19,7 @@ _MOTOR_IDLE_US           = 1500   # SERVO4_TRIM: servo neutral
 _ACTIVATION_THRESHOLD_US = 100    # µs from neutral
 
 
-def test_servo_tail_activation(torque_armed_servo_tail):
+def test_servo_tail_activation_sitl(torque_armed_servo_tail):
     """
     H_TAIL_TYPE=0 + SERVO4_TRIM=1500: servo must deviate >= 100 µs from neutral.
 

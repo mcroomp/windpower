@@ -1,5 +1,5 @@
 """
-test_tail_tilt.py -- ACRO static-hold gate: no swashplate tilt, no PID firing.
+test_tail_tilt_sitl.py -- GUIDED_NOGPS static-hold gate: no swashplate tilt, no PID firing.
 
 Holds the hub stationary at the steady-state equilibrium orientation
 (from steady_state_starting.json) with the production config
@@ -8,12 +8,12 @@ Holds the hub stationary at the steady-state equilibrium orientation
   1. Swashplate tilt: |tilt_lon| < 0.10 and |tilt_lat| < 0.10
   2. Attitude PID: ATTITUDE_TARGET body_roll/pitch_rate < 0.05 rad/s
 
-Both checks must pass for 15 s with neutral sticks in ACRO mode.
+Both checks must pass for 15 s with neutral sticks in GUIDED_NOGPS mode.
 
 History: adding H_TAIL_TYPE=4 to rawes_sitl_defaults.parm initially caused
 tilt_lat=0.432 during the kinematic phase because the vehicle was in
 STABILIZE (mode 0). STABILIZE targets roll=0/pitch=0, generating constant
-cyclic at 65 deg tilt. Fix: set ACRO before arm (wait for EKF3 active first
+cyclic at 65 deg tilt. Fix: set GUIDED_NOGPS before arm (wait for EKF3 active first
 so DO_SET_MODE is accepted). This test is the regression gate for that fix.
 """
 import json
@@ -72,11 +72,11 @@ _RATE_CMD_LIMIT = 0.05   # rad/s; ATTITUDE_TARGET rate command; > this means PID
 
 
 @pytest.mark.timeout(120)
-def test_tail_tilt_h_tail_type_4(tmp_path, request):
+def test_tail_tilt_h_tail_type_4_sitl(tmp_path, request):
     """
     Static hold at IC equilibrium with H_TAIL_TYPE=4: tilt must stay near zero.
 
-    If tilt_lat or tilt_lon exceeds 0.10 in ACRO mode with neutral sticks,
+    If tilt_lat or tilt_lon exceeds 0.10 in GUIDED_NOGPS mode with neutral sticks,
     H_TAIL_TYPE=4 is corrupting the swashplate output — do NOT add it to
     rawes_sitl_defaults.parm for flight tests.
     """
@@ -108,7 +108,7 @@ def test_tail_tilt_h_tail_type_4(tmp_path, request):
 
             # ArduPilot ignores DO_SET_MODE while AHRS is on DCM (EKF3 not yet active).
             # Wait for "EKF3 active" STATUSTEXT before handing off to _arm_sequence.
-            log.info("Waiting for EKF3 to become active before switching to ACRO...")
+            log.info("Waiting for EKF3 to become active before switching to GUIDED_NOGPS...")
             t_ekf3_deadline = gcs.sim_now() + 30.0
             ekf3_active = False
             while gcs.sim_now() < t_ekf3_deadline:
@@ -128,7 +128,7 @@ def test_tail_tilt_h_tail_type_4(tmp_path, request):
             if not ekf3_active:
                 pytest.fail("EKF3 never became active within 30 s")
 
-            # Standard arm sequence: ACRO before arm + hard assert.
+            # Standard arm sequence: GUIDED_NOGPS before arm + hard assert.
             _arm_sequence(
                 gcs, log,
                 rc_override={8: 2000},
@@ -174,7 +174,7 @@ def test_tail_tilt_h_tail_type_4(tmp_path, request):
 
                 elif mt == "ATTITUDE_TARGET":
                     # body_roll/pitch/yaw_rate: rate commands from ArduPilot attitude
-                    # controller. With neutral sticks in ACRO these must stay near zero --
+                    # controller. With neutral sticks in GUIDED_NOGPS these must stay near zero --
                     # any nonzero value means the PID is reacting to a perceived attitude
                     # error (e.g. STABILIZE-style levelling or I-term windup).
                     rr = float(msg.body_roll_rate)

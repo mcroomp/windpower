@@ -1,5 +1,5 @@
 """
-torque/test_yaw_regulation.py — Counter-torque motor stack test.
+torque/test_yaw_regulation_sitl.py — Counter-torque motor stack test.
 
 Verifies that ArduPilot SITL can hold hub yaw steady while the GB4008
 anti-rotation motor counter-rotates against the spinning rotor hub.
@@ -28,7 +28,7 @@ Telemetry
 
 Run with (inside Docker)
 ------------------------
-  RAWES_RUN_STACK_INTEGRATION=1 pytest simulation/tests/sitl/torque/test_yaw_regulation.py -v
+  RAWES_RUN_STACK_INTEGRATION=1 pytest simulation/tests/sitl/torque/test_yaw_regulation_sitl.py -v
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ _SETTLE_S          = 75.0   # absolute SITL: startup_hold(15) + 60 s dynamics se
 _OBSERVE_S         = 20.0
 _MAX_PSI_DOT_RAD_S = math.radians(5.0)   # [rad/s]
 
-def test_yaw_regulation(torque_armed):
+def test_yaw_regulation_sitl(torque_armed):
     """
     ArduPilot SITL regulates hub yaw using the DDFP (Ch4) output.
 

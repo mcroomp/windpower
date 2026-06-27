@@ -1,5 +1,5 @@
 """
-torque/test_wobble.py — High-tilt swashplate wobble test.
+torque/test_wobble_sitl.py — High-tilt swashplate wobble test.
 
 Simulates a RAWES hub under aggressive cyclic swashplate input: roll +/-20 deg,
 pitch +/-15 deg, orbital frequency 0.10 Hz.
@@ -15,7 +15,7 @@ At 20 deg roll with droll/dt approx +/-12.6 deg/s (0.10 Hz), the gyro Z projecti
 in the body frame is roughly sin(20 deg) x 12.6 deg/s approx 4.3 deg/s.  The yaw PID must
 reject this apparent yaw rate without over-correcting.
 
-GPS fusion is disabled (same as test_pitch_roll) because the large horizontal
+GPS fusion is disabled (same as test_pitch_roll_sitl) because the large horizontal
 accel component (g*sin(20 deg) approx 3.4 m/s^2) would trigger GPS Glitch.
 
 EKF compass-tilt artifact -- why the threshold is high
@@ -59,7 +59,7 @@ _THRESHOLD  = math.radians(10.0)  # [rad/s] physics ground truth
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["wobble"], indirect=True)
-def test_wobble(torque_armed_profile):
+def test_wobble_sitl(torque_armed_profile):
     """
     Hub tilts aggressively: roll +/-20 deg, pitch +/-15 deg, at orbital frequency 0.10 Hz.
     Circular tilting creates an apparent ~10-20 deg/s yaw in ATTITUDE.yawspeed via

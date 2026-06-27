@@ -2,10 +2,10 @@
 flight/conftest.py — pytest fixtures for RAWES flight stack integration tests.
 
 Fixtures:
-  acro_armed              — full ACRO stack (mediator + arm).
-  acro_armed_pumping_lua  - ACRO stack with rawes.lua in steady mode (SCR_USER6=1).
-  acro_armed_landing_lua  — ACRO stack with rawes.lua in landing mode (SCR_USER6=4).
-  acro_armed_lua_full     — ACRO stack with rawes.lua in flight mode (SCR_USER6=1).
+    guided_nogps_armed              — full GUIDED_NOGPS stack (mediator + arm).
+    guided_nogps_armed_pumping_lua  - GUIDED_NOGPS stack with rawes.lua in steady mode (SCR_USER6=1).
+    guided_nogps_armed_landing_lua  — GUIDED_NOGPS stack with rawes.lua in landing mode (SCR_USER6=4).
+    guided_nogps_armed_lua_full     — GUIDED_NOGPS stack with rawes.lua in flight mode (SCR_USER6=1).
 """
 import math
 import os
@@ -15,7 +15,6 @@ import pytest
 from stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
 from stack_infra import (
     _acro_stack,
-    _BASE_ACRO_PARAMS,
     _RAWES_DEFAULTS_PARM,
     _install_lua_scripts,
     _STARTUP_DAMP_S,
@@ -27,14 +26,14 @@ from stack_infra import (
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def acro_armed(tmp_path, request):
-    """Full ACRO stack fixture. Yields StackContext armed in ACRO mode."""
+def guided_nogps_armed(tmp_path, request):
+    """Full GUIDED_NOGPS stack fixture. Yields StackContext armed in GUIDED_NOGPS mode."""
     with _acro_stack(tmp_path, test_name=request.node.name) as ctx:
         yield ctx
 
 
 @pytest.fixture
-def acro_armed_pumping_lua(tmp_path, request):
+def guided_nogps_armed_pumping_lua(tmp_path, request):
     """
     Pumping-cycle stack fixture with rawes.lua active in steady mode (SCR_USER6=1);
     the pumping schedule is driven entirely from the ground via RAWES_TEN/RAWES_SUB.
@@ -84,11 +83,11 @@ def acro_armed_pumping_lua(tmp_path, request):
 
 
 @pytest.fixture
-def acro_armed_landing_lua(tmp_path, request):
+def guided_nogps_armed_landing_lua(tmp_path, request):
     """
     Landing stack fixture with rawes.lua active in landing mode (SCR_USER6=4).
 
-    Extends acro_armed_landing:
+    Extends guided_nogps_armed_landing_lua:
       - kinematic_vel_ramp_s=20: hub exits kinematic at vel=0, eliminating the
         linear tether jolt. Tether extension at exit ~ 0 m, tension ~ 0 N.
       - rawes.lua installed before SITL starts.
@@ -101,8 +100,8 @@ def acro_armed_landing_lua(tmp_path, request):
           (b) Lua alt_est computation is correct: "RAWES land: final_drop"
               STATUSTEXT fires when alt_est <= LAND_MIN_TETHER_M=2 m.
           (c) Hub descends to floor and tension stays safe (Lua + WinchController).
-        Lua's VZ descent and orbit-tracking formulas are covered by unit tests
-        and test_lua_flight_steady.
+        Lua's VZ descent and steady-guidance formulas are covered by unit tests
+        and test_lua_flight_steady_sitl.
 
     Hub starts at tether equilibrium with xi=80 deg (10 deg from horizontal).
     Matches test_landing.py: BZ_INIT=[0, cos(80), -sin(80)], pos0=20*BZ_INIT.
@@ -191,15 +190,15 @@ def acro_armed_landing_lua(tmp_path, request):
 
 
 @pytest.fixture
-def acro_armed_lua_full(tmp_path, request):
+def guided_nogps_armed_lua_full(tmp_path, request):
     """
-    Full-stack ACRO fixture with rawes.lua in flight mode (SCR_USER6=1),
+    Full-stack GUIDED_NOGPS fixture with rawes.lua in flight mode (SCR_USER6=1),
     internal_controller=False.
 
     Uses kinematic startup ramp with velocity ~0.96 m/s (default from config.py)
     to enable GPS yaw fusion at high body tilt (65°). Despite the non-zero velocity
     ramp, the fixture waits for GPS fusion before yielding, allowing Lua to capture
-    orbit tracking well before kinematic exits at t=80s.
+    steady-guidance capture well before kinematic exits at t=80s.
 
     Key design points:
       - SCR_USER6=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
@@ -207,34 +206,37 @@ def acro_armed_lua_full(tmp_path, request):
       - Velocity ~0.96 m/s (default from config.py) is applied from frame 0 to
         provide EKF with velocity-derived yaw heading for GPS fusion.
       - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro).
-        _tdir0 fires; orbit tracking ready for activation.
+        _tdir0 fires; steady-guidance ready for activation.
       - Fixture waits for GPS fusion before yielding.
       - Test promotes SCR_USER6 from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
-        kinematic_exit (t=80s) to activate altitude-hold orbit tracking.
+        kinematic_exit (t=80s) to activate altitude-hold steady guidance.
 
     Timeline (from mediator start, speedup=1):
-      t=0..80 s   kinematic with vel ~0.96 m/s (default orbit tangent).
+    t=0..80 s   kinematic with vel ~0.96 m/s (default startup tangent).
       t~6 s       GPS first fix; EKF3 origin set.
       t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
                   NVF streamed.
       t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires;
                   fixture yields.
       t~80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY).
-      t~80+       free flight under ArduPilot + Lua with orbit tracking active.
+    t~80+       free flight under ArduPilot + Lua with steady guidance active.
     """
     extra = {
-        # Orbit tracking needs velocity for GPS yaw fusion at high body tilt (65°).
-        # Use default vel0 ~0.96 m/s from config.py (tangent to tether orbit)
+        # Steady-guidance startup needs velocity for GPS yaw fusion at high body tilt (65°).
+        # Use default vel0 ~0.96 m/s from config.py (startup tangent to tether path)
         # with ramp_s=0 so velocity is applied from frame 0.
         # The hub will drift ~77 m over 80 s at ~0.96 m/s, but GPS fusion allows
-        # Lua to capture orbit tracking well before kinematic exits (t=80s).
+        # Lua to capture steady guidance well before kinematic exits (t=80s).
         # DO NOT set vel0=[0,0,0]: stationary hold prevents GPS yaw fusion.
         #
         # Default vel0 from config.py DEFAULTS: [-0.257, 0.916, -0.093] m/s
-        # (normalized orbit tangent ~0.96 m/s magnitude).
+        # (normalized startup tangent ~0.96 m/s magnitude).
         # kinematic_vel_ramp_s: 0.0 means velocity is applied from t=0 (frame 0).
         "kinematic_vel_ramp_s": 0.0,
         "startup_damp_seconds": 80.0,
+        # Mediator-side cyclic handoff smoothing after kinematic release:
+        # blend IC cyclic -> AP cyclic over first 5 s of free flight.
+        "post_release_cyclic_blend_s": 5.0,
         # Enable the mediator's winch command socket so we can run a
         # ground-side tension regulator (mirrors test_create_ic warmup).
         "winch_cmd_port":       14570,
@@ -268,14 +270,30 @@ def acro_armed_lua_full(tmp_path, request):
             ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
         ctx.wait_drain(timeout=1.0, label="post-param")
 
-        # Stream IC collective to Lua so MODE_PASSIVE pins ch3 at the IC
-        # value and omega_spin doesn't droop while the body is kinematically
+        # Stream IC collective to Lua so MODE_PASSIVE holds the IC collective
+        # through GUIDED throttle and omega_spin doesn't droop while the body is kinematically
         # locked.
         _ic = ctx.initial_state
         if _ic is not None:
-            _coll_trim = float(_ic.get("stack_coll_eq", _ic.get("coll_eq_rad", -0.18)))
+            # Seed Lua with the exact IC collective used by physics. Prefer
+            # eq_physics.collective_rad, then explicit IC scalar fields.
+            _eq_phys = _ic.get("eq_physics")
+            if isinstance(_eq_phys, dict) and "collective_rad" in _eq_phys:
+                _coll_trim = float(_eq_phys["collective_rad"])
+                _coll_src = "eq_physics.collective_rad"
+            elif "stack_coll_eq" in _ic:
+                _coll_trim = float(_ic["stack_coll_eq"])
+                _coll_src = "stack_coll_eq"
+            elif "coll_eq_rad" in _ic:
+                _coll_trim = float(_ic["coll_eq_rad"])
+                _coll_src = "coll_eq_rad"
+            else:
+                raise KeyError(
+                    "initial_state missing collective seed; expected one of "
+                    "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+                )
             ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
-            ctx.log.info("IC collective: coll=%+.4f rad", _coll_trim)
+            ctx.log.info("IC collective (%s): coll=%+.4f rad", _coll_src, _coll_trim)
 
             # Stream the IC equilibrium tension so the gravity-compensation disk
             # axis the Lua targets in MODE_STEADY matches the IC that generated
@@ -296,7 +314,7 @@ def acro_armed_lua_full(tmp_path, request):
         ctx.wait_drain(timeout=0.5, label="post-col")
 
         # Wait for GPS fusion before yielding.
-        # Lua needs _tdir0 (fires on GPS fusion) to begin orbit tracking.
+        # Lua needs _tdir0 (fires on GPS fusion) to begin steady guidance.
         # With dual GPS the wait is ~44 s (delAngBiasLearned bottleneck).
         ctx.log.info("Waiting for GPS fusion before yielding (up to 60 s) ...")
         _gps_seen: list[bool] = [False]
@@ -327,8 +345,8 @@ def acro_armed_lua_full(tmp_path, request):
             label       = "gps-fuse",
         )
         if not _gps_seen[0]:
-            raise RuntimeError("GPS did not fuse within 60 s — cannot start orbit tracking")
-        ctx.log.info("GPS fused — Lua orbit tracking active; yielding to test")
+            raise RuntimeError("GPS did not fuse within 60 s — cannot start steady guidance")
+        ctx.log.info("GPS fused — Lua steady guidance active; yielding to test")
 
         # ── Ground-side tension-regulating winch ─────────────────────────────
         # Mirrors the test_create_ic warmup pattern: a slow integrator on

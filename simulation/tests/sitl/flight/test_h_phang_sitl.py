@@ -1,5 +1,5 @@
 """
-test_h_phang.py -- verify H_SW_PHANG and H_SW_TYPE, and measure swashplate response.
+test_h_phang_sitl.py -- verify H_SW_PHANG and H_SW_TYPE, and measure swashplate response.
 
 Checks that:
   1. H_SW_TYPE = 3 (H3_120) and H_SW_PHANG = 0 are set correctly.
@@ -206,13 +206,13 @@ def _measure_response(gcs, ctx: StackContext) -> dict:
 # Test
 # ---------------------------------------------------------------------------
 
-def test_h_swash_phang(acro_armed: StackContext):
+def test_h_swash_phang_sitl(guided_nogps_armed: StackContext):
     """
     Verify H_SW_TYPE and H_SW_PHANG are set correctly, then measure swashplate
     step response.  Cross-coupling values are logged for diagnostics but are
     not asserted -- H_PHANG is never modified.
     """
-    ctx = acro_armed
+    ctx = guided_nogps_armed
     gcs = ctx.gcs
 
     try:
@@ -237,11 +237,11 @@ def test_h_swash_phang(acro_armed: StackContext):
         # Servos must produce a meaningful deflection on each axis.
         assert abs(m["tilt_lat_ch1"]) + abs(m["tilt_lon_ch1"]) > _MIN_AXIS_RESPONSE, (
             "Ch1=1700 roll step produced no measurable servo deflection. "
-            "Check ACRO_RP_P, ATC_RAT_RLL_P, and SERVO_OUTPUT_RAW stream rate."
+            "Check ATC_RAT_RLL_P and SERVO_OUTPUT_RAW stream rate."
         )
         assert abs(m["tilt_lat_ch2"]) + abs(m["tilt_lon_ch2"]) > _MIN_AXIS_RESPONSE, (
             "Ch2=1700 pitch step produced no measurable servo deflection. "
-            "Check ACRO_RP_P, ATC_RAT_PIT_P, and SERVO_OUTPUT_RAW stream rate."
+            "Check ATC_RAT_PIT_P and SERVO_OUTPUT_RAW stream rate."
         )
 
         # Cross-coupling is logged for diagnostics only -- not asserted.
