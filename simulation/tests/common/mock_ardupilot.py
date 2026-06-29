@@ -7,13 +7,14 @@ Provides a common interface for driving either:
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Callable
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from arduloop import GuidedAttitudeController, HeliParams, RateAxisParams
+from arduloop import GuidedAttitudeController, HeliParams
 from controller import (AZ_REF_TAU_S, AccelVibrationDamper,
                         compute_bz_altitude_hold, compute_rate_cmd,
                         compute_rate_cmd_sqrt, slerp_body_z,
@@ -24,33 +25,37 @@ from pumping_planner import TensionCommand
 from telemetry_csv import TelRow, write_csv
 
 
+def _bz_ned_to_roll_pitch_deg(bz_ned: np.ndarray, yaw_rad: float) -> tuple[float, float]:
+    """Convert desired body-z (NED) to roll/pitch at fixed yaw.
+
+    Mirrors rawes.lua:bz_ned_to_roll_pitch() so Python and Lua angle paths use
+    the same geometry.
+    """
+    bz = np.asarray(bz_ned, dtype=float)
+    n = float(np.linalg.norm(bz))
+    if n <= 1e-9:
+        return 0.0, 0.0
+    bz = bz / n
+
+    cy = float(np.cos(yaw_rad))
+    sy = float(np.sin(yaw_rad))
+    bz_fwd = cy * float(bz[0]) + sy * float(bz[1])
+    bz_right = -sy * float(bz[0]) + cy * float(bz[1])
+    bz_down = float(bz[2])
+
+    pitch_deg = float(np.degrees(np.arctan2(bz_fwd, bz_down)))
+    roll_deg = float(np.degrees(np.arcsin(np.clip(-bz_right, -1.0, 1.0))))
+    return roll_deg, pitch_deg
+
+
 def _tel_every_from_env(dt: float, default_hz: float = 20.0) -> int:
     hz = float(os.environ.get("RAWES_TEL_HZ", default_hz))
     return max(1, round(1.0 / (hz * dt)))
 
 
 def rawes_sitl_heli_params(loop_rate_hz: float) -> HeliParams:
-    """HeliParams mirroring the flight-representative rate-PID gains in
-    tests/sitl/rawes_sitl_defaults.parm.
-
-    The Lua stack flies ArduPilot SITL with these gains; the in-process Lua
-    simtest must use the same so it predicts real-stack behaviour.  rawes.lua
-    uses the GUIDED angle path (set_target_angle_and_rate_and_throttle), so the
-    rate PID is the inner loop under the ATC_ANG_*_P attitude P-loop: P must be
-    high enough to track the attitude-controller rate demand at the high-tilt /
-    low-tension reel-in operating point.  Over a full multi-cycle pump P<=0.06
-    drifts off-plane and blows up by cycle 2; P>=0.10 tracks tightly enough to
-    keep crosswind drift bounded (P=0.15 -> max_cw ~34 m, comparable to the
-    Python pumping path) -- see tests/oneoff/tune_lua_reelin.py.
-    """
-    rate = RateAxisParams(
-        P=0.15, I=0.10, D=0.02, FF=0.0, IMAX=0.0,
-        FLTT=20.0, FLTE=0.0, FLTD=10.0,
-    )
-    hp = HeliParams(loop_rate_hz=loop_rate_hz)
-    hp.roll = rate
-    hp.pitch = rate
-    return hp
+    """HeliParams loaded from ArduPilot .parm files with requested loop rate."""
+    return HeliParams(loop_rate_hz=loop_rate_hz)
 
 
 def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
@@ -108,8 +113,47 @@ class _MockArdupilotBase:
         if self.tel_fn is None or self._tel_every is None:
             return
         if self._log_step % self._tel_every == 0:
+            # Extract current body attitude (actual) from runner
+            obs = runner.observe()
+            R = obs.R
+            roll_now  = math.atan2(float(R[2, 1]), float(R[2, 2]))
+            pitch_now = -math.asin(float(np.clip(R[2, 0], -1.0, 1.0)))
+            yaw_now   = math.atan2(float(R[1, 0]), float(R[0, 0]))
+
+            # Extract target attitude and rates from guided controller
+            mav_att_target_roll_deg = float("nan")
+            mav_att_target_pitch_deg = float("nan")
+            mav_att_target_yaw_deg = float("nan")
+            mav_att_target_roll_rate_rads = float("nan")
+            mav_att_target_pitch_rate_rads = float("nan")
+            mav_att_target_yaw_rate_rads = float("nan")
+
+            if self._guided_ctrl is not None:
+                target_euler = self._guided_ctrl.attitude_target_euler_deg
+                mav_att_target_roll_deg = float(target_euler[0])
+                mav_att_target_pitch_deg = float(target_euler[1])
+                mav_att_target_yaw_deg = float(target_euler[2])
+                
+                rate_tgt = self._guided_ctrl.last_rate_target_rads
+                mav_att_target_roll_rate_rads = float(rate_tgt[0])
+                mav_att_target_pitch_rate_rads = float(rate_tgt[1])
+                mav_att_target_yaw_rate_rads = float(rate_tgt[2])
+
+            extra_kwargs = self.tel_fn(runner, sr) if self.tel_fn else {}
+            extra_kwargs.update(
+                mav_att_roll_deg=math.degrees(roll_now),
+                mav_att_pitch_deg=math.degrees(pitch_now),
+                mav_att_yaw_deg=math.degrees(yaw_now),
+                mav_att_target_roll_deg=mav_att_target_roll_deg,
+                mav_att_target_pitch_deg=mav_att_target_pitch_deg,
+                mav_att_target_yaw_deg=mav_att_target_yaw_deg,
+                mav_att_target_roll_rate_rads=mav_att_target_roll_rate_rads,
+                mav_att_target_pitch_rate_rads=mav_att_target_pitch_rate_rads,
+                mav_att_target_yaw_rate_rads=mav_att_target_yaw_rate_rads,
+            )
+
             self._telemetry.append(
-                TelRow.from_physics(runner, sr, self.col_rad, self._wind, **self.tel_fn(runner, sr))
+                TelRow.from_physics(runner, sr, self.col_rad, self._wind, **extra_kwargs)
             )
         self._log_step += 1
 
@@ -407,6 +451,10 @@ class _PumpingPythonMode:
             body_z_eq                    = bz.tolist() if bz is not None else [0.0, 0.0, 0.0],
         )
 
+    @property
+    def body_z_target(self) -> np.ndarray | None:
+        return None if self._bz_goal is None else np.asarray(self._bz_goal, dtype=float).copy()
+
 
 class _LandingPythonMode:
     """Python-equivalent landing behavior for MockArdupilot."""
@@ -493,6 +541,10 @@ class _LandingPythonMode:
             body_z_eq     = self.bz_current,
         )
 
+    @property
+    def body_z_target(self) -> np.ndarray:
+        return self.bz_current
+
 
 class _PythonBackend(_MockArdupilotBase):
     AP_HZ: float = 50.0
@@ -545,13 +597,28 @@ class _PythonBackend(_MockArdupilotBase):
 
         if self._guided_ctrl is not None:
             throttle = max(0.0, min(1.0, (self.col_rad - self.COL_MIN) / (self.COL_MAX - self.COL_MIN)))
-            self._guided_ctrl.set_target_rate_and_throttle(
-                float(np.degrees(self.roll_sp)),
-                float(np.degrees(self.pitch_sp)),
-                0.0,
-                throttle,
-                sim_time=t_sim,
-            )
+            bz_target = getattr(self._mode, "body_z_target", None)
+            if bz_target is not None:
+                yaw_rad = float(np.arctan2(obs.R[1, 0], obs.R[0, 0]))
+                roll_deg, pitch_deg = _bz_ned_to_roll_pitch_deg(np.asarray(bz_target, dtype=float), yaw_rad)
+                self._guided_ctrl.set_target_angle_and_rate_and_throttle(
+                    roll_deg,
+                    pitch_deg,
+                    float(np.degrees(yaw_rad)),
+                    0.0,
+                    0.0,
+                    0.0,
+                    throttle,
+                    sim_time=t_sim,
+                )
+            else:
+                self._guided_ctrl.set_target_rate_and_throttle(
+                    float(np.degrees(self.roll_sp)),
+                    float(np.degrees(self.pitch_sp)),
+                    0.0,
+                    throttle,
+                    sim_time=t_sim,
+                )
 
 
 class MockArdupilot:

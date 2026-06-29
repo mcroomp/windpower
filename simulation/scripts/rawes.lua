@@ -2,13 +2,13 @@
 rawes.lua -- Unified RAWES flight controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
-Mode is selected at runtime via SCR_USER6 (plain integer 0,1,2,5):
-  0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
-    1  steady      -- GUIDED rate hold (set_target_rate_and_throttle) + altitude collective PID  50 Hz
-  2  manual      -- yaw compensation (SERVO4 PID) + manually commanded cyclic/collective  100 Hz
-                    NVFs: RAWES_TLN (tlon rad), RAWES_TLT (tlat rad), RAWES_COL (col rad)
-  4  landing     -- (reserved, not yet implemented)
-  5  pumping     -- De Schutter pumping cycle                                       50 Hz
+Mode is selected at runtime via SCR_USER6:
+    0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
+    1  steady      -- primary guided flight path (set_target_rate_and_throttle)
+    2  manual      -- legacy bench override: yaw compensation + commanded cyclic/collective
+    3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
+    4  landing     -- reserved, not yet implemented
+    5  pumping     -- De Schutter pumping cycle
 
 Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
@@ -60,17 +60,15 @@ local _nv_floats = {}
 
 local MODE_NONE    = 0
 local MODE_STEADY  = 1
-local MODE_MANUAL  = 2   -- yaw compensation + manually commanded cyclic/collective via NVFs
-local MODE_PASSIVE = 3   -- armed but no commands: keep ch8 high, do nothing else.
-                         -- Used by stack tests during kinematic so the rate-PID
-                         -- has no setpoint to wind up against before release.
+local MODE_MANUAL  = 2   -- legacy bench override: yaw compensation + manually commanded cyclic/collective via NVFs
+local MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable during release.
 local MODE_LANDING = 4   -- reserved; not implemented here
 
--- Temporary debug hold for MODE_PASSIVE: command fixed IC attitude.
--- Set to false to restore live-attitude hold behavior.
-local PASSIVE_HOLD_IC_ATT = true
-local PASSIVE_IC_ROLL_DEG = -63.5
-local PASSIVE_IC_PITCH_DEG = 0.0
+-- MODE_PASSIVE IC seeds are provided over NVF (10-char names max):
+--   RAWES_COL : IC collective [rad]
+--   RAWES_RIC : IC roll       [rad]
+--   RAWES_PIC : IC pitch      [rad]
+-- They start nil and are committed atomically only after all three arrive.
 
 -- RAWES_SUB carries a generic substate index (delivered via NAMED_VALUE_FLOAT).
 -- The ground pumping schedule runs in MODE_STEADY and uses RAWES_SUB only for
@@ -182,7 +180,13 @@ local _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
 -- is kinematically locked.  Defaults to the cruise-flight value.
-local _ic_col         = COL_CRUISE_FLIGHT_RAD
+local _ic_col         = nil
+local _ic_roll_deg    = nil
+local _ic_pitch_deg   = nil
+local _ic_seeded      = false
+local _ic_pending_col = nil
+local _ic_pending_roll_deg = nil
+local _ic_pending_pitch_deg = nil
 
 -- One-shot debug state for capture/first-command handoff diagnostics.
 local _dbg_cap_logged = false
@@ -279,6 +283,11 @@ local function col_rad_to_thrust(col_rad)
     return t
 end
 
+local function ic_col_or_default()
+    if _ic_col ~= nil then return _ic_col end
+    return COL_CRUISE_FLIGHT_RAD
+end
+
 local function thrust_to_col_rad(thrust)
     local t = thrust
     if t < 0.0 then t = 0.0 end
@@ -369,14 +378,15 @@ local function compute_rate_cmd_sqrt(bz_now, bz_goal, kp, accel_max, dt)
     return ahrs:earth_to_body(rate_world)
 end
 
--- Manual-mode RC override path.
+-- Legacy manual-mode RC override path.
 --
--- ── MODE_MANUAL: yaw compensation + manual cyclic/collective ────────────────
+-- ── MODE_MANUAL: legacy yaw compensation + manual cyclic/collective ─────────
 -- SERVO4 (GB4008): driven by yaw PID.  Same sign convention as the old MODE_YAW:
 --   err = -gyro_z; positive error (CCW drift) -> more motor throttle -> CW torque.
 -- RC1/RC2: set from _man_tlat_rad / _man_tlon_rad (updated via RAWES_TLT / RAWES_TLN).
 --   PWM = 1500 + (setpoint_rad / H_CYC_MAX_rad) * 500, clamped to [1000, 2000].
---   Requires H_FLYBAR_MODE=1 so the RC override bypasses the rate PID.
+--   Requires H_FLYBAR_MODE=1 and ACRO so the RC override bypasses the rate PID
+--   and the RC channels directly control the servos.
 -- RC3: set from _ic_col (updated via RAWES_COL NVF).
 -- All three NVFs are persistent (last value holds until a new one arrives).
 
@@ -457,15 +467,15 @@ local function run_manual(dt)
     if _ch2_pwm < 1000 then _ch2_pwm = 1000 end
     if _rc_ch1 then _rc_ch1:set_override(_ch1_pwm) end
     if _rc_ch2 then _rc_ch2:set_override(_ch2_pwm) end
-    -- Collective from _ic_col (updated via RAWES_COL NVF).
-    local _col_thrust_man = col_rad_to_thrust(_ic_col)
+    -- Collective from IC seed if available, else cruise fallback.
+    local _col_thrust_man = col_rad_to_thrust(ic_col_or_default())
     if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + _col_thrust_man * 1000.0 + 0.5)) end
 
     if _diag % 100 == 1 then
         gcs:send_text(6, string.format(
             "RAWES man: yrate=%+.1fdeg/s  s4out=%.3f  s4pwm=%d  col=%.2fdeg  tlon=%.2fdeg  tlat=%.2fdeg",
             math.deg(yaw_rate), output, pwm,
-            math.deg(_ic_col), math.deg(_man_tlon_rad), math.deg(_man_tlat_rad)))
+            math.deg(ic_col_or_default()), math.deg(_man_tlon_rad), math.deg(_man_tlat_rad)))
     end
 end
 
@@ -485,11 +495,11 @@ local function _on_mode_enter(mode)
         _vib_acc_prev = 0.0
         _vib_vel_est = 0.0
         _vib_corr_last = 0.0
-        local _thr_ic = col_rad_to_thrust(_ic_col)
+        local _thr_ic = col_rad_to_thrust(ic_col_or_default())
         local _col_back = thrust_to_col_rad(_thr_ic)
         gcs:send_text(6, string.format(
             "RAWES steady: IC col=%.2fdeg -> thr=%.3f -> col=%.2fdeg",
-            math.deg(_ic_col), _thr_ic, math.deg(_col_back)))
+            math.deg(ic_col_or_default()), _thr_ic, math.deg(_col_back)))
     end
     if mode == MODE_MANUAL then
         _yaw_i        = 0.0
@@ -527,7 +537,7 @@ local function run_flight()
     -- Collective is passed as throttle so ArduPilot's set_throttle_out path
     -- controls it directly -- no ch3 RC override needed.
     if not _el_initialized then
-        local ct = col_rad_to_thrust(_ic_col)
+        local ct = col_rad_to_thrust(ic_col_or_default())
 
         if not ahrs:healthy() then return end
 
@@ -558,7 +568,7 @@ local function run_flight()
                 -- col_cmd == _ic_col at capture (alt_err=vz=0), so there is no
                 -- thrust/tension step that the slow KI_ALT integrator must chase.
                 -- The I-term legitimately starts at 0 (no integrated error yet).
-                local col_ff  = _ic_col
+                local col_ff  = ic_col_or_default()
                 if col_ff < COL_MIN_RAD then col_ff = COL_MIN_RAD end
                 if col_ff > COL_MAX_RAD then col_ff = COL_MAX_RAD end
                 _col_trim     = col_ff
@@ -689,7 +699,8 @@ local function run_flight()
     local col_pid = _col_trim + KP_ALT * alt_err - KD_VZ * vz_gate * vz_up + _alt_i
     -- Expected release transient: keep collective close to IC initially, then
     -- fade in altitude/vibration corrections over POST_RELEASE_RECOVERY_S.
-    local col_cmd = _ic_col + recovery_alpha * (col_pid - _ic_col)
+    local _ic_col_now = ic_col_or_default()
+    local col_cmd = _ic_col_now + recovery_alpha * (col_pid - _ic_col_now)
 
     -- Vibration damper: body-Z accel, HP filter, velocity estimate, collective.
     _vib_corr_last = 0.0
@@ -751,6 +762,37 @@ local function run_armon(now)
     end
 end
 
+local function run_passive_mode(now)
+    -- Armed-but-quiet: hold the IC operating point so the kinematic
+    -- release transitions smoothly. Hold zero body-rate demand and
+    -- pass IC collective through GUIDED throttle (no H_FLYBAR_MODE
+    -- dependency).
+    local ic_ready = (_ic_col ~= nil and _ic_roll_deg ~= nil and _ic_pitch_deg ~= nil)
+    local col_thrust_p = col_rad_to_thrust(ic_col_or_default())
+    local mode_now = vehicle:get_mode()
+    if ic_ready and (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy() then
+        vehicle:set_target_angle_and_rate_and_throttle(
+            _ic_roll_deg, _ic_pitch_deg, math.deg(_passive_hold_yaw_rad or 0.0),
+            0.0, 0.0, 0.0, col_thrust_p)
+    end
+
+    -- Take ownership of SERVO4 and pin the GB4008 at 800 us (ESC armed
+    -- but motor off). Matches the safety-shutdown PWM used by
+    -- calibrate.py so a PASSIVE session never spins the rotor.
+    SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, 800, 200)
+    if now - _none_status_ms >= 5000 then
+        _none_status_ms = now
+        if ic_ready then
+            gcs:send_text(6, string.format(
+                "RAWES PASS IC: r=%.1f p=%.1f y=%.1f col=%.2fdeg thr=%.3f s4=800",
+                _ic_roll_deg, _ic_pitch_deg, math.deg(_passive_hold_yaw_rad or 0.0),
+                math.deg(_ic_col), col_thrust_p))
+        else
+            gcs:send_text(6, "RAWES PASS: waiting for IC seed (COL/RIC/PIC)")
+        end
+    end
+end
+
 -- ── Main update ───────────────────────────────────────────────────────────────
 
 local function update()
@@ -772,9 +814,31 @@ local function update()
     local now  = millis()
 
     -- Update altitude, tension, cyclic and collective targets from NV messages
-    if _nv_floats["RAWES_ALT"]    then _target_alt   = _nv_floats["RAWES_ALT"]    end
-    if _nv_floats["RAWES_TEN"]    then _tension_n    = _nv_floats["RAWES_TEN"]    end
-    if _nv_floats["RAWES_COL"]    then _ic_col       = _nv_floats["RAWES_COL"]    end
+    if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
+    if _nv_floats["RAWES_TEN"] then _tension_n  = _nv_floats["RAWES_TEN"] end
+
+    -- IC seed handling: do not set active IC commands until all three
+    -- (collective, roll, pitch) have been observed at least once.
+    if _nv_floats["RAWES_COL"] then _ic_pending_col = _nv_floats["RAWES_COL"] end
+    if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
+    if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
+
+    if not _ic_seeded then
+        if _ic_pending_col ~= nil and _ic_pending_roll_deg ~= nil and _ic_pending_pitch_deg ~= nil then
+            _ic_col = _ic_pending_col
+            _ic_roll_deg = _ic_pending_roll_deg
+            _ic_pitch_deg = _ic_pending_pitch_deg
+            _ic_seeded = true
+            gcs:send_text(6, string.format(
+                "RAWES IC seed set: r=%.1f p=%.1f col=%.2fdeg",
+                _ic_roll_deg, _ic_pitch_deg, math.deg(_ic_col)))
+        end
+    else
+        -- After initial atomic seed, accept incremental updates.
+        if _nv_floats["RAWES_COL"] then _ic_col = _nv_floats["RAWES_COL"] end
+        if _nv_floats["RAWES_RIC"] then _ic_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
+        if _nv_floats["RAWES_PIC"] then _ic_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
+    end
     if _nv_floats["RAWES_TLN"]    then _man_tlon_rad = _nv_floats["RAWES_TLN"]    end
     if _nv_floats["RAWES_TLT"]    then _man_tlat_rad = _nv_floats["RAWES_TLT"]    end
     -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up)
@@ -803,48 +867,8 @@ local function update()
         return update, BASE_PERIOD_MS
     end
 
-    if arming:is_armed() and _rc_ch8 then
-        _rc_ch8:set_override(2000)
-    end
-
     if mode == MODE_PASSIVE then
-        -- Armed-but-quiet: hold the IC operating point so the kinematic
-        -- release transitions smoothly.  Hold zero body-rate demand and
-        -- pass IC collective through GUIDED throttle (no H_FLYBAR_MODE
-        -- dependency).
-        local _col_thrust_p = col_rad_to_thrust(_ic_col)
-
-        local _mode_now = vehicle:get_mode()
-        if (_mode_now == GUIDED_MODE_NUM or _mode_now == 20) and ahrs:healthy() then
-            if PASSIVE_HOLD_IC_ATT then
-                local _yaw_cmd = _passive_hold_yaw_rad or 0.0
-                vehicle:set_target_angle_and_rate_and_throttle(
-                    PASSIVE_IC_ROLL_DEG, PASSIVE_IC_PITCH_DEG, math.deg(_yaw_cmd),
-                    0.0, 0.0, 0.0, _col_thrust_p)
-            else
-                local _roll_now = ahrs:get_roll_rad()
-                local _pitch_now = ahrs:get_pitch_rad()
-                local _yaw_now = ahrs:get_yaw_rad()
-                if _roll_now and _pitch_now and _yaw_now then
-                    vehicle:set_target_angle_and_rate_and_throttle(
-                        math.deg(_roll_now), math.deg(_pitch_now), math.deg(_yaw_now),
-                        0.0, 0.0, 0.0, _col_thrust_p)
-                end
-            end
-        end
-
-        -- Take ownership of SERVO4 and pin the GB4008 at 800 us (ESC armed
-        -- but motor off).  Matches the safety-shutdown PWM used by
-        -- calibrate.py so a PASSIVE session never spins the rotor.  Same
-        -- direct-write path MODE_MANUAL uses; needs SERVO4_FUNCTION=0 for the
-        -- override to stick (calibrate.py's `passive` command handles that).
-        SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, 800, 200)
-        if now - _none_status_ms >= 5000 then
-            _none_status_ms = now
-            gcs:send_text(6, string.format(
-                "RAWES PASS: col=%.2fdeg s4=800",
-                math.deg(_ic_col)))
-        end
+        run_passive_mode(now)
         return update, BASE_PERIOD_MS
     end
 
@@ -856,8 +880,9 @@ local function update()
     end
 
     if mode == MODE_MANUAL then
-        -- Manual mode: yaw compensation via SERVO4 PID + NVF-commanded cyclic/collective.
+        -- Legacy manual mode: yaw compensation via SERVO4 PID + NVF-commanded cyclic/collective.
         -- run_manual drives SERVO4 directly and sets RC1/RC2/RC3 via override.
+        if _rc_ch8 then _rc_ch8:set_override(2000) end
         run_manual(BASE_PERIOD_MS * 0.001)
     end
 

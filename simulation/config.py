@@ -82,6 +82,13 @@ DEFAULTS: dict = {
     "startup_damp_seconds":         30.0,   # kinematic duration [s]
     "kinematic_vel_ramp_s":         15.0,   # vel ramp-to-zero window at end [s]; 0 = constant vel throughout
     "startup_damp_k_ang":          500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
+    # Kinematic aero behavior:
+    #   "locked" (default): legacy full kinematic lock (no physics response)
+    #   "nul"            : simplified debug response where acceleration is
+    #                        proportional to cyclic body-rate command while
+    #                        translation remains kinematically locked.
+    "kinematic_aero_mode": "locked",
+    "kinematic_nul_rate_gain_rads_per_rad": 0.2,
 
     # ── Attitude damping ──────────────────────────────────────────────────────
     "base_k_ang": 0.0,              # optional diagnostic angular drag [N·m·s/rad]
@@ -127,6 +134,20 @@ DEFAULTS: dict = {
     # send winch set_target commands and receive physics state at ~10 Hz.
     # 0 = disabled (default: trajectory planner owns the winch).
     "winch_cmd_port": 0,
+
+    # ── Dedicated MAVLink log link (mediator-side, optional) ─────────────────
+    # Optional second MAVLink client endpoint used by mediator to sample
+    # ATTITUDE/ATTITUDE_TARGET/SERVO_OUTPUT_RAW for telemetry CSV logging.
+    # Empty string disables this listener.
+    "mavlink_log_connection": "",
+    # Requested ATTITUDE_TARGET message rate [Hz] over the dedicated link.
+    "mavlink_att_target_hz": 100.0,
+    # Requested ATTITUDE message rate [Hz] over the dedicated link.
+    "mavlink_attitude_hz": 100.0,
+    # Requested SERVO_OUTPUT_RAW message rate [Hz] over the dedicated link.
+    "mavlink_servo_output_raw_hz": 100.0,
+    # Periodic mediator-side diagnostics log interval for dedicated MAVLink rx.
+    "mavlink_log_diag_interval_s": 5.0,
 
     # ── Winch hardware parameters ─────────────────────────────────────────────
     # Derived from RAWES ground winch motor spec (400 W BLDC, 20:1, 50 mm drum).

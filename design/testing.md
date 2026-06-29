@@ -57,6 +57,8 @@ The `simtest` timeout is set globally in `simulation/pytest.ini`.
 | `test_force_balance.py` | Static force balance at equilibrium |
 | `test_physical_validation.py` | Physical consistency checks (mass, inertia, geometry) |
 | `test_swashplate.py` | H3-120 inverse mixing, cyclic blade pitch |
+| `test_swashplate_servo_model.py` | SwashplateServoModel: slew-limiting, saturation, reset, properties |
+| `test_swashplate_servo_directions.py` | **Servo output directions for cyclic commands** — catches parameter order bugs |
 | `test_swashplate_aero.py` | Swashplate + aero integrated checks |
 | `test_swashplate_aero_glauert.py` | Glauert correction in swashplate+aero path |
 | `test_tether_stability.py` | Tether elastic model — tension, slack, snap |
@@ -521,3 +523,28 @@ giving it access to all module-level locals. Constants and functions are exposed
   against `controller.py` equivalents. A failing test means `controller.py` diverged; fix that.
 - A failing Lua unit test after a rawes.lua edit means the Python assertion constants
   are stale. Fix the constants, then fix the test.
+
+---
+
+## Testing Pitfall: Round-Trip Tests Mask Symmetric Bugs
+
+**Classic Bug Pattern:** Forward/inverse mixing or bi-directional transforms where **both directions are swapped identically**. Example: swashplate servo model mixing functions.
+
+**Why it's dangerous:**  
+If you swap parameters in both `forward_mix(col, roll, pitch)` → `(s1, s2, s3)` AND `inverse_mix(s1, s2, s3)` → `(col, roll, pitch)` symmetrically, then:
+- Round-trip tests pass: `forward(x)` → `inverse(result)` = `x` ✓ (both swaps cancel)
+- Direct function tests pass: each function individually tested with correct arguments ✓
+- **Integration tests fail silently:** SwashplateServoModel calls forward() with swapped args, getting wrong servo positions, but inverse() swaps them back to match the command
+
+**Mitigation:**  
+For any matrix or transform with an inverse, add **directional validation tests** that verify intermediate results are physically meaningful:
+- Servo positions move in expected directions for cyclic commands
+- Moment vectors align with expected axes
+- Cross-coupling is minimal when not commanded
+
+Example: `test_swashplate_servo_directions.py` validates that positive `tilt_lat` (roll right) produces:
+- S1 (front-right servo) moves **UP** (expected for roll)
+- S2 (front-left servo) moves **DOWN** (expected for roll)
+- S3 (back servo) unchanged (no roll effect)
+
+This catches parameter swaps that round-trip tests cannot.

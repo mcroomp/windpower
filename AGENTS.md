@@ -31,6 +31,7 @@ All design docs live under `design/`. `AGENTS.md` is the standard agent context 
 | File | Purpose |
 |------|---------|
 | [design/simulation.md](design/simulation.md) | **Simulation internals** — sensor design, controller stack, dynamics, aero, tether, kinematic startup, pumping/landing architecture, **module map**, SITL lockstep |
+| [design/aero_conventions.md](design/aero_conventions.md) | **Aero model interface** — RotorInputs/RotorOutput frames, sign conventions, cyclic tilts, moment transformations |
 | [design/aero.md](design/aero.md) | De Schutter Eq. 25–31 validation vs. implementation |
 | [design/history.md](design/history.md) | Phase 2 + Phase 3 decisions, root causes, results |
 | [design/testing.md](design/testing.md) | **Unit & simtest guide** — test catalogue, Lua harness API, SCR_USER6 encoding, IC loading, telemetry |
@@ -185,14 +186,15 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 ## Workflow Rules
 
-- **Use `rg` (ripgrep) for all text searches**, not `grep`/`findstr`/`Select-String`. It is faster, respects `.gitignore` by default (skips `.venv/` and build outputs), and supports `--glob` to scope to source dirs. Add `-q` for quiet mode (no output if no matches). Example: `rg -q "pattern" -g "simulation/scripts/**"`.
 - **Do NOT consult git history** (`git log`/`diff`/`show`/`blame`) when diagnosing problems unless you first ask the user.
 - **Fix telemetry/logging before diagnosing test failures.** When a simtest or stack test fails, inspect the telemetry CSV and logs first. If columns are zero/missing/wrong (e.g. `tether_m=0`, phase never changes), fix the logging bug before attempting to diagnose physics. Diagnosing from bad telemetry produces wrong conclusions.
 - **Run `analyse_run.py` first after any stack test failure.** It loads all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) into a unified `FlightLog` and prints a single bucketed report. `--bucket 10` for overview, `--bucket 1` for frame-level detail.
 - **Keep `rawes_test_surface.lua` in sync with `rawes.lua`.** Lua unit tests access constants and functions through `_rawes_fns`, which is spliced inside `rawes.lua`'s anonymous function wrapper and so can see module-level locals only. Whenever you add a local constant or function to `rawes.lua` that tests need, add it to `_rawes_fns` in `rawes_test_surface.lua` in the same commit. Function-local variables are not accessible — hoist them to module level first.
 - **`controller.py` follows `rawes.lua`.** `test_math_lua.py` cross-checks `rawes.lua` against `controller.py`; a failure there means `controller.py` diverged — fix `controller.py`.
 - **One-off / diagnostic scripts go in `simulation/tests/oneoff/`, never in `tests/unit/`.** Any script run with `python -c "..."` for a gain sweep, Bode probe, plant identification, debug trace, etc. that isn't a pytest-discoverable unit test must be saved as a standalone script in `simulation/tests/oneoff/`. Reasons: (1) keeps the unit-test discovery clean — these scripts are not regression guards; (2) makes the diagnostic reproducible without scrolling chat history; (3) tools-required for the next person who hits the same problem. Prefix file names with the date or topic (e.g. `phase_sweep.py`, `bode_attitude.py`). Add a one-line header `"""<topic> — one-off diagnostic, not a unit test."""`.
-- **Telemetry CSV columns are centralized in `simulation/telemetry_csv.py`.** `COLUMNS` is the single canonical ordered schema. When adding telemetry, add the field there first, update `TelRow` plus the relevant constructor mapping (`from_physics` / `from_tel`), and write via `write_csv()` or a `csv.DictWriter` that imports `COLUMNS`. Do not invent per-test or per-module telemetry headers.
+- **Reusable log merge/align utilities belong in `simulation/analysis/` (or `simulation/scripts/` if they are operational), not `tests/oneoff/`.** Example shape: a CSV-producing tool that aligns `telemetry.csv` against `dataflash.BIN` with a solved time offset should live in `simulation/analysis/` and be documented like any other reusable analysis entry point.
+- **Telemetry CSV columns are centralized in `simulation/telemetry_columns.py`.** `COLUMNS` is the single canonical ordered schema. When adding telemetry, add the field there first, update `TelRow` plus the relevant constructor mapping (`from_physics` / `from_tel`), and write via `write_csv()` or a `csv.DictWriter` that imports `COLUMNS`. Do not invent per-test or per-module telemetry headers.
+- **When asked any question about telemetry CSV fields, inspect `simulation/telemetry_columns.py` first.** Treat it as the authoritative field list and frame annotation reference.
 
 ---
 
@@ -227,21 +229,14 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 ### Commands
 
-**For agents: Use the filtered test wrapper (no piping needed)**
+**For agents: use direct pytest/run_tests entry points**
 
 | Task | Command |
 |------|---------|
-| **Unit tests (agent mode)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py unit` |
-| **Simtests (agent mode)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py simtest` |
-| **Simtest (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py simtest -k test_foo` |
-| **Unit test (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/scripts/run_tests_filtered.py unit -k test_math` |
-
-The `run_tests_filtered.py` wrapper provides:
-- Live-streamed test results (no buffering)
-- Automatic failure capture to temp file (`C:\Temp\pytest_YYYYMMDD_HHMMSS_XXXX.log`)
-- Clean output (no pytest headers or verbose noise)
-- Failure filenames printed in output for easy debugging
-- **Important: Do NOT pipe the output** — the wrapper handles filtering and saving already
+| **Unit tests (agent mode)** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| **Simtests (agent mode)** | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
+| **Simtest (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
+| **Unit test (agent mode, specific)** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -k test_math -q` |
 
 **Stack tests (SITL) use Docker — different entry point:**
 
@@ -250,7 +245,7 @@ The `run_tests_filtered.py` wrapper provides:
 | **Stack test (single)** | `bash test.sh stack -n 1 -k test_foo` |
 | **Stack test (full)** | `bash test.sh stack -n 8` |
 
-Stack tests run in isolated Docker containers, one per test file. Use `bash test.sh` commands, not the filtered wrapper.
+Stack tests run in isolated Docker containers, one per test file. Use `bash test.sh` commands.
 
 | Task | Command |
 |------|---------|

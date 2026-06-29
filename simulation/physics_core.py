@@ -118,6 +118,8 @@ class PhysicsCore:
         startup_damp_k_ang: float = 0.0,
         z_floor:            float = -1.0,
         aero_model:         str   = "quasi_static",
+        kinematic_aero_mode: str  = "locked",
+        kinematic_nul_rate_gain_rads_per_rad: float = 0.0,
         aero_override             = None,
         tether_override           = None,
     ):
@@ -128,6 +130,10 @@ class PhysicsCore:
         self._k_yaw              = float(k_yaw)
         self._kinematic          = kinematic
         self._startup_damp_k_ang = float(startup_damp_k_ang)
+        self._kinematic_aero_mode = str(kinematic_aero_mode)
+        self._kinematic_nul_rate_gain_rads_per_rad = float(
+            kinematic_nul_rate_gain_rads_per_rad
+        )
 
         I_spin = resolve_i_spin_kgm2(rotor)
         self._dyn = RigidBodyDynamics(
@@ -149,6 +155,7 @@ class PhysicsCore:
         self._omega_hold_start_rad_s = float(self._omega_rad_s)
         self._omega_release_target_rad_s = float(ic.omega_spin)
         self._spin_angle_rad = 0.0
+        self._was_kinematic = bool(self._kinematic is not None and self._kinematic.is_active(0.0))
 
         if rotor.control is None or rotor.control.axle_attachment_length_m is None:
             raise ValueError("rotor.control.axle_attachment_length_m must be set")
@@ -345,23 +352,73 @@ class PhysicsCore:
         r   = self._rotor
 
         kin_active = self.is_kinematic
+        just_released = bool(self._was_kinematic and not kin_active)
         self._damp_alpha = self.damp_alpha if kin_active else 0.0
 
         if kin_active:
-            # Kinematic hold: bypass all physics contributions.
-            # No tether, no aero, no gravity-driven dynamics step, and no rotor spin update.
-            self._omega_rad_s = self._kinematic_omega_target(self._t_sim)
             tf = np.zeros(3)
             tm = np.zeros(3)
             self._tension_now = 0.0
-            result = SimpleNamespace(
-                F_world=np.zeros(3),
-                M_orbital=np.zeros(3),
-                M_spin=np.zeros(3),
-                Q_spin=0.0,
-            )
-            F_net = np.zeros(3)
-            new_hub = hub
+            if self._kinematic_aero_mode == "nul":
+                # Kinematic "nul" aero (rotation-only): lock translation to the
+                # kinematic trajectory and apply cyclic-proportional body rates.
+                # tilt_lat > 0 -> roll right (+roll), tilt_lon > 0 -> nose-down (-pitch).
+                kin = self._kinematic.state_at(self._t_sim) if self._kinematic is not None else None
+                if kin is not None:
+                    pos_kin, vel_kin = kin
+                else:
+                    pos_kin = hub["pos"]
+                    vel_kin = hub["vel"]
+
+                gain = self._kinematic_nul_rate_gain_rads_per_rad
+                omega_body = np.array([
+                    gain * tilt_lat,
+                    -gain * tilt_lon,
+                    0.0,
+                ])
+                omega_world = hub["R"] @ omega_body
+
+                # First-order orientation integration with re-orthonormalization.
+                wx, wy, wz = omega_world
+                skew = np.array([
+                    [0.0, -wz,  wy],
+                    [wz,   0.0, -wx],
+                    [-wy,  wx,  0.0],
+                ])
+                R_next = hub["R"] + dt * (skew @ hub["R"])
+                U, _, Vt = np.linalg.svd(R_next)
+                R_next = U @ Vt
+
+                new_hub = {
+                    "pos": pos_kin,
+                    "vel": vel_kin,
+                    "R": R_next,
+                    "omega": omega_world,
+                }
+                self._dyn._pos[:] = pos_kin
+                self._dyn._vel[:] = vel_kin
+                self._dyn._R[:] = R_next
+                self._dyn._omega[:] = omega_world
+
+                F_net = np.zeros(3)
+                result = SimpleNamespace(
+                    F_world=np.zeros(3),
+                    M_orbital=np.zeros(3),
+                    M_spin=np.zeros(3),
+                    Q_spin=0.0,
+                )
+            else:
+                # Kinematic hold: bypass all physics contributions.
+                # No tether, no aero, no gravity-driven dynamics step, and no rotor spin update.
+                self._omega_rad_s = self._kinematic_omega_target(self._t_sim)
+                result = SimpleNamespace(
+                    F_world=np.zeros(3),
+                    M_orbital=np.zeros(3),
+                    M_spin=np.zeros(3),
+                    Q_spin=0.0,
+                )
+                F_net = np.zeros(3)
+                new_hub = hub
         else:
             tf, tm            = self._tether.compute(hub["pos"], hub["vel"], hub["R"])
             self._tension_now = float(self._tether._last_info.get("tension", 0.0))
@@ -389,12 +446,19 @@ class PhysicsCore:
                          if r.autorotation.omega_min_rad_s is not None else 0.5)
             I_ode = (r.autorotation.I_ode_kgm2
                      if r.autorotation.I_ode_kgm2 is not None else 10.0)
-            new_omega, new_spin = euler_step_omega(
-                self._omega_rad_s, self._spin_angle_rad,
-                float(result.Q_spin), 0.0, I_ode, dt,
-            )
-            self._omega_rad_s    = max(omega_min, new_omega)
-            self._spin_angle_rad = new_spin
+            if just_released:
+                # Preserve IC release RPM exactly on the first free-flight step.
+                # This avoids a transition artifact where immediate aero torque
+                # can pull omega away from the kinematic target before the
+                # mediator logs kinematic_exit.
+                self._omega_rad_s = max(omega_min, float(self._omega_release_target_rad_s))
+            else:
+                new_omega, new_spin = euler_step_omega(
+                    self._omega_rad_s, self._spin_angle_rad,
+                    float(result.Q_spin), 0.0, I_ode, dt,
+                )
+                self._omega_rad_s    = max(omega_min, new_omega)
+                self._spin_angle_rad = new_spin
 
             disk_normal = hub["R"][:, 2]
 
@@ -414,9 +478,10 @@ class PhysicsCore:
                                      omega_spin=self._omega_rad_s)
 
         # Kinematic state override — applied post-dynamics so t_sim is pre-advance
-        if self._kinematic is not None:
+        if self._kinematic is not None and not (kin_active and self._kinematic_aero_mode == "nul"):
             self._kinematic.apply(new_hub, self._dyn, self._t_sim)
 
+        self._was_kinematic = kin_active
         self._t_sim += dt
 
         return {

@@ -379,14 +379,14 @@ class SwashplateServoModel:
         col_out_cmd = collective_rad_to_out(
             float(collective_rad_cmd), self._col_min, self._col_max)
         s_cmd = ardupilot_h3_120_forward(
-            col_out_cmd, float(tilt_lon_cmd), float(tilt_lat_cmd),
+            col_out_cmd, float(tilt_lat_cmd), float(tilt_lon_cmd),
             self._h_col_min, self._h_col_max,
         )
         max_step = self._max_servo_rate * dt
         for i in range(3):
             target = max(-1.0, min(1.0, s_cmd[i]))
             self._s[i] = _slew_limit(self._s[i], target, max_step)
-        col_out, tlon, tlat = ardupilot_h3_120_inverse(
+        col_out, tlat, tlon = ardupilot_h3_120_inverse(
             self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max,
         )
         col_rad = collective_out_to_rad(col_out, self._col_min, self._col_max)
@@ -398,7 +398,7 @@ class SwashplateServoModel:
             collective_rad = self._col_min
         col_out = collective_rad_to_out(float(collective_rad), self._col_min, self._col_max)
         self._s = list(ardupilot_h3_120_forward(
-            col_out, float(tilt_lon), float(tilt_lat),
+            col_out, float(tilt_lat), float(tilt_lon),
             self._h_col_min, self._h_col_max,
         ))
 
@@ -410,13 +410,13 @@ class SwashplateServoModel:
 
     @property
     def tilt_lon(self) -> float:
-        _, tlon, _ = ardupilot_h3_120_inverse(
+        _, _, tlon = ardupilot_h3_120_inverse(
             self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max)
         return float(tlon)
 
     @property
     def tilt_lat(self) -> float:
-        _, _, tlat = ardupilot_h3_120_inverse(
+        _, tlat, _ = ardupilot_h3_120_inverse(
             self._s[0], self._s[1], self._s[2], self._h_col_min, self._h_col_max)
         return float(tlat)
 

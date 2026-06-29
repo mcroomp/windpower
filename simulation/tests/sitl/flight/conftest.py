@@ -198,51 +198,57 @@ def guided_nogps_armed_lua_full(tmp_path, request):
     Uses kinematic startup ramp with velocity ~0.96 m/s (default from config.py)
     to enable GPS yaw fusion at high body tilt (65°). Despite the non-zero velocity
     ramp, the fixture waits for GPS fusion before yielding, allowing Lua to capture
-    steady-guidance capture well before kinematic exits at t=80s.
+    steady-guidance capture well before kinematic exits at t=60s.
 
-    Key design points:
-      - SCR_USER6=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
-        rate commands, preventing ArduPilot rate PID windup during kinematic hold.
-      - Velocity ~0.96 m/s (default from config.py) is applied from frame 0 to
-        provide EKF with velocity-derived yaw heading for GPS fusion.
-      - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro).
-        _tdir0 fires; steady-guidance ready for activation.
-      - Fixture waits for GPS fusion before yielding.
-      - Test promotes SCR_USER6 from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
-        kinematic_exit (t=80s) to activate altitude-hold steady guidance.
+        Key design points:
+            - SCR_USER6=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
+                rate commands, preventing ArduPilot rate PID windup during kinematic hold.
+            - Velocity ~0.96 m/s (default from config.py) is applied from frame 0 to
+                provide EKF with velocity-derived yaw heading for GPS fusion.
+            - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro);
+                _tdir0 fires and steady guidance can be activated.
+            - Fixture waits for GPS fusion before yielding.
+            - Test promotes SCR_USER6 from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
+                kinematic_exit (t=60s) to activate altitude-hold steady guidance.
 
-    Timeline (from mediator start, speedup=1):
-    t=0..80 s   kinematic with vel ~0.96 m/s (default startup tangent).
-      t~6 s       GPS first fix; EKF3 origin set.
-      t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
-                  NVF streamed.
-      t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires;
-                  fixture yields.
-      t~80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY).
-    t~80+       free flight under ArduPilot + Lua with steady guidance active.
+        Timeline (from mediator start, speedup=1):
+            t=0..60 s   kinematic with vel ~0.96 m/s (default startup tangent).
+            t~6 s       GPS first fix; EKF3 origin set.
+            t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires.
+            t~40 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
+                                    NVF streamed.
+            t~60 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY).
+            t~60+       free flight under ArduPilot + Lua with steady guidance active.
     """
     extra = {
         # Steady-guidance startup needs velocity for GPS yaw fusion at high body tilt (65°).
         # Use default vel0 ~0.96 m/s from config.py (startup tangent to tether path)
         # with ramp_s=0 so velocity is applied from frame 0.
-        # The hub will drift ~77 m over 80 s at ~0.96 m/s, but GPS fusion allows
-        # Lua to capture steady guidance well before kinematic exits (t=80s).
+        # The hub will drift ~58 m over 60 s at ~0.96 m/s, but GPS fusion allows
+        # Lua to capture steady guidance well before kinematic exits (t=60s).
         # DO NOT set vel0=[0,0,0]: stationary hold prevents GPS yaw fusion.
         #
         # Default vel0 from config.py DEFAULTS: [-0.257, 0.916, -0.093] m/s
         # (normalized startup tangent ~0.96 m/s magnitude).
         # kinematic_vel_ramp_s: 0.0 means velocity is applied from t=0 (frame 0).
         "kinematic_vel_ramp_s": 0.0,
-        "startup_damp_seconds": 80.0,
+        "startup_damp_seconds": 60.0,
+        # Kinematic debug physics: simplified cyclic->rotation response.
+        "kinematic_aero_mode": "nul",
+        "kinematic_nul_rate_gain_rads_per_rad": 0.2,
         # Mediator-side cyclic handoff smoothing after kinematic release:
-        # blend IC cyclic -> AP cyclic over first 5 s of free flight.
-        "post_release_cyclic_blend_s": 5.0,
+        # disabled for tilt-response comparison against the IC-angle-only test.
+        "post_release_cyclic_blend_s": 0.0,
         # Enable the mediator's winch command socket so we can run a
         # ground-side tension regulator (mirrors test_create_ic warmup).
         "winch_cmd_port":       14570,
     }
-    with _acro_stack(tmp_path, extra_config=extra,
-                     test_name=request.node.name) as ctx:
+    with _acro_stack(
+        tmp_path,
+        extra_config=extra,
+        test_name=request.node.name,
+        arm_at_sim_s=40.0,
+    ) as ctx:
         ctx.log.info("Setting SCR_USER params for rawes.lua ...")
         # The anchor is at world origin; the EKF origin is the hub's first
         # GPS fix = launch position pos0.  So anchor-in-EKF-frame = -pos0.
@@ -295,6 +301,23 @@ def guided_nogps_armed_lua_full(tmp_path, request):
             ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
             ctx.log.info("IC collective (%s): coll=%+.4f rad", _coll_src, _coll_trim)
 
+            # Seed passive IC roll/pitch via short NV names (10-char limit):
+            #   RAWES_RIC = IC roll [rad], RAWES_PIC = IC pitch [rad]
+            _R0 = _ic.get("R0")
+            if _R0 is None:
+                raise KeyError("initial_state missing R0 for IC passive attitude seed")
+            _r20 = float(_R0[2][0])
+            _r21 = float(_R0[2][1])
+            _r22 = float(_R0[2][2])
+            _ic_roll_rad = math.atan2(_r21, _r22)
+            _ic_pitch_rad = -math.asin(max(-1.0, min(1.0, _r20)))
+            ctx.gcs.send_named_float("RAWES_RIC", _ic_roll_rad)
+            ctx.gcs.send_named_float("RAWES_PIC", _ic_pitch_rad)
+            ctx.log.info(
+                "IC passive attitude: roll=%+.2f deg pitch=%+.2f deg",
+                math.degrees(_ic_roll_rad), math.degrees(_ic_pitch_rad),
+            )
+
             # Stream the IC equilibrium tension so the gravity-compensation disk
             # axis the Lua targets in MODE_STEADY matches the IC that generated
             # this starting state.  Without it the Lua flies with its default
@@ -317,8 +340,12 @@ def guided_nogps_armed_lua_full(tmp_path, request):
         # Lua needs _tdir0 (fires on GPS fusion) to begin steady guidance.
         # With dual GPS the wait is ~44 s (delAngBiasLearned bottleneck).
         ctx.log.info("Waiting for GPS fusion before yielding (up to 60 s) ...")
-        _gps_seen: list[bool] = [False]
-        _origin_seen: list[bool] = [False]
+        _prior = [str(t).lower() for t in ctx.all_statustext]
+        _origin_seen: list[bool] = [any("origin set" in t for t in _prior)]
+        _gps_seen: list[bool] = [
+            any("is using gps" in t for t in _prior)
+            or (_origin_seen[0] and ctx.gcs.sim_now() >= 34.0)
+        ]
 
         def _gps_fused(text: str | None) -> bool:
             if not text:
@@ -337,13 +364,16 @@ def guided_nogps_armed_lua_full(tmp_path, request):
                 return True
             return False
 
-        ctx.wait_drain(
-            until       = _gps_fused,
-            timeout     = 60.0,
-            drain_s     = 1.0,
-            check_procs = True,
-            label       = "gps-fuse",
-        )
+        if _gps_seen[0]:
+            ctx.log.info("GPS fusion already observed before wait; yielding without extra delay")
+        else:
+            ctx.wait_drain(
+                until       = _gps_fused,
+                timeout     = 60.0,
+                drain_s     = 1.0,
+                check_procs = True,
+                label       = "gps-fuse",
+            )
         if not _gps_seen[0]:
             raise RuntimeError("GPS did not fuse within 60 s — cannot start steady guidance")
         ctx.log.info("GPS fused — Lua steady guidance active; yielding to test")

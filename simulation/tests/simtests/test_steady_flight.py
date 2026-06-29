@@ -82,12 +82,11 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
 
     # ── Recorded run ──────────────────────────────────────────────────────────
     runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
-    # Tuned for elastic tether + wind (see tests/oneoff/warmup_gain_sweep.py).
+    # Use proven default parameters from arduloop.params (matches SITL rawes_sitl_defaults.parm)
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        P=0.67, I=0.15, D=0.02, IMAX=0.30,
-        FLTT=40.0, FLTE=0.0, FLTD=40.0,
+        # All parameters use defaults from make_roll_pitch_params()
     )
     runner._acro._servo.reset(ic.coll_eq_rad)
     ap = MockArdupilot.for_pumping(
@@ -99,11 +98,10 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
         wind=WIND,
         dt=DT,
     )
-    from arduloop import HeliParams, RateAxisParams
-    _rp = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTE=0.0, FLTD=40.0)
-    _hp = HeliParams()
-    _hp.roll = _rp
-    _hp.pitch = _rp
+    from arduloop import HeliParams, make_roll_pitch_params, make_yaw_params
+    _rp = make_roll_pitch_params()
+    _yaw = make_yaw_params()
+    _hp = HeliParams(roll=_rp, pitch=_rp, yaw=_yaw)
     ap.enable_guided(_hp)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),

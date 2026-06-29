@@ -27,9 +27,11 @@ Options:
 
 import argparse
 import csv
+import math
 import logging
 import sys
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +40,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from physics_core    import PhysicsCore
 from tether          import TetherModel, ConstantTensionTether   # noqa: F401 — re-exported for test callers
-from sitl_interface  import SITLInterface
+from sitl_interface  import SITLInterface, SIM_CLOCK_HZ
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from sensor          import make_sensor, SpinSensor
 from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
@@ -46,19 +48,51 @@ from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 import config as _mcfg
 from dynbem import rotor_definition as _rd
-from telemetry_csv import COLUMNS as _TEL_COLUMNS
+from telemetry_csv import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
 from mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from mediator_events import MediatorEventLog
 from types import SimpleNamespace
 
+try:
+    from pymavlink import mavutil
+except Exception:
+    mavutil = None
+
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
-DT_TARGET    = 1.0 / 400.0    # 400 Hz target loop rate [s]
+DT_TARGET    = 1.0 / SIM_CLOCK_HZ   # fixed lockstep loop rate [s]
+TELEMETRY_HZ = 400.0           # telemetry CSV write rate [Hz]
 LOG_INTERVAL = 1.0             # position/attitude log interval [s]
 WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
 I_SPIN_KGMS2 = 10.0            # rotor spin-axis moment of inertia [kg·m²]
 OMEGA_SPIN_MIN = 0.5           # minimum spin rate clamp [rad/s]
+
+
+# ---------------------------------------------------------------------------
+# Async MAVLink snapshot (latest-value cache sampled at telemetry write time)
+# ---------------------------------------------------------------------------
+_ASYNC_MAV_LOCK = threading.Lock()
+_ASYNC_MAV: dict[str, float] = {}
+
+
+def update_async_mavlink(fields: dict[str, float]) -> None:
+    """Update the shared latest-value MAVLink snapshot.
+
+    Unknown keys are ignored. Values are coerced to float.
+    """
+    if not fields:
+        return
+    with _ASYNC_MAV_LOCK:
+        for key, value in fields.items():
+            if key in ASYNC_MAV_COLUMNS:
+                _ASYNC_MAV[key] = float(value)
+
+
+def get_async_mavlink_snapshot() -> dict[str, float]:
+    """Return a copy of the latest async MAVLink snapshot."""
+    with _ASYNC_MAV_LOCK:
+        return dict(_ASYNC_MAV)
 
 # GB4008 yaw-damper gain [N·m·s/rad].  Large value → near-perfect yaw lock.
 # Reduce to model imperfect GB4008 damping / yaw drift.
@@ -134,6 +168,198 @@ def run_mediator(args, trajectory=None):
     ev.open()
 
     cfg = _mcfg.load(getattr(args, "config", None))
+
+    def _quat_wxyz_to_rpy_deg(q):
+        if q is None or len(q) < 4:
+            return (float("nan"), float("nan"), float("nan"))
+        w, x, y, z = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        sinp = 2.0 * (w * y - z * x)
+        if abs(sinp) >= 1.0:
+            pitch = math.copysign(math.pi / 2.0, sinp)
+        else:
+            pitch = math.asin(sinp)
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
+
+    _mavlog_conn = str(cfg.get("mavlink_log_connection", "") or "").strip()
+    _mavlog_diag_interval_s = float(cfg.get("mavlink_log_diag_interval_s", 5.0))
+    _mavlog_stop = threading.Event()
+    _mavlog_thread = None
+
+    def _mavlink_logger_worker():
+        if mavutil is None:
+            log.warning("Dedicated MAVLink logging requested but pymavlink is unavailable")
+            return
+        try:
+            mav = mavutil.mavlink_connection(_mavlog_conn, source_system=252)
+        except Exception as exc:
+            log.warning("Failed to open dedicated MAVLink link '%s': %s", _mavlog_conn, exc)
+            return
+
+        target_sys = 1
+        target_comp = 1
+        rx_total = 0
+        rx_counts = {"ATTITUDE": 0, "ATTITUDE_TARGET": 0, "SERVO_OUTPUT_RAW": 0, "HEARTBEAT": 0}
+        dropped_types = 0
+        last_boot_ms = 0
+        last_rx_wall = _time_mod.monotonic()
+        next_diag_wall = last_rx_wall + _mavlog_diag_interval_s
+        try:
+            while not _mavlog_stop.is_set() and not is_stopped():
+                hb = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=0.25)
+                if hb is not None:
+                    rx_total += 1
+                    rx_counts["HEARTBEAT"] += 1
+                    target_sys = getattr(hb, "_header", None).srcSystem if hasattr(hb, "_header") else 1
+                    target_comp = getattr(hb, "_header", None).srcComponent if hasattr(hb, "_header") else 1
+                    log.info(
+                        "Dedicated MAVLink link connected: sys=%d comp=%d via %s",
+                        target_sys,
+                        target_comp,
+                        _mavlog_conn,
+                    )
+                    break
+
+            if _mavlog_stop.is_set() or is_stopped():
+                return
+
+            att_target_hz = float(cfg.get("mavlink_att_target_hz", 10.0))
+            attitude_hz = float(cfg.get("mavlink_attitude_hz", 50.0))
+            servo_hz = float(cfg.get("mavlink_servo_output_raw_hz", 50.0))
+
+            def _request_interval(message_name: str, message_id: int, rate_hz: float) -> None:
+                interval_us = max(1, int(round(1_000_000.0 / max(rate_hz, 1.0))))
+                mav.mav.command_long_send(
+                    target_sys,
+                    target_comp,
+                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    0,
+                    float(message_id),
+                    float(interval_us),
+                    0.0, 0.0, 0.0, 0.0, 0.0,
+                )
+                log.info(
+                    "Dedicated MAVLink link: requested %s at %.1f Hz",
+                    message_name,
+                    rate_hz,
+                )
+
+            try:
+                # Use normal stream cadence on this dedicated link.
+                mav.mav.request_data_stream_send(
+                    target_sys,
+                    target_comp,
+                    mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                    10,
+                    1,
+                )
+                _request_interval(
+                    "ATTITUDE_TARGET",
+                    mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET,
+                    att_target_hz,
+                )
+                _request_interval(
+                    "ATTITUDE",
+                    mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
+                    attitude_hz,
+                )
+                _request_interval(
+                    "SERVO_OUTPUT_RAW",
+                    mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW,
+                    servo_hz,
+                )
+            except Exception as exc:
+                log.warning("Failed requesting dedicated MAVLink intervals: %s", exc)
+
+            while not _mavlog_stop.is_set() and not is_stopped():
+                msg = mav.recv_match(
+                    blocking=True,
+                    timeout=0.10,
+                )
+                now_wall = _time_mod.monotonic()
+                if msg is None:
+                    if now_wall >= next_diag_wall:
+                        log.info(
+                            "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d dropped=%d last_boot_ms=%d idle_s=%.2f",
+                            rx_total,
+                            rx_counts["HEARTBEAT"],
+                            rx_counts["ATTITUDE"],
+                            rx_counts["ATTITUDE_TARGET"],
+                            rx_counts["SERVO_OUTPUT_RAW"],
+                            dropped_types,
+                            last_boot_ms,
+                            now_wall - last_rx_wall,
+                        )
+                        next_diag_wall = now_wall + _mavlog_diag_interval_s
+                    continue
+
+                mtype = msg.get_type()
+                rx_total += 1
+                if mtype in rx_counts:
+                    rx_counts[mtype] += 1
+                else:
+                    dropped_types += 1
+                last_rx_wall = now_wall
+
+                if now_wall >= next_diag_wall:
+                    log.info(
+                        "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d dropped=%d last_boot_ms=%d",
+                        rx_total,
+                        rx_counts["HEARTBEAT"],
+                        rx_counts["ATTITUDE"],
+                        rx_counts["ATTITUDE_TARGET"],
+                        rx_counts["SERVO_OUTPUT_RAW"],
+                        dropped_types,
+                        last_boot_ms,
+                    )
+                    next_diag_wall = now_wall + _mavlog_diag_interval_s
+
+                fields = {}
+                _tb = getattr(msg, "time_boot_ms", 0)
+                if _tb:
+                    last_boot_ms = int(_tb)
+                    fields["mav_time_boot_ms"] = float(_tb)
+                _tu = getattr(msg, "time_usec", 0)
+                if _tu:
+                    fields["mav_time_usec"] = float(_tu)
+
+                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW"):
+                    if fields:
+                        update_async_mavlink(fields)
+                    continue
+
+                if mtype == "ATTITUDE":
+                    fields["mav_att_roll_deg"] = math.degrees(float(msg.roll))
+                    fields["mav_att_pitch_deg"] = math.degrees(float(msg.pitch))
+                    fields["mav_att_yaw_deg"] = math.degrees(float(msg.yaw))
+                elif mtype == "ATTITUDE_TARGET":
+                    r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(getattr(msg, "q", None))
+                    fields["mav_att_target_roll_deg"] = r_deg
+                    fields["mav_att_target_pitch_deg"] = p_deg
+                    fields["mav_att_target_yaw_deg"] = y_deg
+                    fields["mav_att_target_roll_rate_rads"] = float(getattr(msg, "body_roll_rate", float("nan")))
+                    fields["mav_att_target_pitch_rate_rads"] = float(getattr(msg, "body_pitch_rate", float("nan")))
+                    fields["mav_att_target_yaw_rate_rads"] = float(getattr(msg, "body_yaw_rate", float("nan")))
+                elif mtype == "SERVO_OUTPUT_RAW":
+                    fields["mav_servo1_us"] = float(getattr(msg, "servo1_raw", float("nan")))
+                    fields["mav_servo2_us"] = float(getattr(msg, "servo2_raw", float("nan")))
+                    fields["mav_servo3_us"] = float(getattr(msg, "servo3_raw", float("nan")))
+                    fields["mav_servo4_us"] = float(getattr(msg, "servo4_raw", float("nan")))
+
+                if fields:
+                    update_async_mavlink(fields)
+        except Exception as exc:
+            log.warning("Dedicated MAVLink logging thread stopped with error: %s", exc)
+        finally:
+            try:
+                mav.close()
+            except Exception:
+                pass
 
     # Emit a run-ID so post-run analysis can verify all log files belong to
     # the same test run.  Format: RUN_ID=<integer epoch seconds>.
@@ -237,6 +463,10 @@ def run_mediator(args, trajectory=None):
         k_yaw              = float(cfg.get("k_yaw", _K_YAW_DEFAULT)),
         kinematic          = _startup,
         startup_damp_k_ang = float(cfg["startup_damp_k_ang"]),
+        kinematic_aero_mode = str(cfg["kinematic_aero_mode"]),
+        kinematic_nul_rate_gain_rads_per_rad = float(
+            cfg["kinematic_nul_rate_gain_rads_per_rad"]
+        ),
         z_floor            = -1.0,
         tether_override    = _tether_override,
     )
@@ -256,7 +486,17 @@ def run_mediator(args, trajectory=None):
     # -- Connect ---------------------------------------------------------------
     log.info("Binding SITL UDP sockets...")
     sitl.bind()
+    if _mavlog_conn:
+        _mavlog_thread = threading.Thread(
+            target=_mavlink_logger_worker,
+            daemon=True,
+            name="mediator-mavlog",
+        )
+        _mavlog_thread.start()
+        log.info("Dedicated MAVLink logging connection enabled: %s", _mavlog_conn)
     log.info("Python RigidBodyDynamics ready. Starting main loop.")
+    _telemetry_stride = max(1, int(round((1.0 / sitl.dt()) / TELEMETRY_HZ)))
+    log.info("Telemetry write rate target: %.0f Hz (every %d sim steps)", TELEMETRY_HZ, _telemetry_stride)
 
     # -- State ----------------------------------------------------------------
     step            = 0
@@ -333,7 +573,8 @@ def run_mediator(args, trajectory=None):
     _winch_sock     = None
     _winch_peer     = None   # (host, port) of the test process — learned on first recv
     _winch_send_ctr = 0
-    DT_WINCH_SEND   = 40    # send state every 40 steps ≈ 10 Hz at 400 Hz loop
+    DT_WINCH_SEND   = max(1, int(round((1.0 / sitl.dt()) / 10.0)))
+    # Send winch state at ~10 Hz, regardless of lockstep step rate.
 
     if _winch_cmd_port > 0:
         _winch_sock = _socket_mod.socket(_socket_mod.AF_INET, _socket_mod.SOCK_DGRAM)
@@ -504,7 +745,8 @@ def run_mediator(args, trajectory=None):
         )
 
         # ── Telemetry CSV ─────────────────────────────────────────────────
-        if _telemetry_writer is not None:
+        if _telemetry_writer is not None and (step % _telemetry_stride == 0):
+            _mav_async = get_async_mavlink_snapshot()
             _rpy = sensor_data["rpy"]
             _ti  = core.tether._last_info
             _cur_phase = _traj_cmd.get("phase", "")
@@ -514,6 +756,7 @@ def run_mediator(args, trajectory=None):
             _telemetry_writer.writerow({
                 "t_sim":           core.t_sim,
                 "sitl_time":       t_sim,
+                "frame_count":     int(sitl.frame_count),
                 "phase":           _cur_phase,
                 "note":            _tel_note,
                 "damp_alpha":      _damp_alpha,
@@ -584,6 +827,21 @@ def run_mediator(args, trajectory=None):
                      - np.degrees(np.arctan2(
                          sensor_data["vel_ned"][1], sensor_data["vel_ned"][0]))
                      + 180.0) % 360.0 - 180.0),
+                "mav_time_boot_ms": _mav_async.get("mav_time_boot_ms", float("nan")),
+                "mav_time_usec":    _mav_async.get("mav_time_usec", float("nan")),
+                "mav_att_roll_deg":  _mav_async.get("mav_att_roll_deg", float("nan")),
+                "mav_att_pitch_deg": _mav_async.get("mav_att_pitch_deg", float("nan")),
+                "mav_att_yaw_deg":   _mav_async.get("mav_att_yaw_deg", float("nan")),
+                "mav_att_target_roll_deg": _mav_async.get("mav_att_target_roll_deg", float("nan")),
+                "mav_att_target_pitch_deg": _mav_async.get("mav_att_target_pitch_deg", float("nan")),
+                "mav_att_target_yaw_deg": _mav_async.get("mav_att_target_yaw_deg", float("nan")),
+                "mav_att_target_roll_rate_rads": _mav_async.get("mav_att_target_roll_rate_rads", float("nan")),
+                "mav_att_target_pitch_rate_rads": _mav_async.get("mav_att_target_pitch_rate_rads", float("nan")),
+                "mav_att_target_yaw_rate_rads": _mav_async.get("mav_att_target_yaw_rate_rads", float("nan")),
+                "mav_servo1_us":     _mav_async.get("mav_servo1_us", float("nan")),
+                "mav_servo2_us":     _mav_async.get("mav_servo2_us", float("nan")),
+                "mav_servo3_us":     _mav_async.get("mav_servo3_us", float("nan")),
+                "mav_servo4_us":     _mav_async.get("mav_servo4_us", float("nan")),
                 "servo_s1_us":     float(sitl.last_pwm_raw[0]),
                 "servo_s2_us":     float(sitl.last_pwm_raw[1]),
                 "servo_s3_us":     float(sitl.last_pwm_raw[2]),
@@ -627,6 +885,12 @@ def run_mediator(args, trajectory=None):
         raise
     finally:
         # -- Graceful shutdown ------------------------------------------------
+        _mavlog_stop.set()
+        if _mavlog_thread is not None:
+            try:
+                _mavlog_thread.join(timeout=1.0)
+            except Exception:
+                pass
         ev.write("shutdown", t_sim=sitl.sim_now(),
                  step=step,
                  pos_ned=[round(v, 3) for v in core.hub_state["pos"].tolist()],

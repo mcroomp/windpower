@@ -368,11 +368,8 @@ class PhysicalHoldController:
     clean ATTITUDE message before the controller is used.
     """
 
-    extra_params: dict = {
-        "ATC_RAT_RLL_IMAX": 0.0,
-        "ATC_RAT_PIT_IMAX": 0.0,
-        "ATC_RAT_YAW_IMAX": 0.0,
-    }
+    # Leave PID limits at ArduPilot defaults unless a fixture explicitly overrides them.
+    extra_params: dict = {}
 
     def __init__(self, anchor_ned: np.ndarray):
         self._anchor_ned = np.asarray(anchor_ned, dtype=float)
@@ -1039,27 +1036,33 @@ class HeliCyclicController:
         rotor,
         col_min_rad:    float,
         col_max_rad:    float,
-        P:              float = 0.30,
-        I:              float = 0.10,
-        D:              float = 0.005,
+        P:              float = 0.67,
+        I:              float = 0.15,
+        D:              float = 0.02,
         FF:             float = 0.00,
         IMAX:           float = 0.30,
-        FLTT:           float = 20.0,
+        FLTT:           float = 40.0,
         FLTE:           float = 0.0,
-        FLTD:           float = 20.0,
+        FLTD:           float = 40.0,
         h_sw_h3_phang:  float = 0.0,
         loop_rate_hz:   float = 400.0,
     ) -> None:
         # Local imports keep arduloop optional for environments that don't
         # need it (e.g. analysis scripts that don't run the controller).
-        from arduloop import HeliRateController, HeliParams, RateAxisParams
-        params = HeliParams(loop_rate_hz=loop_rate_hz, H_SW_H3_PHANG=h_sw_h3_phang)
-        rate_cfg = RateAxisParams(
-            P=P, I=I, D=D, FF=FF, IMAX=IMAX,
-            FLTT=FLTT, FLTE=FLTE, FLTD=FLTD,
+        from arduloop import HeliRateController, HeliParams, make_roll_pitch_params, make_yaw_params
+        rate_cfg = make_roll_pitch_params()
+        # Override with caller's params if provided (all match default signature above)
+        if P != 0.67 or I != 0.15 or D != 0.02 or FF != 0.00 or IMAX != 0.30 or FLTT != 40.0 or FLTE != 0.0 or FLTD != 40.0:
+            from arduloop import RateAxisParams
+            rate_cfg = RateAxisParams(
+                P=P, I=I, D=D, FF=FF, IMAX=IMAX,
+                FLTT=FLTT, FLTE=FLTE, FLTD=FLTD,
+            )
+        yaw_cfg = make_yaw_params()
+        params = HeliParams(
+            roll=rate_cfg, pitch=rate_cfg, yaw=yaw_cfg,
+            loop_rate_hz=loop_rate_hz, H_SW_H3_PHANG=h_sw_h3_phang
         )
-        params.roll  = rate_cfg
-        params.pitch = rate_cfg
         self._ctrl  = HeliRateController(params)
         self._servo = SwashplateServoModel.from_rotor(
             rotor, col_min_rad=col_min_rad, col_max_rad=col_max_rad)

@@ -1,12 +1,15 @@
 """
 telemetry_csv.py -- Unified telemetry row for CSV read/write.
 
-Single source of truth for the flat CSV schema used by simtests and analysis.
-COLUMNS is the canonical ordered column list. TelRow is the typed row object.
+Single source of truth for typed row I/O and conversion logic used by simtests
+and analysis.
+COLUMNS is imported from telemetry_columns.py, the canonical CSV schema owner.
+TelRow is the typed row object.
 write_csv / read_csv handle I/O.
 
-When adding telemetry, add the column here first: update COLUMNS, the TelRow
-dataclass field, and the relevant constructor mapping (from_physics/from_tel).
+When adding telemetry, add the column in telemetry_columns.py first, then update
+the TelRow dataclass field and the relevant constructor mapping
+(from_physics/from_tel).
 Telemetry producers must write through write_csv() or import COLUMNS directly;
 do not create per-test or per-module telemetry headers.
 
@@ -41,84 +44,13 @@ from typing import Optional
 
 import numpy as np
 
-
-# ---------------------------------------------------------------------------
-# Column order -- single source of truth
-# ---------------------------------------------------------------------------
-
-COLUMNS: list[str] = [
-    "t_sim",
-    "sitl_time",          # lockstep SITL clock [s] from servo frame_count/frame_rate
-    "phase",               # "reel-out" | "reel-in" | "descent" | "final_drop" | ""
-    "note",                # free-text event annotation (e.g. "kinematic_exit", "reel_out_start")
-    "damp_alpha",          # startup damping blend factor [0..1]; 0.0 when not damping
-    "pos_x", "pos_y", "pos_z",          # NED [m]; altitude = -pos_z
-    "vel_x", "vel_y", "vel_z",          # NED [m/s]
-    "omega_x", "omega_y", "omega_z",    # body angular rate [rad/s]
-    "accel_x", "accel_y", "accel_z",    # NED acceleration [m/s^2] (mediator finite-diff)
-    "omega_rotor",                       # rotor spin [rad/s]
-    "tether_length", "tether_extension", # [m]
-    "tether_tension", "tether_rest_length", "tether_slack",
-    "tether_fx", "tether_fy", "tether_fz",  # tether force NED [N]
-    "aero_fx", "aero_fy", "aero_fz",        # aero force NED [N] (before tether)
-    "aero_mx", "aero_my", "aero_mz",        # aero orbital moment NED [N·m]
-    "tether_mx", "tether_my", "tether_mz",  # tether moment NED [N·m]
-    "collective_rad", "collective_norm",
-    "tilt_lon", "tilt_lat",
-    "tension_feedforward_n", "tension_ic_n", "collective_from_alt_ctrl", "gnd_alt_cmd_m",
-    "winch_speed_ms",
-    "aero_T", "aero_v_axial", "aero_v_inplane", "aero_v_i",
-    "aero_Q_spin",                      # rotor shaft torque [N·m] from aero
-    "F_x", "F_y", "F_z",                # net aero force NED [N]
-    "M_x", "M_y", "M_z",                # net aero moment NED [N·m]
-    "rpy_roll", "rpy_pitch", "rpy_yaw",
-    # EKF yaw tracking diagnostics: difference between vel-heading yaw
-    # (sent to ArduPilot as rpy_yaw) and actual R_orb orientation yaw.
-    # Large delta -> EKF may see attitude/GPS inconsistency.
-    "orb_yaw_rad",   # R_orb yaw before velocity-heading override [rad]
-    "v_horiz_ms",    # horizontal speed [m/s]; selects yaw tracking source
-    # Sensor consistency: what the mediator actually sends to SITL.
-    # Use these to verify compass/GPS velocity heading alignment.
-    # heading_gap_deg = |compass_deg - vel_heading_deg| wrapped to [-180,180].
-    # EKF blocks GPS when |heading_gap_deg| is large (typically > ~90 deg).
-    "sens_vel_n", "sens_vel_e", "sens_vel_d",         # GPS vel sent to SITL (NED) [m/s]
-    "sens_accel_x", "sens_accel_y", "sens_accel_z",   # IMU accel sent to SITL (body) [m/s^2]
-    "sens_gyro_x", "sens_gyro_y", "sens_gyro_z",      # IMU gyro sent to SITL (body) [rad/s]
-    "vel_heading_deg",   # atan2(vel_E, vel_N) in degrees — GPS velocity heading
-    "heading_gap_deg",   # |compass_deg - vel_heading_deg| wrapped to (-180,180] deg
-    "servo_s1_us", "servo_s2_us", "servo_s3_us", "servo4_us",  # raw PWM [µs]
-    "q_bearing_nm", "q_motor_nm", "throttle",
-    "wind_x", "wind_y", "wind_z",
-    "bz_eq_x", "bz_eq_y", "bz_eq_z",
-    # AP altitude/body-z controller diagnostics (0.0 when not using that architecture)
-    "elevation_rad",      # rate-limited elevation angle tracked by AP [rad]
-    "el_correction_rad",  # daisy-chain elevation correction [rad]
-    "coll_saturated",     # collective pinned at floor or ceiling (0/1)
-    "comms_ok",           # ground comms healthy (0=dropout, 1=ok)
-    "vib_corr",           # vibration damper collective correction [rad]
-    "alt_pid_integral",   # altitude PID collective integrator [rad]
-    # AP rate commands and radial velocity diagnostics
-    "roll_sp_rads",          # AP roll rate setpoint [rad/s]
-    "pitch_sp_rads",         # AP pitch rate setpoint [rad/s]
-    "roll_rate_err_rads",    # roll_sp_rads - omega_x [rad/s]
-    "pitch_rate_err_rads",   # pitch_sp_rads - omega_y [rad/s]
-    "vel_radial_mps",        # actual hub radial velocity (outward +) [m/s]
-    "orbit_radius_m",        # horizontal radius from anchor [m]
-    "orbit_azimuth_rad",     # atan2(E, N) horizontal azimuth [rad]
-    "orbit_az_rate_rads",    # horizontal azimuth rate [rad/s]
-    "vel_tangential_mps",    # signed horizontal tangential speed [m/s]
-    "pos_downwind_m",        # horizontal position along wind direction [m]
-    "pos_crosswind_m",       # horizontal position perpendicular to wind [m]
-    "vel_downwind_mps",      # horizontal velocity along wind direction [m/s]
-    "vel_crosswind_mps",     # horizontal velocity perpendicular to wind [m/s]
-    "body_z_err_deg",        # angle between current and target body_z [deg]
-    "body_z_target_az_rad",  # target tether-plane azimuth implied by body_z_eq [rad]
-    "body_z_az_gap_deg",     # target azimuth - current orbit azimuth [deg]
-    # body-to-NED rotation matrix (row-major: r00=R[0,0], r01=R[0,1], ...)
-    "r00", "r01", "r02",
-    "r10", "r11", "r12",
-    "r20", "r21", "r22",
-]
+from telemetry_columns import (
+    ASYNC_MAV_COLUMNS,
+    COLUMNS,
+    COLUMN_GROUPS,
+    COLUMN_SOURCES,
+    COLUMN_SPECS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +61,7 @@ COLUMNS: list[str] = [
 class TelRow:
     t_sim: float = 0.0
     sitl_time: float = 0.0
+    frame_count: int = 0
     phase: str   = ""
     note:  str   = ""          # free-text event marker stamped once per event frame
     damp_alpha: float = 0.0   # startup damping blend [0..1]; 0.0 when free-flying
@@ -215,6 +148,23 @@ class TelRow:
     sens_gyro_z: float = 0.0   # IMU gyro Z (body) sent to SITL [rad/s]
     vel_heading_deg:  float = 0.0  # atan2(vel_E, vel_N) [deg] — GPS heading
     heading_gap_deg:  float = 0.0  # compass - vel_heading wrapped to (-180,180] [deg]
+
+    # Latest async MAVLink snapshot values (NaN = never received)
+    mav_time_boot_ms: float = float("nan")
+    mav_time_usec:    float = float("nan")
+    mav_att_roll_deg:  float = float("nan")
+    mav_att_pitch_deg: float = float("nan")
+    mav_att_yaw_deg:   float = float("nan")
+    mav_att_target_roll_deg: float = float("nan")
+    mav_att_target_pitch_deg: float = float("nan")
+    mav_att_target_yaw_deg: float = float("nan")
+    mav_att_target_roll_rate_rads: float = float("nan")
+    mav_att_target_pitch_rate_rads: float = float("nan")
+    mav_att_target_yaw_rate_rads: float = float("nan")
+    mav_servo1_us:     float = float("nan")
+    mav_servo2_us:     float = float("nan")
+    mav_servo3_us:     float = float("nan")
+    mav_servo4_us:     float = float("nan")
 
     servo_s1_us: float = 0.0   # S1 swashplate servo PWM [µs]
     servo_s2_us: float = 0.0   # S2 swashplate servo PWM [µs]
@@ -374,6 +324,7 @@ class TelRow:
         return cls(
             t_sim               = float(d.get("t_sim", 0.0)),
             sitl_time           = float(d.get("sitl_time", d.get("t_sim", 0.0))),
+            frame_count         = int(d.get("frame_count", 0)),
             phase               = str(d.get("phase", "")),
             pos_x               = float(pos[0]),
             pos_y               = float(pos[1]),
@@ -484,6 +435,15 @@ class TelRow:
         pitch_sp_rads: float = 0.0,
         vel_radial_mps: float = 0.0,
         net_moment=None,
+        mav_att_roll_deg: float = float("nan"),
+        mav_att_pitch_deg: float = float("nan"),
+        mav_att_yaw_deg: float = float("nan"),
+        mav_att_target_roll_deg: float = float("nan"),
+        mav_att_target_pitch_deg: float = float("nan"),
+        mav_att_target_yaw_deg: float = float("nan"),
+        mav_att_target_roll_rate_rads: float = float("nan"),
+        mav_att_target_pitch_rate_rads: float = float("nan"),
+        mav_att_target_yaw_rate_rads: float = float("nan"),
     ) -> "TelRow":
         """Build a TelRow from a PhysicsRunner and its step result (simtest use).
 
@@ -623,6 +583,7 @@ class TelRow:
         return cls(
             t_sim               = float(t_sim),
             sitl_time           = float(t_sim),
+            frame_count         = 0,
             phase               = str(phase),
             pos_x               = float(pos[0]),
             pos_y               = float(pos[1]),
@@ -709,6 +670,15 @@ class TelRow:
             r00=float(R[0, 0]), r01=float(R[0, 1]), r02=float(R[0, 2]),
             r10=float(R[1, 0]), r11=float(R[1, 1]), r12=float(R[1, 2]),
             r20=float(R[2, 0]), r21=float(R[2, 1]), r22=float(R[2, 2]),
+            mav_att_roll_deg=float(mav_att_roll_deg),
+            mav_att_pitch_deg=float(mav_att_pitch_deg),
+            mav_att_yaw_deg=float(mav_att_yaw_deg),
+            mav_att_target_roll_deg=float(mav_att_target_roll_deg),
+            mav_att_target_pitch_deg=float(mav_att_target_pitch_deg),
+            mav_att_target_yaw_deg=float(mav_att_target_yaw_deg),
+            mav_att_target_roll_rate_rads=float(mav_att_target_roll_rate_rads),
+            mav_att_target_pitch_rate_rads=float(mav_att_target_pitch_rate_rads),
+            mav_att_target_yaw_rate_rads=float(mav_att_target_yaw_rate_rads),
         )
 
     def to_dict(self) -> dict:

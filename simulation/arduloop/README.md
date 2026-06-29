@@ -174,16 +174,16 @@ the full rotation matrix.
 
 | Field | AP parameter | Default | Notes |
 |-------|-------------|---------|-------|
-| `ATC_ANG_RLL_P` | `ATC_ANG_RLL_P` | 4.5 | rad/s per rad |
-| `ATC_ANG_PIT_P` | `ATC_ANG_PIT_P` | 4.5 | |
-| `ATC_ANG_YAW_P` | `ATC_ANG_YAW_P` | 4.5 | |
-| `ATC_ACCEL_R_MAX` | `ATC_ACCEL_R_MAX` | 110000 | centi-deg/s², 0=linear P |
-| `ATC_ACCEL_P_MAX` | `ATC_ACCEL_P_MAX` | 110000 | |
-| `ATC_ACCEL_Y_MAX` | `ATC_ACCEL_Y_MAX` | 27000 | |
+| `ATC_ANG_RLL_P` | `ATC_ANG_RLL_P` | loaded from .parm | rad/s per rad |
+| `ATC_ANG_PIT_P` | `ATC_ANG_PIT_P` | loaded from .parm | |
+| `ATC_ANG_YAW_P` | `ATC_ANG_YAW_P` | loaded from .parm | |
+| `ATC_ACCEL_R_MAX` | `ATC_ACC_R_MAX` (fallback `ATC_ACCEL_R_MAX`) | loaded from .parm | deg/s² in AP 4.7 |
+| `ATC_ACCEL_P_MAX` | `ATC_ACC_P_MAX` (fallback `ATC_ACCEL_P_MAX`) | loaded from .parm | |
+| `ATC_ACCEL_Y_MAX` | `ATC_ACC_Y_MAX` (fallback `ATC_ACCEL_Y_MAX`) | loaded from .parm | |
 | `ATC_RATE_R_MAX` | `ATC_RATE_R_MAX` | 0 | deg/s, 0=unlimited |
 | `ATC_RATE_P_MAX` | `ATC_RATE_P_MAX` | 0 | |
 | `ATC_RATE_Y_MAX` | `ATC_RATE_Y_MAX` | 0 | |
-| `ATC_INPUT_TC` | `ATC_INPUT_TC` | 0.15 | s; controls slew speed |
+| `ATC_INPUT_TC` | `ATC_INPUT_TC` | loaded from .parm | s; controls slew speed |
 
 Use `GuidedAttitudeParams.from_heli_params(hp)` to pull values from an
 existing `HeliParams` (avoids duplicating the same gains).
@@ -193,9 +193,9 @@ existing `HeliParams` (avoids duplicating the same gains).
 | Field | AP parameter | Default |
 |-------|-------------|---------|
 | `roll / pitch / yaw` | per-axis `RateAxisParams` | see below |
-| `ATC_ANG_RLL_P / PIT_P / YAW_P` | `ATC_ANG_*_P` | 4.5 |
-| `ATC_ACCEL_R/P/Y_MAX` | `ATC_ACCEL_*_MAX` | 110000/110000/27000 cdss |
-| `ATC_RATE_R/P/Y_MAX` | `ATC_RATE_*_MAX` | 0 (unlimited) |
+| `ATC_ANG_RLL_P / PIT_P / YAW_P` | `ATC_ANG_*_P` | loaded from .parm |
+| `ATC_ACCEL_R/P/Y_MAX` | `ATC_ACC_*_MAX` (fallback `ATC_ACCEL_*_MAX`) | loaded from .parm |
+| `ATC_RATE_R/P/Y_MAX` | `ATC_RATE_*_MAX` | loaded from .parm |
 | `HOVR_ROL_TRM_cd` | `ATC_HOVR_ROL_TRM` | 0 centi-deg |
 | `PIRO_COMP_enabled` | `ATC_PIRO_COMP` | False |
 | `H_SW_H3_PHANG` | `H_SW_H3_PHANG` | 0 deg |
@@ -206,15 +206,15 @@ existing `HeliParams` (avoids duplicating the same gains).
 
 | Field | AP parameter | Default |
 |-------|-------------|---------|
-| `P / I / D / FF` | `ATC_RAT_xxx_P/I/D/FF` | 0.10/0.10/0.005/0.05 |
-| `IMAX` | `ATC_RAT_xxx_IMAX` | 0.3 |
+| `P / I / D / FF` | `ATC_RAT_xxx_P/I/D/FF` | loaded from .parm |
+| `IMAX` | `ATC_RAT_xxx_IMAX` | loaded from .parm |
 | `D_FF` | `ATC_RAT_xxx_D_FF` | 0 |
 | `PDMX` | `ATC_RAT_xxx_PDMX` | 0 (disabled) |
-| `FLTT / FLTE / FLTD` | `ATC_RAT_xxx_FLTT/FLTE/FLTD` | 20/0/20 Hz |
+| `FLTT / FLTE / FLTD` | `ATC_RAT_xxx_FLTT/FLTE/FLTD` | loaded from .parm |
 | `NTF_center_hz / bandwidth_hz / attn_db` | `ATC_RAT_xxx_NTF → FILT*` | 0 (disabled) |
 | `NEF_center_hz / bandwidth_hz / attn_db` | `ATC_RAT_xxx_NEF → FILT*` | 0 (disabled) |
 
-Yaw defaults differ: `P=0.18, I=0.12, D=0.003, FF=0.024, IMAX=0.4, FLTT=20, FLTD=10`.
+Yaw values are loaded from the ArduPilot .parm source by default.
 
 ---
 
@@ -269,7 +269,8 @@ In ArduPilot, `set_target_angle_and_climbrate` stores the commanded quaternion
 but does NOT immediately set `_attitude_target` to it. Instead, every 400 Hz
 tick, `input_shaping_angle` advances `_attitude_target` a small step toward
 `_q_commanded`, capped by `ATC_ACCEL_*_MAX` and `ATC_INPUT_TC`. With AP
-defaults (`ATC_INPUT_TC=0.15 s`, `ATC_ACCEL_P_MAX=110000 cdss ≈ 19 rad/s²`),
+defaults loaded from `.parm` (for example `ATC_INPUT_TC=0.2 s` and
+`ATC_ACC_P_MAX=600 deg/s² ≈ 10.5 rad/s²` in `copter-heli.parm`),
 a 65° step takes roughly 1.5 s to ramp up. This is the correct closed-loop
 transient. A simplified controller that skips this will converge faster in
 simulation but slower in SITL — defeating the purpose of pre-SITL tuning.

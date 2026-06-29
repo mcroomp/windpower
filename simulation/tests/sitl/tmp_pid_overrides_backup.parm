@@ -1,0 +1,27 @@
+# Temporary stash of removed SITL PID-related overrides
+# Date: 2026-06-29
+# Purpose: test stack behavior with ArduPilot default PID params.
+
+# Removed from simulation/tests/sitl/rawes_sitl_defaults.parm:
+ATC_RAT_RLL_P     0.15
+ATC_RAT_PIT_P     0.15
+ATC_RAT_RLL_I     0.15
+ATC_RAT_PIT_I     0.15
+ATC_RAT_RLL_FF    0.0
+ATC_RAT_PIT_FF    0.0
+ATC_RAT_RLL_D     0.02
+ATC_RAT_PIT_D     0.02
+ATC_RAT_RLL_FLTT  40.0
+ATC_RAT_PIT_FLTT  40.0
+ATC_RAT_RLL_FLTD  40.0
+ATC_RAT_PIT_FLTD  40.0
+ATC_RAT_RLL_IMAX  0.0
+ATC_RAT_PIT_IMAX  0.0
+ATC_RAT_YAW_IMAX  0.0
+ATC_ANG_RLL_P     4.0
+ATC_ANG_PIT_P     6.0
+
+# Removed from simulation/tests/sitl/stack_infra.py _BASE_ACRO_PARAMS:
+# "ATC_RAT_RLL_IMAX": 0.0
+# "ATC_RAT_PIT_IMAX": 0.0
+# "ATC_RAT_YAW_IMAX": 0.0

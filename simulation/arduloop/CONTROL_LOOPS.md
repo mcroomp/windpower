@@ -17,14 +17,14 @@ flowchart TD
         AT["_attitude_target\n(slewed internal)"]
         AVT["_ang_vel_target\n(feedforward)"]
 
-        SHAPE["input_shaping_angle (per axis)\nsqrt_controller + accel limit\nATC_INPUT_TC = 0.15 s"]
+        SHAPE["input_shaping_angle (per axis)\nsqrt_controller + accel limit\nATC_INPUT_TC from .parm"]
         QC --> SHAPE
         AT --> SHAPE
         SHAPE -->|"updates"| AVT
 
         subgraph RUNQUAT["attitude_controller_run_quat"]
             TVRA["1. thrust_vector_rotation_angles\n → att_error [roll, pitch, yaw]"]
-            SQRT["2. sqrt_controller per axis\nP = ATC_ANG_*_P (4.5)\n→ P_correction (rad/s)"]
+            SQRT["2. sqrt_controller per axis\nP = ATC_ANG_*_P (from .parm)\n→ P_correction (rad/s)"]
             FF["3. feedforward =\nrot_t2b × _ang_vel_target"]
             BLEND["4. Blend by thrust_error_angle:\n• < 30°: full FF all axes\n• 30–60°: partial, yaw→gyro\n• > 60°: no roll/pitch FF"]
             TVRA --> SQRT --> BLEND
@@ -125,7 +125,7 @@ flowchart TD
     TVRA["thrust_vector_rotation_angles()\n───────────────────────\nbody_z_target vs body_z_actual\ncross product → rotation axis\n→ roll/pitch error (body frame)\nremaining rotation → yaw error"]
 
     TVRA --> AE["att_error = roll, pitch, yaw"]
-    AE --> SQRT["sqrt_controller (per axis)\n───────────────────────\nSmall error: rate = error × P\nLarge error: rate = √(2 × a × e)\n───────────────────────\nP = ATC_ANG_*_P (4.5)\na = ATC_ACCEL_*_MAX"]
+    AE --> SQRT["sqrt_controller (per axis)\n───────────────────────\nSmall error: rate = error × P\nLarge error: rate = √(2 × a × e)\n───────────────────────\nP = ATC_ANG_*_P (from .parm)\na = ATC_ACC_*_MAX (fallback ATC_ACCEL_*)"]
 
     SQRT --> PC["P_correction (rad/s)"]
     AVT["_ang_vel_target"] --> ROT["rot_t2b × _ang_vel_target"]
@@ -182,27 +182,27 @@ flowchart TD
 
 | Parameter | Default | Role |
 |-----------|---------|------|
-| `ATC_ANG_RLL_P` | 4.5 | Attitude P-gain: rad/s per rad error |
-| `ATC_ANG_PIT_P` | 4.5 | Same for pitch |
-| `ATC_ANG_YAW_P` | 4.5 | Same for yaw |
-| `ATC_ACCEL_R_MAX` | 110000 cdss | Angular accel limit (sqrt region) |
-| `ATC_ACCEL_P_MAX` | 110000 cdss | Same for pitch |
-| `ATC_ACCEL_Y_MAX` | 27000 cdss | Same for yaw (slower) |
+| `ATC_ANG_RLL_P` | loaded from .parm | Attitude P-gain: rad/s per rad error |
+| `ATC_ANG_PIT_P` | loaded from .parm | Same for pitch |
+| `ATC_ANG_YAW_P` | loaded from .parm | Same for yaw |
+| `ATC_ACCEL_R_MAX` | loaded from .parm | AP 4.7 `ATC_ACC_R_MAX`, fallback `ATC_ACCEL_R_MAX` |
+| `ATC_ACCEL_P_MAX` | loaded from .parm | AP 4.7 `ATC_ACC_P_MAX`, fallback `ATC_ACCEL_P_MAX` |
+| `ATC_ACCEL_Y_MAX` | loaded from .parm | AP 4.7 `ATC_ACC_Y_MAX`, fallback `ATC_ACCEL_Y_MAX` |
 | `ATC_RATE_R/P/Y_MAX` | 0 (unlimited) | Max body rate cap (deg/s) |
-| `ATC_INPUT_TC` | 0.15 s | Slew time constant |
+| `ATC_INPUT_TC` | loaded from .parm | Slew time constant |
 
 ### Inner Loop (RateAxisParams per axis)
 
 | Parameter | Roll/Pitch | Yaw | Role |
 |-----------|-----------|-----|------|
-| `P` | 0.10 | 0.18 | Proportional gain |
-| `I` | 0.10 | 0.12 | Integral gain |
-| `D` | 0.005 | 0.003 | Derivative gain |
-| `FF` | 0.05 | 0.024 | Feedforward on target |
-| `IMAX` | 0.3 | 0.4 | Integrator clamp |
-| `FLTT` | 20 Hz | 20 Hz | Target signal LPF |
+| `P` | loaded from .parm | loaded from .parm | Proportional gain |
+| `I` | loaded from .parm | loaded from .parm | Integral gain |
+| `D` | loaded from .parm | loaded from .parm | Derivative gain |
+| `FF` | loaded from .parm | loaded from .parm | Feedforward on target |
+| `IMAX` | loaded from .parm | loaded from .parm | Integrator clamp |
+| `FLTT` | loaded from .parm | loaded from .parm | Target signal LPF |
 | `FLTE` | 0 Hz | 0 Hz | Error signal LPF |
-| `FLTD` | 20 Hz | 10 Hz | Derivative LPF |
+| `FLTD` | loaded from .parm | loaded from .parm | Derivative LPF |
 | `NEF` | 3.77 Hz | — | Error notch (tether spring) |
 | `NTF` | — | — | Target notch |
 | `PDMX` | 0 | 0 | PD sum limit (0=off) |

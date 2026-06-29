@@ -13,22 +13,30 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def _attitude_defaults() -> dict[str, float]:
+    from param_defaults import load_attitude_params
+
+    return load_attitude_params()
+
+
 @dataclass
 class RateAxisParams:
     # PID gains — `ATC_RAT_xxx_P / I / D / FF / IMAX`
-    P:    float = 0.10
-    I:    float = 0.10
-    D:    float = 0.005
-    FF:   float = 0.05
-    IMAX: float = 0.3
-    D_FF: float = 0.0
-    PDMX: float = 0.0   # 0 disables the PD sum limit
-
+    # All gains are required — use ArduPilot parameter file as single source of truth.
+    P:    float
+    I:    float
+    D:    float
+    FF:   float
+    IMAX: float
     # Target / error / derivative low-pass cutoffs (Hz)
     # `ATC_RAT_xxx_FLTT / FLTE / FLTD`
-    FLTT: float = 20.0
-    FLTE: float = 0.0
-    FLTD: float = 20.0
+    FLTT: float
+    FLTE: float
+    FLTD: float
+
+    # Optional fields with defaults (must come after required fields)
+    D_FF: float = 0.0
+    PDMX: float = 0.0   # 0 disables the PD sum limit
 
     # Slew-rate limiter (SMAX).  0 = disabled.  `ATC_RAT_xxx_SMAX`
     # When non-zero, limits the rate of change of P+D output to SMAX/s,
@@ -54,20 +62,64 @@ class RateAxisParams:
     NEF_attn_db:      float = 40.0
 
 
+def make_roll_pitch_params() -> RateAxisParams:
+    """Factory for standard roll/pitch rate PID parameters.
+    
+    Simtests use the Python altitude-hold loop which generates smaller rate
+    demands than ArduPilot's GUIDED attitude controller. Requires higher P gain
+    (0.67) to track tightly. This is the single source of truth for simtest
+    rate PID tuning.
+    
+    SITL stack tests use ArduPilot's GUIDED attitude controller which produces
+    larger rate targets; they use lower gains (0.15) configured in
+    rawes_sitl_defaults.parm and loaded by ArduPilot at boot.
+    
+    Returns
+    -------
+    RateAxisParams with P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTD=40.0
+    
+    See Also
+    --------
+    make_yaw_params : Yaw-specific PID parameters (P=0.18, lighter tuning)
+    param_defaults.make_roll_pitch_params_from_file : Load SITL ArduPilot params
+    """
+    from param_defaults import make_roll_pitch_params_from_file
+
+    return make_roll_pitch_params_from_file()
+
+
+def make_yaw_params() -> RateAxisParams:
+    """Factory for standard yaw rate PID parameters.
+    
+    Yaw is tuned differently from roll/pitch (lighter gains, faster derivative filter).
+    These are the standard ArduPilot helicopter yaw defaults.
+    
+    Returns
+    -------
+    RateAxisParams with P=0.18, I=0.12, D=0.003, IMAX=0.4, FLTT=20.0, FLTD=10.0
+    
+    See Also
+    --------
+    make_roll_pitch_params : Roll/pitch PID parameters
+    """
+    from param_defaults import make_yaw_params_from_file
+
+    return make_yaw_params_from_file()
+
+
 @dataclass
 class HeliParams:
-    # Per-axis rate PIDs
-    roll:  RateAxisParams = field(default_factory=RateAxisParams)
-    pitch: RateAxisParams = field(default_factory=RateAxisParams)
-    yaw:   RateAxisParams = field(default_factory=lambda: RateAxisParams(
-        P=0.18, I=0.12, D=0.003, FF=0.024, IMAX=0.4, FLTT=20.0, FLTD=10.0))
+    # Per-axis rate PIDs — loaded from ArduPilot parameter file by default.
+    roll: RateAxisParams = field(default_factory=make_roll_pitch_params)
+    pitch: RateAxisParams = field(default_factory=make_roll_pitch_params)
+    yaw: RateAxisParams = field(default_factory=make_yaw_params)
 
     # Heli-specific — `ATC_HOVR_ROL_TRM`, `ATC_PIRO_COMP`
-    HOVR_ROL_TRM_cd: float = 0.0    # centi-degrees, like ArduPilot
-    PIRO_COMP_enabled: bool = False
+    HOVR_ROL_TRM_cd: float | None = None    # centi-degrees, like ArduPilot
+    PIRO_COMP_enabled: bool | None = None
 
     # Swashplate — `H_SW_H3_PHANG` (degrees)
-    H_SW_H3_PHANG: float = 0.0
+    H_SW_H3_PHANG: float | None = None
 
     # Loop rate (Hz). ArduPilot heli typical: 400.
     loop_rate_hz: float = 400.0
@@ -77,25 +129,59 @@ class HeliParams:
 
     # -----------------------------------------------------------------------
     # Attitude (outer) P-loop gains — `ATC_ANG_RLL_P / PIT_P / YAW_P`
-    # Default 4.5 from AC_AttitudeControl.h AC_ATTITUDE_CONTROL_ANGLE_P.
+    # Loaded from ArduPilot .parm files when unset.
     # -----------------------------------------------------------------------
-    ATC_ANG_RLL_P: float = 4.5
-    ATC_ANG_PIT_P: float = 4.5
-    ATC_ANG_YAW_P: float = 4.5
+    ATC_ANG_RLL_P: float | None = None
+    ATC_ANG_PIT_P: float | None = None
+    ATC_ANG_YAW_P: float | None = None
 
-    # Angular acceleration limits for the sqrt-controller (centi-deg/s^2).
-    # 0 disables accel limiting (linear P only).
-    # ArduPilot defaults: 110000 cdss (roll/pitch), 27000 cdss (yaw).
-    # `ATC_ACCEL_R_MAX`, `ATC_ACCEL_P_MAX`, `ATC_ACCEL_Y_MAX`
-    ATC_ACCEL_R_MAX: float = 110000.0
-    ATC_ACCEL_P_MAX: float = 110000.0
-    ATC_ACCEL_Y_MAX: float = 27000.0
+    # Angular acceleration limits for the sqrt-controller.
+    # AP 4.7 names: `ATC_ACC_*_MAX` in deg/s^2.
+    # Legacy fallback names: `ATC_ACCEL_*_MAX` in centi-deg/s^2.
+    # Values are loaded from .parm files when unset.
+    ATC_ACCEL_R_MAX: float | None = None
+    ATC_ACCEL_P_MAX: float | None = None
+    ATC_ACCEL_Y_MAX: float | None = None
 
     # Maximum body-frame angular velocity (deg/s). 0 = unlimited.
     # `ATC_RATE_R_MAX`, `ATC_RATE_P_MAX`, `ATC_RATE_Y_MAX`
-    ATC_RATE_R_MAX: float = 0.0
-    ATC_RATE_P_MAX: float = 0.0
-    ATC_RATE_Y_MAX: float = 0.0
+    ATC_RATE_R_MAX: float | None = None
+    ATC_RATE_P_MAX: float | None = None
+    ATC_RATE_Y_MAX: float | None = None
 
     # Input shaping time constant (s).  `ATC_INPUT_TC`  AP default: 0.15
-    ATC_INPUT_TC: float = 0.15
+    ATC_INPUT_TC: float | None = None
+
+    def __post_init__(self) -> None:
+        ap = _attitude_defaults()
+
+        if self.HOVR_ROL_TRM_cd is None:
+            self.HOVR_ROL_TRM_cd = ap["ATC_HOVR_ROL_TRM"]
+        if self.PIRO_COMP_enabled is None:
+            self.PIRO_COMP_enabled = bool(ap["ATC_PIRO_COMP"])
+        if self.H_SW_H3_PHANG is None:
+            self.H_SW_H3_PHANG = ap["H_SW_H3_PHANG"]
+
+        if self.ATC_ANG_RLL_P is None:
+            self.ATC_ANG_RLL_P = ap["ATC_ANG_RLL_P"]
+        if self.ATC_ANG_PIT_P is None:
+            self.ATC_ANG_PIT_P = ap["ATC_ANG_PIT_P"]
+        if self.ATC_ANG_YAW_P is None:
+            self.ATC_ANG_YAW_P = ap["ATC_ANG_YAW_P"]
+
+        if self.ATC_ACCEL_R_MAX is None:
+            self.ATC_ACCEL_R_MAX = ap["ATC_ACCEL_R_MAX"]
+        if self.ATC_ACCEL_P_MAX is None:
+            self.ATC_ACCEL_P_MAX = ap["ATC_ACCEL_P_MAX"]
+        if self.ATC_ACCEL_Y_MAX is None:
+            self.ATC_ACCEL_Y_MAX = ap["ATC_ACCEL_Y_MAX"]
+
+        if self.ATC_RATE_R_MAX is None:
+            self.ATC_RATE_R_MAX = ap["ATC_RATE_R_MAX"]
+        if self.ATC_RATE_P_MAX is None:
+            self.ATC_RATE_P_MAX = ap["ATC_RATE_P_MAX"]
+        if self.ATC_RATE_Y_MAX is None:
+            self.ATC_RATE_Y_MAX = ap["ATC_RATE_Y_MAX"]
+
+        if self.ATC_INPUT_TC is None:
+            self.ATC_INPUT_TC = ap["ATC_INPUT_TC"]

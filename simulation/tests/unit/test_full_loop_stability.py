@@ -576,7 +576,7 @@ def _run_elastic_free_flight_with_python_ap(
         wind=WIND,
         dt=DT,
     )
-    rate_params = RateAxisParams(P=0.67, I=0.15, D=0.02, IMAX=0.30,
+    rate_params = RateAxisParams(P=0.67, I=0.15, D=0.02, FF=0.05, IMAX=0.30,
                                  FLTT=40.0, FLTE=0.0, FLTD=40.0)
     heli_params = HeliParams()
     heli_params.roll = rate_params

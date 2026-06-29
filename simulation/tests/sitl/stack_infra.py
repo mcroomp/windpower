@@ -106,9 +106,6 @@ _BASE_ACRO_PARAMS = ParamSetup({
     "FS_EKF_ACTION":    0,      # disable EKF failsafe
     "H_RSC_MODE":       1,      # CH8 passthrough — instant runup_complete
     "ACRO_TRAINER":     0,      # disable auto-leveling (physical tilt ~65 deg)
-    "ATC_RAT_RLL_IMAX": 0.0,   # zero I-term limits — orbital rate accumulates
-    "ATC_RAT_PIT_IMAX": 0.0,
-    "ATC_RAT_YAW_IMAX": 0.0,
     "H_SW_TYPE":        3,      # H3_120 swashplate
     # H_SW_PHANG removed in ArduPilot 4.6 (param no longer exists; default=0 implicit)
 })
@@ -697,7 +694,8 @@ def _static_stack(
 @contextlib.contextmanager
 def _acro_stack(tmp_path, *, extra_config=None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
-                extra_boot_params: "dict[str, float] | None" = None):
+                extra_boot_params: "dict[str, float] | None" = None,
+                arm_at_sim_s: "float | None" = None):
     """
     Core GUIDED_NOGPS stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
 
@@ -740,6 +738,12 @@ def _acro_stack(tmp_path, *, extra_config=None,
     if extra_boot_params:
         _extra.update(extra_boot_params)
 
+    _med_extra = dict(extra_config or {})
+    _med_extra.setdefault("mavlink_log_connection", "tcp:127.0.0.1:5762")
+    _med_extra.setdefault("mavlink_att_target_hz", 100.0)
+    _med_extra.setdefault("mavlink_attitude_hz", 100.0)
+    _med_extra.setdefault("mavlink_servo_output_raw_hz", 100.0)
+
     with _sitl_stack(
         tmp_path,
         test_name         = test_name,
@@ -767,7 +771,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
                 startup_damp_seconds = _STARTUP_DAMP_S,
                 run_id               = _run_id,
                 base_k_ang           = StackConfig.BASE_K_ANG,
-                extra_config         = extra_config,
+                extra_config         = _med_extra,
             )
         else:
             mediator_proc = None
@@ -795,12 +799,17 @@ def _acro_stack(tmp_path, *, extra_config=None,
             log=log, sim_dir=sitl_ctx.sim_dir,
             controller=controller,
             test_log_dir=sitl_ctx.test_log_dir,
-            winch_cmd_port=int((extra_config or {}).get("winch_cmd_port", 0)),
+            winch_cmd_port=int(_med_extra.get("winch_cmd_port", 0)),
         )
 
         try:
             if arm:
-                _run_acro_setup(ctx, _procs_alive, boot_setup=sitl_ctx.boot_setup)
+                _run_acro_setup(
+                    ctx,
+                    _procs_alive,
+                    boot_setup=sitl_ctx.boot_setup,
+                    arm_at_sim_s=arm_at_sim_s,
+                )
             yield ctx
         finally:
             gcs.close()
@@ -993,7 +1002,12 @@ def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
         log.warning("[params] Could not dump params: %s", exc)
 
 
-def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | None" = None) -> None:
+def _run_acro_setup(
+    ctx: StackContext,
+    _procs_alive,
+    boot_setup: "ParamSetup | None" = None,
+    arm_at_sim_s: "float | None" = None,
+) -> None:
     """
     Shared GUIDED_NOGPS setup sequence.
 
@@ -1277,6 +1291,25 @@ def _run_acro_setup(ctx: StackContext, _procs_alive, boot_setup: "ParamSetup | N
     if not ekf_att_ready:
         log.warning("[stabilise] EKF3 attitude confidence not seen within 20 s; "
                     "proceeding with flags=0x%04x", last_flags)
+
+    # Optional delayed arm schedule for fixtures that need a fixed sim-time arm.
+    if arm_at_sim_s is not None:
+        now = gcs.sim_now()
+        if now < arm_at_sim_s:
+            wait_s = arm_at_sim_s - now
+            log.info("[setup] Delaying arm until sim t=%.1f s (waiting %.1f s) ...",
+                     arm_at_sim_s, wait_s)
+            while gcs.sim_now() < arm_at_sim_s:
+                _procs_alive()
+                msg = gcs._recv(
+                    type=["STATUSTEXT", "EKF_STATUS_REPORT", "LOCAL_POSITION_NED"],
+                    blocking=True,
+                    timeout=0.5,
+                )
+                if msg is not None and msg.get_type() == "STATUSTEXT":
+                    text = msg.text.rstrip("\x00").strip()
+                    all_statustext.append(text)
+                    log.info("[setup-delay] STATUSTEXT: %s", text)
 
     # ── 5+6. GUIDED_NOGPS mode (before arm) + arm ─────────────────────────────
     # GUIDED_NOGPS (mode 20) must be active before arm for flight-stack tests.

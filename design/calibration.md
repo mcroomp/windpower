@@ -86,7 +86,7 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 | `p`,`i`,`d`,`ff`,`imax` | `ATC_RAT_YAW_*` | Yaw rate PID gains |
 | `trim` | `H_YAW_TRIM` | Feedforward throttle |
 | `flte`,`fltt`,`fltd` | `ATC_RAT_YAW_FLT*` | Target / error / derivative filters |
-| `accelmax` | `ATC_ACCEL_Y_MAX` | Yaw accel limit |
+| `accelmax` | `ATC_ACC_Y_MAX` (fallback `ATC_ACCEL_Y_MAX`) | Yaw accel limit |
 | `servo_min`,`servo_max` | `SERVO4_MIN/MAX` | Motor PWM range cap |
 
 ```bash

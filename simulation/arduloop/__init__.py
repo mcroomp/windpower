@@ -30,18 +30,21 @@ Public modules
 - :mod:`arduloop.analysis`       — empirical FRF, stability margins, step-response score
 """
 
-from .params import RateAxisParams, HeliParams
+from .params import RateAxisParams, HeliParams, make_roll_pitch_params, make_yaw_params
 from .filters import LowPassFilter1p, NotchFilter
 from .pid import AC_PID
 from .swash import SwashH3
 from .attitude_heli import HeliRateController
 from .guided import GuidedAttitudeController, GuidedAttitudeParams
 from .plant import HeliPlant
+from .log_df_equiv import DataflashEquivRow, make_df_equiv_row, write_df_equiv_csv
 from . import signals, analysis
 
 __all__ = [
     "RateAxisParams",
     "HeliParams",
+    "make_roll_pitch_params",
+    "make_yaw_params",
     "LowPassFilter1p",
     "NotchFilter",
     "AC_PID",
@@ -50,6 +53,9 @@ __all__ = [
     "GuidedAttitudeController",
     "GuidedAttitudeParams",
     "HeliPlant",
+    "DataflashEquivRow",
+    "make_df_equiv_row",
+    "write_df_equiv_csv",
     "signals",
     "analysis",
 ]

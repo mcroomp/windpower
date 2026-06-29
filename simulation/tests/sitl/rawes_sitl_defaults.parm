@@ -21,36 +21,48 @@
 #   rawes.lua flies the GUIDED *angle* path (set_target_angle_and_rate_and_
 #   throttle), so this rate PID is the INNER loop beneath ArduPilot's attitude
 #   P-loop (ATC_ANG_*_P).  It must track the attitude controller's rate demand
-#   at the high-tilt / low-tension reel-in operating point.  The old rate-path
-#   gains (P=0.02) are too weak for the angle path: crosswind drift compounds and
-#   the pump blows up by cycle 2.  P=0.15 with light D=0.02 tracks tightly enough
-#   to keep multi-cycle drift bounded while staying in the linear region (a
-#   non-zero FLTD filters the derivative).  Validated in-process against the
-#   faithful GuidedAttitudeController by test_pump_cycle_lua /
-#   tests/oneoff/tune_lua_reelin.py (P>=0.10 stable, P=0.06 diverges).
+#   at the high-tilt / low-tension reel-in operating point.
+#   P=0.67 is the proven working gain from simtest_runner.PhysicsRunner (validated
+#   in test_steady_flight.py and test_pumping_cycle_lua).  This is the single
+#   source of truth for rate PID tuning — both simulation and SITL use the same
+#   values.  Light D=0.02 filters derivative noise.  FLTT/FLTD match ArduPilot
+#   defaults.  See test_steady_flight.py line ~70 where the proven gains originate.
 #
 # DataFlash logging:
-#   Enable Fast Attitude (bit 0) and Fast IMU (bit 18) in addition to the
-#   existing mask used by Copter heli defaults.
+#   LOG_BITMASK bits from ArduCopter/defines.h:
+#     bit  0: ATTITUDE_FAST
+#     bit  1: ATTITUDE_MED
+#     bit  2: GPS
+#     bit  3: PM
+#     bit  4: CTUN
+#     bit  5: NTUN
+#     bit  6: RCIN
+#     bit  7: IMU
+#     bit  8: CMD
+#     bit  9: CURRENT
+#     bit 10: RCOUT
+#     bit 11: OPTFLOW
+#     bit 12: PID
+#     bit 13: COMPASS
+#     bit 14: INAV (deprecated)
+#     bit 15: CAMERA
+#     bit 16: unused
+#     bit 17: MOTBATT
+#     bit 18: IMU_FAST
+#     bit 19: IMU_RAW
+#     bit 20: VIDEO_STABILISATION
+#     bit 21: FTN_FAST
+#   Current value 442367 enables bits:
+#     0,1,2,3,4,5,6,7,8,9,10,11,12,13,15,17,18
+#   Notes:
+#     - RCIN has no separate fast bit in Copter; RCIN logging is emitted from
+#       ten_hz_logging_loop in source.
+#     - This mask intentionally enables ATTITUDE_FAST (bit 0) and IMU_FAST
+#       (bit 18) for higher-rate attitude/IMU diagnostics.
 LOG_BITMASK       442367
 
-#
-# I-term limits stay at 0 to prevent windup during the kinematic phase
-# (body held fixed; rate setpoint nonzero -> integrator races without
-# IMAX cap).  Promoted by the test post-kinematic_exit if needed.
-ATC_RAT_RLL_P     0.15
-ATC_RAT_PIT_P     0.15
-ATC_RAT_RLL_FF    0.0
-ATC_RAT_PIT_FF    0.0
-ATC_RAT_RLL_D     0.02
-ATC_RAT_PIT_D     0.02
-ATC_RAT_RLL_FLTD  10.0
-ATC_RAT_PIT_FLTD  10.0
-ATC_RAT_RLL_IMAX  0.0
-ATC_RAT_PIT_IMAX  0.0
-ATC_RAT_YAW_IMAX  0.0
-ATC_ANG_RLL_P     4.0
-ATC_ANG_PIT_P     6.0
+# PID overrides removed to test ArduPilot defaults.
+# Stashed in simulation/tests/sitl/tmp_pid_overrides_backup.parm.
 ATC_ANGLE_BOOST   0      # disable throttle boost at high tilt (RAWES commands fixed throttle -> no boost wanted)
 
 ACRO_TRAINER      0      # disable auto-leveling (physical tilt ~65 deg)

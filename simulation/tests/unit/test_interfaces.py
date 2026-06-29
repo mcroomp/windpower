@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 
-from sitl_interface import SITLInterface
+from sitl_interface import SIM_CLOCK_HZ, SITLInterface
 
 
 def _get_free_udp_port():
@@ -67,8 +67,8 @@ def test_sitl_interface_send_state_replies_to_servo_source():
         raw, _addr = sender.recvfrom(4096)
         message = json.loads(raw.decode("utf-8").strip())
 
-        # timestamp = sim_now() = frame_count/frame_rate = 1/400
-        assert message["timestamp"] == pytest.approx(1 / 400)
+        # timestamp advances by one fixed simulation step per lockstep packet.
+        assert message["timestamp"] == pytest.approx(1 / SIM_CLOCK_HZ)
         assert message["position"] == [1.0, 2.0, -3.0]
         assert message["velocity"] == [4.0, 5.0, -6.0]
         assert message["attitude"] == [0.1, 0.2, 0.3]

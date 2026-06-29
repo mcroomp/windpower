@@ -46,6 +46,12 @@ _SERVO_FMT_32    = "<HHI32H"   # magic, frame_rate, frame_count, pwm×32
 _SERVO_SIZE_16   = struct.calcsize(_SERVO_FMT_16)   # 40 bytes
 _SERVO_SIZE_32   = struct.calcsize(_SERVO_FMT_32)   # 72 bytes
 
+# Simulation clock is fixed and monotonic: one physics step per received
+# lockstep servo packet at a constant rate.
+# Change this single constant to adjust the SITL lockstep physics rate.
+SIM_CLOCK_HZ     = 1200
+_SIM_DT_S        = 1.0 / SIM_CLOCK_HZ
+
 
 class SITLInterface:
     """
@@ -78,7 +84,9 @@ class SITLInterface:
         self._last_servos:  np.ndarray = np.zeros(16, dtype=np.float64)
         self._last_pwm_raw: np.ndarray = np.full(16, 1500.0, dtype=np.float64)
         self._sim_time_s:   float      = 0.0
+        self._sim_steps:    int        = 0
         self._frame_rate:   int        = 400   # updated from servo packets; default 400 Hz
+        self._frame_count:  int        = 0     # latest SITL frame counter from servo packets
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -144,6 +152,13 @@ class SITLInterface:
             return   # SITL hasn't sent anything yet; nothing to reply to
 
         rpm1 = rpm_rad_s * (60.0 / (2.0 * 3.141592653589793))
+        # Debug carrier: encode lockstep frame counter across RC11/RC12.
+        #   rc11 = floor(frame_count / 1000) + 1000
+        #   rc12 = (frame_count % 1000) + 1000
+        # Exact reconstruction (while RC channels remain in range):
+        #   frame_count = (rc11 - 1000) * 1000 + (rc12 - 1000)
+        rc11 = int(self._frame_count // 1000) + 1000
+        rc12 = int(self._frame_count % 1000) + 1000
         msg = {
             "timestamp": self._sim_time_s,
             "imu": {
@@ -163,6 +178,7 @@ class SITLInterface:
             "velocity": [float(vel_ned[0]),
                          float(vel_ned[1]),
                          float(vel_ned[2])],
+            "rc": {"rc_11": float(rc11), "rc_12": float(rc12)},
             "rpm":       {"rpm_1": rpm1, "rpm_2": 0.0, "rpm_3": 0.0, "rpm_4": 0.0},
         }
         if battery_voltage is not None:
@@ -229,8 +245,12 @@ class SITLInterface:
         # Record SITL's address so send_state() knows where to reply
         self._sitl_addr = addr
         if frame_rate > 0:
-            self._frame_rate  = frame_rate
-            self._sim_time_s  = frame_count / frame_rate
+            self._frame_rate = frame_rate
+        self._frame_count = int(frame_count)
+
+        # Fixed monotonic sim clock: exactly one tick per lockstep packet.
+        self._sim_steps += 1
+        self._sim_time_s = self._sim_steps * _SIM_DT_S
 
         pwm = np.array(pwm_raw[:16], dtype=np.float64)
         self._last_pwm_raw = pwm
@@ -251,14 +271,18 @@ class SITLInterface:
         return self._last_pwm_raw
 
     def sim_now(self) -> float:
-        """Sim time [s] derived from the most recent servo packet (frame_count / frame_rate).
+        """Sim time [s] from an internal fixed monotonic clock.
         Returns 0.0 before the first packet is received."""
         return self._sim_time_s
 
+    @property
+    def frame_count(self) -> int:
+        """Most recent lockstep frame counter from SITL servo packets."""
+        return self._frame_count
+
     def dt(self) -> float:
-        """Physics timestep [s] = 1 / frame_rate from the most recent servo packet.
-        Returns 1/400 before the first packet is received."""
-        return 1.0 / self._frame_rate
+        """Physics timestep [s] for the fixed simulation clock."""
+        return _SIM_DT_S
 
 
 # ---------------------------------------------------------------------------

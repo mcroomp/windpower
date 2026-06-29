@@ -410,7 +410,7 @@ def angle_to_rate_target(angle_error_rad, kp, accel_max, dt):
 | `ATC_ANG_RLL_P` | Roll angle-error → roll-rate gain |
 | `ATC_ANG_PIT_P` | Pitch angle-error → pitch-rate gain |
 | `ATC_ANG_YAW_P` | Yaw angle-error → yaw-rate gain |
-| `ATC_ACCEL_R_MAX` / `ATC_ACCEL_P_MAX` / `ATC_ACCEL_Y_MAX` | per-axis maximum angular acceleration; sets the sqrt-controller break point |
+| `ATC_ACC_R_MAX` / `ATC_ACC_P_MAX` / `ATC_ACC_Y_MAX` (fallback `ATC_ACCEL_*`) | per-axis maximum angular acceleration; sets the sqrt-controller break point |
 
 ---
 
@@ -449,7 +449,7 @@ if __name__ == "__main__":
 
     dt        = 1.0 / 400.0          # 400 Hz inner loop
     kp_angle  = 6.0                  # ATC_ANG_RLL_P
-    accel_max = math.radians(110000) / 1000.0  # ~110000 cdss² in rad/s²
+    accel_max = math.radians(600.0)  # AP 4.7 deg/s² naming (`ATC_ACC_*_MAX`)
 
     angle    = 0.0                   # measured roll (rad)
     gyro     = 0.0                   # measured roll rate (rad/s)
@@ -485,7 +485,7 @@ if __name__ == "__main__":
 | Parameter group | Owner | Purpose |
 |-----------------|-------|---------|
 | `ATC_ANG_RLL_P` / `PIT_P` / `YAW_P` | Outer angle loop | Attitude-error → rate-target proportional gain. |
-| `ATC_ACCEL_R_MAX` / `P_MAX` / `Y_MAX` | Outer angle loop | Caps the rate slope used by `sqrt_controller`. |
+| `ATC_ACC_R_MAX` / `P_MAX` / `Y_MAX` (fallback `ATC_ACCEL_*`) | Outer angle loop | Caps the rate slope used by `sqrt_controller`. |
 | `ATC_RAT_RLL_*`  / `PIT_*` / `YAW_*` | Rate PID per axis | `P I D FF D_FF IMAX ILMI FLTT FLTE FLTD SMAX PDMX NTF NEF`. |
 | `ATC_PIRO_COMP`  | Heli only | Enable pirouette compensation on roll/pitch I-terms. |
 | `AC_ATTITUDE_HELI_RATE_INTEGRATOR_LEAK_RATE` (=0.02) | Compile-time | Per-call decay of leaky I-term toward `±ILMI`. |
