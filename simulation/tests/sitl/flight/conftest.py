@@ -448,17 +448,16 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             return
 
         # ── Ground-side tension-regulating winch ─────────────────────────────
-        # Mirrors the test_create_ic warmup pattern: a slow integrator on
-        # ``rest_length`` driven by tension error.  Without this the tether
-        # spring mode is undamped after kinematic_exit and the kinematic→
-        # free-flight transient blows up within ~700 ms (tension peaks
-        # >1000 N, SITL crashes).
+        # Mirrors the test_create_ic warmup pattern: the GovernedWinchNode in
+        # the mediator holds tension natively.  Without an active hold command
+        # the tether spring mode is undamped after kinematic_exit and the
+        # kinematic-> free-flight transient blows up within ~700 ms (tension
+        # peaks >1000 N, SITL crashes).
         #
-        # The mediator's WinchController interprets ``target_length`` as
-        # a destination; for tension regulation we set it slightly above /
-        # below the current ``rest_length`` based on the sign of the
-        # tension error, exploiting the WinchController's asymmetric
-        # reel-out / reel-in tension-controlled cruise speed.
+        # The mediator hosts a GovernedWinchController; a hold command
+        # (cruise_v=0 at the target tension) makes the governor pay out / reel
+        # in just enough to keep tension at the set point.  No length math is
+        # needed on the test side.
         import socket as _sock
         import json as _json_w
         import threading as _thr
@@ -471,39 +470,30 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         _winch_sock.bind(("127.0.0.1", 0))
         _winch_sock.settimeout(0.05)
 
-        # Seed the mediator with an initial command so it knows our address
-        # and starts streaming state back.
+        # Seed the mediator with an initial hold command so it knows our
+        # address and starts streaming telemetry back.
         _winch_sock.sendto(_json_w.dumps({
-            "target_length":  float(_ic.get("rest_length", 100.0)) if _ic else 100.0,
-            "target_tension": _tension_target_n,
+            "cruise_v":       0.0,
+            "tension_target": _tension_target_n,
         }).encode(), _winch_addr)
 
         def _winch_regulator():
-            _rest_local = float(_ic.get("rest_length", 100.0)) if _ic else 100.0
-            _tension_now = _tension_target_n
             while not _winch_stop.is_set():
-                # Pull any pending state updates from mediator
+                # Drain any pending telemetry from the mediator (we don't need
+                # it -- the governor closes the tension loop on its own load
+                # cell; we just keep the socket from backing up).
                 try:
                     while True:
-                        _data, _ = _winch_sock.recvfrom(256)
-                        _state = _json_w.loads(_data)
-                        _tension_now = float(_state["tension_n"])
-                        _rest_local  = float(_state["rest_length"])
+                        _winch_sock.recvfrom(256)
                 except (TimeoutError, _sock.timeout, BlockingIOError):
                     pass
 
-                # Asymmetric set-point: target_length above or below current
-                # rest_length depending on which way we need to push tension.
-                # WinchController reel-out speed = kp*(T-T_target), reel-in
-                # speed = kp*(T_target-T) — non-zero only in the matching
-                # direction, so flipping the sign of ``target_length - rest``
-                # selects the right mode each tick.
-                _dT = _tension_now - _tension_target_n
-                _target_len = _rest_local + (1.0 if _dT > 0 else -1.0)
+                # Re-issue the hold command at 10 Hz.  The GovernedWinch holds
+                # tension natively via cruise_v=0 + tension_target.
                 try:
                     _winch_sock.sendto(_json_w.dumps({
-                        "target_length":  _target_len,
-                        "target_tension": _tension_target_n,
+                        "cruise_v":       0.0,
+                        "tension_target": _tension_target_n,
                     }).encode(), _winch_addr)
                 except OSError:
                     pass

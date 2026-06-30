@@ -4,12 +4,12 @@ pumping_planner.py -- Pumping planner: ground controller + communication protoco
 Design
 ------
 Ground (10 Hz):
-    PumpingGroundController.step(t_sim, tension_measured_n)
+    PumpingGroundController.step(t_sim, tension_measured_n, rest_length, hub_alt_m)
         -> TensionCommand (forwarded to AP)
 
     TensionCommand carries:
         tension_target_n   : target/feed-forward tension [N] for AP body-z
-        alt_m              : target altitude above anchor [m]
+        alt_m              : target altitude above anchor [m] (CONSTANT = IC alt)
         phase              : phase label
 
     The AP has no tension sensor of its own.  The ground reads the load cell for
@@ -17,30 +17,34 @@ Ground (10 Hz):
     so gravity-compensated body-z does not chase transient tether dynamics.
     Collective is local AP altitude PID; ground does not command thrust.
 
-Phase state machine (length-driven):
-    reel-out   : exit when rest_length >= start_length + delta_l  (or safety timeout)
-    transition : exit after t_transition seconds  (AP attitude change; winch already reeling)
-    reel-in    : exit when rest_length <= start_length  (or safety timeout)
-    hold       : entered after n_cycles complete
+This is the proven logic from the test_pump_cycle_lua simtest: a two-phase,
+length-driven cycle with a CONSTANT commanded altitude (the IC altitude above
+the anchor).  The kite holds altitude while the winch pays out and reels in the
+tether; the per-phase tension target is both the AP body-z feed-forward and the
+winch tension governor target.
 
-Winch strategy:
-    reel-out   : target = start_length + delta_l,  tension = tension_ic
-                 (generator pays out as AP raises tension above tension_ic)
-    transition : target = start_length,  tension = tension_in
-                 (winch starts reeling in immediately; AP drops tension, so winch
-                  moves naturally once T < tension_in; no forced slack)
-    reel-in    : same as transition (winch continues reeling in)
-    hold       : target = rest_length (hold position)
+Phase state machine (length-driven, with safety timeouts):
+    hold     : pre-capture, and after all cycles complete.  Begins the first
+               reel-out once notify_captured() has fired and capture_settle_s
+               has elapsed.
+    reel-out : exit when rest_length >= start_length + delta_l  (or t_reel_out_max)
+    reel-in  : exit when rest_length <= start_length            (or t_reel_in_max)
 
-Altitude ramp:
-    Transition: ramp from hub_alt_m → reel-in target over t_transition.
-    Reel-out start: ramp from hub_alt_m → IC altitude over t_transition.
-    Reel-in: hold at rest_length * sin(el_reel_in_rad).
+Winch strategy (the planner serves two winch backends):
+    GovernedWinchController (velocity cruise) -> winch_target_velocity
+    WinchController          (length target)  -> winch_target_length
+    Both share                                -> winch_target_tension
+
+    reel-out : length = start_length + delta_l, velocity = +v_cruise_out,
+               tension = tension_out
+    reel-in  : length = start_length,           velocity = -v_cruise_in,
+               tension = tension_in
+    hold     : length = rest_length,            velocity = 0,
+               tension = tension_ic
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 
@@ -54,8 +58,8 @@ class TensionCommand:
     Command sent from ground to AP at ~10 Hz.
 
     tension_target_n   : float  target/feed-forward tension [N] for AP gravity comp
-    alt_m              : float  target altitude above anchor [m]
-    phase              : str    "hold" | "reel-out" | "transition" | "reel-in"
+    alt_m              : float  target altitude above anchor [m] (CONSTANT = IC alt)
+    phase              : str    "hold" | "reel-out" | "reel-in"
     """
     tension_target_n   : float
     alt_m              : float
@@ -68,79 +72,95 @@ class TensionCommand:
 
 class PumpingGroundController:
     """
-    Ground-side pumping controller.
+    Ground-side pumping controller (the proven test_pump_cycle_lua logic).
 
-    Phase exits are driven by tether length (reel-out, reel-in) or time
-    (transition).  t_reel_out and t_reel_in are safety timeouts only.
+    A two-phase, length-driven cycle (hold / reel-out / reel-in) gated on Lua
+    steady capture.  Commands a CONSTANT target altitude (the IC altitude above
+    the anchor) in every phase -- the kite holds altitude while the winch pays
+    out and reels in the tether.  Per-phase tension is both the AP body-z
+    feed-forward AND the winch tension governor target.
+
+    The planner serves two winch backends:
+      - GovernedWinchController (velocity cruise): use winch_target_velocity.
+      - WinchController          (length target):  use winch_target_length.
+    Both share winch_target_tension.
+
+    Phase exits (length-driven, with safety timeouts):
+      reel-out : rest_length >= start_length + delta_l   (or t_reel_out_max)
+      reel-in  : rest_length <= start_length             (or t_reel_in_max)
+      hold     : pre-capture, and after n_cycles complete
+
+    Capture gating:
+      Stays in 'hold' until notify_captured(t) is called AND capture_settle_s
+      has elapsed, then begins the first reel-out.  start_length (the cycle
+      baseline) is latched once, when pumping begins.
 
     Parameters
     ----------
-    t_transition    : float  time for AP attitude change [s]  (primary)
-    target_alt_m    : float  altitude to hold during reel-out [m]
-    delta_l         : float  tether length paid out per cycle [m]
-    n_cycles        : int    number of pumping cycles (0 = infinite)
-    tension_out     : float  reel-out tension setpoint [N]
-    tension_in      : float  reel-in / transition tension setpoint [N]
-    tension_ic      : float  IC equilibrium tension [N]
-    el_reel_in_rad  : float  hub elevation target during reel-in [rad]
-    t_reel_out_max  : float  safety timeout for reel-out phase [s]
-    t_reel_in_max   : float  safety timeout for reel-in phase [s]
-    reel_in_winch_offset_n: float  winch target = T_ic + offset during reel-in [N];
-                                   ensures steady slow reel-in near IC flight state
+    target_alt_m     : float  constant commanded altitude above anchor [m] (IC alt)
+    delta_l          : float  tether length paid out per cycle [m]
+    n_cycles         : int    number of pumping cycles (0 = infinite)
+    tension_out      : float  reel-out tension target [N]  (AP FF + winch)
+    tension_in       : float  reel-in tension target [N]   (AP FF + winch)
+    tension_ic       : float  IC / hold tension target [N]
+    v_cruise_out     : float  reel-out cruise velocity [m/s] (GovernedWinch)
+    v_cruise_in      : float  reel-in cruise speed [m/s] (applied as -v_cruise_in)
+    t_reel_out_max   : float  safety timeout for reel-out phase [s]
+    t_reel_in_max    : float  safety timeout for reel-in phase [s]
+    capture_settle_s : float  hold time after capture before pumping begins [s]
     """
 
     def __init__(
         self,
-        t_transition     : float,
         target_alt_m     : float,
         delta_l          : float = 12.0,
         n_cycles         : int   = 0,
-        tension_out      : float = 435.0,
-        tension_in       : float = 226.0,
+        tension_out      : float = 300.0,
+        tension_in       : float = 100.0,
         tension_ic       : float = 300.0,
-        el_reel_in_rad   : float = 0.0,
-        t_reel_out_max   : float = 300.0,
+        v_cruise_out     : float = 0.5,
+        v_cruise_in      : float = 0.5,
+        t_reel_out_max   : float = 120.0,
         t_reel_in_max    : float = 300.0,
-        k_ff_winch       : float = 0.0,
-        k_ff_vel         : float = 0.0,
-        reel_in_winch_offset_n: float = 60.0,   # winch target = T_ic + offset during reel-in
+        capture_settle_s : float = 2.0,
     ) -> None:
-        self._t_tr         = float(t_transition)
         self._alt_m        = float(target_alt_m)
         self._delta_l      = float(delta_l)
-        self._el_reel_in   = float(el_reel_in_rad)
         self._ncyc         = int(n_cycles)
         self._tension_out  = float(tension_out)
-        self._tension_in   = float(tension_in)        # winch threshold during reel-in
+        self._tension_in   = float(tension_in)
         self._tension_ic   = float(tension_ic)
+        self._v_cruise_out = float(v_cruise_out)
+        self._v_cruise_in  = float(v_cruise_in)
         self._t_out_max    = float(t_reel_out_max)
         self._t_in_max     = float(t_reel_in_max)
-        self._k_ff_winch   = float(k_ff_winch)
-        self._k_ff_vel     = float(k_ff_vel)
-        self._reel_in_winch_offset = float(reel_in_winch_offset_n)
+        self._settle_s     = float(capture_settle_s)
 
-        # State machine
-        self._phase        : str   = "reel-out"
+        # State machine.  Starts in 'hold' (pre-capture); pumping begins only
+        # after notify_captured() + capture_settle_s.
+        self._phase        : str   = "hold"
         self._phase_start  : float = 0.0
         self._cycle_count  : int   = 0       # completed cycles
-        self._start_length : float = 0.0     # rest_length at reel-out start
-        self._reel_out_tgt : float = 0.0     # start_length + delta_l
+        self._start_length : float = 0.0     # cycle baseline (latched at pump start)
         self._initialized  : bool  = False   # True after first step()
+        self._cycles_done  : bool  = False   # True once all n_cycles complete
+        self._capture_t    : float | None = None  # first steady-capture time [s]
 
         # Winch outputs
-        self._winch_target_length  : float = 0.0
-        self._winch_target_tension : float = float(tension_ic)
+        self._winch_target_length   : float = 0.0
+        self._winch_target_tension  : float = float(tension_ic)
+        self._winch_target_velocity : float = 0.0
 
-        # Altitude ramp state
-        self._alt_ramp_start  : float = float(target_alt_m)
-        self._alt_ramp_end    : float = float(target_alt_m)
-        self._reel_out_ramp_s : float = float(t_transition)  # may extend to limit descent rate
+    # ── capture gate ─────────────────────────────────────────────────────────
 
-        # Feedforward state: previous values for rate estimation
-        self._ff_prev_rest_length : float = 0.0
-        self._ff_prev_t_sim       : float = 0.0
-        # EMA-smoothed altitude used for derivative (τ=10s removes 5 Hz alias)
-        self._ff_alt_smooth       : float = float(target_alt_m)
+    def notify_captured(self, t_sim: float) -> None:
+        """Record the first Lua steady-capture time; starts the settle countdown."""
+        if self._capture_t is None:
+            self._capture_t = float(t_sim)
+
+    @property
+    def captured(self) -> bool:
+        return self._capture_t is not None
 
     # ── public properties ──────────────────────────────────────────────────
 
@@ -161,6 +181,11 @@ class PumpingGroundController:
     def winch_target_tension(self) -> float:
         return self._winch_target_tension
 
+    @property
+    def winch_target_velocity(self) -> float:
+        """Cruise velocity [m/s] for a GovernedWinchController (+out/-in/0=hold)."""
+        return self._winch_target_velocity
+
     # ── main step (10 Hz) ─────────────────────────────────────────────────
 
     def step(self, t_sim: float, tension_measured_n: float,
@@ -169,7 +194,8 @@ class PumpingGroundController:
         """
         10 Hz outer step.  Returns TensionCommand for AP.
 
-        Also updates winch_target_length and winch_target_tension.
+        Also updates winch_target_length, winch_target_tension and
+        winch_target_velocity.
 
         Parameters
         ----------
@@ -178,110 +204,82 @@ class PumpingGroundController:
         rest_length        : current tether rest length [m]
         hub_alt_m          : current hub altitude above anchor [m]
         """
-        prev_phase = self._phase
-        self._advance_phase(t_sim, rest_length)
-        phase      = self._phase
-
-        # On phase entry (or first call): initialise phase state
-        if phase != prev_phase or not self._initialized:
+        if not self._initialized:
             self._initialized = True
             self._phase_start = t_sim
-            if phase == "reel-out":
-                self._start_length   = rest_length
-                self._reel_out_tgt   = rest_length + self._delta_l
-                self._alt_ramp_start = hub_alt_m if hub_alt_m > 0.0 else self._alt_m
-                self._alt_ramp_end   = self._alt_m
-                # Limit commanded descent to 3 m/s to avoid tension spikes.
-                descent = max(0.0, self._alt_ramp_start - self._alt_m)
-                self._reel_out_ramp_s = max(self._t_tr, descent / 3.0)
-            elif phase == "transition":
-                self._alt_ramp_start = hub_alt_m if hub_alt_m > 0.0 else self._alt_m
-                reel_in_alt          = (rest_length * math.sin(self._el_reel_in)
-                                        if self._el_reel_in > 0.0 and rest_length > 0.0
-                                        else self._alt_m)
-                self._alt_ramp_end   = reel_in_alt
+            self._start_length = rest_length
 
-        t_in_phase = t_sim - self._phase_start
+        self._advance_phase(t_sim, rest_length)
+        phase = self._phase
 
-        # ── winch targets ────────────────────────────────────────────────
+        # ── per-phase tension target (AP feed-forward + winch governor) ───
         if phase == "reel-out":
-            self._winch_target_length  = self._reel_out_tgt
-            # Winch pays out only when T > tension_out (generator mode).
-            # AP collective is local altitude PID; ground commands altitude and
-            # the phase tension target as body-z feed-forward.
-            self._winch_target_tension = self._tension_out
-
-        elif phase == "transition":
-            self._winch_target_length  = rest_length  # hold current length
-            self._winch_target_tension = self._tension_out  # still holds tension
-
+            t_target = self._tension_out
         elif phase == "reel-in":
-            self._winch_target_length  = self._start_length
-            # Reel in when T < target: maintain tension above T_ic + offset.
-            self._winch_target_tension = self._tension_ic + self._reel_in_winch_offset
-
+            t_target = self._tension_in
         else:  # hold
-            self._winch_target_length  = rest_length
-            self._winch_target_tension = self._tension_ic
+            t_target = self._tension_ic
 
-        # ── altitude command ──────────────────────────────────────────────
-        if self._el_reel_in > 0.0:
-            if phase == "transition":
-                frac  = min(1.0, t_in_phase / max(self._t_tr, 1e-9))
-                alt_m = self._alt_ramp_start + frac * (self._alt_ramp_end - self._alt_ramp_start)
-            elif phase == "reel-in":
-                alt_m = (rest_length * math.sin(self._el_reel_in)
-                         if rest_length > 0.0 else self._alt_m)
-            elif phase == "reel-out":
-                if t_in_phase < self._reel_out_ramp_s and self._alt_ramp_start > self._alt_m + 1.0:
-                    frac  = min(1.0, t_in_phase / max(self._reel_out_ramp_s, 1e-9))
-                    alt_m = self._alt_ramp_start + frac * (self._alt_ramp_end - self._alt_ramp_start)
-                else:
-                    alt_m = self._alt_m
-            else:
-                alt_m = self._alt_m
-        else:
-            alt_m = self._alt_m
+        # ── winch length target (length-driven WinchController) ───────────
+        if phase == "reel-out":
+            self._winch_target_length = self._start_length + self._delta_l
+        elif phase == "reel-in":
+            self._winch_target_length = self._start_length
+        else:  # hold
+            self._winch_target_length = rest_length
 
-        self._ff_prev_rest_length = rest_length
-        self._ff_prev_t_sim       = t_sim
+        # ── winch velocity command (GovernedWinchController) ──────────────
+        if phase == "reel-out":
+            self._winch_target_velocity = +self._v_cruise_out
+        elif phase == "reel-in":
+            self._winch_target_velocity = -self._v_cruise_in
+        else:  # hold
+            self._winch_target_velocity = 0.0
 
+        self._winch_target_tension = t_target
+
+        # Altitude is CONSTANT in every phase: the kite holds the IC altitude
+        # while the winch pumps the tether.
         return TensionCommand(
-            tension_target_n   = float(self._winch_target_tension),
-            alt_m              = alt_m,
-            phase              = phase,
+            tension_target_n = float(t_target),
+            alt_m            = self._alt_m,
+            phase            = phase,
         )
 
     # ── private helpers ────────────────────────────────────────────────────
 
     def _advance_phase(self, t_sim: float, rest_length: float) -> None:
         """
-        Update self._phase based on tether length (reel-out, reel-in) or
-        elapsed time (transition).  Increments cycle count on reel-in exit.
+        Update self._phase from tether length (length-driven exits) with
+        safety timeouts.  Increments cycle count on reel-in exit.
         """
         t_in_phase = t_sim - self._phase_start
 
-        if self._phase == "reel-out":
-            # Primary exit: tether reached target length
-            at_target = (self._reel_out_tgt > 0.0 and
-                         rest_length >= self._reel_out_tgt - 0.05)
+        if self._phase == "hold":
+            # Pre-capture, or all cycles complete.  Begin the first reel-out
+            # once capture has fired and the settle time has elapsed.
+            if (not self._cycles_done
+                    and self._capture_t is not None
+                    and (t_sim - self._capture_t) >= self._settle_s):
+                self._start_length = rest_length   # latch cycle baseline once
+                self._phase        = "reel-out"
+                self._phase_start  = t_sim
+
+        elif self._phase == "reel-out":
+            at_target = rest_length >= self._start_length + self._delta_l - 0.05
             timed_out = t_in_phase >= self._t_out_max
             if at_target or timed_out:
-                self._phase = "transition"
-
-        elif self._phase == "transition":
-            # Exit after attitude-change window
-            if t_in_phase >= self._t_tr:
-                self._phase = "reel-in"
+                self._phase       = "reel-in"
+                self._phase_start = t_sim
 
         elif self._phase == "reel-in":
-            # Primary exit: tether back to start length
-            at_target = (self._start_length > 0.0 and
-                         rest_length <= self._start_length + 0.05)
+            at_target = rest_length <= self._start_length + 0.05
             timed_out = t_in_phase >= self._t_in_max
             if at_target or timed_out:
                 self._cycle_count += 1
                 if self._ncyc > 0 and self._cycle_count >= self._ncyc:
-                    self._phase = "hold"
+                    self._phase       = "hold"
+                    self._cycles_done = True
                 else:
                     self._phase = "reel-out"
+                self._phase_start = t_sim

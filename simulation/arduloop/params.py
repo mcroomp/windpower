@@ -62,45 +62,52 @@ class RateAxisParams:
     NEF_attn_db:      float = 40.0
 
 
-def make_roll_pitch_params() -> RateAxisParams:
-    """Factory for standard roll/pitch rate PID parameters.
-    
-    Simtests use the Python altitude-hold loop which generates smaller rate
-    demands than ArduPilot's GUIDED attitude controller. Requires higher P gain
-    (0.67) to track tightly. This is the single source of truth for simtest
-    rate PID tuning.
-    
-    SITL stack tests use ArduPilot's GUIDED attitude controller which produces
-    larger rate targets; they use lower gains (0.15) configured in
-    rawes_sitl_defaults.parm and loaded by ArduPilot at boot.
-    
-    Returns
-    -------
-    RateAxisParams with P=0.67, I=0.15, D=0.02, IMAX=0.30, FLTT=40.0, FLTD=40.0
-    
+def make_roll_params() -> RateAxisParams:
+    """Factory for the roll rate PID (``ATC_RAT_RLL_*``).
+
+    Every consumer -- unit tests, simtests, and SITL stack tests -- loads the
+    same merged ``copter-heli.parm`` + ``rawes_sitl_defaults.parm`` chain, so
+    the gains here are identical to what ArduPilot loads at boot. Tune the rate
+    PID by editing ``rawes_sitl_defaults.parm``; do not hardcode gains here.
+
     See Also
     --------
-    make_yaw_params : Yaw-specific PID parameters (P=0.18, lighter tuning)
-    param_defaults.make_roll_pitch_params_from_file : Load SITL ArduPilot params
+    make_pitch_params : Pitch rate PID (``ATC_RAT_PIT_*``)
+    make_yaw_params : Yaw rate PID (``ATC_RAT_YAW_*``)
     """
-    from param_defaults import make_roll_pitch_params_from_file
+    from param_defaults import make_roll_params_from_file
 
-    return make_roll_pitch_params_from_file()
+    return make_roll_params_from_file()
+
+
+# Backwards-compatible alias (historically returned the roll axis and was reused
+# for pitch). Pitch now has its own factory; prefer make_roll_params /
+# make_pitch_params in new code.
+make_roll_pitch_params = make_roll_params
+
+
+def make_pitch_params() -> RateAxisParams:
+    """Factory for the pitch rate PID (``ATC_RAT_PIT_*``).
+
+    Loaded from the same merged ``copter-heli.parm`` + ``rawes_sitl_defaults.parm``
+    chain as roll/yaw. ArduPilot's pitch gains differ from roll, so simtests now
+    use the pitch axis for pitch (previously roll was reused for both).
+    """
+    from param_defaults import make_pitch_params_from_file
+
+    return make_pitch_params_from_file()
 
 
 def make_yaw_params() -> RateAxisParams:
-    """Factory for standard yaw rate PID parameters.
-    
-    Yaw is tuned differently from roll/pitch (lighter gains, faster derivative filter).
-    These are the standard ArduPilot helicopter yaw defaults.
-    
-    Returns
-    -------
-    RateAxisParams with P=0.18, I=0.12, D=0.003, IMAX=0.4, FLTT=20.0, FLTD=10.0
-    
+    """Factory for the yaw rate PID (``ATC_RAT_YAW_*``).
+
+    Loaded from the same merged ``copter-heli.parm`` + ``rawes_sitl_defaults.parm``
+    chain as roll/pitch. Tune via the .parm file, not in Python.
+
     See Also
     --------
-    make_roll_pitch_params : Roll/pitch PID parameters
+    make_roll_params : Roll rate PID (``ATC_RAT_RLL_*``)
+    make_pitch_params : Pitch rate PID (``ATC_RAT_PIT_*``)
     """
     from param_defaults import make_yaw_params_from_file
 
@@ -110,8 +117,8 @@ def make_yaw_params() -> RateAxisParams:
 @dataclass
 class HeliParams:
     # Per-axis rate PIDs — loaded from ArduPilot parameter file by default.
-    roll: RateAxisParams = field(default_factory=make_roll_pitch_params)
-    pitch: RateAxisParams = field(default_factory=make_roll_pitch_params)
+    roll: RateAxisParams = field(default_factory=make_roll_params)
+    pitch: RateAxisParams = field(default_factory=make_pitch_params)
     yaw: RateAxisParams = field(default_factory=make_yaw_params)
 
     # Heli-specific — `ATC_HOVR_ROL_TRM`, `ATC_PIRO_COMP`

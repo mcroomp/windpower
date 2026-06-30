@@ -390,7 +390,8 @@ def test_physical_hold_extra_params_compass_enabled():
     assert "COMPASS_USE" not in ctrl.extra_params
     assert "COMPASS_ENABLE" not in ctrl.extra_params
     assert "EK3_SRC1_YAW" not in ctrl.extra_params
-    assert ctrl.extra_params.get("ATC_RAT_RLL_IMAX") == 0.0
+    # Rate PID limits are left at ArduPilot/.parm defaults (not force-overridden).
+    assert "ATC_RAT_RLL_IMAX" not in ctrl.extra_params
 
 
 # ---------------------------------------------------------------------------

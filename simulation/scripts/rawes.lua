@@ -44,7 +44,7 @@ GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
 -- Smooth handoff after kinematic release: keep plant physics unchanged, but
 -- phase in guidance/corrections over a longer window to avoid a command step.
 POST_RELEASE_BLEND_S = 2.5    -- blend current->steady body_z after capture
-POST_RELEASE_RECOVERY_S = 2.0 -- ramp-in for altitude/vibration corrections
+POST_RELEASE_RECOVERY_S = 2.0 -- ramp-in for altitude corrections
 
 _NVF_MSG_ID = 251
 -- mavlink:init(queue_size, num_msgs).  queue_size = max messages buffered
@@ -141,33 +141,6 @@ _rc_ch8 = rc:get_channel(8)
 _last_col_rad = COL_CRUISE_FLIGHT_RAD
 _col_trim     = COL_CRUISE_FLIGHT_RAD
 _alt_i        = 0.0
-_vib_corr_last   = 0.0         -- last vibration damper correction [rad]
-
--- Accelerometer-based tether spring-mode vibration damper.
--- Passes the 1.5-10 Hz resonance band (above altitude controller, below Nyquist),
--- estimates oscillatory hub velocity, opposes it via collective.
--- Works at 400 Hz with on-board IMU only -- no ground comms dependency.
-K_VIB        = 0.008   -- rad / (m/s) velocity feedback gain
-VIB_HP_TAU   = 1.0 / (2.0 * math.pi * 1.5)  -- 1/(2*pi*1.5 Hz)
-VIB_VEL_TAU  = 0.5     -- leaky integrator time constant [s]
-VIB_COL_MAX  = 0.04    -- max collective correction magnitude [rad]
-_vib_acc_hp   = 0.0    -- HP filter state
-_vib_acc_prev = 0.0    -- previous raw accel for HP derivative
-_vib_vel_est  = 0.0    -- estimated oscillatory velocity [m/s]
-
-local function vib_damper_step(accel_z, dt_s)
-    -- First-order high-pass: y[n] = alpha*(y[n-1] + x[n] - x[n-1])
-    local alpha = VIB_HP_TAU / (VIB_HP_TAU + dt_s)
-    _vib_acc_hp   = alpha * (_vib_acc_hp + accel_z - _vib_acc_prev)
-    _vib_acc_prev = accel_z
-    -- Leaky integrator: v[n] = exp(-dt/tau)*v[n-1] + dt*a_hp[n]
-    local leak = math.exp(-dt_s / VIB_VEL_TAU)
-    _vib_vel_est  = leak * _vib_vel_est + dt_s * _vib_acc_hp
-    local corr = -K_VIB * _vib_vel_est
-    if corr >  VIB_COL_MAX then corr =  VIB_COL_MAX end
-    if corr < -VIB_COL_MAX then corr = -VIB_COL_MAX end
-    return corr
-end
 
 -- Altitude hold state
 _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
@@ -531,12 +504,6 @@ local function _on_mode_enter(mode)
         _dbg_cmd_logged = false
         -- Start a fresh post-release recovery window at steady entry.
         _capture_ms = millis()
-        -- Clear vibration states so stale kinematic-history residuals do not
-        -- inject a collective kick exactly at release.
-        _vib_acc_hp = 0.0
-        _vib_acc_prev = 0.0
-        _vib_vel_est = 0.0
-        _vib_corr_last = 0.0
         local _thr_ic = col_rad_to_thrust(ic_col_or_default())
         local _col_back = thrust_to_col_rad(_thr_ic)
         gcs:send_text(6, string.format(
@@ -738,17 +705,9 @@ local function run_flight()
     end
     local col_pid = _col_trim + KP_ALT * alt_err - KD_VZ * vz_gate * vz_up + _alt_i
     -- Expected release transient: keep collective close to IC initially, then
-    -- fade in altitude/vibration corrections over POST_RELEASE_RECOVERY_S.
+    -- fade in altitude corrections over POST_RELEASE_RECOVERY_S.
     local _ic_col_now = ic_col_or_default()
     local col_cmd = _ic_col_now + recovery_alpha * (col_pid - _ic_col_now)
-
-    -- Vibration damper: body-Z accel, HP filter, velocity estimate, collective.
-    _vib_corr_last = 0.0
-    local imu_a = ahrs:get_accel()
-    if imu_a then
-        _vib_corr_last = recovery_alpha * vib_damper_step(imu_a:z(), dt)
-        col_cmd = col_cmd + _vib_corr_last
-    end
 
     if col_cmd < COL_MIN_RAD then col_cmd = COL_MIN_RAD end
     if col_cmd > COL_MAX_RAD then col_cmd = COL_MAX_RAD end

@@ -1016,7 +1016,7 @@ level first.
 | `simulation/controller.py` | `compute_bz_altitude_hold`, `AltitudeHoldController`, `TensionPI`, `RatePID`, `compute_rate_cmd`, `OrbitTracker` |
 | `simulation/ap_controller.py` | `TensionApController` (400 Hz AP side), `LandingApController` |
 | `simulation/pumping_planner.py` | `TensionCommand`, `PumpingGroundController` (10 Hz phase state machine) |
-| `simulation/unified_ground.py` | `UnifiedGroundController`, `DirectComms`, `LuaComms`, `GcsComms` |
+| `simulation/unified_ground.py` | `DirectComms`, `LuaComms`, `GcsComms` (TensionCommand -> NAMED_VALUE_FLOAT adapters) |
 | `simulation/winch.py` | `WinchController` (tension-controlled, 400 Hz) |
 | `simulation/winch_node.py` | `WinchNode` + `Anemometer` (physics/planner protocol boundary) |
 | `simulation/physics_core.py` | `PhysicsCore` — shared 400 Hz physics (dynamics, aero, tether, spin ODE, kinematic) |

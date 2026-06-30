@@ -97,7 +97,6 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "el_correction_rad",
             "coll_saturated",
             "comms_ok",
-            "vib_corr",
             "alt_pid_integral",
             "roll_sp_rads",  # body roll-rate setpoint
             "pitch_sp_rads", # body pitch-rate setpoint

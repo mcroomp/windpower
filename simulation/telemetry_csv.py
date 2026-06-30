@@ -189,7 +189,6 @@ class TelRow:
     el_correction_rad: float = 0.0
     coll_saturated:    int   = 0
     comms_ok:          int   = 1
-    vib_corr:          float = 0.0
     alt_pid_integral:  float = 0.0
 
     # AP rate commands and radial velocity diagnostics
@@ -388,7 +387,6 @@ class TelRow:
             el_correction_rad   = float(d.get("el_correction_rad", 0.0)),
             coll_saturated      = int(bool(d.get("coll_saturated", False))),
             comms_ok            = int(bool(d.get("comms_ok",        True))),
-            vib_corr            = float(d.get("vib_corr",           0.0)),
             alt_pid_integral    = float(d.get("alt_pid_integral",   0.0)),
             roll_sp_rads        = float(d.get("roll_sp_rads",       0.0)),
             pitch_sp_rads       = float(d.get("pitch_sp_rads",      0.0)),
@@ -429,7 +427,6 @@ class TelRow:
         el_correction_rad: float = 0.0,
         coll_saturated: bool = False,
         comms_ok: bool = True,
-        vib_corr: float = 0.0,
         alt_pid_integral: float = 0.0,
         roll_sp_rads: float = 0.0,
         pitch_sp_rads: float = 0.0,
@@ -649,7 +646,6 @@ class TelRow:
             el_correction_rad   = float(el_correction_rad),
             coll_saturated      = int(bool(coll_saturated)),
             comms_ok            = int(bool(comms_ok)),
-            vib_corr            = float(vib_corr),
             alt_pid_integral    = float(alt_pid_integral),
             roll_sp_rads        = float(roll_sp_rads),
             pitch_sp_rads       = float(pitch_sp_rads),

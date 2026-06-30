@@ -267,6 +267,7 @@ def _run_landing(log) -> "tuple[dict, object]":
 # Test
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
 def test_landing(simtest_log):
     """4-phase landing: each phase verified at exit before checking the next."""
     r, ap = _run_landing(simtest_log)

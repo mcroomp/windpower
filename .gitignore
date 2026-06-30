@@ -18,6 +18,9 @@ env/
 simulation/logs/
 *.log
 
+# One-off / diagnostic scripts (kept locally for reproducibility, not checked in by default)
+simulation/tests/oneoff/
+
 # Generated flight report plots
 *.png
 

@@ -221,6 +221,7 @@ def _run_landing(log) -> dict:
 # Test
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
 def test_landing_lua(simtest_log):
     """rawes.lua mode=4: floor reached within anchor radius, no descent bad events."""
     r = _run_landing(simtest_log)

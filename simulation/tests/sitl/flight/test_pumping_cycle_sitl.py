@@ -3,14 +3,16 @@ test_pumping_cycle_sitl.py — Pumping cycle stack test with rawes.lua (SCR_USER
 
 Architecture (mirrors test_pump_cycle_lua.py unit test):
   Test process (10 Hz):
-    - PumpingGroundController: phase state machine.
-    - UDP socket: sends {target_length, target_tension} to mediator WinchController;
-      receives {tension_n, rest_length, hub_alt_m} back at ~10 Hz.
+    - PumpingGroundController: phase state machine (identical to the simtest).
+    - UDP socket = the winch cable: sends WinchCommand {cruise_v, tension_target}
+      to the mediator's GovernedWinchNode; receives WinchTelemetry
+      {tension_n, rest_length, speed_ms, net_energy_j, wind_ned} back at ~10 Hz.
+      No hub data crosses this boundary.
         - GCS (MAVLink): sends RAWES_TEN / RAWES_ALT / RAWES_SUB NVF
             to Lua so measured-tension feed-forward + altitude hold run in-flight.
   Mediator (400 Hz):
-    - WinchController: applies set_target commands, steps at physics rate,
-      owns core.tether.rest_length.
+    - GovernedWinchNode hosts the fast tension-governing loop (same control law
+      as the simtest), owns core.tether.rest_length.
   rawes.lua (50 Hz):
         - Altitude PID collective controlled by RAWES_ALT NVF.
         - Rate-only bz_altitude_hold cyclic uses RAWES_TEN feed-forward.
@@ -45,30 +47,26 @@ from stack_infra import (
 from telemetry_csv import read_csv
 from pumping_planner import PumpingGroundController
 from unified_ground import _cmd_to_nv
-from tests.simtests._rotor_helpers import BODY_Z_SLEW_RATE_RAD_S, load_default_rotor
+from tests.simtests._rotor_helpers import load_default_rotor
 
 _ROTOR = load_default_rotor()
 
 # ---------------------------------------------------------------------------
 # Pumping parameters — match test_pump_cycle_lua.py exactly
 # ---------------------------------------------------------------------------
-_XI_START_DEG   = 30.0
-_XI_REEL_IN_DEG = 50.0
-_T_TRANSITION = (
-    math.radians(_XI_REEL_IN_DEG - _XI_START_DEG) / BODY_Z_SLEW_RATE_RAD_S + 3.0
-)
-
 N_CYCLES         = 3
 DELTA_L          = 12.0
-TENSION_OUT      = 435.0
-TENSION_IN       = 240.0
+TENSION_OUT      = 300.0    # reel-out / IC tension target [N] (AP FF + winch)
+TENSION_IN       = 100.0    # reel-in tension target [N]       (AP FF + winch)
 TENSION_IC       = 300.0
-EL_REEL_IN_RAD   = math.radians(_XI_REEL_IN_DEG)
 T_REEL_OUT_MAX   = 120.0
 T_REEL_IN_MAX    = 120.0
+V_CRUISE_OUT     =   0.5    # reel-out cruise velocity [m/s] (GovernedWinch)
+V_CRUISE_IN      =   0.5    # reel-in cruise speed [m/s]
+CAPTURE_SETTLE_S =   2.0    # hold after steady capture before pumping begins
 
 # Observation: kinematic (120 s) + hold (10 s) + 3 full cycles
-_OBS_SECONDS = 120.0 + 10.0 + N_CYCLES * (T_REEL_OUT_MAX + _T_TRANSITION + T_REEL_IN_MAX) * 1.3
+_OBS_SECONDS = 120.0 + 10.0 + N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.3
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -142,36 +140,41 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
     log.info("Promoted Lua to MODE_STEADY (SCR_USER6 -> 1)  ACK=%s", ok)
 
-    # ── Ground controller (mirrors test_pump_cycle_lua.py) ─────────────────
+    # ── Ground controller (shared PumpingGroundController -- same as simtest) ──
     target_alt_m = ctx.home_alt_m
     planner = PumpingGroundController(
-        t_transition   = _T_TRANSITION,
-        target_alt_m   = target_alt_m,
-        delta_l        = DELTA_L,
-        el_reel_in_rad = EL_REEL_IN_RAD,
-        n_cycles       = N_CYCLES,
-        tension_out    = TENSION_OUT,
-        tension_in     = TENSION_IN,
-        tension_ic     = TENSION_IC,
-        t_reel_out_max = T_REEL_OUT_MAX,
-        t_reel_in_max  = T_REEL_IN_MAX,
+        target_alt_m     = target_alt_m,
+        delta_l          = DELTA_L,
+        n_cycles         = N_CYCLES,
+        tension_out      = TENSION_OUT,
+        tension_in       = TENSION_IN,
+        tension_ic       = TENSION_IC,
+        t_reel_out_max   = T_REEL_OUT_MAX,
+        t_reel_in_max    = T_REEL_IN_MAX,
+        v_cruise_out     = V_CRUISE_OUT,
+        v_cruise_in      = V_CRUISE_IN,
+        capture_settle_s = CAPTURE_SETTLE_S,
     )
+    # The MODE_PASSIVE->STEADY promotion above already established steady capture;
+    # arm the planner's capture gate so the settle countdown begins immediately.
+    if captured_seen:
+        planner.notify_captured(gcs.sim_now())
 
-    # ── Winch command socket ───────────────────────────────────────────────
+    # ── Winch command socket = the winch cable ─────────────────────────────
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))          # OS picks test-side port
     sock.settimeout(_SOCK_TIMEOUT)
     mediator_addr = ("127.0.0.1", ctx.winch_cmd_port)
 
-    # Prime the socket: send an initial hold command so the mediator knows
-    # our address and starts sending state back.
+    # Prime the cable: an initial hold command (cruise_v=0 at the IC tension)
+    # so the mediator learns our address and starts streaming telemetry back.
     if ctx.initial_state:
         _init_len = float(ctx.initial_state.get("rest_length", 50.0))
     else:
         _init_len = 50.0
     _init_cmd = json.dumps({
-        "target_length":  _init_len,
-        "target_tension": TENSION_IC,
+        "cruise_v":       0.0,
+        "tension_target": TENSION_IC,
     }).encode()
     sock.sendto(_init_cmd, mediator_addr)
 
@@ -180,7 +183,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     t_plan_next  = 0.0
     tension_now  = TENSION_IC
     rest_length  = _init_len
-    hub_alt_m    = target_alt_m
+    net_energy_j = 0.0
 
     deadline = gcs.sim_now() + _OBS_SECONDS
     log.info("--- test_pumping_cycle_lua_sitl: observing %.0f s ---", _OBS_SECONDS)
@@ -189,13 +192,14 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
         while gcs.sim_now() < deadline:
             assert_procs_alive(ctx, "pumping_lua")
 
-            # ── Receive winch state from mediator ─────────────────────────
+            # ── Receive winch telemetry from mediator (the only winch data
+            #    the planner is allowed to see) ─────────────────────────────
             try:
                 data, _ = sock.recvfrom(256)
                 state   = json.loads(data)
-                tension_now = float(state["tension_n"])
-                rest_length = float(state["rest_length"])
-                hub_alt_m   = float(state["hub_alt_m"])
+                tension_now  = float(state["tension_n"])
+                rest_length  = float(state["rest_length"])
+                net_energy_j = float(state["net_energy_j"])
             except (TimeoutError, socket.timeout):
                 pass  # keep last known values; mediator may still be in kinematic
 
@@ -204,13 +208,14 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             if t_sim >= t_plan_next:
                 t_plan_next = t_sim + dt_plan
 
-                cmd = planner.step(t_sim, tension_now, rest_length, hub_alt_m)
+                cmd = planner.step(t_sim, tension_now, rest_length)
 
-                # Send winch command to mediator (include phase for telemetry)
+                # Send WinchCommand down the cable (cruise velocity + tension
+                # target -- the planner's winch_target_velocity drives the
+                # governed winch, exactly as in the simtest).
                 winch_msg = json.dumps({
-                    "target_length":  planner.winch_target_length,
-                    "target_tension": planner.winch_target_tension,
-                    "phase":          planner.phase,
+                    "cruise_v":       planner.winch_target_velocity,
+                    "tension_target": planner.winch_target_tension,
                 }).encode()
                 sock.sendto(winch_msg, mediator_addr)
 
@@ -218,8 +223,9 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                 for name, value in _cmd_to_nv(cmd):
                     gcs.send_named_float(name, value)
 
-                if planner.phase == "hold":
-                    log.info("Planner reached 'hold' — all %d cycles complete", N_CYCLES)
+                # All cycles complete -> planner returns to hold (mirrors simtest).
+                if planner.cycle_count >= N_CYCLES:
+                    log.info("Planner completed all %d cycles", N_CYCLES)
                     break
 
             # ── Drain MAVLink for STATUSTEXT ──────────────────────────────
@@ -233,6 +239,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                 log.info("STATUSTEXT: %s", text)
                 if "RAWES steady: captured" in text:
                     captured_seen = True
+                    planner.notify_captured(gcs.sim_now())
 
         sock.close()
 
@@ -275,10 +282,13 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
         all_t  = [r.t_sim for r in out_rows + in_rows]
         dt_tel = (all_t[-1] - all_t[0]) / max(len(all_t) - 1, 1) if len(all_t) > 1 else 0.0025
 
-        winch_out = 0.40    # m/s pay-out speed (WinchController v_max_out)
-        winch_in  = 0.80    # m/s reel-in speed (WinchController v_max_in)
+        # Governed winch cruises at the planner's reel speeds (same for out/in).
+        winch_out = V_CRUISE_OUT    # m/s pay-out speed
+        winch_in  = V_CRUISE_IN     # m/s reel-in speed
         mean_tension_out    = sum(r.tether_tension for r in out_rows) / len(out_rows)
-        skip_in             = int(_T_TRANSITION * len(in_rows) / T_REEL_IN_MAX)
+        # Skip the initial reel-in transient (first ~10% of reel-in rows) so the
+        # steady reel-in tension is not biased by the reversal spike.
+        skip_in             = int(0.1 * len(in_rows))
         steady_in           = in_rows[skip_in:] or in_rows
         mean_tension_in     = sum(r.tether_tension for r in steady_in) / len(steady_in)
         peak_tension        = max(r.tether_tension for r in out_rows + in_rows)
@@ -291,9 +301,11 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             mean_tension_out, mean_tension_in, peak_tension,
         )
         log.info(
-            "Energy: out=%.1f J  in=%.1f J  net=%.1f J",
+            "Energy (CSV): out=%.1f J  in=%.1f J  net=%.1f J",
             energy_out, energy_in, net_energy,
         )
+        # Authoritative net energy from the winch node's own accounting.
+        log.info("Energy (winch node net_energy_j): %.1f J", net_energy_j)
 
         assert peak_tension < _TENSION_LIMIT_N, (
             f"Peak tension {peak_tension:.1f} N >= limit ({_TENSION_LIMIT_N:.1f} N)"

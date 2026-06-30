@@ -160,13 +160,17 @@ DEFAULTS: dict = {
     "mavlink_log_diag_interval_s": 5.0,
 
     # ── Winch hardware parameters ─────────────────────────────────────────────
-    # Derived from RAWES ground winch motor spec (400 W BLDC, 20:1, 50 mm drum).
-    # kp_tension: cruise speed per tension error [(m/s)/N]; 0.005 → 0.675 m/s at 435 N vs 300 N IC
-    "winch_kp_tension":      0.005,   # (m/s)/N
-    "winch_v_max_out":       0.40,    # m/s  generator rated reel-out speed
-    "winch_v_max_in":        0.80,    # m/s  motor rated reel-in speed
-    "winch_accel_limit_ms2": 0.5,     # m/s²
-    "winch_min_length":      2.0,     # m    hard floor (drum stop)
+    # GovernedWinchController gains (canonical winch — same control law as the
+    # pumping simtest test_pump_cycle_lua.py).  cruise velocity + proportional
+    # tension governor, jerk-limited (S-curve) speed.
+    "winch_kp_tension":      4.0e-4,  # (m/s)/N  governor gain (~0.5 s settling)
+    "winch_v_max_out":       1.5,     # m/s  max pay-out speed (governor headroom)
+    "winch_v_max_in":        1.5,     # m/s  max reel-in speed (governor headroom)
+    "winch_accel_limit_ms2": 2.0,     # m/s^2  acceleration limit
+    "winch_jerk_limit_ms3":  10.0,    # m/s^3  jerk limit (S-curve smoothing)
+    "winch_tension_tau_s":   0.08,    # s      load-cell low-pass time constant
+    "winch_min_length":      2.0,     # m      hard floor (drum stop)
+    "winch_hold_tension_n":  300.0,   # N      idle tension target (no socket cmd)
 
     # ── Trajectory controller ─────────────────────────────────────────────────
     # "type" selects the active controller.  Each type has its own sub-dict so

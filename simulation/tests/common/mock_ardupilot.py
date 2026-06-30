@@ -15,10 +15,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from arduloop import GuidedAttitudeController, HeliParams
-from controller import (AZ_REF_TAU_S, AccelVibrationDamper,
-                        compute_bz_altitude_hold, compute_rate_cmd,
-                        compute_rate_cmd_sqrt, slerp_body_z,
-                        update_plane_azimuth)
+from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
+                        compute_rate_cmd, compute_rate_cmd_sqrt,
+                        slerp_body_z, update_plane_azimuth)
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
@@ -241,11 +240,6 @@ class _PumpingPythonMode:
     COL_MIN_RAD: float = -0.28
     COL_MAX_RAD: float = 0.10
 
-    K_VIB:       float = 0.008
-    VIB_HP_HZ:   float = 1.5
-    VIB_VEL_TAU: float = 0.5
-    VIB_COL_MAX: float = 0.04
-
     KP_ALT: float = 0.010
     KI_ALT: float = 0.001
     KD_VZ:  float = 0.040
@@ -273,10 +267,6 @@ class _PumpingPythonMode:
         rate_accel_max_radss: float = RATE_ACCEL_MAX_RADSS,
         az_ref_tau_s   : float = AZ_REF_TAU_S,
         events         = None,
-        k_vib          : float = K_VIB,
-        vib_hp_hz      : float = VIB_HP_HZ,
-        vib_vel_tau_s  : float = VIB_VEL_TAU,
-        vib_col_max    : float = VIB_COL_MAX,
     ) -> None:
         self._mass_kg    = float(mass_kg)
         self._timeout    = float(cmd_timeout_s)
@@ -308,15 +298,6 @@ class _PumpingPythonMode:
         self._t_sim       = 0.0
         self._pos_ned     = np.asarray(ic_pos, dtype=float)
 
-        self._vib_damper = (
-            AccelVibrationDamper(
-                k_vib=float(k_vib),
-                hp_freq_hz=float(vib_hp_hz),
-                vel_tau_s=float(vib_vel_tau_s),
-                col_damp_max=float(vib_col_max),
-            ) if k_vib != 0.0 else None
-        )
-        self._last_vib_corr = 0.0
         self._bz_goal = None
         self._last_roll_sp = 0.0
         self._last_pitch_sp = 0.0
@@ -362,7 +343,7 @@ class _PumpingPythonMode:
         obs      : HubObservation,
         dt       : float,
         *,
-        accel_ned: "np.ndarray | None" = None,
+        accel_ned: "np.ndarray | None" = None,  # noqa: ARG002
     ) -> "tuple[float, float, float]":
         self._pos_ned  = obs.pos
         self._cmd_age += dt
@@ -414,11 +395,6 @@ class _PumpingPythonMode:
             self._col_min,
             self._col_max,
         ))
-        self._last_vib_corr = 0.0
-        if accel_ned is not None and self._vib_damper is not None:
-            accel_body_z = float((R.T @ np.asarray(accel_ned, dtype=float))[2])
-            self._last_vib_corr = self._vib_damper.step(accel_body_z, dt)
-            col_out = float(np.clip(col_out + self._last_vib_corr, self._col_min, self._col_max))
         self._C_held = col_out
 
         return col_out, float(rate_sp[0]), float(rate_sp[1])
@@ -445,7 +421,6 @@ class _PumpingPythonMode:
             collective_from_alt_ctrl     = self._C_held,
             gnd_alt_cmd_m                = self._target_alt,
             alt_pid_integral             = self._alt_i,
-            vib_corr                     = self._last_vib_corr,
             roll_sp_rads                 = self._last_roll_sp,
             pitch_sp_rads                = self._last_pitch_sp,
             body_z_eq                    = bz.tolist() if bz is not None else [0.0, 0.0, 0.0],
@@ -630,10 +605,6 @@ class MockArdupilot:
         "CMD_TIMEOUT_S": _PumpingPythonMode.CMD_TIMEOUT_S,
         "COL_MIN_RAD": _PumpingPythonMode.COL_MIN_RAD,
         "COL_MAX_RAD": _PumpingPythonMode.COL_MAX_RAD,
-        "K_VIB": _PumpingPythonMode.K_VIB,
-        "VIB_HP_HZ": _PumpingPythonMode.VIB_HP_HZ,
-        "VIB_VEL_TAU": _PumpingPythonMode.VIB_VEL_TAU,
-        "VIB_COL_MAX": _PumpingPythonMode.VIB_COL_MAX,
         "KP_ALT": _PumpingPythonMode.KP_ALT,
         "KI_ALT": _PumpingPythonMode.KI_ALT,
         "KD_VZ": _PumpingPythonMode.KD_VZ,

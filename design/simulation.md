@@ -363,7 +363,7 @@ PumpingGroundController (10 Hz)  ──TensionCommand──▶  _PumpingPythonMo
 - **`pumping_planner.PumpingGroundController`** (10 Hz) emits `TensionCommand(tension_target_n, alt_m, phase)` — the **commanded** tension and target altitude only. The ground closes the tension loop itself on the winch's load cell; the AP never receives the measurement. `alt_m` is smoothly ramped at phase boundaries using `hub_alt_m` telemetry received from the kite at 10 Hz: up over `t_transition` seconds entering "transition", down at the start of each next "reel_out". Sudden `alt_m` jumps are ground-controller bugs — detected by `ap_unreachable_alt`.
 - **`_PumpingPythonMode`** (AP side, in `mock_ardupilot.py`) uses the commanded tension (`cmd.tension_target_n`) as a feedforward into the orientation force balance (`bz_altitude_hold`) and holds altitude with an altitude PID on collective — the same law as steady mode. There is **no TensionPI on the AP**. It validates each received command via `BadEventLog`: `ap_impossible_alt` (alt_m > tether_length), `ap_unreachable_alt` (elevation gap > `slew_rate × FEASIBILITY_WINDOW_S = 1 s`). **Blame rule:** `ap_*` events → ground planner sent unreachable commands; slack/tension_spike without `ap_*` → AP tracking failure.
 - **`winch.WinchController`** (400 Hz) is tension-controlled: cruise speed proportional to tension error, trapezoidal accel/decel profile, virtual battery accumulates energy_out_j / energy_in_j / net_energy_j.
-- **`unified_ground.UnifiedGroundController`** wraps the two with pluggable comms: `DirectComms` (Python AP), `LuaComms` (Lua simtest), `GcsComms` (SITL stack).
+- **`unified_ground`** provides pluggable comms adapters that marshal `TensionCommand` to the AP: `DirectComms` (Python AP), `LuaComms` (Lua simtest), `GcsComms` (SITL stack).
 
 ### Critical design invariants
 
@@ -492,10 +492,8 @@ simulation/
 │                        poll_ap_command(t) at 10 Hz.
 │                        MavlinkComms — SITL/hardware: receive_telemetry() polls LOCAL_POSITION_NED;
 │                        send_command() sends RAWES_TEN + RAWES_ALT + RAWES_SUB via gcs.py.
-├── unified_ground.py    UnifiedGroundController — wraps PumpingGroundController + WinchController
-│                        with pluggable comms: DirectComms (Python AP), LuaComms (Lua simtest),
-│                        GcsComms (SITL stack). step(t, tension, altitude, dt) at 400 Hz.
-│                        net_energy_j property passes through WinchController.net_energy_j.
+├── unified_ground.py    TensionCommand comms adapters: DirectComms (Python AP), LuaComms (Lua
+│                        simtest), GcsComms (SITL stack). Marshal TensionCommand -> NV float pairs.
 ├── pumping_planner.py   TensionCommand dataclass + PumpingGroundController (10 Hz phase schedule).
 │                        step(t_sim, tension_measured_n, rest_length, hub_alt_m) → TensionCommand.
 │                        alt_m is smoothly ramped at every phase boundary using hub_alt_m telemetry.

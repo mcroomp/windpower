@@ -30,11 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 from winch          import GovernedWinchController
+from winch_node     import GovernedWinchNode, WinchCommand, Anemometer
 from simtest_ic     import load_ic
 from simtest_log    import BadEventLog
 from simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from pumping_planner import TensionCommand
+from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
 from rawes_modes    import MODE_STEADY
 from unified_ground import LuaComms
@@ -95,8 +96,10 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
     ic_alt = float(-_IC.pos[2])
 
-    # ── Winch: tension-governed, jerk-limited speed (same as unified test) ────
-    winch = GovernedWinchController(
+    # ── Winch node: hosts the fast GovernedWinchController loop + load cell + ──
+    # anemometer.  The planner reaches it ONLY through the cable boundary
+    # node.exchange(WinchCommand) -> WinchTelemetry (targets down, sensed up).
+    gov = GovernedWinchController(
         rest_length     = _IC.rest_length,
         v_max_out       = V_MAX_OUT,
         v_max_in        = V_MAX_IN,
@@ -106,6 +109,7 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         tension_tau_s   = TENSION_TAU,
         min_length      = 2.0,
     )
+    node = GovernedWinchNode(gov, Anemometer())
 
     # ── Ground -> Lua command channel (NAMED_VALUE_FLOAT) ─────────────────────
     comms = LuaComms(sim.send_named_float)
@@ -114,38 +118,33 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
 
     events = BadEventLog()
 
-    # State machine (inline 2-phase, mirrors test_pump_cycle_unified.py)
-    # Start in HOLD and only begin pumping after Lua reports steady capture.
-    # This mirrors intended operation and avoids counting pre-capture transients
-    # as cycle-1 reel-out failures.
-    phase         = "hold"
-    phase_start_t = 0.0
-    start_length  = _IC.rest_length
-    cycle_idx     = 0
+    # ── Ground controller (shared PumpingGroundController -- same as SITL) ────
+    # Two-phase, length-driven, capture-gated, constant IC altitude.  Starts in
+    # 'hold' and begins pumping only after Lua reports steady capture + settle.
+    planner = PumpingGroundController(
+        target_alt_m     = ic_alt,
+        delta_l          = DELTA_L,
+        n_cycles         = N_CYCLES,
+        tension_out      = TENSION_REEL_OUT,
+        tension_in       = TENSION_REEL_IN,
+        tension_ic       = TENSION_IC,
+        v_cruise_out     = V_CRUISE_OUT,
+        v_cruise_in      = V_CRUISE_IN,
+        t_reel_out_max   = T_REEL_OUT_MAX,
+        t_reel_in_max    = T_REEL_IN_MAX,
+        capture_settle_s = CAPTURE_SETTLE_S,
+    )
+
     cycle_net_start = [0.0] * N_CYCLES
-    cycle_net_start[0] = 0.0   # winch starts at 0 energy
-    phase_label = "pre_capture_hold"
-    captured = False
-    capture_t = None
-
-    def _ap_tension_target() -> float:
-        if phase == "reel_in":
-            return TENSION_REEL_IN
-        return TENSION_REEL_OUT
-
-    def _cmd_phase() -> str:
-        # TensionCommand.phase must be hyphenated for _PHASE_TO_SUB -> RAWES_SUB.
-        if phase == "hold":
-            return "hold"
-        return "reel-in" if phase == "reel_in" else "reel-out"
+    phase_label     = "pre_capture_hold"
+    captured        = False
 
     lua.tel_fn = lambda r, sr: dict(
         body_z_eq                = None,
         phase                    = phase_label,
-        winch_speed_ms           = winch.speed_ms,
-        tension_feedforward_n    = _ap_tension_target(),
+        winch_speed_ms           = gov.speed_ms,
+        tension_feedforward_n    = planner.winch_target_tension,
         collective_from_alt_ctrl = lua.col_rad,
-        vib_corr                 = sim.fns.vib_corr_last(),
         alt_pid_integral         = sim.fns.alt_i(),
         gnd_alt_cmd_m            = ic_alt,
         elevation_rad            = 0.0,
@@ -157,12 +156,15 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     max_steps      = int(T_END_SIM / DT) + 1
     planner_every  = max(1, round(DT_PLANNER / DT))
     prev_accel_ned = None   # one-step lagged IMU specific force for vibration damper
+    prev_phase     = planner.phase
+
+    # Seed the cable: an initial hold exchange gives the planner its first
+    # telemetry frame (the only winch data it is ever allowed to see).
+    node.update_sensors(runner.tension_now, WIND)
+    tel = node.exchange(WinchCommand(cruise_v=0.0, tension_target=TENSION_IC))
 
     # Initial command so Lua's _target_alt / _tension_n are set before flight.
-    comms.send(
-        TensionCommand(tension_target_n=_ap_tension_target(), alt_m=ic_alt, phase=_cmd_phase()),
-        DT_PLANNER,
-    )
+    comms.send(planner.step(0.0, tel.tension_n, tel.rest_length), DT_PLANNER)
 
     # ── Inflow warm-up ────────────────────────────────────────────────────
     runner._core.warm_inflow(collective_rad=float(_IC.coll_eq_rad), n_steps=500)
@@ -172,73 +174,57 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         t_sim       = i * DT
         tension_now = runner.tension_now
         altitude    = runner.altitude
-        t_in_phase  = t_sim - phase_start_t
 
-        # ── Wait for Lua steady capture, then start pumping cycles ────────
+        # Winch node feels its load cell + anemometer (physics side).
+        node.update_sensors(tension_now, WIND)
+
+        # ── Detect Lua steady capture and gate the planner ───────────────
         if not captured:
-            captured = any("RAWES steady: captured" in msg for _, msg in sim.messages)
-            if captured:
-                capture_t = t_sim
-                phase = "hold"
-                phase_start_t = t_sim
-                start_length = winch.rest_length
-                cycle_net_start[0] = winch.net_energy_j
-        elif phase == "hold" and capture_t is not None and (t_sim - capture_t) >= CAPTURE_SETTLE_S:
-            phase = "reel_out"
-            phase_start_t = t_sim
-            start_length = winch.rest_length
-            cycle_net_start[0] = winch.net_energy_j
+            if any("RAWES steady: captured" in msg for _, msg in sim.messages):
+                captured = True
+                planner.notify_captured(t_sim)
 
-        # ── Phase transitions ─────────────────────────────────────────────
-        prev_phase = phase
-        if phase == "reel_out":
-            if (winch.rest_length >= start_length + DELTA_L - 0.05
-                    or t_in_phase >= T_REEL_OUT_MAX):
-                phase = "reel_in"
-                phase_start_t = t_sim
-        elif phase == "reel_in":
-            if (winch.rest_length <= start_length + 0.05
-                    or t_in_phase >= T_REEL_IN_MAX):
-                cycle_idx += 1
-                if cycle_idx >= N_CYCLES:
-                    break
-                phase = "reel_out"
-                phase_start_t = t_sim
-                cycle_net_start[cycle_idx] = winch.net_energy_j
+        # ── Ground 10 Hz: step planner, exchange over the cable, cmd Lua ───
+        if i % planner_every == 0:
+            # Planner sees ONLY the last telemetry frame from the winch node.
+            cmd = planner.step(t_sim, tel.tension_n, tel.rest_length)
+            tel = node.exchange(WinchCommand(
+                cruise_v       = planner.winch_target_velocity,
+                tension_target = planner.winch_target_tension,
+            ))
+            comms.send(cmd, DT_PLANNER)
+
+        # Telemetry label + per-cycle net-energy bookkeeping
+        if planner.phase != prev_phase and planner.phase == "reel-out":
+            idx = min(planner.cycle_count, N_CYCLES - 1)
+            cycle_net_start[idx] = gov.net_energy_j
+        prev_phase = planner.phase
 
         if captured:
-            phase_label = f"cycle{cycle_idx+1}_{phase}"
+            phase_label = f"cycle{min(planner.cycle_count + 1, N_CYCLES)}_{planner.phase}"
         else:
             phase_label = "pre_capture_hold"
 
-        # ── Ground 10 Hz: update winch velocity + refresh Lua command ─────
-        if i % planner_every == 0 or phase != prev_phase:
-            if phase == "hold":
-                cruise_v = 0.0
-            else:
-                cruise_v = V_CRUISE_OUT if phase == "reel_out" else -V_CRUISE_IN
-            winch.set_command(cruise_v, _ap_tension_target())
-            comms.send(
-                TensionCommand(tension_target_n=_ap_tension_target(), alt_m=ic_alt, phase=_cmd_phase()),
-                DT_PLANNER,
-            )
+        # All cycles complete -> planner returns to hold.
+        if planner.cycle_count >= N_CYCLES:
+            break
 
         # ── Lua 50 Hz ─────────────────────────────────────────────────────
         if i % LUA_EVERY == 0:
             lua.tick(t_sim, runner, accel_ned=prev_accel_ned)
 
-        # ── Winch 400 Hz ──────────────────────────────────────────────────
-        winch.step(tension_now, DT)
+        # ── Winch node fast loop 400 Hz ────────────────────────────
+        node.step(DT)
 
         # ── Inner physics step driven by GuidedAttitudeController ────────────
-        sr = lua.step(runner, DT, rest_length=winch.rest_length)
+        sr = lua.step(runner, DT, rest_length=node.rest_length)
         prev_accel_ned = sr.get("accel_specific_world")
 
         # ── Safety events ─────────────────────────────────────────────────
         if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
-        if captured and phase != "hold" and runner.tension_now > BREAK_LOAD_N:
+        if captured and planner.phase != "hold" and runner.tension_now > BREAK_LOAD_N:
             events.record("tension_spike", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
         if runner.hub_state["pos"][2] >= -FLOOR_ALT_M:
@@ -249,8 +235,8 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         lua.log(runner, sr)
 
     # ── Results ───────────────────────────────────────────────────────────────
-    net_per_cycle = [winch.net_energy_j - cycle_net_start[k] for k in range(N_CYCLES)]
-    total_net     = winch.net_energy_j
+    net_per_cycle = [gov.net_energy_j - cycle_net_start[k] for k in range(N_CYCLES)]
+    total_net     = gov.net_energy_j
 
     cycle_summary = "  ".join(
         f"c{k+1}={net_per_cycle[k]:.0f}J" for k in range(N_CYCLES)

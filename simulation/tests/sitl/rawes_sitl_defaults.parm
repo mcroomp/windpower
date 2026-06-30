@@ -22,11 +22,13 @@
 #   throttle), so this rate PID is the INNER loop beneath ArduPilot's attitude
 #   P-loop (ATC_ANG_*_P).  It must track the attitude controller's rate demand
 #   at the high-tilt / low-tension reel-in operating point.
-#   P=0.67 is the proven working gain from simtest_runner.PhysicsRunner (validated
-#   in test_steady_flight.py and test_pumping_cycle_lua).  This is the single
-#   source of truth for rate PID tuning — both simulation and SITL use the same
-#   values.  Light D=0.02 filters derivative noise.  FLTT/FLTD match ArduPilot
-#   defaults.  See test_steady_flight.py line ~70 where the proven gains originate.
+#
+#   SINGLE SOURCE OF TRUTH: this file is the one place rate PIDs are tuned.
+#   Everyone -- unit tests, simtests, and SITL -- loads the same
+#   copter-heli.parm + this file chain (simtests via param_defaults.py, SITL via
+#   the boot --add-param-file), so roll uses ATC_RAT_RLL_* and pitch uses
+#   ATC_RAT_PIT_* identically in both paths.  The block below seeds the ArduPilot
+#   copter-heli.parm baseline values; edit it (not Python) to retune.
 #
 # DataFlash logging:
 #   LOG_BITMASK bits from ArduCopter/defines.h:
@@ -61,8 +63,32 @@
 #       (bit 18) for higher-rate attitude/IMU diagnostics.
 LOG_BITMASK       442367
 
-# PID overrides removed to test ArduPilot defaults.
-# Stashed in simulation/tests/sitl/tmp_pid_overrides_backup.parm.
+# Rate PID overrides — single tuning surface shared by simtest + SITL.
+# Seeded from the ArduPilot copter-heli.parm baseline; retune here.
+# Roll and pitch are independent axes in code, but the RAWES rotorcraft is
+# axially symmetric (no long fuselage), so the conventional helicopter
+# assumption of distinct roll/pitch inertia does not apply. Pitch therefore
+# uses the SAME gains as roll, not the copter-heli PIT defaults (which are tuned
+# for a longitudinally elongated airframe).
+# NOTE: ATC_RAT_*_IMAX is intentionally NOT set here — it is left at the
+# ArduPilot/copter-heli default while the "test ArduPilot defaults" experiment
+# is active (see design/simulation.md, AGENTS.md for the IMAX=0 anti-windup intent).
+ATC_RAT_RLL_P    0.06
+ATC_RAT_RLL_I    0.105
+ATC_RAT_RLL_D    0.0001
+ATC_RAT_RLL_FF   0.21
+ATC_RAT_RLL_ILMI 0.1
+ATC_RAT_RLL_FLTT 20
+ATC_RAT_RLL_FLTE 20
+ATC_RAT_RLL_FLTD 0
+ATC_RAT_PIT_P    0.06
+ATC_RAT_PIT_I    0.105
+ATC_RAT_PIT_D    0.0001
+ATC_RAT_PIT_FF   0.21
+ATC_RAT_PIT_ILMI 0.1
+ATC_RAT_PIT_FLTT 20
+ATC_RAT_PIT_FLTE 20
+ATC_RAT_PIT_FLTD 0
 ATC_ANGLE_BOOST   0      # disable throttle boost at high tilt (RAWES commands fixed throttle -> no boost wanted)
 
 ACRO_TRAINER      0      # disable auto-leveling (physical tilt ~65 deg)
@@ -146,8 +172,3 @@ H_COL2YAW       0.0   # no collective-to-yaw feedforward
 SERVO4_MIN       800   # PWM off = 800 us (motor silent)
 SERVO4_MAX       2000  # PWM full = 2000 us
 SERVO4_TRIM      800   # DDFP trim = off; motor silent at neutral stick
-
-# RPM source: SITL reads rpm.rpm_1 from mediator JSON (RPM1_TYPE=10).
-# On hardware: set RPM1_TYPE=5 (bidir DShot ESC telemetry) after enabling AM32 EDT.
-RPM1_TYPE        10    # 10=SITL JSON field rpm.rpm_1 (mediator sends omega_spin)
-RPM1_MIN         0.0   # no minimum filter

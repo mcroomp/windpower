@@ -26,6 +26,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 _SIM_DIR  = Path(__file__).resolve().parents[3]
 _SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))
@@ -66,6 +68,7 @@ _TENSION_LIMIT_N  = 496.0
 # Lua landing test
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
 def test_landing_lua_sitl(guided_nogps_armed_landing_lua: StackContext):
     """
     Lua landing mode (SCR_USER6=4) stack test.

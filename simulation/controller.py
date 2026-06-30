@@ -1026,7 +1026,11 @@ class HeliCyclicController:
             collective_rad, rate_roll_sp, rate_pitch_sp, omega_body, dt,
         )
 
-    Parameters mapped to ArduPilot (per axis — roll & pitch identical):
+    Parameters mapped to ArduPilot:
+        Default (no explicit gains): roll loads ATC_RAT_RLL_* and pitch loads
+        ATC_RAT_PIT_* from the same copter-heli.parm + rawes_sitl_defaults.parm
+        chain as SITL. Passing P/I/D/... explicitly overrides both axes with
+        those gains.
         P, I, D, FF, IMAX, FLTT, FLTE, FLTD  ↔  ATC_RAT_xxx_P/I/D/FF/IMAX/FLTT/FLTE/FLTD
         h_sw_h3_phang                        ↔  H_SW_H3_PHANG
     """
@@ -1049,18 +1053,24 @@ class HeliCyclicController:
     ) -> None:
         # Local imports keep arduloop optional for environments that don't
         # need it (e.g. analysis scripts that don't run the controller).
-        from arduloop import HeliRateController, HeliParams, make_roll_pitch_params, make_yaw_params
-        rate_cfg = make_roll_pitch_params()
-        # Override with caller's params if provided (all match default signature above)
+        from arduloop import HeliRateController, HeliParams, make_roll_params, make_pitch_params, make_yaw_params
+        roll_cfg = make_roll_params()
+        pitch_cfg = make_pitch_params()
+        # Override both axes with caller's params if provided (any deviation from
+        # the default signature builds an explicit RateAxisParams applied to roll
+        # and pitch alike). When no override is given, roll loads ATC_RAT_RLL_*
+        # and pitch loads ATC_RAT_PIT_* from the same .parm chain as SITL.
         if P != 0.67 or I != 0.15 or D != 0.02 or FF != 0.00 or IMAX != 0.30 or FLTT != 40.0 or FLTE != 0.0 or FLTD != 40.0:
             from arduloop import RateAxisParams
-            rate_cfg = RateAxisParams(
+            override = RateAxisParams(
                 P=P, I=I, D=D, FF=FF, IMAX=IMAX,
                 FLTT=FLTT, FLTE=FLTE, FLTD=FLTD,
             )
+            roll_cfg = override
+            pitch_cfg = override
         yaw_cfg = make_yaw_params()
         params = HeliParams(
-            roll=rate_cfg, pitch=rate_cfg, yaw=yaw_cfg,
+            roll=roll_cfg, pitch=pitch_cfg, yaw=yaw_cfg,
             loop_rate_hz=loop_rate_hz, H_SW_H3_PHANG=h_sw_h3_phang
         )
         self._ctrl  = HeliRateController(params)
@@ -1370,90 +1380,3 @@ def make_hold_controller(
     """
     return PhysicalHoldController(anchor_ned)
 
-
-class AccelVibrationDamper:
-    """
-    Accelerometer-based tether spring-mode vibration damper.
-
-    Uses body-Z specific force (the dominant axis of tether spring oscillation)
-    to estimate oscillatory hub velocity along the disk-normal / tether direction,
-    then feeds back a collective correction opposing that velocity.
-
-    Works independently of ground comms — only requires IMU data, which is
-    available at AP sample rate regardless of MAVLink state.
-
-    Design
-    ------
-    1. High-pass filter body-Z acceleration to remove DC (gravity projection
-       on body-Z changes slowly with attitude; the HP removes it cleanly).
-    2. Leaky-integrate the HP-filtered signal to estimate oscillatory velocity.
-       The leak term prevents drift from accumulating over long segments.
-    3. Return -k_vib * vel_est, clamped to ±col_damp_max.
-
-    The sign: body-Z points along disk normal.  When the tether stretches
-    (tension spike), the hub accelerates toward the anchor → body-Z accel
-    becomes more negative.  The HP+integrate gives negative velocity →
-    correction is positive (more collective) → pushes hub back = damping.
-
-    Frequency range
-    ---------------
-    Tether spring-mass resonance: f = sqrt(EA / (m * L)) / (2π)
-    With EA=281 kN, m=5 kg, L=50–200 m → f ≈ 3–8 Hz.
-
-    Default hp_freq_hz=1.5 passes this band while blocking attitude-change
-    contributions (bandwidth ~0.1–0.5 Hz) and high-frequency noise above ~25 Hz
-    (where the leaky integrator provides natural roll-off).
-
-    Parameters
-    ----------
-    k_vib        : collective correction per m/s of estimated velocity [rad/(m/s)]
-    hp_freq_hz   : high-pass filter cutoff [Hz]
-    vel_tau_s    : leaky integrator decay time constant [s]
-    col_damp_max : clamp on correction magnitude [rad]
-    """
-
-    def __init__(
-        self,
-        k_vib:        float = 0.008,
-        hp_freq_hz:   float = 1.5,
-        vel_tau_s:    float = 0.5,
-        col_damp_max: float = 0.04,
-    ) -> None:
-        self._k_vib        = float(k_vib)
-        self._hp_freq      = float(hp_freq_hz)
-        self._vel_tau      = float(vel_tau_s)
-        self._col_damp_max = float(col_damp_max)
-        self._acc_hp   = 0.0
-        self._acc_prev = 0.0
-        self._vel_est  = 0.0
-
-    def reset(self) -> None:
-        self._acc_hp   = 0.0
-        self._acc_prev = 0.0
-        self._vel_est  = 0.0
-
-    def step(self, accel_body_z: float, dt: float) -> float:
-        """
-        Update with one body-Z specific force sample.
-
-        Parameters
-        ----------
-        accel_body_z : body-Z specific force [m/s²]  (R.T @ accel_specific_world)[2]
-        dt           : timestep [s]
-
-        Returns
-        -------
-        Collective correction [rad], clamped to ±col_damp_max.
-        """
-        # First-order high-pass: y[n] = alpha*(y[n-1] + x[n] - x[n-1])
-        tau_hp   = 1.0 / (2.0 * math.pi * self._hp_freq)
-        alpha_hp = tau_hp / (tau_hp + dt)
-        self._acc_hp   = alpha_hp * (self._acc_hp + accel_body_z - self._acc_prev)
-        self._acc_prev = accel_body_z
-
-        # Leaky integrator: v[n] = exp(-dt/tau) * v[n-1] + dt * a_hp[n]
-        leak          = math.exp(-dt / max(self._vel_tau, 1e-6))
-        self._vel_est = leak * self._vel_est + dt * self._acc_hp
-
-        correction = -self._k_vib * self._vel_est
-        return float(max(-self._col_damp_max, min(self._col_damp_max, correction)))

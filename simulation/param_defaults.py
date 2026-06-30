@@ -98,14 +98,21 @@ def _load_rate_axis(prefix: str, params: dict[str, float]) -> dict[str, float]:
     }
 
 
-def load_rate_pid_params(parm_file=None):
-    """Load roll-axis rate PID parameters from ArduPilot .parm sources.
+def load_rate_pid_params(parm_file=None, axis: str = "RLL"):
+    """Load a single rate-axis PID parameter set from ArduPilot .parm sources.
+
+    Every consumer (unit tests, simtests, and SITL) loads the *same* merged
+    ``copter-heli.parm`` + ``rawes_sitl_defaults.parm`` chain, so the gains are
+    identical across paths.
 
     Parameters
     ----------
     parm_file : Path or str, optional
         Path to a single parameter file. If None (default), uses the merged
         precedence chain from :func:`_resolve_default_param_files`.
+    axis : str
+        ArduPilot rate-axis prefix: ``"RLL"`` (roll), ``"PIT"`` (pitch), or
+        ``"YAW"``. Defaults to ``"RLL"``.
 
     Returns
     -------
@@ -124,18 +131,14 @@ def load_rate_pid_params(parm_file=None):
         params = load_ap_params()
     else:
         params = load_ap_params([parm_file])
-    return _load_rate_axis("RLL", params)
+    return _load_rate_axis(axis, params)
 
 
-def make_roll_pitch_params_from_file():
-    """Factory for roll-axis rate PID parameters loaded from .parm sources.
-
-    Uses :func:`load_rate_pid_params`, so values come from the merged ArduPilot
-    baseline + RAWES override chain by default.
-    """
+def _make_axis_params_from_file(axis: str):
+    """Build a :class:`RateAxisParams` for ``axis`` from the merged .parm chain."""
     from arduloop import RateAxisParams
-    
-    params = load_rate_pid_params()
+
+    params = load_rate_pid_params(axis=axis)
     return RateAxisParams(
         P=params["P"],
         I=params["I"],
@@ -150,27 +153,26 @@ def make_roll_pitch_params_from_file():
         SMAX=params["SMAX"],
         ILMI=params["ILMI"],
     )
+
+
+def make_roll_params_from_file():
+    """Factory for the roll rate PID (``ATC_RAT_RLL_*``) from the .parm chain."""
+    return _make_axis_params_from_file("RLL")
+
+
+# Backwards-compatible alias. Historically this returned the roll axis and was
+# (incorrectly) reused for pitch too; pitch now has its own factory below.
+make_roll_pitch_params_from_file = make_roll_params_from_file
+
+
+def make_pitch_params_from_file():
+    """Factory for the pitch rate PID (``ATC_RAT_PIT_*``) from the .parm chain."""
+    return _make_axis_params_from_file("PIT")
 
 
 def make_yaw_params_from_file():
-    """Factory for yaw rate PID parameters loaded from ArduPilot .parm files."""
-    from arduloop import RateAxisParams
-
-    params = _load_rate_axis("YAW", load_ap_params())
-    return RateAxisParams(
-        P=params["P"],
-        I=params["I"],
-        D=params["D"],
-        FF=params["FF"],
-        IMAX=params["IMAX"],
-        FLTT=params["FLTT"],
-        FLTE=params["FLTE"],
-        FLTD=params["FLTD"],
-        D_FF=params["D_FF"],
-        PDMX=params["PDMX"],
-        SMAX=params["SMAX"],
-        ILMI=params["ILMI"],
-    )
+    """Factory for the yaw rate PID (``ATC_RAT_YAW_*``) from the .parm chain."""
+    return _make_axis_params_from_file("YAW")
 
 
 def load_attitude_params() -> dict[str, float]:

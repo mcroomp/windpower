@@ -1,30 +1,33 @@
 """
-WinchNode -- simulation of the ground-based winch controller node.
+winch_node -- simulation of the ground-based winch controller node.
 
-On hardware this is a separate MAVLink node that:
-  - runs the winch reel speed PID (WinchController)
+On hardware this is a separate MAVLink node at the anchor that:
+  - runs the fast tension-governing loop (GovernedWinchController)
   - measures tether tension via load cell
-  - measures tether length via encoder
-  - measures wind via co-located anemometer
+  - measures tether length via drum encoder
+  - measures wind via a co-located anemometer
 
 Protocol boundary
 -----------------
-The ground station planner communicates with this node ONLY through two methods:
+The ground station planner communicates with this node ONLY through the cable
+boundary:
 
-  winch_node.get_telemetry()          -> dict  (planner reads)
-  winch_node.receive_command(speed)            (planner writes)
+  winch_node.exchange(WinchCommand) -> WinchTelemetry
 
-The mediator (physics side) calls:
+The mediator (physics side) additionally calls:
 
   winch_node.update_sensors(tension, wind)     (feed physics outputs in)
+  winch_node.step(dt)                          (advance the governing loop)
+  winch_node.rest_length                       (sync tether.rest_length)
+  winch_node.telemetry()                       (host-side telemetry snapshot)
 
-No other cross-boundary access is allowed.  This mirrors the hardware
-architecture where all data crosses as MAVLink messages and the planner
-has no direct access to tether.py or the true wind vector.
+No hub altitude / position / attitude ever crosses the cable boundary.
 """
 
 import numpy as np
-from winch import WinchController
+from dataclasses import dataclass
+
+from winch import GovernedWinchController
 
 
 class Anemometer:
@@ -58,83 +61,127 @@ class Anemometer:
         return reading
 
 
-class WinchNode:
-    """Simulated winch controller node.
+# ===========================================================================
+# Split-comms winch node (GovernedWinchController on the winch node)
+# ===========================================================================
+#
+# Two logical parts coupled by a single boundary:
+#
+#   GCS / planner node  --(WinchCommand: targets only)-->  Winch node
+#   Winch node          --(WinchTelemetry: sensed only)->  GCS / planner node
+#
+# The fast tension-governing control loop (GovernedWinchController) lives on
+# the winch node, co-located with the load cell, and runs at the physics rate.
+# The channel carries ONLY slow target commands down and winch-measurable
+# telemetry up -- it is never in the fast feedback path.
+#
+# No-leak guarantee: the planner can only call exchange() and only ever sees
+# a WinchTelemetry, whose fields are all quantities the drum/anchor hardware
+# physically senses (load cell, drum encoder, co-located anemometer).  Hub
+# altitude / position / attitude never cross this boundary.
 
-    Encapsulates WinchController + Anemometer and enforces the protocol
-    boundary between the physics simulation and the ground station planner.
 
-    Mediator (physics side)
-    -----------------------
-    Call update_sensors() after tether.compute() each physics step to feed
-    the load cell and anemometer readings.  Then use receive_command() to
-    execute the winch speed command from the planner, and rest_length to
-    synchronise tether.rest_length.
+@dataclass(frozen=True)
+class WinchCommand:
+    """Down-link (planner -> winch node): targets only.
 
-    Planner (ground station side)
-    ------------------------------
-    Call get_telemetry() to read tension, tether length, and wind.  Call
-    receive_command() to send a winch speed setpoint.  No other access to
-    physics state is available.
+    cruise_v        -- commanded cruise reel velocity [m/s], +out / -in / 0=hold
+    tension_target  -- governor tension setpoint [N]
+    """
+    cruise_v:       float
+    tension_target: float
+
+
+@dataclass(frozen=True)
+class WinchTelemetry:
+    """Up-link (winch node -> planner): winch-measurable quantities only.
+
+    tension_n     -- load cell [N]
+    rest_length   -- drum encoder: tether rest length [m]
+    speed_ms      -- reel speed [m/s], signed (+out)
+    net_energy_j  -- drum mechanical energy, integral of T*v [J]
+    wind_ned      -- co-located anemometer reading [NED, m/s]
+    """
+    tension_n:    float
+    rest_length:  float
+    speed_ms:     float
+    net_energy_j: float
+    wind_ned:     tuple
+
+
+class GovernedWinchNode:
+    """Winch + load cell + anemometer node hosting the fast governing loop.
+
+    On hardware this is a self-contained node at the anchor: a winch drum with
+    a load cell and a co-located anemometer, running the tension-governing
+    control loop locally.  The ground-station planner talks to it ONLY through
+    the cable boundary ``exchange(WinchCommand) -> WinchTelemetry``.
+
+    Planner side (across the cable)
+    -------------------------------
+    exchange(cmd)        apply target command, return winch-measurable telemetry
+
+    Physics side (mediator / simulation only -- NOT the protocol)
+    -------------------------------------------------------------
+    update_sensors(T, w) feed load-cell tension and ambient wind into the node
+    step(dt)             advance the fast governing loop one physics tick
+    rest_length          drum encoder, used to sync tether.rest_length
     """
 
-    def __init__(self, winch: WinchController, anemometer: Anemometer):
+    def __init__(self, winch: GovernedWinchController,
+                 anemometer: "Anemometer | None" = None):
         self._winch      = winch
         self._anemometer = anemometer
-        self._tension_n: float       = 0.0
-        self._wind_ned:  np.ndarray  = np.zeros(3)
+        self._tension_n: float      = 0.0
+        self._wind_ned:  np.ndarray = np.zeros(3)
 
-    # ---- physics side (mediator only) ---------------------------------------
+    # ---- physics side (mediator / sim only) ---------------------------------
 
-    def update_sensors(self, tension_n: float, wind_world_ned: np.ndarray) -> None:
-        """Feed load cell reading and ambient wind into the node.
+    def update_sensors(self, tension_n: float, wind_world_ned=None) -> None:
+        """Feed the load-cell reading and ambient wind into the node.
 
-        Called by the mediator after tether.compute() each step.
-        tension_n       -- tether tension from tether._last_info ["tension"] [N]
-        wind_world_ned  -- true ambient wind NED [m/s] (NOT passed to planner)
+        Called at the physics rate before step().  tension_n is the tether
+        load-cell reading [N]; wind_world_ned is the true ambient wind [NED]
+        sampled by the co-located anemometer (optional).
         """
         self._tension_n = float(tension_n)
-        self._wind_ned  = self._anemometer.measure(wind_world_ned)
+        if self._anemometer is not None and wind_world_ned is not None:
+            self._wind_ned = self._anemometer.measure(wind_world_ned)
 
-    def set_target(self, length_m: float, tension_n: float) -> None:
-        """Set the winch target length and tension setpoint.
-
-        Called by the mediator when a remote winch command arrives (e.g. via
-        the pumping socket).  Delegates to WinchController.set_target().
-        """
-        self._winch.set_target(float(length_m), float(tension_n))
-
-    def receive_command(self, winch_speed_ms: float, dt: float) -> None:
-        """Step the winch tension regulator.
-
-        winch_speed_ms is ignored — WinchController is self-contained and
-        decides its own reel direction from the stored tension reading.
-        dt -- physics timestep [s]
-        """
-        self._winch.step(self._tension_n, dt)
+    def step(self, dt: float) -> None:
+        """Advance the fast governing loop one tick using the local load cell."""
+        self._winch.step(self._tension_n, float(dt))
 
     @property
     def rest_length(self) -> float:
-        """Current tether rest length [m].
-
-        Used by mediator to keep tether.rest_length in sync after each
-        winch step.  Not part of the planner-facing protocol.
-        """
+        """Drum encoder reading [m] (mediator syncs tether.rest_length)."""
         return self._winch.rest_length
 
-    # ---- planner side (ground station only) ---------------------------------
+    def telemetry(self) -> WinchTelemetry:
+        """Read-only winch telemetry snapshot (host/transport side).
 
-    def get_telemetry(self) -> dict:
-        """Return the node's MAVLink telemetry packet.
-
-        Keys
-        ----
-        tension_n       -- load cell reading [N]
-        tether_length_m -- encoder reading [m]
-        wind_ned        -- anemometer reading [NED, m/s]
+        Used by the mediator to forward periodic telemetry up the cable
+        without re-applying a command.  Same payload exchange() returns.
         """
-        return {
-            "tension_n":       self._tension_n,
-            "tether_length_m": self._winch.rest_length,
-            "wind_ned":        self._wind_ned.copy(),
-        }
+        return self._telemetry()
+
+    # ---- planner side (the cable boundary) ----------------------------------
+
+    def exchange(self, cmd: WinchCommand) -> WinchTelemetry:
+        """Apply a target command and return current winch telemetry.
+
+        This is the ONLY planner-facing method -- pure marshalling, so no hub
+        or physics state can cross the boundary.
+        """
+        self._winch.set_command(cmd.cruise_v, cmd.tension_target)
+        return self._telemetry()
+
+    def _telemetry(self) -> WinchTelemetry:
+        w = self._wind_ned
+        return WinchTelemetry(
+            tension_n    = float(self._tension_n),
+            rest_length  = float(self._winch.rest_length),
+            speed_ms     = float(self._winch.speed_ms),
+            net_energy_j = float(self._winch.net_energy_j),
+            wind_ned     = (float(w[0]), float(w[1]), float(w[2])),
+        )

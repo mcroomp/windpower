@@ -44,8 +44,8 @@ from sitl_interface  import SITLInterface, SIM_CLOCK_HZ
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from sensor          import make_sensor, SpinSensor
 from kinematic       import KinematicStartup, compute_launch_position, make_smooth_trapezoid_traj  # noqa: F401
-from winch           import WinchController
-from winch_node      import WinchNode, Anemometer
+from winch           import GovernedWinchController
+from winch_node      import GovernedWinchNode, WinchCommand, Anemometer
 import config as _mcfg
 from dynbem import rotor_definition as _rd
 from telemetry_csv import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
@@ -557,42 +557,56 @@ def run_mediator(args, trajectory=None):
         _telemetry_writer.writeheader()
         log.info("Telemetry logging -> %s", args.telemetry_log)
 
-    # -- WinchNode (separate MAVLink node, co-located physically with anchor) --
-    # Encapsulates WinchController + Anemometer.  The planner communicates
-    # with this node ONLY through get_telemetry() and receive_command().
-    # The mediator calls update_sensors() to feed physics outputs in.
-    _winch_node = WinchNode(
-        winch=WinchController(
+    # -- Winch node (canonical GovernedWinchNode — same control law as the ----
+    # pumping simtest test_pump_cycle_lua.py).  Hosts the fast GovernedWinch-
+    # Controller governing loop + load cell + anemometer.  The ground planner
+    # reaches it ONLY through the cable boundary exchange(WinchCommand) ->
+    # WinchTelemetry (cruise velocity + tension target down, sensed up).  The
+    # mediator (transport host) feeds physics in via update_sensors() and runs
+    # the fast loop with step().
+    _winch_node = GovernedWinchNode(
+        winch=GovernedWinchController(
             rest_length     = float(cfg["rest_length"]),
             kp_tension      = float(cfg["winch_kp_tension"]),
             v_max_out       = float(cfg["winch_v_max_out"]),
             v_max_in        = float(cfg["winch_v_max_in"]),
             accel_limit_ms2 = float(cfg["winch_accel_limit_ms2"]),
+            jerk_limit_ms3  = float(cfg["winch_jerk_limit_ms3"]),
+            tension_tau_s   = float(cfg["winch_tension_tau_s"]),
             min_length      = float(cfg["winch_min_length"]),
         ),
         anemometer=Anemometer(height_m=3.0),
     )
+    _winch_hold_tension = float(cfg["winch_hold_tension_n"])
     _winch_node.update_sensors(0.0, wind_world)   # prime anemometer before planner init
+    # Idle hold until a ground WinchCommand arrives (no-socket tests, or before
+    # the first command): cruise=0 at the hold tension so the governor neither
+    # pays out nor reels in against a near-equilibrium load.
+    _winch_node.exchange(WinchCommand(cruise_v=0.0, tension_target=_winch_hold_tension))
 
     # -- Trajectory planner (ground station) ---------------------------------
     # Caller supplies a pre-built planner, or one is built from cfg["trajectory"].
-    # Wind seed comes from the WinchNode anemometer -- NOT from wind_world directly.
-    _pc_telemetry: dict = _winch_node.get_telemetry()
+    # Wind seed comes from the winch-node anemometer -- NOT from wind_world directly.
+    _pc_telemetry = _winch_node.exchange(
+        WinchCommand(cruise_v=0.0, tension_target=_winch_hold_tension))
     if trajectory is not None:
         _trajectory = trajectory
     else:
         _trajectory = _mcfg.make_trajectory(
-            cfg, wind_ned=_pc_telemetry["wind_ned"])
+            cfg, wind_ned=_pc_telemetry.wind_ned)
     ev.write("config", t_sim=0.0, trajectory=type(_trajectory).__name__)
 
-    # -- Winch command socket (pumping mode: test process controls planner) ---
-    # When --winch-cmd-port is set the test process runs PumpingGroundController
-    # and sends winch commands here.  The mediator owns WinchController physics;
-    # the test owns phase management and NVF delivery to Lua via MAVLink GCS.
+    # -- Winch command socket (pumping/steady: test or fixture owns planner) --
+    # When --winch-cmd-port is set the test process (or the conftest tension
+    # regulator) sends WinchCommands here.  The mediator hosts the winch-node
+    # physics; the test owns phase management and NVF delivery to Lua via GCS.
     #
-    # Protocol (UDP JSON, all on one socket):
-    #   test  -> mediator: {"target_length": L, "target_tension": T}
-    #   mediator -> test:  {"tension_n": T, "rest_length": L, "hub_alt_m": H}
+    # Protocol (UDP JSON, all on one socket) -- mirrors GovernedWinchNode.exchange:
+    #   test  -> mediator: {"cruise_v": V, "tension_target": T}   (WinchCommand)
+    #   mediator -> test:  {"tension_n": T, "rest_length": L,      (WinchTelemetry)
+    #                       "speed_ms": S, "net_energy_j": E,
+    #                       "wind_ned": [n, e, d]}
+    # No hub data crosses this boundary (no hub_alt_m / position / attitude).
     #
     # State is sent every ~10 Hz (every DT_WINCH_SEND steps).  Commands are
     # received non-blocking every step so they are applied within one lockstep
@@ -603,6 +617,7 @@ def run_mediator(args, trajectory=None):
     _winch_sock     = None
     _winch_peer     = None   # (host, port) of the test process — learned on first recv
     _winch_send_ctr = 0
+    _winch_phase    = ""     # telemetry phase label derived from commanded cruise_v
     DT_WINCH_SEND   = max(1, int(round((1.0 / sitl.dt()) / 10.0)))
     # Send winch state at ~10 Hz, regardless of lockstep step rate.
 
@@ -625,7 +640,7 @@ def run_mediator(args, trajectory=None):
         nonlocal s1, s2, s3, _traj_cmd, _logged_transition
         nonlocal _ff_t0, _blend_logged
         nonlocal _tel_note, _prev_phase
-        nonlocal _winch_peer, _winch_send_ctr
+        nonlocal _winch_peer, _winch_send_ctr, _winch_phase
         if _t_step0 is None:
             _t_step0 = t_sim
         _dt = sitl.dt()
@@ -633,7 +648,7 @@ def run_mediator(args, trajectory=None):
         # Single source of truth for kinematic/free-flight gating.
         _is_kinematic = core.is_kinematic
 
-        # ── Ground-station planner + WinchNode (free flight only) ────────
+        # ── Ground-station planner + winch node (free flight only) ───────
         if not _is_kinematic:
             _ti_prev = core.tether._last_info
             if _ti_prev.get("tension", 0) > 0.8 * core.tether.BREAK_LOAD_N:
@@ -641,35 +656,46 @@ def run_mediator(args, trajectory=None):
                     "t=%.1f TETHER TENSION %.0f N is >80%% of break load (%.0f N)!",
                     core.t_sim, _ti_prev["tension"], core.tether.BREAK_LOAD_N,
                 )
+            # Winch node feels its load cell + anemometer (physics side).
             _winch_node.update_sensors(core.tension_now, wind_world)
-            _pc_telemetry = _winch_node.get_telemetry()
 
-            # ── Winch command socket: receive set_target commands from test ──
-            _socket_phase = None  # ground-planner phase label (applied after trajectory.step)
+            # ── Winch command socket: receive WinchCommand from test ─────
             if _winch_sock is not None:
                 try:
                     _data, _addr = _winch_sock.recvfrom(256)
                     _cmd = _json_mod.loads(_data)
-                    _winch_node.set_target(
-                        float(_cmd["target_length"]),
-                        float(_cmd["target_tension"]),
-                    )
-                    if "phase" in _cmd:
-                        _socket_phase = _cmd["phase"]
+                    _cruise_v = float(_cmd["cruise_v"])
+                    # Apply the command across the cable boundary.  exchange()
+                    # is the ONLY planner-facing method -- it sets the command
+                    # and returns winch-measurable telemetry (no hub data).
+                    _winch_node.exchange(WinchCommand(
+                        cruise_v       = _cruise_v,
+                        tension_target = float(_cmd["tension_target"]),
+                    ))
+                    # Telemetry phase from the commanded reel direction (the
+                    # winch knows its own velocity sign; this is not a leak).
+                    if _cruise_v > 1e-6:
+                        _winch_phase = "reel-out"
+                    elif _cruise_v < -1e-6:
+                        _winch_phase = "reel-in"
+                    else:
+                        _winch_phase = "hold"
                     _winch_peer = _addr
                 except BlockingIOError:
                     pass
 
-                # Send winch state back to test at ~10 Hz
+                # Send winch telemetry back to test at ~10 Hz.
                 _winch_send_ctr += 1
                 if _winch_send_ctr >= DT_WINCH_SEND and _winch_peer is not None:
                     _winch_send_ctr = 0
-                    _state_bytes = _json_mod.dumps({
-                        "tension_n":   core.tension_now,
-                        "rest_length": _winch_node.rest_length,
-                        "hub_alt_m":   float(-core.hub_state["pos"][2]),
-                    }).encode()
-                    _winch_sock.sendto(_state_bytes, _winch_peer)
+                    _wt = _winch_node.telemetry()
+                    _winch_sock.sendto(_json_mod.dumps({
+                        "tension_n":    _wt.tension_n,
+                        "rest_length":  _wt.rest_length,
+                        "speed_ms":     _wt.speed_ms,
+                        "net_energy_j": _wt.net_energy_j,
+                        "wind_ned":     list(_wt.wind_ned),
+                    }).encode(), _winch_peer)
 
             _state_pkt = {
                 "pos_ned":    core.hub_state["pos"],
@@ -679,15 +705,19 @@ def run_mediator(args, trajectory=None):
             }
             _traj_cmd = _trajectory.step(
                 _state_pkt, _dt,
-                tension_n       = _pc_telemetry["tension_n"],
-                tether_length_m = _pc_telemetry["tether_length_m"],
+                tension_n       = core.tension_now,
+                tether_length_m = _winch_node.rest_length,
             )
-            # Mirror the ground planner phase AFTER trajectory.step() so the
-            # HoldPlanner's "hold" label doesn't overwrite the socket phase.
-            if _socket_phase is not None:
+            # Telemetry phase: socket-driven reel direction overrides the
+            # HoldPlanner's "hold" label.  (HoldPlanner is the only trajectory;
+            # the winch is driven purely by the cable WinchCommand.)
+            if _winch_sock is not None:
                 _traj_cmd = dict(_traj_cmd)
-                _traj_cmd["phase"] = _socket_phase
-            _winch_node.receive_command(_traj_cmd["winch_speed_ms"], _dt)
+                _traj_cmd["phase"] = _winch_phase
+
+            # Advance the fast governing loop one physics tick using the local
+            # load cell (the only fast feedback path -- on the winch node).
+            _winch_node.step(_dt)
 
         # ── Physics step ──────────────────────────────────────────────────
         prev_vel = core.hub_state["vel"].copy()
