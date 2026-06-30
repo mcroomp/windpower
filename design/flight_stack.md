@@ -310,7 +310,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
 | 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_COL` NVF → RC3 PWM direct | bench yaw-tuning + manual swash validation |
-| 3 — passive | neutral cyclic, IC collective | IC collective hold | armed-but-quiet during kinematic |
+| 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
 | 5 — pumping | along the tether, at the per-phase altitude the ground gave us | whatever keeps the measured tether tension on target (435 N during reel-out, 226 N during reel-in) | pumping cycle |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
 
@@ -337,9 +337,11 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
 | RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at SCR_USER2 rad/s. |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. |
-| RAWES_TLN | rad | Trim cyclic `tilt_lon` from `aero.solve_trim_cyclic` — applied as ATC rate-setpoint bias to null wind-driven baseline hub moment. |
-| RAWES_TLT | rad | Trim cyclic `tilt_lat` (companion to RAWES_TLN). |
-| RAWES_COL | rad | IC collective `[COL_MIN_RAD, COL_MAX_RAD]` — held by MODE_PASSIVE to preserve rotor RPM during kinematic. |
+| RAWES_TLN | rad | **Mode 2 (manual) only** — cyclic `tilt_lon` → RC1 PWM direct (`H_FLYBAR_MODE=1`). Not used by passive/steady. |
+| RAWES_TLT | rad | **Mode 2 (manual) only** — cyclic `tilt_lat` → RC2 PWM direct (companion to RAWES_TLN). |
+| RAWES_RIC | rad | IC roll — part of the atomic passive/steady IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_COL`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
+| RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
+| RAWES_COL | rad | IC collective `[COL_MIN_RAD, COL_MAX_RAD]` — part of the atomic IC seed. MODE_PASSIVE maps it onto GUIDED throttle via `col_rad_to_thrust` to preserve rotor RPM during kinematic. |
 
 **MAVLink rx queue:** `mavlink:init(queue_size, num_msgs)` is called as
 `(20, 10)` at module load.  The first arg is the per-tick rx buffer depth;
@@ -375,29 +377,43 @@ On first valid GPS fix: initialize `_el_rad` and `_target_alt` from position, se
 
 ### 4.2b Mode 3 — Passive (SCR_USER6=3)
 
-Armed-but-quiet mode used during the kinematic hold of stack tests.  The
-vehicle stays armed (motor interlock ch8 high) but the Lua emits **no rate
-commands**, only the IC trim cyclic + IC collective:
+Armed-but-quiet mode used during the kinematic hold/release of stack tests.
+The vehicle stays armed (motor interlock ch8 high) and the Lua commands the
+**IC attitude as a GUIDED angle target** plus the IC collective as GUIDED
+throttle.  It does **not** write swashplate channels directly and runs **no**
+closed-loop guidance (no body_z error, no altitude hold, no winch).
 
-1. ch1/ch2 carry the rate-setpoint bias that ArduPilot's ATC_RAT_RLL/PIT
-   PID will turn into the trim cyclic at steady state.  Bias is computed
-   from `_trim_lat / (ATC_RAT_RLL_P + ATC_RAT_RLL_FF)` and the matching
-   pitch term (sign-flipped because `tilt_lon == -pitch_cyclic`).
-2. ch3 holds the IC collective `_ic_col` via the standard
-   `(col − COL_MIN_RAD)/(COL_MAX_RAD − COL_MIN_RAD)` PWM mapping.
-3. No body_z error computation, no altitude hold, no winch interaction —
-   the body is kinematically locked by the mediator so any control output
-   based on bz_now-vs-bz_goal error would just wind up the rate-PID's
-   internal state until kinematic_exit kicks the body.
+**IC seeding (atomic).**  Three NVFs must all be observed before passive
+emits any control output:
 
-The test promotes MODE_PASSIVE → MODE_STEADY immediately after the
-mediator's `kinematic_exit` event, at which point ch3 hand-off is seamless
-(`_last_col_rad` is re-seeded by run_flight's first tick) and the rate
-PIDs continue from the trim cyclic they were already producing.
+- `RAWES_RIC` — IC roll  [rad]
+- `RAWES_PIC` — IC pitch [rad]
+- `RAWES_COL` — IC collective [rad]
 
-`_trim_lon`, `_trim_lat`, `_ic_col` are populated by RAWES_TLN/TLT/COL
-NVFs.  Defaults (0, 0, COL_CRUISE_FLIGHT_RAD) are used until the ground
-sends real values.
+Until all three arrive, `run_passive_mode` returns early and emits no
+control-API traffic (no ch4 neutral, no arm/disarm).  Once `_ic_seeded`
+latches, incremental updates to any of the three are accepted.
+
+**Per-tick command** (once seeded and in GUIDED):
+
+1. Yaw is captured once from `ahrs:get_yaw_rad()` on the first ready tick
+   (`_passive_hold_yaw_rad`) and held constant thereafter — the `nul`-aero
+   cyclic cannot apply yaw, so passive freezes it at the entry heading.
+2. `vehicle:set_target_angle_and_rate_and_throttle(_ic_roll_deg,
+   _ic_pitch_deg, deg(_passive_hold_yaw_rad), 0, 0, 0, throttle)` — the IC
+   roll/pitch **angle** target with **zero rate feed-forward**.
+3. `throttle = col_rad_to_thrust(_ic_col)` maps the IC collective onto GUIDED
+   throttle via `(col − COL_MIN_RAD)/(COL_MAX_RAD − COL_MIN_RAD)`.
+
+During the kinematic hold the `nul`-aero integrates this angle command, so the
+disk slews from the level pre-arm seed toward the commanded IC roll/pitch.
+The test promotes MODE_PASSIVE → MODE_STEADY after the mediator's
+`kinematic_exit` event; the collective hand-off is seamless because steady
+seeds its vertical-speed integrator from the same IC collective.
+
+`_ic_roll_deg`, `_ic_pitch_deg`, `_ic_col` are populated by
+`RAWES_RIC`/`RAWES_PIC`/`RAWES_COL`.  Before the full seed arrives passive is
+inert (no defaults are commanded).
 
 ### 4.3 Mode 1 — Steady (SCR_USER6=1)
 

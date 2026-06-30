@@ -26,11 +26,13 @@ All design docs live under `design/`. `AGENTS.md` is the standard agent context 
 | [design/ardupilot_pids.md](design/ardupilot_pids.md) | ArduPilot heli rate-PID stack — `AC_AttitudeControl_Heli`, Python re-implementation |
 | [design/ardupilot_swashplate.md](design/ardupilot_swashplate.md) | Swashplate signal flow: RC3 collective → servo PWM (H3-120) |
 | [design/ekf_const_pos_mode.md](design/ekf_const_pos_mode.md) | EKF3 `const_pos_mode` — causes and log diagnostics |
+| [design/EKF_GATING.md](design/EKF_GATING.md) | **EKF3 GPS-aiding & yaw-alignment gating** — `readyToUseGPS()` 7 gates, moving-baseline GPS-yaw flow (base/rover, `gps_yaw_deg` XOR), `alignYawAngle` vs GSF `realignYawGPS`, `storedYawAng.recall()` timestamp failure, ArduPilot source index. Verified root cause of `test_lua_flight_steady_sitl` const_pos hang |
 
 **Simulation**
 | File | Purpose |
 |------|---------|
 | [design/simulation.md](design/simulation.md) | **Simulation internals** — sensor design, controller stack, dynamics, aero, tether, kinematic startup, pumping/landing architecture, **module map**, SITL lockstep |
+| [design/sitl_testing.md](design/sitl_testing.md) | **SITL stack testing** — read when editing or diagnosing SITL stack tests: how to run them (`test.sh stack`), the `diagnose_sitl.py` CHECK 1/CHECK 2 post-run workflow, `analyse_run.py`, the SITL lockstep contract, and the one central kinematic-hold implementation + canonical IC-start timeline. Not loaded by default — pull in only for SITL work. |
 | [design/aero_conventions.md](design/aero_conventions.md) | **Aero model interface** — RotorInputs/RotorOutput frames, sign conventions, cyclic tilts, moment transformations |
 | [design/aero.md](design/aero.md) | De Schutter Eq. 25–31 validation vs. implementation |
 | [design/history.md](design/history.md) | Phase 2 + Phase 3 decisions, root causes, results |
@@ -88,6 +90,24 @@ Because only the origin translates (no rotation), any vector that comes from a d
 - **Thrust sign:** upward thrust = `−F_world[2]` (NED Z is down). The aero returns `F_world = −T·R[:,2]`, so for `T > 0` and `R[:,2] = [0,0,+1]`, `F_world = [0,0,−T]` ⇒ `F_world[2] < 0` is upward. Verified by `test_hover_sign.py`.
 - **Cyclic (helicopter signs, `HeliCyclicController`):** `tilt_lon > 0` ⇒ nose-down disk (forward stick); `tilt_lat > 0` ⇒ roll right. `HeliCyclicController` maps body-rate-roll → `tilt_lat` and body-rate-pitch → `−tilt_lon`.
 - **Pitch / roll body rates (FRD standard):** `+roll_rate` = right wing drops, `+pitch_rate` = nose up, `+yaw_rate` = nose right. So "nose-down" command is `−pitch_rate`, matched in `HeliCyclicController.step()` (`pitch_cyclic → −tilt_lon`) and `simtest_runner.step_guided()`.
+
+#### ArduPilot pitch vs. our `tilt_lon` — the mandatory sign flip
+
+There are **two different "pitch" conventions** in the stack and they are **opposite in sign**. Conflating them inverts the cyclic and causes positive feedback (the body rate runs away from the ATC rate PID, or — in the kinematic `nul` aero — rotates *away* from the commanded attitude until the crash check disarms).
+
+| Quantity | Domain | Sign convention | Positive means |
+|----------|--------|-----------------|----------------|
+| ArduPilot attitude/cyclic pitch (`ATTITUDE.pitch`, EKF, `pitch_norm` from `ardupilot_h3_120_inverse`, `heli_out.pitch_cyclic`) | aircraft attitude (FRD, RH about +y) | aerospace standard | **nose-up** |
+| Project `tilt_lon` (`RotorInputs.tilt_lon`, aero, `nul` aero, telemetry) | helicopter cyclic / forward-stick | rotor-disk tilt | **nose-down** (forward stick) |
+
+Because they are opposite:
+
+$$\boxed{\text{tilt\_lon} = -\,\text{pitch\_cyclic}_{\text{ArduPilot}}} \qquad \text{tilt\_lat} = +\,\text{roll\_norm}_{\text{ArduPilot}}\ \text{(roll has NO flip)}$$
+
+- **Verification:** the current `quasi_static` aero gives `d(M_body_pitch)/d(tilt_lon) ≈ −1900` (nose-down moment for `tilt_lon > 0`) — consistent with the table. Probe: `simulation/tests/oneoff/probe_tilt_lon_sign.py`.
+- **Where the flip lives:** the simtest path `simtest_runner.step_guided()` does `tilt_lon_cmd = -heli_out.pitch_cyclic` (correct). The stack path **must** do the same after `ardupilot_h3_120_inverse`: `_tilt_lon = -pitch_norm` in [simulation/mediator.py](simulation/mediator.py). Roll is `_tilt_lat = roll_norm` (no flip) in both.
+- **Unit guard:** `test_cyclic_direction_mapping.py::test_pitch_cyclic_positive_to_tilt_lon_negative` encodes the flip. Do **not** "simplify" `_tilt_lon = -pitch_norm` to `= pitch_norm`.
+- **Only pitch flips, never roll/yaw.** ArduPilot roll (`+roll` = right wing down) already matches `tilt_lat > 0` = roll right.
 
 #### Downwind-plane criteria
 
@@ -188,7 +208,7 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 - **Do NOT consult git history** (`git log`/`diff`/`show`/`blame`) when diagnosing problems unless you first ask the user.
 - **Fix telemetry/logging before diagnosing test failures.** When a simtest or stack test fails, inspect the telemetry CSV and logs first. If columns are zero/missing/wrong (e.g. `tether_m=0`, phase never changes), fix the logging bug before attempting to diagnose physics. Diagnosing from bad telemetry produces wrong conclusions.
-- **Run `analyse_run.py` first after any stack test failure.** It loads all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) into a unified `FlightLog` and prints a single bucketed report. `--bucket 10` for overview, `--bucket 1` for frame-level detail.
+- **SITL stack tests: see [design/sitl_testing.md](design/sitl_testing.md).** That doc owns the SITL workflow — running (`test.sh stack`), the mandatory `diagnose_sitl.py` CHECK 1/CHECK 2 post-run gate, `analyse_run.py`, the lockstep contract, and the one central kinematic-hold implementation (`_ic_trapezoid_stack` → `simulation/kinematic.py`) that every IC-start test must reuse. Read it before editing or diagnosing any SITL stack test, and keep it in sync when the SITL workflow or kinematic-hold timeline changes.
 - **Keep `rawes_test_surface.lua` in sync with `rawes.lua`.** Lua unit tests access constants and functions through `_rawes_fns`, which is spliced inside `rawes.lua`'s anonymous function wrapper and so can see module-level locals only. Whenever you add a local constant or function to `rawes.lua` that tests need, add it to `_rawes_fns` in `rawes_test_surface.lua` in the same commit. Function-local variables are not accessible — hoist them to module level first.
 - **`controller.py` follows `rawes.lua`.** `test_math_lua.py` cross-checks `rawes.lua` against `controller.py`; a failure there means `controller.py` diverged — fix `controller.py`.
 - **One-off / diagnostic scripts go in `simulation/tests/oneoff/`, never in `tests/unit/`.** Any script run with `python -c "..."` for a gain sweep, Bode probe, plant identification, debug trace, etc. that isn't a pytest-discoverable unit test must be saved as a standalone script in `simulation/tests/oneoff/`. Reasons: (1) keeps the unit-test discovery clean — these scripts are not regression guards; (2) makes the diagnostic reproducible without scrolling chat history; (3) tools-required for the next person who hits the same problem. Prefix file names with the date or topic (e.g. `phase_sweep.py`, `bode_attitude.py`). Add a one-line header `"""<topic> — one-off diagnostic, not a unit test."""`.
@@ -238,23 +258,13 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 | **Simtest (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
 | **Unit test (agent mode, specific)** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -k test_math -q` |
 
-**Stack tests (SITL) use Docker — different entry point:**
-
-| Task | Command |
-|------|---------|
-| **Stack test (single)** | `bash test.sh stack -n 1 -k test_foo` |
-| **Stack test (full)** | `bash test.sh stack -n 8` |
-
-Stack tests run in isolated Docker containers, one per test file. Use `bash test.sh` commands.
+**Stack tests (SITL) run in Docker and have their own workflow — see [design/sitl_testing.md](design/sitl_testing.md)** (running via `test.sh stack`, the mandatory `diagnose_sitl.py` CHECK 1/CHECK 2 gate, `analyse_run.py`, and the kinematic-hold timeline). Quick entry point: `bash test.sh stack -n 1 -k test_foo`.
 
 | Task | Command |
 |------|---------|
 | Unit tests (~685) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
 | Simtests (~13) | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
 | Simtest (single) | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
-| Stack test (single) | `bash test.sh stack -n 1 -k test_foo` |
-| Stack test (full) | `bash test.sh stack -n 8` |
-| **Post-failure analysis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>` (add `--bucket 10` for coarser view) |
 | **Visualize result** | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
 | Scrub frames | `simulation/.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
 | Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
@@ -273,7 +283,7 @@ Stack tests run in isolated Docker containers, one per test file. Use `bash test
 
 **Docker & Infrastructure**
 
-Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`. Suite summary: `simulation/logs/suite_summary.json`.
+Stack tests run in isolated Docker containers (one per test file) and log to `simulation/logs/{test_name}/`. Full SITL workflow, log layout, and diagnosis: [design/sitl_testing.md](design/sitl_testing.md).
 
 ---
 
@@ -305,7 +315,7 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 - **Production/default flight aero:** `quasi_static` BEM (from `dynbem` external package at `C:/repos/aero`). Use it for simtests, stack-facing physics, IC replay, pumping, landing, and diagnostics unless a test/script is explicitly comparing aero models or investigating dynamic-inflow behavior. Dynamic models (`oye`, `pitt_peters`, `jit`) are opt-in only.
 - **Two-loop attitude:** `compute_rate_cmd(kp)` → rate setpoint; `HeliCyclicController` (rate PIDs + 25 ms servo lag) → swashplate tilt. **Portable core** in `controller.py` maps 1:1 to Lua: `compute_bz_tether`, `slerp_body_z`, `compute_rate_cmd`, `col_min_for_altitude_rad`, `compute_bz_altitude_hold`.
 - **High-tilt De Schutter:** xi=80° viable. `col_max=0.10`, `col_min_reel_in=0.079`. BEM invalid above xi≈85°. `body_z_slew_rate = 0.40 rad/s`.
-- **rawes.lua modes (valid: 0, 1, 2, 3, 4):** 0=none, 1=steady, 2=manual (bench yaw PID + NVF cyclic/collective — `RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`; `H_FLYBAR_MODE=1`), 3=passive (armed-but-quiet, holds trim cyclic + IC collective during kinematic), 4=landing. Pumping has **no dedicated mode** — it runs in steady (mode 1) with the ground varying `RAWES_TEN`/`RAWES_SUB`. Modes 1/2/3/4 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).
+- **rawes.lua modes (valid: 0, 1, 2, 3, 4):** 0=none, 1=steady, 2=manual (bench yaw PID + NVF cyclic/collective — `RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`; `H_FLYBAR_MODE=1`), 3=passive (armed-but-quiet, commands the IC attitude as a GUIDED angle target via `set_target_angle_and_rate_and_throttle` — `RAWES_RIC`/`RAWES_PIC` roll/pitch + AHRS-captured yaw, zero rate FF — plus IC collective `RAWES_COL` via throttle, during kinematic release), 4=landing. Pumping has **no dedicated mode** — it runs in steady (mode 1) with the ground varying `RAWES_TEN`/`RAWES_SUB`. Modes 1/2/3/4 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).
 - **Lua MAVLink rx queue:** `mavlink:init(20, 10)` — first arg is the per-tick rx buffer depth. `mavlink:init(1, 10)` (a common copy-paste default) drops back-to-back NAMED_VALUE_FLOAT messages — only the first survives until the next update() drains it.
 - **Yaw regulation** lives in ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=3` DDFP CW, no sign flip — matches US-convention rotor: positive yaw error from CCW body drift → positive SERVO4 throttle).  The Lua's `MODE_MANUAL` (SCR_USER6=2) bypasses this entirely and writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`; additionally it commands cyclic via `RAWES_TLN`/`RAWES_TLT` NVFs and collective via `RAWES_COL` with `H_FLYBAR_MODE=1` (RC passthrough, no rate PID). Used for bench yaw-tuning and manual swash validation. `calibrate manual` is the interactive interface; `test_lua_manual_mode_sitl` is the SITL stack test. No DShot active (`RPM1_TYPE=0`); anti-rotation motor on standard PWM, MAIN OUT 4. Current hardware: GB4008 + 80:44 gear. See [design/dshot.md](design/dshot.md), [design/flight_stack.md §4.7–§5](design/flight_stack.md).
 - **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) — required boot params in `rawes_sitl_defaults.parm`. `GPS_AUTO_CONFIG=0` is critical (prevents ArduPilot from corrupting RELPOSNED in SITL). See [design/flight_stack.md Appendix D](design/flight_stack.md).
@@ -322,7 +332,7 @@ Stack test logs: `simulation/logs/{test_name}/` — `mediator.log`, `sitl.log`, 
 
 ## SITL Lockstep — Key Rule
 
-The physics worker must reply to **every** SITL servo packet without exception — skipping a reply causes ArduPilot to stall permanently. `gcs.sim_now()` returns `time_boot_ms/1000` from the most recently processed MAVLink message, not wall-clock time. `sim_sleep(N)` waits N sim-seconds; the physics loop must keep running during the wait. Full reference: [design/simulation.md § SITL Lockstep Protocol](design/simulation.md).
+The physics worker must reply to **every** SITL servo packet without exception (skipping a reply stalls ArduPilot permanently). Full reference, plus the rest of the SITL workflow: [design/sitl_testing.md](design/sitl_testing.md) and [design/simulation.md § SITL Lockstep Protocol](design/simulation.md).
 
 ---
 

@@ -29,6 +29,8 @@ Shared between mediator.py (production loop) and unit/simtests (no Docker).
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from typing import Any, Callable, Tuple
 
@@ -132,6 +134,112 @@ def make_linear_traj(
     def _accel(t_sim: float) -> "np.ndarray":
         if ramp_s > 0.0 and t_sim >= t_ramp_start:
             return -target_vel / ramp_s
+        return np.zeros(3)
+
+    _fn.accel = _accel  # type: ignore[attr-defined]
+    return _fn
+
+# ---------------------------------------------------------------------------
+# Smooth trapezoidal trajectory — raised-cosine accel/decel, ends at target_pos
+# ---------------------------------------------------------------------------
+
+def make_smooth_trapezoid_traj(
+    target_pos,
+    direction,
+    duration: float,
+    cruise_speed: float,
+    accel_s: float,
+    decel_s: float,
+) -> "Callable[[float], Tuple[np.ndarray, np.ndarray]]":
+    """
+    Smooth trapezoidal-speed kinematic trajectory that ends exactly at
+    ``target_pos`` with zero velocity.
+
+    The hub translates along the fixed unit vector ``direction`` with a speed
+    profile that is C1-continuous — acceleration is continuous and zero at every
+    phase boundary (raised-cosine ramps, no jerk steps):
+
+        t in [0, accel_s)              : raised-cosine ramp 0 -> cruise_speed
+        t in [accel_s, T - decel_s)    : constant cruise_speed
+        t in [T - decel_s, T]          : raised-cosine ramp cruise_speed -> 0
+
+    ``launch_pos`` is back-computed so the hub arrives exactly at ``target_pos``
+    at t = ``duration``.  Motion is purely along ``direction`` (typically the IC
+    yaw heading, horizontal), so altitude is held constant when direction[2]==0.
+
+    Total ground distance covered (and hence the launch offset):
+        D = cruise_speed * (duration - 0.5*accel_s - 0.5*decel_s)
+        launch_pos = target_pos - D * direction
+
+    Parameters
+    ----------
+    target_pos : array-like (3,)
+        Hub position NED [m] at t = duration (the IC operating point).
+    direction : array-like (3,)
+        Travel direction NED; normalised internally.  Must be non-zero.
+    duration : float
+        Total kinematic duration [s].
+    cruise_speed : float
+        Constant cruise speed [m/s] between the accel and decel ramps.
+    accel_s : float
+        Acceleration ramp window at the start [s] (0 -> cruise_speed).
+    decel_s : float
+        Deceleration ramp window at the end [s] (cruise_speed -> 0).
+
+    Returns
+    -------
+    fn : Callable[[float], tuple[ndarray, ndarray]]
+        ``fn(t_sim)`` -> ``(pos, vel)`` in NED, with an ``fn.accel(t_sim)``
+        attribute returning the NED acceleration [m/s^2].
+    """
+    target_pos = np.asarray(target_pos, dtype=float).copy()
+    direction  = np.asarray(direction, dtype=float).copy()
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-9:
+        raise ValueError("make_smooth_trapezoid_traj: direction must be non-zero")
+    direction = direction / norm
+
+    T    = float(duration)
+    vmax = float(cruise_speed)
+    ta   = float(np.clip(accel_s, 0.0, T))
+    td   = float(np.clip(decel_s, 0.0, T - ta))
+    t_dec_start = T - td
+
+    # Distance covered in each phase (raised-cosine ramps average vmax/2).
+    s_accel_end  = 0.5 * vmax * ta
+    s_cruise_end = s_accel_end + vmax * (t_dec_start - ta)
+    D            = s_cruise_end + 0.5 * vmax * td
+    launch_pos   = target_pos - D * direction
+
+    def _speed_dist(t: float) -> "Tuple[float, float]":
+        if t <= 0.0:
+            return 0.0, 0.0
+        if t < ta:
+            v = vmax * 0.5 * (1.0 - math.cos(math.pi * t / ta))
+            s = vmax * 0.5 * (t - (ta / math.pi) * math.sin(math.pi * t / ta))
+            return v, s
+        if t < t_dec_start:
+            return vmax, s_accel_end + vmax * (t - ta)
+        if t < T:
+            u = t - t_dec_start
+            v = vmax * 0.5 * (1.0 + math.cos(math.pi * u / td))
+            s = s_cruise_end + vmax * 0.5 * (
+                u + (td / math.pi) * math.sin(math.pi * u / td))
+            return v, s
+        return 0.0, D
+
+    def _fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+        v, s = _speed_dist(t_sim)
+        return launch_pos + s * direction, v * direction
+
+    def _accel(t_sim: float) -> "np.ndarray":
+        if 0.0 < t_sim < ta:
+            a = vmax * 0.5 * (math.pi / ta) * math.sin(math.pi * t_sim / ta)
+            return a * direction
+        if t_dec_start <= t_sim < T and td > 0.0:
+            u = t_sim - t_dec_start
+            a = -vmax * 0.5 * (math.pi / td) * math.sin(math.pi * u / td)
+            return a * direction
         return np.zeros(3)
 
     _fn.accel = _accel  # type: ignore[attr-defined]

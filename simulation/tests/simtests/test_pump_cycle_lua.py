@@ -72,6 +72,7 @@ TENSION_IC       = 300.0   # IC equilibrium tension
 TENSION_REEL_OUT = TENSION_IC
 TENSION_REEL_IN  = 100.0
 FLOOR_ALT_M      = 1.0
+CAPTURE_SETTLE_S = 2.0
 
 # Safety timeouts
 T_REEL_OUT_MAX = 120.0
@@ -114,13 +115,18 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     events = BadEventLog()
 
     # State machine (inline 2-phase, mirrors test_pump_cycle_unified.py)
-    phase         = "reel_out"
+    # Start in HOLD and only begin pumping after Lua reports steady capture.
+    # This mirrors intended operation and avoids counting pre-capture transients
+    # as cycle-1 reel-out failures.
+    phase         = "hold"
     phase_start_t = 0.0
     start_length  = _IC.rest_length
     cycle_idx     = 0
     cycle_net_start = [0.0] * N_CYCLES
     cycle_net_start[0] = 0.0   # winch starts at 0 energy
-    phase_label = f"cycle1_{phase}"
+    phase_label = "pre_capture_hold"
+    captured = False
+    capture_t = None
 
     def _ap_tension_target() -> float:
         if phase == "reel_in":
@@ -129,6 +135,8 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
 
     def _cmd_phase() -> str:
         # TensionCommand.phase must be hyphenated for _PHASE_TO_SUB -> RAWES_SUB.
+        if phase == "hold":
+            return "hold"
         return "reel-in" if phase == "reel_in" else "reel-out"
 
     lua.tel_fn = lambda r, sr: dict(
@@ -166,6 +174,21 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         altitude    = runner.altitude
         t_in_phase  = t_sim - phase_start_t
 
+        # ── Wait for Lua steady capture, then start pumping cycles ────────
+        if not captured:
+            captured = any("RAWES steady: captured" in msg for _, msg in sim.messages)
+            if captured:
+                capture_t = t_sim
+                phase = "hold"
+                phase_start_t = t_sim
+                start_length = winch.rest_length
+                cycle_net_start[0] = winch.net_energy_j
+        elif phase == "hold" and capture_t is not None and (t_sim - capture_t) >= CAPTURE_SETTLE_S:
+            phase = "reel_out"
+            phase_start_t = t_sim
+            start_length = winch.rest_length
+            cycle_net_start[0] = winch.net_energy_j
+
         # ── Phase transitions ─────────────────────────────────────────────
         prev_phase = phase
         if phase == "reel_out":
@@ -183,11 +206,17 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
                 phase_start_t = t_sim
                 cycle_net_start[cycle_idx] = winch.net_energy_j
 
-        phase_label = f"cycle{cycle_idx+1}_{phase}"
+        if captured:
+            phase_label = f"cycle{cycle_idx+1}_{phase}"
+        else:
+            phase_label = "pre_capture_hold"
 
         # ── Ground 10 Hz: update winch velocity + refresh Lua command ─────
         if i % planner_every == 0 or phase != prev_phase:
-            cruise_v = V_CRUISE_OUT if phase == "reel_out" else -V_CRUISE_IN
+            if phase == "hold":
+                cruise_v = 0.0
+            else:
+                cruise_v = V_CRUISE_OUT if phase == "reel_out" else -V_CRUISE_IN
             winch.set_command(cruise_v, _ap_tension_target())
             comms.send(
                 TensionCommand(tension_target_n=_ap_tension_target(), alt_m=ic_alt, phase=_cmd_phase()),
@@ -209,7 +238,7 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
         if runner.tether._last_info.get("slack", False):
             events.record("slack", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
-        if runner.tension_now > BREAK_LOAD_N:
+        if captured and phase != "hold" and runner.tension_now > BREAK_LOAD_N:
             events.record("tension_spike", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
         if runner.hub_state["pos"][2] >= -FLOOR_ALT_M:

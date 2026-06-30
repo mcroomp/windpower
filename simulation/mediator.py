@@ -43,7 +43,7 @@ from tether          import TetherModel, ConstantTensionTether   # noqa: F401 â€
 from sitl_interface  import SITLInterface, SIM_CLOCK_HZ
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
 from sensor          import make_sensor, SpinSensor
-from kinematic       import KinematicStartup, compute_launch_position  # noqa: F401
+from kinematic       import KinematicStartup, compute_launch_position, make_smooth_trapezoid_traj  # noqa: F401
 from winch           import WinchController
 from winch_node      import WinchNode, Anemometer
 import config as _mcfg
@@ -386,24 +386,54 @@ def run_mediator(args, trajectory=None):
     # to zero.  With dual GPS (EK3_SRC1_YAW=2) yaw is known from the first fix;
     # no circular motion or EKFGSF convergence is needed.
     _kin_duration    = max(0.0, float(cfg["startup_damp_seconds"]))
+    _kin_cruise      = float(cfg["kinematic_cruise_speed"])
 
-
-    _startup = KinematicStartup(
-        target_pos = _pos0_arr,
-        target_vel = _vel0_arr,
-        duration   = _kin_duration,
-        ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
-        R0         = _R0,
-    )
-    if _startup.duration > 0.0:
-        ev.write("kinematic_config", t_sim=0.0,
-                 traj_type="linear",
-                 total_s=round(_startup.duration, 1),
-                 ramp_s=round(_startup.ramp_s, 1),
-                 launch_pos=[round(v, 3) for v in _startup.launch_pos],
-                 vel=_vel0_arr.tolist())
+    if _kin_cruise > 0.0 and _kin_duration > 0.0:
+        # Smooth trapezoidal motion along the IC yaw heading, ending exactly at
+        # pos0 with zero velocity.  Gives the EKF velocity observability during
+        # the hold while leaving no residual position/velocity error at release.
+        _ic_yaw  = math.atan2(_R0[1, 0], _R0[0, 0])
+        _kin_dir = np.array([math.cos(_ic_yaw), math.sin(_ic_yaw), 0.0])
+        _traj = make_smooth_trapezoid_traj(
+            target_pos   = _pos0_arr,
+            direction    = _kin_dir,
+            duration     = _kin_duration,
+            cruise_speed = _kin_cruise,
+            accel_s      = float(cfg["kinematic_accel_s"]),
+            decel_s      = float(cfg["kinematic_decel_s"]),
+        )
+        _startup = KinematicStartup(
+            duration = _kin_duration,
+            R0       = _R0,
+            traj_fn  = _traj,
+        )
+        if _startup.duration > 0.0:
+            ev.write("kinematic_config", t_sim=0.0,
+                     traj_type="smooth_trapezoid",
+                     total_s=round(_startup.duration, 1),
+                     cruise_speed=round(_kin_cruise, 3),
+                     accel_s=round(float(cfg["kinematic_accel_s"]), 1),
+                     decel_s=round(float(cfg["kinematic_decel_s"]), 1),
+                     heading_deg=round(math.degrees(_ic_yaw), 1),
+                     launch_pos=[round(v, 3) for v in _startup.launch_pos])
+        _dyn_vel0 = _startup.state_at(0.0)[1]
+    else:
+        _startup = KinematicStartup(
+            target_pos = _pos0_arr,
+            target_vel = _vel0_arr,
+            duration   = _kin_duration,
+            ramp_s     = float(cfg["kinematic_vel_ramp_s"]),
+            R0         = _R0,
+        )
+        if _startup.duration > 0.0:
+            ev.write("kinematic_config", t_sim=0.0,
+                     traj_type="linear",
+                     total_s=round(_startup.duration, 1),
+                     ramp_s=round(_startup.ramp_s, 1),
+                     launch_pos=[round(v, 3) for v in _startup.launch_pos],
+                     vel=_vel0_arr.tolist())
+        _dyn_vel0 = _vel0_arr
     _dyn_pos0 = _startup.launch_pos
-    _dyn_vel0 = _vel0_arr
 
     # New aero's _rd.load takes a file path; allow the historical "name"
     # form (e.g. "beaupoil_2026") by resolving against the project's
@@ -667,7 +697,14 @@ def run_mediator(args, trajectory=None):
         s3 = float(servos[2])
         collective_out, roll_norm, pitch_norm = ardupilot_h3_120_inverse(s1, s2, s3)
         _tilt_lat = roll_norm
-        _tilt_lon = pitch_norm
+        # ArduPilot pitch is nose-UP positive; project tilt_lon is nose-DOWN
+        # positive (helicopter forward-stick).  They are opposite in sign, so the
+        # pitch axis MUST be negated here (roll has no such conflict).  This
+        # mirrors simtest_runner.step_guided() `tilt_lon_cmd = -heli_out.pitch_cyclic`.
+        # See AGENTS.md "ArduPilot pitch vs. our tilt_lon".  Omitting the flip
+        # inverts cyclic -> positive feedback (body rate runs away from the ATC
+        # rate PID / rotates away from the commanded attitude in the nul aero).
+        _tilt_lon = -pitch_norm
 
         # Optional mediator-side handoff smoothing after kinematic release:
         # blend from IC cyclic trim to AP cyclic command over _blend_s seconds.

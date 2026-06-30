@@ -96,6 +96,52 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     all_statustext = ctx.all_statustext
     captured_seen  = any("RAWES steady: captured" in t for t in all_statustext)
 
+    # ── Start at IC: wait for kinematic exit, then promote MODE_PASSIVE -> STEADY ──
+    # The shared trapezoid fixture (guided_nogps_armed_pumping_lua) brings the hub
+    # to the IC at rest and leaves the Lua in MODE_PASSIVE (SCR_USER6=3) with the
+    # IC operating point seeded.  Mirror test_lua_flight_steady_sitl: re-seed the
+    # IC NVFs, let the passive hold settle, then promote to MODE_STEADY before the
+    # pumping schedule begins.
+    log.info("Waiting for kinematic phase to end before pumping ...")
+    if not ctx.wait_kinematic_done(timeout=60.0):
+        pytest.fail(
+            "Kinematic phase did not end within 60 s.\n"
+            "Check mediator log for 'TRANSITION kinematic->free-flight'."
+        )
+
+    ic = ctx.initial_state
+    if ic is None:
+        pytest.fail("initial_state is required for pumping test")
+
+    eq_phys = ic.get("eq_physics")
+    if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
+        coll_seed = float(eq_phys["collective_rad"])
+    elif "stack_coll_eq" in ic:
+        coll_seed = float(ic["stack_coll_eq"])
+    elif "coll_eq_rad" in ic:
+        coll_seed = float(ic["coll_eq_rad"])
+    else:
+        raise KeyError(
+            "initial_state missing collective seed; expected one of "
+            "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+        )
+    ten_seed = float(ic["tension_eq_n"])
+    R0 = ic.get("R0")
+    if R0 is None:
+        pytest.fail("initial_state missing R0 for IC passive attitude seed")
+    ic_roll_rad  = math.atan2(float(R0[2][1]), float(R0[2][2]))
+    ic_pitch_rad = -math.asin(max(-1.0, min(1.0, float(R0[2][0]))))
+
+    gcs.send_named_float("RAWES_COL", coll_seed)
+    gcs.send_named_float("RAWES_TEN", ten_seed)
+    gcs.send_named_float("RAWES_RIC", ic_roll_rad)
+    gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
+    gcs.set_param("SCR_USER6", 3, timeout=5.0)
+    log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
+    gcs.sim_sleep(10.0)
+    ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
+    log.info("Promoted Lua to MODE_STEADY (SCR_USER6 -> 1)  ACK=%s", ok)
+
     # ── Ground controller (mirrors test_pump_cycle_lua.py) ─────────────────
     target_alt_m = ctx.home_alt_m
     planner = PumpingGroundController(

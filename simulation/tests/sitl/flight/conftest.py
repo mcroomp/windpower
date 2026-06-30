@@ -3,12 +3,18 @@ flight/conftest.py — pytest fixtures for RAWES flight stack integration tests.
 
 Fixtures:
     guided_nogps_armed              — full GUIDED_NOGPS stack (mediator + arm).
-    guided_nogps_armed_pumping_lua  - GUIDED_NOGPS stack with rawes.lua in steady mode (SCR_USER6=1).
+    guided_nogps_armed_pumping_lua  - starts at IC (trapezoid); pumping test owns winch.
     guided_nogps_armed_landing_lua  — GUIDED_NOGPS stack with rawes.lua in landing mode (SCR_USER6=4).
-    guided_nogps_armed_lua_full     — GUIDED_NOGPS stack with rawes.lua in flight mode (SCR_USER6=1).
+    guided_nogps_armed_lua_full     — starts at IC (trapezoid); steady/ic tests (MODE_PASSIVE seed).
+
+All IC-start fixtures share the _ic_trapezoid_stack initialization helper.
 """
+import contextlib
+import json
 import math
 import os
+
+import numpy as np
 
 import pytest
 
@@ -17,6 +23,7 @@ from stack_infra import (
     _acro_stack,
     _RAWES_DEFAULTS_PARM,
     _install_lua_scripts,
+    _STARTING_STATE,
     _STARTUP_DAMP_S,
 )
 
@@ -35,21 +42,21 @@ def guided_nogps_armed(tmp_path, request):
 @pytest.fixture
 def guided_nogps_armed_pumping_lua(tmp_path, request):
     """
-    Pumping-cycle stack fixture with rawes.lua active in steady mode (SCR_USER6=1);
-    the pumping schedule is driven entirely from the ground via RAWES_TEN/RAWES_SUB.
+    Pumping-cycle stack fixture — starts at the IC via the shared trapezoid init.
+
+    Thin wrapper over _ic_trapezoid_stack (run_ground_winch=False): the hub
+    starts at the IC operating point at rest, Lua is left in MODE_PASSIVE
+    (SCR_USER6=3) with the IC operating point seeded, and GPS is fused before
+    yielding.  The pumping test owns the winch loop from the test process
+    (mirroring the test_pump_cycle_lua.py simtest) and promotes SCR_USER6 -> 1
+    (MODE_STEADY) right after kinematic_exit.
 
     Division of labour (mirrors test_pump_cycle_lua.py):
-      - Test process: PumpingGroundController (10 Hz) — phase state machine.
-          * Sends winch set_target commands to mediator via UDP socket.
-          * Sends NVF (RAWES_TEN, RAWES_ALT, RAWES_SUB) to Lua via GCS.
-      - Mediator: WinchController (400 Hz) — owns tether rest_length physics.
-          * Listens on winch_cmd_port for {target_length, target_tension} commands.
-          * Sends back {tension_n, rest_length, hub_alt_m} at ~10 Hz.
-    - Lua (50 Hz): altitude PID collective + rate-only bz_altitude_hold cyclic.
-
-    This mirrors the real hardware architecture: ground station manages phase
-    logic and MAVLink NVF delivery; winch node owns motor control.
-
+      - Test process: inline 2-phase state machine + GovernedWinchController
+        commands sent to the mediator WinchController via UDP, plus RAWES_TEN /
+        RAWES_ALT / RAWES_SUB NVF to Lua via GCS.
+      - Mediator: WinchController (400 Hz) owns tether rest_length physics.
+      - Lua (50 Hz): altitude PID collective + rate-only bz_altitude_hold cyclic.
     """
     import socket as _socket
 
@@ -58,28 +65,14 @@ def guided_nogps_armed_pumping_lua(tmp_path, request):
         _s.bind(("127.0.0.1", 0))
         _winch_port = _s.getsockname()[1]
 
-    extra = {
-        "kinematic_vel_ramp_s": 0.0,
-        "winch_cmd_port":       _winch_port,
-    }
-    with _acro_stack(tmp_path, extra_config=extra,
-                     test_name=request.node.name) as ctx:
-        ctx.log.info("Setting SCR_USER params for rawes.lua (pumping schedule, steady mode) ...")
-        lua_params = {
-            "SCR_ENABLE": 1,
-            "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,             # anchor North   [m]
-            "SCR_USER4": 0.0,             # anchor East    [m]
-            "SCR_USER5": ctx.home_alt_m,  # anchor Down from EKF HOME [m]
-            "SCR_USER6": 1,               # RAWES_MODE = 1 (steady; pumping driven from ground)
-        }
-        for pname, pvalue in lua_params.items():
-            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
-            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
-
-        ctx.wait_drain(timeout=1.0, label="post-param")
+    with _ic_trapezoid_stack(
+        tmp_path,
+        test_name=request.node.name,
+        winch_cmd_port=_winch_port,
+        run_ground_winch=False,
+    ) as ctx:
         yield ctx
+
 
 
 @pytest.fixture
@@ -189,65 +182,129 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
         yield ctx
 
 
-@pytest.fixture
-def guided_nogps_armed_lua_full(tmp_path, request):
+@contextlib.contextmanager
+def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch):
     """
-    Full-stack GUIDED_NOGPS fixture with rawes.lua in flight mode (SCR_USER6=1),
-    internal_controller=False.
+    Shared SITL initialization for fixtures that must START AT THE IC.
 
-    Uses kinematic startup ramp with velocity ~0.96 m/s (default from config.py)
-    to enable GPS yaw fusion at high body tilt (65°). Despite the non-zero velocity
-    ramp, the fixture waits for GPS fusion before yielding, allowing Lua to capture
-    steady-guidance capture well before kinematic exits at t=60s.
+    Brings the hub to the IC operating point (pos0) at rest using a smooth
+    trapezoidal kinematic motion, seeds the IC operating point into rawes.lua
+    (MODE_PASSIVE), and waits for GPS fusion before yielding.  Used by every
+    flight fixture that starts at the IC (steady, ic-passive, pumping).
+
+    Parameters
+    ----------
+    winch_cmd_port   : UDP port the mediator's WinchController listens on.
+    run_ground_winch : if True, start an in-fixture ground-side tension regulator
+                       thread (used by steady/ic where no test-side winch loop
+                       exists).  Pumping passes False and drives the winch itself.
+
+    Both modes leave the Lua in MODE_PASSIVE (SCR_USER6=3); the test promotes to
+    its flight mode (MODE_STEADY=1) right after kinematic_exit.
+
+    Uses a smooth trapezoidal kinematic motion: the hub accelerates from rest to
+    1 m/s over the first 5 s, cruises, then decelerates back to rest over the
+    final 5 s, travelling along the IC yaw heading so it ends EXACTLY at pos0 with
+    zero velocity at kinematic exit (t=60s). The motion gives the EKF velocity
+    observability during the hold (helping delAngBiasLearned / GPS aiding) while
+    leaving no residual position/velocity error at release.
 
         Key design points:
             - SCR_USER6=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
                 rate commands, preventing ArduPilot rate PID windup during kinematic hold.
-            - Velocity ~0.96 m/s (default from config.py) is applied from frame 0 to
-                provide EKF with velocity-derived yaw heading for GPS fusion.
-            - GPS fuses at ~34 s (delAngBiasLearned with constant-zero gyro);
-                _tdir0 fires and steady guidance can be activated.
+            - Smooth (raised-cosine) accel/decel => continuous acceleration, no jerk
+                step at the phase boundaries.
+            - Hub ends exactly at pos0 with zero velocity, so GPS aiding engages with
+                no accumulated position mismatch to shock the EKF.
             - Fixture waits for GPS fusion before yielding.
             - Test promotes SCR_USER6 from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
                 kinematic_exit (t=60s) to activate altitude-hold steady guidance.
 
         Timeline (from mediator start, speedup=1):
-            t=0..60 s   kinematic with vel ~0.96 m/s (default startup tangent).
+            t=0..5 s    accelerate 0 -> 1 m/s along IC heading (raised cosine).
+            t=5..55 s   cruise at 1 m/s along IC heading.
+            t=55..60 s  decelerate 1 -> 0 m/s, arriving exactly at pos0 at rest.
             t~6 s       GPS first fix; EKF3 origin set.
+            t~8 s       arm (after EKF tilt alignment); SCR_USER6=3 (MODE_PASSIVE)
+                                    set; IC attitude commanded during kinematic hold.
             t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires.
-            t~40 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
-                                    NVF streamed.
             t~60 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY).
             t~60+       free flight under ArduPilot + Lua with steady guidance active.
     """
+    # Standard kinematic start for all flight stack tests on this fixture:
+    # a LEVEL frame (roll=pitch=0) YAWED to the IC heading.  The nul-aero
+    # cyclic can only apply pitch/roll body rates (never yaw), so the IC
+    # heading is the one orientation the body cannot reach via cyclic alone and
+    # therefore must be seeded here.  Starting from pure identity (nose North)
+    # tilts the disk into the X-Z plane (crosswind), leaving it edge-on to the
+    # +Y wind -> ~0 axial inflow -> ~6 N thrust -> free-fall at release.  With
+    # the heading pre-set, nul-aero pitch-down lands body_z in the tether/wind
+    # plane and autorotation produces full thrust (~334 N) so the tether stays
+    # taut.  Roll/pitch stay 0 here and are commanded later via cyclic.
+    _ic_R0 = np.array(json.loads(_STARTING_STATE.read_text())["R0"], dtype=float)
+    _ic_yaw = math.atan2(_ic_R0[1, 0], _ic_R0[0, 0])  # ZYX yaw of IC attitude
+    _cy, _sy = math.cos(_ic_yaw), math.sin(_ic_yaw)
+    _R0_level_yaw = [
+        [_cy, -_sy, 0.0],
+        [_sy,  _cy, 0.0],
+        [0.0,  0.0, 1.0],
+    ]
     extra = {
-        # Steady-guidance startup needs velocity for GPS yaw fusion at high body tilt (65°).
-        # Use default vel0 ~0.96 m/s from config.py (startup tangent to tether path)
-        # with ramp_s=0 so velocity is applied from frame 0.
-        # The hub will drift ~58 m over 60 s at ~0.96 m/s, but GPS fusion allows
-        # Lua to capture steady guidance well before kinematic exits (t=60s).
-        # DO NOT set vel0=[0,0,0]: stationary hold prevents GPS yaw fusion.
-        #
-        # Default vel0 from config.py DEFAULTS: [-0.257, 0.916, -0.093] m/s
-        # (normalized startup tangent ~0.96 m/s magnitude).
-        # kinematic_vel_ramp_s: 0.0 means velocity is applied from t=0 (frame 0).
+        # Kinematic start: level frame yawed to the IC heading (see above).
+        "R0": _R0_level_yaw,
+        # Keep the EKF pre-arm seed level (live attitude), consistent with the
+        # level R0 start.  The IC roll/pitch is applied later via the nul-aero
+        # cyclic, NOT seeded into the EKF.  Must be False to match level R0:
+        # seeding IC pitch into the EKF while physics starts level would create
+        # an attitude mismatch.
+        "use_ic_pre_arm_attitude": False,
+        # Smooth trapezoidal kinematic motion: accelerate from rest to 1 m/s over
+        # the first 5 s, cruise, then decelerate back to rest over the final 5 s,
+        # travelling along the IC yaw heading so the hub ends EXACTLY at pos0 with
+        # zero velocity at kinematic exit.  Raised-cosine ramps give continuous
+        # acceleration (no jerk step).  This gives the EKF velocity observability
+        # during the hold (helping delAngBiasLearned / GPS aiding) while leaving
+        # no residual position/velocity error at release -- unlike a constant-vel
+        # drift, which left the hub ~58 m from pos0 and shocked the EKF when GPS
+        # aiding finally engaged.
+        "kinematic_cruise_speed": 1.0,
+        "kinematic_accel_s": 5.0,
+        "kinematic_decel_s": 5.0,
         "kinematic_vel_ramp_s": 0.0,
         "startup_damp_seconds": 60.0,
         # Kinematic debug physics: simplified cyclic->rotation response.
         "kinematic_aero_mode": "nul",
-        "kinematic_nul_rate_gain_rads_per_rad": 0.2,
+        # Rate gain sized so the body can slew to the IC attitude within ~0.5 s.
+        # nul aero rotates at omega_body = gain * tilt; cyclic saturates at
+        # tilt ~= 0.556 (H_CYC_MAX = 2500 cdeg / 4500).  Worst-case IC tilt is
+        # ~63.55 deg = 1.11 rad, so to cover it in 0.5 s at saturated cyclic:
+        #   gain = (1.11 / 0.5) / 0.556 ~= 4.0 rad/s per rad.
+        # This keeps attitude error below the crash-check envelope (30 deg / 2 s)
+        # during the kinematic hold once the IC attitude command is applied.
+        "kinematic_nul_rate_gain_rads_per_rad": 4.0,
         # Mediator-side cyclic handoff smoothing after kinematic release:
         # disabled for tilt-response comparison against the IC-angle-only test.
         "post_release_cyclic_blend_s": 0.0,
         # Enable the mediator's winch command socket so we can run a
         # ground-side tension regulator (mirrors test_create_ic warmup).
-        "winch_cmd_port":       14570,
+        "winch_cmd_port":       winch_cmd_port,
     }
+    # Arm AFTER EKF GPS-yaw alignment ("EKF3 IMU0 yaw aligned", ~t=11 s with
+    # the moving-baseline dual GPS).  MODE_PASSIVE freezes _passive_hold_yaw_rad
+    # at the first ready tick (gated only on ahrs:healthy()), and the IC seed is
+    # now sent immediately after arm -- so if we arm before the GPS-yaw snaps to
+    # the IC heading (+90 deg), the passive hold latches the EKF's pre-alignment
+    # yaw (~0 deg) and the disk tilts into the wrong (crosswind) plane, tumbling
+    # at release.  Arming at t=14 s leaves a ~3 s margin past the t=11 s
+    # alignment while still giving the nul-aero the bulk of the hold window to
+    # slew the disk to the IC tilt before kinematic exit (t=60 s).
+    _arm_at_sim_s = 14.0
+
     with _acro_stack(
         tmp_path,
         extra_config=extra,
-        test_name=request.node.name,
-        arm_at_sim_s=40.0,
+        test_name=test_name,
+        arm_at_sim_s=_arm_at_sim_s,
     ) as ctx:
         ctx.log.info("Setting SCR_USER params for rawes.lua ...")
         # The anchor is at world origin; the EKF origin is the hub's first
@@ -281,6 +338,12 @@ def guided_nogps_armed_lua_full(tmp_path, request):
         # locked.
         _ic = ctx.initial_state
         if _ic is not None:
+            # Seed the IC immediately, together with MODE_PASSIVE, right after
+            # arm.  MODE_PASSIVE only commands the IC attitude/collective once
+            # the full atomic seed (RAWES_RIC + RAWES_PIC + RAWES_COL) has
+            # arrived, so sending it now gives the nul-aero the entire kinematic
+            # hold window to slew the disk to the IC tilt before release.
+
             # Seed Lua with the exact IC collective used by physics. Prefer
             # eq_physics.collective_rad, then explicit IC scalar fields.
             _eq_phys = _ic.get("eq_physics")
@@ -378,6 +441,12 @@ def guided_nogps_armed_lua_full(tmp_path, request):
             raise RuntimeError("GPS did not fuse within 60 s — cannot start steady guidance")
         ctx.log.info("GPS fused — Lua steady guidance active; yielding to test")
 
+        if not run_ground_winch:
+            # Pumping (and any caller that owns the winch from the test process)
+            # skips the in-fixture regulator and drives the WinchController itself.
+            yield ctx
+            return
+
         # ── Ground-side tension-regulating winch ─────────────────────────────
         # Mirrors the test_create_ic warmup pattern: a slow integrator on
         # ``rest_length`` driven by tension error.  Without this the tether
@@ -397,7 +466,7 @@ def guided_nogps_armed_lua_full(tmp_path, request):
 
         _winch_stop = _thr.Event()
         _tension_target_n = 300.0
-        _winch_addr  = ("127.0.0.1", 14570)
+        _winch_addr  = ("127.0.0.1", winch_cmd_port)
         _winch_sock  = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
         _winch_sock.bind(("127.0.0.1", 0))
         _winch_sock.settimeout(0.05)
@@ -455,3 +524,25 @@ def guided_nogps_armed_lua_full(tmp_path, request):
                 _winch_sock.close()
             except OSError:
                 pass
+
+
+@pytest.fixture
+def guided_nogps_armed_lua_full(tmp_path, request):
+    """
+    Full-stack GUIDED_NOGPS fixture with rawes.lua, internal_controller=False.
+
+    Thin wrapper over _ic_trapezoid_stack: the hub starts at the IC via the
+    smooth trapezoidal kinematic motion, Lua is left in MODE_PASSIVE (SCR_USER6=3)
+    with the IC operating point seeded, and an in-fixture ground winch tension
+    regulator (target 300 N) runs after kinematic exit.  Used by the steady and
+    ic-passive flight stack tests, which promote SCR_USER6 -> 1 (MODE_STEADY)
+    after kinematic_exit.
+    """
+    with _ic_trapezoid_stack(
+        tmp_path,
+        test_name=request.node.name,
+        winch_cmd_port=14570,
+        run_ground_winch=True,
+    ) as ctx:
+        yield ctx
+

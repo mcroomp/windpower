@@ -75,17 +75,51 @@ EK3_POS_I_GATE  50.0   # position innovation gate (sigma) — widened for extrem
 EK3_VEL_I_GATE  50.0   # velocity innovation gate (sigma) — widened for extreme attitude
 
 # Dual GPS moving-baseline heading (GPS-for-yaw in SITL)
-# GPS1_TYPE=1 + GPS2_TYPE=1 (plain UBLOX): SIM_GPS2_HDG=1 injects RELPOSNED synthetically.
-# Hardware uses GPS1_TYPE=17 (RTK_BASE) + GPS2_TYPE=18 (RTK_ROVER), but those require
-# real serial RTCM flow which SITL does not simulate — SITL heading injection only works
-# with plain UBLOX type 1 on both instances.
-GPS_AUTO_CONFIG  0     # disable GPS auto-config: required in SITL to preserve RELPOSNED stream
-GPS1_TYPE        17    # F9P RTK_BASE: sends RTCM corrections to GPS2
-GPS2_TYPE        18    # F9P RTK_ROVER: receives RTCM, outputs RELPOSNED heading
-GPS1_POS_X       0.25  # GPS1 lever arm: +25 cm along body X from hub centre
-GPS2_POS_X      -0.25  # GPS2 lever arm: -25 cm along body X from hub centre
-# ArduPilot 4.7 SITL param set no longer exposes SIM_GPS* position/type toggles
-# used in older builds. Keep only GPS1_/GPS2_ params above for heading setup.
+#
+# Two F9P antennas 50 cm apart along body X on the rotor disk produce a RELPOSNED
+# baseline vector; EK3_SRC1_YAW=2 derives yaw from it (no compass, no motion).
+#
+# SITL (--model JSON) synthesises the GPS sensors from the truth attitude, so BOTH
+# sides must be configured (matches ArduPilot's own copter-gps-for-yaw.parm):
+#   - Driver side  (GPS1_*/GPS2_*): tells the AP_GPS driver the antenna geometry.
+#   - SITL sim side (SIM_GPS1_*/SIM_GPS2_*): tells the simulator to emit a second
+#     GPS + RELPOSNED.  SIM_GPS*_POS MUST equal the driver GPS*_POS so ArduPilot
+#     backs out the correct vehicle yaw from the simulated baseline heading.
+#
+# CRITICAL: SIM_GPS2_ENABLE=1.  Without it SITL simulates only ONE GPS, no moving
+# baseline exists, no RELPOSNED is emitted, EK3_SRC1_YAW=2 has no yaw source, and
+# the EKF stays in const_pos_mode (AID_NONE) forever — never fusing GPS, never
+# publishing LOCAL_POSITION_NED.
+GPS_AUTO_CONFIG  0      # disable GPS auto-config: required in SITL to preserve RELPOSNED stream
+GPS1_TYPE        17     # driver: F9P moving-baseline BASE
+GPS2_TYPE        18     # driver: F9P moving-baseline ROVER (outputs RELPOSNED heading)
+GPS1_POS_X       0.25   # driver GPS1 (base) lever arm: +25 cm along body X from hub centre
+GPS2_POS_X      -0.25   # driver GPS2 (rover) lever arm: -25 cm along body X from hub centre
+SIM_GPS2_ENABLE  1      # enable the 2nd simulated GPS (default 0) — REQUIRED for moving baseline
+SIM_GPS1_HDG     4      # sim GPS1 = GPS_HEADING_BASE (moving-baseline base antenna)
+SIM_GPS2_HDG     1      # sim GPS2 = rover: emit RELPOSNED heading
+SIM_GPS1_POS_X   0.25   # sim GPS1 lever arm — MUST match driver GPS1_POS_X
+SIM_GPS2_POS_X  -0.25   # sim GPS2 lever arm — MUST match driver GPS2_POS_X
+
+# GPS lag: the EKF-assumed lag MUST equal the SITL-injected lag, or the moving-baseline
+# yaw timestamp (gps_yaw_time_ms) never lands on the EKF fusion horizon, storedYawAng.recall()
+# misses every cycle, yawAlignComplete never latches, and readyToUseGPS() never passes -> the
+# filter hangs in const_pos_mode (AID_NONE) through kinematic release.
+#   The EKF uses get_lag() in TWO places that must agree: (a) ONCE at setup_core() to size the
+#   IMU fusion horizon (imu_buffer_length), and (b) EVERY cycle to back-date the GPS-yaw
+#   timestamp (AP_GPS::gps_yaw_deg subtracts get_lag). If get_lag() returns a DIFFERENT value
+#   at init vs runtime, horizon != yaw-lag and recall() misses the window forever.
+#   With GPS*_DELAY_MS=0, get_lag() falls through to UBLOX hardware-generation detection: it
+#   can report 220 ms (UBLOX_UNKNOWN gen) at boot before the GPS is classified, then 160 ms
+#   (detected-F9 moving-baseline = 120+40) once MON-VER lands -> a 60 ms init/runtime split
+#   that breaks recall(). Pin the lag explicitly instead: params[instance].delay_ms > 0 makes
+#   AP_GPS::get_lag() return that exact value deterministically at all times ("the user is
+#   always right", AP_GPS.cpp:1737), so horizon == yaw-lag == 220 ms, matching the SIM
+#   injection below. This is a legitimate F9P hardware config, not a sim-only hack.
+GPS1_DELAY_MS    220    # pin EKF-assumed lag (overrides driver get_lag gen-detection)
+GPS2_DELAY_MS    220    # pin EKF-assumed lag (overrides driver get_lag gen-detection)
+SIM_GPS1_LAG_MS  220    # SITL-injected lag MUST equal the pinned GPS1_DELAY_MS above
+SIM_GPS2_LAG_MS  220    # SITL-injected lag MUST equal the pinned GPS2_DELAY_MS above
 
 COMPASS_USE     0      # disable compass: GB4008 motor swamps magnetometer on hardware
 COMPASS_ENABLE  0      # disable all SITL synthetic compasses
@@ -100,6 +134,7 @@ H_COL_MIN       1000   # minimum collective servo output (us) -- full range
 H_COL_MAX       2000   # maximum collective servo output (us) -- full range
 H_RSC_MODE      1      # 1=Passthrough: no main rotor motor (autorotation only).
                        # Motor interlock HIGH (RC8=2000) -> THROTTLE_UNLIMITED immediately.
+DISARM_DELAY    0      # disable landed auto-disarm during long kinematic hold
 
 # GB4008 anti-rotation motor -- MAIN OUT 4 (SERVO4, H_TAIL_TYPE=3 DDFP CW).
 # US-convention rotor spins CCW from above => body drifts CCW (gyro:z() < 0)

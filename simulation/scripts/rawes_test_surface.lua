@@ -60,7 +60,7 @@ _rawes_fns = {
     -- ── RAWES_ARM state accessors ─────────────────────────────────────────────
 
     armon_state       = function() return _armon_state end,
-    armon_deadline_ms = function() return _armon_deadline_ms end,
+    armon_deadline_ms = function() return _armon_deadline_ms and _armon_deadline_ms:toint() or nil end,
     armon_armed_sent  = function() return _armon_armed_sent end,
     armon_secs        = function() return _armon_secs end,
 

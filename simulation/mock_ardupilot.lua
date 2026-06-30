@@ -100,10 +100,54 @@ function Vector3f:dot(o)
     return self._x * o:x() + self._y * o:y() + self._z * o:z()
 end
 
+-- ── uint32_t ─────────────────────────────────────────────────────────────────
+-- Replicates the ArduPilot Lua uint32_t userdata returned by millis()/micros().
+-- The real binding stores an unsigned 32-bit integer and coerces the *other*
+-- operand of every arithmetic/comparison op to uint32_t.  Coercion FAILS with
+-- "Unable to coerce to uint32_t" when the operand has a fractional part -- this
+-- is exactly what catches `millis() * 0.001` style bugs (multiply by a fraction)
+-- at unit-test time instead of only on real hardware.  Negative integers wrap
+-- (two's complement) like the real binding, so `now - (-2000)` still works.
+
+local UINT32_MOD = 4294967296  -- 2^32
+
+local Uint32 = {}
+Uint32.__index = Uint32
+
+local function _coerce_u32(x)
+    if type(x) == "table" and getmetatable(x) == Uint32 then
+        return x._v
+    end
+    if type(x) == "number" then
+        if x ~= math.floor(x) then
+            error("Unable to coerce to uint32_t", 2)
+        end
+        return x % UINT32_MOD
+    end
+    error("Unable to coerce to uint32_t", 2)
+end
+
+local function _new_u32(v)
+    return setmetatable({_v = v % UINT32_MOD}, Uint32)
+end
+
+function Uint32:tofloat() return self._v + 0.0 end
+function Uint32:toint()   return math.floor(self._v) end
+
+Uint32.__add      = function(a, b) return _new_u32(_coerce_u32(a) + _coerce_u32(b)) end
+Uint32.__sub      = function(a, b) return _new_u32(_coerce_u32(a) - _coerce_u32(b)) end
+Uint32.__mul      = function(a, b) return _new_u32(_coerce_u32(a) * _coerce_u32(b)) end
+Uint32.__div      = function(a, b) return _new_u32(math.floor(_coerce_u32(a) / _coerce_u32(b))) end
+Uint32.__mod      = function(a, b) return _new_u32(_coerce_u32(a) % _coerce_u32(b)) end
+Uint32.__lt       = function(a, b) return _coerce_u32(a) <  _coerce_u32(b) end
+Uint32.__le       = function(a, b) return _coerce_u32(a) <= _coerce_u32(b) end
+Uint32.__eq       = function(a, b) return _coerce_u32(a) == _coerce_u32(b) end
+Uint32.__tostring = function(a)    return tostring(a._v) end
+
 -- ── millis() ─────────────────────────────────────────────────────────────────
 
 function millis()
-    return _mock.millis_val
+    return _new_u32(_mock.millis_val)
 end
 
 -- ── ahrs ─────────────────────────────────────────────────────────────────────

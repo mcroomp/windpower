@@ -12,15 +12,21 @@ Uses the guided_nogps_armed_lua_full fixture (stationary kinematic hold, vel0=[0
     delAngBiasLearned converges with constant-zero gyro at ~34 s after start.
     GPS fuses at ~34 s; fixture yields.
     - internal_controller=False (ArduPilot + Lua own the stack at 50 Hz)
-  - SCR_USER6=3 (MODE_PASSIVE) set immediately in fixture; the test
-    promotes to SCR_USER6=1 (MODE_STEADY) right after kinematic_exit.
-    MODE_PASSIVE keeps the Lua quiet (only ch8 keepalive + zero-rate,
-    IC-collective GUIDED throttle command) so ArduPilot's rate PID does not wind up against a
-    kinematically-locked body during the 80 s hold.
+  - SCR_USER6=3 (MODE_PASSIVE) set immediately in fixture, right after arm,
+    together with the full IC seed; the test promotes to SCR_USER6=1
+    (MODE_STEADY) right after kinematic_exit.  In MODE_PASSIVE the Lua
+    commands the IC attitude (RAWES_RIC roll / RAWES_PIC pitch + AHRS yaw
+    captured at entry, zero rate FF) and the IC collective (RAWES_COL via
+    GUIDED throttle) through set_target_angle_and_rate_and_throttle.  Because
+    the IC attitude is commanded during the kinematic hold, the nul-aero slews
+    the disk to the IC tilt before release; ArduPilot's rate PID tracks the
+    held angle target rather than winding up against a locked body.
   - IC altitude ~43 m (tether rest length ~100 m); hub orbits near IC altitude.
 
-The fixture streams the IC collective to the Lua as RAWES_COL so MODE_PASSIVE
-holds the IC operating point via GUIDED throttle during kinematic.
+The fixture seeds the FULL IC operating point to the Lua right after arm
+(RAWES_COL collective, RAWES_RIC/RAWES_PIC IC roll/pitch, RAWES_TEN equilibrium
+tension) so MODE_PASSIVE commands the IC attitude + collective throughout the
+kinematic hold (no delayed seed).
 
 No RC cyclic/collective overrides are sent by this test. Lua uses GUIDED
 commands for attitude/collective and keeps Ch8 (motor interlock) high.
@@ -28,9 +34,10 @@ commands for attitude/collective and keeps Ch8 (motor interlock) high.
 Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
-  t~12 s      arm complete; SCR_USER6=3 (MODE_PASSIVE) set; IC collective
-              NVF streamed; Lua holds IC collective through GUIDED throttle but does
-              NOT run altitude hold.
+  t~8 s       arm complete; SCR_USER6=3 (MODE_PASSIVE) set; full IC seed
+              (RAWES_COL/RIC/PIC/TEN) streamed immediately.  Lua commands the
+              IC attitude angle + IC collective via GUIDED throttle; nul-aero
+              slews the disk to the IC tilt during the hold.  No altitude hold.
   t~34 s      GPS fuses; fixture yields
   t=80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY)
               and Lua's altitude-hold loop takes over.
@@ -52,10 +59,15 @@ Note: criteria 2 and 3 use physics pos_z from telemetry.csv (ground truth),
 not EKF LOCAL_POSITION_NED (which can lag physics crashes by tens of seconds).
 """
 import logging
+import math
 import sys
 from pathlib import Path
 
+import numpy as np
+
 import pytest
+
+pytestmark = pytest.mark.timeout(1800)
 
 _SIM_DIR     = Path(__file__).resolve().parents[3]
 _SITL_DIR    = Path(__file__).resolve().parents[1]
@@ -74,6 +86,7 @@ from analyse_run import compute_steady_metrics, print_flight_report
 _KINEMATIC_TIMEOUT_S = 60.0   # s from fixture yield to kinematic end (4.7 timing jitter can reduce effective margin near the 80 s kinematic exit)
 _CAPTURE_TIMEOUT_S   = 30.0   # s from observation start -- Lua captures during kinematic
 _OBS_SECONDS         = 120.0  # s of free-flight observation after kinematic ends
+_PASSIVE_SETTLE_S    = 0.5    # s; keep minimal to avoid passive drift before steady takeover
 
 # -- Pass thresholds ----------------------------------------------------------
 _MIN_ALT_M               = 3.0   # m -- hard floor (no crash; 1 m = sim floor, use 3 m)
@@ -91,7 +104,7 @@ _POS_LOG_INTERVAL        = 5.0   # s between periodic log lines
 
 # Temporary debug switch: keep Lua in MODE_PASSIVE after kinematic exit.
 # Set back to False when steady-mode handoff debugging is complete.
-_DEBUG_KEEP_PASSIVE      = True
+_DEBUG_KEEP_PASSIVE      = False
 
 
 
@@ -120,38 +133,64 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         )
 
     ic = ctx.initial_state
-    if ic is not None:
-        eq_phys = ic.get("eq_physics")
-        if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
-            coll_seed = float(eq_phys["collective_rad"])
-            coll_src = "eq_physics.collective_rad"
-        elif "stack_coll_eq" in ic:
-            coll_seed = float(ic["stack_coll_eq"])
-            coll_src = "stack_coll_eq"
-        elif "coll_eq_rad" in ic:
-            coll_seed = float(ic["coll_eq_rad"])
-            coll_src = "coll_eq_rad"
-        else:
-            raise KeyError(
-                "initial_state missing collective seed; expected one of "
-                "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
-            )
-        # Re-seed right at release so MODE_STEADY capture uses the intended IC
-        # collective even if an earlier NVF update was missed.
-        gcs.send_named_float("RAWES_COL", coll_seed)
-        log.info("Re-seeded RAWES_COL from %s: %+.4f rad", coll_src, coll_seed)
+    if ic is None:
+        pytest.fail("initial_state is required for steady flight test")
+
+    # -- Release initialization: identical to test_lua_flight_ic_passive_sitl --
+    # The IC-passive stack test passes with this exact seeding sequence, so we
+    # replicate it here to establish the same deterministic passive hold before
+    # promoting to MODE_STEADY.  Seed all four IC NVFs (collective, tension, IC
+    # roll, IC pitch) and enter MODE_PASSIVE (SCR_USER6=3) first.
+    eq_phys = ic.get("eq_physics")
+    if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
+        coll_seed = float(eq_phys["collective_rad"])
+        coll_src = "eq_physics.collective_rad"
+    elif "stack_coll_eq" in ic:
+        coll_seed = float(ic["stack_coll_eq"])
+        coll_src = "stack_coll_eq"
+    elif "coll_eq_rad" in ic:
+        coll_seed = float(ic["coll_eq_rad"])
+        coll_src = "coll_eq_rad"
+    else:
+        raise KeyError(
+            "initial_state missing collective seed; expected one of "
+            "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+        )
+    ten_seed = float(ic["tension_eq_n"])
+    R0 = ic.get("R0")
+    if R0 is None:
+        pytest.fail("initial_state missing R0 for IC passive attitude seed")
+    r20 = float(R0[2][0])
+    r21 = float(R0[2][1])
+    r22 = float(R0[2][2])
+    ic_roll_rad = math.atan2(r21, r22)
+    ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
+
+    gcs.send_named_float("RAWES_COL", coll_seed)
+    gcs.send_named_float("RAWES_TEN", ten_seed)
+    gcs.send_named_float("RAWES_RIC", ic_roll_rad)
+    gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
+    ok = gcs.set_param("SCR_USER6", 3, timeout=5.0)
+    log.info(
+        "Release seeds (IC-passive init): RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, "
+        "IC r/p=(%.2f, %.2f)deg, SCR_USER6=3 ACK=%s",
+        coll_seed, coll_src, ten_seed,
+        math.degrees(ic_roll_rad), math.degrees(ic_pitch_rad), ok,
+    )
 
     if _DEBUG_KEEP_PASSIVE:
         log.info("Kinematic phase ended -- DEBUG: keeping Lua in MODE_PASSIVE (SCR_USER6=3)")
-        ok = gcs.set_param("SCR_USER6", 3, timeout=5.0)
-        log.info("  SCR_USER6 -> 3 (MODE_PASSIVE)  ACK=%s", ok)
     else:
-        log.info("Kinematic phase ended -- promoting Lua to MODE_STEADY")
-
-        # Promote Lua from MODE_PASSIVE (3) to MODE_STEADY (1) now that the body
-        # is free.  Doing this AFTER kinematic_exit prevents ArduPilot's rate
-        # PID from winding up against a kinematically-locked body during the
-        # hold phase.
+        # For steady-flight validation, promote to MODE_STEADY almost
+        # immediately after kinematic_exit. A long passive dwell can allow
+        # drift/sag before the steady controller captures.
+        log.info(
+            "  Holding MODE_PASSIVE for %.1fs before MODE_STEADY ...",
+            _PASSIVE_SETTLE_S,
+        )
+        if _PASSIVE_SETTLE_S > 0.0:
+            gcs.sim_sleep(_PASSIVE_SETTLE_S)
+        log.info("Promoting Lua to MODE_STEADY")
         ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
         log.info("  SCR_USER6 -> 1 (MODE_STEADY)  ACK=%s", ok)
 

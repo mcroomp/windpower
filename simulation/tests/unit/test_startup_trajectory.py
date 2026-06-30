@@ -291,3 +291,102 @@ class TestDefaultParametersNumerical:
                     f"axis {axis}: vel={_TARGET_VEL[axis]:.4f}, "
                     f"launch[{axis}]={launch_pos[axis]:.3f}, target[{axis}]={_TARGET_POS[axis]:.3f}"
                 )
+
+
+class TestSmoothTrapezoidTrajectory:
+    """
+    Verify the smooth trapezoidal startup trajectory (make_smooth_trapezoid_traj):
+    accelerate from rest to cruise_speed, cruise, decelerate back to rest,
+    travelling along a fixed heading and ending EXACTLY at target_pos.
+
+    Key properties:
+      - starts and ends at rest (zero velocity)
+      - ends exactly at target_pos
+      - peak speed == cruise_speed
+      - acceleration is continuous and zero at every phase boundary (smooth)
+      - motion is purely along the heading (altitude held when heading is horizontal)
+    """
+
+    T        = 60.0
+    VMAX     = 1.0
+    ACCEL_S  = 5.0
+    DECEL_S  = 5.0
+    YAW      = 0.7   # rad — arbitrary IC heading
+    TARGET   = np.array([3.0, -4.0, -43.0])
+
+    def _traj(self):
+        from kinematic import make_smooth_trapezoid_traj
+        direction = np.array([math.cos(self.YAW), math.sin(self.YAW), 0.0])
+        return make_smooth_trapezoid_traj(
+            self.TARGET, direction, self.T, self.VMAX, self.ACCEL_S, self.DECEL_S
+        )
+
+    def test_starts_at_rest(self):
+        fn = self._traj()
+        _, v0 = fn(0.0)
+        np.testing.assert_allclose(v0, np.zeros(3), atol=1e-12)
+
+    def test_ends_at_target_at_rest(self):
+        fn = self._traj()
+        pT, vT = fn(self.T)
+        np.testing.assert_allclose(pT, self.TARGET, atol=1e-9)
+        np.testing.assert_allclose(vT, np.zeros(3), atol=1e-9)
+
+    def test_peak_speed_equals_cruise_speed(self):
+        fn = self._traj()
+        ts = np.linspace(0.0, self.T, 4001)
+        speeds = np.array([np.linalg.norm(fn(t)[1]) for t in ts])
+        assert abs(speeds.max() - self.VMAX) < 1e-6
+        # Cruise plateau: speed == VMAX in the middle.
+        mid = fn(self.T / 2.0)[1]
+        np.testing.assert_allclose(np.linalg.norm(mid), self.VMAX, atol=1e-9)
+
+    def test_acceleration_zero_at_phase_boundaries(self):
+        """Raised-cosine ramps => accel == 0 at start, end-of-accel, start-of-decel, end."""
+        fn = self._traj()
+        for tb in [0.0, self.ACCEL_S, self.T - self.DECEL_S, self.T]:
+            a = fn.accel(min(tb, self.T - 1e-9))
+            assert np.linalg.norm(a) < 1e-6, f"accel nonzero at boundary t={tb}"
+
+    def test_acceleration_continuous_numerically(self):
+        """Finite-difference accel from velocity has no impulsive jumps (smooth)."""
+        fn = self._traj()
+        dt = 1.0 / 400.0
+        ts = np.arange(0.0, self.T, dt)
+        vel = np.array([fn(t)[1] for t in ts])
+        accel = np.diff(vel, axis=0) / dt
+        jerk = np.linalg.norm(np.diff(accel, axis=0), axis=1) / dt
+        # Smooth raised-cosine accel => bounded jerk, no impulsive spikes.
+        assert jerk.max() < 1.0, f"jerk spike detected: {jerk.max():.3f} m/s^3"
+
+    def test_altitude_held_constant(self):
+        """Horizontal heading => Down component never changes."""
+        fn = self._traj()
+        ts = np.linspace(0.0, self.T, 2001)
+        zs = np.array([fn(t)[0][2] for t in ts])
+        assert (zs.max() - zs.min()) < 1e-9
+
+    def test_motion_along_heading_only(self):
+        """All displacement is along the heading direction (no lateral drift)."""
+        fn = self._traj()
+        lateral = np.array([math.sin(self.YAW), -math.cos(self.YAW), 0.0])
+        ts = np.linspace(0.0, self.T, 2001)
+        launch = fn(0.0)[0]
+        for t in ts:
+            disp = fn(t)[0] - launch
+            assert abs(float(disp @ lateral)) < 1e-9
+
+    def test_launch_offset_matches_formula(self):
+        """launch_pos = target - VMAX*(T - 0.5*accel - 0.5*decel) * heading."""
+        fn = self._traj()
+        direction = np.array([math.cos(self.YAW), math.sin(self.YAW), 0.0])
+        dist = self.VMAX * (self.T - 0.5 * self.ACCEL_S - 0.5 * self.DECEL_S)
+        expected_launch = self.TARGET - dist * direction
+        np.testing.assert_allclose(fn(0.0)[0], expected_launch, atol=1e-9)
+
+    def test_zero_direction_raises(self):
+        from kinematic import make_smooth_trapezoid_traj
+        with pytest.raises(ValueError):
+            make_smooth_trapezoid_traj(
+                self.TARGET, np.zeros(3), self.T, self.VMAX, self.ACCEL_S, self.DECEL_S
+            )

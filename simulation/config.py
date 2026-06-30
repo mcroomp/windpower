@@ -82,6 +82,16 @@ DEFAULTS: dict = {
     "startup_damp_seconds":         30.0,   # kinematic duration [s]
     "kinematic_vel_ramp_s":         15.0,   # vel ramp-to-zero window at end [s]; 0 = constant vel throughout
     "startup_damp_k_ang":          500.0,   # peak angular drag [N·m·s/rad] during kinematic phase
+    # Smooth trapezoidal kinematic motion (overrides the linear vel0 path when
+    # kinematic_cruise_speed > 0).  The hub accelerates from rest to
+    # kinematic_cruise_speed along the IC yaw heading, cruises, then decelerates
+    # back to rest, arriving exactly at pos0 at kinematic exit.  Raised-cosine
+    # ramps give continuous (smooth) acceleration with no jerk steps.  This gives
+    # the EKF velocity observability during the hold while leaving zero residual
+    # position/velocity error at release.
+    "kinematic_cruise_speed":        0.0,   # cruise speed [m/s]; 0 = use linear vel0 path
+    "kinematic_accel_s":             5.0,   # accel ramp window at start [s]
+    "kinematic_decel_s":             5.0,   # decel ramp window at end [s]
     # Kinematic aero behavior:
     #   "locked" (default): legacy full kinematic lock (no physics response)
     #   "nul"            : simplified debug response where acceleration is
