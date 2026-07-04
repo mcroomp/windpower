@@ -141,12 +141,11 @@ class TestRollSignChainLinks:
             wind_world=wind_world,
             omega_rad_s=omega_rad_s,
             rho_kg_m3=1.225,
-            t=0.0,
         )
         
         result, _ = _AERO.compute_forces(inputs, state)
         # M_orbital is in NED frame; transform to body frame for sign check
-        M_body = R_hub.T @ np.asarray(result.M_orbital, dtype=float)
+        M_body = R_hub.T @ np.asarray(result.m_hub_world, dtype=float)
         aero_mx_body = M_body[0]
         
         # In body frame: left-roll disk (tilt_lat < 0) should produce left-roll moment (mx < 0)
@@ -243,11 +242,10 @@ class TestEndToEndRollCorrection:
             wind_world=np.array([0.0, 10.0, 0.0]),
             omega_rad_s=28.0,
             rho_kg_m3=1.225,
-            t=0.0,
         )
         
         result_cmd, _ = _AERO.compute_forces(inputs, state)
-        mx_cmd_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_cmd.M_orbital, dtype=float))[0]
+        mx_cmd_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_cmd.m_hub_world, dtype=float))[0]
 
         inputs_trim = RotorInputs(
             collective_rad=_IC.coll_eq_rad,
@@ -258,10 +256,9 @@ class TestEndToEndRollCorrection:
             wind_world=np.array([0.0, 10.0, 0.0]),
             omega_rad_s=28.0,
             rho_kg_m3=1.225,
-            t=0.0,
         )
         result_trim, _ = _AERO.compute_forces(inputs_trim, state)
-        mx_trim_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_trim.M_orbital, dtype=float))[0]
+        mx_trim_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_trim.m_hub_world, dtype=float))[0]
 
         assert (mx_cmd_body - mx_trim_body) < 0, (
             f"Corrective cyclic should reduce body roll moment; "

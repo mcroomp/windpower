@@ -45,7 +45,7 @@ Options
     --tail-channel      INT     0-based servo channel for motor (default: 3=Ch4)
     --log-level         LEVEL   Logging level (default: INFO)
     --events-log        PATH    Path for structured JSONL event log (default: none)
-    --startup-yaw-rate  FLOAT   Yaw rate [deg/s] during startup hold (default: 5.0; 0=stationary)
+    --startup-yaw-rate  FLOAT   Yaw rate [deg/s] during startup hold (default: 0.0 = stationary)
 """
 from __future__ import annotations
 
@@ -156,6 +156,55 @@ def _omega_gust(dt: float, nom: float) -> float:
 def _tilt_flat(dt: float) -> tuple[float, float]:
     return 0.0, 0.0
 
+# ---------------------------------------------------------------------------
+# IC (steady-state tethered-hover) orientation
+# ---------------------------------------------------------------------------
+# From steady_state_starting.json R0 (body-to-NED), ZYX aerospace Euler (NED):
+#   R[2][0] = -sin(theta) = 0.895326  -> theta = asin(-0.895326) = -63.6 deg
+#   roll = atan2(R[2][1], R[2][2]) = 0 deg ; yaw = atan2(R[1][0], R[0][0]) = +90 deg
+# body_z (disk axis) = R0[:,2] = [0, -0.8953, 0.4454] points along the tether
+# toward the anchor -- the high-tilt flight attitude.
+_IC_ROLL_RAD  = 0.0
+_IC_PITCH_RAD = -1.1102          # asin(-0.895326)
+_IC_YAW_RAD   = math.pi / 2.0    # +90 deg
+
+def _tilt_ic(dt: float) -> tuple[float, float]:
+    """Hold the steady-state IC attitude (high disk tilt) -- roll/pitch fixed."""
+    return _IC_ROLL_RAD, _IC_PITCH_RAD
+# ---------------------------------------------------------------------------
+# Rotation helpers (ZYX aerospace, body-to-NED)
+# ---------------------------------------------------------------------------
+# Used by the IC-orientation path so the yaw DOF rotates about the *tilted*
+# rotor spin axis (body_z) rather than NED-vertical.  At the IC attitude the
+# disk axis is ~63.6 deg off vertical; modelling yaw about NED-Z would leave
+# the rotor-reaction torque and the DDFP motor authority misaligned with the
+# disturbance axis (gyro_z would see only cos(63.6)=0.45 of psi_dot), which is
+# uncontrollable.  Spinning about body_z keeps measurement, actuation, and
+# disturbance on the same axis: gyro_body = [0, 0, spin_rate].
+
+def _rot_z(a: float) -> np.ndarray:
+    """Rotation about the z-axis by angle *a* [rad]."""
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+def _euler_to_R(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """ZYX body-to-NED rotation: R = Rz(yaw) @ Ry(pitch) @ Rx(roll)."""
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
+    ])
+
+def _euler_from_R(R: np.ndarray) -> tuple[float, float, float]:
+    """Extract ZYX (roll, pitch, yaw) [rad] from a body-to-NED rotation."""
+    sp = max(-1.0, min(1.0, -float(R[2, 0])))
+    pitch = math.asin(sp)
+    roll  = math.atan2(float(R[2, 1]), float(R[2, 2]))
+    yaw   = math.atan2(float(R[1, 0]), float(R[0, 0]))
+    return roll, pitch, yaw
 def _tilt_pitch_roll(dt: float) -> tuple[float, float]:
     """Roll ±5° at 0.08 Hz, pitch ±3° at 0.05 Hz.
     Kept small so horizontal gravity component (g·sin θ ≈ 0.5 m/s²) stays
@@ -204,6 +253,7 @@ PROFILES: dict[str, tuple] = {
     "gust":       (_omega_gust,      _tilt_flat),
     "pitch_roll": (_omega_constant,  _tilt_pitch_roll),
     "wobble":     (_omega_constant,  _tilt_wobble),
+    "ic":         (_omega_constant,  _tilt_ic),       # steady-state IC orientation (high tilt)
     # Prescribed-yaw profiles (3rd element = psi_dot_fn, ODE bypassed)
     "yaw_zero":      (_omega_constant, _tilt_flat, _yaw_zero),
     "yaw_slow_ramp": (_omega_constant, _tilt_flat, _yaw_slow_ramp),
@@ -224,9 +274,11 @@ def run(
 
     Startup hold phase (0 … startup_hold_s)
     ----------------------------------------
-    Hub is locked stationary at ψ=0.  A slow constant yaw drift of 5°/s is
-    sent to SITL to give ArduPilot's EKF enough gyro and compass data to
-    initialise.  Bearing drag and motor dynamics are NOT active.
+    Hub is locked stationary at ψ=0 (startup_yaw_rate defaults to 0 = no
+    rotation).  EKF attitude aligns from accel tilt + compass yaw while the hub
+    is still, so the stack arms as soon as attitude locks without any yaw drift.
+    Bearing drag and motor dynamics are NOT active.  (A non-zero startup_yaw_rate
+    may still be supplied for diagnostics.)
 
     Dynamic phase (startup_hold_s … ∞)
     ------------------------------------
@@ -257,6 +309,14 @@ def run(
     omega_fn, tilt_fn = _profile_entry[0], _profile_entry[1]
     psi_dot_fn = _profile_entry[2] if len(_profile_entry) > 2 else None
     ch_yaw = tail_channel
+
+    # IC-orientation mode: the hub holds the high-tilt steady-state attitude
+    # (R_tilt) and the yaw DOF rotates about the *tilted* body_z spin axis.
+    # The torque model's psi (spin angle) and psi_dot (spin rate) drive a
+    # rotation about body_z applied on top of R_tilt:  R = R_tilt @ Rz(psi).
+    _ic_mode = (profile == "ic")
+    _R_tilt  = _euler_to_R(_IC_ROLL_RAD, _IC_PITCH_RAD, _IC_YAW_RAD) if _ic_mode else None
+    _GRAV    = np.array([0.0, 0.0, -9.81])   # specific force for a stationary hub [m/s^2]
 
     ev.write("startup", t_sim=0.0,
              omega_rotor_rad_s=round(omega_rotor, 2),
@@ -292,17 +352,22 @@ def run(
         if in_startup:
             psi_send     = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
             psi_dot_send = _STARTUP_YAW_RATE
-            roll_send = pitch_send = roll_dot = pitch_dot = 0.0
+            if _ic_mode:
+                roll_cmd, pitch_cmd = tilt_fn(0.0)
+            else:
+                roll_cmd = pitch_cmd = 0.0
+            roll_dot = pitch_dot = 0.0
             current_omega = 0.0
+            spin_angle = (_STARTUP_YAW_RATE * t) % (2.0 * math.pi)
         else:
             # Universal spin-up ramp: prevents discontinuous omega jump at DYNAMIC start.
             _SPINUP_S    = 10.0
             spinup_scale  = min(1.0, dynamics_t / _SPINUP_S)
             current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor) * spinup_scale)
 
-            roll_send, pitch_send = tilt_fn(dynamics_t)
-            roll_dot  = (roll_send  - prev_roll)  / DT
-            pitch_dot = (pitch_send - prev_pitch) / DT
+            roll_cmd, pitch_cmd = tilt_fn(dynamics_t)
+            roll_dot  = (roll_cmd  - prev_roll)  / DT
+            pitch_dot = (pitch_cmd - prev_pitch) / DT
 
             if psi_dot_fn is not None:
                 # Prescribed yaw: bypass ODE, drive psi_dot directly from profile.
@@ -316,12 +381,13 @@ def run(
                 hub_state    = _m.step(hub_state, current_omega, throttle, params, DT)
                 psi_send     = math.atan2(math.sin(hub_state.psi), math.cos(hub_state.psi))
                 psi_dot_send = hub_state.psi_dot
+            spin_angle = hub_state.psi
 
         # Safety clamp: cap yaw rate to prevent ArduPilot SIGFPE
         _MAX_PSI_DOT = math.radians(500.0)
         psi_dot_send = max(-_MAX_PSI_DOT, min(_MAX_PSI_DOT, psi_dot_send))
 
-        prev_roll, prev_pitch = roll_send, pitch_send
+        prev_roll, prev_pitch = roll_cmd, pitch_cmd
 
         # One-shot: record when DYNAMIC phase begins
         if not in_startup and not _dynamics_started:
@@ -334,8 +400,18 @@ def run(
         _hb_state["psi_dot_deg_s"]  = round(math.degrees(psi_dot_send), 3)
         _hb_state["throttle"]       = round(throttle, 4)
 
-        gyro_body, accel_body = _body_vectors(
-            roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot)
+        if _ic_mode:
+            # Yaw DOF rotates about the tilted body_z spin axis: R = R_tilt @ Rz(spin).
+            # gyro is pure body_z spin (constant tilt); accel is gravity projected
+            # through the full (tilted + spun) attitude.
+            R = _R_tilt @ _rot_z(spin_angle)
+            roll_send, pitch_send, psi_send = _euler_from_R(R)
+            gyro_body  = np.array([0.0, 0.0, psi_dot_send])
+            accel_body = R.T @ _GRAV
+        else:
+            roll_send, pitch_send = roll_cmd, pitch_cmd
+            gyro_body, accel_body = _body_vectors(
+                roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot)
 
         return dict(
             pos_ned         = np.array([0.0, 0.0, 0.0]),

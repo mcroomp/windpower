@@ -122,8 +122,7 @@ def _rotor_inputs_from_row(row: dict[str, str]) -> RotorInputs:
         ], dtype=float),
         v_hub_world=_vec(row, "vel_x", "vel_y", "vel_z"),
         wind_world=_vec(row, "wind_x", "wind_y", "wind_z"),
-        omega_rad_s=_f(row, "omega_rotor"),
-        t=45.0 + _f(row, "t_sim"),
+        omega_rad_s=_f(row, "omega_rotor"), "t_sim"),
         rho_kg_m3=1.225,
     )
 

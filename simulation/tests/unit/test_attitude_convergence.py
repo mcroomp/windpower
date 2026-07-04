@@ -94,11 +94,11 @@ def _run_attitude_loop(
         inputs = RotorInputs(
             collective_rad=0.0, tilt_lon=tlon, tilt_lat=tlat,
             R_hub=R, v_hub_world=s["vel"], wind_world=wind,
-            omega_rad_s=float(omega_spin), t=10.0, rho_kg_m3=1.225,
+            omega_rad_s=float(omega_spin), rho_kg_m3=1.225,
         )
         result, _deriv = _AERO.compute_forces(inputs, state)
 
-        dyn.step(F_grav_cancel, result.M_orbital, DT, omega_spin=omega_spin)
+        dyn.step(F_grav_cancel, result.m_hub_world, DT, omega_spin=omega_spin)
 
         if i % 10 == 0:
             history.append((i * DT, _alignment_angle(bz_now, body_z_eq)))
@@ -205,7 +205,7 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
         RotorInputs(
             collective_rad=-0.05, tilt_lon=0.0, tilt_lat=0.0,
             R_hub=R, v_hub_world=np.zeros(3), wind_world=wind,
-            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225, t=0.0,
+            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
         ),
         tolerance_Nm=0.5,
     )
@@ -231,10 +231,10 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
     inputs = RotorInputs(
         collective_rad=-0.05, tilt_lon=tlon, tilt_lat=tlat,
         R_hub=R, v_hub_world=np.zeros(3), wind_world=wind,
-        omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
+        omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
     )
     result, _ = _AERO.compute_forces(inputs, trim.final_state)
-    M_mag = float(np.linalg.norm(result.M_orbital))
+    M_mag = float(np.linalg.norm(result.m_hub_world))
     assert M_mag < 5.0, (
         f"Trim feedforward did not cancel disturbance: |M|={M_mag:.2f} N*m"
     )
@@ -256,14 +256,14 @@ def test_wind_creates_baseline_hub_moment():
         collective_rad=0.0, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R, v_hub_world=np.zeros(3),
         wind_world=np.array([0.0, 10.0, 0.0]),
-        omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
+        omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
     )
     for _ in range(200):
         r, d = _AERO.compute_forces(inp, state)
         state = state.from_array(state.to_array() + 0.02 * d.to_array())
     r, _ = _AERO.compute_forces(inp, state)
 
-    M_mag = float(np.linalg.norm(r.M_orbital))
+    M_mag = float(np.linalg.norm(r.m_hub_world))
     assert M_mag > 50.0, (
         f"Expected a large baseline hub moment from cross-disk wind; got "
         f"|M|={M_mag:.1f} N*m"

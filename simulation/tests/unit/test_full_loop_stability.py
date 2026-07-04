@@ -120,7 +120,7 @@ def _run_attitude_only_at_fixed_equilibrium(
         RotorInputs(
             collective_rad=col_fixed, tilt_lon=0.0, tilt_lat=0.0,
             R_hub=R_eq, v_hub_world=np.zeros(3), wind_world=WIND,
-            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225, t=0.0,
+            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
         ),
         tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
     )
@@ -166,13 +166,13 @@ def _run_attitude_only_at_fixed_equilibrium(
         inputs = RotorInputs(
             collective_rad=col_fixed, tilt_lon=tlon, tilt_lat=tlat,
             R_hub=R, v_hub_world=np.zeros(3), wind_world=WIND,
-            omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
+            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
         )
         result, deriv = aero_model.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + DT * deriv.to_array())
 
         # Euler's equation with gyroscopic spin coupling.
-        tau_b   = R.T @ result.M_orbital
+        tau_b   = R.T @ result.m_hub_world
         H_spin  = np.array([0.0, 0.0, -I_spin * OMEGA_SPIN])   # FRD
         Ih      = I_b @ omega_b + H_spin
         gyro    = np.cross(omega_b, Ih)
@@ -298,7 +298,7 @@ def _run_with_constant_tether_force(
             RotorInputs(
                 collective_rad=COL_FIXED, tilt_lon=0.0, tilt_lat=0.0,
                 R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-                omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225, t=0.0,
+                omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
             ),
             tolerance_Nm=0.2, n_inflow_relax=200, dt_relax=DT,
         )
@@ -368,7 +368,7 @@ def _run_with_constant_tether_force(
         inputs = RotorInputs(
             collective_rad=COL_FIXED, tilt_lon=tlon, tilt_lat=tlat,
             R_hub=s["R"], v_hub_world=s["vel"], wind_world=WIND,
-            omega_rad_s=float(OMEGA_SPIN), t=10.0, rho_kg_m3=1.225,
+            omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
         )
         result, deriv = aero_model.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + DT * deriv.to_array())
@@ -382,7 +382,7 @@ def _run_with_constant_tether_force(
         if force_pulse is not None and pulse_t0 <= t_now < pulse_t1:
             F_ext = pulse_F
         F_net = result.F_world + F_tether + F_ext        # gravity added by dynamics
-        M_net = result.M_orbital                         # no tether moment
+        M_net = result.m_hub_world                         # no tether moment
         try:
             dyn.step(F_net, M_net, DT, omega_spin=OMEGA_SPIN)
         except (FloatingPointError, OverflowError, np.linalg.LinAlgError) as exc:

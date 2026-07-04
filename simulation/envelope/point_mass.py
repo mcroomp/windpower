@@ -142,7 +142,7 @@ def simulate_point(
 
     for i in range(n_steps):
         try:
-            f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(), omega, wind, t=45.0)
+            f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(), omega, wind)
         except (OverflowError, ValueError, FloatingPointError):
             break
         if not aero.is_valid():

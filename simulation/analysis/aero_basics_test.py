@@ -82,7 +82,7 @@ print(f"  {'-'*8}  {'-'*8}  {'-'*9}  {'-'*10}  {'-'*9}  {'-'*25}")
 WIND_NONE = np.array([0.0, 0.0, 0.0])
 for col in [COL_MIN, -0.20, -0.18, -0.15, -0.10, -0.05, 0.0, 0.05, COL_MAX]:
     res = aero.compute_forces(col, 0.0, 0.0, R_HOVER, np.zeros(3),
-                              OMEGA_IC, WIND_NONE, t=45.0)
+                              OMEGA_IC, WIND_NONE)
     F_up    = float(-res.F_world[2])   # NED Z negated = upward
     F_east  = float(res.F_world[1])
     F_north = float(res.F_world[0])
@@ -109,7 +109,7 @@ print(f"  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*9}  {'-'*10}  {'-'*20}")
 WIND_10 = np.array([0.0, 10.0, 0.0])
 for col in [COL_MIN, -0.20, -0.18, -0.15, -0.10, -0.05, 0.0, 0.05, COL_MAX]:
     res = aero.compute_forces(col, 0.0, 0.0, R_HOVER, np.zeros(3),
-                              OMEGA_IC, WIND_10, t=45.0)
+                              OMEGA_IC, WIND_10)
     F_up   = float(-res.F_world[2])
     Q_spin = float(res.Q_spin)
     driving = "DRIVING" if Q_spin > 0 else "BRAKING"
@@ -131,7 +131,7 @@ print(f"  {'-'*8}  {'-'*8}  {'-'*9}  {'-'*8}  {'-'*15}")
 
 for omega in [2.0, 5.0, 8.0, 10.0, 12.0, 15.0, 18.0, 20.0, 25.0, 30.0]:
     res = aero.compute_forces(0.0, 0.0, 0.0, R_HOVER, np.zeros(3),
-                              omega, WIND_10, t=45.0)
+                              omega, WIND_10)
     F_up   = float(-res.F_world[2])
     Q_spin = float(res.Q_spin)
     rpm    = omega * 60.0 / (2 * math.pi)

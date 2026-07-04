@@ -30,6 +30,10 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 from calibrate import _RUN_MODES as _CALIBRATE_RUN_MODES  # noqa: E402
 
+# IC (steady-state tethered-hover) orientation constants — single source of
+# truth in mediator_torque (derived from steady_state_starting.json R0).
+from mediator_torque import _IC_ROLL_RAD, _IC_PITCH_RAD, _IC_YAW_RAD  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Counter-torque motor stack fixtures
@@ -41,12 +45,27 @@ LUA_YAW_IC_COL:   float = -0.150  # rad
 
 @pytest.fixture
 def torque_armed(tmp_path, request):
-    """Counter-torque stack fixture (constant RPM). Yields StackContext."""
+    """Counter-torque stack fixture at the IC (high-tilt) orientation. Yields StackContext.
+
+    Boots from the FLIGHT default params (dual-GPS yaw, GPS pos/vel enabled) via
+    profile="ic": the hub is held at the steady-state tethered-hover attitude
+    (roll=0, pitch=-63.6 deg) instead of level.  rawes.lua boots in MODE_PASSIVE
+    (SCR_USER6=3); the IC operating point is seeded before arm (collective=
+    LUA_YAW_IC_COL, RIC/PIC=IC roll/pitch) and the EKF pre-arm attitude is seeded
+    from the live yaw.  ArduPilot's DDFP yaw PID regulates hub yaw via SERVO4.
+    """
     import torque_model as _m
     with _torque_stack(
         tmp_path,
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
+        profile="ic",
         test_name=request.node.name,
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
+        passive_roll_rad=_IC_ROLL_RAD,
+        passive_pitch_rad=_IC_PITCH_RAD,
+        passive_yaw_rad=_IC_YAW_RAD,
+        passive_yaw_ff_ki=0.05,
     ) as ctx:
         yield ctx
 
@@ -69,6 +88,8 @@ def torque_armed_profile(request, tmp_path):
         omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
         profile=profile,
         test_name=request.node.name,
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
     ) as ctx:
         yield ctx
 
@@ -228,6 +249,8 @@ def torque_armed_servo_tail(tmp_path, request):
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
     ) as ctx:
         yield ctx
 
@@ -254,6 +277,8 @@ def torque_armed_ddfp_zero(tmp_path, request):
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
     ) as ctx:
         yield ctx
 
@@ -281,6 +306,8 @@ def torque_armed_ddfp_ramp(tmp_path, request):
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
     ) as ctx:
         yield ctx
 
@@ -294,8 +321,11 @@ def torque_armed_ddfp(tmp_path, request):
     omega_motor (first-order lag), which drives psi_dot.  No prescribed yaw — this is
     the real closed loop.
 
-    SERVO4_MIN=800 / SERVO4_MAX=2000 (from _DDFP_TORQUE_EXTRA_PARAMS).  SCR_ENABLE=0
-    so no Lua scripting is active — ArduPilot's built-in DDFP controller runs alone.
+    SERVO4_MIN=800 / SERVO4_MAX=2000 (from _DDFP_TORQUE_EXTRA_PARAMS).  Uses the
+    flight GUIDED_NOGPS init technique (passive_init): rawes.lua boots in
+    MODE_PASSIVE (SCR_USER6=3) only to seed the IC operating point and hold the
+    level pre-arm attitude; yaw is still regulated solely by ArduPilot's built-in
+    DDFP controller (the Lua does not touch SERVO4 in MODE_PASSIVE).
     """
     import torque_model as _m
     with _torque_stack(
@@ -318,5 +348,7 @@ def torque_armed_ddfp(tmp_path, request):
             "ATC_RAT_YAW_I":    0.01,
             "ATC_RAT_YAW_IMAX": 0.7,   # must be > 0.505 (= throttle_eq + H_YAW_TRIM) to reach zero error
         },
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
     ) as ctx:
         yield ctx

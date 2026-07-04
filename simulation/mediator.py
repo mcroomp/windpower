@@ -775,7 +775,7 @@ def run_mediator(args, trajectory=None):
         aero_result   = result["aero_result"]
 
         F_net  = aero_result.F_world + tether_force
-        M_net  = aero_result.M_orbital + tether_moment
+        M_net  = aero_result.m_hub_world + tether_moment
         forces = np.concatenate([F_net, M_net + aero_result.M_spin])
 
         disk_normal = hub_state["R"][:, 2]
@@ -852,9 +852,9 @@ def run_mediator(args, trajectory=None):
                 "aero_fy":         aero_result.F_world[1],
                 "aero_fz":         aero_result.F_world[2],
                 "aero_T":          float(np.linalg.norm(aero_result.F_world)),
-                "aero_mx":         aero_result.M_orbital[0],
-                "aero_my":         aero_result.M_orbital[1],
-                "aero_mz":         aero_result.M_orbital[2],
+                "aero_mx":         aero_result.m_hub_world[0],
+                "aero_my":         aero_result.m_hub_world[1],
+                "aero_mz":         aero_result.m_hub_world[2],
                 "tether_mx":       tether_moment[0],
                 "tether_my":       tether_moment[1],
                 "tether_mz":       tether_moment[2],

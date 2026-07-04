@@ -110,7 +110,7 @@ def _ramp_full_column(args: tuple) -> list:
 
         try:
             f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(),
-                                    omega, wind_v, t=45.0)
+                                    omega, wind_v)
         except (OverflowError, ValueError, FloatingPointError):
             break
         if not aero.is_valid():

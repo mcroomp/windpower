@@ -90,7 +90,7 @@ def simulate_descent(
 
         # Aero forces with current state
         hub_vel = vel.copy()
-        f = aero.compute_forces(col, c_lon, c_lat, R, hub_vel, omega, wind, t=45.0)
+        f = aero.compute_forces(col, c_lon, c_lat, R, hub_vel, omega, wind)
 
         thrust  = float(np.dot(f.F_world, _BZ_VERT))   # upward = -F_world[2]
         Q_net   = float(np.dot(aero.last_M_spin, _BZ_VERT))
@@ -208,7 +208,7 @@ def simulate_descent_bem_ode(
     for i in range(n_steps):
         t = i * dt
 
-        f = aero.compute_forces(col, c_lon, c_lat, R, vel.copy(), omega, wind, t=45.0)
+        f = aero.compute_forces(col, c_lon, c_lat, R, vel.copy(), omega, wind)
 
         thrust     = float(np.dot(f.F_world, _BZ_VERT))
         Q_spin     = q_spin_from_aero(aero, R)

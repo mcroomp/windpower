@@ -247,7 +247,7 @@ if free:
     tensions = [r["tension"] for r in free]
     cols    = [r["col_rad"] for r in free]
     vels    = [r["vel_mag"] for r in free]
-    print(f"\nFree-flight summary ({len(free)} rows, t=[{free[0]['t']:.1f}, {free[-1]['t']:.1f}] s):")
+    print(f"\nFree-flight summary ({len(free)} rows, {free[-1]['t']:.1f}] s):")
     print(f"  Altitude: min={min(alts):.2f}  max={max(alts):.2f}  mean={sum(alts)/len(alts):.2f} m")
     print(f"  Tension:  min={min(tensions):.1f}  max={max(tensions):.1f}  mean={sum(tensions)/len(tensions):.1f} N")
     print(f"  Col rad:  min={min(cols):.4f}  max={max(cols):.4f}  mean={sum(cols)/len(cols):.4f} rad")

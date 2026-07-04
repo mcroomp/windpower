@@ -93,7 +93,7 @@ def compute_cl_naca_bem(mu: float, alpha_s_deg: float, pitch_deg: float) -> floa
     coll  = math.radians(pitch_deg)
 
     # t=100 bypasses the aero ramp
-    f = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), OMEGA, wind, t=100.0)
+    f = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), OMEGA, wind)
     T = float(np.dot(f[:3], R_hub[:, 2]))
     return T / NORM_NACA
 

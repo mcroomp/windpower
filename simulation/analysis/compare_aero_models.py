@@ -69,7 +69,6 @@ def _run_sweep(model_factory):
             v_hub_world=np.zeros(3),
             omega_rotor=OMEGA,
             wind_world=WIND_NED,
-            t=T_PAST_RAMP,
         )
         T   = model.last_T
         v_i = model.last_v_i
@@ -299,7 +298,7 @@ for _td, _col in sorted(_CRUISE_COL.items()):
     _R_hub = build_orb_frame(_bz)
     _kwargs = dict(collective_rad=_col, tilt_lon=0.0, tilt_lat=0.0,
                    R_hub=_R_hub, v_hub_world=np.zeros(3),
-                   omega_rotor=_OMEGA_CMP, wind_world=_WIND_CMP, t=_T_CMP)
+                   omega_rotor=_OMEGA_CMP, wind_world=_WIND_CMP)
     _fp = _peters.compute_forces(**_kwargs)
     _fs = _skewed_cmp.compute_forces(**_kwargs)
     _T_g = float(np.dot(_fp[:3], _bz))

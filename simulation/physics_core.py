@@ -331,7 +331,6 @@ class PhysicsCore:
             v_hub_world    = hub["vel"],
             wind_world     = self._wind,
             omega_rad_s    = self._omega_rad_s,
-            t              = self._t_sim,
             rho_kg_m3      = 1.225,
         )
         for _ in range(n_steps):
@@ -403,7 +402,7 @@ class PhysicsCore:
                 F_net = np.zeros(3)
                 result = SimpleNamespace(
                     F_world=np.zeros(3),
-                    M_orbital=np.zeros(3),
+                    m_hub_world=np.zeros(3),
                     M_spin=np.zeros(3),
                     Q_spin=0.0,
                 )
@@ -413,7 +412,7 @@ class PhysicsCore:
                 self._omega_rad_s = self._kinematic_omega_target(self._t_sim)
                 result = SimpleNamespace(
                     F_world=np.zeros(3),
-                    M_orbital=np.zeros(3),
+                    m_hub_world=np.zeros(3),
                     M_spin=np.zeros(3),
                     Q_spin=0.0,
                 )
@@ -433,7 +432,6 @@ class PhysicsCore:
                 v_hub_world    = hub["vel"],
                 wind_world     = self._wind,
                 omega_rad_s    = self._omega_rad_s,
-                t              = self.T_AERO_OFFSET + self._t_sim,
                 rho_kg_m3      = 1.225,
             )
             result, rotor_deriv = self._aero.compute_forces(rotor_inputs, self._rotor_state)
@@ -468,7 +466,7 @@ class PhysicsCore:
             # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle)
             k_total   = self._base_k_ang + self._startup_damp_k_ang * self._damp_alpha
             omega_yaw = float(np.dot(hub["omega"], disk_normal))
-            M_net = (result.M_orbital + tm
+            M_net = (result.m_hub_world + tm
                      - k_total * hub["omega"]
                      - self._k_yaw * omega_yaw * disk_normal)
 

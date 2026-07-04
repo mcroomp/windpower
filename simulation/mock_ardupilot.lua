@@ -274,6 +274,11 @@ function param:get(name)
     return _mock.params[name]
 end
 
+function param:set(name, value)
+    _mock.params[name] = value
+    return true
+end
+
 -- ── gcs ──────────────────────────────────────────────────────────────────────
 
 gcs = {}

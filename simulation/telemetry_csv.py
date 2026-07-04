@@ -509,7 +509,7 @@ class TelRow:
         net_M = np.zeros(3)
         if aero_result is not None:
             F = np.asarray(aero_result.F_world, dtype=float)
-            M = np.asarray(aero_result.M_orbital, dtype=float)
+            M = np.asarray(aero_result.m_hub_world, dtype=float)
             aero_fx, aero_fy, aero_fz = float(F[0]), float(F[1]), float(F[2])
             aero_mx, aero_my, aero_mz = float(M[0]), float(M[1]), float(M[2])
             net_F = F + tf

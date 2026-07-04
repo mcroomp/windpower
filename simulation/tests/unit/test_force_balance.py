@@ -47,7 +47,7 @@ def test_thrust_exceeds_weight_at_neutral_collective():
     R30 = _R_tilt(ELEV_DEG)
     r   = probe_steady(_AERO, collective_rad=0.0, R_hub=R30,
                        v_hub_world=np.zeros(3), omega_rotor=28.0,
-                       wind_world=WIND_EAST, t=T_STEADY)
+                       wind_world=WIND_EAST)
     thrust = _thrust_along_normal(r, R30)
     weight = _MASS * G
     assert thrust > weight, f"thrust={thrust:.1f} N < weight={weight:.1f} N at col=0"
@@ -57,7 +57,7 @@ def test_thrust_exceeds_2x_weight_at_positive_5deg():
     R30 = _R_tilt(ELEV_DEG)
     r   = probe_steady(_AERO, collective_rad=math.radians(5.0), R_hub=R30,
                        v_hub_world=np.zeros(3), omega_rotor=28.0,
-                       wind_world=WIND_EAST, t=T_STEADY)
+                       wind_world=WIND_EAST)
     thrust = _thrust_along_normal(r, R30)
     weight = _MASS * G
     assert thrust > 2.0 * weight, (
@@ -70,7 +70,7 @@ def test_h_force_positive_east_with_east_wind():
     R30 = _R_tilt(ELEV_DEG)
     r   = probe_steady(_AERO, collective_rad=0.0, R_hub=R30,
                        v_hub_world=np.zeros(3), omega_rotor=28.0,
-                       wind_world=WIND_EAST, t=T_STEADY)
+                       wind_world=WIND_EAST)
     Fy = float(r.F_world[1])
     assert Fy > 0.0, f"Fy={Fy:.3f} N not eastward with East wind"
 
@@ -79,10 +79,10 @@ def test_h_force_scales_with_wind_speed():
     R30 = _R_tilt(ELEV_DEG)
     f10 = probe_steady(_AERO, collective_rad=0.0, R_hub=R30,
                        v_hub_world=np.zeros(3), omega_rotor=28.0,
-                       wind_world=np.array([0., 10., 0.]), t=T_STEADY)
+                       wind_world=np.array([0., 10., 0.]))
     f20 = probe_steady(_AERO, collective_rad=0.0, R_hub=R30,
                        v_hub_world=np.zeros(3), omega_rotor=28.0,
-                       wind_world=np.array([0., 20., 0.]), t=T_STEADY)
+                       wind_world=np.array([0., 20., 0.]))
     assert float(f20.F_world[1]) > float(f10.F_world[1]), (
         "H-force did not increase with wind speed"
     )
@@ -97,7 +97,7 @@ def test_hover_collective_is_negative():
         col = math.radians(deg)
         r   = probe_steady(_AERO, collective_rad=col, R_hub=R30,
                            v_hub_world=np.zeros(3), omega_rotor=28.0,
-                           wind_world=WIND_EAST, t=T_STEADY)
+                           wind_world=WIND_EAST)
         if _thrust_along_normal(r, R30) <= weight:
             hover_deg = deg
             break
@@ -117,7 +117,7 @@ def _d_omega(omega: float, col: float, R_hub: np.ndarray) -> float:
     inputs = RotorInputs(
         collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R_hub, v_hub_world=np.zeros(3),
-        wind_world=WIND_EAST, omega_rad_s=float(omega), t=T_STEADY, rho_kg_m3=1.225,
+        wind_world=WIND_EAST, omega_rad_s=float(omega), rho_kg_m3=1.225,
     )
     dt = 0.02
     for _ in range(200):
@@ -156,7 +156,7 @@ def test_autorotation_omega_equilibrium_in_range():
         inputs = RotorInputs(
             collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
             R_hub=R30, v_hub_world=np.zeros(3),
-            wind_world=WIND_EAST, omega_rad_s=omega_now, t=T_STEADY, rho_kg_m3=1.225,
+            wind_world=WIND_EAST, omega_rad_s=omega_now, rho_kg_m3=1.225,
         )
         _r, deriv = _AERO.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + dt * deriv.to_array())

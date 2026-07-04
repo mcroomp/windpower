@@ -155,7 +155,6 @@ def _compute_ic() -> dict:
             collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
             R_hub=R_initial, v_hub_world=np.zeros(3), wind_world=WIND,
             omega_rad_s=omega_now,
-            t=PhysicsRunner.T_AERO_OFFSET,
             rho_kg_m3=1.225,
         )
         state = relax_inflow(_aero_est, state, inputs_eq, n_steps=400, dt=dt_eq)
@@ -177,8 +176,7 @@ def _compute_ic() -> dict:
         RotorInputs(
             collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
             R_hub=R_initial, v_hub_world=np.zeros(3), wind_world=WIND,
-            omega_rad_s=omega_now,
-            t=PhysicsRunner.T_AERO_OFFSET, rho_kg_m3=1.225,
+            omega_rad_s=omega_now, rho_kg_m3=1.225,
         ),
         n_inflow_relax=200, dt_relax=dt_eq,
         tolerance_Nm=0.1,
@@ -202,7 +200,7 @@ def _compute_ic() -> dict:
     diag_inputs = RotorInputs(
         collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R_initial, v_hub_world=vel_s, wind_world=WIND,
-        omega_rad_s=omega_spin_settled, t=PhysicsRunner.T_AERO_OFFSET, rho_kg_m3=1.225,
+        omega_rad_s=omega_spin_settled, rho_kg_m3=1.225,
     )
     f_stack, _ = _aero_est.compute_forces(diag_inputs, state)
     F_aero     = f_stack.F_world
@@ -240,7 +238,7 @@ def _compute_ic() -> dict:
         "T_tether":      T_tether,
         "F_aero":        F_aero,
         "f_teth":        f_teth,
-        "M_aero":        f_stack.M_orbital,
+        "M_aero":        f_stack.m_hub_world,
         "m_teth":        m_teth,
         "F_residual":    F_residual,
         "F_res_along":   F_res_along,

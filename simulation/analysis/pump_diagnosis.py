@@ -74,7 +74,6 @@ def _aero_thrust(col):
         v_hub_world=np.zeros(3),
         wind_world=WIND,
         omega_rad_s=OMEGA,
-        t=45.0,
         rho_kg_m3=1.225,
     )
     res, _ = _AERO.compute_forces(inputs, _AERO.initial_rotor_state())

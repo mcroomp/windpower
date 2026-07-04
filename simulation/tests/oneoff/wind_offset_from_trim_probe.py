@@ -87,7 +87,6 @@ def _solve_for_candidate(
         v_hub_world=np.zeros(3),
         wind_world=_wind_vec(wind_speed_mps, wind_az_rad),
         omega_rad_s=omega_rad_s,
-        t=T_AERO_OFFSET,
         rho_kg_m3=1.225,
     )
     return solve_trim_cyclic(

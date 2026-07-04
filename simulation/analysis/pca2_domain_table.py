@@ -37,7 +37,7 @@ def make_state(mu, as_deg):
 def find_autorotation_coll(R_hub, omega, wind):
     bz = R_hub[:, 2]
     def q(c):
-        f = aero.compute_forces(c, 0.0, 0.0, R_hub, np.zeros(3), omega, wind, t=10.0)
+        f = aero.compute_forces(c, 0.0, 0.0, R_hub, np.zeros(3), omega, wind)
         return float(np.dot(f[3:], bz))
     # Try two brackets: near-zero and wider
     for lo, hi in [(-0.08, 0.08), (-0.15, 0.15)]:
@@ -51,7 +51,7 @@ def find_autorotation_coll(R_hub, omega, wind):
 
 def ct_at(R_hub, omega, wind, coll):
     bz = R_hub[:, 2]
-    f  = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), omega, wind, t=10.0)
+    f  = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), omega, wind)
     T  = float(np.dot(f[:3], bz))
     return T / (RHO * A * (omega * R_TIP)**2)
 

@@ -1811,6 +1811,36 @@ _BASE_TORQUE_BOOT_PARAMS = ParamSetup({
     "H_RSC_RUNUP_TIME": 2,   # must be > H_RSC_RAMP_TIME (default 1) to pass prearm check
 })
 
+# IC-orientation torque rig (profile="ic"): the flight defaults
+# (rawes_sitl_defaults.parm) supply the GPS-yaw EKF + init, and H_TAIL_TYPE=3 /
+# SERVO4 range, but NOT the yaw-motor PID tuning.  ArduPilot firmware defaults
+# (ATC_RAT_YAW_P~0.18, I~0.018, IMAX=0.5, H_YAW_TRIM=0) cannot build the steady
+# ~0.5 throttle the rig needs to hold the constant rotor reaction torque, so the
+# spin saturates.  Overlay the SAME rig yaw tuning as _BASE_TORQUE_BOOT_PARAMS.
+# This is motor-control tuning only -- the EKF/yaw-source config stays on the
+# flight defaults (dual-GPS yaw, GPS pos/vel enabled), per "flight params, not
+# the compass".
+_IC_TORQUE_YAW_PARAMS = ParamSetup({
+    "ATC_RAT_YAW_P":    0.015,
+    # ATC_RAT_YAW_I = 0: the Lua MODE_PASSIVE feedforward (RAWES_YFK) now owns the
+    # yaw integration via H_YAW_TRIM, which is added downstream of the attitude
+    # controller's thrust/heading clamps -- so it can build the ~0.485 holding
+    # throttle even when those clamps freeze the native rate-PID integrator.
+    # Keeping a nonzero AP I here would double-integrate against the Lua trim and
+    # overshoot.  AP retains P (fast damping) only.
+    "ATC_RAT_YAW_I":    0.0,
+    # D experiment (0.003) made it WORSE: it shifted the early transient so the
+    # EKF lost the tilt sooner, the thrust-bypass clamp engaged at t=10 and froze
+    # the integrator at 0 (target=measured => zero error => no wind-up), leaving
+    # a steady -86 deg/s spin. Proves the clamp (EKF confusion) is the lock, not
+    # the PID damping. Fix is upstream: slow the spin-up ramp. Keep D small.
+    "ATC_RAT_YAW_D":    0.0005,
+    "ATC_RAT_YAW_IMAX": 0.7,
+    "ATC_RAT_RLL_IMAX": 0.0,
+    "ATC_RAT_PIT_IMAX": 0.0,
+    "H_YAW_TRIM":       0.02,
+})
+
 # Extra params for Lua torque fixtures.
 # ArduPilot's built-in DDFP yaw PID (H_TAIL_TYPE=3) drives SERVO4 for yaw control.
 # Arming is handled by GCS; Lua RAWES_ARM is an optional disarm timer only.
@@ -1925,6 +1955,12 @@ def _torque_stack(
     startup_hold_s: float = _TORQUE_STARTUP_HOLD_S,
     startup_yaw_rate_deg_s: float = 0.0,
     armon_ms: "int | None" = None,
+    passive_init: bool = False,
+    passive_col_rad: float = 0.0,
+    passive_roll_rad: float = 0.0,
+    passive_pitch_rad: float = 0.0,
+    passive_yaw_rad: "float | None" = None,
+    passive_yaw_ff_ki: "float | None" = None,
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
@@ -1954,27 +1990,74 @@ def _torque_stack(
                                   STATUSTEXT (hard fail if not received); no RC override sent.
                              0: skip arming entirely; yield unarmed (test controls arming).
                              None (default): GCS force-arm with Ch8=2000 RC override.
+    passive_init           : if True, adopt the flight GUIDED_NOGPS init technique:
+                             install rawes.lua, boot in MODE_PASSIVE (SCR_USER6=3),
+                             seed the IC operating point (RAWES_COL=passive_col_rad,
+                             RAWES_RIC=RAWES_PIC=0 -> level orientation) BEFORE arm, and
+                             seed the EKF pre-arm attitude from the live EKF yaw.  The
+                             Lua then commands the IC attitude as a GUIDED angle target
+                             while the yaw motor regulates.  Orientation is unchanged
+                             (roll=pitch=0); the hub does not rotate during the hold.
+    passive_col_rad        : IC collective [rad] seeded to MODE_PASSIVE when passive_init.
+    passive_roll_rad       : IC roll [rad] seeded to MODE_PASSIVE (RAWES_RIC) + pre-arm attitude.
+    passive_pitch_rad      : IC pitch [rad] seeded to MODE_PASSIVE (RAWES_PIC) + pre-arm attitude.
+    passive_yaw_rad        : optional fixed yaw target [rad] sent to MODE_PASSIVE (RAWES_YIC).
+                             When set, PASSIVE holds this absolute yaw instead of capturing
+                             (and chasing) the spinning AHRS yaw.  None -> AHRS capture.
+    passive_yaw_ff_ki      : optional Lua yaw-feedforward integral gain sent to MODE_PASSIVE
+                             (RAWES_YFK).  When > 0, rawes.lua runs an integral-trim on the
+                             measured spin rate and writes H_YAW_TRIM directly, bypassing the
+                             attitude-controller clamp that freezes the native rate PID.
+                             None/0 -> feedforward disabled (native DDFP PID only).
     """
-    # Pre-launch: install Lua scripts before SITL starts
+    # Pre-launch: install Lua scripts before SITL starts.
+    # passive_init requires rawes.lua (MODE_PASSIVE) -> ensure it is installed.
+    if passive_init and "rawes.lua" not in install_scripts:
+        install_scripts = (*install_scripts, "rawes.lua")
     if install_scripts:
         _install_lua_scripts(*install_scripts)
+
+    # passive_init boot overrides: enable scripting + MODE_PASSIVE (SCR_USER6=3).
+    _passive_boot = {"SCR_ENABLE": 1, "SCR_USER6": 3} if passive_init else {}
 
     # Build one complete param setup for this test.
     # Always-wipe EEPROM + per-test boot file = single source of truth.
     # Order (each layer overrides the previous):
     #   1. _BASE_TORQUE_BOOT_PARAMS  — all EKF/PID/RSC/arming/GPS-source values
     #   2. extra_params              — fixture-specific overrides (e.g. Lua)
-    #   3. boot_params               — caller-supplied boot-time extras (e.g. RPM1_TYPE)
-    torque_setup = (
-        _BASE_TORQUE_BOOT_PARAMS
-        .merge(extra_params or ParamSetup({}))
-        .merge(ParamSetup(boot_params) if boot_params else ParamSetup({}))
-    )
+    #   3. _passive_boot             — MODE_PASSIVE init overrides (passive_init)
+    #   4. boot_params               — caller-supplied boot-time extras (e.g. RPM1_TYPE)
+    #
+    # IC-orientation experiment (profile="ic"): boot from the FLIGHT default
+    # params (rawes_sitl_defaults.parm: dual-GPS yaw, GPS pos/vel enabled)
+    # instead of the compass-yaw torque base.  Those defaults already configure
+    # the GB4008 yaw motor (H_TAIL_TYPE, SERVO4 range, ATC_RAT_YAW, H_YAW_TRIM),
+    # so the torque extras here only carry the Lua/passive/boot overlays.
+    _ic_mode = (profile == "ic")
+    if _ic_mode:
+        torque_setup = (
+            _IC_TORQUE_YAW_PARAMS
+            .merge(extra_params or ParamSetup({}))
+            .merge(ParamSetup(_passive_boot) if _passive_boot else ParamSetup({}))
+            .merge(ParamSetup(boot_params) if boot_params else ParamSetup({}))
+        )
+        _stack_base_params = None
+        _stack_extra_boot  = dict(torque_setup.as_list())
+    else:
+        torque_setup = (
+            _BASE_TORQUE_BOOT_PARAMS
+            .merge(extra_params or ParamSetup({}))
+            .merge(ParamSetup(_passive_boot) if _passive_boot else ParamSetup({}))
+            .merge(ParamSetup(boot_params) if boot_params else ParamSetup({}))
+        )
+        _stack_base_params = torque_setup
+        _stack_extra_boot  = None
 
     with _sitl_stack(
         tmp_path,
-        test_name   = test_name,
-        base_params = torque_setup,
+        test_name         = test_name,
+        base_params       = _stack_base_params,
+        extra_boot_params = _stack_extra_boot,
     ) as sitl_ctx:
         log = sitl_ctx.log
         log.info(
@@ -2082,6 +2165,35 @@ def _torque_stack(
             torque_setup.verify(gcs, log=log, read_timeout=1.0)
             _assert_alive()
 
+            # passive_init: seed the IC operating point BEFORE arm so rawes.lua
+            # MODE_PASSIVE (SCR_USER6=3) captures yaw and begins commanding the IC
+            # attitude immediately.  Orientation stays level (roll=pitch=0); only
+            # the collective + the captured EKF yaw are held.  Mirrors the flight
+            # GUIDED_NOGPS init technique (seed IC -> seed pre-arm attitude -> arm).
+            _pre_arm_rpy = None
+            if passive_init:
+                _pre_arm_yaw = 0.0
+                _att = gcs._recv(type="ATTITUDE", blocking=True, timeout=2.0)
+                if _att is not None and all(
+                    math.isfinite(v) for v in (_att.roll, _att.pitch, _att.yaw)
+                ):
+                    _pre_arm_yaw = float(_att.yaw)
+                gcs.send_named_float("RAWES_COL", float(passive_col_rad))
+                gcs.send_named_float("RAWES_RIC", float(passive_roll_rad))
+                gcs.send_named_float("RAWES_PIC", float(passive_pitch_rad))
+                if passive_yaw_rad is not None:
+                    gcs.send_named_float("RAWES_YIC", float(passive_yaw_rad))
+                    _pre_arm_yaw = float(passive_yaw_rad)
+                if passive_yaw_ff_ki is not None:
+                    gcs.send_named_float("RAWES_YFK", float(passive_yaw_ff_ki))
+                log.info(
+                    "PASSIVE seed: RAWES_COL=%+.4f rad, RIC=%+.4f, PIC=%+.4f, YIC=%s; pre-arm yaw=%.1f deg",
+                    passive_col_rad, passive_roll_rad, passive_pitch_rad,
+                    ("%+.4f" % passive_yaw_rad) if passive_yaw_rad is not None else "capture",
+                    math.degrees(_pre_arm_yaw),
+                )
+                _pre_arm_rpy = (float(passive_roll_rad), float(passive_pitch_rad), _pre_arm_yaw)
+
             _arm_sequence(
                 gcs, log,
                 armon_ms=armon_ms,
@@ -2090,6 +2202,7 @@ def _torque_stack(
                 mode_timeout=10.0,
                 arm_timeout=15.0,
                 target_mode=GUIDED_NOGPS,
+                pre_arm_attitude_rpy=_pre_arm_rpy,
             )
             if armon_ms is None:
                 log.info("Armed via GCS -- profile=%s", profile)

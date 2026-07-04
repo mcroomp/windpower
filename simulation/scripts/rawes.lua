@@ -27,6 +27,8 @@ Ground planner signals via NAMED_VALUE_FLOAT:
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
     RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
     RAWES_ARM: optional disarm timer (value = ms until forced disarm)
+    RAWES_YFK: yaw-trim feedforward integral gain override (0 = disable; default YFF_KI).
+               Applies in passive + steady; learns H_YAW_TRIM to hold the rotor torque.
 
 Parameters:
   SCR_USER2   RAWES_BZ_SLEW   elevation slew rate     [rad/s]        default 0.40
@@ -69,6 +71,8 @@ MODE_LANDING = 4   -- reserved; not implemented here
 --   RAWES_RIC : IC roll       [rad]
 --   RAWES_PIC : IC pitch      [rad]
 -- They start nil and are committed atomically only after all three arrive.
+--   RAWES_YIC : fixed yaw target [rad] (optional).  When present, PASSIVE holds
+--               this absolute yaw instead of capturing the (spinning) AHRS yaw.
 
 -- RAWES_SUB carries a generic substate index (delivered via NAMED_VALUE_FLOAT).
 -- The ground pumping schedule runs in MODE_STEADY and uses RAWES_SUB only for
@@ -169,6 +173,7 @@ _dbg_cap_bz_y   = 0.0
 _dbg_cap_bz_z   = 1.0
 _capture_ms     = nil
 _passive_hold_yaw_rad = nil
+_passive_yaw_fixed_rad = nil   -- optional ground-provided fixed yaw target [rad] (RAWES_YIC)
 _first_nonzero_rate_logged = false
 _guided_cmd_last_log_ms = -2000
 
@@ -413,6 +418,24 @@ local _yaw_prev_e = 0.0
 local _man_tlon_rad = 0.0
 local _man_tlat_rad = 0.0
 
+-- Yaw feedforward trim (Lua integral + damping on H_YAW_TRIM).  Runs in the
+-- normal flight modes -- MODE_PASSIVE (kinematic release) AND MODE_STEADY -- as
+-- the primary yaw hold: it learns the DC holding throttle that counters the
+-- constant rotor reaction torque and writes it to H_YAW_TRIM, which is injected
+-- DOWNSTREAM of the AP attitude-controller clamps, so it keeps working even when
+-- those clamps freeze the native yaw-rate PID (the tilted-spin case).  See
+-- run_yaw_trim_ff for the full rationale.
+-- Enabled by default (YFF_KI).  The ground can retune or disable it via RAWES_YFK
+-- (RAWES_YFK = 0 disables, > 0 overrides the integral gain).
+local YFF_KI     = 0.05      -- default integral gain [trim per (rad/s)*s]
+local _yaw_ff_ki = YFF_KI    -- active integral gain (RAWES_YFK overrides; 0 = off)
+local _yaw_ff_i  = 0.0       -- integrator state = feedforward trim, [0, YFF_MAX]
+local YFF_MAX    = 0.7       -- max feedforward trim (matches ATC_RAT_YAW_IMAX)
+local YFF_KP     = 0.02      -- proportional damping [trim per rad/s] on measured spin.
+                            -- Catches fast disturbance spikes the slow integral
+                            -- misses.  Co-located with the trim (below the AP clamp),
+                            -- so it stays effective while the native PID is frozen.
+
 local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
 
 local function run_manual(dt)
@@ -518,8 +541,10 @@ local function _on_mode_enter(mode)
     end
     if mode == MODE_PASSIVE then
         -- Defer yaw capture until IC is fully seeded; PASSIVE should not emit
-        -- control API traffic before full IC arrives.
+        -- control API traffic before full IC arrives.  Reset the yaw-trim
+        -- integrator so each release starts learning the hold from zero.
         _passive_hold_yaw_rad = nil
+        _yaw_ff_i             = 0.0
     end
 end
 
@@ -762,6 +787,42 @@ local function run_armon(now)
     end
 end
 
+-- ── Yaw feedforward trim: Lua integral + damping on H_YAW_TRIM ──────────────
+-- Runs in the normal flight modes (MODE_PASSIVE + MODE_STEADY).  ArduPilot's
+-- native yaw-rate PID integrator is frozen whenever the EKF loses the disk tilt
+-- during a fast spin: a spin about a TILTED body-z gives the same body-frame
+-- gyro as a LEVEL spin, so the attitude controller's thrust-error / heading-
+-- error clamps fire and rewrite the commanded yaw RATE = measured gyro.  The
+-- rate PID then sees zero error and can never wind up the ~0.485 holding
+-- throttle needed to counter the rotor reaction torque.
+--
+-- H_YAW_TRIM is added DOWNSTREAM of that clamp (move_yaw(yaw_out + yaw_offset)
+-- in AP_MotorsHeli_Single), so a Lua integrator running on the RAW measured
+-- spin rate builds the feedforward the clamped PID cannot.  gyro:z() is the
+-- sensor estimate, not the clamp-rewritten target, so it still sees the true
+-- spin.  The integrator persists across the PASSIVE->STEADY handoff (reset only
+-- on PASSIVE entry), so the learned trim carries into steady flight with no
+-- discontinuity; once learned it holds at near-zero error while AP's own PID
+-- handles fine residual.  Enabled by default (YFF_KI); RAWES_YFK = 0 disables.
+local function run_yaw_trim_ff(dt)
+    if _yaw_ff_ki <= 0.0 then return end                 -- disabled when RAWES_YFK = 0
+    if not (_ic_seeded and arming:is_armed()) then return end
+    local gyro = ahrs:get_gyro()
+    if not gyro then return end
+    local err = -gyro:z()                                -- setpoint psi_dot = 0
+    _yaw_ff_i = _yaw_ff_i + _yaw_ff_ki * err * dt
+    if _yaw_ff_i > YFF_MAX then _yaw_ff_i = YFF_MAX end
+    if _yaw_ff_i < 0.0     then _yaw_ff_i = 0.0     end
+    -- Proportional damping is added on top of the integrator but NOT accumulated,
+    -- so it decays with the disturbance.  Total trim is clamped to [0, YFF_MAX].
+    local trim = _yaw_ff_i + YFF_KP * err
+    if trim > YFF_MAX then trim = YFF_MAX end
+    if trim < 0.0     then trim = 0.0     end
+    param:set("H_YAW_TRIM", trim)
+    gcs:send_named_float("YFF_I",  _yaw_ff_i)
+    gcs:send_named_float("YFF_GZ", gyro:z())
+end
+
 local function run_passive_mode(now)
     -- Armed-but-quiet: hold the IC operating point so the kinematic
     -- release transitions smoothly. Hold zero body-rate demand and
@@ -772,7 +833,12 @@ local function run_passive_mode(now)
         return
     end
 
-    if _passive_hold_yaw_rad == nil then
+    -- Yaw target: a ground-provided fixed yaw (RAWES_YIC) takes precedence and
+    -- is held as an absolute setpoint, so PASSIVE does not chase the spinning
+    -- AHRS yaw.  Without it, fall back to capturing the AHRS yaw once on entry.
+    if _passive_yaw_fixed_rad ~= nil then
+        _passive_hold_yaw_rad = _passive_yaw_fixed_rad
+    elseif _passive_hold_yaw_rad == nil then
         if not ahrs:healthy() then
             return
         end
@@ -816,6 +882,9 @@ local function update()
     -- Update altitude, tension, cyclic and collective targets from NV messages
     if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
     if _nv_floats["RAWES_TEN"] then _tension_n  = _nv_floats["RAWES_TEN"] end
+    -- Yaw feedforward trim gain override (0 = disable, > 0 = retune).  Enabled by
+    -- default (YFF_KI); persistent once sent.
+    if _nv_floats["RAWES_YFK"] then _yaw_ff_ki  = _nv_floats["RAWES_YFK"] end
 
     -- IC seed handling: do not set active IC commands until all three
     -- (collective, roll, pitch) have been observed at least once.
@@ -827,6 +896,9 @@ local function update()
     end
     if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
     if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
+    -- Optional fixed yaw target for MODE_PASSIVE.  When present, PASSIVE holds
+    -- this absolute yaw instead of capturing (and holding) the spinning AHRS yaw.
+    if _nv_floats["RAWES_YIC"] then _passive_yaw_fixed_rad = _nv_floats["RAWES_YIC"] end
 
     if not _ic_seeded then
         if _ic_pending_col ~= nil and _ic_pending_roll_deg ~= nil and _ic_pending_pitch_deg ~= nil then
@@ -890,10 +962,12 @@ local function update()
 
     if mode == MODE_PASSIVE then
         run_passive_mode(now)
+        run_yaw_trim_ff(BASE_PERIOD_MS * 0.001)
         return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_STEADY then
+        run_yaw_trim_ff(BASE_PERIOD_MS * 0.001)
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
             _last_flight_ms = now
             run_flight()

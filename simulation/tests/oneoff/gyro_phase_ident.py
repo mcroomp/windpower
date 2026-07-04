@@ -63,12 +63,11 @@ def _run_pulse(phase_deg: float, roll_cmd: float, pitch_cmd: float,
             v_hub_world=np.zeros(3),
             wind_world=WIND,
             omega_rad_s=OMEGA_SPIN,
-            t=45.0 + step * DT,
             rho_kg_m3=1.225,
         )
         result, deriv = aero.compute_forces(inputs, state)
         state = state.from_array(state.to_array() + DT * deriv.to_array())
-        dyn.step(gravity_cancel + result.F_world, result.M_orbital, DT,
+        dyn.step(gravity_cancel + result.F_world, result.m_hub_world, DT,
                  omega_spin=OMEGA_SPIN)
         s = dyn.state
         omega_samples.append(s["R"].T @ s["omega"])

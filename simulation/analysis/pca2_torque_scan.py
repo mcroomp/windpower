@@ -38,7 +38,7 @@ for mu, as_deg, rpm, ct_exp in TEST_POINTS:
     bz = R_hub[:, 2]
     vals = []
     for c in colls:
-        f = aero.compute_forces(c, 0.0, 0.0, R_hub, np.zeros(3), omega, wind, t=10.0)
+        f = aero.compute_forces(c, 0.0, 0.0, R_hub, np.zeros(3), omega, wind)
         vals.append(np.dot(f[3:], bz))
     print(f"{mu:>6.3f} {as_deg:>5.1f} | " + " ".join(f"{v:>9.1f}" for v in vals))
 
@@ -49,7 +49,7 @@ A     = math.pi * R_TIP**2
 def find_autorotation_coll(aero, R_hub, omega, wind):
     bz = R_hub[:, 2]
     def q(c):
-        f = aero.compute_forces(c, 0.0, 0.0, R_hub, np.zeros(3), omega, wind, t=10.0)
+        f = aero.compute_forces(c, 0.0, 0.0, R_hub, np.zeros(3), omega, wind)
         return float(np.dot(f[3:], bz))
     lo, hi = -0.08, 0.08
     if q(lo) * q(hi) > 0:
@@ -62,7 +62,7 @@ def find_autorotation_coll(aero, R_hub, omega, wind):
 
 def ct_at(aero, R_hub, omega, wind, coll):
     bz = R_hub[:, 2]
-    f  = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), omega, wind, t=10.0)
+    f  = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), omega, wind)
     T  = float(np.dot(f[:3], bz))
     return T / (RHO * A * (omega * R_TIP)**2)
 

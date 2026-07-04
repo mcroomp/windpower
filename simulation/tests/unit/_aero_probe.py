@@ -64,7 +64,6 @@ def probe_steady(
         v_hub_world=np.asarray(v_hub_world, dtype=float),
         wind_world=np.asarray(wind_world, dtype=float),
         omega_rad_s=float(omega_rotor),
-        t=t,
         rho_kg_m3=rho_kg_m3,
     )
     dt = 0.02

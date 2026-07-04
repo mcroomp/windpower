@@ -209,7 +209,7 @@ def assert_physics_yaw_rate(
     for s in samples:
         if abs(s["psi_dot"]) > threshold_rad_s:
             bad.record(
-                "yaw_violation", t=s["t"], phase="DYNAMIC", alt=0.0,
+                "yaw_violation", phase="DYNAMIC", alt=0.0,
                 psi_dot_deg_s=round(math.degrees(s["psi_dot"]), 2),
             )
 

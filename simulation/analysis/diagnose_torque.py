@@ -43,6 +43,7 @@ THROTTLE_EQ = OMEGA_NOM * GEAR_RATIO / RPM_SCALE   # ~0.485
 
 # ── diagnosis thresholds ─────────────────────────────────────────────────────
 FREEZE_REPEAT_S     = 4      # identical value for this many 1 Hz samples → frozen
+FREEZE_MIN_DEG_S    = 5.0    # frozen psi_dot below this is converged station-keeping, not a stall
 IMAX_MARGIN         = 0.01   # throttle within this of observed max → probably saturated
 MOTOR_DEAD_THROTTLE = 0.05   # throttle below this while psi_dot > threshold → dead
 SLOW_CONV_DEG_S     = 15.0   # psi_dot above this at window start → slow convergence
@@ -148,28 +149,49 @@ def _bucket_df(records: list[dict], t_lo: float, t_hi: float) -> list[dict]:
 # ── physics-side failure detectors ───────────────────────────────────────────
 
 def _detect_frozen(hb: list[dict]) -> list[str]:
+    """Detect a genuine SITL lockstep stall / mediator crash.
+
+    A real stall stops the mediator producing new frames: sim time `t_sim`
+    stops advancing and psi_dot freezes at whatever (typically non-converged)
+    value it last held. Two signatures distinguish that from healthy flight:
+
+      * t_sim does NOT advance across the frozen samples (the harness keeps
+        emitting 1 Hz heartbeats stamped with the stale sim time); and
+      * psi_dot is frozen ABOVE the converged station-keeping band.
+
+    Healthy station-keeping parks psi_dot near zero, and 2-decimal rounding
+    makes several consecutive samples read bit-identical (e.g. 0.50 deg/s) even
+    though the raw signal is jittering and t_sim keeps advancing. That is not a
+    stall, so we require BOTH a stalled clock and a non-converged magnitude.
+    """
     issues = []
     if len(hb) < 2:
         return issues
+
     run_val   = hb[0]["psi_dot_deg_s"]
     run_start = hb[0]["t_dyn"]
+    run_t0    = hb[0]["t_dyn"]
     run_len   = 1
+    prev_t    = hb[0]["t_dyn"]
+
+    def _flush(val: float, start: float, t0: float, t1: float, length: int) -> None:
+        clock_stalled = (t1 - t0) < FREEZE_REPEAT_S * 0.5   # sim time barely moved
+        non_converged = abs(val) > FREEZE_MIN_DEG_S
+        if length >= FREEZE_REPEAT_S and clock_stalled and non_converged:
+            issues.append(
+                f"FROZEN  psi_dot={val:.2f} deg/s stuck with stalled sim clock "
+                f"for {length} samples from t_dyn={start:.1f}s  (SITL stall or mediator crash)"
+            )
+
     for h in hb[1:]:
         v = h["psi_dot_deg_s"]
         if v == run_val:
             run_len += 1
         else:
-            if run_len >= FREEZE_REPEAT_S:
-                issues.append(
-                    f"FROZEN  psi_dot={run_val:.2f} deg/s stuck for {run_len}s "
-                    f"from t_dyn={run_start:.1f}s  (SITL stall or mediator crash)"
-                )
-            run_val, run_start, run_len = v, h["t_dyn"], 1
-    if run_len >= FREEZE_REPEAT_S:
-        issues.append(
-            f"FROZEN  psi_dot={run_val:.2f} deg/s stuck for {run_len}s "
-            f"from t_dyn={run_start:.1f}s  (SITL stall or mediator crash)"
-        )
+            _flush(run_val, run_start, run_t0, prev_t, run_len)
+            run_val, run_start, run_t0, run_len = v, h["t_dyn"], h["t_dyn"], 1
+        prev_t = h["t_dyn"]
+    _flush(run_val, run_start, run_t0, prev_t, run_len)
     return issues
 
 

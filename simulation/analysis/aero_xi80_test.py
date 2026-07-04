@@ -94,7 +94,6 @@ def run(col, tilt_lon, tilt_lat, label=""):
         v_hub_world=np.zeros(3),
         omega_rotor=OMEGA,
         wind_world=WIND,
-        t=45.0,
     )
     F  = res.F_world
     Fm = float(np.linalg.norm(F))

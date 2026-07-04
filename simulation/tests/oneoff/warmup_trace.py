@@ -52,12 +52,11 @@ def _build_initial_state():
     relax_kw  = dict(
         collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-        dt=dt_eq, t=PhysicsRunner.T_AERO_OFFSET,
+        dt=dt_eq,
     )
     inputs_eq = RotorInputs(
         collective_rad=STACK_COLL, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
-        t=PhysicsRunner.T_AERO_OFFSET,
     )
     for _ in range(8):
         state = relax_inflow(aero, state, n_steps=400, fix_omega=True, **relax_kw)
@@ -70,7 +69,7 @@ def _build_initial_state():
         collective_rad=STACK_COLL,
         R_hub=R0, v_hub_world=np.zeros(3), wind_world=WIND,
         n_inflow_relax=200, dt_relax=dt_eq, fix_omega=True,
-        tolerance_Nm=0.1, t=PhysicsRunner.T_AERO_OFFSET,
+        tolerance_Nm=0.1,
     )
     state = trim.final_state
     f_est, _ = aero.compute_forces(inputs_eq, state)

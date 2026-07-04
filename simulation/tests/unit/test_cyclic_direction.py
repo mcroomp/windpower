@@ -42,11 +42,10 @@ def _moment_body(aero, state, ic: SimpleNamespace, tilt_lon: float, tilt_lat: fl
         v_hub_world=ic.vel,
         wind_world=WIND,
         omega_rad_s=ic.omega_spin,
-        t=T_AERO,
         rho_kg_m3=RHO,
     )
     result, _ = aero.compute_forces(inputs, state)
-    return ic.R0.T @ np.asarray(result.M_orbital, dtype=float)
+    return ic.R0.T @ np.asarray(result.m_hub_world, dtype=float)
 
 
 def _fixture():

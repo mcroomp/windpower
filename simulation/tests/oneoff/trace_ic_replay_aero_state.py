@@ -118,7 +118,6 @@ def main() -> None:
             v_hub_world=hub_before["vel"],
             wind_world=icgen.WIND,
             omega_rad_s=runner.omega_spin,
-            t=PhysicsRunner.T_AERO_OFFSET + t_sim,
             rho_kg_m3=1.225,
         )
         live_result, live_deriv = runner.aero.compute_forces(inputs, rotor_state_before)

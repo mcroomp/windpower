@@ -57,7 +57,6 @@ def _setup_runner(setup_model: str, runner_model: str):
             v_hub_world=np.zeros(3),
             wind_world=icgen.WIND,
             omega_rad_s=omega_now,
-            t=PhysicsRunner.T_AERO_OFFSET,
             rho_kg_m3=1.225,
         )
         state = relax_inflow(aero_est, state, inputs_eq, n_steps=400, dt=dt_eq)
@@ -80,7 +79,6 @@ def _setup_runner(setup_model: str, runner_model: str):
             v_hub_world=np.zeros(3),
             wind_world=icgen.WIND,
             omega_rad_s=omega_now,
-            t=PhysicsRunner.T_AERO_OFFSET,
             rho_kg_m3=1.225,
         ),
         n_inflow_relax=200,
@@ -98,7 +96,6 @@ def _setup_runner(setup_model: str, runner_model: str):
             v_hub_world=np.zeros(3),
             wind_world=icgen.WIND,
             omega_rad_s=omega_now,
-            t=PhysicsRunner.T_AERO_OFFSET,
             rho_kg_m3=1.225,
         ),
         state,
@@ -193,12 +190,11 @@ def main() -> None:
                 v_hub_world=vel,
                 wind_world=icgen.WIND,
                 omega_rad_s=runner.omega_spin,
-                t=PhysicsRunner.T_AERO_OFFSET,
                 rho_kg_m3=1.225,
             )
             result, deriv = runner.aero.compute_forces(inputs, rotor_state)
             F = np.asarray(result.F_world, dtype=float)
-            M = np.asarray(result.M_orbital, dtype=float)
+            M = np.asarray(result.m_hub_world, dtype=float)
             F_body = R.T @ F
             print(label)
             print("  inputs:")
@@ -220,7 +216,7 @@ def main() -> None:
             print("  outputs:")
             print(f"    F_world={F.tolist()}")
             print(f"    F_body={F_body.tolist()}")
-            print(f"    M_orbital={M.tolist()}")
+            print(f"    m_hub_world={M.tolist()}")
             print(f"    Q_spin={float(result.Q_spin):+.6f}")
             print(f"    dstate={deriv.to_array().tolist()}")
             print("  projections:")
@@ -295,7 +291,6 @@ def main() -> None:
                 v_hub_world=vel,
                 wind_world=icgen.WIND,
                 omega_rad_s=runner.omega_spin,
-                t=PhysicsRunner.T_AERO_OFFSET,
                 rho_kg_m3=1.225,
             ),
             rotor_state,
@@ -325,7 +320,6 @@ def main() -> None:
                 v_hub_world=vel,
                 wind_world=icgen.WIND,
                 omega_rad_s=runner.omega_spin,
-                t=PhysicsRunner.T_AERO_OFFSET,
                 rho_kg_m3=1.225,
             ),
             rotor_state,
@@ -392,7 +386,6 @@ def main() -> None:
                     v_hub_world=vel,
                     wind_world=icgen.WIND,
                     omega_rad_s=runner.omega_spin,
-                    t=PhysicsRunner.T_AERO_OFFSET,
                     rho_kg_m3=1.225,
                 ),
                 rotor_state,

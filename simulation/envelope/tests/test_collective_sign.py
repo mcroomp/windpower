@@ -46,7 +46,6 @@ def _thrust(col):
         v_hub_world    = V_FALL,
         omega_rotor    = OMEGA,
         wind_world     = NO_WIND,
-        t              = T_STEADY,
     )
     bz = R_HORIZONTAL[:, 2]          # [0, 0, -1]
     return float(np.dot(r.F_world, bz))   # upward thrust > 0

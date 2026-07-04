@@ -109,7 +109,7 @@ def _make_aero(wind_ned: np.ndarray):
 def aero_thrust(col: float, wind_ned: np.ndarray, R_hub: np.ndarray = None) -> float:
     aero, w = _make_aero(wind_ned)
     R = IC_R0 if R_hub is None else R_hub
-    res = aero.compute_forces(col, 0.0, 0.0, R, np.zeros(3), OMEGA_SPIN, w, t=45.0)
+    res = aero.compute_forces(col, 0.0, 0.0, R, np.zeros(3), OMEGA_SPIN, w)
     return float(np.linalg.norm(res.F_world))
 
 def col_for_thrust(target: float, wind_ned: np.ndarray, n: int = 40) -> "float | None":

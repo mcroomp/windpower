@@ -28,7 +28,7 @@ def _settle_state(aero, omega_spin, R_hub, n_steps=50, dt=0.02):
     state.omega_rad_s = omega_spin
     inp = RotorInputs(
         collective_rad=-0.05, tilt_lon=0.0, tilt_lat=0.0,
-        R_hub=R_hub, v_hub_world=np.zeros(3), wind_world=np.zeros(3), t=10.0,
+        R_hub=R_hub, v_hub_world=np.zeros(3), wind_world=np.zeros(3),
     )
     for _ in range(n_steps):
         _, deriv = aero.compute_forces(inp, state)
@@ -57,12 +57,12 @@ def probe(phase_deg: float, tlon: float, tlat: float, *,
         s = dyn.state
         inp = RotorInputs(
             collective_rad=-0.05, tilt_lon=tlon, tilt_lat=tlat,
-            R_hub=s["R"], v_hub_world=s["vel"], wind_world=np.zeros(3), t=10.0,
+            R_hub=s["R"], v_hub_world=s["vel"], wind_world=np.zeros(3),
         )
         res, deriv = aero.compute_forces(inp, state)
         state = state.from_array(state.to_array() + dt * deriv.to_array())
         state.omega_rad_s = omega_spin
-        dyn.step(F_g + res.F_world, res.M_orbital, dt, omega_spin=omega_spin)
+        dyn.step(F_g + res.F_world, res.m_hub_world, dt, omega_spin=omega_spin)
     s = dyn.state
     return s["R"].T @ s["omega"]
 

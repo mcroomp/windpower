@@ -80,7 +80,7 @@ def _run_standalone_ramp():
 
         try:
             f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(),
-                                    omega, wind_v, t=45.0)
+                                    omega, wind_v)
         except (OverflowError, ValueError, FloatingPointError):
             diverged_at = (t_sim, tension)
             break

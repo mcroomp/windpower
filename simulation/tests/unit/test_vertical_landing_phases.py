@@ -74,7 +74,7 @@ def _aero(col: float, v_hub_ned: np.ndarray,
         _AERO,
         collective_rad=col,
         R_hub=R_hub, v_hub_world=v_hub_ned,
-        omega_rotor=omega, wind_world=WIND_NED, t=10.0,
+        omega_rotor=omega, wind_world=WIND_NED,
     )
     thrust_up = float(-res.F_world[2])
     return thrust_up, float(res.Q_spin)

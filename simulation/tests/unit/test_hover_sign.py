@@ -37,7 +37,7 @@ _AERO = make_probe()
 def test_hover_lift_is_upward():
     r = probe_steady(_AERO, collective_rad=0.0,
                      R_hub=R_HORIZONTAL, v_hub_world=V_FALL,
-                     omega_rotor=OMEGA, wind_world=NO_WIND, t=T_STEADY)
+                     omega_rotor=OMEGA, wind_world=NO_WIND)
     Fz = float(r.F_world[2])
     assert Fz < 0.0, (
         f"hover: F_world[2]={Fz:.3f} N -- expected negative (upward lift)"
@@ -48,7 +48,7 @@ def test_hover_lift_exceeds_weight():
     """At OMEGA=28 rad/s with 2 m/s inflow the rotor must support hub weight."""
     r = probe_steady(_AERO, collective_rad=0.0,
                      R_hub=R_HORIZONTAL, v_hub_world=V_FALL,
-                     omega_rotor=OMEGA, wind_world=NO_WIND, t=T_STEADY)
+                     omega_rotor=OMEGA, wind_world=NO_WIND)
     lift = -float(r.F_world[2])
     assert lift > HUB_W, (
         f"hover lift={lift:.1f} N < weight={HUB_W:.1f} N"
@@ -59,7 +59,7 @@ def test_autorotation_lift_is_upward():
     """In-plane wind with spinning rotor must produce upward force (F[2]<0)."""
     r = probe_steady(_AERO, collective_rad=0.0,
                      R_hub=R_HORIZONTAL, v_hub_world=np.zeros(3),
-                     omega_rotor=OMEGA_IC, wind_world=WIND_10E, t=T_STEADY)
+                     omega_rotor=OMEGA_IC, wind_world=WIND_10E)
     Fz = float(r.F_world[2])
     assert Fz < 0.0, (
         f"autorotation: F[2]={Fz:.3f} N -- expected negative (upward lift)"

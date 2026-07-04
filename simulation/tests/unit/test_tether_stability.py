@@ -96,7 +96,7 @@ def _compute_equilibrium_collective(
     def _probe(coll_rad):
         r = probe_steady(aero, collective_rad=coll_rad,
                          R_hub=R_hub, v_hub_world=np.zeros(3),
-                         omega_rotor=omega, wind_world=wind, t=10.0)
+                         omega_rotor=omega, wind_world=wind)
         return r.F_world
 
     for half_deg in range(0, -81, -1):

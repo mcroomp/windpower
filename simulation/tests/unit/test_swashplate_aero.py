@@ -66,9 +66,8 @@ def _forces6(tilt_deg: float, col_rad: float,
         v_hub_world=np.zeros(3),
         omega_rotor=_OMEGA,
         wind_world=_WIND,
-        t=_T,
     )
-    return np.concatenate([r.F_world, r.M_orbital + r.M_spin])
+    return np.concatenate([r.F_world, r.m_hub_world + r.M_spin])
 
 
 def _thrust(tilt_deg: float, col_rad: float,
@@ -211,9 +210,8 @@ def _forces6_no_wind(col_rad: float,
         v_hub_world=np.zeros(3),
         omega_rotor=_OMEGA,
         wind_world=np.zeros(3),
-        t=_T,
     )
-    return np.concatenate([r.F_world, r.M_orbital + r.M_spin])
+    return np.concatenate([r.F_world, r.m_hub_world + r.M_spin])
 
 
 def test_autorotation_no_wind_model_returns_finite():

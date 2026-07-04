@@ -58,7 +58,6 @@ def q_spin_settled(rotor, omega: float, R_hub: np.ndarray) -> float:
             v_hub_world=np.zeros(3),
             omega_rotor=omega,
             wind_world=WIND,
-            t=t,
         )
         q = result.Q_spin
     return q

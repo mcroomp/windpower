@@ -77,7 +77,6 @@ for coll in np.arange(-0.30, 0.15, 0.01):
         tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R_hub, v_hub_world=v_hub,
         omega_rotor=OMEGA_SPIN, wind_world=WIND,
-        t=T_AERO,
     )
     T_axial  = float(np.dot(r.F_world, disk_normal))   # thrust along disk axis
     net      = T_axial - w_axial                        # net axial force

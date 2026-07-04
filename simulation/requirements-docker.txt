@@ -13,4 +13,4 @@ pymavlink
 pyserial
 pexpect
 empy==3.3.4
-dynbem==0.4.0
+dynbem==0.5.0
