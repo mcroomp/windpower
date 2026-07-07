@@ -772,6 +772,45 @@ class RawesGCS:
 
         raise TimeoutError(f"Vehicle did not confirm armed within {timeout:.0f}s")
 
+    def disarm(self, timeout: float = 15.0, force: bool = True) -> None:
+        """Send disarm command and confirm via HEARTBEAT not-armed flag.
+
+        Parameters
+        ----------
+        force : bool
+            Pass the ArduPilot force-disarm magic number (21196) as param2 to
+            bypass the "vehicle is flying / motors running" refusal.  Default
+            True so a mid-run disarm succeeds in simulation.
+        """
+        param2 = 21196.0 if force else 0.0
+        log.info("Sending disarm command (force=%s) …", force)
+        self._mav.mav.command_long_send(
+            self._target_system,
+            self._target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,       # confirmation
+            0,       # param1: 0 = disarm
+            param2, 0, 0, 0, 0, 0,
+        )
+        deadline = self.sim_now() + timeout
+        while self.sim_now() < deadline:
+            msg = self._recv(
+                type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
+                blocking=True, timeout=0.5,
+            )
+            if msg is None:
+                continue
+            if msg.get_type() == "STATUSTEXT":
+                log.info("[t=%.1f] STATUSTEXT during disarm: %s",
+                         self.sim_now(), msg.text.rstrip("\x00").strip())
+                continue
+            if msg.get_type() == "HEARTBEAT":
+                armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                if not armed:
+                    log.info("[t=%.1f] Vehicle is disarmed.", self.sim_now())
+                    return
+        raise TimeoutError(f"Vehicle did not confirm disarmed within {timeout:.0f}s")
+
     # ------------------------------------------------------------------
     # Mode
     # ------------------------------------------------------------------

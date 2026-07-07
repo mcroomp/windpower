@@ -90,6 +90,15 @@ MODE_LANDING = 4   -- reserved; not implemented here
 MASS_KG  = 5.0
 G_ACCEL  = 9.81
 
+-- ── Safety: over-spin auto-disarm ─────────────────────────────────────────────
+-- If the body spin rate about ANY axis exceeds SPIN_LIMIT_RPM continuously for
+-- SPIN_LIMIT_MS, the vehicle auto-disarms.  Runs in EVERY mode while armed as a
+-- last-resort protection against a runaway spin (yaw motor fault, EKF/attitude
+-- divergence, etc.).  Any dip below the limit resets the timer.
+SPIN_LIMIT_RPM  = 60.0                                   -- per-axis body rate cap [RPM]
+SPIN_LIMIT_RADS = SPIN_LIMIT_RPM * 2.0 * math.pi / 60.0  -- = 2*pi ~ 6.283 rad/s (360 deg/s)
+SPIN_LIMIT_MS   = 20000                                  -- sustained ms before disarm
+
 -- ── GPS / attitude ──────────────────────────────────────────────────────────────────
 
 MIN_TETHER_M     = 0.5        -- minimum tether length before GPS init activates
@@ -133,6 +142,10 @@ _none_status_ms = 0
 -- RAWES_ARM disarm timer
 _armon_deadline_ms = nil
 _armon_secs        = 0
+
+-- Over-spin auto-disarm: millis() when the spin first exceeded SPIN_LIMIT_RADS
+-- (nil while within limits or disarmed).
+_spin_over_since_ms = nil
 
 -- Mode / substate tracking
 _prev_mode  = -1
@@ -852,6 +865,38 @@ local function run_armon(now)
     end
 end
 
+-- ── Over-spin auto-disarm safety (runs in every mode) ──────────────────────────
+-- Disarm if |body rate| about any axis stays above SPIN_LIMIT_RADS for longer
+-- than SPIN_LIMIT_MS.  The timer latches on first exceedance and resets on any
+-- dip below the limit, so only a SUSTAINED overspin trips it.
+local function run_spin_safety(now)
+    if not arming:is_armed() then
+        _spin_over_since_ms = nil
+        return
+    end
+    local gyro = ahrs:get_gyro()
+    if not gyro then return end
+    local over = (math.abs(gyro:x()) > SPIN_LIMIT_RADS
+               or math.abs(gyro:y()) > SPIN_LIMIT_RADS
+               or math.abs(gyro:z()) > SPIN_LIMIT_RADS)
+    if not over then
+        _spin_over_since_ms = nil
+        return
+    end
+    if _spin_over_since_ms == nil then
+        _spin_over_since_ms = now
+        gcs:send_text(4, string.format(
+            "RAWES SPIN WARN: >%.0f RPM about an axis; auto-disarm in %ds if sustained",
+            SPIN_LIMIT_RPM, math.floor(SPIN_LIMIT_MS / 1000)))
+    elseif now - _spin_over_since_ms >= SPIN_LIMIT_MS then
+        _spin_over_since_ms = nil
+        arming:disarm()
+        gcs:send_text(3, string.format(
+            "RAWES SAFETY: spin >%.0f RPM for %ds -- AUTO-DISARMED",
+            SPIN_LIMIT_RPM, math.floor(SPIN_LIMIT_MS / 1000)))
+    end
+end
+
 -- ── Yaw feedforward trim: adaptive throttle observer on H_YAW_TRIM ──────────
 -- Runs in the normal flight modes (MODE_PASSIVE + MODE_STEADY).  ArduPilot's
 -- native yaw-rate PID integrator is frozen whenever the EKF loses the disk tilt
@@ -931,12 +976,12 @@ local function run_yaw_trim_ff(dt)
 
     -- Telemetry: trim, applied throttle, spin (every tick); learned slope
     -- streamed periodically to keep the NVF rate down.
-    gcs:send_named_float("YFF_T",  _yaw_ff_trim)
-    gcs:send_named_float("YFF_U",  u)
-    gcs:send_named_float("YFF_GZ", psi_dot)
     _yaw_a_nvf_ctr = _yaw_a_nvf_ctr + 1
     if _yaw_a_nvf_ctr >= YFF_A_NVF_TICKS then
         _yaw_a_nvf_ctr = 0
+        gcs:send_named_float("YFF_T",  _yaw_ff_trim)
+        gcs:send_named_float("YFF_U",  u)
+        gcs:send_named_float("YFF_GZ", psi_dot)
         gcs:send_named_float("YFF_A", _yaw_a_hat)
     end
 end
@@ -947,7 +992,22 @@ local function run_passive_mode(now)
     -- pass IC collective through GUIDED throttle (no H_FLYBAR_MODE
     -- dependency).
     local ic_ready = (_ic_col ~= nil and _ic_roll_deg ~= nil and _ic_pitch_deg ~= nil)
+
+    local mode_now  = vehicle:get_mode()
+    local guided_ok = (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy()
+
     if not ic_ready then
+        -- No IC seed yet: instead of sitting idle, actively damp any rotation
+        -- to a standstill using the rate-only GUIDED API.  Commanding zero body
+        -- rates lets ArduPilot's rate controller null the rotor-reaction /
+        -- disturbance spin while we wait for the ground to send the IC seed.
+        -- Gated on armed so we never emit control-API traffic during the pre-arm
+        -- kinematic phase (motors are off when disarmed anyway).  Uses a default
+        -- collective so rotor RPM is preserved.
+        if guided_ok and arming:is_armed() then
+            local col_thrust_d = col_rad_to_thrust(ic_col_or_default())
+            vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, col_thrust_d)
+        end
         return
     end
 
@@ -968,8 +1028,7 @@ local function run_passive_mode(now)
     end
 
     local col_thrust_p = col_rad_to_thrust(ic_col_or_default())
-    local mode_now = vehicle:get_mode()
-    if ic_ready and (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy() then
+    if guided_ok then
         send_guided_angle_rate_throttle(
             _ic_roll_deg, _ic_pitch_deg, math.deg(_passive_hold_yaw_rad or 0.0),
             0.0, 0.0, 0.0, col_thrust_p,
@@ -1053,6 +1112,9 @@ local function update()
     -- particular, MODE_PASSIVE before full IC seed still needs the safety timer
     -- to expire and disarm if requested by the ground.
     run_armon(now)
+
+    -- Over-spin auto-disarm: last-resort protection in EVERY mode.
+    run_spin_safety(now)
 
     -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up).
     -- In PASSIVE before full IC seed, avoid all non-essential control API calls.

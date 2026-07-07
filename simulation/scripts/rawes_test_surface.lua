@@ -59,6 +59,13 @@ _rawes_fns = {
     run_armon  = run_armon,
     run_manual = run_manual,
 
+    -- ── Over-spin auto-disarm safety ─────────────────────────────────────────
+    run_spin_safety    = run_spin_safety,
+    spin_over_since_ms = function() return _spin_over_since_ms end,
+    SPIN_LIMIT_RPM     = SPIN_LIMIT_RPM,
+    SPIN_LIMIT_RADS    = SPIN_LIMIT_RADS,
+    SPIN_LIMIT_MS      = SPIN_LIMIT_MS,
+
     -- ── Yaw feedforward trim observer ────────────────────────────────────────
     -- Pure observer core + state accessors + reset (unit-testable in isolation).
     yaw_trim_ff_step = yaw_trim_ff_step,

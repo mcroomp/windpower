@@ -892,9 +892,10 @@ Long-running (always log; ESC or Ctrl-C aborts):
                            the other two stay near center.
 
         Modes (run with no args to see force_params per mode):
-          passive   armed but quiet -- pins ch1/ch2/ch3 at IC trim, SERVO4
-                    at 800 us.  Sets H_FLYBAR_MODE=1 (RC passthrough),
-                    H_CYC_MAX=1000 (10 deg cap), H_SV_MAN=0.
+          passive   armed but quiet in GUIDED_NOGPS (matches the SITL passive
+                    test).  Seeds the IC (RAWES_COL/RIC/PIC) and holds the IC
+                    attitude via the GUIDED angle API; DDFP yaw motor stays
+                    under AP + the Lua H_YAW_TRIM observer.
           manual    yaw compensation (SERVO4 PID) + NVF-commanded cyclic /
                     collective.  Sets H_FLYBAR_MODE=1, H_CYC_MAX=1000,
                     H_SV_MAN=0.  For an interactive session use the `manual`
@@ -903,22 +904,19 @@ Long-running (always log; ESC or Ctrl-C aborts):
           pumping   De Schutter pumping cycle
           landing   landing (reserved)
 
-        Examples (all trim values in DEGREES):
-          # Hold IC cyclic + collective on the bench for 30 s
-          run passive --duration 30 --trim tlon=1.15,col=-8.6
+        Examples (IC angles in DEGREES):
+          # Hold the level IC (roll=pitch=0, col=-8.6 deg) on the bench for 30 s
+          run passive --duration 30 --trim col=-8.6
 
-          # Pure lateral cyclic: 2.9 deg roll-right, collective neutral
-          run passive --duration 20 --trim tlat=2.9,col=0
+          # Hold a tilted IC: 3 deg roll, -25 deg pitch, IC collective
+          run passive --duration 20 --roll 3 --pitch -25 --trim col=-8.6
 
-          # Pure longitudinal: 1.7 deg nose-down for 5 s
-          run passive --duration 5 --trim tlon=1.7
+          # Unbounded passive session (ESC to stop, 5-min RAWES_ARM fallback)
+          run passive
 
           # Yaw tuning: gentler P, lower motor max, IC operating point loaded
           run yaw --duration 60 --gain p=0.015,i=0.005,imax=0.7,servo_max=1100 \\
                   --trim tlon=1.15,col=-8.6
-
-          # Unbounded passive session (ESC to stop, 5-min RAWES_ARM fallback)
-          run passive --trim tlon=1.15,tlat=-0.6,col=-8.6
 
           # Full oscillation sweep through every axis extreme (~65 s)
           run passive --osc all
@@ -1465,6 +1463,10 @@ _OSCILLATE_STEP_S = 5.0
 #                    (e.g. H_FLYBAR_MODE=1 to bypass the rate PID for passive)
 _TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT", "col": "RAWES_COL"}
 
+# Default passive IC collective [deg blade pitch] when --trim col is not given.
+# -8.6 deg ~ -0.15 rad, the RAWES operating-point collective.
+_PASSIVE_IC_COL_DEG = -8.6
+
 # Normalisation helpers for the manual / manualtest commands.
 # Lua's run_manual() expects RAWES_COL in [0,1] and RAWES_TLN/TLT in [-1,1].
 _MAN_COL_MIN_RAD = -0.28          # must match COL_MIN_RAD in rawes.lua
@@ -1484,29 +1486,16 @@ def _cyc_nvf(cyc_rad: float) -> float:
 
 _RUN_MODES = {
     "passive": {
-        "scr_user6":  3,
-        "take_servo4": True,
-        "gain_keys":  {},
-        "force_params": {
-            # Flybar passthrough: ACRO sends RC1/RC2 stick deflection straight to
-            # the swash (passthrough_bf_roll_pitch_rate_yaw) instead of through
-            # the rate PID -- trim becomes a direct cyclic command.
-            "H_FLYBAR_MODE": 1,
-            # Cap cyclic at 15 deg of swash tilt at full stick.
-            "H_CYC_MAX": 1500,
-            # Collective range matched to physical servo geometry.
-            "H_COL_MIN": 1400,
-            "H_COL_MAX": 1800,
-            # Servo trims: all three swash servos level at 1600 us.
-            "SERVO1_TRIM": 1600,
-            "SERVO2_TRIM": 1600,
-            "SERVO3_TRIM": 1600,
-            # Disable manual servo override -- we want the live mixer driving
-            # the swash, not a fixed pose.  H_SV_MAN > 0 is for setup only and
-            # must be 0 during any actual run.
-            "H_SV_MAN": 0,
-        },
-        "doc":        "armed but quiet: pins ch1/ch2/ch3 at IC trim, pins SERVO4 at 800 us, H_FLYBAR_MODE=1, H_CYC_MAX=1500, H_COL_MIN=1400, H_COL_MAX=1800, SERVO1/2/3_TRIM=1600, H_SV_MAN=0",
+        "scr_user6":   3,
+        # Match the SITL passive arming flow: boot into GUIDED_NOGPS and hold the
+        # IC attitude via the GUIDED angle API -- NOT the legacy flybar/RC path.
+        "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
+        "ic_seed":     True,     # seed RAWES_COL/RIC/PIC so PASSIVE holds the IC
+        "take_servo4": False,    # DDFP yaw motor (SERVO4=Motor4) stays under AP +
+                                 # the Lua H_YAW_TRIM observer -- do NOT reassign it.
+        "gain_keys":   {},
+        "force_params": {},
+        "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_COL/RIC/PIC) and holds the IC attitude via the GUIDED angle API; DDFP yaw motor stays under AP + the Lua H_YAW_TRIM observer.  IC via --trim col=<deg> --roll <deg> --pitch <deg>.",
     },
     "manual": {
         "scr_user6":  2,
@@ -1572,6 +1561,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         "--trim":             "kv",
         "--gain":             "kv",
         "--osc":              "str",
+        "--roll":             "float",   # passive IC roll  [deg] (RAWES_RIC)
+        "--pitch":            "float",   # passive IC pitch [deg] (RAWES_PIC)
         "--exclude-saturate": "bool",
     }
     if not args:
@@ -1676,6 +1667,29 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     # Activate Lua mode
     session.set_param("SCR_USER6", cfg["scr_user6"])
     print(f"  SCR_USER6 -> {cfg['scr_user6']} ({name} mode)")
+
+    # Flight mode required by this Lua mode (e.g. GUIDED_NOGPS for passive) --
+    # matches the SITL passive arming flow.  Set BEFORE arming so we arm in the
+    # right mode, just like the SITL test (INITIAL_MODE=GUIDED_NOGPS).
+    _fm = cfg.get("flight_mode")
+    if _fm is not None:
+        session.set_mode(_fm)
+        print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
+
+    # Seed the IC (RAWES_COL/RIC/PIC) BEFORE arming so PASSIVE holds a defined
+    # attitude (mirrors the SITL passive_init seed).  Collective comes from
+    # --trim col (deg blade pitch), roll/pitch from --roll/--pitch (deg), all
+    # sent on the wire in radians.  Without a seed PASSIVE just zero-rates.
+    if cfg.get("ic_seed"):
+        col_deg   = float(trim.get("col", _PASSIVE_IC_COL_DEG))
+        roll_deg  = float(flags.get("--roll", 0.0))
+        pitch_deg = float(flags.get("--pitch", 0.0))
+        print("  Seeding IC (deg -> rad on the wire):")
+        for nvf, deg in (("RAWES_COL", col_deg), ("RAWES_RIC", roll_deg), ("RAWES_PIC", pitch_deg)):
+            session.send_named_float(nvf, math.radians(deg))
+            print(f"    {nvf} = {deg:+7.3f} deg  ({math.radians(deg):+.4f} rad)")
+        # col was consumed by the IC seed -- don't re-send it via the trim block.
+        trim.pop("col", None)
 
     # Send NVF trims.  --trim values are user-facing DEGREES; convert to
     # radians for the wire (rawes.lua receives RAWES_TLN/TLT/COL in radians).
