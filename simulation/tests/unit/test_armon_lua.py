@@ -80,6 +80,17 @@ class TestArmonExpiry:
         assert _armon_deadline_ms(sim) is not None
         assert not sim.has_message("expired")
 
+    def test_expiry_disarms_in_passive_before_ic_seed(self):
+        """RAWES_ARM expiry must still disarm in MODE_PASSIVE before IC seed."""
+        sim = RawesLua(mode=3)  # MODE_PASSIVE
+        sim.armed = True
+        _send_arm(sim, 100.0)
+        sim.tick()
+        sim.run(0.2)
+        assert sim.armed is False
+        assert _armon_deadline_ms(sim) is None
+        assert sim.has_message("RAWES disarm timer expired, disarmed")
+
 
 # ---------------------------------------------------------------------------
 # 3. Deadline refresh and deferred armed expiry

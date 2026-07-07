@@ -156,27 +156,28 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name) as ctx:
-        # Post-arm: configure rawes.lua via SCR_USER params.
-        # SCR_USER5 = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
+        # Post-arm: configure rawes.lua.  Mode via SCR_USER6; slew + anchor via
+        # NAMED_VALUE_FLOAT.
+        # RAWES_AND = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
         # vel0[2]=0 => altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
-        # anch_EKF.z = SCR_USER5 = -pos0[2] = altitude above EKF origin.
+        # anch_EKF.z = RAWES_AND = -pos0[2] = altitude above EKF origin.
         # Lua: alt_est = anch.z - hub_ned.z (hub_ned.z from LOCAL_POSITION_NED).
         #
         # SCR_USER6=4 set here; rawes.lua DELAYS body_z capture until
         # millis() >= KINEMATIC_SETTLE_MS (62 s) to ensure EKF has converged.
-        ctx.log.info("Setting SCR_USER params for rawes.lua (landing mode) ...")
-        lua_params = {
-            "SCR_ENABLE": 1,                    # persist scripting in EEPROM for future boots
-            "SCR_USER1": 1.0,                   # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,                  # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": 0.0,                   # anchor North   [m]
-            "SCR_USER4": 0.0,                   # anchor East    [m]
-            "SCR_USER5": -extra["pos0"][2],     # anchor Down in EKF frame = 20.0 m
-            "SCR_USER6": 4,                     # RAWES_MODE = 4 (landing)
-        }
-        for pname, pvalue in lua_params.items():
-            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
-            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
+        ctx.log.info("Setting mode param + slew/anchor NVFs for rawes.lua (landing mode) ...")
+        ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
+        ctx.gcs.set_param("SCR_USER6", 4, timeout=5.0)    # RAWES_MODE = 4 (landing)
+        # Slew + anchor are NAMED_VALUE_FLOAT (formerly SCR_USER2/3/4/5).  Mode is
+        # the only remaining SCR_USER parameter.  The anchor is at world origin;
+        # here anchor North/East = 0 and anchor Down (EKF frame) = -pos0[2].
+        # rawes.lua gates altitude-hold capture on all three anchor floats.
+        ctx.gcs.send_named_float("RAWES_SLW", 0.40)                     # body_z slew [rad/s]
+        ctx.gcs.send_named_float("RAWES_ANN", 0.0)                      # anchor North [m]
+        ctx.gcs.send_named_float("RAWES_ANE", 0.0)                      # anchor East  [m]
+        ctx.gcs.send_named_float("RAWES_AND", -float(extra["pos0"][2])) # anchor Down  [m]
+        ctx.log.info("  mode=4 (landing); slew+anchor sent via NVF (anchor D=%.2f)",
+                     -float(extra["pos0"][2]))
 
         ctx.wait_drain(timeout=1.0, label="post-param")
         yield ctx
@@ -306,31 +307,29 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         test_name=test_name,
         arm_at_sim_s=_arm_at_sim_s,
     ) as ctx:
-        ctx.log.info("Setting SCR_USER params for rawes.lua ...")
+        ctx.log.info("Setting mode param + slew/anchor NVFs for rawes.lua ...")
         # The anchor is at world origin; the EKF origin is the hub's first
         # GPS fix = launch position pos0.  So anchor-in-EKF-frame = -pos0.
-        # SCR_USER3/4 must encode the horizontal offset (negated launch x/y)
+        # RAWES_ANN/ANE must encode the horizontal offset (negated launch x/y)
         # or the Lua sees the anchor directly below the hub and computes
         # elevation = 90 deg, producing a saturated cyclic that kicks the
         # body at kinematic_exit.
         _pos0 = ctx.initial_state["pos"] if ctx.initial_state else [0.0, 0.0, -ctx.home_alt_m]
-        lua_params = {
-            "SCR_ENABLE": 1,              # persist scripting in EEPROM
-            "SCR_USER1": 1.0,             # RAWES_KP_CYC   [rad/s / rad]
-            "SCR_USER2": 0.40,            # RAWES_BZ_SLEW  [rad/s]
-            "SCR_USER3": -float(_pos0[0]),   # anchor North in EKF frame [m]
-            "SCR_USER4": -float(_pos0[1]),   # anchor East  in EKF frame [m]
-            "SCR_USER5":  ctx.home_alt_m,    # anchor Down  in EKF frame [m]
-            # MODE_PASSIVE (3): vehicle stays armed (motor interlock kept
-            # high) but Lua emits no rate commands.  ArduPilot's rate PID
-            # therefore has no setpoint to wind up against while the body
-            # is kinematically locked.  The test must promote to
-            # MODE_STEADY (1) immediately after kinematic_exit.
-            "SCR_USER6": 3,
-        }
-        for pname, pvalue in lua_params.items():
-            ok = ctx.gcs.set_param(pname, pvalue, timeout=5.0)
-            ctx.log.info("  %-12s = %g  ACK=%s", pname, pvalue, ok)
+        # Mode is the only SCR_USER parameter; slew + anchor are NAMED_VALUE_FLOAT
+        # (formerly SCR_USER2/3/4/5).
+        ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
+        # MODE_PASSIVE (3): vehicle stays armed (motor interlock kept high) but
+        # Lua emits no rate commands, so ArduPilot's rate PID has no setpoint to
+        # wind up against while the body is kinematically locked.  The test must
+        # promote to MODE_STEADY (1) immediately after kinematic_exit.
+        ctx.gcs.set_param("SCR_USER6", 3, timeout=5.0)    # RAWES_MODE = MODE_PASSIVE
+        # rawes.lua gates altitude-hold capture on all three anchor floats arriving.
+        ctx.gcs.send_named_float("RAWES_SLW", 0.40)                  # body_z slew [rad/s]
+        ctx.gcs.send_named_float("RAWES_ANN", -float(_pos0[0]))      # anchor North (EKF) [m]
+        ctx.gcs.send_named_float("RAWES_ANE", -float(_pos0[1]))      # anchor East  (EKF) [m]
+        ctx.gcs.send_named_float("RAWES_AND", float(ctx.home_alt_m)) # anchor Down  (EKF) [m]
+        ctx.log.info("  mode=3 (PASSIVE); slew+anchor via NVF (anchor EKF=%.2f,%.2f,%.2f)",
+                     -float(_pos0[0]), -float(_pos0[1]), float(ctx.home_alt_m))
         ctx.wait_drain(timeout=1.0, label="post-param")
 
         # Stream IC collective to Lua so MODE_PASSIVE holds the IC collective

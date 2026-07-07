@@ -29,6 +29,8 @@ Examples
 from __future__ import annotations
 
 import json
+import math
+import re
 import sys
 from pathlib import Path
 
@@ -146,6 +148,305 @@ def _bucket_df(records: list[dict], t_lo: float, t_hi: float) -> list[dict]:
     return [r for r in records if t_lo <= r["t_dyn"] < t_hi]
 
 
+def _load_params(log_dir: Path) -> dict:
+    p = log_dir / "params.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def _load_mavlink(log_dir: Path) -> list[dict]:
+    p = log_dir / "mavlink.jsonl"
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
+def _detect_trim_adaptive_mode(log_dir: Path, mav_msgs: list[dict], params: dict) -> tuple[bool, list[str]]:
+    """Best-effort detection of trim-adaptive yaw control usage.
+
+    Evidence sources:
+      * Lua startup STATUSTEXT advertising mode=3 (MODE_PASSIVE)
+      * H_YAW_TRIM present in params snapshot (always expected on heli)
+      * RAWES_YFK override present in params snapshot when explicitly set
+    """
+    reasons: list[str] = []
+
+    for m in mav_msgs:
+        if m.get("mavpackettype") != "STATUSTEXT":
+            continue
+        txt = str(m.get("text", ""))
+        if "RAWES: loaded" in txt and "mode=3" in txt:
+            reasons.append("Lua MODE_PASSIVE (mode=3) detected")
+            break
+
+    if "H_YAW_TRIM" in params:
+        reasons.append(f"H_YAW_TRIM snapshot={float(params.get('H_YAW_TRIM', 0.0)):.3f}")
+
+    if "RAWES_YFK" in params:
+        reasons.append(f"RAWES_YFK snapshot={float(params.get('RAWES_YFK', 0.0)):.3f}")
+
+    # Conservative: require PASSIVE evidence before changing recommendations.
+    trim_mode = any("MODE_PASSIVE" in r for r in reasons)
+    return trim_mode, reasons
+
+
+def _nearest_interp(x_src: list[float], y_src: list[float], x_q: list[float]) -> list[float]:
+    if not x_src or not y_src or len(x_src) != len(y_src):
+        return [float("nan")] * len(x_q)
+    out: list[float] = []
+    for x in x_q:
+        j = min(range(len(x_src)), key=lambda k: abs(x_src[k] - x))
+        out.append(float(y_src[j]))
+    return out
+
+
+def _pearson(a: list[float], b: list[float]) -> float:
+    pairs = [(x, y) for x, y in zip(a, b) if math.isfinite(x) and math.isfinite(y)]
+    if len(pairs) < 3:
+        return float("nan")
+    ax = [p[0] for p in pairs]
+    bx = [p[1] for p in pairs]
+    ma = sum(ax) / len(ax)
+    mb = sum(bx) / len(bx)
+    da = [x - ma for x in ax]
+    db = [x - mb for x in bx]
+    va = sum(x * x for x in da)
+    vb = sum(x * x for x in db)
+    if va <= 0.0 or vb <= 0.0:
+        return float("nan")
+    cov = sum(x * y for x, y in zip(da, db))
+    return cov / math.sqrt(va * vb)
+
+
+def _tracking_quality(hb: list[dict], settle_s: float, observe_s: float) -> dict:
+    w = [h for h in hb if settle_s <= h["t_dyn"] <= settle_s + observe_s]
+    if not w:
+        return {"n": 0, "pct_12": 0.0, "pct_30": 0.0, "max_abs": float("nan"), "mean_abs": float("nan")}
+    abs_rates = [abs(float(h["psi_dot_deg_s"])) for h in w]
+    n = len(abs_rates)
+    pct_12 = 100.0 * sum(1 for v in abs_rates if v <= 12.0) / n
+    pct_30 = 100.0 * sum(1 for v in abs_rates if v <= 30.0) / n
+    return {
+        "n": n,
+        "pct_12": pct_12,
+        "pct_30": pct_30,
+        "max_abs": max(abs_rates),
+        "mean_abs": sum(abs_rates) / n,
+    }
+
+
+def _find_first_divergence(hb: list[dict], threshold_deg_s: float = 120.0, consecutive: int = 3) -> float | None:
+    if len(hb) < consecutive:
+        return None
+    run = 0
+    for h in hb:
+        if abs(float(h["psi_dot_deg_s"])) >= threshold_deg_s:
+            run += 1
+            if run >= consecutive:
+                return float(h["t_dyn"]) - float(consecutive - 1)
+        else:
+            run = 0
+    return None
+
+
+def _actuation_effectiveness(hb: list[dict], t_center: float, span_s: float = 8.0) -> dict:
+    """Check whether throttle changes reduce |psi_dot| near divergence.
+
+    If large throttle changes are rarely followed by reductions in |psi_dot|, it
+    suggests wrong sign, severe delay, or insufficient authority.
+    """
+    seg = [h for h in hb if (t_center - span_s) <= h["t_dyn"] <= (t_center + span_s)]
+    if len(seg) < 3:
+        return {"available": False, "note": "insufficient heartbeat samples near divergence"}
+
+    checks = 0
+    improve = 0
+    worsen = 0
+    for i in range(len(seg) - 1):
+        h0 = seg[i]
+        h1 = seg[i + 1]
+        dthr = float(h1["throttle"]) - float(h0["throttle"])
+        a0 = abs(float(h0["psi_dot_deg_s"]))
+        a1 = abs(float(h1["psi_dot_deg_s"]))
+        if abs(dthr) < 0.2 or a0 < 80.0:
+            continue
+        checks += 1
+        if a1 < a0 - 20.0:
+            improve += 1
+        elif a1 > a0 + 20.0:
+            worsen += 1
+
+    if checks == 0:
+        return {"available": False, "note": "no strong actuation transitions near divergence"}
+
+    improve_ratio = 100.0 * improve / checks
+    worsen_ratio = 100.0 * worsen / checks
+    verdict = "effective"
+    if improve_ratio < 35.0 and worsen_ratio > 35.0:
+        verdict = "likely wrong-sign or ineffective"
+    elif improve_ratio < 35.0:
+        verdict = "weak authority or delayed response"
+
+    return {
+        "available": True,
+        "checks": checks,
+        "improve_ratio": improve_ratio,
+        "worsen_ratio": worsen_ratio,
+        "verdict": verdict,
+    }
+
+
+def _rate_imu_sign_check(df: dict, t_center: float, span_s: float = 8.0) -> dict:
+    rate = df.get("RATE", [])
+    imu = df.get("IMU", [])
+    if not rate or not imu:
+        return {"available": False, "note": "RATE/IMU records unavailable"}
+
+    t_lo = t_center - span_s
+    t_hi = t_center + span_s
+    rb = [r for r in rate if t_lo <= float(r.get("t_dyn", 0.0)) <= t_hi]
+    ib = [r for r in imu if t_lo <= float(r.get("t_dyn", 0.0)) <= t_hi]
+    if not rb or not ib:
+        return {"available": False, "note": "no RATE/IMU samples in divergence window"}
+
+    rt = [float(r["t_dyn"]) for r in rb]
+    ry = [float(r.get("Y", 0.0)) for r in rb]
+    it = [float(r["t_dyn"]) for r in ib]
+    ig = [float(r.get("GyrZ", 0.0)) * (180.0 / math.pi) for r in ib]
+    ig_at_r = _nearest_interp(it, ig, rt)
+    corr = _pearson(ry, ig_at_r)
+
+    verdict = "consistent"
+    if math.isfinite(corr) and corr < -0.5:
+        verdict = "possible sign inversion"
+    elif math.isfinite(corr) and corr < 0.2:
+        verdict = "weak consistency"
+
+    return {
+        "available": True,
+        "corr": corr,
+        "verdict": verdict,
+    }
+
+
+def _mode_handoff_context(mav_msgs: list[dict], t_dyn_start: float, t_center: float, span_s: float = 8.0) -> list[str]:
+    out: list[str] = []
+    t_abs = t_dyn_start + t_center
+    t_lo = t_abs - span_s
+    t_hi = t_abs + span_s
+    for m in mav_msgs:
+        if m.get("mavpackettype") != "STATUSTEXT":
+            continue
+        tb_ms = m.get("time_boot_ms")
+        if tb_ms is None:
+            continue
+        t = float(tb_ms) / 1000.0
+        if not (t_lo <= t <= t_hi):
+            continue
+        txt = str(m.get("text", "")).strip()
+        if not txt:
+            continue
+        # Keep only ownership/mode-relevant lines.
+        tags = ("RAWES", "Mode", "GUIDED", "ACRO", "Arming", "disarm", "EKF", "prearm", "Arm")
+        if any(tag in txt for tag in tags):
+            out.append(f"t={t - t_dyn_start:+.1f}s: {txt}")
+    return out[:12]
+
+
+def _estimator_check(hb: list[dict], df: dict) -> dict:
+    """Check whether AP's observed gyro/rate behavior is consistent with physics.
+
+    Returns a dictionary with summary stats and a plain-language verdict.
+    """
+    imu = df.get("IMU", [])
+    rate = df.get("RATE", [])
+    if not imu and not rate:
+        return {
+            "available": False,
+            "verdict": "No IMU/RATE DataFlash records available for estimator cross-check.",
+        }
+
+    t_hb = [float(h["t_dyn"]) for h in hb]
+    phys = [float(h["psi_dot_deg_s"]) for h in hb]
+
+    imu_t = [float(r["t_dyn"]) for r in imu]
+    imu_gz_deg = [float(r.get("GyrZ", 0.0)) * (180.0 / math.pi) for r in imu]
+    rate_t = [float(r["t_dyn"]) for r in rate]
+    rate_y = [float(r.get("Y", 0.0)) for r in rate]
+
+    best = {
+        "corr_imu": float("nan"),
+        "corr_rate": float("nan"),
+        "lag_s": 0.0,
+        "sign": 1.0,
+        "med_abs_err_imu": float("nan"),
+    }
+
+    # Allow small timing offset and sign convention differences when comparing
+    # mediator physics vs DataFlash signals.
+    lags = [x * 0.25 for x in range(-12, 13)]  # -3s .. +3s
+    for lag in lags:
+        t_q = [t + lag for t in t_hb]
+        imu_interp = _nearest_interp(imu_t, imu_gz_deg, t_q) if imu else [float("nan")] * len(t_q)
+        rate_interp = _nearest_interp(rate_t, rate_y, t_q) if rate else [float("nan")] * len(t_q)
+        for sign in (1.0, -1.0):
+            imu_signed = [sign * v if math.isfinite(v) else v for v in imu_interp]
+            rate_signed = [sign * v if math.isfinite(v) else v for v in rate_interp]
+            corr_imu = _pearson(phys, imu_signed)
+            corr_rate = _pearson(phys, rate_signed)
+
+            if not math.isfinite(corr_imu):
+                continue
+            if not math.isfinite(best["corr_imu"]) or abs(corr_imu) > abs(best["corr_imu"]):
+                pairs_imu = [(p, i) for p, i in zip(phys, imu_signed) if math.isfinite(p) and math.isfinite(i)]
+                med_abs_err_imu = float("nan")
+                if pairs_imu:
+                    errs = sorted(abs(p - i) for p, i in pairs_imu)
+                    med_abs_err_imu = errs[len(errs) // 2]
+                best = {
+                    "corr_imu": corr_imu,
+                    "corr_rate": corr_rate,
+                    "lag_s": lag,
+                    "sign": sign,
+                    "med_abs_err_imu": med_abs_err_imu,
+                }
+
+    corr_imu = float(best["corr_imu"])
+    corr_rate = float(best["corr_rate"])
+    med_abs_err_imu = float(best["med_abs_err_imu"])
+
+    # Heuristic verdicts for practical debugging.
+    if math.isfinite(corr_imu) and abs(corr_imu) > 0.6:
+        verdict = "Estimator/gyro follows physics trend (after lag/sign alignment); issue is likely real control/plant instability, not EKF confusion."
+    elif math.isfinite(corr_imu) and abs(corr_imu) < 0.2:
+        verdict = "Very low physics-vs-IMU correlation even after lag/sign alignment; possible estimator/sign/frame mismatch worth deeper EKF review."
+    else:
+        verdict = "Estimator check inconclusive; need focused ATT/NKF timeline or higher-rate logging."
+
+    return {
+        "available": True,
+        "corr_imu": corr_imu,
+        "corr_rate": corr_rate,
+        "lag_s": float(best["lag_s"]),
+        "sign": float(best["sign"]),
+        "med_abs_err_imu": med_abs_err_imu,
+        "verdict": verdict,
+    }
+
+
 # ── physics-side failure detectors ───────────────────────────────────────────
 
 def _detect_frozen(hb: list[dict]) -> list[str]:
@@ -195,7 +496,7 @@ def _detect_frozen(hb: list[dict]) -> list[str]:
     return issues
 
 
-def _detect_saturation(hb: list[dict]) -> list[str]:
+def _detect_saturation(hb: list[dict], trim_adaptive: bool) -> list[str]:
     if not hb:
         return []
     max_thr = max(h["throttle"] for h in hb)
@@ -208,6 +509,13 @@ def _detect_saturation(hb: list[dict]) -> list[str]:
         return []
     avg_omega = sum(h.get("omega_rad_s", OMEGA_NOM) for h in ceiling_hits) / len(ceiling_hits)
     i_eq = avg_omega * GEAR_RATIO / RPM_SCALE
+    if trim_adaptive:
+        return [
+            f"SATURATED  throttle ceiling={max_thr:.4f} ({len(ceiling_hits)} samples) "
+            f"while |psi_dot| > {SLOW_CONV_DEG_S:.0f} deg/s.  "
+            f"Trim-adaptive path active: inspect trim adaptation rate/limits and sign, "
+            f"not just ATC_RAT_YAW_IMAX. (I_eq~{i_eq:.3f})"
+        ]
     return [
         f"SATURATED  throttle ceiling={max_thr:.4f} ({len(ceiling_hits)} samples) "
         f"while |psi_dot| > {SLOW_CONV_DEG_S:.0f} deg/s.  "
@@ -268,6 +576,19 @@ def diagnose(log_dir: Path, settle_s: float = 80.0, observe_s: float = 20.0) -> 
     print(f"  DYNAMIC : {len(hb)} heartbeats  t_dyn=[{hb[0]['t_dyn']:.1f}, {t_dyn_end:.1f}]")
     print(f"{'='*70}\n")
 
+    # ── mode/context detection ────────────────────────────────────────────────
+    params = _load_params(log_dir)
+    mav_msgs = _load_mavlink(log_dir)
+    trim_adaptive, trim_reasons = _detect_trim_adaptive_mode(log_dir, mav_msgs, params)
+
+    print("[CONTROL CONTEXT]")
+    print(f"  Trim-adaptive mode       : {'yes' if trim_adaptive else 'no/unknown'}")
+    if trim_reasons:
+        for r in trim_reasons:
+            print(f"    - {r}")
+    else:
+        print("    - no explicit PASSIVE/trim evidence found in logs")
+
     # ── Physics stats ─────────────────────────────────────────────────────────
     window = [h for h in hb if settle_s <= h["t_dyn"] <= settle_s + observe_s]
     overall_max  = max(abs(h["psi_dot_deg_s"]) for h in hb)
@@ -290,10 +611,18 @@ def diagnose(log_dir: Path, settle_s: float = 80.0, observe_s: float = 20.0) -> 
     else:
         print(f"  Converged <10 deg/s    : never")
 
+    tq = _tracking_quality(hb, settle_s, observe_s)
+    print("[TRACKING QUALITY]")
+    print(f"  Window samples          : {tq['n']}")
+    print(f"  In-band <=12 deg/s      : {tq['pct_12']:.1f}%")
+    print(f"  In-band <=30 deg/s      : {tq['pct_30']:.1f}%")
+    if tq["n"] > 0:
+        print(f"  Window mean/max |psi|   : {tq['mean_abs']:.2f} / {tq['max_abs']:.2f} deg/s")
+
     # ── Issue detection ───────────────────────────────────────────────────────
     issues: list[str] = []
     issues += _detect_frozen(hb)
-    issues += _detect_saturation(hb)
+    issues += _detect_saturation(hb, trim_adaptive)
     issues += _detect_motor_dead(hb)
 
     if window_max is None:
@@ -328,6 +657,65 @@ def diagnose(log_dir: Path, settle_s: float = 80.0, observe_s: float = 20.0) -> 
     rate = df.get("RATE", [])
     imu  = df.get("IMU",  [])
     has_df = bool(pidy or rate or imu)
+
+    est = _estimator_check(hb, df)
+    print("[ESTIMATOR CHECK]")
+    if not est.get("available", False):
+        print(f"  {est['verdict']}")
+    else:
+        corr_imu = est.get("corr_imu", float("nan"))
+        corr_rate = est.get("corr_rate", float("nan"))
+        med_abs_err_imu = est.get("med_abs_err_imu", float("nan"))
+        lag_s = est.get("lag_s", float("nan"))
+        sign = est.get("sign", float("nan"))
+        if math.isfinite(corr_imu):
+            print(f"  Corr(physics psi_dot, IMU GyrZ): {corr_imu:.3f}")
+        if math.isfinite(corr_rate):
+            print(f"  Corr(physics psi_dot, RATE.Y)  : {corr_rate:.3f}")
+        if math.isfinite(lag_s):
+            sign_txt = "+" if sign >= 0 else "-"
+            print(f"  Best align (lag/sign)          : {lag_s:+.2f}s / {sign_txt}")
+        if math.isfinite(med_abs_err_imu):
+            print(f"  Median |physics-IMU| error      : {med_abs_err_imu:.2f} deg/s")
+        print(f"  Verdict                         : {est['verdict']}")
+    print()
+
+    # ── First divergence and immediate precursors ────────────────────────────
+    div_t = _find_first_divergence(hb)
+    print("[DIVERGENCE ROOT-CAUSE HINTS]")
+    if div_t is None:
+        print("  No persistent divergence found (|psi_dot| >= 120 deg/s for 3+ samples).")
+    else:
+        print(f"  First persistent divergence     : t_dyn={div_t:.1f}s")
+
+        eff = _actuation_effectiveness(hb, div_t)
+        if eff.get("available", False):
+            print(
+                "  Actuation effectiveness         : "
+                f"{eff['improve_ratio']:.1f}% improve / {eff['worsen_ratio']:.1f}% worsen "
+                f"across {eff['checks']} strong transitions ({eff['verdict']})"
+            )
+        else:
+            print(f"  Actuation effectiveness         : {eff.get('note', 'n/a')}")
+
+        rs = _rate_imu_sign_check(df, div_t)
+        if rs.get("available", False):
+            c = rs.get("corr", float("nan"))
+            if math.isfinite(c):
+                print(f"  RATE.Y vs IMU.GyrZ correlation  : {c:.3f} ({rs['verdict']})")
+            else:
+                print(f"  RATE.Y vs IMU.GyrZ correlation  : n/a ({rs['verdict']})")
+        else:
+            print(f"  RATE.Y vs IMU.GyrZ correlation  : {rs.get('note', 'n/a')}")
+
+        handoff = _mode_handoff_context(mav_msgs, t_dyn_start, div_t)
+        if handoff:
+            print("  Mode/ownership context near divergence:")
+            for line in handoff:
+                print(f"    - {line}")
+        else:
+            print("  Mode/ownership context          : no relevant STATUSTEXT near divergence")
+    print()
 
     hdr = (f"  {'t_dyn':>11}  {'psi_dot':>9}  {'thr':>6}"
            + (f"  {'I_term':>7}  {'clamp':>5}  {'yaw_err':>7}  {'gyroZ_max':>9}"
@@ -412,9 +800,17 @@ def main() -> None:
     if not candidate.exists():
         candidate = _LOGS_DIR / arg
     if not candidate.exists():
+        # Log dirs are sanitized (pytest '[param]' brackets -> underscores) by
+        # stack_utils.sanitize_log_name; try the sanitized form of the name.
+        _safe = re.sub(r"[\[\]() /\\]+", "_", arg).strip("_")
+        _sanitized = _LOGS_DIR / _safe
+        if _sanitized.exists():
+            candidate = _sanitized
+    if not candidate.exists():
         print(f"[ERROR] Log directory not found: {arg}")
         print(f"  Tried: {Path.cwd() / arg}")
         print(f"  Tried: {_LOGS_DIR / arg}")
+        print(f"  Tried: {_LOGS_DIR / re.sub(r'[\\[\\]() /\\\\]+', '_', arg).strip('_')}")
         sys.exit(1)
 
     settle_s  = float(sys.argv[2]) if len(sys.argv) > 2 else 80.0

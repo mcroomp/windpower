@@ -30,8 +30,9 @@ ArduPilot → mediator (binary servo packet over UDP 9002)
       throttle = (pwm_us − 800) / 1200   ∈ [0, 1]
        800 µs → 0%, 2000 µs → 100%
 
-  Motor speed follows commanded throttle with first-order lag (MOTOR_TAU=0.02 s):
-      d(omega_motor)/dt = (throttle × RPM_SCALE − omega_motor) / MOTOR_TAU
+  Motor speed follows the ESC governor toward throttle × RPM_SCALE, limited by the
+  motor's finite peak torque driving the gear-reflected hub inertia (torque_model):
+      d(omega_motor)/dt = clamp(ESC_KP·(throttle·RPM_SCALE − omega_motor), ±Q_MAX) / J_total
 
 Usage (Docker / WSL)
 --------------------
@@ -323,7 +324,9 @@ def run(
              omega_rotor_rpm=round(omega_rotor * 60.0 / (2.0 * math.pi)),
              rpm_scale=round(params.rpm_scale, 1),
              gear_ratio=round(params.gear_ratio, 3),
-             motor_tau_ms=round(params.motor_tau * 1000, 1),
+             hub_inertia_kgm2=round(params.hub_inertia_kgm2, 5),
+             esc_kp=round(params.esc_kp, 3),
+             esc_q_max_nm=round(params.esc_q_max, 2),
              startup_hold_s=round(startup_hold_s, 1),
              profile=profile,
              tail_channel=ch_yaw)

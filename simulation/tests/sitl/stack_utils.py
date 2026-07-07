@@ -6,6 +6,7 @@ copying, and port cleanup so every stack test file can import from one place.
 """
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -486,13 +487,29 @@ def _configure_logging(log_path: Path) -> None:
 # Log file copying
 # ---------------------------------------------------------------------------
 
+def sanitize_log_name(test_name: str) -> str:
+    """Convert a pytest node name into a shell/glob-safe log directory name.
+
+    Pytest parametrized node names contain ``[param]`` brackets (e.g.
+    ``test_slow_rpm_sitl[slow_vary]``).  Square brackets are treated as
+    character-class globs by PowerShell/bash, which silently breaks
+    ``Get-ChildItem``/globbing on the log dir and has caused stale-log
+    confusion.  Replace brackets (and other unsafe chars) with underscores so
+    directory names are plain identifiers, e.g. ``test_slow_rpm_sitl_slow_vary``.
+    """
+    safe = re.sub(r"[\[\]() /\\]+", "_", test_name)
+    return safe.strip("_")
+
+
 def make_test_log_dir(sim_dir: Path, test_name: str) -> Path:
-    """Create (or wipe and recreate) simulation/logs/{test_name}/.
+    """Create (or wipe and recreate) simulation/logs/{sanitized test_name}/.
 
     Called at the start of every stack test so stale logs from a previous
-    run never survive into the current one.
+    run never survive into the current one.  The name is sanitized (see
+    ``sanitize_log_name``) so parametrized ``[param]`` brackets don't break
+    shell globbing on the resulting directory.
     """
-    test_log_dir = sim_dir / "logs" / test_name
+    test_log_dir = sim_dir / "logs" / sanitize_log_name(test_name)
     if test_log_dir.exists():
         shutil.rmtree(test_log_dir)
     test_log_dir.mkdir(parents=True, exist_ok=True)

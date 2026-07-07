@@ -601,13 +601,20 @@ spins. The anti-rotation motor counters the reaction torque from rotor drag. Cur
 **ESC:** REVVitRC 50A AM32 (standard PWM, 800–2000 µs).
 **Gear:** 80:44 spur (motor runs at 1.818× rotor hub speed).
 
-Motor shaft speed tracks PWM with a first-order lag (MOTOR_TAU=20 ms):
+The motor drives the inner-hub yaw inertia through the gear. The ESC is a speed
+governor with **finite peak torque**, so the motor speed cannot change
+instantaneously — it must accelerate the gear-reflected inertia:
 
 ```
-d(omega_motor)/dt = (throttle × RPM_SCALE − omega_motor) / MOTOR_TAU
+omega_target      = throttle × RPM_SCALE
+Q                 = clamp(ESC_KP × (omega_target − omega_motor), ±ESC_Q_MAX)
+d(omega_motor)/dt = Q / J_total        J_total = I_hub / GEAR_RATIO² + I_motor
 ```
 
-Inner assembly yaw rate: `psi_dot = omega_rotor − omega_motor / GEAR_RATIO`
+Inner assembly yaw rate (rigid gear): `psi_dot = −omega_rotor + omega_motor / GEAR_RATIO`.
+Because the finite torque slew-limits the speed, `|d psi_dot/dt| ≤ ESC_Q_MAX /
+(J_total × GEAR_RATIO)` — the plant no longer produces instantaneous yaw-rate
+jumps (the old zero-inertia algebraic model did, which drove a yaw limit cycle).
 
 **Model parameters:**
 
@@ -615,7 +622,9 @@ Inner assembly yaw rate: `psi_dot = omega_rotor − omega_motor / GEAR_RATIO`
 |---|---|---|
 | RPM_SCALE | 105 rad/s | GB4008 66KV × 15.2V (4S LiPo) |
 | GEAR_RATIO | 80/44 ≈ 1.818 | Motor pinion faster than rotor |
-| MOTOR_TAU | 0.02 s | Typical BLDC + ESC step response |
+| HUB_INERTIA | 0.02 kg·m² | Inner-hub yaw inertia (excl. rotor) |
+| ESC_KP | 0.15 N·m/(rad/s) | Governor gain (τ ≈ J_total/ESC_KP ≈ 40 ms) |
+| ESC_Q_MAX | 2.0 N·m | GB4008 peak torque (finite → bounded slew) |
 
 H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419
 

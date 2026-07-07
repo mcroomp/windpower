@@ -91,6 +91,12 @@ def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
     sim.vel_ned      = _IC.vel.tolist()
     sim.R            = _IC.R0
     sim.gyro         = [0.0, 0.0, 0.0]
+    # rawes.lua now gates steady capture on anchor NVFs. In this simtest path
+    # the anchor is at NED origin, so publish zeros once at startup.
+    sim.send_named_float("RAWES_SLW", 0.40)
+    sim.send_named_float("RAWES_ANN", 0.0)
+    sim.send_named_float("RAWES_ANE", 0.0)
+    sim.send_named_float("RAWES_AND", 0.0)
 
     # ── Physics ───────────────────────────────────────────────────────────────
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)

@@ -26,27 +26,36 @@ Physical setup
               spinning outer rotor hub.  Motor throttle in [0, 1]; positive
               throttle produces CW counter-torque on the body.
 
-Hub yaw model
---------------
-The ESC holds the motor shaft at a commanded speed proportional to throttle, but
-the motor shaft speed does not respond instantaneously -- it tracks the commanded
-speed with a first-order lag (time constant MOTOR_TAU):
+Hub yaw model (motor drives the hub inertia through the gear)
+------------------------------------------------------------
+The motor spins the inner hub assembly (a "wheel" with yaw inertia I_hub) via the
+gear.  The ESC is a speed governor: it commands motor torque to drive the motor
+shaft toward a target speed proportional to throttle, but the motor has FINITE
+peak torque, so the speed cannot change instantaneously -- the motor must
+accelerate the (gear-reflected) inertia:
 
-    d(omega_motor)/dt = (throttle x RPM_SCALE - omega_motor) / MOTOR_TAU
+    omega_target = throttle x RPM_SCALE
+    Q            = clamp(ESC_KP x (omega_target - omega_motor), -Q_MAX, +Q_MAX)   [N.m]
+    d(omega_motor)/dt = Q / J_total
+    J_total      = I_hub / GEAR_RATIO^2 + I_motor      (hub inertia reflected to the
+                                                        faster motor shaft, + rotor)
 
-The mechanical gear coupling is instantaneous.  With US-convention rotor spinning
-CCW (omega_rotor > 0), the body wants to drift CCW; the motor (throttle > 0)
-adds CW torque that pushes psi_dot back toward zero:
+The ESC only sees motor RPM; the gear ratio enters solely through the reflected
+inertia J_total.  The mechanical gear coupling itself is rigid, so the hub yaw
+rate follows the motor speed kinematically (US convention, rotor CCW):
 
     psi_dot = -omega_rotor + omega_motor / GEAR_RATIO
 
-psi_dot is an algebraic function of omega_motor and omega_rotor -- no hub inertia
-term appears.  The ESC absorbs all load (bearing drag, swashplate friction) by
-drawing more current; these forces are invisible to yaw dynamics.
+Unlike the older algebraic (zero-inertia, ideal-speed-source) model, psi_dot is
+now a proper dynamic state: throttle ripple is low-passed by the inertia and the
+finite-torque slew limit (|d psi_dot/dt| <= Q_MAX / (J_total x GEAR_RATIO)), so
+the plant no longer produces instantaneous tens-of-rad/s jumps.  Gear/motor
+friction is small and neglected (at balance the governor commands ~0 torque).
 
 Equilibrium
 -----------
-At steady state omega_motor = throttle x RPM_SCALE, so setting psi_dot = 0:
+At steady state the governor holds omega_motor = throttle x RPM_SCALE, so
+setting psi_dot = 0 gives the same feedforward as before:
 
     throttle_eq = omega_rotor x GEAR_RATIO / RPM_SCALE
 
@@ -69,7 +78,7 @@ import dataclasses
 # ---------------------------------------------------------------------------
 
 #: Motor shaft speed per unit throttle [rad/s] -- GB4008 66KV x 15.2V (4S LiPo) ~= 105 rad/s
-#: The ESC targets motor shaft at throttle x RPM_SCALE; MOTOR_TAU governs how fast it gets there.
+#: The ESC governor targets motor shaft at throttle x RPM_SCALE.
 RPM_SCALE: float = 105.0   # rad/s
 
 #: Motor-side gear teeth / hub-side gear teeth  -->  omega_motor / omega_hub
@@ -79,10 +88,23 @@ GEAR_RATIO: float = 80.0 / 44.0
 #: Autorotation spin rate of the outer rotor hub at design point (10 m/s wind, de Schutter 2018)
 OMEGA_ROTOR_NOMINAL: float = 28.0   # rad/s  ~= 267 RPM
 
-#: First-order lag time constant for motor shaft speed response to PWM command [s]
-#: Represents ESC + motor electrical/mechanical inertia.  ~20 ms is typical for
-#: small BLDC + ESC combinations at full-load step.
-MOTOR_TAU: float = 0.02   # s
+#: Yaw moment of inertia of the inner hub assembly (electronics + structure,
+#: EXCLUDING the rotor) about the spin axis [kg.m^2].  Reflected to the motor
+#: shaft through the gear (J = I_hub / GEAR_RATIO^2), it sets how fast the motor
+#: can change the hub yaw rate for a given torque.
+HUB_INERTIA_KGM2: float = 0.02
+
+#: GB4008 rotor moment of inertia at the motor shaft [kg.m^2] (small).
+MOTOR_INERTIA_KGM2: float = 1.0e-5
+
+#: ESC speed-governor gain -- commanded motor torque per rad/s of speed error
+#: [N.m/(rad/s)].  With J_total ~ 6e-3 kg.m^2 this gives a small-signal speed
+#: time constant tau = J_total / ESC_KP ~ 40 ms.
+ESC_KP: float = 0.15
+
+#: GB4008 peak torque at the motor shaft [N.m].  Finite -> the motor cannot change
+#: speed instantaneously; large throttle steps are slew-limited to Q_MAX / J_total.
+ESC_Q_MAX: float = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +114,17 @@ MOTOR_TAU: float = 0.02   # s
 @dataclasses.dataclass
 class HubParams:
     """Physical parameters for the hub yaw model."""
-    rpm_scale:  float = RPM_SCALE   # rad/s, motor shaft speed at throttle=1
-    gear_ratio: float = GEAR_RATIO  # omega_motor / omega_hub  (80/44)
-    motor_tau:  float = MOTOR_TAU   # s, first-order lag on motor shaft speed
+    rpm_scale:          float = RPM_SCALE           # rad/s, motor speed at throttle=1
+    gear_ratio:         float = GEAR_RATIO          # omega_motor / omega_hub (80/44)
+    hub_inertia_kgm2:   float = HUB_INERTIA_KGM2    # inner-hub yaw inertia (no rotor)
+    motor_inertia_kgm2: float = MOTOR_INERTIA_KGM2  # motor rotor inertia at shaft
+    esc_kp:             float = ESC_KP              # governor torque per rad/s error
+    esc_q_max:          float = ESC_Q_MAX           # motor peak torque [N.m]
+
+    def j_total(self) -> float:
+        """Effective inertia at the motor shaft [kg.m^2]:  hub inertia reflected
+        through the gear (I_hub / gear^2) plus the motor rotor inertia."""
+        return self.hub_inertia_kgm2 / (self.gear_ratio ** 2) + self.motor_inertia_kgm2
 
 
 @dataclasses.dataclass
@@ -119,13 +149,17 @@ def step(
     """
     Advance hub yaw state by dt.
 
-    Motor shaft speed tracks the PWM command with a first-order lag:
+    The ESC governor commands motor torque proportional to the motor-speed error,
+    limited by the motor's finite peak torque; that torque accelerates the
+    gear-reflected hub inertia:
 
-        d(omega_motor)/dt = (throttle x RPM_SCALE - omega_motor) / MOTOR_TAU
+        omega_target = throttle x RPM_SCALE
+        Q            = clamp(esc_kp x (omega_target - omega_motor), -q_max, q_max)
+        d(omega_motor)/dt = Q / J_total          J_total = I_hub/gear^2 + I_motor
 
-    Gear coupling is instantaneous:
+    Rigid gear coupling then sets the hub yaw rate (US convention, rotor CCW):
 
-        psi_dot = omega_rotor - omega_motor / GEAR_RATIO
+        psi_dot = -omega_rotor + omega_motor / GEAR_RATIO
 
     Parameters
     ----------
@@ -139,14 +173,24 @@ def step(
     -------
     New HubState at t + dt.
     """
-    throttle        = max(0.0, min(1.0, throttle))
-    omega_commanded = throttle * params.rpm_scale
-    d_omega         = (omega_commanded - state.omega_motor) / params.motor_tau
-    omega_motor_new = state.omega_motor + d_omega * dt
+    throttle     = max(0.0, min(1.0, throttle))
+    omega_target = throttle * params.rpm_scale
+
+    # ESC speed governor -> commanded motor torque, capped by finite peak torque.
+    err   = omega_target - state.omega_motor
+    q_cmd = params.esc_kp * err
+    q     = max(-params.esc_q_max, min(params.esc_q_max, q_cmd))
+
+    # Finite torque accelerates the gear-reflected inertia: speed cannot jump.
+    j_total         = params.j_total()
+    omega_motor_new = state.omega_motor + (q / j_total) * dt
+    if omega_motor_new < 0.0:
+        omega_motor_new = 0.0   # motor speed magnitude cannot go negative
+
     # US convention: rotor CCW -> body drifts CCW (psi_dot < 0).  Motor
-    # produces CW counter-torque (+psi_dot direction).
-    psi_dot         = -omega_rotor + omega_motor_new / params.gear_ratio
-    psi             = state.psi + psi_dot * dt
+    # counter-rotation (omega_motor > 0) pushes psi_dot back toward zero.
+    psi_dot = -omega_rotor + omega_motor_new / params.gear_ratio
+    psi     = state.psi + psi_dot * dt
     return HubState(psi=psi, psi_dot=psi_dot, omega_motor=omega_motor_new)
 
 

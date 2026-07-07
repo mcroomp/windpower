@@ -204,11 +204,25 @@ def run_mediator(args, trajectory=None):
         target_sys = 1
         target_comp = 1
         rx_total = 0
-        rx_counts = {"ATTITUDE": 0, "ATTITUDE_TARGET": 0, "SERVO_OUTPUT_RAW": 0, "HEARTBEAT": 0}
+        rx_counts = {
+            "ATTITUDE": 0,
+            "ATTITUDE_TARGET": 0,
+            "SERVO_OUTPUT_RAW": 0,
+            "NAMED_VALUE_FLOAT": 0,
+            "HEARTBEAT": 0,
+        }
         dropped_types = 0
         last_boot_ms = 0
         last_rx_wall = _time_mod.monotonic()
         next_diag_wall = last_rx_wall + _mavlog_diag_interval_s
+        _nvf_key_map = {
+            "YAW_I": "mav_nvf_yaw_i",
+            "YAW_OUT": "mav_nvf_yaw_out",
+            "YFF_T": "mav_nvf_yff_trim",
+            "YFF_U": "mav_nvf_yff_u",
+            "YFF_GZ": "mav_nvf_yff_gz",
+            "YFF_A": "mav_nvf_yff_a",
+        }
         try:
             while not _mavlog_stop.is_set() and not is_stopped():
                 hb = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=0.25)
@@ -285,12 +299,13 @@ def run_mediator(args, trajectory=None):
                 if msg is None:
                     if now_wall >= next_diag_wall:
                         log.info(
-                            "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d dropped=%d last_boot_ms=%d idle_s=%.2f",
+                            "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d idle_s=%.2f",
                             rx_total,
                             rx_counts["HEARTBEAT"],
                             rx_counts["ATTITUDE"],
                             rx_counts["ATTITUDE_TARGET"],
                             rx_counts["SERVO_OUTPUT_RAW"],
+                            rx_counts["NAMED_VALUE_FLOAT"],
                             dropped_types,
                             last_boot_ms,
                             now_wall - last_rx_wall,
@@ -308,12 +323,13 @@ def run_mediator(args, trajectory=None):
 
                 if now_wall >= next_diag_wall:
                     log.info(
-                        "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d dropped=%d last_boot_ms=%d",
+                        "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d",
                         rx_total,
                         rx_counts["HEARTBEAT"],
                         rx_counts["ATTITUDE"],
                         rx_counts["ATTITUDE_TARGET"],
                         rx_counts["SERVO_OUTPUT_RAW"],
+                        rx_counts["NAMED_VALUE_FLOAT"],
                         dropped_types,
                         last_boot_ms,
                     )
@@ -328,7 +344,7 @@ def run_mediator(args, trajectory=None):
                 if _tu:
                     fields["mav_time_usec"] = float(_tu)
 
-                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW"):
+                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"):
                     if fields:
                         update_async_mavlink(fields)
                     continue
@@ -350,6 +366,18 @@ def run_mediator(args, trajectory=None):
                     fields["mav_servo2_us"] = float(getattr(msg, "servo2_raw", float("nan")))
                     fields["mav_servo3_us"] = float(getattr(msg, "servo3_raw", float("nan")))
                     fields["mav_servo4_us"] = float(getattr(msg, "servo4_raw", float("nan")))
+                elif mtype == "NAMED_VALUE_FLOAT":
+                    # Lua diagnostics are streamed as named floats. Keep only the
+                    # telemetry-relevant keys as latest-value async snapshot fields.
+                    raw_name = getattr(msg, "name", "")
+                    if isinstance(raw_name, bytes):
+                        nvf_name = raw_name.decode("ascii", errors="ignore")
+                    else:
+                        nvf_name = str(raw_name)
+                    nvf_name = nvf_name.rstrip("\x00").strip()
+                    mapped = _nvf_key_map.get(nvf_name)
+                    if mapped is not None:
+                        fields[mapped] = float(getattr(msg, "value", float("nan")))
 
                 if fields:
                     update_async_mavlink(fields)
@@ -909,6 +937,12 @@ def run_mediator(args, trajectory=None):
                 "mav_servo2_us":     _mav_async.get("mav_servo2_us", float("nan")),
                 "mav_servo3_us":     _mav_async.get("mav_servo3_us", float("nan")),
                 "mav_servo4_us":     _mav_async.get("mav_servo4_us", float("nan")),
+                "mav_nvf_yaw_i":     _mav_async.get("mav_nvf_yaw_i", float("nan")),
+                "mav_nvf_yaw_out":   _mav_async.get("mav_nvf_yaw_out", float("nan")),
+                "mav_nvf_yff_trim":  _mav_async.get("mav_nvf_yff_trim", float("nan")),
+                "mav_nvf_yff_u":     _mav_async.get("mav_nvf_yff_u", float("nan")),
+                "mav_nvf_yff_gz":    _mav_async.get("mav_nvf_yff_gz", float("nan")),
+                "mav_nvf_yff_a":     _mav_async.get("mav_nvf_yff_a", float("nan")),
                 "servo_s1_us":     float(sitl.last_pwm_raw[0]),
                 "servo_s2_us":     float(sitl.last_pwm_raw[1]),
                 "servo_s3_us":     float(sitl.last_pwm_raw[2]),

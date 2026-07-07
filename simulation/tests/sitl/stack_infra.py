@@ -83,7 +83,10 @@ from mediator_events import MediatorEventLog
 from controller import make_hold_controller
 
 _STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
-_RAWES_DEFAULTS_PARM  = _SITL_DIR / "rawes_sitl_defaults.parm"
+_RAWES_COMMON_PARM    = _SITL_DIR / "rawes_common_defaults.parm"
+_RAWES_SITL_ONLY_PARM = _SITL_DIR / "rawes_sitl_defaults.parm"
+# Backward-compatible alias used by existing imports/docs.
+_RAWES_DEFAULTS_PARM  = _RAWES_SITL_ONLY_PARM
 _FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 control block
 
 # ── Flight fixture boot params ────────────────────────────────────────────────
@@ -91,7 +94,8 @@ _FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 contr
 # Combined with always-wipe EEPROM in _launch_sitl, this is the single source
 # of truth — no EEPROM contamination from sequential tests is possible.
 #
-# rawes_sitl_defaults.parm provides EKF/compass/collective params.
+# rawes_common_defaults.parm provides shared RAWES tuning and heli params.
+# rawes_sitl_defaults.parm provides SITL-only overlays (SIM_*, relaxed EKF gates).
 # _BASE_ACRO_PARAMS adds the MAVLink-side mode/failsafe params.
 # Per-fixture extras (e.g. SCR_USER6, COL_CRUISE_FLIGHT_RAD) are merged on top.
 #
@@ -548,7 +552,8 @@ def _sitl_stack(
                 _exc,
             )
         _boot_setup = (
-            ParamSetup.from_parm_file(_RAWES_DEFAULTS_PARM)
+            ParamSetup.from_parm_file(_RAWES_COMMON_PARM)
+            .merge(ParamSetup.from_parm_file(_RAWES_SITL_ONLY_PARM))
             .merge(_BASE_ACRO_PARAMS)
             .merge(ParamSetup({"SIM_SERVO_SPEED": _servo_speed}))
             .merge(ParamSetup(extra_boot_params or {}))
@@ -1754,108 +1759,85 @@ _TORQUE_STARTUP_HOLD_S: float = 15.0   # SITL-seconds: enough for EKF + arming b
 #
 # fixture boot_params are merged on top and may override individual values (e.g.
 # ATC_RAT_YAW_P=0 for the Lua fixture where Lua is the sole feedforward provider).
-_BASE_TORQUE_BOOT_PARAMS = ParamSetup({
+# ---------------------------------------------------------------------------
+# STANDARD DDFP yaw regulation — single source of truth for ALL torque tests.
+# ---------------------------------------------------------------------------
+# Every torque yaw test regulates hub yaw with the SAME ArduPilot DDFP controller
+# (H_TAIL_TYPE=3) and the SAME rate-PID gains.  These gains mirror the flight /
+# vanilla path in rawes_common_defaults.parm (P=0.02, I=0, D=0, FLTD=10) -- keep
+# the two in sync.  Rationale: with the inertial motor model the high-authority
+# GB4008 (~58 rad/s per throttle) is stable at P=0.02 with a filtered-but-off D;
+# the Lua trim feedforward (H_YAW_TRIM / observer) carries the DC hold so I=0.
+# Fixtures overlay this with EKF/compass/mode/script params only -- never with a
+# different yaw PID.  (The servo-tail fixture overrides H_TAIL_TYPE=0 to exercise
+# the alternative actuator, but keeps these PID gains.)
+_STANDARD_DDFP_YAW_PARAMS = ParamSetup({
+    "ATC_RAT_YAW_P":    0.02,
+    # AP yaw integral OFF: the Lua trim observer carries the DC hold.  A small AP I
+    # was tried for disturbance rejection but it interacted with the observer during
+    # the slow_vary RPM sweep and degraded steady tracking (vanilla), while the
+    # gust/tilt spikes it was meant to catch are brief coupling artifacts a small I
+    # doesn't fix -- so I stays 0.
+    "ATC_RAT_YAW_I":    0.0,
+    "ATC_RAT_YAW_D":    0.0,
+    "ATC_RAT_YAW_IMAX": 0.1,
+    "ATC_RAT_YAW_FLTD": 10.0,
+    "H_TAIL_TYPE":      3,      # DDFP CW (US-convention rotor; no sign flip)
+    "H_COL2YAW":        0.0,
+    "SERVO4_MIN":       800,    # GB4008: 800 us = off
+    "SERVO4_MAX":       2000,   #         2000 us = full throttle
+    "SERVO4_TRIM":      800,    # DDFP: trim = off (motor off at neutral)
+    "H_YAW_TRIM":       0.02,
+})
+
+# Full self-contained torque boot base = standard DDFP yaw + torque EKF/compass/
+# mode overlay.  Used as base_params (replaces the parm chain) for the compass-yaw
+# torque rigs.  Yaw PID / actuator config comes ONLY from _STANDARD_DDFP_YAW_PARAMS.
+_BASE_TORQUE_BOOT_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
     # Boot directly into GUIDED_NOGPS (mode 20) to keep mode usage consistent
     # across flight and torque stacks.
     "INITIAL_MODE":     20,
-    # Failsafe — disable EKF failsafe
-    # (ARMING_SKIPCHK was removed in ArduPilot 4.6; force-arm bypasses checks)
+    # Failsafe — disable EKF failsafe.
     "FS_EKF_ACTION":    0,
     "FS_THR_ENABLE":    0,
     # Scripting — off by default; Lua fixtures override with SCR_ENABLE=1.
     "SCR_ENABLE":       0,
-    # Compass — enable and do not auto-calibrate.  Default EK3_MAG_CAL=3 (auto) causes
-    # the EKF to distrust compass during calibration; when the wobble profile starts at
-    # t=10 s the EKF has no yaw reference → diverges badly.  Set =0 (no calibration) so
-    # compass headings are used from the first EKF loop.
+    # Compass — enable and do not auto-calibrate (EK3_MAG_CAL=0) so compass
+    # headings are used from the first EKF loop when the profile starts at t=10 s.
     "COMPASS_USE":      1,
     "COMPASS_ENABLE":   1,
-    "EK3_SRC1_YAW":    1,     # compass yaw (default, but be explicit so boot is consistent)
+    "EK3_SRC1_YAW":    1,     # compass yaw
     "EK3_MAG_CAL":     0,     # no magnetometer calibration
     "EK3_GPS_CHECK":   0,     # no GPS pre-arm check (GPS not used in torque tests)
     # EKF source config: disable GPS position/velocity.
     "EK3_SRC1_POSXY":  0,
     "EK3_SRC1_VELXY":  0,
-    # Yaw PID — P=0.015 for transient response.
-    # Equilibrium: throttle_eq = omega_rotor * GEAR_RATIO / RPM_SCALE = 0.485.
-    # With H_YAW_TRIM=0.02: I_integral_eq = throttle_eq + H_YAW_TRIM = 0.505.
-    # slow_vary profile: omega up to 33 rad/s → I_eq = 33*1.818/105 + 0.02 = 0.592.
-    # IMAX=0.7 > 0.592 so the integrator can reach zero error across all RPM profiles.
-    # I=0.01 winds up to 0.5 in ~14 s at 3-4 rad/s residual error (within 40 s settle).
-    "ATC_RAT_YAW_P":   0.015,
-    "ATC_RAT_YAW_I":   0.01,
-    "ATC_RAT_YAW_D":   0.0,
-    "ATC_RAT_YAW_IMAX": 0.7,
-    # Roll/pitch I-term — disable to prevent swashplate wind-up on neutral sticks
+    # Roll/pitch I-term — disable to prevent swashplate wind-up on neutral sticks.
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
-    # H_TAIL_TYPE=3 (DDFP CW, NO sign flip): with US-convention rotor (CCW from
-    # above, body drifts CCW = negative gyro:z()), ATC_RAT_YAW PID outputs
-    # positive (error = -gyro:z() > 0).  H_TAIL_TYPE=3 passes positive PID
-    # straight to SERVO4 throttle -> motor on.  See enum table in
-    # _DDFP_TORQUE_EXTRA_PARAMS.  H_TAIL_TYPE=0 (servo) is NOT used --
-    # requires SERVO4_TRIM=1500 us neutral which maps poorly to the GB4008's
-    # unidirectional 800-2000 us range.
-    "H_TAIL_TYPE":     3,
-    "H_COL2YAW":      0.0,
-    # SERVO4 range matches GB4008 hardware: 800 µs = off, 2000 µs = full throttle.
-    "SERVO4_MIN":       800,
-    "SERVO4_MAX":       2000,
-    "SERVO4_TRIM":      800,   # DDFP: trim = off (motor off at neutral stick)
-    # H_YAW_TRIM ≈ 0: near-zero feedforward so the motor stays off during the STARTUP
-    # phase (no overshoot when the rotor spins up from rest).  The integrator carries
-    # the full equilibrium throttle (~0.42) once DYNAMIC begins — requires IMAX >= 0.44.
-    "H_YAW_TRIM":      0.02,
     # RSC — enable CH8 passthrough (instant runup when CH8=2000)
     "H_RSC_MODE":      1,
     "H_RSC_RUNUP_TIME": 2,   # must be > H_RSC_RAMP_TIME (default 1) to pass prearm check
-})
+}))
 
-# IC-orientation torque rig (profile="ic"): the flight defaults
-# (rawes_sitl_defaults.parm) supply the GPS-yaw EKF + init, and H_TAIL_TYPE=3 /
-# SERVO4 range, but NOT the yaw-motor PID tuning.  ArduPilot firmware defaults
-# (ATC_RAT_YAW_P~0.18, I~0.018, IMAX=0.5, H_YAW_TRIM=0) cannot build the steady
-# ~0.5 throttle the rig needs to hold the constant rotor reaction torque, so the
-# spin saturates.  Overlay the SAME rig yaw tuning as _BASE_TORQUE_BOOT_PARAMS.
-# This is motor-control tuning only -- the EKF/yaw-source config stays on the
-# flight defaults (dual-GPS yaw, GPS pos/vel enabled), per "flight params, not
-# the compass".
-_IC_TORQUE_YAW_PARAMS = ParamSetup({
-    "ATC_RAT_YAW_P":    0.015,
-    # ATC_RAT_YAW_I = 0: the Lua MODE_PASSIVE feedforward (RAWES_YFK) now owns the
-    # yaw integration via H_YAW_TRIM, which is added downstream of the attitude
-    # controller's thrust/heading clamps -- so it can build the ~0.485 holding
-    # throttle even when those clamps freeze the native rate-PID integrator.
-    # Keeping a nonzero AP I here would double-integrate against the Lua trim and
-    # overshoot.  AP retains P (fast damping) only.
-    "ATC_RAT_YAW_I":    0.0,
-    # D experiment (0.003) made it WORSE: it shifted the early transient so the
-    # EKF lost the tilt sooner, the thrust-bypass clamp engaged at t=10 and froze
-    # the integrator at 0 (target=measured => zero error => no wind-up), leaving
-    # a steady -86 deg/s spin. Proves the clamp (EKF confusion) is the lock, not
-    # the PID damping. Fix is upstream: slow the spin-up ramp. Keep D small.
-    "ATC_RAT_YAW_D":    0.0005,
-    "ATC_RAT_YAW_IMAX": 0.7,
+# IC-orientation torque rig (profile="ic"): overlaid on the flight defaults
+# (rawes_sitl_defaults.parm supply the GPS-yaw EKF + init).  The flight boot chain
+# already loads rawes_common_defaults.parm (the standard DDFP yaw PID), but we
+# re-assert the standard here explicitly + disable roll/pitch I so the overlay is
+# self-describing and cannot be silently changed by the common file.
+_IC_TORQUE_YAW_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
-    "H_YAW_TRIM":       0.02,
-})
+}))
 
 # Extra params for Lua torque fixtures.
 # ArduPilot's built-in DDFP yaw PID (H_TAIL_TYPE=3) drives SERVO4 for yaw control.
 # Arming is handled by GCS; Lua RAWES_ARM is an optional disarm timer only.
-_LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
-    "H_TAIL_TYPE":      3,     # DDFP CW (no sign flip) -- US convention rotor
-    "SERVO4_MIN":       800,
-    "SERVO4_MAX":       2000,
-    "SERVO4_TRIM":      800,
-    "H_YAW_TRIM":       0.02,
-    "ATC_RAT_YAW_P":    0.015,
-    "ATC_RAT_YAW_I":    0.01,
-    "ATC_RAT_YAW_IMAX": 0.7,
+# Inherits the standard DDFP yaw PID; adds only the scripting overlay.
+_LUA_TORQUE_EXTRA_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
     "SCR_ENABLE":       1,     # load rawes.lua for optional RAWES_ARM disarm timer
     "SCR_USER6":        0,     # MODE_NONE: no Lua flight control; timer remains available
-})
+}))
 
 # Extra params for the ArduPilot DDFP yaw PI fixture (US-convention rotor).
 # ArduPilot's built-in ATC_RAT_YAW controller drives SERVO4 (Ch4) directly
@@ -1876,27 +1858,15 @@ _LUA_TORQUE_EXTRA_PARAMS = ParamSetup({
 #   yaw error = 0 - gyro:z() = positive.  PID output positive.  H_TAIL_TYPE=3 passes
 #   positive PID straight to SERVO4 throttle -> motor on -> CW counter-torque on body. ✓
 #   H_TAIL_TYPE=4 (CCW with -1 flip) would clamp positive PID to 0 -> motor off. ✗
-_DDFP_TORQUE_EXTRA_PARAMS = ParamSetup({
-    # H_TAIL_TYPE=3 (DDFP CW): no sign flip; positive PID -> positive throttle.
-    # See enum table in the comment above.
-    "H_TAIL_TYPE":          3,
-    # SERVO4 range matches GB4008 hardware (800 us = off, 2000 us = max)
-    "SERVO4_MIN":           800,
-    "SERVO4_MAX":           2000,
-    "SERVO4_TRIM":          800,   # DDFP: trim = off (motor off at neutral)
-    # H_YAW_TRIM ≈ 0: near-zero feedforward; motor stays off during STARTUP (no overshoot).
-    # Prescribed-yaw tests bypass the ODE so equilibrium isn't needed from the integrator.
-    # P=0.5 provides the torque response; I=0 / IMAX=0 for open-loop prescribed tests.
-    "H_YAW_TRIM":           0.02,
-    # Yaw rate P-only for prescribed-yaw tests.  I=0 keeps the integrator inactive so
-    # motor output is determined solely by P * psi_dot_error from the prescribed yaw signal.
-    "ATC_RAT_YAW_P":        0.5,
-    "ATC_RAT_YAW_I":        0.0,
-    "ATC_RAT_YAW_D":        0.0,
-    "ATC_RAT_YAW_IMAX":     0.0,
-    # No Lua script; ArduPilot's built-in controller is the sole yaw actuator
+#
+# Standardized to the shared DDFP yaw PID (_STANDARD_DDFP_YAW_PARAMS): the same
+# closed-loop gains regulate the prescribed-yaw response.  (Historically this set
+# used an open-loop P=0.5; the prescribed-yaw assertions were re-tuned for the
+# standard gains.)
+_DDFP_TORQUE_EXTRA_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
+    # No Lua script; ArduPilot's built-in controller is the sole yaw actuator.
     "SCR_ENABLE":           0,
-})
+}))
 
 
 # Extra params for H_TAIL_TYPE=0 (conventional servo tail) torque fixture.
@@ -1906,18 +1876,14 @@ _DDFP_TORQUE_EXTRA_PARAMS = ParamSetup({
 #   PID=-1 → SERVO4_MIN  (1000 µs)
 # CW hub drift → positive yaw rate error → positive PID → servo above 1500 → motor on.
 # See H_TAIL_TYPE enum table in _DDFP_TORQUE_EXTRA_PARAMS for full value list.
-_SERVO_TAIL_TORQUE_EXTRA_PARAMS = ParamSetup({
+_SERVO_TAIL_TORQUE_EXTRA_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
     "H_TAIL_TYPE":      0,     # conventional servo tail (no DDFP sign flip)
     "SERVO4_MIN":       1000,  # standard servo range
     "SERVO4_MAX":       2000,
     "SERVO4_TRIM":      1500,  # neutral = midpoint; PID drives +/- from here
-    "H_COL2YAW":       0.0,   # no collective-to-yaw feedforward
-    "H_YAW_TRIM":      0.0,
-    "ATC_RAT_YAW_P":   0.015,
-    "ATC_RAT_YAW_I":   0.01,
-    "ATC_RAT_YAW_IMAX": 0.7,
-    "SCR_ENABLE":      0,
-})
+    "H_YAW_TRIM":       0.0,
+    "SCR_ENABLE":       0,
+}))
 
 
 # NOTE: _DDFP_RAMP_TORQUE_EXTRA_PARAMS is retained for reference but currently unused.
@@ -1961,6 +1927,7 @@ def _torque_stack(
     passive_pitch_rad: float = 0.0,
     passive_yaw_rad: "float | None" = None,
     passive_yaw_ff_ki: "float | None" = None,
+    use_vanilla_boot_defaults: bool = False,
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
@@ -2009,6 +1976,11 @@ def _torque_stack(
                              measured spin rate and writes H_YAW_TRIM directly, bypassing the
                              attitude-controller clamp that freezes the native rate PID.
                              None/0 -> feedforward disabled (native DDFP PID only).
+    use_vanilla_boot_defaults : when True, use _sitl_stack default boot chain
+                             (copter-heli + rawes_common_defaults + rawes_sitl_defaults)
+                             instead of _BASE_TORQUE_BOOT_PARAMS. Any extra_params,
+                             passive boot overrides, and boot_params are still merged
+                             on top as explicit overlays.
     """
     # Pre-launch: install Lua scripts before SITL starts.
     # passive_init requires rawes.lua (MODE_PASSIVE) -> ensure it is installed.
@@ -2034,7 +2006,16 @@ def _torque_stack(
     # the GB4008 yaw motor (H_TAIL_TYPE, SERVO4 range, ATC_RAT_YAW, H_YAW_TRIM),
     # so the torque extras here only carry the Lua/passive/boot overlays.
     _ic_mode = (profile == "ic")
-    if _ic_mode:
+    if use_vanilla_boot_defaults:
+        torque_setup = (
+            ParamSetup({})
+            .merge(extra_params or ParamSetup({}))
+            .merge(ParamSetup(_passive_boot) if _passive_boot else ParamSetup({}))
+            .merge(ParamSetup(boot_params) if boot_params else ParamSetup({}))
+        )
+        _stack_base_params = None
+        _stack_extra_boot  = dict(torque_setup.as_list())
+    elif _ic_mode:
         torque_setup = (
             _IC_TORQUE_YAW_PARAMS
             .merge(extra_params or ParamSetup({}))

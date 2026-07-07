@@ -41,6 +41,14 @@ _rawes_fns = {
     p          = p,
     anchor_ned = anchor_ned,
 
+    -- Anchor + slew are delivered via NAMED_VALUE_FLOAT (RAWES_SLW/ANN/ANE/AND);
+    -- expose the latched state + the "all three received" gate for tests.
+    anchor_received = function() return _anchor_received end,
+    anchor_n        = function() return _anchor_n end,
+    anchor_e        = function() return _anchor_e end,
+    anchor_d        = function() return _anchor_d end,
+    bz_slew         = function() return _bz_slew end,
+
     -- ── GUIDED angle conversion ──────────────────────────────────────────────
 
     bz_ned_to_roll_pitch = bz_ned_to_roll_pitch,
@@ -50,6 +58,21 @@ _rawes_fns = {
     run_flight = run_flight,
     run_armon  = run_armon,
     run_manual = run_manual,
+
+    -- ── Yaw feedforward trim observer ────────────────────────────────────────
+    -- Pure observer core + state accessors + reset (unit-testable in isolation).
+    yaw_trim_ff_step = yaw_trim_ff_step,
+    yaw_ff_trim      = function() return _yaw_ff_trim end,
+    yaw_a_hat        = function() return _yaw_a_hat end,
+    yaw_ff_reset     = function()
+        _yaw_ff_trim    = 0.0
+        _yaw_u_prev     = 0.0
+        _yaw_psi_prev   = 0.0
+        _yaw_prev_valid = false
+    end,
+    yaw_a_set        = function(a) _yaw_a_hat = a end,
+    YAW_MOTOR_FUNC   = YAW_MOTOR_FUNC,
+    YFF_MAX          = YFF_MAX,
 
     -- ── Manual mode state accessors ──────────────────────────────────────────
 

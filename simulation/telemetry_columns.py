@@ -163,6 +163,13 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mav_servo2_us",
             "mav_servo3_us",
             "mav_servo4_us",
+            # Lua NAMED_VALUE_FLOAT diagnostics (latest async snapshot)
+            "mav_nvf_yaw_i",
+            "mav_nvf_yaw_out",
+            "mav_nvf_yff_trim",
+            "mav_nvf_yff_u",
+            "mav_nvf_yff_gz",
+            "mav_nvf_yff_a",
         ),
     ),
     # Direct servo values decoded from SITL servo packet in mediator.
@@ -260,4 +267,10 @@ ASYNC_MAV_COLUMNS: tuple[str, ...] = (
     "mav_servo2_us",
     "mav_servo3_us",
     "mav_servo4_us",
+    "mav_nvf_yaw_i",
+    "mav_nvf_yaw_out",
+    "mav_nvf_yff_trim",
+    "mav_nvf_yff_u",
+    "mav_nvf_yff_gz",
+    "mav_nvf_yff_a",
 )

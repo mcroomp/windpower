@@ -65,12 +65,14 @@ def _warm_up(
     omega_rotor: float,
     throttle: float,
     params: m.HubParams | None = None,
-    t_warmup: float = 0.3,
+    t_warmup: float = 1.5,
     dt: float = DT,
 ) -> m.HubState:
     """
-    Run the motor at a fixed throttle until omega_motor reaches steady state
-    (~15 x MOTOR_TAU).  Returns the final HubState with omega_motor settled.
+    Run the motor at a fixed throttle until omega_motor reaches steady state.
+    The inertial model is slew-limited by finite motor torque, so a full-scale
+    spin-up takes a few tenths of a second; 1.5 s is comfortably settled.
+    Returns the final HubState with omega_motor settled.
     """
     if params is None:
         params = m.HubParams()
@@ -121,8 +123,9 @@ def test_equilibrium_throttle_holds():
     The feedforward throttle from equilibrium_throttle() must hold psi_dot = 0
     once the motor has reached steady state.
 
-    During the startup transient (t < ~5 x MOTOR_TAU = 0.1 s), omega_motor is
-    still spinning up and psi_dot will be nonzero.  Check only late-time values.
+    During the spin-up transient omega_motor is still slewing (finite motor
+    torque), so psi_dot is nonzero.  The governor holds omega_motor = target
+    asymptotically, so check only well-settled late-time values.
     """
     params      = m.HubParams()
     eq_throttle = m.equilibrium_throttle(m.OMEGA_ROTOR_NOMINAL, params)
@@ -134,11 +137,11 @@ def test_equilibrium_throttle_holds():
         throttle_fn=lambda s, t: eq_throttle,
         t_end=10.0,
     )
-    # skip the motor spin-up transient (first 0.5 s >> 25 x MOTOR_TAU)
-    late = [(t, s) for t, s in hist if t > 0.5]
+    # skip the motor spin-up transient; the inertial governor settles smoothly.
+    late = [(t, s) for t, s in hist if t > 2.0]
     max_psi_dot = max(abs(s.psi_dot) for _, s in late)
-    assert max_psi_dot < 1e-9, (
-        f"Equilibrium throttle should hold psi_dot=0 at steady state; "
+    assert max_psi_dot < 1e-4, (
+        f"Equilibrium throttle should hold psi_dot~0 at steady state; "
         f"max={max_psi_dot:.2e} rad/s"
     )
 

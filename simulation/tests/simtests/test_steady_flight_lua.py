@@ -56,6 +56,12 @@ def _run_steady(log) -> dict:
     sim.vel_ned      = _IC.vel.tolist()
     sim.R            = _IC.R0
     sim.gyro         = [0.0, 0.0, 0.0]
+    # rawes.lua now requires anchor NVFs before steady capture can initialise.
+    # In this pure simtest path the anchor is at NED origin.
+    sim.send_named_float("RAWES_SLW", 0.40)
+    sim.send_named_float("RAWES_ANN", 0.0)
+    sim.send_named_float("RAWES_ANE", 0.0)
+    sim.send_named_float("RAWES_AND", 0.0)
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
     lua     = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)

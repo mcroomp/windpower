@@ -332,9 +332,9 @@ class TestLuaCaptureAgainstStartingIc:
 
         # Match the stack path: anchor encoded in EKF frame, GPS position at home.
         sim.set_param("mode", 1)
-        sim.set_param("anchor_n", -float(pos0[0]))
-        sim.set_param("anchor_e", -float(pos0[1]))
-        sim.set_param("anchor_d", -float(pos0[2]))
+        sim.send_named_float("RAWES_ANN", -float(pos0[0]))
+        sim.send_named_float("RAWES_ANE", -float(pos0[1]))
+        sim.send_named_float("RAWES_AND", -float(pos0[2]))
         sim.pos_ned = [0.0, 0.0, 0.0]
 
         sim.send_named_float("RAWES_COL", float(ic.get("stack_coll_eq", ic["coll_eq_rad"])))

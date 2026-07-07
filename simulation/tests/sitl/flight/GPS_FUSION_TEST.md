@@ -43,7 +43,7 @@ the production mediator would format it (`sitl_interface.SITLInterface`).
 
 ---
 
-## Boot Parameters (rawes_sitl_defaults.parm, relevant subset)
+## Boot Parameters (rawes_common_defaults.parm + rawes_sitl_defaults.parm, relevant subset)
 
 | Parameter        | Value | Reason |
 |-----------------|-------|--------|

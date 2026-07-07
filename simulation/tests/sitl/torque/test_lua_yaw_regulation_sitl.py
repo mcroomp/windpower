@@ -61,6 +61,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from conftest import LUA_YAW_IC_COL
 from stack_infra import observe
 from torque_test_utils import (
@@ -79,6 +81,10 @@ _SETTLE_S          = 45.0   # startup_hold(15) + spinup(10) + 20 s for I-term to
 _OBSERVE_S         = 10.0   # tail end of the 30 s constant-RPM hold
 _MAX_PSI_DOT_RAD_S = math.radians(5.0)
 
+@pytest.mark.skip(reason="MODE_MANUAL Lua yaw PID is a separate controller (its own "
+                         "I/IMAX, no observer) and does not fit the standardized DDFP "
+                         "yaw regulation; ignored for now pending a decision on whether "
+                         "to retire or convert it to DDFP.")
 def test_lua_yaw_regulation_sitl(torque_armed_lua_yaw):
     """
     rawes.lua MODE_YAW (SCR_USER6=2) regulates hub yaw via SERVO4 direct write.

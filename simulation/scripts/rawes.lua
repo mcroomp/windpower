@@ -27,15 +27,21 @@ Ground planner signals via NAMED_VALUE_FLOAT:
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
     RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
     RAWES_ARM: optional disarm timer (value = ms until forced disarm)
-    RAWES_YFK: yaw-trim feedforward integral gain override (0 = disable; default YFF_KI).
+    RAWES_YFK: yaw-trim feedforward enable flag (<= 0 disables; > 0 enables, default on).
                Applies in passive + steady; learns H_YAW_TRIM to hold the rotor torque.
+    RAWES_SLW: elevation/body_z slew rate limit [rad/s]              default 0.40
+    RAWES_ANN: anchor North from EKF origin [m]                      default 0.0
+    RAWES_ANE: anchor East  from EKF origin [m]                      default 0.0
+    RAWES_AND: anchor Down  from EKF origin [m]                      default 0.0
+               The anchor is safety-critical: MODE_STEADY does NOT initialise
+               altitude hold (and therefore commands no cyclic/collective) until
+               all three anchor floats (ANN/ANE/AND) have been received at least
+               once.  Until then run_flight only holds the current attitude.
 
 Parameters:
-  SCR_USER2   RAWES_BZ_SLEW   elevation slew rate     [rad/s]        default 0.40
-  SCR_USER3   RAWES_ANCHOR_N  Anchor North from EKF origin [m]        default 0.0
-  SCR_USER4   RAWES_ANCHOR_E  Anchor East  from EKF origin [m]        default 0.0
-  SCR_USER5   RAWES_ANCHOR_D  Anchor Down  from EKF origin [m]        default 0.0
-  SCR_USER6   RAWES_MODE      Mode selector (0,1,5)                   default 0
+  SCR_USER6   RAWES_MODE      Mode selector (0,1,2,3,4)               default 0
+              (the ONLY SCR_USER parameter; every other tunable/anchor input is
+               delivered as NAMED_VALUE_FLOAT -- see the list above.)
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -153,6 +159,17 @@ _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
 _tension_n      = 200.0   -- target/feed-forward tether tension [N]; updated from RAWES_TEN
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
 _az_initialized = false   -- true once _az_ref seeded from first GPS fix
+
+-- Tuning + anchor, delivered via NAMED_VALUE_FLOAT (formerly SCR_USER2/3/4/5).
+-- Mode is the ONLY remaining SCR_USER parameter (SCR_USER6).
+_bz_slew         = 0.40    -- RAWES_SLW: elevation/body_z slew rate [rad/s]
+_anchor_n        = 0.0     -- RAWES_ANN: anchor North from EKF origin [m]
+_anchor_e        = 0.0     -- RAWES_ANE: anchor East  from EKF origin [m]
+_anchor_d        = 0.0     -- RAWES_AND: anchor Down  from EKF origin [m]
+_got_anchor_n    = false   -- true once RAWES_ANN has been received at least once
+_got_anchor_e    = false   -- true once RAWES_ANE has been received at least once
+_got_anchor_d    = false   -- true once RAWES_AND has been received at least once
+_anchor_received = false   -- true once all three anchor floats have arrived
 
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
@@ -322,10 +339,13 @@ local function p(name, default)
 end
 
 local function anchor_ned()
+    -- Anchor (EKF frame) is delivered via NAMED_VALUE_FLOAT RAWES_ANN/ANE/AND,
+    -- latched into _anchor_n/e/d.  MODE_STEADY gates altitude-hold init on
+    -- _anchor_received so this is only consulted once all three have arrived.
     local a = Vector3f()
-    a:x(p("SCR_USER3", 0.0))
-    a:y(p("SCR_USER4", 0.0))
-    a:z(p("SCR_USER5", 0.0))
+    a:x(_anchor_n)
+    a:y(_anchor_e)
+    a:z(_anchor_d)
     return a
 end
 
@@ -418,25 +438,61 @@ local _yaw_prev_e = 0.0
 local _man_tlon_rad = 0.0
 local _man_tlat_rad = 0.0
 
--- Yaw feedforward trim (Lua integral + damping on H_YAW_TRIM).  Runs in the
+-- Yaw feedforward trim (adaptive throttle observer on H_YAW_TRIM).  Runs in the
 -- normal flight modes -- MODE_PASSIVE (kinematic release) AND MODE_STEADY -- as
--- the primary yaw hold: it learns the DC holding throttle that counters the
--- constant rotor reaction torque and writes it to H_YAW_TRIM, which is injected
--- DOWNSTREAM of the AP attitude-controller clamps, so it keeps working even when
--- those clamps freeze the native yaw-rate PID (the tilted-spin case).  See
--- run_yaw_trim_ff for the full rationale.
--- Enabled by default (YFF_KI).  The ground can retune or disable it via RAWES_YFK
--- (RAWES_YFK = 0 disables, > 0 overrides the integral gain).
-local YFF_KI     = 0.05      -- default integral gain [trim per (rad/s)*s]
-local _yaw_ff_ki = YFF_KI    -- active integral gain (RAWES_YFK overrides; 0 = off)
-local _yaw_ff_i  = 0.0       -- integrator state = feedforward trim, [0, YFF_MAX]
-local YFF_MAX    = 0.7       -- max feedforward trim (matches ATC_RAT_YAW_IMAX)
-local YFF_KP     = 0.02      -- proportional damping [trim per rad/s] on measured spin.
-                            -- Catches fast disturbance spikes the slow integral
-                            -- misses.  Co-located with the trim (below the AP clamp),
-                            -- so it stays effective while the native PID is frozen.
+-- the primary DC yaw hold.
+--
+-- Plant (counter-torque motor, steady state) is affine in the applied motor
+-- throttle u:
+--       psi_dot = a * u + b
+--   a =  d(psi_dot)/du  = slope  (constant; = RPM_SCALE/GEAR, gear ratio unknown)
+--   b = -omega_rotor               (slowly varying with rotor speed)
+-- The throttle that holds psi_dot = 0 is  u_eq = -b/a.  We learn it online from
+-- the ACTUAL applied throttle (read back from the SERVO4 output) and the measured
+-- spin gyro:z(), and write it to H_YAW_TRIM -- injected DOWNSTREAM of the AP
+-- attitude-controller clamps, so it holds even when the native yaw-rate PID is
+-- frozen by the tilted-spin thrust/heading clamps.
+--
+-- Update (per tick, dt):
+--   u          = SERVO4 output throttle (get_output_pwm(YAW_MOTOR_FUNC) normalised)
+--   trim_target= clamp(u - psi_dot / a_hat, 0, YFF_MAX)
+--   trim      += alpha * (trim_target - trim)          alpha = dt/(YFF_TRIM_TAU+dt)
+-- Because u = trim + p_AP (the AP yaw P-term output), this reduces to
+--   trim += alpha * (p_AP - psi_dot/a_hat),
+-- i.e. the feedforward ABSORBS the AP P-term's rectified DC output.  This is the
+-- crucial difference from a plain integral of psi_dot: under bang-bang yaw
+-- oscillation mean(psi_dot) ~ 0 (a psi_dot integrator stalls), but the one-
+-- directional P-term's MEAN output is nonzero -- reading it back lets the trim
+-- converge to u_eq.  The fixed point (p_AP = 0, psi_dot = 0 => trim = u_eq) is
+-- INDEPENDENT of a_hat; the learned slope only sets the correction rate.
+--
+-- Slope adaptation (normalised LMS on increments, which cancel the slow b):
+--   du = u - u_prev ; dpsi = psi_dot - psi_prev
+--   if |du| > YFF_DU_MIN:  a_hat += YFF_A_MU * du*(dpsi - a_hat*du)/du^2
+-- Enabled by default; RAWES_YFK <= 0 disables the whole feedforward.
+local YFF_MAX        = 0.7       -- max feedforward trim (clamp)
+local YFF_TRIM_TAU   = 0.3       -- trim observer low-pass time constant [s]
+local YFF_A_INIT     = 60.0      -- initial slope guess d(psi_dot)/du [rad/s per throttle]
+local YFF_A_MU       = 0.02      -- slope LMS step (small; slope is ~constant)
+local YFF_A_MIN      = 15.0      -- slope sanity clamp (min)
+local YFF_A_MAX      = 300.0     -- slope sanity clamp (max)
+local YFF_DU_MIN     = 0.03      -- min |throttle step| to update slope estimate
+local YFF_A_QUIET    = 2.0       -- only adapt slope when |psi_dot| below this [rad/s];
+                                 -- during a fast limit cycle the motor lag decorrelates
+                                 -- du/dpsi and biases the slope low, so gate it out.
+local YFF_A_NVF_TICKS = 50       -- stream learned slope YFF_A every N ticks (~0.5 s)
+
+local _yaw_ff_enable = 1.0       -- >0 enable (RAWES_YFK overrides; <=0 disables)
+local _yaw_ff_trim   = 0.0       -- feedforward trim = H_YAW_TRIM, [0, YFF_MAX]
+local _yaw_a_hat     = YFF_A_INIT-- learned plant slope d(psi_dot)/du
+local _yaw_u_prev    = 0.0       -- previous applied throttle (slope increments)
+local _yaw_psi_prev  = 0.0       -- previous gyro:z() (slope increments)
+local _yaw_prev_valid = false    -- guard: skip first increment after a reset
+local _yaw_a_nvf_ctr = 0         -- tick counter for periodic YFF_A streaming
 
 local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
+local YAW_MOTOR_FUNC = 36    -- SERVO output function for the yaw motor (Motor4);
+                             -- matches SERVO4_FUNCTION=36 in the params.
 
 local function run_manual(dt)
     local gyro = ahrs:get_gyro()
@@ -542,9 +598,13 @@ local function _on_mode_enter(mode)
     if mode == MODE_PASSIVE then
         -- Defer yaw capture until IC is fully seeded; PASSIVE should not emit
         -- control API traffic before full IC arrives.  Reset the yaw-trim
-        -- integrator so each release starts learning the hold from zero.
+        -- observer so each release starts learning the hold from zero.  The
+        -- learned slope (_yaw_a_hat) is a physical constant and is NOT reset.
         _passive_hold_yaw_rad = nil
-        _yaw_ff_i             = 0.0
+        _yaw_ff_trim          = 0.0
+        _yaw_u_prev           = 0.0
+        _yaw_psi_prev         = 0.0
+        _yaw_prev_valid       = false
     end
 end
 
@@ -582,9 +642,14 @@ local function run_flight()
             0.0, 0.0, 0.0, ct,
             "pre_capture_hold")
 
-        -- Check for GPS position; initialize altitude hold on first valid fix
+        -- Check for GPS position; initialize altitude hold on first valid fix.
+        -- Gate on _anchor_received: the anchor arrives via NAMED_VALUE_FLOAT
+        -- (RAWES_ANN/ANE/AND), so do NOT capture geometry (and start commanding
+        -- cyclic/collective) until all three have been received -- otherwise a
+        -- zero/stale anchor would put the anchor directly below the hub and
+        -- drive a saturated cyclic.  Until then we keep holding current attitude.
         local pos_ned = ahrs:get_relative_position_NED_origin()
-        if pos_ned then
+        if _anchor_received and pos_ned then
             local anch = anchor_ned()
             local rx = pos_ned:x() - anch:x()
             local ry = pos_ned:y() - anch:y()
@@ -653,7 +718,7 @@ local function run_flight()
     -- The elevation is still rate-limited to break the regenerative
     -- position->tilt->lift->position path (design doc, "Why it should stay
     -- stable", path 1).
-    local bz_slew   = p("SCR_USER2", 0.40)
+    local bz_slew   = _bz_slew
     local target_el = math.asin(math.max(-1.0, math.min(1.0, -rel:z() / math.max(tlen, 0.1))))
     local max_step  = bz_slew * dt
     local el_step   = target_el - _el_rad
@@ -787,40 +852,93 @@ local function run_armon(now)
     end
 end
 
--- ── Yaw feedforward trim: Lua integral + damping on H_YAW_TRIM ──────────────
+-- ── Yaw feedforward trim: adaptive throttle observer on H_YAW_TRIM ──────────
 -- Runs in the normal flight modes (MODE_PASSIVE + MODE_STEADY).  ArduPilot's
 -- native yaw-rate PID integrator is frozen whenever the EKF loses the disk tilt
 -- during a fast spin: a spin about a TILTED body-z gives the same body-frame
 -- gyro as a LEVEL spin, so the attitude controller's thrust-error / heading-
 -- error clamps fire and rewrite the commanded yaw RATE = measured gyro.  The
--- rate PID then sees zero error and can never wind up the ~0.485 holding
--- throttle needed to counter the rotor reaction torque.
+-- rate PID then sees zero error and can never wind up the holding throttle
+-- needed to counter the rotor reaction torque.
 --
--- H_YAW_TRIM is added DOWNSTREAM of that clamp (move_yaw(yaw_out + yaw_offset)
--- in AP_MotorsHeli_Single), so a Lua integrator running on the RAW measured
--- spin rate builds the feedforward the clamped PID cannot.  gyro:z() is the
--- sensor estimate, not the clamp-rewritten target, so it still sees the true
--- spin.  The integrator persists across the PASSIVE->STEADY handoff (reset only
--- on PASSIVE entry), so the learned trim carries into steady flight with no
--- discontinuity; once learned it holds at near-zero error while AP's own PID
--- handles fine residual.  Enabled by default (YFF_KI); RAWES_YFK = 0 disables.
+-- A plain Lua integral of psi_dot ALSO fails here: under one-directional
+-- (motor >= 0) yaw actuation the loop bang-bangs, so mean(psi_dot) ~ 0 and the
+-- integrator never accumulates the DC hold.  Instead we read back the ACTUAL
+-- applied SERVO4 throttle and run an affine-plant observer (psi_dot = a*u + b)
+-- that absorbs the AP P-term's rectified DC output into H_YAW_TRIM.  The learned
+-- slope a_hat (gear ratio unknown, derived from observation) only sets the
+-- correction rate; the equilibrium trim = -b/a is independent of it.  H_YAW_TRIM
+-- is added DOWNSTREAM of the AP clamps (move_yaw(yaw_out + yaw_offset) in
+-- AP_MotorsHeli_Single), so it holds even when the native PID is frozen.  The
+-- learned slope persists across the PASSIVE->STEADY handoff; the trim is reset
+-- on PASSIVE entry so each release re-learns the DC hold from zero.  See the
+-- state-declaration header above for the full update equations.  Enabled by
+-- default; RAWES_YFK <= 0 disables.
+-- Pure observer core: given the applied motor throttle u [0,1] and the measured
+-- spin psi_dot = gyro:z() [rad/s], advance the slope estimate and the trim.
+-- No sensor / gating / param dependencies, so it is unit-testable in isolation.
+-- Returns the new trim.
+local function yaw_trim_ff_step(dt, u, psi_dot)
+    -- Slope adaptation on increments (the slow offset b cancels in du/dpsi).
+    -- Gated to quiescent yaw: during a fast limit cycle the motor lag makes the
+    -- one-tick dpsi lag du, which biases the estimate low.  The equilibrium
+    -- trim is independent of a_hat, so skipping updates here is safe.
+    local du   = u - _yaw_u_prev
+    local dpsi = psi_dot - _yaw_psi_prev
+    local quiet = (psi_dot < YFF_A_QUIET and psi_dot > -YFF_A_QUIET
+               and _yaw_psi_prev < YFF_A_QUIET and _yaw_psi_prev > -YFF_A_QUIET)
+    if _yaw_prev_valid and quiet and (du > YFF_DU_MIN or du < -YFF_DU_MIN) then
+        local e = dpsi - _yaw_a_hat * du
+        _yaw_a_hat = _yaw_a_hat + YFF_A_MU * du * e / (du * du)
+        if _yaw_a_hat < YFF_A_MIN then _yaw_a_hat = YFF_A_MIN end
+        if _yaw_a_hat > YFF_A_MAX then _yaw_a_hat = YFF_A_MAX end
+    end
+    _yaw_u_prev     = u
+    _yaw_psi_prev   = psi_dot
+    _yaw_prev_valid = true
+
+    -- Deadbeat feedforward target, low-passed into the trim.  Fixed point is
+    -- u_eq = -b/a and is independent of _yaw_a_hat (see header comment).
+    local trim_target = u - psi_dot / _yaw_a_hat
+    if trim_target < 0.0 then trim_target = 0.0 elseif trim_target > YFF_MAX then trim_target = YFF_MAX end
+    local alpha = dt / (YFF_TRIM_TAU + dt)
+    _yaw_ff_trim = _yaw_ff_trim + alpha * (trim_target - _yaw_ff_trim)
+    if _yaw_ff_trim < 0.0 then _yaw_ff_trim = 0.0 elseif _yaw_ff_trim > YFF_MAX then _yaw_ff_trim = YFF_MAX end
+    return _yaw_ff_trim
+end
+
 local function run_yaw_trim_ff(dt)
-    if _yaw_ff_ki <= 0.0 then return end                 -- disabled when RAWES_YFK = 0
+    if _yaw_ff_enable <= 0.0 then return end             -- disabled when RAWES_YFK <= 0
     if not (_ic_seeded and arming:is_armed()) then return end
     local gyro = ahrs:get_gyro()
     if not gyro then return end
-    local err = -gyro:z()                                -- setpoint psi_dot = 0
-    _yaw_ff_i = _yaw_ff_i + _yaw_ff_ki * err * dt
-    if _yaw_ff_i > YFF_MAX then _yaw_ff_i = YFF_MAX end
-    if _yaw_ff_i < 0.0     then _yaw_ff_i = 0.0     end
-    -- Proportional damping is added on top of the integrator but NOT accumulated,
-    -- so it decays with the disturbance.  Total trim is clamped to [0, YFF_MAX].
-    local trim = _yaw_ff_i + YFF_KP * err
-    if trim > YFF_MAX then trim = YFF_MAX end
-    if trim < 0.0     then trim = 0.0     end
-    param:set("H_YAW_TRIM", trim)
-    gcs:send_named_float("YFF_I",  _yaw_ff_i)
-    gcs:send_named_float("YFF_GZ", gyro:z())
+
+    -- Applied motor throttle, read back from the actual SERVO4 output so the
+    -- observer sees the TOTAL command (AP yaw P-term + our trim), not just the
+    -- trim.  This is what lets the feedforward absorb the P-term's rectified DC.
+    local pwm = SRV_Channels:get_output_pwm(YAW_MOTOR_FUNC)
+    if pwm == nil then return end                        -- output not available yet
+    local smin = p("SERVO4_MIN", 800)
+    local smax = p("SERVO4_MAX", 2000)
+    local span = smax - smin
+    if span <= 0 then return end
+    local u = (pwm - smin) / span
+    if u < 0.0 then u = 0.0 elseif u > 1.0 then u = 1.0 end
+
+    local psi_dot = gyro:z()
+    yaw_trim_ff_step(dt, u, psi_dot)
+    param:set("H_YAW_TRIM", _yaw_ff_trim)
+
+    -- Telemetry: trim, applied throttle, spin (every tick); learned slope
+    -- streamed periodically to keep the NVF rate down.
+    gcs:send_named_float("YFF_T",  _yaw_ff_trim)
+    gcs:send_named_float("YFF_U",  u)
+    gcs:send_named_float("YFF_GZ", psi_dot)
+    _yaw_a_nvf_ctr = _yaw_a_nvf_ctr + 1
+    if _yaw_a_nvf_ctr >= YFF_A_NVF_TICKS then
+        _yaw_a_nvf_ctr = 0
+        gcs:send_named_float("YFF_A", _yaw_a_hat)
+    end
 end
 
 local function run_passive_mode(now)
@@ -882,9 +1000,22 @@ local function update()
     -- Update altitude, tension, cyclic and collective targets from NV messages
     if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
     if _nv_floats["RAWES_TEN"] then _tension_n  = _nv_floats["RAWES_TEN"] end
-    -- Yaw feedforward trim gain override (0 = disable, > 0 = retune).  Enabled by
-    -- default (YFF_KI); persistent once sent.
-    if _nv_floats["RAWES_YFK"] then _yaw_ff_ki  = _nv_floats["RAWES_YFK"] end
+    -- Elevation/body_z slew rate + anchor position (formerly SCR_USER2/3/4/5).
+    -- The anchor is safety-critical: run_flight does not initialise altitude
+    -- hold until all three anchor floats have been received (see the capture
+    -- gate below), so a stale/zero anchor never drives a cyclic command.
+    if _nv_floats["RAWES_SLW"] then _bz_slew = _nv_floats["RAWES_SLW"] end
+    if _nv_floats["RAWES_ANN"] then _anchor_n = _nv_floats["RAWES_ANN"]; _got_anchor_n = true end
+    if _nv_floats["RAWES_ANE"] then _anchor_e = _nv_floats["RAWES_ANE"]; _got_anchor_e = true end
+    if _nv_floats["RAWES_AND"] then _anchor_d = _nv_floats["RAWES_AND"]; _got_anchor_d = true end
+    if (not _anchor_received) and _got_anchor_n and _got_anchor_e and _got_anchor_d then
+        _anchor_received = true
+        gcs:send_text(6, string.format(
+            "RAWES anchor set: N=%.1f E=%.1f D=%.1f", _anchor_n, _anchor_e, _anchor_d))
+    end
+    -- Yaw feedforward trim enable flag (<= 0 disables, > 0 enables).  Enabled by
+    -- default; persistent once sent.
+    if _nv_floats["RAWES_YFK"] then _yaw_ff_enable = _nv_floats["RAWES_YFK"] end
 
     -- IC seed handling: do not set active IC commands until all three
     -- (collective, roll, pitch) have been observed at least once.
@@ -918,15 +1049,15 @@ local function update()
     end
     if _nv_floats["RAWES_TLN"]    then _man_tlon_rad = _nv_floats["RAWES_TLN"]    end
     if _nv_floats["RAWES_TLT"]    then _man_tlat_rad = _nv_floats["RAWES_TLT"]    end
+    -- RAWES_ARM disarm timer must always run, regardless of mode/IC seed.  In
+    -- particular, MODE_PASSIVE before full IC seed still needs the safety timer
+    -- to expire and disarm if requested by the ground.
+    run_armon(now)
+
     -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up).
     -- In PASSIVE before full IC seed, avoid all non-essential control API calls.
     if mode ~= MODE_PASSIVE or _ic_seeded then
         if _rc_ch4 then _rc_ch4:set_override(1500) end
-    end
-
-    -- In PASSIVE before full IC seed, avoid arming/disarming API actions.
-    if mode ~= MODE_PASSIVE or _ic_seeded then
-        run_armon(now)
     end
 
     -- Latch the motor interlock (CH8) high while armed so the heli rotor stays
@@ -993,10 +1124,8 @@ _mode_names = {[0]="none", [1]="steady", [2]="manual", [4]="landing"}
 _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
-    "RAWES: loaded  mode=%d (%s)  slew=%.2f  anchor=(%.1f %.1f %.1f)",
-    _mode_init, _mode_str,
-    p("SCR_USER2", 0.40),
-    p("SCR_USER3", 0.0), p("SCR_USER4", 0.0), p("SCR_USER5", 0.0)))
+    "RAWES: loaded  mode=%d (%s)  (slew+anchor via NAMED_VALUE_FLOAT)",
+    _mode_init, _mode_str))
 
 -- @@UNIT_TEST_HOOK
 

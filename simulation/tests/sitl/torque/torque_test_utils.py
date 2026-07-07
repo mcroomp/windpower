@@ -53,6 +53,22 @@ def run_observation_loop(
     obs:  list[dict] = []
     rows: list       = []
     pwm = [0]  # latest Ch9/Ch4 PWM, captured by closure
+    nvf_latest = {
+        "mav_nvf_yaw_i": float("nan"),
+        "mav_nvf_yaw_out": float("nan"),
+        "mav_nvf_yff_trim": float("nan"),
+        "mav_nvf_yff_u": float("nan"),
+        "mav_nvf_yff_gz": float("nan"),
+        "mav_nvf_yff_a": float("nan"),
+    }
+    nvf_map = {
+        "YAW_I": "mav_nvf_yaw_i",
+        "YAW_OUT": "mav_nvf_yaw_out",
+        "YFF_T": "mav_nvf_yff_trim",
+        "YFF_U": "mav_nvf_yff_u",
+        "YFF_GZ": "mav_nvf_yff_gz",
+        "YFF_A": "mav_nvf_yff_a",
+    }
     log = ctx.log
 
     def handle(msg, t_rel):
@@ -65,12 +81,28 @@ def run_observation_loop(
             ch9 = getattr(msg, "servo9_raw", 0) or 0
             ch4 = getattr(msg, "servo4_raw", 0) or 0
             pwm[0] = ch9 if ch9 > 1050 else ch4
+        elif mt == "NAMED_VALUE_FLOAT":
+            raw_name = getattr(msg, "name", "")
+            if isinstance(raw_name, bytes):
+                name = raw_name.decode("ascii", errors="ignore")
+            else:
+                name = str(raw_name)
+            name = name.rstrip("\x00").strip()
+            mapped = nvf_map.get(name)
+            if mapped is not None:
+                nvf_latest[mapped] = float(getattr(msg, "value", float("nan")))
         elif mt == "ATTITUDE":
             rows.append(TelRow(
                 t_sim=t_rel, phase="DYNAMIC",
                 rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
                 omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
                 servo4_us=float(pwm[0]),
+                mav_nvf_yaw_i=float(nvf_latest["mav_nvf_yaw_i"]),
+                mav_nvf_yaw_out=float(nvf_latest["mav_nvf_yaw_out"]),
+                mav_nvf_yff_trim=float(nvf_latest["mav_nvf_yff_trim"]),
+                mav_nvf_yff_u=float(nvf_latest["mav_nvf_yff_u"]),
+                mav_nvf_yff_gz=float(nvf_latest["mav_nvf_yff_gz"]),
+                mav_nvf_yff_a=float(nvf_latest["mav_nvf_yff_a"]),
             ))
             if t_rel >= settle_s:
                 obs.append({"t": t_rel, "yaw": msg.yaw, "yaw_rate": msg.yawspeed})
@@ -82,7 +114,7 @@ def run_observation_loop(
         return None
 
     observe(ctx, settle_s + observe_s + timeout_margin_s, handle,
-            msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW"],
+            msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"],
             keepalive={8: 2000})
     return obs, rows
 
@@ -209,7 +241,7 @@ def assert_physics_yaw_rate(
     for s in samples:
         if abs(s["psi_dot"]) > threshold_rad_s:
             bad.record(
-                "yaw_violation", phase="DYNAMIC", alt=0.0,
+                "yaw_violation", t=float(s["t"]), phase="DYNAMIC", alt=0.0,
                 psi_dot_deg_s=round(math.degrees(s["psi_dot"]), 2),
             )
 

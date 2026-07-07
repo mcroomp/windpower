@@ -3,7 +3,7 @@
 # setup.sh -- RAWES one-time setup tasks.  All subcommands are idempotent.
 #
 # Subcommands:
-#   (no args)   create or refresh the Windows venv at simulation/.venv
+#   (no args)   create or refresh the Windows venv at .venv (repo root)
 #                 hash-gated: requirements.txt is re-installed only when changed.
 #   build       build rawes-sim runtime with ArduPilot (~30-60 min)
 #   build-lite  build rawes-sim runtime without ArduPilot (fast)
@@ -21,12 +21,21 @@ export MSYS_NO_PATHCONV=1
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_DIR="$REPO_DIR/simulation"
-VENV="$SIM_DIR/.venv"
+VENV="$REPO_DIR/.venv"
 PYTHON="$VENV/Scripts/python.exe"
 REQS="$SIM_DIR/requirements.txt"
 STAMP="$VENV/Scripts/.requirements_hash"
 
-_winpath() { cygpath -w "$1"; }
+_winpath() {
+    if command -v cygpath &>/dev/null; then
+        cygpath -w "$1"
+    elif command -v wslpath &>/dev/null; then
+        wslpath -w "$1"
+    else
+        # Plain bash on a native Windows PATH — no conversion needed.
+        echo "$1"
+    fi
+}
 
 # --- venv (default) ----------------------------------------------------
 _setup_venv() {

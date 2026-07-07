@@ -1,0 +1,65 @@
+# rawes_common_defaults.parm — RAWES defaults shared by simtests, SITL and hardware.
+#
+# Loaded after copter-heli.parm and before rawes_sitl_defaults.parm.
+# Keep this file free of simulator-only knobs (SIM_*, relaxed EKF gates, etc.).
+
+# Heli rate controller — tuned for the beaupoil_2026 rotor.
+#
+# SINGLE SOURCE OF TRUTH: this file is the one place rate PIDs are tuned.
+# Everyone -- unit tests, simtests, SITL and hardware -- loads the same
+# copter-heli.parm + rawes_common_defaults.parm (+ sitl-only overlay for SITL).
+
+# Rate PID overrides — shared tuning surface.
+ATC_RAT_RLL_P    0.06
+ATC_RAT_RLL_I    0.105
+ATC_RAT_RLL_D    0.0001
+ATC_RAT_RLL_FF   0.21
+ATC_RAT_RLL_ILMI 0.1
+ATC_RAT_RLL_FLTT 20
+ATC_RAT_RLL_FLTE 20
+ATC_RAT_RLL_FLTD 0
+ATC_RAT_PIT_P    0.06
+ATC_RAT_PIT_I    0.105
+ATC_RAT_PIT_D    0.0001
+ATC_RAT_PIT_FF   0.21
+ATC_RAT_PIT_ILMI 0.1
+ATC_RAT_PIT_FLTT 20
+ATC_RAT_PIT_FLTE 20
+ATC_RAT_PIT_FLTD 0
+
+# disable throttle boost at high tilt
+ATC_ANGLE_BOOST   0
+
+# disable auto-leveling (physical tilt ~65 deg)
+ACRO_TRAINER      0
+
+# Collective servo range: full 1000-2000 us.
+H_COL_MIN         1000
+H_COL_MAX         2000
+H_RSC_MODE        1      # passthrough: no main rotor motor
+
+# GB4008 anti-rotation motor (MAIN OUT 4)
+H_TAIL_TYPE       3
+H_COL2YAW         0.0
+
+# The anti-rotation motor has very high yaw authority: the plant slope is
+# d(psi_dot)/d(throttle) ~ RPM_SCALE/GEAR ~ 58 rad/s per unit throttle.  With the
+# inertial motor model (finite torque -> first-order, ~4 Hz pole, bounded slew)
+# P=0.02 roughly halves the yaw-rate RMS and cuts heading-hold stdev from ~9 deg
+# to ~3.6 deg vs the old P=0.01, with throttle still off the rails.  Higher P
+# (>=0.03) rings the rotor spin-up/slow-vary transients over the gate, and D --
+# even filtered (FLTD=10) -- reintroduces a limit cycle, so D stays 0.  I stays 0
+# too: the Lua trim feedforward carries the DC hold.
+ATC_RAT_YAW_P     0.02
+ATC_RAT_YAW_D     0.0
+ATC_RAT_YAW_FLTD  10.0
+
+# AP yaw integral OFF: the Lua trim observer carries the DC hold.  A small AP I was
+# tried for gust/tilt disturbance rejection but it degraded the slow_vary steady
+# tracking (interacts with the observer) and did not fix the brief coupling spikes,
+# so I stays 0.  
+ATC_RAT_YAW_I     0.0
+
+SERVO4_MIN        800
+SERVO4_MAX        2000
+SERVO4_TRIM       800

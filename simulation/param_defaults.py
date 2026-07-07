@@ -2,7 +2,8 @@
 
 Parameter precedence (later files override earlier files):
 1. ArduPilot heli baseline: ``simulation/tests/sitl/copter-heli.parm``
-2. RAWES overrides: ``simulation/tests/sitl/rawes_sitl_defaults.parm``
+2. RAWES common defaults: ``simulation/tests/sitl/rawes_common_defaults.parm``
+3. RAWES SITL-only overrides: ``simulation/tests/sitl/rawes_sitl_defaults.parm``
 
 This keeps arduloop aligned to real ArduPilot parameters without hardcoded
 controller values in Python.
@@ -23,9 +24,13 @@ def _resolve_default_param_files() -> list[Path]:
     if ap_base.exists():
         files.append(ap_base)
 
-    rawes_override = sim_root / "tests" / "sitl" / "rawes_sitl_defaults.parm"
-    if rawes_override.exists():
-        files.append(rawes_override)
+    rawes_common = sim_root / "tests" / "sitl" / "rawes_common_defaults.parm"
+    if rawes_common.exists():
+        files.append(rawes_common)
+
+    rawes_sitl_only = sim_root / "tests" / "sitl" / "rawes_sitl_defaults.parm"
+    if rawes_sitl_only.exists():
+        files.append(rawes_sitl_only)
 
     return files
 
@@ -102,8 +107,8 @@ def load_rate_pid_params(parm_file=None, axis: str = "RLL"):
     """Load a single rate-axis PID parameter set from ArduPilot .parm sources.
 
     Every consumer (unit tests, simtests, and SITL) loads the *same* merged
-    ``copter-heli.parm`` + ``rawes_sitl_defaults.parm`` chain, so the gains are
-    identical across paths.
+    ``copter-heli.parm`` + ``rawes_common_defaults.parm`` +
+    ``rawes_sitl_defaults.parm`` chain, so the gains are identical across paths.
 
     Parameters
     ----------

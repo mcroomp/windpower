@@ -1,174 +1,53 @@
-# rawes_sitl_defaults.parm — SITL boot-time parameter defaults for RAWES stack tests.
+# rawes_sitl_defaults.parm — SITL-ONLY boot-time overrides for RAWES stack tests.
 #
-# Loaded via --add-param-file (combined with --wipe-eeprom) in _launch_sitl().
-# These params become the boot defaults so setting them again via MAVLink is a
-# no-op (value unchanged) — prevents EKF reinit that would delay GPS fusion.
+# This file is loaded after:
+#   1) copter-heli.parm
+#   2) rawes_common_defaults.parm
 #
-# EK3_SRC1_YAW=2 (GPS dual-antenna yaw): heading from the RELPOSNED baseline
-# vector between two F9P antennas 50 cm apart on the rotor disk.  Yaw is known
-# from the first GPS fix — no motion, no EKFGSF rotation needed.
-#
-# GPS_AUTO_CONFIG=0: required for SITL RELPOSNED stream.  Without it ArduPilot
-# tries to reconfigure the UBLOX chips over serial and corrupts the stream.
-#
-# Compass is disabled (COMPASS_USE=0) because:
-#   1. The GB4008 motor swamps the magnetometer on real hardware.
-#   2. SITL has 3 synthetic compasses; with dual GPS yaw they are not needed.
+# Keep this file restricted to simulator-only settings, relaxed EKF gates for
+# deterministic test startup, and test-harness behaviors not intended for
+# hardware defaults.
 
-# Heli rate controller — tuned for the beaupoil_2026 rotor.
-#
-# Why these values:
-#   rawes.lua flies the GUIDED *angle* path (set_target_angle_and_rate_and_
-#   throttle), so this rate PID is the INNER loop beneath ArduPilot's attitude
-#   P-loop (ATC_ANG_*_P).  It must track the attitude controller's rate demand
-#   at the high-tilt / low-tension reel-in operating point.
-#
-#   SINGLE SOURCE OF TRUTH: this file is the one place rate PIDs are tuned.
-#   Everyone -- unit tests, simtests, and SITL -- loads the same
-#   copter-heli.parm + this file chain (simtests via param_defaults.py, SITL via
-#   the boot --add-param-file), so roll uses ATC_RAT_RLL_* and pitch uses
-#   ATC_RAT_PIT_* identically in both paths.  The block below seeds the ArduPilot
-#   copter-heli.parm baseline values; edit it (not Python) to retune.
-#
-# DataFlash logging:
-#   LOG_BITMASK bits from ArduCopter/defines.h:
-#     bit  0: ATTITUDE_FAST
-#     bit  1: ATTITUDE_MED
-#     bit  2: GPS
-#     bit  3: PM
-#     bit  4: CTUN
-#     bit  5: NTUN
-#     bit  6: RCIN
-#     bit  7: IMU
-#     bit  8: CMD
-#     bit  9: CURRENT
-#     bit 10: RCOUT
-#     bit 11: OPTFLOW
-#     bit 12: PID
-#     bit 13: COMPASS
-#     bit 14: INAV (deprecated)
-#     bit 15: CAMERA
-#     bit 16: unused
-#     bit 17: MOTBATT
-#     bit 18: IMU_FAST
-#     bit 19: IMU_RAW
-#     bit 20: VIDEO_STABILISATION
-#     bit 21: FTN_FAST
-#   Current value 442367 enables bits:
-#     0,1,2,3,4,5,6,7,8,9,10,11,12,13,15,17,18
-#   Notes:
-#     - RCIN has no separate fast bit in Copter; RCIN logging is emitted from
-#       ten_hz_logging_loop in source.
-#     - This mask intentionally enables ATTITUDE_FAST (bit 0) and IMU_FAST
-#       (bit 18) for higher-rate attitude/IMU diagnostics.
+# DataFlash logging
 LOG_BITMASK       442367
 
-# Rate PID overrides — single tuning surface shared by simtest + SITL.
-# Seeded from the ArduPilot copter-heli.parm baseline; retune here.
-# Roll and pitch are independent axes in code, but the RAWES rotorcraft is
-# axially symmetric (no long fuselage), so the conventional helicopter
-# assumption of distinct roll/pitch inertia does not apply. Pitch therefore
-# uses the SAME gains as roll, not the copter-heli PIT defaults (which are tuned
-# for a longitudinally elongated airframe).
-# NOTE: ATC_RAT_*_IMAX is intentionally NOT set here — it is left at the
-# ArduPilot/copter-heli default while the "test ArduPilot defaults" experiment
-# is active (see design/simulation.md, AGENTS.md for the IMAX=0 anti-windup intent).
-ATC_RAT_RLL_P    0.06
-ATC_RAT_RLL_I    0.105
-ATC_RAT_RLL_D    0.0001
-ATC_RAT_RLL_FF   0.21
-ATC_RAT_RLL_ILMI 0.1
-ATC_RAT_RLL_FLTT 20
-ATC_RAT_RLL_FLTE 20
-ATC_RAT_RLL_FLTD 0
-ATC_RAT_PIT_P    0.06
-ATC_RAT_PIT_I    0.105
-ATC_RAT_PIT_D    0.0001
-ATC_RAT_PIT_FF   0.21
-ATC_RAT_PIT_ILMI 0.1
-ATC_RAT_PIT_FLTT 20
-ATC_RAT_PIT_FLTE 20
-ATC_RAT_PIT_FLTD 0
-ATC_ANGLE_BOOST   0      # disable throttle boost at high tilt (RAWES commands fixed throttle -> no boost wanted)
+EK3_IMU_MASK      1      # single EKF3 core (IMU0 only)
+EK3_SRC1_YAW      2      # GPS dual-antenna yaw (moving baseline)
+EK3_MAG_CAL       0      # Never
 
-ACRO_TRAINER      0      # disable auto-leveling (physical tilt ~65 deg)
+# Dual GPS moving-baseline heading (driver-side)
+GPS1_TYPE         17     # F9P moving-baseline BASE
+GPS2_TYPE         18     # F9P moving-baseline ROVER
+GPS1_POS_X        0.25   # base lever arm
+GPS2_POS_X       -0.25   # rover lever arm
 
-EK3_IMU_MASK    1      # bit 0 only = IMU0 only = single EKF3 core (no Roll/Pitch inconsistency)
-EK3_SRC1_YAW    2      # 2=GPS dual-antenna yaw (RELPOSNED from F9P moving baseline)
-EK3_MAG_CAL     0      # 0=Never
-EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks (SITL JSON GPS has no quality fields)
-EK3_POS_I_GATE  50.0   # position innovation gate (sigma) — widened for extreme attitude
-EK3_VEL_I_GATE  50.0   # velocity innovation gate (sigma) — widened for extreme attitude
+# Pin EKF-assumed GPS lag deterministically.
+GPS1_DELAY_MS     220
+GPS2_DELAY_MS     220
 
-# Dual GPS moving-baseline heading (GPS-for-yaw in SITL)
-#
-# Two F9P antennas 50 cm apart along body X on the rotor disk produce a RELPOSNED
-# baseline vector; EK3_SRC1_YAW=2 derives yaw from it (no compass, no motion).
-#
-# SITL (--model JSON) synthesises the GPS sensors from the truth attitude, so BOTH
-# sides must be configured (matches ArduPilot's own copter-gps-for-yaw.parm):
-#   - Driver side  (GPS1_*/GPS2_*): tells the AP_GPS driver the antenna geometry.
-#   - SITL sim side (SIM_GPS1_*/SIM_GPS2_*): tells the simulator to emit a second
-#     GPS + RELPOSNED.  SIM_GPS*_POS MUST equal the driver GPS*_POS so ArduPilot
-#     backs out the correct vehicle yaw from the simulated baseline heading.
-#
-# CRITICAL: SIM_GPS2_ENABLE=1.  Without it SITL simulates only ONE GPS, no moving
-# baseline exists, no RELPOSNED is emitted, EK3_SRC1_YAW=2 has no yaw source, and
-# the EKF stays in const_pos_mode (AID_NONE) forever — never fusing GPS, never
-# publishing LOCAL_POSITION_NED.
-GPS_AUTO_CONFIG  0      # disable GPS auto-config: required in SITL to preserve RELPOSNED stream
-GPS1_TYPE        17     # driver: F9P moving-baseline BASE
-GPS2_TYPE        18     # driver: F9P moving-baseline ROVER (outputs RELPOSNED heading)
-GPS1_POS_X       0.25   # driver GPS1 (base) lever arm: +25 cm along body X from hub centre
-GPS2_POS_X      -0.25   # driver GPS2 (rover) lever arm: -25 cm along body X from hub centre
-SIM_GPS2_ENABLE  1      # enable the 2nd simulated GPS (default 0) — REQUIRED for moving baseline
-SIM_GPS1_HDG     4      # sim GPS1 = GPS_HEADING_BASE (moving-baseline base antenna)
-SIM_GPS2_HDG     1      # sim GPS2 = rover: emit RELPOSNED heading
-SIM_GPS1_POS_X   0.25   # sim GPS1 lever arm — MUST match driver GPS1_POS_X
-SIM_GPS2_POS_X  -0.25   # sim GPS2 lever arm — MUST match driver GPS2_POS_X
+COMPASS_USE       0      # disable compass yaw source
+SCR_ENABLE        1      # enable Lua scripting
 
-# GPS lag: the EKF-assumed lag MUST equal the SITL-injected lag, or the moving-baseline
-# yaw timestamp (gps_yaw_time_ms) never lands on the EKF fusion horizon, storedYawAng.recall()
-# misses every cycle, yawAlignComplete never latches, and readyToUseGPS() never passes -> the
-# filter hangs in const_pos_mode (AID_NONE) through kinematic release.
-#   The EKF uses get_lag() in TWO places that must agree: (a) ONCE at setup_core() to size the
-#   IMU fusion horizon (imu_buffer_length), and (b) EVERY cycle to back-date the GPS-yaw
-#   timestamp (AP_GPS::gps_yaw_deg subtracts get_lag). If get_lag() returns a DIFFERENT value
-#   at init vs runtime, horizon != yaw-lag and recall() misses the window forever.
-#   With GPS*_DELAY_MS=0, get_lag() falls through to UBLOX hardware-generation detection: it
-#   can report 220 ms (UBLOX_UNKNOWN gen) at boot before the GPS is classified, then 160 ms
-#   (detected-F9 moving-baseline = 120+40) once MON-VER lands -> a 60 ms init/runtime split
-#   that breaks recall(). Pin the lag explicitly instead: params[instance].delay_ms > 0 makes
-#   AP_GPS::get_lag() return that exact value deterministically at all times ("the user is
-#   always right", AP_GPS.cpp:1737), so horizon == yaw-lag == 220 ms, matching the SIM
-#   injection below. This is a legitimate F9P hardware config, not a sim-only hack.
-GPS1_DELAY_MS    220    # pin EKF-assumed lag (overrides driver get_lag gen-detection)
-GPS2_DELAY_MS    220    # pin EKF-assumed lag (overrides driver get_lag gen-detection)
-SIM_GPS1_LAG_MS  220    # SITL-injected lag MUST equal the pinned GPS1_DELAY_MS above
-SIM_GPS2_LAG_MS  220    # SITL-injected lag MUST equal the pinned GPS2_DELAY_MS above
+# Relax GPS checks / innovation gates for SITL boot determinism.
+EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks in SITL JSON GPS
+EK3_POS_I_GATE  50.0   # widened position innovation gate (sigma)
+EK3_VEL_I_GATE  50.0   # widened velocity innovation gate (sigma)
 
-COMPASS_USE     0      # disable compass: GB4008 motor swamps magnetometer on hardware
-COMPASS_ENABLE  0      # disable all SITL synthetic compasses
-COMPASS_USE2    0      # disable compass instance 2
-COMPASS_USE3    0      # disable compass instance 3
-SCR_ENABLE      1      # enable Lua scripting on first boot (required for guided_nogps_armed_lua)
+# SITL moving-baseline simulator-side GPS config.
+# Driver-side GPS* params live in rawes_common_defaults.parm.
+GPS_AUTO_CONFIG  0      # prevent SITL auto-config from corrupting RELPOSNED stream
+SIM_GPS2_ENABLE  1      # second simulated GPS required for moving baseline
+SIM_GPS1_HDG     4      # simulated base antenna
+SIM_GPS2_HDG     1      # simulated rover (emits RELPOSNED heading)
+SIM_GPS1_POS_X   0.25   # must match GPS1_POS_X driver setting
+SIM_GPS2_POS_X  -0.25   # must match GPS2_POS_X driver setting
+SIM_GPS1_LAG_MS  220    # must match pinned GPS1_DELAY_MS
+SIM_GPS2_LAG_MS  220    # must match pinned GPS2_DELAY_MS
 
-# Collective servo range: full 1000-2000 us so Lua's ch3 encoding maps 1:1 to servos.
-# copter-heli.parm defaults to H_COL_MIN=1250/H_COL_MAX=1750 (0.5x gain).
-# With full range, Lua ch3=1945 -> servo=1945 -> collective_norm=0.89 -> col_rad=0.089.
-H_COL_MIN       1000   # minimum collective servo output (us) -- full range
-H_COL_MAX       2000   # maximum collective servo output (us) -- full range
-H_RSC_MODE      1      # 1=Passthrough: no main rotor motor (autorotation only).
-                       # Motor interlock HIGH (RC8=2000) -> THROTTLE_UNLIMITED immediately.
-DISARM_DELAY    0      # disable landed auto-disarm during long kinematic hold
+# Disable synthetic SITL compasses (compass yaw source already disabled in common file).
+COMPASS_ENABLE   0
+COMPASS_USE2     0
+COMPASS_USE3     0
 
-# GB4008 anti-rotation motor -- MAIN OUT 4 (SERVO4, H_TAIL_TYPE=3 DDFP CW).
-# US-convention rotor spins CCW from above => body drifts CCW (gyro:z() < 0)
-# under drag.  yaw error = 0 - gyro:z() = positive => positive PID output.
-# H_TAIL_TYPE=3 passes positive PID straight to SERVO4 throttle (no sign flip).
-# Lua MODE_YAW bypasses this path and writes SERVO4 directly via SRV_Channels.
-H_TAIL_TYPE      3     # DDFP CW: ATC_RAT_YAW PID output -> SERVO4 (no flip)
-H_COL2YAW       0.0   # no collective-to-yaw feedforward
-SERVO4_MIN       800   # PWM off = 800 us (motor silent)
-SERVO4_MAX       2000  # PWM full = 2000 us
-SERVO4_TRIM      800   # DDFP trim = off; motor silent at neutral stick
+# Test-harness behavior: avoid landed auto-disarm during long kinematic hold.
+DISARM_DELAY     0

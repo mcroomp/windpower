@@ -57,14 +57,15 @@ end)()
 """
 
 # ── SCR_USER param shorthand map ──────────────────────────────────────────────
+# Mode is the ONLY SCR_USER parameter; every other tunable/anchor input is
+# delivered to rawes.lua via NAMED_VALUE_FLOAT (use sim.send_named_float):
+#   slew      -> RAWES_SLW   (body_z slew rate rad/s)
+#   anchor_n  -> RAWES_ANN   (anchor North m)
+#   anchor_e  -> RAWES_ANE   (anchor East  m)
+#   anchor_d  -> RAWES_AND   (anchor Down  m)
 
 _PARAM_ALIAS = {
-    "mode":     "SCR_USER6",   # flight mode (0-8)
-    "kp":       "SCR_USER1",   # cyclic P gain
-    "slew":     "SCR_USER2",   # body_z slew rate rad/s
-    "anchor_n": "SCR_USER3",   # anchor North m
-    "anchor_e": "SCR_USER4",   # anchor East  m
-    "anchor_d": "SCR_USER5",   # anchor Down  m
+    "mode":     "SCR_USER6",   # flight mode (0-4) — the only SCR_USER param
 }
 
 
@@ -111,14 +112,12 @@ class RawesLua:
     Parameters
     ----------
     **params : float
-        Initial SCR_USER parameter values using shorthand names:
+        Initial parameter values.  Mode is the only SCR_USER parameter:
             mode      -> SCR_USER6   (flight mode, default 0)
-            kp        -> SCR_USER1   (cyclic P gain, default 1.0)
-            slew      -> SCR_USER2   (body_z slew rate rad/s, default 0.40)
-            anchor_n  -> SCR_USER3   (anchor North m, default 0)
-            anchor_e  -> SCR_USER4   (anchor East  m, default 0)
-            anchor_d  -> SCR_USER5   (anchor Down  m, default 0)
         Full ArduPilot names (e.g. "SCR_USER6") are also accepted.
+        Slew + anchor are delivered via NAMED_VALUE_FLOAT at runtime, not as
+        params -- use sim.send_named_float("RAWES_SLW"/"RAWES_ANN"/"RAWES_ANE"/
+        "RAWES_AND", value).
     """
 
     # Base tick rate: rawes.lua BASE_PERIOD_MS = 10 ms (100 Hz)
@@ -255,16 +254,19 @@ class RawesLua:
     # ── Parameters ────────────────────────────────────────────────────────
 
     def set_param(self, name: str, value: float):
-        """Set a SCR_USER parameter by ArduPilot name or shorthand alias.
+        """Set a parameter by ArduPilot name or the ``mode`` alias.
+
+        Mode is the only SCR_USER parameter; slew/anchor now flow via
+        send_named_float (RAWES_SLW / RAWES_ANN / RAWES_ANE / RAWES_AND).
 
         Example:
             sim.set_param("mode", 1)          # SCR_USER6 = 1 (steady)
-            sim.set_param("SCR_USER1", 1.5)   # cyclic kp
+            sim.set_param("SCR_USER6", 1)     # same, full name
         """
         self._mock.params[_PARAM_ALIAS.get(name, name)] = float(value)
 
     def get_param(self, name: str) -> float:
-        """Read a SCR_USER parameter by ArduPilot name or shorthand alias."""
+        """Read a parameter by ArduPilot name or the ``mode`` alias."""
         v = self._mock.params[_PARAM_ALIAS.get(name, name)]
         return float(v) if v is not None else 0.0
 
@@ -336,6 +338,15 @@ class RawesLua:
         """
         v = self._mock.srv_out[func]
         return int(v) if v is not None else None
+
+    def set_srv_out(self, func: int, pwm: float) -> None:
+        """Inject a SERVO output PWM for a function number.
+
+        Simulates ArduPilot writing a servo output that the script reads back
+        via ``SRV_Channels:get_output_pwm(func)``.  Used to feed the applied
+        yaw-motor throttle (SERVO4_FUNCTION=36) to the yaw-trim observer.
+        """
+        self._mock.srv_out[int(func)] = float(pwm)
 
     @property
     def guided_target(self) -> dict | None:

@@ -15,7 +15,7 @@ Inputs (write before tick):
   _mock.vel_ned        {x, y, z} m/s
   _mock.R              flat row-major 3x3, indices 1..9  (body_to_NED)
   _mock.accel          {x, y, z} m/s^2  body-frame specific force (gravity excluded)
-  _mock.params         {SCR_USER1..6, ...}
+  _mock.params         {SCR_USER6, ...}  (mode only; slew/anchor via NAMED_VALUE_FLOAT)
 
 Outputs (read after tick):
   _mock.ch_out[n]      RC channel n PWM override (nil if not set)
@@ -40,11 +40,8 @@ _mock = {
     -- R: flat row-major body_to_NED 3x3, 1-indexed.  Default = identity.
     R           = {1,0,0, 0,1,0, 0,0,1},
     params      = {
-        SCR_USER1 = 1.0,   -- KP_CYC
-        SCR_USER2 = 0.40,  -- BZ_SLEW
-        SCR_USER3 = 0.0,   -- anchor N
-        SCR_USER4 = 0.0,   -- anchor E
-        SCR_USER5 = 0.0,   -- anchor D
+        -- Mode is the only SCR_USER parameter rawes.lua reads; slew + anchor
+        -- are delivered via NAMED_VALUE_FLOAT (RAWES_SLW/ANN/ANE/AND).
         SCR_USER6 = 0,     -- mode (0=disabled)
     },
     ch_out      = {},    -- [channel_n] = pwm
@@ -264,6 +261,15 @@ end
 -- chan is 0-indexed in ArduPilot; store as 1-indexed for Lua table access.
 function SRV_Channels:set_output_pwm_chan_timeout(chan, pwm, timeout_ms)
     _mock.srv_chan_out[chan + 1] = pwm
+end
+
+-- get_output_pwm(function_num) -> pwm | nil
+-- Returns the last PWM written for a servo function, or nil when the function
+-- has no output yet (matches the real binding, which returns nil/false when the
+-- function is not available).  Tests inject the applied yaw-motor PWM via
+-- _mock.srv_out[func] (harness: set_srv_out).
+function SRV_Channels:get_output_pwm(func)
+    return _mock.srv_out[func]
 end
 
 -- ── param ────────────────────────────────────────────────────────────────────

@@ -128,6 +128,39 @@ def torque_armed_lua(tmp_path, request):
 
 
 @pytest.fixture
+def torque_production_vanilla_lua(tmp_path, request):
+    """
+    Production-like torque fixture using vanilla SITL boot defaults + Lua PASSIVE.
+
+    Uses the default _sitl_stack parameter chain (copter-heli + rawes_common +
+    rawes_sitl_defaults), not the torque-specific _BASE_TORQUE_BOOT_PARAMS.
+
+    Rotor profile: starts stationary during STARTUP hold, then spins up to 200 RPM
+    and varies slowly around that speed (profile="slow_vary").
+    """
+    _OMEGA_200_RPM = 200.0 * 2.0 * math.pi / 60.0
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=_OMEGA_200_RPM,
+        profile="slow_vary",
+        tail_channel=3,
+        # Keep Lua loaded and in MODE_PASSIVE. PASSIVE holds the seeded IC state
+        # and runs yaw feedforward trim via H_YAW_TRIM while ArduPilot DDFP closes yaw.
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
+        # NOTE: a fixed absolute yaw heading via RAWES_YIC was trialled here but,
+        # combined with the slow_vary RPM sweep and the I=0 rate loop, it left a
+        # steady yaw-rate residual that tripped the gate.  Free-capture (PASSIVE
+        # latches the AHRS yaw on entry) is the default.
+        test_name=request.node.name,
+        startup_hold_s=15.0,
+        startup_yaw_rate_deg_s=0.0,
+        use_vanilla_boot_defaults=True,
+    ) as ctx:
+        yield ctx
+
+
+@pytest.fixture
 def torque_armed_lua_yaw(tmp_path, request):
     """
     Torque stack with rawes.lua in MODE_YAW (SCR_USER6=2).
@@ -151,9 +184,20 @@ def torque_armed_lua_yaw(tmp_path, request):
     ``stack_infra._launch_mediator_torque`` for the no-GPS configuration.
     """
     import math
-    # Override SCR_USER6 from the default 0 (MODE_NONE) used by the
-    # shared _LUA_TORQUE_EXTRA_PARAMS to 2 (MODE_YAW).
-    _yaw_extras = _LUA_TORQUE_EXTRA_PARAMS.update({"SCR_USER6": 2})
+    # MODE_YAW (SCR_USER6=2) runs rawes.lua's OWN manual yaw PID (run_manual),
+    # which reads ATC_RAT_YAW_P/I/D directly and writes SERVO4 -- it does NOT use
+    # ArduPilot's DDFP mixer and there is NO Lua trim observer in this mode.  So it
+    # needs a nonzero yaw INTEGRAL to build the DC holding throttle itself (the
+    # DDFP standard uses I=0 because the observer / AP integrator carries the DC).
+    # Keep the standard P/D but restore I for this manual-PID path.
+    _yaw_extras = _LUA_TORQUE_EXTRA_PARAMS.update({
+        "SCR_USER6":        2,
+        "ATC_RAT_YAW_I":    0.01,
+        # run_manual's PID builds the FULL ~0.36 holding throttle from its own
+        # integrator (no observer in MODE_MANUAL), so it needs a large IMAX --
+        # NOT the small standard IMAX that assumes the observer carries the DC.
+        "ATC_RAT_YAW_IMAX": 0.7,
+    })
     # Bench setpoint: motor stationary during STARTUP (rig won't drive the
     # rotor before ArduPilot arms via RAWES_ARM), then spins up to 120 RPM
     # = 4*pi rad/s (= 12.566 rad/s).  The mediator's universal 10 s ramp

@@ -235,17 +235,17 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 **Unit tests and simtests: Windows native, no Docker. Stack tests: Docker required. Never mix.**
 
-- **`simulation/.venv`** — the one and only Windows venv for unit tests, simtests, and `calibrate.py`. Created/refreshed by `setup.cmd` (which calls `bash setup.sh`); `run_tests.py` auto-installs when `requirements.txt` changes (SHA-256 hash stamp). There is **no** root `.venv`. (`am32config/.venv` belongs to a separate tool — the AM32 ESC configurator — and is unrelated.)
+- **`.venv`** — the one and only Windows venv for unit tests, simtests, and `calibrate.py`. Located at the **repo root** (`e:\repos\windpower\.venv`). Created/refreshed by `setup.cmd` (pure batch, no bash required); hash-gated: requirements are reinstalled only when `requirements.txt` changes. There is **no** `simulation/.venv`. (`am32config/.venv` belongs to a separate tool — the AM32 ESC configurator — and is unrelated.)
 - **Docker container** — has its own Python env (never use the Windows venv inside Docker). Image built by `bash setup.sh build` (with ArduPilot) or `bash setup.sh build-lite` (without ArduPilot); container lifecycle via `bash test.sh start|stop|sync|shell|exec`.
 
 ### Rules
 
 - **Use Bash tool directly — never `wsl.exe`. Always absolute paths.**
-- **Pin Python commands to `simulation/.venv/Scripts/python.exe` for Windows-native tests and scripts.** Do not use system Python or a root `.venv` path.
+- **Pin Python commands to `.venv/Scripts/python.exe` for Windows-native tests and scripts.** Do not use system Python or an unactivated venv.
 - **Always pass an explicit test path to `run_tests.py`** (e.g. `simulation/tests/unit` or `simulation/tests/simtests`). Running without a path lets pytest wander into `simulation/analysis/` and other non-test scripts using `argparse`, causing collection errors.
 - **Scope `Grep` to source dirs (e.g. `simulation/scripts/`, `simulation/tests/`)** — `.venv/` contains hundreds of thousands of third-party files.
 - **NEVER call `docker exec` directly to run stack tests. Use `bash test.sh stack`.** Each stack test always runs in its own fresh Docker container.
-- **Unit/simtests run on the Windows venv** — either directly (`simulation/.venv/Scripts/python.exe ...`) or via `bash test.sh unit` / `bash test.sh simtest`, which both invoke that same venv (NOT Docker).
+- **Unit/simtests run on the Windows venv** — either directly (`.venv/Scripts/python.exe ...`) or via `bash test.sh unit` / `bash test.sh simtest`, which both invoke that same venv (NOT Docker).
 
 ### Commands
 
@@ -253,21 +253,21 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 | Task | Command |
 |------|---------|
-| **Unit tests (agent mode)** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| **Simtests (agent mode)** | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
-| **Simtest (agent mode, specific)** | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
-| **Unit test (agent mode, specific)** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -k test_math -q` |
+| **Unit tests (agent mode)** | `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| **Simtests (agent mode)** | `.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
+| **Simtest (agent mode, specific)** | `.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
+| **Unit test (agent mode, specific)** | `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -k test_math -q` |
 
 **Stack tests (SITL) run in Docker and have their own workflow — see [design/sitl_testing.md](design/sitl_testing.md)** (running via `test.sh stack`, the mandatory `diagnose_sitl.py` CHECK 1/CHECK 2 gate, `analyse_run.py`, and the kinematic-hold timeline). Quick entry point: `bash test.sh stack -n 1 -k test_foo`.
 
 | Task | Command |
 |------|---------|
-| Unit tests (~685) | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
-| Simtests (~13) | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
-| Simtest (single) | `simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
+| Unit tests (~685) | `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q` |
+| Simtests (~13) | `.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest -q` |
+| Simtest (single) | `.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k test_foo -s` |
 | **Visualize result** | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
-| Scrub frames | `simulation/.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
-| Render to MP4/GIF | `simulation/.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
+| Scrub frames | `.venv/Scripts/python.exe simulation/viz3d/scrub.py simulation/logs/<test_name>/telemetry.csv` |
+| Render to MP4/GIF | `.venv/Scripts/python.exe simulation/viz3d/render_cycle.py <csv> [--out cycle.mp4] [--speed 2]` |
 
 **Viz note:** Launch visualization with `visualize.cmd <telemetry.csv>` rather than running `visualize_3d.py` inline. The batch file uses `start` so PyVista/VTK output stays in a separate console and does not block or flood the agent terminal. Ignore VTK/OpenGL shader errors from `visualize_3d.py` such as `vtkShaderProgram: Could not create shader object` / `vtkOpenGLPolyDataMapper: Could not set shader program`. They are local rendering/OpenGL backend failures, not simulation or telemetry failures; inspect the CSV or use non-OpenGL analysis when they occur.
 
@@ -275,11 +275,11 @@ Use `validate_sitl_sensors.py` to verify consistency after any kinematic change.
 
 | Task | Command |
 |------|---------|
-| **Pumping envelope** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` (add `--wind 8 10 12`, `--telemetry <csv>`) |
-| **Pump cycle diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
-| **Landing diagnosis** | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
-| **High-freq telemetry** | `RAWES_TEL_HZ=400 simulation/.venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k <name> -s` (default 20 Hz) |
-| **Regenerate `steady_state_starting.json`** | `simulation/.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s` — **the ONLY test that writes the file.** Run after any aero model change. |
+| **Pumping envelope** | `.venv/Scripts/python.exe simulation/analysis/pump_envelope.py` (add `--wind 8 10 12`, `--telemetry <csv>`) |
+| **Pump cycle diagnosis** | `.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
+| **Landing diagnosis** | `.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
+| **High-freq telemetry** | `RAWES_TEL_HZ=400 .venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -k <name> -s` (default 20 Hz) |
+| **Regenerate `steady_state_starting.json`** | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s` — **the ONLY test that writes the file.** Run after any aero model change. |
 
 **Docker & Infrastructure**
 
@@ -289,14 +289,14 @@ Stack tests run in isolated Docker containers (one per test file) and log to `si
 
 ## Running calibrate.py (real hardware)
 
-**Venv:** `simulation/.venv` (the same venv as the tests — there is no root `.venv`). Use `--port` / `--baud` flags — positional args are parsed as commands.
+**Venv:** `.venv` at the repo root (the same venv as the tests). Use `--port` / `--baud` flags — positional args are parsed as commands.
 
 ```powershell
 # Interactive REPL (SiK radio on COM7 at 57600)
-& "C:\repos\windpower\simulation\.venv\Scripts\python.exe" simulation/scripts/calibrate.py --port COM7 --baud 57600
+& "e:\repos\windpower\.venv\Scripts\python.exe" simulation/scripts/calibrate.py --port COM7 --baud 57600
 
 # USB direct (default 115200)
-& "C:\repos\windpower\simulation\.venv\Scripts\python.exe" simulation/scripts/calibrate.py --port COM4
+& "e:\repos\windpower\.venv\Scripts\python.exe" simulation/scripts/calibrate.py --port COM4
 ```
 
 **Key REPL commands:**
@@ -318,7 +318,7 @@ Stack tests run in isolated Docker containers (one per test file) and log to `si
 - **rawes.lua modes (valid: 0, 1, 2, 3, 4):** 0=none, 1=steady, 2=manual (bench yaw PID + NVF cyclic/collective — `RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`; `H_FLYBAR_MODE=1`), 3=passive (armed-but-quiet, commands the IC attitude as a GUIDED angle target via `set_target_angle_and_rate_and_throttle` — `RAWES_RIC`/`RAWES_PIC` roll/pitch + AHRS-captured yaw, zero rate FF — plus IC collective `RAWES_COL` via throttle, during kinematic release), 4=landing. Pumping has **no dedicated mode** — it runs in steady (mode 1) with the ground varying `RAWES_TEN`/`RAWES_SUB`. Modes 1/2/3/4 own Ch3. Substates via `NAMED_VALUE_FLOAT("RAWES_SUB", N)`. See [design/flight_stack.md §4](design/flight_stack.md).
 - **Lua MAVLink rx queue:** `mavlink:init(20, 10)` — first arg is the per-tick rx buffer depth. `mavlink:init(1, 10)` (a common copy-paste default) drops back-to-back NAMED_VALUE_FLOAT messages — only the first survives until the next update() drains it.
 - **Yaw regulation** lives in ArduPilot's `ATC_RAT_YAW` PID (`H_TAIL_TYPE=3` DDFP CW, no sign flip — matches US-convention rotor: positive yaw error from CCW body drift → positive SERVO4 throttle).  The Lua's `MODE_MANUAL` (SCR_USER6=2) bypasses this entirely and writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`; additionally it commands cyclic via `RAWES_TLN`/`RAWES_TLT` NVFs and collective via `RAWES_COL` with `H_FLYBAR_MODE=1` (RC passthrough, no rate PID). Used for bench yaw-tuning and manual swash validation. `calibrate manual` is the interactive interface; `test_lua_manual_mode_sitl` is the SITL stack test. No DShot active (`RPM1_TYPE=0`); anti-rotation motor on standard PWM, MAIN OUT 4. Current hardware: GB4008 + 80:44 gear. See [design/dshot.md](design/dshot.md), [design/flight_stack.md §4.7–§5](design/flight_stack.md).
-- **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) — required boot params in `rawes_sitl_defaults.parm`. `GPS_AUTO_CONFIG=0` is critical (prevents ArduPilot from corrupting RELPOSNED in SITL). See [design/flight_stack.md Appendix D](design/flight_stack.md).
+- **GPS fusion timing:** `EK3_GPS_CHECK=0` + widened gates (`EK3_POS_I_GATE=50`, `EK3_VEL_I_GATE=50`) — required SITL-only boot params in `rawes_sitl_defaults.parm` (loaded after `rawes_common_defaults.parm`). `GPS_AUTO_CONFIG=0` is critical (prevents ArduPilot from corrupting RELPOSNED in SITL). See [design/flight_stack.md Appendix D](design/flight_stack.md).
 - **Anchor in `LOCAL_POSITION_NED`:** `SCR_USER5 = −initial_state["pos"][2]`. Anchor at `[0, 0, −pos0[2]]` in EKF frame.
 - **Ground-to-air interface (all flight modes):** the AP receives ONLY commanded tension (`RAWES_TEN`) + target altitude (`RAWES_ALT`), plus the phase/substate (`RAWES_SUB`) for sequencing. Never actual/measured tension, never fast feedback. Commanded tension is feedforward into the orientation force balance (sets disk-axis direction + a lift-magnitude feedforward); it is NOT a tension feedback setpoint on the AP. The winch closes the only tension loop on its own load cell.
 - **Pumping (Python simtest):** ground/AP split with `TensionCommand` protocol carrying the commanded tension + altitude per phase. Ground owns altitude smoothing; AP must not add a second layer. The winch drives reel speed from its own load-cell error; **`winch_target_tension = tension_ic` during reel-out (NOT `tension_out`).** See [design/simulation.md](design/simulation.md) Pumping Cycle Architecture.
@@ -326,7 +326,7 @@ Stack tests run in isolated Docker containers (one per test file) and log to `si
 - **IC generation targets 300 N tension.** `test_generate_ic.py::test_create_ic` runs 60 s warmup with `TensionPI` targeting 300 N. This `TensionPI` is an **offline IC-generation tool only** (mirrors the ground winch's tension loop), NOT the AP flight loop. `coll_eq_rad` is the settled collective, not a hardcoded constant; the AP warm-starts its altitude-PID collective at this value (`RAWES_COL`) in all simtests.
 - **`HeliCyclicController` (25 ms servo lag) is baked into `PhysicsRunner` and always active for simtests.** `runner.step()` for Python-AP tests; `runner.step_guided()` for Lua/GUIDED tests (takes `HeliRateOutput` from `arduloop.GuidedAttitudeController`).
 - **Gyroscopic phase NOT needed:** `H_SW_PHANG=0` with dynbem v0.4.0 rotor response. `base_k_ang` defaults to 0; `swashplate_phase_deg≠0` degrades steady-flight stability.
-- **Torque model:** kinematic + first-order motor lag. ESC holds RPM proportional to PWM at steady state; `MOTOR_TAU=0.02 s`. `equilibrium_throttle ≈ 0.485` at 28 rad/s. `H_YAW_TRIM = −0.419`. See [design/flight_stack.md §5](design/flight_stack.md).
+- **Torque model:** ESC speed governor with **finite peak torque** driving the gear-reflected hub inertia (`J_total = I_hub/GEAR² + I_motor`); motor speed cannot jump, so yaw-rate slew is bounded (`|d psi_dot/dt| ≤ ESC_Q_MAX/(J_total·GEAR)`). Replaces the old zero-inertia algebraic model. `equilibrium_throttle ≈ 0.485` at 28 rad/s (unchanged). `H_YAW_TRIM = −0.419`. See [design/flight_stack.md §5](design/flight_stack.md).
 
 ---
 
