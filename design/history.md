@@ -410,7 +410,7 @@ Pre-GPS (_el_initialized == false):
       _el_initialized = true
 
 Post-GPS:
-  - Rate-limit _el_rad toward asin(_target_alt / tlen) at SCR_USER2 rad/s
+  - Rate-limit _el_rad toward asin(_target_alt / tlen) at RAWES_SLW rad/s
   - bz_goal = bz_altitude_hold(rel, _el_rad, _tension_n)
   - err = cyclic_error_body(bz_now, bz_goal)
   - ch1/ch2 = rate_to_pwm(kp * err_bx/by)

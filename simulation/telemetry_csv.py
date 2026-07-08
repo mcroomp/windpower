@@ -165,12 +165,12 @@ class TelRow:
     mav_servo2_us:     float = float("nan")
     mav_servo3_us:     float = float("nan")
     mav_servo4_us:     float = float("nan")
-    mav_nvf_yaw_i:     float = float("nan")
-    mav_nvf_yaw_out:   float = float("nan")
     mav_nvf_yff_trim:  float = float("nan")
-    mav_nvf_yff_u:     float = float("nan")
+    mav_nvf_yff_i:     float = float("nan")
     mav_nvf_yff_gz:    float = float("nan")
-    mav_nvf_yff_a:     float = float("nan")
+    mav_nvf_yff_kp:    float = float("nan")
+    mav_nvf_yff_ki:    float = float("nan")
+    mav_nvf_yff_kd:    float = float("nan")
 
     servo_s1_us: float = 0.0   # S1 swashplate servo PWM [µs]
     servo_s2_us: float = 0.0   # S2 swashplate servo PWM [µs]

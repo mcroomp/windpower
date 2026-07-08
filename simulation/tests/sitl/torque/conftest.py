@@ -135,23 +135,24 @@ def torque_production_vanilla_lua(tmp_path, request):
     Uses the default _sitl_stack parameter chain (copter-heli + rawes_common +
     rawes_sitl_defaults), not the torque-specific _BASE_TORQUE_BOOT_PARAMS.
 
-    Rotor profile: starts stationary during STARTUP hold, then spins up to 200 RPM
-    and varies slowly around that speed (profile="slow_vary").
+    Rotor profile: starts stationary during STARTUP hold, then spins up to a
+    CONSTANT 200 RPM and holds it (profile="constant").  The constant profile
+    isolates the yaw-PID limit-cycle behaviour from any rotor-speed disturbance.
     """
     _OMEGA_200_RPM = 200.0 * 2.0 * math.pi / 60.0
     with _torque_stack(
         tmp_path,
         omega_rotor=_OMEGA_200_RPM,
-        profile="slow_vary",
+        profile="constant",
         tail_channel=3,
         # Keep Lua loaded and in MODE_PASSIVE. PASSIVE holds the seeded IC state
         # and runs yaw feedforward trim via H_YAW_TRIM while ArduPilot DDFP closes yaw.
         passive_init=True,
         passive_col_rad=LUA_YAW_IC_COL,
         # NOTE: a fixed absolute yaw heading via RAWES_YIC was trialled here but,
-        # combined with the slow_vary RPM sweep and the I=0 rate loop, it left a
-        # steady yaw-rate residual that tripped the gate.  Free-capture (PASSIVE
-        # latches the AHRS yaw on entry) is the default.
+        # combined with the I=0 rate loop, it left a steady yaw-rate residual that
+        # tripped the gate.  Free-capture (PASSIVE latches the AHRS yaw on entry)
+        # is the default.
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
@@ -166,22 +167,18 @@ def torque_production_delayed_lua(tmp_path, request):
     Same as ``torque_production_vanilla_lua`` but with a 300 ms transport delay
     on the motor throttle response (models ESC / actuation latency).
 
-    Identical boot chain, profile, and MODE_PASSIVE seeding as the vanilla
-    production fixture; the only difference is ``motor_delay_ms=300.0`` so the
-    yaw regulation loop must cope with a lagged actuator.
+    Identical boot chain, constant-RPM profile, and MODE_PASSIVE seeding as the
+    vanilla production fixture; the only difference is ``motor_delay_ms=300.0`` so
+    the yaw regulation loop must cope with a lagged actuator.
     """
     _OMEGA_200_RPM = 200.0 * 2.0 * math.pi / 60.0
     with _torque_stack(
         tmp_path,
         omega_rotor=_OMEGA_200_RPM,
-        profile="slow_vary",
+        profile="constant",
         tail_channel=3,
         passive_init=True,
         passive_col_rad=LUA_YAW_IC_COL,
-        # Enable the Lua Smith predictor (SCR_USER4 = motor dead time [s]) matched
-        # to the injected 300 ms actuator delay so the yaw feedforward PID sees a
-        # delay-compensated rate and the lag-induced error is cancelled.
-        extra_params=ParamSetup({"SCR_USER4": 0.30}),
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,

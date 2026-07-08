@@ -38,10 +38,14 @@ Ground planner signals via NAMED_VALUE_FLOAT:
                all three anchor floats (ANN/ANE/AND) have been received at least
                once.  Until then run_flight only holds the current attitude.
 
-Parameters:
+Parameters (SCR_USER1-5 are the Lua yaw-PID surface; the anchor + flight
+tunables are delivered as NAMED_VALUE_FLOAT -- see the list above):
+  SCR_USER1   yaw-rate PID KP                                         default 0.01
+  SCR_USER2   yaw-rate PID KI                                         default 0.02
+  SCR_USER3   yaw-rate PID KD                                         default 0.002
+  SCR_USER4   (unused -- was the yaw Smith-predictor dead time; removed)
+  SCR_USER5   yaw-PID telemetry rate [Hz] (SITL sets this high)       default 2.0
   SCR_USER6   RAWES_MODE      Mode selector (0,1,2,3,4)               default 0
-              (the ONLY SCR_USER parameter; every other tunable/anchor input is
-               delivered as NAMED_VALUE_FLOAT -- see the list above.)
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -471,34 +475,14 @@ local _man_tlat_rad = 0.0
 -- psi_dot -> 0, so the dead zone is handled implicitly.  It is therefore used
 -- only to DERIVE the calibrated slope a; the hold operates above the dead zone.
 --
--- Update (per tick, dt):
---   u          = SERVO4 output throttle (get_output_pwm(YAW_MOTOR_FUNC) normalised)
---   trim_target= clamp(u - psi_dot / YFF_A, 0, YFF_MAX)
---   trim      += alpha * (trim_target - trim)          alpha = dt/(YFF_TRIM_TAU+dt)
--- Because u = trim + p_AP (the AP yaw P-term output), this reduces to
---   trim += alpha * (p_AP - psi_dot/YFF_A),
--- i.e. the feedforward ABSORBS the AP P-term's rectified DC output.  The fixed
--- point (p_AP = 0, psi_dot = 0 => trim = u_eq) is INDEPENDENT of YFF_A; the
--- slope only sets the correction rate.  Enabled by default; RAWES_YFK <= 0
--- disables the whole feedforward.
---
--- SLOPE: bench-calibrated (2026-07-07, see repo memory yaw-regulation-lua-ff-clamp.md).
--- Manual SERVO4 PWM->RPM points fit a deadband-linear motor curve:
---       RPM = YAW_RPM_PER_US * (pwm_us - YAW_DEADBAND_US),  pwm_us > YAW_DEADBAND_US
--- Converted to the observer's throttle-fraction u over the SERVO4 PWM span and
--- to body-rate rad/s, the local plant slope is the fixed constant
---       YFF_A = YAW_RPM_PER_US * SERVO4_SPAN_US * (2*pi/60)  ~= 63 rad/s per u.
--- This replaces the old online LMS slope estimator, which could never adapt on
--- the bench (its quiet/excitation gates never coincide during the yaw limit
--- cycle) and whose fixed point was slope-invariant anyway.
+-- Implementation: a standalone yaw-rate PID (see yaw_trim_ff_step below) drives
+-- gyro:z() -> 0 and writes its output to H_YAW_TRIM.  err = -psi_dot; the
+-- integral (clamped [0, YFF_MAX]) provides the DC hold and KP the rate damping.
+-- Gains are live params KP=SCR_USER1, KI=SCR_USER2, KD=SCR_USER3.  Enabled by
+-- default; RAWES_YFK <= 0 disables the whole feedforward.
 local YFF_MAX         = 0.7       -- max feedforward trim (clamp)
-local YFF_TRIM_TAU    = 0.3       -- trim observer low-pass time constant [s]
 local YFF_D_TAU       = 0.05      -- yaw-D derivative low-pass time constant [s] (~3 Hz)
-local YAW_DEADBAND_US = 1108.0    -- SERVO4 ESC/motor dead-zone upper edge [us]
-local YAW_RPM_PER_US  = 0.504     -- bench slope above the deadband [RPM per us]
-local SERVO4_SPAN_US  = 1200.0    -- nominal SERVO4_MAX-SERVO4_MIN (2000-800) [us]
-local YFF_A           = YAW_RPM_PER_US * SERVO4_SPAN_US * (2.0 * math.pi / 60.0)  -- ~63 rad/s per u
-local YFF_A_NVF_TICKS = 50        -- stream YFF_A / diagnostics every N ticks (~0.5 s)
+local YFF_NVF_HZ_DEFAULT = 2.0    -- default yaw-PID telemetry rate [Hz]; SCR_USER5 overrides
 
 -- Best-effort scheduler: the Lua VM runs at MOST 100 Hz but individual ticks can
 -- arrive late, so the yaw PID must integrate/differentiate against the ACTUAL
@@ -508,32 +492,14 @@ local YFF_DT_NOMINAL = BASE_PERIOD_MS * 0.001   -- 0.01 s fallback (first tick)
 local YFF_DT_MIN     = 0.001                     -- dt floor [s]
 local YFF_DT_MAX     = 0.10                      -- dt ceil  [s] (>= 10 skipped bins)
 
--- Smith predictor (dead-time compensation) for the yaw feedforward PID.
--- Enabled via SCR_USER4 = motor dead time [s] (<= 0 disables).  The counter-
--- torque motor is modelled as a pure gain (YFF_A) + transport delay, so the
--- Smith form reduces to
---     psi_dot_pred = psi_dot_meas + YFF_A * (u_now - u_delayed)
--- where u is the applied-throttle history.  Feeding psi_dot_pred (not the lagged
--- measurement) to the PID cancels the delay.  History is a FIXED-size ring, one
--- slot per SMITH_BIN_S (Lua <= 100 Hz); preallocated once, O(1) hot path
--- (bounded gap-fill), zero per-tick allocation.  Max delay = SMITH_BUF_N*SMITH_BIN_S.
-local SMITH_BIN_S  = 0.01         -- one history slot per 10 ms
-local SMITH_BUF_N  = 64           -- ring length -> up to 640 ms of dead time
-
 local _yaw_ff_enable = 1.0       -- >0 enable (RAWES_YFK overrides; <=0 disables)
 local _yaw_ff_trim   = 0.0       -- last H_YAW_TRIM output [0, YFF_MAX]
 local _yaw_i         = 0.0       -- PID integral term (the DC yaw hold)
 local _yaw_err_prev  = 0.0       -- previous rate error (for the D term)
 local _yaw_d_lp      = 0.0       -- low-passed error derivative
 local _yaw_pid_valid = false     -- guard: skip first D sample after a reset
-local _yaw_a_nvf_ctr = 0         -- tick counter for periodic telemetry streaming
+local _yaw_nvf_last_ms = nil     -- millis() at last yaw-PID telemetry emission (nil = first)
 local _yaw_last_s    = nil       -- ms_to_s(millis()) at last PID tick (nil = first)
-
--- Smith predictor applied-throttle history (preallocated once; never grown).
-local _smith_buf  = {}
-for _si = 1, SMITH_BUF_N do _smith_buf[_si] = 0.0 end
-local _smith_widx = 1            -- current write slot (1-based)
-local _smith_wbin = nil          -- absolute 10 ms bin index of last write (nil = empty)
 
 local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
 local YAW_MOTOR_FUNC = 36    -- SERVO output function for the yaw motor (Motor4);
@@ -650,7 +616,6 @@ local function _on_mode_enter(mode)
         _yaw_d_lp      = 0.0
         _yaw_pid_valid = false
         _yaw_last_s    = nil    -- re-derive dt from the first tick after entry
-        _smith_wbin    = nil    -- refill the Smith history from the new hold
     end
 end
 
@@ -965,29 +930,6 @@ end
 -- One-directional motor => output and integral clamped >= 0.  Pure (no sensor/
 -- param access) so it is unit-testable in isolation.
 
--- Advance the Smith history ring to absolute 10 ms `bin`, writing `hold` (the
--- throttle applied during the just-elapsed bins -- zero-order hold).  Bounded to
--- SMITH_BUF_N fills so a long scheduling gap cannot stall the tick.  Only
--- relative offsets (widx - delay_slots) are read, so the absolute widx alignment
--- is arbitrary as long as advancement stays consistent.
-local function smith_advance(bin, hold)
-    if _smith_wbin == nil then
-        for i = 1, SMITH_BUF_N do _smith_buf[i] = hold end
-        _smith_widx = (bin % SMITH_BUF_N) + 1
-        _smith_wbin = bin
-        return
-    end
-    local nadv = bin - _smith_wbin
-    if nadv <= 0 then return end
-    if nadv > SMITH_BUF_N then nadv = SMITH_BUF_N end
-    for _ = 1, nadv do
-        _smith_widx = _smith_widx + 1
-        if _smith_widx > SMITH_BUF_N then _smith_widx = 1 end
-        _smith_buf[_smith_widx] = hold
-    end
-    _smith_wbin = bin
-end
-
 local function yaw_trim_ff_step(dt, psi_dot, kp, ki, kd)
     kp = kp or 0.0; ki = ki or 0.0; kd = kd or 0.0
     local err = -psi_dot
@@ -1029,39 +971,22 @@ local function run_yaw_trim_ff(now)
     local ki = p("SCR_USER2", 0.0)
     local kd = p("SCR_USER3", 0.0)
 
-    -- Optional Smith predictor: feed the DELAY-COMPENSATED rate to the PID.
-    -- SCR_USER4 = motor dead time [s]; <= 0 keeps the raw measured rate.
-    local psi_ctrl   = psi_dot
-    local smith_corr = 0.0
-    local smith_dead = p("SCR_USER4", 0.0)
-    if smith_dead > 0.0 then
-        local delay_slots = math.floor(smith_dead / SMITH_BIN_S + 0.5)
-        if delay_slots < 1 then delay_slots = 1
-        elseif delay_slots > SMITH_BUF_N - 1 then delay_slots = SMITH_BUF_N - 1 end
-        smith_advance(math.floor(now_s / SMITH_BIN_S), _yaw_ff_trim)
-        local ridx = ((_smith_widx - 1 - delay_slots) % SMITH_BUF_N) + 1
-        smith_corr = YFF_A * (_yaw_ff_trim - _smith_buf[ridx])
-        psi_ctrl   = psi_dot + smith_corr
-    end
-
-    local out = yaw_trim_ff_step(dt, psi_ctrl, kp, ki, kd)
+    local out = yaw_trim_ff_step(dt, psi_dot, kp, ki, kd)
     param:set("H_YAW_TRIM", out)
-    if smith_dead > 0.0 then
-        _smith_buf[_smith_widx] = out   -- record the newly applied throttle
-    end
 
-    -- Telemetry (periodic to keep NVF bandwidth down): output, integral, spin,
-    -- the active gains, and the Smith correction so logs record the tuning point.
-    _yaw_a_nvf_ctr = _yaw_a_nvf_ctr + 1
-    if _yaw_a_nvf_ctr >= YFF_A_NVF_TICKS then
-        _yaw_a_nvf_ctr = 0
+    -- Telemetry rate gated by SCR_USER5 [Hz] (default 2 Hz).  SITL sets this much
+    -- higher so the full yaw-PID state (output, integral, spin, gains) is captured
+    -- at close to the control-tick rate.
+    local nvf_hz = p("SCR_USER5", YFF_NVF_HZ_DEFAULT)
+    if nvf_hz <= 0.0 then nvf_hz = YFF_NVF_HZ_DEFAULT end
+    if _yaw_nvf_last_ms == nil or (now - _yaw_nvf_last_ms) >= (1000.0 / nvf_hz) then
+        _yaw_nvf_last_ms = now
         gcs:send_named_float("YFF_T",  out)
         gcs:send_named_float("YFF_I",  _yaw_i)
         gcs:send_named_float("YFF_GZ", psi_dot)
         gcs:send_named_float("YFF_KP", kp)
         gcs:send_named_float("YFF_KI", ki)
         gcs:send_named_float("YFF_KD", kd)
-        gcs:send_named_float("YFF_SM", smith_corr)
     end
 end
 

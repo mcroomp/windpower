@@ -91,24 +91,6 @@ class TestClosedLoopEquilibrium:
 
 
 # ---------------------------------------------------------------------------
-# Calibrated model slope (used by the Smith predictor, not adapted online)
-# ---------------------------------------------------------------------------
-
-class TestCalibratedSlope:
-    def test_slope_is_fixed_and_not_adapted(self):
-        """yaw_a_set is a no-op; yaw_a_hat returns the bench-calibrated constant
-        (~63 rad/s per u) regardless of excitation."""
-        sim = _sim()
-        a0 = float(sim.fns.yaw_a_hat())
-        assert 55.0 < a0 < 72.0, f"calibrated slope out of range: {a0:.2f}"
-        sim.fns.yaw_a_set(120.0)         # no-op now
-        for i in range(200):
-            psi_dot = (0.2 if (i % 2 == 0) else 0.6) * a0 - 10.0
-            sim.fns.yaw_trim_ff_step(_DT, psi_dot, 0.0, 0.02, 0.0)
-        assert abs(float(sim.fns.yaw_a_hat()) - a0) < 1e-9
-
-
-# ---------------------------------------------------------------------------
 # Yaw-D (damping) term (gain kd = SCR_USER3)
 # ---------------------------------------------------------------------------
 

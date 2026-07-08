@@ -5,7 +5,7 @@ torque/test_torque_motor_delay_sitl.py -- Production-style torque check with a
 Goal
 ----
 Same scenario as test_torque_production_vanilla_sitl (vanilla SITL boot chain,
-rawes.lua in MODE_PASSIVE, rotor spun to 200 RPM with slow_vary variation), but
+rawes.lua in MODE_PASSIVE, rotor spun to a constant 200 RPM), but
 mediator_torque applies a 300 ms transport delay to the motor throttle before it
 drives the yaw ODE.  This exercises the DDFP yaw regulator against a lagged
 actuator -- a stand-in for real ESC / motor spin-up latency.
@@ -14,7 +14,7 @@ Scenario
 --------
 - STARTUP hold: stationary hub, arm in GUIDED_NOGPS.
 - DYNAMIC spinup: mediator_torque ramps rotor from 0 to 200 RPM over 10 s.
-- Slow variation: profile="slow_vary" adds a slow sinusoidal RPM sweep.
+- Constant hold: profile="constant" keeps the rotor at 200 RPM (no variation).
 - Motor delay: the yaw motor reacts to the throttle commanded 300 ms earlier.
 
 Pass criteria (same gates as the vanilla production test)
@@ -42,8 +42,8 @@ _MAX_PSI_DOT_RAD_S = math.radians(12.0)
 
 def test_torque_motor_delay_lua_sitl(torque_production_delayed_lua):
     """
-    Vanilla SITL defaults + Lua PASSIVE at 200 RPM with slow speed variation and
-    a 300 ms motor-response delay.
+    Vanilla SITL defaults + Lua PASSIVE at a constant 200 RPM with a 300 ms
+    motor-response delay.
 
     Same looseness as the vanilla production check: a production-like sanity gate
     that the yaw regulator stays bounded and keeps driving the motor even with a

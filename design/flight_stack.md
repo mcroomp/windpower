@@ -322,12 +322,14 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 
 | Parameter | SCR_USER | Default | Description |
 |---|---|---|---|
-| RAWES_KP_CYC | SCR_USER1 | 1.0 | Cyclic outer P gain [rad/s per rad of body_z error] |
-| RAWES_BZ_SLEW | SCR_USER2 | 0.40 | body_z slew rate limit [rad/s] |
-| RAWES_ANCHOR_N | SCR_USER3 | 0.0 | Anchor North from EKF origin [m] |
-| RAWES_ANCHOR_E | SCR_USER4 | 0.0 | Anchor East from EKF origin [m] |
-| RAWES_ANCHOR_D | SCR_USER5 | varies | Anchor altitude above EKF origin [m]. Set to `−initial_state["pos"][2]` (NED Z negated). |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady, 2=yaw, 3=passive, 4=landing (pumping runs in steady) |
+| yaw-rate KP | SCR_USER1 | 0.012 | Lua yaw-rate PID proportional gain |
+| yaw-rate KI | SCR_USER2 | 0.005 | Lua yaw-rate PID integral gain |
+| yaw-rate KD | SCR_USER3 | 0.0 | Lua yaw-rate PID derivative gain (0 = off; D re-excites a limit cycle) |
+| (unused) | SCR_USER4 | 0.0 | Reserved; formerly the yaw Smith-predictor dead time (removed) |
+| yaw telemetry rate | SCR_USER5 | 2.0 | YFF_* NAMED_VALUE_FLOAT telemetry rate [Hz]; SITL raises this |
+| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady, 2=manual, 3=passive, 4=landing |
+
+All other flight tunables (anchor position, slew rate, cyclic gains) are delivered as NAMED_VALUE_FLOATs — see table below.
 
 **Named float inputs (ground → Lua, via `gcs.send_named_float`):**
 
@@ -335,7 +337,11 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 |---|---|---|
 | RAWES_ARM | ms | Arm vehicle + start disarm countdown of `ms` milliseconds. Re-send refreshes timer. |
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
-| RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at SCR_USER2 rad/s. |
+| RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at `RAWES_SLW` rad/s. |
+| RAWES_SLW | rad/s | body_z / elevation slew rate limit (default 0.40 rad/s) |
+| RAWES_ANN | m | Anchor North from EKF origin. MODE_STEADY does not initialise altitude hold until ANN/ANE/AND have all been received. |
+| RAWES_ANE | m | Anchor East from EKF origin. |
+| RAWES_AND | m | Anchor Down from EKF origin (positive downward in NED). Set to `−initial_state["pos"][2]` (NED Z negated). |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. |
 | RAWES_TLN | rad | **Mode 2 (manual) only** — cyclic `tilt_lon` → RC1 PWM direct (`H_FLYBAR_MODE=1`). Not used by passive/steady. |
 | RAWES_TLT | rad | **Mode 2 (manual) only** — cyclic `tilt_lat` → RC2 PWM direct (companion to RAWES_TLN). |
@@ -419,7 +425,7 @@ inert (no defaults are commanded).
 
 Post-GPS, each 50 Hz step:
 
-1. Rate-limit `_el_rad` toward the current tether elevation at SCR_USER2 rad/s.
+1. Rate-limit `_el_rad` toward the current tether elevation at `RAWES_SLW` rad/s (default 0.40).
 2. **Orientation (feedforward):** `bz_goal = bz_altitude_hold(rel, _el_rad, RAWES_TEN)` — the
    force-balance disk axis from the **commanded** tension `RAWES_TEN` + actual position +
    gravity (mirrors Python `compute_bz_altitude_hold`). `RAWES_TEN` is a feedforward only —
@@ -647,11 +653,14 @@ H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419
 | Parameter | Value | Reason |
 |---|---|---|
 | SCR_ENABLE | 1 | Enable Lua scripting subsystem |
-| SCR_USER1 | 1.0 | RAWES_KP_CYC — cyclic P gain; start at 0.3 on hardware |
-| SCR_USER2 | 0.40 | RAWES_BZ_SLEW — body_z slew rate [rad/s] |
-| SCR_USER3/4 | 0.0 | Anchor N/E offsets from EKF origin [m] |
-| SCR_USER5 | −pos0[2] | Anchor altitude above EKF origin [m]. Must be set post-arm. |
+| SCR_USER1 | 0.012 | Lua yaw-rate PID KP |
+| SCR_USER2 | 0.005 | Lua yaw-rate PID KI |
+| SCR_USER3 | 0.0 | Lua yaw-rate PID KD (0 = off) |
+| SCR_USER4 | 0.0 | Reserved (formerly Smith-predictor dead time; removed) |
+| SCR_USER5 | 2.0 | YFF_* telemetry rate [Hz]; SITL raises this |
 | SCR_USER6 | 0/1/4 | RAWES_MODE selector |
+
+Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not SCR_USER params.
 
 **SCR_ENABLE bootstrap:** After EEPROM wipe, Lua only starts if SCR_ENABLE=1 is already in
 EEPROM. The `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).

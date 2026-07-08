@@ -54,20 +54,20 @@ def run_observation_loop(
     rows: list       = []
     pwm = [0]  # latest Ch9/Ch4 PWM, captured by closure
     nvf_latest = {
-        "mav_nvf_yaw_i": float("nan"),
-        "mav_nvf_yaw_out": float("nan"),
         "mav_nvf_yff_trim": float("nan"),
-        "mav_nvf_yff_u": float("nan"),
+        "mav_nvf_yff_i": float("nan"),
         "mav_nvf_yff_gz": float("nan"),
-        "mav_nvf_yff_a": float("nan"),
+        "mav_nvf_yff_kp": float("nan"),
+        "mav_nvf_yff_ki": float("nan"),
+        "mav_nvf_yff_kd": float("nan"),
     }
     nvf_map = {
-        "YAW_I": "mav_nvf_yaw_i",
-        "YAW_OUT": "mav_nvf_yaw_out",
         "YFF_T": "mav_nvf_yff_trim",
-        "YFF_U": "mav_nvf_yff_u",
+        "YFF_I": "mav_nvf_yff_i",
         "YFF_GZ": "mav_nvf_yff_gz",
-        "YFF_A": "mav_nvf_yff_a",
+        "YFF_KP": "mav_nvf_yff_kp",
+        "YFF_KI": "mav_nvf_yff_ki",
+        "YFF_KD": "mav_nvf_yff_kd",
     }
     log = ctx.log
 
@@ -97,12 +97,12 @@ def run_observation_loop(
                 rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
                 omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
                 servo4_us=float(pwm[0]),
-                mav_nvf_yaw_i=float(nvf_latest["mav_nvf_yaw_i"]),
-                mav_nvf_yaw_out=float(nvf_latest["mav_nvf_yaw_out"]),
                 mav_nvf_yff_trim=float(nvf_latest["mav_nvf_yff_trim"]),
-                mav_nvf_yff_u=float(nvf_latest["mav_nvf_yff_u"]),
+                mav_nvf_yff_i=float(nvf_latest["mav_nvf_yff_i"]),
                 mav_nvf_yff_gz=float(nvf_latest["mav_nvf_yff_gz"]),
-                mav_nvf_yff_a=float(nvf_latest["mav_nvf_yff_a"]),
+                mav_nvf_yff_kp=float(nvf_latest["mav_nvf_yff_kp"]),
+                mav_nvf_yff_ki=float(nvf_latest["mav_nvf_yff_ki"]),
+                mav_nvf_yff_kd=float(nvf_latest["mav_nvf_yff_kd"]),
             ))
             if t_rel >= settle_s:
                 obs.append({"t": t_rel, "yaw": msg.yaw, "yaw_rate": msg.yawspeed})

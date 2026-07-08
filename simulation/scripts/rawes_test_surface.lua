@@ -66,13 +66,10 @@ _rawes_fns = {
     SPIN_LIMIT_RADS    = SPIN_LIMIT_RADS,
     SPIN_LIMIT_MS      = SPIN_LIMIT_MS,
 
-    -- ── Yaw feedforward trim observer ────────────────────────────────────────
-    -- Pure observer core + state accessors + reset (unit-testable in isolation).
-    -- Slope YFF_A is a bench-calibrated constant (no online adaptation); yaw_a_hat
-    -- returns it and yaw_a_set is a no-op kept for backward-compatible test calls.
+    -- ── Yaw-rate PID (writes H_YAW_TRIM) ─────────────────────────────────────
+    -- Pure PID core + state accessors + reset (unit-testable in isolation).
     yaw_trim_ff_step = yaw_trim_ff_step,
     yaw_ff_trim      = function() return _yaw_ff_trim end,
-    yaw_a_hat        = function() return YFF_A end,
     yaw_ff_reset     = function()
         _yaw_ff_trim   = 0.0
         _yaw_i         = 0.0
@@ -80,20 +77,9 @@ _rawes_fns = {
         _yaw_d_lp      = 0.0
         _yaw_pid_valid = false
         _yaw_last_s    = nil
-        _smith_wbin    = nil
     end,
-    yaw_a_set        = function(_) end,
     YAW_MOTOR_FUNC   = YAW_MOTOR_FUNC,
     YFF_MAX          = YFF_MAX,
-
-    -- ── Smith predictor (dead-time compensation) ─────────────────────────────
-    -- Fixed-size applied-throttle history ring, one slot per SMITH_BIN_S.
-    SMITH_BUF_N   = SMITH_BUF_N,
-    SMITH_BIN_S   = SMITH_BIN_S,
-    smith_advance = smith_advance,
-    smith_buf     = function() return _smith_buf end,
-    smith_widx    = function() return _smith_widx end,
-    smith_wbin    = function() return _smith_wbin end,
 
     -- ── Manual mode state accessors ──────────────────────────────────────────
 
