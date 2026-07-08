@@ -1,0 +1,12 @@
+==============================================================================
+Steady flight @ commanded 100 N, winch FROZEN for 50 s (zero reel motion)
+==============================================================================
+settle window 0-40s | frozen window 40-90s | fs=400 Hz
+frozen rest_length: 93.4046..93.4046 m (range 0.00 mm)
+------------------------------------------------------------------------------
+  tension_N    mean=   77.66  pp=    3.79  std=   0.61  peak_freq=0.778 Hz
+  pitch_deg    mean=  -39.28  pp=    0.66  std=   0.14  peak_freq=0.778 Hz
+  roll_deg     mean=  -39.29  pp=    0.66  std=   0.14  peak_freq=0.778 Hz
+  v_perp_mps   mean=    0.42  pp=    1.07  std=   0.27  peak_freq=0.244 Hz
+------------------------------------------------------------------------------
+VERDICT: NO sustained oscillation with frozen winch (tension pp=4 N) -> reel motion is part of the excitation.

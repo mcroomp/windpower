@@ -92,7 +92,7 @@
     {
       "name": "FRAME_CLASS",
       "expected": 6,
-      "note": "6=Traditional Helicopter; required before H_* params appear. setup_pixhawk.py sets this in Phase 1 (needs a reboot before H_* are visible)."
+      "note": "6=Traditional Helicopter; required before H_* params appear (set this first, then reboot before applying H_* params)."
     },
     {
       "name": "INITIAL_MODE",

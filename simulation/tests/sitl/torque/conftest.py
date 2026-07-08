@@ -178,6 +178,10 @@ def torque_production_delayed_lua(tmp_path, request):
         tail_channel=3,
         passive_init=True,
         passive_col_rad=LUA_YAW_IC_COL,
+        # Enable the Lua Smith predictor (SCR_USER4 = motor dead time [s]) matched
+        # to the injected 300 ms actuator delay so the yaw feedforward PID sees a
+        # delay-compensated rate and the lag-induced error is cancelled.
+        extra_params=ParamSetup({"SCR_USER4": 0.30}),
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,

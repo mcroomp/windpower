@@ -11,6 +11,7 @@ Reader: iter_messages()  — yield dicts from a .jsonl path, with optional type 
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
@@ -20,6 +21,9 @@ class MavlinkLogWriter:
     """
     Write MAVLink messages as NDJSON to an open file handle.
 
+    Each line records both directions of traffic; a ``_dir`` field marks
+    whether the message was received ("rx") or sent ("tx").
+
     Parameters
     ----------
     fh : writable text file
@@ -28,20 +32,26 @@ class MavlinkLogWriter:
 
     def __init__(self, fh) -> None:
         self._fh = fh
+        self._lock = threading.Lock()
 
-    def write(self, msg, last_time_boot_ms: int) -> None:
+    def write(self, msg, last_time_boot_ms: int, direction: str = "rx") -> None:
         """
         Serialize *msg* (a pymavlink message) as one JSON line.
 
         Some MAVLink message types (e.g. STATUSTEXT) do not carry a
         ``time_boot_ms`` field.  Pass the last known sim time as
         *last_time_boot_ms* so those entries get a meaningful timestamp.
+
+        *direction* is "rx" for received messages (default) or "tx" for
+        messages sent by this GCS; it is recorded as the ``_dir`` field.
         """
         try:
             d = msg.to_dict()
             if "time_boot_ms" not in d and last_time_boot_ms > 0:
                 d["time_boot_ms"] = last_time_boot_ms
-            self._fh.write(json.dumps({"_t_wall": time.time(), **d}) + "\n")
+            line = json.dumps({"_t_wall": time.time(), "_dir": direction, **d}) + "\n"
+            with self._lock:
+                self._fh.write(line)
         except Exception:
             pass
 

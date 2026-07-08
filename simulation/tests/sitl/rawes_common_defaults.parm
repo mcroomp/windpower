@@ -60,6 +60,16 @@ ATC_RAT_YAW_FLTD  10.0
 # so I stays 0.  
 ATC_RAT_YAW_I     0.0
 
+# Lua yaw-rate PID gains (rawes.lua reads these as KP/KI/KD via SCR_USER1/2/3).
+# The Lua PID regulates gyro:z() -> 0 and writes H_YAW_TRIM downstream of the AP
+# attitude clamp.  To let the Lua PID own yaw, zero the AP yaw PID
+# (ATC_RAT_YAW_P/I/D = 0).  Sensible conservative starting point: I carries the
+# DC hold, modest P opposes the rate, small D damps.  Tune live with calibrate
+# `run` keys (P '-'/'=', I '['/']', D ','/'.').
+SCR_USER1         0.01
+SCR_USER2         0.02
+SCR_USER3         0.002
+
 SERVO4_MIN        800
 SERVO4_MAX        2000
 SERVO4_TRIM       800

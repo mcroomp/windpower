@@ -1,0 +1,124 @@
+18:48:10 [INFO] -k 'test_lua_flight_steady_sitl': pre-filtered to 1 file(s)
+18:48:10 [INFO] 1 tests, max 1 concurrent (run=1782751688)
+18:48:10 [t0] starting: test_lua_flight_steady_sitl
+18:54:36 [test_lua_flight_steady_sitl] FAILED
+18:54:36 [test_lua_flight_steady_sitl]                     "  * SITL log for Lua load errors"
+18:54:36 [test_lua_flight_steady_sitl]                 "  * SITL log for Lua load errors"
+18:54:36 [test_lua_flight_steady_sitl] E             * SITL log for Lua load errors
+18:54:36 [test_lua_flight_steady_sitl] FAILED tests/sitl/flight/test_lua_flight_steady_sitl.py::test_lua_flight_steady_sitl
+18:54:36 [test_lua_flight_steady_sitl] ======================== 1 failed in 349.03s (0:05:49) =========================
+
+----------------------------------------------------------------------
+[test_lua_flight_steady_sitl               ] ======================== 1 failed in 349.03s (0:05:49) =========================
+----------------------------------------------------------------------
+
+============================== FAILURE DETAILS ==============================
+
+--- test_lua_flight_steady_sitl ---
+=================================== FAILURES ===================================
+_________________________ test_lua_flight_steady_sitl __________________________
+
+guided_nogps_armed_lua_full = StackContext(gcs=<gcs.RawesGCS object at 0x79dd76533850>, mediator_proc=<Popen: returncode: None args: ['/rawes/.venv/...>, test_log_dir=PosixPath('/rawes/simulation/logs/test_lua_flight_steady_sitl'), winch_cmd_port=14570, omega_rotor=0.0)
+
+    def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
+        """
+        M3 Step 1: steady flight under full ArduPilot + Lua control.
+    
+        Asserts that the hub sustains stable flight for >= 60 s with
+        internal_controller=False and Lua driving cyclic + collective at 50 Hz.
+        Pass/fail is determined from physics telemetry (pos_z), not EKF altitude.
+        """
+        ctx = guided_nogps_armed_lua_full
+        gcs = ctx.gcs
+        log = logging.getLogger("test_lua_flight_steady_sitl")
+    
+        log.info("=== test_lua_flight_steady_sitl: waiting for kinematic phase to end ===")
+        if _DEBUG_KEEP_PASSIVE:
+            log.info("(DEBUG: Lua remains in MODE_PASSIVE after kinematic_exit)")
+        else:
+            log.info("(Lua is in MODE_PASSIVE during kinematic; promotes to MODE_STEADY after kinematic_exit)")
+    
+        if not ctx.wait_kinematic_done(timeout=_KINEMATIC_TIMEOUT_S):
+            pytest.fail(
+                f"Kinematic phase did not end within {_KINEMATIC_TIMEOUT_S:.0f} s.\n"
+                "Check mediator log for 'TRANSITION kinematic->free-flight'."
+            )
+    
+        ic = ctx.initial_state
+        if ic is None:
+            pytest.fail("initial_state is required for steady flight test")
+    
+        # -- Release initialization: identical to test_lua_flight_ic_passive_sitl --
+        # The IC-passive stack test passes with this exact seeding sequence, so we
+        # replicate it here to establish the same deterministic passive hold before
+        # promoting to MODE_STEADY.  Seed all four IC NVFs (collective, tension, IC
+        # roll, IC pitch) and enter MODE_PASSIVE (SCR_USER6=3) first.
+        eq_phys = ic.get("eq_physics")
+        if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
+            coll_seed = float(eq_phys["collective_rad"])
+            coll_src = "eq_physics.collective_rad"
+        elif "stack_coll_eq" in ic:
+            coll_seed = float(ic["stack_coll_eq"])
+            coll_src = "stack_coll_eq"
+        elif "coll_eq_rad" in ic:
+            coll_seed = float(ic["coll_eq_rad"])
+            coll_src = "coll_eq_rad"
+        else:
+            raise KeyError(
+                "initial_state missing collective seed; expected one of "
+                "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+            )
+        ten_seed = float(ic["tension_eq_n"])
+        R0 = ic.get("R0")
+        if R0 is None:
+            pytest.fail("initial_state missing R0 for IC passive attitude seed")
+        r20 = float(R0[2][0])
+        r21 = float(R0[2][1])
+        r22 = float(R0[2][2])
+        ic_roll_rad = math.atan2(r21, r22)
+        ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
+    
+        gcs.send_named_float("RAWES_COL", coll_seed)
+        gcs.send_named_float("RAWES_TEN", ten_seed)
+        gcs.send_named_float("RAWES_RIC", ic_roll_rad)
+        gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
+        ok = gcs.set_param("SCR_USER6", 3, timeout=5.0)
+        log.info(
+            "Release seeds (IC-passive init): RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, "
+            "IC r/p=(%.2f, %.2f)deg, SCR_USER6=3 ACK=%s",
+            coll_seed, coll_src, ten_seed,
+            math.degrees(ic_roll_rad), math.degrees(ic_pitch_rad), ok,
+        )
+    
+        if _DEBUG_KEEP_PASSIVE:
+            log.info("Kinematic phase ended -- DEBUG: keeping Lua in MODE_PASSIVE (SCR_USER6=3)")
+        else:
+            # Let the passive hold settle (same window the IC-passive test observes),
+            # then promote to MODE_STEADY so the altitude-hold loop takes over.
+            log.info("  Holding MODE_PASSIVE for 10s to settle before MODE_STEADY ...")
+            gcs.sim_sleep(10.0)
+            log.info("Promoting Lua to MODE_STEADY")
+            ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
+            log.info("  SCR_USER6 -> 1 (MODE_STEADY)  ACK=%s", ok)
+    
+        all_statustext = ctx.all_statustext
+        lua_captured   = False
+    
+        # all_statustext already includes everything drained during wait_kinematic_done()
+        # Lua sends "RAWES steady: captured" for mode 1 (steady).
+        for _prior in all_statustext:
+            if "rawes" in _prior.lower() and "captured" in _prior.lower():
+                lua_captured = True
+                ctx.flight_events["Lua captured"] = -1.0
+                log.info("Lua DCM capture (in kinematic): %s", _prior)
+                break
+    
+        # -- Observation loop: liveness + servo activity + STATUSTEXT --------------
+        max_cyclic_activity = 0
+FAILED tests/sitl/flight/test_lua_flight_steady_sitl.py::test_lua_flight_steady_sitl
+---
+
+=============================================================================
+18:54:41 [LOGS] simulation\logs
+
+18:54:41 [INFO] Cleaning up parallel containers...
