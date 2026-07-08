@@ -76,7 +76,9 @@ def _aero_thrust(col):
         omega_rad_s=OMEGA,
         rho_kg_m3=1.225,
     )
-    res, _ = _AERO.compute_forces(inputs, _AERO.initial_rotor_state())
+    # The aero step() API settles its inflow/wake state on the first call, so a
+    # single step yields the steady-state thrust at this collective.
+    res, _ = _AERO.step(inputs, _AERO.initial_rotor_state(), 0.0025)
     return float(np.linalg.norm(res.F_world))
 
 

@@ -1170,15 +1170,17 @@ def col_min_for_altitude_rad(
     wind = _np.array([0.0, wind_m_s, 0.0])   # NED: East wind = Y axis
     W    = mass_kg * 9.81
 
-    state = aero.initial_rotor_state()
-
     def _thrust_at(col: float) -> float:
         inputs = _RotorInputs(
             collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
             R_hub=R, v_hub_world=_np.zeros(3), wind_world=wind,
             omega_rad_s=float(omega), rho_kg_m3=1.225,
         )
-        result, _deriv = aero.compute_forces(inputs, state)
+        # Fresh state per probe: the aero step() API settles its inflow/wake
+        # state on the first call, so one step from a clean state yields the
+        # steady-state thrust at this collective.  Threading a state carried
+        # over from a different collective would defeat the auto-settle.
+        result, _ = aero.step(inputs, aero.initial_rotor_state(), 0.0025)
         # In NED, upward force is negative Z.
         return float(-result.F_world[2])
 

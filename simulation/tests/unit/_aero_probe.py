@@ -51,9 +51,8 @@ def probe_steady(
 ):
     """Return a quasi-steady AeroResult.
 
-    Dynamic-inflow models are settled with a short forward-Euler loop at fixed
-    omega.  Quasi-static models have no meaningful transient state, so the loop
-    is effectively a no-op.
+    The aero ``step`` API settles its inflow/wake state on the first call, so a
+    single step at a fixed operating point yields the steady-state result.
     """
     state = aero.initial_rotor_state()
     inputs = RotorInputs(
@@ -66,9 +65,5 @@ def probe_steady(
         omega_rad_s=float(omega_rotor),
         rho_kg_m3=rho_kg_m3,
     )
-    dt = 0.02
-    for _ in range(200):
-        result, deriv = aero.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + dt * deriv.to_array())
-    result, _ = aero.compute_forces(inputs, state)
+    result, _ = aero.step(inputs, state, 0.02)
     return result

@@ -96,7 +96,7 @@ def _run_attitude_loop(
             R_hub=R, v_hub_world=s["vel"], wind_world=wind,
             omega_rad_s=float(omega_spin), rho_kg_m3=1.225,
         )
-        result, _deriv = _AERO.compute_forces(inputs, state)
+        result, state = _AERO.step(inputs, state, DT)
 
         dyn.step(F_grav_cancel, result.m_hub_world, DT, omega_spin=omega_spin)
 
@@ -233,7 +233,7 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
         R_hub=R, v_hub_world=np.zeros(3), wind_world=wind,
         omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
     )
-    result, _ = _AERO.compute_forces(inputs, trim.final_state)
+    result, _ = _AERO.step(inputs, trim.final_state, DT)
     M_mag = float(np.linalg.norm(result.m_hub_world))
     assert M_mag < 5.0, (
         f"Trim feedforward did not cancel disturbance: |M|={M_mag:.2f} N*m"
@@ -251,17 +251,14 @@ def test_wind_creates_baseline_hub_moment():
     state = _AERO.initial_rotor_state()
     R = build_orb_frame(np.array([0.0, 0.0, 1.0]))   # level FRD
 
-    # Settle dynamic inflow
+    # Settle dynamic inflow (step() settles on the first call)
     inp = RotorInputs(
         collective_rad=0.0, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R, v_hub_world=np.zeros(3),
         wind_world=np.array([0.0, 10.0, 0.0]),
         omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
     )
-    for _ in range(200):
-        r, d = _AERO.compute_forces(inp, state)
-        state = state.from_array(state.to_array() + 0.02 * d.to_array())
-    r, _ = _AERO.compute_forces(inp, state)
+    r, _ = _AERO.step(inp, state, 0.02)
 
     M_mag = float(np.linalg.norm(r.m_hub_world))
     assert M_mag > 50.0, (

@@ -334,9 +334,7 @@ class PhysicsCore:
             rho_kg_m3      = 1.225,
         )
         for _ in range(n_steps):
-            _, deriv = self._aero.compute_forces(inputs, self._rotor_state)
-            new_arr = self._rotor_state.to_array() + dt * deriv.to_array()
-            self._rotor_state = self._rotor_state.from_array(new_arr)
+            _, self._rotor_state = self._aero.step(inputs, self._rotor_state, dt)
 
     # ── Internal integration ──────────────────────────────────────────────────
 
@@ -434,11 +432,10 @@ class PhysicsCore:
                 omega_rad_s    = self._omega_rad_s,
                 rho_kg_m3      = 1.225,
             )
-            result, rotor_deriv = self._aero.compute_forces(rotor_inputs, self._rotor_state)
+            # Aero integrates its inflow state internally via step(); omega is a
+            # RotorInputs field (not part of RotorState) so it stays external.
+            result, self._rotor_state = self._aero.step(rotor_inputs, self._rotor_state, dt)
 
-            # Integrate inflow state only (omega removed from RotorState in dynbem 0.2.0)
-            new_arr = self._rotor_state.to_array() + dt * rotor_deriv.to_array()
-            self._rotor_state = self._rotor_state.from_array(new_arr)
             # Integrate omega externally using euler_step_omega
             omega_min = (r.autorotation.omega_min_rad_s
                          if r.autorotation.omega_min_rad_s is not None else 0.5)

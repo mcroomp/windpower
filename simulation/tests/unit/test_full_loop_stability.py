@@ -168,8 +168,7 @@ def _run_attitude_only_at_fixed_equilibrium(
             R_hub=R, v_hub_world=np.zeros(3), wind_world=WIND,
             omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
         )
-        result, deriv = aero_model.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + DT * deriv.to_array())
+        result, state = aero_model.step(inputs, state, DT)
 
         # Euler's equation with gyroscopic spin coupling.
         tau_b   = R.T @ result.m_hub_world
@@ -370,8 +369,7 @@ def _run_with_constant_tether_force(
             R_hub=s["R"], v_hub_world=s["vel"], wind_world=WIND,
             omega_rad_s=float(OMEGA_SPIN), rho_kg_m3=1.225,
         )
-        result, deriv = aero_model.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + DT * deriv.to_array())
+        result, state = aero_model.step(inputs, state, DT)
 
         # Constant-magnitude tether force pulling hub→anchor.
         tether_vec  = anchor - s["pos"]

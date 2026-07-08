@@ -44,7 +44,9 @@ def _moment_body(aero, state, ic: SimpleNamespace, tilt_lon: float, tilt_lat: fl
         omega_rad_s=ic.omega_spin,
         rho_kg_m3=RHO,
     )
-    result, _ = aero.compute_forces(inputs, state)
+    # Probe on the caller's pre-settled state; a single nominal step reads the
+    # instantaneous moment (no-op inflow advance for quasi-static aero).
+    result, _ = aero.step(inputs, state, 1.0 / 400.0)
     return ic.R0.T @ np.asarray(result.m_hub_world, dtype=float)
 
 

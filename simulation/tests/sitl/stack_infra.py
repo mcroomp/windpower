@@ -1928,6 +1928,7 @@ def _torque_stack(
     passive_yaw_rad: "float | None" = None,
     passive_yaw_ff_ki: "float | None" = None,
     use_vanilla_boot_defaults: bool = False,
+    motor_delay_ms: float = 0.0,
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
@@ -1981,6 +1982,9 @@ def _torque_stack(
                              instead of _BASE_TORQUE_BOOT_PARAMS. Any extra_params,
                              passive boot overrides, and boot_params are still merged
                              on top as explicit overlays.
+    motor_delay_ms         : transport delay [ms] applied to the motor throttle
+                             response in mediator_torque (models ESC/actuation
+                             latency).  0 = no delay (default).
     """
     # Pre-launch: install Lua scripts before SITL starts.
     # passive_init requires rawes.lua (MODE_PASSIVE) -> ensure it is installed.
@@ -2056,6 +2060,7 @@ def _torque_stack(
             startup_hold_s=startup_hold_s,
             events_log_path=str(events_path),
             startup_yaw_rate_deg_s=startup_yaw_rate_deg_s,
+            motor_delay_ms=motor_delay_ms,
         )
 
         def _assert_alive() -> None:

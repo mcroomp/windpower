@@ -159,8 +159,7 @@ def _compute_ic() -> dict:
         )
         state = relax_inflow(_aero_est, state, inputs_eq, n_steps=400, dt=dt_eq)
         for _ in range(200):
-            result, deriv = _aero_est.compute_forces(inputs_eq, state)
-            state = state.from_array(state.to_array() + dt_eq * deriv.to_array())
+            result, state = _aero_est.step(inputs_eq, state, dt_eq)
             new_omega, spin_angle = euler_step_omega(
                 omega_now, spin_angle, float(result.Q_spin), 0.0, I_ode, dt_eq
             )
@@ -202,7 +201,7 @@ def _compute_ic() -> dict:
         R_hub=R_initial, v_hub_world=vel_s, wind_world=WIND,
         omega_rad_s=omega_spin_settled, rho_kg_m3=1.225,
     )
-    f_stack, _ = _aero_est.compute_forces(diag_inputs, state)
+    f_stack, state = _aero_est.step(diag_inputs, state, dt_eq)
     F_aero     = f_stack.F_world
     tether = TetherModel(rest_length=rest_length, hub_mass=MASS)
     f_teth, m_teth = tether.compute(pos_s, vel_s, R_initial)

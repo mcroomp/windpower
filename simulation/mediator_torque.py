@@ -54,6 +54,7 @@ import argparse
 import logging
 import math
 import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -269,6 +270,7 @@ def run(
     log_level: str = "INFO",
     events_log_path: "str | None" = None,
     startup_yaw_rate: float = 0.0,
+    motor_delay_ms: float = 0.0,
 ) -> None:
     """
     Main mediator loop.
@@ -306,6 +308,13 @@ def run(
     params = _m.HubParams()
     _STARTUP_YAW_RATE = startup_yaw_rate
 
+    # Motor-response transport delay: the physics motor sees the throttle that
+    # ArduPilot commanded ``motor_delay_ms`` ago (models ESC / actuation latency).
+    # A FIFO of DT-spaced samples, pre-filled with the motor-off value so the
+    # first ``_delay_ticks`` steps see throttle=0.
+    _delay_ticks = max(0, int(round((motor_delay_ms / 1000.0) / DT)))
+    _throttle_buf = deque([0.0] * _delay_ticks) if _delay_ticks > 0 else None
+
     _profile_entry = PROFILES.get(profile, PROFILES["constant"])
     omega_fn, tilt_fn = _profile_entry[0], _profile_entry[1]
     psi_dot_fn = _profile_entry[2] if len(_profile_entry) > 2 else None
@@ -329,8 +338,8 @@ def run(
              esc_q_max_nm=round(params.esc_q_max, 2),
              startup_hold_s=round(startup_hold_s, 1),
              profile=profile,
-             tail_channel=ch_yaw)
-
+             tail_channel=ch_yaw,
+             motor_delay_ms=round(motor_delay_ms, 1))
     # -- Mutable step state (closed over by step_fn) --------------------------
     hub_state  = _m.HubState()
     prev_roll  = 0.0
@@ -348,6 +357,16 @@ def run(
         # Motor PWM: read raw µs from interface to avoid -1.0 clipping at 800 µs idle.
         # This is physics input — throttle drives the counter-torque motor model.
         throttle = _pwm_to_throttle(iface.last_pwm_raw[ch_yaw])
+
+        # Motor-response transport delay: the physics motor reacts to the throttle
+        # commanded ``motor_delay_ms`` ago.  ``throttle`` (freshly commanded) is
+        # still what gets logged as the controller output; ``throttle_motor`` is
+        # what actually drives the yaw ODE.
+        if _throttle_buf is not None:
+            throttle_motor = _throttle_buf.popleft()
+            _throttle_buf.append(throttle)
+        else:
+            throttle_motor = throttle
 
         in_startup = t < startup_hold_s
         dynamics_t = max(0.0, t - startup_hold_s)
@@ -381,7 +400,7 @@ def run(
             else:
                 if hub_state.psi == 0.0 and hub_state.psi_dot == 0.0:
                     hub_state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
-                hub_state    = _m.step(hub_state, current_omega, throttle, params, DT)
+                hub_state    = _m.step(hub_state, current_omega, throttle_motor, params, DT)
                 psi_send     = math.atan2(math.sin(hub_state.psi), math.cos(hub_state.psi))
                 psi_dot_send = hub_state.psi_dot
             spin_angle = hub_state.psi
@@ -470,8 +489,13 @@ if __name__ == "__main__":
         "--startup-yaw-rate", type=float, default=0.0,
         help="Yaw rate [deg/s] sent to SITL during startup hold (default: 0 = stationary)",
     )
+    parser.add_argument(
+        "--motor-delay-ms", type=float, default=0.0,
+        help="Transport delay [ms] applied to the motor throttle response (default: 0 = none)",
+    )
     args = parser.parse_args()
     run(args.omega_rotor, args.startup_hold,
         args.profile, args.tail_channel, args.log_level,
         events_log_path=args.events_log,
-        startup_yaw_rate=math.radians(args.startup_yaw_rate))
+        startup_yaw_rate=math.radians(args.startup_yaw_rate),
+        motor_delay_ms=args.motor_delay_ms)

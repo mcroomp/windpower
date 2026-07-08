@@ -97,16 +97,17 @@ class StepMetrics:
 def _settle_inflow(aero, omega_spin: float, R_hub: np.ndarray,
                    n_steps: int = 200, dt: float = 0.02) -> object:
     """Pre-settle the dynamic-inflow states so the Bode probe starts from
-    a quasi-static operating point and the first cycles aren't transient."""
+    a quasi-static operating point and the first cycles aren't transient.
+
+    The aero ``step`` API settles its inflow/wake state on the first call, so a
+    single step suffices (``n_steps`` retained for signature compatibility)."""
     state = aero.initial_rotor_state()
     inputs = RotorInputs(
         collective_rad=-0.05, tilt_lon=0.0, tilt_lat=0.0,
         R_hub=R_hub, v_hub_world=np.zeros(3), wind_world=np.zeros(3),
         omega_rad_s=float(omega_spin), rho_kg_m3=1.225,
     )
-    for _ in range(n_steps):
-        _, deriv = aero.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + dt * deriv.to_array())
+    _, state = aero.step(inputs, state, dt)
     return state
 
 
@@ -175,8 +176,7 @@ def probe_open_loop_plant(
                 R_hub=R, v_hub_world=s["vel"], wind_world=np.zeros(3),
                 omega_rad_s=float(omega_spin), rho_kg_m3=1.225,
             )
-            result, deriv = aero.compute_forces(inputs, state)
-            state = state.from_array(state.to_array() + dt * deriv.to_array())
+            result, state = aero.step(inputs, state, dt)
             dyn.step(F_grav_cancel + result.F_world, result.m_hub_world, dt,
                      omega_spin=omega_spin)
 
@@ -326,8 +326,7 @@ def probe_step_response(
             R_hub=R, v_hub_world=s["vel"], wind_world=np.zeros(3),
             omega_rad_s=float(omega_spin), rho_kg_m3=1.225,
         )
-        result, deriv = aero.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + dt * deriv.to_array())
+        result, state = aero.step(inputs, state, dt)
         dyn.step(F_grav_cancel + result.F_world, result.m_hub_world, dt,
                  omega_spin=omega_spin)
 

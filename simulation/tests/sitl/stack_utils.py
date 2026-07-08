@@ -643,6 +643,7 @@ def _launch_mediator_torque(
     startup_hold_s: float = 45.0,
     events_log_path: "str | None" = None,
     startup_yaw_rate_deg_s: float = 0.0,
+    motor_delay_ms: float = 0.0,
 ) -> subprocess.Popen:
     """Launch mediator_torque.py as a subprocess."""
     cmd = [
@@ -652,6 +653,7 @@ def _launch_mediator_torque(
         "--profile",           profile,
         "--tail-channel",      str(tail_channel),
         "--startup-yaw-rate",  str(startup_yaw_rate_deg_s),
+        "--motor-delay-ms",    str(motor_delay_ms),
         "--log-level",         "INFO",
     ]
     if events_log_path is not None:

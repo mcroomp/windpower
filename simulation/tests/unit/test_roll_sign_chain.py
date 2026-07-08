@@ -143,7 +143,7 @@ class TestRollSignChainLinks:
             rho_kg_m3=1.225,
         )
         
-        result, _ = _AERO.compute_forces(inputs, state)
+        result, _ = _AERO.step(inputs, state, 0.0025)
         # M_orbital is in NED frame; transform to body frame for sign check
         M_body = R_hub.T @ np.asarray(result.m_hub_world, dtype=float)
         aero_mx_body = M_body[0]
@@ -244,7 +244,7 @@ class TestEndToEndRollCorrection:
             rho_kg_m3=1.225,
         )
         
-        result_cmd, _ = _AERO.compute_forces(inputs, state)
+        result_cmd, _ = _AERO.step(inputs, state, 0.0025)
         mx_cmd_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_cmd.m_hub_world, dtype=float))[0]
 
         inputs_trim = RotorInputs(
@@ -257,7 +257,7 @@ class TestEndToEndRollCorrection:
             omega_rad_s=28.0,
             rho_kg_m3=1.225,
         )
-        result_trim, _ = _AERO.compute_forces(inputs_trim, state)
+        result_trim, _ = _AERO.step(inputs_trim, state, 0.0025)
         mx_trim_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_trim.m_hub_world, dtype=float))[0]
 
         assert (mx_cmd_body - mx_trim_body) < 0, (

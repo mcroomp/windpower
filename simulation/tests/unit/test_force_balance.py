@@ -119,11 +119,8 @@ def _d_omega(omega: float, col: float, R_hub: np.ndarray) -> float:
         R_hub=R_hub, v_hub_world=np.zeros(3),
         wind_world=WIND_EAST, omega_rad_s=float(omega), rho_kg_m3=1.225,
     )
-    dt = 0.02
-    for _ in range(200):
-        _r, deriv = _AERO.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + dt * deriv.to_array())
-    _r, _ = _AERO.compute_forces(inputs, state)
+    # step() settles the inflow state on the first call.
+    _r, _ = _AERO.step(inputs, state, 0.02)
     return float(omega_derivative(_r.Q_spin, 0.0, I_ode))
 
 
@@ -158,8 +155,7 @@ def test_autorotation_omega_equilibrium_in_range():
             R_hub=R30, v_hub_world=np.zeros(3),
             wind_world=WIND_EAST, omega_rad_s=omega_now, rho_kg_m3=1.225,
         )
-        _r, deriv = _AERO.compute_forces(inputs, state)
-        state = state.from_array(state.to_array() + dt * deriv.to_array())
+        _r, state = _AERO.step(inputs, state, dt)
         new_omega, spin_angle = euler_step_omega(omega_now, spin_angle, float(_r.Q_spin), 0.0, I_ode, dt)
         omega_now = max(omega_min, new_omega)
         d_omega = float(omega_derivative(_r.Q_spin, 0.0, I_ode))

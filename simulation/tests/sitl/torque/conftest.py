@@ -161,6 +161,33 @@ def torque_production_vanilla_lua(tmp_path, request):
 
 
 @pytest.fixture
+def torque_production_delayed_lua(tmp_path, request):
+    """
+    Same as ``torque_production_vanilla_lua`` but with a 300 ms transport delay
+    on the motor throttle response (models ESC / actuation latency).
+
+    Identical boot chain, profile, and MODE_PASSIVE seeding as the vanilla
+    production fixture; the only difference is ``motor_delay_ms=300.0`` so the
+    yaw regulation loop must cope with a lagged actuator.
+    """
+    _OMEGA_200_RPM = 200.0 * 2.0 * math.pi / 60.0
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=_OMEGA_200_RPM,
+        profile="slow_vary",
+        tail_channel=3,
+        passive_init=True,
+        passive_col_rad=LUA_YAW_IC_COL,
+        test_name=request.node.name,
+        startup_hold_s=15.0,
+        startup_yaw_rate_deg_s=0.0,
+        use_vanilla_boot_defaults=True,
+        motor_delay_ms=300.0,
+    ) as ctx:
+        yield ctx
+
+
+@pytest.fixture
 def torque_armed_lua_yaw(tmp_path, request):
     """
     Torque stack with rawes.lua in MODE_YAW (SCR_USER6=2).
