@@ -24,6 +24,9 @@ simulation/tests/oneoff/
 # Generated flight report plots
 *.png
 
+# Temporary / working files
+tmp/
+
 # Logs
 *.log
 

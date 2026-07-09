@@ -1,2 +1,0 @@
-[RUN] C:\repos\windpower\simulation\.venv\Scripts\python.exe -m pytest simulation/tests/simtests -v --tb=short -m simtest -k test_landing --maxfail=1
-
