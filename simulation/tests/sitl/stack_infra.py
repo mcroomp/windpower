@@ -1762,12 +1762,18 @@ _TORQUE_STARTUP_HOLD_S: float = 15.0   # SITL-seconds: enough for EKF + arming b
 # ---------------------------------------------------------------------------
 # STANDARD DDFP yaw regulation — single source of truth for ALL torque tests.
 # ---------------------------------------------------------------------------
-# Every torque yaw test regulates hub yaw with the SAME ArduPilot DDFP controller
-# (H_TAIL_TYPE=3) and the SAME rate-PID gains.  These gains mirror the flight /
-# vanilla path in rawes_common_defaults.parm (P=0.02, I=0, D=0, FLTD=10) -- keep
-# the two in sync.  Rationale: with the inertial motor model the high-authority
-# GB4008 (~58 rad/s per throttle) is stable at P=0.02 with a filtered-but-off D;
-# the Lua trim feedforward (H_YAW_TRIM / observer) carries the DC hold so I=0.
+# Every STANDALONE-DDFP torque yaw test regulates hub yaw with ArduPilot's DDFP
+# controller (H_TAIL_TYPE=3) as the SOLE yaw actuator -- no Lua manual PID runs
+# (SCR_ENABLE=0, or Lua in MODE_NONE).  Those tests keep a nonzero AP yaw P here.
+#
+# NOTE: this set NO LONGER mirrors rawes_common_defaults.parm.  The flight/vanilla
+# parm chain now zeroes the AP yaw PID (ATC_RAT_YAW_P/I/D = 0) because yaw there is
+# regulated by the Lua manual PID (MODE_PASSIVE/STEADY) writing H_YAW_TRIM; a
+# nonzero AP yaw gain would fight the Lua loop and drive a limit cycle.  This
+# override set is intentionally different: it drives the AP DDFP loop directly, so
+# it must retain P>0.  Rationale for P=0.02: with the inertial motor model the
+# high-authority GB4008 (~58 rad/s per throttle) is stable at P=0.02 with a
+# filtered-but-off D; H_YAW_TRIM carries the DC hold so I=0.
 # Fixtures overlay this with EKF/compass/mode/script params only -- never with a
 # different yaw PID.  (The servo-tail fixture overrides H_TAIL_TYPE=0 to exercise
 # the alternative actuator, but keeps these PID gains.)

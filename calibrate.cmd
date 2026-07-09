@@ -1,11 +1,12 @@
 @echo off
 setlocal
 
-set VENV=%~dp0simulation\.venv
-set PYTHON=%VENV%\Scripts\python.exe
-set PIP=%VENV%\Scripts\pip.exe
-set REQ=%~dp0simulation\requirements.txt
-set STAMP=%VENV%\.req_stamp
+set "ROOT=%~dp0"
+set "VENV=%ROOT%.venv"
+set "PYTHON=%VENV%\Scripts\python.exe"
+set "PIP=%VENV%\Scripts\pip.exe"
+set "REQ=%ROOT%simulation\requirements.txt"
+set "STAMP=%VENV%\.req_stamp"
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo Creating venv at %VENV% ...

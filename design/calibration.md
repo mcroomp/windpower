@@ -196,11 +196,11 @@ runs).
 | Constant | Value | Source |
 |----------|-------|--------|
 | Kv | 66 RPM/V | EMAX spec |
-| Pole configuration | 24N22P (11 pole-pairs) | EMAX spec |
+| Pole configuration | see SERVO_BLH_POLES | verified against known RPM |
 | Gear ratio | 80:44 = 1.818 | Hardware |
 | Kt (motor shaft) | 0.144 N·m/A | Derived: 60/(2π×66) |
-| eRPM → motor RPM | ÷ 11 | pole-pairs |
-| eRPM → rotor RPM | ÷ 20 | ÷ (11 × 80/44) |
+| eRPM → motor RPM | ÷ (SERVO_BLH_POLES/2) | pole-pairs |
+| eRPM → rotor RPM | ÷ (SERVO_BLH_POLES/2 × 80/44) | apply gear ratio |
 
 ---
 

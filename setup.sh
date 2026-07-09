@@ -14,7 +14,7 @@
 #   bash setup.sh                              # venv
 #   bash setup.sh build                        # Docker image
 #   bash setup.sh build-lite                   # Docker image without ArduPilot
-#   RAWES_HIL_PORT=COM4 bash setup.sh hw       # Pixhawk params
+#   RAWES_HIL_PORT=COM4 bash setup.sh hw       # Pixhawk params (config apply)
 #
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
@@ -88,7 +88,18 @@ _setup_hw() {
         echo "[ERROR] $PYTHON not found.  Run 'bash setup.sh' first." >&2
         exit 1
     fi
-    "$PYTHON" "$(_winpath "$SIM_DIR/scripts/setup_pixhawk.py")" "$@"
+
+    if [ -z "${RAWES_HIL_PORT:-}" ]; then
+        echo "[ERROR] RAWES_HIL_PORT is required (example: COM4)." >&2
+        exit 1
+    fi
+
+    # Reuse calibrate.py as the canonical hardware param writer.
+    # This checks all expected params from rawes_params.json and writes DIFFs.
+    "$PYTHON" "$(_winpath "$SIM_DIR/scripts/calibrate.py")" \
+        --port "$RAWES_HIL_PORT" \
+        --baud "${RAWES_HIL_BAUD:-115200}" \
+        config apply
 }
 
 CMD="${1:-}"

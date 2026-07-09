@@ -1,0 +1,12 @@
+[36m----------------------------------------------------------------------[0m
+[36mcmd:    C:\repos\windpower\.venv\Scripts\python.exe -u -m pytest simulation\tests\simtests -k test_lua_pumping_unified -s[0m
+[36mfilter: summary[0m
+[36m----------------------------------------------------------------------[0m
+
+============================= test session starts =============================
+=========== 1 passed, 1 skipped, 29 deselected in 154.24s (0:02:34) ===========
+
+[36m----------------------------------------------------------------------[0m
+[32m[1m  ALL TESTS PASSED[0m  [32m1 passed[0m, [2m1 skipped[0m  [2m(157.5s)[0m
+[36m----------------------------------------------------------------------[0m
+[36msummary: C:\repos\windpower\simulation\logs\suite_summary.json[0m

@@ -11,7 +11,8 @@ Scenario
 --------
 - STARTUP hold: stationary hub, arm in GUIDED_NOGPS.
 - DYNAMIC spinup: mediator_torque ramps rotor from 0 to 200 RPM over 10 s.
-- Slow variation: profile="slow_vary" adds ±5 rad/s sinusoidal variation.
+- Constant hold: profile="constant" keeps the rotor at 200 RPM (no variation),
+  isolating the yaw-PID limit-cycle behaviour from any rotor-speed disturbance.
 
 Pass criteria
 -------------
@@ -38,7 +39,7 @@ _MAX_PSI_DOT_RAD_S = math.radians(12.0)
 
 def test_torque_production_vanilla_lua_sitl(torque_production_vanilla_lua):
     """
-    Vanilla SITL defaults + Lua PASSIVE at 200 RPM with slow speed variation.
+    Vanilla SITL defaults + Lua PASSIVE at a constant 200 RPM.
 
     This is intentionally looser than the dedicated torque-tuned tests: it is a
     production-like sanity check, not a torque PID tuning gate.

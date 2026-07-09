@@ -184,6 +184,42 @@ class RawesGCS:
         if mavlog_path is not None:
             self._mavlog = MavlinkLogWriter.open(mavlog_path)
 
+    def _register_send_logger(self) -> None:
+        """Tap outgoing MAVLink so sent messages are logged alongside received.
+
+        pymavlink invokes the send callback on every ``mav.<msg>_send`` call,
+        giving us a single choke point for all TX regardless of which helper
+        sent it.  The callback is a no-op while ``self._mavlog`` is None.
+        """
+        if self._mav is None:
+            return
+        try:
+            self._mav.mav.set_send_callback(self._on_send)
+        except Exception:
+            pass
+
+    def _on_send(self, msg, *args, **kwargs) -> None:
+        if self._mavlog is not None:
+            self._mavlog.write(msg, self._sim_clock.now_ms(), direction="tx")
+
+    def start_mavlog(self, path: "str | Path") -> "MavlinkLogWriter":
+        """Begin logging ALL MAVLink traffic (rx + tx) as NDJSON to *path*.
+
+        Received messages are logged by ``_recv``; sent messages by the send
+        callback.  Safe to call after ``connect()``.  Replaces any existing log.
+        """
+        if self._mavlog is not None:
+            self._mavlog.close()
+        self._mavlog = MavlinkLogWriter.open(path)
+        self._register_send_logger()
+        return self._mavlog
+
+    def stop_mavlog(self) -> None:
+        """Close the MAVLink log (if any) and stop logging traffic."""
+        if self._mavlog is not None:
+            self._mavlog.close()
+            self._mavlog = None
+
     # ------------------------------------------------------------------
     # Simulation time
     # ------------------------------------------------------------------
@@ -339,6 +375,7 @@ class RawesGCS:
             baud=self._baud,
             source_system=self._source_system,
         )
+        self._register_send_logger()
         log.info("GCS socket open (no heartbeat wait) — target sys=%d comp=%d",
                  self._target_system, self._target_component)
 
@@ -379,6 +416,7 @@ class RawesGCS:
                     _wd()
                 time.sleep(0.5)
                 continue
+            self._register_send_logger()
 
             # Connection open — poll for the first heartbeat in 0.5 s chunks,
             # calling the watchdog between each chunk so a crashed process is
@@ -955,6 +993,33 @@ class RawesGCS:
             1,   # 1 = start streaming
         )
         log.debug("Requested stream id=%d at %d Hz", stream_id, rate_hz)
+
+    def set_message_interval(self, msg_id: int, interval_us: int) -> None:
+        """
+        Set the send interval for a single MAVLink message (MAV_CMD_SET_MESSAGE_INTERVAL).
+
+        Overrides the stream-rate grouping for one specific message id, so an
+        unwanted high-rate message can be dropped while others in the same
+        stream keep flowing.
+
+        Parameters
+        ----------
+        msg_id : int
+            MAVLink message id (e.g. mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS).
+        interval_us : int
+            Interval between messages in microseconds.  ``-1`` disables the
+            message; ``0`` restores the stream/param default rate.
+        """
+        self._mav.mav.command_long_send(
+            self._target_system,
+            self._target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            0,
+            float(msg_id),
+            float(interval_us),
+            0, 0, 0, 0, 0,
+        )
+        log.debug("SET_MESSAGE_INTERVAL id=%d interval_us=%d", msg_id, interval_us)
 
     def send_rc_override(self, channels: dict[int, int]) -> None:
         """

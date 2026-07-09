@@ -163,13 +163,13 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mav_servo2_us",
             "mav_servo3_us",
             "mav_servo4_us",
-            # Lua NAMED_VALUE_FLOAT diagnostics (latest async snapshot)
-            "mav_nvf_yaw_i",
-            "mav_nvf_yaw_out",
-            "mav_nvf_yff_trim",
-            "mav_nvf_yff_u",
-            "mav_nvf_yff_gz",
-            "mav_nvf_yff_a",
+            # Lua yaw-PID NAMED_VALUE_FLOAT state (latest async snapshot)
+            "mav_nvf_yff_trim",   # YFF_T: PID output = H_YAW_TRIM
+            "mav_nvf_yff_i",      # YFF_I: integral term
+            "mav_nvf_yff_gz",     # YFF_GZ: measured gyro:z() [rad/s]
+            "mav_nvf_yff_kp",     # YFF_KP: active P gain (SCR_USER1)
+            "mav_nvf_yff_ki",     # YFF_KI: active I gain (SCR_USER2)
+            "mav_nvf_yff_kd",     # YFF_KD: active D gain (SCR_USER3)
         ),
     ),
     # Direct servo values decoded from SITL servo packet in mediator.
@@ -267,10 +267,10 @@ ASYNC_MAV_COLUMNS: tuple[str, ...] = (
     "mav_servo2_us",
     "mav_servo3_us",
     "mav_servo4_us",
-    "mav_nvf_yaw_i",
-    "mav_nvf_yaw_out",
     "mav_nvf_yff_trim",
-    "mav_nvf_yff_u",
+    "mav_nvf_yff_i",
     "mav_nvf_yff_gz",
-    "mav_nvf_yff_a",
+    "mav_nvf_yff_kp",
+    "mav_nvf_yff_ki",
+    "mav_nvf_yff_kd",
 )

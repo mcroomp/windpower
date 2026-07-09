@@ -27,6 +27,7 @@ GPS2_DELAY_MS     220
 
 COMPASS_USE       0      # disable compass yaw source
 SCR_ENABLE        1      # enable Lua scripting
+SCR_USER5         50.0   # Lua yaw-PID telemetry rate [Hz]: high in SITL so each CSV row has fresh PID state
 
 # Relax GPS checks / innovation gates for SITL boot determinism.
 EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks in SITL JSON GPS

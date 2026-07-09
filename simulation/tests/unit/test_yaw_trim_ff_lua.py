@@ -1,29 +1,25 @@
-"""Unit tests for the adaptive yaw-trim throttle observer in rawes.lua.
+"""Unit tests for the yaw-rate PID (H_YAW_TRIM feedforward) in rawes.lua.
 
-The counter-torque plant is affine in the applied motor throttle u:
+``yaw_trim_ff_step(dt, psi_dot, kp, ki, kd)`` regulates the measured body yaw
+rate ``psi_dot = gyro:z()`` to zero and writes the result to H_YAW_TRIM,
+downstream of the ArduPilot attitude clamp (so it holds even when the native
+rate PID is frozen).  The counter-torque motor is one-directional, so the
+output and the integrator are clamped to ``[0, YFF_MAX]``:
 
-    psi_dot = a * u + b        a = slope (constant, gear ratio unknown)
-                               b = -omega_rotor (slowly varying)
+    err  = -psi_dot                      (setpoint 0)
+    I   += ki*err*dt                     (clamped [0, YFF_MAX] -- the DC hold)
+    D    = kd * lowpass(d(err)/dt)
+    out  = clamp(I + kp*err + D, 0, YFF_MAX)
 
-The observer (``yaw_trim_ff_step``) learns the equilibrium throttle u_eq = -b/a
-online from the *actual applied* throttle (read back from SERVO4) and the
-measured spin gyro:z().  Two properties are verified:
-
-1.  Slope identification — the learned slope a_hat converges to the true slope
-    from a wrong prior when the throttle is excited (normalised LMS on
-    increments, which cancel the slow offset b).
-
-2.  Equilibrium invariance — in closed loop with a one-directional P actuator,
-    the trim converges to u_eq = omega/a and the spin is driven to ~0, and this
-    holds even when the learned slope is inaccurate (the slope only sets the
-    correction rate, not the fixed point).
+Gains are the live params KP=SCR_USER1, KI=SCR_USER2, KD=SCR_USER3.  The step
+function is pure (no sensor/param access) so it is unit-testable in isolation.
 """
 from __future__ import annotations
 
 from rawes_lua_harness import RawesLua
 
 
-_DT = 0.01  # 100 Hz observer tick
+_DT = 0.01  # 100 Hz nominal observer tick
 
 
 def _sim() -> RawesLua:
@@ -33,88 +29,101 @@ def _sim() -> RawesLua:
 
 
 # ---------------------------------------------------------------------------
-# 1. Slope identification
-# ---------------------------------------------------------------------------
-
-class TestSlopeIdentification:
-    def test_learns_true_slope_from_wrong_prior(self):
-        sim = _sim()
-        a_true = 57.75      # RPM_SCALE / GEAR (unknown to the observer)
-        b_true = -20.94     # -omega_rotor
-        u_eq = -b_true / a_true
-        sim.fns.yaw_a_set(120.0)   # deliberately wrong prior
-
-        # Dither the applied throttle around the operating point so psi_dot stays
-        # in the quiescent band (|psi_dot| < YFF_A_QUIET) where the slope updates.
-        for i in range(600):
-            u = u_eq + (0.02 if (i % 2 == 0) else -0.02)
-            psi_dot = a_true * u + b_true        # = a_true*(u-u_eq) ~ +-1.15 rad/s
-            sim.fns.yaw_trim_ff_step(_DT, u, psi_dot)
-
-        a_hat = float(sim.fns.yaw_a_hat())
-        assert abs(a_hat - a_true) < 0.1 * a_true, (
-            f"slope not learned: a_hat={a_hat:.2f} vs a_true={a_true:.2f}"
-        )
-
-    def test_no_slope_update_when_not_quiescent(self):
-        """Large |psi_dot| (fast oscillation) must not corrupt the slope."""
-        sim = _sim()
-        sim.fns.yaw_a_set(90.0)
-        for i in range(200):
-            u = 0.2 if (i % 2 == 0) else 0.6     # big du, but psi_dot far from 0
-            psi_dot = 8.0 if (i % 2 == 0) else -8.0
-            sim.fns.yaw_trim_ff_step(_DT, u, psi_dot)
-        assert abs(float(sim.fns.yaw_a_hat()) - 90.0) < 1e-6
-
-
-# ---------------------------------------------------------------------------
-# 2. Closed-loop equilibrium (invariant to learned slope)
+# Closed-loop equilibrium: the integrator holds the zero-rate throttle
 # ---------------------------------------------------------------------------
 
 def _run_closed_loop(sim: RawesLua, a_true: float, omega: float,
-                     kp: float = 0.008, n: int = 6000) -> tuple[float, float]:
-    """Simulate the affine plant + one-directional P actuator driven by the
-    observer trim.  Returns (final_trim, final_psi_dot).
+                     ki: float = 1.0, n: int = 4000) -> tuple[float, float]:
+    """Drive the PID as the sole controller of an affine static-gain plant:
 
-    The test P gain is kept below 1/a_true so the no-lag algebraic inner loop is
-    stable (the real system is stabilised by the motor lag at 400 Hz); this test
-    isolates the observer's steady-state behaviour, not the fast loop dynamics.
+        psi_dot = a_true * out - omega      (out = motor throttle in [0, YFF_MAX])
+
+    At equilibrium the PID output settles to u_eq = omega/a_true (rotor reaction
+    torque exactly cancelled).  Returns (final_out, final_psi_dot).
+
+    ki is chosen so ki*dt*a_true < 2 (discrete-integrator stability on the
+    static-gain plant).  The fixed point u_eq is independent of ki.
     """
-    trim = 0.0
     psi_dot = -omega           # t0: motor off, body drifts at -omega
+    out = 0.0
     for _ in range(n):
-        # One-directional P actuator on top of the learned trim.
-        u = trim + kp * (-psi_dot)
-        u = max(0.0, min(1.0, u))
-        # Affine steady-state plant.
-        psi_dot = a_true * u - omega
-        trim = float(sim.fns.yaw_trim_ff_step(_DT, u, psi_dot))
-    return trim, psi_dot
+        out = float(sim.fns.yaw_trim_ff_step(_DT, psi_dot, 0.0, ki, 0.0))
+        psi_dot = a_true * out - omega
+    return out, psi_dot
 
 
 class TestClosedLoopEquilibrium:
     def test_trim_converges_to_equilibrium_throttle(self):
         sim = _sim()
         a_true, omega = 57.75, 20.94
-        u_eq = omega / a_true            # ~0.3626
-        trim, psi_dot = _run_closed_loop(sim, a_true, omega)
-        assert abs(trim - u_eq) < 0.02, f"trim={trim:.4f} vs u_eq={u_eq:.4f}"
+        u_eq = omega / a_true            # ~0.3626 (< YFF_MAX, so the clamp is idle)
+        out, psi_dot = _run_closed_loop(sim, a_true, omega)
+        assert abs(out - u_eq) < 0.02, f"out={out:.4f} vs u_eq={u_eq:.4f}"
         assert abs(psi_dot) < 0.5, f"|psi_dot|={abs(psi_dot):.3f} not converged"
 
-    def test_equilibrium_invariant_to_wrong_slope(self):
-        """Even with a badly wrong (frozen-ish) slope prior, the fixed point is
-        still u_eq = omega/a_true."""
+    def test_equilibrium_tracks_plant_slope(self):
+        """The integrator settles to u_eq = omega/a_true for a different plant
+        slope; the fixed point depends on the plant, not on the loop gain ki."""
         sim = _sim()
-        a_true, omega = 57.75, 20.94
-        u_eq = omega / a_true
-        sim.fns.yaw_a_set(200.0)         # wrong prior; slow correction rate
-        trim, psi_dot = _run_closed_loop(sim, a_true, omega, n=12000)
-        assert abs(trim - u_eq) < 0.03, f"trim={trim:.4f} vs u_eq={u_eq:.4f}"
+        a_true, omega = 45.0, 20.94
+        u_eq = omega / a_true            # ~0.4653
+        out, psi_dot = _run_closed_loop(sim, a_true, omega, ki=1.0, n=6000)
+        assert abs(out - u_eq) < 0.03, f"out={out:.4f} vs u_eq={u_eq:.4f}"
         assert abs(psi_dot) < 0.5, f"|psi_dot|={abs(psi_dot):.3f} not converged"
 
     def test_trim_clamped_non_negative(self):
-        """Over-driven spin (psi_dot > 0 at u=0) must not push trim negative."""
+        """Over-driven spin (psi_dot > 0 with the motor already off) must not
+        push the one-directional output/integrator negative."""
         sim = _sim()
         for _ in range(50):
-            sim.fns.yaw_trim_ff_step(_DT, 0.0, 5.0)
+            out = float(sim.fns.yaw_trim_ff_step(_DT, 5.0, 0.0, 5.0, 0.0))
+            assert out >= 0.0
         assert float(sim.fns.yaw_ff_trim()) >= 0.0
+
+    def test_output_clamped_at_max(self):
+        """A large sustained drift winds the integrator up to YFF_MAX, no more."""
+        sim = _sim()
+        ymax = float(sim.fns.YFF_MAX)
+        for _ in range(2000):
+            out = float(sim.fns.yaw_trim_ff_step(_DT, -50.0, 0.0, 1.0, 0.0))
+            assert out <= ymax + 1e-9
+        assert abs(float(sim.fns.yaw_ff_trim()) - ymax) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Yaw-D (damping) term (gain kd = SCR_USER3)
+# ---------------------------------------------------------------------------
+
+class TestYawDTerm:
+    def test_kd_zero_small_response_to_rate_spike(self):
+        """With kd=0 a single rate spike moves the output only by the integral
+        step (~ki*err*dt), i.e. there is no large derivative kick."""
+        sim = _sim()
+        kp, ki = 0.0, 0.5
+        for _ in range(50):
+            sim.fns.yaw_trim_ff_step(_DT, -0.4, kp, ki, 0.0)   # build a positive I
+        prev = float(sim.fns.yaw_ff_trim())
+        out = float(sim.fns.yaw_trim_ff_step(_DT, 0.5, kp, ki, 0.0))  # rate spike
+        assert abs(out - prev) < 0.01
+
+    def test_kd_opposes_rising_rate(self):
+        """A positive kd subtracts when the yaw rate is rising (d(psi_dot)/dt>0),
+        so the kd>0 output is below the kd=0 output on the same rising sample."""
+        kp, ki, kd = 0.0, 0.5, 0.02
+        sim0 = _sim()
+        simd = _sim()
+        # Prime both identically at a steady rate (the D term settles to 0).
+        for _ in range(50):
+            sim0.fns.yaw_trim_ff_step(_DT, -0.4, kp, ki, 0.0)
+            simd.fns.yaw_trim_ff_step(_DT, -0.4, kp, ki, kd)
+        # Apply the same rising-rate sample; only the kd term should differ.
+        out0 = float(sim0.fns.yaw_trim_ff_step(_DT, 0.5, kp, ki, 0.0))
+        outd = float(simd.fns.yaw_trim_ff_step(_DT, 0.5, kp, ki, kd))
+        assert outd < out0
+
+    def test_output_clamped_non_negative_with_kd(self):
+        sim = _sim()
+        kd = 0.05
+        for _ in range(30):
+            out = float(sim.fns.yaw_trim_ff_step(_DT, 5.0, 0.0, 0.0, kd))
+            assert out >= 0.0

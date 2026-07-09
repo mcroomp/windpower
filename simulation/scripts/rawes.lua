@@ -38,10 +38,14 @@ Ground planner signals via NAMED_VALUE_FLOAT:
                all three anchor floats (ANN/ANE/AND) have been received at least
                once.  Until then run_flight only holds the current attitude.
 
-Parameters:
+Parameters (SCR_USER1-5 are the Lua yaw-PID surface; the anchor + flight
+tunables are delivered as NAMED_VALUE_FLOAT -- see the list above):
+  SCR_USER1   yaw-rate PID KP                                         default 0.01
+  SCR_USER2   yaw-rate PID KI                                         default 0.02
+  SCR_USER3   yaw-rate PID KD                                         default 0.002
+  SCR_USER4   (unused -- was the yaw Smith-predictor dead time; removed)
+  SCR_USER5   yaw-PID telemetry rate [Hz] (SITL sets this high)       default 2.0
   SCR_USER6   RAWES_MODE      Mode selector (0,1,2,3,4)               default 0
-              (the ONLY SCR_USER parameter; every other tunable/anchor input is
-               delivered as NAMED_VALUE_FLOAT -- see the list above.)
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -138,6 +142,7 @@ AZ_REF_TAU_S = 15.0
 _diag           = 0
 _last_flight_ms = 0
 _none_status_ms = 0
+_passive_status_ms = 0
 
 -- RAWES_ARM disarm timer
 _armon_deadline_ms = nil
@@ -451,57 +456,50 @@ local _yaw_prev_e = 0.0
 local _man_tlon_rad = 0.0
 local _man_tlat_rad = 0.0
 
--- Yaw feedforward trim (adaptive throttle observer on H_YAW_TRIM).  Runs in the
--- normal flight modes -- MODE_PASSIVE (kinematic release) AND MODE_STEADY -- as
--- the primary DC yaw hold.
+-- Yaw feedforward trim (throttle observer on H_YAW_TRIM).  Runs in the normal
+-- flight modes -- MODE_PASSIVE (kinematic release) AND MODE_STEADY -- as the
+-- primary DC yaw hold.
 --
 -- Plant (counter-torque motor, steady state) is affine in the applied motor
--- throttle u:
---       psi_dot = a * u + b
---   a =  d(psi_dot)/du  = slope  (constant; = RPM_SCALE/GEAR, gear ratio unknown)
---   b = -omega_rotor               (slowly varying with rotor speed)
--- The throttle that holds psi_dot = 0 is  u_eq = -b/a.  We learn it online from
--- the ACTUAL applied throttle (read back from the SERVO4 output) and the measured
--- spin gyro:z(), and write it to H_YAW_TRIM -- injected DOWNSTREAM of the AP
--- attitude-controller clamps, so it holds even when the native yaw-rate PID is
--- frozen by the tilted-spin thrust/heading clamps.
+-- throttle u ABOVE the ESC/motor dead zone:
+--       psi_dot = a * (u - u_dead) + b
+--   a      = d(psi_dot)/du  = slope  (bench-calibrated constant, see below)
+--   u_dead = deadband throttle fraction (motor makes no thrust below it)
+--   b      = -omega_rotor   (slowly varying with rotor speed)
+-- The throttle that holds psi_dot = 0 is u_eq.  Solving the affine relation for
+-- the zero-rate throttle gives, in the SAME full-range units the observer reads
+-- back from SERVO4:
+--       u_eq = u - psi_dot / a
+-- Note u_dead CANCELS: the observer reads back the ACTUAL applied throttle u
+-- (which already includes whatever is needed to clear the dead zone) and drives
+-- psi_dot -> 0, so the dead zone is handled implicitly.  It is therefore used
+-- only to DERIVE the calibrated slope a; the hold operates above the dead zone.
 --
--- Update (per tick, dt):
---   u          = SERVO4 output throttle (get_output_pwm(YAW_MOTOR_FUNC) normalised)
---   trim_target= clamp(u - psi_dot / a_hat, 0, YFF_MAX)
---   trim      += alpha * (trim_target - trim)          alpha = dt/(YFF_TRIM_TAU+dt)
--- Because u = trim + p_AP (the AP yaw P-term output), this reduces to
---   trim += alpha * (p_AP - psi_dot/a_hat),
--- i.e. the feedforward ABSORBS the AP P-term's rectified DC output.  This is the
--- crucial difference from a plain integral of psi_dot: under bang-bang yaw
--- oscillation mean(psi_dot) ~ 0 (a psi_dot integrator stalls), but the one-
--- directional P-term's MEAN output is nonzero -- reading it back lets the trim
--- converge to u_eq.  The fixed point (p_AP = 0, psi_dot = 0 => trim = u_eq) is
--- INDEPENDENT of a_hat; the learned slope only sets the correction rate.
---
--- Slope adaptation (normalised LMS on increments, which cancel the slow b):
---   du = u - u_prev ; dpsi = psi_dot - psi_prev
---   if |du| > YFF_DU_MIN:  a_hat += YFF_A_MU * du*(dpsi - a_hat*du)/du^2
--- Enabled by default; RAWES_YFK <= 0 disables the whole feedforward.
-local YFF_MAX        = 0.7       -- max feedforward trim (clamp)
-local YFF_TRIM_TAU   = 0.3       -- trim observer low-pass time constant [s]
-local YFF_A_INIT     = 60.0      -- initial slope guess d(psi_dot)/du [rad/s per throttle]
-local YFF_A_MU       = 0.02      -- slope LMS step (small; slope is ~constant)
-local YFF_A_MIN      = 15.0      -- slope sanity clamp (min)
-local YFF_A_MAX      = 300.0     -- slope sanity clamp (max)
-local YFF_DU_MIN     = 0.03      -- min |throttle step| to update slope estimate
-local YFF_A_QUIET    = 2.0       -- only adapt slope when |psi_dot| below this [rad/s];
-                                 -- during a fast limit cycle the motor lag decorrelates
-                                 -- du/dpsi and biases the slope low, so gate it out.
-local YFF_A_NVF_TICKS = 50       -- stream learned slope YFF_A every N ticks (~0.5 s)
+-- Implementation: a standalone yaw-rate PID (see yaw_trim_ff_step below) drives
+-- gyro:z() -> 0 and writes its output to H_YAW_TRIM.  err = -psi_dot; the
+-- integral (clamped [0, YFF_MAX]) provides the DC hold and KP the rate damping.
+-- Gains are live params KP=SCR_USER1, KI=SCR_USER2, KD=SCR_USER3.  Enabled by
+-- default; RAWES_YFK <= 0 disables the whole feedforward.
+local YFF_MAX         = 0.7       -- max feedforward trim (clamp)
+local YFF_D_TAU       = 0.05      -- yaw-D derivative low-pass time constant [s] (~3 Hz)
+local YFF_NVF_HZ_DEFAULT = 2.0    -- default yaw-PID telemetry rate [Hz]; SCR_USER5 overrides
+
+-- Best-effort scheduler: the Lua VM runs at MOST 100 Hz but individual ticks can
+-- arrive late, so the yaw PID must integrate/differentiate against the ACTUAL
+-- elapsed time, clamped to a sane band so a scheduling hiccup cannot blow up the
+-- integral or the 1/dt derivative.
+local YFF_DT_NOMINAL = BASE_PERIOD_MS * 0.001   -- 0.01 s fallback (first tick)
+local YFF_DT_MIN     = 0.001                     -- dt floor [s]
+local YFF_DT_MAX     = 0.10                      -- dt ceil  [s] (>= 10 skipped bins)
 
 local _yaw_ff_enable = 1.0       -- >0 enable (RAWES_YFK overrides; <=0 disables)
-local _yaw_ff_trim   = 0.0       -- feedforward trim = H_YAW_TRIM, [0, YFF_MAX]
-local _yaw_a_hat     = YFF_A_INIT-- learned plant slope d(psi_dot)/du
-local _yaw_u_prev    = 0.0       -- previous applied throttle (slope increments)
-local _yaw_psi_prev  = 0.0       -- previous gyro:z() (slope increments)
-local _yaw_prev_valid = false    -- guard: skip first increment after a reset
-local _yaw_a_nvf_ctr = 0         -- tick counter for periodic YFF_A streaming
+local _yaw_ff_trim   = 0.0       -- last H_YAW_TRIM output [0, YFF_MAX]
+local _yaw_i         = 0.0       -- PID integral term (the DC yaw hold)
+local _yaw_err_prev  = 0.0       -- previous rate error (for the D term)
+local _yaw_d_lp      = 0.0       -- low-passed error derivative
+local _yaw_pid_valid = false     -- guard: skip first D sample after a reset
+local _yaw_nvf_last_ms = nil     -- millis() at last yaw-PID telemetry emission (nil = first)
+local _yaw_last_s    = nil       -- ms_to_s(millis()) at last PID tick (nil = first)
 
 local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
 local YAW_MOTOR_FUNC = 36    -- SERVO output function for the yaw motor (Motor4);
@@ -609,15 +607,15 @@ local function _on_mode_enter(mode)
         _man_tlat_rad = 0.0
     end
     if mode == MODE_PASSIVE then
-        -- Defer yaw capture until IC is fully seeded; PASSIVE should not emit
-        -- control API traffic before full IC arrives.  Reset the yaw-trim
-        -- observer so each release starts learning the hold from zero.  The
-        -- learned slope (_yaw_a_hat) is a physical constant and is NOT reset.
+        _passive_status_ms   = 0
+        -- Reset the yaw PID so each release starts the DC hold from zero.
         _passive_hold_yaw_rad = nil
-        _yaw_ff_trim          = 0.0
-        _yaw_u_prev           = 0.0
-        _yaw_psi_prev         = 0.0
-        _yaw_prev_valid       = false
+        _yaw_ff_trim   = 0.0
+        _yaw_i         = 0.0
+        _yaw_err_prev  = 0.0
+        _yaw_d_lp      = 0.0
+        _yaw_pid_valid = false
+        _yaw_last_s    = nil    -- re-derive dt from the first tick after entry
     end
 end
 
@@ -919,70 +917,76 @@ end
 -- on PASSIVE entry so each release re-learns the DC hold from zero.  See the
 -- state-declaration header above for the full update equations.  Enabled by
 -- default; RAWES_YFK <= 0 disables.
--- Pure observer core: given the applied motor throttle u [0,1] and the measured
--- spin psi_dot = gyro:z() [rad/s], advance the slope estimate and the trim.
--- No sensor / gating / param dependencies, so it is unit-testable in isolation.
--- Returns the new trim.
-local function yaw_trim_ff_step(dt, u, psi_dot)
-    -- Slope adaptation on increments (the slow offset b cancels in du/dpsi).
-    -- Gated to quiescent yaw: during a fast limit cycle the motor lag makes the
-    -- one-tick dpsi lag du, which biases the estimate low.  The equilibrium
-    -- trim is independent of a_hat, so skipping updates here is safe.
-    local du   = u - _yaw_u_prev
-    local dpsi = psi_dot - _yaw_psi_prev
-    local quiet = (psi_dot < YFF_A_QUIET and psi_dot > -YFF_A_QUIET
-               and _yaw_psi_prev < YFF_A_QUIET and _yaw_psi_prev > -YFF_A_QUIET)
-    if _yaw_prev_valid and quiet and (du > YFF_DU_MIN or du < -YFF_DU_MIN) then
-        local e = dpsi - _yaw_a_hat * du
-        _yaw_a_hat = _yaw_a_hat + YFF_A_MU * du * e / (du * du)
-        if _yaw_a_hat < YFF_A_MIN then _yaw_a_hat = YFF_A_MIN end
-        if _yaw_a_hat > YFF_A_MAX then _yaw_a_hat = YFF_A_MAX end
-    end
-    _yaw_u_prev     = u
-    _yaw_psi_prev   = psi_dot
-    _yaw_prev_valid = true
+-- Standalone yaw-rate PID (replaces the read-back trim observer).  Regulates the
+-- measured body yaw rate gyro:z() -> 0 and writes the result to H_YAW_TRIM.  The
+-- AP yaw rate PID is expected to be OFF (ATC_RAT_YAW_P/I/D = 0), so
+-- SERVO4 = f(H_YAW_TRIM) alone; H_YAW_TRIM is injected DOWNSTREAM of the AP
+-- attitude clamp, so the frozen-clamp problem cannot block it.
+--   err = -psi_dot            (target yaw rate 0)
+--   I  += KI*err*dt           (clamped [0,YFF_MAX]; this is the DC hold)
+--   D   = KD * d/dt(filtered err)
+--   out = clamp(I + KP*err + D, 0, YFF_MAX)
+-- Gains are live params: KP=SCR_USER1, KI=SCR_USER2, KD=SCR_USER3.
+-- One-directional motor => output and integral clamped >= 0.  Pure (no sensor/
+-- param access) so it is unit-testable in isolation.
 
-    -- Deadbeat feedforward target, low-passed into the trim.  Fixed point is
-    -- u_eq = -b/a and is independent of _yaw_a_hat (see header comment).
-    local trim_target = u - psi_dot / _yaw_a_hat
-    if trim_target < 0.0 then trim_target = 0.0 elseif trim_target > YFF_MAX then trim_target = YFF_MAX end
-    local alpha = dt / (YFF_TRIM_TAU + dt)
-    _yaw_ff_trim = _yaw_ff_trim + alpha * (trim_target - _yaw_ff_trim)
-    if _yaw_ff_trim < 0.0 then _yaw_ff_trim = 0.0 elseif _yaw_ff_trim > YFF_MAX then _yaw_ff_trim = YFF_MAX end
-    return _yaw_ff_trim
+local function yaw_trim_ff_step(dt, psi_dot, kp, ki, kd)
+    kp = kp or 0.0; ki = ki or 0.0; kd = kd or 0.0
+    local err = -psi_dot
+    _yaw_i = _yaw_i + ki * err * dt
+    if _yaw_i < 0.0 then _yaw_i = 0.0 elseif _yaw_i > YFF_MAX then _yaw_i = YFF_MAX end
+    local d_term = 0.0
+    if _yaw_pid_valid and kd > 0.0 and dt > 0.0 then
+        local beta = dt / (YFF_D_TAU + dt)
+        _yaw_d_lp = _yaw_d_lp + beta * ((err - _yaw_err_prev) / dt - _yaw_d_lp)
+        d_term = kd * _yaw_d_lp
+    end
+    _yaw_err_prev  = err
+    _yaw_pid_valid = true
+    local out = _yaw_i + kp * err + d_term
+    if out < 0.0 then out = 0.0 elseif out > YFF_MAX then out = YFF_MAX end
+    _yaw_ff_trim = out
+    return out
 end
 
-local function run_yaw_trim_ff(dt)
+local function run_yaw_trim_ff(now)
     if _yaw_ff_enable <= 0.0 then return end             -- disabled when RAWES_YFK <= 0
     if not (_ic_seeded and arming:is_armed()) then return end
     local gyro = ahrs:get_gyro()
     if not gyro then return end
-
-    -- Applied motor throttle, read back from the actual SERVO4 output so the
-    -- observer sees the TOTAL command (AP yaw P-term + our trim), not just the
-    -- trim.  This is what lets the feedforward absorb the P-term's rectified DC.
-    local pwm = SRV_Channels:get_output_pwm(YAW_MOTOR_FUNC)
-    if pwm == nil then return end                        -- output not available yet
-    local smin = p("SERVO4_MIN", 800)
-    local smax = p("SERVO4_MAX", 2000)
-    local span = smax - smin
-    if span <= 0 then return end
-    local u = (pwm - smin) / span
-    if u < 0.0 then u = 0.0 elseif u > 1.0 then u = 1.0 end
-
     local psi_dot = gyro:z()
-    yaw_trim_ff_step(dt, u, psi_dot)
-    param:set("H_YAW_TRIM", _yaw_ff_trim)
 
-    -- Telemetry: trim, applied throttle, spin (every tick); learned slope
-    -- streamed periodically to keep the NVF rate down.
-    _yaw_a_nvf_ctr = _yaw_a_nvf_ctr + 1
-    if _yaw_a_nvf_ctr >= YFF_A_NVF_TICKS then
-        _yaw_a_nvf_ctr = 0
-        gcs:send_named_float("YFF_T",  _yaw_ff_trim)
-        gcs:send_named_float("YFF_U",  u)
+    -- Best-effort scheduling: derive the REAL dt from millis(), clamped, rather
+    -- than trusting the nominal tick period (ticks can be late / skipped).
+    local now_s = ms_to_s(now)
+    local dt = YFF_DT_NOMINAL
+    if _yaw_last_s ~= nil then
+        dt = now_s - _yaw_last_s
+        if dt < YFF_DT_MIN then dt = YFF_DT_MIN
+        elseif dt > YFF_DT_MAX then dt = YFF_DT_MAX end
+    end
+    _yaw_last_s = now_s
+
+    local kp = p("SCR_USER1", 0.0)   -- yaw-rate PID gains (live-tunable)
+    local ki = p("SCR_USER2", 0.0)
+    local kd = p("SCR_USER3", 0.0)
+
+    local out = yaw_trim_ff_step(dt, psi_dot, kp, ki, kd)
+    param:set("H_YAW_TRIM", out)
+
+    -- Telemetry rate gated by SCR_USER5 [Hz] (default 2 Hz).  SITL sets this much
+    -- higher so the full yaw-PID state (output, integral, spin, gains) is captured
+    -- at close to the control-tick rate.
+    local nvf_hz = p("SCR_USER5", YFF_NVF_HZ_DEFAULT)
+    if nvf_hz <= 0.0 then nvf_hz = YFF_NVF_HZ_DEFAULT end
+    if _yaw_nvf_last_ms == nil or (now - _yaw_nvf_last_ms) >= (1000.0 / nvf_hz) then
+        _yaw_nvf_last_ms = now
+        gcs:send_named_float("YFF_T",  out)
+        gcs:send_named_float("YFF_I",  _yaw_i)
         gcs:send_named_float("YFF_GZ", psi_dot)
-        gcs:send_named_float("YFF_A", _yaw_a_hat)
+        gcs:send_named_float("YFF_KP", kp)
+        gcs:send_named_float("YFF_KI", ki)
+        gcs:send_named_float("YFF_KD", kd)
     end
 end
 
@@ -995,6 +999,18 @@ local function run_passive_mode(now)
 
     local mode_now  = vehicle:get_mode()
     local guided_ok = (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy()
+
+    if now - _passive_status_ms >= 1000 then
+        _passive_status_ms = now
+        local armed_s = arming:is_armed() and "ARMED" or "disarmed"
+        local ic_s = ic_ready and "ready" or "waiting"
+        local g_s = guided_ok and "ok" or "no"
+        local y_s = (_passive_hold_yaw_rad ~= nil) and string.format("%.1f", math.deg(_passive_hold_yaw_rad)) or "n/a"
+        local col_s = string.format("%.2f", math.deg(ic_col_or_default()))
+        gcs:send_text(6, string.format(
+            "RAWES passive: %s ic=%s guided=%s yaw_hold=%s col=%sdeg",
+            armed_s, ic_s, g_s, y_s, col_s))
+    end
 
     if not ic_ready then
         -- No IC seed yet: instead of sitting idle, actively damp any rotation
@@ -1155,12 +1171,12 @@ local function update()
 
     if mode == MODE_PASSIVE then
         run_passive_mode(now)
-        run_yaw_trim_ff(BASE_PERIOD_MS * 0.001)
+        run_yaw_trim_ff(now)
         return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_STEADY then
-        run_yaw_trim_ff(BASE_PERIOD_MS * 0.001)
+        run_yaw_trim_ff(now)
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
             _last_flight_ms = now
             run_flight()

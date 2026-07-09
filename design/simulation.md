@@ -225,7 +225,7 @@ These follow directly from the orbit physics and pin down several CLAUDE.md inva
 1. **Use ACRO, never STABILIZE.** STABILIZE commands absolute NED attitude (roll=0=level), which fights the 67° tether equilibrium and crashes within 1–2 s. ACRO only damps angular rates toward commanded rates, so the large physical tilt causes no automatic corrective cyclic. PhysicalSensor reports the true hub orientation directly.
 2. **Disable rate-loop I-term:** `ATC_RAT_RLL_IMAX = ATC_RAT_PIT_IMAX = ATC_RAT_YAW_IMAX = 0`. The 0.2–0.3 rad/s orbital body rate is a *desired* steady-state rate, not a disturbance to reject. Without IMAX=0 the I-term integrates this as a tracking error and saturates the swashplate in ≈ 50 s.
 3. **Reference body_z must follow the rotating tether direction.** A fixed reference accumulates ≈ 90° of phase lag per quarter orbit (~15 s). `rawes.lua` uses `compute_bz_altitude_hold(pos, target_el_rad, tension)` — target tether direction at the rate-limited elevation, plus a gravity-compensation tilt. Position is the only sensor needed.
-4. **Disk-tilt slew rate limit = 0.40 rad/s** (`SCR_USER2`). Gyroscopic precession could theoretically tilt the disk at ≈ 20 rad/s; closed-loop bandwidth caps the useful rate at ≈ 2 % of that. Faster slews cause oscillation; slower wastes reel-in time. Minimum reel-out → reel-in transition (Δξ = 45°) ≈ 2 s, with a 3–4 s budget per cycle boundary including settling.
+4. **Disk-tilt slew rate limit = 0.40 rad/s** (`RAWES_SLW` NVF). Gyroscopic precession could theoretically tilt the disk at ≈ 20 rad/s; closed-loop bandwidth caps the useful rate at ≈ 2 % of that. Faster slews cause oscillation; slower wastes reel-in time. Minimum reel-out → reel-in transition (Δξ = 45°) ≈ 2 s, with a 3–4 s budget per cycle boundary including settling.
 5. **Orbital mean position is a passive wind direction estimate.** Mean horizontal position over one orbit lies downwind from the anchor. Convergence: one orbital period (~60 s); accuracy: ~20° absolute (limited by the azimuthal offset from rotor angular momentum). In-plane wind speed is simultaneously recoverable from `omega_spin` via the autorotation torque balance.
 
 ### Implementation mapping
@@ -235,7 +235,7 @@ These follow directly from the orbit physics and pin down several CLAUDE.md inva
 | Physical attitude + ACRO | `PhysicalSensor` reports true `R_hub`; `COMPASS_USE=0`; `EK3_SRC1_YAW=2` |
 | Rate-loop bias | `ATC_RAT_*_IMAX = 0` (boot params, `rawes_sitl_defaults.parm`) |
 | Reference body_z tracking | `rawes.lua`: `bz_altitude_hold(pos, _el_rad, tension)` at 50 Hz |
-| Slew rate limiting | `rawes.lua`: elevation slew `SCR_USER2 = 0.40 rad/s` |
+| Slew rate limiting | `rawes.lua`: elevation slew `RAWES_SLW = 0.40 rad/s` (NVF) |
 | Gyro phase compensation | `H_SW_PHANG = 0` (empirical with dynbem v0.4.0 rotor response) |
 
 ---

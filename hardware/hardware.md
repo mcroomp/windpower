@@ -199,29 +199,39 @@ CPU load: 20.1%  Battery voltage: 15.43 V  Current: 0.46 A  Remaining: 99%
 
 ### DShot / BLHeli
 
-| Parameter | Value |
-|-----------|-------|
-| SERVO_BLH_MASK | 8.0 |
-| SERVO_BLH_BDMASK | 8.0 |
-| SERVO_BLH_OTYPE | 5.0 |
-| SERVO_BLH_AUTO | 1.0 |
-| SERVO_BLH_POLES | 22.0 |
-| SERVO_BLH_TRATE | 10.0 |
-| SERVO_DSHOT_ESC | 1.0 |
-| BRD_IO_DSHOT | 1.0 |
+Live hardware config (Pixhawk 6C, read 2026-07-08).  The GB4008 yaw motor is on
+**OUTPUT 9** (not MAIN OUT 4) so it sits in a DShot-capable timer group away from
+the PWM swash servos; bit 8 of the masks (= 256) selects channel 9.
+
+| Parameter | Value | Note |
+|-----------|-------|------|
+| SERVO_BLH_MASK | 256.0 | DShot on ch9 (bit 8) |
+| SERVO_BLH_BDMASK | 256.0 | bidirectional DShot on ch9 (eRPM in-band) |
+| SERVO_BLH_AUTO | 0.0 | explicit mask (not auto-derived) |
+| SERVO_BLH_OTYPE | 5.0 | DShot300 |
+| SERVO_BLH_POLES | 22.0 | poles; eRPM ÷ (SERVO_BLH_POLES/2) = mech RPM |
+| SERVO_BLH_TRATE | 10.0 | telemetry rate |
+| SERVO_DSHOT_ESC | 1.0 | BLHeli telemetry decode |
+| SERVO_DSHOT_RATE | 0.0 | loop-rate DShot |
+| BRD_IO_DSHOT | 0.0 | outputs from the FMU, not the IO co-processor |
 
 ### Servo functions
 
-| Parameter | Value |
-|-----------|-------|
-| SERVO9_FUNCTION | 94.0 |
+| Parameter | Value | Note |
+|-----------|-------|------|
+| SERVO4_FUNCTION | 0.0 | released (motor relocated off the PWM swash group) |
+| SERVO9_FUNCTION | 36.0 | Motor4 = GB4008 DDFP yaw motor |
+| SERVO9_MIN | 1000.0 | DShot range |
+| SERVO9_MAX | 2000.0 | DShot range |
+| SERVO9_TRIM | 1000.0 | |
 
 ### RPM sensor
 
-| Parameter | Value |
-|-----------|-------|
-| RPM1_TYPE | 5.0 |
-| RPM1_MIN | 0.0 |
+| Parameter | Value | Note |
+|-----------|-------|------|
+| RPM1_TYPE | 5.0 | ESC telemetry (bidirectional DShot) |
+| RPM1_ESC_MASK | 256.0 | source = ch9 ESC |
+| RPM1_MIN | 0.0 | |
 
 ### Scripting
 

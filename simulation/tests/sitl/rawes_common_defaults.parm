@@ -38,28 +38,86 @@ H_COL_MIN         1000
 H_COL_MAX         2000
 H_RSC_MODE        1      # passthrough: no main rotor motor
 
-# GB4008 anti-rotation motor (MAIN OUT 4)
+# GB4008 anti-rotation (yaw) motor.
+# Canonical hardware wiring (read live from the Pixhawk 6C, 2026-07-08):
+#   - The motor is on OUTPUT 9 (SERVO9_FUNCTION=36 = Motor4), NOT MAIN OUT 4.
+#     Output 4 shares timer group TIM1 with the PWM swash servos (ch1-3), and
+#     DShot is all-or-nothing per group, so the motor was relocated to a
+#     DShot-capable AUX output; SERVO4 is released (FUNCTION=0).
+#   - Output 9 runs bidirectional DShot so the ESC returns eRPM in-band, which
+#     RPM1 consumes for omega_spin.  See the DShot block at the end of this file.
 H_TAIL_TYPE       3
 H_COL2YAW         0.0
 
-# The anti-rotation motor has very high yaw authority: the plant slope is
-# d(psi_dot)/d(throttle) ~ RPM_SCALE/GEAR ~ 58 rad/s per unit throttle.  With the
-# inertial motor model (finite torque -> first-order, ~4 Hz pole, bounded slew)
-# P=0.02 roughly halves the yaw-rate RMS and cuts heading-hold stdev from ~9 deg
-# to ~3.6 deg vs the old P=0.01, with throttle still off the rails.  Higher P
-# (>=0.03) rings the rotor spin-up/slow-vary transients over the gate, and D --
-# even filtered (FLTD=10) -- reintroduces a limit cycle, so D stays 0.  I stays 0
-# too: the Lua trim feedforward carries the DC hold.
-ATC_RAT_YAW_P     0.02
+# AP yaw PID fully OFF (P=I=D=0): yaw is now regulated entirely by the Lua manual
+# PID, which reads gyro:z() and writes its output through H_YAW_TRIM.  The AP DDFP
+# path (H_TAIL_TYPE=3) still runs but, with all gains zero, only passes the Lua's
+# H_YAW_TRIM feedforward through to the yaw motor (OUTPUT 9).  Leaving any AP yaw
+# gain nonzero makes
+# the AP loop fight the Lua loop and drives a high-frequency yaw limit cycle
+# (observed: +-300 deg/s bang-bang on SERVO4).  Tune the Lua PID via SCR_USER1/2/3.
+ATC_RAT_YAW_P     0.0
 ATC_RAT_YAW_D     0.0
 ATC_RAT_YAW_FLTD  10.0
-
-# AP yaw integral OFF: the Lua trim observer carries the DC hold.  A small AP I was
-# tried for gust/tilt disturbance rejection but it degraded the slow_vary steady
-# tracking (interacts with the observer) and did not fix the brief coupling spikes,
-# so I stays 0.  
 ATC_RAT_YAW_I     0.0
+
+# Lua yaw-rate PID gains (rawes.lua reads these as KP/KI/KD via SCR_USER1/2/3).
+# The Lua PID regulates gyro:z() -> 0 and writes its output to H_YAW_TRIM (the AP
+# yaw PID is fully off).  The throttle->yaw-rate plant gain is huge (~58 rad/s per
+# unit), the GB4008/ESC has lag, and the motor is UNIDIRECTIONAL (throttle >= 0,
+# counters CCW drift only -- it cannot actively brake an over-correction, only shut
+# off and wait for rotor drag).  Two failure modes bound the tuning:
+#   * KP too high (or any KD) -> fast actuator-lag limit cycle (+-300 deg/s bang-bang).
+#   * KP too low vs KI        -> slow underdamped heading limit cycle (+-130 deg/s),
+#                                because KP*err = -KP*psi_dot is the only rate damping
+#                                and KI is a heading spring that overshoots equilibrium.
+# Balance: modest KP for rate damping, a gentle KI to hold the DC throttle
+# (equilibrium ~0.3 here) without overshooting, and NO derivative.  Tune live with
+# calibrate `run` keys (P '-'/'=', I '['/']', D ','/'.').
+# NOTE: analyze_yaw_limit_cycle.py on the telemetry shows the actuator never
+# saturates (throttle 0.29-0.42, no rail pinning) -- the residual cycle is LINEAR
+# UNDERDAMPING/disturbance tracking.  KP too high (>=0.04) re-excites a fast
+# actuator-lag limit cycle, so KP is kept moderate with a gentle KI and no D.
+SCR_USER1         0.012
+SCR_USER2         0.005
+SCR_USER3         0.0
+
+# SCR_USER5: Lua yaw-PID telemetry rate [Hz] (YFF_* NAMED_VALUE_FLOATs).  Kept low
+# on hardware/common to conserve link bandwidth; SITL raises it (see
+# rawes_sitl_defaults.parm) so every telemetry row captures fresh PID state.
+SCR_USER5         2.0
 
 SERVO4_MIN        800
 SERVO4_MAX        2000
 SERVO4_TRIM       800
+
+# --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
+# Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw
+# motor is Motor4 on OUTPUT 9 with a 1000-2000 us DShot range.
+SERVO4_FUNCTION   0
+SERVO9_FUNCTION   36
+SERVO9_MIN        1000
+SERVO9_MAX        2000
+SERVO9_TRIM       1000
+SERVO9_REVERSED   0
+
+# BLHeli / bidirectional DShot on output 9 (bit 8 -> mask 256).
+#   MASK   = DShot output channels          (256 = ch9)
+#   BDMASK = bidirectional-DShot channels   (256 = ch9; returns eRPM in-band)
+#   AUTO=0 -> explicit mask (not auto-derived from motor outputs)
+#   OTYPE=5 -> DShot300;  DSHOT_ESC=1 -> BLHeli telemetry decode
+#   POLES=22 -> ArduPilot divides eRPM by N pole-pairs for mech RPM
+#   BRD_IO_DSHOT=0 -> outputs driven from the FMU, not the IO co-processor
+SERVO_BLH_MASK    256
+SERVO_BLH_BDMASK  256
+SERVO_BLH_AUTO    0
+SERVO_BLH_OTYPE   5
+SERVO_BLH_POLES   22
+SERVO_BLH_TRATE   10
+SERVO_DSHOT_ESC   1
+SERVO_DSHOT_RATE  0
+BRD_IO_DSHOT      0
+
+# ESC RPM telemetry: RPM1 sourced from the output-9 ESC (bidirectional DShot).
+RPM1_TYPE         5
+RPM1_ESC_MASK     256
