@@ -19,6 +19,7 @@ Division of labour (mirrors real stack):
                           downwind-plane azimuth from its own position (no truth-
                           wind oracle), per the AGENTS.md no-truth-wind invariant.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -27,7 +28,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.simtest,
+              pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
 
 from winch          import GovernedWinchController
 from winch_node     import GovernedWinchNode, WinchCommand, Anemometer
@@ -81,7 +83,11 @@ T_REEL_IN_MAX  = 300.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
 
 
-def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
+def _run_pumping(log, aero_model: "str | None" = None) -> dict:
+    # Aero model: explicit arg wins; otherwise the RAWES_AERO env var
+    # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
+    if aero_model is None:
+        aero_model = os.environ.get("RAWES_AERO", "quasi_static")
     # ── Lua AP ───────────────────────────────────────────────────────────────
     sim = RawesLua(mode=MODE_STEADY)
     sim.armed        = True

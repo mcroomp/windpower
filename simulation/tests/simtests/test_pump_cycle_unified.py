@@ -15,6 +15,7 @@ This test validates smooth, tension-controlled winch cycles without tension
 spikes, slack, or floor hits.
 """
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -23,7 +24,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
+pytestmark = [pytest.mark.simtest,
+              pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
 
 from winch            import GovernedWinchController
 from simtest_log      import BadEventLog
@@ -75,7 +77,11 @@ T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_pumping(log, aero_model: str = "quasi_static") -> dict:
+def _run_pumping(log, aero_model: "str | None" = None) -> dict:
+    # Aero model: explicit arg wins; otherwise the RAWES_AERO env var
+    # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
+    if aero_model is None:
+        aero_model = os.environ.get("RAWES_AERO", "quasi_static")
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
 
     COL_MIN, COL_MAX = -0.28, 0.10
