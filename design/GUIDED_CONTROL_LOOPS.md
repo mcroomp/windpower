@@ -1,5 +1,13 @@
 # Guided Mode Control Loops — Helicopter (RAWES Focus)
 
+## Scope and Ownership
+
+This is a low-level Guided/attitude-control deep dive.
+
+- Canonical system-level behavior and mode ownership live in [flight_stack.md](flight_stack.md).
+- This document should focus on ArduPilot control-chain internals and parameter effects.
+- Avoid repeating full system architecture text already covered in [flight_stack.md](flight_stack.md).
+
 ## 1. Overview
 
 This document describes the control loop architecture for ArduPilot's **Guided mode** as used by the RAWES (Rotary Airborne Wind Energy System). It is intended for control system engineers who need to understand the signal flow from an attitude command down to swashplate and tail actuator outputs.

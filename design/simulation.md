@@ -1,6 +1,6 @@
 # RAWES Simulation Internals
 
-Detailed technical reference for the simulation stack. See [CLAUDE.md](../CLAUDE.md) for the overview and running tests.
+Detailed technical reference for the simulation stack. For overview and test entry points, see [../AGENTS.md](../AGENTS.md) and [testing.md](testing.md).
 
 ---
 
@@ -51,8 +51,8 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 ### Higher-level Python wrappers (simtests + planners)
 
-- **`AltitudeHoldController`** — wraps `compute_bz_altitude_hold` with an internal elevation rate-limiter. `from_pos(pos, slew_rate_rad_s)` initialises `_el_rad` from the IC elevation; `update(pos, target_alt_m, tension_n, mass_kg, dt)` rate-limits `_el_rad` and returns the corresponding `body_z_eq`. Here `tension_n` is the **commanded** tension (force-balance feedforward), never a measurement. Used by the AP pumping mode (`_PumpingPythonMode`), `LandingApController`, and legacy hold tests.
-- **`ElevationHoldController`** — adds `compute_rate_cmd` on top of `AltitudeHoldController`, returning `(rate_roll_sp, rate_pitch_sp)` directly. Legacy; superseded by the GUIDED angle path on the AP.
+- **`AltitudeHoldController`** — wraps `compute_bz_altitude_hold` with an internal elevation rate-limiter. `from_pos(pos, slew_rate_rad_s)` initialises `_el_rad` from the IC elevation; `update(pos, target_alt_m, tension_n, mass_kg, dt)` rate-limits `_el_rad` and returns the corresponding `body_z_eq`. Here `tension_n` is the **commanded** tension (force-balance feedforward), never a measurement. Used by the AP pumping mode (`_PumpingPythonMode`), `LandingApController`, and hold tests.
+- **`ElevationHoldController`** — adds `compute_rate_cmd` on top of `AltitudeHoldController`, returning `(rate_roll_sp, rate_pitch_sp)` directly. Kept for compatibility; the GUIDED angle path is the primary AP path.
 - **`HeliCyclicController`** — inner rate loop + servo lag model. Baked into `PhysicsRunner.step()`. Accepts `(collective_rad, rate_roll, rate_pitch, omega_body, dt)` and returns `(tilt_lon, tilt_lat, col_actual)` after applying the `SwashplateServoModel` (25 ms servo lag). Maps to ArduPilot `ATC_RAT_RLL` / `ATC_RAT_PIT` PID on the stack side.
 - **`compute_rc_from_attitude(roll, pitch, rollspeed, pitchspeed, yawspeed, ...)`** — MAVLink-side helper: takes ArduPilot ATTITUDE-message fields (which already encode tether-relative attitude error via `PhysicalSensor`) and returns RC PWM dict. Used by Python-side hold loops where the only feedback is a 10 Hz MAVLink stream.
 
@@ -67,9 +67,9 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 Gain names are 1:1 with ArduPilot parameters. `GuidedAttitudeController.update(q_body, gyro, dt, collective_norm, ...)` returns a `HeliRateOutput` consumed by `runner.step_guided()`.
 
-### Legacy / dead code (do not use)
+### Inactive controller helpers
 
-`controller.py` still contains `orbit_tracked_body_z_eq`, `orbit_tracked_body_z_eq_3d`, `compute_swashplate_from_state`, `compute_rc_rates`, `OrbitTracker`, and `PhysicalHoldController` from the Phase 2 orbit-tracking era. They are no longer referenced by `rawes.lua`, any simtest, or any production code. Treat them as candidates for deletion; do not add new callers. The replacement primitive is `compute_bz_altitude_hold` + `slerp_body_z`. See [history.md § Why orbit-tracking was replaced](history.md).
+`controller.py` includes helpers such as `orbit_tracked_body_z_eq`, `orbit_tracked_body_z_eq_3d`, `compute_swashplate_from_state`, `compute_rc_rates`, `OrbitTracker`, and `PhysicalHoldController` that are not on the current production control path. Do not add new callers; use `compute_bz_altitude_hold` + `slerp_body_z` for active paths.
 
 ### `TensionPI` — collective PID (offline / winch only)
 
@@ -220,7 +220,7 @@ With dynbem v0.4.0, the rotor attitude response is modelled directly. `base_k_an
 
 ### Five control implications
 
-These follow directly from the orbit physics and pin down several CLAUDE.md invariants:
+These follow directly from the orbit physics and pin down key simulation invariants:
 
 1. **Use ACRO, never STABILIZE.** STABILIZE commands absolute NED attitude (roll=0=level), which fights the 67° tether equilibrium and crashes within 1–2 s. ACRO only damps angular rates toward commanded rates, so the large physical tilt causes no automatic corrective cyclic. PhysicalSensor reports the true hub orientation directly.
 2. **Disable rate-loop I-term:** `ATC_RAT_RLL_IMAX = ATC_RAT_PIT_IMAX = ATC_RAT_YAW_IMAX = 0`. The 0.2–0.3 rad/s orbital body rate is a *desired* steady-state rate, not a disturbance to reject. Without IMAX=0 the I-term integrates this as a tracking error and saturates the swashplate in ≈ 50 s.
@@ -275,9 +275,9 @@ All models return `AeroResult(F_world, M_orbital, Q_spin, M_spin)`:
 - `Q_spin` — net rotor torque (drive − drag) for the omega_spin ODE [N·m]
 - `M_spin` — gyroscopic couple for rigid-body dynamics [N·m]
 
-### Legacy simulation/aero/ package
+### simulation/aero/ package (inactive for production path)
 
-`simulation/aero/` (internal Python package) predates `dynbem` and contains `PetersHeBEMJit`, `PetersHeBEM`, `OpenFASTBEM`, `CCBladeBEM`, and `SimpleBEM`. **None of these are used by `PhysicsCore`, `PhysicsRunner`, or the mediator.** They remain for historical reference and one-off analysis scripts that import them directly. Do not add new callers — use `dynbem.create_aero()` instead.
+`simulation/aero/` (internal Python package) contains `PetersHeBEMJit`, `PetersHeBEM`, `OpenFASTBEM`, `CCBladeBEM`, and `SimpleBEM`. **None of these are used by `PhysicsCore`, `PhysicsRunner`, or the mediator.** Keep production callers on `dynbem.create_aero()`.
 
 ---
 
@@ -412,7 +412,7 @@ At the end of the De Schutter reel-in, body_z is at xi=80° from the (horizontal
 
 Lua landing (mode=4) receives `RAWES_SUB = LAND_FINAL_DROP` (value 1) when `cmd.phase == "final_drop"`.
 
-`LandingPlanner` was deleted — all landing logic now lives in `LandingGroundController` + `LandingApController`. The old "leveling + descent rate controller" approach is gone.
+Landing logic is implemented in `LandingGroundController` + `LandingApController`.
 
 ### Fixture
 
@@ -449,7 +449,7 @@ Additional physics limitations in the current simulation:
 ```
 simulation/
 ├── dynamics.py          RK4 6-DOF rigid-body integrator
-├── aero/                Legacy internal aero package — NOT used by PhysicsCore/PhysicsRunner.
+├── aero/                Internal aero package — NOT used by PhysicsCore/PhysicsRunner.
 │                        PetersHeBEMJit, PetersHeBEM, CCBladeBEM, OpenFASTBEM, SimpleBEM.
 │                        Production code uses dynbem.create_aero() (external package at C:/repos/aero).
 ├── arduloop/            ArduPilot GUIDED/rate control Python port (self-contained package).
@@ -459,7 +459,7 @@ simulation/
 │                        Used by MockArdupilot._LuaBackend and _MockArdupilotBase.step_physics().
 ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 ├── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
-├── frames.py            build_orb_frame(), T_ENU_NED (legacy external-data utility only)
+├── frames.py            build_orb_frame(), T_ENU_NED (external-data conversion utility)
 ├── sensor.py            PhysicalSensor — honest R_hub orientation, NED throughout
 ├── sitl_interface.py    ArduPilot SITL UDP binary protocol
 ├── physics_core.py      PhysicsCore — shared 400 Hz physics (dynamics, aero, tether, spin ODE,

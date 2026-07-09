@@ -1,6 +1,6 @@
 # RAWES Simulation — Development History
 
-Phase 2, Phase 3 M3 architecture decisions, and Phase 3 M3 SkewedWakeBEM production switch. See [CLAUDE.md](../CLAUDE.md) for current status and [flight_stack.md](flight_stack.md) for the full flight control stack spec.
+Phase 2, Phase 3 M3 architecture decisions, and Phase 3 M3 SkewedWakeBEM production switch. See [flight_stack.md](flight_stack.md) for the full flight control stack spec.
 
 ---
 

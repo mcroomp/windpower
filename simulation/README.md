@@ -4,6 +4,15 @@ End-to-end flight simulation for the **Rotary Airborne Wind Energy System (RAWES
 
 Combines ArduPilot SITL (flight controller logic), a Python RK4 dynamics engine, and a Python mediator (aerodynamics + sensor simulation).
 
+## Scope
+
+This file is implementation-oriented (module layout, how to run, where logs live).
+Canonical design details are maintained in:
+
+- [../design/simulation.md](../design/simulation.md) for simulation internals and physics/controller concepts
+- [../design/flight_stack.md](../design/flight_stack.md) for AP/Lua flight-control ownership and behavior
+- [../design/sitl_testing.md](../design/sitl_testing.md) for stack workflow and diagnosis
+
 ---
 
 ## Architecture
@@ -19,7 +28,7 @@ Combines ArduPilot SITL (flight controller logic), a Python RK4 dynamics engine,
 ┌─────────────────────────────────────────────────────────────────┐
 │ mediator.py  (400 Hz loop)                                      │
 │   servo PWM → swashplate.py → collective, tilt_lon, tilt_lat   │
-│   aero.py        → aerodynamic wrench (NED world frame)        │
+│   aero/          → aerodynamic wrench (NED world frame)        │
 │   tether.py      → tether tension force + moment               │
 │   dynamics.py    → RK4 6-DOF step → {pos, vel, R, omega}       │
 │   sensor.py      → build_sitl_packet() → NED sensor outputs    │
@@ -40,10 +49,10 @@ Combines ArduPilot SITL (flight controller logic), a Python RK4 dynamics engine,
 |------|------|
 | `mediator.py` | 400 Hz co-simulation loop — orchestrates all subsystems |
 | `dynamics.py` | Python RK4 6-DOF rigid-body integrator (gravity internal) |
-| `aero.py` | De Schutter (2018) BEM aerodynamic model |
+| `aero/` | Aerodynamic model package |
 | `tether.py` | Tension-only elastic tether (Dyneema SK75) |
 | `swashplate.py` | H3-120 inverse mixing and cyclic blade pitch math |
-| `frames.py` | `T_ENU_NED` legacy constant and `build_orb_frame()` — shared coordinate-frame utilities |
+| `frames.py` | Coordinate-frame utilities (`build_orb_frame()`, transforms) |
 | `sensor.py` | `build_sitl_packet()` — NED truth state → ArduPilot JSON sensor packet |
 | `sitl_interface.py` | ArduPilot SITL UDP binary protocol (servo recv, state send) |
 | `controller.py` | `compute_swashplate_from_state()` — truth-state tether-alignment controller; `compute_rc_from_attitude()` — ACRO RC override controller |
@@ -63,32 +72,21 @@ All defined in and imported from `frames.py`.
 | NED (world) | X=North, Y=East, Z=Down | dynamics, aero, tether, controller, sensor, SITL |
 | Body | columns of R_hub (body→world) | gyro, accel, swashplate |
 
-All physics uses NED. `T_ENU_NED` in `frames.py` is kept as a utility for converting legacy ENU data.
+All physics uses NED. `T_ENU_NED` in `frames.py` is a utility for external ENU conversions.
 
 ---
 
-## Sensor Design — Physical Attitude
+## Sensor Design
 
-`PhysicalSensor` in `sensor.py` reports the **true physical attitude orientation** (~124° roll / −46° pitch at tether equilibrium, ZYX Euler NED). ACRO mode is used because it only damps angular rates, so the large physical tilt causes no automatic corrective cyclic.
-
-- `rpy` = actual ZYX Euler angles from `R_hub` directly (no overrides)
-- Gyro: `R_hub.T @ omega_body` — full body angular velocity; GB4008 keeps body non-rotating via K_YAW dynamics, no sensor stripping
-- Accel: specific force `R_hub.T @ (accel_world − gravity)` in body frame
+For the full physical sensor model, conventions, and invariants, see
+[../design/simulation.md](../design/simulation.md).
 
 ---
 
 ## Initial State
 
-Default starting state (warmup-settled equilibrium, 50 m tether at ~30° elevation):
-
-| Parameter | Value |
-|-----------|-------|
-| pos (NED) | `[14.241, 46.258, -12.530]` m |
-| vel (NED) | `[0.916, -0.257, 0.093]` m/s |
-| body_z    | `[0.851, 0.305, 0.427]` (axle aligned with tether) |
-| omega_spin | 20.148 rad/s |
-
-Regenerate: `pytest tests/unit/test_steady_flight.py` → writes `steady_state_starting.json`.
+The generated startup state is stored in `steady_state_starting.json`.
+Generation and acceptance criteria are documented in [../design/testing.md](../design/testing.md).
 
 ---
 
@@ -105,13 +103,13 @@ Key unit tests:
 - `test_steady_flight.py` -- open-loop equilibrium, writes `steady_state_starting.json`
 - `test_controller.py` -- controller function unit tests
 
-### Stack integration tests (Docker via WSL)
+### Stack integration tests (Docker)
 
 ```bash
 bash test.sh stack -v
 ```
 
-See `CLAUDE.md` in the repo root for full Docker setup and test commands.
+See [../design/sitl_testing.md](../design/sitl_testing.md) for full Docker setup and test commands.
 
 ---
 
@@ -135,7 +133,7 @@ bash test.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumpin
 | `analyse_run.py` | Post-run structured report; reads `logs/{test_name}/telemetry.csv` + `mediator.log` | Active |
 | `analyse_gps_fusion.py` | EKF3 GPS fusion event analysis from `logs/{test_name}/gcs.log` | Active |
 | `analyse_pumping_cycle.py` | Pumping cycle energy/tension analysis from telemetry CSV | Active |
-| `generate_flight_report.py` | Offline multi-panel PNG plot from mediator telemetry CSV | Active |
+| `flight_report.py` | Offline multi-panel PNG plot from mediator telemetry CSV | Active |
 | `merge_logs.py` | Merge mediator/SITL/GCS logs in timestamp order for unified timeline | Active |
 | `build.py` | Docker image build progress monitor | Active |
 | `compare_rotors.py` | Side-by-side rotor definition comparison | Active |

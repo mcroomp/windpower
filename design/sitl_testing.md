@@ -56,7 +56,7 @@ runs in its own fresh Docker container, one per test file.
 decision.**
 
 ```
-simulation/.venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py <test_name>
+.venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py <test_name>
 ```
 
 It answers the two gating questions in order:
@@ -83,7 +83,7 @@ all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) int
 a unified `FlightLog` and prints a single bucketed report.
 
 ```
-simulation/.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>   # --bucket 10 coarse, --bucket 1 frame-level
+.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>   # --bucket 10 coarse, --bucket 1 frame-level
 ```
 
 **Fix telemetry/logging before diagnosing physics.** If telemetry columns are
@@ -94,8 +94,8 @@ first — diagnosing from bad telemetry produces wrong conclusions.
 
 | Task | Command |
 |------|---------|
-| Pump cycle diagnosis | `simulation/.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
-| Landing diagnosis | `simulation/.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
+| Pump cycle diagnosis | `.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
+| Landing diagnosis | `.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
 | Visualize result | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
 | EKF gating reference | [design/EKF_GATING.md](EKF_GATING.md), [design/ekf_const_pos_mode.md](ekf_const_pos_mode.md) |
 
@@ -142,7 +142,7 @@ contract above.
 | Layer | Symbol | File | Role |
 |-------|--------|------|------|
 | Trajectory factory | `make_smooth_trapezoid_traj()` | [kinematic.py](../simulation/kinematic.py) | C1-continuous (raised-cosine) trapezoid ending exactly at `pos0` with zero velocity |
-| Trajectory factory | `make_linear_traj()` / `compute_launch_position()` | [kinematic.py](../simulation/kinematic.py) | Legacy constant-velocity + optional ramp path (used only when `kinematic_cruise_speed == 0`) |
+| Trajectory factory | `make_linear_traj()` / `compute_launch_position()` | [kinematic.py](../simulation/kinematic.py) | Constant-velocity fallback path (used only when `kinematic_cruise_speed == 0`) |
 | Driver | `KinematicStartup` | [kinematic.py](../simulation/kinematic.py) | Wraps a `traj_fn(t)->(pos,vel)` (+ optional `R_fn(t)->R`); `state_at(t)` returns the held kinematic state |
 | Production wiring | mediator startup block | [mediator.py](../simulation/mediator.py) (`_kin_duration`, `make_smooth_trapezoid_traj`, `KinematicStartup`) | Builds the trajectory from config and feeds the SITL sensor stream |
 | Config knobs | `startup_damp_seconds`, `kinematic_cruise_speed`, `kinematic_accel_s`, `kinematic_decel_s`, `kinematic_vel_ramp_s`, `kinematic_aero_mode` | [config.py](../simulation/config.py) | Default profile; overridden per-fixture |
@@ -150,7 +150,7 @@ contract above.
 | SITL setup sequence | `_run_acro_setup` (6 steps) / `_acro_stack` | [stack_infra.py](../simulation/tests/sitl/stack_infra.py) | Connect → params → EKF tilt align → arm → confirm GUIDED_NOGPS |
 
 The trapezoid path is selected whenever `kinematic_cruise_speed > 0`; otherwise
-the legacy linear path is used. With dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED
+the linear fallback path is used. With dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED
 heading) yaw is known from the first fix, so the motion exists only to give the
 EKF **velocity observability** during the hold — not to align yaw.
 
@@ -212,7 +212,7 @@ windows are config-driven; only the *implementation* is shared:
 | `_ic_trapezoid_stack` (steady / ic-passive / pumping) | 60 | Canonical trapezoid, `cruise=1.0` |
 | `guided_nogps_armed_landing_lua` | 65 | Trapezoid + `kinematic_vel_ramp_s` tail; body_z capture gated by `KINEMATIC_SETTLE_MS` |
 | `test_kinematic_gps_sitl` | 160 | Long hold for GPS-fusion timing studies |
-| `config.py` default | 30 | Legacy **linear** path (`kinematic_cruise_speed=0`) for non-IC stacks |
+| `config.py` default | 30 | **Linear** fallback path (`kinematic_cruise_speed=0`) for non-IC stacks |
 
 > Note: the `_run_acro_setup` docstring still mentions a "30 s" damping window;
 > that is the legacy default, not the IC-start value. The IC fixtures override
@@ -246,7 +246,7 @@ hand-off:
 
 ```
 bash test.sh stack -n 1 -k test_lua_flight_steady_sitl
-simulation/.venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py test_lua_flight_steady_sitl
+.venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py test_lua_flight_steady_sitl
 ```
 
 - **CHECK 1** — EKF GPS-aiding (out of `const_pos_mode`, `yawAlignComplete`

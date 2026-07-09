@@ -79,6 +79,23 @@ running inside a computer. It has three interconnected layers:
 
 ## Documentation Map
 
+### Single Source of Truth Rules
+
+To keep docs AI-friendly and avoid drift:
+
+- Each major topic has one primary owner doc.
+- Neighbor docs should summarize briefly and link to the owner doc instead of duplicating deep details.
+- If behavior changes, update the owner doc first.
+
+| Topic | Primary owner doc |
+|------|--------------------|
+| Flight architecture and mode ownership | [design/flight_stack.md](design/flight_stack.md) |
+| Simulation internals and module boundaries | [design/simulation.md](design/simulation.md) |
+| SITL workflow and diagnosis | [design/sitl_testing.md](design/sitl_testing.md) |
+| Aero conventions and signs | [design/aero_conventions.md](design/aero_conventions.md) |
+| EKF GPS/yaw gating | [design/EKF_GATING.md](design/EKF_GATING.md) |
+| Test taxonomy and harness conventions | [design/testing.md](design/testing.md) |
+
 ### Hardware
 
 | File | Description |
@@ -106,7 +123,7 @@ running inside a computer. It has three interconnected layers:
 |------|-------------|
 | [simulation/README.md](simulation/README.md) | Simulation architecture, module summary, coordinate frames, sensor design, initial state, running tests, analysis tools index |
 | [design/simulation.md](design/simulation.md) | Sensor design, controller functions, dynamics model, aero model (SkewedWakeBEM), tether, pumping cycle architecture, known gaps |
-| [design/history.md](design/history.md) | Phase 2 and Phase 3 M3 decisions -- why SkewedWakeBEM, collective passthrough fix, EKF altitude unreliability, test results |
+| [design/history.md](design/history.md) | Milestone and design-decision log |
 | [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw physics model -- HubParams, GB4008 motor torque, RK4 integrator, equilibrium throttle |
 | [design/aero.md](design/aero.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, known gaps vs SkewedWakeBEM |
 
@@ -114,7 +131,7 @@ running inside a computer. It has three interconnected layers:
 
 ## Running Tests
 
-First-time setup (creates `simulation/.venv`, idempotent):
+First-time setup (creates/refreshes the repository Python environment, idempotent):
 
 ```cmd
 setup.cmd            (Windows)         or       bash setup.sh
@@ -130,8 +147,8 @@ bash setup.sh build
 bash setup.sh build-lite
 ```
 
-When running Python directly on Windows, always use `simulation/.venv/Scripts/python.exe`.
-Do not use system Python or a root `.venv` path.
+For direct Python commands on Windows, use `.venv/Scripts/python.exe` from the repository root.
+Do not use system Python.
 
 Then run tests in three sequential stages. Always run them in order.
 
@@ -146,14 +163,10 @@ bash test.sh simtest -q
 bash test.sh stack -v
 ```
 
-`test.cmd` is a Windows shim for the same commands. See CLAUDE.md for the full workflow, Docker setup, and troubleshooting.
+`test.cmd` is a Windows shim for the same commands. See [design/testing.md](design/testing.md) and [design/sitl_testing.md](design/sitl_testing.md) for full workflow and troubleshooting.
 
 ---
 
 ## Current Status
 
-Phase 3, Milestone 3 -- pumping cycle stack test passed. Physics, closed-loop
-controller, and ArduPilot SITL integration are all validated. Next milestone
-covers GB4008 yaw configuration and writing the full rawes_params.parm.
-
-Full phase plan, milestone checklist, and known test status: [CLAUDE.md](CLAUDE.md)
+Current milestone progress and gates are tracked in [design/history.md](design/history.md).

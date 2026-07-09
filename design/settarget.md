@@ -1,5 +1,13 @@
 # Running `set_target_angle_and_climbrate` in SITL
 
+## Scope and Ownership
+
+This is an API-focused usage note for `set_target_angle_and_climbrate` testing.
+
+- Canonical flight behavior and control ownership live in [flight_stack.md](flight_stack.md).
+- Canonical SITL workflow and diagnosis live in [sitl_testing.md](sitl_testing.md).
+- Keep this file focused on API semantics, invocation patterns, and practical SITL usage.
+
 Notes for testing direct earth-frame attitude commands from Lua, bypassing the position controller. Useful for the tethered-heli case where the equilibrium attitude is steep and `AC_PosControl`'s small-angle assumptions degrade.
 
 ## The API

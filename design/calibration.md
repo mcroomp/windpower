@@ -29,14 +29,14 @@ throttle).
 | 1 | S1 — swashplate 0 deg (East) | 33 (Motor1) |
 | 2 | S2 — swashplate 120 deg | 34 (Motor2) |
 | 3 | S3 — swashplate 240 deg | 35 (Motor3) |
-| 4 | GB4008 anti-rotation motor (MAIN OUT 4) | 0 (Lua-owned via SRV_Channels) |
+| 9 | GB4008 anti-rotation motor (AUX 1) | 36 (Motor4) |
 
 Swashplate PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max). The heli mixer
 hard-codes this range on the swash servos — `SERVOn_MIN/MAX` writes are silently
 overwritten on every output tick. Use `swash range <min> <max>` (which writes
 `H_COL_MIN/H_COL_MAX`) to limit physical swash travel.
 
-Motor PWM range: 800 µs (off) … 2000 µs (full throttle). `SERVO4_MIN/MAX` is the
+Motor PWM range: 1000 µs (off) … 2000 µs (full throttle). `SERVO9_MIN/MAX` is the
 limiter you want here.
 
 ---
@@ -63,10 +63,10 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 
 **Modes (`<name>`):**
 
-| Name | `SCR_USER6` | Takes SERVO4? | Accepts `--gain`? |
+| Name | `SCR_USER6` | Uses yaw motor output? | Accepts `--gain`? |
 |---|---|---|---|
 | `passive` | 3 | yes (pins at 800 µs) | no |
-| `yaw` | 2 | yes (Lua yaw PID drives SERVO4) | yes (full PID + filters + servo limits) |
+| `yaw` | 2 | yes (Lua yaw PID drives motor output) | yes (full PID + filters + servo limits) |
 | `steady` | 1 | no | no |
 | `pumping` | 5 | no | no |
 | `landing` | 4 | no | no |
@@ -87,7 +87,7 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 | `trim` | `H_YAW_TRIM` | Feedforward throttle |
 | `flte`,`fltt`,`fltd` | `ATC_RAT_YAW_FLT*` | Target / error / derivative filters |
 | `accelmax` | `ATC_ACC_Y_MAX` (fallback `ATC_ACCEL_Y_MAX`) | Yaw accel limit |
-| `servo_min`,`servo_max` | `SERVO4_MIN/MAX` | Motor PWM range cap |
+| `servo_min`,`servo_max` | `SERVO9_MIN/MAX` | Motor PWM range cap |
 
 ```bash
 # Bench check: hold IC swashplate + motor off, 30 s

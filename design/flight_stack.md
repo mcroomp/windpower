@@ -51,7 +51,7 @@ flowchart LR
 - **Wired (winch ↔ ground):** tether tension and current length up to the ground station; reel-speed commands down to the winch.
 - **MAVLink radio (ground ↔ Pixhawk):** three slow setpoints up (phase, target altitude, **commanded** tension — never the measured tension); telemetry down (hub position, attitude, anti-rotation motor PWM — the WindEstimator uses the last two to solve for wind, see §3.5).
 
-**Roles of the three nodes.** The **winch** is a self-contained ground unit (motor + drum + load cell on one chassis) that closes its own tension-control loop at 400 Hz. The **ground station** runs the pumping/landing phase planners at 10 Hz, the WindEstimator at 50 Hz, and bridges the wired winch link to the radio link; it never commands attitude. On the **Pixhawk**, rawes.lua handles cyclic and collective at 50 Hz; ArduPilot's ACRO_Heli rate loop runs underneath at 400 Hz and drives two actuator paths — the H3-120 swashplate (cyclic + collective via S1/S2/S3) and the **anti-rotation motor** (yaw correction via SERVO4 PWM, speed-controlled ESC; current hardware: EMAX GB4008 — see [components.md](components.md)).
+**Roles of the three nodes.** The **winch** is a self-contained ground unit (motor + drum + load cell on one chassis) that closes its own tension-control loop at 400 Hz. The **ground station** runs the pumping/landing phase planners at 10 Hz, the WindEstimator at 50 Hz, and bridges the wired winch link to the radio link; it never commands attitude. On the **Pixhawk**, rawes.lua handles cyclic and collective at 50 Hz; ArduPilot's ACRO_Heli rate loop runs underneath at 400 Hz and drives two actuator paths — the H3-120 swashplate (cyclic + collective via S1/S2/S3) and the **anti-rotation motor** (yaw correction via the configured Motor4 output, speed-controlled ESC; current hardware: EMAX GB4008 — see [components.md](components.md)).
 
 **Key design principles:**
 
@@ -242,7 +242,7 @@ The ground station runs a model-based estimator that recovers wind speed and dis
 → ω_rotor ≈ throttle · RPM_SCALE / GEAR_RATIO
 ```
 
-For the current hardware (GB4008 + 80:44 spur gear): `RPM_SCALE = 105 rad/s`, `GEAR_RATIO ≈ 1.818`, so `ω_rotor ≈ throttle × 57.8 rad/s`. `throttle` is recovered from PWM by inverting the H_TAIL_TYPE=3 mapping (§4.8) — no sign flip, positive PID → positive throttle (US-convention rotor; see [CLAUDE.md](../CLAUDE.md) "Rotor spin direction"). Valid for τ > ~0.5 s averaging — long enough for the AP yaw-rate loop to settle out of transients.
+For the current hardware (GB4008 + 80:44 spur gear): `RPM_SCALE = 105 rad/s`, `GEAR_RATIO ≈ 1.818`, so `ω_rotor ≈ throttle × 57.8 rad/s`. `throttle` is recovered from PWM by inverting the H_TAIL_TYPE=3 mapping (§4.8) — no sign flip, positive PID → positive throttle. Valid for τ > ~0.5 s averaging — long enough for the AP yaw-rate loop to settle out of transients.
 
 **Inputs (all already on the wire):**
 
@@ -522,9 +522,9 @@ Re-sending refreshes the timer. Works in any mode.
 | Ch1 — roll cyclic | rawes.lua (modes 1/4) or NVF (mode 2) | 50 Hz | Modes 1/4: body_z error (roll). Mode 2 (MANUAL): `1500 + (_man_tlat_rad / cyc_max_rad) × 500` µs from `RAWES_TLT` NVF; `H_FLYBAR_MODE=1` routes RC1 directly to swash. Mode 0/3: neutral 1500. |
 | Ch2 — pitch cyclic | rawes.lua (modes 1/4) or NVF (mode 2) | 50 Hz | Modes 1/4: body_z error (pitch). Mode 2 (MANUAL): `1500 + (_man_tlon_rad / cyc_max_rad) × 500` µs from `RAWES_TLN` NVF. |
 | Ch3 — collective | rawes.lua (modes 1/2/4) | 50 Hz | Altitude PID (mode 1, incl. pumping schedule), `RAWES_COL` NVF (mode 2), VZ descent (mode 4). Mode 0: not overridden. |
-| Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives SERVO4 independently. |
+| Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives the yaw motor output independently. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
-| SERVO4 — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/3/4) or rawes.lua mode 2 | 400 Hz / 100 Hz | Normal: DDFP CW (H_TAIL_TYPE=3, NO sign flip) — CCW body drift → positive PID → positive throttle. Mode 2 (MANUAL): Lua `run_manual()` writes SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`, bypassing ATC_RAT_YAW. |
+| Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/3/4) or rawes.lua mode 2 | 400 Hz / 100 Hz | Normal: DDFP CW (H_TAIL_TYPE=3, NO sign flip) — CCW body drift → positive PID → positive throttle. Mode 2 (MANUAL): Lua `run_manual()` writes the yaw motor output directly via `SRV_Channels:set_output_pwm_chan_timeout`, bypassing ATC_RAT_YAW. |
 
 ### 4.8 Mode 2 — Manual (SCR_USER6=2)
 
@@ -541,21 +541,21 @@ Requires `H_FLYBAR_MODE=1` (RC overrides bypass rate PID, go straight to swash m
 `H_CYC_MAX=1000` (10 deg full-stick cap). These are applied by `calibrate manual` and by the
 `torque_armed_lua_manual` stack test fixture (both read `calibrate._RUN_MODES["manual"]["force_params"]`).
 
-Yaw is still regulated by the same P+I+D loop as before, reading `ATC_RAT_YAW_P/I/D/IMAX` +
-`H_YAW_TRIM` from params and writing SERVO4 directly via `SRV_Channels:set_output_pwm_chan_timeout`.
+Yaw is regulated by a P+I+D loop, reading `ATC_RAT_YAW_P/I/D/IMAX` +
+`H_YAW_TRIM` from params and writing the yaw motor output via `SRV_Channels:set_output_pwm_chan_timeout`.
 
 Interactive use: `calibrate manual [--col DEG] [--tlon DEG] [--tlat DEG]`
-Stack test: `bash simulation/dev.sh test-stack -n 1 -k test_lua_manual_mode_sitl`
+Stack test: `bash test.sh stack -n 1 -k test_lua_manual_mode_sitl`
 
 ### 4.9 Yaw Regulation — ArduPilot ATC_RAT_YAW
 
 Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes 0/1/3/4.
-In mode 2 (MANUAL) rawes.lua runs its own P+I+D loop and writes SERVO4 directly.
+In mode 2 (MANUAL) rawes.lua runs its own P+I+D loop and writes the yaw motor output directly.
 
 ```
 Sensing:    gyro.z (from ACRO_Heli EKF attitude)
-Control:    ATC_RAT_YAW P/I/D → SERVO4 (H_TAIL_TYPE=3 DDFP CW, no sign flip)
-Actuator:   anti-rotation motor via standard PWM on MAIN OUT 4 (IOMCU)
+Control:    ATC_RAT_YAW P/I/D → Motor4 output (H_TAIL_TYPE=3 DDFP CW, no sign flip)
+Actuator:   anti-rotation motor on output 9 (AUX 1)
             (current hardware: GB4008 + 80:44 spur gear — see components.md)
 ```
 
@@ -589,7 +589,7 @@ Equilibrium throttle: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE = 28 
 | ACRO ATC_RAT_RLL/PIT (rate damping) | `RatePID(kp=2/3)` | `controller.py` |
 | RAWES_ARM state machine | N/A — Lua only | `rawes.lua` |
 | ATC_RAT_YAW (yaw regulation) | `torque_model.py` hub ODE | `mediator_torque.py` |
-| `run_manual()` NVF→RC1/RC2/RC3 + SERVO4 PID (mode 2) | N/A — bench/hardware only | `rawes.lua` |
+| `run_manual()` NVF→RC1/RC2/RC3 + yaw-motor PID (mode 2) | N/A — bench/hardware only | `rawes.lua` |
 
 ---
 
@@ -724,16 +724,16 @@ With dual GPS (EK3_SRC1_YAW=2): yaw is known from the first GPS fix. No motion r
 `delAngBiasLearned` converges at ~21 s with constant-zero gyro (stationary hold). GPS fuses
 at ~34 s — well before kinematic exit at 80 s.
 
-### 6.4 Anti-Rotation Motor (SERVO4)
+### 6.4 Anti-Rotation Motor (Motor4 Output)
 
-Current hardware: GB4008 + 80:44 spur gear. See §5.2 and [components.md](components.md) for the actual motor + ESC. The ArduPilot parameters below configure SERVO4 for whatever motor is wired there.
+Current hardware: GB4008 + 80:44 spur gear. See §5.2 and [components.md](components.md) for the actual motor + ESC. The ArduPilot parameters below configure Motor4 on output 9.
 
 | Parameter | Value | Reason |
 |---|---|---|
-| H_TAIL_TYPE | 3 (DDFP CW) | Routes ATC_RAT_YAW PID to SERVO4 directly (no sign flip) — matches US-convention rotor |
-| SERVO4_FUNCTION | 36 (Motor4) | Anti-rotation motor ESC on MAIN OUT 4 |
-| SERVO4_MIN | 800 µs | ESC disarm |
-| SERVO4_MAX | 2000 µs | ESC maximum |
+| H_TAIL_TYPE | 3 (DDFP CW) | Routes ATC_RAT_YAW PID to Motor4 path (no sign flip) — matches US-convention rotor |
+| SERVO9_FUNCTION | 36 (Motor4) | Anti-rotation motor ESC on output 9 (AUX 1) |
+| SERVO9_MIN | 1000 µs | ESC disarm |
+| SERVO9_MAX | 2000 µs | ESC maximum |
 | ATC_RAT_YAW_P | 0.20 | Starting value |
 | ATC_RAT_YAW_I | 0.05 | Corrects residual drift |
 | ATC_RAT_YAW_D | 0.0 | Start at zero |

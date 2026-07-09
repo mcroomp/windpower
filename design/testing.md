@@ -88,7 +88,7 @@ The `simtest` timeout is set globally in `simulation/pytest.ini`.
 |------|------------------|--------------|
 | `test_math_lua.py` | — | Lua math: `bz_altitude_hold`, `cyclic_error_body`, `output_rate_limit`, `rate_to_pwm`, constants |
 | `test_yaw_lua.py` | — | Yaw-trim: PI, dead zone, watchdog, hard-stop, closed-loop equilibrium |
-| `test_manual_mode_lua.py` | — | MODE_MANUAL (SCR_USER6=2): RC1/RC2/RC3 from NVFs, SERVO4 yaw PID, clamp, persistence, mode-entry reset |
+| `test_manual_mode_lua.py` | — | MODE_MANUAL (SCR_USER6=2): RC1/RC2/RC3 from NVFs, yaw-motor PID, clamp, persistence, mode-entry reset |
 | `test_armon_lua.py` | — | `RAWES_ARM` countdown and disarm logic |
 
 ---
@@ -130,7 +130,7 @@ Supporting simtests:
 
 ## SITL Stack Tests (`tests/sitl/`)
 
-Full ArduPilot SITL tests running in Docker. Require `bash simulation/dev.sh test-stack`.
+Full ArduPilot SITL tests running in Docker. Require `bash test.sh stack`.
 Never mix with Windows-native unit/simtests.
 
 ### Torque Stack Tests (`tests/sitl/torque/`)
@@ -141,8 +141,8 @@ No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt chec
 | File | Fixture | What it tests |
 |------|---------|--------------|
 | `test_yaw_regulation_sitl.py` | `torque_armed` | ArduPilot ATC_RAT_YAW DDFP PI holds yaw < 5 deg/s at 120 RPM |
-| `test_lua_yaw_regulation_sitl.py` | `torque_armed_lua_yaw` | rawes.lua MODE_MANUAL SERVO4 direct write holds yaw < 5 deg/s |
-| `test_lua_manual_mode_sitl.py` | `torque_armed_lua_manual` | MODE_MANUAL NVF→RC1/RC2 cyclic shifts + SERVO4 active + neutral restore |
+| `test_lua_yaw_regulation_sitl.py` | `torque_armed_lua_yaw` | rawes.lua MODE_MANUAL direct yaw-motor write holds yaw < 5 deg/s |
+| `test_lua_manual_mode_sitl.py` | `torque_armed_lua_manual` | MODE_MANUAL NVF→RC1/RC2 cyclic shifts + yaw motor active + neutral restore |
 
 **`torque_armed_lua_manual` fixture:** `SCR_USER6`, `H_FLYBAR_MODE`, `H_CYC_MAX`, `H_SV_MAN` are
 sourced directly from `calibrate._RUN_MODES["manual"]["force_params"]` — single source of truth
