@@ -129,13 +129,13 @@ Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards dele
 5. Cyclic: error = cross(body_z_now, body_z_eq); rate_bf = kp × err_body → ATC_RAT_RLL/PIT
 6. Collective: set_throttle_out(_thrust_cmd, false, filt)  ← direct passthrough from ground PI
 7. Counter-torque: yaw rate = 0.0f → ATC_RAT_YAW → GB4008 (H_TAIL_TYPE=4)
-8. omega_spin: AP_ESC_Telem.get_rpm() × 2π/60 × 44/80 (11 pole pairs, 80:44 gear)
+8. omega_spin: AP_ESC_Telem.get_rpm() × 2π/60 × 44/80 (SERVO_BLH_POLES/2 pole pairs, 80:44 gear)
 9. send_state() at 10 Hz → Pixhawk→Planner STATE packet
 ```
 
 ### Protocol (MAVLink, 10 Hz)
 - **Planner → Pixhawk:** `SET_ATTITUDE_TARGET` — `attitude_q` (NED quaternion attitude setpoint), `thrust` (normalized collective 0..1 from ground PI)
-- **Pixhawk → Planner (all standard streams, zero custom code):** `LOCAL_POSITION_NED` (pos + vel), `ATTITUDE_QUATERNION` (body_z_ned = quat_apply(q,[0,0,1])), `ESC_STATUS[RAWES_CTR_ESC]` (omega_spin — planner applies `× 2π/60 / 11 × 44/80`)
+- **Pixhawk → Planner (all standard streams, zero custom code):** `LOCAL_POSITION_NED` (pos + vel), `ATTITUDE_QUATERNION` (body_z_ned = quat_apply(q,[0,0,1])), `ESC_STATUS[RAWES_CTR_ESC]` (omega_spin — planner applies `× 2π/60 / (SERVO_BLH_POLES/2) × 44/80`)
 - No `send_state()` function needed in `Mode_RAWES`
 - Tension and tether_length are **NOT** in the STATE packet — Pixhawk cannot measure them. Winch reads both locally.
 
@@ -164,9 +164,9 @@ All tension PI params (KP, KI, col_min, col_max, tension setpoint) live in groun
 ### omega_spin measurement
 AM32 ESC telemetry via `AP_ESC_Telem`:
 ```
-omega_spin = get_rpm(RAWES_CTR_ESC) × 2π/60 / 11 × 44/80
+omega_spin = get_rpm(RAWES_CTR_ESC) × 2π/60 / (SERVO_BLH_POLES/2) × 44/80
 ```
-(11 pole pairs, 80:44 gear reduction)
+(SERVO_BLH_POLES/2 pole pairs, 80:44 gear reduction)
 
 ---
 
