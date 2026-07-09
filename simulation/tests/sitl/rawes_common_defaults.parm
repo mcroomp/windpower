@@ -38,14 +38,22 @@ H_COL_MIN         1000
 H_COL_MAX         2000
 H_RSC_MODE        1      # passthrough: no main rotor motor
 
-# GB4008 anti-rotation motor (MAIN OUT 4)
+# GB4008 anti-rotation (yaw) motor.
+# Canonical hardware wiring (read live from the Pixhawk 6C, 2026-07-08):
+#   - The motor is on OUTPUT 9 (SERVO9_FUNCTION=36 = Motor4), NOT MAIN OUT 4.
+#     Output 4 shares timer group TIM1 with the PWM swash servos (ch1-3), and
+#     DShot is all-or-nothing per group, so the motor was relocated to a
+#     DShot-capable AUX output; SERVO4 is released (FUNCTION=0).
+#   - Output 9 runs bidirectional DShot so the ESC returns eRPM in-band, which
+#     RPM1 consumes for omega_spin.  See the DShot block at the end of this file.
 H_TAIL_TYPE       3
 H_COL2YAW         0.0
 
 # AP yaw PID fully OFF (P=I=D=0): yaw is now regulated entirely by the Lua manual
 # PID, which reads gyro:z() and writes its output through H_YAW_TRIM.  The AP DDFP
 # path (H_TAIL_TYPE=3) still runs but, with all gains zero, only passes the Lua's
-# H_YAW_TRIM feedforward through to SERVO4.  Leaving any AP yaw gain nonzero makes
+# H_YAW_TRIM feedforward through to the yaw motor (OUTPUT 9).  Leaving any AP yaw
+# gain nonzero makes
 # the AP loop fight the Lua loop and drives a high-frequency yaw limit cycle
 # (observed: +-300 deg/s bang-bang on SERVO4).  Tune the Lua PID via SCR_USER1/2/3.
 ATC_RAT_YAW_P     0.0
@@ -82,3 +90,34 @@ SCR_USER5         2.0
 SERVO4_MIN        800
 SERVO4_MAX        2000
 SERVO4_TRIM       800
+
+# --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
+# Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw
+# motor is Motor4 on OUTPUT 9 with a 1000-2000 us DShot range.
+SERVO4_FUNCTION   0
+SERVO9_FUNCTION   36
+SERVO9_MIN        1000
+SERVO9_MAX        2000
+SERVO9_TRIM       1000
+SERVO9_REVERSED   0
+
+# BLHeli / bidirectional DShot on output 9 (bit 8 -> mask 256).
+#   MASK   = DShot output channels          (256 = ch9)
+#   BDMASK = bidirectional-DShot channels   (256 = ch9; returns eRPM in-band)
+#   AUTO=0 -> explicit mask (not auto-derived from motor outputs)
+#   OTYPE=5 -> DShot300;  DSHOT_ESC=1 -> BLHeli telemetry decode
+#   POLES=22 -> ArduPilot divides eRPM by N pole-pairs for mech RPM
+#   BRD_IO_DSHOT=0 -> outputs driven from the FMU, not the IO co-processor
+SERVO_BLH_MASK    256
+SERVO_BLH_BDMASK  256
+SERVO_BLH_AUTO    0
+SERVO_BLH_OTYPE   5
+SERVO_BLH_POLES   22
+SERVO_BLH_TRATE   10
+SERVO_DSHOT_ESC   1
+SERVO_DSHOT_RATE  0
+BRD_IO_DSHOT      0
+
+# ESC RPM telemetry: RPM1 sourced from the output-9 ESC (bidirectional DShot).
+RPM1_TYPE         5
+RPM1_ESC_MASK     256

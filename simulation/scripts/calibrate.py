@@ -17,11 +17,12 @@ RAWES output channel mapping (ArduCopter Heli)
   Output 1  S1  (swashplate, -60 deg  / front-right)  SERVO1_FUNCTION = 33
   Output 2  S2  (swashplate, +60 deg  / front-left)   SERVO2_FUNCTION = 34
   Output 3  S3  (swashplate, 180 deg  / back)         SERVO3_FUNCTION = 35
-  Output 4  GB4008 anti-rotation motor                H_TAIL_TYPE = 3 (DDFP CW)
+  Output 9  GB4008 anti-rotation motor (AUX 1)        SERVO9_FUNCTION = 36, bidir DShot
 
   See CLAUDE.md "Swashplate geometry" for the canonical azimuth table.
+  The motor output is set by the SERVO_MOTOR constant (see design/dshot.md).
 
-SERVO4 PWM range: 800 us (off) ... 2000 us (full throttle)
+Motor (SERVO9) PWM range: 1000 us (off) ... 2000 us (full throttle)
 Swashplate PWM range: 1000 us (min) ... 1500 us (neutral) ... 2000 us (max)
 
 Commands
@@ -94,8 +95,8 @@ except ImportError:
 # GB4008 motor constants (used in diag torque estimates)
 # ---------------------------------------------------------------------------
 GB4008_KV          = 66.0      # rev/min/V
-GB4008_POLES       = 22        # rotor magnets: 24N22P configuration
-GB4008_POLE_PAIRS  = GB4008_POLES // 2   # 11
+GB4008_POLES       = 22        # rotor magnet poles = SERVO_BLH_POLES (compile-time default)
+GB4008_POLE_PAIRS  = GB4008_POLES // 2   # 11 (overridden at connect from FC's SERVO_BLH_POLES)
 GB4008_GEAR_RATIO  = 80.0 / 44.0  # motor shaft turns per output shaft turn
 
 # Kt = 60 / (2*pi*Kv)  [N*m/A at motor shaft]
@@ -107,10 +108,86 @@ GB4008_KT = 60.0 / (2.0 * math.pi * GB4008_KV)  # ~0.144 N*m/A
 SERVO_S1     = 1
 SERVO_S2     = 2
 SERVO_S3     = 3
-SERVO_MOTOR         = 4   # GB4008 anti-rotation motor -- MAIN OUT 4 (DDFP tail)
-MOTOR_TEST_INSTANCE = 4   # Motor test instance for SERVO4 (heli tail output)
+# GB4008 anti-rotation motor: bidirectional DShot on AUX 1 = SERVO9 (output 9).
+# Single source of truth for the motor output location -- see design/dshot.md.
+# Change this one constant if the motor is ever re-cabled to another output.
+SERVO_MOTOR         = 9
+MOTOR_TEST_INSTANCE = 4   # Heli tail motor NUMBER (Motor4); independent of output
+
+# DShot motor throttle endpoints.  ArduPilot maps SERVO<motor>_MIN..MAX -> DShot
+# 0..2000, so MIN = motor off (idle) and the ESC SELF-ARMS from that idle command.
+# The old PWM/REVVitRC "hold min throttle for 5 s to arm the ESC" dance is NOT
+# needed on DShot.  Use these constants instead of bare 800/2000 literals so a
+# future re-cable (or a return to PWM) is a one-line change.
+MOTOR_OFF_US  = 1000   # DShot idle = throttle 0 = motor off
+MOTOR_FULL_US = 2000   # DShot full throttle
 
 SWASH_SERVOS = (SERVO_S1, SERVO_S2, SERVO_S3)
+
+# ---------------------------------------------------------------------------
+# DShot RPM telemetry
+# ---------------------------------------------------------------------------
+# The GB4008 runs bidirectional DShot on SERVO_MOTOR (AUX 1 = output 9), so its
+# ESC telemetry arrives in ESC_TELEMETRY_9_TO_12 at index 0 (NOT _1_TO_4).  See
+# design/dshot.md.  eRPM -> mech RPM (/pole-pairs) -> rotor RPM (/1.818 gear).
+MOTOR_ESC_CHANNEL = SERVO_MOTOR
+
+# eRPM -> mechanical-RPM divisor (pole-pairs).  Seeded from the GB4008 default
+# but OVERRIDDEN from the FC's SERVO_BLH_POLES on connect (_refresh_pole_pairs)
+# so the RPM readout tracks the param and is never a stale hardcode.
+_motor_pole_pairs = GB4008_POLE_PAIRS
+
+# ESC_TELEMETRY_x_TO_y decode: message name -> (numeric id, first output channel).
+# Numeric ids from the v20 ardupilotmega dialect (the connection is MAVLink2).
+_ESC_TELEM_MSGS = {
+    "ESC_TELEMETRY_1_TO_4":  (11030, 1),
+    "ESC_TELEMETRY_5_TO_8":  (11031, 5),
+    "ESC_TELEMETRY_9_TO_12": (11032, 9),
+}
+
+
+def _esc_telem_msg_for_channel(channel: int) -> "tuple[str, int]":
+    """(msg_name, msg_id) of the ESC_TELEMETRY block covering 1-based `channel`."""
+    base = ((channel - 1) // 4) * 4 + 1
+    for name, (mid, b) in _ESC_TELEM_MSGS.items():
+        if b == base:
+            return name, mid
+    raise ValueError(f"no ESC_TELEMETRY message for output channel {channel}")
+
+
+def _esc_erpm(msg, channel: int) -> "float | None":
+    """eRPM for 1-based output `channel` from an ESC_TELEMETRY_* msg, else None."""
+    info = _ESC_TELEM_MSGS.get(msg.get_type())
+    if info is None:
+        return None
+    _mid, base = info
+    idx = channel - base
+    rpm = getattr(msg, "rpm", None)
+    if rpm is None or not (0 <= idx < len(rpm)):
+        return None
+    return rpm[idx]
+
+
+def _rpm_triplet(erpm: "float | None") -> tuple:
+    """eRPM -> (erpm, mech_rpm, rotor_rpm).  (None, None, None) if erpm is None.
+    Uses the live SERVO_BLH_POLES-derived pole-pair count (_motor_pole_pairs)."""
+    if erpm is None:
+        return None, None, None
+    mech_rpm = erpm / _motor_pole_pairs
+    rotor_rpm = mech_rpm / GB4008_GEAR_RATIO
+    return erpm, mech_rpm, rotor_rpm
+
+
+def _refresh_pole_pairs(session: RawesGCS) -> None:
+    """Set the eRPM->RPM divisor from the FC's SERVO_BLH_POLES (poles/2), so the
+    RPM readout follows the param instead of a hardcode.  Falls back to the
+    GB4008 default if the param is unreadable."""
+    global _motor_pole_pairs
+    poles = session.get_param("SERVO_BLH_POLES")
+    if poles is not None and poles >= 2:
+        _motor_pole_pairs = int(round(poles)) // 2
+        print(f"  eRPM->RPM: SERVO_BLH_POLES={int(round(poles))} "
+              f"-> {_motor_pole_pairs} pole-pairs")
 
 # H3-120 forward mix constants -- bench rig azimuths.
 # Must stay in sync with simulation/swashplate.py and AP's H_SW_H3_SV*_POS.
@@ -292,10 +369,10 @@ _TAIL_PARAM_NAMES = (
     "ATC_RAT_YAW_FLTD",
     "H_RSC_MODE",
     "H_RSC_RUNUP_TIME",
-    "SERVO4_MIN",
-    "SERVO4_MAX",
-    "SERVO4_TRIM",
-    "SERVO4_FUNCTION",
+    f"SERVO{SERVO_MOTOR}_MIN",
+    f"SERVO{SERVO_MOTOR}_MAX",
+    f"SERVO{SERVO_MOTOR}_TRIM",
+    f"SERVO{SERVO_MOTOR}_FUNCTION",
 )
 
 _LUA_MODES = {0: "none", 1: "steady", 2: "manual", 3: "passive", 4: "landing", 5: "pumping"}
@@ -376,7 +453,7 @@ def _print_status(session: RawesGCS) -> None:
     session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
     srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
     if srv:
-        for i in range(1, 9):
+        for i in range(1, 13):
             val = getattr(srv, f"servo{i}_raw", 0)
             if not val:
                 continue
@@ -384,10 +461,10 @@ def _print_status(session: RawesGCS) -> None:
                    SERVO_S2: "  <- S2 (+60 deg, front-left)",
                    SERVO_S3: "  <- S3 (180 deg, back)"}.get(i, "")
             if i == SERVO_MOTOR:
-                if val <= 800:
+                if val <= MOTOR_OFF_US:
                     tag = "  <- GB4008 off"
                 else:
-                    pct = (val - 800) / (2000 - 800) * 100
+                    pct = (val - MOTOR_OFF_US) / (MOTOR_FULL_US - MOTOR_OFF_US) * 100
                     tag = f"  <- GB4008 {pct:.0f}%"
             print(f"  Ch {i}: {val} us{tag}")
     else:
@@ -878,12 +955,15 @@ def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
           f" {'Current(A)':<12} {'Torque(Nm)':<12} {'Volt(V)':<9} {'Temp(C)'}")
     print(f"  {'-'*90}")
 
+    esc_name, esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
+    idx = (MOTOR_ESC_CHANNEL - 1) % 4
+    session.set_message_interval(esc_id, 100000)   # 10 Hz
     deadline = time.monotonic() + duration
     last_print = 0.0
     try:
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
-            msg = session._recv(type="ESC_TELEMETRY_1_TO_4",
+            msg = session._recv(type=esc_name,
                                 blocking=True, timeout=min(0.5, remaining))
             if msg is None:
                 continue
@@ -892,16 +972,15 @@ def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
                 continue
             last_print = now
 
-            i = 0
             try:
-                rpm_e    = msg.rpm[i]
-                volt     = msg.voltage[i] / 100.0
-                curr     = msg.current[i] / 100.0
-                temp     = msg.temperature[i]
+                rpm_e    = msg.rpm[idx]
+                volt     = msg.voltage[idx] / 100.0
+                curr     = msg.current[idx] / 100.0
+                temp     = msg.temperature[idx]
             except (IndexError, TypeError):
                 continue
 
-            mech_rpm  = rpm_e / GB4008_POLE_PAIRS
+            mech_rpm  = rpm_e / _motor_pole_pairs
             rotor_rpm = mech_rpm / GB4008_GEAR_RATIO
             torque    = curr * GB4008_KT / GB4008_GEAR_RATIO
             elapsed   = duration - (deadline - now)
@@ -1055,12 +1134,13 @@ One-shot:
   servo <ch> <pwm>                Set channel ch to pwm directly
   servo sweep <ch> [--step-ms N]  Slowly sweep ch: 1500 -> 2000 -> 1000 -> 1500
   servo hold <ch> <pwm> [--duration N]  Arm, hold ch at pwm for N s
-  motor <pwm_us> [--duration N]   Arm (RAWES_ARM) + ESC pre-arm (5 s @ SERVO4_MIN) +
-                                  hold SERVO4 at pwm_us for N s (default 5).
-                                  pwm_us must be within [SERVO4_MIN, SERVO4_MAX];
+  motor <pwm_us> [--duration N]   Arm (RAWES_ARM) + drive the motor output at
+                                  pwm_us for N s (default 5).  DShot ESC self-arms
+                                  from idle -- no ESC pre-arm hold.
+                                  pwm_us must be within [SERVO<motor>_MIN, _MAX];
                                   >5% of that range prompts unless --force.
                                   Logs to CSV like `run`.
-  motor off                       SERVO4 -> 800 us + disarm immediately
+  motor off                       motor -> idle (off) + disarm immediately
   arm [--duration N]              ACRO + RAWES_ARM (no Lua mode change)
   disarm                          Disarm vehicle
   manualtest [--col VALUE]        Swash servo validation: arm in MODE_MANUAL, step through
@@ -1091,8 +1171,8 @@ def _arm(session: RawesGCS, force: bool = False,
     Arm sequence:
       1. Set throttle RC override to 1000 (CH3 interlock low).
       2. Send MAV_CMD_COMPONENT_ARM_DISARM; wait for armed heartbeat.
-      3. ESC arm: hold output 4 at 800 us for 5 s so the REVVitRC arms.
-    Returns True if vehicle confirms armed.
+    The DShot ESC self-arms from the idle throttle once armed -- no special
+    ESC pre-arm pulse is needed.  Returns True if vehicle confirms armed.
     """
     print("  Setting throttle (CH3) override to 1000 ...")
     session.send_rc_override({3: 1000})
@@ -1138,14 +1218,10 @@ def _arm(session: RawesGCS, force: bool = False,
         print("  [FAIL] Arm timed out.")
         return False
 
-    if esc_arm:
-        print(f"  ESC arm: output {SERVO_MOTOR} -> 800 us for 5 s ...")
-        t_end = time.monotonic() + 5.0
-        while time.monotonic() < t_end:
-            _send_set_servo(session, SERVO_MOTOR, 800)
-            time.sleep(0.1)
-        print("  ESC arm sequence complete -- motor ready.")
-
+    # DShot ESCs self-arm from the idle throttle ArduPilot streams once armed, so
+    # no special "hold min throttle" pre-arm pulse is needed (unlike the old PWM
+    # REVVitRC path).  esc_arm is accepted for call-site compatibility only.
+    _ = esc_arm
     return True
 
 
@@ -1330,7 +1406,7 @@ def _wait_for_armed(session: RawesGCS, timeout_s: float = 15.0) -> bool:
 
 
 def _take_servo4(session: RawesGCS) -> "float | None":
-    """Set SERVO4_FUNCTION=0 (release from DDFP).  Returns saved value for restore."""
+    """Set SERVO<motor>_FUNCTION=0 (release from DDFP).  Returns saved value for restore."""
     servo_key = f"SERVO{SERVO_MOTOR}_FUNCTION"
     saved = session.get_param(servo_key)
     if saved is not None and saved != 0:
@@ -1351,11 +1427,11 @@ def _ensure_passive_tail_setup(session: RawesGCS) -> None:
         tag = "[OK]" if ok else "[FAIL]"
         print(f"  {tag} H_TAIL_TYPE: {tail:.6g} -> {expected_tail:.0f} (passive expects DDFP CW)")
 
-    s4f = session.get_param("SERVO4_FUNCTION")
+    s4f = session.get_param(f"SERVO{SERVO_MOTOR}_FUNCTION")
     if s4f is None:
-        print("  [WARN] SERVO4_FUNCTION unreadable; cannot verify channel-4 ownership")
+        print(f"  [WARN] SERVO{SERVO_MOTOR}_FUNCTION unreadable; cannot verify motor-channel ownership")
     elif int(round(float(s4f))) == 0:
-        print("  [WARN] SERVO4_FUNCTION=0 (channel 4 released). "
+        print(f"  [WARN] SERVO{SERVO_MOTOR}_FUNCTION=0 (output {SERVO_MOTOR} released). "
               "Passive expects AP-owned tail output.")
 
 
@@ -1386,8 +1462,8 @@ def _safety_shutdown(session: RawesGCS, *,
     time.sleep(0.30)   # let SRV_Channels override timeout expire
     if not skip_motor_off:
         try:
-            _send_set_servo(session, SERVO_MOTOR, 800)
-            print(f"  [SAFETY] SERVO{SERVO_MOTOR} -> 800 us (motor off)")
+            _send_set_servo(session, SERVO_MOTOR, MOTOR_OFF_US)
+            print(f"  [SAFETY] SERVO{SERVO_MOTOR} -> {MOTOR_OFF_US} us (motor off)")
         except Exception as e:
             print(f"  [SAFETY] failed to drive SERVO{SERVO_MOTOR} off: {e}")
     try:
@@ -1620,28 +1696,36 @@ def _cyc_nvf(cyc_rad: float) -> float:
     return max(-1.0, min(1.0, cyc_rad / _MAN_CYC_MAX_RAD))
 
 _RUN_MODES = {
+    "none": {
+        "scr_user6":   0,
+        "take_servo4": False,
+        # Lua is idle in mode 0; the AP yaw PID is off (P=I=D=0) and the DDFP
+        # tail path (H_TAIL_TYPE=3) passes H_YAW_TRIM straight through to the yaw
+        # motor.  The only tunable is that static trim, so --gain trim=<value>
+        # sets a constant yaw-motor throttle while everything else stays quiet.
+        "gain_keys": {"trim": "H_YAW_TRIM"},
+        "doc":        "Lua idle (mode 0), armed-but-quiet; only --gain trim=<value> (H_YAW_TRIM) changes the static yaw-motor throttle.",
+    },
     "passive": {
         "scr_user6":   3,
         # Match the SITL passive arming flow: boot into GUIDED_NOGPS and hold the
         # IC attitude via the GUIDED angle API -- NOT the legacy flybar/RC path.
         "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
         "ic_seed":     True,     # seed RAWES_COL/RIC/PIC so PASSIVE holds the IC
-        "take_servo4": False,    # DDFP yaw motor (SERVO4=Motor4) stays under AP +
+        "take_servo4": False,    # DDFP yaw motor (Motor4) stays under AP +
                                  # the Lua H_YAW_TRIM observer -- do NOT reassign it.
-        # Initial yaw-rate PID + filters, settable at run start via --gain and
-        # restored on exit.  e.g. run passive --gain p=0.01,i=0.02,flte=2
-        "gain_keys": {
-            "p":    "ATC_RAT_YAW_P",
-            "i":    "ATC_RAT_YAW_I",
-            "d":    "ATC_RAT_YAW_D",
-            "ff":   "ATC_RAT_YAW_FF",
-            "imax": "ATC_RAT_YAW_IMAX",
-            "flte": "ATC_RAT_YAW_FLTE",
-            "fltd": "ATC_RAT_YAW_FLTD",
-            "fltt": "ATC_RAT_YAW_FLTT",
+        # We tune the Lua yaw PID (SCR_USER1/2/3) ONLY.  Force the AP ATC_RAT_YAW
+        # PID to ZERO on entry so the Lua H_YAW_TRIM observer is the sole yaw
+        # regulator (restored on exit).  No --gain here: passive does not tune the
+        # AP loop -- use `run yaw` for that.
+        "gain_keys": {},
+        "force_params": {
+            "ATC_RAT_YAW_P":  0.0,
+            "ATC_RAT_YAW_I":  0.0,
+            "ATC_RAT_YAW_D":  0.0,
+            "ATC_RAT_YAW_FF": 0.0,
         },
-        "force_params": {},
-        "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_COL/RIC/PIC) and holds the IC attitude via the GUIDED angle API; DDFP yaw motor stays under AP + the Lua H_YAW_TRIM observer.  IC via --trim col=<deg> --roll <deg> --pitch <deg>.  Initial yaw PID via --gain p=,i=,d=,ff=,imax=,flte=,fltd=,fltt=.",
+        "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_COL/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  Forces the AP yaw PID (ATC_RAT_YAW_P/I/D/FF) to ZERO so the Lua yaw PID (SCR_USER1/2/3) is the sole yaw regulator -- tune Lua ONLY.  IC via --trim col=<deg> --roll <deg> --pitch <deg>.",
     },
     "manual": {
         "scr_user6":  2,
@@ -1674,10 +1758,10 @@ _RUN_MODES = {
             "fltt":      "ATC_RAT_YAW_FLTT",
             "fltd":      "ATC_RAT_YAW_FLTD",
             "accelmax":  "ATC_ACCEL_Y_MAX",
-            "servo_min": "SERVO4_MIN",
-            "servo_max": "SERVO4_MAX",
+            "servo_min": f"SERVO{SERVO_MOTOR}_MIN",
+            "servo_max": f"SERVO{SERVO_MOTOR}_MAX",
         },
-        "doc":        "yaw compensation (SERVO4 PID) + NVF-commanded cyclic/collective; H_FLYBAR_MODE=1",
+        "doc":        f"yaw compensation (SERVO{SERVO_MOTOR} motor PID) + NVF-commanded cyclic/collective; H_FLYBAR_MODE=1",
     },
     "steady": {
         "scr_user6":  1,
@@ -1702,30 +1786,77 @@ _RUN_MODES = {
 
 # Sensible starting Lua yaw-PID gains (SCR_USER1/2/3 = KP/KI/KD).  `run` seeds
 # these ONLY when all three are ~0 (fresh/unconfigured FC) so the vehicle holds
-# yaw out of the box; any nonzero (tuned) value is preserved.  Mirrors
-# rawes_common_defaults.parm.
-_YAW_PID_DEFAULTS = {"SCR_USER1": 0.01, "SCR_USER2": 0.02, "SCR_USER3": 0.002}
+# yaw out of the box; any nonzero (tuned) value is preserved.  The values are
+# sourced from rawes_common_defaults.parm (via _CONFIG_TARGET_PARAMS_COMMON) so
+# calibrate.py and the SITL defaults are a single source of truth and cannot drift.
+_YAW_PID_KEYS = ("SCR_USER1", "SCR_USER2", "SCR_USER3")
+_YAW_PID_DEFAULTS = {
+    k: float(_CONFIG_TARGET_PARAMS_COMMON[k])
+    for k in _YAW_PID_KEYS
+    if k in _CONFIG_TARGET_PARAMS_COMMON
+}
 
 
 def _seed_yaw_pid_defaults(session: RawesGCS) -> None:
-    """Seed SCR_USER1/2/3 to sensible defaults iff all three are ~0 (unconfigured).
+    """Seed SCR_USER1/2/3 to the rawes_common_defaults.parm values iff all three
+    are ~0 (unconfigured).
 
     Preserves an already-tuned set (any nonzero gain) so iterative bench tuning
     across runs is not clobbered.
     """
+    if len(_YAW_PID_DEFAULTS) != len(_YAW_PID_KEYS):
+        missing = [k for k in _YAW_PID_KEYS if k not in _YAW_PID_DEFAULTS]
+        print(f"  [WARN] {', '.join(missing)} absent from rawes_common_defaults.parm "
+              "-- yaw PID not seeded")
+        return
     cur = {n: session.get_param(n) for n in _YAW_PID_DEFAULTS}
     if any(v is None for v in cur.values()):
         print("  [WARN] could not read SCR_USER1/2/3 -- yaw PID not seeded")
         return
     if all(abs(float(v)) < 1e-9 for v in cur.values()):
-        print("  Seeding Lua yaw PID (SCR_USER1/2/3 were all 0):")
+        print("  Seeding Lua yaw PID from rawes_common_defaults.parm "
+              "(SCR_USER1/2/3 were all 0):")
         for n, val in _YAW_PID_DEFAULTS.items():
             session.set_param(n, val)
-            print(f"    {n} = {val}")
+            print(f"    {n} = {val:g}")
     else:
-        print(f"  Lua yaw PID gains kept (SCR_USER1/2/3 = "
-              f"{float(cur['SCR_USER1']):.4g}/{float(cur['SCR_USER2']):.4g}/"
-              f"{float(cur['SCR_USER3']):.4g})")
+        kept = "/".join(f"{float(cur[n]):.4g}" for n in _YAW_PID_KEYS)
+        print(f"  Lua yaw PID gains kept (SCR_USER1/2/3 = {kept})")
+
+
+# AP yaw-rate PID params that MUST be zero while tuning the Lua yaw loop alone.
+_AP_YAW_ZERO_PARAMS = ("ATC_RAT_YAW_P", "ATC_RAT_YAW_I",
+                       "ATC_RAT_YAW_D", "ATC_RAT_YAW_FF")
+
+
+def _verify_passive_yaw_setup(session: RawesGCS) -> bool:
+    """Confirm the passive-mode yaw config before the run: the AP ATC_RAT_YAW
+    PID must read back all ~0 (so the Lua H_YAW_TRIM observer is the sole yaw
+    regulator), and report the Lua yaw-rate PID gains (SCR_USER1/2/3 = KP/KI/KD)
+    that we are about to tune.  Returns True iff the AP yaw PID is all zero.
+    """
+    print("  Yaw setup check (tuning Lua ONLY -- AP yaw PID must be 0):")
+    ok = True
+    for n in _AP_YAW_ZERO_PARAMS:
+        v = session.get_param(n)
+        if v is None:
+            print(f"    [WARN] {n}: unreadable")
+            ok = False
+            continue
+        good = abs(float(v)) < 1e-9
+        ok = ok and good
+        tag = "[OK]  " if good else "[FAIL]"
+        print(f"    {tag} {n} = {float(v):.6g}   (expect 0)")
+    kp = session.get_param("SCR_USER1")
+    ki = session.get_param("SCR_USER2")
+    kd = session.get_param("SCR_USER3")
+    _f = lambda x: "n/a" if x is None else f"{float(x):.4g}"
+    print(f"    Lua yaw PID (tune these): SCR_USER1(KP)={_f(kp)}  "
+          f"SCR_USER2(KI)={_f(ki)}  SCR_USER3(KD)={_f(kd)}")
+    if not ok:
+        print("    [WARN] AP yaw PID is NOT all zero -- Lua tuning will be "
+              "contaminated by the AP rate loop.  Aborting recommended.")
+    return ok
 
 
 def _cmd_run(session: RawesGCS, args: list[str]) -> None:
@@ -1854,6 +1985,11 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     # already-tuned gains.
     if cfg["scr_user6"] in (1, 3):
         _seed_yaw_pid_defaults(session)
+
+    # Passive tunes the Lua yaw loop ONLY: confirm the AP yaw PID was forced to
+    # zero (via force_params above) and report the Lua gains we are tuning.
+    if name == "passive":
+        _verify_passive_yaw_setup(session)
 
     # Flight mode required by this Lua mode (e.g. GUIDED_NOGPS for passive) --
     # matches the SITL passive arming flow.  Set BEFORE arming so we arm in the
@@ -2011,62 +2147,109 @@ def _run_observation(session: RawesGCS, mode_name: str,
     (keeping SERVO_OUTPUT_RAW in the same stream) unless keep_rc is set."""
     cols = ["t_s", "armed", "roll_deg", "pitch_deg", "yaw_deg", "yaw_rate_dps",
             "ch1_us", "ch2_us", "ch3_us", "ch4_us",
-            "s1_us", "s2_us", "s3_us", "s4_us",
+            "s1_us", "s2_us", "s3_us", "mot_us",
             "vbat_v", "current_a",
             "yff_t_lua", "yff_i_lua", "yff_gz_lua",
-            "yff_kp_lua", "yff_ki_lua", "yff_kd_lua"]
+            "yff_kp_lua", "yff_ki_lua", "yff_kd_lua",
+            "erpm", "mech_rpm", "rotor_rpm"]
 
     # Live table shows the yaw-PID telemetry (out=H_YAW_TRIM output, I=integral)
-    # plus the servo PWMs (S4 = GB4008 motor).  The full CSV also has ch1..ch4
-    # and the streamed gains (yff_kp/ki/kd) so each row records the tuning point.
+    # plus the swashplate PWMs (s1..s3) and the GB4008 motor output (mot =
+    # SERVO_MOTOR, bidir DShot) with its 5 s rolling average, and rotor RPM.
+    # The full CSV also has ch1..ch4, the streamed gains (yff_kp/ki/kd) and the
+    # eRPM / motor-shaft RPM so each row records the tuning point.
     print_cols = ["t(s)", "armed", "yaw(d)", "yrate", "out", "I",
-                  "s1", "s2", "s3", "s4", "s4~5s", "V", "A"]
+                  "s1", "s2", "s3", "mot", "mot~5s", "V", "A", "mRPM"]
 
-    s4_window_s = 5.0   # rolling average window for s4 PWM
+    mot_window_s = 5.0   # rolling average window for motor (SERVO_MOTOR) PWM
 
-    # Live tuning of the Lua yaw-rate PID gains (SCR_USER1/2/3 = KP/KI/KD).
-    #   P: '-' / '='     I: '[' / ']'     D: ',' / '.'
-    # These are our own SCR_USER params (persist; reset on FC reboot); the run
-    # prints the final values so you can keep them.  (Disable the AP yaw PID with
-    # --gain p=0,i=0,d=0 so the Lua PID owns yaw.)
-    _PID_KEYS = {
-        "P": {"param": "SCR_USER1", "step": 0.005},
-        "I": {"param": "SCR_USER2", "step": 0.005},
-        "D": {"param": "SCR_USER3", "step": 0.0005},
-    }
-    for _g in _PID_KEYS.values():
-        _v = session.get_param(_g["param"])
-        _g["val"] = float(_v) if _v is not None else 0.0
-    print(f"  Lua yaw PID: P={_PID_KEYS['P']['val']:.4f} "
-          f"I={_PID_KEYS['I']['val']:.4f} D={_PID_KEYS['D']['val']:.4f}")
-    print("  tune keys:  P '-'/'='    I '['/']'    D ','/'.'")
-    _PID_KEYMAP = {
-        b"-": ("P", -1), b"=": ("P", +1),
-        b"[": ("I", -1), b"]": ("I", +1),
-        b",": ("D", -1), b".": ("D", +1),
-    }
+    if mode_name == "none":
+        # In none mode (Lua idle) the yaw PID is inert, so the live keys tune the
+        # static DDFP trim H_YAW_TRIM directly.  Step = 0.005 (~5 us over the
+        # SERVO_MOTOR 1000-2000 us range); clamp [0, 1].
+        _trim = {"param": "H_YAW_TRIM", "step": 0.005, "val": 0.0}
+        _tv = session.get_param(_trim["param"])
+        _trim["val"] = float(_tv) if _tv is not None else 0.0
+        _pwm = 1000 + _trim["val"] * 1000.0
+        print(f"  Yaw trim: H_YAW_TRIM={_trim['val']:.4f}  (~{_pwm:.0f} us)")
+        print("  tune keys:  UP/DOWN arrows  or  '-'/'='   (H_YAW_TRIM +/- 0.005)")
+        _arrow_pending = [False]
 
-    def key_handler(k: bytes) -> None:
-        m = _PID_KEYMAP.get(k)
-        if m is None:
-            return
-        name, sign = m
-        g = _PID_KEYS[name]
-        old = g["val"]
-        new = old + sign * g["step"]
-        if new < 0.0:
-            new = 0.0
-        ok = session.set_param(g["param"], new)
-        g["val"] = new
-        tag = "" if ok else "  [FAIL]"
-        print(f"  YAW {name} {old:.4f} -> {new:.4f}{tag}")
+        def key_handler(k: bytes) -> None:
+            # Windows arrow keys arrive as a two-byte sequence: a 0xe0/0x00
+            # prefix followed by 'H' (up) / 'P' (down).  _poll_keys yields the
+            # bytes separately, so latch the prefix and decode on the next byte.
+            sign = 0
+            if _arrow_pending[0]:
+                _arrow_pending[0] = False
+                if k == b"H":
+                    sign = +1
+                elif k == b"P":
+                    sign = -1
+                else:
+                    return
+            elif k in (b"\xe0", b"\x00"):
+                _arrow_pending[0] = True
+                return
+            elif k == b"=":
+                sign = +1
+            elif k == b"-":
+                sign = -1
+            else:
+                return
+            old = _trim["val"]
+            new = min(1.0, max(0.0, old + sign * _trim["step"]))
+            ok = session.set_param(_trim["param"], new)
+            _trim["val"] = new
+            pwm = 1000 + new * 1000.0
+            tag = "" if ok else "  [FAIL]"
+            print(f"  TRIM {old:.4f} -> {new:.4f}  (~{pwm:.0f} us){tag}")
+    else:
+        # Live tuning of the Lua yaw-rate PID gains (SCR_USER1/2/3 = KP/KI/KD).
+        #   P: '-' / '='     I: '[' / ']'     D: ',' / '.'
+        # These are our own SCR_USER params (persist; reset on FC reboot); the run
+        # prints the final values so you can keep them.  (Disable the AP yaw PID
+        # with --gain p=0,i=0,d=0 so the Lua PID owns yaw.)
+        _PID_KEYS = {
+            "P": {"param": "SCR_USER1", "step": 0.005},
+            "I": {"param": "SCR_USER2", "step": 0.005},
+            "D": {"param": "SCR_USER3", "step": 0.0005},
+        }
+        for _g in _PID_KEYS.values():
+            _v = session.get_param(_g["param"])
+            _g["val"] = float(_v) if _v is not None else 0.0
+        print(f"  Lua yaw PID: P={_PID_KEYS['P']['val']:.4f} "
+              f"I={_PID_KEYS['I']['val']:.4f} D={_PID_KEYS['D']['val']:.4f}")
+        print("  tune keys:  P '-'/'='    I '['/']'    D ','/'.'")
+        _PID_KEYMAP = {
+            b"-": ("P", -1), b"=": ("P", +1),
+            b"[": ("I", -1), b"]": ("I", +1),
+            b",": ("D", -1), b".": ("D", +1),
+        }
+
+        def key_handler(k: bytes) -> None:
+            m = _PID_KEYMAP.get(k)
+            if m is None:
+                return
+            name, sign = m
+            g = _PID_KEYS[name]
+            old = g["val"]
+            new = old + sign * g["step"]
+            if new < 0.0:
+                new = 0.0
+            ok = session.set_param(g["param"], new)
+            g["val"] = new
+            tag = "" if ok else "  [FAIL]"
+            print(f"  YAW {name} {old:.4f} -> {new:.4f}{tag}")
 
     state = {
         "roll": None, "pitch": None, "yaw": None, "yaw_rate": None,
         "ch1": None, "ch2": None, "ch3": None, "ch4": None,
-        "s1": None, "s2": None, "s3": None, "s4": None,
-        "s4_hist": [],
+        "s1": None, "s2": None, "s3": None, "smot": None,
+        "smot_hist": [],
+        "mrpm_hist": [],    # (t_rel, mech_rpm) for the 5 s rolling average on screen
         "vbat": None, "curr": None,
+        "erpm": None,
         "yff_t": None, "yff_i": None, "yff_gz": None,
         "yff_kp": None, "yff_ki": None, "yff_kd": None,
         "yff_t_ts": None, "yff_i_ts": None, "yff_gz_ts": None,
@@ -2080,15 +2263,17 @@ def _run_observation(session: RawesGCS, mode_name: str,
             state["yaw"]   = math.degrees(msg.yaw)
             state["yaw_rate"] = math.degrees(msg.yawspeed)
             # Emit one CSV row per ATTITUDE message (typically 10-50 Hz)
+            _erpm, _mech, _rotor = _rpm_triplet(state["erpm"])
             return [
                 f"{t_rel:.4f}", int(st["armed"]),
                 _fmt(state["roll"]), _fmt(state["pitch"]), _fmt(state["yaw"]),
                 _fmt(state["yaw_rate"]),
                 state["ch1"], state["ch2"], state["ch3"], state["ch4"],
-                state["s1"], state["s2"], state["s3"], state["s4"],
+                state["s1"], state["s2"], state["s3"], state["smot"],
                 _fmt(state["vbat"]), _fmt(state["curr"]),
                 _fmt(state["yff_t"]), _fmt(state["yff_i"]), _fmt(state["yff_gz"]),
                 _fmt(state["yff_kp"]), _fmt(state["yff_ki"]), _fmt(state["yff_kd"]),
+                _fmt(_erpm), _fmt(_mech), _fmt(_rotor),
             ]
         elif mt == "RC_CHANNELS":
             state["ch1"] = getattr(msg, "chan1_raw", None)
@@ -2099,12 +2284,13 @@ def _run_observation(session: RawesGCS, mode_name: str,
             state["s1"] = getattr(msg, "servo1_raw", None)
             state["s2"] = getattr(msg, "servo2_raw", None)
             state["s3"] = getattr(msg, "servo3_raw", None)
-            state["s4"] = getattr(msg, "servo4_raw", None)
-            if state["s4"] is not None:
-                state["s4_hist"].append((t_rel, float(state["s4"])))
-                cutoff = t_rel - s4_window_s
-                while state["s4_hist"] and state["s4_hist"][0][0] < cutoff:
-                    state["s4_hist"].pop(0)
+            # GB4008 motor is on output SERVO_MOTOR (AUX 1); SERVO4 is unused now.
+            state["smot"] = getattr(msg, f"servo{SERVO_MOTOR}_raw", None)
+            if state["smot"] is not None:
+                state["smot_hist"].append((t_rel, float(state["smot"])))
+                cutoff = t_rel - mot_window_s
+                while state["smot_hist"] and state["smot_hist"][0][0] < cutoff:
+                    state["smot_hist"].pop(0)
         elif mt == "BATTERY_STATUS":
             cells = [v for v in msg.voltages if v != 65535]
             if cells:
@@ -2116,6 +2302,16 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 state["vbat"] = msg.voltage_battery / 1000.0
             if state["curr"] is None and msg.current_battery >= 0:
                 state["curr"] = msg.current_battery / 100.0
+        elif mt in _ESC_TELEM_MSGS:
+            erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
+            if erpm is not None:
+                state["erpm"] = erpm
+                _, _m, _ = _rpm_triplet(erpm)
+                if _m is not None:
+                    state["mrpm_hist"].append((t_rel, _m))
+                    cutoff = t_rel - mot_window_s
+                    while state["mrpm_hist"] and state["mrpm_hist"][0][0] < cutoff:
+                        state["mrpm_hist"].pop(0)
         elif mt == "NAMED_VALUE_FLOAT":
             nm = msg.name.rstrip("\x00").strip() if isinstance(msg.name, str) else \
                  msg.name.decode("ascii", errors="replace").rstrip("\x00").strip()
@@ -2148,9 +2344,13 @@ def _run_observation(session: RawesGCS, mode_name: str,
         yrate_s = f"{state['yaw_rate']:+6.1f}" if state["yaw_rate"] is not None else None
         out_s = _fresh_or_stale(state["yff_t"], state["yff_t_ts"], lambda v: f"{v:+.3f}")
         i_s = _fresh_or_stale(state["yff_i"], state["yff_i_ts"], lambda v: f"{v:+.3f}")
-        s4_avg_s = None
-        if state["s4_hist"]:
-            s4_avg_s = f"{sum(v for _, v in state['s4_hist']) / len(state['s4_hist']):.0f}"
+        mot_avg_s = None
+        if state["smot_hist"]:
+            mot_avg_s = f"{sum(v for _, v in state['smot_hist']) / len(state['smot_hist']):.0f}"
+        _e, _m, _rotor = _rpm_triplet(state["erpm"])
+        mrpm_avg_s = None
+        if state["mrpm_hist"]:
+            mrpm_avg_s = f"{sum(v for _, v in state['mrpm_hist']) / len(state['mrpm_hist']):.0f}"
         return [
             f"{t_rel:.1f}",
             "YES" if st["armed"] else "no",
@@ -2158,28 +2358,34 @@ def _run_observation(session: RawesGCS, mode_name: str,
             yrate_s,
             out_s,
             i_s,
-            state["s1"], state["s2"], state["s3"], state["s4"], s4_avg_s,
+            state["s1"], state["s2"], state["s3"], state["smot"], mot_avg_s,
             f"{state['vbat']:.2f}" if state["vbat"] is not None else None,
             f"{state['curr']:.2f}" if state["curr"] is not None else None,
+            mrpm_avg_s,
         ]
 
     def _trim_streams() -> None:
         # Runs right after the stream requests so the RC_CHANNELS disable wins
         # over the RC_CHANNELS stream (which we keep for SERVO_OUTPUT_RAW).
+        # Also request the motor's ESC telemetry (bidir DShot RPM) at 5 Hz.
+        _esc_name, _esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
+        session.set_message_interval(_esc_id, 200000)   # 5 Hz
         if not keep_rc:
             session.set_message_interval(
                 mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, -1)
             print("  Stream trim: RC_CHANNELS off, AHRS2 off, EXTENDED_STATUS 1 Hz "
-                  "(use --rc to keep RC_CHANNELS)")
+                  f"(use --rc to keep RC_CHANNELS); {_esc_name} 5 Hz")
         else:
-            print("  Stream trim: AHRS2 off, EXTENDED_STATUS 1 Hz (RC_CHANNELS kept)")
+            print("  Stream trim: AHRS2 off, EXTENDED_STATUS 1 Hz (RC_CHANNELS kept); "
+                  f"{_esc_name} 5 Hz")
 
     _observation_loop(
         session,
         duration_s=duration,
         msg_types=["ATTITUDE", "RC_CHANNELS", "SERVO_OUTPUT_RAW",
                    "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
-                   "NAMED_VALUE_FLOAT"],
+                   "NAMED_VALUE_FLOAT",
+                   _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],
         streams=[
             (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,          25),
             (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,     25),
@@ -2203,9 +2409,15 @@ def _run_observation(session: RawesGCS, mode_name: str,
     session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
 
     # Report final Lua yaw-PID gains (SCR_USER params persist across the session).
-    print(f"  Lua yaw PID final: P={_PID_KEYS['P']['val']:.4f} "
-          f"I={_PID_KEYS['I']['val']:.4f} D={_PID_KEYS['D']['val']:.4f}  "
-          f"(SCR_USER1/2/3 -- persisted)")
+    if mode_name == "none":
+        _tv = session.get_param("H_YAW_TRIM")
+        if _tv is not None:
+            _pwm = 1000 + float(_tv) * 1000.0
+            print(f"  Yaw trim final: H_YAW_TRIM={float(_tv):.4f}  (~{_pwm:.0f} us)")
+    else:
+        print(f"  Lua yaw PID final: P={_PID_KEYS['P']['val']:.4f} "
+              f"I={_PID_KEYS['I']['val']:.4f} D={_PID_KEYS['D']['val']:.4f}  "
+              f"(SCR_USER1/2/3 -- persisted)")
 
 
 def _fmt(v):
@@ -2295,13 +2507,15 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
     kd        = _meta_float(meta, "ATC_RAT_YAW_D",    0.0)
     imax      = _meta_float(meta, "ATC_RAT_YAW_IMAX", 0.7)
     trim      = _meta_float(meta, "H_YAW_TRIM",       0.0)
-    servo_min = _meta_float(meta, "SERVO4_MIN",       800.0)
-    servo_max = _meta_float(meta, "SERVO4_MAX",       2000.0)
+    servo_min = _meta_float(meta, f"SERVO{SERVO_MOTOR}_MIN",
+                            _meta_float(meta, "SERVO4_MIN", 800.0))
+    servo_max = _meta_float(meta, f"SERVO{SERVO_MOTOR}_MAX",
+                            _meta_float(meta, "SERVO4_MAX", 2000.0))
 
     print(f"  source ........ {csv_path}")
     print(f"  gains ......... P={kp:.4g}  I={ki:.4g}  D={kd:.4g}"
           f"  IMAX={imax:.3g}  TRIM={trim:.3g}")
-    print(f"  SERVO4 range .. {servo_min:.0f} .. {servo_max:.0f} us")
+    print(f"  SERVO{SERVO_MOTOR} range .. {servo_min:.0f} .. {servo_max:.0f} us")
 
     # Drop early rows that arrived before the first NVF pair.
     samples = [r for r in rows
@@ -2374,7 +2588,7 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
     p_out_list: list[float] = []
     i_out_list: list[float] = []
     out_list:  list[float]  = []
-    s4_list:   list[float]  = []
+    mot_list:  list[float]  = []
     t_list:    list[float]  = []
     for r in eval_rows:
         o = float(r["yaw_out_lua"])
@@ -2384,9 +2598,9 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
         p_out_list.append(kp * err)
         i_out_list.append(i)
         out_list.append(o)
-        s4 = r.get("s4_us")
-        if isinstance(s4, (int, float)):
-            s4_list.append(float(s4))
+        mot = r.get("mot_us", r.get("s4_us"))
+        if isinstance(mot, (int, float)):
+            mot_list.append(float(mot))
         t = r.get("t_s")
         if isinstance(t, (int, float)):
             t_list.append(float(t))
@@ -2418,9 +2632,9 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
     print(f"    mean p_out .. {_mean(p_out_list):+.4f}  (= kp * err)")
     print(f"    mean i_out .. {_mean(i_out_list):+.4f}  (integrator state)")
     print(f"    mean output . {_mean(out_list):+.4f}  (pre-clamp)")
-    if s4_list:
-        print(f"    mean s4_us .. {_mean(s4_list):8.1f}  (PWM, "
-              f"{min(s4_list):.0f} .. {max(s4_list):.0f})")
+    if mot_list:
+        print(f"    mean mot_us . {_mean(mot_list):8.1f}  (motor PWM, "
+              f"{min(mot_list):.0f} .. {max(mot_list):.0f})")
 
     # Zero-crossing oscillation estimate (cheap, no FFT).  Order-of-magnitude.
     f_hz = 0.0
@@ -2477,17 +2691,17 @@ def _analyze_yaw_csv(csv_path: str, exclude_saturate: bool = True) -> None:
                 f"P effort -- raise ATC_RAT_YAW_P (currently {kp:.3g}, try "
                 f"{kp * 1.5:.3g}).")
 
-        if s4_list:
-            margin_up = servo_max - max(s4_list)
-            mean_pwm  = _mean(s4_list)
+        if mot_list:
+            margin_up = servo_max - max(mot_list)
+            mean_pwm  = _mean(mot_list)
             if margin_up < 20 and pct_sat < 50.0:
                 advice.append(
-                    f"PWM headroom thin at the top (max {max(s4_list):.0f} "
-                    f"vs {servo_max:.0f}) -- raise SERVO4_MAX if the ESC "
+                    f"PWM headroom thin at the top (max {max(mot_list):.0f} "
+                    f"vs {servo_max:.0f}) -- raise SERVO{SERVO_MOTOR}_MAX if the ESC "
                     "accepts it.")
             if mean_pwm < servo_min + 0.1 * (servo_max - servo_min):
                 advice.append(
-                    f"Mean PWM ({mean_pwm:.0f}) sits near SERVO4_MIN -- "
+                    f"Mean PWM ({mean_pwm:.0f}) sits near SERVO{SERVO_MOTOR}_MIN -- "
                     "raise H_YAW_TRIM so the PID is not fighting a static "
                     "offset.")
 
@@ -2624,7 +2838,7 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
     log = _RunLog.open("manual", "ctrl", meta)
     log.write_header(["t_s", "armed",
                       "yaw_deg", "yaw_rate_dps", "roll_deg", "pitch_deg",
-                      "s1_us", "s2_us", "s3_us", "s4_us",
+                      "s1_us", "s2_us", "s3_us", "mot_us",
                       "col_deg", "tlon_deg", "tlat_deg",
                       "yaw_i_lua", "yaw_out_lua",
                       "yff_t_lua", "yff_u_lua", "yff_gz_lua", "yff_a_lua"])
@@ -2640,7 +2854,7 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
         "yaw_rate_dps": None,
         "roll_deg": None,
         "pitch_deg": None,
-        "s1": None, "s2": None, "s3": None, "s4": None,
+        "s1": None, "s2": None, "s3": None, "smot": None,
         "yaw_i": None, "yaw_out": None,
         "yff_t": None, "yff_u": None, "yff_gz": None, "yff_a": None,
         "running": True,
@@ -2700,7 +2914,7 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
                           f"tlon={math.degrees(ctl['tlon_rad']):+.2f}d "
                           f"tlat={math.degrees(ctl['tlat_rad']):+.2f}d  "
                           f"yaw={yaw_s}  "
-                          f"s1={ctl['s1']}  s2={ctl['s2']}  s3={ctl['s3']}  s4={ctl['s4']}")
+                          f"s1={ctl['s1']}  s2={ctl['s2']}  s3={ctl['s3']}  mot={ctl['smot']}")
                 elif "=" in cmd:
                     key, _, val_s = cmd.partition("=")
                     key = key.strip().lower()
@@ -2757,7 +2971,7 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
                         f"{ctl['yaw_rate_dps']:.3f}",
                         f"{ctl['roll_deg']:.3f}",
                         f"{ctl['pitch_deg']:.3f}",
-                        ctl["s1"], ctl["s2"], ctl["s3"], ctl["s4"],
+                        ctl["s1"], ctl["s2"], ctl["s3"], ctl["smot"],
                         f"{math.degrees(ctl['col_rad']):.3f}",
                         f"{math.degrees(ctl['tlon_rad']):.3f}",
                         f"{math.degrees(ctl['tlat_rad']):.3f}",
@@ -2771,7 +2985,7 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
                     ctl["s1"] = getattr(msg, "servo1_raw", None)
                     ctl["s2"] = getattr(msg, "servo2_raw", None)
                     ctl["s3"] = getattr(msg, "servo3_raw", None)
-                    ctl["s4"] = getattr(msg, "servo4_raw", None)
+                    ctl["smot"] = getattr(msg, f"servo{SERVO_MOTOR}_raw", None)
                 elif mt == "NAMED_VALUE_FLOAT":
                     nm = (msg.name.decode("ascii", errors="replace")
                           if isinstance(msg.name, bytes) else msg.name)
@@ -2794,10 +3008,10 @@ def _cmd_manual_interactive(session: RawesGCS, args: list[str]) -> None:
                 last_status_t = t_rel
                 yaw_s   = f"{ctl['yaw_deg']:+6.1f}d" if ctl["yaw_deg"] is not None else "    n/a"
                 yrate_s = f"{ctl['yaw_rate_dps']:+6.1f}d/s" if ctl["yaw_rate_dps"] is not None else "      n/a"
-                s4_s    = f"{ctl['s4']}" if ctl["s4"] is not None else "n/a"
+                s4_s    = f"{ctl['smot']}" if ctl["smot"] is not None else "n/a"
                 armed_s = "ARMED" if ctl["armed"] else " off "
                 print(f"  [{t_rel:6.1f}s] {armed_s}  yaw={yaw_s}  yrate={yrate_s}  "
-                      f"s4={s4_s}  |  "
+                      f"mot={s4_s}  |  "
                       f"col={math.degrees(ctl['col_rad']):+.2f}d  "
                       f"tlon={math.degrees(ctl['tlon_rad']):+.2f}d  "
                       f"tlat={math.degrees(ctl['tlat_rad']):+.2f}d")
@@ -2857,7 +3071,7 @@ def _read_motor_jsonl(jsonl_path: str, motor_off_us: float = 820.0):
             if mt == "ATTITUDE":
                 att.append((tw, m.get("yawspeed")))
             elif mt == "SERVO_OUTPUT_RAW":
-                srv.append((tw, m.get("servo4_raw")))
+                srv.append((tw, m.get(f"servo{SERVO_MOTOR}_raw", m.get("servo4_raw"))))
     att = [x for x in att if x[1] is not None]
     srv = [x for x in srv if x[1] is not None]
     att.sort(); srv.sort()
@@ -3114,8 +3328,8 @@ def _analyze_motor_quantization(jsonl_path: str, *, motor_off_us: float = 820.0,
         print("")
         print("    To test discrete-speed directly, capture an OPEN-LOOP ramp:")
         print("      - Disable the yaw loop so PWM is commanded, not servoed:")
-        print("          run passive --noluayaw --gain p=0,i=0,d=0   (AP + Lua yaw off)")
-        print("        or drive SERVO4 directly while logging yaw:")
+        print("          run passive --noluayaw   (passive forces AP yaw=0; --noluayaw also disables Lua yaw)")
+        print("        or drive the motor output directly while logging yaw:")
         print("          motor <pwm> --duration 4      (step several PWMs 1050..1350)")
         print("      - Step SERVO4 in small increments (e.g. +10 us / 3 s) across")
         print("        1050..1350 us; a discrete motor shows the yaw rate settling")
@@ -3328,30 +3542,48 @@ def _watch_servos(session, duration, log):
 
 
 def _watch_esc(session, duration, log):
-    # ESC_TELEMETRY is broadcast as ESC_TELEMETRY_5_TO_8 / _1_TO_4
-    cols = ["t_s", "rpm", "voltage", "current", "temp"]
+    # GB4008 bidir DShot telemetry (AUX 1 = SERVO9 -> ESC_TELEMETRY_9_TO_12[0]).
+    cols = ["t_s", "erpm", "mech_rpm", "rotor_rpm", "voltage_v", "current_a", "temp_c"]
+    esc_name, esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
+    idx = (MOTOR_ESC_CHANNEL - 1) % 4
+    state = {"erpm": None, "volt": None, "curr": None, "temp": None}
 
     def handle(st, msg, t_rel):
-        mt = msg.get_type()
-        if mt in ("ESC_TELEMETRY_1_TO_4", "ESC_TELEMETRY_5_TO_8"):
-            # Take index 3 = SERVO4 (the GB4008) when present
-            rpm = msg.rpm[3]      if hasattr(msg, "rpm") else None
-            volt = msg.voltage[3] if hasattr(msg, "voltage") else None
-            curr = msg.current[3] if hasattr(msg, "current") else None
-            temp = msg.temperature[3] if hasattr(msg, "temperature") else None
-            return [f"{t_rel:.4f}", rpm, volt, curr, temp]
-        return None
+        if msg.get_type() != esc_name:
+            return None
+        erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
+        volt = msg.voltage[idx] / 100.0 if hasattr(msg, "voltage") else None
+        curr = msg.current[idx] / 100.0 if hasattr(msg, "current") else None
+        temp = msg.temperature[idx] if hasattr(msg, "temperature") else None
+        state["erpm"], state["volt"], state["curr"], state["temp"] = \
+            erpm, volt, curr, temp
+        _e, mech, rotor = _rpm_triplet(erpm)
+        return [f"{t_rel:.4f}", _fmt(_e), _fmt(mech), _fmt(rotor),
+                _fmt(volt), _fmt(curr), temp]
 
     def render(st, t_rel):
-        return [f"{t_rel:.1f}", "?", "?", "?", "?"]
+        _e, mech, rotor = _rpm_triplet(state["erpm"])
+        return [
+            f"{t_rel:.1f}",
+            f"{_e:.0f}" if _e is not None else None,
+            f"{mech:.0f}" if mech is not None else None,
+            f"{rotor:.0f}" if rotor is not None else None,
+            f"{state['volt']:.2f}" if state["volt"] is not None else None,
+            f"{state['curr']:.2f}" if state["curr"] is not None else None,
+            state["temp"],
+        ]
+
+    def _req_esc() -> None:
+        session.set_message_interval(esc_id, 100000)   # 10 Hz
 
     _observation_loop(
         session, duration_s=duration,
-        msg_types=["ESC_TELEMETRY_1_TO_4", "ESC_TELEMETRY_5_TO_8",
-                   "HEARTBEAT", "STATUSTEXT"],
+        msg_types=[esc_name, "HEARTBEAT", "STATUSTEXT"],
         streams=[(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)],
         handle_msg=handle, render_row=render,
         header_cols=cols,
+        header_print_cols=["t(s)", "eRPM", "mRPM", "rotRPM", "V", "A", "T"],
+        setup_hook=_req_esc,
         log=log,
     )
 
@@ -3915,8 +4147,9 @@ def _print_swash_layout(session: RawesGCS) -> None:
         s1 = getattr(srv, "servo1_raw", 0)
         s2 = getattr(srv, "servo2_raw", 0)
         s3 = getattr(srv, "servo3_raw", 0)
-        s4 = getattr(srv, "servo4_raw", 0)
-        print(f"Current PWMs:  S1={s1} us  S2={s2} us  S3={s3} us  S4={s4} us")
+        smot = getattr(srv, f"servo{SERVO_MOTOR}_raw", 0)
+        print(f"Current PWMs:  S1={s1} us  S2={s2} us  S3={s3} us  "
+              f"S{SERVO_MOTOR}(motor)={smot} us")
     else:
         print("Current PWMs:  (no SERVO_OUTPUT_RAW received)")
     print()
@@ -4060,18 +4293,18 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
     """motor <pwm_us> [--duration N]
        motor off
 
-    Run-style lifecycle: arms via RAWES_ARM, releases SERVO4 from any AP
-    mixer, holds SERVO4_MIN for ESC arming, then drives SERVO4 at the
-    requested PWM for `duration` seconds while logging telemetry to
+    Run-style lifecycle: arms via RAWES_ARM, releases the motor output from any
+    AP mixer, then drives the motor output at the requested PWM for `duration`
+    seconds while logging telemetry to
     simulation/logs/calibrate/motor_<pwm>_<ts>.csv.  On exit (timer / ESC /
-    Ctrl-C / exception): SERVO4 -> 800, disarm, SERVO4_FUNCTION restored."""
+    Ctrl-C / exception): motor -> idle (off), disarm, SERVO<motor>_FUNCTION restored."""
     if not args:
         print("  Usage: motor <pwm_us> [--duration N]  OR  motor off"); return
     if args[0].lower() in ("off", "stop"):
-        # Immediate stop: force SERVO4 to 800 and disarm.
+        # Immediate stop: force the motor to idle (off) and disarm.
         try:
-            _send_set_servo(session, SERVO_MOTOR, 800)
-            print(f"  SERVO{SERVO_MOTOR} -> 800 us (motor off)")
+            _send_set_servo(session, SERVO_MOTOR, MOTOR_OFF_US)
+            print(f"  SERVO{SERVO_MOTOR} -> {MOTOR_OFF_US} us (motor off)")
         except Exception as e:
             print(f"  [WARN] failed to drive SERVO{SERVO_MOTOR} off: {e}")
         try:
@@ -4091,12 +4324,14 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
         print("  Error: pwm must be an integer (microseconds)"); return
     secs = flags.get("--duration", 5.0)
 
-    # Read the live SERVO4_MIN / SERVO4_MAX caps so the prompt + clamp warning
-    # reflect the per-bench safety cap (e.g. SERVO4_MAX=1100 during early tuning).
-    s4_min = int(session.get_param("SERVO4_MIN") or 800)
-    s4_max = int(session.get_param("SERVO4_MAX") or 2000)
+    # Read the live SERVO<motor>_MIN / SERVO<motor>_MAX caps so the prompt + clamp
+    # warning reflect the per-bench safety cap (e.g. MAX=1100 during early tuning).
+    mot_min_key = f"SERVO{SERVO_MOTOR}_MIN"
+    mot_max_key = f"SERVO{SERVO_MOTOR}_MAX"
+    s4_min = int(session.get_param(mot_min_key) or MOTOR_OFF_US)
+    s4_max = int(session.get_param(mot_max_key) or MOTOR_FULL_US)
     if not (s4_min <= pwm <= s4_max):
-        print(f"  Error: pwm must be in [{s4_min}, {s4_max}]  (SERVO4_MIN/MAX); got {pwm}")
+        print(f"  Error: pwm must be in [{s4_min}, {s4_max}]  ({mot_min_key}/{mot_max_key}); got {pwm}")
         return
     # Express PWM as fraction of the configured range for the safety prompt.
     if s4_max > s4_min:
@@ -4105,14 +4340,13 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
         pct_for_prompt = 0.0
     if not force and pct_for_prompt > 5.0:
         confirm = input(
-            f"  WARNING: SERVO4 = {pwm} us "
+            f"  WARNING: SERVO{SERVO_MOTOR} = {pwm} us "
             f"({pct_for_prompt:.0f}% of [{s4_min},{s4_max}]) for {secs:.0f}s. "
             f"Confirm (y/N): ")
         if confirm.strip().lower() != "y":
             print("  Cancelled."); return
-    arm_hold_s = 5.0   # ESC arming: hold SERVO4 at min for this long after arm
 
-    # Same shuffle as `run yaw`: release SERVO4 from any AP mixer so our
+    # Same shuffle as `run yaw`: release the motor output from any AP mixer so our
     # DO_SET_SERVO commands win.
     saved_fn = _take_servo4(session)
 
@@ -4122,48 +4356,41 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
     if saved_scr is not None and int(saved_scr) != 0:
         saved_overrides["SCR_USER6"] = float(saved_scr)
         session.set_param("SCR_USER6", 0)
-        print(f"  SCR_USER6 {int(saved_scr)} -> 0 (motor needs direct SERVO4 control)")
+        print(f"  SCR_USER6 {int(saved_scr)} -> 0 (motor needs direct SERVO{SERVO_MOTOR} control)")
 
     if not _arm(session, force=True):
         _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)
         return
     print("  [OK] Armed.")
 
-    # ESC arming sequence: hold SERVO4 at min PWM (=ESC "off") long enough
-    # for the REVVitRC ESC to detect the signal and arm.
-    print(f"  ESC arm: SERVO{SERVO_MOTOR} = {s4_min} us for {arm_hold_s:.0f} s ...")
-    t_arm_end = time.monotonic() + arm_hold_s
-    while time.monotonic() < t_arm_end:
-        _send_set_servo(session, SERVO_MOTOR, s4_min)
-        time.sleep(0.2)
-    print(f"  Motor: SERVO4 = {pwm} us for {secs:.1f}s "
-          f"(SERVO4 range [{s4_min}, {s4_max}]).")
+    # DShot self-arms from idle -- no ESC pre-arm hold needed.
+    print(f"  Motor: SERVO{SERVO_MOTOR} = {pwm} us for {secs:.1f}s "
+          f"(SERVO{SERVO_MOTOR} range [{s4_min}, {s4_max}]).")
 
     # Snapshot params for the log header
     meta = {
         "verb":             "motor",
         "pwm_us":           pwm,
         "duration_s":       secs,
-        "arm_hold_s":       arm_hold_s,
-        "SERVO4_MIN":       s4_min,
-        "SERVO4_MAX":       s4_max,
+        mot_min_key:        s4_min,
+        mot_max_key:        s4_max,
         "run_start_local":  datetime.now().isoformat(timespec="seconds"),
         "run_start_utc":    datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     log = _RunLog.open("motor", f"{pwm}us", meta)
     print(f"  Logging to {log.path}")
 
-    # On_tick refreshes the SERVO4 PWM ~twice per second while t_rel < secs.
+    # On_tick refreshes the motor PWM ~twice per second while t_rel < secs.
     # MAV_CMD_DO_SET_SERVO persists for 30 s on AP, so once we cross the
-    # duration boundary we must explicitly drive it back to 800 us -- the
-    # loop continues observing for the standard +5 s post-window so we get
+    # duration boundary we must explicitly drive it back to idle (motor off) --
+    # the loop continues observing for the standard +5 s post-window so we get
     # spin-down telemetry before safety_shutdown disarms.
     last_send = [-10.0]
     stopped   = [False]
     def on_tick(t_rel: float) -> None:
-        target = pwm if t_rel < secs else 800
+        target = pwm if t_rel < secs else MOTOR_OFF_US
         if t_rel >= secs and not stopped[0]:
-            _send_set_servo(session, SERVO_MOTOR, 800)
+            _send_set_servo(session, SERVO_MOTOR, MOTOR_OFF_US)
             stopped[0] = True
             last_send[0] = t_rel
             return
@@ -4394,6 +4621,7 @@ def _connect(port: "str | None", baud: int) -> RawesGCS:
     print(f"Connected: sysid={session._target_system} compid={session._target_component}")
     session.start_heartbeat()
     session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER, 10)
+    _refresh_pole_pairs(session)
     return session
 
 

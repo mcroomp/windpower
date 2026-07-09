@@ -198,7 +198,7 @@ class SpinSensor:
     This class adds optional Gaussian noise to simulate measurement uncertainty.
     On hardware, omega_spin is derived from the GB4008 counter-torque motor eRPM
     reported by the AM32 ESC via telemetry, converted using the 80:44 gear ratio
-    and 11 pole pairs: ``omega_spin = eRPM * 2pi/60 / 11 * 44/80``.
+    and SERVO_BLH_POLES/2 pole pairs: ``omega_spin = eRPM * 2pi/60 / (SERVO_BLH_POLES/2) * 44/80``.
 
     Parameters
     ----------

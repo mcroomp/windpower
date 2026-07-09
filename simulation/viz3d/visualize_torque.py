@@ -99,7 +99,7 @@ _V_BAT      = 15.2               # 4S LiPo nominal [V]
 _KV_RAD     = 66.0 * math.pi / 30.0  # rad/s per volt
 _R_MOTOR    = 7.5                # winding resistance [Ω]
 _GEAR_RATIO = 80.0 / 44.0        # ω_motor / ω_axle
-_POLE_PAIRS = 11                 # GB4008 24N22P → 22 poles → 11 pole pairs
+_POLE_PAIRS = 11  # = SERVO_BLH_POLES / 2 (rawes_common_defaults.parm)
 _I_MAX      = _V_BAT / _R_MOTOR  # stall current [A] = 2.03 A
 _I_EQ       = (_V_BAT * 0.485 - (28.0 * _GEAR_RATIO / _KV_RAD)) / _R_MOTOR  # ≈ 0.07 A at back-EMF eq
 
