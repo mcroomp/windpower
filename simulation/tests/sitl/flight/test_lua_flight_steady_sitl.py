@@ -67,7 +67,7 @@ import numpy as np
 
 import pytest
 
-pytestmark = pytest.mark.timeout(1800)
+pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1800)]
 
 _SIM_DIR     = Path(__file__).resolve().parents[3]
 _SITL_DIR    = Path(__file__).resolve().parents[1]

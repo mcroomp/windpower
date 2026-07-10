@@ -22,9 +22,9 @@ Usage
     python simulation/analysis/diagnose_torque.py <test_name_or_log_dir> [settle_s [observe_s]]
 
 Examples
-    python simulation/analysis/diagnose_torque.py test_wobble_sitl[wobble]
-    python simulation/analysis/diagnose_torque.py test_wobble_sitl[wobble] 80 20
-    python simulation/analysis/diagnose_torque.py simulation/logs/test_slow_rpm_sitl[slow_vary] 50 30
+    python simulation/analysis/diagnose_torque.py test_yaw_regulation_sitl
+    python simulation/analysis/diagnose_torque.py test_yaw_regulation_sitl 75 20
+    python simulation/analysis/diagnose_torque.py simulation/logs/test_yaw_regulation_sitl 75 20
 """
 from __future__ import annotations
 
@@ -37,11 +37,11 @@ from pathlib import Path
 _SIM_DIR  = Path(__file__).resolve().parents[1]
 _LOGS_DIR = _SIM_DIR / "logs"
 
-# ── torque_model constants (mirror of torque_model.py) ───────────────────────
-GEAR_RATIO  = 80.0 / 44.0   # 1.818
-RPM_SCALE   = 105.0          # rad/s at 100 % throttle
-OMEGA_NOM   = 28.0           # rad/s nominal rotor speed
-THROTTLE_EQ = OMEGA_NOM * GEAR_RATIO / RPM_SCALE   # ~0.485
+# ── torque_model constants (imported from torque_model.py — single source of truth) ─
+import sys as _sys, os as _os
+_sys.path.insert(0, str(_SIM_DIR))
+from torque_model import GEAR_RATIO, RPM_SCALE, OMEGA_ROTOR_NOMINAL as OMEGA_NOM
+THROTTLE_EQ = OMEGA_NOM * GEAR_RATIO / RPM_SCALE
 
 # ── diagnosis thresholds ─────────────────────────────────────────────────────
 FREEZE_REPEAT_S     = 4      # identical value for this many 1 Hz samples → frozen

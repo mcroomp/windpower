@@ -153,6 +153,7 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mav_att_roll_deg",   # MAVLink ATTITUDE roll (NED Euler)
             "mav_att_pitch_deg",  # MAVLink ATTITUDE pitch (NED Euler)
             "mav_att_yaw_deg",    # MAVLink ATTITUDE yaw (NED Euler)
+            "mav_att_yaw_rate_rads",  # MAVLink ATTITUDE yawspeed [rad/s]
             "mav_att_target_roll_deg",       # MAVLink ATTITUDE_TARGET roll (NED Euler)
             "mav_att_target_pitch_deg",      # MAVLink ATTITUDE_TARGET pitch (NED Euler)
             "mav_att_target_yaw_deg",        # MAVLink ATTITUDE_TARGET yaw (NED Euler)
@@ -162,14 +163,11 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mav_servo1_us",
             "mav_servo2_us",
             "mav_servo3_us",
-            "mav_servo4_us",
-            # Lua yaw-PID NAMED_VALUE_FLOAT state (latest async snapshot)
-            "mav_nvf_yff_trim",   # YFF_T: PID output = H_YAW_TRIM
-            "mav_nvf_yff_i",      # YFF_I: integral term
+            "mav_servo9_us",   # GB4008 anti-rotation motor (AUX 1, bidir DShot)
+            # Yaw trim observer NAMED_VALUE_FLOAT state (latest async snapshot)
+            "mav_nvf_yff_trim",   # YFF_T: H_YAW_TRIM written by observer
+            "mav_nvf_yff_u",      # YFF_U: applied motor throttle read-back
             "mav_nvf_yff_gz",     # YFF_GZ: measured gyro:z() [rad/s]
-            "mav_nvf_yff_kp",     # YFF_KP: active P gain (SCR_USER1)
-            "mav_nvf_yff_ki",     # YFF_KI: active I gain (SCR_USER2)
-            "mav_nvf_yff_kd",     # YFF_KD: active D gain (SCR_USER3)
         ),
     ),
     # Direct servo values decoded from SITL servo packet in mediator.
@@ -179,7 +177,7 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "servo_s1_us",
             "servo_s2_us",
             "servo_s3_us",
-            "servo4_us",
+            "servo_mot_us",   # GB4008 motor SITL PWM (output 9, 0-based index 8)
         ),
     ),
     # Anti-rotation torque model internals from mediator_torque path.
@@ -266,11 +264,8 @@ ASYNC_MAV_COLUMNS: tuple[str, ...] = (
     "mav_servo1_us",
     "mav_servo2_us",
     "mav_servo3_us",
-    "mav_servo4_us",
+    "mav_servo9_us",
     "mav_nvf_yff_trim",
-    "mav_nvf_yff_i",
+    "mav_nvf_yff_u",
     "mav_nvf_yff_gz",
-    "mav_nvf_yff_kp",
-    "mav_nvf_yff_ki",
-    "mav_nvf_yff_kd",
 )

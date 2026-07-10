@@ -216,12 +216,9 @@ def run_mediator(args, trajectory=None):
         last_rx_wall = _time_mod.monotonic()
         next_diag_wall = last_rx_wall + _mavlog_diag_interval_s
         _nvf_key_map = {
-            "YFF_T": "mav_nvf_yff_trim",
-            "YFF_I": "mav_nvf_yff_i",
+            "YFF_T":  "mav_nvf_yff_trim",
+            "YFF_U":  "mav_nvf_yff_u",
             "YFF_GZ": "mav_nvf_yff_gz",
-            "YFF_KP": "mav_nvf_yff_kp",
-            "YFF_KI": "mav_nvf_yff_ki",
-            "YFF_KD": "mav_nvf_yff_kd",
         }
         try:
             while not _mavlog_stop.is_set() and not is_stopped():
@@ -365,7 +362,7 @@ def run_mediator(args, trajectory=None):
                     fields["mav_servo1_us"] = float(getattr(msg, "servo1_raw", float("nan")))
                     fields["mav_servo2_us"] = float(getattr(msg, "servo2_raw", float("nan")))
                     fields["mav_servo3_us"] = float(getattr(msg, "servo3_raw", float("nan")))
-                    fields["mav_servo4_us"] = float(getattr(msg, "servo4_raw", float("nan")))
+                    fields["mav_servo9_us"] = float(getattr(msg, "servo9_raw", float("nan")))
                 elif mtype == "NAMED_VALUE_FLOAT":
                     # Lua diagnostics are streamed as named floats. Keep only the
                     # telemetry-relevant keys as latest-value async snapshot fields.
@@ -936,17 +933,14 @@ def run_mediator(args, trajectory=None):
                 "mav_servo1_us":     _mav_async.get("mav_servo1_us", float("nan")),
                 "mav_servo2_us":     _mav_async.get("mav_servo2_us", float("nan")),
                 "mav_servo3_us":     _mav_async.get("mav_servo3_us", float("nan")),
-                "mav_servo4_us":     _mav_async.get("mav_servo4_us", float("nan")),
+                "mav_servo9_us":     _mav_async.get("mav_servo9_us", float("nan")),
                 "mav_nvf_yff_trim":  _mav_async.get("mav_nvf_yff_trim", float("nan")),
-                "mav_nvf_yff_i":     _mav_async.get("mav_nvf_yff_i", float("nan")),
-                "mav_nvf_yff_gz":    _mav_async.get("mav_nvf_yff_gz", float("nan")),
-                "mav_nvf_yff_kp":    _mav_async.get("mav_nvf_yff_kp", float("nan")),
-                "mav_nvf_yff_ki":    _mav_async.get("mav_nvf_yff_ki", float("nan")),
-                "mav_nvf_yff_kd":    _mav_async.get("mav_nvf_yff_kd", float("nan")),
+                "mav_nvf_yff_u":     _mav_async.get("mav_nvf_yff_u",    float("nan")),
+                "mav_nvf_yff_gz":    _mav_async.get("mav_nvf_yff_gz",   float("nan")),
                 "servo_s1_us":     float(sitl.last_pwm_raw[0]),
                 "servo_s2_us":     float(sitl.last_pwm_raw[1]),
                 "servo_s3_us":     float(sitl.last_pwm_raw[2]),
-                "servo4_us":       float(sitl.last_pwm_raw[3]),
+                "servo_mot_us":    float(sitl.last_pwm_raw[8]),
                 "wind_x":          wind_world[0],
                 "wind_y":          wind_world[1],
                 "wind_z":          wind_world[2],

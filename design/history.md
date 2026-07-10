@@ -129,7 +129,7 @@ Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards dele
 5. Cyclic: error = cross(body_z_now, body_z_eq); rate_bf = kp × err_body → ATC_RAT_RLL/PIT
 6. Collective: set_throttle_out(_thrust_cmd, false, filt)  ← direct passthrough from ground PI
 7. Counter-torque: yaw rate = 0.0f → ATC_RAT_YAW → GB4008 (H_TAIL_TYPE=4)
-8. omega_spin: AP_ESC_Telem.get_rpm() × 2π/60 × 44/80 (SERVO_BLH_POLES/2 pole pairs, 80:44 gear)
+8. omega_spin: AP_ESC_Telem.get_rpm() × 2π/60 × 1/10 (SERVO_BLH_POLES/2 pole pairs, 10:1 gear)
 9. send_state() at 10 Hz → Pixhawk→Planner STATE packet
 ```
 

@@ -293,9 +293,9 @@ control:
       All geometry values are estimates — confirm from build.
 
 # Anti-rotation drivetrain (hardware reference — not used in single-body simulation model)
-# EMAX GB4008 66KV motor via 80:44 spur gear keeps the electronics assembly stationary.
-# Control: Pixhawk yaw rate sensor → ATC_RAT_YAW_* PID → ESC torque modulation.
-# Gear purpose: sets motor shaft to (80/44) × omega_rotor for efficient RPM range.
+# EMAX GB4008 66KV motor via 10:1 spur gear keeps the electronics assembly stationary.
+# Control: Pixhawk yaw rate sensor → rawes.lua trim observer → H_YAW_TRIM → ESC.
+# Gear purpose: sets motor shaft to 10× omega_rotor for efficient RPM range.
 # All yaw authority comes from the control loop; the gear is an efficiency choice only.
 # Simulation assumption: motor keeps electronics yaw perfectly at zero (single-body model).
 # The only partial two-body assumption in the model is the gyroscopic calculation:

@@ -49,7 +49,7 @@ Use the FMU PWM connector for output 9 (AUX 1):
 | Constant | Value |
 |---|---|
 | Motor Kv | 66 RPM/V |
-| Gear ratio | 80:44 = 1.818 |
+| Gear ratio | 10:1 |
 | Pole count | SERVO_BLH_POLES = 22 |
 | eRPM -> motor RPM | divide by (poles/2) |
 | eRPM -> rotor RPM | divide by (poles/2 * gear_ratio) |

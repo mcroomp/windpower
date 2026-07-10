@@ -73,7 +73,7 @@ class HubObservation:
 
     omega_spin : float
         Rotor blade spin rate [rad/s] (autorotation).  In hardware derived
-        from GB4008 ESC telemetry RPM divided by the 80:44 gear ratio.
+        from GB4008 ESC telemetry RPM divided by the 10:1 gear ratio.
         Not available via AHRS — a distinct sensor channel.
     """
     R:          np.ndarray

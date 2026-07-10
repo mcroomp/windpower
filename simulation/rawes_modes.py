@@ -23,6 +23,7 @@ Usage
 MODE_NONE     = 0   # script passive: no RC overrides; logs every 5 s + any NV message
 MODE_STEADY   = 1   # bz_altitude_hold cyclic (commanded tension) + altitude-PID collective
 # mode 2 reserved (unused)
+MODE_PASSIVE  = 3   # kinematic capture helper: hold IC attitude during release
 MODE_LANDING  = 4   # (reserved, not yet implemented)
 # mode 5 removed: pumping now runs in MODE_STEADY (same control law); the ground
 # schedule varies the commanded tension (RAWES_TEN) and RAWES_SUB phase over time.
@@ -32,7 +33,7 @@ MODE_LANDING  = 4   # (reserved, not yet implemented)
 NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm countdown
                                   # value = countdown milliseconds; re-send to refresh
 
-# ── Named-float tuning + anchor keys (formerly SCR_USER2/3/4/5) ────────────────
+# ── Named-float tuning + anchor keys ─────────────────────────────────────────────────────
 # rawes.lua gates altitude-hold capture on all three anchor floats arriving.
 
 NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] (default 0.40)

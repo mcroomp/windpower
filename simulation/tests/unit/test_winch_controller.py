@@ -2,7 +2,7 @@
 
 import math
 import pytest
-from simulation.winch import WinchController
+from winch import WinchController
 
 
 # ---------------------------------------------------------------------------

@@ -433,7 +433,7 @@ Landing logic is implemented in `LandingGroundController` + `LandingApController
 | Cyclic phase offset | 2π/3 (120°) | π/2 (90°) |
 | Rotor mass | 40 kg | 5 kg |
 | Flap actuation | Individual servo per blade | Swashplate push-rods (mechanical) |
-| Anti-rotation | Not modeled | GB4008 + 80:44 gear |
+| Anti-rotation | Not modeled | GB4008 + 10:1 gear |
 
 Additional physics limitations in the current simulation:
 - No dynamic inflow, no wake memory, no tip vortices

@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.sitl
+
 _SIM_DIR = Path(__file__).resolve().parents[3]
 _SITL_DIR = Path(__file__).resolve().parents[1]
 _ANALYSIS_DIR = _SIM_DIR / "analysis"

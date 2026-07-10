@@ -517,11 +517,11 @@ def sanitize_log_name(test_name: str) -> str:
     """Convert a pytest node name into a shell/glob-safe log directory name.
 
     Pytest parametrized node names contain ``[param]`` brackets (e.g.
-    ``test_slow_rpm_sitl[slow_vary]``).  Square brackets are treated as
+    ``test_profile_sitl[variant]``).  Square brackets are treated as
     character-class globs by bash, which silently breaks
     globbing on the log dir and has caused stale-log
     confusion.  Replace brackets (and other unsafe chars) with underscores so
-    directory names are plain identifiers, e.g. ``test_slow_rpm_sitl_slow_vary``.
+    directory names are plain identifiers, e.g. ``test_profile_sitl_variant``.
     """
     safe = re.sub(r"[\[\]() /\\]+", "_", test_name)
     return safe.strip("_")
@@ -710,7 +710,7 @@ def _launch_mediator_static(
 
     The subprocess runs the SITL lockstep loop (recv_servos -> send_state)
     with constant sensor values.  No physics, no threading in the test.
-    Used by test_arm_minimal_sitl and test_gps_fusion_layers.
+    Useful for static SITL diagnostics and minimal bring-up checks.
     """
     def _fmt(arr) -> "list[str]":
         return [str(float(v)) for v in arr]

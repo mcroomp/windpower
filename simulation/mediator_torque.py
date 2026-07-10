@@ -12,7 +12,7 @@ Physical scenario
     rotate.  ArduPilot arms and EKF initialises with no yaw disturbance.
     • DYNAMIC phase: rotor spins up per the selected profile.  ArduPilot commands
         the Motor4 output PWM (default: output 9 / AUX 1) to drive the GB4008 motor
-        via the 80:44 gear and counteract yaw.
+        via the 10:1 gear and counteract yaw.
 
 Sensor data sent to ArduPilot (via SITLInterface.send_state)
 ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ def run(
 
     Dynamic phase (startup_hold_s … ∞)
     ------------------------------------
-    Real hub yaw dynamics: the motor counter-rotates via the 80:44 gear to
+    Real hub yaw dynamics: the motor counter-rotates via the 10:1 gear to
     maintain hub heading; ArduPilot's tail-rotor PID controls the GB4008 motor
     speed via the channel selected by ``tail_channel``.
 

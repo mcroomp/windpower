@@ -67,7 +67,7 @@ def _row_to_frame(r) -> TorqueTelemetryFrame:
         roll_deg        = _math.degrees(r.rpy_roll),
         pitch_deg       = _math.degrees(r.rpy_pitch),
         throttle        = r.throttle,
-        servo_pwm_us    = int(r.servo4_us),
+        servo_pwm_us    = int(r.servo_mot_us),
         omega_rotor_rads = r.omega_rotor,
         q_bearing_nm    = r.q_bearing_nm,
         q_motor_nm      = r.q_motor_nm,
@@ -98,10 +98,10 @@ ROTOR_Z         = HUB_HEIGHT + AXLE_TOTAL_H * 0.55  # blade height (~mid-axle)
 _V_BAT      = 15.2               # 4S LiPo nominal [V]
 _KV_RAD     = 66.0 * math.pi / 30.0  # rad/s per volt
 _R_MOTOR    = 7.5                # winding resistance [Ω]
-_GEAR_RATIO = 80.0 / 44.0        # ω_motor / ω_axle
+_GEAR_RATIO = 10.0               # ω_motor / ω_axle (10:1)
 _POLE_PAIRS = 11  # = SERVO_BLH_POLES / 2 (rawes_common_defaults.parm)
 _I_MAX      = _V_BAT / _R_MOTOR  # stall current [A] = 2.03 A
-_I_EQ       = (_V_BAT * 0.485 - (28.0 * _GEAR_RATIO / _KV_RAD)) / _R_MOTOR  # ≈ 0.07 A at back-EMF eq
+_I_EQ       = None  # TODO: update when motor/voltage spec confirmed for 10:1 gear
 
 _THRESHOLD  = 1.0     # ψ_dot warning threshold [deg/s]
 

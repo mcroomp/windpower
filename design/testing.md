@@ -138,8 +138,18 @@ Exercises the counter-torque motor stack (stationary hub, rotor spinning at cons
 No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt checks block arm without GPS).
 
 | File | Fixture | What it tests |
-|------|---------|--------------|
-| `test_yaw_regulation_sitl.py` | `torque_armed` | ArduPilot ATC_RAT_YAW DDFP PI holds yaw < 5 deg/s at 120 RPM |
+|------|---------|---------------|
+| `test_yaw_regulation_sitl.py` | `torque_armed` | Lua yaw trim observer (rawes.lua) holds psi_dot < 5 deg/s via H_YAW_TRIM |
+| `test_wobble_sitl.py` | `torque_armed_profile` | Canonical fixed-RPM wobble disturbance stays bounded |
+| `test_slow_rpm_sitl.py` | `torque_armed_profile` | Canonical slow varying-RPM disturbance stays bounded |
+
+**IC torque rig notes (`torque_armed` / `profile="ic"`):**
+- `FS_CRASH_CHECK=0` is set in `_IC_TORQUE_YAW_PARAMS`. Without it, ArduPilot's crash
+  detector (AngErr > 30 deg + low accel) disarms the vehicle during the observer's
+  initial convergence ramp, before H_YAW_TRIM reaches u\_eq.
+- The observer resets `_yaw_ff_trim=0` on PASSIVE entry; the first 15 s kinematic hold
+  keeps psi\_dot=0 so the trim stays near 0; after hub release the trim ramps to u\_eq
+  (~0.485) in ~1 s.  SETTLE\_S=75 s gives ample convergence time.
 
 **Torque arming note:** `_arm_sequence` passes `target_mode=ACRO` for all `_torque_stack` tests.
 ArduCopter's `mandatory_checks()` always runs `mandatory_gps_checks()` and `alt_checks()` regardless
@@ -150,9 +160,10 @@ both pass.
 
 | File | Fixture | What it tests |
 |------|---------|--------------|
-| `test_lua_flight_steady_sitl.py` | `acro_armed_lua_full` | Orbit r < 5 m, altitude stable ±2 m, yaw gap < 15 deg for ≥ 60 s |
-| `test_pumping_cycle_sitl.py` | `acro_armed_pumping_lua` | Reel-out + reel-in + net energy > 0 |
-| `test_landing_stack_sitl.py` | `acro_armed_landing_lua` | Descent + final drop + hub alt ≤ 2.5 m |
+| `test_kinematic_gps_sitl.py` | `acro_armed` | Canonical kinematic hold + dual-GPS fusion + clean EKF window |
+| `test_lua_flight_ic_passive_sitl.py` | `guided_nogps_armed_lua_full` | MODE_PASSIVE holds the seeded IC operating point after kinematic exit |
+| `test_lua_flight_steady_sitl.py` | `guided_nogps_armed_lua_full` | Canonical passive->steady handoff + sustained steady flight |
+| `test_pumping_cycle_sitl.py` | `guided_nogps_armed_pumping_lua` | Canonical pumping stack: planner + winch + Lua steady control |
 
 ---
 
@@ -510,6 +521,18 @@ giving it access to all module-level locals. Constants and functions are exposed
   `_rawes_fns` in `rawes_test_surface.lua` in the same commit.
 - When adding a **function-local** constant that tests need, hoist it to module level
   first, then add it to `_rawes_fns`. Function-locals are out of scope for the splice.
+
+**CRITICAL — `TelRow` fields in `telemetry_csv.py` must match `COLUMNS` in `telemetry_columns.py`.**
+The two files are not auto-generated from each other.  When the telemetry schema changes:
+
+1. Update `COLUMNS` / `ASYNC_MAV_COLUMNS` in `telemetry_columns.py` (the schema source of truth).
+2. Update the `TelRow` dataclass fields in `telemetry_csv.py` to match exactly.
+3. Update any code that constructs `TelRow` explicitly — especially `torque_test_utils.py`
+   which hard-codes `nvf_latest` dict keys and `TelRow(...)` keyword arguments.
+4. Update `mediator.py` row-write dict to use the new column names.
+
+A mismatch causes `TelRow.to_dict()` to raise `AttributeError` at test runtime, not at
+collection time, so it only surfaces when a test actually writes telemetry.
 - `test_yaw_lua.py` reads all yaw constants from `sim.fns.*` — no manual copies.
 - `test_math_lua.py` runs actual rawes.lua functions via `_rawes_fns` and cross-checks
   against `controller.py` equivalents. A failing test means `controller.py` diverged; fix that.

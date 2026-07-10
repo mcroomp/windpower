@@ -28,7 +28,7 @@ runs through the center top to bottom, with the tether attached at the bottom.
   +-------------------------+
   |   Pixhawk 6C            |
   |   REVVitRC ESC          |
-  |   GB4008 Motor ------+------> 80:44 spur gear --> counter-torque on hub
+  |   GB4008 Motor ------+------> 10:1 spur gear --> counter-torque on hub
   |   UBEC / PM / BM        |     keeps this assembly non-rotating
   |   4S LiPo 15.2V         |
   |   SiK Radio / RP3-H Rx  |

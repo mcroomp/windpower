@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.sitl
+
 _SIM_DIR  = Path(__file__).resolve().parents[3]
 _SITL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SIM_DIR))

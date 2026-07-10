@@ -21,7 +21,7 @@ Physical setup
               (US convention).
   Hub       : stationary inner assembly (~1 kg); yaw DOF psi [rad], psi_dot [rad/s]
   Axle      : stationary central shaft; tether attaches at bottom -- does NOT rotate
-  Gear      : 80:44 (rotor hub : motor pinion), so omega_motor = |omega_rotor| x (80/44)
+  Gear      : 10:1 (omega_motor / omega_hub), so omega_motor = |omega_rotor| x 10
   Motor     : GB4008 66KV BLDC; stator fixed to inner assembly, rotor geared to
               spinning outer rotor hub.  Motor throttle in [0, 1]; positive
               throttle produces CW counter-torque on the body.
@@ -59,7 +59,7 @@ setting psi_dot = 0 gives the same feedforward as before:
 
     throttle_eq = omega_rotor x GEAR_RATIO / RPM_SCALE
 
-At omega_rotor = 28 rad/s: throttle_eq = 28 x 1.818 / 105 ~= 0.485.
+At omega_rotor = 28 rad/s: throttle_eq = 28 x GEAR_RATIO / RPM_SCALE (update when RPM_SCALE changes).
 
 Yaw drift
 ---------
@@ -77,13 +77,15 @@ import dataclasses
 # Physical constants
 # ---------------------------------------------------------------------------
 
-#: Motor shaft speed per unit throttle [rad/s] -- GB4008 66KV x 15.2V (4S LiPo) ~= 105 rad/s
-#: The ESC governor targets motor shaft at throttle x RPM_SCALE.
-RPM_SCALE: float = 105.0   # rad/s
+#: Motor shaft speed per unit throttle [rad/s].
+#: With 10:1 gear: omega_motor_eq = omega_rotor * GEAR_RATIO = 28 * 10 = 280 rad/s at nominal.
+#: RPM_SCALE must satisfy throttle_eq = omega_rotor * GEAR_RATIO / RPM_SCALE in [0, 1].
+#: Verify against actual motor KV + supply voltage for the new hardware.
+RPM_SCALE: float = 578.0   # rad/s  (= OMEGA_ROTOR_NOMINAL * GEAR_RATIO / 0.485)
 
 #: Motor-side gear teeth / hub-side gear teeth  -->  omega_motor / omega_hub
 #: Inner assembly yaw rate: psi_dot = omega_hub - omega_motor / GEAR_RATIO
-GEAR_RATIO: float = 80.0 / 44.0
+GEAR_RATIO: float = 10.0
 
 #: Autorotation spin rate of the outer rotor hub at design point (10 m/s wind, de Schutter 2018)
 OMEGA_ROTOR_NOMINAL: float = 28.0   # rad/s  ~= 267 RPM
@@ -98,9 +100,11 @@ HUB_INERTIA_KGM2: float = 0.02
 MOTOR_INERTIA_KGM2: float = 1.0e-5
 
 #: ESC speed-governor gain -- commanded motor torque per rad/s of speed error
-#: [N.m/(rad/s)].  With J_total ~ 6e-3 kg.m^2 this gives a small-signal speed
-#: time constant tau = J_total / ESC_KP ~ 40 ms.
-ESC_KP: float = 0.15
+#: [N.m/(rad/s)].  Chosen so that tau = J_total / ESC_KP ≈ 40 ms.
+#: With GEAR_RATIO=10: J_total = 0.02/100 + 1e-5 = 2.1e-4 kg.m² → ESC_KP = 2.1e-4 / 0.040 ≈ 5.2e-3.
+#: (With the old 80:44 gear J_total ≈ 6.06e-3, ESC_KP was 0.15 — same 40ms target.)
+#: Discrete stability requires ESC_KP × dt / J_total < 1  (dt=10ms gives ≈ 0.25, safe).
+ESC_KP: float = 5.2e-3
 
 #: GB4008 peak torque at the motor shaft [N.m].  Finite -> the motor cannot change
 #: speed instantaneously; large throttle steps are slew-limited to Q_MAX / J_total.

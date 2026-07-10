@@ -164,18 +164,15 @@ class TelRow:
     mav_servo1_us:     float = float("nan")
     mav_servo2_us:     float = float("nan")
     mav_servo3_us:     float = float("nan")
-    mav_servo4_us:     float = float("nan")
+    mav_servo9_us:     float = float("nan")   # GB4008 motor (output 9)
     mav_nvf_yff_trim:  float = float("nan")
-    mav_nvf_yff_i:     float = float("nan")
+    mav_nvf_yff_u:     float = float("nan")
     mav_nvf_yff_gz:    float = float("nan")
-    mav_nvf_yff_kp:    float = float("nan")
-    mav_nvf_yff_ki:    float = float("nan")
-    mav_nvf_yff_kd:    float = float("nan")
 
     servo_s1_us: float = 0.0   # S1 swashplate servo PWM [µs]
     servo_s2_us: float = 0.0   # S2 swashplate servo PWM [µs]
     servo_s3_us: float = 0.0   # S3 swashplate servo PWM [µs]
-    servo4_us:   float = 0.0   # SERVO4 / GB4008 motor PWM [µs]
+    servo_mot_us: float = 0.0   # GB4008 motor PWM on output 9 [µs]
 
     # Counter-torque motor (torque tests; 0.0 in flight tests)
     q_bearing_nm: float = 0.0   # reserved; always 0 (bearing drag absorbed by ESC)

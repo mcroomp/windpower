@@ -1,33 +1,36 @@
 """
-torque/test_slow_rpm_sitl.py — Slow sinusoidal rotor hub RPM variation test.
+torque/test_slow_rpm_sitl.py — Varying-RPM torque test.
 
-Profile: omega_rotor = 28 + 5*sin(2*pi*0.05*t) rad/s  (+/-18%, 20 s period)
+Uses the canonical torque stack with the ``slow_vary`` mediator profile:
+slow sinusoidal rotor-speed variation with no special actuator or non-standard
+tail setup. This is the canonical RPM-disturbance test for yaw regulation.
 
-The motor PID must track the slowly changing RPM and maintain counter-rotation
-to keep yaw rate within +/-2 deg/s throughout the observation window.
-
-Telemetry -> simulation/logs/torque_telemetry_slow_vary.csv
+Pass criterion
+--------------
+  After settle: actual physics |psi_dot| remains bounded throughout the RPM
+  sweep window. Physics ground truth is used rather than EKF yawspeed.
 """
 from __future__ import annotations
 
 import math
+
 import pytest
 
-from torque_test_utils  import run_observation_loop, save_telemetry, assert_physics_yaw_rate
+pytestmark = pytest.mark.sitl
 
-_SETTLE_S   = 65.0                  # absolute SITL: startup_hold(15) + 50 s dynamics settle
-_OBSERVE_S  = 30.0                  # s  -- longer window because RPM variation is slow
-# P=0.015 cannot fully track 0.25 Hz RPM oscillation; steady-state psi_dot error ~100 deg/s.
-# Threshold verifies that psi_dot is bounded -- tuning can tighten this later.
-_THRESHOLD  = math.radians(120.0)   # [rad/s] -- bounded oscillation, not perfect tracking
+from torque_test_utils import run_observation_loop, save_telemetry, assert_physics_yaw_rate
+
+_SETTLE_S = 65.0
+_OBSERVE_S = 30.0
+_THRESHOLD = math.radians(120.0)
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["slow_vary"], indirect=True)
 def test_slow_rpm_sitl(torque_armed_profile):
     """
-    Rotor hub speed varies sinusoidally at 0.05 Hz (+/-18% of nominal).
-    The yaw rate PID must reject the slowly varying RPM disturbance.
-    Pass: max |psi_dot| < 2 deg/s after 40 s settle.
+    Rotor RPM varies slowly around nominal while the yaw loop stays canonical.
+
+    This is the canonical varying-RPM disturbance test for the yaw regulator.
     """
     ctx = torque_armed_profile
 

@@ -38,16 +38,10 @@ from stack_infra import observe  # noqa: E402
 def yaw_motor_pwm_from_servo_output(msg, default: int = 0) -> int:
     """Return yaw motor PWM from SERVO_OUTPUT_RAW.
 
-    Current mapping is Motor4 on output 9 (servo9_raw). Keep a fallback to
-    servo4_raw for compatibility with older logs/configs.
+    Motor4 is on output 9 (servo9_raw).
     """
     ch9 = int(getattr(msg, "servo9_raw", 0) or 0)
-    if ch9 > 0:
-        return ch9
-    ch4 = int(getattr(msg, "servo4_raw", 0) or 0)
-    if ch4 > 0:
-        return ch4
-    return int(default)
+    return ch9 if ch9 > 0 else int(default)
 
 
 def run_observation_loop(
@@ -70,19 +64,13 @@ def run_observation_loop(
     pwm = [0]  # latest Ch9/Ch4 PWM, captured by closure
     nvf_latest = {
         "mav_nvf_yff_trim": float("nan"),
-        "mav_nvf_yff_i": float("nan"),
-        "mav_nvf_yff_gz": float("nan"),
-        "mav_nvf_yff_kp": float("nan"),
-        "mav_nvf_yff_ki": float("nan"),
-        "mav_nvf_yff_kd": float("nan"),
+        "mav_nvf_yff_u":    float("nan"),
+        "mav_nvf_yff_gz":   float("nan"),
     }
     nvf_map = {
-        "YFF_T": "mav_nvf_yff_trim",
-        "YFF_I": "mav_nvf_yff_i",
+        "YFF_T":  "mav_nvf_yff_trim",
+        "YFF_U":  "mav_nvf_yff_u",
         "YFF_GZ": "mav_nvf_yff_gz",
-        "YFF_KP": "mav_nvf_yff_kp",
-        "YFF_KI": "mav_nvf_yff_ki",
-        "YFF_KD": "mav_nvf_yff_kd",
     }
     log = ctx.log
 
@@ -109,13 +97,10 @@ def run_observation_loop(
                 t_sim=t_rel, phase="DYNAMIC",
                 rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
                 omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
-                servo4_us=float(pwm[0]),
+                servo_mot_us=float(pwm[0]),
                 mav_nvf_yff_trim=float(nvf_latest["mav_nvf_yff_trim"]),
-                mav_nvf_yff_i=float(nvf_latest["mav_nvf_yff_i"]),
+                mav_nvf_yff_u=float(nvf_latest["mav_nvf_yff_u"]),
                 mav_nvf_yff_gz=float(nvf_latest["mav_nvf_yff_gz"]),
-                mav_nvf_yff_kp=float(nvf_latest["mav_nvf_yff_kp"]),
-                mav_nvf_yff_ki=float(nvf_latest["mav_nvf_yff_ki"]),
-                mav_nvf_yff_kd=float(nvf_latest["mav_nvf_yff_kd"]),
             ))
             if t_rel >= settle_s:
                 obs.append({"t": t_rel, "yaw": msg.yaw, "yaw_rate": msg.yawspeed})

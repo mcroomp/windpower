@@ -242,7 +242,7 @@ The ground station runs a model-based estimator that recovers wind speed and dis
 → ω_rotor ≈ throttle · RPM_SCALE / GEAR_RATIO
 ```
 
-For the current hardware (GB4008 + 80:44 spur gear): `RPM_SCALE = 105 rad/s`, `GEAR_RATIO ≈ 1.818`, so `ω_rotor ≈ throttle × 57.8 rad/s`. `throttle` is recovered from PWM by inverting the H_TAIL_TYPE=3 mapping (§4.8) — no sign flip, positive PID → positive throttle. Valid for τ > ~0.5 s averaging — long enough for the AP yaw-rate loop to settle out of transients.
+For the current hardware (GB4008 + 10:1 spur gear): `RPM_SCALE` and `GEAR_RATIO` are defined in `torque_model.py`; `ω_rotor ≈ throttle × RPM_SCALE / GEAR_RATIO`.
 
 **Inputs (all already on the wire):**
 
@@ -309,7 +309,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 |---|---|---|---|
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
-| 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_COL` NVF → RC3 PWM direct | bench yaw-tuning + manual swash validation |
+| 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_COL` NVF → RC3 PWM direct | manual swash validation |
 | 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
 | 5 — pumping | along the tether, at the per-phase altitude the ground gave us | whatever keeps the measured tether tension on target (435 N during reel-out, 226 N during reel-in) | pumping cycle |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
@@ -322,11 +322,8 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 
 | Parameter | SCR_USER | Default | Description |
 |---|---|---|---|
-| yaw-rate KP | SCR_USER1 | 0.012 | Lua yaw-rate PID proportional gain |
-| yaw-rate KI | SCR_USER2 | 0.005 | Lua yaw-rate PID integral gain |
-| yaw-rate KD | SCR_USER3 | 0.0 | Lua yaw-rate PID derivative gain (0 = off; D re-excites a limit cycle) |
-| (unused) | SCR_USER4 | 0.0 | Reserved; formerly the yaw Smith-predictor dead time (removed) |
-| yaw telemetry rate | SCR_USER5 | 2.0 | YFF_* NAMED_VALUE_FLOAT telemetry rate [Hz]; SITL raises this |
+| yaw motor slope | SCR_USER1 | 0 | d(shaft_RPM)/d(PWM_µs) override. 0 → bench default 0.504 RPM/µs. Set from bench calibration of the installed motor + gear. |
+| SCR_USER2–5 | — | — | Unused (removed). |
 | RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady, 3=passive, 4=landing |
 
 All other flight tunables (anchor position, slew rate, cyclic gains) are delivered as NAMED_VALUE_FLOATs — see table below.
@@ -418,6 +415,12 @@ seeds its vertical-speed integrator from the same IC collective.
 `_ic_roll_deg`, `_ic_pitch_deg`, `_ic_col` are populated by
 `RAWES_RIC`/`RAWES_PIC`/`RAWES_COL`.  Before the full seed arrives passive is
 inert (no defaults are commanded).
+
+**Yaw observer in passive mode.**  `run_yaw_trim()` runs every tick alongside
+`run_passive_mode()` once the IC is seeded and the vehicle is armed.  It reads
+the actual SERVO9 output back via `SRV_Channels:get_output_pwm(36)` and drives
+`H_YAW_TRIM` toward the equilibrium throttle (see §5.2).  The trim resets to
+0 on PASSIVE entry and converges within ~1 s.
 
 ### 4.3 Mode 1 — Steady (SCR_USER6=1)
 
@@ -532,7 +535,7 @@ Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes
 Sensing:    gyro.z (from ACRO_Heli EKF attitude)
 Control:    ATC_RAT_YAW P/I/D → Motor4 output (H_TAIL_TYPE=3 DDFP CW, no sign flip)
 Actuator:   anti-rotation motor on output 9 (AUX 1)
-            (current hardware: GB4008 + 80:44 spur gear — see components.md)
+            (current hardware: GB4008 + 10:1 spur gear — see components.md)
 ```
 
 **H_TAIL_TYPE=3 (DDFP CW):** NO sign flip — under the US-convention rotor body drifts CCW (gyro:z() < 0) → error positive → PID positive → throttle positive → motor on.
@@ -551,7 +554,7 @@ pwm > 1500 µs: throttle = trim + (1 − trim) × (pwm − 1500) / 500
 trim = equilibrium_throttle(omega_rotor) ≈ 0.485 at omega_rotor=28 rad/s
 ```
 
-Equilibrium throttle: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE = 28 × 1.818 / 105 ≈ 0.485`
+Equilibrium throttle: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE` (see `torque_model.py` for constants)
 
 ### 4.9 Simulation Mapping
 
@@ -576,11 +579,11 @@ The RAWES rotor (blades + outer hub shell) spins freely in autorotation. The sta
 assembly (flight controller, battery, servos) must maintain a fixed heading while the outer shell
 spins. The anti-rotation motor counters the reaction torque from rotor drag. Current hardware: EMAX GB4008 — see §5.2 and [components.md](components.md).
 
-### 5.2 Actuator: GB4008 + 80:44 Gear
+### 5.2 Actuator: GB4008 + 10:1 Gear
 
 **Motor:** EMAX GB4008, 66 KV, hollow shaft, stator fixed to inner assembly.
 **ESC:** REVVitRC 50A AM32 (standard PWM, 800–2000 µs).
-**Gear:** 80:44 spur (motor runs at 1.818× rotor hub speed).
+**Gear:** 10:1 spur (motor runs at 10× rotor hub speed).
 
 The motor drives the inner-hub yaw inertia through the gear. The ESC is a speed
 governor with **finite peak torque**, so the motor speed cannot change
@@ -601,23 +604,40 @@ jumps (the old zero-inertia algebraic model did, which drove a yaw limit cycle).
 
 | Symbol | Value | Source |
 |---|---|---|
-| RPM_SCALE | 105 rad/s | GB4008 66KV × 15.2V (4S LiPo) |
-| GEAR_RATIO | 80/44 ≈ 1.818 | Motor pinion faster than rotor |
+| RPM_SCALE | 578 rad/s | Motor full-speed (verify against actual motor + voltage) |
+| GEAR_RATIO | 10 | Motor shaft 10× faster than rotor hub (torque_model.py) |
 | HUB_INERTIA | 0.02 kg·m² | Inner-hub yaw inertia (excl. rotor) |
 | ESC_KP | 0.15 N·m/(rad/s) | Governor gain (τ ≈ J_total/ESC_KP ≈ 40 ms) |
 | ESC_Q_MAX | 2.0 N·m | GB4008 peak torque (finite → bounded slew) |
 
-H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419
+**Yaw control — servo-readback trim observer (rawes.lua):**
+
+ArduPilot's own yaw rate PID is **disabled** (P=I=D=0). Instead, rawes.lua runs a
+model-based trim observer (`run_yaw_trim`) that writes `H_YAW_TRIM` every 10 ms tick:
+
+```
+u          = (SERVO9_PWM − SERVO9_MIN) / (SERVO9_MAX − SERVO9_MIN)   ← read back from AP output
+trim_target = clamp(u − psi_dot / YFF_A,  0,  YFF_MAX)
+trim       += (dt / (TAU + dt)) × (trim_target − trim)
+param:set("H_YAW_TRIM", trim)
+```
+
+This drives `H_YAW_TRIM` toward the equilibrium throttle `u_eq = omega_rotor × GEAR_RATIO / RPM_SCALE`
+(see `torque_model.py` for constants) at which `psi_dot = 0`.
+at which `psi_dot = 0`.  `YFF_A = SCR_USER1 × SERVO9_SPAN_US × 2π/60` (default ≈ 52.8 rad/s per
+throttle unit; SCR_USER1=0 uses bench value 0.504 RPM/µs).  The AP yaw P-term handles
+fast transients; the observer absorbs the DC so the integrator is not needed.
 
 ### 5.3 Key Parameters
 
 | Parameter | Value | Purpose |
 |---|---|---|
-| H_TAIL_TYPE | 3 (DDFP CW) | NO sign flip: positive yaw error (from US-convention CCW body drift) → positive motor throttle |
-| ATC_RAT_YAW_P | 0.20 | Starting P gain |
-| ATC_RAT_YAW_I | 0.05 | Corrects residual yaw not cancelled by trim |
-| ATC_RAT_YAW_D | 0.0 | Start at zero |
-| ATC_RAT_YAW_IMAX | 0 | No integrator windup |
+| H_TAIL_TYPE | 3 (DDFP CW) | No sign flip: positive yaw error → positive motor throttle |
+| ATC_RAT_YAW_P | 0.0 | AP yaw PID off — rawes.lua observer owns H_YAW_TRIM |
+| ATC_RAT_YAW_I | 0.0 | Off — observer absorbs DC offset |
+| ATC_RAT_YAW_D | 0.0 | Off |
+| ATC_RAT_YAW_IMAX | 0.1 | Clamp (safety; integrator is zero) |
+| SCR_USER1 | 0 | Slope override; 0 = bench default 0.504 RPM/µs |
 
 ---
 
@@ -628,12 +648,8 @@ H_YAW_TRIM = −(throttle_eq − SPIN_MIN)/(SPIN_MAX − SPIN_MIN) = −0.419
 | Parameter | Value | Reason |
 |---|---|---|
 | SCR_ENABLE | 1 | Enable Lua scripting subsystem |
-| SCR_USER1 | 0.012 | Lua yaw-rate PID KP |
-| SCR_USER2 | 0.005 | Lua yaw-rate PID KI |
-| SCR_USER3 | 0.0 | Lua yaw-rate PID KD (0 = off) |
-| SCR_USER4 | 0.0 | Reserved (formerly Smith-predictor dead time; removed) |
-| SCR_USER5 | 2.0 | YFF_* telemetry rate [Hz]; SITL raises this |
-| SCR_USER6 | 0/1/4 | RAWES_MODE selector |
+| SCR_USER1 | 0 | Yaw motor slope override [RPM/µs]. 0 → bench default 0.504. Set from bench calibration. |
+| SCR_USER6 | 0/1/3/4 | RAWES_MODE selector |
 
 Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not SCR_USER params.
 
@@ -701,7 +717,7 @@ at ~34 s — well before kinematic exit at 80 s.
 
 ### 6.4 Anti-Rotation Motor (Motor4 Output)
 
-Current hardware: GB4008 + 80:44 spur gear. See §5.2 and [components.md](components.md) for the actual motor + ESC. The ArduPilot parameters below configure Motor4 on output 9.
+Current hardware: GB4008 + 10:1 spur gear. See §5.2 and [components.md](components.md) for the actual motor + ESC.
 
 | Parameter | Value | Reason |
 |---|---|---|

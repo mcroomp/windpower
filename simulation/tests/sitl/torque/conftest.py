@@ -54,7 +54,6 @@ def torque_armed(tmp_path, request):
         passive_roll_rad=_IC_ROLL_RAD,
         passive_pitch_rad=_IC_PITCH_RAD,
         passive_yaw_rad=_IC_YAW_RAD,
-        passive_yaw_ff_ki=0.05,
     ) as ctx:
         yield ctx
 

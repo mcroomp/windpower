@@ -1848,6 +1848,7 @@ _IC_TORQUE_YAW_PARAMS = ParamSetup({
     "H_YAW_TRIM":       0.02,   # not set by the common file (AP default is 0)
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
+    "FS_CRASH_CHECK":   0,      # observer needs time to converge; yaw angle may deviate temporarily
 })
 
 # Extra params for Lua torque fixtures.
@@ -1908,7 +1909,6 @@ def _torque_stack(
     passive_roll_rad: float = 0.0,
     passive_pitch_rad: float = 0.0,
     passive_yaw_rad: "float | None" = None,
-    passive_yaw_ff_ki: "float | None" = None,
     use_vanilla_boot_defaults: bool = False,
     motor_delay_ms: float = 0.0,
 ):
@@ -1954,11 +1954,6 @@ def _torque_stack(
     passive_yaw_rad        : optional fixed yaw target [rad] sent to MODE_PASSIVE (RAWES_YIC).
                              When set, PASSIVE holds this absolute yaw instead of capturing
                              (and chasing) the spinning AHRS yaw.  None -> AHRS capture.
-    passive_yaw_ff_ki      : optional Lua yaw-feedforward integral gain sent to MODE_PASSIVE
-                             (RAWES_YFK).  When > 0, rawes.lua runs an integral-trim on the
-                             measured spin rate and writes H_YAW_TRIM directly, bypassing the
-                             attitude-controller clamp that freezes the native rate PID.
-                             None/0 -> feedforward disabled (native DDFP PID only).
     use_vanilla_boot_defaults : when True, use _sitl_stack default boot chain
                              (copter-heli + rawes_common_defaults + rawes_sitl_defaults)
                              instead of _BASE_TORQUE_BOOT_PARAMS. Any extra_params,
@@ -2153,8 +2148,6 @@ def _torque_stack(
                 if passive_yaw_rad is not None:
                     gcs.send_named_float("RAWES_YIC", float(passive_yaw_rad))
                     _pre_arm_yaw = float(passive_yaw_rad)
-                if passive_yaw_ff_ki is not None:
-                    gcs.send_named_float("RAWES_YFK", float(passive_yaw_ff_ki))
                 log.info(
                     "PASSIVE seed: RAWES_COL=%+.4f rad, RIC=%+.4f, PIC=%+.4f, YIC=%s; pre-arm yaw=%.1f deg",
                     passive_col_rad, passive_roll_rad, passive_pitch_rad,

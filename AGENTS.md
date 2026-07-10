@@ -52,14 +52,19 @@ For signs, frame details, EKF gating, and mixer conventions, read the primary do
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
 - For failing simtest/stack test, validate telemetry/log quality before root-cause analysis.
 - Keep telemetry schema centralized in `simulation/telemetry_columns.py`.
+- When changing telemetry columns: update `TelRow` fields in `telemetry_csv.py`, NVF maps in `torque_test_utils.py`, and row-write dicts in `mediator.py` in the same commit. Mismatch causes `AttributeError` in `TelRow.to_dict()` at runtime.
 - Keep `controller.py` aligned with `simulation/scripts/rawes.lua` behavior.
 - Keep `simulation/scripts/rawes_test_surface.lua` exports in sync with needed Lua test symbols.
 
 ## Test Entry Points
 
-- Unit: `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" ...`
-- Simtest: `.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest ...`
-- Stack (Docker): `bash test.sh stack ...`
+There are three tiers, each with a different scope and runtime:
+
+| Tier | Command | Marker | Notes |
+|---|---|---|---|
+| Unit | `.venv/Scripts/python.exe -m pytest simulation/tests/unit` | (none) | Fast; no physics sim |
+| Simtest | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
+| Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
 
 Use `design/sitl_testing.md` for stack-specific run/diagnose flow.
 
@@ -76,3 +81,13 @@ When updating documentation:
 - In other docs, keep only short context + link to the owner doc.
 - Avoid duplicating long parameter tables or algorithm walkthroughs across multiple files.
 - If ownership changes, update this map first.
+
+**If a mistake was caused by stale documentation, fix that documentation in the same commit
+as the code fix.** The test for "stale" is: would a future agent reading only the docs make
+the same mistake? If yes, the doc is stale and must be updated before the session closes.
+This applies to:
+- Design docs (`design/*.md`) describing parameters, modes, or control architecture.
+- `AGENTS.md` workflow rules and invariants.
+- Parm files (`*.parm`) that document defaults.
+- Repo memory files (`/memories/repo/`) that summarise past decisions.
+Do NOT wait for the user to notice. Fix the doc immediately when the stale reference is identified.

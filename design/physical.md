@@ -6,7 +6,7 @@
 | Blade length | 2000 mm, rotor radius ~2500 mm |
 | Rotor mass | 5 kg, airfoil SG6042 |
 | Tether | Dyneema SK75, 1.9 mm, max 300 m |
-| Anti-rotation motor | EMAX GB4008 66KV, 80:44 spur gear |
+| Anti-rotation motor | EMAX GB4008 66KV, 10:1 spur gear |
 | Servos S1/S2/S3 | DS113MG V6.0 |
 | Flight controller | Holybro Pixhawk 6C |
 | Battery | 4S LiPo 15.2V, 450 mAh |

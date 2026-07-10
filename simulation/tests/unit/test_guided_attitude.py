@@ -223,7 +223,9 @@ class TestGuidedAttitudeController:
         ctrl = _make_ctrl(ang_p=4.5, accel_max_cdss=0.0, input_tc=0.0)
         ctrl.set_target_angle_and_climbrate(0.0, 0.0, 30.0, sim_time=0.0)
         out = ctrl.update(_q(), (0.0, 0.0, 0.0), dt=0.0025, sim_time=0.0)
-        assert abs(out.yaw_cmd) > 0.0
+        # Default yaw rate PID gains are zero in the canonical param set, so
+        # yaw_cmd can be zero even when a yaw attitude error exists.
+        assert abs(ctrl._last_rate_target_rads[2]) > 0.0
         assert abs(out.roll_cyclic)  < 1e-4
         assert abs(out.pitch_cyclic) < 1e-4
 

@@ -39,7 +39,7 @@ through blade pitch, actuated indirectly via trailing-edge flaps on each blade.
 | Max tether length  | 300 m         |
 | Min altitude       | 10 m          |
 | Tether attachment  | Bottom of axle|
-| Anti-rotation motor| EMAX GB4008 66KV, 80:44 spur gear |
+| Anti-rotation motor| EMAX GB4008 66KV, 10:1 spur gear |
 | Servos S1/S2/S3    | DS113MG V6.0 |
 | Flight controller  | Holybro Pixhawk 6C |
 | Battery            | 4S LiPo 15.2V, 450 mAh |

@@ -70,9 +70,9 @@ def load(path: str, start_s: float) -> dict:
                 continue
             t.append(ts)
             omz.append(_f(row, "omega_z"))
-            s4.append(_f(row, "servo4_us"))
+            s4.append(_f(row, "servo_mot_us"))
             trim.append(_f(row, "mav_nvf_yff_trim"))
-            yi.append(_f(row, "mav_nvf_yff_i"))
+            yi.append(_f(row, "mav_nvf_yff_u"))
             gz.append(_f(row, "mav_nvf_yff_gz"))
             kp.append(_f(row, "mav_nvf_yff_kp"))
             ki.append(_f(row, "mav_nvf_yff_ki"))

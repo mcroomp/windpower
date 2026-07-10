@@ -7,7 +7,7 @@ anti-rotation motor counter-rotates against the spinning rotor hub.
 Physical scenario
 -----------------
   * Rotor hub spins at ~28 rad/s (nominal RAWES autorotation at 10 m/s wind)
-  * The motor counter-rotates via the 80:44 gear to maintain inner assembly heading
+  * The motor counter-rotates via the 10:1 gear to maintain inner assembly heading
   * The ESC holds commanded RPM; bearing/swashplate drag only affect power draw
   * ArduPilot (heli frame, ACRO mode) senses the yaw rate via gyro and
     commands the Motor4 output to control GB4008 motor speed
@@ -43,6 +43,8 @@ from torque_test_utils import (
 _SETTLE_S          = 75.0   # absolute SITL: startup_hold(15) + 60 s dynamics settle
 _OBSERVE_S         = 20.0
 _MAX_PSI_DOT_RAD_S = math.radians(5.0)   # [rad/s]
+
+pytestmark = pytest.mark.sitl
 
 def test_yaw_regulation_sitl(torque_armed):
     """

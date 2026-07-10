@@ -65,10 +65,8 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 
 | Name | `SCR_USER6` | Uses yaw motor output? | Accepts `--gain`? |
 |---|---|---|---|
-| `passive` | 3 | yes (pins at 800 µs) | no |
-| `yaw` | 2 | yes (Lua yaw PID drives motor output) | yes (full PID + filters + servo limits) |
-| `steady` | 1 | no | no |
-| `pumping` | 5 | no | no |
+| `passive` | 3 | yes — `run_yaw_trim` observer sets H_YAW_TRIM each tick | no |
+| `steady` | 1 | observer active | no |
 | `landing` | 4 | no | no |
 
 `--trim` keys (rad), applies to all modes:
@@ -79,22 +77,13 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 | `tlat` | `RAWES_TLT` | cyclic trim lateral |
 | `col`  | `RAWES_COL` | IC collective |
 
-`--gain` keys (only for `yaw`; values written to ArduPilot params, restored on exit):
-
-| Key | AP param | Notes |
-|---|---|---|
-| `p`,`i`,`d`,`ff`,`imax` | `ATC_RAT_YAW_*` | Yaw rate PID gains |
-| `trim` | `H_YAW_TRIM` | Feedforward throttle |
-| `flte`,`fltt`,`fltd` | `ATC_RAT_YAW_FLT*` | Target / error / derivative filters |
-| `accelmax` | `ATC_ACC_Y_MAX` (fallback `ATC_ACCEL_Y_MAX`) | Yaw accel limit |
-| `servo_min`,`servo_max` | `SERVO9_MIN/MAX` | Motor PWM range cap |
+`--gain` is not accepted in any current mode.  Yaw is regulated by the
+servo-readback trim observer in rawes.lua — calibrate `SCR_USER1` (slope) from
+a bench measurement rather than tuning AP PID gains.
 
 ```bash
-# Bench check: hold IC swashplate + motor off, 30 s
+# Bench check: hold IC swashplate, observer active, 30 s
 python calibrate.py --port COM7 run passive --duration 30 --trim tlon=0.02,col=-0.15
-
-# Yaw PID tuning session with safety cap on motor max
-python calibrate.py --port COM7 run yaw --duration 60 --gain p=0.015,imax=0.7,servo_max=1100 --trim tlon=0.02,col=-0.15
 
 # Steady-flight bench, unbounded (ESC to stop)
 python calibrate.py --port COM7 run steady
@@ -186,8 +175,7 @@ Every `run` and `watch` session writes a CSV under `simulation/logs/calibrate/`
 name, duration, trim/gain dicts, run-start timestamps (local + UTC), and a snapshot
 of relevant AP params. Data section is plain CSV.
 
-Useful for offline analysis (e.g. `simulation/scripts/analyze_tuning.py` for yaw PID
-runs).
+Useful for offline analysis.
 
 ---
 
@@ -197,7 +185,7 @@ runs).
 |----------|-------|--------|
 | Kv | 66 RPM/V | EMAX spec |
 | Pole configuration | see SERVO_BLH_POLES | verified against known RPM |
-| Gear ratio | 80:44 = 1.818 | Hardware |
+| Gear ratio | 10:1 | Hardware |
 | Kt (motor shaft) | 0.144 N·m/A | Derived: 60/(2π×66) |
 | eRPM → motor RPM | ÷ (SERVO_BLH_POLES/2) | pole-pairs |
 | eRPM → rotor RPM | ÷ (SERVO_BLH_POLES/2 × 80/44) | apply gear ratio |

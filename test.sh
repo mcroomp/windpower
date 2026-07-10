@@ -279,21 +279,25 @@ _run_stack() {
         _ACTIVE_CTRS=("${_still_ctrs[@]+"${_still_ctrs[@]}"}")
     }
 
-    local j _c _f _wlog _label
+    local j _c _f _wlog _label _short
     for j in $(seq 0 $((_N_FILES-1))); do
         while [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ]; do
             _reap_finished
             [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ] && sleep 0.5
         done
 
-        _c="rawes-parallel-${_RUN_ID}-${j}"
+        _label="$(basename "${_ALL_FILES[$j]}" .py)"
+        _short="$(echo "${_label#test_}" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | sed 's/^-*//; s/-*$//')"
+        _short="${_short:0:20}"
+        [ -z "$_short" ] && _short="t${j}"
+
+        _c="rawes-parallel-${_RUN_ID}-${_short}-${j}"
         _CONTAINERS+=("$_c")
         _f="/rawes/simulation/${_ALL_FILES[$j]#${SIM_DIR}/}"
         _wlog="/tmp/rawes-parallel-${_RUN_ID}-t${j}.log"
         _WORKER_LOGS+=("$_wlog")
-        _label="$(basename "${_ALL_FILES[$j]}" .py)"
 
-        _log "[t${j}] starting: $_label"
+        _log "[t${j}] starting: $_label ($_c)"
         (
             docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
             _sync_code "$_c" >/dev/null 2>&1

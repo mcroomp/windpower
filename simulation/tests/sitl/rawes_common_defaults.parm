@@ -49,43 +49,18 @@ H_RSC_MODE        1      # passthrough: no main rotor motor
 H_TAIL_TYPE       3
 H_COL2YAW         0.0
 
-# AP yaw PID fully OFF (P=I=D=0): yaw is now regulated entirely by the Lua manual
-# PID, which reads gyro:z() and writes its output through H_YAW_TRIM.  The AP DDFP
-# path (H_TAIL_TYPE=3) still runs but, with all gains zero, only passes the Lua's
-# H_YAW_TRIM feedforward through to the yaw motor (OUTPUT 9).  Leaving any AP yaw
-# gain nonzero makes
-# the AP loop fight the Lua loop and drives a high-frequency yaw limit cycle
-# (observed: +-300 deg/s bang-bang on the yaw motor).  Tune the Lua PID via SCR_USER1/2/3.
+# AP yaw PID off: H_YAW_TRIM is the sole yaw motor command channel.  Any nonzero
+# AP yaw gain fights the Lua-owned trim and drives a limit cycle.
 ATC_RAT_YAW_P     0.0
 ATC_RAT_YAW_D     0.0
 ATC_RAT_YAW_FLTD  10.0
 ATC_RAT_YAW_I     0.0
 
-# Lua yaw-rate PID gains (rawes.lua reads these as KP/KI/KD via SCR_USER1/2/3).
-# The Lua PID regulates gyro:z() -> 0 and writes its output to H_YAW_TRIM (the AP
-# yaw PID is fully off).  The throttle->yaw-rate plant gain is huge (~58 rad/s per
-# unit), the GB4008/ESC has lag, and the motor is UNIDIRECTIONAL (throttle >= 0,
-# counters CCW drift only -- it cannot actively brake an over-correction, only shut
-# off and wait for rotor drag).  Two failure modes bound the tuning:
-#   * KP too high (or any KD) -> fast actuator-lag limit cycle (+-300 deg/s bang-bang).
-#   * KP too low vs KI        -> slow underdamped heading limit cycle (+-130 deg/s),
-#                                because KP*err = -KP*psi_dot is the only rate damping
-#                                and KI is a heading spring that overshoots equilibrium.
-# Balance: modest KP for rate damping, a gentle KI to hold the DC throttle
-# (equilibrium ~0.3 here) without overshooting, and NO derivative.  Tune live with
-# calibrate `run` keys (P '-'/'=', I '['/']', D ','/'.').
-# NOTE: analyze_yaw_limit_cycle.py on the telemetry shows the actuator never
-# saturates (throttle 0.29-0.42, no rail pinning) -- the residual cycle is LINEAR
-# UNDERDAMPING/disturbance tracking.  KP too high (>=0.04) re-excites a fast
-# actuator-lag limit cycle, so KP is kept moderate with a gentle KI and no D.
-SCR_USER1         0.012
-SCR_USER2         0.005
-SCR_USER3         0.0
-
-# SCR_USER5: Lua yaw-PID telemetry rate [Hz] (YFF_* NAMED_VALUE_FLOATs).  Kept low
-# on hardware/common to conserve link bandwidth; SITL raises it (see
-# rawes_sitl_defaults.parm) so every telemetry row captures fresh PID state.
-SCR_USER5         2.0
+# SCR_USER1: yaw motor slope override [RPM/µs].  0 -> use bench default 0.504.
+# Set from bench measurement of d(shaft_RPM)/d(PWM_us) for the installed motor.
+# The correct value for the GB4008 66KV + 10:1 gear is SCR_USER1 = RPM_SCALE/(GEAR_RATIO * SERVO9_SPAN_US * 2pi/60)
+# (see torque_model.py for RPM_SCALE and GEAR_RATIO). Bench measurement gives 0.504 for the old 80:44 gear.
+SCR_USER1         0
 
 # --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
 # Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw

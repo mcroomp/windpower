@@ -65,20 +65,18 @@ _rawes_fns = {
     SPIN_LIMIT_RADS    = SPIN_LIMIT_RADS,
     SPIN_LIMIT_MS      = SPIN_LIMIT_MS,
 
-    -- ── Yaw-rate PID (writes H_YAW_TRIM) ─────────────────────────────────────
-    -- Pure PID core + state accessors + reset (unit-testable in isolation).
-    yaw_trim_ff_step = yaw_trim_ff_step,
-    yaw_ff_trim      = function() return _yaw_ff_trim end,
-    yaw_ff_reset     = function()
-        _yaw_ff_trim   = 0.0
-        _yaw_i         = 0.0
-        _yaw_err_prev  = 0.0
-        _yaw_d_lp      = 0.0
-        _yaw_pid_valid = false
-        _yaw_last_s    = nil
+    -- ── Yaw trim observer ────────────────────────────────────────────────────
+    -- Pure step + state accessors for unit-testing yaw_trim_step in isolation.
+    yaw_trim_step   = yaw_trim_step,
+    yaw_ff_trim     = function() return _yaw_ff_trim end,
+    yaw_trim_reset  = function()
+        _yaw_ff_trim     = 0.0
+        _yaw_nvf_last_ms = nil
     end,
-    YAW_MOTOR_FUNC   = YAW_MOTOR_FUNC,
-    YFF_MAX          = YFF_MAX,
+    YAW_MOTOR_FUNC  = YAW_MOTOR_FUNC,
+    YFF_A           = YFF_A,
+    YFF_MAX         = YFF_MAX,
+    YFF_TRIM_TAU    = YFF_TRIM_TAU,
 
     -- ── RAWES_ARM state accessors ─────────────────────────────────────────────
 

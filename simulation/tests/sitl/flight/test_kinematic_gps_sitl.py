@@ -29,6 +29,9 @@ from stack_infra import _acro_stack
 sys.path.insert(0, str(_SIM_DIR / "analysis"))
 from analyse_run import validate_ekf_window
 
+import pytest
+pytestmark = pytest.mark.sitl
+
 
 def test_kinematic_gps_sitl(tmp_path, request):
     """

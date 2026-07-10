@@ -75,7 +75,7 @@ def load(path: str) -> dict:
                 att_rate.append(float(d.get("yawspeed", math.nan)))
             elif mt == "SERVO_OUTPUT_RAW":
                 srv_t.append(t)
-                srv_pwm.append(float(d.get("servo4_raw", math.nan)))
+                srv_pwm.append(float(d.get("servo9_raw", math.nan)))
             elif mt == "NAMED_VALUE_FLOAT":
                 nm = d.get("name")
                 if nm in nvf:
