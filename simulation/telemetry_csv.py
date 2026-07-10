@@ -165,6 +165,7 @@ class TelRow:
     mav_servo2_us:     float = float("nan")
     mav_servo3_us:     float = float("nan")
     mav_servo9_us:     float = float("nan")   # GB4008 motor (output 9)
+    mav_att_yaw_rate_rads: float = float("nan")  # MAVLink ATTITUDE yawspeed [rad/s]
     mav_nvf_yff_trim:  float = float("nan")
     mav_nvf_yff_u:     float = float("nan")
     mav_nvf_yff_gz:    float = float("nan")

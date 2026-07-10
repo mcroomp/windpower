@@ -18,7 +18,8 @@
 #   bash test.sh -n 8                # full stack suite, 8 workers
 #   bash test.sh -n 1 -k test_foo    # a single stack test
 #
-export MSYS_NO_PATHCONV=1
+# Suppress path mangling in MSYS/Git-for-Windows; harmless elsewhere.
+[[ -n "${MSYSTEM:-}" ]] && export MSYS_NO_PATHCONV=1
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_DIR="$REPO_DIR/simulation"
@@ -252,7 +253,9 @@ _run_stack() {
     local _PROCS_BEFORE
     _PROCS_BEFORE=$(_snap_procs)
 
-    _log "[INFO] $_N_FILES tests, max $_N_WORKERS concurrent (run=$_RUN_ID)"
+    echo ""
+    echo "=== STACK TEST RUN START run=$_RUN_ID files=$_N_FILES workers=$_N_WORKERS date=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo ""
 
     declare -a _ACTIVE_PIDS=()
     declare -a _ACTIVE_CTRS=()
@@ -333,45 +336,52 @@ _run_stack() {
     _warn_new_procs "$_PROCS_BEFORE"
 
     echo ""
-    echo "----------------------------------------------------------------------"
+    echo "=== SUMMARY ==="
     declare -a _FAILED_LABELS=()
     declare -a _FAILED_WLOGS=()
-    local _summary
+    local _summary _status _n_pass=0 _n_fail=0
     for j in $(seq 0 $((_N_FILES-1))); do
         _wlog="${_WORKER_LOGS[$j]}"
         _label="$(basename "${_ALL_FILES[$j]}" .py)"
-        _summary=$(grep -E "^=+ .* in [0-9]" "$_wlog" 2>/dev/null | tail -1 || echo "(no summary)")
-        printf "[%-42s] %s\n" "$_label" "$_summary"
+        _summary=$(grep -E "^=+ .* in [0-9]" "$_wlog" 2>/dev/null | tail -1 || echo "(no output)")
         if echo "$_summary" | grep -qiE "failed|error"; then
+            _status="FAIL"
             _FAILED_LABELS+=("$_label")
             _FAILED_WLOGS+=("$_wlog")
+            (( _n_fail++ )) || true
+        else
+            _status="PASS"
+            (( _n_pass++ )) || true
         fi
+        printf "%-6s | %-42s | %s\n" "$_status" "$_label" "$_summary"
     done
-    echo "----------------------------------------------------------------------"
+    echo "=== END SUMMARY ==="
 
     if [ "${#_FAILED_LABELS[@]}" -gt 0 ]; then
         echo ""
-        echo "============================== FAILURE DETAILS =============================="
+        echo "=== FAILURES ==="
         local _fi _fl _fw
         for _fi in "${!_FAILED_LABELS[@]}"; do
             _fl="${_FAILED_LABELS[$_fi]}"
             _fw="${_FAILED_WLOGS[$_fi]}"
             echo ""
-            echo "--- $_fl ---"
+            echo "### FAIL: $_fl ###"
             awk '
                 /^=+[ ]+(FAILURES|ERRORS)[ ]=+/ { in_s=1; print; next }
                 /^=+[ ]+short test summary/ { in_s=0 }
                 in_s { print }
-            ' "$_fw" 2>/dev/null | head -100 || true
+            ' "$_fw" 2>/dev/null | head -120 || true
             grep -E "^(FAILED|ERROR) " "$_fw" 2>/dev/null || true
-            echo "---"
+            echo "### END FAIL: $_fl ###"
         done
         echo ""
-        echo "============================================================================="
+        echo "=== END FAILURES ==="
     fi
 
     local _WIN_LOGS
-    _WIN_LOGS=$(cygpath -w "$SIM_DIR/logs" 2>/dev/null || echo "simulation\\logs")
+    _WIN_LOGS=$(cygpath -w "$SIM_DIR/logs" 2>/dev/null || echo "$SIM_DIR/logs")
+    echo ""
+    echo "=== RESULT: $_n_pass passed, $_n_fail failed out of $((_n_pass+_n_fail)) ==="
     _log "[LOGS] ${_WIN_LOGS}"
     return $_RC
 }

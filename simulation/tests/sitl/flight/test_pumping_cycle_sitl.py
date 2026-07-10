@@ -81,6 +81,7 @@ _TENSION_LIMIT_N = 0.8 * _BREAK_LOAD_N   # 496 N
 _SOCK_TIMEOUT = 0.5
 
 
+@pytest.mark.timeout(int(_OBS_SECONDS) + 120)
 def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     """
     Pumping cycle stack test: PumpingGroundController in test process,

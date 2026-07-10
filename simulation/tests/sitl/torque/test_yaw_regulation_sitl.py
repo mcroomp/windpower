@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 from torque_test_utils import (
     run_observation_loop,
     save_telemetry,
