@@ -13,11 +13,11 @@ Timeline (SITL seconds):
   t ~ 55-65 s   PI settled; observation window 1 opens (psi_dot < threshold).
     test sends RAWES_ARM(5 000 ms) to shorten deadline to 5 s from now.
     Lua disarms → "RAWES disarm timer expired, disarmed" STATUSTEXT.
-  observation window 2 — motor at 800 µs, psi_dot growing beyond threshold.
+    observation window 2 — motor at 1000 µs, psi_dot growing beyond threshold.
 
 Pass criteria:
   [armed]   max |psi_dot| < 5 deg/s (physics ground truth) over 10 s window.
-  [disarmed] motor PWM = 800 us AND max |psi_dot| > 10 deg/s over 8 s window.
+    [disarmed] motor PWM = 1000 us AND max |psi_dot| > 10 deg/s over 8 s window.
 
 Run with (inside Docker):
   RAWES_RUN_STACK_INTEGRATION=1 pytest \\
@@ -39,7 +39,7 @@ for _p in (str(_SIM_DIR), str(_SITL_DIR)):
         _sys.path.insert(0, _p)
 
 from stack_infra import observe
-from torque_test_utils import save_telemetry
+from torque_test_utils import save_telemetry, yaw_motor_pwm_from_servo_output
 from telemetry_csv import TelRow
 from rawes_modes import NV_ARMON_KEY
 
@@ -103,8 +103,7 @@ def test_armon_sitl(torque_unarmed_lua):
                 return True
 
         elif mt == "SERVO_OUTPUT_RAW":
-            ch9 = getattr(msg, "servo4_raw", 0) or 0
-            pwm[0] = ch9
+            pwm[0] = yaw_motor_pwm_from_servo_output(msg, default=pwm[0])
 
         elif mt == "ATTITUDE":
             rows.append(TelRow(
@@ -170,8 +169,7 @@ def test_armon_sitl(torque_unarmed_lua):
         if mt == "STATUSTEXT":
             log.info("t=%.1f  SITL: %s", t_rel, msg.text.rstrip("\x00").strip())
         elif mt == "SERVO_OUTPUT_RAW":
-            ch9 = getattr(msg, "servo4_raw", 0) or 0
-            pwm[0] = ch9
+            pwm[0] = yaw_motor_pwm_from_servo_output(msg, default=pwm[0])
         elif mt == "ATTITUDE":
             elapsed = gcs.sim_now() - t_drift_start
             drift_rows.append(TelRow(
@@ -205,16 +203,16 @@ def test_armon_sitl(torque_unarmed_lua):
             f"(got {len(drift)}, need >= 5)"
         )
 
-    # Motor must be at 800 µs after a brief spin-down period.
+    # Motor must be at 1000 µs after a brief spin-down period.
     # Allow 2 s for the ESC to ramp to idle after disarm before checking.
     _SPINDOWN_S = 2.0
-    bad_pwm = [s for s in drift if s["t"] > _SPINDOWN_S and s["pwm"] not in (0, 800)]
+    bad_pwm = [s for s in drift if s["t"] > _SPINDOWN_S and s["pwm"] not in (0, 1000)]
     if bad_pwm:
         worst = max(bad_pwm, key=lambda s: s["pwm"])
         pytest.fail(
-            f"Motor not at 800 us after disarm+spindown: pwm={worst['pwm']} at t={worst['t']:.1f} s"
+            f"Motor not at 1000 us after disarm+spindown: pwm={worst['pwm']} at t={worst['t']:.1f} s"
         )
-    log.info("PASS [motor off] -- all %d drift samples at 800 us", len(drift))
+    log.info("PASS [motor off] -- all %d drift samples at 1000 us", len(drift))
 
     # psi_dot must exceed threshold (yaw genuinely out of control).
     max_drift = max(abs(s["psi_dot"]) for s in drift)

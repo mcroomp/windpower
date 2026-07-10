@@ -21,8 +21,8 @@ Output:
   3) Optional CSV for offline inspection
 
 Examples:
-  simulation/.venv/Scripts/python.exe simulation/analysis/arm_target_timeline.py test_lua_flight_ic_passive_sitl
-  simulation/.venv/Scripts/python.exe simulation/analysis/arm_target_timeline.py simulation/logs/test_lua_flight_ic_passive_sitl --csv out.csv
+    .venv/Scripts/python.exe simulation/analysis/arm_target_timeline.py test_lua_flight_ic_passive_sitl
+    .venv/Scripts/python.exe simulation/analysis/arm_target_timeline.py simulation/logs/test_lua_flight_ic_passive_sitl --csv out.csv
 """
 
 from __future__ import annotations

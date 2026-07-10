@@ -1,5 +1,5 @@
 """
-torque/test_ddfp_yaw_regulation_sitl.py — ArduPilot DDFP (H_TAIL_TYPE=4) yaw regulation tests.
+torque/test_ddfp_yaw_regulation_sitl.py — ArduPilot DDFP (H_TAIL_TYPE=3) yaw regulation tests.
 
 Prescribed-yaw tests (open-loop plant, closed-loop control law):
   test_ddfp_zero_yaw_sitl  — motor stays near trim when psi_dot=0
@@ -10,8 +10,8 @@ Kinematic closed-loop test (both plant and control in the loop):
   test_ddfp_responds_to_drift_sitl  — kinematic start (psi_dot=28 rad/s) → motor throttle rises
   test_ddfp_kinematic_regulation_sitl — kinematic, motor regulates psi_dot to < 5 deg/s
 
-H_TAIL_TYPE=4 (DDFP CCW): hub under-speed (RPM < omega_hub*gear_ratio) causes CW drift
-→ yaw error positive → DDFP CCW sign-flip → positive motor throttle → counters CW drift.
+H_TAIL_TYPE=3 (DDFP CW): hub under-speed (RPM < omega_hub*gear_ratio) causes CW drift
+→ yaw error positive → positive PID → positive motor throttle (no sign flip) → counters CW drift.
 
 Run with (inside Docker)
 ------------------------

@@ -154,16 +154,16 @@ Then run tests in three sequential stages. Always run them in order.
 
 ```bash
 # Stage 1 -- Unit tests (Windows, no Docker, ~460 tests, ~65 s)
-bash test.sh unit -q
+.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
 
 # Stage 2 -- Simtests (Windows, no Docker, ~29 tests, ~5 min)
-bash test.sh simtest -q
+.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
 
 # Stage 3 -- Stack tests (Docker, ArduPilot SITL)
 bash test.sh stack -v
 ```
 
-`test.cmd` is a Windows shim for the same commands. See [design/testing.md](design/testing.md) and [design/sitl_testing.md](design/sitl_testing.md) for full workflow and troubleshooting.
+`test.cmd` is a Windows shim to `test.sh` for Docker SITL workflows. See [design/testing.md](design/testing.md) and [design/sitl_testing.md](design/sitl_testing.md) for full workflow and troubleshooting.
 
 ---
 

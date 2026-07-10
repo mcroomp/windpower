@@ -1,55 +1,38 @@
 #!/usr/bin/env bash
 #
-# test.sh -- single entry point for RAWES tests and Docker dev container.
+# test.sh -- RAWES SITL Docker stack-test runner.
 #
-# Test suites:
-#   bash test.sh unit     [pytest args...]   # Windows venv, no Docker
-#   bash test.sh simtest  [pytest args...]   # Windows venv, no Docker
-#   bash test.sh stack    [-n N] [pytest args...]   # Docker (one container per test file)
-#   bash test.sh hil      [pytest args...]   # HIL pytest against a real Pixhawk on USB
-#                                              requires RAWES_HIL_PORT=COMx
+# Runs ONLY the ArduPilot SITL integration tests, in Docker, one container per
+# test file, up to N in parallel.  The SITL stack is the only suite that needs
+# Docker.  Every other suite runs with plain pytest in the Windows venv:
 #
-# Docker dev container (rawes-dev) lifecycle:
-#   bash test.sh start                       # start + sync code
-#   bash test.sh stop                        # stop and remove
-#   bash test.sh sync                        # re-sync code into running container
-#   bash test.sh shell                       # interactive bash
-#   bash test.sh exec <cmd...>               # run command in container
+#   .venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest"
+#   .venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest
+#   .venv/Scripts/python.exe -m pytest simulation/tests/hil   # needs RAWES_HIL_PORT=COMx
+#
+# Usage:
+#   bash test.sh [-n N] [pytest args...]         # run the SITL stack suite
+#   bash test.sh stack [-n N] [pytest args...]   # same, explicit subcommand
 #
 # Examples:
-#   bash test.sh unit                        # all unit tests
-#   bash test.sh unit -k test_foo -s         # one unit test, verbose
-#   bash test.sh simtest -k pumping          # one simtest
-#   bash test.sh stack -n 1 -k test_foo      # one stack test
-#   bash test.sh stack -n 8                  # full stack suite, 8 workers
-#   RAWES_HIL_PORT=COM4 bash test.sh hil -v  # HIL smoke tests
-#   bash test.sh sitl                       # start SITL in Docker; connect with calibrate.py --port sitl
+#   bash test.sh -n 8                # full stack suite, 8 workers
+#   bash test.sh -n 1 -k test_foo    # a single stack test
 #
 export MSYS_NO_PATHCONV=1
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_DIR="$REPO_DIR/simulation"
-VENV_PY="$SIM_DIR/.venv/Scripts/python.exe"
 
 IMAGE=rawes-sim
-CONTAINER=rawes-dev
 
-_winpath() { cygpath -w "$1"; }
 _log() { echo "$(date +%H:%M:%S) $*"; }
-
-_require_venv() {
-    if [ ! -x "$VENV_PY" ]; then
-        echo "[ERROR] $VENV_PY not found.  Run setup.cmd first." >&2
-        exit 1
-    fi
-}
 
 # ---------------------------------------------------------------------------
 # Code sync / log retrieval
 # ---------------------------------------------------------------------------
 
 _sync_code() {
-    local _c="${1:-$CONTAINER}"
+    local _c="$1"
     echo "[INFO] Syncing code to container $_c..."
     docker exec "$_c" mkdir -p /rawes/simulation/logs
     tar -C "$SIM_DIR" \
@@ -141,7 +124,7 @@ PY'
 }
 
 _retrieve_logs() {
-    local _c="${1:-$CONTAINER}"
+    local _c="$1"
     mkdir -p "$SIM_DIR/logs"
     local _host_logs
     _host_logs=$(cygpath -w "$SIM_DIR/logs" 2>/dev/null || echo "$SIM_DIR/logs")
@@ -205,19 +188,6 @@ _cleanup_orphan_containers() {
     fi
 }
 
-ensure_running() {
-    _cleanup_orphan_containers
-    if docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null | grep -q "^true$"; then
-        _sync_code "$CONTAINER"
-        return 0
-    fi
-    docker rm -f "$CONTAINER" 2>/dev/null || true
-    echo "[INFO] Starting container '$CONTAINER'..."
-    docker run -d --cap-add=SYS_PTRACE --name "$CONTAINER" "$IMAGE" sleep infinity >/dev/null
-    echo "[INFO] Container '$CONTAINER' is ready."
-    _sync_code "$CONTAINER"
-}
-
 # ---------------------------------------------------------------------------
 # Stack-test parallel runner
 # ---------------------------------------------------------------------------
@@ -233,6 +203,9 @@ _run_stack() {
         esac
         shift
     done
+
+    # Remove any leftover per-test containers from a previously aborted run.
+    _cleanup_orphan_containers
 
     local _RUN_ID
     _RUN_ID=$(date +%s)
@@ -400,72 +373,20 @@ _run_stack() {
 }
 
 # ---------------------------------------------------------------------------
-# Top-level dispatch
+# Top-level dispatch -- SITL Docker stack tests only.
 # ---------------------------------------------------------------------------
 
-CMD="${1:-}"
-shift || true
-
-case "$CMD" in
-    unit)
-        _require_venv
-        "$VENV_PY" -m pytest "$(_winpath "$SIM_DIR/tests/unit")" -m "not simtest" "$@"
-        ;;
-    simtest)
-        _require_venv
-        "$VENV_PY" "$(_winpath "$SIM_DIR/run_tests.py")" \
-            "$(_winpath "$SIM_DIR/tests/simtests")" -m simtest "$@"
+case "${1:-}" in
+    -h|--help)
+        sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+        exit 0
         ;;
     stack)
+        shift
         _run_stack "$@"
         ;;
-    hil)
-        _require_venv
-        "$VENV_PY" -m pytest "$(_winpath "$SIM_DIR/tests/hil")" "$@"
-        ;;
-    sitl)
-        SITL_CONTAINER=rawes-sitl
-        _log "[INFO] Starting SITL bench environment ..."
-        docker rm -f "$SITL_CONTAINER" 2>/dev/null || true
-        # Expose MAVLink TCP port 5760 to the Windows host so calibrate.py can connect.
-        docker run -d --name "$SITL_CONTAINER" -p 5760:5760 "$IMAGE" sleep infinity >/dev/null
-        _sync_code "$SITL_CONTAINER"
-        # Cleanup on Ctrl-C: remove the container
-        trap "docker rm -f '$SITL_CONTAINER' >/dev/null 2>&1; echo ''; _log '[INFO] SITL container removed.'; exit 0" INT TERM
-        # Run sitl_bench.py in the foreground.
-        # It primes the EEPROM, launches SITL (--model JSON) + mediator_torque
-        # (omega_rotor=0), and streams SITL output to this terminal.
-        # Pass --omega-rotor to spin the rotor, e.g.:  bash test.sh sitl --omega-rotor 12.57
-        docker exec -it "$SITL_CONTAINER" \
-            /rawes/.venv/bin/python3 /rawes/simulation/scripts/sitl_bench.py "$@"
-        docker rm -f "$SITL_CONTAINER" >/dev/null 2>&1 || true
-        ;;
-    start)
-        ensure_running
-        ;;
-    stop)
-        echo "[INFO] Stopping and removing container '$CONTAINER' ..."
-        docker rm -f "$CONTAINER" 2>/dev/null || true
-        echo "[INFO] Done."
-        ;;
-    sync)
-        _sync_code "$CONTAINER"
-        ;;
-    shell)
-        ensure_running
-        docker exec -it "$CONTAINER" bash
-        ;;
-    exec)
-        ensure_running
-        docker exec "$CONTAINER" bash -c "$*"
-        ;;
-    ""|-h|--help)
-        sed -n '3,28p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
-        [ -z "$CMD" ] && exit 1 || exit 0
-        ;;
     *)
-        echo "[ERROR] Unknown command: $CMD" >&2
-        echo "Expected: unit | simtest | stack | hil | sitl | start | stop | sync | shell | exec" >&2
-        exit 1
+        # No subcommand needed: all args (e.g. -n 8, -k test_foo) are stack args.
+        _run_stack "$@"
         ;;
 esac

@@ -2,36 +2,37 @@
 torque/test_disarm_stops_motor_sitl.py — safety: disarm cuts the motor.
 
 Verifies that if the vehicle is DISARMED while the counter-torque rig is
-running (rotor spinning, GB4008 motor actively counter-rotating on SERVO4),
-the motor output collapses to the OFF PWM (SERVO4_MIN) and stays there.
+running (rotor spinning, GB4008 motor actively counter-rotating on Motor4),
+the motor output collapses to the OFF PWM and stays there.
 
 Scenario
 --------
   1. torque_armed fixture: rotor spins up, ArduPilot's DDFP yaw PID drives
-     SERVO4 to hold hub yaw -- so the motor is producing real throttle.
-  2. Run until SERVO4 is clearly ON (well above SERVO4_MIN).
+     Motor4 (on SERVO9) to hold hub yaw -- so the motor is producing real throttle.
+    2. Run until motor PWM is clearly ON (well above idle).
   3. Force-disarm mid-run.
-  4. Confirm SERVO4 falls to ~SERVO4_MIN (motor off) and stays there.
+    4. Confirm motor PWM falls to idle (motor off) and stays there.
 
 Pass criterion
 --------------
-  * Before disarm: SERVO4 > _MOTOR_ON_US (motor running).
-  * After disarm : SERVO4 <= _MOTOR_OFF_US for the whole post-disarm window.
+    * Before disarm: motor PWM > _MOTOR_ON_US (motor running).
+    * After disarm : motor PWM <= _MOTOR_OFF_US for the whole post-disarm window.
 """
 from __future__ import annotations
 
 from stack_infra import observe
+from torque_test_utils import yaw_motor_pwm_from_servo_output
 
-# GB4008 DDFP PWM range: 800 us = off, 2000 us = full (SERVO4_MIN/MAX).
-_MOTOR_OFF_US = 850.0    # <= this counts as "off" (SERVO4_MIN=800 + margin)
-_MOTOR_ON_US  = 1000.0   # >  this counts as "running"
+# GB4008 DDFP PWM range: 1000 us = off, 2000 us = full (SERVO9_MIN/MAX).
+_MOTOR_OFF_US = 1050.0   # <= this counts as "off" (SERVO9_MIN=1000 + margin)
+_MOTOR_ON_US  = 1150.0   # >  this counts as "running"
 
 _SPINUP_RUN_S = 35.0     # observe seconds before disarm (dynamics well underway)
 _POST_DISARM_S = 6.0     # observe seconds after disarm
 
 
 def test_disarm_stops_motor_sitl(torque_armed):
-    """Disarming mid-run must cut the GB4008 motor (SERVO4 -> off)."""
+    """Disarming mid-run must cut the GB4008 motor (Motor4 output -> off)."""
     ctx = torque_armed
     gcs = ctx.gcs
     log = ctx.log
@@ -41,7 +42,7 @@ def test_disarm_stops_motor_sitl(torque_armed):
 
     def observe_running(msg, t_rel):
         if msg is not None and msg.get_type() == "SERVO_OUTPUT_RAW":
-            last_pwm[0] = getattr(msg, "servo4_raw", 0) or 0
+            last_pwm[0] = yaw_motor_pwm_from_servo_output(msg, default=last_pwm[0])
         # Keep the motor interlock (CH8) high while armed.
         return t_rel >= _SPINUP_RUN_S
 
@@ -50,9 +51,9 @@ def test_disarm_stops_motor_sitl(torque_armed):
         msg_types=["SERVO_OUTPUT_RAW", "STATUSTEXT"],
         keepalive={8: 2000},
     )
-    log.info("Pre-disarm SERVO4 = %d us", last_pwm[0])
+    log.info("Pre-disarm motor PWM = %d us", last_pwm[0])
     assert last_pwm[0] > _MOTOR_ON_US, (
-        f"Motor not running before disarm (SERVO4={last_pwm[0]} us, "
+        f"Motor not running before disarm (pwm={last_pwm[0]} us, "
         f"need > {_MOTOR_ON_US:.0f}); cannot verify disarm cuts it."
     )
 
@@ -66,7 +67,7 @@ def test_disarm_stops_motor_sitl(torque_armed):
 
     def observe_stopped(msg, t_rel):
         if msg is not None and msg.get_type() == "SERVO_OUTPUT_RAW":
-            pwm = getattr(msg, "servo4_raw", 0) or 0
+            pwm = yaw_motor_pwm_from_servo_output(msg)
             if t_rel >= 1.0:           # skip the first 1 s propagation transient
                 post_pwm.append(pwm)
         return None
@@ -79,9 +80,9 @@ def test_disarm_stops_motor_sitl(torque_armed):
 
     assert post_pwm, "No SERVO_OUTPUT_RAW samples captured after disarm."
     max_pwm = max(post_pwm)
-    log.info("Post-disarm SERVO4: n=%d  max=%d us  (limit %.0f)",
+    log.info("Post-disarm motor PWM: n=%d  max=%d us  (limit %.0f)",
              len(post_pwm), max_pwm, _MOTOR_OFF_US)
     assert max_pwm <= _MOTOR_OFF_US, (
-        f"Motor did NOT stop after disarm: SERVO4 max={max_pwm} us "
+        f"Motor did NOT stop after disarm: pwm max={max_pwm} us "
         f"(need <= {_MOTOR_OFF_US:.0f}). Disarm failed to cut the motor."
     )

@@ -57,7 +57,6 @@ _rawes_fns = {
 
     run_flight = run_flight,
     run_armon  = run_armon,
-    run_manual = run_manual,
 
     -- ── Over-spin auto-disarm safety ─────────────────────────────────────────
     run_spin_safety    = run_spin_safety,
@@ -80,12 +79,6 @@ _rawes_fns = {
     end,
     YAW_MOTOR_FUNC   = YAW_MOTOR_FUNC,
     YFF_MAX          = YFF_MAX,
-
-    -- ── Manual mode state accessors ──────────────────────────────────────────
-
-    MODE_MANUAL  = MODE_MANUAL,
-    man_tlon_rad = function() return _man_tlon_rad end,
-    man_tlat_rad = function() return _man_tlat_rad end,
 
     -- ── RAWES_ARM state accessors ─────────────────────────────────────────────
 

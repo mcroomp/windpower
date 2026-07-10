@@ -37,8 +37,9 @@ runs in its own fresh Docker container, one per test file.
 - **NEVER call `docker exec` directly to run stack tests. Use `bash test.sh stack`.**
 - Use the Bash tool directly — never `wsl.exe`. Always absolute paths.
 - The Docker image is built by `bash setup.sh build` (with ArduPilot) or
-  `bash setup.sh build-lite` (without). Container lifecycle:
-  `bash test.sh start|stop|sync|shell|exec`.
+  `bash setup.sh build-lite` (without). `bash test.sh` creates and tears down
+  one ephemeral container per test file automatically — there is no persistent
+  dev container to manage.
 - Stack test logs land in `simulation/logs/{test_name}/` —
   `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`.
   Suite summary: `simulation/logs/suite_summary.json`.

@@ -12,9 +12,9 @@ SWASH_PWM_NEUTRAL = 1500   # µs
 SWASH_PWM_MAX     = 2000   # µs
 SWASH_PWM_RANGE   =  500   # µs — half-range from neutral to rail
 
-# GB4008 anti-rotation motor (SERVO4, MAIN OUT 4, H_TAIL_TYPE=4 DDFP)
-# ArduPilot params: SERVO4_MIN=800 / SERVO4_MAX=2000 / SERVO4_TRIM=800
-MOTOR_PWM_MIN     =  800   # µs — motor off
+# GB4008 anti-rotation motor (Motor4 on output 9, H_TAIL_TYPE=3 DDFP CW)
+# ArduPilot params: SERVO9_MIN=1000 / SERVO9_MAX=2000 / SERVO9_TRIM=1000
+MOTOR_PWM_MIN     = 1000   # µs — motor off
 MOTOR_PWM_MAX     = 2000   # µs — full throttle
 
 # Motor interlock channel (CH8 / SERVO8)

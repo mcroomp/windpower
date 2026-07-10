@@ -27,6 +27,27 @@ SIM_VEHICLE_ENV = "RAWES_SIM_VEHICLE"
 
 
 # ---------------------------------------------------------------------------
+# Params present in the RAWES hardware param set but NOT compiled into the
+# ArduCopter-heli SITL build.  These configure BLHeli / bidirectional-DShot on
+# output 9 (the yaw motor's ESC RPM telemetry) — hardware-only features.  They
+# are harmless on a real FC but absent from SITL, so including them in the SITL
+# boot-param verification set makes every flight fixture fail at param
+# read-back ("NOT_IN_DUMP").  SITL drives output 9 as plain PWM and gets rotor
+# RPM from the physics backend, so it never needs these.
+# ---------------------------------------------------------------------------
+
+SITL_UNSUPPORTED_PARAMS = frozenset({
+    "SERVO_BLH_MASK",
+    "SERVO_BLH_BDMASK",
+    "SERVO_BLH_AUTO",
+    "SERVO_BLH_OTYPE",
+    "SERVO_BLH_POLES",
+    "SERVO_BLH_TRATE",
+    "BRD_IO_DSHOT",
+})
+
+
+# ---------------------------------------------------------------------------
 # ParamSetup — declarative parameter table with built-in verification
 # ---------------------------------------------------------------------------
 
@@ -157,6 +178,11 @@ class ParamSetup:
     def update(self, params: "dict[str, float]") -> "ParamSetup":
         """Return a new ParamSetup with extra *params* merged in (they win)."""
         return ParamSetup({**self._params, **params})
+
+    def without(self, names) -> "ParamSetup":
+        """Return a new ParamSetup with *names* removed (no-op if absent)."""
+        drop = set(names)
+        return ParamSetup({k: v for k, v in self._params.items() if k not in drop})
 
     def write_parm_file(self, path: "Path | str") -> None:
         """Write params to a SITL ``--add-param-file`` text file."""
@@ -492,8 +518,8 @@ def sanitize_log_name(test_name: str) -> str:
 
     Pytest parametrized node names contain ``[param]`` brackets (e.g.
     ``test_slow_rpm_sitl[slow_vary]``).  Square brackets are treated as
-    character-class globs by PowerShell/bash, which silently breaks
-    ``Get-ChildItem``/globbing on the log dir and has caused stale-log
+    character-class globs by bash, which silently breaks
+    globbing on the log dir and has caused stale-log
     confusion.  Replace brackets (and other unsafe chars) with underscores so
     directory names are plain identifiers, e.g. ``test_slow_rpm_sitl_slow_vary``.
     """

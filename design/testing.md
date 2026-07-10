@@ -29,7 +29,7 @@ Tests are split across three directories:
 .venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
-**CRITICAL:** Unit tests run via the Windows venv (`bash test.sh unit`) — never inside Docker, which excludes `tests/unit`.
+**CRITICAL:** Unit tests run via the Windows venv (`.venv/Scripts/python.exe -m pytest ...`) — never inside Docker, which excludes `tests/unit`.
 
 ---
 
@@ -88,7 +88,6 @@ The `simtest` timeout is set globally in `simulation/pytest.ini`.
 |------|------------------|--------------|
 | `test_math_lua.py` | — | Lua math: `bz_altitude_hold`, `cyclic_error_body`, `output_rate_limit`, `rate_to_pwm`, constants |
 | `test_yaw_lua.py` | — | Yaw-trim: PI, dead zone, watchdog, hard-stop, closed-loop equilibrium |
-| `test_manual_mode_lua.py` | — | MODE_MANUAL (SCR_USER6=2): RC1/RC2/RC3 from NVFs, yaw-motor PID, clamp, persistence, mode-entry reset |
 | `test_armon_lua.py` | — | `RAWES_ARM` countdown and disarm logic |
 
 ---
@@ -141,12 +140,6 @@ No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt chec
 | File | Fixture | What it tests |
 |------|---------|--------------|
 | `test_yaw_regulation_sitl.py` | `torque_armed` | ArduPilot ATC_RAT_YAW DDFP PI holds yaw < 5 deg/s at 120 RPM |
-| `test_lua_yaw_regulation_sitl.py` | `torque_armed_lua_yaw` | rawes.lua MODE_MANUAL direct yaw-motor write holds yaw < 5 deg/s |
-| `test_lua_manual_mode_sitl.py` | `torque_armed_lua_manual` | MODE_MANUAL NVF→RC1/RC2 cyclic shifts + yaw motor active + neutral restore |
-
-**`torque_armed_lua_manual` fixture:** `SCR_USER6`, `H_FLYBAR_MODE`, `H_CYC_MAX`, `H_SV_MAN` are
-sourced directly from `calibrate._RUN_MODES["manual"]["force_params"]` — single source of truth
-shared with the interactive `calibrate manual` command.
 
 **Torque arming note:** `_arm_sequence` passes `target_mode=ACRO` for all `_torque_stack` tests.
 ArduCopter's `mandatory_checks()` always runs `mandatory_gps_checks()` and `alt_checks()` regardless
@@ -265,7 +258,7 @@ Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lu
 
 ```python
 from rawes_modes import (
-    MODE_NONE, MODE_STEADY, MODE_MANUAL,
+    MODE_NONE, MODE_STEADY,
     MODE_LANDING,
     LAND_DESCEND, LAND_FINAL_DROP,
     PUMP_HOLD, PUMP_REEL_OUT, PUMP_TRANSITION, PUMP_REEL_IN, PUMP_TRANSITION_BACK,
@@ -276,7 +269,6 @@ from rawes_modes import (
 |------|-----------|----------------------|-------|
 | `MODE_NONE` | 0 | — | Logging only; RAWES_ARM still handled |
 | `MODE_STEADY` | 1 | — | Altitude hold + tether tracking |
-| `MODE_MANUAL` | 2 | — | Bench: yaw PID (SERVO4) + NVF cyclic/collective (`RAWES_TLN`/`RAWES_TLT`/`RAWES_COL`). `H_FLYBAR_MODE=1`. |
 | `MODE_PASSIVE` | 3 | — | Armed-but-quiet: commands IC attitude angle (RAWES_RIC/PIC) + IC collective (RAWES_COL via throttle) as a GUIDED angle target during kinematic |
 | `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP | |
 

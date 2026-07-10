@@ -22,7 +22,7 @@ Only when both pass is a post-release flight failure a real controller bug.
 
 Usage:
   python simulation/analysis/diagnose_sitl.py test_lua_flight_steady_sitl
-  bash test.sh exec 'python3 /rawes/simulation/analysis/diagnose_sitl.py test_lua_flight_steady_sitl'
+    .venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py test_lua_flight_steady_sitl
 
 With no test name, lists available test directories in simulation/logs/.
 """

@@ -21,7 +21,7 @@ Sensor packet (NED body-frame, level hover at 50 m)
 
 Usage
 -----
-  bash test.sh stack -v -k test_arm_minimal_sitl
+    bash test.sh stack -v -k test_arm_minimal_sitl
 """
 
 import logging

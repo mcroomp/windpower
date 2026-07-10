@@ -5,14 +5,14 @@
   "exclude": [
     "**/__pycache__",
     "simulation/.pytest_cache",
-    "simulation/.venv",
+    ".venv",
     "simulation/logs"
   ],
   "extraPaths": [
     "simulation",
     "../aero/dynbem/python"
   ],
-  "venvPath": "simulation",
+  "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.10",
   "typeCheckingMode": "basic",

@@ -57,8 +57,8 @@ For signs, frame details, EKF gating, and mixer conventions, read the primary do
 
 ## Test Entry Points
 
-- Unit: `bash test.sh unit ...`
-- Simtest: `bash test.sh simtest ...`
+- Unit: `.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" ...`
+- Simtest: `.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest ...`
 - Stack (Docker): `bash test.sh stack ...`
 
 Use `design/sitl_testing.md` for stack-specific run/diagnose flow.

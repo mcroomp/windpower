@@ -10,7 +10,7 @@ Physical scenario
   * The motor counter-rotates via the 80:44 gear to maintain inner assembly heading
   * The ESC holds commanded RPM; bearing/swashplate drag only affect power draw
   * ArduPilot (heli frame, ACRO mode) senses the yaw rate via gyro and
-    commands Ch4 (H_TAIL_TYPE=4 DDFP, servo) to control GB4008 motor speed
+    commands the Motor4 output to control GB4008 motor speed
 
 Pass criterion
 --------------
@@ -46,10 +46,10 @@ _MAX_PSI_DOT_RAD_S = math.radians(5.0)   # [rad/s]
 
 def test_yaw_regulation_sitl(torque_armed):
     """
-    ArduPilot SITL regulates hub yaw using the DDFP (Ch4) output.
+    ArduPilot SITL regulates hub yaw using the DDFP Motor4 output.
 
     ACRO mode with neutral sticks commands psi_dot = 0.  The yaw rate PID must
-    build enough Ch4 output to maintain counter-rotation against the spinning
+    build enough motor output to maintain counter-rotation against the spinning
     axle and hold |psi_dot| < 5 deg/s after a 60 s settle period.
 
     Physics ground truth (mediator events log) is used — not ATTITUDE.yawspeed,

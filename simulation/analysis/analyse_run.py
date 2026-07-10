@@ -17,8 +17,8 @@ Each stack test writes its logs to simulation/logs/{test_name}/:
   gcs.log         -- GCS / MAVLink events (STATUSTEXT, EKF flags, setup steps)
 
 Usage:
-  bash test.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_acro_armed'
-  bash test.sh exec 'python3 /rawes/simulation/analysis/analyse_run.py test_pumping_cycle --plot'
+    .venv/Scripts/python.exe simulation/analysis/analyse_run.py test_acro_armed
+    .venv/Scripts/python.exe simulation/analysis/analyse_run.py test_pumping_cycle --plot
 
 With no test name, lists available test directories in simulation/logs/.
 """

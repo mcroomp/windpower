@@ -43,7 +43,6 @@ CODE_SUFFIXES = {
     ".cfg",
     ".sh",
     ".cmd",
-    ".ps1",
 }
 
 DOC_SUFFIXES = {".md", ".txt"}

@@ -5,7 +5,7 @@ Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 Mode is selected at runtime via SCR_USER6:
     0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
     1  steady      -- primary guided flight path (set_target_rate_and_throttle)
-    2  manual      -- legacy bench override: yaw compensation + commanded cyclic/collective
+    2  reserved    -- unused
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
     4  landing     -- reserved, not yet implemented
     5  pumping     -- De Schutter pumping cycle
@@ -45,7 +45,7 @@ tunables are delivered as NAMED_VALUE_FLOAT -- see the list above):
   SCR_USER3   yaw-rate PID KD                                         default 0.002
   SCR_USER4   (unused -- was the yaw Smith-predictor dead time; removed)
   SCR_USER5   yaw-PID telemetry rate [Hz] (SITL sets this high)       default 2.0
-  SCR_USER6   RAWES_MODE      Mode selector (0,1,2,3,4)               default 0
+    SCR_USER6   RAWES_MODE      Mode selector (0,1,3,4)                 default 0
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -72,7 +72,6 @@ _nv_floats = {}
 
 MODE_NONE    = 0
 MODE_STEADY  = 1
-MODE_MANUAL  = 2   -- legacy bench override: yaw compensation + manually commanded cyclic/collective via NVFs
 MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable during release.
 MODE_LANDING = 4   -- reserved; not implemented here
 
@@ -436,26 +435,6 @@ local function compute_rate_cmd_sqrt(bz_now, bz_goal, kp, accel_max, dt)
     return ahrs:earth_to_body(rate_world)
 end
 
--- Legacy manual-mode RC override path.
---
--- ── MODE_MANUAL: legacy yaw compensation + manual cyclic/collective ─────────
--- SERVO4 (GB4008): driven by yaw PID.  Same sign convention as the old MODE_YAW:
---   err = -gyro_z; positive error (CCW drift) -> more motor throttle -> CW torque.
--- RC1/RC2: set from _man_tlat_rad / _man_tlon_rad (updated via RAWES_TLT / RAWES_TLN).
---   PWM = 1500 + (setpoint_rad / H_CYC_MAX_rad) * 500, clamped to [1000, 2000].
---   Requires H_FLYBAR_MODE=1 and ACRO so the RC override bypasses the rate PID
---   and the RC channels directly control the servos.
--- RC3: set from _ic_col (updated via RAWES_COL NVF).
--- All three NVFs are persistent (last value holds until a new one arrives).
-
-local _yaw_i      = 0.0
-local _yaw_prev_e = 0.0
-
--- Manual mode cyclic setpoints [rad].  Updated from RAWES_TLN / RAWES_TLT NVFs.
--- tlon > 0 = nose-down disk;  tlat > 0 = roll-right.  Reset to 0 on mode entry.
-local _man_tlon_rad = 0.0
-local _man_tlat_rad = 0.0
-
 -- Yaw feedforward trim (throttle observer on H_YAW_TRIM).  Runs in the normal
 -- flight modes -- MODE_PASSIVE (kinematic release) AND MODE_STEADY -- as the
 -- primary DC yaw hold.
@@ -505,85 +484,6 @@ local SERVO4_CHAN    = 3     -- 0-indexed physical channel (servo 4 = index 3)
 local YAW_MOTOR_FUNC = 36    -- SERVO output function for the yaw motor (Motor4);
                              -- matches SERVO4_FUNCTION=36 in the params.
 
-local function run_manual(dt)
-    local gyro = ahrs:get_gyro()
-    if not gyro then return end
-
-    local yaw_rate = gyro:z()
-    local err = -yaw_rate   -- setpoint = 0
-
-    local kp        = p("ATC_RAT_YAW_P",    0.1)
-    local ki        = p("ATC_RAT_YAW_I",    0.0)
-    local kd        = p("ATC_RAT_YAW_D",    0.0)
-    local imax      = p("ATC_RAT_YAW_IMAX", 0.7)
-    local trim      = p("H_YAW_TRIM",       0.0)
-    -- SERVO4_MIN/MAX are read each tick so setparam SERVO4_MAX <x> takes effect
-    -- immediately -- useful as a tuning safety cap (drop SERVO4_MAX to limit motor
-    -- authority during gain trials, raise it as confidence grows).
-    local servo_min = p("SERVO4_MIN", 800)
-    local servo_max = p("SERVO4_MAX", 2000)
-
-    local p_out = kp * err
-    local d_out = kd * (err - _yaw_prev_e) / dt
-    _yaw_prev_e = err
-
-    -- One-directional actuator (motor throttle >= 0): integrate when err > 0 (we
-    -- have authority to counter the drift) and bleed off symmetrically when err < 0
-    -- so a stuck I-term cannot persist across disturbances or runs.  Clamped to
-    -- [0, imax].  Same |ki*err*dt| step in both directions -- the asymmetry is only
-    -- in which sign of err winds up vs. bleeds.
-    if err > 0 then
-        _yaw_i = _yaw_i + ki * err * dt
-        if _yaw_i > imax then _yaw_i = imax end
-    else
-        _yaw_i = _yaw_i - ki * (-err) * dt
-        if _yaw_i < 0.0 then _yaw_i = 0.0 end
-    end
-
-    local output_unclamp = p_out + _yaw_i + d_out + trim
-    local output = output_unclamp
-    if output > 1.0 then output = 1.0 end
-    if output < 0.0 then output = 0.0 end
-
-    -- Stream internal PID state as NAMED_VALUE_FLOAT for offline tuning analysis.
-    -- Higher rate ceiling than STATUSTEXT and structured (no string parsing).
-    -- YAW_I       : integrator state (clamped to [0, imax])
-    -- YAW_OUT     : pre-clamp output -- shows when PID wants to exceed [0,1]
-    -- Clamped output is derivable from the SERVO_OUTPUT_RAW PWM stream.
-    gcs:send_named_float("YAW_I",   _yaw_i)
-    gcs:send_named_float("YAW_OUT", output_unclamp)
-
-    local pwm = math.floor(servo_min + output * (servo_max - servo_min) + 0.5)
-    -- Defensive clamp on top of the [0,1] clamp upstream -- guards against
-    -- servo_max < servo_min (misconfig) and rounding drift past the bounds.
-    if pwm > servo_max then pwm = servo_max end
-    if pwm < servo_min then pwm = servo_min end
-    SRV_Channels:set_output_pwm_chan_timeout(SERVO4_CHAN, pwm, 200)
-
-    -- Set cyclic from NVF setpoints (tlon/tlat in rad) using H_CYC_MAX as the full-range.
-    -- With H_FLYBAR_MODE=1 the RC override bypasses the rate PID and goes straight to
-    -- the swash mixer.  H_CYC_MAX is in centidegrees (1000 cd = 10 deg).
-    local _cyc_max_rad = math.rad(p("H_CYC_MAX", 1000) / 100.0)
-    local _ch1_pwm = math.floor(1500.0 + _man_tlat_rad / _cyc_max_rad * 500.0 + 0.5)
-    local _ch2_pwm = math.floor(1500.0 + _man_tlon_rad / _cyc_max_rad * 500.0 + 0.5)
-    if _ch1_pwm > 2000 then _ch1_pwm = 2000 end
-    if _ch1_pwm < 1000 then _ch1_pwm = 1000 end
-    if _ch2_pwm > 2000 then _ch2_pwm = 2000 end
-    if _ch2_pwm < 1000 then _ch2_pwm = 1000 end
-    if _rc_ch1 then _rc_ch1:set_override(_ch1_pwm) end
-    if _rc_ch2 then _rc_ch2:set_override(_ch2_pwm) end
-    -- Collective from IC seed if available, else cruise fallback.
-    local _col_thrust_man = col_rad_to_thrust(ic_col_or_default())
-    if _rc_ch3 then _rc_ch3:set_override(math.floor(1000.0 + _col_thrust_man * 1000.0 + 0.5)) end
-
-    if _diag % 100 == 1 then
-        gcs:send_text(6, string.format(
-            "RAWES man: yrate=%+.1fdeg/s  s4out=%.3f  s4pwm=%d  col=%.2fdeg  tlon=%.2fdeg  tlat=%.2fdeg",
-            math.deg(yaw_rate), output, pwm,
-            math.deg(ic_col_or_default()), math.deg(_man_tlon_rad), math.deg(_man_tlat_rad)))
-    end
-end
-
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 
 local function _on_mode_enter(mode)
@@ -599,12 +499,6 @@ local function _on_mode_enter(mode)
         gcs:send_text(6, string.format(
             "RAWES steady: IC col=%.2fdeg -> thr=%.3f -> col=%.2fdeg",
             math.deg(ic_col_or_default()), _thr_ic, math.deg(_col_back)))
-    end
-    if mode == MODE_MANUAL then
-        _yaw_i        = 0.0
-        _yaw_prev_e   = 0.0
-        _man_tlon_rad = 0.0
-        _man_tlat_rad = 0.0
     end
     if mode == MODE_PASSIVE then
         _passive_status_ms   = 0
@@ -1095,11 +989,6 @@ local function update()
     -- IC seed handling: do not set active IC commands until all three
     -- (collective, roll, pitch) have been observed at least once.
     if _nv_floats["RAWES_COL"] then _ic_pending_col = _nv_floats["RAWES_COL"] end
-    -- MODE_MANUAL must react to RAWES_COL immediately; it should not wait for
-    -- full IC atomic seeding (RIC/PIC/COL) used by steady/passive startup.
-    if mode == MODE_MANUAL and _nv_floats["RAWES_COL"] then
-        _ic_col = _nv_floats["RAWES_COL"]
-    end
     if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
     if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
     -- Optional fixed yaw target for MODE_PASSIVE.  When present, PASSIVE holds
@@ -1122,8 +1011,6 @@ local function update()
         if _nv_floats["RAWES_RIC"] then _ic_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
         if _nv_floats["RAWES_PIC"] then _ic_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
     end
-    if _nv_floats["RAWES_TLN"]    then _man_tlon_rad = _nv_floats["RAWES_TLN"]    end
-    if _nv_floats["RAWES_TLT"]    then _man_tlat_rad = _nv_floats["RAWES_TLT"]    end
     -- RAWES_ARM disarm timer must always run, regardless of mode/IC seed.  In
     -- particular, MODE_PASSIVE before full IC seed still needs the safety timer
     -- to expire and disarm if requested by the ground.
@@ -1183,13 +1070,6 @@ local function update()
         end
     end
 
-    if mode == MODE_MANUAL then
-        -- Legacy manual mode: yaw compensation via SERVO4 PID + NVF-commanded cyclic/collective.
-        -- run_manual drives SERVO4 directly and sets RC1/RC2/RC3 via override.
-        -- (CH8 motor-interlock latch is handled above for all armed modes.)
-        run_manual(BASE_PERIOD_MS * 0.001)
-    end
-
     -- MODE_LANDING (4): not yet implemented
 
     return update, BASE_PERIOD_MS
@@ -1198,7 +1078,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 _mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
-_mode_names = {[0]="none", [1]="steady", [2]="manual", [4]="landing"}
+_mode_names = {[0]="none", [1]="steady", [3]="passive", [4]="landing"}
 _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

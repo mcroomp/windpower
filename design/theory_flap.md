@@ -197,7 +197,7 @@ Figures produced:
 
 Run with:
 ```
-venv/Scripts/python simulate.py
+.venv/Scripts/python.exe felix/simulate.py
 ```
 
 ---

@@ -55,7 +55,7 @@ H_COL2YAW         0.0
 # H_YAW_TRIM feedforward through to the yaw motor (OUTPUT 9).  Leaving any AP yaw
 # gain nonzero makes
 # the AP loop fight the Lua loop and drives a high-frequency yaw limit cycle
-# (observed: +-300 deg/s bang-bang on SERVO4).  Tune the Lua PID via SCR_USER1/2/3.
+# (observed: +-300 deg/s bang-bang on the yaw motor).  Tune the Lua PID via SCR_USER1/2/3.
 ATC_RAT_YAW_P     0.0
 ATC_RAT_YAW_D     0.0
 ATC_RAT_YAW_FLTD  10.0
@@ -86,10 +86,6 @@ SCR_USER3         0.0
 # on hardware/common to conserve link bandwidth; SITL raises it (see
 # rawes_sitl_defaults.parm) so every telemetry row captures fresh PID state.
 SCR_USER5         2.0
-
-SERVO4_MIN        800
-SERVO4_MAX        2000
-SERVO4_TRIM       800
 
 # --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
 # Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw

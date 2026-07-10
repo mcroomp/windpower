@@ -9,8 +9,8 @@ long startup hold so the mediator never transitions to DYNAMIC.
 This lets calibrate.py connect over tcp:localhost:5760 from the Windows host
 and exercise rawes.lua / servo commands / arming exactly as on hardware.
 
-Usage (run inside the rawes-sitl Docker container via 'bash test.sh sitl'):
-    python3 /rawes/simulation/scripts/sitl_bench.py [--omega-rotor RAD_S]
+Usage (inside a rawes-sim container with MAVLink port 5760 published):
+    /rawes/.venv/bin/python3 /rawes/simulation/scripts/sitl_bench.py [--omega-rotor RAD_S]
 
 Connect from Windows host (second terminal):
     calibrate.py --port sitl

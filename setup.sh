@@ -73,13 +73,13 @@ _setup_venv() {
 _setup_build() {
     echo "[INFO] Building rawes-sim (target=runtime-ardupilot) -- expect ~30-60 min ..."
     docker build "$SIM_DIR" -t rawes-sim --target runtime-ardupilot
-    echo "[INFO] Build complete.  Run: bash test.sh start"
+    echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
 _setup_build_lite() {
     echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot) ..."
     docker build "$SIM_DIR" -t rawes-sim --target runtime
-    echo "[INFO] Build complete.  Run: bash test.sh start"
+    echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
 # --- Pixhawk hardware --------------------------------------------------

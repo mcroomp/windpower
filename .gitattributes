@@ -15,7 +15,6 @@
 # Windows-only files — CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
-*.ps1 text eol=crlf
 
 # Binary files — no line ending conversion
 *.png binary

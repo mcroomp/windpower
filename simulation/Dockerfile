@@ -15,11 +15,8 @@ FROM ubuntu:22.04 AS base
 #   docker build simulation/ -t rawes-sim --target runtime
 #   docker build simulation/ -t rawes-sim --target runtime-ardupilot
 #
-# Manage the dev container:
-#   bash test.sh start | stop | shell | exec <cmd>
-#
 # Stack tests spin up their own ephemeral containers:
-#   bash test.sh stack [-n N] [pytest args]
+#   bash test.sh [-n N] [pytest args]
 # =============================================================================
 
 ENV DEBIAN_FRONTEND=noninteractive

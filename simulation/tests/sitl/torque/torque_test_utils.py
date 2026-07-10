@@ -35,6 +35,21 @@ from simtest_log import BadEventLog
 from stack_infra import observe  # noqa: E402
 
 
+def yaw_motor_pwm_from_servo_output(msg, default: int = 0) -> int:
+    """Return yaw motor PWM from SERVO_OUTPUT_RAW.
+
+    Current mapping is Motor4 on output 9 (servo9_raw). Keep a fallback to
+    servo4_raw for compatibility with older logs/configs.
+    """
+    ch9 = int(getattr(msg, "servo9_raw", 0) or 0)
+    if ch9 > 0:
+        return ch9
+    ch4 = int(getattr(msg, "servo4_raw", 0) or 0)
+    if ch4 > 0:
+        return ch4
+    return int(default)
+
+
 def run_observation_loop(
     ctx,
     settle_s: float,
@@ -78,9 +93,7 @@ def run_observation_loop(
         if mt == "STATUSTEXT":
             log.debug("SITL t=%.1fs: %s", t_rel, msg.text.rstrip("\x00").strip())
         elif mt == "SERVO_OUTPUT_RAW":
-            ch9 = getattr(msg, "servo9_raw", 0) or 0
-            ch4 = getattr(msg, "servo4_raw", 0) or 0
-            pwm[0] = ch9 if ch9 > 1050 else ch4
+            pwm[0] = yaw_motor_pwm_from_servo_output(msg, default=pwm[0])
         elif mt == "NAMED_VALUE_FLOAT":
             raw_name = getattr(msg, "name", "")
             if isinstance(raw_name, bytes):

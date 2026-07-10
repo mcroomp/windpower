@@ -16,7 +16,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "generator", "generator", "{
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "CS", "CS", "{1840D50F-6852-DC27-E184-DD8D0055C4FD}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MAVLink", "simulation\.venv\Lib\site-packages\pymavlink\generator\CS\MAVLink.csproj", "{38FB806D-63AD-C8CB-680C-E01A18BB7AAE}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MAVLink", ".venv\Lib\site-packages\pymavlink\generator\CS\MAVLink.csproj", "{38FB806D-63AD-C8CB-680C-E01A18BB7AAE}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

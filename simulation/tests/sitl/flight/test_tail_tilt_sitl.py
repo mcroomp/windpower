@@ -2,19 +2,20 @@
 test_tail_tilt_sitl.py -- GUIDED_NOGPS static-hold gate: no swashplate tilt, no PID firing.
 
 Holds the hub stationary at the steady-state equilibrium orientation
-(from steady_state_starting.json) with the production config
-(H_TAIL_TYPE=4 DDFP CCW from rawes_sitl_defaults.parm), then checks:
+(from steady_state_starting.json) with the standard tail config
+(H_TAIL_TYPE=3 DDFP CW, Motor4 on SERVO9, from rawes_common_defaults.parm),
+then checks:
 
   1. Swashplate tilt: |tilt_lon| < 0.10 and |tilt_lat| < 0.10
   2. Attitude PID: ATTITUDE_TARGET body_roll/pitch_rate < 0.05 rad/s
 
 Both checks must pass for 15 s with neutral sticks in GUIDED_NOGPS mode.
 
-History: adding H_TAIL_TYPE=4 to rawes_sitl_defaults.parm initially caused
-tilt_lat=0.432 during the kinematic phase because the vehicle was in
-STABILIZE (mode 0). STABILIZE targets roll=0/pitch=0, generating constant
-cyclic at 65 deg tilt. Fix: set GUIDED_NOGPS before arm (wait for EKF3 active first
-so DO_SET_MODE is accepted). This test is the regression gate for that fix.
+History: the vehicle must be in GUIDED_NOGPS (not STABILIZE) before arm, or
+STABILIZE targets roll=0/pitch=0 and generates constant cyclic at 65 deg tilt
+(observed tilt_lat=0.432 during the kinematic phase). Fix: set GUIDED_NOGPS
+before arm (wait for EKF3 active first so DO_SET_MODE is accepted). This test
+is the regression gate for that fix.
 """
 import json
 import logging
@@ -63,8 +64,8 @@ def _load_ic():
     return pos, vel, rpy, accel_body, gyro
 
 # ---------------------------------------------------------------------------
-# No extra params needed — H_TAIL_TYPE=4 + SERVO4 range are now in rawes_sitl_defaults.parm.
-_TAIL4_EXTRA_PARAMS: dict[str, float] = {}
+# No extra params needed — the standard tail config (H_TAIL_TYPE=3 DDFP CW,
+# Motor4 on SERVO9) comes from rawes_common_defaults.parm via the boot chain.
 
 _OBS_SECONDS    = 15.0
 _TILT_LIMIT     = 0.10   # normalised [-1,1]; > this is a failure
@@ -72,13 +73,13 @@ _RATE_CMD_LIMIT = 0.05   # rad/s; ATTITUDE_TARGET rate command; > this means PID
 
 
 @pytest.mark.timeout(120)
-def test_tail_tilt_h_tail_type_4_sitl(tmp_path, request):
+def test_tail_tilt_sitl(tmp_path, request):
     """
-    Static hold at IC equilibrium with H_TAIL_TYPE=4: tilt must stay near zero.
+    Static hold at IC equilibrium with the standard tail (H_TAIL_TYPE=3):
+    swashplate tilt must stay near zero.
 
-    If tilt_lat or tilt_lon exceeds 0.10 in GUIDED_NOGPS mode with neutral sticks,
-    H_TAIL_TYPE=4 is corrupting the swashplate output — do NOT add it to
-    rawes_sitl_defaults.parm for flight tests.
+    If tilt_lat or tilt_lon exceeds 0.10 in GUIDED_NOGPS mode with neutral
+    sticks, the tail/swashplate mixing is corrupting the cyclic output.
     """
     pos, vel, rpy, accel_body, gyro = _load_ic()
     log.info(
@@ -89,7 +90,6 @@ def test_tail_tilt_h_tail_type_4_sitl(tmp_path, request):
     with _static_stack(
         tmp_path, test_name=request.node.name,
         pos=pos, vel=vel, rpy=rpy, accel_body=accel_body, gyro=gyro,
-        extra_boot_params=_TAIL4_EXTRA_PARAMS,
     ) as ctx:
 
         def _assert_alive() -> None:
@@ -224,12 +224,12 @@ def test_tail_tilt_h_tail_type_4_sitl(tmp_path, request):
             if max_tilt_lon > _TILT_LIMIT:
                 failures.append(
                     f"max_tilt_lon={max_tilt_lon:.3f} > {_TILT_LIMIT} "
-                    f"-- H_TAIL_TYPE=4 is driving swashplate lon tilt"
+                    f"-- tail/swashplate mixing is driving lon tilt"
                 )
             if max_tilt_lat > _TILT_LIMIT:
                 failures.append(
                     f"max_tilt_lat={max_tilt_lat:.3f} > {_TILT_LIMIT} "
-                    f"-- H_TAIL_TYPE=4 is driving swashplate lat tilt"
+                    f"-- tail/swashplate mixing is driving lat tilt"
                 )
             if max_roll_rate > _RATE_CMD_LIMIT:
                 failures.append(

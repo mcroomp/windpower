@@ -14,12 +14,11 @@ REM The aero model is passed to the test via the RAWES_AERO environment variable
 
 set "ROOT=%~dp0"
 set "PY=%ROOT%.venv\Scripts\python.exe"
-if not exist "%PY%" set "PY=%ROOT%simulation\.venv\Scripts\python.exe"
 
 if not exist "%PY%" (
-    echo Python venv not found. Tried:
+    echo Python venv not found at:
     echo   %ROOT%.venv\Scripts\python.exe
-    echo   %ROOT%simulation\.venv\Scripts\python.exe
+    echo Run setup.cmd or bash setup.sh to create the root venv.
     exit /b 1
 )
 
