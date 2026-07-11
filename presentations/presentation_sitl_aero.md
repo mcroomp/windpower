@@ -1,11 +1,15 @@
 ---
-marp: true
 theme: default
-paginate: true
-size: 16:9
+title: RAWES SITL and Aero Architecture
+layout: cover
+class: text-left
+transition: slide-left
+mdc: true
+setup: ./setup/main.ts
+mermaid:
+    flowchart:
+        defaultRenderer: elk
 ---
-
-<!-- _paginate: false -->
 
 # RAWES SITL and Aero Architecture
 

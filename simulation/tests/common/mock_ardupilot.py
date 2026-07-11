@@ -21,21 +21,31 @@ from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
-from param_defaults import load_rawes_lua_constants
+from param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants
 from telemetry_csv import TelRow, write_csv
 
 
 def _load_rawes_pumping_constants() -> dict[str, float]:
-    """Load pumping-mode constants from centralized parameter loader."""
-    return load_rawes_lua_constants((
+    """Load pumping-mode constants from centralized loaders.
+
+    Gains come from the shared ArduPilot .parm chain (SCR_USER2..5), while
+    non-parametrized limits remain sourced from rawes.lua constants.
+    """
+    lua_constants = load_rawes_lua_constants((
         "COL_MIN_RAD",
         "COL_MAX_RAD",
-        "KP_ALT",
-        "KI_ALT",
-        "KD_VZ",
-        "RATE_KP_OUTER",
         "RATE_ACCEL_MAX_RADSS",
     ))
+    params = load_ap_params()
+    return {
+        "COL_MIN_RAD": lua_constants["COL_MIN_RAD"],
+        "COL_MAX_RAD": lua_constants["COL_MAX_RAD"],
+        "KP_ALT": get_ap_param("SCR_USER2", params=params),
+        "KI_ALT": get_ap_param("SCR_USER3", params=params),
+        "KD_VZ": get_ap_param("SCR_USER4", params=params),
+        "RATE_KP_OUTER": get_ap_param("SCR_USER5", params=params),
+        "RATE_ACCEL_MAX_RADSS": lua_constants["RATE_ACCEL_MAX_RADSS"],
+    }
 
 
 _RAWES_PUMPING_CONSTANTS = _load_rawes_pumping_constants()

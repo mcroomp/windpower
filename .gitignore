@@ -33,6 +33,11 @@ tmp/
 # Node
 node_modules/
 
+# Presentation workspace artifacts
+presentations/dist/
+presentations/setup/
+presentations/styles/
+
 # OS / editor
 .DS_Store
 Thumbs.db

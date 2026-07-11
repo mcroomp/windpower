@@ -391,12 +391,9 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         omega_spin=float(omega_spin),
     )
     runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
-    # Same tuned cyclic gains as test_create_ic warmup.
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        P=0.67, I=0.15, D=0.02, IMAX=0.30,
-        FLTT=40.0, FLTE=0.0, FLTD=40.0,
     )
     runner._acro._servo.reset(stack_coll)
     runner._acro.set_trim(trim_tilt_lon, trim_tilt_lat)
