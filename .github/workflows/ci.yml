@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - pidonly
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -138,8 +137,11 @@ jobs:
         run: chmod +x test.sh
 
       - name: Run stack test file
+        shell: bash
         run: |
-          bash test.sh stack -n 1 "${{ matrix.test_file }}"
+          test_stem="$(basename "${{ matrix.test_file }}" .py)"
+          echo "Running stack file via -k prefilter: ${test_stem}"
+          bash test.sh stack -n 1 -k "${test_stem}"
 
       - name: Upload stack logs on failure
         if: failure()
