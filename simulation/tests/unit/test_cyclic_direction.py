@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
 from dynbem import RotorInputs, create_aero, rotor_definition
+from ic import load_ic
 
 
 SIM = Path(__file__).resolve().parents[2]
-IC_PATH = SIM / "steady_state_starting.json"
 ROTOR_PATH = SIM / "rotor_definitions" / "beaupoil_2026.yaml"
 
 RHO = 1.225
@@ -23,13 +22,13 @@ WIND.flags.writeable = False
 
 
 def _load_ic() -> SimpleNamespace:
-    data = json.loads(IC_PATH.read_text())
+    ic = load_ic()
     return SimpleNamespace(
-        vel=np.array(data["vel"], dtype=float),
-        R0=np.array(data["R0"], dtype=float).reshape(3, 3),
-        omega_spin=float(data["omega_spin"]),
-        trim_tilt_lon=float(data.get("trim_tilt_lon", 0.0)),
-        trim_tilt_lat=float(data.get("trim_tilt_lat", 0.0)),
+        vel=ic.vel,
+        R0=ic.R0,
+        omega_spin=ic.omega_spin,
+        trim_tilt_lon=ic.trim_tilt_lon,
+        trim_tilt_lat=ic.trim_tilt_lat,
     )
 
 

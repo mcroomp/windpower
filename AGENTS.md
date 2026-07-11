@@ -44,12 +44,37 @@ Use the primary doc for each topic. Other docs should link, not restate.
 - AP control split: orientation feedforward from commanded tension; altitude PID sets collective.
 - Stack tests must validate real stack behavior (no simulation-only stabilizing hacks).
 - Use GUIDED mode for flight behavior under test.
+- When roll and pitch appear together as paired values (params, tuple returns,
+  unpacking, CSV columns, helper args), always use `roll, pitch` order.
+  Do not introduce `pitch, roll` ordering unless an external interface
+  explicitly requires it; if so, add an inline comment at that boundary.
+
+## SCR_USER Mapping (Agent Critical)
+
+Treat this mapping as contract-level. Keep it consistent across:
+- `simulation/scripts/rawes.lua`
+- `simulation/tests/sitl/rawes_common_defaults.parm`
+- design/hardware docs that reference SCR_USER fields.
+
+Canonical mapping:
+- `SCR_USER1` -> yaw motor slope override (`YAW_RPM_PER_US`), 0 means use bench default.
+- `SCR_USER2` -> Lua `KP_ALT`.
+- `SCR_USER3` -> Lua `KI_ALT`.
+- `SCR_USER4` -> Lua `KD_VZ`.
+- `SCR_USER5` -> Lua `RATE_KP_OUTER`.
+- `SCR_USER6` -> `RAWES_MODE` selector.
+
+Do not repurpose `SCR_USER2..5` for anchor/slew or other runtime values.
+Anchor/slew are NAMED_VALUE_FLOAT inputs (`RAWES_SLW`, `RAWES_ANN`, `RAWES_ANE`, `RAWES_AND`).
 
 For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
 
 ## Workflow Rules
 
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
+- Do not preserve backward-compatibility parameters, fields, aliases, or shims when making code changes.
+- Assume no external callers: prefer a clean cutover and remove legacy paths in the same change to avoid debt.
+- Do not make tests pass by making gates easier or introducing hacks unless the user has explicitly asked for it.
 - For failing simtest/stack test, validate telemetry/log quality before root-cause analysis.
 - Keep telemetry schema centralized in `simulation/telemetry_columns.py`.
 - When changing telemetry columns: update `TelRow` fields in `telemetry_csv.py`, NVF maps in `torque_test_utils.py`, and row-write dicts in `mediator.py` in the same commit. Mismatch causes `AttributeError` in `TelRow.to_dict()` at runtime.

@@ -82,8 +82,9 @@ from pymavlink import mavutil as _mavutil
 from gcs import GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
 from mediator_events import MediatorEventLog
 from controller import make_hold_controller
+from ic import load_ic_dict, IC_JSON_PATH
 
-_STARTING_STATE       = _SIM_DIR / "steady_state_starting.json"
+_STARTING_STATE       = IC_JSON_PATH
 _RAWES_COMMON_PARM    = _SITL_DIR / "rawes_common_defaults.parm"
 _RAWES_SITL_ONLY_PARM = _SITL_DIR / "rawes_sitl_defaults.parm"
 # Backward-compatible alias used by existing imports/docs.
@@ -732,9 +733,8 @@ def _acro_stack(tmp_path, *, extra_config=None,
     initial_state = None
     home_alt_m    = 12.530
     if _STARTING_STATE.exists():
-        initial_state = json.loads(_STARTING_STATE.read_text())
+        initial_state = load_ic_dict()
         home_alt_m    = -float(initial_state["pos"][2])
-        initial_state = dict(initial_state)
 
     # ── Hold controller ────────────────────────────────────────────────────────
     _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])

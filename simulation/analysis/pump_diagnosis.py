@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dynbem import RotorInputs, create_aero
 from tests.simtests._rotor_helpers import load_default_rotor
+from ic import load_ic
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -55,9 +56,9 @@ G       = 9.81
 MG      = MASS * G
 WIND    = np.array([0.0, 10.0, 0.0])
 
-_d   = json.loads((Path(__file__).resolve().parents[1] / "steady_state_starting.json").read_text())
-_R0  = np.array(_d["R0"]).reshape(3, 3)
-OMEGA = float(_d["omega_spin"])
+_ic  = load_ic()
+_R0  = _ic.R0
+OMEGA = _ic.omega_spin
 
 COL_MIN       = -0.28
 COL_MAX       =  0.10

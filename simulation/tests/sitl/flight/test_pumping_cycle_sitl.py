@@ -119,14 +119,12 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     eq_phys = ic.get("eq_physics")
     if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
         coll_seed = float(eq_phys["collective_rad"])
-    elif "stack_coll_eq" in ic:
-        coll_seed = float(ic["stack_coll_eq"])
     elif "coll_eq_rad" in ic:
         coll_seed = float(ic["coll_eq_rad"])
     else:
         raise KeyError(
             "initial_state missing collective seed; expected one of "
-            "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+            "eq_physics.collective_rad, coll_eq_rad"
         )
     ten_seed = float(ic["tension_eq_n"])
     R0 = ic.get("R0")

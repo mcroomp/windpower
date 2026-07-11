@@ -607,11 +607,11 @@ def _launch_mediator(
     # Apply equilibrium collective AFTER extra_config merge so it isn't overridden.
     # warm_coll_rad seeds TensionPI integral at the exact equilibrium value on
     # kinematic exit — must survive the trajectory.deschutter extra_config merge.
-    if initial_state is not None and "stack_coll_eq" in initial_state:
+    if initial_state is not None and "coll_eq_rad" in initial_state:
         cfg.setdefault("trajectory", {}).setdefault("deschutter", {})
-        cfg["trajectory"]["deschutter"]["warm_coll_rad"] = float(initial_state["stack_coll_eq"])
+        cfg["trajectory"]["deschutter"]["warm_coll_rad"] = float(initial_state["coll_eq_rad"])
     # tension_out is intentionally NOT read from initial_state["tension_eq_n"].
-    # The equilibrium tension at stack_coll_eq (-0.18 rad) is ~345 N, but the
+    # The equilibrium tension at coll_eq_rad (-0.18 rad) is ~345 N, but the
     # operational reel-out target stays at the config default (200 N) for energy
     # optimization.  The warm_coll_rad=-0.18 already gives the PI 0.10 rad of
     # downward headroom when tension rises above 200 N.

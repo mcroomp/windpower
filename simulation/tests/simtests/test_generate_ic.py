@@ -270,7 +270,6 @@ def _save_ic(path: Path, ic: dict) -> None:
         # Stored so tests can warm-start from the same equilibrium command.
         "coll_eq_rad":   float(ic["coll_settled"]),
         "tension_eq_n":  float(ic["T_tether"]),
-        "stack_coll_eq": float(ic["coll_settled"]),
         "trim_tilt_lon": float(ic["trim_tilt_lon"]),
         "trim_tilt_lat": float(ic["trim_tilt_lat"]),
         "home_z_ned":    0.0,
@@ -565,7 +564,7 @@ def test_ic_r0_kinematic(simtest_log):
     rest       = ic.rest_length
     d = json.loads(_JSON_PATH.read_text())
     tension_sp = float(d.get("tension_eq_n", 435.0))
-    stack_coll = ic.stack_coll_eq
+    stack_coll = ic.coll_eq_rad
     trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0))
     trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0))
 

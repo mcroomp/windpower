@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dynbem import create_aero
 from dynbem import rotor_definition as rd
+from ic import load_ic
 
 # ── Current simtest parameters (shown as baseline in all tables) ──────────────
 TENSION_OUT_NOW  = 435.0   # N  reel-out TensionPI setpoint
@@ -70,12 +71,10 @@ MASS  = rotor.mass_kg
 G     = 9.81
 MG    = MASS * G
 
-_IC = json.loads(
-    (Path(__file__).resolve().parents[1] / "steady_state_starting.json").read_text()
-)
-IC_POS     = np.array(_IC["pos"])
-IC_R0      = np.array(_IC["R0"]).reshape(3, 3)
-OMEGA_SPIN = float(_IC["omega_spin"])
+_IC = load_ic()
+IC_POS     = _IC.pos
+IC_R0      = _IC.R0
+OMEGA_SPIN = _IC.omega_spin
 
 IC_TLEN = float(np.linalg.norm(IC_POS))
 IC_EL   = math.degrees(math.asin(max(-1.0, min(1.0, -IC_POS[2] / IC_TLEN))))
