@@ -11,6 +11,7 @@ controller values in Python.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Sequence
 
@@ -33,6 +34,42 @@ def _resolve_default_param_files() -> list[Path]:
         files.append(rawes_sitl_only)
 
     return files
+
+
+def _resolve_rawes_lua_file() -> Path:
+    """Return the canonical rawes.lua script path."""
+    sim_root = Path(__file__).resolve().parent
+    return sim_root / "scripts" / "rawes.lua"
+
+
+def load_rawes_lua_constants(required_names: Sequence[str]) -> dict[str, float]:
+    """Load named numeric constants from rawes.lua.
+
+    Raises
+    ------
+    ValueError
+        If one or more required constants are missing.
+    """
+    text = _resolve_rawes_lua_file().read_text(encoding="utf-8")
+    values: dict[str, float] = {}
+    missing: list[str] = []
+
+    for name in required_names:
+        m = re.search(
+            rf"(?m)^\s*{re.escape(name)}\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+            text,
+        )
+        if m is not None:
+            values[name] = float(m.group(1))
+        else:
+            missing.append(name)
+
+    if missing:
+        raise ValueError(
+            "Missing required constants in rawes.lua: " + ", ".join(missing)
+        )
+
+    return values
 
 
 def load_ap_params(param_files: Sequence[Path | str] | None = None) -> dict[str, float]:

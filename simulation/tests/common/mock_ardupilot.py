@@ -21,7 +21,24 @@ from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
+from param_defaults import load_rawes_lua_constants
 from telemetry_csv import TelRow, write_csv
+
+
+def _load_rawes_pumping_constants() -> dict[str, float]:
+    """Load pumping-mode constants from centralized parameter loader."""
+    return load_rawes_lua_constants((
+        "COL_MIN_RAD",
+        "COL_MAX_RAD",
+        "KP_ALT",
+        "KI_ALT",
+        "KD_VZ",
+        "RATE_KP_OUTER",
+        "RATE_ACCEL_MAX_RADSS",
+    ))
+
+
+_RAWES_PUMPING_CONSTANTS = _load_rawes_pumping_constants()
 
 
 def _bz_ned_to_roll_pitch_deg(bz_ned: np.ndarray, yaw_rad: float) -> tuple[float, float]:
@@ -237,18 +254,19 @@ class _PumpingPythonMode:
     CMD_TIMEOUT_S: float = 0.5
     FEASIBILITY_WINDOW_S: float = 1.0
 
-    COL_MIN_RAD: float = -0.28
-    COL_MAX_RAD: float = 0.10
+    COL_MIN_RAD: float = _RAWES_PUMPING_CONSTANTS["COL_MIN_RAD"]
+    COL_MAX_RAD: float = _RAWES_PUMPING_CONSTANTS["COL_MAX_RAD"]
 
-    KP_ALT: float = 0.010
-    KI_ALT: float = 0.001
-    KD_VZ:  float = 0.040
+    KP_ALT: float = _RAWES_PUMPING_CONSTANTS["KP_ALT"]
+    KI_ALT: float = _RAWES_PUMPING_CONSTANTS["KI_ALT"]
+    KD_VZ:  float = _RAWES_PUMPING_CONSTANTS["KD_VZ"]
+    RATE_KP_OUTER: float = _RAWES_PUMPING_CONSTANTS["RATE_KP_OUTER"]
     # Rate-stability gate on the collective vz-damping term (mirrors rawes.lua):
     # fade KD_VZ when body rates are elevated so the derivative term does not
     # react to vertical velocity produced by the attitude loop still slewing.
     VZ_GATE_RATE_RADS: float = 1.0
     VZ_GATE_MIN:       float = 0.0
-    RATE_ACCEL_MAX_RADSS: float = 4.0
+    RATE_ACCEL_MAX_RADSS: float = _RAWES_PUMPING_CONSTANTS["RATE_ACCEL_MAX_RADSS"]
 
     def __init__(
         self,
@@ -260,7 +278,7 @@ class _PumpingPythonMode:
         cmd_timeout_s  : float = CMD_TIMEOUT_S,
         coll_min_rad   : float = COL_MIN_RAD,
         coll_max_rad   : float = COL_MAX_RAD,
-        kp_outer       : float = 2.5,
+        kp_outer       : float = RATE_KP_OUTER,
         kp_alt         : float = KP_ALT,
         ki_alt         : float = KI_ALT,
         kd_vz          : float = KD_VZ,
@@ -608,6 +626,7 @@ class MockArdupilot:
         "KP_ALT": _PumpingPythonMode.KP_ALT,
         "KI_ALT": _PumpingPythonMode.KI_ALT,
         "KD_VZ": _PumpingPythonMode.KD_VZ,
+        "RATE_KP_OUTER": _PumpingPythonMode.RATE_KP_OUTER,
         "RATE_ACCEL_MAX_RADSS": _PumpingPythonMode.RATE_ACCEL_MAX_RADSS,
     }
     LANDING_CONSTANTS = {
@@ -678,7 +697,7 @@ class MockArdupilot:
         ki_vz: float = _LandingPythonMode.KI_VZ,
         col_min_rad: float = _LandingPythonMode.COL_MIN_RAD,
         col_max_rad: float = _LandingPythonMode.COL_MAX_RAD,
-        kp_outer: float = 2.5,
+        kp_outer: float = _PumpingPythonMode.RATE_KP_OUTER,
     ):
         return cls.for_python(
             mode="landing",
