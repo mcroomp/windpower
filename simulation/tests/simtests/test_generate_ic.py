@@ -252,13 +252,6 @@ def _compute_ic() -> dict:
 
 def _save_ic(path: Path, ic: dict) -> None:
     """Write steady_state_starting.json consumed by all stack/simtests via config.py."""
-    F_aero  = ic["F_aero"]
-    f_teth  = ic["f_teth"]
-    M_aero  = ic["M_aero"]
-    m_teth  = ic["m_teth"]
-    F_res   = ic["F_residual"]
-    F_net   = F_aero + f_teth
-
     out = {
         "pos":           ic["pos0"].tolist(),
         "vel":           ic["vel0"].tolist(),
@@ -273,42 +266,6 @@ def _save_ic(path: Path, ic: dict) -> None:
         "trim_tilt_lon": float(ic["trim_tilt_lon"]),
         "trim_tilt_lat": float(ic["trim_tilt_lat"]),
         "home_z_ned":    0.0,
-        "eq_physics": {
-            "mass_kg":        float(MASS),
-            "wind_ned":       WIND.tolist(),
-            "collective_rad": float(STACK_COLL),
-            "tilt_lon":       0.0,
-            "tilt_lat":       0.0,
-            "omega_spin":     float(ic["omega_spin"]),
-            "note": (
-                "Forces evaluated at STACK_COLL from the static fixed-tether IC. "
-                "Perpendicular residual (gravity_perp ~48 N) balanced by Lua cyclic in flight."
-            ),
-            "aero_fx":        float(F_aero[0]),
-            "aero_fy":        float(F_aero[1]),
-            "aero_fz":        float(F_aero[2]),
-            "tether_fx":      float(f_teth[0]),
-            "tether_fy":      float(f_teth[1]),
-            "tether_fz":      float(f_teth[2]),
-            "F_net_x":        float(F_net[0]),
-            "F_net_y":        float(F_net[1]),
-            "F_net_z":        float(F_net[2]),
-            "F_residual_x":   float(F_res[0]),
-            "F_residual_y":   float(F_res[1]),
-            "F_residual_z":   float(F_res[2]),
-            "F_residual_mag": float(np.linalg.norm(F_res)),
-            "F_res_along":    float(ic["F_res_along"]),
-            "grav_perp_x":    float(ic["grav_perp"][0]),
-            "grav_perp_y":    float(ic["grav_perp"][1]),
-            "grav_perp_z":    float(ic["grav_perp"][2]),
-            "grav_perp_mag":  float(np.linalg.norm(ic["grav_perp"])),
-            "aero_mx":        float(M_aero[0]),
-            "aero_my":        float(M_aero[1]),
-            "aero_mz":        float(M_aero[2]),
-            "tether_mx":      float(m_teth[0]),
-            "tether_my":      float(m_teth[1]),
-            "tether_mz":      float(m_teth[2]),
-        },
     }
     path.write_text(json.dumps(out, indent=2))
 
@@ -434,12 +391,9 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         omega_spin=float(omega_spin),
     )
     runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
-    # Same tuned cyclic gains as test_create_ic warmup.
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        P=0.67, I=0.15, D=0.02, IMAX=0.30,
-        FLTT=40.0, FLTE=0.0, FLTD=40.0,
     )
     runner._acro._servo.reset(stack_coll)
     runner._acro.set_trim(trim_tilt_lon, trim_tilt_lat)

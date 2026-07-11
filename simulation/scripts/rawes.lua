@@ -39,6 +39,10 @@ Ground planner signals via NAMED_VALUE_FLOAT:
 Parameters:
   SCR_USER6   RAWES_MODE      Mode selector (0,1,3,4)                 default 0
   SCR_USER1   YAW_RPM_PER_US  Yaw motor slope [RPM/µs] (0=bench default 0.504)
+    SCR_USER2   KP_ALT          Altitude-P gain                          default 0.010
+    SCR_USER3   KI_ALT          Altitude-I gain                          default 0.001
+    SCR_USER4   KD_VZ           Vertical-speed damping gain              default 0.040
+    SCR_USER5   RATE_KP_OUTER   body_z outer-loop gain                   default 2.5
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -170,8 +174,8 @@ _tension_n      = 200.0   -- target/feed-forward tether tension [N]; updated fro
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
 _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 
--- Tuning + anchor, delivered via NAMED_VALUE_FLOAT (formerly SCR_USER2/3/4/5).
--- Mode is the ONLY remaining SCR_USER parameter (SCR_USER6).
+-- Anchor/slew are delivered via NAMED_VALUE_FLOAT.
+-- SCR_USER2..5 remain mapped to steady-flight gains (see header mapping).
 _bz_slew         = 0.40    -- RAWES_SLW: elevation/body_z slew rate [rad/s]
 _anchor_n        = 0.0     -- RAWES_ANN: anchor North from EKF origin [m]
 _anchor_e        = 0.0     -- RAWES_ANE: anchor East  from EKF origin [m]
@@ -381,6 +385,15 @@ do
         YAW_RPM_PER_US = _s
         YFF_A          = YAW_RPM_PER_US * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)
     end
+end
+
+-- Apply steady/pumping gain overrides from SCR_USER2..5 now that param:get is
+-- available via helper p().
+do
+    KP_ALT = p("SCR_USER2", KP_ALT)
+    KI_ALT = p("SCR_USER3", KI_ALT)
+    KD_VZ = p("SCR_USER4", KD_VZ)
+    RATE_KP_OUTER = p("SCR_USER5", RATE_KP_OUTER)
 end
 
 local function anchor_ned()

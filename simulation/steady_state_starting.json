@@ -49,42 +49,5 @@
   "tension_eq_n": 300.0000000000385,
   "trim_tilt_lon": -1.486872051824281e-17,
   "trim_tilt_lat": 0.02847190622497503,
-  "home_z_ned": 0.0,
-  "eq_physics": {
-    "mass_kg": 5.0,
-    "wind_ned": [
-      0.0,
-      10.0,
-      0.0
-    ],
-    "collective_rad": -0.18,
-    "tilt_lon": 0.0,
-    "tilt_lat": 0.0,
-    "omega_spin": 34.80172362278438,
-    "note": "Forces evaluated at STACK_COLL from the static fixed-tether IC. Perpendicular residual (gravity_perp ~48 N) balanced by Lua cyclic in flight.",
-    "aero_fx": 1.3334182588092908e-14,
-    "aero_fy": 217.76372742535537,
-    "aero_fz": -145.22739197662176,
-    "tether_fx": -0.0,
-    "tether_fy": -271.2463039085508,
-    "tether_fz": 128.16178297750545,
-    "F_net_x": 1.3334182588092908e-14,
-    "F_net_y": -53.4825764831954,
-    "F_net_z": -17.065608999116307,
-    "F_residual_x": 1.3334182588092908e-14,
-    "F_residual_y": -53.4825764831954,
-    "F_residual_z": 31.984391000883697,
-    "F_residual_mag": 62.31682962874681,
-    "F_res_along": 62.02042590897893,
-    "grav_perp_x": 0.0,
-    "grav_perp_y": 18.946058414558244,
-    "grav_perp_z": 40.098133774296905,
-    "grav_perp_mag": 44.34877068904237,
-    "aero_mx": 4.402085497059048e-14,
-    "aero_my": -21.55275976907002,
-    "aero_mz": -32.317658808962584,
-    "tether_mx": 13.161595095907682,
-    "tether_my": 1.9586766908190087e-15,
-    "tether_mz": 4.145415275860641e-15
-  }
+  "home_z_ned": 0.0
 }

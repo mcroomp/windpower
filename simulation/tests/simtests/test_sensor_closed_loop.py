@@ -99,11 +99,8 @@ def _run(t_sim: float = T_SIM):
                  gyro_norm, omega_spin
     """
     runner = PhysicsRunner(_ROTOR_S, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
-    # Tuned cyclic gains (see tests/oneoff/warmup_gain_sweep.py).
     runner._acro = HeliCyclicController(
         _ROTOR_S, col_min_rad=-0.28, col_max_rad=0.10,
-        P=0.67, I=0.15, D=0.02, IMAX=0.30,
-        FLTT=40.0, FLTE=0.0, FLTD=40.0,
     )
     runner._acro._servo.reset(_IC.coll_eq_rad)
 

@@ -1,0 +1,15 @@
+{
+  "name": "rawes-presentations",
+  "private": true,
+  "scripts": {
+    "dev": "slidev presentation_sitl_aero.md",
+    "build": "slidev build presentation_sitl_aero.md",
+    "export": "slidev export presentation_sitl_aero.md"
+  },
+  "devDependencies": {
+    "@slidev/cli": "^52.17.0"
+  },
+  "dependencies": {
+    "@slidev/theme-default": "^0.25.0"
+  }
+}

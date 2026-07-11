@@ -82,11 +82,11 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
 
     # ── Recorded run ──────────────────────────────────────────────────────────
     runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
-    # Use proven default parameters from arduloop.params (matches SITL rawes_sitl_defaults.parm)
+    # Use central loader-backed defaults from arduloop/param_defaults.
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
-        # All parameters use defaults from make_roll_pitch_params()
+        # All AP gains/limits come from the merged central .parm chain.
     )
     runner._acro._servo.reset(ic.coll_eq_rad)
     ap = MockArdupilot.for_pumping(
@@ -98,10 +98,8 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
         wind=WIND,
         dt=DT,
     )
-    from arduloop import HeliParams, make_roll_pitch_params, make_yaw_params
-    _rp = make_roll_pitch_params()
-    _yaw = make_yaw_params()
-    _hp = HeliParams(roll=_rp, pitch=_rp, yaw=_yaw)
+    from arduloop import HeliParams
+    _hp = HeliParams()
     ap.enable_guided(_hp)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),

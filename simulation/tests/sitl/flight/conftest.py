@@ -344,19 +344,13 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             # arrived, so sending it now gives the nul-aero the entire kinematic
             # hold window to slew the disk to the IC tilt before release.
 
-            # Seed Lua with the exact IC collective used by physics. Prefer
-            # eq_physics.collective_rad, then explicit IC scalar fields.
-            _eq_phys = _ic.get("eq_physics")
-            if isinstance(_eq_phys, dict) and "collective_rad" in _eq_phys:
-                _coll_trim = float(_eq_phys["collective_rad"])
-                _coll_src = "eq_physics.collective_rad"
-            elif "coll_eq_rad" in _ic:
+            # Seed Lua with the canonical IC collective scalar.
+            if "coll_eq_rad" in _ic:
                 _coll_trim = float(_ic["coll_eq_rad"])
                 _coll_src = "coll_eq_rad"
             else:
                 raise KeyError(
-                    "initial_state missing collective seed; expected one of "
-                    "eq_physics.collective_rad, coll_eq_rad"
+                    "initial_state missing collective seed: coll_eq_rad"
                 )
             ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
             ctx.log.info("IC collective (%s): coll=%+.4f rad", _coll_src, _coll_trim)

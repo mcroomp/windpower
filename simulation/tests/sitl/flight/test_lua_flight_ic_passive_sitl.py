@@ -50,14 +50,10 @@ _MIN_TENSION_N = 0.01
 
 
 def _get_ic_collective(ic: dict) -> tuple[float, str]:
-    eq_phys = ic.get("eq_physics")
-    if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
-        return float(eq_phys["collective_rad"]), "eq_physics.collective_rad"
     if "coll_eq_rad" in ic:
         return float(ic["coll_eq_rad"]), "coll_eq_rad"
     raise KeyError(
-        "initial_state missing collective seed; expected one of "
-        "eq_physics.collective_rad, coll_eq_rad"
+        "initial_state missing collective seed: coll_eq_rad"
     )
 
 

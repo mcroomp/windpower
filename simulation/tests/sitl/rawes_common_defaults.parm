@@ -62,6 +62,12 @@ ATC_RAT_YAW_I     0.0
 # (see torque_model.py for RPM_SCALE and GEAR_RATIO). Bench measurement gives 0.504 for the old 80:44 gear.
 SCR_USER1         0
 
+# Lua steady/pumping control gains (consumed by rawes.lua via SCR_USER2..5).
+SCR_USER2         0.010   # KP_ALT
+SCR_USER3         0.001   # KI_ALT
+SCR_USER4         0.040   # KD_VZ
+SCR_USER5         2.5     # RATE_KP_OUTER
+
 # --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
 # Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw
 # motor is Motor4 on OUTPUT 9 with a 1000-2000 us DShot range.
