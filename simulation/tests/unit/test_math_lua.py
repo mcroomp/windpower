@@ -337,7 +337,7 @@ class TestLuaCaptureAgainstStartingIc:
         sim.send_named_float("RAWES_AND", -float(pos0[2]))
         sim.pos_ned = [0.0, 0.0, 0.0]
 
-        sim.send_named_float("RAWES_COL", float(ic.get("stack_coll_eq", ic["coll_eq_rad"])))
+        sim.send_named_float("RAWES_COL", float(ic["coll_eq_rad"]))
         sim.send_named_float("RAWES_TEN", float(ic["tension_eq_n"]))
 
         # Capture needs one run_flight call; angle command appears on the next.

@@ -328,7 +328,7 @@ from simtest_ic import load_ic
 ic = load_ic()
 # ic.pos, ic.vel, ic.R0, ic.omega_spin, ic.rest_length
 # ic.coll_eq_rad     -- collective at which TensionPI settled (~300 N tension)
-# ic.stack_coll_eq   -- same value; used as TensionPI warm-start in stack tests
+# ic.coll_eq_rad     -- collective used as TensionPI warm-start in stack tests
 # ic.home_z_ned      -- GPS home NED Z [m]
 ```
 

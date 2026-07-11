@@ -53,13 +53,11 @@ def _get_ic_collective(ic: dict) -> tuple[float, str]:
     eq_phys = ic.get("eq_physics")
     if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
         return float(eq_phys["collective_rad"]), "eq_physics.collective_rad"
-    if "stack_coll_eq" in ic:
-        return float(ic["stack_coll_eq"]), "stack_coll_eq"
     if "coll_eq_rad" in ic:
         return float(ic["coll_eq_rad"]), "coll_eq_rad"
     raise KeyError(
         "initial_state missing collective seed; expected one of "
-        "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+        "eq_physics.collective_rad, coll_eq_rad"
     )
 
 

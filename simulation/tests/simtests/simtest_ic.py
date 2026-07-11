@@ -21,85 +21,16 @@ Usage
     ORBIT_BZ0    = ic.orbit_bz   # pre-tilted disk normal for orbit tracking start
     OMEGA_SPIN0  = ic.omega_spin
     REST_LENGTH0 = ic.rest_length
-    COLL_EQ      = ic.coll_eq_rad  # equilibrium collective (= stack_coll_eq = -0.18 rad)
+    COLL_EQ      = ic.coll_eq_rad  # equilibrium collective (= -0.18 rad)
     TRIM_TLAT    = ic.trim_tilt_lat
 """
 
 from __future__ import annotations
-import json
-from dataclasses import dataclass
-from pathlib import Path
 
-import numpy as np
+from ic import IC, load_ic, load_ic_dict, IC_JSON_PATH
 
-_JSON_PATH = Path(__file__).resolve().parents[2] / "steady_state_starting.json"
+# Backward-compatible alias for the JSON path (old name used by some tests).
+_JSON_PATH = IC_JSON_PATH
 
+__all__ = ["IC", "load_ic", "load_ic_dict", "IC_JSON_PATH", "_JSON_PATH"]
 
-@dataclass
-class IC:
-    """Steady-state initial conditions loaded from steady_state_starting.json."""
-    pos:           np.ndarray   # NED hub position [m]
-    vel:           np.ndarray   # NED hub velocity [m/s]
-    R0:            np.ndarray   # body-to-NED rotation (3x3); body_z = R0[:, 2]
-    R0_kinematic:  np.ndarray   # R0 with body_x North-aligned for GPS/RELPOSNED lock (pure spin around body_z)
-    R0_orbit:      np.ndarray   # R0 pre-tilted to cancel gravity_perp at IC; body_z = R0_orbit[:, 2]
-    orbit_bz:      np.ndarray   # disk normal for orbit tracking start (= R0_orbit[:, 2])
-    omega_spin:    float        # equilibrium rotor spin [rad/s]
-    rest_length:   float        # tether rest length [m]
-    coll_eq_rad:   float        # warmup collective [rad]; IC is settled at this value (-0.18 rad)
-    stack_coll_eq: float        # Lua col_cruise [rad]; equals coll_eq_rad (-0.18 rad)
-    trim_tilt_lon: float        # cyclic trim that nulls IC hub moment [rad]
-    trim_tilt_lat: float        # cyclic trim that nulls IC hub moment [rad]
-    home_z_ned:    float        # GPS home NED Z [m] — 0 = ground level
-
-
-def load_ic() -> IC:
-    """
-    Load and return the steady-state initial conditions.
-
-    Raises FileNotFoundError if the JSON has not been generated yet.
-    Run test_generate_ic.py::test_create_ic to generate it.
-    """
-    if not _JSON_PATH.exists():
-        raise FileNotFoundError(
-            f"steady_state_starting.json not found at {_JSON_PATH}.\n"
-            "Run:  python -m pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s"
-        )
-    d = json.loads(_JSON_PATH.read_text())
-
-    R0 = np.array(d["R0"], dtype=float).reshape(3, 3)
-
-    # Fall back gracefully when loading older JSON lacking these fields.
-    R0_kinematic = (
-        np.array(d["R0_kinematic"], dtype=float).reshape(3, 3)
-        if "R0_kinematic" in d
-        else R0.copy()
-    )
-    R0_orbit = (
-        np.array(d["R0_orbit"], dtype=float).reshape(3, 3)
-        if "R0_orbit" in d
-        else R0.copy()
-    )
-    orbit_bz = (
-        np.array(d["orbit_bz"], dtype=float)
-        if "orbit_bz" in d
-        else R0[:, 2].copy()
-    )
-
-    coll_eq_rad = float(d["coll_eq_rad"])
-
-    return IC(
-        pos           = np.array(d["pos"], dtype=float),
-        vel           = np.array(d["vel"], dtype=float),
-        R0            = R0,
-        R0_kinematic  = R0_kinematic,
-        R0_orbit      = R0_orbit,
-        orbit_bz      = orbit_bz,
-        omega_spin    = float(d["omega_spin"]),
-        rest_length   = float(d["rest_length"]),
-        coll_eq_rad   = coll_eq_rad,
-        stack_coll_eq = float(d["stack_coll_eq"]),
-        trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0)),
-        trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0)),
-        home_z_ned    = float(d["home_z_ned"]),
-    )

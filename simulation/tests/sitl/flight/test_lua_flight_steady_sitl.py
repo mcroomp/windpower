@@ -145,16 +145,13 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     if isinstance(eq_phys, dict) and "collective_rad" in eq_phys:
         coll_seed = float(eq_phys["collective_rad"])
         coll_src = "eq_physics.collective_rad"
-    elif "stack_coll_eq" in ic:
-        coll_seed = float(ic["stack_coll_eq"])
-        coll_src = "stack_coll_eq"
     elif "coll_eq_rad" in ic:
         coll_seed = float(ic["coll_eq_rad"])
         coll_src = "coll_eq_rad"
     else:
         raise KeyError(
             "initial_state missing collective seed; expected one of "
-            "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+            "eq_physics.collective_rad, coll_eq_rad"
         )
     ten_seed = float(ic["tension_eq_n"])
     R0 = ic.get("R0")

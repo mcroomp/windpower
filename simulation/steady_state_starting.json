@@ -47,7 +47,6 @@
   "rest_length": 99.89332656472537,
   "coll_eq_rad": -0.18,
   "tension_eq_n": 300.0000000000385,
-  "stack_coll_eq": -0.18,
   "trim_tilt_lon": -1.486872051824281e-17,
   "trim_tilt_lat": 0.02847190622497503,
   "home_z_ned": 0.0,

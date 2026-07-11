@@ -26,6 +26,7 @@ from stack_infra import (
     _STARTING_STATE,
     _STARTUP_DAMP_S,
 )
+from ic import load_ic
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +243,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
     # the heading pre-set, nul-aero pitch-down lands body_z in the tether/wind
     # plane and autorotation produces full thrust (~334 N) so the tether stays
     # taut.  Roll/pitch stay 0 here and are commanded later via cyclic.
-    _ic_R0 = np.array(json.loads(_STARTING_STATE.read_text())["R0"], dtype=float)
+    _ic_R0 = load_ic().R0
     _ic_yaw = math.atan2(_ic_R0[1, 0], _ic_R0[0, 0])  # ZYX yaw of IC attitude
     _cy, _sy = math.cos(_ic_yaw), math.sin(_ic_yaw)
     _R0_level_yaw = [
@@ -349,16 +350,13 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             if isinstance(_eq_phys, dict) and "collective_rad" in _eq_phys:
                 _coll_trim = float(_eq_phys["collective_rad"])
                 _coll_src = "eq_physics.collective_rad"
-            elif "stack_coll_eq" in _ic:
-                _coll_trim = float(_ic["stack_coll_eq"])
-                _coll_src = "stack_coll_eq"
             elif "coll_eq_rad" in _ic:
                 _coll_trim = float(_ic["coll_eq_rad"])
                 _coll_src = "coll_eq_rad"
             else:
                 raise KeyError(
                     "initial_state missing collective seed; expected one of "
-                    "eq_physics.collective_rad, stack_coll_eq, coll_eq_rad"
+                    "eq_physics.collective_rad, coll_eq_rad"
                 )
             ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
             ctx.log.info("IC collective (%s): coll=%+.4f rad", _coll_src, _coll_trim)

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - pidonly
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-and-simtests:
+    name: Unit + Simtests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: simulation/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r simulation/requirements.txt
+
+      - name: Run unit tests
+        run: |
+          python -m pytest simulation/tests/unit -m "not simtest"
+
+      - name: Run simtests
+        run: |
+          python -m pytest simulation/tests/simtests -m simtest
+
+  stack-matrix:
+    name: Discover stack test files
+    runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.discover.outputs.files }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Discover stack tests
+        id: discover
+        shell: bash
+        run: |
+          files_json=$(find simulation/tests/sitl -name 'test_*.py' | sort | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "files=${files_json}" >> "$GITHUB_OUTPUT"
+
+  stack-docker:
+    name: Stack (Docker) - ${{ matrix.test_file }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: stack-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        test_file: ${{ fromJson(needs.stack-matrix.outputs.files) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rawes-sim image with cache
+        uses: docker/build-push-action@v6
+        with:
+          context: ./simulation
+          target: runtime-ardupilot
+          tags: rawes-sim:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Make test runner executable
+        run: chmod +x test.sh
+
+      - name: Run stack test file
+        run: |
+          bash test.sh stack -n 1 "${{ matrix.test_file }}"
+
+      - name: Upload stack logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-logs-${{ strategy.job-index }}
+          path: simulation/logs
+          if-no-files-found: ignore

@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dynbem import rotor_definition as rd
 from frames      import build_orb_frame
 from physics_core import PhysicsCore
+from ic import load_ic
 
 
 _G = 9.81
@@ -95,11 +96,10 @@ def simulate_one(
     rotor = rd.default()
     mass  = rotor.dynamics_kwargs()["mass"]
 
-    _d = json.loads(
-        (Path(__file__).resolve().parents[1] / "steady_state_starting.json").read_text())
+    _ic = load_ic()
     if omega_init is None:
-        omega_init = float(_d["omega_spin"])
-    col_warm = float(_d["coll_eq_rad"])
+        omega_init = _ic.omega_spin
+    col_warm = _ic.coll_eq_rad
 
     el     = math.radians(elevation_deg)
     L      = 100.0
