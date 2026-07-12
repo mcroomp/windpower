@@ -335,7 +335,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         if _ic is not None:
             # Seed the IC immediately, together with MODE_PASSIVE, right after
             # arm.  MODE_PASSIVE only commands the IC attitude/collective once
-            # the full atomic seed (RAWES_RIC + RAWES_PIC + RAWES_COL) has
+            # the full atomic seed (RAWES_RIC + RAWES_PIC + RAWES_THR) has
             # arrived, so sending it now gives the nul-aero the entire kinematic
             # hold window to slew the disk to the IC tilt before release.
 

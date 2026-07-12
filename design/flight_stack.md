@@ -309,7 +309,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 |---|---|---|---|
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
-| 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_COL` NVF → RC3 PWM direct | manual swash validation |
+| 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_TEN` NVF → orientation force-balance (direct cyclic only) | manual swash validation |
 | 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
 | 5 — pumping | along the tether, at the per-phase altitude the ground gave us | whatever keeps the measured tether tension on target (435 N during reel-out, 226 N during reel-in) | pumping cycle |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
@@ -324,9 +324,9 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 |---|---|---|
 | RAWES_MODE | 0 | Mode selector: 0=none, 1=steady, 3=passive, 4=landing |
 | RAWES_YAW_SLP | 0 | Yaw motor slope [RPM/µs] override. 0 → bench default 0.504 RPM/µs. |
-| RAWES_KP_ALT | 0.010 | Altitude P gain |
-| RAWES_KI_ALT | 0.001 | Altitude I gain |
-| RAWES_KD_VZ | 0.040 | Vertical-speed damping gain |
+| RAWES_KP_ALT | 0.0263 | Altitude P gain [thrust/m] |
+| RAWES_KI_ALT | 0.0026 | Altitude I gain [thrust/m·s] |
+| RAWES_KD_VZ | 0.105 | Vertical-speed damping [thrust/(m/s)] |
 | RAWES_KP_EL | 2.5 | In-plane (elevation) position rate-P gain [rad/s per m] |
 | RAWES_KP_AZ | 0.5 | Crosswind (azimuth) position rate-P gain [rad/s per m] |
 | RAWES_KD_EL | 0.0 | In-plane position rate-D gain [rad/s per (m/s)] |
@@ -350,9 +350,9 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_ANE | m | Anchor East from EKF origin. |
 | RAWES_AND | m | Anchor Down from EKF origin (positive downward in NED). Set to `−initial_state["pos"][2]` (NED Z negated). |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. Ramped by RAWES_TRP. |
-| RAWES_RIC | rad | IC roll — part of the atomic passive/steady IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_COL`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
+| RAWES_RIC | rad | IC roll — part of the atomic passive IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
 | RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
-| RAWES_COL | rad | IC collective `[COL_MIN_RAD, COL_MAX_RAD]` — part of the atomic IC seed. MODE_PASSIVE maps it onto GUIDED throttle via `col_rad_to_thrust` to preserve rotor RPM during kinematic. |
+| RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
 
 **MAVLink rx queue:** `mavlink:init(queue_size, num_msgs)` is called as
 `(20, 10)` at module load.  The first arg is the per-tick rx buffer depth;
@@ -371,15 +371,15 @@ update() drains it.  20 is safe for the typical ~5 NVFs/tick burst.
 | MIN_TETHER_M | 0.5 | Minimum tether length before GPS init activates elevation hold |
 | COL_MIN_RAD | −0.28 | Hard collective floor [rad] |
 | COL_MAX_RAD | 0.10 | Hard collective ceiling [rad] |
-| COL_CRUISE_FLIGHT_RAD | −0.18 | Pre-GPS collective hold; VZ integrator warm-start value |
-| COL_SLEW_MAX | 0.022 | Max collective change per 50 Hz step [rad/step] |
+| THRUST_CRUISE | 0.263 | Pre-GPS thrust hold; altitude PID warm-start |
+| THRUST_SLEW_MAX | 0.058 | Max thrust change per 50 Hz step |
 | ACRO_RP_RATE_DEG | 360.0 | Must match ArduPilot ACRO_RP_RATE parameter |
 
 ### 4.2 Pre-GPS Stabilization (all modes)
 
 Before `_el_initialized` is set (first valid GPS position fix with tlen ≥ MIN_TETHER_M):
 
-1. Hold collective at `COL_CRUISE_FLIGHT_RAD` (−0.18 rad) to prevent tension runaway.
+1. Hold thrust at `THRUST_CRUISE` (0.263) to prevent tension runaway.
 2. Feed gyro through to Ch1/Ch2: ACRO desired_rate = measured_rate → rate_error = 0 →
    zero corrective torque → natural orbital rate preserved.
 
@@ -399,7 +399,7 @@ emits any control output:
 
 - `RAWES_RIC` — IC roll  [rad]
 - `RAWES_PIC` — IC pitch [rad]
-- `RAWES_COL` — IC collective [rad]
+- `RAWES_THR` — IC thrust [0..1]
 
 Until all three arrive, `run_passive_mode` returns early and emits no
 control-API traffic (no ch4 neutral, no arm/disarm).  Once `_ic_seeded`
@@ -413,8 +413,7 @@ latches, incremental updates to any of the three are accepted.
 2. `vehicle:set_target_angle_and_rate_and_throttle(_ic_roll_deg,
    _ic_pitch_deg, deg(_passive_hold_yaw_rad), 0, 0, 0, throttle)` — the IC
    roll/pitch **angle** target with **zero rate feed-forward**.
-3. `throttle = col_rad_to_thrust(_ic_col)` maps the IC collective onto GUIDED
-   throttle via `(col − COL_MIN_RAD)/(COL_MAX_RAD − COL_MIN_RAD)`.
+3. `throttle = _ic_thrust` passes the IC thrust directly to GUIDED throttle.
 
 During the kinematic hold the `nul`-aero integrates this angle command, so the
 disk slews from the level pre-arm seed toward the commanded IC roll/pitch.
@@ -422,8 +421,8 @@ The test promotes MODE_PASSIVE → MODE_STEADY after the mediator's
 `kinematic_exit` event; the collective hand-off is seamless because steady
 seeds its vertical-speed integrator from the same IC collective.
 
-`_ic_roll_deg`, `_ic_pitch_deg`, `_ic_col` are populated by
-`RAWES_RIC`/`RAWES_PIC`/`RAWES_COL`.  Before the full seed arrives passive is
+`_ic_roll_deg`, `_ic_pitch_deg`, `_ic_thrust` are populated by
+`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`.  Before the full seed arrives passive is
 inert (no defaults are commanded).
 
 **Yaw observer in passive mode.**  `run_yaw_trim()` runs every tick alongside
@@ -444,10 +443,10 @@ Post-GPS, each 50 Hz step:
 3. **Attitude:** convert `bz_goal` to roll/pitch via `bz_ned_to_roll_pitch` and command the
    GUIDED angle path (`vehicle:set_target_angle_and_rate_and_throttle`), so ArduPilot's
    native attitude + rate PID closes the cyclic loop at 400 Hz.
-4. **Altitude (feedback):** collective from a 50 Hz PID on altitude error
-   (`col = _col_trim + KP_ALT·alt_err + KI_ALT·∫alt_err − KD_VZ·vz`, integrator clamped,
-   vz-damping gain-scheduled down while body rates are high, slew-limited). `_col_trim`
-   warm-starts from the IC collective (`RAWES_COL`). Output is the GUIDED throttle.
+4. **Altitude (feedback):** thrust from a 50 Hz PID on altitude error
+   (`thrust = _thrust_trim + KP_ALT·alt_err + KI_ALT·∫alt_err − KD_VZ·vz`, integrator clamped,
+   vz-damping gain-scheduled down while body rates are high, slew-limited). `_thrust_trim`
+   warm-starts from the IC thrust (`RAWES_THR`). Output is the GUIDED throttle.
 
 **Ch3 ownership:** Lua owns Ch3 entirely in mode 1. Ground does not send collective.
 
@@ -657,7 +656,7 @@ fast transients; the observer absorbs the DC so the integrator is not needed.
 | Parameter | Value | Reason |
 |---|---|---|
 | SCR_ENABLE | 1 | Enable Lua scripting subsystem |
-| RAWES_MODE | 0 | Mode selector (script-generated param registered by rawes.lua). Set via GCS or parm file; do not use SCR_USER6. |
+| RAWES_MODE | 0 | Mode selector (script-generated param registered by rawes.lua). Set via GCS or parm file. |
 | RAWES_YAW_SLP | 0 | Yaw motor slope override [RPM/µs]. 0 → bench default 0.504. Set from bench calibration. |
 
 Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not boot-time params.

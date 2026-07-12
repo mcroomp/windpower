@@ -234,7 +234,7 @@ def _phase_detail(rows: list[TelRow]) -> dict:
         "tether_tension_n":    [r.tether_tension           for r in rows],
         "tension_feedforward_n": [r.tension_feedforward_n  for r in rows],
         "collective_rad":      [r.collective_rad       for r in rows],
-        "collective_alt_ctrl": [r.collective_from_alt_ctrl for r in rows],
+        "collective_alt_ctrl": [r.thrust_from_alt_ctrl for r in rows],
         "orbit_radius_m":      [r.orbit_radius        for r in rows],
     }
 
@@ -371,8 +371,8 @@ def analyse(rows: list[TelRow]) -> dict:
     ri = phases["reel-in"]
     if ri:
         # Check if controller is saturating (collective at floor)
-        col_vals  = [r.collective_from_alt_ctrl for r in ri
-                 if r.collective_from_alt_ctrl != 0.0]
+        col_vals  = [r.thrust_from_alt_ctrl for r in ri
+                 if r.thrust_from_alt_ctrl != 0.0]
         tens_ri   = [r.tether_tension for r in ri]
         t_ri      = [r.t_sim for r in ri]
 
@@ -544,7 +544,7 @@ def compare(rows_a: list[TelRow], label_a: str,
             "t_above_500":     sum(sp.duration for sp in find_tension_spikes(rows, 500.0)),
             "mean_t_out":      mean(out_t) if out_t else 0.0,
             "mean_t_in":       mean(in_t)  if in_t  else 0.0,
-            "col_saturated_%": (100.0 * sum(1 for r in ri if r.collective_from_alt_ctrl < 0.02)
+            "col_saturated_%": (100.0 * sum(1 for r in ri if r.thrust_from_alt_ctrl < 0.02)
                                 / max(len(ri), 1)),
         }
 

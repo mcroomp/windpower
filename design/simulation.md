@@ -313,7 +313,7 @@ The default initial state is the warmup-settled equilibrium produced by `test_ge
 | `body_z` | `[0.878, 0.276, 0.392]` | tether-aligned |
 | `omega_spin` | ~19.3 rad/s | equilibrium autorotation spin |
 | `rest_length` | ~49.97 m | tether taut from t=0 |
-| `coll_eq_rad` | −0.28 rad | TensionPI equilibrium collective |
+| `eq_thrust` | 0.263 | Altitude-hold trim thrust [0..1] |
 | `home_z_ned` | 0.0 m | GPS home at ground level |
 
 **IMPORTANT:** The `vel` in this file is the near-zero physics velocity at settled state. The stack test does **NOT** use it as `vel0` for the kinematic startup ramp. `vel0 = [-0.257, 0.916, -0.093]` from `config.py` DEFAULTS is always used for the ramp — it provides a non-zero heading so the EKF gets a velocity-derived yaw from frame 0.

@@ -210,7 +210,7 @@ def _slack_events(rows, tension_window=5):
 _OSC_SIGNALS = [
     ("tether_tension",              "tension_N"),
     ("collective_rad",              "col_act"),
-    ("collective_from_alt_ctrl","col_alt"),
+    ("thrust_from_alt_ctrl",  "thr_alt"),
     ("aero_T",                      "aero_T_N"),
     ("aero_v_i",                    "v_inflow"),
     ("aero_v_axial",                "v_axial"),
@@ -332,7 +332,7 @@ def _compute_buckets(rows, bucket_s):
 
         t_set   = avg("tension_feedforward_n")
         t_act   = avg("tether_tension")
-        col_alt = avg("collective_from_alt_ctrl")
+        col_alt = avg("thrust_from_alt_ctrl")
         col_act = avg("collective_rad")
         col_std = std("collective_rad")
         col_pp  = peak_to_peak("collective_rad")
@@ -415,7 +415,7 @@ def _write_osc_csv(osc_rows, path):
 _CORR_SIGNALS = [
     ("tether_tension",               "tension_N"),
     ("collective_rad",               "col_act"),
-    ("collective_from_alt_ctrl", "col_alt"),
+    ("thrust_from_alt_ctrl",  "col_alt"),
     ("aero_T",                       "aero_T"),
     ("aero_v_i",                     "v_inflow"),
     ("aero_v_axial",                 "v_axial"),

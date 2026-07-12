@@ -20,10 +20,7 @@ sys.path.insert(0, str(_SIM))
 
 _LOG = _SIM / "logs"
 
-KEY_COLS = [
-    "tether_tension",
-    "collective_rad",
-    "collective_from_alt_ctrl",
+    "thrust_from_alt_ctrl",
     "vib_corr",
     "alt_pid_integral",
     "tension_feedforward_n",
@@ -208,7 +205,7 @@ def main() -> None:
     if args.window:
         t0, t1 = [float(x) for x in args.window.split(",")]
         focus_cols = ["tether_tension", "collective_rad",
-                      "collective_from_alt_ctrl", "vib_corr",
+                      "thrust_from_alt_ctrl", "vib_corr",
                       "alt_pid_integral", "omega_rotor"]
         _print_time_series(py_rows, lua_rows, args.phase, t0, t1, focus_cols)
 

@@ -93,7 +93,7 @@ Long-running (always log; ESC or Ctrl-C aborts):
 
                 Modes (run with no args to see force_params per mode):
           passive   armed but quiet in GUIDED_NOGPS (matches the SITL passive
-                    test).  Seeds the IC (RAWES_COL/RIC/PIC) and holds the IC
+                    test).  Seeds the IC (RAWES_THR/RIC/PIC) and holds the IC
                     attitude via the GUIDED angle API; DDFP yaw motor stays
                     under AP + the Lua H_YAW_TRIM observer.
           steady    steady flight (alt hold + VZ PI collective)

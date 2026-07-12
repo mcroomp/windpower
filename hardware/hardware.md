@@ -239,14 +239,7 @@ the PWM swash servos; bit 8 of the masks (= 256) selects channel 9.
 |-----------|-------|
 | SCR_ENABLE | 1.0 |
 | SCR_HEAP_SIZE | 204800.0 |
-| SCR_USER1 | 0.0 | (unused — yaw slope now set via RAWES_YAW_SLP script-generated param) |
-| SCR_USER2 | 0.0 | (unused) |
-| SCR_USER3 | 0.0 | (unused) |
-| SCR_USER4 | 0.0 | (unused) |
-| SCR_USER5 | 0.0 | (unused) |
-| SCR_USER6 | 2.0 | (unused — mode now set via RAWES_MODE script-generated param) |
 
-Note: SCR_USER1..6 are ArduPilot system params that still exist in EEPROM but rawes.lua no longer reads any of them.
 All Lua configuration uses the RAWES_* script-generated parameter table (key 77).
 
 ### Arming / safety

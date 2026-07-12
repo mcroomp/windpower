@@ -657,7 +657,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         session.set_mode(_fm)
         print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
 
-    # Seed the IC (RAWES_COL/RIC/PIC) BEFORE arming so PASSIVE holds a defined
+    # Seed the IC (RAWES_THR/RIC/PIC) BEFORE arming so PASSIVE holds a defined
     # attitude (mirrors the SITL passive_init seed).
     if cfg.get("ic_seed"):
         col_deg = float(trim.get("col", _PASSIVE_IC_COL_DEG))

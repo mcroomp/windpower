@@ -16,7 +16,7 @@ Uses the guided_nogps_armed_lua_full fixture (stationary kinematic hold, vel0=[0
     together with the full IC seed; the test promotes to RAWES_MODE=1
     (MODE_STEADY) right after kinematic_exit.  In MODE_PASSIVE the Lua
     commands the IC attitude (RAWES_RIC roll / RAWES_PIC pitch + AHRS yaw
-    captured at entry, zero rate FF) and the IC collective (RAWES_COL via
+    captured at entry, zero rate FF) and the IC thrust (RAWES_THR via
     GUIDED throttle) through set_target_angle_and_rate_and_throttle.  Because
     the IC attitude is commanded during the kinematic hold, the nul-aero slews
     the disk to the IC tilt before release; ArduPilot's rate PID tracks the
@@ -24,8 +24,8 @@ Uses the guided_nogps_armed_lua_full fixture (stationary kinematic hold, vel0=[0
   - IC altitude ~43 m (tether rest length ~100 m); hub orbits near IC altitude.
 
 The fixture seeds the FULL IC operating point to the Lua right after arm
-(RAWES_COL collective, RAWES_RIC/RAWES_PIC IC roll/pitch, RAWES_TEN equilibrium
-tension) so MODE_PASSIVE commands the IC attitude + collective throughout the
+(RAWES_THR thrust, RAWES_RIC/RAWES_PIC IC roll/pitch, RAWES_TEN equilibrium
+tension) so MODE_PASSIVE commands the IC attitude + thrust throughout the
 kinematic hold (no delayed seed).
 
 No RC cyclic/collective overrides are sent by this test. Lua uses GUIDED
@@ -35,8 +35,8 @@ Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
   t~8 s       arm complete; RAWES_MODE=3 (MODE_PASSIVE) set; full IC seed
-              (RAWES_COL/RIC/PIC/TEN) streamed immediately.  Lua commands the
-              IC attitude angle + IC collective via GUIDED throttle; nul-aero
+              (RAWES_THR/RIC/PIC/TEN) streamed immediately.  Lua commands the
+              IC attitude angle + IC thrust via GUIDED throttle; nul-aero
               slews the disk to the IC tilt during the hold.  No altitude hold.
   t~34 s      GPS fuses; fixture yields
   t=80 s      kinematic exits; test promotes RAWES_MODE 3 -> 1 (MODE_STEADY)

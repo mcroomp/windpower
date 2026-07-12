@@ -9,8 +9,8 @@ RAWES is a tethered, 4-blade autorotating rotor kite (no drive motor on the roto
 Wind drives autorotation; cyclic steers; tether tension during reel-out drives a ground generator.
 
 Current focus:
-- Fix stack regression in `test_lua_flight_steady_sitl` first.
-- After steady stack is stable, validate pumping and landing stack tests.
+- Run `bash test.sh stack -n 1 -k test_lua_flight_steady_sitl` to validate the steady flight SITL stack.
+- After steady stack passes, validate pumping and landing stack tests.
 
 ## Read Order (for agents)
 
@@ -42,6 +42,9 @@ Use the primary doc for each topic. Other docs should link, not restate.
 - body_z: rotor axis points down through disk in NED conventions.
 - AP interface: ground sends commanded tension + target altitude (+ phase/substate), not measured tension.
 - AP control split: orientation feedforward from commanded tension; altitude PID sets collective.
+- Controller layer (Lua + Python mock) works in thrust [0..1]. Physics layer works in collective_rad.
+  Single conversion point: `thrust_to_coll_rad()` in `simulation/param_defaults.py`.
+  Never convert thrust→rad→thrust in a roundtrip; compute in thrust and map once at the physics boundary.
 - Stack tests must validate real stack behavior (no simulation-only stabilizing hacks).
 - Use GUIDED mode for flight behavior under test.
 - When roll and pitch appear together as paired values (params, tuple returns,
@@ -49,26 +52,43 @@ Use the primary doc for each topic. Other docs should link, not restate.
   Do not introduce `pitch, roll` ordering unless an external interface
   explicitly requires it; if so, add an inline comment at that boundary.
 
-## SCR_USER Mapping (Agent Critical)
+## RAWES_* Parameter Mapping
 
-SCR_USER1..6 are NO LONGER USED by rawes.lua. Replaced by script-generated
-RAWES_* parameters (param:add_table key 77, prefix "RAWES_"). Canonical mapping:
+All Lua configuration uses RAWES_* script-generated params (param:add_table key 77, prefix "RAWES_").
+Canonical parameter list (mirrors `param:add_param` calls in rawes.lua):
 
-| Old SCR_USER | New param    | Default | Purpose                            |
-|---|---|---|---|
-| SCR_USER1    | RAWES_YAW_SLP | 0      | Yaw motor slope [RPM/µs], 0=bench default |
-| SCR_USER3    | RAWES_KP_ALT  | 0.0263 | Altitude P gain [thrust/m]         |
-| SCR_USER2    | RAWES_KI_ALT  | 0.0026 | Altitude I gain [thrust/m]         |
-| SCR_USER4    | RAWES_KD_VZ   | 0.040  | Vertical-speed damping             |
-| SCR_USER5    | RAWES_KP_EL   | 2.5    | In-plane (elevation) position rate-P gain  |
-| SCR_USER6    | RAWES_MODE    | 0      | Mode selector (0=none,1=steady,3=passive,4=landing) |
-| *(new)*      | RAWES_THR    | —     | IC thrust [0..1] (passive seed; replaces RAWES_COL in rad) |
+| Param         | Default | Purpose                                             |
+|---|---|---|
+| RAWES_MODE    | 0       | Mode selector (0=none,1=steady,3=passive,4=landing) |
+| RAWES_YAW_SLP | 0       | Yaw motor slope [RPM/µs], 0=bench default           |
+| RAWES_KP_ALT  | 0.0263  | Altitude P gain [thrust/m]                          |
+| RAWES_KI_ALT  | 0.0026  | Altitude I gain [thrust/m·s]                        |
+| RAWES_KD_VZ   | 0.105   | Vertical-speed damping [thrust/(m/s)]               |
+| RAWES_KP_EL   | 2.5     | In-plane (elevation) position rate-P [rad/s per m]  |
+| RAWES_KP_AZ   | 0.5     | Crosswind (azimuth) position rate-P [rad/s per m]   |
+| RAWES_KD_EL   | 0.0     | In-plane position rate-D [rad/s per (m/s)]          |
+| RAWES_CWMAX   | 0.6     | Position rate saturation [rad/s]                    |
+| RAWES_SLW     | 0.40    | Elevation/body_z slew rate limit [rad/s]            |
+| RAWES_TEL_HZ  | 2.0     | Diagnostic NVF telemetry emission rate [Hz]         |
+| RAWES_YFF_MAX | 0.7     | Yaw trim clamp upper bound [throttle]               |
+| RAWES_YFF_TAU | 0.3     | Yaw trim low-pass time constant [s]                 |
+| RAWES_TRP     | 2.0     | Tension feedforward ramp time constant [s]          |
 
-Runtime overrides for crosswind gains via NAMED_VALUE_FLOAT:
-- `RAWES_CWP` overrides `_cw_rate_kp` (in-plane/elevation, defaults from RAWES_KP_EL)
-- `RAWES_CWA` overrides `_cw_rate_kp_az` (crosswind/azimuth, defaults from RAWES_KP_AZ)
-- `RAWES_CWD` overrides `_cw_rate_kd` (D term, default 0)
-- `RAWES_CWM` overrides `_cw_rate_max` (saturation, default 0.6)
+Ground→Lua NAMED_VALUE_FLOAT interface (not AP params):
+
+| NVF key    | Purpose                                                          |
+|---|---|
+| RAWES_ALT  | Target altitude [m] above anchor                                 |
+| RAWES_TEN  | Target/feed-forward tether tension [N]                           |
+| RAWES_SUB  | Substate (0=hold,1=reel_out,2=transition,3=reel_in,4=transition_back) |
+| RAWES_ARM  | Optional disarm timer [ms until forced disarm]                   |
+| RAWES_ANN  | Anchor North from EKF origin [m]                                 |
+| RAWES_ANE  | Anchor East from EKF origin [m]                                  |
+| RAWES_AND  | Anchor Down from EKF origin [m]                                  |
+| RAWES_THR  | IC thrust [0..1] (passive seed; committed atomically with RIC/PIC) |
+| RAWES_RIC  | IC roll [rad]                                                    |
+| RAWES_PIC  | IC pitch [rad]                                                   |
+| RAWES_YIC  | Optional fixed yaw target [rad] for MODE_PASSIVE                 |
 
 Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
 
@@ -82,9 +102,18 @@ For signs, frame details, EKF gating, and mixer conventions, read the primary do
 - Do not make tests pass by making gates easier or introducing hacks unless the user has explicitly asked for it.
 - For failing simtest/stack test, validate telemetry/log quality before root-cause analysis.
 - Keep telemetry schema centralized in `simulation/telemetry_columns.py`.
-- When changing telemetry columns: update `TelRow` fields in `telemetry_csv.py`, NVF maps in `torque_test_utils.py`, and row-write dicts in `mediator.py` in the same commit. Mismatch causes `AttributeError` in `TelRow.to_dict()` at runtime.
+- When changing telemetry columns: edit `COLUMN_GROUPS` in `telemetry_columns.py` (the
+  single source — `COLUMN_SPECS` and `COLUMNS` are derived from it automatically), update
+  `TelRow` fields in `telemetry_csv.py`, NVF maps in `torque_test_utils.py`, and row-write
+  dicts in `mediator.py` in the same commit. Mismatch causes `AttributeError` in
+  `TelRow.to_dict()` at runtime.
 - Keep `controller.py` aligned with `simulation/scripts/rawes.lua` behavior.
 - Keep `simulation/scripts/rawes_test_surface.lua` exports in sync with needed Lua test symbols.
+- `_PumpingPythonMode` in `simulation/tests/common/mock_ardupilot.py` is a mechanical translation
+  of `rawes.lua do_steady_loop_inner()`. Variable names mirror Lua. When changing Lua altitude PID
+  logic, update the Python in the same commit. Key state that must stay in sync:
+  `_tension_for_bz` is a RAMPED value (τ=RAWES_TRP≈2 s) toward `_tension_cmd_n` — not a step.
+  Missing this ramp caused tether slack on phase transitions (reel-out→reel-in tension change).
 
 ## Test Entry Points
 

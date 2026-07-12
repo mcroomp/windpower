@@ -523,7 +523,7 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
     # ── Kinematic-phase timeseries: omega_spin, collective, servo_s3 ──────────
     # Diagnoses two failure modes:
     #   (a) omega_spin decays during the hold — collective too low or wrong sign
-    #   (b) RAWES_COL NVF not received — Lua using wrong _ic_col
+    #   (b) RAWES_THR NVF not received — Lua using wrong _ic_thrust
     if damp_rows:
         _ic_om = None
         _ic_col = None
@@ -532,7 +532,7 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         try:
             _d = load_ic_dict()
             _ic_om  = float(_d.get("omega_spin", 0))
-            _ic_col = float(_d.get("coll_eq_rad", 0))
+            _ic_thr = float(_d.get("eq_thrust", 0))
             _ic_tlon = float(_d.get("trim_tilt_lon", 0.0))
             _ic_tlat = float(_d.get("trim_tilt_lat", 0.0))
         except Exception:
@@ -541,7 +541,7 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         print()
         print(f"  -- Kinematic phase timeseries (omega / collective / servo_s3) --")
         if _ic_om is not None:
-            print(f"    IC file: omega_spin={_ic_om:.2f} rad/s  coll_eq_rad={_ic_col:.4f} rad")
+            print(f"    IC file: omega_spin={_ic_om:.2f} rad/s  eq_thrust={_ic_thr:.4f}")
 
         # Sample every ~10 s of sim time
         t0_d = damp_rows[0].t_sim
@@ -580,17 +580,17 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
                 tag = "" if abs(decay_rate) < 0.1 else "  [!!] check collective sign/magnitude"
                 print(f"    omega decay rate : {decay_rate:+.3f} rad/s per sim-second{tag}")
 
-        # Check if RAWES_COL was acknowledged in the GCS log
-        _rawes_col_ack = None
+        # Check if IC seed was acknowledged in the GCS log
+        _ic_seed_ack = None
         if fl is not None:
             for ev in fl.events:
-                if "rcvd RAWES_COL" in ev.text:
-                    _rawes_col_ack = ev
+                if "RAWES IC seed set" in ev.text:
+                    _ic_seed_ack = ev
                     break
-        if _rawes_col_ack is not None:
-            print(f"    RAWES_COL ack    : t={_rawes_col_ack.t_sim:.1f}s  '{_rawes_col_ack.text.strip()}'  [OK]")
+        if _ic_seed_ack is not None:
+            print(f"    IC seed ack      : t={_ic_seed_ack.t_sim:.1f}s  '{_ic_seed_ack.text.strip()}'  [OK]")
         else:
-            print(f"    RAWES_COL ack    : not found in GCS log  [!!] Lua may be using default _ic_col")
+            print(f"    IC seed ack      : not found in GCS log  [!!] Lua may not have received RAWES_THR/RIC/PIC")
 
         # Rotor-equilibrium diagnostic during kinematic hold (post-arm).
         # Goal: explain spin decay with measurable deviations from the IC point.

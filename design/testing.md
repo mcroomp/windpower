@@ -253,7 +253,7 @@ sim.vec_to_list(bz)            # -> [x, y, z]
 | `pos_ned` | in | {x,y,z} or nil | GPS position; nil = not fused |
 | `vel_ned` | in | {x,y,z} | NED velocity m/s |
 | `R` | in | flat 1..9 | body-to-NED rotation, row-major |
-| `params` | in/out | table | ArduPilot params (SCR_USER1..6, ATC_*, RAWES_*, etc.) |
+| `params` | in/out | table | ArduPilot params (ATC_*, RAWES_*, etc.) |
 | `ch_out[n]` | out | int or nil | RC channel override PWM |
 | `srv_out[func]` | out | int or nil | SRV_Channels PWM by function |
 | `gcs_msgs` | out | array | {level, msg} log |
@@ -280,7 +280,7 @@ from rawes_modes import (
 |------|-----------|----------------------|-------|
 | `MODE_NONE` | 0 | — | Logging only; RAWES_ARM still handled |
 | `MODE_STEADY` | 1 | — | Altitude hold + tether tracking |
-| `MODE_PASSIVE` | 3 | — | Armed-but-quiet: commands IC attitude angle (RAWES_RIC/PIC) + IC collective (RAWES_COL via throttle) as a GUIDED angle target during kinematic |
+| `MODE_PASSIVE` | 3 | — | Armed-but-quiet: commands IC attitude angle (RAWES_RIC/PIC) + IC thrust (RAWES_THR via throttle) as a GUIDED angle target during kinematic |
 | `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP | |
 
 Pumping has **no dedicated mode**: it runs in `MODE_STEADY` (RAWES_MODE=1) while the ground
@@ -327,12 +327,11 @@ collective and body_z slerp logic.
 from simtest_ic import load_ic
 ic = load_ic()
 # ic.pos, ic.vel, ic.R0, ic.omega_spin, ic.rest_length
-# ic.coll_eq_rad     -- collective at which TensionPI settled (~300 N tension)
-# ic.coll_eq_rad     -- collective used as TensionPI warm-start in stack tests
+# ic.eq_thrust       -- thrust [0..1] at which TensionPI settled (~300 N tension)
 # ic.home_z_ned      -- GPS home NED Z [m]
 ```
 
-`ic.coll_eq_rad` is determined by running 60 s warmup with `TensionPI(setpoint_n=300 N)`.
+`ic.eq_thrust` is determined by running 60 s warmup with `TensionPI(setpoint_n=300 N)`.
 300 N is midway between pumping reel-in (226 N) and reel-out (435 N) targets.
 
 Regenerate after any aero model change:
@@ -384,7 +383,7 @@ for i in range(max_steps):
         telemetry.append(TelRow.from_physics(runner, sr, col, WIND, ...))
 
 # IC generation warmup (zero initial velocity):
-runner = PhysicsRunner.for_warmup(rotor, pos0, R0, rest_length, coll_eq_rad, omega_spin, wind)
+runner = PhysicsRunner.for_warmup(rotor, pos0, R0, rest_length, thrust_to_coll_rad(ic.eq_thrust), omega_spin, wind)
 ```
 
 ### Lua simtest loop
@@ -393,7 +392,7 @@ runner = PhysicsRunner.for_warmup(rotor, pos0, R0, rest_length, coll_eq_rad, ome
 from simtest_runner import PhysicsRunner, LuaAP
 
 runner = PhysicsRunner(rotor, ic, wind)
-lua    = LuaAP(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND, dt=DT)  # wind+dt mandatory
+lua    = LuaAP(sim, initial_thrust=ic.eq_thrust, wind=WIND, dt=DT)  # wind+dt mandatory
 lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase_label)     # set before loop
 
 for i in range(max_steps):
@@ -437,7 +436,7 @@ After each `step()`:
 `wind` and `dt` are mandatory keyword arguments.
 
 ```python
-lua = LuaAP(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND, dt=DT)
+lua = LuaAP(sim, initial_thrust=ic.eq_thrust, wind=WIND, dt=DT)
 
 lua.tick(t_sim, runner)
 # lua.col_rad, lua.roll_sp, lua.pitch_sp now hold latest decoded PWM

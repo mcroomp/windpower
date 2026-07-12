@@ -50,7 +50,7 @@ _rawes_fns = {
     anchor_d        = function() return _anchor_d end,
     bz_slew         = function() return _bz_slew end,
 
-    -- Crosswind rate damping gains (delivered via NAMED_VALUE_FLOAT: RAWES_CWP/CWD/CWM).
+    -- Crosswind rate damping gains (from RAWES_KP_EL, RAWES_KD_EL, RAWES_CWMAX params).
     cw_rate_kp      = function() return _cw_rate_kp end,
     cw_rate_kd      = function() return _cw_rate_kd end,
     cw_rate_max     = function() return _cw_rate_max end,

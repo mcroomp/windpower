@@ -75,7 +75,7 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 |---|---|---|
 | `tlon` | `RAWES_TLN` | cyclic trim longitudinal |
 | `tlat` | `RAWES_TLT` | cyclic trim lateral |
-| `col`  | `RAWES_COL` | IC collective |
+| `thr`  | `RAWES_THR` | IC thrust [0..1] |
 
 `--gain` is not accepted in any current mode.  Yaw is regulated by the
 servo-readback trim observer in rawes.lua — calibrate `RAWES_YAW_SLP` (slope) from

@@ -1957,7 +1957,7 @@ def _torque_stack(
                              None (default): GCS force-arm with Ch8=2000 RC override.
     passive_init           : if True, adopt the flight GUIDED_NOGPS init technique:
                              install rawes.lua, boot in MODE_PASSIVE (RAWES_MODE=3),
-                             seed the IC operating point (RAWES_COL=passive_col_rad,
+                             seed the IC operating point (RAWES_THR=passive_thrust,
                              RAWES_RIC=RAWES_PIC=0 -> level orientation) BEFORE arm, and
                              seed the EKF pre-arm attitude from the live EKF yaw.  The
                              Lua then commands the IC attitude as a GUIDED angle target

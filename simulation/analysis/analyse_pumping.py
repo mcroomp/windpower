@@ -99,7 +99,8 @@ def simulate_one(
     _ic = load_ic()
     if omega_init is None:
         omega_init = _ic.omega_spin
-    col_warm = _ic.coll_eq_rad
+    from param_defaults import thrust_to_coll_rad as _t2c  # noqa: F811
+    col_warm = _t2c(_ic.eq_thrust)
 
     el     = math.radians(elevation_deg)
     L      = 100.0
@@ -122,7 +123,7 @@ def simulate_one(
         vel         = vel0.copy(),
         R0          = R0,
         rest_length = L,
-        coll_eq_rad = col_warm,
+        eq_thrust   = _ic.eq_thrust,
         omega_spin  = omega_init,
     )
 

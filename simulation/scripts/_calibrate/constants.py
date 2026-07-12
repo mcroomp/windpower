@@ -191,7 +191,7 @@ _RUN_MODES = {
             "ATC_RAT_YAW_D":  0.0,
             "ATC_RAT_YAW_FF": 0.0,
         },
-        "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_COL/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  IC via --trim col=<deg> --roll <deg> --pitch <deg>.",
+        "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_THR/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  IC via --trim thr=<thrust> --roll <deg> --pitch <deg>.",
     },
     "steady": {
         "rawes_mode":  1,

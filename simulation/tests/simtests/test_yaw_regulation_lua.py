@@ -75,7 +75,9 @@ _SERVO9_MAX = 2000.0
 
 _IC_PITCH = -1.1102   # rad (≈ −63.6 deg, tethered-hover IC)
 _IC_ROLL  =  0.0
-_IC_COL   = -0.15     # rad
+# IC thrust: derived from -0.150 rad design point via physical collective range
+_col_min, _col_max = __import__('param_defaults').load_collective_phys_range()
+_IC_THRUST = (-0.150 - _col_min) / (_col_max - _col_min)
 
 
 def test_yaw_regulation_lua():
@@ -104,7 +106,7 @@ def test_yaw_regulation_lua():
     )
 
     # Seed IC so _ic_seeded becomes True on the first update() tick
-    sim.send_named_float("RAWES_COL", _IC_COL)
+    sim.send_named_float("RAWES_THR", _IC_THRUST)
     sim.send_named_float("RAWES_RIC", _IC_ROLL)
     sim.send_named_float("RAWES_PIC", _IC_PITCH)
 

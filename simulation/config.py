@@ -203,9 +203,9 @@ DEFAULTS: dict = {
             "col_min_rad":         -0.28,  # reel-out floor [rad]
             "col_min_reel_in_rad":  0.079, # reel-in floor [rad]: altitude floor at xi=80°
             "col_max_rad":          0.10,  # extended for high-tilt altitude support [rad]
-            # TensionPI warm-start: collective output at zero error on first step.
-            # Overridden by initial_state["coll_eq_rad"] when available so PI
-            # starts at the exact equilibrium collective after kinematic exit.
+            # TensionPI warm-start: thrust output at zero error on first step.
+            # Overridden by initial_state["eq_thrust"] when available so PI
+            # starts at the exact equilibrium thrust after kinematic exit.
             "warm_coll_rad":       -0.20,  # [rad] integrator seed near reel-out equilibrium
         },
     },

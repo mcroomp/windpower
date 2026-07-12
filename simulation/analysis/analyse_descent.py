@@ -259,18 +259,20 @@ def simulate_descent_physics(
     """
     from types import SimpleNamespace
     from physics_core import PhysicsCore, q_spin_from_aero
+    from param_defaults import load_collective_phys_range as _lr
 
     rotor   = rd.default()
     bz_vert = np.array([0.0, 0.0, -1.0])
     R0      = build_orb_frame(bz_vert)
     wind    = np.array([0.0, float(wind_speed), 0.0])
 
+    _col_min, _col_max = _lr()
     ic = SimpleNamespace(
         pos         = np.array([0.0, 0.0, -float(altitude)]),
         vel         = np.array([0.0, 0.0, float(vel_z_init)]),
         R0          = R0,
         rest_length = float(altitude),
-        coll_eq_rad = float(col),
+        eq_thrust   = (float(col) - _col_min) / (_col_max - _col_min),
         omega_spin  = float(omega_init),
     )
 

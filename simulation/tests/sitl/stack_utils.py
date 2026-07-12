@@ -612,7 +612,7 @@ def _launch_mediator(
         cfg.setdefault("trajectory", {}).setdefault("deschutter", {})
         cfg["trajectory"]["deschutter"]["warm_coll_rad"] = _t2c(float(initial_state["eq_thrust"]))
     # tension_out is intentionally NOT read from initial_state["tension_eq_n"].
-    # The equilibrium tension at coll_eq_rad (-0.18 rad) is ~345 N, but the
+    # The equilibrium tension at eq_thrust=0.263 is ~345 N, but the
     # operational reel-out target stays at the config default (200 N) for energy
     # optimization.  The warm_coll_rad=-0.18 already gives the PI 0.10 rad of
     # downward headroom when tension rises above 200 N.

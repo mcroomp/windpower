@@ -78,7 +78,7 @@ def _build_ic() -> SimpleNamespace:
     """
     Hub at altitude 1 m, horizontal disk.  Anchor at NED origin.
 
-    omega_spin / coll_eq_rad from IC file if available.
+    omega_spin / eq_thrust from IC file if available.
     """
     try:
         from simtest_ic import load_ic as _load_ic
