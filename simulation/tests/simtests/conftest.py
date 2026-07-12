@@ -32,4 +32,6 @@ def pytest_collection_modifyitems(items):
 def simtest_log(request):
     """Per-test SimtestLog: logs land in simulation/logs/<test_name>/."""
     from simtest_log import SimtestLog
-    return SimtestLog(request.node.name)
+    log = SimtestLog(request.node.name)
+    log.dump_params_json()
+    return log

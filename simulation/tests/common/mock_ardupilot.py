@@ -114,7 +114,8 @@ class _MockArdupilotBase:
         self._guided_ctrl: "GuidedAttitudeController | None" = None
 
     def enable_guided(self, heli_params: "HeliParams | None" = None) -> None:
-        self._guided_ctrl = GuidedAttitudeController(heli_params or HeliParams())
+        hp = heli_params or HeliParams()
+        self._guided_ctrl = GuidedAttitudeController(hp)
 
     def step_physics(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
         if self._guided_ctrl is None:
@@ -167,18 +168,61 @@ class _MockArdupilotBase:
                 mav_att_target_pitch_rate_rads = float(rate_tgt[1])
                 mav_att_target_yaw_rate_rads = float(rate_tgt[2])
 
+            rate_terms = {
+                "rate_roll_p_contrib": float("nan"),
+                "rate_roll_i_contrib": float("nan"),
+                "rate_roll_d_contrib": float("nan"),
+                "rate_roll_ff_contrib": float("nan"),
+                "rate_pitch_p_contrib": float("nan"),
+                "rate_pitch_i_contrib": float("nan"),
+                "rate_pitch_d_contrib": float("nan"),
+                "rate_pitch_ff_contrib": float("nan"),
+                "rate_yaw_p_contrib": float("nan"),
+                "rate_yaw_i_contrib": float("nan"),
+                "rate_yaw_d_contrib": float("nan"),
+                "rate_yaw_ff_contrib": float("nan"),
+            }
+            if self._guided_ctrl is not None:
+                _rate_ctrl = getattr(self._guided_ctrl, "_rate_ctrl", None)
+                if _rate_ctrl is not None:
+                    _pid_roll = getattr(_rate_ctrl, "pid_roll", None)
+                    _pid_pitch = getattr(_rate_ctrl, "pid_pitch", None)
+                    _pid_yaw = getattr(_rate_ctrl, "pid_yaw", None)
+                    if _pid_roll is not None:
+                        rate_terms["rate_roll_p_contrib"] = float(_pid_roll.debug.P)
+                        rate_terms["rate_roll_i_contrib"] = float(_pid_roll.debug.I)
+                        rate_terms["rate_roll_d_contrib"] = float(_pid_roll.debug.D)
+                        rate_terms["rate_roll_ff_contrib"] = float(_pid_roll.debug.FF + _pid_roll.debug.DFF)
+                    if _pid_pitch is not None:
+                        rate_terms["rate_pitch_p_contrib"] = float(_pid_pitch.debug.P)
+                        rate_terms["rate_pitch_i_contrib"] = float(_pid_pitch.debug.I)
+                        rate_terms["rate_pitch_d_contrib"] = float(_pid_pitch.debug.D)
+                        rate_terms["rate_pitch_ff_contrib"] = float(_pid_pitch.debug.FF + _pid_pitch.debug.DFF)
+                    if _pid_yaw is not None:
+                        rate_terms["rate_yaw_p_contrib"] = float(_pid_yaw.debug.P)
+                        rate_terms["rate_yaw_i_contrib"] = float(_pid_yaw.debug.I)
+                        rate_terms["rate_yaw_d_contrib"] = float(_pid_yaw.debug.D)
+                        rate_terms["rate_yaw_ff_contrib"] = float(_pid_yaw.debug.FF + _pid_yaw.debug.DFF)
+
             extra_kwargs = self.tel_fn(runner, sr) if self.tel_fn else {}
             extra_kwargs.update(
                 mav_att_roll_deg=math.degrees(roll_now),
                 mav_att_pitch_deg=math.degrees(pitch_now),
                 mav_att_yaw_deg=math.degrees(yaw_now),
+                mav_att_roll_rate_rads=float(obs.gyro[0]),
+                mav_att_pitch_rate_rads=float(obs.gyro[1]),
+                mav_att_yaw_rate_rads=float(obs.gyro[2]),
                 mav_att_target_roll_deg=mav_att_target_roll_deg,
                 mav_att_target_pitch_deg=mav_att_target_pitch_deg,
                 mav_att_target_yaw_deg=mav_att_target_yaw_deg,
                 mav_att_target_roll_rate_rads=mav_att_target_roll_rate_rads,
                 mav_att_target_pitch_rate_rads=mav_att_target_pitch_rate_rads,
                 mav_att_target_yaw_rate_rads=mav_att_target_yaw_rate_rads,
+                roll_sp_rads=mav_att_target_roll_rate_rads,
+                pitch_sp_rads=mav_att_target_pitch_rate_rads,
+                yaw_sp_rads=mav_att_target_yaw_rate_rads,
             )
+            extra_kwargs.update(rate_terms)
 
             self._telemetry.append(
                 TelRow.from_physics(runner, sr, self.col_rad, self._wind, **extra_kwargs)

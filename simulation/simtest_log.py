@@ -28,6 +28,7 @@ then query counts by kind and phase for assertions and summaries.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 _LOG_DIR = Path(__file__).parent / "logs"
@@ -144,3 +145,14 @@ class SimtestLog:
         """
         self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"[{self.name}] {summary}  log: {self.path}")
+
+    def dump_params_json(self) -> None:
+        """Write merged ArduPilot parameter chain to log_dir/params.json."""
+        try:
+            from param_defaults import load_ap_params
+
+            params = load_ap_params()
+            out = self.log_dir / "params.json"
+            out.write_text(json.dumps(params, sort_keys=True, indent=2), encoding="utf-8")
+        except Exception as exc:
+            print(f"[{self.name}] WARN params.json dump skipped: {exc}")

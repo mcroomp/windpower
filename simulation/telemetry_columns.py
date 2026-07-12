@@ -98,10 +98,34 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "coll_saturated",
             "comms_ok",
             "alt_pid_integral",
+            "lua_ol_alt_p_contrib",
+            "lua_ol_alt_i_contrib",
+            "lua_ol_alt_d_contrib",
+            "lua_ol_col_cmd_rad",
             "roll_sp_rads",  # body roll-rate setpoint
             "pitch_sp_rads", # body pitch-rate setpoint
+            "yaw_sp_rads",   # body yaw-rate setpoint
             "roll_rate_err_rads",   # body roll-rate error
             "pitch_rate_err_rads",  # body pitch-rate error
+            "yaw_rate_err_rads",    # body yaw-rate error
+        ),
+    ),
+    # Per-step rate PID contributions (controller output terms) by axis.
+    (
+        "ap_rate_pid_terms",
+        (
+            "rate_roll_p_contrib",
+            "rate_roll_i_contrib",
+            "rate_roll_d_contrib",
+            "rate_roll_ff_contrib",
+            "rate_pitch_p_contrib",
+            "rate_pitch_i_contrib",
+            "rate_pitch_d_contrib",
+            "rate_pitch_ff_contrib",
+            "rate_yaw_p_contrib",
+            "rate_yaw_i_contrib",
+            "rate_yaw_d_contrib",
+            "rate_yaw_ff_contrib",
         ),
     ),
     # Net force/moment assembled in PhysicsCore before state integration.
@@ -153,6 +177,8 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mav_att_roll_deg",   # MAVLink ATTITUDE roll (NED Euler)
             "mav_att_pitch_deg",  # MAVLink ATTITUDE pitch (NED Euler)
             "mav_att_yaw_deg",    # MAVLink ATTITUDE yaw (NED Euler)
+            "mav_att_roll_rate_rads",  # MAVLink ATTITUDE rollspeed [rad/s]
+            "mav_att_pitch_rate_rads", # MAVLink ATTITUDE pitchspeed [rad/s]
             "mav_att_yaw_rate_rads",  # MAVLink ATTITUDE yawspeed [rad/s]
             "mav_att_target_roll_deg",       # MAVLink ATTITUDE_TARGET roll (NED Euler)
             "mav_att_target_pitch_deg",      # MAVLink ATTITUDE_TARGET pitch (NED Euler)
@@ -255,6 +281,18 @@ ASYNC_MAV_COLUMNS: tuple[str, ...] = (
     "mav_att_roll_deg",
     "mav_att_pitch_deg",
     "mav_att_yaw_deg",
+    "mav_att_roll_rate_rads",
+    "mav_att_pitch_rate_rads",
+    "roll_sp_rads",
+    "pitch_sp_rads",
+    "yaw_sp_rads",
+    "roll_rate_err_rads",
+    "pitch_rate_err_rads",
+    "yaw_rate_err_rads",
+    "lua_ol_alt_p_contrib",
+    "lua_ol_alt_i_contrib",
+    "lua_ol_alt_d_contrib",
+    "lua_ol_col_cmd_rad",
     "mav_att_target_roll_deg",
     "mav_att_target_pitch_deg",
     "mav_att_target_yaw_deg",

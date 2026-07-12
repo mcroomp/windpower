@@ -1465,6 +1465,9 @@ def main(argv: Optional[list] = None) -> None:
     else:
         with _suppress_vtk_stderr():
             viz.play()
+    # Exit cleanly — VTK/PyVista registers an atexit handler that exits with
+    # code 1 on Windows when the window closes.  Override it here.
+    sys.exit(0)
 
 
 def _suppress_vtk_stderr():

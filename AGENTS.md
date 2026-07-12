@@ -96,6 +96,17 @@ There are three tiers, each with a different scope and runtime:
 | Simtest | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
 | Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
 
+Stack-test execution rule (agent-critical):
+- For any test under `simulation/tests/sitl/**`, ALWAYS use `bash test.sh stack ...`.
+- DO NOT run SITL tests with host-side pytest commands like
+    `.venv/Scripts/python.exe -m pytest simulation/tests/sitl/...`.
+    Those bypass the Docker stack harness and can fail with host-path issues
+    (for example `/ardupilot/scripts` not existing on Windows host).
+- For a single SITL test, use:
+    `bash test.sh stack -n 1 -k <test_name>`
+    Example:
+    `bash test.sh stack -n 1 -k test_pumping_cycle_lua_sitl`
+
 Use `design/sitl_testing.md` for stack-specific run/diagnose flow.
 
 ## File Placement Rules

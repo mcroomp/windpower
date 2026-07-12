@@ -219,6 +219,16 @@ def run_mediator(args, trajectory=None):
             "YFF_T":  "mav_nvf_yff_trim",
             "YFF_U":  "mav_nvf_yff_u",
             "YFF_GZ": "mav_nvf_yff_gz",
+            "OL_RSP": "roll_sp_rads",
+            "OL_PSP": "pitch_sp_rads",
+            "OL_YSP": "yaw_sp_rads",
+            "OL_RER": "roll_rate_err_rads",
+            "OL_PER": "pitch_rate_err_rads",
+            "OL_YER": "yaw_rate_err_rads",
+            "OL_AP":  "lua_ol_alt_p_contrib",
+            "OL_AI":  "lua_ol_alt_i_contrib",
+            "OL_AD":  "lua_ol_alt_d_contrib",
+            "OL_COL": "lua_ol_col_cmd_rad",
         }
         try:
             while not _mavlog_stop.is_set() and not is_stopped():
@@ -350,6 +360,9 @@ def run_mediator(args, trajectory=None):
                     fields["mav_att_roll_deg"] = math.degrees(float(msg.roll))
                     fields["mav_att_pitch_deg"] = math.degrees(float(msg.pitch))
                     fields["mav_att_yaw_deg"] = math.degrees(float(msg.yaw))
+                    fields["mav_att_roll_rate_rads"] = float(getattr(msg, "rollspeed", float("nan")))
+                    fields["mav_att_pitch_rate_rads"] = float(getattr(msg, "pitchspeed", float("nan")))
+                    fields["mav_att_yaw_rate_rads"] = float(getattr(msg, "yawspeed", float("nan")))
                 elif mtype == "ATTITUDE_TARGET":
                     r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(getattr(msg, "q", None))
                     fields["mav_att_target_roll_deg"] = r_deg
@@ -889,6 +902,16 @@ def run_mediator(args, trajectory=None):
                 "tilt_lat":        tilt_lat,
                 "tension_feedforward_n":        _traj_cmd.get("tension_feedforward_n", 0.0),
                 "collective_from_alt_ctrl":     collective_rad,
+                "lua_ol_alt_p_contrib": _mav_async.get("lua_ol_alt_p_contrib", float("nan")),
+                "lua_ol_alt_i_contrib": _mav_async.get("lua_ol_alt_i_contrib", float("nan")),
+                "lua_ol_alt_d_contrib": _mav_async.get("lua_ol_alt_d_contrib", float("nan")),
+                "lua_ol_col_cmd_rad":   _mav_async.get("lua_ol_col_cmd_rad",   float("nan")),
+                "roll_sp_rads":    _mav_async.get("roll_sp_rads", 0.0),
+                "pitch_sp_rads":   _mav_async.get("pitch_sp_rads", 0.0),
+                "yaw_sp_rads":     _mav_async.get("yaw_sp_rads", 0.0),
+                "roll_rate_err_rads":  _mav_async.get("roll_rate_err_rads", float("nan")),
+                "pitch_rate_err_rads": _mav_async.get("pitch_rate_err_rads", float("nan")),
+                "yaw_rate_err_rads":   _mav_async.get("yaw_rate_err_rads", float("nan")),
                 # Note: new aero (Pitt-Peters Level 2) does not expose internal
                 # axial/inplane/induced velocity diagnostics. Keep them unset.
                 "aero_Q_spin":     float(aero_result.Q_spin),
@@ -924,6 +947,9 @@ def run_mediator(args, trajectory=None):
                 "mav_att_roll_deg":  _mav_async.get("mav_att_roll_deg", float("nan")),
                 "mav_att_pitch_deg": _mav_async.get("mav_att_pitch_deg", float("nan")),
                 "mav_att_yaw_deg":   _mav_async.get("mav_att_yaw_deg", float("nan")),
+                "mav_att_roll_rate_rads":  _mav_async.get("mav_att_roll_rate_rads", float("nan")),
+                "mav_att_pitch_rate_rads": _mav_async.get("mav_att_pitch_rate_rads", float("nan")),
+                "mav_att_yaw_rate_rads":   _mav_async.get("mav_att_yaw_rate_rads", float("nan")),
                 "mav_att_target_roll_deg": _mav_async.get("mav_att_target_roll_deg", float("nan")),
                 "mav_att_target_pitch_deg": _mav_async.get("mav_att_target_pitch_deg", float("nan")),
                 "mav_att_target_yaw_deg": _mav_async.get("mav_att_target_yaw_deg", float("nan")),

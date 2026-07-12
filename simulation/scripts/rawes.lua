@@ -399,6 +399,30 @@ local function _nvf_due(now)
     return false
 end
 
+-- Shared diagnostic NVF state and single emitter.
+local _diag_nvf = {}
+local _diag_nvf_keys = {
+    "YFF_T", "YFF_U", "YFF_GZ",           -- yaw trim observer
+    "OL_RSP", "OL_PSP", "OL_YSP",        -- outer-loop commanded body rates
+    "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
+    "OL_AP", "OL_AI", "OL_AD", "OL_COL" -- altitude PID terms + commanded collective
+}
+
+local function _diag_set(name, value)
+    _diag_nvf[name] = value
+end
+
+local function _diag_emit(now)
+    if not _nvf_due(now) then return end
+    for i = 1, #_diag_nvf_keys do
+        local k = _diag_nvf_keys[i]
+        local v = _diag_nvf[k]
+        if v ~= nil then
+            gcs:send_named_float(k, v)
+        end
+    end
+end
+
 -- ── Script-generated parameters ─────────────────────────────────────────────
 -- These are registered into ArduPilot's parameter system at script load time.
 -- They appear in GCS as RAWES_* params, can be set in parm files, and are
@@ -736,7 +760,10 @@ local function run_flight()
         if vz_gate < VZ_GATE_MIN then vz_gate = VZ_GATE_MIN end
         if vz_gate > 1.0 then vz_gate = 1.0 end
     end
-    local col_pid = _col_trim + KP_ALT * alt_err - KD_VZ * vz_gate * vz_up + _alt_i
+    local alt_p = KP_ALT * alt_err
+    local alt_d = -KD_VZ * vz_gate * vz_up
+    local alt_i = _alt_i
+    local col_pid = _col_trim + alt_p + alt_d + alt_i
     -- Expected release transient: keep collective close to IC initially, then
     -- fade in altitude corrections over POST_RELEASE_RECOVERY_S.
     local _ic_col_now = ic_col_or_default()
@@ -799,6 +826,25 @@ local function run_flight()
     send_guided_angle_rate_throttle(
         roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, col_thrust,
         "steady_attitude")
+
+    -- Record outer-loop diagnostics for centralized NVF telemetry emission.
+    local gx, gy, gz = 0.0, 0.0, 0.0
+    local gyro_now = ahrs:get_gyro()
+    if gyro_now then
+        gx = gyro_now:x()
+        gy = gyro_now:y()
+        gz = gyro_now:z()
+    end
+    _diag_set("OL_RSP", rate_roll_cw)
+    _diag_set("OL_PSP", rate_pitch_cw)
+    _diag_set("OL_YSP", 0.0)
+    _diag_set("OL_RER", rate_roll_cw - gx)
+    _diag_set("OL_PER", rate_pitch_cw - gy)
+    _diag_set("OL_YER", -gz)
+    _diag_set("OL_AP", alt_p)
+    _diag_set("OL_AI", alt_i)
+    _diag_set("OL_AD", alt_d)
+    _diag_set("OL_COL", _last_col_rad)
 
     -- Diagnostic log (every ~5 s at 50 Hz)
     if _diag % 250 == 1 then
@@ -901,11 +947,9 @@ local function run_yaw_trim(now)
     local psi_dot = gyro:z()
     yaw_trim_step(BASE_PERIOD_MS * 0.001, u, psi_dot)
     param:set("H_YAW_TRIM", _yaw_ff_trim)
-    if _nvf_due(now) then
-        gcs:send_named_float("YFF_T",  _yaw_ff_trim)
-        gcs:send_named_float("YFF_U",  u)
-        gcs:send_named_float("YFF_GZ", psi_dot)
-    end
+    _diag_set("YFF_T", _yaw_ff_trim)
+    _diag_set("YFF_U", u)
+    _diag_set("YFF_GZ", psi_dot)
 end
 
 local function run_passive_mode(now)
@@ -1070,12 +1114,14 @@ local function update()
             local armed = arming:is_armed() and "ARMED" or "disarmed"
             gcs:send_text(6, "RAWES: mode 0 (none)  " .. armed)
         end
+        _diag_emit(now)
         return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_PASSIVE then
         run_passive_mode(now)
         run_yaw_trim(now)
+        _diag_emit(now)
         return update, BASE_PERIOD_MS
     end
 
@@ -1088,6 +1134,8 @@ local function update()
     end
 
     -- MODE_LANDING (4): not yet implemented
+
+    _diag_emit(now)
 
     return update, BASE_PERIOD_MS
 end
