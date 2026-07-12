@@ -118,12 +118,10 @@ def run_observation_loop(
 
 
 def save_telemetry(rows: list,
-                   profile: str,
-                   log,
-                   suffix: str = "") -> None:
-    """Save telemetry CSV to simulation/logs/torque_telemetry_<profile>.csv."""
-    stem = f"torque_telemetry_{profile}{suffix}"
-    path = _SIM_DIR / "logs" / f"{stem}.csv"
+                   log_dir: "Path",
+                   log) -> None:
+    """Save telemetry CSV to <log_dir>/telemetry.csv (matches flight test convention)."""
+    path = log_dir / "telemetry.csv"
     write_csv(rows, path)
     log.info("Telemetry saved -> %s  (%d frames)", path, len(rows))
     log.info("Visualise with:  python simulation/viz3d/visualize_torque.py %s", path)

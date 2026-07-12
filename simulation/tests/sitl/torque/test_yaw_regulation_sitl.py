@@ -23,7 +23,7 @@ Pass criterion
 
 Telemetry
 ---------
-  The test writes a CSV log to simulation/logs/torque_telemetry_yaw_regulation.csv
+  The test writes a CSV log to simulation/logs/test_yaw_regulation_sitl/telemetry.csv
   after each run.
 
 Run with (inside Docker)
@@ -64,5 +64,5 @@ def test_yaw_regulation_sitl(torque_armed):
 
     _, rows = run_observation_loop(ctx, _SETTLE_S, _OBSERVE_S)
 
-    save_telemetry(rows, "yaw_regulation", ctx.log)
+    save_telemetry(rows, ctx.test_log_dir, ctx.log)
     assert_physics_yaw_rate(ctx.events_log, _MAX_PSI_DOT_RAD_S, _SETTLE_S, _OBSERVE_S, ctx.log)

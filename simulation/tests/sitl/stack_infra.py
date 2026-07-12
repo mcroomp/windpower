@@ -2075,6 +2075,7 @@ def _torque_stack(
             gcs_log=sitl_ctx.gcs_log,
             events_log=MediatorEventLog(events_path),
             omega_rotor=omega_rotor, log=log,
+            test_log_dir=sitl_ctx.test_log_dir,
         )
 
         try:

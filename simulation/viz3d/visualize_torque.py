@@ -446,13 +446,14 @@ class TorqueScene:
             pv.Box(bounds=(_x-.027, _x+.027, _y-.027, _y+.027, 0.0, self._max_h)),
             color=(0.35,0.35,0.35), opacity=0.45, style="wireframe",
         )
-        # Equilibrium current mark (I_eq / I_max)
-        eq_z = (_I_EQ / _I_MAX) * self._max_h
-        pl.add_mesh(
-            pv.Box(bounds=(_x-.032, _x+.032, _y-.002, _y+.002,
-                           eq_z-.003, eq_z+.003)),
-            color=C_EQ_LINE, opacity=0.95,
-        )
+        # Equilibrium current mark (I_eq / I_max) — omitted if I_eq not yet known
+        if _I_EQ is not None:
+            eq_z = (_I_EQ / _I_MAX) * self._max_h
+            pl.add_mesh(
+                pv.Box(bounds=(_x-.032, _x+.032, _y-.002, _y+.002,
+                               eq_z-.003, eq_z+.003)),
+                color=C_EQ_LINE, opacity=0.95,
+            )
 
         # Pre-create ALL text actors — updated in-place each frame (no recreation).
         # Use pixel positions so all actors are vtkTextActor (supports SetInput).

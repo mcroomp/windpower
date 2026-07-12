@@ -30,7 +30,7 @@ Usage:
     python simulation/analysis/analyze_yaw_limit_cycle.py [csv] [--start SEC]
         [--idle-tol-us US] [--ceil-frac F]
 
-    csv defaults to simulation/logs/torque_telemetry_torque_production_vanilla.csv
+    csv defaults to simulation/logs/test_yaw_regulation_sitl/telemetry.csv
     --start   analysis window start [sim s] (default 25 = end of spin-up)
 
 All output is 7-bit ASCII (Windows cp1252 safe).
@@ -49,7 +49,7 @@ SERVO4_MIN_US = 800.0
 SERVO4_MAX_US = 2000.0
 YFF_MAX = 0.7            # Lua H_YAW_TRIM clamp ceiling (rawes.lua YFF_MAX)
 
-_DEFAULT_CSV = "simulation/logs/torque_telemetry_torque_production_vanilla.csv"
+_DEFAULT_CSV = "simulation/logs/test_yaw_regulation_sitl/telemetry.csv"
 
 
 def _f(row: dict, key: str) -> float:

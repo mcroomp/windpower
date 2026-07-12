@@ -36,5 +36,5 @@ def test_wobble_sitl(torque_armed_profile):
 
     _, rows = run_observation_loop(ctx, _SETTLE_S, _OBSERVE_S)
 
-    save_telemetry(rows, "wobble", ctx.log)
+    save_telemetry(rows, ctx.test_log_dir, ctx.log)
     assert_physics_yaw_rate(ctx.events_log, _THRESHOLD, _SETTLE_S, _OBSERVE_S, ctx.log)

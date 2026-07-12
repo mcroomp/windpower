@@ -138,6 +138,28 @@ Stack-test execution rule (agent-critical):
 
 Use `design/sitl_testing.md` for stack-specific run/diagnose flow.
 
+## Visualization
+
+Flight telemetry (pumping, steady, passive SITL runs):
+```
+.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv
+```
+Example — most recent pumping SITL run:
+```
+.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/test_pumping_cycle_lua_sitl/telemetry.csv
+```
+
+Counter-torque motor telemetry (torque SITL runs):
+```
+.venv/Scripts/python.exe simulation/viz3d/visualize_torque.py simulation/logs/<test_name>/telemetry.csv
+```
+Example — yaw regulation run:
+```
+.venv/Scripts/python.exe simulation/viz3d/visualize_torque.py simulation/logs/test_yaw_regulation_sitl/telemetry.csv
+```
+
+Controls (both visualizers): Space = play/pause, Left/Right = step frame, +/- = speed.
+
 ## File Placement Rules
 
 - Temporary and working files must go in `tmp/` at repo root.
