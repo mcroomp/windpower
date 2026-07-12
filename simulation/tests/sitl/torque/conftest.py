@@ -22,15 +22,18 @@ from stack_infra import (
 # IC (steady-state tethered-hover) orientation constants — single source of
 # truth in mediator_torque (derived from steady_state_starting.json R0).
 from mediator_torque import _IC_ROLL_RAD, _IC_PITCH_RAD, _IC_YAW_RAD  # noqa: E402
+from param_defaults import load_collective_phys_range
 
 
 # ---------------------------------------------------------------------------
 # Counter-torque motor stack fixtures
 # ---------------------------------------------------------------------------
 
-# IC collective value sent to MODE_YAW so the Lua pins ch3 at the right
-# collective while the test observes yaw regulation.
-LUA_YAW_IC_COL:   float = -0.150  # rad
+# IC thrust sent to MODE_PASSIVE so Lua pins collective at the right
+# operating point while the test observes yaw regulation.
+# Derived from the original -0.150 rad design point via the physical range.
+_col_min, _col_max = load_collective_phys_range()
+LUA_YAW_IC_THRUST: float = (-0.150 - _col_min) / (_col_max - _col_min)
 
 @pytest.fixture
 def torque_armed(tmp_path, request):
@@ -50,7 +53,7 @@ def torque_armed(tmp_path, request):
         profile="ic",
         test_name=request.node.name,
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
         passive_roll_rad=_IC_ROLL_RAD,
         passive_pitch_rad=_IC_PITCH_RAD,
         passive_yaw_rad=_IC_YAW_RAD,
@@ -77,7 +80,7 @@ def torque_armed_profile(request, tmp_path):
         profile=profile,
         test_name=request.node.name,
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
     ) as ctx:
         yield ctx
 
@@ -136,7 +139,7 @@ def torque_production_vanilla_lua(tmp_path, request):
         # Keep Lua loaded and in MODE_PASSIVE. PASSIVE holds the seeded IC state
         # and runs yaw feedforward trim via H_YAW_TRIM while ArduPilot DDFP closes yaw.
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
         # NOTE: a fixed absolute yaw heading via RAWES_YIC was trialled here but,
         # combined with the I=0 rate loop, it left a steady yaw-rate residual that
         # tripped the gate.  Free-capture (PASSIVE latches the AHRS yaw on entry)
@@ -166,7 +169,7 @@ def torque_production_delayed_lua(tmp_path, request):
         profile="constant",
         tail_channel=8,
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
         test_name=request.node.name,
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
@@ -213,7 +216,7 @@ def torque_armed_ddfp_zero(tmp_path, request):
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
     ) as ctx:
         yield ctx
 
@@ -242,7 +245,7 @@ def torque_armed_ddfp_ramp(tmp_path, request):
         startup_hold_s=15.0,
         startup_yaw_rate_deg_s=0.0,
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
     ) as ctx:
         yield ctx
 
@@ -284,6 +287,6 @@ def torque_armed_ddfp(tmp_path, request):
             "ATC_RAT_YAW_IMAX": 0.7,   # must be > 0.505 (= throttle_eq + H_YAW_TRIM) to reach zero error
         },
         passive_init=True,
-        passive_col_rad=LUA_YAW_IC_COL,
+        passive_thrust=LUA_YAW_IC_THRUST,
     ) as ctx:
         yield ctx
