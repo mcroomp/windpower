@@ -4,7 +4,7 @@ test_ground_liftoff.py -- rawes.lua GUIDED mode lifts off from near-ground altit
 Physical scenario
 -----------------
   - Hub starts at altitude 1 m (NED pos = [0, 0, -1]).
-  - Anchor at NED origin [0, 0, 0] (SCR_USER3/4/5 all 0).
+  - Anchor at NED origin [0, 0, 0] (RAWES_ANN/ANE/AND all 0).
   - Rotor disk is horizontal: body_z = [0, 0, +1] (NED; FRD body_z points toward anchor).
   - Wind: constant 10 m/s upward, i.e. wind_ned = [0, 0, -10] m/s.
   - Constant 200 N downward load modelling a pre-tensioned tether.

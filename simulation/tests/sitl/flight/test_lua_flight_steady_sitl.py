@@ -1,7 +1,7 @@
 """
 test_lua_flight_steady_sitl.py — steady flight under full ArduPilot + Lua control.
 
-Validates that rawes.lua (SCR_USER6=1) can sustain stable steady flight with
+Validates that rawes.lua (RAWES_MODE=1) can sustain stable steady flight with
 internal_controller=False — ArduPilot + Lua own the physics entirely.
 
 This is M3 Step 1: the foundational gate for pumping and landing tests.
@@ -12,8 +12,8 @@ Uses the guided_nogps_armed_lua_full fixture (stationary kinematic hold, vel0=[0
     delAngBiasLearned converges with constant-zero gyro at ~34 s after start.
     GPS fuses at ~34 s; fixture yields.
     - internal_controller=False (ArduPilot + Lua own the stack at 50 Hz)
-  - SCR_USER6=3 (MODE_PASSIVE) set immediately in fixture, right after arm,
-    together with the full IC seed; the test promotes to SCR_USER6=1
+  - RAWES_MODE=3 (MODE_PASSIVE) set immediately in fixture, right after arm,
+    together with the full IC seed; the test promotes to RAWES_MODE=1
     (MODE_STEADY) right after kinematic_exit.  In MODE_PASSIVE the Lua
     commands the IC attitude (RAWES_RIC roll / RAWES_PIC pitch + AHRS yaw
     captured at entry, zero rate FF) and the IC collective (RAWES_COL via
@@ -34,12 +34,12 @@ commands for attitude/collective and keeps Ch8 (motor interlock) high.
 Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
-  t~8 s       arm complete; SCR_USER6=3 (MODE_PASSIVE) set; full IC seed
+  t~8 s       arm complete; RAWES_MODE=3 (MODE_PASSIVE) set; full IC seed
               (RAWES_COL/RIC/PIC/TEN) streamed immediately.  Lua commands the
               IC attitude angle + IC collective via GUIDED throttle; nul-aero
               slews the disk to the IC tilt during the hold.  No altitude hold.
   t~34 s      GPS fuses; fixture yields
-  t=80 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY)
+  t=80 s      kinematic exits; test promotes RAWES_MODE 3 -> 1 (MODE_STEADY)
               and Lua's altitude-hold loop takes over.
   t~80+       free flight under ArduPilot + Lua
 
@@ -140,7 +140,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     # The IC-passive stack test passes with this exact seeding sequence, so we
     # replicate it here to establish the same deterministic passive hold before
     # promoting to MODE_STEADY.  Seed all four IC NVFs (collective, tension, IC
-    # roll, IC pitch) and enter MODE_PASSIVE (SCR_USER6=3) first.
+    # roll, IC pitch) and enter MODE_PASSIVE (RAWES_MODE=3) first.
     if "coll_eq_rad" in ic:
         coll_seed = float(ic["coll_eq_rad"])
         coll_src = "coll_eq_rad"
@@ -243,7 +243,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 "Checklist:\n"
                 "  * SCR_ENABLE=1 baked into eeprom (prime_eeprom=True in fixture)\n"
                 "  * rawes.lua installed to /ardupilot/scripts/\n"
-                "  * SCR_USER5 (anchor Down) = home_alt_m correct\n"
+                "  * RAWES_AND (anchor Down) = home_alt_m correct\n"
                 "  * SITL log for Lua load errors"
             )
         if now - state["t_last_log"] >= _POS_LOG_INTERVAL:

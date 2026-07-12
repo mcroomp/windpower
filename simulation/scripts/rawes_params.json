@@ -11,9 +11,9 @@
       "note": "1=Lua scripting on; rawes.lua is loaded and running after boot"
     },
     {
-      "name": "SCR_USER6",
+      "name": "RAWES_MODE",
       "expected": null,
-      "note": "active Lua flight mode: 0=none (default)  1=steady  2=yaw  4=landing (pumping runs in steady)"
+      "note": "active Lua flight mode (script-generated param): 0=none (default)  1=steady  3=passive  4=landing  (pumping runs in steady)"
     },
     {
       "name": "ARMING_CHECK",

@@ -16,7 +16,7 @@ _UNDER = 6.0    # rad/s  < 2*pi           -> within limits
 
 
 def _sim() -> RawesLua:
-    return RawesLua()   # default SCR_USER6=0 (MODE_NONE) -- safety runs in all modes
+    return RawesLua()   # default RAWES_MODE=0 (MODE_NONE) -- safety runs in all modes
 
 
 class TestOverSpinDisarm:

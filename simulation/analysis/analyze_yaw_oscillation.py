@@ -12,7 +12,6 @@ Signals used (each on the FC boot-time clock, so they align):
   * NAMED_VALUE_FLOAT YFF_U   applied SERVO4 throttle u [0..1]                  ~2 Hz
   * NAMED_VALUE_FLOAT YFF_GZ  Lua psi_dot (gyro:z()) [rad/s]                    ~2 Hz
   * NAMED_VALUE_FLOAT YFF_A   calibrated slope [rad/s per u]                    ~2 Hz
-  * NAMED_VALUE_FLOAT YFF_KD  yaw-D gain (SCR_USER1)                            ~2 Hz
 
 Reports oscillation frequency / amplitude (FFT + zero-crossings), the
 actuator<->response phase, the ESC deadband duty, and the trim behaviour.
@@ -322,7 +321,7 @@ def analyze(path: str, do_plot: bool = False) -> None:
     print("\n--- Lua yaw-trim feedforward (NVF) ---")
     kd = nvf["YFF_KD"]
     a = nvf["YFF_A"]
-    print(f"  YFF_KD (yaw-D gain, SCR_USER1) = "
+    print(f"  YFF_KD (yaw-D gain, RAWES_YAW_SLP slope-calibrated) = "
           f"{_fmt(kd[-1],4) if len(kd) else 'not streamed'}"
           f"{'' if len(kd)<2 else f'  (range {_fmt(kd.min(),4)}..{_fmt(kd.max(),4)})'}")
     print(f"  YFF_A  (calibrated slope)      = {_fmt(a[-1],1) if len(a) else 'n/a'} rad/s per u")

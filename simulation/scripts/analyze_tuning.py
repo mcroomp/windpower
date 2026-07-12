@@ -168,8 +168,8 @@ def section_summary(tr: Trace) -> list[str]:
         smin = tr.meta.get("SERVO4_MIN", "?")
         smax = tr.meta.get("SERVO4_MAX", "?")
         sfn  = tr.meta.get("SERVO4_FUNCTION", "?")
-        mode = tr.meta.get("SCR_USER6", "?")
-        out.append(f"  servo4_min/max: {smin} / {smax} us   SERVO4_FUNCTION={sfn}   SCR_USER6={mode}")
+        mode = tr.meta.get("RAWES_MODE", tr.meta.get("SCR_USER6", "?"))  # support old logs
+        out.append(f"  servo4_min/max: {smin} / {smax} us   SERVO4_FUNCTION={sfn}   RAWES_MODE={mode}")
     return out
 
 

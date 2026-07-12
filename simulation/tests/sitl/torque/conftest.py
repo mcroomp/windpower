@@ -39,7 +39,7 @@ def torque_armed(tmp_path, request):
     Boots from the FLIGHT default params (dual-GPS yaw, GPS pos/vel enabled) via
     profile="ic": the hub is held at the steady-state tethered-hover attitude
     (roll=0, pitch=-63.6 deg) instead of level.  rawes.lua boots in MODE_PASSIVE
-    (SCR_USER6=3); the IC operating point is seeded before arm (collective=
+    (SCR_USER6=3 / RAWES_MODE=3); the IC operating point is seeded before arm (collective=
     LUA_YAW_IC_COL, RIC/PIC=IC roll/pitch) and the EKF pre-arm attitude is seeded
     from the live yaw.  ArduPilot's DDFP yaw PID regulates hub yaw via Motor4.
     """
@@ -86,7 +86,7 @@ def _lua_torque_stack(tmp_path, request, armon_ms):
     """Shared setup for Lua torque fixtures.
 
     ArduPilot DDFP yaw PID drives Motor4 (tail_channel=8 / Ch9).
-    Arming is handled by GCS; rawes.lua (SCR_USER6=0) provides optional
+    Arming is handled by GCS; rawes.lua (RAWES_MODE=0) provides optional
     RAWES_ARM disarm timer behavior only.
     """
     import torque_model as _m
@@ -104,7 +104,7 @@ def _lua_torque_stack(tmp_path, request, armon_ms):
 @pytest.fixture
 def torque_armed_lua(tmp_path, request):
     """
-    Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
+    Torque stack with rawes.lua passive (RAWES_MODE=0, MODE_NONE).
 
     Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=3).
     Armed via GCS in ACRO mode; no GCS RC override required for arming.
@@ -179,7 +179,7 @@ def torque_production_delayed_lua(tmp_path, request):
 @pytest.fixture
 def torque_unarmed_lua(tmp_path, request):
     """
-    Torque stack with rawes.lua passive (SCR_USER6=0, MODE_NONE).
+    Torque stack with rawes.lua passive (RAWES_MODE=0, MODE_NONE).
 
     Yaw is regulated by ArduPilot's ATC_RAT_YAW DDFP PID (H_TAIL_TYPE=3).
     Yields StackContext with vehicle UNARMED and ACRO active.
@@ -258,7 +258,7 @@ def torque_armed_ddfp(tmp_path, request):
 
     Motor output min/max comes from _DDFP_TORQUE_EXTRA_PARAMS. Uses the
     flight GUIDED_NOGPS init technique (passive_init): rawes.lua boots in
-    MODE_PASSIVE (SCR_USER6=3) only to seed the IC operating point and hold the
+    MODE_PASSIVE (RAWES_MODE=3) only to seed the IC operating point and hold the
     level pre-arm attitude; yaw is still regulated solely by ArduPilot's built-in
     DDFP controller (the Lua does not touch the yaw motor output in MODE_PASSIVE).
     """

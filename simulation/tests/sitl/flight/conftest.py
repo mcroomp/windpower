@@ -4,7 +4,7 @@ flight/conftest.py — pytest fixtures for RAWES flight stack integration tests.
 Fixtures:
     guided_nogps_armed              — full GUIDED_NOGPS stack (mediator + arm).
     guided_nogps_armed_pumping_lua  - starts at IC (trapezoid); pumping test owns winch.
-    guided_nogps_armed_landing_lua  — GUIDED_NOGPS stack with rawes.lua in landing mode (SCR_USER6=4).
+    guided_nogps_armed_landing_lua  — GUIDED_NOGPS stack with rawes.lua in landing mode (RAWES_MODE=4).
     guided_nogps_armed_lua_full     — starts at IC (trapezoid); steady/ic tests (MODE_PASSIVE seed).
 
 All IC-start fixtures share the _ic_trapezoid_stack initialization helper.
@@ -47,9 +47,9 @@ def guided_nogps_armed_pumping_lua(tmp_path, request):
 
     Thin wrapper over _ic_trapezoid_stack (run_ground_winch=False): the hub
     starts at the IC operating point at rest, Lua is left in MODE_PASSIVE
-    (SCR_USER6=3) with the IC operating point seeded, and GPS is fused before
+    (RAWES_MODE=3) with the IC operating point seeded, and GPS is fused before
     yielding.  The pumping test owns the winch loop from the test process
-    (mirroring the test_pump_cycle_lua.py simtest) and promotes SCR_USER6 -> 1
+    (mirroring the test_pump_cycle_lua.py simtest) and promotes RAWES_MODE 3 -> 1
     (MODE_STEADY) right after kinematic_exit.
 
     Division of labour (mirrors test_pump_cycle_lua.py):
@@ -79,14 +79,13 @@ def guided_nogps_armed_pumping_lua(tmp_path, request):
 @pytest.fixture
 def guided_nogps_armed_landing_lua(tmp_path, request):
     """
-    Landing stack fixture with rawes.lua active in landing mode (SCR_USER6=4).
+    Landing stack fixture with rawes.lua active in landing mode (RAWES_MODE=4).
 
     Extends guided_nogps_armed_landing_lua:
       - kinematic_vel_ramp_s=20: hub exits kinematic at vel=0, eliminating the
         linear tether jolt. Tether extension at exit ~ 0 m, tension ~ 0 N.
       - rawes.lua installed before SITL starts.
-      - SCR_USER1..5 configured post-arm immediately; SCR_USER6=4 set so Lua
-        starts in landing mode; KINEMATIC_SETTLE_MS=62000 delays body_z capture
+      - RAWES_MODE=4 set post-arm so Lua starts in landing mode; KINEMATIC_SETTLE_MS=62000 delays body_z capture
         until EKF has converged.
       What is validated:
           (a) Lua enters landing mode and body_z capture fires on schedule
@@ -111,7 +110,7 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
     Timing (from mediator start, speedup=1):
       t=0..45 s   kinematic constant-velocity phase (vel=0.96 m/s East)
       t~23 s      GPS fuses (EK3_GPS_CHECK=0 + widened gates)
-      t~15 s      arm complete; fixture sets SCR_USER1-6; yields to test
+      t~15 s      arm complete; fixture sets RAWES_MODE and NVFs; yields to test
       t=45..65 s  kinematic ramp phase: vel ramps 0.96->0 m/s (vel_ramp_s=20)
       t~51 s      ahrs:healthy() True; Lua enters KINEMATIC_SETTLE_MS wait
       t~62 s      Lua KINEMATIC_SETTLE_MS (62 s) expires; captures body_z
@@ -157,20 +156,19 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name) as ctx:
-        # Post-arm: configure rawes.lua.  Mode via SCR_USER6; slew + anchor via
+        # Post-arm: configure rawes.lua.  Mode via RAWES_MODE; slew + anchor via
         # NAMED_VALUE_FLOAT.
         # RAWES_AND = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
         # vel0[2]=0 => altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
         # anch_EKF.z = RAWES_AND = -pos0[2] = altitude above EKF origin.
         # Lua: alt_est = anch.z - hub_ned.z (hub_ned.z from LOCAL_POSITION_NED).
         #
-        # SCR_USER6=4 set here; rawes.lua DELAYS body_z capture until
+        # RAWES_MODE=4 set here; rawes.lua DELAYS body_z capture until
         # millis() >= KINEMATIC_SETTLE_MS (62 s) to ensure EKF has converged.
-        ctx.log.info("Setting mode param + slew/anchor NVFs for rawes.lua (landing mode) ...")
+        ctx.log.info("Setting RAWES_MODE + slew/anchor NVFs for rawes.lua (landing mode) ...")
         ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
         ctx.gcs.set_param("RAWES_MODE", 4, timeout=5.0)   # landing mode
-        # Slew + anchor are NAMED_VALUE_FLOAT (formerly SCR_USER2/3/4/5).  Mode is
-        # the only remaining SCR_USER parameter.  The anchor is at world origin;
+        # Slew + anchor are NAMED_VALUE_FLOAT.  The anchor is at world origin;
         # here anchor North/East = 0 and anchor Down (EKF frame) = -pos0[2].
         # rawes.lua gates altitude-hold capture on all three anchor floats.
         ctx.gcs.send_named_float("RAWES_ANN", 0.0)                      # anchor North [m]
@@ -200,7 +198,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
                        thread (used by steady/ic where no test-side winch loop
                        exists).  Pumping passes False and drives the winch itself.
 
-    Both modes leave the Lua in MODE_PASSIVE (SCR_USER6=3); the test promotes to
+    Both modes leave the Lua in MODE_PASSIVE (RAWES_MODE=3); the test promotes to
     its flight mode (MODE_STEADY=1) right after kinematic_exit.
 
     Uses a smooth trapezoidal kinematic motion: the hub accelerates from rest to
@@ -211,14 +209,14 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
     leaving no residual position/velocity error at release.
 
         Key design points:
-            - SCR_USER6=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
+            - RAWES_MODE=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
                 rate commands, preventing ArduPilot rate PID windup during kinematic hold.
             - Smooth (raised-cosine) accel/decel => continuous acceleration, no jerk
                 step at the phase boundaries.
             - Hub ends exactly at pos0 with zero velocity, so GPS aiding engages with
                 no accumulated position mismatch to shock the EKF.
             - Fixture waits for GPS fusion before yielding.
-            - Test promotes SCR_USER6 from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
+            - Test promotes RAWES_MODE from 3 (MODE_PASSIVE) to 1 (MODE_STEADY) after
                 kinematic_exit (t=60s) to activate altitude-hold steady guidance.
 
         Timeline (from mediator start, speedup=1):
@@ -226,10 +224,10 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             t=5..55 s   cruise at 1 m/s along IC heading.
             t=55..60 s  decelerate 1 -> 0 m/s, arriving exactly at pos0 at rest.
             t~6 s       GPS first fix; EKF3 origin set.
-            t~8 s       arm (after EKF tilt alignment); SCR_USER6=3 (MODE_PASSIVE)
+            t~8 s       arm (after EKF tilt alignment); RAWES_MODE=3 (MODE_PASSIVE)
                                     set; IC attitude commanded during kinematic hold.
             t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires.
-            t~60 s      kinematic exits; test promotes SCR_USER6 -> 1 (MODE_STEADY).
+            t~60 s      kinematic exits; test promotes RAWES_MODE 3 -> 1 (MODE_STEADY).
             t~60+       free flight under ArduPilot + Lua with steady guidance active.
     """
     # Standard kinematic start for all flight stack tests on this fixture:
@@ -315,8 +313,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         # elevation = 90 deg, producing a saturated cyclic that kicks the
         # body at kinematic_exit.
         _pos0 = ctx.initial_state["pos"] if ctx.initial_state else [0.0, 0.0, -ctx.home_alt_m]
-        # Mode is the only SCR_USER parameter; slew + anchor are NAMED_VALUE_FLOAT
-        # (formerly SCR_USER2/3/4/5).
+        # Mode is the only RAWES_* script-generated param set here; slew + anchor are NAMED_VALUE_FLOAT.
         ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
         # MODE_PASSIVE (3): vehicle stays armed (motor interlock kept high) but
         # Lua emits no rate commands, so ArduPilot's rate PID has no setpoint to
@@ -511,10 +508,10 @@ def guided_nogps_armed_lua_full(tmp_path, request):
     Full-stack GUIDED_NOGPS fixture with rawes.lua, internal_controller=False.
 
     Thin wrapper over _ic_trapezoid_stack: the hub starts at the IC via the
-    smooth trapezoidal kinematic motion, Lua is left in MODE_PASSIVE (SCR_USER6=3)
+    smooth trapezoidal kinematic motion, Lua is left in MODE_PASSIVE (RAWES_MODE=3)
     with the IC operating point seeded, and an in-fixture ground winch tension
     regulator (target 300 N) runs after kinematic exit.  Used by the steady and
-    ic-passive flight stack tests, which promote SCR_USER6 -> 1 (MODE_STEADY)
+    ic-passive flight stack tests, which promote RAWES_MODE 3 -> 1 (MODE_STEADY)
     after kinematic_exit.
     """
     with _ic_trapezoid_stack(

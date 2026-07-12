@@ -1,5 +1,5 @@
 """
-test_pumping_cycle_sitl.py — Pumping cycle stack test with rawes.lua (SCR_USER6=1, steady mode).
+test_pumping_cycle_sitl.py — Pumping cycle stack test with rawes.lua (RAWES_MODE=1, steady mode).
 
 Architecture (mirrors test_pump_cycle_lua.py unit test):
   Test process (10 Hz):
@@ -101,7 +101,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
 
     # ── Start at IC: wait for kinematic exit, then promote MODE_PASSIVE -> STEADY ──
     # The shared trapezoid fixture (guided_nogps_armed_pumping_lua) brings the hub
-    # to the IC at rest and leaves the Lua in MODE_PASSIVE (SCR_USER6=3) with the
+    # to the IC at rest and leaves the Lua in MODE_PASSIVE (RAWES_MODE=3) with the
     # IC operating point seeded.  Mirror test_lua_flight_steady_sitl: re-seed the
     # IC NVFs, let the passive hold settle, then promote to MODE_STEADY before the
     # pumping schedule begins.

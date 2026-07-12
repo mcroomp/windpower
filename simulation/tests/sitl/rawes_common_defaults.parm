@@ -57,7 +57,7 @@ ATC_RAT_YAW_FLTD  10.0
 ATC_RAT_YAW_I     0.0
 
 # RAWES_* script-generated parameters (registered by rawes.lua via param:add_table).
-# These replace the old SCR_USER1..5 slots and are visible in GCS as RAWES_* params.
+# These are script-generated (RAWES_*) params visible in GCS, registered by rawes.lua via param:add_table.
 # RAWES_MODE is set per-test; defaults here cover steady/pumping flight gains.
 
 # RAWES_YAW_SLP: yaw motor slope override [RPM/µs].  0 -> use bench default 0.504.

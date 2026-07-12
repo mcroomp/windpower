@@ -99,7 +99,7 @@ _FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 contr
 # rawes_common_defaults.parm provides shared RAWES tuning and heli params.
 # rawes_sitl_defaults.parm provides SITL-only overlays (SIM_*, relaxed EKF gates).
 # _BASE_ACRO_PARAMS adds the MAVLink-side mode/failsafe params.
-# Per-fixture extras (e.g. SCR_USER6, COL_CRUISE_FLIGHT_RAD) are merged on top.
+# Per-fixture extras (e.g. RAWES_MODE, COL_CRUISE_FLIGHT_RAD) are merged on top.
 #
 # EKF params (EK3_*, COMPASS_*) are ONLY in the boot file — never set via
 # MAVLink — because setting them post-boot triggers EKF3 yaw-state reset.
@@ -852,7 +852,7 @@ def _install_lua_scripts(*names: str) -> None:
     Copy the named Lua scripts from simulation/scripts/ to SITL's /ardupilot/scripts/.
 
     Must be called before SITL starts.  In normal use, pass only "rawes.lua"
-    (the unified script); SCR_USER6 selects the active mode at runtime.
+    (the unified script); RAWES_MODE selects the active mode at runtime.
 
     Examples::
 
@@ -1956,7 +1956,7 @@ def _torque_stack(
                              0: skip arming entirely; yield unarmed (test controls arming).
                              None (default): GCS force-arm with Ch8=2000 RC override.
     passive_init           : if True, adopt the flight GUIDED_NOGPS init technique:
-                             install rawes.lua, boot in MODE_PASSIVE (SCR_USER6=3),
+                             install rawes.lua, boot in MODE_PASSIVE (RAWES_MODE=3),
                              seed the IC operating point (RAWES_COL=passive_col_rad,
                              RAWES_RIC=RAWES_PIC=0 -> level orientation) BEFORE arm, and
                              seed the EKF pre-arm attitude from the live EKF yaw.  The

@@ -19,7 +19,7 @@ Usage
     gcs.send_named_float(NV_ANCHOR_N_KEY, -pos0[0])     # anchor North (EKF frame)
 """
 
-# ── Mode numbers (written directly to SCR_USER6) ──────────────────────────────
+# ── Mode numbers (RAWES_MODE script-generated param; 0=none 1=steady 3=passive 4=landing) ──
 
 MODE_NONE     = 0   # script passive: no RC overrides; logs every 5 s + any NV message
 MODE_STEADY   = 1   # bz_altitude_hold cyclic (commanded tension) + altitude-PID collective
@@ -37,7 +37,7 @@ NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm 
 # ── Named-float tuning + anchor keys ─────────────────────────────────────────────────────
 # rawes.lua gates altitude-hold capture on all three anchor floats arriving.
 
-NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] (default 0.40)
+NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] — also a RAWES_* param (override via NVF for runtime changes)
 NV_ANCHOR_N_KEY = "RAWES_ANN"    # anchor North from EKF origin [m]
 NV_ANCHOR_E_KEY = "RAWES_ANE"    # anchor East  from EKF origin [m]
 NV_ANCHOR_D_KEY = "RAWES_AND"    # anchor Down  from EKF origin [m]

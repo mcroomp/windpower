@@ -239,12 +239,15 @@ the PWM swash servos; bit 8 of the masks (= 256) selects channel 9.
 |-----------|-------|
 | SCR_ENABLE | 1.0 |
 | SCR_HEAP_SIZE | 204800.0 |
-| SCR_USER1 | 0.0 |
-| SCR_USER2 | 0.0 |
-| SCR_USER3 | 0.0 |
-| SCR_USER4 | 0.0 |
-| SCR_USER5 | 0.0 |
-| SCR_USER6 | 2.0 |
+| SCR_USER1 | 0.0 | (unused — yaw slope now set via RAWES_YAW_SLP script-generated param) |
+| SCR_USER2 | 0.0 | (unused) |
+| SCR_USER3 | 0.0 | (unused) |
+| SCR_USER4 | 0.0 | (unused) |
+| SCR_USER5 | 0.0 | (unused) |
+| SCR_USER6 | 2.0 | (unused — mode now set via RAWES_MODE script-generated param) |
+
+Note: SCR_USER1..6 are ArduPilot system params that still exist in EEPROM but rawes.lua no longer reads any of them.
+All Lua configuration uses the RAWES_* script-generated parameter table (key 77).
 
 ### Arming / safety
 
@@ -257,7 +260,7 @@ the PWM swash servos; bit 8 of the masks (= 256) selects channel 9.
 
 | Feature | SITL Docker | This Pixhawk |
 |---------|------------|-------------|
-| SCR_USER params | SCR_USER1..9 | SCR_USER1..6 only |
+| Lua mode param | RAWES_MODE (script-generated) | RAWES_MODE (script-generated) |
+| Yaw slope param | RAWES_YAW_SLP (script-generated) | RAWES_YAW_SLP (script-generated) |
 | H_SW_PHANG | Exists (set to 0) | Does not exist; phase implicit in H_SW_TYPE |
 | RPM source in Lua | battery:voltage(0) (mediator hack) | rpm:get_rpm(0) (DSHOT telemetry) |
-| Mode selector param | SCR_USER6 | SCR_USER6 |

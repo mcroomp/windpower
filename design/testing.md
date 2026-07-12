@@ -210,7 +210,7 @@ _mock          = global state table (inputs/outputs bridged to Python)
 from rawes_lua_harness import RawesLua
 from rawes_modes import MODE_STEADY, PUMP_HOLD
 
-sim = RawesLua(mode=MODE_STEADY)  # SCR_USER6 = 1 (pumping schedule runs in steady)
+sim = RawesLua(mode=MODE_STEADY)  # RAWES_MODE = 1 (pumping schedule runs in steady)
 sim.armed        = True
 sim.healthy      = True
 sim.vehicle_mode = 1           # ACRO = 1
@@ -253,17 +253,17 @@ sim.vec_to_list(bz)            # -> [x, y, z]
 | `pos_ned` | in | {x,y,z} or nil | GPS position; nil = not fused |
 | `vel_ned` | in | {x,y,z} | NED velocity m/s |
 | `R` | in | flat 1..9 | body-to-NED rotation, row-major |
-| `params` | in/out | table | SCR_USER1..6 |
+| `params` | in/out | table | ArduPilot params (SCR_USER1..6, ATC_*, RAWES_*, etc.) |
 | `ch_out[n]` | out | int or nil | RC channel override PWM |
 | `srv_out[func]` | out | int or nil | SRV_Channels PWM by function |
 | `gcs_msgs` | out | array | {level, msg} log |
 
 ---
 
-## SCR_USER6 Mode/Substate Encoding
+## RAWES_MODE / Substate Encoding
 
-`SCR_USER6` is a **plain integer 0–8** (mode only). Substate is delivered separately via
-`NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in SCR_USER6.
+`RAWES_MODE` is a **script-generated parameter** (registered by rawes.lua at load time; visible as `RAWES_MODE` in GCS). Substate is delivered separately via
+`NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in the mode param.
 
 Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lua` (Lua).
 
@@ -276,21 +276,21 @@ from rawes_modes import (
 )
 ```
 
-| Mode | SCR_USER6 | Substates (RAWES_SUB) | Notes |
+| Mode | RAWES_MODE | Substates (RAWES_SUB) | Notes |
 |------|-----------|----------------------|-------|
 | `MODE_NONE` | 0 | — | Logging only; RAWES_ARM still handled |
 | `MODE_STEADY` | 1 | — | Altitude hold + tether tracking |
 | `MODE_PASSIVE` | 3 | — | Armed-but-quiet: commands IC attitude angle (RAWES_RIC/PIC) + IC collective (RAWES_COL via throttle) as a GUIDED angle target during kinematic |
 | `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP | |
 
-Pumping has **no dedicated mode**: it runs in `MODE_STEADY` (SCR_USER6=1) while the ground
+Pumping has **no dedicated mode**: it runs in `MODE_STEADY` (RAWES_MODE=1) while the ground
 varies `RAWES_TEN` and sends the `RAWES_SUB` pumping substate (0=HOLD, 1=REEL_OUT,
 2=TRANSITION, 3=REEL_IN, 4=TRANSITION_BACK) for telemetry/diagnostics.
 
 **Sending substates in simtests** (via `RawesLua.send_named_float`):
 
 ```python
-sim = RawesLua(mode=MODE_STEADY)          # SCR_USER6 = 1 (pumping schedule)
+sim = RawesLua(mode=MODE_STEADY)          # RAWES_MODE = 1 (pumping schedule)
 
 # Only send on transitions — Lua drains the inbox each update tick
 prev_sub = None

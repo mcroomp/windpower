@@ -519,7 +519,7 @@ simulation/
 │                        tests and simtests. Loads mock_ardupilot.lua then rawes.lua. Python writes
 │                        sensor inputs to `_mock` and calls `_update_fn()` each tick.
 ├── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.
-├── scripts/rawes.lua    Unified Lua controller (SCR_USER6 modes 0/1/4).
+├── scripts/rawes.lua    Unified Lua controller (RAWES_MODE: 0=none 1=steady 3=passive 4=landing).
 ├── scripts/rawes_test_surface.lua  Test-surface table (_rawes_fns) splicing internal locals
 │                        for Python unit tests via lupa.
 ├── analysis/

@@ -131,7 +131,7 @@ class RawesLua:
         self._mock = self._lua.globals()._mock
 
         # Apply params before loading rawes.lua so the startup GCS message
-        # (which reads SCR_USER6 at module load time) shows the right mode.
+        # (which reads RAWES_MODE at module load time) shows the right mode.
         for k, v in params.items():
             self._mock.params[_PARAM_ALIAS.get(k, k)] = float(v)
 
@@ -258,12 +258,12 @@ class RawesLua:
     def set_param(self, name: str, value: float):
         """Set a parameter by ArduPilot name or the ``mode`` alias.
 
-        Mode is the only SCR_USER parameter; slew/anchor now flow via
+        RAWES_MODE is a script-generated parameter; slew/anchor now flow via
         send_named_float (RAWES_SLW / RAWES_ANN / RAWES_ANE / RAWES_AND).
 
         Example:
-            sim.set_param("mode", 1)          # SCR_USER6 = 1 (steady)
-            sim.set_param("SCR_USER6", 1)     # same, full name
+            sim.set_param("mode", 1)          # RAWES_MODE = 1 (steady)
+            sim.set_param("RAWES_MODE", 1)    # same, full name
         """
         self._mock.params[_PARAM_ALIAS.get(name, name)] = float(value)
 

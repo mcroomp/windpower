@@ -318,13 +318,24 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 
 Sections 4.2–4.5 give the per-mode detail and gain values.
 
-**SCR_USER parameter slots:**
+**RAWES_\* script-generated parameters (set via GCS/parm file):**
 
-| Parameter | SCR_USER | Default | Description |
-|---|---|---|---|
-| yaw motor slope | SCR_USER1 | 0 | d(shaft_RPM)/d(PWM_µs) override. 0 → bench default 0.504 RPM/µs. Set from bench calibration of the installed motor + gear. |
-| SCR_USER2–5 | — | — | Unused (removed). |
-| RAWES_MODE | SCR_USER6 | 0 | Mode selector: 0=none, 1=steady, 3=passive, 4=landing |
+| Parameter | Default | Description |
+|---|---|---|
+| RAWES_MODE | 0 | Mode selector: 0=none, 1=steady, 3=passive, 4=landing |
+| RAWES_YAW_SLP | 0 | Yaw motor slope [RPM/µs] override. 0 → bench default 0.504 RPM/µs. |
+| RAWES_KP_ALT | 0.010 | Altitude P gain |
+| RAWES_KI_ALT | 0.001 | Altitude I gain |
+| RAWES_KD_VZ | 0.040 | Vertical-speed damping gain |
+| RAWES_KP_EL | 2.5 | In-plane (elevation) position rate-P gain [rad/s per m] |
+| RAWES_KP_AZ | 0.5 | Crosswind (azimuth) position rate-P gain [rad/s per m] |
+| RAWES_KD_EL | 0.0 | In-plane position rate-D gain [rad/s per (m/s)] |
+| RAWES_CWMAX | 0.6 | Position rate saturation [rad/s] |
+| RAWES_SLW | 0.40 | Elevation/body_z slew rate [rad/s] |
+| RAWES_TEL_HZ | 2.0 | Diagnostic NVF emission rate [Hz] |
+| RAWES_YFF_MAX | 0.7 | Yaw trim clamp upper bound [throttle] |
+| RAWES_YFF_TAU | 0.3 | Yaw trim low-pass time constant [s] |
+| RAWES_TRP | 2.0 | Tension feedforward ramp time constant [s] (0 = instant) |
 
 All other flight tunables (anchor position, slew rate, cyclic gains) are delivered as NAMED_VALUE_FLOATs — see table below.
 
@@ -334,12 +345,11 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 |---|---|---|
 | RAWES_ARM | ms | Arm vehicle + start disarm countdown of `ms` milliseconds. Re-send refreshes timer. |
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
-| RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at `RAWES_SLW` rad/s. |
-| RAWES_SLW | rad/s | body_z / elevation slew rate limit (default 0.40 rad/s) |
+| RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at RAWES_SLW rad/s. |
 | RAWES_ANN | m | Anchor North from EKF origin. MODE_STEADY does not initialise altitude hold until ANN/ANE/AND have all been received. |
 | RAWES_ANE | m | Anchor East from EKF origin. |
 | RAWES_AND | m | Anchor Down from EKF origin (positive downward in NED). Set to `−initial_state["pos"][2]` (NED Z negated). |
-| RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. |
+| RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. Ramped by RAWES_TRP. |
 | RAWES_RIC | rad | IC roll — part of the atomic passive/steady IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_COL`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
 | RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
 | RAWES_COL | rad | IC collective `[COL_MIN_RAD, COL_MAX_RAD]` — part of the atomic IC seed. MODE_PASSIVE maps it onto GUIDED throttle via `col_rad_to_thrust` to preserve rotor RPM during kinematic. |
@@ -376,7 +386,7 @@ Before `_el_initialized` is set (first valid GPS position fix with tlen ≥ MIN_
 On first valid GPS fix: initialize `_el_rad` and `_target_alt` from position, set
 `_el_initialized = true`, send STATUSTEXT.
 
-### 4.2b Mode 3 — Passive (SCR_USER6=3)
+### 4.2b Mode 3 — Passive (RAWES_MODE=3)
 
 Armed-but-quiet mode used during the kinematic hold/release of stack tests.
 The vehicle stays armed (motor interlock ch8 high) and the Lua commands the
@@ -422,7 +432,7 @@ the actual SERVO9 output back via `SRV_Channels:get_output_pwm(36)` and drives
 `H_YAW_TRIM` toward the equilibrium throttle (see §5.2).  The trim resets to
 0 on PASSIVE entry and converges within ~1 s.
 
-### 4.3 Mode 1 — Steady (SCR_USER6=1)
+### 4.3 Mode 1 — Steady (RAWES_MODE=1)
 
 Post-GPS, each 50 Hz step:
 
@@ -441,10 +451,10 @@ Post-GPS, each 50 Hz step:
 
 **Ch3 ownership:** Lua owns Ch3 entirely in mode 1. Ground does not send collective.
 
-### 4.4 Pumping schedule (runs in steady mode, SCR_USER6=1)
+### 4.4 Pumping schedule (runs in steady mode, RAWES_MODE=1)
 
 There is **no dedicated pumping mode**. Pumping is a ground-side schedule executed while
-the vehicle stays in **steady mode (SCR_USER6=1)**. Phase is driven by
+the vehicle stays in **steady mode (RAWES_MODE=1)**. Phase is driven by
 `NAMED_VALUE_FLOAT("RAWES_SUB", N)` from ground (telemetry/diagnostics only — it does not
 switch the control law). The AP runs the **same control law as steady** —
 `bz_altitude_hold(rel, _el_rad, _tension_n, _az_ref)` for cyclic and the altitude PID for
@@ -468,7 +478,7 @@ Altitude hold: ground sends `RAWES_ALT = IC_altitude` (constant in the current P
 simtest). The AP's altitude PID drives collective; the commanded tension only sets the
 disk-axis direction via the force balance.
 
-### 4.5 Mode 4 — Landing (SCR_USER6=4)
+### 4.5 Mode 4 — Landing (RAWES_MODE=4)
 
 **Architecture (unified):**
 
@@ -623,9 +633,8 @@ param:set("H_YAW_TRIM", trim)
 ```
 
 This drives `H_YAW_TRIM` toward the equilibrium throttle `u_eq = omega_rotor × GEAR_RATIO / RPM_SCALE`
-(see `torque_model.py` for constants) at which `psi_dot = 0`.
-at which `psi_dot = 0`.  `YFF_A = SCR_USER1 × SERVO9_SPAN_US × 2π/60` (default ≈ 52.8 rad/s per
-throttle unit; SCR_USER1=0 uses bench value 0.504 RPM/µs).  The AP yaw P-term handles
+(see `torque_model.py` for constants) at which `psi_dot = 0`.  `YFF_A = RAWES_YAW_SLP × SERVO9_SPAN_US × 2π/60` (default ≈ 52.8 rad/s per
+throttle unit; RAWES_YAW_SLP=0 uses bench value 0.504 RPM/µs).  The AP yaw P-term handles
 fast transients; the observer absorbs the DC so the integrator is not needed.
 
 ### 5.3 Key Parameters
@@ -637,7 +646,7 @@ fast transients; the observer absorbs the DC so the integrator is not needed.
 | ATC_RAT_YAW_I | 0.0 | Off — observer absorbs DC offset |
 | ATC_RAT_YAW_D | 0.0 | Off |
 | ATC_RAT_YAW_IMAX | 0.1 | Clamp (safety; integrator is zero) |
-| SCR_USER1 | 0 | Slope override; 0 = bench default 0.504 RPM/µs |
+| RAWES_YAW_SLP | 0 | Yaw motor slope override [RPM/µs]; 0 = bench default 0.504 |
 
 ---
 
@@ -648,10 +657,10 @@ fast transients; the observer absorbs the DC so the integrator is not needed.
 | Parameter | Value | Reason |
 |---|---|---|
 | SCR_ENABLE | 1 | Enable Lua scripting subsystem |
-| SCR_USER1 | 0 | Yaw motor slope override [RPM/µs]. 0 → bench default 0.504. Set from bench calibration. |
-| SCR_USER6 | 0/1/3/4 | RAWES_MODE selector |
+| RAWES_MODE | 0 | Mode selector (script-generated param registered by rawes.lua). Set via GCS or parm file; do not use SCR_USER6. |
+| RAWES_YAW_SLP | 0 | Yaw motor slope override [RPM/µs]. 0 → bench default 0.504. Set from bench calibration. |
 
-Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not SCR_USER params.
+Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not boot-time params.
 
 **SCR_ENABLE bootstrap:** After EEPROM wipe, Lua only starts if SCR_ENABLE=1 is already in
 EEPROM. The `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).

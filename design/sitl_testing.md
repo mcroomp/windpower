@@ -172,13 +172,13 @@ Time is measured from mediator start at `speedup = 1`.
          trapezoid ends exactly at pos0). Lua not yet active.
  0..5    accelerate 0 -> 1 m/s along the IC yaw heading (raised cosine).
  ~6      GPS first fix; EKF3 origin set.
- ~8      arm (after EKF tilt alignment); SCR_USER6=3 (MODE_PASSIVE) set;
+ ~8      arm (after EKF tilt alignment); RAWES_MODE=3 (MODE_PASSIVE) set;
          IC attitude commanded via nul-aero cyclic during the hold.
  5..55   cruise at 1 m/s along the IC heading (constant velocity).
  ~34     GPS fuses: delAngBiasLearned converges, readyToUseGPS() passes,
          const_pos_mode clears. (yawAlignComplete must latch by here.)
  55..60  decelerate 1 -> 0 m/s, arriving EXACTLY at pos0 at rest.
- 60      KINEMATIC EXIT: physics takes over. Test promotes SCR_USER6 3 -> 1
+ 60      KINEMATIC EXIT: physics takes over. Test promotes RAWES_MODE 3 -> 1
          (MODE_STEADY) and steady guidance becomes active.
  60+     free flight under ArduPilot + Lua.
 ```
@@ -195,7 +195,7 @@ Why this shape:
 - **Level frame yawed to the IC heading.** The hold starts at roll=pitch=0 yawed
   to the IC heading; the IC roll/pitch is slewed in later via the `nul`-aero
   cyclic (it cannot apply yaw), keeping the EKF pre-arm seed level and consistent.
-- **MODE_PASSIVE during the hold.** `SCR_USER6=3` is set right after arm so the
+- **MODE_PASSIVE during the hold.** `RAWES_MODE=3` is set right after arm so the
   Lua commands the IC attitude as a GUIDED angle target (IC roll/pitch from
   `RAWES_RIC`/`RAWES_PIC` + yaw captured at entry, with **zero rate
   feed-forward**) plus IC collective via throttle. The `nul`-aero integrates

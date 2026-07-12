@@ -57,13 +57,13 @@ rest are one-shot.
 
 ### `run <name> [--duration N] [--trim K=V,...] [--gain K=V,...]`
 
-Activate a Lua mode (via `SCR_USER6`) → arm via `RAWES_ARM` → stream observation rows
+Activate a Lua mode (via `RAWES_MODE`) → arm via `RAWES_ARM` → stream observation rows
 to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. Without
 `--duration`, the session is unbounded (5-min `RAWES_ARM`); abort with ESC/Ctrl-C.
 
 **Modes (`<name>`):**
 
-| Name | `SCR_USER6` | Uses yaw motor output? | Accepts `--gain`? |
+| Name | `RAWES_MODE` | Uses yaw motor output? | Accepts `--gain`? |
 |---|---|---|---|
 | `passive` | 3 | yes — `run_yaw_trim` observer sets H_YAW_TRIM each tick | no |
 | `steady` | 1 | observer active | no |
@@ -78,7 +78,7 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 | `col`  | `RAWES_COL` | IC collective |
 
 `--gain` is not accepted in any current mode.  Yaw is regulated by the
-servo-readback trim observer in rawes.lua — calibrate `SCR_USER1` (slope) from
+servo-readback trim observer in rawes.lua — calibrate `RAWES_YAW_SLP` (slope) from
 a bench measurement rather than tuning AP PID gains.
 
 ```bash
@@ -122,7 +122,7 @@ silent rejects (writes that the FC ACKs but doesn't apply, e.g. swash-channel
 
 ```bash
 python calibrate.py --port COM7 set H_COL_MAX 1700
-python calibrate.py --port COM7 get SCR_USER6
+python calibrate.py --port COM7 get RAWES_MODE
 ```
 
 ### `swash`
@@ -152,7 +152,7 @@ motor off
 ```
 
 ### `arm [--duration N]`
-Set ACRO + send `RAWES_ARM=N*1000` (default 10 s). Doesn't touch `SCR_USER6` — use
+Set ACRO + send `RAWES_ARM=N*1000` (default 10 s). Doesn't touch `RAWES_MODE` — use
 `run <name>` if you also want to activate a Lua mode.
 
 ### `disarm` / `reboot` / `ping [baud]`

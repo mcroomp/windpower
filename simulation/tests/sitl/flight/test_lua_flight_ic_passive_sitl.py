@@ -4,7 +4,7 @@ test_lua_flight_ic_passive_sitl.py -- IC-targeted passive-mode stack test.
 Goal
 ----
 Provide a stack-level analogue of the Python IC angle-only test:
-- Keep Lua in MODE_PASSIVE (SCR_USER6=3) after kinematic_exit.
+- Keep Lua in MODE_PASSIVE (RAWES_MODE=3) after kinematic_exit.
 - Re-seed IC collective/tension at release.
 - Observe a short free-flight window and check IC-style stability metrics.
 

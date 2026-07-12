@@ -271,7 +271,7 @@ if free:
 if MED_LOG.exists():
     print("\n--- Key events from mediator.log ---")
     patterns = [
-        "TRANSITION", "RAWES", "GPS", "EKF", "captured", "SCR_USER6",
+        "TRANSITION", "RAWES", "GPS", "EKF", "captured", "RAWES_MODE",
         "col=", "body_z=", "vel_NED=", "tension",
     ]
     lines = MED_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
