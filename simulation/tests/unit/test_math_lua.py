@@ -92,7 +92,7 @@ def test_constants_have_expected_values(sim):
     assert float(f.KP_ALT)                == pytest.approx(0.010)
     assert float(f.KI_ALT)                == pytest.approx(0.001)
     assert float(f.KD_VZ)                 == pytest.approx(0.040)
-    assert float(f.RATE_KP_OUTER)         == pytest.approx(2.5)
+    assert float(f.KP_EL)                 == pytest.approx(2.5)
     assert float(f.RATE_ACCEL_MAX_RADSS)  == pytest.approx(4.0)
 
 

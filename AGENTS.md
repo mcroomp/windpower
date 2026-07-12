@@ -51,21 +51,26 @@ Use the primary doc for each topic. Other docs should link, not restate.
 
 ## SCR_USER Mapping (Agent Critical)
 
-Treat this mapping as contract-level. Keep it consistent across:
-- `simulation/scripts/rawes.lua`
-- `simulation/tests/sitl/rawes_common_defaults.parm`
-- design/hardware docs that reference SCR_USER fields.
+SCR_USER1..6 are NO LONGER USED by rawes.lua. Replaced by script-generated
+RAWES_* parameters (param:add_table key 77, prefix "RAWES_"). Canonical mapping:
 
-Canonical mapping:
-- `SCR_USER1` -> yaw motor slope override (`YAW_RPM_PER_US`), 0 means use bench default.
-- `SCR_USER2` -> Lua `KP_ALT`.
-- `SCR_USER3` -> Lua `KI_ALT`.
-- `SCR_USER4` -> Lua `KD_VZ`.
-- `SCR_USER5` -> Lua `RATE_KP_OUTER`.
-- `SCR_USER6` -> `RAWES_MODE` selector.
+| Old SCR_USER | New param    | Default | Purpose                            |
+|---|---|---|---|
+| SCR_USER1    | RAWES_YAW_SLP | 0      | Yaw motor slope [RPM/µs], 0=bench default |
+| SCR_USER2    | RAWES_KP_ALT  | 0.010  | Altitude P gain                    |
+| SCR_USER3    | RAWES_KI_ALT  | 0.001  | Altitude I gain                    |
+| SCR_USER4    | RAWES_KD_VZ   | 0.040  | Vertical-speed damping             |
+| SCR_USER5    | RAWES_KP_EL   | 2.5    | In-plane (elevation) position rate-P gain  |
+| SCR_USER6    | RAWES_MODE    | 0      | Mode selector (0=none,1=steady,3=passive,4=landing) |
+| *(new)*      | RAWES_KP_AZ   | 0.5    | Crosswind (azimuth) position rate-P gain   |
 
-Do not repurpose `SCR_USER2..5` for anchor/slew or other runtime values.
-Anchor/slew are NAMED_VALUE_FLOAT inputs (`RAWES_SLW`, `RAWES_ANN`, `RAWES_ANE`, `RAWES_AND`).
+Runtime overrides for crosswind gains via NAMED_VALUE_FLOAT:
+- `RAWES_CWP` overrides `_cw_rate_kp` (in-plane/elevation, defaults from RAWES_KP_EL)
+- `RAWES_CWA` overrides `_cw_rate_kp_az` (crosswind/azimuth, defaults from RAWES_KP_AZ)
+- `RAWES_CWD` overrides `_cw_rate_kd` (D term, default 0)
+- `RAWES_CWM` overrides `_cw_rate_max` (saturation, default 0.6)
+
+Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
 
 For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
 

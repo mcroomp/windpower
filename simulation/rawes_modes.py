@@ -1,10 +1,11 @@
 """
-rawes_modes.py — SCR_USER6 mode constants and NAMED_VALUE_FLOAT constants for rawes.lua.
+rawes_modes.py — RAWES_MODE constants and NAMED_VALUE_FLOAT constants for rawes.lua.
 
-SCR_USER6 is the ONLY SCR_USER parameter: plain integer, valid values 0,1,3,4 (mode only).
+RAWES_MODE is a script-generated parameter (registered by rawes.lua via param:add_table).
+Valid values: 0=none, 1=steady, 3=passive, 4=landing.
 Every other input (substate, tuning, anchor) is delivered via NAMED_VALUE_FLOAT --
-never encoded in SCR_USER. Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N);
-the slew rate and anchor position use RAWES_SLW / RAWES_ANN / RAWES_ANE / RAWES_AND.
+never encoded in a parameter. Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N);
+the slew rate and anchor position use RAWES_SLW (param) / RAWES_ANN / RAWES_ANE / RAWES_AND.
 
 Keep this file in sync with the constant definitions in rawes.lua.
 Used by simtests, SITL stack tests, and calibrate.py.
@@ -13,9 +14,9 @@ Usage
 -----
     from rawes_modes import MODE_STEADY, PUMP_REEL_OUT, NV_ANCHOR_N_KEY
 
-    gcs.set_param("SCR_USER6", MODE_STEADY)            # set mode (pumping runs in steady)
-    gcs.send_named_float("RAWES_SUB", PUMP_REEL_OUT)   # set substate
-    gcs.send_named_float(NV_ANCHOR_N_KEY, -pos0[0])    # anchor North (EKF frame)
+    gcs.set_param("RAWES_MODE", MODE_STEADY)            # set mode (pumping runs in steady)
+    gcs.send_named_float("RAWES_SUB", PUMP_REEL_OUT)    # set substate
+    gcs.send_named_float(NV_ANCHOR_N_KEY, -pos0[0])     # anchor North (EKF frame)
 """
 
 # ── Mode numbers (written directly to SCR_USER6) ──────────────────────────────

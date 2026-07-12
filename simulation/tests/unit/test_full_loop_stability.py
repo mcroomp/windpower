@@ -278,6 +278,7 @@ def _run_with_constant_tether_force(
         HeliCyclicController, AltitudeHoldController,
         compute_rate_cmd, compute_bz_tether,
         damp_bz_eq_lateral, position_feedback_bz_eq,
+        compute_crosswind_rate_cmd, apply_crosswind_rate_to_body_rates,
     )
     from dynamics   import RigidBodyDynamics
     from tests.unit._aero_probe import make_probe
@@ -366,14 +367,14 @@ def _run_with_constant_tether_force(
         # world-frame rotation about East (NED +Y), then map into body rate
         # components used by the inner roll/pitch controller.
         if crosswind_rate_kp > 0.0 or crosswind_rate_kd > 0.0:
-            crosswind_err = float(s["pos"][0] - pos_design[0])
-            crosswind_vel = float(s["vel"][0])
-            omega_east_cmd = float(np.clip(
-                -(crosswind_rate_kp * crosswind_err + crosswind_rate_kd * crosswind_vel),
-                -crosswind_rate_max,
-                crosswind_rate_max,
-            ))
-            omega_body_corr = s["R"].T @ np.array([0.0, omega_east_cmd, 0.0], dtype=float)
+            omega_east_cmd = compute_crosswind_rate_cmd(
+                s["pos"], s["vel"], pos_design,
+                kp=crosswind_rate_kp, kd=crosswind_rate_kd,
+                rate_max=crosswind_rate_max,
+            )
+            omega_body_corr = apply_crosswind_rate_to_body_rates(
+                omega_east_cmd, s["R"],
+            )
             rate = rate.copy()
             rate[0] += float(omega_body_corr[0])
             rate[1] += float(omega_body_corr[1])

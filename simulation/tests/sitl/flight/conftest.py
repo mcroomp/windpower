@@ -168,12 +168,11 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
         # millis() >= KINEMATIC_SETTLE_MS (62 s) to ensure EKF has converged.
         ctx.log.info("Setting mode param + slew/anchor NVFs for rawes.lua (landing mode) ...")
         ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
-        ctx.gcs.set_param("SCR_USER6", 4, timeout=5.0)    # RAWES_MODE = 4 (landing)
+        ctx.gcs.set_param("RAWES_MODE", 4, timeout=5.0)   # landing mode
         # Slew + anchor are NAMED_VALUE_FLOAT (formerly SCR_USER2/3/4/5).  Mode is
         # the only remaining SCR_USER parameter.  The anchor is at world origin;
         # here anchor North/East = 0 and anchor Down (EKF frame) = -pos0[2].
         # rawes.lua gates altitude-hold capture on all three anchor floats.
-        ctx.gcs.send_named_float("RAWES_SLW", 0.40)                     # body_z slew [rad/s]
         ctx.gcs.send_named_float("RAWES_ANN", 0.0)                      # anchor North [m]
         ctx.gcs.send_named_float("RAWES_ANE", 0.0)                      # anchor East  [m]
         ctx.gcs.send_named_float("RAWES_AND", -float(extra["pos0"][2])) # anchor Down  [m]
@@ -323,9 +322,8 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         # Lua emits no rate commands, so ArduPilot's rate PID has no setpoint to
         # wind up against while the body is kinematically locked.  The test must
         # promote to MODE_STEADY (1) immediately after kinematic_exit.
-        ctx.gcs.set_param("SCR_USER6", 3, timeout=5.0)    # RAWES_MODE = MODE_PASSIVE
+        ctx.gcs.set_param("RAWES_MODE", 3, timeout=5.0)   # MODE_PASSIVE
         # rawes.lua gates altitude-hold capture on all three anchor floats arriving.
-        ctx.gcs.send_named_float("RAWES_SLW", 0.40)                  # body_z slew [rad/s]
         ctx.gcs.send_named_float("RAWES_ANN", -float(_pos0[0]))      # anchor North (EKF) [m]
         ctx.gcs.send_named_float("RAWES_ANE", -float(_pos0[1]))      # anchor East  (EKF) [m]
         ctx.gcs.send_named_float("RAWES_AND", float(ctx.home_alt_m)) # anchor Down  (EKF) [m]

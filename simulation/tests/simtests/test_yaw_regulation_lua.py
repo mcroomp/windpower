@@ -8,17 +8,17 @@ mediator_torque.  No shortcuts: the motor speed responds via the ESC governor
 (~40 ms tau), and the hub yaw rate is derived from motor speed vs rotor speed
 through the 10:1 gear.
 
-SCR_USER1 calibration
+RAWES_YAW_SLP calibration
 ---------------------
-rawes.lua reads SCR_USER1 [RPM/µs] and converts it to the observer slope YFF_A.
-The test sets SCR_USER1 to the value derived from torque_model constants
+rawes.lua reads RAWES_YAW_SLP [RPM/µs] and converts it to the observer slope YFF_A.
+The test sets RAWES_YAW_SLP to the value derived from torque_model constants
 (the result a bench calibration of d(shaft_RPM)/d(PWM_µs) would produce for
 this motor + gear combination).  The test then verifies:
 
   1. YFF_A inside Lua equals the plant's static d(psi_dot)/d(throttle).
   2. The closed-loop observer drives |psi_dot| below MAX_DEG_S within SETTLE_S.
 
-This makes the test honest: if in real life SCR_USER1 is set from an actual
+This makes the test honest: if in real life RAWES_YAW_SLP is set from an actual
 bench measurement of the motor, the observer will work the same way.
 """
 from __future__ import annotations
@@ -51,10 +51,10 @@ _PLANT_SLOPE = _PARAMS.rpm_scale / _PARAMS.gear_ratio   # ≈ 57.8 rad/s per uni
 # SERVO9 span that rawes.lua uses for normalisation
 _SERVO9_SPAN_US = 1000.0   # SERVO9_MAX − SERVO9_MIN
 
-# Correct SCR_USER1 derived from plant constants [RPM/µs]:
-#   YFF_A_lua = SCR_USER1 × SERVO9_SPAN_US × 2π/60
-#   set YFF_A_lua = plant slope  →  SCR_USER1 = plant_slope / (span × 2π/60)
-_SCR_USER1 = _PLANT_SLOPE / (_SERVO9_SPAN_US * (2.0 * math.pi / 60.0))
+# Correct RAWES_YAW_SLP derived from plant constants [RPM/µs]:
+#   YFF_A_lua = RAWES_YAW_SLP × SERVO9_SPAN_US × 2π/60
+#   set YFF_A_lua = plant slope  →  RAWES_YAW_SLP = plant_slope / (span × 2π/60)
+_YAW_SLP = _PLANT_SLOPE / (_SERVO9_SPAN_US * (2.0 * math.pi / 60.0))
 
 # Equilibrium throttle (psi_dot = 0):
 #   0 = −omega_rotor + throttle × RPM_SCALE / GEAR_RATIO
@@ -81,9 +81,9 @@ _IC_COL   = -0.15     # rad
 def test_yaw_regulation_lua():
     """
     rawes.lua yaw trim observer converges psi_dot to ≤ MAX_DEG_S
-    when SCR_USER1 is set to the slope derived from the real plant.
+    when RAWES_YAW_SLP is set to the slope derived from the real plant.
     """
-    sim = RawesLua(mode=MODE_PASSIVE, SCR_USER1=_SCR_USER1)
+    sim = RawesLua(mode=MODE_PASSIVE, RAWES_YAW_SLP=_YAW_SLP)
     sim.armed   = True
     sim.healthy = True
 
@@ -96,10 +96,10 @@ def test_yaw_regulation_lua():
         [-cr * sp,  sr,  cr * cp ],
     ])
 
-    # Verify SCR_USER1 was applied: Lua YFF_A must equal the plant slope
+    # Verify RAWES_YAW_SLP was applied: Lua YFF_A must equal the plant slope
     yff_a_lua = float(sim.fns.YFF_A)
     assert abs(yff_a_lua - _PLANT_SLOPE) < 0.5, (
-        f"YFF_A mismatch after SCR_USER1 override: "
+        f"YFF_A mismatch after RAWES_YAW_SLP override: "
         f"Lua={yff_a_lua:.3f}  plant={_PLANT_SLOPE:.3f} rad/s/u"
     )
 
@@ -141,6 +141,6 @@ def test_yaw_regulation_lua():
     assert max_psi_dot_deg_s < MAX_DEG_S, (
         f"psi_dot did not converge after {SETTLE_S:.0f} s settle: "
         f"max={max_psi_dot_deg_s:.2f} deg/s  (limit {MAX_DEG_S:.1f} deg/s)\n"
-        f"Check SCR_USER1 calibration: set to {_SCR_USER1:.4f} RPM/µs "
+        f"Check RAWES_YAW_SLP calibration: set to {_YAW_SLP:.4f} RPM/µs "
         f"(derived from RPM_SCALE={_PARAMS.rpm_scale} / GEAR_RATIO={_PARAMS.gear_ratio:.3f})"
     )

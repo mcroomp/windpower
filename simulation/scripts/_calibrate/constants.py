@@ -131,7 +131,7 @@ _KEY_PARAM_NAMES = (
     "INITIAL_MODE",
     "H_TAIL_TYPE",
     "SCR_ENABLE",
-    "SCR_USER6",
+    "RAWES_MODE",
     "ARMING_CHECK",
     "BRD_SAFETY_DEFLT",
     "ACRO_TRAINER",
@@ -174,13 +174,13 @@ _PASSIVE_IC_COL_DEG = -8.6
 
 _RUN_MODES = {
     "none": {
-        "scr_user6":   0,
+        "rawes_mode":  0,
         "take_servo4": False,
         "gain_keys": {"trim": "H_YAW_TRIM"},
         "doc":        "Lua idle (mode 0), armed-but-quiet; only --gain trim=<value> (H_YAW_TRIM) changes the static yaw-motor throttle.",
     },
     "passive": {
-        "scr_user6":   3,
+        "rawes_mode":  3,
         "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
         "ic_seed":     True,
         "take_servo4": False,
@@ -194,19 +194,19 @@ _RUN_MODES = {
         "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_COL/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  IC via --trim col=<deg> --roll <deg> --pitch <deg>.",
     },
     "steady": {
-        "scr_user6":  1,
+        "rawes_mode":  1,
         "take_servo4": False,
         "gain_keys":  {},
         "doc":        "steady flight: altitude hold + VZ PI collective",
     },
     "pumping": {
-        "scr_user6":  1,
+        "rawes_mode":  1,
         "take_servo4": False,
         "gain_keys":  {},
         "doc":        "De Schutter pumping cycle (runs in steady mode; ground varies tension)",
     },
     "landing": {
-        "scr_user6":  4,
+        "rawes_mode":  4,
         "take_servo4": False,
         "gain_keys":  {},
         "doc":        "landing (reserved)",

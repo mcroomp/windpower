@@ -15,7 +15,7 @@ Inputs (write before tick):
   _mock.vel_ned        {x, y, z} m/s
   _mock.R              flat row-major 3x3, indices 1..9  (body_to_NED)
   _mock.accel          {x, y, z} m/s^2  body-frame specific force (gravity excluded)
-  _mock.params         {SCR_USER6, ...}  (mode only; slew/anchor via NAMED_VALUE_FLOAT)
+  _mock.params         {RAWES_MODE, RAWES_KP_EL, ...}  (script-generated params)
 
 Outputs (read after tick):
   _mock.ch_out[n]      RC channel n PWM override (nil if not set)
@@ -40,9 +40,21 @@ _mock = {
     -- R: flat row-major body_to_NED 3x3, 1-indexed.  Default = identity.
     R           = {1,0,0, 0,1,0, 0,0,1},
     params      = {
-        -- Mode is the only SCR_USER parameter rawes.lua reads; slew + anchor
-        -- are delivered via NAMED_VALUE_FLOAT (RAWES_SLW/ANN/ANE/AND).
-        SCR_USER6 = 0,     -- mode (0=disabled)
+        -- Script-generated RAWES_* parameters (mirrors rawes.lua param:add_param defaults).
+        -- Slew + anchor inputs are delivered via NAMED_VALUE_FLOAT.
+        RAWES_MODE    = 0,     -- flight mode (0=disabled)
+        RAWES_YAW_SLP = 0,     -- yaw motor slope override (0 = use bench default)
+        RAWES_KP_ALT  = 0.010, -- altitude P gain
+        RAWES_KI_ALT  = 0.001, -- altitude I gain
+        RAWES_KD_VZ   = 0.040, -- vertical-speed damping
+        RAWES_KP_EL   = 2.5,   -- in-plane (elevation) position rate-P gain
+        RAWES_KP_AZ   = 0.5,   -- crosswind (azimuth) position rate-P gain
+        RAWES_KD_EL   = 0.0,   -- in-plane position rate-D gain
+        RAWES_CWMAX   = 0.6,   -- position rate saturation
+        RAWES_SLW     = 0.40,  -- elevation/body_z slew rate
+        RAWES_TEL_HZ  = 2.0,   -- diagnostic NVF emission rate [Hz]
+        RAWES_YFF_MAX = 0.7,   -- yaw trim clamp upper bound
+        RAWES_YFF_TAU = 0.3,   -- yaw trim time constant
     },
     ch_out      = {},    -- [channel_n] = pwm
     srv_out     = {},    -- [func] = pwm
@@ -276,12 +288,31 @@ end
 
 param = {}
 
+-- Populated by param:add_table calls; maps table_key -> prefix string.
+_PARAM_PREFIX_MAP = {}
+
 function param:get(name)
     return _mock.params[name]
 end
 
 function param:set(name, value)
     _mock.params[name] = value
+    return true
+end
+
+-- Script-generated parameter registration (AP 4.7+).
+-- Registers a default into _mock.params only if not already set,
+-- so test code can pre-populate params before loading rawes.lua.
+function param:add_table(key, prefix, count)
+    _PARAM_PREFIX_MAP[key] = prefix
+    return true
+end
+
+function param:add_param(key, index, name, default)
+    local full_key = (_PARAM_PREFIX_MAP[key] or ("P" .. key .. "_")) .. name
+    if _mock.params[full_key] == nil then
+        _mock.params[full_key] = default
+    end
     return true
 end
 

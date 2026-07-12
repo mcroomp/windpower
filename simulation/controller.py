@@ -639,6 +639,85 @@ def damp_bz_eq_lateral(
     return bz_new / float(np.linalg.norm(bz_new))
 
 
+def compute_crosswind_rate_cmd(
+    pos:               np.ndarray,
+    vel:               np.ndarray,
+    target_pos:        np.ndarray,
+    kp:                float,
+    kd:                float,
+    rate_max:          float = math.pi,
+) -> float:
+    """Compute world-frame East rotation rate from crosswind (North) error.
+
+    A simple rate-based damper for lateral/crosswind excursion without
+    tether-axis feedback.  Commands a rotation about the East (NED +Y)
+    axis proportional to North position error and North velocity.
+
+    Physics: A world-frame rotation about East is like a swing; tilting
+    the body ``toward`` the North error produces a corrective Northward
+    force from gravity (like pendulum restoring force).  The rate limit
+    prevents aggressive saturated corrections.
+
+    Parameters
+    ----------
+    pos        : hub NED position [m]
+    vel        : hub velocity [m/s]
+    target_pos : desired hub position [m]
+    kp         : position gain [rad/s per m]
+    kd         : velocity gain [rad/s per (m/s)]
+    rate_max   : saturation limit on returned rate [rad/s]
+
+    Returns
+    -------
+    float : world-frame East (NED +Y) rotation rate command [rad/s].
+            Positive = body tilts North; negative = body tilts South.
+    """
+    pos        = np.asarray(pos,        dtype=float)
+    vel        = np.asarray(vel,        dtype=float)
+    target_pos = np.asarray(target_pos, dtype=float)
+
+    crosswind_err = float(pos[0] - target_pos[0])  # North error (NED +X)
+    crosswind_vel = float(vel[0])                  # North velocity (NED +X)
+
+    omega_east_cmd = float(np.clip(
+        -(kp * crosswind_err + kd * crosswind_vel),
+        -rate_max,
+        rate_max,
+    ))
+    return omega_east_cmd
+
+
+def apply_crosswind_rate_to_body_rates(
+    omega_east_world: float,
+    R_body_to_world:  np.ndarray,
+) -> np.ndarray:
+    """Convert world-frame East rotation rate to body-frame roll/pitch rates.
+
+    The crosswind rate loop commands a rotation about East (NED +Y).
+    This rotation has roll and pitch components when expressed in the body
+    frame, which are added to the rate command sent to the acro controller.
+
+    Parameters
+    ----------
+    omega_east_world : world-frame East (NED +Y) rotation rate [rad/s]
+    R_body_to_world  : rotation matrix; columns are body axes in world frame
+
+    Returns
+    -------
+    np.ndarray (3,) : (roll_rate, pitch_rate, yaw_rate) correction [rad/s] to
+                      be added to the main rate command.  Only roll and pitch
+                      are typically nonzero; yaw is zero for a pure East
+                      rotation.
+    """
+    R = np.asarray(R_body_to_world, dtype=float)
+    # East in NED world frame
+    east_world = np.array([0.0, 1.0, 0.0])
+    omega_vec_world = omega_east_world * east_world
+    # Map to body frame
+    omega_body_corr = R.T @ omega_vec_world
+    return np.asarray(omega_body_corr, dtype=float)
+
+
 # Time constant [s] for the plane-keeping azimuth low-pass.  The body-z azimuth
 # reference is slowly slewed toward the kite's instantaneous position azimuth so
 # fast lateral excursions (e.g. low-tension reel-in) do not chase their own

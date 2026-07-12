@@ -56,16 +56,18 @@ _rawes_update = (function()
 end)()
 """
 
-# ── SCR_USER param shorthand map ──────────────────────────────────────────────
-# Mode is the ONLY SCR_USER parameter; every other tunable/anchor input is
-# delivered to rawes.lua via NAMED_VALUE_FLOAT (use sim.send_named_float):
-#   slew      -> RAWES_SLW   (body_z slew rate rad/s)
-#   anchor_n  -> RAWES_ANN   (anchor North m)
-#   anchor_e  -> RAWES_ANE   (anchor East  m)
-#   anchor_d  -> RAWES_AND   (anchor Down  m)
+# ── Script-generated param shorthand map ──────────────────────────────────────
+# All RAWES_* params are registered by rawes.lua via param:add_table/add_param.
+# The harness exposes shorthand aliases for convenience.
 
 _PARAM_ALIAS = {
-    "mode":     "SCR_USER6",   # flight mode (0-4) — the only SCR_USER param
+    "mode":     "RAWES_MODE",    # flight mode (0=none,1=steady,3=passive,4=landing)
+    "kp_alt":   "RAWES_KP_ALT",
+    "ki_alt":   "RAWES_KI_ALT",
+    "kd_vz":    "RAWES_KD_VZ",
+    "kp_el":    "RAWES_KP_EL",
+    "kp_az":    "RAWES_KP_AZ",
+    "yaw_slp":  "RAWES_YAW_SLP",
 }
 
 
@@ -101,7 +103,7 @@ class RawesLua:
     Presents the same interface ArduPilot exposes to the script:
       * AHRS sensor state (attitude, gyro, GPS position, velocity)
       * Vehicle mode and arming state
-      * SCR_USER parameters
+      * RAWES_* script-generated parameters (registered by rawes.lua at load)
       * RC channel and servo outputs from the script
       * GCS text messages logged by the script
 
@@ -112,12 +114,12 @@ class RawesLua:
     Parameters
     ----------
     **params : float
-        Initial parameter values.  Mode is the only SCR_USER parameter:
-            mode      -> SCR_USER6   (flight mode, default 0)
-        Full ArduPilot names (e.g. "SCR_USER6") are also accepted.
-        Slew + anchor are delivered via NAMED_VALUE_FLOAT at runtime, not as
-        params -- use sim.send_named_float("RAWES_SLW"/"RAWES_ANN"/"RAWES_ANE"/
-        "RAWES_AND", value).
+        Initial parameter values.  Use shorthand aliases or full RAWES_* names:
+            mode      -> RAWES_MODE   (flight mode, default 0)
+            kp_el     -> RAWES_KP_EL  (elevation crosswind gain)
+            kp_az     -> RAWES_KP_AZ  (azimuth crosswind gain)
+            ...etc.   Full names (e.g. "RAWES_KP_ALT") are also accepted.
+        Anchor/slew use sim.send_named_float ("RAWES_SLW"/"RAWES_ANN"/etc.).
     """
 
     # Base tick rate: rawes.lua BASE_PERIOD_MS = 10 ms (100 Hz)

@@ -2,7 +2,7 @@
 rawes.lua -- Unified RAWES flight controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
-Mode is selected at runtime via SCR_USER6:
+Mode is selected at runtime via RAWES_MODE (script-generated parameter):
     0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
     1  steady      -- primary guided flight path (set_target_rate_and_throttle)
     2  reserved    -- unused
@@ -21,28 +21,34 @@ Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   attitude controller's set_throttle_out path.
   Before GPS fuses: command current body attitude (zero corrective torque).
 
-Ground planner signals via NAMED_VALUE_FLOAT:
+Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_SUB: substate 0=hold 1=reel_out 2=transition 3=reel_in 4=transition_back
              (set by the ground pumping schedule; the vehicle stays in MODE_STEADY)
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
-    RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
-    RAWES_ARM: optional disarm timer (value = ms until forced disarm)
-    RAWES_SLW: elevation/body_z slew rate limit [rad/s]              default 0.40
-    RAWES_ANN: anchor North from EKF origin [m]                      default 0.0
-    RAWES_ANE: anchor East  from EKF origin [m]                      default 0.0
-    RAWES_AND: anchor Down  from EKF origin [m]                      default 0.0
-               The anchor is safety-critical: MODE_STEADY does NOT initialise
-               altitude hold (and therefore commands no cyclic/collective) until
-               all three anchor floats (ANN/ANE/AND) have been received at least
-               once.  Until then run_flight only holds the current attitude.
+  RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
+  RAWES_ARM: optional disarm timer (value = ms until forced disarm)
+  RAWES_ANN: anchor North from EKF origin [m]                      default 0.0
+  RAWES_ANE: anchor East  from EKF origin [m]                      default 0.0
+  RAWES_AND: anchor Down  from EKF origin [m]                      default 0.0
+             The anchor is safety-critical: MODE_STEADY does NOT initialise
+             altitude hold (and therefore commands no cyclic/collective) until
+             all three anchor floats (ANN/ANE/AND) have been received at least
+             once.  Until then run_flight only holds the current attitude.
 
-Parameters:
-  SCR_USER6   RAWES_MODE      Mode selector (0,1,3,4)                 default 0
-  SCR_USER1   YAW_RPM_PER_US  Yaw motor slope [RPM/µs] (0=bench default 0.504)
-    SCR_USER2   KP_ALT          Altitude-P gain                          default 0.010
-    SCR_USER3   KI_ALT          Altitude-I gain                          default 0.001
-    SCR_USER4   KD_VZ           Vertical-speed damping gain              default 0.040
-    SCR_USER5   RATE_KP_OUTER   body_z outer-loop gain                   default 2.5
+Parameters (script-generated; visible in GCS as RAWES_* params):
+  RAWES_MODE    Mode selector (0=none,1=steady,3=passive,4=landing)    default 0
+  RAWES_YAW_SLP Yaw motor slope [RPM/µs] (0=bench default 0.504)       default 0
+  RAWES_KP_ALT  Altitude-P gain                                         default 0.010
+  RAWES_KI_ALT  Altitude-I gain                                         default 0.001
+  RAWES_KD_VZ   Vertical-speed damping gain                             default 0.040
+  RAWES_KP_EL   In-plane (elevation) position rate-P gain [rad/s per m]  default 2.5
+  RAWES_KP_AZ   Crosswind (azimuth) position rate-P gain  [rad/s per m]  default 0.5
+  RAWES_KD_EL   In-plane position rate-D gain              [rad/s/(m/s)]  default 0.0
+  RAWES_CWMAX   Position rate saturation                   [rad/s]        default 0.6
+  RAWES_SLW     Elevation/body_z slew rate limit           [rad/s]        default 0.40
+  RAWES_TEL_HZ  Diagnostic NVF telemetry emission rate     [Hz]           default 2.0
+  RAWES_YFF_MAX Yaw trim clamp upper bound                 [throttle]     default 0.7
+  RAWES_YFF_TAU Yaw trim low-pass time constant            [s]            default 0.3
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -123,7 +129,10 @@ KD_VZ  = 0.040
 -- KP/KI altitude terms still hold altitude, only the derivative kick is gated.
 VZ_GATE_RATE_RADS = 1.0          -- |gyro| at which the vz-damping fully fades
 VZ_GATE_MIN       = 0.0          -- floor on the gate factor
-RATE_KP_OUTER        = 2.5
+KP_EL              = 2.5          -- in-plane (elevation) position rate-P [rad/s per m]
+KP_AZ              = 0.5          -- crosswind (azimuth) position rate-P [rad/s per m]
+KD_EL              = 0.0          -- in-plane position rate-D [rad/s per (m/s)]
+CWMAX              = 0.6          -- position rate saturation [rad/s]
 RATE_ACCEL_MAX_RADSS = 4.0
 
 -- Plane-keeping azimuth low-pass time constant [s].  The body-z azimuth
@@ -174,9 +183,8 @@ _tension_n      = 200.0   -- target/feed-forward tether tension [N]; updated fro
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
 _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 
--- Anchor/slew are delivered via NAMED_VALUE_FLOAT.
--- SCR_USER2..5 remain mapped to steady-flight gains (see header mapping).
-_bz_slew         = 0.40    -- RAWES_SLW: elevation/body_z slew rate [rad/s]
+-- Anchor delivered via NAMED_VALUE_FLOAT (must arrive before altitude-hold activates).
+_bz_slew         = 0.40    -- RAWES_SLW param: elevation/body_z slew rate [rad/s]
 _anchor_n        = 0.0     -- RAWES_ANN: anchor North from EKF origin [m]
 _anchor_e        = 0.0     -- RAWES_ANE: anchor East  from EKF origin [m]
 _anchor_d        = 0.0     -- RAWES_AND: anchor Down  from EKF origin [m]
@@ -184,6 +192,12 @@ _got_anchor_n    = false   -- true once RAWES_ANN has been received at least onc
 _got_anchor_e    = false   -- true once RAWES_ANE has been received at least once
 _got_anchor_d    = false   -- true once RAWES_AND has been received at least once
 _anchor_received = false   -- true once all three anchor floats have arrived
+
+-- Crosswind rate damping (all initialized from RAWES_* params at load time)
+_cw_rate_kp      = 0.0     -- RAWES_KP_EL: in-plane (elevation) position rate-P [rad/s per m]
+_cw_rate_kp_az   = 0.0     -- RAWES_KP_AZ: crosswind (azimuth) position rate-P  [rad/s per m]
+_cw_rate_kd      = 0.0     -- RAWES_KD_EL: in-plane position rate-D [rad/s per (m/s)]
+_cw_rate_max     = 0.6     -- RAWES_CWMAX: position rate saturation [rad/s]
 
 -- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
 -- to pin ch3 at the IC value so omega_spin doesn't droop while the body
@@ -218,21 +232,17 @@ _guided_cmd_last_log_ms = -2000
 -- Plant model: psi_dot = YFF_A * (u - u_eq)
 --   YFF_A = d(psi_dot)/d(u)  bench-calibrated from PWM->RPM curve (2026-07-07):
 --     slope 0.504 RPM/us, SERVO9 span 1000 us  =>  YFF_A ≈ 52.8 rad/s per unit
-local YFF_MAX                = 0.7     -- trim clamp upper bound [throttle fraction]
-local YFF_TRIM_TAU           = 0.3     -- trim low-pass time constant [s]
--- SCR_USER1: yaw-motor slope override [RPM/µs].  0 → use bench default below.
--- Set to the measured d(shaft_RPM)/d(PWM_µs) for the installed motor + gear.
--- The simtest (test_yaw_regulation_lua.py) derives this from torque_model to
--- validate the closed-loop observer with a physically-honest plant.
-local YAW_RPM_PER_US_DEFAULT = 0.504   -- bench-measured default
-local YAW_RPM_PER_US         = YAW_RPM_PER_US_DEFAULT
-local SERVO9_SPAN_US         = 1000.0  -- SERVO9_MAX - SERVO9_MIN
-local YFF_A                  = YAW_RPM_PER_US * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)
+local YFF_MAX  = 0.7     -- trim clamp upper bound [throttle fraction] (RAWES_YFF_MAX)
+local YFF_TAU  = 0.3     -- trim low-pass time constant [s]            (RAWES_YFF_TAU)
+-- RAWES_YAW_SLP: yaw-motor slope [RPM/µs].  0 → use bench default below.
+-- YFF_A = slope × SERVO9_SPAN_US × 2π/60 = d(psi_dot)/d(throttle) [rad/s per unit]
+local SERVO9_SPAN_US   = 1000.0  -- SERVO9_MAX - SERVO9_MIN
+local YFF_A            = 0.504 * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)  -- default slope 0.504 RPM/µs
 local YAW_MOTOR_FUNC   = 36      -- ArduPilot servo function for Motor4 (SERVO9)
-local YFF_NVF_HZ       = 2.0     -- telemetry stream rate [Hz]
+local TEL_HZ           = 2.0     -- diagnostic NVF emission rate [Hz]  (RAWES_TEL_HZ)
 
-local _yaw_ff_trim     = 0.0     -- current H_YAW_TRIM value [0, YFF_MAX]
-local _yaw_nvf_last_ms = nil     -- millis() at last YFF_* NVF emission
+local _yaw_ff_trim  = 0.0     -- current H_YAW_TRIM value [0, YFF_MAX]
+local _nvf_last_ms  = nil     -- shared timer for all outer-rate NVF diagnostic emissions
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 -- Convert a millis() result to seconds (float).  On real ArduPilot millis()
 -- returns a uint32_t userdata whose __mul/__div cannot coerce a fractional
@@ -377,23 +387,64 @@ local function p(name, default)
     return v
 end
 
--- Apply SCR_USER1 slope override now that param:get is available.
--- SCR_USER1 > 0 → use as d(shaft_RPM)/d(PWM_µs) in place of the bench default.
+-- Rate gate for diagnostic NVF telemetry (RAWES_TEL_HZ).  Returns true and
+-- advances the timer when it is time to emit; returns false otherwise.
+-- All diagnostic NVFs (YFF_T/U/GZ, etc.) share this single timer so they
+-- are always emitted together at a consistent rate.
+local function _nvf_due(now)
+    if _nvf_last_ms == nil or (now - _nvf_last_ms) >= (1000.0 / TEL_HZ) then
+        _nvf_last_ms = now
+        return true
+    end
+    return false
+end
+
+-- ── Script-generated parameters ─────────────────────────────────────────────
+-- These are registered into ArduPilot's parameter system at script load time.
+-- They appear in GCS as RAWES_* params, can be set in parm files, and are
+-- persistent across reboots.  Table key 77 is reserved for this script.
+local _PARAM_KEY    = 77
+local _PARAM_PREFIX = "RAWES_"
+assert(param:add_table(_PARAM_KEY, _PARAM_PREFIX, 13),
+       "rawes.lua: failed to register param table (key conflict?)")
+assert(param:add_param(_PARAM_KEY, 1, "MODE",    0),      "RAWES_MODE")
+assert(param:add_param(_PARAM_KEY, 2, "YAW_SLP", 0),      "RAWES_YAW_SLP")
+assert(param:add_param(_PARAM_KEY, 3, "KP_ALT",  0.010),  "RAWES_KP_ALT")
+assert(param:add_param(_PARAM_KEY, 4, "KI_ALT",  0.001),  "RAWES_KI_ALT")
+assert(param:add_param(_PARAM_KEY, 5, "KD_VZ",   0.040),  "RAWES_KD_VZ")
+assert(param:add_param(_PARAM_KEY, 6, "KP_EL",   2.5),    "RAWES_KP_EL")
+assert(param:add_param(_PARAM_KEY, 7, "KP_AZ",   0.5),    "RAWES_KP_AZ")
+assert(param:add_param(_PARAM_KEY, 8, "KD_EL",   0.0),    "RAWES_KD_EL")
+assert(param:add_param(_PARAM_KEY, 9, "CWMAX",   0.6),    "RAWES_CWMAX")
+assert(param:add_param(_PARAM_KEY, 10, "SLW",    0.40),   "RAWES_SLW")
+assert(param:add_param(_PARAM_KEY, 11, "TEL_HZ", 2.0),    "RAWES_TEL_HZ")
+assert(param:add_param(_PARAM_KEY, 12, "YFF_MAX", 0.7),   "RAWES_YFF_MAX")
+assert(param:add_param(_PARAM_KEY, 13, "YFF_TAU", 0.3),   "RAWES_YFF_TAU")
+
+-- Apply RAWES_YAW_SLP slope override (0 → use bench default).
 do
-    local _s = p("SCR_USER1", 0)
+    local _s = p("RAWES_YAW_SLP", 0)
     if _s ~= nil and _s > 0 then
-        YAW_RPM_PER_US = _s
-        YFF_A          = YAW_RPM_PER_US * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)
+        YFF_A = _s * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)
     end
 end
 
--- Apply steady/pumping gain overrides from SCR_USER2..5 now that param:get is
--- available via helper p().
+-- Apply steady/pumping gain overrides from script-generated RAWES_* params.
 do
-    KP_ALT = p("SCR_USER2", KP_ALT)
-    KI_ALT = p("SCR_USER3", KI_ALT)
-    KD_VZ = p("SCR_USER4", KD_VZ)
-    RATE_KP_OUTER = p("SCR_USER5", RATE_KP_OUTER)
+    KP_ALT        = p("RAWES_KP_ALT", KP_ALT)
+    KI_ALT        = p("RAWES_KI_ALT", KI_ALT)
+    KD_VZ         = p("RAWES_KD_VZ",  KD_VZ)
+    KP_EL         = p("RAWES_KP_EL",  KP_EL)
+
+    -- Initialize all position rate control from params
+    _cw_rate_kp    = KP_EL
+    _cw_rate_kp_az = p("RAWES_KP_AZ",  KP_AZ)
+    _cw_rate_kd    = p("RAWES_KD_EL",  KD_EL)
+    _cw_rate_max   = p("RAWES_CWMAX",  CWMAX)
+    _bz_slew       = p("RAWES_SLW",    _bz_slew)
+    TEL_HZ         = p("RAWES_TEL_HZ", TEL_HZ)
+    YFF_MAX        = p("RAWES_YFF_MAX", YFF_MAX)
+    YFF_TAU        = p("RAWES_YFF_TAU", YFF_TAU)
 end
 
 local function anchor_ned()
@@ -496,7 +547,7 @@ local function _on_mode_enter(mode)
         _passive_status_ms    = 0
         _passive_hold_yaw_rad = nil
         _yaw_ff_trim          = 0.0
-        _yaw_nvf_last_ms      = nil
+        _nvf_last_ms          = nil
     end
 end
 
@@ -701,10 +752,52 @@ local function run_flight()
 
     local col_thrust = col_rad_to_thrust(_last_col_rad)
 
+    -- Crosswind rate damping: compute a world-frame East rotation rate command
+    -- from North position/velocity error, then map to body-frame roll/pitch rates.
+    local rate_roll_cw = 0.0
+    local rate_pitch_cw = 0.0
+    if (_cw_rate_kp > 0.0 or _cw_rate_kd > 0.0) and pos_ned and vel_ned then
+        local pos_north = rel:x()
+        local pos_east  = rel:y()
+        local vel_north = vel_ned:x()
+        local vel_east  = vel_ned:y()
+
+        -- Compute desired world-frame rotation rate about East (NED +Y).
+        -- Positive omega_east is right-hand rule: counterclockwise when viewed from East.
+        -- pos_north_error is a scalar: signed position error along North axis.
+        local pos_north_error = -pos_north    -- pointing toward design position (negative north)
+        local pos_north_rate_request = _cw_rate_kp * pos_north_error
+        local vel_north_damping = _cw_rate_kd * vel_north
+        local omega_east = pos_north_rate_request + vel_north_damping
+
+        -- Apply saturation
+        if omega_east >  _cw_rate_max then omega_east =  _cw_rate_max end
+        if omega_east < -_cw_rate_max then omega_east = -_cw_rate_max end
+
+        -- Map world-East rotation to body-frame roll/pitch rates.
+        -- For a body aligned with NED (body_x=North, body_y=East, body_z=Down),
+        -- a rotation about world-East (+Y) produces:
+        --   body_roll_rate = 0 (rotation is about +Y, which is body +Y)
+        --   body_pitch_rate = omega_east (right-hand rule; positive pitch-rate = nose-up)
+        -- However, the actual body frame may be tilted, so we use AHRS-based rotation.
+        local yaw_b = ahrs:get_yaw_rad()
+        if yaw_b then
+            -- In the yaw-rotated frame, East remains East.
+            -- Rotation about world-East induces roll and pitch rates proportional to
+            -- the tilt angles (through the rotation matrix).  For small tilts from NED:
+            -- body-frame roll_rate ≈ omega_east * sin(yaw)
+            -- body-frame pitch_rate ≈ omega_east * cos(yaw)
+            local sin_yaw = math.sin(yaw_b)
+            local cos_yaw = math.cos(yaw_b)
+            rate_roll_cw = omega_east * sin_yaw
+            rate_pitch_cw = omega_east * cos_yaw
+        end
+    end
+
     -- GUIDED angle path: absolute roll/pitch + held yaw, zero feedforward rate,
     -- collective as direct throttle (set_throttle_out; no ch3 RC override).
     send_guided_angle_rate_throttle(
-        roll_deg, pitch_deg, math.deg(yaw_now), 0.0, 0.0, 0.0, col_thrust,
+        roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, col_thrust,
         "steady_attitude")
 
     -- Diagnostic log (every ~5 s at 50 Hz)
@@ -784,7 +877,7 @@ local function yaw_trim_step(dt, u, psi_dot)
     local trim_target = u - psi_dot / YFF_A
     if trim_target < 0.0 then trim_target = 0.0
     elseif trim_target > YFF_MAX then trim_target = YFF_MAX end
-    local alpha = dt / (YFF_TRIM_TAU + dt)
+    local alpha = dt / (YFF_TAU + dt)
     _yaw_ff_trim = _yaw_ff_trim + alpha * (trim_target - _yaw_ff_trim)
     if _yaw_ff_trim < 0.0 then _yaw_ff_trim = 0.0
     elseif _yaw_ff_trim > YFF_MAX then _yaw_ff_trim = YFF_MAX end
@@ -792,7 +885,7 @@ local function yaw_trim_step(dt, u, psi_dot)
 end
 
 local function run_yaw_trim(now)
-    if not (_ic_seeded and arming:is_armed()) then return end
+    if not arming:is_armed() then return end
     local gyro = ahrs:get_gyro()
     if not gyro then return end
     -- Read the total applied throttle from the SERVO9 output (H_YAW_TRIM +
@@ -808,8 +901,7 @@ local function run_yaw_trim(now)
     local psi_dot = gyro:z()
     yaw_trim_step(BASE_PERIOD_MS * 0.001, u, psi_dot)
     param:set("H_YAW_TRIM", _yaw_ff_trim)
-    if _yaw_nvf_last_ms == nil or (now - _yaw_nvf_last_ms) >= (1000.0 / YFF_NVF_HZ) then
-        _yaw_nvf_last_ms = now
+    if _nvf_due(now) then
         gcs:send_named_float("YFF_T",  _yaw_ff_trim)
         gcs:send_named_float("YFF_U",  u)
         gcs:send_named_float("YFF_GZ", psi_dot)
@@ -894,18 +986,14 @@ local function update()
     end
 
     -- Decode mode and substate
-    local mode = math.floor(p("SCR_USER6", 0) + 0.5)
+    local mode = math.floor(p("RAWES_MODE", 0) + 0.5)
     local sub  = math.floor((_nv_floats["RAWES_SUB"] or 0) + 0.5)
     local now  = millis()
 
     -- Update altitude, tension, cyclic and collective targets from NV messages
     if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
     if _nv_floats["RAWES_TEN"] then _tension_n  = _nv_floats["RAWES_TEN"] end
-    -- Elevation/body_z slew rate + anchor position (formerly SCR_USER2/3/4/5).
-    -- The anchor is safety-critical: run_flight does not initialise altitude
-    -- hold until all three anchor floats have been received (see the capture
-    -- gate below), so a stale/zero anchor never drives a cyclic command.
-    if _nv_floats["RAWES_SLW"] then _bz_slew = _nv_floats["RAWES_SLW"] end
+    -- Anchor position (safety-critical; gates altitude-hold capture).
     if _nv_floats["RAWES_ANN"] then _anchor_n = _nv_floats["RAWES_ANN"]; _got_anchor_n = true end
     if _nv_floats["RAWES_ANE"] then _anchor_e = _nv_floats["RAWES_ANE"]; _got_anchor_e = true end
     if _nv_floats["RAWES_AND"] then _anchor_d = _nv_floats["RAWES_AND"]; _got_anchor_d = true end
@@ -914,6 +1002,7 @@ local function update()
         gcs:send_text(6, string.format(
             "RAWES anchor set: N=%.1f E=%.1f D=%.1f", _anchor_n, _anchor_e, _anchor_d))
     end
+    -- Crosswind rate damping gains now come from RAWES_* params; no NVF override needed.
     -- IC seed handling: do not set active IC commands until all three
     -- (collective, roll, pitch) have been observed at least once.
     if _nv_floats["RAWES_COL"] then _ic_pending_col = _nv_floats["RAWES_COL"] end
@@ -1005,9 +1094,9 @@ end
 
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
-_mode_init  = math.floor(p("SCR_USER6", 0) + 0.5)
-_mode_names = {[0]="none", [1]="steady", [3]="passive", [4]="landing"}
-_mode_str   = _mode_names[_mode_init] or "unknown"
+local _mode_init  = math.floor(p("RAWES_MODE", 0) + 0.5)
+local _mode_names = {[0]="none", [1]="steady", [3]="passive", [4]="landing"}
+local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
     "RAWES: loaded  mode=%d (%s)  (slew+anchor via NAMED_VALUE_FLOAT)",

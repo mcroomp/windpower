@@ -102,9 +102,9 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
     gcs.send_named_float("RAWES_TEN", ten_seed)
     gcs.send_named_float("RAWES_RIC", ic_roll_rad)
     gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
-    ok = gcs.set_param("SCR_USER6", 3, timeout=5.0)
+    ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
-        "Release seeds: RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, IC r/p=(%.2f, %.2f)deg, SCR_USER6=3 ACK=%s",
+        "Release seeds: RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
         coll_seed,
         coll_src,
         ten_seed,

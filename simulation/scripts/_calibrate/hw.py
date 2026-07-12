@@ -258,7 +258,7 @@ def _print_status(session: RawesGCS) -> None:
         if val is None:
             print(f"  {name:<22} NOT FOUND")
             continue
-        if name == "SCR_USER6":
+        if name == "RAWES_MODE":
             lua_name = _LUA_MODES.get(int(val), f"mode_{int(val)}")
             print(f"  {name:<22} {val:<8.4g}  {lua_name}")
         elif expected is not None and abs(val - float(expected)) > 1e-4:
