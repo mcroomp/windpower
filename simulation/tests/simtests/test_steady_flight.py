@@ -36,6 +36,7 @@ import mediator as _mediator_module
 from simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner import TensionCommand
+from param_defaults import thrust_to_coll_rad
 from simtest_ic import load_ic
 from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
@@ -88,12 +89,12 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
         # All AP gains/limits come from the merged central .parm chain.
     )
-    runner._acro._servo.reset(ic.coll_eq_rad)
+    runner._acro._servo.reset(thrust_to_coll_rad(ic.eq_thrust))
     ap = MockArdupilot.for_pumping(
         ic_pos=ic.pos,
         mass_kg=MASS,
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=ic.coll_eq_rad,
+        warm_thrust=ic.eq_thrust,
         tension_ic=tension_out,
         wind=WIND,
         dt=DT,
@@ -151,7 +152,7 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
 
     ap.write_telemetry(log.log_dir / "telemetry.csv")
     return {
-        "coll_deg":      math.degrees(ic.coll_eq_rad),
+        "coll_deg":      math.degrees(thrust_to_coll_rad(ic.eq_thrust)),
         "omega_spin_eq": runner.omega_spin,
         "pos0":          ic.pos,
         "vel0":          ic.vel,

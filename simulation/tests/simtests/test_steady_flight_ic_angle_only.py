@@ -43,6 +43,7 @@ from arduloop import (
 from frames import build_gps_yaw_frame
 from telemetry_csv import TelRow, write_csv
 from simtest_ic import load_ic
+from param_defaults import thrust_to_coll_rad
 from simtest_runner import PhysicsRunner
 from tests.simtests._rotor_helpers import load_default_rotor
 
@@ -66,15 +67,15 @@ def _run_angle_ic_only(steps: int = 4000):
         vel=_IC.vel,
         R0=R0_gps,
         rest_length=_IC.rest_length,
-        coll_eq_rad=_IC.coll_eq_rad,
+        eq_thrust=_IC.eq_thrust,
         omega_spin=_IC.omega_spin,
         trim_tilt_lon=float(getattr(_IC, "trim_tilt_lon", 0.0)),
         trim_tilt_lat=float(getattr(_IC, "trim_tilt_lat", 0.0)),
     )
     runner = PhysicsRunner(_ROTOR, ic_run, WIND, col_min_rad=-0.28, col_max_rad=0.10)
 
-    # Force cyclic to 0,0 at t=0 to test recovery toward IC attitude command.
-    runner._acro._servo.reset(_IC.coll_eq_rad, tilt_lon=0.0, tilt_lat=0.0)
+    from param_defaults import thrust_to_coll_rad as _t2c
+    runner._acro._servo.reset(_t2c(_IC.eq_thrust), tilt_lon=0.0, tilt_lat=0.0)
 
     rp = make_roll_pitch_params()
     yaw = make_yaw_params()
@@ -89,7 +90,9 @@ def _run_angle_ic_only(steps: int = 4000):
     pitch_ic = float(euler_ic[1])
     yaw_ic = float(euler_ic[2])
 
-    col_norm = (_IC.coll_eq_rad - (-0.28)) / (0.10 - (-0.28)) * 2.0 - 1.0
+    from param_defaults import load_collective_phys_range as _lr
+    col_min, col_max = _lr()
+    col_norm = (_t2c(_IC.eq_thrust) - col_min) / (col_max - col_min) * 2.0 - 1.0
 
     pos_hist = np.zeros((steps, 3))
     ten_hist = np.zeros(steps)
@@ -138,7 +141,7 @@ def _run_angle_ic_only(steps: int = 4000):
                 heli_out=heli_out,
             )
         )
-        sr = runner.step_guided(DT, _IC.coll_eq_rad, heli_out, rest_length=float(_IC.rest_length))
+        sr = runner.step_guided(DT, thrust_to_coll_rad(_IC.eq_thrust), heli_out, rest_length=float(_IC.rest_length))
 
         # Extract guided controller state for telemetry
         tgt_euler = guided.attitude_target_euler_deg
@@ -152,7 +155,7 @@ def _run_angle_ic_only(steps: int = 4000):
             TelRow.from_physics(
                 runner,
                 sr,
-                _IC.coll_eq_rad,
+                thrust_to_coll_rad(_IC.eq_thrust),
                 WIND,
                 body_z_eq=np.asarray(ic_run.R0[:, 2], dtype=float),
                 phase="steady",

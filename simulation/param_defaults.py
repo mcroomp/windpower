@@ -217,6 +217,45 @@ def make_yaw_params_from_file():
     return _make_axis_params_from_file("YAW")
 
 
+def load_collective_phys_range() -> tuple[float, float]:
+    """Return (col_at_thrust_0, col_at_thrust_1) in radians.
+
+    Derives the collective blade-pitch angle at thrust=0 and thrust=1 by
+    combining the physical calibration from the trajectory config with the
+    ArduPilot H_COL_MIN / H_COL_MAX servo limits.  The result is the single
+    source of truth for the thrust→collective_rad mapping used by the Python
+    physics runner.
+
+    With the standard parm values H_COL_MIN=1000, H_COL_MAX=2000 (full servo
+    span), col_at_thrust_0 = col_min_rad and col_at_thrust_1 = col_max_rad.
+    """
+    import config as mcfg
+    cfg = mcfg.defaults()
+    traj = cfg["trajectory"]["deschutter"]
+    col_min_rad = float(traj["col_min_rad"])
+    col_max_rad = float(traj["col_max_rad"])
+    params = load_ap_params()
+    h_col_min_us = params.get("H_COL_MIN", 1000.0)
+    h_col_max_us = params.get("H_COL_MAX", 2000.0)
+    h_col_min_norm = (h_col_min_us - 1000.0) / 1000.0
+    h_col_max_norm = (h_col_max_us - 1000.0) / 1000.0
+    span = col_max_rad - col_min_rad
+    return (
+        col_min_rad + h_col_min_norm * span,
+        col_min_rad + h_col_max_norm * span,
+    )
+
+
+def thrust_to_coll_rad(thrust: float) -> float:
+    col_min, col_max = load_collective_phys_range()
+    return col_min + float(thrust) * (col_max - col_min)
+
+
+def thrust_to_coll_rad(thrust: float) -> float:
+    col_min, col_max = load_collective_phys_range()
+    return col_min + float(thrust) * (col_max - col_min)
+
+
 def load_attitude_params() -> dict[str, float]:
     """Load outer-loop/swash heli params required by arduloop."""
     p = load_ap_params()

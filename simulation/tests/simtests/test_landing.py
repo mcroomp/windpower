@@ -94,7 +94,7 @@ def _run_landing(log) -> "tuple[dict, object]":
     ap = MockArdupilot.for_landing(
         ic_body_z       = _IC.R0[:, 2],
         slew_rate_rad_s = BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad   = _IC.coll_eq_rad,
+        warm_thrust     = _IC.eq_thrust,
         kp_outer        = 2.5,
         wind            = WIND,
         dt              = DT,

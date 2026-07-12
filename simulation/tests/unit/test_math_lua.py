@@ -82,18 +82,16 @@ def _body_z_from_attitude_target(roll_deg, pitch_deg, yaw_deg):
 # ── Constants sanity ─────────────────────────────────────────────────────────
 
 def test_constants_have_expected_values(sim):
-    """Key rawes.lua constants match their documented values."""
     f = sim.fns
-    assert float(f.COL_CRUISE_FLIGHT_RAD) == pytest.approx(-0.18)
-    assert float(f.COL_MIN_RAD)           == pytest.approx(-0.28)
-    assert float(f.COL_MAX_RAD)           == pytest.approx(0.10)
-    assert float(f.MASS_KG)               == pytest.approx(5.0)
-    assert float(f.G_ACCEL)               == pytest.approx(9.81)
-    assert float(f.KP_ALT)                == pytest.approx(0.010)
-    assert float(f.KI_ALT)                == pytest.approx(0.001)
-    assert float(f.KD_VZ)                 == pytest.approx(0.040)
-    assert float(f.KP_EL)                 == pytest.approx(2.5)
-    assert float(f.RATE_ACCEL_MAX_RADSS)  == pytest.approx(4.0)
+    assert float(f.THRUST_CRUISE)        == pytest.approx(0.263, abs=1e-3)
+    assert float(f.THRUST_SLEW_MAX)      == pytest.approx(0.058, abs=1e-3)
+    assert float(f.MASS_KG)              == pytest.approx(5.0)
+    assert float(f.G_ACCEL)              == pytest.approx(9.81)
+    assert float(f.KP_ALT)               == pytest.approx(0.0263, abs=1e-4)
+    assert float(f.KI_ALT)               == pytest.approx(0.0026, abs=1e-4)
+    assert float(f.KD_VZ)                == pytest.approx(0.105, abs=1e-3)
+    assert float(f.KP_EL)                == pytest.approx(2.5)
+    assert float(f.RATE_ACCEL_MAX_RADSS) == pytest.approx(4.0)
 
 
 # ── bz_altitude_hold ─────────────────────────────────────────────────────────
@@ -337,7 +335,7 @@ class TestLuaCaptureAgainstStartingIc:
         sim.send_named_float("RAWES_AND", -float(pos0[2]))
         sim.pos_ned = [0.0, 0.0, 0.0]
 
-        sim.send_named_float("RAWES_COL", float(ic["coll_eq_rad"]))
+        sim.send_named_float("RAWES_THR", float(ic["eq_thrust"]))
         sim.send_named_float("RAWES_TEN", float(ic["tension_eq_n"]))
 
         # Capture needs one run_flight call; angle command appears on the next.

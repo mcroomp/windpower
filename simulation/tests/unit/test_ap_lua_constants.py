@@ -21,12 +21,6 @@ def lua():
 
 
 class TestTensionApLuaConstants:
-    def test_col_min_rad(self, lua):
-        assert MockArdupilot.PUMPING_CONSTANTS["COL_MIN_RAD"] == pytest.approx(lua.fns.COL_MIN_RAD)
-
-    def test_col_max_rad(self, lua):
-        assert MockArdupilot.PUMPING_CONSTANTS["COL_MAX_RAD"] == pytest.approx(lua.fns.COL_MAX_RAD)
-
     def test_kp_alt(self, lua):
         assert MockArdupilot.PUMPING_CONSTANTS["KP_ALT"] == pytest.approx(lua.fns.KP_ALT)
 

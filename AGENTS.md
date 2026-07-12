@@ -57,12 +57,12 @@ RAWES_* parameters (param:add_table key 77, prefix "RAWES_"). Canonical mapping:
 | Old SCR_USER | New param    | Default | Purpose                            |
 |---|---|---|---|
 | SCR_USER1    | RAWES_YAW_SLP | 0      | Yaw motor slope [RPM/µs], 0=bench default |
-| SCR_USER2    | RAWES_KP_ALT  | 0.010  | Altitude P gain                    |
-| SCR_USER3    | RAWES_KI_ALT  | 0.001  | Altitude I gain                    |
+| SCR_USER3    | RAWES_KP_ALT  | 0.0263 | Altitude P gain [thrust/m]         |
+| SCR_USER2    | RAWES_KI_ALT  | 0.0026 | Altitude I gain [thrust/m]         |
 | SCR_USER4    | RAWES_KD_VZ   | 0.040  | Vertical-speed damping             |
 | SCR_USER5    | RAWES_KP_EL   | 2.5    | In-plane (elevation) position rate-P gain  |
 | SCR_USER6    | RAWES_MODE    | 0      | Mode selector (0=none,1=steady,3=passive,4=landing) |
-| *(new)*      | RAWES_KP_AZ   | 0.5    | Crosswind (azimuth) position rate-P gain   |
+| *(new)*      | RAWES_THR    | —     | IC thrust [0..1] (passive seed; replaces RAWES_COL in rad) |
 
 Runtime overrides for crosswind gains via NAMED_VALUE_FLOAT:
 - `RAWES_CWP` overrides `_cw_rate_kp` (in-plane/elevation, defaults from RAWES_KP_EL)

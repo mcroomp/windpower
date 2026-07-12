@@ -141,12 +141,11 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     # replicate it here to establish the same deterministic passive hold before
     # promoting to MODE_STEADY.  Seed all four IC NVFs (collective, tension, IC
     # roll, IC pitch) and enter MODE_PASSIVE (RAWES_MODE=3) first.
-    if "coll_eq_rad" in ic:
-        coll_seed = float(ic["coll_eq_rad"])
-        coll_src = "coll_eq_rad"
+    if "eq_thrust" in ic:
+        thr_seed = float(ic["eq_thrust"])
     else:
         raise KeyError(
-            "initial_state missing collective seed: coll_eq_rad"
+            "initial_state missing thrust seed: eq_thrust"
         )
     ten_seed = float(ic["tension_eq_n"])
     R0 = ic.get("R0")
@@ -158,15 +157,15 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     ic_roll_rad = math.atan2(r21, r22)
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
 
-    gcs.send_named_float("RAWES_COL", coll_seed)
+    gcs.send_named_float("RAWES_THR", thr_seed)
     gcs.send_named_float("RAWES_TEN", ten_seed)
     gcs.send_named_float("RAWES_RIC", ic_roll_rad)
     gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
-        "Release seeds (IC-passive init): RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, "
+        "Release seeds (IC-passive init): RAWES_THR=%.3f, RAWES_TEN=%.1f N, "
         "IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
-        coll_seed, coll_src, ten_seed,
+        thr_seed, ten_seed,
         math.degrees(ic_roll_rad), math.degrees(ic_pitch_rad), ok,
     )
 

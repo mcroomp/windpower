@@ -251,7 +251,10 @@ def _compute_ic() -> dict:
 # ── IC serialiser ──────────────────────────────────────────────────────────────
 
 def _save_ic(path: Path, ic: dict) -> None:
-    """Write steady_state_starting.json consumed by all stack/simtests via config.py."""
+    from param_defaults import load_collective_phys_range as _lr
+    col_min, col_max = _lr()
+    coll_settled = float(ic["coll_settled"])
+    eq_thrust = (coll_settled - col_min) / (col_max - col_min)
     out = {
         "pos":           ic["pos0"].tolist(),
         "vel":           ic["vel0"].tolist(),
@@ -259,9 +262,7 @@ def _save_ic(path: Path, ic: dict) -> None:
         "R0_kinematic":  ic["R0_kinematic"].tolist(),
         "omega_spin":    float(ic["omega_spin"]),
         "rest_length":   float(ic["rest_length"]),
-        # coll_eq_rad: collective used at the settled fixed-tether IC point.
-        # Stored so tests can warm-start from the same equilibrium command.
-        "coll_eq_rad":   float(ic["coll_settled"]),
+        "eq_thrust":     float(eq_thrust),
         "tension_eq_n":  float(ic["T_tether"]),
         "trim_tilt_lon": float(ic["trim_tilt_lon"]),
         "trim_tilt_lat": float(ic["trim_tilt_lat"]),
@@ -382,18 +383,21 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     """
     target_alt = float(-pos0[2])
 
+    from param_defaults import load_collective_phys_range as _lr
+    col_min, col_max = _lr()
+    stack_thrust = (float(stack_coll) - col_min) / (col_max - col_min)
     ic = SimpleNamespace(
         pos=np.asarray(pos0, dtype=float),
         vel=np.asarray(vel0, dtype=float),
         R0=R0,
         rest_length=float(rest),
-        coll_eq_rad=float(stack_coll),
+        eq_thrust=float(stack_thrust),
         omega_spin=float(omega_spin),
     )
-    runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=col_min, col_max_rad=col_max)
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR, col_min_rad=col_min, col_max_rad=col_max,
     )
     runner._acro._servo.reset(stack_coll)
     runner._acro.set_trim(trim_tilt_lon, trim_tilt_lat)
@@ -401,7 +405,7 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
         ic_pos=pos0,
         mass_kg=MASS,
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=stack_coll,
+        warm_thrust=stack_thrust,
         tension_ic=tension_sp,
         wind=WIND,
         dt=_DT,
@@ -518,7 +522,8 @@ def test_ic_r0_kinematic(simtest_log):
     rest       = ic.rest_length
     d = json.loads(_JSON_PATH.read_text())
     tension_sp = float(d.get("tension_eq_n", 435.0))
-    stack_coll = ic.coll_eq_rad
+    from param_defaults import thrust_to_coll_rad as _t2c
+    stack_coll = _t2c(ic.eq_thrust)
     trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0))
     trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0))
 

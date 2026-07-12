@@ -69,7 +69,7 @@ class PhysicsRunner:
         Parameters
         ----------
         rotor         : RotorDefinition
-        ic            : object with .pos, .vel, .R0, .rest_length, .coll_eq_rad, .omega_spin
+        ic            : object with .pos, .vel, .R0, .rest_length, .eq_thrust, .omega_spin
                 and optional .trim_tilt_lon/.trim_tilt_lat cyclic trim
         wind          : NED wind vector [m/s]
         z_floor       : NED Z floor for dynamics (default -1.0 m = 1 m altitude floor)
@@ -85,8 +85,9 @@ class PhysicsRunner:
         self._acro = HeliCyclicController(rotor, col_min_rad=col_min_rad,
                                         col_max_rad=col_max_rad)
         self._acro.set_trim(self._tilt_lon_trim, self._tilt_lat_trim)
+        from param_defaults import thrust_to_coll_rad as _t2c
         self._acro._servo.reset(
-            ic.coll_eq_rad,
+            _t2c(ic.eq_thrust),
             tilt_lon=self._tilt_lon_trim,
             tilt_lat=self._tilt_lat_trim,
         )
@@ -94,17 +95,18 @@ class PhysicsRunner:
     # ── Convenience constructor for warmup / IC generation runs ───────────────
 
     @classmethod
-    def for_warmup(cls, rotor, pos, R0, rest_length, coll_eq_rad, omega_spin, wind):
-        """Construct from explicit state — used when no SimtestIC exists yet."""
+    def for_warmup(cls, rotor, pos, R0, rest_length, eq_thrust, omega_spin, wind):
+        from param_defaults import load_collective_phys_range as _lr
+        col_min, col_max = _lr()
         ic = SimpleNamespace(
             pos        = np.asarray(pos, dtype=float),
             vel        = np.zeros(3),
             R0         = R0,
             rest_length= float(rest_length),
-            coll_eq_rad= float(coll_eq_rad),
+            eq_thrust  = float(eq_thrust),
             omega_spin = float(omega_spin),
         )
-        return cls(rotor, ic, wind, col_min_rad=-0.28, col_max_rad=0.10)
+        return cls(rotor, ic, wind, col_min_rad=col_min, col_max_rad=col_max)
 
     # ── Read-only state properties ────────────────────────────────────────────
 

@@ -167,7 +167,7 @@ _FALLBACK_BAUDS = [57600, 38400, 19200, 9600]
 # ---------------------------------------------------------------------------
 # Run mode config table
 # ---------------------------------------------------------------------------
-_TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT", "col": "RAWES_COL"}
+_TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT", "col": "RAWES_THR"}
 
 # Default passive IC collective [deg blade pitch] when --trim col is not given.
 _PASSIVE_IC_COL_DEG = -8.6

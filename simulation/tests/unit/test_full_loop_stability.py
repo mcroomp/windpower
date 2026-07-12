@@ -34,6 +34,9 @@ OMEGA_SPIN = 28.0
 KP_OUTER   = 2.5
 COL_FIXED  = -0.18    # constant collective, no TensionPI
 
+_COL_MIN, _COL_MAX = -0.28, 0.10  # physical range (matches load_collective_phys_range)
+_THRUST_FIXED = (COL_FIXED - _COL_MIN) / (_COL_MAX - _COL_MIN)  # eq_thrust for COL_FIXED
+
 
 def _make_ic(elevation_deg: float, tether_length_m: float):
     """Build a synthetic IC: hub on tether at given elevation, level FRD body."""
@@ -46,7 +49,7 @@ def _make_ic(elevation_deg: float, tether_length_m: float):
     return {
         "pos": pos, "vel": np.zeros(3), "R0": R0,
         "rest_length": tether_length_m - 0.1,    # slight pre-tension
-        "coll_eq_rad": COL_FIXED,
+        "eq_thrust": _THRUST_FIXED,
         "omega_spin": OMEGA_SPIN,
     }
 
@@ -569,7 +572,7 @@ def _run_elastic_free_flight_with_python_ap(
         vel=vel0,
         R0=ic0.R0,
         rest_length=float(ic0.rest_length),
-        coll_eq_rad=float(ic0.coll_eq_rad),
+        eq_thrust=float(ic0.eq_thrust),
         omega_spin=float(ic0.omega_spin),
         trim_tilt_lon=float(ic0.trim_tilt_lon),
         trim_tilt_lat=float(ic0.trim_tilt_lat),
@@ -582,13 +585,14 @@ def _run_elastic_free_flight_with_python_ap(
     runner._acro = _Heli(
         _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
     )
-    runner._acro._servo.reset(ic.coll_eq_rad)
+    from param_defaults import thrust_to_coll_rad as _t2c
+    runner._acro._servo.reset(_t2c(ic.eq_thrust))
 
     ap = MockArdupilot.for_pumping(
         ic_pos=ic0.pos,
         mass_kg=_MASS,
         slew_rate_rad_s=0.40,
-        warm_coll_rad=ic.coll_eq_rad,
+        warm_thrust=ic.eq_thrust,
         tension_ic=tension_target_n,
         wind=WIND,
         dt=DT,

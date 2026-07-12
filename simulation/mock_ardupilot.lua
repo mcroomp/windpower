@@ -42,11 +42,11 @@ _mock = {
     params      = {
         -- Script-generated RAWES_* parameters (mirrors rawes.lua param:add_param defaults).
         -- Slew + anchor inputs are delivered via NAMED_VALUE_FLOAT.
-        RAWES_MODE    = 0,     -- flight mode (0=disabled)
-        RAWES_YAW_SLP = 0,     -- yaw motor slope override (0 = use bench default)
-        RAWES_KP_ALT  = 0.010, -- altitude P gain
-        RAWES_KI_ALT  = 0.001, -- altitude I gain
-        RAWES_KD_VZ   = 0.040, -- vertical-speed damping
+        RAWES_MODE    = 0,      -- flight mode (0=disabled)
+        RAWES_YAW_SLP = 0,      -- yaw motor slope override (0 = use bench default)
+        RAWES_KP_ALT  = 0.0263, -- altitude P gain (thrust/m)
+        RAWES_KI_ALT  = 0.0026, -- altitude I gain (thrust/m)
+        RAWES_KD_VZ   = 0.105,  -- vertical-speed damping (thrust/(m/s))
         RAWES_KP_EL   = 2.5,   -- in-plane (elevation) position rate-P gain
         RAWES_KP_AZ   = 0.5,   -- crosswind (azimuth) position rate-P gain
         RAWES_KD_EL   = 0.0,   -- in-plane position rate-D gain

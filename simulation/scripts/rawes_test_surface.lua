@@ -10,10 +10,8 @@ _rawes_fns = {
 
     BASE_PERIOD_MS          = BASE_PERIOD_MS,
     FLIGHT_PERIOD_MS        = FLIGHT_PERIOD_MS,
-    COL_CRUISE_FLIGHT_RAD   = COL_CRUISE_FLIGHT_RAD,
-    COL_MIN_RAD             = COL_MIN_RAD,
-    COL_MAX_RAD             = COL_MAX_RAD,
-    COL_SLEW_MAX            = COL_SLEW_MAX,
+    THRUST_CRUISE           = THRUST_CRUISE,
+    THRUST_SLEW_MAX         = THRUST_SLEW_MAX,
     MIN_TETHER_M            = MIN_TETHER_M,
     MASS_KG                 = MASS_KG,
     G_ACCEL                 = G_ACCEL,
@@ -100,7 +98,7 @@ _rawes_fns = {
     target_alt     = function() return _target_alt end,
     tension_n      = function() return _tension_n end,     -- ramped feedforward
     tension_cmd_n  = function() return _tension_cmd_n end, -- ground-commanded (unramped)
-    ic_col           = function() return _ic_col end,
+    ic_thrust        = function() return _ic_thrust end,
 
     -- ── Altitude PID state accessors ─────────────────────────────────────────
 

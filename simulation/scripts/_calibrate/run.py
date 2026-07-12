@@ -260,7 +260,7 @@ def _make_oscillate_tick(session: RawesGCS, steps: list):
         tlon_d, tlat_d, col_d, label = steps[idx]
         session.send_named_float("RAWES_TLN", math.radians(tlon_d))
         session.send_named_float("RAWES_TLT", math.radians(tlat_d))
-        session.send_named_float("RAWES_COL", math.radians(col_d))
+        session.send_named_float("RAWES_THR", float(col_d))
         print(f"  [{t_rel:6.1f}s] osc {idx+1}/{len(steps)}  "
               f"tlon={tlon_d:+5.1f}  tlat={tlat_d:+5.1f}  col={col_d:+5.1f}  "
               f"({label})")
@@ -662,8 +662,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     if cfg.get("ic_seed"):
         col_deg = float(trim.get("col", _PASSIVE_IC_COL_DEG))
         print("  Seeding IC (deg -> rad on the wire):")
-        session.send_named_float("RAWES_COL", math.radians(col_deg))
-        print(f"    RAWES_COL = {col_deg:+7.3f} deg  ({math.radians(col_deg):+.4f} rad)")
+        session.send_named_float("RAWES_THR", float(col_deg))
+        print(f"    RAWES_THR = {col_deg:.3f}  (thrust [0..1])")
 
         if "--yaw" in flags:
             yaw_deg = float(flags["--yaw"])

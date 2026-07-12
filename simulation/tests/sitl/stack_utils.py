@@ -607,9 +607,10 @@ def _launch_mediator(
     # Apply equilibrium collective AFTER extra_config merge so it isn't overridden.
     # warm_coll_rad seeds TensionPI integral at the exact equilibrium value on
     # kinematic exit — must survive the trajectory.deschutter extra_config merge.
-    if initial_state is not None and "coll_eq_rad" in initial_state:
+    if initial_state is not None and "eq_thrust" in initial_state:
+        from param_defaults import thrust_to_coll_rad as _t2c
         cfg.setdefault("trajectory", {}).setdefault("deschutter", {})
-        cfg["trajectory"]["deschutter"]["warm_coll_rad"] = float(initial_state["coll_eq_rad"])
+        cfg["trajectory"]["deschutter"]["warm_coll_rad"] = _t2c(float(initial_state["eq_thrust"]))
     # tension_out is intentionally NOT read from initial_state["tension_eq_n"].
     # The equilibrium tension at coll_eq_rad (-0.18 rad) is ~345 N, but the
     # operational reel-out target stays at the config default (200 N) for energy

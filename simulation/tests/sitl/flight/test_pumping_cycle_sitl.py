@@ -116,11 +116,11 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     if ic is None:
         pytest.fail("initial_state is required for pumping test")
 
-    if "coll_eq_rad" in ic:
-        coll_seed = float(ic["coll_eq_rad"])
+    if "eq_thrust" in ic:
+        thr_seed = float(ic["eq_thrust"])
     else:
         raise KeyError(
-            "initial_state missing collective seed: coll_eq_rad"
+            "initial_state missing thrust seed: eq_thrust"
         )
     ten_seed = float(ic["tension_eq_n"])
     R0 = ic.get("R0")
@@ -129,7 +129,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     ic_roll_rad  = math.atan2(float(R0[2][1]), float(R0[2][2]))
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, float(R0[2][0]))))
 
-    gcs.send_named_float("RAWES_COL", coll_seed)
+    gcs.send_named_float("RAWES_THR", thr_seed)
     gcs.send_named_float("RAWES_TEN", ten_seed)
     gcs.send_named_float("RAWES_RIC", ic_roll_rad)
     gcs.send_named_float("RAWES_PIC", ic_pitch_rad)

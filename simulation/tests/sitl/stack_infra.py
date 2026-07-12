@@ -99,7 +99,7 @@ _FALLBACK_SIM_SERVO_SPEED = 5.45  # 545 deg/s / 100 deg from beaupoil_2026 contr
 # rawes_common_defaults.parm provides shared RAWES tuning and heli params.
 # rawes_sitl_defaults.parm provides SITL-only overlays (SIM_*, relaxed EKF gates).
 # _BASE_ACRO_PARAMS adds the MAVLink-side mode/failsafe params.
-# Per-fixture extras (e.g. RAWES_MODE, COL_CRUISE_FLIGHT_RAD) are merged on top.
+# Per-fixture extras (e.g. RAWES_MODE, THRUST_CRUISE) are merged on top.
 #
 # EKF params (EK3_*, COMPASS_*) are ONLY in the boot file — never set via
 # MAVLink — because setting them post-boot triggers EKF3 yaw-state reset.
@@ -1920,7 +1920,7 @@ def _torque_stack(
     startup_yaw_rate_deg_s: float = 0.0,
     armon_ms: "int | None" = None,
     passive_init: bool = False,
-    passive_col_rad: float = 0.0,
+    passive_thrust: float = 0.263,
     passive_roll_rad: float = 0.0,
     passive_pitch_rad: float = 0.0,
     passive_yaw_rad: "float | None" = None,
@@ -1963,7 +1963,7 @@ def _torque_stack(
                              Lua then commands the IC attitude as a GUIDED angle target
                              while the yaw motor regulates.  Orientation is unchanged
                              (roll=pitch=0); the hub does not rotate during the hold.
-    passive_col_rad        : IC collective [rad] seeded to MODE_PASSIVE when passive_init.
+    passive_thrust          : IC thrust [0..1] seeded to MODE_PASSIVE when passive_init.
     passive_roll_rad       : IC roll [rad] seeded to MODE_PASSIVE (RAWES_RIC) + pre-arm attitude.
     passive_pitch_rad      : IC pitch [rad] seeded to MODE_PASSIVE (RAWES_PIC) + pre-arm attitude.
     passive_yaw_rad        : optional fixed yaw target [rad] sent to MODE_PASSIVE (RAWES_YIC).
@@ -2168,15 +2168,15 @@ def _torque_stack(
                     math.isfinite(v) for v in (_att.roll, _att.pitch, _att.yaw)
                 ):
                     _pre_arm_yaw = float(_att.yaw)
-                gcs.send_named_float("RAWES_COL", float(passive_col_rad))
+                gcs.send_named_float("RAWES_THR", float(passive_thrust))
                 gcs.send_named_float("RAWES_RIC", float(passive_roll_rad))
                 gcs.send_named_float("RAWES_PIC", float(passive_pitch_rad))
                 if passive_yaw_rad is not None:
                     gcs.send_named_float("RAWES_YIC", float(passive_yaw_rad))
                     _pre_arm_yaw = float(passive_yaw_rad)
                 log.info(
-                    "PASSIVE seed: RAWES_COL=%+.4f rad, RIC=%+.4f, PIC=%+.4f, YIC=%s; pre-arm yaw=%.1f deg",
-                    passive_col_rad, passive_roll_rad, passive_pitch_rad,
+                    "PASSIVE seed: RAWES_THR=%.3f, RIC=%+.4f, PIC=%+.4f, YIC=%s; pre-arm yaw=%.1f deg",
+                    passive_thrust, passive_roll_rad, passive_pitch_rad,
                     ("%+.4f" % passive_yaw_rad) if passive_yaw_rad is not None else "capture",
                     math.degrees(_pre_arm_yaw),
                 )

@@ -339,16 +339,15 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             # arrived, so sending it now gives the nul-aero the entire kinematic
             # hold window to slew the disk to the IC tilt before release.
 
-            # Seed Lua with the canonical IC collective scalar.
-            if "coll_eq_rad" in _ic:
-                _coll_trim = float(_ic["coll_eq_rad"])
-                _coll_src = "coll_eq_rad"
+            # Seed Lua with the IC thrust [0..1].
+            if "eq_thrust" in _ic:
+                _ic_thrust = float(_ic["eq_thrust"])
             else:
                 raise KeyError(
-                    "initial_state missing collective seed: coll_eq_rad"
+                    "initial_state missing thrust seed: eq_thrust"
                 )
-            ctx.gcs.send_named_float("RAWES_COL", float(_coll_trim))
-            ctx.log.info("IC collective (%s): coll=%+.4f rad", _coll_src, _coll_trim)
+            ctx.gcs.send_named_float("RAWES_THR", float(_ic_thrust))
+            ctx.log.info("IC thrust: %.3f", _ic_thrust)
 
             # Seed passive IC roll/pitch via short NV names (10-char limit):
             #   RAWES_RIC = IC roll [rad], RAWES_PIC = IC pitch [rad]

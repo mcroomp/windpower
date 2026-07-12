@@ -92,7 +92,7 @@ class PhysicsCore:
     ----------
     rotor               : RotorDefinition — single source of all physical constants
     ic                  : object with .pos, .vel, .R0, .rest_length,
-                          .coll_eq_rad, .omega_spin
+                          .eq_thrust, .omega_spin
     wind                : NED wind vector [m/s]
     base_k_ang          : optional diagnostic angular damping [N·m·s/rad]
     k_yaw               : GB4008 yaw damper around disk_normal [N·m·s/rad]
@@ -178,15 +178,15 @@ class PhysicsCore:
     # ── Convenience constructor ───────────────────────────────────────────────
 
     @classmethod
-    def from_state(cls, rotor, pos, vel, R0, rest_length, coll_eq_rad,
+    def from_state(cls, rotor, pos, vel, R0, rest_length, eq_thrust,
                    omega_spin, wind, **kwargs):
-        """Construct from explicit state arrays — used when no IC object exists."""
+        from param_defaults import thrust_to_coll_rad as _t2c
         ic = SimpleNamespace(
             pos        = np.asarray(pos, dtype=float),
             vel        = np.asarray(vel, dtype=float),
             R0         = R0,
             rest_length= float(rest_length),
-            coll_eq_rad= float(coll_eq_rad),
+            eq_thrust  = float(eq_thrust),
             omega_spin = float(omega_spin),
         )
         return cls(rotor, ic, wind, **kwargs)
@@ -318,7 +318,7 @@ class PhysicsCore:
 
         Parameters
         ----------
-        collective_rad : equilibrium collective [rad] — use ic.coll_eq_rad
+        collective_rad : equilibrium collective [rad] — use thrust_to_coll_rad(ic.eq_thrust)
         n_steps        : number of ODE steps (default 500 @ 1 ms = 0.5 s)
         dt             : inflow ODE time step [s] (default 1e-3)
         """

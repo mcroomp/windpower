@@ -79,7 +79,7 @@ MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable duri
 MODE_LANDING = 4   -- reserved; not implemented here
 
 -- MODE_PASSIVE IC seeds are provided over NVF (10-char names max):
---   RAWES_COL : IC collective [rad]
+--   RAWES_THR : IC thrust [0..1]
 --   RAWES_RIC : IC roll       [rad]
 --   RAWES_PIC : IC pitch      [rad]
 -- They start nil and are committed atomically only after all three arrive.
@@ -109,18 +109,16 @@ SPIN_LIMIT_MS   = 20000                                  -- sustained ms before 
 
 MIN_TETHER_M     = 0.5        -- minimum tether length before GPS init activates
 
--- ── Collective limits and cruise values ───────────────────────────────────────
+-- ── Thrust limits and cruise value ────────────────────────────────────────────
 
-COL_MIN_RAD           = -0.28
-COL_MAX_RAD           =  0.10
-COL_SLEW_MAX          =  0.022   -- rad per 50 Hz step
-COL_CRUISE_FLIGHT_RAD = -0.18    -- VZ integrator initial value (xi~8 deg, altitude hold)
+THRUST_SLEW_MAX = 0.058   -- thrust [0..1] per 50 Hz step
+THRUST_CRUISE   = 0.263   -- altitude-hold trim thrust
 
--- ── Altitude collective + body-rate controller constants ─────────────────────
+-- ── Altitude controller constants ────────────────────────────────────────────
 
-KP_ALT = 0.010
-KI_ALT = 0.001
-KD_VZ  = 0.040
+KP_ALT = 0.0263
+KI_ALT = 0.0026
+KD_VZ  = 0.105
 -- Rate-stability gate on the collective vz-damping term.  While the attitude
 -- loop is still slewing (flight start cyclic establishment, reel transitions),
 -- the measured vertical velocity is partly rotational coupling rather than a
@@ -170,10 +168,10 @@ _rc_ch3 = rc:get_channel(3)
 _rc_ch4 = rc:get_channel(4)
 _rc_ch8 = rc:get_channel(8)
 
--- Collective state
-_last_col_rad = COL_CRUISE_FLIGHT_RAD
-_col_trim     = COL_CRUISE_FLIGHT_RAD
-_alt_i        = 0.0
+-- Thrust state [0..1]
+_last_thrust = THRUST_CRUISE
+_thrust_trim = THRUST_CRUISE
+_alt_i       = 0.0
 
 -- Altitude hold state
 _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
@@ -200,15 +198,14 @@ _cw_rate_kp_az   = 0.0     -- RAWES_KP_AZ: crosswind (azimuth) position rate-P  
 _cw_rate_kd      = 0.0     -- RAWES_KD_EL: in-plane position rate-D [rad/s per (m/s)]
 _cw_rate_max     = 0.6     -- RAWES_CWMAX: position rate saturation [rad/s]
 
--- IC collective [rad] — ground sends via RAWES_COL.  Used by MODE_PASSIVE
--- to pin ch3 at the IC value so omega_spin doesn't droop while the body
--- is kinematically locked.  Defaults to the cruise-flight value.
-_ic_col         = nil
-_ic_roll_deg    = nil
-_ic_pitch_deg   = nil
-_ic_seeded      = false
-_ic_pending_col = nil
-_ic_pending_roll_deg = nil
+-- IC thrust [0..1] — ground sends via RAWES_THR.  Used by MODE_PASSIVE
+-- to hold the IC operating point while the body is kinematically locked.
+_ic_thrust         = nil
+_ic_roll_deg       = nil
+_ic_pitch_deg      = nil
+_ic_seeded         = false
+_ic_pending_thrust = nil
+_ic_pending_roll_deg  = nil
 _ic_pending_pitch_deg = nil
 
 -- One-shot debug state for capture/first-command handoff diagnostics.
@@ -359,27 +356,9 @@ local function blend_bz(bz_now, bz_goal, alpha)
     return r
 end
 
-local function col_rad_to_thrust(col_rad)
-    local span = COL_MAX_RAD - COL_MIN_RAD
-    if span <= 1e-9 then
-        return 0.5
-    end
-    local t = (col_rad - COL_MIN_RAD) / span
-    if t < 0.0 then t = 0.0 end
-    if t > 1.0 then t = 1.0 end
-    return t
-end
-
-local function ic_col_or_default()
-    if _ic_col ~= nil then return _ic_col end
-    return COL_CRUISE_FLIGHT_RAD
-end
-
-local function thrust_to_col_rad(thrust)
-    local t = thrust
-    if t < 0.0 then t = 0.0 end
-    if t > 1.0 then t = 1.0 end
-    return COL_MIN_RAD + t * (COL_MAX_RAD - COL_MIN_RAD)
+local function ic_thrust_or_default()
+    if _ic_thrust ~= nil then return _ic_thrust end
+    return THRUST_CRUISE
 end
 
 local function p(name, default)
@@ -406,7 +385,7 @@ local _diag_nvf_keys = {
     "YFF_T", "YFF_U", "YFF_GZ",           -- yaw trim observer
     "OL_RSP", "OL_PSP", "OL_YSP",        -- outer-loop commanded body rates
     "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
-    "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded collective
+    "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded thrust
     "OL_TEN"                             -- ramped tension feedforward [N]
 }
 
@@ -435,9 +414,9 @@ assert(param:add_table(_PARAM_KEY, _PARAM_PREFIX, 14),
        "rawes.lua: failed to register param table (key conflict?)")
 assert(param:add_param(_PARAM_KEY, 1, "MODE",    0),      "RAWES_MODE")
 assert(param:add_param(_PARAM_KEY, 2, "YAW_SLP", 0),      "RAWES_YAW_SLP")
-assert(param:add_param(_PARAM_KEY, 3, "KP_ALT",  0.010),  "RAWES_KP_ALT")
-assert(param:add_param(_PARAM_KEY, 4, "KI_ALT",  0.001),  "RAWES_KI_ALT")
-assert(param:add_param(_PARAM_KEY, 5, "KD_VZ",   0.040),  "RAWES_KD_VZ")
+assert(param:add_param(_PARAM_KEY, 3, "KP_ALT",  0.0263), "RAWES_KP_ALT")
+assert(param:add_param(_PARAM_KEY, 4, "KI_ALT",  0.0026), "RAWES_KI_ALT")
+assert(param:add_param(_PARAM_KEY, 5, "KD_VZ",   0.105),  "RAWES_KD_VZ")
 assert(param:add_param(_PARAM_KEY, 6, "KP_EL",   2.5),    "RAWES_KP_EL")
 assert(param:add_param(_PARAM_KEY, 7, "KP_AZ",   0.5),    "RAWES_KP_AZ")
 assert(param:add_param(_PARAM_KEY, 8, "KD_EL",   0.0),    "RAWES_KD_EL")
@@ -579,13 +558,8 @@ local function _on_mode_enter(mode)
     if mode == MODE_STEADY then
         _dbg_cap_logged = false
         _dbg_cmd_logged = false
-        -- Start a fresh post-release recovery window at steady entry.
         _capture_ms = millis()
-        local _thr_ic = col_rad_to_thrust(ic_col_or_default())
-        local _col_back = thrust_to_col_rad(_thr_ic)
-        gcs:send_text(6, string.format(
-            "RAWES steady: IC col=%.2fdeg -> thr=%.3f -> col=%.2fdeg",
-            math.deg(ic_col_or_default()), _thr_ic, math.deg(_col_back)))
+        gcs:send_text(6, string.format("RAWES steady: IC thrust=%.3f", ic_thrust_or_default()))
     end
     if mode == MODE_PASSIVE then
         _passive_status_ms    = 0
@@ -615,7 +589,7 @@ local function run_flight()
     -- Collective is passed as throttle so ArduPilot's set_throttle_out path
     -- controls it directly -- no ch3 RC override needed.
     if not _el_initialized then
-        local ct = col_rad_to_thrust(ic_col_or_default())
+        local ct = ic_thrust_or_default()
 
         if not ahrs:healthy() then return end
 
@@ -645,19 +619,10 @@ local function run_flight()
             if tlen >= MIN_TETHER_M then
                 _el_rad       = math.asin(math.max(-1.0, math.min(1.0, -rz / math.max(tlen, 0.1))))
                 _target_alt   = -rz
-                -- Warm-start the collective feedforward from the actual IC
-                -- equilibrium collective (TensionPI-settled, sent by ground via
-                -- RAWES_COL) instead of the nominal cruise constant.  This is the
-                -- Lua analog of TensionPI.warm_coll_rad in controller.py: it makes
-                -- col_cmd == _ic_col at capture (alt_err=vz=0), so there is no
-                -- thrust/tension step that the slow KI_ALT integrator must chase.
-                -- The I-term legitimately starts at 0 (no integrated error yet).
-                local col_ff  = ic_col_or_default()
-                if col_ff < COL_MIN_RAD then col_ff = COL_MIN_RAD end
-                if col_ff > COL_MAX_RAD then col_ff = COL_MAX_RAD end
+                local thr_ff  = math.max(0.0, math.min(1.0, ic_thrust_or_default()))
                 _tension_n    = _tension_cmd_n  -- seed ramp at capture (no startup transient)
-                _col_trim     = col_ff
-                _last_col_rad = col_ff
+                _thrust_trim  = thr_ff
+                _last_thrust  = thr_ff
                 _alt_i        = 0.0
                 _az_ref         = math.atan(ry, rx)
                 _az_initialized = true
@@ -759,15 +724,15 @@ local function run_flight()
             d_now, d_cap, roll_deg, pitch_deg, roll_now_deg, pitch_now_deg))
     end
 
-    -- Local altitude PID controls collective; ground no longer commands thrust.
+    -- Altitude PID controls thrust [0..1]; ArduPilot maps thrust to collective.
     local alt_m = -rel:z()
     local vz_up = 0.0
     local vel_ned = ahrs:get_velocity_NED()
     if vel_ned then vz_up = -vel_ned:z() end
     local alt_err = _target_alt - alt_m
     _alt_i = _alt_i + KI_ALT * alt_err * dt
-    local i_min = COL_MIN_RAD - _col_trim
-    local i_max = COL_MAX_RAD - _col_trim
+    local i_min = 0.0 - _thrust_trim
+    local i_max = 1.0 - _thrust_trim
     if _alt_i < i_min then _alt_i = i_min end
     if _alt_i > i_max then _alt_i = i_max end
     -- Rate-stability gate: fade the vz-damping term while body rates are high.
@@ -784,21 +749,17 @@ local function run_flight()
     local alt_p = KP_ALT * alt_err
     local alt_d = -KD_VZ * vz_gate * vz_up
     local alt_i = _alt_i
-    local col_pid = _col_trim + alt_p + alt_d + alt_i
-    -- Expected release transient: keep collective close to IC initially, then
-    -- fade in altitude corrections over POST_RELEASE_RECOVERY_S.
-    local _ic_col_now = ic_col_or_default()
-    local col_cmd = _ic_col_now + recovery_alpha * (col_pid - _ic_col_now)
+    local thrust_pid = _thrust_trim + alt_p + alt_d + alt_i
+    local _ic_thrust_now = ic_thrust_or_default()
+    local thrust_cmd = _ic_thrust_now + recovery_alpha * (thrust_pid - _ic_thrust_now)
 
-    if col_cmd < COL_MIN_RAD then col_cmd = COL_MIN_RAD end
-    if col_cmd > COL_MAX_RAD then col_cmd = COL_MAX_RAD end
+    if thrust_cmd < 0.0 then thrust_cmd = 0.0 end
+    if thrust_cmd > 1.0 then thrust_cmd = 1.0 end
 
-    local col_delta = col_cmd - _last_col_rad
-    if col_delta >  COL_SLEW_MAX then col_delta =  COL_SLEW_MAX end
-    if col_delta < -COL_SLEW_MAX then col_delta = -COL_SLEW_MAX end
-    _last_col_rad = _last_col_rad + col_delta
-
-    local col_thrust = col_rad_to_thrust(_last_col_rad)
+    local thrust_delta = thrust_cmd - _last_thrust
+    if thrust_delta >  THRUST_SLEW_MAX then thrust_delta =  THRUST_SLEW_MAX end
+    if thrust_delta < -THRUST_SLEW_MAX then thrust_delta = -THRUST_SLEW_MAX end
+    _last_thrust = _last_thrust + thrust_delta
 
     -- Crosswind rate damping: compute a world-frame East rotation rate command
     -- from North position/velocity error, then map to body-frame roll/pitch rates.
@@ -843,9 +804,9 @@ local function run_flight()
     end
 
     -- GUIDED angle path: absolute roll/pitch + held yaw, zero feedforward rate,
-    -- collective as direct throttle (set_throttle_out; no ch3 RC override).
+    -- thrust passed directly to set_throttle_out.
     send_guided_angle_rate_throttle(
-        roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, col_thrust,
+        roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, _last_thrust,
         "steady_attitude")
 
     -- Record outer-loop diagnostics for centralized NVF telemetry emission.
@@ -865,7 +826,7 @@ local function run_flight()
     _diag_set("OL_AP", alt_p)
     _diag_set("OL_AI", alt_i)
     _diag_set("OL_AD", alt_d)
-    _diag_set("OL_COL", _last_col_rad)
+    _diag_set("OL_COL", _last_thrust)
 
     -- Diagnostic log (every ~5 s at 50 Hz)
     if _diag % 250 == 1 then
@@ -876,9 +837,9 @@ local function run_flight()
         local d_roll = roll_deg - roll_now_deg
         local d_pitch = pitch_deg - pitch_now_deg
         gcs:send_text(6, string.format(
-            "RAWES: cmd_rp=(%.1f,%.1f) now_rp=(%.1f,%.1f) d_rp=(%.1f,%.1f) thr=%.2f el=%.1f alt=%.1f%s",
+            "RAWES: cmd_rp=(%.1f,%.1f) now_rp=(%.1f,%.1f) d_rp=(%.1f,%.1f) thr=%.3f el=%.1f alt=%.1f%s",
             roll_deg, pitch_deg, roll_now_deg, pitch_now_deg,
-            d_roll, d_pitch, col_thrust, math.deg(_el_rad), _target_alt, sub_info))
+            d_roll, d_pitch, _last_thrust, math.deg(_el_rad), _target_alt, sub_info))
     end
 end
 
@@ -978,7 +939,7 @@ local function run_passive_mode(now)
     -- release transitions smoothly. Hold zero body-rate demand and
     -- pass IC collective through GUIDED throttle (no H_FLYBAR_MODE
     -- dependency).
-    local ic_ready = (_ic_col ~= nil and _ic_roll_deg ~= nil and _ic_pitch_deg ~= nil)
+    local ic_ready = (_ic_thrust ~= nil and _ic_roll_deg ~= nil and _ic_pitch_deg ~= nil)
 
     local mode_now  = vehicle:get_mode()
     local guided_ok = (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy()
@@ -989,10 +950,9 @@ local function run_passive_mode(now)
         local ic_s = ic_ready and "ready" or "waiting"
         local g_s = guided_ok and "ok" or "no"
         local y_s = (_passive_hold_yaw_rad ~= nil) and string.format("%.1f", math.deg(_passive_hold_yaw_rad)) or "n/a"
-        local col_s = string.format("%.2f", math.deg(ic_col_or_default()))
         gcs:send_text(6, string.format(
-            "RAWES passive: %s ic=%s guided=%s yaw_hold=%s col=%sdeg",
-            armed_s, ic_s, g_s, y_s, col_s))
+            "RAWES passive: %s ic=%s guided=%s yaw_hold=%s thr=%.3f",
+            armed_s, ic_s, g_s, y_s, ic_thrust_or_default()))
     end
 
     if not ic_ready then
@@ -1004,8 +964,7 @@ local function run_passive_mode(now)
         -- kinematic phase (motors are off when disarmed anyway).  Uses a default
         -- collective so rotor RPM is preserved.
         if guided_ok and arming:is_armed() then
-            local col_thrust_d = col_rad_to_thrust(ic_col_or_default())
-            vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, col_thrust_d)
+            vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, ic_thrust_or_default())
         end
         return
     end
@@ -1026,7 +985,7 @@ local function run_passive_mode(now)
         _passive_hold_yaw_rad = y
     end
 
-    local col_thrust_p = col_rad_to_thrust(ic_col_or_default())
+    local col_thrust_p = ic_thrust_or_default()
     if guided_ok then
         send_guided_angle_rate_throttle(
             _ic_roll_deg, _ic_pitch_deg, math.deg(_passive_hold_yaw_rad or 0.0),
@@ -1070,7 +1029,7 @@ local function update()
     -- Crosswind rate damping gains now come from RAWES_* params; no NVF override needed.
     -- IC seed handling: do not set active IC commands until all three
     -- (collective, roll, pitch) have been observed at least once.
-    if _nv_floats["RAWES_COL"] then _ic_pending_col = _nv_floats["RAWES_COL"] end
+    if _nv_floats["RAWES_THR"] then _ic_pending_thrust = _nv_floats["RAWES_THR"] end
     if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
     if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
     -- Optional fixed yaw target for MODE_PASSIVE.  When present, PASSIVE holds
@@ -1078,18 +1037,18 @@ local function update()
     if _nv_floats["RAWES_YIC"] then _passive_yaw_fixed_rad = _nv_floats["RAWES_YIC"] end
 
     if not _ic_seeded then
-        if _ic_pending_col ~= nil and _ic_pending_roll_deg ~= nil and _ic_pending_pitch_deg ~= nil then
-            _ic_col = _ic_pending_col
+        if _ic_pending_thrust ~= nil and _ic_pending_roll_deg ~= nil and _ic_pending_pitch_deg ~= nil then
+            _ic_thrust = _ic_pending_thrust
             _ic_roll_deg = _ic_pending_roll_deg
             _ic_pitch_deg = _ic_pending_pitch_deg
             _ic_seeded = true
             gcs:send_text(6, string.format(
-                "RAWES IC seed set: r=%.1f p=%.1f col=%.2fdeg",
-                _ic_roll_deg, _ic_pitch_deg, math.deg(_ic_col)))
+                "RAWES IC seed set: r=%.1f p=%.1f thr=%.3f",
+                _ic_roll_deg, _ic_pitch_deg, _ic_thrust))
         end
     else
         -- After initial atomic seed, accept incremental updates.
-        if _nv_floats["RAWES_COL"] then _ic_col = _nv_floats["RAWES_COL"] end
+        if _nv_floats["RAWES_THR"] then _ic_thrust = _nv_floats["RAWES_THR"] end
         if _nv_floats["RAWES_RIC"] then _ic_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
         if _nv_floats["RAWES_PIC"] then _ic_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
     end

@@ -228,7 +228,7 @@ def run_mediator(args, trajectory=None):
             "OL_AP":  "lua_ol_alt_p_contrib",
             "OL_AI":  "lua_ol_alt_i_contrib",
             "OL_AD":  "lua_ol_alt_d_contrib",
-            "OL_COL": "lua_ol_col_cmd_rad",
+            "OL_COL": "lua_ol_thrust_cmd",
             "OL_TEN": "lua_ol_tension_n",
         }
         try:
@@ -508,7 +508,7 @@ def run_mediator(args, trajectory=None):
         vel        = _dyn_vel0,
         R0         = _R0,
         rest_length= float(cfg["rest_length"]),
-        coll_eq_rad= _col_min_rad,
+        eq_thrust  = 0.0,
         omega_spin = _omega_spin_init,
     )
     # Optional constant-tension tether: tether_model="constant_tension" in config.
@@ -902,11 +902,11 @@ def run_mediator(args, trajectory=None):
                 "tilt_lon":        tilt_lon,
                 "tilt_lat":        tilt_lat,
                 "tension_feedforward_n":        _traj_cmd.get("tension_feedforward_n", 0.0),
-                "collective_from_alt_ctrl":     collective_rad,
+                "thrust_from_alt_ctrl":          0.0,
                 "lua_ol_alt_p_contrib": _mav_async.get("lua_ol_alt_p_contrib", float("nan")),
                 "lua_ol_alt_i_contrib": _mav_async.get("lua_ol_alt_i_contrib", float("nan")),
                 "lua_ol_alt_d_contrib": _mav_async.get("lua_ol_alt_d_contrib", float("nan")),
-                "lua_ol_col_cmd_rad":   _mav_async.get("lua_ol_col_cmd_rad",   float("nan")),
+                "lua_ol_thrust_cmd":    _mav_async.get("lua_ol_thrust_cmd",    float("nan")),
                 "lua_ol_tension_n":     _mav_async.get("lua_ol_tension_n",     float("nan")),
                 "roll_sp_rads":    _mav_async.get("roll_sp_rads", 0.0),
                 "pitch_sp_rads":   _mav_async.get("pitch_sp_rads", 0.0),

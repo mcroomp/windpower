@@ -21,7 +21,7 @@ Usage
     ORBIT_BZ0    = ic.orbit_bz   # pre-tilted disk normal for orbit tracking start
     OMEGA_SPIN0  = ic.omega_spin
     REST_LENGTH0 = ic.rest_length
-    COLL_EQ      = ic.coll_eq_rad  # equilibrium collective (= -0.18 rad)
+    EQ_THRUST    = ic.eq_thrust   # equilibrium thrust [0..1] (~0.263)
     TRIM_TLAT    = ic.trim_tilt_lat
 """
 

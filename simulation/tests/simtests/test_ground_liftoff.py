@@ -84,17 +84,19 @@ def _build_ic() -> SimpleNamespace:
         from simtest_ic import load_ic as _load_ic
         _ic = _load_ic()
         omega_spin  = float(_ic.omega_spin)
-        coll_eq_rad = float(_ic.coll_eq_rad)
+        eq_thrust   = float(_ic.eq_thrust)
     except FileNotFoundError:
+        from param_defaults import load_collective_phys_range as _lr
+        col_min, col_max = _lr()
         omega_spin  = 39.42
-        coll_eq_rad = -0.18
+        eq_thrust   = (-0.18 - col_min) / (col_max - col_min)
 
     return SimpleNamespace(
         pos         = np.array([0.0, 0.0, -1.0]),  # altitude = 1 m
         vel         = np.zeros(3),
         R0          = np.eye(3),                    # horizontal disk; body_z = [0,0,1]
         rest_length = 1.0,
-        coll_eq_rad = coll_eq_rad,
+        eq_thrust   = eq_thrust,
         omega_spin  = omega_spin,
     )
 
@@ -127,7 +129,7 @@ def test_ground_liftoff():
     # Swap the elastic tether for a constant 200 N downward load.
     runner._core._tether = _ConstantDownforce(TETHER_FORCE_N)
 
-    lua         = MockArdupilot.for_lua(sim, initial_col_rad=ic.coll_eq_rad, wind=WIND_NED, dt=DT)
+    lua         = MockArdupilot.for_lua(sim, initial_thrust=ic.eq_thrust, wind=WIND_NED, dt=DT)
     total_steps = int(LIFTOFF_TIMEOUT / DT)
     liftoff_t   = None
     max_alt     = ic.pos[2] * -1.0   # start altitude

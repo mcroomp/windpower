@@ -125,7 +125,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     # ── Ground -> Lua command channel (NAMED_VALUE_FLOAT) ─────────────────────
     comms = LuaComms(sim.send_named_float)
 
-    lua = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
 
     events = BadEventLog()
 
@@ -155,7 +155,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         phase                    = phase_label,
         winch_speed_ms           = gov.speed_ms,
         tension_feedforward_n    = planner.winch_target_tension,
-        collective_from_alt_ctrl = lua.col_rad,
+        thrust_from_alt_ctrl     = lua._last_thrust,
         alt_pid_integral         = sim.fns.alt_i(),
         gnd_alt_cmd_m            = ic_alt,
         elevation_rad            = 0.0,
@@ -178,7 +178,8 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     comms.send(planner.step(0.0, tel.tension_n, tel.rest_length), DT_PLANNER)
 
     # ── Inflow warm-up ────────────────────────────────────────────────────
-    runner._core.warm_inflow(collective_rad=float(_IC.coll_eq_rad), n_steps=500)
+    from param_defaults import thrust_to_coll_rad as _t2c
+    runner._core.warm_inflow(collective_rad=_t2c(float(_IC.eq_thrust)), n_steps=500)
 
     t_sim = 0.0
     for i in range(max_steps):
@@ -297,9 +298,9 @@ def test_lua_pumping_constants():
         assert len(name) <= 10, f"NV name '{name}' exceeds 10-char MAVLink limit"
 
     # Lua pumping now matches Python-mode altitude PID + rate-only body_z path.
-    assert float(f.KP_ALT)                == pytest.approx(0.010, rel=1e-3)
-    assert float(f.KI_ALT)                == pytest.approx(0.001, rel=1e-3)
-    assert float(f.KD_VZ)                 == pytest.approx(0.040, rel=1e-3)
+    assert float(f.KP_ALT)                == pytest.approx(0.0263, rel=1e-3)
+    assert float(f.KI_ALT)                == pytest.approx(0.0026, rel=1e-3)
+    assert float(f.KD_VZ)                 == pytest.approx(0.105, rel=1e-3)
     assert float(f.KP_EL)                 == pytest.approx(2.5, rel=1e-3)
     assert float(f.RATE_ACCEL_MAX_RADSS)  == pytest.approx(4.0, rel=1e-3)
 

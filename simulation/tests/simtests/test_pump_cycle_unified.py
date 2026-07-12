@@ -35,6 +35,7 @@ from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner  import TensionCommand
 from comms            import VirtualComms
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
+from param_defaults import thrust_to_coll_rad
 
 _IC    = load_ic()
 _ROTOR = load_default_rotor()
@@ -84,8 +85,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         aero_model = os.environ.get("RAWES_AERO", "quasi_static")
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
 
-    COL_MIN, COL_MAX = -0.28, 0.10
-    thrust_ic = float((_IC.coll_eq_rad - COL_MIN) / (COL_MAX - COL_MIN))
+    thrust_ic = _IC.eq_thrust
     ic_alt    = float(-_IC.pos[2])
 
     # ── Winch: tension-governed, jerk-limited speed ────────────────────
@@ -110,7 +110,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         ic_pos=_IC.pos,
         mass_kg=float(mass_kg),
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_coll_rad=_IC.coll_eq_rad,
+        warm_thrust=_IC.eq_thrust,
         tension_ic=TENSION_IC,
         events=events,
         wind=WIND,
@@ -167,7 +167,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     comms.send_command(0.0, cmd)
 
     # ── Inflow warm-up ────────────────────────────────────────────────────
-    runner._core.warm_inflow(collective_rad=float(_IC.coll_eq_rad), n_steps=500)
+    runner._core.warm_inflow(collective_rad=thrust_to_coll_rad(float(_IC.eq_thrust)), n_steps=500)
 
     t_sim = 0.0
     for i in range(max_steps):

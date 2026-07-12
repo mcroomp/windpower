@@ -110,7 +110,7 @@ class TelRow:
     tilt_lat:        float = 0.0
     tension_feedforward_n:        float = 0.0
     tension_ic_n:                 float = 0.0
-    collective_from_alt_ctrl:     float = 0.0
+    thrust_from_alt_ctrl:         float = 0.0
     gnd_alt_cmd_m:                float = 0.0   # ground-commanded altitude [m] (TensionCommand.alt_m)
     winch_speed_ms:               float = 0.0   # winch reel speed [m/s] +ve=out -ve=in
 
@@ -199,7 +199,7 @@ class TelRow:
     lua_ol_alt_p_contrib: float = float("nan")
     lua_ol_alt_i_contrib: float = float("nan")
     lua_ol_alt_d_contrib: float = float("nan")
-    lua_ol_col_cmd_rad:   float = float("nan")
+    lua_ol_thrust_cmd:    float = float("nan")
     lua_ol_tension_n:     float = float("nan")   # ramped tension feedforward [N]
 
     # AP rate commands and radial velocity diagnostics
@@ -385,7 +385,7 @@ class TelRow:
             tilt_lat            = float(d.get("tilt_lat",         0.0)),
             tension_feedforward_n        = float(d.get("tension_feedforward_n",        0.0)),
             tension_ic_n                 = float(d.get("tension_ic_n",                 0.0)),
-            collective_from_alt_ctrl     = float(d.get("collective_from_alt_ctrl",     0.0)),
+            thrust_from_alt_ctrl         = float(d.get("thrust_from_alt_ctrl",         0.0)),
             gnd_alt_cmd_m                = float(d.get("gnd_alt_cmd_m",                0.0)),
             winch_speed_ms               = float(d.get("winch_speed_ms",               0.0)),
             aero_T              = float(d.get("aero_T",           0.0)),
@@ -445,7 +445,7 @@ class TelRow:
         phase: str = "",
         tension_feedforward_n: float = 0.0,
         tension_ic_n: float = 0.0,
-        collective_from_alt_ctrl: float = 0.0,
+        thrust_from_alt_ctrl: float = 0.0,
         gnd_alt_cmd_m: float = 0.0,
         winch_speed_ms: float = 0.0,
         elevation_rad: float = 0.0,
@@ -456,7 +456,7 @@ class TelRow:
         lua_ol_alt_p_contrib: float = float("nan"),
         lua_ol_alt_i_contrib: float = float("nan"),
         lua_ol_alt_d_contrib: float = float("nan"),
-        lua_ol_col_cmd_rad: float = float("nan"),
+        lua_ol_thrust_cmd: float = float("nan"),
         lua_ol_tension_n: float = float("nan"),
         roll_sp_rads: float = 0.0,
         pitch_sp_rads: float = 0.0,
@@ -663,7 +663,7 @@ class TelRow:
             tilt_lat            = float(tilt_lat),
             tension_feedforward_n        = float(tension_feedforward_n),
             tension_ic_n                 = float(tension_ic_n),
-            collective_from_alt_ctrl     = float(collective_from_alt_ctrl),
+            thrust_from_alt_ctrl         = float(thrust_from_alt_ctrl),
             gnd_alt_cmd_m                = float(gnd_alt_cmd_m),
             winch_speed_ms               = float(winch_speed_ms),
             aero_T              = aero_T,
@@ -696,7 +696,7 @@ class TelRow:
             lua_ol_alt_p_contrib = float(lua_ol_alt_p_contrib),
             lua_ol_alt_i_contrib = float(lua_ol_alt_i_contrib),
             lua_ol_alt_d_contrib = float(lua_ol_alt_d_contrib),
-            lua_ol_col_cmd_rad   = float(lua_ol_col_cmd_rad),
+            lua_ol_thrust_cmd    = float(lua_ol_thrust_cmd),
             lua_ol_tension_n     = float(lua_ol_tension_n),
             roll_sp_rads        = float(roll_sp_rads),
             pitch_sp_rads       = float(pitch_sp_rads),

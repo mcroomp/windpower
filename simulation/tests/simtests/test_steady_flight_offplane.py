@@ -36,7 +36,7 @@ def _with_azimuth_offset(ic, offset_rad: float):
         vel=rot @ ic.vel,
         R0=rot @ ic.R0,
         rest_length=ic.rest_length,
-        coll_eq_rad=ic.coll_eq_rad,
+        eq_thrust=ic.eq_thrust,
         omega_spin=ic.omega_spin,
         trim_tilt_lon=ic.trim_tilt_lon,
         trim_tilt_lat=ic.trim_tilt_lat,

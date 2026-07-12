@@ -49,11 +49,11 @@ _MIN_ALT_M = 3.0
 _MIN_TENSION_N = 0.01
 
 
-def _get_ic_collective(ic: dict) -> tuple[float, str]:
-    if "coll_eq_rad" in ic:
-        return float(ic["coll_eq_rad"]), "coll_eq_rad"
+def _get_ic_thrust(ic: dict) -> float:
+    if "eq_thrust" in ic:
+        return float(ic["eq_thrust"])
     raise KeyError(
-        "initial_state missing collective seed: coll_eq_rad"
+        "initial_state missing thrust seed: eq_thrust"
     )
 
 
@@ -86,7 +86,7 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
     if ic is None:
         pytest.fail("initial_state is required for IC-passive test")
 
-    coll_seed, coll_src = _get_ic_collective(ic)
+    thr_seed = _get_ic_thrust(ic)
     ten_seed = float(ic["tension_eq_n"])
     R0 = ic.get("R0")
     if R0 is None:
@@ -97,16 +97,14 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
     ic_roll_rad = math.atan2(r21, r22)
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
 
-    # Re-seed IC targets right at release for deterministic passive hold.
-    gcs.send_named_float("RAWES_COL", coll_seed)
+    gcs.send_named_float("RAWES_THR", thr_seed)
     gcs.send_named_float("RAWES_TEN", ten_seed)
     gcs.send_named_float("RAWES_RIC", ic_roll_rad)
     gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
-        "Release seeds: RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
-        coll_seed,
-        coll_src,
+        "Release seeds: RAWES_THR=%.3f, RAWES_TEN=%.1f N, IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
+        thr_seed,
         ten_seed,
         math.degrees(ic_roll_rad),
         math.degrees(ic_pitch_rad),

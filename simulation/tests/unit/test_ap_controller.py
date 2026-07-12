@@ -11,10 +11,11 @@ from pumping_planner import TensionCommand
 from tests.common.mock_ardupilot import MockArdupilot
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
-COL_MIN  = -0.28   # rad
-COL_MAX  =  0.10   # rad
+from param_defaults import load_collective_phys_range
+_COL_MIN, _COL_MAX = load_collective_phys_range()
 T_IC     = 300.0   # N
-COLL_IC  = -0.240  # rad
+COLL_IC  = -0.240  # rad IC collective (test-specific value)
+THRUST_IC = (COLL_IC - _COL_MIN) / (_COL_MAX - _COL_MIN)
 
 IC_POS = np.array([0.0, 0.0, -50.0])
 IC_R   = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)
@@ -37,11 +38,9 @@ def _make_ap():
         ic_pos          = IC_POS,
         mass_kg         = 5.0,
         slew_rate_rad_s = 0.4,
-        warm_coll_rad   = COLL_IC,
+        warm_thrust     = THRUST_IC,
         tension_ic      = T_IC,
         cmd_timeout_s   = 0.5,
-        coll_min_rad    = COL_MIN,
-        coll_max_rad    = COL_MAX,
         wind            = np.zeros(3),
         dt              = DT,
     )
@@ -68,7 +67,7 @@ class TestAltitudePidCollective:
         for _ in range(38):
             coll, _, _ = ap.controller_step(IC_OBS, DT)
             assert coll == coll0
-        assert coll0 == pytest.approx(COLL_IC)
+        assert coll0 == pytest.approx(THRUST_IC)
 
     def test_low_altitude_increases_collective(self):
         """If hub is below target altitude, altitude PID increases collective."""
@@ -83,7 +82,7 @@ class TestAltitudePidCollective:
             omega_spin=0.0,
         )
         coll, _, _ = ap.controller_step(obs, DT)
-        assert coll > COLL_IC
+        assert coll > THRUST_IC
 
     def test_high_altitude_decreases_collective(self):
         """If hub is above target altitude, altitude PID decreases collective."""
@@ -98,7 +97,7 @@ class TestAltitudePidCollective:
             omega_spin=0.0,
         )
         coll, _, _ = ap.controller_step(obs, DT)
-        assert coll < COLL_IC
+        assert coll < THRUST_IC
 
 
 # ---------------------------------------------------------------------------

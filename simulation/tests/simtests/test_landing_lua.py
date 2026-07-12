@@ -98,7 +98,7 @@ def _run_landing(log) -> dict:
     sim.healthy      = True
     sim.vehicle_mode = 4   # GUIDED
 
-    lua = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
+    lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
     lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase)
 
     events    = BadEventLog()

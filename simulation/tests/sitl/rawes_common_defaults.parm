@@ -66,10 +66,10 @@ ATC_RAT_YAW_I     0.0
 # (see torque_model.py for RPM_SCALE and GEAR_RATIO). Bench measurement gives 0.504 for the old 80:44 gear.
 RAWES_YAW_SLP     0
 
-# Lua steady/pumping control gains.
-RAWES_KP_ALT      0.010
-RAWES_KI_ALT      0.001
-RAWES_KD_VZ       0.040
+# Lua steady/pumping control gains (thrust [0..1] space; AP maps thrust\u2192collective via H_COL_MIN/MAX).
+RAWES_KP_ALT      0.0263
+RAWES_KI_ALT      0.0026
+RAWES_KD_VZ       0.105
 RAWES_KP_EL       2.5     # in-plane (elevation) position rate-P gain [rad/s per m]
 RAWES_KP_AZ       0.5     # crosswind (azimuth) position rate-P gain   [rad/s per m]
 RAWES_KD_EL       0.0     # in-plane position rate-D gain [rad/s per (m/s)]

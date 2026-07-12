@@ -102,7 +102,8 @@ def _run(t_sim: float = T_SIM):
     runner._acro = HeliCyclicController(
         _ROTOR_S, col_min_rad=-0.28, col_max_rad=0.10,
     )
-    runner._acro._servo.reset(_IC.coll_eq_rad)
+    from param_defaults import thrust_to_coll_rad as _t2c
+    runner._acro._servo.reset(_t2c(_IC.eq_thrust))
 
     # Ground-side tension-regulating winch.
     tension_target = 300.0
@@ -158,7 +159,7 @@ def _run(t_sim: float = T_SIM):
         dT       = runner.tension_now - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
-        runner.step(DT, _IC.coll_eq_rad, rate_roll, rate_pitch, omega_body,
+        runner.step(DT, _t2c(_IC.eq_thrust), rate_roll, rate_pitch, omega_body,
                     rest_length=rest_now)
         events.check_floor(runner.hub_state["pos"][2], t, "flight")
 
