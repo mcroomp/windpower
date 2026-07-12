@@ -98,7 +98,8 @@ _rawes_fns = {
     el_initialized = function() return _el_initialized end,
     el_rad         = function() return _el_rad end,
     target_alt     = function() return _target_alt end,
-    tension_n      = function() return _tension_n end,
+    tension_n      = function() return _tension_n end,     -- ramped feedforward
+    tension_cmd_n  = function() return _tension_cmd_n end, -- ground-commanded (unramped)
     ic_col           = function() return _ic_col end,
 
     -- ── Altitude PID state accessors ─────────────────────────────────────────

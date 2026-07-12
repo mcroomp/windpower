@@ -102,6 +102,7 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lua_ol_alt_i_contrib",
             "lua_ol_alt_d_contrib",
             "lua_ol_col_cmd_rad",
+            "lua_ol_tension_n",     # OL_TEN: current ramped tension feedforward [N]
             "roll_sp_rads",  # body roll-rate setpoint
             "pitch_sp_rads", # body pitch-rate setpoint
             "yaw_sp_rads",   # body yaw-rate setpoint
@@ -293,6 +294,7 @@ ASYNC_MAV_COLUMNS: tuple[str, ...] = (
     "lua_ol_alt_i_contrib",
     "lua_ol_alt_d_contrib",
     "lua_ol_col_cmd_rad",
+    "lua_ol_tension_n",
     "mav_att_target_roll_deg",
     "mav_att_target_pitch_deg",
     "mav_att_target_yaw_deg",

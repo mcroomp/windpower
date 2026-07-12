@@ -179,7 +179,8 @@ _alt_i        = 0.0
 _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
 _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
-_tension_n      = 200.0   -- target/feed-forward tether tension [N]; updated from RAWES_TEN
+_tension_n      = 200.0   -- ramped tension feedforward [N]; smoothed output used in bz_altitude_hold
+_tension_cmd_n  = 200.0   -- step-change tension commanded by ground via RAWES_TEN
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
 _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 
@@ -405,7 +406,8 @@ local _diag_nvf_keys = {
     "YFF_T", "YFF_U", "YFF_GZ",           -- yaw trim observer
     "OL_RSP", "OL_PSP", "OL_YSP",        -- outer-loop commanded body rates
     "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
-    "OL_AP", "OL_AI", "OL_AD", "OL_COL" -- altitude PID terms + commanded collective
+    "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded collective
+    "OL_TEN"                             -- ramped tension feedforward [N]
 }
 
 local function _diag_set(name, value)
@@ -429,7 +431,7 @@ end
 -- persistent across reboots.  Table key 77 is reserved for this script.
 local _PARAM_KEY    = 77
 local _PARAM_PREFIX = "RAWES_"
-assert(param:add_table(_PARAM_KEY, _PARAM_PREFIX, 13),
+assert(param:add_table(_PARAM_KEY, _PARAM_PREFIX, 14),
        "rawes.lua: failed to register param table (key conflict?)")
 assert(param:add_param(_PARAM_KEY, 1, "MODE",    0),      "RAWES_MODE")
 assert(param:add_param(_PARAM_KEY, 2, "YAW_SLP", 0),      "RAWES_YAW_SLP")
@@ -444,6 +446,7 @@ assert(param:add_param(_PARAM_KEY, 10, "SLW",    0.40),   "RAWES_SLW")
 assert(param:add_param(_PARAM_KEY, 11, "TEL_HZ", 2.0),    "RAWES_TEL_HZ")
 assert(param:add_param(_PARAM_KEY, 12, "YFF_MAX", 0.7),   "RAWES_YFF_MAX")
 assert(param:add_param(_PARAM_KEY, 13, "YFF_TAU", 0.3),   "RAWES_YFF_TAU")
+assert(param:add_param(_PARAM_KEY, 14, "TRP",     2.0),   "RAWES_TRP")
 
 -- Apply RAWES_YAW_SLP slope override (0 → use bench default).
 do
@@ -469,6 +472,23 @@ do
     TEL_HZ         = p("RAWES_TEL_HZ", TEL_HZ)
     YFF_MAX        = p("RAWES_YFF_MAX", YFF_MAX)
     YFF_TAU        = p("RAWES_YFF_TAU", YFF_TAU)
+end
+
+-- ── Tension feed-forward ramp ───────────────────────────────────────────────
+-- _tension_cmd_n: step-change target from RAWES_TEN (ground-commanded)
+-- _tension_n:     smoothed output used in bz_altitude_hold() — ramps toward cmd
+-- Applied every BASE_PERIOD_MS tick (100 Hz) so the kite orientation changes
+-- gradually when the ground transitions between phase tension targets.
+local _TRP_DEFAULT = 2.0  -- default ramp time constant [s]
+
+local function _apply_tension_ramp(dt_s)
+    local tau = p("RAWES_TRP", _TRP_DEFAULT)
+    if tau ~= nil and tau > 0.0 then
+        _tension_n = _tension_n + (dt_s / tau) * (_tension_cmd_n - _tension_n)
+    else
+        _tension_n = _tension_cmd_n
+    end
+    _diag_set("OL_TEN", _tension_n)
 end
 
 local function anchor_ned()
@@ -635,6 +655,7 @@ local function run_flight()
                 local col_ff  = ic_col_or_default()
                 if col_ff < COL_MIN_RAD then col_ff = COL_MIN_RAD end
                 if col_ff > COL_MAX_RAD then col_ff = COL_MAX_RAD end
+                _tension_n    = _tension_cmd_n  -- seed ramp at capture (no startup transient)
                 _col_trim     = col_ff
                 _last_col_rad = col_ff
                 _alt_i        = 0.0
@@ -1036,7 +1057,7 @@ local function update()
 
     -- Update altitude, tension, cyclic and collective targets from NV messages
     if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
-    if _nv_floats["RAWES_TEN"] then _tension_n  = _nv_floats["RAWES_TEN"] end
+    if _nv_floats["RAWES_TEN"] then _tension_cmd_n = _nv_floats["RAWES_TEN"] end
     -- Anchor position (safety-critical; gates altitude-hold capture).
     if _nv_floats["RAWES_ANN"] then _anchor_n = _nv_floats["RAWES_ANN"]; _got_anchor_n = true end
     if _nv_floats["RAWES_ANE"] then _anchor_e = _nv_floats["RAWES_ANE"]; _got_anchor_e = true end
@@ -1079,6 +1100,10 @@ local function update()
 
     -- Over-spin auto-disarm: last-resort protection in EVERY mode.
     run_spin_safety(now)
+
+    -- Tension feed-forward ramp: apply every tick so orientation changes
+    -- smoothly when the ground transitions between phase tension targets.
+    _apply_tension_ramp(BASE_PERIOD_MS * 0.001)
 
     -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up).
     -- In PASSIVE before full IC seed, avoid all non-essential control API calls.

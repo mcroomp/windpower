@@ -229,6 +229,7 @@ def run_mediator(args, trajectory=None):
             "OL_AI":  "lua_ol_alt_i_contrib",
             "OL_AD":  "lua_ol_alt_d_contrib",
             "OL_COL": "lua_ol_col_cmd_rad",
+            "OL_TEN": "lua_ol_tension_n",
         }
         try:
             while not _mavlog_stop.is_set() and not is_stopped():
@@ -906,6 +907,7 @@ def run_mediator(args, trajectory=None):
                 "lua_ol_alt_i_contrib": _mav_async.get("lua_ol_alt_i_contrib", float("nan")),
                 "lua_ol_alt_d_contrib": _mav_async.get("lua_ol_alt_d_contrib", float("nan")),
                 "lua_ol_col_cmd_rad":   _mav_async.get("lua_ol_col_cmd_rad",   float("nan")),
+                "lua_ol_tension_n":     _mav_async.get("lua_ol_tension_n",     float("nan")),
                 "roll_sp_rads":    _mav_async.get("roll_sp_rads", 0.0),
                 "pitch_sp_rads":   _mav_async.get("pitch_sp_rads", 0.0),
                 "yaw_sp_rads":     _mav_async.get("yaw_sp_rads", 0.0),

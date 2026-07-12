@@ -108,6 +108,8 @@ class PumpingGroundController:
     t_reel_out_max   : float  safety timeout for reel-out phase [s]
     t_reel_in_max    : float  safety timeout for reel-in phase [s]
     capture_settle_s : float  hold time after capture before pumping begins [s]
+    tension_ramp_s   : float  ramp duration for tension target changes [s]
+                              (0 = step change, default 2.0 s)
     """
 
     def __init__(
@@ -123,6 +125,7 @@ class PumpingGroundController:
         t_reel_out_max   : float = 120.0,
         t_reel_in_max    : float = 300.0,
         capture_settle_s : float = 2.0,
+        tension_ramp_s   : float = 2.0,
     ) -> None:
         self._alt_m        = float(target_alt_m)
         self._delta_l      = float(delta_l)
@@ -135,6 +138,7 @@ class PumpingGroundController:
         self._t_out_max    = float(t_reel_out_max)
         self._t_in_max     = float(t_reel_in_max)
         self._settle_s     = float(capture_settle_s)
+        self._tension_ramp_s = float(tension_ramp_s)
 
         # State machine.  Starts in 'hold' (pre-capture); pumping begins only
         # after notify_captured() + capture_settle_s.
@@ -150,6 +154,9 @@ class PumpingGroundController:
         self._winch_target_length   : float = 0.0
         self._winch_target_tension  : float = float(tension_ic)
         self._winch_target_velocity : float = 0.0
+        # Ramped tension state (slews toward the phase target)
+        self._tension_current       : float = float(tension_ic)
+        self._prev_step_t           : float | None = None
 
     # ── capture gate ─────────────────────────────────────────────────────────
 
@@ -212,13 +219,24 @@ class PumpingGroundController:
         self._advance_phase(t_sim, rest_length)
         phase = self._phase
 
-        # ── per-phase tension target (AP feed-forward + winch governor) ───
+        # ── per-phase tension target (step change — sent to Lua as RAWES_TEN) ──
         if phase == "reel-out":
             t_target = self._tension_out
         elif phase == "reel-in":
             t_target = self._tension_in
         else:  # hold
             t_target = self._tension_ic
+
+        # ── ramp winch_target_tension toward phase target ─────────────────
+        # winch governor sees the smoothed value; Lua receives t_target
+        # (step change) and applies its own ramp via RAWES_TRP.
+        dt = (t_sim - self._prev_step_t) if self._prev_step_t is not None else 0.0
+        self._prev_step_t = t_sim
+        if self._tension_ramp_s > 0.0 and dt > 0.0:
+            alpha = dt / self._tension_ramp_s
+            self._tension_current += alpha * (t_target - self._tension_current)
+        else:
+            self._tension_current = float(t_target)
 
         # ── winch length target (length-driven WinchController) ───────────
         if phase == "reel-out":
@@ -236,10 +254,12 @@ class PumpingGroundController:
         else:  # hold
             self._winch_target_velocity = 0.0
 
-        self._winch_target_tension = t_target
+        self._winch_target_tension = self._tension_current
 
         # Altitude is CONSTANT in every phase: the kite holds the IC altitude
         # while the winch pumps the tether.
+        # tension_target_n carries the step-change target (unramped) so Lua
+        # can apply its own RAWES_TRP ramp independently.
         return TensionCommand(
             tension_target_n = float(t_target),
             alt_m            = self._alt_m,

@@ -200,6 +200,7 @@ class TelRow:
     lua_ol_alt_i_contrib: float = float("nan")
     lua_ol_alt_d_contrib: float = float("nan")
     lua_ol_col_cmd_rad:   float = float("nan")
+    lua_ol_tension_n:     float = float("nan")   # ramped tension feedforward [N]
 
     # AP rate commands and radial velocity diagnostics
     roll_sp_rads:       float = 0.0   # AP roll rate setpoint [rad/s]
@@ -456,6 +457,7 @@ class TelRow:
         lua_ol_alt_i_contrib: float = float("nan"),
         lua_ol_alt_d_contrib: float = float("nan"),
         lua_ol_col_cmd_rad: float = float("nan"),
+        lua_ol_tension_n: float = float("nan"),
         roll_sp_rads: float = 0.0,
         pitch_sp_rads: float = 0.0,
         yaw_sp_rads: float = 0.0,
@@ -695,6 +697,7 @@ class TelRow:
             lua_ol_alt_i_contrib = float(lua_ol_alt_i_contrib),
             lua_ol_alt_d_contrib = float(lua_ol_alt_d_contrib),
             lua_ol_col_cmd_rad   = float(lua_ol_col_cmd_rad),
+            lua_ol_tension_n     = float(lua_ol_tension_n),
             roll_sp_rads        = float(roll_sp_rads),
             pitch_sp_rads       = float(pitch_sp_rads),
             yaw_sp_rads         = float(yaw_sp_rads),
