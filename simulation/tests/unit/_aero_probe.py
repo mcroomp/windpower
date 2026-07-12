@@ -46,7 +46,6 @@ def probe_steady(
     v_hub_world: np.ndarray,
     omega_rotor: float,
     wind_world: np.ndarray,
-    t: float = 0.0,
     rho_kg_m3: float = 1.225,
 ):
     """Return a quasi-steady AeroResult.

@@ -296,8 +296,9 @@ param_groups = {
     ],
     "Scripting": [
         "SCR_ENABLE", "SCR_HEAP_SIZE",
-        "SCR_USER1", "SCR_USER2", "SCR_USER3",
-        "SCR_USER4", "SCR_USER5", "SCR_USER6",
+        "RAWES_MODE", "RAWES_YAW_SLP",
+        "RAWES_KP_ALT", "RAWES_KI_ALT", "RAWES_KD_VZ",
+        "RAWES_KP_EL", "RAWES_KP_AZ", "RAWES_KD_EL", "RAWES_CWMAX", "RAWES_SLW",
     ],
     "Arming / safety": [
         "ARMING_SKIPCHK", "BRD_SAFETYENABLE",

@@ -706,6 +706,7 @@ def _static_stack(
 def _acro_stack(tmp_path, *, extra_config=None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
                 extra_boot_params: "dict[str, float] | None" = None,
+                rawes_params: "dict[str, float] | None" = None,
                 arm_at_sim_s: "float | None" = None):
     """
     Core GUIDED_NOGPS stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
@@ -716,18 +717,15 @@ def _acro_stack(tmp_path, *, extra_config=None,
     Differences between fixtures are handled outside this function:
       - extra_config   : pumping cycle passes trajectory config here
       - pre-launch work: Lua fixture installs scripts before calling this
-      - post-arm work  : Lua fixture sets SCR_USER params inside the with-block
+      - post-arm work  : Lua fixture sets RAWES_MODE inside the with-block
 
     Parameters
     ----------
-    tmp_path       : pytest tmp_path fixture value
-    extra_config   : optional dict merged into mediator config (pumping cycle)
-    arm            : if False, skip _run_acro_setup — yield with procs running
-                     but GCS not connected and vehicle not armed.  Callers may
-                     call ctx.gcs.connect() manually (e.g. smoke tests).
-    with_mediator  : if False, skip mediator launch (pure SITL connectivity tests)
-    test_name      : pytest test node name; used as logger name and for persistent
-                     log file names so each test run produces uniquely-named files.
+    rawes_params : dict of RAWES_* params to apply via GCS after scripting is up.
+        Script-generated params (RAWES_MODE, RAWES_KP_ALT, etc.) cannot be set
+        via the boot parm file because param:add_table registers them at script
+        load time, AFTER --add-param-file is applied.  Pass them here instead;
+        _run_acro_setup applies them via set_param once the param subsystem is ready.
     """
     # ── Initial state ──────────────────────────────────────────────────────────
     initial_state = None
@@ -820,6 +818,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
                     ctx,
                     _procs_alive,
                     boot_setup=sitl_ctx.boot_setup,
+                    rawes_params=rawes_params,
                     arm_at_sim_s=arm_at_sim_s,
                     use_ic_pre_arm_attitude=_use_ic_pre_arm_att,
                 )
@@ -1028,6 +1027,7 @@ def _run_acro_setup(
     ctx: StackContext,
     _procs_alive,
     boot_setup: "ParamSetup | None" = None,
+    rawes_params: "dict[str, float] | None" = None,
     arm_at_sim_s: "float | None" = None,
     use_ic_pre_arm_attitude: bool = True,
 ) -> None:
@@ -1040,16 +1040,18 @@ def _run_acro_setup(
 
     Steps:
         1. Connect GCS; request telemetry streams; clear motor interlock
-        2. Wait for param subsystem
+        2. Wait for param subsystem; apply rawes_params via GCS (scripting is up)
         3. Verify all boot params via MAVLink read-back (pytest.fail on mismatch)
         4. Wait for EKF tilt alignment — FAIL HARD if it doesn't arrive
         5. Arm with force=True (motor interlock low → arm → raise interlock)
         6. Confirm GUIDED_NOGPS mode
 
-    Populates ctx.flight_events with timing checkpoints.
-    Populates ctx.setup_samples with every EKF/ATTITUDE/position sample.
-    Raises RuntimeError on any unrecoverable failure so the fixture
-    finally-block still runs cleanup.
+    Parameters
+    ----------
+    rawes_params : RAWES_* params to apply via GCS after the param subsystem is ready.
+        Script-generated params cannot be set via boot parm file (registered at
+        script load time, after --add-param-file).  Pass RAWES_MODE and any other
+        RAWES_* values here; they are applied via set_param once scripting is up.
     """
     gcs            = ctx.gcs
     log            = ctx.log
@@ -1103,6 +1105,18 @@ def _run_acro_setup(
     _wait_params_ready(gcs, log)
     _dump_params_to_log(gcs, ctx.test_log_dir, log)
     _procs_alive()
+
+    # Apply RAWES_* script-generated params now that scripting is up.
+    # param:add_table registers RAWES_* at Lua load time (after --add-param-file),
+    # so they cannot be set via the boot parm file.  By the time _wait_params_ready
+    # returns, rawes.lua has already loaded and all RAWES_* params are registered.
+    if rawes_params:
+        log.info("[setup 2/6] Applying %d RAWES_* params via GCS ...", len(rawes_params))
+        for name, value in rawes_params.items():
+            ok = gcs.set_param(name, float(value), timeout=5.0)
+            log.info("  %-28s = %-10g  ACK=%s", name, value, ok)
+            if not ok:
+                log.warning("  [WARN] set_param %s=%g failed — param may not be registered", name, value)
 
     # ── 3 / 4. EKF alignment then boot-param verify ───────────────────────────
     # EKF alignment is time-critical (must complete within kinematic startup).
@@ -1857,7 +1871,8 @@ _IC_TORQUE_YAW_PARAMS = ParamSetup({
 # Inherits the standard DDFP yaw PID; adds only the scripting overlay.
 _LUA_TORQUE_EXTRA_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
     "SCR_ENABLE":       1,     # load rawes.lua for optional RAWES_ARM disarm timer
-    "SCR_USER6":        0,     # MODE_NONE: no Lua flight control; timer remains available
+    # RAWES_MODE is NOT set here: script-generated params are applied via GCS
+    # after scripting is up (see rawes_params arg to _run_acro_setup).
 }))
 
 # Extra params for the ArduPilot DDFP yaw PI fixture (US-convention rotor).
@@ -1970,8 +1985,10 @@ def _torque_stack(
     if install_scripts:
         _install_lua_scripts(*install_scripts)
 
-    # passive_init boot overrides: enable scripting + MODE_PASSIVE (SCR_USER6=3).
-    _passive_boot = {"SCR_ENABLE": 1, "SCR_USER6": 3} if passive_init else {}
+    # passive_init boot overrides: enable scripting only (RAWES_MODE applied via GCS
+    # after scripting is up; cannot be set via boot parm file).
+    _passive_boot = {"SCR_ENABLE": 1} if passive_init else {}
+    _passive_rawes = {"RAWES_MODE": 3} if passive_init else {}
 
     # Build one complete param setup for this test.
     # Always-wipe EEPROM + per-test boot file = single source of truth.
@@ -2086,6 +2103,15 @@ def _torque_stack(
                 pytest.fail("Param subsystem never responded within 20 s")
             _dump_params_to_log(gcs, sitl_ctx.test_log_dir, log)
 
+            # Apply RAWES_* script-generated params now that scripting is up.
+            # param:add_table registers RAWES_* at Lua load time (after --add-param-file),
+            # so they cannot be set via the boot parm file.  Apply them here via GCS.
+            if _passive_rawes:
+                log.info("Applying RAWES_* params via GCS (scripting now registered them) ...")
+                for _rname, _rval in _passive_rawes.items():
+                    _ok = gcs.set_param(_rname, float(_rval), timeout=5.0)
+                    log.info("  %-28s = %-10g  ACK=%s", _rname, _rval, _ok)
+
             # EKF alignment (no RC override keepalive required).
             log.info("Waiting for EKF yaw alignment (up to 45 s) ...")
             ekf_ok  = False
@@ -2130,7 +2156,7 @@ def _torque_stack(
             _assert_alive()
 
             # passive_init: seed the IC operating point BEFORE arm so rawes.lua
-            # MODE_PASSIVE (SCR_USER6=3) captures yaw and begins commanding the IC
+            # MODE_PASSIVE (RAWES_MODE=3) captures yaw and begins commanding the IC
             # attitude immediately.  Orientation stays level (roll=pitch=0); only
             # the collective + the captured EKF yaw are held.  Mirrors the flight
             # GUIDED_NOGPS init technique (seed IC -> seed pre-arm attitude -> arm).

@@ -113,10 +113,10 @@ def _safety_shutdown(session: RawesGCS, *,
     is best-effort: one failure does not skip the next."""
     print("  [SAFETY] shutting down ...")
     try:
-        session.set_param("SCR_USER6", 0)
-        print("  [SAFETY] SCR_USER6 -> 0 (Lua mode none)")
+        session.set_param("RAWES_MODE", 0)
+        print("  [SAFETY] RAWES_MODE -> 0 (Lua mode none)")
     except Exception as e:
-        print(f"  [SAFETY] failed to set SCR_USER6=0: {e}")
+        print(f"  [SAFETY] failed to set RAWES_MODE=0: {e}")
     time.sleep(0.30)   # let SRV_Channels override timeout expire
     if not skip_motor_off:
         try:
@@ -643,8 +643,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     saved_fn = _take_servo4(session) if cfg["take_servo4"] else None
 
     # Activate Lua mode
-    session.set_param("SCR_USER6", cfg["scr_user6"])
-    print(f"  SCR_USER6 -> {cfg['scr_user6']} ({name} mode)")
+    session.set_param("RAWES_MODE", cfg["rawes_mode"])
+    print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode)")
 
     # Passive confirms the AP yaw PID was forced to zero.
     if name == "passive":
@@ -709,7 +709,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         "osc":             osc if osc is not None else "",
         "run_start_local": datetime.now().isoformat(timespec="seconds"),
         "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "SCR_USER6":       cfg["scr_user6"],
+        "RAWES_MODE":      cfg["rawes_mode"],
     }
     # Add per-mode AP param snapshot
     for ap_name in gain_map.values():

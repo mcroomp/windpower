@@ -133,11 +133,11 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     gcs.send_named_float("RAWES_TEN", ten_seed)
     gcs.send_named_float("RAWES_RIC", ic_roll_rad)
     gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
-    gcs.set_param("SCR_USER6", 3, timeout=5.0)
+    gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
     gcs.sim_sleep(10.0)
-    ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
-    log.info("Promoted Lua to MODE_STEADY (SCR_USER6 -> 1)  ACK=%s", ok)
+    ok = gcs.set_param("RAWES_MODE", 1, timeout=5.0)
+    log.info("Promoted Lua to MODE_STEADY (RAWES_MODE -> 1)  ACK=%s", ok)
 
     # ── Ground controller (shared PumpingGroundController -- same as simtest) ──
     target_alt_m = ctx.home_alt_m

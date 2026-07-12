@@ -20,7 +20,10 @@ _rawes_fns = {
     KP_ALT                  = KP_ALT,
     KI_ALT                  = KI_ALT,
     KD_VZ                   = KD_VZ,
-    RATE_KP_OUTER           = RATE_KP_OUTER,
+    KP_EL                   = KP_EL,
+    KP_AZ                   = KP_AZ,
+    KD_EL                   = KD_EL,
+    CWMAX                   = CWMAX,
     RATE_ACCEL_MAX_RADSS    = RATE_ACCEL_MAX_RADSS,
     AZ_REF_TAU_S            = AZ_REF_TAU_S,
 
@@ -49,6 +52,11 @@ _rawes_fns = {
     anchor_d        = function() return _anchor_d end,
     bz_slew         = function() return _bz_slew end,
 
+    -- Crosswind rate damping gains (delivered via NAMED_VALUE_FLOAT: RAWES_CWP/CWD/CWM).
+    cw_rate_kp      = function() return _cw_rate_kp end,
+    cw_rate_kd      = function() return _cw_rate_kd end,
+    cw_rate_max     = function() return _cw_rate_max end,
+
     -- ── GUIDED angle conversion ──────────────────────────────────────────────
 
     bz_ned_to_roll_pitch = bz_ned_to_roll_pitch,
@@ -71,12 +79,12 @@ _rawes_fns = {
     yaw_ff_trim     = function() return _yaw_ff_trim end,
     yaw_trim_reset  = function()
         _yaw_ff_trim     = 0.0
-        _yaw_nvf_last_ms = nil
+        _nvf_last_ms = nil
     end,
     YAW_MOTOR_FUNC  = YAW_MOTOR_FUNC,
     YFF_A           = YFF_A,
     YFF_MAX         = YFF_MAX,
-    YFF_TRIM_TAU    = YFF_TRIM_TAU,
+    YFF_TAU         = YFF_TAU,
 
     -- ── RAWES_ARM state accessors ─────────────────────────────────────────────
 

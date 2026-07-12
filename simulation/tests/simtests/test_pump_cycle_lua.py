@@ -99,7 +99,6 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     sim.gyro         = [0.0, 0.0, 0.0]
     # rawes.lua now gates steady capture on anchor NVFs. In this simtest path
     # the anchor is at NED origin, so publish zeros once at startup.
-    sim.send_named_float("RAWES_SLW", 0.40)
     sim.send_named_float("RAWES_ANN", 0.0)
     sim.send_named_float("RAWES_ANE", 0.0)
     sim.send_named_float("RAWES_AND", 0.0)
@@ -301,7 +300,7 @@ def test_lua_pumping_constants():
     assert float(f.KP_ALT)                == pytest.approx(0.010, rel=1e-3)
     assert float(f.KI_ALT)                == pytest.approx(0.001, rel=1e-3)
     assert float(f.KD_VZ)                 == pytest.approx(0.040, rel=1e-3)
-    assert float(f.RATE_KP_OUTER)         == pytest.approx(2.5, rel=1e-3)
+    assert float(f.KP_EL)                 == pytest.approx(2.5, rel=1e-3)
     assert float(f.RATE_ACCEL_MAX_RADSS)  == pytest.approx(4.0, rel=1e-3)
 
 

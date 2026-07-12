@@ -17,6 +17,8 @@ from scipy.spatial.transform import Rotation
 from arduloop import GuidedAttitudeController, HeliParams
 from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
                         compute_rate_cmd, compute_rate_cmd_sqrt,
+                        compute_crosswind_rate_cmd,
+                        apply_crosswind_rate_to_body_rates,
                         slerp_body_z, update_plane_azimuth)
 from landing_planner import LandingCommand
 from physics_core import HubObservation
@@ -28,7 +30,7 @@ from telemetry_csv import TelRow, write_csv
 def _load_rawes_pumping_constants() -> dict[str, float]:
     """Load pumping-mode constants from centralized loaders.
 
-    Gains come from the shared ArduPilot .parm chain (SCR_USER2..5), while
+    Gains come from the shared ArduPilot .parm chain (RAWES_KP_ALT etc.), while
     non-parametrized limits remain sourced from rawes.lua constants.
     """
     lua_constants = load_rawes_lua_constants((
@@ -40,10 +42,10 @@ def _load_rawes_pumping_constants() -> dict[str, float]:
     return {
         "COL_MIN_RAD": lua_constants["COL_MIN_RAD"],
         "COL_MAX_RAD": lua_constants["COL_MAX_RAD"],
-        "KP_ALT": get_ap_param("SCR_USER2", params=params),
-        "KI_ALT": get_ap_param("SCR_USER3", params=params),
-        "KD_VZ": get_ap_param("SCR_USER4", params=params),
-        "RATE_KP_OUTER": get_ap_param("SCR_USER5", params=params),
+        "KP_ALT": get_ap_param("RAWES_KP_ALT", params=params),
+        "KI_ALT": get_ap_param("RAWES_KI_ALT", params=params),
+        "KD_VZ": get_ap_param("RAWES_KD_VZ", params=params),
+        "KP_EL": get_ap_param("RAWES_KP_EL", params=params),
         "RATE_ACCEL_MAX_RADSS": lua_constants["RATE_ACCEL_MAX_RADSS"],
     }
 
@@ -270,7 +272,7 @@ class _PumpingPythonMode:
     KP_ALT: float = _RAWES_PUMPING_CONSTANTS["KP_ALT"]
     KI_ALT: float = _RAWES_PUMPING_CONSTANTS["KI_ALT"]
     KD_VZ:  float = _RAWES_PUMPING_CONSTANTS["KD_VZ"]
-    RATE_KP_OUTER: float = _RAWES_PUMPING_CONSTANTS["RATE_KP_OUTER"]
+    KP_EL:  float = _RAWES_PUMPING_CONSTANTS["KP_EL"]
     # Rate-stability gate on the collective vz-damping term (mirrors rawes.lua):
     # fade KD_VZ when body rates are elevated so the derivative term does not
     # react to vertical velocity produced by the attitude loop still slewing.
@@ -288,12 +290,15 @@ class _PumpingPythonMode:
         cmd_timeout_s  : float = CMD_TIMEOUT_S,
         coll_min_rad   : float = COL_MIN_RAD,
         coll_max_rad   : float = COL_MAX_RAD,
-        kp_outer       : float = RATE_KP_OUTER,
+        kp_outer       : float = KP_EL,
         kp_alt         : float = KP_ALT,
         ki_alt         : float = KI_ALT,
         kd_vz          : float = KD_VZ,
         rate_accel_max_radss: float = RATE_ACCEL_MAX_RADSS,
         az_ref_tau_s   : float = AZ_REF_TAU_S,
+        cw_rate_kp     : float = 0.0,
+        cw_rate_kd     : float = 0.0,
+        cw_rate_max    : float = 0.6,
         events         = None,
     ) -> None:
         self._mass_kg    = float(mass_kg)
@@ -317,6 +322,11 @@ class _PumpingPythonMode:
         self._kd_vz = float(kd_vz)
         self._rate_accel_max = float(rate_accel_max_radss)
 
+        # Crosswind rate damping gains
+        self._cw_rate_kp = float(cw_rate_kp)
+        self._cw_rate_kd = float(cw_rate_kd)
+        self._cw_rate_max = float(cw_rate_max)
+
         self._col_trim    = float(warm_coll_rad)
         self._C_held      = float(warm_coll_rad)
         self._alt_i       = 0.0
@@ -325,6 +335,7 @@ class _PumpingPythonMode:
         self._comms_ok    = True
         self._t_sim       = 0.0
         self._pos_ned     = np.asarray(ic_pos, dtype=float)
+        self._pos_design  = np.asarray(ic_pos, dtype=float)  # Reference position for crosswind rate damping
 
         self._bz_goal = None
         self._last_roll_sp = 0.0
@@ -402,6 +413,21 @@ class _PumpingPythonMode:
             dt=dt,
             kd=0.0,
         )
+        
+        # Apply crosswind rate damping if gains are non-zero.
+        if self._cw_rate_kp > 0.0 or self._cw_rate_kd > 0.0:
+            # Compute world-frame East rotation rate from crosswind position/velocity error.
+            omega_east_cmd = compute_crosswind_rate_cmd(
+                obs.pos, obs.vel, self._pos_design,
+                kp=self._cw_rate_kp, kd=self._cw_rate_kd,
+                rate_max=self._cw_rate_max,
+            )
+            # Map to body-frame roll/pitch rates.
+            omega_body_corr = apply_crosswind_rate_to_body_rates(omega_east_cmd, R)
+            rate_sp = np.asarray(rate_sp, dtype=float).copy()
+            rate_sp[0] += float(omega_body_corr[0])
+            rate_sp[1] += float(omega_body_corr[1])
+        
         self._bz_goal = bz_goal
         self._last_roll_sp = float(rate_sp[0])
         self._last_pitch_sp = float(rate_sp[1])
@@ -636,7 +662,7 @@ class MockArdupilot:
         "KP_ALT": _PumpingPythonMode.KP_ALT,
         "KI_ALT": _PumpingPythonMode.KI_ALT,
         "KD_VZ": _PumpingPythonMode.KD_VZ,
-        "RATE_KP_OUTER": _PumpingPythonMode.RATE_KP_OUTER,
+        "KP_EL": _PumpingPythonMode.KP_EL,
         "RATE_ACCEL_MAX_RADSS": _PumpingPythonMode.RATE_ACCEL_MAX_RADSS,
     }
     LANDING_CONSTANTS = {
@@ -707,7 +733,7 @@ class MockArdupilot:
         ki_vz: float = _LandingPythonMode.KI_VZ,
         col_min_rad: float = _LandingPythonMode.COL_MIN_RAD,
         col_max_rad: float = _LandingPythonMode.COL_MAX_RAD,
-        kp_outer: float = _PumpingPythonMode.RATE_KP_OUTER,
+        kp_outer: float = _PumpingPythonMode.KP_EL,
     ):
         return cls.for_python(
             mode="landing",

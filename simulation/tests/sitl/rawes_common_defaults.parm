@@ -56,17 +56,28 @@ ATC_RAT_YAW_D     0.0
 ATC_RAT_YAW_FLTD  10.0
 ATC_RAT_YAW_I     0.0
 
-# SCR_USER1: yaw motor slope override [RPM/µs].  0 -> use bench default 0.504.
-# Set from bench measurement of d(shaft_RPM)/d(PWM_us) for the installed motor.
-# The correct value for the GB4008 66KV + 10:1 gear is SCR_USER1 = RPM_SCALE/(GEAR_RATIO * SERVO9_SPAN_US * 2pi/60)
-# (see torque_model.py for RPM_SCALE and GEAR_RATIO). Bench measurement gives 0.504 for the old 80:44 gear.
-SCR_USER1         0
+# RAWES_* script-generated parameters (registered by rawes.lua via param:add_table).
+# These replace the old SCR_USER1..5 slots and are visible in GCS as RAWES_* params.
+# RAWES_MODE is set per-test; defaults here cover steady/pumping flight gains.
 
-# Lua steady/pumping control gains (consumed by rawes.lua via SCR_USER2..5).
-SCR_USER2         0.010   # KP_ALT
-SCR_USER3         0.001   # KI_ALT
-SCR_USER4         0.040   # KD_VZ
-SCR_USER5         2.5     # RATE_KP_OUTER
+# RAWES_YAW_SLP: yaw motor slope override [RPM/µs].  0 -> use bench default 0.504.
+# Set from bench measurement of d(shaft_RPM)/d(PWM_us) for the installed motor.
+# The correct value for the GB4008 66KV + 10:1 gear is RAWES_YAW_SLP = RPM_SCALE/(GEAR_RATIO * SERVO9_SPAN_US * 2pi/60)
+# (see torque_model.py for RPM_SCALE and GEAR_RATIO). Bench measurement gives 0.504 for the old 80:44 gear.
+RAWES_YAW_SLP     0
+
+# Lua steady/pumping control gains.
+RAWES_KP_ALT      0.010
+RAWES_KI_ALT      0.001
+RAWES_KD_VZ       0.040
+RAWES_KP_EL       2.5     # in-plane (elevation) position rate-P gain [rad/s per m]
+RAWES_KP_AZ       0.5     # crosswind (azimuth) position rate-P gain   [rad/s per m]
+RAWES_KD_EL       0.0     # in-plane position rate-D gain [rad/s per (m/s)]
+RAWES_CWMAX       0.6     # position rate saturation [rad/s]
+RAWES_SLW         0.40    # elevation/body_z slew rate limit [rad/s]
+RAWES_TEL_HZ      2.0     # diagnostic NVF telemetry emission rate [Hz]
+RAWES_YFF_MAX     0.7     # yaw trim clamp upper bound [throttle fraction]
+RAWES_YFF_TAU     0.3     # yaw trim low-pass time constant [s]
 
 # --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
 # Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw

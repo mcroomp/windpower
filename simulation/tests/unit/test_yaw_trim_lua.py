@@ -49,7 +49,7 @@ class TestTrimTarget:
         """With small dt the trim moves only a fraction (alpha) per step."""
         sim = _sim()
         a   = float(sim.fns.YFF_A)
-        tau = float(sim.fns.YFF_TRIM_TAU)
+        tau = float(sim.fns.YFF_TAU)
         u, psi_dot = 0.4, 0.0
         alpha = _DT / (tau + _DT)
         out = float(sim.fns.yaw_trim_step(_DT, u, psi_dot))

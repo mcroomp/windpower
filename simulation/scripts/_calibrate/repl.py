@@ -558,11 +558,11 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
 
     # MODE_PASSIVE / MODE_YAW would also drive SERVO4 -- force Lua to NONE.
     saved_overrides: dict[str, float] = {}
-    saved_scr = session.get_param("SCR_USER6")
+    saved_scr = session.get_param("RAWES_MODE")
     if saved_scr is not None and int(saved_scr) != 0:
-        saved_overrides["SCR_USER6"] = float(saved_scr)
-        session.set_param("SCR_USER6", 0)
-        print(f"  SCR_USER6 {int(saved_scr)} -> 0 (motor needs direct SERVO{SERVO_MOTOR} control)")
+        saved_overrides["RAWES_MODE"] = float(saved_scr)
+        session.set_param("RAWES_MODE", 0)
+        print(f"  RAWES_MODE {int(saved_scr)} -> 0 (motor needs direct SERVO{SERVO_MOTOR} control)")
 
     if not _arm(session, force=True):
         _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)

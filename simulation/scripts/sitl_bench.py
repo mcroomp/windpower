@@ -84,7 +84,7 @@ _BOOT_PARAMS: dict[str, float] = {
     "H_RSC_RUNUP_TIME":   2,
     # Lua scripting
     "SCR_ENABLE":         1,
-    "SCR_USER6":          0,     # MODE_NONE at boot; calibrate.py sets mode
+    "RAWES_MODE":          0,     # MODE_NONE at boot; calibrate.py sets mode
     # Arming — disable prearm checks so force-arm from calibrate.py works
     "ARMING_CHECK":       0,
 }

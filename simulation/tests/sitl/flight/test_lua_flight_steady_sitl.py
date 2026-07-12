@@ -162,16 +162,16 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     gcs.send_named_float("RAWES_TEN", ten_seed)
     gcs.send_named_float("RAWES_RIC", ic_roll_rad)
     gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
-    ok = gcs.set_param("SCR_USER6", 3, timeout=5.0)
+    ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
         "Release seeds (IC-passive init): RAWES_COL=%+.4f (%s), RAWES_TEN=%.1f N, "
-        "IC r/p=(%.2f, %.2f)deg, SCR_USER6=3 ACK=%s",
+        "IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
         coll_seed, coll_src, ten_seed,
         math.degrees(ic_roll_rad), math.degrees(ic_pitch_rad), ok,
     )
 
     if _DEBUG_KEEP_PASSIVE:
-        log.info("Kinematic phase ended -- DEBUG: keeping Lua in MODE_PASSIVE (SCR_USER6=3)")
+        log.info("Kinematic phase ended -- DEBUG: keeping Lua in MODE_PASSIVE (RAWES_MODE=3)")
     else:
         # For steady-flight validation, promote to MODE_STEADY almost
         # immediately after kinematic_exit. A long passive dwell can allow
@@ -183,8 +183,8 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         if _PASSIVE_SETTLE_S > 0.0:
             gcs.sim_sleep(_PASSIVE_SETTLE_S)
         log.info("Promoting Lua to MODE_STEADY")
-        ok = gcs.set_param("SCR_USER6", 1, timeout=5.0)
-        log.info("  SCR_USER6 -> 1 (MODE_STEADY)  ACK=%s", ok)
+        ok = gcs.set_param("RAWES_MODE", 1, timeout=5.0)
+        log.info("  RAWES_MODE -> 1 (MODE_STEADY)  ACK=%s", ok)
 
     all_statustext = ctx.all_statustext
     lua_captured   = False

@@ -38,27 +38,56 @@ Controls (interactive mode):
 from __future__ import annotations
 
 import argparse
+import contextlib
+import logging
 import math
+import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 
+# Suppress warnings early (before importing VTK/PyVista)
+warnings.filterwarnings('ignore')
+logging.disable(logging.CRITICAL)
+os.environ['VTK_DEBUG'] = '0'
+os.environ['VTK_DATA_ROOT'] = ''
+os.environ['VTK_LOGGING_LEVEL'] = '0'
+
+# Redirect stderr to suppress VTK warnings
+import io
+_stderr_backup = sys.stderr
+sys.stderr = io.StringIO()
+
 try:
     from vtkmodules.vtkRenderingCore import (
         vtkRenderer, vtkPolyDataMapper, vtkActor,
     )
+    from vtkmodules.vtkCommonCore import vtkLogger
     _HAS_VTK = True
 except ImportError:
     _HAS_VTK = False
+finally:
+    # Restore stderr after VTK import
+    sys.stderr = _stderr_backup
 
 try:
     import pyvista as pv
+    pv.set_jupyter_backend(None)
+    pv.set_plot_theme("document")
 except ImportError:
     print("PyVista not found.  Install with:  pip install pyvista")
     sys.exit(1)
+
+# Suppress VTK/PyVista debug and warning messages
+if _HAS_VTK:
+    try:
+        vtkLogger.SetStdErrType(0)  # Disable VTK stderr
+    except Exception:
+        pass
 
 # Ensure viz3d package is importable when run as a script
 _HERE = Path(__file__).resolve().parent
@@ -700,8 +729,12 @@ class RAWESVisualizer:
             if len(_fps_times) > 30:
                 _fps_times.pop(0)
             if len(_fps_times) >= 2:
-                actual_fps = (len(_fps_times) - 1) / (_fps_times[-1] - _fps_times[0])
-                _fps_actor.SetInput(f"FPS {actual_fps:4.1f}")
+                dt_fps = _fps_times[-1] - _fps_times[0]
+                if dt_fps > 1e-6:
+                    actual_fps = (len(_fps_times) - 1) / dt_fps
+                    _fps_actor.SetInput(f"FPS {actual_fps:4.1f}")
+                else:
+                    _fps_actor.SetInput("FPS --")
 
             if playing[0]:
                 sim_target = sim_t0[0] + (t_loop - wall_t0[0]) * speed[0]
@@ -1424,11 +1457,42 @@ def main(argv: Optional[list] = None) -> None:
     viz = RAWESVisualizer(frames, trail_len=args.trail, playback_fps=args.fps,
                          no_inset=args.no_inset)
 
+    # Suppress VTK warnings during rendering by redirecting stderr
     if args.export:
-        viz.export(args.export, fps=args.fps,
-                   spin_substeps=args.spin_substeps)
+        with _suppress_vtk_stderr():
+            viz.export(args.export, fps=args.fps,
+                       spin_substeps=args.spin_substeps)
     else:
-        viz.play()
+        with _suppress_vtk_stderr():
+            viz.play()
+
+
+def _suppress_vtk_stderr():
+    """Context manager to suppress VTK stderr at OS file descriptor level."""
+    @contextlib.contextmanager
+    def _context():
+        if sys.platform == 'win32':
+            try:
+                stderr_fileno = sys.stderr.fileno()
+                stderr_copy = os.dup(stderr_fileno)
+                nul_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(nul_fd, stderr_fileno)
+                try:
+                    yield
+                finally:
+                    os.dup2(stderr_copy, stderr_fileno)
+                    os.close(nul_fd)
+                    os.close(stderr_copy)
+            except (OSError, AttributeError):
+                # Fallback if fd redirection fails
+                yield
+        else:
+            # Unix-like: use contextlib.redirect_stderr
+            with open(os.devnull, 'w') as devnull:
+                with contextlib.redirect_stderr(devnull):
+                    yield
+    
+    return _context()
 
 
 if __name__ == "__main__":

@@ -36,8 +36,8 @@ class TestTensionApLuaConstants:
     def test_kd_vz(self, lua):
         assert MockArdupilot.PUMPING_CONSTANTS["KD_VZ"] == pytest.approx(lua.fns.KD_VZ)
 
-    def test_rate_kp_outer(self, lua):
-        assert MockArdupilot.PUMPING_CONSTANTS["RATE_KP_OUTER"] == pytest.approx(lua.fns.RATE_KP_OUTER)
+    def test_kp_el(self, lua):
+        assert MockArdupilot.PUMPING_CONSTANTS["KP_EL"] == pytest.approx(lua.fns.KP_EL)
 
     def test_rate_accel_max(self, lua):
         assert MockArdupilot.PUMPING_CONSTANTS["RATE_ACCEL_MAX_RADSS"] == pytest.approx(lua.fns.RATE_ACCEL_MAX_RADSS)

@@ -315,8 +315,8 @@ _run_stack() {
                 ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
             | tee "$_wlog" \
             | sed -n -E '/PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error/p' \
-            | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}' \
-            || _test_rc=$?
+            | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}'
+            _test_rc=${PIPESTATUS[0]}
             rm -rf "$SIM_DIR/logs/${_label}"
             _retrieve_logs "$_c"
             mkdir -p "$SIM_DIR/logs/${_label}"
@@ -344,7 +344,7 @@ _run_stack() {
         _wlog="${_WORKER_LOGS[$j]}"
         _label="$(basename "${_ALL_FILES[$j]}" .py)"
         _summary=$(grep -E "^=+ .* in [0-9]" "$_wlog" 2>/dev/null | tail -1 || echo "(no output)")
-        if echo "$_summary" | grep -qiE "failed|error"; then
+        if [ -z "$_summary" ] || [ "$_summary" = "(no output)" ] || echo "$_summary" | grep -qiE "failed|error"; then
             _status="FAIL"
             _FAILED_LABELS+=("$_label")
             _FAILED_WLOGS+=("$_wlog")
