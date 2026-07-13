@@ -75,7 +75,7 @@ T_FLARE_MAX          = 30.0   # s   max time in flare before timeout
 # ---------------------------------------------------------------------------
 
 def _run_landing(log) -> "tuple[dict, object]":
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     ground = LandingGroundController(
         initial_body_z   = _IC.R0[:, 2],

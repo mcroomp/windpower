@@ -130,7 +130,7 @@ def _run_attitude_only_at_fixed_equilibrium(
     state = trim.final_state
 
     acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         P=2.0/3.0, I=0.5, D=0.02, IMAX=0.5,
     )
     acro._servo.reset(col_fixed)
@@ -322,7 +322,7 @@ def _run_with_constant_tether_force(
     )
 
     acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         P=2.0/3.0, I=0.5, D=0.02, IMAX=0.5,
     )
     acro._servo.reset(COL_FIXED)
@@ -579,11 +579,10 @@ def _run_elastic_free_flight_with_python_ap(
     )
     runner = PhysicsRunner(
         _ROTOR, ic, WIND,
-        col_min_rad=-0.28, col_max_rad=0.10,
-    )
+            )
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
     )
     from param_defaults import thrust_to_coll_rad as _t2c
     runner._acro._servo.reset(_t2c(ic.eq_thrust))
@@ -597,7 +596,8 @@ def _run_elastic_free_flight_with_python_ap(
         wind=WIND,
         dt=DT,
     )
-    heli_params = HeliParams()
+    from param_defaults import load_ap_params as _lp
+    heli_params = HeliParams.from_ap_dict(_lp())
     ap.enable_guided(heli_params)
 
     target_alt = float(-ic0.pos[2])

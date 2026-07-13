@@ -12,8 +12,10 @@ controller values in Python.
 from __future__ import annotations
 
 import re
+import yaml
 from pathlib import Path
 from typing import Sequence
+from arduloop.params import RateAxisParams
 
 
 def _resolve_default_param_files() -> list[Path]:
@@ -176,25 +178,9 @@ def load_rate_pid_params(parm_file=None, axis: str = "RLL"):
     return _load_rate_axis(axis, params)
 
 
-def _make_axis_params_from_file(axis: str):
+def _make_axis_params_from_file(axis: str) -> RateAxisParams:
     """Build a :class:`RateAxisParams` for ``axis`` from the merged .parm chain."""
-    from arduloop import RateAxisParams
-
-    params = load_rate_pid_params(axis=axis)
-    return RateAxisParams(
-        P=params["P"],
-        I=params["I"],
-        D=params["D"],
-        FF=params["FF"],
-        IMAX=params["IMAX"],
-        FLTT=params["FLTT"],
-        FLTE=params["FLTE"],
-        FLTD=params["FLTD"],
-        D_FF=params["D_FF"],
-        PDMX=params["PDMX"],
-        SMAX=params["SMAX"],
-        ILMI=params["ILMI"],
-    )
+    return RateAxisParams.from_ap_dict(load_ap_params(), axis)
 
 
 def make_roll_params_from_file():
@@ -217,23 +203,28 @@ def make_yaw_params_from_file():
     return _make_axis_params_from_file("YAW")
 
 
+def _resolve_default_rotor_yaml() -> Path:
+    """Return the path to the project default rotor YAML (beaupoil_2026)."""
+    return Path(__file__).resolve().parent / "rotor_definitions" / "beaupoil_2026.yaml"
+
+
 def load_collective_phys_range() -> tuple[float, float]:
     """Return (col_at_thrust_0, col_at_thrust_1) in radians.
 
     Derives the collective blade-pitch angle at thrust=0 and thrust=1 by
-    combining the physical calibration from the trajectory config with the
-    ArduPilot H_COL_MIN / H_COL_MAX servo limits.  The result is the single
-    source of truth for the thrust→collective_rad mapping used by the Python
-    physics runner.
+    combining the physical calibration from the rotor YAML (control.col_min_rad /
+    control.col_max_rad) with the ArduPilot H_COL_MIN / H_COL_MAX servo limits.
+    The result is the single source of truth for the thrust→collective_rad
+    mapping used by the Python physics runner.
 
     With the standard parm values H_COL_MIN=1000, H_COL_MAX=2000 (full servo
     span), col_at_thrust_0 = col_min_rad and col_at_thrust_1 = col_max_rad.
     """
-    import config as mcfg
-    cfg = mcfg.defaults()
-    traj = cfg["trajectory"]["deschutter"]
-    col_min_rad = float(traj["col_min_rad"])
-    col_max_rad = float(traj["col_max_rad"])
+    with open(_resolve_default_rotor_yaml(), encoding="utf-8") as _f:
+        _rotor_data = yaml.safe_load(_f)
+    _ctrl = _rotor_data["control"]
+    col_min_rad = float(_ctrl["col_min_rad"])
+    col_max_rad = float(_ctrl["col_max_rad"])
     params = load_ap_params()
     h_col_min_us = params.get("H_COL_MIN", 1000.0)
     h_col_max_us = params.get("H_COL_MAX", 2000.0)
@@ -249,50 +240,3 @@ def load_collective_phys_range() -> tuple[float, float]:
 def thrust_to_coll_rad(thrust: float) -> float:
     col_min, col_max = load_collective_phys_range()
     return col_min + float(thrust) * (col_max - col_min)
-
-
-def thrust_to_coll_rad(thrust: float) -> float:
-    col_min, col_max = load_collective_phys_range()
-    return col_min + float(thrust) * (col_max - col_min)
-
-
-def load_attitude_params() -> dict[str, float]:
-    """Load outer-loop/swash heli params required by arduloop."""
-    p = load_ap_params()
-    return {
-        "ATC_ANG_RLL_P": get_ap_param("ATC_ANG_RLL_P", params=p),
-        "ATC_ANG_PIT_P": get_ap_param("ATC_ANG_PIT_P", params=p),
-        "ATC_ANG_YAW_P": get_ap_param("ATC_ANG_YAW_P", params=p),
-        "ATC_ACCEL_R_MAX": get_ap_param("ATC_ACC_R_MAX", params=p, aliases=("ATC_ACCEL_R_MAX",)),
-        "ATC_ACCEL_P_MAX": get_ap_param("ATC_ACC_P_MAX", params=p, aliases=("ATC_ACCEL_P_MAX",)),
-        "ATC_ACCEL_Y_MAX": get_ap_param("ATC_ACC_Y_MAX", params=p, aliases=("ATC_ACCEL_Y_MAX",)),
-        "ATC_RATE_R_MAX": p.get("ATC_RATE_R_MAX", 0.0),
-        "ATC_RATE_P_MAX": p.get("ATC_RATE_P_MAX", 0.0),
-        "ATC_RATE_Y_MAX": p.get("ATC_RATE_Y_MAX", 0.0),
-        "ATC_INPUT_TC": get_ap_param("ATC_INPUT_TC", params=p),
-        "ATC_HOVR_ROL_TRM": p.get("ATC_HOVR_ROL_TRM", 0.0),
-        "ATC_PIRO_COMP": p.get("ATC_PIRO_COMP", 0.0),
-        "H_SW_H3_PHANG": p.get("H_SW_H3_PHANG", p.get("H3_PHANG", 0.0)),
-    }
-
-
-def make_simtest_roll_pitch_params():
-    """Factory for simtest-specific roll/pitch rate PID parameters.
-    
-    Simtests use the Python altitude-hold loop which generates smaller rate
-    demands than ArduPilot's GUIDED attitude controller. Requires higher P gain
-    (0.67) to track tightly. SITL uses lower gains (0.15) because ArduPilot
-    produces larger rate targets.
-    
-    This is the SINGLE SOURCE OF TRUTH for simtest rate PID tuning.
-    
-    Returns
-    -------
-    RateAxisParams with proven-working gains for simtests: P=0.67, I=0.15, D=0.02, etc.
-    """
-    from arduloop import RateAxisParams
-    
-    return RateAxisParams(
-        P=0.67, I=0.15, D=0.02, FF=0.0, IMAX=0.30,
-        FLTT=40.0, FLTE=0.0, FLTD=40.0,
-    )

@@ -116,13 +116,11 @@ def _setup_runner(setup_model: str, runner_model: str):
         ic,
         icgen.WIND,
         aero_model=runner_model,
-        col_min_rad=-0.28,
-        col_max_rad=0.10,
+        
     )
     runner._acro = HeliCyclicController(
         icgen._ROTOR,
-        col_min_rad=-0.28,
-        col_max_rad=0.10,
+        
         P=0.67,
         I=0.15,
         D=0.02,

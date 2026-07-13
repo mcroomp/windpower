@@ -23,13 +23,13 @@ from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
-from param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
+from param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range, thrust_to_coll_rad
 from telemetry_csv import TelRow, write_csv
 
 
 def _load_rawes_pumping_constants() -> dict[str, float]:
     lua_constants = load_rawes_lua_constants((
-        "RATE_ACCEL_MAX_RADSS", "THRUST_SLEW_MAX", "THRUST_CRUISE",
+        "RATE_ACCEL_MAX_RADSS", "THRUST_SLEW_MAX",
         "POST_RELEASE_BLEND_S", "POST_RELEASE_RECOVERY_S",
     ))
     params = load_ap_params()
@@ -41,7 +41,6 @@ def _load_rawes_pumping_constants() -> dict[str, float]:
         "TRP_S": params.get("RAWES_TRP", 2.0),  # tension ramp τ; default from Lua param:add_param
         "RATE_ACCEL_MAX_RADSS": lua_constants["RATE_ACCEL_MAX_RADSS"],
         "THRUST_SLEW_MAX": lua_constants["THRUST_SLEW_MAX"],
-        "THRUST_CRUISE": lua_constants["THRUST_CRUISE"],
         "POST_RELEASE_BLEND_S": lua_constants["POST_RELEASE_BLEND_S"],
         "POST_RELEASE_RECOVERY_S": lua_constants["POST_RELEASE_RECOVERY_S"],
     }
@@ -80,7 +79,7 @@ def _tel_every_from_env(dt: float, default_hz: float = 20.0) -> int:
 
 def rawes_sitl_heli_params(loop_rate_hz: float) -> HeliParams:
     """HeliParams loaded from ArduPilot .parm files with requested loop rate."""
-    return HeliParams(loop_rate_hz=loop_rate_hz)
+    return HeliParams.from_ap_dict(load_ap_params(), loop_rate_hz=loop_rate_hz)
 
 
 def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
@@ -96,26 +95,9 @@ def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
 class _MockArdupilotBase:
     """Common adapter utilities shared by lua/python backends."""
 
-    _COL_RANGE: "tuple[float, float] | None" = None
-
-    @classmethod
-    def _get_col_range(cls) -> "tuple[float, float]":
-        if cls._COL_RANGE is None:
-            cls._COL_RANGE = load_collective_phys_range()
-        return cls._COL_RANGE
-
-    @property
-    def COL_MIN(self) -> float:
-        return self._get_col_range()[0]
-
-    @property
-    def COL_MAX(self) -> float:
-        return self._get_col_range()[1]
-
     def __init__(self, *, wind: "np.ndarray", dt: float, initial_thrust: float = 0.263) -> None:
-        col_min, col_max = self._get_col_range()
         self._last_thrust = float(initial_thrust)
-        self.col_rad = col_min + self._last_thrust * (col_max - col_min)
+        self.col_rad = thrust_to_coll_rad(self._last_thrust)
         self.roll_sp = 0.0
         self.pitch_sp = 0.0
         self._wind = wind
@@ -126,7 +108,7 @@ class _MockArdupilotBase:
         self._guided_ctrl: "GuidedAttitudeController | None" = None
 
     def enable_guided(self, heli_params: "HeliParams | None" = None) -> None:
-        hp = heli_params or HeliParams()
+        hp = heli_params or HeliParams.from_ap_dict(load_ap_params())
         self._guided_ctrl = GuidedAttitudeController(hp)
 
     def step_physics(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
@@ -148,7 +130,7 @@ class _MockArdupilotBase:
         if heli_out.collective_norm_cmd is not None and abs(float(self._guided_ctrl.climbrate_ms)) > 1e-6:
             c_norm = float(np.clip(heli_out.collective_norm_cmd, -1.0, 1.0))
             self._last_thrust = 0.5 * (c_norm + 1.0)
-            self.col_rad = self.COL_MIN + self._last_thrust * (self.COL_MAX - self.COL_MIN)
+            self.col_rad = thrust_to_coll_rad(self._last_thrust)
         return runner.step_guided(dt, self.col_rad, heli_out, rest_length=rest_length)
 
     def log(self, runner, sr: dict) -> None:
@@ -259,6 +241,12 @@ class _LuaBackend(_MockArdupilotBase):
         self.enable_guided(rawes_sitl_heli_params(hz))
         assert self._guided_ctrl is not None
         self._ctrl = self._guided_ctrl
+        # Seed _ic_thrust directly so Lua ic_thrust_or_default() has a non-zero
+        # warm-start before the first tick (GPS capture may happen on tick 1,
+        # before a mavlink NVF could be processed). Mirrors RAWES_THR arriving
+        # before kinematic release in real SITL.
+        if initial_thrust > 0.0:
+            sim._lua.execute(f"_ic_thrust = {float(initial_thrust)}")
 
     def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
         self._sim._mock.millis_val = int(t_sim * 1000)
@@ -272,12 +260,12 @@ class _LuaBackend(_MockArdupilotBase):
         gt_throttle = self._sim._mock.guided_throttle
         if gt_throttle is not None:
             self._last_thrust = float(gt_throttle)
-            self.col_rad = self.COL_MIN + self._last_thrust * (self.COL_MAX - self.COL_MIN)
+            self.col_rad = thrust_to_coll_rad(self._last_thrust)
         else:
             ch3 = self._sim.ch_out[3]
             if ch3 is not None:
                 self._last_thrust = max(0.0, min(1.0, (ch3 - 1000) / 1000.0))
-                self.col_rad = self.COL_MIN + self._last_thrust * (self.COL_MAX - self.COL_MIN)
+                self.col_rad = thrust_to_coll_rad(self._last_thrust)
 
         gt_rate = self._sim._mock.guided_rate_target
         if gt_rate is not None:
@@ -333,7 +321,6 @@ class _PumpingPythonMode:
     KI_ALT:                float = _RAWES_PUMPING_CONSTANTS["KI_ALT"]
     KD_VZ:                 float = _RAWES_PUMPING_CONSTANTS["KD_VZ"]
     KP_EL:                 float = _RAWES_PUMPING_CONSTANTS["KP_EL"]
-    THRUST_CRUISE:         float = _RAWES_PUMPING_CONSTANTS["THRUST_CRUISE"]
     THRUST_SLEW_MAX:       float = _RAWES_PUMPING_CONSTANTS["THRUST_SLEW_MAX"]
     POST_RELEASE_BLEND_S:     float = _RAWES_PUMPING_CONSTANTS["POST_RELEASE_BLEND_S"]
     POST_RELEASE_RECOVERY_S:  float = _RAWES_PUMPING_CONSTANTS["POST_RELEASE_RECOVERY_S"]
@@ -408,7 +395,7 @@ class _PumpingPythonMode:
         self._tension_ic     = float(tension_ic)
 
     def _ic_thrust_or_default(self) -> float:
-        """Return IC thrust if set, else THRUST_CRUISE. Mirrors rawes.lua ic_thrust_or_default()."""
+        """Return IC thrust (always set from warm_thrust at init). Mirrors rawes.lua ic_thrust_or_default()."""
         return self._ic_thrust  # always set from warm_thrust at init
 
     def notify_captured(self, t_sim: float) -> None:
@@ -594,8 +581,6 @@ class _PumpingPythonMode:
 class _LandingPythonMode:
     """Python-equivalent landing behavior for MockArdupilot."""
 
-    COL_MIN_RAD: float = -0.28
-    COL_MAX_RAD: float = 0.10
     KP_VZ: float = 0.05
     KI_VZ: float = 0.005
 
@@ -606,8 +591,6 @@ class _LandingPythonMode:
         warm_coll_rad:   float,
         kp_vz:           float,
         ki_vz:           float,
-        col_min_rad:     float,
-        col_max_rad:     float,
         kp_outer:        float,
     ) -> None:
         bz = np.asarray(ic_body_z, dtype=float)
@@ -618,6 +601,7 @@ class _LandingPythonMode:
         self._col_i      = float(warm_coll_rad)
         self._kp_vz      = float(kp_vz)
         self._ki_vz      = float(ki_vz)
+        col_min_rad, col_max_rad = load_collective_phys_range()
         self._col_min    = float(col_min_rad)
         self._col_max    = float(col_max_rad)
         self._kp_outer   = float(kp_outer)
@@ -712,7 +696,7 @@ class _PythonBackend(_MockArdupilotBase):
         accel_ned: "np.ndarray | None" = None,
     ) -> "tuple[float, float, float]":
         thrust, roll_sp, pitch_sp = self._mode.step(obs, dt, accel_ned=accel_ned)
-        self.col_rad = self.COL_MIN + float(thrust) * (self.COL_MAX - self.COL_MIN)
+        self.col_rad = thrust_to_coll_rad(float(thrust))
         self.roll_sp = roll_sp
         self.pitch_sp = pitch_sp
         return thrust, roll_sp, pitch_sp
@@ -769,8 +753,6 @@ class MockArdupilot:
         "RATE_ACCEL_MAX_RADSS": _RAWES_PUMPING_CONSTANTS["RATE_ACCEL_MAX_RADSS"],
     }
     LANDING_CONSTANTS = {
-        "COL_MIN_RAD": _LandingPythonMode.COL_MIN_RAD,
-        "COL_MAX_RAD": _LandingPythonMode.COL_MAX_RAD,
         "KP_VZ": _LandingPythonMode.KP_VZ,
         "KI_VZ": _LandingPythonMode.KI_VZ,
     }
@@ -833,8 +815,6 @@ class MockArdupilot:
         dt: float,
         kp_vz: float = _LandingPythonMode.KP_VZ,
         ki_vz: float = _LandingPythonMode.KI_VZ,
-        col_min_rad: float = _LandingPythonMode.COL_MIN_RAD,
-        col_max_rad: float = _LandingPythonMode.COL_MAX_RAD,
         kp_outer: float = _PumpingPythonMode.KP_EL,
     ):
         return cls.for_python(
@@ -844,8 +824,6 @@ class MockArdupilot:
             warm_coll_rad=warm_coll_rad,
             kp_vz=kp_vz,
             ki_vz=ki_vz,
-            col_min_rad=col_min_rad,
-            col_max_rad=col_max_rad,
             kp_outer=kp_outer,
             wind=wind,
             dt=dt,

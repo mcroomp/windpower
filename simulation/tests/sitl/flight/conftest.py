@@ -366,22 +366,17 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
                 math.degrees(_ic_roll_rad), math.degrees(_ic_pitch_rad),
             )
 
-            # Stream the IC equilibrium tension so the gravity-compensation disk
-            # axis the Lua targets in MODE_STEADY matches the IC that generated
-            # this starting state.  Without it the Lua flies with its default
-            # _tension_n (200 N), which over-tilts the disk relative to the IC's
-            # 300 N equilibrium (k = m*g*cos(el)/tension) and injects an
-            # orientation step at the MODE_PASSIVE -> MODE_STEADY handover.
-            # Tension feeds the orientation force balance only -- it is position-
-            # independent, so this is safe to pin regardless of kinematic drift.
-            # (RAWES_ALT is deliberately NOT sent: the Lua captures the live
-            # altitude at handover so alt_err=0 with a warm-started collective,
-            # avoiding a collective step.  Pinning the IC altitude here would
-            # re-introduce that step because the hub drifts ~7 m up during the
-            # kinematic ramp.)
+            # Stream the IC equilibrium tension and target altitude from the IC.
+            # Tension feeds the orientation force balance; altitude overrides the
+            # EKF-reported altitude (which has a ~2.5 m bias at capture time due
+            # to EKF vertical convergence lag) so Lua targets the physics IC
+            # altitude, not the biased EKF altitude.
             _tension_eq = float(_ic["tension_eq_n"])
+            _alt_ic     = float(-_ic["pos"][2])   # physics altitude above anchor
             ctx.gcs.send_named_float("RAWES_TEN", _tension_eq)
-            ctx.log.info("IC equilibrium tension: %.0f N", _tension_eq)
+            ctx.gcs.send_named_float("RAWES_ALT", _alt_ic)
+            ctx.log.info("IC equilibrium tension: %.0f N  target altitude: %.1f m",
+                         _tension_eq, _alt_ic)
         ctx.wait_drain(timeout=0.5, label="post-col")
 
         # Wait for GPS fusion before yielding.

@@ -97,8 +97,7 @@ class TestCyclicDirectionMapping:
         servo = SwashplateServoModel(
             slew_rate_deg_s=3600.0,  # Very fast to minimize slew limiting effects
             travel_deg=120.0,
-            col_min_rad=-0.28,
-            col_max_rad=0.10,
+            
         )
         
         # Take multiple steps to allow slew limiting to catch up

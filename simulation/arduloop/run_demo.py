@@ -58,23 +58,18 @@ def main() -> None:
     t = np.arange(0.0, T, dt)
 
     # Baseline parameter set — modest gains, no notches.
-    base = HeliParams(loop_rate_hz=fs)
-    base.roll  = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05, IMAX=0.3,
-                                FLTT=20.0, FLTE=0.0, FLTD=20.0)
-    base.pitch = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05, IMAX=0.3,
-                                FLTT=20.0, FLTE=0.0, FLTD=20.0)
+    _rp_base = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05, IMAX=0.3,
+                              FLTT=20.0, FLTE=0.0, FLTD=20.0)
+    base = HeliParams(roll=_rp_base, pitch=_rp_base, yaw=_rp_base, loop_rate_hz=fs)
 
     # Tuned: error notch on the tether-spring frequency, lowered FLTT for the
     # outer loop's expected pendulum coupling band.
-    tuned = HeliParams(loop_rate_hz=fs, H_SW_H3_PHANG=0.0)
-    tuned.roll  = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05, IMAX=0.3,
-                                 FLTT=1.5, FLTE=0.0, FLTD=20.0,
-                                 NEF_center_hz=3.77, NEF_bandwidth_hz=0.5,
-                                 NEF_attn_db=40.0)
-    tuned.pitch = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05, IMAX=0.3,
-                                 FLTT=1.5, FLTE=0.0, FLTD=20.0,
-                                 NEF_center_hz=3.77, NEF_bandwidth_hz=0.5,
-                                 NEF_attn_db=40.0)
+    _rp_tuned = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05, IMAX=0.3,
+                               FLTT=1.5, FLTE=0.0, FLTD=20.0,
+                               NEF_center_hz=3.77, NEF_bandwidth_hz=0.5,
+                               NEF_attn_db=40.0)
+    tuned = HeliParams(roll=_rp_tuned, pitch=_rp_tuned, yaw=_rp_tuned,
+                       loop_rate_hz=fs, H_SW_H3_PHANG=0.0)
 
     # ---------------- Step response ----------------
     u_step = signals.step(t, amplitude=1.0, t0=0.2)

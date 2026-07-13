@@ -114,6 +114,11 @@ For signs, frame details, EKF gating, and mixer conventions, read the primary do
   logic, update the Python in the same commit. Key state that must stay in sync:
   `_tension_for_bz` is a RAMPED value (τ=RAWES_TRP≈2 s) toward `_tension_cmd_n` — not a step.
   Missing this ramp caused tether slack on phase transitions (reel-out→reel-in tension change).
+- Prefer module-level imports in Python. Avoid `import` statements inside functions or methods
+  unless the import is genuinely optional (e.g. heavy optional dependency). Lazy imports that
+  exist only to work around circular imports are a sign of bad architecture — fix the circular
+  dependency by refactoring (e.g. extract a shared module, invert the dependency) rather than
+  papering over it with a local import.
 
 ## Test Entry Points
 
@@ -126,7 +131,7 @@ There are three tiers, each with a different scope and runtime:
 | Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
 
 Stack-test execution rule (agent-critical):
-- For any test under `simulation/tests/sitl/**`, ALWAYS use `bash test.sh stack ...`.
+- For any test under `simulation/tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
 - DO NOT run SITL tests with host-side pytest commands like
     `.venv/Scripts/python.exe -m pytest simulation/tests/sitl/...`.
     Those bypass the Docker stack harness and can fail with host-path issues
@@ -135,8 +140,14 @@ Stack-test execution rule (agent-critical):
     `bash test.sh stack -n 1 -k <test_name>`
     Example:
     `bash test.sh stack -n 1 -k test_pumping_cycle_lua_sitl`
+    Do NOT pipe through `tail` or `grep` — the failure summary is printed last
+    and piping will truncate or hide it.
 
-Use `design/sitl_testing.md` for stack-specific run/diagnose flow.
+After a SITL run, **do not re-run to see the error**. The failure summary is
+printed at the end of the `test.sh` output (the `=== FAILURES ===` section shows
+the tail of each failure, including the assertion error). The full output is also
+saved — read it directly if needed:
+    `Get-Content simulation/logs/<test_name>/worker.log | Select-String "ERROR|CRITICAL|Traceback|assert|FAIL" | Select-Object -First 30`
 
 ## Visualization
 

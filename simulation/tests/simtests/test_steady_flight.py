@@ -82,11 +82,11 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
     target_alt = float(-ic.pos[2])
 
     # ── Recorded run ──────────────────────────────────────────────────────────
-    runner = PhysicsRunner(_ROTOR, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, ic, WIND)
     # Use central loader-backed defaults from arduloop/param_defaults.
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         # All AP gains/limits come from the merged central .parm chain.
     )
     runner._acro._servo.reset(thrust_to_coll_rad(ic.eq_thrust))
@@ -100,7 +100,8 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
         dt=DT,
     )
     from arduloop import HeliParams
-    _hp = HeliParams()
+    from param_defaults import load_ap_params as _lp
+    _hp = HeliParams.from_ap_dict(_lp())
     ap.enable_guided(_hp)
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),

@@ -21,6 +21,7 @@ Usage
 
 import collections
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -672,11 +673,10 @@ class RawesGCS:
             elif mt == "EKF_STATUS_REPORT":
                 log.debug("EKF_STATUS flags=0x%04x", msg.flags)
             elif mt == "ATTITUDE":
-                import math as _math
-                r = _math.degrees(msg.roll)
-                p = _math.degrees(msg.pitch)
-                y = _math.degrees(msg.yaw)
-                if all(_math.isfinite(v) for v in (r, p, y)):
+                r = math.degrees(msg.roll)
+                p = math.degrees(msg.pitch)
+                y = math.degrees(msg.yaw)
+                if all(math.isfinite(v) for v in (r, p, y)):
                     log.info("[t=%.1f] EKF attitude ready rpy=(%.1f, %.1f, %.1f)deg",
                              self.sim_now(), r, p, y)
                     return True

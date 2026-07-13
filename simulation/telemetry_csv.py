@@ -48,7 +48,6 @@ from telemetry_columns import (
     ASYNC_MAV_COLUMNS,
     COLUMNS,
     COLUMN_GROUPS,
-    COLUMN_SOURCES,
     COLUMN_SPECS,
 )
 
@@ -171,6 +170,9 @@ class TelRow:
     mav_nvf_yff_trim:  float = float("nan")
     mav_nvf_yff_u:     float = float("nan")
     mav_nvf_yff_gz:    float = float("nan")
+    ekf_pos_x:         float = float("nan")   # EKF LOCAL_POSITION_NED x [m] (NED)
+    ekf_pos_y:         float = float("nan")   # EKF LOCAL_POSITION_NED y [m] (NED)
+    ekf_pos_z:         float = float("nan")   # EKF LOCAL_POSITION_NED z [m] (NED)
 
     servo_s1_us: float = 0.0   # S1 swashplate servo PWM [µs]
     servo_s2_us: float = 0.0   # S2 swashplate servo PWM [µs]

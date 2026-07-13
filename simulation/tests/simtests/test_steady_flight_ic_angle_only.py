@@ -34,12 +34,12 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 from arduloop import (
     GuidedAttitudeController,
     HeliParams,
-    make_roll_pitch_params,
-    make_yaw_params,
+    RateAxisParams,
     DataflashEquivRow,
     make_df_equiv_row,
     write_df_equiv_csv,
 )
+from param_defaults import load_ap_params as _lp
 from frames import build_gps_yaw_frame
 from telemetry_csv import TelRow, write_csv
 from simtest_ic import load_ic
@@ -72,13 +72,14 @@ def _run_angle_ic_only(steps: int = 4000):
         trim_tilt_lon=float(getattr(_IC, "trim_tilt_lon", 0.0)),
         trim_tilt_lat=float(getattr(_IC, "trim_tilt_lat", 0.0)),
     )
-    runner = PhysicsRunner(_ROTOR, ic_run, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, ic_run, WIND)
 
     from param_defaults import thrust_to_coll_rad as _t2c
     runner._acro._servo.reset(_t2c(_IC.eq_thrust), tilt_lon=0.0, tilt_lat=0.0)
 
-    rp = make_roll_pitch_params()
-    yaw = make_yaw_params()
+    _ap = _lp()
+    rp = RateAxisParams.from_ap_dict(_ap, "RLL")
+    yaw = RateAxisParams.from_ap_dict(_ap, "YAW")
     hp = HeliParams(roll=rp, pitch=rp, yaw=yaw)
 
     guided = GuidedAttitudeController(hp)

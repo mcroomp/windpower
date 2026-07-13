@@ -30,7 +30,9 @@ This is the single source of truth for swashplate arithmetic.
 """
 
 import math
+import yaml
 import numpy as np
+from param_defaults import load_collective_phys_range as _load_col_range, _resolve_default_rotor_yaml
 
 
 # ---------------------------------------------------------------------------
@@ -314,21 +316,31 @@ class SwashplateServoModel:
     ----------
     slew_rate_deg_s : DS113MG angular speed [deg/s] at operating voltage
     travel_deg      : DS113MG total angular travel [deg]
-    col_min_rad     : physical collective floor [rad]
-    col_max_rad     : physical collective ceiling [rad]
     h_col_min       : ArduPilot H_COL_MIN parameter [µs]  (default 1000)
     h_col_max       : ArduPilot H_COL_MAX parameter [µs]  (default 2000)
+
+    Collective range (col_min_rad / col_max_rad) is always loaded from the
+    rotor YAML via load_collective_phys_range() — not a constructor parameter.
     """
 
     def __init__(
         self,
-        slew_rate_deg_s: float,
-        travel_deg:      float,
-        col_min_rad:     float,
-        col_max_rad:     float,
+        slew_rate_deg_s: "float | None" = None,
+        travel_deg:      "float | None" = None,
+        col_min_rad:     "float | None" = None,
+        col_max_rad:     "float | None" = None,
         h_col_min:       float = 1000.0,
         h_col_max:       float = 2000.0,
     ):
+        if col_min_rad is None or col_max_rad is None:
+            col_min_rad, col_max_rad = _load_col_range()
+        if slew_rate_deg_s is None or travel_deg is None:
+            with open(_resolve_default_rotor_yaml(), encoding="utf-8") as _f:
+                _ctrl = yaml.safe_load(_f)["control"]
+            if slew_rate_deg_s is None:
+                slew_rate_deg_s = float(_ctrl["servo_slew_rate_deg_s"])
+            if travel_deg is None:
+                travel_deg = float(_ctrl["servo_travel_deg"])
         self._max_servo_rate = 2.0 * slew_rate_deg_s / travel_deg  # [norm/s]
         self._col_min  = float(col_min_rad)
         self._col_max  = float(col_max_rad)
@@ -342,10 +354,8 @@ class SwashplateServoModel:
 
     @classmethod
     def from_rotor(cls, rotor,
-                   col_min_rad: float = -0.28,
-                   col_max_rad: float =  0.10,
-                   h_col_min:   float = 1000.0,
-                   h_col_max:   float = 2000.0) -> "SwashplateServoModel":
+                   h_col_min: float = 1000.0,
+                   h_col_max: float = 2000.0) -> "SwashplateServoModel":
         if rotor.control is None:
             raise ValueError("rotor.control must be set to construct SwashplateServoModel")
         slew = rotor.control.servo_slew_rate_deg_s
@@ -358,8 +368,6 @@ class SwashplateServoModel:
         return cls(
             slew_rate_deg_s=float(slew),
             travel_deg=float(travel),
-            col_min_rad=col_min_rad,
-            col_max_rad=col_max_rad,
             h_col_min=h_col_min,
             h_col_max=h_col_max,
         )

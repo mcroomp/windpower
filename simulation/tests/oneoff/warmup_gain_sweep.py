@@ -84,7 +84,7 @@ def run_combo(P, I, D, FLTT, kp_winch, t_total,
     runner = PhysicsRunner.for_warmup(
         _ROTOR, pos0, R0, rest_length, STACK_COLL, omega_spin, WIND)
     runner._acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         P=P, I=I, D=D, FLTT=FLTT, FLTE=0.0, FLTD=FLTT, IMAX=0.30,
     )
     runner._acro._servo.reset(STACK_COLL)

@@ -85,7 +85,7 @@ def run(kd_lat, t_total, R0, pos0, omega_spin, rest_length, trim,
     runner = PhysicsRunner.for_warmup(
         _ROTOR, pos0, R0, rest_length, STACK_COLL, omega_spin, WIND)
     runner._acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         P=P, I=I, D=D, FLTT=40.0, FLTE=0.0, FLTD=40.0, IMAX=0.30,
     )
     runner._acro._servo.reset(STACK_COLL)

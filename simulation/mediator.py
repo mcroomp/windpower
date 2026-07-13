@@ -27,10 +27,13 @@ Options:
 
 import argparse
 import csv
+import json
 import math
 import logging
+import socket
 import sys
 import os
+import time
 import threading
 from pathlib import Path
 
@@ -42,6 +45,7 @@ from physics_core    import PhysicsCore
 from tether          import TetherModel, ConstantTensionTether   # noqa: F401 — re-exported for test callers
 from sitl_interface  import SITLInterface, SIM_CLOCK_HZ
 from swashplate      import ardupilot_h3_120_inverse, collective_out_to_rad
+from param_defaults  import load_collective_phys_range as _load_col_range
 from sensor          import make_sensor, SpinSensor
 from kinematic       import KinematicStartup, compute_launch_position, make_smooth_trapezoid_traj  # noqa: F401
 from winch           import GovernedWinchController
@@ -161,7 +165,6 @@ def run_mediator(args, trajectory=None):
         Callers that want full control pass a pre-built object; the config
         section is only needed for subprocess/CLI use.
     """
-    import time as _time_mod
     log = logging.getLogger("mediator")
     is_stopped = install_sigterm_handler()
     ev  = MediatorEventLog(getattr(args, "events_log", None))
@@ -213,7 +216,7 @@ def run_mediator(args, trajectory=None):
         }
         dropped_types = 0
         last_boot_ms = 0
-        last_rx_wall = _time_mod.monotonic()
+        last_rx_wall = time.monotonic()
         next_diag_wall = last_rx_wall + _mavlog_diag_interval_s
         _nvf_key_map = {
             "YFF_T":  "mav_nvf_yff_trim",
@@ -303,7 +306,7 @@ def run_mediator(args, trajectory=None):
                     blocking=True,
                     timeout=0.10,
                 )
-                now_wall = _time_mod.monotonic()
+                now_wall = time.monotonic()
                 if msg is None:
                     if now_wall >= next_diag_wall:
                         log.info(
@@ -352,7 +355,7 @@ def run_mediator(args, trajectory=None):
                 if _tu:
                     fields["mav_time_usec"] = float(_tu)
 
-                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"):
+                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT", "LOCAL_POSITION_NED"):
                     if fields:
                         update_async_mavlink(fields)
                     continue
@@ -389,6 +392,10 @@ def run_mediator(args, trajectory=None):
                     mapped = _nvf_key_map.get(nvf_name)
                     if mapped is not None:
                         fields[mapped] = float(getattr(msg, "value", float("nan")))
+                elif mtype == "LOCAL_POSITION_NED":
+                    fields["ekf_pos_x"] = float(getattr(msg, "x", float("nan")))
+                    fields["ekf_pos_y"] = float(getattr(msg, "y", float("nan")))
+                    fields["ekf_pos_z"] = float(getattr(msg, "z", float("nan")))
 
                 if fields:
                     update_async_mavlink(fields)
@@ -404,7 +411,7 @@ def run_mediator(args, trajectory=None):
     # the same test run.  Format: RUN_ID=<integer epoch seconds>.
     # Authoritative source: conftest.py generates once and passes via --run-id.
     # When run standalone (no --run-id), generate locally as fallback.
-    _run_id = args.run_id if args.run_id is not None else int(_time_mod.time())
+    _run_id = args.run_id if args.run_id is not None else int(time.time())
     wind_world = np.array(cfg["wind"])
     ev.write("startup", t_sim=0.0, run_id=_run_id, wind_ned=wind_world.tolist())
 
@@ -496,9 +503,7 @@ def run_mediator(args, trajectory=None):
     OMEGA_SPIN_MIN = rotor.autorotation.omega_min_rad_s
 
     # Collective denormalisation range (must precede _ic which uses _col_min_rad)
-    _traj_cfg    = cfg["trajectory"]["deschutter"]
-    _col_min_rad = float(_traj_cfg["col_min_rad"])
-    _col_max_rad = float(_traj_cfg["col_max_rad"])
+    _col_min_rad, _col_max_rad = _load_col_range()
 
     sitl = SITLInterface(
         recv_port=args.sitl_recv_port,
@@ -650,8 +655,6 @@ def run_mediator(args, trajectory=None):
     # State is sent every ~10 Hz (every DT_WINCH_SEND steps).  Commands are
     # received non-blocking every step so they are applied within one lockstep
     # cycle (~2.5 ms latency).
-    import socket as _socket_mod
-    import json   as _json_mod
     _winch_cmd_port = int(cfg.get("winch_cmd_port", 0)) or getattr(args, "winch_cmd_port", 0)
     _winch_sock     = None
     _winch_peer     = None   # (host, port) of the test process — learned on first recv
@@ -661,7 +664,7 @@ def run_mediator(args, trajectory=None):
     # Send winch state at ~10 Hz, regardless of lockstep step rate.
 
     if _winch_cmd_port > 0:
-        _winch_sock = _socket_mod.socket(_socket_mod.AF_INET, _socket_mod.SOCK_DGRAM)
+        _winch_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _winch_sock.bind(("127.0.0.1", _winch_cmd_port))
         _winch_sock.setblocking(False)
         log.info("Winch command socket listening on 127.0.0.1:%d", _winch_cmd_port)
@@ -702,7 +705,7 @@ def run_mediator(args, trajectory=None):
             if _winch_sock is not None:
                 try:
                     _data, _addr = _winch_sock.recvfrom(256)
-                    _cmd = _json_mod.loads(_data)
+                    _cmd = json.loads(_data)
                     _cruise_v = float(_cmd["cruise_v"])
                     # Apply the command across the cable boundary.  exchange()
                     # is the ONLY planner-facing method -- it sets the command
@@ -728,7 +731,7 @@ def run_mediator(args, trajectory=None):
                 if _winch_send_ctr >= DT_WINCH_SEND and _winch_peer is not None:
                     _winch_send_ctr = 0
                     _wt = _winch_node.telemetry()
-                    _winch_sock.sendto(_json_mod.dumps({
+                    _winch_sock.sendto(json.dumps({
                         "tension_n":    _wt.tension_n,
                         "rest_length":  _wt.rest_length,
                         "speed_ms":     _wt.speed_ms,
@@ -965,6 +968,9 @@ def run_mediator(args, trajectory=None):
                 "mav_nvf_yff_trim":  _mav_async.get("mav_nvf_yff_trim", float("nan")),
                 "mav_nvf_yff_u":     _mav_async.get("mav_nvf_yff_u",    float("nan")),
                 "mav_nvf_yff_gz":    _mav_async.get("mav_nvf_yff_gz",   float("nan")),
+                "ekf_pos_x":         _mav_async.get("ekf_pos_x",        float("nan")),
+                "ekf_pos_y":         _mav_async.get("ekf_pos_y",        float("nan")),
+                "ekf_pos_z":         _mav_async.get("ekf_pos_z",        float("nan")),
                 "servo_s1_us":     float(sitl.last_pwm_raw[0]),
                 "servo_s2_us":     float(sitl.last_pwm_raw[1]),
                 "servo_s3_us":     float(sitl.last_pwm_raw[2]),

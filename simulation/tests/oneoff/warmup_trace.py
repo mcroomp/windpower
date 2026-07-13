@@ -89,7 +89,7 @@ def main():
     runner = PhysicsRunner.for_warmup(
         _ROTOR, pos0, R0, rest_length, STACK_COLL, omega_spin, WIND)
     runner._acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         P=0.30, I=0.10, D=0.005, IMAX=0.30,
         FLTT=20.0, FLTE=0.0, FLTD=20.0,
     )

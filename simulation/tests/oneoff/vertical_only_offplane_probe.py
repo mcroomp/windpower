@@ -50,11 +50,10 @@ def run(*, offset_deg: float = 30.0, duration_s: float = 30.0) -> dict:
     ic = _with_azimuth_offset(base_ic, math.radians(offset_deg))
     steps = int(round(duration_s / DT))
 
-    runner = PhysicsRunner(rotor, ic, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(rotor, ic, WIND)
     runner._acro = HeliCyclicController(
         rotor,
-        col_min_rad=-0.28,
-        col_max_rad=0.10,
+        
         P=0.67,
         I=0.15,
         D=0.02,

@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from physics_core  import PhysicsCore, HubObservation
 from controller    import HeliCyclicController
+from param_defaults import thrust_to_coll_rad as _t2c, load_collective_phys_range as _load_col_range
 
 
 class PhysicsRunner:
@@ -63,8 +64,7 @@ class PhysicsRunner:
     T_AERO_OFFSET = PhysicsCore.T_AERO_OFFSET
 
     def __init__(self, rotor, ic, wind, *, z_floor: float = -1.0,
-                 aero_model: str = "quasi_static", aero_override=None,
-                 col_min_rad: float, col_max_rad: float):
+                 aero_model: str = "quasi_static", aero_override=None):
         """
         Parameters
         ----------
@@ -75,19 +75,18 @@ class PhysicsRunner:
         z_floor       : NED Z floor for dynamics (default -1.0 m = 1 m altitude floor)
         aero_model    : aero model key passed to create_aero() (default "quasi_static" = no inflow state)
         aero_override : if provided, used directly instead of create_aero()
-        col_min_rad   : collective floor for HeliCyclicController servo model
-        col_max_rad   : collective ceiling for HeliCyclicController servo model
         """
         self._core = PhysicsCore(rotor, ic, wind, z_floor=z_floor,
                                  aero_model=aero_model, aero_override=aero_override)
         self._tilt_lon_trim = float(getattr(ic, "trim_tilt_lon", 0.0))
         self._tilt_lat_trim = float(getattr(ic, "trim_tilt_lat", 0.0))
-        self._acro = HeliCyclicController(rotor, col_min_rad=col_min_rad,
-                                        col_max_rad=col_max_rad)
+        self._acro = HeliCyclicController(rotor)
         self._acro.set_trim(self._tilt_lon_trim, self._tilt_lat_trim)
-        from param_defaults import thrust_to_coll_rad as _t2c
+        # coll_eq_rad is the physics equilibrium collective; eq_thrust is its
+        # normalized form. Use coll_eq_rad if present, else convert eq_thrust.
+        servo_col = getattr(ic, 'coll_eq_rad', None) or _t2c(ic.eq_thrust)
         self._acro._servo.reset(
-            _t2c(ic.eq_thrust),
+            servo_col,
             tilt_lon=self._tilt_lon_trim,
             tilt_lat=self._tilt_lat_trim,
         )
@@ -96,8 +95,7 @@ class PhysicsRunner:
 
     @classmethod
     def for_warmup(cls, rotor, pos, R0, rest_length, eq_thrust, omega_spin, wind):
-        from param_defaults import load_collective_phys_range as _lr
-        col_min, col_max = _lr()
+        col_min, col_max = _load_col_range()
         ic = SimpleNamespace(
             pos        = np.asarray(pos, dtype=float),
             vel        = np.zeros(3),

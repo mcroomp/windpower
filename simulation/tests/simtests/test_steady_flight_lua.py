@@ -62,7 +62,7 @@ def _run_steady(log) -> dict:
     sim.send_named_float("RAWES_ANE", 0.0)
     sim.send_named_float("RAWES_AND", 0.0)
 
-    runner  = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner  = PhysicsRunner(_ROTOR, _IC, WIND)
     lua     = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
     lua.tel_fn = lambda r, sr: dict(body_z_eq=None)
 

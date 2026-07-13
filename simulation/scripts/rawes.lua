@@ -112,7 +112,6 @@ MIN_TETHER_M     = 0.5        -- minimum tether length before GPS init activates
 -- ── Thrust limits and cruise value ────────────────────────────────────────────
 
 THRUST_SLEW_MAX = 0.058   -- thrust [0..1] per 50 Hz step
-THRUST_CRUISE   = 0.263   -- altitude-hold trim thrust
 
 -- ── Altitude controller constants ────────────────────────────────────────────
 
@@ -169,14 +168,17 @@ _rc_ch4 = rc:get_channel(4)
 _rc_ch8 = rc:get_channel(8)
 
 -- Thrust state [0..1]
-_last_thrust = THRUST_CRUISE
-_thrust_trim = THRUST_CRUISE
+-- _last_thrust starts at 0; seeded at capture from RAWES_THR (ic_thrust_or_default).
+-- RAWES_THR MUST be sent before GPS capture for correct altitude-hold warm-start.
+_last_thrust = 0.0
+_thrust_trim = 0.0
 _alt_i       = 0.0
 
 -- Altitude hold state
 _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
 _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
+_target_alt_cmd = nil     -- physics-truth altitude from ground RAWES_ALT; persists across mode clears
 _tension_n      = 200.0   -- ramped tension feedforward [N]; smoothed output used in bz_altitude_hold
 _tension_cmd_n  = 200.0   -- step-change tension commanded by ground via RAWES_TEN
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
@@ -358,7 +360,7 @@ end
 
 local function ic_thrust_or_default()
     if _ic_thrust ~= nil then return _ic_thrust end
-    return THRUST_CRUISE
+    return _last_thrust  -- hold current; RAWES_THR should always be sent before GPS capture
 end
 
 local function p(name, default)
@@ -618,7 +620,9 @@ local function run_flight()
             local tlen = math.sqrt(rx*rx + ry*ry + rz*rz)
             if tlen >= MIN_TETHER_M then
                 _el_rad       = math.asin(math.max(-1.0, math.min(1.0, -rz / math.max(tlen, 0.1))))
-                _target_alt   = -rz
+                -- Use physics-truth altitude if ground provided it via RAWES_ALT;
+                -- otherwise fall back to EKF position (which may have a vertical bias).
+                _target_alt   = _target_alt_cmd or _nv_floats["RAWES_ALT"] or (-rz)
                 local thr_ff  = math.max(0.0, math.min(1.0, ic_thrust_or_default()))
                 _tension_n    = _tension_cmd_n  -- seed ramp at capture (no startup transient)
                 _thrust_trim  = thr_ff
@@ -1015,7 +1019,10 @@ local function update()
     local now  = millis()
 
     -- Update altitude, tension, cyclic and collective targets from NV messages
-    if _nv_floats["RAWES_ALT"] then _target_alt = _nv_floats["RAWES_ALT"] end
+    if _nv_floats["RAWES_ALT"] then
+        _target_alt     = _nv_floats["RAWES_ALT"]
+        _target_alt_cmd = _nv_floats["RAWES_ALT"]  -- persist across mode entry clears
+    end
     if _nv_floats["RAWES_TEN"] then _tension_cmd_n = _nv_floats["RAWES_TEN"] end
     -- Anchor position (safety-critical; gates altitude-hold capture).
     if _nv_floats["RAWES_ANN"] then _anchor_n = _nv_floats["RAWES_ANN"]; _got_anchor_n = true end

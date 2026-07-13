@@ -281,7 +281,7 @@ def probe_step_response(
     aero  = OyeBEMModel(defn=rotor)
     state = _settle_inflow(aero, omega_spin, R_hub)
     acro  = HeliCyclicController(
-        rotor, col_min_rad=-0.28, col_max_rad=0.10,
+        rotor,
         P=kp_inner, I=ki_inner, D=kd_inner, IMAX=imax_inner,
     )
     dyn = RigidBodyDynamics(
