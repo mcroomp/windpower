@@ -83,7 +83,6 @@ def _body_z_from_attitude_target(roll_deg, pitch_deg, yaw_deg):
 
 def test_constants_have_expected_values(sim):
     f = sim.fns
-    assert float(f.THRUST_CRUISE)        == pytest.approx(0.263, abs=1e-3)
     assert float(f.THRUST_SLEW_MAX)      == pytest.approx(0.058, abs=1e-3)
     assert float(f.MASS_KG)              == pytest.approx(5.0)
     assert float(f.G_ACCEL)              == pytest.approx(9.81)

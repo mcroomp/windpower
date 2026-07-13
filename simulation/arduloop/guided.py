@@ -67,12 +67,6 @@ from .params import HeliParams
 from .attitude_heli import HeliRateController, HeliRateOutput
 
 
-def _guided_ap_defaults() -> dict[str, float]:
-    from param_defaults import load_attitude_params
-
-    return load_attitude_params()
-
-
 def _accel_param_to_radss(value: float) -> float:
     """Convert AP accel parameter to rad/s^2.
 
@@ -413,25 +407,25 @@ class GuidedAttitudeParams:
     SITL transfer directly.
     """
     # Outer attitude P gains [rad/s per rad].  ATC_ANG_RLL/PIT/YAW_P
-    ATC_ANG_RLL_P: float | None = None
-    ATC_ANG_PIT_P: float | None = None
-    ATC_ANG_YAW_P: float | None = None
+    ATC_ANG_RLL_P: float = 0.0
+    ATC_ANG_PIT_P: float = 0.0
+    ATC_ANG_YAW_P: float = 0.0
 
     # Accel limits for sqrt/shaping (centi-deg/s^2). 0 = linear P only.
     # ATC_ACCEL_R_MAX, ATC_ACCEL_P_MAX, ATC_ACCEL_Y_MAX
-    ATC_ACCEL_R_MAX: float | None = None
-    ATC_ACCEL_P_MAX: float | None = None
-    ATC_ACCEL_Y_MAX: float | None = None
+    ATC_ACCEL_R_MAX: float = 0.0
+    ATC_ACCEL_P_MAX: float = 0.0
+    ATC_ACCEL_Y_MAX: float = 0.0
 
     # Max body-frame angular velocity (deg/s). 0 = unlimited.
     # ATC_RATE_R_MAX, ATC_RATE_P_MAX, ATC_RATE_Y_MAX
-    ATC_RATE_R_MAX: float | None = None
-    ATC_RATE_P_MAX: float | None = None
-    ATC_RATE_Y_MAX: float | None = None
+    ATC_RATE_R_MAX: float = 0.0
+    ATC_RATE_P_MAX: float = 0.0
+    ATC_RATE_Y_MAX: float = 0.0
 
     # Input shaping time constant (s).  ATC_INPUT_TC
     # AP default: 0.15 (Medium) from AC_AttitudeControl.cpp
-    ATC_INPUT_TC: float | None = None
+    ATC_INPUT_TC: float = 0.0
     # Yaw input shaping time constant (s).  AP uses a separate _rate_y_tc value
     # (AC_AttitudeControl._rate_y_tc) which is set to ATC_INPUT_TC by default.
     # Provide separately so yaw can be slowed independently if needed.
@@ -459,29 +453,26 @@ class GuidedAttitudeParams:
     H_COL_MID_norm: float = 0.5
 
     def __post_init__(self) -> None:
-        ap = _guided_ap_defaults()
-        if self.ATC_ANG_RLL_P is None:
-            self.ATC_ANG_RLL_P = ap["ATC_ANG_RLL_P"]
-        if self.ATC_ANG_PIT_P is None:
-            self.ATC_ANG_PIT_P = ap["ATC_ANG_PIT_P"]
-        if self.ATC_ANG_YAW_P is None:
-            self.ATC_ANG_YAW_P = ap["ATC_ANG_YAW_P"]
-        if self.ATC_ACCEL_R_MAX is None:
-            self.ATC_ACCEL_R_MAX = ap["ATC_ACCEL_R_MAX"]
-        if self.ATC_ACCEL_P_MAX is None:
-            self.ATC_ACCEL_P_MAX = ap["ATC_ACCEL_P_MAX"]
-        if self.ATC_ACCEL_Y_MAX is None:
-            self.ATC_ACCEL_Y_MAX = ap["ATC_ACCEL_Y_MAX"]
-        if self.ATC_RATE_R_MAX is None:
-            self.ATC_RATE_R_MAX = ap["ATC_RATE_R_MAX"]
-        if self.ATC_RATE_P_MAX is None:
-            self.ATC_RATE_P_MAX = ap["ATC_RATE_P_MAX"]
-        if self.ATC_RATE_Y_MAX is None:
-            self.ATC_RATE_Y_MAX = ap["ATC_RATE_Y_MAX"]
-        if self.ATC_INPUT_TC is None:
-            self.ATC_INPUT_TC = ap["ATC_INPUT_TC"]
         if self.ATC_INPUT_TC_YAW is None:
             self.ATC_INPUT_TC_YAW = self.ATC_INPUT_TC
+
+    @classmethod
+    def from_ap_dict(cls, params: dict[str, float]) -> "GuidedAttitudeParams":
+        """Build from a flat AP params dict (e.g. from param_defaults.load_ap_params())."""
+        def _f(key: str, default: float = 0.0) -> float:
+            return float(params.get(key, default))
+        return cls(
+            ATC_ANG_RLL_P   = _f("ATC_ANG_RLL_P"),
+            ATC_ANG_PIT_P   = _f("ATC_ANG_PIT_P"),
+            ATC_ANG_YAW_P   = _f("ATC_ANG_YAW_P"),
+            ATC_ACCEL_R_MAX = _f("ATC_ACC_R_MAX") or _f("ATC_ACCEL_R_MAX"),
+            ATC_ACCEL_P_MAX = _f("ATC_ACC_P_MAX") or _f("ATC_ACCEL_P_MAX"),
+            ATC_ACCEL_Y_MAX = _f("ATC_ACC_Y_MAX") or _f("ATC_ACCEL_Y_MAX"),
+            ATC_RATE_R_MAX  = _f("ATC_RATE_R_MAX"),
+            ATC_RATE_P_MAX  = _f("ATC_RATE_P_MAX"),
+            ATC_RATE_Y_MAX  = _f("ATC_RATE_Y_MAX"),
+            ATC_INPUT_TC    = _f("ATC_INPUT_TC"),
+        )
 
     @classmethod
     def from_heli_params(cls, p: HeliParams) -> "GuidedAttitudeParams":
@@ -597,7 +588,7 @@ class GuidedAttitudeController:
         pitch_deg: float,
         yaw_deg: float,
         climbrate_ms: float = 0.0,
-        use_yaw_rate: bool = False,
+        use_yaw_rate: bool = False,  # noqa: ARG002 — matches AP API; yaw-rate mode not implemented
         yaw_rate_degs: float = 0.0,
         *,
         sim_time: float = 0.0,

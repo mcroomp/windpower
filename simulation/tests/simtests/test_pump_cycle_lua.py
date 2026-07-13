@@ -104,7 +104,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     sim.send_named_float("RAWES_AND", 0.0)
 
     # ── Physics ───────────────────────────────────────────────────────────────
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)
     ic_alt = float(-_IC.pos[2])
 
     # ── Winch node: hosts the fast GovernedWinchController loop + load cell + ──

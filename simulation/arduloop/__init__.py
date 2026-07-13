@@ -33,10 +33,6 @@ Public modules
 from .params import (
     RateAxisParams,
     HeliParams,
-    make_roll_params,
-    make_pitch_params,
-    make_roll_pitch_params,
-    make_yaw_params,
 )
 from .filters import LowPassFilter1p, NotchFilter
 from .pid import AC_PID
@@ -50,10 +46,6 @@ from . import signals, analysis
 __all__ = [
     "RateAxisParams",
     "HeliParams",
-    "make_roll_params",
-    "make_pitch_params",
-    "make_roll_pitch_params",
-    "make_yaw_params",
     "LowPassFilter1p",
     "NotchFilter",
     "AC_PID",

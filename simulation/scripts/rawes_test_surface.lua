@@ -10,7 +10,6 @@ _rawes_fns = {
 
     BASE_PERIOD_MS          = BASE_PERIOD_MS,
     FLIGHT_PERIOD_MS        = FLIGHT_PERIOD_MS,
-    THRUST_CRUISE           = THRUST_CRUISE,
     THRUST_SLEW_MAX         = THRUST_SLEW_MAX,
     MIN_TETHER_M            = MIN_TETHER_M,
     MASS_KG                 = MASS_KG,

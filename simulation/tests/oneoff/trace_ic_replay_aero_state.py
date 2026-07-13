@@ -61,10 +61,10 @@ def main() -> None:
         coll_eq_rad=stack_coll,
         omega_spin=omega_spin,
     )
-    runner = PhysicsRunner(icgen._ROTOR, ic, icgen.WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(icgen._ROTOR, ic, icgen.WIND)
     from controller import HeliCyclicController as _Heli
     runner._acro = _Heli(
-        icgen._ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        icgen._ROTOR,
         P=0.67, I=0.15, D=0.02, IMAX=0.30,
         FLTT=40.0, FLTE=0.0, FLTD=40.0,
     )

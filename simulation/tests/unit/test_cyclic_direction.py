@@ -16,7 +16,6 @@ ROTOR_PATH = SIM / "rotor_definitions" / "beaupoil_2026.yaml"
 
 RHO = 1.225
 T_AERO = 45.0
-STACK_COLL = -0.18
 WIND = np.array([0.0, 10.0, 0.0], dtype=float)
 WIND.flags.writeable = False
 
@@ -27,6 +26,7 @@ def _load_ic() -> SimpleNamespace:
         vel=ic.vel,
         R0=ic.R0,
         omega_spin=ic.omega_spin,
+        coll_eq_rad=ic.coll_eq_rad,
         trim_tilt_lon=ic.trim_tilt_lon,
         trim_tilt_lat=ic.trim_tilt_lat,
     )
@@ -34,7 +34,7 @@ def _load_ic() -> SimpleNamespace:
 
 def _moment_body(aero, state, ic: SimpleNamespace, tilt_lon: float, tilt_lat: float) -> np.ndarray:
     inputs = RotorInputs(
-        collective_rad=STACK_COLL,
+        collective_rad=ic.coll_eq_rad,
         tilt_lon=tilt_lon,
         tilt_lat=tilt_lat,
         R_hub=ic.R0,
@@ -95,7 +95,10 @@ def test_saved_ic_trim_cyclic_removes_baseline_roll_moment():
     )
 
     assert abs(zero_moment[0]) > 10.0
-    # Aero migration changed the exact static trim residual, but trim should
-    # still reduce magnitude materially and oppose the baseline direction.
-    assert abs(trim_moment[0]) < 0.5 * abs(zero_moment[0])
-    assert trim_moment[0] * zero_moment[0] < 0.0
+    # Aero migration and the coupled force-balance IC changed the exact static
+    # trim residual.  A correct trim drives the baseline roll moment toward zero
+    # (large magnitude reduction); it need not overshoot into the opposite sign.
+    assert abs(trim_moment[0]) < 0.4 * abs(zero_moment[0]), (
+        f"IC lateral trim did not substantially reduce the baseline roll moment: "
+        f"zero={zero_moment[0]:.2f} N·m -> trim={trim_moment[0]:.2f} N·m"
+    )

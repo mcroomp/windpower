@@ -370,7 +370,7 @@ _run_stack() {
                 /^=+[ ]+(FAILURES|ERRORS)[ ]=+/ { in_s=1; print; next }
                 /^=+[ ]+short test summary/ { in_s=0 }
                 in_s { print }
-            ' "$_fw" 2>/dev/null | head -120 || true
+            ' "$_fw" 2>/dev/null | tail -40 || true
             grep -E "^(FAILED|ERROR) " "$_fw" 2>/dev/null || true
             echo "### END FAIL: $_fl ###"
         done

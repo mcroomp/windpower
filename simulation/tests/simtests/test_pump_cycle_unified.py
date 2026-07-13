@@ -83,7 +83,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
     if aero_model is None:
         aero_model = os.environ.get("RAWES_AERO", "quasi_static")
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)
 
     thrust_ic = _IC.eq_thrust
     ic_alt    = float(-_IC.pos[2])

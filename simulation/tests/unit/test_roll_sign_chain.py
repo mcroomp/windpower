@@ -23,8 +23,6 @@ from dynbem import create_aero, RotorInputs
 
 _ROTOR = load_default_rotor()
 _IC = load_ic()
-from param_defaults import thrust_to_coll_rad as _t2c
-_IC_COLL_RAD = _t2c(_IC.eq_thrust)  # collective_rad for physics callers
 _AERO = create_aero(_ROTOR, "quasi_static")
 _R_HUB_HOVER = _IC.R0  # hover attitude at IC
 
@@ -61,7 +59,7 @@ class TestRollSignChainLinks:
             [0, cos_e, -sin_e],
             [0, sin_e,  cos_e],
         ])
-        R_body_err = R_roll @ _IC.R0
+        R_body_err = _IC.R0 @ R_roll
         bz_now_err = R_body_err[:, 2]  # rotated down vector
         
         # Compute rate command to align (expect negative roll rate)
@@ -85,7 +83,7 @@ class TestRollSignChainLinks:
         HeliCyclicController.step() takes rate setpoint and body rate,
         computes error, and outputs cyclic command.
         """
-        heli = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
+        heli = HeliCyclicController(_ROTOR)
         heli.set_trim(tilt_lon=_IC.trim_tilt_lon, tilt_lat=_IC.trim_tilt_lat)
         
         # Simulate: body is rolling right (positive omega_x)
@@ -103,7 +101,7 @@ class TestRollSignChainLinks:
         
         for step in range(100):
             tilt_lon_out, tilt_lat_out, _ = heli.step(
-                _IC_COLL_RAD, rate_sp_roll, rate_sp_pitch, omega_body, dt,
+                _IC.coll_eq_rad, rate_sp_roll, rate_sp_pitch, omega_body, dt,
                 collective_norm=0.5
             )
         
@@ -123,7 +121,7 @@ class TestRollSignChainLinks:
         """
         # Hovering at IC attitude
         R_hub = np.asarray(_R_HUB_HOVER, dtype=float)
-        collective_rad = _IC_COLL_RAD
+        collective_rad = _IC.coll_eq_rad
         tilt_lon = 0.0
         tilt_lat = -0.05  # left-roll disk
         
@@ -135,7 +133,7 @@ class TestRollSignChainLinks:
         state = _AERO.initial_rotor_state()
         
         inputs = RotorInputs(
-            collective_rad=_IC_COLL_RAD,
+            collective_rad=_IC.coll_eq_rad,
             tilt_lon=tilt_lon,
             tilt_lat=tilt_lat,
             R_hub=R_hub,
@@ -206,7 +204,7 @@ class TestEndToEndRollCorrection:
         Trace: roll_err + → rate - → cyclic - → aero_mx - (corrects)
         """
         # Setup controller
-        heli = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
+        heli = HeliCyclicController(_ROTOR)
         heli.set_trim(tilt_lon=_IC.trim_tilt_lon, tilt_lat=_IC.trim_tilt_lat)
         
         # Simulate positive roll error (wing high): body rolling right
@@ -220,7 +218,7 @@ class TestEndToEndRollCorrection:
         dt = 1.0 / 400.0
         for _ in range(50):
             tilt_lon_cmd, tilt_lat_cmd, _ = heli.step(
-                _IC_COLL_RAD, rate_sp, 0.0, omega_body_right_roll, dt,
+                _IC.coll_eq_rad, rate_sp, 0.0, omega_body_right_roll, dt,
                 collective_norm=0.5
             )
         
@@ -236,7 +234,7 @@ class TestEndToEndRollCorrection:
         state = _AERO.initial_rotor_state()
 
         inputs = RotorInputs(
-            collective_rad=_IC_COLL_RAD,
+            collective_rad=_IC.coll_eq_rad,
             tilt_lon=tilt_lon_cmd,
             tilt_lat=tilt_lat_cmd,
             R_hub=np.asarray(_R_HUB_HOVER, dtype=float),
@@ -250,7 +248,7 @@ class TestEndToEndRollCorrection:
         mx_cmd_body = (np.asarray(_R_HUB_HOVER, dtype=float).T @ np.asarray(result_cmd.m_hub_world, dtype=float))[0]
 
         inputs_trim = RotorInputs(
-            collective_rad=_IC_COLL_RAD,
+            collective_rad=_IC.coll_eq_rad,
             tilt_lon=_IC.trim_tilt_lon,
             tilt_lat=_IC.trim_tilt_lat,
             R_hub=np.asarray(_R_HUB_HOVER, dtype=float),

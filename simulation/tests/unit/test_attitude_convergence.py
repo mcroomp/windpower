@@ -71,7 +71,7 @@ def _run_attitude_loop(
         pos0=[0.0, 0.0, -50.0], vel0=[0.0, 0.0, 0.0],
         R0=R0.copy(), omega0=[0.0, 0.0, 0.0],
     )
-    acro  = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
+    acro  = HeliCyclicController(_ROTOR)
     state = _AERO.initial_rotor_state()
     F_grav_cancel = np.array([0.0, 0.0, -_MASS * 9.81])
 
@@ -213,7 +213,7 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
 
     # HeliCyclicController with zero rate command must reproduce the trim
     # cyclic at its output.
-    acro = HeliCyclicController(_ROTOR, col_min_rad=-0.28, col_max_rad=0.10)
+    acro = HeliCyclicController(_ROTOR)
     acro.set_trim(trim.tilt_lon, trim.tilt_lat)
     # Run a few steps with zero rate command so the servo settles to trim.
     omega_body_zero = np.zeros(3)

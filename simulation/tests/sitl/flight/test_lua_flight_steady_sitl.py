@@ -184,6 +184,10 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         log.info("Promoting Lua to MODE_STEADY")
         ok = gcs.set_param("RAWES_MODE", 1, timeout=5.0)
         log.info("  RAWES_MODE -> 1 (MODE_STEADY)  ACK=%s", ok)
+        # Send RAWES_ALT immediately after MODE_STEADY so Lua's capture uses the
+        # physics IC altitude, not the EKF-reported altitude (which has a ~2.5 m
+        # vertical bias).  Mode enter clears _nv_floats, so this must arrive after.
+        gcs.send_named_float("RAWES_ALT", float(-ic["pos"][2]))
 
     all_statustext = ctx.all_statustext
     lua_captured   = False

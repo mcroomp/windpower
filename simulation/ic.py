@@ -43,6 +43,7 @@ class IC:
     omega_spin:    float        # equilibrium rotor spin [rad/s]
     rest_length:   float        # tether rest length [m]
     eq_thrust:     float        # equilibrium thrust [0..1]; IC is settled at this value (~0.263)
+    coll_eq_rad:   float        # equilibrium collective [rad]; same operating point as eq_thrust
     trim_tilt_lon: float        # cyclic trim that nulls IC hub moment [rad]
     trim_tilt_lat: float        # cyclic trim that nulls IC hub moment [rad]
     home_z_ned:    float        # GPS home NED Z [m] — 0 = ground level
@@ -113,6 +114,7 @@ def load_ic() -> IC:
         omega_spin    = float(d["omega_spin"]),
         rest_length   = float(d["rest_length"]),
         eq_thrust     = float(d["eq_thrust"]),
+        coll_eq_rad   = float(d.get("coll_eq_rad", 0.0)),
         trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0)),
         trim_tilt_lat = float(d.get("trim_tilt_lat", 0.0)),
         home_z_ned    = float(d["home_z_ned"]),

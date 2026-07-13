@@ -20,10 +20,9 @@ import pytest
 
 from swashplate import SwashplateServoModel, collective_rad_to_out
 from dynbem import rotor_definition as rd
+from param_defaults import load_collective_phys_range as _lr
 
-# Physical limits matching test_pump_cycle_unified defaults
-_COL_MIN = -0.28  # rad
-_COL_MAX =  0.10  # rad
+_COL_MIN, _COL_MAX = _lr()
 
 # DS113MG V6.0: 333 deg/s at 6V, 60 deg travel
 _SLEW_DEG_S = 333.0
@@ -37,8 +36,6 @@ def _make() -> SwashplateServoModel:
     return SwashplateServoModel(
         slew_rate_deg_s=_SLEW_DEG_S,
         travel_deg=_TRAVEL_DEG,
-        col_min_rad=_COL_MIN,
-        col_max_rad=_COL_MAX,
     )
 
 
@@ -59,7 +56,7 @@ class TestInstantiation:
     def test_from_rotor_constructs(self):
         from tests.unit._aero_probe import load_rotor
         rotor = load_rotor("beaupoil_2026")
-        m = SwashplateServoModel.from_rotor(rotor, col_min_rad=_COL_MIN, col_max_rad=_COL_MAX)
+        m = SwashplateServoModel.from_rotor(rotor)
         assert isinstance(m, SwashplateServoModel)
         assert math.isclose(m.collective_rad, _COL_MIN, abs_tol=1e-9)
 
@@ -75,8 +72,6 @@ class TestImmediateSettling:
         return SwashplateServoModel(
             slew_rate_deg_s=1e9,
             travel_deg=60.0,
-            col_min_rad=_COL_MIN,
-            col_max_rad=_COL_MAX,
         )
 
     @pytest.mark.parametrize("col_rad", [-0.28, -0.18, -0.10, 0.00, 0.10])
@@ -170,13 +165,13 @@ class TestSlewLimiting:
 class TestServoClipping:
     def test_extreme_collective_clipped(self):
         """Commands above col_max are silently clipped to col_max."""
-        m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX)
+        m = SwashplateServoModel(1e9, 60.0)
         col_act, _, _ = m.step(0.50, 0.0, 0.0, _DT)   # 0.50 > col_max=0.10
         assert col_act <= _COL_MAX + 1e-9
 
     def test_extreme_collective_below_min_clipped(self):
         """Commands below col_min are clipped to col_min."""
-        m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX)
+        m = SwashplateServoModel(1e9, 60.0)
         col_act, _, _ = m.step(-0.50, 0.0, 0.0, _DT)  # -0.50 < col_min=-0.28
         assert col_act >= _COL_MIN - 1e-9
 
@@ -185,7 +180,7 @@ class TestServoClipping:
         Max collective + max cyclic saturates the servos.
         The inverse mix then returns a cyclic smaller than commanded.
         """
-        m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX)
+        m = SwashplateServoModel(1e9, 60.0)
         # Command extreme collective and extreme cyclic simultaneously
         _, tlon_act, tlat_act = m.step(_COL_MAX, 1.0, 1.0, _DT)
         # With saturation the cyclic must be reduced below the command
@@ -224,14 +219,14 @@ class TestReset:
 
 class TestProperties:
     def test_properties_consistent_with_step_output(self):
-        m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX)
+        m = SwashplateServoModel(1e9, 60.0)
         col_ret, tlon_ret, tlat_ret = m.step(-0.15, 0.2, -0.1, _DT)
         assert math.isclose(m.collective_rad, col_ret,  abs_tol=1e-9)
         assert math.isclose(m.tilt_lon,       tlon_ret, abs_tol=1e-9)
         assert math.isclose(m.tilt_lat,       tlat_ret, abs_tol=1e-9)
 
     def test_properties_update_each_step(self):
-        m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX)
+        m = SwashplateServoModel(1e9, 60.0)
         m.step(-0.28, 0.0, 0.0, _DT)
         m.step(-0.10, 0.3, 0.0, _DT)
         assert math.isclose(m.collective_rad, -0.10, abs_tol=1e-6)
@@ -245,13 +240,13 @@ class TestProperties:
 class TestCustomColLimits:
     def test_non_default_h_col(self):
         """H_COL_MIN=1100, H_COL_MAX=1900 narrows the collective range."""
-        m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX, h_col_min=1100.0, h_col_max=1900.0)
+        m = SwashplateServoModel(1e9, 60.0, h_col_min=1100.0, h_col_max=1900.0)
         col_act, _, _ = m.step(-0.18, 0.0, 0.0, _DT)
         assert math.isclose(col_act, -0.18, abs_tol=1e-6)
 
     def test_h_col_limits_preserved_through_step(self):
         """round-trip with non-default H_COL params does not corrupt collective."""
         for col in (-0.28, -0.18, 0.0, 0.10):
-            m = SwashplateServoModel(1e9, 60.0, _COL_MIN, _COL_MAX, h_col_min=1100.0, h_col_max=1900.0)
+            m = SwashplateServoModel(1e9, 60.0, h_col_min=1100.0, h_col_max=1900.0)
             col_act, _, _ = m.step(col, 0.0, 0.0, _DT)
             assert math.isclose(col_act, col, abs_tol=1e-6), f"col={col} failed round-trip"

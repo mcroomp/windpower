@@ -123,8 +123,6 @@ def test_ground_liftoff():
     runner = PhysicsRunner(
         _ROTOR, ic, WIND_NED,
         z_floor     = 0.0,
-        col_min_rad = -0.28,
-        col_max_rad =  0.10,
     )
     # Swap the elastic tether for a constant 200 N downward load.
     runner._core._tether = _ConstantDownforce(TETHER_FORCE_N)

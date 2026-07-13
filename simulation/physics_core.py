@@ -180,7 +180,6 @@ class PhysicsCore:
     @classmethod
     def from_state(cls, rotor, pos, vel, R0, rest_length, eq_thrust,
                    omega_spin, wind, **kwargs):
-        from param_defaults import thrust_to_coll_rad as _t2c
         ic = SimpleNamespace(
             pos        = np.asarray(pos, dtype=float),
             vel        = np.asarray(vel, dtype=float),

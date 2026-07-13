@@ -44,7 +44,8 @@ def _make_ctrl(
     accel_max_cdss: float = 0.0,   # 0 = linear P
     input_tc: float = 0.0,         # 0 = no shaping delay (instantaneous)
 ) -> GuidedAttitudeController:
-    hp = HeliParams()
+    from param_defaults import load_ap_params as _lp
+    hp = HeliParams.from_ap_dict(_lp())
     gp = GuidedAttitudeParams(
         ATC_ANG_RLL_P=ang_p,
         ATC_ANG_PIT_P=ang_p,
@@ -322,7 +323,8 @@ class TestGuidedAttitudeController:
     # --- set_target_rotation matches Euler path ---
 
     def test_set_target_rotation_equals_euler(self):
-        hp = HeliParams()
+        from param_defaults import load_ap_params as _lp
+        hp = HeliParams.from_ap_dict(_lp())
         gp = GuidedAttitudeParams()
         roll, pitch, yaw = 5.0, -25.0, 45.0
 

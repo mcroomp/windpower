@@ -69,7 +69,7 @@ def _make_runner(P, I, D, FF, FLTT, FLTE, FLTD, IMAX, ic, kin):
         base_k_ang=0.0, startup_damp_k_ang=500.0,
     )
     acro = HeliCyclicController(
-        _ROTOR, col_min_rad=-0.28, col_max_rad=0.10,
+        _ROTOR,
         P=P, I=I, D=D, FF=FF, IMAX=IMAX,
         FLTT=FLTT, FLTE=FLTE, FLTD=FLTD,
     )
@@ -87,7 +87,7 @@ def run(label: str, params: dict, *, use_trim: bool = True,
         vel        = np.asarray(ic.vel, dtype=float),
         R0         = np.asarray(ic.R0,  dtype=float).reshape(3, 3),
         rest_length= float(ic.rest_length),
-        coll_eq_rad= float(ic.stack_coll_eq),
+        coll_eq_rad= float(ic.coll_eq_rad),
         omega_spin = float(ic.omega_spin),
     )
 

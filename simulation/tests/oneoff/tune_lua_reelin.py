@@ -69,8 +69,7 @@ def run(P=0.02, I=0.10, D=0.0, FF=0.0, FLTD=10.0, SMAX=0.0,
     sim.R = _IC.R0
     sim.gyro = [0.0, 0.0, 0.0]
 
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model="quasi_static",
-                           col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model="quasi_static")
     ic_alt = float(-_IC.pos[2])
 
     winch = GovernedWinchController(

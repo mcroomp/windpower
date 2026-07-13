@@ -19,6 +19,9 @@ import numpy as np
 from frames     import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
 from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE, INTERLOCK_PWM_HIGH
 from swashplate import SwashplateServoModel
+from dynbem     import RotorInputs
+from param_defaults import load_ap_params as _load_ap_params
+from arduloop import HeliRateController, HeliParams, RateAxisParams
 
 
 def compute_rc_rates(
@@ -1100,7 +1103,7 @@ class HeliCyclicController:
 
     Usage::
 
-        acro = HeliCyclicController(rotor, col_min_rad=-0.28, col_max_rad=0.10)
+        acro = HeliCyclicController(rotor)
         tilt_lon, tilt_lat, col_actual = acro.step(
             collective_rad, rate_roll_sp, rate_pitch_sp, omega_body, dt,
         )
@@ -1117,8 +1120,6 @@ class HeliCyclicController:
     def __init__(
         self,
         rotor,
-        col_min_rad:    float,
-        col_max_rad:    float,
         P:              float = 0.67,
         I:              float = 0.15,
         D:              float = 0.02,
@@ -1130,31 +1131,27 @@ class HeliCyclicController:
         h_sw_h3_phang:  float = 0.0,
         loop_rate_hz:   float = 400.0,
     ) -> None:
-        # Local imports keep arduloop optional for environments that don't
-        # need it (e.g. analysis scripts that don't run the controller).
-        from arduloop import HeliRateController, HeliParams, make_roll_params, make_pitch_params, make_yaw_params
-        roll_cfg = make_roll_params()
-        pitch_cfg = make_pitch_params()
+        _ap = _load_ap_params()
+        roll_cfg  = RateAxisParams.from_ap_dict(_ap, "RLL")
+        pitch_cfg = RateAxisParams.from_ap_dict(_ap, "PIT")
         # Override both axes with caller's params if provided (any deviation from
         # the default signature builds an explicit RateAxisParams applied to roll
         # and pitch alike). When no override is given, roll loads ATC_RAT_RLL_*
         # and pitch loads ATC_RAT_PIT_* from the same .parm chain as SITL.
         if P != 0.67 or I != 0.15 or D != 0.02 or FF != 0.00 or IMAX != 0.30 or FLTT != 40.0 or FLTE != 0.0 or FLTD != 40.0:
-            from arduloop import RateAxisParams
             override = RateAxisParams(
                 P=P, I=I, D=D, FF=FF, IMAX=IMAX,
                 FLTT=FLTT, FLTE=FLTE, FLTD=FLTD,
             )
             roll_cfg = override
             pitch_cfg = override
-        yaw_cfg = make_yaw_params()
+        yaw_cfg = RateAxisParams.from_ap_dict(_ap, "YAW")
         params = HeliParams(
             roll=roll_cfg, pitch=pitch_cfg, yaw=yaw_cfg,
             loop_rate_hz=loop_rate_hz, H_SW_H3_PHANG=h_sw_h3_phang
         )
         self._ctrl  = HeliRateController(params)
-        self._servo = SwashplateServoModel.from_rotor(
-            rotor, col_min_rad=col_min_rad, col_max_rad=col_max_rad)
+        self._servo = SwashplateServoModel.from_rotor(rotor)
         self._tilt_lon_trim = 0.0
         self._tilt_lat_trim = 0.0
 
@@ -1237,22 +1234,17 @@ def col_min_for_altitude_rad(
     omega     : rotor spin rate [rad/s]
     safety_rad: margin added above the exact floor [rad]
     """
-    import math as _math
-    import numpy as _np
-    from frames import build_orb_frame as _build_orb_frame
-    from dynbem   import RotorInputs as _RotorInputs
-
-    xi_r = _math.radians(xi_deg)
+    xi_r = math.radians(xi_deg)
     # bz in NED: East = Y axis.  xi from East direction toward Down (negative NED Z = Up).
-    bz   = _np.array([0.0, _math.cos(xi_r), -_math.sin(xi_r)])
-    R    = _build_orb_frame(bz)
-    wind = _np.array([0.0, wind_m_s, 0.0])   # NED: East wind = Y axis
+    bz   = np.array([0.0, math.cos(xi_r), -math.sin(xi_r)])
+    R    = build_orb_frame(bz)
+    wind = np.array([0.0, wind_m_s, 0.0])   # NED: East wind = Y axis
     W    = mass_kg * 9.81
 
     def _thrust_at(col: float) -> float:
-        inputs = _RotorInputs(
+        inputs = RotorInputs(
             collective_rad=col, tilt_lon=0.0, tilt_lat=0.0,
-            R_hub=R, v_hub_world=_np.zeros(3), wind_world=wind,
+            R_hub=R, v_hub_world=np.zeros(3), wind_world=wind,
             omega_rad_s=float(omega), rho_kg_m3=1.225,
         )
         # Fresh state per probe: the aero step() API settles its inflow/wake

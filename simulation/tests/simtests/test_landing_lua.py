@@ -64,7 +64,7 @@ T_FINAL_DROP_MAX     = 15.0
 # ---------------------------------------------------------------------------
 
 def _run_landing(log) -> dict:
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, col_min_rad=-0.28, col_max_rad=0.10)
+    runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     # Note: xi_reel_in_deg / col_cruise_rad were dropped from the planner
     # API.  The current LandingGroundController uses tether-length targets

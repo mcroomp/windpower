@@ -15,11 +15,9 @@ from pathlib import Path
 import pytest
 
 from swashplate import SwashplateServoModel, ardupilot_h3_120_forward, collective_rad_to_out
+from param_defaults import load_collective_phys_range as _lr
 
-
-# Physical limits
-_COL_MIN = -0.28  # rad
-_COL_MAX = 0.10   # rad
+_COL_MIN, _COL_MAX = _lr()
 
 # High slew rate for immediate settling
 _DT = 1.0 / 400.0

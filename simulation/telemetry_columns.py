@@ -195,6 +195,9 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mav_nvf_yff_trim",   # YFF_T: H_YAW_TRIM written by observer
             "mav_nvf_yff_u",      # YFF_U: applied motor throttle read-back
             "mav_nvf_yff_gz",     # YFF_GZ: measured gyro:z() [rad/s]
+            "ekf_pos_x",          # EKF LOCAL_POSITION_NED x [m] (NED)
+            "ekf_pos_y",          # EKF LOCAL_POSITION_NED y [m] (NED)
+            "ekf_pos_z",          # EKF LOCAL_POSITION_NED z [m] (NED, negative = up)
         ),
     ),
     # Direct servo values decoded from SITL servo packet in mediator.
