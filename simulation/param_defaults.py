@@ -240,3 +240,13 @@ def load_collective_phys_range() -> tuple[float, float]:
 def thrust_to_coll_rad(thrust: float) -> float:
     col_min, col_max = load_collective_phys_range()
     return col_min + float(thrust) * (col_max - col_min)
+
+
+def coll_rad_to_thrust(collective_rad: float) -> float:
+    """Map physical collective [rad] back to normalized thrust [0..1]."""
+    col_min, col_max = load_collective_phys_range()
+    span = col_max - col_min
+    if abs(span) < 1e-12:
+        return 0.0
+    thrust = (float(collective_rad) - col_min) / span
+    return float(max(0.0, min(1.0, thrust)))

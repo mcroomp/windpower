@@ -858,8 +858,16 @@ def _install_lua_scripts(*names: str) -> None:
 
         _install_lua_scripts("rawes.lua")
     """
-    dst_dir = Path("/ardupilot/scripts")
-    dst_dir.mkdir(exist_ok=True)
+    sim_vehicle = _resolve_sim_vehicle()
+    if sim_vehicle is not None:
+        dst_dir = sim_vehicle.parent.parent.parent / "scripts"
+    else:
+        ardupilot_root = os.environ.get(ARDUPILOT_ENV, "").strip()
+        if ardupilot_root:
+            dst_dir = Path(ardupilot_root) / "scripts"
+        else:
+            dst_dir = Path("/ardupilot/scripts")
+    dst_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
         src = _SCRIPTS_DIR / name
         shutil.copy2(src, dst_dir / name)

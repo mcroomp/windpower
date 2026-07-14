@@ -3,8 +3,8 @@ simtest_runner.py — Shared 400 Hz physics core for simtests.
 
 PhysicsRunner is a thin wrapper around PhysicsCore (simulation/physics_core.py).
 
-    step(dt, collective, rate_roll, rate_pitch, omega_body)
-        → runs HeliCyclicController (baked in) then core.step()
+    step_from_thrust(dt, thrust, rate_roll, rate_pitch, omega_body)
+        → runs HeliCyclicController.step_from_thrust(), then core.step()
 
 PhysicsCore owns all physics constants (k_yaw, T_AERO_OFFSET) and
 the integration loop (dynamics, aero, tether, spin ODE, angular damping).
@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from physics_core  import PhysicsCore, HubObservation
 from controller    import HeliCyclicController
-from param_defaults import thrust_to_coll_rad as _t2c, load_collective_phys_range as _load_col_range
+from param_defaults import load_collective_phys_range as _load_col_range
 
 
 class PhysicsRunner:
@@ -54,7 +54,7 @@ class PhysicsRunner:
     -----
     runner = PhysicsRunner(rotor, ic, wind)
     for i in range(steps):
-        sr = runner.step(DT, collective_rad, rate_roll, rate_pitch, omega_body, rest_length=winch.rest_length)
+        sr = runner.step_from_thrust(DT, thrust_cmd, rate_roll, rate_pitch, omega_body, rest_length=winch.rest_length)
         tension_now = runner.tension_now
         hub = runner.hub_state
     """
@@ -79,15 +79,13 @@ class PhysicsRunner:
         """
         self._core = PhysicsCore(rotor, ic, wind, z_floor=z_floor,
                                  aero_model=aero_model, aero_override=aero_override)
+        self._col_min, self._col_max = _load_col_range()
         self._tilt_lon_trim = float(getattr(ic, "trim_tilt_lon", 0.0))
         self._tilt_lat_trim = float(getattr(ic, "trim_tilt_lat", 0.0))
         self._acro = HeliCyclicController(rotor)
         self._acro.set_trim(self._tilt_lon_trim, self._tilt_lat_trim)
-        # coll_eq_rad is the physics equilibrium collective; eq_thrust is its
-        # normalized form. Use coll_eq_rad if present, else convert eq_thrust.
-        servo_col = getattr(ic, 'coll_eq_rad', None) or _t2c(ic.eq_thrust)
-        self._acro._servo.reset(
-            servo_col,
+        self._acro.reset_from_thrust(
+            float(ic.eq_thrust),
             tilt_lon=self._tilt_lon_trim,
             tilt_lat=self._tilt_lat_trim,
         )
@@ -96,7 +94,6 @@ class PhysicsRunner:
 
     @classmethod
     def for_warmup(cls, rotor, pos, R0, rest_length, eq_thrust, omega_spin, wind):
-        col_min, col_max = _load_col_range()
         ic = SimpleNamespace(
             pos        = np.asarray(pos, dtype=float),
             vel        = np.zeros(3),
@@ -105,7 +102,7 @@ class PhysicsRunner:
             eq_thrust  = float(eq_thrust),
             omega_spin = float(omega_spin),
         )
-        return cls(rotor, ic, wind, col_min_rad=col_min, col_max_rad=col_max)
+        return cls(rotor, ic, wind)
 
     # ── Read-only state properties ────────────────────────────────────────────
 
@@ -146,18 +143,13 @@ class PhysicsRunner:
 
     # ── Physics steps ─────────────────────────────────────────────────────────
 
-    def step(self, dt: float, collective_rad: float,
-             rate_roll: float, rate_pitch: float,
-             omega_body: np.ndarray,
-             *, rest_length: "float | None" = None) -> dict:
-        """
-        400 Hz step for Python-AP tests.
-
-        Runs HeliCyclicController (arduloop rate PID + servo model) then physics.
-        Use when a Python AP controller produces (collective, rate_roll, rate_pitch).
-        """
-        tlon, tlat, col_act = self._acro.step(
-            collective_rad, rate_roll, rate_pitch, omega_body, dt)
+    def step_from_thrust(self, dt: float, thrust_cmd: float,
+                         rate_roll: float, rate_pitch: float,
+                         omega_body: np.ndarray,
+                         *, rest_length: "float | None" = None) -> dict:
+        """400 Hz step for Python-AP tests using thrust [0..1]."""
+        tlon, tlat, col_act = self._acro.step_from_thrust(
+            thrust_cmd, rate_roll, rate_pitch, omega_body, dt)
         return self._core.step(dt, col_act, tlon, tlat, rest_length)
 
     def observe(self) -> HubObservation:
@@ -167,7 +159,7 @@ class PhysicsRunner:
     def step_guided(
         self,
         dt: float,
-        collective_cmd: float,
+        thrust_cmd: float,
         heli_out,
         *,
         rest_length: "float | None" = None,
@@ -175,16 +167,19 @@ class PhysicsRunner:
         """400 Hz step for GUIDED tests.
 
         Takes a HeliRateOutput from GuidedAttitudeController.update() directly,
+        converts thrust [0..1] to collective radians at the boundary,
         applies the SwashplateServoModel for servo lag, then calls physics.
         Bypasses the rate PIDs in _acro (those are inside GuidedAttitudeController).
         """
-        # Sign mapping matches HeliCyclicController.step():
+        # Sign mapping matches HeliCyclicController._step_collective():
         #   roll_cyclic  ->  tilt_lat  (no sign flip)
         #   pitch_cyclic -> -tilt_lon  (sign flip)
         tilt_lat_cmd =  heli_out.roll_cyclic
         tilt_lon_cmd = -heli_out.pitch_cyclic
         tilt_lat_cmd += self._tilt_lat_trim
         tilt_lon_cmd += self._tilt_lon_trim
+        thrust = float(np.clip(thrust_cmd, 0.0, 1.0))
+        collective_cmd = self._col_min + thrust * (self._col_max - self._col_min)
         col_act, tlon, tlat = self._acro._servo.step(
             collective_cmd, tilt_lon_cmd, tilt_lat_cmd, dt)
         return self._core.step(dt, col_act, tlon, tlat, rest_length)

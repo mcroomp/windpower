@@ -80,7 +80,7 @@ class TestRollSignChainLinks:
     def test_cyclic_output_sign_from_rate_error(self):
         """Link 2: negative rate error should produce negative cyclic via PID.
         
-        HeliCyclicController.step() takes rate setpoint and body rate,
+        HeliCyclicController.step_from_thrust() takes rate setpoint and body rate,
         computes error, and outputs cyclic command.
         """
         heli = HeliCyclicController(_ROTOR)
@@ -100,8 +100,8 @@ class TestRollSignChainLinks:
         tilt_lat_out = None
         
         for step in range(100):
-            tilt_lon_out, tilt_lat_out, _ = heli.step(
-                _IC.coll_eq_rad, rate_sp_roll, rate_sp_pitch, omega_body, dt,
+            tilt_lon_out, tilt_lat_out, _ = heli.step_from_thrust(
+                float(_IC.eq_thrust), rate_sp_roll, rate_sp_pitch, omega_body, dt,
                 collective_norm=0.5
             )
         
@@ -217,8 +217,8 @@ class TestEndToEndRollCorrection:
         # Run controller to generate cyclic (should be negative to roll left)
         dt = 1.0 / 400.0
         for _ in range(50):
-            tilt_lon_cmd, tilt_lat_cmd, _ = heli.step(
-                _IC.coll_eq_rad, rate_sp, 0.0, omega_body_right_roll, dt,
+            tilt_lon_cmd, tilt_lat_cmd, _ = heli.step_from_thrust(
+                float(_IC.eq_thrust), rate_sp, 0.0, omega_body_right_roll, dt,
                 collective_norm=0.5
             )
         

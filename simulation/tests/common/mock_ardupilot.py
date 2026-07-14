@@ -96,7 +96,6 @@ class _MockArdupilotBase:
 
     def __init__(self, *, wind: "np.ndarray", dt: float, initial_thrust: float = 0.263) -> None:
         self._last_thrust = float(initial_thrust)
-        self.col_rad = thrust_to_coll_rad(self._last_thrust)
         self.roll_sp = 0.0
         self.pitch_sp = 0.0
         self._wind = wind
@@ -129,8 +128,7 @@ class _MockArdupilotBase:
         if heli_out.collective_norm_cmd is not None and abs(float(self._guided_ctrl.climbrate_ms)) > 1e-6:
             c_norm = float(np.clip(heli_out.collective_norm_cmd, -1.0, 1.0))
             self._last_thrust = 0.5 * (c_norm + 1.0)
-            self.col_rad = thrust_to_coll_rad(self._last_thrust)
-        return runner.step_guided(dt, self.col_rad, heli_out, rest_length=rest_length)
+        return runner.step_guided(dt, self._last_thrust, heli_out, rest_length=rest_length)
 
     def log(self, runner, sr: dict) -> None:
         if self.tel_fn is None or self._tel_every is None:
@@ -219,7 +217,7 @@ class _MockArdupilotBase:
             extra_kwargs.update(rate_terms)
 
             self._telemetry.append(
-                TelRow.from_physics(runner, sr, self.col_rad, self._wind, **extra_kwargs)
+                TelRow.from_physics(runner, sr, thrust_to_coll_rad(self._last_thrust), self._wind, **extra_kwargs)
             )
         self._log_step += 1
 
@@ -230,6 +228,10 @@ class _MockArdupilotBase:
     @property
     def telemetry(self) -> list:
         return self._telemetry
+
+    @property
+    def thrust(self) -> float:
+        return float(self._last_thrust)
 
 
 class _LuaBackend(_MockArdupilotBase):
@@ -259,12 +261,10 @@ class _LuaBackend(_MockArdupilotBase):
         gt_throttle = self._sim._mock.guided_throttle
         if gt_throttle is not None:
             self._last_thrust = float(gt_throttle)
-            self.col_rad = thrust_to_coll_rad(self._last_thrust)
         else:
             ch3 = self._sim.ch_out[3]
             if ch3 is not None:
                 self._last_thrust = max(0.0, min(1.0, (ch3 - 1000) / 1000.0))
-                self.col_rad = thrust_to_coll_rad(self._last_thrust)
 
         gt_rate = self._sim._mock.guided_rate_target
         if gt_rate is not None:
@@ -694,7 +694,7 @@ class _PythonBackend(_MockArdupilotBase):
         accel_ned: "np.ndarray | None" = None,
     ) -> "tuple[float, float, float]":
         thrust, roll_sp, pitch_sp = self._mode.step(obs, dt, accel_ned=accel_ned)
-        self.col_rad = thrust_to_coll_rad(float(thrust))
+        self._last_thrust = float(thrust)
         self.roll_sp = roll_sp
         self.pitch_sp = pitch_sp
         return thrust, roll_sp, pitch_sp

@@ -100,7 +100,7 @@ def _run(t_sim: float = T_SIM):
     """
     runner = PhysicsRunner(_ROTOR_S, _IC, WIND)
     runner._acro = HeliCyclicController(_ROTOR_S)
-    runner._acro._servo.reset(_IC.coll_eq_rad)
+    runner._acro.reset_from_thrust(float(_IC.eq_thrust))
 
     # Ground-side tension-regulating winch.
     tension_target = 300.0
@@ -156,7 +156,7 @@ def _run(t_sim: float = T_SIM):
         dT       = runner.tension_now - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
-        runner.step(DT, _IC.coll_eq_rad, rate_roll, rate_pitch, omega_body,
+        runner.step_from_thrust(DT, float(_IC.eq_thrust), rate_roll, rate_pitch, omega_body,
                     rest_length=rest_now)
         events.check_floor(runner.hub_state["pos"][2], t, "flight")
 
