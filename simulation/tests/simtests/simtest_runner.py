@@ -22,10 +22,11 @@ Implementation lives in tests/common/mock_ardupilot.py.
 Lua backend wraps the 50-100 Hz tick pattern that every Lua test
 repeats: millis update → feed_obs → update_fn → PWM decode.
 
-In GUIDED mode rawes.lua drives cyclic via vehicle:set_target_angle_and_climbrate
-(stored in _mock.guided_target) rather than ch1/ch2 RC overrides. The Lua backend
-feeds guided_target into a GuidedAttitudeController (400 Hz inner loop) and
-calls runner.step_guided() so physics sees the correct swashplate tilt.
+In GUIDED mode rawes.lua drives cyclic/collective via
+vehicle:set_target_angle_and_rate_and_throttle and
+vehicle:set_target_rate_and_throttle. The Lua backend feeds those targets into
+GuidedAttitudeController (400 Hz inner loop) and calls runner.step_guided() so
+physics sees the correct swashplate tilt.
 Collective is sourced from the guided vertical channel when available,
 with ch3 kept as a legacy fallback.
 """

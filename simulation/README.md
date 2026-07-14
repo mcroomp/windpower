@@ -56,7 +56,7 @@ Canonical design details are maintained in:
 | `sensor.py` | `build_sitl_packet()` — NED truth state → ArduPilot JSON sensor packet |
 | `sitl_interface.py` | ArduPilot SITL UDP binary protocol (servo recv, state send) |
 | `controller.py` | `compute_swashplate_from_state()` — truth-state tether-alignment controller; `compute_rc_from_attitude()` — legacy ACRO RC helper |
-| `gcs.py` | MAVLink GCS client (arm, mode, params, named-float commands; RC override helper remains for tooling) |
+| `gcs.py` | MAVLink GCS client (arm, mode, params, named-float commands) |
 | `flight_report.py` | Multi-panel PNG flight report from position/attitude/servo history |
 
 Analysis scripts (not part of simulation runtime): `analysis/`

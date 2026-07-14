@@ -152,7 +152,7 @@ motor off
 ```
 
 ### `arm [--duration N]`
-Set ACRO + send `RAWES_ARM=N*1000` (default 10 s). Doesn't touch `RAWES_MODE` — use
+Set stack arm state + send `RAWES_ARM=N*1000` (default 10 s). Doesn't touch `RAWES_MODE` — use
 `run <name>` if you also want to activate a Lua mode.
 
 ### `disarm` / `reboot` / `ping [baud]`

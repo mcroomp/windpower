@@ -3,7 +3,7 @@ rawes.lua -- Unified RAWES flight controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via RAWES_MODE (script-generated parameter):
-    0  none        -- script passive: no RC overrides; logs every 5 s + any NV message
+    0  none        -- script passive: no control-channel overrides; CH8 interlock hold still applies while armed
     1  steady      -- primary guided flight path (set_target_rate_and_throttle)
     2  reserved    -- unused
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release

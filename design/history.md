@@ -114,15 +114,15 @@ not collective.  Collective provides fine-grained tension tuning within a phase.
 
 Full spec in `flight_stack.md`. Key settled decisions:
 
-### ModeRAWES inherits ModeAcro_Heli (not Mode directly)
+### ModeRAWES inherits ModeRateLoopHeli (not Mode directly)
 ```
-Mode → ModeAcro → ModeAcro_Heli → ModeRAWES
+Mode → ModeRateLegacy → ModeRateLoopHeli → ModeRAWES
 ```
-Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards delegate to `ModeAcro_Heli::run()`. ~162 lines new C++.
+Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards delegate to `ModeRateLoopHeli::run()`. ~162 lines new C++.
 
 ### 400 Hz loop (run()) pseudocode
 ```
-1. Spool guards: SHUT_DOWN/GROUND_IDLE → ModeAcro_Heli::run(); return
+1. Spool guards: SHUT_DOWN/GROUND_IDLE → ModeRateLoopHeli::run(); return
 2. Planner timeout (2 s) → snap bz_target back to bz_tether
 3. Orbit tracking → update bz_tether from current tether direction
 4. Attitude setpoint: identity attitude_q → use bz_tether; else slerp toward bz_target
@@ -237,9 +237,9 @@ Min physics altitude    :   5.7 m (> 2.0 m limit)
 
 ## Post-M3 Infrastructure Changes
 
-### test_acro_hold known failure (not a regression)
+### Legacy hold-test known failure (not a regression)
 
-`test_acro_hold` fails with "Hub crashed: altitude < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick ACRO hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_90s`) passes.
+The legacy hold test fails with "Hub crashed: altitude < 2.0 m". The hub descends from ~7 m to ~1.3 m over 60 s of neutral-stick hold after the 45 s kinematic damping phase. Unit-level equivalent (`test_closed_loop_90s`) passes.
 
 **Root cause:** Kinematic phase ends with ~0.9 m/s orbital velocity. `HoldPlanner` → `thrust=0.0 → collective=col_min=−0.28 rad` provides barely-positive lift at shallow tether elevation (~8°). Hub spirals down. `test_closed_loop_90s` starts from near-zero IC velocity so lift is sufficient.
 
@@ -394,7 +394,7 @@ The orbit-tracking implementation (`rodrigues`, `slerp_step`, `orbit_track_azimu
 
 1. **Stateless geometry**: `bz_altitude_hold(pos, el_rad, tension_n)` needs no captured reference state (`_bz_eq0`, `_tdir0`). GPS init simply sets `_el_rad` and `_target_alt` once; subsequent updates are rate-limited toward `asin(target_alt / tlen)`.
 2. **Natural gravity compensation**: The function tilts the disk slightly inward (elevation-upward tangent direction) by `k = mass*g*cos(el)/tension` so the thrust vector counteracts the elevation-lowering component of gravity — no empirical tuning.
-3. **Simpler pre-GPS path**: Gyro feedthrough (desired_rate = measured_rate → ACRO rate_error = 0 → zero corrective torque) preserves the natural orbital rate. No need to track `_bz_orbit = bz_now` to synthesize neutral-stick behavior.
+3. **Simpler pre-GPS path**: Gyro feedthrough (desired_rate = measured_rate → rate_error = 0 → zero corrective torque) preserves the natural orbital rate. No need to track `_bz_orbit = bz_now` to synthesize neutral-stick behavior.
 4. **Pumping collective via TensionPI**: The open-loop collective schedule (`COL_REEL_OUT`, `COL_REEL_IN`) was replaced with a TensionPI running inside rawes.lua. TensionPI feedback on `RAWES_TEN` produces correct tension for each phase without requiring phase-specific collective tuning.
    - **Superseded (Phase 3, M3):** the AP no longer runs any tension loop. `RAWES_TEN` is now the *commanded* tension (a feedforward into the orientation force balance), collective is owned by a 50 Hz altitude PID, and the only tension feedback lives on the ground winch. See [tension_collective_control_loop.md](tension_collective_control_loop.md).
 

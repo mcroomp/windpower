@@ -459,15 +459,11 @@ def _arm(session: RawesGCS, force: bool = False,
          timeout: float = 15.0, esc_arm: bool = True) -> bool:
     """
     Arm sequence:
-      1. Set throttle RC override to 1000 (CH3 interlock low).
-      2. Send MAV_CMD_COMPONENT_ARM_DISARM; wait for armed heartbeat.
+            1. Send MAV_CMD_COMPONENT_ARM_DISARM.
+            2. Wait for armed heartbeat.
     The DShot ESC self-arms from the idle throttle once armed -- no special
     ESC pre-arm pulse is needed.  Returns True if vehicle confirms armed.
     """
-    print("  Setting throttle (CH3) override to 1000 ...")
-    session.send_rc_override({3: 1000})
-    time.sleep(0.5)
-
     print("  Sending arm command ...")
     param2 = 21196.0 if force else 0.0
     session._mav.mav.command_long_send(
@@ -482,7 +478,6 @@ def _arm(session: RawesGCS, force: bool = False,
     deadline = time.monotonic() + timeout
     armed = False
     while time.monotonic() < deadline:
-        session.send_rc_override({3: 1000})
         msg = session._recv(
             type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
             blocking=True, timeout=0.5,
@@ -528,7 +523,6 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
         param2, # param2: 21196 = force-disarm
         0, 0, 0, 0, 0,
     )
-    session.send_rc_override({})   # clear all RC overrides
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         msg = session._recv(type="HEARTBEAT", blocking=True, timeout=1.0)

@@ -1599,18 +1599,14 @@ def observe(
     msg_types: "list[str]",
     label: str = "observation",
     recv_timeout: float = 0.2,
-    keepalive: "dict | None" = None,
-    keepalive_interval_s: float = 0.5,
 ) -> None:
     """
     Run a SITL observation loop for ``duration_s`` sim-seconds.
 
     On every iteration:
       1. ``assert_procs_alive(ctx, label)`` — pytest.fail if a process exited.
-      2. Optional RC keepalive: if ``keepalive`` is set, ``send_rc_override``
-         is called once every ``keepalive_interval_s`` sim-seconds.
-      3. ``gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)``
-      4. ``on_message(msg, t_rel)`` — ``msg`` may be ``None`` on recv timeout.
+        2. ``gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)``
+        3. ``on_message(msg, t_rel)`` — ``msg`` may be ``None`` on recv timeout.
          Return ``True`` from the callback to exit the loop early.
 
     Parameters
@@ -1621,21 +1617,13 @@ def observe(
     msg_types            : MAVLink message types to pass to _recv
     label                : label forwarded to assert_procs_alive / logs
     recv_timeout         : wall-clock seconds _recv waits for a message
-    keepalive            : RC channel dict for send_rc_override, or None
-    keepalive_interval_s : minimum sim-seconds between keepalive sends;
-                           0.0 sends on every iteration
     """
     gcs      = ctx.gcs
     t_start  = gcs.sim_now()
     deadline = t_start + duration_s
-    t_rc     = gcs.sim_now()
 
     while gcs.sim_now() < deadline:
         assert_procs_alive(ctx, label)
-
-        if keepalive is not None and gcs.sim_now() - t_rc >= keepalive_interval_s:
-            gcs.send_rc_override(keepalive)
-            t_rc = gcs.sim_now()
 
         msg   = gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)
         t_rel = gcs.sim_now() - t_start

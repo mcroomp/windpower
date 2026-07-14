@@ -19,7 +19,7 @@ Pull this doc into context when you are:
 
 - running a SITL stack test (`bash test.sh stack ...`);
 - diagnosing a SITL failure (`diagnose_sitl.py`, `analyse_run.py`, EKF/GPS gating);
-- touching the kinematic-hold trajectory, the IC-start fixtures, or `_run_acro_setup`;
+- touching the kinematic-hold trajectory, the IC-start fixtures, or stack setup sequencing;
 - debugging the SITL lockstep protocol or the GPS/EKF startup path.
 
 ---
@@ -148,7 +148,7 @@ contract above.
 | Production wiring | mediator startup block | [mediator.py](../simulation/mediator.py) (`_kin_duration`, `make_smooth_trapezoid_traj`, `KinematicStartup`) | Builds the trajectory from config and feeds the SITL sensor stream |
 | Config knobs | `startup_damp_seconds`, `kinematic_cruise_speed`, `kinematic_accel_s`, `kinematic_decel_s`, `kinematic_vel_ramp_s`, `kinematic_aero_mode` | [config.py](../simulation/config.py) | Default profile; overridden per-fixture |
 | Central IC fixture | `_ic_trapezoid_stack` | [flight/conftest.py](../simulation/tests/sitl/flight/conftest.py) | The **only** entry point for "start at the IC" SITL flight tests |
-| SITL setup sequence | `_run_acro_setup` (6 steps) / `_acro_stack` | [stack_infra.py](../simulation/tests/sitl/stack_infra.py) | Connect → params → EKF tilt align → arm → confirm GUIDED_NOGPS |
+| SITL setup sequence | stack setup helpers (6 steps) | [stack_infra.py](../simulation/tests/sitl/stack_infra.py) | Connect → params → EKF tilt align → arm → confirm GUIDED_NOGPS |
 
 The trapezoid path is selected whenever `kinematic_cruise_speed > 0`; otherwise
 the linear fallback path is used. With dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED
@@ -215,7 +215,7 @@ windows are config-driven; only the *implementation* is shared:
 | `test_kinematic_gps_sitl` | 160 | Long hold for GPS-fusion timing studies |
 | `config.py` default | 30 | **Linear** fallback path (`kinematic_cruise_speed=0`) for non-IC stacks |
 
-> Note: the `_run_acro_setup` docstring still mentions a "30 s" damping window;
+> Note: one setup helper docstring still mentions a "30 s" damping window;
 > that is the legacy default, not the IC-start value. The IC fixtures override
 > `startup_damp_seconds` to 60. The authoritative duration for any given test is
 > the value in its fixture/extra-config, not the docstring.
@@ -224,7 +224,7 @@ windows are config-driven; only the *implementation* is shared:
 
 ## 4. SITL setup sequence (runs inside the hold)
 
-`_run_acro_setup` must complete its six steps **inside** the kinematic window so
+The setup sequence must complete its six steps **inside** the kinematic window so
 the hub is still being held when GPS aligns:
 
 1. Connect GCS; request telemetry streams.
@@ -283,7 +283,7 @@ change any of:
   (`startup_damp_seconds`, `kinematic_cruise_speed`, `kinematic_accel_s`,
   `kinematic_decel_s`, `kinematic_vel_ramp_s`, `kinematic_aero_mode`,
   `_arm_at_sim_s`) in any fixture or in [config.py](../simulation/config.py);
-- the `_run_acro_setup` six-step sequence or the arm timing.
+- the stack setup six-step sequence or the arm timing.
 
 Any SITL test that needs to **start at the IC must reuse the single shared
 implementation** (`_ic_trapezoid_stack` → `kinematic.py`). Do not add a second

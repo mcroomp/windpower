@@ -114,7 +114,7 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
       t=45..65 s  kinematic ramp phase: vel ramps 0.96->0 m/s (vel_ramp_s=20)
       t~51 s      ahrs:healthy() True; Lua enters KINEMATIC_SETTLE_MS wait
       t~62 s      Lua KINEMATIC_SETTLE_MS (62 s) expires; captures body_z
-      t~62..65 s  Lua sends RC overrides; kinematic still ramps vel to 0
+    t~62..65 s  Lua sends GUIDED setpoints; kinematic still ramps vel to 0
       t=65 s      kinematic exits; hub at pos0 with vel=0, tension~0
       t~65..102 s Lua VZ controller descends hub; WinchController reels in tether
       t~102 s     Lua triggers final_drop STATUSTEXT (alt_est <= 2 m)

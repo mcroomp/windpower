@@ -1,16 +1,8 @@
 """
-controller.py — RAWES attitude rate controllers for ArduPilot ACRO mode.
+controller.py — RAWES guidance/control helpers.
 
-The mediator reports actual orbital-frame orientation (~65° from NED vertical
-at tether equilibrium).  PhysicalHoldController derives the tether-alignment
-error from the equilibrium captured during kinematic startup and uses
-compute_rc_from_attitude to send corrective ACRO RC overrides.
-GPS + compass are fused normally.
-
-Usage
------
-controller = make_hold_controller(anchor_ned=anchor_ned)
-controller.send_correction(att, pos_ned, gcs)   # in the hold loop
+Legacy RC-override helpers are retained for historical tests only; runtime
+flight stack control is GUIDED-only.
 """
 
 import math
@@ -350,7 +342,7 @@ def compute_rc_from_physical_attitude(
 
 class PhysicalHoldController:
     """
-    ACRO hold controller for physical sensor mode.
+    Legacy hold controller retained for compatibility tests.
 
     ATTITUDE.roll/pitch are actual NED Euler angles.  Error is computed as
     deviation from the tether equilibrium orientation (roll_eq, pitch_eq)
@@ -392,18 +384,17 @@ class PhysicalHoldController:
         gcs,
     ) -> dict:
         """
-        Compute and send RC override.  Returns the rc dict sent (for logging).
+        Compute a legacy RC correction dict without sending it.
 
         Error = (roll - roll_eq, pitch - pitch_eq) — yaw-independent deviation
         from the tether equilibrium captured during kinematic startup.
 
-        Sends neutral sticks when equilibrium has not been set yet.
+        Returns neutral sticks when equilibrium has not been set yet.
         """
         _neutral = {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL,
                 3: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
 
         if self._roll_eq is None or self._pitch_eq is None:
-            gcs.send_rc_override(_neutral)
             return _neutral
 
         roll_dev  = att["roll"]  - self._roll_eq
@@ -417,7 +408,6 @@ class PhysicalHoldController:
             yawspeed   = att["yawspeed"],
         )
         rc[3] = SWASH_PWM_NEUTRAL   # neutral collective
-        gcs.send_rc_override(rc)
         return rc
 
 
@@ -872,8 +862,8 @@ class ElevationHoldController:
         ElevationHoldController  →  (rate_roll_sp, rate_pitch_sp)
         HeliCyclicController       →  (tilt_lon, tilt_lat)
 
-    This mirrors the rawes.lua architecture where the outer loop sends rate
-    commands via RC override and the firmware ACRO PIDs close the inner loop.
+    This mirrors the rawes.lua outer-loop structure, but runtime stack control
+    now uses GUIDED setpoints rather than RC override transport.
 
     Usage
     -----
