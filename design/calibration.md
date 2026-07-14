@@ -69,13 +69,13 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 | `steady` | 1 | observer active | no |
 | `landing` | 4 | no | no |
 
-`--trim` keys (rad), applies to all modes:
+`--trim` keys, applies to all modes:
 
 | Key | NVF sent | Meaning |
 |---|---|---|
 | `tlon` | `RAWES_TLN` | cyclic trim longitudinal |
 | `tlat` | `RAWES_TLT` | cyclic trim lateral |
-| `thr`  | `RAWES_THR` | IC thrust [0..1] |
+| `thr`  | `RAWES_THR` | IC thrust [0..1] (passive only) |
 
 `--gain` is not accepted in any current mode.  Yaw is regulated by the
 servo-readback trim observer in rawes.lua — calibrate `RAWES_YAW_SLP` (slope) from
@@ -83,7 +83,7 @@ a bench measurement rather than tuning AP PID gains.
 
 ```bash
 # Bench check: hold IC swashplate, observer active, 30 s
-python calibrate.py --port COM7 run passive --duration 30 --trim tlon=0.02,col=-0.15
+python calibrate.py --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342
 
 # Steady-flight bench, unbounded (ESC to stop)
 python calibrate.py --port COM7 run steady

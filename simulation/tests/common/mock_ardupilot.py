@@ -29,7 +29,7 @@ from telemetry_csv import TelRow, write_csv
 
 def _load_rawes_pumping_constants() -> dict[str, float]:
     lua_constants = load_rawes_lua_constants((
-        "RATE_ACCEL_MAX_RADSS", "THRUST_SLEW_MAX",
+        "THRUST_SLEW_MAX",
         "POST_RELEASE_BLEND_S", "POST_RELEASE_RECOVERY_S",
     ))
     params = load_ap_params()
@@ -39,7 +39,6 @@ def _load_rawes_pumping_constants() -> dict[str, float]:
         "KD_VZ": get_ap_param("RAWES_KD_VZ", params=params),
         "KP_EL": get_ap_param("RAWES_KP_EL", params=params),
         "TRP_S": params.get("RAWES_TRP", 2.0),  # tension ramp τ; default from Lua param:add_param
-        "RATE_ACCEL_MAX_RADSS": lua_constants["RATE_ACCEL_MAX_RADSS"],
         "THRUST_SLEW_MAX": lua_constants["THRUST_SLEW_MAX"],
         "POST_RELEASE_BLEND_S": lua_constants["POST_RELEASE_BLEND_S"],
         "POST_RELEASE_RECOVERY_S": lua_constants["POST_RELEASE_RECOVERY_S"],
@@ -327,7 +326,6 @@ class _PumpingPythonMode:
     TRP_S:                 float = _RAWES_PUMPING_CONSTANTS["TRP_S"]  # tension ramp τ [s]
     VZ_GATE_RATE_RADS:     float = 1.0
     VZ_GATE_MIN:           float = 0.0
-    RATE_ACCEL_MAX_RADSS:  float = _RAWES_PUMPING_CONSTANTS["RATE_ACCEL_MAX_RADSS"]
 
     def __init__(
         self,
@@ -366,7 +364,7 @@ class _PumpingPythonMode:
         self._kp_alt         = float(kp_alt)
         self._ki_alt         = float(ki_alt)
         self._kd_vz          = float(kd_vz)
-        self._rate_accel_max = float(rate_accel_max_radss) if rate_accel_max_radss else _RAWES_PUMPING_CONSTANTS["RATE_ACCEL_MAX_RADSS"]
+        self._rate_accel_max = float(rate_accel_max_radss) if rate_accel_max_radss else 4.0
         self._cw_rate_kp     = float(cw_rate_kp)
         self._cw_rate_kd     = float(cw_rate_kd)
         self._cw_rate_max    = float(cw_rate_max)
@@ -750,7 +748,6 @@ class MockArdupilot:
         "KI_ALT": _PumpingPythonMode.KI_ALT,
         "KD_VZ": _PumpingPythonMode.KD_VZ,
         "KP_EL": _PumpingPythonMode.KP_EL,
-        "RATE_ACCEL_MAX_RADSS": _RAWES_PUMPING_CONSTANTS["RATE_ACCEL_MAX_RADSS"],
     }
     LANDING_CONSTANTS = {
         "KP_VZ": _LandingPythonMode.KP_VZ,

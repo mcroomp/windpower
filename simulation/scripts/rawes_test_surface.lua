@@ -21,20 +21,13 @@ _rawes_fns = {
     KP_AZ                   = KP_AZ,
     KD_EL                   = KD_EL,
     CWMAX                   = CWMAX,
-    RATE_ACCEL_MAX_RADSS    = RATE_ACCEL_MAX_RADSS,
     AZ_REF_TAU_S            = AZ_REF_TAU_S,
 
     -- ── Pure geometry ───────────────────────────────────────────────────────
 
     bz_altitude_hold    = bz_altitude_hold,
-    sqrt_rate_from_error = sqrt_rate_from_error,
-    compute_rate_cmd_sqrt = compute_rate_cmd_sqrt,
     wrap_pi              = wrap_pi,
     update_plane_azimuth = update_plane_azimuth,
-
-    -- ── Vector3f helpers ─────────────────────────────────────────────────────
-
-    v3_copy    = v3_copy,
 
     -- ── Param / anchor ───────────────────────────────────────────────────────
 

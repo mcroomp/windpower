@@ -8,7 +8,6 @@ Mode is selected at runtime via RAWES_MODE (script-generated parameter):
     2  reserved    -- unused
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
     4  landing     -- reserved, not yet implemented
-    5  pumping     -- De Schutter pumping cycle
 
 Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
@@ -34,13 +33,18 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
              altitude hold (and therefore commands no cyclic/collective) until
              all three anchor floats (ANN/ANE/AND) have been received at least
              once.  Until then run_flight only holds the current attitude.
+  -- IC seed (MODE_PASSIVE; committed atomically once all three arrive):
+  RAWES_THR: IC thrust [0..1]   (calibrate: --trim thr=<value>)
+  RAWES_RIC: IC roll  [rad]     (calibrate: --roll <deg>)
+  RAWES_PIC: IC pitch [rad]     (calibrate: --pitch <deg>)
+  RAWES_YIC: optional fixed yaw target [rad] for MODE_PASSIVE (calibrate: --yaw <deg>)
 
 Parameters (script-generated; visible in GCS as RAWES_* params):
   RAWES_MODE    Mode selector (0=none,1=steady,3=passive,4=landing)    default 0
   RAWES_YAW_SLP Yaw motor slope [RPM/µs] (0=bench default 0.504)       default 0
-  RAWES_KP_ALT  Altitude-P gain                                         default 0.010
-  RAWES_KI_ALT  Altitude-I gain                                         default 0.001
-  RAWES_KD_VZ   Vertical-speed damping gain                             default 0.040
+  RAWES_KP_ALT  Altitude-P gain                                         default 0.0263
+  RAWES_KI_ALT  Altitude-I gain                                         default 0.0026
+  RAWES_KD_VZ   Vertical-speed damping gain                             default 0.105
   RAWES_KP_EL   In-plane (elevation) position rate-P gain [rad/s per m]  default 2.5
   RAWES_KP_AZ   Crosswind (azimuth) position rate-P gain  [rad/s per m]  default 0.5
   RAWES_KD_EL   In-plane position rate-D gain              [rad/s/(m/s)]  default 0.0
@@ -49,6 +53,7 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
   RAWES_TEL_HZ  Diagnostic NVF telemetry emission rate     [Hz]           default 2.0
   RAWES_YFF_MAX Yaw trim clamp upper bound                 [throttle]     default 0.7
   RAWES_YFF_TAU Yaw trim low-pass time constant            [s]            default 0.3
+  RAWES_TRP     Tension feedforward ramp time constant     [s]            default 2.0
 --]]
 
 -- ── Constants ─────────────────────────────────────────────────────────────────
@@ -130,7 +135,6 @@ KP_EL              = 2.5          -- in-plane (elevation) position rate-P [rad/s
 KP_AZ              = 0.5          -- crosswind (azimuth) position rate-P [rad/s per m]
 KD_EL              = 0.0          -- in-plane position rate-D [rad/s per (m/s)]
 CWMAX              = 0.6          -- position rate saturation [rad/s]
-RATE_ACCEL_MAX_RADSS = 4.0
 
 -- Plane-keeping azimuth low-pass time constant [s].  The body-z azimuth
 -- reference is slowly slewed toward the instantaneous position azimuth so fast
@@ -161,9 +165,6 @@ _mode_ms    = 0
 _submode_ms = 0
 
 -- Cached RC channel objects
-_rc_ch1 = rc:get_channel(1)
-_rc_ch2 = rc:get_channel(2)
-_rc_ch3 = rc:get_channel(3)
 _rc_ch4 = rc:get_channel(4)
 _rc_ch8 = rc:get_channel(8)
 
@@ -255,12 +256,6 @@ local function ms_to_s(ms)
     end
     return ms:tofloat() * 0.001
 end
-local function v3_copy(v)
-    local r = Vector3f()
-    r:x(v:x()); r:y(v:y()); r:z(v:z())
-    return r
-end
-
 local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, roll_rate, pitch_rate, yaw_rate, throttle, src)
     local rr = roll_rate or 0.0
     local pr = pitch_rate or 0.0
@@ -498,60 +493,6 @@ local function bz_ned_to_roll_pitch(bz_ned, yaw_rad)
     return roll_deg, pitch_deg
 end
 
-local function sqrt_rate_from_error(error, kp, accel_max, dt)
-    local rate
-    if accel_max <= 0.0 then
-        rate = error * kp
-    elseif kp == 0.0 then
-        if error == 0.0 then
-            rate = 0.0
-        elseif error > 0.0 then
-            rate = math.sqrt(2.0 * accel_max * math.abs(error))
-        else
-            rate = -math.sqrt(2.0 * accel_max * math.abs(error))
-        end
-    else
-        local linear_dist = accel_max / (kp * kp)
-        if error > linear_dist then
-            rate = math.sqrt(2.0 * accel_max * (error - linear_dist / 2.0))
-        elseif error < -linear_dist then
-            rate = -math.sqrt(2.0 * accel_max * (-error - linear_dist / 2.0))
-        else
-            rate = error * kp
-        end
-    end
-
-    if dt > 0.0 then
-        local max_rate = math.abs(error) / dt
-        if rate >  max_rate then rate =  max_rate end
-        if rate < -max_rate then rate = -max_rate end
-    end
-    return rate
-end
-
-local function compute_rate_cmd_sqrt(bz_now, bz_goal, kp, accel_max, dt)
-    local cx = bz_now:y() * bz_goal:z() - bz_now:z() * bz_goal:y()
-    local cy = bz_now:z() * bz_goal:x() - bz_now:x() * bz_goal:z()
-    local cz = bz_now:x() * bz_goal:y() - bz_now:y() * bz_goal:x()
-    local cn = math.sqrt(cx*cx + cy*cy + cz*cz)
-    local dot = bz_now:x() * bz_goal:x() + bz_now:y() * bz_goal:y() + bz_now:z() * bz_goal:z()
-    if dot >  1.0 then dot =  1.0 end
-    if dot < -1.0 then dot = -1.0 end
-    local angle = math.atan(cn, dot)
-
-    local wx, wy, wz = 0.0, 0.0, 0.0
-    if cn > 1e-12 and angle > 1e-12 then
-        local rate_mag = sqrt_rate_from_error(angle, kp, accel_max, dt)
-        wx = cx / cn * rate_mag
-        wy = cy / cn * rate_mag
-        wz = cz / cn * rate_mag
-    end
-
-    local rate_world = Vector3f()
-    rate_world:x(wx); rate_world:y(wy); rate_world:z(wz)
-    return ahrs:earth_to_body(rate_world)
-end
-
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 
 local function _on_mode_enter(mode)
@@ -579,7 +520,6 @@ local function run_flight()
     local mode = vehicle:get_mode()
     if mode ~= GUIDED_MODE_NUM and mode ~= 20 then return end
 
-    local mode_now    = _prev_mode
     local substate    = _prev_sub
     local dt          = FLIGHT_PERIOD_MS * 0.001
     local now_ms      = millis()
@@ -771,9 +711,7 @@ local function run_flight()
     local rate_pitch_cw = 0.0
     if (_cw_rate_kp > 0.0 or _cw_rate_kd > 0.0) and pos_ned and vel_ned then
         local pos_north = rel:x()
-        local pos_east  = rel:y()
         local vel_north = vel_ned:x()
-        local vel_east  = vel_ned:y()
 
         -- Compute desired world-frame rotation rate about East (NED +Y).
         -- Positive omega_east is right-hand rule: counterclockwise when viewed from East.

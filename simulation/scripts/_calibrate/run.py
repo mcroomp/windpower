@@ -25,7 +25,7 @@ from .constants import (
     RawesGCS,
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
-    _RUN_MODES, _TRIM_NVF, _PASSIVE_IC_COL_DEG,
+    _RUN_MODES, _TRIM_NVF, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
     _AP_YAW_ZERO_PARAMS, _OSCILLATE_TARGETS, _OSCILLATE_STEP_S,
     _COPTER_MODES, _LOG_DIR,
 )
@@ -245,10 +245,11 @@ def _observation_loop(session: RawesGCS, *,
 
 def _make_oscillate_tick(session: RawesGCS, steps: list):
     """Return an on_tick(t_rel) callback that advances through `steps`
-    (a list of (tlon_deg, tlat_deg, col_deg, label) tuples) at
-    _OSCILLATE_STEP_S sec/step.  Sends RAWES_TLN/TLT/COL NVFs on each
-    step boundary.  Once the sequence ends the callback is a no-op (the
-    duration timer in _observation_loop expires shortly after)."""
+    (a list of (tlon_deg, tlat_deg, thr, label) tuples) at
+    _OSCILLATE_STEP_S sec/step.  Sends RAWES_TLN/TLT NVFs (in radians) and
+    RAWES_THR (thrust [0..1]) on each step boundary.  Once the sequence ends
+    the callback is a no-op (the duration timer in _observation_loop expires
+    shortly after)."""
     last_step = [None]
     def _tick(t_rel: float) -> None:
         idx = int(t_rel / _OSCILLATE_STEP_S)
@@ -257,12 +258,12 @@ def _make_oscillate_tick(session: RawesGCS, steps: list):
         if idx == last_step[0]:
             return
         last_step[0] = idx
-        tlon_d, tlat_d, col_d, label = steps[idx]
+        tlon_d, tlat_d, thr_d, label = steps[idx]
         session.send_named_float("RAWES_TLN", math.radians(tlon_d))
         session.send_named_float("RAWES_TLT", math.radians(tlat_d))
-        session.send_named_float("RAWES_THR", float(col_d))
+        session.send_named_float("RAWES_THR", float(thr_d))
         print(f"  [{t_rel:6.1f}s] osc {idx+1}/{len(steps)}  "
-              f"tlon={tlon_d:+5.1f}  tlat={tlat_d:+5.1f}  col={col_d:+5.1f}  "
+              f"tlon={tlon_d:+5.1f}  tlat={tlat_d:+5.1f}  thr={thr_d:.3f}  "
               f"({label})")
     return _tick
 
@@ -590,10 +591,13 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
             print(f"  [WARN] --trim {list(trim)} ignored because --osc is set")
             trim = {}
 
-    # Validate trim keys
-    bad = [k for k in trim if k not in _TRIM_NVF]
+    # Validate trim keys: angle keys (tlon/tlat) + ic-seed thrust key (thr, passive only)
+    allowed_trim = set(_TRIM_NVF)
+    if cfg.get("ic_seed"):
+        allowed_trim |= _IC_TRIM_KEYS
+    bad = [k for k in trim if k not in allowed_trim]
     if bad:
-        print(f"  Unknown --trim keys: {bad}  (valid: {', '.join(_TRIM_NVF)})")
+        print(f"  Unknown --trim keys: {bad}  (valid: {', '.join(sorted(allowed_trim))})")
         return
     # Validate gain keys
     gain_map = cfg["gain_keys"]
@@ -660,10 +664,10 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     # Seed the IC (RAWES_THR/RIC/PIC) BEFORE arming so PASSIVE holds a defined
     # attitude (mirrors the SITL passive_init seed).
     if cfg.get("ic_seed"):
-        col_deg = float(trim.get("col", _PASSIVE_IC_COL_DEG))
-        print("  Seeding IC (deg -> rad on the wire):")
-        session.send_named_float("RAWES_THR", float(col_deg))
-        print(f"    RAWES_THR = {col_deg:.3f}  (thrust [0..1])")
+        thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
+        print("  Seeding IC:")
+        session.send_named_float("RAWES_THR", thr)
+        print(f"    RAWES_THR = {thr:.3f}  (thrust [0..1])")
 
         if "--yaw" in flags:
             yaw_deg = float(flags["--yaw"])
@@ -678,8 +682,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
             pitch_deg = float(flags["--pitch"])
             session.send_named_float("RAWES_PIC", math.radians(pitch_deg))
             print(f"    RAWES_PIC = {pitch_deg:+7.3f} deg  ({math.radians(pitch_deg):+.4f} rad)")
-        # col was consumed by the IC seed -- don't re-send it via the trim block.
-        trim.pop("col", None)
+        # thr was consumed by the IC seed -- don't re-send it via the trim block.
+        trim.pop("thr", None)
 
     # Send NVF trims.  --trim values are user-facing DEGREES; convert to
     # radians for the wire (rawes.lua receives RAWES_TLN/TLT/COL in radians).

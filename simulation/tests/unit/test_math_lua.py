@@ -23,7 +23,6 @@ import pytest
 
 from controller import (
     compute_bz_altitude_hold,
-    compute_rate_cmd_sqrt,
 )
 from rawes_lua_harness import RawesLua
 
@@ -90,7 +89,6 @@ def test_constants_have_expected_values(sim):
     assert float(f.KI_ALT)               == pytest.approx(0.0026, abs=1e-4)
     assert float(f.KD_VZ)                == pytest.approx(0.105, abs=1e-3)
     assert float(f.KP_EL)                == pytest.approx(2.5)
-    assert float(f.RATE_ACCEL_MAX_RADSS) == pytest.approx(4.0)
 
 
 # ── bz_altitude_hold ─────────────────────────────────────────────────────────
@@ -189,22 +187,6 @@ class TestBzAltitudeHold:
             f"Mismatch at el={el_deg} az={az_deg} T={tension}"
 
 
-class TestRateCmdSqrt:
-    def test_matches_python_reference(self, sim):
-        """Lua compute_rate_cmd_sqrt mirrors Python for identity body frame."""
-        bz_now = sim.lua_vec(0.0, 0.0, 1.0)
-        angle = math.radians(15.0)
-        bz_goal = sim.lua_vec(math.sin(angle), 0.0, math.cos(angle))
-        r_lua = sim.vec_to_list(sim.fns.compute_rate_cmd_sqrt(bz_now, bz_goal, 2.5, 4.0, 0.02))
-        r_py = compute_rate_cmd_sqrt(
-            np.array([0.0, 0.0, 1.0]),
-            np.array([math.sin(angle), 0.0, math.cos(angle)]),
-            np.eye(3),
-            kp=2.5,
-            accel_max=4.0,
-            dt=0.02,
-        )
-        np.testing.assert_allclose(r_lua, r_py, atol=1e-9)
 
 # ── bz_ned_to_roll_pitch ──────────────────────────────────────────────────────
 

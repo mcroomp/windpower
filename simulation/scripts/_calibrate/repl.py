@@ -55,25 +55,22 @@ Long-running (always log; ESC or Ctrl-C aborts):
         On exit (timer / ESC / Ctrl-C) every overridden param is restored.
 
         --duration N       run for N seconds; omit for unbounded (5-min ARM)
-        --trim K=V,K=V     cyclic + collective held by the Lua; sent as
-                           NAMED_VALUE_FLOAT to rawes.lua's MODE_PASSIVE /
-                           MODE_YAW.  Repeatable.  **All values in degrees.**
-                           The wire converts to radians automatically.
+        --trim K=V,K=V     cyclic trim + IC thrust sent as NAMED_VALUE_FLOAT
+                           to rawes.lua.  Repeatable.
                              tlon  longitudinal cyclic [deg].  >0 = nose-down
                                    (forward-stick); <0 = nose-up.
                                    Range +/- H_CYC_MAX_cd/100 (passive: +/- 10).
                                    Typical bench: 0.5 .. 3 deg.
                              tlat  lateral cyclic [deg].  >0 = roll-right.
                                    Same range/limits as tlon.
-                             col   IC collective [deg of blade pitch].
-                                   COL_MIN_RAD (-0.28 rad = -16 deg)
-                                   .. COL_MAX_RAD (+0.10 rad = +5.7 deg)
-                                   linearly maps to RC3 PWM 1000..2000.
+                             thr   IC thrust [0..1] (passive mode only; sent as
+                                   RAWES_THR before arming).
+                                   col_min=-0.28 rad (-16 deg) at thrust=0,
+                                   col_max=+0.10 rad (+5.7 deg) at thrust=1.
                                    Typical values:
-                                     -5    zero-thrust / cruise neutral
-                                     -8.6  modest negative (autorotation feed)
-                                      0    neutral collective
-                                     +3    light positive thrust
+                                     0.342  autorotation feed (-8.6 deg equiv)
+                                     0.507  zero-thrust neutral (-5 deg equiv)
+                                     0.875  light positive thrust (+3 deg equiv)
         --gain K=V,K=V     per-run AP param overrides.
                            Repeatable.  Run `run` (no args) for the per-mode
                            gain-key table.
@@ -100,22 +97,22 @@ Long-running (always log; ESC or Ctrl-C aborts):
           pumping   De Schutter pumping cycle
           landing   landing (reserved)
 
-        Examples (IC angles in DEGREES):
-          # Hold the level IC (roll=pitch=0, col=-8.6 deg) on the bench for 30 s
-          run passive --duration 30 --trim col=-8.6
+        Examples:
+          # Hold the level IC (roll=pitch=0, thr=0.342) on the bench for 30 s
+          run passive --duration 30 --trim thr=0.342
 
                     # Hold a fixed yaw IC as well
-                    run passive --duration 20 --yaw 90 --trim col=-8.6
+                    run passive --duration 20 --yaw 90 --trim thr=0.342
 
-          # Hold a tilted IC: 3 deg roll, -25 deg pitch, IC collective
-          run passive --duration 20 --roll 3 --pitch -25 --trim col=-8.6
+          # Hold a tilted IC: 3 deg roll, -25 deg pitch, IC thrust
+          run passive --duration 20 --roll 3 --pitch -25 --trim thr=0.342
 
           # Unbounded passive session (ESC to stop, 5-min RAWES_ARM fallback)
           run passive
 
           # Yaw tuning: gentler P, lower motor max, IC operating point loaded
           run yaw --duration 60 --gain p=0.015,i=0.005,imax=0.7,servo_max=1100 \\
-                  --trim tlon=1.15,col=-8.6
+                  --trim tlon=1.15
 
           # Full oscillation sweep through every axis extreme (~65 s)
           run passive --osc all

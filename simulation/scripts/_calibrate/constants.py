@@ -167,10 +167,15 @@ _FALLBACK_BAUDS = [57600, 38400, 19200, 9600]
 # ---------------------------------------------------------------------------
 # Run mode config table
 # ---------------------------------------------------------------------------
-_TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT", "col": "RAWES_THR"}
+_TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT"}
 
-# Default passive IC collective [deg blade pitch] when --trim col is not given.
-_PASSIVE_IC_COL_DEG = -8.6
+# IC-seed-specific trim key (passive mode only); sent as thrust [0..1] directly,
+# no radians conversion.  Separate from _TRIM_NVF angle keys.
+_IC_TRIM_KEYS = {"thr"}
+
+# Default passive IC thrust [0..1] when --trim thr is not given.
+# Corresponds to -8.6 deg blade pitch (col_min=-0.28 rad, span=0.38 rad).
+_PASSIVE_IC_THRUST = 0.342
 
 _RUN_MODES = {
     "none": {
@@ -220,46 +225,46 @@ _AP_YAW_ZERO_PARAMS = ("ATC_RAT_YAW_P", "ATC_RAT_YAW_I",
 # ---------------------------------------------------------------------------
 # Oscillation sequences for `--osc {all|s1|s2|s3}`
 # ---------------------------------------------------------------------------
-_OSC_BASE_COL_DEG = -8.6   # IC operating-point collective baseline
-_OSC_DELTA_COL    =  1.08  # Half collective swing (deg) at Delta = 0.3
+_OSC_BASE_THR  = 0.342  # IC operating-point thrust [0..1] baseline (-8.6 deg equiv)
+_OSC_DELTA_THR = 0.050  # Half thrust swing (1.08 deg equiv at Delta = 0.3)
 
 _OSCILLATE_STEPS_ALL = [
-    # (tlon_deg, tlat_deg, col_deg, label)
-    ( 0.0,  0.0,  -8.6, "center"),
-    (+5.0,  0.0,  -8.6, "tlon +5 (nose-down)"),
-    ( 0.0,  0.0,  -8.6, "center"),
-    (-5.0,  0.0,  -8.6, "tlon -5 (nose-up)"),
-    ( 0.0,  0.0,  -8.6, "center"),
-    ( 0.0, +5.0,  -8.6, "tlat +5 (roll-right)"),
-    ( 0.0,  0.0,  -8.6, "center"),
-    ( 0.0, -5.0,  -8.6, "tlat -5 (roll-left)"),
-    ( 0.0,  0.0,  -8.6, "center"),
-    ( 0.0,  0.0,  +3.0, "col +3 (positive)"),
-    ( 0.0,  0.0,  -8.6, "center"),
-    ( 0.0,  0.0, -12.0, "col -12 (negative)"),
-    ( 0.0,  0.0,  -8.6, "center"),
+    # (tlon_deg, tlat_deg, thr[0..1], label)
+    ( 0.0,  0.0,  0.342, "center"),
+    (+5.0,  0.0,  0.342, "tlon +5 (nose-down)"),
+    ( 0.0,  0.0,  0.342, "center"),
+    (-5.0,  0.0,  0.342, "tlon -5 (nose-up)"),
+    ( 0.0,  0.0,  0.342, "center"),
+    ( 0.0, +5.0,  0.342, "tlat +5 (roll-right)"),
+    ( 0.0,  0.0,  0.342, "center"),
+    ( 0.0, -5.0,  0.342, "tlat -5 (roll-left)"),
+    ( 0.0,  0.0,  0.342, "center"),
+    ( 0.0,  0.0,  0.875, "thr 0.875 (+3 deg equiv, positive)"),
+    ( 0.0,  0.0,  0.342, "center"),
+    ( 0.0,  0.0,  0.186, "thr 0.186 (-12 deg equiv, negative)"),
+    ( 0.0,  0.0,  0.342, "center"),
 ]
 
 _OSCILLATE_STEPS_S1 = [
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
-    ( -2.22,  +3.85, _OSC_BASE_COL_DEG + _OSC_DELTA_COL, "S1 UP"),
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
-    ( +2.22,  -3.85, _OSC_BASE_COL_DEG - _OSC_DELTA_COL, "S1 DOWN"),
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
+    ( -2.22,  +3.85, _OSC_BASE_THR + _OSC_DELTA_THR, "S1 UP"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
+    ( +2.22,  -3.85, _OSC_BASE_THR - _OSC_DELTA_THR, "S1 DOWN"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
 ]
 _OSCILLATE_STEPS_S2 = [
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
-    ( -2.22,  -3.85, _OSC_BASE_COL_DEG + _OSC_DELTA_COL, "S2 UP"),
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
-    ( +2.22,  +3.85, _OSC_BASE_COL_DEG - _OSC_DELTA_COL, "S2 DOWN"),
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
+    ( -2.22,  -3.85, _OSC_BASE_THR + _OSC_DELTA_THR, "S2 UP"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
+    ( +2.22,  +3.85, _OSC_BASE_THR - _OSC_DELTA_THR, "S2 DOWN"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
 ]
 _OSCILLATE_STEPS_S3 = [
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
-    ( +4.44,    0.0, _OSC_BASE_COL_DEG + _OSC_DELTA_COL, "S3 UP"),
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
-    ( -4.44,    0.0, _OSC_BASE_COL_DEG - _OSC_DELTA_COL, "S3 DOWN"),
-    (   0.0,    0.0, _OSC_BASE_COL_DEG,                   "center"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
+    ( +4.44,    0.0, _OSC_BASE_THR + _OSC_DELTA_THR, "S3 UP"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
+    ( -4.44,    0.0, _OSC_BASE_THR - _OSC_DELTA_THR, "S3 DOWN"),
+    (   0.0,    0.0, _OSC_BASE_THR,                  "center"),
 ]
 
 _OSCILLATE_TARGETS = {
