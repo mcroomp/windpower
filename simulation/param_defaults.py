@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import yaml
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 from arduloop.params import RateAxisParams
@@ -108,6 +109,12 @@ def load_ap_params(param_files: Sequence[Path | str] | None = None) -> dict[str,
     return params
 
 
+@lru_cache(maxsize=1)
+def _load_default_ap_params_cached() -> dict[str, float]:
+    """Load merged default .parm chain once per process."""
+    return load_ap_params(tuple(_resolve_default_param_files()))
+
+
 def get_ap_param(
     name: str,
     *,
@@ -115,7 +122,7 @@ def get_ap_param(
     aliases: tuple[str, ...] = (),
 ) -> float:
     """Get a required ArduPilot parameter value (with optional aliases)."""
-    p = params if params is not None else load_ap_params()
+    p = params if params is not None else _load_default_ap_params_cached()
     if name in p:
         return p[name]
     for alias in aliases:
@@ -172,7 +179,7 @@ def load_rate_pid_params(parm_file=None, axis: str = "RLL"):
         If any required parameter is missing from the file.
     """
     if parm_file is None:
-        params = load_ap_params()
+        params = _load_default_ap_params_cached()
     else:
         params = load_ap_params([parm_file])
     return _load_rate_axis(axis, params)
@@ -180,7 +187,7 @@ def load_rate_pid_params(parm_file=None, axis: str = "RLL"):
 
 def _make_axis_params_from_file(axis: str) -> RateAxisParams:
     """Build a :class:`RateAxisParams` for ``axis`` from the merged .parm chain."""
-    return RateAxisParams.from_ap_dict(load_ap_params(), axis)
+    return RateAxisParams.from_ap_dict(_load_default_ap_params_cached(), axis)
 
 
 def make_roll_params_from_file():
@@ -208,6 +215,7 @@ def _resolve_default_rotor_yaml() -> Path:
     return Path(__file__).resolve().parent / "rotor_definitions" / "beaupoil_2026.yaml"
 
 
+@lru_cache(maxsize=1)
 def load_collective_phys_range() -> tuple[float, float]:
     """Return (col_at_thrust_0, col_at_thrust_1) in radians.
 
@@ -225,7 +233,7 @@ def load_collective_phys_range() -> tuple[float, float]:
     _ctrl = _rotor_data["control"]
     col_min_rad = float(_ctrl["col_min_rad"])
     col_max_rad = float(_ctrl["col_max_rad"])
-    params = load_ap_params()
+    params = _load_default_ap_params_cached()
     h_col_min_us = params.get("H_COL_MIN", 1000.0)
     h_col_max_us = params.get("H_COL_MAX", 2000.0)
     h_col_min_norm = (h_col_min_us - 1000.0) / 1000.0

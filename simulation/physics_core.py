@@ -318,7 +318,7 @@ class PhysicsCore:
 
         Parameters
         ----------
-        collective_rad : equilibrium collective [rad] — use thrust_to_coll_rad(ic.eq_thrust)
+        collective_rad : equilibrium collective [rad]
         n_steps        : number of ODE steps (default 500 @ 1 ms = 0.5 s)
         dt             : inflow ODE time step [s] (default 1e-3)
         """

@@ -23,7 +23,7 @@ from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
-from param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range, thrust_to_coll_rad
+from param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
 from telemetry_csv import TelRow, write_csv
 
 
@@ -98,6 +98,7 @@ class _MockArdupilotBase:
         self._last_thrust = float(initial_thrust)
         self.roll_sp = 0.0
         self.pitch_sp = 0.0
+        self._col_min, self._col_max = load_collective_phys_range()
         self._wind = wind
         self._tel_every = _tel_every_from_env(dt)
         self.tel_fn: "Callable[..., dict] | None" = None
@@ -216,8 +217,9 @@ class _MockArdupilotBase:
             )
             extra_kwargs.update(rate_terms)
 
+            collective_rad = self._col_min + self._last_thrust * (self._col_max - self._col_min)
             self._telemetry.append(
-                TelRow.from_physics(runner, sr, thrust_to_coll_rad(self._last_thrust), self._wind, **extra_kwargs)
+                TelRow.from_physics(runner, sr, collective_rad, self._wind, **extra_kwargs)
             )
         self._log_step += 1
 
