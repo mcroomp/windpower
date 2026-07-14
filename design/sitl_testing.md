@@ -227,11 +227,11 @@ windows are config-driven; only the *implementation* is shared:
 `_run_acro_setup` must complete its six steps **inside** the kinematic window so
 the hub is still being held when GPS aligns:
 
-1. Connect GCS; request telemetry streams; motor interlock LOW (CH8=1000).
+1. Connect GCS; request telemetry streams.
 2. Wait for the param subsystem.
 3. Verify boot params via MAVLink read-back.
 4. Wait for EKF tilt alignment (FAIL HARD if it never arrives).
-5. Arm with `force=True` (interlock low → arm → raise CH8 to 2000).
+5. Arm with `force=True`.
 6. Confirm GUIDED_NOGPS mode.
 
 The arm at `t ~ 8 s` is deliberately early so the IC attitude is commanded as

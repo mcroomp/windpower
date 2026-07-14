@@ -37,7 +37,7 @@ Canonical design details are maintained in:
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ gcs.py / test GCS                                               │
-│   Arm, set mode, send RC overrides, read MAVLink messages       │
+│   Arm, set mode, send NV floats, read MAVLink messages          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,8 +55,8 @@ Canonical design details are maintained in:
 | `frames.py` | Coordinate-frame utilities (`build_orb_frame()`, transforms) |
 | `sensor.py` | `build_sitl_packet()` — NED truth state → ArduPilot JSON sensor packet |
 | `sitl_interface.py` | ArduPilot SITL UDP binary protocol (servo recv, state send) |
-| `controller.py` | `compute_swashplate_from_state()` — truth-state tether-alignment controller; `compute_rc_from_attitude()` — ACRO RC override controller |
-| `gcs.py` | MAVLink GCS client (arm, mode, RC override, params) |
+| `controller.py` | `compute_swashplate_from_state()` — truth-state tether-alignment controller; `compute_rc_from_attitude()` — legacy ACRO RC helper |
+| `gcs.py` | MAVLink GCS client (arm, mode, params, named-float commands; RC override helper remains for tooling) |
 | `flight_report.py` | Multi-panel PNG flight report from position/attitude/servo history |
 
 Analysis scripts (not part of simulation runtime): `analysis/`

@@ -532,7 +532,7 @@ Re-sending refreshes the timer. Works in any mode.
 | Ch1 — roll cyclic | rawes.lua (modes 1/4) | 50 Hz | Modes 1/4: body_z error (roll). Mode 0/3: neutral 1500. |
 | Ch2 — pitch cyclic | rawes.lua (modes 1/4) | 50 Hz | Modes 1/4: body_z error (pitch). Mode 0/3: neutral 1500. |
 | Ch3 — collective | rawes.lua (modes 1/4) | 50 Hz | Altitude PID (mode 1, incl. pumping schedule), VZ descent (mode 4). Mode 0/3: not overridden. |
-| Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives the yaw motor output independently. |
+| Ch4 — yaw | ArduPilot | 400 Hz / 100 Hz | No Lua RC override; yaw-rate loop drives Motor4 output independently. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
 | Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/3/4) | 400 Hz / 100 Hz | DDFP CW (H_TAIL_TYPE=3, no sign flip): CCW body drift -> positive PID -> positive throttle. |
 
@@ -823,9 +823,8 @@ params = {
 # Sequence:
 # 1. Set params above
 # 2. Wait for ATTITUDE messages (EKF attitude aligned)
-# 3. Send CH8=2000 (motor interlock ON; RSC at setpoint for mode 1)
-# 4. Send force arm (param2=21196 in MAV_CMD_COMPONENT_ARM_DISARM)
-# 5. HEARTBEAT shows armed=True immediately (mode 1 = instant runup_complete)
+# 3. Send force arm (param2=21196 in MAV_CMD_COMPONENT_ARM_DISARM)
+# 4. HEARTBEAT shows armed=True immediately (mode 1 = instant runup_complete)
 ```
 
 ### B.2 RAWES_ARM Lua Timer (Lua tests)
@@ -844,7 +843,7 @@ params = {
 | Symptom | Cause | Fix |
 |---|---|---|
 | "PreArm: Motors: H_RSC_MODE invalid" | H_RSC_MODE=0 (SITL default) | Set H_RSC_MODE=1 |
-| COMMAND_ACK ACCEPTED but HEARTBEAT never armed | RSC not at runup_complete | Use H_RSC_MODE=1 + CH8=2000 |
+| COMMAND_ACK ACCEPTED but HEARTBEAT never armed | Transient SITL pre-arm state | Retry force-arm after EKF attitude alignment |
 | GPS never fuses | GPS_AUTO_CONFIG=1 corrupts RELPOSNED | Set GPS_AUTO_CONFIG=0 |
 | GPS fuses then drops — compass cycles | COMPASS_ENABLE=1 synthetic compass cycling every 10 s | Set COMPASS_USE=0, COMPASS_ENABLE=0 |
 | `_el_initialized` never fires | Tether < MIN_TETHER_M (0.5 m) or no valid position | Verify GPS fusion + tether length |

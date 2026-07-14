@@ -484,7 +484,8 @@ simulation/
 │                        motor_tau), HubState (psi, psi_dot, omega_motor), step(), equilibrium_throttle()
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
-├── gcs.py               MAVLink GCS client (arm, mode, RC override, params).
+├── gcs.py               MAVLink GCS client (arm, mode, params, named-float commands;
+│                        RC override helper retained for calibration/tooling paths).
 │                        recv_local_position_latest() — non-blocking poll of LOCAL_POSITION_NED.
 ├── comms.py             MAVLink comms boundary between ground and AP.
 │                        VirtualComms — simtest: latency queue + optional Gaussian noise on hub_alt_m;

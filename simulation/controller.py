@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 from frames     import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
-from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE, INTERLOCK_PWM_HIGH
+from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
 from swashplate import SwashplateServoModel
 from dynbem     import RotorInputs
 from param_defaults import load_ap_params as _load_ap_params
@@ -57,8 +57,8 @@ def compute_rc_rates(
     Returns
     -------
     dict
-        RC channel overrides: {1: pwm, 2: pwm, 4: pwm, 8: 2000}.
-        Channel 1 = roll rate, 2 = pitch rate, 4 = yaw rate, 8 = motor interlock.
+        RC channel overrides: {1: pwm, 2: pwm, 4: pwm}.
+        Channel 1 = roll rate, 2 = pitch rate, 4 = yaw rate.
         Neutral = 1500, min = 1000, max = 2000.
     """
     pos   = np.asarray(hub_state["pos"],   dtype=float)
@@ -70,7 +70,7 @@ def compute_rc_rates(
     tether = pos - anch
     t_len  = float(np.linalg.norm(tether))
     if t_len < 0.1:
-        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
+        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
 
     # FRD body_z points DOWN through the disk → hub→anchor in tethered hover.
     body_z_eq  = -tether / t_len
@@ -106,7 +106,6 @@ def compute_rc_rates(
         1: _pwm(omega_body[0]),   # roll rate
         2: _pwm(omega_body[1]),   # pitch rate
         4: _pwm(omega_body[2]),   # yaw rate
-        8: INTERLOCK_PWM_HIGH,    # motor interlock always on
     }
 
 
@@ -236,7 +235,7 @@ def compute_rc_from_attitude(
 
     Returns
     -------
-    dict : {1: pwm, 2: pwm, 4: pwm, 8: 2000}
+    dict : {1: pwm, 2: pwm, 4: pwm}
     """
     max_rate = np.radians(rate_max_deg)
 
@@ -251,7 +250,6 @@ def compute_rc_from_attitude(
         1: _pwm(cmd_roll),
         2: _pwm(cmd_pitch),
         4: _pwm(cmd_yaw),
-        8: INTERLOCK_PWM_HIGH,
     }
 
 
@@ -292,7 +290,7 @@ def compute_rc_from_physical_attitude(
 
     Returns
     -------
-    dict : {1: pwm, 2: pwm, 4: pwm, 8: 2000}
+    dict : {1: pwm, 2: pwm, 4: pwm}
     """
     max_rate = np.radians(rate_max_deg)
 
@@ -317,7 +315,7 @@ def compute_rc_from_physical_attitude(
     tether_ned = np.asarray(anchor_ned, dtype=float) - np.asarray(pos_ned, dtype=float)
     t_len = float(np.linalg.norm(tether_ned))
     if t_len < 0.1:
-        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
+        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
     body_z_eq = tether_ned / t_len
 
     # Attitude error: rotation axis needed to align body_z with body_z_eq.
@@ -341,7 +339,6 @@ def compute_rc_from_physical_attitude(
         1: _pwm(omega_corr[0]),   # roll rate
         2: _pwm(omega_corr[1]),   # pitch rate
         4: _pwm(omega_corr[2]),   # yaw rate
-        8: INTERLOCK_PWM_HIGH,
     }
 
 
@@ -403,7 +400,7 @@ class PhysicalHoldController:
         Sends neutral sticks when equilibrium has not been set yet.
         """
         _neutral = {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL,
-                    3: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
+                3: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
 
         if self._roll_eq is None or self._pitch_eq is None:
             gcs.send_rc_override(_neutral)
@@ -420,7 +417,6 @@ class PhysicalHoldController:
             yawspeed   = att["yawspeed"],
         )
         rc[3] = SWASH_PWM_NEUTRAL   # neutral collective
-        rc[8] = INTERLOCK_PWM_HIGH  # motor interlock on
         gcs.send_rc_override(rc)
         return rc
 

@@ -94,6 +94,28 @@ Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
 
 For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
 
+## DShot Setup (Agent Critical)
+
+Use this as the quick contract-level reference for the yaw-motor ESC path.
+Canonical long-form owner doc is `design/dshot.md`.
+
+Active hardware-default parameters (from `simulation/tests/sitl/rawes_common_defaults.parm`):
+- `SERVO9_FUNCTION=36` (Motor4 on output 9), `SERVO9_MIN=1000`, `SERVO9_MAX=2000`, `SERVO9_TRIM=1000`
+- `SERVO_BLH_MASK=256` (output 9)
+- `SERVO_BLH_BDMASK=256` (bidirectional DShot on output 9)
+- `SERVO_BLH_AUTO=0` (manual masks)
+- `SERVO_BLH_OTYPE=5` (DShot300)
+- `SERVO_BLH_POLES=22`
+- `SERVO_DSHOT_ESC=1` (AM32 telemetry decode)
+- `SERVO_DSHOT_RATE=0`
+- `BRD_IO_DSHOT=0` (FMU output path)
+- `RPM1_TYPE=5`, `RPM1_ESC_MASK=256` (ESC telemetry routed from output 9)
+
+SITL behavior:
+- These BLHeli/DShot params are intentionally excluded from SITL boot verification
+    (`simulation/tests/sitl/stack_utils.py` -> `SITL_UNSUPPORTED_PARAMS`) because
+    ArduCopter-heli SITL does not compile the BLHeli backend and drives output 9 as PWM.
+
 ## Workflow Rules
 
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
