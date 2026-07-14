@@ -430,7 +430,7 @@ After each `step()`:
 
 ### LuaAP
 
-`LuaAP(sim, *, wind, dt, initial_col_rad=0.0)` wraps `RawesLua` for the standard Lua simtest tick.
+`LuaAP(sim, *, wind, dt, initial_thrust=0.263)` wraps `RawesLua` for the standard Lua simtest tick.
 `wind` and `dt` are mandatory keyword arguments.
 
 ```python
@@ -444,8 +444,8 @@ lua.tick(t_sim, runner,
          inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
 ```
 
-PWM decoding constants are `LuaAP.COL_MIN`, `LuaAP.COL_MAX`, `LuaAP.RATE_SCALE` — these
-match the constants baked into `rawes.lua` and must stay in sync.
+Lua collective is decoded from guided throttle (`guided_throttle`) when present,
+with channel-3 PWM as fallback, then converted through `thrust_to_coll_rad()`.
 
 ### PythonAP
 

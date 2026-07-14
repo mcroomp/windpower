@@ -114,15 +114,15 @@ not collective.  Collective provides fine-grained tension tuning within a phase.
 
 Full spec in `flight_stack.md`. Key settled decisions:
 
-### ModeRAWES inherits ModeRateLoopHeli (not Mode directly)
+### ModeRAWES inherits the heli rate-loop base (not Mode directly)
 ```
-Mode → ModeRateLegacy → ModeRateLoopHeli → ModeRAWES
+Mode → heli rate-loop base → ModeRAWES
 ```
-Only `run()`, `init()`, and 5 metadata overrides needed. Spool-state guards delegate to `ModeRateLoopHeli::run()`. ~162 lines new C++.
+Only `run()`, `init()`, and 5 metadata overrides were needed. Spool-state guards delegated to the inherited heli base-loop implementation. ~162 lines new C++.
 
 ### 400 Hz loop (run()) pseudocode
 ```
-1. Spool guards: SHUT_DOWN/GROUND_IDLE → ModeRateLoopHeli::run(); return
+1. Spool guards: SHUT_DOWN/GROUND_IDLE → inherited heli base loop; return
 2. Planner timeout (2 s) → snap bz_target back to bz_tether
 3. Orbit tracking → update bz_tether from current tether direction
 4. Attitude setpoint: identity attitude_q → use bz_tether; else slerp toward bz_target

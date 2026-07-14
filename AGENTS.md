@@ -30,8 +30,8 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `simulation/analysis/diagnose_sitl.py` usage text |
 | Aero interfaces and conventions | `design/aero_conventions.md` | `design/aero.md` |
 | EKF gating and GPS yaw bring-up | `design/EKF_GATING.md` | `design/ekf_const_pos_mode.md` |
-| ArduPilot heli PID behavior | `design/ardupilot_pids.md` | `design/GUIDED_CONTROL_LOOPS.md` |
-| Swashplate geometry and sign mapping | `design/ardupilot_swashplate.md` | `simulation/swashplate.py` |
+| ArduPilot heli control-loop behavior | `design/GUIDED_CONTROL_LOOPS.md` | `design/flight_stack.md` |
+| Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `simulation/pytest.ini` |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |

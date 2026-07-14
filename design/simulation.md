@@ -416,7 +416,7 @@ Landing logic is implemented in `LandingGroundController` + `LandingApController
 
 ### Fixture
 
-`guided_armed_landing_lua` (`kinematic_vel_ramp_s = 20` so the hub exits kinematic at vel=0 — eliminates linear tether jolt).
+Landing Lua fixture in `simulation/tests/sitl/flight/conftest.py` (`kinematic_vel_ramp_s = 20` so the hub exits kinematic at vel=0 — eliminates linear tether jolt).
 
 ### Diagnosis
 
@@ -552,17 +552,17 @@ simulation/
     │   └── simtest_ic.py          load_ic() — loads steady_state_starting.json.
     ├── common/
     │   └── mock_ardupilot.py      MockArdupilot — public adapter for simtests. Two factory methods:
-    │                                MockArdupilot.for_lua(sim, wind, dt, initial_col_rad) — Lua backend
+    │                                MockArdupilot.for_lua(sim, wind, dt, initial_thrust=...) — Lua backend
     │                                  wraps RawesLua; reads guided_target/_rate_target/_throttle from
     │                                  _mock and feeds GuidedAttitudeController each tick;
-    │                                MockArdupilot.for_python(ap, wind, dt, initial_col_rad) — Python
-    │                                  AP backend (calls ap.step() each tick).
+    │                                MockArdupilot.for_python(mode=..., wind, dt, **kwargs) — Python
+    │                                  AP backend (calls the selected mode step each tick).
     │                              Shared base (_MockArdupilotBase): enable_guided(), step_physics(),
     │                              log(), write_telemetry(). TelRow.from_physics() written at
     │                              RAWES_TEL_HZ (default 20 Hz, override via env var).
     └── sitl/            Docker; all SITL/stack tests live here.
         ├── conftest.py                 thin re-exporter — pytest_addoption + pytest_configure only.
-        ├── stack_infra.py              StackConfig, SitlContext, stack helpers, _torque_stack.
+        ├── stack_infra.py              StackConfig, SitlContext, _sitl_stack, _acro_stack, _torque_stack.
         ├── stack_utils.py              port checks, log copy, mediator launcher.
         ├── rawes_sitl_defaults.parm    boot-time ArduPilot params (EEPROM defaults).
         ├── flight/                     flight stack tests (mediator + physics + ArduPilot).
