@@ -135,7 +135,7 @@ Never mix with Windows-native unit/simtests.
 ### Torque Stack Tests (`tests/sitl/torque/`)
 
 Exercises the counter-torque motor stack (stationary hub, rotor spinning at constant RPM).
-No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt checks block arm without GPS).
+No GPS — arming uses `RAWES_ARM` with GPS-independent stack setup.
 
 | File | Fixture | What it tests |
 |------|---------|---------------|
@@ -151,16 +151,14 @@ No GPS — arming uses `RAWES_ARM` in ACRO mode (GUIDED's mandatory GPS/alt chec
   keeps psi\_dot=0 so the trim stays near 0; after hub release the trim ramps to u\_eq
   (~0.485) in ~1 s.  SETTLE\_S=75 s gives ample convergence time.
 
-**Torque arming note:** `_arm_sequence` passes `target_mode=ACRO` for all `_torque_stack` tests.
-ArduCopter's `mandatory_checks()` always runs `mandatory_gps_checks()` and `alt_checks()` regardless
-of `ARMING_CHECK=0` — these fail in GUIDED without GPS. ACRO has `has_manual_throttle()=True` so
-both pass.
+**Torque arming note:** torque stack setup avoids GPS-dependent guided checks and arms through the
+dedicated torque sequence. This keeps no-GPS torque tests deterministic.
 
 ### Flight Stack Tests (`tests/sitl/flight/`)
 
 | File | Fixture | What it tests |
 |------|---------|--------------|
-| `test_kinematic_gps_sitl.py` | `acro_armed` | Canonical kinematic hold + dual-GPS fusion + clean EKF window |
+| `test_kinematic_gps_sitl.py` | guided/GPS fixture | Canonical kinematic hold + dual-GPS fusion + clean EKF window |
 | `test_lua_flight_ic_passive_sitl.py` | `guided_nogps_armed_lua_full` | MODE_PASSIVE holds the seeded IC operating point after kinematic exit |
 | `test_lua_flight_steady_sitl.py` | `guided_nogps_armed_lua_full` | Canonical passive->steady handoff + sustained steady flight |
 | `test_pumping_cycle_sitl.py` | `guided_nogps_armed_pumping_lua` | Canonical pumping stack: planner + winch + Lua steady control |
@@ -202,7 +200,7 @@ _mock          = global state table (inputs/outputs bridged to Python)
 2. **`rawes_test_surface.lua`** is spliced in at `-- @@UNIT_TEST_HOOK` so it has access to all
    rawes.lua `local` variables and functions. It builds `_rawes_fns` with wrapped exports.
 3. **`RawesLua`** wraps the Lua runtime. Python writes sensor state into `_mock`, calls
-   `_rawes_update()`, and reads RC overrides from `_mock.ch_out[n]`.
+  `_rawes_update()`, and reads channel outputs from `_mock.ch_out[n]`.
 
 ### RawesLua API
 
@@ -213,7 +211,7 @@ from rawes_modes import MODE_STEADY, PUMP_HOLD
 sim = RawesLua(mode=MODE_STEADY)  # RAWES_MODE = 1 (pumping schedule runs in steady)
 sim.armed        = True
 sim.healthy      = True
-sim.vehicle_mode = 1           # ACRO = 1
+sim.vehicle_mode = 1           # RATE-MODE = 1
 sim.pos_ned      = [50, 0, -14]  # GPS fused (None = not yet fused)
 sim.vel_ned      = [0.0, 0.96, 0.0]
 sim.R            = build_orb_frame(body_z)
@@ -246,7 +244,7 @@ sim.vec_to_list(bz)            # -> [x, y, z]
 | Field | Direction | Type | Notes |
 |-------|-----------|------|-------|
 | `armed` | in | bool | arming state |
-| `mode` | in | int | vehicle flight mode (1 = ACRO) |
+| `mode` | in | int | vehicle flight mode (1 = RATE-MODE) |
 | `healthy` | in | bool | AHRS health |
 | `millis_val` | in | int | fake milliseconds |
 | `gyro` | in | {x,y,z} | body-frame gyro rad/s |
@@ -345,7 +343,7 @@ Regenerate after any aero model change:
 
 `simtest_runner.py` provides `PhysicsRunner`, a thin wrapper around `PhysicsCore`
 (`simulation/physics_core.py`). `PhysicsCore` owns `RigidBodyDynamics`, `create_aero`,
-`TetherModel`, the spin ODE, and yaw damping. `AcroControllerSitl` (RatePID + servo model)
+`TetherModel`, the spin ODE, and yaw damping. `RateControllerSitl` (RatePID + servo model)
 is baked into `PhysicsRunner` — callers produce `(col, rate_roll, rate_pitch)` and
 `runner.step()` handles the rest. Callers own `PumpingGroundController`,
 `TensionApController`, `WinchController` at their own rates.
@@ -432,7 +430,7 @@ After each `step()`:
 
 ### LuaAP
 
-`LuaAP(sim, *, wind, dt, initial_col_rad=0.0)` wraps `RawesLua` for the standard Lua simtest tick.
+`LuaAP(sim, *, wind, dt, initial_thrust=0.263)` wraps `RawesLua` for the standard Lua simtest tick.
 `wind` and `dt` are mandatory keyword arguments.
 
 ```python
@@ -446,8 +444,8 @@ lua.tick(t_sim, runner,
          inject=lambda s, r: s.send_named_float("RAWES_TEN", r.tension_now))
 ```
 
-PWM decoding constants are `LuaAP.COL_MIN`, `LuaAP.COL_MAX`, `LuaAP.ACRO_SCALE` — these
-match the constants baked into `rawes.lua` and must stay in sync.
+Lua collective is decoded from guided throttle (`guided_throttle`) when present,
+with channel-3 PWM as fallback, then converted through `thrust_to_coll_rad()`.
 
 ### PythonAP
 

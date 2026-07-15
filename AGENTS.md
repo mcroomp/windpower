@@ -19,6 +19,56 @@ Current focus:
 3. `design/sitl_testing.md` (stack workflow and diagnosis)
 4. Topic-specific docs from the ownership map below
 
+## Code Search: Prefer ast-grep over grep/ripgrep
+
+`ast-grep` (CLI: `ast-grep`, alias `sg`) is installed and available in this workspace.
+For searching *source code* (Python, Lua), prefer it over `grep`/`rg`/text-based
+`grep_search` because it matches on AST structure, so it ignores comments/strings and
+is indentation/formatting agnostic. Still use plain text search for non-code files
+(docs, `.parm` files, logs, config).
+
+Basic invocation:
+```
+ast-grep run -p '<PATTERN>' [-l <LANG>] [PATHS...]
+```
+- `-p/--pattern`: the AST pattern to match (see below).
+- `-l/--lang`: language (`python`, `lua`, etc). Optional — ast-grep infers language
+  from file extension when scanning a directory, but set it explicitly when
+  scanning a single file whose extension is ambiguous or when using `--stdin`.
+- `PATHS`: files or directories to search (defaults to `.`).
+- `-A/-B/-C <N>`: lines of context after/before/around a match (like grep).
+- `-r/--rewrite <FIX>`: rewrite matched code (combine with `-i` for interactive
+  confirmation, or `-U` to apply all rewrites unattended — treat `-U` as a
+  hard-to-reverse bulk edit, confirm intent before running it).
+- `--json[=pretty|stream|compact]`: structured output for programmatic use.
+
+Pattern syntax (tree-sitter based):
+- Meta-variables capture a single AST node: `$NAME`, `$ARGS`, `$X` (uppercase by convention).
+- `$$$NAME` captures zero or more nodes (e.g. a variable-length argument list or
+  statement block).
+- Patterns must be syntactically valid (partial) code in the target language — write
+  the pattern the way you'd write real code, using meta-variables where content varies.
+
+Examples used/verified in this repo:
+```
+# Find all calls to a function across the simulation/ package
+ast-grep run -p 'thrust_to_coll_rad($$$ARGS)' simulation
+
+# Find a Python function definition (any body) in one file
+ast-grep run -p 'def $NAME($$$ARGS):
+    $$$BODY' simulation/param_defaults.py
+
+# Find Lua function definitions in a script
+ast-grep run -p 'function $NAME($$$ARGS)
+  $$$BODY
+end' -l lua simulation/scripts/rawes.lua
+```
+
+When to still use grep/`grep_search`: matching exact substrings/regex in prose,
+`.parm`/`.md`/`.yml`/log files, or when you need to match across code+comments+strings
+uniformly (e.g. searching for a TODO string or a parameter name that may appear in
+comments).
+
 ## Documentation Ownership (Single Source of Truth)
 
 Use the primary doc for each topic. Other docs should link, not restate.
@@ -30,11 +80,16 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `simulation/analysis/diagnose_sitl.py` usage text |
 | Aero interfaces and conventions | `design/aero_conventions.md` | `design/aero.md` |
 | EKF gating and GPS yaw bring-up | `design/EKF_GATING.md` | `design/ekf_const_pos_mode.md` |
-| ArduPilot heli PID behavior | `design/ardupilot_pids.md` | `design/GUIDED_CONTROL_LOOPS.md` |
-| Swashplate geometry and sign mapping | `design/ardupilot_swashplate.md` | `simulation/swashplate.py` |
+| ArduPilot heli control-loop behavior | `design/GUIDED_CONTROL_LOOPS.md` | `design/flight_stack.md` |
+| Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `simulation/pytest.ini` |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
+
+Parameter-reference ownership note:
+- Canonical place for ArduPilot parameter defaults and inline explanations is `simulation/tests/sitl/copter-heli.parm`.
+- Canonical place for RAWES_* parameter defaults and inline explanations is `simulation/tests/sitl/rawes_common_defaults.parm`.
+- If a parameter explanation changes, update the owning `.parm` file first; other docs should link to it instead of duplicating bitmasks/tables.
 
 ## Core Invariants (summary)
 
@@ -92,7 +147,41 @@ Ground→Lua NAMED_VALUE_FLOAT interface (not AP params):
 
 Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
 
+RAWES mode -> vehicle control API (current `rawes.lua` behavior):
+
+| RAWES_MODE | Mode | Vehicle API used |
+|---|---|---|
+| 0 | none | none |
+| 3 | passive | `vehicle:set_target_rate_and_throttle` for thrust-only seed (`RAWES_THR` without `RAWES_RIC/PIC`); `vehicle:set_target_angle_and_rate_and_throttle` once full IC seed is present |
+| 1 | steady | `vehicle:set_target_angle_and_rate_and_throttle` |
+
+Steady command basis (`RAWES_MODE=1`):
+- roll/pitch: derived from `bz_altitude_hold(rel, el_rad, tension_n, az_ref)` and converted by `bz_ned_to_roll_pitch(...)`.
+- throttle: altitude PID around IC thrust (`RAWES_THR` as trim/seed), with vertical-speed damping and thrust slew limiting before sending to ArduPilot.
+
 For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
+
+## DShot Setup (Agent Critical)
+
+Use this as the quick contract-level reference for the yaw-motor ESC path.
+Canonical long-form owner doc is `design/dshot.md`.
+
+Active hardware-default parameters (from `simulation/tests/sitl/rawes_common_defaults.parm`):
+- `SERVO9_FUNCTION=36` (Motor4 on output 9), `SERVO9_MIN=1000`, `SERVO9_MAX=2000`, `SERVO9_TRIM=1000`
+- `SERVO_BLH_MASK=256` (output 9)
+- `SERVO_BLH_BDMASK=256` (bidirectional DShot on output 9)
+- `SERVO_BLH_AUTO=0` (manual masks)
+- `SERVO_BLH_OTYPE=5` (DShot300)
+- `SERVO_BLH_POLES=22`
+- `SERVO_DSHOT_ESC=1` (AM32 telemetry decode)
+- `SERVO_DSHOT_RATE=0`
+- `BRD_IO_DSHOT=0` (FMU output path)
+- `RPM1_TYPE=5`, `RPM1_ESC_MASK=256` (ESC telemetry routed from output 9)
+
+SITL behavior:
+- These BLHeli/DShot params are intentionally excluded from SITL boot verification
+    (`simulation/tests/sitl/stack_utils.py` -> `SITL_UNSUPPORTED_PARAMS`) because
+    ArduCopter-heli SITL does not compile the BLHeli backend and drives output 9 as PWM.
 
 ## Workflow Rules
 

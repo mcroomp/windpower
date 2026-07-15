@@ -31,9 +31,9 @@ flowchart LR
         SENS(["GPS + IMU"]):::sensor
         EKF["EKF3"]:::ctrl
         LUA["rawes.lua"]:::ctrl
-        ACRO["ACRO_Heli<br/>rate PIDs"]:::ctrl
+        RATE["ArduPilot<br/>rate loops"]:::ctrl
         ACT(["swashplate +<br/>anti-rotation motor"]):::actuator
-        SENS --> EKF --> LUA --> ACRO --> ACT
+        SENS --> EKF --> LUA --> RATE --> ACT
     end
 
     WIN <== "wired:&nbsp; tension, length" ==> GND
@@ -51,11 +51,11 @@ flowchart LR
 - **Wired (winch ↔ ground):** tether tension and current length up to the ground station; reel-speed commands down to the winch.
 - **MAVLink radio (ground ↔ Pixhawk):** three slow setpoints up (phase, target altitude, **commanded** tension — never the measured tension); telemetry down (hub position, attitude, anti-rotation motor PWM — the WindEstimator uses the last two to solve for wind, see §3.5).
 
-**Roles of the three nodes.** The **winch** is a self-contained ground unit (motor + drum + load cell on one chassis) that closes its own tension-control loop at 400 Hz. The **ground station** runs the pumping/landing phase planners at 10 Hz, the WindEstimator at 50 Hz, and bridges the wired winch link to the radio link; it never commands attitude. On the **Pixhawk**, rawes.lua handles cyclic and collective at 50 Hz; ArduPilot's ACRO_Heli rate loop runs underneath at 400 Hz and drives two actuator paths — the H3-120 swashplate (cyclic + collective via S1/S2/S3) and the **anti-rotation motor** (yaw correction via the configured Motor4 output, speed-controlled ESC; current hardware: EMAX GB4008 — see [components.md](components.md)).
+**Roles of the three nodes.** The **winch** is a self-contained ground unit (motor + drum + load cell on one chassis) that closes its own tension-control loop at 400 Hz. The **ground station** runs the pumping/landing phase planners at 10 Hz, the WindEstimator at 50 Hz, and bridges the wired winch link to the radio link; it never commands attitude. On the **Pixhawk**, rawes.lua handles cyclic and collective at 50 Hz; ArduPilot's inner rate loops run underneath at 400 Hz and drive two actuator paths — the H3-120 swashplate (cyclic + collective via S1/S2/S3) and the **anti-rotation motor** (yaw correction via the configured Motor4 output, speed-controlled ESC; current hardware: EMAX GB4008 — see [components.md](components.md)).
 
 **Key design principles:**
 
-- **rawes.lua owns all flight control.** Cyclic (Ch1/Ch2) and collective (Ch3) are written by Lua in modes 1, 4, and 5. The ground station never sends `SET_ATTITUDE_TARGET`.
+- **rawes.lua owns flight guidance, ArduPilot owns servo outputs.** Lua sends GUIDED attitude/rate/throttle setpoints; it does not write Ch1-Ch4 RC overrides. The only RC override in the stack is Lua's Ch8 motor-interlock hold while armed.
 - **Orientation is a feedforward force balance.** `bz_altitude_hold` computes a body_z setpoint from the **commanded tension** + actual hub position + gravity (`b_z = normalize(T_cmd·t_hat + mg·z_hat)`, `t_hat = -r/|r|`). Pure geometry at the current commanded tension and position — no barometer, no measured tension, no tension feedback.
 - **Altitude hold owns collective.** A 50 Hz PID on altitude error (target altitude vs. actual) sets collective (lift magnitude), with the force-balance `T_R` as a feedforward trim term. This is the AP's fast disturbance rejector.
 - **No TensionPI on the AP.** The vehicle never sees the load cell. The only tension feedback loop in the system is on the winch (its own load cell → reel speed). Commanded tension reaches the AP via `RAWES_TEN` purely as a feedforward into the orientation force balance.
@@ -97,7 +97,7 @@ For detail on individual blocks see §3 (ground), §4 (rawes.lua modes / pre-GPS
 | el | Tether elevation | `asin(alt / tlen)` — elevation angle of tether above horizontal [rad] |
 | T | Tether tension | Force along tether at anchor [N] |
 | L0 | Tether rest length | Unstretched tether length [m], changed by winch |
-| theta_col | Collective pitch | Average blade pitch [rad]; Ch3 RC override 1000–2000 µs |
+| theta_col | Collective pitch | Average blade pitch [rad]; driven by GUIDED throttle path |
 | v_winch | Winch speed | Tether length change rate [m/s]. +ve = pay out, −ve = reel in |
 
 ---
@@ -111,7 +111,7 @@ winch (WinchController, 400 Hz). It reads the load cell to close the winch's own
 loop, and sends three NV floats to rawes.lua: RAWES_SUB (phase), RAWES_ALT (target
 altitude), and RAWES_TEN (**commanded** tension — the winch setpoint, fed forward into the
 AP's orientation force balance; never the measured tension). The ground station never
-commands collective directly — rawes.lua owns Ch3.
+commands collective directly — Lua provides GUIDED throttle setpoints.
 
 ### 3.2 Pumping Cycle (De Schutter 2018)
 
@@ -251,7 +251,7 @@ For the current hardware (GB4008 + 10:1 spur gear): `RPM_SCALE` and `GEAR_RATIO`
 | Tether tension `T` | winch load cell (wired) | 400 Hz |
 | Anti-rotation motor PWM → `ω_rotor` | Pixhawk → `SERVO_OUTPUT_RAW` (MAVLink) | 50 Hz |
 | Hub attitude (`body_z`) | Pixhawk → `ATTITUDE` (MAVLink) | 50 Hz |
-| Collective `θ_col` | from `RAWES_TEN` round-trip / `RC_CHANNELS_RAW` Ch3 | 10 Hz |
+| Collective `θ_col` | from GUIDED throttle command + AP mixer telemetry | 10 Hz |
 
 **Two-equation solve.** For a given collective, BEM gives both tension and rotor speed as smooth monotonic functions of `(V_wind, ξ)`:
 
@@ -309,9 +309,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 |---|---|---|---|
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
-| 2 — manual | `RAWES_TLN`/`RAWES_TLT` NVFs → RC1/RC2 PWM direct (H_FLYBAR_MODE=1) | `RAWES_TEN` NVF → orientation force-balance (direct cyclic only) | manual swash validation |
 | 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
-| 5 — pumping | along the tether, at the per-phase altitude the ground gave us | whatever keeps the measured tether tension on target (435 N during reel-out, 226 N during reel-in) | pumping cycle |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
 
 **Before the first GPS fix:** we don't know where the hub is yet, so the loop runs degenerately — blade pitch is held at a safe cruise value, and tilt commands are pass-throughs of the gyro so the rotor doesn't fight its natural orbital precession. On the first fix, the elevation target initialises and the mode-specific loop above takes over (§4.2).
@@ -369,19 +367,22 @@ update() drains it.  20 is safe for the typical ~5 NVFs/tick burst.
 | MASS_KG | 5.0 | Hub + rotor mass |
 | G_ACCEL | 9.81 | Gravity [m/s²] |
 | MIN_TETHER_M | 0.5 | Minimum tether length before GPS init activates elevation hold |
-| COL_MIN_RAD | −0.28 | Hard collective floor [rad] |
-| COL_MAX_RAD | 0.10 | Hard collective ceiling [rad] |
 | THRUST_CRUISE | 0.263 | Pre-GPS thrust hold; altitude PID warm-start |
 | THRUST_SLEW_MAX | 0.058 | Max thrust change per 50 Hz step |
-| ACRO_RP_RATE_DEG | 360.0 | Must match ArduPilot ACRO_RP_RATE parameter |
+| RP_RATE_DEG | 360.0 | Must match ArduPilot roll/pitch rate scaling |
+
+Collective physical limits are no longer hard-coded as `COL_*` constants. The
+runtime mapping is thrust `[0..1]` to collective `[rad]` using rotor YAML
+`control.col_min_rad/control.col_max_rad` combined with ArduPilot `H_COL_*`
+via `load_collective_phys_range()`.
 
 ### 4.2 Pre-GPS Stabilization (all modes)
 
 Before `_el_initialized` is set (first valid GPS position fix with tlen ≥ MIN_TETHER_M):
 
 1. Hold thrust at `THRUST_CRUISE` (0.263) to prevent tension runaway.
-2. Feed gyro through to Ch1/Ch2: ACRO desired_rate = measured_rate → rate_error = 0 →
-   zero corrective torque → natural orbital rate preserved.
+2. Command current attitude with zero corrective rate/throttle transients via
+    GUIDED APIs so the natural orbital rate is preserved until GPS fusion.
 
 On first valid GPS fix: initialize `_el_rad` and `_target_alt` from position, set
 `_el_initialized = true`, send STATUSTEXT.
@@ -402,7 +403,7 @@ emits any control output:
 - `RAWES_THR` — IC thrust [0..1]
 
 Until all three arrive, `run_passive_mode` returns early and emits no
-control-API traffic (no ch4 neutral, no arm/disarm).  Once `_ic_seeded`
+control-API traffic (no guided target writes, no arm/disarm). Once `_ic_seeded`
 latches, incremental updates to any of the three are accepted.
 
 **Per-tick command** (once seeded and in GUIDED):
@@ -448,7 +449,8 @@ Post-GPS, each 50 Hz step:
    vz-damping gain-scheduled down while body rates are high, slew-limited). `_thrust_trim`
    warm-starts from the IC thrust (`RAWES_THR`). Output is the GUIDED throttle.
 
-**Ch3 ownership:** Lua owns Ch3 entirely in mode 1. Ground does not send collective.
+**Collective ownership:** ground never sends collective directly. Lua sends GUIDED
+throttle setpoints; ArduPilot maps them to actuator outputs.
 
 ### 4.4 Pumping schedule (runs in steady mode, RAWES_MODE=1)
 
@@ -499,13 +501,13 @@ Lua receives `RAWES_SUB=1` (LAND_FINAL_DROP) from ground planner when `cmd.phase
 
 1. Gate on `ahrs:healthy()`. Until healthy, return early.
 2. On first healthy call: capture `_bz_eq0` from AHRS. Send "RAWES land: captured" STATUSTEXT.
-3. Collective: `col_cmd = COL_CRUISE_FLIGHT_RAD + KP_VZ × (vz_actual − VZ_LAND_SP)`
+3. Collective/throttle: `thrust_cmd = THRUST_CRUISE + KP_VZ × (vz_actual − VZ_LAND_SP)`
    where `VZ_LAND_SP=0.5 m/s` (positive = descending in NED). `KP_VZ=0.05`.
 4. Final drop: when ground sends `RAWES_SUB=1` (LAND_FINAL_DROP): set collective=0,
    send "RAWES land: final_drop" STATUSTEXT.
 5. Cyclic: altitude hold at current tether direction (body_z tracks tether as hub descends).
 
-**Fixture `acro_armed_landing_lua`:** hub at xi~80°
+**Landing Lua fixture:** hub at xi~80°
 (`pos0=[0.0, 3.473, −19.696]`, `vel0=[0.0, 0.96, 0.0]`, `tether_rest_length=20 m`,
 `kinematic_vel_ramp_s=20.0` so hub exits kinematic at vel=0 — eliminates tether jolt).
 
@@ -519,7 +521,7 @@ Re-sending refreshes the timer. Works in any mode.
 **SITL sequence:**
 1. GCS force-arms the vehicle (bypasses SITL prearm failures).
 2. GCS sends `NAMED_VALUE_FLOAT("RAWES_ARM", ms)`.
-3. Lua sets Ch3=1000 (throttle low), Ch8=2000 (motor interlock ON), starts countdown.
+3. Lua sets Ch8=2000 (motor interlock ON), starts countdown.
 4. Once `arming:is_armed()` true: Lua sends "RAWES arm-on: armed, expires in Xs".
 5. On expiry: Lua calls `arming:disarm()`, sends "RAWES arm-on: expired, disarmed".
 
@@ -529,10 +531,7 @@ Re-sending refreshes the timer. Works in any mode.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1 — roll cyclic | rawes.lua (modes 1/4) | 50 Hz | Modes 1/4: body_z error (roll). Mode 0/3: neutral 1500. |
-| Ch2 — pitch cyclic | rawes.lua (modes 1/4) | 50 Hz | Modes 1/4: body_z error (pitch). Mode 0/3: neutral 1500. |
-| Ch3 — collective | rawes.lua (modes 1/4) | 50 Hz | Altitude PID (mode 1, incl. pumping schedule), VZ descent (mode 4). Mode 0/3: not overridden. |
-| Ch4 — yaw | rawes.lua holds 1500 µs | 50 Hz | Neutral — prevents ACRO yaw integrator windup. ATC_RAT_YAW drives the yaw motor output independently. |
+| Ch1-Ch4 (servo outputs) | ArduPilot | 400 Hz / 100 Hz | Driven from GUIDED setpoints and AP control loops; no Lua RC overrides on Ch1-Ch4. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
 | Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/3/4) | 400 Hz / 100 Hz | DDFP CW (H_TAIL_TYPE=3, no sign flip): CCW body drift -> positive PID -> positive throttle. |
 
@@ -541,7 +540,7 @@ Re-sending refreshes the timer. Works in any mode.
 Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes 0/1/3/4.
 
 ```
-Sensing:    gyro.z (from ACRO_Heli EKF attitude)
+Sensing:    gyro.z (from EKF attitude estimate)
 Control:    ATC_RAT_YAW P/I/D → Motor4 output (H_TAIL_TYPE=3 DDFP CW, no sign flip)
 Actuator:   anti-rotation motor on output 9 (AUX 1)
             (current hardware: GB4008 + 10:1 spur gear — see components.md)
@@ -574,7 +573,7 @@ Equilibrium throttle: `throttle_eq = omega_rotor × GEAR_RATIO / RPM_SCALE` (see
 | `bz_altitude_hold` (commanded-tension force balance) | `compute_bz_altitude_hold` | `controller.py` |
 | VZ PI collective (mode 1) | `TensionApController._vz_pi` | `ap_controller.py` |
 | Cyclic P loop | `compute_rate_cmd` | `controller.py` |
-| ACRO ATC_RAT_RLL/PIT (rate damping) | `RatePID(kp=2/3)` | `controller.py` |
+| AP ATC_RAT_RLL/PIT (rate damping) | `RatePID(kp=2/3)` | `controller.py` |
 | RAWES_ARM state machine | N/A — Lua only | `rawes.lua` |
 | ATC_RAT_YAW (yaw regulation) | `torque_model.py` hub ODE | `mediator_torque.py` |
 
@@ -621,7 +620,8 @@ jumps (the old zero-inertia algebraic model did, which drove a yaw limit cycle).
 
 **Yaw control — servo-readback trim observer (rawes.lua):**
 
-ArduPilot's own yaw rate PID is **disabled** (P=I=D=0). Instead, rawes.lua runs a
+ArduPilot's yaw rate loop is kept **small but nonzero** (P=0.015, I=0.0015, D=0).
+rawes.lua still runs a
 model-based trim observer (`run_yaw_trim`) that writes `H_YAW_TRIM` every 10 ms tick:
 
 ```
@@ -634,15 +634,16 @@ param:set("H_YAW_TRIM", trim)
 This drives `H_YAW_TRIM` toward the equilibrium throttle `u_eq = omega_rotor × GEAR_RATIO / RPM_SCALE`
 (see `torque_model.py` for constants) at which `psi_dot = 0`.  `YFF_A = RAWES_YAW_SLP × SERVO9_SPAN_US × 2π/60` (default ≈ 52.8 rad/s per
 throttle unit; RAWES_YAW_SLP=0 uses bench value 0.504 RPM/µs).  The AP yaw P-term handles
-fast transients; the observer absorbs the DC so the integrator is not needed.
+fast transients; the tiny I-term cleans up residual drift; the observer carries the
+bulk DC trim so the AP integrator can stay small.
 
 ### 5.3 Key Parameters
 
 | Parameter | Value | Purpose |
 |---|---|---|
 | H_TAIL_TYPE | 3 (DDFP CW) | No sign flip: positive yaw error → positive motor throttle |
-| ATC_RAT_YAW_P | 0.0 | AP yaw PID off — rawes.lua observer owns H_YAW_TRIM |
-| ATC_RAT_YAW_I | 0.0 | Off — observer absorbs DC offset |
+| ATC_RAT_YAW_P | 0.015 | Small AP yaw P-term for fast disturbance rejection |
+| ATC_RAT_YAW_I | 0.0015 | Tiny I-term for residual drift cleanup |
 | ATC_RAT_YAW_D | 0.0 | Off |
 | ATC_RAT_YAW_IMAX | 0.1 | Clamp (safety; integrator is zero) |
 | RAWES_YAW_SLP | 0 | Yaw motor slope override [RPM/µs]; 0 = bench default 0.504 |
@@ -662,7 +663,7 @@ fast transients; the observer absorbs the DC so the integrator is not needed.
 Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not boot-time params.
 
 **SCR_ENABLE bootstrap:** After EEPROM wipe, Lua only starts if SCR_ENABLE=1 is already in
-EEPROM. The `acro_armed_lua` fixture sets it via MAVLink post-arm (persists for future boots).
+EEPROM. The Lua flight fixture sets it via MAVLink post-arm (persists for future boots).
 Lua is unavailable on the first boot from a fresh EEPROM.
 
 ### 6.2 Swashplate and RSC
@@ -678,16 +679,14 @@ Lua is unavailable on the first boot from a fresh EEPROM.
 | SERVO1_FUNCTION | 33 (Motor1/S1) | Swashplate servo S1 |
 | SERVO2_FUNCTION | 34 (Motor2/S2) | Swashplate servo S2 |
 | SERVO3_FUNCTION | 35 (Motor3/S3) | Swashplate servo S3 |
-| ACRO_TRAINER | 0 | Disable leveling (equilibrium is 65° from vertical) |
-| ACRO_RP_RATE | 360 | Must match constant in rawes.lua |
 | ATC_RAT_RLL_IMAX | 0 | Prevent orbital angular rate integrator windup |
 | ATC_RAT_PIT_IMAX | 0 | Same |
 | ATC_RAT_YAW_IMAX | 0 | Same |
 
-**Why ACRO, not STABILIZE:** The hub has no passive stability. ACRO converts RC rate commands to
-cyclic without attitude restoration toward level. rawes.lua supplies the continuous rate commands
-needed to hold body_z at the natural 65° tether tilt. STABILIZE commands cyclic to drive
-roll=0/pitch=0 and crashes within seconds. Do not switch to STABILIZE.
+**Why GUIDED + Lua setpoints:** The hub has no passive stability. rawes.lua supplies continuous
+GUIDED attitude/rate/throttle setpoints that hold body_z at the natural tether tilt while the
+inner rate loops provide damping. STABILIZE-style leveling toward roll=0/pitch=0 is incompatible
+with tethered equilibrium and causes rapid loss of control.
 
 ### 6.3 GPS Configuration (Dual F9P, RELPOSNED Yaw)
 
@@ -733,8 +732,8 @@ Current hardware: GB4008 + 10:1 spur gear. See §5.2 and [components.md](compone
 | SERVO9_FUNCTION | 36 (Motor4) | Anti-rotation motor ESC on output 9 (AUX 1) |
 | SERVO9_MIN | 1000 µs | ESC disarm |
 | SERVO9_MAX | 2000 µs | ESC maximum |
-| ATC_RAT_YAW_P | 0.20 | Starting value |
-| ATC_RAT_YAW_I | 0.05 | Corrects residual drift |
+| ATC_RAT_YAW_P | 0.015 | Small AP yaw P-term for fast disturbance rejection |
+| ATC_RAT_YAW_I | 0.0015 | Tiny I-term for residual drift cleanup |
 | ATC_RAT_YAW_D | 0.0 | Start at zero |
 
 ---
@@ -747,7 +746,7 @@ Current hardware: GB4008 + 10:1 spur gear. See §5.2 and [components.md](compone
 1. Ground: spin rotor to omega_spin ≥ omega_min (~10–15 rad/s). Monitor ESC RPM.
 2. Release mechanism drops rotor. Lift > weight → rapid climb.
 3. Tether pays out. Once taut, tension develops and lateral stability begins.
-4. rawes.lua pre-GPS phase: gyro feedthrough + COL_CRUISE_FLIGHT_RAD hold until GPS fuses.
+4. rawes.lua pre-GPS phase: gyro feedthrough + THRUST_CRUISE hold until GPS fuses.
 5. GPS fuses → _el_initialized → orientation force balance + altitude-PID collective active.
 6. Ground planner begins pumping cycle.
 ```
@@ -764,7 +763,7 @@ Phase 1 — reel_in:
 Phase 2 — descent:
     body_z fixed (disk nearly horizontal at xi~80°).
     Winch tension target=180 N: kp×(180−natural_T) gives v_land.
-    VZ PI (vz_sp=0.5 m/s): Lua holds Ch3 via rawes.lua mode 4.
+    VZ PI (vz_sp=0.5 m/s): Lua holds guided throttle via rawes.lua mode 4.
 
 Phase 3 — final_drop:
     Ground sends RAWES_SUB=LAND_FINAL_DROP (=1).
@@ -823,9 +822,8 @@ params = {
 # Sequence:
 # 1. Set params above
 # 2. Wait for ATTITUDE messages (EKF attitude aligned)
-# 3. Send CH8=2000 (motor interlock ON; RSC at setpoint for mode 1)
-# 4. Send force arm (param2=21196 in MAV_CMD_COMPONENT_ARM_DISARM)
-# 5. HEARTBEAT shows armed=True immediately (mode 1 = instant runup_complete)
+# 3. Send force arm (param2=21196 in MAV_CMD_COMPONENT_ARM_DISARM)
+# 4. HEARTBEAT shows armed=True immediately (mode 1 = instant runup_complete)
 ```
 
 ### B.2 RAWES_ARM Lua Timer (Lua tests)
@@ -834,7 +832,7 @@ params = {
 # Sequence:
 # 1. GCS force-arms the vehicle
 # 2. GCS sends NAMED_VALUE_FLOAT("RAWES_ARM", ms)
-# 3. Lua holds Ch3=1000 + Ch8=2000, starts countdown
+# 3. Lua holds Ch8=2000, starts countdown
 # 4. Sends "RAWES arm-on: armed, expires in Xs" STATUSTEXT once arming:is_armed()
 # 5. On expiry: arming:disarm(), sends "RAWES arm-on: expired, disarmed"
 ```
@@ -844,7 +842,7 @@ params = {
 | Symptom | Cause | Fix |
 |---|---|---|
 | "PreArm: Motors: H_RSC_MODE invalid" | H_RSC_MODE=0 (SITL default) | Set H_RSC_MODE=1 |
-| COMMAND_ACK ACCEPTED but HEARTBEAT never armed | RSC not at runup_complete | Use H_RSC_MODE=1 + CH8=2000 |
+| COMMAND_ACK ACCEPTED but HEARTBEAT never armed | Transient SITL pre-arm state | Retry force-arm after EKF attitude alignment |
 | GPS never fuses | GPS_AUTO_CONFIG=1 corrupts RELPOSNED | Set GPS_AUTO_CONFIG=0 |
 | GPS fuses then drops — compass cycles | COMPASS_ENABLE=1 synthetic compass cycling every 10 s | Set COMPASS_USE=0, COMPASS_ENABLE=0 |
 | `_el_initialized` never fires | Tether < MIN_TETHER_M (0.5 m) or no valid position | Verify GPS fusion + tether length |
@@ -861,7 +859,7 @@ params = {
 | GPS_AUTO_CONFIG | 0 | Do not reconfigure F9P chips (corrupts RELPOSNED) |
 | FS_THR_ENABLE | 0 | No RC throttle failsafe (SITL has no real RC) |
 | FS_GCS_ENABLE | 0 | No GCS heartbeat failsafe |
-| INITIAL_MODE | 1 | Boot into ACRO |
+| INITIAL_MODE | 4 | Boot into GUIDED |
 
 ---
 
@@ -1004,11 +1002,11 @@ Clears when `readyToUseGPS()` returns true.
 | `v:normalized()` | Doesn't exist. Copy then `:normalize()` in-place |
 | `vec * scalar` or `vec + vec` | `*` not overloaded; `+` may silently fail. Use component arithmetic |
 | `rc:set_override(chan, pwm)` | Use `rc:get_channel(n):set_override(pwm)` (cache channel at module load) |
-| ArduCopter ACRO = 6 | ACRO = **1**. Mode 6 is RTL |
+| ArduCopter GUIDED = 4 | Mode 6 is RTL |
 
 **"RAWES flight: loaded" STATUSTEXT:** Sent at module load (~1 s after SITL starts). The GCS
 connects ~4 s later. This message is always dropped before GCS has an active link — never use
-it as a readiness signal. Use periodic diagnostic messages ("RAWES: ch1=...") or wait for
+it as a readiness signal. Use periodic diagnostic messages ("RAWES: guided target=...") or wait for
 "RAWES land: captured" / GPS fusion events.
 
 **`rawes_test_surface.lua`:** Lua unit tests run rawes.lua in-process via lupa. Constants
@@ -1025,9 +1023,9 @@ level first.
 |---|---|
 | `simulation/scripts/rawes.lua` | Unified Lua controller (modes 0/1/3/4, RAWES_ARM, bz_altitude_hold force balance, altitude-PID collective; pumping runs in mode 1) |
 | `simulation/tests/sitl/rawes_sitl_defaults.parm` | Boot-time ArduPilot params (EKF3, GPS, compass, servos) |
-| `simulation/tests/sitl/flight/conftest.py` | Flight fixtures: `acro_armed`, `acro_armed_lua_full`, `acro_armed_pumping_lua`, `acro_armed_landing_lua` |
+| `simulation/tests/sitl/flight/conftest.py` | Flight fixtures for guided and Lua stack tests |
 | `simulation/tests/sitl/torque/conftest.py` | Torque fixtures for DDFP and Lua PASSIVE stack paths |
-| `simulation/tests/sitl/stack_infra.py` | Shared infra: `_sitl_stack`, `_acro_stack`, `_torque_stack`, `StackContext`; `_arm_sequence(target_mode=ACRO)` for GPS-free torque tests |
+| `simulation/tests/sitl/stack_infra.py` | Shared infra: `_sitl_stack`, torque stack helpers, `StackContext`; `_arm_sequence(...)` for stack bring-up |
 | `simulation/scripts/calibrate.py` | Interactive calibration CLI for run/watch/motor/log/config workflows |
 | `simulation/controller.py` | `compute_bz_altitude_hold`, `AltitudeHoldController`, `TensionPI`, `RatePID`, `compute_rate_cmd`, `OrbitTracker` |
 | `simulation/ap_controller.py` | `TensionApController` (400 Hz AP side), `LandingApController` |
@@ -1040,7 +1038,7 @@ level first.
 | `simulation/torque_model.py` | Hub yaw kinematics: `HubParams`, `HubState`, `step()`, `equilibrium_throttle()` |
 | `simulation/mediator_torque.py` | Standalone torque SITL mediator |
 | `simulation/comms.py` | `VirtualComms` (simtest), `MavlinkComms` (SITL/hardware) |
-| `simulation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, RC override, `send_named_float` |
+| `simulation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_named_float` |
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
 | `simulation/analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
 | `simulation/analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |

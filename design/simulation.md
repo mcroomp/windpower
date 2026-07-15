@@ -17,7 +17,7 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 ## Sensor Design — Physical Attitude
 
-`PhysicalSensor` (the only sensor class) reports the **true physical hub orientation** — approximately roll=124°, pitch=−46° at tether equilibrium (ZYX Euler, NED). ACRO mode is compatible with this because it only damps angular rates toward commanded rates; the large physical tilt causes no automatic corrective cyclic.
+`PhysicalSensor` (the only sensor class) reports the **true physical hub orientation** — approximately roll=124°, pitch=−46° at tether equilibrium (ZYX Euler, NED). The active guided setpoint path is compatible with this because inner rate damping tracks commanded rates; the large physical tilt causes no automatic leveling correction.
 
 **`PhysicalSensor.compute()`** (`sensor.py`):
 - `rpy` = actual ZYX Euler angles from `R_hub` directly (no overrides)
@@ -187,7 +187,7 @@ The spinning rotor changes the instability character. Any torque applied to a sp
 | Gravity on CM above attachment | Pulls CM down (unstable) | Precesses body_z (like a spinning top) |
 | Aerodynamic cyclic moment | Tilts disk | Precesses body_z in controlled direction |
 
-The tether and gravity torques therefore drive **uncontrolled orbital precession** rather than a simple fall. Without active cyclic control the hub drifts into an uncontrolled orbit and crashes within seconds. Confirmed empirically: neutral sticks in ACRO mode always crashes the hub.
+The tether and gravity torques therefore drive **uncontrolled orbital precession** rather than a simple fall. Without active cyclic control the hub drifts into an uncontrolled orbit and crashes within seconds.
 
 Both effects are fully implemented:
 - **Tether offset moment** (`M = r_attach × F_tether`, `r_attach = 0.3 m along body_z`) — computed in `tether.py` and applied to `dynamics.step()` every timestep.
@@ -222,7 +222,7 @@ With dynbem v0.4.0, the rotor attitude response is modelled directly. `base_k_an
 
 These follow directly from the orbit physics and pin down key simulation invariants:
 
-1. **Use ACRO, never STABILIZE.** STABILIZE commands absolute NED attitude (roll=0=level), which fights the 67° tether equilibrium and crashes within 1–2 s. ACRO only damps angular rates toward commanded rates, so the large physical tilt causes no automatic corrective cyclic. PhysicalSensor reports the true hub orientation directly.
+1. **Use guided setpoints, never leveling modes.** Level-seeking attitude control (roll=0/pitch=0 in NED) fights the 67° tether equilibrium and crashes within 1–2 s. The guided/Lua setpoint path preserves the physical tilt equilibrium while inner rate loops provide damping. PhysicalSensor reports the true hub orientation directly.
 2. **Disable rate-loop I-term:** `ATC_RAT_RLL_IMAX = ATC_RAT_PIT_IMAX = ATC_RAT_YAW_IMAX = 0`. The 0.2–0.3 rad/s orbital body rate is a *desired* steady-state rate, not a disturbance to reject. Without IMAX=0 the I-term integrates this as a tracking error and saturates the swashplate in ≈ 50 s.
 3. **Reference body_z must follow the rotating tether direction.** A fixed reference accumulates ≈ 90° of phase lag per quarter orbit (~15 s). `rawes.lua` uses `compute_bz_altitude_hold(pos, target_el_rad, tension)` — target tether direction at the rate-limited elevation, plus a gravity-compensation tilt. Position is the only sensor needed.
 4. **Disk-tilt slew rate limit = 0.40 rad/s** (`RAWES_SLW` NVF). Gyroscopic precession could theoretically tilt the disk at ≈ 20 rad/s; closed-loop bandwidth caps the useful rate at ≈ 2 % of that. Faster slews cause oscillation; slower wastes reel-in time. Minimum reel-out → reel-in transition (Δξ = 45°) ≈ 2 s, with a 3–4 s budget per cycle boundary including settling.
@@ -232,7 +232,7 @@ These follow directly from the orbit physics and pin down key simulation invaria
 
 | Implication | Where it lives |
 |---|---|
-| Physical attitude + ACRO | `PhysicalSensor` reports true `R_hub`; `COMPASS_USE=0`; `EK3_SRC1_YAW=2` |
+| Physical attitude + guided setpoints | `PhysicalSensor` reports true `R_hub`; `COMPASS_USE=0`; `EK3_SRC1_YAW=2` |
 | Rate-loop bias | `ATC_RAT_*_IMAX = 0` (boot params, `rawes_sitl_defaults.parm`) |
 | Reference body_z tracking | `rawes.lua`: `bz_altitude_hold(pos, _el_rad, tension)` at 50 Hz |
 | Slew rate limiting | `rawes.lua`: elevation slew `RAWES_SLW = 0.40 rad/s` (NVF) |
@@ -332,7 +332,7 @@ The mediator runs a 45 s kinematic override so the ArduPilot EKF can initialise 
 During the ramp:
 - Hub position follows a constant-velocity trajectory from `launch_pos` to `pos0`
 - `vel = vel0 = [-0.257, 0.916, -0.093]` m/s constant throughout (zero acceleration → clean IMU signal)
-- Orientation locked to R0 throughout (prevents ACRO servo commands from misaligning the disk before physics starts)
+- Orientation locked to R0 throughout (prevents RATE-MODE servo commands from misaligning the disk before physics starts)
 - Non-zero velocity from frame 0 gives the EKF a velocity-derived yaw heading immediately
 
 **EKF timeline (physical sensor mode, EK3_SRC1_YAW=1/compass):**
@@ -416,7 +416,7 @@ Landing logic is implemented in `LandingGroundController` + `LandingApController
 
 ### Fixture
 
-`acro_armed_landing_lua` (`kinematic_vel_ramp_s = 20` so the hub exits kinematic at vel=0 — eliminates linear tether jolt).
+Landing Lua fixture in `simulation/tests/sitl/flight/conftest.py` (`kinematic_vel_ramp_s = 20` so the hub exits kinematic at vel=0 — eliminates linear tether jolt).
 
 ### Diagnosis
 
@@ -475,16 +475,17 @@ simulation/
 │                        (runs via lupa in RawesLua harness). Provides Vector3f, ahrs, rc,
 │                        SRV_Channels, param, gcs, arming, vehicle, mavlink stubs. State lives in
 │                        global `_mock` table; Python writes inputs and reads outputs each tick.
-│                        Notably: `vehicle:set_target_angle_and_climbrate` stores into
-│                        `_mock.guided_target`, which `MockArdupilot._LuaBackend.tick()` reads to
-│                        feed `GuidedAttitudeController`. Distinct from `tests/common/mock_ardupilot.py`.
+│                        Notably: GUIDED setpoint calls (`set_target_angle_and_rate_and_throttle`
+│                        / `set_target_rate_and_throttle`) are captured in `_mock` and consumed by
+│                        `MockArdupilot._LuaBackend.tick()` to feed `GuidedAttitudeController`.
+│                        Distinct from `tests/common/mock_ardupilot.py`.
 ├── mediator.py          SITL co-simulation loop — thin wrapper around PhysicsCore
 ├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw kinematics)
 ├── torque_model.py      Hub yaw model (kinematic + motor lag) — HubParams (rpm_scale, gear_ratio,
 │                        motor_tau), HubState (psi, psi_dot, omega_motor), step(), equilibrium_throttle()
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
 ├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
-├── gcs.py               MAVLink GCS client (arm, mode, RC override, params).
+├── gcs.py               MAVLink GCS client (arm, mode, params, named-float commands).
 │                        recv_local_position_latest() — non-blocking poll of LOCAL_POSITION_NED.
 ├── comms.py             MAVLink comms boundary between ground and AP.
 │                        VirtualComms — simtest: latency queue + optional Gaussian noise on hub_alt_m;
@@ -551,11 +552,11 @@ simulation/
     │   └── simtest_ic.py          load_ic() — loads steady_state_starting.json.
     ├── common/
     │   └── mock_ardupilot.py      MockArdupilot — public adapter for simtests. Two factory methods:
-    │                                MockArdupilot.for_lua(sim, wind, dt, initial_col_rad) — Lua backend
+    │                                MockArdupilot.for_lua(sim, wind, dt, initial_thrust=...) — Lua backend
     │                                  wraps RawesLua; reads guided_target/_rate_target/_throttle from
     │                                  _mock and feeds GuidedAttitudeController each tick;
-    │                                MockArdupilot.for_python(ap, wind, dt, initial_col_rad) — Python
-    │                                  AP backend (calls ap.step() each tick).
+    │                                MockArdupilot.for_python(mode=..., wind, dt, **kwargs) — Python
+    │                                  AP backend (calls the selected mode step each tick).
     │                              Shared base (_MockArdupilotBase): enable_guided(), step_physics(),
     │                              log(), write_telemetry(). TelRow.from_physics() written at
     │                              RAWES_TEL_HZ (default 20 Hz, override via env var).

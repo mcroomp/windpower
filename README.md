@@ -115,17 +115,17 @@ To keep docs AI-friendly and avoid drift:
 
 | File | Description |
 |------|-------------|
-| [design/flight_stack.md](design/flight_stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Pixhawk orbit tracker (rawes.lua), yaw trim (rawes.lua), ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
+| [design/flight_stack.md](design/flight_stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Lua-guided attitude/throttle control path, yaw trim behavior, ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
 
 ### Simulation
 
 | File | Description |
 |------|-------------|
 | [simulation/README.md](simulation/README.md) | Simulation architecture, module summary, coordinate frames, sensor design, initial state, running tests, analysis tools index |
-| [design/simulation.md](design/simulation.md) | Sensor design, controller functions, dynamics model, aero model (SkewedWakeBEM), tether, pumping cycle architecture, known gaps |
+| [design/simulation.md](design/simulation.md) | Sensor design, controller functions, dynamics model, `PhysicsCore` ownership, quasi-static aero path, tether, pumping cycle architecture, known gaps |
 | [design/history.md](design/history.md) | Milestone and design-decision log |
 | [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw physics model -- HubParams, GB4008 motor torque, RK4 integrator, equilibrium throttle |
-| [design/aero.md](design/aero.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, known gaps vs SkewedWakeBEM |
+| [design/aero.md](design/aero.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, and model-gap notes |
 
 ---
 
