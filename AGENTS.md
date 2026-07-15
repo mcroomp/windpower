@@ -19,6 +19,56 @@ Current focus:
 3. `design/sitl_testing.md` (stack workflow and diagnosis)
 4. Topic-specific docs from the ownership map below
 
+## Code Search: Prefer ast-grep over grep/ripgrep
+
+`ast-grep` (CLI: `ast-grep`, alias `sg`) is installed and available in this workspace.
+For searching *source code* (Python, Lua), prefer it over `grep`/`rg`/text-based
+`grep_search` because it matches on AST structure, so it ignores comments/strings and
+is indentation/formatting agnostic. Still use plain text search for non-code files
+(docs, `.parm` files, logs, config).
+
+Basic invocation:
+```
+ast-grep run -p '<PATTERN>' [-l <LANG>] [PATHS...]
+```
+- `-p/--pattern`: the AST pattern to match (see below).
+- `-l/--lang`: language (`python`, `lua`, etc). Optional — ast-grep infers language
+  from file extension when scanning a directory, but set it explicitly when
+  scanning a single file whose extension is ambiguous or when using `--stdin`.
+- `PATHS`: files or directories to search (defaults to `.`).
+- `-A/-B/-C <N>`: lines of context after/before/around a match (like grep).
+- `-r/--rewrite <FIX>`: rewrite matched code (combine with `-i` for interactive
+  confirmation, or `-U` to apply all rewrites unattended — treat `-U` as a
+  hard-to-reverse bulk edit, confirm intent before running it).
+- `--json[=pretty|stream|compact]`: structured output for programmatic use.
+
+Pattern syntax (tree-sitter based):
+- Meta-variables capture a single AST node: `$NAME`, `$ARGS`, `$X` (uppercase by convention).
+- `$$$NAME` captures zero or more nodes (e.g. a variable-length argument list or
+  statement block).
+- Patterns must be syntactically valid (partial) code in the target language — write
+  the pattern the way you'd write real code, using meta-variables where content varies.
+
+Examples used/verified in this repo:
+```
+# Find all calls to a function across the simulation/ package
+ast-grep run -p 'thrust_to_coll_rad($$$ARGS)' simulation
+
+# Find a Python function definition (any body) in one file
+ast-grep run -p 'def $NAME($$$ARGS):
+    $$$BODY' simulation/param_defaults.py
+
+# Find Lua function definitions in a script
+ast-grep run -p 'function $NAME($$$ARGS)
+  $$$BODY
+end' -l lua simulation/scripts/rawes.lua
+```
+
+When to still use grep/`grep_search`: matching exact substrings/regex in prose,
+`.parm`/`.md`/`.yml`/log files, or when you need to match across code+comments+strings
+uniformly (e.g. searching for a TODO string or a parameter name that may appear in
+comments).
+
 ## Documentation Ownership (Single Source of Truth)
 
 Use the primary doc for each topic. Other docs should link, not restate.
@@ -35,6 +85,11 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `simulation/pytest.ini` |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
+
+Parameter-reference ownership note:
+- Canonical place for ArduPilot parameter defaults and inline explanations is `simulation/tests/sitl/copter-heli.parm`.
+- Canonical place for RAWES_* parameter defaults and inline explanations is `simulation/tests/sitl/rawes_common_defaults.parm`.
+- If a parameter explanation changes, update the owning `.parm` file first; other docs should link to it instead of duplicating bitmasks/tables.
 
 ## Core Invariants (summary)
 
@@ -91,6 +146,18 @@ Ground→Lua NAMED_VALUE_FLOAT interface (not AP params):
 | RAWES_YIC  | Optional fixed yaw target [rad] for MODE_PASSIVE                 |
 
 Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
+
+RAWES mode -> vehicle control API (current `rawes.lua` behavior):
+
+| RAWES_MODE | Mode | Vehicle API used |
+|---|---|---|
+| 0 | none | none |
+| 3 | passive | `vehicle:set_target_rate_and_throttle` for thrust-only seed (`RAWES_THR` without `RAWES_RIC/PIC`); `vehicle:set_target_angle_and_rate_and_throttle` once full IC seed is present |
+| 1 | steady | `vehicle:set_target_angle_and_rate_and_throttle` |
+
+Steady command basis (`RAWES_MODE=1`):
+- roll/pitch: derived from `bz_altitude_hold(rel, el_rad, tension_n, az_ref)` and converted by `bz_ned_to_roll_pitch(...)`.
+- throttle: altitude PID around IC thrust (`RAWES_THR` as trim/seed), with vertical-speed damping and thrust slew limiting before sending to ArduPilot.
 
 For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
 

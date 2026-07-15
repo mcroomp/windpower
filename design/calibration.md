@@ -55,7 +55,7 @@ rest are one-shot.
 
 ## Long-running verbs
 
-### `run <name> [--duration N] [--trim K=V,...] [--gain K=V,...]`
+### `run <name> [--duration N] [--trim K=V,...]`
 
 Activate a Lua mode (via `RAWES_MODE`) → arm via `RAWES_ARM` → stream observation rows
 to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. Without
@@ -63,11 +63,11 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 
 **Modes (`<name>`):**
 
-| Name | `RAWES_MODE` | Uses yaw motor output? | Accepts `--gain`? |
-|---|---|---|---|
-| `passive` | 3 | yes — `run_yaw_trim` observer sets H_YAW_TRIM each tick | no |
-| `steady` | 1 | observer active | no |
-| `landing` | 4 | no | no |
+| Name | `RAWES_MODE` | Uses yaw motor output? |
+|---|---|---|
+| `passive` | 3 | yes — `run_yaw_trim` observer sets H_YAW_TRIM each tick |
+| `steady` | 1 | observer active |
+| `landing` | 4 | no |
 
 `--trim` keys, applies to all modes:
 
@@ -77,9 +77,9 @@ to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. With
 | `tlat` | `RAWES_TLT` | cyclic trim lateral |
 | `thr`  | `RAWES_THR` | IC thrust [0..1] (passive only) |
 
-`--gain` is not accepted in any current mode.  Yaw is regulated by the
-servo-readback trim observer in rawes.lua — calibrate `RAWES_YAW_SLP` (slope) from
-a bench measurement rather than tuning AP PID gains.
+`run` uses current FC parameters as-is and does not apply per-run parameter
+overrides. Yaw is regulated by the servo-readback trim observer in rawes.lua —
+calibrate `RAWES_YAW_SLP` (slope) from a bench measurement.
 
 ```bash
 # Bench check: hold IC swashplate, observer active, 30 s
@@ -113,7 +113,8 @@ python calibrate.py --port COM7 watch text                       # default 10 s
 
 ### `status`
 Vehicle snapshot: armed state, flight mode, battery, EKF flags, SERVO_OUTPUT_RAW for
-all active outputs, and a pass/fail table for key RAWES parameters + tail PID values.
+all active outputs, plus pass/fail tables for key stack params, interlock/DShot path,
+and yaw control gains.
 
 ### `set <name> <value>` / `get <name>`
 Read or write a single ArduPilot parameter. `set` verifies via read-back and flags
@@ -163,8 +164,10 @@ Lua FS over MAVLink FTP. `upload` writes to `/APM/scripts/<basename>` and then
 toggles `SCR_ENABLE 1→0→1` to restart the scripting engine (no reboot needed).
 
 ### `config show` / `config apply`
-Diff the live FC params against `simulation/scripts/rawes_params.json`. `show` prints
-a `[OK]`/`[DIFF]`/`[FAIL]` table without changes; `apply` writes every `[DIFF]`.
+Diff the live FC params against shared parm defaults:
+`simulation/tests/sitl/copter-heli.parm` + `simulation/tests/sitl/rawes_common_defaults.parm`
+(excluding SITL-only and hardware calibration params). `show` prints an
+`[OK]`/`[DIFF]`/`[FAIL]` table without changes; `apply` writes every `[DIFF]`.
 
 ---
 
@@ -174,6 +177,24 @@ Every `run` and `watch` session writes a CSV under `simulation/logs/calibrate/`
 (gitignored). Header is `# key: value` comments capturing the verb, mode/stream
 name, duration, trim/gain dicts, run-start timestamps (local + UTC), and a snapshot
 of relevant AP params. Data section is plain CSV.
+
+For `run`, the CSV now also captures:
+- Lua diagnostic NVFs: `YFF_*` and `OL_*`
+- `ATTITUDE_TARGET` state when emitted by ArduPilot
+- `PID_TUNING` state when emitted by ArduPilot
+
+`PID_TUNING` caveat: ArduPilot may suppress these messages when `GCS_PID_MASK=0`.
+calibrate requests `PID_TUNING`, but the FC must still be configured to emit it.
+
+### `GCS_PID_MASK` (ArduCopter)
+
+`GCS_PID_MASK` is documented in the canonical ArduPilot parameter file:
+`simulation/tests/sitl/copter-heli.parm`.
+
+Use that `.parm` file as the single source of truth for bit assignments, default, and common values.
+
+Important: `PID_TUNING` in Copter reports rate-loop internals (plus AccelZ), not
+the outer attitude-angle controller internals.
 
 Useful for offline analysis.
 
@@ -230,8 +251,6 @@ python calibrate.py --port COM7 script list
 # 8. Quiet armed bench check
 python calibrate.py --port COM7 run passive --duration 30 --trim tlon=0.02,col=-0.15
 
-# 9. Yaw PID tuning
-python calibrate.py --port COM7 run yaw --duration 60 \
-    --gain p=0.015,imax=0.7,servo_max=1100 \
-    --trim tlon=0.02,col=-0.15
+# 9. Passive hold check with current controller settings
+python calibrate.py --port COM7 run passive --duration 60 --trim tlon=0.02,thr=0.342
 ```

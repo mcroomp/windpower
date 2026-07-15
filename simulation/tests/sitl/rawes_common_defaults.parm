@@ -8,6 +8,9 @@
 # SINGLE SOURCE OF TRUTH: this file is the one place rate PIDs are tuned.
 # Everyone -- unit tests, simtests, SITL and hardware -- loads the same
 # copter-heli.parm + rawes_common_defaults.parm (+ sitl-only overlay for SITL).
+#
+# Parameter reference notes (co-located with defaults in this file):
+# - RAWES_* script params are documented below where they are configured.
 
 # Rate PID overrides — shared tuning surface.
 ATC_RAT_RLL_P    0.06
@@ -49,16 +52,32 @@ H_RSC_MODE        1      # passthrough: no main rotor motor
 H_TAIL_TYPE       3
 H_COL2YAW         0.0
 
-# AP yaw PID off: H_YAW_TRIM is the sole yaw motor command channel.  Any nonzero
-# AP yaw gain fights the Lua-owned trim and drives a limit cycle.
-ATC_RAT_YAW_P     0.0
+# Small AP yaw PID assist: P handles fast disturbances and a tiny I removes
+# residual bias.  rawes.lua still owns the DC trim through H_YAW_TRIM.
+ATC_RAT_YAW_P     0.015
 ATC_RAT_YAW_D     0.0
 ATC_RAT_YAW_FLTD  10.0
-ATC_RAT_YAW_I     0.0
+ATC_RAT_YAW_I     0.0015
 
 # RAWES_* script-generated parameters (registered by rawes.lua via param:add_table).
 # These are script-generated (RAWES_*) params visible in GCS, registered by rawes.lua via param:add_table.
 # RAWES_MODE is set per-test; defaults here cover steady/pumping flight gains.
+#
+# RAWES_* quick reference:
+#   RAWES_MODE    mode selector (0=none,1=steady,3=passive,4=landing)
+#   RAWES_YAW_SLP yaw motor slope [RPM/us], 0 = bench fallback in script
+#   RAWES_KP_ALT  altitude P gain [thrust/m]
+#   RAWES_KI_ALT  altitude I gain [thrust/(m*s)]
+#   RAWES_KD_VZ   vertical-speed damping [thrust/(m/s)]
+#   RAWES_KP_EL   in-plane (elevation) position rate-P [rad/s per m]
+#   RAWES_KP_AZ   crosswind (azimuth) position rate-P [rad/s per m]
+#   RAWES_KD_EL   in-plane position rate-D [rad/s per (m/s)]
+#   RAWES_CWMAX   position rate saturation [rad/s]
+#   RAWES_SLW     elevation/body_z slew limit [rad/s]
+#   RAWES_TEL_HZ  diagnostic NVF emission rate [Hz]
+#   RAWES_YFF_MAX yaw trim clamp upper bound [throttle fraction]
+#   RAWES_YFF_TAU yaw trim low-pass tau [s]
+#   RAWES_TRP     tension feedforward ramp tau [s]
 
 # RAWES_YAW_SLP: yaw motor slope override [RPM/µs].  0 -> use bench default 0.504.
 # Set from bench measurement of d(shaft_RPM)/d(PWM_us) for the installed motor.

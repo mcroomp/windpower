@@ -85,8 +85,8 @@ _BOOT_PARAMS: dict[str, float] = {
     # Lua scripting
     "SCR_ENABLE":         1,
     "RAWES_MODE":          0,     # MODE_NONE at boot; calibrate.py sets mode
-    # Arming — disable prearm checks so force-arm from calibrate.py works
-    "ARMING_CHECK":       0,
+    # Arming — skip all prearm checks so force-arm from calibrate.py works
+    "ARMING_SKIPCHK":    65535,
 }
 
 # Very long startup hold so mediator_torque never transitions from STARTUP to

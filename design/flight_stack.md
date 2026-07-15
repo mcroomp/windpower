@@ -620,7 +620,8 @@ jumps (the old zero-inertia algebraic model did, which drove a yaw limit cycle).
 
 **Yaw control — servo-readback trim observer (rawes.lua):**
 
-ArduPilot's own yaw rate PID is **disabled** (P=I=D=0). Instead, rawes.lua runs a
+ArduPilot's yaw rate loop is kept **small but nonzero** (P=0.015, I=0.0015, D=0).
+rawes.lua still runs a
 model-based trim observer (`run_yaw_trim`) that writes `H_YAW_TRIM` every 10 ms tick:
 
 ```
@@ -633,15 +634,16 @@ param:set("H_YAW_TRIM", trim)
 This drives `H_YAW_TRIM` toward the equilibrium throttle `u_eq = omega_rotor × GEAR_RATIO / RPM_SCALE`
 (see `torque_model.py` for constants) at which `psi_dot = 0`.  `YFF_A = RAWES_YAW_SLP × SERVO9_SPAN_US × 2π/60` (default ≈ 52.8 rad/s per
 throttle unit; RAWES_YAW_SLP=0 uses bench value 0.504 RPM/µs).  The AP yaw P-term handles
-fast transients; the observer absorbs the DC so the integrator is not needed.
+fast transients; the tiny I-term cleans up residual drift; the observer carries the
+bulk DC trim so the AP integrator can stay small.
 
 ### 5.3 Key Parameters
 
 | Parameter | Value | Purpose |
 |---|---|---|
 | H_TAIL_TYPE | 3 (DDFP CW) | No sign flip: positive yaw error → positive motor throttle |
-| ATC_RAT_YAW_P | 0.0 | AP yaw PID off — rawes.lua observer owns H_YAW_TRIM |
-| ATC_RAT_YAW_I | 0.0 | Off — observer absorbs DC offset |
+| ATC_RAT_YAW_P | 0.015 | Small AP yaw P-term for fast disturbance rejection |
+| ATC_RAT_YAW_I | 0.0015 | Tiny I-term for residual drift cleanup |
 | ATC_RAT_YAW_D | 0.0 | Off |
 | ATC_RAT_YAW_IMAX | 0.1 | Clamp (safety; integrator is zero) |
 | RAWES_YAW_SLP | 0 | Yaw motor slope override [RPM/µs]; 0 = bench default 0.504 |
@@ -730,8 +732,8 @@ Current hardware: GB4008 + 10:1 spur gear. See §5.2 and [components.md](compone
 | SERVO9_FUNCTION | 36 (Motor4) | Anti-rotation motor ESC on output 9 (AUX 1) |
 | SERVO9_MIN | 1000 µs | ESC disarm |
 | SERVO9_MAX | 2000 µs | ESC maximum |
-| ATC_RAT_YAW_P | 0.20 | Starting value |
-| ATC_RAT_YAW_I | 0.05 | Corrects residual drift |
+| ATC_RAT_YAW_P | 0.015 | Small AP yaw P-term for fast disturbance rejection |
+| ATC_RAT_YAW_I | 0.0015 | Tiny I-term for residual drift cleanup |
 | ATC_RAT_YAW_D | 0.0 | Start at zero |
 
 ---

@@ -132,12 +132,16 @@ _KEY_PARAM_NAMES = (
     "H_TAIL_TYPE",
     "SCR_ENABLE",
     "RAWES_MODE",
-    "ARMING_CHECK",
+    "RAWES_YAW_SLP",
+    "ARMING_SKIPCHK",
     "BRD_SAFETY_DEFLT",
     "ACRO_TRAINER",
+    "FS_THR_ENABLE",
+    "FS_GCS_ENABLE",
 )
 
 _TAIL_PARAM_NAMES = (
+    "H_COL2YAW",
     "H_YAW_TRIM",
     "ATC_RAT_YAW_P",
     "ATC_RAT_YAW_I",
@@ -146,12 +150,22 @@ _TAIL_PARAM_NAMES = (
     "ATC_RAT_YAW_FLTT",
     "ATC_RAT_YAW_FLTE",
     "ATC_RAT_YAW_FLTD",
+)
+
+_MOTOR_PATH_PARAM_NAMES = (
     "H_RSC_MODE",
     "H_RSC_RUNUP_TIME",
+    "SERVO_BLH_MASK",
+    "SERVO_BLH_BDMASK",
+    "SERVO_BLH_AUTO",
+    "SERVO_BLH_OTYPE",
+    "SERVO_BLH_POLES",
     f"SERVO{SERVO_MOTOR}_MIN",
     f"SERVO{SERVO_MOTOR}_MAX",
     f"SERVO{SERVO_MOTOR}_TRIM",
     f"SERVO{SERVO_MOTOR}_FUNCTION",
+    "RPM1_TYPE",
+    "RPM1_ESC_MASK",
 )
 
 # ---------------------------------------------------------------------------
@@ -177,50 +191,40 @@ _IC_TRIM_KEYS = {"thr"}
 # Corresponds to -8.6 deg blade pitch (col_min=-0.28 rad, span=0.38 rad).
 _PASSIVE_IC_THRUST = 0.342
 
+# Sentinel value for RAWES_YIC (radians, matches RAWES_YIC_CAPTURE_SENTINEL in
+# rawes.lua): sending this instead of a yaw angle tells MODE_PASSIVE to
+# capture the current AHRS roll/pitch/yaw as the IC seed.
+_RAWES_YIC_CAPTURE_SENTINEL = -1000.0
+
 _RUN_MODES = {
     "none": {
         "rawes_mode":  0,
         "take_servo4": False,
-        "gain_keys": {"trim": "H_YAW_TRIM"},
-        "doc":        "Lua idle (mode 0), armed-but-quiet; only --gain trim=<value> (H_YAW_TRIM) changes the static yaw-motor throttle.",
+        "doc":        "Lua idle (mode 0), armed-but-quiet.",
     },
     "passive": {
         "rawes_mode":  3,
         "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
         "ic_seed":     True,
         "take_servo4": False,
-        "gain_keys": {},
-        "force_params": {
-            "ATC_RAT_YAW_P":  0.0,
-            "ATC_RAT_YAW_I":  0.0,
-            "ATC_RAT_YAW_D":  0.0,
-            "ATC_RAT_YAW_FF": 0.0,
-        },
         "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_THR/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  IC via --trim thr=<thrust> --roll <deg> --pitch <deg>.",
     },
     "steady": {
         "rawes_mode":  1,
         "take_servo4": False,
-        "gain_keys":  {},
         "doc":        "steady flight: altitude hold + VZ PI collective",
     },
     "pumping": {
         "rawes_mode":  1,
         "take_servo4": False,
-        "gain_keys":  {},
         "doc":        "De Schutter pumping cycle (runs in steady mode; ground varies tension)",
     },
     "landing": {
         "rawes_mode":  4,
         "take_servo4": False,
-        "gain_keys":  {},
         "doc":        "landing (reserved)",
     },
 }
-
-# AP yaw-rate PID params that MUST be zero while the Lua owns H_YAW_TRIM.
-_AP_YAW_ZERO_PARAMS = ("ATC_RAT_YAW_P", "ATC_RAT_YAW_I",
-                       "ATC_RAT_YAW_D", "ATC_RAT_YAW_FF")
 
 # ---------------------------------------------------------------------------
 # Oscillation sequences for `--osc {all|s1|s2|s3}`
