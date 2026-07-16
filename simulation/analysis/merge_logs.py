@@ -213,7 +213,7 @@ def main() -> int:
     parser.add_argument("--errors-only", action="store_true",
                         help="Show only WARNING/ERROR/CRITICAL lines")
     parser.add_argument("--no-debug", action="store_true",
-                        help="Hide DEBUG lines (removes RC override keepalive spam)")
+                        help="Hide DEBUG lines")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable ANSI color codes")
     parser.add_argument("--write", action="store_true",

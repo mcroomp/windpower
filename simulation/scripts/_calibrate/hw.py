@@ -18,7 +18,7 @@ from .constants import (
     PWM_MIN, PWM_MAX, PWM_NEUTRAL,
     _AZ_S1, _AZ_S2, _AZ_S3,
     _COPTER_MODES, _SYS_STATUS, _LUA_MODES,
-    _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES,
+    _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES,
     _FALLBACK_BAUDS,
 )
 
@@ -76,8 +76,6 @@ def _refresh_pole_pairs(session: RawesGCS) -> None:
     poles = session.get_param("SERVO_BLH_POLES")
     if poles is not None and poles >= 2:
         _motor_pole_pairs = int(round(poles)) // 2
-        print(f"  eRPM->RPM: SERVO_BLH_POLES={int(round(poles))} "
-              f"-> {_motor_pole_pairs} pole-pairs")
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +251,19 @@ def _print_status(session: RawesGCS) -> None:
     print("KEY PARAMS")
     print(sep)
     for name in _KEY_PARAM_NAMES:
-        expected = _CONFIG_TARGET_PARAMS_ALL.get(name)
-        val = session.get_param(name)
+        aliases = (name,)
+        resolved_name = name
+        if name == "ARMING_SKIPCHK":
+            aliases = ("ARMING_SKIPCHK", "ARMING_CHECK")
+
+        val = None
+        for candidate in aliases:
+            val = session.get_param(candidate)
+            if val is not None:
+                resolved_name = candidate
+                break
+
+        expected = _CONFIG_TARGET_PARAMS_ALL.get(resolved_name)
         if val is None:
             print(f"  {name:<22} NOT FOUND")
             continue
@@ -262,9 +271,15 @@ def _print_status(session: RawesGCS) -> None:
             lua_name = _LUA_MODES.get(int(val), f"mode_{int(val)}")
             print(f"  {name:<22} {val:<8.4g}  {lua_name}")
         elif expected is not None and abs(val - float(expected)) > 1e-4:
-            print(f"  {name:<22} {val:<8.4g}  [DIFF] expected {expected}")
+            suffix = ""
+            if resolved_name != name:
+                suffix = f"  ({resolved_name})"
+            print(f"  {name:<22} {val:<8.4g}  [DIFF] expected {expected}{suffix}")
         else:
-            print(f"  {name:<22} {val:<8.4g}  OK")
+            suffix = ""
+            if resolved_name != name:
+                suffix = f"  ({resolved_name})"
+            print(f"  {name:<22} {val:<8.4g}  OK{suffix}")
 
     ss2 = session._recv(type="SYS_STATUS", blocking=True, timeout=2.0)
     if ss2:
@@ -276,9 +291,23 @@ def _print_status(session: RawesGCS) -> None:
         print(f"  {'motor outputs':<22} present={present}  enabled={enabled}  {health}")
         print(f"  {'CPU load':<22} {ss2.load/10.0:.1f}%")
 
-    # --- tail PID ------------------------------------------------------------
+    # --- interlock / dshot path ---------------------------------------------
     print(f"\n{sep}")
-    print("TAIL PID  (GB4008 yaw / DDFP)")
+    print("INTERLOCK / DSHOT")
+    print(sep)
+    for name in _MOTOR_PATH_PARAM_NAMES:
+        expected = _CONFIG_TARGET_PARAMS_ALL.get(name)
+        val = session.get_param(name)
+        if val is None:
+            print(f"  {name:<22} NOT FOUND")
+        elif expected is not None and abs(val - float(expected)) > 1e-4:
+            print(f"  {name:<22} {val:<10.4g}  [DIFF] expected {expected}")
+        else:
+            print(f"  {name:<22} {val:<10.4g}")
+
+    # --- yaw control ---------------------------------------------------------
+    print(f"\n{sep}")
+    print("YAW CONTROL")
     print(sep)
     for name in _TAIL_PARAM_NAMES:
         expected = _CONFIG_TARGET_PARAMS_ALL.get(name)
@@ -459,15 +488,11 @@ def _arm(session: RawesGCS, force: bool = False,
          timeout: float = 15.0, esc_arm: bool = True) -> bool:
     """
     Arm sequence:
-      1. Set throttle RC override to 1000 (CH3 interlock low).
-      2. Send MAV_CMD_COMPONENT_ARM_DISARM; wait for armed heartbeat.
+            1. Send MAV_CMD_COMPONENT_ARM_DISARM.
+            2. Wait for armed heartbeat.
     The DShot ESC self-arms from the idle throttle once armed -- no special
     ESC pre-arm pulse is needed.  Returns True if vehicle confirms armed.
     """
-    print("  Setting throttle (CH3) override to 1000 ...")
-    session.send_rc_override({3: 1000})
-    time.sleep(0.5)
-
     print("  Sending arm command ...")
     param2 = 21196.0 if force else 0.0
     session._mav.mav.command_long_send(
@@ -482,7 +507,6 @@ def _arm(session: RawesGCS, force: bool = False,
     deadline = time.monotonic() + timeout
     armed = False
     while time.monotonic() < deadline:
-        session.send_rc_override({3: 1000})
         msg = session._recv(
             type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
             blocking=True, timeout=0.5,
@@ -528,16 +552,50 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
         param2, # param2: 21196 = force-disarm
         0, 0, 0, 0, 0,
     )
-    session.send_rc_override({})   # clear all RC overrides
     deadline = time.monotonic() + timeout
+    ack_seen = False
     while time.monotonic() < deadline:
-        msg = session._recv(type="HEARTBEAT", blocking=True, timeout=1.0)
-        if msg:
+        msg = session._recv(
+            type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
+            blocking=True, timeout=1.0,
+        )
+        if msg is None:
+            continue
+
+        t = msg.get_type()
+        if t == "STATUSTEXT":
+            print(f"  [FC] {msg.text.rstrip()}")
+            continue
+
+        if t == "COMMAND_ACK" and msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+            ack_seen = True
+            result = int(msg.result)
+            if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
+            elif result == mavutil.mavlink.MAV_RESULT_DENIED:
+                print("  [FAIL] Disarm denied by FC.")
+                return False
+            elif result == mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED:
+                print("  [FAIL] Disarm temporarily rejected by FC.")
+                return False
+            elif result == mavutil.mavlink.MAV_RESULT_UNSUPPORTED:
+                print("  [FAIL] Disarm unsupported by FC.")
+                return False
+            elif result == mavutil.mavlink.MAV_RESULT_FAILED:
+                print("  [FAIL] Disarm failed on FC.")
+                return False
+            continue
+
+        if t == "HEARTBEAT":
             armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
             if not armed:
                 print("  [OK] Vehicle disarmed.")
                 return True
-    print("  [FAIL] Disarm timed out.")
+
+    if ack_seen:
+        print("  [FAIL] Disarm timed out waiting for disarmed heartbeat.")
+    else:
+        print("  [FAIL] Disarm timed out (no disarm ACK).")
     return False
 
 

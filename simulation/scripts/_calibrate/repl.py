@@ -50,9 +50,9 @@ time-bounded operations and log to simulation/logs/calibrate/*.csv.  The
 rest are one-shot.
 
 Long-running (always log; ESC or Ctrl-C aborts):
-  run <name> [--duration N] [--trim K=V,...] [--gain K=V,...]
+  run <name> [--duration N] [--trim K=V,...]
         Activate a Lua mode + arm via RAWES_ARM + stream observation rows.
-        On exit (timer / ESC / Ctrl-C) every overridden param is restored.
+      On exit (timer / ESC / Ctrl-C) safety shutdown disarms and sets RAWES_MODE=0.
 
         --duration N       run for N seconds; omit for unbounded (5-min ARM)
         --trim K=V,K=V     cyclic trim + IC thrust sent as NAMED_VALUE_FLOAT
@@ -71,9 +71,6 @@ Long-running (always log; ESC or Ctrl-C aborts):
                                      0.342  autorotation feed (-8.6 deg equiv)
                                      0.507  zero-thrust neutral (-5 deg equiv)
                                      0.875  light positive thrust (+3 deg equiv)
-        --gain K=V,K=V     per-run AP param overrides.
-                           Repeatable.  Run `run` (no args) for the per-mode
-                           gain-key table.
         --exclude-saturate After the run, print an analysis report computed
                            ONLY from samples where the yaw loop was not
                            saturated (trim below YFF_MAX).
@@ -88,7 +85,7 @@ Long-running (always log; ESC or Ctrl-C aborts):
                            combinations so the target servo dominates while
                            the other two stay near center.
 
-                Modes (run with no args to see force_params per mode):
+                Modes:
           passive   armed but quiet in GUIDED_NOGPS (matches the SITL passive
                     test).  Seeds the IC (RAWES_THR/RIC/PIC) and holds the IC
                     attitude via the GUIDED angle API; DDFP yaw motor stays
@@ -104,15 +101,18 @@ Long-running (always log; ESC or Ctrl-C aborts):
                     # Hold a fixed yaw IC as well
                     run passive --duration 20 --yaw 90 --trim thr=0.342
 
+          # Hold at whatever attitude the vehicle is currently at (captures
+          # current AHRS roll/pitch/yaw as the IC via the RAWES_YIC sentinel)
+          run passive --duration 20 --hold --trim thr=0.342
+
           # Hold a tilted IC: 3 deg roll, -25 deg pitch, IC thrust
           run passive --duration 20 --roll 3 --pitch -25 --trim thr=0.342
 
           # Unbounded passive session (ESC to stop, 5-min RAWES_ARM fallback)
           run passive
 
-          # Yaw tuning: gentler P, lower motor max, IC operating point loaded
-          run yaw --duration 60 --gain p=0.015,i=0.005,imax=0.7,servo_max=1100 \\
-                  --trim tlon=1.15
+          # Live yaw PID tuning during passive/steady/pumping runs:
+          #   q/a = P +/- 0.002,  w/s = I +/- 0.0005,  e/d = D +/- 0.001
 
           # Full oscillation sweep through every axis extreme (~65 s)
           run passive --osc all
@@ -549,7 +549,7 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
         if confirm.strip().lower() != "y":
             print("  Cancelled."); return
 
-    # Same shuffle as `run yaw`: release the motor output from any AP mixer so our
+    # Same shuffle as `run`: release the motor output from any AP mixer so our
     # DO_SET_SERVO commands win.
     saved_fn = _take_servo4(session)
 

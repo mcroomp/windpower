@@ -26,7 +26,8 @@ from .constants import (
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
     _RUN_MODES, _TRIM_NVF, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
-    _AP_YAW_ZERO_PARAMS, _OSCILLATE_TARGETS, _OSCILLATE_STEP_S,
+    _RAWES_YIC_CAPTURE_SENTINEL,
+    _OSCILLATE_TARGETS, _OSCILLATE_STEP_S,
     _COPTER_MODES, _LOG_DIR,
 )
 from .hw import (
@@ -126,7 +127,7 @@ def _safety_shutdown(session: RawesGCS, *,
             print(f"  [SAFETY] failed to drive SERVO{SERVO_MOTOR} off: {e}")
     try:
         if not _disarm(session, timeout=5.0):
-            print("  [SAFETY] disarm not confirmed within 5 s -- retrying force-disarm")
+            print("  [SAFETY] disarm rejected/not confirmed -- retrying force-disarm immediately")
             if not _disarm(session, timeout=5.0, force=True):
                 print("  [SAFETY] force-disarm not confirmed")
     except Exception as e:
@@ -250,7 +251,7 @@ def _make_oscillate_tick(session: RawesGCS, steps: list):
     RAWES_THR (thrust [0..1]) on each step boundary.  Once the sequence ends
     the callback is a no-op (the duration timer in _observation_loop expires
     shortly after)."""
-    last_step = [None]
+    last_step: list[int | None] = [None]
     def _tick(t_rel: float) -> None:
         idx = int(t_rel / _OSCILLATE_STEP_S)
         if idx >= len(steps):
@@ -291,10 +292,20 @@ def _run_observation(session: RawesGCS, mode_name: str,
     cols = ["t_s", "armed",
             "mav_att_roll_deg", "mav_att_pitch_deg", "mav_att_yaw_deg",
             "mav_att_yaw_rate_rads",
+            "mav_att_target_roll_deg", "mav_att_target_pitch_deg", "mav_att_target_yaw_deg",
+            "mav_att_target_roll_rate_rads", "mav_att_target_pitch_rate_rads", "mav_att_target_yaw_rate_rads",
+            "mav_att_target_thrust",
             "ch1_us", "ch2_us", "ch3_us", "ch4_us",
             "mav_servo1_us", "mav_servo2_us", "mav_servo3_us", "mav_servo9_us",
             "vbat_v", "current_a",
             "mav_nvf_yff_trim", "mav_nvf_yff_u", "mav_nvf_yff_gz",
+            "mav_nvf_ol_rsp", "mav_nvf_ol_psp", "mav_nvf_ol_ysp",
+            "mav_nvf_ol_rer", "mav_nvf_ol_per", "mav_nvf_ol_yer",
+            "mav_nvf_ol_ap", "mav_nvf_ol_ai", "mav_nvf_ol_ad",
+            "mav_nvf_ol_col", "mav_nvf_ol_ten",
+            "mav_pid_roll_des", "mav_pid_roll_ach", "mav_pid_roll_ff", "mav_pid_roll_p", "mav_pid_roll_i", "mav_pid_roll_d",
+            "mav_pid_pitch_des", "mav_pid_pitch_ach", "mav_pid_pitch_ff", "mav_pid_pitch_p", "mav_pid_pitch_i", "mav_pid_pitch_d",
+            "mav_pid_yaw_des", "mav_pid_yaw_ach", "mav_pid_yaw_ff", "mav_pid_yaw_p", "mav_pid_yaw_i", "mav_pid_yaw_d",
             "erpm", "mech_rpm", "rotor_rpm"]
 
     # Live table: H_YAW_TRIM output (out=trim), motor throttle command (u=YFF_U),
@@ -345,12 +356,50 @@ def _run_observation(session: RawesGCS, mode_name: str,
             pwm = 1000 + new * 1000.0
             tag = "" if ok else "  [FAIL]"
             print(f"  TRIM {old:.4f} -> {new:.4f}  (~{pwm:.0f} us){tag}")
+    elif mode_name in ("passive", "steady", "pumping"):
+        _yaw_pid = {
+            "P": {"param": "ATC_RAT_YAW_P", "step": 0.002,  "val": 0.0},
+            "I": {"param": "ATC_RAT_YAW_I", "step": 0.0005, "val": 0.0},
+            "D": {"param": "ATC_RAT_YAW_D", "step": 0.001,  "val": 0.0},
+        }
+        for axis in _yaw_pid.values():
+            _tv = session.get_param(axis["param"])
+            axis["val"] = float(_tv) if _tv is not None else 0.0
+        print("  Yaw PID:")
+        print(f"    P={_yaw_pid['P']['val']:.4f}  I={_yaw_pid['I']['val']:.4f}  D={_yaw_pid['D']['val']:.4f}")
+        print("  tune keys:  q/a = P +/- 0.002,  w/s = I +/- 0.0005,  e/d = D +/- 0.001")
+
+        def _bump(axis_name: str, sign: int) -> None:
+            axis = _yaw_pid[axis_name]
+            old = axis["val"]
+            new = max(0.0, old + sign * axis["step"])
+            ok = session.set_param(axis["param"], new)
+            axis["val"] = new
+            tag = "" if ok else "  [FAIL]"
+            print(f"  {axis['param']} {old:.4f} -> {new:.4f}{tag}")
+
+        def key_handler(k: bytes) -> None:
+            if k == b"q":
+                _bump("P", +1)
+            elif k == b"a":
+                _bump("P", -1)
+            elif k == b"w":
+                _bump("I", +1)
+            elif k == b"s":
+                _bump("I", -1)
+            elif k == b"e":
+                _bump("D", +1)
+            elif k == b"d":
+                _bump("D", -1)
     else:
         def key_handler(k: bytes) -> None:  # no live key tuning for this mode
             pass
 
     state = {
         "roll": None, "pitch": None, "yaw": None, "yaw_rate": None,
+        "att_target_roll": None, "att_target_pitch": None, "att_target_yaw": None,
+        "att_target_roll_rate": None, "att_target_pitch_rate": None, "att_target_yaw_rate": None,
+        "att_target_thrust": None,
         "ch1": None, "ch2": None, "ch3": None, "ch4": None,
         "s1": None, "s2": None, "s3": None, "smot": None,
         "smot_hist": [],
@@ -358,8 +407,34 @@ def _run_observation(session: RawesGCS, mode_name: str,
         "vbat": None, "curr": None,
         "erpm": None,
         "yff_t": None, "yff_u": None, "yff_gz": None,
+        "ol_rsp": None, "ol_psp": None, "ol_ysp": None,
+        "ol_rer": None, "ol_per": None, "ol_yer": None,
+        "ol_ap": None, "ol_ai": None, "ol_ad": None,
+        "ol_col": None, "ol_ten": None,
         "yff_t_ts": None, "yff_u_ts": None, "yff_gz_ts": None,
+        "pid_roll_des": None, "pid_roll_ach": None, "pid_roll_ff": None, "pid_roll_p": None, "pid_roll_i": None, "pid_roll_d": None,
+        "pid_pitch_des": None, "pid_pitch_ach": None, "pid_pitch_ff": None, "pid_pitch_p": None, "pid_pitch_i": None, "pid_pitch_d": None,
+        "pid_yaw_des": None, "pid_yaw_ach": None, "pid_yaw_ff": None, "pid_yaw_p": None, "pid_yaw_i": None, "pid_yaw_d": None,
     }
+
+    def _quat_to_rpy_deg(q) -> tuple[float, float, float] | tuple[None, None, None]:
+        if q is None or len(q) != 4:
+            return None, None, None
+        w, x, y, z = [float(v) for v in q]
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
+
+        sinp = 2.0 * (w * y - z * x)
+        if abs(sinp) >= 1.0:
+            pitch = math.degrees(math.copysign(math.pi / 2.0, sinp))
+        else:
+            pitch = math.degrees(math.asin(sinp))
+
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+        return roll, pitch, yaw
 
     def handle_msg(st, msg, t_rel):
         mt = msg.get_type()
@@ -374,12 +449,31 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 f"{t_rel:.4f}", int(st["armed"]),
                 _fmt(state["roll"]), _fmt(state["pitch"]), _fmt(state["yaw"]),
                 _fmt(state["yaw_rate"]),
+                _fmt(state["att_target_roll"]), _fmt(state["att_target_pitch"]), _fmt(state["att_target_yaw"]),
+                _fmt(state["att_target_roll_rate"]), _fmt(state["att_target_pitch_rate"]), _fmt(state["att_target_yaw_rate"]),
+                _fmt(state["att_target_thrust"]),
                 state["ch1"], state["ch2"], state["ch3"], state["ch4"],
                 state["s1"], state["s2"], state["s3"], state["smot"],
                 _fmt(state["vbat"]), _fmt(state["curr"]),
                 _fmt(state["yff_t"]), _fmt(state["yff_u"]), _fmt(state["yff_gz"]),
+                _fmt(state["ol_rsp"]), _fmt(state["ol_psp"]), _fmt(state["ol_ysp"]),
+                _fmt(state["ol_rer"]), _fmt(state["ol_per"]), _fmt(state["ol_yer"]),
+                _fmt(state["ol_ap"]), _fmt(state["ol_ai"]), _fmt(state["ol_ad"]),
+                _fmt(state["ol_col"]), _fmt(state["ol_ten"]),
+                _fmt(state["pid_roll_des"]), _fmt(state["pid_roll_ach"]), _fmt(state["pid_roll_ff"]), _fmt(state["pid_roll_p"]), _fmt(state["pid_roll_i"]), _fmt(state["pid_roll_d"]),
+                _fmt(state["pid_pitch_des"]), _fmt(state["pid_pitch_ach"]), _fmt(state["pid_pitch_ff"]), _fmt(state["pid_pitch_p"]), _fmt(state["pid_pitch_i"]), _fmt(state["pid_pitch_d"]),
+                _fmt(state["pid_yaw_des"]), _fmt(state["pid_yaw_ach"]), _fmt(state["pid_yaw_ff"]), _fmt(state["pid_yaw_p"]), _fmt(state["pid_yaw_i"]), _fmt(state["pid_yaw_d"]),
                 _fmt(_erpm), _fmt(_mech), _fmt(_rotor),
             ]
+        elif mt == "ATTITUDE_TARGET":
+            att_r, att_p, att_y = _quat_to_rpy_deg(getattr(msg, "q", None))
+            state["att_target_roll"] = att_r
+            state["att_target_pitch"] = att_p
+            state["att_target_yaw"] = att_y
+            state["att_target_roll_rate"] = getattr(msg, "body_roll_rate", None)
+            state["att_target_pitch_rate"] = getattr(msg, "body_pitch_rate", None)
+            state["att_target_yaw_rate"] = getattr(msg, "body_yaw_rate", None)
+            state["att_target_thrust"] = getattr(msg, "thrust", None)
         elif mt == "RC_CHANNELS":
             state["ch1"] = getattr(msg, "chan1_raw", None)
             state["ch2"] = getattr(msg, "chan2_raw", None)
@@ -429,6 +523,39 @@ def _run_observation(session: RawesGCS, mode_name: str,
             elif nm == "YFF_GZ":
                 state["yff_gz"] = float(msg.value)
                 state["yff_gz_ts"] = t_rel
+            elif nm == "OL_RSP":
+                state["ol_rsp"] = float(msg.value)
+            elif nm == "OL_PSP":
+                state["ol_psp"] = float(msg.value)
+            elif nm == "OL_YSP":
+                state["ol_ysp"] = float(msg.value)
+            elif nm == "OL_RER":
+                state["ol_rer"] = float(msg.value)
+            elif nm == "OL_PER":
+                state["ol_per"] = float(msg.value)
+            elif nm == "OL_YER":
+                state["ol_yer"] = float(msg.value)
+            elif nm == "OL_AP":
+                state["ol_ap"] = float(msg.value)
+            elif nm == "OL_AI":
+                state["ol_ai"] = float(msg.value)
+            elif nm == "OL_AD":
+                state["ol_ad"] = float(msg.value)
+            elif nm == "OL_COL":
+                state["ol_col"] = float(msg.value)
+            elif nm == "OL_TEN":
+                state["ol_ten"] = float(msg.value)
+        elif mt == "PID_TUNING":
+            axis = int(getattr(msg, "axis", -1))
+            # ArduPilot emits PID_TUNING axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
+            prefix = {1: "pid_roll", 2: "pid_pitch", 3: "pid_yaw"}.get(axis)
+            if prefix is not None:
+                state[f"{prefix}_des"] = getattr(msg, "desired", None)
+                state[f"{prefix}_ach"] = getattr(msg, "achieved", None)
+                state[f"{prefix}_ff"] = getattr(msg, "FF", None)
+                state[f"{prefix}_p"] = getattr(msg, "P", None)
+                state[f"{prefix}_i"] = getattr(msg, "I", None)
+                state[f"{prefix}_d"] = getattr(msg, "D", None)
         return None
 
     def render_row(st, t_rel):
@@ -469,6 +596,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         # Also request the motor's ESC telemetry (bidir DShot RPM) at 5 Hz.
         _esc_name, _esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
         session.set_message_interval(_esc_id, 200000)   # 5 Hz
+
         if not keep_rc:
             session.set_message_interval(
                 mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, -1)
@@ -482,6 +610,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         session,
         duration_s=duration,
         msg_types=["ATTITUDE", "RC_CHANNELS", "SERVO_OUTPUT_RAW",
+                   "ATTITUDE_TARGET", "PID_TUNING",
                    "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
                    "NAMED_VALUE_FLOAT",
                    _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],
@@ -515,46 +644,24 @@ def _run_observation(session: RawesGCS, mode_name: str,
 
 
 # ---------------------------------------------------------------------------
-# Passive yaw setup verification
-# ---------------------------------------------------------------------------
-
-def _verify_passive_yaw_setup(session: RawesGCS) -> bool:
-    print("  Passive yaw setup check (AP yaw PID must be 0):")
-    ok = True
-    for n in _AP_YAW_ZERO_PARAMS:
-        v = session.get_param(n)
-        if v is None:
-            print(f"    [WARN] {n}: unreadable")
-            ok = False
-            continue
-        good = abs(float(v)) < 1e-9
-        ok = ok and good
-        tag = "[OK]  " if good else "[FAIL]"
-        print(f"    {tag} {n} = {float(v):.6g}   (expect 0)")
-    if not ok:
-        print("    [WARN] AP yaw PID is NOT all zero -- H_YAW_TRIM trim will be contaminated.")
-    return ok
-
-
-# ---------------------------------------------------------------------------
 # `run <mode>` command
 # ---------------------------------------------------------------------------
 
 def _cmd_run(session: RawesGCS, args: list[str]) -> None:
-    """run <mode> [--duration N] [--trim K=V,...] [--gain K=V,...] [--osc TARGET]"""
+    """run <mode> [--duration N] [--trim K=V,...] [--osc TARGET]"""
     schema = {
         "--duration":         "float",
         "--trim":             "kv",
-        "--gain":             "kv",
         "--osc":              "str",
         "--yaw":              "float",   # passive fixed yaw IC [deg] (RAWES_YIC)
         "--roll":             "float",   # passive IC roll  [deg] (RAWES_RIC)
         "--pitch":            "float",   # passive IC pitch [deg] (RAWES_PIC)
+        "--hold":             "bool",    # passive: capture current roll/pitch/yaw as IC (RAWES_YIC sentinel)
         "--rc":               "bool",    # keep RC_CHANNELS stream (mixer diagnosis)
     }
     if not args:
         print("  Usage: run <name> [--duration N] [--trim K=V,...] "
-              "[--gain K=V,...] [--osc {all|s1|s2|s3}]")
+              "[--osc {all|s1|s2|s3}]")
         print("  Modes:")
         for name, cfg in _RUN_MODES.items():
             print(f"    {name:<8} -- {cfg['doc']}")
@@ -565,7 +672,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         print(f"  Error: {e}"); return
     if len(pos) != 1:
         print("  Usage: run <name> [--duration N] [--trim K=V,...] "
-              "[--gain K=V,...] [--osc {all|s1|s2|s3}]")
+              "[--osc {all|s1|s2|s3}]")
         return
     name = pos[0].lower()
     cfg = _RUN_MODES.get(name)
@@ -574,7 +681,6 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         return
     duration         = flags.get("--duration")
     trim             = flags.get("--trim", {}) or {}
-    gain             = flags.get("--gain", {}) or {}
     osc              = flags.get("--osc")
 
     osc_steps = None
@@ -599,151 +705,124 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     if bad:
         print(f"  Unknown --trim keys: {bad}  (valid: {', '.join(sorted(allowed_trim))})")
         return
-    # Validate gain keys
-    gain_map = cfg["gain_keys"]
-    bad = [k for k in gain if k not in gain_map]
-    if bad:
-        if not gain_map:
-            print(f"  Mode {name!r} does not accept --gain")
-        else:
-            print(f"  Unknown --gain keys for {name!r}: {bad}  (valid: {list(gain_map)})")
-        return
 
-    # Apply per-run param overrides (restored on exit)
-    saved_overrides: dict[str, float] = {}
-    if gain:
-        print("  Per-run overrides:")
-        for k, v in gain.items():
-            ap_name = gain_map[k]
-            orig = session.get_param(ap_name)
-            if orig is None:
-                print(f"    [WARN] {ap_name}: could not read -- skipping")
-                continue
-            saved_overrides[ap_name] = float(orig)
-            ok = session.set_param(ap_name, float(v))
-            tag = "[OK]  " if ok else "[FAIL]"
-            print(f"    {tag} {ap_name}: {orig:.6g} -> {v:.6g}")
-
-    # Mode-required param overrides (e.g. H_FLYBAR_MODE=1 for passthrough).
-    force_params = cfg.get("force_params", {})
-    if force_params:
-        print("  Mode-required overrides:")
-        for ap_name, target in force_params.items():
-            orig = session.get_param(ap_name)
-            if orig is None:
-                print(f"    [WARN] {ap_name}: could not read -- skipping")
-                continue
-            if ap_name not in saved_overrides:
-                saved_overrides[ap_name] = float(orig)
-            ok = session.set_param(ap_name, float(target))
-            tag = "[OK]  " if ok else "[FAIL]"
-            print(f"    {tag} {ap_name}: {orig:.6g} -> {target}")
-
-    # Passive mode requires AP-owned DDFP tail control on channel 4.
-    if name == "passive":
-        _ensure_passive_tail_setup(session)
-
-    # SERVO4 ownership shuffle if the mode needs it
-    saved_fn = _take_servo4(session) if cfg["take_servo4"] else None
-
-    # Activate Lua mode
-    session.set_param("RAWES_MODE", cfg["rawes_mode"])
-    print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode)")
-
-    # Passive confirms the AP yaw PID was forced to zero.
-    if name == "passive":
-        _verify_passive_yaw_setup(session)
-
-    # Flight mode required by this Lua mode (e.g. GUIDED_NOGPS for passive) --
-    # matches the SITL passive arming flow.
-    _fm = cfg.get("flight_mode")
-    if _fm is not None:
-        session.set_mode(_fm)
-        print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
-
-    # Seed the IC (RAWES_THR/RIC/PIC) BEFORE arming so PASSIVE holds a defined
-    # attitude (mirrors the SITL passive_init seed).
-    if cfg.get("ic_seed"):
-        thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
-        print("  Seeding IC:")
-        session.send_named_float("RAWES_THR", thr)
-        print(f"    RAWES_THR = {thr:.3f}  (thrust [0..1])")
-
-        if "--yaw" in flags:
-            yaw_deg = float(flags["--yaw"])
-            session.send_named_float("RAWES_YIC", math.radians(yaw_deg))
-            print(f"    RAWES_YIC = {yaw_deg:+7.3f} deg  ({math.radians(yaw_deg):+.4f} rad)")
-
-        if "--roll" in flags:
-            roll_deg = float(flags["--roll"])
-            session.send_named_float("RAWES_RIC", math.radians(roll_deg))
-            print(f"    RAWES_RIC = {roll_deg:+7.3f} deg  ({math.radians(roll_deg):+.4f} rad)")
-        if "--pitch" in flags:
-            pitch_deg = float(flags["--pitch"])
-            session.send_named_float("RAWES_PIC", math.radians(pitch_deg))
-            print(f"    RAWES_PIC = {pitch_deg:+7.3f} deg  ({math.radians(pitch_deg):+.4f} rad)")
-        # thr was consumed by the IC seed -- don't re-send it via the trim block.
-        trim.pop("thr", None)
-
-    # Send NVF trims.  --trim values are user-facing DEGREES; convert to
-    # radians for the wire (rawes.lua receives RAWES_TLN/TLT/COL in radians).
-    if trim:
-        print("  Sending trim NVFs (deg -> rad on the wire):")
-        for k, v_deg in trim.items():
-            v_rad = math.radians(float(v_deg))
-            session.send_named_float(_TRIM_NVF[k], v_rad)
-            print(f"    {_TRIM_NVF[k]} = {v_deg:+7.3f} deg  ({v_rad:+.4f} rad)")
-
-    # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip
-    # direct DO_SET_SERVO pre-arm pulses on SERVO4 to avoid ownership conflicts.
-    esc_arm = (name != "passive")
-    if not _arm(session, force=True, esc_arm=esc_arm):
-        _safety_shutdown(session, saved_servo4_fn=saved_fn,
-                         saved_overrides=saved_overrides)
-        return
-    print("  [OK] Armed.")
-
-    # Snapshot key params for the log header
+    # Open CSV + MAVLink logs before any run side-effects so startup/arming
+    # delays are visible in the packet trace.
     meta = {
         "verb":            "run",
         "name":            name,
         "duration_s":      duration if duration is not None else "",
         "trim_deg":        ", ".join(f"{k}={v}" for k, v in trim.items()),
-        "gain":            ", ".join(f"{k}={v}" for k, v in gain.items()),
         "osc":             osc if osc is not None else "",
         "run_start_local": datetime.now().isoformat(timespec="seconds"),
         "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "RAWES_MODE":      cfg["rawes_mode"],
     }
-    # Add per-mode AP param snapshot
-    for ap_name in gain_map.values():
-        v = session.get_param(ap_name)
-        meta[ap_name] = float(v) if v is not None else ""
-
     log = _RunLog.open("run", name, meta)
     print(f"  Logging to {log.path}")
 
-    # Parallel MAVLink traffic log alongside the CSV.
     mavlog_path = log.path[:-4] + ".mavlink.jsonl" if log.path.endswith(".csv") \
         else log.path + ".mavlink.jsonl"
     session.start_mavlog(mavlog_path)
     print(f"  MAVLink log: {mavlog_path}")
 
-    # Build the oscillate tick callback if --osc was set
-    on_tick = None
-    if osc_steps is not None:
-        on_tick = _make_oscillate_tick(session, osc_steps)
-        total_s = len(osc_steps) * _OSCILLATE_STEP_S
-        print(f"  Oscillate target={osc!r}: walking {len(osc_steps)} steps "
-              f"x {_OSCILLATE_STEP_S:.0f}s each (total {total_s:.0f}s).")
-
+    saved_overrides: dict[str, float] = {}
+    armed = False
+    saved_fn = None
+    done_ok = False
     try:
+
+        # Passive mode requires AP-owned DDFP tail control on channel 4.
+        if name == "passive":
+            _ensure_passive_tail_setup(session)
+
+        # SERVO4 ownership shuffle if the mode needs it
+        saved_fn = _take_servo4(session) if cfg["take_servo4"] else None
+
+        # Activate Lua mode
+        session.set_param("RAWES_MODE", cfg["rawes_mode"])
+        print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode)")
+
+    # Flight mode required by this Lua mode (e.g. GUIDED_NOGPS for passive) --
+    # matches the SITL passive arming flow.
+        _fm = cfg.get("flight_mode")
+        if _fm is not None:
+            session.set_mode(_fm)
+            print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
+
+    # Seed the IC (RAWES_THR/RIC/PIC) BEFORE arming so PASSIVE holds a defined
+    # attitude (mirrors the SITL passive_init seed).
+        if cfg.get("ic_seed"):
+            thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
+            print("  Seeding IC:")
+            session.send_named_float("RAWES_THR", thr)
+            print(f"    RAWES_THR = {thr:.3f}  (thrust [0..1])")
+
+            if flags.get("--hold"):
+                # --hold captures the CURRENT roll/pitch/yaw in Lua via the
+                # RAWES_YIC sentinel, so RAWES_RIC/RAWES_PIC must NOT be sent
+                # here (Lua only auto-fills them if they haven't already been
+                # explicitly provided).
+                if "--roll" in flags or "--pitch" in flags:
+                    print("  [WARN] --hold ignores --roll/--pitch (captures current AHRS attitude instead)")
+                if "--yaw" in flags:
+                    print("  [WARN] --hold ignores --yaw (captures current AHRS attitude instead)")
+                session.send_named_float("RAWES_YIC", _RAWES_YIC_CAPTURE_SENTINEL)
+                print(f"    RAWES_YIC = {_RAWES_YIC_CAPTURE_SENTINEL:.1f}  (capture current roll/pitch/yaw)")
+            else:
+                roll_deg = float(flags.get("--roll", 0.0))
+                pitch_deg = float(flags.get("--pitch", 0.0))
+                # RAWES IC seed commits atomically only after THR+RIC+PIC all arrive.
+                # Always send roll/pitch (default 0 deg) so PASSIVE does not stall at
+                # "ic=waiting" when only --trim thr is provided.
+                session.send_named_float("RAWES_RIC", math.radians(roll_deg))
+                print(f"    RAWES_RIC = {roll_deg:+7.3f} deg  ({math.radians(roll_deg):+.4f} rad)")
+                session.send_named_float("RAWES_PIC", math.radians(pitch_deg))
+                print(f"    RAWES_PIC = {pitch_deg:+7.3f} deg  ({math.radians(pitch_deg):+.4f} rad)")
+
+                if "--yaw" in flags:
+                    yaw_deg = float(flags["--yaw"])
+                    session.send_named_float("RAWES_YIC", math.radians(yaw_deg))
+                    print(f"    RAWES_YIC = {yaw_deg:+7.3f} deg  ({math.radians(yaw_deg):+.4f} rad)")
+            # thr was consumed by the IC seed -- don't re-send it via the trim block.
+            trim.pop("thr", None)
+
+    # Send NVF trims.  --trim values are user-facing DEGREES; convert to
+    # radians for the wire (rawes.lua receives RAWES_TLN/TLT/COL in radians).
+        if trim:
+            print("  Sending trim NVFs (deg -> rad on the wire):")
+            for k, v_deg in trim.items():
+                v_rad = math.radians(float(v_deg))
+                session.send_named_float(_TRIM_NVF[k], v_rad)
+                print(f"    {_TRIM_NVF[k]} = {v_deg:+7.3f} deg  ({v_rad:+.4f} rad)")
+
+    # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip
+    # direct DO_SET_SERVO pre-arm pulses on SERVO4 to avoid ownership conflicts.
+        esc_arm = (name != "passive")
+        if not _arm(session, force=True, esc_arm=esc_arm):
+            return
+        armed = True
+        print("  [OK] Armed.")
+
+    # Build the oscillate tick callback if --osc was set
+        on_tick = None
+        if osc_steps is not None:
+            on_tick = _make_oscillate_tick(session, osc_steps)
+            total_s = len(osc_steps) * _OSCILLATE_STEP_S
+            print(f"  Oscillate target={osc!r}: walking {len(osc_steps)} steps "
+                  f"x {_OSCILLATE_STEP_S:.0f}s each (total {total_s:.0f}s).")
+
         _run_observation(session, name, duration, log, on_tick=on_tick,
                          keep_rc=bool(flags.get("--rc", False)))
+        done_ok = True
     finally:
-        session.stop_mavlog()
-        log.close()
-        print(f"  Wrote {log.n_rows} rows to {log.path}")
-        _safety_shutdown(session, saved_servo4_fn=saved_fn,
-                         saved_overrides=saved_overrides)
-    print("  Done.")
+        try:
+            if armed or saved_fn is not None:
+                _safety_shutdown(session, saved_servo4_fn=saved_fn,
+                                 saved_overrides=saved_overrides)
+        finally:
+            session.stop_mavlog()
+            log.close()
+            print(f"  Wrote {log.n_rows} rows to {log.path}")
+    if done_ok:
+        print("  Done.")
