@@ -42,7 +42,6 @@ from dynamics   import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, euler_step_omega
 from tether     import TetherModel
 from rotor_physics import resolve_i_spin_kgm2
-from param_defaults import thrust_to_coll_rad as _t2c
 
 
 @dataclass
@@ -318,7 +317,7 @@ class PhysicsCore:
 
         Parameters
         ----------
-        collective_rad : equilibrium collective [rad]
+        collective_rad : equilibrium collective [rad] — use thrust_to_coll_rad(ic.eq_thrust)
         n_steps        : number of ODE steps (default 500 @ 1 ms = 0.5 s)
         dt             : inflow ODE time step [s] (default 1e-3)
         """
@@ -335,12 +334,6 @@ class PhysicsCore:
         )
         for _ in range(n_steps):
             _, self._rotor_state = self._aero.step(inputs, self._rotor_state, dt)
-
-    def warm_inflow_from_thrust(self, thrust_cmd: float, n_steps: int = 500,
-                                dt: float = 1e-3) -> None:
-        """Thrust-domain wrapper around warm_inflow()."""
-        thrust = float(np.clip(thrust_cmd, 0.0, 1.0))
-        self.warm_inflow(_t2c(thrust), n_steps=n_steps, dt=dt)
 
     # ── Internal integration ──────────────────────────────────────────────────
 

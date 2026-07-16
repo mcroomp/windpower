@@ -1,19 +1,26 @@
 """
-controller.py — RAWES guidance/control helpers.
+controller.py — RAWES attitude rate controllers for ArduPilot ACRO mode.
 
-Legacy RC-override helpers are retained for historical tests only; runtime
-flight stack control is GUIDED-only.
+The mediator reports actual orbital-frame orientation (~65° from NED vertical
+at tether equilibrium).  PhysicalHoldController derives the tether-alignment
+error from the equilibrium captured during kinematic startup and uses
+compute_rc_from_attitude to send corrective ACRO RC overrides.
+GPS + compass are fused normally.
+
+Usage
+-----
+controller = make_hold_controller(anchor_ned=anchor_ned)
+controller.send_correction(att, pos_ned, gcs)   # in the hold loop
 """
 
 import math
 
 import numpy as np
 from frames     import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
-from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
+from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE, INTERLOCK_PWM_HIGH
 from swashplate import SwashplateServoModel
 from dynbem     import RotorInputs
 from param_defaults import load_ap_params as _load_ap_params
-from param_defaults import load_collective_phys_range as _load_col_range
 from arduloop import HeliRateController, HeliParams, RateAxisParams
 
 
@@ -50,8 +57,8 @@ def compute_rc_rates(
     Returns
     -------
     dict
-        RC channel overrides: {1: pwm, 2: pwm, 4: pwm}.
-        Channel 1 = roll rate, 2 = pitch rate, 4 = yaw rate.
+        RC channel overrides: {1: pwm, 2: pwm, 4: pwm, 8: 2000}.
+        Channel 1 = roll rate, 2 = pitch rate, 4 = yaw rate, 8 = motor interlock.
         Neutral = 1500, min = 1000, max = 2000.
     """
     pos   = np.asarray(hub_state["pos"],   dtype=float)
@@ -63,7 +70,7 @@ def compute_rc_rates(
     tether = pos - anch
     t_len  = float(np.linalg.norm(tether))
     if t_len < 0.1:
-        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
+        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
 
     # FRD body_z points DOWN through the disk → hub→anchor in tethered hover.
     body_z_eq  = -tether / t_len
@@ -99,6 +106,7 @@ def compute_rc_rates(
         1: _pwm(omega_body[0]),   # roll rate
         2: _pwm(omega_body[1]),   # pitch rate
         4: _pwm(omega_body[2]),   # yaw rate
+        8: INTERLOCK_PWM_HIGH,    # motor interlock always on
     }
 
 
@@ -228,7 +236,7 @@ def compute_rc_from_attitude(
 
     Returns
     -------
-    dict : {1: pwm, 2: pwm, 4: pwm}
+    dict : {1: pwm, 2: pwm, 4: pwm, 8: 2000}
     """
     max_rate = np.radians(rate_max_deg)
 
@@ -243,6 +251,7 @@ def compute_rc_from_attitude(
         1: _pwm(cmd_roll),
         2: _pwm(cmd_pitch),
         4: _pwm(cmd_yaw),
+        8: INTERLOCK_PWM_HIGH,
     }
 
 
@@ -283,7 +292,7 @@ def compute_rc_from_physical_attitude(
 
     Returns
     -------
-    dict : {1: pwm, 2: pwm, 4: pwm}
+    dict : {1: pwm, 2: pwm, 4: pwm, 8: 2000}
     """
     max_rate = np.radians(rate_max_deg)
 
@@ -308,7 +317,7 @@ def compute_rc_from_physical_attitude(
     tether_ned = np.asarray(anchor_ned, dtype=float) - np.asarray(pos_ned, dtype=float)
     t_len = float(np.linalg.norm(tether_ned))
     if t_len < 0.1:
-        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
+        return {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
     body_z_eq = tether_ned / t_len
 
     # Attitude error: rotation axis needed to align body_z with body_z_eq.
@@ -332,6 +341,7 @@ def compute_rc_from_physical_attitude(
         1: _pwm(omega_corr[0]),   # roll rate
         2: _pwm(omega_corr[1]),   # pitch rate
         4: _pwm(omega_corr[2]),   # yaw rate
+        8: INTERLOCK_PWM_HIGH,
     }
 
 
@@ -343,7 +353,7 @@ def compute_rc_from_physical_attitude(
 
 class PhysicalHoldController:
     """
-    Legacy hold controller retained for compatibility tests.
+    ACRO hold controller for physical sensor mode.
 
     ATTITUDE.roll/pitch are actual NED Euler angles.  Error is computed as
     deviation from the tether equilibrium orientation (roll_eq, pitch_eq)
@@ -385,17 +395,18 @@ class PhysicalHoldController:
         gcs,
     ) -> dict:
         """
-        Compute and send a legacy RC correction dict.
+        Compute and send RC override.  Returns the rc dict sent (for logging).
 
         Error = (roll - roll_eq, pitch - pitch_eq) — yaw-independent deviation
         from the tether equilibrium captured during kinematic startup.
 
-        Returns neutral sticks when equilibrium has not been set yet.
+        Sends neutral sticks when equilibrium has not been set yet.
         """
         _neutral = {1: SWASH_PWM_NEUTRAL, 2: SWASH_PWM_NEUTRAL,
-                3: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL}
+                    3: SWASH_PWM_NEUTRAL, 4: SWASH_PWM_NEUTRAL, 8: INTERLOCK_PWM_HIGH}
 
         if self._roll_eq is None or self._pitch_eq is None:
+            gcs.send_rc_override(_neutral)
             return _neutral
 
         roll_dev  = att["roll"]  - self._roll_eq
@@ -409,6 +420,7 @@ class PhysicalHoldController:
             yawspeed   = att["yawspeed"],
         )
         rc[3] = SWASH_PWM_NEUTRAL   # neutral collective
+        rc[8] = INTERLOCK_PWM_HIGH  # motor interlock on
         gcs.send_rc_override(rc)
         return rc
 
@@ -864,8 +876,8 @@ class ElevationHoldController:
         ElevationHoldController  →  (rate_roll_sp, rate_pitch_sp)
         HeliCyclicController       →  (tilt_lon, tilt_lat)
 
-    This mirrors the rawes.lua outer-loop structure, but runtime stack control
-    now uses GUIDED setpoints rather than RC override transport.
+    This mirrors the rawes.lua architecture where the outer loop sends rate
+    commands via RC override and the firmware ACRO PIDs close the inner loop.
 
     Usage
     -----
@@ -1089,16 +1101,11 @@ class HeliCyclicController:
     is applied to the controller output so the closed-loop bandwidth in
     sim matches the bandwidth limited by the actual servos.
 
-    This class is thrust-first. Callers provide thrust in ``[0..1]`` via
-    ``step_from_thrust()`` and conversion to physical collective radians is
-    applied once at the swashplate/physics boundary.
-
     Usage::
 
         acro = HeliCyclicController(rotor)
-        tilt_lon, tilt_lat, col_actual = acro.step_from_thrust(
-            thrust_cmd,
-            rate_roll_sp, rate_pitch_sp, omega_body, dt,
+        tilt_lon, tilt_lat, col_actual = acro.step(
+            collective_rad, rate_roll_sp, rate_pitch_sp, omega_body, dt,
         )
 
     Parameters mapped to ArduPilot:
@@ -1145,7 +1152,6 @@ class HeliCyclicController:
         )
         self._ctrl  = HeliRateController(params)
         self._servo = SwashplateServoModel.from_rotor(rotor)
-        self._col_min, self._col_max = _load_col_range()
         self._tilt_lon_trim = 0.0
         self._tilt_lat_trim = 0.0
 
@@ -1161,19 +1167,7 @@ class HeliCyclicController:
         self._tilt_lon_trim = float(tilt_lon)
         self._tilt_lat_trim = float(tilt_lat)
 
-    def reset_from_thrust(
-        self,
-        thrust_cmd: float,
-        *,
-        tilt_lon: float = 0.0,
-        tilt_lat: float = 0.0,
-    ) -> None:
-        """Reset servo state using thrust [0..1] at the physics boundary."""
-        thrust = float(np.clip(thrust_cmd, 0.0, 1.0))
-        col_rad = self._col_min + thrust * (self._col_max - self._col_min)
-        self._servo.reset(col_rad, tilt_lon=float(tilt_lon), tilt_lat=float(tilt_lat))
-
-    def _step_collective(
+    def step(
         self,
         collective_cmd: float,
         rate_roll_sp  : float,
@@ -1182,7 +1176,7 @@ class HeliCyclicController:
         dt            : float,
         collective_norm: float = 0.0,
     ) -> "tuple[float, float, float]":
-        """Advance one timestep from physical collective [rad].
+        """Advance one timestep.
 
         Returns ``(tilt_lon, tilt_lat, col_actual)``.  All three channels
         pass through the SwashplateServoModel so collective and cyclic
@@ -1209,34 +1203,6 @@ class HeliCyclicController:
         tilt_lon_cmd = -out.pitch_cyclic + self._tilt_lon_trim
         col_act, tlon, tlat = self._servo.step(
             float(collective_cmd), tilt_lon_cmd, tilt_lat_cmd, dt)
-        return float(tlon), float(tlat), float(col_act)
-
-    def step_from_thrust(
-        self,
-        thrust_cmd    : float,
-        rate_roll_sp  : float,
-        rate_pitch_sp : float,
-        omega_body    : np.ndarray,
-        dt            : float,
-        collective_norm: float | None = None,
-    ) -> "tuple[float, float, float]":
-        """Advance one timestep using thrust [0..1] as input.
-
-        This is the preferred API for guided-stack integration because it matches
-        ArduPilot's throttle/thrust-facing interface. Conversion to physical
-        collective radians is done exactly once at this boundary.
-        """
-        thrust = float(np.clip(thrust_cmd, 0.0, 1.0))
-        col_rad = self._col_min + thrust * (self._col_max - self._col_min)
-        c_norm = float(2.0 * thrust - 1.0) if collective_norm is None else float(collective_norm)
-        tlon, tlat, col_act = self._step_collective(
-            collective_cmd=col_rad,
-            rate_roll_sp=rate_roll_sp,
-            rate_pitch_sp=rate_pitch_sp,
-            omega_body=omega_body,
-            dt=dt,
-            collective_norm=c_norm,
-        )
         return float(tlon), float(tlat), float(col_act)
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,20 @@
 # Suppress path mangling in MSYS/Git-for-Windows; harmless elsewhere.
 [[ -n "${MSYSTEM:-}" ]] && export MSYS_NO_PATHCONV=1
 
+# Docker Desktop's Windows named-pipe backend is not reachable from an
+# MSYS/Git-Bash shell on this box (fails with
+# "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine").
+# Docker works natively inside WSL2 instead, so when we detect we're running
+# under Git-for-Windows bash (MSYSTEM set, not already inside WSL), reinvoke
+# ourselves inside WSL with the repo path translated from /c/... (mingw) to
+# /mnt/c/... (WSL), forwarding all original args.
+if [[ -n "${MSYSTEM:-}" && -z "${WSL_DISTRO_NAME:-}" ]] && command -v wsl.exe >/dev/null 2>&1; then
+    _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _drive="${_script_dir:1:1}"
+    _wsl_dir="/mnt/${_drive,,}${_script_dir:2}"
+    exec wsl.exe -e bash -lc "cd '$_wsl_dir' && bash test.sh $(printf '%q ' "$@")"
+fi
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_DIR="$REPO_DIR/simulation"
 

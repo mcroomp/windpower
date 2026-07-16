@@ -26,7 +26,6 @@ from dynbem        import RotorInputs
 from controller  import HeliCyclicController, compute_rate_cmd
 from dynamics    import RigidBodyDynamics
 from frames      import build_orb_frame
-from param_defaults import coll_rad_to_thrust
 from rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor, make_probe
 
@@ -77,7 +76,6 @@ def _run_attitude_loop(
     F_grav_cancel = np.array([0.0, 0.0, -_MASS * 9.81])
 
     history = []
-    thrust_cmd = coll_rad_to_thrust(0.0)
     n = int(round(t_total / DT))
     for i in range(n):
         s         = dyn.state
@@ -86,8 +84,8 @@ def _run_attitude_loop(
         omega_b   = R.T @ omega_w
         bz_now    = R[:, 2]
         rate_body = compute_rate_cmd(bz_now, body_z_eq, R, kp=KP_OUTER, kd=0.0)
-        tlon, tlat, _col = acro.step_from_thrust(
-            thrust_cmd=thrust_cmd,
+        tlon, tlat, _col = acro.step(
+            collective_cmd=0.0,
             rate_roll_sp =rate_body[0],
             rate_pitch_sp=rate_body[1],
             omega_body   =omega_b,
@@ -219,10 +217,9 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
     acro.set_trim(trim.tilt_lon, trim.tilt_lat)
     # Run a few steps with zero rate command so the servo settles to trim.
     omega_body_zero = np.zeros(3)
-    trim_thrust = coll_rad_to_thrust(-0.05)
     for _ in range(200):
-        tlon, tlat, _ = acro.step_from_thrust(
-            thrust_cmd=trim_thrust,
+        tlon, tlat, _ = acro.step(
+            collective_cmd=-0.05,
             rate_roll_sp =0.0,
             rate_pitch_sp=0.0,
             omega_body   =omega_body_zero,

@@ -167,7 +167,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     comms.send_command(0.0, cmd)
 
     # ── Inflow warm-up ────────────────────────────────────────────────────
-    runner._core.warm_inflow_from_thrust(float(_IC.eq_thrust), n_steps=500)
+    runner._core.warm_inflow(collective_rad=thrust_to_coll_rad(float(_IC.eq_thrust)), n_steps=500)
 
     t_sim = 0.0
     for i in range(max_steps):
@@ -227,7 +227,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         # ── Physics 400 Hz ────────────────────────────────────────────────
         omega_body    = runner.omega_body
         omega_body[2] = 0.0
-        sr = runner.step_from_thrust(DT, ap.thrust, ap.roll_sp, ap.pitch_sp, omega_body,
+        sr = runner.step(DT, ap.col_rad, ap.roll_sp, ap.pitch_sp, omega_body,
                          rest_length=winch.rest_length)
         prev_accel_ned = sr.get("accel_specific_world")
 

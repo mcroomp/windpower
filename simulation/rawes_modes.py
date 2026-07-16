@@ -21,7 +21,7 @@ Usage
 
 # ── Mode numbers (RAWES_MODE script-generated param; 0=none 1=steady 3=passive 4=landing) ──
 
-MODE_NONE     = 0   # script passive: no control-channel overrides (CH8 interlock hold still applies while armed)
+MODE_NONE     = 0   # script passive: no RC overrides; logs every 5 s + any NV message
 MODE_STEADY   = 1   # bz_altitude_hold cyclic (commanded tension) + altitude-PID collective
 # mode 2 reserved (unused)
 MODE_PASSIVE  = 3   # kinematic capture helper: hold IC attitude during release
