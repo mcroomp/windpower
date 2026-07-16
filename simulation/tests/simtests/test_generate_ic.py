@@ -515,7 +515,7 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             ap.tick(step * _DT, runner)
-        sr = runner.step_from_thrust(_DT, ap.thrust, ap.roll_sp, ap.pitch_sp,
+        sr = runner.step(_DT, ap.col_rad, ap.roll_sp, ap.pitch_sp,
                          runner.omega_body, rest_length=rest_now)
         ap.log(runner, sr)
 
@@ -562,6 +562,7 @@ def _print_steady(log, m: dict, label: str) -> None:
 def test_ic_force_balance(simtest_log):
     """
     The IC must be a genuine physics fixed point at coll_eq_rad.
+
     At static equilibrium (vel=0, coll=coll_eq_rad, R0=force-balanced),
     the net force on the hub should be near zero.  We verify this by running
     1 second of open-loop physics (no controller — fixed collective = coll_eq_rad,
@@ -600,8 +601,8 @@ def test_ic_force_balance(simtest_log):
     # Run 1 second open-loop at the IC collective + trim cyclic (no rate commands).
     N_STEPS = int(1.0 / _DT)
     for _ in range(N_STEPS):
-        runner.step_from_thrust(_DT, float(ic_static.eq_thrust), 0.0, 0.0,
-                                runner.omega_body, rest_length=ic_static.rest_length)
+        runner.step(_DT, ic_static.coll_eq_rad, 0.0, 0.0,
+                    runner.omega_body, rest_length=ic_static.rest_length)
 
     final_speed = float(np.linalg.norm(runner.hub_state["vel"]))
     final_tension = runner.tension_now

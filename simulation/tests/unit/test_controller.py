@@ -87,6 +87,7 @@ def test_body_z_on_tether_no_rate():
     assert rc[1] == 1500
     assert rc[2] == 1500
     assert rc[4] == 1500
+    assert rc[8] == 2000
 
 
 def test_body_z_on_tether_with_spin_only():
@@ -101,6 +102,7 @@ def test_body_z_on_tether_with_spin_only():
     assert rc[1] == 1500
     assert rc[2] == 1500
     assert rc[4] == 1500
+    assert rc[8] == 2000
 
 
 def test_tilt_error_gives_non_neutral_command():
@@ -182,7 +184,7 @@ def test_rc_values_always_in_range():
     omega_huge = np.array([5., 5., 5.])
     state = _state(_POS, R_huge, omega_huge)
     rc = compute_rc_rates(state, _ANCHOR, _VEL_NED)
-    for ch in (1, 2, 4):
+    for ch in (1, 2, 4, 8):
         assert 1000 <= rc[ch] <= 2000, f"Channel {ch} out of range: {rc[ch]}"
 
 
@@ -202,6 +204,18 @@ def test_hub_too_close_to_anchor_gives_neutral():
     assert rc[1] == 1500
     assert rc[2] == 1500
     assert rc[4] == 1500
+    assert rc[8] == 2000
+
+
+def test_motor_interlock_always_2000():
+    """Channel 8 (motor interlock) must always be 2000."""
+    # Several different states
+    for omega in ([0., 0., 0.], [5., 5., 5.], [0., 0., 25.]):
+        for tilt_deg in (0, 10, 45):
+            R = _Ry(np.radians(tilt_deg)) @ _R_EQ
+            state = _state(_POS, R, omega)
+            rc = compute_rc_rates(state, _ANCHOR, _VEL_NED)
+            assert rc[8] == 2000
 
 
 def test_kp_zero_no_proportional_correction():
@@ -232,6 +246,7 @@ def test_att_zero_attitude_zero_rates_neutral():
     assert rc[1] == 1500
     assert rc[2] == 1500
     assert rc[4] == 1500
+    assert rc[8] == 2000
 
 
 def test_att_positive_roll_gives_negative_roll_command():
@@ -282,7 +297,7 @@ def test_att_output_always_in_range():
         for pitch in (-2.0, 0.0, 2.0):
             for speed in (-5.0, 0.0, 5.0):
                 rc = compute_rc_from_attitude(roll, pitch, speed, speed, speed)
-                for ch in (1, 2, 4):
+                for ch in (1, 2, 4, 8):
                     assert 1000 <= rc[ch] <= 2000
 
 
@@ -290,6 +305,14 @@ def test_att_large_error_saturates():
     """Very large error saturates to 1000 or 2000."""
     rc = compute_rc_from_attitude(100.0, 0.0, 0.0, 0.0, 0.0, kp=10.0, kd=0.0)
     assert rc[1] == 1000   # max negative roll rate
+
+
+def test_att_motor_interlock_always_2000():
+    """Channel 8 is always 2000 regardless of inputs."""
+    for roll in (-1.0, 0.0, 1.0):
+        rc = compute_rc_from_attitude(roll, 0.0, 0.0, 0.0, 0.0)
+        assert rc[8] == 2000
+
 
 # ---------------------------------------------------------------------------
 # compute_rc_from_physical_attitude tests
@@ -334,6 +357,7 @@ def test_physical_att_aligned_gives_neutral():
     # At perfect alignment cross(body_z, body_z_eq) = 0 → all neutral
     assert rc[1] == 1500
     assert rc[2] == 1500
+    assert rc[8] == 2000
 
 
 def test_physical_att_output_in_range():
@@ -382,6 +406,7 @@ def test_physical_hold_neutral_when_no_pos():
     rc   = ctrl.send_correction(att, pos_ned=None, gcs=gcs)
     assert rc[1] == 1500
     assert rc[2] == 1500
+    assert rc[8] == 2000
 
 
 def test_physical_hold_neutral_when_no_equilibrium():
@@ -395,6 +420,7 @@ def test_physical_hold_neutral_when_no_equilibrium():
     rc  = ctrl.send_correction(att, pos_ned=pos_ned, gcs=gcs)
     assert rc[1] == 1500
     assert rc[2] == 1500
+    assert rc[8] == 2000
 
 
 def test_physical_hold_sends_correction_near_equilibrium():
@@ -413,9 +439,10 @@ def test_physical_hold_sends_correction_near_equilibrium():
     att  = {"roll": roll + small_tilt, "pitch": pitch + small_tilt, "yaw": yaw,
             "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}
     rc   = ctrl.send_correction(att, pos_ned=tuple(pos_ned), gcs=gcs)
-    # RC must be in valid range
+    # RC must be in valid range; motor interlock must be 2000
     for ch in (1, 2, 3, 4):
         assert 1000 <= rc[ch] <= 2000
+    assert rc[8] == 2000
     assert len(gcs.sent) == 1
 
 

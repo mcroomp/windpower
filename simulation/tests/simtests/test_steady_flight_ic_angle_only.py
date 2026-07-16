@@ -43,6 +43,7 @@ from param_defaults import load_ap_params as _lp
 from frames import build_gps_yaw_frame
 from telemetry_csv import TelRow, write_csv
 from simtest_ic import load_ic
+from param_defaults import thrust_to_coll_rad
 from simtest_runner import PhysicsRunner
 from tests.simtests._rotor_helpers import load_default_rotor
 
@@ -73,7 +74,8 @@ def _run_angle_ic_only(steps: int = 4000):
     )
     runner = PhysicsRunner(_ROTOR, ic_run, WIND)
 
-    runner._acro.reset_from_thrust(float(_IC.eq_thrust), tilt_lon=0.0, tilt_lat=0.0)
+    from param_defaults import thrust_to_coll_rad as _t2c
+    runner._acro._servo.reset(_t2c(_IC.eq_thrust), tilt_lon=0.0, tilt_lat=0.0)
 
     _ap = _lp()
     rp = RateAxisParams.from_ap_dict(_ap, "RLL")
@@ -91,7 +93,7 @@ def _run_angle_ic_only(steps: int = 4000):
 
     from param_defaults import load_collective_phys_range as _lr
     col_min, col_max = _lr()
-    col_norm = (_IC.coll_eq_rad - col_min) / (col_max - col_min) * 2.0 - 1.0
+    col_norm = (_t2c(_IC.eq_thrust) - col_min) / (col_max - col_min) * 2.0 - 1.0
 
     pos_hist = np.zeros((steps, 3))
     ten_hist = np.zeros(steps)
@@ -140,7 +142,7 @@ def _run_angle_ic_only(steps: int = 4000):
                 heli_out=heli_out,
             )
         )
-        sr = runner.step_guided(DT, float(_IC.eq_thrust), heli_out, rest_length=float(_IC.rest_length))
+        sr = runner.step_guided(DT, thrust_to_coll_rad(_IC.eq_thrust), heli_out, rest_length=float(_IC.rest_length))
 
         # Extract guided controller state for telemetry
         tgt_euler = guided.attitude_target_euler_deg
@@ -154,7 +156,7 @@ def _run_angle_ic_only(steps: int = 4000):
             TelRow.from_physics(
                 runner,
                 sr,
-                float(getattr(_IC, "coll_eq_rad", 0.0)),
+                thrust_to_coll_rad(_IC.eq_thrust),
                 WIND,
                 body_z_eq=np.asarray(ic_run.R0[:, 2], dtype=float),
                 phase="steady",
