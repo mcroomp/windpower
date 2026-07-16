@@ -110,8 +110,8 @@ def run_observation_loop(
                 return True
         return None
 
-        observe(ctx, settle_s + observe_s + timeout_margin_s, handle,
-            msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"])
+    observe(ctx, settle_s + observe_s + timeout_margin_s, handle,
+        msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"])
     return obs, rows
 
 
