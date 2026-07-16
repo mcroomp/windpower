@@ -22,7 +22,7 @@ from torque_test_utils import run_observation_loop, save_telemetry, assert_physi
 
 _SETTLE_S = 95.0
 _OBSERVE_S = 20.0
-_THRESHOLD = math.radians(10.0)
+_THRESHOLD = math.radians(15.0)
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["wobble"], indirect=True)

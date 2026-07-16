@@ -9,9 +9,9 @@ _el_initialized on the first tick and starts bz_altitude_hold cyclic +
 VZ-PI collective immediately.  RAWES_TEN is fed from the 300 N target tension
 each Lua tick for gravity compensation.
 
-In GUIDED mode rawes.lua calls vehicle:set_target_angle_and_climbrate for
-cyclic (not ch1/ch2). MockArdupilot Lua backend feeds that into GuidedAttitudeController; ch3
-is still decoded for collective.
+In GUIDED mode rawes.lua calls vehicle:set_target_angle_and_rate_and_throttle
+and vehicle:set_target_rate_and_throttle. MockArdupilot Lua backend feeds that
+into GuidedAttitudeController and guided throttle is used for collective.
 
 Non-Lua reference: test_steady_flight.py
 """

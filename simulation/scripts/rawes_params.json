@@ -16,9 +16,9 @@
       "note": "active Lua flight mode (script-generated param): 0=none (default)  1=steady  3=passive  4=landing  (pumping runs in steady)"
     },
     {
-      "name": "ARMING_CHECK",
-      "expected": 0,
-      "note": "0=prearm checks disabled; required for Lua arming:arm() to succeed"
+      "name": "ARMING_SKIPCHK",
+      "expected": 65535,
+      "note": "0xFFFF=skip all prearm checks (ArduPilot 4.7+); ARMING_CHECK is legacy"
     },
     {
       "name": "BRD_SAFETY_DEFLT",
@@ -44,8 +44,8 @@
     },
     {
       "name": "ATC_RAT_YAW_I",
-      "expected": 0.0,
-      "note": "yaw rate I gain; disabled while characterizing P alone (one-sided actuator + asymmetric integrator makes I aggressive). After P is settled, re-enable at ~P/10 (~0.0015) to remove steady-state drift."
+      "expected": 0.0015,
+      "note": "yaw rate I gain; kept small (~P/10) so ArduPilot can remove residual drift without fighting the Lua-owned trim observer."
     },
     {
       "name": "ATC_RAT_YAW_D",

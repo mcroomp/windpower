@@ -46,7 +46,7 @@ Typical usage
     # Step response with candidate gains
     metrics = probe_step_response(rotor, R_hub, omega_spin=28.0,
                                   kp_inner=0.1, kd_inner=0.05,
-                                  setpoint=1.0)
+                                  thrust_cmd=0.6, setpoint=1.0)
 """
 from __future__ import annotations
 
@@ -59,6 +59,7 @@ import numpy as np
 from dynbem import RotorInputs, OyeBEMModel
 from controller import HeliCyclicController
 from dynamics import RigidBodyDynamics
+from param_defaults import thrust_to_coll_rad
 
 
 _G_M_S2 = 9.81
@@ -270,14 +271,17 @@ def probe_step_response(
     channel:        str   = "roll",                  # "roll" | "pitch"
     duration_s:     float = 2.0,
     dt:             float = 0.0025,
-    collective_rad: float = -0.05,
+    thrust_cmd:     float,
     mass_kg:        float = 5.0,
     I_body:         tuple = (5.0, 5.0, 10.0),
     I_spin:         float = 4.0,
 ) -> StepMetrics:
     """Apply a step rate setpoint through ``HeliCyclicController`` and
     return time-response metrics.  Use as the cost function for an
-    automated gain search."""
+    automated gain search.
+
+    Uses ``thrust_cmd`` in [0..1] as the collective command input.
+    """
     aero  = OyeBEMModel(defn=rotor)
     state = _settle_inflow(aero, omega_spin, R_hub)
     acro  = HeliCyclicController(
@@ -290,6 +294,9 @@ def probe_step_response(
         R0=R_hub.copy(), omega0=[0.0, 0.0, 0.0],
     )
     F_grav_cancel = np.array([0.0, 0.0, -mass_kg * _G_M_S2])
+
+    thrust = float(np.clip(thrust_cmd, 0.0, 1.0))
+    collective_for_aero = float(thrust_to_coll_rad(thrust))
 
     n_steps = int(round(duration_s / dt))
     t_log       = np.arange(n_steps, dtype=float) * dt
@@ -314,15 +321,15 @@ def probe_step_response(
         omega_y_log[i] = omega_b[1]
         rate_roll  = setpoint if channel == "roll"  else 0.0
         rate_pitch = setpoint if channel == "pitch" else 0.0
-        tlon, tlat, _ = acro.step(
-            collective_cmd=collective_rad,
+        tlon, tlat, _ = acro.step_from_thrust(
+            thrust_cmd=thrust,
             rate_roll_sp=rate_roll, rate_pitch_sp=rate_pitch,
             omega_body=omega_b, dt=dt,
         )
         tlon_log[i] = tlon
         tlat_log[i] = tlat
         inputs = RotorInputs(
-            collective_rad=collective_rad, tilt_lon=tlon, tilt_lat=tlat,
+            collective_rad=collective_for_aero, tilt_lon=tlon, tilt_lat=tlat,
             R_hub=R, v_hub_world=s["vel"], wind_world=np.zeros(3),
             omega_rad_s=float(omega_spin), rho_kg_m3=1.225,
         )

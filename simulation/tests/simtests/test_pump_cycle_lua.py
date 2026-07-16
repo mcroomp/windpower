@@ -178,8 +178,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     comms.send(planner.step(0.0, tel.tension_n, tel.rest_length), DT_PLANNER)
 
     # ── Inflow warm-up ────────────────────────────────────────────────────
-    from param_defaults import thrust_to_coll_rad as _t2c
-    runner._core.warm_inflow(collective_rad=_t2c(float(_IC.eq_thrust)), n_steps=500)
+    runner._core.warm_inflow_from_thrust(float(_IC.eq_thrust), n_steps=500)
 
     t_sim = 0.0
     for i in range(max_steps):

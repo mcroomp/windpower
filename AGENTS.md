@@ -238,6 +238,20 @@ the tail of each failure, including the assertion error). The full output is als
 saved — read it directly if needed:
     `Get-Content simulation/logs/<test_name>/worker.log | Select-String "ERROR|CRITICAL|Traceback|assert|FAIL" | Select-Object -First 30`
 
+Long-running test commands (agent-critical, efficiency):
+- Unit and simtest runs can take 1-5+ minutes. Do NOT pipe them through `| tail -N` when
+  running in a mode that may background the command — a slow/idle command piped through
+  `tail` produces no output until the pipeline's stdout closes, so a background poll via
+  `get_terminal_output` just returns the same stale snapshot every time (wastes calls,
+  looks like a hang). Run the bare command first; only pipe through `tail`/`grep` after
+  confirming the run is fast enough to complete synchronously, or redirect to a file
+  (`... > /tmp/out.log 2>&1`) and read/grep the file instead.
+- Once a command has been moved to background, do not repeatedly call `get_terminal_output`
+  in a tight loop — it will not return new content until the process actually produces more
+  output or exits. Wait for the automatic completion notification instead of polling.
+- Prefer `bash test.sh stack -n 1 -k <test_name>` (single test) while iterating; only widen
+  to `-n 4`/full suite once the targeted test is confirmed passing, to keep turnaround short.
+
 ## Visualization
 
 Flight telemetry (pumping, steady, passive SITL runs):
