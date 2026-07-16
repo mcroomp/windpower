@@ -182,6 +182,7 @@ _mode_ms    = 0
 _submode_ms = 0
 
 -- Cached RC channel objects
+_rc_ch4 = rc:get_channel(4)
 _rc_ch8 = rc:get_channel(8)
 
 -- Thrust state [0..1]
@@ -1089,6 +1090,12 @@ local function update()
     -- Tension feed-forward ramp: apply every tick so orientation changes
     -- smoothly when the ground transitions between phase tension targets.
     _apply_tension_ramp(BASE_PERIOD_MS * 0.001)
+
+    -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up).
+    -- In PASSIVE before full IC seed, avoid all non-essential control API calls.
+    if mode ~= MODE_PASSIVE or _ic_seeded then
+        if _rc_ch4 then _rc_ch4:set_override(1500) end
+    end
 
     -- Latch the motor interlock (CH8) high while armed so the heli rotor stays
     -- runup-complete and ArduPilot clears land_complete (otherwise GUIDED angle

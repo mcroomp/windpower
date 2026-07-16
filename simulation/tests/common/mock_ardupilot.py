@@ -19,7 +19,8 @@ from controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
                         compute_rate_cmd, compute_rate_cmd_sqrt,
                         compute_crosswind_rate_cmd,
                         apply_crosswind_rate_to_body_rates,
-                        slerp_body_z, update_plane_azimuth)
+                        slerp_body_z, update_plane_azimuth,
+                        YawTrimObserver)
 from landing_planner import LandingCommand
 from physics_core import HubObservation
 from pumping_planner import TensionCommand
@@ -105,6 +106,14 @@ class _MockArdupilotBase:
         self._telemetry: list = []
         self._log_step = 0
         self._guided_ctrl: "GuidedAttitudeController | None" = None
+        # Anti-rotation feedforward trim (Python port of rawes.lua's
+        # yaw_trim_step/run_yaw_trim -- see controller.YawTrimObserver).
+        # Applied uniformly for both Lua- and Python-backed simtests since
+        # arduloop.HeliRateController has no equivalent of ArduPilot's native
+        # H_YAW_TRIM mixer addition, and the Lua-side observer's output is
+        # never fed back into physics in the Lua backend (no real SITL
+        # firmware in the loop to consume H_YAW_TRIM).
+        self._yaw_trim = YawTrimObserver()
 
     def enable_guided(self, heli_params: "HeliParams | None" = None) -> None:
         hp = heli_params or HeliParams.from_ap_dict(load_ap_params())
@@ -129,7 +138,18 @@ class _MockArdupilotBase:
         if heli_out.collective_norm_cmd is not None and abs(float(self._guided_ctrl.climbrate_ms)) > 1e-6:
             c_norm = float(np.clip(heli_out.collective_norm_cmd, -1.0, 1.0))
             self._last_thrust = 0.5 * (c_norm + 1.0)
-        return runner.step_guided(dt, self._last_thrust, heli_out, rest_length=rest_length)
+        # Total commanded Motor4 throttle THIS tick = PID output + trim
+        # computed on the PREVIOUS tick (mirrors ArduPilot: the mixer adds
+        # the current H_YAW_TRIM to the rate-controller output, and the
+        # observer only sees/updates that trim for the NEXT cycle via its
+        # own readback of what was just applied). Clamped to [0, 1] to match
+        # the SERVO9_TRIM=SERVO9_MIN one-directional-motor convention (see
+        # mediator.py's yaw_throttle derivation).
+        u_raw     = float(np.clip(heli_out.yaw_cmd, 0.0, 1.0))
+        u_applied = float(np.clip(u_raw + self._yaw_trim.trim, 0.0, 1.0))
+        self._yaw_trim.step(dt, u_applied, float(gyro[2]))
+        return runner.step_guided(dt, self._last_thrust, heli_out, rest_length=rest_length,
+                                  yaw_throttle=u_applied)
 
     def log(self, runner, sr: dict) -> None:
         if self.tel_fn is None or self._tel_every is None:

@@ -147,7 +147,16 @@ class PhysicsRunner:
                          rate_roll: float, rate_pitch: float,
                          omega_body: np.ndarray,
                          *, rest_length: "float | None" = None) -> dict:
-        """400 Hz step for Python-AP tests using thrust [0..1]."""
+        """400 Hz step for Python-AP tests using thrust [0..1].
+
+        Does not drive the yaw-motor hub ODE (yaw_throttle stays None -> pure
+        damp-to-zero): HeliCyclicController's yaw rate PID has no anti-rotation
+        trim observer behind it (unlike the GUIDED path -- see
+        mock_ardupilot._MockArdupilotBase.step_physics()), and this API is
+        shared by many simtests that never intended to exercise yaw-motor
+        coupling (e.g. static force-balance checks). Real yaw authority is
+        exercised via step_guided() instead.
+        """
         tlon, tlat, col_act = self._acro.step_from_thrust(
             thrust_cmd, rate_roll, rate_pitch, omega_body, dt)
         return self._core.step(dt, col_act, tlon, tlat, rest_length)
@@ -163,6 +172,7 @@ class PhysicsRunner:
         heli_out,
         *,
         rest_length: "float | None" = None,
+        yaw_throttle: "float | None" = None,
     ) -> dict:
         """400 Hz step for GUIDED tests.
 
@@ -170,6 +180,11 @@ class PhysicsRunner:
         converts thrust [0..1] to collective radians at the boundary,
         applies the SwashplateServoModel for servo lag, then calls physics.
         Bypasses the rate PIDs in _acro (those are inside GuidedAttitudeController).
+
+        yaw_throttle : caller-supplied Motor4 throttle override [0..1] (e.g.
+            after adding the anti-rotation trim -- see
+            mock_ardupilot._MockArdupilotBase.step_physics()). Defaults to
+            heli_out.yaw_cmd clamped to [0, 1] when not supplied.
         """
         # Sign mapping matches HeliCyclicController._step_collective():
         #   roll_cyclic  ->  tilt_lat  (no sign flip)
@@ -182,7 +197,10 @@ class PhysicsRunner:
         collective_cmd = self._col_min + thrust * (self._col_max - self._col_min)
         col_act, tlon, tlat = self._acro._servo.step(
             collective_cmd, tilt_lon_cmd, tilt_lat_cmd, dt)
-        return self._core.step(dt, col_act, tlon, tlat, rest_length)
+        if yaw_throttle is None:
+            yaw_throttle = float(np.clip(heli_out.yaw_cmd, 0.0, 1.0))
+        return self._core.step(dt, col_act, tlon, tlat, rest_length,
+                                yaw_throttle=float(yaw_throttle))
 
 
 from tests.common.mock_ardupilot import MockArdupilot

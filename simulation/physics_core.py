@@ -10,7 +10,8 @@ PhysicsCore owns
 - Aero model (SkewedWakeBEMJit)
 - TetherModel (elastic, tension-only)
 - Spin ODE (autorotation equilibrium)
-- Yaw damping: k_yaw (GB4008 yaw axis)
+- Yaw damping: k_yaw (GB4008 yaw axis), with optional hub-motor ODE
+  (torque_model.HubState) driven by caller-supplied yaw_throttle
 - KinematicStartup: state override + tether gating + extra startup damping
 - Time tracking (_t_sim)
 
@@ -43,6 +44,10 @@ from dynbem       import create_aero, RotorInputs, euler_step_omega
 from tether     import TetherModel
 from rotor_physics import resolve_i_spin_kgm2
 from param_defaults import thrust_to_coll_rad as _t2c
+from torque_model import (
+    HubState as _HubState, HubParams as _HubParams, step as _hub_step,
+    equilibrium_throttle as _hub_equilibrium_throttle,
+)
 
 
 @dataclass
@@ -135,6 +140,16 @@ class PhysicsCore:
         self._kinematic_nul_rate_gain_rads_per_rad = float(
             kinematic_nul_rate_gain_rads_per_rad
         )
+        # GB4008 yaw-motor hub model (torque_model.py) -- same ESC-governor +
+        # finite-torque ODE used by the standalone counter-torque tests.
+        # Only advanced when the caller supplies yaw_throttle (see step()).
+        # Start the motor at the trim speed that holds psi_dot=0 for the IC's
+        # rotor spin rate (matches physical reality: the ESC is already
+        # holding heading before free flight starts, not spinning up from a
+        # dead stop -- avoids a spurious startup yaw-drift transient).
+        self._hub_params = _HubParams()
+        _eq_throttle = _hub_equilibrium_throttle(float(ic.omega_spin), self._hub_params)
+        self._hub_state  = _HubState(omega_motor=_eq_throttle * self._hub_params.rpm_scale)
 
         I_spin = resolve_i_spin_kgm2(rotor)
         self._dyn = RigidBodyDynamics(
@@ -296,14 +311,24 @@ class PhysicsCore:
 
     def step(self, dt: float, collective_rad: float,
              tilt_lon: float, tilt_lat: float,
-             rest_length: "float | None" = None) -> dict:
+             rest_length: "float | None" = None,
+             yaw_throttle: "float | None" = None) -> dict:
         """
         400 Hz step with caller-supplied tilts.
 
         Use for mediator (ArduPilot servo decode) and Lua-controlled simtests
         (HeliCyclicController produces tilt_lon/tilt_lat).
+
+        yaw_throttle : GB4008 tail-motor throttle command [0..1] (Motor4/SERVO9
+            for the real SITL mediator; arduloop HeliRateOutput.yaw_cmd clamped
+            to [0,1] for simtests).  Advances the same torque_model.HubState
+            ESC-governor ODE used by the standalone counter-torque tests, so
+            rotor/counter-rotation determines hub spin identically in both
+            paths (see _integrate).  Default None reproduces the previous
+            pure damping-to-zero behavior exactly (no hub-motor ODE advance).
         """
-        return self._integrate(dt, collective_rad, tilt_lon, tilt_lat, rest_length)
+        return self._integrate(dt, collective_rad, tilt_lon, tilt_lat,
+                                rest_length, yaw_throttle)
 
     def warm_inflow(self, collective_rad: float, n_steps: int = 500,
                     dt: float = 1e-3) -> None:
@@ -346,7 +371,8 @@ class PhysicsCore:
 
     def _integrate(self, dt: float, collective_rad: float,
                    tilt_lon: float, tilt_lat: float,
-                   rest_length: "float | None") -> dict:
+                   rest_length: "float | None",
+                   yaw_throttle: "float | None" = None) -> dict:
 
         if rest_length is not None:
             self._tether.rest_length = float(rest_length)
@@ -466,12 +492,31 @@ class PhysicsCore:
             # Angular damping
             # base term  : optional diagnostic damping; default 0 in free flight
             # startup extra: additional damping during kinematic ramp
-            # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle)
+            # k_yaw term : GB4008 counter-torque around disk_normal (rotor axle).
+            # Yaw authority: the hub yaw rate is damped toward yaw_rate_target,
+            # which comes from advancing torque_model.HubState (same ESC-governor
+            # + finite-torque ODE as the standalone counter-torque tests) using
+            # the caller-supplied yaw_throttle.  Rotor spin (self._omega_rad_s)
+            # and the gear-reflected motor speed together determine hub spin,
+            # exactly as in the torque tests -- this replaces the earlier
+            # instantaneous/algebraic target with a slew-rate-limited one, so
+            # throttle changes can no longer inject torque-impulse jumps.
+            # yaw_throttle is None for callers that don't drive a yaw motor
+            # (analysis scripts, legacy tests): reproduces the previous pure
+            # damping-to-zero behavior exactly, with no hub ODE advance.
+            if yaw_throttle is None:
+                yaw_rate_target = 0.0
+            else:
+                self._hub_state = _hub_step(
+                    self._hub_state, self._omega_rad_s, float(yaw_throttle),
+                    self._hub_params, dt,
+                )
+                yaw_rate_target = self._hub_state.psi_dot
             k_total   = self._base_k_ang + self._startup_damp_k_ang * self._damp_alpha
             omega_yaw = float(np.dot(hub["omega"], disk_normal))
             M_net = (result.m_hub_world + tm
                      - k_total * hub["omega"]
-                     - self._k_yaw * omega_yaw * disk_normal)
+                     - self._k_yaw * (omega_yaw - yaw_rate_target) * disk_normal)
 
             # 6-DOF rigid-body integration (gravity applied internally)
             F_net   = result.F_world + tf

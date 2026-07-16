@@ -805,6 +805,17 @@ def run_mediator(args, trajectory=None):
         # is prescribed externally; rest_length must be kept in sync so that when
         # kinematic ends, the tether is pre-tensioned correctly without huge spike.
         core.tether.rest_length = _winch_node.rest_length
+
+        # Yaw authority: NOT wired for the real SITL/flight-test path. The
+        # torque_model.HubState ESC-governor ODE + real-PWM readback was tried
+        # here, but reproduces the known-unresolved mediator_torque closed-loop
+        # yaw coupling issue (see repo memory sitl-param-verify-and-yaw-ff.md,
+        # "Root cause 2") even for the plain steady-flight test -- the hub
+        # spins up unbounded (SPIN WARN, auto-disarm) because there's no trim
+        # observer counterpart in this path (unlike GUIDED-mode simtests via
+        # mock_ardupilot.step_physics(), which does have YawTrimObserver and
+        # passes). Left as pure damp-to-zero here (yaw_throttle=None) pending
+        # a dedicated fix to the mediator_torque closed-loop coupling.
         result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat)
         _damp_alpha = float(result.get("damp_alpha", 0.0))
 

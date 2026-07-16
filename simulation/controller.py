@@ -786,6 +786,49 @@ def compute_bz_altitude_hold(
     return raw / np.linalg.norm(raw)
 
 
+class YawTrimObserver:
+    """Python port of rawes.lua's yaw trim observer (anti-rotation feedforward).
+
+    Mirrors ``yaw_trim_step(dt, u, psi_dot)`` in ``simulation/scripts/rawes.lua``
+    exactly (see ``test_yaw_trim_lua.py`` for the Lua-side unit tests and
+    ``test_yaw_trim_parity.py`` for the cross-check). Keep these two in sync —
+    per AGENTS.md, any change to the Lua formula must be mirrored here in the
+    same commit.
+
+    Reads back the total applied Motor4/SERVO9 throttle ``u`` [0, 1] and the
+    measured body yaw rate ``psi_dot`` [rad/s], computes the equilibrium trim
+    that would hold psi_dot=0 (``u - psi_dot / YFF_A``), and low-passes it
+    into a running trim estimate (clamped to [0, YFF_MAX]).
+    """
+
+    #: Motor throttle→yaw-rate slope, bench-calibrated: 0.504 RPM/µs over the
+    #: SERVO9 PWM span (1000 µs) → rad/s per unit throttle. Matches rawes.lua's
+    #: default (RAWES_YAW_SLP=0 → this bench default).
+    YFF_A_DEFAULT: float = 0.504 * 1000.0 * (2.0 * math.pi / 60.0)
+    YFF_MAX_DEFAULT: float = 0.7
+    YFF_TAU_DEFAULT: float = 0.3
+
+    def __init__(self, yaw_slope_rpm_per_us: float = 0.0,
+                 yff_max: float = YFF_MAX_DEFAULT,
+                 yff_tau: float = YFF_TAU_DEFAULT):
+        slope = float(yaw_slope_rpm_per_us) if yaw_slope_rpm_per_us > 0 else 0.504
+        self.yff_a = slope * 1000.0 * (2.0 * math.pi / 60.0)
+        self.yff_max = float(yff_max)
+        self.yff_tau = float(yff_tau)
+        self.trim = 0.0
+
+    def reset(self) -> None:
+        self.trim = 0.0
+
+    def step(self, dt: float, u: float, psi_dot: float) -> float:
+        trim_target = u - psi_dot / self.yff_a
+        trim_target = max(0.0, min(self.yff_max, trim_target))
+        alpha = dt / (self.yff_tau + dt)
+        self.trim += alpha * (trim_target - self.trim)
+        self.trim = max(0.0, min(self.yff_max, self.trim))
+        return self.trim
+
+
 class AltitudeHoldController:
     """
     Elevation-holding cyclic controller.
@@ -1172,6 +1215,15 @@ class HeliCyclicController:
         thrust = float(np.clip(thrust_cmd, 0.0, 1.0))
         col_rad = self._col_min + thrust * (self._col_max - self._col_min)
         self._servo.reset(col_rad, tilt_lon=float(tilt_lon), tilt_lat=float(tilt_lat))
+
+    @property
+    def yaw_cmd(self) -> float:
+        """Last tail-rotor/yaw-axis command from the rate PID (arduloop
+        HeliRateOutput.yaw_cmd, [-1, 1]).  Callers wanting a GB4008 motor
+        throttle should clamp to [0, 1] (the physical motor cannot reverse;
+        this mirrors ArduPilot's SERVO_TRIM=SERVO_MIN convention for the
+        one-directional Motor4 output)."""
+        return float(self._ctrl.out.yaw_cmd)
 
     def _step_collective(
         self,
