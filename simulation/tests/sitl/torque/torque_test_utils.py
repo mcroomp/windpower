@@ -7,7 +7,7 @@ All torque stack tests follow the same structure:
   3. Assert pass criteria on the returned samples
 
 This module provides:
-  run_observation_loop()      — drives the MAVLink receive loop, keeps CH8 alive;
+    run_observation_loop()      — drives the MAVLink receive loop;
                                 returns (obs, rows): obs = observation-window dicts,
                                 rows = all TelRow records for save_telemetry()
   save_telemetry()            — writes accumulated TelRow list to CSV
@@ -54,7 +54,6 @@ def run_observation_loop(
     """
     Collect ATTITUDE samples for the full test duration using the shared observe() loop.
 
-    Keeps CH8=2000 alive every 0.5 sim-seconds (motor interlock).
     Returns (obs, rows):
       obs  — samples in the observation window (settle_s .. settle_s+observe_s)
       rows — all TelRow records collected throughout the run (for save_telemetry)
@@ -112,8 +111,7 @@ def run_observation_loop(
         return None
 
     observe(ctx, settle_s + observe_s + timeout_margin_s, handle,
-            msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"],
-            keepalive={8: 2000})
+        msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"])
     return obs, rows
 
 

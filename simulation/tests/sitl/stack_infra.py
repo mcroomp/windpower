@@ -858,8 +858,16 @@ def _install_lua_scripts(*names: str) -> None:
 
         _install_lua_scripts("rawes.lua")
     """
-    dst_dir = Path("/ardupilot/scripts")
-    dst_dir.mkdir(exist_ok=True)
+    sim_vehicle = _resolve_sim_vehicle()
+    if sim_vehicle is not None:
+        dst_dir = sim_vehicle.parent.parent.parent / "scripts"
+    else:
+        ardupilot_root = os.environ.get(ARDUPILOT_ENV, "").strip()
+        if ardupilot_root:
+            dst_dir = Path(ardupilot_root) / "scripts"
+        else:
+            dst_dir = Path("/ardupilot/scripts")
+    dst_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
         src = _SCRIPTS_DIR / name
         shutil.copy2(src, dst_dir / name)
@@ -1039,11 +1047,10 @@ def _run_acro_setup(
     we arm — strong damping keeps it near the initial position during GPS init.
 
     Steps:
-        1. Connect GCS; request telemetry streams; clear motor interlock
-        2. Wait for param subsystem; apply rawes_params via GCS (scripting is up)
+        1. Connect GCS; request telemetry streams`r`n        2. Wait for param subsystem
         3. Verify all boot params via MAVLink read-back (pytest.fail on mismatch)
         4. Wait for EKF tilt alignment — FAIL HARD if it doesn't arrive
-        5. Arm with force=True (motor interlock low → arm → raise interlock)
+        5. Arm with force=True
         6. Confirm GUIDED_NOGPS mode
 
     Parameters
@@ -1091,14 +1098,6 @@ def _run_acro_setup(
         gcs._target_system, gcs._target_component,
         _mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1,  # LOCAL_POSITION_NED
     )
-
-    # Motor interlock must be LOW (CH8=1000) during arm.
-    # In H_RSC_MODE=1 (passthrough), motor_interlock_switch = (pilot_rotor_speed > 0.01).
-    # CH8=2000 → motor_interlock_switch=True → "Arm: Motor Interlock Enabled" blocks arm
-    # even with force=True.  CH8=1000 → motor_interlock_switch=False → arm succeeds.
-    # After arm confirmation, CH8 is raised to 2000 so the rotor interlock engages.
-    log.info("[setup 1/6] Sending motor interlock LOW (CH8=1000) ...")
-    gcs.send_rc_override({8: 1000})
 
     # ── 2. Param subsystem ────────────────────────────────────────────────────
     log.info("[setup 2/6] Waiting for param subsystem ...")
@@ -1391,12 +1390,6 @@ def _run_acro_setup(
         raise
     ctx.flight_events["arm_t"] = gcs.sim_now()
 
-    # Engage rotor interlock after successful arm. Setup drops CH8 low so
-    # force-arm can pass pre-arm interlock checks; leaving it low can cause
-    # immediate disarm in heli passthrough mode.
-    log.info("[setup 5/6] Raising motor interlock HIGH (CH8=2000) post-arm ...")
-    gcs.send_rc_override({8: 2000})
-
     all_statustext += drain_statustext(gcs, log)
     _procs_alive()
 
@@ -1474,7 +1467,7 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
     if any("motor interlock" in t.lower() for t in ctx.all_statustext):
         issues.append(
             "PreArm: Motor Interlock Enabled — interlock was HIGH before arm. "
-            "Fix: send CH8=1000 before arming, raise to 2000 after."
+            "Fix: ensure no external CH8 override is active before arming."
         )
     if any("runup" in t.lower() for t in ctx.all_statustext):
         issues.append(
@@ -1614,18 +1607,14 @@ def observe(
     msg_types: "list[str]",
     label: str = "observation",
     recv_timeout: float = 0.2,
-    keepalive: "dict | None" = None,
-    keepalive_interval_s: float = 0.5,
 ) -> None:
     """
     Run a SITL observation loop for ``duration_s`` sim-seconds.
 
     On every iteration:
       1. ``assert_procs_alive(ctx, label)`` — pytest.fail if a process exited.
-      2. Optional RC keepalive: if ``keepalive`` is set, ``send_rc_override``
-         is called once every ``keepalive_interval_s`` sim-seconds.
-      3. ``gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)``
-      4. ``on_message(msg, t_rel)`` — ``msg`` may be ``None`` on recv timeout.
+        2. ``gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)``
+        3. ``on_message(msg, t_rel)`` — ``msg`` may be ``None`` on recv timeout.
          Return ``True`` from the callback to exit the loop early.
 
     Parameters
@@ -1636,21 +1625,13 @@ def observe(
     msg_types            : MAVLink message types to pass to _recv
     label                : label forwarded to assert_procs_alive / logs
     recv_timeout         : wall-clock seconds _recv waits for a message
-    keepalive            : RC channel dict for send_rc_override, or None
-    keepalive_interval_s : minimum sim-seconds between keepalive sends;
-                           0.0 sends on every iteration
     """
     gcs      = ctx.gcs
     t_start  = gcs.sim_now()
     deadline = t_start + duration_s
-    t_rc     = gcs.sim_now()
 
     while gcs.sim_now() < deadline:
         assert_procs_alive(ctx, label)
-
-        if keepalive is not None and gcs.sim_now() - t_rc >= keepalive_interval_s:
-            gcs.send_rc_override(keepalive)
-            t_rc = gcs.sim_now()
 
         msg   = gcs._recv(type=msg_types, blocking=True, timeout=recv_timeout)
         t_rel = gcs.sim_now() - t_start
@@ -1954,7 +1935,7 @@ def _torque_stack(
                              > 0: send RAWES_ARM(armon_ms) and wait for "RAWES arm-on: armed"
                                   STATUSTEXT (hard fail if not received); no RC override sent.
                              0: skip arming entirely; yield unarmed (test controls arming).
-                             None (default): GCS force-arm with Ch8=2000 RC override.
+                            None (default): GCS force-arm (no RC override).
     passive_init           : if True, adopt the flight GUIDED_NOGPS init technique:
                              install rawes.lua, boot in MODE_PASSIVE (RAWES_MODE=3),
                              seed the IC operating point (RAWES_THR=passive_thrust,
@@ -2219,3 +2200,4 @@ def _torque_stack(
                 _logs["events.jsonl"] = events_path
             copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)
             log.info("Mediator log copied to %s", sitl_ctx.test_log_dir)
+

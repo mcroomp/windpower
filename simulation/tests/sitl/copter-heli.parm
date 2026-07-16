@@ -1,3 +1,18 @@
+# copter-heli.parm — ArduPilot heli baseline parameters.
+#
+# Canonical parameter reference for ArduPilot (ATC_*, H_*, SERVO_*, RC_*, GCS_*):
+# - Keep inline explanations for ArduPilot parameters in this file.
+# - RAWES_* script-generated parameters are documented in
+#   simulation/tests/sitl/rawes_common_defaults.parm.
+#
+# ArduPilot PID telemetry gate (not set here by default):
+#   GCS_PID_MASK bitmask: 0=Roll, 1=Pitch, 2=Yaw, 3=AccelZ
+#   Common values: 0=off, 4=yaw only, 7=roll+pitch+yaw, 15=roll+pitch+yaw+accelZ
+# This controls which MAVLink PID_TUNING axes ArduCopter emits.
+# Verified against ArduCopter/Parameters.cpp (c:\repos\ardupilot):
+#   GSCALAR(gcs_pid_mask, "GCS_PID_MASK", 0) -- default 0 (no PID_TUNING emitted),
+#   bitmask matches the table above.
+
 BATT_MONITOR 4.0000
 COMPASS_OFS2_X 5.0000
 COMPASS_OFS2_Y 13.0000
