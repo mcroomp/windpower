@@ -19,6 +19,7 @@ import pytest
 from controller   import HeliCyclicController, compute_rate_cmd, compute_bz_tether
 from frames       import build_orb_frame
 from physics_core import PhysicsCore
+from param_defaults import coll_rad_to_thrust
 from rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor
 
@@ -152,14 +153,15 @@ def _run_attitude_only_at_fixed_equilibrium(
                          [-w[1],  w[0],  0  ]])
 
     angle_hist = []
+    thrust_cmd = coll_rad_to_thrust(col_fixed)
     n = int(round(t_total / DT))
     for i in range(n):
         bz_now    = R[:, 2]
         omega_b   = R.T @ omega
         rate_sp   = compute_rate_cmd(bz_now, bz_eq_fixed, R,
                                      kp=KP_OUTER, kd=0.0)
-        tlon, tlat, _ = acro.step(
-            collective_cmd=col_fixed,
+        tlon, tlat, _ = acro.step_from_thrust(
+            thrust_cmd=thrust_cmd,
             rate_roll_sp =rate_sp[0],
             rate_pitch_sp=rate_sp[1],
             omega_body   =omega_b,
@@ -339,6 +341,7 @@ def _run_with_constant_tether_force(
 
     alt_hist, v_hist, angle_hist, dist_hist = [], [], [], []
     target_angle_hist, north_hist, tilt_hist, rate_hist, omega_hist = [], [], [], [], []
+    thrust_cmd = coll_rad_to_thrust(COL_FIXED)
     n = int(round(t_total / DT))
     for i in range(n):
         t_now = i * DT
@@ -382,8 +385,8 @@ def _run_with_constant_tether_force(
             rate[0] += float(omega_body_corr[0])
             rate[1] += float(omega_body_corr[1])
 
-        tlon, tlat, _ = acro.step(
-            collective_cmd=COL_FIXED,
+        tlon, tlat, _ = acro.step_from_thrust(
+            thrust_cmd=thrust_cmd,
             rate_roll_sp=rate[0], rate_pitch_sp=rate[1],
             omega_body=omega_b, dt=DT,
         )

@@ -719,7 +719,6 @@ class RawesGCS:
         self,
         timeout: float = 15.0,
         force: bool = False,
-        rc_override: dict[int, int] | None = None,
     ) -> None:
         """Send arm command and confirm via HEARTBEAT armed flag.
 
@@ -730,10 +729,8 @@ class RawesGCS:
             bypass all remaining pre-arm safety checks.  Use in simulation
             when hardware-specific interlocks (motor interlock, RC failsafe)
             are irrelevant.
-        rc_override : dict[int, int] | None
-            If provided, RC_CHANNELS_OVERRIDE is re-sent every 0.5 s while
-            waiting for arm confirmation, preventing ArduPilot from expiring
-            the override (default expiry ~1 s).  Format: {channel: pwm, ...}
+        The stack uses GUIDED setpoint APIs for control. RC channel overrides
+        are intentionally not part of arm sequencing.
         """
         param2 = 21196.0 if force else 0.0
         log.info("Sending arm command (force=%s) …", force)
@@ -746,15 +743,9 @@ class RawesGCS:
             param2, 0, 0, 0, 0, 0,
         )
         deadline        = self.sim_now() + timeout
-        t_last_override = self.sim_now()
         t_last_arm_send = self.sim_now()
         _poll = 0.5
         while self.sim_now() < deadline:
-            # Refresh RC override every 0.5 s sim-time (ArduPilot expiry is ~1 s).
-            if rc_override and (self.sim_now() - t_last_override) >= _poll:
-                self.send_rc_override(rc_override)
-                t_last_override = self.sim_now()
-
             msg = self._recv(
                 type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
                 blocking=True, timeout=max(_poll, 0.005),
@@ -857,19 +848,13 @@ class RawesGCS:
         self,
         mode_id: int,
         timeout: float = 10.0,
-        rc_override: dict[int, int] | None = None,
     ) -> None:
         """Set ArduCopter flight mode by custom mode number.
 
-        Parameters
-        ----------
-        rc_override : dict[int, int] | None
-            If provided, RC_CHANNELS_OVERRIDE is re-sent every 0.5 s while
-            waiting for mode confirmation (prevents ArduPilot from expiring
-            the override, which would disengage the motor interlock).
+        The stack uses GUIDED setpoint APIs for control. RC channel overrides
+        are intentionally not part of mode switching.
         """
         log.info("Setting mode %d …", mode_id)
-        t_last_override = self.sim_now()
         t_last_send     = self.sim_now()
         self._mav.mav.command_long_send(
             self._target_system,
@@ -883,11 +868,6 @@ class RawesGCS:
         deadline = self.sim_now() + timeout
         _poll = 0.5
         while self.sim_now() < deadline:
-            # Refresh RC override every 0.5 s sim-time (ArduPilot expiry is ~1 s).
-            if rc_override and (self.sim_now() - t_last_override) >= _poll:
-                self.send_rc_override(rc_override)
-                t_last_override = self.sim_now()
-
             msg = self._recv(
                 type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT", "ATTITUDE"],
                 blocking=True,
@@ -1023,28 +1003,15 @@ class RawesGCS:
 
     def send_rc_override(self, channels: dict[int, int]) -> None:
         """
-        Send RC_CHANNELS_OVERRIDE to the vehicle.
+        RC overrides are disabled in the stack.
 
-        Parameters
-        ----------
-        channels : dict[int, int]
-            Mapping of channel number (1-indexed) to PWM value.
-            Channels not listed are set to 0 (= no override).
-
-        Example
-        -------
-        gcs.send_rc_override({8: 2000})   # CH8 = full high (motor interlock release)
+        Policy: flight control is GUIDED-only, and the only permitted override
+        is Lua-managed CH8 interlock in rawes.lua.
         """
-        pwm = [0] * 18
-        for ch, val in channels.items():
-            if 1 <= ch <= 18:
-                pwm[ch - 1] = val
-        self._mav.mav.rc_channels_override_send(
-            self._target_system,
-            self._target_component,
-            *pwm[:18],
+        raise RuntimeError(
+            "RC_CHANNELS_OVERRIDE is disabled. Use GUIDED setpoints; only "
+            "rawes.lua may hold CH8 override."
         )
-        log.debug("RC override sent: %s", channels)
 
     def send_named_float(self, name: str, value: float) -> None:
         """Send a NAMED_VALUE_FLOAT MAVLink message to the vehicle.

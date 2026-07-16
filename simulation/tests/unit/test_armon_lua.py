@@ -126,32 +126,25 @@ class TestArmonDeadlineRefresh:
 
 
 # ---------------------------------------------------------------------------
-# 8. CH4 yaw always neutral
+# 8. CH4 is not script-driven
 # ---------------------------------------------------------------------------
 
-class TestCh4AlwaysNeutral:
-    def test_ch4_neutral_in_mode0_before_arm(self):
-        """CH4 must be overridden to 1500 even in passive mode 0 before arming."""
+class TestCh4NotOverridden:
+    def test_ch4_unset_in_mode0_before_arm(self):
+        """rawes.lua must not write CH4 in mode 0 before arming."""
         sim = _sim()
         sim.tick()
-        assert sim.ch_out[4] == 1500, f"CH4={sim.ch_out[4]}, expected 1500"
+        assert sim.ch_out[4] is None
 
-    def test_ch4_neutral_in_mode1(self):
-        """CH4 stays neutral during steady flight (mode 1)."""
+    def test_ch4_unset_in_mode1(self):
+        """rawes.lua must not write CH4 in mode 1 either."""
         sim = RawesLua(mode=1)
         sim.tick()
-        assert sim.ch_out[4] == 1500
+        assert sim.ch_out[4] is None
 
-    def test_ch4_neutral_while_armed(self):
-        """CH4 stays neutral throughout RAWES_ARM armed window."""
+    def test_ch4_unset_while_armed(self):
+        """CH4 remains untouched throughout RAWES_ARM armed window."""
         sim = _sim()
         _send_arm(sim, 60_000.0)
         sim.run(0.5)  # reach armed state
-        assert sim.ch_out[4] == 1500
-
-    def test_ch4_set_every_tick(self):
-        """CH4=1500 must be written on every tick, not just once."""
-        sim = _sim()
-        for _ in range(20):
-            sim.tick()
-            assert sim.ch_out[4] == 1500
+        assert sim.ch_out[4] is None
