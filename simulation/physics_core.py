@@ -301,6 +301,7 @@ class PhysicsCore:
             rotor/counter-rotation determines hub spin identically in both
             paths (see _integrate).  Default None reproduces the previous
             pure damping-to-zero behavior exactly (no hub-motor ODE advance).
+
         """
         return self._integrate(dt, collective_rad, tilt_lon, tilt_lat,
                                 rest_length, yaw_throttle)
@@ -415,6 +416,11 @@ class PhysicsCore:
                 # Kinematic hold: bypass all physics contributions.
                 # No tether, no aero, no gravity-driven dynamics step, and no rotor spin update.
                 self._omega_rad_s = self._kinematic_omega_target(self._t_sim)
+                # Keep hub-motor state aligned with the kinematic omega profile.
+                # This prevents a motor/rotor speed mismatch at handoff from
+                # creating an artificial yaw-rate transient.
+                self._hub_state.omega_motor = self._omega_rad_s * self._hub_params.gear_ratio
+                self._hub_state.psi_dot = 0.0
                 result = SimpleNamespace(
                     F_world=np.zeros(3),
                     m_hub_world=np.zeros(3),
@@ -454,6 +460,10 @@ class PhysicsCore:
                 # can pull omega away from the kinematic target before the
                 # mediator logs kinematic_exit.
                 self._omega_rad_s = max(omega_min, float(self._omega_release_target_rad_s))
+                # Use the same kinematic->IC handoff for hub motor state to
+                # avoid a mismatch-driven yaw kick at release.
+                self._hub_state.omega_motor = self._omega_rad_s * self._hub_params.gear_ratio
+                self._hub_state.psi_dot = 0.0
             else:
                 new_omega, new_spin = euler_step_omega(
                     self._omega_rad_s, self._spin_angle_rad,

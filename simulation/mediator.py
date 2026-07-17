@@ -256,6 +256,7 @@ def run_mediator(args, trajectory=None):
             att_target_hz = float(cfg.get("mavlink_att_target_hz", 10.0))
             attitude_hz = float(cfg.get("mavlink_attitude_hz", 50.0))
             servo_hz = float(cfg.get("mavlink_servo_output_raw_hz", 50.0))
+            local_position_ned_hz = float(cfg.get("mavlink_local_position_ned_hz", 10.0))
             pid_tuning_hz = float(cfg.get("mavlink_pid_tuning_hz", 0.0))
 
             def _request_interval(message_name: str, message_id: int, rate_hz: float) -> None:
@@ -298,6 +299,11 @@ def run_mediator(args, trajectory=None):
                     "SERVO_OUTPUT_RAW",
                     mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW,
                     servo_hz,
+                )
+                _request_interval(
+                    "LOCAL_POSITION_NED",
+                    mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
+                    local_position_ned_hz,
                 )
                 # PID_TUNING: SITL-only (noisy, 4 axes; ArduPilot also gates
                 # emission on GCS_PID_MASK, set in rawes_sitl_defaults.parm).

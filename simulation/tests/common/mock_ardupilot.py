@@ -165,6 +165,10 @@ class _MockArdupilotBase:
         self._yaw_trim.step(dt, u_applied, float(gyro[2]))
         return u_applied
 
+    def _telemetry_overrides(self, obs: HubObservation) -> dict:  # noqa: ARG002
+        """Backend-specific telemetry field overrides."""
+        return {}
+
     def log(self, runner, sr: dict) -> None:
         if self.tel_fn is None or self._tel_every is None:
             return
@@ -262,6 +266,7 @@ class _MockArdupilotBase:
                 yaw_sp_rads=mav_att_target_yaw_rate_rads,
             )
             extra_kwargs.update(rate_terms)
+            extra_kwargs.update(self._telemetry_overrides(obs))
 
             collective_rad = self._col_min + self._last_thrust * (self._col_max - self._col_min)
             self._telemetry.append(
@@ -302,6 +307,27 @@ class _LuaBackend(_MockArdupilotBase):
     # run_yaw_trim() `p("SERVO9_MIN", 1000)` / `p("SERVO9_MAX", 2000)` fallback.
     _SERVO9_MIN_US = 1000.0
     _SERVO9_MAX_US = 2000.0
+
+    def _lua_diag(self, key: str) -> float:
+        v = self._sim.fns.diag_nvf(key)
+        return float(v) if v is not None else float("nan")
+
+    def _telemetry_overrides(self, obs: HubObservation) -> dict:  # noqa: ARG002
+        # In SITL, these fields come from Lua NAMED_VALUE_FLOAT diagnostics.
+        # Keep simtest Lua backend semantics identical: Lua-only source, no fallback.
+        return {
+            "roll_sp_rads": self._lua_diag("OL_RSP"),
+            "pitch_sp_rads": self._lua_diag("OL_PSP"),
+            "yaw_sp_rads": self._lua_diag("OL_YSP"),
+            "roll_rate_err_rads": self._lua_diag("OL_RER"),
+            "pitch_rate_err_rads": self._lua_diag("OL_PER"),
+            "yaw_rate_err_rads": self._lua_diag("OL_YER"),
+            "lua_ol_alt_p_contrib": self._lua_diag("OL_AP"),
+            "lua_ol_alt_i_contrib": self._lua_diag("OL_AI"),
+            "lua_ol_alt_d_contrib": self._lua_diag("OL_AD"),
+            "lua_ol_thrust_cmd": self._lua_diag("OL_COL"),
+            "lua_ol_tension_n": self._lua_diag("OL_TEN"),
+        }
 
     def _yaw_apply(self, u_raw: float, gyro: np.ndarray, dt: float) -> float:
         """Route yaw trim through the REAL rawes.lua run_yaw_trim(), not a

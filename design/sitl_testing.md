@@ -115,6 +115,12 @@ running during the wait. Full reference:
 
 ## Kinematic hold timeline
 
+Canonical timeline note:
+- The repository-level canonical timeline definition for IC-start SITL flight
+  analysis is `design/sitl_flight_timeline.md`.
+- Use this section for stack-specific execution details; use the canonical doc
+  for shared event anchors (`t_sim`, `kinematic_exit`, `t_rel`).
+
 The **kinematic hold** (a.k.a. kinematic startup phase) is the artificial,
 physics-free trajectory that brings the hub to the IC operating point and holds
 it there while the EKF aligns on GPS. It exists for one reason: to leave the EKF

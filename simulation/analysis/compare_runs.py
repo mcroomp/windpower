@@ -56,6 +56,8 @@ _ALT_DIFF_WARN   = 2.0    # m
 _ORB_DIFF_WARN   = 5.0    # m
 _YAW_DIFF_WARN   = 15.0   # deg
 _COL_DIFF_WARN   = 0.02   # rad
+_REACTION_PRE_S = 1.0
+_REACTION_HORIZON_S = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +88,21 @@ def _bucket(rows: list[TelRow], t_ref: float, window_s: float = 5.0) -> dict[int
 
 def _mean(vals: list[float]) -> Optional[float]:
     return sum(vals) / len(vals) if vals else None
+
+
+def _mean_finite(vals: list[float]) -> Optional[float]:
+    good = [v for v in vals if math.isfinite(v)]
+    return (sum(good) / len(good)) if good else None
+
+
+def _sgn(v: Optional[float], eps: float = 1e-6) -> int:
+    if v is None or not math.isfinite(v):
+        return 0
+    if v > eps:
+        return 1
+    if v < -eps:
+        return -1
+    return 0
 
 
 def _stats(rows: list[TelRow]) -> dict:
@@ -121,12 +138,313 @@ def _diff_flag(a: Optional[float], b: Optional[float],
     return f"{d:+{fmt}}{flag}"
 
 
+def _bucket_control(rows: list[TelRow], t_ref: float, window_s: float) -> dict[int, dict]:
+    """Bucket rate-loop diagnostics after t_ref.
+
+    Returns per-bucket means for error and PID contributions on each axis.
+    """
+    out: dict[int, dict] = {}
+    by_key: dict[int, list[TelRow]] = {}
+    for r in rows:
+        if r.damp_alpha != 0.0:
+            continue
+        dt = r.t_sim - t_ref
+        if dt < 0.0:
+            continue
+        key = int(dt // window_s)
+        by_key.setdefault(key, []).append(r)
+
+    axes = [
+        ("roll",  "rate_roll_p_contrib",  "rate_roll_i_contrib",  "rate_roll_d_contrib",  "rate_roll_ff_contrib"),
+        ("pitch", "rate_pitch_p_contrib", "rate_pitch_i_contrib", "rate_pitch_d_contrib", "rate_pitch_ff_contrib"),
+        ("yaw",   "rate_yaw_p_contrib",   "rate_yaw_i_contrib",   "rate_yaw_d_contrib",   "rate_yaw_ff_contrib"),
+    ]
+
+    def _axis_error(r: TelRow, axis: str) -> float:
+        if axis == "roll":
+            return float(r.roll_sp_rads - r.omega_x)
+        if axis == "pitch":
+            return float(r.pitch_sp_rads - r.omega_y)
+        return float(r.yaw_sp_rads - r.omega_z)
+
+    for key, group in by_key.items():
+        d: dict = {"n": len(group)}
+        for name, p_f, i_f, d_f, ff_f in axes:
+            err = _mean_finite([_axis_error(r, name) for r in group])
+            p = _mean_finite([getattr(r, p_f) for r in group])
+            i = _mean_finite([getattr(r, i_f) for r in group])
+            dd = _mean_finite([getattr(r, d_f) for r in group])
+            ff = _mean_finite([getattr(r, ff_f) for r in group])
+            total = None
+            parts = [x for x in [p, i, dd, ff] if x is not None and math.isfinite(x)]
+            if parts:
+                total = sum(parts)
+            d[name] = {
+                "err": err,
+                "p": p,
+                "i": i,
+                "d": dd,
+                "ff": ff,
+                "total": total,
+            }
+        out[key] = d
+    return out
+
+
+def _print_pid_diagnostics(
+    rows_a: list[TelRow], rows_b: list[TelRow],
+    label_a: str, label_b: str,
+    t_kin_a: float, t_kin_b: float,
+    window_s: float,
+) -> None:
+    """Print whether both runs are correcting the same rate error with similar commands."""
+    ca = _bucket_control(rows_a, t_kin_a, window_s)
+    cb = _bucket_control(rows_b, t_kin_b, window_s)
+    common = sorted(set(ca) & set(cb))
+    if not common:
+        print("\nPID diagnostics: no overlapping free-flight control buckets.")
+        return
+
+    print("\nPID diagnostics (rate loop) -- are both runs correcting the same error?")
+    print(f"  Bucket size: {window_s:.1f}s, overlapping buckets: {len(common)}")
+
+    axes = ["roll", "pitch", "yaw"]
+    for axis in axes:
+        err_sign_match = 0
+        cmd_sign_match = 0
+        both_correct = 0
+        valid_err = 0
+        valid_cmd = 0
+        valid_correct = 0
+
+        disagree_rows: list[tuple[float, dict, dict]] = []
+        abs_means_a = {"p": [], "i": [], "d": [], "ff": []}
+        abs_means_b = {"p": [], "i": [], "d": [], "ff": []}
+
+        for key in common:
+            a = ca[key][axis]
+            b = cb[key][axis]
+            t_rel = key * window_s
+
+            for term in ["p", "i", "d", "ff"]:
+                va = a.get(term)
+                vb = b.get(term)
+                if va is not None and math.isfinite(va):
+                    abs_means_a[term].append(abs(va))
+                if vb is not None and math.isfinite(vb):
+                    abs_means_b[term].append(abs(vb))
+
+            se_a = _sgn(a.get("err"))
+            se_b = _sgn(b.get("err"))
+            if se_a != 0 and se_b != 0:
+                valid_err += 1
+                if se_a == se_b:
+                    err_sign_match += 1
+
+            sc_a = _sgn(a.get("total"))
+            sc_b = _sgn(b.get("total"))
+            if sc_a != 0 and sc_b != 0:
+                valid_cmd += 1
+                if sc_a == sc_b:
+                    cmd_sign_match += 1
+
+            corr_a = (se_a != 0 and sc_a != 0 and se_a == sc_a)
+            corr_b = (se_b != 0 and sc_b != 0 and se_b == sc_b)
+            if (se_a != 0 and sc_a != 0 and se_b != 0 and sc_b != 0):
+                valid_correct += 1
+                if corr_a and corr_b:
+                    both_correct += 1
+                if (se_a != se_b) or (sc_a != sc_b) or (corr_a != corr_b):
+                    disagree_rows.append((t_rel, a, b))
+
+        def _pct(num: int, den: int) -> float:
+            return (100.0 * num / den) if den else float("nan")
+
+        dom_a = max(abs_means_a.items(), key=lambda kv: _mean(kv[1]) or -1.0)[0]
+        dom_b = max(abs_means_b.items(), key=lambda kv: _mean(kv[1]) or -1.0)[0]
+
+        print(f"\nAxis: {axis}")
+        print(
+            f"  Error sign match ({label_a} vs {label_b}): "
+            f"{err_sign_match}/{valid_err} ({_pct(err_sign_match, valid_err):.1f}%)"
+        )
+        print(
+            f"  Command sign match ({label_a} vs {label_b}): "
+            f"{cmd_sign_match}/{valid_cmd} ({_pct(cmd_sign_match, valid_cmd):.1f}%)"
+        )
+        print(
+            f"  Both correcting own error (sign(cmd)=sign(err)): "
+            f"{both_correct}/{valid_correct} ({_pct(both_correct, valid_correct):.1f}%)"
+        )
+        print(
+            f"  Dominant mean |term|: {label_a}={dom_a.upper()}  {label_b}={dom_b.upper()}"
+        )
+
+        if disagree_rows:
+            print("  First disagreement buckets (t_rel s):")
+            for t_rel, a, b in disagree_rows[:5]:
+                print(
+                    f"    t={t_rel:6.1f}  "
+                    f"err(A,B)=({a.get('err', float('nan')):+.3f},{b.get('err', float('nan')):+.3f})  "
+                    f"cmd(A,B)=({a.get('total', float('nan')):+.3f},{b.get('total', float('nan')):+.3f})"
+                )
+
+    print("\nNote: 'correcting own error' uses sign(cmd_total)=sign(rate_error).")
+
+
+def _rows_in_rel_window(rows: list[TelRow], t_kin: float, t0: float, t1: float) -> list[TelRow]:
+    return [r for r in rows if r.damp_alpha == 0.0 and t0 <= (r.t_sim - t_kin) < t1]
+
+
+def _mean_attr(rows: list[TelRow], attr: str) -> Optional[float]:
+    vals = [getattr(r, attr) for r in rows]
+    return _mean_finite(vals)
+
+
+def _dominant_pid_term(rows: list[TelRow], axis: str) -> str:
+    if axis == "roll":
+        fields = {
+            "P": "rate_roll_p_contrib",
+            "I": "rate_roll_i_contrib",
+            "D": "rate_roll_d_contrib",
+            "FF": "rate_roll_ff_contrib",
+        }
+    elif axis == "pitch":
+        fields = {
+            "P": "rate_pitch_p_contrib",
+            "I": "rate_pitch_i_contrib",
+            "D": "rate_pitch_d_contrib",
+            "FF": "rate_pitch_ff_contrib",
+        }
+    else:
+        fields = {
+            "P": "rate_yaw_p_contrib",
+            "I": "rate_yaw_i_contrib",
+            "D": "rate_yaw_d_contrib",
+            "FF": "rate_yaw_ff_contrib",
+        }
+    scored: list[tuple[str, float]] = []
+    for name, field in fields.items():
+        v = _mean_finite([abs(getattr(r, field)) for r in rows])
+        scored.append((name, v if v is not None else -1.0))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[0][0]
+
+
+def _axis_err_cmd(rows: list[TelRow], axis: str) -> tuple[Optional[float], Optional[float]]:
+    if axis == "roll":
+        e = _mean_finite([r.roll_sp_rads - r.omega_x for r in rows])
+        p = _mean_attr(rows, "rate_roll_p_contrib")
+        i = _mean_attr(rows, "rate_roll_i_contrib")
+        d = _mean_attr(rows, "rate_roll_d_contrib")
+        ff = _mean_attr(rows, "rate_roll_ff_contrib")
+    elif axis == "pitch":
+        e = _mean_finite([r.pitch_sp_rads - r.omega_y for r in rows])
+        p = _mean_attr(rows, "rate_pitch_p_contrib")
+        i = _mean_attr(rows, "rate_pitch_i_contrib")
+        d = _mean_attr(rows, "rate_pitch_d_contrib")
+        ff = _mean_attr(rows, "rate_pitch_ff_contrib")
+    else:
+        e = _mean_finite([r.yaw_sp_rads - r.omega_z for r in rows])
+        p = _mean_attr(rows, "rate_yaw_p_contrib")
+        i = _mean_attr(rows, "rate_yaw_i_contrib")
+        d = _mean_attr(rows, "rate_yaw_d_contrib")
+        ff = _mean_attr(rows, "rate_yaw_ff_contrib")
+    parts = [x for x in [p, i, d, ff] if x is not None and math.isfinite(x)]
+    cmd = sum(parts) if parts else None
+    return e, cmd
+
+
+def _print_first_divergence_reactions(
+    rows_a: list[TelRow], rows_b: list[TelRow],
+    label_a: str, label_b: str,
+    t_kin_a: float, t_kin_b: float,
+    first_diverge: Optional[float],
+    reaction_pre_s: float,
+    reaction_horizon_s: float,
+) -> None:
+    if first_diverge is None:
+        print("\nFirst-divergence reactions: not available (no divergence found).")
+        return
+
+    t0 = first_diverge
+    pre0 = max(0.0, t0 - reaction_pre_s)
+    post1 = t0 + reaction_horizon_s
+
+    a_pre = _rows_in_rel_window(rows_a, t_kin_a, pre0, t0)
+    b_pre = _rows_in_rel_window(rows_b, t_kin_b, pre0, t0)
+    a_post = _rows_in_rel_window(rows_a, t_kin_a, t0, post1)
+    b_post = _rows_in_rel_window(rows_b, t_kin_b, t0, post1)
+
+    print("\nFirst-divergence reactions (pre-noise window)")
+    print(f"  First divergence t_rel: {t0:.2f}s")
+    print(f"  Window: pre=[{pre0:.2f},{t0:.2f})  post=[{t0:.2f},{post1:.2f})")
+    print(f"  Samples: {label_a} pre={len(a_pre)} post={len(a_post)}; {label_b} pre={len(b_pre)} post={len(b_post)}")
+
+    def _safe_delta(post: Optional[float], pre: Optional[float]) -> Optional[float]:
+        if post is None or pre is None:
+            return None
+        return post - pre
+
+    def _fmt(v: Optional[float], fmt: str = "+.3f") -> str:
+        if v is None or not math.isfinite(v):
+            return "  n/a"
+        return format(v, fmt)
+
+    # Command-level reactions likely linked to tension divergence.
+    def _cyc_mag(rows: list[TelRow]) -> Optional[float]:
+        vals = [math.hypot(r.roll_sp_rads, r.pitch_sp_rads) for r in rows]
+        return _mean_finite(vals)
+
+    a_col_pre = _mean_attr(a_pre, "collective_rad")
+    a_col_post = _mean_attr(a_post, "collective_rad")
+    b_col_pre = _mean_attr(b_pre, "collective_rad")
+    b_col_post = _mean_attr(b_post, "collective_rad")
+
+    a_cyc_pre = _cyc_mag(a_pre)
+    a_cyc_post = _cyc_mag(a_post)
+    b_cyc_pre = _cyc_mag(b_pre)
+    b_cyc_post = _cyc_mag(b_post)
+
+    a_ten_pre = _mean_attr(a_pre, "tether_tension")
+    a_ten_post = _mean_attr(a_post, "tether_tension")
+    b_ten_pre = _mean_attr(b_pre, "tether_tension")
+    b_ten_post = _mean_attr(b_post, "tether_tension")
+
+    print("\n  Command/tension reaction summary (post - pre):")
+    print(f"    collective_rad  {label_a}: {_fmt(_safe_delta(a_col_post, a_col_pre))}   {label_b}: {_fmt(_safe_delta(b_col_post, b_col_pre))}")
+    print(f"    cyclic_sp_mag   {label_a}: {_fmt(_safe_delta(a_cyc_post, a_cyc_pre))}   {label_b}: {_fmt(_safe_delta(b_cyc_post, b_cyc_pre))}")
+    print(f"    tether_tension  {label_a}: {_fmt(_safe_delta(a_ten_post, a_ten_pre), '+.1f')}   {label_b}: {_fmt(_safe_delta(b_ten_post, b_ten_pre), '+.1f')}")
+
+    # Axis-wise: are both runs correcting the same error in this early reaction window?
+    print("\n  PID reaction at first divergence (post window means):")
+    for axis in ["roll", "pitch", "yaw"]:
+        e_a, c_a = _axis_err_cmd(a_post, axis)
+        e_b, c_b = _axis_err_cmd(b_post, axis)
+        corr_a = (_sgn(e_a) != 0 and _sgn(c_a) != 0 and _sgn(e_a) == _sgn(c_a))
+        corr_b = (_sgn(e_b) != 0 and _sgn(c_b) != 0 and _sgn(e_b) == _sgn(c_b))
+        same_err = (_sgn(e_a) != 0 and _sgn(e_b) != 0 and _sgn(e_a) == _sgn(e_b))
+        same_cmd = (_sgn(c_a) != 0 and _sgn(c_b) != 0 and _sgn(c_a) == _sgn(c_b))
+        dom_a = _dominant_pid_term(a_post, axis) if a_post else "n/a"
+        dom_b = _dominant_pid_term(b_post, axis) if b_post else "n/a"
+        print(
+            f"    {axis:>5}: "
+            f"err(A,B)=({_fmt(e_a)},{_fmt(e_b)})  "
+            f"cmd(A,B)=({_fmt(c_a)},{_fmt(c_b)})  "
+            f"same_err={same_err} same_cmd={same_cmd} "
+            f"correct(A,B)=({corr_a},{corr_b}) "
+            f"dom(A,B)=({dom_a},{dom_b})"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main report
 # ---------------------------------------------------------------------------
 
 def compare(name_a: str, name_b: str, window_s: float = 5.0,
-            do_plot: bool = False) -> None:
+            do_plot: bool = False,
+            reaction_pre_s: float = _REACTION_PRE_S,
+            reaction_horizon_s: float = _REACTION_HORIZON_S) -> None:
 
     dir_a = _LOG_DIR / name_a
     dir_b = _LOG_DIR / name_b
@@ -250,6 +568,15 @@ def compare(name_a: str, name_b: str, window_s: float = 5.0,
 
     _run_summary(rows_a, f"Run A [{name_a}]", t_kin_a)
     _run_summary(rows_b, f"Run B [{name_b}]", t_kin_b)
+    _print_pid_diagnostics(rows_a, rows_b, f"A[{name_a}]", f"B[{name_b}]", t_kin_a, t_kin_b, window_s)
+    _print_first_divergence_reactions(
+        rows_a, rows_b,
+        f"A[{name_a}]", f"B[{name_b}]",
+        t_kin_a, t_kin_b,
+        first_diverge,
+        reaction_pre_s,
+        reaction_horizon_s,
+    )
 
     # ── Optional plot ──────────────────────────────────────────────────────────
     if do_plot:
@@ -353,6 +680,17 @@ if __name__ == "__main__":
     parser.add_argument("run_b", help="Second test log directory name (in simulation/logs/)")
     parser.add_argument("--window", type=float, default=5.0,
                         help="Averaging window in seconds (default: 5.0)")
+    parser.add_argument("--reaction-pre", type=float, default=_REACTION_PRE_S,
+                        help="Seconds before first divergence for reaction baseline (default: 1.0)")
+    parser.add_argument("--reaction-horizon", type=float, default=_REACTION_HORIZON_S,
+                        help="Seconds after first divergence to analyze reactions (default: 3.0)")
     parser.add_argument("--plot", action="store_true", help="Save comparison plot")
     args = parser.parse_args()
-    compare(args.run_a, args.run_b, window_s=args.window, do_plot=args.plot)
+    compare(
+        args.run_a,
+        args.run_b,
+        window_s=args.window,
+        do_plot=args.plot,
+        reaction_pre_s=args.reaction_pre,
+        reaction_horizon_s=args.reaction_horizon,
+    )

@@ -59,7 +59,7 @@ CONTROL_COLS = [
     "lua_ol_alt_p_contrib",
     "lua_ol_alt_i_contrib",
     "lua_ol_alt_d_contrib",
-    "lua_ol_col_cmd_rad",
+    "lua_ol_thrust_cmd",
 ]
 
 PARAM_PREFIX_FOCUS = (
