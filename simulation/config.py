@@ -156,12 +156,6 @@ DEFAULTS: dict = {
     "mavlink_attitude_hz": 100.0,
     # Requested SERVO_OUTPUT_RAW message rate [Hz] over the dedicated link.
     "mavlink_servo_output_raw_hz": 100.0,
-    # Requested PID_TUNING message rate [Hz] over the dedicated link.
-    # 0 = disabled (default).  PID_TUNING is noisy (4 axes, high rate) and
-    # ArduPilot only emits it when GCS_PID_MASK is nonzero -- SITL test fixtures
-    # set both this and GCS_PID_MASK; leave disabled for real hardware/radio
-    # links to avoid saturating the link.
-    "mavlink_pid_tuning_hz": 0.0,
     # Periodic mediator-side diagnostics log interval for dedicated MAVLink rx.
     "mavlink_log_diag_interval_s": 5.0,
 

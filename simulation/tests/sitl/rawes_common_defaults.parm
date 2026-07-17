@@ -52,15 +52,12 @@ H_RSC_MODE        1      # passthrough: no main rotor motor
 H_TAIL_TYPE       3
 H_COL2YAW         0.0
 
-# AP yaw PID assist: P/I sized to match ArduCopter-Heli's stock default
-# (ATC_RAT_YAW_P~0.18) so the rate loop has enough authority to keep heading
-# error under the hardcoded 45 deg heading-error-max ceiling (see
-# design/flight_stack.md yaw-runaway diagnosis) -- rawes.lua still owns the
-# DC trim through H_YAW_TRIM.
-ATC_RAT_YAW_P     0.18
+# Small AP yaw PID assist: P handles fast disturbances and a tiny I removes
+# residual bias.  rawes.lua still owns the DC trim through H_YAW_TRIM.
+ATC_RAT_YAW_P     0.015
 ATC_RAT_YAW_D     0.0
 ATC_RAT_YAW_FLTD  10.0
-ATC_RAT_YAW_I     0.018
+ATC_RAT_YAW_I     0.0015
 
 # RAWES_* script-generated parameters (registered by rawes.lua via param:add_table).
 # These are script-generated (RAWES_*) params visible in GCS, registered by rawes.lua via param:add_table.

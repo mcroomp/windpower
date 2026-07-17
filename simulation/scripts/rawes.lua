@@ -261,7 +261,6 @@ local YAW_MOTOR_FUNC   = 36      -- ArduPilot servo function for Motor4 (SERVO9)
 local TEL_HZ           = 2.0     -- diagnostic NVF emission rate [Hz]  (RAWES_TEL_HZ)
 
 local _yaw_ff_trim  = 0.0     -- current H_YAW_TRIM value [0, YFF_MAX]
-_yaw_ff_seed        = nil     -- ground-provided equilibrium trim seed [0, YFF_MAX] (RAWES_YFF)
 local _nvf_last_ms  = nil     -- shared timer for all outer-rate NVF diagnostic emissions
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 -- Convert a millis() result to seconds (float).  On real ArduPilot millis()
@@ -873,24 +872,8 @@ local function yaw_trim_step(dt, u, psi_dot)
     return _yaw_ff_trim
 end
 
-local function run_yaw_trim(now, is_passive)
+local function run_yaw_trim(now)
     if not arming:is_armed() then return end
-    -- MODE_PASSIVE (kinematic hold): the body's gyro/PWM readback is a
-    -- simulation artifact (position/attitude is externally forced), so the
-    -- normal psi_dot feedback below would incorrectly converge the trim
-    -- toward whatever near-zero throttle currently holds a fake zero rate.
-    -- Instead, directly hold the ground-computed equilibrium seed (RAWES_YFF)
-    -- so the real SERVO9 PWM already matches the yaw-motor ODE's frozen IC
-    -- equilibrium by the time of kinematic release -- avoiding a step-input
-    -- torque mismatch that spins the hub.  Falls through to the normal
-    -- feedback path once mode leaves PASSIVE (release), continuing smoothly
-    -- from whatever _yaw_ff_trim was left at.
-    if is_passive and _yaw_ff_seed ~= nil then
-        _yaw_ff_trim = math.max(0.0, math.min(YFF_MAX, _yaw_ff_seed))
-        param:set("H_YAW_TRIM", _yaw_ff_trim)
-        _diag_set("YFF_T", _yaw_ff_trim)
-        return
-    end
     local gyro = ahrs:get_gyro()
     if not gyro then return end
     -- Read the total applied throttle from the SERVO9 output (H_YAW_TRIM +
@@ -1042,13 +1025,6 @@ local function update()
     if _nv_floats["RAWES_THR"] then _ic_pending_thrust = _nv_floats["RAWES_THR"] end
     if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
     if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
-    -- Equilibrium yaw-trim seed (ground-computed from IC rotor omega and the
-    -- GB4008 hub model -- see torque_model.equilibrium_throttle()).  Held
-    -- constant for the whole MODE_PASSIVE kinematic hold; consumed by
-    -- run_yaw_trim() below instead of its normal psi_dot feedback, which is
-    -- meaningless while the body is kinematically locked (see AGENTS.md /
-    -- design/flight_stack.md "Yaw observer in passive mode").
-    if _nv_floats["RAWES_YFF"] then _yaw_ff_seed = _nv_floats["RAWES_YFF"] end
     -- Optional fixed yaw target for MODE_PASSIVE.  When present, PASSIVE holds
     -- this absolute yaw instead of capturing (and holding) the spinning AHRS yaw.
     -- Sending RAWES_YIC_CAPTURE_SENTINEL instead captures roll/pitch/yaw all
@@ -1155,13 +1131,13 @@ local function update()
 
     if mode == MODE_PASSIVE then
         run_passive_mode(now)
-        run_yaw_trim(now, true)
+        run_yaw_trim(now)
         _diag_emit(now)
         return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_STEADY then
-        run_yaw_trim(now, false)
+        run_yaw_trim(now)
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
             _last_flight_ms = now
             run_flight()

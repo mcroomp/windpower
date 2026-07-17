@@ -47,12 +47,6 @@ class HeliRateController:
         self.pid_yaw   = AC_PID(params.yaw,   fs)
         self.swash = SwashH3(params.H_SW_H3_PHANG)
         self.out = HeliRateOutput()
-        # Per-axis output-saturation flags from the PREVIOUS tick's
-        # move_actuators-equivalent below — fed into THIS tick's update_all()
-        # anti-windup `limit` argument, exactly mirroring how real AP feeds
-        # `_motors.limit.roll/pitch/yaw` (set once per cycle in move_actuators)
-        # back into `_pid_rate_*.update_all()` on the NEXT cycle.
-        self._prev_saturated: tuple[bool, bool, bool] = (False, False, False)
 
     def reload_params(self) -> None:
         self.pid_roll.reload_params()
@@ -64,13 +58,13 @@ class HeliRateController:
         self.pid_roll.reset()
         self.pid_pitch.reset()
         self.pid_yaw.reset()
-        self._prev_saturated = (False, False, False)
 
     def update(self,
                rate_target_rads: tuple[float, float, float],
                gyro_rate_rads:   tuple[float, float, float],
                dt: float,
                collective_norm: float = 0.0,
+               saturated: tuple[bool, bool, bool] = (False, False, False),
                sim_time_s: float = 0.0,
                ) -> HeliRateOutput:
         """Run one tick of the rate loop.
@@ -81,11 +75,12 @@ class HeliRateController:
         gyro_rate_rads   : measured body rates (already gyro-filtered), rad/s.
         dt               : tick duration, seconds.
         collective_norm  : current collective in [-1, 1]; used by hover-roll-trim.
+        saturated        : per-axis output saturation flags for anti-windup.
         sim_time_s       : simulation time (s) for slew-rate limiter timestamps.
         """
         tr, tp, ty = rate_target_rads
         gr, gp, gy = gyro_rate_rads
-        sr, sp, sy = self._prev_saturated
+        sr, sp, sy = saturated
         p = self.params
 
         # Leaky integrator: decay I toward ±ILMI before PID update.
@@ -120,26 +115,6 @@ class HeliRateController:
         if p.HOVR_ROL_TRM_cd != 0.0:
             trim_rad = math.radians(p.HOVR_ROL_TRM_cd * 0.01)
             roll_out += trim_rad * max(0.0, collective_norm)
-
-        # ------------------------------------------------------------------
-        # Cyclic-magnitude rescale + saturation detection — AP
-        # `AP_MotorsHeli_Single::move_actuators`: when the combined roll/pitch
-        # cyclic magnitude exceeds `H_CYC_MAX` (centi-degrees, out of the
-        # ±4500 cd full range), both axes are rescaled down proportionally
-        # and `_motors.limit.roll/pitch` are set — fed back into next tick's
-        # rate-PID anti-windup above. Yaw saturates independently at ±1
-        # (`move_yaw`).
-        # ------------------------------------------------------------------
-        cyc_max_norm = p.CYC_MAX_cd / 4500.0
-        total_out = math.hypot(pitch_out, roll_out)
-        sat_roll = sat_pitch = False
-        if cyc_max_norm > 0.0 and total_out > cyc_max_norm:
-            ratio = cyc_max_norm / total_out
-            roll_out *= ratio
-            pitch_out *= ratio
-            sat_roll = sat_pitch = True
-        sat_yaw = abs(yaw_out) > p.output_limit
-        self._prev_saturated = (sat_roll, sat_pitch, sat_yaw)
 
         # ------------------------------------------------------------------
         # Swash phase rotation — `H_SW_H3_PHANG`

@@ -28,12 +28,6 @@ GPS2_DELAY_MS     220
 COMPASS_USE       0      # disable compass yaw source
 SCR_ENABLE        1      # enable Lua scripting
 
-# Emit PID_TUNING (roll+pitch+yaw+accelZ) for telemetry logging. See
-# copter-heli.parm for the bitmask reference; this is SITL-only (over the
-# dedicated mavlink_log_connection UDP/TCP link, not a real telemetry radio)
-# because PID_TUNING at high rate is too noisy for a real MAVLink radio link.
-GCS_PID_MASK      15
-
 # Relax GPS checks / innovation gates for SITL boot determinism.
 EK3_GPS_CHECK   0      # skip HDOP/speed-accuracy/min-sat checks in SITL JSON GPS
 EK3_POS_I_GATE  50.0   # widened position innovation gate (sigma)

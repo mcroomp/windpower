@@ -751,7 +751,6 @@ def _acro_stack(tmp_path, *, extra_config=None,
     _med_extra.setdefault("mavlink_att_target_hz", 100.0)
     _med_extra.setdefault("mavlink_attitude_hz", 100.0)
     _med_extra.setdefault("mavlink_servo_output_raw_hz", 100.0)
-    _med_extra.setdefault("mavlink_pid_tuning_hz", 100.0)
 
     with _sitl_stack(
         tmp_path,
@@ -1768,13 +1767,11 @@ _TORQUE_STARTUP_HOLD_S: float = 15.0   # SITL-seconds: enough for EKF + arming b
 # (SCR_ENABLE=0, or Lua in MODE_NONE).  Those tests keep a nonzero AP yaw P here.
 #
 # NOTE: this set NO LONGER mirrors rawes_common_defaults.parm.  The flight/vanilla
-# parm chain uses ATC_RAT_YAW_P/I = 0.18/0.018 (D=0 -- see rawes_common_defaults.parm)
-# sized to match ArduCopter-Heli's stock default so the rate loop has enough
-# authority to keep heading error under the 45 deg heading-error-max ceiling;
-# H_YAW_TRIM (written by the Lua manual PID in MODE_PASSIVE/STEADY) carries the
-# DC hold. This override set is intentionally different: it drives
-# the AP DDFP loop directly as the SOLE yaw actuator, so it must retain a much
-# larger P. Rationale for P=0.02 here: with the inertial motor model the
+# parm chain now zeroes the AP yaw PID (ATC_RAT_YAW_P/I/D = 0) because yaw there is
+# regulated by the Lua manual PID (MODE_PASSIVE/STEADY) writing H_YAW_TRIM; a
+# nonzero AP yaw gain would fight the Lua loop and drive a limit cycle.  This
+# override set is intentionally different: it drives the AP DDFP loop directly, so
+# it must retain P>0.  Rationale for P=0.02: with the inertial motor model the
 # high-authority GB4008 (~58 rad/s per throttle) is stable at P=0.02 with a
 # filtered-but-off D; H_YAW_TRIM carries the DC hold so I=0.
 # Fixtures overlay this with EKF/compass/mode/script params only -- never with a

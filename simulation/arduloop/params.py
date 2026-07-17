@@ -108,12 +108,6 @@ class HeliParams:
     # Output limit per axis [-1, 1] like motor mixer normalised cyclic.
     output_limit: float = 1.0
 
-    # `H_CYC_MAX` (centi-degrees) — combined roll/pitch cyclic magnitude above
-    # which AP_MotorsHeli_Single::move_actuators rescales roll/pitch down and
-    # sets `_motors.limit.roll/pitch` (anti-windup feedback for next tick).
-    # AP default AP_MOTORS_HELI_SWASH_CYCLIC_MAX = 2500 centi-degrees.
-    CYC_MAX_cd: float = 2500.0
-
     # Attitude (outer) P-loop gains — `ATC_ANG_RLL_P / PIT_P / YAW_P`.
     # 0.0 = no outer-loop correction (safe default for ACRO-only use).
     ATC_ANG_RLL_P: float = 0.0
@@ -160,6 +154,5 @@ class HeliParams:
             ATC_RATE_P_MAX    = _f("ATC_RATE_P_MAX"),
             ATC_RATE_Y_MAX    = _f("ATC_RATE_Y_MAX"),
             ATC_INPUT_TC      = _f("ATC_INPUT_TC"),
-            CYC_MAX_cd        = _f("H_CYC_MAX", 2500.0),
             **overrides,
         )

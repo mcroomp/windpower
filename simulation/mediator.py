@@ -256,8 +256,6 @@ def run_mediator(args, trajectory=None):
             att_target_hz = float(cfg.get("mavlink_att_target_hz", 10.0))
             attitude_hz = float(cfg.get("mavlink_attitude_hz", 50.0))
             servo_hz = float(cfg.get("mavlink_servo_output_raw_hz", 50.0))
-            local_position_ned_hz = float(cfg.get("mavlink_local_position_ned_hz", 10.0))
-            pid_tuning_hz = float(cfg.get("mavlink_pid_tuning_hz", 0.0))
 
             def _request_interval(message_name: str, message_id: int, rate_hz: float) -> None:
                 interval_us = max(1, int(round(1_000_000.0 / max(rate_hz, 1.0))))
@@ -300,21 +298,6 @@ def run_mediator(args, trajectory=None):
                     mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW,
                     servo_hz,
                 )
-                _request_interval(
-                    "LOCAL_POSITION_NED",
-                    mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
-                    local_position_ned_hz,
-                )
-                # PID_TUNING: SITL-only (noisy, 4 axes; ArduPilot also gates
-                # emission on GCS_PID_MASK, set in rawes_sitl_defaults.parm).
-                # 0 Hz (the default) skips the request entirely so this never
-                # adds traffic on a real telemetry radio link.
-                if pid_tuning_hz > 0.0:
-                    _request_interval(
-                        "PID_TUNING",
-                        mavutil.mavlink.MAVLINK_MSG_ID_PID_TUNING,
-                        pid_tuning_hz,
-                    )
             except Exception as exc:
                 log.warning("Failed requesting dedicated MAVLink intervals: %s", exc)
 
@@ -372,7 +355,7 @@ def run_mediator(args, trajectory=None):
                 if _tu:
                     fields["mav_time_usec"] = float(_tu)
 
-                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT", "LOCAL_POSITION_NED", "PID_TUNING"):
+                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT", "LOCAL_POSITION_NED"):
                     if fields:
                         update_async_mavlink(fields)
                     continue
@@ -413,18 +396,6 @@ def run_mediator(args, trajectory=None):
                     fields["ekf_pos_x"] = float(getattr(msg, "x", float("nan")))
                     fields["ekf_pos_y"] = float(getattr(msg, "y", float("nan")))
                     fields["ekf_pos_z"] = float(getattr(msg, "z", float("nan")))
-                elif mtype == "PID_TUNING":
-                    # ArduPilot emits axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
-                    # Only roll/pitch/yaw have telemetry columns (ap_rate_pid_terms).
-                    axis = int(getattr(msg, "axis", -1))
-                    prefix = {1: "rate_roll", 2: "rate_pitch", 3: "rate_yaw"}.get(axis)
-                    if prefix is not None:
-                        fields[f"{prefix}_p_contrib"] = float(getattr(msg, "P", float("nan")))
-                        fields[f"{prefix}_i_contrib"] = float(getattr(msg, "I", float("nan")))
-                        fields[f"{prefix}_d_contrib"] = float(getattr(msg, "D", float("nan")))
-                        fields[f"{prefix}_ff_contrib"] = float(getattr(msg, "FF", float("nan")))
-                        fields[f"{prefix}_pdmod"] = float(getattr(msg, "PDmod", float("nan")))
-                        fields[f"{prefix}_srate"] = float(getattr(msg, "SRate", float("nan")))
 
                 if fields:
                     update_async_mavlink(fields)
@@ -835,17 +806,17 @@ def run_mediator(args, trajectory=None):
         # kinematic ends, the tether is pre-tensioned correctly without huge spike.
         core.tether.rest_length = _winch_node.rest_length
 
-        # Yaw authority: real GB4008 Motor4/SERVO9 PWM readback drives the
-        # torque_model.HubState ESC-governor ODE (same ODE mediator_torque.py
-        # uses).  rawes.lua's run_yaw_trim() is the REAL ArduPilot Lua script
-        # here (not a Python stand-in) -- it reads this same SERVO9 PWM via
-        # SRV_Channels:get_output_pwm() every tick, armed or not, in both
-        # MODE_PASSIVE (kinematic hold) and MODE_STEADY. See repo memory
-        # sitl-param-verify-and-yaw-ff.md for the earlier failed attempt at
-        # this (combined with removing rawes.lua's CH4 override -- CH4 is an
-        # unrelated, orthogonal mechanism and must stay intact).
-        _yaw_throttle = float(np.clip((sitl.last_pwm_raw[8] - 1000.0) / 1000.0, 0.0, 1.0))
-        result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat, yaw_throttle=_yaw_throttle)
+        # Yaw authority: NOT wired for the real SITL/flight-test path. The
+        # torque_model.HubState ESC-governor ODE + real-PWM readback was tried
+        # here, but reproduces the known-unresolved mediator_torque closed-loop
+        # yaw coupling issue (see repo memory sitl-param-verify-and-yaw-ff.md,
+        # "Root cause 2") even for the plain steady-flight test -- the hub
+        # spins up unbounded (SPIN WARN, auto-disarm) because there's no trim
+        # observer counterpart in this path (unlike GUIDED-mode simtests via
+        # mock_ardupilot.step_physics(), which does have YawTrimObserver and
+        # passes). Left as pure damp-to-zero here (yaw_throttle=None) pending
+        # a dedicated fix to the mediator_torque closed-loop coupling.
+        result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat)
         _damp_alpha = float(result.get("damp_alpha", 0.0))
 
         # ── Unpack physics results ────────────────────────────────────────
@@ -1008,24 +979,6 @@ def run_mediator(args, trajectory=None):
                 "mav_nvf_yff_trim":  _mav_async.get("mav_nvf_yff_trim", float("nan")),
                 "mav_nvf_yff_u":     _mav_async.get("mav_nvf_yff_u",    float("nan")),
                 "mav_nvf_yff_gz":    _mav_async.get("mav_nvf_yff_gz",   float("nan")),
-                "rate_roll_p_contrib":  _mav_async.get("rate_roll_p_contrib",  float("nan")),
-                "rate_roll_i_contrib":  _mav_async.get("rate_roll_i_contrib",  float("nan")),
-                "rate_roll_d_contrib":  _mav_async.get("rate_roll_d_contrib",  float("nan")),
-                "rate_roll_ff_contrib": _mav_async.get("rate_roll_ff_contrib", float("nan")),
-                "rate_pitch_p_contrib":  _mav_async.get("rate_pitch_p_contrib",  float("nan")),
-                "rate_pitch_i_contrib":  _mav_async.get("rate_pitch_i_contrib",  float("nan")),
-                "rate_pitch_d_contrib":  _mav_async.get("rate_pitch_d_contrib",  float("nan")),
-                "rate_pitch_ff_contrib": _mav_async.get("rate_pitch_ff_contrib", float("nan")),
-                "rate_yaw_p_contrib":  _mav_async.get("rate_yaw_p_contrib",  float("nan")),
-                "rate_yaw_i_contrib":  _mav_async.get("rate_yaw_i_contrib",  float("nan")),
-                "rate_yaw_d_contrib":  _mav_async.get("rate_yaw_d_contrib",  float("nan")),
-                "rate_yaw_ff_contrib": _mav_async.get("rate_yaw_ff_contrib", float("nan")),
-                "rate_roll_pdmod":   _mav_async.get("rate_roll_pdmod",  float("nan")),
-                "rate_roll_srate":   _mav_async.get("rate_roll_srate",  float("nan")),
-                "rate_pitch_pdmod":  _mav_async.get("rate_pitch_pdmod", float("nan")),
-                "rate_pitch_srate":  _mav_async.get("rate_pitch_srate", float("nan")),
-                "rate_yaw_pdmod":    _mav_async.get("rate_yaw_pdmod",   float("nan")),
-                "rate_yaw_srate":    _mav_async.get("rate_yaw_srate",   float("nan")),
                 "ekf_pos_x":         _mav_async.get("ekf_pos_x",        float("nan")),
                 "ekf_pos_y":         _mav_async.get("ekf_pos_y",        float("nan")),
                 "ekf_pos_z":         _mav_async.get("ekf_pos_z",        float("nan")),
