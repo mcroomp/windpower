@@ -835,17 +835,11 @@ def run_mediator(args, trajectory=None):
         # kinematic ends, the tether is pre-tensioned correctly without huge spike.
         core.tether.rest_length = _winch_node.rest_length
 
-        # Yaw authority: real GB4008 Motor4/SERVO9 PWM readback drives the
-        # torque_model.HubState ESC-governor ODE (same ODE mediator_torque.py
-        # uses).  rawes.lua's run_yaw_trim() is the REAL ArduPilot Lua script
-        # here (not a Python stand-in) -- it reads this same SERVO9 PWM via
-        # SRV_Channels:get_output_pwm() every tick, armed or not, in both
-        # MODE_PASSIVE (kinematic hold) and MODE_STEADY. See repo memory
-        # sitl-param-verify-and-yaw-ff.md for the earlier failed attempt at
-        # this (combined with removing rawes.lua's CH4 override -- CH4 is an
-        # unrelated, orthogonal mechanism and must stay intact).
-        _yaw_throttle = float(np.clip((sitl.last_pwm_raw[8] - 1000.0) / 1000.0, 0.0, 1.0))
-        result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat, yaw_throttle=_yaw_throttle)
+        # SITL temporarily uses damping-only yaw again.  We still log SERVO9,
+        # but do not feed the tail-motor throttle into the shared physics core.
+        # This keeps the release behavior simple while we focus on logging and
+        # documentation work.
+        result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat, yaw_throttle=None)
         _damp_alpha = float(result.get("damp_alpha", 0.0))
 
         # ── Unpack physics results ────────────────────────────────────────
