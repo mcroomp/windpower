@@ -223,6 +223,12 @@ class TelRow:
     rate_yaw_i_contrib:  float = float("nan")
     rate_yaw_d_contrib:  float = float("nan")
     rate_yaw_ff_contrib: float = float("nan")
+    rate_roll_pdmod:  float = float("nan")
+    rate_roll_srate:  float = float("nan")
+    rate_pitch_pdmod: float = float("nan")
+    rate_pitch_srate: float = float("nan")
+    rate_yaw_pdmod:   float = float("nan")
+    rate_yaw_srate:   float = float("nan")
     vel_radial_mps:     float = 0.0   # actual hub radial velocity (outward +) [m/s]
     orbit_radius_m:     float = 0.0   # horizontal radius from anchor [m]
     orbit_azimuth_rad:  float = 0.0   # atan2(E, N) horizontal azimuth [rad]
@@ -475,6 +481,12 @@ class TelRow:
         rate_yaw_i_contrib: float = float("nan"),
         rate_yaw_d_contrib: float = float("nan"),
         rate_yaw_ff_contrib: float = float("nan"),
+        rate_roll_pdmod: float = float("nan"),
+        rate_roll_srate: float = float("nan"),
+        rate_pitch_pdmod: float = float("nan"),
+        rate_pitch_srate: float = float("nan"),
+        rate_yaw_pdmod: float = float("nan"),
+        rate_yaw_srate: float = float("nan"),
         vel_radial_mps: float = 0.0,
         net_moment=None,
         mav_att_roll_deg: float = float("nan"),
@@ -718,6 +730,12 @@ class TelRow:
             rate_yaw_i_contrib  = float(rate_yaw_i_contrib),
             rate_yaw_d_contrib  = float(rate_yaw_d_contrib),
             rate_yaw_ff_contrib = float(rate_yaw_ff_contrib),
+            rate_roll_pdmod  = float(rate_roll_pdmod),
+            rate_roll_srate  = float(rate_roll_srate),
+            rate_pitch_pdmod = float(rate_pitch_pdmod),
+            rate_pitch_srate = float(rate_pitch_srate),
+            rate_yaw_pdmod   = float(rate_yaw_pdmod),
+            rate_yaw_srate   = float(rate_yaw_srate),
             vel_radial_mps      = float(vel_radial_mps if vel_radial_mps != 0.0 else vel_radial_auto),
             orbit_radius_m      = orbit_radius,
             orbit_azimuth_rad   = orbit_azimuth,

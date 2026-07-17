@@ -232,31 +232,6 @@ class PhysicsCore:
     def tether(self):
         return self._tether
 
-    def hub_observe(self) -> dict:
-        """
-        Raw observable state — only what real hardware sensors can measure.
-
-        Returns a plain dict so physics_core.py stays free of dataclass
-        dependencies.  PhysicsRunner.observe() wraps this in SensorReading.
-
-        Keys
-        ----
-        R           ndarray (3,3) — body→world rotation matrix (AHRS)
-        pos         ndarray (3,)  — NED position [m] (GPS/EKF)
-        vel         ndarray (3,)  — NED velocity [m/s] (GPS/EKF)
-        omega_world ndarray (3,)  — world-frame angular velocity [rad/s] (IMU input;
-                                    sensor computes gyro_body = R.T @ omega_world)
-        omega_spin  float         — rotor spin rate [rad/s] (ESC telemetry)
-        """
-        hub = self._dyn.state
-        return {
-            "R":           hub["R"],
-            "pos":         hub["pos"],
-            "vel":         hub["vel"],
-            "omega_world": hub["omega"],
-            "omega_spin":  self._omega_rad_s,
-        }
-
     def hub_observe(self) -> HubObservation:
         """Return current observable hub state as a HubObservation."""
         hub = self._dyn.state

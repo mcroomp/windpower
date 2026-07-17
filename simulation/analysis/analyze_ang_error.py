@@ -206,9 +206,15 @@ def _heading_error_max(rat_yaw_p: float, ang_yaw_p: float, acc_y_degss: float) -
 # ── log loading ───────────────────────────────────────────────────────────────
 
 def _dynamics_start_tsim(log_dir: Path) -> float | None:
+    """t_sim [s] of the dynamics-start reference for t_dyn=0.
+
+    Prefers `dynamics_start` (torque-test convention); falls back to
+    `kinematic_exit` (flight-stack convention: t_dyn=0 at kinematic release).
+    """
     p = log_dir / "events.jsonl"
     if not p.exists():
         return None
+    fallback: float | None = None
     for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -219,7 +225,9 @@ def _dynamics_start_tsim(log_dir: Path) -> float | None:
             continue
         if e.get("event") == "dynamics_start":
             return float(e["t_sim"])
-    return None
+        if e.get("event") == "kinematic_exit":
+            fallback = float(e["t_sim"])
+    return fallback
 
 
 def _load_dataflash(bin_path: Path, t_dyn_start_s: float) -> dict:

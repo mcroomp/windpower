@@ -127,6 +127,15 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "rate_yaw_i_contrib",
             "rate_yaw_d_contrib",
             "rate_yaw_ff_contrib",
+            # PD-sum derating factor (1.0=no slew-rate limiting) and the
+            # slew-limiter's tracked output slew rate, mirroring MAVLink
+            # PID_TUNING's PDmod/SRate fields for direct SITL comparison.
+            "rate_roll_pdmod",
+            "rate_roll_srate",
+            "rate_pitch_pdmod",
+            "rate_pitch_srate",
+            "rate_yaw_pdmod",
+            "rate_yaw_srate",
         ),
     ),
     # Net force/moment assembled in PhysicsCore before state integration.
@@ -311,4 +320,22 @@ ASYNC_MAV_COLUMNS: tuple[str, ...] = (
     "mav_nvf_yff_trim",
     "mav_nvf_yff_u",
     "mav_nvf_yff_gz",
+    "rate_roll_p_contrib",
+    "rate_roll_i_contrib",
+    "rate_roll_d_contrib",
+    "rate_roll_ff_contrib",
+    "rate_pitch_p_contrib",
+    "rate_pitch_i_contrib",
+    "rate_pitch_d_contrib",
+    "rate_pitch_ff_contrib",
+    "rate_yaw_p_contrib",
+    "rate_yaw_i_contrib",
+    "rate_yaw_d_contrib",
+    "rate_yaw_ff_contrib",
+    "rate_roll_pdmod",
+    "rate_roll_srate",
+    "rate_pitch_pdmod",
+    "rate_pitch_srate",
+    "rate_yaw_pdmod",
+    "rate_yaw_srate",
 )

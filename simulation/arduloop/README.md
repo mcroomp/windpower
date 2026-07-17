@@ -225,10 +225,17 @@ out = ctrl.update(
     rate_target_rads=(roll_rate, pitch_rate, yaw_rate),
     gyro_rate_rads=(gr, gp, gy),
     dt=dt,
-    collective_norm=0.5,
-    saturated=(False, False, False))
+    collective_norm=0.5)
 # out.roll_cyclic, out.pitch_cyclic, out.yaw_cmd
 ```
+
+Anti-windup saturation flags (AP `_motors.limit.roll/pitch/yaw`) are computed
+internally each tick from the combined roll/pitch cyclic magnitude vs
+`H_CYC_MAX` (and yaw vs the output limit), then fed into the NEXT tick's
+`update_all(limit=...)` — mirroring AP's one-cycle-delayed feedback from
+`AP_MotorsHeli_Single::move_actuators`. There is no external `saturated`
+parameter to pass in.
+
 
 Signal path per axis (`pid.py` / `AC_PID::update_all`):
 
