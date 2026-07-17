@@ -173,6 +173,9 @@ class PIDDebug:
     FF:        float = 0.0
     DFF:       float = 0.0
     out:       float = 0.0
+    # Mirror MAVLink PID_TUNING fields for direct comparison against real SITL logs.
+    PDmod:     float = 1.0   # P/D derating factor from the slew-rate limiter (1.0 = no limiting)
+    SRate:     float = 0.0   # output slew rate [units/s] from the slew-rate limiter
 
 
 class AC_PID:
@@ -314,6 +317,7 @@ class AC_PID:
 
         # Slew rate limiter: reduce P+D when output changes faster than SMAX.
         # Matches AC_PID::update_all line: Dmod = _slew_limiter.modifier(P+D, dt)
+        Dmod = 1.0
         if p.SMAX > 0.0:
             Dmod = self._slew_limiter.modifier(
                 (P_out + D_out) * self._slew_limit_scale, dt, sim_time_s)
@@ -343,6 +347,8 @@ class AC_PID:
         d.FF = FF_out
         d.DFF = DFF_out
         d.out = out
+        d.PDmod = Dmod
+        d.SRate = self._slew_limiter.get_slew_rate() if p.SMAX > 0.0 else 0.0
         return out
 
     # ------------------------------------------------------------------

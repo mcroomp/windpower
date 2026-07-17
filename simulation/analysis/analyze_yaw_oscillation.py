@@ -52,6 +52,9 @@ def load(path: str) -> dict:
     nvf: dict[str, list] = {k: [] for k in
                             ("YFF_T", "YFF_U", "YFF_GZ", "YFF_A", "YFF_KD")}
     nvf_t: dict[str, list] = {k: [] for k in nvf}
+    rpm_t, rpm1 = [], []
+    pidy_t: list = []
+    pidy_p, pidy_i, pidy_d, pidy_ff = [], [], [], []
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -75,6 +78,17 @@ def load(path: str) -> dict:
             elif mt == "SERVO_OUTPUT_RAW":
                 srv_t.append(t)
                 srv_pwm.append(float(d.get("servo9_raw", math.nan)))
+            elif mt == "RPM":
+                rpm_t.append(t)
+                rpm1.append(float(d.get("rpm1", math.nan)))
+            elif mt == "PID_TUNING":
+                # ArduPilot axis: 1=roll, 2=pitch, 3=yaw, 4=accelz.
+                if int(d.get("axis", -1)) == 3:
+                    pidy_t.append(t)
+                    pidy_p.append(float(d.get("P", math.nan)))
+                    pidy_i.append(float(d.get("I", math.nan)))
+                    pidy_d.append(float(d.get("D", math.nan)))
+                    pidy_ff.append(float(d.get("FF", math.nan)))
             elif mt == "NAMED_VALUE_FLOAT":
                 nm = d.get("name")
                 if nm in nvf:
@@ -87,7 +101,21 @@ def load(path: str) -> dict:
         "srv_t": np.array(srv_t), "srv_pwm": np.array(srv_pwm),
         "nvf": {k: np.array(v) for k, v in nvf.items()},
         "nvf_t": {k: np.array(v) for k, v in nvf_t.items()},
+        "rpm_t": np.array(rpm_t), "rpm1": np.array(rpm1),
+        "pidy_t": np.array(pidy_t),
+        "pidy_p": np.array(pidy_p),
+        "pidy_i": np.array(pidy_i),
+        "pidy_d": np.array(pidy_d),
+        "pidy_ff": np.array(pidy_ff),
     }
+
+
+def _window_filter(t_ms: np.ndarray, t0_ms: float, window: "tuple[float, float] | None"):
+    """Boolean mask selecting samples with (t_ms - t0_ms)/1000 in [window[0], window[1]]."""
+    if window is None or len(t_ms) == 0:
+        return np.ones(len(t_ms), dtype=bool)
+    rel_s = (t_ms - t0_ms) / 1000.0
+    return (rel_s >= window[0]) & (rel_s <= window[1])
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +283,7 @@ def correction_analysis(t_srv_ms, pwm, t_att_ms, rate):
 # Report
 # ---------------------------------------------------------------------------
 
-def analyze(path: str, do_plot: bool = False) -> None:
+def analyze(path: str, do_plot: bool = False, window: "tuple[float, float] | None" = None) -> None:
     D = load(path)
     att_t, yaw, rate = D["att_t"], D["att_yaw"], D["att_rate"]
     srv_t, pwm = D["srv_t"], D["srv_pwm"]
@@ -267,6 +295,26 @@ def analyze(path: str, do_plot: bool = False) -> None:
         return
 
     t0 = min(att_t[0], srv_t[0])
+
+    if window is not None:
+        print(f"  window = [{window[0]:.1f}, {window[1]:.1f}] s relative to first ATTITUDE/SERVO sample")
+        m_att = _window_filter(att_t, t0, window)
+        att_t, yaw, rate = att_t[m_att], yaw[m_att], rate[m_att]
+        m_srv = _window_filter(srv_t, t0, window)
+        srv_t, pwm = srv_t[m_srv], pwm[m_srv]
+        for k in nvf:
+            m = _window_filter(nvf_t[k], t0, window)
+            nvf_t[k], nvf[k] = nvf_t[k][m], nvf[k][m]
+        m_rpm = _window_filter(D["rpm_t"], t0, window)
+        D["rpm_t"], D["rpm1"] = D["rpm_t"][m_rpm], D["rpm1"][m_rpm]
+        m_pidy = _window_filter(D["pidy_t"], t0, window)
+        for k in ("pidy_t", "pidy_p", "pidy_i", "pidy_d", "pidy_ff"):
+            D[k] = D[k][m_pidy]
+
+    if len(att_t) < 4 or len(srv_t) < 4:
+        print("  Not enough ATTITUDE/SERVO samples inside window to analyze.")
+        return
+
     dur = (max(att_t[-1], srv_t[-1]) - t0) / 1000.0
     print(f"  duration = {dur:.1f} s   ATTITUDE N={len(att_t)} "
           f"({len(att_t)/dur:.1f} Hz)   SERVO N={len(srv_t)} ({len(srv_t)/dur:.1f} Hz)")
@@ -341,6 +389,39 @@ def analyze(path: str, do_plot: bool = False) -> None:
         print(f"  YFF_GZ (Lua psi_dot)           : mean={_fmt(np.mean(gz),3)} "
               f"rms={_fmt(np.std(gz),3)} rad/s  (ATTITUDE rms={_fmt(np.std(r_ac),3)})")
 
+    # -- Rotor speed (real ESC/DShot telemetry, RPM.rpm1) ------------------
+    rpm_t, rpm1 = D["rpm_t"], D["rpm1"]
+    print("\n--- Yaw motor RPM (RPM.rpm1, real ESC/DShot telemetry) ---")
+    if len(rpm1) >= 2:
+        ts = (rpm_t - rpm_t[0]) / 1000.0
+        growth = np.polyfit(ts, rpm1, 1)[0]
+        print(f"  N={len(rpm1)}  start={_fmt(rpm1[0],0)} rpm  end={_fmt(rpm1[-1],0)} rpm  "
+              f"mean={_fmt(np.mean(rpm1),0)}  growth={_fmt(growth,2)} rpm/s")
+        if abs(growth) > 5.0:
+            print(f"  -> rotor speed is {'RISING' if growth > 0 else 'FALLING'} "
+                  f"over this window, not steady.")
+    else:
+        print("  not streamed (RPM message absent)")
+
+    # -- ArduPilot yaw rate-PID contribution (PID_TUNING axis=3) ----------
+    pidy_t, pidy_p, pidy_i, pidy_d, pidy_ff = (
+        D["pidy_t"], D["pidy_p"], D["pidy_i"], D["pidy_d"], D["pidy_ff"])
+    print("\n--- ArduPilot yaw rate-PID contribution (PID_TUNING axis=yaw) ---")
+    if len(pidy_t) >= 2:
+        print(f"  N={len(pidy_t)}  ({len(pidy_t)/max(dur,1e-6):.1f} Hz)")
+        for lab, arr in (("P", pidy_p), ("I", pidy_i), ("D", pidy_d), ("FF", pidy_ff)):
+            print(f"  {lab:2s}: mean={_fmt(np.mean(arr),5)}  std={_fmt(np.std(arr),5)}  "
+                  f"range=[{_fmt(np.min(arr),5)}, {_fmt(np.max(arr),5)}]")
+        trim_mean = np.mean(nvf["YFF_T"]) if len(nvf["YFF_T"]) else float("nan")
+        pi_mag = float(np.mean(np.abs(pidy_p)) + np.mean(np.abs(pidy_i)))
+        if not math.isnan(trim_mean) and trim_mean > 0:
+            print(f"  AP P+I magnitude vs Lua trim (H_YAW_TRIM~{_fmt(trim_mean,3)}): "
+                  f"{_fmt(pi_mag,5)}  ({_fmt(100.0*pi_mag/trim_mean,1)}% of trim)")
+        print("  -> ArduPilot's own rate-PID assist is this small; it cannot arrest a")
+        print("     divergence that the Lua trim (H_YAW_TRIM, low-passed at YFF_TAU) misses.")
+    else:
+        print("  not streamed (PID_TUNING axis=yaw absent -- check GCS_PID_MASK)")
+
     # -- Interpretation ---------------------------------------------------
     print("\n--- Interpretation ---")
     kd_now = kd[-1] if len(kd) else 0.0
@@ -387,10 +468,15 @@ def _plot(D, t0):
 
 def main():
     ap = argparse.ArgumentParser(description="Analyze yaw oscillation + Lua trim interaction")
-    ap.add_argument("log", help="path to a .mavlink.jsonl calibrate log")
+    ap.add_argument("log", help="path to a .mavlink.jsonl calibrate/SITL log")
     ap.add_argument("--plot", action="store_true", help="show time-series plots")
+    ap.add_argument("--window", nargs=2, type=float, metavar=("START_S", "END_S"),
+                     help="restrict analysis to [START_S, END_S] relative to the "
+                          "first ATTITUDE/SERVO sample in the file (e.g. to zoom "
+                          "into the post-release divergence window)")
     args = ap.parse_args()
-    analyze(args.log, do_plot=args.plot)
+    window = tuple(args.window) if args.window else None
+    analyze(args.log, do_plot=args.plot, window=window)
 
 
 if __name__ == "__main__":

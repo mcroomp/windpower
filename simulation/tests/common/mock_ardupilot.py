@@ -92,6 +92,12 @@ def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
         sim.accel = accel_body.tolist()
 
 
+# ArduPilot SRV_Channels function number for Motor4/SERVO9 -- must match
+# rawes.lua's YAW_MOTOR_FUNC constant exactly (real run_yaw_trim() reads
+# this same servo function via SRV_Channels:get_output_pwm()).
+_YAW_MOTOR_FUNC = 36
+
+
 class _MockArdupilotBase:
     """Common adapter utilities shared by lua/python backends."""
 
@@ -106,13 +112,11 @@ class _MockArdupilotBase:
         self._telemetry: list = []
         self._log_step = 0
         self._guided_ctrl: "GuidedAttitudeController | None" = None
-        # Anti-rotation feedforward trim (Python port of rawes.lua's
-        # yaw_trim_step/run_yaw_trim -- see controller.YawTrimObserver).
-        # Applied uniformly for both Lua- and Python-backed simtests since
-        # arduloop.HeliRateController has no equivalent of ArduPilot's native
-        # H_YAW_TRIM mixer addition, and the Lua-side observer's output is
-        # never fed back into physics in the Lua backend (no real SITL
-        # firmware in the loop to consume H_YAW_TRIM).
+        # Anti-rotation feedforward trim. Default: Python port of rawes.lua's
+        # yaw_trim_step/run_yaw_trim (see controller.YawTrimObserver), used by
+        # the pure-Python backend which has no real Lua VM to run the actual
+        # function. _LuaBackend overrides _yaw_apply() below to route through
+        # the REAL rawes.lua run_yaw_trim() instead of this Python duplicate.
         self._yaw_trim = YawTrimObserver()
 
     def enable_guided(self, heli_params: "HeliParams | None" = None) -> None:
@@ -146,10 +150,24 @@ class _MockArdupilotBase:
         # the SERVO9_TRIM=SERVO9_MIN one-directional-motor convention (see
         # mediator.py's yaw_throttle derivation).
         u_raw     = float(np.clip(heli_out.yaw_cmd, 0.0, 1.0))
-        u_applied = float(np.clip(u_raw + self._yaw_trim.trim, 0.0, 1.0))
-        self._yaw_trim.step(dt, u_applied, float(gyro[2]))
+        u_applied = self._yaw_apply(u_raw, gyro, dt)
         return runner.step_guided(dt, self._last_thrust, heli_out, rest_length=rest_length,
                                   yaw_throttle=u_applied)
+
+    def _yaw_apply(self, u_raw: float, gyro: np.ndarray, dt: float) -> float:
+        """Add yaw trim to the raw rate-controller output u_raw [0, 1].
+
+        Default implementation: Python port (YawTrimObserver). Used by the
+        pure-Python backend, which has no real ArduPilot/Lua firmware in the
+        loop to run the actual rawes.lua run_yaw_trim().
+        """
+        u_applied = float(np.clip(u_raw + self._yaw_trim.trim, 0.0, 1.0))
+        self._yaw_trim.step(dt, u_applied, float(gyro[2]))
+        return u_applied
+
+    def _telemetry_overrides(self, obs: HubObservation) -> dict:  # noqa: ARG002
+        """Backend-specific telemetry field overrides."""
+        return {}
 
     def log(self, runner, sr: dict) -> None:
         if self.tel_fn is None or self._tel_every is None:
@@ -194,6 +212,12 @@ class _MockArdupilotBase:
                 "rate_yaw_i_contrib": float("nan"),
                 "rate_yaw_d_contrib": float("nan"),
                 "rate_yaw_ff_contrib": float("nan"),
+                "rate_roll_pdmod": float("nan"),
+                "rate_roll_srate": float("nan"),
+                "rate_pitch_pdmod": float("nan"),
+                "rate_pitch_srate": float("nan"),
+                "rate_yaw_pdmod": float("nan"),
+                "rate_yaw_srate": float("nan"),
             }
             if self._guided_ctrl is not None:
                 _rate_ctrl = getattr(self._guided_ctrl, "_rate_ctrl", None)
@@ -206,16 +230,22 @@ class _MockArdupilotBase:
                         rate_terms["rate_roll_i_contrib"] = float(_pid_roll.debug.I)
                         rate_terms["rate_roll_d_contrib"] = float(_pid_roll.debug.D)
                         rate_terms["rate_roll_ff_contrib"] = float(_pid_roll.debug.FF + _pid_roll.debug.DFF)
+                        rate_terms["rate_roll_pdmod"] = float(_pid_roll.debug.PDmod)
+                        rate_terms["rate_roll_srate"] = float(_pid_roll.debug.SRate)
                     if _pid_pitch is not None:
                         rate_terms["rate_pitch_p_contrib"] = float(_pid_pitch.debug.P)
                         rate_terms["rate_pitch_i_contrib"] = float(_pid_pitch.debug.I)
                         rate_terms["rate_pitch_d_contrib"] = float(_pid_pitch.debug.D)
                         rate_terms["rate_pitch_ff_contrib"] = float(_pid_pitch.debug.FF + _pid_pitch.debug.DFF)
+                        rate_terms["rate_pitch_pdmod"] = float(_pid_pitch.debug.PDmod)
+                        rate_terms["rate_pitch_srate"] = float(_pid_pitch.debug.SRate)
                     if _pid_yaw is not None:
                         rate_terms["rate_yaw_p_contrib"] = float(_pid_yaw.debug.P)
                         rate_terms["rate_yaw_i_contrib"] = float(_pid_yaw.debug.I)
                         rate_terms["rate_yaw_d_contrib"] = float(_pid_yaw.debug.D)
                         rate_terms["rate_yaw_ff_contrib"] = float(_pid_yaw.debug.FF + _pid_yaw.debug.DFF)
+                        rate_terms["rate_yaw_pdmod"] = float(_pid_yaw.debug.PDmod)
+                        rate_terms["rate_yaw_srate"] = float(_pid_yaw.debug.SRate)
 
             extra_kwargs = self.tel_fn(runner, sr) if self.tel_fn else {}
             extra_kwargs.update(
@@ -236,6 +266,7 @@ class _MockArdupilotBase:
                 yaw_sp_rads=mav_att_target_yaw_rate_rads,
             )
             extra_kwargs.update(rate_terms)
+            extra_kwargs.update(self._telemetry_overrides(obs))
 
             collective_rad = self._col_min + self._last_thrust * (self._col_max - self._col_min)
             self._telemetry.append(
@@ -270,6 +301,51 @@ class _LuaBackend(_MockArdupilotBase):
         # before kinematic release in real SITL.
         if initial_thrust > 0.0:
             sim._lua.execute(f"_ic_thrust = {float(initial_thrust)}")
+
+    # ArduPilot heli mixer SERVO9 (Motor4) PWM range -- matches SERVO9_MIN/MAX
+    # in simulation/tests/sitl/rawes_common_defaults.parm and rawes.lua's
+    # run_yaw_trim() `p("SERVO9_MIN", 1000)` / `p("SERVO9_MAX", 2000)` fallback.
+    _SERVO9_MIN_US = 1000.0
+    _SERVO9_MAX_US = 2000.0
+
+    def _lua_diag(self, key: str) -> float:
+        v = self._sim.fns.diag_nvf(key)
+        return float(v) if v is not None else float("nan")
+
+    def _telemetry_overrides(self, obs: HubObservation) -> dict:  # noqa: ARG002
+        # In SITL, these fields come from Lua NAMED_VALUE_FLOAT diagnostics.
+        # Keep simtest Lua backend semantics identical: Lua-only source, no fallback.
+        return {
+            "roll_sp_rads": self._lua_diag("OL_RSP"),
+            "pitch_sp_rads": self._lua_diag("OL_PSP"),
+            "yaw_sp_rads": self._lua_diag("OL_YSP"),
+            "roll_rate_err_rads": self._lua_diag("OL_RER"),
+            "pitch_rate_err_rads": self._lua_diag("OL_PER"),
+            "yaw_rate_err_rads": self._lua_diag("OL_YER"),
+            "lua_ol_alt_p_contrib": self._lua_diag("OL_AP"),
+            "lua_ol_alt_i_contrib": self._lua_diag("OL_AI"),
+            "lua_ol_alt_d_contrib": self._lua_diag("OL_AD"),
+            "lua_ol_thrust_cmd": self._lua_diag("OL_COL"),
+            "lua_ol_tension_n": self._lua_diag("OL_TEN"),
+        }
+
+    def _yaw_apply(self, u_raw: float, gyro: np.ndarray, dt: float) -> float:
+        """Route yaw trim through the REAL rawes.lua run_yaw_trim(), not a
+        Python duplicate.
+
+        Writes this tick's applied Motor4/SERVO9 PWM (rate-controller output
+        u_raw + the H_YAW_TRIM the PREVIOUS Lua tick computed) into the mock's
+        SRV_Channels output register -- exactly what ArduPilot's real heli
+        mixer would produce. The next time tick() runs sim._update_fn(),
+        rawes.lua's run_yaw_trim() reads this same PWM back via
+        SRV_Channels:get_output_pwm() and updates H_YAW_TRIM for real (no
+        Python-side observer involved for this backend).
+        """
+        trim_prev = self._sim.get_param("H_YAW_TRIM")
+        u_applied = float(np.clip(u_raw + trim_prev, 0.0, 1.0))
+        pwm = self._SERVO9_MIN_US + u_applied * (self._SERVO9_MAX_US - self._SERVO9_MIN_US)
+        self._sim.set_srv_out(_YAW_MOTOR_FUNC, pwm)
+        return u_applied
 
     def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
         self._sim._mock.millis_val = int(t_sim * 1000)
@@ -314,8 +390,8 @@ class _LuaBackend(_MockArdupilotBase):
             )
 
     def step(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
-        obs = runner.observe()
         if not self._ctrl._target_set:
+            obs = runner.observe()
             self._ctrl.set_target_rotation(obs.R, sim_time=runner.t_sim)
         return self.step_physics(runner, dt, rest_length=rest_length)
 

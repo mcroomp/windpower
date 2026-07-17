@@ -50,10 +50,16 @@ CONTROL_COLS = [
     "rate_yaw_i_contrib",
     "rate_yaw_d_contrib",
     "rate_yaw_ff_contrib",
+    "rate_roll_pdmod",
+    "rate_roll_srate",
+    "rate_pitch_pdmod",
+    "rate_pitch_srate",
+    "rate_yaw_pdmod",
+    "rate_yaw_srate",
     "lua_ol_alt_p_contrib",
     "lua_ol_alt_i_contrib",
     "lua_ol_alt_d_contrib",
-    "lua_ol_col_cmd_rad",
+    "lua_ol_thrust_cmd",
 ]
 
 PARAM_PREFIX_FOCUS = (

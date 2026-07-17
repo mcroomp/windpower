@@ -223,6 +223,12 @@ class TelRow:
     rate_yaw_i_contrib:  float = float("nan")
     rate_yaw_d_contrib:  float = float("nan")
     rate_yaw_ff_contrib: float = float("nan")
+    rate_roll_pdmod:  float = float("nan")
+    rate_roll_srate:  float = float("nan")
+    rate_pitch_pdmod: float = float("nan")
+    rate_pitch_srate: float = float("nan")
+    rate_yaw_pdmod:   float = float("nan")
+    rate_yaw_srate:   float = float("nan")
     vel_radial_mps:     float = 0.0   # actual hub radial velocity (outward +) [m/s]
     orbit_radius_m:     float = 0.0   # horizontal radius from anchor [m]
     orbit_azimuth_rad:  float = 0.0   # atan2(E, N) horizontal azimuth [rad]
@@ -463,6 +469,9 @@ class TelRow:
         roll_sp_rads: float = 0.0,
         pitch_sp_rads: float = 0.0,
         yaw_sp_rads: float = 0.0,
+        roll_rate_err_rads: float = float("nan"),
+        pitch_rate_err_rads: float = float("nan"),
+        yaw_rate_err_rads: float = float("nan"),
         rate_roll_p_contrib: float = float("nan"),
         rate_roll_i_contrib: float = float("nan"),
         rate_roll_d_contrib: float = float("nan"),
@@ -475,6 +484,12 @@ class TelRow:
         rate_yaw_i_contrib: float = float("nan"),
         rate_yaw_d_contrib: float = float("nan"),
         rate_yaw_ff_contrib: float = float("nan"),
+        rate_roll_pdmod: float = float("nan"),
+        rate_roll_srate: float = float("nan"),
+        rate_pitch_pdmod: float = float("nan"),
+        rate_pitch_srate: float = float("nan"),
+        rate_yaw_pdmod: float = float("nan"),
+        rate_yaw_srate: float = float("nan"),
         vel_radial_mps: float = 0.0,
         net_moment=None,
         mav_att_roll_deg: float = float("nan"),
@@ -584,6 +599,7 @@ class TelRow:
 
         pos_h = pos[:2]
         vel_h = vel[:2]
+        v_horiz = float(np.linalg.norm(vel_h))
         orbit_radius = float(np.linalg.norm(pos_h))
         if orbit_radius > 1e-9:
             er_h = pos_h / orbit_radius
@@ -624,6 +640,16 @@ class TelRow:
             body_z_err_deg = 0.0
             body_z_target_az = 0.0
             body_z_az_gap = 0.0
+
+        vel_heading_deg = float(np.degrees(np.arctan2(vel[1], vel[0])))
+        heading_gap_deg = float((np.degrees(yaw) - vel_heading_deg + 180.0) % 360.0 - 180.0)
+
+        if not math.isfinite(roll_rate_err_rads):
+            roll_rate_err_rads = float(roll_sp_rads - om[0])
+        if not math.isfinite(pitch_rate_err_rads):
+            pitch_rate_err_rads = float(pitch_sp_rads - om[1])
+        if not math.isfinite(yaw_rate_err_rads):
+            yaw_rate_err_rads = float(yaw_sp_rads - om[2])
 
         return cls(
             t_sim               = float(t_sim),
@@ -681,6 +707,16 @@ class TelRow:
             sens_accel_x        = float(acc_body[0]),
             sens_accel_y        = float(acc_body[1]),
             sens_accel_z        = float(acc_body[2]),
+            orb_yaw_rad         = yaw,
+            v_horiz_ms          = v_horiz,
+            sens_vel_n          = float(vel[0]),
+            sens_vel_e          = float(vel[1]),
+            sens_vel_d          = float(vel[2]),
+            sens_gyro_x         = float(om[0]),
+            sens_gyro_y         = float(om[1]),
+            sens_gyro_z         = float(om[2]),
+            vel_heading_deg     = vel_heading_deg,
+            heading_gap_deg     = heading_gap_deg,
             rpy_roll            = roll,
             rpy_pitch           = pitch,
             rpy_yaw             = yaw,
@@ -703,9 +739,9 @@ class TelRow:
             roll_sp_rads        = float(roll_sp_rads),
             pitch_sp_rads       = float(pitch_sp_rads),
             yaw_sp_rads         = float(yaw_sp_rads),
-            roll_rate_err_rads  = float(roll_sp_rads - om[0]),
-            pitch_rate_err_rads = float(pitch_sp_rads - om[1]),
-            yaw_rate_err_rads   = float(yaw_sp_rads - om[2]),
+            roll_rate_err_rads  = float(roll_rate_err_rads),
+            pitch_rate_err_rads = float(pitch_rate_err_rads),
+            yaw_rate_err_rads   = float(yaw_rate_err_rads),
             rate_roll_p_contrib = float(rate_roll_p_contrib),
             rate_roll_i_contrib = float(rate_roll_i_contrib),
             rate_roll_d_contrib = float(rate_roll_d_contrib),
@@ -718,6 +754,12 @@ class TelRow:
             rate_yaw_i_contrib  = float(rate_yaw_i_contrib),
             rate_yaw_d_contrib  = float(rate_yaw_d_contrib),
             rate_yaw_ff_contrib = float(rate_yaw_ff_contrib),
+            rate_roll_pdmod  = float(rate_roll_pdmod),
+            rate_roll_srate  = float(rate_roll_srate),
+            rate_pitch_pdmod = float(rate_pitch_pdmod),
+            rate_pitch_srate = float(rate_pitch_srate),
+            rate_yaw_pdmod   = float(rate_yaw_pdmod),
+            rate_yaw_srate   = float(rate_yaw_srate),
             vel_radial_mps      = float(vel_radial_mps if vel_radial_mps != 0.0 else vel_radial_auto),
             orbit_radius_m      = orbit_radius,
             orbit_azimuth_rad   = orbit_azimuth,

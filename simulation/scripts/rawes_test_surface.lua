@@ -97,4 +97,8 @@ _rawes_fns = {
     col_trim         = function() return _col_trim end,
     alt_i            = function() return _alt_i end,
 
+    -- Latest diagnostics emitted via _diag_set / _diag_emit.
+    -- Returns nil when a key has not been set yet.
+    diag_nvf         = function(name) return _diag_nvf[name] end,
+
 }

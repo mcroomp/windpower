@@ -723,7 +723,6 @@ class GuidedAttitudeController:
         dt: float,
         collective_norm: float = 0.0,
         sim_time: float = 0.0,
-        saturated: tuple[bool, bool, bool] = (False, False, False),
         pos_z_up_m: float | None = None,
         vel_z_up_mps: float | None = None,
     ) -> HeliRateOutput:
@@ -736,7 +735,6 @@ class GuidedAttitudeController:
         dt             : tick duration (s).
         collective_norm: current collective in [-1,1] for hover-roll-trim.
         sim_time       : current sim time (s) for timeout detection.
-        saturated      : per-axis PID saturation flags for anti-windup.
         """
         q_body = np.asarray(q_body_ned, dtype=float)
         gyro   = np.asarray(gyro_body_rads, dtype=float)
@@ -830,7 +828,6 @@ class GuidedAttitudeController:
                 gyro_rate_rads=tuple(gyro),
                 dt=dt,
                 collective_norm=collective_norm,
-                saturated=saturated,
                 sim_time_s=sim_time,
             )
             out.collective_norm_cmd = self._apply_throttle_out(
@@ -930,7 +927,6 @@ class GuidedAttitudeController:
             gyro_rate_rads=tuple(gyro),
             dt=dt,
             collective_norm=collective_norm,
-            saturated=saturated,
             sim_time_s=sim_time,
         )
 

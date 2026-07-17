@@ -69,6 +69,14 @@ When to still use grep/`grep_search`: matching exact substrings/regex in prose,
 uniformly (e.g. searching for a TODO string or a parameter name that may appear in
 comments).
 
+Searching OUTSIDE this workspace (e.g. a separate `C:\repos\ardupilot` checkout):
+the `grep_search`/`file_search`/`semantic_search` tools are scoped to this workspace
+folder and silently return "No matches found" (a generic VS Code search-exclusion
+message) for paths outside it — this does NOT mean the pattern is genuinely absent,
+it means the tool couldn't search there at all. For any path outside the current
+workspace folder, go straight to a terminal command (`grep`/`sed`/`rg` via
+`run_in_terminal`) instead of retrying the workspace-scoped search tools.
+
 ## Documentation Ownership (Single Source of Truth)
 
 Use the primary doc for each topic. Other docs should link, not restate.
@@ -78,6 +86,7 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Flight architecture, mode ownership, AP/Lua boundaries | `design/flight_stack.md` | `design/tension_collective_control_loop.md`, `design/GUIDED_CONTROL_LOOPS.md` |
 | Simulation internals (physics, sensors, controller plumbing, module map) | `design/simulation.md` | `simulation/README.md`, code docstrings |
 | SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `simulation/analysis/diagnose_sitl.py` usage text |
+| SITL IC-start timeline and event anchors | `design/sitl_flight_timeline.md` | `design/sitl_testing.md`, `simulation/tests/sitl/flight/conftest.py` |
 | Aero interfaces and conventions | `design/aero_conventions.md` | `design/aero.md` |
 | EKF gating and GPS yaw bring-up | `design/EKF_GATING.md` | `design/ekf_const_pos_mode.md` |
 | ArduPilot heli control-loop behavior | `design/GUIDED_CONTROL_LOOPS.md` | `design/flight_stack.md` |
@@ -185,6 +194,10 @@ SITL behavior:
 
 ## Workflow Rules
 
+- Do not use `wsl` to run anything directly. `test.sh` is the only script that uses WSL, and it
+  already contains the logic to re-invoke itself inside WSL when needed (for Docker access).
+  Run `bash test.sh ...` (or `./test.sh ...`) from Git Bash directly — do not wrap it in
+  `wsl -e bash -lc "..."` or run other commands (pytest, analysis scripts, git, etc.) via `wsl`.
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
 - Do not preserve backward-compatibility parameters, fields, aliases, or shims when making code changes.
 - Assume no external callers: prefer a clean cutover and remove legacy paths in the same change to avoid debt.
@@ -208,6 +221,23 @@ SITL behavior:
   exist only to work around circular imports are a sign of bad architecture — fix the circular
   dependency by refactoring (e.g. extract a shared module, invert the dependency) rather than
   papering over it with a local import.
+- `/tmp` is NOT one shared filesystem on this box — Git Bash (mingw/MSYS2, the default terminal)
+  and WSL2 (used for `docker`/`test.sh stack`) each have their own separate `/tmp`:
+  - A bare `> /tmp/foo.log` redirection in a Git Bash command writes to Git Bash's own `/tmp`
+    (really `C:\Users\<user>\AppData\Local\Temp\foo.log` — check with `cygpath -w /tmp/foo.log`).
+  - A command run via `wsl -e bash -lc "... > /tmp/foo.log"` writes inside WSL's `/tmp`
+    (`\\wsl$\...\tmp\foo.log` from Windows, or `/tmp/foo.log` from *inside* another `wsl -e` call)
+    — NOT reachable from a later plain Git Bash `cat /tmp/foo.log`.
+  - If the redirection is written OUTSIDE the `wsl -e bash -lc "..."` quoted string (e.g.
+    `wsl -e bash -lc "cmd" > /tmp/foo.log`), it's the OUTER (Git Bash) shell that owns the
+    redirect, not WSL — easy to mix up.
+  - A native Windows executable (e.g. `.venv/Scripts/python.exe`) invoked from Git Bash does NOT
+    understand `/tmp/...` paths passed as arguments (it's a Windows process, not MSYS2-aware) —
+    convert with `cygpath -w /tmp/foo.log` first, or it'll fail with `FileNotFoundError` even
+    though `ls /tmp/foo.log` (from Git Bash) shows the file existing.
+  - Rule of thumb: know which shell environment (Git Bash vs WSL) is actually creating/reading
+    a `/tmp` path before assuming a file exists or is missing; don't conclude "no output was
+    produced" just because a naive `cat`/`find` from the wrong shell doesn't see it.
 
 ## Test Entry Points
 
@@ -218,6 +248,12 @@ There are three tiers, each with a different scope and runtime:
 | Unit | `.venv/Scripts/python.exe -m pytest simulation/tests/unit` | (none) | Fast; no physics sim |
 | Simtest | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
 | Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
+
+SITL IC-start timeline rule (agent-critical):
+- For SITL flight diagnosis, use one shared timeline anchored at the IC-start flow.
+- Treat `t_sim` with the `kinematic_exit` event as the canonical phase boundary for
+  release-to-flight comparisons across steady/passive/pumping/landing stack tests.
+- Canonical definition and per-phase markers live in `design/sitl_flight_timeline.md`.
 
 Stack-test execution rule (agent-critical):
 - For any test under `simulation/tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
@@ -249,6 +285,14 @@ Long-running test commands (agent-critical, efficiency):
 - Once a command has been moved to background, do not repeatedly call `get_terminal_output`
   in a tight loop — it will not return new content until the process actually produces more
   output or exits. Wait for the automatic completion notification instead of polling.
+- Do NOT call `get_terminal_output` immediately after a command moves to background "just to
+  check progress". It returns a byte-limited tail of the WHOLE terminal scrollback, not just
+  the new command's output — if the new command has only printed a little so far, the tail
+  can still be dominated by leftover output from earlier unrelated commands in the same
+  terminal, which looks like stale/wrong output but is really just "not enough new output yet
+  to push the old stuff out of the tail window". End the turn and wait for the automatic
+  completion notification instead; only poll if genuinely unsure whether the process is hung
+  after a long silence.
 - Prefer `bash test.sh stack -n 1 -k <test_name>` (single test) while iterating; only widen
   to `-n 4`/full suite once the targeted test is confirmed passing, to keep turnaround short.
 
