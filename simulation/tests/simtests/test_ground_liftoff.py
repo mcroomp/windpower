@@ -4,7 +4,7 @@ test_ground_liftoff.py -- rawes.lua GUIDED mode lifts off from near-ground altit
 Physical scenario
 -----------------
   - Hub starts at altitude 1 m (NED pos = [0, 0, -1]).
-  - Anchor at NED origin [0, 0, 0] (RAWES_ANN/ANE/AND all 0).
+  - Anchor at the mock EKF origin, i.e. NED offset [0, 0, 0] (see rawes_modes.send_anchor_ned).
   - Rotor disk is horizontal: body_z = [0, 0, +1] (NED; FRD body_z points toward anchor).
   - Wind: constant 10 m/s upward, i.e. wind_ned = [0, 0, -10] m/s.
   - Constant 200 N downward load modelling a pre-tensioned tether.
@@ -32,7 +32,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 from simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from rawes_lua_harness import RawesLua
-from rawes_modes import MODE_STEADY
+from rawes_modes import MODE_STEADY, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
 
 # ── Physical constants ────────────────────────────────────────────────────────
@@ -131,6 +131,8 @@ def test_ground_liftoff():
     total_steps = int(LIFTOFF_TIMEOUT / DT)
     liftoff_t   = None
     max_alt     = ic.pos[2] * -1.0   # start altitude
+
+    send_anchor_ned(sim, 0.0, 0.0, 0.0)   # anchor at the mock EKF origin
 
     def _inject(s, r):
         s.send_named_float("RAWES_TEN", TETHER_FORCE_N)

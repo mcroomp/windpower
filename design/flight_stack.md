@@ -344,21 +344,39 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_ARM | ms | Arm vehicle + start disarm countdown of `ms` milliseconds. Re-send refreshes timer. |
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
 | RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at RAWES_SLW rad/s. |
-| RAWES_ANN | m | Anchor North from EKF origin. MODE_STEADY does not initialise altitude hold until ANN/ANE/AND have all been received. |
-| RAWES_ANE | m | Anchor East from EKF origin. |
-| RAWES_AND | m | Anchor Down from EKF origin (positive downward in NED). Set to `−initial_state["pos"][2]` (NED Z negated). |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. Ramped by RAWES_TRP. |
 | RAWES_RIC | rad | IC roll — part of the atomic passive IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
 | RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
 | RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
+
+**Named int inputs (ground → Lua, via `gcs.send_named_int`, one-shot anchor location):**
+
+| Name | Value | Purpose |
+|---|---|---|
+| RAWES_LAT | deg × 1e7 | Anchor latitude. |
+| RAWES_LON | deg × 1e7 | Anchor longitude. |
+| RAWES_AAL | cm, AMSL | Anchor altitude. |
+
+Sent as NAMED_VALUE_INT (not FLOAT) to preserve ArduPilot's own Location int32
+precision (~1 cm) end-to-end — a float32 NVF would quantize latitude to
+~0.5–1 m. Lua converts this absolute location into the EKF-local NED anchor
+offset on board via `Location:get_vector_from_origin_NEU_m()`, which returns
+`nil` until the EKF origin is set, so all three ints must arrive AND the
+onboard conversion must succeed at least once before MODE_STEADY initialises
+altitude hold (see `_try_resolve_anchor()` in rawes.lua).
 
 **MAVLink rx queue:** `mavlink:init(queue_size, num_msgs)` is called as
 `(20, 10)` at module load.  The first arg is the per-tick rx buffer depth;
 with `1` (the prior default) multiple back-to-back NAMED_VALUE_FLOATs sent
 by the ground get dropped — only the first survives until the next
 update() drains it.  20 is safe for the typical ~5 NVFs/tick burst.
+Both NAMED_VALUE_FLOAT (msgid 251) and NAMED_VALUE_INT (msgid 252) are
+registered and share this one queue; the drain loop peeks the 3-byte msgid
+at byte offset 10 (`string.unpack("<I3", raw, 10)`) to dispatch each message.
 
-`_nv_floats` dict resets to `{}` on every mode change.
+`_nv_floats` dict resets to `{}` on every mode change. `_nv_ints` (anchor) is
+NOT cleared on mode change — the anchor is a static, one-shot location that
+persists for the whole flight once resolved.
 
 **Key physical constants:**
 
@@ -664,7 +682,8 @@ bulk DC trim so AP's rate loop mainly acts as a fast disturbance-rejection assis
 | RAWES_MODE | 0 | Mode selector (script-generated param registered by rawes.lua). Set via GCS or parm file. |
 | RAWES_YAW_SLP | 0 | Yaw motor slope override [RPM/µs]. 0 → bench default 0.504. Set from bench calibration. |
 
-Anchor position (RAWES_ANN/ANE/AND) and slew rate (RAWES_SLW) are NVFs sent post-arm by the ground station, not boot-time params.
+Anchor location (RAWES_LAT/LON/AAL, NAMED_VALUE_INT) and slew rate (RAWES_SLW,
+NAMED_VALUE_FLOAT) are sent post-arm by the ground station, not boot-time params.
 
 **SCR_ENABLE bootstrap:** After EEPROM wipe, Lua only starts if SCR_ENABLE=1 is already in
 EEPROM. The Lua flight fixture sets it via MAVLink post-arm (persists for future boots).

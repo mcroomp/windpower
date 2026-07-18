@@ -39,7 +39,7 @@ from simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from pumping_planner import PumpingGroundController
 from rawes_lua_harness import RawesLua
-from rawes_modes    import MODE_STEADY
+from rawes_modes    import MODE_STEADY, send_anchor_ned
 from unified_ground import LuaComms
 from tests.simtests._rotor_helpers import load_default_rotor
 
@@ -97,11 +97,10 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     sim.vel_ned      = _IC.vel.tolist()
     sim.R            = _IC.R0
     sim.gyro         = [0.0, 0.0, 0.0]
-    # rawes.lua now gates steady capture on anchor NVFs. In this simtest path
-    # the anchor is at NED origin, so publish zeros once at startup.
-    sim.send_named_float("RAWES_ANN", 0.0)
-    sim.send_named_float("RAWES_ANE", 0.0)
-    sim.send_named_float("RAWES_AND", 0.0)
+    # rawes.lua now gates steady capture on the anchor location arriving and
+    # resolving on board. In this simtest path the anchor is at the mock EKF
+    # origin (NED offset zero), so publish it once at startup.
+    send_anchor_ned(sim, 0.0, 0.0, 0.0)
 
     # ── Physics ───────────────────────────────────────────────────────────────
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)

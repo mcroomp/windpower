@@ -26,13 +26,22 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
   RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
   RAWES_ARM: optional disarm timer (value = ms until forced disarm)
-  RAWES_ANN: anchor North from EKF origin [m]                      default 0.0
-  RAWES_ANE: anchor East  from EKF origin [m]                      default 0.0
-  RAWES_AND: anchor Down  from EKF origin [m]                      default 0.0
-             The anchor is safety-critical: MODE_STEADY does NOT initialise
-             altitude hold (and therefore commands no cyclic/collective) until
-             all three anchor floats (ANN/ANE/AND) have been received at least
-             once.  Until then run_flight only holds the current attitude.
+
+Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
+  RAWES_LAT: anchor latitude  [deg * 1e7]                           (int32, no default)
+  RAWES_LON: anchor longitude [deg * 1e7]                           (int32, no default)
+  RAWES_AAL: anchor altitude  [cm, AMSL]                            (int32, no default)
+             Sent as NAMED_VALUE_INT (not FLOAT) so the value keeps ArduPilot's
+             own Location int32 precision (~1 cm) end-to-end -- a float32 NVF
+             would quantize latitude to ~0.5-1 m.  Lua converts this absolute
+             location into the EKF-local NED anchor offset on board via
+             Location:get_vector_from_origin_NEU_m(), which returns nil until
+             the EKF origin is set -- so the anchor is safety-critical and
+             gates altitude-hold init: MODE_STEADY does NOT initialise altitude
+             hold (and therefore commands no cyclic/collective) until all
+             three values have arrived AND the onboard NED conversion has
+             succeeded at least once.  Until then run_flight only holds the
+             current attitude.
     -- IC seed (MODE_PASSIVE):
     --   thrust-only seed (RAWES_THR) is valid and drives zero-rate hold.
     --   full attitude hold commits once RAWES_THR+RAWES_RIC+RAWES_PIC all arrive.
@@ -72,14 +81,17 @@ POST_RELEASE_BLEND_S = 2.5    -- blend current->steady body_z after capture
 POST_RELEASE_RECOVERY_S = 2.0 -- ramp-in for altitude corrections
 
 _NVF_MSG_ID = 251
+_NVI_MSG_ID = 252
 -- mavlink:init(queue_size, num_msgs).  queue_size = max messages buffered
 -- between Lua ticks; with queue=1 (the old default) back-to-back NVFs from
 -- the ground get dropped because only the first survives until update()
 -- drains it.  20 is plenty for our ~5 named-floats / tick max rate.
 mavlink.init(20, 10)
 mavlink.register_rx_msgid(_NVF_MSG_ID)
+mavlink.register_rx_msgid(_NVI_MSG_ID)
 
 _nv_floats = {}
+_nv_ints   = {}
 
 -- ── Mode numbers ──────────────────────────────────────────────────────────────
 
@@ -202,15 +214,16 @@ _tension_cmd_n  = 200.0   -- step-change tension commanded by ground via RAWES_T
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
 _az_initialized = false   -- true once _az_ref seeded from first GPS fix
 
--- Anchor delivered via NAMED_VALUE_FLOAT (must arrive before altitude-hold activates).
+-- Anchor delivered via NAMED_VALUE_INT as an absolute lat/lon/alt (must arrive
+-- and resolve to a NED offset before altitude-hold activates).
 _bz_slew         = 0.40    -- RAWES_SLW param: elevation/body_z slew rate [rad/s]
-_anchor_n        = 0.0     -- RAWES_ANN: anchor North from EKF origin [m]
-_anchor_e        = 0.0     -- RAWES_ANE: anchor East  from EKF origin [m]
-_anchor_d        = 0.0     -- RAWES_AND: anchor Down  from EKF origin [m]
-_got_anchor_n    = false   -- true once RAWES_ANN has been received at least once
-_got_anchor_e    = false   -- true once RAWES_ANE has been received at least once
-_got_anchor_d    = false   -- true once RAWES_AND has been received at least once
-_anchor_received = false   -- true once all three anchor floats have arrived
+_anchor_n        = 0.0     -- anchor North from EKF origin [m] (resolved on board)
+_anchor_e        = 0.0     -- anchor East  from EKF origin [m] (resolved on board)
+_anchor_d        = 0.0     -- anchor Down  from EKF origin [m] (resolved on board)
+_anchor_lat_e7   = nil     -- RAWES_LAT: anchor latitude  [deg * 1e7]
+_anchor_lon_e7   = nil     -- RAWES_LON: anchor longitude [deg * 1e7]
+_anchor_alt_cm   = nil     -- RAWES_AAL: anchor altitude  [cm, AMSL]
+_anchor_received = false   -- true once the onboard lat/lon/alt -> NED conversion has succeeded
 
 -- Crosswind rate damping (all initialized from RAWES_* params at load time)
 _cw_rate_kp      = 0.0     -- RAWES_KP_EL: in-plane (elevation) position rate-P [rad/s per m]
@@ -236,6 +249,7 @@ _dbg_cap_bz_x   = 0.0
 _dbg_cap_bz_y   = 0.0
 _dbg_cap_bz_z   = 1.0
 _capture_ms     = nil
+_dbg_precap_last_ms = -100000   -- throttle for pre-capture pos_ned/anchor diagnostic
 _passive_hold_yaw_rad = nil
 _passive_yaw_fixed_rad = nil   -- optional ground-provided fixed yaw target [rad] (RAWES_YIC)
 _first_nonzero_rate_logged = false
@@ -487,14 +501,40 @@ local function _apply_tension_ramp(dt_s)
 end
 
 local function anchor_ned()
-    -- Anchor (EKF frame) is delivered via NAMED_VALUE_FLOAT RAWES_ANN/ANE/AND,
-    -- latched into _anchor_n/e/d.  MODE_STEADY gates altitude-hold init on
-    -- _anchor_received so this is only consulted once all three have arrived.
+    -- Anchor (EKF frame), resolved on board from the absolute lat/lon/alt
+    -- delivered via NAMED_VALUE_INT (see _try_resolve_anchor()).  MODE_STEADY
+    -- gates altitude-hold init on _anchor_received so this is only consulted
+    -- once the conversion has succeeded.
     local a = Vector3f()
     a:x(_anchor_n)
     a:y(_anchor_e)
     a:z(_anchor_d)
     return a
+end
+
+-- Resolve the anchor's absolute lat/lon/alt (RAWES_LAT/LON/AAL) into an
+-- EKF-local NED offset.  Location:get_vector_from_origin_NEU_m() returns nil
+-- until the EKF origin has been set, so this retries every tick until it
+-- succeeds, then latches the result (the EKF origin is fixed for the rest of
+-- the flight once set, so one successful resolution is sufficient).
+local function _try_resolve_anchor()
+    if _anchor_received then return end
+    if _anchor_lat_e7 == nil or _anchor_lon_e7 == nil or _anchor_alt_cm == nil then return end
+
+    local loc = Location()
+    loc:lat(_anchor_lat_e7)
+    loc:lng(_anchor_lon_e7)
+    loc:alt(_anchor_alt_cm)
+    local neu = loc:get_vector_from_origin_NEU_m()
+    if neu == nil then return end   -- EKF origin not set yet; retry next tick
+
+    _anchor_n = neu:x()
+    _anchor_e = neu:y()
+    _anchor_d = -neu:z()   -- NEU up -> NED down
+    _anchor_received = true
+    gcs:send_text(6, string.format(
+        "RAWES: anchor resolved  N=%.2f E=%.2f D=%.2f",
+        _anchor_n, _anchor_e, _anchor_d))
 end
 
 -- Convert a desired body_z direction (NED Vector3f) to ZYX Euler roll/pitch (degrees)
@@ -565,12 +605,31 @@ local function run_flight()
             "pre_capture_hold")
 
         -- Check for GPS position; initialize altitude hold on first valid fix.
-        -- Gate on _anchor_received: the anchor arrives via NAMED_VALUE_FLOAT
-        -- (RAWES_ANN/ANE/AND), so do NOT capture geometry (and start commanding
-        -- cyclic/collective) until all three have been received -- otherwise a
-        -- zero/stale anchor would put the anchor directly below the hub and
-        -- drive a saturated cyclic.  Until then we keep holding current attitude.
+        -- Gate on _anchor_received: the anchor's absolute lat/lon/alt arrives
+        -- via NAMED_VALUE_INT (RAWES_LAT/LON/AAL) and must be resolved to a
+        -- NED offset on board (_try_resolve_anchor()), so do NOT capture
+        -- geometry (and start commanding cyclic/collective) until that has
+        -- succeeded -- otherwise a zero/stale anchor would put the anchor
+        -- directly below the hub and drive a saturated cyclic.  Until then we
+        -- keep holding current attitude.
         local pos_ned = ahrs:get_relative_position_NED_origin()
+
+        -- Throttled diagnostic (~1 Hz): show exactly what pos_ned/anchor look
+        -- like on the way to capture, so a bad geometry capture can be traced
+        -- back to raw EKF/anchor values instead of only the derived el/az/tlen.
+        if now_ms - _dbg_precap_last_ms >= 1000 then
+            _dbg_precap_last_ms = now_ms
+            local pos_str = pos_ned and string.format("(%.2f,%.2f,%.2f)", pos_ned:x(), pos_ned:y(), pos_ned:z()) or "nil"
+            local anch_str = "nil"
+            if _anchor_received then
+                local anch_dbg = anchor_ned()
+                anch_str = string.format("(%.2f,%.2f,%.2f)", anch_dbg:x(), anch_dbg:y(), anch_dbg:z())
+            end
+            gcs:send_text(6, string.format(
+                "RAWES DBG precap: t=%.1fs anchor_rcvd=%s pos_ned=%s anch=%s",
+                ms_to_s(now_ms), tostring(_anchor_received), pos_str, anch_str))
+        end
+
         if _anchor_received and pos_ned then
             local anch = anchor_ned()
             local rx = pos_ned:x() - anch:x()
@@ -607,8 +666,10 @@ local function run_flight()
                         d_cap, math.deg(_el_rad), math.deg(_az_ref), _tension_n))
                 end
                 gcs:send_text(6, string.format(
-                    "RAWES steady: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m",
-                    math.deg(_el_rad), _target_alt, tlen))
+                    "RAWES steady: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m  rel=(%.2f,%.2f,%.2f)  pos_ned=(%.2f,%.2f,%.2f)  anch=(%.2f,%.2f,%.2f)",
+                    math.deg(_el_rad), _target_alt, tlen, rx, ry, rz,
+                    pos_ned:x(), pos_ned:y(), pos_ned:z(),
+                    anch:x(), anch:y(), anch:z()))
             end
         end
         return
@@ -1005,14 +1066,22 @@ end
 local function update()
     _diag = _diag + 1
 
-    -- Drain MAVLink named-float inbox (all modes including 0)
-    local nvf_raw = mavlink.receive_chan()
-    while nvf_raw do
-        local _, nv_val, nv_name = string.unpack("<Ifc10", nvf_raw, 13)
-        nv_name = nv_name:gsub("\0", "")
-        _nv_floats[nv_name] = nv_val
-        gcs:send_text(6, string.format("RAWES: rcvd %s=%.0f", nv_name, nv_val))
-        nvf_raw = mavlink.receive_chan()
+    -- Drain MAVLink named-value inbox (floats + ints; all modes including 0)
+    local nv_raw = mavlink.receive_chan()
+    while nv_raw do
+        local msgid = string.unpack("<I3", nv_raw, 10)
+        if msgid == _NVI_MSG_ID then
+            local _, nv_val, nv_name = string.unpack("<Iic10", nv_raw, 13)
+            nv_name = nv_name:gsub("\0", "")
+            _nv_ints[nv_name] = nv_val
+            gcs:send_text(6, string.format("RAWES: rcvd %s=%d", nv_name, nv_val))
+        elseif msgid == _NVF_MSG_ID then
+            local _, nv_val, nv_name = string.unpack("<Ifc10", nv_raw, 13)
+            nv_name = nv_name:gsub("\0", "")
+            _nv_floats[nv_name] = nv_val
+            gcs:send_text(6, string.format("RAWES: rcvd %s=%.0f", nv_name, nv_val))
+        end
+        nv_raw = mavlink.receive_chan()
     end
 
     -- Decode mode and substate
@@ -1026,15 +1095,13 @@ local function update()
         _target_alt_cmd = _nv_floats["RAWES_ALT"]  -- persist across mode entry clears
     end
     if _nv_floats["RAWES_TEN"] then _tension_cmd_n = _nv_floats["RAWES_TEN"] end
-    -- Anchor position (safety-critical; gates altitude-hold capture).
-    if _nv_floats["RAWES_ANN"] then _anchor_n = _nv_floats["RAWES_ANN"]; _got_anchor_n = true end
-    if _nv_floats["RAWES_ANE"] then _anchor_e = _nv_floats["RAWES_ANE"]; _got_anchor_e = true end
-    if _nv_floats["RAWES_AND"] then _anchor_d = _nv_floats["RAWES_AND"]; _got_anchor_d = true end
-    if (not _anchor_received) and _got_anchor_n and _got_anchor_e and _got_anchor_d then
-        _anchor_received = true
-        gcs:send_text(6, string.format(
-            "RAWES anchor set: N=%.1f E=%.1f D=%.1f", _anchor_n, _anchor_e, _anchor_d))
-    end
+    -- Anchor position: absolute lat/lon/alt from RAWES_LAT/LON/AAL (NAMED_VALUE_INT),
+    -- resolved on board to an EKF-local NED offset (safety-critical; gates
+    -- altitude-hold capture -- see _try_resolve_anchor()).
+    if _nv_ints["RAWES_LAT"] then _anchor_lat_e7 = _nv_ints["RAWES_LAT"] end
+    if _nv_ints["RAWES_LON"] then _anchor_lon_e7 = _nv_ints["RAWES_LON"] end
+    if _nv_ints["RAWES_AAL"] then _anchor_alt_cm = _nv_ints["RAWES_AAL"] end
+    _try_resolve_anchor()
     -- Crosswind rate damping gains now come from RAWES_* params; no NVF override needed.
     -- IC seed handling:
     --   RAWES_THR alone is accepted for thrust-only zero-rate hold.

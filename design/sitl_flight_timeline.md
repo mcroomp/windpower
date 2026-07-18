@@ -33,6 +33,26 @@ Rules:
 - If `kinematic_exit` is missing, treat the run as invalid for flight-phase
   root-cause analysis until telemetry/event logging is fixed.
 
+## Field naming contract (docs vs code)
+
+Use the exact field names below when writing analysis notes/scripts.
+
+Telemetry CSV (`simulation/logs/<test>/telemetry.csv`):
+- `t_sim`, `note`, `phase`, `omega_rotor`
+- `mav_att_roll_deg`, `mav_att_pitch_deg`, `mav_att_yaw_deg`
+- `mav_att_target_roll_deg`, `mav_att_target_pitch_deg`, `mav_att_target_yaw_deg`
+- `ekf_pos_x`, `ekf_pos_y`, `ekf_pos_z`
+
+MAVLink JSONL (`simulation/logs/<test>/mavlink.jsonl`):
+- `GPS_RAW_INT.fix_type`, `GPS_RAW_INT.satellites_visible`
+- `EKF_STATUS_REPORT.flags`
+- `HEARTBEAT.custom_mode`, `HEARTBEAT.base_mode` (armed bit lives in `base_mode`)
+- `STATUSTEXT.text`
+
+Not valid in current telemetry CSV schema:
+- `mav_fix_type`, `mav_satellites_visible`, `mav_ekf_flags`, `mav_mode`, `mav_armed`
+- `roll_rad`, `pitch_rad`
+
 ## Standard phase timeline (IC-start stacks)
 
 This is the expected sequence for IC-start SITL flight stacks.
@@ -48,25 +68,54 @@ Notes:
 - Phase duration differences do not change the anchor rule: always compare using
   `t_rel` based on `kinematic_exit`.
 
-## Pre-release event matrix (major columns)
+## Canonical event matrix (reference run)
 
-Use this table format for steady SITL timeline analysis up to kinematic exit.
-Each row is a milestone, and each major subsystem has its own column.
+Reference artifacts:
+- `simulation/logs/test_lua_flight_steady_sitl/telemetry.csv`
+- `simulation/logs/test_lua_flight_steady_sitl/mavlink.jsonl`
+- `simulation/logs/test_lua_flight_steady_sitl/events.jsonl`
 
-| Time marker | Kinematic / trajectory | GPS | EKF | Vehicle mode / arm | RAWES / Lua | Analysis note |
-|---|---|---|---|---|---|---|
-| `t_sim = 0`, `t_rel < 0` | Kinematic startup begins | No guaranteed fix yet | Startup alignment state | Disarmed | `RAWES_MODE=0` expected | Run initialization |
-| Early hold (`t_rel << 0`) | Trapezoid accel/cruise/decel progressing | `GPS_RAW_INT` transitions 0 -> 1 -> 6 | `EKF_STATUS` transitions toward aiding-ready flags | GUIDED_NOGPS setup starts, then arm pending | Passive pipeline preparing IC seed | Confirm bring-up order |
-| Mid hold (`t_rel < 0`) | Kinematic still active | Fix 6 expected to be stable | Origin set, then GPS aiding active | Armed, GUIDED_NOGPS stable | `RAWES_MODE=3` (passive), IC ready status | Verify pre-release stability |
-| Late hold (`t_rel -> 0-`) | Near release target state (at IC pose/vel) | Fix remains stable | Aiding-ready flags stable | Armed/mode unchanged | Passive hold commands continue | Ensure no last-second state jumps |
-| `note == kinematic_exit`, `t_rel = 0` | Kinematic handoff ends | Should still be locked | Should still be aiding | Armed/mode continuous across handoff | Steady logic eligible to take control | Start post-release comparisons |
+Anchor:
+- `t_kin_exit = 60.003 s` from telemetry/event marker `note == "kinematic_exit"`
 
-Minimum fields to populate per row:
-- Time: `t_sim`, `t_rel`.
-- GPS: `fix_type`, `satellites_visible`.
-- EKF: `EKF_STATUS_REPORT.flags` and key STATUSTEXT milestones.
-- Mode/arm: HEARTBEAT `custom_mode` and armed bit.
-- RAWES/Lua: mode transitions and passive/steady status text.
+Use this as the compact reference table for this run.
+
+| `t_start` (s) | Kind | Milestone | Evidence |
+|---:|---|---|---|
+| 0.000 | observed | Mediator startup and 60 s kinematic profile start | `events.jsonl: startup`, `events.jsonl: kinematic_config.total_s=60` |
+| 8.860-8.960 | observed | EKF yaw aligned and GPS reaches 3D fix (`fix_type=6`) | `STATUSTEXT "EKF3 IMU0 yaw aligned"`, `GPS_RAW_INT.fix_type=6` |
+| 14.000 (nominal) | scheduled | Arm gate reached in fixture | `conftest.py _arm_at_sim_s=14.0` |
+| 14.000+ (nominal) | scheduled | PASSIVE IC seeds scheduled, including tilt targets (`RAWES_RIC/PIC`) | `conftest.py send_named_float RAWES_THR/RIC/PIC`, `RAWES_MODE=3` |
+| 24.077 | observed | EKF starts GPS aiding | `STATUSTEXT "EKF3 IMU0 is using GPS"` |
+| 26.748 | observed | Tilt target first visible at AP interface | `telemetry.csv: |mav_att_target_pitch_deg| >= 1` |
+| 26.848 | observed | Physical tilt response begins (real attitude moves) | `telemetry.csv: |mav_att_pitch_deg| >= 5` |
+| 27.178 | observed | Large tilt achieved | `telemetry.csv: |mav_att_pitch_deg| >= 40` |
+| 60.003 | observed | Kinematic handoff (`t_kin_exit`) | `telemetry.csv/events.jsonl: note=="kinematic_exit"` |
+| 60.503 (nominal) | scheduled | Test schedules steady takeover (`RAWES_MODE=1` then `RAWES_ALT`) | `test_lua_flight_steady_sitl.py`, `_PASSIVE_SETTLE_S=0.5` |
+| 61.060 | observed | Steady capture confirmed | `STATUSTEXT "RAWES steady: captured"` |
+
+Quick summary:
+- Horizontal start at `t=0`; no IC tilt yet.
+- IC tilt targets are scheduled right after arm (~`t=14`).
+- Targets appear on AP side around `t=26.748`, and physical tilt follows shortly (`t=26.848`).
+- Handoff is at `t=60.003`; steady capture follows near `t=61.060`.
+
+Rotor state reference for this run:
+- `omega_rotor` is already ~`38.10 rad/s` from the first telemetry sample and at
+  `kinematic_exit`; there is no distinct spin-start transition in this run.
+
+Tilt scheduling ownership note:
+- The kinematic hold controller (`make_hold_controller`) is setup/parameter plumbing in
+  the stack harness; it is not the runtime source of tilt commands in this IC-start path.
+- Runtime tilt scheduling during kinematic hold comes from `rawes.lua` in `MODE_PASSIVE`
+  once the IC seed is complete (`RAWES_THR` + `RAWES_RIC` + `RAWES_PIC`) and
+  `guided_ok` is true.
+
+Tilt command-to-response flow (IC-start path):
+1. Fixture schedules IC tilt targets (`RAWES_RIC/PIC`) right after arm (`t_start~14s`).
+2. Lua `MODE_PASSIVE` emits GUIDED angle targets once IC seed is complete and `guided_ok` is true.
+3. During kinematic hold with `kinematic_aero_mode="nul"`, the physics side realizes tilt by
+   integrating body rates (`omega_body = gain * tilt`) until measured attitude matches target.
 
 ## Required analysis convention
 

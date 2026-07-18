@@ -246,7 +246,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 "Checklist:\n"
                 "  * SCR_ENABLE=1 baked into eeprom (prime_eeprom=True in fixture)\n"
                 "  * rawes.lua installed to /ardupilot/scripts/\n"
-                "  * RAWES_AND (anchor Down) = home_alt_m correct\n"
+                "  * RAWES_LAT/LON/AAL (anchor location) sent and resolved to a NED offset\n"
                 "  * SITL log for Lua load errors"
             )
         if now - state["t_last_log"] >= _POS_LOG_INTERVAL:

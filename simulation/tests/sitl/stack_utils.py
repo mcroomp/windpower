@@ -16,6 +16,11 @@ from pathlib import Path
 
 import numpy as np
 from frames import build_gps_yaw_frame
+from rawes_modes import (
+    MOCK_ORIGIN_LAT_DEG as HOME_LAT_DEG,
+    MOCK_ORIGIN_LON_DEG as HOME_LON_DEG,
+    MOCK_ORIGIN_ALT_M as HOME_ALT_M,
+)
 
 # ---------------------------------------------------------------------------
 # Environment variable names
@@ -24,6 +29,24 @@ from frames import build_gps_yaw_frame
 STACK_ENV_FLAG  = "RAWES_RUN_STACK_INTEGRATION"
 ARDUPILOT_ENV   = "RAWES_ARDUPILOT_PATH"
 SIM_VEHICLE_ENV = "RAWES_SIM_VEHICLE"
+
+
+# ---------------------------------------------------------------------------
+# Fixed SITL home location
+# ---------------------------------------------------------------------------
+# All stack tests launch SITL at this fixed absolute location (see
+# --custom-location in _launch_sitl below).  The mediator's tether anchor
+# sits at the mediator's own world-frame origin (config.py
+# anchor_ned=[0, 0, 0]), and the bare-NED JSON physics backend maps that
+# origin directly onto SITL's home location (ArduPilot's
+# Aircraft::update_home()/set_start_location() in SIM_Aircraft.cpp) -- so
+# this location IS the anchor's absolute GPS position, sent to rawes.lua by
+# _send_anchor_location() in flight/conftest.py.
+#
+# HOME_LAT_DEG/HOME_LON_DEG/HOME_ALT_M are re-exported aliases of
+# rawes_modes.MOCK_ORIGIN_LAT_DEG/LON_DEG/ALT_M -- that module is the single
+# source of truth (also used by the mock Lua harness's Location EKF-origin
+# stub) so the SITL and mock-harness "world origin" never drift apart.
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +326,7 @@ def _launch_sitl(
         str(sim_vehicle),
         "--vehicle", "ArduCopter",
         "--frame", "heli",
-        "--custom-location=51.5074,-0.1278,50,0",
+        f"--custom-location={HOME_LAT_DEG},{HOME_LON_DEG},{HOME_ALT_M},0",
         "--model", "JSON",
         "--sim-address", "127.0.0.1",
         "--no-rebuild",

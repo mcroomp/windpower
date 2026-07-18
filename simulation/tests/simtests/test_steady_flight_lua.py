@@ -31,7 +31,7 @@ from simtest_log   import BadEventLog
 from simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from rawes_lua_harness import RawesLua
-from rawes_modes   import MODE_STEADY
+from rawes_modes   import MODE_STEADY, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _IC    = load_ic()
@@ -56,11 +56,10 @@ def _run_steady(log) -> dict:
     sim.vel_ned      = _IC.vel.tolist()
     sim.R            = _IC.R0
     sim.gyro         = [0.0, 0.0, 0.0]
-    # rawes.lua now requires anchor NVFs before steady capture can initialise.
-    # In this pure simtest path the anchor is at NED origin.
-    sim.send_named_float("RAWES_ANN", 0.0)
-    sim.send_named_float("RAWES_ANE", 0.0)
-    sim.send_named_float("RAWES_AND", 0.0)
+    # rawes.lua now requires the anchor location to arrive and resolve on
+    # board before steady capture can initialise. In this pure simtest path
+    # the anchor is at the mock EKF origin (NED offset zero).
+    send_anchor_ned(sim, 0.0, 0.0, 0.0)
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND)
     lua     = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)

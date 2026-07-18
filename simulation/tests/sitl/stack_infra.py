@@ -18,6 +18,7 @@ Exported names (imported by conftest.py via ``from stack_infra import *``):
     _TORQUE_STARTUP_HOLD_S
     _STARTUP_TIMEOUT, _ARM_TIMEOUT, _MODE_TIMEOUT, _STARTUP_DAMP_S
     _static_stack
+    HOME_LAT_DEG, HOME_LON_DEG, HOME_ALT_M
 """
 import contextlib
 import dataclasses
@@ -61,6 +62,9 @@ from stack_utils import (
     ARDUPILOT_ENV,
     STACK_ENV_FLAG,
     SIM_VEHICLE_ENV,
+    HOME_LAT_DEG,
+    HOME_LON_DEG,
+    HOME_ALT_M,
     ParamSetup,
     SITL_UNSUPPORTED_PARAMS,
     _check_ardupilot_version,
@@ -309,6 +313,8 @@ class StackContext:
     setup_samples  : list of dicts — EKF/ATTITUDE samples captured during setup
     sim_dir        : simulation/ directory (for writing outputs)
     controller     : PhysicalHoldController instance
+    last_local_position_ned : most recent (x, y, z, vx, vy, vz) LOCAL_POSITION_NED
+                              sample seen by wait_drain(), or None
 
     Torque tests only (default 0.0 for flight tests)
     -------------------------------------------------
@@ -334,6 +340,7 @@ class StackContext:
     sim_dir:             Path | None  = None
     controller:          object       = None
     test_log_dir:        Path | None  = None
+    last_local_position_ned: tuple | None = None
     # ── pumping socket (default 0 = disabled) ────────────────────────────────
     winch_cmd_port:      int          = 0
     # ── torque tests (default 0.0 for flight) ─────────────────────────────────
@@ -382,13 +389,25 @@ class StackContext:
                 type=["STATUSTEXT", "ATTITUDE", "LOCAL_POSITION_NED",
                       "EKF_STATUS_REPORT", "SERVO_OUTPUT_RAW"],
                 blocking=True, timeout=recv_timeout)
-            if msg is not None and msg.get_type() == "STATUSTEXT":
+            if msg is None:
+                last_text[0] = None
+                return
+            mtype = msg.get_type()
+            if mtype == "STATUSTEXT":
                 text = msg.text.rstrip("\x00").strip()
                 self.all_statustext.append(text)
                 self.log.info("STATUSTEXT [%s]: %s", label, text)
                 last_text[0] = text
-            else:
-                last_text[0] = None
+                return
+            if mtype == "LOCAL_POSITION_NED":
+                # Only the most recent sample is kept -- callers needing a
+                # gated/finite sample poll self.last_local_position_ned via
+                # `until` rather than accumulating history here.
+                self.last_local_position_ned = (
+                    float(msg.x), float(msg.y), float(msg.z),
+                    float(msg.vx), float(msg.vy), float(msg.vz),
+                )
+            last_text[0] = None
 
         def _check_liveness() -> None:
             if not check_procs:

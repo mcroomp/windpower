@@ -36,6 +36,17 @@ ATC_ANGLE_BOOST   0
 # disable auto-leveling (physical tilt ~65 deg)
 ACRO_TRAINER      0
 
+# EKF3 baro/GPS altitude blending: baro is the primary vertical position source
+# (EK3_SRC1_POSZ default = Baro), but baro has no absolute reference and drifts
+# with weather-driven QNH changes over long flights (~8-9 m per hPa). GPS
+# altitude has no drift (only noise), so bits 0+2 let a Bayes filter slowly
+# correct the baro-derived local position toward GPS altitude over time without
+# giving up baro's short-term smoothness. See AP_NavEKF3_PosVelFusion.cpp
+# correctEkfOriginHeight() / OGN_HGT_MASK doc for the mechanism.
+#   bit 0 (1): correct when Baro is the active height source
+#   bit 2 (4): apply the correction to local position (not just origin height)
+EK3_OGN_HGT_MASK  5
+
 # Collective servo range: full 1000-2000 us.
 H_COL_MIN         1000
 H_COL_MAX         2000

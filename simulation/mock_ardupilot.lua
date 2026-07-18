@@ -41,7 +41,8 @@ _mock = {
     R           = {1,0,0, 0,1,0, 0,0,1},
     params      = {
         -- Script-generated RAWES_* parameters (mirrors rawes.lua param:add_param defaults).
-        -- Slew + anchor inputs are delivered via NAMED_VALUE_FLOAT.
+        -- Slew is delivered via NAMED_VALUE_FLOAT; anchor lat/lon/alt via NAMED_VALUE_INT
+        -- (see Location mock below).
         RAWES_MODE    = 0,      -- flight mode (0=disabled)
         RAWES_YAW_SLP = 0,      -- yaw motor slope override (0 = use bench default)
         RAWES_KP_ALT  = 0.0263, -- altitude P gain (thrust/m)
@@ -107,6 +108,65 @@ end
 
 function Vector3f:dot(o)
     return self._x * o:x() + self._y * o:y() + self._z * o:z()
+end
+
+-- ── Location ─────────────────────────────────────────────────────────────────
+-- Minimal stub for rawes.lua's onboard anchor GPS->NED conversion:
+-- Location():lat()/:lng()/:alt() + :get_vector_from_origin_NEU_m().
+-- There is no real EKF in this harness, so the "EKF origin" is a FIXED
+-- constant and get_vector_from_origin_NEU_m() never returns nil (unlike on
+-- real ArduPilot before the EKF origin is set).  These three numbers MUST
+-- match rawes_modes.MOCK_ORIGIN_LAT_DEG / MOCK_ORIGIN_LON_DEG /
+-- MOCK_ORIGIN_ALT_M -- rawes_modes.send_anchor_ned() computes anchor
+-- lat/lon/alt as an offset from that same origin so it round-trips (up to
+-- int32 quantization, ~1 cm) back through this exact flat-earth math.
+-- Formula mirrors ArduPilot's AP_Common/Location.cpp
+-- get_vector_from_origin_NEU_m()/longitude_scale() (LATLON_TO_M flat-earth
+-- scaling), NOT a full geodesic calculation -- correct for the metre-scale
+-- local offsets used here.
+
+local _EKF_ORIGIN_LAT_E7 = 515074000   -- 51.5074 deg * 1e7
+local _EKF_ORIGIN_LON_E7 = -1278000    -- -0.1278 deg * 1e7
+local _EKF_ORIGIN_ALT_CM = 5000        -- 50.0 m * 100
+
+local _LATLON_TO_M = 0.011131884502145034  -- AP_Math/definitions.h LATLON_TO_M
+
+local function _longitude_scale(lat_e7)
+    local s = math.cos(lat_e7 * 1.0e-7 * math.pi / 180.0)
+    if s < 0.01 then s = 0.01 end
+    return s
+end
+
+Location_ud = {}
+Location_ud.__index = Location_ud
+
+function Location()
+    return setmetatable({_lat = 0, _lng = 0, _alt_cm = 0}, Location_ud)
+end
+
+function Location_ud:lat(value)
+    if value ~= nil then self._lat = value; return end
+    return self._lat
+end
+
+function Location_ud:lng(value)
+    if value ~= nil then self._lng = value; return end
+    return self._lng
+end
+
+function Location_ud:alt(value)
+    if value ~= nil then self._alt_cm = value; return end
+    return self._alt_cm
+end
+
+function Location_ud:get_vector_from_origin_NEU_m()
+    local mid_lat = (self._lat + _EKF_ORIGIN_LAT_E7) / 2.0
+    local north_m = (self._lat - _EKF_ORIGIN_LAT_E7) * _LATLON_TO_M
+    local east_m  = (self._lng - _EKF_ORIGIN_LON_E7) * _LATLON_TO_M * _longitude_scale(mid_lat)
+    local up_m    = (self._alt_cm - _EKF_ORIGIN_ALT_CM) * 0.01
+    local v = Vector3f()
+    v:x(north_m); v:y(east_m); v:z(up_m)
+    return v
 end
 
 -- ── uint32_t ─────────────────────────────────────────────────────────────────

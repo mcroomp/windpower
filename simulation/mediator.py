@@ -78,6 +78,7 @@ OMEGA_SPIN_MIN = 0.5           # minimum spin rate clamp [rad/s]
 # ---------------------------------------------------------------------------
 _ASYNC_MAV_LOCK = threading.Lock()
 _ASYNC_MAV: dict[str, float] = {}
+_ASYNC_ARMED = False
 
 
 def update_async_mavlink(fields: dict[str, float]) -> None:
@@ -97,6 +98,19 @@ def get_async_mavlink_snapshot() -> dict[str, float]:
     """Return a copy of the latest async MAVLink snapshot."""
     with _ASYNC_MAV_LOCK:
         return dict(_ASYNC_MAV)
+
+
+def update_async_armed(armed: bool) -> None:
+    """Update the latest armed state from HEARTBEAT.base_mode."""
+    global _ASYNC_ARMED
+    with _ASYNC_MAV_LOCK:
+        _ASYNC_ARMED = bool(armed)
+
+
+def get_async_armed() -> bool:
+    """Return the latest armed state from HEARTBEAT.base_mode."""
+    with _ASYNC_MAV_LOCK:
+        return bool(_ASYNC_ARMED)
 
 # GB4008 yaw-damper gain [N·m·s/rad].  Large value → near-perfect yaw lock.
 # Reduce to model imperfect GB4008 damping / yaw drift.
@@ -371,6 +385,11 @@ def run_mediator(args, trajectory=None):
                 _tu = getattr(msg, "time_usec", 0)
                 if _tu:
                     fields["mav_time_usec"] = float(_tu)
+
+                if mtype == "HEARTBEAT":
+                    _base_mode = int(getattr(msg, "base_mode", 0))
+                    _armed = bool(_base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    update_async_armed(_armed)
 
                 if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT", "LOCAL_POSITION_NED", "PID_TUNING"):
                     if fields:
@@ -842,6 +861,13 @@ def run_mediator(args, trajectory=None):
         result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat, yaw_throttle=None)
         _damp_alpha = float(result.get("damp_alpha", 0.0))
 
+        # Unified phase label for telemetry CSV.
+        # During kinematic hold, keep startup phases in the same `phase` field.
+        if _is_kinematic:
+            _phase_label = "positioning" if get_async_armed() else "waiting_ekf"
+        else:
+            _phase_label = str(_traj_cmd.get("phase", "") or "")
+
         # ── Unpack physics results ────────────────────────────────────────
         hub_state     = result["hub_state"]
         tether_force  = result["tether_force"]
@@ -892,7 +918,7 @@ def run_mediator(args, trajectory=None):
             _mav_async = get_async_mavlink_snapshot()
             _rpy = sensor_data["rpy"]
             _ti  = core.tether._last_info
-            _cur_phase = _traj_cmd.get("phase", "")
+            _cur_phase = _phase_label
             if _cur_phase and _cur_phase != _prev_phase and not _tel_note:
                 _tel_note = f"phase_{_cur_phase.replace('-', '_')}_start"
             _prev_phase = _cur_phase

@@ -25,6 +25,7 @@ from controller import (
     compute_bz_altitude_hold,
 )
 from rawes_lua_harness import RawesLua
+from rawes_modes import send_anchor_ned
 
 # ── Module-level harness ──────────────────────────────────────────────────────
 
@@ -309,11 +310,11 @@ class TestLuaCaptureAgainstStartingIc:
         sim.vel_ned = [0.0, 0.0, 0.0]
         sim.clear_messages()
 
-        # Match the stack path: anchor encoded in EKF frame, GPS position at home.
+        # Match the stack path: anchor encoded as a NED offset from the mock's
+        # fixed EKF/Location origin (see rawes_modes.send_anchor_ned), GPS
+        # position at home.
         sim.set_param("mode", 1)
-        sim.send_named_float("RAWES_ANN", -float(pos0[0]))
-        sim.send_named_float("RAWES_ANE", -float(pos0[1]))
-        sim.send_named_float("RAWES_AND", -float(pos0[2]))
+        send_anchor_ned(sim, -float(pos0[0]), -float(pos0[1]), -float(pos0[2]))
         sim.pos_ned = [0.0, 0.0, 0.0]
 
         sim.send_named_float("RAWES_THR", float(ic["eq_thrust"]))
