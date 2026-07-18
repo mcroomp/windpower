@@ -7,8 +7,8 @@ import sys
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from mediator_events import MediatorEventLog
-    from sitl_interface import SITLInterface
+    from simulation.mediator_events import MediatorEventLog
+    from simulation.sitl_interface import SITLInterface
 
 # Single canonical log format for all mediators.
 # Routes to stdout so output is captured when run as a subprocess

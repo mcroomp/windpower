@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rawes"
+version = "0.1.0"
+description = "RAWES tethered autorotating rotor kite -- simulation, flight-stack, and analysis tooling"
+requires-python = ">=3.10"
+
+# Runtime dependencies are NOT declared here on purpose: simulation/requirements.txt
+# (installed via setup.cmd/setup.sh, hash-gated) remains the single source of truth
+# for the venv and the Docker image. This pyproject.toml exists so that `pip install
+# -e .` registers the first-party packages below on sys.path -- no dependency
+# resolution is involved.
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "simulation",
+    "simulation.*",
+    "arduloop",
+    "arduloop.*",
+    "calibrate",
+    "calibrate.*",
+    "envelope",
+    "envelope.*",
+    "analysis",
+    "analysis.*",
+    "viz3d",
+    "viz3d.*",
+    "scripts",
+    "scripts.*",
+    "tests",
+    "tests.*",
+]
+
+[tool.pytest.ini_options]
+timeout = 600
+markers = [
+    "simtest: full physics simulation (seconds-minutes); excluded from quick unit run",
+    "sitl: ArduPilot SITL integration test (Docker); run via test.sh stack",
+]

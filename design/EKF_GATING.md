@@ -255,4 +255,4 @@ GPS lag is the classic cause of `recall()` never landing in-window.
 
 Related project docs: [ekf_const_pos_mode.md](ekf_const_pos_mode.md),
 [flight_stack.md](flight_stack.md) (EKF3 config, Appendix D GPS timing).
-Diagnostic tool: `simulation/analysis/diagnose_sitl.py`.
+Diagnostic tool: `analysis/diagnose_sitl.py`.

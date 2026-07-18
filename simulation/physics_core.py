@@ -37,14 +37,13 @@ from types import SimpleNamespace
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dynamics   import RigidBodyDynamics
+from simulation.dynamics import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, euler_step_omega
-from tether     import TetherModel
-from rotor_physics import resolve_i_spin_kgm2
-from param_defaults import thrust_to_coll_rad as _t2c
-from torque_model import (
+from simulation.tether import TetherModel
+from simulation.rotor_physics import resolve_i_spin_kgm2
+from simulation.param_defaults import thrust_to_coll_rad as _t2c
+from simulation.torque_model import (
     HubState as _HubState, HubParams as _HubParams, step as _hub_step,
     equilibrium_throttle as _hub_equilibrium_throttle,
 )

@@ -14,7 +14,7 @@ Used by simtests, SITL stack tests, and calibrate.py.
 
 Usage
 -----
-    from rawes_modes import MODE_STEADY, PUMP_REEL_OUT, send_anchor_ned
+    from simulation.rawes_modes import MODE_STEADY, PUMP_REEL_OUT, send_anchor_ned
 
     gcs.set_param("RAWES_MODE", MODE_STEADY)            # set mode (pumping runs in steady)
     gcs.send_named_float("RAWES_SUB", PUMP_REEL_OUT)    # set substate

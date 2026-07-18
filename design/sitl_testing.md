@@ -2,7 +2,7 @@
 
 Everything you need to **run, diagnose, and reason about RAWES SITL stack tests**
 — the full-stack (ArduPilot + Lua) Docker tests under
-[simulation/tests/sitl/](../simulation/tests/sitl/). Read this whenever you are
+[tests/sitl/](../tests/sitl/). Read this whenever you are
 editing or diagnosing a SITL stack test; it is intentionally kept out of the
 always-on [AGENTS.md](../AGENTS.md) context.
 
@@ -57,7 +57,7 @@ runs in its own fresh Docker container, one per test file.
 decision.**
 
 ```
-.venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py <test_name>
+.venv/Scripts/python.exe analysis/diagnose_sitl.py <test_name>
 ```
 
 It answers the two gating questions in order:
@@ -84,7 +84,7 @@ all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) int
 a unified `FlightLog` and prints a single bucketed report.
 
 ```
-.venv/Scripts/python.exe simulation/analysis/analyse_run.py <test_name>   # --bucket 10 coarse, --bucket 1 frame-level
+.venv/Scripts/python.exe analysis/analyse_run.py <test_name>   # --bucket 10 coarse, --bucket 1 frame-level
 ```
 
 **Fix telemetry/logging before diagnosing physics.** If telemetry columns are
@@ -95,8 +95,8 @@ first — diagnosing from bad telemetry produces wrong conclusions.
 
 | Task | Command |
 |------|---------|
-| Pump cycle diagnosis | `.venv/Scripts/python.exe simulation/analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
-| Landing diagnosis | `.venv/Scripts/python.exe simulation/analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
+| Pump cycle diagnosis | `.venv/Scripts/python.exe analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
+| Landing diagnosis | `.venv/Scripts/python.exe analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
 | Visualize result | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
 | EKF gating reference | [design/EKF_GATING.md](EKF_GATING.md), [design/ekf_const_pos_mode.md](ekf_const_pos_mode.md) |
 
@@ -137,7 +137,7 @@ contract above.
 > unit/simtest build their trajectory from it. Every SITL **flight** fixture that
 > must *start at the IC* goes through the single shared helper
 > `_ic_trapezoid_stack` in
-> [simulation/tests/sitl/flight/conftest.py](../simulation/tests/sitl/flight/conftest.py).
+> [tests/sitl/flight/conftest.py](../tests/sitl/flight/conftest.py).
 > **Do not** fork or re-derive a kinematic trajectory inside a test. If a test
 > needs to start at the IC, call the shared fixture; if it needs a different
 > profile, change the shared implementation (and this doc), do not copy it.
@@ -153,8 +153,8 @@ contract above.
 | Driver | `KinematicStartup` | [kinematic.py](../simulation/kinematic.py) | Wraps a `traj_fn(t)->(pos,vel)` (+ optional `R_fn(t)->R`); `state_at(t)` returns the held kinematic state |
 | Production wiring | mediator startup block | [mediator.py](../simulation/mediator.py) (`_kin_duration`, `make_smooth_trapezoid_traj`, `KinematicStartup`) | Builds the trajectory from config and feeds the SITL sensor stream |
 | Config knobs | `startup_damp_seconds`, `kinematic_cruise_speed`, `kinematic_accel_s`, `kinematic_decel_s`, `kinematic_vel_ramp_s`, `kinematic_aero_mode` | [config.py](../simulation/config.py) | Default profile; overridden per-fixture |
-| Central IC fixture | `_ic_trapezoid_stack` | [flight/conftest.py](../simulation/tests/sitl/flight/conftest.py) | The **only** entry point for "start at the IC" SITL flight tests |
-| SITL setup sequence | stack setup helpers (6 steps) | [stack_infra.py](../simulation/tests/sitl/stack_infra.py) | Connect → params → EKF tilt align → arm → confirm GUIDED_NOGPS |
+| Central IC fixture | `_ic_trapezoid_stack` | [flight/conftest.py](../tests/sitl/flight/conftest.py) | The **only** entry point for "start at the IC" SITL flight tests |
+| SITL setup sequence | stack setup helpers (6 steps) | [stack_infra.py](../tests/sitl/stack_infra.py) | Connect → params → EKF tilt align → arm → confirm GUIDED_NOGPS |
 
 The trapezoid path is selected whenever `kinematic_cruise_speed > 0`; otherwise
 the linear fallback path is used. With dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED
@@ -253,7 +253,7 @@ hand-off:
 
 ```
 bash test.sh stack -n 1 -k test_lua_flight_steady_sitl
-.venv/Scripts/python.exe simulation/analysis/diagnose_sitl.py test_lua_flight_steady_sitl
+.venv/Scripts/python.exe analysis/diagnose_sitl.py test_lua_flight_steady_sitl
 ```
 
 - **CHECK 1** — EKF GPS-aiding (out of `const_pos_mode`, `yawAlignComplete`
@@ -262,7 +262,7 @@ bash test.sh stack -n 1 -k test_lua_flight_steady_sitl
   vs `steady_state_starting.json`.
 
 The Windows-native guard for the trajectory math is
-[simulation/tests/unit/test_startup_trajectory.py](../simulation/tests/unit/test_startup_trajectory.py)
+[tests/unit/test_startup_trajectory.py](../tests/unit/test_startup_trajectory.py)
 (`make_smooth_trapezoid_traj` ends at `pos0` with zero velocity, continuous accel).
 
 ---

@@ -41,4 +41,4 @@ if not "%REQ_HASH%"=="%STAMP_HASH%" (
     echo %REQ_HASH%>"%STAMP%"
 )
 
-"%PYTHON%" "%~dp0simulation\scripts\calibrate.py" %*
+"%PYTHON%" -m calibrate %*

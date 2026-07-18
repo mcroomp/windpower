@@ -1,0 +1,392 @@
+"""
+test_startup_trajectory.py — Unit tests for the startup kinematic trajectory.
+
+The RAWES cannot hover statically — it needs orbital velocity for lift.
+To give the EKF a stable yaw signal from frame 0 and avoid impulsive loads,
+we use a constant-velocity startup trajectory:
+
+    1. Compute a "launch position" by working backwards from the target
+       steady-state (position, velocity) at constant velocity.
+    2. Start the hub there with velocity = target_vel (constant throughout).
+    3. By the end of the damping window the hub has moved linearly to
+       target_pos, still at target_vel — ready for free flight.
+
+Benefits over constant-acceleration:
+    - Non-zero velocity from frame 0 → EKF derives yaw heading immediately
+    - Zero acceleration → IMU sees only gravity (cleaner EKF signal)
+
+These tests verify the kinematic formula and trajectory properties only.
+No aerodynamics, wind, or tether forces are involved.
+"""
+
+import sys
+import os
+import math
+
+import numpy as np
+import pytest
+
+# ---------------------------------------------------------------------------
+# Import from mediator
+# ---------------------------------------------------------------------------
+_SIM_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+
+from simulation.mediator import compute_launch_position
+import simulation.config as _mcfg
+DEFAULT_POS0 = _mcfg.DEFAULTS["pos0"]
+DEFAULT_VEL0 = _mcfg.DEFAULTS["vel0"]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_TARGET_POS = np.array(DEFAULT_POS0, dtype=float)
+_TARGET_POS.flags.writeable = False
+_TARGET_VEL = np.array(DEFAULT_VEL0, dtype=float)
+_TARGET_VEL.flags.writeable = False
+_T          = 30.0   # s — default startup damping window
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _kinematic_state(launch_pos: np.ndarray, target_vel: np.ndarray, t: float):
+    """Return (pos, vel) for constant-velocity motion from launch_pos."""
+    pos = launch_pos + target_vel * t
+    vel = target_vel.copy()
+    return pos, vel
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestComputeLaunchPosition:
+    """Verify the launch-position formula itself."""
+
+    def test_arrival_position_exact(self):
+        """Hub must be exactly at target position at t=T."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        pos_at_T, _ = _kinematic_state(launch_pos, _TARGET_VEL, _T)
+        np.testing.assert_allclose(pos_at_T, _TARGET_POS, atol=1e-10)
+
+    def test_arrival_velocity_exact(self):
+        """Hub must have exactly target velocity at t=T."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        _, vel_at_T = _kinematic_state(launch_pos, _TARGET_VEL, _T)
+        np.testing.assert_allclose(vel_at_T, _TARGET_VEL, atol=1e-10)
+
+    def test_constant_velocity_from_start(self):
+        """Hub starts at target_vel at t=0 (constant velocity throughout)."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        _, vel_at_0 = _kinematic_state(launch_pos, _TARGET_VEL, 0.0)
+        np.testing.assert_allclose(vel_at_0, _TARGET_VEL, atol=1e-10)
+
+    def test_launch_pos_is_offset_from_target(self):
+        """launch_pos = target_pos − target_vel * T."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        expected = _TARGET_POS - _TARGET_VEL * _T
+        np.testing.assert_allclose(launch_pos, expected, atol=1e-12)
+
+    def test_returns_array_not_tuple(self):
+        """compute_launch_position returns a single array, not a tuple."""
+        result = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        assert isinstance(result, np.ndarray), (
+            f"expected np.ndarray, got {type(result)}"
+        )
+        assert result.shape == (3,)
+
+    def test_works_for_different_damp_windows(self):
+        """Formula holds for any positive damp window."""
+        for T in [5.0, 10.0, 60.0, 120.0]:
+            launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, T)
+            pos_at_T, vel_at_T = _kinematic_state(launch_pos, _TARGET_VEL, T)
+            np.testing.assert_allclose(pos_at_T, _TARGET_POS, atol=1e-10,
+                                       err_msg=f"position mismatch at T={T}")
+            np.testing.assert_allclose(vel_at_T, _TARGET_VEL, atol=1e-10,
+                                       err_msg=f"velocity mismatch at T={T}")
+
+
+class TestTrajectorySmoothnessNumerical:
+    """Verify the kinematic trajectory is smooth (no sudden jumps)."""
+
+    @pytest.fixture
+    def trajectory(self):
+        """Sample the trajectory at 400 Hz over the full damping window."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        dt = 1.0 / 400.0
+        n  = int(_T / dt) + 1
+        times = np.linspace(0.0, _T, n)
+        positions  = np.array([_kinematic_state(launch_pos, _TARGET_VEL, t)[0] for t in times])
+        velocities = np.array([_kinematic_state(launch_pos, _TARGET_VEL, t)[1] for t in times])
+        return times, positions, velocities
+
+    def test_no_velocity_jump_at_any_step(self, trajectory):
+        """Velocity is constant — change per step must be zero."""
+        _, _, velocities = trajectory
+        dv = np.diff(velocities, axis=0)
+        step_impulse = np.linalg.norm(dv, axis=1)
+        assert np.all(step_impulse < 1e-12), (
+            f"velocity changed between steps (max change {step_impulse.max():.2e} m/s), "
+            "expected zero for constant-velocity trajectory"
+        )
+
+    def test_acceleration_is_zero(self, trajectory):
+        """Numerically estimated acceleration must be zero throughout."""
+        times, _, velocities = trajectory
+        dt = times[1] - times[0]
+        accel_numeric = np.diff(velocities, axis=0) / dt    # (N-1, 3)
+        max_accel = np.abs(accel_numeric).max()
+        assert max_accel < 1e-9, (
+            f"non-zero acceleration detected: max={max_accel:.2e} m/s² "
+            "(expected zero for constant-velocity trajectory)"
+        )
+
+    def test_constant_speed_throughout(self, trajectory):
+        """Speed must be constant (= |target_vel|) throughout."""
+        _, _, velocities = trajectory
+        speeds = np.linalg.norm(velocities, axis=1)
+        target_speed = np.linalg.norm(_TARGET_VEL)
+        np.testing.assert_allclose(speeds, target_speed, atol=1e-10,
+                                   err_msg="speed must be constant at |target_vel|")
+
+    def test_position_monotone_toward_target_per_axis(self, trajectory):
+        """Each axis must move monotonically from launch_pos toward target_pos."""
+        _, positions, _ = trajectory
+        launch_pos = positions[0]
+        for axis, label in enumerate(["E", "N", "U"]):
+            delta_total = _TARGET_POS[axis] - launch_pos[axis]
+            if abs(delta_total) < 1e-9:
+                continue   # axis barely moves — skip monotonicity check
+            remaining = _TARGET_POS[axis] - positions[:, axis]
+            if delta_total > 0:
+                assert np.all(np.diff(remaining) <= 1e-12), (
+                    f"{label}-axis not monotonically approaching target"
+                )
+            else:
+                assert np.all(np.diff(remaining) >= -1e-12), (
+                    f"{label}-axis not monotonically approaching target"
+                )
+
+
+class TestHandoffContinuity:
+    """
+    Simulate the trajectory step-by-step (as the mediator would run it),
+    switch from kinematic startup to free flight at T/2, and verify there
+    are no position or velocity discontinuities at the handoff.
+
+    The mediator runs two phases:
+        Phase 1 (0 … T/2) : kinematic — hub moves at constant target_vel.
+        Phase 2 (T/2 … )  : free steady-state flight — physics takes over
+                             from whatever state the hub is in at T/2.
+
+    Continuity requirement: the hub's position and velocity seen by physics
+    at the first free-flight step must equal the last kinematic step exactly.
+    """
+
+    DT = 1.0 / 400.0   # mediator timestep [s]
+
+    def _run_kinematic_phase(self, launch_pos, target_vel, duration):
+        """Step through constant-velocity trajectory at 400 Hz; return final (pos, vel)."""
+        pos = launch_pos.copy()
+        n   = int(round(duration / self.DT))
+        for _ in range(n):
+            pos = pos + target_vel * self.DT
+        return pos, target_vel.copy()
+
+    def test_step_by_step_matches_analytic_at_midpoint(self):
+        """Discrete 400 Hz integration must match analytic formula at T/2."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        pos_step, vel_step = self._run_kinematic_phase(launch_pos, _TARGET_VEL, _T / 2)
+        pos_analytic, vel_analytic = _kinematic_state(launch_pos, _TARGET_VEL, _T / 2)
+        np.testing.assert_allclose(pos_step, pos_analytic, atol=1e-9,
+                                   err_msg="position mismatch at T/2")
+        np.testing.assert_allclose(vel_step, vel_analytic, atol=1e-12,
+                                   err_msg="velocity mismatch at T/2")
+
+    def test_step_by_step_matches_analytic_at_T(self):
+        """Discrete 400 Hz integration must arrive at target position/velocity at T."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        pos_step, vel_step = self._run_kinematic_phase(launch_pos, _TARGET_VEL, _T)
+        np.testing.assert_allclose(pos_step, _TARGET_POS, atol=1e-9,
+                                   err_msg="final position mismatch")
+        np.testing.assert_allclose(vel_step, _TARGET_VEL, atol=1e-12,
+                                   err_msg="final velocity mismatch")
+
+    def test_no_position_jump_at_handoff(self):
+        """Position must be continuous at the kinematic→free-flight switch."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        pos_end_kin, vel_end_kin = self._run_kinematic_phase(launch_pos, _TARGET_VEL, _T / 2)
+        # Physics receives pos_end_kin directly — no re-initialisation.
+        pos_physics_init = pos_end_kin.copy()
+        vel_physics_init = vel_end_kin.copy()
+        assert np.linalg.norm(pos_physics_init - pos_end_kin) == 0.0
+        assert np.linalg.norm(vel_physics_init - vel_end_kin) == 0.0
+
+    def test_velocity_at_handoff_equals_target_vel(self):
+        """At any point in kinematic phase, velocity == target_vel (constant)."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        _, vel_at_half = _kinematic_state(launch_pos, _TARGET_VEL, _T / 2)
+        np.testing.assert_allclose(vel_at_half, _TARGET_VEL, atol=1e-12,
+                                   err_msg="velocity should equal target_vel throughout")
+
+    def test_no_velocity_discontinuity_across_handoff(self):
+        """No velocity spike across the kinematic→free-flight boundary."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        # One step before and at handoff: velocity is identically target_vel
+        _, vel_before = _kinematic_state(launch_pos, _TARGET_VEL, _T / 2 - self.DT)
+        _, vel_at     = _kinematic_state(launch_pos, _TARGET_VEL, _T / 2)
+        dv = np.linalg.norm(vel_at - vel_before)
+        assert dv < 1e-12, (
+            f"velocity change at handoff boundary: {dv:.2e} m/s (expected 0)"
+        )
+
+    def test_full_trajectory_step_by_step_constant_speed(self):
+        """Speed must be constant throughout the entire kinematic window."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        target_speed = np.linalg.norm(_TARGET_VEL)
+        n      = int(round(_T / self.DT))
+        pos    = launch_pos.copy()
+        for _ in range(n + 1):
+            speed = np.linalg.norm(_TARGET_VEL)
+            assert abs(speed - target_speed) < 1e-12, (
+                f"speed deviated from target: {speed:.6f} != {target_speed:.6f}"
+            )
+            pos = pos + _TARGET_VEL * self.DT
+
+
+class TestDefaultParametersNumerical:
+    """Spot-check the trajectory for the actual DEFAULT_POS0/DEFAULT_VEL0 values."""
+
+    def test_launch_pos_reasonable_altitude(self):
+        """Launch position must be above the ground (NED Z < 0 = altitude > 0)."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        assert launch_pos[2] < 0.0, (
+            f"launch altitude {launch_pos[2]:.2f} m is underground (NED Z must be negative)"
+        )
+
+    def test_launch_pos_within_tether_length(self):
+        """Launch position must be within 300 m of anchor (tether max)."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        dist = np.linalg.norm(launch_pos)
+        assert dist < 300.0, f"launch position {dist:.1f} m from anchor exceeds tether limit"
+
+    def test_midpoint_velocity_equals_target(self):
+        """At t=T/2, velocity is still exactly target_vel (constant-velocity)."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        _, vel_half = _kinematic_state(launch_pos, _TARGET_VEL, _T / 2)
+        np.testing.assert_allclose(vel_half, _TARGET_VEL, atol=1e-12)
+
+    def test_kinematic_values(self):
+        """Regression: verify the specific launch position for default parameters (NED)."""
+        launch_pos = compute_launch_position(_TARGET_POS, _TARGET_VEL, _T)
+        expected_launch = _TARGET_POS - _TARGET_VEL * _T
+        np.testing.assert_allclose(launch_pos, expected_launch, atol=1e-12)
+        # Directional sanity: launch_pos = target - vel*T, so launch is offset opposite to velocity.
+        for axis in range(3):
+            if abs(_TARGET_VEL[axis]) > 1e-6:
+                expected_sign = -1 if _TARGET_VEL[axis] > 0 else 1
+                actual_sign   = np.sign(launch_pos[axis] - _TARGET_POS[axis])
+                assert actual_sign == expected_sign, (
+                    f"axis {axis}: vel={_TARGET_VEL[axis]:.4f}, "
+                    f"launch[{axis}]={launch_pos[axis]:.3f}, target[{axis}]={_TARGET_POS[axis]:.3f}"
+                )
+
+
+class TestSmoothTrapezoidTrajectory:
+    """
+    Verify the smooth trapezoidal startup trajectory (make_smooth_trapezoid_traj):
+    accelerate from rest to cruise_speed, cruise, decelerate back to rest,
+    travelling along a fixed heading and ending EXACTLY at target_pos.
+
+    Key properties:
+      - starts and ends at rest (zero velocity)
+      - ends exactly at target_pos
+      - peak speed == cruise_speed
+      - acceleration is continuous and zero at every phase boundary (smooth)
+      - motion is purely along the heading (altitude held when heading is horizontal)
+    """
+
+    T        = 60.0
+    VMAX     = 1.0
+    ACCEL_S  = 5.0
+    DECEL_S  = 5.0
+    YAW      = 0.7   # rad — arbitrary IC heading
+    TARGET   = np.array([3.0, -4.0, -43.0])
+
+    def _traj(self):
+        from simulation.kinematic import make_smooth_trapezoid_traj
+        direction = np.array([math.cos(self.YAW), math.sin(self.YAW), 0.0])
+        return make_smooth_trapezoid_traj(
+            self.TARGET, direction, self.T, self.VMAX, self.ACCEL_S, self.DECEL_S
+        )
+
+    def test_starts_at_rest(self):
+        fn = self._traj()
+        _, v0 = fn(0.0)
+        np.testing.assert_allclose(v0, np.zeros(3), atol=1e-12)
+
+    def test_ends_at_target_at_rest(self):
+        fn = self._traj()
+        pT, vT = fn(self.T)
+        np.testing.assert_allclose(pT, self.TARGET, atol=1e-9)
+        np.testing.assert_allclose(vT, np.zeros(3), atol=1e-9)
+
+    def test_peak_speed_equals_cruise_speed(self):
+        fn = self._traj()
+        ts = np.linspace(0.0, self.T, 4001)
+        speeds = np.array([np.linalg.norm(fn(t)[1]) for t in ts])
+        assert abs(speeds.max() - self.VMAX) < 1e-6
+        # Cruise plateau: speed == VMAX in the middle.
+        mid = fn(self.T / 2.0)[1]
+        np.testing.assert_allclose(np.linalg.norm(mid), self.VMAX, atol=1e-9)
+
+    def test_acceleration_zero_at_phase_boundaries(self):
+        """Raised-cosine ramps => accel == 0 at start, end-of-accel, start-of-decel, end."""
+        fn = self._traj()
+        for tb in [0.0, self.ACCEL_S, self.T - self.DECEL_S, self.T]:
+            a = fn.accel(min(tb, self.T - 1e-9))
+            assert np.linalg.norm(a) < 1e-6, f"accel nonzero at boundary t={tb}"
+
+    def test_acceleration_continuous_numerically(self):
+        """Finite-difference accel from velocity has no impulsive jumps (smooth)."""
+        fn = self._traj()
+        dt = 1.0 / 400.0
+        ts = np.arange(0.0, self.T, dt)
+        vel = np.array([fn(t)[1] for t in ts])
+        accel = np.diff(vel, axis=0) / dt
+        jerk = np.linalg.norm(np.diff(accel, axis=0), axis=1) / dt
+        # Smooth raised-cosine accel => bounded jerk, no impulsive spikes.
+        assert jerk.max() < 1.0, f"jerk spike detected: {jerk.max():.3f} m/s^3"
+
+    def test_altitude_held_constant(self):
+        """Horizontal heading => Down component never changes."""
+        fn = self._traj()
+        ts = np.linspace(0.0, self.T, 2001)
+        zs = np.array([fn(t)[0][2] for t in ts])
+        assert (zs.max() - zs.min()) < 1e-9
+
+    def test_motion_along_heading_only(self):
+        """All displacement is along the heading direction (no lateral drift)."""
+        fn = self._traj()
+        lateral = np.array([math.sin(self.YAW), -math.cos(self.YAW), 0.0])
+        ts = np.linspace(0.0, self.T, 2001)
+        launch = fn(0.0)[0]
+        for t in ts:
+            disp = fn(t)[0] - launch
+            assert abs(float(disp @ lateral)) < 1e-9
+
+    def test_launch_offset_matches_formula(self):
+        """launch_pos = target - VMAX*(T - 0.5*accel - 0.5*decel) * heading."""
+        fn = self._traj()
+        direction = np.array([math.cos(self.YAW), math.sin(self.YAW), 0.0])
+        dist = self.VMAX * (self.T - 0.5 * self.ACCEL_S - 0.5 * self.DECEL_S)
+        expected_launch = self.TARGET - dist * direction
+        np.testing.assert_allclose(fn(0.0)[0], expected_launch, atol=1e-9)
+
+    def test_zero_direction_raises(self):
+        from simulation.kinematic import make_smooth_trapezoid_traj
+        with pytest.raises(ValueError):
+            make_smooth_trapezoid_traj(
+                self.TARGET, np.zeros(3), self.T, self.VMAX, self.ACCEL_S, self.DECEL_S
+            )

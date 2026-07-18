@@ -19,7 +19,7 @@ simulation/logs/
 *.log
 
 # One-off / diagnostic scripts (kept locally for reproducibility, not checked in by default)
-simulation/tests/oneoff/
+tests/oneoff/
 
 # Generated flight report plots
 *.png
@@ -29,6 +29,9 @@ tmp/
 
 # Logs
 *.log
+
+# Python packaging build artifacts
+*.egg-info/
 
 # Node
 node_modules/

@@ -94,9 +94,9 @@ _setup_hw() {
         exit 1
     fi
 
-    # Reuse calibrate.py as the canonical hardware param writer.
+    # Reuse calibrate (python -m calibrate) as the canonical hardware param writer.
     # This checks all expected params from rawes_params.json and writes DIFFs.
-    "$PYTHON" "$(_winpath "$SIM_DIR/scripts/calibrate.py")" \
+    "$PYTHON" -m calibrate \
         --port "$RAWES_HIL_PORT" \
         --baud "${RAWES_HIL_BAUD:-115200}" \
         config apply

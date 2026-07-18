@@ -58,7 +58,7 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 
 ### arduloop/ — ArduPilot GUIDED mode Python port
 
-`simulation/arduloop/` is a self-contained Python port of ArduPilot's traditional-helicopter attitude and rate-control stack. Used by `MockArdupilot` (simtest adapter) and `_MockArdupilotBase.step_physics()` to close the GUIDED-mode control loop in-process without real ArduPilot SITL.
+`arduloop/` is a self-contained Python port of ArduPilot's traditional-helicopter attitude and rate-control stack. Used by `MockArdupilot` (simtest adapter) and `_MockArdupilotBase.step_physics()` to close the GUIDED-mode control loop in-process without real ArduPilot SITL.
 
 | Layer | Class | ArduPilot equivalent |
 |-------|-------|----------------------|
@@ -319,7 +319,7 @@ The default initial state is the warmup-settled equilibrium produced by `test_ge
 **IMPORTANT:** The `vel` in this file is the near-zero physics velocity at settled state. The stack test does **NOT** use it as `vel0` for the kinematic startup ramp. `vel0 = [-0.257, 0.916, -0.093]` from `config.py` DEFAULTS is always used for the ramp — it provides a non-zero heading so the EKF gets a velocity-derived yaw from frame 0.
 
 **Workflow for regenerating:**
-1. `pytest simulation/tests/unit/test_generate_ic.py::test_create_ic -s` — writes `simulation/steady_state_starting.json`
+1. `pytest tests/unit/test_generate_ic.py::test_create_ic -s` — writes `simulation/steady_state_starting.json`
 2. Stack test reads this file and passes `pos0`, `body_z`, `omega_spin`, `rest_length` to mediator via config
 3. `test_steady_flight.py` reads the file but never writes it
 
@@ -416,7 +416,7 @@ Landing logic is implemented in `LandingGroundController` + `LandingApController
 
 ### Fixture
 
-Landing Lua fixture in `simulation/tests/sitl/flight/conftest.py` (`kinematic_vel_ramp_s = 20` so the hub exits kinematic at vel=0 — eliminates linear tether jolt).
+Landing Lua fixture in `tests/sitl/flight/conftest.py` (`kinematic_vel_ramp_s = 20` so the hub exits kinematic at vel=0 — eliminates linear tether jolt).
 
 ### Diagnosis
 

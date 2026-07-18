@@ -12,7 +12,7 @@ Use ``save(cfg, path)`` to write a JSON file for the mediator to read.
 Use ``defaults()`` to get a fresh copy of the defaults dict.
 
 Example (test fixture):
-    import config as mcfg
+    import simulation.config as mcfg
     cfg = mcfg.defaults()
     cfg["base_k_ang"] = 0.0
     cfg_path = tmp_path / "mediator_config.json"
@@ -20,7 +20,7 @@ Example (test fixture):
     # pass --config str(cfg_path) to mediator subprocess
 
 Example (mediator):
-    import config as mcfg
+    import simulation.config as mcfg
     cfg = mcfg.load(args.config)   # args.config may be None → pure defaults
 """
 
@@ -33,7 +33,7 @@ from pathlib import Path
 # the mediator config uses the exact same IC as simtests and the SITL stack.
 # The JSON is written only by test_generate_ic.py::test_create_ic.
 # ---------------------------------------------------------------------------
-import ic as _ic
+import simulation.ic as _ic
 
 _ss: dict = _ic.load_ic_dict()
 
@@ -289,7 +289,6 @@ def make_trajectory(cfg: dict, wind_ned):
     Mode_RAWES (mediator), not in the trajectory planner.
     """
     import sys, os
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from planner import HoldPlanner
+    from simulation.planner import HoldPlanner
 
     return HoldPlanner()

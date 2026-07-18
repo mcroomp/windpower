@@ -61,13 +61,12 @@ from pathlib import Path
 import numpy as np
 
 # simulation/ — add so SITLInterface, torque_model, mediator_events are importable.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import torque_model as _m
-from mediator_base import install_sigterm_handler, run_lockstep, setup_logging
-from mediator_events import MediatorEventLog
-from servo_pwm import MOTOR_PWM_MIN, MOTOR_PWM_MAX
-from sitl_interface import SITLInterface
+import simulation.torque_model as _m
+from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
+from simulation.mediator_events import MediatorEventLog
+from simulation.servo_pwm import MOTOR_PWM_MIN, MOTOR_PWM_MAX
+from simulation.sitl_interface import SITLInterface
 
 # ---------------------------------------------------------------------------
 # Timing / port constants

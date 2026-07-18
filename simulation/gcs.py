@@ -28,7 +28,7 @@ from pathlib import Path
 
 from pymavlink import mavutil
 
-from mavlink_log import MavlinkLogWriter
+from simulation.mavlink_log import MavlinkLogWriter
 
 log = logging.getLogger(__name__)
 

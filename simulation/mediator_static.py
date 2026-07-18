@@ -28,10 +28,9 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mediator_base import install_sigterm_handler, run_lockstep, setup_logging
-from mediator_events import MediatorEventLog
-from sitl_interface import SITLInterface
+from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
+from simulation.mediator_events import MediatorEventLog
+from simulation.sitl_interface import SITLInterface
 
 log = logging.getLogger("mediator_static")
 

@@ -32,7 +32,7 @@ This is the single source of truth for swashplate arithmetic.
 import math
 import yaml
 import numpy as np
-from param_defaults import load_collective_phys_range as _load_col_range, _resolve_default_rotor_yaml
+from simulation.param_defaults import load_collective_phys_range as _load_col_range, _resolve_default_rotor_yaml
 
 
 # ---------------------------------------------------------------------------

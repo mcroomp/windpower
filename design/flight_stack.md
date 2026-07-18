@@ -291,7 +291,7 @@ def estimate_wind(T_meas, anti_rot_pwm, body_z, theta_col, hub_pos_lpf):
 
 ### 4.1 rawes.lua Overview
 
-Single unified controller (`simulation/scripts/rawes.lua`) running at 50 Hz (FLIGHT_PERIOD_MS=20) on a 100 Hz base tick (BASE_PERIOD_MS=10).
+Single unified controller (`scripts/rawes.lua`) running at 50 Hz (FLIGHT_PERIOD_MS=20) on a 100 Hz base tick (BASE_PERIOD_MS=10).
 
 #### How one 50 Hz tick works
 
@@ -1044,12 +1044,12 @@ level first.
 
 | File | Description |
 |---|---|
-| `simulation/scripts/rawes.lua` | Unified Lua controller (modes 0/1/3/4, RAWES_ARM, bz_altitude_hold force balance, altitude-PID collective; pumping runs in mode 1) |
-| `simulation/tests/sitl/rawes_sitl_defaults.parm` | Boot-time ArduPilot params (EKF3, GPS, compass, servos) |
-| `simulation/tests/sitl/flight/conftest.py` | Flight fixtures for guided and Lua stack tests |
-| `simulation/tests/sitl/torque/conftest.py` | Torque fixtures for DDFP and Lua PASSIVE stack paths |
-| `simulation/tests/sitl/stack_infra.py` | Shared infra: `_sitl_stack`, torque stack helpers, `StackContext`; `_arm_sequence(...)` for stack bring-up |
-| `simulation/scripts/calibrate.py` | Interactive calibration CLI for run/watch/motor/log/config workflows |
+| `scripts/rawes.lua` | Unified Lua controller (modes 0/1/3/4, RAWES_ARM, bz_altitude_hold force balance, altitude-PID collective; pumping runs in mode 1) |
+| `tests/sitl/rawes_sitl_defaults.parm` | Boot-time ArduPilot params (EKF3, GPS, compass, servos) |
+| `tests/sitl/flight/conftest.py` | Flight fixtures for guided and Lua stack tests |
+| `tests/sitl/torque/conftest.py` | Torque fixtures for DDFP and Lua PASSIVE stack paths |
+| `tests/sitl/stack_infra.py` | Shared infra: `_sitl_stack`, torque stack helpers, `StackContext`; `_arm_sequence(...)` for stack bring-up |
+| `calibrate/` (`python -m calibrate`) | Interactive calibration CLI for run/watch/motor/log/config workflows |
 | `simulation/controller.py` | `compute_bz_altitude_hold`, `AltitudeHoldController`, `TensionPI`, `RatePID`, `compute_rate_cmd`, `OrbitTracker` |
 | `simulation/ap_controller.py` | `TensionApController` (400 Hz AP side), `LandingApController` |
 | `simulation/pumping_planner.py` | `TensionCommand`, `PumpingGroundController` (10 Hz phase state machine) |
@@ -1063,8 +1063,8 @@ level first.
 | `simulation/comms.py` | `VirtualComms` (simtest), `MavlinkComms` (SITL/hardware) |
 | `simulation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_named_float` |
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
-| `simulation/analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
-| `simulation/analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |
+| `analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
+| `analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |
 | `hardware.md` | Assembly layout, rotor geometry, swashplate, Kaman flap mechanism |
 | `dshot.md` | DShot reference, AM32 EDT, GB4008 wiring |
 | `theory_pumping.md` | De Schutter 2018 — pumping cycle, aero, structural constraints |

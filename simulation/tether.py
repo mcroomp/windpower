@@ -7,7 +7,7 @@ anchor to the hub.  Force is zero when slack; elastic + damped when taut.
 
 import numpy as np
 
-from frames import cross3
+from simulation.frames import cross3
 
 
 class TetherModel:

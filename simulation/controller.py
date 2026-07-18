@@ -8,12 +8,12 @@ flight stack control is GUIDED-only.
 import math
 
 import numpy as np
-from frames     import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
-from servo_pwm  import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
-from swashplate import SwashplateServoModel
+from simulation.frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
+from simulation.servo_pwm import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
+from simulation.swashplate import SwashplateServoModel
 from dynbem     import RotorInputs
-from param_defaults import load_ap_params as _load_ap_params
-from param_defaults import load_collective_phys_range as _load_col_range
+from simulation.param_defaults import load_ap_params as _load_ap_params
+from simulation.param_defaults import load_collective_phys_range as _load_col_range
 from arduloop import HeliRateController, HeliParams, RateAxisParams
 
 
@@ -789,7 +789,7 @@ def compute_bz_altitude_hold(
 class YawTrimObserver:
     """Python port of rawes.lua's yaw trim observer (anti-rotation feedforward).
 
-    Mirrors ``yaw_trim_step(dt, u, psi_dot)`` in ``simulation/scripts/rawes.lua``
+    Mirrors ``yaw_trim_step(dt, u, psi_dot)`` in ``scripts/rawes.lua``
     exactly (see ``test_yaw_trim_lua.py`` for the Lua-side unit tests and
     ``test_yaw_trim_parity.py`` for the cross-check). Keep these two in sync —
     per AGENTS.md, any change to the Lua formula must be mirrored here in the

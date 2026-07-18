@@ -11,7 +11,7 @@ Any module inside simulation/ (or a subdirectory) can use:
 
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[N]))  # reach simulation/
-    from stack_utils import (
+    from tests.sitl.stack_utils import (
         STACK_ENV_FLAG, ARDUPILOT_ENV, SIM_VEHICLE_ENV,
         SITL_GCS_PORT, SITL_JSON_PORT, GCS_ADDRESS,
         _resolve_sim_vehicle, _launch_sitl, _prime_sitl_eeprom,

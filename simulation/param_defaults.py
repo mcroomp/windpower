@@ -1,9 +1,9 @@
 """Load ArduPilot parameters from .parm files.
 
 Parameter precedence (later files override earlier files):
-1. ArduPilot heli baseline: ``simulation/tests/sitl/copter-heli.parm``
-2. RAWES common defaults: ``simulation/tests/sitl/rawes_common_defaults.parm``
-3. RAWES SITL-only overrides: ``simulation/tests/sitl/rawes_sitl_defaults.parm``
+1. ArduPilot heli baseline: ``tests/sitl/copter-heli.parm``
+2. RAWES common defaults: ``tests/sitl/rawes_common_defaults.parm``
+3. RAWES SITL-only overrides: ``tests/sitl/rawes_sitl_defaults.parm``
 
 This keeps arduloop aligned to real ArduPilot parameters without hardcoded
 controller values in Python.
@@ -21,18 +21,18 @@ from arduloop.params import RateAxisParams
 
 def _resolve_default_param_files() -> list[Path]:
     """Return parameter files in precedence order (base -> overrides)."""
-    sim_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parent.parent
     files: list[Path] = []
 
-    ap_base = sim_root / "tests" / "sitl" / "copter-heli.parm"
+    ap_base = repo_root / "tests" / "sitl" / "copter-heli.parm"
     if ap_base.exists():
         files.append(ap_base)
 
-    rawes_common = sim_root / "tests" / "sitl" / "rawes_common_defaults.parm"
+    rawes_common = repo_root / "tests" / "sitl" / "rawes_common_defaults.parm"
     if rawes_common.exists():
         files.append(rawes_common)
 
-    rawes_sitl_only = sim_root / "tests" / "sitl" / "rawes_sitl_defaults.parm"
+    rawes_sitl_only = repo_root / "tests" / "sitl" / "rawes_sitl_defaults.parm"
     if rawes_sitl_only.exists():
         files.append(rawes_sitl_only)
 
@@ -41,8 +41,8 @@ def _resolve_default_param_files() -> list[Path]:
 
 def _resolve_rawes_lua_file() -> Path:
     """Return the canonical rawes.lua script path."""
-    sim_root = Path(__file__).resolve().parent
-    return sim_root / "scripts" / "rawes.lua"
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / "scripts" / "rawes.lua"
 
 
 def load_rawes_lua_constants(required_names: Sequence[str]) -> dict[str, float]:
