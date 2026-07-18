@@ -56,25 +56,15 @@ _sync_code() {
         --exclude="tests/hil" \
         --exclude=".venv" \
         --exclude="*.egg-info" \
-        -cf - simulation arduloop envelope analysis viz3d scripts tests calibrate \
+        -cf - pyproject.toml simulation arduloop envelope analysis viz3d scripts tests calibrate \
     | docker exec -i "$_c" tar -xf - -C /rawes/
-    # Sync the sibling aero workspace (editable-installed on host from ../aero
-    # relative to the repo root) for local development convenience.
-    local _AERO_DIR="$REPO_DIR/../aero"
-    if [ -d "$_AERO_DIR" ]; then
-        docker exec "$_c" mkdir -p /rawes
-        tar -C "$_AERO_DIR" \
-            --exclude="./__pycache__" \
-            --exclude="*/__pycache__" \
-            --exclude="./.venv" \
-            --exclude="./tests" \
-            --exclude="./target" \
-            --exclude="./out" \
-            --exclude="./Research" \
-            --exclude="./envelope" \
-            -cf - Cargo.toml Cargo.lock pyproject.toml dynbem dynbem_rs aero \
-        | docker exec -i "$_c" tar -xf - -C /rawes/
-        docker exec "$_c" bash -lc 'python - <<"PY"
+    # dynbem (the Rust-backed aero core) is installed from a pinned PyPI wheel,
+    # not synced from the sibling ../aero source workspace -- that source tree
+    # is not needed at runtime (all rawes code imports only `dynbem`, never
+    # bare `aero`/`dynbem_rs`) and its pyproject.toml previously clobbered
+    # rawes's own /rawes/pyproject.toml (pytest timeout/marker config) when
+    # both were synced to the same container path.
+    docker exec "$_c" bash -lc 'python - <<"PY"
 import importlib.metadata as m
 import pathlib
 import re
@@ -132,7 +122,6 @@ if installed != required:
     print(f"[ERROR] dynbem version check failed after install (required={required!r}, found={installed!r}); aborting sync.", file=sys.stderr)
     raise SystemExit(2)
 PY'
-    fi
     echo "[INFO] Code sync complete."
 }
 
