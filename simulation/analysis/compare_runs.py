@@ -15,7 +15,7 @@ Usage (inside Docker):
       pumping_lua_test_pumping_cycle_lua \\
       --plot
 
-The script aligns both runs on kinematic exit time (first row with damp_alpha==0),
+The script aligns both runs on kinematic exit time (first row after startup phases end),
 then prints a side-by-side comparison of key metrics in 5 s windows.
 
 Metrics compared:
@@ -58,6 +58,11 @@ _YAW_DIFF_WARN   = 15.0   # deg
 _COL_DIFF_WARN   = 0.02   # rad
 _REACTION_PRE_S = 1.0
 _REACTION_HORIZON_S = 3.0
+_KINEMATIC_PHASES = frozenset({"waiting_ekf", "positioning"})
+
+
+def _is_kinematic_row(r: TelRow) -> bool:
+    return str(r.phase or "") in _KINEMATIC_PHASES
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +70,10 @@ _REACTION_HORIZON_S = 3.0
 # ---------------------------------------------------------------------------
 
 def _find_kin_exit_t(rows: list[TelRow]) -> Optional[float]:
-    """Return t_sim of first row with damp_alpha == 0 (kinematic exit)."""
+    """Return t_sim of first row where startup phase transitions to free-flight."""
     prev = None
     for r in rows:
-        if r.damp_alpha == 0.0 and (prev is None or prev.damp_alpha > 0.0):
+        if (not _is_kinematic_row(r)) and (prev is None or _is_kinematic_row(prev)):
             return r.t_sim
         prev = r
     return None
@@ -146,7 +151,7 @@ def _bucket_control(rows: list[TelRow], t_ref: float, window_s: float) -> dict[i
     out: dict[int, dict] = {}
     by_key: dict[int, list[TelRow]] = {}
     for r in rows:
-        if r.damp_alpha != 0.0:
+        if _is_kinematic_row(r):
             continue
         dt = r.t_sim - t_ref
         if dt < 0.0:
@@ -293,7 +298,7 @@ def _print_pid_diagnostics(
 
 
 def _rows_in_rel_window(rows: list[TelRow], t_kin: float, t0: float, t1: float) -> list[TelRow]:
-    return [r for r in rows if r.damp_alpha == 0.0 and t0 <= (r.t_sim - t_kin) < t1]
+    return [r for r in rows if (not _is_kinematic_row(r)) and t0 <= (r.t_sim - t_kin) < t1]
 
 
 def _mean_attr(rows: list[TelRow], attr: str) -> Optional[float]:
@@ -540,7 +545,7 @@ def compare(name_a: str, name_b: str, window_s: float = 5.0,
 
     # ── Per-run summary stats ──────────────────────────────────────────────────
     def _run_summary(rows: list[TelRow], label: str, t_kin: float) -> None:
-        free_rows = [r for r in rows if r.damp_alpha == 0.0]
+        free_rows = [r for r in rows if not _is_kinematic_row(r)]
         if not free_rows:
             print(f"\n{label}: no free-flight rows")
             return
@@ -593,20 +598,20 @@ def _plot(rows_a: list[TelRow], rows_b: list[TelRow],
         return
 
     def _ts(rows: list[TelRow], t_kin: float) -> list[float]:
-        return [r.t_sim - t_kin for r in rows if r.damp_alpha == 0.0]
+        return [r.t_sim - t_kin for r in rows if not _is_kinematic_row(r)]
 
     ta = _ts(rows_a, t_kin_a)
     tb = _ts(rows_b, t_kin_b)
 
     def _get(rows: list[TelRow], attr: str) -> list[float]:
-        return [getattr(r, attr) for r in rows if r.damp_alpha == 0.0]
+        return [getattr(r, attr) for r in rows if not _is_kinematic_row(r)]
 
-    alt_a = [-r.pos_z for r in rows_a if r.damp_alpha == 0.0]
-    alt_b = [-r.pos_z for r in rows_b if r.damp_alpha == 0.0]
-    orb_a = [math.sqrt(r.pos_x**2 + r.pos_y**2) for r in rows_a if r.damp_alpha == 0.0]
-    orb_b = [math.sqrt(r.pos_x**2 + r.pos_y**2) for r in rows_b if r.damp_alpha == 0.0]
-    yaw_a = [math.degrees(r.orb_yaw_rad - r.rpy_yaw) for r in rows_a if r.damp_alpha == 0.0]
-    yaw_b = [math.degrees(r.orb_yaw_rad - r.rpy_yaw) for r in rows_b if r.damp_alpha == 0.0]
+    alt_a = [-r.pos_z for r in rows_a if not _is_kinematic_row(r)]
+    alt_b = [-r.pos_z for r in rows_b if not _is_kinematic_row(r)]
+    orb_a = [math.sqrt(r.pos_x**2 + r.pos_y**2) for r in rows_a if not _is_kinematic_row(r)]
+    orb_b = [math.sqrt(r.pos_x**2 + r.pos_y**2) for r in rows_b if not _is_kinematic_row(r)]
+    yaw_a = [math.degrees(r.orb_yaw_rad - r.rpy_yaw) for r in rows_a if not _is_kinematic_row(r)]
+    yaw_b = [math.degrees(r.orb_yaw_rad - r.rpy_yaw) for r in rows_b if not _is_kinematic_row(r)]
     col_a = _get(rows_a, "collective_rad")
     col_b = _get(rows_b, "collective_rad")
     ten_a = _get(rows_a, "tether_tension")

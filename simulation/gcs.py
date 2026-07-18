@@ -1034,6 +1034,31 @@ class RawesGCS:
         )
         log.debug("NAMED_VALUE_FLOAT sent: %s=%.4g", name, value)
 
+    def send_named_int(self, name: str, value: int) -> None:
+        """Send a NAMED_VALUE_INT MAVLink message to the vehicle.
+
+        ArduPilot Lua scripts that have called mavlink.register_rx_msgid(252)
+        will receive this message via mavlink.receive_chan() on their next tick.
+
+        Use this instead of send_named_float() whenever the value must keep
+        exact int32 precision (e.g. lat/lon in degrees*1e7) -- a float32 NVF
+        loses precision for large-magnitude values like absolute latitude.
+
+        Parameters
+        ----------
+        name : str
+            Message name, up to 10 ASCII characters (truncated + null-padded).
+        value : int
+            Signed 32-bit integer value carried by the message.
+        """
+        name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
+        self._mav.mav.named_value_int_send(
+            0,       # time_boot_ms — not meaningful for GCS-to-vehicle messages
+            name_b,
+            int(value),
+        )
+        log.debug("NAMED_VALUE_INT sent: %s=%d", name, value)
+
     # ------------------------------------------------------------------
     # Telemetry receive
     # ------------------------------------------------------------------

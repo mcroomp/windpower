@@ -119,7 +119,8 @@ class RawesLua:
             kp_el     -> RAWES_KP_EL  (elevation crosswind gain)
             kp_az     -> RAWES_KP_AZ  (azimuth crosswind gain)
             ...etc.   Full names (e.g. "RAWES_KP_ALT") are also accepted.
-        Anchor/slew use sim.send_named_float ("RAWES_SLW"/"RAWES_ANN"/etc.).
+        Anchor uses sim.send_named_int ("RAWES_LAT"/"RAWES_LON"/"RAWES_AAL");
+        slew uses sim.send_named_float ("RAWES_SLW").
     """
 
     # Base tick rate: rawes.lua BASE_PERIOD_MS = 10 ms (100 Hz)
@@ -258,8 +259,9 @@ class RawesLua:
     def set_param(self, name: str, value: float):
         """Set a parameter by ArduPilot name or the ``mode`` alias.
 
-        RAWES_MODE is a script-generated parameter; slew/anchor now flow via
-        send_named_float (RAWES_SLW / RAWES_ANN / RAWES_ANE / RAWES_AND).
+        RAWES_MODE is a script-generated parameter; slew flows via
+        send_named_float (RAWES_SLW); anchor flows via send_named_int
+        (RAWES_LAT / RAWES_LON / RAWES_AAL — see rawes_modes.send_anchor_ned()).
 
         Example:
             sim.set_param("mode", 1)          # RAWES_MODE = 1 (steady)
@@ -401,30 +403,51 @@ class RawesLua:
         """Discard all accumulated gcs:send_text messages."""
         self._lua.execute("_mock.gcs_msgs = {}")
 
-    # ── MAVLink named-float inject ─────────────────────────────────────────
+    # ── MAVLink named-value inject (float + int) ────────────────────────────
 
-    def send_named_float(self, name: str, value: float) -> None:
-        """Inject a NAMED_VALUE_FLOAT into the Lua mavlink inbox.
+    def _send_named(self, name: str, value, msg_cls, msgid: int) -> None:
+        """Inject a NAMED_VALUE_FLOAT/INT message into the Lua mavlink inbox.
 
         Builds the message with pymavlink (same serialiser used by the real GCS)
-        and extracts the wire payload (bytes 6..6+len), then prepends 12 null
-        bytes to match the mavlink_message_t internal-struct layout that
-        ArduPilot's mavlink.receive_chan() returns.  Lua unpacks the payload
-        starting at byte 13 (1-indexed) with string.unpack("<If10s", raw, 13).
+        and extracts the wire payload (bytes 6..6+len), then prepends a 12-byte
+        header matching the mavlink_message_t internal-struct layout that
+        ArduPilot's mavlink.receive_chan() returns.  The msgid is encoded as a
+        3-byte little-endian int in the last 3 header bytes (offset 10, 1-indexed)
+        so Lua's dispatch (string.unpack("<I3", raw, 10)) can tell NAMED_VALUE_INT
+        (252) apart from NAMED_VALUE_FLOAT (251); the payload itself starts at
+        byte 13 (1-indexed), unpacked with string.unpack("<Ifc10"/"<Iic10", raw, 13).
         """
         from pymavlink import mavutil as _mu  # local import — not always needed
 
         _mav = _mu.mavlink.MAVLink(None, srcSystem=255, srcComponent=0)
         name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
-        msg = _mu.mavlink.MAVLink_named_value_float_message(
-            time_boot_ms=0, name=name_b, value=float(value)
-        )
+        msg = msg_cls(time_boot_ms=0, name=name_b, value=value)
         wire = msg.pack(_mav)
         # Extract payload from wire packet (skip 6-byte MAVLink v1 header and
         # 2-byte trailing CRC; payload length is wire[1]).
         payload = wire[6 : 6 + wire[1]]
-        # Prepend 12-byte internal-struct header so payload lands at offset 13.
-        raw = b"\x00" * 12 + payload
+        header = b"\x00" * 9 + msgid.to_bytes(3, "little")
+        raw = header + payload
         # Push as a Lua string using hex escapes — safe for all byte values.
         lua_str = "".join(f"\\x{b:02x}" for b in raw)
         self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
+
+    def send_named_float(self, name: str, value: float) -> None:
+        """Inject a NAMED_VALUE_FLOAT (msgid 251) into the Lua mavlink inbox."""
+        from pymavlink import mavutil as _mu
+
+        self._send_named(
+            name, float(value), _mu.mavlink.MAVLink_named_value_float_message, 251
+        )
+
+    def send_named_int(self, name: str, value: int) -> None:
+        """Inject a NAMED_VALUE_INT (msgid 252) into the Lua mavlink inbox.
+
+        Used for the anchor lat/lon/alt (RAWES_LAT/LON/AAL), which are sent as
+        int32 to preserve ArduPilot's own Location precision end-to-end.
+        """
+        from pymavlink import mavutil as _mu
+
+        self._send_named(
+            name, int(value), _mu.mavlink.MAVLink_named_value_int_message, 252
+        )

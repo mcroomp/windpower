@@ -10,11 +10,7 @@ Fixtures:
 All IC-start fixtures share the _ic_trapezoid_stack initialization helper.
 """
 import contextlib
-import json
 import math
-import os
-
-import numpy as np
 
 import pytest
 
@@ -25,9 +21,64 @@ from stack_infra import (
     _install_lua_scripts,
     _STARTING_STATE,
     _STARTUP_DAMP_S,
+    HOME_LAT_DEG,
+    HOME_LON_DEG,
+    HOME_ALT_M,
 )
 from ic import load_ic
 from torque_model import HubParams, equilibrium_throttle
+
+
+def _send_anchor_location(ctx) -> None:
+    """Send the tether anchor's absolute GPS location to rawes.lua via NAMED_VALUE_INT.
+
+    The anchor is fixed at the mediator's world-frame origin (config.py
+    anchor_ned=[0, 0, 0]).  Horizontally, the bare-NED JSON physics backend
+    maps this directly onto SITL's fixed launch location (stack_utils.
+    HOME_LAT_DEG / HOME_LON_DEG, matching the --custom-location SITL launch
+    arg) -- GPS lat/lon is an absolute measurement, so rawes.lua's
+    Location:get_vector_from_origin_NEU_m() resolves the correct N/E offset
+    regardless of where the EKF origin actually lands.
+
+    Altitude is different: ArduPilot's vertical estimate is baro-anchored,
+    so whatever altitude the vehicle physically occupies when the EKF's
+    local origin is established becomes its "zero" -- a real sensor
+    behavior (baro is zeroed at boot), not a simulation artifact.  This
+    stack test boots the vehicle already kinematically locked ctx.home_alt_m
+    metres above the anchor, so the EKF's local origin altitude ends up that
+    far above the anchor's true altitude.  The anchor's sent altitude must
+    therefore be offset by -ctx.home_alt_m so it resolves to the correct
+    (positive-down) D offset once EKF-local.
+
+    Sent as NAMED_VALUE_INT (not NAMED_VALUE_FLOAT): lat/lon in degrees lose
+    ~0.5-1 m of precision when round-tripped through a float32 NVF wire
+    field, whereas NAMED_VALUE_INT carries the same int32 degrees*1e7 / cm
+    representation ArduPilot's own Location object uses natively.
+    """
+    anchor_alt_m = HOME_ALT_M - ctx.home_alt_m
+    lat_e7 = round(HOME_LAT_DEG * 1e7)
+    lon_e7 = round(HOME_LON_DEG * 1e7)
+    alt_cm = round(anchor_alt_m * 100)
+    ctx.gcs.send_named_int("RAWES_LAT", lat_e7)
+    ctx.gcs.send_named_int("RAWES_LON", lon_e7)
+    ctx.gcs.send_named_int("RAWES_AAL", alt_cm)
+    ctx.log.info(
+        "  anchor location sent via NVI (lat=%.7f lon=%.7f alt=%.1fm, "
+        "home_alt_m=%.2f)",
+        HOME_LAT_DEG, HOME_LON_DEG, anchor_alt_m, ctx.home_alt_m,
+    )
+
+
+def _wait_and_configure_mode_anchor(
+    ctx,
+    *,
+    mode: int,
+    mode_label: str,
+) -> None:
+    """Send the anchor location once, then set RAWES_MODE."""
+    _send_anchor_location(ctx)
+    ctx.gcs.set_param("RAWES_MODE", int(mode), timeout=5.0)
+    ctx.log.info("  mode=%s set", mode_label)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +127,6 @@ def guided_nogps_armed_pumping_lua(tmp_path, request):
         yield ctx
 
 
-
 @pytest.fixture
 def guided_nogps_armed_landing_lua(tmp_path, request):
     """
@@ -115,7 +165,7 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
       t=45..65 s  kinematic ramp phase: vel ramps 0.96->0 m/s (vel_ramp_s=20)
       t~51 s      ahrs:healthy() True; Lua enters KINEMATIC_SETTLE_MS wait
       t~62 s      Lua KINEMATIC_SETTLE_MS (62 s) expires; captures body_z
-    t~62..65 s  Lua sends GUIDED setpoints; kinematic still ramps vel to 0
+      t~62..65 s  Lua sends GUIDED setpoints; kinematic still ramps vel to 0
       t=65 s      kinematic exits; hub at pos0 with vel=0, tension~0
       t~65..102 s Lua VZ controller descends hub; WinchController reels in tether
       t~102 s     Lua triggers final_drop STATUSTEXT (alt_est <= 2 m)
@@ -157,26 +207,11 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
     }
     with _acro_stack(tmp_path, extra_config=extra,
                      test_name=request.node.name) as ctx:
-        # Post-arm: configure rawes.lua.  Mode via RAWES_MODE; slew + anchor via
-        # NAMED_VALUE_FLOAT.
-        # RAWES_AND = -pos0[2] = altitude of pos0 above anchor ~ 19.696 m.
-        # vel0[2]=0 => altitude constant during kinematic => EKF_ORIGIN.z = pos0[2].
-        # anch_EKF.z = RAWES_AND = -pos0[2] = altitude above EKF origin.
-        # Lua: alt_est = anch.z - hub_ned.z (hub_ned.z from LOCAL_POSITION_NED).
-        #
-        # RAWES_MODE=4 set here; rawes.lua DELAYS body_z capture until
-        # millis() >= KINEMATIC_SETTLE_MS (62 s) to ensure EKF has converged.
-        ctx.log.info("Setting RAWES_MODE + slew/anchor NVFs for rawes.lua (landing mode) ...")
-        ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
-        ctx.gcs.set_param("RAWES_MODE", 4, timeout=5.0)   # landing mode
-        # Slew + anchor are NAMED_VALUE_FLOAT.  The anchor is at world origin;
-        # here anchor North/East = 0 and anchor Down (EKF frame) = -pos0[2].
-        # rawes.lua gates altitude-hold capture on all three anchor floats.
-        ctx.gcs.send_named_float("RAWES_ANN", 0.0)                      # anchor North [m]
-        ctx.gcs.send_named_float("RAWES_ANE", 0.0)                      # anchor East  [m]
-        ctx.gcs.send_named_float("RAWES_AND", -float(extra["pos0"][2])) # anchor Down  [m]
-        ctx.log.info("  mode=4 (landing); slew+anchor sent via NVF (anchor D=%.2f)",
-                     -float(extra["pos0"][2]))
+        # Post-arm: configure rawes.lua for landing mode.
+        # rawes.lua delays body_z capture until KINEMATIC_SETTLE_MS, so this can
+        # be applied before kinematic exit without premature guidance capture.
+        ctx.log.info("Setting RAWES_MODE + anchor NVI for rawes.lua (landing mode) ...")
+        _wait_and_configure_mode_anchor(ctx, mode=4, mode_label="4 (landing)")
 
         ctx.wait_drain(timeout=1.0, label="post-param")
         yield ctx
@@ -306,36 +341,22 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         test_name=test_name,
         arm_at_sim_s=_arm_at_sim_s,
     ) as ctx:
-        ctx.log.info("Setting mode param + slew/anchor NVFs for rawes.lua ...")
-        # The anchor is at world origin; the EKF origin is the hub's first
-        # GPS fix = launch position pos0.  So anchor-in-EKF-frame = -pos0.
-        # RAWES_ANN/ANE must encode the horizontal offset (negated launch x/y)
-        # or the Lua sees the anchor directly below the hub and computes
-        # elevation = 90 deg, producing a saturated cyclic that kicks the
-        # body at kinematic_exit.
-        _pos0 = ctx.initial_state["pos"] if ctx.initial_state else [0.0, 0.0, -ctx.home_alt_m]
-        # Mode is the only RAWES_* script-generated param set here; slew + anchor are NAMED_VALUE_FLOAT.
-        ctx.gcs.set_param("SCR_ENABLE", 1, timeout=5.0)   # persist scripting in EEPROM
-        # MODE_PASSIVE (3): vehicle stays armed (motor interlock kept high) but
-        # Lua emits no rate commands, so ArduPilot's rate PID has no setpoint to
-        # wind up against while the body is kinematically locked.  The test must
-        # promote to MODE_STEADY (1) immediately after kinematic_exit.
-        ctx.gcs.set_param("RAWES_MODE", 3, timeout=5.0)   # MODE_PASSIVE
-        # rawes.lua gates altitude-hold capture on all three anchor floats arriving.
-        ctx.gcs.send_named_float("RAWES_ANN", -float(_pos0[0]))      # anchor North (EKF) [m]
-        ctx.gcs.send_named_float("RAWES_ANE", -float(_pos0[1]))      # anchor East  (EKF) [m]
-        ctx.gcs.send_named_float("RAWES_AND", float(ctx.home_alt_m)) # anchor Down  (EKF) [m]
-        ctx.log.info("  mode=3 (PASSIVE); slew+anchor via NVF (anchor EKF=%.2f,%.2f,%.2f)",
-                     -float(_pos0[0]), -float(_pos0[1]), float(ctx.home_alt_m))
-        ctx.wait_drain(timeout=1.0, label="post-param")
+        # MODE_PASSIVE (3) is set immediately after arm, decoupled from anchor
+        # calibration below (which needs telemetry/EKF data that can take
+        # longer to become ready).  Lua emits no rate commands in this mode,
+        # so ArduPilot's rate PID has no setpoint to wind up against while the
+        # body is kinematically locked -- this must happen right after arm,
+        # not after waiting on anchor telemetry.
+        ctx.log.info("Setting RAWES_MODE=3 (PASSIVE) immediately after arm ...")
+        ctx.gcs.set_param("RAWES_MODE", 3, timeout=5.0)
 
         # Stream IC collective to Lua so MODE_PASSIVE holds the IC collective
         # through GUIDED throttle and omega_spin doesn't droop while the body is kinematically
         # locked.
         _ic = ctx.initial_state
         if _ic is not None:
-            # Seed the IC immediately, together with MODE_PASSIVE, right after
-            # arm.  MODE_PASSIVE only commands the IC attitude/collective once
+            # Seed the IC immediately, right after MODE_PASSIVE is set.
+            # MODE_PASSIVE only commands the IC attitude/collective once
             # the full atomic seed (RAWES_RIC + RAWES_PIC + RAWES_THR) has
             # arrived, so sending it now gives the nul-aero the entire kinematic
             # hold window to slew the disk to the IC tilt before release.
@@ -368,13 +389,26 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             )
 
             # Stream the IC equilibrium tension and target altitude from the IC.
-            # Tension feeds the orientation force balance; altitude overrides the
-            # EKF-reported altitude (which has a ~2.5 m bias at capture time due
-            # to EKF vertical convergence lag) so Lua targets the physics IC
-            # altitude, not the biased EKF altitude.
+            # Tension feeds the orientation force balance; altitude is the
+            # physics-truth IC altitude (ctx.home_alt_m), not a live EKF
+            # reading, avoiding the ~2.5 m EKF vertical convergence-lag bias
+            # present at capture time.
             _tension_eq = float(_ic["tension_eq_n"])
-            _alt_ic     = float(-_ic["pos"][2])   # physics altitude above anchor
             ctx.gcs.send_named_float("RAWES_TEN", _tension_eq)
+
+            # Anchor location is a static constant, sent EXACTLY ONCE here
+            # (after the IC seed values are queued) -- it does not depend on
+            # telemetry/EKF availability, so it can be sent right away without
+            # gating the MODE_PASSIVE assignment above.
+            _send_anchor_location(ctx)
+
+            # Altitude above anchor at IC = ctx.home_alt_m (precomputed in
+            # stack_infra._acro_stack as -initial_state["pos"][2]; the anchor
+            # sits at the mediator's world-frame origin so this equals the
+            # physics-truth altitude directly -- no telemetry/EKF calibration
+            # needed).
+            _alt_ic = float(ctx.home_alt_m)
+
             ctx.gcs.send_named_float("RAWES_ALT", _alt_ic)
             ctx.log.info("IC equilibrium tension: %.0f N  target altitude: %.1f m",
                          _tension_eq, _alt_ic)
@@ -391,6 +425,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             _yff_seed = equilibrium_throttle(float(_ic["omega_spin"]), HubParams())
             ctx.gcs.send_named_float("RAWES_YFF", _yff_seed)
             ctx.log.info("IC yaw-trim equilibrium seed: %.3f", _yff_seed)
+        ctx.wait_drain(timeout=1.0, label="post-param")
         ctx.wait_drain(timeout=0.5, label="post-col")
 
         # Wait for GPS fusion before yielding.

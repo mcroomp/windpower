@@ -146,17 +146,30 @@ Ground→Lua NAMED_VALUE_FLOAT interface (not AP params):
 | RAWES_TEN  | Target/feed-forward tether tension [N]                           |
 | RAWES_SUB  | Substate (0=hold,1=reel_out,2=transition,3=reel_in,4=transition_back) |
 | RAWES_ARM  | Optional disarm timer [ms until forced disarm]                   |
-| RAWES_ANN  | Anchor North from EKF origin [m]                                 |
-| RAWES_ANE  | Anchor East from EKF origin [m]                                  |
-| RAWES_AND  | Anchor Down from EKF origin [m]                                  |
 | RAWES_THR  | IC thrust [0..1] (passive seed; committed atomically with RIC/PIC) |
 | RAWES_RIC  | IC roll [rad]                                                    |
 | RAWES_PIC  | IC pitch [rad]                                                   |
 | RAWES_YIC  | Optional fixed yaw target [rad] for MODE_PASSIVE                 |
 
+Ground→Lua NAMED_VALUE_INT interface (one-shot anchor location, sent once post-arm):
+
+| NVI key    | Purpose                                                          |
+|---|---|
+| RAWES_LAT  | Anchor latitude  [deg * 1e7]                                     |
+| RAWES_LON  | Anchor longitude [deg * 1e7]                                     |
+| RAWES_AAL  | Anchor altitude  [cm, AMSL]                                      |
+
+Sent as NAMED_VALUE_INT (not FLOAT) for ArduPilot's Location int32 precision
+(~1 cm) end-to-end. Lua resolves this to an EKF-local NED anchor offset on
+board via `Location:get_vector_from_origin_NEU_m()` (see `_try_resolve_anchor()`
+in `rawes.lua`); MODE_STEADY does not initialise altitude hold until all three
+ints have arrived AND that resolution has succeeded. Python helper:
+`rawes_modes.send_anchor_ned(sim_or_gcs, dn_m, de_m, dd_m)`.
+
 Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
 
 RAWES mode -> vehicle control API (current `rawes.lua` behavior):
+
 
 | RAWES_MODE | Mode | Vehicle API used |
 |---|---|---|

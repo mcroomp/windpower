@@ -52,6 +52,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from flight_log import FlightLog  # noqa: E402
 
 
+_KINEMATIC_PHASES = frozenset({"waiting_ekf", "positioning"})
+
+
+def _is_kinematic_row(row: TelRow) -> bool:
+    return str(getattr(row, "phase", "") or "") in _KINEMATIC_PHASES
+
+
 # ---------------------------------------------------------------------------
 # Public API — importable from tests
 # ---------------------------------------------------------------------------
@@ -77,7 +84,7 @@ def compute_steady_metrics(
 ) -> SteadyMetrics:
     """Compute stability metrics from TelRow list (physics ground truth).
 
-    Considers only free-flight rows (damp_alpha == 0).  The stable window is
+    Considers only free-flight rows (non-startup phase). The stable window is
     measured in simulation seconds so it is independent of wall-clock timing.
 
     Args:
@@ -87,7 +94,7 @@ def compute_steady_metrics(
     Returns:
         SteadyMetrics with physics-based pass/fail values.
     """
-    free_rows = [r for r in tel_rows if r.damp_alpha == 0.0]
+    free_rows = [r for r in tel_rows if not _is_kinematic_row(r)]
     if not free_rows:
         return SteadyMetrics(
             min_phys_alt=0.0, max_stable_s=0.0, floor_hits=0,
@@ -448,8 +455,8 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         k_ang_str = f"  k_ang={r.k_ang:.1f}" if r.k_ang is not None else ""
         print(f"  damping     : T={r.damp_T:.0f}s{k_ang_str}")
 
-    damp_rows = [row for row in rows if row.damp_alpha > 0.0]
-    free_rows  = [row for row in rows if row.damp_alpha == 0.0]
+    damp_rows = [row for row in rows if _is_kinematic_row(row)]
+    free_rows  = [row for row in rows if not _is_kinematic_row(row)]
 
     # Damping phase
     if damp_rows:
@@ -666,8 +673,7 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
                     print("    diagnosis              : spin decay occurs primarily BEFORE arm/NVF hold capture,")
                     print("                               then stabilizes post-arm. Investigate pre-arm collective/throttle state.")
 
-    # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV;
-    # fall back to first free-flight row (damp_alpha==0) for older logs.
+    # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV.
     _tr_rows = [r for r in rows if r.note == "kinematic_exit"]
     tr = _tr_rows[0] if _tr_rows else (free_rows[0] if free_rows else None)
     if tr is not None:
@@ -1145,9 +1151,9 @@ def _print_yaw_divergence(r: RunReport) -> None:
 
     # Group into three logical segments: kinematic, free-flight, pumping phases
     segments = [
-        ("kinematic (damp_alpha>0)",  [r for r in rows if r.damp_alpha > 0.0]),
-        ("free-flight (damp_alpha=0, no pump phase)",
-         [r for r in rows if r.damp_alpha == 0.0
+        ("kinematic (phase is waiting_ekf/positioning)",  [r for r in rows if _is_kinematic_row(r)]),
+        ("free-flight (phase not startup, no pump phase)",
+         [r for r in rows if not _is_kinematic_row(r)
                           and r.phase not in ("reel-out", "reel-in", "descent", "final_drop")]),
         ("pumping (reel-out/reel-in)", [r for r in rows if r.phase in ("reel-out", "reel-in")]),
         ("landing (descent/final_drop)", [r for r in rows if r.phase in ("descent", "final_drop")]),
@@ -1246,9 +1252,9 @@ def _print_sensor_consistency(r: RunReport) -> None:
 
     segments = [
         ("kinematic",
-         [row for row in rows if row.damp_alpha > 0.0]),
+         [row for row in rows if _is_kinematic_row(row)]),
         ("free-flight (no pump/landing)",
-         [row for row in rows if row.damp_alpha == 0.0
+         [row for row in rows if not _is_kinematic_row(row)
           and row.phase not in ("reel-out", "reel-in", "descent", "final_drop")]),
         ("pumping (reel-out/reel-in)",
          [row for row in rows if row.phase in ("reel-out", "reel-in")]),
@@ -1575,7 +1581,7 @@ def _print_release_window(
     if tr_rows:
         t_exit = tr_rows[0].t_sim
     else:
-        free_rows = [row for row in rows if row.damp_alpha == 0.0]
+        free_rows = [row for row in rows if not _is_kinematic_row(row)]
         if not free_rows:
             return
         t_exit = free_rows[0].t_sim

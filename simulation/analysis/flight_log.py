@@ -442,12 +442,6 @@ class FlightLog:
         kin_exit_rows = [r for r in self.tel_rows if r.note == "kinematic_exit"]
         if kin_exit_rows:
             _forced.append(kin_exit_rows[0].t_sim)
-        elif self.tel_rows:
-            # Fall back: first row where damp_alpha drops to 0
-            for i in range(1, len(self.tel_rows)):
-                if self.tel_rows[i - 1].damp_alpha > 0 and self.tel_rows[i].damp_alpha == 0:
-                    _forced.append(self.tel_rows[i].t_sim)
-                    break
 
         for ft in _forced:
             if t_start < ft < t_end:
@@ -462,7 +456,7 @@ class FlightLog:
             brows = [r for r in self.tel_rows if bs <= r.t_sim < be]
 
             if brows:
-                is_kin = any(r.damp_alpha > 0 for r in brows)
+                is_kin = any((r.phase in ("waiting_ekf", "positioning")) for r in brows)
                 if is_kin:
                     phase = "kinematic"
                 else:
