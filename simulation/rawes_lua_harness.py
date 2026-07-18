@@ -35,6 +35,8 @@ from pathlib import Path
 import numpy as np
 from lupa import lua54
 
+from groundstation.gcs import NamedValueFloat, NamedValueInt
+
 # ── File paths ────────────────────────────────────────────────────────────────
 
 _SIM_DIR     = Path(__file__).resolve().parent
@@ -432,22 +434,40 @@ class RawesLua:
         lua_str = "".join(f"\\x{b:02x}" for b in raw)
         self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
 
-    def send_named_float(self, name: str, value: float) -> None:
-        """Inject a NAMED_VALUE_FLOAT (msgid 251) into the Lua mavlink inbox."""
+    def send_message(self, msg) -> None:
+        """Inject a supported MAVLink dataclass into the Lua mavlink inbox.
+
+        Supported today: NamedValueFloat and NamedValueInt, which mirror the
+        same ground->Lua control channel used by RawesGCS in SITL.
+        """
         from pymavlink import mavutil as _mu
 
-        self._send_named(
-            name, float(value), _mu.mavlink.MAVLink_named_value_float_message, 251
-        )
+        if isinstance(msg, NamedValueFloat):
+            self._send_named(
+                msg.name,
+                float(msg.value),
+                _mu.mavlink.MAVLink_named_value_float_message,
+                251,
+            )
+            return
+        if isinstance(msg, NamedValueInt):
+            self._send_named(
+                msg.name,
+                int(msg.value),
+                _mu.mavlink.MAVLink_named_value_int_message,
+                252,
+            )
+            return
+        raise TypeError(f"Unsupported RawesLua message type: {type(msg).__name__}")
+
+    def send_named_float(self, name: str, value: float) -> None:
+        """Compatibility shim: inject a NAMED_VALUE_FLOAT into the Lua inbox."""
+        self.send_message(NamedValueFloat(name, float(value)))
 
     def send_named_int(self, name: str, value: int) -> None:
-        """Inject a NAMED_VALUE_INT (msgid 252) into the Lua mavlink inbox.
+        """Compatibility shim: inject a NAMED_VALUE_INT into the Lua inbox.
 
         Used for the anchor lat/lon/alt (RAWES_LAT/LON/AAL), which are sent as
         int32 to preserve ArduPilot's own Location precision end-to-end.
         """
-        from pymavlink import mavutil as _mu
-
-        self._send_named(
-            name, int(value), _mu.mavlink.MAVLink_named_value_int_message, 252
-        )
+        self.send_message(NamedValueInt(name, int(value)))

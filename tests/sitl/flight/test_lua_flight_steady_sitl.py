@@ -72,6 +72,7 @@ from tests.sitl.stack_infra import (
     StackContext, dump_startup_diagnostics,
     observe, assert_no_mediator_criticals, get_arducopter_crash_info,
 )
+from groundstation.gcs import LocalPositionNed, NamedValueFloat, ServoOutputRaw, StatusText, decode_message
 from analysis.analyse_run import compute_steady_metrics, print_flight_report
 
 # -- Timing -------------------------------------------------------------------
@@ -91,6 +92,17 @@ _MIN_CYCLIC_ACTIVITY_PWM = 50    # |servo1-1500| + |servo2-1500| minimum peak
 _KIN_SPINUP_WINDOW_S     = 5.0   # final kinematic omega ramp window [s]
 _OMEGA_END_TOL_RAD_S     = 0.5   # omega tolerance at kinematic exit [rad/s]
 _OMEGA_MONO_EPS_RAD_S    = 0.15  # allow tiny sample jitter while checking monotonicity
+
+# Anchor-relative position cross-check: rawes.lua resolves the ground-sent
+# anchor lat/lon/alt into an EKF-local NED offset (ANCH_N/E/D, sent via NVF)
+# and combines it with the standard LOCAL_POSITION_NED mavlink message to get
+# its own view of "position relative to anchor".  Compare that (post-run)
+# against the physics-truth pos_x/pos_y/pos_z in telemetry.csv -- this is a
+# sanity check on the onboard anchor resolution + EKF position, not an EKF
+# accuracy benchmark, hence a generous tolerance (EKF/GPS noise + the ~0.5-1 m
+# lat/lon->NED quantization noted in conftest._send_anchor_location()).
+_MAX_ANCHOR_POS_ERR_M    = 5.0   # m -- max allowed |onboard rel - physics truth|
+_POS_XCHECK_MAX_DT_S     = 1.0   # s -- max allowed gap when matching samples to telemetry rows
 
 _POS_LOG_INTERVAL        = 5.0   # s between periodic log lines
 
@@ -149,10 +161,10 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     ic_roll_rad = math.atan2(r21, r22)
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
 
-    gcs.send_named_float("RAWES_THR", thr_seed)
-    gcs.send_named_float("RAWES_TEN", ten_seed)
-    gcs.send_named_float("RAWES_RIC", ic_roll_rad)
-    gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
+    gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
+    gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
+    gcs.send_message(NamedValueFloat("RAWES_RIC", ic_roll_rad))
+    gcs.send_message(NamedValueFloat("RAWES_PIC", ic_pitch_rad))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
         "Release seeds (IC-passive init): RAWES_THR=%.3f, RAWES_TEN=%.1f N, "
@@ -179,7 +191,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         # Send RAWES_ALT immediately after MODE_STEADY so Lua's capture uses the
         # physics IC altitude, not the EKF-reported altitude (which has a ~2.5 m
         # vertical bias).  Mode enter clears _nv_floats, so this must arrive after.
-        gcs.send_named_float("RAWES_ALT", float(-ic["pos"][2]))
+        gcs.send_message(NamedValueFloat("RAWES_ALT", float(-ic["pos"][2])))
 
     all_statustext = ctx.all_statustext
     lua_captured   = False
@@ -209,18 +221,20 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         "ekf_yaw_reset":     ekf_yaw_reset,
         "max_cyclic":        max_cyclic_activity,
         "t_last_log":        t_obs_start,
+        "anch":              {"N": None, "E": None, "D": None},
+        "pos_samples":       [],   # (t_abs, x, y, z) from LOCAL_POSITION_NED
     }
 
     def _handle(msg, t_rel):
         now = gcs.sim_now()
         if msg is not None:
-            mt = msg.get_type()
-            if mt == "SERVO_OUTPUT_RAW":
-                activity = abs(msg.servo1_raw - 1500) + abs(msg.servo2_raw - 1500)
+            decoded = decode_message(msg)
+            if isinstance(decoded, ServoOutputRaw):
+                activity = abs(decoded.servo1_raw - 1500) + abs(decoded.servo2_raw - 1500)
                 if activity > state["max_cyclic"]:
                     state["max_cyclic"] = activity
-            elif mt == "STATUSTEXT":
-                text = msg.text.rstrip("\x00").strip()
+            elif isinstance(decoded, StatusText):
+                text = decoded.text
                 log.info("STATUSTEXT [t=%.1fs]: %s", t_rel, text)
                 all_statustext.append(text)
                 tl = text.lower()
@@ -230,6 +244,12 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 if "emergency yaw" in tl or "yaw reset" in tl:
                     state["ekf_yaw_reset"] = True
                     log.warning("EKF yaw reset at t=%.1fs: %s", t_rel, text)
+            elif isinstance(decoded, NamedValueFloat):
+                name, value = decoded.name, decoded.value
+                if name in ("ANCH_N", "ANCH_E", "ANCH_D"):
+                    state["anch"][name[-1]] = value
+            elif isinstance(decoded, LocalPositionNed):
+                state["pos_samples"].append((now, decoded.x, decoded.y, decoded.z))
 
         if (not _DEBUG_KEEP_PASSIVE) and (not state["lua_captured"]) and now > t_capture_deadline:
             pytest.fail(
@@ -249,12 +269,14 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
 
     observe(ctx, _OBS_SECONDS, _handle,
             msg_types=["SERVO_OUTPUT_RAW", "STATUSTEXT", "ATTITUDE",
-                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"],
+                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT", "NAMED_VALUE_FLOAT"],
             label="observation")
 
     lua_captured      = state["lua_captured"]
     ekf_yaw_reset     = state["ekf_yaw_reset"]
     max_cyclic_activity = state["max_cyclic"]
+    anch              = state["anch"]
+    pos_samples       = state["pos_samples"]
     log.info("Observation complete: max_activity=%d PWM", max_cyclic_activity)
 
     try:
@@ -263,9 +285,10 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         # so we can assert before printing the full report.
         metrics = None
         _rows = []
-        if ctx.telemetry_log.exists():
+        telemetry_log = ctx.telemetry_log
+        if telemetry_log is not None and telemetry_log.exists():
             from simulation.telemetry_csv import read_csv as _read_csv
-            _rows   = _read_csv(ctx.telemetry_log)
+            _rows   = _read_csv(telemetry_log)
             metrics = compute_steady_metrics(_rows, stable_alt_m=_STABLE_ALT_M)
             log.info(
                 "Physics: min_alt=%.2f m  stable=%.0f s  floor_hits=%d"
@@ -276,11 +299,52 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         else:
             log.warning("No telemetry CSV -- physics checks skipped")
 
+        # -- Anchor-relative position cross-check ------------------------------
+        # Combine the onboard-resolved anchor (ANCH_N/E/D, via NVF) with the
+        # standard LOCAL_POSITION_NED samples to reconstruct the script's own
+        # view of "position relative to anchor", then compare against the
+        # physics-truth pos_x/pos_y/pos_z in telemetry.csv (see
+        # design/sitl_testing.md, "Anchor-relative position cross-check").
+        anchor_pos_max_err = None
+        if _rows and pos_samples and all(v is not None for v in anch.values()):
+            truth_t   = np.array([float(r.t_sim) for r in _rows])
+            truth_pos = np.array([[float(r.pos_x), float(r.pos_y), float(r.pos_z)] for r in _rows])
+            order     = np.argsort(truth_t)
+            truth_t   = truth_t[order]
+            truth_pos = truth_pos[order]
+
+            worst = None
+            for t_abs, x, y, z in pos_samples:
+                rel = np.array([x - anch["N"], y - anch["E"], z - anch["D"]])
+                idx = int(np.searchsorted(truth_t, t_abs))
+                idx = min(max(idx, 0), len(truth_t) - 1)
+                if abs(truth_t[idx] - t_abs) > _POS_XCHECK_MAX_DT_S:
+                    continue
+                err = float(np.linalg.norm(rel - truth_pos[idx]))
+                if worst is None or err > worst[0]:
+                    worst = (err, t_abs, rel, truth_pos[idx])
+
+            if worst is not None:
+                anchor_pos_max_err = worst[0]
+                log.info(
+                    "Anchor-relative position cross-check: max_err=%.2f m at t=%.1fs "
+                    "(onboard rel=%s  truth=%s)  n_samples=%d",
+                    worst[0], worst[1], worst[2], worst[3], len(pos_samples),
+                )
+            else:
+                log.warning("Anchor-relative position cross-check: no matchable samples")
+        else:
+            log.warning(
+                "Anchor-relative position cross-check skipped "
+                "(anch=%s  n_pos_samples=%d)", anch, len(pos_samples)
+            )
+
         # -- Assertions -------------------------------------------------------
         log.info(
             "=== ASSERTION CHECK: captured=%s  cyclic=%d  yaw_reset=%s"
             "  min_alt=%.2f  mean_alt=%.1f  max_alt=%.0f"
-            "  max_tension=%.0f  stable=%.0f  floor_hits=%d ===",
+            "  max_tension=%.0f  stable=%.0f  floor_hits=%d"
+            "  anchor_pos_max_err=%s ===",
             lua_captured, max_cyclic_activity, ekf_yaw_reset,
             metrics.min_phys_alt if metrics else float("nan"),
             metrics.mean_alt     if metrics else float("nan"),
@@ -288,12 +352,23 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
             metrics.max_tension  if metrics else float("nan"),
             metrics.max_stable_s if metrics else float("nan"),
             metrics.floor_hits   if metrics else -1,
+            f"{anchor_pos_max_err:.2f}" if anchor_pos_max_err is not None else "n/a",
         )
 
         if not _DEBUG_KEEP_PASSIVE:
             assert lua_captured, (
                 "rawes.lua never captured equilibrium.\n"
                 f"STATUSTEXT: {all_statustext}"
+            )
+
+        if anchor_pos_max_err is not None:
+            assert anchor_pos_max_err <= _MAX_ANCHOR_POS_ERR_M, (
+                f"Onboard anchor-relative position diverged from physics truth: "
+                f"max_err={anchor_pos_max_err:.2f} m > {_MAX_ANCHOR_POS_ERR_M:.1f} m.\n"
+                "Checklist:\n"
+                "  * RAWES_LAT/LON/AAL resolved correctly by _try_resolve_anchor()\n"
+                "  * ANCH_N/E/D NVF telemetry matches conftest._send_anchor_location() intent\n"
+                "  * EKF position (LOCAL_POSITION_NED) not diverging from physics truth"
             )
 
         if metrics is not None:
@@ -383,9 +458,12 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         )
 
         # -- Full physics report ----------------------------------------------
-        _log_dir = ctx.telemetry_log.parent
-        if _log_dir.exists():
-            print_flight_report(_log_dir)
+        if telemetry_log is not None:
+            _log_dir = telemetry_log.parent
+            if _log_dir.exists():
+                print_flight_report(_log_dir)
+        else:
+            log.warning("No telemetry log path available -- flight report skipped")
 
     except Exception as exc:
         dump_startup_diagnostics(ctx)

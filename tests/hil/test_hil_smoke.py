@@ -32,6 +32,7 @@ import time
 
 import pytest
 from pymavlink import mavutil
+from groundstation.gcs import Attitude, Heartbeat, ParamRequestRead, ParamValue, RequestDataStream, SysStatus
 
 # ---------------------------------------------------------------------------
 # Fixture: serial connection
@@ -97,14 +98,18 @@ def _recv_param(mav, name: str, timeout: float = 8.0) -> float | None:
     while time.monotonic() < deadline:
         now = time.monotonic()
         if now - last_request > 2.0:
-            mav.mav.param_request_read_send(
-                mav.target_system, mav.target_component,
-                name.encode(), -1,
-            )
+            ParamRequestRead(
+                target_system=mav.target_system,
+                target_component=mav.target_component,
+                param_id=name,
+                param_index=-1,
+            ).send(mav)
             last_request = now
         msg = mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.5)
-        if msg and msg.param_id.rstrip("\x00") == name:
-            return float(msg.param_value)
+        if msg:
+            pv = ParamValue.decode(msg)
+            if pv.param_id == name:
+                return float(pv.param_value)
     return None
 
 
@@ -121,12 +126,13 @@ def test_heartbeat_is_ardupilot(hil_mav):
     """
     msg = hil_mav.recv_match(type="HEARTBEAT", blocking=True, timeout=3.0)
     assert msg is not None, "No HEARTBEAT received within 3 s"
+    hb = Heartbeat.decode(msg)
 
-    assert msg.autopilot == mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, (
-        f"Expected ArduPilot autopilot (3), got {msg.autopilot}"
+    assert hb.autopilot == mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, (
+        f"Expected ArduPilot autopilot (3), got {hb.autopilot}"
     )
-    assert msg.type == mavutil.mavlink.MAV_TYPE_HELICOPTER, (
-        f"Expected MAV_TYPE_HELICOPTER (4), got {msg.type} "
+    assert hb.type == mavutil.mavlink.MAV_TYPE_HELICOPTER, (
+        f"Expected MAV_TYPE_HELICOPTER (4), got {hb.type} "
         "(check FRAME_CLASS param -- should be heli frame)"
     )
 
@@ -139,17 +145,21 @@ def test_attitude_flowing(hil_mav):
     Bench test (Pixhawk stationary): |roll|, |pitch| < 30 deg is expected.
     """
     # Request ATTITUDE stream if not already flowing
-    hil_mav.mav.request_data_stream_send(
-        hil_mav.target_system, hil_mav.target_component,
-        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 4, 1,
-    )
+    RequestDataStream(
+        target_system=hil_mav.target_system,
+        target_component=hil_mav.target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+        req_message_rate=4,
+        start_stop=1,
+    ).send(hil_mav)
 
     msg = hil_mav.recv_match(type="ATTITUDE", blocking=True, timeout=5.0)
     assert msg is not None, "No ATTITUDE message received within 5 s"
+    att = Attitude.decode(msg)
 
-    roll_deg  = math.degrees(msg.roll)
-    pitch_deg = math.degrees(msg.pitch)
-    yaw_deg   = math.degrees(msg.yaw)
+    roll_deg  = math.degrees(att.roll)
+    pitch_deg = math.degrees(att.pitch)
+    yaw_deg   = math.degrees(att.yaw)
 
     assert all(math.isfinite(v) for v in (roll_deg, pitch_deg, yaw_deg)), (
         f"ATTITUDE contains non-finite values: "
@@ -168,31 +178,35 @@ def test_sys_status_imu_healthy(hil_mav):
 
     Confirms the Pixhawk's IMU hardware is detected and passing self-test.
     """
-    hil_mav.mav.request_data_stream_send(
-        hil_mav.target_system, hil_mav.target_component,
-        mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1,
-    )
+    RequestDataStream(
+        target_system=hil_mav.target_system,
+        target_component=hil_mav.target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+        req_message_rate=2,
+        start_stop=1,
+    ).send(hil_mav)
 
     msg = hil_mav.recv_match(type="SYS_STATUS", blocking=True, timeout=5.0)
     assert msg is not None, "No SYS_STATUS message received within 5 s"
+    sys_status = SysStatus.decode(msg)
 
     IMU_SENSORS = (
         mavutil.mavlink.MAV_SYS_STATUS_SENSOR_3D_GYRO
         | mavutil.mavlink.MAV_SYS_STATUS_SENSOR_3D_ACCEL
     )
 
-    present = msg.onboard_control_sensors_present & IMU_SENSORS
-    enabled = msg.onboard_control_sensors_enabled & IMU_SENSORS
-    healthy = msg.onboard_control_sensors_health  & IMU_SENSORS
+    present = sys_status.onboard_control_sensors_present & IMU_SENSORS
+    enabled = sys_status.onboard_control_sensors_enabled & IMU_SENSORS
+    healthy = sys_status.onboard_control_sensors_health  & IMU_SENSORS
 
     assert present == IMU_SENSORS, (
-        f"IMU sensors not present (present=0x{msg.onboard_control_sensors_present:08x})"
+        f"IMU sensors not present (present=0x{sys_status.onboard_control_sensors_present:08x})"
     )
     assert enabled == IMU_SENSORS, (
-        f"IMU sensors not enabled (enabled=0x{msg.onboard_control_sensors_enabled:08x})"
+        f"IMU sensors not enabled (enabled=0x{sys_status.onboard_control_sensors_enabled:08x})"
     )
     assert healthy == IMU_SENSORS, (
-        f"IMU sensors unhealthy (health=0x{msg.onboard_control_sensors_health:08x})"
+        f"IMU sensors unhealthy (health=0x{sys_status.onboard_control_sensors_health:08x})"
     )
 
 
@@ -205,7 +219,7 @@ def test_vehicle_is_disarmed(hil_mav):
     msg = hil_mav.recv_match(type="HEARTBEAT", blocking=True, timeout=3.0)
     assert msg is not None, "No HEARTBEAT received"
 
-    armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    armed = bool(Heartbeat.decode(msg).base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
     assert not armed, (
         "Vehicle is ARMED during HIL smoke test -- disarm before running"
     )

@@ -27,6 +27,7 @@ from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
+from groundstation.gcs import NamedValueFloat
 from groundstation.landing_planner import LandingGroundController
 from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_LANDING, LAND_FINAL_DROP
@@ -142,7 +143,7 @@ def _run_landing(log) -> dict:
 
         # ── Send final_drop substate to Lua once ──────────────────────────
         if cmd.phase == "final_drop" and not final_drop_sent:
-            sim.send_named_float("RAWES_SUB", LAND_FINAL_DROP)
+            sim.send_message(NamedValueFloat("RAWES_SUB", LAND_FINAL_DROP))
             final_drop_sent = True
             t_final_start   = t_sim
 

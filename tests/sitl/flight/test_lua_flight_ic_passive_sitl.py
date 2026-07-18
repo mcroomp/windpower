@@ -30,6 +30,7 @@ from tests.sitl.stack_infra import (  # noqa: E402
     get_arducopter_crash_info,
     observe,
 )
+from groundstation.gcs import NamedValueFloat, ServoOutputRaw, StatusText, decode_message
 
 # Timing
 _KINEMATIC_TIMEOUT_S = 60.0
@@ -90,10 +91,10 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
     ic_roll_rad = math.atan2(r21, r22)
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
 
-    gcs.send_named_float("RAWES_THR", thr_seed)
-    gcs.send_named_float("RAWES_TEN", ten_seed)
-    gcs.send_named_float("RAWES_RIC", ic_roll_rad)
-    gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
+    gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
+    gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
+    gcs.send_message(NamedValueFloat("RAWES_RIC", ic_roll_rad))
+    gcs.send_message(NamedValueFloat("RAWES_PIC", ic_pitch_rad))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
         "Release seeds: RAWES_THR=%.3f, RAWES_TEN=%.1f N, IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
@@ -115,13 +116,13 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
     def _handle(msg, t_rel):
         if msg is None:
             return None
-        mt = msg.get_type()
-        if mt == "SERVO_OUTPUT_RAW":
-            activity = abs(msg.servo1_raw - 1500) + abs(msg.servo2_raw - 1500)
+        decoded = decode_message(msg)
+        if isinstance(decoded, ServoOutputRaw):
+            activity = abs(decoded.servo1_raw - 1500) + abs(decoded.servo2_raw - 1500)
             if activity > state["max_cyclic"]:
                 state["max_cyclic"] = activity
-        elif mt == "STATUSTEXT":
-            text = msg.text.rstrip("\x00").strip()
+        elif isinstance(decoded, StatusText):
+            text = decoded.text
             all_statustext.append(text)
             tl = text.lower()
             if "emergency yaw" in tl or "yaw reset" in tl:

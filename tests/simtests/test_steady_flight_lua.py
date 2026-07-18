@@ -29,6 +29,7 @@ from tests.simtests.simtest_ic import load_ic
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
+from groundstation.gcs import NamedValueFloat
 from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
@@ -79,7 +80,7 @@ def _run_steady(log) -> dict:
 
         if i % LUA_EVERY == 0:
             lua.tick(t, runner,
-                     inject=lambda s, r: s.send_named_float("RAWES_TEN", 300.0))
+                     inject=lambda s, r: s.send_message(NamedValueFloat("RAWES_TEN", 300.0)))
 
         dT       = runner.tension_now - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))

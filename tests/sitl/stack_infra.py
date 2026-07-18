@@ -83,7 +83,23 @@ from tests.sitl.stack_utils import (
 )
 
 from pymavlink import mavutil as _mavutil
-from groundstation.gcs import GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
+from groundstation.gcs import (
+    Attitude,
+    decode_message,
+    EkfStatusReport,
+    GlobalPositionInt,
+    GUIDED,
+    GUIDED_NOGPS,
+    LocalPositionNed,
+    ParamValue,
+    STABILIZE,
+    RawesGCS,
+    NamedValueFloat,
+    ParamRequestRead,
+    RequestDataStream,
+    StatusText,
+    SetAttitudeTarget,
+)
 from simulation.mediator_events import MediatorEventLog
 from simulation.controller import make_hold_controller
 from simulation.ic import load_ic_dict, IC_JSON_PATH
@@ -392,20 +408,20 @@ class StackContext:
             if msg is None:
                 last_text[0] = None
                 return
-            mtype = msg.get_type()
-            if mtype == "STATUSTEXT":
-                text = msg.text.rstrip("\x00").strip()
+            decoded = decode_message(msg)
+            if isinstance(decoded, StatusText):
+                text = decoded.text
                 self.all_statustext.append(text)
                 self.log.info("STATUSTEXT [%s]: %s", label, text)
                 last_text[0] = text
                 return
-            if mtype == "LOCAL_POSITION_NED":
+            if isinstance(decoded, LocalPositionNed):
                 # Only the most recent sample is kept -- callers needing a
                 # gated/finite sample poll self.last_local_position_ned via
                 # `until` rather than accumulating history here.
                 self.last_local_position_ned = (
-                    float(msg.x), float(msg.y), float(msg.z),
-                    float(msg.vx), float(msg.vy), float(msg.vz),
+                    decoded.x, decoded.y, decoded.z,
+                    decoded.vx, decoded.vy, decoded.vz,
                 )
             last_text[0] = None
 
@@ -999,17 +1015,17 @@ def _arm_sequence(
             | _mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
             | _mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
         )
-        gcs._mav.mav.set_attitude_target_send(
-            0,
-            gcs._target_system,
-            gcs._target_component,
-            mask,
-            q,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
+        gcs.send_message(SetAttitudeTarget(
+            target_system=gcs._target_system,
+            target_component=gcs._target_component,
+            type_mask=mask,
+            q=q,
+            body_roll_rate=0.0,
+            body_pitch_rate=0.0,
+            body_yaw_rate=0.0,
+            thrust=0.0,
+            time_boot_ms=0,
+        ))
         log.info(
             "[arm] Seeded SET_ATTITUDE_TARGET from EKF rpy=(%.2f, %.2f, %.2f) deg",
             math.degrees(roll), math.degrees(pitch), math.degrees(yaw),
@@ -1031,7 +1047,7 @@ def _arm_sequence(
 
     # Optional Lua disarm timer (ms from now). This no longer controls arming.
     if armon_ms is not None and armon_ms > 0:
-        gcs.send_named_float("RAWES_ARM", float(armon_ms))
+        gcs.send_message(NamedValueFloat("RAWES_ARM", float(armon_ms)))
         log.info("[arm] Sent RAWES_ARM disarm timer=%d ms", armon_ms)
 
 
@@ -1101,23 +1117,35 @@ def _run_acro_setup(
     # Request telemetry streams so ArduPilot sends ATTITUDE, EKF, and position.
     # Without this, SITL often sends no messages on a plain TCP connection.
     log.info("[setup 1/6] Requesting telemetry streams ...")
-    gcs._mav.mav.request_data_stream_send(
-        gcs._target_system, gcs._target_component,
-        _mavutil.mavlink.MAV_DATA_STREAM_ALL, 10, 1,   # all streams at 10 Hz
-    )
+    gcs.send_message(RequestDataStream(
+        target_system=gcs._target_system,
+        target_component=gcs._target_component,
+        req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_ALL,
+        req_message_rate=10,
+        start_stop=1,
+    ))
     # Also send a targeted ATTITUDE request to be sure
-    gcs._mav.mav.request_data_stream_send(
-        gcs._target_system, gcs._target_component,
-        _mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10, 1,  # ATTITUDE
-    )
-    gcs._mav.mav.request_data_stream_send(
-        gcs._target_system, gcs._target_component,
-        _mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 5, 1,  # EKF_STATUS
-    )
-    gcs._mav.mav.request_data_stream_send(
-        gcs._target_system, gcs._target_component,
-        _mavutil.mavlink.MAV_DATA_STREAM_POSITION, 5, 1,  # LOCAL_POSITION_NED
-    )
+    gcs.send_message(RequestDataStream(
+        target_system=gcs._target_system,
+        target_component=gcs._target_component,
+        req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+        req_message_rate=10,
+        start_stop=1,
+    ))
+    gcs.send_message(RequestDataStream(
+        target_system=gcs._target_system,
+        target_component=gcs._target_component,
+        req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+        req_message_rate=5,
+        start_stop=1,
+    ))
+    gcs.send_message(RequestDataStream(
+        target_system=gcs._target_system,
+        target_component=gcs._target_component,
+        req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+        req_message_rate=5,
+        start_stop=1,
+    ))
 
     # ── 2. Param subsystem ────────────────────────────────────────────────────
     log.info("[setup 2/6] Waiting for param subsystem ...")
@@ -1167,11 +1195,11 @@ def _run_acro_setup(
         if msg is None:
             continue
         t_now = gcs.sim_now()
-        mt    = msg.get_type()
+        decoded = decode_message(msg)
 
-        if mt == "STATUSTEXT":
-            text = msg.text.rstrip("\x00").strip()
-            sev  = getattr(msg, "severity", "?")
+        if isinstance(decoded, StatusText):
+            text = decoded.text
+            sev  = decoded.severity
             log.info("[setup 4/6] STATUSTEXT [sev=%s]: %s", sev, text)
             all_statustext.append(text)
             setup_samples.append({"t": t_now, "type": "STATUSTEXT",
@@ -1185,12 +1213,12 @@ def _run_acro_setup(
                 log.warning("[setup 4/6] GPS Glitch seen pre-arm — continuing "
                             "(will be flagged as known issue only if arm fails).")
 
-        elif mt == "ATTITUDE":
-            att_seed_rpy = (float(msg.roll), float(msg.pitch), float(msg.yaw))
-            r, p, y = math.degrees(msg.roll), math.degrees(msg.pitch), math.degrees(msg.yaw)
-            rr, pr, yr = (math.degrees(msg.rollspeed),
-                          math.degrees(msg.pitchspeed),
-                          math.degrees(msg.yawspeed))
+        elif isinstance(decoded, Attitude):
+            att_seed_rpy = (decoded.roll, decoded.pitch, decoded.yaw)
+            r, p, y = math.degrees(decoded.roll), math.degrees(decoded.pitch), math.degrees(decoded.yaw)
+            rr, pr, yr = (math.degrees(decoded.rollspeed),
+                          math.degrees(decoded.pitchspeed),
+                          math.degrees(decoded.yawspeed))
             log.info("[setup 4/6] ATTITUDE  rpy=(%.2f°,%.2f°,%.2f°)  "
                      "rates=(%.2f,%.2f,%.2f)°/s", r, p, y, rr, pr, yr)
             setup_samples.append({"t": t_now, "type": "ATTITUDE",
@@ -1207,13 +1235,13 @@ def _run_acro_setup(
                 # so corrections stay valid even when velocity-derived yaw jumps
                 # ~150° at kinematic end when the tether activates.
                 if hasattr(ctx.controller, "set_equilibrium"):
-                    ctx.controller.set_equilibrium(msg.roll, msg.pitch)
+                    ctx.controller.set_equilibrium(decoded.roll, decoded.pitch)
                     log.info("[setup 4/6] Equilibrium set: roll_eq=%.2f° pitch_eq=%.2f°",
                              r, p)
             ekf_ok = ekf_att
 
-        elif mt == "EKF_STATUS_REPORT":
-            flags = msg.flags
+        elif isinstance(decoded, EkfStatusReport):
+            flags = decoded.flags
             log.info("[setup 4/6] EKF_STATUS  flags=0x%04x  vel_var=%.3f  "
                      "pos_var=%.3f  hgt_var=%.3f",
                      flags,
@@ -1227,23 +1255,23 @@ def _run_acro_setup(
                 t_ekf   = t_now
             ekf_ok = ekf_att
 
-        elif mt == "LOCAL_POSITION_NED":
+        elif isinstance(decoded, LocalPositionNed):
             log.info("[setup 4/6] LOCAL_POSITION_NED  N=%.2f  E=%.2f  D=%.2f  "
                      "vN=%.3f  vE=%.3f  vD=%.3f",
-                     msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz)
+                     decoded.x, decoded.y, decoded.z, decoded.vx, decoded.vy, decoded.vz)
             setup_samples.append({"t": t_now, "type": "LOCAL_POSITION_NED",
-                                   "N": msg.x, "E": msg.y, "D": msg.z,
-                                   "vN": msg.vx, "vE": msg.vy, "vD": msg.vz})
+                                   "N": decoded.x, "E": decoded.y, "D": decoded.z,
+                                   "vN": decoded.vx, "vE": decoded.vy, "vD": decoded.vz})
             if not ekf_pos:
                 log.info("[setup 4/6] LOCAL_POSITION_NED received — EKF has position.")
                 ekf_pos = True
             # ekf_ok does not depend on ekf_pos — ATTITUDE alone is sufficient
 
-        elif mt == "GLOBAL_POSITION_INT":
+        elif isinstance(decoded, GlobalPositionInt):
             log.info("[setup 4/6] GLOBAL_POSITION_INT  lat=%d  lon=%d  alt_mm=%d",
-                     msg.lat, msg.lon, msg.alt)
+                     decoded.lat, decoded.lon, decoded.alt)
             setup_samples.append({"t": t_now, "type": "GLOBAL_POSITION_INT",
-                                   "lat": msg.lat, "lon": msg.lon, "alt_mm": msg.alt})
+                                   "lat": decoded.lat, "lon": decoded.lon, "alt_mm": decoded.alt})
 
     # FAIL HARD — do not proceed with a broken EKF
     if not ekf_ok:
@@ -1307,10 +1335,10 @@ def _run_acro_setup(
             blocking=True, timeout=0.2,
         )
         if msg is not None:
-            mt = msg.get_type()
-            if mt == "STATUSTEXT":
-                text = msg.text.rstrip("\x00").strip()
-                sev  = getattr(msg, "severity", "?")
+            decoded = decode_message(msg)
+            if isinstance(decoded, StatusText):
+                text = decoded.text
+                sev  = decoded.severity
                 log.info("[stabilise] STATUSTEXT [sev=%s]: %s", sev, text)
                 all_statustext.append(text)
                 # "tilt alignment complete" STATUSTEXT is the definitive signal
@@ -1322,17 +1350,17 @@ def _run_acro_setup(
                     ekf_att_ready = True
                     log.info("[stabilise] EKF tilt alignment confirmed via STATUSTEXT "
                              "-- proceeding to arm immediately.")
-            elif mt == "LOCAL_POSITION_NED":
+            elif isinstance(decoded, LocalPositionNed):
                 log.info("[stabilise] LOCAL_POSITION_NED  N=%.2f  E=%.2f  D=%.2f",
-                         msg.x, msg.y, msg.z)
+                         decoded.x, decoded.y, decoded.z)
                 setup_samples.append({"t": gcs.sim_now(), "type": "LOCAL_POSITION_NED",
-                                       "N": msg.x, "E": msg.y, "D": msg.z,
-                                       "vN": msg.vx, "vE": msg.vy, "vD": msg.vz})
+                                       "N": decoded.x, "E": decoded.y, "D": decoded.z,
+                                       "vN": decoded.vx, "vE": decoded.vy, "vD": decoded.vz})
                 if not ekf_pos:
                     log.info("[stabilise] EKF GPS position fused (LOCAL_POSITION_NED).")
                     ekf_pos = True
-            elif mt == "EKF_STATUS_REPORT":
-                flags      = msg.flags
+            elif isinstance(decoded, EkfStatusReport):
+                flags      = decoded.flags
                 last_flags = flags
                 log.info("[stabilise] EKF_STATUS  flags=0x%04x", flags)
                 if flags & _EKF_POS_FLAG:
@@ -1362,8 +1390,8 @@ def _run_acro_setup(
                     blocking=True,
                     timeout=0.5,
                 )
-                if msg is not None and msg.get_type() == "STATUSTEXT":
-                    text = msg.text.rstrip("\x00").strip()
+                if msg is not None and isinstance((decoded := decode_message(msg)), StatusText):
+                    text = decoded.text
                     all_statustext.append(text)
                     log.info("[setup-delay] STATUSTEXT: %s", text)
 
@@ -1596,9 +1624,10 @@ def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
         msg = gcs._recv(type="ATTITUDE", blocking=True, timeout=1.0)
         if msg is None:
             continue
-        r = math.degrees(msg.roll)
-        p = math.degrees(msg.pitch)
-        y = math.degrees(msg.yaw)
+        att = Attitude.decode(msg)
+        r = math.degrees(att.roll)
+        p = math.degrees(att.pitch)
+        y = math.degrees(att.yaw)
         if all(math.isfinite(v) for v in (r, p, y)):
             log.info("GUIDED_NOGPS stable: rpy=(%.2f°, %.2f°, %.2f°)", r, p, y)
             return True
@@ -1613,8 +1642,9 @@ def drain_statustext(gcs, log) -> list[str]:
         msg = gcs._recv(type="STATUSTEXT", blocking=True, timeout=0.05)
         if msg is None:
             break
-        text = msg.text.rstrip("\x00").strip()
-        log.warning("STATUSTEXT [sev=%s] %s", getattr(msg, "severity", "?"), text)
+        st = StatusText.decode(msg)
+        text = st.text
+        log.warning("STATUSTEXT [sev=%s] %s", st.severity, text)
         texts.append(text)
     return texts
 
@@ -1732,13 +1762,17 @@ def assert_no_mediator_criticals(mediator_log: Path) -> None:
 def _wait_params_ready(gcs, log, timeout: float = 15.0) -> None:
     deadline = gcs.sim_now() + timeout
     while gcs.sim_now() < deadline:
-        gcs._mav.mav.param_request_read_send(
-            gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
-        )
+        gcs.send_message(ParamRequestRead(
+            target_system=gcs._target_system,
+            target_component=gcs._target_component,
+            param_id="SYSID_THISMAV",
+            param_index=-1,
+        ))
         msg = gcs._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
         if msg is not None:
+            pv = ParamValue.decode(msg)
             log.info("Param subsystem ready (%s = %g)",
-                     msg.param_id.rstrip("\x00"), msg.param_value)
+                     pv.param_id, pv.param_value)
             return
         log.debug("Waiting for param subsystem ...")
     raise TimeoutError(
@@ -2086,20 +2120,38 @@ def _torque_stack(
             _assert_alive()
             log.info("GCS connected")
 
-            gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
-            gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
-            gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+            gcs.send_message(RequestDataStream(
+                target_system=gcs._target_system,
+                target_component=gcs._target_component,
+                req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+                req_message_rate=10,
+            ))
+            gcs.send_message(RequestDataStream(
+                target_system=gcs._target_system,
+                target_component=gcs._target_component,
+                req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,
+                req_message_rate=2,
+            ))
+            gcs.send_message(RequestDataStream(
+                target_system=gcs._target_system,
+                target_component=gcs._target_component,
+                req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+                req_message_rate=10,
+            ))
 
             log.info("Waiting for param subsystem ...")
             deadline = gcs.sim_now() + 20.0
             while gcs.sim_now() < deadline:
                 _assert_alive()
-                gcs._mav.mav.param_request_read_send(
-                    gcs._target_system, gcs._target_component, b"SYSID_THISMAV", -1,
-                )
+                gcs.send_message(ParamRequestRead(
+                    target_system=gcs._target_system,
+                    target_component=gcs._target_component,
+                    param_id="SYSID_THISMAV",
+                    param_index=-1,
+                ))
                 msg = gcs._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
                 if msg is not None:
-                    log.info("Param subsystem ready (SYSID_THISMAV=%g)", msg.param_value)
+                    log.info("Param subsystem ready (SYSID_THISMAV=%g)", ParamValue.decode(msg).param_value)
                     break
             else:
                 pytest.fail("Param subsystem never responded within 20 s")
@@ -2129,22 +2181,28 @@ def _torque_stack(
                 if msg is None:
                     continue
                 now = gcs.sim_now()
-                if msg.get_type() == "STATUSTEXT":
-                    text = msg.text.rstrip("\x00").strip()
+                decoded = decode_message(msg)
+                if isinstance(decoded, StatusText):
+                    text = decoded.text
                     log.info("SITL: %s", text)
                     if "EKF3 active" in text or "EKF3 IMU" in text:
-                        gcs.request_stream(_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10)
+                        gcs.send_message(RequestDataStream(
+                            target_system=gcs._target_system,
+                            target_component=gcs._target_component,
+                            req_stream_id=_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+                            req_message_rate=10,
+                        ))
                     if "rawes" in text.lower() and "mode=" in text.lower():
                         log.info("Lua script confirmed loaded: %s", text)
                     if "yaw alignment complete" in text.lower() and now - t_start >= _MIN_WAIT:
                         ekf_ok = True
                         break
-                elif msg.get_type() == "ATTITUDE":
-                    if (all(math.isfinite(v) for v in (msg.roll, msg.pitch, msg.yaw))
+                elif isinstance(decoded, Attitude):
+                    if (all(math.isfinite(v) for v in (decoded.roll, decoded.pitch, decoded.yaw))
                             and now - t_start >= _MIN_WAIT):
                         log.info(
                             "EKF attitude ready  rpy=(%.1f, %.1f, %.1f) deg",
-                            math.degrees(msg.roll), math.degrees(msg.pitch), math.degrees(msg.yaw),
+                            math.degrees(decoded.roll), math.degrees(decoded.pitch), math.degrees(decoded.yaw),
                         )
                         ekf_ok = True
                         break
@@ -2170,11 +2228,11 @@ def _torque_stack(
                     math.isfinite(v) for v in (_att.roll, _att.pitch, _att.yaw)
                 ):
                     _pre_arm_yaw = float(_att.yaw)
-                gcs.send_named_float("RAWES_THR", float(passive_thrust))
-                gcs.send_named_float("RAWES_RIC", float(passive_roll_rad))
-                gcs.send_named_float("RAWES_PIC", float(passive_pitch_rad))
+                gcs.send_message(NamedValueFloat("RAWES_THR", float(passive_thrust)))
+                gcs.send_message(NamedValueFloat("RAWES_RIC", float(passive_roll_rad)))
+                gcs.send_message(NamedValueFloat("RAWES_PIC", float(passive_pitch_rad)))
                 if passive_yaw_rad is not None:
-                    gcs.send_named_float("RAWES_YIC", float(passive_yaw_rad))
+                    gcs.send_message(NamedValueFloat("RAWES_YIC", float(passive_yaw_rad)))
                     _pre_arm_yaw = float(passive_yaw_rad)
                 log.info(
                     "PASSIVE seed: RAWES_THR=%.3f, RIC=%+.4f, PIC=%+.4f, YIC=%s; pre-arm yaw=%.1f deg",

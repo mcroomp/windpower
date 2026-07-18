@@ -7,29 +7,53 @@ Usage:
 """
 from __future__ import annotations
 import datetime, math, os, struct, sys, threading, time
+from typing import cast
 from pymavlink import mavutil
+from groundstation.gcs import (
+    Attitude,
+    EkfStatusReport,
+    GpsRawInt,
+    Heartbeat,
+    MavConnectionLike,
+    McuStatus,
+    MemInfo,
+    ParamRequestRead,
+    ParamValue,
+    PowerStatus,
+    RequestDataStream,
+    ServoOutputRaw,
+    SysStatus,
+)
 
 PORT = os.environ.get("RAWES_HIL_PORT", "COM4")
 BAUD = int(os.environ.get("RAWES_HIL_BAUD", "115200"))
 OUT  = os.path.join(os.path.dirname(__file__), "..", "..", "hardware", "hardware.md")
 
-mav = mavutil.mavlink_connection(PORT, baud=BAUD, source_system=255)
+mav = cast(MavConnectionLike, mavutil.mavlink_connection(PORT, baud=BAUD, source_system=255))
 mav.wait_heartbeat(timeout=15)
 print(f"Connected sysid={mav.target_system}")
 
 def _hb():
     for _ in range(120):
         try:
-            mav.mav.heartbeat_send(
-                mavutil.mavlink.MAV_TYPE_GCS,
-                mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+            Heartbeat(
+                type=mavutil.mavlink.MAV_TYPE_GCS,
+                autopilot=mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                base_mode=0,
+                custom_mode=0,
+                system_status=0,
+            ).send(mav)
         except Exception:
             break
         time.sleep(1.0)
 threading.Thread(target=_hb, daemon=True).start()
-mav.mav.request_data_stream_send(
-    mav.target_system, mav.target_component,
-    mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1)
+RequestDataStream(
+    target_system=mav.target_system,
+    target_component=mav.target_component,
+    req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_ALL,
+    req_message_rate=4,
+    start_stop=1,
+).send(mav)
 time.sleep(1.5)
 
 def recv_param(name, timeout=8.0):
@@ -37,12 +61,18 @@ def recv_param(name, timeout=8.0):
     last = 0.0
     while time.monotonic() < deadline:
         if time.monotonic() - last > 2.0:
-            mav.mav.param_request_read_send(
-                mav.target_system, mav.target_component, name.encode(), -1)
+            ParamRequestRead(
+                target_system=mav.target_system,
+                target_component=mav.target_component,
+                param_id=name,
+                param_index=-1,
+            ).send(mav)
             last = time.monotonic()
         msg = mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.5)
-        if msg and msg.param_id.rstrip("\x00") == name:
-            return float(msg.param_value)
+        if msg:
+            pv = ParamValue.decode(msg)
+            if pv.param_id == name:
+                return float(pv.param_value)
     return None
 
 lines = []
@@ -87,13 +117,14 @@ hb_msg = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=3.0)
 L("## System")
 L()
 if hb_msg:
+    hb = Heartbeat.decode(hb_msg)
     L("| Field | Value |")
     L("|-------|-------|")
-    L(f"| Autopilot | {hb_msg.autopilot} (3=ArduPilot) |")
-    L(f"| MAV type | {hb_msg.type} (4=Helicopter) |")
-    L(f"| Base mode | 0x{hb_msg.base_mode:02X} |")
-    L(f"| System status | {hb_msg.system_status} |")
-    L(f"| MAVLink version | {hb_msg.mavlink_version} |")
+    L(f"| Autopilot | {hb.autopilot} (3=ArduPilot) |")
+    L(f"| MAV type | {hb.type} (4=Helicopter) |")
+    L(f"| Base mode | 0x{hb.base_mode:02X} |")
+    L(f"| System status | {hb.system_status} |")
+    L(f"| MAVLink version | {hb.mavlink_version} |")
 L()
 
 # --- Sensor health ---
@@ -101,6 +132,7 @@ ss = mav.recv_match(type="SYS_STATUS", blocking=True, timeout=3.0)
 L("## Sensor Health")
 L()
 if ss:
+    ss_d = SysStatus.decode(ss)
     sensors = [
         (0x000001, "3D Gyro"),
         (0x000002, "3D Accel"),
@@ -118,16 +150,16 @@ if ss:
     L("| Sensor | Present | Enabled | Healthy |")
     L("|--------|---------|---------|---------|")
     for bit, name in sensors:
-        pres = bool(ss.onboard_control_sensors_present & bit)
-        enab = bool(ss.onboard_control_sensors_enabled & bit)
-        hlth = bool(ss.onboard_control_sensors_health  & bit)
+        pres = bool(ss_d.onboard_control_sensors_present & bit)
+        enab = bool(ss_d.onboard_control_sensors_enabled & bit)
+        hlth = bool(ss_d.onboard_control_sensors_health  & bit)
         if pres:
             L(f"| {name} | yes | {'yes' if enab else 'no'} | {'**NO**' if not hlth else 'yes'} |")
     L()
-    L(f"CPU load: {ss.load/10.0:.1f}%  "
-      f"Battery voltage: {ss.voltage_battery/1000.0:.2f} V  "
-      f"Current: {ss.current_battery/100.0:.2f} A  "
-      f"Remaining: {ss.battery_remaining}%")
+    L(f"CPU load: {ss_d.load/10.0:.1f}%  "
+      f"Battery voltage: {ss_d.voltage_battery/1000.0:.2f} V  "
+      f"Current: {ss_d.current_battery/100.0:.2f} A  "
+      f"Remaining: {ss_d.battery_remaining}%")
 L()
 
 # --- Power ---
@@ -135,11 +167,12 @@ pw = mav.recv_match(type="POWER_STATUS", blocking=True, timeout=3.0)
 L("## Power Rails")
 L()
 if pw:
+    pw_d = PowerStatus.decode(pw)
     L("| Rail | Voltage |")
     L("|------|---------|")
-    L(f"| Vcc (5V) | {pw.Vcc/1000.0:.3f} V |")
-    L(f"| Vservo | {pw.Vservo/1000.0:.3f} V |")
-    flags = pw.flags
+    L(f"| Vcc (5V) | {pw_d.Vcc/1000.0:.3f} V |")
+    L(f"| Vservo | {pw_d.Vservo/1000.0:.3f} V |")
+    flags = pw_d.flags
     L()
     L("| Flag | State |")
     L("|------|-------|")
@@ -153,11 +186,12 @@ mi = mav.recv_match(type="MEMINFO", blocking=True, timeout=3.0)
 L("## Memory")
 L()
 if mi:
+    mi_d = MemInfo.decode(mi)
     L("| Field | Value |")
     L("|-------|-------|")
-    L(f"| Free RAM | {mi.freemem} bytes |")
-    if hasattr(mi, "freemem32"):
-        L(f"| Free RAM (32-bit) | {mi.freemem32} bytes |")
+    L(f"| Free RAM | {mi_d.freemem} bytes |")
+    if mi_d.freemem32 is not None:
+        L(f"| Free RAM (32-bit) | {mi_d.freemem32} bytes |")
 L()
 
 # --- MCU ---
@@ -165,12 +199,13 @@ mcu = mav.recv_match(type="MCU_STATUS", blocking=True, timeout=3.0)
 L("## MCU")
 L()
 if mcu:
+    mcu_d = McuStatus.decode(mcu)
     L("| Field | Value |")
     L("|-------|-------|")
-    L(f"| Temperature | {mcu.MCU_temperature/100.0:.1f} deg C |")
-    L(f"| Voltage | {mcu.MCU_voltage/1000.0:.3f} V |")
-    L(f"| Voltage min | {mcu.MCU_voltage_min/1000.0:.3f} V |")
-    L(f"| Voltage max | {mcu.MCU_voltage_max/1000.0:.3f} V |")
+    L(f"| Temperature | {mcu_d.MCU_temperature/100.0:.1f} deg C |")
+    L(f"| Voltage | {mcu_d.MCU_voltage/1000.0:.3f} V |")
+    L(f"| Voltage min | {mcu_d.MCU_voltage_min/1000.0:.3f} V |")
+    L(f"| Voltage max | {mcu_d.MCU_voltage_max/1000.0:.3f} V |")
 L()
 
 # --- GPS ---
@@ -178,18 +213,19 @@ gps = mav.recv_match(type="GPS_RAW_INT", blocking=True, timeout=3.0)
 L("## GPS")
 L()
 if gps:
+    gps_d = GpsRawInt.decode(gps)
     fix_map = {0:"No GPS", 1:"No fix", 2:"2D fix", 3:"3D fix",
                4:"DGPS", 5:"RTK float", 6:"RTK fixed"}
     L("| Field | Value |")
     L("|-------|-------|")
-    L(f"| Fix type | {fix_map.get(gps.fix_type, str(gps.fix_type))} |")
-    L(f"| Satellites visible | {gps.satellites_visible} |")
-    L(f"| HDOP | {gps.eph/100.0:.2f} |")
-    L(f"| VDOP | {gps.epv/100.0:.2f} |")
-    if gps.fix_type >= 3:
-        L(f"| Latitude | {gps.lat/1e7:.6f} deg |")
-        L(f"| Longitude | {gps.lon/1e7:.6f} deg |")
-        L(f"| Altitude | {gps.alt/1000.0:.1f} m MSL |")
+    L(f"| Fix type | {fix_map.get(gps_d.fix_type, str(gps_d.fix_type))} |")
+    L(f"| Satellites visible | {gps_d.satellites_visible} |")
+    L(f"| HDOP | {gps_d.eph/100.0:.2f} |")
+    L(f"| VDOP | {gps_d.epv/100.0:.2f} |")
+    if gps_d.fix_type >= 3:
+        L(f"| Latitude | {gps_d.lat/1e7:.6f} deg |")
+        L(f"| Longitude | {gps_d.lon/1e7:.6f} deg |")
+        L(f"| Altitude | {gps_d.alt/1000.0:.1f} m MSL |")
 L()
 
 # --- EKF ---
@@ -197,19 +233,20 @@ ekf = mav.recv_match(type="EKF_STATUS_REPORT", blocking=True, timeout=3.0)
 L("## EKF Status")
 L()
 if ekf:
+    ekf_d = EkfStatusReport.decode(ekf)
     L("| Field | Value |")
     L("|-------|-------|")
-    L(f"| Flags | 0x{ekf.flags:04X} |")
-    L(f"| Attitude initialised | {bool(ekf.flags & 0x0001)} |")
-    L(f"| Velocity horiz valid | {bool(ekf.flags & 0x0002)} |")
-    L(f"| Pos horiz rel valid | {bool(ekf.flags & 0x0004)} |")
-    L(f"| Pos horiz abs valid | {bool(ekf.flags & 0x0008)} |")
-    L(f"| Pos vert abs valid | {bool(ekf.flags & 0x0010)} |")
-    L(f"| Velocity variance | {ekf.velocity_variance:.4f} |")
-    L(f"| Pos horiz variance | {ekf.pos_horiz_variance:.4f} |")
-    L(f"| Pos vert variance | {ekf.pos_vert_variance:.4f} |")
-    L(f"| Compass variance | {ekf.compass_variance:.4f} |")
-    L(f"| Terrain alt variance | {ekf.terrain_alt_variance:.4f} |")
+    L(f"| Flags | 0x{ekf_d.flags:04X} |")
+    L(f"| Attitude initialised | {bool(ekf_d.flags & 0x0001)} |")
+    L(f"| Velocity horiz valid | {bool(ekf_d.flags & 0x0002)} |")
+    L(f"| Pos horiz rel valid | {bool(ekf_d.flags & 0x0004)} |")
+    L(f"| Pos horiz abs valid | {bool(ekf_d.flags & 0x0008)} |")
+    L(f"| Pos vert abs valid | {bool(ekf_d.flags & 0x0010)} |")
+    L(f"| Velocity variance | {ekf_d.velocity_variance:.4f} |")
+    L(f"| Pos horiz variance | {ekf_d.pos_horiz_variance:.4f} |")
+    L(f"| Pos vert variance | {ekf_d.pos_vert_variance:.4f} |")
+    L(f"| Compass variance | {ekf_d.compass_variance:.4f} |")
+    L(f"| Terrain alt variance | {ekf_d.terrain_alt_variance:.4f} |")
 L()
 
 # --- Attitude ---
@@ -217,14 +254,15 @@ att = mav.recv_match(type="ATTITUDE", blocking=True, timeout=3.0)
 L("## Attitude (bench, stationary)")
 L()
 if att:
+    att_d = Attitude.decode(att)
     L("| Axis | Value |")
     L("|------|-------|")
-    L(f"| Roll | {math.degrees(att.roll):.1f} deg |")
-    L(f"| Pitch | {math.degrees(att.pitch):.1f} deg |")
-    L(f"| Yaw | {math.degrees(att.yaw):.1f} deg |")
-    L(f"| Roll rate | {math.degrees(att.rollspeed):.2f} deg/s |")
-    L(f"| Pitch rate | {math.degrees(att.pitchspeed):.2f} deg/s |")
-    L(f"| Yaw rate | {math.degrees(att.yawspeed):.2f} deg/s |")
+    L(f"| Roll | {math.degrees(att_d.roll):.1f} deg |")
+    L(f"| Pitch | {math.degrees(att_d.pitch):.1f} deg |")
+    L(f"| Yaw | {math.degrees(att_d.yaw):.1f} deg |")
+    L(f"| Roll rate | {math.degrees(att_d.rollspeed):.2f} deg/s |")
+    L(f"| Pitch rate | {math.degrees(att_d.pitchspeed):.2f} deg/s |")
+    L(f"| Yaw rate | {math.degrees(att_d.yawspeed):.2f} deg/s |")
 L()
 
 # --- IMU ---
@@ -244,11 +282,12 @@ srv = mav.recv_match(type="SERVO_OUTPUT_RAW", blocking=True, timeout=3.0)
 L("## Servo Outputs (current)")
 L()
 if srv:
+    srv_d = ServoOutputRaw.decode(srv)
     L("| Channel | PWM (us) |")
     L("|---------|----------|")
     for i in range(1, 17):
         attr = f"servo{i}_raw"
-        val  = getattr(srv, attr, None)
+        val  = getattr(srv_d, attr, None)
         if val is not None and val != 0:
             L(f"| {i} | {val} |")
 L()

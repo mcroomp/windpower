@@ -31,6 +31,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from simulation.rawes_lua_harness import RawesLua
+from groundstation.gcs import NamedValueFloat
 from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
 
@@ -134,8 +135,8 @@ def test_ground_liftoff():
     send_anchor_ned(sim, 0.0, 0.0, 0.0)   # anchor at the mock EKF origin
 
     def _inject(s, r):
-        s.send_named_float("RAWES_TEN", TETHER_FORCE_N)
-        s.send_named_float("RAWES_ALT", TARGET_ALT_M)
+        s.send_message(NamedValueFloat("RAWES_TEN", TETHER_FORCE_N))
+        s.send_message(NamedValueFloat("RAWES_ALT", TARGET_ALT_M))
 
     for i in range(total_steps):
         t = i * DT

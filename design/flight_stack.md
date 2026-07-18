@@ -337,7 +337,7 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 
 All other flight tunables (anchor position, slew rate, cyclic gains) are delivered as NAMED_VALUE_FLOATs — see table below.
 
-**Named float inputs (ground → Lua, via `gcs.send_named_float`):**
+**Named float inputs (ground → Lua, via `gcs.send_message(NamedValueFloat(...))`):**
 
 | Name | Value | Purpose |
 |---|---|---|
@@ -349,7 +349,7 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
 | RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
 
-**Named int inputs (ground → Lua, via `gcs.send_named_int`, one-shot anchor location):**
+**Named int inputs (ground → Lua, via `gcs.send_message(NamedValueInt(...))`, one-shot anchor location):**
 
 | Name | Value | Purpose |
 |---|---|---|
@@ -1063,7 +1063,7 @@ level first.
 | `simulation/torque_model.py` | Hub yaw kinematics: `HubParams`, `HubState`, `step()`, `equilibrium_throttle()` |
 | `simulation/mediator_torque.py` | Standalone torque SITL mediator |
 | `simulation/comms.py` | `VirtualComms` (simtest-only comms link) |
-| `groundstation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_named_float` |
+| `groundstation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_message`, message dataclasses (`NamedValueFloat`, ...) |
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
 | `analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
 | `analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |

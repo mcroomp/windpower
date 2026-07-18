@@ -189,6 +189,10 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
   exist only to work around circular imports are a sign of bad architecture — fix the circular
   dependency by refactoring (e.g. extract a shared module, invert the dependency) rather than
   papering over it with a local import.
+- Python 3.12+ is the project floor and should be treated as the baseline. Prefer modern Python
+  features when they improve clarity and reduce boilerplate (for example `match`/`case`, `X | Y`
+  union types, and 3.12 generic/type-alias syntax) rather than avoiding them for backward-
+  compatibility with older interpreters.
 - `/tmp` is NOT one shared filesystem on this box — Git Bash and WSL2 (used for
   `docker`/`test.sh stack`) each have their own separate `/tmp`, and native Windows
   executables invoked from Git Bash can't resolve `/tmp/...` paths at all. Full

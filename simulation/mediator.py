@@ -38,6 +38,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+from groundstation.gcs import Attitude, CommandLong, LocalPositionNed, NamedValueFloat, PidTuning, RequestDataStream, ServoOutputRaw, SetAttitudeTarget, decode_message
 
 # Local modules (same directory)
 from simulation.physics_core import PhysicsCore
@@ -275,15 +276,14 @@ def run_mediator(args, trajectory=None):
 
             def _request_interval(message_name: str, message_id: int, rate_hz: float) -> None:
                 interval_us = max(1, int(round(1_000_000.0 / max(rate_hz, 1.0))))
-                mav.mav.command_long_send(
-                    target_sys,
-                    target_comp,
-                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                    0,
-                    float(message_id),
-                    float(interval_us),
-                    0.0, 0.0, 0.0, 0.0, 0.0,
-                )
+                CommandLong(
+                    target_system=target_sys,
+                    target_component=target_comp,
+                    command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    confirmation=0,
+                    param1=float(message_id),
+                    param2=float(interval_us),
+                ).send(mav)
                 log.info(
                     "Dedicated MAVLink link: requested %s at %.1f Hz",
                     message_name,
@@ -292,13 +292,13 @@ def run_mediator(args, trajectory=None):
 
             try:
                 # Use normal stream cadence on this dedicated link.
-                mav.mav.request_data_stream_send(
-                    target_sys,
-                    target_comp,
-                    mavutil.mavlink.MAV_DATA_STREAM_ALL,
-                    10,
-                    1,
-                )
+                RequestDataStream(
+                    target_system=target_sys,
+                    target_component=target_comp,
+                    req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                    req_message_rate=10,
+                    start_stop=1,
+                ).send(mav)
                 _request_interval(
                     "ATTITUDE_TARGET",
                     mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET,
@@ -396,54 +396,50 @@ def run_mediator(args, trajectory=None):
                         update_async_mavlink(fields)
                     continue
 
-                if mtype == "ATTITUDE":
-                    fields["mav_att_roll_deg"] = math.degrees(float(msg.roll))
-                    fields["mav_att_pitch_deg"] = math.degrees(float(msg.pitch))
-                    fields["mav_att_yaw_deg"] = math.degrees(float(msg.yaw))
-                    fields["mav_att_roll_rate_rads"] = float(getattr(msg, "rollspeed", float("nan")))
-                    fields["mav_att_pitch_rate_rads"] = float(getattr(msg, "pitchspeed", float("nan")))
-                    fields["mav_att_yaw_rate_rads"] = float(getattr(msg, "yawspeed", float("nan")))
-                elif mtype == "ATTITUDE_TARGET":
-                    r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(getattr(msg, "q", None))
+                decoded = decode_message(msg)
+                if isinstance(decoded, Attitude):
+                    att = decoded
+                    fields["mav_att_roll_deg"] = math.degrees(att.roll)
+                    fields["mav_att_pitch_deg"] = math.degrees(att.pitch)
+                    fields["mav_att_yaw_deg"] = math.degrees(att.yaw)
+                    fields["mav_att_roll_rate_rads"] = att.rollspeed
+                    fields["mav_att_pitch_rate_rads"] = att.pitchspeed
+                    fields["mav_att_yaw_rate_rads"] = att.yawspeed
+                elif isinstance(decoded, SetAttitudeTarget):
+                    r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(decoded.q)
                     fields["mav_att_target_roll_deg"] = r_deg
                     fields["mav_att_target_pitch_deg"] = p_deg
                     fields["mav_att_target_yaw_deg"] = y_deg
-                    fields["mav_att_target_roll_rate_rads"] = float(getattr(msg, "body_roll_rate", float("nan")))
-                    fields["mav_att_target_pitch_rate_rads"] = float(getattr(msg, "body_pitch_rate", float("nan")))
-                    fields["mav_att_target_yaw_rate_rads"] = float(getattr(msg, "body_yaw_rate", float("nan")))
-                elif mtype == "SERVO_OUTPUT_RAW":
-                    fields["mav_servo1_us"] = float(getattr(msg, "servo1_raw", float("nan")))
-                    fields["mav_servo2_us"] = float(getattr(msg, "servo2_raw", float("nan")))
-                    fields["mav_servo3_us"] = float(getattr(msg, "servo3_raw", float("nan")))
-                    fields["mav_servo9_us"] = float(getattr(msg, "servo9_raw", float("nan")))
-                elif mtype == "NAMED_VALUE_FLOAT":
+                    fields["mav_att_target_roll_rate_rads"] = decoded.body_roll_rate
+                    fields["mav_att_target_pitch_rate_rads"] = decoded.body_pitch_rate
+                    fields["mav_att_target_yaw_rate_rads"] = decoded.body_yaw_rate
+                elif isinstance(decoded, ServoOutputRaw):
+                    fields["mav_servo1_us"] = float(decoded.servo1_raw)
+                    fields["mav_servo2_us"] = float(decoded.servo2_raw)
+                    fields["mav_servo3_us"] = float(decoded.servo3_raw)
+                    fields["mav_servo9_us"] = float(decoded.servo9_raw)
+                elif isinstance(decoded, NamedValueFloat):
                     # Lua diagnostics are streamed as named floats. Keep only the
                     # telemetry-relevant keys as latest-value async snapshot fields.
-                    raw_name = getattr(msg, "name", "")
-                    if isinstance(raw_name, bytes):
-                        nvf_name = raw_name.decode("ascii", errors="ignore")
-                    else:
-                        nvf_name = str(raw_name)
-                    nvf_name = nvf_name.rstrip("\x00").strip()
-                    mapped = _nvf_key_map.get(nvf_name)
+                    mapped = _nvf_key_map.get(decoded.name)
                     if mapped is not None:
-                        fields[mapped] = float(getattr(msg, "value", float("nan")))
-                elif mtype == "LOCAL_POSITION_NED":
-                    fields["ekf_pos_x"] = float(getattr(msg, "x", float("nan")))
-                    fields["ekf_pos_y"] = float(getattr(msg, "y", float("nan")))
-                    fields["ekf_pos_z"] = float(getattr(msg, "z", float("nan")))
-                elif mtype == "PID_TUNING":
+                        fields[mapped] = float(decoded.value)
+                elif isinstance(decoded, LocalPositionNed):
+                    fields["ekf_pos_x"] = decoded.x
+                    fields["ekf_pos_y"] = decoded.y
+                    fields["ekf_pos_z"] = decoded.z
+                elif isinstance(decoded, PidTuning):
                     # ArduPilot emits axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
                     # Only roll/pitch/yaw have telemetry columns (ap_rate_pid_terms).
-                    axis = int(getattr(msg, "axis", -1))
+                    axis = decoded.axis
                     prefix = {1: "rate_roll", 2: "rate_pitch", 3: "rate_yaw"}.get(axis)
                     if prefix is not None:
-                        fields[f"{prefix}_p_contrib"] = float(getattr(msg, "P", float("nan")))
-                        fields[f"{prefix}_i_contrib"] = float(getattr(msg, "I", float("nan")))
-                        fields[f"{prefix}_d_contrib"] = float(getattr(msg, "D", float("nan")))
-                        fields[f"{prefix}_ff_contrib"] = float(getattr(msg, "FF", float("nan")))
-                        fields[f"{prefix}_pdmod"] = float(getattr(msg, "PDmod", float("nan")))
-                        fields[f"{prefix}_srate"] = float(getattr(msg, "SRate", float("nan")))
+                        fields[f"{prefix}_p_contrib"] = float(decoded.P if decoded.P is not None else float("nan"))
+                        fields[f"{prefix}_i_contrib"] = float(decoded.I if decoded.I is not None else float("nan"))
+                        fields[f"{prefix}_d_contrib"] = float(decoded.D if decoded.D is not None else float("nan"))
+                        fields[f"{prefix}_ff_contrib"] = float(decoded.FF if decoded.FF is not None else float("nan"))
+                        fields[f"{prefix}_pdmod"] = float(decoded.PDmod if decoded.PDmod is not None else float("nan"))
+                        fields[f"{prefix}_srate"] = float(decoded.SRate if decoded.SRate is not None else float("nan"))
 
                 if fields:
                     update_async_mavlink(fields)

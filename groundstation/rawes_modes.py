@@ -14,14 +14,17 @@ Used by simtests, SITL stack tests, and calibrate.py.
 
 Usage
 -----
+    from groundstation.gcs import NamedValueFloat
     from groundstation.rawes_modes import MODE_STEADY, PUMP_REEL_OUT, send_anchor_ned
 
-    gcs.set_param("RAWES_MODE", MODE_STEADY)            # set mode (pumping runs in steady)
-    gcs.send_named_float("RAWES_SUB", PUMP_REEL_OUT)    # set substate
-    send_anchor_ned(gcs, 0.0, 0.0, 0.0)                 # anchor at the mock/SITL origin
+    gcs.set_param("RAWES_MODE", MODE_STEADY)                      # set mode (pumping runs in steady)
+    gcs.send_message(NamedValueFloat("RAWES_SUB", PUMP_REEL_OUT)) # set substate
+    send_anchor_ned(gcs, 0.0, 0.0, 0.0)                           # anchor at the mock/SITL origin
 """
 
 import math
+
+from groundstation.gcs import NamedValueInt
 
 # ── Mode numbers (RAWES_MODE script-generated param; 0=none 1=steady 3=passive 4=landing) ──
 
@@ -86,9 +89,15 @@ def anchor_ned_to_gps(dn_m: float, de_m: float, dd_m: float) -> tuple[int, int, 
 def send_anchor_ned(sim, dn_m: float, de_m: float, dd_m: float) -> None:
     """Send the anchor at NED offset (dn_m, de_m, dd_m) from MOCK_ORIGIN_* via NAMED_VALUE_INT.
 
-    `sim` must expose `send_named_int(name, value)` (RawesLua harness / gcs.py).
+    `sim` may expose `send_message(NamedValueInt(...))` or the older
+    `send_named_int(name, value)` compatibility shim.
     """
     lat_e7, lon_e7, alt_cm = anchor_ned_to_gps(dn_m, de_m, dd_m)
+    if hasattr(sim, "send_message"):
+        sim.send_message(NamedValueInt(NV_ANCHOR_LAT_KEY, lat_e7))
+        sim.send_message(NamedValueInt(NV_ANCHOR_LON_KEY, lon_e7))
+        sim.send_message(NamedValueInt(NV_ANCHOR_ALT_KEY, alt_cm))
+        return
     sim.send_named_int(NV_ANCHOR_LAT_KEY, lat_e7)
     sim.send_named_int(NV_ANCHOR_LON_KEY, lon_e7)
     sim.send_named_int(NV_ANCHOR_ALT_KEY, alt_cm)
