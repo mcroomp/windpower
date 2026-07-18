@@ -2,8 +2,8 @@
 """
 mavlink_jsonl_query.py -- Standard CLI tool for querying *.mavlink.jsonl logs.
 
-These logs are written by MavlinkLogWriter (simulation/mavlink_log.py) from
-both simulation/gcs.py (RawesGCS.start_mavlog) and the bench calibration tool
+These logs are written by MavlinkLogWriter (groundstation/mavlink_log.py) from
+both groundstation/gcs.py (RawesGCS.start_mavlog) and the bench calibration tool
 (calibrate/run.py). Every line is one JSON object:
 
     {"_t_wall": <float>, "_dir": "rx"|"tx", "mavpackettype": "<TYPE>", ...fields...}
