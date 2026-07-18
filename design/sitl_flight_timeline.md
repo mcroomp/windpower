@@ -85,7 +85,7 @@ Use this as the compact reference table for this run.
 | 0.000 | observed | Mediator startup and 60 s kinematic profile start | `events.jsonl: startup`, `events.jsonl: kinematic_config.total_s=60` |
 | 8.860-8.960 | observed | EKF yaw aligned and GPS reaches 3D fix (`fix_type=6`) | `STATUSTEXT "EKF3 IMU0 yaw aligned"`, `GPS_RAW_INT.fix_type=6` |
 | 14.000 (nominal) | scheduled | Arm gate reached in fixture | `conftest.py _arm_at_sim_s=14.0` |
-| 14.000+ (nominal) | scheduled | PASSIVE IC seeds scheduled, including tilt targets (`RAWES_RIC/PIC`) | `conftest.py send_named_float RAWES_THR/RIC/PIC`, `RAWES_MODE=3` |
+| 14.000+ (nominal) | scheduled | PASSIVE IC seeds scheduled, including tilt targets (`RAWES_RIC/PIC`) | `conftest.py gcs.send_message(NamedValueFloat(...)) RAWES_THR/RIC/PIC`, `RAWES_MODE=3` |
 | 24.077 | observed | EKF starts GPS aiding | `STATUSTEXT "EKF3 IMU0 is using GPS"` |
 | 26.748 | observed | Tilt target first visible at AP interface | `telemetry.csv: |mav_att_target_pitch_deg| >= 1` |
 | 26.848 | observed | Physical tilt response begins (real attitude moves) | `telemetry.csv: |mav_att_pitch_deg| >= 5` |

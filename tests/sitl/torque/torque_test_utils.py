@@ -17,12 +17,14 @@ This module provides:
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
 from simulation.telemetry_csv import TelRow, write_csv
 from simulation.mediator_events import MediatorEventLog
 from simulation.simtest_log import BadEventLog
+from groundstation.gcs import Attitude, NamedValueFloat, ServoOutputRaw, StatusText, decode_message
 from tests.sitl.stack_infra import observe  # noqa: E402
 
 
@@ -67,38 +69,32 @@ def run_observation_loop(
     def handle(msg, t_rel):
         if msg is None:
             return None
-        mt = msg.get_type()
-        if mt == "STATUSTEXT":
-            log.debug("SITL t=%.1fs: %s", t_rel, msg.text.rstrip("\x00").strip())
-        elif mt == "SERVO_OUTPUT_RAW":
-            pwm[0] = yaw_motor_pwm_from_servo_output(msg, default=pwm[0])
-        elif mt == "NAMED_VALUE_FLOAT":
-            raw_name = getattr(msg, "name", "")
-            if isinstance(raw_name, bytes):
-                name = raw_name.decode("ascii", errors="ignore")
-            else:
-                name = str(raw_name)
-            name = name.rstrip("\x00").strip()
-            mapped = nvf_map.get(name)
-            if mapped is not None:
-                nvf_latest[mapped] = float(getattr(msg, "value", float("nan")))
-        elif mt == "ATTITUDE":
-            rows.append(TelRow(
-                t_sim=t_rel, phase="DYNAMIC",
-                rpy_roll=msg.roll, rpy_pitch=msg.pitch, rpy_yaw=msg.yaw,
-                omega_z=msg.yawspeed, omega_rotor=ctx.omega_rotor,
-                servo_mot_us=float(pwm[0]),
-                mav_nvf_yff_trim=float(nvf_latest["mav_nvf_yff_trim"]),
-                mav_nvf_yff_u=float(nvf_latest["mav_nvf_yff_u"]),
-                mav_nvf_yff_gz=float(nvf_latest["mav_nvf_yff_gz"]),
-            ))
-            if t_rel >= settle_s:
-                obs.append({"t": t_rel, "yaw": msg.yaw, "yaw_rate": msg.yawspeed})
-                if len(obs) % log_interval_samples == 0:
-                    log.info("t=%6.1f s  psi=%+7.2f deg  psi_dot=%+6.2f deg/s  pwm=%d",
-                             t_rel, math.degrees(msg.yaw), math.degrees(msg.yawspeed), pwm[0])
-            if t_rel >= settle_s + observe_s:
-                return True
+        match decode_message(msg):
+            case StatusText(text=text):
+                log.debug("SITL t=%.1fs: %s", t_rel, text)
+            case ServoOutputRaw() as servo:
+                pwm[0] = yaw_motor_pwm_from_servo_output(servo, default=pwm[0])
+            case NamedValueFloat(name=name, value=value):
+                mapped = nvf_map.get(name)
+                if mapped is not None:
+                    nvf_latest[mapped] = value
+            case Attitude() as att:
+                rows.append(TelRow(
+                    t_sim=t_rel, phase="DYNAMIC",
+                    rpy_roll=att.roll, rpy_pitch=att.pitch, rpy_yaw=att.yaw,
+                    omega_z=att.yawspeed, omega_rotor=ctx.omega_rotor,
+                    servo_mot_us=float(pwm[0]),
+                    mav_nvf_yff_trim=float(nvf_latest["mav_nvf_yff_trim"]),
+                    mav_nvf_yff_u=float(nvf_latest["mav_nvf_yff_u"]),
+                    mav_nvf_yff_gz=float(nvf_latest["mav_nvf_yff_gz"]),
+                ))
+                if t_rel >= settle_s:
+                    obs.append({"t": t_rel, "yaw": att.yaw, "yaw_rate": att.yawspeed})
+                    if len(obs) % log_interval_samples == 0:
+                        log.info("t=%6.1f s  psi=%+7.2f deg  psi_dot=%+6.2f deg/s  pwm=%d",
+                                 t_rel, math.degrees(att.yaw), math.degrees(att.yawspeed), pwm[0])
+                if t_rel >= settle_s + observe_s:
+                    return True
         return None
 
     observe(ctx, settle_s + observe_s + timeout_margin_s, handle,

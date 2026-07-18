@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 import simulation
+from groundstation.gcs import NamedValueFloat
 from simulation.controller import (
     compute_bz_altitude_hold,
 )
@@ -317,8 +318,8 @@ class TestLuaCaptureAgainstStartingIc:
         send_anchor_ned(sim, -float(pos0[0]), -float(pos0[1]), -float(pos0[2]))
         sim.pos_ned = [0.0, 0.0, 0.0]
 
-        sim.send_named_float("RAWES_THR", float(ic["eq_thrust"]))
-        sim.send_named_float("RAWES_TEN", float(ic["tension_eq_n"]))
+        sim.send_message(NamedValueFloat("RAWES_THR", float(ic["eq_thrust"])))
+        sim.send_message(NamedValueFloat("RAWES_TEN", float(ic["tension_eq_n"])))
 
         # Capture needs one run_flight call; angle command appears on the next.
         sim.run(0.20)

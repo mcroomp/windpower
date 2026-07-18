@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 
 from pymavlink import mavutil
+from groundstation.gcs import decode_message
 
 # msvcrt is Windows stdlib -- used for non-blocking ESC-key abort.
 # Falls back to a stub on non-Windows so the rest of the module still imports.
@@ -22,7 +23,17 @@ except ImportError:
     msvcrt = _MsvcrtStub()  # type: ignore[assignment]
 
 from .constants import (
+    Attitude,
+    Heartbeat,
+    EscTelemetry,
+    PidTuning,
+    RcChannels,
     RawesGCS,
+    NamedValueFloat,
+    CommandLong,
+    RequestDataStream,
+    SetAttitudeTarget,
+    StatusText,
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
     _RUN_MODES, _TRIM_NVF, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
@@ -56,10 +67,11 @@ def _wait_for_armed(session: RawesGCS, timeout_s: float = 15.0) -> bool:
                             blocking=True, timeout=0.5)
         if msg is None:
             continue
-        if msg.get_type() == "STATUSTEXT":
-            print(f"  [FC] {msg.text.rstrip()}")
-        elif msg.get_type() == "HEARTBEAT":
-            if bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+        decoded = decode_message(msg)
+        if isinstance(decoded, StatusText):
+            print(f"  [FC] {decoded.text}")
+        elif isinstance(decoded, Heartbeat):
+            if bool(decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
                 return True
     return False
 
@@ -178,7 +190,12 @@ def _observation_loop(session: RawesGCS, *,
     Returns (n_rows, aborted).
     """
     for s_id, hz in streams:
-        session.request_stream(s_id, hz)
+        session.send_message(RequestDataStream(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            req_stream_id=s_id,
+            req_message_rate=hz,
+        ))
 
     if setup_hook is not None:
         setup_hook()
@@ -214,15 +231,16 @@ def _observation_loop(session: RawesGCS, *,
             if on_tick is not None:
                 on_tick(t_rel)
             if msg is not None:
-                if msg.get_type() == "HEARTBEAT":
-                    state["armed"] = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                elif msg.get_type() == "STATUSTEXT":
+                decoded = decode_message(msg)
+                if isinstance(decoded, Heartbeat):
+                    state["armed"] = bool(decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                elif isinstance(decoded, StatusText):
                     if not suppress_status:
-                        text = msg.text.rstrip("\x00").strip()
+                        text = decoded.text
                         if text:
                             state["pending_text"].append(text)
                 else:
-                    row = handle_msg(state, msg, t_rel)
+                    row = handle_msg(state, decoded, t_rel)
                     if row is not None and log is not None:
                         log.row(row)
             if t_rel - last_print >= print_period_s:
@@ -260,9 +278,9 @@ def _make_oscillate_tick(session: RawesGCS, steps: list):
             return
         last_step[0] = idx
         tlon_d, tlat_d, thr_d, label = steps[idx]
-        session.send_named_float("RAWES_TLN", math.radians(tlon_d))
-        session.send_named_float("RAWES_TLT", math.radians(tlat_d))
-        session.send_named_float("RAWES_THR", float(thr_d))
+        session.send_message(NamedValueFloat("RAWES_TLN", math.radians(tlon_d)))
+        session.send_message(NamedValueFloat("RAWES_TLT", math.radians(tlat_d)))
+        session.send_message(NamedValueFloat("RAWES_THR", float(thr_d)))
         print(f"  [{t_rel:6.1f}s] osc {idx+1}/{len(steps)}  "
               f"tlon={tlon_d:+5.1f}  tlat={tlat_d:+5.1f}  thr={thr_d:.3f}  "
               f"({label})")
@@ -437,8 +455,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         return roll, pitch, yaw
 
     def handle_msg(st, msg, t_rel):
-        mt = msg.get_type()
-        if mt == "ATTITUDE":
+        if isinstance(msg, Attitude):
             state["roll"]     = math.degrees(msg.roll)
             state["pitch"]    = math.degrees(msg.pitch)
             state["yaw"]      = math.degrees(msg.yaw)
@@ -465,21 +482,21 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 _fmt(state["pid_yaw_des"]), _fmt(state["pid_yaw_ach"]), _fmt(state["pid_yaw_ff"]), _fmt(state["pid_yaw_p"]), _fmt(state["pid_yaw_i"]), _fmt(state["pid_yaw_d"]),
                 _fmt(_erpm), _fmt(_mech), _fmt(_rotor),
             ]
-        elif mt == "ATTITUDE_TARGET":
-            att_r, att_p, att_y = _quat_to_rpy_deg(getattr(msg, "q", None))
+        if isinstance(msg, SetAttitudeTarget):
+            att_r, att_p, att_y = _quat_to_rpy_deg(msg.q)
             state["att_target_roll"] = att_r
             state["att_target_pitch"] = att_p
             state["att_target_yaw"] = att_y
-            state["att_target_roll_rate"] = getattr(msg, "body_roll_rate", None)
-            state["att_target_pitch_rate"] = getattr(msg, "body_pitch_rate", None)
-            state["att_target_yaw_rate"] = getattr(msg, "body_yaw_rate", None)
-            state["att_target_thrust"] = getattr(msg, "thrust", None)
-        elif mt == "RC_CHANNELS":
-            state["ch1"] = getattr(msg, "chan1_raw", None)
-            state["ch2"] = getattr(msg, "chan2_raw", None)
-            state["ch3"] = getattr(msg, "chan3_raw", None)
-            state["ch4"] = getattr(msg, "chan4_raw", None)
-        elif mt == "SERVO_OUTPUT_RAW":
+            state["att_target_roll_rate"] = msg.body_roll_rate
+            state["att_target_pitch_rate"] = msg.body_pitch_rate
+            state["att_target_yaw_rate"] = msg.body_yaw_rate
+            state["att_target_thrust"] = msg.thrust
+        elif isinstance(msg, RcChannels):
+            state["ch1"] = msg.chan1_raw
+            state["ch2"] = msg.chan2_raw
+            state["ch3"] = msg.chan3_raw
+            state["ch4"] = msg.chan4_raw
+        elif hasattr(msg, "servo1_raw"):
             state["s1"] = getattr(msg, "servo1_raw", None)
             state["s2"] = getattr(msg, "servo2_raw", None)
             state["s3"] = getattr(msg, "servo3_raw", None)
@@ -490,18 +507,18 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 cutoff = t_rel - mot_window_s
                 while state["smot_hist"] and state["smot_hist"][0][0] < cutoff:
                     state["smot_hist"].pop(0)
-        elif mt == "BATTERY_STATUS":
+        elif hasattr(msg, "voltages"):
             cells = [v for v in msg.voltages if v != 65535]
             if cells:
                 state["vbat"] = sum(cells) / 1000.0
             if msg.current_battery >= 0:
                 state["curr"] = msg.current_battery / 100.0
-        elif mt == "SYS_STATUS":
+        elif hasattr(msg, "voltage_battery"):
             if state["vbat"] is None and msg.voltage_battery != 65535:
                 state["vbat"] = msg.voltage_battery / 1000.0
             if state["curr"] is None and msg.current_battery >= 0:
                 state["curr"] = msg.current_battery / 100.0
-        elif mt in _ESC_TELEM_MSGS:
+        elif isinstance(msg, EscTelemetry):
             erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
             if erpm is not None:
                 state["erpm"] = erpm
@@ -511,9 +528,8 @@ def _run_observation(session: RawesGCS, mode_name: str,
                     cutoff = t_rel - mot_window_s
                     while state["mrpm_hist"] and state["mrpm_hist"][0][0] < cutoff:
                         state["mrpm_hist"].pop(0)
-        elif mt == "NAMED_VALUE_FLOAT":
-            nm = msg.name.rstrip("\x00").strip() if isinstance(msg.name, str) else \
-                 msg.name.decode("ascii", errors="replace").rstrip("\x00").strip()
+        elif isinstance(msg, NamedValueFloat):
+            nm = msg.name
             if nm == "YFF_T":
                 state["yff_t"] = float(msg.value)
                 state["yff_t_ts"] = t_rel
@@ -545,17 +561,17 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 state["ol_col"] = float(msg.value)
             elif nm == "OL_TEN":
                 state["ol_ten"] = float(msg.value)
-        elif mt == "PID_TUNING":
-            axis = int(getattr(msg, "axis", -1))
+        elif isinstance(msg, PidTuning):
+            axis = msg.axis
             # ArduPilot emits PID_TUNING axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
             prefix = {1: "pid_roll", 2: "pid_pitch", 3: "pid_yaw"}.get(axis)
             if prefix is not None:
-                state[f"{prefix}_des"] = getattr(msg, "desired", None)
-                state[f"{prefix}_ach"] = getattr(msg, "achieved", None)
-                state[f"{prefix}_ff"] = getattr(msg, "FF", None)
-                state[f"{prefix}_p"] = getattr(msg, "P", None)
-                state[f"{prefix}_i"] = getattr(msg, "I", None)
-                state[f"{prefix}_d"] = getattr(msg, "D", None)
+                state[f"{prefix}_des"] = msg.desired
+                state[f"{prefix}_ach"] = msg.achieved
+                state[f"{prefix}_ff"] = msg.FF
+                state[f"{prefix}_p"] = msg.P
+                state[f"{prefix}_i"] = msg.I
+                state[f"{prefix}_d"] = msg.D
         return None
 
     def render_row(st, t_rel):
@@ -595,11 +611,22 @@ def _run_observation(session: RawesGCS, mode_name: str,
         # over the RC_CHANNELS stream (which we keep for SERVO_OUTPUT_RAW).
         # Also request the motor's ESC telemetry (bidir DShot RPM) at 5 Hz.
         _esc_name, _esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
-        session.set_message_interval(_esc_id, 200000)   # 5 Hz
+        session.send_message(CommandLong(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            param1=float(_esc_id),
+            param2=200000.0,
+        ))  # 5 Hz
 
         if not keep_rc:
-            session.set_message_interval(
-                mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, -1)
+            session.send_message(CommandLong(
+                target_system=session._target_system,
+                target_component=session._target_component,
+                command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1=float(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS),
+                param2=-1.0,
+            ))
             print("  Stream trim: RC_CHANNELS off, AHRS2 off, EXTENDED_STATUS 1 Hz "
                   f"(use --rc to keep RC_CHANNELS); {_esc_name} 5 Hz")
         else:
@@ -632,9 +659,25 @@ def _run_observation(session: RawesGCS, mode_name: str,
     )
     # Restore telemetry the trim disabled (best-effort; resets on FC reboot).
     if not keep_rc:
-        session.set_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, 0)
-    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2)
-    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_EXTRA3, 2)
+        session.send_message(CommandLong(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            param1=float(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS),
+            param2=0.0,
+        ))
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+        req_message_rate=2,
+    ))
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,
+        req_message_rate=2,
+    ))
 
     # Report final H_YAW_TRIM.
     _tv = session.get_param("H_YAW_TRIM")
@@ -755,7 +798,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         if cfg.get("ic_seed"):
             thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
             print("  Seeding IC:")
-            session.send_named_float("RAWES_THR", thr)
+            session.send_message(NamedValueFloat("RAWES_THR", thr))
             print(f"    RAWES_THR = {thr:.3f}  (thrust [0..1])")
 
             if flags.get("--hold"):
@@ -767,7 +810,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                     print("  [WARN] --hold ignores --roll/--pitch (captures current AHRS attitude instead)")
                 if "--yaw" in flags:
                     print("  [WARN] --hold ignores --yaw (captures current AHRS attitude instead)")
-                session.send_named_float("RAWES_YIC", _RAWES_YIC_CAPTURE_SENTINEL)
+                session.send_message(NamedValueFloat("RAWES_YIC", _RAWES_YIC_CAPTURE_SENTINEL))
                 print(f"    RAWES_YIC = {_RAWES_YIC_CAPTURE_SENTINEL:.1f}  (capture current roll/pitch/yaw)")
             else:
                 roll_deg = float(flags.get("--roll", 0.0))
@@ -775,14 +818,14 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                 # RAWES IC seed commits atomically only after THR+RIC+PIC all arrive.
                 # Always send roll/pitch (default 0 deg) so PASSIVE does not stall at
                 # "ic=waiting" when only --trim thr is provided.
-                session.send_named_float("RAWES_RIC", math.radians(roll_deg))
+                session.send_message(NamedValueFloat("RAWES_RIC", math.radians(roll_deg)))
                 print(f"    RAWES_RIC = {roll_deg:+7.3f} deg  ({math.radians(roll_deg):+.4f} rad)")
-                session.send_named_float("RAWES_PIC", math.radians(pitch_deg))
+                session.send_message(NamedValueFloat("RAWES_PIC", math.radians(pitch_deg)))
                 print(f"    RAWES_PIC = {pitch_deg:+7.3f} deg  ({math.radians(pitch_deg):+.4f} rad)")
 
                 if "--yaw" in flags:
                     yaw_deg = float(flags["--yaw"])
-                    session.send_named_float("RAWES_YIC", math.radians(yaw_deg))
+                    session.send_message(NamedValueFloat("RAWES_YIC", math.radians(yaw_deg)))
                     print(f"    RAWES_YIC = {yaw_deg:+7.3f} deg  ({math.radians(yaw_deg):+.4f} rad)")
             # thr was consumed by the IC seed -- don't re-send it via the trim block.
             trim.pop("thr", None)
@@ -793,7 +836,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
             print("  Sending trim NVFs (deg -> rad on the wire):")
             for k, v_deg in trim.items():
                 v_rad = math.radians(float(v_deg))
-                session.send_named_float(_TRIM_NVF[k], v_rad)
+                session.send_message(NamedValueFloat(_TRIM_NVF[k], v_rad))
                 print(f"    {_TRIM_NVF[k]} = {v_deg:+7.3f} deg  ({v_rad:+.4f} rad)")
 
     # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip

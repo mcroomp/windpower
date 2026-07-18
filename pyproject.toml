@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "rawes"
 version = "0.1.0"
 description = "RAWES tethered autorotating rotor kite -- simulation, flight-stack, and analysis tooling"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 # Runtime dependencies are NOT declared here on purpose: simulation/requirements.txt
 # (installed via setup.cmd/setup.sh, hash-gated) remains the single source of truth

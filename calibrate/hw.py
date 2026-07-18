@@ -6,11 +6,23 @@ from __future__ import annotations
 
 import math
 import time
+from typing import cast
 
 from pymavlink import mavutil
+from groundstation.gcs import MavConnectionLike
 
 from .constants import (
     RawesGCS,
+    CommandAck,
+    EscTelemetry,
+    PidTuning,
+    RequestDataStream,
+    RcChannels,
+    CommandLong,
+    decode_message,
+    Heartbeat,
+    SetAttitudeTarget,
+    StatusText,
     GB4008_KV, GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
@@ -47,6 +59,12 @@ def _esc_telem_msg_for_channel(channel: int) -> "tuple[str, int]":
 
 def _esc_erpm(msg, channel: int) -> "float | None":
     """eRPM for 1-based output `channel` from an ESC_TELEMETRY_* msg, else None."""
+    if isinstance(msg, EscTelemetry):
+        base = msg.first_channel
+        idx = channel - base
+        if msg.rpm is None or not (0 <= idx < len(msg.rpm)):
+            return None
+        return msg.rpm[idx]
     info = _ESC_TELEM_MSGS.get(msg.get_type())
     if info is None:
         return None
@@ -119,15 +137,14 @@ def _norm_to_pwm(v: float) -> int:
 
 def _send_set_servo(session: RawesGCS, instance: int, pwm: int) -> None:
     """Send MAV_CMD_DO_SET_SERVO (works while disarmed)."""
-    session._mav.mav.command_long_send(
-        session._target_system,
-        session._target_component,
-        mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
-        0,              # confirmation
-        float(instance),
-        float(pwm),
-        0, 0, 0, 0, 0,
-    )
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+        confirmation=0,
+        param1=float(instance),
+        param2=float(pwm),
+    ))
 
 
 def _send_motor_test(session: RawesGCS, instance: int,
@@ -139,17 +156,16 @@ def _send_motor_test(session: RawesGCS, instance: int,
     throttle_pct  : 0-100  (MOTOR_TEST_THROTTLE_PERCENT = 0)
     timeout_s     : test duration; 0 = run until next command
     """
-    session._mav.mav.command_long_send(
-        session._target_system,
-        session._target_component,
-        mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST,
-        0,
-        float(instance),      # param1: motor instance
-        0.0,                  # param2: throttle type 0 = PERCENT
-        float(throttle_pct),  # param3: throttle value
-        float(timeout_s),     # param4: test duration [s]
-        0, 0, 0,
-    )
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST,
+        confirmation=0,
+        param1=float(instance),
+        param2=0.0,
+        param3=float(throttle_pct),
+        param4=float(timeout_s),
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +242,12 @@ def _print_status(session: RawesGCS) -> None:
     print(f"\n{sep}")
     print("SERVO OUTPUTS")
     print(sep)
-    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_message_rate=10,
+    ))
     srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
     if srv:
         for i in range(1, 13):
@@ -358,9 +379,9 @@ def _restart_scripting(session: RawesGCS) -> None:
 
 def _probe_port(port: str, baud: int, timeout: float) -> tuple:
     """Try one port at one baud. Returns (ok, sysid) — closes connection before returning."""
-    conn = None
+    conn: MavConnectionLike | None = None
     try:
-        conn = mavutil.mavlink_connection(port, baud=baud, autoreconnect=False)
+        conn = cast(MavConnectionLike, mavutil.mavlink_connection(port, baud=baud, autoreconnect=False))
         hb = conn.wait_heartbeat(timeout=timeout)
         if hb:
             return True, conn.target_system
@@ -447,7 +468,13 @@ def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
 
     esc_name, esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
     idx = (MOTOR_ESC_CHANNEL - 1) % 4
-    session.set_message_interval(esc_id, 100000)   # 10 Hz
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        param1=float(esc_id),
+        param2=100000.0,
+    ))  # 10 Hz
     deadline = time.monotonic() + duration
     last_print = 0.0
     try:
@@ -495,14 +522,14 @@ def _arm(session: RawesGCS, force: bool = False,
     """
     print("  Sending arm command ...")
     param2 = 21196.0 if force else 0.0
-    session._mav.mav.command_long_send(
-        session._target_system, session._target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0,
-        1.0,     # param1: 1 = arm
-        param2,  # param2: 21196 = force-arm
-        0, 0, 0, 0, 0,
-    )
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        confirmation=0,
+        param1=1.0,
+        param2=param2,
+    ))
 
     deadline = time.monotonic() + timeout
     armed = False
@@ -513,20 +540,20 @@ def _arm(session: RawesGCS, force: bool = False,
         )
         if msg is None:
             continue
-        t = msg.get_type()
-        if t == "STATUSTEXT":
-            print(f"  [FC] {msg.text.rstrip()}")
-        elif t == "COMMAND_ACK" and msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-            if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                print("  Arm command accepted -- waiting for armed heartbeat ...")
-            elif msg.result == mavutil.mavlink.MAV_RESULT_DENIED:
-                print("  [FAIL] Arm denied -- check pre-arm messages above")
-                return False
-        elif t == "HEARTBEAT":
-            if bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-                print("  [OK] Vehicle armed.")
-                armed = True
-                break
+        match decode_message(msg):
+            case StatusText(text=text):
+                print(f"  [FC] {text}")
+            case CommandAck(command=command, result=result) if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                    print("  Arm command accepted -- waiting for armed heartbeat ...")
+                elif result == mavutil.mavlink.MAV_RESULT_DENIED:
+                    print("  [FAIL] Arm denied -- check pre-arm messages above")
+                    return False
+            case Heartbeat(base_mode=base_mode):
+                if bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                    print("  [OK] Vehicle armed.")
+                    armed = True
+                    break
 
     if not armed:
         print("  [FAIL] Arm timed out.")
@@ -544,14 +571,14 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
     """Send disarm command. Returns True if vehicle confirms disarmed."""
     print("  Sending disarm command ...")
     param2 = 21196.0 if force else 0.0
-    session._mav.mav.command_long_send(
-        session._target_system, session._target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0,
-        0.0,    # param1: 0 = disarm
-        param2, # param2: 21196 = force-disarm
-        0, 0, 0, 0, 0,
-    )
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        confirmation=0,
+        param1=0.0,
+        param2=param2,
+    ))
     deadline = time.monotonic() + timeout
     ack_seen = False
     while time.monotonic() < deadline:
@@ -561,36 +588,31 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
         )
         if msg is None:
             continue
-
-        t = msg.get_type()
-        if t == "STATUSTEXT":
-            print(f"  [FC] {msg.text.rstrip()}")
-            continue
-
-        if t == "COMMAND_ACK" and msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-            ack_seen = True
-            result = int(msg.result)
-            if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
-            elif result == mavutil.mavlink.MAV_RESULT_DENIED:
-                print("  [FAIL] Disarm denied by FC.")
-                return False
-            elif result == mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED:
-                print("  [FAIL] Disarm temporarily rejected by FC.")
-                return False
-            elif result == mavutil.mavlink.MAV_RESULT_UNSUPPORTED:
-                print("  [FAIL] Disarm unsupported by FC.")
-                return False
-            elif result == mavutil.mavlink.MAV_RESULT_FAILED:
-                print("  [FAIL] Disarm failed on FC.")
-                return False
-            continue
-
-        if t == "HEARTBEAT":
-            armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-            if not armed:
-                print("  [OK] Vehicle disarmed.")
-                return True
+        match decode_message(msg):
+            case StatusText(text=text):
+                print(f"  [FC] {text}")
+                continue
+            case CommandAck(command=command, result=result) if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                ack_seen = True
+                if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                    print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
+                elif result == mavutil.mavlink.MAV_RESULT_DENIED:
+                    print("  [FAIL] Disarm denied by FC.")
+                    return False
+                elif result == mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED:
+                    print("  [FAIL] Disarm temporarily rejected by FC.")
+                    return False
+                elif result == mavutil.mavlink.MAV_RESULT_UNSUPPORTED:
+                    print("  [FAIL] Disarm unsupported by FC.")
+                    return False
+                elif result == mavutil.mavlink.MAV_RESULT_FAILED:
+                    print("  [FAIL] Disarm failed on FC.")
+                    return False
+                continue
+            case Heartbeat(base_mode=base_mode):
+                if not bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                    print("  [OK] Vehicle disarmed.")
+                    return True
 
     if ack_seen:
         print("  [FAIL] Disarm timed out waiting for disarmed heartbeat.")

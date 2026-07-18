@@ -300,10 +300,10 @@ for i in range(max_steps):
     sim._update_fn()
 ```
 
-**Sending substates in stack tests** (via `gcs.send_named_float`):
+**Sending substates in stack tests** (via `gcs.send_message(NamedValueFloat(...))`):
 
 ```python
-gcs.send_named_float("RAWES_SUB", LAND_FINAL_DROP)
+gcs.send_message(NamedValueFloat("RAWES_SUB", LAND_FINAL_DROP))
 ```
 
 **`_nv_floats` reset:** Lua resets its internal `_nv_floats` table to `{}` on every mode

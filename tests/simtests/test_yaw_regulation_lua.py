@@ -37,6 +37,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(30)]
 
 import simulation.torque_model as _m
 from simulation.rawes_lua_harness import RawesLua
+from groundstation.gcs import NamedValueFloat
 from groundstation.rawes_modes import MODE_PASSIVE
 
 # ---------------------------------------------------------------------------
@@ -107,9 +108,9 @@ def test_yaw_regulation_lua():
     )
 
     # Seed IC so _ic_seeded becomes True on the first update() tick
-    sim.send_named_float("RAWES_THR", _IC_THRUST)
-    sim.send_named_float("RAWES_RIC", _IC_ROLL)
-    sim.send_named_float("RAWES_PIC", _IC_PITCH)
+    sim.send_message(NamedValueFloat("RAWES_THR", _IC_THRUST))
+    sim.send_message(NamedValueFloat("RAWES_RIC", _IC_ROLL))
+    sim.send_message(NamedValueFloat("RAWES_PIC", _IC_PITCH))
 
     # ---------------------------------------------------------------------------
     # Closed-loop simulation

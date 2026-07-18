@@ -25,6 +25,7 @@ from tests.sitl.stack_infra import (
     HOME_LON_DEG,
     HOME_ALT_M,
 )
+from groundstation.gcs import NamedValueFloat, NamedValueInt
 from simulation.ic import load_ic
 from simulation.torque_model import HubParams, equilibrium_throttle
 
@@ -59,9 +60,9 @@ def _send_anchor_location(ctx) -> None:
     lat_e7 = round(HOME_LAT_DEG * 1e7)
     lon_e7 = round(HOME_LON_DEG * 1e7)
     alt_cm = round(anchor_alt_m * 100)
-    ctx.gcs.send_named_int("RAWES_LAT", lat_e7)
-    ctx.gcs.send_named_int("RAWES_LON", lon_e7)
-    ctx.gcs.send_named_int("RAWES_AAL", alt_cm)
+    ctx.gcs.send_message(NamedValueInt("RAWES_LAT", lat_e7))
+    ctx.gcs.send_message(NamedValueInt("RAWES_LON", lon_e7))
+    ctx.gcs.send_message(NamedValueInt("RAWES_AAL", alt_cm))
     ctx.log.info(
         "  anchor location sent via NVI (lat=%.7f lon=%.7f alt=%.1fm, "
         "home_alt_m=%.2f)",
@@ -368,7 +369,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
                 raise KeyError(
                     "initial_state missing thrust seed: eq_thrust"
                 )
-            ctx.gcs.send_named_float("RAWES_THR", float(_ic_thrust))
+            ctx.gcs.send_message(NamedValueFloat("RAWES_THR", float(_ic_thrust)))
             ctx.log.info("IC thrust: %.3f", _ic_thrust)
 
             # Seed passive IC roll/pitch via short NV names (10-char limit):
@@ -381,8 +382,8 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             _r22 = float(_R0[2][2])
             _ic_roll_rad = math.atan2(_r21, _r22)
             _ic_pitch_rad = -math.asin(max(-1.0, min(1.0, _r20)))
-            ctx.gcs.send_named_float("RAWES_RIC", _ic_roll_rad)
-            ctx.gcs.send_named_float("RAWES_PIC", _ic_pitch_rad)
+            ctx.gcs.send_message(NamedValueFloat("RAWES_RIC", _ic_roll_rad))
+            ctx.gcs.send_message(NamedValueFloat("RAWES_PIC", _ic_pitch_rad))
             ctx.log.info(
                 "IC passive attitude: roll=%+.2f deg pitch=%+.2f deg",
                 math.degrees(_ic_roll_rad), math.degrees(_ic_pitch_rad),
@@ -394,7 +395,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             # reading, avoiding the ~2.5 m EKF vertical convergence-lag bias
             # present at capture time.
             _tension_eq = float(_ic["tension_eq_n"])
-            ctx.gcs.send_named_float("RAWES_TEN", _tension_eq)
+            ctx.gcs.send_message(NamedValueFloat("RAWES_TEN", _tension_eq))
 
             # Anchor location is a static constant, sent EXACTLY ONCE here
             # (after the IC seed values are queued) -- it does not depend on
@@ -409,7 +410,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             # needed).
             _alt_ic = float(ctx.home_alt_m)
 
-            ctx.gcs.send_named_float("RAWES_ALT", _alt_ic)
+            ctx.gcs.send_message(NamedValueFloat("RAWES_ALT", _alt_ic))
             ctx.log.info("IC equilibrium tension: %.0f N  target altitude: %.1f m",
                          _tension_eq, _alt_ic)
 
@@ -423,7 +424,7 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             # step-input torque mismatch that spins the hub. See design/flight_stack.md
             # "Yaw observer in passive mode" and repo memory sitl-param-verify-and-yaw-ff.md.
             _yff_seed = equilibrium_throttle(float(_ic["omega_spin"]), HubParams())
-            ctx.gcs.send_named_float("RAWES_YFF", _yff_seed)
+            ctx.gcs.send_message(NamedValueFloat("RAWES_YFF", _yff_seed))
             ctx.log.info("IC yaw-trim equilibrium seed: %.3f", _yff_seed)
         ctx.wait_drain(timeout=1.0, label="post-param")
         ctx.wait_drain(timeout=0.5, label="post-col")

@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 from simulation.rawes_lua_harness import RawesLua
+from groundstation.gcs import NamedValueFloat
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +30,7 @@ def _armon_deadline_ms(sim: RawesLua):
 
 
 def _send_arm(sim: RawesLua, ms: float):
-    sim.send_named_float("RAWES_ARM", ms)
+    sim.send_message(NamedValueFloat("RAWES_ARM", ms))
 
 
 # ---------------------------------------------------------------------------

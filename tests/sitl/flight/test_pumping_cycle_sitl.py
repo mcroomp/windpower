@@ -44,6 +44,7 @@ from tests.sitl.stack_infra import (
 from simulation.telemetry_csv import read_csv
 from groundstation.pumping_planner import PumpingGroundController
 from groundstation.unified_ground import _cmd_to_nv
+from groundstation.gcs import NamedValueFloat, StatusText, decode_message
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _ROTOR = load_default_rotor()
@@ -124,10 +125,10 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     ic_roll_rad  = math.atan2(float(R0[2][1]), float(R0[2][2]))
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, float(R0[2][0]))))
 
-    gcs.send_named_float("RAWES_THR", thr_seed)
-    gcs.send_named_float("RAWES_TEN", ten_seed)
-    gcs.send_named_float("RAWES_RIC", ic_roll_rad)
-    gcs.send_named_float("RAWES_PIC", ic_pitch_rad)
+    gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
+    gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
+    gcs.send_message(NamedValueFloat("RAWES_RIC", ic_roll_rad))
+    gcs.send_message(NamedValueFloat("RAWES_PIC", ic_pitch_rad))
     gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
     gcs.sim_sleep(10.0)
@@ -215,7 +216,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
 
                 # Send NVF to Lua via GCS
                 for name, value in _cmd_to_nv(cmd):
-                    gcs.send_named_float(name, value)
+                    gcs.send_message(NamedValueFloat(name, value))
 
                 # All cycles complete -> planner returns to hold (mirrors simtest).
                 if planner.cycle_count >= N_CYCLES:
@@ -227,8 +228,8 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                 type=["STATUSTEXT"],
                 blocking=False, timeout=0.01,
             )
-            if msg is not None and msg.get_type() == "STATUSTEXT":
-                text = msg.text.rstrip("\x00").strip()
+            if msg is not None and isinstance((decoded := decode_message(msg)), StatusText):
+                text = decoded.text
                 all_statustext.append(text)
                 log.info("STATUSTEXT: %s", text)
                 if "RAWES steady: captured" in text:

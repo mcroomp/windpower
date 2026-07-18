@@ -10,7 +10,14 @@ from datetime import datetime, timezone
 from pymavlink import mavutil
 
 from .constants import (
+    Attitude,
+    BatteryStatus,
+    EscTelemetry,
     RawesGCS,
+    CommandLong,
+    SysStatus,
+    StatusText,
+    decode_message,
     MOTOR_ESC_CHANNEL, SERVO_MOTOR,
     _WATCH_STREAMS,
 )
@@ -83,10 +90,10 @@ def _watch_servos(session, duration, log):
     state = {f"s{i}": None for i in range(1, 9)}
 
     def handle(st, msg, t_rel):
-        mt = msg.get_type()
-        if mt == "SERVO_OUTPUT_RAW":
+        decoded = decode_message(msg)
+        if hasattr(decoded, "servo1_raw"):
             for i in range(1, 9):
-                state[f"s{i}"] = getattr(msg, f"servo{i}_raw", None)
+                state[f"s{i}"] = getattr(decoded, f"servo{i}_raw", None)
             return [f"{t_rel:.4f}"] + [state[f"s{i}"] for i in range(1, 9)]
         return None
 
@@ -112,12 +119,13 @@ def _watch_esc(session, duration, log):
     state = {"erpm": None, "volt": None, "curr": None, "temp": None}
 
     def handle(st, msg, t_rel):
-        if msg.get_type() != esc_name:
+        decoded = decode_message(msg)
+        if not isinstance(decoded, EscTelemetry) or decoded.message_name != esc_name:
             return None
-        erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
-        volt = msg.voltage[idx] / 100.0 if hasattr(msg, "voltage") else None
-        curr = msg.current[idx] / 100.0 if hasattr(msg, "current") else None
-        temp = msg.temperature[idx] if hasattr(msg, "temperature") else None
+        erpm = _esc_erpm(decoded, MOTOR_ESC_CHANNEL)
+        volt = decoded.voltage[idx] / 100.0 if idx < len(decoded.voltage) else None
+        curr = decoded.current[idx] / 100.0 if idx < len(decoded.current) else None
+        temp = decoded.temperature[idx] if idx < len(decoded.temperature) else None
         state["erpm"], state["volt"], state["curr"], state["temp"] = \
             erpm, volt, curr, temp
         _e, mech, rotor = _rpm_triplet(erpm)
@@ -137,7 +145,13 @@ def _watch_esc(session, duration, log):
         ]
 
     def _req_esc() -> None:
-        session.set_message_interval(esc_id, 100000)   # 10 Hz
+        session.send_message(CommandLong(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            param1=float(esc_id),
+            param2=100000.0,
+        ))  # 10 Hz
 
     _observation_loop(
         session, duration_s=duration,
@@ -157,8 +171,9 @@ def _watch_text(session, duration, log):
     def handle(st, msg, t_rel):
         # STATUSTEXTs are handled by the engine and surfaced via state["pending_text"]
         # We still log them here so the CSV captures everything.
-        if msg.get_type() == "STATUSTEXT":
-            text = msg.text.rstrip("\x00").strip()
+        decoded = decode_message(msg)
+        if isinstance(decoded, StatusText):
+            text = decoded.text
             if text:
                 return [f"{t_rel:.4f}", int(getattr(msg, "severity", 6)), text]
         return None
@@ -185,13 +200,14 @@ def _watch_attitude(session, duration, log):
              "wx": None, "wy": None, "wz": None}
 
     def handle(st, msg, t_rel):
-        if msg.get_type() == "ATTITUDE":
-            state["roll"]  = math.degrees(msg.roll)
-            state["pitch"] = math.degrees(msg.pitch)
-            state["yaw"]   = math.degrees(msg.yaw)
-            state["wx"]    = msg.rollspeed
-            state["wy"]    = msg.pitchspeed
-            state["wz"]    = msg.yawspeed
+        decoded = decode_message(msg)
+        if isinstance(decoded, Attitude):
+            state["roll"]  = math.degrees(decoded.roll)
+            state["pitch"] = math.degrees(decoded.pitch)
+            state["yaw"]   = math.degrees(decoded.yaw)
+            state["wx"]    = decoded.rollspeed
+            state["wy"]    = decoded.pitchspeed
+            state["wz"]    = decoded.yawspeed
             return [f"{t_rel:.4f}",
                     f"{state['roll']:.3f}", f"{state['pitch']:.3f}", f"{state['yaw']:.3f}",
                     f"{state['wx']:.4f}", f"{state['wy']:.4f}", f"{state['wz']:.4f}"]
@@ -222,20 +238,20 @@ def _watch_power(session, duration, log):
     state = {"vbat": None, "curr": None}
 
     def handle(st, msg, t_rel):
-        mt = msg.get_type()
-        if mt == "BATTERY_STATUS":
-            cells = [v for v in msg.voltages if v != 65535]
-            if cells:
-                state["vbat"] = sum(cells) / 1000.0
-            if msg.current_battery >= 0:
-                state["curr"] = msg.current_battery / 100.0
-        elif mt == "SYS_STATUS":
-            if state["vbat"] is None and msg.voltage_battery != 65535:
-                state["vbat"] = msg.voltage_battery / 1000.0
-            if state["curr"] is None and msg.current_battery >= 0:
-                state["curr"] = msg.current_battery / 100.0
-        else:
-            return None
+        match decode_message(msg):
+            case BatteryStatus(voltages=voltages, current_battery=current_battery):
+                cells = [v for v in voltages if v != 65535]
+                if cells:
+                    state["vbat"] = sum(cells) / 1000.0
+                if current_battery >= 0:
+                    state["curr"] = current_battery / 100.0
+            case SysStatus(voltage_battery=voltage_battery, current_battery=current_battery):
+                if state["vbat"] is None and voltage_battery != 65535:
+                    state["vbat"] = voltage_battery / 1000.0
+                if state["curr"] is None and current_battery >= 0:
+                    state["curr"] = current_battery / 100.0
+            case _:
+                return None
         power = state["vbat"] * state["curr"] if (state["vbat"] is not None and state["curr"] is not None) else None
         return [f"{t_rel:.4f}", _fmt(state["vbat"]), _fmt(state["curr"]), _fmt(power)]
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pymavlink import mavutil
 
 from .constants import (
-    RawesGCS, WallClock,
+    RawesGCS, WallClock, CommandLong, RequestDataStream,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
     SWASH_SERVOS,
@@ -222,11 +222,13 @@ def _cmd_ping(args: list[str]) -> None:
 
 def _cmd_reboot(session: RawesGCS) -> None:
     print("  Sending reboot command ...")
-    session._mav.mav.command_long_send(
-        session._target_system, session._target_component,
-        mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-        0, 1, 0, 0, 0, 0, 0, 0,
-    )
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+        confirmation=0,
+        param1=1,
+    ))
     print("  Pixhawk rebooting -- reconnect in ~5 s.")
 
 
@@ -347,7 +349,12 @@ def _print_swash_layout(session: RawesGCS) -> None:
     print("  tlat > 0 = roll right;  tlon > 0 = nose-DOWN disk;  col > 0 = positive thrust")
     print()
     # Live PWMs
-    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_message_rate=10,
+    ))
     srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
     if srv:
         s1 = getattr(srv, "servo1_raw", 0)
@@ -823,7 +830,12 @@ def _connect(port: "str | None", baud: int) -> RawesGCS:
     session.connect(timeout=15.0)
     print(f"Connected: sysid={session._target_system} compid={session._target_component}")
     session.start_heartbeat()
-    session.request_stream(mavutil.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER, 10)
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER,
+        req_message_rate=10,
+    ))
     _refresh_pole_pairs(session)
     return session
 

@@ -416,7 +416,8 @@ local _diag_nvf_keys = {
     "OL_RSP", "OL_PSP", "OL_YSP",        -- outer-loop commanded body rates
     "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
     "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded thrust
-    "OL_TEN"                             -- ramped tension feedforward [N]
+    "OL_TEN",                            -- ramped tension feedforward [N]
+    "ANCH_N", "ANCH_E", "ANCH_D"        -- resolved anchor NED offset from EKF origin [m]
 }
 
 local function _diag_set(name, value)
@@ -849,6 +850,18 @@ local function run_flight()
     _diag_set("OL_AI", alt_i)
     _diag_set("OL_AD", alt_d)
     _diag_set("OL_COL", _last_thrust)
+
+    -- ANCH_N/E/D: the resolved anchor NED offset from the EKF origin (see
+    -- _try_resolve_anchor()).  pos_ned itself is already telemetered via the
+    -- standard LOCAL_POSITION_NED mavlink message, so only the anchor offset
+    -- needs a new channel -- post-run log analysis subtracts this from
+    -- LOCAL_POSITION_NED and compares against the physics-truth pos_x/pos_y/
+    -- pos_z in telemetry.csv to verify the onboard anchor resolution tracks
+    -- the real position (see design/sitl_testing.md, "Anchor-relative
+    -- position cross-check").
+    _diag_set("ANCH_N", anch:x())
+    _diag_set("ANCH_E", anch:y())
+    _diag_set("ANCH_D", anch:z())
 
     -- Diagnostic log (every ~5 s at 50 Hz)
     if _diag % 250 == 1 then

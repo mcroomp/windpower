@@ -24,13 +24,33 @@ import logging
 import math
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, ClassVar, Protocol, TypeVar, cast
 
 from pymavlink import mavutil
 
 from groundstation.mavlink_log import MavlinkLogWriter
 
 log = logging.getLogger(__name__)
+
+
+class MavSenderLike(Protocol):
+    def __getattr__(self, name: str) -> Any: ...
+
+    def set_send_callback(self, callback) -> None: ...
+
+
+class MavConnectionLike(Protocol):
+    mav: MavSenderLike
+    target_system: int
+    target_component: int
+
+    def recv_match(self, *args, **kwargs) -> Any: ...
+
+    def wait_heartbeat(self, *args, **kwargs) -> Any: ...
+
+    def close(self) -> None: ...
 
 # ArduCopter custom mode numbers
 STABILIZE    = 0
@@ -136,6 +156,740 @@ class WallClock:
         return int((time.monotonic() - self._t0) * 1000)
 
 
+# ==========================================================================
+# MAVLink message dataclasses
+# ==========================================================================
+# One dataclass per MAVLink message this codebase sends and/or receives.
+# Field names/types intentionally mirror the generated C++ struct ArduPilot
+# itself uses (mavlink/include/mavlink/v2.0/common/mavlink_msg_<name>.h,
+# e.g. `mavlink_attitude_t`) -- these are the same names the MAVLink XML
+# defines, so they also match pymavlink's message attributes 1:1.  This is
+# additive: existing call sites (RawesGCS methods, observe() callbacks) are
+# unchanged for now and can adopt these incrementally.
+#
+# MAVLINK_TYPE mirrors msg.get_type() (e.g. "ATTITUDE") for future dispatch.
+# decode(msg) parses a raw pymavlink message into the dataclass; send(mav)
+# serializes the dataclass back out over a pymavlink connection.  Messages
+# this codebase only ever receives get decode() only; messages it only ever
+# sends get send() only.
+
+def _decode_mavlink_name(msg) -> str:
+    """Decode a 10/16-byte null-padded name field (bytes or str) into a str.
+
+    Shared by NamedValueFloat/NamedValueInt (name, 10 bytes) and would also
+    suit ParamValue/ParamSet (param_id, 16 bytes) if/when those adopt decode().
+    """
+    raw_name = getattr(msg, "name", "")
+    name = (
+        raw_name.decode("ascii", errors="ignore")
+        if isinstance(raw_name, bytes) else str(raw_name)
+    )
+    return name.rstrip("\x00").strip()
+
+
+@dataclass(frozen=True)
+class StatusText:
+    """MAVLink STATUSTEXT (#253) -- mirrors mavlink_statustext_t."""
+    MAVLINK_TYPE: ClassVar[str] = "STATUSTEXT"
+
+    text: str
+    severity: int = 0  # MAV_SEVERITY
+
+    @staticmethod
+    def decode(msg) -> "StatusText":
+        return StatusText(
+            text=str(msg.text).rstrip("\x00").strip(),
+            severity=int(getattr(msg, "severity", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class Attitude:
+    """MAVLink ATTITUDE (#30) -- mirrors mavlink_attitude_t."""
+    MAVLINK_TYPE: ClassVar[str] = "ATTITUDE"
+
+    roll:       float  # rad
+    pitch:      float  # rad
+    yaw:        float  # rad
+    rollspeed:  float  # rad/s
+    pitchspeed: float  # rad/s
+    yawspeed:   float  # rad/s
+    time_boot_ms: int = 0
+
+    @staticmethod
+    def decode(msg) -> "Attitude":
+        return Attitude(
+            roll=float(msg.roll),
+            pitch=float(msg.pitch),
+            yaw=float(msg.yaw),
+            rollspeed=float(msg.rollspeed),
+            pitchspeed=float(msg.pitchspeed),
+            yawspeed=float(msg.yawspeed),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class LocalPositionNed:
+    """MAVLink LOCAL_POSITION_NED (#32) -- mirrors mavlink_local_position_ned_t."""
+    MAVLINK_TYPE: ClassVar[str] = "LOCAL_POSITION_NED"
+
+    x: float  # m, North
+    y: float  # m, East
+    z: float  # m, Down
+    vx: float = 0.0  # m/s
+    vy: float = 0.0  # m/s
+    vz: float = 0.0  # m/s
+    time_boot_ms: int = 0
+
+    @staticmethod
+    def decode(msg) -> "LocalPositionNed":
+        return LocalPositionNed(
+            x=float(msg.x), y=float(msg.y), z=float(msg.z),
+            vx=float(getattr(msg, "vx", 0.0)),
+            vy=float(getattr(msg, "vy", 0.0)),
+            vz=float(getattr(msg, "vz", 0.0)),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class GlobalPositionInt:
+    """MAVLink GLOBAL_POSITION_INT (#33) -- mirrors mavlink_global_position_int_t."""
+    MAVLINK_TYPE: ClassVar[str] = "GLOBAL_POSITION_INT"
+
+    lat:          int  # degE7
+    lon:          int  # degE7
+    alt:          int  # mm, AMSL
+    relative_alt: int  # mm, above home
+    vx:           int = 0  # cm/s
+    vy:           int = 0  # cm/s
+    vz:           int = 0  # cm/s
+    hdg:          int = 0  # cdeg
+    time_boot_ms: int = 0
+
+    @staticmethod
+    def decode(msg) -> "GlobalPositionInt":
+        return GlobalPositionInt(
+            lat=int(msg.lat), lon=int(msg.lon), alt=int(msg.alt),
+            relative_alt=int(msg.relative_alt),
+            vx=int(getattr(msg, "vx", 0)),
+            vy=int(getattr(msg, "vy", 0)),
+            vz=int(getattr(msg, "vz", 0)),
+            hdg=int(getattr(msg, "hdg", 0)),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class EkfStatusReport:
+    """MAVLink EKF_STATUS_REPORT (#193) -- mirrors mavlink_ekf_status_report_t."""
+    MAVLINK_TYPE: ClassVar[str] = "EKF_STATUS_REPORT"
+
+    flags:                 int    # EKF_STATUS_FLAGS bitmask
+    velocity_variance:     float = 0.0
+    pos_horiz_variance:    float = 0.0
+    pos_vert_variance:     float = 0.0
+    compass_variance:      float = 0.0
+    terrain_alt_variance:  float = 0.0
+
+    @staticmethod
+    def decode(msg) -> "EkfStatusReport":
+        return EkfStatusReport(
+            flags=int(msg.flags),
+            velocity_variance=float(getattr(msg, "velocity_variance", 0.0)),
+            pos_horiz_variance=float(getattr(msg, "pos_horiz_variance", 0.0)),
+            pos_vert_variance=float(getattr(msg, "pos_vert_variance", 0.0)),
+            compass_variance=float(getattr(msg, "compass_variance", 0.0)),
+            terrain_alt_variance=float(getattr(msg, "terrain_alt_variance", 0.0)),
+        )
+
+
+@dataclass(frozen=True)
+class BatteryStatus:
+    """MAVLink BATTERY_STATUS (#147) -- mirrors mavlink_battery_status_t."""
+    MAVLINK_TYPE: ClassVar[str] = "BATTERY_STATUS"
+
+    current_battery: int = -1
+    battery_remaining: int = -1
+    voltages: tuple[int, ...] = ()
+
+    @staticmethod
+    def decode(msg) -> "BatteryStatus":
+        return BatteryStatus(
+            current_battery=int(getattr(msg, "current_battery", -1)),
+            battery_remaining=int(getattr(msg, "battery_remaining", -1)),
+            voltages=tuple(int(v) for v in getattr(msg, "voltages", ())),
+        )
+
+
+@dataclass(frozen=True)
+class SysStatus:
+    """MAVLink SYS_STATUS (#1) -- mirrors mavlink_sys_status_t."""
+    MAVLINK_TYPE: ClassVar[str] = "SYS_STATUS"
+
+    onboard_control_sensors_present: int = 0
+    onboard_control_sensors_enabled: int = 0
+    onboard_control_sensors_health: int = 0
+    load: int = 0
+    voltage_battery: int = 65535
+    current_battery: int = -1
+    battery_remaining: int = -1
+
+    @staticmethod
+    def decode(msg) -> "SysStatus":
+        return SysStatus(
+            onboard_control_sensors_present=int(getattr(msg, "onboard_control_sensors_present", 0)),
+            onboard_control_sensors_enabled=int(getattr(msg, "onboard_control_sensors_enabled", 0)),
+            onboard_control_sensors_health=int(getattr(msg, "onboard_control_sensors_health", 0)),
+            load=int(getattr(msg, "load", 0)),
+            voltage_battery=int(getattr(msg, "voltage_battery", 65535)),
+            current_battery=int(getattr(msg, "current_battery", -1)),
+            battery_remaining=int(getattr(msg, "battery_remaining", -1)),
+        )
+
+
+@dataclass(frozen=True)
+class GpsRawInt:
+    """MAVLink GPS_RAW_INT (#24) -- mirrors mavlink_gps_raw_int_t."""
+    MAVLINK_TYPE: ClassVar[str] = "GPS_RAW_INT"
+
+    fix_type: int = 0
+    satellites_visible: int = 0
+    eph: int = 65535
+    epv: int = 65535
+    lat: int = 0
+    lon: int = 0
+    alt: int = 0
+
+    @staticmethod
+    def decode(msg) -> "GpsRawInt":
+        return GpsRawInt(
+            fix_type=int(getattr(msg, "fix_type", 0)),
+            satellites_visible=int(getattr(msg, "satellites_visible", 0)),
+            eph=int(getattr(msg, "eph", 65535)),
+            epv=int(getattr(msg, "epv", 65535)),
+            lat=int(getattr(msg, "lat", 0)),
+            lon=int(getattr(msg, "lon", 0)),
+            alt=int(getattr(msg, "alt", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class PowerStatus:
+    """MAVLink POWER_STATUS (#125) -- mirrors mavlink_power_status_t."""
+    MAVLINK_TYPE: ClassVar[str] = "POWER_STATUS"
+
+    Vcc: int = 0
+    Vservo: int = 0
+    flags: int = 0
+
+    @staticmethod
+    def decode(msg) -> "PowerStatus":
+        return PowerStatus(
+            Vcc=int(getattr(msg, "Vcc", 0)),
+            Vservo=int(getattr(msg, "Vservo", 0)),
+            flags=int(getattr(msg, "flags", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class MemInfo:
+    """MAVLink MEMINFO (#152) -- mirrors mavlink_meminfo_t."""
+    MAVLINK_TYPE: ClassVar[str] = "MEMINFO"
+
+    freemem: int = 0
+    freemem32: int | None = None
+
+    @staticmethod
+    def decode(msg) -> "MemInfo":
+        freemem32 = getattr(msg, "freemem32", None)
+        return MemInfo(
+            freemem=int(getattr(msg, "freemem", 0)),
+            freemem32=int(freemem32) if freemem32 is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class McuStatus:
+    """MAVLink MCU_STATUS (#11039) -- mirrors mavlink_mcu_status_t."""
+    MAVLINK_TYPE: ClassVar[str] = "MCU_STATUS"
+
+    MCU_temperature: int = 0
+    MCU_voltage: int = 0
+    MCU_voltage_min: int = 0
+    MCU_voltage_max: int = 0
+
+    @staticmethod
+    def decode(msg) -> "McuStatus":
+        return McuStatus(
+            MCU_temperature=int(getattr(msg, "MCU_temperature", 0)),
+            MCU_voltage=int(getattr(msg, "MCU_voltage", 0)),
+            MCU_voltage_min=int(getattr(msg, "MCU_voltage_min", 0)),
+            MCU_voltage_max=int(getattr(msg, "MCU_voltage_max", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class ServoOutputRaw:
+    """MAVLink SERVO_OUTPUT_RAW (#36) -- mirrors mavlink_servo_output_raw_t."""
+    MAVLINK_TYPE: ClassVar[str] = "SERVO_OUTPUT_RAW"
+
+    servo1_raw: int = 0
+    servo2_raw: int = 0
+    servo3_raw: int = 0
+    servo4_raw: int = 0
+    servo5_raw: int = 0
+    servo6_raw: int = 0
+    servo7_raw: int = 0
+    servo8_raw: int = 0
+    servo9_raw:  int = 0
+    servo10_raw: int = 0
+    servo11_raw: int = 0
+    servo12_raw: int = 0
+    servo13_raw: int = 0
+    servo14_raw: int = 0
+    servo15_raw: int = 0
+    servo16_raw: int = 0
+    port:       int = 0
+    time_usec:  int = 0
+
+    @staticmethod
+    def decode(msg) -> "ServoOutputRaw":
+        return ServoOutputRaw(**{
+            f: int(getattr(msg, f, 0))
+            for f in (
+                "servo1_raw", "servo2_raw", "servo3_raw", "servo4_raw",
+                "servo5_raw", "servo6_raw", "servo7_raw", "servo8_raw",
+                "servo9_raw", "servo10_raw", "servo11_raw", "servo12_raw",
+                "servo13_raw", "servo14_raw", "servo15_raw", "servo16_raw",
+                "port", "time_usec",
+            )
+        })
+
+
+@dataclass(frozen=True)
+class ParamValue:
+    """MAVLink PARAM_VALUE (#22) -- mirrors mavlink_param_value_t."""
+    MAVLINK_TYPE: ClassVar[str] = "PARAM_VALUE"
+
+    param_id:    str
+    param_value: float
+    param_type:  int = 0  # MAV_PARAM_TYPE
+    param_count: int = 0
+    param_index: int = 0
+
+    @staticmethod
+    def decode(msg) -> "ParamValue":
+        return ParamValue(
+            param_id=str(msg.param_id).rstrip("\x00").strip(),
+            param_value=float(msg.param_value),
+            param_type=int(getattr(msg, "param_type", 0)),
+            param_count=int(getattr(msg, "param_count", 0)),
+            param_index=int(getattr(msg, "param_index", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class CommandAck:
+    """MAVLink COMMAND_ACK (#77) -- mirrors mavlink_command_ack_t."""
+    MAVLINK_TYPE: ClassVar[str] = "COMMAND_ACK"
+
+    command: int  # MAV_CMD
+    result:  int  # MAV_RESULT
+
+    @staticmethod
+    def decode(msg) -> "CommandAck":
+        return CommandAck(command=int(msg.command), result=int(msg.result))
+
+
+@dataclass(frozen=True)
+class Heartbeat:
+    """MAVLink HEARTBEAT (#0) -- mirrors mavlink_heartbeat_t."""
+    MAVLINK_TYPE: ClassVar[str] = "HEARTBEAT"
+
+    type:            int  # MAV_TYPE
+    autopilot:       int  # MAV_AUTOPILOT
+    base_mode:       int  # MAV_MODE_FLAG bitmask
+    custom_mode:     int
+    system_status:   int  # MAV_STATE
+    mavlink_version: int = 3
+
+    @staticmethod
+    def decode(msg) -> "Heartbeat":
+        return Heartbeat(
+            type=int(msg.type),
+            autopilot=int(msg.autopilot),
+            base_mode=int(msg.base_mode),
+            custom_mode=int(msg.custom_mode),
+            system_status=int(msg.system_status),
+            mavlink_version=int(getattr(msg, "mavlink_version", 3)),
+        )
+
+    def send(self, mav) -> None:
+        mav.mav.heartbeat_send(
+            self.type, self.autopilot, self.base_mode,
+            self.custom_mode, self.system_status,
+        )
+
+
+@dataclass(frozen=True)
+class NamedValueFloat:
+    """MAVLink NAMED_VALUE_FLOAT (#251) -- mirrors mavlink_named_value_float_t."""
+    MAVLINK_TYPE: ClassVar[str] = "NAMED_VALUE_FLOAT"
+
+    name:  str
+    value: float
+    time_boot_ms: int = 0
+
+    @staticmethod
+    def decode(msg) -> "NamedValueFloat":
+        return NamedValueFloat(
+            name=_decode_mavlink_name(msg),
+            value=float(getattr(msg, "value", float("nan"))),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+    def send(self, mav) -> None:
+        name_b = self.name.encode("ascii")[:10].ljust(10, b"\x00")
+        mav.mav.named_value_float_send(self.time_boot_ms, name_b, float(self.value))
+
+
+@dataclass(frozen=True)
+class NamedValueInt:
+    """MAVLink NAMED_VALUE_INT (#252) -- mirrors mavlink_named_value_int_t."""
+    MAVLINK_TYPE: ClassVar[str] = "NAMED_VALUE_INT"
+
+    name:  str
+    value: int
+    time_boot_ms: int = 0
+
+    @staticmethod
+    def decode(msg) -> "NamedValueInt":
+        return NamedValueInt(
+            name=_decode_mavlink_name(msg),
+            value=int(getattr(msg, "value", 0)),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+    def send(self, mav) -> None:
+        name_b = self.name.encode("ascii")[:10].ljust(10, b"\x00")
+        mav.mav.named_value_int_send(self.time_boot_ms, name_b, int(self.value))
+
+
+@dataclass(frozen=True)
+class CommandLong:
+    """MAVLink COMMAND_LONG (#76) -- mirrors mavlink_command_long_t.
+
+    Generic command envelope used by arm/disarm (MAV_CMD_COMPONENT_ARM_DISARM),
+    set_mode (MAV_CMD_DO_SET_MODE), and set_message_interval
+    (MAV_CMD_SET_MESSAGE_INTERVAL) -- the command field selects behaviour.
+    """
+    MAVLINK_TYPE: ClassVar[str] = "COMMAND_LONG"
+
+    target_system:    int
+    target_component: int
+    command:          int  # MAV_CMD
+    confirmation:     int = 0
+    param1: float = 0.0
+    param2: float = 0.0
+    param3: float = 0.0
+    param4: float = 0.0
+    param5: float = 0.0
+    param6: float = 0.0
+    param7: float = 0.0
+
+    def send(self, mav) -> None:
+        mav.mav.command_long_send(
+            self.target_system, self.target_component,
+            self.command, self.confirmation,
+            self.param1, self.param2, self.param3,
+            self.param4, self.param5, self.param6, self.param7,
+        )
+
+
+@dataclass(frozen=True)
+class SetPositionTargetLocalNed:
+    """MAVLink SET_POSITION_TARGET_LOCAL_NED (#84) -- mirrors
+    mavlink_set_position_target_local_ned_t."""
+    MAVLINK_TYPE: ClassVar[str] = "SET_POSITION_TARGET_LOCAL_NED"
+
+    target_system:    int
+    target_component: int
+    coordinate_frame: int
+    type_mask:        int
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    vx: float = 0.0
+    vy: float = 0.0
+    vz: float = 0.0
+    afx: float = 0.0
+    afy: float = 0.0
+    afz: float = 0.0
+    yaw: float = 0.0
+    yaw_rate: float = 0.0
+    time_boot_ms: int = 0
+
+    def send(self, mav) -> None:
+        mav.mav.set_position_target_local_ned_send(
+            self.time_boot_ms, self.target_system, self.target_component,
+            self.coordinate_frame, self.type_mask,
+            self.x, self.y, self.z,
+            self.vx, self.vy, self.vz,
+            self.afx, self.afy, self.afz,
+            self.yaw, self.yaw_rate,
+        )
+
+
+@dataclass(frozen=True)
+class SetAttitudeTarget:
+    """MAVLink SET_ATTITUDE_TARGET (#82) -- mirrors
+    mavlink_set_attitude_target_t."""
+    MAVLINK_TYPE: ClassVar[str] = "SET_ATTITUDE_TARGET"
+
+    target_system:    int
+    target_component: int
+    type_mask:        int
+    q:                list[float]
+    body_roll_rate:   float = 0.0
+    body_pitch_rate:  float = 0.0
+    body_yaw_rate:    float = 0.0
+    thrust:           float = 0.0
+    time_boot_ms:     int = 0
+
+    def send(self, mav) -> None:
+        mav.mav.set_attitude_target_send(
+            self.time_boot_ms,
+            self.target_system,
+            self.target_component,
+            self.type_mask,
+            self.q,
+            self.body_roll_rate,
+            self.body_pitch_rate,
+            self.body_yaw_rate,
+            self.thrust,
+        )
+
+    @staticmethod
+    def decode(msg) -> "SetAttitudeTarget":
+        return SetAttitudeTarget(
+            target_system=int(getattr(msg, "target_system", 0)),
+            target_component=int(getattr(msg, "target_component", 0)),
+            type_mask=int(getattr(msg, "type_mask", 0)),
+            q=list(getattr(msg, "q", ()) or ()),
+            body_roll_rate=float(getattr(msg, "body_roll_rate", 0.0)),
+            body_pitch_rate=float(getattr(msg, "body_pitch_rate", 0.0)),
+            body_yaw_rate=float(getattr(msg, "body_yaw_rate", 0.0)),
+            thrust=float(getattr(msg, "thrust", 0.0)),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class RcChannels:
+    """MAVLink RC_CHANNELS (#65) -- mirrors mavlink_rc_channels_t."""
+    MAVLINK_TYPE: ClassVar[str] = "RC_CHANNELS"
+
+    chan1_raw: int | None = None
+    chan2_raw: int | None = None
+    chan3_raw: int | None = None
+    chan4_raw: int | None = None
+
+    @staticmethod
+    def decode(msg) -> "RcChannels":
+        return RcChannels(
+            chan1_raw=getattr(msg, "chan1_raw", None),
+            chan2_raw=getattr(msg, "chan2_raw", None),
+            chan3_raw=getattr(msg, "chan3_raw", None),
+            chan4_raw=getattr(msg, "chan4_raw", None),
+        )
+
+
+@dataclass(frozen=True)
+class PidTuning:
+    """MAVLink PID_TUNING (#194) -- mirrors mavlink_pid_tuning_t."""
+    MAVLINK_TYPE: ClassVar[str] = "PID_TUNING"
+
+    axis: int = -1
+    desired: float | None = None
+    achieved: float | None = None
+    FF: float | None = None
+    P: float | None = None
+    I: float | None = None
+    D: float | None = None
+    PDmod: float | None = None
+    SRate: float | None = None
+
+    @staticmethod
+    def decode(msg) -> "PidTuning":
+        return PidTuning(
+            axis=int(getattr(msg, "axis", -1)),
+            desired=getattr(msg, "desired", None),
+            achieved=getattr(msg, "achieved", None),
+            FF=getattr(msg, "FF", None),
+            P=getattr(msg, "P", None),
+            I=getattr(msg, "I", None),
+            D=getattr(msg, "D", None),
+            PDmod=getattr(msg, "PDmod", None),
+            SRate=getattr(msg, "SRate", None),
+        )
+
+
+_ESC_CHANNEL_BASE_BY_TYPE = {
+    "ESC_TELEMETRY_1_TO_4": 1,
+    "ESC_TELEMETRY_5_TO_8": 5,
+    "ESC_TELEMETRY_9_TO_12": 9,
+}
+
+
+@dataclass(frozen=True)
+class EscTelemetry:
+    """MAVLink ESC_TELEMETRY_* messages -- common decoded shape."""
+
+    message_name: str
+    first_channel: int
+    rpm: tuple[int, ...] = ()
+    voltage: tuple[int, ...] = ()
+    current: tuple[int, ...] = ()
+    temperature: tuple[int, ...] = ()
+
+    @staticmethod
+    def decode(msg) -> "EscTelemetry":
+        name = msg.get_type()
+        return EscTelemetry(
+            message_name=name,
+            first_channel=_ESC_CHANNEL_BASE_BY_TYPE.get(name, 0),
+            rpm=tuple(int(v) for v in getattr(msg, "rpm", ())),
+            voltage=tuple(int(v) for v in getattr(msg, "voltage", ())),
+            current=tuple(int(v) for v in getattr(msg, "current", ())),
+            temperature=tuple(int(v) for v in getattr(msg, "temperature", ())),
+        )
+
+
+@dataclass(frozen=True)
+class ParamSet:
+    """MAVLink PARAM_SET (#23) -- mirrors mavlink_param_set_t."""
+    MAVLINK_TYPE: ClassVar[str] = "PARAM_SET"
+
+    target_system:    int
+    target_component: int
+    param_id:         str
+    param_value:      float
+    param_type:       int  # MAV_PARAM_TYPE
+
+    def send(self, mav) -> None:
+        mav.mav.param_set_send(
+            self.target_system, self.target_component,
+            self.param_id.encode("utf-8"), float(self.param_value), self.param_type,
+        )
+
+
+@dataclass(frozen=True)
+class ParamRequestRead:
+    """MAVLink PARAM_REQUEST_READ (#20) -- mirrors mavlink_param_request_read_t."""
+    MAVLINK_TYPE: ClassVar[str] = "PARAM_REQUEST_READ"
+
+    target_system:    int
+    target_component: int
+    param_id:         str
+    param_index:      int = -1
+
+    def send(self, mav) -> None:
+        mav.mav.param_request_read_send(
+            self.target_system, self.target_component,
+            self.param_id.encode("utf-8"), self.param_index,
+        )
+
+
+@dataclass(frozen=True)
+class ParamRequestList:
+    """MAVLink PARAM_REQUEST_LIST (#21) -- mirrors mavlink_param_request_list_t."""
+    MAVLINK_TYPE: ClassVar[str] = "PARAM_REQUEST_LIST"
+
+    target_system:    int
+    target_component: int
+
+    def send(self, mav) -> None:
+        mav.mav.param_request_list_send(self.target_system, self.target_component)
+
+
+@dataclass(frozen=True)
+class RequestDataStream:
+    """MAVLink REQUEST_DATA_STREAM (#66) -- mirrors mavlink_request_data_stream_t."""
+    MAVLINK_TYPE: ClassVar[str] = "REQUEST_DATA_STREAM"
+
+    target_system:      int
+    target_component:   int
+    req_stream_id:      int  # MAV_DATA_STREAM
+    req_message_rate:   int  # Hz
+    start_stop:         int = 1  # 1 = start, 0 = stop
+
+    def send(self, mav) -> None:
+        mav.mav.request_data_stream_send(
+            self.target_system, self.target_component,
+            self.req_stream_id, self.req_message_rate, self.start_stop,
+        )
+
+
+_DecodedMessageT = TypeVar("_DecodedMessageT", covariant=True)
+
+
+class _DecodableMessageClass(Protocol[_DecodedMessageT]):
+    MAVLINK_TYPE: str
+
+    @staticmethod
+    def decode(msg) -> _DecodedMessageT: ...
+
+_MESSAGE_CLASS_BY_TYPE: dict[str, object] = {
+    cls.MAVLINK_TYPE: cls
+    for cls in (
+        StatusText,
+        Attitude,
+        LocalPositionNed,
+        GlobalPositionInt,
+        EkfStatusReport,
+        BatteryStatus,
+        SysStatus,
+        GpsRawInt,
+        PowerStatus,
+        MemInfo,
+        McuStatus,
+        RcChannels,
+        ServoOutputRaw,
+        ParamValue,
+        CommandAck,
+        Heartbeat,
+        NamedValueFloat,
+        NamedValueInt,
+        SetAttitudeTarget,
+        PidTuning,
+    )
+}
+_MESSAGE_CLASS_BY_TYPE.update({name: EscTelemetry for name in _ESC_CHANNEL_BASE_BY_TYPE})
+
+
+def decode_message(msg):
+    """Decode a raw pymavlink message into a registered dataclass when possible.
+
+    Returns the original object unchanged when this module has no dataclass
+    wrapper for the message type yet.
+    """
+    cls = _MESSAGE_CLASS_BY_TYPE.get(msg.get_type())
+    if cls is None:
+        return msg
+    return cast(_DecodableMessageClass[object], cls).decode(msg)
+
+
+def decode_as(msg, message_cls: "_DecodableMessageClass[_DecodedMessageT]") -> "_DecodedMessageT":
+    """Decode *msg* as *message_cls*, with a type check on msg.get_type()."""
+    if msg.get_type() != message_cls.MAVLINK_TYPE:
+        raise TypeError(
+            f"Expected {message_cls.MAVLINK_TYPE}, got {msg.get_type()}"
+        )
+    return message_cls.decode(msg)
+
+
 class RawesGCS:
     """
     Minimal MAVLink GCS client for RAWES SITL control.
@@ -167,7 +921,7 @@ class RawesGCS:
         self._address = address
         self._source_system = source_system
         self._baud = baud
-        self._mav = None
+        self._mav: MavConnectionLike | None = None
         self._target_system = 1
         self._target_component = 1
         self._watchdog = watchdog  # nullary callable; raises if process is dead
@@ -325,6 +1079,10 @@ class RawesGCS:
         timeout : float
             Maximum wall-clock seconds to wait (only used when blocking=True).
         """
+        if self._mav is None:
+            raise RuntimeError("RawesGCS is not connected")
+
+        mav = self._mav
         type_set = None
         if type is not None:
             type_set = set(type) if isinstance(type, list) else {type}
@@ -333,7 +1091,7 @@ class RawesGCS:
             # Drain all currently available messages from the network into the
             # internal buffer without blocking.
             while True:
-                msg = self._mav.recv_match(blocking=False)
+                msg = mav.recv_match(blocking=False)
                 if msg is None:
                     break
                 self._recv_buf.append(msg)
@@ -371,11 +1129,11 @@ class RawesGCS:
         Target system/component default to 1/1 and are corrected automatically
         when the first HEARTBEAT is processed by _recv().
         """
-        self._mav = mavutil.mavlink_connection(
+        self._mav = cast(MavConnectionLike, mavutil.mavlink_connection(
             self._address,
             baud=self._baud,
             source_system=self._source_system,
-        )
+        ))
         self._register_send_logger()
         log.info("GCS socket open (no heartbeat wait) — target sys=%d comp=%d",
                  self._target_system, self._target_component)
@@ -406,11 +1164,11 @@ class RawesGCS:
             # ECONNTIMEDOUT can happen in Docker when no process holds the port;
             # it is caught the same way.
             try:
-                self._mav = mavutil.mavlink_connection(
+                self._mav = cast(MavConnectionLike, mavutil.mavlink_connection(
                     self._address,
                     baud=self._baud,
                     source_system=self._source_system,
-                )
+                ))
             except Exception as exc:
                 log.debug("Connect attempt failed: %s", exc)
                 if _wd is not None:
@@ -495,11 +1253,13 @@ class RawesGCS:
         interval = 1.0 / rate_hz
         while not self._hb_stop.wait(interval):
             try:
-                self._mav.mav.heartbeat_send(
-                    mavutil.mavlink.MAV_TYPE_GCS,
-                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                    0, 0, 0,
-                )
+                self.send_message(Heartbeat(
+                    type=mavutil.mavlink.MAV_TYPE_GCS,
+                    autopilot=mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    base_mode=0,
+                    custom_mode=0,
+                    system_status=0,
+                ))
             except Exception:
                 pass
 
@@ -525,7 +1285,6 @@ class RawesGCS:
         with a PARAM_REQUEST_READ and retries the set up to *retries* times.
         Returns True if the parameter is confirmed at the requested value.
         """
-        name_bytes = name.encode("utf-8")
         param_type = (
             mavutil.mavlink.MAV_PARAM_TYPE_INT32
             if isinstance(value, int)
@@ -536,13 +1295,13 @@ class RawesGCS:
             if attempt > 0:
                 log.debug("set_param %s retry %d/%d", name, attempt, retries - 1)
 
-            self._mav.mav.param_set_send(
-                self._target_system,
-                self._target_component,
-                name_bytes,
-                float(value),
-                param_type,
-            )
+            self.send_message(ParamSet(
+                target_system=self._target_system,
+                target_component=self._target_component,
+                param_id=name,
+                param_value=float(value),
+                param_type=param_type,
+            ))
 
             deadline = self.sim_now() + timeout
             while self.sim_now() < deadline:
@@ -551,23 +1310,24 @@ class RawesGCS:
                 )
                 if msg is None:
                     continue
-                pid = msg.param_id.rstrip("\x00")
+                pv = ParamValue.decode(msg)
+                pid = pv.param_id
                 log.debug(
                     "PARAM_VALUE received: %s = %g (looking for %s)",
-                    pid, msg.param_value, name,
+                    pid, pv.param_value, name,
                 )
                 if pid == name:
-                    log.info("Param %-20s = %g", name, msg.param_value)
+                    log.info("Param %-20s = %g", name, pv.param_value)
                     return True
 
             # ACK not received — read back to check if the value was applied silently
             log.debug("No ACK for %s — verifying via PARAM_REQUEST_READ", name)
-            self._mav.mav.param_request_read_send(
-                self._target_system,
-                self._target_component,
-                name_bytes,
-                -1,
-            )
+            self.send_message(ParamRequestRead(
+                target_system=self._target_system,
+                target_component=self._target_component,
+                param_id=name,
+                param_index=-1,
+            ))
             verify_deadline = self.sim_now() + 2.0
             while self.sim_now() < verify_deadline:
                 msg = self._recv(
@@ -575,17 +1335,18 @@ class RawesGCS:
                 )
                 if msg is None:
                     continue
-                pid = msg.param_id.rstrip("\x00")
+                pv = ParamValue.decode(msg)
+                pid = pv.param_id
                 if pid == name:
-                    if msg.param_value == float(value):
+                    if pv.param_value == float(value):
                         log.info(
                             "Param %-20s = %g (set confirmed via readback)",
-                            name, msg.param_value,
+                            name, pv.param_value,
                         )
                         return True
                     log.debug(
                         "Param %s readback = %g (wanted %g) — will retry set",
-                        name, msg.param_value, value,
+                        name, pv.param_value, value,
                     )
                     break
 
@@ -598,22 +1359,22 @@ class RawesGCS:
 
         Returns the float value, or None if no response within *timeout*.
         """
-        name_bytes = name.encode("utf-8")
-        self._mav.mav.param_request_read_send(
-            self._target_system,
-            self._target_component,
-            name_bytes,
-            -1,
-        )
+        self.send_message(ParamRequestRead(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            param_id=name,
+            param_index=-1,
+        ))
         deadline = self.sim_now() + timeout
         while self.sim_now() < deadline:
             msg = self._recv(type="PARAM_VALUE", blocking=True, timeout=1.0)
             if msg is None:
                 continue
-            pid = msg.param_id.rstrip("\x00")
+            pv = ParamValue.decode(msg)
+            pid = pv.param_id
             if pid == name:
-                log.debug("get_param %s = %g", name, msg.param_value)
-                return float(msg.param_value)
+                log.debug("get_param %s = %g", name, pv.param_value)
+                return float(pv.param_value)
         log.warning("get_param %s: no response within %.1f s", name, timeout)
         return None
 
@@ -623,10 +1384,10 @@ class RawesGCS:
         Returns a dict mapping param name to value.  Completes when the full
         param_count is received or *timeout* expires (whichever comes first).
         """
-        self._mav.mav.param_request_list_send(
-            self._target_system,
-            self._target_component,
-        )
+        self.send_message(ParamRequestList(
+            target_system=self._target_system,
+            target_component=self._target_component,
+        ))
         params: "dict[str, float]" = {}
         total: "int | None" = None
         deadline = self.sim_now() + timeout
@@ -636,10 +1397,11 @@ class RawesGCS:
                 if total is not None and len(params) >= total:
                     break
                 continue
-            pid = msg.param_id.rstrip("\x00")
-            params[pid] = float(msg.param_value)
+            pv = ParamValue.decode(msg)
+            pid = pv.param_id
+            params[pid] = float(pv.param_value)
             if total is None:
-                total = msg.param_count
+                total = pv.param_count
             if len(params) >= total:
                 break
         log.debug("fetch_all_params: got %d/%s params", len(params), total)
@@ -666,20 +1428,19 @@ class RawesGCS:
             )
             if msg is None:
                 continue
-            mt = msg.get_type()
-            if mt == "STATUSTEXT":
-                log.info("[t=%.1f] EKF wait STATUSTEXT: %s",
-                         self.sim_now(), msg.text.rstrip("\x00").strip())
-            elif mt == "EKF_STATUS_REPORT":
-                log.debug("EKF_STATUS flags=0x%04x", msg.flags)
-            elif mt == "ATTITUDE":
-                r = math.degrees(msg.roll)
-                p = math.degrees(msg.pitch)
-                y = math.degrees(msg.yaw)
-                if all(math.isfinite(v) for v in (r, p, y)):
-                    log.info("[t=%.1f] EKF attitude ready rpy=(%.1f, %.1f, %.1f)deg",
-                             self.sim_now(), r, p, y)
-                    return True
+            match decode_message(msg):
+                case StatusText(text=text):
+                    log.info("[t=%.1f] EKF wait STATUSTEXT: %s", self.sim_now(), text)
+                case EkfStatusReport(flags=flags):
+                    log.debug("EKF_STATUS flags=0x%04x", flags)
+                case Attitude() as att:
+                    r = math.degrees(att.roll)
+                    p = math.degrees(att.pitch)
+                    y = math.degrees(att.yaw)
+                    if all(math.isfinite(v) for v in (r, p, y)):
+                        log.info("[t=%.1f] EKF attitude ready rpy=(%.1f, %.1f, %.1f)deg",
+                                 self.sim_now(), r, p, y)
+                        return True
         return False
 
     def wait_ekf_ok(self, timeout: float = 60.0) -> None:
@@ -705,10 +1466,11 @@ class RawesGCS:
             )
             if msg is None:
                 continue
-            if (msg.flags & NEEDED) == NEEDED:
-                log.info("[t=%.1f] EKF healthy (flags=0x%04x)", self.sim_now(), msg.flags)
+            ekf = EkfStatusReport.decode(msg)
+            if (ekf.flags & NEEDED) == NEEDED:
+                log.info("[t=%.1f] EKF healthy (flags=0x%04x)", self.sim_now(), ekf.flags)
                 return
-            log.debug("EKF not ready yet (flags=0x%04x)", msg.flags)
+            log.debug("EKF not ready yet (flags=0x%04x)", ekf.flags)
         raise TimeoutError(f"EKF not healthy after {timeout:.0f}s")
 
     # ------------------------------------------------------------------
@@ -734,14 +1496,14 @@ class RawesGCS:
         """
         param2 = 21196.0 if force else 0.0
         log.info("Sending arm command (force=%s) …", force)
-        self._mav.mav.command_long_send(
-            self._target_system,
-            self._target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,       # confirmation
-            1,       # param1: 1 = arm
-            param2, 0, 0, 0, 0, 0,
-        )
+        self.send_message(CommandLong(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            confirmation=0,
+            param1=1,
+            param2=param2,
+        ))
         deadline        = self.sim_now() + timeout
         t_last_arm_send = self.sim_now()
         _poll = 0.5
@@ -752,52 +1514,42 @@ class RawesGCS:
             )
             if msg is None:
                 continue
-
-            if msg.get_type() == "STATUSTEXT":
-                log.warning("[t=%.1f] STATUSTEXT during arm: %s",
-                            self.sim_now(), msg.text.rstrip("\x00").strip())
-                continue
-
-            if msg.get_type() == "COMMAND_ACK":
-                if msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-                    if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                        log.info("[t=%.1f] Arm command ACCEPTED — waiting for armed heartbeat ...",
-                                 self.sim_now())
-                    elif msg.result in (
-                        mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED,
-                        mavutil.mavlink.MAV_RESULT_FAILED,
-                    ):
-                        # Transient pre-arm failure (e.g. interlock not yet registered,
-                        # EKF still converging).  ArduPilot returns FAILED (=4) for
-                        # pre-arm check failures, TEMPORARILY_REJECTED (=1) for busy.
-                        # Sleep 1 s sim-time then resend; do NOT raise.
-                        log.info(
-                            "[t=%.1f] Arm rejected (result=%d) — retrying",
-                            self.sim_now(), msg.result,
-                        )
-                        self.sim_sleep(1.0)
-                        self._mav.mav.command_long_send(
-                            self._target_system,
-                            self._target_component,
-                            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                            0, 1, param2, 0, 0, 0, 0, 0,
-                        )
-                        t_last_arm_send = self.sim_now()
-                    else:
-                        raise RuntimeError(
-                            f"Arm rejected by vehicle (result={msg.result})"
-                        )
-                elif msg.command != mavutil.mavlink.MAV_CMD_DO_SET_MODE:
-                    log.debug("COMMAND_ACK for cmd=%d result=%d (not arm)",
-                              msg.command, msg.result)
-
-            if msg.get_type() == "HEARTBEAT":
-                armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                log.info("[t=%.1f] HEARTBEAT: sysid=%d base_mode=0x%02x armed=%s custom_mode=%d",
-                         self.sim_now(), msg.get_srcSystem(), msg.base_mode, armed, msg.custom_mode)
-                if armed:
-                    log.info("[t=%.1f] Vehicle is armed.", self.sim_now())
-                    return
+            match decode_message(msg):
+                case StatusText(text=text):
+                    log.warning("[t=%.1f] STATUSTEXT during arm: %s", self.sim_now(), text)
+                    continue
+                case CommandAck(command=command, result=result):
+                    if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                        if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                            log.info("[t=%.1f] Arm command ACCEPTED — waiting for armed heartbeat ...",
+                                     self.sim_now())
+                        elif result in (
+                            mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED,
+                            mavutil.mavlink.MAV_RESULT_FAILED,
+                        ):
+                            log.info("[t=%.1f] Arm rejected (result=%d) — retrying",
+                                     self.sim_now(), result)
+                            self.sim_sleep(1.0)
+                            self.send_message(CommandLong(
+                                target_system=self._target_system,
+                                target_component=self._target_component,
+                                command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                                confirmation=0,
+                                param1=1,
+                                param2=param2,
+                            ))
+                            t_last_arm_send = self.sim_now()
+                        else:
+                            raise RuntimeError(f"Arm rejected by vehicle (result={result})")
+                    elif command != mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+                        log.debug("COMMAND_ACK for cmd=%d result=%d (not arm)", command, result)
+                case Heartbeat() as hb:
+                    armed = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    log.info("[t=%.1f] HEARTBEAT: sysid=%d base_mode=0x%02x armed=%s custom_mode=%d",
+                             self.sim_now(), msg.get_srcSystem(), hb.base_mode, armed, hb.custom_mode)
+                    if armed:
+                        log.info("[t=%.1f] Vehicle is armed.", self.sim_now())
+                        return
 
         raise TimeoutError(f"Vehicle did not confirm armed within {timeout:.0f}s")
 
@@ -813,14 +1565,14 @@ class RawesGCS:
         """
         param2 = 21196.0 if force else 0.0
         log.info("Sending disarm command (force=%s) …", force)
-        self._mav.mav.command_long_send(
-            self._target_system,
-            self._target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,       # confirmation
-            0,       # param1: 0 = disarm
-            param2, 0, 0, 0, 0, 0,
-        )
+        self.send_message(CommandLong(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            confirmation=0,
+            param1=0,
+            param2=param2,
+        ))
         deadline = self.sim_now() + timeout
         while self.sim_now() < deadline:
             msg = self._recv(
@@ -829,15 +1581,14 @@ class RawesGCS:
             )
             if msg is None:
                 continue
-            if msg.get_type() == "STATUSTEXT":
-                log.info("[t=%.1f] STATUSTEXT during disarm: %s",
-                         self.sim_now(), msg.text.rstrip("\x00").strip())
-                continue
-            if msg.get_type() == "HEARTBEAT":
-                armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                if not armed:
-                    log.info("[t=%.1f] Vehicle is disarmed.", self.sim_now())
-                    return
+            match decode_message(msg):
+                case StatusText(text=text):
+                    log.info("[t=%.1f] STATUSTEXT during disarm: %s", self.sim_now(), text)
+                    continue
+                case Heartbeat(base_mode=base_mode):
+                    if not bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                        log.info("[t=%.1f] Vehicle is disarmed.", self.sim_now())
+                        return
         raise TimeoutError(f"Vehicle did not confirm disarmed within {timeout:.0f}s")
 
     # ------------------------------------------------------------------
@@ -856,15 +1607,14 @@ class RawesGCS:
         """
         log.info("Setting mode %d …", mode_id)
         t_last_send     = self.sim_now()
-        self._mav.mav.command_long_send(
-            self._target_system,
-            self._target_component,
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            0,
-            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            float(mode_id),
-            0, 0, 0, 0, 0,
-        )
+        self.send_message(CommandLong(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            command=mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            confirmation=0,
+            param1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            param2=float(mode_id),
+        ))
         deadline = self.sim_now() + timeout
         _poll = 0.5
         while self.sim_now() < deadline:
@@ -875,42 +1625,33 @@ class RawesGCS:
             )
             if msg is None:
                 continue
-            t = msg.get_type()
-            if t == "HEARTBEAT":
-                if msg.custom_mode == mode_id:
-                    log.info("[t=%.1f] Mode confirmed: %d", self.sim_now(), mode_id)
-                    return
-                log.debug("Heartbeat custom_mode=%d (waiting for %d)", msg.custom_mode, mode_id)
-            elif t == "COMMAND_ACK":
-                if msg.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
-                    if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            match decode_message(msg):
+                case Heartbeat(custom_mode=custom_mode):
+                    if custom_mode == mode_id:
+                        log.info("[t=%.1f] Mode confirmed: %d", self.sim_now(), mode_id)
+                        return
+                    log.debug("Heartbeat custom_mode=%d (waiting for %d)", custom_mode, mode_id)
+                case CommandAck(command=command, result=result) if command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+                    if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
                         log.debug("MAV_CMD_DO_SET_MODE accepted, waiting for heartbeat confirmation")
-                    elif msg.result == mavutil.mavlink.MAV_RESULT_FAILED:
-                        # Transient rejection (e.g. EKF not yet providing position).
-                        # Retry after 1 s sim-time.
-                        log.debug(
-                            "Mode %d rejected (result=%d) — retrying",
-                            mode_id, msg.result,
-                        )
+                    elif result == mavutil.mavlink.MAV_RESULT_FAILED:
+                        log.debug("Mode %d rejected (result=%d) — retrying", mode_id, result)
                         self.sim_sleep(1.0)
-                        self._mav.mav.command_long_send(
-                            self._target_system,
-                            self._target_component,
-                            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                            0,
-                            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                            float(mode_id),
-                            0, 0, 0, 0, 0,
-                        )
+                        self.send_message(CommandLong(
+                            target_system=self._target_system,
+                            target_component=self._target_component,
+                            command=mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                            confirmation=0,
+                            param1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                            param2=float(mode_id),
+                        ))
                         t_last_send = self.sim_now()
                     else:
                         raise RuntimeError(
-                            f"Mode change rejected by vehicle "
-                            f"(mode={mode_id}, result={msg.result})"
+                            f"Mode change rejected by vehicle (mode={mode_id}, result={result})"
                         )
-            elif t == "STATUSTEXT":
-                log.warning("[t=%.1f] STATUSTEXT during mode set: %s",
-                            self.sim_now(), msg.text.rstrip("\x00").strip())
+                case StatusText(text=text):
+                    log.warning("[t=%.1f] STATUSTEXT during mode set: %s", self.sim_now(), text)
         raise TimeoutError(f"Mode {mode_id} not confirmed within {timeout:.0f}s")
 
     # ------------------------------------------------------------------
@@ -935,17 +1676,18 @@ class RawesGCS:
         north, east, down : float   Target position [m]
         yaw               : float   Target yaw [rad], default 0 (ignored in mask)
         """
-        self._mav.mav.set_position_target_local_ned_send(
-            0,                                          # time_boot_ms
-            self._target_system,
-            self._target_component,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            _POS_ONLY_MASK,
-            north, east, down,                          # position
-            0.0, 0.0, 0.0,                              # velocity (ignored)
-            0.0, 0.0, 0.0,                              # acceleration (ignored)
-            yaw, 0.0,                                   # yaw, yaw_rate (ignored)
-        )
+        self.send_message(SetPositionTargetLocalNed(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            coordinate_frame=mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            type_mask=_POS_ONLY_MASK,
+            x=north,
+            y=east,
+            z=down,
+            yaw=yaw,
+            yaw_rate=0.0,
+            time_boot_ms=0,
+        ))
         log.info(
             "Position target sent: N=%.1f E=%.1f D=%.1f m", north, east, down
         )
@@ -965,13 +1707,13 @@ class RawesGCS:
         rate_hz : int
             Requested message rate in Hz.  Call once; ArduPilot sustains the rate.
         """
-        self._mav.mav.request_data_stream_send(
-            self._target_system,
-            self._target_component,
-            stream_id,
-            rate_hz,
-            1,   # 1 = start streaming
-        )
+        self.send_message(RequestDataStream(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            req_stream_id=stream_id,
+            req_message_rate=rate_hz,
+            start_stop=1,
+        ))
         log.debug("Requested stream id=%d at %d Hz", stream_id, rate_hz)
 
     def set_message_interval(self, msg_id: int, interval_us: int) -> None:
@@ -990,15 +1732,14 @@ class RawesGCS:
             Interval between messages in microseconds.  ``-1`` disables the
             message; ``0`` restores the stream/param default rate.
         """
-        self._mav.mav.command_long_send(
-            self._target_system,
-            self._target_component,
-            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-            0,
-            float(msg_id),
-            float(interval_us),
-            0, 0, 0, 0, 0,
-        )
+        self.send_message(CommandLong(
+            target_system=self._target_system,
+            target_component=self._target_component,
+            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            confirmation=0,
+            param1=float(msg_id),
+            param2=float(interval_us),
+        ))
         log.debug("SET_MESSAGE_INTERVAL id=%d interval_us=%d", msg_id, interval_us)
 
     def send_rc_override(self, channels: dict[int, int]) -> None:
@@ -1013,51 +1754,35 @@ class RawesGCS:
             "rawes.lua may hold CH8 override."
         )
 
-    def send_named_float(self, name: str, value: float) -> None:
-        """Send a NAMED_VALUE_FLOAT MAVLink message to the vehicle.
+    def send_message(self, msg) -> None:
+        """Send any MAVLink message dataclass (NamedValueFloat, NamedValueInt,
+        Heartbeat, CommandLong, ...) that defines a `send(mav)` method.
 
-        ArduPilot Lua scripts that have called mavlink.register_rx_msgid(251)
-        will receive this message via mavlink.receive_chan() on their next tick.
-
-        Parameters
-        ----------
-        name : str
-            Message name, up to 10 ASCII characters (truncated + null-padded).
-        value : float
-            Floating-point value carried by the message.
+        Replaces the old per-message send_named_float()/send_named_int()
+        wrappers -- construct the dataclass and pass it here instead:
+            gcs.send_message(NamedValueFloat("RAWES_THR", 0.5))
+            gcs.send_message(NamedValueInt("RAWES_LAT", lat_e7))
         """
-        name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
-        self._mav.mav.named_value_float_send(
-            0,       # time_boot_ms — not meaningful for GCS-to-vehicle messages
-            name_b,
-            float(value),
+        msg.send(self._mav)
+        log.debug("%s sent: %r", type(msg).__name__, msg)
+
+    def recv_decoded(
+        self,
+        message_cls: "_DecodableMessageClass[_DecodedMessageT]",
+        *,
+        blocking: bool = True,
+        timeout: float = 1.0,
+    ) -> "_DecodedMessageT | None":
+        """Receive one message of *message_cls* and decode it immediately."""
+        msg = self._recv(
+            type=message_cls.MAVLINK_TYPE,
+            blocking=blocking,
+            timeout=timeout,
         )
-        log.debug("NAMED_VALUE_FLOAT sent: %s=%.4g", name, value)
+        if msg is None:
+            return None
+        return message_cls.decode(msg)
 
-    def send_named_int(self, name: str, value: int) -> None:
-        """Send a NAMED_VALUE_INT MAVLink message to the vehicle.
-
-        ArduPilot Lua scripts that have called mavlink.register_rx_msgid(252)
-        will receive this message via mavlink.receive_chan() on their next tick.
-
-        Use this instead of send_named_float() whenever the value must keep
-        exact int32 precision (e.g. lat/lon in degrees*1e7) -- a float32 NVF
-        loses precision for large-magnitude values like absolute latitude.
-
-        Parameters
-        ----------
-        name : str
-            Message name, up to 10 ASCII characters (truncated + null-padded).
-        value : int
-            Signed 32-bit integer value carried by the message.
-        """
-        name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
-        self._mav.mav.named_value_int_send(
-            0,       # time_boot_ms — not meaningful for GCS-to-vehicle messages
-            name_b,
-            int(value),
-        )
-        log.debug("NAMED_VALUE_INT sent: %s=%d", name, value)
 
     # ------------------------------------------------------------------
     # Telemetry receive
@@ -1073,7 +1798,8 @@ class RawesGCS:
             type="LOCAL_POSITION_NED", blocking=True, timeout=timeout
         )
         if msg:
-            return (msg.x, msg.y, msg.z)
+            pos = LocalPositionNed.decode(msg)
+            return (pos.x, pos.y, pos.z)
         return None
 
     def recv_local_position_latest(self) -> tuple[float, float, float] | None:
@@ -1087,7 +1813,7 @@ class RawesGCS:
             msg = self._recv(type="LOCAL_POSITION_NED", blocking=False)
             if msg is None:
                 break
-            latest = msg
+            latest = LocalPositionNed.decode(msg)
         if latest is not None:
             return (latest.x, latest.y, latest.z)
         return None
@@ -1100,5 +1826,6 @@ class RawesGCS:
             type="ATTITUDE", blocking=True, timeout=timeout
         )
         if msg:
-            return (msg.roll, msg.pitch, msg.yaw)
+            att = Attitude.decode(msg)
+            return (att.roll, att.pitch, att.yaw)
         return None

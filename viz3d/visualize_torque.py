@@ -38,7 +38,7 @@ import math
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Protocol, cast
 
 import numpy as np
 
@@ -48,6 +48,43 @@ from viz3d.torque_telemetry import TorqueTelemetryFrame
 from simulation.telemetry_csv import read_csv as _read_csv
 from simulation.mediator_torque import PROFILES as _MEDIATOR_PROFILES
 from simulation.torque_model import HubParams as _HubParams, equilibrium_throttle as _eq_throttle
+
+
+class _TextActorLike(Protocol):
+    def SetInput(self, text: str) -> None: ...
+
+    def GetTextProperty(self) -> Any: ...
+
+
+class _PlotterLike(Protocol):
+    title: str
+    camera_position: Any
+    window_size: tuple[int, int]
+    render_window: Any
+
+    def add_mesh(self, *args, **kwargs) -> Any: ...
+
+    def add_axes(self, *args, **kwargs) -> Any: ...
+
+    def add_key_event(self, *args, **kwargs) -> Any: ...
+
+    def add_text(self, *args, **kwargs) -> _TextActorLike: ...
+
+    def set_background(self, *args, **kwargs) -> Any: ...
+
+    def enable_anti_aliasing(self, *args, **kwargs) -> Any: ...
+
+    def render(self, *args, **kwargs) -> Any: ...
+
+    def show(self, *args, **kwargs) -> Any: ...
+
+    def open_gif(self, *args, **kwargs) -> Any: ...
+
+    def write_frame(self, *args, **kwargs) -> Any: ...
+
+    def close(self, *args, **kwargs) -> Any: ...
+
+    def update(self, *args, **kwargs) -> Any: ...
 
 _MODEL_PARAMS = _HubParams()   # default GB4008 params (same as mediator default)
 
@@ -212,7 +249,7 @@ class EventLog:
 
     _COLOURS = {"info": "white", "warn": "yellow", "pass": "lime", "fail": "red"}
 
-    def __init__(self, pl: pv.Plotter,
+    def __init__(self, pl: _PlotterLike,
                  settle_s: float, observe_s: float, threshold: float,
                  omega_nom: float = 28.0) -> None:
         self.pl          = pl
@@ -348,7 +385,7 @@ class TorqueScene:
     update() only sets actor.user_matrix — no mesh objects created per frame.
     """
 
-    def __init__(self, pl: pv.Plotter,
+    def __init__(self, pl: _PlotterLike,
                  settle_s: float = 40.0,
                  observe_s: float = 20.0,
                  threshold_degs: float = 1.0) -> None:
@@ -548,7 +585,7 @@ def play(frames: List[TorqueTelemetryFrame],
         f"result={meta.get('result','?')}"
     )
 
-    pl = pv.Plotter(title=title, off_screen=(export is not None))
+    pl = cast(_PlotterLike, pv.Plotter(title=title, off_screen=(export is not None)))
     pl.set_background((0.05, 0.05, 0.08))   # very dark blue-black
     pl.camera_position = [
         (0.55, -0.75, 0.80),
@@ -674,8 +711,8 @@ def play(frames: List[TorqueTelemetryFrame],
     # FPS counter + controls — pre-created, FPS updated in-place via SetInput
     pl.add_text("Space=play/pause  </>=step  +/-=speed  N/B=next/prev file  drag=orbit",
                 position=(10, 10), font_size=7, color=(0.45, 0.45, 0.45))
-    _fps_actor = pl.add_text("FPS --.-", position=(10, 28),
-                              font_size=9, font="courier", color=(0.5, 0.9, 0.5))
+    _fps_actor = cast(_TextActorLike, pl.add_text("FPS --.-", position=(10, 28),
+                              font_size=9, font="courier", color=(0.5, 0.9, 0.5)))
 
     # File counter (top-centre)
     _w, _h = pl.window_size
