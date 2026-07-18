@@ -12,6 +12,33 @@ Current focus:
 - Run `bash test.sh stack -n 1 -k test_lua_flight_steady_sitl` to validate the steady flight SITL stack.
 - After steady stack passes, validate pumping and landing stack tests.
 
+## Repository Layout
+
+The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
+8 first-party top-level packages, installed in editable mode
+(`pip install -e . --no-deps`, done by `setup.cmd`/`setup.sh`). Import them as plain dotted
+packages (`from simulation.controller import ...`, `from analysis.flight_log import ...`) —
+there are no `sys.path.insert()` hacks anywhere in the codebase.
+
+| Package | Contents |
+|---|---|
+| `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `gcs.py`, ...), `requirements.txt`, `Dockerfile`, `logs/` |
+| `arduloop/` | Self-contained Python port of ArduPilot's traditional-heli attitude/rate-control stack (used by the in-process mock ArduPilot) |
+| `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
+| `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |
+| `analysis/` | Post-run diagnosis/report scripts (all read `simulation/logs/{test_name}/...`) |
+| `viz3d/` | 3D telemetry playback and torque visualizers |
+| `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`, `query_hardware.py`) |
+| `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/hil`, `tests/oneoff`, `tests/common` |
+
+Non-package top-level directories: `design/` (owner docs), `documents/`, `hardware/`,
+`presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`), `tmp/`
+(scratch/working files only).
+
+`simulation/logs/` is the single log root for every test tier (unit fixtures, simtests, and
+SITL stack runs all write there) — it did not move when the other packages were promoted to
+top-level.
+
 ## Read Order (for agents)
 
 1. `design/flight_stack.md` (system behavior and control ownership)
@@ -92,7 +119,7 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | ArduPilot heli control-loop behavior | `design/GUIDED_CONTROL_LOOPS.md` | `design/flight_stack.md` |
 | Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
-| Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `simulation/pytest.ini` |
+| Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
 
 Parameter-reference ownership note:

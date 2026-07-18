@@ -446,17 +446,17 @@ Additional physics limitations in the current simulation:
 
 ## Module Map
 
+Repo layout note: `simulation/` is one of 8 top-level packages (see `AGENTS.md` ->
+Repository Layout). `arduloop/`, `analysis/`, `viz3d/`, `scripts/`, and `tests/` are
+siblings of `simulation/` at the repo root, not nested inside it — shown here as
+separate trees for clarity.
+
 ```
 simulation/
 ├── dynamics.py          RK4 6-DOF rigid-body integrator
 ├── aero/                Internal aero package — NOT used by PhysicsCore/PhysicsRunner.
 │                        PetersHeBEMJit, PetersHeBEM, CCBladeBEM, OpenFASTBEM, SimpleBEM.
 │                        Production code uses dynbem.create_aero() (external package at C:/repos/aero).
-├── arduloop/            ArduPilot GUIDED/rate control Python port (self-contained package).
-│                        guided.py: GuidedAttitudeController (input_quaternion + sqrt P-ctrl).
-│                        attitude_heli.py: HeliRateController (rate PIDs + swash output).
-│                        params.py: HeliParams, RateAxisParams (1:1 ArduPilot param names).
-│                        Used by MockArdupilot._LuaBackend and _MockArdupilotBase.step_physics().
 ├── tether.py            Tension-only elastic tether (Dyneema SK75)
 ├── swashplate.py        H3-120 inverse mixing, cyclic blade pitch
 ├── frames.py            build_orb_frame(), T_ENU_NED (external-data conversion utility)
@@ -519,54 +519,65 @@ simulation/
 ├── rawes_lua_harness.py RawesLua class — runs rawes.lua in-process via lupa; shared by unit
 │                        tests and simtests. Loads mock_ardupilot.lua then rawes.lua. Python writes
 │                        sensor inputs to `_mock` and calls `_update_fn()` each tick.
-├── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.
-├── scripts/rawes.lua    Unified Lua controller (RAWES_MODE: 0=none 1=steady 3=passive 4=landing).
-├── scripts/rawes_test_surface.lua  Test-surface table (_rawes_fns) splicing internal locals
-│                        for Python unit tests via lupa.
-├── analysis/
-│   ├── flight_log.py    Unified data loader — FlightLog.load(log_dir), FlightLog.buckets(bucket_s),
-│   │                    FlightEvent, Bucket; reads all log sources into one structure.
-│   ├── analyse_run.py   Post-run report: print_flight_report, compute_steady_metrics,
-│   │                    validate_ekf_window; CLI: --bucket S.
-│   ├── analyse_landing.py    Landing diagnosis (alt/vz/winch/tension/collective per bucket).
-│   ├── pump_envelope.py      Pumping cycle envelope sweep (tension setpoints, wind, tilt).
-│   └── pump_diagnosis.py     Per-bucket compact summary + CSV (osc, corr) to test log dir.
-├── viz3d/
-│   ├── visualize_3d.py       Interactive 3D playback of any telemetry.csv (default viz tool).
-│   ├── scrub.py              Interactive frame scrubber.
-│   ├── render_cycle.py       Off-screen render to MP4 / GIF.
-│   ├── telemetry.py          TelemetryFrame dataclass + CSVSource / LiveQueueSource protocol.
-│   ├── visualize_torque.py   Torque telemetry 3-panel replay.
-│   └── torque_telemetry.py   TorqueTelemetryFrame dataclass.
-└── tests/
-    ├── unit/            Windows native, no Docker (~685 fast unit tests; no simtests).
-    │   └── README.md    Unit & simtest reference guide.
-    ├── simtests/        Windows native, no Docker (~13 full physics simulation tests; marker: simtest).
-    │   ├── conftest.py            simtest marker registration; 600 s auto-timeout.
-    │   ├── simtest_runner.py      PhysicsRunner — thin wrapper around PhysicsCore.
-    │   │                          HeliCyclicController baked in. Two step methods:
-    │   │                            step(dt, col, rate_roll, rate_pitch, omega_body) — Python AP path;
-    │   │                            step_guided(dt, col, heli_out) — GUIDED path (HeliRateOutput from
-    │   │                            GuidedAttitudeController). Re-exports MockArdupilot from
-    │   │                            tests/common/mock_ardupilot.py.
-    │   └── simtest_ic.py          load_ic() — loads steady_state_starting.json.
-    ├── common/
-    │   └── mock_ardupilot.py      MockArdupilot — public adapter for simtests. Two factory methods:
-    │                                MockArdupilot.for_lua(sim, wind, dt, initial_thrust=...) — Lua backend
-    │                                  wraps RawesLua; reads guided_target/_rate_target/_throttle from
-    │                                  _mock and feeds GuidedAttitudeController each tick;
-    │                                MockArdupilot.for_python(mode=..., wind, dt, **kwargs) — Python
-    │                                  AP backend (calls the selected mode step each tick).
-    │                              Shared base (_MockArdupilotBase): enable_guided(), step_physics(),
-    │                              log(), write_telemetry(). TelRow.from_physics() written at
-    │                              RAWES_TEL_HZ (default 20 Hz, override via env var).
-    └── sitl/            Docker; all SITL/stack tests live here.
-        ├── conftest.py                 thin re-exporter — pytest_addoption + pytest_configure only.
-        ├── stack_infra.py              StackConfig, SitlContext, _sitl_stack, _acro_stack, _torque_stack.
-        ├── stack_utils.py              port checks, log copy, mediator launcher.
-        ├── rawes_sitl_defaults.parm    boot-time ArduPilot params (EEPROM defaults).
-        ├── flight/                     flight stack tests (mediator + physics + ArduPilot).
-        └── torque/                     torque/anti-rotation tests.
+└── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.
+
+scripts/
+├── rawes.lua                      Unified Lua controller (RAWES_MODE: 0=none 1=steady 3=passive 4=landing).
+└── rawes_test_surface.lua         Test-surface table (_rawes_fns) splicing internal locals
+                                   for Python unit tests via lupa.
+
+arduloop/               ArduPilot GUIDED/rate control Python port (self-contained package).
+                        guided.py: GuidedAttitudeController (input_quaternion + sqrt P-ctrl).
+                        attitude_heli.py: HeliRateController (rate PIDs + swash output).
+                        params.py: HeliParams, RateAxisParams (1:1 ArduPilot param names).
+                        Used by MockArdupilot._LuaBackend and _MockArdupilotBase.step_physics().
+
+analysis/
+├── flight_log.py    Unified data loader — FlightLog.load(log_dir), FlightLog.buckets(bucket_s),
+│                    FlightEvent, Bucket; reads all log sources into one structure.
+├── analyse_run.py   Post-run report: print_flight_report, compute_steady_metrics,
+│                    validate_ekf_window; CLI: --bucket S.
+├── analyse_landing.py    Landing diagnosis (alt/vz/winch/tension/collective per bucket).
+├── pump_envelope.py      Pumping cycle envelope sweep (tension setpoints, wind, tilt).
+└── pump_diagnosis.py     Per-bucket compact summary + CSV (osc, corr) to test log dir.
+
+viz3d/
+├── visualize_3d.py       Interactive 3D playback of any telemetry.csv (default viz tool).
+├── scrub.py              Interactive frame scrubber.
+├── render_cycle.py       Off-screen render to MP4 / GIF.
+├── telemetry.py          TelemetryFrame dataclass + CSVSource / LiveQueueSource protocol.
+├── visualize_torque.py   Torque telemetry 3-panel replay.
+└── torque_telemetry.py   TorqueTelemetryFrame dataclass.
+
+tests/
+├── unit/            Windows native, no Docker (~685 fast unit tests; no simtests).
+│   └── README.md    Unit & simtest reference guide.
+├── simtests/        Windows native, no Docker (~13 full physics simulation tests; marker: simtest).
+│   ├── conftest.py            simtest marker registration; 600 s auto-timeout.
+│   ├── simtest_runner.py      PhysicsRunner — thin wrapper around PhysicsCore.
+│   │                          HeliCyclicController baked in. Two step methods:
+│   │                            step(dt, col, rate_roll, rate_pitch, omega_body) — Python AP path;
+│   │                            step_guided(dt, col, heli_out) — GUIDED path (HeliRateOutput from
+│   │                            GuidedAttitudeController). Re-exports MockArdupilot from
+│   │                            tests/common/mock_ardupilot.py.
+│   └── simtest_ic.py          load_ic() — loads steady_state_starting.json.
+├── common/
+│   └── mock_ardupilot.py      MockArdupilot — public adapter for simtests. Two factory methods:
+│                                MockArdupilot.for_lua(sim, wind, dt, initial_thrust=...) — Lua backend
+│                                  wraps RawesLua; reads guided_target/_rate_target/_throttle from
+│                                  _mock and feeds GuidedAttitudeController each tick;
+│                                MockArdupilot.for_python(mode=..., wind, dt, **kwargs) — Python
+│                                  AP backend (calls the selected mode step each tick).
+│                              Shared base (_MockArdupilotBase): enable_guided(), step_physics(),
+│                              log(), write_telemetry(). TelRow.from_physics() written at
+│                              RAWES_TEL_HZ (default 20 Hz, override via env var).
+└── sitl/            Docker; all SITL/stack tests live here.
+    ├── conftest.py                 thin re-exporter — pytest_addoption + pytest_configure only.
+    ├── stack_infra.py              StackConfig, SitlContext, _sitl_stack, _acro_stack, _torque_stack.
+    ├── stack_utils.py              port checks, log copy, mediator launcher.
+    ├── rawes_sitl_defaults.parm    boot-time ArduPilot params (EEPROM defaults).
+    ├── flight/                     flight stack tests (mediator + physics + ArduPilot).
+    └── torque/                     torque/anti-rotation tests.
 ```
 
 **Data flow (400 Hz):** SITL servo PWM → `ardupilot_h3_120_inverse` swashplate mix → **PhysicsCore** (`dynbem.create_aero` quasi_static + TetherModel + RK4 + spin ODE + yaw damping) → `sensor.py` packet → SITL. `mediator.py` is a thin wrapper; `PhysicsCore` (`physics_core.py`) owns the integration loop.

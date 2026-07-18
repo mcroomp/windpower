@@ -40,7 +40,7 @@ Tests are split across three directories:
 | *(none)* | Fast unit test, no physics loop |
 | `simtest` | Full time-domain physics loop — seconds of compute (auto-timeout 600 s) |
 
-The `simtest` timeout is set globally in `simulation/pytest.ini`.
+The `simtest` timeout is set globally in `pyproject.toml` (`[tool.pytest.ini_options]`).
 
 ---
 
