@@ -9,7 +9,7 @@ Time is fake: millis() reads from an internal counter advanced by run().
 Simulation runs at Python execution speed with no real sleeping.
 
 Usage:
-    from rawes_lua_harness import RawesLua
+    from simulation.rawes_lua_harness import RawesLua
 
     sim = RawesLua(mode=1)           # mode 1 = steady_noyaw
     sim.armed    = True
@@ -38,7 +38,7 @@ from lupa import lua54
 # ── File paths ────────────────────────────────────────────────────────────────
 
 _SIM_DIR     = Path(__file__).resolve().parent
-_SCRIPTS_DIR = _SIM_DIR / "scripts"
+_SCRIPTS_DIR = _SIM_DIR.parent / "scripts"
 
 _MOCK_LUA     = (_SIM_DIR     / "mock_ardupilot.lua"   ).read_text(encoding="utf-8")
 _RAWES_LUA    = (_SCRIPTS_DIR / "rawes.lua"            ).read_text(encoding="utf-8")

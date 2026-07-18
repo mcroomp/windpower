@@ -51,13 +51,13 @@ if not defined RAWES_PUMP_TIMEOUT (
 if defined RAWES_PUMP_TIMEOUT echo Test timeout: %RAWES_PUMP_TIMEOUT% s  ^(RAWES_PUMP_TIMEOUT^)
 
 echo Running Lua pumping simtest (test_lua_pumping_unified) ...
-"%PY%" simulation\run_tests.py simulation\tests\simtests -k test_lua_pumping_unified -m simtest -s
+"%PY%" simulation\run_tests.py tests\simtests -k test_lua_pumping_unified -m simtest -s
 set "RC=%ERRORLEVEL%"
 
 if not defined NOVIS (
     if exist "%CSV%" (
         echo Launching visualization: %CSV%
-        start "RAWES pumping (Lua)" cmd /k ""%PY%" simulation\viz3d\visualize_3d.py "%CSV%""
+        start "RAWES pumping (Lua)" cmd /k ""%PY%" viz3d\visualize_3d.py "%CSV%""
     ) else (
         echo Telemetry not found: %CSV%
     )

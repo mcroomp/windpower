@@ -13,10 +13,10 @@ Torque stack tests use their own initial condition (see mediator_torque.py) and
 do NOT go through this module.
 
 The JSON is written (and regenerated) only by
-    simulation/tests/simtests/test_generate_ic.py::test_create_ic
+    tests/simtests/test_generate_ic.py::test_create_ic
 Run that once after any aero-model or rotor-geometry change:
     .venv/Scripts/python.exe -m pytest \\
-        simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
+        tests/simtests/test_generate_ic.py::test_create_ic -s
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _require_json() -> Path:
         raise FileNotFoundError(
             f"steady_state_starting.json not found at {IC_JSON_PATH}.\n"
             "Run:  python -m pytest "
-            "simulation/tests/simtests/test_generate_ic.py::test_create_ic -s"
+            "tests/simtests/test_generate_ic.py::test_create_ic -s"
         )
     return IC_JSON_PATH
 

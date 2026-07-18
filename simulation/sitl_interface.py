@@ -31,7 +31,7 @@ from typing import Optional
 
 import numpy as np
 
-from servo_pwm import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
+from simulation.servo_pwm import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
 
 log = logging.getLogger(__name__)
 

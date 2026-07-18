@@ -154,10 +154,10 @@ Then run tests in three sequential stages. Always run them in order.
 
 ```bash
 # Stage 1 -- Unit tests (Windows, no Docker, ~460 tests, ~65 s)
-.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
+.venv/Scripts/python.exe -m pytest tests/unit -m "not simtest" -q
 
 # Stage 2 -- Simtests (Windows, no Docker, ~29 tests, ~5 min)
-.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
+.venv/Scripts/python.exe -m pytest tests/simtests -m simtest -q
 
 # Stage 3 -- Stack tests (Docker, ArduPilot SITL)
 bash test.sh stack -v

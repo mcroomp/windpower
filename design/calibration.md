@@ -1,16 +1,17 @@
-# calibrate.py — Hardware Calibration Tool
+# calibrate — Hardware Calibration Tool
 
-`simulation/scripts/calibrate.py` connects to the Pixhawk 6C over USB (or SiK radio)
+`calibrate` (top-level package, run as `python -m calibrate`, or via `calibrate.cmd`
+on Windows) connects to the Pixhawk 6C over USB (or SiK radio)
 and provides servo control, motor testing, ESC diagnostics, arming, and Lua script
 upload — all over MAVLink, with no arming required for most commands.
 
 ## Connection
 
 ```bash
-python simulation/scripts/calibrate.py                              # auto-detect port
-python simulation/scripts/calibrate.py --port COM7
-python simulation/scripts/calibrate.py --port COM7 --baud 57600     # SiK radio
-python simulation/scripts/calibrate.py --port COM7 <verb> [args]    # non-interactive
+python -m calibrate                              # auto-detect port
+python -m calibrate --port COM7
+python -m calibrate --port COM7 --baud 57600     # SiK radio
+python -m calibrate --port COM7 <verb> [args]    # non-interactive
 ```
 
 If `--port` is omitted, the tool scans all COM ports and connects to the first one
@@ -44,7 +45,7 @@ limiter you want here.
 ## CLI shape
 
 ```
-calibrate.py [--port P] [--baud B] [--force] <verb> [args...]
+python -m calibrate [--port P] [--baud B] [--force] <verb> [args...]
 ```
 
 Two long-running verbs (`run`, `watch`) handle anything time-bounded and always log
@@ -83,10 +84,10 @@ calibrate `RAWES_YAW_SLP` (slope) from a bench measurement.
 
 ```bash
 # Bench check: hold IC swashplate, observer active, 30 s
-python calibrate.py --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342
+python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342
 
 # Steady-flight bench, unbounded (ESC to stop)
-python calibrate.py --port COM7 run steady
+python -m calibrate --port COM7 run steady
 ```
 
 ### `watch <stream> [--duration N]`
@@ -102,9 +103,9 @@ Read-only observation; never changes vehicle state, never arms. Default duration
 | `power` | BATTERY_STATUS / SYS_STATUS | t, vbat_v, current_a, power_w |
 
 ```bash
-python calibrate.py --port COM7 watch servos --duration 15
-python calibrate.py --port COM7 watch attitude --duration 60
-python calibrate.py --port COM7 watch text                       # default 10 s
+python -m calibrate --port COM7 watch servos --duration 15
+python -m calibrate --port COM7 watch attitude --duration 60
+python -m calibrate --port COM7 watch text                       # default 10 s
 ```
 
 ---
@@ -122,8 +123,8 @@ silent rejects (writes that the FC ACKs but doesn't apply, e.g. swash-channel
 `SERVOn_MIN/MAX`).
 
 ```bash
-python calibrate.py --port COM7 set H_COL_MAX 1700
-python calibrate.py --port COM7 get RAWES_MODE
+python -m calibrate --port COM7 set H_COL_MAX 1700
+python -m calibrate --port COM7 get RAWES_MODE
 ```
 
 ### `swash`
@@ -165,7 +166,7 @@ toggles `SCR_ENABLE 1→0→1` to restart the scripting engine (no reboot needed
 
 ### `config show` / `config apply`
 Diff the live FC params against shared parm defaults:
-`simulation/tests/sitl/copter-heli.parm` + `simulation/tests/sitl/rawes_common_defaults.parm`
+`tests/sitl/copter-heli.parm` + `tests/sitl/rawes_common_defaults.parm`
 (excluding SITL-only and hardware calibration params). `show` prints an
 `[OK]`/`[DIFF]`/`[FAIL]` table without changes; `apply` writes every `[DIFF]`.
 
@@ -189,7 +190,7 @@ calibrate requests `PID_TUNING`, but the FC must still be configured to emit it.
 ### `GCS_PID_MASK` (ArduCopter)
 
 `GCS_PID_MASK` is documented in the canonical ArduPilot parameter file:
-`simulation/tests/sitl/copter-heli.parm`.
+`tests/sitl/copter-heli.parm`.
 
 Use that `.parm` file as the single source of truth for bit assignments, default, and common values.
 
@@ -217,40 +218,40 @@ Useful for offline analysis.
 
 ```bash
 # 0. Survey ports (first time)
-python calibrate.py ping
+python -m calibrate ping
 
 # 1. Diff against canonical params; apply if needed
-python calibrate.py --port COM7 config show
-python calibrate.py --port COM7 config apply   # if any [DIFF] shown
-python calibrate.py --port COM7 reboot
+python -m calibrate --port COM7 config show
+python -m calibrate --port COM7 config apply   # if any [DIFF] shown
+python -m calibrate --port COM7 reboot
 
 # 2. Verify live state
-python calibrate.py --port COM7 status
+python -m calibrate --port COM7 status
 
 # 3. Swashplate neutral + mixing check (one-shot, no arming)
-python calibrate.py --port COM7 swash neutral
-python calibrate.py --port COM7 swash 50 0 0     # all servos rise equally?
-python calibrate.py --port COM7 swash 0 0 50     # lateral differential?
+python -m calibrate --port COM7 swash neutral
+python -m calibrate --port COM7 swash 50 0 0     # all servos rise equally?
+python -m calibrate --port COM7 swash 0 0 50     # lateral differential?
 
 # 4. Limit swash travel if servos can't take full range
-python calibrate.py --port COM7 swash range 1300 1700
-python calibrate.py --port COM7 set H_CYC_MAX 1000
+python -m calibrate --port COM7 swash range 1300 1700
+python -m calibrate --port COM7 set H_CYC_MAX 1000
 
 # 5. Flap deflection measurement -- sweep each servo
-python calibrate.py --port COM7 servo sweep 1
-python calibrate.py --port COM7 servo sweep 2
+python -m calibrate --port COM7 servo sweep 1
+python -m calibrate --port COM7 servo sweep 2
 
 # 6. Motor spin check
-python calibrate.py --port COM7 motor 5 --duration 5
-python calibrate.py --port COM7 watch esc --duration 10
+python -m calibrate --port COM7 motor 5 --duration 5
+python -m calibrate --port COM7 watch esc --duration 10
 
 # 7. Upload updated Lua and verify
-python calibrate.py --port COM7 script upload simulation/scripts/rawes.lua
-python calibrate.py --port COM7 script list
+python -m calibrate --port COM7 script upload scripts/rawes.lua
+python -m calibrate --port COM7 script list
 
 # 8. Quiet armed bench check
-python calibrate.py --port COM7 run passive --duration 30 --trim tlon=0.02,col=-0.15
+python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,col=-0.15
 
 # 9. Passive hold check with current controller settings
-python calibrate.py --port COM7 run passive --duration 60 --trim tlon=0.02,thr=0.342
+python -m calibrate --port COM7 run passive --duration 60 --trim tlon=0.02,thr=0.342
 ```

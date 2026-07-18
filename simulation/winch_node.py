@@ -27,7 +27,7 @@ No hub altitude / position / attitude ever crosses the cable boundary.
 import numpy as np
 from dataclasses import dataclass
 
-from winch import GovernedWinchController
+from simulation.winch import GovernedWinchController
 
 
 class Anemometer:

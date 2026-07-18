@@ -204,7 +204,7 @@ def test_tilt_lat_positive_gives_roll_right_moment():
 
 At hover (`R_hub = I`), NED frame moments equal body-frame moments, so this directly validates the sign convention.
 
-### Regression Test: `simulation/tests/unit/test_cyclic_direction.py`
+### Regression Test: `tests/unit/test_cyclic_direction.py`
 
 Validates cyclic derivatives at saved IC (tethered equilibrium):
 

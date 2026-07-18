@@ -14,19 +14,19 @@ Tests are split across three directories:
 
 ```bash
 # Fast unit tests only (~685)
-.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
+.venv/Scripts/python.exe -m pytest tests/unit -m "not simtest" -q
 
 # Simtests only (~13)
-.venv/Scripts/python.exe -m pytest simulation/tests/simtests -m simtest -q
+.venv/Scripts/python.exe -m pytest tests/simtests -m simtest -q
 
 # Both together
-.venv/Scripts/python.exe -m pytest simulation/tests/unit simulation/tests/simtests -q
+.venv/Scripts/python.exe -m pytest tests/unit tests/simtests -q
 
 # Single test
-.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_steady_flight.py -q
+.venv/Scripts/python.exe -m pytest tests/simtests/test_steady_flight.py -q
 
 # Regenerate steady-state IC (required after any aero model change)
-.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
+.venv/Scripts/python.exe -m pytest tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
 **CRITICAL:** Unit tests run via the Windows venv (`.venv/Scripts/python.exe -m pytest ...`) — never inside Docker, which excludes `tests/unit`.
@@ -40,7 +40,7 @@ Tests are split across three directories:
 | *(none)* | Fast unit test, no physics loop |
 | `simtest` | Full time-domain physics loop — seconds of compute (auto-timeout 600 s) |
 
-The `simtest` timeout is set globally in `simulation/pytest.ini`.
+The `simtest` timeout is set globally in `pyproject.toml` (`[tool.pytest.ini_options]`).
 
 ---
 
@@ -176,7 +176,7 @@ embedded in Python). No SITL, no Docker, no real sleeping.
 |------|----------|---------|
 | `rawes_lua_harness.py` | `simulation/` root | `RawesLua` class — Python interface to rawes.lua |
 | `mock_ardupilot.lua` | `simulation/` root | ArduPilot API stub (AHRS, RC, SRV_Channels, param, gcs, arming, vehicle) |
-| `rawes_test_surface.lua` | `simulation/scripts/` | Test surface spliced into rawes.lua — exposes internals via `_rawes_fns` |
+| `rawes_test_surface.lua` | `scripts/` | Test surface spliced into rawes.lua — exposes internals via `_rawes_fns` |
 | `rawes_modes.py` | `simulation/` root | Central Python constants mirroring rawes.lua mode/substate numbers |
 
 `rawes_lua_harness.py` lives in `simulation/` (not in a test subdirectory) because it is imported
@@ -205,8 +205,8 @@ _mock          = global state table (inputs/outputs bridged to Python)
 ### RawesLua API
 
 ```python
-from rawes_lua_harness import RawesLua
-from rawes_modes import MODE_STEADY, PUMP_HOLD
+from simulation.rawes_lua_harness import RawesLua
+from simulation.rawes_modes import MODE_STEADY, PUMP_HOLD
 
 sim = RawesLua(mode=MODE_STEADY)  # RAWES_MODE = 1 (pumping schedule runs in steady)
 sim.armed        = True
@@ -266,7 +266,7 @@ sim.vec_to_list(bz)            # -> [x, y, z]
 Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lua` (Lua).
 
 ```python
-from rawes_modes import (
+from simulation.rawes_modes import (
     MODE_NONE, MODE_STEADY,
     MODE_LANDING,
     LAND_DESCEND, LAND_FINAL_DROP,
@@ -334,7 +334,7 @@ ic = load_ic()
 
 Regenerate after any aero model change:
 ```bash
-.venv/Scripts/python.exe -m pytest simulation/tests/simtests/test_generate_ic.py::test_create_ic -s
+.venv/Scripts/python.exe -m pytest tests/simtests/test_generate_ic.py::test_create_ic -s
 ```
 
 ---

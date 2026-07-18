@@ -31,14 +31,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r simulation/requirements.txt
+          python -m pip install -e . --no-deps
 
       - name: Run unit tests
         run: |
-          python -m pytest simulation/tests/unit -m "not simtest"
+          python -m pytest tests/unit -m "not simtest"
 
       - name: Run simtests
         run: |
-          python -m pytest simulation/tests/simtests -m simtest
+          python -m pytest tests/simtests -m simtest
 
   stack-matrix:
     name: Discover stack test files
@@ -54,7 +55,7 @@ jobs:
         id: discover
         shell: bash
         run: |
-          files_json=$(find simulation/tests/sitl -name 'test_*.py' | sort | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          files_json=$(find tests/sitl -name 'test_*.py' | sort | jq -R -s -c 'split("\n") | map(select(length > 0))')
           echo "files=${files_json}" >> "$GITHUB_OUTPUT"
 
   stack-build-image:

@@ -3,7 +3,7 @@ simtest_log.py — shared logging utility for simtests.
 
 Each test module creates one instance at module level:
 
-    from simtest_log import SimtestLog
+    from simulation.simtest_log import SimtestLog
     _log = SimtestLog(__file__)
 
 Then calls _log.write(lines, summary) to flush a full diagnostic table to disk
@@ -149,7 +149,7 @@ class SimtestLog:
     def dump_params_json(self) -> None:
         """Write merged ArduPilot parameter chain to log_dir/params.json."""
         try:
-            from param_defaults import load_ap_params
+            from simulation.param_defaults import load_ap_params
 
             params = load_ap_params()
             out = self.log_dir / "params.json"

@@ -6,9 +6,9 @@
 # test file, up to N in parallel.  The SITL stack is the only suite that needs
 # Docker.  Every other suite runs with plain pytest in the Windows venv:
 #
-#   .venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest"
-#   .venv/Scripts/python.exe simulation/run_tests.py simulation/tests/simtests -m simtest
-#   .venv/Scripts/python.exe -m pytest simulation/tests/hil   # needs RAWES_HIL_PORT=COMx
+#   .venv/Scripts/python.exe -m pytest tests/unit -m "not simtest"
+#   .venv/Scripts/python.exe simulation/run_tests.py tests/simtests -m simtest
+#   .venv/Scripts/python.exe -m pytest tests/hil   # needs RAWES_HIL_PORT=COMx
 #
 # Usage:
 #   bash test.sh [-n N] [pytest args...]         # run the SITL stack suite
@@ -47,33 +47,24 @@ _sync_code() {
     local _c="$1"
     echo "[INFO] Syncing code to container $_c..."
     docker exec "$_c" mkdir -p /rawes/simulation/logs
-    tar -C "$SIM_DIR" \
-        --exclude="./logs" \
-        --exclude="./__pycache__" \
+    tar -C "$REPO_DIR" \
+        --exclude="simulation/logs" \
+        --exclude="__pycache__" \
         --exclude="*/__pycache__" \
-        --exclude="./eeprom*.bin" \
-        --exclude="./tests/unit" \
-        --exclude="./tests/hil" \
-        --exclude="./.venv" \
-        -cf - . \
-    | docker exec -i "$_c" tar -xf - -C /rawes/simulation/
-    # Sync the sibling aero workspace (editable-installed on host from ../aero
-    # relative to the repo root) for local development convenience.
-    local _AERO_DIR="$REPO_DIR/../aero"
-    if [ -d "$_AERO_DIR" ]; then
-        docker exec "$_c" mkdir -p /rawes
-        tar -C "$_AERO_DIR" \
-            --exclude="./__pycache__" \
-            --exclude="*/__pycache__" \
-            --exclude="./.venv" \
-            --exclude="./tests" \
-            --exclude="./target" \
-            --exclude="./out" \
-            --exclude="./Research" \
-            --exclude="./envelope" \
-            -cf - Cargo.toml Cargo.lock pyproject.toml dynbem dynbem_rs aero \
-        | docker exec -i "$_c" tar -xf - -C /rawes/
-        docker exec "$_c" bash -lc 'python - <<"PY"
+        --exclude="simulation/eeprom*.bin" \
+        --exclude="tests/unit" \
+        --exclude="tests/hil" \
+        --exclude=".venv" \
+        --exclude="*.egg-info" \
+        -cf - pyproject.toml simulation arduloop envelope analysis viz3d scripts tests calibrate \
+    | docker exec -i "$_c" tar -xf - -C /rawes/
+    # dynbem (the Rust-backed aero core) is installed from a pinned PyPI wheel,
+    # not synced from the sibling ../aero source workspace -- that source tree
+    # is not needed at runtime (all rawes code imports only `dynbem`, never
+    # bare `aero`/`dynbem_rs`) and its pyproject.toml previously clobbered
+    # rawes's own /rawes/pyproject.toml (pytest timeout/marker config) when
+    # both were synced to the same container path.
+    docker exec "$_c" bash -lc 'python - <<"PY"
 import importlib.metadata as m
 import pathlib
 import re
@@ -131,7 +122,6 @@ if installed != required:
     print(f"[ERROR] dynbem version check failed after install (required={required!r}, found={installed!r}); aborting sync.", file=sys.stderr)
     raise SystemExit(2)
 PY'
-    fi
     echo "[INFO] Code sync complete."
 }
 
@@ -233,7 +223,7 @@ _run_stack() {
     }
     trap _parallel_cleanup EXIT INT TERM
 
-    mapfile -t _ALL_FILES < <(find "$SIM_DIR/tests/sitl" -name "test_*.py" | sort)
+    mapfile -t _ALL_FILES < <(find "$REPO_DIR/tests/sitl" -name "test_*.py" | sort)
 
     local _K_EXPR=""
     local _i _next
@@ -307,7 +297,7 @@ _run_stack() {
 
         _c="rawes-parallel-${_RUN_ID}-${_short}-${j}"
         _CONTAINERS+=("$_c")
-        _f="/rawes/simulation/${_ALL_FILES[$j]#${SIM_DIR}/}"
+        _f="/rawes/${_ALL_FILES[$j]#${REPO_DIR}/}"
         _wlog="/tmp/rawes-parallel-${_RUN_ID}-t${j}.log"
         _WORKER_LOGS+=("$_wlog")
 

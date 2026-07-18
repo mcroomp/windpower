@@ -4,7 +4,7 @@ This document defines the canonical timeline used for SITL flight analysis when
 stacks start from the shared IC flow.
 
 Scope:
-- SITL stack flight tests under `simulation/tests/sitl/flight/`.
+- SITL stack flight tests under `tests/sitl/flight/`.
 - Steady, passive, pumping, and landing variants that use IC-start fixtures.
 
 Out of scope:
@@ -132,8 +132,8 @@ When reporting first divergence, include:
 
 Canonical marker producers/consumers:
 - Producer: `simulation/mediator.py` writes `note = "kinematic_exit"` and event log entry.
-- Shared fixture path: `simulation/tests/sitl/flight/conftest.py` (`_ic_trapezoid_stack`).
-- Primary diagnosis workflow: `design/sitl_testing.md` and `simulation/analysis/diagnose_sitl.py`.
+- Shared fixture path: `tests/sitl/flight/conftest.py` (`_ic_trapezoid_stack`).
+- Primary diagnosis workflow: `design/sitl_testing.md` and `analysis/diagnose_sitl.py`.
 
 ## Validation checklist (after timeline-related changes)
 

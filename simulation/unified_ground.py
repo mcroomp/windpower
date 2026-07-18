@@ -16,7 +16,7 @@ LuaComms and GcsComms both marshal TensionCommand to the same three NV pairs:
 
 from __future__ import annotations
 
-from pumping_planner import TensionCommand
+from simulation.pumping_planner import TensionCommand
 
 _PHASE_TO_SUB: dict[str, int] = {
     "hold":       0,

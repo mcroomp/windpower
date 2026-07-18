@@ -17,5 +17,5 @@ if not exist "%PY%" (
 )
 
 pushd "%ROOT%" >nul
-start "RAWES visualization" cmd /k ""%PY%" simulation\viz3d\visualize_3d.py "%CSV%""
+start "RAWES visualization" cmd /k ""%PY%" viz3d\visualize_3d.py "%CSV%""
 popd >nul

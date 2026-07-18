@@ -95,7 +95,7 @@ Generation and acceptance criteria are documented in [../design/testing.md](../d
 ### Unit tests (Windows, no Docker)
 
 ```bash
-.venv/Scripts/python.exe -m pytest simulation/tests/unit -m "not simtest" -q
+.venv/Scripts/python.exe -m pytest tests/unit -m "not simtest" -q
 ```
 
 Key unit tests:
@@ -122,10 +122,10 @@ Standalone scripts in `analysis/`. Not part of the simulation runtime; not impor
 
 ```bash
 # List available test runs (newest first)
-.venv/Scripts/python.exe simulation/analysis/analyse_run.py
+.venv/Scripts/python.exe analysis/analyse_run.py
 # Analyse a specific test
-.venv/Scripts/python.exe simulation/analysis/analyse_run.py test_acro_armed
-.venv/Scripts/python.exe simulation/analysis/analyse_run.py test_pumping_cycle --plot
+.venv/Scripts/python.exe analysis/analyse_run.py test_acro_armed
+.venv/Scripts/python.exe analysis/analyse_run.py test_pumping_cycle --plot
 ```
 
 | Script | Purpose | Status |

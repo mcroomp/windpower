@@ -44,7 +44,7 @@ from typing import Optional
 
 import numpy as np
 
-from telemetry_columns import (
+from simulation.telemetry_columns import (
     ASYNC_MAV_COLUMNS,
     COLUMNS,
     COLUMN_GROUPS,

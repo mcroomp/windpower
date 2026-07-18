@@ -19,9 +19,9 @@ Per-test physics logs (telemetry.csv, mediator.log, etc.) go in
 simulation/logs/{test_name}/ and are written by each test fixture.
 
 Examples:
-    python simulation/run_tests.py simulation/tests/unit -m "not simtest" -q
-    python simulation/run_tests.py --filter failures simulation/tests/unit -v
-    python simulation/run_tests.py simulation/tests/unit -k test_aero
+    python simulation/run_tests.py tests/unit -m "not simtest" -q
+    python simulation/run_tests.py --filter failures tests/unit -v
+    python simulation/run_tests.py tests/unit -k test_aero
 """
 
 import hashlib
@@ -149,7 +149,7 @@ def main() -> int:
         return 2
 
     if not pytest_args:
-        pytest_args = ["simulation/tests/unit", "-m", "not simtest", "-q"]
+        pytest_args = ["tests/unit", "-m", "not simtest", "-q"]
 
     _venv  = Path(VENV_PYTHON)
     python = str(_venv.resolve()) if _venv.exists() else sys.executable

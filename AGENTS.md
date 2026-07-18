@@ -12,6 +12,33 @@ Current focus:
 - Run `bash test.sh stack -n 1 -k test_lua_flight_steady_sitl` to validate the steady flight SITL stack.
 - After steady stack passes, validate pumping and landing stack tests.
 
+## Repository Layout
+
+The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
+8 first-party top-level packages, installed in editable mode
+(`pip install -e . --no-deps`, done by `setup.cmd`/`setup.sh`). Import them as plain dotted
+packages (`from simulation.controller import ...`, `from analysis.flight_log import ...`) —
+there are no `sys.path.insert()` hacks anywhere in the codebase.
+
+| Package | Contents |
+|---|---|
+| `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `gcs.py`, ...), `requirements.txt`, `Dockerfile`, `logs/` |
+| `arduloop/` | Self-contained Python port of ArduPilot's traditional-heli attitude/rate-control stack (used by the in-process mock ArduPilot) |
+| `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
+| `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |
+| `analysis/` | Post-run diagnosis/report scripts (all read `simulation/logs/{test_name}/...`) |
+| `viz3d/` | 3D telemetry playback and torque visualizers |
+| `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`, `query_hardware.py`) |
+| `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/hil`, `tests/oneoff`, `tests/common` |
+
+Non-package top-level directories: `design/` (owner docs), `documents/`, `hardware/`,
+`presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`), `tmp/`
+(scratch/working files only).
+
+`simulation/logs/` is the single log root for every test tier (unit fixtures, simtests, and
+SITL stack runs all write there) — it did not move when the other packages were promoted to
+top-level.
+
 ## Read Order (for agents)
 
 1. `design/flight_stack.md` (system behavior and control ownership)
@@ -61,7 +88,7 @@ ast-grep run -p 'def $NAME($$$ARGS):
 # Find Lua function definitions in a script
 ast-grep run -p 'function $NAME($$$ARGS)
   $$$BODY
-end' -l lua simulation/scripts/rawes.lua
+end' -l lua scripts/rawes.lua
 ```
 
 When to still use grep/`grep_search`: matching exact substrings/regex in prose,
@@ -85,19 +112,19 @@ Use the primary doc for each topic. Other docs should link, not restate.
 |---|---|---|
 | Flight architecture, mode ownership, AP/Lua boundaries | `design/flight_stack.md` | `design/tension_collective_control_loop.md`, `design/GUIDED_CONTROL_LOOPS.md` |
 | Simulation internals (physics, sensors, controller plumbing, module map) | `design/simulation.md` | `simulation/README.md`, code docstrings |
-| SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `simulation/analysis/diagnose_sitl.py` usage text |
-| SITL IC-start timeline and event anchors | `design/sitl_flight_timeline.md` | `design/sitl_testing.md`, `simulation/tests/sitl/flight/conftest.py` |
+| SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `analysis/diagnose_sitl.py` usage text |
+| SITL IC-start timeline and event anchors | `design/sitl_flight_timeline.md` | `design/sitl_testing.md`, `tests/sitl/flight/conftest.py` |
 | Aero interfaces and conventions | `design/aero_conventions.md` | `design/aero.md` |
 | EKF gating and GPS yaw bring-up | `design/EKF_GATING.md` | `design/ekf_const_pos_mode.md` |
 | ArduPilot heli control-loop behavior | `design/GUIDED_CONTROL_LOOPS.md` | `design/flight_stack.md` |
 | Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
-| Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `simulation/pytest.ini` |
+| Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
 
 Parameter-reference ownership note:
-- Canonical place for ArduPilot parameter defaults and inline explanations is `simulation/tests/sitl/copter-heli.parm`.
-- Canonical place for RAWES_* parameter defaults and inline explanations is `simulation/tests/sitl/rawes_common_defaults.parm`.
+- Canonical place for ArduPilot parameter defaults and inline explanations is `tests/sitl/copter-heli.parm`.
+- Canonical place for RAWES_* parameter defaults and inline explanations is `tests/sitl/rawes_common_defaults.parm`.
 - If a parameter explanation changes, update the owning `.parm` file first; other docs should link to it instead of duplicating bitmasks/tables.
 
 ## Core Invariants (summary)
@@ -188,7 +215,7 @@ For signs, frame details, EKF gating, and mixer conventions, read the primary do
 Use this as the quick contract-level reference for the yaw-motor ESC path.
 Canonical long-form owner doc is `design/dshot.md`.
 
-Active hardware-default parameters (from `simulation/tests/sitl/rawes_common_defaults.parm`):
+Active hardware-default parameters (from `tests/sitl/rawes_common_defaults.parm`):
 - `SERVO9_FUNCTION=36` (Motor4 on output 9), `SERVO9_MIN=1000`, `SERVO9_MAX=2000`, `SERVO9_TRIM=1000`
 - `SERVO_BLH_MASK=256` (output 9)
 - `SERVO_BLH_BDMASK=256` (bidirectional DShot on output 9)
@@ -202,7 +229,7 @@ Active hardware-default parameters (from `simulation/tests/sitl/rawes_common_def
 
 SITL behavior:
 - These BLHeli/DShot params are intentionally excluded from SITL boot verification
-    (`simulation/tests/sitl/stack_utils.py` -> `SITL_UNSUPPORTED_PARAMS`) because
+    (`tests/sitl/stack_utils.py` -> `SITL_UNSUPPORTED_PARAMS`) because
     ArduCopter-heli SITL does not compile the BLHeli backend and drives output 9 as PWM.
 
 ## Workflow Rules
@@ -222,9 +249,9 @@ SITL behavior:
   `TelRow` fields in `telemetry_csv.py`, NVF maps in `torque_test_utils.py`, and row-write
   dicts in `mediator.py` in the same commit. Mismatch causes `AttributeError` in
   `TelRow.to_dict()` at runtime.
-- Keep `controller.py` aligned with `simulation/scripts/rawes.lua` behavior.
-- Keep `simulation/scripts/rawes_test_surface.lua` exports in sync with needed Lua test symbols.
-- `_PumpingPythonMode` in `simulation/tests/common/mock_ardupilot.py` is a mechanical translation
+- Keep `controller.py` aligned with `scripts/rawes.lua` behavior.
+- Keep `scripts/rawes_test_surface.lua` exports in sync with needed Lua test symbols.
+- `_PumpingPythonMode` in `tests/common/mock_ardupilot.py` is a mechanical translation
   of `rawes.lua do_steady_loop_inner()`. Variable names mirror Lua. When changing Lua altitude PID
   logic, update the Python in the same commit. Key state that must stay in sync:
   `_tension_for_bz` is a RAMPED value (τ=RAWES_TRP≈2 s) toward `_tension_cmd_n` — not a step.
@@ -258,8 +285,8 @@ There are three tiers, each with a different scope and runtime:
 
 | Tier | Command | Marker | Notes |
 |---|---|---|---|
-| Unit | `.venv/Scripts/python.exe -m pytest simulation/tests/unit` | (none) | Fast; no physics sim |
-| Simtest | `.venv/Scripts/python.exe -m pytest simulation/tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
+| Unit | `.venv/Scripts/python.exe -m pytest tests/unit` | (none) | Fast; no physics sim |
+| Simtest | `.venv/Scripts/python.exe -m pytest tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
 | Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
 
 SITL IC-start timeline rule (agent-critical):
@@ -269,9 +296,9 @@ SITL IC-start timeline rule (agent-critical):
 - Canonical definition and per-phase markers live in `design/sitl_flight_timeline.md`.
 
 Stack-test execution rule (agent-critical):
-- For any test under `simulation/tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
+- For any test under `tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
 - DO NOT run SITL tests with host-side pytest commands like
-    `.venv/Scripts/python.exe -m pytest simulation/tests/sitl/...`.
+    `.venv/Scripts/python.exe -m pytest tests/sitl/...`.
     Those bypass the Docker stack harness and can fail with host-path issues
     (for example `/ardupilot/scripts` not existing on Windows host).
 - For a single SITL test, use:
@@ -313,20 +340,20 @@ Long-running test commands (agent-critical, efficiency):
 
 Flight telemetry (pumping, steady, passive SITL runs):
 ```
-.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv
+.venv/Scripts/python.exe viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv
 ```
 Example — most recent pumping SITL run:
 ```
-.venv/Scripts/python.exe simulation/viz3d/visualize_3d.py simulation/logs/test_pumping_cycle_lua_sitl/telemetry.csv
+.venv/Scripts/python.exe viz3d/visualize_3d.py simulation/logs/test_pumping_cycle_lua_sitl/telemetry.csv
 ```
 
 Counter-torque motor telemetry (torque SITL runs):
 ```
-.venv/Scripts/python.exe simulation/viz3d/visualize_torque.py simulation/logs/<test_name>/telemetry.csv
+.venv/Scripts/python.exe viz3d/visualize_torque.py simulation/logs/<test_name>/telemetry.csv
 ```
 Example — yaw regulation run:
 ```
-.venv/Scripts/python.exe simulation/viz3d/visualize_torque.py simulation/logs/test_yaw_regulation_sitl/telemetry.csv
+.venv/Scripts/python.exe viz3d/visualize_torque.py simulation/logs/test_yaw_regulation_sitl/telemetry.csv
 ```
 
 Controls (both visualizers): Space = play/pause, Left/Right = step frame, +/- = speed.
@@ -334,8 +361,8 @@ Controls (both visualizers): Space = play/pause, Left/Right = step frame, +/- = 
 ## File Placement Rules
 
 - Temporary and working files must go in `tmp/` at repo root.
-- One-off diagnostic scripts belong in `simulation/tests/oneoff/`.
-- Reusable analysis tooling belongs in `simulation/analysis/`.
+- One-off diagnostic scripts belong in `tests/oneoff/`.
+- Reusable analysis tooling belongs in `analysis/`.
 
 ## Agent Editing Policy for Docs
 

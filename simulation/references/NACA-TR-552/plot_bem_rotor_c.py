@@ -29,7 +29,6 @@ import matplotlib.pyplot as plt
 
 HERE = Path(__file__).parent
 REPO = HERE.parents[2]
-sys.path.insert(0, str(REPO / "simulation"))
 
 from dynbem import rotor_definition as rd
 from dynbem import create_aero

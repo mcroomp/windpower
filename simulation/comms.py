@@ -47,8 +47,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pumping_planner import TensionCommand
-    from gcs import GCSClient
+    from simulation.pumping_planner import TensionCommand
+    from simulation.gcs import GCSClient
 
 
 # ---------------------------------------------------------------------------

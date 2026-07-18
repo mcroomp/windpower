@@ -64,7 +64,7 @@ def plot_flight_report(
     telem: dict = {}
     if telemetry_path is not None and Path(telemetry_path).exists():
         try:
-            from telemetry_csv import read_csv as _read_csv
+            from simulation.telemetry_csv import read_csv as _read_csv
             rows = _read_csv(telemetry_path)
             if rows:
                 t_end_telem      = rows[-1].t_sim
