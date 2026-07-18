@@ -41,7 +41,7 @@ _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOG_DIR = _SIM_DIR / "logs"
 _IC_PATH = _SIM_DIR / "steady_state_starting.json"
 
-from simulation.ekf_flags import EKF_FLAGS, has_warn, decode_flags  # noqa: E402
+from groundstation.ekf_flags import EKF_FLAGS, has_warn, decode_flags  # noqa: E402
 
 from analysis.flight_log import FlightLog  # noqa: E402
 

@@ -15,14 +15,15 @@ Current focus:
 ## Repository Layout
 
 The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
-8 first-party top-level packages, installed in editable mode
+9 first-party top-level packages, installed in editable mode
 (`pip install -e . --no-deps`, done by `setup.cmd`/`setup.sh`). Import them as plain dotted
 packages (`from simulation.controller import ...`, `from analysis.flight_log import ...`) —
 there are no `sys.path.insert()` hacks anywhere in the codebase.
 
 | Package | Contents |
 |---|---|
-| `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `gcs.py`, ...), `requirements.txt`, `Dockerfile`, `logs/` |
+| `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `winch.py`, `winch_node.py`, `comms.py` (`VirtualComms`), ...), `requirements.txt`, `Dockerfile`, `logs/` |
+| `groundstation/` | Genuinely-production ground-station/flight-planner code, split out from `simulation/`: `pumping_planner.py`, `landing_planner.py`, `gcs.py` (`RawesGCS` MAVLink client), `rawes_modes.py` (protocol constants), `mavlink_log.py`, `ekf_flags.py`, `winch_protocol.py` (`WinchCommand`/`WinchTelemetry` wire format), `unified_ground.py` (`GcsComms` production comms adapter). Distinction: code that will genuinely run on the real ground station/flight planner lives here; code that stands in for not-yet-built hardware (e.g. the winch-node control loop in `simulation/winch.py`) stays in `simulation/` |
 | `arduloop/` | Self-contained Python port of ArduPilot's traditional-heli attitude/rate-control stack (used by the in-process mock ArduPilot) |
 | `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
 | `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |

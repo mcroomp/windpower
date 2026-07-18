@@ -1,10 +1,11 @@
 """
-comms.py — MAVLink communication boundary between ground controller and AP.
+comms.py — MAVLink communication boundary between ground controller and AP
+(simtest-only implementation).
 
-Two implementations share the same call pattern:
-
-    VirtualComms     — simtest: latency queue + optional Gaussian noise
-    MavlinkComms     — SITL/hardware: real MAVLink via gcs.py
+VirtualComms simulates the comms link for Python simtests (latency queue +
+optional Gaussian noise).  The real SITL/hardware adapter is
+groundstation.unified_ground.GcsComms, which marshals commands to NAMED_VALUE_FLOAT
+via MAVLink (see groundstation/unified_ground.py for the shared NvComms protocol).
 
 Simtest loop (VirtualComms):
 
@@ -19,16 +20,6 @@ Simtest loop (VirtualComms):
     ap_cmd  = comms.poll_ap_command(t_sim)
     if ap_cmd:
         ap.receive_command(ap_cmd, DT_PLANNER)
-
-Stack-test loop (MavlinkComms):
-
-    comms = MavlinkComms(gcs)
-    # 10 Hz ground step:
-    tel     = comms.receive_telemetry()            # non-blocking poll LOCAL_POSITION_NED
-    cmd     = ground.step(t_sim, tension, rest_length,
-                          hub_alt_m=tel.hub_alt_m if tel else prev_alt)
-    comms.send_command(t_sim, cmd)                 # RAWES_TEN + RAWES_ALT + RAWES_SUB
-    # No poll_ap_command — ArduPilot/Lua handles AP side directly.
 
 Latency model (VirtualComms):
     Each injected telemetry sample is tagged with t_sim.  receive_telemetry(t_now)
@@ -47,8 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from simulation.pumping_planner import TensionCommand
-    from simulation.gcs import GCSClient
+    from groundstation.pumping_planner import TensionCommand
 
 
 # ---------------------------------------------------------------------------
@@ -123,55 +113,3 @@ class VirtualComms:
             return cmd
         return None
 
-
-# ---------------------------------------------------------------------------
-# MavlinkComms — SITL / hardware implementation
-# ---------------------------------------------------------------------------
-
-# Phase string → RAWES_SUB integer (matches rawes_modes.py constants)
-_PHASE_TO_SUB: dict[str, int] = {
-    "hold":       0,   # PUMP_HOLD
-    "reel-out":   1,   # PUMP_REEL_OUT
-    "transition": 2,   # PUMP_TRANSITION
-    "reel-in":    3,   # PUMP_REEL_IN
-}
-
-
-class MavlinkComms:
-    """
-    Real MAVLink comms for SITL stack tests and hardware.
-
-    send_command() sends RAWES_TEN + RAWES_ALT + RAWES_SUB via gcs.py.
-    receive_telemetry() does a non-blocking poll of LOCAL_POSITION_NED.
-
-    tension_target_n carries the target/feed-forward tension used by Lua
-    gravity compensation and by the local MockArdupilot Python equivalent.
-
-    Parameters
-    ----------
-    gcs : GCSClient  open MAVLink connection (simulation/gcs.py)
-    """
-
-    def __init__(self, gcs: "GCSClient") -> None:
-        self._gcs = gcs
-
-    def receive_telemetry(self) -> HubTelemetry | None:
-        """
-        Non-blocking poll.  Returns latest LOCAL_POSITION_NED as HubTelemetry,
-        or None if no message is buffered.
-        """
-        pos = self._gcs.recv_local_position_latest()
-        if pos is None:
-            return None
-        _n, _e, ned_z = pos
-        return HubTelemetry(hub_alt_m=float(-ned_z))
-
-    def send_command(self, _t_sim: float, cmd: "TensionCommand") -> None:
-        """
-        Send target tension, altitude target, and phase substate to the AP.
-        t_sim is accepted for API symmetry with VirtualComms but is not used.
-        """
-        sub = _PHASE_TO_SUB.get(cmd.phase, 0)
-        self._gcs.send_named_float("RAWES_TEN", cmd.tension_target_n)
-        self._gcs.send_named_float("RAWES_ALT", cmd.alt_m)
-        self._gcs.send_named_float("RAWES_SUB", float(sub))

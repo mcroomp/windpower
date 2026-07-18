@@ -7,7 +7,7 @@ import pytest
 
 
 from simulation.physics_core import HubObservation
-from simulation.pumping_planner import TensionCommand
+from groundstation.pumping_planner import TensionCommand
 from tests.common.mock_ardupilot import MockArdupilot
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

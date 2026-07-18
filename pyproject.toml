@@ -19,6 +19,8 @@ where = ["."]
 include = [
     "simulation",
     "simulation.*",
+    "groundstation",
+    "groundstation.*",
     "arduloop",
     "arduloop.*",
     "calibrate",

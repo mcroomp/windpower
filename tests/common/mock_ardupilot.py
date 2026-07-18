@@ -21,9 +21,9 @@ from simulation.controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
                         apply_crosswind_rate_to_body_rates,
                         slerp_body_z, update_plane_azimuth,
                         YawTrimObserver)
-from simulation.landing_planner import LandingCommand
+from groundstation.landing_planner import LandingCommand
 from simulation.physics_core import HubObservation
-from simulation.pumping_planner import TensionCommand
+from groundstation.pumping_planner import TensionCommand
 from simulation.param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
 from simulation.telemetry_csv import TelRow, write_csv
 

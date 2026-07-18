@@ -14,6 +14,11 @@ boundary:
 
   winch_node.exchange(WinchCommand) -> WinchTelemetry
 
+WinchCommand/WinchTelemetry are the genuine wire protocol and live in
+groundstation.winch_protocol (importable by both the real ground station and
+this simulated node). GovernedWinchNode itself stands in for winch-node
+firmware that does not exist yet, so it stays here in simulation/.
+
 The mediator (physics side) additionally calls:
 
   winch_node.update_sensors(tension, wind)     (feed physics outputs in)
@@ -25,9 +30,9 @@ No hub altitude / position / attitude ever crosses the cable boundary.
 """
 
 import numpy as np
-from dataclasses import dataclass
 
 from simulation.winch import GovernedWinchController
+from groundstation.winch_protocol import WinchCommand, WinchTelemetry
 
 
 class Anemometer:
@@ -79,34 +84,6 @@ class Anemometer:
 # a WinchTelemetry, whose fields are all quantities the drum/anchor hardware
 # physically senses (load cell, drum encoder, co-located anemometer).  Hub
 # altitude / position / attitude never cross this boundary.
-
-
-@dataclass(frozen=True)
-class WinchCommand:
-    """Down-link (planner -> winch node): targets only.
-
-    cruise_v        -- commanded cruise reel velocity [m/s], +out / -in / 0=hold
-    tension_target  -- governor tension setpoint [N]
-    """
-    cruise_v:       float
-    tension_target: float
-
-
-@dataclass(frozen=True)
-class WinchTelemetry:
-    """Up-link (winch node -> planner): winch-measurable quantities only.
-
-    tension_n     -- load cell [N]
-    rest_length   -- drum encoder: tether rest length [m]
-    speed_ms      -- reel speed [m/s], signed (+out)
-    net_energy_j  -- drum mechanical energy, integral of T*v [J]
-    wind_ned      -- co-located anemometer reading [NED, m/s]
-    """
-    tension_n:    float
-    rest_length:  float
-    speed_ms:     float
-    net_energy_j: float
-    wind_ned:     tuple
 
 
 class GovernedWinchNode:

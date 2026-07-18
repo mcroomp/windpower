@@ -558,7 +558,7 @@ def _run_elastic_free_flight_with_python_ap(
     """
     from types import SimpleNamespace
     from arduloop import HeliParams
-    from simulation.pumping_planner import TensionCommand
+    from groundstation.pumping_planner import TensionCommand
     from tests.common.mock_ardupilot import MockArdupilot
     from tests.simtests.simtest_ic import load_ic
     from tests.simtests.simtest_runner import PhysicsRunner

@@ -363,7 +363,7 @@ PumpingGroundController (10 Hz)  ──TensionCommand──▶  _PumpingPythonMo
 - **`pumping_planner.PumpingGroundController`** (10 Hz) emits `TensionCommand(tension_target_n, alt_m, phase)` — the **commanded** tension and target altitude only. The ground closes the tension loop itself on the winch's load cell; the AP never receives the measurement. `alt_m` is smoothly ramped at phase boundaries using `hub_alt_m` telemetry received from the kite at 10 Hz: up over `t_transition` seconds entering "transition", down at the start of each next "reel_out". Sudden `alt_m` jumps are ground-controller bugs — detected by `ap_unreachable_alt`.
 - **`_PumpingPythonMode`** (AP side, in `mock_ardupilot.py`) uses the commanded tension (`cmd.tension_target_n`) as a feedforward into the orientation force balance (`bz_altitude_hold`) and holds altitude with an altitude PID on collective — the same law as steady mode. There is **no TensionPI on the AP**. It validates each received command via `BadEventLog`: `ap_impossible_alt` (alt_m > tether_length), `ap_unreachable_alt` (elevation gap > `slew_rate × FEASIBILITY_WINDOW_S = 1 s`). **Blame rule:** `ap_*` events → ground planner sent unreachable commands; slack/tension_spike without `ap_*` → AP tracking failure.
 - **`winch.WinchController`** (400 Hz) is tension-controlled: cruise speed proportional to tension error, trapezoidal accel/decel profile, virtual battery accumulates energy_out_j / energy_in_j / net_energy_j.
-- **`unified_ground`** provides pluggable comms adapters that marshal `TensionCommand` to the AP: `DirectComms` (Python AP), `LuaComms` (Lua simtest), `GcsComms` (SITL stack).
+- **`unified_ground`** provides pluggable comms adapters that marshal `TensionCommand` to the AP: `DirectComms` (Python AP, `simulation/unified_ground.py`), `LuaComms` (Lua simtest, `simulation/unified_ground.py`), `GcsComms` (SITL stack, `groundstation/unified_ground.py` — the production adapter).
 
 ### Critical design invariants
 
@@ -446,10 +446,14 @@ Additional physics limitations in the current simulation:
 
 ## Module Map
 
-Repo layout note: `simulation/` is one of 8 top-level packages (see `AGENTS.md` ->
-Repository Layout). `arduloop/`, `analysis/`, `viz3d/`, `scripts/`, and `tests/` are
-siblings of `simulation/` at the repo root, not nested inside it — shown here as
-separate trees for clarity.
+Repo layout note: `simulation/` is one of 9 top-level packages (see `AGENTS.md` ->
+Repository Layout). `arduloop/`, `groundstation/`, `analysis/`, `viz3d/`, `scripts/`,
+and `tests/` are siblings of `simulation/` at the repo root, not nested inside it —
+shown here as separate trees for clarity. Genuinely production ground-station/
+flight-planner code (`pumping_planner.py`, `landing_planner.py`, `gcs.py`,
+`rawes_modes.py`, `mavlink_log.py`, `ekf_flags.py`, the `WinchCommand`/
+`WinchTelemetry` wire protocol, and `GcsComms`) lives in `groundstation/`, not
+`simulation/` — see the `groundstation/` tree below.
 
 ```
 simulation/
@@ -484,21 +488,17 @@ simulation/
 ├── torque_model.py      Hub yaw model (kinematic + motor lag) — HubParams (rpm_scale, gear_ratio,
 │                        motor_tau), HubState (psi, psi_dot, omega_motor), step(), equilibrium_throttle()
 ├── kinematic.py         KinematicStartup — hub trajectory during EKF init phase
-├── winch_node.py        WinchNode + Anemometer (physics/planner protocol boundary)
-├── gcs.py               MAVLink GCS client (arm, mode, params, named-float commands).
-│                        recv_local_position_latest() — non-blocking poll of LOCAL_POSITION_NED.
-├── comms.py             MAVLink comms boundary between ground and AP.
+├── winch_node.py        GovernedWinchNode + Anemometer — simulated winch-node hardware stand-in.
+│                        WinchCommand/WinchTelemetry wire protocol lives in
+│                        groundstation/winch_protocol.py (imported here).
+├── comms.py             MAVLink comms boundary between ground and AP (simtest-only).
 │                        VirtualComms — simtest: latency queue + optional Gaussian noise on hub_alt_m;
 │                        inject(t, alt) at 400 Hz, receive_telemetry(t)/send_command(t,cmd)/
-│                        poll_ap_command(t) at 10 Hz.
-│                        MavlinkComms — SITL/hardware: receive_telemetry() polls LOCAL_POSITION_NED;
-│                        send_command() sends RAWES_TEN + RAWES_ALT + RAWES_SUB via gcs.py.
-├── unified_ground.py    TensionCommand comms adapters: DirectComms (Python AP), LuaComms (Lua
-│                        simtest), GcsComms (SITL stack). Marshal TensionCommand -> NV float pairs.
-├── pumping_planner.py   TensionCommand dataclass + PumpingGroundController (10 Hz phase schedule).
-│                        step(t_sim, tension_measured_n, rest_length, hub_alt_m) → TensionCommand.
-│                        alt_m is smoothly ramped at every phase boundary using hub_alt_m telemetry.
-│                        winch_target_length / winch_target_tension properties for WinchController.
+│                        poll_ap_command(t) at 10 Hz. The production adapter is
+│                        groundstation.unified_ground.GcsComms (SITL/hardware).
+├── unified_ground.py    Test-only TensionCommand comms adapters: DirectComms (Python AP), LuaComms
+│                        (Lua simtest). NvComms base + the production GcsComms adapter live in
+│                        groundstation/unified_ground.py.
 ├── ap_controller.py     TensionApController (400 Hz AP side): TensionPI collective + rate-limited
 │                        elevation hold. receive_command(cmd, dt) validates alt_m against cached
 │                        pos_ned (updated each step): ap_impossible_alt (alt > tether_length),
@@ -519,6 +519,22 @@ simulation/
 ├── rawes_lua_harness.py RawesLua class — runs rawes.lua in-process via lupa; shared by unit
 │                        tests and simtests. Loads mock_ardupilot.lua then rawes.lua. Python writes
 │                        sensor inputs to `_mock` and calls `_update_fn()` each tick.
+└── (rawes_modes.py, gcs.py, mavlink_log.py, ekf_flags.py, pumping_planner.py,
+    landing_planner.py moved to groundstation/ — see below)
+
+groundstation/
+├── pumping_planner.py   TensionCommand dataclass + PumpingGroundController (10 Hz phase schedule).
+│                        step(t_sim, tension_measured_n, rest_length, hub_alt_m) → TensionCommand.
+│                        alt_m is smoothly ramped at every phase boundary using hub_alt_m telemetry.
+│                        winch_target_length / winch_target_tension properties for WinchController.
+├── landing_planner.py   LandingCommand dataclass + LandingGroundController (10 Hz phase schedule).
+├── winch_protocol.py    WinchCommand/WinchTelemetry — ground <-> winch-node wire protocol dataclasses.
+├── unified_ground.py    NvComms base + _cmd_to_nv marshalling + GcsComms — production TensionCommand
+│                        -> NAMED_VALUE_FLOAT adapter (SITL stack / real hardware).
+├── gcs.py               MAVLink GCS client (arm, mode, params, named-float commands).
+│                        recv_local_position_latest() — non-blocking poll of LOCAL_POSITION_NED.
+├── mavlink_log.py       MavlinkLogWriter (live NDJSON message log) + iter_messages() (log reader).
+├── ekf_flags.py         EKF_STATUS_REPORT flag decode helpers used by analysis/ tooling.
 └── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.
 
 scripts/

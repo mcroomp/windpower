@@ -19,8 +19,8 @@ import simulation as _simulation_pkg
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
 from simulation.telemetry_csv import read_csv
-from simulation.mavlink_log import iter_messages as _iter_mavlink  # noqa: F401 (re-exported for callers)
-from simulation.ekf_flags import (
+from groundstation.mavlink_log import iter_messages as _iter_mavlink  # noqa: F401 (re-exported for callers)
+from groundstation.ekf_flags import (
     MAV_MODE_ARMED, ARDU_MODES,
     decode_flags, flag_diff, has_warn,
 )

@@ -44,8 +44,8 @@ from typing import Any, Iterable, Iterator
 import simulation as _simulation_pkg
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
-from simulation.mavlink_log import iter_messages  # noqa: E402
-from simulation.ekf_flags import MAV_MODE_ARMED, ARDU_MODES, MAV_STATE  # noqa: E402
+from groundstation.mavlink_log import iter_messages  # noqa: E402
+from groundstation.ekf_flags import MAV_MODE_ARMED, ARDU_MODES, MAV_STATE  # noqa: E402
 
 MAV_SEVERITY = {
     0: "EMERGENCY", 1: "ALERT", 2: "CRITICAL", 3: "ERROR",
