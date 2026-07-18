@@ -42,8 +42,8 @@ from tests.sitl.stack_infra import (
     assert_no_mediator_criticals, assert_procs_alive,
 )
 from simulation.telemetry_csv import read_csv
-from simulation.pumping_planner import PumpingGroundController
-from simulation.unified_ground import _cmd_to_nv
+from groundstation.pumping_planner import PumpingGroundController
+from groundstation.unified_ground import _cmd_to_nv
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _ROTOR = load_default_rotor()

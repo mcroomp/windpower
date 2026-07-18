@@ -8,21 +8,18 @@ Detailed design and implementation content lives in `design/*.md` and module-lev
 RAWES is a tethered, 4-blade autorotating rotor kite (no drive motor on the rotor).
 Wind drives autorotation; cyclic steers; tether tension during reel-out drives a ground generator.
 
-Current focus:
-- Run `bash test.sh stack -n 1 -k test_lua_flight_steady_sitl` to validate the steady flight SITL stack.
-- After steady stack passes, validate pumping and landing stack tests.
-
 ## Repository Layout
 
 The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
-8 first-party top-level packages, installed in editable mode
+9 first-party top-level packages, installed in editable mode
 (`pip install -e . --no-deps`, done by `setup.cmd`/`setup.sh`). Import them as plain dotted
 packages (`from simulation.controller import ...`, `from analysis.flight_log import ...`) —
 there are no `sys.path.insert()` hacks anywhere in the codebase.
 
 | Package | Contents |
 |---|---|
-| `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `gcs.py`, ...), `requirements.txt`, `Dockerfile`, `logs/` |
+| `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `winch.py`, `winch_node.py`, `comms.py` (`VirtualComms`), ...), `requirements.txt`, `Dockerfile`, `logs/` |
+| `groundstation/` | Genuinely-production ground-station/flight-planner code, split out from `simulation/`: `pumping_planner.py`, `landing_planner.py`, `gcs.py` (`RawesGCS` MAVLink client), `rawes_modes.py` (protocol constants), `mavlink_log.py`, `ekf_flags.py`, `winch_protocol.py` (`WinchCommand`/`WinchTelemetry` wire format), `unified_ground.py` (`GcsComms` production comms adapter). Distinction: code that will genuinely run on the real ground station/flight planner lives here; code that stands in for not-yet-built hardware (e.g. the winch-node control loop in `simulation/winch.py`) stays in `simulation/` |
 | `arduloop/` | Self-contained Python port of ArduPilot's traditional-heli attitude/rate-control stack (used by the in-process mock ArduPilot) |
 | `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
 | `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |
@@ -143,94 +140,25 @@ Parameter-reference ownership note:
   Do not introduce `pitch, roll` ordering unless an external interface
   explicitly requires it; if so, add an inline comment at that boundary.
 
-## RAWES_* Parameter Mapping
+## RAWES_* Parameter Reference
 
-All Lua configuration uses RAWES_* script-generated params (param:add_table key 77, prefix "RAWES_").
-Canonical parameter list (mirrors `param:add_param` calls in rawes.lua):
-
-| Param         | Default | Purpose                                             |
-|---|---|---|
-| RAWES_MODE    | 0       | Mode selector (0=none,1=steady,3=passive,4=landing) |
-| RAWES_YAW_SLP | 0       | Yaw motor slope [RPM/µs], 0=bench default           |
-| RAWES_KP_ALT  | 0.0263  | Altitude P gain [thrust/m]                          |
-| RAWES_KI_ALT  | 0.0026  | Altitude I gain [thrust/m·s]                        |
-| RAWES_KD_VZ   | 0.105   | Vertical-speed damping [thrust/(m/s)]               |
-| RAWES_KP_EL   | 2.5     | In-plane (elevation) position rate-P [rad/s per m]  |
-| RAWES_KP_AZ   | 0.5     | Crosswind (azimuth) position rate-P [rad/s per m]   |
-| RAWES_KD_EL   | 0.0     | In-plane position rate-D [rad/s per (m/s)]          |
-| RAWES_CWMAX   | 0.6     | Position rate saturation [rad/s]                    |
-| RAWES_SLW     | 0.40    | Elevation/body_z slew rate limit [rad/s]            |
-| RAWES_TEL_HZ  | 2.0     | Diagnostic NVF telemetry emission rate [Hz]         |
-| RAWES_YFF_MAX | 0.7     | Yaw trim clamp upper bound [throttle]               |
-| RAWES_YFF_TAU | 0.3     | Yaw trim low-pass time constant [s]                 |
-| RAWES_TRP     | 2.0     | Tension feedforward ramp time constant [s]          |
-
-Ground→Lua NAMED_VALUE_FLOAT interface (not AP params):
-
-| NVF key    | Purpose                                                          |
-|---|---|
-| RAWES_ALT  | Target altitude [m] above anchor                                 |
-| RAWES_TEN  | Target/feed-forward tether tension [N]                           |
-| RAWES_SUB  | Substate (0=hold,1=reel_out,2=transition,3=reel_in,4=transition_back) |
-| RAWES_ARM  | Optional disarm timer [ms until forced disarm]                   |
-| RAWES_THR  | IC thrust [0..1] (passive seed; committed atomically with RIC/PIC) |
-| RAWES_RIC  | IC roll [rad]                                                    |
-| RAWES_PIC  | IC pitch [rad]                                                   |
-| RAWES_YIC  | Optional fixed yaw target [rad] for MODE_PASSIVE                 |
-
-Ground→Lua NAMED_VALUE_INT interface (one-shot anchor location, sent once post-arm):
-
-| NVI key    | Purpose                                                          |
-|---|---|
-| RAWES_LAT  | Anchor latitude  [deg * 1e7]                                     |
-| RAWES_LON  | Anchor longitude [deg * 1e7]                                     |
-| RAWES_AAL  | Anchor altitude  [cm, AMSL]                                      |
-
-Sent as NAMED_VALUE_INT (not FLOAT) for ArduPilot's Location int32 precision
-(~1 cm) end-to-end. Lua resolves this to an EKF-local NED anchor offset on
-board via `Location:get_vector_from_origin_NEU_m()` (see `_try_resolve_anchor()`
-in `rawes.lua`); MODE_STEADY does not initialise altitude hold until all three
-ints have arrived AND that resolution has succeeded. Python helper:
-`rawes_modes.send_anchor_ned(sim_or_gcs, dn_m, de_m, dd_m)`.
-
-Set RAWES_MODE per-test; other RAWES_* are in rawes_common_defaults.parm.
-
-RAWES mode -> vehicle control API (current `rawes.lua` behavior):
-
-
-| RAWES_MODE | Mode | Vehicle API used |
-|---|---|---|
-| 0 | none | none |
-| 3 | passive | `vehicle:set_target_rate_and_throttle` for thrust-only seed (`RAWES_THR` without `RAWES_RIC/PIC`); `vehicle:set_target_angle_and_rate_and_throttle` once full IC seed is present |
-| 1 | steady | `vehicle:set_target_angle_and_rate_and_throttle` |
-
-Steady command basis (`RAWES_MODE=1`):
-- roll/pitch: derived from `bz_altitude_hold(rel, el_rad, tension_n, az_ref)` and converted by `bz_ned_to_roll_pitch(...)`.
-- throttle: altitude PID around IC thrust (`RAWES_THR` as trim/seed), with vertical-speed damping and thrust slew limiting before sending to ArduPilot.
+The full RAWES_* script-generated parameter table, the NAMED_VALUE_FLOAT/INT
+wire interface, and the RAWES_MODE → vehicle-API mapping are owned by
+`design/flight_stack.md` (see its "RAWES_\* script-generated parameters" table
+and §4.2b–4.5) — do not duplicate those tables here. Live defaults for
+non-RAWES_* AP params are in `tests/sitl/rawes_common_defaults.parm`; set
+`RAWES_MODE` per-test.
 
 For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
 
 ## DShot Setup (Agent Critical)
 
-Use this as the quick contract-level reference for the yaw-motor ESC path.
-Canonical long-form owner doc is `design/dshot.md`.
-
-Active hardware-default parameters (from `tests/sitl/rawes_common_defaults.parm`):
-- `SERVO9_FUNCTION=36` (Motor4 on output 9), `SERVO9_MIN=1000`, `SERVO9_MAX=2000`, `SERVO9_TRIM=1000`
-- `SERVO_BLH_MASK=256` (output 9)
-- `SERVO_BLH_BDMASK=256` (bidirectional DShot on output 9)
-- `SERVO_BLH_AUTO=0` (manual masks)
-- `SERVO_BLH_OTYPE=5` (DShot300)
-- `SERVO_BLH_POLES=22`
-- `SERVO_DSHOT_ESC=1` (AM32 telemetry decode)
-- `SERVO_DSHOT_RATE=0`
-- `BRD_IO_DSHOT=0` (FMU output path)
-- `RPM1_TYPE=5`, `RPM1_ESC_MASK=256` (ESC telemetry routed from output 9)
-
-SITL behavior:
-- These BLHeli/DShot params are intentionally excluded from SITL boot verification
-    (`tests/sitl/stack_utils.py` -> `SITL_UNSUPPORTED_PARAMS`) because
-    ArduCopter-heli SITL does not compile the BLHeli backend and drives output 9 as PWM.
+Canonical owner doc: `design/dshot.md` (full parameter tables, wiring, RPM
+conversion). One SITL-specific gotcha not covered there: BLHeli/DShot params
+(`SERVO9_*`, `SERVO_BLH_*`, `SERVO_DSHOT_*`, `RPM1_*`) are intentionally
+excluded from SITL boot verification (`tests/sitl/stack_utils.py` ->
+`SITL_UNSUPPORTED_PARAMS`) because ArduCopter-heli SITL does not compile the
+BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`.
 
 ## Workflow Rules
 
@@ -261,23 +189,11 @@ SITL behavior:
   exist only to work around circular imports are a sign of bad architecture — fix the circular
   dependency by refactoring (e.g. extract a shared module, invert the dependency) rather than
   papering over it with a local import.
-- `/tmp` is NOT one shared filesystem on this box — Git Bash (mingw/MSYS2, the default terminal)
-  and WSL2 (used for `docker`/`test.sh stack`) each have their own separate `/tmp`:
-  - A bare `> /tmp/foo.log` redirection in a Git Bash command writes to Git Bash's own `/tmp`
-    (really `C:\Users\<user>\AppData\Local\Temp\foo.log` — check with `cygpath -w /tmp/foo.log`).
-  - A command run via `wsl -e bash -lc "... > /tmp/foo.log"` writes inside WSL's `/tmp`
-    (`\\wsl$\...\tmp\foo.log` from Windows, or `/tmp/foo.log` from *inside* another `wsl -e` call)
-    — NOT reachable from a later plain Git Bash `cat /tmp/foo.log`.
-  - If the redirection is written OUTSIDE the `wsl -e bash -lc "..."` quoted string (e.g.
-    `wsl -e bash -lc "cmd" > /tmp/foo.log`), it's the OUTER (Git Bash) shell that owns the
-    redirect, not WSL — easy to mix up.
-  - A native Windows executable (e.g. `.venv/Scripts/python.exe`) invoked from Git Bash does NOT
-    understand `/tmp/...` paths passed as arguments (it's a Windows process, not MSYS2-aware) —
-    convert with `cygpath -w /tmp/foo.log` first, or it'll fail with `FileNotFoundError` even
-    though `ls /tmp/foo.log` (from Git Bash) shows the file existing.
-  - Rule of thumb: know which shell environment (Git Bash vs WSL) is actually creating/reading
-    a `/tmp` path before assuming a file exists or is missing; don't conclude "no output was
-    produced" just because a naive `cat`/`find` from the wrong shell doesn't see it.
+- `/tmp` is NOT one shared filesystem on this box — Git Bash and WSL2 (used for
+  `docker`/`test.sh stack`) each have their own separate `/tmp`, and native Windows
+  executables invoked from Git Bash can't resolve `/tmp/...` paths at all. Full
+  gotcha writeup (redirection ownership, `cygpath -w` conversion, diagnosis tips)
+  is in `design/sitl_testing.md`.
 
 ## Test Entry Points
 
@@ -314,27 +230,11 @@ the tail of each failure, including the assertion error). The full output is als
 saved — read it directly if needed:
     `Get-Content simulation/logs/<test_name>/worker.log | Select-String "ERROR|CRITICAL|Traceback|assert|FAIL" | Select-Object -First 30`
 
-Long-running test commands (agent-critical, efficiency):
-- Unit and simtest runs can take 1-5+ minutes. Do NOT pipe them through `| tail -N` when
-  running in a mode that may background the command — a slow/idle command piped through
-  `tail` produces no output until the pipeline's stdout closes, so a background poll via
-  `get_terminal_output` just returns the same stale snapshot every time (wastes calls,
-  looks like a hang). Run the bare command first; only pipe through `tail`/`grep` after
-  confirming the run is fast enough to complete synchronously, or redirect to a file
-  (`... > /tmp/out.log 2>&1`) and read/grep the file instead.
-- Once a command has been moved to background, do not repeatedly call `get_terminal_output`
-  in a tight loop — it will not return new content until the process actually produces more
-  output or exits. Wait for the automatic completion notification instead of polling.
-- Do NOT call `get_terminal_output` immediately after a command moves to background "just to
-  check progress". It returns a byte-limited tail of the WHOLE terminal scrollback, not just
-  the new command's output — if the new command has only printed a little so far, the tail
-  can still be dominated by leftover output from earlier unrelated commands in the same
-  terminal, which looks like stale/wrong output but is really just "not enough new output yet
-  to push the old stuff out of the tail window". End the turn and wait for the automatic
-  completion notification instead; only poll if genuinely unsure whether the process is hung
-  after a long silence.
-- Prefer `bash test.sh stack -n 1 -k <test_name>` (single test) while iterating; only widen
-  to `-n 4`/full suite once the targeted test is confirmed passing, to keep turnaround short.
+Long-running test commands (agent-critical, efficiency): unit/simtest/stack runs can
+take 1-5+ minutes. Do not pipe a possibly-backgrounded command through `tail`/`grep`,
+and do not poll `get_terminal_output` in a tight loop — full guidance (why piping
+hides output, why polling wastes calls, and the preferred iterate-in-isolation
+pattern) is in `design/sitl_testing.md`.
 
 ## Visualization
 

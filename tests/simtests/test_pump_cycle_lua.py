@@ -31,14 +31,15 @@ pytestmark = [pytest.mark.simtest,
               pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
 
 from simulation.winch import GovernedWinchController
-from simulation.winch_node import GovernedWinchNode, WinchCommand, Anemometer
+from simulation.winch_node import GovernedWinchNode, Anemometer
+from groundstation.winch_protocol import WinchCommand
 from tests.simtests.simtest_ic import load_ic
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from simulation.pumping_planner import PumpingGroundController
+from groundstation.pumping_planner import PumpingGroundController
 from simulation.rawes_lua_harness import RawesLua
-from simulation.rawes_modes import MODE_STEADY, send_anchor_ned
+from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
 from simulation.unified_ground import LuaComms
 from tests.simtests._rotor_helpers import load_default_rotor
 
@@ -284,8 +285,8 @@ def test_lua_pumping_constants():
     sim = RawesLua(mode=MODE_STEADY)
     f   = sim.fns
     # NV names are ≤ 10 chars (MAVLink hard limit)
-    from simulation.unified_ground import _cmd_to_nv
-    from simulation.pumping_planner import TensionCommand
+    from groundstation.unified_ground import _cmd_to_nv
+    from groundstation.pumping_planner import TensionCommand
     dummy = TensionCommand(
         tension_target_n=300.0,
         alt_m=38.0,

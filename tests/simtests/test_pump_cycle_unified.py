@@ -31,7 +31,7 @@ from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from simulation.pumping_planner import TensionCommand
+from groundstation.pumping_planner import TensionCommand
 from simulation.comms import VirtualComms
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 from simulation.param_defaults import thrust_to_coll_rad

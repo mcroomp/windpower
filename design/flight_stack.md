@@ -199,7 +199,7 @@ So the controller is a **single proportional gain on tension error**, followed b
 
 ### 3.3 TensionCommand Protocol
 
-Ground→AP command packet (10 Hz), carried by `VirtualComms` (simtest) or `GcsComms` (stack):
+Ground→AP command packet (10 Hz), carried by `VirtualComms` (simtest) or `groundstation.unified_ground.GcsComms` (stack):
 
 ```python
 @dataclass(frozen=True)
@@ -1052,16 +1052,18 @@ level first.
 | `calibrate/` (`python -m calibrate`) | Interactive calibration CLI for run/watch/motor/log/config workflows |
 | `simulation/controller.py` | `compute_bz_altitude_hold`, `AltitudeHoldController`, `TensionPI`, `RatePID`, `compute_rate_cmd`, `OrbitTracker` |
 | `simulation/ap_controller.py` | `TensionApController` (400 Hz AP side), `LandingApController` |
-| `simulation/pumping_planner.py` | `TensionCommand`, `PumpingGroundController` (10 Hz phase state machine) |
-| `simulation/unified_ground.py` | `DirectComms`, `LuaComms`, `GcsComms` (TensionCommand -> NAMED_VALUE_FLOAT adapters) |
-| `simulation/winch.py` | `WinchController` (tension-controlled, 400 Hz) |
-| `simulation/winch_node.py` | `WinchNode` + `Anemometer` (physics/planner protocol boundary) |
+| `groundstation/pumping_planner.py` | `TensionCommand`, `PumpingGroundController` (10 Hz phase state machine) |
+| `groundstation/unified_ground.py` | `NvComms`, `GcsComms` (production TensionCommand -> NAMED_VALUE_FLOAT adapter) |
+| `simulation/unified_ground.py` | `DirectComms`, `LuaComms` (test-only TensionCommand adapters) |
+| `simulation/winch.py` | `WinchController` (tension-controlled, 400 Hz; stands in for future dedicated winch-node hardware) |
+| `simulation/winch_node.py` | `GovernedWinchNode` + `Anemometer` (simulated winch-node hardware stand-in) |
+| `groundstation/winch_protocol.py` | `WinchCommand`, `WinchTelemetry` (ground <-> winch-node wire protocol) |
 | `simulation/physics_core.py` | `PhysicsCore` — shared 400 Hz physics (dynamics, aero, tether, spin ODE, kinematic) |
 | `simulation/mediator.py` | SITL co-simulation loop — thin wrapper around PhysicsCore |
 | `simulation/torque_model.py` | Hub yaw kinematics: `HubParams`, `HubState`, `step()`, `equilibrium_throttle()` |
 | `simulation/mediator_torque.py` | Standalone torque SITL mediator |
-| `simulation/comms.py` | `VirtualComms` (simtest), `MavlinkComms` (SITL/hardware) |
-| `simulation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_named_float` |
+| `simulation/comms.py` | `VirtualComms` (simtest-only comms link) |
+| `groundstation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_named_float` |
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
 | `analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
 | `analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |

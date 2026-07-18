@@ -31,7 +31,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from simulation.rawes_lua_harness import RawesLua
-from simulation.rawes_modes import MODE_STEADY, send_anchor_ned
+from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
 
 # ── Physical constants ────────────────────────────────────────────────────────

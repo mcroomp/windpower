@@ -2,8 +2,8 @@
 """
 mavlink_jsonl_query.py -- Standard CLI tool for querying *.mavlink.jsonl logs.
 
-These logs are written by MavlinkLogWriter (simulation/mavlink_log.py) from
-both simulation/gcs.py (RawesGCS.start_mavlog) and the bench calibration tool
+These logs are written by MavlinkLogWriter (groundstation/mavlink_log.py) from
+both groundstation/gcs.py (RawesGCS.start_mavlog) and the bench calibration tool
 (calibrate/run.py). Every line is one JSON object:
 
     {"_t_wall": <float>, "_dir": "rx"|"tx", "mavpackettype": "<TYPE>", ...fields...}
@@ -44,8 +44,8 @@ from typing import Any, Iterable, Iterator
 import simulation as _simulation_pkg
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
-from simulation.mavlink_log import iter_messages  # noqa: E402
-from simulation.ekf_flags import MAV_MODE_ARMED, ARDU_MODES, MAV_STATE  # noqa: E402
+from groundstation.mavlink_log import iter_messages  # noqa: E402
+from groundstation.ekf_flags import MAV_MODE_ARMED, ARDU_MODES, MAV_STATE  # noqa: E402
 
 MAV_SEVERITY = {
     0: "EMERGENCY", 1: "ALERT", 2: "CRITICAL", 3: "ERROR",

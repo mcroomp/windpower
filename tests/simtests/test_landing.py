@@ -32,7 +32,7 @@ from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from simulation.landing_planner import LandingGroundController
+from groundstation.landing_planner import LandingGroundController
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 _IC    = load_ic()

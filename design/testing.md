@@ -206,7 +206,7 @@ _mock          = global state table (inputs/outputs bridged to Python)
 
 ```python
 from simulation.rawes_lua_harness import RawesLua
-from simulation.rawes_modes import MODE_STEADY, PUMP_HOLD
+from groundstation.rawes_modes import MODE_STEADY, PUMP_HOLD
 
 sim = RawesLua(mode=MODE_STEADY)  # RAWES_MODE = 1 (pumping schedule runs in steady)
 sim.armed        = True
@@ -263,10 +263,10 @@ sim.vec_to_list(bz)            # -> [x, y, z]
 `RAWES_MODE` is a **script-generated parameter** (registered by rawes.lua at load time; visible as `RAWES_MODE` in GCS). Substate is delivered separately via
 `NAMED_VALUE_FLOAT("RAWES_SUB", N)` — never encoded in the mode param.
 
-Constants are in `simulation/rawes_modes.py` (Python) and as locals in `rawes.lua` (Lua).
+Constants are in `groundstation/rawes_modes.py` (Python) and as locals in `rawes.lua` (Lua).
 
 ```python
-from simulation.rawes_modes import (
+from groundstation.rawes_modes import (
     MODE_NONE, MODE_STEADY,
     MODE_LANDING,
     LAND_DESCEND, LAND_FINAL_DROP,

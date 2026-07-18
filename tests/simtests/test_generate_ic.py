@@ -37,7 +37,7 @@ from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim
 from simulation.frames import build_orb_frame
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from simulation.pumping_planner import TensionCommand
+from groundstation.pumping_planner import TensionCommand
 from simulation.controller import compute_bz_altitude_hold
 from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,

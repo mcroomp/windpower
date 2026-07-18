@@ -48,7 +48,8 @@ from simulation.param_defaults import load_collective_phys_range as _load_col_ra
 from simulation.sensor import make_sensor, SpinSensor
 from simulation.kinematic import KinematicStartup, compute_launch_position, make_smooth_trapezoid_traj  # noqa: F401
 from simulation.winch import GovernedWinchController
-from simulation.winch_node import GovernedWinchNode, WinchCommand, Anemometer
+from simulation.winch_node import GovernedWinchNode, Anemometer
+from groundstation.winch_protocol import WinchCommand
 import simulation.config as _mcfg
 from dynbem import rotor_definition as _rd
 from simulation.telemetry_csv import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS

@@ -44,8 +44,8 @@ _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOG_DIR = _SIM_DIR / "logs"
 
 from simulation.telemetry_csv import TelRow, read_csv  # noqa: E402
-from simulation.mavlink_log import iter_messages as _iter_mavlink  # noqa: E402
-from simulation.ekf_flags import has_warn as _ekf_has_warn  # noqa: E402
+from groundstation.mavlink_log import iter_messages as _iter_mavlink  # noqa: E402
+from groundstation.ekf_flags import has_warn as _ekf_has_warn  # noqa: E402
 from simulation.ic import load_ic_dict  # noqa: E402
 
 from analysis.flight_log import FlightLog  # noqa: E402

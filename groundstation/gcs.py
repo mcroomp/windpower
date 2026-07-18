@@ -28,7 +28,7 @@ from pathlib import Path
 
 from pymavlink import mavutil
 
-from simulation.mavlink_log import MavlinkLogWriter
+from groundstation.mavlink_log import MavlinkLogWriter
 
 log = logging.getLogger(__name__)
 
@@ -1080,7 +1080,7 @@ class RawesGCS:
         """
         Non-blocking poll: drain buffered LOCAL_POSITION_NED messages and
         return the most recent one, or None if none are buffered.
-        Used by MavlinkComms.receive_telemetry() in the 10 Hz ground loop.
+        Used in the 10 Hz ground loop to read the downlinked hub altitude.
         """
         latest = None
         while True:

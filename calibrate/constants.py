@@ -12,7 +12,7 @@ import os
 import simulation
 
 # Re-exported so submodules can do `from .constants import RawesGCS` etc.
-from simulation.gcs            import RawesGCS, WallClock
+from groundstation.gcs         import RawesGCS, WallClock
 from simulation.param_defaults import load_ap_params
 from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,
                                         MOTOR_PWM_MIN, MOTOR_PWM_MAX)

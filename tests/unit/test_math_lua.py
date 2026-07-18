@@ -25,7 +25,7 @@ from simulation.controller import (
     compute_bz_altitude_hold,
 )
 from simulation.rawes_lua_harness import RawesLua
-from simulation.rawes_modes import send_anchor_ned
+from groundstation.rawes_modes import send_anchor_ned
 
 # ── Module-level harness ──────────────────────────────────────────────────────
 

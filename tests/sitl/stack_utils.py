@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from simulation.frames import build_gps_yaw_frame
-from simulation.rawes_modes import (
+from groundstation.rawes_modes import (
     MOCK_ORIGIN_LAT_DEG as HOME_LAT_DEG,
     MOCK_ORIGIN_LON_DEG as HOME_LON_DEG,
     MOCK_ORIGIN_ALT_M as HOME_ALT_M,

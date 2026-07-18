@@ -51,6 +51,71 @@ runs in its own fresh Docker container, one per test file.
 
 ---
 
+## Efficient long-running command handling (agent-critical)
+
+Unit/simtest/stack runs can take 1-5+ minutes. Handle them like this:
+
+- Do NOT pipe a command through `| tail -N` if it might run in a mode that can
+  background — a slow/idle command piped through `tail` produces no output until
+  the pipeline's stdout closes, so a background poll via `get_terminal_output`
+  just returns the same stale snapshot every time (wastes calls, looks like a
+  hang). Run the bare command first; only pipe through `tail`/`grep` once you've
+  confirmed the run completes synchronously, or redirect to a file
+  (`... > /tmp/out.log 2>&1`) and read/grep the file instead.
+- Once a command has moved to background, do not repeatedly call
+  `get_terminal_output` in a tight loop — it will not return new content until
+  the process actually produces more output or exits. Wait for the automatic
+  completion notification instead of polling.
+- Do NOT call `get_terminal_output` immediately after a command backgrounds
+  "just to check progress". It returns a byte-limited tail of the WHOLE
+  terminal scrollback, not just the new command's output — if the new command
+  has only printed a little so far, the tail can still be dominated by
+  leftover output from earlier unrelated commands in the same terminal, which
+  looks like stale/wrong output but really just means "not enough new output
+  yet to push the old stuff out of the tail window". End the turn and wait for
+  the automatic completion notification instead; only poll if genuinely unsure
+  whether the process is hung after a long silence.
+- Prefer `bash test.sh stack -n 1 -k <test_name>` (single test) while iterating;
+  only widen to `-n 4`/full suite once the targeted test is confirmed passing,
+  to keep turnaround short.
+
+## Git Bash vs WSL `/tmp` gotcha
+
+`/tmp` is NOT one shared filesystem on Windows dev boxes — Git Bash (mingw/MSYS2,
+the default terminal) and WSL2 (used for `docker`/`test.sh stack`) each have their
+own separate `/tmp`:
+
+- A bare `> /tmp/foo.log` redirection in a Git Bash command writes to Git Bash's
+  own `/tmp` (really `C:\Users\<user>\AppData\Local\Temp\foo.log` — check with
+  `cygpath -w /tmp/foo.log`).
+- A command run via `wsl -e bash -lc "... > /tmp/foo.log"` writes inside WSL's
+  `/tmp` (`\\wsl$\...\tmp\foo.log` from Windows, or `/tmp/foo.log` from *inside*
+  another `wsl -e` call) — NOT reachable from a later plain Git Bash
+  `cat /tmp/foo.log`.
+- If the redirection is written OUTSIDE the `wsl -e bash -lc "..."` quoted
+  string (e.g. `wsl -e bash -lc "cmd" > /tmp/foo.log`), it's the OUTER (Git
+  Bash) shell that owns the redirect, not WSL — easy to mix up.
+- A native Windows executable (e.g. `.venv/Scripts/python.exe`) invoked from
+  Git Bash does NOT understand `/tmp/...` paths passed as arguments (it's a
+  Windows process, not MSYS2-aware) — convert with `cygpath -w /tmp/foo.log`
+  first, or it'll fail with `FileNotFoundError` even though
+  `ls /tmp/foo.log` (from Git Bash) shows the file existing.
+- Rule of thumb: know which shell environment (Git Bash vs WSL) is actually
+  creating/reading a `/tmp` path before assuming a file exists or is missing;
+  don't conclude "no output was produced" just because a naive `cat`/`find`
+  from the wrong shell doesn't see it.
+
+## DShot/BLHeli params excluded from SITL boot verification
+
+BLHeli/DShot params (`SERVO9_*`, `SERVO_BLH_*`, `SERVO_DSHOT_*`, `RPM1_*` —
+full table in [design/dshot.md](dshot.md)) are intentionally excluded from
+SITL boot-param verification via `SITL_UNSUPPORTED_PARAMS` in
+[tests/sitl/stack_utils.py](../tests/sitl/stack_utils.py), because
+ArduCopter-heli SITL does not compile the BLHeli backend and drives output 9
+as plain PWM instead of DShot.
+
+---
+
 ## Post-run diagnosis workflow
 
 **ALWAYS run `diagnose_sitl.py` FIRST after ANY SITL stack run, before making any

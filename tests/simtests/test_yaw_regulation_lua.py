@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(30)]
 
 import simulation.torque_model as _m
 from simulation.rawes_lua_harness import RawesLua
-from simulation.rawes_modes import MODE_PASSIVE
+from groundstation.rawes_modes import MODE_PASSIVE
 
 # ---------------------------------------------------------------------------
 # Plant constants (torque_model defaults — GB4008 66KV, 80:44 gear, 4S LiPo)

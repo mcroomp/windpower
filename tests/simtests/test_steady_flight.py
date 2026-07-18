@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 import simulation.mediator as _mediator_module
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from simulation.pumping_planner import TensionCommand
+from groundstation.pumping_planner import TensionCommand
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,

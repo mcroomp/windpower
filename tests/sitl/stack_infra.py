@@ -83,7 +83,7 @@ from tests.sitl.stack_utils import (
 )
 
 from pymavlink import mavutil as _mavutil
-from simulation.gcs import GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
+from groundstation.gcs import GUIDED, GUIDED_NOGPS, STABILIZE, RawesGCS
 from simulation.mediator_events import MediatorEventLog
 from simulation.controller import make_hold_controller
 from simulation.ic import load_ic_dict, IC_JSON_PATH
