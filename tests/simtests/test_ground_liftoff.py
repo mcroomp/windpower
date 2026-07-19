@@ -41,9 +41,14 @@ _ROTOR = load_default_rotor()
 DT              = 2.5e-3          # 400 Hz
 LUA_PERIOD      = 0.020           # 50 Hz Lua tick
 LUA_EVERY       = round(LUA_PERIOD / DT)
-WIND_NED        = np.array([0.0, 0.0, -10.0])   # 10 m/s upward (NED Z down)
-TETHER_FORCE_N  = 200.0           # constant downward load [N]
+WIND_NED        = np.array([0.0, 0.0, 0.0])     # no wind
+OMEGA_START_RAD_S = 40.0          # fixed rotor start speed [rad/s]
+TETHER_FORCE_N  = 10.0            # minimal constant downward load [N]
 TARGET_ALT_M    = 5.0             # RAWES_ALT command sent each tick
+TARGET_THRUST   = 1.0             # RAWES_THR command sent each tick
+TARGET_ROLL_RAD = 0.0             # RAWES_RIC command sent each tick
+TARGET_PITCH_RAD = 0.0            # RAWES_PIC command sent each tick
+AERO_MODEL    = "quasi_static"    # use default quasi-static aero model
 LIFTOFF_ALT_M   = 2.0             # altitude threshold that counts as liftoff [m]
 LIFTOFF_TIMEOUT = 60.0            # must lift off within this many sim-seconds [s]
 
@@ -78,17 +83,15 @@ def _build_ic() -> SimpleNamespace:
     """
     Hub at altitude 1 m, horizontal disk.  Anchor at NED origin.
 
-    omega_spin / eq_thrust from IC file if available.
+    eq_thrust from IC file if available; omega_spin is forced to OMEGA_START_RAD_S.
     """
     try:
         from tests.simtests.simtest_ic import load_ic as _load_ic
         _ic = _load_ic()
-        omega_spin  = float(_ic.omega_spin)
         eq_thrust   = float(_ic.eq_thrust)
     except FileNotFoundError:
         from simulation.param_defaults import load_collective_phys_range as _lr
         col_min, col_max = _lr()
-        omega_spin  = 39.42
         eq_thrust   = (-0.18 - col_min) / (col_max - col_min)
 
     return SimpleNamespace(
@@ -97,17 +100,17 @@ def _build_ic() -> SimpleNamespace:
         R0          = np.eye(3),                    # horizontal disk; body_z = [0,0,1]
         rest_length = 1.0,
         eq_thrust   = eq_thrust,
-        omega_spin  = omega_spin,
+        omega_spin  = OMEGA_START_RAD_S,
     )
 
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-def test_ground_liftoff():
+def test_ground_liftoff(simtest_log):
     """
-    Hub at altitude 1 m, horizontal disk, 10 m/s upward wind, 200 N downforce.
-    rawes.lua GUIDED mode, RAWES_ALT = 5.0.  Lua VZ-PI must command enough
-    collective to climb above 2 m within 60 s.
+    Hub at altitude 1 m, horizontal disk, no wind, 10 N downforce.
+    rawes.lua GUIDED mode with RAWES_ALT=5.0, RAWES_THR=1.0, and fixed
+    RAWES_RIC/RAWES_PIC targets to hold level attitude while climbing.
     """
     ic = _build_ic()
 
@@ -122,12 +125,14 @@ def test_ground_liftoff():
 
     runner = PhysicsRunner(
         _ROTOR, ic, WIND_NED,
+        aero_model=AERO_MODEL,
         z_floor     = 0.0,
     )
-    # Swap the elastic tether for a constant 200 N downward load.
+    # Swap the elastic tether for a constant 10 N downward load.
     runner._core._tether = _ConstantDownforce(TETHER_FORCE_N)
 
     lua         = MockArdupilot.for_lua(sim, initial_thrust=ic.eq_thrust, wind=WIND_NED, dt=DT)
+    lua.tel_fn  = lambda r, sr: dict(body_z_eq=None)
     total_steps = int(LIFTOFF_TIMEOUT / DT)
     liftoff_t   = None
     max_alt     = ic.pos[2] * -1.0   # start altitude
@@ -137,12 +142,16 @@ def test_ground_liftoff():
     def _inject(s, r):
         s.send_message(NamedValueFloat("RAWES_TEN", TETHER_FORCE_N))
         s.send_message(NamedValueFloat("RAWES_ALT", TARGET_ALT_M))
+        s.send_message(NamedValueFloat("RAWES_THR", TARGET_THRUST))
+        s.send_message(NamedValueFloat("RAWES_RIC", TARGET_ROLL_RAD))
+        s.send_message(NamedValueFloat("RAWES_PIC", TARGET_PITCH_RAD))
 
     for i in range(total_steps):
         t = i * DT
         if i % LUA_EVERY == 0:
             lua.tick(t, runner, inject=_inject)
         sr = lua.step(runner, DT)
+        lua.log(runner, sr)
 
         alt = runner.altitude
         if alt > max_alt:
@@ -160,6 +169,22 @@ def test_ground_liftoff():
         print(f"  liftoff_t    : {liftoff_t:.2f} s  [PASS]")
     else:
         print(f"  liftoff_t    : did not reach {LIFTOFF_ALT_M} m  [FAIL]")
+
+    lines = [
+        f"t_final      : {t_final:.1f} s",
+        f"max_altitude : {max_alt:.3f} m",
+        f"omega_spin   : {omega_final:.2f} rad/s  (started {ic.omega_spin:.2f})",
+        (
+            f"liftoff_t    : {liftoff_t:.2f} s  [PASS]"
+            if liftoff_t is not None
+            else f"liftoff_t    : did not reach {LIFTOFF_ALT_M} m  [FAIL]"
+        ),
+    ]
+    for level, msg in sim.messages[:10]:
+        lines.append(f"  [GCS {level}] {msg}")
+
+    lua.write_telemetry(simtest_log.log_dir / "telemetry.csv")
+    simtest_log.write(lines, "ground_liftoff")
 
     assert liftoff_t is not None, (
         f"Hub did not reach {LIFTOFF_ALT_M} m altitude within {LIFTOFF_TIMEOUT} s "

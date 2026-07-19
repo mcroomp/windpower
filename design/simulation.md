@@ -24,8 +24,6 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 - `gyro_body` = `R_hub.T @ omega_body` — full body angular velocity in electronics body frame. No stripping: GB4008 keeps electronics non-rotating via K_YAW damping in dynamics.
 - `accel_body` = `R_hub.T @ (accel_world_ned − [0,0,9.81])` — specific force in electronics body frame
 
-**`PhysicalHoldController`** (`controller.py`): captures equilibrium roll/pitch at kinematic startup end. Calls `compute_rc_from_attitude(roll − roll_eq, pitch − pitch_eq, ...)` so the function receives the deviation from equilibrium, not the raw physical angle.
-
 **Sensor consistency rules (must all agree or EKF triggers emergency yaw reset):**
 1. `rpy[2]` = actual hub orientation yaw from `R_hub` (never overridden with velocity heading)
 2. `gyro_body` = `R_hub.T @ omega_body` — no artificial stripping
@@ -54,7 +52,6 @@ Always initialise the hub with body Z along the tether, not upright. The `build_
 - **`AltitudeHoldController`** — wraps `compute_bz_altitude_hold` with an internal elevation rate-limiter. `from_pos(pos, slew_rate_rad_s)` initialises `_el_rad` from the IC elevation; `update(pos, target_alt_m, tension_n, mass_kg, dt)` rate-limits `_el_rad` and returns the corresponding `body_z_eq`. Here `tension_n` is the **commanded** tension (force-balance feedforward), never a measurement. Used by the AP pumping mode (`_PumpingPythonMode`), `LandingApController`, and hold tests.
 - **`ElevationHoldController`** — adds `compute_rate_cmd` on top of `AltitudeHoldController`, returning `(rate_roll_sp, rate_pitch_sp)` directly. Kept for compatibility; the GUIDED angle path is the primary AP path.
 - **`HeliCyclicController`** — inner rate loop + servo lag model. Baked into `PhysicsRunner.step()`. Accepts `(collective_rad, rate_roll, rate_pitch, omega_body, dt)` and returns `(tilt_lon, tilt_lat, col_actual)` after applying the `SwashplateServoModel` (25 ms servo lag). Maps to ArduPilot `ATC_RAT_RLL` / `ATC_RAT_PIT` PID on the stack side.
-- **`compute_rc_from_attitude(roll, pitch, rollspeed, pitchspeed, yawspeed, ...)`** — MAVLink-side helper: takes ArduPilot ATTITUDE-message fields (which already encode tether-relative attitude error via `PhysicalSensor`) and returns RC PWM dict. Used by Python-side hold loops where the only feedback is a 10 Hz MAVLink stream.
 
 ### arduloop/ — ArduPilot GUIDED mode Python port
 
@@ -69,7 +66,13 @@ Gain names are 1:1 with ArduPilot parameters. `GuidedAttitudeController.update(q
 
 ### Inactive controller helpers
 
-`controller.py` includes helpers such as `orbit_tracked_body_z_eq`, `orbit_tracked_body_z_eq_3d`, `compute_swashplate_from_state`, `compute_rc_rates`, `OrbitTracker`, and `PhysicalHoldController` that are not on the current production control path. Do not add new callers; use `compute_bz_altitude_hold` + `slerp_body_z` for active paths.
+The pre-`AltitudeHoldController` orbit-tracking design (`orbit_tracked_body_z_eq`,
+`orbit_tracked_body_z_eq_3d`, `OrbitTracker`, `blend_body_z`), the truth-state/
+physical-attitude RC helpers it depended on (`compute_rc_rates`,
+`compute_swashplate_from_state`, `compute_rc_from_physical_attitude`), and the
+MAVLink-side ACRO RC-override path (`compute_rc_from_attitude`, `PhysicalHoldController`,
+`make_hold_controller`) had no production callers and were all deleted from
+`controller.py`. Use `compute_bz_altitude_hold` + `slerp_body_z` for active paths.
 
 ### `TensionPI` — collective PID (offline / winch only)
 
@@ -154,11 +157,14 @@ M_orbital += disk_normal * T_GB4008
 `K_yaw → large`: perfect damper (yaw rate ≈ 0, hardware nominal).
 `K_yaw` finite: realistic GB4008 with residual yaw drift, visible in `rpy_yaw` telemetry.
 
-**Rotor spin** is maintained as a separate scalar `omega_spin`, updated each step via the BEM-derived spin torque:
+**Rotor spin** is maintained as a separate scalar `omega_spin`, updated each step via `dynbem.mechanical.step_omega()` — the single canonical spin-ODE integrator (also used by `omega_derivative()` for direct-derivative callers such as unit tests). windpower never re-implements the Euler update itself:
 ```
-omega_spin += result.Q_spin / I_SPIN_KGMS2 × dt
+new_omega, new_spin = step_omega(
+    omega, spin_angle, Q_spin, motor_torque_Nm, I_ode_kgm2, dt,
+    bearing_friction_Nm=BEARING_FRICTION_NM,
+)
 ```
-`Q_spin` comes from `dynbem`'s `create_aero()` model (quasi_static BEM) which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium — no empirical K_drive/K_drag constants needed.
+`Q_spin` comes from `dynbem`'s `create_aero()` model (quasi_static BEM) which balances drive torque (from inflow) against profile drag torque. Gives a stable equilibrium — no empirical K_drive/K_drag constants needed. `BEARING_FRICTION_NM` is a windpower-owned constant in `physics_core.py` (not part of the aero rotor schema).
 
 **Gyroscopic coupling** is included in Euler's equations (`dynamics.py`):
 ```
@@ -244,7 +250,7 @@ These follow directly from the orbit physics and pin down key simulation invaria
 
 **Production model:** `quasi_static` BEM from the `dynbem` external package (`create_aero(rotor, model="quasi_static")`).
 
-All simulation code, simtests, and the mediator use `dynbem.create_aero()` with `model="quasi_static"` (the default in `PhysicsCore` and `PhysicsRunner`). Dynamic inflow models (`oye`, `pitt_peters`, `jit`) are opt-in only and are not used in any production flight path.
+All simulation code, simtests, and the mediator use `dynbem.create_aero()` with `model="quasi_static"` (the default in `PhysicsCore` and `PhysicsRunner`). Dynamic inflow models (`oye`, `pitt_peters`, `vpm`) are opt-in only and are not used in any production flight path.
 
 ### dynbem factory
 
@@ -254,18 +260,19 @@ All simulation code, simtests, and the mediator use `dynbem.create_aero()` with 
 from dynbem import create_aero, rotor_definition as rd
 aero = create_aero(rotor, model="quasi_static")  # production default
 aero = create_aero(rotor, model="oye")            # dynamic inflow (opt-in)
-aero = create_aero(rotor, model="jit")            # Peters-He JIT (opt-in)
+aero = create_aero(rotor, model="pitt_peters")     # dynamic inflow (opt-in)
 ```
 
 ### Available model keys
 
 | Key | Description |
 |-----|-------------|
-| `quasi_static` | **Production default** — quasi-static BEM, no inflow state; fastest and most numerically stable |
-| `oye` | Øye dynamic wake model — first-order filter on induced velocity |
-| `pitt_peters` | Pitt-Peters 3-state dynamic inflow |
-| `jit` | Peters-He 3-state inflow with Numba `@njit` hot loop; stateful via `to_dict()` / `from_dict()` |
-| `bem` | Minimal textbook BEM — sanity cross-check only |
+| `quasi_static` (alias `bem`) | **Production default** — quasi-static BEM, no inflow state; fastest and most numerically stable |
+| `oye` (alias `oye_bem`) | Øye dynamic wake model — 2-stage annular inflow filter |
+| `pitt_peters` | Pitt-Peters 3-state dynamic inflow (L-matrix) |
+| `vpm` (alias `vpm_rotor`/`free_wake`) | Forward-flight free-wake vortex particle method; no single-shot `compute_forces` -- advance with `step(inputs, state, dt)` |
+
+Note: the old Peters-He model (`model="jit"`/`"peters_he"`, 5-state dynamic inflow, valid through axial descent) no longer exists in `dynbem` -- it has not been re-implemented under the new state-based `step()` API. Code that relied on it for near-vertical/axial-descent validity (e.g. `envelope/`) currently uses `quasi_static` instead; see `envelope/CLAUDE.md` for the open caveat.
 
 ### AeroResult
 
@@ -473,8 +480,7 @@ simulation/
 │                        col_min_for_altitude_rad/compute_bz_altitude_hold), AltitudeHoldController,
 │                        ElevationHoldController, HeliCyclicController (rate PIDs + SwashplateServoModel
 │                        25 ms lag; baked into PhysicsRunner), TensionPI (collective PID at 400 Hz;
-│                        kd=0 default). Legacy dead code: compute_swashplate_from_state,
-│                        compute_rc_from_attitude, PhysicalHoldController, OrbitTracker.
+│                        kd=0 default).
 ├── mock_ardupilot.lua   Minimal Lua stub of the ArduPilot API used by rawes.lua unit tests
 │                        (runs via lupa in RawesLua harness). Provides Vector3f, ahrs, rc,
 │                        SRV_Channels, param, gcs, arming, vehicle, mavlink stubs. State lives in
@@ -554,7 +560,6 @@ analysis/
 ├── analyse_run.py   Post-run report: print_flight_report, compute_steady_metrics,
 │                    validate_ekf_window; CLI: --bucket S.
 ├── analyse_landing.py    Landing diagnosis (alt/vz/winch/tension/collective per bucket).
-├── pump_envelope.py      Pumping cycle envelope sweep (tension setpoints, wind, tilt).
 └── pump_diagnosis.py     Per-bucket compact summary + CSV (osc, corr) to test log dir.
 
 viz3d/

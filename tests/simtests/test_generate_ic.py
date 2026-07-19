@@ -33,7 +33,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import simulation
 import simulation.mediator as _mediator_module
-from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, euler_step_omega
+from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, step_omega
 from simulation.frames import build_orb_frame
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
@@ -179,7 +179,7 @@ def _compute_ic() -> dict:
             st = relax_inflow(aero, st, inp, n_steps=250, dt=dt_eq)
             for _ in range(200):
                 res, st = aero.step(inp, st, dt_eq)
-                om, ang = euler_step_omega(om, ang, float(res.Q_spin), 0.0, I_ode, dt_eq)
+                om, ang = step_omega(om, ang, float(res.Q_spin), 0.0, I_ode, dt_eq)
                 om = max(omega_min, min(80.0, om))
         return om
 

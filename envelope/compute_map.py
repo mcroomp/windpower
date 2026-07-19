@@ -40,16 +40,18 @@ def _ramp_full_column(args: tuple) -> list:
     ti_unified is the index into tension_list_unified (the merged list of all tensions).
     """
     vi, wi, ai, v_target, wind, angle, v_tension_list, dt, tension_list_unified = args
-    import rotor_definition as rd
-    from dynbem import create_aero
+    from dynbem import create_aero, RotorInputs, step_omega
     from simulation.frames import build_orb_frame
+    from simulation.physics_core import BEARING_FRICTION_NM
     from envelope.point_mass import tether_hat, balance_bz
+    from envelope.rotor_helpers import load_default_rotor
 
-    rotor   = rd.default()
-    aero    = create_aero(rotor, model="peters_he")
-    dk      = rotor.dynamics_kwargs()
-    mass    = dk["mass"]
-    I_spin  = dk["I_spin"]
+    rotor     = load_default_rotor()
+    aero      = create_aero(rotor, model="quasi_static")
+    rotor_state = aero.initial_rotor_state()
+    mass      = float(rotor.inertia.mass_kg)
+    I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
+    omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     weight  = mass * 9.81
     clamp   = math.radians(8.6)
     wind_v  = np.array([0.0, -float(wind), 0.0])
@@ -57,6 +59,7 @@ def _ramp_full_column(args: tuple) -> list:
 
     # Fresh start: omega=28 (operational), vel=0, col=0
     omega    = 28.0
+    spin_angle = 0.0
     vel      = np.zeros(3)
     col_now  = 0.0
     c_lon    = c_lat = 0.0
@@ -107,19 +110,27 @@ def _ramp_full_column(args: tuple) -> list:
         R      = build_orb_frame(bz)
         F_teth = tension * t_hat
 
+        inputs = RotorInputs(
+            collective_rad = col_now, tilt_lon = c_lon, tilt_lat = c_lat,
+            R_hub          = R,       v_hub_world = vel.copy(),
+            wind_world     = wind_v,  omega_rad_s = omega,
+            rho_kg_m3      = 1.225,
+        )
         try:
-            f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(),
-                                    omega, wind_v)
+            f, rotor_state = aero.step(inputs, rotor_state, dt)
         except (OverflowError, ValueError, FloatingPointError):
             break
-        if not aero.is_valid():
+        if not np.all(np.isfinite(f.F_world)) or not math.isfinite(f.Q_spin):
             break
 
         thrust = float(np.dot(f.F_world, bz))
-        Q_net  = float(np.dot(aero.last_M_spin, bz))
         F_net  = f.F_world + F_teth + np.array([0.0, 0.0, weight])
 
-        omega = max(0.0, omega + (Q_net / I_spin) * dt)
+        omega, spin_angle = step_omega(
+            omega, spin_angle, float(f.Q_spin), 0.0, I_ode, dt,
+            bearing_friction_Nm=BEARING_FRICTION_NM,
+        )
+        omega = max(omega_min, omega)
         vel   = vel + (F_net / mass) * dt
 
         if not np.all(np.isfinite(vel)):
@@ -191,35 +202,6 @@ FULL = dict(
 
 V_REEL_OUT = -0.8
 V_REEL_IN  =  0.8
-
-
-# ── PID-based sweep ────────────────────────────────────────────────────────────
-
-def _run_pass(tasks: list, tag: str, n_workers: int,
-              settled_col: np.ndarray, settled_v: np.ndarray,
-              col_sat: np.ndarray, settled_ic: np.ndarray) -> int:
-    """Submit tasks, collect results into arrays. Returns number of newly converged cells."""
-    newly = 0
-    total = len(tasks)
-    done  = 0
-    t0    = time.time()
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_pid_cell, t[1:]): t[:4] for t in tasks}
-        for fut in as_completed(futures):
-            vi, wi, ai, ti = futures[fut][:4]
-            _, _, _, col, va, sat, ic_out = fut.result()
-            if np.isfinite(col):
-                settled_col[vi, wi, ai, ti] = col
-                settled_v  [vi, wi, ai, ti] = va
-                col_sat    [vi, wi, ai, ti] = sat
-                settled_ic [vi, wi, ai, ti] = ic_out
-                newly += 1
-            done += 1
-            elapsed = time.time() - t0
-            eta = elapsed / done * (total - done) if done > 0 else 0
-            print(f"  [{tag}] {done:>4}/{total}  eta={eta:.0f}s    ", end="\r")
-    print()
-    return newly
 
 
 def compute_grid(

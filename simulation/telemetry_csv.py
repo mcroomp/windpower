@@ -523,7 +523,6 @@ class TelRow:
         tension_now = runner.tension_now
         omega_spin  = runner.omega_spin
         t_sim       = runner.t_sim
-        aero_obj    = runner.aero
 
         tilt_lon    = float(step_result.get("tilt_lon",  0.0))
         tilt_lat    = float(step_result.get("tilt_lat",  0.0))
@@ -567,29 +566,19 @@ class TelRow:
 
         aero_fx = aero_fy = aero_fz = 0.0
         aero_mx = aero_my = aero_mz = 0.0
-        aero_T = aero_v_axial = aero_v_inplane = aero_v_i = 0.0
+        aero_T = aero_v_axial = aero_v_inplane = aero_v_i = aero_Q_spin = 0.0
         net_F = np.zeros(3)
         net_M = np.zeros(3)
         if aero_result is not None:
             F = np.asarray(aero_result.F_world, dtype=float)
             M = np.asarray(aero_result.m_hub_world, dtype=float)
+            aero_Q_spin = float(getattr(aero_result, "Q_spin", 0.0))
             aero_fx, aero_fy, aero_fz = float(F[0]), float(F[1]), float(F[2])
             aero_mx, aero_my, aero_mz = float(M[0]), float(M[1]), float(M[2])
+            aero_T = float(np.linalg.norm(F))
             net_F = F + tf
             if net_moment is not None:
                 net_M = np.asarray(net_moment, dtype=float)
-            if aero_obj is not None:
-                # New aero package doesn't expose these as model attributes —
-                # they live in the per-step result/state.  Telemetry-only,
-                # safe to default to 0 when unavailable.
-                aero_T         = float(getattr(aero_obj, "last_T",         0.0))
-                aero_v_axial   = float(getattr(aero_obj, "last_v_axial",   0.0))
-                aero_v_inplane = float(getattr(aero_obj, "last_v_inplane", 0.0))
-                aero_v_i       = float(getattr(aero_obj, "last_v_i",       0.0))
-            # dynbem (PittPeters/Oye) doesn't expose last_T — fall back to
-            # the total aero force magnitude as a proxy for thrust.
-            if aero_T == 0.0:
-                aero_T = float(np.sqrt(aero_fx**2 + aero_fy**2 + aero_fz**2))
 
         tm = np.asarray(tether_moment, dtype=float) if tether_moment is not None else np.zeros(3)
 
@@ -698,6 +687,7 @@ class TelRow:
             aero_v_axial        = aero_v_axial,
             aero_v_inplane      = aero_v_inplane,
             aero_v_i            = aero_v_i,
+            aero_Q_spin         = aero_Q_spin,
             F_x                 = float(net_F[0]),
             F_y                 = float(net_F[1]),
             F_z                 = float(net_F[2]),

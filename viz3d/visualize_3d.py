@@ -1463,9 +1463,15 @@ def main(argv: Optional[list] = None) -> None:
     else:
         with _suppress_vtk_stderr():
             viz.play()
-    # Exit cleanly — VTK/PyVista registers an atexit handler that exits with
-    # code 1 on Windows when the window closes.  Override it here.
-    sys.exit(0)
+
+    # The visualization started and ran successfully at this point, so this
+    # is always a success exit — pin it to 0. Use os._exit() rather than
+    # sys.exit(): PyVista/VTK registers an atexit handler that exits with
+    # code 1 on Windows when the render window closes, and only os._exit()
+    # (which skips atexit callbacks entirely) reliably bypasses it.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def _suppress_vtk_stderr():

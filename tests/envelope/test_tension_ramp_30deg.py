@@ -15,10 +15,11 @@ from pathlib import Path
 import numpy as np
 
 
-from dynbem import rotor_definition as rd
-from dynbem import create_aero
+from dynbem import create_aero, RotorInputs, step_omega
 from simulation.frames import build_orb_frame
+from simulation.physics_core import BEARING_FRICTION_NM
 from envelope.point_mass import tether_hat, balance_bz, simulate_point
+from envelope.rotor_helpers import load_default_rotor
 
 EL           = 30.0
 WIND         = 10.0
@@ -35,17 +36,19 @@ TENSION_LIST = list(range(25, 1025, 25))   # 25 … 1000 N in 25 N steps
 
 def _run_standalone_ramp():
     """Own ODE loop — omega=28, vel=0, 40 s settle at T=25 N, then ramp to 1000 N."""
-    rotor   = rd.default()
-    aero    = create_aero(rotor, model="peters_he")
-    dk      = rotor.dynamics_kwargs()
-    mass    = dk["mass"]
-    I_spin  = dk["I_spin"]
+    rotor     = load_default_rotor()
+    aero      = create_aero(rotor, model="quasi_static")
+    rotor_state = aero.initial_rotor_state()
+    mass      = float(rotor.inertia.mass_kg)
+    I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
+    omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     weight  = mass * 9.81
     clamp   = math.radians(8.6)
     wind_v  = np.array([0.0, -float(WIND), 0.0])
     t_hat   = tether_hat(EL)
 
     omega    = float(OMEGA_INIT)
+    spin_angle = 0.0
     vel      = np.zeros(3)
     col_now  = 0.0
     c_lon    = c_lat = 0.0
@@ -78,17 +81,28 @@ def _run_standalone_ramp():
         F_teth = tension * t_hat
 
         try:
-            f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(),
-                                    omega, wind_v)
+            inputs = RotorInputs(
+                collective_rad = col_now, tilt_lon = c_lon, tilt_lat = c_lat,
+                R_hub          = R,       v_hub_world = vel.copy(),
+                wind_world     = wind_v,  omega_rad_s = omega,
+                rho_kg_m3      = 1.225,
+            )
+            f, rotor_state = aero.step(inputs, rotor_state, DT)
         except (OverflowError, ValueError, FloatingPointError):
+            diverged_at = (t_sim, tension)
+            break
+        if not np.all(np.isfinite(f.F_world)) or not math.isfinite(f.Q_spin):
             diverged_at = (t_sim, tension)
             break
 
         thrust = float(np.dot(f.F_world, bz))
-        Q_net  = float(np.dot(aero.last_M_spin, bz))
         F_net  = f.F_world + F_teth + np.array([0.0, 0.0, weight])
 
-        omega = max(0.0, omega + (Q_net / I_spin) * DT)
+        omega, spin_angle = step_omega(
+            omega, spin_angle, float(f.Q_spin), 0.0, I_ode, DT,
+            bearing_friction_Nm=BEARING_FRICTION_NM,
+        )
+        omega = max(omega_min, omega)
         vel   = vel + (F_net / mass) * DT
 
         if not np.all(np.isfinite(vel)):
@@ -122,7 +136,6 @@ def _run_standalone_ramp():
                 c_lon    = c_lon,    c_lat    = c_lat,
                 int_vx   = int_vx,   int_vy   = int_vy,
                 int_vcol = int_vcol,
-                aero_state = aero.to_dict(),
             )
             samples.append((ti, v_along, col_now, ic_out))
             next_grid += float(TENSION_LIST[1] - TENSION_LIST[0])

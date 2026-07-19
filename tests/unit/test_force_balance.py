@@ -121,7 +121,7 @@ def _d_omega(omega: float, col: float, R_hub: np.ndarray) -> float:
     )
     # step() settles the inflow state on the first call.
     _r, _ = _AERO.step(inputs, state, 0.02)
-    return float(omega_derivative(_r.Q_spin, 0.0, I_ode))
+    return float(omega_derivative(float(omega), _r.Q_spin, 0.0, I_ode))
 
 
 def test_autorotation_d_omega_brackets_zero():
@@ -139,7 +139,7 @@ def test_autorotation_omega_equilibrium_in_range():
 
     Settled omega in [8, 60] rad/s and |d_omega| < 0.01 rad/s^2.
     """
-    from dynbem import RotorInputs, euler_step_omega, omega_derivative
+    from dynbem import RotorInputs, step_omega, omega_derivative
     R30 = _R_tilt(ELEV_DEG)
     col = math.radians(-10.0)
     state = _AERO.initial_rotor_state()
@@ -156,9 +156,9 @@ def test_autorotation_omega_equilibrium_in_range():
             wind_world=WIND_EAST, omega_rad_s=omega_now, rho_kg_m3=1.225,
         )
         _r, state = _AERO.step(inputs, state, dt)
-        new_omega, spin_angle = euler_step_omega(omega_now, spin_angle, float(_r.Q_spin), 0.0, I_ode, dt)
+        new_omega, spin_angle = step_omega(omega_now, spin_angle, float(_r.Q_spin), 0.0, I_ode, dt)
         omega_now = max(omega_min, new_omega)
-        d_omega = float(omega_derivative(_r.Q_spin, 0.0, I_ode))
+        d_omega = float(omega_derivative(omega_now, _r.Q_spin, 0.0, I_ode))
     assert 8.0 <= omega_now <= 60.0, (
         f"equilibrium omega={omega_now:.1f} rad/s outside [8, 60] rad/s"
     )

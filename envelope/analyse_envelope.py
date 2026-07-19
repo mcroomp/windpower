@@ -55,8 +55,8 @@ PHASES: dict[str, dict] = {
 # ── Geometry summary ───────────────────────────────────────────────────────────
 
 def _print_geometry(elevation_deg: float, tension_n: float, wind_speed: float) -> None:
-    import rotor_definition as rd
-    mass   = rd.default().dynamics_kwargs()["mass"]
+    from envelope.rotor_helpers import load_default_rotor
+    mass   = float(load_default_rotor().inertia.mass_kg)
     weight = mass * _G
     t_hat  = tether_hat(elevation_deg)
     F_teth = tension_n * t_hat
