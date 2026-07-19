@@ -1,8 +1,6 @@
 """
 point_mass.py -- Generalised point-mass equilibrium ODE for arbitrary flight conditions.
 
-Extends the analyse_descent approach to arbitrary tether elevation angles.
-
 Physics
 -------
 - Disk orientation fixed at force-balance direction: bz = -norm(F_teth + F_grav)
@@ -10,9 +8,8 @@ Physics
 - Wind: [0, +wind_speed, 0] in NED (blowing East, i.e. from West)
 - Cyclic PI drives horizontal velocity (North, East) toward zero
 - Along-tether and vertical velocities evolve freely from force balance
-- Spin ODE: d(omega)/dt = Q_spin / I_spin
-
-At el=90 (vertical) this is identical to simulate_descent() in analyse_descent.py.
+- Spin ODE: integrated via dynbem.mechanical.step_omega() (the single canonical
+  spin-ODE integrator; see simulation/physics_core.py for the production usage)
 
 NED convention: X=North, Y=East, Z=Down. Gravity = [0, 0, +g*m].
 Altitude = -pos[2]. Upward thrust = dot(F_world, body_z).
@@ -26,9 +23,10 @@ from pathlib import Path
 import numpy as np
 
 
-from dynbem import rotor_definition as rd
-from dynbem   import create_aero
+from dynbem import create_aero, RotorInputs, step_omega
 from simulation.frames import build_orb_frame
+from simulation.physics_core import BEARING_FRICTION_NM
+from envelope.rotor_helpers import load_default_rotor
 
 _G = 9.81
 
@@ -99,11 +97,11 @@ def simulate_point(
                      range over conv_window_s is below this
     conv_window_s : window duration [s] to check for convergence
     """
-    rotor  = rd.default()
-    dk     = rotor.dynamics_kwargs()
-    mass   = dk["mass"]
-    I_spin = dk["I_spin"]
-    weight = mass * gravity
+    rotor     = load_default_rotor()
+    mass      = float(rotor.inertia.mass_kg)
+    I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
+    omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
+    weight    = mass * gravity
 
     t_hat   = tether_hat(elevation_deg)
     F_teth  = tension_n * t_hat
@@ -112,9 +110,10 @@ def simulate_point(
     wind    = np.array([0.0, -float(wind_speed), 0.0])  # blowing West, away from anchor
     clamp   = math.radians(cyc_clamp_deg)
 
+    aero        = create_aero(rotor, model="quasi_static")
+    rotor_state = aero.initial_rotor_state()
+
     if ic is not None:
-        aero     = create_aero(rotor, model="peters_he",
-                               state_dict=ic.get("aero_state"))
         omega    = float(ic.get("omega",    omega_init))
         vel      = np.array(ic.get("vel",   float(v_along_init) * t_hat), dtype=float)
         col_now  = float(ic.get("col",      col))
@@ -124,7 +123,6 @@ def simulate_point(
         int_vy   = float(ic.get("int_vy",   0.0))
         int_vcol = float(ic.get("int_vcol", 0.0))
     else:
-        aero     = create_aero(rotor, model="peters_he")
         omega    = float(omega_init)
         vel      = float(v_along_init) * t_hat
         col_now  = float(col)
@@ -133,6 +131,7 @@ def simulate_point(
         int_vx   = 0.0
         int_vy   = 0.0
         int_vcol = 0.0
+    spin_angle = 0.0
 
     history   = []
     log_every = max(1, int(round(1.0 / dt)))
@@ -140,18 +139,27 @@ def simulate_point(
     conv_steps = max(1, int(round(conv_window_s / dt)))
 
     for i in range(n_steps):
+        inputs = RotorInputs(
+            collective_rad = col_now, tilt_lon = c_lon, tilt_lat = c_lat,
+            R_hub          = R,       v_hub_world = vel.copy(),
+            wind_world     = wind,    omega_rad_s = omega,
+            rho_kg_m3      = 1.225,
+        )
         try:
-            f = aero.compute_forces(col_now, c_lon, c_lat, R, vel.copy(), omega, wind)
+            f, rotor_state = aero.step(inputs, rotor_state, dt)
         except (OverflowError, ValueError, FloatingPointError):
             break
-        if not aero.is_valid():
+        if not np.all(np.isfinite(f.F_world)) or not math.isfinite(f.Q_spin):
             break
 
         thrust     = float(np.dot(f.F_world, bz))
-        Q_net      = float(np.dot(aero.last_M_spin, bz))
         F_net      = f.F_world + F_teth + np.array([0.0, 0.0, weight])  # weight = mass*gravity
 
-        omega = max(0.0, omega + (Q_net / I_spin) * dt)
+        omega, spin_angle = step_omega(
+            omega, spin_angle, float(f.Q_spin), 0.0, I_ode, dt,
+            bearing_friction_Nm=BEARING_FRICTION_NM,
+        )
+        omega = max(omega_min, omega)
         vel   = vel + (F_net / mass) * dt
 
         # Cyclic PI: null cross-tether velocity only (project out along-tether)
@@ -241,7 +249,6 @@ def simulate_point(
         int_vx   = int_vx,
         int_vy   = int_vy,
         int_vcol = int_vcol,
-        aero_state = aero.to_dict(),
     )
 
     return dict(history=history, eq=eq, cyc_saturated=cyc_sat,

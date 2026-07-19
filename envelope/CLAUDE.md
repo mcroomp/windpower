@@ -13,21 +13,34 @@ target tensions are reachable across the full reel-out/reel-in envelope.
 
 | File | Purpose |
 |------|---------|
-| `point_mass.py` | Single-cell ODE integrator — generalised point-mass force balance at arbitrary elevation. `simulate_point(col, elevation_deg, tension_n, wind_speed, ...)` → `{eq, history}`. Uses `model="peters_he"` (PetersHeBEMJit). |
+| `point_mass.py` | Single-cell ODE integrator — generalised point-mass force balance at arbitrary elevation. `simulate_point(col, elevation_deg, tension_n, wind_speed, ...)` → `{eq, history}`. Uses `model="quasi_static"` (the project's production aero model; see below for the open validity caveat). |
 | `compute_map.py` | Parallel grid computation. `_ramp_full_column()` sweeps tension from T_min→T_max on a single (wind, angle, v_target) column, sampling at each grid tension. `compute_grid()` runs all columns in a `ProcessPoolExecutor`. CLI: `--quick` / `--full` / `--load`. |
 | `analyse_envelope.py` | Post-processing: load `.npz` grid, compute net-energy contours, plot slices, export CSVs. |
 
 ---
 
-## Peters-He Dependency
+## Aero Model — Peters-He Removed, Not Yet Replaced for High Elevation
 
-All cells use `model="peters_he"` → `PetersHeBEMJit` (Numba JIT, 5-state dynamic inflow).
-This is required because the envelope covers near-vertical angles (high elevation, xi ≳ 85°)
-where the Coleman skewed-wake correction degenerates. Peters-He uses a momentum ODE
-(`V_T = sqrt(v_inplane² + v_axial²)`) that is valid from hover through axial descent.
+The envelope module used to run all cells with `model="peters_he"` (`PetersHeBEMJit`,
+Numba JIT, 5-state dynamic inflow) because the envelope covers near-vertical angles
+(high elevation, xi ≳ 85°) where the Coleman skewed-wake correction degenerates.
+Peters-He used a momentum ODE (`V_T = sqrt(v_inplane² + v_axial²)`) valid from hover
+through axial descent.
 
-`PetersHeBEM.is_valid()` guards on `abs(v0, v1c, v1s) ≤ INFLOW_MAX_MS=50.0` and
-`isfinite(last_T)`. `point_mass.py` calls this at line 148 to detect diverged states.
+**`dynbem` no longer exposes a Peters-He model at all** (no `"peters_he"`/`"jit"` key,
+no `PetersHeBEM` class — see `design/simulation.md` "Aerodynamic Model" section for the
+current model list: `quasi_static`/`bem`, `pitt_peters`, `oye`/`oye_bem`, `vpm`). The
+module has been migrated to `model="quasi_static"` (the project's production model,
+used everywhere else in windpower) purely to restore a working state-based API — this
+has **not** been validated as accurate at high elevation/near-axial-descent angles the
+way Peters-He was. Treat envelope results near xi ≳ 85° with caution until this is
+revisited (e.g. by trying `pitt_peters`/`oye` or asking upstream for a Peters-He-
+equivalent replacement in `dynbem`).
+
+The per-step `isfinite`/`OverflowError`/`ValueError` guards that used to call
+`PetersHeBEM.is_valid()` now check `np.isfinite(f.F_world)` / `math.isfinite(f.Q_spin)`
+directly on the `AeroResult` returned by `aero.step()` — there is no separate
+`is_valid()` method in the current API.
 
 ---
 

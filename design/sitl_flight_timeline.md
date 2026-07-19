@@ -105,8 +105,9 @@ Rotor state reference for this run:
   `kinematic_exit`; there is no distinct spin-start transition in this run.
 
 Tilt scheduling ownership note:
-- The kinematic hold controller (`make_hold_controller`) is setup/parameter plumbing in
-  the stack harness; it is not the runtime source of tilt commands in this IC-start path.
+- The kinematic hold controller setup in the stack harness (`tests/sitl/stack_infra.py`)
+  is parameter/anchor plumbing only; it is not the runtime source of tilt commands in
+  this IC-start path.
 - Runtime tilt scheduling during kinematic hold comes from `rawes.lua` in `MODE_PASSIVE`
   once the IC seed is complete (`RAWES_THR` + `RAWES_RIC` + `RAWES_PIC`) and
   `guided_ok` is true.

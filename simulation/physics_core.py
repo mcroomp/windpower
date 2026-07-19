@@ -39,7 +39,7 @@ import sys
 import os
 
 from simulation.dynamics import RigidBodyDynamics
-from dynbem       import create_aero, RotorInputs, euler_step_omega
+from dynbem       import create_aero, RotorInputs, step_omega
 from simulation.tether import TetherModel
 from simulation.rotor_physics import resolve_i_spin_kgm2
 from simulation.param_defaults import thrust_to_coll_rad as _t2c
@@ -47,6 +47,14 @@ from simulation.torque_model import (
     HubState as _HubState, HubParams as _HubParams, step as _hub_step,
     equilibrium_throttle as _hub_equilibrium_throttle,
 )
+
+# Coulomb (dry) bearing friction on the rotor's own spin axle [N.m], fed into
+# dynbem.mechanical.step_omega. This is a windpower simulation constant, not
+# part of the aero rotor definition (rotor.autorotation carries only I_ode_kgm2
+# and omega_min_rad_s -- aerodynamic-adjacent inertia/clamp values owned by
+# dynbem's rotor schema). 0.0 = frictionless; not yet characterised on the
+# bench (see design/hardware.md).
+BEARING_FRICTION_NM = 0.0
 
 
 @dataclass
@@ -448,7 +456,7 @@ class PhysicsCore:
             # RotorInputs field (not part of RotorState) so it stays external.
             result, self._rotor_state = self._aero.step(rotor_inputs, self._rotor_state, dt)
 
-            # Integrate omega externally using euler_step_omega
+            # Integrate omega externally using step_omega
             omega_min = (r.autorotation.omega_min_rad_s
                          if r.autorotation.omega_min_rad_s is not None else 0.5)
             I_ode = (r.autorotation.I_ode_kgm2
@@ -464,9 +472,10 @@ class PhysicsCore:
                 self._hub_state.omega_motor = self._omega_rad_s * self._hub_params.gear_ratio
                 self._hub_state.psi_dot = 0.0
             else:
-                new_omega, new_spin = euler_step_omega(
+                new_omega, new_spin = step_omega(
                     self._omega_rad_s, self._spin_angle_rad,
                     float(result.Q_spin), 0.0, I_ode, dt,
+                    bearing_friction_Nm=BEARING_FRICTION_NM,
                 )
                 self._omega_rad_s    = max(omega_min, new_omega)
                 self._spin_angle_rad = new_spin

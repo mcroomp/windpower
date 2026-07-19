@@ -70,8 +70,6 @@ DT_TARGET    = 1.0 / SIM_CLOCK_HZ   # fixed lockstep loop rate [s]
 TELEMETRY_HZ = 400.0           # telemetry CSV write rate [Hz]
 LOG_INTERVAL = 1.0             # position/attitude log interval [s]
 WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
-I_SPIN_KGMS2 = 10.0            # rotor spin-axis moment of inertia [kg·m²]
-OMEGA_SPIN_MIN = 0.5           # minimum spin rate clamp [rad/s]
 
 
 # ---------------------------------------------------------------------------
@@ -542,10 +540,6 @@ def run_mediator(args, trajectory=None):
         elif issue.level == "WARNING":
             log.warning("Rotor validation: %s", issue)
 
-    # Shadow module-level constants with rotor-definition values
-    I_SPIN_KGMS2   = rotor.autorotation.I_ode_kgm2
-    OMEGA_SPIN_MIN = rotor.autorotation.omega_min_rad_s
-
     # Collective denormalisation range (must precede _ic which uses _col_min_rad)
     _col_min_rad, _col_max_rad = _load_col_range()
 
@@ -914,6 +908,7 @@ def run_mediator(args, trajectory=None):
             _mav_async = get_async_mavlink_snapshot()
             _rpy = sensor_data["rpy"]
             _ti  = core.tether._last_info
+            _aero_v_i = 0.0
             _cur_phase = _phase_label
             if _cur_phase and _cur_phase != _prev_phase and not _tel_note:
                 _tel_note = f"phase_{_cur_phase.replace('-', '_')}_start"
@@ -950,6 +945,7 @@ def run_mediator(args, trajectory=None):
                 "aero_fy":         aero_result.F_world[1],
                 "aero_fz":         aero_result.F_world[2],
                 "aero_T":          float(np.linalg.norm(aero_result.F_world)),
+                "aero_v_i":        _aero_v_i,
                 "aero_mx":         aero_result.m_hub_world[0],
                 "aero_my":         aero_result.m_hub_world[1],
                 "aero_mz":         aero_result.m_hub_world[2],
