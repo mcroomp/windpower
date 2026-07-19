@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -100,7 +101,7 @@ class ParamSetup:
         extended = base_setup.update({"NEW_PARAM": 1.0})
     """
 
-    def __init__(self, params: "dict[str, int | float]"):
+    def __init__(self, params: "Mapping[str, int | float]"):
         self._params: "dict[str, int | float]" = {
             k: (int(v) if isinstance(v, int) else float(v))
             for k, v in params.items()
@@ -436,7 +437,7 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     # os.killpg because processes may not be their own process group leader
     # (e.g. when start_new_session is not set).
     try:
-        os.kill(proc.pid, signal.SIGTERM)
+        os.kill(proc.pid, getattr(signal, "SIGTERM", 15))
     except ProcessLookupError:
         return
     try:
@@ -445,7 +446,7 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.kill(proc.pid, signal.SIGKILL)
+        os.kill(proc.pid, getattr(signal, "SIGKILL", 9))
     except ProcessLookupError:
         return
     proc.wait(timeout=5.0)
@@ -502,7 +503,7 @@ def _kill_by_port(port: int, proto: str = "tcp") -> None:
                 if os.readlink(fd_path) == target:
                     pid = int(fd_path.split("/")[2])
                     try:
-                        os.kill(pid, _signal.SIGKILL)
+                        os.kill(pid, getattr(_signal, "SIGKILL", 9))
                     except (ProcessLookupError, PermissionError):
                         pass
             except OSError:

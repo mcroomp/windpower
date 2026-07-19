@@ -101,7 +101,6 @@ from groundstation.gcs import (
     SetAttitudeTarget,
 )
 from simulation.mediator_events import MediatorEventLog
-from simulation.controller import make_hold_controller
 from simulation.ic import load_ic_dict, IC_JSON_PATH
 
 _STARTING_STATE       = IC_JSON_PATH
@@ -328,7 +327,6 @@ class StackContext:
     all_statustext : all STATUSTEXT messages seen during setup
     setup_samples  : list of dicts — EKF/ATTITUDE samples captured during setup
     sim_dir        : simulation/ directory (for writing outputs)
-    controller     : PhysicalHoldController instance
     last_local_position_ned : most recent (x, y, z, vx, vy, vz) LOCAL_POSITION_NED
                               sample seen by wait_drain(), or None
 
@@ -338,9 +336,9 @@ class StackContext:
     """
     # ── required for all stack tests ──────────────────────────────────────────
     gcs:           RawesGCS
-    mediator_proc: object
-    sitl_proc:     object
-    mediator_log:  Path
+    mediator_proc: subprocess.Popen | None
+    sitl_proc:     subprocess.Popen | None
+    mediator_log:  Path | None
     sitl_log:      Path
     gcs_log:       Path
     events_log:    MediatorEventLog
@@ -353,9 +351,8 @@ class StackContext:
     flight_events:       dict         = dataclasses.field(default_factory=dict)
     all_statustext:      list         = dataclasses.field(default_factory=list)
     setup_samples:       list         = dataclasses.field(default_factory=list)
-    sim_dir:             Path | None  = None
-    controller:          object       = None
-    test_log_dir:        Path | None  = None
+    sim_dir:             Path = dataclasses.field(default_factory=Path)
+    test_log_dir:        Path = dataclasses.field(default_factory=Path)
     last_local_position_ned: tuple | None = None
     # ── pumping socket (default 0 = disabled) ────────────────────────────────
     winch_cmd_port:      int          = 0
@@ -432,7 +429,7 @@ class StackContext:
                 ("mediator", self.mediator_proc, self.mediator_log),
                 ("SITL",     self.sitl_proc,     self.sitl_log),
             ]:
-                if proc.poll() is not None:
+                if proc is not None and proc.poll() is not None:
                     txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                     pytest.fail(
                         f"{name} exited during {label} "
@@ -505,10 +502,10 @@ class SitlContext:
     repo_root:     Path
     log:           logging.Logger
     test_log_dir:  Path
-    boot_setup:    object            # ParamSetup
+    boot_setup:    ParamSetup | None
     # Set by _static_stack; None when using _sitl_stack directly
-    mediator_proc: object = None     # subprocess.Popen | None
-    mediator_log:  "Path | None" = None
+    mediator_proc: subprocess.Popen | None = None
+    mediator_log:  Path | None = None
 
 
 @contextlib.contextmanager
@@ -576,8 +573,12 @@ def _sitl_stack(
         # project YAML carries 545 deg/s / 100 deg ≈ 5.45.
         try:
             _rotor = _project_default_rotor()
-            _servo_speed = (_rotor.control.servo_slew_rate_deg_s
-                            / _rotor.control.servo_travel_deg)
+            _control = getattr(_rotor, "control", None)
+            _servo_slew = getattr(_control, "servo_slew_rate_deg_s", None)
+            _servo_travel = getattr(_control, "servo_travel_deg", None)
+            if _servo_slew is None or _servo_travel is None or _servo_travel == 0:
+                raise ValueError("missing rotor control rates")
+            _servo_speed = float(_servo_slew) / float(_servo_travel)
         except Exception as _exc:
             # Keep arm/connectivity stack tests runnable even if dynbem is
             # unavailable in the container (e.g. Rust toolchain mismatch).
@@ -769,17 +770,13 @@ def _acro_stack(tmp_path, *, extra_config=None,
         initial_state = load_ic_dict()
         home_alt_m    = -float(initial_state["pos"][2])
 
-    # ── Hold controller ────────────────────────────────────────────────────────
+    # ── Anchor position ──────────────────────────────────────────────────────
     _anchor_ned = _np.array([0.0, 0.0, float(home_alt_m)])
-    controller   = make_hold_controller(anchor_ned=_anchor_ned)
 
     # ── Lua scripts ───────────────────────────────────────────────────────────
     _install_lua_scripts("rawes.lua")
 
-    # ── Merge controller params + test extras into boot params ─────────────────
-    _extra: dict = dict(controller.extra_params)
-    if extra_boot_params:
-        _extra.update(extra_boot_params)
+    _extra: dict = dict(extra_boot_params) if extra_boot_params else {}
 
     _med_extra = dict(extra_config or {})
     _med_extra.setdefault("mavlink_log_connection", "tcp:127.0.0.1:5762")
@@ -794,7 +791,6 @@ def _acro_stack(tmp_path, *, extra_config=None,
         extra_boot_params = _extra,
     ) as sitl_ctx:
         log = sitl_ctx.log
-        log.info("Hold controller: %s", type(controller).__name__)
 
         # ── Extra log paths (mediator-specific) ────────────────────────────────
         mediator_log  = tmp_path / "mediator.log"
@@ -821,11 +817,11 @@ def _acro_stack(tmp_path, *, extra_config=None,
             mediator_proc = None
 
         def _procs_alive():
-            _checks = [("SITL", sitl_ctx.sitl_proc, sitl_ctx.sitl_log)]
+            _checks: list[tuple[str, subprocess.Popen | None, Path]] = [("SITL", sitl_ctx.sitl_proc, sitl_ctx.sitl_log)]
             if with_mediator:
                 _checks.insert(0, ("mediator", mediator_proc, mediator_log))
             for name, proc, lp in _checks:
-                if proc.poll() is not None:
+                if proc is not None and proc.poll() is not None:
                     txt = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
                     pytest.fail(f"{name} exited early (rc={proc.returncode}):\n{txt[-3000:]}")
 
@@ -841,7 +837,6 @@ def _acro_stack(tmp_path, *, extra_config=None,
             initial_state=initial_state, home_alt_m=home_alt_m,
             flight_events={}, all_statustext=[], setup_samples=[],
             log=log, sim_dir=sitl_ctx.sim_dir,
-            controller=controller,
             test_log_dir=sitl_ctx.test_log_dir,
             winch_cmd_port=int(_med_extra.get("winch_cmd_port", 0)),
         )
@@ -1228,16 +1223,6 @@ def _run_acro_setup(
                 log.info("[setup 4/6] Clean ATTITUDE — EKF attitude ready.")
                 ekf_att = True
                 t_ekf   = t_now
-                # Capture equilibrium orientation for PhysicalHoldController.
-                # This is the tether equilibrium the hub holds during the 45 s
-                # kinematic startup (R locked to R0).  The controller uses
-                # (roll - roll_eq, pitch - pitch_eq) as a yaw-independent error
-                # so corrections stay valid even when velocity-derived yaw jumps
-                # ~150° at kinematic end when the tether activates.
-                if hasattr(ctx.controller, "set_equilibrium"):
-                    ctx.controller.set_equilibrium(decoded.roll, decoded.pitch)
-                    log.info("[setup 4/6] Equilibrium set: roll_eq=%.2f° pitch_eq=%.2f°",
-                             r, p)
             ekf_ok = ekf_att
 
         elif isinstance(decoded, EkfStatusReport):
@@ -1484,8 +1469,9 @@ def analyze_startup_logs(ctx: StackContext) -> dict:
     }
 
     # ── Mediator log ──────────────────────────────────────────────────────────
-    if ctx.mediator_log.exists():
-        lines = ctx.mediator_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    mediator_log = ctx.mediator_log
+    if mediator_log is not None and mediator_log.exists():
+        lines = mediator_log.read_text(encoding="utf-8", errors="replace").splitlines()
         result["mediator_tail"] = lines[-30:]
         for line in lines:
             if " ERROR " in line or " CRITICAL " in line:
@@ -1732,7 +1718,7 @@ def assert_procs_alive(ctx, label: str = "observation") -> None:
         ("mediator", ctx.mediator_proc, ctx.mediator_log),
         ("SITL",     ctx.sitl_proc,     ctx.sitl_log),
     ]:
-        if proc.poll() is not None:
+        if proc is not None and proc.poll() is not None:
             txt   = lp.read_text(encoding="utf-8", errors="replace") if lp.exists() else "(no log)"
             crash = get_arducopter_crash_info(ctx)
             pytest.fail(
