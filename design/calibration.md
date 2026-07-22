@@ -183,6 +183,31 @@ For `run`, the CSV now also captures:
 - Lua diagnostic NVFs: `YFF_*` and `OL_*`
 - `ATTITUDE_TARGET` state when emitted by ArduPilot
 - `PID_TUNING` state when emitted by ArduPilot
+- Actual (`ATTITUDE_QUATERNION`) and target (`ATTITUDE_TARGET.q`) attitude
+  quaternions (`mav_att_q_*` / `mav_att_target_q_*`), plus the quaternion
+  attitude error (`mav_att_qerr_*`): `conj(q_actual) (x) q_target`, its total
+  rotation angle (`mav_att_qerr_deg`), and a yaw-only deviation
+  (`mav_att_qerr_yaw_deg`, via `2*atan2(z, w)`). The Lua heading/yaw lock is
+  implemented as a quaternion attitude target under the hood (AP's
+  `set_target_angle_and_rate_and_throttle` converts the Euler args to a
+  quaternion before handing off to the attitude controller), so comparing
+  quaternions directly avoids the +-180 deg wraparound ambiguity that
+  differencing the two Euler yaw columns has near the wrap boundary.
+
+Neither `ATTITUDE_QUATERNION` (#31) nor `ATTITUDE_TARGET` (#83) rides along
+with the legacy `EXTRA1` `REQUEST_DATA_STREAM` group on ArduCopter -- `run`
+explicitly requests both via `MAV_CMD_SET_MESSAGE_INTERVAL` at 25 Hz. Without
+that explicit request, `mav_att_q_*`/`mav_att_target_q_*`/`mav_att_qerr_*`
+stay empty even while a GUIDED angle target is actively held (verify with
+`analysis/mavlink_jsonl_query.py types <log>.mavlink.jsonl` -- if a message
+type never appears at all, it's a missing stream/interval request, not a
+decode bug; see `analysis/mavlink_jsonl_query.md` for full usage -- it is
+the first-line tool for diagnosing any problematic run). `ATTITUDE_TARGET`
+also only appears at all once the vehicle is
+actually in `GUIDED`/`GUIDED_NOGPS` and Lua is driving an angle target (e.g.
+`run passive --hold`, or `steady`/`pumping`) -- a bare `run passive` without
+`--hold`/an IC-seeded IC still logs `mav_att_q_*` (actual attitude) but only
+gets a non-empty target/`qerr` once the hold is engaged.
 
 `PID_TUNING` caveat: ArduPilot may suppress these messages when `GCS_PID_MASK=0`.
 calibrate requests `PID_TUNING`, but the FC must still be configured to emit it.

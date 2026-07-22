@@ -645,7 +645,11 @@ class SetPositionTargetLocalNed:
 @dataclass(frozen=True)
 class SetAttitudeTarget:
     """MAVLink SET_ATTITUDE_TARGET (#82) -- mirrors
-    mavlink_set_attitude_target_t."""
+    mavlink_set_attitude_target_t.
+
+    Also used to decode the FC's ATTITUDE_TARGET (#83) telemetry echo of the
+    active attitude target (same field layout minus target_system/component).
+    `decode_message()` registers both wire message names against this class."""
     MAVLINK_TYPE: ClassVar[str] = "SET_ATTITUDE_TARGET"
 
     target_system:    int
@@ -682,6 +686,32 @@ class SetAttitudeTarget:
             body_pitch_rate=float(getattr(msg, "body_pitch_rate", 0.0)),
             body_yaw_rate=float(getattr(msg, "body_yaw_rate", 0.0)),
             thrust=float(getattr(msg, "thrust", 0.0)),
+            time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class AttitudeQuaternion:
+    """MAVLink ATTITUDE_QUATERNION (#31) -- mirrors
+    mavlink_attitude_quaternion_t.  q1..q4 are (w, x, y, z), NED body attitude."""
+    MAVLINK_TYPE: ClassVar[str] = "ATTITUDE_QUATERNION"
+
+    q1:         float  # w
+    q2:         float  # x
+    q3:         float  # y
+    q4:         float  # z
+    rollspeed:  float = 0.0   # rad/s
+    pitchspeed: float = 0.0   # rad/s
+    yawspeed:   float = 0.0   # rad/s
+    time_boot_ms: int = 0
+
+    @staticmethod
+    def decode(msg) -> "AttitudeQuaternion":
+        return AttitudeQuaternion(
+            q1=float(msg.q1), q2=float(msg.q2), q3=float(msg.q3), q4=float(msg.q4),
+            rollspeed=float(getattr(msg, "rollspeed", 0.0)),
+            pitchspeed=float(getattr(msg, "pitchspeed", 0.0)),
+            yawspeed=float(getattr(msg, "yawspeed", 0.0)),
             time_boot_ms=int(getattr(msg, "time_boot_ms", 0)),
         )
 
@@ -863,10 +893,18 @@ _MESSAGE_CLASS_BY_TYPE: dict[str, object] = {
         NamedValueFloat,
         NamedValueInt,
         SetAttitudeTarget,
+        AttitudeQuaternion,
         PidTuning,
     )
 }
 _MESSAGE_CLASS_BY_TYPE.update({name: EscTelemetry for name in _ESC_CHANNEL_BASE_BY_TYPE})
+# ATTITUDE_TARGET (#83) is the FC's telemetry echo of the active attitude
+# target -- same fields as SET_ATTITUDE_TARGET (#82) minus target_system/
+# component, so it decodes to the same dataclass.  Without this, ATTITUDE_TARGET
+# messages fell through decode_message() unchanged (raw pymavlink object), so
+# `isinstance(decoded, SetAttitudeTarget)` checks downstream never matched and
+# attitude-target logging columns stayed empty.
+_MESSAGE_CLASS_BY_TYPE["ATTITUDE_TARGET"] = SetAttitudeTarget
 
 
 def decode_message(msg):

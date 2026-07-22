@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
 # setup.sh -- RAWES one-time setup tasks.  All subcommands are idempotent.
-#
-# Subcommands:
+## Subcommands:
 #   (no args)   create or refresh the Windows venv at .venv (repo root)
-#                 hash-gated: requirements.txt is re-installed only when changed.
+#                 hash-gated: requirements.txt and the editable rawes package
+#                 install are each re-installed only when their source
+#                 (requirements.txt / pyproject.toml) changes.
 #   build       build rawes-sim runtime with ArduPilot (~30-60 min)
 #   build-lite  build rawes-sim runtime without ArduPilot (fast)
 #   hw          push canonical params to a real Pixhawk via MAVLink
@@ -25,6 +26,8 @@ VENV="$REPO_DIR/.venv"
 PYTHON="$VENV/Scripts/python.exe"
 REQS="$SIM_DIR/requirements.txt"
 STAMP="$VENV/Scripts/.requirements_hash"
+PYPROJECT="$REPO_DIR/pyproject.toml"
+PKG_STAMP="$VENV/Scripts/.editable_install_hash"
 
 _winpath() {
     if command -v cygpath &>/dev/null; then
@@ -62,6 +65,25 @@ _setup_venv() {
             echo "[INFO] Installing requirements ..."
             "$PYTHON" -m pip install -r "$(_winpath "$REQS")"
             echo "$digest" > "$STAMP"
+        fi
+    fi
+
+    # Hash-gated editable install: only reinstall when pyproject.toml changes.
+    # The editable install is what makes `import simulation`/`groundstation`/etc.
+    # work from any cwd or when a script is invoked by path (rather than via
+    # `python -c` from repo root) -- but re-running pip install -e on every
+    # invocation is unnecessary overhead once it's already registered.
+    if [ ! -f "$PYPROJECT" ]; then
+        echo "[WARN] $PYPROJECT not found -- skipping editable install"
+    else
+        local pkg_digest
+        pkg_digest="$(sha256sum "$PYPROJECT" | awk '{print $1}')"
+        if [ -f "$PKG_STAMP" ] && [ "$(cat "$PKG_STAMP")" = "$pkg_digest" ]; then
+            echo "[INFO] pyproject.toml unchanged -- skipping pip install -e"
+        else
+            echo "[INFO] Installing rawes package (editable) ..."
+            "$PYTHON" -m pip install -e "$(_winpath "$REPO_DIR")" --no-deps --quiet
+            echo "$pkg_digest" > "$PKG_STAMP"
         fi
     fi
 

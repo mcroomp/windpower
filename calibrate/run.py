@@ -24,6 +24,7 @@ except ImportError:
 
 from .constants import (
     Attitude,
+    AttitudeQuaternion,
     Heartbeat,
     EscTelemetry,
     PidTuning,
@@ -313,6 +314,10 @@ def _run_observation(session: RawesGCS, mode_name: str,
             "mav_att_target_roll_deg", "mav_att_target_pitch_deg", "mav_att_target_yaw_deg",
             "mav_att_target_roll_rate_rads", "mav_att_target_pitch_rate_rads", "mav_att_target_yaw_rate_rads",
             "mav_att_target_thrust",
+            "mav_att_q_w", "mav_att_q_x", "mav_att_q_y", "mav_att_q_z",
+            "mav_att_target_q_w", "mav_att_target_q_x", "mav_att_target_q_y", "mav_att_target_q_z",
+            "mav_att_qerr_w", "mav_att_qerr_x", "mav_att_qerr_y", "mav_att_qerr_z",
+            "mav_att_qerr_deg", "mav_att_qerr_yaw_deg",
             "ch1_us", "ch2_us", "ch3_us", "ch4_us",
             "mav_servo1_us", "mav_servo2_us", "mav_servo3_us", "mav_servo9_us",
             "vbat_v", "current_a",
@@ -329,7 +334,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
     # Live table: H_YAW_TRIM output (out=trim), motor throttle command (u=YFF_U),
     # swashplate PWMs (s1..s3), GB4008 motor PWM with 5 s rolling average, rotor RPM.
     print_cols = ["t(s)", "armed", "yaw(d)", "yrate_d", "out", "u",
-                  "s1", "s2", "s3", "mot", "mot~5s", "V", "A", "mRPM"]
+                  "s1", "s2", "s3", "mot", "mot~5s", "qerr(d)", "qyaw(d)", "mRPM"]
 
     mot_window_s = 5.0   # rolling average window for motor (SERVO_MOTOR) PWM
 
@@ -418,6 +423,8 @@ def _run_observation(session: RawesGCS, mode_name: str,
         "att_target_roll": None, "att_target_pitch": None, "att_target_yaw": None,
         "att_target_roll_rate": None, "att_target_pitch_rate": None, "att_target_yaw_rate": None,
         "att_target_thrust": None,
+        "att_q": None,          # actual attitude quaternion (w, x, y, z) from ATTITUDE_QUATERNION
+        "att_target_q": None,   # target attitude quaternion (w, x, y, z) from ATTITUDE_TARGET
         "ch1": None, "ch2": None, "ch3": None, "ch4": None,
         "s1": None, "s2": None, "s3": None, "smot": None,
         "smot_hist": [],
@@ -454,6 +461,41 @@ def _run_observation(session: RawesGCS, mode_name: str,
         yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
         return roll, pitch, yaw
 
+    def _quat_conj(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        w, x, y, z = q
+        return (w, -x, -y, -z)
+
+    def _quat_mul(a: tuple[float, float, float, float],
+                  b: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        aw, ax, ay, az = a
+        bw, bx, by, bz = b
+        return (
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        )
+
+    def _quat_error(q_actual, q_target):
+        """Body-frame rotation error q_err = conj(q_actual) (x) q_target --
+        i.e. the rotation that takes the actual attitude onto the target
+        attitude.  Using the quaternion error directly (rather than
+        differencing the two Euler yaws) avoids the +-180 deg wraparound
+        ambiguity Euler subtraction has at the heading-lock boundary.
+
+        Returns (qerr_w, qerr_x, qerr_y, qerr_z, total_err_deg, yaw_err_deg)
+        or a tuple of Nones if either input is missing.  yaw_err_deg uses the
+        small-roll/pitch-error approximation 2*atan2(z, w), which is exact
+        when the error is a pure yaw rotation (the case for a yaw/heading
+        lock holding roll/pitch elsewhere) and near-exact otherwise."""
+        if q_actual is None or q_target is None:
+            return (None,) * 6
+        qe = _quat_mul(_quat_conj(q_actual), q_target)
+        w, x, y, z = qe
+        total_deg = math.degrees(2.0 * math.acos(max(-1.0, min(1.0, abs(w)))))
+        yaw_deg = math.degrees(2.0 * math.atan2(z, w))
+        return w, x, y, z, total_deg, yaw_deg
+
     def handle_msg(st, msg, t_rel):
         if isinstance(msg, Attitude):
             state["roll"]     = math.degrees(msg.roll)
@@ -462,6 +504,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
             state["yaw_rate"] = msg.yawspeed          # rad/s (mav_att_yaw_rate_rads)
             # Emit one CSV row per ATTITUDE message (typically 10-50 Hz)
             _erpm, _mech, _rotor = _rpm_triplet(state["erpm"])
+            _qw, _qx, _qy, _qz, _qerr_deg, _qerr_yaw_deg = _quat_error(state["att_q"], state["att_target_q"])
             return [
                 f"{t_rel:.4f}", int(st["armed"]),
                 _fmt(state["roll"]), _fmt(state["pitch"]), _fmt(state["yaw"]),
@@ -469,6 +512,10 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 _fmt(state["att_target_roll"]), _fmt(state["att_target_pitch"]), _fmt(state["att_target_yaw"]),
                 _fmt(state["att_target_roll_rate"]), _fmt(state["att_target_pitch_rate"]), _fmt(state["att_target_yaw_rate"]),
                 _fmt(state["att_target_thrust"]),
+                *(_fmt(v) for v in (state["att_q"] or (None, None, None, None))),
+                *(_fmt(v) for v in (state["att_target_q"] or (None, None, None, None))),
+                _fmt(_qw), _fmt(_qx), _fmt(_qy), _fmt(_qz),
+                _fmt(_qerr_deg), _fmt(_qerr_yaw_deg),
                 state["ch1"], state["ch2"], state["ch3"], state["ch4"],
                 state["s1"], state["s2"], state["s3"], state["smot"],
                 _fmt(state["vbat"]), _fmt(state["curr"]),
@@ -491,6 +538,10 @@ def _run_observation(session: RawesGCS, mode_name: str,
             state["att_target_pitch_rate"] = msg.body_pitch_rate
             state["att_target_yaw_rate"] = msg.body_yaw_rate
             state["att_target_thrust"] = msg.thrust
+            if msg.q is not None and len(msg.q) == 4:
+                state["att_target_q"] = tuple(float(v) for v in msg.q)
+        elif isinstance(msg, AttitudeQuaternion):
+            state["att_q"] = (msg.q1, msg.q2, msg.q3, msg.q4)
         elif isinstance(msg, RcChannels):
             state["ch1"] = msg.chan1_raw
             state["ch2"] = msg.chan2_raw
@@ -593,6 +644,9 @@ def _run_observation(session: RawesGCS, mode_name: str,
         mrpm_avg_s = None
         if state["mrpm_hist"]:
             mrpm_avg_s = f"{sum(v for _, v in state['mrpm_hist']) / len(state['mrpm_hist']):.0f}"
+        _, _, _, _, _qerr_deg, _qerr_yaw_deg = _quat_error(state["att_q"], state["att_target_q"])
+        qerr_s = f"{_qerr_deg:+6.2f}" if _qerr_deg is not None else None
+        qyaw_s = f"{_qerr_yaw_deg:+6.2f}" if _qerr_yaw_deg is not None else None
         return [
             f"{t_rel:.1f}",
             "YES" if st["armed"] else "no",
@@ -601,8 +655,8 @@ def _run_observation(session: RawesGCS, mode_name: str,
             out_s,
             i_s,
             state["s1"], state["s2"], state["s3"], state["smot"], mot_avg_s,
-            f"{state['vbat']:.2f}" if state["vbat"] is not None else None,
-            f"{state['curr']:.2f}" if state["curr"] is not None else None,
+            qerr_s,
+            qyaw_s,
             mrpm_avg_s,
         ]
 
@@ -618,6 +672,32 @@ def _run_observation(session: RawesGCS, mode_name: str,
             param1=float(_esc_id),
             param2=200000.0,
         ))  # 5 Hz
+
+        # ATTITUDE_QUATERNION (#31) isn't guaranteed to ride along with the
+        # legacy EXTRA1 REQUEST_DATA_STREAM group on every AP build, so request
+        # it explicitly at the same rate as ATTITUDE -- needed for the
+        # quaternion heading-lock deviation columns (mav_att_qerr_*).
+        session.send_message(CommandLong(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION),
+            param2=40000.0,
+        ))  # 25 Hz
+
+        # ATTITUDE_TARGET (#83) -- the FC's telemetry echo of the active GUIDED
+        # angle target -- is likewise NOT part of the EXTRA1 stream group and
+        # was previously only listed in the msg_types receive filter with no
+        # request ever sent for it, so it never arrived (mav_att_target_q_*/
+        # mav_att_qerr_* stayed empty even while a target was actively being
+        # held). Request it explicitly, same as ATTITUDE_QUATERNION above.
+        session.send_message(CommandLong(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET),
+            param2=40000.0,
+        ))  # 25 Hz
 
         if not keep_rc:
             session.send_message(CommandLong(
@@ -637,7 +717,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         session,
         duration_s=duration,
         msg_types=["ATTITUDE", "RC_CHANNELS", "SERVO_OUTPUT_RAW",
-                   "ATTITUDE_TARGET", "PID_TUNING",
+                   "ATTITUDE_TARGET", "ATTITUDE_QUATERNION", "PID_TUNING",
                    "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
                    "NAMED_VALUE_FLOAT",
                    _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],

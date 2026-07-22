@@ -348,6 +348,7 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_RIC | rad | IC roll — part of the atomic passive IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
 | RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
 | RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
+| RAWES_YIC | rad, or the `RAWES_YIC_CAPTURE_SENTINEL` (-1000) | Fixed yaw target for MODE_PASSIVE, held as an absolute setpoint instead of capturing the (possibly spinning) AHRS yaw. Sending the sentinel instead captures the CURRENT roll/pitch/yaw all at once from AHRS (calibrate `run passive --hold`) — see §4.2b "IC seeding via capture" for the one-shot-per-boot commit gotcha. |
 
 **Named int inputs (ground → Lua, via `gcs.send_message(NamedValueInt(...))`, one-shot anchor location):**
 
@@ -423,6 +424,31 @@ emits any control output:
 Until all three arrive, `run_passive_mode` returns early and emits no
 control-API traffic (no guided target writes, no arm/disarm). Once `_ic_seeded`
 latches, incremental updates to any of the three are accepted.
+
+**IC seeding via capture (`RAWES_YIC` sentinel / calibrate `--hold`).**
+Instead of ground-supplied `RAWES_RIC`/`RAWES_PIC` values, sending
+`RAWES_YIC = RAWES_YIC_CAPTURE_SENTINEL` (-1000 rad, calibrate `run passive
+--hold`) tells Lua to capture the **current** AHRS roll/pitch/yaw as the IC
+seed instead — i.e. "hold exactly the attitude the vehicle is in right now"
+(no `RAWES_RIC`/`RAWES_PIC` should be sent alongside it). This capture writes
+`_ic_pending_roll_deg`/`_ic_pending_pitch_deg` (and `_passive_yaw_fixed_rad`)
+AND commits directly to `_ic_roll_deg`/`_ic_pitch_deg` in the same tick — the
+direct commit is required because `_ic_seeded` is Lua global state that
+persists across `RAWES_MODE` transitions for the whole FC boot (it is never
+reset on mode entry). If a `--hold` capture happens after passive has already
+been seeded once earlier in the same boot (e.g. an earlier `--roll/--pitch`
+run, or a prior `--hold`), relying only on the pending fields would leave
+`_ic_roll_deg`/`_ic_pitch_deg` frozen at the stale prior value forever, since
+the "already seeded" incremental-update branch only reacts to explicit
+`RAWES_RIC`/`RAWES_PIC` NVFs, not to the sentinel-capture pending fields. This
+previously caused the GUIDED angle target to stay at the *previous* run's
+roll/pitch (e.g. 0/0) while the vehicle held a completely different actual
+attitude, producing a large, non-decaying `mav_att_qerr_deg` in `calibrate run`
+telemetry — diagnose this class of bug by comparing `RAWES YIC capture: r=...
+p=... y=...` against subsequent `RAWES guided cmd: ... rpy=(...)` STATUSTEXT
+lines (`analysis/mavlink_jsonl_query.py statustext`): if the commanded rpy
+never converges to the captured r/p, the capture never reached the committed
+fields.
 
 **Per-tick command** (once seeded and in GUIDED):
 
