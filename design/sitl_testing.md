@@ -162,6 +162,7 @@ first — diagnosing from bad telemetry produces wrong conclusions.
 |------|---------|
 | Pump cycle diagnosis | `.venv/Scripts/python.exe analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
 | Landing diagnosis | `.venv/Scripts/python.exe analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
+| Raw MAVLink inspection (STATUSTEXT, message presence, NVF/param events) | `.venv/Scripts/python.exe analysis/mavlink_jsonl_query.py ... <test_name>/*.mavlink.jsonl` -- see [analysis/mavlink_jsonl_query.md](../analysis/mavlink_jsonl_query.md) |
 | Visualize result | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
 | EKF gating reference | [design/EKF_GATING.md](EKF_GATING.md), [design/ekf_const_pos_mode.md](ekf_const_pos_mode.md) |
 

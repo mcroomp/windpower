@@ -1145,6 +1145,18 @@ local function update()
                 _nv_floats["RAWES_YIC"] = nil
                 _ic_pending_roll_deg = math.deg(ahrs:get_roll_rad())
                 _ic_pending_pitch_deg = math.deg(ahrs:get_pitch_rad())
+                -- Also commit directly to _ic_roll_deg/_ic_pitch_deg (not just
+                -- the *_pending_* staging fields).  The "not _ic_seeded" atomic
+                -- commit below only copies pending -> committed ONCE, the first
+                -- time IC seeding happens after a Lua (re)load.  _ic_seeded is
+                -- Lua global state that persists across RAWES_MODE transitions
+                -- within the same FC boot, so a second/later --hold capture in
+                -- the same boot would otherwise land only in the *_pending_*
+                -- fields and never reach send_guided_angle_rate_throttle(),
+                -- leaving the GUIDED target frozen at whatever roll/pitch was
+                -- committed earlier (e.g. 0/0 from a prior --roll/--pitch run).
+                _ic_roll_deg = _ic_pending_roll_deg
+                _ic_pitch_deg = _ic_pending_pitch_deg
                 _passive_yaw_fixed_rad = ahrs:get_yaw_rad()
                 gcs:send_text(6, string.format(
                     "RAWES YIC capture: r=%.1f p=%.1f y=%.1f",

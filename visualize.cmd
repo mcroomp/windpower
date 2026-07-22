@@ -10,11 +10,8 @@ if "%~1"=="" (
     set "CSV=%~1"
 )
 
-if not exist "%PY%" (
-    echo Python venv not found. Expected:
-    echo   %ROOT%.venv\Scripts\python.exe
-    exit /b 1
-)
+call "%ROOT%setup.cmd"
+if errorlevel 1 exit /b 1
 
 pushd "%ROOT%" >nul
 start "RAWES visualization" cmd /k ""%PY%" viz3d\visualize_3d.py "%CSV%""

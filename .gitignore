@@ -18,8 +18,12 @@ env/
 simulation/logs/
 *.log
 
-# One-off / diagnostic scripts (kept locally for reproducibility, not checked in by default)
-tests/oneoff/
+# One-off / diagnostic scripts (kept locally for reproducibility, not checked in
+# by default). Matched at any depth -- e.g. simulation/tests/oneoff/ is a stray
+# legacy path that predates tests/oneoff/ moving to the repo-root tests/ package
+# (see AGENTS.md repo layout); anchoring this to root only would silently leave
+# that directory's scratch scripts untracked-but-visible to `git status`.
+**/tests/oneoff/
 
 # Generated flight report plots
 *.png

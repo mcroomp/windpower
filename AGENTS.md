@@ -118,11 +118,22 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
+| MAVLink `*.mavlink.jsonl` log inspection (calibrate `run`, SITL stack tests) | `analysis/mavlink_jsonl_query.md` | `design/calibration.md` |
 
 Parameter-reference ownership note:
 - Canonical place for ArduPilot parameter defaults and inline explanations is `tests/sitl/copter-heli.parm`.
 - Canonical place for RAWES_* parameter defaults and inline explanations is `tests/sitl/rawes_common_defaults.parm`.
 - If a parameter explanation changes, update the owning `.parm` file first; other docs should link to it instead of duplicating bitmasks/tables.
+
+## MAVLink Log Diagnosis (Agent Critical)
+
+For ANY problematic run that produced a `*.mavlink.jsonl` log (calibrate `run`,
+SITL stack tests), use `analysis/mavlink_jsonl_query.py` as the first-line
+diagnostic tool -- before writing one-off jsonl-parsing code or manually
+grepping the raw file. See `analysis/mavlink_jsonl_query.md` for the full
+interface (subcommands, filters, gotchas); do not duplicate its contents
+here. If a diagnosis need doesn't fit an existing subcommand, prefer
+extending the script (new subcommand/filter) over a standalone script.
 
 ## Core Invariants (summary)
 

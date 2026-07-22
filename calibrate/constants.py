@@ -14,6 +14,7 @@ import simulation
 # Re-exported so submodules can do `from .constants import RawesGCS` etc.
 from groundstation.gcs         import (
     Attitude,
+    AttitudeQuaternion,
     EscTelemetry,
     PidTuning,
     BatteryStatus,

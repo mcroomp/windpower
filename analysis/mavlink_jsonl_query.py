@@ -8,10 +8,13 @@ both groundstation/gcs.py (RawesGCS.start_mavlog) and the bench calibration tool
 
     {"_t_wall": <float>, "_dir": "rx"|"tx", "mavpackettype": "<TYPE>", ...fields...}
 
-This is the standard tool for ad-hoc inspection of these logs -- prefer
-extending this script (new subcommand or filter) over writing one-off jsonl
-parsing code. See mavlink_jsonl_query.md in this directory for usage
-docs/examples; keep that file in sync with any command/flag changes.
+This is the standard, first-line tool for diagnosing any problematic run that
+has a `*.mavlink.jsonl` log (calibrate `run`, SITL stack tests) -- prefer it
+over writing one-off jsonl parsing code or manually grepping the raw file, and
+prefer extending this script (new subcommand or filter) over either of those.
+See mavlink_jsonl_query.md in this directory for the canonical usage doc
+(subcommand intent, gotchas, examples); keep that file in sync with any
+command/flag changes.
 
 Usage summary (see `--help` on each subcommand for full options):
     mavlink_jsonl_query.py types      <log.jsonl>
@@ -229,19 +232,68 @@ def cmd_armed(args: argparse.Namespace) -> None:
             last_mode = mode
 
 
-def cmd_statustext(args: argparse.Namespace) -> None:
-    msgs = load(args.log)
-    for m in apply_filters(msgs, types=["STATUSTEXT"], direction="rx",
-                            since=args.since, until=args.until):
-        sev = m.get("severity", -1)
-        if args.min_severity is not None and sev > args.min_severity:
-            # NOTE: lower severity number == more severe (MAVLink convention)
-            continue
+def _reassemble_statustext(rows: Iterable[dict]) -> Iterator[dict]:
+    """Reassemble multi-chunk STATUSTEXT messages into single logical lines.
+
+    ArduPilot's gcs:send_text()/STATUSTEXT wire format caps `text` at 50 bytes;
+    longer messages are split across multiple STATUSTEXT messages that share a
+    common non-zero `id`, ordered by `chunk_seq` (0, 1, 2, ...). `id == 0` is
+    the ArduPilot sentinel for a standalone, already-short single-chunk
+    message -- those must NEVER be merged with each other even if several
+    appear back-to-back. Without this reassembly, `show`/raw dumps print each
+    ~50-char fragment as its own line/timestamp, which is hard for both humans
+    and AI to read (a single log line like "RAWES YIC capture: r=89.9 p=20.0
+    y=-175.3" can be split mid-word across two lines).
+    """
+    pending_id: "int | None" = None
+    pending_chunks: dict[int, str] = {}
+    pending_meta: "dict | None" = None
+
+    def _flush() -> "dict | None":
+        if pending_meta is None:
+            return None
+        out = dict(pending_meta)
+        out["text"] = "".join(pending_chunks[k] for k in sorted(pending_chunks))
+        return out
+
+    for m in rows:
+        mid = m.get("id", 0)
         text = m.get("text", "")
         if isinstance(text, (bytes, bytearray)):
             text = text.decode("utf-8", errors="replace")
         text = text.split("\x00", 1)[0]
-        print(f"[{m['t_rel']:>9.3f}s] {MAV_SEVERITY.get(sev, sev):<9} {text}")
+        if mid == 0:
+            flushed = _flush()
+            if flushed is not None:
+                yield flushed
+            pending_id, pending_chunks, pending_meta = None, {}, None
+            out = dict(m)
+            out["text"] = text
+            yield out
+            continue
+        if mid != pending_id:
+            flushed = _flush()
+            if flushed is not None:
+                yield flushed
+            pending_id = mid
+            pending_chunks = {}
+            pending_meta = dict(m)
+        pending_chunks[m.get("chunk_seq", 0)] = text
+    flushed = _flush()
+    if flushed is not None:
+        yield flushed
+
+
+def cmd_statustext(args: argparse.Namespace) -> None:
+    msgs = load(args.log)
+    rows = apply_filters(msgs, types=["STATUSTEXT"], direction="rx",
+                          since=args.since, until=args.until)
+    for m in _reassemble_statustext(rows):
+        sev = m.get("severity", -1)
+        if args.min_severity is not None and sev > args.min_severity:
+            # NOTE: lower severity number == more severe (MAVLink convention)
+            continue
+        print(f"[{m['t_rel']:>9.3f}s] {MAV_SEVERITY.get(sev, sev):<9} {m['text']}")
 
 
 def cmd_nvf(args: argparse.Namespace) -> None:
