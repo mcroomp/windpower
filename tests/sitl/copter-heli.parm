@@ -87,6 +87,14 @@ H_COL_MAX 1740
 H_COL_MIN 1460
 H_COL_ANG_MAX 12
 H_COL_ANG_MIN -2
+# H_COL_LAND_MIN clamps commanded collective to this angle whenever
+# should_use_landing_swash() is true (any time !auto_armed, i.e. disarmed on
+# the bench). RAWES is not a landed helicopter that needs a soft-touchdown
+# collective floor, so set it equal to H_COL_ANG_MIN to disable the clamp --
+# otherwise it silently overrides low collective commands (including
+# H_SV_MAN=4 "min collective" bench calibration, which always requests
+# collective_out=0.0 but got floored back up before this fix).
+H_COL_LAND_MIN -2
 H_RSC_MODE 2
 H_RSC_SETPOINT 66
 RC1_MAX         2000.000000

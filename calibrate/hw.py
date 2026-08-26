@@ -9,7 +9,7 @@ import time
 from typing import cast
 
 from pymavlink import mavutil
-from groundstation.gcs import MavConnectionLike
+from groundstation.gcs import MavConnectionLike, ParamSet
 
 from .constants import (
     RawesGCS,
@@ -25,6 +25,7 @@ from .constants import (
     StatusText,
     GB4008_KV, GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
+    SWASH_SERVOS,
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
     PWM_MIN, PWM_MAX, PWM_NEUTRAL,
@@ -39,10 +40,6 @@ from .constants import (
 # Seeded from the GB4008 default; overridden by _refresh_pole_pairs().
 # ---------------------------------------------------------------------------
 _motor_pole_pairs = GB4008_POLE_PAIRS
-
-# Per-session saved SERVO{n}_FUNCTION values for release/restore.
-_saved_servo_functions: dict[int, float] = {}
-
 
 # ---------------------------------------------------------------------------
 # ESC telemetry helpers
@@ -625,20 +622,69 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
 # Servo sweep
 # ---------------------------------------------------------------------------
 
-def _sweep(session: RawesGCS, instance: int, step_ms: int = 5) -> None:
-    """Sweep a servo from 1000 to 2000 and back, step_ms ms per PWM step."""
-    print(f"  Sweeping output {instance}: 1500 -> 2000 -> 1000 -> 1500  (Ctrl-C to abort)")
-    delay = step_ms / 1000.0
-    try:
-        for pwm in range(1500, 2001, 1):
-            _send_set_servo(session, instance, pwm)
-            time.sleep(delay)
-        for pwm in range(2000, 999, -1):
-            _send_set_servo(session, instance, pwm)
-            time.sleep(delay)
-        for pwm in range(1000, 1501, 1):
-            _send_set_servo(session, instance, pwm)
-            time.sleep(delay)
-    except KeyboardInterrupt:
-        _send_set_servo(session, instance, PWM_NEUTRAL)
-        print("  Sweep interrupted -- servo returned to neutral")
+def _set_servo_function(session: RawesGCS, output: int, value: float) -> bool:
+    servo_function = f"SERVO{output}_FUNCTION"
+    session.send_message(ParamSet(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        param_id=servo_function,
+        param_value=value,
+        param_type=mavutil.mavlink.MAV_PARAM_TYPE_INT16,
+    ))
+    time.sleep(0.1)
+    return session.get_param(servo_function) == value
+
+
+def _set_heli_servo_mode(session: RawesGCS, value: float) -> bool:
+    for _attempt in range(3):
+        session.send_message(ParamSet(
+            target_system=session._target_system,
+            target_component=session._target_component,
+            param_id="H_SV_MAN",
+            param_value=value,
+            param_type=mavutil.mavlink.MAV_PARAM_TYPE_INT8,
+        ))
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            if session.get_param("H_SV_MAN", timeout=0.5) == value:
+                return True
+            time.sleep(0.1)
+    return False
+
+
+def _release_servo_functions(
+    session: RawesGCS, outputs: tuple[int, ...]
+) -> "dict[int, float] | None":
+    """Set outputs to disabled and return their original functions."""
+    saved_functions: dict[int, float] = {}
+    changed = False
+    for output in outputs:
+        servo_function = f"SERVO{output}_FUNCTION"
+        saved_function = session.get_param(servo_function)
+        if saved_function is None:
+            print(f"  [FAIL] {servo_function} unreadable; command aborted")
+            _restore_servo_functions(session, saved_functions)
+            return None
+        saved_functions[output] = saved_function
+        if saved_function != 0:
+            if not _set_servo_function(session, output, 0.0):
+                print(f"  [FAIL] could not disconnect {servo_function}; command aborted")
+                _restore_servo_functions(session, saved_functions)
+                return None
+            print(f"  {servo_function} {saved_function:.0f} -> 0 (manual passthrough)")
+            changed = True
+    if changed:
+        time.sleep(1.2)
+    return saved_functions
+
+
+def _restore_servo_functions(session: RawesGCS, saved_functions: dict[int, float]) -> None:
+    for output, saved_function in saved_functions.items():
+        if saved_function != 0:
+            servo_function = f"SERVO{output}_FUNCTION"
+            if _set_servo_function(session, output, saved_function):
+                print(f"  {servo_function} restored to {saved_function:.0f}")
+            else:
+                print(f"  [FAIL] could not restore {servo_function} to {saved_function:.0f}")
+
+

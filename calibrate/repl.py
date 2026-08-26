@@ -23,9 +23,10 @@ from .constants import (
     _RUN_MODES, _WATCH_STREAMS,
 )
 from .hw import (
-    _arm, _disarm, _sweep, _send_set_servo, _send_motor_test,
+    _arm, _disarm, _send_set_servo, _send_motor_test,
     _print_status, _ping_ports, _probe_port,
     _h3_forward_mix, _norm_to_pwm,
+    _release_servo_functions, _restore_servo_functions, _set_heli_servo_mode,
     _refresh_pole_pairs, _monitor_esc,
 )
 from .params import (
@@ -136,9 +137,10 @@ One-shot:
   swash range <min> <max>         Set H_COL_MIN / H_COL_MAX (heli swash range)
   swash neutral [n]               Drive S1/S2/S3 (or n) to 1500 us
   swash info                      Print current swashplate geometry + factors
-  servo <ch> <pwm>                Set channel ch to pwm directly
-  servo sweep <ch> [--step-ms N]  Slowly sweep ch: 1500 -> 2000 -> 1000 -> 1500
-  servo hold <ch> <pwm> [--duration N]  Arm, hold ch at pwm for N s
+    servo <ch> <pwm>                Set ch directly; disconnect/restore swash ch1-3
+    servo mode <name|0..5> [--duration N]  Run any native H_SV_MAN mode
+    servo sweep [--duration N]      Alias for 'servo mode oscillate' (default 12 s)
+    servo hold <ch> <pwm> [--duration N]  Hold ch; disconnect/restore swash ch1-3
   motor <pwm_us> [--duration N]   Arm (RAWES_ARM) + drive the motor output at
                                   pwm_us for N s (default 5).  DShot ESC self-arms
                                   from idle -- no ESC pre-arm hold.
@@ -431,29 +433,106 @@ def _cmd_swash(session: RawesGCS, args: list[str]) -> None:
     print(f"    S1={pwm1} us  S2={pwm2} us  S3={pwm3} us")
 
 
+_SV_MAN_MODES = {
+    "automated": 0,
+    "passthrough": 1,
+    "max": 2,
+    "zero": 3,
+    "min": 4,
+    "oscillate": 5,
+}
+
+
+def _run_servo_mode(session: RawesGCS, mode: int, duration: float) -> None:
+    heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+    if heartbeat is None:
+        print("  [FAIL] no heartbeat; servo mode aborted")
+        return
+    if heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+        print("  [FAIL] vehicle is armed; native servo modes require disarmed")
+        return
+    saved_mode = session.get_param("H_SV_MAN")
+    if saved_mode is None:
+        print("  [FAIL] H_SV_MAN unreadable; servo mode aborted")
+        return
+    if not _set_heli_servo_mode(session, float(mode)):
+        print(f"  [FAIL] could not set H_SV_MAN={mode}")
+        return
+    mode_name = next(name for name, value in _SV_MAN_MODES.items() if value == mode)
+    print(f"  H_SV_MAN={mode} ({mode_name}) running for {duration:.1f}s (ESC or Ctrl-C to stop)")
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_message_rate=10,
+    ))
+    print("  t(s)    S1(us)  S2(us)  S3(us)")
+    started = time.monotonic()
+    deadline = time.monotonic() + duration
+    next_print = started
+    try:
+        while time.monotonic() < deadline:
+            msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.2)
+            now = time.monotonic()
+            if msg is not None and now >= next_print:
+                print(f"  {now - started:5.1f}  "
+                      f"{getattr(msg, 'servo1_raw', 0):6d}  "
+                      f"{getattr(msg, 'servo2_raw', 0):6d}  "
+                      f"{getattr(msg, 'servo3_raw', 0):6d}")
+                next_print = now + 0.2
+            if _esc_check():
+                print("\n  [ESC] stopping servo mode")
+                break
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if _set_heli_servo_mode(session, saved_mode):
+            print(f"  H_SV_MAN restored to {saved_mode:.0f}")
+        else:
+            print(f"  [FAIL] could not restore H_SV_MAN to {saved_mode:.0f}")
+
+
 def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
     """servo <ch> <pwm>
-       servo sweep <ch> [--step-ms N]
+       servo mode <name|0..5> [--duration N]
+       servo sweep [--duration N]
        servo hold <ch> <pwm> [--duration N]"""
     if not args:
         print("  Usage: servo <ch> <pwm>")
-        print("         servo sweep <ch> [--step-ms N]")
+        print("         servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]")
+        print("         servo sweep [--duration N]")
         print("         servo hold <ch> <pwm> [--duration N]")
         return
     sub = args[0].lower()
-    if sub == "sweep":
+    if sub in ("mode", "sweep"):
         try:
-            pos, flags = _parse_flags(args[1:], {"--step-ms": "int"})
+            mode_args = args[1:]
+            pos, flags = _parse_flags(mode_args, {"--duration": "float"})
         except ValueError as e:
             print(f"  Error: {e}"); return
-        if len(pos) != 1:
-            print("  Usage: servo sweep <ch> [--step-ms N]"); return
-        try:
-            ch = int(pos[0])
-        except ValueError:
-            print("  Error: ch must be an integer"); return
-        step = flags.get("--step-ms", 5)
-        _sweep(session, ch, step_ms=step)
+        if sub == "sweep":
+            if pos:
+                print("  Usage: servo sweep [--duration N]"); return
+            mode = _SV_MAN_MODES["oscillate"]
+        else:
+            if len(pos) != 1:
+                print("  Usage: servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]")
+                return
+            mode_arg = pos[0].lower()
+            if mode_arg in _SV_MAN_MODES:
+                mode = _SV_MAN_MODES[mode_arg]
+            else:
+                try:
+                    mode = int(mode_arg)
+                except ValueError:
+                    mode = -1
+                if mode not in _SV_MAN_MODES.values():
+                    print(f"  Error: unknown servo mode {pos[0]!r}; expected a name or 0..5")
+                    return
+        duration = flags.get("--duration", 12.0 if mode == 5 else 10.0)
+        if duration <= 0:
+            print("  Error: duration must be greater than zero"); return
+        _run_servo_mode(session, mode, duration)
         return
     if sub == "hold":
         try:
@@ -469,10 +548,16 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
         if not (800 <= pwm <= PWM_MAX):
             print(f"  Error: pwm must be 800-{PWM_MAX}"); return
         duration = flags.get("--duration", 60.0)
-        if not _arm(session, force=True):
-            _safety_shutdown(session, skip_motor_off=(ch != SERVO_MOTOR))
+        outputs_to_release = tuple(dict.fromkeys((*SWASH_SERVOS, ch)))
+        saved_functions = _release_servo_functions(session, outputs_to_release)
+        if saved_functions is None:
             return
-        print("  [OK] Armed.")
+        if ch not in SWASH_SERVOS:
+            if not _arm(session, force=True):
+                _restore_servo_functions(session, saved_functions)
+                _safety_shutdown(session, skip_motor_off=(ch != SERVO_MOTOR))
+                return
+            print("  [OK] Armed.")
         deadline = time.monotonic() + duration
         try:
             while time.monotonic() < deadline:
@@ -483,7 +568,16 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
         except KeyboardInterrupt:
             print()
         finally:
-            _safety_shutdown(session, skip_motor_off=(ch != SERVO_MOTOR))
+            if ch in SWASH_SERVOS:
+                try:
+                    _send_set_servo(session, ch, PWM_NEUTRAL)
+                finally:
+                    _restore_servo_functions(session, saved_functions)
+            else:
+                try:
+                    _safety_shutdown(session, skip_motor_off=(ch != SERVO_MOTOR))
+                finally:
+                    _restore_servo_functions(session, saved_functions)
         return
     # Positional: servo <ch> <pwm>
     if len(args) < 2:
@@ -496,8 +590,15 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
         print("  Error: ch must be 1-16"); return
     if not (PWM_MIN <= pwm <= PWM_MAX):
         print(f"  Error: pwm must be {PWM_MIN}-{PWM_MAX}"); return
-    _send_set_servo(session, ch, pwm)
-    print(f"  Output {ch} -> {pwm} us")
+    outputs_to_release = tuple(dict.fromkeys((*SWASH_SERVOS, ch)))
+    saved_functions = _release_servo_functions(session, outputs_to_release)
+    if saved_functions is None:
+        return
+    try:
+        _send_set_servo(session, ch, pwm)
+        print(f"  Output {ch} -> {pwm} us")
+    finally:
+        _restore_servo_functions(session, saved_functions)
 
 
 def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:

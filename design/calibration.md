@@ -140,10 +140,19 @@ swash neutral [n]              # drive S1/S2/S3 (or n) to 1500 us
 Three forms:
 
 ```bash
-servo <ch> <pwm>                            # write raw PWM via MAV_CMD_DO_SET_SERVO
-servo sweep <ch> [--step-ms N]              # slow sweep 1500 -> 2000 -> 1000 -> 1500
-servo hold <ch> <pwm> [--duration N]        # arm + hold ch at pwm for N s (default 60)
+servo <ch> <pwm>                            # raw PWM; ch1-3 all disconnect, then restore
+servo mode <name|0..5> [--duration N]       # run a native H_SV_MAN mode, then restore
+servo sweep [--duration N]                  # native ArduPilot all-swash test; default 12 s
+servo hold <ch> <pwm> [--duration N]        # hold; ch1-3 disconnect; swash stays disarmed
 ```
+
+Native mode names are `automated` (0), `passthrough` (1), `max` collective (2),
+`zero` thrust collective (3), `min` collective (4), and `oscillate` (5). The command
+requires a disarmed vehicle, prints live S1/S2/S3 PWM telemetry, and restores the
+previous setting afterward. `servo sweep` is an alias for `servo mode oscillate`.
+Direct and hold commands temporarily disconnect all three swash functions before
+sending raw PWM. Changing `H_SW_TYPE` is neither required nor a way to disable the
+swash mixer.
 
 ### `motor`
 GB4008 throttle test via `MAV_CMD_DO_MOTOR_TEST`. Prompts above 5% unless `--force`.
@@ -262,9 +271,8 @@ python -m calibrate --port COM7 swash 0 0 50     # lateral differential?
 python -m calibrate --port COM7 swash range 1300 1700
 python -m calibrate --port COM7 set H_CYC_MAX 1000
 
-# 5. Flap deflection measurement -- sweep each servo
-python -m calibrate --port COM7 servo sweep 1
-python -m calibrate --port COM7 servo sweep 2
+# 5. Swash motion check -- one complete native ArduPilot cycle
+python -m calibrate --port COM7 servo sweep --duration 12
 
 # 6. Motor spin check
 python -m calibrate --port COM7 motor 5 --duration 5
