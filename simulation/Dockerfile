@@ -65,12 +65,19 @@ RUN mkdir -p "$ARDUPILOT_PATH" && chown sim:sim "$ARDUPILOT_PATH"
 
 USER sim
 ENV USER=sim
-# ArduPilot-4.7 = the 4.7 beta line (currently V4.7.0-beta7). Required for the
-# vehicle:set_target_angle_and_rate_and_throttle scripting binding used by
-# rawes.lua, which does not exist in 4.6.x.
-RUN git clone --recurse-submodules --branch ArduPilot-4.7 \
+# Pinned to a specific commit on the ArduPilot-4.7 branch (V4.7.1) rather than
+# the moving branch head, so image rebuilds are reproducible and don't drift
+# out from under EXPECTED_ARDUPILOT_VERSION in tests/sitl/stack_utils.py.
+# Required for the vehicle:set_target_angle_and_rate_and_throttle scripting
+# binding used by rawes.lua, which does not exist in 4.6.x.
+# To move to a newer ArduPilot-4.7 commit: update ARDUPILOT_COMMIT below and
+# EXPECTED_ARDUPILOT_VERSION in tests/sitl/stack_utils.py together.
+ARG ARDUPILOT_COMMIT=331c42a50c1f68b0065d4944e55eb688b62fe9c4
+RUN git clone --branch ArduPilot-4.7 \
         https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
     && cd "$ARDUPILOT_PATH" \
+    && git checkout "$ARDUPILOT_COMMIT" \
+    && git submodule update --init --recursive \
     && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     && Tools/environment_install/install-prereqs-ubuntu.sh -y \
     && . ~/.profile \
