@@ -51,6 +51,7 @@ EK3_OGN_HGT_MASK  5
 H_COL_MIN         1000
 H_COL_MAX         2000
 H_RSC_MODE        1      # passthrough: no main rotor motor
+RC_SPEED          333    # PWM refresh rate for heli swash servos [Hz]
 
 # GB4008 anti-rotation (yaw) motor.
 # Canonical hardware wiring (read live from the Pixhawk 6C, 2026-07-08):
@@ -78,7 +79,7 @@ ATC_RAT_YAW_I     0.018
 # RAWES_MODE is set per-test; defaults here cover steady/pumping flight gains.
 #
 # RAWES_* quick reference:
-#   RAWES_MODE    mode selector (0=none,1=steady,3=passive,4=landing)
+#   RAWES_MODE    mode selector (0=none,1=steady,2=ACRO-manual,3=passive,4=landing)
 #   RAWES_YAW_SLP yaw motor slope [RPM/us], 0 = bench fallback in script
 #   RAWES_KP_ALT  altitude P gain [thrust/m]
 #   RAWES_KI_ALT  altitude I gain [thrust/(m*s)]

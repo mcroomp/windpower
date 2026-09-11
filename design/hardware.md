@@ -146,6 +146,29 @@ EPP RG30 (expanded polypropylene foam) -- blade body. Lightweight, flexible, foa
 
 Blade pitch is controlled **indirectly**. There are no pitch bearings at the blade root. Instead:
 
+### Installed HR3-120 layout
+
+Viewed from above with vehicle +X and the Pixhawk arrow pointing toward the centre of gravity:
+
+```text
+                    FRONT / +X / CG
+                           S3
+                       MAIN OUT 3
+                            *
+                           / \
+                          /   \
+             MAIN OUT 2 *-----* MAIN OUT 1
+                    S2           S1
+               left-rear    right-rear
+```
+
+ArduPilot represents this front-elevator HR3-120 arrangement with `H_SW_TYPE=3`
+(H3-120), `SERVO1/2/3_REVERSED=1`, and `H_SW_COL_DIR=1`. The Pixhawk is 8 cm
+aft of the CG, so all three co-located IMUs use `INS_POSn_X=-0.08 m`;
+`AHRS_ORIENTATION=0` because the board arrow remains aligned with vehicle +X.
+The deployable values live in
+[`hardware/rawes_hardware_defaults.parm`](../hardware/rawes_hardware_defaults.parm).
+
 ```
 Servos S1/S2/S3
   -> tilt lower swashplate ring (collective + cyclic)

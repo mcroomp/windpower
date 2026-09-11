@@ -121,7 +121,8 @@ def _restore_servo4(session: RawesGCS, saved: "float | None") -> None:
 def _safety_shutdown(session: RawesGCS, *,
                      saved_servo4_fn: "float | None" = None,
                      saved_overrides: "dict[str, float] | None" = None,
-                     skip_motor_off: bool = False) -> None:
+                     skip_motor_off: bool = False,
+                     restore_flight_mode: "int | None" = None) -> None:
     """Unified post-run shutdown.  Order: stop Lua -> wait -> motor off ->
     disarm -> restore SERVO4_FUNCTION -> restore param overrides.  Every step
     is best-effort: one failure does not skip the next."""
@@ -152,6 +153,14 @@ def _safety_shutdown(session: RawesGCS, *,
             print(f"  [SAFETY] {param} restored to {orig:.6g}")
         except Exception as e:
             print(f"  [SAFETY] failed to restore {param}: {e}")
+    if restore_flight_mode is not None:
+        try:
+            session.set_mode(restore_flight_mode)
+            print(f"  [SAFETY] flight mode restored to "
+                  f"{_COPTER_MODES.get(restore_flight_mode, restore_flight_mode)} "
+                  f"({restore_flight_mode})")
+        except Exception as e:
+            print(f"  [SAFETY] failed to restore flight mode: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +303,8 @@ def _make_oscillate_tick(session: RawesGCS, steps: list):
 
 def _run_observation(session: RawesGCS, mode_name: str,
                      duration: "float | None", log: _RunLog,
-                     on_tick=None, keep_rc: bool = False) -> None:
+                     on_tick=None, keep_rc: bool = False,
+                     manual_controls: "dict[str, float] | None" = None) -> None:
     """Generic observation loop for `run` modes.  Stream + columns are the
     same across all modes; the row content is whatever the FC reports.  Per-
     mode NVFs (e.g. YAW_I, YAW_OUT) appear as columns when emitted.
@@ -333,8 +343,14 @@ def _run_observation(session: RawesGCS, mode_name: str,
 
     # Live table: H_YAW_TRIM output (out=trim), motor throttle command (u=YFF_U),
     # swashplate PWMs (s1..s3), GB4008 motor PWM with 5 s rolling average, rotor RPM.
-    print_cols = ["t(s)", "armed", "yaw(d)", "yrate_d", "out", "u",
-                  "s1", "s2", "s3", "mot", "mot~5s", "qerr(d)", "qyaw(d)", "mRPM"]
+    if mode_name == "acro-manual":
+        print_cols = [
+            "t(s)", "armed", "rc1", "rc2", "rc3", "rc4",
+            "s1", "s2", "s3", "mot", "yaw(d)", "yrate_d",
+        ]
+    else:
+        print_cols = ["t(s)", "armed", "yaw(d)", "yrate_d", "out", "u",
+                      "s1", "s2", "s3", "mot", "mot~5s", "qerr(d)", "qyaw(d)", "mRPM"]
 
     mot_window_s = 5.0   # rolling average window for motor (SERVO_MOTOR) PWM
 
@@ -379,6 +395,62 @@ def _run_observation(session: RawesGCS, mode_name: str,
             pwm = 1000 + new * 1000.0
             tag = "" if ok else "  [FAIL]"
             print(f"  TRIM {old:.4f} -> {new:.4f}  (~{pwm:.0f} us){tag}")
+    elif mode_name == "acro-manual":
+        if manual_controls is None:
+            raise ValueError("manual_controls required for acro-manual")
+        print("  ACRO manual controls:")
+        print("    arrows: LEFT/RIGHT roll, UP/DOWN pitch")
+        print("    -/= (no Shift): collective down/up")
+        print("    step=0.05; ESC exits and disarms")
+        _arrow_pending = [False]
+
+        def _send_manual(name: str) -> None:
+            wire_name = {
+                "roll": "RAWES_RLL",
+                "pitch": "RAWES_PIT",
+                "collective": "RAWES_COL",
+            }[name]
+            session.send_message(NamedValueFloat(wire_name, manual_controls[name]))
+
+        def _show_manual() -> None:
+            print(
+                "  MANUAL "
+                f"roll={manual_controls['roll']:+.2f}  "
+                f"pitch={manual_controls['pitch']:+.2f}  "
+                f"collective={manual_controls['collective']:.2f}"
+            )
+
+        def key_handler(k: bytes) -> None:
+            axis = None
+            delta = 0.0
+            if _arrow_pending[0]:
+                _arrow_pending[0] = False
+                if k == b"K":
+                    axis, delta = "roll", -0.05
+                elif k == b"M":
+                    axis, delta = "roll", 0.05
+                elif k == b"H":
+                    axis, delta = "pitch", 0.05
+                elif k == b"P":
+                    axis, delta = "pitch", -0.05
+                else:
+                    return
+            elif k in (b"\xe0", b"\x00"):
+                _arrow_pending[0] = True
+                return
+            elif k == b"-":
+                axis, delta = "collective", -0.05
+            elif k == b"=":
+                axis, delta = "collective", 0.05
+            else:
+                return
+
+            lower, upper = (0.0, 1.0) if axis == "collective" else (-1.0, 1.0)
+            manual_controls[axis] = max(
+                lower, min(upper, manual_controls[axis] + delta)
+            )
+            _send_manual(axis)
+            _show_manual()
     elif mode_name in ("passive", "steady", "pumping"):
         _yaw_pid = {
             "P": {"param": "ATC_RAT_YAW_P", "step": 0.002,  "val": 0.0},
@@ -647,6 +719,13 @@ def _run_observation(session: RawesGCS, mode_name: str,
         _, _, _, _, _qerr_deg, _qerr_yaw_deg = _quat_error(state["att_q"], state["att_target_q"])
         qerr_s = f"{_qerr_deg:+6.2f}" if _qerr_deg is not None else None
         qyaw_s = f"{_qerr_yaw_deg:+6.2f}" if _qerr_yaw_deg is not None else None
+        if mode_name == "acro-manual":
+            return [
+                f"{t_rel:.1f}", "YES" if st["armed"] else "no",
+                state["ch1"], state["ch2"], state["ch3"], state["ch4"],
+                state["s1"], state["s2"], state["s3"], state["smot"],
+                yaw_s, yrate_s,
+            ]
         return [
             f"{t_rel:.1f}",
             "YES" if st["armed"] else "no",
@@ -732,6 +811,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         header_cols=cols,
         header_print_cols=print_cols,
         log=log,
+        print_period_s=0.25 if mode_name == "acro-manual" else 1.0,
         on_tick=on_tick,
         suppress_status=True,
         key_handler=key_handler,
@@ -805,6 +885,11 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     duration         = flags.get("--duration")
     trim             = flags.get("--trim", {}) or {}
     osc              = flags.get("--osc")
+    manual_controls = (
+        {"roll": 0.0, "pitch": 0.0, "collective": 0.5}
+        if cfg.get("manual_control")
+        else None
+    )
 
     osc_steps = None
     if osc is not None:
@@ -850,6 +935,12 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     print(f"  MAVLink log: {mavlog_path}")
 
     saved_overrides: dict[str, float] = {}
+    initial_heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+    saved_flight_mode = (
+        int(initial_heartbeat.custom_mode)
+        if initial_heartbeat is not None
+        else None
+    )
     armed = False
     saved_fn = None
     done_ok = False
@@ -872,6 +963,24 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         if _fm is not None:
             session.set_mode(_fm)
             print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
+
+        if manual_controls is not None:
+            flybar = session.get_param("H_FLYBAR_MODE")
+            if flybar is None or round(flybar) != 1:
+                print("  [FAIL] ACRO manual requires H_FLYBAR_MODE=1")
+                return
+            col_expo = session.get_param("IM_ACRO_COL_EXP")
+            if col_expo is None or abs(col_expo) > 1e-6:
+                print("  [FAIL] ACRO manual requires IM_ACRO_COL_EXP=0 so "
+                      "normalized collective matches GUIDED")
+                return
+            for wire_name, value in (
+                ("RAWES_RLL", manual_controls["roll"]),
+                ("RAWES_PIT", manual_controls["pitch"]),
+                ("RAWES_COL", manual_controls["collective"]),
+            ):
+                session.send_message(NamedValueFloat(wire_name, value))
+            print("  Manual seed: roll=+0.00 pitch=+0.00 collective=0.50")
 
     # Seed the IC (RAWES_THR/RIC/PIC) BEFORE arming so PASSIVE holds a defined
     # attitude (mirrors the SITL passive_init seed).
@@ -921,7 +1030,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
 
     # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip
     # direct DO_SET_SERVO pre-arm pulses on SERVO4 to avoid ownership conflicts.
-        esc_arm = (name != "passive")
+        esc_arm = (name not in ("passive", "acro-manual"))
         if not _arm(session, force=True, esc_arm=esc_arm):
             return
         armed = True
@@ -936,13 +1045,17 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                   f"x {_OSCILLATE_STEP_S:.0f}s each (total {total_s:.0f}s).")
 
         _run_observation(session, name, duration, log, on_tick=on_tick,
-                         keep_rc=bool(flags.get("--rc", False)))
+                         keep_rc=bool(flags.get("--rc", False) or manual_controls),
+                         manual_controls=manual_controls)
         done_ok = True
     finally:
         try:
-            if armed or saved_fn is not None:
-                _safety_shutdown(session, saved_servo4_fn=saved_fn,
-                                 saved_overrides=saved_overrides)
+            _safety_shutdown(
+                session,
+                saved_servo4_fn=saved_fn,
+                saved_overrides=saved_overrides,
+                restore_flight_mode=saved_flight_mode,
+            )
         finally:
             session.stop_mavlog()
             log.close()

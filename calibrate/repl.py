@@ -19,7 +19,8 @@ from .constants import (
     SWASH_SERVOS,
     PWM_MIN, PWM_MAX, PWM_NEUTRAL,
     _COPTER_MODES, _FALLBACK_BAUDS,
-    _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH,
+    _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH,
+    _AZ_S1, _AZ_S2, _AZ_S3,
     _RUN_MODES, _WATCH_STREAMS,
 )
 from .hw import (
@@ -87,6 +88,9 @@ Long-running (always log; ESC or Ctrl-C aborts):
                            the other two stay near center.
 
                 Modes:
+          acro-manual
+                   ACRO flybar passthrough from normalized Lua controls.
+                   Arrows set roll/pitch; -/= set collective; AP + Lua own yaw.
           passive   armed but quiet in GUIDED_NOGPS (matches the SITL passive
                     test).  Seeds the IC (RAWES_THR/RIC/PIC) and holds the IC
                     attitude via the GUIDED angle API; DDFP yaw motor stays
@@ -133,13 +137,16 @@ One-shot:
   status                          Vehicle / battery / EKF / servos / key params
   set <name> <value>              Write a parameter (read-back verified)
   get <name>                      Read a parameter
-  swash <coll%> [lon%] [lat%]     H3-120 manual mixer (-100..+100 each)
+  swash <coll%> [lon%] [lat%]     HR3-120 physical mixer (-100..+100 each)
   swash range <min> <max>         Set H_COL_MIN / H_COL_MAX (heli swash range)
   swash neutral [n]               Drive S1/S2/S3 (or n) to 1500 us
   swash info                      Print current swashplate geometry + factors
     servo <ch> <pwm>                Set ch directly; disconnect/restore swash ch1-3
-    servo mode <name|0..5> [--duration N]  Run any native H_SV_MAN mode
-    servo sweep [--duration N]      Alias for 'servo mode oscillate' (default 12 s)
+    servo mode <name|0..5> [--duration N]  Run a native H_SV_MAN mode
+                                            oscillate requires --allow-full-range
+    servo sweep [--duration N]      Safe raw-PWM sweep within H_COL_MIN/MAX
+    swash fit-range <min> <max> --cyclic N --allow-full-range
+                                    Fit/verify H_COL limits using native oscillation
     servo hold <ch> <pwm> [--duration N]  Hold ch; disconnect/restore swash ch1-3
   motor <pwm_us> [--duration N]   Arm (RAWES_ARM) + drive the motor output at
                                   pwm_us for N s (default 5).  DShot ESC self-arms
@@ -153,9 +160,9 @@ One-shot:
   script upload <file>            Upload .lua to /APM/scripts and restart engine
   script list                     List /APM/scripts
   script remove <name>            Remove from /APM/scripts
-    config check [--all]            Diff params against defaults
-                                                                    default: rawes_common_defaults.parm overrides only
-                                                                    --all: copter-heli.parm + rawes_common_defaults.parm
+    config check [--all]            Diff params against hardware defaults
+                                    default: common + physical-airframe overrides
+                                    --all: also include copter-heli.parm baseline
     config fix [--all]              Write the DIFFs (same scope rules as check)
     config show/apply               Compatibility aliases for check/fix
   logs list                       List all dataflash logs on the FC (id / size)
@@ -187,6 +194,8 @@ def _run_command(session: RawesGCS, tokens: list[str],
         return True
     verb = tokens[0].lower()
     args = tokens[1:]
+    if verb == "param" and args:
+        verb, args = args[0].lower(), args[1:]
 
     if   verb == "status":   _print_status(session)
     elif verb == "ping":     _cmd_ping(args)
@@ -268,7 +277,7 @@ def _cmd_get(session: RawesGCS, args: list[str]) -> None:
 
 
 def _print_swash_layout(session: RawesGCS) -> None:
-    """Print the current H3-120 swashplate geometry as read from the FC."""
+    """Print the configured mixer and RAWES physical HR3-120 geometry."""
     def g(name, default=None):
         v = session.get_param(name)
         return float(v) if v is not None else default
@@ -279,12 +288,35 @@ def _print_swash_layout(session: RawesGCS) -> None:
     sv3_pos   = g("H_SW_H3_SV3_POS")
     phang     = g("H_SW_H3_PHANG")
     ahrs_orn  = g("AHRS_ORIENTATION")
+    col_dir   = g("H_SW_COL_DIR")
+    rev1      = g("SERVO1_REVERSED")
+    rev2      = g("SERVO2_REVERSED")
+    rev3      = g("SERVO3_REVERSED")
     col_min   = g("H_COL_MIN")
     col_max   = g("H_COL_MAX")
-    col_mid   = g("H_COL_MID")
+    col_zero  = g("H_COL_ZERO_THRST")
+    col_hover = g("H_COL_HOVER")
     cyc_max   = g("H_CYC_MAX")
     flybar    = g("H_FLYBAR_MODE")
     sv_man    = g("H_SV_MAN")
+
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_message_rate=10,
+    ))
+    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
+    pwm = {
+        1: getattr(srv, "servo1_raw", 0) if srv else 0,
+        2: getattr(srv, "servo2_raw", 0) if srv else 0,
+        3: getattr(srv, "servo3_raw", 0) if srv else 0,
+        SERVO_MOTOR: getattr(srv, f"servo{SERVO_MOTOR}_raw", 0) if srv else 0,
+    }
+
+    def _pwm_text(channel: int) -> str:
+        value = pwm[channel]
+        return f"{value} us" if value else "no data"
 
     def _quad(az):
         """Rough physical quadrant label from azimuth (deg, CCW from front)."""
@@ -303,19 +335,28 @@ def _print_swash_layout(session: RawesGCS) -> None:
         return (-math.sin(a), math.cos(a))   # (roll_factor, pitch_factor)
 
     print()
-    print("RAWES H3-120 swashplate layout")
-    print("==============================")
+    physical_positions = (
+        ("S1", math.degrees(_AZ_S1)),
+        ("S2", math.degrees(_AZ_S2)),
+        ("S3", math.degrees(_AZ_S3)),
+    )
+
+    print("RAWES HR3-120 swashplate layout")
+    print("===============================")
     print()
     print("ArduPilot params:")
-    print(f"  H_SW_TYPE         = {sw_type!s:<8}  (3 = H3-120 generic)")
-    print(f"  H_SW_H3_SV1_POS   = {sv1_pos!s:<8}  ({_quad(sv1_pos)})")
-    print(f"  H_SW_H3_SV2_POS   = {sv2_pos!s:<8}  ({_quad(sv2_pos)})")
-    print(f"  H_SW_H3_SV3_POS   = {sv3_pos!s:<8}  ({_quad(sv3_pos)})")
+    print(f"  H_SW_TYPE         = {sw_type!s:<8}  (3 = H3-120; reversals implement HR3)")
+    print(f"  H_SW_COL_DIR      = {col_dir!s:<8}  (1 required for RAWES HR3)")
+    print(f"  SERVO1/2/3_REV    = {rev1!s}/{rev2!s}/{rev3!s}  (1/1/1 required)")
+    print(f"  H_SW_H3_SV1_POS   = {sv1_pos!s:<8}  (unused when H_SW_TYPE=3)")
+    print(f"  H_SW_H3_SV2_POS   = {sv2_pos!s:<8}  (unused when H_SW_TYPE=3)")
+    print(f"  H_SW_H3_SV3_POS   = {sv3_pos!s:<8}  (unused when H_SW_TYPE=3)")
     print(f"  H_SW_H3_PHANG     = {phang!s:<8}  (deg of phase correction)")
     print(f"  AHRS_ORIENTATION  = {ahrs_orn!s:<8}  (0 = forward; 4 = YAW_180)")
     print()
-    print(f"  H_COL_MIN = {col_min!s:<6}  H_COL_MAX = {col_max!s:<6}  "
-          f"H_COL_MID = {col_mid!s:<6}")
+    print(f"  H_COL_MIN         = {col_min!s:<8}  H_COL_MAX = {col_max!s}")
+    print(f"  H_COL_ZERO_THRST  = {col_zero!s:<8}  deg")
+    print(f"  H_COL_HOVER       = {col_hover!s:<8}  normalized collective")
     if cyc_max is not None:
         print(f"  H_CYC_MAX = {cyc_max:.0f}  cd  ({cyc_max/100:.1f} deg of swash tilt at full stick)")
     else:
@@ -325,7 +366,7 @@ def _print_swash_layout(session: RawesGCS) -> None:
     print()
     print("Servo factors  (AP mixer: roll = -sin(az), pitch = cos(az)):")
     print(f"  {'Servo':<6} {'Azimuth':>8}  {'Position':<14}  {'roll_f':>8}  {'pitch_f':>8}")
-    for label, az in (("S1", sv1_pos), ("S2", sv2_pos), ("S3", sv3_pos)):
+    for label, az in physical_positions:
         rf, pf = _factors(az)
         rf_s = f"{rf:+.3f}" if rf is not None else "  n/a"
         pf_s = f"{pf:+.3f}" if pf is not None else "  n/a"
@@ -334,37 +375,37 @@ def _print_swash_layout(session: RawesGCS) -> None:
     print()
     print("Layout (top view, looking down at the swashplate):")
     print()
-    print("                FRONT (nose, +x)")
-    print("                      ^")
-    print("                      |")
-    print("       SV2  *    [FC] *  SV1")
-    print(f"     ({_fmt_az(sv2_pos)})         ({_fmt_az(sv1_pos)})")
-    print(f"     {_quad(sv2_pos):<12}       {_quad(sv1_pos):<12}")
-    print("                      |")
-    print("                      *  SV3")
-    print(f"                    ({_fmt_az(sv3_pos)})")
-    print(f"                    {_quad(sv3_pos)}")
-    print("                      v")
-    print("                BACK (tail)")
+    print("                    FRONT / +X / TOWARD CG")
+    print("                              ^")
+    print("                              |")
+    print("                         [ FC arrow ]")
+    print("                              |")
+    print("                    S3 - FRONT / ELEVATOR")
+    print("                         MAIN OUT 3")
+    print(f"                          [{_pwm_text(3)}]")
+    print("                              o")
+    print("                            /   \\")
+    print("                           /  O  \\")
+    print("                          /       \\")
+    print("                         /         \\")
+    print("                        o-----------o")
+    print("              S2 - LEFT-REAR     S1 - RIGHT-REAR")
+    print("                 MAIN OUT 2         MAIN OUT 1")
+    print(f"                  [{_pwm_text(2)}]          [{_pwm_text(1)}]")
+    print()
+    print("                              |")
+    print("                              v")
+    print("                            REAR / -X")
     print()
     print("Sign convention (design/ardupilot_swashplate.md):")
     print("  tlat > 0 = roll right;  tlon > 0 = nose-DOWN disk;  col > 0 = positive thrust")
     print()
-    # Live PWMs
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
-        req_message_rate=10,
-    ))
-    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
     if srv:
-        s1 = getattr(srv, "servo1_raw", 0)
-        s2 = getattr(srv, "servo2_raw", 0)
-        s3 = getattr(srv, "servo3_raw", 0)
-        smot = getattr(srv, f"servo{SERVO_MOTOR}_raw", 0)
-        print(f"Current PWMs:  S1={s1} us  S2={s2} us  S3={s3} us  "
-              f"S{SERVO_MOTOR}(motor)={smot} us")
+        print("Current outputs:")
+        print(f"  S1 right-rear     OUT 1: {_pwm_text(1)}")
+        print(f"  S2 left-rear      OUT 2: {_pwm_text(2)}")
+        print(f"  S3 front/elevator OUT 3: {_pwm_text(3)}")
+        print(f"  yaw motor         OUT {SERVO_MOTOR}: {_pwm_text(SERVO_MOTOR)}")
     else:
         print("Current PWMs:  (no SERVO_OUTPUT_RAW received)")
     print()
@@ -380,11 +421,13 @@ def _cmd_swash(session: RawesGCS, args: list[str]) -> None:
     """swash <coll%> [lon%] [lat%]
        swash range <min> <max>
        swash neutral [n]
+       swash fit-range <min> <max> --cyclic N --allow-full-range
        swash info"""
     if not args:
         print("  Usage: swash <coll%> [lon%] [lat%]")
         print("         swash range <min_us> <max_us>")
         print("         swash neutral [n]")
+        print("         swash fit-range <min_us> <max_us> --cyclic N --allow-full-range")
         print("         swash info")
         return
     sub = args[0].lower()
@@ -405,6 +448,36 @@ def _cmd_swash(session: RawesGCS, args: list[str]) -> None:
             actual = session.get_param(nm)
             tag = "[OK]  " if actual is not None and abs(actual - val) < 1.0 else "[FAIL]"
             print(f"  {tag} {nm} = {actual}")
+        return
+    if sub == "fit-range":
+        try:
+            pos, flags = _parse_flags(
+                args[1:],
+                {
+                    "--cyclic": "int",
+                    "--iterations": "int",
+                    "--margin": "int",
+                    "--allow-full-range": "bool",
+                },
+            )
+        except ValueError as e:
+            print(f"  Error: {e}"); return
+        if len(pos) != 2 or "--cyclic" not in flags:
+            print("  Usage: swash fit-range <min_us> <max_us> --cyclic N "
+                  "--allow-full-range")
+            return
+        if not flags.get("--allow-full-range", False):
+            print("  [REFUSED] fit-range runs native full-envelope oscillation.")
+            print("  Disconnect the servos and add --allow-full-range.")
+            return
+        try:
+            lo, hi = (int(value) for value in pos)
+        except ValueError:
+            print("  Error: min and max must be integers"); return
+        cyclic = flags["--cyclic"]
+        iterations = flags.get("--iterations", 3)
+        margin = flags.get("--margin", 3)
+        _fit_swash_range(session, lo, hi, cyclic, iterations, margin)
         return
     if sub == "neutral":
         targets = list(SWASH_SERVOS)
@@ -443,21 +516,25 @@ _SV_MAN_MODES = {
 }
 
 
-def _run_servo_mode(session: RawesGCS, mode: int, duration: float) -> None:
+def _run_servo_mode(
+    session: RawesGCS,
+    mode: int,
+    duration: float,
+) -> tuple[int, int] | None:
     heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
     if heartbeat is None:
         print("  [FAIL] no heartbeat; servo mode aborted")
-        return
+        return None
     if heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
         print("  [FAIL] vehicle is armed; native servo modes require disarmed")
-        return
+        return None
     saved_mode = session.get_param("H_SV_MAN")
     if saved_mode is None:
         print("  [FAIL] H_SV_MAN unreadable; servo mode aborted")
-        return
+        return None
     if not _set_heli_servo_mode(session, float(mode)):
         print(f"  [FAIL] could not set H_SV_MAN={mode}")
-        return
+        return None
     mode_name = next(name for name, value in _SV_MAN_MODES.items() if value == mode)
     print(f"  H_SV_MAN={mode} ({mode_name}) running for {duration:.1f}s (ESC or Ctrl-C to stop)")
     session.send_message(RequestDataStream(
@@ -470,26 +547,205 @@ def _run_servo_mode(session: RawesGCS, mode: int, duration: float) -> None:
     started = time.monotonic()
     deadline = time.monotonic() + duration
     next_print = started
+    observed: list[int] = []
+    completed = True
     try:
         while time.monotonic() < deadline:
             msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.2)
             now = time.monotonic()
-            if msg is not None and now >= next_print:
-                print(f"  {now - started:5.1f}  "
-                      f"{getattr(msg, 'servo1_raw', 0):6d}  "
-                      f"{getattr(msg, 'servo2_raw', 0):6d}  "
-                      f"{getattr(msg, 'servo3_raw', 0):6d}")
-                next_print = now + 0.2
+            if msg is not None:
+                values = [
+                    getattr(msg, "servo1_raw", 0),
+                    getattr(msg, "servo2_raw", 0),
+                    getattr(msg, "servo3_raw", 0),
+                ]
+                observed.extend(value for value in values if value > 0)
+                if now >= next_print:
+                    print(f"  {now - started:5.1f}  "
+                          f"{values[0]:6d}  {values[1]:6d}  {values[2]:6d}")
+                    next_print = now + 0.2
             if _esc_check():
                 print("\n  [ESC] stopping servo mode")
+                completed = False
                 break
     except KeyboardInterrupt:
         print()
+        completed = False
     finally:
         if _set_heli_servo_mode(session, saved_mode):
             print(f"  H_SV_MAN restored to {saved_mode:.0f}")
         else:
             print(f"  [FAIL] could not restore H_SV_MAN to {saved_mode:.0f}")
+    if not completed or not observed:
+        return None
+    extrema = min(observed), max(observed)
+    print(f"  Observed envelope: {extrema[0]}..{extrema[1]} us")
+    return extrema
+
+
+def _set_param_verified(session: RawesGCS, name: str, value: int) -> bool:
+    if not session.set_param(name, float(value)):
+        print(f"  [FAIL] {name}: no ACK")
+        return False
+    actual = session.get_param(name)
+    ok = actual is not None and abs(actual - value) < 1.0
+    print(f"  {'[OK]  ' if ok else '[FAIL]'} {name} = {actual}")
+    return ok
+
+
+def _fit_swash_range(
+    session: RawesGCS,
+    lo: int,
+    hi: int,
+    cyclic: int,
+    iterations: int,
+    margin: int,
+) -> None:
+    if not (800 <= lo < hi <= 2200):
+        print(f"  Error: need 800 <= min < max <= 2200 (got {lo}..{hi})")
+        return
+    if not (0 <= cyclic <= 4500):
+        print("  Error: cyclic must be in 0..4500")
+        return
+    if not (1 <= iterations <= 5):
+        print("  Error: iterations must be in 1..5")
+        return
+    if margin < 0 or 2 * margin >= hi - lo:
+        print("  Error: margin must be non-negative and less than half the range")
+        return
+
+    trim = round((lo + hi) / 2)
+    initial = {
+        "SERVO1_TRIM": trim,
+        "SERVO2_TRIM": trim,
+        "SERVO3_TRIM": trim,
+        "H_CYC_MAX": cyclic,
+    }
+    if not all(_set_param_verified(session, name, value) for name, value in initial.items()):
+        print("  [FAIL] setup write failed; fit aborted")
+        return
+
+    target_lo, target_hi = lo + margin, hi - margin
+    print(f"  Target final envelope: {target_lo}..{target_hi} us "
+          f"({margin} us margin)")
+    for attempt in range(1, iterations + 1):
+        print(f"\n  Fit iteration {attempt}/{iterations}")
+        extrema = _run_servo_mode(session, _SV_MAN_MODES["oscillate"], 12.0)
+        if extrema is None:
+            print("  [FAIL] incomplete oscillation; fit aborted")
+            return
+        observed_lo, observed_hi = extrema
+        if observed_lo >= target_lo and observed_hi <= target_hi:
+            print(f"  [PASS] configured envelope is within {lo}..{hi} us")
+            for name in ("SERVO1_TRIM", "H_COL_MIN", "H_COL_MAX", "H_CYC_MAX"):
+                value = session.get_param(name)
+                print(f"    {name} = {value}")
+            return
+
+        col_min = session.get_param("H_COL_MIN")
+        col_max = session.get_param("H_COL_MAX")
+        if col_min is None or col_max is None:
+            print("  [FAIL] H_COL_MIN/MAX readback failed")
+            return
+        next_min = round(col_min + target_lo - observed_lo)
+        next_max = round(col_max + target_hi - observed_hi)
+        if next_min >= next_max:
+            print("  [FAIL] requested cyclic leaves no usable collective range")
+            return
+        print(f"  Adjusting collective limits: {round(col_min)}..{round(col_max)} "
+              f"-> {next_min}..{next_max}")
+        if not (
+            _set_param_verified(session, "H_COL_MIN", next_min)
+            and _set_param_verified(session, "H_COL_MAX", next_max)
+        ):
+            print("  [FAIL] collective-limit write failed")
+            return
+
+    print("  [FAIL] fit did not converge within the requested iterations")
+
+
+def _bounded_swash_waypoints(lo: int, neutral: int, hi: int) -> tuple[tuple[int, int, int], ...]:
+    """Safe HR3 setup positions, all bounded by the measured servo envelope."""
+    return (
+        (neutral, neutral, neutral),
+        (lo, lo, lo),
+        (neutral, neutral, neutral),
+        (hi, hi, hi),
+        (neutral, neutral, neutral),
+        (hi, hi, lo),
+        (lo, lo, hi),
+        (neutral, neutral, neutral),
+        (hi, lo, neutral),
+        (lo, hi, neutral),
+        (neutral, neutral, neutral),
+    )
+
+
+def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
+    heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+    if heartbeat is None:
+        print("  [FAIL] no heartbeat; swash sweep aborted")
+        return
+    if heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+        print("  [FAIL] vehicle is armed; swash sweep requires disarmed")
+        return
+
+    lo = session.get_param("H_COL_MIN")
+    hi = session.get_param("H_COL_MAX")
+    if lo is None or hi is None:
+        print("  [FAIL] H_COL_MIN/MAX unreadable; swash sweep aborted")
+        return
+    lo, hi = round(lo), round(hi)
+    if not lo <= PWM_NEUTRAL <= hi:
+        print(f"  [FAIL] neutral {PWM_NEUTRAL} us is outside {lo}..{hi} us")
+        return
+
+    saved_functions = _release_servo_functions(session, SWASH_SERVOS)
+    if saved_functions is None:
+        return
+
+    waypoints = _bounded_swash_waypoints(lo, PWM_NEUTRAL, hi)
+    segment_s = duration / (len(waypoints) - 1)
+    started = time.monotonic()
+    deadline = started + duration
+    print(f"  Safe HR3 sweep: {lo}..{hi} us for {duration:.1f}s (ESC or Ctrl-C to stop)")
+    print("  t(s)    S1(us)  S2(us)  S3(us)")
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_message_rate=10,
+    ))
+    next_print = started
+    try:
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            progress = min((now - started) / segment_s, len(waypoints) - 1)
+            index = min(int(progress), len(waypoints) - 2)
+            blend = progress - index
+            start = waypoints[index]
+            end = waypoints[index + 1]
+            targets = tuple(round(a + blend * (b - a)) for a, b in zip(start, end))
+            for output, pwm in zip(SWASH_SERVOS, targets):
+                _send_set_servo(session, output, pwm)
+
+            msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.08)
+            if msg is not None and now >= next_print:
+                values = tuple(getattr(msg, f"servo{output}_raw", 0) for output in SWASH_SERVOS)
+                status = "OK" if all(lo <= value <= hi for value in values) else "OUT OF RANGE"
+                print(f"  {now - started:5.1f}  {values[0]:6d}  {values[1]:6d}  {values[2]:6d}  {status}")
+                next_print = now + 0.2
+            if _esc_check():
+                print("\n  [ESC] stopping swash sweep")
+                break
+    except KeyboardInterrupt:
+        print()
+    finally:
+        try:
+            for output in SWASH_SERVOS:
+                _send_set_servo(session, output, PWM_NEUTRAL)
+        finally:
+            _restore_servo_functions(session, saved_functions)
 
 
 def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
@@ -507,13 +763,20 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
     if sub in ("mode", "sweep"):
         try:
             mode_args = args[1:]
-            pos, flags = _parse_flags(mode_args, {"--duration": "float"})
+            pos, flags = _parse_flags(
+                mode_args,
+                {"--duration": "float", "--allow-full-range": "bool"},
+            )
         except ValueError as e:
             print(f"  Error: {e}"); return
         if sub == "sweep":
             if pos:
                 print("  Usage: servo sweep [--duration N]"); return
-            mode = _SV_MAN_MODES["oscillate"]
+            duration = flags.get("--duration", 12.0)
+            if duration <= 0:
+                print("  Error: duration must be greater than zero"); return
+            _run_bounded_swash_sweep(session, duration)
+            return
         else:
             if len(pos) != 1:
                 print("  Usage: servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]")
@@ -528,6 +791,12 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
                     mode = -1
                 if mode not in _SV_MAN_MODES.values():
                     print(f"  Error: unknown servo mode {pos[0]!r}; expected a name or 0..5")
+                    return
+            if mode == _SV_MAN_MODES["oscillate"]:
+                if not flags.get("--allow-full-range", False):
+                    print("  [REFUSED] native oscillate exercises the full configured")
+                    print("  swash envelope. Disconnect the servos, then explicitly use")
+                    print("  'servo mode oscillate --allow-full-range'.")
                     return
         duration = flags.get("--duration", 12.0 if mode == 5 else 10.0)
         if duration <= 0:
@@ -775,14 +1044,18 @@ def _cmd_config(session: RawesGCS, args: list[str]) -> None:
             return
     apply = (sub == "fix")
     target = _CONFIG_TARGET_PARAMS_ALL if use_all else _CONFIG_TARGET_PARAMS_COMMON
-    scope = "all shared defaults" if use_all else "rawes_common overrides only"
+    scope = (
+        "all shared and hardware defaults"
+        if use_all
+        else "RAWES common and hardware overrides"
+    )
     action = "Applying" if apply else "Preview -- 'config fix' to write"
     print(f"  RAWES config  [{action}]")
     print(f"  Scope: {scope}")
     print(f"  Source: {_AP_BASE_PARM_PATH}")
     print(f"          {_RAWES_COMMON_PARM_PATH}")
+    print(f"          {_RAWES_HARDWARE_PARM_PATH}")
     print("          (SITL-only rawes_sitl_defaults.parm excluded)")
-    print("          (hardware calibration params excluded)")
     print()
     print(f"  {'Parameter':<25} {'Expected':>8}  {'Actual':>10}  Status")
     print(f"  {'-'*25}  {'-'*8}  {'-'*10}  ------")

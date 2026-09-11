@@ -2,7 +2,7 @@
 rawes_modes.py — RAWES_MODE constants and NAMED_VALUE_FLOAT constants for rawes.lua.
 
 RAWES_MODE is a script-generated parameter (registered by rawes.lua via param:add_table).
-Valid values: 0=none, 1=steady, 3=passive, 4=landing.
+Valid values: 0=none, 1=steady, 2=acro manual, 3=passive, 4=landing.
 Every other dynamic input (substate, tuning) is delivered via NAMED_VALUE_FLOAT --
 never encoded in a parameter. Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N).
 The anchor location (RAWES_LAT/LON/AAL) is delivered via NAMED_VALUE_INT as an
@@ -26,11 +26,11 @@ import math
 
 from groundstation.gcs import NamedValueInt
 
-# ── Mode numbers (RAWES_MODE script-generated param; 0=none 1=steady 3=passive 4=landing) ──
+# ── Mode numbers (RAWES_MODE script-generated param) ──────────────────────────
 
 MODE_NONE     = 0   # script passive: no control-channel overrides (CH8 interlock hold still applies while armed)
 MODE_STEADY   = 1   # bz_altitude_hold cyclic (commanded tension) + altitude-PID collective
-# mode 2 reserved (unused)
+MODE_ACRO_MANUAL = 2  # normalized NVP roll/pitch/collective through ACRO flybar
 MODE_PASSIVE  = 3   # kinematic capture helper: hold IC attitude during release
 MODE_LANDING  = 4   # (reserved, not yet implemented)
 # mode 5 removed: pumping now runs in MODE_STEADY (same control law); the ground
@@ -44,6 +44,9 @@ NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm 
 # ── Named-float tuning key ────────────────────────────────────────────────────
 
 NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] — also a RAWES_* param (override via NVF for runtime changes)
+NV_MANUAL_ROLL_KEY = "RAWES_RLL"  # normalized ACRO-manual roll [-1,1]
+NV_MANUAL_PITCH_KEY = "RAWES_PIT" # normalized ACRO-manual pitch [-1,1]
+NV_MANUAL_COL_KEY = "RAWES_COL"   # normalized ACRO-manual collective [0,1]
 
 # ── Named-int anchor keys ─────────────────────────────────────────────────────
 # rawes.lua gates altitude-hold capture on all three anchor ints arriving AND

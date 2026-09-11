@@ -56,6 +56,11 @@ _mock = {
         RAWES_TEL_HZ  = 2.0,   -- diagnostic NVF emission rate [Hz]
         RAWES_YFF_MAX = 0.7,   -- yaw trim clamp upper bound
         RAWES_YFF_TAU = 0.3,   -- yaw trim time constant
+        H_FLYBAR_MODE = 1,
+        IM_ACRO_COL_EXP = 0,
+        RC1_MIN = 1000, RC1_TRIM = 1500, RC1_MAX = 2000, RC1_REVERSED = 0,
+        RC2_MIN = 1000, RC2_TRIM = 1500, RC2_MAX = 2000, RC2_REVERSED = 0,
+        RC3_MIN = 1000, RC3_TRIM = 1500, RC3_MAX = 2000, RC3_REVERSED = 0,
     },
     ch_out      = {},    -- [channel_n] = pwm
     srv_out     = {},    -- [func] = pwm

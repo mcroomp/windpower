@@ -220,6 +220,16 @@ There are three tiers, each with a different scope and runtime:
 | Simtest | `.venv/Scripts/python.exe -m pytest tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
 | Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
 
+## Hardware Calibration Connection
+
+- On the first hardware operation in a conversation, run `python -m calibrate`
+  without `--port` or `--baud` so it auto-detects the active Pixhawk connection.
+- After a successful scan, reuse the detected port and baud for subsequent
+  one-shot commands in that conversation.
+- Last successful connection (2026-09-11): `COM4` at `115200` baud.
+- If a remembered connection fails, fall back immediately to `python -m calibrate`
+  without connection parameters instead of trying guessed ports.
+
 SITL IC-start timeline rule (agent-critical):
 - For SITL flight diagnosis, use one shared timeline anchored at the IC-start flow.
 - Treat `t_sim` with the `kinematic_exit` event as the canonical phase boundary for

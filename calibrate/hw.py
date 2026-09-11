@@ -100,23 +100,23 @@ def _refresh_pole_pairs(session: RawesGCS) -> None:
 def _h3_forward_mix(coll: float, tilt_lon: float, tilt_lat: float):
     """
     Convert collective + cyclic tilts (all normalised -1..+1) to
-    individual H3-120 servo positions (normalised -1..+1).
+    individual HR3-120 servo positions (normalised -1..+1).
 
-    Bench layout (must match H_SW_H3_SV*_POS on the FC -- see design/ardupilot_swashplate.md):
-        S1 at -60 deg  (front-right)
-        S2 at +60 deg  (front-left)
-        S3 at 180 deg  (back, longitudinal axis)
+    Physical bench layout:
+        S1 at -120 deg  (right-rear)
+        S2 at +120 deg  (left-rear)
+        S3 at    0 deg  (front, longitudinal axis)
 
-    Mirrors AP's add_servo_angle() mixer, then applies the user-side sign
-    convention (tlat > 0 = roll-right; tlon > 0 = nose-DOWN disk = forward
-    stick = NEGATIVE pitch command in AP frame):
+    This uses the physical HR3 servo azimuths because direct MAV_CMD_DO_SET_SERVO
+    commands bypass ArduPilot's H3-120 reversal-based HR3 mapping. It then applies
+    the user-side sign convention (tlat > 0 = roll-right; tlon > 0 = nose-DOWN):
 
         AP mixer:        out = -sin(az)*roll_cmd + cos(az)*pitch_cmd + coll
         Map user input:  roll_cmd = tlat,  pitch_cmd = -tlon
         Result:          out = -sin(az)*tlat - cos(az)*tlon + coll
 
-    For S3 at 180 deg with tlon > 0 (nose-down), -cos(180) * tlon = +tlon
-    -> S3 PWM rises, matching observed flybar-passthrough behaviour.
+    For S3 at 0 deg with tlon > 0 (nose-down), its command decreases while the
+    two rear commands increase.
     """
     def _mix(az):
         return coll - math.sin(az) * tilt_lat - math.cos(az) * tilt_lon
@@ -251,9 +251,9 @@ def _print_status(session: RawesGCS) -> None:
             val = getattr(srv, f"servo{i}_raw", 0)
             if not val:
                 continue
-            tag = {SERVO_S1: "  <- S1 (-60 deg, front-right)",
-                   SERVO_S2: "  <- S2 (+60 deg, front-left)",
-                   SERVO_S3: "  <- S3 (180 deg, back)"}.get(i, "")
+            tag = {SERVO_S1: "  <- S1 (-120 deg, right-rear)",
+                   SERVO_S2: "  <- S2 (+120 deg, left-rear)",
+                   SERVO_S3: "  <- S3 (0 deg, front/elevator)"}.get(i, "")
             if i == SERVO_MOTOR:
                 if val <= MOTOR_OFF_US:
                     tag = "  <- GB4008 off"
@@ -686,5 +686,3 @@ def _restore_servo_functions(session: RawesGCS, saved_functions: dict[int, float
                 print(f"  {servo_function} restored to {saved_function:.0f}")
             else:
                 print(f"  [FAIL] could not restore {servo_function} to {saved_function:.0f}")
-
-

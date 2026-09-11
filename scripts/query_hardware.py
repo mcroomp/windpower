@@ -301,6 +301,14 @@ param_groups = {
     ],
     "Swashplate": [
         "H_SW_TYPE", "H_SW_COL_DIR", "H_SW_H3_ENABLE", "H_SW_LIN_SVO",
+        "SERVO1_FUNCTION", "SERVO2_FUNCTION", "SERVO3_FUNCTION",
+        "SERVO1_REVERSED", "SERVO2_REVERSED", "SERVO3_REVERSED",
+    ],
+    "Board / inertial geometry": [
+        "AHRS_ORIENTATION",
+        "INS_POS1_X", "INS_POS1_Y", "INS_POS1_Z",
+        "INS_POS2_X", "INS_POS2_Y", "INS_POS2_Z",
+        "INS_POS3_X", "INS_POS3_Y", "INS_POS3_Z",
     ],
     "RSC": [
         "H_RSC_MODE", "H_RSC_RUNUP_TIME", "H_RSC_SETPOINT",

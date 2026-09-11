@@ -544,7 +544,7 @@ groundstation/
 └── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.
 
 scripts/
-├── rawes.lua                      Unified Lua controller (RAWES_MODE: 0=none 1=steady 3=passive 4=landing).
+├── rawes.lua                      Unified Lua controller (RAWES_MODE: 0=none 1=steady 2=ACRO-manual 3=passive 4=landing).
 └── rawes_test_surface.lua         Test-surface table (_rawes_fns) splicing internal locals
                                    for Python unit tests via lupa.
 

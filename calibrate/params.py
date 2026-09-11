@@ -17,7 +17,7 @@ except ImportError:
 from .constants import (
     RawesGCS,
     _SIM_DIR,
-    _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH,
+    _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH,
     _CALIBRATION_PARAM_PREFIXES,
     SCRIPTS_DIR,
     load_ap_params,
@@ -38,14 +38,21 @@ def _is_calibration_param(name: str) -> bool:
 
 
 def _load_shared_hw_target_params() -> dict[str, float]:
-    """Load hardware target params from shared sources, excluding SITL-only overrides."""
-    raw = load_ap_params([_AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH])
+    """Load the complete hardware target, including physical-airframe overrides."""
+    raw = load_ap_params([
+        _AP_BASE_PARM_PATH,
+        _RAWES_COMMON_PARM_PATH,
+        _RAWES_HARDWARE_PARM_PATH,
+    ])
     return {k: v for k, v in raw.items() if not _is_calibration_param(k)}
 
 
 def _load_common_override_target_params() -> dict[str, float]:
-    """Load only params explicitly overridden in rawes_common_defaults.parm."""
-    raw = load_ap_params([_RAWES_COMMON_PARM_PATH])
+    """Load normal hardware fixes without rewriting the full ArduPilot baseline."""
+    raw = load_ap_params([
+        _RAWES_COMMON_PARM_PATH,
+        _RAWES_HARDWARE_PARM_PATH,
+    ])
     return {k: v for k, v in raw.items() if not _is_calibration_param(k)}
 
 

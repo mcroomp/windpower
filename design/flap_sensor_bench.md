@@ -441,8 +441,11 @@ If any servo moves the wrong way, set SERVO1/2/3_REVERSED = 1.
 ```
 H_COL_MIN = 1250    # us -- minimum collective (flat/negative pitch)
 H_COL_MAX = 1750    # us -- maximum collective (positive pitch)
-H_COL_MID = 1500    # us -- zero collective (neutral, matches SERVO_TRIM)
+H_COL_ZERO_THRST = 0.0  # deg -- blade pitch that produces zero thrust
 ```
+
+`H_COL_MID` is obsolete in current ArduPilot. Use `H_COL_ZERO_THRST` for the
+zero-thrust blade angle and `H_COL_HOVER` for learned hover collective.
 
 ### Step 6 -- Cyclic pitch range
 

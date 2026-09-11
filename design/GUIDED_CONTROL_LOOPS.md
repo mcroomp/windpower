@@ -250,7 +250,8 @@ When `apply_angle_boost` is true (default), the collective is scaled by `1/cos(t
 |-----------|-------|-------------|
 | `H_COL_MIN` | PWM or 0-1 | Minimum collective pitch |
 | `H_COL_MAX` | PWM or 0-1 | Maximum collective pitch |
-| `H_COL_MID` | PWM or 0-1 | Mid-stick collective |
+| `H_COL_ZERO_THRST` | degrees | Blade pitch that produces zero thrust |
+| `H_COL_HOVER` | 0-1 | Learned collective required to hover |
 | `H_COL_ANG_MIN` | degrees | Blade pitch at minimum collective |
 | `H_COL_ANG_MAX` | degrees | Blade pitch at maximum collective |
 
@@ -505,7 +506,8 @@ While this doesn't directly inject yaw, it clips the maximum allowed attitude ba
 |-----------|-------|-------------|
 | `H_COL_MIN` | PWM or 0-1 | Minimum collective pitch |
 | `H_COL_MAX` | PWM or 0-1 | Maximum collective pitch |
-| `H_COL_MID` | PWM or 0-1 | Mid-stick collective (hover approx) |
+| `H_COL_ZERO_THRST` | degrees | Blade pitch that produces zero thrust |
+| `H_COL_HOVER` | 0-1 | Learned collective required to hover |
 | `H_COL_ANG_MIN` | degrees | Blade pitch at minimum collective |
 | `H_COL_ANG_MAX` | degrees | Blade pitch at maximum collective |
 

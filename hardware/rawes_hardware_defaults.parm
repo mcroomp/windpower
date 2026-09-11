@@ -1,0 +1,47 @@
+# RAWES physical-airframe overrides.
+#
+# These values are applied by `python -m calibrate ... config fix` after the
+# shared SITL/hardware defaults. They must not be loaded by SITL because the
+# simulator uses the standard rear-elevator H3-120 channel geometry.
+
+# Vehicle +X points from the Pixhawk toward the centre of gravity. The Pixhawk
+# arrow is aligned with +X, so no board-orientation rotation is required.
+AHRS_ORIENTATION   0
+
+# Physical HR3-120 layout:
+#   front: MAIN OUT 3 / Motor3
+#   left:  MAIN OUT 2 / Motor2
+#   right: MAIN OUT 1 / Motor1
+# ArduPilot implements HR3-120 using H3-120 with all swash servos and the
+# collective direction reversed.
+H_SW_TYPE          3
+H_SW_COL_DIR       1
+SERVO1_FUNCTION   33
+SERVO2_FUNCTION   34
+SERVO3_FUNCTION   35
+SERVO1_REVERSED    1
+SERVO2_REVERSED    1
+SERVO3_REVERSED    1
+
+# Measured final-output safe travel is 1257..1777 us. These collective-only
+# limits reserve cyclic headroom; native oscillation verified 1260..1774 us.
+SERVO1_TRIM      1517
+SERVO2_TRIM      1517
+SERVO3_TRIM      1517
+H_COL_MIN        1342
+H_COL_MAX        1657
+H_CYC_MAX        1000
+H_FLYBAR_MODE       1
+IM_ACRO_COL_EXP     0
+
+# All three accelerometers are inside the same Pixhawk enclosure. With the
+# vehicle origin at the CG, the Pixhawk is 8 cm aft along body X.
+INS_POS1_X        -0.08
+INS_POS1_Y         0.0
+INS_POS1_Z         0.0
+INS_POS2_X        -0.08
+INS_POS2_Y         0.0
+INS_POS2_Z         0.0
+INS_POS3_X        -0.08
+INS_POS3_Y         0.0
+INS_POS3_Z         0.0

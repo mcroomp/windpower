@@ -55,6 +55,9 @@ _rawes_fns = {
 
     run_flight = run_flight,
     run_armon  = run_armon,
+    run_acro_manual_mode = run_acro_manual_mode,
+    normalized_angle_pwm = normalized_angle_pwm,
+    normalized_collective_pwm = normalized_collective_pwm,
 
     -- ── Over-spin auto-disarm safety ─────────────────────────────────────────
     run_spin_safety    = run_spin_safety,

@@ -63,7 +63,7 @@ end)()
 # The harness exposes shorthand aliases for convenience.
 
 _PARAM_ALIAS = {
-    "mode":     "RAWES_MODE",    # flight mode (0=none,1=steady,3=passive,4=landing)
+    "mode":     "RAWES_MODE",    # flight mode (0=none,1=steady,2=acro-manual,3=passive,4=landing)
     "kp_alt":   "RAWES_KP_ALT",
     "ki_alt":   "RAWES_KI_ALT",
     "kd_vz":    "RAWES_KD_VZ",

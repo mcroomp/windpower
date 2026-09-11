@@ -27,15 +27,27 @@ throttle).
 
 | Output | Component | SERVO_FUNCTION |
 |--------|-----------|---------------|
-| 1 | S1 — swashplate 0 deg (East) | 33 (Motor1) |
-| 2 | S2 — swashplate 120 deg | 34 (Motor2) |
-| 3 | S3 — swashplate 240 deg | 35 (Motor3) |
+| 1 | S1 — right-rear swashplate servo | 33 (Motor1) |
+| 2 | S2 — left-rear swashplate servo | 34 (Motor2) |
+| 3 | S3 — front/elevator swashplate servo | 35 (Motor3) |
 | 9 | GB4008 anti-rotation motor (AUX 1) | 36 (Motor4) |
+
+The physical layout is HR3-120. ArduPilot has no separate HR3 mixer selection:
+`H_SW_TYPE=3` selects H3-120, while `SERVO1/2/3_REVERSED=1` and
+`H_SW_COL_DIR=1` implement the front-elevator arrangement. The Pixhawk arrow
+and vehicle +X both point toward the centre of gravity (`AHRS_ORIENTATION=0`).
+The physical-airframe overrides are in
+[`hardware/rawes_hardware_defaults.parm`](../hardware/rawes_hardware_defaults.parm).
 
 Swashplate PWM range: 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max). The heli mixer
 hard-codes this range on the swash servos — `SERVOn_MIN/MAX` writes are silently
 overwritten on every output tick. Use `swash range <min> <max>` (which writes
 `H_COL_MIN/H_COL_MAX`) to limit physical swash travel.
+
+The measured RAWES final-output limits are 1257–1777 µs. The fitted configuration
+uses `SERVO1/2/3_TRIM=1517`, `H_COL_MIN=1342`, `H_COL_MAX=1657`, and
+`H_CYC_MAX=1000` (10°). A complete native oscillation measured 1260–1774 µs,
+including the configured 3 µs guard band.
 
 Motor PWM range: 1000 µs (off) … 2000 µs (full throttle). `SERVO9_MIN/MAX` is the
 limiter you want here.
@@ -131,9 +143,11 @@ python -m calibrate --port COM7 get RAWES_MODE
 Three forms:
 
 ```bash
-swash <coll%> [lon%] [lat%]    # H3-120 forward mixer manual drive (-100..+100)
+swash <coll%> [lon%] [lat%]    # HR3-120 physical mixer manual drive (-100..+100)
 swash range <min_us> <max_us>  # writes H_COL_MIN / H_COL_MAX (heli mixer respects these)
 swash neutral [n]              # drive S1/S2/S3 (or n) to 1500 us
+swash fit-range <min> <max> --cyclic N --allow-full-range
+                                 # empirically fit the final PWM envelope
 ```
 
 ### `servo`
@@ -141,18 +155,46 @@ Three forms:
 
 ```bash
 servo <ch> <pwm>                            # raw PWM; ch1-3 all disconnect, then restore
-servo mode <name|0..5> [--duration N]       # run a native H_SV_MAN mode, then restore
-servo sweep [--duration N]                  # native ArduPilot all-swash test; default 12 s
+servo mode <name|0..5> [--duration N]       # native mode; oscillate requires explicit override
+servo sweep [--duration N]                  # safe raw-PWM sweep within H_COL_MIN/MAX
 servo hold <ch> <pwm> [--duration N]        # hold; ch1-3 disconnect; swash stays disarmed
 ```
 
 Native mode names are `automated` (0), `passthrough` (1), `max` collective (2),
-`zero` thrust collective (3), `min` collective (4), and `oscillate` (5). The command
-requires a disarmed vehicle, prints live S1/S2/S3 PWM telemetry, and restores the
-previous setting afterward. `servo sweep` is an alias for `servo mode oscillate`.
-Direct and hold commands temporarily disconnect all three swash functions before
-sending raw PWM. Changing `H_SW_TYPE` is neither required nor a way to disable the
-swash mixer.
+`zero` thrust collective (3), `min` collective (4), and `oscillate` (5).
+ArduPilot's native oscillation exercises maximum configured cyclic at minimum
+and maximum collective, so it requires disconnected servos and the explicit
+`--allow-full-range` flag. `servo sweep` instead disconnects all three swash
+functions and performs a raw-PWM HR3 sweep bounded by live `H_COL_MIN/MAX`,
+restoring neutral and the original functions afterward. All servo setup
+commands require a disarmed vehicle.
+
+`swash fit-range` is for disconnected servos. It centers all three servo trims
+at the midpoint of the requested final PWM range, sets the requested
+`H_CYC_MAX`, runs complete native oscillation cycles, and adjusts
+`H_COL_MIN/MAX` from measured `SERVO_OUTPUT_RAW` extrema until the requested
+range (with a default 3 us margin) is satisfied. Optional controls are
+`--iterations 1..5` and `--margin N`.
+
+### Interactive ACRO manual mode
+
+```bash
+run acro-manual [--duration N]
+```
+
+This selects ArduPilot ACRO and `RAWES_MODE=2`, verifies
+`H_FLYBAR_MODE=1`, seeds normalized roll/pitch/collective at `0/0/0.5`,
+then arms. Arrow keys adjust roll and pitch by 0.05; `-` and `=` adjust
+collective by 0.05 without Shift. Lua latches each NVP setpoint and refreshes
+the short-lived RC override every 10 ms. The live table keeps RC1–RC4 and
+mixed S1–S3 PWM telemetry enabled and refreshes four times per second.
+Selecting mode 2 outside ACRO, without flybar passthrough, or without a
+complete three-axis seed immediately disarms.
+`IM_ACRO_COL_EXP=0` is also required so normalized collective remains linear
+and matches the GUIDED throttle convention.
+On exit, the run command sets `RAWES_MODE=0` permanently so Lua releases
+RC1–RC3, turns the motor output off, disarms, and then restores the ArduPilot
+flight mode that was active before the run.
 
 ### `motor`
 GB4008 throttle test via `MAV_CMD_DO_MOTOR_TEST`. Prompts above 5% unless `--force`.
@@ -175,7 +217,8 @@ toggles `SCR_ENABLE 1→0→1` to restart the scripting engine (no reboot needed
 
 ### `config show` / `config apply`
 Diff the live FC params against shared parm defaults:
-`tests/sitl/copter-heli.parm` + `tests/sitl/rawes_common_defaults.parm`
+`tests/sitl/copter-heli.parm` + `tests/sitl/rawes_common_defaults.parm` +
+`hardware/rawes_hardware_defaults.parm`
 (excluding SITL-only and hardware calibration params). `show` prints an
 `[OK]`/`[DIFF]`/`[FAIL]` table without changes; `apply` writes every `[DIFF]`.
 

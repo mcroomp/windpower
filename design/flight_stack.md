@@ -309,6 +309,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 |---|---|---|---|
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
+| 2 — ACRO manual | normalized RAWES_RLL/RAWES_PIT through ACRO flybar passthrough | normalized RAWES_COL through ACRO collective | manual bench/flight control with AP yaw regulation |
 | 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
 
@@ -320,7 +321,7 @@ Sections 4.2–4.5 give the per-mode detail and gain values.
 
 | Parameter | Default | Description |
 |---|---|---|
-| RAWES_MODE | 0 | Mode selector: 0=none, 1=steady, 3=passive, 4=landing |
+| RAWES_MODE | 0 | Mode selector: 0=none, 1=steady, 2=ACRO manual, 3=passive, 4=landing |
 | RAWES_YAW_SLP | 0 | Yaw motor slope [RPM/µs] override. 0 → bench default 0.504 RPM/µs. |
 | RAWES_KP_ALT | 0.0263 | Altitude P gain [thrust/m] |
 | RAWES_KI_ALT | 0.0026 | Altitude I gain [thrust/m·s] |
@@ -349,6 +350,9 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
 | RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
 | RAWES_YIC | rad, or the `RAWES_YIC_CAPTURE_SENTINEL` (-1000) | Fixed yaw target for MODE_PASSIVE, held as an absolute setpoint instead of capturing the (possibly spinning) AHRS yaw. Sending the sentinel instead captures the CURRENT roll/pitch/yaw all at once from AHRS (calibrate `run passive --hold`) — see §4.2b "IC seeding via capture" for the one-shot-per-boot commit gotcha. |
+| RAWES_RLL | [-1..1] | Latched ACRO-manual roll input. Lua converts it with the inverse RC MIN/TRIM/MAX mapping and continuously refreshes the RC override. |
+| RAWES_PIT | [-1..1] | Latched ACRO-manual pitch input. Positive is ArduPilot positive pitch; the calibration Up arrow increases it. |
+| RAWES_COL | [0..1] | Latched ACRO-manual collective input using RC3 MIN/MAX and reversal. |
 
 **Named int inputs (ground → Lua, via `gcs.send_message(NamedValueInt(...))`, one-shot anchor location):**
 
@@ -575,13 +579,20 @@ Re-sending refreshes the timer. Works in any mode.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1-Ch4 (servo outputs) | ArduPilot | 400 Hz / 100 Hz | Driven from GUIDED setpoints and AP control loops; no Lua RC overrides on Ch1-Ch4. |
+| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC overrides only in mode 2 | 400 Hz / 100 Hz | GUIDED setpoints in automatic modes; normalized NVP → refreshed RC override → ACRO flybar mixer in mode 2. |
+| Ch4 (yaw input) | rawes.lua | 100 Hz | Held at 1500 µs so AP yaw-rate demand is zero; AP yaw PID and Lua trim observer drive the anti-rotation motor. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
-| Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/3/4) | 400 Hz / 100 Hz | DDFP CW (H_TAIL_TYPE=3, no sign flip): CCW body drift -> positive PID -> positive throttle. |
+| Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/2/3/4) | 400 Hz / 100 Hz | DDFP CW (H_TAIL_TYPE=3, no sign flip): CCW body drift -> positive PID -> positive throttle. |
 
 ### 4.8 Yaw Regulation — ArduPilot ATC_RAT_YAW
 
-Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes 0/1/3/4.
+Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes 0/1/2/3/4.
+
+ACRO manual additionally requires `H_FLYBAR_MODE=1` and
+`IM_ACRO_COL_EXP=0`. Disabling ACRO collective expo makes `RAWES_COL`
+follow the same linear normalized `[0,1]` collective convention as the
+GUIDED throttle path. Leaving mode 2 writes override value zero on RC1–RC3,
+which immediately releases those Lua overrides.
 
 ```
 Sensing:    gyro.z (from EKF attitude estimate)
@@ -720,14 +731,18 @@ Lua is unavailable on the first boot from a fresh EEPROM.
 | Parameter | Value | Reason |
 |---|---|---|
 | FRAME_CLASS | 6 (Heli) | Traditional helicopter frame |
-| H_SWASH_TYPE | 3 (H3_120) | 3-servo lower ring at 120° |
+| H_SW_TYPE | 3 (H3_120) | ArduPilot mixer used for the physical HR3-120 front-elevator layout |
+| H_SW_COL_DIR | 1 (reversed) | Required with reversed swash servos for HR3-120 |
 | H_RSC_MODE | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete |
 | H_SW_PHANG | 0 (confirmed) | No phase offset. Built-in +90° roll advance in H3_120 already aligns with RAWES layout. Cross-coupling <20% confirmed via test_h_phang. |
 | H_COL_MIN | 1000 µs | Full servo range (not default 1250–1750) |
 | H_COL_MAX | 2000 µs | Full servo range |
-| SERVO1_FUNCTION | 33 (Motor1/S1) | Swashplate servo S1 |
-| SERVO2_FUNCTION | 34 (Motor2/S2) | Swashplate servo S2 |
-| SERVO3_FUNCTION | 35 (Motor3/S3) | Swashplate servo S3 |
+| SERVO1_FUNCTION | 33 (Motor1/S1) | Right-rear swashplate servo |
+| SERVO2_FUNCTION | 34 (Motor2/S2) | Left-rear swashplate servo |
+| SERVO3_FUNCTION | 35 (Motor3/S3) | Front/elevator swashplate servo |
+| SERVO1/2/3_REVERSED | 1 | ArduPilot's H3-120-to-HR3-120 mapping |
+| AHRS_ORIENTATION | 0 | Pixhawk arrow is aligned with vehicle +X toward the CG |
+| INS_POS1/2/3_X | -0.08 m | Pixhawk IMUs are 8 cm aft of the CG in the new body frame |
 | ATC_RAT_RLL_IMAX | 0 | Prevent orbital angular rate integrator windup |
 | ATC_RAT_PIT_IMAX | 0 | Same |
 | ATC_RAT_YAW_IMAX | 0 | Same |
@@ -1070,7 +1085,7 @@ level first.
 
 | File | Description |
 |---|---|
-| `scripts/rawes.lua` | Unified Lua controller (modes 0/1/3/4, RAWES_ARM, bz_altitude_hold force balance, altitude-PID collective; pumping runs in mode 1) |
+| `scripts/rawes.lua` | Unified Lua controller (modes 0/1/2/3/4, RAWES_ARM, ACRO-manual passthrough, bz_altitude_hold force balance, altitude-PID collective; pumping runs in mode 1) |
 | `tests/sitl/rawes_sitl_defaults.parm` | Boot-time ArduPilot params (EKF3, GPS, compass, servos) |
 | `tests/sitl/flight/conftest.py` | Flight fixtures for guided and Lua stack tests |
 | `tests/sitl/torque/conftest.py` | Torque fixtures for DDFP and Lua PASSIVE stack paths |

@@ -81,11 +81,11 @@ _ESC_TELEM_MSGS = {
 }
 
 # ---------------------------------------------------------------------------
-# H3-120 forward mix constants -- bench rig azimuths.
+# HR3-120 forward mix constants -- physical bench rig azimuths.
 # ---------------------------------------------------------------------------
-_AZ_S1 = math.radians(-60.0)   # SV1: front-right
-_AZ_S2 = math.radians( 60.0)   # SV2: front-left
-_AZ_S3 = math.radians(180.0)   # SV3: back
+_AZ_S1 = math.radians(-120.0)  # SV1: right-rear
+_AZ_S2 = math.radians( 120.0)  # SV2: left-rear
+_AZ_S3 = math.radians(   0.0)  # SV3: front
 
 # PWM range constants — imported from servo_pwm.py; local aliases for brevity.
 PWM_MIN     = SWASH_PWM_MIN
@@ -105,13 +105,14 @@ _COPTER_MODES = {
 _SYS_STATUS = {0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
                4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY", 7: "POWEROFF"}
 
-_LUA_MODES = {0: "none", 1: "steady", 3: "passive", 4: "landing", 5: "pumping"}
+_LUA_MODES = {0: "none", 1: "steady", 2: "acro_manual", 3: "passive", 4: "landing"}
 
 # ---------------------------------------------------------------------------
 # Param file paths
 # ---------------------------------------------------------------------------
 _AP_BASE_PARM_PATH     = os.path.join(_REPO_ROOT, "tests", "sitl", "copter-heli.parm")
 _RAWES_COMMON_PARM_PATH = os.path.join(_REPO_ROOT, "tests", "sitl", "rawes_common_defaults.parm")
+_RAWES_HARDWARE_PARM_PATH = os.path.join(_REPO_ROOT, "hardware", "rawes_hardware_defaults.parm")
 
 # Never push hardware-calibrated sensor values from defaults to a real FC.
 _CALIBRATION_PARAM_PREFIXES = (
@@ -224,6 +225,13 @@ _RUN_MODES = {
         "ic_seed":     True,
         "take_servo4": False,
         "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_THR/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  IC via --trim thr=<thrust> --roll <deg> --pitch <deg>.",
+    },
+    "acro-manual": {
+        "rawes_mode":  2,
+        "flight_mode": 1,
+        "manual_control": True,
+        "take_servo4": False,
+        "doc":        "interactive ACRO flybar control: arrows=roll/pitch, -/=collective; AP yaw compensation remains active",
     },
     "steady": {
         "rawes_mode":  1,

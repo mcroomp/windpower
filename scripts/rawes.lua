@@ -5,7 +5,7 @@ Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 Mode is selected at runtime via RAWES_MODE (script-generated parameter):
     0  none        -- script passive: no control-channel overrides; CH8 interlock hold still applies while armed
     1  steady      -- primary guided flight path (set_target_rate_and_throttle)
-    2  reserved    -- unused
+    2  acro_manual -- normalized NVP controls through ACRO flybar passthrough
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
     4  landing     -- reserved, not yet implemented
 
@@ -26,6 +26,9 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
   RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
   RAWES_ARM: optional disarm timer (value = ms until forced disarm)
+  RAWES_RLL: ACRO-manual normalized roll [-1,1]
+  RAWES_PIT: ACRO-manual normalized pitch [-1,1]
+  RAWES_COL: ACRO-manual normalized collective [0,1]
 
 Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
   RAWES_LAT: anchor latitude  [deg * 1e7]                           (int32, no default)
@@ -54,7 +57,7 @@ Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
              and fixed yaw target all at once.
 
 Parameters (script-generated; visible in GCS as RAWES_* params):
-  RAWES_MODE    Mode selector (0=none,1=steady,3=passive,4=landing)    default 0
+  RAWES_MODE    Mode selector (0=none,1=steady,2=acro-manual,3=passive,4=landing) default 0
   RAWES_YAW_SLP Yaw motor slope [RPM/µs] (0=bench default 0.504)       default 0
   RAWES_KP_ALT  Altitude-P gain                                         default 0.0263
   RAWES_KI_ALT  Altitude-I gain                                         default 0.0026
@@ -75,6 +78,7 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
 BASE_PERIOD_MS    = 10        -- 100 Hz base tick
 FLIGHT_PERIOD_MS  = 20        -- 50 Hz flight subsystem
 GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
+ACRO_MODE_NUM     = 1         -- ArduCopter ACRO = 1
 -- Smooth handoff after kinematic release: keep plant physics unchanged, but
 -- phase in guidance/corrections over a longer window to avoid a command step.
 POST_RELEASE_BLEND_S = 2.5    -- blend current->steady body_z after capture
@@ -97,6 +101,7 @@ _nv_ints   = {}
 
 MODE_NONE    = 0
 MODE_STEADY  = 1
+MODE_ACRO_MANUAL = 2
 MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable during release.
 MODE_LANDING = 4   -- reserved; not implemented here
 
@@ -196,6 +201,12 @@ _submode_ms = 0
 -- Cached RC channel objects
 _rc_ch4 = rc:get_channel(4)
 _rc_ch8 = rc:get_channel(8)
+_rc_ch1 = rc:get_channel(1)
+_rc_ch2 = rc:get_channel(2)
+_rc_ch3 = rc:get_channel(3)
+
+local _manual_status_ms = 0
+local _manual_active = false
 
 -- Thrust state [0..1]
 -- _last_thrust starts at 0; seeded at capture from RAWES_THR (ic_thrust_or_default).
@@ -397,6 +408,27 @@ local function p(name, default)
     return v
 end
 
+local function normalized_angle_pwm(value, channel)
+    local v = math.max(-1.0, math.min(1.0, value))
+    local prefix = "RC" .. tostring(channel) .. "_"
+    local rmin = p(prefix .. "MIN", 1000)
+    local trim = p(prefix .. "TRIM", 1500)
+    local rmax = p(prefix .. "MAX", 2000)
+    if p(prefix .. "REVERSED", 0) > 0.5 then v = -v end
+    if v >= 0.0 then
+        return math.floor(trim + v * (rmax - trim) + 0.5)
+    end
+    return math.floor(trim + v * (trim - rmin) + 0.5)
+end
+
+local function normalized_collective_pwm(value)
+    local v = math.max(0.0, math.min(1.0, value))
+    local rmin = p("RC3_MIN", 1000)
+    local rmax = p("RC3_MAX", 2000)
+    if p("RC3_REVERSED", 0) > 0.5 then v = 1.0 - v end
+    return math.floor(rmin + v * (rmax - rmin) + 0.5)
+end
+
 -- Rate gate for diagnostic NVF telemetry (RAWES_TEL_HZ).  Returns true and
 -- advances the timer when it is time to emit; returns false otherwise.
 -- All diagnostic NVFs (YFF_T/U/GZ, etc.) share this single timer so they
@@ -556,8 +588,16 @@ end
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 
 local function _on_mode_enter(mode)
-    _nv_floats      = {}   -- clear NV inbox so stale substates cannot bleed through
+    -- Preserve a manual seed received in the same scheduler tick as the mode
+    -- change. Leaving manual mode clears it, so a later re-entry needs a new seed.
+    if mode ~= MODE_ACRO_MANUAL then _nv_floats = {} end
     _none_status_ms = 0
+    if mode ~= MODE_ACRO_MANUAL and _manual_active then
+        if _rc_ch1 then _rc_ch1:set_override(0) end
+        if _rc_ch2 then _rc_ch2:set_override(0) end
+        if _rc_ch3 then _rc_ch3:set_override(0) end
+        _manual_active = false
+    end
     if mode == MODE_STEADY then
         _dbg_cap_logged = false
         _dbg_cmd_logged = false
@@ -985,6 +1025,50 @@ local function run_yaw_trim(now, is_passive)
     _diag_set("YFF_GZ", psi_dot)
 end
 
+local function run_acro_manual_mode(now)
+    if vehicle:get_mode() ~= ACRO_MODE_NUM then
+        if arming:is_armed() then arming:disarm() end
+        if now - _manual_status_ms >= 1000 then
+            _manual_status_ms = now
+            gcs:send_text(3, "RAWES ACRO manual: AP not in ACRO -- DISARMED")
+        end
+        return false
+    end
+    if math.floor(p("H_FLYBAR_MODE", 0) + 0.5) ~= 1 then
+        if arming:is_armed() then arming:disarm() end
+        if now - _manual_status_ms >= 1000 then
+            _manual_status_ms = now
+            gcs:send_text(3, "RAWES ACRO manual: H_FLYBAR_MODE must be 1 -- DISARMED")
+        end
+        return false
+    end
+    if math.abs(p("IM_ACRO_COL_EXP", 0.0)) > 1e-6 then
+        if arming:is_armed() then arming:disarm() end
+        if now - _manual_status_ms >= 1000 then
+            _manual_status_ms = now
+            gcs:send_text(3, "RAWES ACRO manual: IM_ACRO_COL_EXP must be 0 -- DISARMED")
+        end
+        return false
+    end
+
+    if _nv_floats["RAWES_RLL"] == nil
+       or _nv_floats["RAWES_PIT"] == nil
+       or _nv_floats["RAWES_COL"] == nil then
+        if arming:is_armed() then arming:disarm() end
+        if now - _manual_status_ms >= 1000 then
+            _manual_status_ms = now
+            gcs:send_text(3, "RAWES ACRO manual: waiting for RLL/PIT/COL -- DISARMED")
+        end
+        return false
+    end
+
+    if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(_nv_floats["RAWES_RLL"], 1)) end
+    if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(_nv_floats["RAWES_PIT"], 2)) end
+    if _rc_ch3 then _rc_ch3:set_override(normalized_collective_pwm(_nv_floats["RAWES_COL"])) end
+    _manual_active = true
+    return true
+end
+
 local function run_passive_mode(now)
     -- Armed-but-quiet: hold the IC operating point so the kinematic
     -- release transitions smoothly. Hold zero body-rate demand and
@@ -1252,6 +1336,14 @@ local function update()
         return update, BASE_PERIOD_MS
     end
 
+    if mode == MODE_ACRO_MANUAL then
+        if run_acro_manual_mode(now) then
+            run_yaw_trim(now, false)
+        end
+        _diag_emit(now)
+        return update, BASE_PERIOD_MS
+    end
+
     if mode == MODE_STEADY then
         run_yaw_trim(now, false)
         if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
@@ -1270,7 +1362,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 local _mode_init  = math.floor(p("RAWES_MODE", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="steady", [3]="passive", [4]="landing"}
+local _mode_names = {[0]="none", [1]="steady", [2]="acro_manual", [3]="passive", [4]="landing"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
@@ -1280,4 +1372,3 @@ gcs:send_text(6, string.format(
 -- @@UNIT_TEST_HOOK
 
 return update, BASE_PERIOD_MS
-
