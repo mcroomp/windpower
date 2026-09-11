@@ -47,6 +47,7 @@ NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] �
 NV_MANUAL_ROLL_KEY = "RAWES_RLL"  # normalized ACRO-manual roll [-1,1]
 NV_MANUAL_PITCH_KEY = "RAWES_PIT" # normalized ACRO-manual pitch [-1,1]
 NV_MANUAL_COL_KEY = "RAWES_COL"   # normalized ACRO-manual collective [0,1]
+NV_PASSIVE_Q_KEYS = ("RAWES_QW", "RAWES_QX", "RAWES_QY", "RAWES_QZ")
 
 # ── Named-int anchor keys ─────────────────────────────────────────────────────
 # rawes.lua gates altitude-hold capture on all three anchor ints arriving AND

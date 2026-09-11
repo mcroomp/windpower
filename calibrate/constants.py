@@ -208,11 +208,6 @@ _IC_TRIM_KEYS = {"thr"}
 # Corresponds to -8.6 deg blade pitch (col_min=-0.28 rad, span=0.38 rad).
 _PASSIVE_IC_THRUST = 0.342
 
-# Sentinel value for RAWES_YIC (radians, matches RAWES_YIC_CAPTURE_SENTINEL in
-# rawes.lua): sending this instead of a yaw angle tells MODE_PASSIVE to
-# capture the current AHRS roll/pitch/yaw as the IC seed.
-_RAWES_YIC_CAPTURE_SENTINEL = -1000.0
-
 _RUN_MODES = {
     "none": {
         "rawes_mode":  0,
@@ -224,7 +219,7 @@ _RUN_MODES = {
         "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
         "ic_seed":     True,
         "take_servo4": False,
-        "doc":        "armed-but-quiet in GUIDED_NOGPS (matches the SITL passive test): seeds the IC (RAWES_THR/RIC/PIC) and holds the IC attitude via the GUIDED angle API.  IC via --trim thr=<thrust> --roll <deg> --pitch <deg>.",
+        "doc":        "interactive GUIDED_NOGPS attitude hold: captures the current quaternion; keys apply relative quaternion offsets and adjust held thrust",
     },
     "acro-manual": {
         "rawes_mode":  2,

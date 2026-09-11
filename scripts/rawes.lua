@@ -29,6 +29,7 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_RLL: ACRO-manual normalized roll [-1,1]
   RAWES_PIT: ACRO-manual normalized pitch [-1,1]
   RAWES_COL: ACRO-manual normalized collective [0,1]
+  RAWES_QW/QX/QY/QZ: atomic passive target quaternion (w,x,y,z)
 
 Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
   RAWES_LAT: anchor latitude  [deg * 1e7]                           (int32, no default)
@@ -251,6 +252,7 @@ _ic_seeded         = false
 _ic_pending_thrust = nil
 _ic_pending_roll_deg  = nil
 _ic_pending_pitch_deg = nil
+_passive_q_pending = {}
 _ic_thrust_only_reported = false
 
 -- One-shot debug state for capture/first-command handoff diagnostics.
@@ -300,6 +302,21 @@ local function ms_to_s(ms)
     end
     return ms:tofloat() * 0.001
 end
+local function quaternion_to_euler(qw, qx, qy, qz)
+    local norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+    if norm < 1.0e-6 then return nil, nil, nil end
+    qw, qx, qy, qz = qw/norm, qx/norm, qy/norm, qz/norm
+    local roll = math.atan(
+        2.0 * (qw*qx + qy*qz),
+        1.0 - 2.0 * (qx*qx + qy*qy))
+    local sin_pitch = math.max(-1.0, math.min(1.0, 2.0 * (qw*qy - qz*qx)))
+    local pitch = math.asin(sin_pitch)
+    local yaw = math.atan(
+        2.0 * (qw*qz + qx*qy),
+        1.0 - 2.0 * (qy*qy + qz*qz))
+    return roll, pitch, yaw
+end
+
 local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, roll_rate, pitch_rate, yaw_rate, throttle, src)
     local rr = roll_rate or 0.0
     local pr = pitch_rate or 0.0
@@ -314,6 +331,7 @@ local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, rol
             rr, pr, yr,
             throttle))
     end
+
     if not _first_nonzero_rate_logged then
         if math.abs(rr) > 1.0e-6 or math.abs(pr) > 1.0e-6 or math.abs(yr) > 1.0e-6 then
             _first_nonzero_rate_logged = true
@@ -1206,6 +1224,31 @@ local function update()
     if _nv_floats["RAWES_THR"] then _ic_pending_thrust = _nv_floats["RAWES_THR"] end
     if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
     if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
+    for _, component in ipairs({"QW", "QX", "QY", "QZ"}) do
+        local key = "RAWES_" .. component
+        if _nv_floats[key] ~= nil then
+            _passive_q_pending[component] = _nv_floats[key]
+            _nv_floats[key] = nil
+        end
+    end
+    if _passive_q_pending.QW ~= nil
+       and _passive_q_pending.QX ~= nil
+       and _passive_q_pending.QY ~= nil
+       and _passive_q_pending.QZ ~= nil then
+        local roll, pitch, yaw = quaternion_to_euler(
+            _passive_q_pending.QW, _passive_q_pending.QX,
+            _passive_q_pending.QY, _passive_q_pending.QZ)
+        _passive_q_pending = {}
+        if roll ~= nil then
+            _ic_pending_roll_deg = math.deg(roll)
+            _ic_pending_pitch_deg = math.deg(pitch)
+            _ic_roll_deg = _ic_pending_roll_deg
+            _ic_pitch_deg = _ic_pending_pitch_deg
+            _passive_yaw_fixed_rad = yaw
+        else
+            gcs:send_text(3, "RAWES passive: rejected zero quaternion")
+        end
+    end
     -- Equilibrium yaw-trim seed (ground-computed from IC rotor omega and the
     -- GB4008 hub model -- see torque_model.equilibrium_throttle()).  Held
     -- constant for the whole MODE_PASSIVE kinematic hold; consumed by

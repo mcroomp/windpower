@@ -7,6 +7,7 @@ import csv
 import math
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from pymavlink import mavutil
@@ -38,7 +39,6 @@ from .constants import (
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
     _RUN_MODES, _TRIM_NVF, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
-    _RAWES_YIC_CAPTURE_SENTINEL,
     _OSCILLATE_TARGETS, _OSCILLATE_STEP_S,
     _COPTER_MODES, _LOG_DIR,
 )
@@ -59,6 +59,179 @@ from .util import (
 # ---------------------------------------------------------------------------
 # Arm / pre-run helpers
 # ---------------------------------------------------------------------------
+
+_PASSIVE_ANGLE_STEP_DEG = 5.0
+_PASSIVE_ANGLE_LIMIT_DEG = 30.0
+_CONTROL_THRUST_STEP = 0.05
+
+
+@dataclass
+class _PassiveTarget:
+    initial_q: tuple[float, float, float, float]
+    thrust: float
+    roll_offset_deg: float = 0.0
+    pitch_offset_deg: float = 0.0
+    yaw_offset_deg: float = 0.0
+    roll_deg: float = 0.0
+    pitch_deg: float = 0.0
+    yaw_deg: float = 0.0
+
+
+def _quat_normalize(
+    q: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    length = math.sqrt(sum(value * value for value in q))
+    if length <= 1e-9:
+        raise ValueError("Quaternion length is zero")
+    return tuple(value / length for value in q)
+
+
+def _quat_multiply(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def _quat_from_euler_deg(
+    roll_deg: float, pitch_deg: float, yaw_deg: float,
+) -> tuple[float, float, float, float]:
+    roll, pitch, yaw = map(
+        math.radians, (roll_deg, pitch_deg, yaw_deg)
+    )
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return _quat_normalize((
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ))
+
+
+def _quat_to_euler_deg(
+    q: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    w, x, y, z = _quat_normalize(q)
+    roll = math.atan2(
+        2.0 * (w * x + y * z),
+        1.0 - 2.0 * (x * x + y * y),
+    )
+    sin_pitch = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = math.asin(sin_pitch)
+    yaw = math.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y * y + z * z),
+    )
+    return tuple(map(math.degrees, (roll, pitch, yaw)))
+
+
+def _passive_target_messages(
+    target: _PassiveTarget,
+) -> list[tuple[str, float]]:
+    relative_q = _quat_from_euler_deg(
+        target.roll_offset_deg,
+        target.pitch_offset_deg,
+        target.yaw_offset_deg,
+    )
+    target_q = _quat_normalize(_quat_multiply(target.initial_q, relative_q))
+    target.roll_deg, target.pitch_deg, target.yaw_deg = _quat_to_euler_deg(target_q)
+    return [
+        ("RAWES_QW", target_q[0]),
+        ("RAWES_QX", target_q[1]),
+        ("RAWES_QY", target_q[2]),
+        ("RAWES_QZ", target_q[3]),
+    ]
+
+
+def _decode_flight_control_key(
+    key: bytes, arrow_pending: list[bool],
+) -> tuple[str, int] | None:
+    if arrow_pending[0]:
+        arrow_pending[0] = False
+        return {
+            b"K": ("roll", -1),
+            b"M": ("roll", 1),
+            b"H": ("pitch", 1),
+            b"P": ("pitch", -1),
+        }.get(key)
+    if key in (b"\xe0", b"\x00"):
+        arrow_pending[0] = True
+        return None
+    return {
+        b"-": ("collective", -1),
+        b"=": ("collective", 1),
+    }.get(key)
+
+
+def _adjust_passive_target(
+    target: _PassiveTarget, axis: str, direction: int,
+) -> list[tuple[str, float]]:
+    if axis == "collective":
+        target.thrust = max(
+            0.0, min(1.0, target.thrust + direction * _CONTROL_THRUST_STEP)
+        )
+        return [("RAWES_THR", target.thrust)]
+
+    offset_name = f"{axis}_offset_deg"
+    offset = getattr(target, offset_name) + direction * _PASSIVE_ANGLE_STEP_DEG
+    if axis == "yaw":
+        offset = (
+            offset + 180.0
+        ) % 360.0 - 180.0
+    else:
+        offset = max(
+            -_PASSIVE_ANGLE_LIMIT_DEG,
+            min(_PASSIVE_ANGLE_LIMIT_DEG, offset),
+        )
+    setattr(target, offset_name, offset)
+    return _passive_target_messages(target)
+
+
+def _decode_passive_control_key(
+    key: bytes, arrow_pending: list[bool],
+) -> tuple[str, int] | None:
+    yaw_change = {
+        b",": ("yaw", -1),
+        b"<": ("yaw", -1),
+        b".": ("yaw", 1),
+        b">": ("yaw", 1),
+    }.get(key)
+    if yaw_change is not None:
+        return yaw_change
+    return _decode_flight_control_key(key, arrow_pending)
+
+
+def _capture_current_quaternion(
+    session: RawesGCS, timeout_s: float = 3.0,
+) -> tuple[float, float, float, float] | None:
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION),
+        param2=40000.0,
+    ))
+    raw = session._recv(
+        type="ATTITUDE_QUATERNION", blocking=True, timeout=timeout_s
+    )
+    if raw is None:
+        return None
+    attitude = decode_message(raw)
+    if not isinstance(attitude, AttitudeQuaternion):
+        raise TypeError(
+            f"Expected ATTITUDE_QUATERNION, got {type(attitude).__name__}"
+        )
+    return _quat_normalize((attitude.q1, attitude.q2, attitude.q3, attitude.q4))
+
 
 def _wait_for_armed(session: RawesGCS, timeout_s: float = 15.0) -> bool:
     """Block until armed heartbeat or timeout.  Prints STATUSTEXT inline."""
@@ -304,7 +477,8 @@ def _make_oscillate_tick(session: RawesGCS, steps: list):
 def _run_observation(session: RawesGCS, mode_name: str,
                      duration: "float | None", log: _RunLog,
                      on_tick=None, keep_rc: bool = False,
-                     manual_controls: "dict[str, float] | None" = None) -> None:
+                     manual_controls: "dict[str, float] | None" = None,
+                     passive_target: "_PassiveTarget | None" = None) -> None:
     """Generic observation loop for `run` modes.  Stream + columns are the
     same across all modes; the row content is whatever the FC reports.  Per-
     mode NVFs (e.g. YAW_I, YAW_OUT) appear as columns when emitted.
@@ -347,6 +521,11 @@ def _run_observation(session: RawesGCS, mode_name: str,
         print_cols = [
             "t(s)", "armed", "rc1", "rc2", "rc3", "rc4",
             "s1", "s2", "s3", "mot", "yaw(d)", "yrate_d",
+        ]
+    elif mode_name == "passive":
+        print_cols = [
+            "t(s)", "armed", "roll", "pitch", "trg_r", "trg_p", "thr",
+            "yaw", "qerr(d)", "qyaw(d)", "s1", "s2", "s3", "mot",
         ]
     else:
         print_cols = ["t(s)", "armed", "yaw(d)", "yrate_d", "out", "u",
@@ -421,37 +600,52 @@ def _run_observation(session: RawesGCS, mode_name: str,
             )
 
         def key_handler(k: bytes) -> None:
-            axis = None
-            delta = 0.0
-            if _arrow_pending[0]:
-                _arrow_pending[0] = False
-                if k == b"K":
-                    axis, delta = "roll", -0.05
-                elif k == b"M":
-                    axis, delta = "roll", 0.05
-                elif k == b"H":
-                    axis, delta = "pitch", 0.05
-                elif k == b"P":
-                    axis, delta = "pitch", -0.05
-                else:
-                    return
-            elif k in (b"\xe0", b"\x00"):
-                _arrow_pending[0] = True
+            change = _decode_flight_control_key(k, _arrow_pending)
+            if change is None:
                 return
-            elif k == b"-":
-                axis, delta = "collective", -0.05
-            elif k == b"=":
-                axis, delta = "collective", 0.05
-            else:
-                return
+            axis, direction = change
 
             lower, upper = (0.0, 1.0) if axis == "collective" else (-1.0, 1.0)
             manual_controls[axis] = max(
-                lower, min(upper, manual_controls[axis] + delta)
+                lower, min(upper, manual_controls[axis] + direction * 0.05)
             )
             _send_manual(axis)
             _show_manual()
-    elif mode_name in ("passive", "steady", "pumping"):
+    elif mode_name == "passive":
+        if passive_target is None:
+            raise ValueError("passive_target required for passive")
+        print("  PASSIVE target controls:")
+        print("    arrows: LEFT/RIGHT target roll, UP/DOWN target pitch")
+        print("    ,/. (or </>): target yaw left/right")
+        print("    -/= (no Shift): held thrust down/up")
+        print("    angle step=5 deg, roll/pitch travel=+/-30 deg from start; thrust step=0.05")
+        print("    ESC exits, disarms, and leaves RAWES_MODE off")
+        _arrow_pending = [False]
+
+        def _show_passive_target() -> None:
+            print(
+                "  TARGET "
+                f"relative=({passive_target.roll_offset_deg:+.1f}, "
+                f"{passive_target.pitch_offset_deg:+.1f}, "
+                f"{passive_target.yaw_offset_deg:+.1f}) deg  "
+                f"target_rpy=({passive_target.roll_deg:+.1f}, "
+                f"{passive_target.pitch_deg:+.1f}, "
+                f"{passive_target.yaw_deg:+.1f}) deg  "
+                f"thrust={passive_target.thrust:.2f}"
+            )
+
+        _show_passive_target()
+
+        def key_handler(k: bytes) -> None:
+            change = _decode_passive_control_key(k, _arrow_pending)
+            if change is None:
+                return
+            for wire_name, value in _adjust_passive_target(
+                passive_target, change[0], change[1]
+            ):
+                session.send_message(NamedValueFloat(wire_name, value))
+            _show_passive_target()
+    elif mode_name in ("steady", "pumping"):
         _yaw_pid = {
             "P": {"param": "ATC_RAT_YAW_P", "step": 0.002,  "val": 0.0},
             "I": {"param": "ATC_RAT_YAW_I", "step": 0.0005, "val": 0.0},
@@ -726,6 +920,23 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 state["s1"], state["s2"], state["s3"], state["smot"],
                 yaw_s, yrate_s,
             ]
+        if mode_name == "passive":
+            return [
+                f"{t_rel:.1f}",
+                "YES" if st["armed"] else "no",
+                _fmt(state["roll"]),
+                _fmt(state["pitch"]),
+                _fmt(state["att_target_roll"]),
+                _fmt(state["att_target_pitch"]),
+                _fmt(state["att_target_thrust"]),
+                yaw_s,
+                qerr_s,
+                qyaw_s,
+                state["s1"],
+                state["s2"],
+                state["s3"],
+                state["smot"],
+            ]
         return [
             f"{t_rel:.1f}",
             "YES" if st["armed"] else "no",
@@ -811,7 +1022,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         header_cols=cols,
         header_print_cols=print_cols,
         log=log,
-        print_period_s=0.25 if mode_name == "acro-manual" else 1.0,
+        print_period_s=0.25 if mode_name in ("acro-manual", "passive") else 1.0,
         on_tick=on_tick,
         suppress_status=True,
         key_handler=key_handler,
@@ -859,7 +1070,6 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         "--yaw":              "float",   # passive fixed yaw IC [deg] (RAWES_YIC)
         "--roll":             "float",   # passive IC roll  [deg] (RAWES_RIC)
         "--pitch":            "float",   # passive IC pitch [deg] (RAWES_PIC)
-        "--hold":             "bool",    # passive: capture current roll/pitch/yaw as IC (RAWES_YIC sentinel)
         "--rc":               "bool",    # keep RC_CHANNELS stream (mixer diagnosis)
     }
     if not args:
@@ -890,6 +1100,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         if cfg.get("manual_control")
         else None
     )
+    passive_target = None
 
     osc_steps = None
     if osc is not None:
@@ -986,36 +1197,41 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     # attitude (mirrors the SITL passive_init seed).
         if cfg.get("ic_seed"):
             thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
+            captured_q = _capture_current_quaternion(session)
+            if captured_q is None:
+                print(
+                    "  [FAIL] No ATTITUDE_QUATERNION received; "
+                    "cannot capture passive target."
+                )
+                return
+            current_roll_deg, current_pitch_deg, current_yaw_deg = (
+                _quat_to_euler_deg(captured_q)
+            )
+            roll_deg = float(flags.get("--roll", current_roll_deg))
+            pitch_deg = float(flags.get("--pitch", current_pitch_deg))
+            yaw_deg = float(flags.get("--yaw", current_yaw_deg))
+            if not 0.0 <= thr <= 1.0:
+                print(f"  [FAIL] Passive thrust must be within [0,1], got {thr}.")
+                return
+            initial_q = (
+                captured_q
+                if not any(name in flags for name in ("--roll", "--pitch", "--yaw"))
+                else _quat_from_euler_deg(roll_deg, pitch_deg, yaw_deg)
+            )
+            initial_roll, initial_pitch, initial_yaw = _quat_to_euler_deg(initial_q)
+            passive_target = _PassiveTarget(
+                initial_q=initial_q,
+                thrust=thr,
+                roll_deg=initial_roll,
+                pitch_deg=initial_pitch,
+                yaw_deg=initial_yaw,
+            )
             print("  Seeding IC:")
             session.send_message(NamedValueFloat("RAWES_THR", thr))
             print(f"    RAWES_THR = {thr:.3f}  (thrust [0..1])")
-
-            if flags.get("--hold"):
-                # --hold captures the CURRENT roll/pitch/yaw in Lua via the
-                # RAWES_YIC sentinel, so RAWES_RIC/RAWES_PIC must NOT be sent
-                # here (Lua only auto-fills them if they haven't already been
-                # explicitly provided).
-                if "--roll" in flags or "--pitch" in flags:
-                    print("  [WARN] --hold ignores --roll/--pitch (captures current AHRS attitude instead)")
-                if "--yaw" in flags:
-                    print("  [WARN] --hold ignores --yaw (captures current AHRS attitude instead)")
-                session.send_message(NamedValueFloat("RAWES_YIC", _RAWES_YIC_CAPTURE_SENTINEL))
-                print(f"    RAWES_YIC = {_RAWES_YIC_CAPTURE_SENTINEL:.1f}  (capture current roll/pitch/yaw)")
-            else:
-                roll_deg = float(flags.get("--roll", 0.0))
-                pitch_deg = float(flags.get("--pitch", 0.0))
-                # RAWES IC seed commits atomically only after THR+RIC+PIC all arrive.
-                # Always send roll/pitch (default 0 deg) so PASSIVE does not stall at
-                # "ic=waiting" when only --trim thr is provided.
-                session.send_message(NamedValueFloat("RAWES_RIC", math.radians(roll_deg)))
-                print(f"    RAWES_RIC = {roll_deg:+7.3f} deg  ({math.radians(roll_deg):+.4f} rad)")
-                session.send_message(NamedValueFloat("RAWES_PIC", math.radians(pitch_deg)))
-                print(f"    RAWES_PIC = {pitch_deg:+7.3f} deg  ({math.radians(pitch_deg):+.4f} rad)")
-
-                if "--yaw" in flags:
-                    yaw_deg = float(flags["--yaw"])
-                    session.send_message(NamedValueFloat("RAWES_YIC", math.radians(yaw_deg)))
-                    print(f"    RAWES_YIC = {yaw_deg:+7.3f} deg  ({math.radians(yaw_deg):+.4f} rad)")
+            for wire_name, value in _passive_target_messages(passive_target):
+                session.send_message(NamedValueFloat(wire_name, value))
+                print(f"    {wire_name} = {value:+.6f}")
             # thr was consumed by the IC seed -- don't re-send it via the trim block.
             trim.pop("thr", None)
 
@@ -1046,7 +1262,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
 
         _run_observation(session, name, duration, log, on_tick=on_tick,
                          keep_rc=bool(flags.get("--rc", False) or manual_controls),
-                         manual_controls=manual_controls)
+                         manual_controls=manual_controls,
+                         passive_target=passive_target)
         done_ok = True
     finally:
         try:

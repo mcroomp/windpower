@@ -91,32 +91,25 @@ Long-running (always log; ESC or Ctrl-C aborts):
           acro-manual
                    ACRO flybar passthrough from normalized Lua controls.
                    Arrows set roll/pitch; -/= set collective; AP + Lua own yaw.
-          passive   armed but quiet in GUIDED_NOGPS (matches the SITL passive
-                    test).  Seeds the IC (RAWES_THR/RIC/PIC) and holds the IC
-                    attitude via the GUIDED angle API; DDFP yaw motor stays
-                    under AP + the Lua H_YAW_TRIM observer.
+          passive   interactive GUIDED_NOGPS attitude hold. Captures current
+                    quaternion on entry; arrows apply relative roll/pitch offsets
+                    by 5 deg, limited to +/-30 deg; -/= change held thrust by
+                    0.05; ,/. (or </>) apply relative yaw by 5 deg.
           steady    steady flight (alt hold + VZ PI collective)
           pumping   De Schutter pumping cycle
           landing   landing (reserved)
 
         Examples:
-          # Hold the level IC (roll=pitch=0, thr=0.342) on the bench for 30 s
+          # Capture current attitude and interactively hold it for 30 s
           run passive --duration 30 --trim thr=0.342
 
-                    # Hold a fixed yaw IC as well
-                    run passive --duration 20 --yaw 90 --trim thr=0.342
-
-          # Hold at whatever attitude the vehicle is currently at (captures
-          # current AHRS roll/pitch/yaw as the IC via the RAWES_YIC sentinel)
-          run passive --duration 20 --hold --trim thr=0.342
-
-          # Hold a tilted IC: 3 deg roll, -25 deg pitch, IC thrust
+          # Override the captured target with explicit absolute angles
           run passive --duration 20 --roll 3 --pitch -25 --trim thr=0.342
 
           # Unbounded passive session (ESC to stop, 5-min RAWES_ARM fallback)
           run passive
 
-          # Live yaw PID tuning during passive/steady/pumping runs:
+          # Live yaw PID tuning during steady/pumping runs:
           #   q/a = P +/- 0.002,  w/s = I +/- 0.0005,  e/d = D +/- 0.001
 
           # Full oscillation sweep through every axis extreme (~65 s)

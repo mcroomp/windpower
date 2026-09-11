@@ -256,10 +256,35 @@ type never appears at all, it's a missing stream/interval request, not a
 decode bug; see `analysis/mavlink_jsonl_query.md` for full usage -- it is
 the first-line tool for diagnosing any problematic run). `ATTITUDE_TARGET`
 also only appears at all once the vehicle is
-actually in `GUIDED`/`GUIDED_NOGPS` and Lua is driving an angle target (e.g.
-`run passive --hold`, or `steady`/`pumping`) -- a bare `run passive` without
-`--hold`/an IC-seeded IC still logs `mav_att_q_*` (actual attitude) but only
-gets a non-empty target/`qerr` once the hold is engaged.
+actually in `GUIDED`/`GUIDED_NOGPS` and Lua is driving an angle target.
+`run passive` captures the current roll/pitch/yaw and immediately uses it as
+the initial target, so its target-quaternion and quaternion-error columns are
+populated once the hold is engaged.
+
+### Interactive passive attitude hold
+
+`run passive` starts in `GUIDED_NOGPS`, captures `ATTITUDE_QUATERNION`, and
+holds that attitude. Keyboard offsets are composed relative to the captured
+quaternion as `q_target = q_initial * q_relative`; they are not added to its
+Euler angles. During the run:
+
+- Left/Right changes relative target roll by 5 degrees.
+- Up/Down changes relative target pitch by 5 degrees.
+- `,`/`.` (the `<`/`>` keys) changes relative target yaw by -/+5 degrees.
+- Relative roll and pitch keyboard travel is limited to +/-30 degrees.
+- `-`/`=` changes held thrust by 0.05 within `[0,1]`.
+- The captured yaw remains fixed.
+- ESC exits, disarms, and leaves `RAWES_MODE=0`.
+
+The quaternion is sent atomically as `RAWES_QW/QX/QY/QZ`. Lua converts the
+complete quaternion to the equivalent Euler triplet only at the final
+`set_target_angle_and_rate_and_throttle` boundary because that is the attitude
+API exposed by ArduPilot scripting.
+
+`--roll`, `--pitch`, and `--yaw` can override individual captured angles for
+the initial target. The live table refreshes four times per second and shows
+actual roll/pitch, target roll/pitch, target thrust, yaw, quaternion error,
+swash PWM, and yaw-motor PWM.
 
 `PID_TUNING` caveat: ArduPilot may suppress these messages when `GCS_PID_MASK=0`.
 calibrate requests `PID_TUNING`, but the FC must still be configured to emit it.
@@ -326,7 +351,7 @@ python -m calibrate --port COM7 script upload scripts/rawes.lua
 python -m calibrate --port COM7 script list
 
 # 8. Quiet armed bench check
-python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,col=-0.15
+python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342
 
 # 9. Passive hold check with current controller settings
 python -m calibrate --port COM7 run passive --duration 60 --trim tlon=0.02,thr=0.342
