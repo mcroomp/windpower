@@ -125,6 +125,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     comms = LuaComms(sim.send_named_float)
 
     lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
+    lua.winch = gov   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
 
     events = BadEventLog()
 
@@ -150,14 +151,11 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     captured        = False
 
     lua.tel_fn = lambda r, sr: dict(
-        body_z_eq                = None,
         phase                    = phase_label,
-        winch_speed_ms           = gov.speed_ms,
         tension_feedforward_n    = planner.winch_target_tension,
         thrust_from_alt_ctrl     = lua._last_thrust,
         alt_pid_integral         = sim.fns.alt_i(),
         gnd_alt_cmd_m            = ic_alt,
-        elevation_rad            = 0.0,
         el_correction_rad        = 0.0,
         coll_saturated           = 0,
         comms_ok                 = 1,

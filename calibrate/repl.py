@@ -39,7 +39,7 @@ from .run import (
     _run_observation,
 )
 from .util import _RunLog, _parse_flags, _parse_kv_list, _log_path, _esc_check
-from .watch import _cmd_watch
+from .watch import _cmd_watch, _watch_servos
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +57,7 @@ Long-running (always log; ESC or Ctrl-C aborts):
       On exit (timer / ESC / Ctrl-C) safety shutdown disarms and sets RAWES_MODE=0.
 
         --duration N       run for N seconds; omit for unbounded (5-min ARM)
-        --trim K=V,K=V     cyclic trim + IC thrust sent as NAMED_VALUE_FLOAT
-                           to rawes.lua.  Repeatable.
-                             tlon  longitudinal cyclic [deg].  >0 = nose-down
-                                   (forward-stick); <0 = nose-up.
-                                   Range +/- H_CYC_MAX_cd/100 (passive: +/- 10).
-                                   Typical bench: 0.5 .. 3 deg.
-                             tlat  lateral cyclic [deg].  >0 = roll-right.
-                                   Same range/limits as tlon.
+        --trim K=V,K=V     IC thrust sent as NAMED_VALUE_FLOAT to rawes.lua.
                              thr   IC thrust [0..1] (passive mode only; sent as
                                    RAWES_THR before arming).
                                    col_min=-0.28 rad (-16 deg) at thrust=0,
@@ -76,16 +69,6 @@ Long-running (always log; ESC or Ctrl-C aborts):
         --exclude-saturate After the run, print an analysis report computed
                            ONLY from samples where the yaw loop was not
                            saturated (trim below YFF_MAX).
-        --osc TARGET       Walk a sequence of trim setpoints, 5 s/step;
-                           overrides --trim.  Targets:
-                             all  full 13-step sweep through tlon/tlat/col
-                                  extremes (~65 s)
-                             s1   isolated S1 up/down (~25 s, 5 steps)
-                             s2   isolated S2 up/down
-                             s3   isolated S3 up/down (longitudinal axis)
-                           The s1/s2/s3 sequences use mixer-isolated
-                           combinations so the target servo dominates while
-                           the other two stay near center.
 
                 Modes:
           acro-manual
@@ -112,12 +95,6 @@ Long-running (always log; ESC or Ctrl-C aborts):
           # Live yaw PID tuning during steady/pumping runs:
           #   q/a = P +/- 0.002,  w/s = I +/- 0.0005,  e/d = D +/- 0.001
 
-          # Full oscillation sweep through every axis extreme (~65 s)
-          run passive --osc all
-
-          # Isolated S2 swashplate-servo test (~25 s, S2 dominant up/down)
-          run passive --osc s2
-
   watch <stream> [--duration N]
         Read-only observation; no state change.  Default duration 10 s.
         streams: servos    SERVO_OUTPUT_RAW for ch1..8
@@ -141,6 +118,28 @@ One-shot:
     swash fit-range <min> <max> --cyclic N --allow-full-range
                                     Fit/verify H_COL limits using native oscillation
     servo hold <ch> <pwm> [--duration N]  Hold ch; disconnect/restore swash ch1-3
+  swash test [--duration N]       Run ArduPilot's OWN native swash exercise
+                                  (H_SV_MAN=5 MANUAL_OSCILLATE) via a single
+                                  MAVLink param write -- no reboot, no config
+                                  file edits.  AP's own H3-120 mixer (not this
+                                  tool's Python mixer) sweeps tilt-back ->
+                                  roll-around -> level -> raise -> lower over
+                                  a ~12 s cycle; watches SERVO_OUTPUT_RAW for
+                                  N s (default 12) then restores H_SV_MAN=0.
+                                  DISARMED ONLY -- AP force-resets H_SV_MAN to
+                                  0 the instant it arms, so this is a no-op if
+                                  the counter-rotation/yaw motor needs to be
+                                  active (which requires armed).  For fixed
+                                  cyclic/collective positions WHILE ARMED, use
+                                  `run passive --trim ...` instead (closed-loop
+                                  via the GUIDED attitude/thrust target, not
+                                  raw PWM -- see its --help text for why armed
+                                  can't do open-loop swash positioning).
+  swash test off                  Immediately restore H_SV_MAN=0 (e.g. after
+                                  a Ctrl-C during `swash test`).
+  servo <ch> <pwm>                Set channel ch to pwm directly
+  servo sweep <ch> [--step-ms N]  Slowly sweep ch: 1500 -> 2000 -> 1000 -> 1500
+  servo hold <ch> <pwm> [--duration N]  Arm, hold ch at pwm for N s
   motor <pwm_us> [--duration N]   Arm (RAWES_ARM) + drive the motor output at
                                   pwm_us for N s (default 5).  DShot ESC self-arms
                                   from idle -- no ESC pre-arm hold.
@@ -410,22 +409,97 @@ def _fmt_az(az):
     return f"{az:+.0f} deg"
 
 
+def _cmd_swash_test(session: RawesGCS, args: list[str]) -> None:
+    """swash test [--duration N]
+       swash test off
+
+    Drives ArduPilot's OWN native H_SV_MAN=5 (MANUAL_OSCILLATE) swash
+    exercise via a single MAVLink param write -- no reboot, no config
+    file edits.  AP_MotorsHeli_Single::servo_test() then sweeps S1/S2/S3
+    through a ~12 s tilt-back / roll-around / level / raise / lower cycle
+    using the FC's own H3-120 mixer (H_SW_H3_SV*_POS, H_CYC_MAX,
+    H_COL_MIN/MAX) -- NOT this tool's Python `_h3_forward_mix`.
+
+    H_SV_MAN is undocumented beyond value 4 in AP's param metadata but the
+    enum (AP_MotorsHeli.h) goes 0=AUTOMATED,1=PASSTHROUGH,2=MAX,3=CENTER,
+    4=MIN,5=OSCILLATE.  AP force-resets H_SV_MAN to 0 the instant the
+    vehicle arms (AP_MotorsHeli::output_armed_stabilizing), so this can
+    never linger into flight -- but arming_checks() does NOT itself block
+    arming while it's engaged, so we refuse to start if already armed.
+
+    NOTE: this only ever works disarmed, which also means the DDFP
+    counter-rotation/yaw motor (Motor4) is silent -- AP_MotorsHeli_Single::
+    output_to_motors() forces it to 0 unless SpoolState is SPOOLING_UP/
+    THROTTLE_UNLIMITED, both only reachable while armed.  If the bench rig
+    needs the yaw motor active (main rotor genuinely creating reaction
+    torque), this command cannot help -- use `run passive --trim ...`
+    instead, which holds a commanded cyclic/collective through the
+    closed-loop GUIDED attitude/thrust path while staying armed (there is
+    no way to get raw/open-loop swash PWM while armed -- the swash mixer is
+    always fed by the live attitude controller).
+    """
+    if args and args[0].lower() == "off":
+        session.set_param("H_SV_MAN", 0.0)
+        print(f"  H_SV_MAN -> {session.get_param('H_SV_MAN')}  (native swash test stopped)")
+        return
+    try:
+        pos, flags = _parse_flags(args, {"--duration": "float"})
+    except ValueError as e:
+        print(f"  Error: {e}"); return
+    if pos:
+        print("  Usage: swash test [--duration N]  |  swash test off"); return
+    duration = flags.get("--duration", 12.0)
+
+    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=5.0)
+    if hb is not None and bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+        print("  Error: vehicle is armed -- disarm first.")
+        print("         (H_SV_MAN is force-reset to AUTOMATED the instant AP")
+        print("         arms, so the test would be a no-op while armed.)")
+        return
+
+    print("  Engaging ArduPilot's native H_SV_MAN=5 (MANUAL_OSCILLATE) swash")
+    print(f"  exercise for {duration:.0f} s (AP's own H3-120 mixer, ~12 s/cycle) ...")
+    if not session.set_param("H_SV_MAN", 5.0):
+        print("  [FAIL] H_SV_MAN: no ACK within timeout"); return
+
+    meta = {
+        "verb":            "swash",
+        "stream":          "test",
+        "duration_s":      duration,
+        "run_start_local": datetime.now().isoformat(timespec="seconds"),
+        "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    log = _RunLog.open("swash", "test", meta)
+    print(f"  Logging to {log.path}")
+    try:
+        _watch_servos(session, duration, log)
+    finally:
+        log.close()
+        session.set_param("H_SV_MAN", 0.0)
+        print(f"  H_SV_MAN -> {session.get_param('H_SV_MAN')}  (restored to AUTOMATED)")
+
+
 def _cmd_swash(session: RawesGCS, args: list[str]) -> None:
     """swash <coll%> [lon%] [lat%]
        swash range <min> <max>
        swash neutral [n]
        swash fit-range <min> <max> --cyclic N --allow-full-range
-       swash info"""
+       swash info
+       swash test [--duration N] | swash test off"""
     if not args:
         print("  Usage: swash <coll%> [lon%] [lat%]")
         print("         swash range <min_us> <max_us>")
         print("         swash neutral [n]")
         print("         swash fit-range <min_us> <max_us> --cyclic N --allow-full-range")
         print("         swash info")
+        print("         swash test [--duration N]  |  swash test off")
         return
     sub = args[0].lower()
     if sub == "info":
         _print_swash_layout(session)
+        return
+    if sub == "test":
+        _cmd_swash_test(session, args[1:])
         return
     if sub == "range":
         if len(args) != 3:

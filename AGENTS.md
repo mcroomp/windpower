@@ -230,15 +230,24 @@ There are three tiers, each with a different scope and runtime:
 - If a remembered connection fails, fall back immediately to `python -m calibrate`
   without connection parameters instead of trying guessed ports.
 
+Where test logs land (agent-critical — do not guess this):
+- Every tier writes to `simulation/logs/<name>/` (params.json, simtest.log/worker.log,
+  telemetry.csv).
+- `<name>` is the **pytest test *function* name** (`request.node.name`), NOT the
+  test *file* name and NOT a `-k` substring — these often differ (e.g.
+  `test_pump_cycle_lua.py`'s live test is `def test_lua_pumping_unified(...)`, so
+  its logs are in `simulation/logs/test_lua_pumping_unified/`). Check the actual
+  `def test_...(` line (or the test's own printed `log:` line) before assuming a path.
+
 SITL IC-start timeline rule (agent-critical):
 - For SITL flight diagnosis, use one shared timeline anchored at the IC-start flow.
 - Treat `t_sim` with the `kinematic_exit` event as the canonical phase boundary for
   release-to-flight comparisons across steady/passive/pumping/landing stack tests.
 - Canonical definition and per-phase markers live in `design/sitl_flight_timeline.md`.
 
-Stack-test execution rule (agent-critical):
+Stack-test execution rule (CRITICAL, non-negotiable):
 - For any test under `tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
-- DO NOT run SITL tests with host-side pytest commands like
+- NEVER run SITL tests with host-side pytest commands like
     `.venv/Scripts/python.exe -m pytest tests/sitl/...`.
     Those bypass the Docker stack harness and can fail with host-path issues
     (for example `/ardupilot/scripts` not existing on Windows host).
@@ -263,6 +272,17 @@ pattern) is in `design/sitl_testing.md`.
 
 ## Visualization
 
+When the user asks to "show me the visualization" (or similar) with no
+mention of exporting/saving, run the interactive tool as a plain foreground
+command with **no `--export` flag** — a real display is available in this
+environment, so the tool opens its own interactive window directly; do not
+default to generating a GIF/PNG file instead. Only pass `--export` when the
+user explicitly asks to save/export a file.
+
+Always pass the explicit telemetry path `simulation/logs/<test_name>/telemetry.csv`
+for the specific test just run/discussed — don't guess a filename or omit the
+path.
+
 Flight telemetry (pumping, steady, passive SITL runs):
 ```
 .venv/Scripts/python.exe viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv
@@ -280,6 +300,7 @@ Example — yaw regulation run:
 ```
 .venv/Scripts/python.exe viz3d/visualize_torque.py simulation/logs/test_yaw_regulation_sitl/telemetry.csv
 ```
+
 
 Controls (both visualizers): Space = play/pause, Left/Right = step frame, +/- = speed.
 
