@@ -109,6 +109,13 @@ class _MockArdupilotBase:
         self._wind = wind
         self._tel_every = _tel_every_from_env(dt)
         self.tel_fn: "Callable[..., dict] | None" = None
+        # Optional winch object (WinchController/GovernedWinchController/...)
+        # attached by the test.  When set, its log_fields() is merged into
+        # every log() call automatically -- see log() below -- so winch
+        # telemetry (winch_speed_ms, ...) is centralized the same way as the
+        # backend-specific _telemetry_overrides() instead of every test
+        # needing to thread it through its own tel_fn.
+        self.winch = None
         self._telemetry: list = []
         self._log_step = 0
         self._guided_ctrl: "GuidedAttitudeController | None" = None
@@ -267,6 +274,8 @@ class _MockArdupilotBase:
             )
             extra_kwargs.update(rate_terms)
             extra_kwargs.update(self._telemetry_overrides(obs))
+            if self.winch is not None:
+                extra_kwargs.update(self.winch.log_fields())
 
             collective_rad = self._col_min + self._last_thrust * (self._col_max - self._col_min)
             self._telemetry.append(
@@ -327,6 +336,12 @@ class _LuaBackend(_MockArdupilotBase):
             "lua_ol_alt_d_contrib": self._lua_diag("OL_AD"),
             "lua_ol_thrust_cmd": self._lua_diag("OL_COL"),
             "lua_ol_tension_n": self._lua_diag("OL_TEN"),
+            "elevation_rad": self._lua_diag("OL_EL"),
+            "body_z_eq": [
+                self._lua_diag("BZG_N"),
+                self._lua_diag("BZG_E"),
+                self._lua_diag("BZG_D"),
+            ],
         }
 
     def _yaw_apply(self, u_raw: float, gyro: np.ndarray, dt: float) -> float:
@@ -799,6 +814,13 @@ class _PythonBackend(_MockArdupilotBase):
 
     def log_fields(self) -> dict:
         return self._mode.log_fields()
+
+    def _telemetry_overrides(self, obs: HubObservation) -> dict:  # noqa: ARG002
+        # Centralized, backend-agnostic counterpart to _LuaBackend's NVF-diag
+        # overrides above -- supplies elevation_rad (and the mode's other
+        # log_fields()) automatically so per-test tel_fn callbacks don't need
+        # to remember to splat **ap.log_fields() themselves.
+        return self.log_fields()
 
     def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
         dt = 1.0 / self.AP_HZ if self._t_last is None else t_sim - self._t_last

@@ -2,7 +2,8 @@
 rawes_modes.py — RAWES_MODE constants and NAMED_VALUE_FLOAT constants for rawes.lua.
 
 RAWES_MODE is a script-generated parameter (registered by rawes.lua via param:add_table).
-Valid values: 0=none, 1=steady, 2=acro manual, 3=passive, 4=landing.
+Valid values: 0=none, 1=steady, 2=acro manual, 3=passive, 4=landing,
+5=takeoff.
 Every other dynamic input (substate, tuning) is delivered via NAMED_VALUE_FLOAT --
 never encoded in a parameter. Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N).
 The anchor location (RAWES_LAT/LON/AAL) is delivered via NAMED_VALUE_INT as an
@@ -33,8 +34,9 @@ MODE_STEADY   = 1   # bz_altitude_hold cyclic (commanded tension) + altitude-PID
 MODE_ACRO_MANUAL = 2  # normalized NVP roll/pitch/collective through ACRO flybar
 MODE_PASSIVE  = 3   # kinematic capture helper: hold IC attitude during release
 MODE_LANDING  = 4   # (reserved, not yet implemented)
-# mode 5 removed: pumping now runs in MODE_STEADY (same control law); the ground
-# schedule varies the commanded tension (RAWES_TEN) and RAWES_SUB phase over time.
+MODE_TAKEOFF  = 5   # fixed level attitude + altitude-PID climb toward RAWES_ALT;
+                    # no anchor/elevation tracking or lateral position hold
+# Pumping runs in MODE_STEADY; the ground schedule varies RAWES_TEN and RAWES_SUB.
 
 # ── Named-float control values ────────────────────────────────────────────────
 

@@ -69,7 +69,6 @@ except Exception:
 DT_TARGET    = 1.0 / SIM_CLOCK_HZ   # fixed lockstep loop rate [s]
 TELEMETRY_HZ = 400.0           # telemetry CSV write rate [Hz]
 LOG_INTERVAL = 1.0             # position/attitude log interval [s]
-WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
 
 
 # ---------------------------------------------------------------------------

@@ -63,7 +63,6 @@ def _run_steady(log) -> dict:
 
     runner  = PhysicsRunner(_ROTOR, _IC, WIND)
     lua     = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
-    lua.tel_fn = lambda r, sr: dict(body_z_eq=None)
 
     events           = BadEventLog()
     max_axle_err_deg = 0.0
@@ -74,6 +73,9 @@ def _run_steady(log) -> dict:
     rest_now       = float(_IC.rest_length)
     _WINCH_KP      = 0.01
     _WINCH_VMAX    = 1.0
+    v_winch        = 0.0
+
+    lua.tel_fn = lambda r, sr: dict(winch_speed_ms=v_winch)
 
     for i in range(int(T_SIM / DT)):
         t = i * DT

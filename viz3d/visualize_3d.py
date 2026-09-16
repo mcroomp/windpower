@@ -1121,6 +1121,7 @@ class RAWESVisualizer:
 
         # Swashplate inset
         self._update_inset_frame(f)
+        self._sync_inset_camera()
 
         # HUD text: SetInput on the underlying vtkTextActor (no new actor)
         if hasattr(self, "_hud_actor") and hasattr(self, "_hud_frame_idx"):
