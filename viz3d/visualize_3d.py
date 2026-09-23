@@ -630,12 +630,20 @@ class RAWESVisualizer:
         trail_len: int = TRAIL_LEN,
         playback_fps: float = 10.0,
         no_inset: bool = False,
+        swash_servo_angles: tuple[float, float, float] = _SWASH_SERVO_ANGLES,
+        show_rotor_disk: bool = True,
+        individual_blades: bool = False,
+        blade_count: int = N_BLADES,
     ) -> None:
         self._frames      = frames
         self._trail_len   = trail_len
         self._fps         = playback_fps
         self._n           = len(frames)
         self._no_inset    = no_inset
+        self._swash_servo_angles = swash_servo_angles
+        self._show_rotor_disk = show_rotor_disk
+        self._individual_blades = individual_blades
+        self._blade_count = blade_count
         self._pos_history = np.array([_to_viz(f.pos_ned) for f in frames])
         self._spin_angles = self._integrate_spin()
         self._energy      = self._integrate_energy()
@@ -988,24 +996,38 @@ class RAWESVisualizer:
                                   normal=[0, 0, 1], r_res=1, c_res=64)
         self._actor_disk = plotter.add_mesh(self._mesh_disk, color=COL_DISK,
                                             opacity=0.45, smooth_shading=True)
+        self._actor_disk.SetVisibility(self._show_rotor_disk)
         self._actor_disk.user_matrix = T @ _rz4(sa)
 
-        # ── Blades — single actor, per-cell colour per blade ─────────────────
-        # One merged mesh keeps the actor/shader count identical to before.
-        # Cell scalars (blade index 0-3) are mapped to COL_BLADES via a
-        # ListedColormap so each blade gets a distinct colour.
-        blade_meshes = [_blade_mesh_local(k, 0.0) for k in range(N_BLADES)]
-        self._mesh_blades = pv.merge(blade_meshes)
-        _N_FACES_PER_BLADE = blade_meshes[0].n_cells          # 6 quads per blade
-        self._mesh_blades.cell_data["blade_id"] = np.repeat(
-            np.arange(N_BLADES, dtype=float), _N_FACES_PER_BLADE)
-        from matplotlib.colors import ListedColormap as _LCM
-        _blade_cmap = _LCM(COL_BLADES[:N_BLADES])
-        self._actor_blades = plotter.add_mesh(
-            self._mesh_blades, scalars="blade_id", cmap=_blade_cmap,
-            clim=[0.0, float(N_BLADES - 1)], show_scalar_bar=False,
-            smooth_shading=True)
-        self._actor_blades.user_matrix = T @ _rz4(sa)
+        blade_meshes = [
+            _blade_mesh_local(k, 0.0) for k in range(self._blade_count)
+        ]
+        if self._individual_blades:
+            self._mesh_blades = blade_meshes
+            self._actor_blades = [
+                plotter.add_mesh(
+                    mesh, color=COL_BLADES[k % len(COL_BLADES)],
+                    smooth_shading=True,
+                )
+                for k, mesh in enumerate(blade_meshes)
+            ]
+            for actor in self._actor_blades:
+                actor.user_matrix = T @ _rz4(sa)
+        else:
+            # Playback uses one actor to minimize shader work at high rotor speed.
+            self._mesh_blades = pv.merge(blade_meshes)
+            n_faces_per_blade = blade_meshes[0].n_cells
+            self._mesh_blades.cell_data["blade_id"] = np.repeat(
+                np.arange(self._blade_count, dtype=float), n_faces_per_blade)
+            from matplotlib.colors import ListedColormap as _LCM
+            blade_cmap = _LCM(
+                [COL_BLADES[k % len(COL_BLADES)] for k in range(self._blade_count)]
+            )
+            self._actor_blades = plotter.add_mesh(
+                self._mesh_blades, scalars="blade_id", cmap=blade_cmap,
+                clim=[0.0, float(self._blade_count - 1)], show_scalar_bar=False,
+                smooth_shading=True)
+            self._actor_blades.user_matrix = T @ _rz4(sa)
 
         # ── Hub sphere ────────────────────────────────────────────────────────
         self._mesh_hub = pv.Sphere(radius=0.2, center=[0, 0, 0])
@@ -1092,7 +1114,11 @@ class RAWESVisualizer:
         # Rotor + blades: spin × hub transform
         Tsa = T @ _rz4(sa)
         self._actor_disk.user_matrix   = Tsa
-        self._actor_blades.user_matrix = Tsa
+        if self._individual_blades:
+            for actor in self._actor_blades:
+                actor.user_matrix = Tsa
+        else:
+            self._actor_blades.user_matrix = Tsa
 
         # Hub sphere: translate only
         Mh = np.eye(4, dtype=float); Mh[:3, 3] = pos_viz
@@ -1257,7 +1283,7 @@ class RAWESVisualizer:
                         pv.Cylinder(center=(0, 0, 0), direction=(0, 0, 1),
                                     radius=0.035, height=_SWASH_TRACK_HALF * 2.5,
                                     resolution=8)]
-        for angle_deg in _SWASH_SERVO_ANGLES:
+        for angle_deg in self._swash_servo_angles:
             theta = np.radians(angle_deg)
             sx, sy = _SWASH_R_SERVO * np.cos(theta), _SWASH_R_SERVO * np.sin(theta)
             static_parts.append(
@@ -1274,7 +1300,7 @@ class RAWESVisualizer:
 
         # Servo spheres — geometry pre-centred at (sx, sy, 0); user_matrix per frame
         self._inset_spheres = []
-        for angle_deg, col in zip(_SWASH_SERVO_ANGLES, _SWASH_SERVO_COLORS):
+        for angle_deg, col in zip(self._swash_servo_angles, _SWASH_SERVO_COLORS):
             theta = np.radians(angle_deg)
             sx, sy = _SWASH_R_SERVO * np.cos(theta), _SWASH_R_SERVO * np.sin(theta)
             self._inset_spheres.append(_add(
@@ -1327,7 +1353,7 @@ class RAWESVisualizer:
 
         # Servo spheres: geometry at (sx, sy, 0) in body frame; move to R_viz @ (sx, sy, zh)
         # M[:3,:3] = R_viz rotates the sphere; M[:3,3] = R_viz @ [0,0,zh] adds the Z lift
-        for actor, angle_deg in zip(self._inset_spheres, _SWASH_SERVO_ANGLES):
+        for actor, angle_deg in zip(self._inset_spheres, self._swash_servo_angles):
             zh = _servo_z(f.swash_collective, f.swash_tilt_lon,
                           f.swash_tilt_lat, angle_deg)
             M         = np.eye(4, dtype=float)

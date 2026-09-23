@@ -27,6 +27,7 @@ from .constants import (
     Attitude,
     AttitudeQuaternion,
     Heartbeat,
+    LocalPositionNed,
     EscTelemetry,
     PidTuning,
     RcChannels,
@@ -43,7 +44,7 @@ from .constants import (
     _COPTER_MODES, _LOG_DIR,
 )
 from .hw import (
-    _arm, _disarm, _send_set_servo,
+    _arm, _disarm, _send_set_servo, _set_safe_off_state,
     _esc_telem_msg_for_channel, _esc_erpm, _rpm_triplet,
 )
 from .util import (
@@ -63,6 +64,26 @@ from .util import (
 _PASSIVE_ANGLE_STEP_DEG = 5.0
 _PASSIVE_ANGLE_LIMIT_DEG = 30.0
 _CONTROL_THRUST_STEP = 0.05
+_RAWES_YIC_CAPTURE_SENTINEL = -1000.0
+_PASSIVE_RUNUP_MARGIN_S = 0.5
+_PASSIVE_EKF_SETTLE_S = 3.0
+_PASSIVE_EKF_TIMEOUT_S = 15.0
+_PASSIVE_SETTLE_RATE_RADS = 0.05
+_PASSIVE_PROTOCOL_SEQUENCE = (
+    ("capture actual", "capture", 0.0),
+    ("roll +5 deg", "roll", 5.0),
+    ("attitude baseline", "attitude", 0.0),
+    ("roll -5 deg", "roll", -5.0),
+    ("attitude baseline", "attitude", 0.0),
+    ("pitch +5 deg", "pitch", 5.0),
+    ("attitude baseline", "attitude", 0.0),
+    ("pitch -5 deg", "pitch", -5.0),
+    ("attitude baseline", "attitude", 0.0),
+    ("collective +0.05", "collective", 0.05),
+    ("collective baseline", "collective", 0.0),
+    ("collective -0.05", "collective", -0.05),
+    ("collective baseline", "collective", 0.0),
+)
 
 
 @dataclass
@@ -196,6 +217,18 @@ def _adjust_passive_target(
     return _passive_target_messages(target)
 
 
+def _set_passive_target_to_actual(
+    target: _PassiveTarget,
+    actual_q: tuple[float, float, float, float],
+) -> list[tuple[str, float]]:
+    """Request an onboard AHRS capture and reset the ground offset origin."""
+    target.initial_q = _quat_normalize(actual_q)
+    target.roll_offset_deg = 0.0
+    target.pitch_offset_deg = 0.0
+    target.yaw_offset_deg = 0.0
+    return [("RAWES_YIC", _RAWES_YIC_CAPTURE_SENTINEL)]
+
+
 def _decode_passive_control_key(
     key: bytes, arrow_pending: list[bool],
 ) -> tuple[str, int] | None:
@@ -250,6 +283,142 @@ def _wait_for_armed(session: RawesGCS, timeout_s: float = 15.0) -> bool:
     return False
 
 
+def _wait_for_passive_runup(
+    session: RawesGCS,
+    *,
+    stop_requested=None,
+) -> bool:
+    """Wait in ACRO until ArduPilot's configured heli runup estimate completes."""
+    ramp_s = session.get_param("H_RSC_RAMP_TIME")
+    runup_s = session.get_param("H_RSC_RUNUP_TIME")
+    if ramp_s is None or runup_s is None:
+        print("  [FAIL] Could not read heli ramp/runup timing parameters.")
+        return False
+    if ramp_s <= 0.0 or runup_s <= 0.0:
+        print(
+            "  [FAIL] Invalid heli ramp/runup timing: "
+            f"H_RSC_RAMP_TIME={ramp_s}, H_RSC_RUNUP_TIME={runup_s}."
+        )
+        return False
+
+    wait_s = max(float(ramp_s), float(runup_s)) + _PASSIVE_RUNUP_MARGIN_S
+    print(
+        f"  Waiting {wait_s:.1f}s in ACRO for heli runup "
+        f"(ramp={ramp_s:.1f}s, runup={runup_s:.1f}s) ..."
+    )
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            print("  [REMOTE] stop requested during heli runup.")
+            return False
+        remaining = deadline - time.monotonic()
+        msg = session._recv(
+            type=["HEARTBEAT", "STATUSTEXT"],
+            blocking=True,
+            timeout=min(0.2, remaining),
+        )
+        if msg is not None:
+            decoded = decode_message(msg)
+            if isinstance(decoded, StatusText):
+                print(f"  [FC] {decoded.text}")
+            elif isinstance(decoded, Heartbeat) and not bool(
+                decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            ):
+                print("  [FAIL] Vehicle disarmed during heli runup.")
+                return False
+    print("  [OK] Heli runup interval complete; entering passive control.")
+    return True
+
+
+def _wait_for_passive_ekf_settle(
+    session: RawesGCS,
+    *,
+    stop_requested=None,
+    timeout_s: float = _PASSIVE_EKF_TIMEOUT_S,
+    settle_s: float = _PASSIVE_EKF_SETTLE_S,
+) -> bool:
+    """Wait for GUIDED ACTIVE and a quiet interval after EKF yaw alignment."""
+    session.send_message(RequestDataStream(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+        req_message_rate=10,
+    ))
+    deadline = time.monotonic() + timeout_s
+    quiet_since: float | None = None
+    active = False
+    print("  Waiting for GUIDED ACTIVE and settled EKF yaw ...")
+    while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            print("  [REMOTE] stop requested during EKF settling.")
+            return False
+        msg = session._recv(
+            type=["HEARTBEAT", "STATUSTEXT", "ATTITUDE_QUATERNION"],
+            blocking=True,
+            timeout=0.2,
+        )
+        now = time.monotonic()
+        if msg is not None:
+            decoded = decode_message(msg)
+            if isinstance(decoded, Heartbeat):
+                if not bool(
+                    decoded.base_mode
+                    & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                ):
+                    print("  [FAIL] Vehicle disarmed during EKF settling.")
+                    return False
+                if (
+                    decoded.system_status == mavutil.mavlink.MAV_STATE_ACTIVE
+                    and not active
+                ):
+                    active = True
+                    quiet_since = now
+                    print("  [FC] GUIDED is ACTIVE; monitoring yaw settling.")
+            elif isinstance(decoded, StatusText):
+                print(f"  [FC] {decoded.text}")
+                if active and "yaw alignment complete" in decoded.text.lower():
+                    quiet_since = now
+            elif isinstance(decoded, AttitudeQuaternion) and active:
+                if max(
+                    abs(decoded.rollspeed),
+                    abs(decoded.pitchspeed),
+                    abs(decoded.yawspeed),
+                ) > _PASSIVE_SETTLE_RATE_RADS:
+                    quiet_since = now
+        if active and quiet_since is not None and now - quiet_since >= settle_s:
+            print(
+                f"  [OK] EKF attitude quiet for {settle_s:.1f}s; "
+                "capturing passive target."
+            )
+            return True
+    print("  [FAIL] Timed out waiting for GUIDED/EKF attitude to settle.")
+    return False
+
+
+def _wait_for_disarmed(session: RawesGCS, timeout_s: float) -> bool:
+    """Wait for Lua or ArduPilot to confirm disarm via heartbeat."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        msg = session._recv(
+            type=["HEARTBEAT", "STATUSTEXT"],
+            blocking=True,
+            timeout=0.2,
+        )
+        if msg is None:
+            continue
+        decoded = decode_message(msg)
+        if isinstance(decoded, StatusText):
+            print(f"  [FC] {decoded.text}")
+        elif isinstance(decoded, Heartbeat):
+            if not bool(
+                decoded.base_mode
+                & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            ):
+                print("  [OK] Vehicle disarmed by Lua.")
+                return True
+    return False
+
+
 def _take_servo4(session: RawesGCS) -> "float | None":
     """Set SERVO<motor>_FUNCTION=0 (release from DDFP).  Returns saved value for restore."""
     servo_key = f"SERVO{SERVO_MOTOR}_FUNCTION"
@@ -294,46 +463,47 @@ def _restore_servo4(session: RawesGCS, saved: "float | None") -> None:
 def _safety_shutdown(session: RawesGCS, *,
                      saved_servo4_fn: "float | None" = None,
                      saved_overrides: "dict[str, float] | None" = None,
-                     skip_motor_off: bool = False,
-                     restore_flight_mode: "int | None" = None) -> None:
-    """Unified post-run shutdown.  Order: stop Lua -> wait -> motor off ->
-    disarm -> restore SERVO4_FUNCTION -> restore param overrides.  Every step
-    is best-effort: one failure does not skip the next."""
+                     skip_motor_off: bool = False) -> None:
+    """Stop Lua control, request onboard disarm, then enter ACRO safe-off."""
     print("  [SAFETY] shutting down ...")
     try:
         session.set_param("RAWES_MODE", 0)
         print("  [SAFETY] RAWES_MODE -> 0 (Lua mode none)")
     except Exception as e:
         print(f"  [SAFETY] failed to set RAWES_MODE=0: {e}")
-    time.sleep(0.30)   # let SRV_Channels override timeout expire
     if not skip_motor_off:
         try:
             _send_set_servo(session, SERVO_MOTOR, MOTOR_OFF_US)
             print(f"  [SAFETY] SERVO{SERVO_MOTOR} -> {MOTOR_OFF_US} us (motor off)")
         except Exception as e:
             print(f"  [SAFETY] failed to drive SERVO{SERVO_MOTOR} off: {e}")
+    disarmed = False
     try:
-        if not _disarm(session, timeout=5.0):
-            print("  [SAFETY] disarm rejected/not confirmed -- retrying force-disarm immediately")
+        session.send_message(NamedValueFloat("RAWES_ARM", 1.0))
+        print("  [SAFETY] requested onboard Lua disarm")
+        disarmed = _wait_for_disarmed(session, timeout_s=1.0)
+    except Exception as e:
+        print(f"  [SAFETY] onboard disarm request failed: {e}")
+
+    if disarmed:
+        _set_safe_off_state(session, rawes_mode_released=True)
+    else:
+        print("  [SAFETY] Lua disarm not confirmed -- force-disarming immediately")
+        try:
             if not _disarm(session, timeout=5.0, force=True):
                 print("  [SAFETY] force-disarm not confirmed")
-    except Exception as e:
-        print(f"  [SAFETY] disarm command failed: {e}")
+        except Exception as e:
+            print(f"  [SAFETY] force-disarm command failed: {e}")
     _restore_servo4(session, saved_servo4_fn)
     for param, orig in (saved_overrides or {}).items():
+        if param == "RAWES_MODE":
+            print("  [SAFETY] RAWES_MODE remains 0 in safe-off state")
+            continue
         try:
             session.set_param(param, orig)
             print(f"  [SAFETY] {param} restored to {orig:.6g}")
         except Exception as e:
             print(f"  [SAFETY] failed to restore {param}: {e}")
-    if restore_flight_mode is not None:
-        try:
-            session.set_mode(restore_flight_mode)
-            print(f"  [SAFETY] flight mode restored to "
-                  f"{_COPTER_MODES.get(restore_flight_mode, restore_flight_mode)} "
-                  f"({restore_flight_mode})")
-        except Exception as e:
-            print(f"  [SAFETY] failed to restore flight mode: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +528,8 @@ def _observation_loop(session: RawesGCS, *,
                       suppress_status: bool = False,
                       key_handler=None,
                       setup_hook=None,
+                      loop_hook=None,
+                      stop_requested=None,
                       ) -> tuple[int, bool]:
     """Run the standard observation loop.
 
@@ -401,6 +573,10 @@ def _observation_loop(session: RawesGCS, *,
         while True:
             if deadline and time.monotonic() >= deadline:
                 break
+            if stop_requested is not None and stop_requested():
+                aborted = True
+                print("\n  [REMOTE] stop requested -- running safety shutdown ...")
+                break
             keys = _poll_keys()
             if b"\x1b" in keys:
                 aborted = True
@@ -426,6 +602,10 @@ def _observation_loop(session: RawesGCS, *,
                     row = handle_msg(state, decoded, t_rel)
                     if row is not None and log is not None:
                         log.row(row)
+            if loop_hook is not None and not loop_hook(state, t_rel):
+                aborted = True
+                print("\n  [VIEW] closed -- running safety shutdown ...")
+                break
             if t_rel - last_print >= print_period_s:
                 last_print = t_rel
                 cells = render_row(state, t_rel)
@@ -478,7 +658,10 @@ def _run_observation(session: RawesGCS, mode_name: str,
                      duration: "float | None", log: _RunLog,
                      on_tick=None, keep_rc: bool = False,
                      manual_controls: "dict[str, float] | None" = None,
-                     passive_target: "_PassiveTarget | None" = None) -> None:
+                     passive_target: "_PassiveTarget | None" = None,
+                     protocol_debug: bool = False,
+                     auto_sequence_hold_s: float | None = None,
+                     stop_requested=None) -> None:
     """Generic observation loop for `run` modes.  Stream + columns are the
     same across all modes; the row content is whatever the FC reports.  Per-
     mode NVFs (e.g. YAW_I, YAW_OUT) appear as columns when emitted.
@@ -502,6 +685,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
             "mav_att_target_q_w", "mav_att_target_q_x", "mav_att_target_q_y", "mav_att_target_q_z",
             "mav_att_qerr_w", "mav_att_qerr_x", "mav_att_qerr_y", "mav_att_qerr_z",
             "mav_att_qerr_deg", "mav_att_qerr_yaw_deg",
+            "mav_pos_n_m", "mav_pos_e_m", "mav_pos_d_m",
             "ch1_us", "ch2_us", "ch3_us", "ch4_us",
             "mav_servo1_us", "mav_servo2_us", "mav_servo3_us", "mav_servo9_us",
             "vbat_v", "current_a",
@@ -532,8 +716,44 @@ def _run_observation(session: RawesGCS, mode_name: str,
                       "s1", "s2", "s3", "mot", "mot~5s", "qerr(d)", "qyaw(d)", "mRPM"]
 
     mot_window_s = 5.0   # rolling average window for motor (SERVO_MOTOR) PWM
+    protocol_started = time.monotonic()
+    protocol_sequence = 0
+    protocol_pending_sequence: int | None = None
+    protocol_pending_until = 0.0
+    protocol_last_target_q = None
+    auto_sequence_index = -1
+    auto_sequence_baseline_thrust = (
+        passive_target.thrust if passive_target is not None else 0.5
+    )
 
+    def _protocol_print(message: str) -> None:
+        if protocol_debug:
+            elapsed = time.monotonic() - protocol_started
+            print(f"\n  [PROTO {elapsed:8.3f}] {message}")
+
+    def _protocol_state(label: str) -> None:
+        actual = state["att_q"]
+        target = state["att_target_q"]
+        _, _, _, _, qerr_deg, _ = _quat_error(actual, target)
+        actual_text = (
+            "n/a" if actual is None
+            else " ".join(f"{value:+.6f}" for value in actual)
+        )
+        target_text = (
+            "n/a" if target is None
+            else " ".join(f"{value:+.6f}" for value in target)
+        )
+        _protocol_print(
+            f"{label}\n"
+            f"    actual q  {actual_text}\n"
+            f"    target q  {target_text}\n"
+            f"    qerr       {'n/a' if qerr_deg is None else f'{qerr_deg:.3f} deg'}\n"
+            f"    servo pwm  {state['s1']} / {state['s2']} / {state['s3']}"
+        )
+
+    passive_reset_handler = None
     if mode_name == "none":
+        passive_control_handler = None
         # In none mode (Lua idle) the yaw PID is inert, so the live keys tune the
         # static DDFP trim H_YAW_TRIM directly.  Step = 0.005 (~5 us over the
         # SERVO_MOTOR 1000-2000 us range); clamp [0, 1].
@@ -575,6 +795,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
             tag = "" if ok else "  [FAIL]"
             print(f"  TRIM {old:.4f} -> {new:.4f}  (~{pwm:.0f} us){tag}")
     elif mode_name == "acro-manual":
+        passive_control_handler = None
         if manual_controls is None:
             raise ValueError("manual_controls required for acro-manual")
         print("  ACRO manual controls:")
@@ -618,6 +839,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         print("    arrows: LEFT/RIGHT target roll, UP/DOWN target pitch")
         print("    ,/. (or </>): target yaw left/right")
         print("    -/= (no Shift): held thrust down/up")
+        print("    Space: set target attitude to current actual attitude")
         print("    angle step=5 deg, roll/pitch travel=+/-30 deg from start; thrust step=0.05")
         print("    ESC exits, disarms, and leaves RAWES_MODE off")
         _arrow_pending = [False]
@@ -636,16 +858,62 @@ def _run_observation(session: RawesGCS, mode_name: str,
 
         _show_passive_target()
 
-        def key_handler(k: bytes) -> None:
-            change = _decode_passive_control_key(k, _arrow_pending)
-            if change is None:
-                return
+        def passive_control_handler(axis: str, direction: int) -> None:
+            nonlocal protocol_sequence, protocol_pending_sequence
+            nonlocal protocol_pending_until, protocol_last_target_q
+            protocol_sequence += 1
+            protocol_pending_sequence = protocol_sequence
+            protocol_pending_until = time.monotonic() + 1.0
+            protocol_last_target_q = None
+            _protocol_state(
+                f"COMMAND #{protocol_sequence}: {axis} "
+                f"{'+' if direction > 0 else '-'}"
+            )
             for wire_name, value in _adjust_passive_target(
-                passive_target, change[0], change[1]
+                passive_target, axis, direction
             ):
                 session.send_message(NamedValueFloat(wire_name, value))
+                _protocol_print(
+                    f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
+                    f"{wire_name}={value:+.7f}"
+                )
             _show_passive_target()
+
+        def passive_reset_handler(
+            actual_q: tuple[float, float, float, float],
+        ) -> None:
+            nonlocal protocol_sequence, protocol_pending_sequence
+            nonlocal protocol_pending_until, protocol_last_target_q
+            protocol_sequence += 1
+            protocol_pending_sequence = protocol_sequence
+            protocol_pending_until = time.monotonic() + 1.0
+            protocol_last_target_q = None
+            _protocol_state(
+                f"COMMAND #{protocol_sequence}: SPACE target=current onboard AHRS"
+            )
+            for wire_name, value in _set_passive_target_to_actual(
+                passive_target, actual_q
+            ):
+                session.send_message(NamedValueFloat(wire_name, value))
+                _protocol_print(
+                    f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
+                    f"{wire_name}={value:+.1f} (onboard atomic capture)"
+                )
+            _show_passive_target()
+
+        def key_handler(k: bytes) -> None:
+            if k == b" ":
+                actual_q = state["att_q"]
+                if actual_q is None:
+                    print("  [FAIL] No actual quaternion available for target capture.")
+                    return
+                passive_reset_handler(actual_q)
+                return
+            change = _decode_passive_control_key(k, _arrow_pending)
+            if change is not None:
+                passive_control_handler(*change)
     elif mode_name in ("steady", "pumping"):
+        passive_control_handler = None
         _yaw_pid = {
             "P": {"param": "ATC_RAT_YAW_P", "step": 0.002,  "val": 0.0},
             "I": {"param": "ATC_RAT_YAW_I", "step": 0.0005, "val": 0.0},
@@ -681,6 +949,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
             elif k == b"d":
                 _bump("D", -1)
     else:
+        passive_control_handler = None
         def key_handler(k: bytes) -> None:  # no live key tuning for this mode
             pass
 
@@ -691,6 +960,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
         "att_target_thrust": None,
         "att_q": None,          # actual attitude quaternion (w, x, y, z) from ATTITUDE_QUATERNION
         "att_target_q": None,   # target attitude quaternion (w, x, y, z) from ATTITUDE_TARGET
+        "pos_ned": None,
         "ch1": None, "ch2": None, "ch3": None, "ch4": None,
         "s1": None, "s2": None, "s3": None, "smot": None,
         "smot_hist": [],
@@ -782,6 +1052,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 *(_fmt(v) for v in (state["att_target_q"] or (None, None, None, None))),
                 _fmt(_qw), _fmt(_qx), _fmt(_qy), _fmt(_qz),
                 _fmt(_qerr_deg), _fmt(_qerr_yaw_deg),
+                *(_fmt(v) for v in (state["pos_ned"] or (None, None, None))),
                 state["ch1"], state["ch2"], state["ch3"], state["ch4"],
                 state["s1"], state["s2"], state["s3"], state["smot"],
                 _fmt(state["vbat"]), _fmt(state["curr"]),
@@ -796,6 +1067,7 @@ def _run_observation(session: RawesGCS, mode_name: str,
                 _fmt(_erpm), _fmt(_mech), _fmt(_rotor),
             ]
         if isinstance(msg, SetAttitudeTarget):
+            nonlocal protocol_last_target_q
             att_r, att_p, att_y = _quat_to_rpy_deg(msg.q)
             state["att_target_roll"] = att_r
             state["att_target_pitch"] = att_p
@@ -806,8 +1078,31 @@ def _run_observation(session: RawesGCS, mode_name: str,
             state["att_target_thrust"] = msg.thrust
             if msg.q is not None and len(msg.q) == 4:
                 state["att_target_q"] = tuple(float(v) for v in msg.q)
+                target_q = state["att_target_q"]
+                if (
+                    protocol_debug
+                    and protocol_pending_sequence is not None
+                    and time.monotonic() <= protocol_pending_until
+                    and target_q != protocol_last_target_q
+                ):
+                    _, _, _, _, qerr_deg, _ = _quat_error(
+                        state["att_q"], target_q
+                    )
+                    _protocol_print(
+                        f"RX #{protocol_pending_sequence} ATTITUDE_TARGET\n"
+                        f"    target q   "
+                        f"{' '.join(f'{value:+.6f}' for value in target_q)}\n"
+                        f"    rates rad/s {msg.body_roll_rate:+.4f} "
+                        f"{msg.body_pitch_rate:+.4f} {msg.body_yaw_rate:+.4f}\n"
+                        f"    thrust     {msg.thrust:.4f}\n"
+                        f"    qerr       "
+                        f"{'n/a' if qerr_deg is None else f'{qerr_deg:.3f} deg'}"
+                    )
+                    protocol_last_target_q = target_q
         elif isinstance(msg, AttitudeQuaternion):
             state["att_q"] = (msg.q1, msg.q2, msg.q3, msg.q4)
+        elif isinstance(msg, LocalPositionNed):
+            state["pos_ned"] = (msg.x, msg.y, msg.z)
         elif isinstance(msg, RcChannels):
             state["ch1"] = msg.chan1_raw
             state["ch2"] = msg.chan2_raw
@@ -950,6 +1245,114 @@ def _run_observation(session: RawesGCS, mode_name: str,
             mrpm_avg_s,
         ]
 
+    live_view = None
+    if mode_name == "passive" and not protocol_debug:
+        if passive_control_handler is None or passive_reset_handler is None:
+            raise RuntimeError("passive control handlers were not initialized")
+        from viz3d.passive_live import PassiveLiveView, PassiveViewData
+        live_view = PassiveLiveView(
+            passive_control_handler,
+            passive_reset_handler,
+        )
+
+        def _update_live_view(st, t_rel: float) -> bool:
+            actual_q = state["att_q"] or (1.0, 0.0, 0.0, 0.0)
+            _, _, _, _, qerr_deg, _ = _quat_error(
+                state["att_q"], state["att_target_q"]
+            )
+            _, _, rotor_rpm = _rpm_triplet(state["erpm"])
+            return live_view.update(PassiveViewData(
+                t=t_rel,
+                actual_q=actual_q,
+                target_q=state["att_target_q"],
+                servo_pwm=(state["s1"], state["s2"], state["s3"]),
+                motor_pwm=state["smot"],
+                rotor_rpm=None if rotor_rpm is None else float(rotor_rpm),
+                pos_ned=state["pos_ned"],
+                actual_rpy=(state["roll"], state["pitch"], state["yaw"]),
+                target_rpy=(
+                    state["att_target_roll"],
+                    state["att_target_pitch"],
+                    state["att_target_yaw"],
+                ),
+                target_thrust=state["att_target_thrust"],
+                quaternion_error_deg=qerr_deg,
+            ))
+    else:
+        def _update_live_view(_st, _t_rel: float) -> bool:
+            return True
+
+    if protocol_debug:
+        print("  Protocol debug: text-only, no 3D renderer.")
+        print("  Each key logs the pre-command actual/target quaternion,")
+        print("  quaternion error, servo outputs, and every transmitted NVF.")
+        print("  Space sends one RAWES_YIC=-1000 onboard AHRS-capture packet.")
+        if auto_sequence_hold_s is not None:
+            print(
+                f"  Automatic sequence: {len(_PASSIVE_PROTOCOL_SEQUENCE)} "
+                f"steps x {auto_sequence_hold_s:.1f} s."
+            )
+
+    def _run_auto_sequence(t_rel: float) -> None:
+        nonlocal auto_sequence_index, protocol_sequence
+        nonlocal protocol_pending_sequence, protocol_pending_until
+        nonlocal protocol_last_target_q
+        if auto_sequence_hold_s is None or passive_target is None:
+            return
+        requested_index = min(
+            int(t_rel / auto_sequence_hold_s),
+            len(_PASSIVE_PROTOCOL_SEQUENCE) - 1,
+        )
+        if requested_index == auto_sequence_index:
+            return
+        label, kind, value = _PASSIVE_PROTOCOL_SEQUENCE[requested_index]
+        if kind == "capture":
+            actual_q = state["att_q"]
+            if actual_q is None:
+                return
+            passive_reset_handler(actual_q)
+        elif kind in ("roll", "pitch", "attitude"):
+            protocol_sequence += 1
+            protocol_pending_sequence = protocol_sequence
+            protocol_pending_until = time.monotonic() + 1.0
+            protocol_last_target_q = None
+            passive_target.roll_offset_deg = value if kind == "roll" else 0.0
+            passive_target.pitch_offset_deg = value if kind == "pitch" else 0.0
+            _protocol_state(
+                f"AUTO COMMAND #{protocol_sequence}, "
+                f"step {requested_index + 1}: {label}"
+            )
+            for wire_name, wire_value in _passive_target_messages(passive_target):
+                session.send_message(NamedValueFloat(wire_name, wire_value))
+                _protocol_print(
+                    f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
+                    f"{wire_name}={wire_value:+.7f}"
+                )
+        elif kind == "collective":
+            protocol_sequence += 1
+            protocol_pending_sequence = protocol_sequence
+            protocol_pending_until = time.monotonic() + 1.0
+            protocol_last_target_q = None
+            passive_target.thrust = max(
+                0.0, min(1.0, auto_sequence_baseline_thrust + value)
+            )
+            _protocol_state(
+                f"AUTO COMMAND #{protocol_sequence}, "
+                f"step {requested_index + 1}: {label}"
+            )
+            session.send_message(
+                NamedValueFloat("RAWES_THR", passive_target.thrust)
+            )
+            _protocol_print(
+                f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
+                f"RAWES_THR={passive_target.thrust:+.4f}"
+            )
+        auto_sequence_index = requested_index
+
+    def _combined_loop_hook(st, t_rel: float) -> bool:
+        _run_auto_sequence(t_rel)
+        return _update_live_view(st, t_rel)
+
     def _trim_streams() -> None:
         # Runs right after the stream requests so the RC_CHANNELS disable wins
         # over the RC_CHANNELS stream (which we keep for SERVO_OUTPUT_RAW).
@@ -974,6 +1377,15 @@ def _run_observation(session: RawesGCS, mode_name: str,
             param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION),
             param2=40000.0,
         ))  # 25 Hz
+
+        if mode_name == "passive":
+            session.send_message(CommandLong(
+                target_system=session._target_system,
+                target_component=session._target_component,
+                command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1=float(mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED),
+                param2=40000.0,
+            ))  # 25 Hz
 
         # ATTITUDE_TARGET (#83) -- the FC's telemetry echo of the active GUIDED
         # angle target -- is likewise NOT part of the EXTRA1 stream group and
@@ -1003,31 +1415,38 @@ def _run_observation(session: RawesGCS, mode_name: str,
             print("  Stream trim: AHRS2 off, EXTENDED_STATUS 1 Hz (RC_CHANNELS kept); "
                   f"{_esc_name} 5 Hz")
 
-    _observation_loop(
-        session,
-        duration_s=duration,
-        msg_types=["ATTITUDE", "RC_CHANNELS", "SERVO_OUTPUT_RAW",
-                   "ATTITUDE_TARGET", "ATTITUDE_QUATERNION", "PID_TUNING",
-                   "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
-                   "NAMED_VALUE_FLOAT",
-                   _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],
-        streams=[
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,          25),
-            (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,     25),
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 1),
-            (mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,          0),
-        ],
-        handle_msg=handle_msg,
-        render_row=render_row,
-        header_cols=cols,
-        header_print_cols=print_cols,
-        log=log,
-        print_period_s=0.25 if mode_name in ("acro-manual", "passive") else 1.0,
-        on_tick=on_tick,
-        suppress_status=True,
-        key_handler=key_handler,
-        setup_hook=_trim_streams,
-    )
+    try:
+        _observation_loop(
+            session,
+            duration_s=duration,
+            msg_types=["ATTITUDE", "RC_CHANNELS", "SERVO_OUTPUT_RAW",
+                       "ATTITUDE_TARGET", "ATTITUDE_QUATERNION",
+                       "LOCAL_POSITION_NED", "PID_TUNING",
+                       "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
+                       "NAMED_VALUE_FLOAT",
+                       _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],
+            streams=[
+                (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,          25),
+                (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,     25),
+                (mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 1),
+                (mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,          0),
+            ],
+            handle_msg=handle_msg,
+            render_row=render_row,
+            header_cols=cols,
+            header_print_cols=print_cols,
+            log=log,
+            print_period_s=0.25 if mode_name in ("acro-manual", "passive") else 1.0,
+            on_tick=on_tick,
+            suppress_status=not protocol_debug,
+            key_handler=key_handler,
+            setup_hook=_trim_streams,
+            loop_hook=_combined_loop_hook,
+            stop_requested=stop_requested,
+        )
+    finally:
+        if live_view is not None:
+            live_view.close()
     # Restore telemetry the trim disabled (best-effort; resets on FC reboot).
     if not keep_rc:
         session.send_message(CommandLong(
@@ -1061,7 +1480,12 @@ def _run_observation(session: RawesGCS, mode_name: str,
 # `run <mode>` command
 # ---------------------------------------------------------------------------
 
-def _cmd_run(session: RawesGCS, args: list[str]) -> None:
+def _cmd_run(
+    session: RawesGCS,
+    args: list[str],
+    *,
+    stop_requested=None,
+) -> None:
     """run <mode> [--duration N] [--trim K=V,...] [--osc TARGET]"""
     schema = {
         "--duration":         "float",
@@ -1071,10 +1495,13 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         "--roll":             "float",   # passive IC roll  [deg] (RAWES_RIC)
         "--pitch":            "float",   # passive IC pitch [deg] (RAWES_PIC)
         "--rc":               "bool",    # keep RC_CHANNELS stream (mixer diagnosis)
+        "--protocol-debug":   "bool",    # text-only passive command trace
+        "--auto-sequence":    "bool",    # automatic passive protocol exercise
+        "--step-hold":        "float",   # seconds per auto-sequence step
     }
     if not args:
         print("  Usage: run <name> [--duration N] [--trim K=V,...] "
-              "[--osc {all|s1|s2|s3}]")
+              "[--osc {all|s1|s2|s3}] [--protocol-debug]")
         print("  Modes:")
         for name, cfg in _RUN_MODES.items():
             print(f"    {name:<8} -- {cfg['doc']}")
@@ -1085,7 +1512,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         print(f"  Error: {e}"); return
     if len(pos) != 1:
         print("  Usage: run <name> [--duration N] [--trim K=V,...] "
-              "[--osc {all|s1|s2|s3}]")
+              "[--osc {all|s1|s2|s3}] [--protocol-debug]")
         return
     name = pos[0].lower()
     cfg = _RUN_MODES.get(name)
@@ -1093,6 +1520,19 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         print(f"  Unknown mode {name!r}  (valid: {', '.join(_RUN_MODES)})")
         return
     duration         = flags.get("--duration")
+    protocol_debug   = bool(flags.get("--protocol-debug", False))
+    auto_sequence    = bool(flags.get("--auto-sequence", False))
+    step_hold_s      = float(flags.get("--step-hold", 2.0))
+    if auto_sequence:
+        protocol_debug = True
+    if protocol_debug and name != "passive":
+        print("  [FAIL] --protocol-debug is only valid with run passive.")
+        return
+    if auto_sequence and step_hold_s <= 0.0:
+        print("  [FAIL] --step-hold must be greater than zero.")
+        return
+    if auto_sequence and duration is None:
+        duration = len(_PASSIVE_PROTOCOL_SEQUENCE) * step_hold_s + 1.0
     trim             = flags.get("--trim", {}) or {}
     osc              = flags.get("--osc")
     manual_controls = (
@@ -1136,6 +1576,9 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         "run_start_local": datetime.now().isoformat(timespec="seconds"),
         "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "RAWES_MODE":      cfg["rawes_mode"],
+        "protocol_debug":  protocol_debug,
+        "auto_sequence":   auto_sequence,
+        "step_hold_s":     step_hold_s if auto_sequence else "",
     }
     log = _RunLog.open("run", name, meta)
     print(f"  Logging to {log.path}")
@@ -1146,12 +1589,6 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     print(f"  MAVLink log: {mavlog_path}")
 
     saved_overrides: dict[str, float] = {}
-    initial_heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
-    saved_flight_mode = (
-        int(initial_heartbeat.custom_mode)
-        if initial_heartbeat is not None
-        else None
-    )
     armed = False
     saved_fn = None
     done_ok = False
@@ -1161,19 +1598,29 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         if name == "passive":
             _ensure_passive_tail_setup(session)
 
+        if not session.set_param("H_SV_MAN", 0):
+            print("  [FAIL] H_SV_MAN=0 was not acknowledged; refusing to run.")
+            return
+        print("  H_SV_MAN -> 0 (automated heli control for run)")
+
         # SERVO4 ownership shuffle if the mode needs it
         saved_fn = _take_servo4(session) if cfg["take_servo4"] else None
 
-        # Activate Lua mode
-        session.set_param("RAWES_MODE", cfg["rawes_mode"])
-        print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode)")
-
-    # Flight mode required by this Lua mode (e.g. GUIDED_NOGPS for passive) --
-    # matches the SITL passive arming flow.
         _fm = cfg.get("flight_mode")
-        if _fm is not None:
-            session.set_mode(_fm)
-            print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
+        if name == "passive":
+            # Keep ArduPilot's attitude target aligned in ACRO while CH8/RSC runs
+            # up.  Entering GUIDED while landed causes its takeoff branch to
+            # flatten roll/pitch until spool state reaches THROTTLE_UNLIMITED.
+            session.set_param("RAWES_MODE", 0)
+            print("  RAWES_MODE -> 0 (runup preparation)")
+            session.set_mode(1)
+            print("  Flight mode -> ACRO (1) for aligned heli runup")
+        else:
+            session.set_param("RAWES_MODE", cfg["rawes_mode"])
+            print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode)")
+            if _fm is not None:
+                session.set_mode(_fm)
+                print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
 
         if manual_controls is not None:
             flybar = session.get_param("H_FLYBAR_MODE")
@@ -1193,9 +1640,8 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                 session.send_message(NamedValueFloat(wire_name, value))
             print("  Manual seed: roll=+0.00 pitch=+0.00 collective=0.50")
 
-    # Seed the IC (RAWES_THR/RIC/PIC) BEFORE arming so PASSIVE holds a defined
-    # attitude (mirrors the SITL passive_init seed).
-        if cfg.get("ic_seed"):
+        def seed_passive_target() -> bool:
+            nonlocal passive_target
             thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
             captured_q = _capture_current_quaternion(session)
             if captured_q is None:
@@ -1203,7 +1649,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                     "  [FAIL] No ATTITUDE_QUATERNION received; "
                     "cannot capture passive target."
                 )
-                return
+                return False
             current_roll_deg, current_pitch_deg, current_yaw_deg = (
                 _quat_to_euler_deg(captured_q)
             )
@@ -1212,7 +1658,7 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
             yaw_deg = float(flags.get("--yaw", current_yaw_deg))
             if not 0.0 <= thr <= 1.0:
                 print(f"  [FAIL] Passive thrust must be within [0,1], got {thr}.")
-                return
+                return False
             initial_q = (
                 captured_q
                 if not any(name in flags for name in ("--roll", "--pitch", "--yaw"))
@@ -1234,12 +1680,14 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                 print(f"    {wire_name} = {value:+.6f}")
             # thr was consumed by the IC seed -- don't re-send it via the trim block.
             trim.pop("thr", None)
+            return True
 
-    # Send NVF trims.  --trim values are user-facing DEGREES; convert to
-    # radians for the wire (rawes.lua receives RAWES_TLN/TLT/COL in radians).
-        if trim:
+    # Send angle trims.  Passive thrust is consumed later, after runup, with
+    # the attitude capture.
+        angle_trim = {key: value for key, value in trim.items() if key != "thr"}
+        if angle_trim:
             print("  Sending trim NVFs (deg -> rad on the wire):")
-            for k, v_deg in trim.items():
+            for k, v_deg in angle_trim.items():
                 v_rad = math.radians(float(v_deg))
                 session.send_message(NamedValueFloat(_TRIM_NVF[k], v_rad))
                 print(f"    {_TRIM_NVF[k]} = {v_deg:+7.3f} deg  ({v_rad:+.4f} rad)")
@@ -1247,10 +1695,41 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
     # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip
     # direct DO_SET_SERVO pre-arm pulses on SERVO4 to avoid ownership conflicts.
         esc_arm = (name not in ("passive", "acro-manual"))
+        if stop_requested is not None and stop_requested():
+            print("  [REMOTE] stop requested before arm.")
+            return
         if not _arm(session, force=True, esc_arm=esc_arm):
             return
         armed = True
         print("  [OK] Armed.")
+
+        if name == "passive":
+            if not _wait_for_passive_runup(
+                session,
+                stop_requested=stop_requested,
+            ):
+                return
+            if _fm is None:
+                raise RuntimeError("Passive mode requires an ArduPilot flight mode.")
+            thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
+            if not 0.0 <= thr <= 1.0:
+                print(f"  [FAIL] Passive thrust must be within [0,1], got {thr}.")
+                return
+            session.send_message(NamedValueFloat("RAWES_THR", thr))
+            print(f"  Staging RAWES_THR = {thr:.3f} for GUIDED rate hold")
+            session.set_param("RAWES_MODE", cfg["rawes_mode"])
+            print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode, staged in ACRO)")
+            session.set_mode(_fm)
+            print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
+            if not _wait_for_passive_ekf_settle(
+                session,
+                stop_requested=stop_requested,
+            ):
+                return
+            if not seed_passive_target():
+                return
+            session.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+            print("  RAWES_PEN -> 1 (absolute passive hold enabled)")
 
     # Build the oscillate tick callback if --osc was set
         on_tick = None
@@ -1263,7 +1742,12 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
         _run_observation(session, name, duration, log, on_tick=on_tick,
                          keep_rc=bool(flags.get("--rc", False) or manual_controls),
                          manual_controls=manual_controls,
-                         passive_target=passive_target)
+                         passive_target=passive_target,
+                         protocol_debug=protocol_debug,
+                         auto_sequence_hold_s=(
+                             step_hold_s if auto_sequence else None
+                         ),
+                         stop_requested=stop_requested)
         done_ok = True
     finally:
         try:
@@ -1271,7 +1755,6 @@ def _cmd_run(session: RawesGCS, args: list[str]) -> None:
                 session,
                 saved_servo4_fn=saved_fn,
                 saved_overrides=saved_overrides,
-                restore_flight_mode=saved_flight_mode,
             )
         finally:
             session.stop_mavlog()

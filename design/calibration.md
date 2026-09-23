@@ -5,6 +5,12 @@ on Windows) connects to the Pixhawk 6C over USB (or SiK radio)
 and provides servo control, motor testing, ESC diagnostics, arming, and Lua script
 upload — all over MAVLink, with no arming required for most commands.
 
+Lua script deployment is the exception to normal radio operation: upload scripts
+only over a direct Pixhawk USB connection. MAVLink FTP over the SiK radio is too
+slow for reliable operational updates. Disconnect the radio MCP connection,
+connect USB, upload and verify the script manually, reboot or restart scripting,
+then reconnect the MCP over the normal radio link.
+
 ## Connection
 
 ```bash
@@ -193,8 +199,15 @@ complete three-axis seed immediately disarms.
 `IM_ACRO_COL_EXP=0` is also required so normalized collective remains linear
 and matches the GUIDED throttle convention.
 On exit, the run command sets `RAWES_MODE=0` permanently so Lua releases
-RC1–RC3, turns the motor output off, disarms, and then restores the ArduPilot
-flight mode that was active before the run.
+RC1–RC3, turns the motor output off, requests disarm through Lua's always-active
+`RAWES_ARM` handler, and selects ArduPilot ACRO after a disarmed heartbeat.
+If Lua does not confirm disarm within one second, calibrate immediately sends a
+force-disarm instead of waiting on a normal disarm that may be rejected while
+ArduPilot does not consider the vehicle landed.
+This is the canonical safe-off state: disarmed, Lua control released,
+`H_SV_MAN=3` centered/zero-thrust swash setup mode, and virtual-flybar-disabled
+behavior provided by `H_FLYBAR_MODE=0`. Before any run, calibrate restores
+`H_SV_MAN=0` so the automated heli mixer is active.
 
 ### `motor`
 GB4008 throttle test via `MAV_CMD_DO_MOTOR_TEST`. Prompts above 5% unless `--force`.
@@ -209,11 +222,18 @@ Set stack arm state + send `RAWES_ARM=N*1000` (default 10 s). Doesn't touch `RAW
 `run <name>` if you also want to activate a Lua mode.
 
 ### `disarm` / `reboot` / `ping [baud]`
-Self-explanatory. `ping` doesn't open a connection.
+Every confirmed normal or force disarm selects the canonical safe-off state:
+`RAWES_MODE=0`, `H_SV_MAN=3`, ArduPilot ACRO, and `H_FLYBAR_MODE=0`
+virtual-flybar-disabled behavior.
+The mode change happens only after disarm is confirmed so it cannot cause an
+armed control transition. `ping` doesn't open a connection.
 
 ### `script upload <file>` / `script list` / `script remove <name>`
 Lua FS over MAVLink FTP. `upload` writes to `/APM/scripts/<basename>` and then
 toggles `SCR_ENABLE 1→0→1` to restart the scripting engine (no reboot needed).
+Use this command only through a direct USB connection; do not upload Lua over
+the SiK radio. The MCP's normal COM6/57600 radio connection is suitable for
+control and diagnosis, not script deployment.
 
 ### `config show` / `config apply`
 Diff the live FC params against shared parm defaults:
@@ -263,8 +283,15 @@ populated once the hold is engaged.
 
 ### Interactive passive attitude hold
 
-`run passive` starts in `GUIDED_NOGPS`, captures `ATTITUDE_QUATERNION`, and
-holds that attitude. Keyboard offsets are composed relative to the captured
+`run passive` arms and completes heli runup in ACRO with `RAWES_MODE=0`, stages
+passive thrust with absolute hold disabled, and then enters `GUIDED_NOGPS`.
+During this staging phase Lua commands zero body rate plus thrust only; passive
+yaw trim remains inhibited. The ground waits for an `ACTIVE` heartbeat and a
+three-second quiet interval after any EKF yaw-alignment event, captures the
+settled `ATTITUDE_QUATERNION`, and sends `RAWES_PEN=1` to enable absolute
+attitude and yaw hold. This prevents EKF in-flight yaw resets from triggering
+the GB4008 while the stationary hardware is already physically on target.
+Keyboard offsets are composed relative to the captured
 quaternion as `q_target = q_initial * q_relative`; they are not added to its
 Euler angles. During the run:
 
@@ -273,8 +300,106 @@ Euler angles. During the run:
 - `,`/`.` (the `<`/`>` keys) changes relative target yaw by -/+5 degrees.
 - Relative roll and pitch keyboard travel is limited to +/-30 degrees.
 - `-`/`=` changes held thrust by 0.05 within `[0,1]`.
-- The captured yaw remains fixed.
+- Space sends the one-shot `RAWES_YIC=-1000` capture command. Lua samples the
+  onboard AHRS roll/pitch/yaw and commits that attitude directly, avoiding
+  ground-telemetry latency in a read-and-echo reset.
+- Yaw remains at the captured heading until changed with `,`/`.`.
 - ESC exits, disarms, and leaves `RAWES_MODE=0`.
+
+For a text-only interactive protocol trace, add `--protocol-debug`:
+
+```bash
+python -m calibrate --port COM6 --baud 57600 run passive --protocol-debug
+```
+
+This suppresses the 3D window. Before each keyboard command it prints the
+latest actual and target quaternions, quaternion error, and swash PWM, followed
+by every transmitted `NAMED_VALUE_FLOAT`. Space is intentionally a single
+`RAWES_YIC=-1000` packet; normal arrow/yaw updates remain atomic
+`RAWES_QW/QX/QY/QZ` target updates. ArduPilot receives angle targets with zero
+rate feed-forward and its native attitude/rate loops determine the commanded
+motion.
+
+For an automatic spinning-hardware exercise, add `--auto-sequence` and select
+the dwell per step with `--step-hold`:
+
+```bash
+python -m calibrate --port COM6 --baud 57600 run passive \
+  --protocol-debug --auto-sequence --step-hold 5
+```
+
+The bounded sequence performs onboard attitude capture, +/-5 degree roll and
+pitch commands with a baseline return after each, then +/-0.05 collective
+commands with baseline returns. Every target is sent once; Lua passes the
+target to ArduPilot with zero rate feed-forward, and ArduPilot determines the
+motion through its native attitude and rate controllers. Normal safety shutdown
+runs automatically after the final dwell.
+
+### AI/MCP access
+
+The local stdio MCP server exposes the complete calibrate command dispatcher
+through one persistent MAVLink connection. VS Code configuration is checked in
+at `.vscode/mcp.json` and defaults to COM6 at 57600 baud.
+
+Run it directly when testing the server outside VS Code:
+
+```bash
+.venv/Scripts/python.exe -m calibrate.mcp_server --port COM6 --baud 57600
+```
+
+The MCP process owns one persistent `RawesGCS` connection. It does not launch
+the calibrate command line. Typed tools call the shared calibration library
+functions directly: connection management, hardware status, parameters,
+swash, servo, motor, run modes, telemetry watch, logs, Lua scripts,
+configuration, arm/reboot, and emergency disarm. Printed library output is
+captured into the tool result so it cannot corrupt the MCP stdio protocol.
+Passive startup holds `RAWES_MODE=0` in ACRO during the configured traditional-
+heli RSC runup interval. Only after runup does it enter GUIDED_NOGPS, capture
+the current quaternion, seed the passive target, and select `RAWES_MODE=3`.
+This prevents GUIDED's landed/runup branch from flattening the internal
+roll/pitch target before passive control begins.
+Hardware operations are serialized and protected by an independent process
+watchdog. One-shot tools have a 30-second deadline. Intentionally long tools
+(`run_mode`, `watch`, `motor`, logs, script, and config) have a 600-second
+deadline. `run_mode` and `watch` accept a per-call `timeout_s` override. When a
+deadline expires, the watchdog first requests cooperative stop so the normal
+safety shutdown can run. If the operation is still blocked 10 seconds later,
+the watchdog terminates the MCP process with exit code 124. Configure these
+defaults with `--command-timeout`, `--long-command-timeout`, and
+`--timeout-grace`; `.vscode/mcp.json` specifies the project defaults explicitly.
+
+`stop_operation` interrupts an active `run_mode` at its next observation-loop
+iteration and lets the normal mode-0, Lua-disarm, motor-off, ACRO safe-off
+lifecycle complete while keeping the MCP server running. It is lock-free, so a
+blocked hardware operation cannot prevent the stop request. `shutdown_server`
+first requests the same cancellation, waits for the active operation to release
+the connection, force-disarms to confirm hardware safety, closes COM6, returns
+its final result, and then terminates the stdio MCP process. By default it
+refuses to terminate if disarm cannot be confirmed. Use
+`shutdown_server(force=true)` only after independently confirming the hardware
+is safe; it closes the connection and exits even without disarm confirmation.
+VS Code can then start a fresh MCP process containing updated code without a
+window reload.
+
+The command automatically opens a live PyVista window using the existing
+RAWES hub/blade renderer and swashplate inset. The live view renders the four
+physical blades individually and omits the translucent high-speed rotor-disc
+anti-flicker aid. The main view overlays the
+actual rotor orientation in blue and the commanded target orientation in
+yellow. The inset reconstructs collective and cyclic plate motion from live
+S1/S2/S3 PWM. The HUD shows actual/target attitude, quaternion error, swash
+PWM, yaw-motor PWM, thrust, and rotor speed. A visible orange GB4008 rotor
+turns opposite the commanded motor-shaft RPM. The blade speed uses ESC
+telemetry when available and otherwise uses the commanded motor speed divided
+by the 10:1 motor-to-rotor ratio. Hub translation follows live
+`LOCAL_POSITION_NED`. Arrow, yaw, thrust, and Escape keys work directly in
+this window; closing it also ends the run and invokes the normal safety
+shutdown.
+
+Actual position, orientation, target orientation, swash position, and rotor
+speed are linearly interpolated between MAVLink updates (with rotation matrices
+re-orthonormalized) so the display remains smooth rather than stepping at the
+telemetry rate.
 
 The quaternion is sent atomically as `RAWES_QW/QX/QY/QZ`. Lua converts the
 complete quaternion to the equivalent Euler triplet only at the final
@@ -312,7 +437,7 @@ Useful for offline analysis.
 | Gear ratio | 10:1 | Hardware |
 | Kt (motor shaft) | 0.144 N·m/A | Derived: 60/(2π×66) |
 | eRPM → motor RPM | ÷ (SERVO_BLH_POLES/2) | pole-pairs |
-| eRPM → rotor RPM | ÷ (SERVO_BLH_POLES/2 × 80/44) | apply gear ratio |
+| eRPM → rotor RPM | ÷ (SERVO_BLH_POLES/2 × 10) | apply gear ratio |
 
 ---
 
@@ -346,9 +471,9 @@ python -m calibrate --port COM7 servo sweep --duration 12
 python -m calibrate --port COM7 motor 5 --duration 5
 python -m calibrate --port COM7 watch esc --duration 10
 
-# 7. Upload updated Lua and verify
-python -m calibrate --port COM7 script upload scripts/rawes.lua
-python -m calibrate --port COM7 script list
+# 7. Connect the Pixhawk directly by USB, then upload updated Lua and verify
+python -m calibrate --port <USB_COM_PORT> script upload scripts/rawes.lua
+python -m calibrate --port <USB_COM_PORT> script list
 
 # 8. Quiet armed bench check
 python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342

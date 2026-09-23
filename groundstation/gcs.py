@@ -965,6 +965,7 @@ class RawesGCS:
         self._watchdog = watchdog  # nullary callable; raises if process is dead
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
+        self._send_lock = threading.RLock()
         self._sim_clock = clock if clock is not None else SimClock()
         # Internal receive buffer — messages drained from the network socket but
         # not yet returned to a caller.  Populated by _recv; popped in FIFO order.
@@ -1801,7 +1802,10 @@ class RawesGCS:
             gcs.send_message(NamedValueFloat("RAWES_THR", 0.5))
             gcs.send_message(NamedValueInt("RAWES_LAT", lat_e7))
         """
-        msg.send(self._mav)
+        # pymavlink's serial writer is not thread-safe. The background heartbeat
+        # and foreground control path must never encode/write concurrently.
+        with self._send_lock:
+            msg.send(self._mav)
         log.debug("%s sent: %r", type(msg).__name__, msg)
 
     def recv_decoded(

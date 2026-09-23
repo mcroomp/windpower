@@ -265,6 +265,7 @@ _capture_ms     = nil
 _dbg_precap_last_ms = -100000   -- throttle for pre-capture pos_ned/anchor diagnostic
 _passive_hold_yaw_rad = nil
 _passive_yaw_fixed_rad = nil   -- optional ground-provided fixed yaw target [rad] (RAWES_YIC)
+_passive_enabled = false       -- ground enables only after GUIDED/EKF yaw settling
 _first_nonzero_rate_logged = false
 _guided_cmd_last_log_ms = -2000
 -- ── Yaw trim observer ────────────────────────────────────────────────────────────
@@ -625,6 +626,7 @@ local function _on_mode_enter(mode)
     if mode == MODE_PASSIVE then
         _passive_status_ms    = 0
         _passive_hold_yaw_rad = nil
+        _passive_enabled      = false
         _yaw_ff_trim          = 0.0
         _nvf_last_ms          = nil
     end
@@ -1105,6 +1107,24 @@ local function run_passive_mode(now)
         gz = gyro:z()
     end
 
+    if not _passive_enabled then
+        _diag_set("OL_RSP", 0.0)
+        _diag_set("OL_PSP", 0.0)
+        _diag_set("OL_YSP", 0.0)
+        _diag_set("OL_RER", -gx)
+        _diag_set("OL_PER", -gy)
+        _diag_set("OL_YER", -gz)
+        _diag_set("OL_AP", 0.0)
+        _diag_set("OL_AI", 0.0)
+        _diag_set("OL_AD", 0.0)
+        _diag_set("OL_COL", ic_thrust_or_default())
+        if guided_ok and arming:is_armed() and _ic_thrust ~= nil then
+            vehicle:set_target_rate_and_throttle(
+                0.0, 0.0, 0.0, ic_thrust_or_default())
+        end
+        return false
+    end
+
     if now - _passive_status_ms >= 1000 then
         _passive_status_ms = now
         local armed_s = arming:is_armed() and "ARMED" or "disarmed"
@@ -1138,7 +1158,7 @@ local function run_passive_mode(now)
         if guided_ok and arming:is_armed() and _ic_thrust ~= nil then
             vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, ic_thrust_or_default())
         end
-        return
+        return guided_ok
     end
 
     -- Yaw target: a ground-provided fixed yaw (RAWES_YIC) takes precedence and
@@ -1148,11 +1168,11 @@ local function run_passive_mode(now)
         _passive_hold_yaw_rad = _passive_yaw_fixed_rad
     elseif _passive_hold_yaw_rad == nil then
         if not ahrs:healthy() then
-            return
+            return false
         end
         local y = ahrs:get_yaw_rad()
         if y == nil then
-            return
+            return false
         end
         _passive_hold_yaw_rad = y
     end
@@ -1174,6 +1194,7 @@ local function run_passive_mode(now)
             0.0, 0.0, 0.0, col_thrust_p,
             "passive_hold")
     end
+    return guided_ok
 end
 
 -- ── Main update ───────────────────────────────────────────────────────────────
@@ -1296,6 +1317,14 @@ local function update()
             _passive_yaw_fixed_rad = yic
         end
     end
+    if _nv_floats["RAWES_PEN"] then
+        local enabled = _nv_floats["RAWES_PEN"] > 0.5
+        _nv_floats["RAWES_PEN"] = nil
+        _passive_enabled = enabled
+        gcs:send_text(6, enabled and
+            "RAWES passive: absolute hold enabled" or
+            "RAWES passive: absolute hold disabled")
+    end
 
     if not _ic_seeded then
         if _ic_pending_thrust ~= nil then
@@ -1373,8 +1402,9 @@ local function update()
     end
 
     if mode == MODE_PASSIVE then
-        run_passive_mode(now)
-        run_yaw_trim(now, true)
+        if run_passive_mode(now) then
+            run_yaw_trim(now, true)
+        end
         _diag_emit(now)
         return update, BASE_PERIOD_MS
     end

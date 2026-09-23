@@ -41,7 +41,7 @@ from groundstation.gcs import NamedValueFloat
 from groundstation.rawes_modes import MODE_PASSIVE
 
 # ---------------------------------------------------------------------------
-# Plant constants (torque_model defaults — GB4008 66KV, 80:44 gear, 4S LiPo)
+# Plant constants (torque_model defaults — GB4008 66KV, 10:1 gear, 4S LiPo)
 # ---------------------------------------------------------------------------
 _PARAMS      = _m.HubParams()
 _OMEGA_ROTOR = 200.0 * (2.0 * math.pi / 60.0)  # 200 RPM = 20.94 rad/s (design target)

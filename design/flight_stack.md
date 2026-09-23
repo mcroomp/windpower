@@ -441,6 +441,12 @@ clients that cannot read and echo the current attitude. A sentinel capture
 commits directly to the active roll/pitch fields because `_ic_seeded` persists
 across mode transitions for the whole FC boot.
 
+During an interactive run, Space uses that sentinel path to redefine the target
+as the current onboard AHRS attitude. This avoids commanding a slightly stale
+attitude obtained by receiving and echoing ground-side telemetry. The
+`--protocol-debug` calibration option provides a text-only trace of discrete
+target packets, actual/target quaternion state, error, and servo response.
+
 **Per-tick command** (once seeded and in GUIDED):
 
 1. A fixed `RAWES_YIC` is held when supplied. Otherwise yaw is captured once
@@ -719,7 +725,7 @@ Lua is unavailable on the first boot from a fresh EEPROM.
 | FRAME_CLASS | 6 (Heli) | Traditional helicopter frame |
 | H_SW_TYPE | 3 (H3_120) | ArduPilot mixer used for the physical HR3-120 front-elevator layout |
 | H_SW_COL_DIR | 1 (reversed) | Required with reversed swash servos for HR3-120 |
-| H_RSC_MODE | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete |
+| H_RSC_MODE | 1 (CH8 passthrough) | Wind-driven rotor; ArduPilot still applies `H_RSC_RAMP_TIME` and `H_RSC_RUNUP_TIME` before `runup_complete` |
 | H_SW_PHANG | 0 (confirmed) | No phase offset. Built-in +90° roll advance in H3_120 already aligns with RAWES layout. Cross-coupling <20% confirmed via test_h_phang. |
 | H_COL_MIN | 1000 µs | Full servo range (not default 1250–1750) |
 | H_COL_MAX | 2000 µs | Full servo range |
@@ -865,7 +871,7 @@ flowchart TD
 ```python
 params = {
     "ARMING_SKIPCHK": 0xFFFF,  # skip ALL pre-arm checks (4.7+ name; ARMING_CHECK silently fails)
-    "H_RSC_MODE":     1,        # CH8 passthrough — instant runup_complete
+    "H_RSC_MODE":     1,        # CH8 passthrough; configured runup timing still applies
     "FS_THR_ENABLE":  0,        # no RC throttle failsafe
     "FS_GCS_ENABLE":  0,        # no GCS heartbeat failsafe
 }
@@ -873,8 +879,30 @@ params = {
 # 1. Set params above
 # 2. Wait for ATTITUDE messages (EKF attitude aligned)
 # 3. Send force arm (param2=21196 in MAV_CMD_COMPONENT_ARM_DISARM)
-# 4. HEARTBEAT shows armed=True immediately (mode 1 = instant runup_complete)
+# 4. HEARTBEAT shows armed=True; wait for configured RSC runup before flight control
 ```
+
+`H_RSC_MODE=1` does **not** make traditional-heli runup instantaneous. After
+interlock assertion, ArduPilot ramps `_rotor_ramp_output` over
+`H_RSC_RAMP_TIME` and estimates rotor speed over `H_RSC_RUNUP_TIME`;
+`runup_complete` requires both to reach 1.0. While GUIDED angle control is
+landed with positive thrust, it calls `zero_throttle_and_relax_ac()` and does
+not apply the requested attitude until spool state reaches
+`THROTTLE_UNLIMITED`. Entering GUIDED before runup therefore flattens the
+internal roll/pitch target and produces a large target slew when runup
+completes, even when the requested quaternion equals the actual attitude.
+
+Passive hardware startup avoids that transition:
+
+1. Select `RAWES_MODE=0` and ACRO.
+2. Arm; Lua asserts CH8 while ACRO keeps the attitude target aligned.
+3. Wait `max(H_RSC_RAMP_TIME, H_RSC_RUNUP_TIME)` plus a short scheduling margin.
+4. Stage passive thrust with `RAWES_MODE=3`, but leave `RAWES_PEN=0`. Lua enters
+   GUIDED_NOGPS using zero body-rate plus thrust only, with yaw trim inhibited.
+5. Wait for Copter `MAV_STATE_ACTIVE` and three quiet seconds after the last EKF
+   yaw-alignment event or measured body-rate excursion.
+6. Capture the settled attitude and send `RAWES_PEN=1`; only then does Lua issue
+   the absolute quaternion-derived attitude command and passive yaw trim.
 
 ### B.2 RAWES_ARM Lua Timer (Lua tests)
 
@@ -903,7 +931,7 @@ params = {
 | Parameter | Value | Reason |
 |---|---|---|
 | ARMING_SKIPCHK | 0xFFFF | Skip all pre-arm checks (4.7+ name) |
-| H_RSC_MODE | 1 | CH8 passthrough — instant runup_complete |
+| H_RSC_MODE | 1 | CH8 passthrough; ramp/runup timing still gates `runup_complete` |
 | COMPASS_USE | 0 | Disabled — GB4008 interference on hardware; cycling in SITL |
 | COMPASS_ENABLE | 0 | Same |
 | GPS_AUTO_CONFIG | 0 | Do not reconfigure F9P chips (corrupts RELPOSNED) |

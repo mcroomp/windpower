@@ -508,6 +508,63 @@ def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
 # Arm / Disarm
 # ---------------------------------------------------------------------------
 
+_SAFE_OFF_FLIGHT_MODE = 1  # ArduCopter ACRO with virtual flybar disabled.
+_SAFE_OFF_FLYBAR_MODE = 0.0
+_SAFE_OFF_SERVO_MODE = 3.0  # H_SV_MAN: zero-thrust collective/manual center.
+
+
+def _set_safe_off_state(
+    session: RawesGCS,
+    *,
+    rawes_mode_released: bool = False,
+) -> None:
+    """Leave a disarmed vehicle with Lua released, centered swash, and ACRO."""
+    if rawes_mode_released:
+        print("  [OK] Safe-off RAWES_MODE=0 (Lua control released).")
+    else:
+        try:
+            if not session.set_param("RAWES_MODE", 0):
+                print("  [FAIL] Safe-off RAWES_MODE=0 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off RAWES_MODE=0 (Lua control released).")
+        except Exception as e:
+            print(f"  [FAIL] Could not release Lua control for safe-off: {e}")
+
+    try:
+        flybar_mode = session.get_param("H_FLYBAR_MODE")
+        if flybar_mode is None:
+            print("  [FAIL] Could not read H_FLYBAR_MODE for safe-off.")
+        elif round(flybar_mode) != round(_SAFE_OFF_FLYBAR_MODE):
+            if not session.set_param("H_FLYBAR_MODE", _SAFE_OFF_FLYBAR_MODE):
+                print("  [FAIL] Safe-off H_FLYBAR_MODE=0 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off H_FLYBAR_MODE=0 (virtual flybar disabled).")
+        else:
+            print("  [OK] Safe-off H_FLYBAR_MODE=0 (virtual flybar disabled).")
+    except Exception as e:
+        print(f"  [FAIL] Could not disable virtual flybar for safe-off: {e}")
+
+    try:
+        servo_mode = session.get_param("H_SV_MAN")
+        if servo_mode is None:
+            print("  [FAIL] Could not read H_SV_MAN for safe-off.")
+        elif round(servo_mode) != round(_SAFE_OFF_SERVO_MODE):
+            if not session.set_param("H_SV_MAN", _SAFE_OFF_SERVO_MODE):
+                print("  [FAIL] Safe-off H_SV_MAN=3 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off H_SV_MAN=3 (centered swash).")
+        else:
+            print("  [OK] Safe-off H_SV_MAN=3 (centered swash).")
+    except Exception as e:
+        print(f"  [FAIL] Could not configure centered swash for safe-off: {e}")
+
+    try:
+        session.set_mode(_SAFE_OFF_FLIGHT_MODE)
+        print("  [OK] Safe-off flight mode ACRO (centered swash).")
+    except Exception as e:
+        print(f"  [FAIL] Could not select ACRO safe-off mode: {e}")
+
+
 def _arm(session: RawesGCS, force: bool = False,
          timeout: float = 15.0, esc_arm: bool = True) -> bool:
     """
@@ -609,6 +666,7 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
             case Heartbeat(base_mode=base_mode):
                 if not bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
                     print("  [OK] Vehicle disarmed.")
+                    _set_safe_off_state(session)
                     return True
 
     if ack_seen:

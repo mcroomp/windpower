@@ -25,6 +25,7 @@ from groundstation.gcs         import (
     WallClock,
     CommandAck,
     Heartbeat,
+    LocalPositionNed,
     NamedValueFloat,
     CommandLong,
     decode_message,
