@@ -26,13 +26,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, ClassVar, Literal, Protocol, TypeVar, cast
 
 from pymavlink import mavutil
 
-from groundstation.mavlink_log import MavlinkLogWriter
+from groundstation.mavlink_log import MavlinkLogWriter, convert_raw_to_ndjson
 
 log = logging.getLogger(__name__)
+
+ReceiveMode = Literal["background", "lockstep"]
 
 
 class MavSenderLike(Protocol):
@@ -45,6 +47,7 @@ class MavConnectionLike(Protocol):
     mav: MavSenderLike
     target_system: int
     target_component: int
+    logfile_raw: BinaryIO | None
 
     def recv_match(self, *args, **kwargs) -> Any: ...
 
@@ -99,8 +102,9 @@ class SimClock:
       HEARTBEAT is thrown away.  The type filter controls what is *returned*
       to the caller; it does not affect clock updates.
 
-    No lock is needed: only the main test thread reads and writes this clock
-    (the heartbeat thread only *sends* MAVLink messages, never receives them).
+    RawesGCS advances this clock only when a received message is popped from
+    the synchronized receive buffer, keeping sim-time progression tied to the
+    consumer that observed the message.
     """
 
     def __init__(self) -> None:
@@ -945,6 +949,11 @@ class RawesGCS:
         Clock to use for all deadline arithmetic.  Pass a ``WallClock()``
         instance when connecting to real hardware over USB/serial; omit (or
         pass None) for SITL where the sim clock is driven by ``time_boot_ms``.
+    receive_mode : {"background", "lockstep"} | None
+        ``background`` continuously drains the MAVLink socket into a synchronized
+        queue (hardware/default for WallClock). ``lockstep`` keeps the receive
+        worker parked until _recv explicitly requests a non-blocking drain
+        (SITL/default for SimClock).
     """
 
     def __init__(
@@ -954,6 +963,7 @@ class RawesGCS:
         mavlog_path: "str | Path | None" = None,
         baud: int = 115200,
         clock: "SimClock | WallClock | None" = None,
+        receive_mode: "ReceiveMode | None" = None,
         watchdog=None,
     ):
         self._address = address
@@ -967,14 +977,29 @@ class RawesGCS:
         self._hb_stop = threading.Event()
         self._send_lock = threading.RLock()
         self._sim_clock = clock if clock is not None else SimClock()
-        # Internal receive buffer — messages drained from the network socket but
-        # not yet returned to a caller.  Populated by _recv; popped in FIFO order.
-        # Clock is advanced only when a message is popped, so sim_now() stays
-        # consistent with the message that caused _recv to return.
+        self._receive_mode: ReceiveMode = (
+            receive_mode if receive_mode is not None
+            else ("background" if isinstance(self._sim_clock, WallClock) else "lockstep")
+        )
+        if self._receive_mode not in ("background", "lockstep"):
+            raise ValueError(f"unknown receive mode {self._receive_mode!r}")
+        # Internal receive buffer — messages drained from the network socket by
+        # the receive worker but not yet returned to a caller.  Popped in FIFO
+        # order.  Clock is advanced only when a message is popped, so sim_now()
+        # stays consistent with the message that caused _recv to return.
         self._recv_buf: collections.deque = collections.deque()
+        self._recv_cv = threading.Condition()
+        self._recv_thread: threading.Thread | None = None
+        self._recv_stop = threading.Event()
+        self._recv_worker_error: BaseException | None = None
+        self._lockstep_drain_request_id = 0
+        self._lockstep_drain_complete_id = 0
         self._armed: bool = False
-        # JSON message log — every received MAVLink message written as one line
-        self._mavlog: MavlinkLogWriter | None = None
+        # Native raw capture is the source of truth; NDJSON is built at close.
+        self._mavlog = None
+        self._mavlog_path: Path | None = None
+        self._raw_mavlog_fh = None
+        self._raw_mavlog_path: Path | None = None
         if mavlog_path is not None:
             self._mavlog = MavlinkLogWriter.open(mavlog_path)
 
@@ -996,23 +1021,46 @@ class RawesGCS:
         if self._mavlog is not None:
             self._mavlog.write(msg, self._sim_clock.now_ms(), direction="tx")
 
-    def start_mavlog(self, path: "str | Path") -> "MavlinkLogWriter":
-        """Begin logging ALL MAVLink traffic (rx + tx) as NDJSON to *path*.
+    def start_mavlog(
+        self,
+        path: "str | Path",
+        raw_path: "str | Path | None" = None,
+    ) -> None:
+        """Begin a native raw capture whose final output is *path*.
 
-        Received messages are logged by ``_recv``; sent messages by the send
-        callback.  Safe to call after ``connect()``.  Replaces any existing log.
+        Pymavlink writes every received byte directly to the raw logfile.
+        When the capture stops, that raw stream is replayed into the single
+        canonical NDJSON file at *path*. Safe to call after ``connect()``.
         """
-        if self._mavlog is not None:
-            self._mavlog.close()
-        self._mavlog = MavlinkLogWriter.open(path)
+        self.stop_mavlog()
+        self._mavlog_path = Path(path)
+        if raw_path is None:
+            raw_path = Path(path).with_suffix(".tlog.raw")
+        self._raw_mavlog_path = Path(raw_path)
+        if self._mav is not None:
+            self._raw_mavlog_fh = open(self._raw_mavlog_path, "ab", buffering=0)
+            self._mav.logfile_raw = self._raw_mavlog_fh
         self._register_send_logger()
-        return self._mavlog
 
     def stop_mavlog(self) -> None:
         """Close the MAVLink log (if any) and stop logging traffic."""
-        if self._mavlog is not None:
-            self._mavlog.close()
-            self._mavlog = None
+        if self._mav is not None:
+            self._mav.logfile_raw = None
+        mavlog_path = self._mavlog_path
+        self._mavlog_path = None
+        if self._raw_mavlog_fh is not None:
+            self._raw_mavlog_fh.close()
+            self._raw_mavlog_fh = None
+        raw_path = self._raw_mavlog_path
+        self._raw_mavlog_path = None
+        if raw_path is not None and mavlog_path is not None:
+            decoded = convert_raw_to_ndjson(raw_path, mavlog_path)
+            log.info(
+                "Rebuilt %s from %d messages in native raw log %s",
+                mavlog_path,
+                decoded,
+                raw_path,
+            )
 
     # ------------------------------------------------------------------
     # Simulation time
@@ -1090,6 +1138,129 @@ class RawesGCS:
             if check is not None:
                 check()
 
+    def _start_recv_worker(self) -> None:
+        if self._mav is None:
+            raise RuntimeError("RawesGCS is not connected")
+        if self._recv_thread is not None and self._recv_thread.is_alive():
+            return
+        with self._recv_cv:
+            self._recv_buf.clear()
+            self._recv_worker_error = None
+            self._lockstep_drain_request_id = 0
+            self._lockstep_drain_complete_id = 0
+        self._recv_stop.clear()
+        self._recv_thread = threading.Thread(
+            target=self._recv_worker,
+            args=(self._mav,),
+            daemon=True,
+            name=f"gcs-recv-{self._receive_mode}",
+        )
+        self._recv_thread.start()
+
+    def _stop_recv_worker(self, *, close_connection: bool = False) -> None:
+        self._recv_stop.set()
+        with self._recv_cv:
+            self._recv_cv.notify_all()
+        if close_connection and self._mav is not None:
+            try:
+                self._mav.close()
+            except Exception:
+                pass
+        if (
+            self._recv_thread is not None
+            and self._recv_thread is not threading.current_thread()
+        ):
+            self._recv_thread.join(timeout=2.0)
+        self._recv_thread = None
+
+    def _recv_worker(self, mav: MavConnectionLike) -> None:
+        if self._receive_mode == "background":
+            self._recv_worker_background(mav)
+        elif self._receive_mode == "lockstep":
+            self._recv_worker_lockstep(mav)
+        else:
+            self._record_recv_worker_error(
+                ValueError(f"unknown receive mode {self._receive_mode!r}")
+            )
+
+    def _recv_worker_background(self, mav: MavConnectionLike) -> None:
+        while not self._recv_stop.is_set():
+            try:
+                msg = mav.recv_match(blocking=True, timeout=0.1)
+            except Exception as exc:
+                if not self._recv_stop.is_set():
+                    self._record_recv_worker_error(exc)
+                return
+            if msg is not None:
+                self._enqueue_received(msg)
+
+    def _recv_worker_lockstep(self, mav: MavConnectionLike) -> None:
+        while not self._recv_stop.is_set():
+            with self._recv_cv:
+                while (
+                    self._lockstep_drain_complete_id >= self._lockstep_drain_request_id
+                    and not self._recv_stop.is_set()
+                ):
+                    self._recv_cv.wait()
+                request_id = self._lockstep_drain_request_id
+            if self._recv_stop.is_set():
+                return
+            try:
+                self._drain_available_from_mav(mav)
+            except Exception as exc:
+                if not self._recv_stop.is_set():
+                    self._record_recv_worker_error(exc)
+                return
+            with self._recv_cv:
+                self._lockstep_drain_complete_id = max(
+                    self._lockstep_drain_complete_id,
+                    request_id,
+                )
+                self._recv_cv.notify_all()
+
+    def _drain_available_from_mav(self, mav: MavConnectionLike) -> None:
+        while not self._recv_stop.is_set():
+            msg = mav.recv_match(blocking=False)
+            if msg is None:
+                return
+            self._enqueue_received(msg)
+
+    def _enqueue_received(self, msg) -> None:
+        with self._recv_cv:
+            self._recv_buf.append(msg)
+            self._recv_cv.notify_all()
+
+    def _record_recv_worker_error(self, exc: BaseException) -> None:
+        with self._recv_cv:
+            self._recv_worker_error = exc
+            self._recv_cv.notify_all()
+
+    def _request_lockstep_drain(self, timeout: float) -> None:
+        with self._recv_cv:
+            self._lockstep_drain_request_id += 1
+            request_id = self._lockstep_drain_request_id
+            self._recv_cv.notify_all()
+            deadline = time.monotonic() + max(timeout, 0.0)
+            while (
+                self._lockstep_drain_complete_id < request_id
+                and self._recv_worker_error is None
+                and not self._recv_stop.is_set()
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._recv_cv.wait(remaining)
+
+    def _process_received_message(self, msg) -> None:
+        self._sim_clock.update(getattr(msg, "time_boot_ms", 0))
+        if self._mavlog is not None:
+            self._mavlog.write(msg, self._sim_clock.now_ms())
+        if msg.get_type() == "HEARTBEAT":
+            self._armed = bool(msg.base_mode & 128)  # MAV_MODE_FLAG_SAFETY_ARMED
+            if hasattr(msg, "_header"):
+                self._target_system = msg._header.srcSystem
+                self._target_component = msg._header.srcComponent
+
     def _recv(
         self,
         type=None,
@@ -1098,63 +1269,48 @@ class RawesGCS:
     ):
         """Receive the next matching MAVLink message, advancing the sim-clock.
 
-        Drains all available bytes from the network socket into an internal
-        deque, then pops messages from that deque one at a time.  For each
-        popped message the clock is advanced and the message is logged; if it
-        matches *type* it is returned immediately.  Any messages still in the
-        deque are left for the next call, so ``sim_now()`` is always
-        consistent with the message that caused this call to return.
+        A single receive worker owns the socket.  In hardware/background mode it
+        continuously drains MAVLink into ``_recv_buf``.  In SITL/lockstep mode
+        it drains only when this method explicitly requests a drain, preserving
+        the existing sim-time progression semantics without concurrent socket
+        reads.
 
         The *timeout* parameter is a **wall-clock** deadline (``time.monotonic``),
         not a sim-time deadline.  All test logic that should be tied to sim
         time should use ``sim_now()`` + ``sim_sleep()`` instead.
-
-        Parameters
-        ----------
-        type : str | list[str] | None
-            Message type(s) to accept.  None accepts any type.
-        blocking : bool
-            If True, keep reading until a match is found or *timeout* expires.
-        timeout : float
-            Maximum wall-clock seconds to wait (only used when blocking=True).
         """
         if self._mav is None:
             raise RuntimeError("RawesGCS is not connected")
 
-        mav = self._mav
         type_set = None
         if type is not None:
-            type_set = set(type) if isinstance(type, list) else {type}
+            type_set = set(type) if isinstance(type, (list, tuple, set)) else {type}
         deadline = time.monotonic() + (timeout or 0.0)
+
         while True:
-            # Drain all currently available messages from the network into the
-            # internal buffer without blocking.
-            while True:
-                msg = mav.recv_match(blocking=False)
-                if msg is None:
-                    break
-                self._recv_buf.append(msg)
+            if self._receive_mode == "lockstep":
+                remaining = max(deadline - time.monotonic(), 0.0) if blocking else 0.05
+                self._request_lockstep_drain(min(remaining, 0.05))
 
-            # Process the buffer in arrival order.  Clock and log are updated
-            # as each message is popped; unprocessed messages stay for next call.
-            while self._recv_buf:
-                msg = self._recv_buf.popleft()
-                self._sim_clock.update(getattr(msg, 'time_boot_ms', 0))
-                if self._mavlog is not None:
-                    self._mavlog.write(msg, self._sim_clock.now_ms())
-                if msg.get_type() == "HEARTBEAT":
-                    self._armed = bool(msg.base_mode & 128)  # MAV_MODE_FLAG_SAFETY_ARMED
-                    if hasattr(msg, '_header'):
-                        self._target_system    = msg._header.srcSystem
-                        self._target_component = msg._header.srcComponent
-                if type_set is None or msg.get_type() in type_set:
-                    return msg
-                # Non-matching: clock updated + logged; discard and continue.
+            with self._recv_cv:
+                while self._recv_buf:
+                    msg = self._recv_buf.popleft()
+                    self._process_received_message(msg)
+                    if type_set is None or msg.get_type() in type_set:
+                        return msg
+                    # Non-matching: clock updated + logged; discard and continue.
 
-            # Buffer exhausted.
-            if not blocking or time.monotonic() >= deadline:
-                return None
-            time.sleep(0.002)
+                if self._recv_worker_error is not None:
+                    raise RuntimeError("MAVLink receive worker failed") from self._recv_worker_error
+                if self._recv_stop.is_set():
+                    return None
+                if not blocking:
+                    return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                wait_s = min(remaining, 0.002 if self._receive_mode == "lockstep" else remaining)
+                self._recv_cv.wait(wait_s)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1174,6 +1330,7 @@ class RawesGCS:
             source_system=self._source_system,
         ))
         self._register_send_logger()
+        self._start_recv_worker()
         log.info("GCS socket open (no heartbeat wait) — target sys=%d comp=%d",
                  self._target_system, self._target_component)
 
@@ -1215,6 +1372,7 @@ class RawesGCS:
                 time.sleep(0.5)
                 continue
             self._register_send_logger()
+            self._start_recv_worker()
 
             # Connection open — poll for the first heartbeat in 0.5 s chunks,
             # calling the watchdog between each chunk so a crashed process is
@@ -1224,7 +1382,7 @@ class RawesGCS:
                 if _wd is not None:
                     _wd()
                 try:
-                    hb = self._mav.recv_match(type="HEARTBEAT", blocking=True, timeout=0.5)
+                    hb = self._recv(type="HEARTBEAT", blocking=True, timeout=0.5)
                 except Exception as exc:
                     log.debug("Heartbeat recv failed: %s", exc)
                     hb = None
@@ -1238,10 +1396,7 @@ class RawesGCS:
                     return
 
             # No heartbeat within 5 s on this connection — close and retry.
-            try:
-                self._mav.close()
-            except Exception:
-                pass
+            self._stop_recv_worker(close_connection=True)
             self._mav = None
 
         raise TimeoutError(
@@ -1251,15 +1406,9 @@ class RawesGCS:
     def close(self) -> None:
         """Stop heartbeat thread and close socket."""
         self.stop_heartbeat()
-        if self._mav is not None:
-            try:
-                self._mav.close()
-            except Exception:
-                pass
-            self._mav = None
-        if self._mavlog is not None:
-            self._mavlog.close()
-            self._mavlog = None
+        self._stop_recv_worker(close_connection=True)
+        self.stop_mavlog()
+        self._mav = None
 
     # ------------------------------------------------------------------
     # Heartbeat

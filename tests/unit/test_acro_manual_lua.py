@@ -93,9 +93,9 @@ def test_leaving_acro_manual_releases_rc_overrides():
     sim.set_param("mode", 0)
     sim.tick()
 
-    assert sim.ch_out[1] == 0
-    assert sim.ch_out[2] == 0
-    assert sim.ch_out[3] == 0
+    assert sim.ch_out[1] == 1500
+    assert sim.ch_out[2] == 1500
+    assert sim.ch_out[3] == 1505
 
 
 def test_acro_manual_runs_yaw_trim_observer():

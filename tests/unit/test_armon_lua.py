@@ -3,7 +3,8 @@
 Current semantics (run_armon):
 1. RAWES_ARM sets an absolute disarm deadline (`now + ms`) and stores seconds.
 2. Arming/disarming itself is handled externally (GCS/ArduPilot).
-3. Expiry only acts when currently armed: disarm + STATUSTEXT.
+3. Timer requests received while unarmed are ignored, so they cannot disarm a
+   later flight.
 """
 from __future__ import annotations
 
@@ -47,13 +48,13 @@ class TestArmonTimerProgramming:
         assert int(sim.fns.armon_secs()) == 60
         assert sim.has_message("RAWES disarm timer set: 60s")
 
-    def test_set_timer_while_unarmed_emits_warning(self):
+    def test_set_timer_while_unarmed_is_ignored(self):
         sim = _sim()
         sim.armed = False
         _send_arm(sim, 5_000.0)
         sim.tick()
-        assert _armon_deadline_ms(sim) == sim.t_ms + 5_000.0
-        assert sim.has_message("RAWES disarm timer set while unarmed")
+        assert _armon_deadline_ms(sim) is None
+        assert sim.has_message("RAWES disarm timer ignored while unarmed")
 
 
 # ---------------------------------------------------------------------------
@@ -111,18 +112,16 @@ class TestArmonDeadlineRefresh:
         sim.run(0.2)
         assert sim.armed is True
 
-    def test_expiry_is_only_enforced_when_armed(self):
+    def test_unarmed_request_cannot_disarm_a_later_flight(self):
         sim = _sim()
         sim.armed = False
         _send_arm(sim, 100.0)
         sim.tick()
         sim.run(0.2)
-        # Deadline remains programmed while unarmed.
-        assert _armon_deadline_ms(sim) is not None
+        assert _armon_deadline_ms(sim) is None
         sim.armed = True
         sim.tick()
-        # Once armed after deadline has passed, next tick expires immediately.
-        assert sim.armed is False
+        assert sim.armed is True
         assert _armon_deadline_ms(sim) is None
 
 

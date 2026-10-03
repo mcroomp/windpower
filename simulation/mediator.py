@@ -38,7 +38,8 @@ import threading
 from pathlib import Path
 
 import numpy as np
-from groundstation.gcs import Attitude, CommandLong, LocalPositionNed, NamedValueFloat, PidTuning, RequestDataStream, ServoOutputRaw, SetAttitudeTarget, decode_message
+from linkhub_client import mav_constants as mavlink
+from linkhub_client.client import LinkHubClient
 
 # Local modules (same directory)
 from simulation.physics_core import PhysicsCore
@@ -57,11 +58,6 @@ from simulation.telemetry_csv import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
 from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from simulation.mediator_events import MediatorEventLog
 from types import SimpleNamespace
-
-try:
-    from pymavlink import mavutil
-except Exception:
-    mavutil = None
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -202,23 +198,19 @@ def run_mediator(args, trajectory=None):
         yaw = math.atan2(siny_cosp, cosy_cosp)
         return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
 
-    _mavlog_conn = str(cfg.get("mavlink_log_connection", "") or "").strip()
+    _linkhub_url = str(cfg.get("linkhub_url", "") or "").strip()
     _mavlog_diag_interval_s = float(cfg.get("mavlink_log_diag_interval_s", 5.0))
     _mavlog_stop = threading.Event()
     _mavlog_thread = None
 
     def _mavlink_logger_worker():
-        if mavutil is None:
-            log.warning("Dedicated MAVLink logging requested but pymavlink is unavailable")
-            return
+        hub = LinkHubClient(_linkhub_url)
         try:
-            mav = mavutil.mavlink_connection(_mavlog_conn, source_system=252)
+            hub.connect(timeout=90.0)
         except Exception as exc:
-            log.warning("Failed to open dedicated MAVLink link '%s': %s", _mavlog_conn, exc)
+            log.warning("Failed to connect to LinkHub '%s': %s", _linkhub_url, exc)
             return
 
-        target_sys = 1
-        target_comp = 1
         rx_total = 0
         rx_counts = {
             "ATTITUDE": 0,
@@ -248,90 +240,10 @@ def run_mediator(args, trajectory=None):
             "OL_TEN": "lua_ol_tension_n",
         }
         try:
-            while not _mavlog_stop.is_set() and not is_stopped():
-                hb = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=0.25)
-                if hb is not None:
-                    rx_total += 1
-                    rx_counts["HEARTBEAT"] += 1
-                    target_sys = getattr(hb, "_header", None).srcSystem if hasattr(hb, "_header") else 1
-                    target_comp = getattr(hb, "_header", None).srcComponent if hasattr(hb, "_header") else 1
-                    log.info(
-                        "Dedicated MAVLink link connected: sys=%d comp=%d via %s",
-                        target_sys,
-                        target_comp,
-                        _mavlog_conn,
-                    )
-                    break
-
-            if _mavlog_stop.is_set() or is_stopped():
-                return
-
-            att_target_hz = float(cfg.get("mavlink_att_target_hz", 10.0))
-            attitude_hz = float(cfg.get("mavlink_attitude_hz", 50.0))
-            servo_hz = float(cfg.get("mavlink_servo_output_raw_hz", 50.0))
-            local_position_ned_hz = float(cfg.get("mavlink_local_position_ned_hz", 10.0))
-            pid_tuning_hz = float(cfg.get("mavlink_pid_tuning_hz", 0.0))
-
-            def _request_interval(message_name: str, message_id: int, rate_hz: float) -> None:
-                interval_us = max(1, int(round(1_000_000.0 / max(rate_hz, 1.0))))
-                CommandLong(
-                    target_system=target_sys,
-                    target_component=target_comp,
-                    command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                    confirmation=0,
-                    param1=float(message_id),
-                    param2=float(interval_us),
-                ).send(mav)
-                log.info(
-                    "Dedicated MAVLink link: requested %s at %.1f Hz",
-                    message_name,
-                    rate_hz,
-                )
-
-            try:
-                # Use normal stream cadence on this dedicated link.
-                RequestDataStream(
-                    target_system=target_sys,
-                    target_component=target_comp,
-                    req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_ALL,
-                    req_message_rate=10,
-                    start_stop=1,
-                ).send(mav)
-                _request_interval(
-                    "ATTITUDE_TARGET",
-                    mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET,
-                    att_target_hz,
-                )
-                _request_interval(
-                    "ATTITUDE",
-                    mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
-                    attitude_hz,
-                )
-                _request_interval(
-                    "SERVO_OUTPUT_RAW",
-                    mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW,
-                    servo_hz,
-                )
-                _request_interval(
-                    "LOCAL_POSITION_NED",
-                    mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
-                    local_position_ned_hz,
-                )
-                # PID_TUNING: SITL-only (noisy, 4 axes; ArduPilot also gates
-                # emission on GCS_PID_MASK, set in rawes_sitl_defaults.parm).
-                # 0 Hz (the default) skips the request entirely so this never
-                # adds traffic on a real telemetry radio link.
-                if pid_tuning_hz > 0.0:
-                    _request_interval(
-                        "PID_TUNING",
-                        mavutil.mavlink.MAVLINK_MSG_ID_PID_TUNING,
-                        pid_tuning_hz,
-                    )
-            except Exception as exc:
-                log.warning("Failed requesting dedicated MAVLink intervals: %s", exc)
+            log.info("LinkHub observation connected via %s", _linkhub_url)
 
             while not _mavlog_stop.is_set() and not is_stopped():
-                msg = mav.recv_match(
+                msg = hub.receive(
                     blocking=True,
                     timeout=0.10,
                 )
@@ -339,7 +251,7 @@ def run_mediator(args, trajectory=None):
                 if msg is None:
                     if now_wall >= next_diag_wall:
                         log.info(
-                            "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d idle_s=%.2f",
+                            "LinkHub rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d idle_s=%.2f",
                             rx_total,
                             rx_counts["HEARTBEAT"],
                             rx_counts["ATTITUDE"],
@@ -363,7 +275,7 @@ def run_mediator(args, trajectory=None):
 
                 if now_wall >= next_diag_wall:
                     log.info(
-                        "Dedicated MAVLink rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d",
+                        "LinkHub rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d",
                         rx_total,
                         rx_counts["HEARTBEAT"],
                         rx_counts["ATTITUDE"],
@@ -386,7 +298,7 @@ def run_mediator(args, trajectory=None):
 
                 if mtype == "HEARTBEAT":
                     _base_mode = int(getattr(msg, "base_mode", 0))
-                    _armed = bool(_base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    _armed = bool(_base_mode & mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                     update_async_armed(_armed)
 
                 if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT", "LOCAL_POSITION_NED", "PID_TUNING"):
@@ -394,60 +306,55 @@ def run_mediator(args, trajectory=None):
                         update_async_mavlink(fields)
                     continue
 
-                decoded = decode_message(msg)
-                if isinstance(decoded, Attitude):
-                    att = decoded
-                    fields["mav_att_roll_deg"] = math.degrees(att.roll)
-                    fields["mav_att_pitch_deg"] = math.degrees(att.pitch)
-                    fields["mav_att_yaw_deg"] = math.degrees(att.yaw)
-                    fields["mav_att_roll_rate_rads"] = att.rollspeed
-                    fields["mav_att_pitch_rate_rads"] = att.pitchspeed
-                    fields["mav_att_yaw_rate_rads"] = att.yawspeed
-                elif isinstance(decoded, SetAttitudeTarget):
-                    r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(decoded.q)
+                if mtype == "ATTITUDE":
+                    fields["mav_att_roll_deg"] = math.degrees(msg.roll)
+                    fields["mav_att_pitch_deg"] = math.degrees(msg.pitch)
+                    fields["mav_att_yaw_deg"] = math.degrees(msg.yaw)
+                    fields["mav_att_roll_rate_rads"] = msg.rollspeed
+                    fields["mav_att_pitch_rate_rads"] = msg.pitchspeed
+                    fields["mav_att_yaw_rate_rads"] = msg.yawspeed
+                elif mtype == "ATTITUDE_TARGET":
+                    r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(msg.q)
                     fields["mav_att_target_roll_deg"] = r_deg
                     fields["mav_att_target_pitch_deg"] = p_deg
                     fields["mav_att_target_yaw_deg"] = y_deg
-                    fields["mav_att_target_roll_rate_rads"] = decoded.body_roll_rate
-                    fields["mav_att_target_pitch_rate_rads"] = decoded.body_pitch_rate
-                    fields["mav_att_target_yaw_rate_rads"] = decoded.body_yaw_rate
-                elif isinstance(decoded, ServoOutputRaw):
-                    fields["mav_servo1_us"] = float(decoded.servo1_raw)
-                    fields["mav_servo2_us"] = float(decoded.servo2_raw)
-                    fields["mav_servo3_us"] = float(decoded.servo3_raw)
-                    fields["mav_servo9_us"] = float(decoded.servo9_raw)
-                elif isinstance(decoded, NamedValueFloat):
+                    fields["mav_att_target_roll_rate_rads"] = msg.body_roll_rate
+                    fields["mav_att_target_pitch_rate_rads"] = msg.body_pitch_rate
+                    fields["mav_att_target_yaw_rate_rads"] = msg.body_yaw_rate
+                elif mtype == "SERVO_OUTPUT_RAW":
+                    fields["mav_servo1_us"] = float(msg.servo1_raw)
+                    fields["mav_servo2_us"] = float(msg.servo2_raw)
+                    fields["mav_servo3_us"] = float(msg.servo3_raw)
+                    fields["mav_servo9_us"] = float(msg.servo9_raw)
+                elif mtype == "NAMED_VALUE_FLOAT":
                     # Lua diagnostics are streamed as named floats. Keep only the
                     # telemetry-relevant keys as latest-value async snapshot fields.
-                    mapped = _nvf_key_map.get(decoded.name)
+                    mapped = _nvf_key_map.get(msg.name)
                     if mapped is not None:
-                        fields[mapped] = float(decoded.value)
-                elif isinstance(decoded, LocalPositionNed):
-                    fields["ekf_pos_x"] = decoded.x
-                    fields["ekf_pos_y"] = decoded.y
-                    fields["ekf_pos_z"] = decoded.z
-                elif isinstance(decoded, PidTuning):
+                        fields[mapped] = float(msg.value)
+                elif mtype == "LOCAL_POSITION_NED":
+                    fields["ekf_pos_x"] = msg.x
+                    fields["ekf_pos_y"] = msg.y
+                    fields["ekf_pos_z"] = msg.z
+                elif mtype == "PID_TUNING":
                     # ArduPilot emits axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
                     # Only roll/pitch/yaw have telemetry columns (ap_rate_pid_terms).
-                    axis = decoded.axis
+                    axis = msg.axis
                     prefix = {1: "rate_roll", 2: "rate_pitch", 3: "rate_yaw"}.get(axis)
                     if prefix is not None:
-                        fields[f"{prefix}_p_contrib"] = float(decoded.P if decoded.P is not None else float("nan"))
-                        fields[f"{prefix}_i_contrib"] = float(decoded.I if decoded.I is not None else float("nan"))
-                        fields[f"{prefix}_d_contrib"] = float(decoded.D if decoded.D is not None else float("nan"))
-                        fields[f"{prefix}_ff_contrib"] = float(decoded.FF if decoded.FF is not None else float("nan"))
-                        fields[f"{prefix}_pdmod"] = float(decoded.PDmod if decoded.PDmod is not None else float("nan"))
-                        fields[f"{prefix}_srate"] = float(decoded.SRate if decoded.SRate is not None else float("nan"))
+                        fields[f"{prefix}_p_contrib"] = float(msg.P)
+                        fields[f"{prefix}_i_contrib"] = float(msg.I)
+                        fields[f"{prefix}_d_contrib"] = float(msg.D)
+                        fields[f"{prefix}_ff_contrib"] = float(msg.FF)
+                        fields[f"{prefix}_pdmod"] = float(msg.PDmod)
+                        fields[f"{prefix}_srate"] = float(msg.SRate)
 
                 if fields:
                     update_async_mavlink(fields)
         except Exception as exc:
-            log.warning("Dedicated MAVLink logging thread stopped with error: %s", exc)
+            log.warning("LinkHub observation thread stopped with error: %s", exc)
         finally:
-            try:
-                mav.close()
-            except Exception:
-                pass
+            hub.close()
 
     # Emit a run-ID so post-run analysis can verify all log files belong to
     # the same test run.  Format: RUN_ID=<integer epoch seconds>.
@@ -598,14 +505,14 @@ def run_mediator(args, trajectory=None):
     # -- Connect ---------------------------------------------------------------
     log.info("Binding SITL UDP sockets...")
     sitl.bind()
-    if _mavlog_conn:
+    if _linkhub_url:
         _mavlog_thread = threading.Thread(
             target=_mavlink_logger_worker,
             daemon=True,
             name="mediator-mavlog",
         )
         _mavlog_thread.start()
-        log.info("Dedicated MAVLink logging connection enabled: %s", _mavlog_conn)
+        log.info("LinkHub observation enabled: %s", _linkhub_url)
     log.info("Python RigidBodyDynamics ready. Starting main loop.")
     _telemetry_stride = max(1, int(round((1.0 / sitl.dt()) / TELEMETRY_HZ)))
     log.info("Telemetry write rate target: %.0f Hz (every %d sim steps)", TELEMETRY_HZ, _telemetry_stride)

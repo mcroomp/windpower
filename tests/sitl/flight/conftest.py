@@ -12,6 +12,7 @@ All IC-start fixtures share the _ic_trapezoid_stack initialization helper.
 import contextlib
 import math
 
+import numpy as np
 import pytest
 
 from tests.sitl.stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
@@ -25,8 +26,9 @@ from tests.sitl.stack_infra import (
     HOME_LON_DEG,
     HOME_ALT_M,
 )
-from groundstation.gcs import NamedValueFloat, NamedValueInt
+from linkhub_client.messages import NamedValueFloat, NamedValueInt
 from simulation.ic import load_ic
+from simulation.sensor import _rotation_matrix_to_euler_zyx
 from simulation.torque_model import HubParams, equilibrium_throttle
 
 
@@ -246,8 +248,8 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
     leaving no residual position/velocity error at release.
 
         Key design points:
-            - RAWES_MODE=3 (MODE_PASSIVE) set immediately after arm; Lua does not emit
-                rate commands, preventing ArduPilot rate PID windup during kinematic hold.
+            - RAWES_MODE=3 (MODE_PASSIVE) set immediately after arm; Lua captures
+                the level-yaw anchor and applies the relative rotation to the IC.
             - Smooth (raised-cosine) accel/decel => continuous acceleration, no jerk
                 step at the phase boundaries.
             - Hub ends exactly at pos0 with zero velocity, so GPS aiding engages with
@@ -262,37 +264,25 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             t=55..60 s  decelerate 1 -> 0 m/s, arriving exactly at pos0 at rest.
             t~6 s       GPS first fix; EKF3 origin set.
             t~8 s       arm (after EKF tilt alignment); RAWES_MODE=3 (MODE_PASSIVE)
-                                    set; IC attitude commanded during kinematic hold.
+                                    set; level-yaw anchor captured, then slewed to IC.
             t~34 s      GPS fuses (delAngBiasLearned converges); _tdir0 fires.
             t~60 s      kinematic exits; test promotes RAWES_MODE 3 -> 1 (MODE_STEADY).
             t~60+       free flight under ArduPilot + Lua with steady guidance active.
     """
-    # Standard kinematic start for all flight stack tests on this fixture:
-    # a LEVEL frame (roll=pitch=0) YAWED to the IC heading.  The nul-aero
-    # cyclic can only apply pitch/roll body rates (never yaw), so the IC
-    # heading is the one orientation the body cannot reach via cyclic alone and
-    # therefore must be seeded here.  Starting from pure identity (nose North)
-    # tilts the disk into the X-Z plane (crosswind), leaving it edge-on to the
-    # +Y wind -> ~0 axial inflow -> ~6 N thrust -> free-fall at release.  With
-    # the heading pre-set, nul-aero pitch-down lands body_z in the tether/wind
-    # plane and autorotation produces full thrust (~334 N) so the tether stays
-    # taut.  Roll/pitch stay 0 here and are commanded later via cyclic.
+    # Start level at the IC heading so ArduPilot can arm cleanly. Passive mode
+    # captures this AHRS quaternion after arming, then applies the relative
+    # rotation from this anchor to the IC attitude.
     _ic_R0 = load_ic().R0
-    _ic_yaw = math.atan2(_ic_R0[1, 0], _ic_R0[0, 0])  # ZYX yaw of IC attitude
+    _ic_yaw = math.atan2(_ic_R0[1, 0], _ic_R0[0, 0])
     _cy, _sy = math.cos(_ic_yaw), math.sin(_ic_yaw)
-    _R0_level_yaw = [
+    _R0_level_yaw = np.array([
         [_cy, -_sy, 0.0],
         [_sy,  _cy, 0.0],
         [0.0,  0.0, 1.0],
-    ]
+    ])
+    _ic_relative_rpy = _rotation_matrix_to_euler_zyx(_R0_level_yaw.T @ _ic_R0)
     extra = {
-        # Kinematic start: level frame yawed to the IC heading (see above).
-        "R0": _R0_level_yaw,
-        # Keep the EKF pre-arm seed level (live attitude), consistent with the
-        # level R0 start.  The IC roll/pitch is applied later via the nul-aero
-        # cyclic, NOT seeded into the EKF.  Must be False to match level R0:
-        # seeding IC pitch into the EKF while physics starts level would create
-        # an attitude mismatch.
+        "R0": _R0_level_yaw.tolist(),
         "use_ic_pre_arm_attitude": False,
         # Smooth trapezoidal kinematic motion: accelerate from rest to 1 m/s over
         # the first 5 s, cruise, then decelerate back to rest over the final 5 s,
@@ -308,15 +298,9 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         "kinematic_decel_s": 5.0,
         "kinematic_vel_ramp_s": 0.0,
         "startup_damp_seconds": 60.0,
-        # Kinematic debug physics: simplified cyclic->rotation response.
+        # Simplified cyclic response slews from the captured level-yaw anchor to
+        # the IC attitude while translation follows the startup trajectory.
         "kinematic_aero_mode": "nul",
-        # Rate gain sized so the body can slew to the IC attitude within ~0.5 s.
-        # nul aero rotates at omega_body = gain * tilt; cyclic saturates at
-        # tilt ~= 0.556 (H_CYC_MAX = 2500 cdeg / 4500).  Worst-case IC tilt is
-        # ~63.55 deg = 1.11 rad, so to cover it in 0.5 s at saturated cyclic:
-        #   gain = (1.11 / 0.5) / 0.556 ~= 4.0 rad/s per rad.
-        # This keeps attitude error below the crash-check envelope (30 deg / 2 s)
-        # during the kinematic hold once the IC attitude command is applied.
         "kinematic_nul_rate_gain_rads_per_rad": 4.0,
         # Mediator-side cyclic handoff smoothing after kinematic release:
         # disabled for tilt-response comparison against the IC-angle-only test.
@@ -326,14 +310,10 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         "winch_cmd_port":       winch_cmd_port,
     }
     # Arm AFTER EKF GPS-yaw alignment ("EKF3 IMU0 yaw aligned", ~t=11 s with
-    # the moving-baseline dual GPS).  MODE_PASSIVE freezes _passive_hold_yaw_rad
-    # at the first ready tick (gated only on ahrs:healthy()), and the IC seed is
-    # now sent immediately after arm -- so if we arm before the GPS-yaw snaps to
-    # the IC heading (+90 deg), the passive hold latches the EKF's pre-alignment
-    # yaw (~0 deg) and the disk tilts into the wrong (crosswind) plane, tumbling
-    # at release.  Arming at t=14 s leaves a ~3 s margin past the t=11 s
-    # alignment while still giving the nul-aero the bulk of the hold window to
-    # slew the disk to the IC tilt before kinematic exit (t=60 s).
+    # the moving-baseline dual GPS). MODE_PASSIVE captures the current AHRS
+    # quaternion when RAWES_PEN arrives, so capturing before yaw alignment would
+    # freeze the pre-alignment heading (~0 deg) instead of the IC heading
+    # (+90 deg). Arming at t=14 s leaves a margin past alignment.
     _arm_at_sim_s = 14.0
 
     with _acro_stack(
@@ -344,23 +324,18 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
     ) as ctx:
         # MODE_PASSIVE (3) is set immediately after arm, decoupled from anchor
         # calibration below (which needs telemetry/EKF data that can take
-        # longer to become ready).  Lua emits no rate commands in this mode,
-        # so ArduPilot's rate PID has no setpoint to wind up against while the
-        # body is kinematically locked -- this must happen right after arm,
-        # not after waiting on anchor telemetry.
+        # longer to become ready). Lua captures the armable level-yaw attitude,
+        # then the relative offsets below command the IC attitude.
         ctx.log.info("Setting RAWES_MODE=3 (PASSIVE) immediately after arm ...")
         ctx.gcs.set_param("RAWES_MODE", 3, timeout=5.0)
 
         # Stream IC collective to Lua so MODE_PASSIVE holds the IC collective
         # through GUIDED throttle and omega_spin doesn't droop while the body is kinematically
-        # locked.
+        # constrained.
         _ic = ctx.initial_state
         if _ic is not None:
-            # Seed the IC immediately, right after MODE_PASSIVE is set.
-            # MODE_PASSIVE only commands the IC attitude/collective once
-            # the full atomic seed (RAWES_RIC + RAWES_PIC + RAWES_THR) has
-            # arrived, so sending it now gives the nul-aero the entire kinematic
-            # hold window to slew the disk to the IC tilt before release.
+            # Seed thrust immediately. Lua captures the settled AHRS quaternion
+            # as the passive anchor; the ground sends only relative offsets.
 
             # Seed Lua with the IC thrust [0..1].
             if "eq_thrust" in _ic:
@@ -372,21 +347,16 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
             ctx.gcs.send_message(NamedValueFloat("RAWES_THR", float(_ic_thrust)))
             ctx.log.info("IC thrust: %.3f", _ic_thrust)
 
-            # Seed passive IC roll/pitch via short NV names (10-char limit):
-            #   RAWES_RIC = IC roll [rad], RAWES_PIC = IC pitch [rad]
-            _R0 = _ic.get("R0")
-            if _R0 is None:
-                raise KeyError("initial_state missing R0 for IC passive attitude seed")
-            _r20 = float(_R0[2][0])
-            _r21 = float(_R0[2][1])
-            _r22 = float(_R0[2][2])
-            _ic_roll_rad = math.atan2(_r21, _r22)
-            _ic_pitch_rad = -math.asin(max(-1.0, min(1.0, _r20)))
-            ctx.gcs.send_message(NamedValueFloat("RAWES_RIC", _ic_roll_rad))
-            ctx.gcs.send_message(NamedValueFloat("RAWES_PIC", _ic_pitch_rad))
+            _roll_offset, _pitch_offset, _yaw_offset = _ic_relative_rpy
+            ctx.gcs.send_message(NamedValueFloat("RAWES_ROFF", float(_roll_offset)))
+            ctx.gcs.send_message(NamedValueFloat("RAWES_POFF", float(_pitch_offset)))
+            ctx.gcs.send_message(NamedValueFloat("RAWES_YOFF", float(_yaw_offset)))
+            ctx.gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
             ctx.log.info(
-                "IC passive attitude: roll=%+.2f deg pitch=%+.2f deg",
-                math.degrees(_ic_roll_rad), math.degrees(_ic_pitch_rad),
+                "Lua passive anchor captured; IC-relative offsets: roll=%+.2f pitch=%+.2f yaw=%+.2f deg",
+                math.degrees(_roll_offset),
+                math.degrees(_pitch_offset),
+                math.degrees(_yaw_offset),
             )
 
             # Stream the IC equilibrium tension and target altitude from the IC.
@@ -565,4 +535,3 @@ def guided_nogps_armed_lua_full(tmp_path, request):
         run_ground_winch=True,
     ) as ctx:
         yield ctx
-

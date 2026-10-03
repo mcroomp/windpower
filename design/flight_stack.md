@@ -414,63 +414,35 @@ On first valid GPS fix: initialize `_el_rad` and `_target_alt` from position, se
 ### 4.2b Mode 3 — Passive (RAWES_MODE=3)
 
 Armed-but-quiet mode used during the kinematic hold/release of stack tests.
-The vehicle stays armed (motor interlock ch8 high) and the Lua commands the
-**IC attitude as a GUIDED angle target** plus the IC collective as GUIDED
-throttle.  It does **not** write swashplate channels directly and runs **no**
-closed-loop guidance (no body_z error, no altitude hold, no winch).
+The vehicle stays armed (motor interlock ch8 high) and does **not** write
+swashplate channels directly or run body_z/altitude/winch guidance.
 
-**IC seeding (atomic).**  Three NVFs must all be observed before passive
-emits any control output:
+**Ground-owned capture gate.** Ground first sends `RAWES_THR` and leaves
+`RAWES_PEN=0`. In GUIDED, Lua commands zero body rates plus that thrust through
+`set_target_rate_and_throttle`; it deliberately sends no Euler angle target.
+The ground station qualifies active mode, estimator events, telemetry freshness,
+body-rate threshold, and continuous quiet duration. These policies are tunable
+without a Lua upload (`--settle-rate-deg-s`, `--settle-time`,
+`--settle-timeout`). Only after the gate passes does ground send
+`RAWES_PEN=1`.
 
-- `RAWES_RIC` — IC roll  [rad]
-- `RAWES_PIC` — IC pitch [rad]
-- `RAWES_THR` — IC thrust [0..1]
+**Lua-owned quaternion anchor.** On `RAWES_PEN=1`, Lua performs a final AHRS
+health/quaternion-validity check and captures `ahrs:get_quaternion()` once.
+Ground sends complete relative state through:
 
-Until all three arrive, `run_passive_mode` returns early and emits no
-control-API traffic (no guided target writes, no arm/disarm). Once `_ic_seeded`
-latches, incremental updates to any of the three are accepted.
+- `RAWES_ROFF` — roll offset [rad];
+- `RAWES_POFF` — pitch offset [rad];
+- `RAWES_YOFF` — yaw offset [rad].
 
-**Initial target capture.** `calibrate run passive` reads the current MAVLink
-`ATTITUDE_QUATERNION` and retains it as `q_initial`. Keyboard offsets are
-composed as `q_target = q_initial * q_relative`, then sent atomically through
-`RAWES_QW/QX/QY/QZ`; `-`/`=` update THR. Lua converts a complete normalized
-quaternion to Euler only at the final ArduPilot scripting API boundary because
-`vehicle:set_target_angle_and_rate_and_throttle` has no quaternion overload.
-The Lua `RAWES_YIC_CAPTURE_SENTINEL` path remains available to other ground
-clients that cannot read and echo the current attitude. A sentinel capture
-commits directly to the active roll/pitch fields because `_ic_seeded` persists
-across mode transitions for the whole FC boot.
+Lua computes `q_target = q_anchor * q_relative`, normalizes it, and converts to
+Euler only at the final `set_target_angle_and_rate_and_throttle` API boundary.
+The anchor remains fixed until hold is explicitly disabled. Space in the
+interactive tool resets all offsets to zero; it does not recapture the anchor.
 
-During an interactive run, Space uses that sentinel path to redefine the target
-as the current onboard AHRS attitude. This avoids commanding a slightly stale
-attitude obtained by receiving and echoing ground-side telemetry. The
-`--protocol-debug` calibration option provides a text-only trace of discrete
-target packets, actual/target quaternion state, error, and servo response.
-
-**Per-tick command** (once seeded and in GUIDED):
-
-1. A fixed `RAWES_YIC` is held when supplied. Otherwise yaw is captured once
-   from `ahrs:get_yaw_rad()` on the first ready tick and held thereafter.
-2. `vehicle:set_target_angle_and_rate_and_throttle(_ic_roll_deg,
-   _ic_pitch_deg, deg(_passive_hold_yaw_rad), 0, 0, 0, throttle)` — the IC
-   roll/pitch **angle** target with **zero rate feed-forward**.
-3. `throttle = _ic_thrust` passes the IC thrust directly to GUIDED throttle.
-
-During the kinematic hold the `nul`-aero integrates this angle command, so the
-disk slews from the level pre-arm seed toward the commanded IC roll/pitch.
-The test promotes MODE_PASSIVE → MODE_STEADY after the mediator's
-`kinematic_exit` event; the collective hand-off is seamless because steady
-seeds its vertical-speed integrator from the same IC collective.
-
-`_ic_roll_deg`, `_ic_pitch_deg`, `_ic_thrust` are populated by
-`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`.  Before the full seed arrives passive is
-inert (no defaults are commanded).
-
-**Yaw observer in passive mode.**  `run_yaw_trim()` runs every tick alongside
-`run_passive_mode()` once the IC is seeded and the vehicle is armed.  It reads
-the actual SERVO9 output back via `SRV_Channels:get_output_pwm(36)` and drives
-`H_YAW_TRIM` toward the equilibrium throttle (see §5.2).  The trim resets to
-0 on PASSIVE entry and converges within ~1 s.
+**Yaw observer.** Passive yaw trim remains inhibited before `RAWES_PEN`.
+After the fixed anchor is active, `run_yaw_trim()` may operate alongside the
+angle hold and reads actual SERVO9 output via
+`SRV_Channels:get_output_pwm(36)` (see §5.2).
 
 ### 4.3 Mode 1 — Steady (RAWES_MODE=1)
 

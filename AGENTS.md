@@ -29,12 +29,21 @@ there are no `sys.path.insert()` hacks anywhere in the codebase.
 | `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/hil`, `tests/oneoff`, `tests/common` |
 
 Non-package top-level directories: `design/` (owner docs), `documents/`, `hardware/`,
-`presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`), `tmp/`
-(scratch/working files only).
+`presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`),
+`linkhub/` (standalone Rust transport and diagnostic gateway), `tmp/` (scratch/working
+files only).
 
 `simulation/logs/` is the single log root for every test tier (unit fixtures, simtests, and
 SITL stack runs all write there) — it did not move when the other packages were promoted to
 top-level.
+
+Use `uv` as the standard Python environment and dependency manager for local work:
+`uv sync --dev` provisions the lightweight hardware environment and `uv run ...` executes
+commands. Use `uv sync --dev --extra simulation` for the full scientific stack. Do not
+install project dependencies with pip or build a packaged installer for the channel service.
+On this Windows workstation, `UV_NO_SYNC=1` is configured as a persistent user environment
+variable, so ordinary `uv run ...` commands do not perform dependency synchronization.
+Run `uv sync` explicitly after changing dependencies or pulling a lockfile update.
 
 ## Read Order (for agents)
 
@@ -42,6 +51,11 @@ top-level.
 2. `design/simulation.md` (simulation internals and module responsibilities)
 3. `design/sitl_testing.md` (stack workflow and diagnosis)
 4. Topic-specific docs from the ownership map below
+
+For ongoing Pixhawk startup and direction-glitch investigation, read the
+root-level [`HARDWARE_STARTUP.md`](HARDWARE_STARTUP.md) before touching
+hardware. It records verified observations, the required safe-off state, and
+the next safe diagnostic steps; update it after each hardware session.
 
 ## Code Search: Prefer ast-grep over grep/ripgrep
 
@@ -117,6 +131,7 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
+| LinkHub transport, journal, diagnostics, and HTTP architecture | `design/linkhub.md` | `linkhub/README.md`, `design/sitl_testing.md` |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
 | MAVLink `*.mavlink.jsonl` log inspection (calibrate `run`, SITL stack tests) | `analysis/mavlink_jsonl_query.md` | `design/calibration.md` |
 
@@ -146,6 +161,12 @@ extending the script (new subcommand/filter) over a standalone script.
   Never convert thrust→rad→thrust in a roundtrip; compute in thrust and map once at the physics boundary.
 - Stack tests must validate real stack behavior (no simulation-only stabilizing hacks).
 - Use GUIDED mode for flight behavior under test.
+- Canonical hardware safe-off is one invariant across every normal/forced
+  arm-disarm cycle and every calibration run exit: confirmed disarmed,
+  `RAWES_MODE=0`, ACRO, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`,
+  `SERVO9_FUNCTION=0` (yaw motor physically unassigned), and neutral swash
+  outputs from Lua's disarmed mode-0 neutral hold. Cleanup paths must converge
+  on `_set_safe_off_state()` and must never restore the motor function afterward.
 - When roll and pitch appear together as paired values (params, tuple returns,
   unpacking, CSV columns, helper args), always use `roll, pitch` order.
   Do not introduce `pitch, roll` ordering unless an external interface
@@ -225,10 +246,10 @@ There are three tiers, each with a different scope and runtime:
 - On the first hardware operation in a conversation, run `python -m calibrate`
   without `--port` or `--baud` so it auto-detects the active Pixhawk connection.
 - After a successful scan, reuse the detected port and baud for subsequent
-  one-shot commands in that conversation.
-- Last successful connection (2026-09-11): `COM4` at `115200` baud.
-- If a remembered connection fails, fall back immediately to `python -m calibrate`
-  without connection parameters instead of trying guessed ports.
+  one-shot commands in that conversation/session only.
+- Never assume a port or baud from an earlier session. If the remembered
+  connection fails, fall back immediately to `python -m calibrate` without
+  connection parameters instead of trying guessed ports.
 
 SITL IC-start timeline rule (agent-critical):
 - For SITL flight diagnosis, use one shared timeline anchored at the IC-start flow.

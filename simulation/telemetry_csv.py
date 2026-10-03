@@ -832,6 +832,11 @@ def _f(s: object) -> Optional[float]:
 
 
 def _row_from_raw(raw: dict) -> Optional[TelRow]:
+    # DictReader returns None for columns missing from an incomplete final line.
+    # Mediator telemetry is read while it is still being appended, so ignore that
+    # transient row instead of filling missing physics fields with zero.
+    if any(raw.get(col) is None for col in COLUMNS):
+        return None
     t = _f(raw.get("t_sim"))
     if t is None:
         return None

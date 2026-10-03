@@ -56,7 +56,7 @@ _sync_code() {
         --exclude="tests/hil" \
         --exclude=".venv" \
         --exclude="*.egg-info" \
-        -cf - pyproject.toml simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate \
+        -cf - pyproject.toml simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
     | docker exec -i "$_c" tar -xf - -C /rawes/
     # dynbem (the Rust-backed aero core) is installed from a pinned PyPI wheel,
     # not synced from the sibling ../aero source workspace -- that source tree
@@ -95,7 +95,13 @@ try:
 except m.PackageNotFoundError:
     version = None
 
-if version != required:
+try:
+    import dynbem
+    api_ok = hasattr(dynbem, "step_omega")
+except ImportError:
+    api_ok = False
+
+if version != required or not api_ok:
     try:
         # Install dynbem from PyPI (wheel-only) to avoid local Rust builds in container.
         subprocess.check_call([
@@ -105,7 +111,10 @@ if version != required:
             "install",
             "-q",
             "--upgrade",
+            "--force-reinstall",
             "--only-binary=:all:",
+            "--index-url",
+            "https://packagefeedproxy.microsoft.io/pypi/simple/",
             f"dynbem=={required}",
         ])
     except subprocess.CalledProcessError as exc:
@@ -115,11 +124,14 @@ if version != required:
 # Hard guard: abort if dynbem is still missing or wrong version.
 try:
     installed = m.version("dynbem")
+    import dynbem
+    installed_api_ok = hasattr(dynbem, "step_omega")
 except m.PackageNotFoundError:
     installed = None
+    installed_api_ok = False
 
-if installed != required:
-    print(f"[ERROR] dynbem version check failed after install (required={required!r}, found={installed!r}); aborting sync.", file=sys.stderr)
+if installed != required or not installed_api_ok:
+    print(f"[ERROR] dynbem validation failed after install (required={required!r}, found={installed!r}, step_omega={installed_api_ok}); aborting sync.", file=sys.stderr)
     raise SystemExit(2)
 PY'
     echo "[INFO] Code sync complete."
@@ -144,7 +156,7 @@ _snap_procs() {
     for _ct in $_cs; do
         local _hits
         _hits=$(docker exec "$_ct" bash -c \
-            "pgrep -a -f 'arducopter|sim_vehicle|mediator\.py' 2>/dev/null | grep -v 'pgrep' || true" \
+            "pgrep -a -f 'arducopter|sim_vehicle|mediator\.py|linkhub serve' 2>/dev/null | grep -v 'pgrep' || true" \
             2>/dev/null || true)
         if [ -n "$_hits" ]; then
             while IFS= read -r _line; do
@@ -310,7 +322,7 @@ _run_stack() {
             docker exec \
                 -e RAWES_RUN_STACK_INTEGRATION=1 \
                 -e RAWES_SIM_VEHICLE=/ardupilot/Tools/autotest/sim_vehicle.py \
-                -e PYTHONPATH=/rawes \
+                -e PYTHONPATH=/rawes:/rawes/linkhub_client/src \
                 "$_c" \
                 /rawes/.venv/bin/python -m pytest "$_f" -s -v \
                 ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \

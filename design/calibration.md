@@ -1,28 +1,42 @@
 # calibrate — Hardware Calibration Tool
 
-`calibrate` (top-level package, run as `python -m calibrate`, or via `calibrate.cmd`
-on Windows) connects to the Pixhawk 6C over USB (or SiK radio)
-and provides servo control, motor testing, ESC diagnostics, arming, and Lua script
-upload — all over MAVLink, with no arming required for most commands.
+`calibrate` is an HTTP-only client of LinkHub. LinkHub owns the
+Pixhawk serial/UDP connection, MAVLink parsing and transmission, persistent
+telemetry archive, stateful MAVLink transactions, and optional Bluetooth motor
+connection. `calibrate` provides servo control, motor testing, ESC diagnostics,
+arming, DataFlash download, and Lua script management without importing
+`pymavlink` or `bleak`. The calibration launcher uses `pyserial` only to list
+candidate ports when starting LinkHub automatically.
 
-Lua script deployment is the exception to normal radio operation: upload scripts
-only over a direct Pixhawk USB connection. MAVLink FTP over the SiK radio is too
-slow for reliable operational updates. Disconnect the radio MCP connection,
-connect USB, upload and verify the script manually, reboot or restart scripting,
-then reconnect the MCP over the normal radio link.
+Lua script deployment remains best over a direct Pixhawk USB connection because
+MAVFTP over a SiK radio is too slow for reliable operational updates.
 
 ## Connection
 
 ```bash
-python -m calibrate                              # auto-detect port
-python -m calibrate --port COM7
-python -m calibrate --port COM7 --baud 57600     # SiK radio
-python -m calibrate --port COM7 <verb> [args]    # non-interactive
+python -m calibrate
+python -m calibrate <verb> [args]
 ```
 
-If `--port` is omitted, the tool scans all COM ports and connects to the first one
-that responds with a MAVLink heartbeat (tries 115200, then 57600/38400/19200/9600 as
-fallbacks). Use `ping` to survey ports without connecting.
+When the default local endpoint is not running, calibration starts the release
+LinkHub binary, scans serial ports and standard baud rates, and stops that child
+service on exit. Use `--connection COM7 --baud 57600` to select a known link, or
+`--server` to use an already-running LinkHub.
+
+The default environment is intentionally limited to the hardware/calibration stack,
+so `uv run python -m calibrate --help` starts quickly. Install the optional simulation
+environment only when needed:
+
+```bash
+uv sync --dev --extra simulation
+```
+
+The workstation uses `UV_NO_SYNC=1`, so `uv run` does not re-check or modify the
+environment on every command. Run `uv sync` explicitly when dependencies change.
+
+LinkHub reports ready after the first heartbeat. Check
+`GET /v1/mavlink/status` for the selected connection, target IDs, counters, and
+the current journal cursor.
 
 `--force` / `-f` skips interactive confirmation prompts (safe for scripted use at low
 throttle).
@@ -63,7 +77,7 @@ limiter you want here.
 ## CLI shape
 
 ```
-python -m calibrate [--port P] [--baud B] [--force] <verb> [args...]
+python -m calibrate [--server URL] [--force] <verb> [args...]
 ```
 
 Two long-running verbs (`run`, `watch`) handle anything time-bounded and always log
@@ -74,11 +88,19 @@ rest are one-shot.
 
 ## Long-running verbs
 
-### `run <name> [--duration N] [--trim K=V,...]`
+### `run <name> [--duration N] [--trim K=V,...] [--force]`
 
-Activate a Lua mode (via `RAWES_MODE`) → arm via `RAWES_ARM` → stream observation rows
+Activate a Lua mode (via `RAWES_MODE`) → arm via MAVLink → stream observation rows
 to console + CSV → safety shutdown on exit. ESC or Ctrl-C aborts cleanly. Without
-`--duration`, the session is unbounded (5-min `RAWES_ARM`); abort with ESC/Ctrl-C.
+`--duration`, the session is unbounded; abort with ESC/Ctrl-C.
+Normal ArduPilot pre-arm checks apply by default. `--force` explicitly bypasses
+them for secured, disconnected bench hardware; shutdown remains unchanged and
+always restores disarmed safe-off state.
+
+Every safe-off path leaves `SERVO9_FUNCTION=0`, so the DShot yaw-motor output
+is unassigned after arm/disarm tests and every run exit. A later passive run
+keeps it unassigned during arming and restores Motor4/DDFP ownership only after
+passive target capture, when yaw control actually begins.
 
 **Modes (`<name>`):**
 
@@ -102,11 +124,43 @@ calibrate `RAWES_YAW_SLP` (slope) from a bench measurement.
 
 ```bash
 # Bench check: hold IC swashplate, observer active, 30 s
-python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342
+python -m calibrate --server http://127.0.0.1:8999 run passive --duration 30 --force --trim tlon=0.02,thr=0.342
 
 # Steady-flight bench, unbounded (ESC to stop)
-python -m calibrate --port COM7 run steady
+python -m calibrate --server http://127.0.0.1:8999 run steady
 ```
+
+To use the external Bluetooth motor that drives the rotor on the test stand,
+add `--rotor-motor`. The command scans for a device whose name starts with
+`BLDC`, connects over the Nordic UART Service, and leaves the motor stopped:
+
+```bash
+python -m calibrate --server http://127.0.0.1:8999 run passive --rotor-motor \
+  --rotor-speed 10 --rotor-direction cw
+```
+
+During the passive run, `m` starts or stops the external rotor motor, `[` and
+`]` decrease or increase its speed by 5 percentage points, and `0` sends an
+emergency stop. Every exit path (timer, ESC, Ctrl-C, startup failure, or remote
+stop) sends `S:0;E:0;B:1` before disconnecting Bluetooth and performing the
+normal vehicle safety shutdown.
+
+The Bluetooth motor module can also be tested independently of the Pixhawk.
+With no run duration it only connects, sends the safe-stop command, and
+disconnects:
+
+```bash
+uv run python -m calibrate.bldc_ble
+```
+
+Spinning the test-stand motor requires an explicit bounded duration:
+
+```bash
+uv run python -m calibrate.bldc_ble --run-seconds 5 --speed 10 --direction cw
+```
+
+Normal completion, connection errors, and Ctrl-C all pass through the same
+emergency-stop and disconnect cleanup.
 
 ### `watch <stream> [--duration N]`
 
@@ -121,9 +175,9 @@ Read-only observation; never changes vehicle state, never arms. Default duration
 | `power` | BATTERY_STATUS / SYS_STATUS | t, vbat_v, current_a, power_w |
 
 ```bash
-python -m calibrate --port COM7 watch servos --duration 15
-python -m calibrate --port COM7 watch attitude --duration 60
-python -m calibrate --port COM7 watch text                       # default 10 s
+python -m calibrate --server http://127.0.0.1:8999 watch servos --duration 15
+python -m calibrate --server http://127.0.0.1:8999 watch attitude --duration 60
+python -m calibrate --server http://127.0.0.1:8999 watch text
 ```
 
 ---
@@ -135,15 +189,30 @@ Vehicle snapshot: armed state, flight mode, battery, EKF flags, SERVO_OUTPUT_RAW
 all active outputs, plus pass/fail tables for key stack params, interlock/DShot path,
 and yaw control gains.
 
-### `set <name> <value>` / `get <name>`
-Read or write a single ArduPilot parameter. `set` verifies via read-back and flags
+### `set <name> <value>` / `get <name> [<name> ...]`
+Read or write ArduPilot parameters. `get` accepts multiple names so a diagnostic
+session can read a group through one connection. `set` verifies via read-back and flags
 silent rejects (writes that the FC ACKs but doesn't apply, e.g. swash-channel
 `SERVOn_MIN/MAX`).
 
 ```bash
-python -m calibrate --port COM7 set H_COL_MAX 1700
-python -m calibrate --port COM7 get RAWES_MODE
+python -m calibrate --server http://127.0.0.1:8999 set H_COL_MAX 1700
+python -m calibrate --server http://127.0.0.1:8999 get RAWES_MODE H_SV_MAN H_FLYBAR_MODE
 ```
+
+`config check` gets the complete parameter table in one stateful request and
+compares it locally. `config fix` submits all differences through
+LinkHub's batch parameter operation and then gets the table once more to
+verify every requested value. MAVLink still applies each parameter
+individually; the batch avoids one HTTP round trip and one sequential wait per
+parameter.
+
+The standalone `arm` command uses normal ArduPilot pre-arm checks, remains
+armed only for `--duration` seconds (five seconds by default), and always
+requests disarm and safe-off restoration afterward. `arm --force` explicitly
+uses ArduPilot's force-arm magic value to bypass pre-arm checks for secured,
+disconnected bench hardware. Normal arm remains the default, and forced arm is
+still duration-bounded with the same guaranteed disarm cleanup.
 
 ### `swash`
 Three forms:
@@ -198,16 +267,15 @@ Selecting mode 2 outside ACRO, without flybar passthrough, or without a
 complete three-axis seed immediately disarms.
 `IM_ACRO_COL_EXP=0` is also required so normalized collective remains linear
 and matches the GUIDED throttle convention.
-On exit, the run command sets `RAWES_MODE=0` permanently so Lua releases
-RC1–RC3, turns the motor output off, requests disarm through Lua's always-active
-`RAWES_ARM` handler, and selects ArduPilot ACRO after a disarmed heartbeat.
-If Lua does not confirm disarm within one second, calibrate immediately sends a
-force-disarm instead of waiting on a normal disarm that may be rejected while
-ArduPilot does not consider the vehicle landed.
-This is the canonical safe-off state: disarmed, Lua control released,
-`H_SV_MAN=3` centered/zero-thrust swash setup mode, and virtual-flybar-disabled
-behavior provided by `H_FLYBAR_MODE=0`. Before any run, calibrate restores
-`H_SV_MAN=0` so the automated heli mixer is active.
+On exit, the run command sets `RAWES_MODE=0`, requests normal MAVLink disarm,
+falls back to force-disarm when ArduPilot rejects an in-flight disarm, and then
+applies the canonical safe-off state. That state is: confirmed disarmed,
+`RAWES_MODE=0`, `H_SV_MAN=0`, ACRO RC passthrough selected by
+`H_FLYBAR_MODE=1`, and `SERVO9_FUNCTION=0` so the yaw motor is unassigned.
+While disarmed in mode 0,
+Lua refreshes RC1/RC2 at their configured trims and computes the RC3 value that
+places the reversed swash mixer at its 1500-us center. The overrides are cleared
+as soon as the vehicle arms or RAWES enters another mode.
 
 ### `motor`
 GB4008 throttle test via `MAV_CMD_DO_MOTOR_TEST`. Prompts above 5% unless `--force`.
@@ -217,23 +285,43 @@ motor <pct> [--duration N]    # default 5 s
 motor off
 ```
 
-### `arm [--duration N]`
-Set stack arm state + send `RAWES_ARM=N*1000` (default 10 s). Doesn't touch `RAWES_MODE` — use
-`run <name>` if you also want to activate a Lua mode.
+### `arm [--duration N] [--force]`
+Arm through MAVLink for a bounded interval, then disarm and apply canonical
+safe-off. `--force` explicitly bypasses ArduPilot pre-arm checks.
 
-### `disarm` / `reboot` / `ping [baud]`
+### `disarm` / `reboot`
 Every confirmed normal or force disarm selects the canonical safe-off state:
-`RAWES_MODE=0`, `H_SV_MAN=3`, ArduPilot ACRO, and `H_FLYBAR_MODE=0`
-virtual-flybar-disabled behavior.
+`RAWES_MODE=0`, `H_SV_MAN=0`, ArduPilot ACRO, `H_FLYBAR_MODE=1`, and
+`SERVO9_FUNCTION=0`.
+The `disarm` command tries normal disarm first and automatically falls back to
+force-disarm when ArduPilot rejects disarming from an active flight state.
+Lua's disarmed mode-0 RC overrides hold the swash neutral without using an
+ArduPilot manual servo setup mode.
 The mode change happens only after disarm is confirmed so it cannot cause an
-armed control transition. `ping` doesn't open a connection.
+armed control transition.
+
+### `battery monitor off|on [type]`
+
+Disable battery monitoring for USB-only bench work with `battery monitor off`.
+Restore it with `battery monitor on`; the default type `4` is analog voltage and
+current, matching the current hardware configuration. An alternate monitor type
+can be supplied to `on`. ArduPilot marks `BATT_MONITOR` reboot-required, so the
+command reports that a reboot is needed; calibrate does not reboot automatically.
+Restore battery monitoring before reconnecting or operating from a battery.
 
 ### `script upload <file>` / `script list` / `script remove <name>`
 Lua FS over MAVLink FTP. `upload` writes to `/APM/scripts/<basename>` and then
 toggles `SCR_ENABLE 1→0→1` to restart the scripting engine (no reboot needed).
 Use this command only through a direct USB connection; do not upload Lua over
-the SiK radio. The MCP's normal COM6/57600 radio connection is suitable for
-control and diagnosis, not script deployment.
+the SiK radio.
+
+### `logs list` / `logs fetch [--id N] [--dir D]`
+
+LinkHub owns the complete DataFlash protocol transaction: `LOG_ENTRY`
+collection, chunk requests, out-of-order reassembly, retries, timeouts, and
+`LOG_REQUEST_END`. `logs list` shows available controller logs. `logs fetch`
+downloads the latest log by default or a selected ID to
+`simulation/logs/calibrate/` unless `--dir` is supplied.
 
 ### `config show` / `config apply`
 Diff the live FC params against shared parm defaults:
@@ -250,6 +338,11 @@ Every `run` and `watch` session writes a CSV under `simulation/logs/calibrate/`
 (gitignored). Header is `# key: value` comments capturing the verb, mode/stream
 name, duration, trim/gain dicts, run-start timestamps (local + UTC), and a snapshot
 of relevant AP params. Data section is plain CSV.
+
+LinkHub owns the lossless raw MAVLink journal for all clients. Calibration
+sessions may additionally write a filtered `*.mavlink.jsonl` trace beside the
+CSV for convenient analysis; it is derived from LinkHub's decoded HTTP
+stream and is not the raw source of truth.
 
 For `run`, the CSV now also captures:
 - Lua diagnostic NVFs: `YFF_*` and `OL_*`
@@ -277,20 +370,22 @@ decode bug; see `analysis/mavlink_jsonl_query.md` for full usage -- it is
 the first-line tool for diagnosing any problematic run). `ATTITUDE_TARGET`
 also only appears at all once the vehicle is
 actually in `GUIDED`/`GUIDED_NOGPS` and Lua is driving an angle target.
-`run passive` captures the current roll/pitch/yaw and immediately uses it as
-the initial target, so its target-quaternion and quaternion-error columns are
-populated once the hold is engaged.
+`run passive` waits for ground-side qualification, then asks Lua to capture the
+onboard AHRS quaternion. Target-quaternion and quaternion-error columns are
+populated once that hold is engaged.
 
 ### Interactive passive attitude hold
 
 `run passive` arms and completes heli runup in ACRO with `RAWES_MODE=0`, stages
 passive thrust with absolute hold disabled, and then enters `GUIDED_NOGPS`.
-During this staging phase Lua commands zero body rate plus thrust only; passive
-yaw trim remains inhibited. The ground waits for an `ACTIVE` heartbeat and a
-three-second quiet interval after any EKF yaw-alignment event, captures the
-settled `ATTITUDE_QUATERNION`, and sends `RAWES_PEN=1` to enable absolute
-attitude and yaw hold. This prevents EKF in-flight yaw resets from triggering
-the GB4008 while the stationary hardware is already physically on target.
+During this staging phase Lua commands zero body rate plus thrust only; it does
+not send an Euler angle target and passive yaw trim remains inhibited. The
+ground waits for an `ACTIVE` heartbeat, fresh attitude-rate telemetry, and a
+continuous quiet interval after any EKF yaw-alignment event. It then sends
+`RAWES_PEN=1`; Lua captures the onboard AHRS quaternion and enables absolute
+attitude and yaw hold. Ground-side qualification can be tuned per run with
+`--settle-rate-deg-s`, `--settle-time`, and `--settle-timeout` without changing
+or uploading Lua.
 Keyboard offsets are composed relative to the captured
 quaternion as `q_target = q_initial * q_relative`; they are not added to its
 Euler angles. During the run:
@@ -300,31 +395,29 @@ Euler angles. During the run:
 - `,`/`.` (the `<`/`>` keys) changes relative target yaw by -/+5 degrees.
 - Relative roll and pitch keyboard travel is limited to +/-30 degrees.
 - `-`/`=` changes held thrust by 0.05 within `[0,1]`.
-- Space sends the one-shot `RAWES_YIC=-1000` capture command. Lua samples the
-  onboard AHRS roll/pitch/yaw and commits that attitude directly, avoiding
-  ground-telemetry latency in a read-and-echo reset.
+- Space resets relative roll/pitch/yaw offsets to zero; it does not recapture
+  the fixed Lua-owned anchor.
 - Yaw remains at the captured heading until changed with `,`/`.`.
 - ESC exits, disarms, and leaves `RAWES_MODE=0`.
 
 For a text-only interactive protocol trace, add `--protocol-debug`:
 
 ```bash
-python -m calibrate --port COM6 --baud 57600 run passive --protocol-debug
+python -m calibrate --server http://127.0.0.1:8999 run passive --protocol-debug
 ```
 
 This suppresses the 3D window. Before each keyboard command it prints the
 latest actual and target quaternions, quaternion error, and swash PWM, followed
-by every transmitted `NAMED_VALUE_FLOAT`. Space is intentionally a single
-`RAWES_YIC=-1000` packet; normal arrow/yaw updates remain atomic
-`RAWES_QW/QX/QY/QZ` target updates. ArduPilot receives angle targets with zero
-rate feed-forward and its native attitude/rate loops determine the commanded
-motion.
+by every transmitted `NAMED_VALUE_FLOAT`. Relative attitude state is sent as
+`RAWES_ROFF/POFF/YOFF`; `RAWES_PEN` is sent only after the ground qualification
+gate passes. ArduPilot receives angle targets with zero rate feed-forward after
+capture and its native attitude/rate loops determine the commanded motion.
 
 For an automatic spinning-hardware exercise, add `--auto-sequence` and select
 the dwell per step with `--step-hold`:
 
 ```bash
-python -m calibrate --port COM6 --baud 57600 run passive \
+python -m calibrate --server http://127.0.0.1:8999 run passive \
   --protocol-debug --auto-sequence --step-hold 5
 ```
 
@@ -335,51 +428,12 @@ target to ArduPilot with zero rate feed-forward, and ArduPilot determines the
 motion through its native attitude and rate controllers. Normal safety shutdown
 runs automatically after the final dwell.
 
-### AI/MCP access
+### Agent and automation access
 
-The local stdio MCP server exposes the complete calibrate command dispatcher
-through one persistent MAVLink connection. VS Code configuration is checked in
-at `.vscode/mcp.json` and defaults to COM6 at 57600 baud.
-
-Run it directly when testing the server outside VS Code:
-
-```bash
-.venv/Scripts/python.exe -m calibrate.mcp_server --port COM6 --baud 57600
-```
-
-The MCP process owns one persistent `RawesGCS` connection. It does not launch
-the calibrate command line. Typed tools call the shared calibration library
-functions directly: connection management, hardware status, parameters,
-swash, servo, motor, run modes, telemetry watch, logs, Lua scripts,
-configuration, arm/reboot, and emergency disarm. Printed library output is
-captured into the tool result so it cannot corrupt the MCP stdio protocol.
-Passive startup holds `RAWES_MODE=0` in ACRO during the configured traditional-
-heli RSC runup interval. Only after runup does it enter GUIDED_NOGPS, capture
-the current quaternion, seed the passive target, and select `RAWES_MODE=3`.
-This prevents GUIDED's landed/runup branch from flattening the internal
-roll/pitch target before passive control begins.
-Hardware operations are serialized and protected by an independent process
-watchdog. One-shot tools have a 30-second deadline. Intentionally long tools
-(`run_mode`, `watch`, `motor`, logs, script, and config) have a 600-second
-deadline. `run_mode` and `watch` accept a per-call `timeout_s` override. When a
-deadline expires, the watchdog first requests cooperative stop so the normal
-safety shutdown can run. If the operation is still blocked 10 seconds later,
-the watchdog terminates the MCP process with exit code 124. Configure these
-defaults with `--command-timeout`, `--long-command-timeout`, and
-`--timeout-grace`; `.vscode/mcp.json` specifies the project defaults explicitly.
-
-`stop_operation` interrupts an active `run_mode` at its next observation-loop
-iteration and lets the normal mode-0, Lua-disarm, motor-off, ACRO safe-off
-lifecycle complete while keeping the MCP server running. It is lock-free, so a
-blocked hardware operation cannot prevent the stop request. `shutdown_server`
-first requests the same cancellation, waits for the active operation to release
-the connection, force-disarms to confirm hardware safety, closes COM6, returns
-its final result, and then terminates the stdio MCP process. By default it
-refuses to terminate if disarm cannot be confirmed. Use
-`shutdown_server(force=true)` only after independently confirming the hardware
-is safe; it closes the connection and exits even without disarm confirmation.
-VS Code can then start a fresh MCP process containing updated code without a
-window reload.
+Agents and automation call LinkHub's HTTP API directly. There is no
+calibration MCP server or intermediate channel service. Stateful generic
+operations live under `/v1/mavlink`; RAWES-specific sequencing and safety
+policy remain in the calibration client.
 
 The command automatically opens a live PyVista window using the existing
 RAWES hub/blade renderer and swashplate inset. The live view renders the four
@@ -445,39 +499,39 @@ Useful for offline analysis.
 
 ```bash
 # 0. Survey ports (first time)
-python -m calibrate ping
+curl http://127.0.0.1:8999/v1/mavlink/status
 
 # 1. Diff against canonical params; apply if needed
-python -m calibrate --port COM7 config show
-python -m calibrate --port COM7 config apply   # if any [DIFF] shown
-python -m calibrate --port COM7 reboot
+python -m calibrate --server http://127.0.0.1:8999 config show
+python -m calibrate --server http://127.0.0.1:8999 config apply
+python -m calibrate --server http://127.0.0.1:8999 reboot
 
 # 2. Verify live state
-python -m calibrate --port COM7 status
+python -m calibrate --server http://127.0.0.1:8999 status
 
 # 3. Swashplate neutral + mixing check (one-shot, no arming)
-python -m calibrate --port COM7 swash neutral
-python -m calibrate --port COM7 swash 50 0 0     # all servos rise equally?
-python -m calibrate --port COM7 swash 0 0 50     # lateral differential?
+python -m calibrate --server http://127.0.0.1:8999 swash neutral
+python -m calibrate --server http://127.0.0.1:8999 swash 50 0 0
+python -m calibrate --server http://127.0.0.1:8999 swash 0 0 50
 
 # 4. Limit swash travel if servos can't take full range
-python -m calibrate --port COM7 swash range 1300 1700
-python -m calibrate --port COM7 set H_CYC_MAX 1000
+python -m calibrate --server http://127.0.0.1:8999 swash range 1300 1700
+python -m calibrate --server http://127.0.0.1:8999 set H_CYC_MAX 1000
 
 # 5. Swash motion check -- one complete native ArduPilot cycle
-python -m calibrate --port COM7 servo sweep --duration 12
+python -m calibrate --server http://127.0.0.1:8999 servo sweep --duration 12
 
 # 6. Motor spin check
-python -m calibrate --port COM7 motor 5 --duration 5
-python -m calibrate --port COM7 watch esc --duration 10
+python -m calibrate --server http://127.0.0.1:8999 motor 5 --duration 5
+python -m calibrate --server http://127.0.0.1:8999 watch esc --duration 10
 
 # 7. Connect the Pixhawk directly by USB, then upload updated Lua and verify
-python -m calibrate --port <USB_COM_PORT> script upload scripts/rawes.lua
-python -m calibrate --port <USB_COM_PORT> script list
+python -m calibrate --server http://127.0.0.1:8999 script upload scripts/rawes.lua
+python -m calibrate --server http://127.0.0.1:8999 script list
 
 # 8. Quiet armed bench check
-python -m calibrate --port COM7 run passive --duration 30 --trim tlon=0.02,thr=0.342
+python -m calibrate --server http://127.0.0.1:8999 run passive --duration 30 --trim tlon=0.02,thr=0.342
 
 # 9. Passive hold check with current controller settings
-python -m calibrate --port COM7 run passive --duration 60 --trim tlon=0.02,thr=0.342
+python -m calibrate --server http://127.0.0.1:8999 run passive --duration 60 --trim tlon=0.02,thr=0.342
 ```

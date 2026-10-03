@@ -13,20 +13,15 @@ Uses the guided_nogps_armed_lua_full fixture (stationary kinematic hold, vel0=[0
     GPS fuses at ~34 s; fixture yields.
     - internal_controller=False (ArduPilot + Lua own the stack at 50 Hz)
   - RAWES_MODE=3 (MODE_PASSIVE) set immediately in fixture, right after arm,
-    together with the full IC seed; the test promotes to RAWES_MODE=1
-    (MODE_STEADY) right after kinematic_exit.  In MODE_PASSIVE the Lua
-    commands the IC attitude (RAWES_RIC roll / RAWES_PIC pitch + AHRS yaw
-    captured at entry, zero rate FF) and the IC thrust (RAWES_THR via
-    GUIDED throttle) through set_target_angle_and_rate_and_throttle.  Because
-    the IC attitude is commanded during the kinematic hold, the nul-aero slews
-    the disk to the IC tilt before release; ArduPilot's rate PID tracks the
-    held angle target rather than winding up against a locked body.
+    together with thrust and zero relative offsets; the test promotes to
+    RAWES_MODE=1 (MODE_STEADY) right after kinematic_exit. Lua captures the
+    settled AHRS quaternion and composes relative offsets into the target.
   - IC altitude ~43 m (tether rest length ~100 m); hub orbits near IC altitude.
 
-The fixture seeds the FULL IC operating point to the Lua right after arm
-(RAWES_THR thrust, RAWES_RIC/RAWES_PIC IC roll/pitch, RAWES_TEN equilibrium
-tension) so MODE_PASSIVE commands the IC attitude + thrust throughout the
-kinematic hold (no delayed seed).
+The fixture seeds the passive operating point to Lua right after arm
+(RAWES_THR thrust, RAWES_ROFF/RAWES_POFF/RAWES_YOFF relative offsets,
+RAWES_TEN equilibrium tension) so MODE_PASSIVE has a complete target state
+throughout the kinematic hold (no delayed seed).
 
 No RC cyclic/collective overrides are sent by this test. Lua uses GUIDED
 commands for attitude/collective and keeps Ch8 (motor interlock) high.
@@ -72,7 +67,13 @@ from tests.sitl.stack_infra import (
     StackContext, dump_startup_diagnostics,
     observe, assert_no_mediator_criticals, get_arducopter_crash_info,
 )
-from groundstation.gcs import LocalPositionNed, NamedValueFloat, ServoOutputRaw, StatusText, decode_message
+from linkhub_client.messages import (
+    LocalPositionNed,
+    NamedValueFloat,
+    ServoOutputRaw,
+    StatusText,
+    decode_message,
+)
 from analysis.analyse_run import compute_steady_metrics, print_flight_report
 
 # -- Timing -------------------------------------------------------------------
@@ -163,8 +164,9 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
 
     gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
     gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
-    gcs.send_message(NamedValueFloat("RAWES_RIC", ic_roll_rad))
-    gcs.send_message(NamedValueFloat("RAWES_PIC", ic_pitch_rad))
+    gcs.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
+    gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
+    gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     log.info(
         "Release seeds (IC-passive init): RAWES_THR=%.3f, RAWES_TEN=%.1f N, "

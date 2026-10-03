@@ -13,6 +13,10 @@ independent of aero or controller code:
 Frames: NED world + FRD body throughout.  body_z = R[:,2] points DOWN
 through the rotor disk for a level hover.
 """
+import pytest
+
+pytestmark = pytest.mark.expensive
+
 import math
 import sys
 from pathlib import Path

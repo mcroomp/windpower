@@ -46,8 +46,8 @@ OMEGA_START_RAD_S = 40.0          # fixed rotor start speed [rad/s]
 TETHER_FORCE_N  = 10.0            # minimal constant downward load [N]
 TARGET_ALT_M    = 5.0             # RAWES_ALT command sent each tick
 TARGET_THRUST   = 1.0             # RAWES_THR command sent each tick
-TARGET_ROLL_RAD = 0.0             # RAWES_RIC command sent each tick
-TARGET_PITCH_RAD = 0.0            # RAWES_PIC command sent each tick
+TARGET_ROLL_RAD = 0.0             # RAWES_ROFF command sent each tick
+TARGET_PITCH_RAD = 0.0            # RAWES_POFF command sent each tick
 AERO_MODEL    = "quasi_static"    # use default quasi-static aero model
 LIFTOFF_ALT_M   = 2.0             # altitude threshold that counts as liftoff [m]
 LIFTOFF_TIMEOUT = 60.0            # must lift off within this many sim-seconds [s]
@@ -109,8 +109,7 @@ def _build_ic() -> SimpleNamespace:
 def test_ground_liftoff(simtest_log):
     """
     Hub at altitude 1 m, horizontal disk, no wind, 10 N downforce.
-    rawes.lua GUIDED mode with RAWES_ALT=5.0, RAWES_THR=1.0, and fixed
-    RAWES_RIC/RAWES_PIC targets to hold level attitude while climbing.
+    rawes.lua GUIDED mode with RAWES_ALT=5.0 and RAWES_THR=1.0.
     """
     ic = _build_ic()
 
@@ -143,8 +142,8 @@ def test_ground_liftoff(simtest_log):
         s.send_message(NamedValueFloat("RAWES_TEN", TETHER_FORCE_N))
         s.send_message(NamedValueFloat("RAWES_ALT", TARGET_ALT_M))
         s.send_message(NamedValueFloat("RAWES_THR", TARGET_THRUST))
-        s.send_message(NamedValueFloat("RAWES_RIC", TARGET_ROLL_RAD))
-        s.send_message(NamedValueFloat("RAWES_PIC", TARGET_PITCH_RAD))
+        s.send_message(NamedValueFloat("RAWES_ROFF", TARGET_ROLL_RAD))
+        s.send_message(NamedValueFloat("RAWES_POFF", TARGET_PITCH_RAD))
 
     for i in range(total_steps):
         t = i * DT

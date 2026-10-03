@@ -21,6 +21,7 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PIP_INDEX_URL="https://packagefeedproxy.microsoft.io/pypi/simple/"
 SIM_DIR="$REPO_DIR/simulation"
 VENV="$REPO_DIR/.venv"
 PYTHON="$VENV/Scripts/python.exe"
@@ -68,13 +69,13 @@ _setup_venv() {
         fi
     fi
 
-    # Hash-gated editable install: only reinstall when pyproject.toml changes.
-    # The editable install is what makes `import simulation`/`groundstation`/etc.
-    # work from any cwd or when a script is invoked by path (rather than via
-    # `python -c` from repo root) -- but re-running pip install -e on every
-    # invocation is unnecessary overhead once it's already registered.
+    # Install the editable package only when its distribution is missing.
+    # Re-running pip install -e can invoke the build backend and appear to hang,
+    # while an existing editable install remains valid as source files change.
     if [ ! -f "$PYPROJECT" ]; then
         echo "[WARN] $PYPROJECT not found -- skipping editable install"
+    elif "$PYTHON" -c "import importlib.metadata as m; m.version('rawes')" >/dev/null 2>&1; then
+        echo "[INFO] rawes editable package already installed -- skipping pip install -e"
     else
         local pkg_digest
         pkg_digest="$(sha256sum "$PYPROJECT" | awk '{print $1}')"
@@ -87,20 +88,50 @@ _setup_venv() {
         fi
     fi
 
+    if ! "$PYTHON" -c "import linkhub_client" >/dev/null 2>&1; then
+        echo "[INFO] Installing linkhub-client package (editable) ..."
+        "$PYTHON" -m pip install -e "$(_winpath "$REPO_DIR/linkhub_client")" --no-deps --quiet
+    fi
+
+    local linkhub="$REPO_DIR/linkhub/target/release/linkhub.exe"
+    if [ ! -x "$linkhub" ]; then
+        echo "[INFO] Building LinkHub with Bluetooth support ..."
+        cargo build \
+            --manifest-path "$REPO_DIR/linkhub/Cargo.toml" \
+            --release \
+            --features bluetooth
+    fi
     echo "[INFO] Done."
     "$PYTHON" --version
 }
 
 # --- Docker image ------------------------------------------------------
 _setup_build() {
-    echo "[INFO] Building rawes-sim (target=runtime-ardupilot) -- expect ~30-60 min ..."
-    docker build "$SIM_DIR" -t rawes-sim --target runtime-ardupilot
+    local ardupilot_image="rawes-sim-ardupilot-base:Copter-4.7.0-v1"
+    if [ "${RAWES_REBUILD_ARDUPILOT:-0}" = "1" ] \
+        || ! docker image inspect "$ardupilot_image" >/dev/null 2>&1; then
+        echo "[INFO] Building $ardupilot_image -- expect ~30-60 min ..."
+        docker build \
+            -f "$SIM_DIR/Dockerfile" \
+            "$REPO_DIR" \
+            -t "$ardupilot_image" \
+            --target runtime-ardupilot-base
+    else
+        echo "[INFO] Reusing $ardupilot_image"
+    fi
+    echo "[INFO] Building rawes-sim with the current LinkHub ..."
+    docker build \
+        -f "$SIM_DIR/Dockerfile" \
+        "$REPO_DIR" \
+        -t rawes-sim \
+        --build-arg "ARDUPILOT_RUNTIME_IMAGE=$ardupilot_image" \
+        --target runtime-ardupilot
     echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
 _setup_build_lite() {
-    echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot) ..."
-    docker build "$SIM_DIR" -t rawes-sim --target runtime
+    echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot or LinkHub) ..."
+    docker build -f "$SIM_DIR/Dockerfile" "$REPO_DIR" -t rawes-sim --target runtime
     echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
@@ -119,7 +150,7 @@ _setup_hw() {
     # Reuse calibrate (python -m calibrate) as the canonical hardware param writer.
     # This checks all expected params from rawes_params.json and writes DIFFs.
     "$PYTHON" -m calibrate \
-        --port "$RAWES_HIL_PORT" \
+        --connection "$RAWES_HIL_PORT" \
         --baud "${RAWES_HIL_BAUD:-115200}" \
         config apply
 }

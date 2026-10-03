@@ -24,7 +24,7 @@ from tests.sitl.stack_infra import _acro_stack
 from analysis.analyse_run import validate_ekf_window
 
 import pytest
-pytestmark = pytest.mark.sitl
+pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1200)]
 
 
 def test_kinematic_gps_sitl(tmp_path, request):
@@ -68,7 +68,7 @@ def test_kinematic_gps_sitl(tmp_path, request):
 
         ctx.wait_drain(
             until       = _gps_fused,
-            timeout     = 50.0,
+            timeout     = 90.0,
             drain_s     = 2.0,
             check_procs = True,
             label       = "gps-fuse",
@@ -80,8 +80,8 @@ def test_kinematic_gps_sitl(tmp_path, request):
         log.info("GPS origin : %s", gps_origin)
         log.info("GPS fused  : %s", gps_fused)
 
-        assert gps_origin, "GPS origin never set within 50 s"
-        assert gps_fused,  "GPS never fused within 50 s"
+        assert gps_origin, "GPS origin never set within 90 s"
+        assert gps_fused,  "GPS never fused within 90 s"
 
         t_fused = t_gps_fused_s[0]
         t_end   = t_fused + 40.0

@@ -15,6 +15,10 @@ tether direction.  These tests verify:
 
 Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 """
+import pytest
+
+pytestmark = pytest.mark.expensive
+
 import math
 import sys
 from pathlib import Path
@@ -224,5 +228,4 @@ def test_equilibrium_collective_is_at_or_below_neutral():
     assert coll_eq <= 0.0, (
         f"Equilibrium collective at 30° should be ≤ 0°, got {math.degrees(coll_eq):.1f}°"
     )
-
 

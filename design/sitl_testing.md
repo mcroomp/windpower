@@ -40,6 +40,10 @@ runs in its own fresh Docker container, one per test file.
   `bash setup.sh build-lite` (without). `bash test.sh` creates and tears down
   one ephemeral container per test file automatically — there is no persistent
   dev container to manage.
+- `bash setup.sh build` stores the expensive runtime as the versioned
+  `rawes-sim-ardupilot-base:Copter-4.7.0-v1` image and reuses it while that tag
+  exists. Set `RAWES_REBUILD_ARDUPILOT=1` only when intentionally rebuilding
+  that base (for example after changing its Dockerfile stages or ArduPilot tag).
 - Stack test logs land in `simulation/logs/{test_name}/` —
   `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`.
   Suite summary: `simulation/logs/suite_summary.json`.
@@ -48,6 +52,32 @@ runs in its own fresh Docker container, one per test file.
 - **SITL must run as close to hardware as possible.** Find and fix root causes; do
   NOT paper over failures with simulation-only hacks. Confirm with the user before
   adding any override. `base_k_ang` is diagnostic-only and defaults to 0.
+
+### Single MAVLink owner
+
+Each per-test container launches the Rust LinkHub process. It is the only process
+connected to ArduPilot's TCP port 5760 and owns the GCS heartbeat, message rates,
+transaction correlation, and the complete binary archive. The Dockerfile adds
+LinkHub only onto the separately tagged, reusable ArduPilot runtime image, so
+LinkHub changes cannot invalidate the expensive ArduPilot build.
+The LinkHub build stage also keeps Cargo registry and target artifacts in
+BuildKit cache mounts, so source-only LinkHub changes recompile the crate rather
+than every Rust dependency.
+
+Pytest fixtures and the mediator consume the shared HTTP/NDJSON API on
+`127.0.0.1:8999`. The mediator's JSON physics link on UDP 9002/9003 and the
+winch command socket remain direct because they are not MAVLink transports.
+There is no dedicated mediator MAVLink connection on port 5762.
+
+The dependency-free `linkhub_client` project supplies the common record
+dataclasses and HTTP client. It must not import `pymavlink`; protocol framing
+belongs exclusively to LinkHub.
+
+LinkHub uses the official `mavlink/rust-mavlink` ArduPilotMega dialect for
+validated MAVLink 1/2 decoding and typed encoding. Its decoded stream, command
+ACK correlation, parameter operations, message-rate API, MAVFTP, DataFlash, and
+capability discovery are implemented. The architecture and current extension
+points are owned by [design/linkhub.md](linkhub.md).
 
 ---
 

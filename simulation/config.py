@@ -145,11 +145,11 @@ DEFAULTS: dict = {
     # 0 = disabled (default: trajectory planner owns the winch).
     "winch_cmd_port": 0,
 
-    # ── Dedicated MAVLink log link (mediator-side, optional) ─────────────────
+    # ── LinkHub observation stream (mediator-side, optional) ────────────────
     # Optional second MAVLink client endpoint used by mediator to sample
-    # ATTITUDE/ATTITUDE_TARGET/SERVO_OUTPUT_RAW for telemetry CSV logging.
-    # Empty string disables this listener.
-    "mavlink_log_connection": "",
+    # LinkHub NDJSON source for asynchronous FC telemetry columns.
+    # Empty string disables this observer.
+    "linkhub_url": "",
     # Requested ATTITUDE_TARGET message rate [Hz] over the dedicated link.
     "mavlink_att_target_hz": 100.0,
     # Requested ATTITUDE message rate [Hz] over the dedicated link.

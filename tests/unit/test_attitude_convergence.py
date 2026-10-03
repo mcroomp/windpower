@@ -14,6 +14,10 @@ If these tests fail, the loop has a sign issue somewhere between
 mapping, and ``RigidBodyDynamics.H_spin_b`` — i.e. exactly the chain that
 makes ``test_create_ic`` settle (or not).
 """
+import pytest
+
+pytestmark = pytest.mark.expensive
+
 import math
 import sys
 from pathlib import Path

@@ -9,20 +9,17 @@ from __future__ import annotations
 import math
 import os
 
-import simulation
-
-# Re-exported so submodules can do `from .constants import RawesGCS` etc.
-from groundstation.gcs         import (
+# Re-exported so existing calibration modules share the one HTTP client.
+from linkhub_client.client import LinkHubClient as RawesGCS, WallClock
+from linkhub_client.messages import (
     Attitude,
     AttitudeQuaternion,
     EscTelemetry,
     PidTuning,
     BatteryStatus,
-    RawesGCS,
     RcChannels,
     SetAttitudeTarget,
     SysStatus,
-    WallClock,
     CommandAck,
     Heartbeat,
     LocalPositionNed,
@@ -32,14 +29,19 @@ from groundstation.gcs         import (
     RequestDataStream,
     StatusText,
 )
-from simulation.param_defaults import load_ap_params
 from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,
                                         MOTOR_PWM_MIN, MOTOR_PWM_MAX)
 
-# Repo root, resolved via the installed `simulation` package rather than a
-# relative sys.path hack -- works regardless of CWD or invocation style.
-_SIM_DIR    = os.path.dirname(os.path.abspath(simulation.__file__))
-_REPO_ROOT  = os.path.dirname(_SIM_DIR)
+# Resolve paths from this package rather than importing the simulation runtime.
+_REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SIM_DIR    = os.path.join(_REPO_ROOT, "simulation")
+
+
+def load_ap_params(*args, **kwargs):
+    """Load simulation parameters only when a config operation needs them."""
+    from simulation.param_defaults import load_ap_params as _load_ap_params
+
+    return _load_ap_params(*args, **kwargs)
 
 # ---------------------------------------------------------------------------
 # GB4008 motor constants (used in diag torque estimates)

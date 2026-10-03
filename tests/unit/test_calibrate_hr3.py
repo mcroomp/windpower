@@ -1,12 +1,12 @@
 import pytest
 
-from pymavlink import mavutil
-
 import calibrate.hw as calibrate_hw
+import calibrate.repl as calibrate_repl
 import calibrate.run as calibrate_run
 from calibrate.hw import _disarm, _h3_forward_mix
-from groundstation.gcs import Heartbeat, NamedValueFloat
-from calibrate.params import _CONFIG_TARGET_PARAMS_COMMON
+from linkhub_client.mav_constants import mavutil
+from linkhub_client.messages import Heartbeat
+from calibrate.params import _config_target_params
 from calibrate.repl import (
     _bounded_swash_waypoints,
     _fit_swash_range,
@@ -30,15 +30,93 @@ def test_hardware_profile_uses_front_elevator_hr3_layout():
         "SERVO3_TRIM": 1517.0,
         "H_COL_MIN": 1342.0,
         "H_COL_MAX": 1657.0,
+        "H_COL_ANG_MIN": -2.0,
+        "H_COL_ANG_MAX": 12.0,
         "H_CYC_MAX": 1000.0,
         "H_FLYBAR_MODE": 1.0,
         "IM_ACRO_COL_EXP": 0.0,
         "INS_POS1_X": -0.08,
         "INS_POS2_X": -0.08,
         "INS_POS3_X": -0.08,
+        "SCR_ENABLE": 1.0,
+        "SERVO9_FUNCTION": 0.0,
     }
 
-    assert {name: _CONFIG_TARGET_PARAMS_COMMON[name] for name in expected} == expected
+    assert {name: _config_target_params(use_all=False)[name] for name in expected} == expected
+
+
+def test_arm_command_uses_normal_arm_and_bounded_disarm(monkeypatch):
+    events = []
+
+    class Session:
+        def set_mode(self, mode):
+            events.append(("mode", mode))
+
+    monkeypatch.setattr(
+        calibrate_repl,
+        "_arm",
+        lambda _session, *, force: events.append(("arm", force)) or True,
+    )
+    monkeypatch.setattr(
+        calibrate_repl.time,
+        "sleep",
+        lambda duration: events.append(("sleep", duration)),
+    )
+    monkeypatch.setattr(
+        calibrate_repl,
+        "_disarm",
+        lambda _session, force=False: events.append(("disarm", force)) or True,
+    )
+
+    calibrate_repl._cmd_arm(Session(), ["--duration", "0.25"])
+
+    assert events == [
+        ("mode", 1),
+        ("arm", False),
+        ("sleep", 0.25),
+        ("disarm", False),
+    ]
+
+
+def test_arm_command_can_explicitly_bypass_prearm_checks(monkeypatch):
+    events = []
+
+    class Session:
+        def set_mode(self, mode):
+            events.append(("mode", mode))
+
+    monkeypatch.setattr(
+        calibrate_repl,
+        "_arm",
+        lambda _session, *, force: events.append(("arm", force)) or True,
+    )
+    monkeypatch.setattr(calibrate_repl.time, "sleep", lambda _duration: None)
+    monkeypatch.setattr(
+        calibrate_repl,
+        "_disarm",
+        lambda _session, force=False: events.append(("disarm", force)) or True,
+    )
+
+    calibrate_repl._cmd_arm(Session(), ["--duration", "0.25", "--force"])
+
+    assert events == [
+        ("mode", 1),
+        ("arm", True),
+        ("disarm", False),
+    ]
+
+
+def test_disarm_command_falls_back_to_force(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        calibrate_repl,
+        "_disarm",
+        lambda _session, force=False: events.append(force) or force,
+    )
+
+    calibrate_repl._cmd_disarm(object())
+
+    assert events == [False, True]
 
 
 def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
@@ -50,6 +128,10 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
 
         def send_message(self, _message):
             events.append("disarm-command")
+
+        def command(self, *_args, **_kwargs):
+            events.append("disarm-command")
+            return {"result": mavutil.mavlink.MAV_RESULT_ACCEPTED}
 
         def _recv(self, **_kwargs):
             return Heartbeat(
@@ -65,7 +147,7 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
             return True
 
         def get_param(self, name):
-            return {"H_FLYBAR_MODE": 1.0, "H_SV_MAN": 0.0}[name]
+            return {"H_FLYBAR_MODE": 0.0, "H_SV_MAN": 0.0}[name]
 
         def set_mode(self, mode):
             events.append(("set-mode", mode))
@@ -76,8 +158,8 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
     assert events == [
         "disarm-command",
         ("set-param", "RAWES_MODE", 0),
-        ("set-param", "H_FLYBAR_MODE", 0.0),
-        ("set-param", "H_SV_MAN", 3.0),
+        ("set-param", "SERVO9_FUNCTION", 0.0),
+        ("set-param", "H_FLYBAR_MODE", 1.0),
         ("set-mode", 1),
     ]
 
@@ -92,6 +174,9 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
         def send_message(self, _message):
             pass
 
+        def command(self, *_args, **_kwargs):
+            return {"result": mavutil.mavlink.MAV_RESULT_ACCEPTED}
+
         def _recv(self, **_kwargs):
             return Heartbeat(
                 type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
@@ -101,8 +186,8 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
                 system_status=mavutil.mavlink.MAV_STATE_STANDBY,
             )
 
-        def get_param(self, _name):
-            return 0.0
+        def get_param(self, name):
+            return {"H_FLYBAR_MODE": 0.0, "H_SV_MAN": 3.0}[name]
 
         def set_param(self, name, value):
             events.append(("set-param", name, value))
@@ -116,22 +201,20 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
     assert _disarm(Session(), force=True) is True
     assert events == [
         ("set-param", "RAWES_MODE", 0),
-        ("set-param", "H_SV_MAN", 3.0),
+        ("set-param", "SERVO9_FUNCTION", 0.0),
+        ("set-param", "H_FLYBAR_MODE", 1.0),
+        ("set-param", "H_SV_MAN", 0.0),
         ("set-mode", 1),
     ]
 
 
-def test_safety_shutdown_uses_lua_disarm_before_safe_off(monkeypatch):
+def test_safety_shutdown_skips_disarm_when_already_disarmed(monkeypatch):
     events = []
 
     class Session:
         def set_param(self, name, value):
             events.append(("set-param", name, value))
             return True
-
-        def send_message(self, message):
-            assert isinstance(message, NamedValueFloat)
-            events.append(("send", message.name, message.value))
 
     monkeypatch.setattr(
         calibrate_run,
@@ -153,7 +236,7 @@ def test_safety_shutdown_uses_lua_disarm_before_safe_off(monkeypatch):
     monkeypatch.setattr(
         calibrate_run,
         "_disarm",
-        lambda *_args, **_kwargs: pytest.fail("force disarm should not be used"),
+        lambda *_args, **_kwargs: pytest.fail("disarm should not be used"),
     )
 
     calibrate_run._safety_shutdown(Session())
@@ -161,13 +244,12 @@ def test_safety_shutdown_uses_lua_disarm_before_safe_off(monkeypatch):
     assert events == [
         ("set-param", "RAWES_MODE", 0),
         ("servo", 9, 1000),
-        ("send", "RAWES_ARM", 1.0),
-        ("wait", 1.0),
+        ("wait", 0.2),
         ("safe-off", True),
     ]
 
 
-def test_safety_shutdown_force_disarms_when_lua_does_not_confirm(monkeypatch):
+def test_safety_shutdown_force_disarms_when_normal_disarm_fails(monkeypatch):
     events = []
 
     class Session:
@@ -186,12 +268,14 @@ def test_safety_shutdown_force_disarms_when_lua_does_not_confirm(monkeypatch):
     monkeypatch.setattr(
         calibrate_run,
         "_disarm",
-        lambda _session, timeout, force: events.append((timeout, force)) or True,
+        lambda _session, timeout, force: (
+            events.append((timeout, force)) or force
+        ),
     )
 
     calibrate_run._safety_shutdown(Session())
 
-    assert events == [(5.0, True)]
+    assert events == [(5.0, False), (5.0, True)]
 
 
 def test_hr3_manual_mixer_matches_physical_servo_positions():

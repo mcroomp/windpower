@@ -30,7 +30,7 @@ SCR_ENABLE        1      # enable Lua scripting
 
 # Emit PID_TUNING (roll+pitch+yaw+accelZ) for telemetry logging. See
 # copter-heli.parm for the bitmask reference; this is SITL-only (over the
-# dedicated mavlink_log_connection UDP/TCP link, not a real telemetry radio)
+# local TelemetryHub connection, not a real telemetry radio)
 # because PID_TUNING at high rate is too noisy for a real MAVLink radio link.
 GCS_PID_MASK      15
 

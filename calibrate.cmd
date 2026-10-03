@@ -2,9 +2,10 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "PYTHON=%ROOT%.venv\Scripts\python.exe"
 
-call "%ROOT%setup.cmd"
-if errorlevel 1 exit /b 1
+pushd "%ROOT%"
+uv run --no-sync python -m calibrate %*
+set "RESULT=%ERRORLEVEL%"
+popd
 
-"%PYTHON%" -m calibrate %*
+exit /b %RESULT%

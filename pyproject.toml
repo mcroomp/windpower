@@ -8,11 +8,37 @@ version = "0.1.0"
 description = "RAWES tethered autorotating rotor kite -- simulation, flight-stack, and analysis tooling"
 requires-python = ">=3.12"
 
-# Runtime dependencies are NOT declared here on purpose: simulation/requirements.txt
-# (installed via setup.cmd/setup.sh, hash-gated) remains the single source of truth
-# for the venv and the Docker image. This pyproject.toml exists so that `pip install
-# -e .` registers the first-party packages below on sys.path -- no dependency
-# resolution is involved.
+dependencies = [
+    "mcp==2.2.0",
+    "pyserial",
+    "pyyaml",
+    "pymavlink",
+]
+
+[project.optional-dependencies]
+simulation = [
+    "dynbem==0.8.0",
+    "imageio",
+    "imageio-ffmpeg",
+    "lupa",
+    "matplotlib",
+    "numba",
+    "numpy",
+    "pandas",
+    "pyvista",
+    "scipy",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-timeout",
+]
+
+[[tool.uv.index]]
+name = "microsoft-python"
+url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+default = true
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -39,7 +65,9 @@ include = [
 
 [tool.pytest.ini_options]
 timeout = 600
+pythonpath = ["linkhub_client/src"]
 markers = [
     "simtest: full physics simulation (seconds-minutes); excluded from quick unit run",
     "sitl: ArduPilot SITL integration test (Docker); run via test.sh stack",
+    "expensive: loop-heavy unit test; run explicitly with -m expensive",
 ]

@@ -41,10 +41,9 @@ def torque_armed(tmp_path, request):
 
     Boots from the FLIGHT default params (dual-GPS yaw, GPS pos/vel enabled) via
     profile="ic": the hub is held at the steady-state tethered-hover attitude
-    (roll=0, pitch=-63.6 deg) instead of level.  rawes.lua boots in MODE_PASSIVE
-    (RAWES_MODE=3); the IC operating point is seeded before arm (collective=
-    LUA_YAW_IC_COL, RIC/PIC=IC roll/pitch) and the EKF pre-arm attitude is seeded
-    from the live yaw.  ArduPilot's DDFP yaw PID regulates hub yaw via Motor4.
+    (roll=0, pitch=-63.6 deg) instead of level. rawes.lua boots in MODE_PASSIVE
+    (RAWES_MODE=3); the current physical attitude is captured as the passive anchor
+    before arming. ArduPilot's DDFP yaw PID regulates hub yaw via Motor4.
     """
     import simulation.torque_model as _m
     with _torque_stack(
@@ -54,9 +53,6 @@ def torque_armed(tmp_path, request):
         test_name=request.node.name,
         passive_init=True,
         passive_thrust=LUA_YAW_IC_THRUST,
-        passive_roll_rad=_IC_ROLL_RAD,
-        passive_pitch_rad=_IC_PITCH_RAD,
-        passive_yaw_rad=_IC_YAW_RAD,
     ) as ctx:
         yield ctx
 

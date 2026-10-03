@@ -57,10 +57,12 @@ _mock = {
         RAWES_YFF_MAX = 0.7,   -- yaw trim clamp upper bound
         RAWES_YFF_TAU = 0.3,   -- yaw trim time constant
         H_FLYBAR_MODE = 1,
+        H_COL_MIN = 1250,
+        H_COL_MAX = 1750,
         IM_ACRO_COL_EXP = 0,
         RC1_MIN = 1000, RC1_TRIM = 1500, RC1_MAX = 2000, RC1_REVERSED = 0,
         RC2_MIN = 1000, RC2_TRIM = 1500, RC2_MAX = 2000, RC2_REVERSED = 0,
-        RC3_MIN = 1000, RC3_TRIM = 1500, RC3_MAX = 2000, RC3_REVERSED = 0,
+        RC3_MIN = 1000, RC3_TRIM = 1500, RC3_MAX = 2000, RC3_DZ = 10, RC3_REVERSED = 0,
     },
     ch_out      = {},    -- [channel_n] = pwm
     srv_out     = {},    -- [func] = pwm
@@ -305,6 +307,44 @@ end
 
 function ahrs:get_yaw_rad()
     return self:get_yaw()
+end
+
+function ahrs:get_quaternion()
+    local R = _mock.R
+    local trace = R[1] + R[5] + R[9]
+    local qw, qx, qy, qz
+    if trace > 0.0 then
+        local s = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * s
+        qx = (R[8] - R[6]) / s
+        qy = (R[3] - R[7]) / s
+        qz = (R[4] - R[2]) / s
+    elseif R[1] > R[5] and R[1] > R[9] then
+        local s = math.sqrt(1.0 + R[1] - R[5] - R[9]) * 2.0
+        qw = (R[8] - R[6]) / s
+        qx = 0.25 * s
+        qy = (R[2] + R[4]) / s
+        qz = (R[3] + R[7]) / s
+    elseif R[5] > R[9] then
+        local s = math.sqrt(1.0 + R[5] - R[1] - R[9]) * 2.0
+        qw = (R[3] - R[7]) / s
+        qx = (R[2] + R[4]) / s
+        qy = 0.25 * s
+        qz = (R[6] + R[8]) / s
+    else
+        local s = math.sqrt(1.0 + R[9] - R[1] - R[5]) * 2.0
+        qw = (R[4] - R[2]) / s
+        qx = (R[3] + R[7]) / s
+        qy = (R[6] + R[8]) / s
+        qz = 0.25 * s
+    end
+
+    return {
+        q1 = function() return qw end,
+        q2 = function() return qx end,
+        q3 = function() return qy end,
+        q4 = function() return qz end,
+    }
 end
 
 -- ── rc ───────────────────────────────────────────────────────────────────────
