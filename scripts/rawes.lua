@@ -793,8 +793,10 @@ local function run_flight()
                 if not _dbg_cap_logged then
                     _dbg_cap_logged = true
                     gcs:send_text(6, string.format(
-                        "RAWES DBG cap: d_bz=%.2fdeg el=%.2f az=%.2f T=%.1f",
-                        d_cap, math.deg(_el_rad), math.deg(_az_ref), _tension_n))
+                        "RAWES DBG cap: d_bz=%.2fdeg el=%.2f az=%.2f T=%.1f now=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f)",
+                        d_cap, math.deg(_el_rad), math.deg(_az_ref), _tension_n,
+                        bz_now_cap:x(), bz_now_cap:y(), bz_now_cap:z(),
+                        bz_goal_cap:x(), bz_goal_cap:y(), bz_goal_cap:z()))
                 end
                 gcs:send_text(6, string.format(
                     "RAWES steady: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m  rel=(%.2f,%.2f,%.2f)  pos_ned=(%.2f,%.2f,%.2f)  anch=(%.2f,%.2f,%.2f)",
@@ -1272,13 +1274,19 @@ local function update()
         if msgid == _NVI_MSG_ID then
             local _, nv_val, nv_name = string.unpack("<Iic10", nv_raw, 13)
             nv_name = nv_name:gsub("\0", "")
+            local previous = _nv_ints[nv_name]
             _nv_ints[nv_name] = nv_val
-            gcs:send_text(6, string.format("RAWES: rcvd %s=%d", nv_name, nv_val))
+            if previous == nil or previous ~= nv_val then
+                gcs:send_text(6, string.format("RAWES: rcvd %s=%d", nv_name, nv_val))
+            end
         elseif msgid == _NVF_MSG_ID then
             local _, nv_val, nv_name = string.unpack("<Ifc10", nv_raw, 13)
             nv_name = nv_name:gsub("\0", "")
+            local previous = _nv_floats[nv_name]
             _nv_floats[nv_name] = nv_val
-            gcs:send_text(6, string.format("RAWES: rcvd %s=%.0f", nv_name, nv_val))
+            if previous == nil or previous ~= nv_val then
+                gcs:send_text(6, string.format("RAWES: rcvd %s=%.6g", nv_name, nv_val))
+            end
         end
         nv_raw = mavlink.receive_chan()
     end

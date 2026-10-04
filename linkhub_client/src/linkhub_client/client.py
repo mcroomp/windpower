@@ -1,26 +1,18 @@
 from __future__ import annotations
 
 import json
-import collections
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
 from . import mav_constants as mavlink
-from .messages import (
-    CommandLong,
-    NamedValueFloat,
-    ParamSet,
-    RawMessage,
-    RequestDataStream,
-)
-from .records import DiagnosticEvent, DiagnosticRecord, TelemetryRecord
+from .messages import RawMessage
+from .records import DiagnosticEvent, DiagnosticRecord, SimClock, TelemetryRecord
 
 
 class LinkHubError(RuntimeError):
@@ -31,31 +23,30 @@ class WallClock:
     pass
 
 
+@dataclass(frozen=True)
+class MessageBatch:
+    messages: tuple[RawMessage, ...]
+    next_cursor: str
+    next_clock: SimClock
+
+
+@dataclass(frozen=True)
+class DiagnosticBatch:
+    records: tuple[DiagnosticRecord, ...]
+    next_cursor: str
+    next_clock: SimClock
+
+
 class LinkHubClient:
     """Dependency-free client for LinkHub's HTTP v1 API."""
 
     def __init__(
         self,
         address: str = "http://127.0.0.1:8999",
-        **_ignored: Any,
     ) -> None:
         self._base_url = address.rstrip("/")
         self._target_system = 1
         self._target_component = 1
-        self._cursor: str | None = None
-        self._last_operation_cursor: str | None = None
-        self._cursor_lock = threading.Lock()
-        self._receive_cv = threading.Condition()
-        self._receive_queue: collections.deque[RawMessage] = collections.deque()
-        self._receive_stop = threading.Event()
-        self._receive_thread: threading.Thread | None = None
-        self._receive_response = None
-        self._receive_error: BaseException | None = None
-        self._sim_time_s = 0.0
-        self._armed = False
-        self._mavlog_path: Path | None = None
-        self._mavlog_lock = threading.Lock()
-        self._mavlog_file = None
 
     def connect(self, timeout: float = 15.0) -> None:
         deadline = time.monotonic() + timeout
@@ -77,8 +68,6 @@ class LinkHubClient:
                 self._target_component = int(
                     1 if target_component is None else target_component
                 )
-                self._cursor = status.get("cursor")
-                self._start_receive_stream()
                 return
             except (OSError, LinkHubError) as exc:
                 last_error = exc
@@ -88,12 +77,17 @@ class LinkHubClient:
         ) from last_error
 
     def close(self) -> None:
-        self._stop_receive_stream()
-        self.stop_mavlog()
+        pass
 
     def linkhub_status(self) -> dict[str, Any]:
         """Return LinkHub service, run, journal, and transport status."""
         return dict(self._request_json("GET", "/v1/status"))
+
+    def vehicle_status(self) -> dict[str, Any]:
+        return dict(self._request_json("GET", "/v1/mavlink/status"))
+
+    def current_cursor(self) -> str:
+        return str(self.vehicle_status()["cursor"])
 
     def send_diagnostics(
         self,
@@ -110,39 +104,41 @@ class LinkHubClient:
             )
         )
 
-    def iter_diagnostics(
+    def read_diagnostics(
         self,
+        after: str,
         *,
-        after: str | None = None,
-        follow: bool = False,
+        wait: float = 0.0,
+        limit: int = 1_000,
         source: str | None = None,
         event: str | None = None,
         level: str | None = None,
-    ) -> Iterator[DiagnosticRecord]:
-        """Read or follow LinkHub diagnostics from an opaque journal cursor."""
+    ) -> DiagnosticBatch:
+        """Read a finite diagnostic batch after an opaque journal cursor."""
         query = {
             key: value
             for key, value in {
                 "after": after,
-                "follow": "true" if follow else "false",
+                "wait_ms": round(wait * 1_000),
+                "limit": limit,
                 "source": source,
                 "event": event,
                 "level": level,
             }.items()
             if value is not None
         }
-        request = urllib.request.Request(
-            self._base_url
-            + "/v1/diagnostics/events?"
-            + urllib.parse.urlencode(query)
+        result = self._request_json(
+            "GET",
+            "/v1/diagnostics/events?" + urllib.parse.urlencode(query),
+            timeout=max(1.0, wait + 1.0),
         )
-        try:
-            with urllib.request.urlopen(request, timeout=60.0) as response:
-                for line in response:
-                    if line.strip():
-                        yield DiagnosticRecord.from_dict(json.loads(line))
-        except urllib.error.HTTPError as exc:
-            raise LinkHubError(_http_error_message(exc)) from exc
+        return DiagnosticBatch(
+            records=tuple(
+                DiagnosticRecord.from_dict(value) for value in result["records"]
+            ),
+            next_cursor=str(result["next_cursor"]),
+            next_clock=SimClock.from_dict(result["next_clock"]),
+        )
 
     def send_message(self, message: Any) -> str:
         if hasattr(message, "to_request"):
@@ -173,7 +169,6 @@ class LinkHubClient:
                 "timeout_ms": round(timeout * 1000),
             },
         )
-        self._last_operation_cursor = result.get("after_cursor")
         return result
 
     def get_param(self, name: str, timeout: float = 3.0) -> float | None:
@@ -186,7 +181,6 @@ class LinkHubClient:
             )
         except LinkHubError:
             return None
-        self._last_operation_cursor = result.get("after_cursor")
         return float(result["value"])
 
     def set_param(
@@ -196,7 +190,6 @@ class LinkHubClient:
         *,
         timeout: float = 3.0,
         param_type: int | None = None,
-        **_ignored: Any,
     ) -> bool:
         try:
             result = self._request_json(
@@ -217,7 +210,6 @@ class LinkHubClient:
             )
         except LinkHubError:
             return False
-        self._last_operation_cursor = result.get("after_cursor")
         return abs(float(result["value"]) - float(value)) < 1e-4
 
     def fetch_all_params(self, timeout: float = 15.0) -> dict[str, float]:
@@ -262,10 +254,6 @@ class LinkHubClient:
             str(item["name"]): dict(item)
             for item in result["parameters"]
         }
-        if records:
-            self._last_operation_cursor = next(
-                reversed(records.values())
-            ).get("after_cursor")
         return records
 
     def set_mode(
@@ -273,7 +261,6 @@ class LinkHubClient:
         custom_mode: int,
         *,
         timeout: float = 10.0,
-        **_ignored: Any,
     ) -> bool:
         result = self.command(
             mavlink.MAV_CMD_DO_SET_MODE,
@@ -284,17 +271,17 @@ class LinkHubClient:
             raise LinkHubError(f"Mode {custom_mode} was rejected: {result}")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            heartbeat = self._recv(type="HEARTBEAT", blocking=True, timeout=0.5)
-            if (
-                heartbeat is not None
-                and int(getattr(heartbeat, "custom_mode", -1)) == custom_mode
-            ):
+            if int(self.vehicle_status().get("custom_mode", -1)) == custom_mode:
                 return True
+            time.sleep(0.05)
         raise TimeoutError(f"Mode {custom_mode} was not confirmed by heartbeat")
 
     @property
     def is_armed(self) -> bool:
-        return self._armed
+        return bool(
+            int(self.vehicle_status().get("base_mode", 0))
+            & mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        )
 
     def arm(
         self,
@@ -327,14 +314,15 @@ class LinkHubClient:
         return self._wait_armed(False, timeout)
 
     def sim_now(self) -> float:
-        return self._sim_time_s
+        clock = SimClock.from_dict(self.vehicle_status()["sim_clock"])
+        return float(clock.time_boot_ms or 0) / 1000.0
 
     def sim_sleep(self, duration_s: float, check=None) -> None:
         deadline = self.sim_now() + duration_s
         while self.sim_now() < deadline:
-            self._recv(blocking=True, timeout=0.1)
             if check is not None:
                 check()
+            time.sleep(0.02)
 
     def set_message_rates(
         self,
@@ -353,9 +341,9 @@ class LinkHubClient:
     def _wait_armed(self, expected: bool, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            heartbeat = self._recv(type="HEARTBEAT", blocking=True, timeout=0.5)
-            if heartbeat is not None and self._armed == expected:
+            if self.is_armed == expected:
                 return True
+            time.sleep(0.05)
         state = "armed" if expected else "disarmed"
         raise TimeoutError(f"Vehicle was not confirmed {state} by heartbeat")
 
@@ -365,56 +353,44 @@ class LinkHubClient:
             [float(message_id), float(interval_us)],
         )
 
-    def _recv(
+    def read_messages(
         self,
-        type: str | list[str] | tuple[str, ...] | set[str] | None = None,
-        blocking: bool = True,
-        timeout: float = 1.0,
-    ) -> Any | None:
-        accepted = None if type is None else {
-            name.upper()
-            for name in ([type] if isinstance(type, str) else type)
-        }
-        deadline = time.monotonic() + max(timeout, 0.0)
-        with self._receive_cv:
-            while True:
-                for index, message in enumerate(self._receive_queue):
-                    if accepted is None or message.get_type() in accepted:
-                        del self._receive_queue[index]
-                        self._process_received(message)
-                        return message
-                if self._receive_error is not None:
-                    error = self._receive_error
-                    self._receive_error = None
-                    raise LinkHubError("Telemetry stream failed") from error
-                if not blocking:
-                    return None
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                self._receive_cv.wait(remaining)
-
-    def receive(
-        self,
+        after: str,
         message_types: str | list[str] | tuple[str, ...] | set[str] | None = None,
         *,
-        timeout: float = 1.0,
-        blocking: bool = True,
-    ) -> RawMessage | None:
-        return self._recv(type=message_types, blocking=blocking, timeout=timeout)
+        direction: str | None = None,
+        wait: float = 0.0,
+        limit: int = 1_000,
+    ) -> MessageBatch:
+        records, next_cursor, next_clock = self._read_telemetry_batch(
+            after,
+            message_types=message_types,
+            direction=direction,
+            wait=wait,
+            limit=limit,
+        )
+        return MessageBatch(
+            messages=tuple(_decode_record(record) for record in records),
+            next_cursor=next_cursor,
+            next_clock=next_clock,
+        )
 
-    def start_mavlog(self, path: str | Path, **_ignored: Any) -> None:
-        self.stop_mavlog()
-        self._mavlog_path = Path(path)
-        self._mavlog_path.parent.mkdir(parents=True, exist_ok=True)
-        self._mavlog_file = self._mavlog_path.open("w", encoding="utf-8")
-
-    def stop_mavlog(self) -> None:
-        with self._mavlog_lock:
-            if self._mavlog_file is not None:
-                self._mavlog_file.close()
-            self._mavlog_file = None
-            self._mavlog_path = None
+    def export_mavlog(self, path: str | Path, after: str) -> str:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cursor = after
+        with output_path.open("a", encoding="utf-8") as output:
+            while True:
+                records, next_cursor, _next_clock = self._read_telemetry_batch(
+                    cursor,
+                    limit=10_000,
+                    request_timeout=30.0,
+                )
+                for record in records:
+                    _write_mavlog_record(output, record)
+                if next_cursor == cursor:
+                    return cursor
+                cursor = next_cursor
 
     def list_files(self, path: str) -> list[dict[str, Any]]:
         result = self._request_json(
@@ -522,7 +498,6 @@ class LinkHubClient:
             ) as response, partial_path.open("wb") as output:
                 while chunk := response.read(64 * 1024):
                     output.write(chunk)
-                cursor = response.headers.get("X-LinkHub-After-Cursor")
         except urllib.error.HTTPError as exc:
             partial_path.unlink(missing_ok=True)
             try:
@@ -535,8 +510,6 @@ class LinkHubClient:
             partial_path.unlink(missing_ok=True)
             raise
         partial_path.replace(destination_path)
-        if cursor:
-            self._last_operation_cursor = cursor
         return destination_path
 
     def motor_status(self) -> dict[str, Any]:
@@ -564,8 +537,6 @@ class LinkHubClient:
         self,
         message_name: str,
         payload: dict[str, Any],
-        *,
-        update_cursor: bool = True,
     ) -> str:
         result = self._request_json("POST", "/v1/mavlink/messages", {
             "message": message_name,
@@ -574,85 +545,44 @@ class LinkHubClient:
         cursor = str(result["after_cursor"])
         return cursor
 
-    def _start_receive_stream(self) -> None:
-        if self._receive_thread is not None and self._receive_thread.is_alive():
-            return
-        self._receive_stop.clear()
-        self._receive_error = None
-        self._receive_thread = threading.Thread(
-            target=self._receive_worker,
-            daemon=True,
-            name="linkhub-client-receive",
+    def _read_telemetry_batch(
+        self,
+        after: str,
+        message_types: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        *,
+        direction: str | None = None,
+        wait: float = 0.0,
+        limit: int = 1_000,
+        request_timeout: float | None = None,
+    ) -> tuple[list[TelemetryRecord], str, SimClock]:
+        if wait < 0.0:
+            raise ValueError("wait must be non-negative")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        query = {
+            "after": after,
+            "wait_ms": round(wait * 1_000),
+            "limit": limit,
+        }
+        if message_types is not None:
+            names = [message_types] if isinstance(message_types, str) else message_types
+            query["messages"] = ",".join(sorted(name.upper() for name in names))
+        if direction is not None:
+            query["direction"] = direction
+        result = self._request_json(
+            "GET",
+            "/v1/mavlink/messages?" + urllib.parse.urlencode(query),
+            timeout=(
+                max(5.0, wait + 2.0)
+                if request_timeout is None
+                else request_timeout
+            ),
         )
-        self._receive_thread.start()
-
-    def _stop_receive_stream(self) -> None:
-        self._receive_stop.set()
-        response = self._receive_response
-        if response is not None:
-            try:
-                response.close()
-            except OSError:
-                pass
-        with self._receive_cv:
-            self._receive_cv.notify_all()
-        if (
-            self._receive_thread is not None
-            and self._receive_thread is not threading.current_thread()
-        ):
-            self._receive_thread.join(timeout=2.0)
-        self._receive_thread = None
-        self._receive_response = None
-
-    def _receive_worker(self) -> None:
-        while not self._receive_stop.is_set():
-            query = {"direction": "rx", "follow": "true"}
-            with self._cursor_lock:
-                if self._cursor:
-                    query["after"] = self._cursor
-            request = urllib.request.Request(
-                self._base_url
-                + "/v1/mavlink/messages?"
-                + urllib.parse.urlencode(query)
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=5.0) as response:
-                    self._receive_response = response
-                    for line in response:
-                        if self._receive_stop.is_set():
-                            return
-                        if not line.strip():
-                            continue
-                        record = TelemetryRecord.from_dict(json.loads(line))
-                        message = _decode_record(record)
-                        with self._cursor_lock:
-                            self._cursor = record.cursor
-                        self._write_mavlog_record(record)
-                        with self._receive_cv:
-                            self._receive_queue.append(message)
-                            self._receive_cv.notify_all()
-            except (
-                AttributeError,
-                TimeoutError,
-                OSError,
-                urllib.error.URLError,
-                ValueError,
-            ):
-                if self._receive_stop.is_set():
-                    return
-                time.sleep(0.05)
-            finally:
-                self._receive_response = None
-
-    def _process_received(self, message: RawMessage) -> None:
-        boot_ms = getattr(message, "time_boot_ms", 0)
-        if boot_ms:
-            self._sim_time_s = max(self._sim_time_s, int(boot_ms) / 1000.0)
-        if message.get_type() == "HEARTBEAT":
-            self._armed = bool(
-                int(getattr(message, "base_mode", 0))
-                & mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-            )
+        return (
+            [TelemetryRecord.from_dict(value) for value in result["records"]],
+            str(result["next_cursor"]),
+            SimClock.from_dict(result["next_clock"]),
+        )
 
     def _request_json(
         self,
@@ -678,22 +608,8 @@ class LinkHubClient:
         except urllib.error.HTTPError as exc:
             raise LinkHubError(_http_error_message(exc)) from exc
 
-    def _write_mavlog_record(self, record: TelemetryRecord) -> None:
-        with self._mavlog_lock:
-            if self._mavlog_file is None:
-                return
-            output = {
-                "_t_wall": record.received_time_ns / 1_000_000_000,
-                "_dir": record.direction,
-                "mavpackettype": record.message,
-                **record.fields,
-            }
-            self._mavlog_file.write(json.dumps(output) + "\n")
-            self._mavlog_file.flush()
-
-
 class LinkHubMotorController:
-    """Compatibility-shaped logical motor client backed only by LinkHub."""
+    """Logical motor client backed by LinkHub."""
 
     def __init__(
         self,
@@ -775,6 +691,22 @@ class LinkHubMotorController:
 
 def _decode_record(record: TelemetryRecord) -> RawMessage:
     return RawMessage(record.message, dict(record.fields))
+
+
+def _write_mavlog_record(output, record: TelemetryRecord) -> None:
+    output.write(json.dumps({
+        "_t_wall": record.received_time_ns / 1_000_000_000,
+        "_dir": record.direction,
+        "_sim_epoch": record.sim_clock.epoch,
+        "_sim_time_boot_ms": record.sim_clock.time_boot_ms,
+        "_sim_time_quality": (
+            None
+            if record.sim_clock.quality is None
+            else record.sim_clock.quality.value
+        ),
+        "mavpackettype": record.message,
+        **record.fields,
+    }) + "\n")
 
 
 def _http_error_message(exc: urllib.error.HTTPError) -> str:

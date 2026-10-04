@@ -41,11 +41,36 @@ runs in its own fresh Docker container, one per test file.
   one ephemeral container per test file automatically — there is no persistent
   dev container to manage.
 - `bash setup.sh build` stores the expensive runtime as the versioned
-  `rawes-sim-ardupilot-base:Copter-4.7.0-v1` image and reuses it while that tag
-  exists. Set `RAWES_REBUILD_ARDUPILOT=1` only when intentionally rebuilding
-  that base (for example after changing its Dockerfile stages or ArduPilot tag).
+  `rawes-sim-ardupilot-base:Copter-4.7.1-v1` image. The final `rawes-sim` image
+  carries a deterministic hash of its Dockerfile, Python requirement files, and
+  LinkHub manifests/source. Stack startup compares that label first and skips
+  Docker BuildKit entirely when it matches. A changed input rebuilds through
+  the normal layered cache; LinkHub remains independent of the ArduPilot
+  compilation stage. Set `RAWES_REBUILD_ARDUPILOT=1` only to intentionally
+  disable that cache and force the expensive base rebuild.
+- The ArduPilot source is pinned to the official `Copter-4.7.1` release and
+  commit `dbe792162d06cab66c3475fd5556bf7a120f119e`; the Docker build verifies the
+  checked-out commit before compiling.
+- Before collection, `test.sh` probes the selected image for Python 3.12+, the
+  ArduCopter-heli binary, and LinkHub. An incompatible cached image fails before
+  any workers start.
+- `test.sh -n N` treats `N` as an upper bound. On the supported Windows
+  workstation it runs at most two 400 Hz lockstep stacks concurrently; higher
+  concurrency causes host scheduling stalls and UDP loss rather than useful
+  throughput. The LinkHub stress test runs exclusively so its 100 Hz transport
+  assertion measures LinkHub instead of contention from another stack.
+- Each stack-test file has an outer 10-minute wall-clock deadline in addition
+  to pytest's in-process timeout. This catches blocked subprocesses and native
+  calls that pytest cannot interrupt. Override it with
+  `RAWES_STACK_TEST_TIMEOUT_S=<seconds>` for an intentional long diagnostic run.
+- The physical mediator and ArduPilot remain in 400 Hz lockstep, while the
+  diagnostic physics CSV is sampled at 100 Hz to match the fastest MAVLink
+  observations without serializing four duplicate rows per observation.
+- Pass `--profile-lockstep` to log five-second timing windows split into
+  ArduPilot receive wait, mediator step, and UDP send time.
 - Stack test logs land in `simulation/logs/{test_name}/` —
-  `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.csv`, `arducopter.log`.
+  `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.physics.csv`,
+  enriched `telemetry.csv`, `mavlink.jsonl`, and `arducopter.log`.
   Suite summary: `simulation/logs/suite_summary.json`.
 - **`internal_controller` MUST be `False` for all full-stack flight tests** — the
   whole point is to validate that ArduPilot + Lua actually fly the vehicle.
@@ -64,10 +89,17 @@ The LinkHub build stage also keeps Cargo registry and target artifacts in
 BuildKit cache mounts, so source-only LinkHub changes recompile the crate rather
 than every Rust dependency.
 
-Pytest fixtures and the mediator consume the shared HTTP/NDJSON API on
-`127.0.0.1:8999`. The mediator's JSON physics link on UDP 9002/9003 and the
-winch command socket remain direct because they are not MAVLink transports.
-There is no dedicated mediator MAVLink connection on port 5762.
+Pytest fixtures consume the shared finite HTTP/JSON API on `127.0.0.1:8999`.
+The mediator does not consume LinkHub or MAVLink: its JSON physics link on UDP
+9002/9003 and the winch command socket remain direct because they model the
+physical world rather than MAVLink transports. There is no dedicated mediator
+MAVLink connection on port 5762.
+
+The mediator writes `telemetry.physics.csv`. During fixture teardown the harness
+exports LinkHub's journal range to `mavlink.jsonl`, preserves the raw physics
+artifact, and runs `analysis/enrich_sitl_telemetry.py` to produce the canonical
+`telemetry.csv`. Enrichment uses LinkHub simulation-clock metadata and
+latest-observation sampling; it never runs in the lockstep process.
 
 The dependency-free `linkhub_client` project supplies the common record
 dataclasses and HTTP client. It must not import `pymavlink`; protocol framing
@@ -114,6 +146,10 @@ Unit/simtest/stack runs can take 1-5+ minutes. Handle them like this:
 `/tmp` is NOT one shared filesystem on Windows dev boxes — Git Bash (mingw/MSYS2,
 the default terminal) and WSL2 (used for `docker`/`test.sh stack`) each have their
 own separate `/tmp`:
+
+Docker is WSL-only on the supported workstation. Invoke `bash test.sh ...` or
+`bash setup.sh build` from Git Bash and let those scripts re-enter WSL; do not
+use Docker Desktop's native Windows engine or manually wrap commands with `wsl`.
 
 - A bare `> /tmp/foo.log` redirection in a Git Bash command writes to Git Bash's
   own `/tmp` (really `C:\Users\<user>\AppData\Local\Temp\foo.log` — check with
@@ -202,9 +238,10 @@ first — diagnosing from bad telemetry produces wrong conclusions.
 
 The physics worker must reply to **every** SITL servo packet without exception —
 skipping a reply causes ArduPilot to stall permanently. `gcs.sim_now()` returns
-`time_boot_ms/1000` from the most recently processed MAVLink message, not
-wall-clock time. `sim_sleep(N)` waits N sim-seconds; the physics loop must keep
-running during the wait. Full reference:
+LinkHub's latest observed `time_boot_ms/1000`, not wall-clock time and not
+necessarily the timestamp of a message just returned by a filtered journal
+read. `sim_sleep(N)` waits N sim-seconds; the physics loop must keep running
+during the wait. Full reference:
 [design/simulation.md § SITL Lockstep Protocol](simulation.md).
 
 ---

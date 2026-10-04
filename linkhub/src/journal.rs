@@ -18,10 +18,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::records::{DiagnosticEvent, JournalRecord, RecordPayload};
+use crate::records::{DiagnosticEvent, JournalRecord, RecordPayload, SimClock, SimTimeQuality};
 
 const CHUNK_MAGIC: &[u8; 8] = b"LHCHNK01";
-const CHUNK_VERSION: u16 = 1;
+const CHUNK_VERSION: u16 = 2;
 
 #[derive(Clone, Debug)]
 pub struct JournalConfig {
@@ -82,7 +82,11 @@ enum Command {
     Append {
         payload: RecordPayload,
         correlation_id: Option<Uuid>,
+        time_boot_ms: Option<u64>,
         reply: oneshot::Sender<Result<AppendResult, JournalError>>,
+    },
+    BeginClockEpoch {
+        reply: oneshot::Sender<u64>,
     },
     Snapshot {
         reply: oneshot::Sender<JournalSnapshot>,
@@ -97,7 +101,13 @@ enum Command {
 
 struct JournalSnapshot {
     tail: u64,
+    sim_clock: SimClock,
     pending: Vec<JournalRecord>,
+}
+
+pub struct JournalRead {
+    pub records: Vec<JournalRecord>,
+    pub tail_clock: SimClock,
 }
 
 #[derive(Clone)]
@@ -146,19 +156,45 @@ impl JournalHandle {
         payload: RecordPayload,
         correlation_id: Option<Uuid>,
     ) -> Result<u64, JournalError> {
-        Ok(self.append_record(payload, correlation_id).await?.sequence)
+        Ok(self
+            .append_record(payload, correlation_id, None)
+            .await?
+            .sequence)
+    }
+
+    pub async fn append_with_time_boot_ms(
+        &self,
+        payload: RecordPayload,
+        correlation_id: Option<Uuid>,
+        time_boot_ms: u64,
+    ) -> Result<u64, JournalError> {
+        Ok(self
+            .append_record(payload, correlation_id, Some(time_boot_ms))
+            .await?
+            .sequence)
+    }
+
+    pub async fn begin_clock_epoch(&self) -> Result<u64, JournalError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Command::BeginClockEpoch { reply })
+            .await
+            .map_err(|_| JournalError::Unavailable)?;
+        response.await.map_err(|_| JournalError::Unavailable)
     }
 
     async fn append_record(
         &self,
         payload: RecordPayload,
         correlation_id: Option<Uuid>,
+        time_boot_ms: Option<u64>,
     ) -> Result<AppendResult, JournalError> {
         let (reply, response) = oneshot::channel();
         self.sender
             .send(Command::Append {
                 payload,
                 correlation_id,
+                time_boot_ms,
                 reply,
             })
             .await
@@ -174,17 +210,20 @@ impl JournalHandle {
             return Err(JournalError::WrongRun);
         }
         let correlation_id = event.correlation_id;
-        self.append_record(RecordPayload::Diagnostic(Box::new(event)), correlation_id)
-            .await
+        self.append_record(
+            RecordPayload::Diagnostic(Box::new(event)),
+            correlation_id,
+            None,
+        )
+        .await
     }
 
     pub async fn records_after(&self, after: u64) -> Result<Vec<JournalRecord>, JournalError> {
-        let (reply, response) = oneshot::channel();
-        self.sender
-            .send(Command::Snapshot { reply })
-            .await
-            .map_err(|_| JournalError::Unavailable)?;
-        let snapshot = response.await.map_err(|_| JournalError::Unavailable)?;
+        Ok(self.read_after(after).await?.records)
+    }
+
+    pub async fn read_after(&self, after: u64) -> Result<JournalRead, JournalError> {
+        let snapshot = self.snapshot().await?;
         let mut records = read_flushed_after(&self.directory, after).await?;
         records.retain(|record| record.sequence <= snapshot.tail);
         let flushed_sequences: HashSet<u64> =
@@ -193,7 +232,24 @@ impl JournalHandle {
             record.sequence > after && !flushed_sequences.contains(&record.sequence)
         }));
         records.sort_unstable_by_key(|record| record.sequence);
-        Ok(records)
+        Ok(JournalRead {
+            records,
+            tail_clock: snapshot.sim_clock,
+        })
+    }
+
+    pub async fn checkpoint(&self) -> Result<(u64, SimClock), JournalError> {
+        let snapshot = self.snapshot().await?;
+        Ok((snapshot.tail, snapshot.sim_clock))
+    }
+
+    async fn snapshot(&self) -> Result<JournalSnapshot, JournalError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Command::Snapshot { reply })
+            .await
+            .map_err(|_| JournalError::Unavailable)?;
+        response.await.map_err(|_| JournalError::Unavailable)
     }
 
     pub async fn flush(&self) -> Result<(), JournalError> {
@@ -228,6 +284,7 @@ async fn run_journal(
     let mut pending = Vec::with_capacity(config.max_chunk_records);
     let mut pending_bytes = 0_usize;
     let mut diagnostic_sequences: HashMap<(String, u64), u64> = HashMap::new();
+    let mut sim_clock = SimClock::default();
     let mut ticker = time::interval(config.flush_interval);
     ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     ticker.tick().await;
@@ -241,7 +298,12 @@ async fn run_journal(
                     return;
                 };
                 match command {
-                    Command::Append { payload, correlation_id, reply } => {
+                    Command::Append {
+                        payload,
+                        correlation_id,
+                        time_boot_ms,
+                        reply,
+                    } => {
                         let diagnostic_key = match &payload {
                             RecordPayload::Diagnostic(event) => Some((
                                 event.source_instance.clone(),
@@ -260,7 +322,27 @@ async fn run_journal(
                             continue;
                         }
                         let sequence = tail.fetch_add(1, Ordering::AcqRel) + 1;
-                        let record = JournalRecord::new(sequence, correlation_id, payload);
+                        let record_clock = match time_boot_ms {
+                            Some(observed) if sim_clock.time_boot_ms.is_none_or(|last| observed >= last) => {
+                                sim_clock.time_boot_ms = Some(observed);
+                                SimClock {
+                                    quality: Some(SimTimeQuality::Exact),
+                                    ..sim_clock
+                                }
+                            }
+                            _ if sim_clock.time_boot_ms.is_some() => SimClock {
+                                quality: Some(SimTimeQuality::LastObserved),
+                                ..sim_clock
+                            },
+                            _ => sim_clock,
+                        };
+                        sim_clock = record_clock;
+                        let record = JournalRecord::new(
+                            sequence,
+                            correlation_id,
+                            record_clock,
+                            payload,
+                        );
                         pending_bytes += estimated_size(&record);
                         pending.push(record.clone());
                         let _ = live.send(Arc::new(record));
@@ -280,9 +362,17 @@ async fn run_journal(
                             pending_bytes = 0;
                         }
                     }
+                    Command::BeginClockEpoch { reply } => {
+                        sim_clock = SimClock {
+                            epoch: sim_clock.epoch + 1,
+                            ..SimClock::default()
+                        };
+                        let _ = reply.send(sim_clock.epoch);
+                    }
                     Command::Snapshot { reply } => {
                         let _ = reply.send(JournalSnapshot {
                             tail: tail.load(Ordering::Acquire),
+                            sim_clock,
                             pending: pending.clone(),
                         });
                     }
@@ -432,7 +522,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::records::{DiagnosticLevel, wall_time_ns};
+    use crate::records::{DiagnosticLevel, Direction, MavlinkFrame, SimTimeQuality, wall_time_ns};
 
     fn diagnostic(run_id: Uuid, source_sequence: u64) -> DiagnosticEvent {
         let mut fields = Map::new();
@@ -456,6 +546,84 @@ mod tests {
             fields,
             related_records: Vec::new(),
         }
+    }
+
+    fn frame() -> MavlinkFrame {
+        MavlinkFrame {
+            link_id: "test".to_owned(),
+            direction: Direction::Rx,
+            protocol_version: 2,
+            sequence: 1,
+            system_id: 1,
+            component_id: 1,
+            message_id: 30,
+            message_name: "ATTITUDE".to_owned(),
+            fields: Map::new(),
+            signed: false,
+            frame: vec![1, 2, 3],
+        }
+    }
+
+    #[tokio::test]
+    async fn stamps_records_with_epoch_clock_watermarks() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+
+        journal
+            .append_diagnostic(diagnostic(run_id, 1))
+            .await
+            .expect("startup diagnostic");
+        assert_eq!(journal.begin_clock_epoch().await.expect("epoch"), 1);
+        journal
+            .append_with_time_boot_ms(RecordPayload::MavlinkFrame(frame()), None, 1_250)
+            .await
+            .expect("timestamped frame");
+        journal
+            .append_diagnostic(diagnostic(run_id, 2))
+            .await
+            .expect("diagnostic");
+        journal
+            .append_with_time_boot_ms(RecordPayload::MavlinkFrame(frame()), None, 1_200)
+            .await
+            .expect("out-of-order frame");
+        assert_eq!(journal.begin_clock_epoch().await.expect("epoch"), 2);
+        journal
+            .append_diagnostic(diagnostic(run_id, 3))
+            .await
+            .expect("new epoch diagnostic");
+
+        let records = journal.records_after(0).await.expect("records");
+        assert_eq!(records[0].sim_clock, SimClock::default());
+        assert_eq!(
+            records[1].sim_clock,
+            SimClock {
+                epoch: 1,
+                time_boot_ms: Some(1_250),
+                quality: Some(SimTimeQuality::Exact),
+            }
+        );
+        assert_eq!(
+            records[2].sim_clock,
+            SimClock {
+                epoch: 1,
+                time_boot_ms: Some(1_250),
+                quality: Some(SimTimeQuality::LastObserved),
+            }
+        );
+        assert_eq!(records[3].sim_clock, records[2].sim_clock);
+        assert_eq!(
+            records[4].sim_clock,
+            SimClock {
+                epoch: 2,
+                time_boot_ms: None,
+                quality: None,
+            }
+        );
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +30,23 @@ pub enum SimTimeQuality {
     Exact,
     LastObserved,
     Estimated,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SimClock {
+    pub epoch: u64,
+    pub time_boot_ms: Option<u64>,
+    pub quality: Option<SimTimeQuality>,
+}
+
+impl Default for SimClock {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            time_boot_ms: None,
+            quality: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -86,17 +103,24 @@ pub struct JournalRecord {
     pub sequence: u64,
     pub ingest_time_ns: u64,
     pub correlation_id: Option<Uuid>,
+    pub sim_clock: SimClock,
     pub payload: RecordPayload,
 }
 
 impl JournalRecord {
     #[must_use]
-    pub fn new(sequence: u64, correlation_id: Option<Uuid>, payload: RecordPayload) -> Self {
+    pub fn new(
+        sequence: u64,
+        correlation_id: Option<Uuid>,
+        sim_clock: SimClock,
+        payload: RecordPayload,
+    ) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             sequence,
             ingest_time_ns: wall_time_ns(),
             correlation_id,
+            sim_clock,
             payload,
         }
     }

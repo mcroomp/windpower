@@ -16,6 +16,7 @@ class TelemetryRecord:
     message: str
     fields: dict[str, Any]
     cursor: str
+    sim_clock: SimClock
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> TelemetryRecord:
@@ -34,6 +35,7 @@ class TelemetryRecord:
             message=str(value["message"]),
             fields=dict(value["fields"]),
             cursor=str(value["cursor"]),
+            sim_clock=SimClock.from_dict(value["sim_clock"]),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +55,25 @@ class SimTimeQuality(StrEnum):
     EXACT = "exact"
     LAST_OBSERVED = "last_observed"
     ESTIMATED = "estimated"
+
+
+@dataclass(frozen=True)
+class SimClock:
+    epoch: int
+    time_boot_ms: int | None
+    quality: SimTimeQuality | None
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> SimClock:
+        return cls(
+            epoch=int(value["epoch"]),
+            time_boot_ms=_optional_int(value.get("time_boot_ms")),
+            quality=(
+                None
+                if value.get("quality") is None
+                else SimTimeQuality(value["quality"])
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -128,6 +149,7 @@ class DiagnosticRecord:
     cursor: str
     ingest_time_ns: int
     correlation_id: UUID | None
+    sim_clock: SimClock
     event: DiagnosticEvent
 
     @classmethod
@@ -139,6 +161,7 @@ class DiagnosticRecord:
             cursor=str(value["cursor"]),
             ingest_time_ns=int(value["ingest_time_ns"]),
             correlation_id=_optional_uuid(value.get("correlation_id")),
+            sim_clock=SimClock.from_dict(value["sim_clock"]),
             event=DiagnosticEvent.from_dict(value["data"]),
         )
 

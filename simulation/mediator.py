@@ -34,12 +34,9 @@ import socket
 import sys
 import os
 import time
-import threading
 from pathlib import Path
 
 import numpy as np
-from linkhub_client import mav_constants as mavlink
-from linkhub_client.client import LinkHubClient
 
 # Local modules (same directory)
 from simulation.physics_core import PhysicsCore
@@ -63,49 +60,10 @@ from types import SimpleNamespace
 # Configuration defaults
 # ---------------------------------------------------------------------------
 DT_TARGET    = 1.0 / SIM_CLOCK_HZ   # fixed lockstep loop rate [s]
-TELEMETRY_HZ = 400.0           # telemetry CSV write rate [Hz]
+TELEMETRY_HZ = 100.0           # diagnostic CSV rate; physics remains at 400 Hz
 LOG_INTERVAL = 1.0             # position/attitude log interval [s]
 WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
 
-
-# ---------------------------------------------------------------------------
-# Async MAVLink snapshot (latest-value cache sampled at telemetry write time)
-# ---------------------------------------------------------------------------
-_ASYNC_MAV_LOCK = threading.Lock()
-_ASYNC_MAV: dict[str, float] = {}
-_ASYNC_ARMED = False
-
-
-def update_async_mavlink(fields: dict[str, float]) -> None:
-    """Update the shared latest-value MAVLink snapshot.
-
-    Unknown keys are ignored. Values are coerced to float.
-    """
-    if not fields:
-        return
-    with _ASYNC_MAV_LOCK:
-        for key, value in fields.items():
-            if key in ASYNC_MAV_COLUMNS:
-                _ASYNC_MAV[key] = float(value)
-
-
-def get_async_mavlink_snapshot() -> dict[str, float]:
-    """Return a copy of the latest async MAVLink snapshot."""
-    with _ASYNC_MAV_LOCK:
-        return dict(_ASYNC_MAV)
-
-
-def update_async_armed(armed: bool) -> None:
-    """Update the latest armed state from HEARTBEAT.base_mode."""
-    global _ASYNC_ARMED
-    with _ASYNC_MAV_LOCK:
-        _ASYNC_ARMED = bool(armed)
-
-
-def get_async_armed() -> bool:
-    """Return the latest armed state from HEARTBEAT.base_mode."""
-    with _ASYNC_MAV_LOCK:
-        return bool(_ASYNC_ARMED)
 
 # GB4008 yaw-damper gain [N·m·s/rad].  Large value → near-perfect yaw lock.
 # Reduce to model imperfect GB4008 damping / yaw drift.
@@ -180,181 +138,6 @@ def run_mediator(args, trajectory=None):
     ev.open()
 
     cfg = _mcfg.load(getattr(args, "config", None))
-
-    def _quat_wxyz_to_rpy_deg(q):
-        if q is None or len(q) < 4:
-            return (float("nan"), float("nan"), float("nan"))
-        w, x, y, z = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
-        sinr_cosp = 2.0 * (w * x + y * z)
-        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-        roll = math.atan2(sinr_cosp, cosr_cosp)
-        sinp = 2.0 * (w * y - z * x)
-        if abs(sinp) >= 1.0:
-            pitch = math.copysign(math.pi / 2.0, sinp)
-        else:
-            pitch = math.asin(sinp)
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-        return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
-
-    _linkhub_url = str(cfg.get("linkhub_url", "") or "").strip()
-    _mavlog_diag_interval_s = float(cfg.get("mavlink_log_diag_interval_s", 5.0))
-    _mavlog_stop = threading.Event()
-    _mavlog_thread = None
-
-    def _mavlink_logger_worker():
-        hub = LinkHubClient(_linkhub_url)
-        try:
-            hub.connect(timeout=90.0)
-        except Exception as exc:
-            log.warning("Failed to connect to LinkHub '%s': %s", _linkhub_url, exc)
-            return
-
-        rx_total = 0
-        rx_counts = {
-            "ATTITUDE": 0,
-            "ATTITUDE_TARGET": 0,
-            "SERVO_OUTPUT_RAW": 0,
-            "NAMED_VALUE_FLOAT": 0,
-            "HEARTBEAT": 0,
-        }
-        dropped_types = 0
-        last_boot_ms = 0
-        last_rx_wall = time.monotonic()
-        next_diag_wall = last_rx_wall + _mavlog_diag_interval_s
-        _nvf_key_map = {
-            "YFF_T":  "mav_nvf_yff_trim",
-            "YFF_U":  "mav_nvf_yff_u",
-            "YFF_GZ": "mav_nvf_yff_gz",
-            "OL_RSP": "roll_sp_rads",
-            "OL_PSP": "pitch_sp_rads",
-            "OL_YSP": "yaw_sp_rads",
-            "OL_RER": "roll_rate_err_rads",
-            "OL_PER": "pitch_rate_err_rads",
-            "OL_YER": "yaw_rate_err_rads",
-            "OL_AP":  "lua_ol_alt_p_contrib",
-            "OL_AI":  "lua_ol_alt_i_contrib",
-            "OL_AD":  "lua_ol_alt_d_contrib",
-            "OL_COL": "lua_ol_thrust_cmd",
-            "OL_TEN": "lua_ol_tension_n",
-        }
-        try:
-            log.info("LinkHub observation connected via %s", _linkhub_url)
-
-            while not _mavlog_stop.is_set() and not is_stopped():
-                msg = hub.receive(
-                    blocking=True,
-                    timeout=0.10,
-                )
-                now_wall = time.monotonic()
-                if msg is None:
-                    if now_wall >= next_diag_wall:
-                        log.info(
-                            "LinkHub rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d idle_s=%.2f",
-                            rx_total,
-                            rx_counts["HEARTBEAT"],
-                            rx_counts["ATTITUDE"],
-                            rx_counts["ATTITUDE_TARGET"],
-                            rx_counts["SERVO_OUTPUT_RAW"],
-                            rx_counts["NAMED_VALUE_FLOAT"],
-                            dropped_types,
-                            last_boot_ms,
-                            now_wall - last_rx_wall,
-                        )
-                        next_diag_wall = now_wall + _mavlog_diag_interval_s
-                    continue
-
-                mtype = msg.get_type()
-                rx_total += 1
-                if mtype in rx_counts:
-                    rx_counts[mtype] += 1
-                else:
-                    dropped_types += 1
-                last_rx_wall = now_wall
-
-                if now_wall >= next_diag_wall:
-                    log.info(
-                        "LinkHub rx diag: total=%d hb=%d att=%d att_tgt=%d servo=%d nvf=%d dropped=%d last_boot_ms=%d",
-                        rx_total,
-                        rx_counts["HEARTBEAT"],
-                        rx_counts["ATTITUDE"],
-                        rx_counts["ATTITUDE_TARGET"],
-                        rx_counts["SERVO_OUTPUT_RAW"],
-                        rx_counts["NAMED_VALUE_FLOAT"],
-                        dropped_types,
-                        last_boot_ms,
-                    )
-                    next_diag_wall = now_wall + _mavlog_diag_interval_s
-
-                fields = {}
-                _tb = getattr(msg, "time_boot_ms", 0)
-                if _tb:
-                    last_boot_ms = int(_tb)
-                    fields["mav_time_boot_ms"] = float(_tb)
-                _tu = getattr(msg, "time_usec", 0)
-                if _tu:
-                    fields["mav_time_usec"] = float(_tu)
-
-                if mtype == "HEARTBEAT":
-                    _base_mode = int(getattr(msg, "base_mode", 0))
-                    _armed = bool(_base_mode & mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                    update_async_armed(_armed)
-
-                if mtype not in ("ATTITUDE", "ATTITUDE_TARGET", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT", "LOCAL_POSITION_NED", "PID_TUNING"):
-                    if fields:
-                        update_async_mavlink(fields)
-                    continue
-
-                if mtype == "ATTITUDE":
-                    fields["mav_att_roll_deg"] = math.degrees(msg.roll)
-                    fields["mav_att_pitch_deg"] = math.degrees(msg.pitch)
-                    fields["mav_att_yaw_deg"] = math.degrees(msg.yaw)
-                    fields["mav_att_roll_rate_rads"] = msg.rollspeed
-                    fields["mav_att_pitch_rate_rads"] = msg.pitchspeed
-                    fields["mav_att_yaw_rate_rads"] = msg.yawspeed
-                elif mtype == "ATTITUDE_TARGET":
-                    r_deg, p_deg, y_deg = _quat_wxyz_to_rpy_deg(msg.q)
-                    fields["mav_att_target_roll_deg"] = r_deg
-                    fields["mav_att_target_pitch_deg"] = p_deg
-                    fields["mav_att_target_yaw_deg"] = y_deg
-                    fields["mav_att_target_roll_rate_rads"] = msg.body_roll_rate
-                    fields["mav_att_target_pitch_rate_rads"] = msg.body_pitch_rate
-                    fields["mav_att_target_yaw_rate_rads"] = msg.body_yaw_rate
-                elif mtype == "SERVO_OUTPUT_RAW":
-                    fields["mav_servo1_us"] = float(msg.servo1_raw)
-                    fields["mav_servo2_us"] = float(msg.servo2_raw)
-                    fields["mav_servo3_us"] = float(msg.servo3_raw)
-                    fields["mav_servo9_us"] = float(msg.servo9_raw)
-                elif mtype == "NAMED_VALUE_FLOAT":
-                    # Lua diagnostics are streamed as named floats. Keep only the
-                    # telemetry-relevant keys as latest-value async snapshot fields.
-                    mapped = _nvf_key_map.get(msg.name)
-                    if mapped is not None:
-                        fields[mapped] = float(msg.value)
-                elif mtype == "LOCAL_POSITION_NED":
-                    fields["ekf_pos_x"] = msg.x
-                    fields["ekf_pos_y"] = msg.y
-                    fields["ekf_pos_z"] = msg.z
-                elif mtype == "PID_TUNING":
-                    # ArduPilot emits axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
-                    # Only roll/pitch/yaw have telemetry columns (ap_rate_pid_terms).
-                    axis = msg.axis
-                    prefix = {1: "rate_roll", 2: "rate_pitch", 3: "rate_yaw"}.get(axis)
-                    if prefix is not None:
-                        fields[f"{prefix}_p_contrib"] = float(msg.P)
-                        fields[f"{prefix}_i_contrib"] = float(msg.I)
-                        fields[f"{prefix}_d_contrib"] = float(msg.D)
-                        fields[f"{prefix}_ff_contrib"] = float(msg.FF)
-                        fields[f"{prefix}_pdmod"] = float(msg.PDmod)
-                        fields[f"{prefix}_srate"] = float(msg.SRate)
-
-                if fields:
-                    update_async_mavlink(fields)
-        except Exception as exc:
-            log.warning("LinkHub observation thread stopped with error: %s", exc)
-        finally:
-            hub.close()
 
     # Emit a run-ID so post-run analysis can verify all log files belong to
     # the same test run.  Format: RUN_ID=<integer epoch seconds>.
@@ -505,14 +288,6 @@ def run_mediator(args, trajectory=None):
     # -- Connect ---------------------------------------------------------------
     log.info("Binding SITL UDP sockets...")
     sitl.bind()
-    if _linkhub_url:
-        _mavlog_thread = threading.Thread(
-            target=_mavlink_logger_worker,
-            daemon=True,
-            name="mediator-mavlog",
-        )
-        _mavlog_thread.start()
-        log.info("LinkHub observation enabled: %s", _linkhub_url)
     log.info("Python RigidBodyDynamics ready. Starting main loop.")
     _telemetry_stride = max(1, int(round((1.0 / sitl.dt()) / TELEMETRY_HZ)))
     log.info("Telemetry write rate target: %.0f Hz (every %d sim steps)", TELEMETRY_HZ, _telemetry_stride)
@@ -761,7 +536,7 @@ def run_mediator(args, trajectory=None):
         # Unified phase label for telemetry CSV.
         # During kinematic hold, keep startup phases in the same `phase` field.
         if _is_kinematic:
-            _phase_label = "positioning" if get_async_armed() else "waiting_ekf"
+            _phase_label = "positioning"
         else:
             _phase_label = str(_traj_cmd.get("phase", "") or "")
 
@@ -812,7 +587,6 @@ def run_mediator(args, trajectory=None):
 
         # ── Telemetry CSV ─────────────────────────────────────────────────
         if _telemetry_writer is not None and (step % _telemetry_stride == 0):
-            _mav_async = get_async_mavlink_snapshot()
             _rpy = sensor_data["rpy"]
             _ti  = core.tether._last_info
             _aero_v_i = 0.0
@@ -826,6 +600,7 @@ def run_mediator(args, trajectory=None):
                 "frame_count":     int(sitl.frame_count),
                 "phase":           _cur_phase,
                 "note":            _tel_note,
+                **{name: float("nan") for name in ASYNC_MAV_COLUMNS},
                 "damp_alpha":      _damp_alpha,
                 "pos_x":           hub_state["pos"][0],
                 "pos_y":           hub_state["pos"][1],
@@ -865,17 +640,6 @@ def run_mediator(args, trajectory=None):
                 "tilt_lat":        tilt_lat,
                 "tension_feedforward_n":        _traj_cmd.get("tension_feedforward_n", 0.0),
                 "thrust_from_alt_ctrl":          0.0,
-                "lua_ol_alt_p_contrib": _mav_async.get("lua_ol_alt_p_contrib", float("nan")),
-                "lua_ol_alt_i_contrib": _mav_async.get("lua_ol_alt_i_contrib", float("nan")),
-                "lua_ol_alt_d_contrib": _mav_async.get("lua_ol_alt_d_contrib", float("nan")),
-                "lua_ol_thrust_cmd":    _mav_async.get("lua_ol_thrust_cmd",    float("nan")),
-                "lua_ol_tension_n":     _mav_async.get("lua_ol_tension_n",     float("nan")),
-                "roll_sp_rads":    _mav_async.get("roll_sp_rads", 0.0),
-                "pitch_sp_rads":   _mav_async.get("pitch_sp_rads", 0.0),
-                "yaw_sp_rads":     _mav_async.get("yaw_sp_rads", 0.0),
-                "roll_rate_err_rads":  _mav_async.get("roll_rate_err_rads", float("nan")),
-                "pitch_rate_err_rads": _mav_async.get("pitch_rate_err_rads", float("nan")),
-                "yaw_rate_err_rads":   _mav_async.get("yaw_rate_err_rads", float("nan")),
                 # Note: new aero (Pitt-Peters Level 2) does not expose internal
                 # axial/inplane/induced velocity diagnostics. Keep them unset.
                 "aero_Q_spin":     float(aero_result.Q_spin),
@@ -906,48 +670,6 @@ def run_mediator(args, trajectory=None):
                      - np.degrees(np.arctan2(
                          sensor_data["vel_ned"][1], sensor_data["vel_ned"][0]))
                      + 180.0) % 360.0 - 180.0),
-                "mav_time_boot_ms": _mav_async.get("mav_time_boot_ms", float("nan")),
-                "mav_time_usec":    _mav_async.get("mav_time_usec", float("nan")),
-                "mav_att_roll_deg":  _mav_async.get("mav_att_roll_deg", float("nan")),
-                "mav_att_pitch_deg": _mav_async.get("mav_att_pitch_deg", float("nan")),
-                "mav_att_yaw_deg":   _mav_async.get("mav_att_yaw_deg", float("nan")),
-                "mav_att_roll_rate_rads":  _mav_async.get("mav_att_roll_rate_rads", float("nan")),
-                "mav_att_pitch_rate_rads": _mav_async.get("mav_att_pitch_rate_rads", float("nan")),
-                "mav_att_yaw_rate_rads":   _mav_async.get("mav_att_yaw_rate_rads", float("nan")),
-                "mav_att_target_roll_deg": _mav_async.get("mav_att_target_roll_deg", float("nan")),
-                "mav_att_target_pitch_deg": _mav_async.get("mav_att_target_pitch_deg", float("nan")),
-                "mav_att_target_yaw_deg": _mav_async.get("mav_att_target_yaw_deg", float("nan")),
-                "mav_att_target_roll_rate_rads": _mav_async.get("mav_att_target_roll_rate_rads", float("nan")),
-                "mav_att_target_pitch_rate_rads": _mav_async.get("mav_att_target_pitch_rate_rads", float("nan")),
-                "mav_att_target_yaw_rate_rads": _mav_async.get("mav_att_target_yaw_rate_rads", float("nan")),
-                "mav_servo1_us":     _mav_async.get("mav_servo1_us", float("nan")),
-                "mav_servo2_us":     _mav_async.get("mav_servo2_us", float("nan")),
-                "mav_servo3_us":     _mav_async.get("mav_servo3_us", float("nan")),
-                "mav_servo9_us":     _mav_async.get("mav_servo9_us", float("nan")),
-                "mav_nvf_yff_trim":  _mav_async.get("mav_nvf_yff_trim", float("nan")),
-                "mav_nvf_yff_u":     _mav_async.get("mav_nvf_yff_u",    float("nan")),
-                "mav_nvf_yff_gz":    _mav_async.get("mav_nvf_yff_gz",   float("nan")),
-                "rate_roll_p_contrib":  _mav_async.get("rate_roll_p_contrib",  float("nan")),
-                "rate_roll_i_contrib":  _mav_async.get("rate_roll_i_contrib",  float("nan")),
-                "rate_roll_d_contrib":  _mav_async.get("rate_roll_d_contrib",  float("nan")),
-                "rate_roll_ff_contrib": _mav_async.get("rate_roll_ff_contrib", float("nan")),
-                "rate_pitch_p_contrib":  _mav_async.get("rate_pitch_p_contrib",  float("nan")),
-                "rate_pitch_i_contrib":  _mav_async.get("rate_pitch_i_contrib",  float("nan")),
-                "rate_pitch_d_contrib":  _mav_async.get("rate_pitch_d_contrib",  float("nan")),
-                "rate_pitch_ff_contrib": _mav_async.get("rate_pitch_ff_contrib", float("nan")),
-                "rate_yaw_p_contrib":  _mav_async.get("rate_yaw_p_contrib",  float("nan")),
-                "rate_yaw_i_contrib":  _mav_async.get("rate_yaw_i_contrib",  float("nan")),
-                "rate_yaw_d_contrib":  _mav_async.get("rate_yaw_d_contrib",  float("nan")),
-                "rate_yaw_ff_contrib": _mav_async.get("rate_yaw_ff_contrib", float("nan")),
-                "rate_roll_pdmod":   _mav_async.get("rate_roll_pdmod",  float("nan")),
-                "rate_roll_srate":   _mav_async.get("rate_roll_srate",  float("nan")),
-                "rate_pitch_pdmod":  _mav_async.get("rate_pitch_pdmod", float("nan")),
-                "rate_pitch_srate":  _mav_async.get("rate_pitch_srate", float("nan")),
-                "rate_yaw_pdmod":    _mav_async.get("rate_yaw_pdmod",   float("nan")),
-                "rate_yaw_srate":    _mav_async.get("rate_yaw_srate",   float("nan")),
-                "ekf_pos_x":         _mav_async.get("ekf_pos_x",        float("nan")),
-                "ekf_pos_y":         _mav_async.get("ekf_pos_y",        float("nan")),
-                "ekf_pos_z":         _mav_async.get("ekf_pos_z",        float("nan")),
                 "servo_s1_us":     float(sitl.last_pwm_raw[0]),
                 "servo_s2_us":     float(sitl.last_pwm_raw[1]),
                 "servo_s3_us":     float(sitl.last_pwm_raw[2]),
@@ -991,12 +713,6 @@ def run_mediator(args, trajectory=None):
         raise
     finally:
         # -- Graceful shutdown ------------------------------------------------
-        _mavlog_stop.set()
-        if _mavlog_thread is not None:
-            try:
-                _mavlog_thread.join(timeout=1.0)
-            except Exception:
-                pass
         ev.write("shutdown", t_sim=sitl.sim_now(),
                  step=step,
                  pos_ned=[round(v, 3) for v in core.hub_state["pos"].tolist()],

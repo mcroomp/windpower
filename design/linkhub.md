@@ -16,7 +16,7 @@ One LinkHub process owns each configured physical link. For MAVLink this means:
 - one message-rate configuration owner;
 - one lossless record of every complete RX and TX frame accepted by LinkHub.
 
-Clients use HTTP and NDJSON and do not link a MAVLink implementation.
+Clients use finite HTTP/JSON requests and do not link a MAVLink implementation.
 
 ## Unified journal
 
@@ -42,10 +42,8 @@ tail files. A clean shutdown flushes the active chunk.
 For a replay, the actor first fixes one tail sequence and snapshots the active
 chunk; the reader then merges that snapshot with completed chunks through the
 fixed tail. This ordering prevents a periodic flush from moving records between
-the disk and RAM views while a replay is being assembled. Live followers start
-from that consistent replay and then consume notifications. A lagged live
-subscriber resumes from its journal cursor instead of requiring an unbounded
-per-client queue.
+the disk and RAM views while a replay is being assembled. Public reads are
+finite batches; LinkHub keeps no per-client subscription or queue.
 
 ## Diagnostics
 
@@ -104,9 +102,27 @@ The foundation provides:
 - optional Bluetooth motor status, command, stop, and reconnect operations;
 - `GET /v1/mavlink/status`.
 
-Generic, diagnostics, and MAVLink streams are projections over the same cursor
-space. Raw frame bodies are base64 in JSON/NDJSON; completed journal chunks keep
-the original binary frame bytes.
+Generic, diagnostics, raw MAVLink frames, and decoded MAVLink messages are
+finite projections over the same cursor space. Every GET accepts an explicit
+`after` cursor and returns:
+
+- a bounded `records` array;
+- `next_cursor`, the last journal position scanned even when no record matched.
+
+An optional bounded `wait_ms` keeps one HTTP request open until a match arrives
+or the deadline expires. It does not create server-side subscription state.
+Response `limit` bounds the number of matching records; LinkHub never advances
+`next_cursor` past a matching record it did not return. Raw frame bodies are
+base64 in JSON; completed journal chunks keep the original binary frame bytes.
+
+Python clients do not mirror the journal in a local message queue and do not
+retain a global receive cursor. Each logical operation owns an opaque cursor and
+passes it explicitly on every finite batch read. Heartbeat-derived mode/arming
+state and the latest vehicle boot time are exposed by
+`/v1/mavlink/status`, so polling state never depends on which telemetry a client
+chooses to consume. Test MAVLink JSONL artifacts are exported from the journal
+cursor range with an explicit export cursor instead of being assembled by a
+client receive thread.
 
 Rate leases remain future work; calibration uses explicit message-rate
 configuration.
@@ -130,7 +146,7 @@ The current Rust implementation:
 - records system, component, message, protocol, signing, and direction metadata;
 - owns GCS heartbeat transmission;
 - journals RX and TX in the same global order;
-- exposes raw and decoded message streams;
+- exposes finite raw and decoded message batches;
 - supports the typed messages used by calibration and SITL;
 - correlates command ACKs and serializes command transactions;
 - supports named and bulk parameter reads plus named writes;
@@ -152,7 +168,6 @@ with actuators disconnected. Motor protocol, timeout, and safe-stop behavior are
 covered by hardware-free Rust backend tests.
 
 The reusable hardware stress harness additionally verifies malformed-request
-and operation-timeout isolation, concurrent TX journaling, follower churn,
-lossless multi-reader replay, and requested telemetry throughput. On the
-disconnected Pixhawk it archived 32/32 concurrent sends, delivered the same 201
-ATTITUDE records to eight readers, and measured 100.5 Hz for a 100 Hz request.
+and operation-timeout isolation, concurrent TX journaling, bounded-wait
+requests, lossless multi-reader batch replay, and requested telemetry
+throughput.

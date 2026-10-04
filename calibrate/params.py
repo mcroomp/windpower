@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .constants import (
-    RawesGCS,
+    LinkHubClient,
     SCRIPTS_DIR,
     _LOG_DIR,
     _AP_BASE_PARM_PATH,
@@ -65,7 +65,7 @@ def _config_target_params(*, use_all: bool) -> dict[str, float]:
     return _CONFIG_TARGET_PARAMS_COMMON
 
 
-def _list_scripts(session: RawesGCS) -> None:
+def _list_scripts(session: LinkHubClient) -> None:
     print(f"  Listing {SCRIPTS_DIR} ...")
     try:
         entries = session.list_files(SCRIPTS_DIR)
@@ -78,7 +78,7 @@ def _list_scripts(session: RawesGCS) -> None:
         print(f"    {marker} {entry['name']}{suffix}")
 
 
-def _remove_script(session: RawesGCS, filename: str) -> None:
+def _remove_script(session: LinkHubClient, filename: str) -> None:
     remote = f"{SCRIPTS_DIR}/{os.path.basename(filename)}"
     print(f"  Removing {remote} ...")
     try:
@@ -90,7 +90,7 @@ def _remove_script(session: RawesGCS, filename: str) -> None:
 
 
 def _upload_script(
-    session: RawesGCS,
+    session: LinkHubClient,
     local_path: str,
     restart: bool = True,
 ) -> None:
@@ -111,7 +111,7 @@ def _upload_script(
         _restart_scripting(session)
 
 
-def _list_dataflash_logs(session: RawesGCS) -> list[dict[str, object]]:
+def _list_dataflash_logs(session: LinkHubClient) -> list[dict[str, object]]:
     logs = session.list_logs()
     if not logs:
         print("  No DataFlash logs found.")
@@ -127,7 +127,7 @@ def _list_dataflash_logs(session: RawesGCS) -> list[dict[str, object]]:
 
 
 def _fetch_dataflash_log(
-    session: RawesGCS,
+    session: LinkHubClient,
     *,
     log_id: int | None,
     directory: str | Path = _LOG_DIR,

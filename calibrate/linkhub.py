@@ -15,6 +15,7 @@ from serial.tools import list_ports
 from .constants import _FALLBACK_BAUDS, _REPO_ROOT
 
 _DEFAULT_SERVER = "http://127.0.0.1:8999"
+_DEFAULT_HEARTBEAT_TIMEOUT_S = 30.0
 
 
 def _service_status(server: str, path: str) -> int | None:
@@ -31,10 +32,20 @@ def _service_status(server: str, path: str) -> int | None:
 
 def _linkhub_binary() -> Path:
     name = "linkhub.exe" if os.name == "nt" else "linkhub"
-    binary = Path(_REPO_ROOT, "linkhub", "target", "release", name)
+    linkhub_dir = Path(_REPO_ROOT, "linkhub")
+    binary = linkhub_dir / "target" / "release" / name
     if not binary.is_file():
         raise FileNotFoundError(
             f"LinkHub binary not found at {binary}; run setup.cmd first"
+        )
+    source_paths = [
+        linkhub_dir / "Cargo.toml",
+        linkhub_dir / "Cargo.lock",
+        *linkhub_dir.joinpath("src").glob("*.rs"),
+    ]
+    if any(path.stat().st_mtime_ns > binary.stat().st_mtime_ns for path in source_paths):
+        raise RuntimeError(
+            f"LinkHub binary at {binary} is older than its source; run setup.cmd first"
         )
     return binary
 
@@ -89,7 +100,7 @@ def ensure_linkhub(
     connection: str | None,
     baud: int | None,
     motor_name_prefix: str | None,
-    heartbeat_timeout: float = 15.0,
+    heartbeat_timeout: float = _DEFAULT_HEARTBEAT_TIMEOUT_S,
 ) -> Iterator[None]:
     if _service_status(server, "/health/ready") == 200:
         yield

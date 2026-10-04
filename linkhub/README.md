@@ -5,7 +5,7 @@ owner for both SITL and hardware calibration.
 
 It owns one MAVLink connection, writes exact RX and TX frames plus structured
 diagnostic events into one globally ordered chunk journal, and exposes filtered
-cursor streams over HTTP. Completed chunks are immutable MessagePack files.
+cursor batches over HTTP. Completed chunks are immutable MessagePack files.
 The active chunk is buffered in RAM and may be lost if the process crashes.
 
 ## Run
@@ -30,7 +30,7 @@ python scripts/linkhub_stress.py --server http://127.0.0.1:8999
 ```
 
 It checks malformed-request isolation, parameter-timeout isolation, concurrent
-TX journaling, follower connection churn, identical lossless reader streams,
+TX journaling, bounded-wait requests, identical lossless batch replay,
 and observed high-rate ATTITUDE throughput. The prior ATTITUDE interval is
 restored before exit.
 
@@ -39,7 +39,7 @@ restored before exit.
 - `GET /health/live`
 - `GET /health/ready`
 - `GET /v1/status`
-- `GET /v1/records?after=v1:<sequence>&follow=true`
+- `GET /v1/records?after=v1:<sequence>&wait_ms=<bounded>`
 - `GET /v1/mavlink/status`
 - `GET|POST /v1/mavlink/messages`
 - `POST /v1/mavlink/commands`

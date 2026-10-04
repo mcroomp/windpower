@@ -168,9 +168,10 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
     gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
+    gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
     log.info(
         "Release seeds (IC-passive init): RAWES_THR=%.3f, RAWES_TEN=%.1f N, "
-        "IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
+        "IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s, passive anchor re-captured",
         thr_seed, ten_seed,
         math.degrees(ic_roll_rad), math.degrees(ic_pitch_rad), ok,
     )
@@ -251,7 +252,12 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 if name in ("ANCH_N", "ANCH_E", "ANCH_D"):
                     state["anch"][name[-1]] = value
             elif isinstance(decoded, LocalPositionNed):
-                state["pos_samples"].append((now, decoded.x, decoded.y, decoded.z))
+                state["pos_samples"].append((
+                    decoded.time_boot_ms * 0.001,
+                    decoded.x,
+                    decoded.y,
+                    decoded.z,
+                ))
 
         if (not _DEBUG_KEEP_PASSIVE) and (not state["lua_captured"]) and now > t_capture_deadline:
             pytest.fail(

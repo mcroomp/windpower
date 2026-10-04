@@ -3,7 +3,10 @@
 import math
 
 from calibrate.watch import _watch_attitude
+from linkhub_client import MessageBatch, SimClock
 from linkhub_client.messages import Attitude
+
+_CLOCK = SimClock(epoch=1, time_boot_ms=1, quality=None)
 
 
 class _Log:
@@ -26,17 +29,20 @@ class _Session:
     def send_message(self, _message):
         pass
 
-    def _recv(self, *, type, blocking, timeout):
-        if type == ["ATTITUDE", "HEARTBEAT", "STATUSTEXT"]:
-            return Attitude(
+    def current_cursor(self):
+        return "v1:0"
+
+    def read_messages(self, _after, message_types, **_kwargs):
+        if message_types == ["ATTITUDE", "HEARTBEAT", "STATUSTEXT"]:
+            return MessageBatch((Attitude(
                 roll=math.radians(10),
                 pitch=math.radians(-5),
                 yaw=math.radians(20),
                 rollspeed=0.1,
                 pitchspeed=-0.2,
                 yawspeed=0.3,
-            )
-        return None
+            ),), "v1:1", _CLOCK)
+        return MessageBatch((), "v1:1", _CLOCK)
 
 
 def test_watch_attitude_handles_already_decoded_attitude(monkeypatch):

@@ -8,6 +8,20 @@ Detailed design and implementation content lives in `design/*.md` and module-lev
 RAWES is a tethered, 4-blade autorotating rotor kite (no drive motor on the rotor).
 Wind drives autorotation; cyclic steers; tether tension during reel-out drives a ground generator.
 
+## Agreed Runtime Architecture
+
+- The mediator is the simulated physical world and lockstep adapter only: dynamics,
+  aero, tether, wind, sensors, simulated hardware plants, actuator application,
+  physics events, and raw physics telemetry.
+- ArduPilot owns estimation, modes, attitude/rate control, Lua behavior, and servo
+  mixing. LinkHub is the sole MAVLink owner and journal.
+- Production ground-control policy runs separately from the mediator and lives in
+  `groundstation/`; tests may host it in-process but must use production command
+  boundaries. Simulation-only hardware stand-ins remain in `simulation/`.
+- The SITL harness owns process orchestration, timeouts, artifacts, and post-run
+  enrichment. It combines mediator physics telemetry with LinkHub observations
+  after the run; the mediator must not consume MAVLink merely to decorate CSV rows.
+
 ## Repository Layout
 
 The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
@@ -115,6 +129,18 @@ it means the tool couldn't search there at all. For any path outside the current
 workspace folder, go straight to a terminal command (`grep`/`sed`/`rg` via
 `run_in_terminal`) instead of retrying the workspace-scoped search tools.
 
+## Pylance Responsiveness
+
+- Issue Pylance MCP/LSP requests serially. In particular, do not batch multiple
+  `textDocument/diagnostic` calls in parallel: concurrent diagnostics can stall the
+  Pylance MCP bridge until its request deadline even though each request completes
+  quickly on its own.
+- `pyrightconfig.json` is the source of truth for analyzed project roots. Before
+  blaming workspace size for a timeout, query Pylance's workspace root, effective
+  settings, and user-file list, then retry one diagnostic serially.
+- If even one serial Pylance request times out, restart Pylance before retrying.
+  Do not send more concurrent requests to a server that is already unresponsive.
+
 ## Documentation Ownership (Single Source of Truth)
 
 Use the primary doc for each topic. Other docs should link, not restate.
@@ -164,9 +190,10 @@ extending the script (new subcommand/filter) over a standalone script.
 - Canonical hardware safe-off is one invariant across every normal/forced
   arm-disarm cycle and every calibration run exit: confirmed disarmed,
   `RAWES_MODE=0`, ACRO, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`,
-  `SERVO9_FUNCTION=0` (yaw motor physically unassigned), and neutral swash
-  outputs from Lua's disarmed mode-0 neutral hold. Cleanup paths must converge
-  on `_set_safe_off_state()` and must never restore the motor function afterward.
+  `SERVO9_FUNCTION=0` (yaw motor physically unassigned), `H_YAW_TRIM=0`
+  (no stale motor command if DDFP is later restored), and neutral swash outputs
+  from Lua's disarmed mode-0 neutral hold. Cleanup paths must converge on
+  `_set_safe_off_state()` and must never restore the motor function afterward.
 - When roll and pitch appear together as paired values (params, tuple returns,
   unpacking, CSV columns, helper args), always use `roll, pitch` order.
   Do not introduce `pitch, roll` ordering unless an external interface
@@ -194,10 +221,21 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
 
 ## Workflow Rules
 
-- Do not use `wsl` to run anything directly. `test.sh` is the only script that uses WSL, and it
-  already contains the logic to re-invoke itself inside WSL when needed (for Docker access).
-  Run `bash test.sh ...` (or `./test.sh ...`) from Git Bash directly — do not wrap it in
-  `wsl -e bash -lc "..."` or run other commands (pytest, analysis scripts, git, etc.) via `wsl`.
+- **Critical — do not bypass broken tooling.** If a required build, test runner,
+  language server, MCP query, or other project tool does not work as expected,
+  stop the task and diagnose the tool failure first. Do not substitute a weaker
+  tool, infer the missing result, skip the validation, or continue through an
+  alternate path merely to make progress. Restore the intended tool and rerun the
+  original operation. If the failure cannot be understood and fixed, stop and ask
+  the user to investigate rather than bypassing it.
+- **Critical — the agent may run in either Windows or WSL, but every Docker
+  operation must run through WSL; never use or probe Docker Desktop's native
+  Windows engine.** Do not invoke `wsl` manually. When launched from Windows,
+  `test.sh` and the Docker subcommands of `setup.sh` automatically re-invoke
+  themselves inside WSL; when already in WSL, they run there directly. Use
+  `bash test.sh ...` or `bash setup.sh build` from the current environment and
+  let the scripts choose the Docker execution path. Do not wrap commands in
+  `wsl -e bash -lc "..."`.
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
 - Do not preserve backward-compatibility parameters, fields, aliases, or shims when making code changes.
 - Assume no external callers: prefer a clean cutover and remove legacy paths in the same change to avoid debt.
@@ -250,6 +288,22 @@ There are three tiers, each with a different scope and runtime:
 - Never assume a port or baud from an earlier session. If the remembered
   connection fails, fall back immediately to `python -m calibrate` without
   connection parameters instead of trying guessed ports.
+- An agent may upload `scripts/rawes.lua` automatically only when the selected
+  port is positively identified as the flight controller's native direct-USB
+  interface. Verify the selected port with `serial.tools.list_ports` and require
+  board-specific USB identity (VID/PID plus device serial/location), not merely
+  a `COM` name or the fact that the adapter itself uses USB. The current Pixhawk
+  6C native interface enumerates as `VID:PID=3162:0053` with device serial
+  `160031001751343131363538` (COM7/COM8 interfaces). Reconfirm this metadata
+  each hardware session; do not assume the port assignment persists.
+- Never upload Lua through a SiK/telemetry radio, generic USB-serial adapter, or
+  any connection whose metadata is missing or ambiguous. If direct USB cannot
+  be proven, stop before deployment and give the operator the exact upload
+  command to run manually.
+- Before an automatic direct-USB upload, run the focused Lua/control tests and
+  require them to pass. After upload, verify the remote script size, reboot,
+  auto-detect again without connection arguments, and restore canonical
+  safe-off before any armed test.
 
 SITL IC-start timeline rule (agent-critical):
 - For SITL flight diagnosis, use one shared timeline anchored at the IC-start flow.

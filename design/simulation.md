@@ -489,7 +489,7 @@ simulation/
 │                        / `set_target_rate_and_throttle`) are captured in `_mock` and consumed by
 │                        `MockArdupilot._LuaBackend.tick()` to feed `GuidedAttitudeController`.
 │                        Distinct from `tests/common/mock_ardupilot.py`.
-├── mediator.py          SITL co-simulation loop — thin wrapper around PhysicsCore
+├── mediator.py          Physical-world SITL lockstep adapter around PhysicsCore
 ├── mediator_torque.py   Standalone torque SITL mediator (RPM profiles, hub yaw kinematics)
 ├── torque_model.py      Hub yaw model (kinematic + motor lag) — HubParams (rpm_scale, gear_ratio,
 │                        motor_tau), HubState (psi, psi_dot, omega_motor), step(), equilibrium_throttle()
@@ -627,26 +627,43 @@ ArduPilot SITL uses a **lockstep** physics protocol:
 
 Because ArduPilot cannot advance until it receives a reply, the physics worker must **reply to every servo packet without exception**. Any attempt to rate-limit the physics loop using sim time will cause ArduPilot to stall permanently.
 
-### sim_now() — ArduPilot's internal clock, not wall-clock
+### sim_now() — ArduPilot's global internal clock, not wall-clock
 
-`gcs.sim_now()` returns `time_boot_ms / 1000.0` from the most recently **processed** MAVLink message. This is ArduPilot's internal simulation clock:
+`gcs.sim_now()` returns `latest_time_boot_ms / 1000.0` from LinkHub's MAVLink
+status. LinkHub updates that value monotonically as it ingests timestamp-bearing
+MAVLink messages, independently of which records any client reads:
 
 - It advances only when MAVLink messages are received (which requires the physics loop to be running).
 - At SITL speedup=1 (default), sim time ≈ wall time (roughly 1:1), but they are **not** guaranteed equal.
-- Returns 0.0 before the first MAVLink message is received.
-- All test timeouts and deadlines (arm, set_mode, wait_ekf_attitude, etc.) are expressed in sim seconds.
-- **`sim_now()` is always consistent with the message that caused `_recv` to return.**
+- It returns 0.0 before LinkHub receives the first timestamp-bearing MAVLink message.
+- Test flight durations and protocol deadlines are expressed in sim seconds.
+- It is a global latest-value clock. It is **not** guaranteed to equal the timestamp
+  of a message just returned by a filtered journal read.
 
-### `_recv` internal buffer — clock consistency guarantee
+### Explicit journal cursors — independent consumers
 
-`_recv` drains all available network bytes into an internal deque, then pops and processes messages one at a time. It returns on the first match, leaving the rest for the next call. **Result: `sim_now()` always equals the `time_boot_ms` of the message that caused `_recv` to return** — never a later timestamp from the same network burst. `SimClock.update()` asserts non-decreasing timestamps (zero skipped); out-of-order delivery surfaces immediately as `AssertionError`.
+Each logical consumer owns an opaque LinkHub cursor. A finite
+`read_messages(after=cursor, ...)` call returns matching records plus a
+`next_cursor` that advances through every journal record examined, including
+when no record matched. A response limited to one match stops at that match, so
+it cannot skip a later matching record.
+
+This separates timekeeping from message consumption: filtering for
+`STATUSTEXT`, for example, cannot prevent `sim_now()` from advancing as LinkHub
+receives timestamped attitude or position messages. Conversely, code that needs
+the timestamp of one specific message must use that message's timestamp (or a
+structured event timestamp), not sample `sim_now()` after reading it.
 
 ### sim_sleep(N) — waits N sim-seconds, not N wall-seconds
 
-`gcs.sim_sleep(N)` loops calling `_recv(blocking=True, timeout=0.1)` until sim time has advanced by N seconds. It does **not** call `time.sleep()`. Key properties:
+`gcs.sim_sleep(N)` polls LinkHub's latest simulation clock until sim time has
+advanced by N seconds. Its short wall-clock sleeps only pace status requests;
+they do not define the deadline. Key properties:
 
 - **The physics worker must keep running** while `sim_sleep` is active — otherwise ArduPilot stalls, no MAVLink messages arrive, and `sim_sleep` never returns.
-- Every received message — whether it matches a type filter or not — advances the sim-clock and is written to the MAVLink log. The type filter in `_recv` only controls what is *returned* to the caller; discarded messages still tick the clock.
+- Filtered journal reads do not control the simulation clock. LinkHub updates it
+  from all timestamp-bearing MAVLink traffic and retains all RX/TX records for
+  explicit-cursor export.
 - At speedup=1, `sim_sleep(70)` takes ~70 seconds of real time.
 
 ### Anti-pattern: rate-limiting inside a physics worker

@@ -50,6 +50,13 @@ def test_kinematic_gps_sitl(tmp_path, request):
         tmp_path,
         test_name    = request.node.name,
         extra_config = extra,
+        message_rates={
+            "ATTITUDE": 10.0,
+            "EKF_STATUS_REPORT": 10.0,
+            "LOCAL_POSITION_NED": 10.0,
+            "GLOBAL_POSITION_INT": 5.0,
+            "RC_CHANNELS": 2.0,
+        },
     ) as ctx:
         log = ctx.log
         log.info("Dual GPS kinematic: stationary hold at equilibrium")
@@ -96,7 +103,13 @@ def test_kinematic_gps_sitl(tmp_path, request):
         )
 
         # Validate EKF was clean from GPS fusion to fusion+40 s.
-        # validate_ekf_window reads the already-written MAVLink log.
+        # Export the corresponding LinkHub journal range before reading it.
+        assert ctx.mavlink_log is not None
+        assert ctx.mavlog_cursor is not None
+        ctx.mavlog_cursor = ctx.gcs.export_mavlog(
+            ctx.mavlink_log,
+            ctx.mavlog_cursor,
+        )
         issues = validate_ekf_window(ctx.mavlink_log, t_fused, t_end)
         for issue in issues:
             log.warning("EKF issue: %s", issue)

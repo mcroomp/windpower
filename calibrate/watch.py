@@ -15,7 +15,7 @@ from .constants import (
     Attitude,
     BatteryStatus,
     EscTelemetry,
-    RawesGCS,
+    LinkHubClient,
     CommandLong,
     SysStatus,
     StatusText,
@@ -33,7 +33,7 @@ from .util import _fmt, _parse_flags
 # `watch <stream>` command
 # ---------------------------------------------------------------------------
 
-def _cmd_watch(session: RawesGCS, args: list[str]) -> None:
+def _cmd_watch(session: LinkHubClient, args: list[str]) -> None:
     """watch <stream> [--duration N]"""
 
     schema = {"--duration": "float"}
@@ -64,13 +64,10 @@ def _cmd_watch(session: RawesGCS, args: list[str]) -> None:
     }
     log = _RunLog.open("watch", stream, meta)
     print(f"  Logging to {log.path}")
-    mavlog_started = False
-    start_mavlog = getattr(session, "start_mavlog", None)
-    if start_mavlog is not None:
-        mavlog_path = Path(log.path).with_suffix(".mavlink.jsonl")
-        start_mavlog(mavlog_path)
-        mavlog_started = True
-        print(f"  Canonical MAVLink NDJSON: {mavlog_path}")
+    mavlog_path = Path(log.path).with_suffix(".mavlink.jsonl")
+    mavlog_path.write_text("", encoding="utf-8")
+    mavlog_cursor = session.current_cursor()
+    print(f"  Canonical MAVLink JSONL: {mavlog_path}")
 
     try:
         if stream == "servos":
@@ -84,8 +81,7 @@ def _cmd_watch(session: RawesGCS, args: list[str]) -> None:
         elif stream == "power":
             _watch_power(session, duration, log)
     finally:
-        if mavlog_started:
-            session.stop_mavlog()
+        session.export_mavlog(mavlog_path, mavlog_cursor)
         log.close()
         print(f"  Wrote {log.n_rows} rows to {log.path}")
     print("  Done.")

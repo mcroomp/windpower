@@ -33,7 +33,7 @@ def test_linkhub_stress_sitl(tmp_path, request) -> None:
         )
 
     assert result.sends_archived == 768
-    assert result.follower_connections == 64
+    assert result.bounded_wait_requests == 64
     assert result.readers == 32
     assert result.attitude_records >= 1_400
     assert result.attitude_rate_hz >= 70.0

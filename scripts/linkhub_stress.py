@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise LinkHub's HTTP and lossless telemetry surfaces under load."""
+"""Exercise LinkHub's finite HTTP batches and lossless journal under load."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class StressResult:
     status_requests_during_timeout: int
     send_rounds: int
     sends_archived: int
-    follower_connections: int
+    bounded_wait_requests: int
     readers: int
     attitude_records: int
     attitude_rate_hz: float
@@ -88,23 +88,28 @@ def _read_message_cursors(
     direction: str,
     message: str,
 ) -> list[str]:
-    query = urllib.parse.urlencode({
-        "after": after,
-        "direction": direction,
-        "messages": message,
-        "follow": "false",
-    })
-    request = urllib.request.Request(
-        f"{server.rstrip('/')}/v1/mavlink/messages?{query}"
-    )
     cursors: list[str] = []
-    with urllib.request.urlopen(request, timeout=30.0) as response:
-        for line in response:
-            if not line.strip():
-                continue
-            record = json.loads(line)
+    cursor = after
+    while _cursor_sequence(cursor) < through:
+        query = urllib.parse.urlencode({
+            "after": cursor,
+            "direction": direction,
+            "messages": message,
+            "limit": 10_000,
+        })
+        batch = _json_request(
+            server,
+            "GET",
+            f"/v1/mavlink/messages?{query}",
+            timeout=30.0,
+        )
+        for record in batch["records"]:
             if _cursor_sequence(str(record["cursor"])) <= through:
                 cursors.append(str(record["cursor"]))
+        next_cursor = str(batch["next_cursor"])
+        if next_cursor == cursor:
+            break
+        cursor = next_cursor
     return cursors
 
 
@@ -118,18 +123,21 @@ def _read_attitudes(server: str, after: str, through: int) -> list[str]:
     )
 
 
-def _open_follower(server: str, after: str) -> bool:
+def _bounded_attitude_wait(server: str, after: str) -> bool:
     query = urllib.parse.urlencode({
         "after": after,
         "direction": "rx",
         "messages": "ATTITUDE",
-        "follow": "true",
+        "wait_ms": 2_000,
+        "limit": 1,
     })
-    request = urllib.request.Request(
-        f"{server.rstrip('/')}/v1/mavlink/messages?{query}"
+    batch = _json_request(
+        server,
+        "GET",
+        f"/v1/mavlink/messages?{query}",
+        timeout=3.0,
     )
-    with urllib.request.urlopen(request, timeout=5.0) as response:
-        return bool(response.readline().strip())
+    return bool(batch["records"]) and str(batch["next_cursor"]) != after
 
 
 def _send_named_value(server: str, index: int) -> str:
@@ -280,19 +288,19 @@ def run_stress(
 
         for transition_rate in (50.0, 200.0, 100.0, attitude_rate):
             client.set_message_rates({"ATTITUDE": transition_rate})
-        follower_start = _json_request(server, "GET", "/v1/mavlink/status")["cursor"]
-        follower_count = readers * 2
-        with ThreadPoolExecutor(max_workers=follower_count) as pool:
-            followers = list(
+        wait_start = _json_request(server, "GET", "/v1/mavlink/status")["cursor"]
+        wait_count = readers * 2
+        with ThreadPoolExecutor(max_workers=wait_count) as pool:
+            wait_results = list(
                 pool.map(
-                    lambda _: _open_follower(server, follower_start),
-                    range(follower_count),
+                    lambda _: _bounded_attitude_wait(server, wait_start),
+                    range(wait_count),
                 )
             )
-        connected_followers = sum(followers)
-        if connected_followers != follower_count:
+        completed_waits = sum(wait_results)
+        if completed_waits != wait_count:
             raise AssertionError(
-                f"only {connected_followers}/{follower_count} followers received telemetry"
+                f"only {completed_waits}/{wait_count} bounded waits received telemetry"
             )
 
         capture_start = _json_request(server, "GET", "/v1/mavlink/status")["cursor"]
@@ -329,7 +337,7 @@ def run_stress(
             status_requests_during_timeout=responsive,
             send_rounds=send_rounds,
             sends_archived=archived,
-            follower_connections=connected_followers,
+            bounded_wait_requests=completed_waits,
             readers=readers,
             attitude_records=len(first),
             attitude_rate_hz=observed_rate,

@@ -1,7 +1,7 @@
 """
 linkhub_client/mav_constants.py -- internal stable wire constants.
 
-Clients talk to LinkHub over HTTP/NDJSON only (see client.py) and
+Clients talk to LinkHub over finite HTTP/JSON requests only (see client.py) and
 must not import pymavlink, even transitively.  These are the small handful of
 MAV_CMD / MAV_* enum values calibrate actually sends or compares against;
 values are the standard MAVLink common/ardupilotmega dialect numbers (the

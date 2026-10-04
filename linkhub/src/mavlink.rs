@@ -43,8 +43,13 @@ pub struct LinkStatus {
     pub connected: bool,
     pub ready: bool,
     pub connection: String,
+    pub clock_epoch: u64,
     pub target_system: u8,
     pub target_component: u8,
+    pub base_mode: u64,
+    pub custom_mode: u64,
+    pub system_status: u64,
+    pub latest_time_boot_ms: u64,
     pub received_messages: u64,
     pub transmitted_messages: u64,
     pub framing_errors: u64,
@@ -339,14 +344,32 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send,
 {
+    let clock_epoch = match context.journal.begin_clock_epoch().await {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            context.status_tx.send_modify(|status| {
+                status.connected = false;
+                status.ready = false;
+                status.error = Some(error.to_string());
+            });
+            tracing::error!(link = %context.config.id, %error, "could not start MAVLink clock epoch");
+            return;
+        }
+    };
     context.status_tx.send_modify(|status| {
         status.connected = true;
+        status.clock_epoch = clock_epoch;
+        status.latest_time_boot_ms = 0;
         status.error = None;
     });
     let link_id = context.config.id.clone();
     let status_tx = context.status_tx.clone();
     if let Err(error) = run_connected(context, reader, writer).await {
-        tracing::warn!(link = %link_id, %error, "MAVLink connection lost");
+        if status_tx.borrow().ready {
+            tracing::warn!(link = %link_id, %error, "MAVLink connection lost");
+        } else {
+            tracing::debug!(link = %link_id, %error, "MAVLink acquisition retry");
+        }
         status_tx.send_modify(|status| {
             status.connected = false;
             status.ready = false;
@@ -473,14 +496,28 @@ async fn archive_received(
     let is_heartbeat = decoded.message_id == HEARTBEAT_MESSAGE_ID;
     let system_id = decoded.system_id;
     let component_id = decoded.component_id;
+    let time_boot_ms = decoded.fields.get("time_boot_ms").and_then(Value::as_u64);
+    let heartbeat_state = is_heartbeat.then(|| {
+        (
+            decoded.fields["base_mode"].as_u64().unwrap_or_default(),
+            decoded.fields["custom_mode"].as_u64().unwrap_or_default(),
+            decoded.fields["system_status"].as_u64().unwrap_or_default(),
+        )
+    });
     if is_heartbeat {
         update_component_registry(components, system_id, component_id, &decoded.fields, now)?;
         let _ = components_tx.send(components.values().cloned().collect());
     }
     let record = decoded_frame(&config.id, Direction::Rx, &decoded);
-    let journal_sequence = journal
-        .append(RecordPayload::MavlinkFrame(record), None)
-        .await?;
+    let payload = RecordPayload::MavlinkFrame(record);
+    let journal_sequence = match time_boot_ms {
+        Some(time_boot_ms) => {
+            journal
+                .append_with_time_boot_ms(payload, None, time_boot_ms)
+                .await?
+        }
+        None => journal.append(payload, None).await?,
+    };
     let _ = received.send(Arc::new(ReceivedMessage {
         journal_sequence,
         ingest_time_ns: now,
@@ -499,7 +536,15 @@ async fn archive_received(
         if is_heartbeat && system_id != config.source_system {
             status.target_system = system_id;
             status.target_component = component_id;
+            let (base_mode, custom_mode, system_status) =
+                heartbeat_state.expect("heartbeat state was captured");
+            status.base_mode = base_mode;
+            status.custom_mode = custom_mode;
+            status.system_status = system_status;
             status.ready = true;
+        }
+        if let Some(time_boot_ms) = time_boot_ms {
+            status.latest_time_boot_ms = status.latest_time_boot_ms.max(time_boot_ms);
         }
     });
     Ok(())
@@ -765,7 +810,16 @@ mod tests {
             &record.payload,
             RecordPayload::MavlinkFrame(frame) if frame.direction == Direction::Tx
         )));
+        assert!(
+            records
+                .iter()
+                .all(|record| record.sim_clock.epoch == 1)
+        );
+        assert_eq!(link.status().clock_epoch, 1);
         assert_eq!(link.status().target_system, 1);
+        assert_eq!(link.status().base_mode, 0);
+        assert_eq!(link.status().custom_mode, 0);
+        assert_eq!(link.status().system_status, 4);
 
         link_task.abort();
         journal.shutdown().await.expect("shutdown");

@@ -126,7 +126,16 @@ def guided_nogps_armed_pumping_lua(tmp_path, request):
         test_name=request.node.name,
         winch_cmd_port=_winch_port,
         run_ground_winch=False,
+        message_rates={
+            "ATTITUDE": 10.0,
+            "EKF_STATUS_REPORT": 10.0,
+            "LOCAL_POSITION_NED": 10.0,
+            "GLOBAL_POSITION_INT": 5.0,
+            "RC_CHANNELS": 2.0,
+        },
     ) as ctx:
+        if not ctx.gcs.set_param("RAWES_TEL_HZ", 0.5, timeout=5.0):
+            pytest.fail("Failed to reduce pumping diagnostic telemetry rate")
         yield ctx
 
 
@@ -221,7 +230,14 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
 
 
 @contextlib.contextmanager
-def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch):
+def _ic_trapezoid_stack(
+    tmp_path,
+    *,
+    test_name,
+    winch_cmd_port,
+    run_ground_winch,
+    message_rates=None,
+):
     """
     Shared SITL initialization for fixtures that must START AT THE IC.
 
@@ -309,11 +325,9 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         # ground-side tension regulator (mirrors test_create_ic warmup).
         "winch_cmd_port":       winch_cmd_port,
     }
-    # Arm AFTER EKF GPS-yaw alignment ("EKF3 IMU0 yaw aligned", ~t=11 s with
-    # the moving-baseline dual GPS). MODE_PASSIVE captures the current AHRS
-    # quaternion when RAWES_PEN arrives, so capturing before yaw alignment would
-    # freeze the pre-alignment heading (~0 deg) instead of the IC heading
-    # (+90 deg). Arming at t=14 s leaves a margin past alignment.
+    # MODE_PASSIVE captures the current AHRS quaternion when RAWES_PEN arrives,
+    # so capturing before GPS-yaw alignment would freeze the pre-alignment
+    # heading (~0 deg) instead of the IC heading (+90 deg).
     _arm_at_sim_s = 14.0
 
     with _acro_stack(
@@ -321,6 +335,8 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         extra_config=extra,
         test_name=test_name,
         arm_at_sim_s=_arm_at_sim_s,
+        message_rates=message_rates,
+        require_yaw_alignment=True,
     ) as ctx:
         # MODE_PASSIVE (3) is set immediately after arm, decoupled from anchor
         # calibration below (which needs telemetry/EKF data that can take
@@ -399,45 +415,36 @@ def _ic_trapezoid_stack(tmp_path, *, test_name, winch_cmd_port, run_ground_winch
         ctx.wait_drain(timeout=1.0, label="post-param")
         ctx.wait_drain(timeout=0.5, label="post-col")
 
-        # Wait for GPS fusion before yielding.
-        # Lua needs _tdir0 (fires on GPS fusion) to begin steady guidance.
-        # With dual GPS the wait is ~44 s (delAngBiasLearned bottleneck).
+        # Wait for EKF local position before yielding. Lua needs the same fused
+        # position state to initialise _tdir0; STATUSTEXT wording is not a
+        # synchronization interface.
         ctx.log.info("Waiting for GPS fusion before yielding (up to 60 s) ...")
-        _prior = [str(t).lower() for t in ctx.all_statustext]
-        _origin_seen: list[bool] = [any("origin set" in t for t in _prior)]
-        _gps_seen: list[bool] = [
-            any("is using gps" in t for t in _prior)
-            or (_origin_seen[0] and ctx.gcs.sim_now() >= 34.0)
-        ]
-
-        def _gps_fused(text: str | None) -> bool:
-            if not text:
-                return False
-            if "is using GPS" in text:
-                _gps_seen[0] = True
-                return True
-            # ArduPilot 4.7 often reports "origin set" earlier than the
-            # legacy fusion text. Keep waiting until the historical ~34 s
-            # fusion epoch to avoid yielding too early and timing out
-            # kinematic_exit in the test body.
-            if "origin set" in text:
-                _origin_seen[0] = True
-            if _origin_seen[0] and ctx.gcs.sim_now() >= 34.0:
-                _gps_seen[0] = True
-                return True
-            return False
-
-        if _gps_seen[0]:
-            ctx.log.info("GPS fusion already observed before wait; yielding without extra delay")
-        else:
-            ctx.wait_drain(
-                until       = _gps_fused,
-                timeout     = 60.0,
-                drain_s     = 1.0,
-                check_procs = True,
-                label       = "gps-fuse",
+        _gps_seen = False
+        _gps_deadline = ctx.gcs.sim_now() + 60.0
+        _gps_cursor = ctx.gcs.current_cursor()
+        while ctx.gcs.sim_now() < _gps_deadline:
+            _batch = ctx.gcs.read_messages(
+                _gps_cursor,
+                ["LOCAL_POSITION_NED", "STATUSTEXT"],
+                wait=0.5,
+                limit=1,
             )
-        if not _gps_seen[0]:
+            _gps_cursor = _batch.next_cursor
+            _msg = _batch.messages[0] if _batch.messages else None
+            if _msg is None:
+                continue
+            _decoded = decode_message(_msg)
+            if isinstance(_decoded, LocalPositionNed):
+                ctx.last_local_position_ned = (
+                    _decoded.x, _decoded.y, _decoded.z,
+                    _decoded.vx, _decoded.vy, _decoded.vz,
+                )
+                _gps_seen = True
+                break
+            if isinstance(_decoded, StatusText):
+                ctx.all_statustext.append(_decoded.text)
+                ctx.log.info("STATUSTEXT [gps-fuse]: %s", _decoded.text)
+        if not _gps_seen:
             raise RuntimeError("GPS did not fuse within 60 s — cannot start steady guidance")
         ctx.log.info("GPS fused — Lua steady guidance active; yielding to test")
 

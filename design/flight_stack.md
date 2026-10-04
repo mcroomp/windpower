@@ -868,7 +868,9 @@ Passive hardware startup avoids that transition:
 
 1. Select `RAWES_MODE=0` and ACRO.
 2. Arm; Lua asserts CH8 while ACRO keeps the attitude target aligned.
-3. Wait `max(H_RSC_RAMP_TIME, H_RSC_RUNUP_TIME)` plus a short scheduling margin.
+3. Wait for ArduPilot's `Runup Complete` status. The configured ramp/runup
+   durations are timeout inputs, not proof that the internal
+   `rotor_runup_complete()` gate is true.
 4. Stage passive thrust with `RAWES_MODE=3`, but leave `RAWES_PEN=0`. Lua enters
    GUIDED_NOGPS using zero body-rate plus thrust only, with yaw trim inhibited.
 5. Wait for Copter `MAV_STATE_ACTIVE` and three quiet seconds after the last EKF

@@ -1,26 +1,24 @@
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{
-        HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE},
-    },
+    http::{StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::time::Instant;
 
 use crate::{
     journal::{JournalError, JournalHandle},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
     operations::{MavlinkOperations, OperationError},
-    records::{DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload},
+    records::{DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock},
 };
 
 #[derive(Clone)]
@@ -192,7 +190,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-async fn mavlink_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+async fn mavlink_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let status = state.link.as_ref().map_or_else(
         || LinkStatus {
             error: Some("MAVLink is not configured".to_owned()),
@@ -200,22 +198,22 @@ async fn mavlink_status(State(state): State<Arc<AppState>>) -> Json<Value> {
         },
         MavlinkLinkHandle::status,
     );
+    let (cursor, sim_clock) = state.journal.checkpoint().await?;
     let mut value = serde_json::to_value(status).expect("LinkStatus is serializable");
-    value
+    let object = value
         .as_object_mut()
-        .expect("LinkStatus serializes as an object")
-        .insert(
-            "cursor".to_owned(),
-            Value::String(format_cursor(state.journal.tail())),
-        );
-    Json(value)
+        .expect("LinkStatus serializes as an object");
+    object.insert("cursor".to_owned(), Value::String(format_cursor(cursor)));
+    object.insert(
+        "sim_clock".to_owned(),
+        serde_json::to_value(sim_clock).expect("SimClock is serializable"),
+    );
+    Ok(Json(value))
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct StreamQuery {
+struct RecordQuery {
     after: Option<String>,
-    #[serde(default)]
-    follow: bool,
     classes: Option<String>,
     source: Option<String>,
     event: Option<String>,
@@ -223,6 +221,38 @@ struct StreamQuery {
     direction: Option<String>,
     message_ids: Option<String>,
     messages: Option<String>,
+    #[serde(default)]
+    wait_ms: u64,
+    limit: Option<usize>,
+}
+
+const DEFAULT_MESSAGE_BATCH_LIMIT: usize = 1_000;
+const MAX_MESSAGE_BATCH_LIMIT: usize = 10_000;
+const MAX_MESSAGE_WAIT_MS: u64 = 30_000;
+
+#[derive(Debug, Default, Deserialize)]
+struct MessageQuery {
+    after: Option<String>,
+    direction: Option<String>,
+    message_ids: Option<String>,
+    messages: Option<String>,
+    #[serde(default)]
+    wait_ms: u64,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct MessageBatch {
+    records: Vec<Value>,
+    next_cursor: String,
+    next_clock: SimClock,
+}
+
+#[derive(Debug, Serialize)]
+struct RecordBatch {
+    records: Vec<Value>,
+    next_cursor: String,
+    next_clock: SimClock,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -238,7 +268,7 @@ struct RecordFilter {
 }
 
 impl RecordFilter {
-    fn from_query(query: &StreamQuery) -> Result<Self, ApiError> {
+    fn from_query(query: &RecordQuery) -> Result<Self, ApiError> {
         let mut filter = Self {
             diagnostics: true,
             mavlink: true,
@@ -258,6 +288,7 @@ impl RecordFilter {
                     "mavlink" | "mavlink.frame" | "mavlink.rx" | "mavlink.tx" => {
                         filter.mavlink = true;
                     }
+
                     "" => {}
                     other => {
                         return Err(ApiError::BadRequest(format!(
@@ -300,6 +331,21 @@ impl RecordFilter {
         Ok(filter)
     }
 
+    fn from_message_query(query: &MessageQuery) -> Result<Self, ApiError> {
+        Self::from_query(&RecordQuery {
+            after: None,
+            classes: Some("mavlink".to_owned()),
+            source: None,
+            event: None,
+            level: None,
+            direction: query.direction.clone(),
+            message_ids: query.message_ids.clone(),
+            messages: query.messages.clone(),
+            wait_ms: 0,
+            limit: None,
+        })
+    }
+
     fn matches(&self, record: &JournalRecord) -> bool {
         match &record.payload {
             RecordPayload::Diagnostic(event) => {
@@ -335,158 +381,142 @@ impl RecordFilter {
 
 async fn records(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<StreamQuery>,
-) -> Result<Response, ApiError> {
-    stream_records(state, query, None).await
+    Query(query): Query<RecordQuery>,
+) -> Result<Json<RecordBatch>, ApiError> {
+    read_record_batch(state, query, None).await
 }
 
 async fn diagnostic_events(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<StreamQuery>,
-) -> Result<Response, ApiError> {
-    stream_records(state, query, Some("diagnostic.event")).await
+    Query(query): Query<RecordQuery>,
+) -> Result<Json<RecordBatch>, ApiError> {
+    read_record_batch(state, query, Some("diagnostic.event")).await
 }
 
 async fn mavlink_frames(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<StreamQuery>,
-) -> Result<Response, ApiError> {
-    stream_records(state, query, Some("mavlink.frame")).await
+    Query(query): Query<RecordQuery>,
+) -> Result<Json<RecordBatch>, ApiError> {
+    read_record_batch(state, query, Some("mavlink.frame")).await
 }
 
 async fn mavlink_messages(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<StreamQuery>,
-) -> Result<Response, ApiError> {
-    let filter = RecordFilter::from_query(&query)?;
+    Query(query): Query<MessageQuery>,
+) -> Result<Json<MessageBatch>, ApiError> {
+    let filter = RecordFilter::from_message_query(&query)?;
     let mut cursor = parse_cursor(query.after.as_deref())?;
-    let follow = query.follow;
+    let limit = query.limit.unwrap_or(DEFAULT_MESSAGE_BATCH_LIMIT);
+    if limit == 0 || limit > MAX_MESSAGE_BATCH_LIMIT {
+        return Err(ApiError::BadRequest(format!(
+            "limit must be between 1 and {MAX_MESSAGE_BATCH_LIMIT}"
+        )));
+    }
+    if query.wait_ms > MAX_MESSAGE_WAIT_MS {
+        return Err(ApiError::BadRequest(format!(
+            "wait_ms must not exceed {MAX_MESSAGE_WAIT_MS}"
+        )));
+    }
     let mut live = state.journal.subscribe();
-    let history = state.journal.records_after(cursor).await?;
-    let journal = state.journal.clone();
+    let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
-    let stream = async_stream::stream! {
-        for record in history {
+    loop {
+        let read = state.journal.read_after(cursor).await?;
+        let mut next_clock = read.tail_clock;
+        let mut records = Vec::new();
+        for record in read.records {
             cursor = cursor.max(record.sequence);
+            next_clock = record.sim_clock;
             if filter.matches(&record)
-                && let Some(line) = encode_telemetry_line(&record)
+                && let Some(value) = encode_telemetry_record(&record)
             {
-                yield Ok::<Bytes, Infallible>(line);
-            }
-        }
-        if follow {
-            loop {
-                match live.recv().await {
-                    Ok(record) => {
-                        cursor = cursor.max(record.sequence);
-                        if filter.matches(&record)
-                            && let Some(line) = encode_telemetry_line(&record)
-                        {
-                            yield Ok(line);
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        match journal.records_after(cursor).await {
-                            Ok(records) => {
-                                for record in records {
-                                    cursor = cursor.max(record.sequence);
-                                    if filter.matches(&record)
-                                        && let Some(line) = encode_telemetry_line(&record)
-                                    {
-                                        yield Ok(line);
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::error!(%error, "failed to recover lagged MAVLink message stream");
-                                break;
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                records.push(value);
+                if records.len() == limit {
+                    break;
                 }
             }
         }
-    };
+        if !records.is_empty() || query.wait_ms == 0 || Instant::now() >= deadline {
+            return Ok(Json(MessageBatch {
+                records,
+                next_cursor: format_cursor(cursor),
+                next_clock,
+            }));
+        }
 
-    let mut response = Body::from_stream(stream).into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/x-ndjson"),
-    );
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("no-cache, no-transform"),
-    );
-    Ok(response)
+        match tokio::time::timeout_at(deadline, live.recv()).await {
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
+                return Ok(Json(MessageBatch {
+                    records: Vec::new(),
+                    next_cursor: format_cursor(cursor),
+                    next_clock,
+                }));
+            }
+        }
+    }
 }
 
-async fn stream_records(
+async fn read_record_batch(
     state: Arc<AppState>,
-    mut query: StreamQuery,
+    mut query: RecordQuery,
     forced_class: Option<&str>,
-) -> Result<Response, ApiError> {
+) -> Result<Json<RecordBatch>, ApiError> {
     if let Some(forced_class) = forced_class {
         query.classes = Some(forced_class.to_owned());
     }
     let filter = RecordFilter::from_query(&query)?;
     let mut cursor = parse_cursor(query.after.as_deref())?;
-    let follow = query.follow;
+    let limit = query.limit.unwrap_or(DEFAULT_MESSAGE_BATCH_LIMIT);
+    if limit == 0 || limit > MAX_MESSAGE_BATCH_LIMIT {
+        return Err(ApiError::BadRequest(format!(
+            "limit must be between 1 and {MAX_MESSAGE_BATCH_LIMIT}"
+        )));
+    }
+    if query.wait_ms > MAX_MESSAGE_WAIT_MS {
+        return Err(ApiError::BadRequest(format!(
+            "wait_ms must not exceed {MAX_MESSAGE_WAIT_MS}"
+        )));
+    }
     let mut live = state.journal.subscribe();
-    let history = state.journal.records_after(cursor).await?;
-    let journal = state.journal.clone();
+    let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
-    let stream = async_stream::stream! {
-        for record in history {
+    loop {
+        let read = state.journal.read_after(cursor).await?;
+        let mut next_clock = read.tail_clock;
+        let mut records = Vec::new();
+        for record in read.records {
             cursor = cursor.max(record.sequence);
+            next_clock = record.sim_clock;
             if filter.matches(&record) {
-                yield Ok::<Bytes, Infallible>(encode_record_line(&record));
-            }
-        }
-        if follow {
-            loop {
-                match live.recv().await {
-                    Ok(record) => {
-                        cursor = cursor.max(record.sequence);
-                        if filter.matches(&record) {
-                            yield Ok(encode_record_line(&record));
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        match journal.records_after(cursor).await {
-                            Ok(records) => {
-                                for record in records {
-                                    cursor = cursor.max(record.sequence);
-                                    if filter.matches(&record) {
-                                        yield Ok(encode_record_line(&record));
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::error!(%error, "failed to recover lagged journal stream");
-                                break;
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                records.push(encode_record(&record));
+                if records.len() == limit {
+                    break;
                 }
             }
         }
-    };
+        if !records.is_empty() || query.wait_ms == 0 || Instant::now() >= deadline {
+            return Ok(Json(RecordBatch {
+                records,
+                next_cursor: format_cursor(cursor),
+                next_clock,
+            }));
+        }
 
-    let mut response = Body::from_stream(stream).into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/x-ndjson"),
-    );
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("no-cache, no-transform"),
-    );
-    Ok(response)
+        match tokio::time::timeout_at(deadline, live.recv()).await {
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
+                return Ok(Json(RecordBatch {
+                    records: Vec::new(),
+                    next_cursor: format_cursor(cursor),
+                    next_clock,
+                }));
+            }
+        }
+    }
 }
 
-fn encode_record_line(record: &JournalRecord) -> Bytes {
+fn encode_record(record: &JournalRecord) -> Value {
     let (kind, data) = match &record.payload {
         RecordPayload::Diagnostic(event) => (
             "diagnostic.event",
@@ -512,25 +542,23 @@ fn encode_record_line(record: &JournalRecord) -> Bytes {
             }),
         ),
     };
-    let mut encoded = serde_json::to_vec(&json!({
+    json!({
         "schema_version": record.schema_version,
         "sequence": record.sequence,
         "cursor": format_cursor(record.sequence),
         "ingest_time_ns": record.ingest_time_ns,
         "correlation_id": record.correlation_id,
+        "sim_clock": record.sim_clock,
         "kind": kind,
         "data": data,
-    }))
-    .expect("journal API record is serializable");
-    encoded.push(b'\n');
-    Bytes::from(encoded)
+    })
 }
 
-fn encode_telemetry_line(record: &JournalRecord) -> Option<Bytes> {
+fn encode_telemetry_record(record: &JournalRecord) -> Option<Value> {
     let RecordPayload::MavlinkFrame(frame) = &record.payload else {
         return None;
     };
-    let mut encoded = serde_json::to_vec(&json!({
+    Some(json!({
         "received_time": record.ingest_time_ns.to_string(),
         "received_time_ns": record.ingest_time_ns,
         "direction": frame.direction,
@@ -539,10 +567,8 @@ fn encode_telemetry_line(record: &JournalRecord) -> Option<Bytes> {
         "message": frame.message_name,
         "fields": frame.fields,
         "cursor": format_cursor(record.sequence),
+        "sim_clock": record.sim_clock,
     }))
-    .expect("telemetry API record is serializable");
-    encoded.push(b'\n');
-    Some(Bytes::from(encoded))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1113,7 +1139,7 @@ mod tests {
     use super::*;
     use crate::{
         journal::JournalConfig,
-        records::{DiagnosticLevel, wall_time_ns},
+        records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
     };
 
     fn event(run_id: Uuid) -> DiagnosticEvent {
@@ -1139,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingests_deduplicates_and_streams_diagnostics() {
+    async fn ingests_deduplicates_and_batches_diagnostics() {
         let temp = TempDir::new().expect("temp directory");
         let run_id = Uuid::new_v4();
         let config = JournalConfig::for_directory(temp.path(), run_id);
@@ -1167,7 +1193,7 @@ mod tests {
             )
             .await
             .expect("response");
-        let streamed = app
+        let read = app
             .oneshot(
                 Request::get("/v1/diagnostics/events")
                     .body(Body::empty())
@@ -1184,12 +1210,85 @@ mod tests {
             serde_json::from_slice::<Value>(&duplicate_body).expect("duplicate JSON")["duplicates"],
             1
         );
-        let stream_body = to_bytes(streamed.into_body(), usize::MAX)
+        let batch_body = to_bytes(read.into_body(), usize::MAX)
             .await
-            .expect("stream body");
-        let record: Value = serde_json::from_slice(&stream_body).expect("stream record");
-        assert_eq!(record["kind"], "diagnostic.event");
-        assert_eq!(record["data"]["source"], "groundstation");
+            .expect("batch body");
+        let batch: Value = serde_json::from_slice(&batch_body).expect("diagnostic batch");
+        assert_eq!(batch["records"][0]["kind"], "diagnostic.event");
+        assert_eq!(batch["records"][0]["data"]["source"], "groundstation");
+        assert_eq!(batch["next_cursor"], "v1:1");
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn message_batch_advances_past_nonmatching_records() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        journal
+            .append(RecordPayload::Diagnostic(Box::new(event(run_id))), None)
+            .await
+            .expect("diagnostic");
+        let app = router(journal.clone(), None);
+
+        let empty = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/mavlink/messages?after=v1:0&messages=STATUSTEXT")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let empty_body = to_bytes(empty.into_body(), usize::MAX)
+            .await
+            .expect("empty body");
+        let empty_batch: Value = serde_json::from_slice(&empty_body).expect("empty message batch");
+        assert_eq!(empty_batch["records"], json!([]));
+        assert_eq!(empty_batch["next_cursor"], "v1:1");
+
+        journal
+            .append(
+                RecordPayload::MavlinkFrame(MavlinkFrame {
+                    link_id: "test".to_owned(),
+                    direction: Direction::Rx,
+                    protocol_version: 2,
+                    sequence: 1,
+                    system_id: 1,
+                    component_id: 1,
+                    message_id: 253,
+                    message_name: "STATUSTEXT".to_owned(),
+                    fields: serde_json::Map::from_iter([
+                        ("severity".to_owned(), json!(6)),
+                        ("text".to_owned(), json!("ready")),
+                    ]),
+                    signed: false,
+                    frame: Vec::new(),
+                }),
+                None,
+            )
+            .await
+            .expect("STATUSTEXT");
+
+        let matched = app
+            .oneshot(
+                Request::get("/v1/mavlink/messages?after=v1:1&messages=STATUSTEXT&limit=1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let matched_body = to_bytes(matched.into_body(), usize::MAX)
+            .await
+            .expect("matched body");
+        let matched_batch: Value =
+            serde_json::from_slice(&matched_body).expect("matched message batch");
+        assert_eq!(matched_batch["records"][0]["message"], "STATUSTEXT");
+        assert_eq!(matched_batch["records"][0]["fields"]["text"], "ready");
+        assert_eq!(matched_batch["next_cursor"], "v1:2");
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");

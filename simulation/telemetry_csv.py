@@ -148,7 +148,7 @@ class TelRow:
     vel_heading_deg:  float = 0.0  # atan2(vel_E, vel_N) [deg] — GPS heading
     heading_gap_deg:  float = 0.0  # compass - vel_heading wrapped to (-180,180] [deg]
 
-    # Latest async MAVLink snapshot values (NaN = never received)
+    # Latest autopilot observation values (NaN = unavailable at this row)
     mav_time_boot_ms: float = float("nan")
     mav_time_usec:    float = float("nan")
     mav_att_roll_deg:  float = float("nan")

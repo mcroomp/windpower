@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-ARG ARDUPILOT_RUNTIME_IMAGE=rawes-sim-ardupilot-base:Copter-4.7.0-v1
+ARG ARDUPILOT_RUNTIME_IMAGE=rawes-sim-ardupilot-base:Copter-4.7.1-v1
 
 FROM ubuntu:24.04 AS base
 
@@ -15,7 +15,7 @@ FROM ubuntu:24.04 AS base
 #
 # Or directly:
 #   docker build -f simulation/Dockerfile . -t rawes-sim --target runtime
-#   docker build -f simulation/Dockerfile . -t rawes-sim-ardupilot-base:Copter-4.7.0-v1 --target runtime-ardupilot-base
+#   docker build -f simulation/Dockerfile . -t rawes-sim-ardupilot-base:Copter-4.7.1-v1 --target runtime-ardupilot-base
 #   docker build -f simulation/Dockerfile . -t rawes-sim --target runtime-ardupilot
 #
 # Stack tests spin up their own ephemeral containers:
@@ -69,16 +69,18 @@ RUN mkdir -p "$ARDUPILOT_PATH" && chown sim:sim "$ARDUPILOT_PATH"
 
 USER sim
 ENV USER=sim
-# Pinned to the stable Copter-4.7.0 release tag (not the moving ArduPilot-4.7
+# Pinned to the stable Copter-4.7.1 release tag (not the moving ArduPilot-4.7
 # branch head) so image rebuilds are reproducible. Required for the
 # vehicle:set_target_angle_and_rate_and_throttle scripting binding used by
 # rawes.lua, which does not exist in 4.6.x.
 # To move to a newer stable release: update ARDUPILOT_TAG below and
 # EXPECTED_ARDUPILOT_VERSION in tests/sitl/stack_utils.py together.
-ARG ARDUPILOT_TAG=Copter-4.7.0
+ARG ARDUPILOT_TAG=Copter-4.7.1
+ARG ARDUPILOT_COMMIT=dbe792162d06cab66c3475fd5556bf7a120f119e
 RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
         --branch "$ARDUPILOT_TAG" \
-        https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH"
+        https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
+    && test "$(git -C "$ARDUPILOT_PATH" rev-parse HEAD)" = "$ARDUPILOT_COMMIT"
 
 WORKDIR "$ARDUPILOT_PATH"
 RUN SKIP_AP_GRAPHIC_ENV=1 SKIP_AP_EXT_ENV=1 SKIP_AP_COV_ENV=1 \
@@ -168,4 +170,6 @@ RUN --mount=type=cache,id=linkhub-cargo-registry,target=/usr/local/cargo/registr
     && cp /build/target/release/linkhub /tmp/linkhub
 
 FROM ${ARDUPILOT_RUNTIME_IMAGE} AS runtime-ardupilot
+ARG RAWES_IMAGE_INPUT_HASH
+LABEL org.rawes.image-input-hash="${RAWES_IMAGE_INPUT_HASH}"
 COPY --from=linkhub-build /tmp/linkhub /usr/local/bin/linkhub

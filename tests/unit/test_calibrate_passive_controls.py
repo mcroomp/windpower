@@ -4,8 +4,9 @@ import time
 import pytest
 
 import calibrate.run as calibrate_run
+from linkhub_client import MessageBatch, SimClock
 from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import Attitude, Heartbeat, NamedValueFloat
+from linkhub_client.messages import Attitude, Heartbeat, NamedValueFloat, StatusText
 from calibrate.run import (
     _PASSIVE_PROTOCOL_SEQUENCE,
     _PassiveTarget,
@@ -26,6 +27,7 @@ from simulation.rawes_lua_harness import RawesLua
 
 
 _CAPTURE_Q = _quat_from_euler_deg(12.0, -7.0, 135.0)
+_CLOCK = SimClock(epoch=1, time_boot_ms=1, quality=None)
 
 
 class _RawAttitudeQuaternion:
@@ -50,8 +52,11 @@ class _CaptureSession:
     def send_message(self, message) -> None:
         self.sent.append(message)
 
-    def _recv(self, **_kwargs):
-        return _RawAttitudeQuaternion()
+    def current_cursor(self):
+        return "v1:0"
+
+    def read_messages(self, *_args, **_kwargs):
+        return MessageBatch((_RawAttitudeQuaternion(),), "v1:1", _CLOCK)
 
 
 def test_capture_current_attitude_uses_quaternion_telemetry():
@@ -70,15 +75,19 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
         def get_param(self, name):
             return {"H_RSC_RAMP_TIME": 0.01, "H_RSC_RUNUP_TIME": 0.02}[name]
 
-        def _recv(self, *, timeout, **_kwargs):
-            events.append(timeout)
-            time.sleep(timeout)
-            return Heartbeat(
-                type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
-                autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-                base_mode=mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED,
-                custom_mode=1,
-                system_status=mavutil.mavlink.MAV_STATE_STANDBY,
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(
+            self, _after, _message_types, *, direction, wait, limit
+        ):
+            assert direction == "rx"
+            events.append(wait)
+            time.sleep(wait)
+            return MessageBatch(
+                (StatusText(severity=6, text="Runup Complete"),),
+                "v1:1",
+                _CLOCK,
             )
 
     monkeypatch.setattr(calibrate_run, "_PASSIVE_RUNUP_MARGIN_S", 0.0)
@@ -115,9 +124,17 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
         def send_message(self, _message):
             pass
 
-        def _recv(self, **kwargs):
-            self.receive_types = kwargs["type"]
-            return next(messages, None)
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(self, _after, message_types, **_kwargs):
+            self.receive_types = message_types
+            message = next(messages, None)
+            return MessageBatch(
+                () if message is None else (message,),
+                "v1:1",
+                _CLOCK,
+            )
 
     monkeypatch.setattr(calibrate_run, "decode_message", lambda message: message)
 
@@ -162,11 +179,14 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
         def send_message(self, _message):
             pass
 
-        def _recv(self, **_kwargs):
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(self, *_args, **_kwargs):
             if self.first:
                 self.first = False
-                return heartbeat
-            return spin
+                return MessageBatch((heartbeat,), "v1:1", _CLOCK)
+            return MessageBatch((spin,), "v1:2", _CLOCK)
 
     monkeypatch.setattr(calibrate_run.time, "monotonic", Clock().monotonic)
     monkeypatch.setattr(calibrate_run, "decode_message", lambda message: message)
@@ -178,7 +198,7 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
     ) is False
 
 
-def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch):
+def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     events = []
     settle_options = []
 
@@ -194,11 +214,12 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch):
             if isinstance(message, NamedValueFloat):
                 events.append(("send", message.name, message.value))
 
-        def start_mavlog(self, path):
-            events.append(("start-log", path))
+        def current_cursor(self):
+            return "v1:0"
 
-        def stop_mavlog(self):
-            events.append(("stop-log",))
+        def export_mavlog(self, path, after):
+            events.append(("export-log", path, after))
+            return "v1:1"
 
     monkeypatch.setattr(
         calibrate_run,
@@ -218,7 +239,7 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch):
         lambda _session, saved: events.append(("restore-motor-function", saved)),
     )
     class Log:
-        path = "passive.csv"
+        path = str(tmp_path / "passive.csv")
         n_rows = 0
 
         def close(self):
@@ -257,6 +278,11 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch):
             settle_options.append(kwargs),
             True,
         )[-1],
+    )
+    monkeypatch.setattr(
+        calibrate_run,
+        "_configure_passive_startup_telemetry",
+        lambda _session: events.append(("startup-telemetry",)),
     )
     monkeypatch.setattr(
         calibrate_run,
@@ -456,6 +482,9 @@ def test_passive_lua_applies_incremental_target_updates_and_preserves_yaw():
         "roll_deg": 20.0,
         "pitch_deg": -5.0,
         "yaw_deg": 120.0,
+        "roll_rate": 0.0,
+        "pitch_rate": 0.0,
+        "yaw_rate": 0.0,
         "climbrate": None,
     }, abs=1e-5)
     assert sim.guided_throttle == pytest.approx(0.45)
@@ -529,6 +558,9 @@ def test_passive_precondition_uses_only_zero_rates_near_hardware_attitude():
         "roll_deg": 90.6,
         "pitch_deg": -35.8,
         "yaw_deg": 77.2,
+        "roll_rate": 0.0,
+        "pitch_rate": 0.0,
+        "yaw_rate": 0.0,
         "climbrate": None,
     }, abs=1e-5)
 

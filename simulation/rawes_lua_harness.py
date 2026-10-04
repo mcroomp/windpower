@@ -368,6 +368,9 @@ class RawesLua:
             "roll_deg": float(t.roll_deg),
             "pitch_deg": float(t.pitch_deg),
             "yaw_deg": float(t.yaw_deg),
+            "roll_rate": float(t.roll_rate),
+            "pitch_rate": float(t.pitch_rate),
+            "yaw_rate": float(t.yaw_rate),
             "climbrate": float(t.climbrate) if t.climbrate is not None else None,
         }
 

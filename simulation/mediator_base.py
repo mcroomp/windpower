@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
+import time
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -84,16 +86,32 @@ def run_lockstep(
     """
     frame = 0
     last_hb = -1.0
+    profile = os.environ.get("RAWES_PROFILE_LOCKSTEP") == "1"
+    profile_wall_start = time.perf_counter()
+    profile_cpu_start = time.process_time()
+    profile_sim_start = 0.0
+    profile_recv_s = 0.0
+    profile_step_s = 0.0
+    profile_send_s = 0.0
     while not is_stopped():
+        recv_start = time.perf_counter() if profile else 0.0
         servos = sitl.recv_servos()
+        if profile:
+            profile_recv_s += time.perf_counter() - recv_start
         if servos is None:
             if is_stopped():
                 break
             log.error("SITL servo watchdog expired -- ArduPilot stopped responding")
             sys.exit(1)
         t = sitl.sim_now()
+        step_start = time.perf_counter() if profile else 0.0
         state = step_fn(servos, t)
+        if profile:
+            profile_step_s += time.perf_counter() - step_start
+        send_start = time.perf_counter() if profile else 0.0
         sitl.send_state(**state)
+        if profile:
+            profile_send_s += time.perf_counter() - send_start
         frame += 1
         if t - last_hb >= 1.0:
             last_hb = t
@@ -101,4 +119,26 @@ def run_lockstep(
             if ev is not None:
                 extra = heartbeat_fields() if heartbeat_fields is not None else {}
                 ev.write("heartbeat", t_sim=round(t, 1), **extra)
+        if profile and t - profile_sim_start >= 5.0:
+            wall_now = time.perf_counter()
+            cpu_now = time.process_time()
+            wall_s = wall_now - profile_wall_start
+            sim_s = t - profile_sim_start
+            log.info(
+                "lockstep_perf sim=%.1fs wall=%.3fs speed=%.2fx "
+                "recv=%.3fs step=%.3fs send=%.3fs mediator_cpu=%.1f%%",
+                sim_s,
+                wall_s,
+                sim_s / wall_s if wall_s > 0.0 else 0.0,
+                profile_recv_s,
+                profile_step_s,
+                profile_send_s,
+                100.0 * (cpu_now - profile_cpu_start) / wall_s if wall_s > 0.0 else 0.0,
+            )
+            profile_wall_start = wall_now
+            profile_cpu_start = cpu_now
+            profile_sim_start = t
+            profile_recv_s = 0.0
+            profile_step_s = 0.0
+            profile_send_s = 0.0
     return frame

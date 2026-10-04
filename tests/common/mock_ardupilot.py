@@ -382,9 +382,9 @@ class _LuaBackend(_MockArdupilotBase):
                 float(gt.roll_deg),
                 float(gt.pitch_deg),
                 float(gt.yaw_deg),
-                0.0,
-                0.0,
-                0.0,
+                float(gt.roll_rate),
+                float(gt.pitch_rate),
+                float(gt.yaw_rate),
                 throttle,
                 sim_time=t_sim,
             )

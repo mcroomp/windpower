@@ -150,6 +150,8 @@ After every diagnostic, leave the vehicle:
 - `H_FLYBAR_MODE=1` (ACRO RC passthrough);
 - Lua mode 0 refreshing neutral RC1/RC2 and center-collective RC3 overrides while disarmed.
 - `SERVO9_FUNCTION=0`, leaving the yaw motor output electrically unassigned.
+- `H_YAW_TRIM=0`, preventing a stale prior-run motor trim when DDFP ownership
+  is restored on a later run.
 
 `H_SV_MAN=0` is required before an automated heli-control run. Disarmed alone
 does not guarantee centered or electrically inactive swash outputs: with the
@@ -482,10 +484,182 @@ quaternion-validity checks at capture. Focused Lua/ground/logging tests pass
 (47 tests), including a regression at the measured hardware attitude
 `(90.6, -35.8, 77.2) deg`: before enable it produces only zero body rates at
 the held thrust, and after enable the captured angle target matches that
-attitude. The upload artifact is 65,465 bytes with SHA-256
-`120633C4AC4A61266402E990AF24F72ADDFCA4D80593E9874373AC9F1B9402D0`.
-This revised Lua file is ready for controlled direct-USB upload but has not yet
-been uploaded after this change.
+attitude. The repository script has changed since the original prepared
+artifact; its current fingerprint is recorded in the 2026-10-04 session below.
+
+## 2026-10-04 passive hardware investigation
+
+The attached Pixhawk auto-detected on `COM7` at `115200` baud. The first
+read-only status was disarmed in STABILIZE with S1/S2/S3 at
+`1420/1546/1587 us`; `SERVO9_FUNCTION=0`. Running the canonical `disarm`
+command restored ACRO, `RAWES_MODE=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`, and
+stable S1/S2/S3 outputs of `1518/1518/1518 us`.
+
+The direct connection is now positively identified as the Pixhawk 6C native
+USB composite device. COM7 and COM8 both report `VID:PID=3162:0053`, device
+serial `160031001751343131363538`, at one physical USB location. This metadata,
+not the COM number alone, is the basis for permitting automatic Lua upload in
+this hardware session. Radio or ambiguous USB-serial metadata remains a hard
+stop for agent-driven deployment.
+
+The running LinkHub binary initially predated its source and returned telemetry
+records without the client's required `sim_clock` field. PID 43532 was stopped
+and `cargo build --manifest-path .\linkhub\Cargo.toml --release` rebuilt the
+service. No flight command was attempted until the normal calibration tool
+worked again.
+
+The first forced passive attempt exposed a ground-side telemetry-direction
+bug. LinkHub journals both RX vehicle heartbeats and TX GCS heartbeats, but
+`calibrate.read_one()` consumed both. The passive runup waiter mistook the TX
+GCS heartbeat for a disarmed vehicle heartbeat about `0.27 s` after the real
+armed heartbeat. `LinkHubClient.read_messages()` now exposes the server's
+direction filter and calibration state waits request `direction=rx`.
+
+The next forced attempt was immediately disarmed by the battery failsafe:
+`Battery 1 is low 0.11V` and `Battery Failsafe - Disarming`.
+`BATT_MONITOR` was live at `4` despite this being an unpowered bench setup.
+The documented `battery monitor off` command set it to `0`; the Pixhawk was
+rebooted, auto-detected again, and returned to canonical safe-off. Restore
+monitor type 4 before battery-powered operation.
+
+The next run reached the nominal elapsed runup time but ArduPilot rejected
+GUIDED_NOGPS with `Mode change to Guided No GPS failed: runup not complete`.
+The ground tool had treated
+`max(H_RSC_RAMP_TIME, H_RSC_RUNUP_TIME) + 0.5 s` as proof of completion.
+ArduPilot actually gates the mode on its internal
+`rotor_runup_complete()` state. The tool now waits for the explicit
+`Runup Complete` status with a bounded timeout. It also enables attitude,
+attitude-target, and servo-output evidence streams before arming; previously
+those streams began only after the handoff being diagnosed.
+
+One final forced, actuator-disconnected run used:
+
+```text
+uv run python -m calibrate --connection COM7 --baud 115200 run passive --duration 5 --protocol-debug --force
+```
+
+The canonical evidence is
+`simulation/logs/calibrate/run_passive_20261004_100414.mavlink.jsonl`.
+Measured facts:
+
+- ArduPilot reported `Runup Complete` before the mode request.
+- The ACRO attitude was quiet for three seconds.
+- Lua acknowledged `anchor captured` and then repeatedly reported the correct
+  fixed command `rpy=(-179.5,-0.3,49.0)` with zero requested body rates.
+- On GUIDED_NOGPS entry, ArduPilot's `ATTITUDE_TARGET` did not equal that
+  command. It began far away and slewed toward it; initial quaternion error was
+  about `171 deg`.
+- The stationary actual attitude remained approximately
+  `(-179.5,-0.34,49 deg)` while S1/S2/S3 ranged `1273..1567`,
+  `1367..1567`, and `1362..1567 us`.
+- This proves the movement is an ArduPilot internal target-transition response,
+  not a changing Lua target or physical attitude response.
+
+Capturing the absolute target before GUIDED did not prevent the transient:
+mode entry reset/retained a distant internal target and then input-shaped
+toward Lua's correct command. The required bridge is the repository Lua
+precondition: enter GUIDED with `RAWES_PEN=0`, continuously command zero body
+rates plus held thrust so ArduPilot aligns its internal state, qualify quiet
+rates, and only then capture/enable the absolute target.
+
+The deployed `/APM/scripts/rawes.lua` is `67,080` bytes. The current repository
+[`scripts/rawes.lua`](scripts/rawes.lua) is `67,522` bytes with SHA-256
+`4C5068532D7A8DADD2B67A35938E1DB25DFB446847E363EF8CFE312266A31E67` and contains
+the zero-rate precondition. They are not the same artifact. No Lua upload was
+performed during this session.
+
+The operator's next step, over the currently detected direct USB connection,
+is to perform the upload manually:
+
+```text
+uv run python -m calibrate --connection COM7 --baud 115200 script upload scripts\rawes.lua
+uv run python -m calibrate --connection COM7 --baud 115200 reboot
+```
+
+After reboot, auto-detect without connection arguments, run `disarm` to restore
+canonical safe-off, and verify `script list` reports `67,522` bytes before any
+armed retest. Never use these session-specific connection arguments in a later
+session without a fresh scan.
+
+Final hardware state for this session was confirmed by the automatic shutdown:
+disarmed, ACRO, `RAWES_MODE=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`, and
+`SERVO9_FUNCTION=0`. The first normal disarm request after the successful run
+was temporarily rejected; the existing cleanup force-disarm fallback succeeded
+and then applied canonical safe-off.
+
+### 2026-10-04 verified deployment and robustness continuation
+
+The operator uploaded the repository script and rebooted. Auto-detection found
+COM7/115200 again, `script list` reported the expected `67,522` bytes, and the
+canonical `disarm` command restored safe-off before testing.
+
+The focused deployment gate passed 95 tests covering Lua math, arm timer,
+neutral hold, spin safety, yaw trim, passive controls/live view, constants,
+and ACRO-manual behavior.
+
+Three consecutive two-second forced arm cycles were then run through one
+persistent LinkHub session. Every arm was acknowledged, every normal disarm
+was acknowledged, and every cycle restored canonical safe-off. This separates
+arm/disarm behavior from direct-USB reopen behavior.
+
+Repeatedly starting a new LinkHub process on native USB exposed a separate
+connection glitch: opening COM7 can reset or stall the USB MAVLink endpoint
+longer than the old 15-second heartbeat deadline. One cycle succeeded, while
+the next timed out before issuing an arm command. LinkHub now:
+
+- allows 30 seconds for initial heartbeat acquisition;
+- logs receive EOFs during initial acquisition at debug level;
+- retains warning-level reporting if an already-ready MAVLink link is lost.
+
+A deterministic Python regression simulating readiness after 16 seconds
+passes. The full LinkHub Rust suite passes (34 tests), and the release binary
+was rebuilt. Subsequent hardware commands connected without the misleading
+early-EOF warning stream.
+
+The updated Lua zero-rate precondition was exercised by:
+
+```text
+uv run python -m calibrate --connection COM7 --baud 115200 run passive --duration 5 --protocol-debug --force
+```
+
+Canonical evidence:
+`simulation/logs/calibrate/run_passive_20261004_113355.mavlink.jsonl`.
+GUIDED_NOGPS became ACTIVE, the quiet-rate gate completed, and the captured
+target matched actual attitude. During the five-second absolute-hold interval,
+125 samples held S1/S2/S3 exactly at `1467/1467/1467 us`; displayed quaternion
+error remained approximately zero. A second three-second run
+(`run_passive_20261004_113631.mavlink.jsonl`) repeated the result with
+quaternion error no greater than approximately `0.05 deg` and S1/S2/S3 at
+`1467/1467/1468 us`.
+
+ArduPilot predictably rejects a normal disarm from active, non-landed
+GUIDED_NOGPS. Calibration shutdown previously reported that expected rejection
+as a failure before its successful force-disarm fallback. Armed bench-run
+shutdown now releases Lua, commands motor-off where applicable, and explicitly
+force-disarms once. Dedicated `calibrate arm` cycles continue to use and verify
+normal disarm.
+
+ACRO-manual was exercised twice. Canonical final evidence:
+`simulation/logs/calibrate/run_acro-manual_20261004_113951.mavlink.jsonl`.
+The neutral seed produced RC1-RC4 at `1500 us` and S1/S2/S3 fixed at
+`1515/1515/1515 us` for the full bounded run. The generic named-float status
+formatter previously rounded `RAWES_COL=0.5` to the misleading text
+`RAWES_COL=1`; it now uses six significant digits. The corrected Lua passed
+the 95-test deployment gate, was uploaded automatically over the positively
+verified native Pixhawk USB interface, rebooted, and verified remotely at
+`67,522` bytes. The final manual run reported `RAWES_COL=0.5`.
+
+The final remaining stale-state issue was `H_YAW_TRIM`: passive/manual yaw
+observation could leave a nonzero trim while `SERVO9_FUNCTION=0`. Although
+electrically safe while unassigned, restoring DDFP later could briefly expose
+the prior-run command. Canonical safe-off now disconnects the motor first and
+then verifies `H_YAW_TRIM=0`. Twelve calibration hardware tests pass. Final
+live status verified:
+
+- disarmed, ACRO, STANDBY;
+- `RAWES_MODE=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`;
+- `SERVO9_FUNCTION=0`, `H_YAW_TRIM=0`;
+- S1/S2/S3 `1518/1518/1518 us`, channel 8 `1000 us`.
 
 ## Changes already made
 

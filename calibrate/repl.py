@@ -15,7 +15,7 @@ from linkhub_client import mav_constants as mavlink
 from linkhub_client.mav_constants import mavutil
 
 from .constants import (
-    RawesGCS, WallClock, CommandLong, RequestDataStream,
+    LinkHubClient, WallClock, CommandLong, RequestDataStream,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
     SWASH_SERVOS,
@@ -34,6 +34,7 @@ from .hw import (
     _refresh_pole_pairs, _monitor_esc, _set_safe_off_state,
 )
 from .linkhub import ensure_linkhub
+from .messages import read_one
 from .params import (
     _config_target_params,
     _fetch_dataflash_log,
@@ -182,7 +183,6 @@ One-shot:
                                     default: common + physical-airframe overrides
                                     --all: also include copter-heli.parm baseline
     config fix [--all]              Write the DIFFs (same scope rules as check)
-    config show/apply               Compatibility aliases for check/fix
   logs list                       List all dataflash logs on the FC (id / size)
   logs fetch [--id N] [--dir D]   Download a dataflash .BIN log (default: latest)
                                   --id N   specific log id; omit for latest
@@ -203,7 +203,7 @@ class _BatteryParameterSession(Protocol):
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def _run_command(session: RawesGCS, tokens: list[str],
+def _run_command(session: LinkHubClient, tokens: list[str],
                  force: bool = False) -> bool:
     """
     Execute one calibration command.
@@ -245,7 +245,7 @@ def _run_command(session: RawesGCS, tokens: list[str],
 # One-shot verb implementations
 # ---------------------------------------------------------------------------
 
-def _cmd_reboot(session: RawesGCS) -> None:
+def _cmd_reboot(session: LinkHubClient) -> None:
     print("  Sending reboot command ...")
     session.command(
         mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
@@ -253,7 +253,7 @@ def _cmd_reboot(session: RawesGCS) -> None:
     )
 
 
-def _cmd_disarm(session: RawesGCS) -> None:
+def _cmd_disarm(session: LinkHubClient) -> None:
     """Converge on canonical safe-off, forcing disarm only when necessary."""
     if _disarm(session):
         return
@@ -268,7 +268,7 @@ def _cmd_disarm(session: RawesGCS) -> None:
     )
 
 
-def _cmd_set(session: RawesGCS, args: list[str]) -> None:
+def _cmd_set(session: LinkHubClient, args: list[str]) -> None:
     """set <name> <value>"""
     if len(args) < 2:
         print("  Usage: set <name> <value>"); return
@@ -341,7 +341,7 @@ def _cmd_battery(session: _BatteryParameterSession, args: list[str]) -> None:
     print("  [NOTE] ArduPilot marks BATT_MONITOR reboot-required; reboot to apply.")
 
 
-def _cmd_get(session: RawesGCS, args: list[str]) -> None:
+def _cmd_get(session: LinkHubClient, args: list[str]) -> None:
     """get <name> [<name> ...]"""
     if not args:
         print("  Usage: get <name> [<name> ...]"); return
@@ -354,7 +354,7 @@ def _cmd_get(session: RawesGCS, args: list[str]) -> None:
             print(f"  {name} = {v}")
 
 
-def _print_swash_layout(session: RawesGCS) -> None:
+def _print_swash_layout(session: LinkHubClient) -> None:
     """Print the configured mixer and RAWES physical HR3-120 geometry."""
     def g(name, default=None):
         v = session.get_param(name)
@@ -378,13 +378,14 @@ def _print_swash_layout(session: RawesGCS) -> None:
     flybar    = g("H_FLYBAR_MODE")
     sv_man    = g("H_SV_MAN")
 
+    cursor = session.current_cursor()
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
         req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
         req_message_rate=10,
     ))
-    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
+    srv, _ = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
     pwm = {
         1: getattr(srv, "servo1_raw", 0) if srv else 0,
         2: getattr(srv, "servo2_raw", 0) if srv else 0,
@@ -495,7 +496,7 @@ def _fmt_az(az):
     return f"{az:+.0f} deg"
 
 
-def _cmd_swash(session: RawesGCS, args: list[str]) -> None:
+def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
     """swash <coll%> [lon%] [lat%]
        swash range <min> <max>
        swash neutral [n]
@@ -595,11 +596,14 @@ _SV_MAN_MODES = {
 
 
 def _run_servo_mode(
-    session: RawesGCS,
+    session: LinkHubClient,
     mode: int,
     duration: float,
 ) -> tuple[int, int] | None:
-    heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+    cursor = session.current_cursor()
+    heartbeat, cursor = read_one(
+        session, cursor, "HEARTBEAT", wait=2.0,
+    )
     if heartbeat is None:
         print("  [FAIL] no heartbeat; servo mode aborted")
         return None
@@ -629,7 +633,9 @@ def _run_servo_mode(
     completed = True
     try:
         while time.monotonic() < deadline:
-            msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.2)
+            msg, cursor = read_one(
+                session, cursor, "SERVO_OUTPUT_RAW", wait=0.2,
+            )
             now = time.monotonic()
             if msg is not None:
                 values = [
@@ -661,7 +667,7 @@ def _run_servo_mode(
     return extrema
 
 
-def _set_param_verified(session: RawesGCS, name: str, value: int) -> bool:
+def _set_param_verified(session: LinkHubClient, name: str, value: int) -> bool:
     if not session.set_param(name, float(value)):
         print(f"  [FAIL] {name}: no ACK")
         return False
@@ -672,7 +678,7 @@ def _set_param_verified(session: RawesGCS, name: str, value: int) -> bool:
 
 
 def _fit_swash_range(
-    session: RawesGCS,
+    session: LinkHubClient,
     lo: int,
     hi: int,
     cyclic: int,
@@ -759,8 +765,11 @@ def _bounded_swash_waypoints(lo: int, neutral: int, hi: int) -> tuple[tuple[int,
     )
 
 
-def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
-    heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
+    cursor = session.current_cursor()
+    heartbeat, cursor = read_one(
+        session, cursor, "HEARTBEAT", wait=2.0,
+    )
     if heartbeat is None:
         print("  [FAIL] no heartbeat; swash sweep aborted")
         return
@@ -807,7 +816,9 @@ def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
             for output, pwm in zip(SWASH_SERVOS, targets):
                 _send_set_servo(session, output, pwm)
 
-            msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.08)
+            msg, cursor = read_one(
+                session, cursor, "SERVO_OUTPUT_RAW", wait=0.08,
+            )
             if msg is not None and now >= next_print:
                 values = tuple(getattr(msg, f"servo{output}_raw", 0) for output in SWASH_SERVOS)
                 status = "OK" if all(lo <= value <= hi for value in values) else "OUT OF RANGE"
@@ -826,7 +837,7 @@ def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
             _restore_servo_functions(session, saved_functions)
 
 
-def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
+def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
     """servo <ch> <pwm>
        servo mode <name|0..5> [--duration N]
        servo sweep [--duration N]
@@ -952,7 +963,7 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
         _restore_servo_functions(session, saved_functions)
 
 
-def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
+def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     """motor <pwm_us> [--duration N]
        motor off
 
@@ -1063,7 +1074,7 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
     print("  Done.")
 
 
-def _cmd_arm(session: RawesGCS, args: list[str]) -> None:
+def _cmd_arm(session: LinkHubClient, args: list[str]) -> None:
     """Arm normally for a bounded interval, then return to safe-off."""
     try:
         pos, flags = _parse_flags(
@@ -1100,7 +1111,7 @@ def _cmd_arm(session: RawesGCS, args: list[str]) -> None:
             _disarm(session, force=True)
 
 
-def _cmd_script(session: RawesGCS, args: list[str]) -> None:
+def _cmd_script(session: LinkHubClient, args: list[str]) -> None:
     """script upload <file>
        script list
        script remove <name>"""
@@ -1124,7 +1135,7 @@ def _cmd_script(session: RawesGCS, args: list[str]) -> None:
     print(f"  Unknown script subcommand {sub!r}  (valid: upload, list, remove)")
 
 
-def _cmd_logs(session: RawesGCS, args: list[str]) -> None:
+def _cmd_logs(session: LinkHubClient, args: list[str]) -> None:
     if not args or args[0].lower() not in {"list", "fetch"}:
         print("  Usage: logs list")
         print("         logs fetch [--id N] [--dir D]")
@@ -1157,14 +1168,11 @@ def _cmd_logs(session: RawesGCS, args: list[str]) -> None:
     _fetch_dataflash_log(session, log_id=log_id, directory=directory)
 
 
-def _cmd_config(session: RawesGCS, args: list[str]) -> None:
-    """config check|show
-       config fix|apply"""
+def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
+    """config check|fix"""
     if not args:
         print("  Usage: config check [--all]  OR  config fix [--all]"); return
     sub = args[0].lower()
-    alias = {"show": "check", "apply": "fix"}
-    sub = alias.get(sub, sub)
     if sub not in ("check", "fix"):
         print(f"  Unknown config subcommand {sub!r}  (valid: check, fix)"); return
     opt_tokens = args[1:]
@@ -1262,7 +1270,7 @@ def _cmd_config(session: RawesGCS, args: list[str]) -> None:
 # REPL
 # ---------------------------------------------------------------------------
 
-def _repl(session: RawesGCS) -> None:
+def _repl(session: LinkHubClient) -> None:
     print("\nConnected. Type 'help' for commands, 'quit' to exit.\n")
     while True:
         try:
@@ -1317,9 +1325,9 @@ def _build_parser() -> argparse.ArgumentParser:
 # Connection helper
 # ---------------------------------------------------------------------------
 
-def _connect(server: str) -> RawesGCS:
+def _connect(server: str) -> LinkHubClient:
     print(f"Connecting to LinkHub at {server} ...")
-    session = RawesGCS(address=server)
+    session = LinkHubClient(address=server)
     session.connect(timeout=15.0)
     print(f"Connected: sysid={session._target_system} compid={session._target_component}")
     session.send_message(RequestDataStream(

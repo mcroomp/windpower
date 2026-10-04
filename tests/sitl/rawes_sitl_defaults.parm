@@ -51,6 +51,7 @@ SIM_GPS1_LAG_MS  220    # must match pinned GPS1_DELAY_MS
 SIM_GPS2_LAG_MS  220    # must match pinned GPS2_DELAY_MS
 
 # Disable synthetic SITL compasses (compass yaw source already disabled in common file).
+SIM_RATE_HZ      400    # match RAWES physics/control lockstep; ArduPilot default 1200 is needlessly expensive
 COMPASS_ENABLE   0
 COMPASS_USE2     0
 COMPASS_USE3     0

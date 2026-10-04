@@ -10,7 +10,7 @@ import math
 import os
 
 # Re-exported so existing calibration modules share the one HTTP client.
-from linkhub_client.client import LinkHubClient as RawesGCS, WallClock
+from linkhub_client.client import LinkHubClient, WallClock
 from linkhub_client.messages import (
     Attitude,
     AttitudeQuaternion,
@@ -196,7 +196,7 @@ SCRIPTS_DIR = "/APM/scripts"
 # ---------------------------------------------------------------------------
 # COM port scan fallback bauds
 # ---------------------------------------------------------------------------
-_FALLBACK_BAUDS = [57600, 38400, 19200, 9600]
+_FALLBACK_BAUDS = [115200, 57600, 38400, 19200, 9600]
 
 # ---------------------------------------------------------------------------
 # Run mode config table

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "linkhub-client"
 version = "0.1.0"
-description = "Dependency-free LinkHub HTTP/NDJSON protocol and Python client"
+description = "Dependency-free LinkHub HTTP/JSON protocol and Python client"
 requires-python = ">=3.12"
 dependencies = []
 

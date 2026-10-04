@@ -4,6 +4,7 @@ import calibrate.hw as calibrate_hw
 import calibrate.repl as calibrate_repl
 import calibrate.run as calibrate_run
 from calibrate.hw import _disarm, _h3_forward_mix
+from linkhub_client import MessageBatch, SimClock
 from linkhub_client.mav_constants import mavutil
 from linkhub_client.messages import Heartbeat
 from calibrate.params import _config_target_params
@@ -12,6 +13,8 @@ from calibrate.repl import (
     _fit_swash_range,
     _print_swash_layout,
 )
+
+_CLOCK = SimClock(epoch=1, time_boot_ms=1, quality=None)
 
 
 def test_hardware_profile_uses_front_elevator_hr3_layout():
@@ -133,21 +136,28 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
             events.append("disarm-command")
             return {"result": mavutil.mavlink.MAV_RESULT_ACCEPTED}
 
-        def _recv(self, **_kwargs):
-            return Heartbeat(
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(self, *_args, **_kwargs):
+            return MessageBatch((Heartbeat(
                 type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
                 autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
                 base_mode=0,
                 custom_mode=4,
                 system_status=mavutil.mavlink.MAV_STATE_STANDBY,
-            )
+            ),), "v1:1", _CLOCK)
 
         def set_param(self, name, value):
             events.append(("set-param", name, value))
             return True
 
         def get_param(self, name):
-            return {"H_FLYBAR_MODE": 0.0, "H_SV_MAN": 0.0}[name]
+            return {
+                "H_YAW_TRIM": 0.25,
+                "H_FLYBAR_MODE": 0.0,
+                "H_SV_MAN": 0.0,
+            }[name]
 
         def set_mode(self, mode):
             events.append(("set-mode", mode))
@@ -159,6 +169,7 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
         "disarm-command",
         ("set-param", "RAWES_MODE", 0),
         ("set-param", "SERVO9_FUNCTION", 0.0),
+        ("set-param", "H_YAW_TRIM", 0.0),
         ("set-param", "H_FLYBAR_MODE", 1.0),
         ("set-mode", 1),
     ]
@@ -177,17 +188,24 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
         def command(self, *_args, **_kwargs):
             return {"result": mavutil.mavlink.MAV_RESULT_ACCEPTED}
 
-        def _recv(self, **_kwargs):
-            return Heartbeat(
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(self, *_args, **_kwargs):
+            return MessageBatch((Heartbeat(
                 type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
                 autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
                 base_mode=0,
                 custom_mode=4,
                 system_status=mavutil.mavlink.MAV_STATE_STANDBY,
-            )
+            ),), "v1:1", _CLOCK)
 
         def get_param(self, name):
-            return {"H_FLYBAR_MODE": 0.0, "H_SV_MAN": 3.0}[name]
+            return {
+                "H_YAW_TRIM": 0.25,
+                "H_FLYBAR_MODE": 0.0,
+                "H_SV_MAN": 3.0,
+            }[name]
 
         def set_param(self, name, value):
             events.append(("set-param", name, value))
@@ -202,6 +220,7 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
     assert events == [
         ("set-param", "RAWES_MODE", 0),
         ("set-param", "SERVO9_FUNCTION", 0.0),
+        ("set-param", "H_YAW_TRIM", 0.0),
         ("set-param", "H_FLYBAR_MODE", 1.0),
         ("set-param", "H_SV_MAN", 0.0),
         ("set-mode", 1),
@@ -275,7 +294,7 @@ def test_safety_shutdown_force_disarms_when_normal_disarm_fails(monkeypatch):
 
     calibrate_run._safety_shutdown(Session())
 
-    assert events == [(5.0, False), (5.0, True)]
+    assert events == [(5.0, True)]
 
 
 def test_hr3_manual_mixer_matches_physical_servo_positions():
@@ -329,8 +348,11 @@ def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
         def send_message(self, _message):
             pass
 
-        def _recv(self, **_kwargs):
-            return ServoOutput()
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(self, *_args, **_kwargs):
+            return MessageBatch((ServoOutput(),), "v1:1", _CLOCK)
 
     session = Session()
     _print_swash_layout(session)

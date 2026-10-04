@@ -127,6 +127,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
     gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     gcs.set_param("RAWES_MODE", 3, timeout=5.0)
+    gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
     log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
     gcs.sim_sleep(10.0)
     ok = gcs.set_param("RAWES_MODE", 1, timeout=5.0)
@@ -151,7 +152,9 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     # explicit MODE_STEADY promotion above starts Lua capture, so begin the ground
     # planner's settle countdown from the same transition instead of depending on
     # asynchronously chunked STATUSTEXT delivery.
-    planner.notify_captured(gcs.sim_now())
+    planner_capture_time = gcs.sim_now()
+    planner.notify_captured(planner_capture_time)
+    log.info("Planner capture gate armed at t=%.3f s", planner_capture_time)
 
     # ── Winch command socket = the winch cable ─────────────────────────────
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -180,6 +183,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     previous_phase = planner.phase
 
     deadline = gcs.sim_now() + _OBS_SECONDS
+    message_cursor = gcs.current_cursor()
     log.info("--- test_pumping_cycle_lua_sitl: observing %.0f s ---", _OBS_SECONDS)
 
     try:
@@ -203,6 +207,16 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                 t_plan_next = t_sim + dt_plan
 
                 cmd = planner.step(t_sim, tension_now, rest_length)
+                if (
+                    planner.phase == "hold"
+                    and planner.cycle_count < N_CYCLES
+                    and t_sim - planner_capture_time >= CAPTURE_SETTLE_S + 5.0
+                ):
+                    pytest.fail(
+                        "Pumping planner remained in hold after capture settle: "
+                        f"capture_t={planner_capture_time:.3f}, now={t_sim:.3f}, "
+                        f"captured={planner.captured}, rest_length={rest_length:.3f}"
+                    )
                 if planner.phase != previous_phase:
                     log.info(
                         "Planner phase: %s -> %s at t=%.1f s, rest_length=%.2f m",
@@ -229,17 +243,20 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                     break
 
             # ── Drain MAVLink for STATUSTEXT ──────────────────────────────
-            msg = gcs._recv(
-                type=["STATUSTEXT"],
-                blocking=False, timeout=0.01,
+            batch = gcs.read_messages(
+                message_cursor,
+                ["STATUSTEXT"],
+                limit=100,
             )
-            if msg is not None and isinstance((decoded := decode_message(msg)), StatusText):
-                text = decoded.text
-                all_statustext.append(text)
-                log.info("STATUSTEXT: %s", text)
-                if "RAWES steady: captured" in text:
-                    captured_seen = True
-                    planner.notify_captured(gcs.sim_now())
+            message_cursor = batch.next_cursor
+            for msg in batch.messages:
+                if isinstance((decoded := decode_message(msg)), StatusText):
+                    text = decoded.text
+                    all_statustext.append(text)
+                    log.info("STATUSTEXT: %s", text)
+                    if "RAWES steady: captured" in text:
+                        captured_seen = True
+                        planner.notify_captured(gcs.sim_now())
 
         sock.close()
 

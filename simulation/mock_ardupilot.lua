@@ -481,6 +481,9 @@ function vehicle:set_target_angle_and_rate_and_throttle(roll_deg, pitch_deg, yaw
         roll_deg  = roll_deg,
         pitch_deg = pitch_deg,
         yaw_deg   = yaw_deg,
+        roll_rate = roll_rate,
+        pitch_rate = pitch_rate,
+        yaw_rate = yaw_rate,
         climbrate = nil,
     }
     _mock.guided_rate_target = nil

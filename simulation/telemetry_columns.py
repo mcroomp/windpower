@@ -178,7 +178,7 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "heading_gap_deg", # heading gap in NED heading convention
         ),
     ),
-    # Asynchronous MAVLink captures (ATTITUDE/TARGET/SERVO) sampled by mediator.
+    # LinkHub MAVLink observations sampled onto the physics timeline after a SITL run.
     (
         "mavlink_async",
         (
