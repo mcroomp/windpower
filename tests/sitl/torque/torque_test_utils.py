@@ -174,18 +174,26 @@ def read_physics_psi_dot(
     Extract physics psi_dot samples from the mediator events log.
 
     Reads heartbeat events with phase=="DYNAMIC" in the observation window.
-    settle_s and observe_s are measured from DYNAMIC start (the dynamics_start
-    event), so the window is independent of startup_hold_s.
+    settle_s and observe_s use absolute mediator simulation time, including
+    startup_hold_s; no dynamics_start offset is applied.
 
-    Returns a list of {"t": float [s dynamics], "psi_dot": float [rad/s]}.
+    Returns a list of {"t": float [s simulation], "psi_dot": float [rad/s]}.
     """
     samples: list[dict] = []
     for ev in events_log.get_events("heartbeat"):
         if ev.get("phase") != "DYNAMIC":
             continue
-        t = float(ev.get("t_sim", 0.0))
+        if "t_sim" not in ev:
+            pytest.fail(f"Physics heartbeat is missing t_sim: {events_log.path}")
+        t = float(ev["t_sim"])
+        if not math.isfinite(t):
+            pytest.fail(f"Physics heartbeat has non-finite t_sim: {events_log.path}")
         if settle_s <= t <= settle_s + observe_s:
-            psi_dot_deg_s = float(ev.get("psi_dot_deg_s", 0.0))
+            if "psi_dot_deg_s" not in ev:
+                pytest.fail(f"Physics heartbeat at t={t:.1f} is missing psi_dot_deg_s: {events_log.path}")
+            psi_dot_deg_s = float(ev["psi_dot_deg_s"])
+            if not math.isfinite(psi_dot_deg_s):
+                pytest.fail(f"Physics heartbeat at t={t:.1f} has non-finite psi_dot_deg_s: {events_log.path}")
             samples.append({"t": t, "psi_dot": math.radians(psi_dot_deg_s)})
     return samples
 
@@ -224,6 +232,22 @@ def assert_physics_yaw_rate(
             f"Log: {events_log.path}"
         )
 
+    # run_lockstep emits heartbeats every sim-second, rounded to 0.1 s.
+    max_gap_s = 1.1
+    times = [sample["t"] for sample in samples]
+    if (
+        times[0] - settle_s > max_gap_s + 1e-9
+        or settle_s + observe_s - times[-1] > max_gap_s + 1e-9
+        or any(not 0.0 < later - earlier <= max_gap_s + 1e-9
+               for earlier, later in zip(times, times[1:]))
+    ):
+        pytest.fail(
+            f"Incomplete physics psi_dot coverage in window "
+            f"{settle_s:.0f}-{settle_s+observe_s:.0f} s "
+            f"(samples span {times[0]:.1f}-{times[-1]:.1f} s, "
+            f"maximum allowed gap {max_gap_s:.1f} s). Log: {events_log.path}"
+        )
+
     bad = BadEventLog()
     for s in samples:
         if abs(s["psi_dot"]) > threshold_rad_s:
@@ -243,7 +267,8 @@ def assert_physics_yaw_rate(
 
     assert not bad, (
         f"Physics psi_dot exceeded {math.degrees(threshold_rad_s):.1f} deg/s limit "
-        f"in window t={settle_s:.0f}-{settle_s+observe_s:.0f} s: {bad.summary()}"
+        f"in window t={settle_s:.0f}-{settle_s+observe_s:.0f} s "
+        f"(max {math.degrees(max_rate):.2f} deg/s): {bad.summary()}"
     )
     log.info("PASS -- physics yaw rate held within %.1f deg/s limit",
              math.degrees(threshold_rad_s))

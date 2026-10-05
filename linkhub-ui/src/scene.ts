@@ -2,6 +2,28 @@ import * as THREE from "three";
 import type { TelemetryStore } from "./telemetry";
 import { VehicleMotion } from "./vehicle-motion";
 
+function createBayCheckerTexture(): THREE.DataTexture {
+  const size = 8;
+  const colors = [
+    [216, 59, 59],
+    [239, 107, 100],
+  ] as const;
+  const pixels = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const offset = (y * size + x) * 4;
+      const color = colors[(x + y) % 2 === 0 ? 0 : 1];
+      pixels.set([...color, 255], offset);
+    }
+  }
+  const texture = new THREE.DataTexture(pixels, size, size, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export class VehicleScene {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(38, 1, 0.1, 200);
@@ -26,6 +48,7 @@ export class VehicleScene {
   private readonly rotorAxis = new THREE.Vector3();
   private readonly previousRotorAxis = new THREE.Vector3(0, 1, 0);
   private readonly unsubscribe: (() => void)[];
+  private readonly textures = new Set<THREE.Texture>();
 
   constructor(
     private readonly container: HTMLElement,
@@ -117,13 +140,16 @@ export class VehicleScene {
     });
     geometries.forEach((geometry) => geometry.dispose());
     materials.forEach((material) => material.dispose());
+    this.textures.forEach((texture) => texture.dispose());
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
 
   private buildVehicle(): void {
+    const bayTexture = createBayCheckerTexture();
+    this.textures.add(bayTexture);
     const bayMaterial = new THREE.MeshStandardMaterial({
-      color: 0xd83b3b,
+      map: bayTexture,
       roughness: 0.55,
       metalness: 0.25,
     });

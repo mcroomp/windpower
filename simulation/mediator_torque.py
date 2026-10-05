@@ -74,7 +74,6 @@ from simulation.sitl_interface import SITLInterface
 
 _RECV_PORT   = 9002      # must match ArduPilot SITL JSON backend default
 _BATTERY_V   = 15.2     # V — nominal 4S LiPo; sent to SITL to override battery simulation
-DT         = 1.0 / 400.0  # 400 Hz loop target [s]
 
 # Default ArduPilot channel for yaw/tail-rotor (0-based index → Ch9/output 9).
 # Motor4 is mapped to output 9 in the current RAWES setup.
@@ -310,10 +309,10 @@ def run(
 
     # Motor-response transport delay: the physics motor sees the throttle that
     # ArduPilot commanded ``motor_delay_ms`` ago (models ESC / actuation latency).
-    # A FIFO of DT-spaced samples, pre-filled with the motor-off value so the
-    # first ``_delay_ticks`` steps see throttle=0.
-    _delay_ticks = max(0, int(round((motor_delay_ms / 1000.0) / DT)))
-    _throttle_buf = deque([0.0] * _delay_ticks) if _delay_ticks > 0 else None
+    # Timestamped samples preserve the delay even if SITL changes its frame rate.
+    motor_delay_s = motor_delay_ms / 1000.0
+    throttle_history: deque[tuple[float, float]] = deque()
+    delayed_throttle = 0.0
 
     _profile_entry = PROFILES.get(profile, PROFILES["constant"])
     omega_fn, tilt_fn = _profile_entry[0], _profile_entry[1]
@@ -352,7 +351,8 @@ def run(
     log.info("Bound to UDP port %d", _RECV_PORT)
 
     def step_fn(_servos, t):
-        nonlocal hub_state, prev_roll, prev_pitch, _dynamics_started
+        nonlocal hub_state, prev_roll, prev_pitch, _dynamics_started, delayed_throttle
+        dt = iface.dt()
 
         # Motor PWM: read raw µs from interface to avoid -1.0 clipping at 800 µs idle.
         # This is physics input — throttle drives the counter-torque motor model.
@@ -362,9 +362,11 @@ def run(
         # commanded ``motor_delay_ms`` ago.  ``throttle`` (freshly commanded) is
         # still what gets logged as the controller output; ``throttle_motor`` is
         # what actually drives the yaw ODE.
-        if _throttle_buf is not None:
-            throttle_motor = _throttle_buf.popleft()
-            _throttle_buf.append(throttle)
+        if motor_delay_s > 0.0:
+            throttle_history.append((t, throttle))
+            while throttle_history and throttle_history[0][0] <= t - motor_delay_s + 1e-9:
+                _, delayed_throttle = throttle_history.popleft()
+            throttle_motor = delayed_throttle
         else:
             throttle_motor = throttle
 
@@ -388,19 +390,19 @@ def run(
             current_omega = max(1.0, omega_fn(dynamics_t, omega_rotor) * spinup_scale)
 
             roll_cmd, pitch_cmd = tilt_fn(dynamics_t)
-            roll_dot  = (roll_cmd  - prev_roll)  / DT
-            pitch_dot = (pitch_cmd - prev_pitch) / DT
+            roll_dot  = (roll_cmd  - prev_roll)  / dt
+            pitch_dot = (pitch_cmd - prev_pitch) / dt
 
             if psi_dot_fn is not None:
                 # Prescribed yaw: bypass ODE, drive psi_dot directly from profile.
                 psi_dot_send   = psi_dot_fn(dynamics_t)
-                hub_state.psi  = (hub_state.psi + psi_dot_send * DT) % (2.0 * math.pi)
+                hub_state.psi  = (hub_state.psi + psi_dot_send * dt) % (2.0 * math.pi)
                 hub_state.psi_dot = psi_dot_send
                 psi_send       = hub_state.psi
             else:
                 if hub_state.psi == 0.0 and hub_state.psi_dot == 0.0:
                     hub_state.psi = (_STARTUP_YAW_RATE * startup_hold_s) % (2.0 * math.pi)
-                hub_state    = _m.step(hub_state, current_omega, throttle_motor, params, DT)
+                hub_state    = _m.step(hub_state, current_omega, throttle_motor, params, dt)
                 psi_send     = math.atan2(math.sin(hub_state.psi), math.cos(hub_state.psi))
                 psi_dot_send = hub_state.psi_dot
             spin_angle = hub_state.psi

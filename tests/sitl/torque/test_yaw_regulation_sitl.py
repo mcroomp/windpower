@@ -9,26 +9,26 @@ Physical scenario
   * Rotor hub spins at ~28 rad/s (nominal RAWES autorotation at 10 m/s wind)
   * The motor counter-rotates via the 10:1 gear to maintain inner assembly heading
   * The ESC holds commanded RPM; bearing/swashplate drag only affect power draw
-  * ArduPilot (heli frame, ACRO mode) senses the yaw rate via gyro and
+  * ArduPilot (heli frame, GUIDED_NOGPS with Lua PASSIVE) senses the yaw rate via gyro and
     commands the Motor4 output to control GB4008 motor speed
 
 Pass criterion
 --------------
   After the model-based yaw trim has converged with neutral sticks:
-    * max |psi_dot|  < 16 deg/s over the last 20 s  (physics ground truth)
+    * max |psi_dot|  <= 16 deg/s over the last 20 s  (physics ground truth)
 
-  Note: ACRO mode controls yaw RATE (not angle), so the hub may settle at a
-  non-zero yaw angle.  Only the rate is asserted.  The yaw angle represents
-  the hub's operating heading and has no operational significance.
+  Lua PASSIVE holds its captured attitude through GUIDED_NOGPS. This test
+  asserts the physical spin rate about the tilted rotor axis, not EKF Euler
+  yawspeed or heading error.
 
 Telemetry
 ---------
   The test writes a CSV log to simulation/logs/test_yaw_regulation_sitl/telemetry.csv
   after each run.
 
-Run with (inside Docker)
+Run with
 ------------------------
-  RAWES_RUN_STACK_INTEGRATION=1 pytest tests/sitl/torque/test_yaw_regulation_sitl.py -v
+  bash test.sh stack -n 1 -k test_yaw_regulation_sitl
 """
 from __future__ import annotations
 
@@ -42,8 +42,6 @@ from tests.sitl.torque.torque_test_utils import (
 )
 
 # Absolute mediator time: startup_hold(15) + 100 s dynamic convergence.
-# The model-based trim can still be above 20 deg/s at t_dynamic=80-90 s,
-# while diagnostics show convergence below 10 deg/s by t_dynamic=100 s.
 _SETTLE_S          = 115.0
 _OBSERVE_S         = 20.0
 _MAX_PSI_DOT_RAD_S = math.radians(16.0)   # [rad/s]
@@ -55,9 +53,9 @@ def test_yaw_regulation_sitl(torque_armed):
     """
     ArduPilot SITL regulates hub yaw using the DDFP Motor4 output.
 
-    ACRO mode with neutral sticks commands psi_dot = 0.  The yaw rate PID and
-    model-based trim observer must build enough motor output to maintain
-    counter-rotation against the spinning axle.
+    Lua PASSIVE commands its captured attitude through GUIDED_NOGPS. The yaw
+    rate PID and model-based trim observer must build enough motor output to
+    maintain counter-rotation against the spinning axle.
 
     Physics ground truth (mediator events log) is used — not ATTITUDE.yawspeed,
     which can carry compass-tilt artefacts.
