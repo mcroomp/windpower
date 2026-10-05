@@ -1116,7 +1116,7 @@ level first.
 | `simulation/torque_model.py` | Hub yaw kinematics: `HubParams`, `HubState`, `step()`, `equilibrium_throttle()` |
 | `simulation/mediator_torque.py` | Standalone torque SITL mediator |
 | `simulation/comms.py` | `VirtualComms` (simtest-only comms link) |
-| `groundstation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_message`, message dataclasses (`NamedValueFloat`, ...) |
+| `linkhub_client/` | `LinkHubClient` (arm, mode, params, `send_message` through LinkHub) and MAVLink message dataclasses (`NamedValueFloat`, ...) |
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
 | `analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
 | `analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |

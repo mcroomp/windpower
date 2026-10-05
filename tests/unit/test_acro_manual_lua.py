@@ -1,4 +1,4 @@
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from simulation.rawes_lua_harness import RawesLua
 
 

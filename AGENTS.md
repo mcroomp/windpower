@@ -33,14 +33,14 @@ there are no `sys.path.insert()` hacks anywhere in the codebase.
 | Package | Contents |
 |---|---|
 | `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `winch.py`, `winch_node.py`, `comms.py` (`VirtualComms`), ...), `requirements.txt`, `Dockerfile`, `logs/` |
-| `groundstation/` | Genuinely-production ground-station/flight-planner code, split out from `simulation/`: `pumping_planner.py`, `landing_planner.py`, `gcs.py` (`RawesGCS` MAVLink client), `rawes_modes.py` (protocol constants), `mavlink_log.py`, `ekf_flags.py`, `winch_protocol.py` (`WinchCommand`/`WinchTelemetry` wire format), `unified_ground.py` (`GcsComms` production comms adapter). Distinction: code that will genuinely run on the real ground station/flight planner lives here; code that stands in for not-yet-built hardware (e.g. the winch-node control loop in `simulation/winch.py`) stays in `simulation/` |
+| `groundstation/` | Genuinely-production ground-station/flight-planner code, split out from `simulation/`: `pumping_planner.py`, `landing_planner.py`, `rawes_modes.py` (protocol constants), `mavlink_log.py`, `ekf_flags.py`, `winch_protocol.py` (`WinchCommand`/`WinchTelemetry` wire format), `unified_ground.py` (`GcsComms` production comms adapter). Distinction: code that will genuinely run on the real ground station/flight planner lives here; code that stands in for not-yet-built hardware (e.g. the winch-node control loop in `simulation/winch.py`) stays in `simulation/` |
 | `arduloop/` | Self-contained Python port of ArduPilot's traditional-heli attitude/rate-control stack (used by the in-process mock ArduPilot) |
 | `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
 | `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |
 | `analysis/` | Post-run diagnosis/report scripts (all read `simulation/logs/{test_name}/...`) |
 | `viz3d/` | 3D telemetry playback and torque visualizers |
-| `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`, `query_hardware.py`) |
-| `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/hil`, `tests/oneoff`, `tests/common` |
+| `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`) |
+| `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/oneoff`, `tests/common` |
 
 Non-package top-level directories: `design/` (owner docs), `documents/`, `hardware/`,
 `presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`),

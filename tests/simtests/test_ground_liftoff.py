@@ -45,7 +45,7 @@ from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from simulation.rawes_lua_harness import RawesLua
 from simulation.winch import GovernedWinchController
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from groundstation.rawes_modes import MODE_STEADY, MODE_TAKEOFF, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
 

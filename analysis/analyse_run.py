@@ -1713,7 +1713,7 @@ def _print_release_window(
 
 
 # ---------------------------------------------------------------------------
-# EKF telemetry (from mavlink.jsonl written by RawesGCS)
+# EKF telemetry (from a legacy mavlink.jsonl log)
 # ---------------------------------------------------------------------------
 
 def _load_mavlink_ekf_rows(path: Path) -> list[dict]:

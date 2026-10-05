@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(30)]
 
 import simulation.torque_model as _m
 from simulation.rawes_lua_harness import RawesLua
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, MODE_PASSIVE, enter_passive_params
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ Used by simtests, SITL stack tests, and calibrate.py.
 
 Usage
 -----
-    from groundstation.gcs import NamedValueFloat
+    from linkhub_client.messages import NamedValueFloat
     from groundstation.rawes_modes import MODE_STEADY, PUMP_REEL_OUT, send_anchor_ned
 
     gcs.set_param("RAWES_MODE", MODE_STEADY)                      # set mode (pumping runs in steady)
@@ -25,7 +25,7 @@ Usage
 
 import math
 
-from groundstation.gcs import NamedValueInt
+from linkhub_client.messages import NamedValueInt
 
 # ── Mode numbers (RAWES_MODE script-generated param) ──────────────────────────
 

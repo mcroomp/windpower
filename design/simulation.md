@@ -457,7 +457,7 @@ Repo layout note: `simulation/` is one of 9 top-level packages (see `AGENTS.md` 
 Repository Layout). `arduloop/`, `groundstation/`, `analysis/`, `viz3d/`, `scripts/`,
 and `tests/` are siblings of `simulation/` at the repo root, not nested inside it —
 shown here as separate trees for clarity. Genuinely production ground-station/
-flight-planner code (`pumping_planner.py`, `landing_planner.py`, `gcs.py`,
+flight-planner code (`pumping_planner.py`, `landing_planner.py`,
 `rawes_modes.py`, `mavlink_log.py`, `ekf_flags.py`, the `WinchCommand`/
 `WinchTelemetry` wire protocol, and `GcsComms`) lives in `groundstation/`, not
 `simulation/` — see the `groundstation/` tree below.
@@ -525,7 +525,7 @@ simulation/
 ├── rawes_lua_harness.py RawesLua class — runs rawes.lua in-process via lupa; shared by unit
 │                        tests and simtests. Loads mock_ardupilot.lua then rawes.lua. Python writes
 │                        sensor inputs to `_mock` and calls `_update_fn()` each tick.
-└── (rawes_modes.py, gcs.py, mavlink_log.py, ekf_flags.py, pumping_planner.py,
+└── (rawes_modes.py, mavlink_log.py, ekf_flags.py, pumping_planner.py,
     landing_planner.py moved to groundstation/ — see below)
 
 groundstation/
@@ -537,8 +537,6 @@ groundstation/
 ├── winch_protocol.py    WinchCommand/WinchTelemetry — ground <-> winch-node wire protocol dataclasses.
 ├── unified_ground.py    NvComms base + _cmd_to_nv marshalling + GcsComms — production TensionCommand
 │                        -> NAMED_VALUE_FLOAT adapter (SITL stack / real hardware).
-├── gcs.py               MAVLink GCS client (arm, mode, params, named-float commands).
-│                        recv_local_position_latest() — non-blocking poll of LOCAL_POSITION_NED.
 ├── mavlink_log.py       MavlinkLogWriter (live NDJSON message log) + iter_messages() (log reader).
 ├── ekf_flags.py         EKF_STATUS_REPORT flag decode helpers used by analysis/ tooling.
 └── rawes_modes.py       Python constants mirroring rawes.lua mode/substate numbers.

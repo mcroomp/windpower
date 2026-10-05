@@ -319,7 +319,7 @@ class StackContext:
 
     Required for all tests
     ----------------------
-    gcs            : connected, heartbeating RawesGCS (armed, in GUIDED_NOGPS mode)
+    gcs            : connected, heartbeating LinkHubClient (armed, in GUIDED_NOGPS mode)
     mediator_proc  : running mediator subprocess
     sitl_proc      : running SITL subprocess
     mediator_log   : path to mediator stdout/stderr log
@@ -546,7 +546,7 @@ def _sitl_stack(
 
     Yields SitlContext.  Caller is responsible for:
       - starting any sensor / mediator worker that feeds SITL
-      - connecting and driving RawesGCS
+      - connecting and driving LinkHubClient
 
     Parameters
     ----------
@@ -722,7 +722,7 @@ def _static_stack(
         if ctx.mediator_proc.poll() is not None:
             pytest.fail(...)
 
-    Caller is responsible for connecting and driving RawesGCS.
+    Caller is responsible for connecting and driving LinkHubClient.
 
     Parameters
     ----------

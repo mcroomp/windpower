@@ -430,7 +430,7 @@ class RawesLua:
         """Inject a supported MAVLink dataclass into the Lua mavlink inbox.
 
         Supported today: NamedValueFloat and NamedValueInt, which mirror the
-        same ground->Lua control channel used by RawesGCS in SITL.
+        same ground->Lua control channel used by LinkHubClient in SITL.
 
         Dispatches on ``msg.MAVLINK_TYPE`` rather than ``isinstance`` so any
         NamedValueFloat/NamedValueInt-shaped dataclass works here.

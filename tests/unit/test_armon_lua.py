@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 from simulation.rawes_lua_harness import RawesLua
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 
 
 # ---------------------------------------------------------------------------

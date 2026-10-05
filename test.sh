@@ -8,7 +8,6 @@
 #
 #   .venv/Scripts/python.exe -m pytest tests/unit -m "not simtest"
 #   .venv/Scripts/python.exe simulation/run_tests.py tests/simtests -m simtest
-#   .venv/Scripts/python.exe -m pytest tests/hil   # needs RAWES_HIL_PORT=COMx
 #
 # Usage:
 #   bash test.sh [-n N] [pytest args...]         # run the SITL stack suite
@@ -58,7 +57,6 @@ _sync_code() {
         --exclude="*/__pycache__" \
         --exclude="simulation/eeprom*.bin" \
         --exclude="tests/unit" \
-        --exclude="tests/hil" \
         --exclude=".venv" \
         --exclude="*.egg-info" \
         -cf - pyproject.toml simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
