@@ -463,13 +463,13 @@ speed are linearly interpolated between MAVLink updates (with rotation matrices
 re-orthonormalized) so the display remains smooth rather than stepping at the
 telemetry rate.
 
-The quaternion is sent atomically as `RAWES_QW/QX/QY/QZ`. Lua converts the
-complete quaternion to the equivalent Euler triplet only at the final
-`set_target_angle_and_rate_and_throttle` boundary because that is the attitude
-API exposed by ArduPilot scripting.
+Lua composes the target quaternion from its captured anchor and the relative
+`RAWES_ROFF/POFF/YOFF` offsets, and converts it to the equivalent Euler triplet
+only at the final `set_target_angle_and_rate_and_throttle` boundary because
+that is the attitude API exposed by ArduPilot scripting.
 
-`--roll`, `--pitch`, and `--yaw` can override individual captured angles for
-the initial target. The live table refreshes four times per second and shows
+`--roll`, `--pitch`, and `--yaw` set initial offsets [deg] relative to the
+captured anchor. The live table refreshes four times per second and shows
 actual roll/pitch, target roll/pitch, target thrust, yaw, quaternion error,
 swash PWM, and yaw-motor PWM.
 

@@ -85,7 +85,7 @@ Use this as the compact reference table for this run.
 | 0.000 | observed | Mediator startup and 60 s kinematic profile start | `events.jsonl: startup`, `events.jsonl: kinematic_config.total_s=60` |
 | 8.860-8.960 | observed | EKF yaw aligned and GPS reaches 3D fix (`fix_type=6`) | `STATUSTEXT "EKF3 IMU0 yaw aligned"`, `GPS_RAW_INT.fix_type=6` |
 | 14.000 (nominal) | scheduled | Arm gate reached in fixture | `conftest.py _arm_at_sim_s=14.0` |
-| 14.000+ (nominal) | scheduled | PASSIVE IC seeds scheduled, including tilt targets (`RAWES_RIC/PIC`) | `conftest.py gcs.send_message(NamedValueFloat(...)) RAWES_THR/RIC/PIC`, `RAWES_MODE=3` |
+| 14.000+ (nominal) | scheduled | PASSIVE IC seeds scheduled: thrust plus IC tilt as offsets from the Lua-captured anchor (`RAWES_ROFF/POFF/YOFF`), then `ENTER_PASSIVE` | `conftest.py` `RAWES_MODE=3`, `NamedValueFloat` `RAWES_THR/ROFF/POFF/YOFF`, `CMD_ENTER_PASSIVE` |
 | 24.077 | observed | EKF starts GPS aiding | `STATUSTEXT "EKF3 IMU0 is using GPS"` |
 | 26.748 | observed | Tilt target first visible at AP interface | `telemetry.csv: |mav_att_target_pitch_deg| >= 1` |
 | 26.848 | observed | Physical tilt response begins (real attitude moves) | `telemetry.csv: |mav_att_pitch_deg| >= 5` |
@@ -109,12 +109,12 @@ Tilt scheduling ownership note:
   is parameter/anchor plumbing only; it is not the runtime source of tilt commands in
   this IC-start path.
 - Runtime tilt scheduling during kinematic hold comes from `rawes.lua` in `MODE_PASSIVE`
-  once the IC seed is complete (`RAWES_THR` + `RAWES_RIC` + `RAWES_PIC`) and
-  `guided_ok` is true.
+  once `ENTER_PASSIVE` has captured the quaternion anchor; the target is
+  `q_anchor * q(RAWES_ROFF, RAWES_POFF, RAWES_YOFF)` with `RAWES_THR` as throttle.
 
 Tilt command-to-response flow (IC-start path):
-1. Fixture schedules IC tilt targets (`RAWES_RIC/PIC`) right after arm (`t_start~14s`).
-2. Lua `MODE_PASSIVE` emits GUIDED angle targets once IC seed is complete and `guided_ok` is true.
+1. Fixture sends IC tilt as anchor-relative offsets (`RAWES_ROFF/POFF/YOFF`) and `ENTER_PASSIVE` right after arm (`t_start~14s`).
+2. Lua `MODE_PASSIVE` captures the anchor and emits GUIDED angle targets composed from anchor and offsets.
 3. During kinematic hold with `kinematic_aero_mode="nul"`, the physics side realizes tilt by
    integrating body rates (`omega_body = gain * tilt`) until measured attitude matches target.
 

@@ -174,7 +174,7 @@ The intended stock-firmware sequence is:
 6. Send the Lua-handled `ENTER_GUIDED` command (COMMAND_LONG 31010). In one
    scripting tick Lua captures the current quaternion, switches to
    GUIDED_NOGPS, and installs that attitude with zero body rates and the IC
-   thrust; it re-sends the target at 20 Hz until passive is enabled. Ground
+   thrust; it holds that target (re-sent on change or as a 1 s keepalive) until passive is enabled. Ground
    never sends `DO_SET_MODE` for this transition, so ArduPilot's level entry
    target is replaced before the next attitude-controller run.
    `GUID_OPTIONS` bit 3 must be set.

@@ -310,7 +310,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
 | 2 — ACRO manual | normalized RAWES_RLL/RAWES_PIT through ACRO flybar passthrough | normalized RAWES_COL through ACRO collective | manual bench/flight control with AP yaw regulation |
-| 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
+| 3 — passive | Lua-captured AHRS quaternion anchor composed with relative RAWES_ROFF/POFF/YOFF offsets (§4.2b) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
 
 **Before the first GPS fix:** we don't know where the hub is yet, so the loop runs degenerately — blade pitch is held at a safe cruise value, and tilt commands are pass-throughs of the gyro so the rotor doesn't fight its natural orbital precession. On the first fix, the elevation target initialises and the mode-specific loop above takes over (§4.2).
@@ -346,11 +346,10 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
 | RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at RAWES_SLW rad/s. |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. Ramped by RAWES_TRP. |
-| RAWES_RIC | rad | IC roll — part of the atomic passive IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
-| RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
-| RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
-| RAWES_YIC | rad, or the `RAWES_YIC_CAPTURE_SENTINEL` (-1000) | Legacy fixed-yaw/passive-capture input. Sending the sentinel through a ground client captures the current roll/pitch/yaw on board. Interactive calibration uses the atomic quaternion interface below. |
-| RAWES_QW/QX/QY/QZ | unit quaternion | Atomic passive attitude target. Lua waits for all four components, normalizes the quaternion, then updates the active roll/pitch/yaw target together. |
+| RAWES_ROFF | rad | Passive roll offset relative to the Lua-captured anchor (§4.2b). Latched; may be sent before or after ENTER_PASSIVE. |
+| RAWES_POFF | rad | Passive pitch offset relative to the Lua-captured anchor. |
+| RAWES_YOFF | rad | Passive yaw offset relative to the Lua-captured anchor. |
+| RAWES_THR | [0..1] | IC/passive thrust. ENTER_GUIDED requires it; MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
 | RAWES_RLL | [-1..1] | Latched ACRO-manual roll input. Lua converts it with the inverse RC MIN/TRIM/MAX mapping and continuously refreshes the RC override. |
 | RAWES_PIT | [-1..1] | Latched ACRO-manual pitch input. Positive is ArduPilot positive pitch; the calibration Up arrow increases it. |
 | RAWES_COL | [0..1] | Latched ACRO-manual collective input using RC3 MIN/MAX and reversal. |
@@ -367,7 +366,7 @@ also emit `RAWES cmd <id> rejected: <reason>` STATUSTEXT. IDs live in
 
 | Command | ID | Params | Lua action | Gate (else DENIED; set_mode failure → FAILED) |
 |---|---|---|---|---|
-| ENTER_GUIDED | 31010 (`MAV_CMD_USER_1`) | none | Captures the current AHRS quaternion, calls `vehicle:set_mode(GUIDED_NOGPS)` and installs that attitude + IC thrust in the same tick, then re-sends it at 20 Hz (guided-entry hold) until ENTER_PASSIVE, disarm, or a mode other than 2/3. This removes the level-target transient that `ModeGuided::angle_control_start()` would otherwise command before the first ground target arrives. | armed, `RAWES_MODE=2`, IC thrust seeded, AHRS healthy |
+| ENTER_GUIDED | 31010 (`MAV_CMD_USER_1`) | none | Captures the current AHRS quaternion, calls `vehicle:set_mode(GUIDED_NOGPS)` and installs that attitude + IC thrust in the same tick, then holds it (guided-entry hold; re-sent only on change or as a 1 s keepalive, see §4.2b) until ENTER_PASSIVE, disarm, or a mode other than 2/3. This removes the level-target transient that `ModeGuided::angle_control_start()` would otherwise command before the first ground target arrives. | armed, `RAWES_MODE=2`, IC thrust seeded, AHRS healthy |
 | ENTER_PASSIVE | 31011 (`MAV_CMD_USER_2`) | param1 = yaw-trim seed [0, `RAWES_YFF_MAX`]; negative = adaptive observer | Captures the passive quaternion anchor (§4.2b), enables passive hold and ends the guided-entry hold. | `RAWES_MODE=3`, AHRS healthy |
 
 **Named int inputs (ground → Lua, via `gcs.send_message(NamedValueInt(...))`, one-shot anchor location):**
@@ -453,8 +452,12 @@ relative state through:
 
 Lua computes `q_target = q_anchor * q_relative`, normalizes it, and converts to
 Euler only at the final `set_target_angle_and_rate_and_throttle` API boundary.
-The fixed passive target is refreshed at 20 Hz; no `AP_Vehicle` call is made
-before activation and passive hold does not separately poll `vehicle:get_mode()`.
+The target is sent when it changes (at most every `PASSIVE_TARGET_PERIOD_MS`,
+50 ms) and otherwise only as a `GUIDED_KEEPALIVE_MS` (1 s) keepalive, well
+inside `GUID_TIMEOUT` (3 s): every `vehicle:*` binding takes the scheduler
+semaphore and repeated calls starve the scripting thread in SITL. No
+`AP_Vehicle` call is made before activation and passive hold does not
+separately poll `vehicle:get_mode()`.
 The anchor remains fixed until hold is explicitly disabled. Space in the
 interactive tool resets all offsets to zero; it does not recapture the anchor.
 

@@ -278,7 +278,7 @@ from groundstation.rawes_modes import (
 |------|-----------|----------------------|-------|
 | `MODE_NONE` | 0 | — | Logging only; RAWES_ARM still handled |
 | `MODE_STEADY` | 1 | — | Altitude hold + tether tracking |
-| `MODE_PASSIVE` | 3 | — | Armed-but-quiet: commands IC attitude angle (RAWES_RIC/PIC) + IC thrust (RAWES_THR via throttle) as a GUIDED angle target during kinematic |
+| `MODE_PASSIVE` | 3 | — | Armed-but-quiet: commands the captured anchor + relative offsets (RAWES_ROFF/POFF/YOFF) + IC thrust (RAWES_THR via throttle) as a GUIDED angle target during kinematic |
 | `MODE_LANDING` | 4 | 0=DESCEND, 1=FINAL_DROP | |
 
 Pumping has **no dedicated mode**: it runs in `MODE_STEADY` (RAWES_MODE=1) while the ground

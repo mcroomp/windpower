@@ -30,8 +30,8 @@ Timing from mediator start (speedup=1):
   t=0..80 s   kinematic stationary hold at pos0 (vel=0)
   t~6 s       GPS first fix; EKF3 origin set
   t~8 s       arm complete; RAWES_MODE=3 (MODE_PASSIVE) set; full IC seed
-              (RAWES_THR/RIC/PIC/TEN) streamed immediately.  Lua commands the
-              IC attitude angle + IC thrust via GUIDED throttle; nul-aero
+              (RAWES_THR/ROFF/POFF/YOFF/TEN + ENTER_PASSIVE) streamed immediately.
+              Lua commands anchor + IC offsets as the attitude angle + IC thrust via GUIDED throttle; nul-aero
               slews the disk to the IC tilt during the hold.  No altitude hold.
   t~34 s      GPS fuses; fixture yields
   t=80 s      kinematic exits; test promotes RAWES_MODE 3 -> 1 (MODE_STEADY)

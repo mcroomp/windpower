@@ -338,8 +338,9 @@ Why this shape:
   to the IC heading; the IC roll/pitch is slewed in later via the `nul`-aero
   cyclic (it cannot apply yaw), keeping the EKF pre-arm seed level and consistent.
 - **MODE_PASSIVE during the hold.** `RAWES_MODE=3` is set right after arm so the
-  Lua commands the IC attitude as a GUIDED angle target (IC roll/pitch from
-  `RAWES_RIC`/`RAWES_PIC` + yaw captured at entry, with **zero rate
+  Lua commands the IC attitude as a GUIDED angle target (the quaternion
+  anchor captured on `ENTER_PASSIVE` composed with the IC tilt sent as
+  `RAWES_ROFF`/`RAWES_POFF`/`RAWES_YOFF` offsets, with **zero rate
   feed-forward**) plus IC collective via throttle. The `nul`-aero integrates
   that angle command so the disk slews to the IC tilt during the hold.
 
