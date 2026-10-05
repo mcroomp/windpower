@@ -2244,9 +2244,19 @@ def _torque_stack(
                             f"Failed to set {_rname}={_rval} after rawes.lua loaded"
                         )
 
-            # EKF alignment (no RC override keepalive required).
-            log.info("Waiting for EKF alignment (up to 45 s) ...")
-            ekf_ok  = False
+            # EKF readiness (no RC override keepalive required). The tilt
+            # alignment STATUSTEXT precedes usable EKF outputs, and ArduPilot's
+            # mandatory arm checks (which force-arm does not bypass) need EKF
+            # attitude and a vertical position estimate.
+            _ekf_ready_flags = (
+                _mavlink.EKF_ATTITUDE
+                | _mavlink.EKF_VELOCITY_VERT
+                | _mavlink.EKF_POS_VERT_ABS
+            )
+            log.info("Waiting for EKF alignment and EKF_STATUS flags 0x%04x (up to 45 s) ...",
+                     _ekf_ready_flags)
+            aligned = False
+            ekf_flags = 0
             deadline = gcs.sim_now() + 45.0
 
             while gcs.sim_now() < deadline:
@@ -2254,7 +2264,7 @@ def _torque_stack(
                 msg, message_cursor = _read_one(
                     gcs,
                     message_cursor,
-                    "STATUSTEXT",
+                    ["STATUSTEXT", "EKF_STATUS_REPORT"],
                     wait=0.5,
                 )
                 if msg is None:
@@ -2265,15 +2275,18 @@ def _torque_stack(
                     log.info("SITL: %s", text)
                     if "rawes" in text.lower() and "mode=" in text.lower():
                         log.info("Lua script confirmed loaded: %s", text)
-                    if "yaw alignment complete" in text.lower():
-                        ekf_ok = True
-                        break
-                    if "tilt alignment complete" in text.lower():
-                        ekf_ok = True
-                        break
-
-            if not ekf_ok:
-                pytest.fail("EKF alignment timed out after 45 s; refusing to arm")
+                    if "alignment complete" in text.lower():
+                        aligned = True
+                elif isinstance(decoded, EkfStatusReport):
+                    ekf_flags = int(decoded.flags)
+                if aligned and (ekf_flags & _ekf_ready_flags) == _ekf_ready_flags:
+                    log.info("EKF ready: flags=0x%04x", ekf_flags)
+                    break
+            else:
+                pytest.fail(
+                    "EKF not ready after 45 s "
+                    f"(aligned={aligned}, flags=0x{ekf_flags:04x}); refusing to arm"
+                )
 
             # passive_init: seed the passive operating point BEFORE arm so
             # rawes.lua captures the settled AHRS quaternion and commands the

@@ -37,6 +37,8 @@ ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE = 64
 
 # -- EKF_STATUS_REPORT flags -------------------------------------------------
 EKF_ATTITUDE = 1
+EKF_VELOCITY_VERT = 4
+EKF_POS_VERT_ABS = 32
 
 # -- MAV_RESULT -----------------------------------------------------------
 MAV_RESULT_ACCEPTED = 0
