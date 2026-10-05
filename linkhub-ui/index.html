@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>RAWES LinkHub</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="panel scene-panel">
+        <header>
+          <div>
+            <p class="eyebrow">RAWES</p>
+            <h1>Live vehicle state</h1>
+          </div>
+          <div id="connection-state" class="badge offline">connecting</div>
+        </header>
+        <div id="scene"></div>
+        <div id="telemetry-overlay" class="telemetry-overlay">Waiting for telemetry…</div>
+        <div class="control-hint">
+          Passive controls: arrows roll/pitch · -/= thrust · ,/. yaw · Space recapture · Esc stop
+        </div>
+      </section>
+      <section class="panel terminal-panel">
+        <header>
+          <div>
+            <p class="eyebrow">CONTROL</p>
+            <h2>Terminal</h2>
+          </div>
+          <div id="operation-state" class="badge">idle</div>
+        </header>
+        <div id="terminal-output" role="log" aria-live="polite"></div>
+        <form id="terminal-form">
+          <span aria-hidden="true">&gt;</span>
+          <input
+            id="terminal-input"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-label="LinkHub command"
+            placeholder="status or run passive"
+          >
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
