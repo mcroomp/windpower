@@ -26,23 +26,49 @@ use tokio::{
     task::JoinHandle,
     time,
 };
-use tokio_serial::SerialPortBuilderExt;
 
 use crate::{
     codec::{
         CodecError, DecodedMessage, decode_raw, decode_raw_bytes, encode_message, serialize_message,
     },
+    discovery::{DiscoveryConfig, ScanReport},
     journal::{JournalError, JournalHandle},
+    link_events::{FailureRepeats, LinkEvent, LinkEvents},
     records::{Direction, MavlinkFrame, RecordPayload, wall_time_ns},
 };
 
-const HEARTBEAT_MESSAGE_ID: u32 = 0;
+pub(crate) const HEARTBEAT_MESSAGE_ID: u32 = 0;
+
+/// Where the link is in its acquire/use/reconnect cycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkPhase {
+    #[default]
+    Idle,
+    /// Enumerating and probing serial ports for a heartbeat.
+    Scanning,
+    /// Opening the resolved serial port or TCP address.
+    Opening,
+    /// Transport open, waiting for the first vehicle heartbeat.
+    Acquiring,
+    /// Vehicle heartbeat received; the link is usable.
+    Ready,
+    /// Waiting `reconnect_interval` after a failure before retrying.
+    Backoff,
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct LinkStatus {
     pub connected: bool,
     pub ready: bool,
+    pub phase: LinkPhase,
     pub connection: String,
+    /// Serial port currently in use, if connected over serial. `None` while
+    /// scanning, disconnected, or connected over TCP — not connected is an
+    /// ordinary, frequently-occurring state, not an error.
+    pub port: Option<String>,
+    /// Baud rate currently in use, if connected over serial.
+    pub baud: Option<u32>,
     pub clock_epoch: u64,
     pub target_system: u8,
     pub target_component: u8,
@@ -56,6 +82,17 @@ pub struct LinkStatus {
     pub discarded_bytes: u64,
     pub last_received_ns: Option<u64>,
     pub error: Option<String>,
+    /// Which step produced `error`: `scan`, `open`, `acquire`, or `link`.
+    pub last_error_stage: Option<String>,
+    pub last_error_ns: Option<u64>,
+    /// Transports opened since start (each successful serial/TCP open).
+    pub attempts: u64,
+    /// Failed scans/opens/sessions since the link was last ready.
+    pub consecutive_failures: u64,
+    /// When the current transport was opened, if connected.
+    pub connected_since_ns: Option<u64>,
+    /// Most recent serial discovery scan, with per-port probe outcomes.
+    pub last_scan: Option<ScanReport>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -84,14 +121,22 @@ pub struct MavlinkLinkConfig {
 #[derive(Clone, Debug)]
 pub enum MavlinkTransport {
     Tcp(SocketAddr),
-    Serial { port: String, baud: u32 },
+    /// Discover the serial port by scanning for a MAVLink heartbeat. This is
+    /// the normal way a serial link is acquired; a port and/or baud rate in
+    /// `DiscoveryConfig` only restrict which candidates are probed, they do
+    /// not skip the heartbeat confirmation. The scan repeats on every
+    /// reconnect, so an unplugged or renumbered port is rediscovered.
+    Serial(DiscoveryConfig),
 }
 
 impl std::fmt::Display for MavlinkTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tcp(address) => write!(formatter, "tcp:{address}"),
-            Self::Serial { port, baud } => write!(formatter, "serial:{port}:{baud}"),
+            Self::Serial(discovery) => match &discovery.port_filter {
+                Some(port) => write!(formatter, "auto:{port}"),
+                None => write!(formatter, "auto"),
+            },
         }
     }
 }
@@ -110,14 +155,13 @@ impl MavlinkLinkConfig {
         }
     }
 
+    /// Discover the serial port, rescanning whenever the link drops. Restrict
+    /// candidates via `discovery.port_filter` / `discovery.bauds` if needed.
     #[must_use]
-    pub fn serial(port: impl Into<String>, baud: u32) -> Self {
+    pub fn serial(discovery: DiscoveryConfig) -> Self {
         Self {
             id: "mavlink".to_owned(),
-            transport: MavlinkTransport::Serial {
-                port: port.into(),
-                baud,
-            },
+            transport: MavlinkTransport::Serial(discovery),
             source_system: 255,
             source_component: 0,
             heartbeat_interval: Duration::from_secs(1),
@@ -234,6 +278,21 @@ pub enum LinkError {
     Journal(#[from] JournalError),
 }
 
+impl LinkError {
+    /// Short classification for diagnostics, e.g. `io:TimedOut`.
+    #[must_use]
+    pub fn kind_name(&self) -> String {
+        match self {
+            Self::Unavailable => "unavailable".to_owned(),
+            Self::InvalidFrame(_) => "invalid_frame".to_owned(),
+            Self::Receive(_) => "receive".to_owned(),
+            Self::Io(error) => format!("io:{:?}", error.kind()),
+            Self::Codec(_) => "codec".to_owned(),
+            Self::Journal(_) => "journal".to_owned(),
+        }
+    }
+}
+
 pub fn start_link(
     config: MavlinkLinkConfig,
     journal: JournalHandle,
@@ -276,13 +335,44 @@ async fn run_link(
 ) {
     let tx_sequence = AtomicU8::new(0);
     let mut components = BTreeMap::new();
+    let events = LinkEvents::new(journal.clone(), &config.id);
+    let mut repeats = FailureRepeats::default();
     loop {
-        match &config.transport {
-            MavlinkTransport::Tcp(address) => match TcpStream::connect(address).await {
-                Ok(stream) => {
-                    stream.set_nodelay(true).ok();
-                    let (reader, writer) = stream.into_split();
-                    run_transport(
+        if let Some(resolved) =
+            resolve_transport(&config.transport, &status_tx, &events, &mut repeats).await
+        {
+            set_phase(&status_tx, LinkPhase::Opening);
+            let target = resolved.target();
+            let opened = match resolved {
+                ResolvedTransport::Tcp(address) => match TcpStream::connect(address).await {
+                    Ok(stream) => {
+                        stream.set_nodelay(true).ok();
+                        let (reader, writer) = stream.into_split();
+                        Ok((
+                            Box::new(reader) as Box<dyn AsyncRead + Unpin + Send>,
+                            Box::new(writer) as Box<dyn AsyncWrite + Unpin + Send>,
+                        ))
+                    }
+                    Err(error) => Err((error.to_string(), format!("{:?}", error.kind()))),
+                },
+                // Discovery hands over the already-open probe stream.
+                ResolvedTransport::Serial(found) => {
+                    let (reader, writer) = tokio::io::split(found.stream);
+                    Ok((
+                        Box::new(crate::discovery::SerialReader::new(reader))
+                            as Box<dyn AsyncRead + Unpin + Send>,
+                        Box::new(writer) as Box<dyn AsyncWrite + Unpin + Send>,
+                    ))
+                }
+            };
+            match opened {
+                Ok((reader, writer)) => {
+                    events
+                        .emit(LinkEvent::Opened {
+                            target: target.clone(),
+                        })
+                        .await;
+                    let reached_ready = run_transport(
                         ConnectionContext {
                             config: &config,
                             journal: &journal,
@@ -293,38 +383,137 @@ async fn run_link(
                             components: &mut components,
                             tx_sequence: &tx_sequence,
                         },
+                        &events,
+                        &mut repeats,
+                        &target,
                         reader,
                         writer,
                     )
                     .await;
-                }
-                Err(error) => record_connect_error(&status_tx, error),
-            },
-            MavlinkTransport::Serial { port, baud } => {
-                match tokio_serial::new(port, *baud).open_native_async() {
-                    Ok(stream) => {
-                        let (reader, writer) = tokio::io::split(stream);
-                        run_transport(
-                            ConnectionContext {
-                                config: &config,
-                                journal: &journal,
-                                outbound: &mut outbound,
-                                received: &received,
-                                status_tx: &status_tx,
-                                components_tx: &components_tx,
-                                components: &mut components,
-                                tx_sequence: &tx_sequence,
-                            },
-                            reader,
-                            writer,
-                        )
-                        .await;
+                    if reached_ready {
+                        repeats.reset();
                     }
-                    Err(error) => record_connect_error(&status_tx, error),
+                }
+                Err((error, error_kind)) => {
+                    record_failure(&status_tx, "open", format!("{target}: {error}"));
+                    if let Some(repeat_count) =
+                        repeats.observe("session", format!("open:{target}:{error}"))
+                    {
+                        events
+                            .emit(LinkEvent::OpenFailed {
+                                target,
+                                error,
+                                error_kind,
+                                repeat_count,
+                            })
+                            .await;
+                    }
                 }
             }
         }
+        set_phase(&status_tx, LinkPhase::Backoff);
         time::sleep(config.reconnect_interval).await;
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A transport the link can actually connect to, after discovery.
+enum ResolvedTransport {
+    Tcp(SocketAddr),
+    Serial(crate::discovery::DiscoveredSerial),
+}
+
+impl ResolvedTransport {
+    fn target(&self) -> String {
+        match self {
+            Self::Tcp(address) => format!("tcp:{address}"),
+            Self::Serial(found) => format!("serial:{}:{}", found.port, found.baud),
+        }
+    }
+}
+
+fn set_phase(status_tx: &watch::Sender<LinkStatus>, phase: LinkPhase) {
+    status_tx.send_if_modified(|status| {
+        let changed = status.phase != phase;
+        status.phase = phase;
+        changed
+    });
+}
+
+/// Resolve the configured transport for one connection attempt.
+///
+/// For serial transports this rescans the serial ports on every attempt
+/// (restricted by `DiscoveryConfig::port_filter` / `bauds` if set), so a port
+/// that disappears (unplugged cable, renumbered COM port, autopilot not yet
+/// powered on) is replaced by whichever port is currently emitting MAVLink
+/// heartbeats. Finding nothing is an ordinary, frequently-occurring outcome,
+/// not an error condition: the caller simply waits and rescans.
+async fn resolve_transport(
+    transport: &MavlinkTransport,
+    status_tx: &watch::Sender<LinkStatus>,
+    events: &LinkEvents,
+    repeats: &mut FailureRepeats,
+) -> Option<ResolvedTransport> {
+    match transport {
+        MavlinkTransport::Tcp(address) => Some(ResolvedTransport::Tcp(*address)),
+        MavlinkTransport::Serial(discovery) => {
+            status_tx.send_modify(|status| {
+                status.connected = false;
+                status.ready = false;
+                status.phase = LinkPhase::Scanning;
+                status.connection = "auto:scanning".to_owned();
+                status.port = None;
+                status.baud = None;
+            });
+            tracing::debug!("scanning serial ports for MAVLink");
+            match crate::discovery::discover_serial_transport(discovery).await {
+                Ok(found) => {
+                    status_tx.send_modify(|status| {
+                        status.connection = format!("serial:{}:{}", found.port, found.baud);
+                        status.port = Some(found.port.clone());
+                        status.baud = Some(found.baud);
+                        status.last_scan = Some(found.report.clone());
+                    });
+                    // A rediscovery after repeated failures is always worth
+                    // recording; a steady discover/open loop is not.
+                    if repeats
+                        .observe("scan", format!("discovered:{}:{}", found.port, found.baud))
+                        .is_some()
+                    {
+                        events
+                            .emit(LinkEvent::Discovered {
+                                port: found.port.clone(),
+                                baud: found.baud,
+                                scan: found.report.clone(),
+                            })
+                            .await;
+                    }
+                    Some(ResolvedTransport::Serial(found))
+                }
+                Err(failure) => {
+                    tracing::debug!(error = %failure, "serial discovery found no MAVLink device yet");
+                    record_failure(status_tx, "scan", &failure.message);
+                    status_tx.send_modify(|status| {
+                        status.last_scan = Some(failure.report.clone());
+                    });
+                    if let Some(repeat_count) =
+                        repeats.observe("scan", format!("scan:{}", failure.report.signature()))
+                    {
+                        events
+                            .emit(LinkEvent::ScanFailed {
+                                error: failure.message,
+                                repeat_count,
+                                scan: failure.report,
+                            })
+                            .await;
+                    }
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -339,7 +528,16 @@ struct ConnectionContext<'a> {
     tx_sequence: &'a AtomicU8,
 }
 
-async fn run_transport<R, W>(context: ConnectionContext<'_>, reader: R, writer: W)
+/// Run one opened transport until it fails. Returns whether the session ever
+/// received a vehicle heartbeat.
+async fn run_transport<R, W>(
+    context: ConnectionContext<'_>,
+    events: &LinkEvents,
+    repeats: &mut FailureRepeats,
+    target: &str,
+    reader: R,
+    writer: W,
+) -> bool
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send,
@@ -347,42 +545,129 @@ where
     let clock_epoch = match context.journal.begin_clock_epoch().await {
         Ok(epoch) => epoch,
         Err(error) => {
-            context.status_tx.send_modify(|status| {
-                status.connected = false;
-                status.ready = false;
-                status.error = Some(error.to_string());
-            });
+            record_failure(context.status_tx, "open", &error);
+            context
+                .status_tx
+                .send_modify(|status| status.connected = false);
             tracing::error!(link = %context.config.id, %error, "could not start MAVLink clock epoch");
-            return;
+            return false;
         }
     };
+    let opened_ns = wall_time_ns();
+    let opened_at = time::Instant::now();
+    let received_before = context.status_tx.borrow().received_messages;
     context.status_tx.send_modify(|status| {
         status.connected = true;
+        status.phase = LinkPhase::Acquiring;
         status.clock_epoch = clock_epoch;
         status.latest_time_boot_ms = 0;
+        status.attempts += 1;
+        status.connected_since_ns = Some(opened_ns);
         status.error = None;
     });
-    let link_id = context.config.id.clone();
     let status_tx = context.status_tx.clone();
-    if let Err(error) = run_connected(context, reader, writer).await {
-        if status_tx.borrow().ready {
-            tracing::warn!(link = %link_id, %error, "MAVLink connection lost");
-        } else {
-            tracing::debug!(link = %link_id, %error, "MAVLink acquisition retry");
+    let journal = context.journal.clone();
+    let mut ready_rx = status_tx.subscribe();
+    let session = run_connected(context, reader, writer);
+    tokio::pin!(session);
+    let mut reached_ready = false;
+    let result = loop {
+        tokio::select! {
+            result = &mut session => break result,
+            changed = ready_rx.changed(), if !reached_ready => {
+                if changed.is_err() || !ready_rx.borrow_and_update().ready {
+                    continue;
+                }
+                reached_ready = true;
+                status_tx.send_modify(|status| {
+                    status.phase = LinkPhase::Ready;
+                    status.consecutive_failures = 0;
+                });
+                let (target_system, target_component) = {
+                    let status = status_tx.borrow();
+                    (status.target_system, status.target_component)
+                };
+                events
+                    .emit(LinkEvent::Ready {
+                        target: target.to_owned(),
+                        ms_to_first_heartbeat: millis(opened_at.elapsed()),
+                        target_system,
+                        target_component,
+                    })
+                    .await;
+            }
         }
-        status_tx.send_modify(|status| {
-            status.connected = false;
-            status.ready = false;
-            status.error = Some(error.to_string());
-        });
+    };
+    let Err(error) = result else {
+        return reached_ready;
+    };
+    // The link was live and just broke, forcing a reconnect: bump the
+    // generation immediately (rather than waiting for reacquisition,
+    // which can take much longer than one request) so a caller mid
+    // multi-step sequence is told to abort right away instead of
+    // lingering on a link that is no longer trustworthy.
+    let clock_epoch = journal.begin_clock_epoch().await.unwrap_or(clock_epoch);
+    let stage = if reached_ready { "link" } else { "acquire" };
+    record_failure(&status_tx, stage, &error);
+    let (received_messages, last_received_ns) = {
+        let status = status_tx.borrow();
+        (status.received_messages, status.last_received_ns)
+    };
+    status_tx.send_modify(|status| {
+        status.connected = false;
+        status.clock_epoch = clock_epoch;
+        status.connected_since_ns = None;
+    });
+    let target = target.to_owned();
+    let error_kind = error.kind_name();
+    let error = error.to_string();
+    let connected_ms = millis(opened_at.elapsed());
+    let received_messages = received_messages.saturating_sub(received_before);
+    if reached_ready {
+        events
+            .emit(LinkEvent::Lost {
+                target,
+                error,
+                error_kind,
+                connected_ms,
+                received_messages,
+                ms_since_last_received: last_received_ns
+                    .map(|ns| wall_time_ns().saturating_sub(ns) / 1_000_000),
+            })
+            .await;
+    } else if let Some(repeat_count) =
+        repeats.observe("session", format!("acquire:{target}:{error}"))
+    {
+        events
+            .emit(LinkEvent::AcquireFailed {
+                target,
+                error,
+                error_kind,
+                connected_ms,
+                received_messages,
+                repeat_count,
+            })
+            .await;
     }
+    reached_ready
 }
 
-fn record_connect_error(status_tx: &watch::Sender<LinkStatus>, error: impl std::fmt::Display) {
+/// Record a failed scan/open/session in the status. `stage` is one of
+/// `scan`, `open`, `acquire`, or `link`.
+fn record_failure(
+    status_tx: &watch::Sender<LinkStatus>,
+    stage: &str,
+    error: impl std::fmt::Display,
+) {
     status_tx.send_modify(|status| {
         status.connected = false;
         status.ready = false;
+        status.port = None;
+        status.baud = None;
         status.error = Some(error.to_string());
+        status.last_error_stage = Some(stage.to_owned());
+        status.last_error_ns = Some(wall_time_ns());
+        status.consecutive_failures += 1;
     });
 }
 
@@ -442,10 +727,10 @@ where
                     status_tx,
                     tx_sequence,
                 ).await;
-                let failed = result.is_err();
+                let failure = result.as_ref().err().map(ToString::to_string);
                 let _ = command.reply.send(result);
-                if failed {
-                    break Err(LinkError::Receive("MAVLink send failed".to_owned()));
+                if let Some(failure) = failure {
+                    break Err(LinkError::Receive(format!("MAVLink send failed: {failure}")));
                 }
             }
             _ = heartbeat.tick() => {
@@ -664,7 +949,7 @@ fn decoded_frame(link_id: &str, direction: Direction, decoded: &DecodedMessage) 
     }
 }
 
-fn heartbeat_message() -> MavMessage {
+pub(crate) fn heartbeat_message() -> MavMessage {
     MavMessage::HEARTBEAT(HEARTBEAT_DATA {
         custom_mode: 0,
         mavtype: MavType::MAV_TYPE_GCS,
@@ -788,6 +1073,10 @@ mod tests {
         })
         .await
         .expect("link ready");
+        // Capture status while still connected: once `peer` below returns, it
+        // drops the socket, and the link's disconnect-triggered epoch bump
+        // (see `run_transport`) would otherwise race with these assertions.
+        let connected_status = link.status();
         let transmitted = peer.await.expect("peer task");
         time::timeout(Duration::from_secs(2), async {
             loop {
@@ -810,12 +1099,86 @@ mod tests {
             &record.payload,
             RecordPayload::MavlinkFrame(frame) if frame.direction == Direction::Tx
         )));
-        assert!(records.iter().all(|record| record.sim_clock.epoch == 1));
-        assert_eq!(link.status().clock_epoch, 1);
-        assert_eq!(link.status().target_system, 1);
-        assert_eq!(link.status().base_mode, 0);
-        assert_eq!(link.status().custom_mode, 0);
-        assert_eq!(link.status().system_status, 4);
+        assert!(
+            records
+                .iter()
+                .filter(|record| matches!(record.payload, RecordPayload::MavlinkFrame(_)))
+                .all(|record| record.sim_clock.epoch == 1)
+        );
+        assert_eq!(connected_status.clock_epoch, 1);
+        assert_eq!(connected_status.target_system, 1);
+        assert_eq!(connected_status.base_mode, 0);
+        assert_eq!(connected_status.custom_mode, 0);
+        assert_eq!(connected_status.system_status, 4);
+
+        link_task.abort();
+        journal.shutdown().await.expect("shutdown");
+        journal_task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn link_journals_lifecycle_diagnostics() {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = server.local_addr().expect("listener address");
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept link");
+            socket
+                .write_all(&heartbeat(1, 1, 1))
+                .await
+                .expect("send vehicle heartbeat");
+            let mut received = [0_u8; 21];
+            socket
+                .read_exact(&mut received)
+                .await
+                .expect("read GCS heartbeat");
+        });
+
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let journal_config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, journal_task) = JournalHandle::start(journal_config).await.expect("journal");
+        let mut link_config = MavlinkLinkConfig::sitl(address);
+        link_config.heartbeat_interval = Duration::from_millis(10);
+        let (link, link_task) = start_link(link_config, journal.clone());
+        peer.await.expect("peer task");
+
+        let events = time::timeout(Duration::from_secs(3), async {
+            loop {
+                let events: Vec<_> = journal
+                    .records_after(0)
+                    .await
+                    .expect("journal records")
+                    .into_iter()
+                    .filter_map(|record| match record.payload {
+                        RecordPayload::Diagnostic(event) => Some(*event),
+                        RecordPayload::MavlinkFrame(_) => None,
+                    })
+                    .collect();
+                if events.iter().any(|event| event.event == "link.lost") {
+                    return events;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("link.lost diagnostic");
+
+        let names: Vec<_> = events.iter().map(|event| event.event.as_str()).collect();
+        assert_eq!(&names[..3], ["link.opened", "link.ready", "link.lost"]);
+        assert!(events.iter().all(|event| event.source == "linkhub.link"));
+        let ready = &events[1];
+        assert_eq!(ready.fields["target_system"], json!(1));
+        let lost = &events[2];
+        assert!(lost.fields.contains_key("error_kind"));
+        assert!(lost.fields.contains_key("connected_ms"));
+
+        let status = link.status();
+        assert_eq!(status.attempts, 1);
+        assert!(status.consecutive_failures >= 1);
+        assert!(status.last_error_ns.is_some());
+        assert!(status.connected_since_ns.is_none());
 
         link_task.abort();
         journal.shutdown().await.expect("shutdown");

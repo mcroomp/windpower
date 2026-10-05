@@ -130,6 +130,15 @@ zero-rate commands preserve the newly installed level target.
 Disarmed GUIDED_NOGPS settling cannot consume this branch because
 `ModeGuided::angle_control_run()` returns immediately while disarmed.
 
+Independently of landed state, `ModeGuided::angle_control_start()` initialises
+the GUIDED angle target to level roll/pitch at the current yaw, and Copter
+ignores `SET_ATTITUDE_TARGET` until the vehicle is already in a guided mode.
+The interval between the mode change and the first ground attitude target
+therefore commands level. Away from level attitude this produces a swash
+transient (about 10 deg target error and ~95 us servo swing measured near
+pitch -89 deg on 2026-10-05; see `HARDWARE_STARTUP.md`). Clearing landed state
+alone does not remove it.
+
 Armed ACRO provides a stock-firmware route to clear the flag before the mode
 switch. With spool state `THROTTLE_UNLIMITED`, traditional-heli land detection
 clears `land_complete` when collective exceeds:
@@ -158,18 +167,22 @@ The intended stock-firmware sequence is:
    `RAWES_MODE=0`, clear `H_YAW_TRIM`, and select ACRO.
 3. Arm, allow Lua's 500 ms ground-idle interval, assert interlock, and wait for
    ArduPilot's explicit `Runup Complete`.
-4. Capture the current attitude, then briefly use RAWES ACRO-manual mode with
+4. Briefly use RAWES ACRO-manual mode with
    zero roll, zero pitch, and the passive collective. Lua owns these continuous
    RC overrides; calibration owns the sequence and telemetry gates.
 5. Require `EXTENDED_SYS_STATE.landed_state=MAV_LANDED_STATE_IN_AIR`.
-6. Enter GUIDED_NOGPS and have calibration stream the captured quaternion,
-   zero body rates, and normalized thrust through `SET_ATTITUDE_TARGET`.
+6. Send the Lua-handled `ENTER_GUIDED` command (COMMAND_LONG 31010). In one
+   scripting tick Lua captures the current quaternion, switches to
+   GUIDED_NOGPS, and installs that attitude with zero body rates and the IC
+   thrust; it re-sends the target at 20 Hz until passive is enabled. Ground
+   never sends `DO_SET_MODE` for this transition, so ArduPilot's level entry
+   target is replaced before the next attitude-controller run.
    `GUID_OPTIONS` bit 3 must be set.
-7. Require active heartbeat plus a quiet attitude interval while calibration
-   continues that target stream.
-8. Send the passive thrust and relative offsets, send `RAWES_PEN=1`, then set
-   `RAWES_MODE=3`. Calibration continues streaming until Lua confirms both
-   anchor capture and passive mode entry.
+7. Require active heartbeat plus a quiet attitude interval while Lua continues
+   the guided-entry hold.
+8. Send the passive thrust and relative offsets, set `RAWES_MODE=3`, then send
+   `ENTER_PASSIVE` (COMMAND_LONG 31011, param1 = yaw-trim seed). Lua captures
+   the anchor, enables passive hold, and returns the COMMAND_ACK.
 9. Lua replaces the temporary runup collective with neutral fallback RC
    collective before its first steady target call.
 
@@ -182,8 +195,8 @@ generation, but must not be used to tune the observer. Never reconnect the
 motor while armed or with accumulated trim; canonical safe-off clears
 `H_YAW_TRIM` before reconnection.
 
-The LinkHub UI stationary bench route must send `RAWES_YFF=0` before enabling
-passive mode. A supplied seed makes Lua hold that trim during passive instead
+The LinkHub UI stationary bench route must send `ENTER_PASSIVE` with
+param1 = 0. A supplied seed makes Lua hold that trim during passive instead
 of entering the adaptive observer fallback. This prevents a small persistent
 AP yaw correction from being absorbed into trim while the actuator is
 disconnected. The AP yaw PID remains active; zero trim does not promise an
@@ -195,7 +208,8 @@ the ground display retain a pre-passive value and can falsely imply an active
 motor command. Ground displays must mark `YFF_U` inactive while disarmed.
 
 A stationary, motor-disconnected hardware acceptance run on 2026-10-05 sent
-`RAWES_YFF=0` before passive capture. Every one of the 59 passive-hold samples
+a zero yaw-trim seed (then `RAWES_YFF=0`, now ENTER_PASSIVE param1) before
+passive capture. Every one of the 59 passive-hold samples
 reported both `YFF_T=0` and live `YFF_U=0`; cleanup verified the complete
 safe-off invariant. This establishes the no-Motor4-command behavior only for
 the stationary LinkHub bench route. It does not replace connected-actuator
@@ -243,41 +257,41 @@ through the common safe-off path.
 
 ## SITL scripting-thread starvation
 
-The passive torque regression can expose a lockstep-SITL artifact that is
-separate from the landed-state GUIDED handoff. ArduPilot 4.7.1 marks every
-generated `AP_Vehicle` Lua binding `scheduler-semaphore`. The main scheduler
-holds that semaphore for the complete flight-control loop and releases it only
-while waiting for the next INS sample.
+Every generated `AP_Vehicle` Lua binding in ArduPilot 4.7.1 is marked
+`scheduler-semaphore`. The main loop holds that semaphore while it runs and
+releases it only inside `AP::ins().wait_for_sample()`. In SITL the stack
+reached a state where the main thread almost never released it, so
+`vehicle:*` calls from Lua blocked for seconds. RC4/RC8 overrides then expired
+(`RC_OVERRIDE_TIME`), output 8 dropped, and heli runup restarted. Do not hide
+this by raising or disabling `RC_OVERRIDE_TIME`.
 
-`SCR_DEBUG_OPTS=8`, Lua phase timing, and Linux `/proc` thread tracing proved
-that the scripting thread can wake once per 2.5 ms frame yet repeatedly lose
-that short semaphore-acquisition window. The long calls were exclusively
-`vehicle:get_mode()` and `vehicle:set_target_*()`:
+**Root cause: `SIM_RATE_HZ=400`.** A gdb stall snapshot
+(`tests/sitl/thread_trace.py`, `stall_snapshot_s`) taken while Lua was blocked
+in `HALSITL::Semaphore::take` from
+`AP_Vehicle_set_target_angle_and_rate_and_throttle` showed the main thread in
+`AP_Scheduler::loop` → `delay_microseconds` → `SITL_State::wait_clock` →
+`JSON::recv_fdm` → `sync_frame_time`. That is the SITL-only
+`delay_microseconds(1)` that `AP_Scheduler::loop()` runs *after* `run()`, while
+it still holds the semaphore. In lockstep, any delay must step at least one
+physics frame. At 400 Hz one frame is the whole 2.5 ms loop, so the full
+wall-clock frame (including the real-time pacing sleep) elapsed with the lock
+held. `wait_for_sample()` then found its sample already due and returned
+immediately, so the unlocked window was effectively zero.
 
-- a reproduced `vehicle:get_mode()` wait lasted 3.307 s;
-- the scripting thread slept in `futex_wait_queue` rather than consuming CPU
-  or waiting runnable;
-- the main loop remained healthy at 400 Hz and lockstep stayed near 1.0x;
-- after 3.110 s without a Lua refresh, RC4 and RC8 overrides expired together;
-- output 8 dropped from 2000 to 1000, heli runup restarted, and swash spread
-  reached 175 us;
-- both overrides recovered immediately after the vehicle binding returned.
+At ArduPilot's SITL default of `SIM_RATE_HZ=1200`, the locked delay advances
+one 0.83 ms frame and `wait_for_sample()` steps the remaining frames unlocked.
+On 2026-10-05 the passive torque regression went from more than 100 scripting
+futex waits over 0.3 s (max 6.4 s, repeated RC8 drops) to a 0.02 s maximum and
+passed. Keep `SIM_RATE_HZ` at 1200 in `tests/sitl/rawes_sitl_defaults.parm` and
+the torque boot params; the mediator follows the servo-packet frame rate. This
+is a lockstep artifact; hardware does not step physics inside the scheduler.
 
-This evidence identifies scheduler-semaphore starvation as the cause of that
-SITL output interruption. It does not replace the separately verified hardware
-theory: entering armed GUIDED with landed state set installs a level target.
-Do not hide the SITL failure by increasing or disabling `RC_OVERRIDE_TIME`;
-that weakens a safety timeout without fixing the blocked scripting thread.
-
-The passive path avoids the startup exposure by having calibration stream
-`SET_ATTITUDE_TARGET` until Lua activation. After activation, fixed passive hold
-does not poll `vehicle:get_mode()` and refreshes its one
-`vehicle:set_target_angle_and_rate_and_throttle()` call at 20 Hz instead of
-making two scheduler-locked vehicle calls at 100 Hz. RC fallback still refreshes
-at 100 Hz before that call. The end-to-end regression passed with this
-mitigation on 2026-10-05. This reduces exposure without weakening either
-`RC_OVERRIDE_TIME` or GUIDED's target timeout; it does not change the underlying
-SITL mutex fairness.
+The static GUIDED holds (the entry hold after `ENTER_GUIDED` and the passive
+hold after `ENTER_PASSIVE`) never poll `vehicle:get_mode()`. They call
+`vehicle:set_target_angle_and_rate_and_throttle()` only when the target changes
+(at most every 50 ms) and otherwise once per second as a keepalive inside
+`GUID_TIMEOUT` (3 s). This keeps scheduler-locked calls to a minimum but was
+not, by itself, sufficient at 400 Hz.
 
 ## Evidence and tests
 

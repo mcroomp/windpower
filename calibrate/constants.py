@@ -10,7 +10,7 @@ import math
 import os
 
 # Re-exported so existing calibration modules share the one HTTP client.
-from linkhub_client.client import LinkHubClient, WallClock
+from linkhub_client.client import LinkHubClient, LinkHubGenerationChanged, WallClock
 from linkhub_client.messages import (
     Attitude,
     AttitudeQuaternion,
@@ -196,11 +196,6 @@ _MOTOR_PATH_PARAM_NAMES = (
 SCRIPTS_DIR = "/APM/scripts"
 
 # ---------------------------------------------------------------------------
-# COM port scan fallback bauds
-# ---------------------------------------------------------------------------
-_FALLBACK_BAUDS = [115200, 57600, 38400, 19200, 9600]
-
-# ---------------------------------------------------------------------------
 # Run mode config table
 # ---------------------------------------------------------------------------
 _TRIM_NVF = {"tlon": "RAWES_TLN", "tlat": "RAWES_TLT"}
@@ -220,7 +215,7 @@ _RUN_MODES = {
     },
     "passive": {
         "rawes_mode":  3,
-        "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
+        "flight_mode": 20,       # GUIDED_NOGPS, entered by Lua on ENTER_GUIDED
         "ic_seed":     True,
         "doc":        "interactive GUIDED_NOGPS attitude hold: captures the current quaternion; keys apply relative quaternion offsets and adjust held thrust",
     },

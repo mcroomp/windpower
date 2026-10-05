@@ -462,6 +462,13 @@ vehicle = {}
 
 function vehicle:get_mode()  return _mock.mode end
 
+_mock.set_mode_ok = true
+function vehicle:set_mode(mode)
+    if not _mock.set_mode_ok then return false end
+    _mock.mode = mode
+    return true
+end
+
 function vehicle:set_target_angle_and_climbrate(roll_deg, pitch_deg, yaw_deg, climbrate, use_yaw_rate, yaw_rate_degs)
     _mock.guided_target = {
         roll_deg      = roll_deg,
@@ -477,6 +484,7 @@ function vehicle:set_target_angle_and_climbrate(roll_deg, pitch_deg, yaw_deg, cl
 end
 
 function vehicle:set_target_angle_and_rate_and_throttle(roll_deg, pitch_deg, yaw_deg, roll_rate, pitch_rate, yaw_rate, throttle)
+    _mock.guided_target_calls = (_mock.guided_target_calls or 0) + 1
     _mock.guided_target = {
         roll_deg  = roll_deg,
         pitch_deg = pitch_deg,
@@ -510,6 +518,8 @@ end
 -- by the message payload, so string.unpack("<If10s", raw, 13) works correctly.
 
 _mock.mavlink_inbox = {}   -- queue of raw byte strings
+_mock.mavlink_sent = {}    -- {chan, msgid, payload_hex} sent through send_chan
+_mock.blocked_commands = {}
 
 mavlink = {}
 
@@ -519,6 +529,17 @@ end
 
 function mavlink.register_rx_msgid(_msgid)
     -- no-op in mock
+end
+
+function mavlink.block_command(command)
+    _mock.blocked_commands[command] = true
+    return true
+end
+
+function mavlink.send_chan(chan, msgid, payload)
+    local hex = payload:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+    table.insert(_mock.mavlink_sent, {chan = chan, msgid = msgid, payload_hex = hex})
+    return true
 end
 
 function mavlink.receive_chan()

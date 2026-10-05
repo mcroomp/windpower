@@ -108,7 +108,7 @@ if not exist "%LINKHUB%" (
     )
 )
 set "LINKHUB_CLIENT=%REPO%\linkhub_client"
-"%PYTHON%" -c "import linkhub_client" >nul 2>nul
+"%PYTHON%" -c "import linkhub_client.client" >nul 2>nul
 if errorlevel 1 (
     echo [INFO] Installing linkhub-client package ^(editable^) ...
     "%PYTHON%" -m pip install -e "%LINKHUB_CLIENT%" --no-deps --quiet

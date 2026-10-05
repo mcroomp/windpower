@@ -1,12 +1,13 @@
-import type { LinkHubApi } from "./api";
+import { formatMavResult, type LinkHubApi } from "./api";
 import {
   MavLandedState,
+  MavResult,
   MavState,
   NamedValueFloat,
-  SetAttitudeTarget,
 } from "./generated/protocol";
 import type { TelemetryStore } from "./telemetry";
-import type { LinkHubStatus, MessageRecord, Quaternion } from "./types";
+import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
+import type { LinkHubStatus, MessageRecord } from "./types";
 
 const ARMED_FLAG = 128;
 const MODE_ACRO = 1;
@@ -16,6 +17,9 @@ const ANGLE_STEP_DEG = 5;
 const ANGLE_LIMIT_DEG = 30;
 const THRUST_STEP = 0.05;
 const DEFAULT_THRUST = 0.342;
+// rawes.lua COMMAND_LONG IDs (MAV_CMD_USER_1/2); Lua owns the acknowledgement.
+export const CMD_ENTER_GUIDED = 31010;
+export const CMD_ENTER_PASSIVE = 31011;
 
 export interface PassiveOptions {
   force: boolean;
@@ -27,13 +31,8 @@ export interface PassiveOptions {
 }
 
 export const PASSIVE_TELEMETRY_RATES = Object.freeze({
-  ATTITUDE: 25,
-  ATTITUDE_QUATERNION: 25,
-  ATTITUDE_TARGET: 25,
+  ...DISPLAY_TELEMETRY_RATES,
   EXTENDED_SYS_STATE: 25,
-  SERVO_OUTPUT_RAW: 25,
-  LOCAL_POSITION_NED: 10,
-  BATTERY_STATUS: 2,
   EKF_STATUS_REPORT: 2,
 });
 export const PASSIVE_YAW_TRIM_SEED = 0;
@@ -188,7 +187,6 @@ export class PassiveController {
       this.write("Vehicle armed; waiting for heli runup.");
       await this.waitForRunup(runupAfter, signal);
 
-      const initialQuaternion = await this.captureQuaternion(signal);
       await this.sendNamedValue("RAWES_THR", this.thrust);
       await this.sendNamedValue("RAWES_RLL", 0);
       await this.sendNamedValue("RAWES_PIT", 0);
@@ -196,15 +194,19 @@ export class PassiveController {
       await this.setParameter("RAWES_MODE", 2);
       await this.waitForInAir(signal);
 
-      await this.setModeAndConfirm(MODE_GUIDED_NOGPS, signal);
-      await this.waitForSettledAttitude(initialQuaternion, signal);
+      this.write("Lua capturing attitude and entering GUIDED_NOGPS…");
+      await this.luaCommand(CMD_ENTER_GUIDED, [], "ENTER_GUIDED", signal);
+      await this.waitForMode(MODE_GUIDED_NOGPS, signal);
+      await this.waitForSettledAttitude(signal);
 
       await this.sendTargets();
-      await this.sendNamedValue("RAWES_YFF", PASSIVE_YAW_TRIM_SEED);
-      const passiveAfter = this.telemetry.checkpoint();
-      await this.sendNamedValue("RAWES_PEN", 1);
       await this.setParameter("RAWES_MODE", MODE_PASSIVE);
-      await this.waitForPassiveAcknowledgement(initialQuaternion, passiveAfter, signal);
+      await this.luaCommand(
+        CMD_ENTER_PASSIVE,
+        [PASSIVE_YAW_TRIM_SEED],
+        "ENTER_PASSIVE",
+        signal,
+      );
 
       this.setPhase("running");
       this.write("Passive run active. Keyboard controls are enabled.");
@@ -351,33 +353,6 @@ export class PassiveController {
     this.write("ArduPilot reports heli runup complete.", "fc");
   }
 
-  private async captureQuaternion(signal: AbortSignal): Promise<Quaternion> {
-    const existing = this.quaternion();
-    if (existing) {
-      return existing;
-    }
-    const record = await this.telemetry.waitFor(
-      (candidate) => candidate.direction === "rx"
-        && candidate.message === "ATTITUDE_QUATERNION",
-      3_000,
-      signal,
-    );
-    return this.quaternion(record) ?? Promise.reject(new Error("Invalid attitude quaternion"));
-  }
-
-  private quaternion(
-    record = this.telemetry.get("ATTITUDE_QUATERNION"),
-  ): Quaternion | null {
-    const q1 = recordNumber(record, "q1");
-    const q2 = recordNumber(record, "q2");
-    const q3 = recordNumber(record, "q3");
-    const q4 = recordNumber(record, "q4");
-    if (q1 === null || q2 === null || q3 === null || q4 === null) {
-      return null;
-    }
-    return [q1, q2, q3, q4];
-  }
-
   private async waitForInAir(signal: AbortSignal): Promise<void> {
     const current = this.telemetry.get("EXTENDED_SYS_STATE");
     if (recordEnum(current?.fields.landed_state, "IN_AIR", MavLandedState.IN_AIR)) {
@@ -391,10 +366,7 @@ export class PassiveController {
     );
   }
 
-  private async waitForSettledAttitude(
-    target: Quaternion,
-    signal: AbortSignal,
-  ): Promise<void> {
+  private async waitForSettledAttitude(signal: AbortSignal): Promise<void> {
     this.write("Waiting for GUIDED ACTIVE and a quiet attitude interval…");
     let quietSince: number | null = null;
     let latestAttitudeAt: number | null = null;
@@ -430,7 +402,6 @@ export class PassiveController {
     try {
       while (performance.now() < deadline) {
         signal.throwIfAborted();
-        await this.sendAttitudeTarget(target);
         const now = performance.now();
         if (
           active
@@ -449,44 +420,42 @@ export class PassiveController {
     }
   }
 
-  private async waitForPassiveAcknowledgement(
-    target: Quaternion,
-    after: number,
+  private async luaCommand(
+    command: number,
+    params: number[],
+    label: string,
     signal: AbortSignal,
   ): Promise<void> {
-    let modeSeen = false;
-    let captureSeen = false;
-    for (const record of this.telemetry.recordsAfter(
-      after,
-      (candidate) => candidate.direction === "rx" && candidate.message === "STATUSTEXT",
-    )) {
-      const text = String(record.fields.text ?? "");
-      modeSeen ||= text.includes("RAWES: mode 3 (passive) entered");
-      captureSeen ||= text.includes("RAWES: passive active");
+    const after = this.telemetry.checkpoint();
+    const result = await this.api.command(command, params);
+    if (result.result === MavResult.ACCEPTED) {
+      this.write(`Lua accepted ${label}.`);
+      return;
     }
-    const unsubscribe = this.telemetry.onRecord((record) => {
-      if (record.direction !== "rx" || record.message !== "STATUSTEXT") {
+    await delay(300, signal);
+    const reason = this.telemetry.recordsAfter(
+      after,
+      (record) => record.direction === "rx" && record.message === "STATUSTEXT",
+    )
+      .map((record) => String(record.fields.text ?? ""))
+      .filter((text) => text.startsWith("RAWES cmd"))
+      .at(-1);
+    throw new Error(
+      `${label} rejected with ${formatMavResult(result.result)}`
+      + (reason ? `: ${reason}` : ""),
+    );
+  }
+
+  private async waitForMode(mode: number, signal: AbortSignal): Promise<void> {
+    const deadline = performance.now() + 5_000;
+    while (performance.now() < deadline) {
+      signal.throwIfAborted();
+      if (this.telemetry.status?.custom_mode === mode) {
         return;
       }
-      const text = String(record.fields.text ?? "");
-      this.write(text, "fc");
-      modeSeen ||= text.includes("RAWES: mode 3 (passive) entered");
-      captureSeen ||= text.includes("RAWES: passive active");
-    });
-    const deadline = performance.now() + 2_000;
-    try {
-      while (performance.now() < deadline) {
-        signal.throwIfAborted();
-        if (modeSeen && captureSeen) {
-          return;
-        }
-        await this.sendAttitudeTarget(target);
-        await delay(50, signal);
-      }
-      throw new Error("Lua did not confirm passive steady-state control");
-    } finally {
-      unsubscribe();
+      await delay(50, signal);
     }
+    throw new Error(`Flight mode ${mode} was not confirmed`);
   }
 
   private async setModeAndConfirm(mode: number, signal: AbortSignal): Promise<void> {
@@ -562,21 +531,6 @@ export class PassiveController {
     await this.api.sendMessage(new NamedValueFloat({
       name,
       value,
-      time_boot_ms: 0,
-    }));
-  }
-
-  private async sendAttitudeTarget(quaternion: Quaternion): Promise<void> {
-    const status = this.telemetry.status;
-    await this.api.sendMessage(new SetAttitudeTarget({
-      target_system: status?.target_system ?? 0,
-      target_component: status?.target_component ?? 0,
-      type_mask: 0,
-      q: [...quaternion],
-      body_roll_rate: 0,
-      body_pitch_rate: 0,
-      body_yaw_rate: 0,
-      thrust: this.thrust,
       time_boot_ms: 0,
     }));
   }

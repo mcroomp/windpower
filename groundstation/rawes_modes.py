@@ -36,6 +36,36 @@ MODE_LANDING  = 4   # (reserved, not yet implemented)
 # mode 5 removed: pumping now runs in MODE_STEADY (same control law); the ground
 # schedule varies the commanded tension (RAWES_TEN) and RAWES_SUB phase over time.
 
+# ── Ground -> Lua commands (COMMAND_LONG, acknowledged by rawes.lua) ──────────
+# rawes.lua blocks these IDs from ArduPilot's own command handler and sends the
+# COMMAND_ACK itself; see the command table in rawes.lua's header.
+
+CMD_ENTER_GUIDED  = 31010  # MAV_CMD_USER_1: capture attitude, enter GUIDED_NOGPS holding it
+CMD_ENTER_PASSIVE = 31011  # MAV_CMD_USER_2: capture passive anchor; param1 = yaw-trim seed
+NO_YAW_TRIM_SEED  = -1.0   # ENTER_PASSIVE param1: keep the adaptive yaw-trim observer
+MAV_RESULT_ACCEPTED = 0
+
+
+def enter_passive_params(yaw_trim_seed: float | None = None) -> list[float]:
+    """COMMAND_LONG params for CMD_ENTER_PASSIVE."""
+    return [NO_YAW_TRIM_SEED if yaw_trim_seed is None else float(yaw_trim_seed)]
+
+
+def send_rawes_command(
+    gcs,
+    command: int,
+    params: list[float] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Send a RAWES Lua command and raise unless Lua acknowledges ACCEPTED."""
+    result = gcs.command(command, params or [], timeout=timeout)
+    if int(result["result"]) != MAV_RESULT_ACCEPTED:
+        raise RuntimeError(
+            f"RAWES command {command} rejected with MAV_RESULT {result['result']}"
+        )
+
+
 # ── Named-float control values ────────────────────────────────────────────────
 
 NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm countdown

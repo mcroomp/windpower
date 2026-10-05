@@ -104,7 +104,7 @@ _setup_venv() {
         fi
     fi
 
-    if ! "$PYTHON" -c "import linkhub_client" >/dev/null 2>&1; then
+    if ! "$PYTHON" -c "import linkhub_client.client" >/dev/null 2>&1; then
         echo "[INFO] Installing linkhub-client package (editable) ..."
         "$PYTHON" -m pip install -e "$(_winpath "$REPO_DIR/linkhub_client")" --no-deps --quiet
     fi
@@ -207,7 +207,7 @@ _setup_hw() {
     "$PYTHON" -m calibrate \
         --connection "$RAWES_HIL_PORT" \
         --baud "${RAWES_HIL_BAUD:-115200}" \
-        config apply
+        config fix
 }
 
 CMD="${1:-}"

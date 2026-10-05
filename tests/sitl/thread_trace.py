@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
+
+# gdb Python run inside the traced process: report which thread owns the futex
+# the traced thread is blocked on. In a futex syscall %rdi holds the futex
+# address; for a glibc pthread_mutex_t, __owner (TID) follows __lock/__count.
+_OWNER_PROBE = """
+import gdb
+tid = {tid}
+names = {{t.ptid[1]: t.name for t in gdb.selected_inferior().threads()}}
+for thread in gdb.selected_inferior().threads():
+    if thread.ptid[1] == tid:
+        thread.switch()
+        futex = int(gdb.parse_and_eval("$rdi"))
+        owner = int(gdb.parse_and_eval("*(int*)%d" % (futex + 8)))
+        print("STALL_FUTEX 0x%x OWNER_TID %d OWNER_NAME %s" % (
+            futex, owner, names.get(owner, "?")))
+"""
 
 
 class LinuxThreadTrace:
@@ -17,17 +35,23 @@ class LinuxThreadTrace:
         process_name: str,
         thread_name: str,
         interval_s: float = 0.02,
+        stall_snapshot_s: float | None = None,
+        max_stall_snapshots: int = 5,
     ) -> None:
         self._path = path
         self._process_name = process_name
         self._thread_name = thread_name
         self._interval_s = interval_s
+        self._stall_snapshot_s = stall_snapshot_s
+        self._max_stall_snapshots = max_stall_snapshots
+        self._snapshot_path = path.with_name(path.stem + "-stalls.txt")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._stream = None
         self.pid: int | None = None
         self.tid: int | None = None
         self.samples = 0
+        self.stall_snapshots = 0
 
     def start(self, timeout_s: float = 10.0) -> None:
         if os.name != "posix" or not Path("/proc").is_dir():
@@ -113,6 +137,8 @@ class LinuxThreadTrace:
         assert self.tid is not None
         task_path = Path(f"/proc/{self.pid}/task/{self.tid}")
         previous_sched: tuple[int, int, int] | None = None
+        futex_since: float | None = None
+        snapshot_taken = False
         while not self._stop.is_set():
             sample_started = time.monotonic()
             try:
@@ -151,6 +177,20 @@ class LinuxThreadTrace:
                 previous_sched = sched
                 self._write(sample)
                 self.samples += 1
+                if "futex" in sample["wchan"]:
+                    if futex_since is None:
+                        futex_since = sample_started
+                        snapshot_taken = False
+                    if (
+                        self._stall_snapshot_s is not None
+                        and not snapshot_taken
+                        and self.stall_snapshots < self._max_stall_snapshots
+                        and sample_started - futex_since >= self._stall_snapshot_s
+                    ):
+                        snapshot_taken = True
+                        self._snapshot_stall(sample_started - futex_since)
+                else:
+                    futex_since = None
             except (FileNotFoundError, ProcessLookupError) as error:
                 self._write({
                     "event": "thread-exited",
@@ -161,6 +201,53 @@ class LinuxThreadTrace:
                 return
             remaining = self._interval_s - (time.monotonic() - sample_started)
             self._stop.wait(max(0.0, remaining))
+
+    def _snapshot_stall(self, blocked_s: float) -> None:
+        """Attach gdb once and record every thread's stack plus the futex owner."""
+        self.stall_snapshots += 1
+        gdb = shutil.which("gdb")
+        if gdb is None:
+            raise RuntimeError("stall snapshots require gdb in the SITL image")
+        started_ns = time.monotonic_ns()
+        probe_path = self._snapshot_path.with_suffix(".gdb.py")
+        probe_path.write_text(_OWNER_PROBE.format(tid=self.tid), encoding="utf-8")
+        result = subprocess.run(
+            [
+                gdb, "-p", str(self.pid), "-batch", "-nx",
+                "-ex", "set pagination off",
+                "-x", str(probe_path),
+                "-ex", "info threads",
+                "-ex", "thread apply all bt 30",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        probe_path.unlink()
+        owner = next(
+            (line for line in result.stdout.splitlines()
+             if line.startswith("STALL_FUTEX")),
+            None,
+        )
+        self._write({
+            "event": "stall-snapshot",
+            "wall_time_ns": time.time_ns(),
+            "monotonic_ns": started_ns,
+            "blocked_s": round(blocked_s, 3),
+            "gdb_returncode": result.returncode,
+            "owner": owner,
+            "snapshot_file": self._snapshot_path.name,
+        })
+        with self._snapshot_path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"===== stall snapshot {self.stall_snapshots}: traced thread "
+                f"blocked {blocked_s:.2f} s, monotonic_ns={started_ns} =====\n"
+            )
+            stream.write(result.stdout)
+            if result.stderr:
+                stream.write("----- gdb stderr -----\n" + result.stderr)
+            stream.write("\n")
 
     @staticmethod
     def _read_status(path: Path) -> dict[str, str]:

@@ -20,7 +20,7 @@ from .constants import (
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
     SWASH_SERVOS,
     PWM_MIN, PWM_MAX, PWM_NEUTRAL,
-    _COPTER_MODES, _FALLBACK_BAUDS,
+    _COPTER_MODES,
     _LOG_DIR,
     _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH,
     _AZ_S1, _AZ_S2, _AZ_S3,
@@ -1308,9 +1308,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--connection",
-        help="LinkHub MAVLink connection (for example COM4); omit to scan serial ports",
+        help=(
+            "restrict LinkHub discovery to one serial port (for example COM4); "
+            "omit to auto-scan every port"
+        ),
     )
-    p.add_argument("--baud", type=int, help="serial baud; omit to try standard rates")
+    p.add_argument(
+        "--baud",
+        type=int,
+        help="restrict LinkHub discovery to one baud rate; omit to try standard rates",
+    )
     p.add_argument("--motor-name-prefix", help="optional Bluetooth motor name prefix")
     p.add_argument("--force", "-f", action="store_true",
                    help="Skip confirmation prompts (for scripted/CI use)")

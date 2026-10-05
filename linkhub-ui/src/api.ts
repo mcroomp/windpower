@@ -109,6 +109,26 @@ export class LinkHubApi {
     return this.request("PUT", "/v1/mavlink/message-rates", rates);
   }
 
+  async listParameters(timeoutMs = 30_000): Promise<Map<string, ParameterResult>> {
+    const result = await this.request<{ parameters: ParameterResult[] }>(
+      "GET",
+      `/v1/mavlink/parameters?timeout_ms=${timeoutMs}`,
+    );
+    return new Map(result.parameters.map((parameter) => [parameter.name, parameter]));
+  }
+
+  async setParameters(
+    parameters: ParameterResult[],
+    timeoutMs = 15_000,
+  ): Promise<Map<string, ParameterResult>> {
+    const result = await this.request<{ parameters: ParameterResult[] }>(
+      "PUT",
+      "/v1/mavlink/parameters",
+      { parameters, timeout_ms: timeoutMs, retries: 2 },
+    );
+    return new Map(result.parameters.map((parameter) => [parameter.name, parameter]));
+  }
+
   command(command: number, params: number[], timeoutMs = 10_000): Promise<CommandResult> {
     return this.request("POST", "/v1/mavlink/commands", {
       command,

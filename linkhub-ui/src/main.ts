@@ -1,5 +1,6 @@
 import "./styles.css";
 import { LinkHubApi } from "./api";
+import { formatCopterMode } from "./modes";
 import { PassiveController, type PassivePhase } from "./passive";
 import { VehicleScene } from "./scene";
 import { decodeH3Swashplate, swashControlPositions } from "./swashplate";
@@ -86,19 +87,41 @@ function updateOverlay(): void {
     collectiveDot.style.top = `${(1 - controls.collectiveUpDown) * 50}%`;
   }
   overlay.textContent = [
-    `${armed ? "ARMED" : "disarmed"} · mode ${status?.custom_mode ?? "n/a"}`,
+    `${armed ? "ARMED" : "disarmed"} · ${formatCopterMode(status?.custom_mode)}`,
     `roll ${degrees(attitude?.fields.roll)}°  pitch ${degrees(attitude?.fields.pitch)}°  yaw ${degrees(attitude?.fields.yaw)}°`,
+    scene.hasCaptureTarget ? "Capture target: yellow arrow" : "No capture target",
     `swash ${swashText}`,
     `S1 ${field("servo1_raw")}  S2 ${field("servo2_raw")}  S3 ${field("servo3_raw")}  DShot/S9 ${field("servo9_raw")}  YFF_U ${motorCommand}`,
   ].join("\n");
 }
 
-telemetry.onRecord(updateOverlay);
+let overlayTimer: number | undefined;
+function scheduleOverlay(): void {
+  if (overlayTimer === undefined) {
+    overlayTimer = window.setTimeout(() => {
+      overlayTimer = undefined;
+      updateOverlay();
+    }, 100);
+  }
+}
+telemetry.onRecord((record) => {
+  if (record.direction === "rx" && (
+    record.message === "HEARTBEAT"
+    || record.message === "ATTITUDE"
+    || record.message === "ATTITUDE_TARGET"
+    || record.message === "SERVO_OUTPUT_RAW"
+    || (record.message === "NAMED_VALUE_FLOAT" && record.fields.name === "YFF_U")
+  )) {
+    scheduleOverlay();
+  }
+});
 telemetry.onGeneration(() => {
+  scheduleOverlay();
   connectionState.textContent = "reconnecting";
   connectionState.className = "badge offline";
 });
 telemetry.onConnection((connected, error) => {
+  scheduleOverlay();
   connectionState.textContent = connected ? "connected" : "offline";
   connectionState.className = `badge ${connected ? "online" : "offline"}`;
   if (error) {
@@ -138,6 +161,7 @@ await passive.reconcile().catch((error) => {
 });
 
 window.addEventListener("beforeunload", () => {
+  window.clearTimeout(overlayTimer);
   scene.dispose();
   telemetry.stop();
 });

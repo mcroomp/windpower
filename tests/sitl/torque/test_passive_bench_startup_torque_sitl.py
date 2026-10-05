@@ -7,11 +7,13 @@ import statistics
 from pathlib import Path
 
 import pytest
+from pymavlink import mavutil
 
 from analysis.linkhub_journal import cursor_sequence, iter_messages
 from calibrate.hw import verify_safe_off
 from calibrate.run import PassiveRunOptions, run_passive
 from groundstation.ekf_flags import MAV_MODE_ARMED
+from groundstation.rawes_modes import CMD_ENTER_GUIDED, CMD_ENTER_PASSIVE
 from tests.sitl.stack_infra import StackContext
 from tests.sitl.thread_trace import LinuxThreadTrace
 from tests.sitl.torque.torque_test_utils import (
@@ -47,6 +49,13 @@ def _first_time(messages: list[dict], predicate) -> float:
     pytest.fail("Expected MAVLink event was not present")
 
 
+def _is_command(message: dict, command: int) -> bool:
+    """Match a journal COMMAND_LONG; LinkHub decodes ``command`` as an enum."""
+    return message.get("command") == {
+        "type": mavutil.mavlink.enums["MAV_CMD"][command].name
+    }
+
+
 @pytest.mark.timeout(2400)
 def test_passive_bench_startup_torque_sitl(
     torque_unarmed_lua_calibrate: StackContext,
@@ -59,6 +68,7 @@ def test_passive_bench_startup_torque_sitl(
         ctx.test_log_dir / "scripting-thread-trace.jsonl",
         process_name="arducopter-heli",
         thread_name="Scripting",
+        stall_snapshot_s=0.5,
     )
     scripting_trace.start()
     try:
@@ -216,6 +226,14 @@ def test_passive_bench_startup_torque_sitl(
             == 2  # MAV_LANDED_STATE_IN_AIR
         ),
     )
+    enter_guided_at = _first_time(
+        messages,
+        lambda message: (
+            message.get("_dir") == "tx"
+            and message.get("mavpackettype") == "COMMAND_LONG"
+            and _is_command(message, CMD_ENTER_GUIDED)
+        ),
+    )
     guided_at = _first_time(
         messages,
         lambda message: (
@@ -229,15 +247,15 @@ def test_passive_bench_startup_torque_sitl(
         messages,
         lambda message: (
             message.get("_dir") == "tx"
-            and message.get("mavpackettype") == "NAMED_VALUE_FLOAT"
-            and message.get("name") == "RAWES_PEN"
-            and float(message.get("value", 0.0)) > 0.5
+            and message.get("mavpackettype") == "COMMAND_LONG"
+            and _is_command(message, CMD_ENTER_PASSIVE)
         ),
     )
     assert (
         armed_acro_at
         < runup_complete_at
         < land_clear_at
+        < enter_guided_at
         < guided_at
         < passive_enable_at
     )

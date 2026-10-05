@@ -4,7 +4,10 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderValue, StatusCode,
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -12,10 +15,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
-use tower_http::services::ServeDir;
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
+use uuid::Uuid;
 
 use crate::{
-    journal::{JournalError, JournalHandle},
+    journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
     operations::{MavlinkOperations, OperationError},
@@ -65,6 +69,17 @@ enum ApiError {
     Operation(#[from] OperationError),
     #[error(transparent)]
     Motor(#[from] MotorError),
+    /// The caller's `expected_generation` no longer matches LinkHub's live
+    /// generation: the service restarted, the serial link reconnected, or
+    /// the vehicle rebooted since the caller captured its baseline. A
+    /// multi-step sequence polling for a state transition (e.g. confirming
+    /// arm/disarm) should abort rather than keep trusting this link.
+    #[error("LinkHub generation changed ({expected} -> {current})")]
+    GenerationChanged {
+        expected: String,
+        current: String,
+        cursor: String,
+    },
 }
 
 impl IntoResponse for ApiError {
@@ -90,15 +105,30 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_REQUEST, "invalid_motor_command")
             }
             Self::Motor(_) => (StatusCode::SERVICE_UNAVAILABLE, "motor_unavailable"),
+            Self::GenerationChanged { .. } => (StatusCode::CONFLICT, "generation_changed"),
         };
-        (
-            status,
-            Json(json!({
-                "error": code,
-                "message": self.to_string(),
-            })),
-        )
-            .into_response()
+        let mut body = json!({
+            "error": code,
+            "message": self.to_string(),
+        });
+        if let Self::GenerationChanged {
+            expected,
+            current,
+            cursor,
+        } = &self
+        {
+            let object = body.as_object_mut().expect("body is an object");
+            object.insert(
+                "expected_generation".to_owned(),
+                Value::String(expected.clone()),
+            );
+            object.insert(
+                "current_generation".to_owned(),
+                Value::String(current.clone()),
+            );
+            object.insert("cursor".to_owned(), Value::String(cursor.clone()));
+        }
+        (status, Json(body)).into_response()
     }
 }
 
@@ -111,7 +141,7 @@ pub fn router_with_motor(
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
 ) -> Router {
-    router_with_motor_and_static(journal, link, motor, None)
+    router_with_motor_and_static(journal, link, motor, None, false)
 }
 
 pub fn router_with_motor_and_static(
@@ -119,6 +149,7 @@ pub fn router_with_motor_and_static(
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
     static_dir: Option<PathBuf>,
+    no_cache: bool,
 ) -> Router {
     let operations = link.clone().map(MavlinkOperations::new);
     let router = Router::new()
@@ -184,12 +215,19 @@ pub fn router_with_motor_and_static(
             operations,
             motor,
         }));
-    match static_dir {
+    let router = match static_dir {
         Some(directory) => {
             router.fallback_service(ServeDir::new(directory).append_index_html_on_directories(true))
         }
         None => router,
+    };
+    if !no_cache {
+        return router;
     }
+    router.layer(SetResponseHeaderLayer::overriding(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    ))
 }
 
 async fn live() -> Json<Value> {
@@ -240,6 +278,15 @@ async fn flush_journal(State(state): State<Arc<AppState>>) -> Result<Json<Value>
     })))
 }
 
+/// LinkHub's opaque generation token: changes whenever the service restarts
+/// (new `run_id`) or the MAVLink link is replaced (new `clock_epoch` from a
+/// serial reconnect or vehicle reboot). Callers polling for a state
+/// transition across multiple requests should discard that state, or abort
+/// outright, when this token changes mid-sequence.
+fn generation_token(run_id: Uuid, clock_epoch: u64) -> String {
+    format!("v1:{run_id}:{clock_epoch}")
+}
+
 async fn mavlink_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let status = state.link.as_ref().map_or_else(
         || LinkStatus {
@@ -261,7 +308,7 @@ async fn mavlink_status(State(state): State<Arc<AppState>>) -> Result<Json<Value
     let clock_epoch = object["clock_epoch"].as_u64().unwrap_or_default();
     object.insert(
         "generation".to_owned(),
-        Value::String(format!("v1:{}:{clock_epoch}", state.journal.run_id())),
+        Value::String(generation_token(state.journal.run_id(), clock_epoch)),
     );
     Ok(Json(value))
 }
@@ -299,6 +346,30 @@ struct MessageQuery {
     #[serde(default)]
     collapse: bool,
     max_lag_ms: Option<u64>,
+    /// Generation token the caller captured before starting a multi-step
+    /// sequence (e.g. confirming arm/disarm). If LinkHub's live generation
+    /// no longer matches, the request fails with 409 `generation_changed`
+    /// instead of returning a batch, so the caller can abort immediately
+    /// rather than keep polling a link that is no longer trustworthy.
+    expected_generation: Option<String>,
+    /// Range-query bounds. Any of these selects a one-shot range scan.
+    since_ns: Option<u64>,
+    until_ns: Option<u64>,
+    last_ms: Option<u64>,
+    through: Option<String>,
+    /// Comma-separated `field=value` pairs; values parse as JSON, else string.
+    eq: Option<String>,
+    /// Case-insensitive substring over the message name and decoded fields.
+    contains: Option<String>,
+}
+
+impl MessageQuery {
+    fn is_range(&self) -> bool {
+        self.since_ns.is_some()
+            || self.until_ns.is_some()
+            || self.last_ms.is_some()
+            || self.through.is_some()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -325,6 +396,8 @@ struct RecordFilter {
     direction: Option<String>,
     message_ids: Option<Vec<u32>>,
     messages: Option<Vec<String>>,
+    equal: Vec<(String, Value)>,
+    contains: Option<String>,
 }
 
 impl RecordFilter {
@@ -338,6 +411,8 @@ impl RecordFilter {
             direction: query.direction.clone(),
             message_ids: None,
             messages: None,
+            equal: Vec::new(),
+            contains: None,
         };
         if let Some(classes) = &query.classes {
             filter.diagnostics = false;
@@ -392,7 +467,7 @@ impl RecordFilter {
     }
 
     fn from_message_query(query: &MessageQuery) -> Result<Self, ApiError> {
-        Self::from_query(&RecordQuery {
+        let mut filter = Self::from_query(&RecordQuery {
             after: None,
             classes: Some("mavlink".to_owned()),
             source: None,
@@ -403,7 +478,29 @@ impl RecordFilter {
             messages: query.messages.clone(),
             wait_ms: 0,
             limit: None,
-        })
+        })?;
+        if let Some(pairs) = &query.eq {
+            for pair in pairs
+                .split(',')
+                .map(str::trim)
+                .filter(|pair| !pair.is_empty())
+            {
+                let Some((field, expected)) = pair.split_once('=') else {
+                    return Err(ApiError::BadRequest(format!(
+                        "eq expects field=value, got {pair:?}"
+                    )));
+                };
+                let expected = serde_json::from_str(expected)
+                    .unwrap_or_else(|_| Value::String(expected.to_owned()));
+                filter.equal.push((field.trim().to_owned(), expected));
+            }
+        }
+        filter.contains = query
+            .contains
+            .as_ref()
+            .filter(|needle| !needle.is_empty())
+            .map(|needle| needle.to_lowercase());
+        Ok(filter)
     }
 
     fn matches(&self, record: &JournalRecord) -> bool {
@@ -434,6 +531,17 @@ impl RecordFilter {
                         .messages
                         .as_ref()
                         .is_none_or(|names| names.contains(&frame.message_name))
+                    && self
+                        .equal
+                        .iter()
+                        .all(|(field, expected)| frame.fields.get(field) == Some(expected))
+                    && self.contains.as_ref().is_none_or(|needle| {
+                        frame.message_name.to_lowercase().contains(needle)
+                            || Value::Object(frame.fields.clone())
+                                .to_string()
+                                .to_lowercase()
+                                .contains(needle)
+                    })
             }
         }
     }
@@ -460,6 +568,26 @@ async fn mavlink_frames(
     read_record_batch(state, query, Some("mavlink.frame")).await
 }
 
+/// Fail fast if the caller's `expected_generation` baseline no longer
+/// matches LinkHub's live generation. Only enforced when the caller actually
+/// passes a baseline and a MAVLink link is configured; otherwise there is
+/// nothing to protect and the check is a no-op.
+async fn check_generation(state: &AppState, expected: Option<&str>) -> Result<(), ApiError> {
+    let (Some(expected), Some(link)) = (expected, state.link.as_ref()) else {
+        return Ok(());
+    };
+    let current = generation_token(state.journal.run_id(), link.status().clock_epoch);
+    if current != expected {
+        let (tail, _) = state.journal.checkpoint().await?;
+        return Err(ApiError::GenerationChanged {
+            expected: expected.to_owned(),
+            current,
+            cursor: format_cursor(tail),
+        });
+    }
+    Ok(())
+}
+
 async fn mavlink_messages(
     State(state): State<Arc<AppState>>,
     Query(query): Query<MessageQuery>,
@@ -472,12 +600,18 @@ async fn mavlink_messages(
             "limit must be between 1 and {MAX_MESSAGE_BATCH_LIMIT}"
         )));
     }
+    if query.is_range() {
+        return read_message_range(&state, &query, &filter, cursor, limit).await;
+    }
     if query.wait_ms > MAX_MESSAGE_WAIT_MS {
         return Err(ApiError::BadRequest(format!(
             "wait_ms must not exceed {MAX_MESSAGE_WAIT_MS}"
         )));
     }
-    if query.max_lag_ms.is_some_and(|value| value > MAX_MESSAGE_LAG_MS) {
+    if query
+        .max_lag_ms
+        .is_some_and(|value| value > MAX_MESSAGE_LAG_MS)
+    {
         return Err(ApiError::BadRequest(format!(
             "max_lag_ms must not exceed {MAX_MESSAGE_LAG_MS}"
         )));
@@ -486,6 +620,7 @@ async fn mavlink_messages(
     let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
     loop {
+        check_generation(&state, query.expected_generation.as_deref()).await?;
         let read = state
             .journal
             .read_after_bounded(cursor, MAX_JOURNAL_SCAN_RECORDS)
@@ -540,6 +675,89 @@ async fn mavlink_messages(
             }
         }
     }
+}
+
+/// One-shot historical scan bounded by ingest time and/or cursor. Scans until
+/// `limit` matches, the range end, or the journal tail. A batch with fewer
+/// than `limit` records means the range is exhausted; otherwise continue with
+/// `after=next_cursor` and the same bounds.
+async fn read_message_range(
+    state: &AppState,
+    query: &MessageQuery,
+    filter: &RecordFilter,
+    mut cursor: u64,
+    limit: usize,
+) -> Result<Json<MessageBatch>, ApiError> {
+    if query.wait_ms != 0 || query.max_lag_ms.is_some() {
+        return Err(ApiError::BadRequest(
+            "range queries (since_ns/until_ns/last_ms/through) do not accept wait_ms or max_lag_ms"
+                .to_owned(),
+        ));
+    }
+    if query.since_ns.is_some() && query.last_ms.is_some() {
+        return Err(ApiError::BadRequest(
+            "since_ns and last_ms are mutually exclusive".to_owned(),
+        ));
+    }
+    let window = TimeWindow {
+        since_ns: query.since_ns.or_else(|| {
+            query
+                .last_ms
+                .map(|ms| wall_time_ns().saturating_sub(ms.saturating_mul(1_000_000)))
+        }),
+        until_ns: query.until_ns,
+    };
+    let through = query
+        .through
+        .as_deref()
+        .map(|value| parse_cursor(Some(value)))
+        .transpose()?;
+    check_generation(state, query.expected_generation.as_deref()).await?;
+
+    let mut records = Vec::new();
+    let mut next_clock = None;
+    let mut fallback_clock;
+    'scan: loop {
+        let read = state
+            .journal
+            .read_window_bounded(cursor, window, MAX_JOURNAL_SCAN_RECORDS)
+            .await?;
+        fallback_clock = read.tail_clock;
+        if read.records.is_empty() {
+            break;
+        }
+        for record in read.records {
+            if through.is_some_and(|through| record.sequence > through)
+                || window
+                    .until_ns
+                    .is_some_and(|until| record.ingest_time_ns > until)
+            {
+                break 'scan;
+            }
+            cursor = record.sequence;
+            next_clock = Some(record.sim_clock);
+            if window
+                .since_ns
+                .is_some_and(|since| record.ingest_time_ns < since)
+            {
+                continue;
+            }
+            if filter.matches(&record) {
+                records.push(record);
+                if records.len() == limit {
+                    break 'scan;
+                }
+            }
+        }
+    }
+    if query.collapse {
+        records = collapse_state_records(records);
+    }
+    Ok(Json(MessageBatch {
+        records: records.iter().filter_map(encode_telemetry_record).collect(),
+        next_cursor: format_cursor(cursor),
+        next_clock: next_clock.unwrap_or(fallback_clock),
+    }))
 }
 
 async fn read_record_batch(
@@ -1228,11 +1446,32 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    use mavlink::MavHeader;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::timeout,
+    };
+
     use super::*;
     use crate::{
+        codec::serialize_message,
         journal::JournalConfig,
+        mavlink::{MavlinkLinkConfig, heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
     };
+
+    fn heartbeat_frame(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
+        serialize_message(
+            &heartbeat_message(),
+            MavHeader {
+                sequence,
+                system_id,
+                component_id,
+            },
+        )
+        .expect("heartbeat frame")
+    }
 
     fn event(run_id: Uuid) -> DiagnosticEvent {
         DiagnosticEvent {
@@ -1380,7 +1619,13 @@ mod tests {
         let run_id = Uuid::new_v4();
         let config = JournalConfig::for_directory(temp.path().join("journal"), run_id);
         let (journal, task) = JournalHandle::start(config).await.expect("journal");
-        let app = router_with_motor_and_static(journal.clone(), None, None, Some(static_dir));
+        let app = router_with_motor_and_static(
+            journal.clone(),
+            None,
+            None,
+            Some(static_dir.clone()),
+            true,
+        );
 
         let index = app
             .clone()
@@ -1406,6 +1651,9 @@ mod tests {
             .expect("response");
 
         assert_eq!(index.status(), StatusCode::OK);
+        assert_eq!(index.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(api.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(script.headers()[CACHE_CONTROL], "no-store");
         assert_eq!(
             to_bytes(index.into_body(), usize::MAX)
                 .await
@@ -1415,6 +1663,13 @@ mod tests {
         assert_eq!(script.status(), StatusCode::OK);
         assert_eq!(script.headers()[CONTENT_TYPE], "text/javascript");
         assert_eq!(api.status(), StatusCode::OK);
+
+        let cached =
+            router_with_motor_and_static(journal.clone(), None, None, Some(static_dir), false)
+                .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+        assert!(cached.headers().get(CACHE_CONTROL).is_none());
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
@@ -1493,6 +1748,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_range_query_filters_by_time_cursor_fields_and_text() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let mut config = JournalConfig::for_directory(temp.path(), run_id);
+        config.max_chunk_records = 2;
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let frame = |name: &str, fields: Value| {
+            RecordPayload::MavlinkFrame(MavlinkFrame {
+                link_id: "test".to_owned(),
+                direction: Direction::Rx,
+                protocol_version: 2,
+                sequence: 1,
+                system_id: 1,
+                component_id: 1,
+                message_id: 0,
+                message_name: name.to_owned(),
+                fields: fields.as_object().expect("fields").clone(),
+                signed: false,
+                frame: Vec::new(),
+            })
+        };
+        journal
+            .append(
+                frame("STATUSTEXT", json!({"severity": 6, "text": "early"})),
+                None,
+            )
+            .await
+            .expect("early");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let since_ns = wall_time_ns();
+        for (name, fields) in [
+            (
+                "STATUSTEXT",
+                json!({"severity": 0, "text": "Crash: Disarming"}),
+            ),
+            (
+                "NAMED_VALUE_FLOAT",
+                json!({"name": "RAWES_PEN", "value": 1.0}),
+            ),
+            ("NAMED_VALUE_FLOAT", json!({"name": "YFF_U", "value": 0.2})),
+            ("STATUSTEXT", json!({"severity": 6, "text": "late"})),
+        ] {
+            journal
+                .append(frame(name, fields), None)
+                .await
+                .expect("append");
+        }
+        let app = router(journal.clone(), None);
+        let get = |uri: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(Request::get(uri).body(Body::empty()).expect("request"))
+                    .await
+                    .expect("response");
+                let status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                (
+                    status,
+                    serde_json::from_slice::<Value>(&body).expect("json"),
+                )
+            }
+        };
+        let texts = |batch: &Value| -> Vec<String> {
+            batch["records"]
+                .as_array()
+                .expect("records")
+                .iter()
+                .map(|record| {
+                    record["fields"]["text"]
+                        .as_str()
+                        .or(record["fields"]["name"].as_str())
+                        .expect("text or name")
+                        .to_owned()
+                })
+                .collect()
+        };
+
+        let (status, batch) = get(format!("/v1/mavlink/messages?since_ns={since_ns}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            texts(&batch),
+            ["Crash: Disarming", "RAWES_PEN", "YFF_U", "late"]
+        );
+
+        let (_, batch) = get("/v1/mavlink/messages?through=v1:3".to_owned()).await;
+        assert_eq!(texts(&batch), ["early", "Crash: Disarming", "RAWES_PEN"]);
+        assert_eq!(batch["next_cursor"], "v1:3");
+
+        let (_, batch) =
+            get("/v1/mavlink/messages?last_ms=60000&eq=name=RAWES_PEN".to_owned()).await;
+        assert_eq!(texts(&batch), ["RAWES_PEN"]);
+
+        let (_, batch) =
+            get("/v1/mavlink/messages?last_ms=60000&eq=severity=0&contains=crash".to_owned()).await;
+        assert_eq!(texts(&batch), ["Crash: Disarming"]);
+
+        let (_, batch) = get("/v1/mavlink/messages?last_ms=60000&limit=2".to_owned()).await;
+        assert_eq!(texts(&batch), ["early", "Crash: Disarming"]);
+        let (_, batch) = get(format!(
+            "/v1/mavlink/messages?last_ms=60000&limit=2&after={}",
+            batch["next_cursor"].as_str().expect("cursor")
+        ))
+        .await;
+        assert_eq!(texts(&batch), ["RAWES_PEN", "YFF_U"]);
+
+        let (status, _) = get("/v1/mavlink/messages?last_ms=1000&wait_ms=10".to_owned()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get(format!(
+            "/v1/mavlink/messages?last_ms=1000&since_ns={since_ns}"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
     async fn message_batch_skips_stale_backlog_to_the_current_tail() {
         let temp = TempDir::new().expect("temp directory");
         let run_id = Uuid::new_v4();
@@ -1520,6 +1896,87 @@ mod tests {
         assert_eq!(batch["records"], json!([]));
         assert_eq!(batch["next_cursor"], "v1:1");
 
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn message_batch_rejects_stale_expected_generation() {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = server.local_addr().expect("listener address");
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept link");
+            socket
+                .write_all(&heartbeat_frame(1, 1, 1))
+                .await
+                .expect("send vehicle heartbeat");
+            // Keep the socket open for the rest of the test so the link
+            // stays connected instead of racing its own disconnect-epoch bump.
+            let mut sink = Vec::new();
+            let _ = socket.read_to_end(&mut sink).await;
+        });
+
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let mut link_config = MavlinkLinkConfig::sitl(address);
+        link_config.heartbeat_interval = Duration::from_millis(10);
+        let (link, link_task) = start_link(link_config, journal.clone());
+
+        timeout(Duration::from_secs(2), async {
+            let mut status = link.subscribe_status();
+            while !status.borrow().ready {
+                status.changed().await.expect("status update");
+            }
+        })
+        .await
+        .expect("link ready");
+
+        let current_generation = format!("v1:{run_id}:1");
+        let app = router(journal.clone(), Some(link));
+
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/mavlink/messages?after=v1:0&expected_generation={current_generation}"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let stale = app
+            .oneshot(
+                Request::get(
+                    "/v1/mavlink/messages?after=v1:0&expected_generation=v1:\
+                     00000000-0000-0000-0000-000000000000:1",
+                )
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let body = to_bytes(stale.into_body(), usize::MAX)
+            .await
+            .expect("conflict body");
+        let value: Value = serde_json::from_slice(&body).expect("conflict json");
+        assert_eq!(value["error"], "generation_changed");
+        assert_eq!(value["current_generation"], current_generation);
+        assert_eq!(
+            value["expected_generation"],
+            "v1:00000000-0000-0000-0000-000000000000:1"
+        );
+        assert!(value["cursor"].as_str().is_some());
+
+        link_task.abort();
+        peer.abort();
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
     }

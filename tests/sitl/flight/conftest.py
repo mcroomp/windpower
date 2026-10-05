@@ -27,6 +27,11 @@ from tests.sitl.stack_infra import (
     HOME_ALT_M,
 )
 from linkhub_client.messages import NamedValueFloat, NamedValueInt
+from groundstation.rawes_modes import (
+    CMD_ENTER_PASSIVE,
+    enter_passive_params,
+    send_rawes_command,
+)
 from simulation.ic import load_ic
 from simulation.sensor import _rotation_matrix_to_euler_zyx
 from simulation.torque_model import HubParams, equilibrium_throttle
@@ -325,7 +330,7 @@ def _ic_trapezoid_stack(
         # ground-side tension regulator (mirrors test_create_ic warmup).
         "winch_cmd_port":       winch_cmd_port,
     }
-    # MODE_PASSIVE captures the current AHRS quaternion when RAWES_PEN arrives,
+    # MODE_PASSIVE captures the current AHRS quaternion on ENTER_PASSIVE,
     # so capturing before GPS-yaw alignment would freeze the pre-alignment
     # heading (~0 deg) instead of the IC heading (+90 deg).
     _arm_at_sim_s = 14.0
@@ -367,12 +372,27 @@ def _ic_trapezoid_stack(
             ctx.gcs.send_message(NamedValueFloat("RAWES_ROFF", float(_roll_offset)))
             ctx.gcs.send_message(NamedValueFloat("RAWES_POFF", float(_pitch_offset)))
             ctx.gcs.send_message(NamedValueFloat("RAWES_YOFF", float(_yaw_offset)))
-            ctx.gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+
+            # Seed the yaw-motor trim equilibrium for the IC/release rotor spin
+            # rate (same torque_model.equilibrium_throttle() calc physics_core.py
+            # uses to initialize the frozen hub ODE state).  rawes.lua holds this
+            # directly in H_YAW_TRIM throughout MODE_PASSIVE instead of trying to
+            # derive it from a (kinematically-locked, hence meaningless) psi_dot
+            # readback -- so the real SERVO9 PWM already matches the yaw-motor
+            # ODE's equilibrium by the time of kinematic release, avoiding a
+            # step-input torque mismatch that spins the hub. See design/flight_stack.md
+            # "Yaw observer in passive mode" and repo memory sitl-param-verify-and-yaw-ff.md.
+            _yff_seed = equilibrium_throttle(float(_ic["omega_spin"]), HubParams())
+            send_rawes_command(
+                ctx.gcs, CMD_ENTER_PASSIVE, enter_passive_params(_yff_seed),
+            )
             ctx.log.info(
-                "Lua passive anchor captured; IC-relative offsets: roll=%+.2f pitch=%+.2f yaw=%+.2f deg",
+                "Lua passive anchor captured; IC-relative offsets: roll=%+.2f pitch=%+.2f yaw=%+.2f deg; "
+                "yaw-trim seed %.3f",
                 math.degrees(_roll_offset),
                 math.degrees(_pitch_offset),
                 math.degrees(_yaw_offset),
+                _yff_seed,
             )
 
             # Stream the IC equilibrium tension and target altitude from the IC.
@@ -399,19 +419,6 @@ def _ic_trapezoid_stack(
             ctx.gcs.send_message(NamedValueFloat("RAWES_ALT", _alt_ic))
             ctx.log.info("IC equilibrium tension: %.0f N  target altitude: %.1f m",
                          _tension_eq, _alt_ic)
-
-            # Seed the yaw-motor trim equilibrium for the IC/release rotor spin
-            # rate (same torque_model.equilibrium_throttle() calc physics_core.py
-            # uses to initialize the frozen hub ODE state).  rawes.lua holds this
-            # directly in H_YAW_TRIM throughout MODE_PASSIVE instead of trying to
-            # derive it from a (kinematically-locked, hence meaningless) psi_dot
-            # readback -- so the real SERVO9 PWM already matches the yaw-motor
-            # ODE's equilibrium by the time of kinematic release, avoiding a
-            # step-input torque mismatch that spins the hub. See design/flight_stack.md
-            # "Yaw observer in passive mode" and repo memory sitl-param-verify-and-yaw-ff.md.
-            _yff_seed = equilibrium_throttle(float(_ic["omega_spin"]), HubParams())
-            ctx.gcs.send_message(NamedValueFloat("RAWES_YFF", _yff_seed))
-            ctx.log.info("IC yaw-trim equilibrium seed: %.3f", _yff_seed)
         ctx.wait_drain(timeout=1.0, label="post-param")
         ctx.wait_drain(timeout=0.5, label="post-col")
 

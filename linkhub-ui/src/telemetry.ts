@@ -1,4 +1,5 @@
 import type { LinkHubApi } from "./api";
+import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
 import type { LinkHubStatus, MessageRecord } from "./types";
 
 type Listener = (record: MessageRecord) => void;
@@ -27,6 +28,7 @@ export class TelemetryStore {
   private cursor = "v1:0";
   private currentStatus: LinkHubStatus | null = null;
   private running: Promise<void> | null = null;
+  private configuredGeneration: string | null = null;
 
   constructor(private readonly api: LinkHubApi) {}
 
@@ -41,6 +43,7 @@ export class TelemetryStore {
     this.controller = new AbortController();
     try {
       const status = await this.api.status(this.controller.signal);
+      await this.configureDisplayTelemetry(status);
       this.currentStatus = status;
       const initialTail = status.cursor;
       while (cursorSequence(this.cursor) < cursorSequence(initialTail)) {
@@ -184,6 +187,7 @@ export class TelemetryStore {
             connected = false;
             this.cursor = status.cursor;
           }
+          await this.configureDisplayTelemetry(status);
           this.currentStatus = status;
         }
       } catch (error) {
@@ -198,6 +202,15 @@ export class TelemetryStore {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
       }
     }
+  }
+
+  private async configureDisplayTelemetry(status: LinkHubStatus): Promise<void> {
+    if (!status.connected || !status.ready
+      || status.generation === this.configuredGeneration) {
+      return;
+    }
+    await this.api.setMessageRates(DISPLAY_TELEMETRY_RATES);
+    this.configuredGeneration = status.generation;
   }
 
   private handleGenerationChange(status: LinkHubStatus): boolean {

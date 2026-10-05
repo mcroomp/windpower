@@ -292,13 +292,16 @@ The current staged passive protocol is:
 
 - ACRO/runup with `RAWES_MODE=0`;
 - passive thrust with absolute hold disabled;
-- GUIDED_NOGPS transition;
-- Lua commands zero body rate plus thrust while `RAWES_PEN` is disabled;
+- `ENTER_GUIDED` command: Lua captures the attitude, switches to GUIDED_NOGPS
+  and holds that attitude from the same tick;
 - passive yaw trim remains inhibited;
 - wait for an `ACTIVE` heartbeat;
 - wait for a quiet attitude-rate interval after EKF yaw-alignment events;
-- capture the settled `ATTITUDE_QUATERNION`;
-- send `RAWES_PEN=1` to enable absolute attitude/yaw hold.
+- set `RAWES_MODE=3` and send the `ENTER_PASSIVE` command; Lua captures the
+  settled quaternion and enables absolute attitude/yaw hold.
+
+(Before the 2026-10-05 command cutover these steps used the `RAWES_PEN` and
+`RAWES_YFF` named floats referenced in the historical sections below.)
 
 This is intended to prevent an EKF yaw reset from producing a motor command
 when absolute hold is enabled.
@@ -864,6 +867,46 @@ and output 9 off. This validates the stationary disconnected LinkHub force-arm
 route: passive captures the current orientation without commanding Motor4.
 It does not validate motor direction, ESC response, or behavior under rotor
 torque.
+
+### 2026-10-05 GUIDED-entry level-target window (orientation-dependent)
+
+The GUIDED-entry transient returned in a bounded LinkHub UI run
+(`run passive --force --duration 30`, start ~16:59:27 local) with the airframe
+stationary near `rpy=(-134,-89,-56 deg)`, i.e. close to pitch -90. Journal
+evidence:
+
+- runup complete and `landed_state=IN_AIR` at 39.68; `RAWES_MODE=2` at 39.71;
+  `DO_SET_MODE 20` sent at 39.758; heartbeat mode 20 at 39.797;
+- the first `SET_ATTITUDE_TARGET` was not sent until 39.856, ~100 ms after
+  the mode request. Every streamed quaternion matched the measured attitude
+  within `0.04..0.17 deg`;
+- ArduPilot's `ATTITUDE_TARGET` pitch moved from -89 toward level
+  (-85, -83, -81.8 deg) during that window, then reversed after the stream
+  arrived. Peak quaternion error was `10.5 deg` at 40.09 and decayed below
+  `5 deg` by 40.48;
+- S1/S2/S3 swung from 1465 to about `1369 / 1502 / 1551 us` (~95 us) and
+  settled within ~1.5 s. The body did not move.
+
+Cause (Copter source, `ModeGuided::angle_control_start()`): GUIDED entry
+initialises `guided_angle_state.attitude_quat` to **level roll/pitch at the
+current target yaw**, and `handle_message_set_attitude_target()` discards
+`SET_ATTITUDE_TARGET` while not in a guided mode. Any delay between the mode
+change and the first ground target therefore commands level, and input shaping
+carries momentum after the real target arrives. The earlier "no transient"
+validation (`run_passive_20261005_072814`) was taken near level
+(`rpy~(0.8,-0.6,..)`), where the level init target coincides with the actual
+attitude, so it did not exercise this path. Both calibrate and the LinkHub UI
+change mode first and stream afterward, so both are affected.
+
+**Fix (pending hardware verification).** Ground no longer sends `DO_SET_MODE`
+for this transition. It sends the Lua-handled `ENTER_GUIDED` COMMAND_LONG;
+in one scripting tick Lua captures `ahrs:get_quaternion()`, calls
+`vehicle:set_mode(20)`, and immediately installs that attitude with
+`set_target_angle_and_rate_and_throttle()`, so the level init target is
+replaced before the attitude controller runs on it (re-sent at 20 Hz until
+`ENTER_PASSIVE`). Verify on the bench at the nose-down attitude: around mode-20
+entry, `ATTITUDE_TARGET` must stay at the measured attitude instead of moving
+toward level, and S1/S2/S3 must not show the ~95 us swing.
 
 ## Changes already made
 

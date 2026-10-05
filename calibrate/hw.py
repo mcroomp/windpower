@@ -14,6 +14,7 @@ from linkhub_client.messages import ParamSet, ServoOutputRaw
 
 from .constants import (
     LinkHubClient,
+    LinkHubGenerationChanged,
     CommandAck,
     EscTelemetry,
     PidTuning,
@@ -33,7 +34,6 @@ from .constants import (
     _AZ_S1, _AZ_S2, _AZ_S3,
     _COPTER_MODES, _SYS_STATUS, _LUA_MODES,
     _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES,
-    _FALLBACK_BAUDS,
 )
 from .messages import read_one
 
@@ -667,6 +667,11 @@ def _arm(session: LinkHubClient, force: bool = False,
     """
     print("  Sending arm command ...")
     cursor = session.current_cursor()
+    # Arming should never cause a reboot, so any generation change mid-wait
+    # (service restart, serial reconnect, vehicle reboot) means something
+    # unexpected happened -- abort rather than keep polling a link that is
+    # no longer trustworthy.
+    generation = session.generation
     param2 = 21196.0 if force else 0.0
     result = session.command(
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
@@ -681,9 +686,14 @@ def _arm(session: LinkHubClient, force: bool = False,
     deadline = time.monotonic() + timeout
     armed = False
     while time.monotonic() < deadline:
-        msg, cursor = read_one(
-            session, cursor, ["HEARTBEAT", "STATUSTEXT"], wait=0.5,
-        )
+        try:
+            msg, cursor = read_one(
+                session, cursor, ["HEARTBEAT", "STATUSTEXT"], wait=0.5,
+                expected_generation=generation,
+            )
+        except LinkHubGenerationChanged as exc:
+            print(f"  [FAIL] Aborting arm: {exc}")
+            return False
         if msg is None:
             continue
         match decode_message(msg):
@@ -711,6 +721,11 @@ def _disarm(session: LinkHubClient, timeout: float = 10.0,
     """Send disarm command. Returns True if vehicle confirms disarmed."""
     print("  Sending disarm command ...")
     cursor = session.current_cursor()
+    # Disarming does not itself trigger a reboot (that happens afterward, as a
+    # separate documented step -- see _cmd_disarm), so a generation change
+    # while still waiting for the disarmed heartbeat is just as unexpected as
+    # during arm, and is handled the same way.
+    generation = session.generation
     param2 = 21196.0 if force else 0.0
     result = session.command(
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
@@ -723,9 +738,14 @@ def _disarm(session: LinkHubClient, timeout: float = 10.0,
     print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        msg, cursor = read_one(
-            session, cursor, ["HEARTBEAT", "STATUSTEXT"], wait=1.0,
-        )
+        try:
+            msg, cursor = read_one(
+                session, cursor, ["HEARTBEAT", "STATUSTEXT"], wait=1.0,
+                expected_generation=generation,
+            )
+        except LinkHubGenerationChanged as exc:
+            print(f"  [FAIL] Aborting disarm: {exc}")
+            return False
         if msg is None:
             continue
         match decode_message(msg):

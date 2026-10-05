@@ -1,20 +1,10 @@
 import type { LinkHubApi } from "./api";
+import { compareConfig, configSources, configTargets, matchesTarget } from "./config";
+import { formatCopterMode } from "./modes";
 import { parseRunPassive, type PassiveController } from "./passive";
 import { decodeH3Swashplate } from "./swashplate";
 import type { TelemetryStore } from "./telemetry";
-
-const MODES: Record<number, string> = {
-  0: "STABILIZE",
-  1: "ACRO",
-  2: "ALT_HOLD",
-  3: "AUTO",
-  4: "GUIDED",
-  5: "LOITER",
-  6: "RTL",
-  9: "LAND",
-  16: "POSHOLD",
-  20: "GUIDED_NOGPS",
-};
+import type { ParameterResult } from "./types";
 
 const STATUS_PARAMETERS = [
   "FRAME_CLASS",
@@ -55,7 +45,7 @@ export class Terminal {
     });
     input.addEventListener("keydown", (event) => this.keyDown(event));
     this.write("RAWES LinkHub UI");
-    this.write("Commands: status, run passive [options], stop, help");
+    this.write("Commands: status, config check|apply, run passive [options], stop, help");
     input.focus();
   }
 
@@ -78,6 +68,8 @@ export class Terminal {
         await this.passive.start(parseRunPassive(tokens.slice(2)));
       } else if (tokens[0] === "stop" && tokens.length === 1) {
         await this.passive.stop();
+      } else if (tokens[0] === "config") {
+        await this.config(tokens.slice(1));
       } else if (tokens[0] === "help") {
         this.help();
       } else {
@@ -97,7 +89,7 @@ export class Terminal {
     this.write(`  connected  ${status.connected ? "yes" : "no"}`);
     this.write(`  generation ${status.generation}`);
     this.write(`  armed     ${armed ? "YES" : "no"}`);
-    this.write(`  mode      ${MODES[status.custom_mode] ?? `MODE_${status.custom_mode}`}`);
+    this.write(`  mode      ${formatCopterMode(status.custom_mode)}`);
     this.write(`  RX/TX     ${status.received_messages} / ${status.transmitted_messages}`);
 
     const battery = this.telemetry.get("BATTERY_STATUS");
@@ -168,8 +160,70 @@ export class Terminal {
     });
   }
 
+  private async config(args: string[]): Promise<void> {
+    const [sub, ...options] = args;
+    if ((sub !== "check" && sub !== "apply") || options.some((option) => option !== "--all")) {
+      throw new Error("Usage: config check [--all]  OR  config apply [--all]");
+    }
+    const apply = sub === "apply";
+    const all = options.includes("--all");
+    if (apply) {
+      const status = await this.api.status();
+      if (status.base_mode & 128) {
+        throw new Error("config apply refused: vehicle is ARMED");
+      }
+      if (this.passive.phase !== "idle") {
+        throw new Error("config apply refused: a passive run is active");
+      }
+    }
+
+    const targets = configTargets(all);
+    this.write(`CONFIG ${apply ? "APPLY" : "CHECK"}  (${all ? "all shared + hardware defaults" : "RAWES common + hardware overrides"})`);
+    configSources(all).forEach((source) => this.write(`  source ${source}`));
+    this.write(`  reading ${targets.size} target parameters from vehicle…`);
+    const rows = compareConfig(targets, await this.api.listParameters());
+    const diffs = rows.filter((row) => row.status === "diff");
+    const missing = rows.filter((row) => row.status === "missing");
+
+    let verified = new Map<string, ParameterResult>();
+    if (apply && diffs.length > 0) {
+      verified = await this.api.setParameters(diffs.map((row) => ({
+        name: row.name,
+        value: row.expected,
+        type: row.type as number,
+      })));
+    }
+
+    const format = (value: number | undefined) =>
+      value === undefined ? "n/a" : String(Number(value.toPrecision(6)));
+    let failed = missing.length;
+    for (const row of diffs) {
+      const line = `  ${row.name.padEnd(22)} expected ${format(row.expected).padStart(10)}  actual ${format(row.actual).padStart(10)}`;
+      if (!apply) {
+        this.write(`${line}  DIFF`, "error");
+      } else if (matchesTarget(verified.get(row.name)?.value, row.expected)) {
+        this.write(`${line}  -> SET`);
+      } else {
+        this.write(`${line}  FAIL verification mismatch`, "error");
+        failed += 1;
+      }
+    }
+    for (const row of missing) {
+      this.write(`  ${row.name.padEnd(22)} expected ${format(row.expected).padStart(10)}  not found on vehicle`, "error");
+    }
+    const okCount = rows.length - diffs.length - missing.length;
+    this.write(`  ${okCount} OK, ${diffs.length} differ, ${missing.length} missing`);
+    if (!apply && diffs.length > 0) {
+      this.write("  run 'config apply' to write the differences");
+    } else if (apply && diffs.length > 0 && failed === 0) {
+      this.write("  applied; reboot if any changed parameter is boot-time only");
+    }
+  }
+
   private help(): void {
     this.write("status");
+    this.write("config check [--all]   compare vehicle params with repo defaults");
+    this.write("config apply [--all]   write differing params (disarmed only)");
     this.write("run passive [--force] [--duration S] [--trim thr=0.342]");
     this.write("            [--roll DEG] [--pitch DEG] [--yaw DEG]");
     this.write("stop");

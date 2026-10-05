@@ -355,6 +355,21 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_PIT | [-1..1] | Latched ACRO-manual pitch input. Positive is ArduPilot positive pitch; the calibration Up arrow increases it. |
 | RAWES_COL | [0..1] | Latched ACRO-manual collective input using RC3 MIN/MAX and reversal. |
 
+**Command inputs (ground → Lua, via `COMMAND_LONG`):** one-shot actions use
+script-handled MAVLink commands instead of NAMED_VALUE_FLOAT. rawes.lua calls
+`mavlink:block_command(id)` so ArduPilot's GCS command handler skips them
+(no autopilot ACK), receives the COMMAND_LONG through its rx queue, and sends
+the single `COMMAND_ACK` itself on the receiving channel. Ground clients
+retry with an incremented `confirmation`; Lua treats a retry of an already
+completed command as ACCEPTED without repeating the side effect. Rejections
+also emit `RAWES cmd <id> rejected: <reason>` STATUSTEXT. IDs live in
+`groundstation/rawes_modes.py` (`CMD_*`) and `linkhub-ui/src/passive.ts`.
+
+| Command | ID | Params | Lua action | Gate (else DENIED; set_mode failure → FAILED) |
+|---|---|---|---|---|
+| ENTER_GUIDED | 31010 (`MAV_CMD_USER_1`) | none | Captures the current AHRS quaternion, calls `vehicle:set_mode(GUIDED_NOGPS)` and installs that attitude + IC thrust in the same tick, then re-sends it at 20 Hz (guided-entry hold) until ENTER_PASSIVE, disarm, or a mode other than 2/3. This removes the level-target transient that `ModeGuided::angle_control_start()` would otherwise command before the first ground target arrives. | armed, `RAWES_MODE=2`, IC thrust seeded, AHRS healthy |
+| ENTER_PASSIVE | 31011 (`MAV_CMD_USER_2`) | param1 = yaw-trim seed [0, `RAWES_YFF_MAX`]; negative = adaptive observer | Captures the passive quaternion anchor (§4.2b), enables passive hold and ends the guided-entry hold. | `RAWES_MODE=3`, AHRS healthy |
+
 **Named int inputs (ground → Lua, via `gcs.send_message(NamedValueInt(...))`, one-shot anchor location):**
 
 | Name | Value | Purpose |
@@ -376,8 +391,8 @@ altitude hold (see `_try_resolve_anchor()` in rawes.lua).
 with `1` (the prior default) multiple back-to-back NAMED_VALUE_FLOATs sent
 by the ground get dropped — only the first survives until the next
 update() drains it.  20 is safe for the typical ~5 NVFs/tick burst.
-Both NAMED_VALUE_FLOAT (msgid 251) and NAMED_VALUE_INT (msgid 252) are
-registered and share this one queue; the drain loop peeks the 3-byte msgid
+NAMED_VALUE_FLOAT (msgid 251), NAMED_VALUE_INT (msgid 252) and
+COMMAND_LONG (msgid 76) are registered and share this one queue; the drain loop peeks the 3-byte msgid
 at byte offset 10 (`string.unpack("<I3", raw, 10)`) to dispatch each message.
 
 `_nv_floats` dict resets to `{}` on every mode change. `_nv_ints` (anchor) is
@@ -417,19 +432,20 @@ Armed-but-quiet mode used during the kinematic hold/release of stack tests.
 The vehicle stays armed (motor interlock ch8 high) and does **not** write
 swashplate channels directly or run body_z/altitude/winch guidance.
 
-**Ground-owned capture gate.** Calibration captures the ACRO attitude before
-the temporary landed-state-clearing collective. After entering GUIDED_NOGPS it
-streams that quaternion, zero body rates, and normalized thrust through
-`SET_ATTITUDE_TARGET` with `GUID_OPTIONS` bit 3 set. Calibration qualifies
-active mode, estimator events, telemetry freshness, body-rate threshold, and
-continuous quiet duration. These policies are tunable without a Lua upload
-(`--settle-rate-deg-s`, `--settle-time`, `--settle-timeout`).
+**Ground-owned capture gate.** After the temporary landed-state-clearing
+collective, ground sends the ENTER_GUIDED command. Lua switches to
+GUIDED_NOGPS and holds the attitude it captured in that same tick (see the
+command table above), so there is no window in which ArduPilot's level entry
+target is active. Calibration then qualifies active mode, estimator events,
+telemetry freshness, body-rate threshold, and continuous quiet duration. These
+policies are tunable without a Lua upload (`--settle-rate-deg-s`,
+`--settle-time`, `--settle-timeout`).
 
-**Lua-owned quaternion anchor.** On `RAWES_PEN=1`, Lua performs a final AHRS
-health/quaternion-validity check and captures `ahrs:get_quaternion()` once while
-still in ACRO-manual RAWES mode. Ground then selects `RAWES_MODE=3` and keeps
-streaming the same MAVLink target until Lua confirms both capture and mode
-entry. Ground sends complete relative state through:
+**Lua-owned quaternion anchor.** Ground sets `RAWES_MODE=3` (the guided-entry
+hold keeps streaming) and then sends ENTER_PASSIVE. Lua performs a final AHRS
+health/quaternion-validity check, captures `ahrs:get_quaternion()` once,
+enables passive hold, and acknowledges the command. Ground sends complete
+relative state through:
 
 - `RAWES_ROFF` — roll offset [rad];
 - `RAWES_POFF` — pitch offset [rad];
@@ -447,7 +463,7 @@ uses the passive collective to clear landed state. Mode 3 changes RC1-RC4 to
 neutral roll, pitch, collective, and yaw before its first steady
 `vehicle:set_target_*()` call, and keeps those overrides active in GUIDED_NOGPS.
 
-**Yaw observer.** Passive yaw trim remains inhibited before `RAWES_PEN`.
+**Yaw observer.** Passive yaw trim remains inhibited before ENTER_PASSIVE.
 After the fixed anchor is active, `run_yaw_trim()` may operate alongside the
 angle hold and reads actual SERVO9 output via
 `SRV_Channels:get_output_pwm(36)` (see §5.2).
@@ -574,7 +590,7 @@ Actuator:   anti-rotation motor on output 9 (AUX 1)
 ```
 
 During the LinkHub UI stationary passive bench route, ground sends
-`RAWES_YFF=0` before `RAWES_PEN=1`. Lua holds that explicit trim seed instead
+ENTER_PASSIVE with param1 = 0. Lua holds that explicit trim seed instead
 of adapting from a disconnected actuator, while continuing to publish the
 live applied Motor4 readback as `YFF_U`. A 2026-10-05 disconnected acceptance
 run measured `YFF_T=0` and `YFF_U=0` for all 59 passive-hold samples.

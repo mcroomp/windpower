@@ -10,12 +10,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from serial.tools import list_ports
-
-from .constants import _FALLBACK_BAUDS, _REPO_ROOT
+from .constants import _REPO_ROOT
 
 _DEFAULT_SERVER = "http://127.0.0.1:8999"
-_DEFAULT_HEARTBEAT_TIMEOUT_S = 30.0
+# LinkHub scans every serial port against every candidate baud rate (5 by
+# default) at up to 3 s per probe, so the wait here must cover a full sweep,
+# not just one candidate.
+_DEFAULT_HEARTBEAT_TIMEOUT_S = 60.0
 
 
 def _service_status(server: str, path: str) -> int | None:
@@ -50,15 +51,11 @@ def _linkhub_binary() -> Path:
     return binary
 
 
-def _connection_candidates(connection: str | None, baud: int | None) -> list[tuple[str, int]]:
-    if connection:
-        return [(connection, baud or 115_200)]
-    ports = sorted(
-        list_ports.comports(),
-        key=lambda port: (port.vid is None, port.device),
-    )
-    bauds = (baud,) if baud else _FALLBACK_BAUDS
-    return [(port.device, candidate_baud) for port in ports for candidate_baud in bauds]
+def _connection_label(connection: str | None, baud: int | None) -> str:
+    label = connection or "auto"
+    if baud:
+        label += f"@{baud}"
+    return label
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
@@ -72,22 +69,22 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=5)
 
 
-def _start_candidate(
-    connection: str,
-    baud: int,
+def _start_linkhub(
+    connection: str | None,
+    baud: int | None,
     *,
     motor_name_prefix: str | None,
 ) -> subprocess.Popen[bytes]:
     command = [
         str(_linkhub_binary()),
         "serve",
-        "--connection",
-        connection,
-        "--baud",
-        str(baud),
         "--data-dir",
         str(Path(_REPO_ROOT, "simulation", "logs", "linkhub")),
     ]
+    if connection:
+        command.extend(("--connection", connection))
+    if baud:
+        command.extend(("--baud", str(baud)))
     if motor_name_prefix:
         command.extend(("--motor-name-prefix", motor_name_prefix))
     return subprocess.Popen(command, cwd=_REPO_ROOT)
@@ -113,45 +110,36 @@ def ensure_linkhub(
             f"{_DEFAULT_SERVER}; start the configured remote server explicitly"
         )
 
-    candidates = _connection_candidates(connection, baud)
-    if not candidates:
-        raise RuntimeError("no serial ports were found for LinkHub")
-
-    failures: list[str] = []
-    process: subprocess.Popen[bytes] | None = None
+    # LinkHub itself discovers the serial port: `connection`/`baud` only
+    # restrict which candidates it scans (unset means scan everything), and
+    # it keeps rescanning on its own if the link drops. Not being connected
+    # yet is an ordinary state here, not a failure, so we just wait.
+    print(f"Starting LinkHub on {_connection_label(connection, baud)} ...")
+    process = _start_linkhub(connection, baud, motor_name_prefix=motor_name_prefix)
     try:
-        for candidate, candidate_baud in candidates:
-            print(f"Starting LinkHub on {candidate} at {candidate_baud} baud ...")
-            process = _start_candidate(
-                candidate,
-                candidate_baud,
-                motor_name_prefix=motor_name_prefix,
-            )
-            deadline = time.monotonic() + heartbeat_timeout
-            while time.monotonic() < deadline:
-                if process.poll() is not None:
-                    failures.append(
-                        f"{candidate}@{candidate_baud}: exited with {process.returncode}"
-                    )
-                    break
-                if _service_status(server, "/health/ready") == 200:
-                    print(f"LinkHub connected on {candidate} at {candidate_baud} baud.")
-                    yield
-                    return
-                time.sleep(0.1)
-            else:
-                status = _read_link_status(server)
-                failures.append(
-                    f"{candidate}@{candidate_baud}: "
-                    f"{status.get('error') or 'heartbeat timeout'}"
+        deadline = time.monotonic() + heartbeat_timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"LinkHub exited with {process.returncode} before finding a Pixhawk"
                 )
-            _stop_process(process)
-            process = None
+            if _service_status(server, "/health/ready") == 200:
+                status = _read_link_status(server)
+                port, found_baud = status.get("port"), status.get("baud")
+                if port and found_baud:
+                    print(f"LinkHub connected on {port} at {found_baud} baud.")
+                else:
+                    print("LinkHub connected.")
+                yield
+                return
+            time.sleep(0.1)
+        status = _read_link_status(server)
+        raise RuntimeError(
+            "LinkHub could not find a Pixhawk: "
+            + (status.get("error") or "heartbeat timeout")
+        )
     finally:
-        if process is not None:
-            _stop_process(process)
-
-    raise RuntimeError("LinkHub could not find a Pixhawk: " + "; ".join(failures))
+        _stop_process(process)
 
 
 def _read_link_status(server: str) -> dict[str, object]:

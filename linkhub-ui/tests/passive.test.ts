@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 
+import luaSource from "../../scripts/rawes.lua?raw";
 import {
+  CMD_ENTER_GUIDED,
+  CMD_ENTER_PASSIVE,
   PASSIVE_TELEMETRY_RATES,
   PASSIVE_YAW_TRIM_SEED,
   parseRunPassive,
 } from "../src/passive";
+
+describe("Lua command IDs", () => {
+  it("match rawes.lua", () => {
+    expect(luaSource).toMatch(new RegExp(`MAV_CMD_RAWES_ENTER_GUIDED = ${CMD_ENTER_GUIDED}\\b`));
+    expect(luaSource).toMatch(new RegExp(`MAV_CMD_RAWES_ENTER_PASSIVE = ${CMD_ENTER_PASSIVE}\\b`));
+  });
+});
 
 describe("parseRunPassive", () => {
   it("uses production passive defaults", () => {

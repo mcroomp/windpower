@@ -102,6 +102,11 @@ from linkhub_client.messages import (
     SetAttitudeTarget,
 )
 from linkhub_client.client import LinkHubClient
+from groundstation.rawes_modes import (
+    CMD_ENTER_PASSIVE,
+    enter_passive_params,
+    send_rawes_command,
+)
 from simulation.mediator_events import MediatorEventLog
 from simulation.ic import load_ic_dict, IC_JSON_PATH
 
@@ -1922,7 +1927,7 @@ _STANDARD_DDFP_YAW_PARAMS = ParamSetup({
 # mode overlay.  Used as base_params (replaces the parm chain) for the compass-yaw
 # torque rigs.  Yaw PID / actuator config comes ONLY from _STANDARD_DDFP_YAW_PARAMS.
 _BASE_TORQUE_BOOT_PARAMS = _STANDARD_DDFP_YAW_PARAMS.merge(ParamSetup({
-    "SIM_RATE_HZ": 400,
+    "SIM_RATE_HZ": 1200,
     # Boot directly into GUIDED_NOGPS (mode 20) to keep mode usage consistent
     # across flight and torque stacks.
     "INITIAL_MODE":     20,
@@ -1964,7 +1969,6 @@ _IC_TORQUE_YAW_PARAMS = ParamSetup({
     "H_YAW_TRIM":       0.02,   # not set by the common file (AP default is 0)
     "ATC_RAT_RLL_IMAX": 0.0,
     "ATC_RAT_PIT_IMAX": 0.0,
-    "FS_CRASH_CHECK":   0,      # observer needs time to converge; yaw angle may deviate temporarily
 })
 
 # Extra params for Lua torque fixtures.
@@ -2063,7 +2067,7 @@ def _torque_stack(
     passive_init           : if True, adopt the flight GUIDED_NOGPS init technique:
                              install rawes.lua, boot in MODE_PASSIVE (RAWES_MODE=3),
                              seed thrust plus relative attitude offsets, then send
-                             RAWES_PEN to capture the live AHRS anchor before arming.
+                             ENTER_PASSIVE to capture the live AHRS anchor before arming.
                              The EKF pre-arm attitude is seeded from that same attitude.
     passive_thrust          : IC thrust [0..1] seeded to MODE_PASSIVE when passive_init.
     passive_roll_rad       : roll offset [rad] relative to the captured AHRS anchor.
@@ -2293,7 +2297,7 @@ def _torque_stack(
                 gcs.send_message(NamedValueFloat("RAWES_POFF", float(passive_pitch_rad)))
                 if passive_yaw_rad is not None:
                     gcs.send_message(NamedValueFloat("RAWES_YOFF", float(passive_yaw_rad)))
-                gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+                send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
                 log.info(
                     "PASSIVE seed: RAWES_THR=%.3f, ROFF=%+.4f, POFF=%+.4f, YOFF=%s; pre-arm yaw=%.1f deg",
                     passive_thrust, passive_roll_rad, passive_pitch_rad,

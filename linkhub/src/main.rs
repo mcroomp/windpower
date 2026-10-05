@@ -2,6 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
 use linkhub::{
+    discovery::{self, DiscoveryConfig},
     http,
     journal::{JournalConfig, JournalHandle},
     mavlink::{MavlinkLinkConfig, start_link},
@@ -34,7 +35,13 @@ enum Command {
         typescript_output: Option<PathBuf>,
     },
     Serve {
-        #[arg(long, env = "LINKHUB_CONNECTION")]
+        /// MAVLink endpoint: `tcp:HOST:PORT` for SITL, or `auto` (the
+        /// default) to discover a serial port by scanning for a MAVLink
+        /// heartbeat. Any other value is treated as a serial port name that
+        /// *restricts* which port is scanned (e.g. `COM7`); the heartbeat
+        /// probe still runs, and the restricted port is still rescanned on
+        /// every reconnect.
+        #[arg(long, env = "LINKHUB_CONNECTION", default_value = "auto")]
         connection: String,
         #[arg(long, default_value = "127.0.0.1")]
         listen: String,
@@ -44,9 +51,13 @@ enum Command {
         data_dir: PathBuf,
         #[arg(long, env = "LINKHUB_STATIC_DIR")]
         static_dir: Option<PathBuf>,
+        /// Send `Cache-Control: no-store` on every response so browsers
+        /// always load the latest rebuilt UI.
+        #[arg(long)]
+        no_cache: bool,
         #[arg(long)]
         run_id: Option<Uuid>,
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 60_000)]
         flush_ms: u64,
         #[arg(long, default_value_t = 4)]
         chunk_mb: usize,
@@ -54,8 +65,17 @@ enum Command {
         source_system: u8,
         #[arg(long, default_value_t = 0)]
         source_component: u8,
-        #[arg(long, default_value_t = 115_200)]
-        baud: u32,
+        /// Restrict discovery to a single baud rate instead of scanning
+        /// `--discovery-bauds`.
+        #[arg(long)]
+        baud: Option<u32>,
+        /// Baud rates probed, in order, while discovery scans a serial port.
+        /// Ignored when `--baud` is set.
+        #[arg(long, default_value = "115200,57600,38400,19200,9600")]
+        discovery_bauds: String,
+        /// Time each port/baud candidate is given to deliver a heartbeat.
+        #[arg(long, default_value_t = 3_000)]
+        discovery_timeout_ms: u64,
         #[arg(long)]
         motor_name_prefix: Option<String>,
         #[arg(long, default_value_t = 10_000)]
@@ -110,12 +130,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             data_dir,
             static_dir,
+            no_cache,
             run_id,
             flush_ms,
             chunk_mb,
             source_system,
             source_component,
             baud,
+            discovery_bauds,
+            discovery_timeout_ms,
             motor_name_prefix,
             motor_scan_timeout_ms,
             motor_heartbeat_ms,
@@ -156,7 +179,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             journal.append_diagnostic(startup_event(run_id)).await?;
 
-            let mut link_config = link_config(&connection, baud)?;
+            let mut link_config = link_config(
+                &connection,
+                baud,
+                &discovery_bauds,
+                Duration::from_millis(discovery_timeout_ms),
+            )?;
             link_config.source_system = source_system;
             link_config.source_component = source_component;
             let (link, link_task) = start_link(link_config, journal.clone());
@@ -178,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(link),
                     motor.clone(),
                     static_dir,
+                    no_cache,
                 ),
             )
             .with_graceful_shutdown(shutdown_signal())
@@ -230,7 +259,20 @@ async fn configure_motor(
     Ok(None)
 }
 
-fn link_config(connection: &str, baud: u32) -> Result<MavlinkLinkConfig, String> {
+/// Build the MAVLink link configuration for `serve`.
+///
+/// `connection` is `auto` (discover any serial port), `tcp:HOST:PORT` (SITL),
+/// or any other value, which is treated as a serial port name that
+/// *restricts* discovery to that one port. `baud`, if set, likewise
+/// restricts discovery to a single baud rate instead of scanning
+/// `discovery_bauds`. In every serial case the link still confirms a live
+/// MAVLink heartbeat before use, and rescans from scratch on every reconnect.
+fn link_config(
+    connection: &str,
+    baud: Option<u32>,
+    discovery_bauds: &str,
+    probe_timeout: Duration,
+) -> Result<MavlinkLinkConfig, String> {
     if let Some(address) = connection.strip_prefix("tcp:") {
         return address
             .parse()
@@ -240,11 +282,24 @@ fn link_config(connection: &str, baud: u32) -> Result<MavlinkLinkConfig, String>
     if let Ok(address) = connection.parse::<SocketAddr>() {
         return Ok(MavlinkLinkConfig::sitl(address));
     }
-    let port = connection.strip_prefix("serial:").unwrap_or(connection);
-    if port.is_empty() {
-        return Err("serial port must not be empty".to_owned());
-    }
-    Ok(MavlinkLinkConfig::serial(port, baud))
+    let bauds = match baud {
+        Some(baud) => vec![baud],
+        None => discovery::parse_bauds(discovery_bauds)?,
+    };
+    let port_filter = if connection.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        let port = connection.strip_prefix("serial:").unwrap_or(connection);
+        if port.is_empty() {
+            return Err("serial port must not be empty".to_owned());
+        }
+        Some(port.to_owned())
+    };
+    Ok(MavlinkLinkConfig::serial(DiscoveryConfig {
+        port_filter,
+        bauds,
+        probe_timeout,
+    }))
 }
 
 fn startup_event(run_id: Uuid) -> DiagnosticEvent {
@@ -295,19 +350,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_tcp_and_serial_connection_syntax() {
+    fn accepts_tcp_auto_and_restricted_serial_connection_syntax() {
         assert!(matches!(
-            link_config("tcp:127.0.0.1:5760", 115_200)
+            link_config("tcp:127.0.0.1:5760", None, "115200", Duration::from_secs(3))
                 .expect("TCP connection")
                 .transport,
             linkhub::mavlink::MavlinkTransport::Tcp(_)
         ));
         assert!(matches!(
-            link_config("COM4", 115_200)
-                .expect("serial connection")
+            link_config("auto", None, "115200,57600", Duration::from_secs(3))
+                .expect("auto connection")
                 .transport,
-            linkhub::mavlink::MavlinkTransport::Serial { port, baud }
-                if port == "COM4" && baud == 115_200
+            linkhub::mavlink::MavlinkTransport::Serial(discovery)
+                if discovery.port_filter.is_none() && discovery.bauds == [115_200, 57_600]
+        ));
+        assert!(matches!(
+            link_config("COM4", Some(57_600), "115200", Duration::from_secs(3))
+                .expect("restricted serial connection")
+                .transport,
+            linkhub::mavlink::MavlinkTransport::Serial(discovery)
+                if discovery.port_filter.as_deref() == Some("COM4") && discovery.bauds == [57_600]
         ));
     }
 }

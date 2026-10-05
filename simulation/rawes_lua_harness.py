@@ -444,6 +444,44 @@ class RawesLua:
             return
         raise TypeError(f"Unsupported RawesLua message type: {type(msg).__name__}")
 
+    def send_command(
+        self,
+        command: int,
+        params: list[float] | tuple[float, ...] = (),
+        *,
+        confirmation: int = 0,
+        sysid: int = 255,
+        compid: int = 190,
+    ) -> None:
+        """Inject a COMMAND_LONG addressed to the vehicle into the Lua inbox."""
+        values = [float(value) for value in params] + [0.0] * (7 - len(params))
+        payload = struct.pack("<7fHBBB", *values, command, 1, 1, confirmation)
+        header = b"\x00" * 7 + bytes((sysid, compid)) + (76).to_bytes(3, "little")
+        raw = header + payload
+        lua_str = "".join(f"\\x{b:02x}" for b in raw)
+        self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
+
+    @property
+    def command_acks(self) -> list[dict[str, int]]:
+        """COMMAND_ACK messages sent by Lua through mavlink.send_chan."""
+        acks = []
+        sent = self._mock.mavlink_sent
+        for index in range(1, len(sent) + 1):
+            entry = sent[index]
+            if int(entry.msgid) != 77:
+                continue
+            payload = bytes.fromhex(entry.payload_hex)
+            command, result, _, _, target_system, target_component = struct.unpack(
+                "<HBBiBB", payload,
+            )
+            acks.append({
+                "command": command,
+                "result": result,
+                "target_system": target_system,
+                "target_component": target_component,
+            })
+        return acks
+
     def send_named_float(self, name: str, value: float) -> None:
         """Compatibility shim: inject a NAMED_VALUE_FLOAT into the Lua inbox."""
         self.send_message(NamedValueFloat(name, float(value)))

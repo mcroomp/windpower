@@ -64,14 +64,10 @@ def test_default_heartbeat_timeout_tolerates_usb_reboot(monkeypatch) -> None:
     monkeypatch.setattr(calibrate_linkhub.time, "monotonic", monotonic)
     monkeypatch.setattr(calibrate_linkhub.time, "sleep", sleep)
     monkeypatch.setattr(calibrate_linkhub, "_service_status", service_status)
+    monkeypatch.setattr(calibrate_linkhub, "_read_link_status", lambda _server: {})
     monkeypatch.setattr(
         calibrate_linkhub,
-        "_connection_candidates",
-        lambda *_args: [("COM7", 115_200)],
-    )
-    monkeypatch.setattr(
-        calibrate_linkhub,
-        "_start_candidate",
+        "_start_linkhub",
         lambda *_args, **_kwargs: Process(),
     )
     monkeypatch.setattr(

@@ -107,7 +107,8 @@ echo [INFO] Press Ctrl+C to stop.
     --baud "%BAUD%" ^
     --port "%PORT%" ^
     --data-dir "%REPO%\simulation\logs\linkhub" ^
-    --static-dir "%REPO%\linkhub-ui\dist"
+    --static-dir "%REPO%\linkhub-ui\dist" ^
+    --no-cache
 
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" echo ERROR: LinkHub exited with code %EXIT_CODE%.

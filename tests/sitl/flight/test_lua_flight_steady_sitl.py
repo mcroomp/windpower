@@ -63,6 +63,7 @@ import pytest
 pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1800)]
 
 
+from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from tests.sitl.stack_infra import (
     StackContext, dump_startup_diagnostics,
     observe, assert_no_mediator_criticals, get_arducopter_crash_info,
@@ -168,7 +169,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
     gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
-    gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+    send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info(
         "Release seeds (IC-passive init): RAWES_THR=%.3f, RAWES_TEN=%.1f N, "
         "IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s, passive anchor re-captured",

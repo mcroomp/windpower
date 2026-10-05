@@ -33,11 +33,17 @@ ID, and versioned payload. HTTP cursors are opaque encodings of the global
 sequence.
 
 The journal actor is the only sequence allocator and chunk writer. Records
-accumulate in an in-memory chunk. A chunk is encoded as MessagePack and written
-as one immutable `.lhc` file when it reaches the configured record/byte limit
-or flush interval. Losing the active in-memory chunk on a process or machine
-crash is an accepted design tradeoff; LinkHub does not fsync or repair partial
-tail files. A clean shutdown flushes the active chunk.
+accumulate in an in-memory chunk. A chunk is written as one immutable `.lhc`
+file when it reaches the configured record/byte limit (4096 records / 4 MiB)
+or the 60-second flush interval. Live readers never wait for a flush: HTTP
+reads merge flushed chunks with the in-memory chunk. Each file is the magic
+`LHCHNK02`, the minimum and maximum host ingest time (two little-endian `u64`
+nanosecond values), then the MessagePack chunk; time-range reads use this
+header to skip files without decoding them. Files with any other magic are
+rejected rather than skipped. Losing up to one minute of the active in-memory
+chunk on a process or machine crash is an accepted design tradeoff; LinkHub
+does not fsync or repair partial tail files. A clean shutdown flushes the
+active chunk.
 
 For a replay, the actor first fixes one tail sequence and snapshots the active
 chunk; the reader then merges that snapshot with completed chunks through the
@@ -144,10 +150,25 @@ and SITL preserves the run's `linkhub/<run-id>/journal/` directory. New runs do
 not export a duplicate `mavlink.jsonl`.
 
 `/v1/mavlink/status` also exposes `generation = v1:<run-id>:<clock-epoch>`.
-The run ID changes when the service is replaced; the clock epoch changes when
-the MAVLink transport reconnects, including after a vehicle reboot. Browser
-clients use this ETag-like value to invalidate reconstructed command and
-telemetry state. It intentionally does not include the journal cursor.
+The run ID changes when the service is replaced; the clock epoch changes both
+when the MAVLink transport (re)connects -- including after a vehicle reboot --
+and the moment a previously live connection drops, so the token changes as
+soon as the link becomes untrustworthy rather than only once it is
+reacquired. Browser clients use this ETag-like value to invalidate
+reconstructed command and telemetry state. It intentionally does not include
+the journal cursor.
+
+A multi-step sequence that polls for a state transition across several
+requests (e.g. confirming arm/disarm) can pass its captured `generation` as
+`expected_generation` on `GET /v1/mavlink/messages`. LinkHub itself aborts
+that read with `409 generation_changed` the moment its live generation no
+longer matches, instead of returning a batch -- so the caller can stop
+immediately rather than keep polling a link, or a vehicle, it can no longer
+trust. `calibrate`'s arm/disarm sequences (`calibrate/hw.py`) use this so an
+unexpected mid-sequence service restart, serial reconnect, or vehicle reboot
+aborts the sequence instead of silently waiting out its timeout. Do not pass
+`expected_generation` for single, one-shot reads -- they have no state to
+protect.
 
 ## Generated protocol boundary
 
@@ -178,7 +199,13 @@ Python or TypeScript.
 Rate leases remain future work; calibration uses explicit message-rate
 configuration.
 
-## Offline journal query
+## Journal query
+
+For a running LinkHub, prefer the HTTP range query on
+`GET /v1/mavlink/messages` (see `linkhub/README.md`): for example
+`?last_ms=120000&messages=ATTITUDE_TARGET,STATUSTEXT&direction=rx` returns the
+last two minutes without touching files on disk. `linkhub query` remains the
+offline tool for journals of stopped runs.
 
 `linkhub query` reads immutable `.lhc` chunks directly. Pass a journal
 directory, its parent run directory, or a data directory containing exactly

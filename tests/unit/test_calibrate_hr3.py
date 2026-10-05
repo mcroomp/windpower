@@ -175,6 +175,7 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
     class Session:
         _target_system = 1
         _target_component = 1
+        generation = None
 
         def __init__(self):
             self.params = {
@@ -239,6 +240,7 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
     class Session:
         _target_system = 1
         _target_component = 1
+        generation = None
 
         def __init__(self):
             self.params = {

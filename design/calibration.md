@@ -385,14 +385,15 @@ populated once that hold is engaged.
 `run passive` arms and completes heli runup in ACRO with `RAWES_MODE=0`, applies
 neutral cyclic plus passive collective until `EXTENDED_SYS_STATE` confirms that
 Copter's landed state is clear, stages passive thrust with absolute hold
-disabled, and then enters `GUIDED_NOGPS`. The complete startup and safe-off
-sequence is owned by [arming.md](arming.md).
-During this staging phase Lua commands zero body rate plus thrust only; it does
-not send an Euler angle target and passive yaw trim remains inhibited. The
+disabled, and then sends the Lua-handled `ENTER_GUIDED` command; Lua switches to
+`GUIDED_NOGPS` and holds the attitude captured in that same tick. The complete
+startup and safe-off sequence is owned by [arming.md](arming.md); the command
+interface is owned by [flight_stack.md](flight_stack.md).
+During this staging phase passive yaw trim remains inhibited. The
 ground waits for an `ACTIVE` heartbeat, fresh attitude-rate telemetry, and a
-continuous quiet interval after any EKF yaw-alignment event. It then sends
-`RAWES_PEN=1`; Lua captures the onboard AHRS quaternion and enables absolute
-attitude and yaw hold. Ground-side qualification can be tuned per run with
+continuous quiet interval after any EKF yaw-alignment event. It then sets
+`RAWES_MODE=3` and sends `ENTER_PASSIVE`; Lua captures the onboard AHRS
+quaternion, enables absolute attitude and yaw hold, and acknowledges. Ground-side qualification can be tuned per run with
 `--settle-rate-deg-s`, `--settle-time`, and `--settle-timeout` without changing
 or uploading Lua.
 Keyboard offsets are composed relative to the captured
@@ -418,8 +419,8 @@ python -m calibrate --server http://127.0.0.1:8999 run passive --protocol-debug
 This suppresses the 3D window. Before each keyboard command it prints the
 latest actual and target quaternions, quaternion error, and swash PWM, followed
 by every transmitted `NAMED_VALUE_FLOAT`. Relative attitude state is sent as
-`RAWES_ROFF/POFF/YOFF`; `RAWES_PEN` is sent only after the ground qualification
-gate passes. ArduPilot receives angle targets with zero rate feed-forward after
+`RAWES_ROFF/POFF/YOFF`; `ENTER_PASSIVE` is sent only after the ground
+qualification gate passes. ArduPilot receives angle targets with zero rate feed-forward after
 capture and its native attitude/rate loops determine the commanded motion.
 
 For an automatic spinning-hardware exercise, add `--auto-sequence` and select

@@ -55,7 +55,7 @@ runs in its own fresh Docker container, one per test file.
   ArduCopter-heli binary, and LinkHub. An incompatible cached image fails before
   any workers start.
 - `test.sh -n N` treats `N` as an upper bound. On the supported Windows
-  workstation it runs at most two 400 Hz lockstep stacks concurrently; higher
+  workstation it runs at most two lockstep stacks concurrently; higher
   concurrency causes host scheduling stalls and UDP loss rather than useful
   throughput. The LinkHub stress test runs exclusively so its 100 Hz transport
   assertion measures LinkHub instead of contention from another stack.
@@ -63,9 +63,12 @@ runs in its own fresh Docker container, one per test file.
   to pytest's in-process timeout. This catches blocked subprocesses and native
   calls that pytest cannot interrupt. Override it with
   `RAWES_STACK_TEST_TIMEOUT_S=<seconds>` for an intentional long diagnostic run.
-- The physical mediator and ArduPilot remain in 400 Hz lockstep, while the
+- The physical mediator and ArduPilot run in lockstep at `SIM_RATE_HZ=1200`
+  (three physics frames per 400 Hz control loop). Do not lower it to 400: the
+  SITL scheduler then holds its semaphore for the whole frame and starves Lua
+  (see `design/arming.md`, "SITL scripting-thread starvation"). The
   diagnostic physics CSV is sampled at 100 Hz to match the fastest MAVLink
-  observations without serializing four duplicate rows per observation.
+  observations.
 - Pass `--profile-lockstep` to log five-second timing windows split into
   ArduPilot receive wait, mediator step, and UDP send time.
 - Stack test logs land in `simulation/logs/{test_name}/` —

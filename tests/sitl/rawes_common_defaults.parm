@@ -36,6 +36,11 @@ ATC_ANGLE_BOOST   0
 # disable auto-leveling (physical tilt ~65 deg)
 ACRO_TRAINER      0
 
+# Disable ArduCopter crash detection. It disarms when attitude error >30 deg
+# with low acceleration for ~2 s; a tethered, inverted-capable rotor kite on a
+# bench or tether legitimately sits far from its controller target while still.
+FS_CRASH_CHECK    0
+
 # EKF3 baro/GPS altitude blending: baro is the primary vertical position source
 # (EK3_SRC1_POSZ default = Baro), but baro has no absolute reference and drifts
 # with weather-driven QNH changes over long flights (~8-9 m per hPa). GPS

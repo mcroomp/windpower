@@ -19,6 +19,38 @@ class LinkHubError(RuntimeError):
     pass
 
 
+class LinkHubGenerationChanged(LinkHubError):
+    """LinkHub's generation token changed mid-sequence.
+
+    The `generation` token (LinkHub run ID + MAVLink clock epoch) changes
+    whenever the service restarts, the serial link reconnects, or the vehicle
+    reboots. A multi-step sequence that polls for a state transition (e.g.
+    confirming arm/disarm) cannot trust that transition if this happens
+    part-way through, so it should stop and surface this instead of
+    continuing to poll a possibly different vehicle/boot.
+    """
+
+    def __init__(
+        self,
+        baseline: str | None,
+        current: str | None,
+        *,
+        cursor: str | None = None,
+    ) -> None:
+        self.baseline = baseline
+        self.current = current
+        # The journal cursor at the moment the change was observed, so a
+        # caller that was reading messages against the old `baseline` can
+        # skip straight to the tail instead of draining a backlog that may
+        # now belong to a different vehicle boot.
+        self.cursor = cursor
+        super().__init__(
+            f"LinkHub generation changed ({baseline!r} -> {current!r}): the "
+            "service restarted, the serial link reconnected, or the vehicle "
+            "rebooted mid-sequence"
+        )
+
+
 class WallClock:
     pass
 
@@ -47,6 +79,7 @@ class LinkHubClient:
         self._base_url = address.rstrip("/")
         self._target_system = 1
         self._target_component = 1
+        self._generation: str | None = None
 
     def connect(self, timeout: float = 15.0) -> None:
         deadline = time.monotonic() + timeout
@@ -68,6 +101,7 @@ class LinkHubClient:
                 self._target_component = int(
                     1 if target_component is None else target_component
                 )
+                self._generation = status.get("generation")
                 return
             except (OSError, LinkHubError) as exc:
                 last_error = exc
@@ -78,6 +112,20 @@ class LinkHubClient:
 
     def close(self) -> None:
         pass
+
+    @property
+    def generation(self) -> str | None:
+        """Opaque LinkHub generation token captured at `connect()` time.
+
+        Changes whenever LinkHub's run or MAVLink link is replaced (service
+        restart, serial reconnect, or vehicle reboot); see `vehicle_status()`.
+        Pass this as `expected_generation` to `read_messages()`/`read_one()`
+        inside a multi-step sequence (e.g. confirming arm/disarm) so LinkHub
+        itself aborts the read with `LinkHubGenerationChanged` the moment it
+        no longer matches, instead of continuing to poll a link that is no
+        longer trustworthy. Leave it unset for single, one-shot reads.
+        """
+        return self._generation
 
     def linkhub_status(self) -> dict[str, Any]:
         """Return LinkHub service, run, journal, and transport status."""
@@ -366,6 +414,7 @@ class LinkHubClient:
         wait: float = 0.0,
         limit: int = 1_000,
         collapse: bool = False,
+        expected_generation: str | None = None,
     ) -> MessageBatch:
         records, next_cursor, next_clock = self._read_telemetry_batch(
             after,
@@ -374,6 +423,7 @@ class LinkHubClient:
             wait=wait,
             limit=limit,
             collapse=collapse,
+            expected_generation=expected_generation,
         )
         return MessageBatch(
             messages=tuple(_decode_record(record) for record in records),
@@ -544,6 +594,7 @@ class LinkHubClient:
         limit: int = 1_000,
         collapse: bool = False,
         request_timeout: float | None = None,
+        expected_generation: str | None = None,
     ) -> tuple[list[TelemetryRecord], str, SimClock]:
         if wait < 0.0:
             raise ValueError("wait must be non-negative")
@@ -561,6 +612,8 @@ class LinkHubClient:
             query["messages"] = ",".join(sorted(name.upper() for name in names))
         if direction is not None:
             query["direction"] = direction
+        if expected_generation is not None:
+            query["expected_generation"] = expected_generation
         result = self._request_json(
             "GET",
             "/v1/mavlink/messages?" + urllib.parse.urlencode(query),
@@ -598,7 +651,14 @@ class LinkHubClient:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            raise LinkHubError(_http_error_message(exc)) from exc
+            payload = _http_error_payload(exc)
+            if payload.get("error") == "generation_changed":
+                raise LinkHubGenerationChanged(
+                    payload.get("expected_generation"),
+                    payload.get("current_generation"),
+                    cursor=payload.get("cursor"),
+                ) from exc
+            raise LinkHubError(_http_error_message(payload, exc)) from exc
 
 class LinkHubMotorController:
     """Logical motor client backed by LinkHub."""
@@ -685,9 +745,14 @@ def _decode_record(record: TelemetryRecord) -> Message | RawMessage:
     return decode_message(RawMessage(record.message, dict(record.fields)))
 
 
-def _http_error_message(exc: urllib.error.HTTPError) -> str:
+def _http_error_payload(exc: urllib.error.HTTPError) -> dict[str, Any]:
     try:
-        error = json.load(exc)
-        return str(error.get("message") or error.get("error"))
+        payload = json.load(exc)
     except (OSError, ValueError, TypeError, AttributeError):
-        return str(exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _http_error_message(payload: dict[str, Any], exc: urllib.error.HTTPError) -> str:
+    message = payload.get("message") or payload.get("error")
+    return str(message) if message else str(exc)

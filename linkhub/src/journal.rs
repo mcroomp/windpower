@@ -12,6 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
+    io::AsyncReadExt,
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
     time,
@@ -20,8 +21,26 @@ use uuid::Uuid;
 
 use crate::records::{DiagnosticEvent, JournalRecord, RecordPayload, SimClock, SimTimeQuality};
 
-const CHUNK_MAGIC: &[u8; 8] = b"LHCHNK01";
+// Chunk file layout: magic, min ingest ns (u64 LE), max ingest ns (u64 LE),
+// then the MessagePack `Chunk`. The time header lets range reads skip files
+// without decoding them; min/max (not first/last) tolerate wall-clock steps.
+const CHUNK_MAGIC: &[u8; 8] = b"LHCHNK02";
+const CHUNK_HEADER_LEN: usize = CHUNK_MAGIC.len() + 16;
 const CHUNK_VERSION: u16 = 2;
+
+/// Inclusive host-ingest-time window, in wall-clock nanoseconds.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TimeWindow {
+    pub since_ns: Option<u64>,
+    pub until_ns: Option<u64>,
+}
+
+impl TimeWindow {
+    fn overlaps(self, min_ns: u64, max_ns: u64) -> bool {
+        self.since_ns.is_none_or(|since| max_ns >= since)
+            && self.until_ns.is_none_or(|until| min_ns <= until)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct JournalConfig {
@@ -42,7 +61,7 @@ impl JournalConfig {
             run_id,
             max_chunk_bytes: 4 * 1024 * 1024,
             max_chunk_records: 4096,
-            flush_interval: Duration::from_millis(50),
+            flush_interval: Duration::from_secs(60),
             command_capacity: 8192,
             live_capacity: 8192,
         }
@@ -68,6 +87,8 @@ pub enum JournalError {
     Encode(#[from] rmp_serde::encode::Error),
     #[error("journal decoding failed: {0}")]
     Decode(#[from] rmp_serde::decode::Error),
+    #[error("{0} is not a supported LinkHub journal chunk")]
+    UnsupportedChunk(PathBuf),
     #[error("diagnostic event run ID does not match this journal")]
     WrongRun,
 }
@@ -231,9 +252,22 @@ impl JournalHandle {
         after: u64,
         max_records: usize,
     ) -> Result<JournalRead, JournalError> {
+        self.read_window_bounded(after, TimeWindow::default(), max_records)
+            .await
+    }
+
+    /// Like `read_after_bounded`, but skips flushed chunks whose ingest-time
+    /// header lies entirely outside `window`. Records inside a returned chunk
+    /// are not filtered by time; callers apply exact per-record bounds.
+    pub async fn read_window_bounded(
+        &self,
+        after: u64,
+        window: TimeWindow,
+        max_records: usize,
+    ) -> Result<JournalRead, JournalError> {
         assert!(max_records > 0, "max_records must be positive");
         let snapshot = self.snapshot().await?;
-        let mut records = read_flushed_after(&self.directory, after, max_records).await?;
+        let mut records = read_flushed_after(&self.directory, after, window, max_records).await?;
         records.retain(|record| record.sequence <= snapshot.tail);
         let scanned_through = records.last().map_or(after, |record| record.sequence);
         let remaining = max_records.saturating_sub(records.len());
@@ -443,8 +477,20 @@ async fn flush_pending(
     };
     let final_path = chunk_path(&config.directory, first_sequence, last_sequence);
     let temporary_path = final_path.with_extension("lhc.tmp");
-    let mut bytes = Vec::with_capacity(CHUNK_MAGIC.len() + encoded.len());
+    let (min_ns, max_ns) =
+        chunk
+            .records
+            .iter()
+            .fold((u64::MAX, u64::MIN), |(min_ns, max_ns), record| {
+                (
+                    min_ns.min(record.ingest_time_ns),
+                    max_ns.max(record.ingest_time_ns),
+                )
+            });
+    let mut bytes = Vec::with_capacity(CHUNK_HEADER_LEN + encoded.len());
     bytes.extend_from_slice(CHUNK_MAGIC);
+    bytes.extend_from_slice(&min_ns.to_le_bytes());
+    bytes.extend_from_slice(&max_ns.to_le_bytes());
     bytes.extend_from_slice(&encoded);
     let result = async {
         fs::write(&temporary_path, bytes).await?;
@@ -463,6 +509,7 @@ async fn flush_pending(
 async fn read_flushed_after(
     directory: &Path,
     after: u64,
+    window: TimeWindow,
     max_records: usize,
 ) -> Result<Vec<JournalRecord>, JournalError> {
     let mut entries = fs::read_dir(directory).await?;
@@ -480,11 +527,17 @@ async fn read_flushed_after(
         if chunk_last_sequence(&path).is_some_and(|last_sequence| last_sequence <= after) {
             continue;
         }
-        let bytes = fs::read(path).await?;
-        if !bytes.starts_with(CHUNK_MAGIC) {
-            continue;
+        if window != TimeWindow::default() {
+            let (min_ns, max_ns) = read_chunk_times(&path).await?;
+            if !window.overlaps(min_ns, max_ns) {
+                continue;
+            }
         }
-        let chunk: Chunk = rmp_serde::from_slice(&bytes[CHUNK_MAGIC.len()..])?;
+        let bytes = fs::read(&path).await?;
+        if bytes.len() < CHUNK_HEADER_LEN || !bytes.starts_with(CHUNK_MAGIC) {
+            return Err(JournalError::UnsupportedChunk(path));
+        }
+        let chunk: Chunk = rmp_serde::from_slice(&bytes[CHUNK_HEADER_LEN..])?;
         if chunk.last_sequence <= after {
             continue;
         }
@@ -502,12 +555,29 @@ async fn read_flushed_after(
     Ok(records)
 }
 
+async fn read_chunk_times(path: &Path) -> Result<(u64, u64), JournalError> {
+    let mut header = [0_u8; CHUNK_HEADER_LEN];
+    let mut file = fs::File::open(path).await?;
+    if file.read_exact(&mut header).await.is_err() || !header.starts_with(CHUNK_MAGIC) {
+        return Err(JournalError::UnsupportedChunk(path.to_owned()));
+    }
+    let time = |offset: usize| {
+        u64::from_le_bytes(
+            header[offset..offset + 8]
+                .try_into()
+                .expect("header slice is eight bytes"),
+        )
+    };
+    Ok((time(CHUNK_MAGIC.len()), time(CHUNK_MAGIC.len() + 8)))
+}
+
 pub async fn read_persisted(
     directory: &Path,
     after: u64,
     through: Option<u64>,
 ) -> Result<Vec<JournalRecord>, JournalError> {
-    let mut records = read_flushed_after(directory, after, usize::MAX).await?;
+    let mut records =
+        read_flushed_after(directory, after, TimeWindow::default(), usize::MAX).await?;
     if let Some(through) = through {
         records.retain(|record| record.sequence <= through);
     }
@@ -761,11 +831,68 @@ mod tests {
         invalid_chunk.push(0xff);
         fs::write(path, invalid_chunk).await.expect("old chunk");
 
-        let records = read_flushed_after(temp.path(), 10, usize::MAX)
+        let records = read_flushed_after(temp.path(), 10, TimeWindow::default(), usize::MAX)
             .await
             .expect("old chunk must not be decoded");
 
         assert!(records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunk_time_header_skips_chunks_outside_window() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let mut config = JournalConfig::for_directory(temp.path(), run_id);
+        config.max_chunk_records = 1;
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        journal
+            .append_diagnostic(diagnostic(run_id, 1))
+            .await
+            .expect("first");
+        journal.flush().await.expect("flush");
+        let (min_ns, max_ns) = read_chunk_times(&chunk_path(temp.path(), 1, 1))
+            .await
+            .expect("chunk header");
+        assert!(min_ns > 0 && min_ns == max_ns);
+
+        // A chunk whose header is outside the window must not be decoded.
+        let mut undecodable = CHUNK_MAGIC.to_vec();
+        undecodable.extend_from_slice(&1_u64.to_le_bytes());
+        undecodable.extend_from_slice(&2_u64.to_le_bytes());
+        undecodable.push(0xc1);
+        fs::write(chunk_path(temp.path(), 2, 2), undecodable)
+            .await
+            .expect("out-of-window chunk");
+
+        let window = TimeWindow {
+            since_ns: Some(min_ns),
+            until_ns: None,
+        };
+        let records = read_flushed_after(temp.path(), 0, window, usize::MAX)
+            .await
+            .expect("windowed read");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, 1);
+
+        let unsupported = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
+            .await
+            .expect_err("full read must decode, and reject, the corrupt chunk");
+        assert!(matches!(unsupported, JournalError::Decode(_)));
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn rejects_chunks_without_current_magic() {
+        let temp = TempDir::new().expect("temp directory");
+        fs::write(chunk_path(temp.path(), 1, 1), b"LHCHNK01\x80")
+            .await
+            .expect("legacy chunk");
+        let error = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
+            .await
+            .expect_err("legacy chunk");
+        assert!(matches!(error, JournalError::UnsupportedChunk(_)));
     }
 
     #[tokio::test]

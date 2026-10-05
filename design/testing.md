@@ -144,9 +144,9 @@ No GPS — arming uses `RAWES_ARM` with GPS-independent stack setup.
 | `test_slow_rpm_sitl.py` | `torque_armed_profile` | Canonical slow varying-RPM disturbance stays bounded |
 
 **IC torque rig notes (`torque_armed` / `profile="ic"`):**
-- `FS_CRASH_CHECK=0` is set in `_IC_TORQUE_YAW_PARAMS`. Without it, ArduPilot's crash
-  detector (AngErr > 30 deg + low accel) disarms the vehicle during the observer's
-  initial convergence ramp, before H_YAW_TRIM reaches u\_eq.
+- `FS_CRASH_CHECK=0` comes from `rawes_common_defaults.parm` (all tiers and hardware).
+  ArduPilot's crash detector (AngErr > 30 deg + low accel) would otherwise disarm the
+  vehicle during the observer's initial convergence ramp, before H_YAW_TRIM reaches u\_eq.
 - The observer resets `_yaw_ff_trim=0` on PASSIVE entry; the first 15 s kinematic hold
   keeps psi\_dot=0 so the trim stays near 0; after hub release the trim ramps to u\_eq
   (~0.485) in ~1 s.  SETTLE\_S=75 s gives ample convergence time.

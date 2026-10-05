@@ -42,6 +42,7 @@ from tests.sitl.stack_infra import (
     assert_no_mediator_criticals, assert_procs_alive,
 )
 from simulation.telemetry_csv import read_csv
+from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from groundstation.pumping_planner import PumpingGroundController
 from groundstation.unified_ground import _cmd_to_nv
 from linkhub_client.messages import NamedValueFloat, StatusText, decode_message
@@ -127,7 +128,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
     gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     gcs.set_param("RAWES_MODE", 3, timeout=5.0)
-    gcs.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+    send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
     gcs.sim_sleep(10.0)
     ok = gcs.set_param("RAWES_MODE", 1, timeout=5.0)

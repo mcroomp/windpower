@@ -60,7 +60,7 @@ from types import SimpleNamespace
 # Configuration defaults
 # ---------------------------------------------------------------------------
 DT_TARGET    = 1.0 / SIM_CLOCK_HZ   # fixed lockstep loop rate [s]
-TELEMETRY_HZ = 100.0           # diagnostic CSV rate; physics remains at 400 Hz
+TELEMETRY_HZ = 100.0           # diagnostic CSV rate; physics runs at SIM_RATE_HZ
 LOG_INTERVAL = 1.0             # position/attitude log interval [s]
 WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
 
@@ -289,8 +289,7 @@ def run_mediator(args, trajectory=None):
     log.info("Binding SITL UDP sockets...")
     sitl.bind()
     log.info("Python RigidBodyDynamics ready. Starting main loop.")
-    _telemetry_stride = max(1, int(round((1.0 / sitl.dt()) / TELEMETRY_HZ)))
-    log.info("Telemetry write rate target: %.0f Hz (every %d sim steps)", TELEMETRY_HZ, _telemetry_stride)
+    log.info("Telemetry write rate target: %.0f Hz (stride follows SITL frame rate)", TELEMETRY_HZ)
 
     # -- State ----------------------------------------------------------------
     step            = 0
@@ -380,8 +379,8 @@ def run_mediator(args, trajectory=None):
     _winch_peer     = None   # (host, port) of the test process — learned on first recv
     _winch_send_ctr = 0
     _winch_phase    = ""     # telemetry phase label derived from commanded cruise_v
-    DT_WINCH_SEND   = max(1, int(round((1.0 / sitl.dt()) / 10.0)))
-    # Send winch state at ~10 Hz, regardless of lockstep step rate.
+    # Winch state is sent at ~10 Hz; the step stride is derived per step from
+    # the live SITL frame rate inside step_fn.
 
     if _winch_cmd_port > 0:
         _winch_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -406,6 +405,11 @@ def run_mediator(args, trajectory=None):
         if _t_step0 is None:
             _t_step0 = t_sim
         _dt = sitl.dt()
+        # Cadences follow the live SITL frame rate (SIM_RATE_HZ), which is only
+        # known once servo packets arrive.
+        _steps_per_s = 1.0 / _dt
+        _telemetry_stride = max(1, round(_steps_per_s / TELEMETRY_HZ))
+        DT_WINCH_SEND = max(1, round(_steps_per_s / 10.0))
 
         # Single source of truth for kinematic/free-flight gating.
         _is_kinematic = core.is_kinematic

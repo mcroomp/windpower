@@ -172,4 +172,8 @@ RUN --mount=type=cache,id=linkhub-cargo-registry,target=/usr/local/cargo/registr
 FROM ${ARDUPILOT_RUNTIME_IMAGE} AS runtime-ardupilot
 ARG RAWES_IMAGE_INPUT_HASH
 LABEL org.rawes.image-input-hash="${RAWES_IMAGE_INPUT_HASH}"
+# gdb lets SITL diagnostics snapshot thread stacks and mutex owners
+# (tests/sitl/thread_trace.py); containers run with SYS_PTRACE.
+RUN apt-get update && apt-get install -y --no-install-recommends gdb \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=linkhub-build /tmp/linkhub /usr/local/bin/linkhub
