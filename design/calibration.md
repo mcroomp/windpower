@@ -267,8 +267,10 @@ then arms. Arrow keys adjust roll and pitch by 0.05; `-` and `=` adjust
 collective by 0.05 without Shift. Lua latches each NVP setpoint and refreshes
 the short-lived RC override every 10 ms. The live table keeps RC1–RC4 and
 mixed S1–S3 PWM telemetry enabled and refreshes four times per second.
-Selecting mode 2 outside ACRO, without flybar passthrough, or without a
-complete three-axis seed immediately disarms.
+Selecting mode 2 without flybar passthrough or without a complete three-axis
+seed immediately disarms. Lua does not check the ArduPilot flight mode in
+mode 2 (ENTER_GUIDED switches to GUIDED_NOGPS while `RAWES_MODE` is still 2);
+the ground selects ACRO before arming.
 `IM_ACRO_COL_EXP=0` is also required so normalized collective remains linear
 and matches the GUIDED throttle convention.
 On exit, the run command sets `RAWES_MODE=0`, requests normal MAVLink disarm,

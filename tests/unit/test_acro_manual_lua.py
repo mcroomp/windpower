@@ -47,17 +47,6 @@ def test_acro_manual_uses_asymmetric_rc_calibration_and_reversal():
     assert sim.ch_out[3] == 1650
 
 
-def test_acro_manual_disarms_outside_acro():
-    sim = RawesLua(mode=2)
-    sim.vehicle_mode = 4
-    sim.armed = True
-    _seed_manual(sim, 0.0, 0.0, 0.5)
-
-    sim.tick()
-
-    assert not sim.armed
-
-
 def test_acro_manual_disarms_without_complete_seed_or_flybar_mode():
     missing_seed = RawesLua(mode=2)
     missing_seed.vehicle_mode = 1
