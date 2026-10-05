@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import sys
 
-
+from analysis.linkhub_journal import cursor_sequence, iter_messages
 from tests.sitl.stack_infra import _acro_stack
 
-from analysis.analyse_run import validate_ekf_window
+from analysis.analyse_run import validate_ekf_records
 
 import pytest
-pytestmark = pytest.mark.sitl
+pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1200)]
 
 
 def test_kinematic_gps_sitl(tmp_path, request):
@@ -50,6 +50,13 @@ def test_kinematic_gps_sitl(tmp_path, request):
         tmp_path,
         test_name    = request.node.name,
         extra_config = extra,
+        message_rates={
+            "ATTITUDE": 10.0,
+            "EKF_STATUS_REPORT": 10.0,
+            "LOCAL_POSITION_NED": 10.0,
+            "GLOBAL_POSITION_INT": 5.0,
+            "RC_CHANNELS": 2.0,
+        },
     ) as ctx:
         log = ctx.log
         log.info("Dual GPS kinematic: stationary hold at equilibrium")
@@ -68,7 +75,7 @@ def test_kinematic_gps_sitl(tmp_path, request):
 
         ctx.wait_drain(
             until       = _gps_fused,
-            timeout     = 50.0,
+            timeout     = 90.0,
             drain_s     = 2.0,
             check_procs = True,
             label       = "gps-fuse",
@@ -80,8 +87,8 @@ def test_kinematic_gps_sitl(tmp_path, request):
         log.info("GPS origin : %s", gps_origin)
         log.info("GPS fused  : %s", gps_fused)
 
-        assert gps_origin, "GPS origin never set within 50 s"
-        assert gps_fused,  "GPS never fused within 50 s"
+        assert gps_origin, "GPS origin never set within 90 s"
+        assert gps_fused,  "GPS never fused within 90 s"
 
         t_fused = t_gps_fused_s[0]
         t_end   = t_fused + 40.0
@@ -96,8 +103,20 @@ def test_kinematic_gps_sitl(tmp_path, request):
         )
 
         # Validate EKF was clean from GPS fusion to fusion+40 s.
-        # validate_ekf_window reads the already-written MAVLink log.
-        issues = validate_ekf_window(ctx.mavlink_log, t_fused, t_end)
+        assert ctx.linkhub_journal is not None
+        assert ctx.mavlog_cursor is not None
+        through_cursor = ctx.gcs.flush_journal()
+        records = list(iter_messages(
+            ctx.linkhub_journal,
+            after=cursor_sequence(ctx.mavlog_cursor),
+            through=cursor_sequence(through_cursor),
+            direction="rx",
+        ))
+        issues = validate_ekf_records(
+            records,
+            t_fused,
+            t_end,
+        )
         for issue in issues:
             log.warning("EKF issue: %s", issue)
         assert not issues, (

@@ -1,18 +1,20 @@
 """
 calibrate/hw.py -- ESC telemetry, swashplate mix, MAVLink send helpers,
-arm/disarm, probe/ping, monitor_esc, sweep, status/drain.
+arm/disarm, monitor_esc, sweep, and status/drain.
 """
 from __future__ import annotations
 
 import math
 import time
-from typing import cast
+from dataclasses import dataclass
 
-from pymavlink import mavutil
-from groundstation.gcs import MavConnectionLike, ParamSet
+from linkhub_client import mav_constants as mavlink
+from linkhub_client.mav_constants import mavutil
+from linkhub_client.messages import ParamSet, ServoOutputRaw
 
 from .constants import (
-    RawesGCS,
+    LinkHubClient,
+    LinkHubGenerationChanged,
     CommandAck,
     EscTelemetry,
     PidTuning,
@@ -32,8 +34,8 @@ from .constants import (
     _AZ_S1, _AZ_S2, _AZ_S3,
     _COPTER_MODES, _SYS_STATUS, _LUA_MODES,
     _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES,
-    _FALLBACK_BAUDS,
 )
+from .messages import read_one
 
 # ---------------------------------------------------------------------------
 # Mutable global: eRPM -> RPM divisor (pole-pairs)
@@ -83,7 +85,7 @@ def _rpm_triplet(erpm: "float | None") -> tuple:
     return erpm, mech_rpm, rotor_rpm
 
 
-def _refresh_pole_pairs(session: RawesGCS) -> None:
+def _refresh_pole_pairs(session: LinkHubClient) -> None:
     """Set the eRPM->RPM divisor from the FC's SERVO_BLH_POLES (poles/2), so the
     RPM readout follows the param instead of a hardcode.  Falls back to the
     GB4008 default if the param is unreadable."""
@@ -132,19 +134,19 @@ def _norm_to_pwm(v: float) -> int:
 # MAVLink helpers
 # ---------------------------------------------------------------------------
 
-def _send_set_servo(session: RawesGCS, instance: int, pwm: int) -> None:
+def _send_set_servo(session: LinkHubClient, instance: int, pwm: int) -> None:
     """Send MAV_CMD_DO_SET_SERVO (works while disarmed)."""
     session.send_message(CommandLong(
         target_system=session._target_system,
         target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+        command=mavlink.MAV_CMD_DO_SET_SERVO,
         confirmation=0,
         param1=float(instance),
         param2=float(pwm),
     ))
 
 
-def _send_motor_test(session: RawesGCS, instance: int,
+def _send_motor_test(session: LinkHubClient, instance: int,
                      throttle_pct: float, timeout_s: float = 3.0) -> None:
     """
     Send MAV_CMD_DO_MOTOR_TEST.
@@ -156,7 +158,7 @@ def _send_motor_test(session: RawesGCS, instance: int,
     session.send_message(CommandLong(
         target_system=session._target_system,
         target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST,
+        command=mavlink.MAV_CMD_DO_MOTOR_TEST,
         confirmation=0,
         param1=float(instance),
         param2=0.0,
@@ -169,17 +171,19 @@ def _send_motor_test(session: RawesGCS, instance: int,
 # Status snapshot
 # ---------------------------------------------------------------------------
 
-def _print_status(session: RawesGCS) -> None:
+def _print_status(session: LinkHubClient) -> None:
     """Unified status: vehicle, battery, EKF, servo outputs, key params."""
-    from .params import _CONFIG_TARGET_PARAMS_ALL   # avoid circular at module level
+    from .params import _config_target_params   # avoid circular at module level
+    expected_params = _config_target_params(use_all=True)
 
     sep = "-" * 50
+    cursor = session.current_cursor()
 
     # --- vehicle -------------------------------------------------------------
     print(f"\n{sep}")
     print("VEHICLE")
     print(sep)
-    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=5.0)
+    hb, cursor = read_one(session, cursor, "HEARTBEAT", wait=5.0)
     if hb is None:
         print("  (no HEARTBEAT received)")
     else:
@@ -195,7 +199,7 @@ def _print_status(session: RawesGCS) -> None:
     print(f"\n{sep}")
     print("BATTERY")
     print(sep)
-    batt = session._recv(type="BATTERY_STATUS", blocking=True, timeout=2.0)
+    batt, cursor = read_one(session, cursor, "BATTERY_STATUS", wait=2.0)
     if batt:
         cells = [v for v in batt.voltages if v != 65535]
         total_v   = sum(cells) / 1000.0 if cells else None
@@ -210,7 +214,7 @@ def _print_status(session: RawesGCS) -> None:
         if total_v and len(cells) >= 3 and total_v / len(cells) < 3.5:
             print(f"  [WARN] avg cell {total_v/len(cells):.3f} V -- low")
     else:
-        ss = session._recv(type="SYS_STATUS", blocking=True, timeout=1.0)
+        ss, cursor = read_one(session, cursor, "SYS_STATUS", wait=1.0)
         if ss and ss.voltage_battery != 65535:
             v = ss.voltage_battery / 1000.0
             i = ss.current_battery / 100.0 if ss.current_battery >= 0 else None
@@ -224,7 +228,7 @@ def _print_status(session: RawesGCS) -> None:
     print(f"\n{sep}")
     print("EKF")
     print(sep)
-    ekf = session._recv(type="EKF_STATUS_REPORT", blocking=True, timeout=2.0)
+    ekf, cursor = read_one(session, cursor, "EKF_STATUS_REPORT", wait=2.0)
     if ekf:
         flags  = ekf.flags
         att_ok = bool(flags & 0x01)
@@ -245,7 +249,7 @@ def _print_status(session: RawesGCS) -> None:
         req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
         req_message_rate=10,
     ))
-    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
+    srv, cursor = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
     if srv:
         for i in range(1, 13):
             val = getattr(srv, f"servo{i}_raw", 0)
@@ -281,7 +285,7 @@ def _print_status(session: RawesGCS) -> None:
                 resolved_name = candidate
                 break
 
-        expected = _CONFIG_TARGET_PARAMS_ALL.get(resolved_name)
+        expected = expected_params.get(resolved_name)
         if val is None:
             print(f"  {name:<22} NOT FOUND")
             continue
@@ -299,7 +303,7 @@ def _print_status(session: RawesGCS) -> None:
                 suffix = f"  ({resolved_name})"
             print(f"  {name:<22} {val:<8.4g}  OK{suffix}")
 
-    ss2 = session._recv(type="SYS_STATUS", blocking=True, timeout=2.0)
+    ss2, cursor = read_one(session, cursor, "SYS_STATUS", wait=2.0)
     if ss2:
         motor_bit = 0x000200
         present = bool(ss2.onboard_control_sensors_present & motor_bit)
@@ -314,10 +318,15 @@ def _print_status(session: RawesGCS) -> None:
     print("INTERLOCK / DSHOT")
     print(sep)
     for name in _MOTOR_PATH_PARAM_NAMES:
-        expected = _CONFIG_TARGET_PARAMS_ALL.get(name)
+        expected = expected_params.get(name)
         val = session.get_param(name)
         if val is None:
             print(f"  {name:<22} NOT FOUND")
+        elif (
+            name == f"SERVO{SERVO_MOTOR}_FUNCTION"
+            and round(val) == round(_SAFE_OFF_MOTOR_FUNCTION)
+        ):
+            print(f"  {name:<22} {val:<10.4g}  SAFE-OFF")
         elif expected is not None and abs(val - float(expected)) > 1e-4:
             print(f"  {name:<22} {val:<10.4g}  [DIFF] expected {expected}")
         else:
@@ -328,7 +337,7 @@ def _print_status(session: RawesGCS) -> None:
     print("YAW CONTROL")
     print(sep)
     for name in _TAIL_PARAM_NAMES:
-        expected = _CONFIG_TARGET_PARAMS_ALL.get(name)
+        expected = expected_params.get(name)
         val = session.get_param(name)
         if val is None:
             print(f"  {name:<22} NOT FOUND")
@@ -344,14 +353,16 @@ def _print_status(session: RawesGCS) -> None:
 # Drain helper
 # ---------------------------------------------------------------------------
 
-def _drain(session: RawesGCS, msg_types, duration: float) -> list:
+def _drain(session: LinkHubClient, msg_types, duration: float) -> list:
     """Collect all messages of given types for `duration` wall-clock seconds."""
     msgs = []
     deadline = time.monotonic() + duration
+    cursor = session.current_cursor()
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
-        msg = session._recv(type=msg_types, blocking=True,
-                            timeout=min(0.2, remaining))
+        msg, cursor = read_one(
+            session, cursor, msg_types, wait=min(0.2, remaining),
+        )
         if msg:
             msgs.append(msg)
     return msgs
@@ -361,7 +372,7 @@ def _drain(session: RawesGCS, msg_types, duration: float) -> list:
 # Lua scripting restart
 # ---------------------------------------------------------------------------
 
-def _restart_scripting(session: RawesGCS) -> None:
+def _restart_scripting(session: LinkHubClient) -> None:
     """Restart Lua scripting engine by toggling SCR_ENABLE (no reboot needed)."""
     print("  Restarting scripting engine (SCR_ENABLE 1->0->1) ...")
     session.set_param("SCR_ENABLE", 0)
@@ -371,90 +382,10 @@ def _restart_scripting(session: RawesGCS) -> None:
 
 
 # ---------------------------------------------------------------------------
-# COM port scanner
-# ---------------------------------------------------------------------------
-
-def _probe_port(port: str, baud: int, timeout: float) -> tuple:
-    """Try one port at one baud. Returns (ok, sysid) — closes connection before returning."""
-    conn: MavConnectionLike | None = None
-    try:
-        conn = cast(MavConnectionLike, mavutil.mavlink_connection(port, baud=baud, autoreconnect=False))
-        hb = conn.wait_heartbeat(timeout=timeout)
-        if hb:
-            return True, conn.target_system
-        return False, None
-    except Exception:
-        return False, None
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-
-def _ping_ports(baud: int = 115200, timeout: float = 3.0) -> list:
-    """
-    Enumerate all COM ports and probe each for a MAVLink HEARTBEAT.
-    If the primary baud yields no heartbeat, retries with lower baud rates.
-    Returns list of dicts: {port, description, ok, sysid, baud, detail}.
-    """
-    try:
-        import serial.tools.list_ports as _list_ports
-        ports = list(_list_ports.comports())
-    except ImportError:
-        print("  ERROR: pyserial not installed")
-        return []
-
-    if not ports:
-        print("  No COM ports found.")
-        return []
-
-    fallbacks = [b for b in _FALLBACK_BAUDS if b < baud]
-    all_bauds = [baud] + fallbacks
-    print(f"  Scanning {len(ports)} port(s) at {baud} baud ({timeout:.0f} s each) ...")
-    if fallbacks:
-        print(f"  Fallback baud rates if no heartbeat: {fallbacks}")
-    print()
-    results = []
-    for info in sorted(ports, key=lambda p: p.device):
-        port = info.device
-        desc = (info.description or "").strip()
-        print(f"  {port:<12} {desc:<40} ", end="", flush=True)
-        entry = {"port": port, "description": desc, "ok": False, "sysid": None, "baud": None, "detail": ""}
-        found = False
-        for try_baud in all_bauds:
-            ok, sysid = _probe_port(port, try_baud, timeout)
-            if ok:
-                entry.update(ok=True, sysid=sysid, baud=try_baud, detail=f"sysid={sysid} baud={try_baud}")
-                marker = f"({try_baud})" if try_baud != baud else ""
-                print(f"[OK]  ArduPilot  sysid={sysid}  {try_baud} baud {marker}".rstrip())
-                found = True
-                break
-            if try_baud != baud:
-                print(f"\n  {port:<12} {'':40} retry {try_baud} baud ... ", end="", flush=True)
-        if not found:
-            tried = "/".join(str(b) for b in all_bauds)
-            entry["detail"] = f"no HEARTBEAT (tried {tried})"
-            print(f"[--]  no HEARTBEAT (tried {tried})")
-        results.append(entry)
-
-    print()
-    ok = [r for r in results if r["ok"]]
-    if ok:
-        print(f"  [OK] Found {len(ok)} ArduPilot device(s):")
-        for r in ok:
-            print(f"       {r['port']}  {r['description']}  ({r['detail']})")
-    else:
-        print("  No ArduPilot devices found on any port.")
-    return results
-
-
-# ---------------------------------------------------------------------------
 # ESC monitor
 # ---------------------------------------------------------------------------
 
-def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
+def _monitor_esc(session: LinkHubClient, duration: float = 10.0) -> None:
     """
     Stream ESC telemetry continuously for `duration` seconds.
     """
@@ -474,11 +405,13 @@ def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
     ))  # 10 Hz
     deadline = time.monotonic() + duration
     last_print = 0.0
+    cursor = session.current_cursor()
     try:
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
-            msg = session._recv(type=esc_name,
-                                blocking=True, timeout=min(0.5, remaining))
+            msg, cursor = read_one(
+                session, cursor, esc_name, wait=min(0.5, remaining),
+            )
             if msg is None:
                 continue
             now = time.monotonic()
@@ -508,7 +441,222 @@ def _monitor_esc(session: RawesGCS, duration: float = 10.0) -> None:
 # Arm / Disarm
 # ---------------------------------------------------------------------------
 
-def _arm(session: RawesGCS, force: bool = False,
+_SAFE_OFF_FLIGHT_MODE = 1  # ArduCopter ACRO with RC passthrough selected.
+_SAFE_OFF_FLYBAR_MODE = 1.0
+_SAFE_OFF_SERVO_MODE = 0.0  # Automated mixer; Lua mode 0 supplies neutral RC inputs.
+_SAFE_OFF_MOTOR_FUNCTION = 36.0
+_SAFE_OFF_YAW_TRIM = 0.0
+
+
+@dataclass(frozen=True)
+class SafeOffReport:
+    armed: bool
+    flight_mode: int
+    rawes_mode: float | None
+    flybar_mode: float | None
+    servo_mode: float | None
+    motor_function: float | None
+    yaw_trim: float | None
+    motor_output_raw: int | None
+    errors: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def verify_safe_off(
+    session: LinkHubClient,
+    *,
+    output_timeout_s: float = 1.0,
+) -> SafeOffReport:
+    """Read and validate the canonical disarmed hardware state."""
+    status = session.vehicle_status()
+    base_mode = int(status.get("base_mode", 0))
+    armed = bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    flight_mode = int(status.get("custom_mode", -1))
+    params = {
+        name: session.get_param(name)
+        for name in (
+            "RAWES_MODE",
+            "H_FLYBAR_MODE",
+            "H_SV_MAN",
+            f"SERVO{SERVO_MOTOR}_FUNCTION",
+            "H_YAW_TRIM",
+            f"SERVO{SERVO_MOTOR}_MIN",
+        )
+    }
+
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        param1=float(mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW),
+        param2=100_000.0,
+    ))
+    cursor = session.current_cursor()
+    motor_output_raw = None
+    deadline = time.monotonic() + output_timeout_s
+    while motor_output_raw is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        batch = session.read_messages(
+            cursor,
+            ["SERVO_OUTPUT_RAW"],
+            direction="rx",
+            wait=remaining,
+            limit=1,
+        )
+        cursor = batch.next_cursor
+        if not batch.messages:
+            continue
+        decoded = decode_message(batch.messages[0])
+        if isinstance(decoded, ServoOutputRaw):
+            motor_output_raw = int(
+                getattr(decoded, f"servo{SERVO_MOTOR}_raw")
+            )
+
+    errors: list[str] = []
+    if armed:
+        errors.append("vehicle is armed")
+    if flight_mode != _SAFE_OFF_FLIGHT_MODE:
+        errors.append(f"flight mode is {flight_mode}, expected ACRO (1)")
+
+    expected_params = {
+        "RAWES_MODE": 0.0,
+        "H_FLYBAR_MODE": _SAFE_OFF_FLYBAR_MODE,
+        "H_SV_MAN": _SAFE_OFF_SERVO_MODE,
+        f"SERVO{SERVO_MOTOR}_FUNCTION": _SAFE_OFF_MOTOR_FUNCTION,
+        "H_YAW_TRIM": _SAFE_OFF_YAW_TRIM,
+    }
+    for name, expected in expected_params.items():
+        actual = params[name]
+        if actual is None:
+            errors.append(f"{name} is unreadable")
+        elif not math.isclose(float(actual), expected, abs_tol=1e-6):
+            errors.append(f"{name}={actual:.6g}, expected {expected:.6g}")
+
+    motor_min = params[f"SERVO{SERVO_MOTOR}_MIN"]
+    if motor_output_raw is None:
+        errors.append("output 9 is unreadable")
+    elif motor_min is None:
+        errors.append(f"SERVO{SERVO_MOTOR}_MIN is unreadable")
+    elif motor_output_raw not in (0, round(float(motor_min))):
+        errors.append(
+            f"output 9 is {motor_output_raw}, expected off "
+            f"(0 or {round(float(motor_min))})"
+        )
+
+    return SafeOffReport(
+        armed=armed,
+        flight_mode=flight_mode,
+        rawes_mode=params["RAWES_MODE"],
+        flybar_mode=params["H_FLYBAR_MODE"],
+        servo_mode=params["H_SV_MAN"],
+        motor_function=params[f"SERVO{SERVO_MOTOR}_FUNCTION"],
+        yaw_trim=params["H_YAW_TRIM"],
+        motor_output_raw=motor_output_raw,
+        errors=tuple(errors),
+    )
+
+
+def _set_safe_off_state(
+    session: LinkHubClient,
+    *,
+    rawes_mode_released: bool = False,
+) -> SafeOffReport:
+    """Apply the one canonical disarmed hardware state."""
+    if rawes_mode_released:
+        print("  [OK] Safe-off RAWES_MODE=0 (Lua control released).")
+    else:
+        try:
+            if not session.set_param("RAWES_MODE", 0):
+                print("  [FAIL] Safe-off RAWES_MODE=0 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off RAWES_MODE=0 (Lua control released).")
+        except Exception as e:
+            print(f"  [FAIL] Could not release Lua control for safe-off: {e}")
+
+    motor_function = f"SERVO{SERVO_MOTOR}_FUNCTION"
+    try:
+        configured_function = session.get_param(motor_function)
+        if configured_function is None:
+            print(f"  [FAIL] Could not read {motor_function} for safe-off.")
+        elif round(configured_function) != round(_SAFE_OFF_MOTOR_FUNCTION):
+            print(
+                f"  [FAIL] Safe-off requires {motor_function}=36 at boot; "
+                f"found {configured_function:.6g}. Configure it and reboot."
+            )
+        else:
+            print(
+                f"  [OK] Safe-off {motor_function}=36 "
+                "(DDFP mapped; disarm holds output off)."
+            )
+    except Exception as e:
+        print(f"  [FAIL] Could not disconnect motor output for safe-off: {e}")
+
+    try:
+        yaw_trim = session.get_param("H_YAW_TRIM")
+        if yaw_trim is None:
+            print("  [FAIL] Could not read H_YAW_TRIM for safe-off.")
+        elif abs(yaw_trim - _SAFE_OFF_YAW_TRIM) > 1e-6:
+            if not session.set_param("H_YAW_TRIM", _SAFE_OFF_YAW_TRIM):
+                print("  [FAIL] Safe-off H_YAW_TRIM=0 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off H_YAW_TRIM=0 (no stale motor trim).")
+        else:
+            print("  [OK] Safe-off H_YAW_TRIM=0 (no stale motor trim).")
+    except Exception as e:
+        print(f"  [FAIL] Could not clear yaw trim for safe-off: {e}")
+
+    try:
+        flybar_mode = session.get_param("H_FLYBAR_MODE")
+        if flybar_mode is None:
+            print("  [FAIL] Could not read H_FLYBAR_MODE for safe-off.")
+        elif round(flybar_mode) != round(_SAFE_OFF_FLYBAR_MODE):
+            if not session.set_param("H_FLYBAR_MODE", _SAFE_OFF_FLYBAR_MODE):
+                print("  [FAIL] Safe-off H_FLYBAR_MODE=1 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off H_FLYBAR_MODE=1 (ACRO RC passthrough).")
+        else:
+            print("  [OK] Safe-off H_FLYBAR_MODE=1 (ACRO RC passthrough).")
+    except Exception as e:
+        print(f"  [FAIL] Could not configure ACRO RC passthrough for safe-off: {e}")
+
+    try:
+        servo_mode = session.get_param("H_SV_MAN")
+        if servo_mode is None:
+            print("  [FAIL] Could not read H_SV_MAN for safe-off.")
+        elif round(servo_mode) != round(_SAFE_OFF_SERVO_MODE):
+            if not session.set_param("H_SV_MAN", _SAFE_OFF_SERVO_MODE):
+                print("  [FAIL] Safe-off H_SV_MAN=0 was not acknowledged.")
+            else:
+                print("  [OK] Safe-off H_SV_MAN=0 (Lua neutral-input hold).")
+        else:
+            print("  [OK] Safe-off H_SV_MAN=0 (Lua neutral-input hold).")
+    except Exception as e:
+        print(f"  [FAIL] Could not enable automated swash control for safe-off: {e}")
+
+    try:
+        session.set_mode(_SAFE_OFF_FLIGHT_MODE)
+        print("  [OK] Safe-off flight mode ACRO (Lua neutral-input hold).")
+    except Exception as e:
+        print(f"  [FAIL] Could not select ACRO safe-off mode: {e}")
+
+    report = verify_safe_off(session)
+    if report.ok:
+        print(
+            f"  [OK] Safe-off verified; output {SERVO_MOTOR}="
+            f"{report.motor_output_raw}."
+        )
+    else:
+        for error in report.errors:
+            print(f"  [FAIL] Safe-off verification: {error}.")
+    return report
+
+
+def _arm(session: LinkHubClient, force: bool = False,
          timeout: float = 15.0, esc_arm: bool = True) -> bool:
     """
     Arm sequence:
@@ -518,34 +666,39 @@ def _arm(session: RawesGCS, force: bool = False,
     ESC pre-arm pulse is needed.  Returns True if vehicle confirms armed.
     """
     print("  Sending arm command ...")
+    cursor = session.current_cursor()
+    # Arming should never cause a reboot, so any generation change mid-wait
+    # (service restart, serial reconnect, vehicle reboot) means something
+    # unexpected happened -- abort rather than keep polling a link that is
+    # no longer trustworthy.
+    generation = session.generation
     param2 = 21196.0 if force else 0.0
-    session.send_message(CommandLong(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        confirmation=0,
-        param1=1.0,
-        param2=param2,
-    ))
+    result = session.command(
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        [1.0, param2],
+        timeout=timeout,
+    )
+    if result.get("result") != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+        print(f"  [FAIL] Arm rejected: result={result.get('result')}")
+        return False
+    print("  Arm command accepted -- waiting for armed heartbeat ...")
 
     deadline = time.monotonic() + timeout
     armed = False
     while time.monotonic() < deadline:
-        msg = session._recv(
-            type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
-            blocking=True, timeout=0.5,
-        )
+        try:
+            msg, cursor = read_one(
+                session, cursor, ["HEARTBEAT", "STATUSTEXT"], wait=0.5,
+                expected_generation=generation,
+            )
+        except LinkHubGenerationChanged as exc:
+            print(f"  [FAIL] Aborting arm: {exc}")
+            return False
         if msg is None:
             continue
         match decode_message(msg):
             case StatusText(text=text):
                 print(f"  [FC] {text}")
-            case CommandAck(command=command, result=result) if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-                if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                    print("  Arm command accepted -- waiting for armed heartbeat ...")
-                elif result == mavutil.mavlink.MAV_RESULT_DENIED:
-                    print("  [FAIL] Arm denied -- check pre-arm messages above")
-                    return False
             case Heartbeat(base_mode=base_mode):
                 if bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
                     print("  [OK] Vehicle armed.")
@@ -563,58 +716,49 @@ def _arm(session: RawesGCS, force: bool = False,
     return True
 
 
-def _disarm(session: RawesGCS, timeout: float = 10.0,
+def _disarm(session: LinkHubClient, timeout: float = 10.0,
             force: bool = False) -> bool:
     """Send disarm command. Returns True if vehicle confirms disarmed."""
     print("  Sending disarm command ...")
+    cursor = session.current_cursor()
+    # Disarming does not itself trigger a reboot (that happens afterward, as a
+    # separate documented step -- see _cmd_disarm), so a generation change
+    # while still waiting for the disarmed heartbeat is just as unexpected as
+    # during arm, and is handled the same way.
+    generation = session.generation
     param2 = 21196.0 if force else 0.0
-    session.send_message(CommandLong(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        confirmation=0,
-        param1=0.0,
-        param2=param2,
-    ))
+    result = session.command(
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        [0.0, param2],
+        timeout=timeout,
+    )
+    if result.get("result") != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+        print(f"  [FAIL] Disarm rejected: result={result.get('result')}")
+        return False
+    print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
     deadline = time.monotonic() + timeout
-    ack_seen = False
     while time.monotonic() < deadline:
-        msg = session._recv(
-            type=["HEARTBEAT", "COMMAND_ACK", "STATUSTEXT"],
-            blocking=True, timeout=1.0,
-        )
+        try:
+            msg, cursor = read_one(
+                session, cursor, ["HEARTBEAT", "STATUSTEXT"], wait=1.0,
+                expected_generation=generation,
+            )
+        except LinkHubGenerationChanged as exc:
+            print(f"  [FAIL] Aborting disarm: {exc}")
+            return False
         if msg is None:
             continue
         match decode_message(msg):
             case StatusText(text=text):
                 print(f"  [FC] {text}")
                 continue
-            case CommandAck(command=command, result=result) if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-                ack_seen = True
-                if result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                    print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
-                elif result == mavutil.mavlink.MAV_RESULT_DENIED:
-                    print("  [FAIL] Disarm denied by FC.")
-                    return False
-                elif result == mavutil.mavlink.MAV_RESULT_TEMPORARILY_REJECTED:
-                    print("  [FAIL] Disarm temporarily rejected by FC.")
-                    return False
-                elif result == mavutil.mavlink.MAV_RESULT_UNSUPPORTED:
-                    print("  [FAIL] Disarm unsupported by FC.")
-                    return False
-                elif result == mavutil.mavlink.MAV_RESULT_FAILED:
-                    print("  [FAIL] Disarm failed on FC.")
-                    return False
-                continue
             case Heartbeat(base_mode=base_mode):
                 if not bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
                     print("  [OK] Vehicle disarmed.")
+                    _set_safe_off_state(session)
                     return True
 
-    if ack_seen:
-        print("  [FAIL] Disarm timed out waiting for disarmed heartbeat.")
-    else:
-        print("  [FAIL] Disarm timed out (no disarm ACK).")
+    print("  [FAIL] Disarm timed out waiting for disarmed heartbeat.")
     return False
 
 
@@ -622,28 +766,22 @@ def _disarm(session: RawesGCS, timeout: float = 10.0,
 # Servo sweep
 # ---------------------------------------------------------------------------
 
-def _set_servo_function(session: RawesGCS, output: int, value: float) -> bool:
+def _set_servo_function(session: LinkHubClient, output: int, value: float) -> bool:
     servo_function = f"SERVO{output}_FUNCTION"
-    session.send_message(ParamSet(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        param_id=servo_function,
-        param_value=value,
+    return session.set_param(
+        servo_function,
+        value,
         param_type=mavutil.mavlink.MAV_PARAM_TYPE_INT16,
-    ))
-    time.sleep(0.1)
-    return session.get_param(servo_function) == value
+    )
 
 
-def _set_heli_servo_mode(session: RawesGCS, value: float) -> bool:
+def _set_heli_servo_mode(session: LinkHubClient, value: float) -> bool:
     for _attempt in range(3):
-        session.send_message(ParamSet(
-            target_system=session._target_system,
-            target_component=session._target_component,
-            param_id="H_SV_MAN",
-            param_value=value,
+        session.set_param(
+            "H_SV_MAN",
+            value,
             param_type=mavutil.mavlink.MAV_PARAM_TYPE_INT8,
-        ))
+        )
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
             if session.get_param("H_SV_MAN", timeout=0.5) == value:
@@ -653,7 +791,7 @@ def _set_heli_servo_mode(session: RawesGCS, value: float) -> bool:
 
 
 def _release_servo_functions(
-    session: RawesGCS, outputs: tuple[int, ...]
+    session: LinkHubClient, outputs: tuple[int, ...]
 ) -> "dict[int, float] | None":
     """Set outputs to disabled and return their original functions."""
     saved_functions: dict[int, float] = {}
@@ -678,8 +816,15 @@ def _release_servo_functions(
     return saved_functions
 
 
-def _restore_servo_functions(session: RawesGCS, saved_functions: dict[int, float]) -> None:
+def _restore_servo_functions(
+    session: LinkHubClient,
+    saved_functions: dict[int, float],
+    *,
+    exclude_outputs: tuple[int, ...] = (),
+) -> None:
     for output, saved_function in saved_functions.items():
+        if output in exclude_outputs:
+            continue
         if saved_function != 0:
             servo_function = f"SERVO{output}_FUNCTION"
             if _set_servo_function(session, output, saved_function):

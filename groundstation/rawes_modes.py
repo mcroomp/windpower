@@ -15,7 +15,7 @@ Used by simtests, SITL stack tests, and calibrate.py.
 
 Usage
 -----
-    from groundstation.gcs import NamedValueFloat
+    from linkhub_client.messages import NamedValueFloat
     from groundstation.rawes_modes import MODE_STEADY, PUMP_REEL_OUT, send_anchor_ned
 
     gcs.set_param("RAWES_MODE", MODE_STEADY)                      # set mode (pumping runs in steady)
@@ -25,7 +25,7 @@ Usage
 
 import math
 
-from groundstation.gcs import NamedValueInt
+from linkhub_client.messages import NamedValueInt
 
 # ── Mode numbers (RAWES_MODE script-generated param) ──────────────────────────
 
@@ -38,6 +38,36 @@ MODE_TAKEOFF  = 5   # fixed level attitude + altitude-PID climb toward RAWES_ALT
                     # no anchor/elevation tracking or lateral position hold
 # Pumping runs in MODE_STEADY; the ground schedule varies RAWES_TEN and RAWES_SUB.
 
+# ── Ground -> Lua commands (COMMAND_LONG, acknowledged by rawes.lua) ──────────
+# rawes.lua blocks these IDs from ArduPilot's own command handler and sends the
+# COMMAND_ACK itself; see the command table in rawes.lua's header.
+
+CMD_ENTER_GUIDED  = 31010  # MAV_CMD_USER_1: capture attitude, enter GUIDED_NOGPS holding it
+CMD_ENTER_PASSIVE = 31011  # MAV_CMD_USER_2: capture passive anchor; param1 = yaw-trim seed
+NO_YAW_TRIM_SEED  = -1.0   # ENTER_PASSIVE param1: keep the adaptive yaw-trim observer
+MAV_RESULT_ACCEPTED = 0
+
+
+def enter_passive_params(yaw_trim_seed: float | None = None) -> list[float]:
+    """COMMAND_LONG params for CMD_ENTER_PASSIVE."""
+    return [NO_YAW_TRIM_SEED if yaw_trim_seed is None else float(yaw_trim_seed)]
+
+
+def send_rawes_command(
+    gcs,
+    command: int,
+    params: list[float] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Send a RAWES Lua command and raise unless Lua acknowledges ACCEPTED."""
+    result = gcs.command(command, params or [], timeout=timeout)
+    if int(result["result"]) != MAV_RESULT_ACCEPTED:
+        raise RuntimeError(
+            f"RAWES command {command} rejected with MAV_RESULT {result['result']}"
+        )
+
+
 # ── Named-float control values ────────────────────────────────────────────────
 
 NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm countdown
@@ -49,7 +79,6 @@ NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] �
 NV_MANUAL_ROLL_KEY = "RAWES_RLL"  # normalized ACRO-manual roll [-1,1]
 NV_MANUAL_PITCH_KEY = "RAWES_PIT" # normalized ACRO-manual pitch [-1,1]
 NV_MANUAL_COL_KEY = "RAWES_COL"   # normalized ACRO-manual collective [0,1]
-NV_PASSIVE_Q_KEYS = ("RAWES_QW", "RAWES_QX", "RAWES_QY", "RAWES_QZ")
 
 # ── Named-int anchor keys ─────────────────────────────────────────────────────
 # rawes.lua gates altitude-hold capture on all three anchor ints arriving AND

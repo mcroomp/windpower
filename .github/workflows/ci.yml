@@ -15,6 +15,8 @@ jobs:
     name: Unit + Simtests
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
 
     steps:
       - name: Checkout
@@ -29,7 +31,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --index-url https://packagefeedproxy.microsoft.io/pypi/simple/ --upgrade pip
           python -m pip install -r simulation/requirements.txt
           python -m pip install -e . --no-deps
 
@@ -79,6 +81,8 @@ jobs:
           owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           image_ref="ghcr.io/${owner_lc}/windpower/rawes-sim:${{ github.sha }}"
           echo "image_ref=${image_ref}" >> "$GITHUB_OUTPUT"
+          # test.sh -> setup.sh build skips rebuilding when this label matches.
+          echo "input_hash=$(bash scripts/docker_image_hash.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -93,8 +97,14 @@ jobs:
       - name: Build and push rawes-sim image with cache
         uses: docker/build-push-action@v6
         with:
-          context: ./simulation
+          context: .
+          file: simulation/Dockerfile
           target: runtime-ardupilot
+          # Locally setup.sh tags the ArduPilot base separately; in CI one
+          # BuildKit build resolves it as the in-file stage instead.
+          build-args: |
+            ARDUPILOT_RUNTIME_IMAGE=runtime-ardupilot-base
+            RAWES_IMAGE_INPUT_HASH=${{ steps.meta.outputs.input_hash }}
           push: true
           tags: ${{ steps.meta.outputs.image_ref }}
           cache-from: type=gha

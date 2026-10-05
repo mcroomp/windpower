@@ -2,7 +2,7 @@
 """
 calibrate/__main__.py -- thin entry point; all logic lives in calibrate/repl.py.
 
-Run as: python -m calibrate [--port P] [--baud B] [--force] <verb> [args...]
+Run as: python -m calibrate [--server URL] [--force] <verb> [args...]
 """
 from calibrate.repl import main
 

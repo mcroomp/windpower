@@ -272,9 +272,9 @@ Control feel is light and consistent regardless of rotor loading.
 
 ## 6. Anti-Rotation Motor (GB4008)
 
-The **EMAX GB4008** gimbal motor is mechanically geared to the spinning outer rotor hub
-via an 80:44 spur gear (80 teeth on the hub, 44 on the motor pinion). The motor stator
-is fixed to the stationary inner assembly; the motor rotor spins with the gear.
+The **EMAX GB4008** gimbal motor is mechanically geared 10:1 to the spinning outer
+rotor hub. The motor stator is fixed to the stationary inner assembly; the motor
+rotor spins ten turns for each outer-hub turn.
 
 The ESC maintains the commanded motor RPM (proportional to commanded PWM) regardless of
 mechanical load. Bearing drag and swashplate friction only affect **power consumption** —
@@ -295,7 +295,7 @@ counter-rotates against it (CCW).
 | Cable gauge    | 0.19 mm                        |
 | Weight         | 101 g                          |
 | Mounting       | 19x19 mm or 25x25 mm           |
-| Gear reduction | 80:44 spur gear (~1.82x torque)|
+| Gear reduction | 10:1 (motor:rotor speed)        |
 
 The hollow shaft allows mechanical linkage through the blade axis. The motor does not drive
 rotor rotation -- it counter-rotates via the gear coupling, and we control its speed to keep

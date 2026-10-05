@@ -16,6 +16,19 @@ import time
 from pathlib import Path
 from typing import Iterator
 
+from pymavlink import mavutil
+
+
+def _json_safe(value):
+    """Convert pymavlink binary fields into deterministic JSON values."""
+    if isinstance(value, (bytes, bytearray)):
+        return list(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
 
 class MavlinkLogWriter:
     """
@@ -49,7 +62,9 @@ class MavlinkLogWriter:
             d = msg.to_dict()
             if "time_boot_ms" not in d and last_time_boot_ms > 0:
                 d["time_boot_ms"] = last_time_boot_ms
-            line = json.dumps({"_t_wall": time.time(), "_dir": direction, **d}) + "\n"
+            line = json.dumps(_json_safe(
+                {"_t_wall": time.time(), "_dir": direction, **d}
+            )) + "\n"
             with self._lock:
                 self._fh.write(line)
         except Exception:
@@ -104,3 +119,47 @@ def iter_messages(
                 continue
             if type_set is None or msg.get("mavpackettype") in type_set:
                 yield msg
+
+
+def convert_raw_to_ndjson(
+    raw_path: "str | Path",
+    ndjson_path: "str | Path",
+) -> int:
+    """Replay a native pymavlink raw capture into parser-derived NDJSON.
+
+    The raw capture is the source of truth. Bytes that cannot be parsed are
+    intentionally absent from the derived NDJSON and remain available in the
+    raw file for diagnosis.
+    """
+    reader = mavutil.mavlogfile(
+        str(raw_path),
+        robust_parsing=True,
+        notimestamps=True,
+    )
+    decoded = 0
+    wall_start = time.time()
+    first_boot_ms: int | None = None
+    last_wall = wall_start
+    try:
+        with Path(ndjson_path).open("w", encoding="utf-8") as fh:
+            while True:
+                msg = reader.recv_msg()
+                if msg is None:
+                    break
+                if msg.get_type() == "BAD_DATA":
+                    continue
+                boot_ms = getattr(msg, "time_boot_ms", None)
+                if boot_ms is not None:
+                    if first_boot_ms is None:
+                        first_boot_ms = int(boot_ms)
+                    last_wall = wall_start + (int(boot_ms) - first_boot_ms) / 1000.0
+                fh.write(json.dumps(_json_safe({
+                    "_t_wall": last_wall,
+                    "_dir": "rx",
+                    "_source": "native_raw",
+                    **msg.to_dict(),
+                })) + "\n")
+                decoded += 1
+    finally:
+        reader.f.close()
+    return decoded

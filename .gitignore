@@ -36,9 +36,16 @@ tmp/
 
 # Python packaging build artifacts
 *.egg-info/
+/build/
+/dist/
+*.spec
 
 # Node
 node_modules/
+/linkhub-ui/dist/
+
+# Rust
+/linkhub/target/
 
 # Presentation workspace artifacts
 presentations/dist/

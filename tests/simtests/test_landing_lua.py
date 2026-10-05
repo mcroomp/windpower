@@ -27,7 +27,7 @@ from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from groundstation.landing_planner import LandingGroundController
 from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_LANDING, LAND_FINAL_DROP

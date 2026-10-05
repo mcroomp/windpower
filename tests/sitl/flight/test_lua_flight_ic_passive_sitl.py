@@ -24,13 +24,19 @@ import pytest
 pytestmark = pytest.mark.sitl
 
 
+from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from tests.sitl.stack_infra import (  # noqa: E402
     StackContext,
     assert_no_mediator_criticals,
     get_arducopter_crash_info,
     observe,
 )
-from groundstation.gcs import NamedValueFloat, ServoOutputRaw, StatusText, decode_message
+from linkhub_client.messages import (
+    NamedValueFloat,
+    ServoOutputRaw,
+    StatusText,
+    decode_message,
+)
 
 # Timing
 _KINEMATIC_TIMEOUT_S = 60.0
@@ -82,26 +88,18 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
 
     thr_seed = _get_ic_thrust(ic)
     ten_seed = float(ic["tension_eq_n"])
-    R0 = ic.get("R0")
-    if R0 is None:
-        pytest.fail("initial_state missing R0 for IC passive attitude seed")
-    r20 = float(R0[2][0])
-    r21 = float(R0[2][1])
-    r22 = float(R0[2][2])
-    ic_roll_rad = math.atan2(r21, r22)
-    ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
-
     gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
     gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
-    gcs.send_message(NamedValueFloat("RAWES_RIC", ic_roll_rad))
-    gcs.send_message(NamedValueFloat("RAWES_PIC", ic_pitch_rad))
+    gcs.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
+    gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
+    gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
+    send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info(
-        "Release seeds: RAWES_THR=%.3f, RAWES_TEN=%.1f N, IC r/p=(%.2f, %.2f)deg, RAWES_MODE=3 ACK=%s",
+        "Release seeds: RAWES_THR=%.3f, RAWES_TEN=%.1f N, relative offsets=(0, 0, 0)deg, "
+        "RAWES_MODE=3 ACK=%s, passive anchor re-captured",
         thr_seed,
         ten_seed,
-        math.degrees(ic_roll_rad),
-        math.degrees(ic_pitch_rad),
         ok,
     )
 
@@ -111,7 +109,10 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
         "max_cyclic": 0,
     }
 
-    t_obs_start = gcs.sim_now()
+    kinematic_exit = ctx.events_log.last_event("kinematic_exit")
+    if kinematic_exit is None:
+        pytest.fail("kinematic_exit event disappeared after transition wait")
+    t_obs_start = float(kinematic_exit["t_sim"])
 
     def _handle(msg, t_rel):
         if msg is None:
@@ -145,7 +146,7 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
         from simulation.telemetry_csv import read_csv as _read_csv  # noqa: PLC0415
 
         rows = _read_csv(ctx.telemetry_log)
-        window = [r for r in rows if float(r.t_sim) >= t_obs_start]
+        window = [r for r in rows if float(r.t_sim) > t_obs_start]
         if len(window) < 2:
             pytest.fail(
                 f"Insufficient telemetry rows in passive observation window: {len(window)}"

@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.6
 
-FROM ubuntu:22.04 AS base
+ARG ARDUPILOT_RUNTIME_IMAGE=rawes-sim-ardupilot-base:Copter-4.7.1-v1
+
+FROM ubuntu:24.04 AS base
 
 # =============================================================================
 # RAWES simulation image
@@ -12,8 +14,9 @@ FROM ubuntu:22.04 AS base
 #   bash setup.sh build                                    (with ArduPilot)
 #
 # Or directly:
-#   docker build simulation/ -t rawes-sim --target runtime
-#   docker build simulation/ -t rawes-sim --target runtime-ardupilot
+#   docker build -f simulation/Dockerfile . -t rawes-sim --target runtime
+#   docker build -f simulation/Dockerfile . -t rawes-sim-ardupilot-base:Copter-4.7.1-v1 --target runtime-ardupilot-base
+#   docker build -f simulation/Dockerfile . -t rawes-sim --target runtime-ardupilot
 #
 # Stack tests spin up their own ephemeral containers:
 #   bash test.sh [-n N] [pytest args]
@@ -21,6 +24,7 @@ FROM ubuntu:22.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
+ENV PIP_INDEX_URL=https://packagefeedproxy.microsoft.io/pypi/simple/
 
 # =============================================================================
 # 1. System packages + non-root user for ArduPilot install
@@ -45,9 +49,9 @@ FROM base AS pyenv
 
 ENV VENV_DIR=/rawes/.venv
 
-COPY requirements.txt requirements-docker.txt /tmp/
+COPY simulation/requirements.txt simulation/requirements-docker.txt /tmp/
 RUN python3 -m venv "$VENV_DIR" \
-    && "$VENV_DIR/bin/pip" install --upgrade pip --quiet \
+    && "$VENV_DIR/bin/pip" install --index-url "$PIP_INDEX_URL" --upgrade pip --quiet \
     && "$VENV_DIR/bin/pip" install -r /tmp/requirements-docker.txt --quiet
 
 # Activate venv for all subsequent RUN commands and the final shell
@@ -65,20 +69,25 @@ RUN mkdir -p "$ARDUPILOT_PATH" && chown sim:sim "$ARDUPILOT_PATH"
 
 USER sim
 ENV USER=sim
-# Pinned to the stable Copter-4.7.0 release tag (not the moving ArduPilot-4.7
+# Pinned to the stable Copter-4.7.1 release tag (not the moving ArduPilot-4.7
 # branch head) so image rebuilds are reproducible. Required for the
 # vehicle:set_target_angle_and_rate_and_throttle scripting binding used by
 # rawes.lua, which does not exist in 4.6.x.
 # To move to a newer stable release: update ARDUPILOT_TAG below and
 # EXPECTED_ARDUPILOT_VERSION in tests/sitl/stack_utils.py together.
-ARG ARDUPILOT_TAG=Copter-4.7.0
-RUN git clone --recurse-submodules --branch "$ARDUPILOT_TAG" \
+ARG ARDUPILOT_TAG=Copter-4.7.1
+ARG ARDUPILOT_COMMIT=dbe792162d06cab66c3475fd5556bf7a120f119e
+RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
+        --branch "$ARDUPILOT_TAG" \
         https://github.com/ArduPilot/ardupilot.git "$ARDUPILOT_PATH" \
-    && cd "$ARDUPILOT_PATH" \
-    && export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    && Tools/environment_install/install-prereqs-ubuntu.sh -y \
-    && . ~/.profile \
-    && git config --global --add safe.directory "$ARDUPILOT_PATH" \
+    && test "$(git -C "$ARDUPILOT_PATH" rev-parse HEAD)" = "$ARDUPILOT_COMMIT"
+
+WORKDIR "$ARDUPILOT_PATH"
+RUN SKIP_AP_GRAPHIC_ENV=1 SKIP_AP_EXT_ENV=1 SKIP_AP_COV_ENV=1 \
+        DO_AP_STM_ENV=0 Tools/environment_install/install-prereqs-ubuntu.sh -y
+
+ENV PATH="/home/sim/venv-ardupilot/bin:${PATH}"
+RUN git config --global --add safe.directory "$ARDUPILOT_PATH" \
     && ./waf configure --board sitl \
     && ./waf --target bin/arducopter-heli
 USER root
@@ -112,7 +121,7 @@ RUN printf '\n# RAWES: Lua scripting on by default\nSCR_ENABLE 1\n' \
            2>/dev/null || true
 
 # =============================================================================
-# 4. Runtime image (no ArduPilot)
+# 4. Runtime image (no ArduPilot or LinkHub)
 # =============================================================================
 FROM pyenv AS runtime
 
@@ -136,9 +145,35 @@ EXPOSE 5762/tcp
 CMD ["/bin/bash"]
 
 # =============================================================================
-# 5. Runtime image with ArduPilot copied from reusable build stage
+# 5. Reusable runtime image with ArduPilot
 # =============================================================================
-FROM runtime AS runtime-ardupilot
+FROM runtime AS runtime-ardupilot-base
 
 ARG ARDUPILOT_PATH=/ardupilot
 COPY --from=ardupilot-build ${ARDUPILOT_PATH} ${ARDUPILOT_PATH}
+
+# =============================================================================
+# 6. LinkHub and final stack image
+#
+# LinkHub is deliberately built and copied onto a separately tagged ArduPilot
+# runtime image. setup.sh creates that image once and skips its build while the
+# versioned tag exists, so LinkHub source edits cannot invalidate ArduPilot.
+# =============================================================================
+FROM rust:1.95-bookworm AS linkhub-build
+
+WORKDIR /build
+COPY linkhub/Cargo.toml linkhub/Cargo.lock ./
+COPY linkhub/src ./src
+RUN --mount=type=cache,id=linkhub-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=linkhub-target,target=/build/target \
+    cargo build --locked --release \
+    && cp /build/target/release/linkhub /tmp/linkhub
+
+FROM ${ARDUPILOT_RUNTIME_IMAGE} AS runtime-ardupilot
+ARG RAWES_IMAGE_INPUT_HASH
+LABEL org.rawes.image-input-hash="${RAWES_IMAGE_INPUT_HASH}"
+# gdb lets SITL diagnostics snapshot thread stacks and mutex owners
+# (tests/sitl/thread_trace.py); containers run with SYS_PTRACE.
+RUN apt-get update && apt-get install -y --no-install-recommends gdb \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=linkhub-build /tmp/linkhub /usr/local/bin/linkhub

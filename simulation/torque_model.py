@@ -119,7 +119,7 @@ ESC_Q_MAX: float = 2.0
 class HubParams:
     """Physical parameters for the hub yaw model."""
     rpm_scale:          float = RPM_SCALE           # rad/s, motor speed at throttle=1
-    gear_ratio:         float = GEAR_RATIO          # omega_motor / omega_hub (80/44)
+    gear_ratio:         float = GEAR_RATIO          # omega_motor / omega_hub
     hub_inertia_kgm2:   float = HUB_INERTIA_KGM2    # inner-hub yaw inertia (no rotor)
     motor_inertia_kgm2: float = MOTOR_INERTIA_KGM2  # motor rotor inertia at shaft
     esc_kp:             float = ESC_KP              # governor torque per rad/s error

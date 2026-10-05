@@ -45,7 +45,7 @@ from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from simulation.rawes_lua_harness import RawesLua
 from simulation.winch import GovernedWinchController
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from groundstation.rawes_modes import MODE_STEADY, MODE_TAKEOFF, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
 
@@ -63,8 +63,8 @@ TARGET_THRUST     = 1.0             # RAWES_THR IC-seed sent during MODE_TAKEOFF
                                      # climb-out trim is needed here to sustain rotor RPM (a
                                      # hover-equilibrium seed lets the rotor slowly spin down and
                                      # the climb stall well short of TAKEOFF_MIN_ALT_M).
-TARGET_ROLL_RAD   = 0.0             # RAWES_RIC command sent each tick
-TARGET_PITCH_RAD  = 0.0             # RAWES_PIC command sent each tick
+TARGET_ROLL_RAD   = 0.0             # RAWES_ROFF command sent each tick
+TARGET_PITCH_RAD  = 0.0             # RAWES_POFF command sent each tick
 
 TAKEOFF_ALT_TARGET_M = 11.0   # RAWES_ALT commanded during MODE_TAKEOFF -- kept close to the transition
                                # threshold so the altitude PID is already decelerating (small alt_err,
@@ -206,8 +206,8 @@ def test_ground_liftoff(simtest_log):
             s.send_message(NamedValueFloat("RAWES_ALT", alt_cmd))
             s.send_message(NamedValueFloat("RAWES_TEN", TETHER_TEN_TARGET_N))
             s.send_message(NamedValueFloat("RAWES_THR", capture_thrust_seed))
-        s.send_message(NamedValueFloat("RAWES_RIC", TARGET_ROLL_RAD))
-        s.send_message(NamedValueFloat("RAWES_PIC", TARGET_PITCH_RAD))
+        s.send_message(NamedValueFloat("RAWES_ROFF", TARGET_ROLL_RAD))
+        s.send_message(NamedValueFloat("RAWES_POFF", TARGET_PITCH_RAD))
 
     for i in range(total_steps):
         t = i * DT

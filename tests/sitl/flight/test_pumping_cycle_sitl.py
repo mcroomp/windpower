@@ -42,9 +42,10 @@ from tests.sitl.stack_infra import (
     assert_no_mediator_criticals, assert_procs_alive,
 )
 from simulation.telemetry_csv import read_csv
+from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from groundstation.pumping_planner import PumpingGroundController
 from groundstation.unified_ground import _cmd_to_nv
-from groundstation.gcs import NamedValueFloat, StatusText, decode_message
+from linkhub_client.messages import NamedValueFloat, StatusText, decode_message
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _ROTOR = load_default_rotor()
@@ -79,7 +80,9 @@ _TENSION_LIMIT_N = 2.0 * _BREAK_LOAD_N   # 1240 N
 _SOCK_TIMEOUT = 0.5
 
 
-@pytest.mark.timeout(int(_OBS_SECONDS) + 120)
+# Four concurrent Docker workers can advance this long physics run at less than
+# half real time on a loaded host.
+@pytest.mark.timeout(int(_OBS_SECONDS) + 1500)
 def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     """
     Pumping cycle stack test: PumpingGroundController in test process,
@@ -119,17 +122,13 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             "initial_state missing thrust seed: eq_thrust"
         )
     ten_seed = float(ic["tension_eq_n"])
-    R0 = ic.get("R0")
-    if R0 is None:
-        pytest.fail("initial_state missing R0 for IC passive attitude seed")
-    ic_roll_rad  = math.atan2(float(R0[2][1]), float(R0[2][2]))
-    ic_pitch_rad = -math.asin(max(-1.0, min(1.0, float(R0[2][0]))))
-
     gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
     gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
-    gcs.send_message(NamedValueFloat("RAWES_RIC", ic_roll_rad))
-    gcs.send_message(NamedValueFloat("RAWES_PIC", ic_pitch_rad))
+    gcs.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
+    gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
+    gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
     gcs.set_param("RAWES_MODE", 3, timeout=5.0)
+    send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
     gcs.sim_sleep(10.0)
     ok = gcs.set_param("RAWES_MODE", 1, timeout=5.0)
@@ -150,10 +149,13 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
         v_cruise_in      = V_CRUISE_IN,
         capture_settle_s = CAPTURE_SETTLE_S,
     )
-    # The MODE_PASSIVE->STEADY promotion above already established steady capture;
-    # arm the planner's capture gate so the settle countdown begins immediately.
-    if captured_seen:
-        planner.notify_captured(gcs.sim_now())
+    # The fixture has already established GPS fusion and the passive anchor. The
+    # explicit MODE_STEADY promotion above starts Lua capture, so begin the ground
+    # planner's settle countdown from the same transition instead of depending on
+    # asynchronously chunked STATUSTEXT delivery.
+    planner_capture_time = gcs.sim_now()
+    planner.notify_captured(planner_capture_time)
+    log.info("Planner capture gate armed at t=%.3f s", planner_capture_time)
 
     # ── Winch command socket = the winch cable ─────────────────────────────
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -179,8 +181,10 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
     tension_now  = TENSION_IC
     rest_length  = _init_len
     net_energy_j = 0.0
+    previous_phase = planner.phase
 
     deadline = gcs.sim_now() + _OBS_SECONDS
+    message_cursor = gcs.current_cursor()
     log.info("--- test_pumping_cycle_lua_sitl: observing %.0f s ---", _OBS_SECONDS)
 
     try:
@@ -204,6 +208,22 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                 t_plan_next = t_sim + dt_plan
 
                 cmd = planner.step(t_sim, tension_now, rest_length)
+                if (
+                    planner.phase == "hold"
+                    and planner.cycle_count < N_CYCLES
+                    and t_sim - planner_capture_time >= CAPTURE_SETTLE_S + 5.0
+                ):
+                    pytest.fail(
+                        "Pumping planner remained in hold after capture settle: "
+                        f"capture_t={planner_capture_time:.3f}, now={t_sim:.3f}, "
+                        f"captured={planner.captured}, rest_length={rest_length:.3f}"
+                    )
+                if planner.phase != previous_phase:
+                    log.info(
+                        "Planner phase: %s -> %s at t=%.1f s, rest_length=%.2f m",
+                        previous_phase, planner.phase, t_sim, rest_length,
+                    )
+                    previous_phase = planner.phase
 
                 # Send WinchCommand down the cable (cruise velocity + tension
                 # target -- the planner's winch_target_velocity drives the
@@ -224,17 +244,20 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                     break
 
             # ── Drain MAVLink for STATUSTEXT ──────────────────────────────
-            msg = gcs._recv(
-                type=["STATUSTEXT"],
-                blocking=False, timeout=0.01,
+            batch = gcs.read_messages(
+                message_cursor,
+                ["STATUSTEXT"],
+                limit=100,
             )
-            if msg is not None and isinstance((decoded := decode_message(msg)), StatusText):
-                text = decoded.text
-                all_statustext.append(text)
-                log.info("STATUSTEXT: %s", text)
-                if "RAWES steady: captured" in text:
-                    captured_seen = True
-                    planner.notify_captured(gcs.sim_now())
+            message_cursor = batch.next_cursor
+            for msg in batch.messages:
+                if isinstance((decoded := decode_message(msg)), StatusText):
+                    text = decoded.text
+                    all_statustext.append(text)
+                    log.info("STATUSTEXT: %s", text)
+                    if "RAWES steady: captured" in text:
+                        captured_seen = True
+                        planner.notify_captured(gcs.sim_now())
 
         sock.close()
 

@@ -1,5 +1,6 @@
 @echo off
 setlocal
+set "PIP_INDEX_URL=https://packagefeedproxy.microsoft.io/pypi/simple/"
 
 set "REPO=%~dp0"
 set "REPO=%REPO:~0,-1%"
@@ -60,13 +61,18 @@ if errorlevel 1 (
 echo %DIGEST%>"%STAMP%"
 
 :install_pkg
-:: Hash-gated editable install: only reinstall when pyproject.toml changes.
-:: The editable install is what makes `import simulation`/`groundstation`/etc.
-:: work from any cwd or when a script is invoked by path (rather than via
-:: `python -c` from repo root) -- but re-running pip install -e on every
-:: invocation is unnecessary overhead once it's already registered.
+:: Install the editable package only when its distribution is missing.
+:: Re-running pip install -e can invoke the build backend and appear to hang,
+:: while an existing editable install remains valid as source files change.
 if not exist "%PYPROJECT%" (
     echo [WARN] pyproject.toml not found -- skipping editable install
+    goto :done
+)
+set "PKG_PRESENT="
+"%PYTHON%" -c "import importlib.metadata as m; m.version('rawes')" >nul 2>nul
+if not errorlevel 1 set "PKG_PRESENT=1"
+if defined PKG_PRESENT (
+    echo [INFO] rawes editable package already installed -- skipping pip install -e
     goto :done
 )
 for /f "skip=1 tokens=1" %%H in ('certutil -hashfile "%PYPROJECT%" SHA256 2^>nul') do (
@@ -92,6 +98,25 @@ if errorlevel 1 (
 echo %PKG_DIGEST%>"%PKG_STAMP%"
 
 :done
+set "LINKHUB=%REPO%\linkhub\target\release\linkhub.exe"
+if not exist "%LINKHUB%" (
+    echo [INFO] Building LinkHub with Bluetooth support ...
+    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release --features bluetooth
+    if errorlevel 1 (
+        echo ERROR: LinkHub build failed.
+        exit /b 1
+    )
+)
+set "LINKHUB_CLIENT=%REPO%\linkhub_client"
+"%PYTHON%" -c "import linkhub_client.client" >nul 2>nul
+if errorlevel 1 (
+    echo [INFO] Installing linkhub-client package ^(editable^) ...
+    "%PYTHON%" -m pip install -e "%LINKHUB_CLIENT%" --no-deps --quiet
+    if errorlevel 1 (
+        echo ERROR: linkhub-client editable install failed.
+        exit /b 1
+    )
+)
 echo [INFO] Done.
 "%PYTHON%" --version
 endlocal

@@ -1,6 +1,6 @@
 """analyze_yaw_oscillation.py -- yaw limit-cycle / Lua-trim interaction analyzer.
 
-Reads a calibrate ``.mavlink.jsonl`` traffic log (written by RawesGCS /
+Reads a calibrate ``.mavlink.jsonl`` traffic log (legacy, written by
 MavlinkLogWriter) and characterises the yaw oscillation and how it interacts
 with the Lua yaw-trim feedforward.
 

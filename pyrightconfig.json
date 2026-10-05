@@ -1,25 +1,29 @@
 {
   "include": [
     "simulation",
+    "groundstation",
     "arduloop",
+    "calibrate",
     "envelope",
     "analysis",
     "viz3d",
     "scripts",
-    "tests"
+    "tests",
+    "linkhub_client"
   ],
   "exclude": [
     "**/__pycache__",
+    "**/tests/oneoff",
     ".pytest_cache",
     ".venv",
     "simulation/logs"
   ],
   "extraPaths": [
-    "../aero/dynbem/python"
+    "linkhub_client/src"
   ],
   "venvPath": ".",
   "venv": ".venv",
-  "pythonVersion": "3.10",
+  "pythonVersion": "3.12",
   "typeCheckingMode": "basic",
   "reportMissingImports": "warning",
   "reportMissingModuleSource": "none"

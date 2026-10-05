@@ -37,11 +37,11 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(30)]
 
 import simulation.torque_model as _m
 from simulation.rawes_lua_harness import RawesLua
-from groundstation.gcs import NamedValueFloat
-from groundstation.rawes_modes import MODE_PASSIVE
+from linkhub_client.messages import NamedValueFloat
+from groundstation.rawes_modes import CMD_ENTER_PASSIVE, MODE_PASSIVE, enter_passive_params
 
 # ---------------------------------------------------------------------------
-# Plant constants (torque_model defaults — GB4008 66KV, 80:44 gear, 4S LiPo)
+# Plant constants (torque_model defaults — GB4008 66KV, 10:1 gear, 4S LiPo)
 # ---------------------------------------------------------------------------
 _PARAMS      = _m.HubParams()
 _OMEGA_ROTOR = 200.0 * (2.0 * math.pi / 60.0)  # 200 RPM = 20.94 rad/s (design target)
@@ -109,8 +109,9 @@ def test_yaw_regulation_lua():
 
     # Seed IC so _ic_seeded becomes True on the first update() tick
     sim.send_message(NamedValueFloat("RAWES_THR", _IC_THRUST))
-    sim.send_message(NamedValueFloat("RAWES_RIC", _IC_ROLL))
-    sim.send_message(NamedValueFloat("RAWES_PIC", _IC_PITCH))
+    sim.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
+    sim.send_message(NamedValueFloat("RAWES_POFF", 0.0))
+    sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
 
     # ---------------------------------------------------------------------------
     # Closed-loop simulation

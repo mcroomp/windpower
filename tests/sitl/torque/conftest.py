@@ -41,10 +41,9 @@ def torque_armed(tmp_path, request):
 
     Boots from the FLIGHT default params (dual-GPS yaw, GPS pos/vel enabled) via
     profile="ic": the hub is held at the steady-state tethered-hover attitude
-    (roll=0, pitch=-63.6 deg) instead of level.  rawes.lua boots in MODE_PASSIVE
-    (RAWES_MODE=3); the IC operating point is seeded before arm (collective=
-    LUA_YAW_IC_COL, RIC/PIC=IC roll/pitch) and the EKF pre-arm attitude is seeded
-    from the live yaw.  ArduPilot's DDFP yaw PID regulates hub yaw via Motor4.
+    (roll=0, pitch=-63.6 deg) instead of level. rawes.lua boots in MODE_PASSIVE
+    (RAWES_MODE=3); the current physical attitude is captured as the passive anchor
+    before arming. ArduPilot's DDFP yaw PID regulates hub yaw via Motor4.
     """
     import simulation.torque_model as _m
     with _torque_stack(
@@ -54,9 +53,6 @@ def torque_armed(tmp_path, request):
         test_name=request.node.name,
         passive_init=True,
         passive_thrust=LUA_YAW_IC_THRUST,
-        passive_roll_rad=_IC_ROLL_RAD,
-        passive_pitch_rad=_IC_PITCH_RAD,
-        passive_yaw_rad=_IC_YAW_RAD,
     ) as ctx:
         yield ctx
 
@@ -190,6 +186,36 @@ def torque_unarmed_lua(tmp_path, request):
     disarm timer.
     """
     with _lua_torque_stack(tmp_path, request, armon_ms=0) as ctx:
+        yield ctx
+
+
+@pytest.fixture
+def torque_unarmed_lua_calibrate(tmp_path, request):
+    """Compass-only torque stack whose lifecycle is owned by calibrate run passive."""
+    import simulation.torque_model as _m
+
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
+        tail_channel=8,
+        extra_params=_LUA_TORQUE_EXTRA_PARAMS,
+        install_scripts=("rawes.lua",),
+        test_name=request.node.name,
+        armon_ms=0,
+        target_mode=1,
+        boot_params={
+            "GCS_PID_MASK": 4,
+            "H_COL_MIN": 1342,
+            "H_COL_MAX": 1657,
+            "H_COL_ANG_MIN": -2,
+            "H_COL_ANG_MAX": 12,
+            "H_COL_LAND_MIN": -2,
+            "H_FLYBAR_MODE": 1,
+            "IM_ACRO_COL_EXP": 0,
+            "SCR_DEBUG_OPTS": 8,
+        },
+        startup_hold_s=35.0,
+    ) as ctx:
         yield ctx
 
 

@@ -310,7 +310,7 @@ Mode picks two things — *where the rotor axle should aim* and *how hard the bl
 | 0 — none | (controller off) | (controller off) | passive logging |
 | 1 — steady | along the tether, at the target altitude the ground gave us | enough to hold a vertical speed of zero (hover) | hover at a fixed altitude |
 | 2 — ACRO manual | normalized RAWES_RLL/RAWES_PIT through ACRO flybar passthrough | normalized RAWES_COL through ACRO collective | manual bench/flight control with AP yaw regulation |
-| 3 — passive | IC attitude angle (RAWES_RIC/RAWES_PIC roll/pitch + AHRS yaw captured at entry) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
+| 3 — passive | Lua-captured AHRS quaternion anchor composed with relative RAWES_ROFF/POFF/YOFF offsets (§4.2b) | IC collective via GUIDED throttle | armed-but-quiet during kinematic release |
 | 4 — landing | frozen at the descent attitude captured on entry | enough to descend at 0.5 m/s; on the final-drop signal, drop to zero | vertical descent over the anchor |
 
 **Before the first GPS fix:** we don't know where the hub is yet, so the loop runs degenerately — blade pitch is held at a safe cruise value, and tilt commands are pass-throughs of the gyro so the rotor doesn't fight its natural orbital precession. On the first fix, the elevation target initialises and the mode-specific loop above takes over (§4.2).
@@ -346,14 +346,28 @@ All other flight tunables (anchor position, slew rate, cyclic gains) are deliver
 | RAWES_SUB | 0–4 | Pumping substate or landing trigger (LAND_FINAL_DROP=1) |
 | RAWES_ALT | m | Target altitude above anchor. Lua rate-limits elevation at RAWES_SLW rad/s. |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in mode 1 (incl. the pumping schedule). Never the measured/load-cell tension. Ramped by RAWES_TRP. |
-| RAWES_RIC | rad | IC roll — part of the atomic passive IC seed (`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`). MODE_PASSIVE commands it as the GUIDED roll angle target. |
-| RAWES_PIC | rad | IC pitch — part of the atomic IC seed. MODE_PASSIVE commands it as the GUIDED pitch angle target. |
-| RAWES_THR | [0..1] | IC thrust — part of the atomic IC seed. MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
-| RAWES_YIC | rad, or the `RAWES_YIC_CAPTURE_SENTINEL` (-1000) | Legacy fixed-yaw/passive-capture input. Sending the sentinel through a ground client captures the current roll/pitch/yaw on board. Interactive calibration uses the atomic quaternion interface below. |
-| RAWES_QW/QX/QY/QZ | unit quaternion | Atomic passive attitude target. Lua waits for all four components, normalizes the quaternion, then updates the active roll/pitch/yaw target together. |
+| RAWES_ROFF | rad | Passive roll offset relative to the Lua-captured anchor (§4.2b). Latched; may be sent before or after ENTER_PASSIVE. |
+| RAWES_POFF | rad | Passive pitch offset relative to the Lua-captured anchor. |
+| RAWES_YOFF | rad | Passive yaw offset relative to the Lua-captured anchor. |
+| RAWES_THR | [0..1] | IC/passive thrust. ENTER_GUIDED requires it; MODE_PASSIVE maps it directly to GUIDED throttle to preserve rotor RPM during kinematic. |
 | RAWES_RLL | [-1..1] | Latched ACRO-manual roll input. Lua converts it with the inverse RC MIN/TRIM/MAX mapping and continuously refreshes the RC override. |
 | RAWES_PIT | [-1..1] | Latched ACRO-manual pitch input. Positive is ArduPilot positive pitch; the calibration Up arrow increases it. |
 | RAWES_COL | [0..1] | Latched ACRO-manual collective input using RC3 MIN/MAX and reversal. |
+
+**Command inputs (ground → Lua, via `COMMAND_LONG`):** one-shot actions use
+script-handled MAVLink commands instead of NAMED_VALUE_FLOAT. rawes.lua calls
+`mavlink:block_command(id)` so ArduPilot's GCS command handler skips them
+(no autopilot ACK), receives the COMMAND_LONG through its rx queue, and sends
+the single `COMMAND_ACK` itself on the receiving channel. Ground clients
+retry with an incremented `confirmation`; Lua treats a retry of an already
+completed command as ACCEPTED without repeating the side effect. Rejections
+also emit `RAWES cmd <id> rejected: <reason>` STATUSTEXT. IDs live in
+`groundstation/rawes_modes.py` (`CMD_*`) and `linkhub-ui/src/passive.ts`.
+
+| Command | ID | Params | Lua action | Gate (else DENIED; set_mode failure → FAILED) |
+|---|---|---|---|---|
+| ENTER_GUIDED | 31010 (`MAV_CMD_USER_1`) | none | Captures the current AHRS quaternion, calls `vehicle:set_mode(GUIDED_NOGPS)` and installs that attitude + IC thrust in the same tick, then holds it (guided-entry hold; re-sent only on change or as a 1 s keepalive, see §4.2b) until ENTER_PASSIVE, disarm, or a mode other than 2/3. This removes the level-target transient that `ModeGuided::angle_control_start()` would otherwise command before the first ground target arrives. | armed, `RAWES_MODE=2`, IC thrust seeded, AHRS healthy |
+| ENTER_PASSIVE | 31011 (`MAV_CMD_USER_2`) | param1 = yaw-trim seed [0, `RAWES_YFF_MAX`]; negative = adaptive observer | Captures the passive quaternion anchor (§4.2b), enables passive hold and ends the guided-entry hold. | `RAWES_MODE=3`, AHRS healthy |
 
 **Named int inputs (ground → Lua, via `gcs.send_message(NamedValueInt(...))`, one-shot anchor location):**
 
@@ -376,8 +390,8 @@ altitude hold (see `_try_resolve_anchor()` in rawes.lua).
 with `1` (the prior default) multiple back-to-back NAMED_VALUE_FLOATs sent
 by the ground get dropped — only the first survives until the next
 update() drains it.  20 is safe for the typical ~5 NVFs/tick burst.
-Both NAMED_VALUE_FLOAT (msgid 251) and NAMED_VALUE_INT (msgid 252) are
-registered and share this one queue; the drain loop peeks the 3-byte msgid
+NAMED_VALUE_FLOAT (msgid 251), NAMED_VALUE_INT (msgid 252) and
+COMMAND_LONG (msgid 76) are registered and share this one queue; the drain loop peeks the 3-byte msgid
 at byte offset 10 (`string.unpack("<I3", raw, 10)`) to dispatch each message.
 
 `_nv_floats` dict resets to `{}` on every mode change. `_nv_ints` (anchor) is
@@ -414,57 +428,48 @@ On first valid GPS fix: initialize `_el_rad` and `_target_alt` from position, se
 ### 4.2b Mode 3 — Passive (RAWES_MODE=3)
 
 Armed-but-quiet mode used during the kinematic hold/release of stack tests.
-The vehicle stays armed (motor interlock ch8 high) and the Lua commands the
-**IC attitude as a GUIDED angle target** plus the IC collective as GUIDED
-throttle.  It does **not** write swashplate channels directly and runs **no**
-closed-loop guidance (no body_z error, no altitude hold, no winch).
+The vehicle stays armed (motor interlock ch8 high) and does **not** write
+swashplate channels directly or run body_z/altitude/winch guidance.
 
-**IC seeding (atomic).**  Three NVFs must all be observed before passive
-emits any control output:
+**Ground-owned capture gate.** After the temporary landed-state-clearing
+collective, ground sends the ENTER_GUIDED command. Lua switches to
+GUIDED_NOGPS and holds the attitude it captured in that same tick (see the
+command table above), so there is no window in which ArduPilot's level entry
+target is active. Calibration then qualifies active mode, estimator events,
+telemetry freshness, body-rate threshold, and continuous quiet duration. These
+policies are tunable without a Lua upload (`--settle-rate-deg-s`,
+`--settle-time`, `--settle-timeout`).
 
-- `RAWES_RIC` — IC roll  [rad]
-- `RAWES_PIC` — IC pitch [rad]
-- `RAWES_THR` — IC thrust [0..1]
+**Lua-owned quaternion anchor.** Ground sets `RAWES_MODE=3` (the guided-entry
+hold keeps streaming) and then sends ENTER_PASSIVE. Lua performs a final AHRS
+health/quaternion-validity check, captures `ahrs:get_quaternion()` once,
+enables passive hold, and acknowledges the command. Ground sends complete
+relative state through:
 
-Until all three arrive, `run_passive_mode` returns early and emits no
-control-API traffic (no guided target writes, no arm/disarm). Once `_ic_seeded`
-latches, incremental updates to any of the three are accepted.
+- `RAWES_ROFF` — roll offset [rad];
+- `RAWES_POFF` — pitch offset [rad];
+- `RAWES_YOFF` — yaw offset [rad].
 
-**Initial target capture.** `calibrate run passive` reads the current MAVLink
-`ATTITUDE_QUATERNION` and retains it as `q_initial`. Keyboard offsets are
-composed as `q_target = q_initial * q_relative`, then sent atomically through
-`RAWES_QW/QX/QY/QZ`; `-`/`=` update THR. Lua converts a complete normalized
-quaternion to Euler only at the final ArduPilot scripting API boundary because
-`vehicle:set_target_angle_and_rate_and_throttle` has no quaternion overload.
-The Lua `RAWES_YIC_CAPTURE_SENTINEL` path remains available to other ground
-clients that cannot read and echo the current attitude. A sentinel capture
-commits directly to the active roll/pitch fields because `_ic_seeded` persists
-across mode transitions for the whole FC boot.
+Lua computes `q_target = q_anchor * q_relative`, normalizes it, and converts to
+Euler only at the final `set_target_angle_and_rate_and_throttle` API boundary.
+The target is sent when it changes (at most every `PASSIVE_TARGET_PERIOD_MS`,
+50 ms) and otherwise only as a `GUIDED_KEEPALIVE_MS` (1 s) keepalive, well
+inside `GUID_TIMEOUT` (3 s): every `vehicle:*` binding takes the scheduler
+semaphore and repeated calls starve the scripting thread in SITL. No
+`AP_Vehicle` call is made before activation and passive hold does not
+separately poll `vehicle:get_mode()`.
+The anchor remains fixed until hold is explicitly disabled. Space in the
+interactive tool resets all offsets to zero; it does not recapture the anchor.
 
-**Per-tick command** (once seeded and in GUIDED):
+Lua owns continuous RC fallback throughout the handoff. ACRO staging temporarily
+uses the passive collective to clear landed state. Mode 3 changes RC1-RC4 to
+neutral roll, pitch, collective, and yaw before its first steady
+`vehicle:set_target_*()` call, and keeps those overrides active in GUIDED_NOGPS.
 
-1. A fixed `RAWES_YIC` is held when supplied. Otherwise yaw is captured once
-   from `ahrs:get_yaw_rad()` on the first ready tick and held thereafter.
-2. `vehicle:set_target_angle_and_rate_and_throttle(_ic_roll_deg,
-   _ic_pitch_deg, deg(_passive_hold_yaw_rad), 0, 0, 0, throttle)` — the IC
-   roll/pitch **angle** target with **zero rate feed-forward**.
-3. `throttle = _ic_thrust` passes the IC thrust directly to GUIDED throttle.
-
-During the kinematic hold the `nul`-aero integrates this angle command, so the
-disk slews from the level pre-arm seed toward the commanded IC roll/pitch.
-The test promotes MODE_PASSIVE → MODE_STEADY after the mediator's
-`kinematic_exit` event; the collective hand-off is seamless because steady
-seeds its vertical-speed integrator from the same IC collective.
-
-`_ic_roll_deg`, `_ic_pitch_deg`, `_ic_thrust` are populated by
-`RAWES_RIC`/`RAWES_PIC`/`RAWES_THR`.  Before the full seed arrives passive is
-inert (no defaults are commanded).
-
-**Yaw observer in passive mode.**  `run_yaw_trim()` runs every tick alongside
-`run_passive_mode()` once the IC is seeded and the vehicle is armed.  It reads
-the actual SERVO9 output back via `SRV_Channels:get_output_pwm(36)` and drives
-`H_YAW_TRIM` toward the equilibrium throttle (see §5.2).  The trim resets to
-0 on PASSIVE entry and converges within ~1 s.
+**Yaw observer.** Passive yaw trim remains inhibited before ENTER_PASSIVE.
+After the fixed anchor is active, `run_yaw_trim()` may operate alongside the
+angle hold and reads actual SERVO9 output via
+`SRV_Channels:get_output_pwm(36)` (see §5.2).
 
 ### 4.3 Mode 1 — Steady (RAWES_MODE=1)
 
@@ -565,7 +570,7 @@ Re-sending refreshes the timer. Works in any mode.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC overrides only in mode 2 | 400 Hz / 100 Hz | GUIDED setpoints in automatic modes; normalized NVP → refreshed RC override → ACRO flybar mixer in mode 2. |
+| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC fallback in modes 2 and 3 | 400 Hz / 100 Hz | Mode 2 applies normalized staging commands through ACRO; mode 3 refreshes neutral fallback overrides while GUIDED setpoints own active control. |
 | Ch4 (yaw input) | rawes.lua | 100 Hz | Held at 1500 µs so AP yaw-rate demand is zero; AP yaw PID and Lua trim observer drive the anti-rotation motor. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
 | Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/2/3/4) | 400 Hz / 100 Hz | DDFP CW (H_TAIL_TYPE=3, no sign flip): CCW body drift -> positive PID -> positive throttle. |
@@ -577,8 +582,8 @@ Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes
 ACRO manual additionally requires `H_FLYBAR_MODE=1` and
 `IM_ACRO_COL_EXP=0`. Disabling ACRO collective expo makes `RAWES_COL`
 follow the same linear normalized `[0,1]` collective convention as the
-GUIDED throttle path. Leaving mode 2 writes override value zero on RC1–RC3,
-which immediately releases those Lua overrides.
+GUIDED throttle path. The mode-2 to mode-3 handoff does not release RC1-RC3;
+it replaces the temporary staging values with neutral fallback overrides.
 
 ```
 Sensing:    gyro.z (from EKF attitude estimate)
@@ -586,6 +591,12 @@ Control:    ATC_RAT_YAW P/I/D → Motor4 output (H_TAIL_TYPE=3 DDFP CW, no sign 
 Actuator:   anti-rotation motor on output 9 (AUX 1)
             (current hardware: GB4008 + 10:1 spur gear — see components.md)
 ```
+
+During the LinkHub UI stationary passive bench route, ground sends
+ENTER_PASSIVE with param1 = 0. Lua holds that explicit trim seed instead
+of adapting from a disconnected actuator, while continuing to publish the
+live applied Motor4 readback as `YFF_U`. A 2026-10-05 disconnected acceptance
+run measured `YFF_T=0` and `YFF_U=0` for all 59 passive-hold samples.
 
 **H_TAIL_TYPE=3 (DDFP CW):** NO sign flip — under the US-convention rotor body drifts CCW (gyro:z() < 0) → error positive → PID positive → throttle positive → motor on.
 
@@ -719,7 +730,7 @@ Lua is unavailable on the first boot from a fresh EEPROM.
 | FRAME_CLASS | 6 (Heli) | Traditional helicopter frame |
 | H_SW_TYPE | 3 (H3_120) | ArduPilot mixer used for the physical HR3-120 front-elevator layout |
 | H_SW_COL_DIR | 1 (reversed) | Required with reversed swash servos for HR3-120 |
-| H_RSC_MODE | 1 (CH8 passthrough) | Wind-driven rotor — instant runup_complete |
+| H_RSC_MODE | 1 (CH8 passthrough) | Wind-driven rotor; ArduPilot still applies `H_RSC_RAMP_TIME` and `H_RSC_RUNUP_TIME` before `runup_complete` |
 | H_SW_PHANG | 0 (confirmed) | No phase offset. Built-in +90° roll advance in H3_120 already aligns with RAWES layout. Cross-coupling <20% confirmed via test_h_phang. |
 | H_COL_MIN | 1000 µs | Full servo range (not default 1250–1750) |
 | H_COL_MAX | 2000 µs | Full servo range |
@@ -865,7 +876,7 @@ flowchart TD
 ```python
 params = {
     "ARMING_SKIPCHK": 0xFFFF,  # skip ALL pre-arm checks (4.7+ name; ARMING_CHECK silently fails)
-    "H_RSC_MODE":     1,        # CH8 passthrough — instant runup_complete
+    "H_RSC_MODE":     1,        # CH8 passthrough; configured runup timing still applies
     "FS_THR_ENABLE":  0,        # no RC throttle failsafe
     "FS_GCS_ENABLE":  0,        # no GCS heartbeat failsafe
 }
@@ -873,8 +884,23 @@ params = {
 # 1. Set params above
 # 2. Wait for ATTITUDE messages (EKF attitude aligned)
 # 3. Send force arm (param2=21196 in MAV_CMD_COMPONENT_ARM_DISARM)
-# 4. HEARTBEAT shows armed=True immediately (mode 1 = instant runup_complete)
+# 4. HEARTBEAT shows armed=True; wait for configured RSC runup before flight control
 ```
+
+`H_RSC_MODE=1` does **not** make traditional-heli runup instantaneous. After
+interlock assertion, ArduPilot ramps `_rotor_ramp_output` over
+`H_RSC_RAMP_TIME` and estimates rotor speed over `H_RSC_RUNUP_TIME`;
+`runup_complete` requires both to reach 1.0. While GUIDED angle control is
+landed with positive thrust, it calls `zero_throttle_and_relax_ac()` and does
+not apply the requested attitude until spool state reaches
+`THROTTLE_UNLIMITED`. Entering GUIDED before runup therefore flattens the
+internal roll/pitch target and produces a large target slew when runup
+completes, even when the requested quaternion equals the actual attitude.
+
+Passive startup must clear Copter's landed state in armed ACRO before entering
+GUIDED_NOGPS; otherwise GUIDED deliberately installs a level roll/pitch target.
+The canonical safe sequence, flybar/manual-servo constraints, telemetry gates,
+and current validation status are owned by [arming.md](arming.md).
 
 ### B.2 RAWES_ARM Lua Timer (Lua tests)
 
@@ -903,7 +929,7 @@ params = {
 | Parameter | Value | Reason |
 |---|---|---|
 | ARMING_SKIPCHK | 0xFFFF | Skip all pre-arm checks (4.7+ name) |
-| H_RSC_MODE | 1 | CH8 passthrough — instant runup_complete |
+| H_RSC_MODE | 1 | CH8 passthrough; ramp/runup timing still gates `runup_complete` |
 | COMPASS_USE | 0 | Disabled — GB4008 interference on hardware; cycling in SITL |
 | COMPASS_ENABLE | 0 | Same |
 | GPS_AUTO_CONFIG | 0 | Do not reconfigure F9P chips (corrupts RELPOSNED) |
@@ -1090,7 +1116,7 @@ level first.
 | `simulation/torque_model.py` | Hub yaw kinematics: `HubParams`, `HubState`, `step()`, `equilibrium_throttle()` |
 | `simulation/mediator_torque.py` | Standalone torque SITL mediator |
 | `simulation/comms.py` | `VirtualComms` (simtest-only comms link) |
-| `groundstation/gcs.py` | `RawesGCS` MAVLink client: arm, mode, params, `send_message`, message dataclasses (`NamedValueFloat`, ...) |
+| `linkhub_client/` | `LinkHubClient` (arm, mode, params, `send_message` through LinkHub) and MAVLink message dataclasses (`NamedValueFloat`, ...) |
 | `simulation/sensor.py` | `PhysicalSensor` — honest NED sensors (accel, gyro, vel) |
 | `analysis/analyse_run.py` | Post-run report: physics + EKF/GPS + attitude per time bucket |
 | `analysis/analyse_landing.py` | Landing diagnosis: alt/vz/winch/tension/collective per bucket |

@@ -46,11 +46,9 @@ _SERVO_FMT_32    = "<HHI32H"   # magic, frame_rate, frame_count, pwm×32
 _SERVO_SIZE_16   = struct.calcsize(_SERVO_FMT_16)   # 40 bytes
 _SERVO_SIZE_32   = struct.calcsize(_SERVO_FMT_32)   # 72 bytes
 
-# Simulation clock is fixed and monotonic: one physics step per received
-# lockstep servo packet at a constant rate.
-# Change this single constant to adjust the SITL lockstep physics rate.
-SIM_CLOCK_HZ     = 1200
-_SIM_DT_S        = 1.0 / SIM_CLOCK_HZ
+# Fallback before the first packet arrives. ArduPilot's packet header is the
+# runtime source of truth; SITL defaults set SIM_RATE_HZ to this same value.
+SIM_CLOCK_HZ = 400
 
 
 class SITLInterface:
@@ -244,13 +242,17 @@ class SITLInterface:
 
         # Record SITL's address so send_state() knows where to reply
         self._sitl_addr = addr
+        if self._sim_steps == 0:
+            log.info("First SITL servo packet declares frame_rate=%d Hz", frame_rate)
+        elif frame_rate == SIM_CLOCK_HZ and self._frame_rate != SIM_CLOCK_HZ:
+            log.info("SITL servo frame rate settled at %d Hz", frame_rate)
         if frame_rate > 0:
             self._frame_rate = frame_rate
         self._frame_count = int(frame_count)
 
-        # Fixed monotonic sim clock: exactly one tick per lockstep packet.
+        # Monotonic sim clock: one tick at the rate declared by this packet.
         self._sim_steps += 1
-        self._sim_time_s = self._sim_steps * _SIM_DT_S
+        self._sim_time_s += self.dt()
 
         pwm = np.array(pwm_raw[:16], dtype=np.float64)
         self._last_pwm_raw = pwm
@@ -281,8 +283,8 @@ class SITLInterface:
         return self._frame_count
 
     def dt(self) -> float:
-        """Physics timestep [s] for the fixed simulation clock."""
-        return _SIM_DT_S
+        """Physics timestep [s] declared by the latest SITL servo packet."""
+        return 1.0 / self._frame_rate
 
 
 # ---------------------------------------------------------------------------

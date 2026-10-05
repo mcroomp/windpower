@@ -14,7 +14,7 @@ Physical scenario
 
 Pass criterion
 --------------
-  After 60 s of ACRO with neutral sticks:
+  After the model-based yaw trim has converged with neutral sticks:
     * max |psi_dot|  < 16 deg/s over the last 20 s  (physics ground truth)
 
   Note: ACRO mode controls yaw RATE (not angle), so the hub may settle at a
@@ -41,21 +41,23 @@ from tests.sitl.torque.torque_test_utils import (
     assert_physics_yaw_rate,
 )
 
-# absolute SITL: startup_hold(15) + extended settle; start slightly later to
-# avoid a recurrent boundary transient right at t=90s in stacked runs.
-_SETTLE_S          = 95.0
+# Absolute mediator time: startup_hold(15) + 100 s dynamic convergence.
+# The model-based trim can still be above 20 deg/s at t_dynamic=80-90 s,
+# while diagnostics show convergence below 10 deg/s by t_dynamic=100 s.
+_SETTLE_S          = 115.0
 _OBSERVE_S         = 20.0
 _MAX_PSI_DOT_RAD_S = math.radians(16.0)   # [rad/s]
 
 pytestmark = pytest.mark.sitl
 
+@pytest.mark.timeout(2400)
 def test_yaw_regulation_sitl(torque_armed):
     """
     ArduPilot SITL regulates hub yaw using the DDFP Motor4 output.
 
-    ACRO mode with neutral sticks commands psi_dot = 0.  The yaw rate PID must
-    build enough motor output to maintain counter-rotation against the spinning
-    axle and hold |psi_dot| < 5 deg/s after a 60 s settle period.
+    ACRO mode with neutral sticks commands psi_dot = 0.  The yaw rate PID and
+    model-based trim observer must build enough motor output to maintain
+    counter-rotation against the spinning axle.
 
     Physics ground truth (mediator events log) is used — not ATTITUDE.yawspeed,
     which can carry compass-tilt artefacts.

@@ -21,6 +21,23 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Docker builds on this Windows workstation are WSL-only. Keep Windows venv
+# and hardware setup in Git Bash, but self-reinvoke Docker subcommands in WSL.
+if [[ ("${1:-}" == "build" || "${1:-}" == "build-lite") \
+      && -n "${MSYSTEM:-}" && -z "${WSL_DISTRO_NAME:-}" ]]; then
+    if ! command -v wsl.exe >/dev/null 2>&1; then
+        echo "[ERROR] WSL is required for RAWES Docker builds." >&2
+        exit 1
+    fi
+    _drive="${REPO_DIR:1:1}"
+    _wsl_dir="/mnt/${_drive,,}${REPO_DIR:2}"
+    _rebuild_ardupilot="$(printf '%q' "${RAWES_REBUILD_ARDUPILOT:-0}")"
+    exec wsl.exe -e bash -lc \
+        "cd '$_wsl_dir' && RAWES_REBUILD_ARDUPILOT=$_rebuild_ardupilot bash setup.sh $(printf '%q ' "$@")"
+fi
+
+export PIP_INDEX_URL="https://packagefeedproxy.microsoft.io/pypi/simple/"
 SIM_DIR="$REPO_DIR/simulation"
 VENV="$REPO_DIR/.venv"
 PYTHON="$VENV/Scripts/python.exe"
@@ -68,13 +85,13 @@ _setup_venv() {
         fi
     fi
 
-    # Hash-gated editable install: only reinstall when pyproject.toml changes.
-    # The editable install is what makes `import simulation`/`groundstation`/etc.
-    # work from any cwd or when a script is invoked by path (rather than via
-    # `python -c` from repo root) -- but re-running pip install -e on every
-    # invocation is unnecessary overhead once it's already registered.
+    # Install the editable package only when its distribution is missing.
+    # Re-running pip install -e can invoke the build backend and appear to hang,
+    # while an existing editable install remains valid as source files change.
     if [ ! -f "$PYPROJECT" ]; then
         echo "[WARN] $PYPROJECT not found -- skipping editable install"
+    elif "$PYTHON" -c "import importlib.metadata as m; m.version('rawes')" >/dev/null 2>&1; then
+        echo "[INFO] rawes editable package already installed -- skipping pip install -e"
     else
         local pkg_digest
         pkg_digest="$(sha256sum "$PYPROJECT" | awk '{print $1}')"
@@ -87,20 +104,89 @@ _setup_venv() {
         fi
     fi
 
+    if ! "$PYTHON" -c "import linkhub_client.client" >/dev/null 2>&1; then
+        echo "[INFO] Installing linkhub-client package (editable) ..."
+        "$PYTHON" -m pip install -e "$(_winpath "$REPO_DIR/linkhub_client")" --no-deps --quiet
+    fi
+
+    local linkhub="$REPO_DIR/linkhub/target/release/linkhub.exe"
+    if [ ! -x "$linkhub" ]; then
+        echo "[INFO] Building LinkHub with Bluetooth support ..."
+        cargo build \
+            --manifest-path "$REPO_DIR/linkhub/Cargo.toml" \
+            --release \
+            --features bluetooth
+    fi
     echo "[INFO] Done."
     "$PYTHON" --version
 }
 
 # --- Docker image ------------------------------------------------------
 _setup_build() {
-    echo "[INFO] Building rawes-sim (target=runtime-ardupilot) -- expect ~30-60 min ..."
-    docker build "$SIM_DIR" -t rawes-sim --target runtime-ardupilot
+    local ardupilot_image="rawes-sim-ardupilot-base:Copter-4.7.1-v1"
+    local image_hash
+    local existing_hash
+    image_hash="$(bash "$REPO_DIR/scripts/docker_image_hash.sh")"
+    existing_hash="$(
+        docker image inspect rawes-sim \
+            --format '{{ index .Config.Labels "org.rawes.image-input-hash" }}' \
+            2>/dev/null || true
+    )"
+
+    if [ "${RAWES_REBUILD_ARDUPILOT:-0}" != "1" ] && [ "$existing_hash" = "$image_hash" ]; then
+        echo "[INFO] rawes-sim build inputs unchanged ($image_hash) -- skipping Docker build"
+        docker run --rm --entrypoint /bin/bash rawes-sim -lc \
+            '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 12), sys.version" \
+             && test -x /ardupilot/build/sitl/bin/arducopter-heli \
+             && command -v linkhub >/dev/null'
+        return
+    fi
+
+    local -a cache_args=()
+    if [ "${RAWES_REBUILD_ARDUPILOT:-0}" = "1" ]; then
+        cache_args+=(--no-cache)
+        echo "[INFO] Rebuilding $ardupilot_image without cache -- expect ~30-60 min ..."
+    else
+        echo "[INFO] Verifying/building $ardupilot_image with Docker layer cache ..."
+    fi
+    # Always ask Docker to build the base target. An unchanged image is a cheap
+    # cache hit, while Python requirements and runtime-stage changes are picked
+    # up without rebuilding the independent ArduPilot compilation stage.
+    docker build \
+        -f "$SIM_DIR/Dockerfile" \
+        "$REPO_DIR" \
+        -t "$ardupilot_image" \
+        --target runtime-ardupilot-base \
+        "${cache_args[@]}"
+    echo "[INFO] Building rawes-sim with the current LinkHub ..."
+    docker build \
+        -f "$SIM_DIR/Dockerfile" \
+        "$REPO_DIR" \
+        -t rawes-sim \
+        --build-arg "ARDUPILOT_RUNTIME_IMAGE=$ardupilot_image" \
+        --build-arg "RAWES_IMAGE_INPUT_HASH=$image_hash" \
+        --target runtime-ardupilot
+    local built_hash
+    built_hash="$(
+        docker image inspect rawes-sim \
+            --format '{{ index .Config.Labels "org.rawes.image-input-hash" }}'
+    )"
+    if [ "$built_hash" != "$image_hash" ]; then
+        echo "[ERROR] rawes-sim image hash label was not updated after build" >&2
+        echo "        expected: $image_hash" >&2
+        echo "        actual:   $built_hash" >&2
+        return 1
+    fi
+    docker run --rm --entrypoint /bin/bash rawes-sim -lc \
+        '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 12), sys.version" \
+         && test -x /ardupilot/build/sitl/bin/arducopter-heli \
+         && command -v linkhub >/dev/null'
     echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
 _setup_build_lite() {
-    echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot) ..."
-    docker build "$SIM_DIR" -t rawes-sim --target runtime
+    echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot or LinkHub) ..."
+    docker build -f "$SIM_DIR/Dockerfile" "$REPO_DIR" -t rawes-sim --target runtime
     echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
@@ -119,9 +205,9 @@ _setup_hw() {
     # Reuse calibrate (python -m calibrate) as the canonical hardware param writer.
     # This checks all expected params from rawes_params.json and writes DIFFs.
     "$PYTHON" -m calibrate \
-        --port "$RAWES_HIL_PORT" \
+        --connection "$RAWES_HIL_PORT" \
         --baud "${RAWES_HIL_BAUD:-115200}" \
-        config apply
+        config fix
 }
 
 CMD="${1:-}"

@@ -1,0 +1,24 @@
+{
+  "python.analysis.includeExtraPathSymbolsInSymbolSearch": true,
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/.venv/**": true,
+    "**/am32config/node_modules/**": true,
+    "**/linkhub/target/**": true,
+    "**/simulation/logs/**": true,
+    "**/tmp/**": true
+  },
+  "search.exclude": {
+    "**/.git/**": true,
+    "**/.venv/**": true,
+    "**/am32config/node_modules/**": true,
+    "**/linkhub/target/**": true,
+    "**/simulation/logs/**": true,
+    "**/tmp/**": true
+  }
+}

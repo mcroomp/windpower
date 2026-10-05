@@ -30,6 +30,9 @@ SERVO2_TRIM      1517
 SERVO3_TRIM      1517
 H_COL_MIN        1342
 H_COL_MAX        1657
+# Measured blade-pitch endpoints for the current rotor setup.
+H_COL_ANG_MIN      -2
+H_COL_ANG_MAX      12
 H_CYC_MAX        1000
 H_FLYBAR_MODE       1
 IM_ACRO_COL_EXP     0
@@ -45,3 +48,11 @@ INS_POS2_Z         0.0
 INS_POS3_X        -0.08
 INS_POS3_Y         0.0
 INS_POS3_Z         0.0
+
+# Load rawes.lua from /APM/scripts at boot.
+SCR_ENABLE          1
+
+# Keep the DDFP yaw motor mapped at boot. ArduPilot forces DDFP to minimum in
+# SHUT_DOWN/GROUND_IDLE/SPOOLING_DOWN; runtime function remapping does not
+# rebuild SRV_Channels' live map.
+SERVO9_FUNCTION     36

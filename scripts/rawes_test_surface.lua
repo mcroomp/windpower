@@ -59,6 +59,9 @@ _rawes_fns = {
     run_acro_manual_mode = run_acro_manual_mode,
     normalized_angle_pwm = normalized_angle_pwm,
     normalized_collective_pwm = normalized_collective_pwm,
+    neutral_collective_pwm = neutral_collective_pwm,
+    update_disarmed_neutral_hold = update_disarmed_neutral_hold,
+    neutral_hold_active = function() return _neutral_hold_active end,
 
     -- ── Over-spin auto-disarm safety ─────────────────────────────────────────
     run_spin_safety    = run_spin_safety,
@@ -70,6 +73,7 @@ _rawes_fns = {
     -- ── Yaw trim observer ────────────────────────────────────────────────────
     -- Pure step + state accessors for unit-testing yaw_trim_step in isolation.
     yaw_trim_step   = yaw_trim_step,
+    yaw_output_throttle = yaw_output_throttle,
     yaw_ff_trim     = function() return _yaw_ff_trim end,
     yaw_trim_reset  = function()
         _yaw_ff_trim     = 0.0
@@ -95,6 +99,11 @@ _rawes_fns = {
     tension_n      = function() return _tension_n end,     -- ramped feedforward
     tension_cmd_n  = function() return _tension_cmd_n end, -- ground-commanded (unramped)
     ic_thrust        = function() return _ic_thrust end,
+    passive_anchor_q = function() return _passive_anchor_q end,
+    passive_target_q = function() return _passive_target_q end,
+    passive_roll_offset_rad = function() return _passive_roll_offset_rad end,
+    passive_pitch_offset_rad = function() return _passive_pitch_offset_rad end,
+    passive_yaw_offset_rad = function() return _passive_yaw_offset_rad end,
 
     -- ── Altitude PID state accessors ─────────────────────────────────────────
 

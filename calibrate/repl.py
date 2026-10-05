@@ -9,37 +9,46 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Protocol
 
-from pymavlink import mavutil
+from linkhub_client import mav_constants as mavlink
+from linkhub_client.mav_constants import mavutil
 
 from .constants import (
-    RawesGCS, WallClock, CommandLong, RequestDataStream,
+    LinkHubClient, WallClock, CommandLong, RequestDataStream,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
     SWASH_SERVOS,
     PWM_MIN, PWM_MAX, PWM_NEUTRAL,
-    _COPTER_MODES, _FALLBACK_BAUDS,
+    _COPTER_MODES,
+    _LOG_DIR,
     _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH,
     _AZ_S1, _AZ_S2, _AZ_S3,
     _RUN_MODES, _WATCH_STREAMS,
 )
 from .hw import (
     _arm, _disarm, _send_set_servo, _send_motor_test,
-    _print_status, _ping_ports, _probe_port,
+    _print_status,
     _h3_forward_mix, _norm_to_pwm,
     _release_servo_functions, _restore_servo_functions, _set_heli_servo_mode,
-    _refresh_pole_pairs, _monitor_esc,
+    _refresh_pole_pairs, _monitor_esc, _set_safe_off_state,
 )
+from .linkhub import ensure_linkhub
+from .messages import read_one
 from .params import (
-    _CONFIG_TARGET_PARAMS_ALL, _CONFIG_TARGET_PARAMS_COMMON,
-    _list_scripts, _remove_script, _upload_script, _cmd_logs,
+    _config_target_params,
+    _fetch_dataflash_log,
+    _list_dataflash_logs,
+    _list_scripts,
+    _remove_script,
+    _upload_script,
 )
 from .run import (
     _cmd_run, _observation_loop, _take_servo4, _safety_shutdown,
     _run_observation,
 )
 from .util import _RunLog, _parse_flags, _parse_kv_list, _log_path, _esc_check
-from .watch import _cmd_watch, _watch_servos
+from .watch import _cmd_watch
 
 
 # ---------------------------------------------------------------------------
@@ -52,11 +61,12 @@ time-bounded operations and log to simulation/logs/calibrate/*.csv.  The
 rest are one-shot.
 
 Long-running (always log; ESC or Ctrl-C aborts):
-  run <name> [--duration N] [--trim K=V,...]
-        Activate a Lua mode + arm via RAWES_ARM + stream observation rows.
+  run <name> [--duration N] [--trim K=V,...] [--force]
+        Activate a Lua mode + arm via MAVLink + stream observation rows.
       On exit (timer / ESC / Ctrl-C) safety shutdown disarms and sets RAWES_MODE=0.
 
-        --duration N       run for N seconds; omit for unbounded (5-min ARM)
+        --duration N       run for N seconds; omit for unbounded
+        --force            bypass ArduPilot pre-arm checks on secured bench hardware
         --trim K=V,K=V     IC thrust sent as NAMED_VALUE_FLOAT to rawes.lua.
                              thr   IC thrust [0..1] (passive mode only; sent as
                                    RAWES_THR before arming).
@@ -69,15 +79,29 @@ Long-running (always log; ESC or Ctrl-C aborts):
         --exclude-saturate After the run, print an analysis report computed
                            ONLY from samples where the yaw loop was not
                            saturated (trim below YFF_MAX).
+        --settle-rate-deg-s N
+                           Maximum body rate allowed during passive capture
+                           qualification (default 2.865 deg/s).
+        --settle-time N    Continuous quiet time required before capture
+                           (default 3 s).
+        --settle-timeout N Maximum time to wait for passive qualification
+                           before safe shutdown (default 15 s).
+        --rotor-motor      Connect to the BLDC* Bluetooth rotor drive (passive only).
+                           During the run: m starts/stops, [/] changes speed by 5,
+                           and 0 emergency-stops. Exit always stops and disconnects.
+        --rotor-speed N    Initial external rotor-drive speed, 0..100 (default 10).
+        --rotor-direction D
+                           External rotor-drive direction: cw (default) or ccw.
 
                 Modes:
           acro-manual
                    ACRO flybar passthrough from normalized Lua controls.
                    Arrows set roll/pitch; -/= set collective; AP + Lua own yaw.
-          passive   interactive GUIDED_NOGPS attitude hold. Captures current
-                    quaternion on entry; arrows apply relative roll/pitch offsets
-                    by 5 deg, limited to +/-30 deg; -/= change held thrust by
-                    0.05; ,/. (or </>) apply relative yaw by 5 deg.
+          passive   interactive GUIDED_NOGPS attitude hold. Ground qualifies a
+                    quiet interval, then asks Lua to capture the quaternion;
+                    arrows apply relative roll/pitch offsets by 5 deg, limited
+                    to +/-30 deg; -/= change held thrust by 0.05; ,/. (or </>)
+                    apply relative yaw by 5 deg.
           steady    steady flight (alt hold + VZ PI collective)
           pumping   De Schutter pumping cycle
           landing   landing (reserved)
@@ -86,10 +110,10 @@ Long-running (always log; ESC or Ctrl-C aborts):
           # Capture current attitude and interactively hold it for 30 s
           run passive --duration 30 --trim thr=0.342
 
-          # Override the captured target with explicit absolute angles
+          # Apply initial offsets relative to the captured quaternion
           run passive --duration 20 --roll 3 --pitch -25 --trim thr=0.342
 
-          # Unbounded passive session (ESC to stop, 5-min RAWES_ARM fallback)
+          # Unbounded passive session (ESC or Ctrl-C to stop)
           run passive
 
           # Live yaw PID tuning during steady/pumping runs:
@@ -105,8 +129,9 @@ Long-running (always log; ESC or Ctrl-C aborts):
 
 One-shot:
   status                          Vehicle / battery / EKF / servos / key params
+  battery monitor off|on [type]   Disable monitoring; on defaults to type 4
   set <name> <value>              Write a parameter (read-back verified)
-  get <name>                      Read a parameter
+  get <name> [<name> ...]         Read one or more parameters
   swash <coll%> [lon%] [lat%]     HR3-120 physical mixer (-100..+100 each)
   swash range <min> <max>         Set H_COL_MIN / H_COL_MAX (heli swash range)
   swash neutral [n]               Drive S1/S2/S3 (or n) to 1500 us
@@ -118,36 +143,19 @@ One-shot:
     swash fit-range <min> <max> --cyclic N --allow-full-range
                                     Fit/verify H_COL limits using native oscillation
     servo hold <ch> <pwm> [--duration N]  Hold ch; disconnect/restore swash ch1-3
-  swash test [--duration N]       Run ArduPilot's OWN native swash exercise
-                                  (H_SV_MAN=5 MANUAL_OSCILLATE) via a single
-                                  MAVLink param write -- no reboot, no config
-                                  file edits.  AP's own H3-120 mixer (not this
-                                  tool's Python mixer) sweeps tilt-back ->
-                                  roll-around -> level -> raise -> lower over
-                                  a ~12 s cycle; watches SERVO_OUTPUT_RAW for
-                                  N s (default 12) then restores H_SV_MAN=0.
-                                  DISARMED ONLY -- AP force-resets H_SV_MAN to
-                                  0 the instant it arms, so this is a no-op if
-                                  the counter-rotation/yaw motor needs to be
-                                  active (which requires armed).  For fixed
-                                  cyclic/collective positions WHILE ARMED, use
-                                  `run passive --trim ...` instead (closed-loop
-                                  via the GUIDED attitude/thrust target, not
-                                  raw PWM -- see its --help text for why armed
-                                  can't do open-loop swash positioning).
-  swash test off                  Immediately restore H_SV_MAN=0 (e.g. after
-                                  a Ctrl-C during `swash test`).
-  servo <ch> <pwm>                Set channel ch to pwm directly
-  servo sweep <ch> [--step-ms N]  Slowly sweep ch: 1500 -> 2000 -> 1000 -> 1500
-  servo hold <ch> <pwm> [--duration N]  Arm, hold ch at pwm for N s
-  motor <pwm_us> [--duration N]   Arm (RAWES_ARM) + drive the motor output at
+  swash test [--duration N] --allow-full-range
+                                  Alias for `servo mode oscillate` (native
+                                  H_SV_MAN=5, disarmed only)
+  swash test off                  Restore H_SV_MAN=0 after an interrupted test
+  motor <pwm_us> [--duration N]   Arm via MAVLink + drive the motor output at
                                   pwm_us for N s (default 5).  DShot ESC self-arms
                                   from idle -- no ESC pre-arm hold.
                                   pwm_us must be within [SERVO<motor>_MIN, _MAX];
                                   >5% of that range prompts unless --force.
                                   Logs to CSV like `run`.
   motor off                       motor -> idle (off) + disarm immediately
-  arm [--duration N]              ACRO + RAWES_ARM (no Lua mode change)
+  arm [--duration N] [--force]    Arm in ACRO, then disarm (default 5 s);
+                                  --force bypasses ArduPilot pre-arm checks
   disarm                          Disarm vehicle
   script upload <file>            Upload .lua to /APM/scripts and restart engine
   script list                     List /APM/scripts
@@ -156,23 +164,27 @@ One-shot:
                                     default: common + physical-airframe overrides
                                     --all: also include copter-heli.parm baseline
     config fix [--all]              Write the DIFFs (same scope rules as check)
-    config show/apply               Compatibility aliases for check/fix
   logs list                       List all dataflash logs on the FC (id / size)
   logs fetch [--id N] [--dir D]   Download a dataflash .BIN log (default: latest)
                                   --id N   specific log id; omit for latest
                                   --dir D  destination dir (default: simulation/logs/calibrate)
   reboot                          Reboot ArduPilot
-  ping [baud]                     Scan COM ports for ArduPilot heartbeats
   help                            Show this list
   quit                            Exit (REPL only)
 """
+
+
+class _BatteryParameterSession(Protocol):
+    def set_param(self, name: str, value: float) -> bool: ...
+
+    def get_param(self, name: str) -> float | None: ...
 
 
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def _run_command(session: RawesGCS, tokens: list[str],
+def _run_command(session: LinkHubClient, tokens: list[str],
                  force: bool = False) -> bool:
     """
     Execute one calibration command.
@@ -190,19 +202,19 @@ def _run_command(session: RawesGCS, tokens: list[str],
         verb, args = args[0].lower(), args[1:]
 
     if   verb == "status":   _print_status(session)
-    elif verb == "ping":     _cmd_ping(args)
     elif verb == "reboot":   _cmd_reboot(session)
-    elif verb == "disarm":   _disarm(session)
+    elif verb == "disarm":   _cmd_disarm(session)
     elif verb == "arm":      _cmd_arm(session, args)
+    elif verb == "battery":  _cmd_battery(session, args)
     elif verb == "set":      _cmd_set(session, args)
     elif verb == "get":      _cmd_get(session, args)
     elif verb == "swash":    _cmd_swash(session, args)
     elif verb == "servo":    _cmd_servo(session, args)
     elif verb == "motor":    _cmd_motor(session, args, force=force)
     elif verb == "run":      _cmd_run(session, args)
-    elif verb == "logs":        _cmd_logs(session, args)
     elif verb == "watch":    _cmd_watch(session, args)
     elif verb == "script":   _cmd_script(session, args)
+    elif verb == "logs":     _cmd_logs(session, args)
     elif verb == "config":   _cmd_config(session, args)
     elif verb == "help":     print(_HELP)
     else:
@@ -214,28 +226,30 @@ def _run_command(session: RawesGCS, tokens: list[str],
 # One-shot verb implementations
 # ---------------------------------------------------------------------------
 
-def _cmd_ping(args: list[str]) -> None:
-    """ping [baud]"""
-    try:
-        baud = int(args[0]) if args else 115200
-    except ValueError:
-        print("  Usage: ping [baud]"); return
-    _ping_ports(baud=baud)
-
-
-def _cmd_reboot(session: RawesGCS) -> None:
+def _cmd_reboot(session: LinkHubClient) -> None:
     print("  Sending reboot command ...")
-    session.send_message(CommandLong(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
-        confirmation=0,
-        param1=1,
-    ))
+    session.command(
+        mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+        [1.0],
+    )
+
+
+def _cmd_disarm(session: LinkHubClient) -> None:
+    """Converge on canonical safe-off, forcing disarm only when necessary."""
+    if _disarm(session):
+        return
+    print("  [WARN] Normal disarm failed; requesting forced disarm.")
+    if not _disarm(session, force=True):
+        print("  [FAIL] Could not confirm disarm; applying safe-off outputs anyway.")
+        _set_safe_off_state(session)
     print("  Pixhawk rebooting -- reconnect in ~5 s.")
+    print(
+        "  [SAFETY] After reconnect, run disarm to restore "
+        "ACRO / H_FLYBAR_MODE=1 / H_SV_MAN=0 safe-off."
+    )
 
 
-def _cmd_set(session: RawesGCS, args: list[str]) -> None:
+def _cmd_set(session: LinkHubClient, args: list[str]) -> None:
     """set <name> <value>"""
     if len(args) < 2:
         print("  Usage: set <name> <value>"); return
@@ -256,19 +270,72 @@ def _cmd_set(session: RawesGCS, args: list[str]) -> None:
         print(f"  [OK]   {name} = {actual}")
 
 
-def _cmd_get(session: RawesGCS, args: list[str]) -> None:
-    """get <name>"""
-    if not args:
-        print("  Usage: get <name>"); return
-    name = args[0].upper()
-    v = session.get_param(name)
-    if v is None:
-        print(f"  [FAIL] {name}: not found")
+def _cmd_battery(session: _BatteryParameterSession, args: list[str]) -> None:
+    """battery monitor off|on [type]; type 4 is analog voltage and current."""
+    if not args or args[0].lower() != "monitor":
+        print("  Usage: battery monitor off|on [type]")
+        return
+    if len(args) < 2 or len(args) > 3:
+        print("  Usage: battery monitor off|on [type]")
+        return
+
+    action = args[1].lower()
+    if action == "off" and len(args) == 2:
+        monitor_type = 0
+    elif action == "on":
+        if len(args) == 2:
+            monitor_type = 4
+        else:
+            try:
+                monitor_type = int(args[2])
+            except ValueError:
+                print("  Error: battery monitor type must be an integer")
+                return
+            if not 1 <= monitor_type <= 32:
+                print("  Error: enabled battery monitor type must be 1..32")
+                return
     else:
-        print(f"  {name} = {v}")
+        print("  Usage: battery monitor off|on [type]")
+        return
+
+    if not session.set_param("BATT_MONITOR", monitor_type):
+        print("  [FAIL] BATT_MONITOR: no ACK within timeout")
+        return
+    actual = session.get_param("BATT_MONITOR")
+    if actual is None:
+        print("  [WARN] BATT_MONITOR set ACK'd but readback failed")
+    elif round(actual) != monitor_type:
+        print(
+            f"  [FAIL] BATT_MONITOR: wrote {monitor_type}, "
+            f"read back {actual} (likely silently rejected)"
+        )
+        return
+    else:
+        label = (
+            "disabled"
+            if monitor_type == 0
+            else "analog voltage + current"
+            if monitor_type == 4
+            else "enabled"
+        )
+        print(f"  [OK] BATT_MONITOR = {monitor_type} ({label})")
+    print("  [NOTE] ArduPilot marks BATT_MONITOR reboot-required; reboot to apply.")
 
 
-def _print_swash_layout(session: RawesGCS) -> None:
+def _cmd_get(session: LinkHubClient, args: list[str]) -> None:
+    """get <name> [<name> ...]"""
+    if not args:
+        print("  Usage: get <name> [<name> ...]"); return
+    for raw_name in args:
+        name = raw_name.upper()
+        v = session.get_param(name)
+        if v is None:
+            print(f"  [FAIL] {name}: not found")
+        else:
+            print(f"  {name} = {v}")
+
+
+def _print_swash_layout(session: LinkHubClient) -> None:
     """Print the configured mixer and RAWES physical HR3-120 geometry."""
     def g(name, default=None):
         v = session.get_param(name)
@@ -292,13 +359,14 @@ def _print_swash_layout(session: RawesGCS) -> None:
     flybar    = g("H_FLYBAR_MODE")
     sv_man    = g("H_SV_MAN")
 
+    cursor = session.current_cursor()
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
         req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
         req_message_rate=10,
     ))
-    srv = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=2.0)
+    srv, _ = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
     pwm = {
         1: getattr(srv, "servo1_raw", 0) if srv else 0,
         2: getattr(srv, "servo2_raw", 0) if srv else 0,
@@ -409,90 +477,35 @@ def _fmt_az(az):
     return f"{az:+.0f} deg"
 
 
-def _cmd_swash_test(session: RawesGCS, args: list[str]) -> None:
-    """swash test [--duration N]
+def _cmd_swash_test(session: LinkHubClient, args: list[str]) -> None:
+    """swash test [--duration N] --allow-full-range
        swash test off
 
-    Drives ArduPilot's OWN native H_SV_MAN=5 (MANUAL_OSCILLATE) swash
-    exercise via a single MAVLink param write -- no reboot, no config
-    file edits.  AP_MotorsHeli_Single::servo_test() then sweeps S1/S2/S3
-    through a ~12 s tilt-back / roll-around / level / raise / lower cycle
-    using the FC's own H3-120 mixer (H_SW_H3_SV*_POS, H_CYC_MAX,
-    H_COL_MIN/MAX) -- NOT this tool's Python `_h3_forward_mix`.
-
-    H_SV_MAN is undocumented beyond value 4 in AP's param metadata but the
-    enum (AP_MotorsHeli.h) goes 0=AUTOMATED,1=PASSTHROUGH,2=MAX,3=CENTER,
-    4=MIN,5=OSCILLATE.  AP force-resets H_SV_MAN to 0 the instant the
-    vehicle arms (AP_MotorsHeli::output_armed_stabilizing), so this can
-    never linger into flight -- but arming_checks() does NOT itself block
-    arming while it's engaged, so we refuse to start if already armed.
-
-    NOTE: this only ever works disarmed, which also means the DDFP
-    counter-rotation/yaw motor (Motor4) is silent -- AP_MotorsHeli_Single::
-    output_to_motors() forces it to 0 unless SpoolState is SPOOLING_UP/
-    THROTTLE_UNLIMITED, both only reachable while armed.  If the bench rig
-    needs the yaw motor active (main rotor genuinely creating reaction
-    torque), this command cannot help -- use `run passive --trim ...`
-    instead, which holds a commanded cyclic/collective through the
-    closed-loop GUIDED attitude/thrust path while staying armed (there is
-    no way to get raw/open-loop swash PWM while armed -- the swash mixer is
-    always fed by the live attitude controller).
+    Alias for `servo mode oscillate`: ArduPilot's own H_SV_MAN=5 swash
+    exercise through the FC's H3-120 mixer.  Disarmed only (AP resets
+    H_SV_MAN on arm).  `off` restores H_SV_MAN=0 after an interrupted run.
     """
     if args and args[0].lower() == "off":
-        session.set_param("H_SV_MAN", 0.0)
-        print(f"  H_SV_MAN -> {session.get_param('H_SV_MAN')}  (native swash test stopped)")
+        ok = _set_heli_servo_mode(session, 0.0)
+        print(f"  {'[OK]  ' if ok else '[FAIL]'} H_SV_MAN=0 (native swash test stopped)")
         return
-    try:
-        pos, flags = _parse_flags(args, {"--duration": "float"})
-    except ValueError as e:
-        print(f"  Error: {e}"); return
-    if pos:
-        print("  Usage: swash test [--duration N]  |  swash test off"); return
-    duration = flags.get("--duration", 12.0)
-
-    hb = session._recv(type="HEARTBEAT", blocking=True, timeout=5.0)
-    if hb is not None and bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-        print("  Error: vehicle is armed -- disarm first.")
-        print("         (H_SV_MAN is force-reset to AUTOMATED the instant AP")
-        print("         arms, so the test would be a no-op while armed.)")
-        return
-
-    print("  Engaging ArduPilot's native H_SV_MAN=5 (MANUAL_OSCILLATE) swash")
-    print(f"  exercise for {duration:.0f} s (AP's own H3-120 mixer, ~12 s/cycle) ...")
-    if not session.set_param("H_SV_MAN", 5.0):
-        print("  [FAIL] H_SV_MAN: no ACK within timeout"); return
-
-    meta = {
-        "verb":            "swash",
-        "stream":          "test",
-        "duration_s":      duration,
-        "run_start_local": datetime.now().isoformat(timespec="seconds"),
-        "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    log = _RunLog.open("swash", "test", meta)
-    print(f"  Logging to {log.path}")
-    try:
-        _watch_servos(session, duration, log)
-    finally:
-        log.close()
-        session.set_param("H_SV_MAN", 0.0)
-        print(f"  H_SV_MAN -> {session.get_param('H_SV_MAN')}  (restored to AUTOMATED)")
+    _cmd_servo(session, ["mode", "oscillate", *args])
 
 
-def _cmd_swash(session: RawesGCS, args: list[str]) -> None:
+def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
     """swash <coll%> [lon%] [lat%]
        swash range <min> <max>
        swash neutral [n]
        swash fit-range <min> <max> --cyclic N --allow-full-range
        swash info
-       swash test [--duration N] | swash test off"""
+       swash test [--duration N] --allow-full-range | swash test off"""
     if not args:
         print("  Usage: swash <coll%> [lon%] [lat%]")
         print("         swash range <min_us> <max_us>")
         print("         swash neutral [n]")
         print("         swash fit-range <min_us> <max_us> --cyclic N --allow-full-range")
         print("         swash info")
-        print("         swash test [--duration N]  |  swash test off")
+        print("         swash test [--duration N] --allow-full-range  |  swash test off")
         return
     sub = args[0].lower()
     if sub == "info":
@@ -584,11 +597,14 @@ _SV_MAN_MODES = {
 
 
 def _run_servo_mode(
-    session: RawesGCS,
+    session: LinkHubClient,
     mode: int,
     duration: float,
 ) -> tuple[int, int] | None:
-    heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+    cursor = session.current_cursor()
+    heartbeat, cursor = read_one(
+        session, cursor, "HEARTBEAT", wait=2.0,
+    )
     if heartbeat is None:
         print("  [FAIL] no heartbeat; servo mode aborted")
         return None
@@ -618,7 +634,9 @@ def _run_servo_mode(
     completed = True
     try:
         while time.monotonic() < deadline:
-            msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.2)
+            msg, cursor = read_one(
+                session, cursor, "SERVO_OUTPUT_RAW", wait=0.2,
+            )
             now = time.monotonic()
             if msg is not None:
                 values = [
@@ -650,7 +668,7 @@ def _run_servo_mode(
     return extrema
 
 
-def _set_param_verified(session: RawesGCS, name: str, value: int) -> bool:
+def _set_param_verified(session: LinkHubClient, name: str, value: int) -> bool:
     if not session.set_param(name, float(value)):
         print(f"  [FAIL] {name}: no ACK")
         return False
@@ -661,7 +679,7 @@ def _set_param_verified(session: RawesGCS, name: str, value: int) -> bool:
 
 
 def _fit_swash_range(
-    session: RawesGCS,
+    session: LinkHubClient,
     lo: int,
     hi: int,
     cyclic: int,
@@ -748,8 +766,11 @@ def _bounded_swash_waypoints(lo: int, neutral: int, hi: int) -> tuple[tuple[int,
     )
 
 
-def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
-    heartbeat = session._recv(type="HEARTBEAT", blocking=True, timeout=2.0)
+def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
+    cursor = session.current_cursor()
+    heartbeat, cursor = read_one(
+        session, cursor, "HEARTBEAT", wait=2.0,
+    )
     if heartbeat is None:
         print("  [FAIL] no heartbeat; swash sweep aborted")
         return
@@ -796,7 +817,9 @@ def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
             for output, pwm in zip(SWASH_SERVOS, targets):
                 _send_set_servo(session, output, pwm)
 
-            msg = session._recv(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.08)
+            msg, cursor = read_one(
+                session, cursor, "SERVO_OUTPUT_RAW", wait=0.08,
+            )
             if msg is not None and now >= next_print:
                 values = tuple(getattr(msg, f"servo{output}_raw", 0) for output in SWASH_SERVOS)
                 status = "OK" if all(lo <= value <= hi for value in values) else "OUT OF RANGE"
@@ -815,7 +838,7 @@ def _run_bounded_swash_sweep(session: RawesGCS, duration: float) -> None:
             _restore_servo_functions(session, saved_functions)
 
 
-def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
+def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
     """servo <ch> <pwm>
        servo mode <name|0..5> [--duration N]
        servo sweep [--duration N]
@@ -913,7 +936,11 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
                 try:
                     _safety_shutdown(session, skip_motor_off=(ch != SERVO_MOTOR))
                 finally:
-                    _restore_servo_functions(session, saved_functions)
+                    _restore_servo_functions(
+                        session,
+                        saved_functions,
+                        exclude_outputs=(SERVO_MOTOR,),
+                    )
         return
     # Positional: servo <ch> <pwm>
     if len(args) < 2:
@@ -937,15 +964,15 @@ def _cmd_servo(session: RawesGCS, args: list[str]) -> None:
         _restore_servo_functions(session, saved_functions)
 
 
-def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
+def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     """motor <pwm_us> [--duration N]
        motor off
 
-    Run-style lifecycle: arms via RAWES_ARM, releases the motor output from any
+    Run-style lifecycle: arms via MAVLink, releases the motor output from any
     AP mixer, then drives the motor output at the requested PWM for `duration`
     seconds while logging telemetry to
     simulation/logs/calibrate/motor_<pwm>_<ts>.csv.  On exit (timer / ESC /
-    Ctrl-C / exception): motor -> idle (off), disarm, SERVO<motor>_FUNCTION restored."""
+    Ctrl-C / exception): motor -> idle, disarm, and leave the motor disconnected."""
     if not args:
         print("  Usage: motor <pwm_us> [--duration N]  OR  motor off"); return
     if args[0].lower() in ("off", "stop"):
@@ -995,18 +1022,16 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
 
     # Same shuffle as `run`: release the motor output from any AP mixer so our
     # DO_SET_SERVO commands win.
-    saved_fn = _take_servo4(session)
+    _take_servo4(session)
 
     # MODE_PASSIVE / MODE_YAW would also drive SERVO4 -- force Lua to NONE.
-    saved_overrides: dict[str, float] = {}
     saved_scr = session.get_param("RAWES_MODE")
     if saved_scr is not None and int(saved_scr) != 0:
-        saved_overrides["RAWES_MODE"] = float(saved_scr)
         session.set_param("RAWES_MODE", 0)
         print(f"  RAWES_MODE {int(saved_scr)} -> 0 (motor needs direct SERVO{SERVO_MOTOR} control)")
 
     if not _arm(session, force=True):
-        _safety_shutdown(session, saved_servo4_fn=saved_fn, saved_overrides=saved_overrides)
+        _safety_shutdown(session)
         return
     print("  [OK] Armed.")
 
@@ -1046,28 +1071,48 @@ def _cmd_motor(session: RawesGCS, args: list[str], *, force: bool) -> None:
     finally:
         log.close()
         print(f"  Wrote {log.n_rows} rows to {log.path}")
-        _safety_shutdown(session, saved_servo4_fn=saved_fn,
-                         saved_overrides=saved_overrides)
+        _safety_shutdown(session)
     print("  Done.")
 
 
-def _cmd_arm(session: RawesGCS, args: list[str]) -> None:
-    """arm [--duration N]   -- ACRO + direct arm (no Lua mode change)"""
+def _cmd_arm(session: LinkHubClient, args: list[str]) -> None:
+    """Arm normally for a bounded interval, then return to safe-off."""
     try:
-        pos, flags = _parse_flags(args, {"--duration": "float"})
+        pos, flags = _parse_flags(
+            args,
+            {"--duration": "float", "--force": "bool"},
+        )
     except ValueError as e:
         print(f"  Error: {e}"); return
     if pos:
-        print("  Usage: arm [--duration N]  (use --duration, not positional)"); return
+        print(
+            "  Usage: arm [--duration N] [--force]"
+            "  (use --duration, not positional)"
+        )
+        return
+    duration = float(flags.get("--duration", 5.0))
+    force = bool(flags.get("--force", False))
+    if duration <= 0:
+        print("  Error: --duration must be positive")
+        return
+    if force:
+        print("  [WARN] Force-arm enabled: ArduPilot pre-arm checks are bypassed.")
     print("  Setting ACRO mode ...")
     session.set_mode(1)
-    if not _arm(session, force=True):
+    if not _arm(session, force=force):
         print("  [WARN] Arm failed.")
-    else:
-        print("  [OK] Armed.")
+        _set_safe_off_state(session)
+        return
+    print(f"  [OK] Armed for {duration:g} s.")
+    try:
+        time.sleep(duration)
+    finally:
+        if not _disarm(session):
+            print("  [WARN] Normal disarm failed; requesting forced disarm.")
+            _disarm(session, force=True)
 
 
-def _cmd_script(session: RawesGCS, args: list[str]) -> None:
+def _cmd_script(session: LinkHubClient, args: list[str]) -> None:
     """script upload <file>
        script list
        script remove <name>"""
@@ -1091,14 +1136,44 @@ def _cmd_script(session: RawesGCS, args: list[str]) -> None:
     print(f"  Unknown script subcommand {sub!r}  (valid: upload, list, remove)")
 
 
-def _cmd_config(session: RawesGCS, args: list[str]) -> None:
-    """config check|show
-       config fix|apply"""
+def _cmd_logs(session: LinkHubClient, args: list[str]) -> None:
+    if not args or args[0].lower() not in {"list", "fetch"}:
+        print("  Usage: logs list")
+        print("         logs fetch [--id N] [--dir D]")
+        return
+    if args[0].lower() == "list":
+        if len(args) != 1:
+            print("  Usage: logs list")
+            return
+        _list_dataflash_logs(session)
+        return
+
+    log_id: int | None = None
+    directory = _LOG_DIR
+    index = 1
+    try:
+        while index < len(args):
+            option = args[index]
+            if option == "--id" and index + 1 < len(args):
+                log_id = int(args[index + 1])
+                index += 2
+            elif option == "--dir" and index + 1 < len(args):
+                directory = args[index + 1]
+                index += 2
+            else:
+                raise ValueError(f"unknown or incomplete option {option!r}")
+    except ValueError as exc:
+        print(f"  Error: {exc}")
+        print("  Usage: logs fetch [--id N] [--dir D]")
+        return
+    _fetch_dataflash_log(session, log_id=log_id, directory=directory)
+
+
+def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
+    """config check|fix"""
     if not args:
         print("  Usage: config check [--all]  OR  config fix [--all]"); return
     sub = args[0].lower()
-    alias = {"show": "check", "apply": "fix"}
-    sub = alias.get(sub, sub)
     if sub not in ("check", "fix"):
         print(f"  Unknown config subcommand {sub!r}  (valid: check, fix)"); return
     opt_tokens = args[1:]
@@ -1110,7 +1185,7 @@ def _cmd_config(session: RawesGCS, args: list[str]) -> None:
             print(f"  Unknown option {tok!r} (valid: --all)")
             return
     apply = (sub == "fix")
-    target = _CONFIG_TARGET_PARAMS_ALL if use_all else _CONFIG_TARGET_PARAMS_COMMON
+    target = _config_target_params(use_all=use_all)
     scope = (
         "all shared and hardware defaults"
         if use_all
@@ -1128,22 +1203,56 @@ def _cmd_config(session: RawesGCS, args: list[str]) -> None:
     print(f"  {'-'*25}  {'-'*8}  {'-'*10}  ------")
     any_diff = False
     any_fail = False
+    try:
+        current = session.fetch_all_param_records(timeout=30.0)
+    except RuntimeError as exc:
+        print(f"  [FAIL] Could not fetch parameters: {exc}")
+        return
+
+    differences = [
+        {
+            "name": name,
+            "value": float(target[name]),
+            "type": int(current[name]["type"]),
+        }
+        for name in sorted(target)
+        if name in current
+        and abs(float(current[name]["value"]) - float(target[name])) >= 1e-4
+    ]
+    updated: dict[str, dict[str, object]] = {}
+    if apply and differences:
+        try:
+            session.set_params(differences, timeout=15.0)
+            updated = session.fetch_all_param_records(timeout=30.0)
+        except RuntimeError as exc:
+            print(f"  [FAIL] Batch update failed: {exc}")
+            return
+
     for name in sorted(target):
         expected = target[name]
-        actual = session.get_param(name)
-        if actual is None:
+        record = current.get(name)
+        if record is None:
             print(f"  {name:<25} {str(expected):>8}  {'N/A':>10}  [FAIL] not found")
             any_fail = True
-        elif abs(actual - float(expected)) < 1e-4:
+            continue
+
+        actual = float(record["value"])
+        if abs(actual - float(expected)) < 1e-4:
             print(f"  {name:<25} {str(expected):>8}  {actual:>10.4g}  OK")
         else:
             any_diff = True
             if apply:
-                ok = session.set_param(name, float(expected))
-                if ok:
+                verified = updated.get(name)
+                if (
+                    verified is not None
+                    and abs(float(verified["value"]) - float(expected)) < 1e-4
+                ):
                     print(f"  {name:<25} {str(expected):>8}  {actual:>10.4g}  -> SET")
                 else:
-                    print(f"  {name:<25} {str(expected):>8}  {actual:>10.4g}  [FAIL] no ACK")
+                    print(
+                        f"  {name:<25} {str(expected):>8}  {actual:>10.4g}"
+                        "  [FAIL] verification mismatch"
+                    )
                     any_fail = True
             else:
                 print(f"  {name:<25} {str(expected):>8}  {actual:>10.4g}  DIFF")
@@ -1162,7 +1271,7 @@ def _cmd_config(session: RawesGCS, args: list[str]) -> None:
 # REPL
 # ---------------------------------------------------------------------------
 
-def _repl(session: RawesGCS) -> None:
+def _repl(session: LinkHubClient) -> None:
     print("\nConnected. Type 'help' for commands, 'quit' to exit.\n")
     while True:
         try:
@@ -1193,10 +1302,24 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_HELP,
     )
-    p.add_argument("--port", "-p", default=None,
-                   help="Serial port (e.g. COM4), or 'sitl' / 'tcp:localhost:5760' for SITL")
-    p.add_argument("--baud", "-b", "--rate", dest="baud", type=int, default=115200,
-                   help="Baud rate (default: 115200)")
+    p.add_argument(
+        "--server",
+        default="http://127.0.0.1:8999",
+        help="LinkHub base URL (default: http://127.0.0.1:8999)",
+    )
+    p.add_argument(
+        "--connection",
+        help=(
+            "restrict LinkHub discovery to one serial port (for example COM4); "
+            "omit to auto-scan every port"
+        ),
+    )
+    p.add_argument(
+        "--baud",
+        type=int,
+        help="restrict LinkHub discovery to one baud rate; omit to try standard rates",
+    )
+    p.add_argument("--motor-name-prefix", help="optional Bluetooth motor name prefix")
     p.add_argument("--force", "-f", action="store_true",
                    help="Skip confirmation prompts (for scripted/CI use)")
     p.add_argument("command", nargs="?", default=None,
@@ -1207,70 +1330,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 # ---------------------------------------------------------------------------
-# Connection helpers
+# Connection helper
 # ---------------------------------------------------------------------------
 
-def _resolve_port(port: "str | None", baud: int) -> tuple:
-    """
-    Return (port, baud) to use for the connection.
-
-    TCP/UDP addresses and the 'sitl' shorthand bypass serial scanning entirely.
-    If port is None, scans all COM ports and returns the first that gives a
-    heartbeat (trying baud then _FALLBACK_BAUDS in order).
-    If port is given, probes that port with baud fallbacks until a heartbeat
-    is received, then returns the working (port, baud).
-    Raises SystemExit if nothing responds.
-    """
-    # SITL shorthand and raw TCP/UDP strings go straight to pymavlink.
-    if port is not None:
-        if port == "sitl":
-            print("Using SITL shorthand -> tcp:localhost:5760")
-            return "tcp:localhost:5760", baud
-        if port.startswith(("tcp:", "udp:", "udpin:", "tcpin:")):
-            return port, baud
-    try:
-        import serial.tools.list_ports as _list_ports
-    except ImportError:
-        raise SystemExit("pyserial not installed -- cannot scan COM ports")
-
-    if port is None:
-        ports = sorted(_list_ports.comports(), key=lambda p: p.device)
-        if not ports:
-            raise SystemExit("No COM ports found.")
-        candidates = [(info.device, (info.description or "").strip()) for info in ports]
-        print(f"No port specified -- scanning {len(candidates)} COM port(s) ...")
-    else:
-        candidates = [(port, "")]
-
-    all_bauds = [baud] + [b for b in _FALLBACK_BAUDS if b < baud]
-    for dev, desc in candidates:
-        label = f"{dev}  {desc}".strip()
-        for try_baud in all_bauds:
-            suffix = f" (fallback)" if try_baud != baud else ""
-            print(f"  {label:<50} {try_baud} baud{suffix} ... ", end="", flush=True)
-            ok, sysid = _probe_port(dev, try_baud, timeout=3.0)
-            if ok:
-                print(f"[OK] sysid={sysid}")
-                return dev, try_baud
-            print("--")
-
-    tried = "/".join(str(b) for b in all_bauds)
-    if port is None:
-        raise SystemExit(f"No ArduPilot heartbeat on any COM port (tried {tried}).")
-    raise SystemExit(f"No heartbeat from {port} at {tried}.")
-
-
-def _connect(port: "str | None", baud: int) -> RawesGCS:
-    port, baud = _resolve_port(port, baud)
-    is_tcp = port.startswith(("tcp:", "udp:", "udpin:", "tcpin:"))
-    if is_tcp:
-        print(f"Connecting to {port} ...")
-    else:
-        print(f"Connecting to {port} at {baud} baud ...")
-    session = RawesGCS(address=port, baud=baud, clock=WallClock())
+def _connect(server: str) -> LinkHubClient:
+    print(f"Connecting to LinkHub at {server} ...")
+    session = LinkHubClient(address=server)
     session.connect(timeout=15.0)
     print(f"Connected: sysid={session._target_system} compid={session._target_component}")
-    session.start_heartbeat()
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
@@ -1281,38 +1348,6 @@ def _connect(port: "str | None", baud: int) -> RawesGCS:
     return session
 
 
-def _extract_late_connection_flags(tokens: list[str],
-                                   port: "str | None",
-                                   baud: int) -> tuple[list[str], "str | None", int]:
-    """Pull connection flags from command args so users can place them after verbs.
-
-    Accepts: --port/-p <port>, --baud/-b/--rate <baud>
-    Returns remaining tokens plus resolved (port, baud).
-    """
-    out: list[str] = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t in ("--port", "-p"):
-            if i + 1 >= len(tokens):
-                raise SystemExit("Missing value for --port")
-            port = tokens[i + 1]
-            i += 2
-            continue
-        if t in ("--baud", "-b", "--rate"):
-            if i + 1 >= len(tokens):
-                raise SystemExit(f"Missing value for {t}")
-            try:
-                baud = int(tokens[i + 1])
-            except ValueError:
-                raise SystemExit(f"Invalid baud value for {t}: {tokens[i + 1]!r}")
-            i += 2
-            continue
-        out.append(t)
-        i += 1
-    return out, port, baud
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1321,33 +1356,29 @@ def main() -> None:
     args = _build_parser().parse_args()
 
     cmd_args = list(args.args)
-    if args.command is not None:
-        cmd_args, late_port, late_baud = _extract_late_connection_flags(
-            cmd_args, args.port, args.baud)
-        args.port = late_port
-        args.baud = late_baud
-
-    if args.command == "ping":
-        _ping_ports(baud=args.baud)
-        return
-
-    session = _connect(args.port, args.baud)
     exit_code = 0
-    try:
-        if args.command:
-            tokens = [args.command] + cmd_args
-            ok = _run_command(session, tokens, force=args.force)
-            if not ok:
-                print(f"Unknown command: {args.command!r}")
-                _build_parser().print_help()
-                exit_code = 1
-        else:
-            _repl(session)
-    except KeyboardInterrupt:
-        print("\nInterrupted.")
-    finally:
-        session.close()
-        print("Disconnected.")
+    with ensure_linkhub(
+        args.server,
+        connection=args.connection,
+        baud=args.baud,
+        motor_name_prefix=args.motor_name_prefix,
+    ):
+        session = _connect(args.server)
+        try:
+            if args.command:
+                tokens = [args.command] + cmd_args
+                ok = _run_command(session, tokens, force=args.force)
+                if not ok:
+                    print(f"Unknown command: {args.command!r}")
+                    _build_parser().print_help()
+                    exit_code = 1
+            else:
+                _repl(session)
+        except KeyboardInterrupt:
+            print("\nInterrupted.")
+        finally:
+            session.close()
+            print("Disconnected.")
 
     if exit_code:
         sys.exit(exit_code)

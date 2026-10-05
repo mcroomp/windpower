@@ -1,0 +1,886 @@
+{
+  "$defs": {
+    "Attitude": {
+      "additionalProperties": false,
+      "properties": {
+        "pitch": {
+          "type": "number"
+        },
+        "pitchspeed": {
+          "type": "number"
+        },
+        "roll": {
+          "type": "number"
+        },
+        "rollspeed": {
+          "type": "number"
+        },
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "yaw": {
+          "type": "number"
+        },
+        "yawspeed": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "roll",
+        "pitch",
+        "yaw",
+        "rollspeed",
+        "pitchspeed",
+        "yawspeed"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "ATTITUDE"
+      ]
+    },
+    "AttitudeQuaternion": {
+      "additionalProperties": false,
+      "properties": {
+        "pitchspeed": {
+          "type": "number"
+        },
+        "q1": {
+          "type": "number"
+        },
+        "q2": {
+          "type": "number"
+        },
+        "q3": {
+          "type": "number"
+        },
+        "q4": {
+          "type": "number"
+        },
+        "rollspeed": {
+          "type": "number"
+        },
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "yawspeed": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "q1",
+        "q2",
+        "q3",
+        "q4"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "ATTITUDE_QUATERNION"
+      ]
+    },
+    "BatteryStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "battery_remaining": {
+          "type": "integer"
+        },
+        "current_battery": {
+          "type": "integer"
+        },
+        "voltages": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "BATTERY_STATUS"
+      ]
+    },
+    "CommandAck": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "integer"
+        },
+        "result": {
+          "$ref": "#/$defs/MavResult"
+        }
+      },
+      "required": [
+        "command",
+        "result"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "COMMAND_ACK"
+      ]
+    },
+    "CommandLong": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "integer"
+        },
+        "confirmation": {
+          "type": "integer"
+        },
+        "param1": {
+          "type": "number"
+        },
+        "param2": {
+          "type": "number"
+        },
+        "param3": {
+          "type": "number"
+        },
+        "param4": {
+          "type": "number"
+        },
+        "param5": {
+          "type": "number"
+        },
+        "param6": {
+          "type": "number"
+        },
+        "param7": {
+          "type": "number"
+        },
+        "target_component": {
+          "type": "integer"
+        },
+        "target_system": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_system",
+        "target_component",
+        "command"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "COMMAND_LONG"
+      ]
+    },
+    "EkfStatusReport": {
+      "additionalProperties": false,
+      "properties": {
+        "compass_variance": {
+          "type": "number"
+        },
+        "flags": {
+          "type": "integer"
+        },
+        "pos_horiz_variance": {
+          "type": "number"
+        },
+        "pos_vert_variance": {
+          "type": "number"
+        },
+        "terrain_alt_variance": {
+          "type": "number"
+        },
+        "velocity_variance": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "flags"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "EKF_STATUS_REPORT"
+      ]
+    },
+    "ExtendedSysState": {
+      "additionalProperties": false,
+      "properties": {
+        "landed_state": {
+          "$ref": "#/$defs/MavLandedState"
+        },
+        "vtol_state": {
+          "$ref": "#/$defs/MavVtolState"
+        }
+      },
+      "required": [
+        "vtol_state",
+        "landed_state"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "EXTENDED_SYS_STATE"
+      ]
+    },
+    "GlobalPositionInt": {
+      "additionalProperties": false,
+      "properties": {
+        "alt": {
+          "type": "integer"
+        },
+        "hdg": {
+          "type": "integer"
+        },
+        "lat": {
+          "type": "integer"
+        },
+        "lon": {
+          "type": "integer"
+        },
+        "relative_alt": {
+          "type": "integer"
+        },
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "vx": {
+          "type": "integer"
+        },
+        "vy": {
+          "type": "integer"
+        },
+        "vz": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lat",
+        "lon",
+        "alt",
+        "relative_alt"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "GLOBAL_POSITION_INT"
+      ]
+    },
+    "Heartbeat": {
+      "additionalProperties": false,
+      "properties": {
+        "autopilot": {
+          "$ref": "#/$defs/MavAutopilot"
+        },
+        "base_mode": {
+          "type": "integer"
+        },
+        "custom_mode": {
+          "type": "integer"
+        },
+        "mavlink_version": {
+          "type": "integer"
+        },
+        "system_status": {
+          "$ref": "#/$defs/MavState"
+        },
+        "type": {
+          "$ref": "#/$defs/MavType"
+        }
+      },
+      "required": [
+        "type",
+        "autopilot",
+        "base_mode",
+        "custom_mode",
+        "system_status"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "HEARTBEAT"
+      ]
+    },
+    "LocalPositionNed": {
+      "additionalProperties": false,
+      "properties": {
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "vx": {
+          "type": "number"
+        },
+        "vy": {
+          "type": "number"
+        },
+        "vz": {
+          "type": "number"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "z": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "LOCAL_POSITION_NED"
+      ]
+    },
+    "MavAutopilot": {
+      "enum": [
+        3,
+        8
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "ARDUPILOTMEGA",
+        "INVALID"
+      ]
+    },
+    "MavLandedState": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "UNDEFINED",
+        "ON_GROUND",
+        "IN_AIR",
+        "TAKEOFF",
+        "LANDING"
+      ]
+    },
+    "MavParamType": {
+      "enum": [
+        2,
+        4,
+        6,
+        9
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "INT8",
+        "INT16",
+        "INT32",
+        "REAL32"
+      ]
+    },
+    "MavResult": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "ACCEPTED",
+        "TEMPORARILY_REJECTED",
+        "DENIED",
+        "UNSUPPORTED",
+        "FAILED"
+      ]
+    },
+    "MavSeverity": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "EMERGENCY",
+        "ALERT",
+        "CRITICAL",
+        "ERROR",
+        "WARNING",
+        "NOTICE",
+        "INFO",
+        "DEBUG"
+      ]
+    },
+    "MavState": {
+      "enum": [
+        3,
+        4
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "STANDBY",
+        "ACTIVE"
+      ]
+    },
+    "MavType": {
+      "enum": [
+        4,
+        6
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "HELICOPTER",
+        "GCS"
+      ]
+    },
+    "MavVtolState": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "UNDEFINED",
+        "TRANSITION_TO_FW",
+        "TRANSITION_TO_MC",
+        "MC",
+        "FW"
+      ]
+    },
+    "NamedValueFloat": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "NAMED_VALUE_FLOAT"
+      ]
+    },
+    "NamedValueInt": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "NAMED_VALUE_INT"
+      ]
+    },
+    "ParamRequestRead": {
+      "additionalProperties": false,
+      "properties": {
+        "param_id": {
+          "type": "string"
+        },
+        "param_index": {
+          "type": "integer"
+        },
+        "target_component": {
+          "type": "integer"
+        },
+        "target_system": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_system",
+        "target_component",
+        "param_id"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "PARAM_REQUEST_READ"
+      ]
+    },
+    "ParamSet": {
+      "additionalProperties": false,
+      "properties": {
+        "param_id": {
+          "type": "string"
+        },
+        "param_type": {
+          "$ref": "#/$defs/MavParamType"
+        },
+        "param_value": {
+          "type": "number"
+        },
+        "target_component": {
+          "type": "integer"
+        },
+        "target_system": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_system",
+        "target_component",
+        "param_id",
+        "param_value",
+        "param_type"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "PARAM_SET"
+      ]
+    },
+    "ParamValue": {
+      "additionalProperties": false,
+      "properties": {
+        "param_count": {
+          "type": "integer"
+        },
+        "param_id": {
+          "type": "string"
+        },
+        "param_index": {
+          "type": "integer"
+        },
+        "param_type": {
+          "$ref": "#/$defs/MavParamType"
+        },
+        "param_value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "param_id",
+        "param_value"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "PARAM_VALUE"
+      ]
+    },
+    "PidAxis": {
+      "enum": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "type": "integer",
+      "x-enum-varnames": [
+        "ROLL",
+        "PITCH",
+        "YAW",
+        "ACCEL_Z"
+      ]
+    },
+    "PidTuning": {
+      "additionalProperties": false,
+      "properties": {
+        "D": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "FF": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "I": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "P": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "PDmod": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "SRate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "achieved": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "axis": {
+          "$ref": "#/$defs/PidAxis"
+        },
+        "desired": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "PID_TUNING"
+      ]
+    },
+    "RcChannels": {
+      "additionalProperties": false,
+      "properties": {
+        "chan1_raw": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "chan2_raw": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "chan3_raw": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "chan4_raw": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "RC_CHANNELS"
+      ]
+    },
+    "RequestDataStream": {
+      "additionalProperties": false,
+      "properties": {
+        "req_message_rate": {
+          "type": "integer"
+        },
+        "req_stream_id": {
+          "type": "integer"
+        },
+        "start_stop": {
+          "type": "integer"
+        },
+        "target_component": {
+          "type": "integer"
+        },
+        "target_system": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_system",
+        "target_component",
+        "req_stream_id",
+        "req_message_rate"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "REQUEST_DATA_STREAM"
+      ]
+    },
+    "ServoOutputRaw": {
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer"
+        },
+        "servo10_raw": {
+          "type": "integer"
+        },
+        "servo11_raw": {
+          "type": "integer"
+        },
+        "servo12_raw": {
+          "type": "integer"
+        },
+        "servo13_raw": {
+          "type": "integer"
+        },
+        "servo14_raw": {
+          "type": "integer"
+        },
+        "servo15_raw": {
+          "type": "integer"
+        },
+        "servo16_raw": {
+          "type": "integer"
+        },
+        "servo1_raw": {
+          "type": "integer"
+        },
+        "servo2_raw": {
+          "type": "integer"
+        },
+        "servo3_raw": {
+          "type": "integer"
+        },
+        "servo4_raw": {
+          "type": "integer"
+        },
+        "servo5_raw": {
+          "type": "integer"
+        },
+        "servo6_raw": {
+          "type": "integer"
+        },
+        "servo7_raw": {
+          "type": "integer"
+        },
+        "servo8_raw": {
+          "type": "integer"
+        },
+        "servo9_raw": {
+          "type": "integer"
+        },
+        "time_usec": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "SERVO_OUTPUT_RAW"
+      ]
+    },
+    "SetAttitudeTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "body_pitch_rate": {
+          "type": "number"
+        },
+        "body_roll_rate": {
+          "type": "number"
+        },
+        "body_yaw_rate": {
+          "type": "number"
+        },
+        "q": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "target_component": {
+          "type": "integer"
+        },
+        "target_system": {
+          "type": "integer"
+        },
+        "thrust": {
+          "type": "number"
+        },
+        "time_boot_ms": {
+          "type": "integer"
+        },
+        "type_mask": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "SET_ATTITUDE_TARGET",
+        "ATTITUDE_TARGET"
+      ]
+    },
+    "StatusText": {
+      "additionalProperties": false,
+      "properties": {
+        "severity": {
+          "$ref": "#/$defs/MavSeverity"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "STATUSTEXT"
+      ]
+    },
+    "SysStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "battery_remaining": {
+          "type": "integer"
+        },
+        "current_battery": {
+          "type": "integer"
+        },
+        "load": {
+          "type": "integer"
+        },
+        "onboard_control_sensors_enabled": {
+          "type": "integer"
+        },
+        "onboard_control_sensors_health": {
+          "type": "integer"
+        },
+        "onboard_control_sensors_present": {
+          "type": "integer"
+        },
+        "voltage_battery": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object",
+      "x-mavlink-message-names": [
+        "SYS_STATUS"
+      ]
+    }
+  },
+  "$id": "https://rawes.dev/linkhub/protocol-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "title": "LinkHub protocol",
+  "type": "object"
+}

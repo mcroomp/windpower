@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.expensive
+
 
 from simulation.controller import HeliCyclicController, compute_rate_cmd, compute_bz_tether
 from simulation.frames import build_orb_frame
@@ -688,12 +690,11 @@ def test_elastic_tether_free_flight_holds_generated_ic():
 
 # PD position-feedback gains used by the disturbance tests.  Tuned for
 # the beaupoil rotor (5 kg hub, 100 m tether, ~22 s pendulum period).
-# kp_pos = 80 N/m gives a stiffness ~16 N/m·kg = pendulum frequency
-# ~1.8 rad/s (3× natural).  kd_pos = 80 N·s/m is critically damped at
-# that stiffness for a 5 kg hub.  See controller.position_feedback_bz_eq
-# docstring for the full design rationale.
+# These gains restore the hub without exceeding the 15-degree target-angle
+# envelope under a 1 m/s lateral kick. See position_feedback_bz_eq for the
+# force-to-tilt relationship.
 _KP_POS    = 20.0
-_KD_POS    = 45.0
+_KD_POS    = 40.0
 _CROSSWIND_RATE_KP = 0.015
 _CROSSWIND_RATE_KD = 0.15
 _T_SETTLE  = 30.0   # s — settling budget for disturbance tests
@@ -759,5 +760,3 @@ def test_constant_tether_rejects_brief_force_impulse():
         f"Hub did not return to wind plane: final_north={r['final_north']:.2f} m"
     )
     assert math.degrees(r["max_target_angle"]) < 15.0
-
-

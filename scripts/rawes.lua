@@ -33,7 +33,9 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_RLL: ACRO-manual normalized roll [-1,1]
   RAWES_PIT: ACRO-manual normalized pitch [-1,1]
   RAWES_COL: ACRO-manual normalized collective [0,1]
-  RAWES_QW/QX/QY/QZ: atomic passive target quaternion (w,x,y,z)
+  RAWES_ROFF: passive roll offset from the Lua-owned anchor [rad]
+  RAWES_POFF: passive pitch offset from the Lua-owned anchor [rad]
+  RAWES_YOFF: passive yaw offset from the Lua-owned anchor [rad]
 
 Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
   RAWES_LAT: anchor latitude  [deg * 1e7]                           (int32, no default)
@@ -52,14 +54,22 @@ Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
              current attitude.
     -- IC seed (MODE_PASSIVE):
     --   thrust-only seed (RAWES_THR) is valid and drives zero-rate hold.
-    --   full attitude hold commits once RAWES_THR+RAWES_RIC+RAWES_PIC all arrive.
+    --   Lua captures the attitude anchor on MAV_CMD_RAWES_ENTER_PASSIVE.
   RAWES_THR: IC thrust [0..1]   (calibrate: --trim thr=<value>)
-  RAWES_RIC: IC roll  [rad]     (calibrate: --roll <deg>)
-  RAWES_PIC: IC pitch [rad]     (calibrate: --pitch <deg>)
-  RAWES_YIC: optional fixed yaw target [rad] for MODE_PASSIVE (calibrate: --yaw <deg>)
-             Sending -1000 (RAWES_YIC_CAPTURE_SENTINEL) instead of a yaw angle
-             captures the current AHRS roll/pitch/yaw as the IC roll, pitch,
-             and fixed yaw target all at once.
+  RAWES_ROFF: passive roll offset  [rad] (relative to Lua's captured anchor)
+  RAWES_POFF: passive pitch offset [rad] (relative to Lua's captured anchor)
+  RAWES_YOFF: passive yaw offset   [rad] (relative to Lua's captured anchor)
+
+Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
+  31010 ENTER_GUIDED  (MAV_CMD_USER_1): requires armed, RAWES_MODE=2, RAWES_THR
+        and healthy AHRS. Captures the current attitude, switches to
+        GUIDED_NOGPS and installs that attitude in the same tick, then holds it
+        at 20 Hz until passive hold takes over or the vehicle leaves GUIDED.
+  31011 ENTER_PASSIVE (MAV_CMD_USER_2): requires RAWES_MODE=3 and healthy AHRS.
+        Captures the passive anchor and enables absolute hold.
+        param1 = yaw-trim seed [0, RAWES_YFF_MAX]; negative = adaptive observer.
+  A retry (confirmation > 0) of an already-applied command is acknowledged
+  without capturing again.
 
 Parameters (script-generated; visible in GCS as RAWES_* params):
     RAWES_MODE    Mode selector (0=none,1=steady,2=acro-manual,3=passive,4=landing,5=takeoff) default 0
@@ -82,6 +92,12 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
 
 BASE_PERIOD_MS    = 10        -- 100 Hz base tick
 FLIGHT_PERIOD_MS  = 20        -- 50 Hz flight subsystem
+PASSIVE_TARGET_PERIOD_MS = 50 -- max rate for changed static-hold targets
+-- Static GUIDED holds (entry hold, passive hold) re-send an unchanged target
+-- only as a keepalive well inside GUID_TIMEOUT (3 s). Every vehicle:* binding
+-- takes the scheduler semaphore, which can starve the scripting thread in SITL.
+GUIDED_KEEPALIVE_MS = 1000
+INTERLOCK_ARM_DELAY_MS = 500  -- let ACRO reset its attitude target at ground idle
 GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
 ACRO_MODE_NUM     = 1         -- ArduCopter ACRO = 1
 -- Smooth handoff after kinematic release: keep plant physics unchanged, but
@@ -91,6 +107,16 @@ POST_RELEASE_RECOVERY_S = 2.0 -- ramp-in for altitude corrections
 
 _NVF_MSG_ID = 251
 _NVI_MSG_ID = 252
+_COMMAND_LONG_MSG_ID = 76
+_COMMAND_ACK_MSG_ID  = 77
+-- Ground -> Lua one-shot commands (COMMAND_LONG).  ArduPilot does not process
+-- or acknowledge blocked commands; rawes.lua sends the COMMAND_ACK itself.
+MAV_CMD_RAWES_ENTER_GUIDED = 31010  -- MAV_CMD_USER_1
+MAV_CMD_RAWES_ENTER_PASSIVE = 31011 -- MAV_CMD_USER_2
+MAV_RESULT_ACCEPTED = 0
+MAV_RESULT_DENIED   = 2
+MAV_RESULT_FAILED   = 4
+GUIDED_NOGPS_MODE_NUM = 20
 -- mavlink:init(queue_size, num_msgs).  queue_size = max messages buffered
 -- between Lua ticks; with queue=1 (the old default) back-to-back NVFs from
 -- the ground get dropped because only the first survives until update()
@@ -98,9 +124,13 @@ _NVI_MSG_ID = 252
 mavlink.init(20, 10)
 mavlink.register_rx_msgid(_NVF_MSG_ID)
 mavlink.register_rx_msgid(_NVI_MSG_ID)
+mavlink.register_rx_msgid(_COMMAND_LONG_MSG_ID)
+assert(mavlink.block_command(MAV_CMD_RAWES_ENTER_GUIDED), "block ENTER_GUIDED")
+assert(mavlink.block_command(MAV_CMD_RAWES_ENTER_PASSIVE), "block ENTER_PASSIVE")
 
 _nv_floats = {}
 _nv_ints   = {}
+_pending_commands = {}
 
 -- ── Mode numbers ──────────────────────────────────────────────────────────────
 
@@ -111,25 +141,8 @@ MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable duri
 MODE_LANDING = 4   -- reserved; not implemented here
 MODE_TAKEOFF = 5   -- fixed level attitude + altitude-PID climb; see run_takeoff().
 
--- Sentinel value for RAWES_YIC: sending this instead of a yaw angle tells
--- MODE_PASSIVE to capture the CURRENT roll, pitch, AND yaw from AHRS as the
--- IC seed (roll/pitch pending IC + fixed yaw target), instead of treating the
--- value as a fixed yaw target in radians.  -1000 rad is far outside any valid
--- yaw angle so it cannot collide with a real command.
-RAWES_YIC_CAPTURE_SENTINEL = -1000.0
-
--- MODE_PASSIVE IC seeds are provided over NVF (10-char names max):
---   RAWES_THR : IC thrust [0..1]
---   RAWES_RIC : IC roll       [rad]
---   RAWES_PIC : IC pitch      [rad]
--- RAWES_THR alone is accepted for thrust-only zero-rate hold while waiting for
--- attitude seed.  Full IC attitude hold commits atomically after all three.
---   RAWES_YIC : fixed yaw target [rad] (optional).  When present, PASSIVE holds
---               this absolute yaw instead of capturing the (spinning) AHRS yaw.
---               Sending RAWES_YIC_CAPTURE_SENTINEL (-1000) instead captures the
---               the current AHRS roll/pitch if RAWES_RIC/RAWES_PIC have not
---               already been received, so a yaw-only IC command doesn't block
---               the atomic thrust+roll+pitch seed.
+-- MODE_PASSIVE receives thrust plus relative roll/pitch/yaw offsets.  Lua
+-- captures the AHRS quaternion anchor locally when absolute hold is enabled.
 
 -- RAWES_SUB carries a generic substate index (delivered via NAMED_VALUE_FLOAT).
 -- The ground pumping schedule runs in MODE_STEADY and uses RAWES_SUB only for
@@ -213,6 +226,8 @@ _rc_ch3 = rc:get_channel(3)
 
 local _manual_status_ms = 0
 local _manual_active = false
+local _neutral_hold_active = false
+local _armed_since_ms = nil
 
 -- Thrust state [0..1]
 -- _last_thrust starts at 0; seeded at capture from RAWES_THR (ic_thrust_or_default).
@@ -259,13 +274,15 @@ _cw_rate_max     = 0.6     -- RAWES_CWMAX: position rate saturation [rad/s]
 -- IC thrust [0..1] — ground sends via RAWES_THR.  Used by MODE_PASSIVE
 -- to hold the IC operating point while the body is kinematically locked.
 _ic_thrust         = nil
-_ic_roll_deg       = nil
-_ic_pitch_deg      = nil
 _ic_seeded         = false
 _ic_pending_thrust = nil
-_ic_pending_roll_deg  = nil
-_ic_pending_pitch_deg = nil
-_passive_q_pending = {}
+_passive_anchor_q  = nil
+_passive_target_q  = nil
+_passive_roll_offset_rad  = 0.0
+_passive_pitch_offset_rad = 0.0
+_passive_yaw_offset_rad   = 0.0
+_passive_capture_stable   = 0
+_passive_last_capture_q   = nil
 _ic_thrust_only_reported = false
 
 -- One-shot debug state for capture/first-command handoff diagnostics.
@@ -276,8 +293,12 @@ _dbg_cap_bz_y   = 0.0
 _dbg_cap_bz_z   = 1.0
 _capture_ms     = nil
 _dbg_precap_last_ms = -100000   -- throttle for pre-capture pos_ned/anchor diagnostic
-_passive_hold_yaw_rad = nil
-_passive_yaw_fixed_rad = nil   -- optional ground-provided fixed yaw target [rad] (RAWES_YIC)
+_passive_enabled = false       -- ground enables only after GUIDED/EKF yaw settling
+_passive_guided_ok = false
+_guided_hold_q = nil           -- ENTER_GUIDED captured attitude, held until passive takes over
+_held_target = nil             -- last static-hold target sent {roll, pitch, yaw, thr} [deg, thrust]
+_held_target_ok = false
+_held_target_ms = 0
 _first_nonzero_rate_logged = false
 _guided_cmd_last_log_ms = -2000
 -- ── Yaw trim observer ────────────────────────────────────────────────────────────
@@ -301,7 +322,7 @@ local YAW_MOTOR_FUNC   = 36      -- ArduPilot servo function for Motor4 (SERVO9)
 local TEL_HZ           = 2.0     -- diagnostic NVF emission rate [Hz]  (RAWES_TEL_HZ)
 
 local _yaw_ff_trim  = 0.0     -- current H_YAW_TRIM value [0, YFF_MAX]
-_yaw_ff_seed        = nil     -- ground-provided equilibrium trim seed [0, YFF_MAX] (RAWES_YFF)
+_yaw_ff_seed        = nil     -- ground-provided equilibrium trim seed [0, YFF_MAX] (ENTER_PASSIVE param1)
 local _nvf_last_ms  = nil     -- shared timer for all outer-rate NVF diagnostic emissions
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 -- Convert a millis() result to seconds (float).  On real ArduPilot millis()
@@ -330,6 +351,56 @@ local function quaternion_to_euler(qw, qx, qy, qz)
     return roll, pitch, yaw
 end
 
+local function quaternion_normalize(qw, qx, qy, qz)
+    local norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+    if norm < 1.0e-6 then return nil end
+    return qw/norm, qx/norm, qy/norm, qz/norm
+end
+
+local function quaternion_multiply(aw, ax, ay, az, bw, bx, by, bz)
+    return
+        aw*bw - ax*bx - ay*by - az*bz,
+        aw*bx + ax*bw + ay*bz - az*by,
+        aw*by - ax*bz + ay*bw + az*bx,
+        aw*bz + ax*by - ay*bx + az*bw
+end
+
+local function quaternion_from_euler(roll, pitch, yaw)
+    local cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+    local cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
+    local cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    return
+        cr*cp*cy + sr*sp*sy,
+        sr*cp*cy - cr*sp*sy,
+        cr*sp*cy + sr*cp*sy,
+        cr*cp*sy - sr*sp*cy
+end
+
+local function current_ahrs_quaternion()
+    local q = ahrs:get_quaternion()
+    if q == nil then return nil end
+    return quaternion_normalize(q:q1(), q:q2(), q:q3(), q:q4())
+end
+
+local function quaternion_distance(qw, qx, qy, qz, rw, rx, ry, rz)
+    local dot = math.abs(qw*rw + qx*rx + qy*ry + qz*rz)
+    return 2.0 * math.acos(math.max(-1.0, math.min(1.0, dot)))
+end
+
+local function passive_target_from_anchor()
+    if _passive_anchor_q == nil then return nil end
+    local ow, ox, oy, oz = quaternion_from_euler(
+        _passive_roll_offset_rad,
+        _passive_pitch_offset_rad,
+        _passive_yaw_offset_rad)
+    local aw, ax, ay, az = table.unpack(_passive_anchor_q)
+    local tw, tx, ty, tz = quaternion_multiply(
+        aw, ax, ay, az, ow, ox, oy, oz)
+    tw, tx, ty, tz = quaternion_normalize(tw, tx, ty, tz)
+    _passive_target_q = {tw, tx, ty, tz}
+    return _passive_target_q
+end
+
 local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, roll_rate, pitch_rate, yaw_rate, throttle, src)
     local rr = roll_rate or 0.0
     local pr = pitch_rate or 0.0
@@ -355,7 +426,7 @@ local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, rol
                 src or "unknown"))
         end
     end
-    vehicle:set_target_angle_and_rate_and_throttle(
+    return vehicle:set_target_angle_and_rate_and_throttle(
         roll_deg, pitch_deg, yaw_deg,
         rr, pr, yr,
         throttle)
@@ -458,6 +529,38 @@ local function normalized_collective_pwm(value)
     local rmax = p("RC3_MAX", 2000)
     if p("RC3_REVERSED", 0) > 0.5 then v = 1.0 - v end
     return math.floor(rmin + v * (rmax - rmin) + 0.5)
+end
+
+local function neutral_collective_pwm()
+    local hmin = p("H_COL_MIN", 1250)
+    local hmax = p("H_COL_MAX", 1750)
+    local collective = 0.5
+    if hmax > hmin then
+        collective = math.max(0.0, math.min(1.0, (1500 - hmin) / (hmax - hmin)))
+    end
+
+    local rmin = p("RC3_MIN", 1000)
+    local rmax = p("RC3_MAX", 2000)
+    local deadzone = math.max(0.0, math.min(p("RC3_DZ", 10), rmax - rmin))
+    local pwm = rmin + deadzone + collective * (rmax - rmin - deadzone)
+    if p("RC3_REVERSED", 0) > 0.5 then
+        pwm = rmin + rmax - pwm
+    end
+    return math.floor(pwm + 0.5)
+end
+
+local function update_disarmed_neutral_hold(mode, armed)
+    if mode == MODE_NONE and not armed then
+        if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+        if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+        if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
+        _neutral_hold_active = true
+    elseif _neutral_hold_active then
+        if _rc_ch1 then _rc_ch1:set_override(0) end
+        if _rc_ch2 then _rc_ch2:set_override(0) end
+        if _rc_ch3 then _rc_ch3:set_override(0) end
+        _neutral_hold_active = false
+    end
 end
 
 -- Rate gate for diagnostic NVF telemetry (RAWES_TEL_HZ).  Returns true and
@@ -623,13 +726,21 @@ end
 local function _on_mode_enter(mode)
     -- Preserve a manual seed received in the same scheduler tick as the mode
     -- change. Leaving manual mode clears it, so a later re-entry needs a new seed.
-    if mode ~= MODE_ACRO_MANUAL then _nv_floats = {} end
     _none_status_ms = 0
-    if mode ~= MODE_ACRO_MANUAL and _manual_active then
+    if mode == MODE_PASSIVE and _manual_active then
+        if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+        if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+        if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
+        _manual_active = false
+    elseif mode ~= MODE_ACRO_MANUAL and _manual_active then
         if _rc_ch1 then _rc_ch1:set_override(0) end
         if _rc_ch2 then _rc_ch2:set_override(0) end
         if _rc_ch3 then _rc_ch3:set_override(0) end
         _manual_active = false
+    end
+    if mode ~= MODE_ACRO_MANUAL and mode ~= MODE_PASSIVE then
+        _guided_hold_q = nil
+        _held_target = nil
     end
     if mode == MODE_STEADY then
         _dbg_cap_logged = false
@@ -646,9 +757,13 @@ local function _on_mode_enter(mode)
     end
     if mode == MODE_PASSIVE then
         _passive_status_ms    = 0
-        _passive_hold_yaw_rad = nil
+        _passive_guided_ok = false
+        _held_target = nil
+        _passive_capture_stable   = 0
+        _passive_last_capture_q   = nil
         _yaw_ff_trim          = 0.0
         _nvf_last_ms          = nil
+        gcs:send_text(6, "RAWES: mode 3 (passive) entered")
     end
 end
 
@@ -743,8 +858,10 @@ local function run_flight()
                 if not _dbg_cap_logged then
                     _dbg_cap_logged = true
                     gcs:send_text(6, string.format(
-                        "RAWES DBG cap: d_bz=%.2fdeg el=%.2f az=%.2f T=%.1f",
-                        d_cap, math.deg(_el_rad), math.deg(_az_ref), _tension_n))
+                        "RAWES DBG cap: d_bz=%.2fdeg el=%.2f az=%.2f T=%.1f now=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f)",
+                        d_cap, math.deg(_el_rad), math.deg(_az_ref), _tension_n,
+                        bz_now_cap:x(), bz_now_cap:y(), bz_now_cap:z(),
+                        bz_goal_cap:x(), bz_goal_cap:y(), bz_goal_cap:z()))
                 end
                 gcs:send_text(6, string.format(
                     "RAWES steady: captured  el=%.1f deg  alt=%.1f m  tlen=%.1f m  rel=(%.2f,%.2f,%.2f)  pos_ned=(%.2f,%.2f,%.2f)  anch=(%.2f,%.2f,%.2f)",
@@ -1048,19 +1165,24 @@ local function run_armon(now)
     local armon_ms = _nv_floats["RAWES_ARM"]
     if armon_ms and armon_ms > 0 then
         _nv_floats["RAWES_ARM"] = nil
-        _armon_deadline_ms = now + armon_ms
-        _armon_secs        = math.floor(armon_ms / 1000)
         if arming:is_armed() then
+            _armon_deadline_ms = now + armon_ms
+            _armon_secs        = math.floor(armon_ms / 1000)
             gcs:send_text(6, string.format("RAWES disarm timer set: %ds", _armon_secs))
         else
-            gcs:send_text(4, "RAWES disarm timer set while unarmed")
+            _armon_deadline_ms = nil
+            _armon_secs        = 0
+            gcs:send_text(4, "RAWES disarm timer ignored while unarmed")
         end
     end
 
-    if _armon_deadline_ms and arming:is_armed() and now >= _armon_deadline_ms then
+    if _armon_deadline_ms and now >= _armon_deadline_ms then
         _armon_deadline_ms = nil
-        arming:disarm()
-        gcs:send_text(6, "RAWES disarm timer expired, disarmed")
+        _armon_secs = 0
+        if arming:is_armed() then
+            arming:disarm()
+            gcs:send_text(6, "RAWES disarm timer expired, disarmed")
+        end
     end
 end
 
@@ -1111,13 +1233,26 @@ local function yaw_trim_step(dt, u, psi_dot)
     return _yaw_ff_trim
 end
 
+local function yaw_output_throttle()
+    local pwm = SRV_Channels:get_output_pwm(YAW_MOTOR_FUNC)
+    if pwm == nil then return nil end
+    local smin = p("SERVO9_MIN", 1000)
+    local smax = p("SERVO9_MAX", 2000)
+    local span = smax - smin
+    if span <= 0 then return nil end
+    local u = (pwm - smin) / span
+    if u < 0.0 then u = 0.0 elseif u > 1.0 then u = 1.0 end
+    return u
+end
+
 local function run_yaw_trim(now, is_passive)
     if not arming:is_armed() then return end
     -- MODE_PASSIVE (kinematic hold): the body's gyro/PWM readback is a
     -- simulation artifact (position/attitude is externally forced), so the
     -- normal psi_dot feedback below would incorrectly converge the trim
     -- toward whatever near-zero throttle currently holds a fake zero rate.
-    -- Instead, directly hold the ground-computed equilibrium seed (RAWES_YFF)
+    -- Instead, directly hold the ground-computed equilibrium seed (ENTER_PASSIVE
+    -- param1)
     -- so the real SERVO9 PWM already matches the yaw-motor ODE's frozen IC
     -- equilibrium by the time of kinematic release -- avoiding a step-input
     -- torque mismatch that spins the hub.  Falls through to the normal
@@ -1127,20 +1262,18 @@ local function run_yaw_trim(now, is_passive)
         _yaw_ff_trim = math.max(0.0, math.min(YFF_MAX, _yaw_ff_seed))
         param:set("H_YAW_TRIM", _yaw_ff_trim)
         _diag_set("YFF_T", _yaw_ff_trim)
+        local u = yaw_output_throttle()
+        if u ~= nil then _diag_set("YFF_U", u) end
+        local gyro = ahrs:get_gyro()
+        if gyro then _diag_set("YFF_GZ", gyro:z()) end
         return
     end
     local gyro = ahrs:get_gyro()
     if not gyro then return end
     -- Read the total applied throttle from the SERVO9 output (H_YAW_TRIM +
     -- any AP yaw P-term).  Returns nil until AP has written its first output.
-    local pwm = SRV_Channels:get_output_pwm(YAW_MOTOR_FUNC)
-    if pwm == nil then return end
-    local smin = p("SERVO9_MIN", 1000)
-    local smax = p("SERVO9_MAX", 2000)
-    local span = smax - smin
-    if span <= 0 then return end
-    local u = (pwm - smin) / span
-    if u < 0.0 then u = 0.0 elseif u > 1.0 then u = 1.0 end
+    local u = yaw_output_throttle()
+    if u == nil then return end
     local psi_dot = gyro:z()
     yaw_trim_step(BASE_PERIOD_MS * 0.001, u, psi_dot)
     param:set("H_YAW_TRIM", _yaw_ff_trim)
@@ -1150,14 +1283,6 @@ local function run_yaw_trim(now, is_passive)
 end
 
 local function run_acro_manual_mode(now)
-    if vehicle:get_mode() ~= ACRO_MODE_NUM then
-        if arming:is_armed() then arming:disarm() end
-        if now - _manual_status_ms >= 1000 then
-            _manual_status_ms = now
-            gcs:send_text(3, "RAWES ACRO manual: AP not in ACRO -- DISARMED")
-        end
-        return false
-    end
     if math.floor(p("H_FLYBAR_MODE", 0) + 0.5) ~= 1 then
         if arming:is_armed() then arming:disarm() end
         if now - _manual_status_ms >= 1000 then
@@ -1193,22 +1318,71 @@ local function run_acro_manual_mode(now)
     return true
 end
 
+-- ── Static GUIDED attitude hold ──────────────────────────────────────────────
+
+-- Hold a fixed attitude target. ArduPilot keeps the last target until
+-- GUID_TIMEOUT, so the scheduler-locked binding is called only when the target
+-- changes (at most every PASSIVE_TARGET_PERIOD_MS) or for the keepalive. A
+-- rejected target (vehicle not in GUIDED) is retried at the keepalive rate.
+-- Setting _held_target = nil forces the next call to send immediately.
+local function hold_guided_quaternion(q, thrust, src, now)
+    local roll_rad, pitch_rad, yaw_rad = quaternion_to_euler(table.unpack(q))
+    if roll_rad == nil then return false end
+    local target = {math.deg(roll_rad), math.deg(pitch_rad), math.deg(yaw_rad), thrust}
+    local last = _held_target
+    if last ~= nil then
+        local elapsed = now - _held_target_ms
+        if elapsed < PASSIVE_TARGET_PERIOD_MS then return _held_target_ok end
+        if elapsed < GUIDED_KEEPALIVE_MS then
+            if not _held_target_ok then return false end
+            local changed = false
+            for i = 1, 4 do
+                if target[i] ~= last[i] then changed = true break end
+            end
+            if not changed then return true end
+        end
+    end
+    local ok = send_guided_angle_rate_throttle(
+        target[1], target[2], target[3], 0.0, 0.0, 0.0, thrust, src)
+    _held_target = target
+    _held_target_ok = ok
+    _held_target_ms = now
+    return ok
+end
+
 local function run_passive_mode(now)
     -- Armed-but-quiet: hold the IC operating point so the kinematic
     -- release transitions smoothly. Hold zero body-rate demand and
     -- pass IC collective through GUIDED throttle (no H_FLYBAR_MODE
     -- dependency).
-    local ic_full_ready = (_ic_thrust ~= nil and _ic_roll_deg ~= nil and _ic_pitch_deg ~= nil)
-    local ic_thrust_only = (_ic_thrust ~= nil and _ic_roll_deg == nil and _ic_pitch_deg == nil)
+    local ic_full_ready = (_ic_thrust ~= nil and _passive_anchor_q ~= nil)
+    local ic_thrust_only = (_ic_thrust ~= nil and _passive_anchor_q == nil)
 
-    local mode_now  = vehicle:get_mode()
-    local guided_ok = (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy()
+    if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+    if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+    if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
+
+    local guided_ok = _passive_guided_ok
     local gyro = ahrs:get_gyro()
     local gx, gy, gz = 0.0, 0.0, 0.0
     if gyro then
         gx = gyro:x()
         gy = gyro:y()
         gz = gyro:z()
+    end
+
+    if not _passive_enabled then
+        _diag_set("OL_RSP", 0.0)
+        _diag_set("OL_PSP", 0.0)
+        _diag_set("OL_YSP", 0.0)
+        _diag_set("OL_RER", -gx)
+        _diag_set("OL_PER", -gy)
+        _diag_set("OL_YER", -gz)
+        _diag_set("OL_AP", 0.0)
+        _diag_set("OL_AI", 0.0)
+        _diag_set("OL_AD", 0.0)
+        _diag_set("OL_COL", ic_thrust_or_default())
+        return false
     end
 
     if now - _passive_status_ms >= 1000 then
@@ -1221,16 +1395,15 @@ local function run_passive_mode(now)
             ic_s = "thr_only"
         end
         local g_s = guided_ok and "ok" or "no"
-        local y_s = (_passive_hold_yaw_rad ~= nil) and string.format("%.1f", math.deg(_passive_hold_yaw_rad)) or "n/a"
+        local y_s = (_passive_anchor_q ~= nil) and "set" or "n/a"
         gcs:send_text(6, string.format(
             "RAWES passive: %s ic=%s guided=%s yaw_hold=%s thr=%.3f",
             armed_s, ic_s, g_s, y_s, ic_thrust_or_default()))
     end
 
     if not ic_full_ready then
-        -- Without full attitude seed, run thrust-only zero-rate hold when
-        -- RAWES_THR is available.  This damps rotation while preserving rotor
-        -- RPM and avoids blocking PASSIVE on RAWES_RIC/PIC.
+        -- Without a captured anchor, run thrust-only zero-rate hold when
+        -- RAWES_THR is available while the ground-side settle sequence runs.
         _diag_set("OL_RSP", 0.0)
         _diag_set("OL_PSP", 0.0)
         _diag_set("OL_YSP", 0.0)
@@ -1245,26 +1418,7 @@ local function run_passive_mode(now)
         _diag_set("BZG_N", 0.0)
         _diag_set("BZG_E", 0.0)
         _diag_set("BZG_D", 0.0)
-        if guided_ok and arming:is_armed() and _ic_thrust ~= nil then
-            vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, ic_thrust_or_default())
-        end
-        return
-    end
-
-    -- Yaw target: a ground-provided fixed yaw (RAWES_YIC) takes precedence and
-    -- is held as an absolute setpoint, so PASSIVE does not chase the spinning
-    -- AHRS yaw.  Without it, fall back to capturing the AHRS yaw once on entry.
-    if _passive_yaw_fixed_rad ~= nil then
-        _passive_hold_yaw_rad = _passive_yaw_fixed_rad
-    elseif _passive_hold_yaw_rad == nil then
-        if not ahrs:healthy() then
-            return
-        end
-        local y = ahrs:get_yaw_rad()
-        if y == nil then
-            return
-        end
-        _passive_hold_yaw_rad = y
+        return false
     end
 
     local col_thrust_p = ic_thrust_or_default()
@@ -1282,12 +1436,85 @@ local function run_passive_mode(now)
     _diag_set("BZG_N", 0.0)
     _diag_set("BZG_E", 0.0)
     _diag_set("BZG_D", 0.0)
-    if guided_ok then
-        send_guided_angle_rate_throttle(
-            _ic_roll_deg, _ic_pitch_deg, math.deg(_passive_hold_yaw_rad or 0.0),
-            0.0, 0.0, 0.0, col_thrust_p,
-            "passive_hold")
+    guided_ok = hold_guided_quaternion(_passive_target_q, col_thrust_p, "passive_hold", now)
+        and ahrs:healthy()
+    _passive_guided_ok = guided_ok
+    return guided_ok
+end
+
+-- ── Ground commands (COMMAND_LONG) ──────────────────────────────────────────
+
+local function run_guided_entry_hold(now)
+    if _guided_hold_q == nil then return end
+    if not arming:is_armed() then
+        _guided_hold_q = nil
+        return
     end
+    if not hold_guided_quaternion(_guided_hold_q, ic_thrust_or_default(), "guided_entry", now) then
+        _guided_hold_q = nil
+        gcs:send_text(4, "RAWES: GUIDED entry hold released (vehicle left GUIDED)")
+    end
+end
+
+local function enter_guided(cmd, mode, now)
+    if cmd.confirmation > 0 and _guided_hold_q ~= nil then
+        return MAV_RESULT_ACCEPTED
+    end
+    if not arming:is_armed() then return MAV_RESULT_DENIED, "not armed" end
+    if mode ~= MODE_ACRO_MANUAL then return MAV_RESULT_DENIED, "RAWES_MODE must be 2" end
+    if _ic_thrust == nil then return MAV_RESULT_DENIED, "RAWES_THR not seeded" end
+    if not ahrs:healthy() then return MAV_RESULT_DENIED, "AHRS unhealthy" end
+    local qw, qx, qy, qz = current_ahrs_quaternion()
+    if qw == nil then return MAV_RESULT_FAILED, "invalid AHRS quaternion" end
+    if not vehicle:set_mode(GUIDED_NOGPS_MODE_NUM) then
+        return MAV_RESULT_FAILED, "GUIDED_NOGPS mode change rejected"
+    end
+    -- Mode init installs a level target; replace it before the next control
+    -- tick can act on it.
+    local hold_q = {qw, qx, qy, qz}
+    _held_target = nil
+    if not hold_guided_quaternion(hold_q, _ic_thrust, "guided_entry", now) then
+        return MAV_RESULT_FAILED, "GUIDED target rejected"
+    end
+    _guided_hold_q = hold_q
+    gcs:send_text(6, "RAWES: GUIDED entry holding captured attitude")
+    return MAV_RESULT_ACCEPTED
+end
+
+local function enter_passive(cmd, mode)
+    if cmd.confirmation > 0 and _passive_enabled then
+        return MAV_RESULT_ACCEPTED
+    end
+    if mode ~= MODE_PASSIVE then return MAV_RESULT_DENIED, "RAWES_MODE must be 3" end
+    if not ahrs:healthy() then return MAV_RESULT_DENIED, "AHRS unhealthy" end
+    local qw, qx, qy, qz = current_ahrs_quaternion()
+    if qw == nil then return MAV_RESULT_FAILED, "invalid AHRS quaternion" end
+    _passive_anchor_q = {qw, qx, qy, qz}
+    _passive_target_q = passive_target_from_anchor()
+    _passive_enabled = true
+    _guided_hold_q = nil
+    if cmd.param1 >= 0.0 then _yaw_ff_seed = cmd.param1 end
+    gcs:send_text(6, "RAWES passive: anchor captured, absolute hold enabled")
+    gcs:send_text(6, "RAWES: passive active")
+    return MAV_RESULT_ACCEPTED
+end
+
+local function process_commands(mode, now)
+    for i = 1, #_pending_commands do
+        local cmd = _pending_commands[i]
+        local result, reason
+        if cmd.command == MAV_CMD_RAWES_ENTER_GUIDED then
+            result, reason = enter_guided(cmd, mode, now)
+        else
+            result, reason = enter_passive(cmd, mode)
+        end
+        if reason ~= nil then
+            gcs:send_text(3, string.format("RAWES cmd %d rejected: %s", cmd.command, reason))
+        end
+        mavlink.send_chan(cmd.chan, _COMMAND_ACK_MSG_ID, string.pack(
+            "<HBBiBB", cmd.command, result, 0, 0, cmd.sysid, cmd.compid))
+    end
+    _pending_commands = {}
 end
 
 -- ── Main update ───────────────────────────────────────────────────────────────
@@ -1296,27 +1523,56 @@ local function update()
     _diag = _diag + 1
 
     -- Drain MAVLink named-value inbox (floats + ints; all modes including 0)
-    local nv_raw = mavlink.receive_chan()
+    local nv_raw, nv_chan = mavlink.receive_chan()
     while nv_raw do
         local msgid = string.unpack("<I3", nv_raw, 10)
-        if msgid == _NVI_MSG_ID then
+        if msgid == _COMMAND_LONG_MSG_ID then
+            local p1, _, _, _, _, _, _, command, _, _, confirmation =
+                string.unpack("<fffffffHBBB", nv_raw, 13)
+            if command == MAV_CMD_RAWES_ENTER_GUIDED
+               or command == MAV_CMD_RAWES_ENTER_PASSIVE then
+                local sysid, compid = string.unpack("<BB", nv_raw, 8)
+                table.insert(_pending_commands, {
+                    command = command, param1 = p1, confirmation = confirmation,
+                    sysid = sysid, compid = compid, chan = nv_chan,
+                })
+            end
+        elseif msgid == _NVI_MSG_ID then
             local _, nv_val, nv_name = string.unpack("<Iic10", nv_raw, 13)
             nv_name = nv_name:gsub("\0", "")
+            local previous = _nv_ints[nv_name]
             _nv_ints[nv_name] = nv_val
-            gcs:send_text(6, string.format("RAWES: rcvd %s=%d", nv_name, nv_val))
+            if previous == nil or previous ~= nv_val then
+                gcs:send_text(6, string.format("RAWES: rcvd %s=%d", nv_name, nv_val))
+            end
         elseif msgid == _NVF_MSG_ID then
             local _, nv_val, nv_name = string.unpack("<Ifc10", nv_raw, 13)
             nv_name = nv_name:gsub("\0", "")
+            local previous = _nv_floats[nv_name]
             _nv_floats[nv_name] = nv_val
-            gcs:send_text(6, string.format("RAWES: rcvd %s=%.0f", nv_name, nv_val))
+            if previous == nil or previous ~= nv_val then
+                gcs:send_text(6, string.format("RAWES: rcvd %s=%.6g", nv_name, nv_val))
+            end
         end
-        nv_raw = mavlink.receive_chan()
+        nv_raw, nv_chan = mavlink.receive_chan()
     end
 
     -- Decode mode and substate
     local mode = math.floor(p("RAWES_MODE", 0) + 0.5)
     local sub  = math.floor((_nv_floats["RAWES_SUB"] or 0) + 0.5)
     local now  = millis()
+
+    -- Apply mode-entry resets before consuming mode-specific commands.
+    if mode ~= _prev_mode then
+        _on_mode_enter(mode)
+        _prev_mode  = mode
+        _prev_sub   = sub
+        _mode_ms    = now
+        _submode_ms = now
+    elseif sub ~= _prev_sub then
+        _prev_sub   = sub
+        _submode_ms = now
+    end
 
     -- Update altitude, tension, cyclic and collective targets from NV messages
     if _nv_floats["RAWES_ALT"] then
@@ -1332,110 +1588,39 @@ local function update()
     if _nv_ints["RAWES_AAL"] then _anchor_alt_cm = _nv_ints["RAWES_AAL"] end
     _try_resolve_anchor()
     -- Crosswind rate damping gains now come from RAWES_* params; no NVF override needed.
-    -- IC seed handling:
+    -- Passive seed handling:
     --   RAWES_THR alone is accepted for thrust-only zero-rate hold.
-    --   full attitude hold commits once RAWES_THR+RAWES_RIC+RAWES_PIC are all present.
+    --   attitude offsets are relative to the Lua-owned captured anchor.
     if _nv_floats["RAWES_THR"] then _ic_pending_thrust = _nv_floats["RAWES_THR"] end
-    if _nv_floats["RAWES_RIC"] then _ic_pending_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
-    if _nv_floats["RAWES_PIC"] then _ic_pending_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
-    for _, component in ipairs({"QW", "QX", "QY", "QZ"}) do
-        local key = "RAWES_" .. component
-        if _nv_floats[key] ~= nil then
-            _passive_q_pending[component] = _nv_floats[key]
-            _nv_floats[key] = nil
-        end
+    if _nv_floats["RAWES_ROFF"] ~= nil then
+        _passive_roll_offset_rad = _nv_floats["RAWES_ROFF"]
     end
-    if _passive_q_pending.QW ~= nil
-       and _passive_q_pending.QX ~= nil
-       and _passive_q_pending.QY ~= nil
-       and _passive_q_pending.QZ ~= nil then
-        local roll, pitch, yaw = quaternion_to_euler(
-            _passive_q_pending.QW, _passive_q_pending.QX,
-            _passive_q_pending.QY, _passive_q_pending.QZ)
-        _passive_q_pending = {}
-        if roll ~= nil then
-            _ic_pending_roll_deg = math.deg(roll)
-            _ic_pending_pitch_deg = math.deg(pitch)
-            _ic_roll_deg = _ic_pending_roll_deg
-            _ic_pitch_deg = _ic_pending_pitch_deg
-            _passive_yaw_fixed_rad = yaw
-        else
-            gcs:send_text(3, "RAWES passive: rejected zero quaternion")
-        end
+    if _nv_floats["RAWES_POFF"] ~= nil then
+        _passive_pitch_offset_rad = _nv_floats["RAWES_POFF"]
     end
-    -- Equilibrium yaw-trim seed (ground-computed from IC rotor omega and the
-    -- GB4008 hub model -- see torque_model.equilibrium_throttle()).  Held
-    -- constant for the whole MODE_PASSIVE kinematic hold; consumed by
-    -- run_yaw_trim() below instead of its normal psi_dot feedback, which is
-    -- meaningless while the body is kinematically locked (see AGENTS.md /
-    -- design/flight_stack.md "Yaw observer in passive mode").
-    if _nv_floats["RAWES_YFF"] then _yaw_ff_seed = _nv_floats["RAWES_YFF"] end
-    -- Optional fixed yaw target for MODE_PASSIVE.  When present, PASSIVE holds
-    -- this absolute yaw instead of capturing (and holding) the spinning AHRS yaw.
-    -- Sending RAWES_YIC_CAPTURE_SENTINEL instead captures roll/pitch/yaw all
-    -- at once from the current AHRS attitude.
-    -- One-shot: RAWES_YIC persists in _nv_floats once received, so it must be
-    -- cleared after processing -- otherwise every tick re-enters this block,
-    -- continuously re-capturing the (possibly still-moving) AHRS attitude and
-    -- re-emitting the capture statustext (mirrors the RAWES_ARM one-shot idiom
-    -- in run_armon()).
-    if _nv_floats["RAWES_YIC"] then
-        local yic = _nv_floats["RAWES_YIC"]
-        if yic <= RAWES_YIC_CAPTURE_SENTINEL + 0.5 then
-            if ahrs:healthy() then
-                _nv_floats["RAWES_YIC"] = nil
-                _ic_pending_roll_deg = math.deg(ahrs:get_roll_rad())
-                _ic_pending_pitch_deg = math.deg(ahrs:get_pitch_rad())
-                -- Also commit directly to _ic_roll_deg/_ic_pitch_deg (not just
-                -- the *_pending_* staging fields).  The "not _ic_seeded" atomic
-                -- commit below only copies pending -> committed ONCE, the first
-                -- time IC seeding happens after a Lua (re)load.  _ic_seeded is
-                -- Lua global state that persists across RAWES_MODE transitions
-                -- within the same FC boot, so a second/later --hold capture in
-                -- the same boot would otherwise land only in the *_pending_*
-                -- fields and never reach send_guided_angle_rate_throttle(),
-                -- leaving the GUIDED target frozen at whatever roll/pitch was
-                -- committed earlier (e.g. 0/0 from a prior --roll/--pitch run).
-                _ic_roll_deg = _ic_pending_roll_deg
-                _ic_pitch_deg = _ic_pending_pitch_deg
-                _passive_yaw_fixed_rad = ahrs:get_yaw_rad()
-                gcs:send_text(6, string.format(
-                    "RAWES YIC capture: r=%.1f p=%.1f y=%.1f",
-                    _ic_pending_roll_deg, _ic_pending_pitch_deg, math.deg(_passive_yaw_fixed_rad)))
-            end
-            -- else: AHRS not yet healthy -- leave RAWES_YIC in the inbox and
-            -- retry the capture next tick.
-        else
-            _nv_floats["RAWES_YIC"] = nil
-            _passive_yaw_fixed_rad = yic
-        end
+    if _nv_floats["RAWES_YOFF"] ~= nil then
+        _passive_yaw_offset_rad = _nv_floats["RAWES_YOFF"]
     end
+    if _passive_anchor_q ~= nil then passive_target_from_anchor() end
 
     if not _ic_seeded then
         if _ic_pending_thrust ~= nil then
             _ic_thrust = _ic_pending_thrust
-            if (not _ic_thrust_only_reported)
-               and _ic_pending_roll_deg == nil and _ic_pending_pitch_deg == nil then
+            if not _ic_thrust_only_reported then
                 _ic_thrust_only_reported = true
                 gcs:send_text(6, string.format(
-                    "RAWES IC thrust set: thr=%.3f (attitude pending)", _ic_thrust))
+                    "RAWES IC thrust set: thr=%.3f", _ic_thrust))
             end
         end
-        if _ic_thrust ~= nil and _ic_pending_roll_deg ~= nil and _ic_pending_pitch_deg ~= nil then
-            _ic_roll_deg = _ic_pending_roll_deg
-            _ic_pitch_deg = _ic_pending_pitch_deg
+        if _ic_thrust ~= nil then
             _ic_seeded = true
-            _ic_thrust_only_reported = false
-            gcs:send_text(6, string.format(
-                "RAWES IC seed set: r=%.1f p=%.1f thr=%.3f",
-                _ic_roll_deg, _ic_pitch_deg, _ic_thrust))
         end
     else
-        -- After initial atomic seed, accept incremental updates.
         if _nv_floats["RAWES_THR"] then _ic_thrust = _nv_floats["RAWES_THR"] end
-        if _nv_floats["RAWES_RIC"] then _ic_roll_deg = math.deg(_nv_floats["RAWES_RIC"]) end
-        if _nv_floats["RAWES_PIC"] then _ic_pitch_deg = math.deg(_nv_floats["RAWES_PIC"]) end
     end
+    -- One-shot ground commands run after the named values queued ahead of
+    -- them (thrust, offsets) have been applied.
+    process_commands(mode, now)
     -- RAWES_ARM disarm timer must always run, regardless of mode/IC seed.  In
     -- particular, MODE_PASSIVE before full IC seed still needs the safety timer
     -- to expire and disarm if requested by the ground.
@@ -1448,52 +1633,53 @@ local function update()
     -- smoothly when the ground transitions between phase tension targets.
     _apply_tension_ramp(BASE_PERIOD_MS * 0.001)
 
+    -- In the default disarmed state, keep ACRO flybar passthrough at neutral
+    -- without relying on H_SV_MAN. Clear before any armed or active-mode control.
+    local armed = arming:is_armed()
+    update_disarmed_neutral_hold(mode, armed)
+
     -- Ch4 yaw always neutral (no RC receiver; prevents yaw integrator wind-up).
     -- In PASSIVE before full IC seed, avoid all non-essential control API calls.
     if mode ~= MODE_PASSIVE or _ic_seeded then
         if _rc_ch4 then _rc_ch4:set_override(1500) end
     end
 
-    -- Latch the motor interlock (CH8) high while armed so the heli rotor stays
-    -- runup-complete and ArduPilot clears land_complete (otherwise GUIDED angle
-    -- commands are silently dropped by angle_control_run's takeoff/relax branch).
-    -- Scripting RC overrides expire after RC_OVERRIDE_TIME, so this must be
-    -- re-asserted every tick.  Gated on armed only (NOT on IC seed): CH8 high
-    -- before arm blocks arming ("Motor Interlock Enabled"), but the rotor must
-    -- run up through the whole kinematic phase so land_complete is already
-    -- cleared at release.
-    if _rc_ch8 and arming:is_armed() then _rc_ch8:set_override(2000) end
-
-    -- Mode/substate change tracking
-    if mode ~= _prev_mode then
-        _on_mode_enter(mode)
-        _prev_mode  = mode
-        _prev_sub   = sub
-        _mode_ms    = now
-        _submode_ms = now
-    elseif sub ~= _prev_sub then
-        _prev_sub   = sub
-        _submode_ms = now
+    -- Give ACRO at least one deterministic ground-idle control interval after
+    -- arming so it resets ArduPilot's internal attitude target to the AHRS
+    -- attitude. Rate-only GUIDED preserves that target; asserting interlock on
+    -- the first armed tick can otherwise carry a stale near-inverted target
+    -- into the later absolute-hold handoff.
+    if armed then
+        if _armed_since_ms == nil then _armed_since_ms = now end
+        if _rc_ch8 and now - _armed_since_ms >= INTERLOCK_ARM_DELAY_MS then
+            _rc_ch8:set_override(2000)
+        end
+    else
+        _armed_since_ms = nil
+        if _rc_ch8 then _rc_ch8:set_override(0) end
     end
 
     if mode == MODE_NONE then
         if now - _none_status_ms >= 5000 then
             _none_status_ms = now
-            local armed = arming:is_armed() and "ARMED" or "disarmed"
-            gcs:send_text(6, "RAWES: mode 0 (none)  " .. armed)
+            local armed_status = armed and "ARMED" or "disarmed"
+            gcs:send_text(6, "RAWES: mode 0 (none)  " .. armed_status)
         end
         _diag_emit(now)
         return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_PASSIVE then
-        run_passive_mode(now)
-        run_yaw_trim(now, true)
+        run_guided_entry_hold(now)
+        if run_passive_mode(now) then
+            run_yaw_trim(now, true)
+        end
         _diag_emit(now)
         return update, BASE_PERIOD_MS
     end
 
     if mode == MODE_ACRO_MANUAL then
+        run_guided_entry_hold(now)
         if run_acro_manual_mode(now) then
             run_yaw_trim(now, false)
         end

@@ -8,7 +8,6 @@
 #
 #   .venv/Scripts/python.exe -m pytest tests/unit -m "not simtest"
 #   .venv/Scripts/python.exe simulation/run_tests.py tests/simtests -m simtest
-#   .venv/Scripts/python.exe -m pytest tests/hil   # needs RAWES_HIL_PORT=COMx
 #
 # Usage:
 #   bash test.sh [-n N] [pytest args...]         # run the SITL stack suite
@@ -21,15 +20,20 @@
 # Suppress path mangling in MSYS/Git-for-Windows; harmless elsewhere.
 [[ -n "${MSYSTEM:-}" ]] && export MSYS_NO_PATHCONV=1
 
-# Prefer the current shell if Docker is already reachable here.  On this box,
-# Docker Desktop is available from Git Bash, so there is no need to reinvoke
-# inside WSL.  Only fall back to WSL when Docker is not usable locally and a
-# WSL launch path is available.
-if [[ -n "${MSYSTEM:-}" && -z "${WSL_DISTRO_NAME:-}" ]] && ! docker info >/dev/null 2>&1 && command -v wsl.exe >/dev/null 2>&1; then
+# Docker access on this Windows workstation is WSL-only. Never use or probe
+# Docker Desktop's native Windows named pipe.
+if [[ -n "${MSYSTEM:-}" && -z "${WSL_DISTRO_NAME:-}" ]]; then
+    if ! command -v wsl.exe >/dev/null 2>&1; then
+        echo "[ERROR] WSL is required for RAWES Docker stack tests." >&2
+        exit 1
+    fi
     _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     _drive="${_script_dir:1:1}"
     _wsl_dir="/mnt/${_drive,,}${_script_dir:2}"
-    exec wsl.exe -e bash -lc "cd '$_wsl_dir' && bash test.sh $(printf '%q ' "$@")"
+    _profile_lockstep="$(printf '%q' "${RAWES_PROFILE_LOCKSTEP:-0}")"
+    _hard_timeout="$(printf '%q' "${RAWES_STACK_TEST_TIMEOUT_S:-600}")"
+    exec wsl.exe -e bash -lc \
+        "cd '$_wsl_dir' && RAWES_PROFILE_LOCKSTEP=$_profile_lockstep RAWES_STACK_TEST_TIMEOUT_S=$_hard_timeout bash test.sh $(printf '%q ' "$@")"
 fi
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,10 +57,9 @@ _sync_code() {
         --exclude="*/__pycache__" \
         --exclude="simulation/eeprom*.bin" \
         --exclude="tests/unit" \
-        --exclude="tests/hil" \
         --exclude=".venv" \
         --exclude="*.egg-info" \
-        -cf - pyproject.toml simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate \
+        -cf - pyproject.toml simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
     | docker exec -i "$_c" tar -xf - -C /rawes/
     # dynbem (the Rust-backed aero core) is installed from a pinned PyPI wheel,
     # not synced from the sibling ../aero source workspace -- that source tree
@@ -95,7 +98,13 @@ try:
 except m.PackageNotFoundError:
     version = None
 
-if version != required:
+try:
+    import dynbem
+    api_ok = hasattr(dynbem, "step_omega")
+except ImportError:
+    api_ok = False
+
+if version != required or not api_ok:
     try:
         # Install dynbem from PyPI (wheel-only) to avoid local Rust builds in container.
         subprocess.check_call([
@@ -105,7 +114,10 @@ if version != required:
             "install",
             "-q",
             "--upgrade",
+            "--force-reinstall",
             "--only-binary=:all:",
+            "--index-url",
+            "https://packagefeedproxy.microsoft.io/pypi/simple/",
             f"dynbem=={required}",
         ])
     except subprocess.CalledProcessError as exc:
@@ -115,11 +127,14 @@ if version != required:
 # Hard guard: abort if dynbem is still missing or wrong version.
 try:
     installed = m.version("dynbem")
+    import dynbem
+    installed_api_ok = hasattr(dynbem, "step_omega")
 except m.PackageNotFoundError:
     installed = None
+    installed_api_ok = False
 
-if installed != required:
-    print(f"[ERROR] dynbem version check failed after install (required={required!r}, found={installed!r}); aborting sync.", file=sys.stderr)
+if installed != required or not installed_api_ok:
+    print(f"[ERROR] dynbem validation failed after install (required={required!r}, found={installed!r}, step_omega={installed_api_ok}); aborting sync.", file=sys.stderr)
     raise SystemExit(2)
 PY'
     echo "[INFO] Code sync complete."
@@ -144,7 +159,7 @@ _snap_procs() {
     for _ct in $_cs; do
         local _hits
         _hits=$(docker exec "$_ct" bash -c \
-            "pgrep -a -f 'arducopter|sim_vehicle|mediator\.py' 2>/dev/null | grep -v 'pgrep' || true" \
+            "pgrep -a -f 'arducopter|sim_vehicle|mediator\.py|linkhub serve' 2>/dev/null | grep -v 'pgrep' || true" \
             2>/dev/null || true)
         if [ -n "$_hits" ]; then
             while IFS= read -r _line; do
@@ -196,15 +211,44 @@ _cleanup_orphan_containers() {
 
 _run_stack() {
     local _N_WORKERS=4
+    local _HARD_TIMEOUT_S="${RAWES_STACK_TEST_TIMEOUT_S:-600}"
+    local _PROFILE_LOCKSTEP="${RAWES_PROFILE_LOCKSTEP:-0}"
     local _PASS_ARGS=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n) shift; _N_WORKERS="$1" ;;
             -n[0-9]*) _N_WORKERS="${1#-n}" ;;
+            --profile-lockstep) _PROFILE_LOCKSTEP=1 ;;
             *) _PASS_ARGS+=("$1") ;;
         esac
         shift
     done
+
+    if ! [[ "$_HARD_TIMEOUT_S" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] RAWES_STACK_TEST_TIMEOUT_S must be a positive integer" >&2
+        return 2
+    fi
+
+    # Each worker runs ArduPilot, LinkHub, and a 400 Hz lockstep mediator.
+    # More than two concurrent stacks on the supported Windows workstation
+    # causes UDP loss rather than useful throughput.  Keep -n as the requested
+    # upper bound, but cap actual lockstep concurrency at the measured-safe
+    # value.  The LinkHub rate benchmark runs exclusively below.
+    local _EFFECTIVE_WORKERS="$_N_WORKERS"
+    if [ "$_EFFECTIVE_WORKERS" -gt 2 ]; then
+        _EFFECTIVE_WORKERS=2
+        _log "[INFO] Requested $_N_WORKERS workers; limiting lockstep concurrency to 2"
+    fi
+
+    # A cached Docker build is intentionally run before collection. Docker
+    # reuses the expensive ArduPilot stage, but still notices changed Python
+    # requirements, runtime layers, or LinkHub sources. The probe gives a short,
+    # actionable failure before parallel workers are launched.
+    bash "$REPO_DIR/setup.sh" build
+    docker run --rm --entrypoint /bin/bash "$IMAGE" -lc \
+        '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 12), sys.version" \
+         && test -x /ardupilot/build/sitl/bin/arducopter-heli \
+         && command -v linkhub >/dev/null'
 
     # Remove any leftover per-test containers from a previously aborted run.
     _cleanup_orphan_containers
@@ -255,7 +299,7 @@ _run_stack() {
     _PROCS_BEFORE=$(_snap_procs)
 
     echo ""
-    echo "=== STACK TEST RUN START run=$_RUN_ID files=$_N_FILES workers=$_N_WORKERS date=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo "=== STACK TEST RUN START run=$_RUN_ID files=$_N_FILES workers=$_EFFECTIVE_WORKERS requested_workers=$_N_WORKERS hard_timeout_s=$_HARD_TIMEOUT_S date=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
     echo ""
 
     declare -a _ACTIVE_PIDS=()
@@ -285,12 +329,22 @@ _run_stack() {
 
     local j _c _f _wlog _label _short
     for j in $(seq 0 $((_N_FILES-1))); do
-        while [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ]; do
+        _label="$(basename "${_ALL_FILES[$j]}" .py)"
+
+        # Message-rate assertions measure LinkHub itself, so do not run that
+        # benchmark while another CPU-intensive lockstep stack is active.
+        if [ "$_label" = "test_linkhub_stress_sitl" ]; then
+            while [ "${#_ACTIVE_PIDS[@]}" -gt 0 ]; do
+                _reap_finished
+                [ "${#_ACTIVE_PIDS[@]}" -gt 0 ] && sleep 0.5
+            done
+        fi
+
+        while [ "${#_ACTIVE_PIDS[@]}" -ge "$_EFFECTIVE_WORKERS" ]; do
             _reap_finished
-            [ "${#_ACTIVE_PIDS[@]}" -ge "$_N_WORKERS" ] && sleep 0.5
+            [ "${#_ACTIVE_PIDS[@]}" -ge "$_EFFECTIVE_WORKERS" ] && sleep 0.5
         done
 
-        _label="$(basename "${_ALL_FILES[$j]}" .py)"
         _short="$(echo "${_label#test_}" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | sed 's/^-*//; s/-*$//')"
         _short="${_short:0:20}"
         [ -z "$_short" ] && _short="t${j}"
@@ -310,14 +364,20 @@ _run_stack() {
             docker exec \
                 -e RAWES_RUN_STACK_INTEGRATION=1 \
                 -e RAWES_SIM_VEHICLE=/ardupilot/Tools/autotest/sim_vehicle.py \
-                -e PYTHONPATH=/rawes \
+                -e RAWES_PROFILE_LOCKSTEP="$_PROFILE_LOCKSTEP" \
+                -e PYTHONPATH=/rawes:/rawes/linkhub_client/src \
                 "$_c" \
+                timeout --signal=TERM --kill-after=30s "${_HARD_TIMEOUT_S}s" \
                 /rawes/.venv/bin/python -m pytest "$_f" -s -v \
                 ${_PASS_ARGS[@]+"${_PASS_ARGS[@]}"} 2>&1 \
             | tee "$_wlog" \
-            | sed -n -E '/PASSED|FAILED|XFAIL|XPASS|ERROR|passed|failed|xfailed|xpassed|error/p' \
+            | sed -n -E '/PASSED|FAILED|XFAIL|XPASS|ERROR|Error|error|Traceback|ImportError|passed|failed|xfailed|xpassed/p' \
             | awk -v lbl="[${_label}]" '{print strftime("%H:%M:%S") " " lbl " " $0; fflush()}'
             _test_rc=${PIPESTATUS[0]}
+            if [ "$_test_rc" -eq 124 ]; then
+                echo "[ERROR] Hard timeout: ${_label} exceeded ${_HARD_TIMEOUT_S}s" \
+                    | tee -a "$_wlog"
+            fi
             rm -rf "$SIM_DIR/logs/${_label}"
             _retrieve_logs "$_c"
             mkdir -p "$SIM_DIR/logs/${_label}"
@@ -327,6 +387,13 @@ _run_stack() {
         ) &
         _ACTIVE_PIDS+=($!)
         _ACTIVE_CTRS+=("$_c")
+
+        if [ "$_label" = "test_linkhub_stress_sitl" ]; then
+            while [ "${#_ACTIVE_PIDS[@]}" -gt 0 ]; do
+                _reap_finished
+                [ "${#_ACTIVE_PIDS[@]}" -gt 0 ] && sleep 0.5
+            done
+        fi
     done
 
     while [ "${#_ACTIVE_PIDS[@]}" -gt 0 ]; do
@@ -340,7 +407,7 @@ _run_stack() {
     echo "=== SUMMARY ==="
     declare -a _FAILED_LABELS=()
     declare -a _FAILED_WLOGS=()
-    local _summary _status _n_pass=0 _n_fail=0
+    local _summary _status _n_pass=0 _n_fail=0 _n_skip=0
     for j in $(seq 0 $((_N_FILES-1))); do
         _wlog="${_WORKER_LOGS[$j]}"
         _label="$(basename "${_ALL_FILES[$j]}" .py)"
@@ -350,6 +417,10 @@ _run_stack() {
             _FAILED_LABELS+=("$_label")
             _FAILED_WLOGS+=("$_wlog")
             (( _n_fail++ )) || true
+        elif echo "$_summary" | grep -qi "deselected" \
+                && ! echo "$_summary" | grep -qiE "[0-9]+ passed"; then
+            _status="SKIP"
+            (( _n_skip++ )) || true
         else
             _status="PASS"
             (( _n_pass++ )) || true
@@ -361,28 +432,42 @@ _run_stack() {
     if [ "${#_FAILED_LABELS[@]}" -gt 0 ]; then
         echo ""
         echo "=== FAILURES ==="
-        local _fi _fl _fw
+        local _fi _fl _fw _failure_detail
         for _fi in "${!_FAILED_LABELS[@]}"; do
             _fl="${_FAILED_LABELS[$_fi]}"
             _fw="${_FAILED_WLOGS[$_fi]}"
             echo ""
             echo "### FAIL: $_fl ###"
-            awk '
+            _failure_detail=$(
+              awk '
                 /^=+[ ]+(FAILURES|ERRORS)[ ]=+/ { in_s=1; print; next }
                 /^=+[ ]+short test summary/ { in_s=0 }
                 in_s { print }
-            ' "$_fw" 2>/dev/null | tail -40 || true
-            grep -E "^(FAILED|ERROR) " "$_fw" 2>/dev/null || true
+              ' "$_fw" 2>/dev/null
+              grep -E "^(FAILED|ERROR) " "$_fw" 2>/dev/null || true
+            )
+            if [ -n "$_failure_detail" ]; then
+                echo "$_failure_detail" | tail -60
+            else
+                echo "(pytest did not emit a standard failure section; worker log tail follows)"
+                tail -60 "$_fw" 2>/dev/null || true
+            fi
             echo "### END FAIL: $_fl ###"
         done
         echo ""
         echo "=== END FAILURES ==="
     fi
 
+    if [ "$_n_pass" -eq 0 ] && [ "$_n_fail" -eq 0 ]; then
+        echo ""
+        echo "[ERROR] No tests matched the supplied pytest selection."
+        _RC=1
+    fi
+
     local _WIN_LOGS
     _WIN_LOGS=$(cygpath -w "$SIM_DIR/logs" 2>/dev/null || echo "$SIM_DIR/logs")
     echo ""
-    echo "=== RESULT: $_n_pass passed, $_n_fail failed out of $((_n_pass+_n_fail)) ==="
+    echo "=== RESULT: $_n_pass passed, $_n_fail failed, $_n_skip deselected out of $((_n_pass+_n_fail+_n_skip)) files ==="
     _log "[LOGS] ${_WIN_LOGS}"
     return $_RC
 }

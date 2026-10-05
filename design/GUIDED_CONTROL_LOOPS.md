@@ -136,7 +136,11 @@ attitude_control->set_throttle_out(thrust, apply_angle_boost=true, filt);
 
 Important behavior:
 - The caller does **not** provide an absolute attitude target.
-- ArduPilot conditions its internal `_attitude_target` from the current body attitude, then integrates that target using the shaped body-rate target.
+- ArduPilot integrates the existing internal `_attitude_target`; this API does
+  not reset that target from current body attitude. RAWES gives ACRO a
+  ground-idle control interval after arm and before asserting CH8, then clears
+  Copter's landed state in ACRO before entering GUIDED_NOGPS. See
+  [arming.md](arming.md).
 - Desired body rates are smoothed by `input_shaping_ang_vel(...)` using `ATC_INPUT_TC` and `ATC_ACCEL_R/P/Y_MAX`.
 - The normal quaternion attitude controller still runs afterward, so this is **stabilized rate control**, not a raw PID-only passthrough.
 - With requested rates `(0, 0, 0)`, the vehicle tries to settle body rates to zero while holding the internally conditioned attitude target.
@@ -150,7 +154,7 @@ Control-chain summary:
 body rates → set_angle(zero quaternion, rates, thrust, use_thrust=true)
            → input_rate_bf_roll_pitch_yaw()
            → input_shaping_ang_vel()
-           → internal attitude target conditioned from current attitude
+           → existing internal attitude target advanced by shaped rates
            → heli rate PID
 thrust     → set_throttle_out(...)
            → direct collective output

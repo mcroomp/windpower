@@ -29,13 +29,14 @@ Usage:
 from __future__ import annotations
 
 import math
+import struct
 import sys
 from pathlib import Path
 
 import numpy as np
 from lupa import lua54
 
-from groundstation.gcs import NamedValueFloat, NamedValueInt
+from linkhub_client.messages import NamedValueFloat, NamedValueInt
 
 # ── File paths ────────────────────────────────────────────────────────────────
 
@@ -367,6 +368,9 @@ class RawesLua:
             "roll_deg": float(t.roll_deg),
             "pitch_deg": float(t.pitch_deg),
             "yaw_deg": float(t.yaw_deg),
+            "roll_rate": float(t.roll_rate),
+            "pitch_rate": float(t.pitch_rate),
+            "yaw_rate": float(t.yaw_rate),
             "climbrate": float(t.climbrate) if t.climbrate is not None else None,
         }
 
@@ -407,27 +411,15 @@ class RawesLua:
 
     # ── MAVLink named-value inject (float + int) ────────────────────────────
 
-    def _send_named(self, name: str, value, msg_cls, msgid: int) -> None:
+    def _send_named(self, name: str, value: float | int, msgid: int) -> None:
         """Inject a NAMED_VALUE_FLOAT/INT message into the Lua mavlink inbox.
 
-        Builds the message with pymavlink (same serialiser used by the real GCS)
-        and extracts the wire payload (bytes 6..6+len), then prepends a 12-byte
-        header matching the mavlink_message_t internal-struct layout that
-        ArduPilot's mavlink.receive_chan() returns.  The msgid is encoded as a
-        3-byte little-endian int in the last 3 header bytes (offset 10, 1-indexed)
-        so Lua's dispatch (string.unpack("<I3", raw, 10)) can tell NAMED_VALUE_INT
-        (252) apart from NAMED_VALUE_FLOAT (251); the payload itself starts at
-        byte 13 (1-indexed), unpacked with string.unpack("<Ifc10"/"<Iic10", raw, 13).
+        Prepends a 12-byte header matching the mavlink_message_t internal-struct
+        layout returned by ArduPilot's mavlink.receive_chan(). The payload starts
+        at byte 13 and uses the MAVLink field order consumed by rawes.lua.
         """
-        from pymavlink import mavutil as _mu  # local import — not always needed
-
-        _mav = _mu.mavlink.MAVLink(None, srcSystem=255, srcComponent=0)
         name_b = name.encode("ascii")[:10].ljust(10, b"\x00")
-        msg = msg_cls(time_boot_ms=0, name=name_b, value=value)
-        wire = msg.pack(_mav)
-        # Extract payload from wire packet (skip 6-byte MAVLink v1 header and
-        # 2-byte trailing CRC; payload length is wire[1]).
-        payload = wire[6 : 6 + wire[1]]
+        payload = struct.pack("<If10s" if msgid == 251 else "<Ii10s", 0, value, name_b)
         header = b"\x00" * 9 + msgid.to_bytes(3, "little")
         raw = header + payload
         # Push as a Lua string using hex escapes — safe for all byte values.
@@ -438,27 +430,57 @@ class RawesLua:
         """Inject a supported MAVLink dataclass into the Lua mavlink inbox.
 
         Supported today: NamedValueFloat and NamedValueInt, which mirror the
-        same ground->Lua control channel used by RawesGCS in SITL.
-        """
-        from pymavlink import mavutil as _mu
+        same ground->Lua control channel used by LinkHubClient in SITL.
 
-        if isinstance(msg, NamedValueFloat):
-            self._send_named(
-                msg.name,
-                float(msg.value),
-                _mu.mavlink.MAVLink_named_value_float_message,
-                251,
-            )
+        Dispatches on ``msg.MAVLINK_TYPE`` rather than ``isinstance`` so any
+        NamedValueFloat/NamedValueInt-shaped dataclass works here.
+        """
+        wire_type = getattr(msg, "MAVLINK_TYPE", None)
+        if wire_type == NamedValueFloat.MAVLINK_TYPE:
+            self._send_named(msg.name, float(msg.value), 251)
             return
-        if isinstance(msg, NamedValueInt):
-            self._send_named(
-                msg.name,
-                int(msg.value),
-                _mu.mavlink.MAVLink_named_value_int_message,
-                252,
-            )
+        if wire_type == NamedValueInt.MAVLINK_TYPE:
+            self._send_named(msg.name, int(msg.value), 252)
             return
         raise TypeError(f"Unsupported RawesLua message type: {type(msg).__name__}")
+
+    def send_command(
+        self,
+        command: int,
+        params: list[float] | tuple[float, ...] = (),
+        *,
+        confirmation: int = 0,
+        sysid: int = 255,
+        compid: int = 190,
+    ) -> None:
+        """Inject a COMMAND_LONG addressed to the vehicle into the Lua inbox."""
+        values = [float(value) for value in params] + [0.0] * (7 - len(params))
+        payload = struct.pack("<7fHBBB", *values, command, 1, 1, confirmation)
+        header = b"\x00" * 7 + bytes((sysid, compid)) + (76).to_bytes(3, "little")
+        raw = header + payload
+        lua_str = "".join(f"\\x{b:02x}" for b in raw)
+        self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
+
+    @property
+    def command_acks(self) -> list[dict[str, int]]:
+        """COMMAND_ACK messages sent by Lua through mavlink.send_chan."""
+        acks = []
+        sent = self._mock.mavlink_sent
+        for index in range(1, len(sent) + 1):
+            entry = sent[index]
+            if int(entry.msgid) != 77:
+                continue
+            payload = bytes.fromhex(entry.payload_hex)
+            command, result, _, _, target_system, target_component = struct.unpack(
+                "<HBBiBB", payload,
+            )
+            acks.append({
+                "command": command,
+                "result": result,
+                "target_system": target_system,
+                "target_component": target_component,
+            })
+        return acks
 
     def send_named_float(self, name: str, value: float) -> None:
         """Compatibility shim: inject a NAMED_VALUE_FLOAT into the Lua inbox."""

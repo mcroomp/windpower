@@ -38,6 +38,16 @@ def test_sitl_interface_recv_servos_normalizes_binary_payload():
         expected[:4] = np.array([-1.0, 0.0, 1.0, -0.5])
         np.testing.assert_allclose(servos, expected)
         np.testing.assert_allclose(interface.last_servos(), expected)
+        assert interface.dt() == pytest.approx(1 / 400)
+        assert interface.sim_now() == pytest.approx(1 / 400)
+
+        sender.sendto(
+            _make_servo_pkt_16([1500] * 16, frame_rate=200, frame_count=1),
+            ("127.0.0.1", recv_port),
+        )
+        interface.recv_servos()
+        assert interface.dt() == pytest.approx(1 / 200)
+        assert interface.sim_now() == pytest.approx(1 / 400 + 1 / 200)
     finally:
         sender.close()
         interface.close()

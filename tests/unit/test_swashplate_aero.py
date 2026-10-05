@@ -12,6 +12,10 @@ is tilted away from pure-axial (wind-aligned) orientation:
   tilt_deg = 30 : body_z = [0, cos30, -sin30] — typical RAWES orbit angle
   tilt_deg = 60 : body_z = [0, cos60, -sin60] — high-tilt / reel-in
 """
+import pytest
+
+pytestmark = pytest.mark.expensive
+
 import math
 import sys
 from pathlib import Path

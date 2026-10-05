@@ -8,6 +8,20 @@ Detailed design and implementation content lives in `design/*.md` and module-lev
 RAWES is a tethered, 4-blade autorotating rotor kite (no drive motor on the rotor).
 Wind drives autorotation; cyclic steers; tether tension during reel-out drives a ground generator.
 
+## Agreed Runtime Architecture
+
+- The mediator is the simulated physical world and lockstep adapter only: dynamics,
+  aero, tether, wind, sensors, simulated hardware plants, actuator application,
+  physics events, and raw physics telemetry.
+- ArduPilot owns estimation, modes, attitude/rate control, Lua behavior, and servo
+  mixing. LinkHub is the sole MAVLink owner and journal.
+- Production ground-control policy runs separately from the mediator and lives in
+  `groundstation/`; tests may host it in-process but must use production command
+  boundaries. Simulation-only hardware stand-ins remain in `simulation/`.
+- The SITL harness owns process orchestration, timeouts, artifacts, and post-run
+  enrichment. It combines mediator physics telemetry with LinkHub observations
+  after the run; the mediator must not consume MAVLink merely to decorate CSV rows.
+
 ## Repository Layout
 
 The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
@@ -19,29 +33,48 @@ there are no `sys.path.insert()` hacks anywhere in the codebase.
 | Package | Contents |
 |---|---|
 | `simulation/` | Physics/aero/EKF-adjacent simulation runtime, Lua/Python flight-stack modules (`mediator.py`, `controller.py`, `param_defaults.py`, `swashplate.py`, `frames.py`, `winch.py`, `winch_node.py`, `comms.py` (`VirtualComms`), ...), `requirements.txt`, `Dockerfile`, `logs/` |
-| `groundstation/` | Genuinely-production ground-station/flight-planner code, split out from `simulation/`: `pumping_planner.py`, `landing_planner.py`, `gcs.py` (`RawesGCS` MAVLink client), `rawes_modes.py` (protocol constants), `mavlink_log.py`, `ekf_flags.py`, `winch_protocol.py` (`WinchCommand`/`WinchTelemetry` wire format), `unified_ground.py` (`GcsComms` production comms adapter). Distinction: code that will genuinely run on the real ground station/flight planner lives here; code that stands in for not-yet-built hardware (e.g. the winch-node control loop in `simulation/winch.py`) stays in `simulation/` |
+| `groundstation/` | Genuinely-production ground-station/flight-planner code, split out from `simulation/`: `pumping_planner.py`, `landing_planner.py`, `rawes_modes.py` (protocol constants), `mavlink_log.py`, `ekf_flags.py`, `winch_protocol.py` (`WinchCommand`/`WinchTelemetry` wire format), `unified_ground.py` (`GcsComms` production comms adapter). Distinction: code that will genuinely run on the real ground station/flight planner lives here; code that stands in for not-yet-built hardware (e.g. the winch-node control loop in `simulation/winch.py`) stays in `simulation/` |
 | `arduloop/` | Self-contained Python port of ArduPilot's traditional-heli attitude/rate-control stack (used by the in-process mock ArduPilot) |
 | `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
 | `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |
 | `analysis/` | Post-run diagnosis/report scripts (all read `simulation/logs/{test_name}/...`) |
 | `viz3d/` | 3D telemetry playback and torque visualizers |
-| `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`, `query_hardware.py`) |
-| `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/hil`, `tests/oneoff`, `tests/common` |
+| `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`) |
+| `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/oneoff`, `tests/common` |
 
 Non-package top-level directories: `design/` (owner docs), `documents/`, `hardware/`,
-`presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`), `tmp/`
+`presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`),
+`linkhub/` (standalone Rust transport and diagnostic gateway), `linkhub-ui/` (compiled
+TypeScript/Three.js browser control and telemetry UI served by LinkHub), `tmp/`
 (scratch/working files only).
 
 `simulation/logs/` is the single log root for every test tier (unit fixtures, simtests, and
 SITL stack runs all write there) — it did not move when the other packages were promoted to
 top-level.
 
+Use `uv` as the standard Python environment and dependency manager for local work:
+`uv sync --dev` provisions the lightweight hardware environment and `uv run ...` executes
+commands. Use `uv sync --dev --extra simulation` for the full scientific stack. Do not
+install project dependencies with pip or build a packaged installer for the channel service.
+On this Windows workstation, `UV_NO_SYNC=1` is configured as a persistent user environment
+variable, so ordinary `uv run ...` commands do not perform dependency synchronization.
+Run `uv sync` explicitly after changing dependencies or pulling a lockfile update.
+
 ## Read Order (for agents)
 
 1. `design/flight_stack.md` (system behavior and control ownership)
-2. `design/simulation.md` (simulation internals and module responsibilities)
-3. `design/sitl_testing.md` (stack workflow and diagnosis)
-4. Topic-specific docs from the ownership map below
+2. `design/arming.md` before any arm/disarm, passive-startup, or hardware work
+3. `design/simulation.md` (simulation internals and module responsibilities)
+4. `design/sitl_testing.md` (stack workflow and diagnosis)
+5. Topic-specific docs from the ownership map below
+
+For ongoing Pixhawk startup and direction-glitch investigation, read the
+root-level [`HARDWARE_STARTUP.md`](HARDWARE_STARTUP.md) before touching
+hardware. It records verified observations, the required safe-off state, and
+the next safe diagnostic steps; update it after each hardware session.
+`design/arming.md` owns the current arm/disarm model and procedures; update it
+in the same change whenever a source or test finding changes a critical
+ArduPilot arm/disarm fact.
 
 ## Code Search: Prefer ast-grep over grep/ripgrep
 
@@ -101,6 +134,18 @@ it means the tool couldn't search there at all. For any path outside the current
 workspace folder, go straight to a terminal command (`grep`/`sed`/`rg` via
 `run_in_terminal`) instead of retrying the workspace-scoped search tools.
 
+## Pylance Responsiveness
+
+- Issue Pylance MCP/LSP requests serially. In particular, do not batch multiple
+  `textDocument/diagnostic` calls in parallel: concurrent diagnostics can stall the
+  Pylance MCP bridge until its request deadline even though each request completes
+  quickly on its own.
+- `pyrightconfig.json` is the source of truth for analyzed project roots. Before
+  blaming workspace size for a timeout, query Pylance's workspace root, effective
+  settings, and user-file list, then retry one diagnostic serially.
+- If even one serial Pylance request times out, restart Pylance before retrying.
+  Do not send more concurrent requests to a server that is already unresponsive.
+
 ## Documentation Ownership (Single Source of Truth)
 
 Use the primary doc for each topic. Other docs should link, not restate.
@@ -108,6 +153,7 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Topic | Primary doc | Supporting docs |
 |---|---|---|
 | Flight architecture, mode ownership, AP/Lua boundaries | `design/flight_stack.md` | `design/tension_collective_control_loop.md`, `design/GUIDED_CONTROL_LOOPS.md` |
+| Arming, disarming, safe-off, and passive/bench startup | `design/arming.md` | `HARDWARE_STARTUP.md`, `design/calibration.md`, `design/flight_stack.md` |
 | Simulation internals (physics, sensors, controller plumbing, module map) | `design/simulation.md` | `simulation/README.md`, code docstrings |
 | SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `analysis/diagnose_sitl.py` usage text |
 | SITL IC-start timeline and event anchors | `design/sitl_flight_timeline.md` | `design/sitl_testing.md`, `tests/sitl/flight/conftest.py` |
@@ -117,8 +163,9 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
 | Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
+| LinkHub transport, journal, diagnostics, and HTTP architecture | `design/linkhub.md` | `linkhub/README.md`, `design/sitl_testing.md` |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
-| MAVLink `*.mavlink.jsonl` log inspection (calibrate `run`, SITL stack tests) | `analysis/mavlink_jsonl_query.md` | `design/calibration.md` |
+| LinkHub journal and MAVLink inspection | `design/linkhub.md` | `linkhub/README.md`, `design/calibration.md` |
 
 Parameter-reference ownership note:
 - Canonical place for ArduPilot parameter defaults and inline explanations is `tests/sitl/copter-heli.parm`.
@@ -127,13 +174,12 @@ Parameter-reference ownership note:
 
 ## MAVLink Log Diagnosis (Agent Critical)
 
-For ANY problematic run that produced a `*.mavlink.jsonl` log (calibrate `run`,
-SITL stack tests), use `analysis/mavlink_jsonl_query.py` as the first-line
-diagnostic tool -- before writing one-off jsonl-parsing code or manually
-grepping the raw file. See `analysis/mavlink_jsonl_query.md` for the full
-interface (subcommands, filters, gotchas); do not duplicate its contents
-here. If a diagnosis need doesn't fit an existing subcommand, prefer
-extending the script (new subcommand/filter) over a standalone script.
+For ANY problematic hardware or SITL run, query LinkHub's canonical journal
+with `linkhub query` before writing one-off parsing code. Use the native
+`types`, `show`, `count`, `stats`, `armed`, `statustext`, `nvf`, `param`, and
+`diagnostics` subcommands; pipe `show --json` into `jq` for composed analysis.
+See `design/linkhub.md` for the full interface. New runs must not export a
+duplicate `mavlink.jsonl`.
 
 ## Core Invariants (summary)
 
@@ -146,6 +192,15 @@ extending the script (new subcommand/filter) over a standalone script.
   Never convert thrust→rad→thrust in a roundtrip; compute in thrust and map once at the physics boundary.
 - Stack tests must validate real stack behavior (no simulation-only stabilizing hacks).
 - Use GUIDED mode for flight behavior under test.
+- Canonical hardware safe-off is one invariant across every normal/forced
+  arm-disarm cycle and every calibration run exit: confirmed disarmed,
+  `RAWES_MODE=0`, ACRO, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`,
+  `SERVO9_FUNCTION=36` (DDFP mapping established at boot), `H_YAW_TRIM=0`,
+  output 9 verified off, and neutral swash outputs from Lua's disarmed mode-0
+  neutral hold. ArduPilot forces DDFP off while disarmed; runtime
+  `SERVO9_FUNCTION` writes do not rebuild the live output map. Cleanup paths
+  must converge on `_set_safe_off_state()` and must not unassign/reassign the
+  motor function at runtime.
 - When roll and pitch appear together as paired values (params, tuple returns,
   unpacking, CSV columns, helper args), always use `roll, pitch` order.
   Do not introduce `pitch, roll` ordering unless an external interface
@@ -173,10 +228,21 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
 
 ## Workflow Rules
 
-- Do not use `wsl` to run anything directly. `test.sh` is the only script that uses WSL, and it
-  already contains the logic to re-invoke itself inside WSL when needed (for Docker access).
-  Run `bash test.sh ...` (or `./test.sh ...`) from Git Bash directly — do not wrap it in
-  `wsl -e bash -lc "..."` or run other commands (pytest, analysis scripts, git, etc.) via `wsl`.
+- **Critical — do not bypass broken tooling.** If a required build, test runner,
+  language server, MCP query, or other project tool does not work as expected,
+  stop the task and diagnose the tool failure first. Do not substitute a weaker
+  tool, infer the missing result, skip the validation, or continue through an
+  alternate path merely to make progress. Restore the intended tool and rerun the
+  original operation. If the failure cannot be understood and fixed, stop and ask
+  the user to investigate rather than bypassing it.
+- **Critical — the agent may run in either Windows or WSL, but every Docker
+  operation must run through WSL; never use or probe Docker Desktop's native
+  Windows engine.** Do not invoke `wsl` manually. When launched from Windows,
+  `test.sh` and the Docker subcommands of `setup.sh` automatically re-invoke
+  themselves inside WSL; when already in WSL, they run there directly. Use
+  `bash test.sh ...` or `bash setup.sh build` from the current environment and
+  let the scripts choose the Docker execution path. Do not wrap commands in
+  `wsl -e bash -lc "..."`.
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
 - Do not preserve backward-compatibility parameters, fields, aliases, or shims when making code changes.
 - Assume no external callers: prefer a clean cutover and remove legacy paths in the same change to avoid debt.
@@ -225,10 +291,26 @@ There are three tiers, each with a different scope and runtime:
 - On the first hardware operation in a conversation, run `python -m calibrate`
   without `--port` or `--baud` so it auto-detects the active Pixhawk connection.
 - After a successful scan, reuse the detected port and baud for subsequent
-  one-shot commands in that conversation.
-- Last successful connection (2026-09-11): `COM4` at `115200` baud.
-- If a remembered connection fails, fall back immediately to `python -m calibrate`
-  without connection parameters instead of trying guessed ports.
+  one-shot commands in that conversation/session only.
+- Never assume a port or baud from an earlier session. If the remembered
+  connection fails, fall back immediately to `python -m calibrate` without
+  connection parameters instead of trying guessed ports.
+- An agent may upload `scripts/rawes.lua` automatically only when the selected
+  port is positively identified as the flight controller's native direct-USB
+  interface. Verify the selected port with `serial.tools.list_ports` and require
+  board-specific USB identity (VID/PID plus device serial/location), not merely
+  a `COM` name or the fact that the adapter itself uses USB. The current Pixhawk
+  6C native interface enumerates as `VID:PID=3162:0053` with device serial
+  `160031001751343131363538` (COM7/COM8 interfaces). Reconfirm this metadata
+  each hardware session; do not assume the port assignment persists.
+- Never upload Lua through a SiK/telemetry radio, generic USB-serial adapter, or
+  any connection whose metadata is missing or ambiguous. If direct USB cannot
+  be proven, stop before deployment and give the operator the exact upload
+  command to run manually.
+- Before an automatic direct-USB upload, run the focused Lua/control tests and
+  require them to pass. After upload, verify the remote script size, reboot,
+  auto-detect again without connection arguments, and restore canonical
+  safe-off before any armed test.
 
 Where test logs land (agent-critical — do not guess this):
 - Every tier writes to `simulation/logs/<name>/` (params.json, simtest.log/worker.log,

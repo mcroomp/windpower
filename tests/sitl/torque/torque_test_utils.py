@@ -24,7 +24,13 @@ import pytest
 from simulation.telemetry_csv import TelRow, write_csv
 from simulation.mediator_events import MediatorEventLog
 from simulation.simtest_log import BadEventLog
-from groundstation.gcs import Attitude, NamedValueFloat, ServoOutputRaw, StatusText, decode_message
+from linkhub_client.messages import (
+    Attitude,
+    NamedValueFloat,
+    ServoOutputRaw,
+    StatusText,
+    decode_message,
+)
 from tests.sitl.stack_infra import observe  # noqa: E402
 
 

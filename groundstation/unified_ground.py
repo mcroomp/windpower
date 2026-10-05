@@ -17,7 +17,7 @@ for this wire format; simulation.unified_ground's test-only adapters
 
 from __future__ import annotations
 
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from groundstation.pumping_planner import TensionCommand
 
 _PHASE_TO_SUB: dict[str, int] = {
@@ -51,7 +51,7 @@ class NvComms:
 class GcsComms(NvComms):
     """Sends TensionCommand via MAVLink NAMED_VALUE_FLOAT (SITL stack tests).
 
-    gcs: object with send_message(msg) — e.g. RawesGCS.
+    gcs: object with send_message(msg) — e.g. LinkHubClient.
     """
 
     def __init__(self, gcs) -> None:

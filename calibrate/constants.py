@@ -9,36 +9,41 @@ from __future__ import annotations
 import math
 import os
 
-import simulation
-
-# Re-exported so submodules can do `from .constants import RawesGCS` etc.
-from groundstation.gcs         import (
+# Re-exported so existing calibration modules share the one HTTP client.
+from linkhub_client.client import LinkHubClient, LinkHubGenerationChanged, WallClock
+from linkhub_client.messages import (
     Attitude,
     AttitudeQuaternion,
     EscTelemetry,
     PidTuning,
     BatteryStatus,
-    RawesGCS,
     RcChannels,
     SetAttitudeTarget,
     SysStatus,
-    WallClock,
     CommandAck,
+    ExtendedSysState,
     Heartbeat,
+    LocalPositionNed,
+    MavLandedState,
     NamedValueFloat,
     CommandLong,
     decode_message,
     RequestDataStream,
     StatusText,
 )
-from simulation.param_defaults import load_ap_params
 from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,
                                         MOTOR_PWM_MIN, MOTOR_PWM_MAX)
 
-# Repo root, resolved via the installed `simulation` package rather than a
-# relative sys.path hack -- works regardless of CWD or invocation style.
-_SIM_DIR    = os.path.dirname(os.path.abspath(simulation.__file__))
-_REPO_ROOT  = os.path.dirname(_SIM_DIR)
+# Resolve paths from this package rather than importing the simulation runtime.
+_REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SIM_DIR    = os.path.join(_REPO_ROOT, "simulation")
+
+
+def load_ap_params(*args, **kwargs):
+    """Load simulation parameters only when a config operation needs them."""
+    from simulation.param_defaults import load_ap_params as _load_ap_params
+
+    return _load_ap_params(*args, **kwargs)
 
 # ---------------------------------------------------------------------------
 # GB4008 motor constants (used in diag torque estimates)
@@ -191,11 +196,6 @@ _MOTOR_PATH_PARAM_NAMES = (
 SCRIPTS_DIR = "/APM/scripts"
 
 # ---------------------------------------------------------------------------
-# COM port scan fallback bauds
-# ---------------------------------------------------------------------------
-_FALLBACK_BAUDS = [57600, 38400, 19200, 9600]
-
-# ---------------------------------------------------------------------------
 # Run mode config table
 # ---------------------------------------------------------------------------
 # IC-seed-specific trim key (passive mode only); sent as thrust [0..1] directly,
@@ -209,36 +209,30 @@ _PASSIVE_IC_THRUST = 0.342
 _RUN_MODES = {
     "none": {
         "rawes_mode":  0,
-        "take_servo4": False,
         "doc":        "Lua idle (mode 0), armed-but-quiet.",
     },
     "passive": {
         "rawes_mode":  3,
-        "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
+        "flight_mode": 20,       # GUIDED_NOGPS, entered by Lua on ENTER_GUIDED
         "ic_seed":     True,
-        "take_servo4": False,
         "doc":        "interactive GUIDED_NOGPS attitude hold: captures the current quaternion; keys apply relative quaternion offsets and adjust held thrust",
     },
     "acro-manual": {
         "rawes_mode":  2,
         "flight_mode": 1,
         "manual_control": True,
-        "take_servo4": False,
         "doc":        "interactive ACRO flybar control: arrows=roll/pitch, -/=collective; AP yaw compensation remains active",
     },
     "steady": {
         "rawes_mode":  1,
-        "take_servo4": False,
         "doc":        "steady flight: altitude hold + VZ PI collective",
     },
     "pumping": {
         "rawes_mode":  1,
-        "take_servo4": False,
         "doc":        "De Schutter pumping cycle (runs in steady mode; ground varies tension)",
     },
     "landing": {
         "rawes_mode":  4,
-        "take_servo4": False,
         "doc":        "landing (reserved)",
     },
 }

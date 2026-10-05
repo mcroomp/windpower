@@ -29,7 +29,7 @@ from tests.simtests.simtest_ic import load_ic
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor

@@ -251,7 +251,7 @@ class ParamSetup:
 # Process helpers
 # ---------------------------------------------------------------------------
 
-EXPECTED_ARDUPILOT_VERSION = "4.7.0"
+EXPECTED_ARDUPILOT_VERSION = "4.7.1"
 
 
 def _check_ardupilot_version(sim_vehicle: Path) -> None:
@@ -668,6 +668,38 @@ def _launch_mediator(
     )
 
 
+def _launch_linkhub(
+    repo_root: Path,
+    log_path: Path,
+    data_dir: Path,
+    *,
+    connection: str = "tcp:127.0.0.1:5760",
+    port: int = 8999,
+) -> subprocess.Popen:
+    """Launch the sole MAVLink owner for one isolated SITL test container."""
+    cmd = [
+        "linkhub",
+        "serve",
+        "--connection",
+        connection,
+        "--listen",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--data-dir",
+        str(data_dir),
+        "--flush-ms",
+        "1000",
+    ]
+    return subprocess.Popen(
+        cmd,
+        cwd=str(repo_root),
+        stdout=log_path.open("w", encoding="utf-8"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Port availability check
 # ---------------------------------------------------------------------------
@@ -675,12 +707,15 @@ def _launch_mediator(
 # Default SITL ports — must match StackConfig in conftest.py
 _SITL_GCS_PORT  = 5760   # TCP
 _SITL_JSON_PORT = 9002   # UDP
+_LINKHUB_PORT = 8999
 
 _PORT_CHECKS = [
     ("127.0.0.1", _SITL_GCS_PORT,  "tcp",
      "SITL GCS port — a previous SITL process may still be running"),
     ("0.0.0.0",   _SITL_JSON_PORT, "udp",
      "mediator/sensor JSON port — a previous mediator or sensor worker may still be running"),
+    ("127.0.0.1", _LINKHUB_PORT, "tcp",
+     "LinkHub HTTP port — a previous stack process may still be running"),
 ]
 
 

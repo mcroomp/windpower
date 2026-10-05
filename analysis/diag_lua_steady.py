@@ -52,15 +52,16 @@ with open(TEL_CSV, newline="", encoding="utf-8") as fh:
         tel_rows.append({
             "t":          t,
             "phase":      row.get("phase", ""),
+            "note":       row.get("note", ""),
             "pos_z":      float(row["pos_z"]),          # NED z; altitude = -pos_z
             "vel_z":      float(row["vel_z"]),           # NED z; positive = down
             "vel_mag":    math.sqrt(float(row["vel_x"])**2 + float(row["vel_y"])**2 + float(row["vel_z"])**2),
             "col_rad":    float(row["collective_rad"]),
             "tension":    float(row["tether_tension"]),
             "aero_T":     float(row["aero_T"]),
-            "s1":         float(row["servo_s1"]) if row["servo_s1"] else 0.0,
-            "s2":         float(row["servo_s2"]) if row["servo_s2"] else 0.0,
-            "s3":         float(row["servo_s3"]) if row["servo_s3"] else 0.0,
+            "s1":         float(row["servo_s1_us"]) if row["servo_s1_us"] else 0.0,
+            "s2":         float(row["servo_s2_us"]) if row["servo_s2_us"] else 0.0,
+            "s3":         float(row["servo_s3_us"]) if row["servo_s3_us"] else 0.0,
             "bz_x":       float(row["bz_eq_x"]) if row["bz_eq_x"] else 0.0,
             "bz_y":       float(row["bz_eq_y"]) if row["bz_eq_y"] else 0.0,
             "bz_z":       float(row["bz_eq_z"]) if row["bz_eq_z"] else 0.0,
@@ -97,14 +98,11 @@ else:
     print(f"  WARNING: {EKF_CSV} not found -- EKF comparison skipped")
 
 # ── Find kinematic exit time ─────────────────────────────────────────────────
-# phase column: non-empty string during kinematic ("kinematic" or blank).
-# Telemetry written every 400 Hz step; phase column is set by mediator.
-# Find the last row where phase != "" (kinematic still active) then first free.
-t_kin_exit = None
-for i, r in enumerate(tel_rows):
-    if r["phase"] == "" and i > 0 and tel_rows[i-1]["phase"] != "":
-        t_kin_exit = r["t"]
-        break
+# The mediator owns the canonical transition marker in the note column.
+t_kin_exit = next(
+    (r["t"] for r in tel_rows if r["note"] == "kinematic_exit"),
+    None,
+)
 
 if t_kin_exit is None:
     # Try mediator log
@@ -201,7 +199,7 @@ ALERT_ALT_LO  = 3.0     # m -- flag if altitude drops below this
 first_free = True
 for r in sampled:
     t     = r["t"]
-    phase = "kin" if r["phase"] else "free"
+    phase = "kin" if t < t_kin_exit else "free"
     alt   = -r["pos_z"]
     vel_z = r["vel_z"]
     vel_m = r["vel_mag"]
@@ -243,7 +241,7 @@ for r in sampled:
 print("=" * 110)
 
 # ── Summary stats ─────────────────────────────────────────────────────────────
-free = [r for r in tel_rows if r["t"] >= t_kin_exit and not r["phase"]]
+free = [r for r in tel_rows if r["t"] >= t_kin_exit]
 if free:
     alts    = [-r["pos_z"] for r in free]
     tensions = [r["tension"] for r in free]

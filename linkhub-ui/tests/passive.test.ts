@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vitest";
+
+import luaSource from "../../scripts/rawes.lua?raw";
+import {
+  CMD_ENTER_GUIDED,
+  CMD_ENTER_PASSIVE,
+  PASSIVE_TELEMETRY_RATES,
+  PASSIVE_YAW_TRIM_SEED,
+  parseRunPassive,
+} from "../src/passive";
+
+describe("Lua command IDs", () => {
+  it("match rawes.lua", () => {
+    expect(luaSource).toMatch(new RegExp(`MAV_CMD_RAWES_ENTER_GUIDED = ${CMD_ENTER_GUIDED}\\b`));
+    expect(luaSource).toMatch(new RegExp(`MAV_CMD_RAWES_ENTER_PASSIVE = ${CMD_ENTER_PASSIVE}\\b`));
+  });
+});
+
+describe("parseRunPassive", () => {
+  it("uses production passive defaults", () => {
+    expect(parseRunPassive([])).toEqual({
+      force: false,
+      thrust: 0.342,
+      durationSeconds: null,
+      rollDegrees: 0,
+      pitchDegrees: 0,
+      yawDegrees: 0,
+    });
+  });
+
+  it("parses supported passive options", () => {
+    expect(parseRunPassive([
+      "--force",
+      "--duration", "30",
+      "--trim", "thr=0.5",
+      "--roll", "5",
+      "--pitch", "-10",
+      "--yaw", "15",
+    ])).toEqual({
+      force: true,
+      thrust: 0.5,
+      durationSeconds: 30,
+      rollDegrees: 5,
+      pitchDegrees: -10,
+      yawDegrees: 15,
+    });
+  });
+
+  describe("passive telemetry", () => {
+    it("does not request a rate for event-driven STATUSTEXT messages", () => {
+      expect(PASSIVE_TELEMETRY_RATES).not.toHaveProperty("STATUSTEXT");
+    });
+
+    it("holds zero adaptive yaw trim during a bench passive run", () => {
+      expect(PASSIVE_YAW_TRIM_SEED).toBe(0);
+    });
+  });
+
+  it("rejects unsafe or unsupported inputs", () => {
+    expect(() => parseRunPassive(["--trim", "thr=1.1"])).toThrow("0..1");
+    expect(() => parseRunPassive(["--roll", "31"])).toThrow("-30..30");
+    expect(() => parseRunPassive(["--osc", "all"])).toThrow("Unknown");
+  });
+});

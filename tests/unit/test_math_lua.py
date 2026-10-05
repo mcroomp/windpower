@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 import simulation
-from groundstation.gcs import NamedValueFloat
+from linkhub_client.messages import NamedValueFloat
 from simulation.controller import (
     compute_bz_altitude_hold,
 )

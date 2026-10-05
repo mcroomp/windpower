@@ -6,18 +6,19 @@ from __future__ import annotations
 import math
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-from pymavlink import mavutil
+from linkhub_client import mav_constants as mavlink
+from linkhub_client.mav_constants import mavutil
 
 from .constants import (
     Attitude,
     BatteryStatus,
     EscTelemetry,
-    RawesGCS,
+    LinkHubClient,
     CommandLong,
     SysStatus,
     StatusText,
-    decode_message,
     MOTOR_ESC_CHANNEL, SERVO_MOTOR,
     _WATCH_STREAMS,
 )
@@ -32,7 +33,7 @@ from .util import _fmt, _parse_flags
 # `watch <stream>` command
 # ---------------------------------------------------------------------------
 
-def _cmd_watch(session: RawesGCS, args: list[str]) -> None:
+def _cmd_watch(session: LinkHubClient, args: list[str]) -> None:
     """watch <stream> [--duration N]"""
 
     schema = {"--duration": "float"}
@@ -63,6 +64,8 @@ def _cmd_watch(session: RawesGCS, args: list[str]) -> None:
     }
     log = _RunLog.open("watch", stream, meta)
     print(f"  Logging to {log.path}")
+    journal_start_cursor = session.current_cursor()
+    print(f"  LinkHub journal starts at {journal_start_cursor}")
 
     try:
         if stream == "servos":
@@ -76,8 +79,13 @@ def _cmd_watch(session: RawesGCS, args: list[str]) -> None:
         elif stream == "power":
             _watch_power(session, duration, log)
     finally:
+        journal_end_cursor = session.current_cursor()
         log.close()
         print(f"  Wrote {log.n_rows} rows to {log.path}")
+        print(
+            "  LinkHub journal range: "
+            f"{journal_start_cursor}..{journal_end_cursor}"
+        )
     print("  Done.")
 
 
@@ -90,10 +98,9 @@ def _watch_servos(session, duration, log):
     state = {f"s{i}": None for i in range(1, 9)}
 
     def handle(st, msg, t_rel):
-        decoded = decode_message(msg)
-        if hasattr(decoded, "servo1_raw"):
+        if hasattr(msg, "servo1_raw"):
             for i in range(1, 9):
-                state[f"s{i}"] = getattr(decoded, f"servo{i}_raw", None)
+                state[f"s{i}"] = getattr(msg, f"servo{i}_raw", None)
             return [f"{t_rel:.4f}"] + [state[f"s{i}"] for i in range(1, 9)]
         return None
 
@@ -119,13 +126,12 @@ def _watch_esc(session, duration, log):
     state = {"erpm": None, "volt": None, "curr": None, "temp": None}
 
     def handle(st, msg, t_rel):
-        decoded = decode_message(msg)
-        if not isinstance(decoded, EscTelemetry) or decoded.message_name != esc_name:
+        if not isinstance(msg, EscTelemetry) or msg.message_name != esc_name:
             return None
-        erpm = _esc_erpm(decoded, MOTOR_ESC_CHANNEL)
-        volt = decoded.voltage[idx] / 100.0 if idx < len(decoded.voltage) else None
-        curr = decoded.current[idx] / 100.0 if idx < len(decoded.current) else None
-        temp = decoded.temperature[idx] if idx < len(decoded.temperature) else None
+        erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
+        volt = msg.voltage[idx] / 100.0 if idx < len(msg.voltage) else None
+        curr = msg.current[idx] / 100.0 if idx < len(msg.current) else None
+        temp = msg.temperature[idx] if idx < len(msg.temperature) else None
         state["erpm"], state["volt"], state["curr"], state["temp"] = \
             erpm, volt, curr, temp
         _e, mech, rotor = _rpm_triplet(erpm)
@@ -171,9 +177,8 @@ def _watch_text(session, duration, log):
     def handle(st, msg, t_rel):
         # STATUSTEXTs are handled by the engine and surfaced via state["pending_text"]
         # We still log them here so the CSV captures everything.
-        decoded = decode_message(msg)
-        if isinstance(decoded, StatusText):
-            text = decoded.text
+        if isinstance(msg, StatusText):
+            text = msg.text
             if text:
                 return [f"{t_rel:.4f}", int(getattr(msg, "severity", 6)), text]
         return None
@@ -200,7 +205,7 @@ def _watch_attitude(session, duration, log):
              "wx": None, "wy": None, "wz": None}
 
     def handle(st, msg, t_rel):
-        decoded = decode_message(msg)
+        decoded = msg
         if isinstance(decoded, Attitude):
             state["roll"]  = math.degrees(decoded.roll)
             state["pitch"] = math.degrees(decoded.pitch)
@@ -238,7 +243,7 @@ def _watch_power(session, duration, log):
     state = {"vbat": None, "curr": None}
 
     def handle(st, msg, t_rel):
-        match decode_message(msg):
+        match msg:
             case BatteryStatus(voltages=voltages, current_battery=current_battery):
                 cells = [v for v in voltages if v != 65535]
                 if cells:
