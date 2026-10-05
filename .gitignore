@@ -42,6 +42,7 @@ tmp/
 
 # Node
 node_modules/
+/linkhub-ui/dist/
 
 # Rust
 /linkhub/target/

@@ -45,7 +45,9 @@ Open `http://127.0.0.1:8999/`. LinkHub serves only the compiled files and
 continues to expose its existing transport-generic HTTP/JSON API. The browser
 owns RAWES-specific passive sequencing and reconstructs active targets from the
 journal after reconnect. A change to the status `generation` token invalidates
-that reconstructed state.
+that reconstructed state. Message reads ask LinkHub to enforce a one-second
+maximum lag; the server advances stale reads to the current journal tail instead
+of sending backlog for the browser to replay.
 
 Supported terminal commands:
 
@@ -56,3 +58,7 @@ run passive [--force] [--duration S] [--trim thr=0.342]
 stop
 help
 ```
+
+The browser bench route sends `RAWES_YFF=0` before enabling passive mode. This
+keeps Lua's adaptive yaw trim at zero during the stationary hold while leaving
+ArduPilot's ordinary yaw PID available for transient correction.

@@ -3,10 +3,10 @@ import pytest
 import calibrate.hw as calibrate_hw
 import calibrate.repl as calibrate_repl
 import calibrate.run as calibrate_run
-from calibrate.hw import _disarm, _h3_forward_mix
+from calibrate.hw import _disarm, _h3_forward_mix, verify_safe_off
 from linkhub_client import MessageBatch, SimClock
 from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import Heartbeat
+from linkhub_client.messages import Heartbeat, ServoOutputRaw
 from calibrate.params import _config_target_params
 from calibrate.repl import (
     _bounded_swash_waypoints,
@@ -42,7 +42,7 @@ def test_hardware_profile_uses_front_elevator_hr3_layout():
         "INS_POS2_X": -0.08,
         "INS_POS3_X": -0.08,
         "SCR_ENABLE": 1.0,
-        "SERVO9_FUNCTION": 0.0,
+        "SERVO9_FUNCTION": 36.0,
     }
 
     assert {name: _config_target_params(use_all=False)[name] for name in expected} == expected
@@ -122,6 +122,53 @@ def test_disarm_command_falls_back_to_force(monkeypatch):
     assert events == [False, True]
 
 
+def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
+    class Session:
+        _target_system = 1
+        _target_component = 1
+
+        def __init__(self):
+            self.cursors = []
+
+        def vehicle_status(self):
+            return {"base_mode": 0, "custom_mode": 1}
+
+        def get_param(self, name):
+            return {
+                "RAWES_MODE": 0.0,
+                "H_FLYBAR_MODE": 1.0,
+                "H_SV_MAN": 0.0,
+                "SERVO9_FUNCTION": 36.0,
+                "H_YAW_TRIM": 0.0,
+                "SERVO9_MIN": 1000.0,
+            }[name]
+
+        def send_message(self, _message):
+            pass
+
+        def current_cursor(self):
+            return "v1:10"
+
+        def read_messages(self, after, _message_types, **_kwargs):
+            self.cursors.append(after)
+            if len(self.cursors) == 1:
+                return MessageBatch((), "v1:11", _CLOCK)
+            return MessageBatch(
+                (ServoOutputRaw(servo9_raw=1000),),
+                "v1:12",
+                _CLOCK,
+            )
+
+    monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
+    session = Session()
+
+    report = verify_safe_off(session)
+
+    assert report.ok
+    assert report.motor_output_raw == 1000
+    assert session.cursors == ["v1:10", "v1:11"]
+
+
 def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
     events = []
 
@@ -129,8 +176,18 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
         _target_system = 1
         _target_component = 1
 
+        def __init__(self):
+            self.params = {
+                "RAWES_MODE": 3.0,
+                "H_YAW_TRIM": 0.25,
+                "H_FLYBAR_MODE": 0.0,
+                "H_SV_MAN": 0.0,
+                "SERVO9_FUNCTION": 36.0,
+                "SERVO9_MIN": 1000.0,
+            }
+
         def send_message(self, _message):
-            events.append("disarm-command")
+            pass
 
         def command(self, *_args, **_kwargs):
             events.append("disarm-command")
@@ -139,7 +196,9 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, *_args, **_kwargs):
+        def read_messages(self, _after, message_types, **_kwargs):
+            if "SERVO_OUTPUT_RAW" in message_types:
+                return MessageBatch((ServoOutputRaw(servo9_raw=0),), "v1:2", _CLOCK)
             return MessageBatch((Heartbeat(
                 type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
                 autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
@@ -150,17 +209,17 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
 
         def set_param(self, name, value):
             events.append(("set-param", name, value))
+            self.params[name] = value
             return True
 
         def get_param(self, name):
-            return {
-                "H_YAW_TRIM": 0.25,
-                "H_FLYBAR_MODE": 0.0,
-                "H_SV_MAN": 0.0,
-            }[name]
+            return self.params[name]
 
         def set_mode(self, mode):
             events.append(("set-mode", mode))
+
+        def vehicle_status(self):
+            return {"base_mode": 0, "custom_mode": 1}
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 
@@ -168,7 +227,6 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
     assert events == [
         "disarm-command",
         ("set-param", "RAWES_MODE", 0),
-        ("set-param", "SERVO9_FUNCTION", 0.0),
         ("set-param", "H_YAW_TRIM", 0.0),
         ("set-param", "H_FLYBAR_MODE", 1.0),
         ("set-mode", 1),
@@ -182,6 +240,16 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
         _target_system = 1
         _target_component = 1
 
+        def __init__(self):
+            self.params = {
+                "RAWES_MODE": 3.0,
+                "H_YAW_TRIM": 0.25,
+                "H_FLYBAR_MODE": 0.0,
+                "H_SV_MAN": 3.0,
+                "SERVO9_FUNCTION": 36.0,
+                "SERVO9_MIN": 1000.0,
+            }
+
         def send_message(self, _message):
             pass
 
@@ -191,7 +259,9 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, *_args, **_kwargs):
+        def read_messages(self, _after, message_types, **_kwargs):
+            if "SERVO_OUTPUT_RAW" in message_types:
+                return MessageBatch((ServoOutputRaw(servo9_raw=0),), "v1:2", _CLOCK)
             return MessageBatch((Heartbeat(
                 type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
                 autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
@@ -201,25 +271,24 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
             ),), "v1:1", _CLOCK)
 
         def get_param(self, name):
-            return {
-                "H_YAW_TRIM": 0.25,
-                "H_FLYBAR_MODE": 0.0,
-                "H_SV_MAN": 3.0,
-            }[name]
+            return self.params[name]
 
         def set_param(self, name, value):
             events.append(("set-param", name, value))
+            self.params[name] = value
             return True
 
         def set_mode(self, mode):
             events.append(("set-mode", mode))
+
+        def vehicle_status(self):
+            return {"base_mode": 0, "custom_mode": 1}
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 
     assert _disarm(Session(), force=True) is True
     assert events == [
         ("set-param", "RAWES_MODE", 0),
-        ("set-param", "SERVO9_FUNCTION", 0.0),
         ("set-param", "H_YAW_TRIM", 0.0),
         ("set-param", "H_FLYBAR_MODE", 1.0),
         ("set-param", "H_SV_MAN", 0.0),

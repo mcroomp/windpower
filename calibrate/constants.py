@@ -216,36 +216,30 @@ _PASSIVE_IC_THRUST = 0.342
 _RUN_MODES = {
     "none": {
         "rawes_mode":  0,
-        "take_servo4": False,
         "doc":        "Lua idle (mode 0), armed-but-quiet.",
     },
     "passive": {
         "rawes_mode":  3,
         "flight_mode": 20,       # GUIDED_NOGPS (ArduCopter mode 20)
         "ic_seed":     True,
-        "take_servo4": False,
         "doc":        "interactive GUIDED_NOGPS attitude hold: captures the current quaternion; keys apply relative quaternion offsets and adjust held thrust",
     },
     "acro-manual": {
         "rawes_mode":  2,
         "flight_mode": 1,
         "manual_control": True,
-        "take_servo4": False,
         "doc":        "interactive ACRO flybar control: arrows=roll/pitch, -/=collective; AP yaw compensation remains active",
     },
     "steady": {
         "rawes_mode":  1,
-        "take_servo4": False,
         "doc":        "steady flight: altitude hold + VZ PI collective",
     },
     "pumping": {
         "rawes_mode":  1,
-        "take_servo4": False,
         "doc":        "De Schutter pumping cycle (runs in steady mode; ground varies tension)",
     },
     "landing": {
         "rawes_mode":  4,
-        "take_servo4": False,
         "doc":        "landing (reserved)",
     },
 }

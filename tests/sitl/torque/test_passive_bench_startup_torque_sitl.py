@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-import calibrate.util as calibrate_util
 from analysis.linkhub_journal import cursor_sequence, iter_messages
-from calibrate.run import _cmd_run
+from calibrate.hw import verify_safe_off
+from calibrate.run import PassiveRunOptions, run_passive
 from groundstation.ekf_flags import MAV_MODE_ARMED
 from tests.sitl.stack_infra import StackContext
 from tests.sitl.thread_trace import LinuxThreadTrace
@@ -50,12 +50,9 @@ def _first_time(messages: list[dict], predicate) -> float:
 @pytest.mark.timeout(2400)
 def test_passive_bench_startup_torque_sitl(
     torque_unarmed_lua_calibrate: StackContext,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Run calibration's real passive startup and shutdown against torque SITL."""
     ctx = torque_unarmed_lua_calibrate
-    monkeypatch.setattr(calibrate_util, "_LOG_DIR", str(ctx.test_log_dir))
-
     before_csv = set(ctx.test_log_dir.glob("run_passive_*.csv"))
     journal_start_cursor = ctx.gcs.current_cursor()
     scripting_trace = LinuxThreadTrace(
@@ -65,15 +62,15 @@ def test_passive_bench_startup_torque_sitl(
     )
     scripting_trace.start()
     try:
-        _cmd_run(
+        run_passive(
             ctx.gcs,
-            [
-                "passive",
-                "--duration", str(_RUN_DURATION_S),
-                "--force",
-                "--trim", "thr=0.342",
-                "--protocol-debug",
-            ],
+            PassiveRunOptions(
+                duration_s=_RUN_DURATION_S,
+                force=True,
+                thrust=0.342,
+                protocol_debug=True,
+                log_dir=ctx.test_log_dir,
+            ),
         )
     finally:
         scripting_trace.stop()
@@ -273,11 +270,5 @@ def test_passive_bench_startup_torque_sitl(
         abs(row["psi_dot"]) for row in early_physics
     )
 
-    status = ctx.gcs.vehicle_status()
-    assert not bool(int(status["base_mode"]) & MAV_MODE_ARMED)
-    assert int(status["custom_mode"]) == 1
-    assert ctx.gcs.get_param("RAWES_MODE") == pytest.approx(0.0)
-    assert ctx.gcs.get_param("H_FLYBAR_MODE") == pytest.approx(1.0)
-    assert ctx.gcs.get_param("H_SV_MAN") == pytest.approx(0.0)
-    assert ctx.gcs.get_param("SERVO9_FUNCTION") == pytest.approx(0.0)
-    assert ctx.gcs.get_param("H_YAW_TRIM") == pytest.approx(0.0)
+    safe_off = verify_safe_off(ctx.gcs)
+    assert safe_off.ok, safe_off.errors

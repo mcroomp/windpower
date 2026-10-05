@@ -52,7 +52,7 @@ INS_POS3_Z         0.0
 # Load rawes.lua from /APM/scripts at boot.
 SCR_ENABLE          1
 
-# Canonical hardware safe-off: leave the yaw motor output unassigned at boot.
-# Passive mode assigns Motor4 only after target capture and disconnects it again
-# during every shutdown path.
-SERVO9_FUNCTION     0
+# Keep the DDFP yaw motor mapped at boot. ArduPilot forces DDFP to minimum in
+# SHUT_DOWN/GROUND_IDLE/SPOOLING_DOWN; runtime function remapping does not
+# rebuild SRV_Channels' live map.
+SERVO9_FUNCTION     36

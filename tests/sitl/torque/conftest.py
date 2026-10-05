@@ -215,7 +215,6 @@ def torque_unarmed_lua_calibrate(tmp_path, request):
             "SCR_DEBUG_OPTS": 8,
         },
         startup_hold_s=35.0,
-        mutable_param_names={"SERVO9_FUNCTION"},
     ) as ctx:
         yield ctx
 

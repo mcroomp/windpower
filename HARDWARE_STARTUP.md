@@ -151,16 +151,16 @@ After every diagnostic, leave the vehicle:
 - `H_SV_MAN=0` (automated heli mixer);
 - `H_FLYBAR_MODE=1` (ACRO RC passthrough);
 - Lua mode 0 refreshing neutral RC1/RC2 and center-collective RC3 overrides while disarmed.
-- `SERVO9_FUNCTION=0`, leaving the yaw motor output electrically unassigned.
-- `H_YAW_TRIM=0`, preventing a stale prior-run motor trim when DDFP ownership
-  is restored on a later run.
+- `SERVO9_FUNCTION=36`, with the DDFP mapping established at boot.
+- `H_YAW_TRIM=0`, preventing a stale motor trim.
+- output 9 observed off.
 
 `H_SV_MAN=0` is required before an automated heli-control run. Disarmed alone
 does not guarantee centered or electrically inactive swash outputs: with the
 automated heli mixer enabled, ArduPilot can continue driving the swash.
 Every normal/forced arm-disarm cycle and every calibration run exit must
-converge on this exact state; cleanup code must not restore the yaw-motor
-function afterward.
+converge on this exact state; cleanup code must not change yaw-motor function
+ownership at runtime.
 
 ## What has been observed
 
@@ -722,6 +722,148 @@ Shutdown restored and verified canonical safe-off: disarmed in ACRO with
 `RAWES_MODE=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`,
 `SERVO9_FUNCTION=0`, and `H_YAW_TRIM=0`. No further hardware arm is needed to
 validate this handoff.
+
+### 2026-10-05 runtime yaw-output mapping failure
+
+The subsequent interactive passive run generated
+`simulation/logs/calibrate/run_passive_20261005_080224.csv`. Lua entered
+passive mode and continuously ran the yaw-trim observer:
+
+- `YFF_T` ranged from approximately `0.092` to `0.645`;
+- the internal applied-function readback `YFF_U` ranged from `0.100` to
+  `0.858`;
+- measured yaw rate reached approximately `3.68 rad/s`.
+
+Nevertheless, every one of the 4,344 populated `SERVO_OUTPUT_RAW.servo9_raw`
+samples was zero. The LinkHub journal proves that calibration wrote
+`SERVO9_FUNCTION=36` approximately `16.05 s` after run startup, immediately
+after Lua acknowledged passive activation, but the write did not connect that
+function to physical output 9.
+
+Local Copter 4.7.1 source explains the discrepancy. ArduCopter rebuilds the
+`SRV_Channels` function-to-channel masks through
+`SRV_Channels::update_aux_servo_function()` in `Copter::init_rc_out()` during
+startup. A MAVLink parameter write while armed changes the parameter value but
+does not call that mapping refresh. Lua's
+`SRV_Channels:get_output_pwm(36)` therefore observed the changing internal
+Motor4/DDFP function while output 9 remained in the unassigned mapping created
+at boot.
+
+The held quaternion itself did not follow the moved vehicle. Lua repeatedly
+reported the fixed command `rpy=(0.8,-0.6,132.9)` with zero rates, and 95.5% of
+the armed `ATTITUDE_TARGET` quaternions remained within `0.1 deg` of the first
+target. Short deviations occurred during the largest attitude errors because
+MAVLink `ATTITUDE_TARGET` reports ArduPilot's internal controller target, not
+Lua's requested quaternion. `AC_AttitudeControl` deliberately limits heading
+error by moving that internal target toward the measured body attitude when
+the yaw error would saturate the output.
+
+Do not repeat a yaw-enabled run using runtime
+`SERVO9_FUNCTION: 0 -> 36 -> 0` writes. Neither direction proves that the live
+physical mapping changed.
+
+The replacement permanent-mapping design was then tested with the yaw motor
+physically disconnected. After restoring canonical disarm, the test set
+`SERVO9_FUNCTION=36` and deliberately left `H_YAW_TRIM=0.25`, then rebooted so
+Copter built the mapping during `init_rc_out()`. The rebooted vehicle was
+confirmed disarmed in STABILIZE. Output 9 reported off (`servo9_raw=0`) for 100
+consecutive samples while changing STABILIZE -> ACRO -> STABILIZE -> ACRO,
+with the heartbeat armed bit clear after every transition. A three-second
+force-arm cycle then completed and heartbeat-confirmed normal disarm; another
+100 consecutive output-9 samples were off afterward. This verifies the
+ArduPilot source behavior on the attached Pixhawk: a boot-mapped DDFP output is
+held off while disarmed, including with stale nonzero yaw trim.
+
+The canonical design is therefore now to leave `SERVO9_FUNCTION=36` mapped,
+clear `H_YAW_TRIM` during cleanup, confirm disarm, and verify output 9 off.
+
+### 2026-10-05 LinkHub UI yaw-command observation
+
+During LinkHub run `7b0302a6-3fb6-463c-a26d-26fb34172699`, the anti-rotation
+motor and ESC were physically disconnected for safety. The vehicle was moved
+in both yaw directions during an armed passive interval. Journal evidence
+showed:
+
+- `YFF_GZ` ranged from approximately `-2.069` to `+1.732 rad/s`;
+- Lua's internal applied Motor4 readback `YFF_U` was nonzero in 43 of 181
+  samples and reached `1.0`;
+- `YFF_T` ranged from approximately `0.00001` to `0.698`;
+- all 2,375 `SERVO_OUTPUT_RAW.servo9_raw` samples remained zero.
+
+This proves that the yaw controller and internal Motor4/DDFP command path did
+respond to both-direction movement. With the DShot hardware disconnected,
+`SERVO_OUTPUT_RAW.servo9_raw=0` is not evidence that the controller command is
+zero and must not be used as the LinkHub UI motor-command indicator. The UI now
+displays the raw output-9/DShot field and `YFF_U` as separately labeled values.
+This disconnected test does not validate the physical DShot waveform, ESC
+response, motor direction, or live
+function-to-pin mapping; those still require a separately authorized connected
+test or electrical signal measurement.
+
+A later stationary interval in the same disconnected session demonstrated why
+`YFF_U` and `H_YAW_TRIM` can rise even when measured yaw rate is nearly zero.
+Passive held approximately `-152.6 deg` yaw while the physically repositioned
+body remained near `-124.3 deg`, leaving about `28 deg` of heading error.
+Across `t=850..983 s`, `YFF_GZ` stayed between approximately `-0.00152` and
+`+0.00143 rad/s` (mean `-0.000079 rad/s`), while `YFF_U` reached `0.705` and
+`YFF_T` reached its `0.7` clamp. With no connected actuator, the AP yaw
+controller cannot reduce heading error; the trim observer sees the persistent
+applied-function command and absorbs it into `H_YAW_TRIM`.
+
+Do not interpret stationary rate as zero yaw demand: compare actual and held
+heading as well. Do not reconnect the motor while armed or with accumulated
+`H_YAW_TRIM`; exit through canonical safe-off, which disarms and clears the
+trim. A disconnected yaw actuator is suitable for observing command generation
+but not for validating or tuning the adaptive yaw-trim observer.
+
+A bounded LinkHub UI force-arm test then isolated the startup route with the
+Pixhawk stationary and the motor disconnected. Passive captured yaw at
+approximately `74.2 deg` with actual yaw initially near `74.0 deg`, but the UI
+had not sent `RAWES_YFF`. Lua therefore used the adaptive fallback path:
+`YFF_U` rose from about `0.08` to `0.75` during the 30-second hold even though
+the body moved only about one degree. Cleanup completed canonical safe-off and
+verified `H_YAW_TRIM=0`.
+
+The LinkHub UI bench route now sends `RAWES_YFF=0` before `RAWES_PEN=1`. Deployed
+Lua already treats a supplied passive seed as authoritative, so this holds
+adaptive trim at zero during the stationary passive interval. ArduPilot's yaw
+PID remains active and may still produce a transient command for estimator
+noise or residual heading error.
+
+The first seeded repeat proved that `YFF_T` stayed zero, but it also exposed a
+diagnostic defect: the seeded branch returned before refreshing `YFF_U`, so the
+UI continued showing the final pre-passive value (`0.267`) throughout the
+hold. That value was stale and could not establish whether Motor4 remained
+active. Lua now refreshes `YFF_U` and `YFF_GZ` while holding a passive seed,
+and the UI labels `YFF_U` inactive whenever the vehicle is disarmed.
+
+After focused Lua/control tests passed, the updated `rawes.lua` was uploaded
+over the positively identified Pixhawk 6C native USB interface
+(`COM7`, `VID:PID=3162:0053`, serial `160031001751343131363538`). The remote
+file size matched at `67767` bytes. The controller was rebooted, auto-detected
+again without connection arguments, and restored to canonical safe-off before
+the final test.
+
+The final bounded LinkHub UI command was
+`run passive --force --duration 30`, with the Pixhawk stationary and the yaw
+motor/ESC physically disconnected. LinkHub run
+`f015b731-6fa6-4054-9f42-d50abd1a8c05` recorded:
+
+- force arm at `t=18.392 s`;
+- GUIDED_NOGPS at `t=30.105 s`;
+- `RAWES_YFF=0` at `t=33.269 s`;
+- passive anchor capture at `t=33.328 s`, target yaw approximately
+  `71.3 deg`;
+- disarm at `t=63.661 s`;
+- all 59 passive-hold `YFF_T` samples exactly `0.0`;
+- all 59 live passive-hold `YFF_U` samples exactly `0.0`.
+
+Cleanup verified ACRO, `RAWES_MODE=0`, `H_YAW_TRIM=0`,
+`H_FLYBAR_MODE=1`, `H_SV_MAN=0`, `SERVO9_FUNCTION=36`, disarmed heartbeat,
+and output 9 off. This validates the stationary disconnected LinkHub force-arm
+route: passive captures the current orientation without commanding Motor4.
+It does not validate motor direction, ESC response, or behavior under rotor
+torque.
 
 ## Changes already made
 

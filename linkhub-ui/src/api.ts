@@ -64,6 +64,7 @@ export class LinkHubApi {
     waitMs: number,
     collapse: boolean,
     signal?: AbortSignal,
+    maxLagMs?: number,
   ): Promise<MessageBatch> {
     const query = new URLSearchParams({
       after: cursor,
@@ -71,6 +72,9 @@ export class LinkHubApi {
       limit: "1000",
       collapse: String(collapse),
     });
+    if (maxLagMs !== undefined) {
+      query.set("max_lag_ms", String(maxLagMs));
+    }
     return this.request("GET", `/v1/mavlink/messages?${query}`, undefined, signal);
   }
 

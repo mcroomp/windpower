@@ -23,12 +23,20 @@ cleanup must converge through `calibrate.hw._set_safe_off_state()` to:
 - `RAWES_MODE=0`;
 - `H_FLYBAR_MODE=1`;
 - `H_SV_MAN=0`;
-- `SERVO9_FUNCTION=0`;
+- `SERVO9_FUNCTION=36`;
 - `H_YAW_TRIM=0`;
+- output 9 observed off;
 - neutral swash output from Lua's disarmed mode-0 RC overrides.
 
-`SERVO9_FUNCTION` must not be restored after cleanup. A later passive run takes
-ownership explicitly only after its attitude handoff is safe.
+`calibrate.hw.verify_safe_off()` is the shared read-only acceptance check used
+after production cleanup and by the SITL passive acceptance test. It returns
+the heartbeat, parameter, and output-9 results as one typed report; do not
+duplicate those assertions in individual startup tests.
+
+The DDFP mapping remains configured across boot and cleanup. ArduPilot forces
+DDFP to minimum output in `SHUT_DOWN`, `GROUND_IDLE`, and `SPOOLING_DOWN`.
+Do not unassign or restore `SERVO9_FUNCTION` at runtime: Copter 4.7.1 does not
+rebuild the live `SRV_Channels` function map for those parameter writes.
 
 Disarmed does not by itself mean that the swash is neutral or that an output is
 unassigned. Verify the complete invariant. Do not use historical port or baud
@@ -138,36 +146,77 @@ criteria become true again.
 
 ## Passive bench startup
 
+Programmatic callers use `calibrate.run.run_passive()` with
+`PassiveRunOptions`. The interactive `run passive` command and the SITL
+acceptance test both enter the same production orchestration; tests inject only
+their artifact directory rather than monkeypatching calibration globals.
+
 The intended stock-firmware sequence is:
 
 1. Verify `H_FLYBAR_MODE=1` and `H_SV_MAN=0`.
-2. Keep `SERVO9_FUNCTION=0`; select `RAWES_MODE=0` and ACRO.
+2. Verify the boot-established `SERVO9_FUNCTION=36` mapping, select
+   `RAWES_MODE=0`, clear `H_YAW_TRIM`, and select ACRO.
 3. Arm, allow Lua's 500 ms ground-idle interval, assert interlock, and wait for
    ArduPilot's explicit `Runup Complete`.
 4. Capture the current attitude, then briefly use RAWES ACRO-manual mode with
    zero roll, zero pitch, and the passive collective. Lua owns these continuous
    RC overrides; calibration owns the sequence and telemetry gates.
 5. Require `EXTENDED_SYS_STATE.landed_state=MAV_LANDED_STATE_IN_AIR`.
-6. Immediately turn off the yaw motor output, enter GUIDED_NOGPS, and have
-   calibration stream the captured quaternion, zero body rates, and normalized
-   thrust through `SET_ATTITUDE_TARGET`. `GUID_OPTIONS` bit 3 must be set.
+6. Enter GUIDED_NOGPS and have calibration stream the captured quaternion,
+   zero body rates, and normalized thrust through `SET_ATTITUDE_TARGET`.
+   `GUID_OPTIONS` bit 3 must be set.
 7. Require active heartbeat plus a quiet attitude interval while calibration
    continues that target stream.
 8. Send the passive thrust and relative offsets, send `RAWES_PEN=1`, then set
    `RAWES_MODE=3`. Calibration continues streaming until Lua confirms both
    anchor capture and passive mode entry.
 9. Lua replaces the temporary runup collective with neutral fallback RC
-   collective before its first steady target call. Restore yaw-motor ownership
-   only after Lua acknowledges steady-state control.
+   collective before its first steady target call.
+
+When the yaw motor or ESC is disconnected, physical yaw movement cannot close
+the held-heading loop. A stationary body can still have substantial heading
+error and therefore a persistent Motor4 demand. The yaw-trim observer reads
+that applied-function demand and can drive `H_YAW_TRIM` to its clamp even
+though measured yaw rate is near zero. Disconnected runs may verify command
+generation, but must not be used to tune the observer. Never reconnect the
+motor while armed or with accumulated trim; canonical safe-off clears
+`H_YAW_TRIM` before reconnection.
+
+The LinkHub UI stationary bench route must send `RAWES_YFF=0` before enabling
+passive mode. A supplied seed makes Lua hold that trim during passive instead
+of entering the adaptive observer fallback. This prevents a small persistent
+AP yaw correction from being absorbed into trim while the actuator is
+disconnected. The AP yaw PID remains active; zero trim does not promise an
+exactly zero transient Motor4 command.
+
+Lua must continue sampling and publishing the applied Motor4 readback
+(`YFF_U`) while holding a passive seed. Returning before that readback makes
+the ground display retain a pre-passive value and can falsely imply an active
+motor command. Ground displays must mark `YFF_U` inactive while disarmed.
+
+A stationary, motor-disconnected hardware acceptance run on 2026-10-05 sent
+`RAWES_YFF=0` before passive capture. Every one of the 59 passive-hold samples
+reported both `YFF_T=0` and live `YFF_U=0`; cleanup verified the complete
+safe-off invariant. This establishes the no-Motor4-command behavior only for
+the stationary LinkHub bench route. It does not replace connected-actuator
+direction and load testing.
 
 Lua does not poll `vehicle:get_mode()` during ACRO staging. Calibration verifies
 the actual ArduPilot mode from heartbeats. Once mode 3 is active, Lua keeps
 neutral roll, pitch, collective, and yaw RC overrides refreshed even in
 GUIDED_NOGPS, so an unexpected return to ACRO never exposes released inputs.
 
-As of 2026-10-05, this sequence is implemented for SITL validation but is not yet
-approved for connected hardware. Approval requires the passive bench startup
-SITL test to prove:
+On Copter 4.7.1, a runtime `SERVO9_FUNCTION` write changes the stored parameter
+but does not rebuild `SRV_Channels`' function-to-physical-channel map. That map
+is populated by `SRV_Channels::update_aux_servo_function()` during
+`Copter::init_rc_out()`. Keep function 36 configured at boot instead of trying
+to transfer ownership during the handoff.
+
+Disarmed hardware verification on 2026-10-05 used a boot-established function
+36 mapping and deliberately stale `H_YAW_TRIM=0.25`. Output 9 remained off for
+100 consecutive samples across STABILIZE/ACRO mode changes and returned off
+after a force-arm/disarm cycle. Approval of a connected yaw motor still
+requires the passive bench startup test to prove:
 
 - landed state clears before the mode change;
 - no level target is introduced;

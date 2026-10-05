@@ -30,6 +30,8 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(long)]
         python_output: Option<PathBuf>,
+        #[arg(long)]
+        typescript_output: Option<PathBuf>,
     },
     Serve {
         #[arg(long, env = "LINKHUB_CONNECTION")]
@@ -40,6 +42,8 @@ enum Command {
         port: u16,
         #[arg(long, default_value = "linkhub-data")]
         data_dir: PathBuf,
+        #[arg(long, env = "LINKHUB_STATIC_DIR")]
+        static_dir: Option<PathBuf>,
         #[arg(long)]
         run_id: Option<Uuid>,
         #[arg(long, default_value_t = 50)]
@@ -76,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Schema {
             output,
             python_output,
+            typescript_output,
         } => {
             let schema = serde_json::to_string_pretty(&protocol::json_schema())? + "\n";
             if let Some(path) = output {
@@ -92,12 +97,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 fs::write(path, protocol::python_types()).await?;
             }
+            if let Some(path) = typescript_output {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::write(path, protocol::typescript_types()).await?;
+            }
         }
         Command::Serve {
             connection,
             listen,
             port,
             data_dir,
+            static_dir,
             run_id,
             flush_ms,
             chunk_mb,
@@ -109,6 +121,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             motor_heartbeat_ms,
             motor_max_command_timeout_ms,
         } => {
+            if let Some(directory) = &static_dir {
+                let metadata = fs::metadata(directory).await.map_err(|error| {
+                    format!(
+                        "could not read static directory {}: {error}",
+                        directory.display()
+                    )
+                })?;
+                if !metadata.is_dir() {
+                    return Err(
+                        format!("static path is not a directory: {}", directory.display()).into(),
+                    );
+                }
+            }
             let run_id = run_id.unwrap_or_else(Uuid::new_v4);
             let run_dir = data_dir.join(run_id.to_string());
             fs::create_dir_all(&run_dir).await?;
@@ -148,7 +173,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(%bind, %run_id, "LinkHub listening");
             axum::serve(
                 listener,
-                http::router_with_motor(journal.clone(), Some(link), motor.clone()),
+                http::router_with_motor_and_static(
+                    journal.clone(),
+                    Some(link),
+                    motor.clone(),
+                    static_dir,
+                ),
             )
             .with_graceful_shutdown(shutdown_signal())
             .await?;

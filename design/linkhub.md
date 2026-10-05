@@ -80,6 +80,11 @@ channels. They do not hold a socket, archive, or transaction lock while waiting
 on a client. A broadcast notification is only a wake-up mechanism; the journal
 cursor remains authoritative.
 
+LinkHub can optionally serve compiled static browser assets from the directory
+configured by `--static-dir` or `LINKHUB_STATIC_DIR`. Static serving is a
+deployment convenience only: browser applications continue to use the same
+finite HTTP/JSON API, and LinkHub owns no UI session or rendering state.
+
 ## HTTP API
 
 The foundation provides:
@@ -138,6 +143,12 @@ chooses to consume. Calibration CSV headers record their LinkHub start cursor,
 and SITL preserves the run's `linkhub/<run-id>/journal/` directory. New runs do
 not export a duplicate `mavlink.jsonl`.
 
+`/v1/mavlink/status` also exposes `generation = v1:<run-id>:<clock-epoch>`.
+The run ID changes when the service is replaced; the clock epoch changes when
+the MAVLink transport reconnects, including after a vehicle reboot. Browser
+clients use this ETag-like value to invalidate reconstructed command and
+telemetry state. It intentionally does not include the journal cursor.
+
 ## Generated protocol boundary
 
 LinkHub's Rust descriptor in `linkhub/src/protocol.rs` owns the public enum
@@ -145,6 +156,7 @@ codes, known MAVLink message field types, aliases, and defaults. It generates:
 
 - `linkhub/schema/protocol-v1.schema.json`;
 - `linkhub_client/src/linkhub_client/generated_protocol.py`;
+- `linkhub-ui/src/generated/protocol.ts`;
 - the live `GET /v1/schema` response.
 
 Regenerate checked artifacts with:
@@ -152,7 +164,8 @@ Regenerate checked artifacts with:
 ```powershell
 cargo run --manifest-path .\linkhub\Cargo.toml -- schema `
   --output .\linkhub\schema\protocol-v1.schema.json `
-  --python-output .\linkhub_client\src\linkhub_client\generated_protocol.py
+  --python-output .\linkhub_client\src\linkhub_client\generated_protocol.py `
+  --typescript-output .\linkhub-ui\src\generated\protocol.ts
 ```
 
 Rust tests fail when either checked artifact drifts from the descriptor.
@@ -160,7 +173,7 @@ Known messages decode to generated dataclasses and numeric MAVLink enums decode
 to generated forward-compatible `IntEnum` values. Unknown enum values become
 `UNKNOWN_<value>` pseudo-members; unknown message types remain `RawMessage`.
 Do not hand-edit the generated artifacts or duplicate these public types in
-Python.
+Python or TypeScript.
 
 Rate leases remain future work; calibration uses explicit message-rate
 configuration.

@@ -97,10 +97,16 @@ Normal ArduPilot pre-arm checks apply by default. `--force` explicitly bypasses
 them for secured, disconnected bench hardware; shutdown remains unchanged and
 always restores disarmed safe-off state.
 
-Every safe-off path leaves `SERVO9_FUNCTION=0`, so the DShot yaw-motor output
-is unassigned after arm/disarm tests and every run exit. A later passive run
-keeps it unassigned during arming and restores Motor4/DDFP ownership only after
-passive target capture, when yaw control actually begins.
+Every safe-off path leaves `SERVO9_FUNCTION=36`, `H_YAW_TRIM=0`, and the
+vehicle confirmed disarmed. ArduPilot's DDFP implementation forces the mapped
+output off while disarmed. Passive runs use the mapping established at boot;
+runtime function writes are not used because they do not rebuild the live
+`SRV_Channels` mapping.
+
+Python integrations should call `calibrate.run.run_passive(session, options)`
+with a `PassiveRunOptions` instance. `log_dir` selects the artifact directory
+without changing module globals. The CLI remains the human-facing parser for
+the same production path.
 
 **Modes (`<name>`):**
 
@@ -271,7 +277,8 @@ On exit, the run command sets `RAWES_MODE=0`, requests normal MAVLink disarm,
 falls back to force-disarm when ArduPilot rejects an in-flight disarm, and then
 applies the canonical safe-off state. That state is: confirmed disarmed,
 `RAWES_MODE=0`, `H_SV_MAN=0`, ACRO RC passthrough selected by
-`H_FLYBAR_MODE=1`, and `SERVO9_FUNCTION=0` so the yaw motor is unassigned.
+`H_FLYBAR_MODE=1`, `SERVO9_FUNCTION=36`, and `H_YAW_TRIM=0`; disarm holds the
+mapped DDFP output off.
 While disarmed in mode 0,
 Lua refreshes RC1/RC2 at their configured trims and computes the RC3 value that
 places the reversed swash mixer at its 1500-us center. The overrides are cleared
@@ -292,7 +299,7 @@ safe-off. `--force` explicitly bypasses ArduPilot pre-arm checks.
 ### `disarm` / `reboot`
 Every confirmed normal or force disarm selects the canonical safe-off state:
 `RAWES_MODE=0`, `H_SV_MAN=0`, ArduPilot ACRO, `H_FLYBAR_MODE=1`, and
-`SERVO9_FUNCTION=0`.
+`SERVO9_FUNCTION=36`, with `H_YAW_TRIM=0`.
 The `disarm` command tries normal disarm first and automatically falls back to
 force-disarm when ArduPilot rejects disarming from an active flight state.
 Lua's disarmed mode-0 RC overrides hold the swash neutral without using an

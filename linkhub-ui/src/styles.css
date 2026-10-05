@@ -125,6 +125,132 @@ h2 {
   font: 12px/1.65 ui-monospace, "Cascadia Code", monospace;
 }
 
+.swash-controls {
+  position: absolute;
+  z-index: 2;
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  gap: 22px;
+  padding: 12px 14px 14px;
+  border: 1px solid rgba(70, 90, 121, 0.7);
+  border-radius: 10px;
+  background: rgba(7, 12, 21, 0.82);
+  backdrop-filter: blur(8px);
+  color: #8fa2bc;
+  font: 9px ui-monospace, "Cascadia Code", monospace;
+  pointer-events: none;
+}
+
+.swash-controls.unavailable {
+  opacity: 0.4;
+}
+
+.instrument-title {
+  margin-bottom: 9px;
+  color: #cbd8e9;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.cyclic-widget,
+.collective-widget {
+  position: relative;
+  padding: 10px 12px 12px;
+}
+
+.cyclic-plane {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  border: 2px solid #aeb9c9;
+  border-radius: 50%;
+}
+
+.axis {
+  position: absolute;
+  display: block;
+  background: #40506b;
+}
+
+.axis.horizontal {
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1px;
+}
+
+.axis.vertical {
+  top: 0;
+  left: 50%;
+  width: 1px;
+  height: 100%;
+}
+
+.collective-track {
+  position: relative;
+  width: 24px;
+  height: 112px;
+}
+
+.collective-track::before {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 4px;
+  height: 100%;
+  border-radius: 2px;
+  background: #aeb9c9;
+  content: "";
+  transform: translateX(-50%);
+}
+
+.instrument-dot {
+  position: absolute;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff3c4;
+  border-radius: 50%;
+  background: #ffca28;
+  box-shadow: 0 0 12px rgba(255, 202, 40, 0.65);
+  transform: translate(-50%, -50%);
+}
+
+.collective-track .instrument-dot {
+  left: 50%;
+}
+
+.direction {
+  position: absolute;
+  color: #7186a4;
+}
+
+.direction.up {
+  top: 30px;
+  left: 50%;
+  transform: translate(-50%, -100%);
+}
+
+.direction.down {
+  bottom: -2px;
+  left: 50%;
+  transform: translate(-50%, 100%);
+}
+
+.direction.left {
+  top: calc(50% + 13px);
+  left: 5px;
+  transform: translate(-100%, -50%);
+}
+
+.direction.right {
+  top: calc(50% + 13px);
+  right: 5px;
+  transform: translate(100%, -50%);
+}
+
 .telemetry-overlay {
   top: 86px;
   left: 16px;

@@ -1,5 +1,6 @@
 import type { LinkHubApi } from "./api";
 import { parseRunPassive, type PassiveController } from "./passive";
+import { decodeH3Swashplate } from "./swashplate";
 import type { TelemetryStore } from "./telemetry";
 
 const MODES: Record<number, string> = {
@@ -117,11 +118,41 @@ export class Terminal {
     const servos = this.telemetry.get("SERVO_OUTPUT_RAW");
     if (servos) {
       this.write(
-        `  servos    ${[1, 2, 3, 9]
+        `  servos    ${[1, 2, 3]
           .map((channel) => `S${channel}=${String(servos.fields[`servo${channel}_raw`] ?? "n/a")}`)
           .join("  ")}`,
       );
+      const limits = await Promise.allSettled([
+        this.api.getParameter("H_COL_MIN"),
+        this.api.getParameter("H_COL_MAX"),
+      ]);
+      if (limits[0].status === "fulfilled" && limits[1].status === "fulfilled") {
+        const swash = decodeH3Swashplate(
+          Number(servos.fields.servo1_raw),
+          Number(servos.fields.servo2_raw),
+          Number(servos.fields.servo3_raw),
+          limits[0].value.value,
+          limits[1].value.value,
+        );
+        if (swash) {
+          const signed = (value: number) =>
+            `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
+          this.write(
+            `  swash     roll=${signed(swash.roll)}  pitch=${signed(swash.pitch)}  `
+            + `collective=${(swash.collective * 100).toFixed(1)}%`,
+          );
+        }
+      } else {
+        this.write("  swash     unavailable (H_COL_MIN/MAX read failed)", "error");
+      }
     }
+    const yawMotor = this.telemetry.get("NAMED_VALUE_FLOAT", "rx", "YFF_U");
+    const motorCommand = yawMotor?.fields.value;
+    this.write(
+      `  motor     DShot/S9=${String(servos?.fields.servo9_raw ?? "n/a")}  YFF_U=${typeof motorCommand === "number"
+        ? `${(motorCommand * 100).toFixed(1)}%`
+        : "unavailable"}`,
+    );
 
     this.write("KEY PARAMETERS");
     const values = await Promise.allSettled(

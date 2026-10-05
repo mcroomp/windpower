@@ -18,6 +18,28 @@
         </header>
         <div id="scene"></div>
         <div id="telemetry-overlay" class="telemetry-overlay">Waiting for telemetry…</div>
+        <div id="swash-controls" class="swash-controls unavailable">
+          <div class="cyclic-widget">
+            <div class="instrument-title">CYCLIC</div>
+            <div class="cyclic-plane">
+              <span class="axis horizontal"></span>
+              <span class="axis vertical"></span>
+              <span id="cyclic-dot" class="instrument-dot"></span>
+            </div>
+            <span class="direction up">UP</span>
+            <span class="direction down">DOWN</span>
+            <span class="direction left">LEFT</span>
+            <span class="direction right">RIGHT</span>
+          </div>
+          <div class="collective-widget">
+            <div class="instrument-title">COLLECTIVE</div>
+            <div class="collective-track">
+              <span id="collective-dot" class="instrument-dot"></span>
+            </div>
+            <span class="direction up">UP</span>
+            <span class="direction down">DOWN</span>
+          </div>
+        </div>
         <div class="control-hint">
           Passive controls: arrows roll/pitch · -/= thrust · ,/. yaw · Space recapture · Esc stop
         </div>

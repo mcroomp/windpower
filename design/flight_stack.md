@@ -573,6 +573,12 @@ Actuator:   anti-rotation motor on output 9 (AUX 1)
             (current hardware: GB4008 + 10:1 spur gear — see components.md)
 ```
 
+During the LinkHub UI stationary passive bench route, ground sends
+`RAWES_YFF=0` before `RAWES_PEN=1`. Lua holds that explicit trim seed instead
+of adapting from a disconnected actuator, while continuing to publish the
+live applied Motor4 readback as `YFF_U`. A 2026-10-05 disconnected acceptance
+run measured `YFF_T=0` and `YFF_U=0` for all 59 passive-hold samples.
+
 **H_TAIL_TYPE=3 (DDFP CW):** NO sign flip — under the US-convention rotor body drifts CCW (gyro:z() < 0) → error positive → PID positive → throttle positive → motor on.
 
 ```

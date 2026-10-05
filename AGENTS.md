@@ -44,8 +44,9 @@ there are no `sys.path.insert()` hacks anywhere in the codebase.
 
 Non-package top-level directories: `design/` (owner docs), `documents/`, `hardware/`,
 `presentations/`, `felix/`, `am32config/` (ESC config tool, separate `package.json`),
-`linkhub/` (standalone Rust transport and diagnostic gateway), `tmp/` (scratch/working
-files only).
+`linkhub/` (standalone Rust transport and diagnostic gateway), `linkhub-ui/` (compiled
+TypeScript/Three.js browser control and telemetry UI served by LinkHub), `tmp/`
+(scratch/working files only).
 
 `simulation/logs/` is the single log root for every test tier (unit fixtures, simtests, and
 SITL stack runs all write there) — it did not move when the other packages were promoted to
@@ -194,10 +195,12 @@ duplicate `mavlink.jsonl`.
 - Canonical hardware safe-off is one invariant across every normal/forced
   arm-disarm cycle and every calibration run exit: confirmed disarmed,
   `RAWES_MODE=0`, ACRO, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`,
-  `SERVO9_FUNCTION=0` (yaw motor physically unassigned), `H_YAW_TRIM=0`
-  (no stale motor command if DDFP is later restored), and neutral swash outputs
-  from Lua's disarmed mode-0 neutral hold. Cleanup paths must converge on
-  `_set_safe_off_state()` and must never restore the motor function afterward.
+  `SERVO9_FUNCTION=36` (DDFP mapping established at boot), `H_YAW_TRIM=0`,
+  output 9 verified off, and neutral swash outputs from Lua's disarmed mode-0
+  neutral hold. ArduPilot forces DDFP off while disarmed; runtime
+  `SERVO9_FUNCTION` writes do not rebuild the live output map. Cleanup paths
+  must converge on `_set_safe_off_state()` and must not unassign/reassign the
+  motor function at runtime.
 - When roll and pitch appear together as paired values (params, tuple returns,
   unpacking, CSV columns, helper args), always use `roll, pitch` order.
   Do not introduce `pitch, roll` ordering unless an external interface

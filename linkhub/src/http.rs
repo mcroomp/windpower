@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -12,6 +12,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
+use tower_http::services::ServeDir;
 
 use crate::{
     journal::{JournalError, JournalHandle},
@@ -19,7 +20,9 @@ use crate::{
     motor::{MotorDirection, MotorError, MotorHandle},
     operations::{MavlinkOperations, OperationError},
     protocol,
-    records::{DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock},
+    records::{
+        DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, wall_time_ns,
+    },
 };
 
 #[derive(Clone)]
@@ -108,8 +111,17 @@ pub fn router_with_motor(
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
 ) -> Router {
+    router_with_motor_and_static(journal, link, motor, None)
+}
+
+pub fn router_with_motor_and_static(
+    journal: JournalHandle,
+    link: Option<MavlinkLinkHandle>,
+    motor: Option<MotorHandle>,
+    static_dir: Option<PathBuf>,
+) -> Router {
     let operations = link.clone().map(MavlinkOperations::new);
-    Router::new()
+    let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/v1/status", get(status))
@@ -171,7 +183,13 @@ pub fn router_with_motor(
             link,
             operations,
             motor,
-        }))
+        }));
+    match static_dir {
+        Some(directory) => {
+            router.fallback_service(ServeDir::new(directory).append_index_html_on_directories(true))
+        }
+        None => router,
+    }
 }
 
 async fn live() -> Json<Value> {
@@ -240,6 +258,11 @@ async fn mavlink_status(State(state): State<Arc<AppState>>) -> Result<Json<Value
         "sim_clock".to_owned(),
         serde_json::to_value(sim_clock).expect("SimClock is serializable"),
     );
+    let clock_epoch = object["clock_epoch"].as_u64().unwrap_or_default();
+    object.insert(
+        "generation".to_owned(),
+        Value::String(format!("v1:{}:{clock_epoch}", state.journal.run_id())),
+    );
     Ok(Json(value))
 }
 
@@ -262,6 +285,7 @@ const DEFAULT_MESSAGE_BATCH_LIMIT: usize = 1_000;
 const MAX_MESSAGE_BATCH_LIMIT: usize = 10_000;
 const MAX_JOURNAL_SCAN_RECORDS: usize = 10_000;
 const MAX_MESSAGE_WAIT_MS: u64 = 30_000;
+const MAX_MESSAGE_LAG_MS: u64 = 60_000;
 
 #[derive(Debug, Default, Deserialize)]
 struct MessageQuery {
@@ -274,6 +298,7 @@ struct MessageQuery {
     limit: Option<usize>,
     #[serde(default)]
     collapse: bool,
+    max_lag_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -452,6 +477,11 @@ async fn mavlink_messages(
             "wait_ms must not exceed {MAX_MESSAGE_WAIT_MS}"
         )));
     }
+    if query.max_lag_ms.is_some_and(|value| value > MAX_MESSAGE_LAG_MS) {
+        return Err(ApiError::BadRequest(format!(
+            "max_lag_ms must not exceed {MAX_MESSAGE_LAG_MS}"
+        )));
+    }
     let mut live = state.journal.subscribe();
     let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
@@ -460,6 +490,17 @@ async fn mavlink_messages(
             .journal
             .read_after_bounded(cursor, MAX_JOURNAL_SCAN_RECORDS)
             .await?;
+        if let (Some(max_lag_ms), Some(first)) = (query.max_lag_ms, read.records.first())
+            && wall_time_ns().saturating_sub(first.ingest_time_ns)
+                > max_lag_ms.saturating_mul(1_000_000)
+        {
+            let (tail, tail_clock) = state.journal.checkpoint().await?;
+            return Ok(Json(MessageBatch {
+                records: Vec::new(),
+                next_cursor: format_cursor(tail),
+                next_clock: tail_clock,
+            }));
+        }
         let mut next_clock = read.tail_clock;
         let mut records = Vec::new();
         for record in read.records {
@@ -1329,6 +1370,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serves_static_files_without_shadowing_api_routes() {
+        let temp = TempDir::new().expect("temp directory");
+        let static_dir = temp.path().join("static");
+        std::fs::create_dir(&static_dir).expect("static directory");
+        std::fs::write(static_dir.join("index.html"), "linkhub ui").expect("index");
+        std::fs::write(static_dir.join("app.js"), "console.log('ui')").expect("script");
+
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path().join("journal"), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let app = router_with_motor_and_static(journal.clone(), None, None, Some(static_dir));
+
+        let index = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        let script = app
+            .clone()
+            .oneshot(
+                Request::get("/app.js")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let api = app
+            .oneshot(
+                Request::get("/health/live")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(index.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(index.into_body(), usize::MAX)
+                .await
+                .expect("index body"),
+            "linkhub ui"
+        );
+        assert_eq!(script.status(), StatusCode::OK);
+        assert_eq!(script.headers()[CONTENT_TYPE], "text/javascript");
+        assert_eq!(api.status(), StatusCode::OK);
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
     async fn message_batch_advances_past_nonmatching_records() {
         let temp = TempDir::new().expect("temp directory");
         let run_id = Uuid::new_v4();
@@ -1395,6 +1487,38 @@ mod tests {
         assert_eq!(matched_batch["records"][0]["message"], "STATUSTEXT");
         assert_eq!(matched_batch["records"][0]["fields"]["text"], "ready");
         assert_eq!(matched_batch["next_cursor"], "v1:2");
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn message_batch_skips_stale_backlog_to_the_current_tail() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        journal
+            .append(RecordPayload::Diagnostic(Box::new(event(run_id))), None)
+            .await
+            .expect("diagnostic");
+        let app = router(journal.clone(), None);
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/mavlink/messages?after=v1:0&max_lag_ms=0")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let batch: Value = serde_json::from_slice(&body).expect("message batch");
+
+        assert_eq!(batch["records"], json!([]));
+        assert_eq!(batch["next_cursor"], "v1:1");
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");

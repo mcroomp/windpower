@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { PASSIVE_TELEMETRY_RATES, parseRunPassive } from "../src/passive";
+import {
+  PASSIVE_TELEMETRY_RATES,
+  PASSIVE_YAW_TRIM_SEED,
+  parseRunPassive,
+} from "../src/passive";
 
 describe("parseRunPassive", () => {
   it("uses production passive defaults", () => {
@@ -35,6 +39,10 @@ describe("parseRunPassive", () => {
   describe("passive telemetry", () => {
     it("does not request a rate for event-driven STATUSTEXT messages", () => {
       expect(PASSIVE_TELEMETRY_RATES).not.toHaveProperty("STATUSTEXT");
+    });
+
+    it("holds zero adaptive yaw trim during a bench passive run", () => {
+      expect(PASSIVE_YAW_TRIM_SEED).toBe(0);
     });
   });
 

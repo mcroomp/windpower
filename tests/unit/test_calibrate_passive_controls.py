@@ -278,6 +278,48 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     events = []
     settle_options = []
 
+    typed_calls = []
+    with monkeypatch.context() as typed_patch:
+        typed_patch.setattr(
+            calibrate_run,
+            "_cmd_run",
+            lambda session, args, **kwargs: typed_calls.append(
+                (session, args, kwargs)
+            ),
+        )
+        typed_session = object()
+        calibrate_run.run_passive(
+            typed_session,
+            calibrate_run.PassiveRunOptions(
+                duration_s=140.0,
+                force=True,
+                thrust=0.342,
+                protocol_debug=True,
+                log_dir=tmp_path,
+            ),
+        )
+    assert len(typed_calls) == 1
+    typed_session_actual, typed_args, typed_kwargs = typed_calls[0]
+    assert typed_session_actual is typed_session
+    assert typed_args[0] == "passive"
+    assert "--force" in typed_args
+    assert "--protocol-debug" in typed_args
+    assert typed_kwargs["log_dir"] == tmp_path
+
+    class TailSession:
+        def __init__(self, tail_type, function):
+            self.params = {
+                "H_TAIL_TYPE": tail_type,
+                "SERVO9_FUNCTION": function,
+            }
+
+        def get_param(self, name):
+            return self.params[name]
+
+    assert calibrate_run._ensure_passive_tail_setup(TailSession(3.0, 36.0))
+    assert not calibrate_run._ensure_passive_tail_setup(TailSession(3.0, 0.0))
+    assert not calibrate_run._ensure_passive_tail_setup(TailSession(0.0, 36.0))
+
     class Session:
         _target_system = 1
         _target_component = 1
@@ -306,23 +348,6 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
             events.append(("export-log", path, after))
             return "v1:1"
 
-    monkeypatch.setattr(
-        calibrate_run,
-        "_send_set_servo",
-        lambda _session, channel, pwm: events.append(("servo", channel, pwm)),
-    )
-    monkeypatch.setattr(
-        calibrate_run,
-        "_take_servo4",
-        lambda _session, restore_function=None: (
-            events.append(("disable-motor-function", restore_function)) or 36.0
-        ),
-    )
-    monkeypatch.setattr(
-        calibrate_run,
-        "_restore_servo4",
-        lambda _session, saved: events.append(("restore-motor-function", saved)),
-    )
     class Log:
         path = str(tmp_path / "passive.csv")
         n_rows = 0
@@ -338,7 +363,7 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     monkeypatch.setattr(
         calibrate_run,
         "_ensure_passive_tail_setup",
-        lambda _session: events.append(("tail-setup",)),
+        lambda _session: events.append(("tail-setup",)) or True,
     )
     monkeypatch.setattr(
         calibrate_run,
@@ -440,14 +465,8 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
         < passive_index
         < mode_ack_index
     )
-    motor_disable_index = events.index(
-        ("disable-motor-function", calibrate_run._PASSIVE_TAIL_FUNCTION)
-    )
-    motor_off_index = events.index(("servo", calibrate_run.SERVO_MOTOR, calibrate_run.MOTOR_OFF_US))
-    restore_index = events.index(("restore-motor-function", 36.0))
-    assert motor_disable_index < acro_index < arm_index
-    assert land_clear_index < motor_off_index < guided_index
-    assert mode_ack_index < restore_index < observe_index
+    assert events.index(("tail-setup",)) < acro_index < arm_index
+    assert mode_ack_index < observe_index
     assert ("shutdown", True) in events
     assert settle_options == [{
         "target_q": _CAPTURE_Q,
@@ -658,10 +677,12 @@ def test_passive_yaw_trim_waits_until_guided_handoff():
     assert sim.get_param("H_YAW_TRIM") == pytest.approx(0.0)
 
     sim.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+    sim.set_srv_out(sim.fns.YAW_MOTOR_FUNC, 1234)
     sim.run(0.1)
 
     assert sim.guided_target is not None
     assert sim.get_param("H_YAW_TRIM") == pytest.approx(0.3)
+    assert sim.fns.diag_nvf("YFF_U") == pytest.approx(0.234)
 
 
 def test_passive_waits_for_ground_owned_capture_near_hardware_attitude():

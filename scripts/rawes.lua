@@ -1091,6 +1091,18 @@ local function yaw_trim_step(dt, u, psi_dot)
     return _yaw_ff_trim
 end
 
+local function yaw_output_throttle()
+    local pwm = SRV_Channels:get_output_pwm(YAW_MOTOR_FUNC)
+    if pwm == nil then return nil end
+    local smin = p("SERVO9_MIN", 1000)
+    local smax = p("SERVO9_MAX", 2000)
+    local span = smax - smin
+    if span <= 0 then return nil end
+    local u = (pwm - smin) / span
+    if u < 0.0 then u = 0.0 elseif u > 1.0 then u = 1.0 end
+    return u
+end
+
 local function run_yaw_trim(now, is_passive)
     if not arming:is_armed() then return end
     -- MODE_PASSIVE (kinematic hold): the body's gyro/PWM readback is a
@@ -1107,20 +1119,18 @@ local function run_yaw_trim(now, is_passive)
         _yaw_ff_trim = math.max(0.0, math.min(YFF_MAX, _yaw_ff_seed))
         param:set("H_YAW_TRIM", _yaw_ff_trim)
         _diag_set("YFF_T", _yaw_ff_trim)
+        local u = yaw_output_throttle()
+        if u ~= nil then _diag_set("YFF_U", u) end
+        local gyro = ahrs:get_gyro()
+        if gyro then _diag_set("YFF_GZ", gyro:z()) end
         return
     end
     local gyro = ahrs:get_gyro()
     if not gyro then return end
     -- Read the total applied throttle from the SERVO9 output (H_YAW_TRIM +
     -- any AP yaw P-term).  Returns nil until AP has written its first output.
-    local pwm = SRV_Channels:get_output_pwm(YAW_MOTOR_FUNC)
-    if pwm == nil then return end
-    local smin = p("SERVO9_MIN", 1000)
-    local smax = p("SERVO9_MAX", 2000)
-    local span = smax - smin
-    if span <= 0 then return end
-    local u = (pwm - smin) / span
-    if u < 0.0 then u = 0.0 elseif u > 1.0 then u = 1.0 end
+    local u = yaw_output_throttle()
+    if u == nil then return end
     local psi_dot = gyro:z()
     yaw_trim_step(BASE_PERIOD_MS * 0.001, u, psi_dot)
     param:set("H_YAW_TRIM", _yaw_ff_trim)

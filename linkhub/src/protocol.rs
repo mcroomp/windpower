@@ -585,6 +585,64 @@ class Message:
     output
 }
 
+#[must_use]
+pub fn typescript_types() -> String {
+    let mut output = String::from(
+        r#"// Generated from LinkHub's Rust protocol descriptor. Do not edit.
+
+export interface MavlinkMessage<TFields extends object> {
+  readonly message: string;
+  readonly fields: TFields;
+}
+
+"#,
+    );
+    for enumeration in ENUMS {
+        writeln!(output, "export enum {} {{", enumeration.name).unwrap();
+        for (name, value) in enumeration.values {
+            writeln!(output, "  {name} = {value},").unwrap();
+        }
+        output.push_str("}\n\n");
+    }
+    for message in MESSAGES {
+        writeln!(output, "export interface {}Fields {{", message.class_name).unwrap();
+        for field in message.fields {
+            let optional = if field.default.is_some() { "?" } else { "" };
+            writeln!(
+                output,
+                "  readonly {}{}: {};",
+                field.name,
+                optional,
+                typescript_type(field.kind)
+            )
+            .unwrap();
+        }
+        output.push_str("}\n\n");
+        writeln!(
+            output,
+            "export class {} implements MavlinkMessage<{}Fields> {{",
+            message.class_name, message.class_name
+        )
+        .unwrap();
+        writeln!(output, "  readonly message = {:?};", message.wire_names[0]).unwrap();
+        writeln!(
+            output,
+            "  constructor(readonly fields: {}Fields) {{}}",
+            message.class_name
+        )
+        .unwrap();
+        output.push_str("}\n\n");
+    }
+    output.push_str("export const MESSAGE_CLASSES = {\n");
+    for message in MESSAGES.iter().filter(|message| message.decode) {
+        for wire_name in message.wire_names {
+            writeln!(output, "  {wire_name:?}: {},", message.class_name).unwrap();
+        }
+    }
+    output.push_str("} as const;\n");
+    output
+}
+
 fn python_type(kind: FieldType) -> &'static str {
     match kind {
         FieldType::Int => "int",
@@ -594,6 +652,16 @@ fn python_type(kind: FieldType) -> &'static str {
         FieldType::OptionalFloat => "float | None",
         FieldType::IntTuple => "tuple[int, ...]",
         FieldType::FloatSequence => "tuple[float, ...] | list[float]",
+        FieldType::Enum(name) => name,
+    }
+}
+
+fn typescript_type(kind: FieldType) -> &'static str {
+    match kind {
+        FieldType::Int | FieldType::Float => "number",
+        FieldType::String => "string",
+        FieldType::OptionalInt | FieldType::OptionalFloat => "number | null",
+        FieldType::IntTuple | FieldType::FloatSequence => "readonly number[]",
         FieldType::Enum(name) => name,
     }
 }
@@ -609,6 +677,10 @@ mod tests {
         assert_eq!(
             python_types(),
             include_str!("../../linkhub_client/src/linkhub_client/generated_protocol.py")
+        );
+        assert_eq!(
+            typescript_types(),
+            include_str!("../../linkhub-ui/src/generated/protocol.ts")
         );
     }
 }

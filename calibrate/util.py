@@ -100,11 +100,16 @@ def _parse_flags(tokens: list[str],
 # CSV run log
 # ---------------------------------------------------------------------------
 
-def _log_path(verb: str, name: str) -> str:
+def _log_path(
+    verb: str,
+    name: str,
+    directory: str | Path | None = None,
+) -> str:
     """Timestamped CSV path under simulation/logs/calibrate/.  Creates the dir."""
-    os.makedirs(_LOG_DIR, exist_ok=True)
+    log_dir = os.fspath(directory) if directory is not None else _LOG_DIR
+    os.makedirs(log_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(_LOG_DIR, f"{verb}_{name}_{ts}.csv")
+    return os.path.join(log_dir, f"{verb}_{name}_{ts}.csv")
 
 
 class _RunLog:
@@ -124,8 +129,15 @@ class _RunLog:
         self.n_rows = 0
 
     @classmethod
-    def open(cls, verb: str, name: str, meta: dict) -> "_RunLog":
-        path = _log_path(verb, name)
+    def open(
+        cls,
+        verb: str,
+        name: str,
+        meta: dict,
+        *,
+        directory: str | Path | None = None,
+    ) -> "_RunLog":
+        path = _log_path(verb, name, directory)
         fh = open(path, "w", newline="")
         fh.write(f"# {verb}.csv -- written by calibrate.py {verb}\n")
         for k, v in meta.items():

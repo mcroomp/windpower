@@ -49,7 +49,7 @@ from .constants import (
     _ESC_TELEM_MSGS,
     _RUN_MODES, _TRIM_NVF, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
     _OSCILLATE_TARGETS, _OSCILLATE_STEP_S,
-    _COPTER_MODES, _LOG_DIR,
+    _COPTER_MODES,
 )
 from .hw import (
     _arm, _disarm, _send_set_servo, _set_safe_off_state,
@@ -109,6 +109,55 @@ class _PassiveTarget:
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
+
+
+@dataclass(frozen=True)
+class PassiveRunOptions:
+    duration_s: float | None = None
+    force: bool = False
+    thrust: float = _PASSIVE_IC_THRUST
+    protocol_debug: bool = False
+    log_dir: str | Path | None = None
+    roll_offset_deg: float = 0.0
+    pitch_offset_deg: float = 0.0
+    yaw_offset_deg: float = 0.0
+    settle_rate_deg_s: float = math.degrees(_PASSIVE_SETTLE_RATE_RADS)
+    settle_time_s: float = _PASSIVE_EKF_SETTLE_S
+    settle_timeout_s: float = _PASSIVE_EKF_TIMEOUT_S
+
+
+def run_passive(
+    session: LinkHubClient,
+    options: PassiveRunOptions,
+    *,
+    stop_requested=None,
+) -> None:
+    """Run the production passive startup using typed options."""
+    args = ["passive", "--trim", f"thr={options.thrust:.17g}"]
+    if options.duration_s is not None:
+        args.extend(("--duration", f"{options.duration_s:.17g}"))
+    if options.force:
+        args.append("--force")
+    if options.protocol_debug:
+        args.append("--protocol-debug")
+    for flag, value in (
+        ("--roll", options.roll_offset_deg),
+        ("--pitch", options.pitch_offset_deg),
+        ("--yaw", options.yaw_offset_deg),
+    ):
+        if value != 0.0:
+            args.extend((flag, f"{value:.17g}"))
+    args.extend((
+        "--settle-rate-deg-s", f"{options.settle_rate_deg_s:.17g}",
+        "--settle-time", f"{options.settle_time_s:.17g}",
+        "--settle-timeout", f"{options.settle_timeout_s:.17g}",
+    ))
+    _cmd_run(
+        session,
+        args,
+        stop_requested=stop_requested,
+        log_dir=options.log_dir,
+    )
 
 
 def _quat_normalize(
@@ -627,9 +676,6 @@ def _wait_for_disarmed(session: LinkHubClient, timeout_s: float) -> bool:
     return False
 
 
-_PASSIVE_TAIL_FUNCTION = 36.0
-
-
 def _take_servo4(
     session: LinkHubClient,
     restore_function: "float | None" = None,
@@ -646,36 +692,38 @@ def _take_servo4(
     return restore_function
 
 
-def _ensure_passive_tail_setup(session: LinkHubClient) -> None:
-    """Ensure passive mode uses AP-owned DDFP tail control on the motor output."""
+def _ensure_passive_tail_setup(session: LinkHubClient) -> bool:
+    """Verify that AP-owned DDFP tail control was mapped at boot."""
     expected_tail = 3.0
     tail = session.get_param("H_TAIL_TYPE")
     if tail is None:
-        print("  [WARN] H_TAIL_TYPE unreadable; cannot enforce passive tail setup")
+        print("  [FAIL] H_TAIL_TYPE unreadable; refusing passive run.")
+        return False
     elif abs(float(tail) - expected_tail) > 1e-4:
-        ok = session.set_param("H_TAIL_TYPE", expected_tail)
-        tag = "[OK]" if ok else "[FAIL]"
-        print(f"  {tag} H_TAIL_TYPE: {tail:.6g} -> {expected_tail:.0f} (passive expects DDFP CW)")
+        print(
+            f"  [FAIL] H_TAIL_TYPE={tail:.6g}; passive requires "
+            f"{expected_tail:.0f} (DDFP CW) at boot."
+        )
+        return False
 
     s4f = session.get_param(f"SERVO{SERVO_MOTOR}_FUNCTION")
     if s4f is None:
-        print(f"  [WARN] SERVO{SERVO_MOTOR}_FUNCTION unreadable; cannot verify motor-channel ownership")
-    elif int(round(float(s4f))) == 0:
         print(
-            f"  [OK] SERVO{SERVO_MOTOR}_FUNCTION=0"
-            " (safe-off; DDFP ownership will be restored after capture)."
+            f"  [FAIL] SERVO{SERVO_MOTOR}_FUNCTION unreadable; "
+            "refusing passive run."
         )
-
-
-def _restore_servo4(session: LinkHubClient, saved: "float | None") -> None:
-    if saved is None:
-        return
-    servo_key = f"SERVO{SERVO_MOTOR}_FUNCTION"
-    try:
-        session.set_param(servo_key, saved)
-        print(f"  [SAFETY] {servo_key} restored to {saved:.0f}")
-    except Exception as e:
-        print(f"  [SAFETY] failed to restore {servo_key}: {e}")
+        return False
+    if int(round(float(s4f))) != 36:
+        print(
+            f"  [FAIL] SERVO{SERVO_MOTOR}_FUNCTION={s4f:.6g}; "
+            "set it to 36 and reboot before passive flight."
+        )
+        return False
+    print(
+        f"  [OK] SERVO{SERVO_MOTOR}_FUNCTION=36 "
+        "(DDFP mapping established at boot)."
+    )
+    return True
 
 
 def _safety_shutdown(session: LinkHubClient, *,
@@ -1735,6 +1783,7 @@ def _cmd_run(
     args: list[str],
     *,
     stop_requested=None,
+    log_dir: str | Path | None = None,
 ) -> None:
     """run <mode> [--duration N] [--trim K=V,...] [--osc TARGET]"""
     schema = {
@@ -1874,14 +1923,12 @@ def _cmd_run(
         "rotor_direction": rotor_direction_name if use_rotor_motor else "",
         "linkhub_start_cursor": journal_start_cursor,
     }
-    log = _RunLog.open("run", name, meta)
+    log = _RunLog.open("run", name, meta, directory=log_dir)
     print(f"  Logging to {log.path}")
     print(f"  LinkHub journal starts at {journal_start_cursor}")
     if name == "passive":
         _configure_passive_startup_telemetry(session)
 
-    armed = False
-    saved_fn = None
     rotor_motor = None
     done_ok = False
     try:
@@ -1901,27 +1948,13 @@ def _cmd_run(
                 return
             print(f"  [OK] BLDC Bluetooth connected: {device_name} (motor stopped)")
 
-        # Passive mode requires AP-owned DDFP tail control on channel 4.
-        if name == "passive":
-            _ensure_passive_tail_setup(session)
-            saved_fn = _take_servo4(
-                session,
-                restore_function=_PASSIVE_TAIL_FUNCTION,
-            )
-            if saved_fn is not None:
-                print(
-                    f"  SERVO{SERVO_MOTOR}_FUNCTION -> 0 "
-                    "(motor disabled before arming)"
-                )
+        if name == "passive" and not _ensure_passive_tail_setup(session):
+            return
 
         if not session.set_param("H_SV_MAN", 0):
             print("  [FAIL] H_SV_MAN=0 was not acknowledged; refusing to run.")
             return
         print("  H_SV_MAN -> 0 (automated heli control for run)")
-
-        # SERVO4 ownership shuffle if the mode needs it
-        if cfg["take_servo4"]:
-            saved_fn = _take_servo4(session)
 
         _fm = cfg.get("flight_mode")
         if name == "passive":
@@ -1997,7 +2030,6 @@ def _cmd_run(
             print("  [WARN] Force-arm enabled: ArduPilot pre-arm checks are bypassed.")
         if not _arm(session, force=force_arm, esc_arm=esc_arm):
             return
-        armed = True
         print("  [OK] Armed.")
 
         if name == "passive":
@@ -2034,11 +2066,6 @@ def _cmd_run(
                 stop_requested=stop_requested,
             ):
                 return
-            _send_set_servo(session, SERVO_MOTOR, MOTOR_OFF_US)
-            print(
-                f"  SERVO{SERVO_MOTOR} -> {MOTOR_OFF_US} us "
-                "(motor off before GUIDED capture)"
-            )
             session.set_mode(_fm)
             print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
             if not _wait_for_passive_ekf_settle(
@@ -2069,10 +2096,6 @@ def _cmd_run(
                 stop_requested=stop_requested,
             ):
                 return
-            _restore_servo4(session, saved_fn)
-            print("  Motor function restored after passive capture")
-            saved_fn = None
-
     # Build the oscillate tick callback if --osc was set
         on_tick = None
         if osc_steps is not None:
@@ -2101,7 +2124,7 @@ def _cmd_run(
             finally:
                 _safety_shutdown(
                     session,
-                    skip_motor_off=(name == "passive" and saved_fn is None),
+                    skip_motor_off=(name == "passive"),
                 )
         finally:
             journal_end_cursor = session.current_cursor()

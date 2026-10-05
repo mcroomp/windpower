@@ -72,6 +72,7 @@ _rawes_fns = {
     -- ── Yaw trim observer ────────────────────────────────────────────────────
     -- Pure step + state accessors for unit-testing yaw_trim_step in isolation.
     yaw_trim_step   = yaw_trim_step,
+    yaw_output_throttle = yaw_output_throttle,
     yaw_ff_trim     = function() return _yaw_ff_trim end,
     yaw_trim_reset  = function()
         _yaw_ff_trim     = 0.0

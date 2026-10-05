@@ -36,6 +36,7 @@ export const PASSIVE_TELEMETRY_RATES = Object.freeze({
   BATTERY_STATUS: 2,
   EKF_STATUS_REPORT: 2,
 });
+export const PASSIVE_YAW_TRIM_SEED = 0;
 
 export type PassivePhase = "idle" | "starting" | "running" | "stopping" | "failed";
 
@@ -199,6 +200,7 @@ export class PassiveController {
       await this.waitForSettledAttitude(initialQuaternion, signal);
 
       await this.sendTargets();
+      await this.sendNamedValue("RAWES_YFF", PASSIVE_YAW_TRIM_SEED);
       const passiveAfter = this.telemetry.checkpoint();
       await this.sendNamedValue("RAWES_PEN", 1);
       await this.setParameter("RAWES_MODE", MODE_PASSIVE);

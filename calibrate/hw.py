@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 
 from linkhub_client import mav_constants as mavlink
 from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import ParamSet
+from linkhub_client.messages import ParamSet, ServoOutputRaw
 
 from .constants import (
     LinkHubClient,
@@ -443,15 +444,128 @@ def _monitor_esc(session: LinkHubClient, duration: float = 10.0) -> None:
 _SAFE_OFF_FLIGHT_MODE = 1  # ArduCopter ACRO with RC passthrough selected.
 _SAFE_OFF_FLYBAR_MODE = 1.0
 _SAFE_OFF_SERVO_MODE = 0.0  # Automated mixer; Lua mode 0 supplies neutral RC inputs.
-_SAFE_OFF_MOTOR_FUNCTION = 0.0
+_SAFE_OFF_MOTOR_FUNCTION = 36.0
 _SAFE_OFF_YAW_TRIM = 0.0
+
+
+@dataclass(frozen=True)
+class SafeOffReport:
+    armed: bool
+    flight_mode: int
+    rawes_mode: float | None
+    flybar_mode: float | None
+    servo_mode: float | None
+    motor_function: float | None
+    yaw_trim: float | None
+    motor_output_raw: int | None
+    errors: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def verify_safe_off(
+    session: LinkHubClient,
+    *,
+    output_timeout_s: float = 1.0,
+) -> SafeOffReport:
+    """Read and validate the canonical disarmed hardware state."""
+    status = session.vehicle_status()
+    base_mode = int(status.get("base_mode", 0))
+    armed = bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    flight_mode = int(status.get("custom_mode", -1))
+    params = {
+        name: session.get_param(name)
+        for name in (
+            "RAWES_MODE",
+            "H_FLYBAR_MODE",
+            "H_SV_MAN",
+            f"SERVO{SERVO_MOTOR}_FUNCTION",
+            "H_YAW_TRIM",
+            f"SERVO{SERVO_MOTOR}_MIN",
+        )
+    }
+
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        param1=float(mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW),
+        param2=100_000.0,
+    ))
+    cursor = session.current_cursor()
+    motor_output_raw = None
+    deadline = time.monotonic() + output_timeout_s
+    while motor_output_raw is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        batch = session.read_messages(
+            cursor,
+            ["SERVO_OUTPUT_RAW"],
+            direction="rx",
+            wait=remaining,
+            limit=1,
+        )
+        cursor = batch.next_cursor
+        if not batch.messages:
+            continue
+        decoded = decode_message(batch.messages[0])
+        if isinstance(decoded, ServoOutputRaw):
+            motor_output_raw = int(
+                getattr(decoded, f"servo{SERVO_MOTOR}_raw")
+            )
+
+    errors: list[str] = []
+    if armed:
+        errors.append("vehicle is armed")
+    if flight_mode != _SAFE_OFF_FLIGHT_MODE:
+        errors.append(f"flight mode is {flight_mode}, expected ACRO (1)")
+
+    expected_params = {
+        "RAWES_MODE": 0.0,
+        "H_FLYBAR_MODE": _SAFE_OFF_FLYBAR_MODE,
+        "H_SV_MAN": _SAFE_OFF_SERVO_MODE,
+        f"SERVO{SERVO_MOTOR}_FUNCTION": _SAFE_OFF_MOTOR_FUNCTION,
+        "H_YAW_TRIM": _SAFE_OFF_YAW_TRIM,
+    }
+    for name, expected in expected_params.items():
+        actual = params[name]
+        if actual is None:
+            errors.append(f"{name} is unreadable")
+        elif not math.isclose(float(actual), expected, abs_tol=1e-6):
+            errors.append(f"{name}={actual:.6g}, expected {expected:.6g}")
+
+    motor_min = params[f"SERVO{SERVO_MOTOR}_MIN"]
+    if motor_output_raw is None:
+        errors.append("output 9 is unreadable")
+    elif motor_min is None:
+        errors.append(f"SERVO{SERVO_MOTOR}_MIN is unreadable")
+    elif motor_output_raw not in (0, round(float(motor_min))):
+        errors.append(
+            f"output 9 is {motor_output_raw}, expected off "
+            f"(0 or {round(float(motor_min))})"
+        )
+
+    return SafeOffReport(
+        armed=armed,
+        flight_mode=flight_mode,
+        rawes_mode=params["RAWES_MODE"],
+        flybar_mode=params["H_FLYBAR_MODE"],
+        servo_mode=params["H_SV_MAN"],
+        motor_function=params[f"SERVO{SERVO_MOTOR}_FUNCTION"],
+        yaw_trim=params["H_YAW_TRIM"],
+        motor_output_raw=motor_output_raw,
+        errors=tuple(errors),
+    )
 
 
 def _set_safe_off_state(
     session: LinkHubClient,
     *,
     rawes_mode_released: bool = False,
-) -> None:
+) -> SafeOffReport:
     """Apply the one canonical disarmed hardware state."""
     if rawes_mode_released:
         print("  [OK] Safe-off RAWES_MODE=0 (Lua control released).")
@@ -466,10 +580,19 @@ def _set_safe_off_state(
 
     motor_function = f"SERVO{SERVO_MOTOR}_FUNCTION"
     try:
-        if not session.set_param(motor_function, _SAFE_OFF_MOTOR_FUNCTION):
-            print(f"  [FAIL] Safe-off {motor_function}=0 was not acknowledged.")
+        configured_function = session.get_param(motor_function)
+        if configured_function is None:
+            print(f"  [FAIL] Could not read {motor_function} for safe-off.")
+        elif round(configured_function) != round(_SAFE_OFF_MOTOR_FUNCTION):
+            print(
+                f"  [FAIL] Safe-off requires {motor_function}=36 at boot; "
+                f"found {configured_function:.6g}. Configure it and reboot."
+            )
         else:
-            print(f"  [OK] Safe-off {motor_function}=0 (motor disconnected).")
+            print(
+                f"  [OK] Safe-off {motor_function}=36 "
+                "(DDFP mapped; disarm holds output off)."
+            )
     except Exception as e:
         print(f"  [FAIL] Could not disconnect motor output for safe-off: {e}")
 
@@ -520,6 +643,17 @@ def _set_safe_off_state(
         print("  [OK] Safe-off flight mode ACRO (Lua neutral-input hold).")
     except Exception as e:
         print(f"  [FAIL] Could not select ACRO safe-off mode: {e}")
+
+    report = verify_safe_off(session)
+    if report.ok:
+        print(
+            f"  [OK] Safe-off verified; output {SERVO_MOTOR}="
+            f"{report.motor_output_raw}."
+        )
+    else:
+        for error in report.errors:
+            print(f"  [FAIL] Safe-off verification: {error}.")
+    return report
 
 
 def _arm(session: LinkHubClient, force: bool = False,

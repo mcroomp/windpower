@@ -5,6 +5,8 @@ type Listener = (record: MessageRecord) => void;
 type GenerationListener = (generation: string, previous: string | null) => void;
 type ConnectionListener = (connected: boolean, error?: Error) => void;
 
+const MAX_TELEMETRY_LAG_MS = 1_000;
+
 function cursorSequence(cursor: string): number {
   const value = Number(cursor.split(":", 2)[1]);
   return Number.isFinite(value) ? value : 0;
@@ -47,6 +49,7 @@ export class TelemetryStore {
           0,
           true,
           this.controller.signal,
+          MAX_TELEMETRY_LAG_MS,
         );
         this.apply(batch.records);
         if (batch.next_cursor === this.cursor) {
@@ -159,7 +162,13 @@ export class TelemetryStore {
     let connected = true;
     while (!signal.aborted) {
       try {
-        const batch = await this.api.readMessages(this.cursor, 10_000, true, signal);
+        const batch = await this.api.readMessages(
+          this.cursor,
+          10_000,
+          true,
+          signal,
+          MAX_TELEMETRY_LAG_MS,
+        );
         if (!connected) {
           connected = true;
           for (const listener of this.connectionListeners) {
@@ -171,18 +180,9 @@ export class TelemetryStore {
         if (performance.now() - lastStatusCheck >= 1_000) {
           lastStatusCheck = performance.now();
           const status = await this.api.status(signal);
-          const previous = this.currentStatus?.generation ?? null;
-          if (previous !== null && status.generation !== previous) {
-            this.latest.clear();
-            this.recent.length = 0;
-            this.cursor = "v1:0";
+          if (this.handleGenerationChange(status)) {
             connected = false;
-            for (const listener of this.connectionListeners) {
-              listener(false);
-            }
-            for (const listener of this.generationListeners) {
-              listener(status.generation, previous);
-            }
+            this.cursor = status.cursor;
           }
           this.currentStatus = status;
         }
@@ -198,5 +198,21 @@ export class TelemetryStore {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
       }
     }
+  }
+
+  private handleGenerationChange(status: LinkHubStatus): boolean {
+    const previous = this.currentStatus?.generation ?? null;
+    if (previous === null || status.generation === previous) {
+      return false;
+    }
+    this.latest.clear();
+    this.recent.length = 0;
+    for (const listener of this.connectionListeners) {
+      listener(false);
+    }
+    for (const listener of this.generationListeners) {
+      listener(status.generation, previous);
+    }
+    return true;
   }
 }
