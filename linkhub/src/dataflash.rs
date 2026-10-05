@@ -360,6 +360,16 @@ mod tests {
             download.receive(zero),
             Err(DataFlashError::EarlyEnd { .. })
         ));
+        download.on_timeout().unwrap();
+        assert_eq!(
+            download.next_request(),
+            Some(DataRequest {
+                target: TARGET,
+                id: 2,
+                offset: 0,
+                count: 100,
+            })
+        );
         assert!(matches!(
             download.receive(packet(2, 90, &[1; 20])),
             Err(DataFlashError::BeyondRequestedRange { .. })

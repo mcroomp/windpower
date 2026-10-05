@@ -1,4 +1,3 @@
-import json
 from uuid import UUID
 
 import linkhub_client.client as client_module
@@ -9,6 +8,11 @@ from linkhub_client import (
     SimClock,
     SimTimeQuality,
     LinkHubClient,
+)
+from linkhub_client.messages import (
+    ExtendedSysState,
+    MavLandedState,
+    MavVtolState,
 )
 
 _CLOCK_DICT = {
@@ -126,92 +130,60 @@ def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
         {"timeout": 5.0},
     )]
 
+    requests.clear()
+    client.read_messages(
+        "v1:9",
+        ["ATTITUDE", "HEARTBEAT"],
+        direction="rx",
+        limit=100,
+        collapse=True,
+    )
 
-def test_client_flushes_mavlog_incrementally_without_duplicates(
-    monkeypatch, tmp_path
+    assert requests == [(
+        "GET",
+        "/v1/mavlink/messages?"
+        "after=v1%3A9&wait_ms=0&limit=100&collapse=true"
+        "&messages=ATTITUDE%2CHEARTBEAT&direction=rx",
+        None,
+        {"timeout": 5.0},
+    )]
+
+
+def test_client_decodes_generated_enum_types_and_preserves_unknown_values(
+    monkeypatch,
 ) -> None:
     client = LinkHubClient()
-    requests = []
-    batches_by_after = {
-        "v1%3A9": {
-            "records": [
-            {
-                "received_time": "2026-01-01T00:00:00Z",
-                "received_time_ns": 10,
-                "direction": "rx",
-                "system_id": 1,
-                "component_id": 1,
-                "message": "HEARTBEAT",
-                "fields": {"base_mode": 0},
-                "cursor": "v1:10",
-                "sim_clock": _CLOCK_DICT,
-            },
-            {
-                "received_time": "2026-01-01T00:00:01Z",
-                "received_time_ns": 11,
-                "direction": "tx",
-                "system_id": 255,
-                "component_id": 190,
-                "message": "COMMAND_LONG",
-                "fields": {"command": 400},
-                "cursor": "v1:11",
-                "sim_clock": _CLOCK_DICT,
-            },
-            ],
-            "next_cursor": "v1:11",
-            "next_clock": _CLOCK_DICT,
-        },
-        "v1%3A11": {
-            "records": [
-            {
-                "received_time": "2026-01-01T00:00:02Z",
-                "received_time_ns": 12,
-                "direction": "rx",
-                "system_id": 1,
-                "component_id": 1,
-                "message": "STATUSTEXT",
-                "fields": {"text": "ready", "severity": 6},
-                "cursor": "v1:12",
-                "sim_clock": _CLOCK_DICT,
-            }
-            ],
-            "next_cursor": "v1:12",
-            "next_clock": _CLOCK_DICT,
-        },
-        "v1%3A12": {
-            "records": [],
-            "next_cursor": "v1:12",
-            "next_clock": _CLOCK_DICT,
-        },
-    }
-    def request(method, path, body=None, **kwargs):
-        requests.append((method, path, body, kwargs))
-        return next(
-            value for key, value in batches_by_after.items()
-            if f"after={key}" in path
-        )
-
-    monkeypatch.setattr(client, "_request_json", request)
-    output = tmp_path / "mavlink.jsonl"
-    output.write_text("")
-
-    cursor = client.export_mavlog(output, "v1:9")
-    cursor = client.export_mavlog(output, cursor)
-
-    lines = [json.loads(line) for line in output.read_text().splitlines()]
-    assert [line["mavpackettype"] for line in lines] == [
-        "HEARTBEAT", "COMMAND_LONG", "STATUSTEXT"
+    records = [
+        {
+            "received_time": "2026-01-01T00:00:00Z",
+            "received_time_ns": index,
+            "direction": "rx",
+            "system_id": 1,
+            "component_id": 1,
+            "message": "EXTENDED_SYS_STATE",
+            "fields": {"vtol_state": 3, "landed_state": landed_state},
+            "cursor": f"v1:{index}",
+            "sim_clock": _CLOCK_DICT,
+        }
+        for index, landed_state in ((1, 2), (2, 99))
     ]
-    assert [line["_dir"] for line in lines] == ["rx", "tx", "rx"]
-    assert [line["_sim_epoch"] for line in lines] == [1, 1, 1]
-    assert [line["_sim_time_boot_ms"] for line in lines] == [12_345] * 3
-    assert [line["_sim_time_quality"] for line in lines] == [
-        "last_observed",
-        "last_observed",
-        "last_observed",
-    ]
-    assert all(request[3]["timeout"] == 30.0 for request in requests)
-    assert cursor == "v1:12"
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "records": records,
+            "next_cursor": "v1:2",
+            "next_clock": _CLOCK_DICT,
+        },
+    )
+
+    batch = client.read_messages("v1:0", "EXTENDED_SYS_STATE")
+
+    assert batch.messages == (
+        ExtendedSysState(MavVtolState.MC, MavLandedState.IN_AIR),
+        ExtendedSysState(MavVtolState.MC, MavLandedState(99)),
+    )
+    assert batch.messages[1].landed_state.name == "UNKNOWN_99"
 
 
 def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
@@ -239,6 +211,20 @@ def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
     )
     assert requests[1][2]["timeout_ms"] == 4_000
     assert requests[1][3] == {"timeout": 5.0}
+
+
+def test_client_flushes_journal_and_returns_cursor(monkeypatch) -> None:
+    client = LinkHubClient()
+    requests = []
+
+    def request(method, path, body=None, **kwargs):
+        requests.append((method, path, body, kwargs))
+        return {"cursor": "v1:42"}
+
+    monkeypatch.setattr(client, "_request_json", request)
+
+    assert client.flush_journal() == "v1:42"
+    assert requests == [("POST", "/v1/journal/flush", {}, {})]
 
 
 def test_diagnostic_protocol_round_trip() -> None:

@@ -43,7 +43,7 @@ Telemetry CSV (`simulation/logs/<test>/telemetry.csv`):
 - `mav_att_target_roll_deg`, `mav_att_target_pitch_deg`, `mav_att_target_yaw_deg`
 - `ekf_pos_x`, `ekf_pos_y`, `ekf_pos_z`
 
-MAVLink JSONL (`simulation/logs/<test>/mavlink.jsonl`):
+LinkHub journal (`simulation/logs/<test>/linkhub/<run-id>/journal/`):
 - `GPS_RAW_INT.fix_type`, `GPS_RAW_INT.satellites_visible`
 - `EKF_STATUS_REPORT.flags`
 - `HEARTBEAT.custom_mode`, `HEARTBEAT.base_mode` (armed bit lives in `base_mode`)
@@ -72,7 +72,7 @@ Notes:
 
 Reference artifacts:
 - `simulation/logs/test_lua_flight_steady_sitl/telemetry.csv`
-- `simulation/logs/test_lua_flight_steady_sitl/mavlink.jsonl`
+- `simulation/logs/test_lua_flight_steady_sitl/linkhub/<run-id>/journal/`
 - `simulation/logs/test_lua_flight_steady_sitl/events.jsonl`
 
 Anchor:

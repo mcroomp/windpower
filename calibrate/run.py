@@ -32,8 +32,10 @@ except ImportError:
 from .constants import (
     Attitude,
     AttitudeQuaternion,
+    ExtendedSysState,
     Heartbeat,
     LocalPositionNed,
+    MavLandedState,
     EscTelemetry,
     PidTuning,
     RcChannels,
@@ -77,6 +79,9 @@ _PASSIVE_EKF_TIMEOUT_S = 15.0
 _PASSIVE_SETTLE_RATE_RADS = 0.05
 _PASSIVE_ATTITUDE_MAX_AGE_S = 0.5
 _PASSIVE_RUNUP_TIMEOUT_MARGIN_S = 5.0
+_PASSIVE_LAND_CLEAR_TIMEOUT_S = 3.0
+_PASSIVE_TARGET_STREAM_PERIOD_S = 0.05
+_GUID_OPTIONS_THRUST_AS_THRUST = 1 << 3
 _PASSIVE_PROTOCOL_SEQUENCE = (
     ("capture actual", "capture", 0.0),
     ("roll +5 deg", "roll", 5.0),
@@ -260,17 +265,56 @@ def _capture_current_quaternion(
         param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION),
         param2=40000.0,
     ))
-    raw, _ = read_one(
-        session, cursor, "ATTITUDE_QUATERNION", wait=timeout_s,
-    )
-    if raw is None:
-        return None
-    attitude = decode_message(raw)
-    if not isinstance(attitude, AttitudeQuaternion):
-        raise TypeError(
-            f"Expected ATTITUDE_QUATERNION, got {type(attitude).__name__}"
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        raw, cursor = read_one(
+            session,
+            cursor,
+            "ATTITUDE_QUATERNION",
+            wait=min(0.2, deadline - time.monotonic()),
         )
-    return _quat_normalize((attitude.q1, attitude.q2, attitude.q3, attitude.q4))
+        if raw is not None:
+            attitude = decode_message(raw)
+            if not isinstance(attitude, AttitudeQuaternion):
+                raise TypeError(
+                    f"Expected ATTITUDE_QUATERNION, got {type(attitude).__name__}"
+                )
+            return _quat_normalize(
+                (attitude.q1, attitude.q2, attitude.q3, attitude.q4)
+            )
+    return None
+
+
+def _send_passive_guided_target(
+    session: LinkHubClient,
+    target_q: tuple[float, float, float, float],
+    thrust: float,
+) -> None:
+    session.send_message(SetAttitudeTarget(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        type_mask=0,
+        q=target_q,
+        body_roll_rate=0.0,
+        body_pitch_rate=0.0,
+        body_yaw_rate=0.0,
+        thrust=thrust,
+    ))
+
+
+def _ensure_guided_thrust_option(session: LinkHubClient) -> bool:
+    options = session.get_param("GUID_OPTIONS")
+    if options is None:
+        print("  [FAIL] Could not read GUID_OPTIONS.")
+        return False
+    required = int(round(options)) | _GUID_OPTIONS_THRUST_AS_THRUST
+    if required == int(round(options)):
+        return True
+    if not session.set_param("GUID_OPTIONS", required):
+        print("  [FAIL] GUID_OPTIONS thrust-as-thrust was not acknowledged.")
+        return False
+    print("  GUID_OPTIONS bit 3 enabled (SET_ATTITUDE_TARGET uses thrust).")
+    return True
 
 
 def _wait_for_armed(session: LinkHubClient, timeout_s: float = 15.0) -> bool:
@@ -351,6 +395,8 @@ def _wait_for_passive_runup(
 def _wait_for_passive_ekf_settle(
     session: LinkHubClient,
     *,
+    target_q: tuple[float, float, float, float],
+    thrust: float,
     stop_requested=None,
     timeout_s: float = _PASSIVE_EKF_TIMEOUT_S,
     settle_s: float = _PASSIVE_EKF_SETTLE_S,
@@ -359,8 +405,8 @@ def _wait_for_passive_ekf_settle(
 ) -> bool:
     """Wait for an armed quiet interval after EKF yaw alignment.
 
-    Passive startup requires an active GUIDED mode so Lua's zero-rate
-    precondition can align ArduPilot's internal attitude target before capture.
+    Calibration owns the initial GUIDED target until Lua's steady-state
+    controller is active.
     """
     session.send_message(RequestDataStream(
         target_system=session._target_system,
@@ -377,10 +423,15 @@ def _wait_for_passive_ekf_settle(
     else:
         print("  Waiting for settled EKF yaw in ACRO before GUIDED ...")
     cursor = session.current_cursor()
+    next_target_at = 0.0
     while time.monotonic() < deadline:
         if stop_requested is not None and stop_requested():
             print("  [REMOTE] stop requested during EKF settling.")
             return False
+        now = time.monotonic()
+        if now >= next_target_at:
+            _send_passive_guided_target(session, target_q, thrust)
+            next_target_at = now + _PASSIVE_TARGET_STREAM_PERIOD_S
         msg, cursor = read_one(
             session,
             cursor,
@@ -453,6 +504,7 @@ def _configure_passive_startup_telemetry(session: LinkHubClient) -> None:
     for message_id in (
         mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION,
         mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET,
+        mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE,
     ):
         session.send_message(CommandLong(
             target_system=session._target_system,
@@ -461,6 +513,95 @@ def _configure_passive_startup_telemetry(session: LinkHubClient) -> None:
             param1=float(message_id),
             param2=40000.0,
         ))
+
+
+def _wait_for_passive_land_clear(
+    session: LinkHubClient,
+    *,
+    stop_requested=None,
+    timeout_s: float = _PASSIVE_LAND_CLEAR_TIMEOUT_S,
+) -> bool:
+    """Wait for ArduPilot to clear land_complete during armed ACRO runup."""
+    deadline = time.monotonic() + timeout_s
+    cursor = session.current_cursor()
+    while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            print("  [REMOTE] stop requested while clearing landed state.")
+            return False
+        msg, cursor = read_one(
+            session,
+            cursor,
+            ["EXTENDED_SYS_STATE", "HEARTBEAT", "STATUSTEXT"],
+            wait=min(0.2, deadline - time.monotonic()),
+        )
+        if msg is None:
+            continue
+        decoded = decode_message(msg)
+        if isinstance(decoded, ExtendedSysState):
+            if decoded.landed_state is MavLandedState.IN_AIR:
+                print("  [OK] ArduPilot landed state cleared in ACRO.")
+                return True
+        elif isinstance(decoded, Heartbeat) and not bool(
+            decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        ):
+            print("  [FAIL] Vehicle disarmed while clearing landed state.")
+            return False
+        elif isinstance(decoded, StatusText):
+            print(f"  [FC] {decoded.text}")
+    print("  [FAIL] ArduPilot remained landed after ACRO collective staging.")
+    return False
+
+
+def _wait_for_passive_mode_ack(
+    session: LinkHubClient,
+    cursor: str,
+    *,
+    target_q: tuple[float, float, float, float],
+    thrust: float,
+    stop_requested=None,
+    timeout_s: float = 2.0,
+) -> bool:
+    """Stream the qualified target until Lua confirms steady-state ownership."""
+    mode_expected = "RAWES: mode 3 (passive) entered"
+    capture_expected = "RAWES: passive active"
+    mode_seen = False
+    capture_seen = False
+    deadline = time.monotonic() + timeout_s
+    next_target_at = 0.0
+    while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            print("  [REMOTE] stop requested while waiting for RAWES mode.")
+            return False
+        now = time.monotonic()
+        if now >= next_target_at:
+            _send_passive_guided_target(session, target_q, thrust)
+            next_target_at = now + _PASSIVE_TARGET_STREAM_PERIOD_S
+        msg, cursor = read_one(
+            session,
+            cursor,
+            ["HEARTBEAT", "STATUSTEXT"],
+            wait=min(0.2, deadline - time.monotonic()),
+        )
+        if msg is None:
+            continue
+        decoded = decode_message(msg)
+        if isinstance(decoded, StatusText):
+            if decoded.text:
+                print(f"  [FC] {decoded.text}")
+            mode_seen = mode_seen or mode_expected in decoded.text
+            capture_seen = capture_seen or capture_expected in decoded.text
+            if mode_seen and capture_seen:
+                print("  [OK] Lua confirmed passive steady-state control.")
+                return True
+        elif (
+            isinstance(decoded, Heartbeat)
+            and not decoded.base_mode
+            & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        ):
+            print("  [FAIL] Vehicle disarmed while waiting for RAWES mode.")
+            return False
+    print("  [FAIL] Lua did not confirm passive steady-state control.")
+    return False
 
 
 def _wait_for_disarmed(session: LinkHubClient, timeout_s: float) -> bool:
@@ -659,13 +800,18 @@ def _observation_loop(session: LinkHubClient, *,
             if key_handler is not None:
                 for k in keys:
                     key_handler(k)
-            msg, cursor = read_one(
-                session, cursor, msg_types, wait=0.1,
+            batch = session.read_messages(
+                cursor,
+                msg_types,
+                direction="rx",
+                wait=0.1,
+                limit=1_000,
             )
+            cursor = batch.next_cursor
             t_rel = time.monotonic() - t0
             if on_tick is not None:
                 on_tick(t_rel)
-            if msg is not None:
+            for msg in batch.messages:
                 decoded = decode_message(msg)
                 if isinstance(decoded, Heartbeat):
                     state["armed"] = bool(decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
@@ -1710,8 +1856,7 @@ def _cmd_run(
         print(f"  Unknown --trim keys: {bad}  (valid: {', '.join(sorted(allowed_trim))})")
         return
 
-    # Open CSV + MAVLink logs before any run side-effects so startup/arming
-    # delays are visible in the packet trace.
+    journal_start_cursor = session.current_cursor()
     meta = {
         "verb":            "run",
         "name":            name,
@@ -1727,24 +1872,21 @@ def _cmd_run(
         "rotor_motor":     use_rotor_motor,
         "rotor_speed":     rotor_speed if use_rotor_motor else "",
         "rotor_direction": rotor_direction_name if use_rotor_motor else "",
+        "linkhub_start_cursor": journal_start_cursor,
     }
     log = _RunLog.open("run", name, meta)
     print(f"  Logging to {log.path}")
-
-    mavlog_path = log.path[:-4] + ".mavlink.jsonl" if log.path.endswith(".csv") \
-        else log.path + ".mavlink.jsonl"
-    Path(mavlog_path).write_text("", encoding="utf-8")
-    mavlog_cursor = session.current_cursor()
-    print(f"  MAVLink log: {mavlog_path}")
+    print(f"  LinkHub journal starts at {journal_start_cursor}")
     if name == "passive":
         _configure_passive_startup_telemetry(session)
 
-    saved_overrides: dict[str, float] = {}
     armed = False
     saved_fn = None
     rotor_motor = None
     done_ok = False
     try:
+        if name == "passive" and not _ensure_guided_thrust_option(session):
+            return
         if use_rotor_motor:
             rotor_motor = LinkHubMotorController(
                 session,
@@ -1783,9 +1925,6 @@ def _cmd_run(
 
         _fm = cfg.get("flight_mode")
         if name == "passive":
-            # Keep ArduPilot's attitude target aligned in ACRO while CH8/RSC runs
-            # up.  Entering GUIDED while landed causes its takeoff branch to
-            # flatten roll/pitch until spool state reaches THROTTLE_UNLIMITED.
             session.set_param("RAWES_MODE", 0)
             print("  RAWES_MODE -> 0 (runup preparation)")
             session.set_mode(1)
@@ -1869,14 +2008,32 @@ def _cmd_run(
                 return
             if _fm is None:
                 raise RuntimeError("Passive mode requires an ArduPilot flight mode.")
+            initial_q = _capture_current_quaternion(session)
+            if initial_q is None:
+                print("  [FAIL] Could not capture the ACRO attitude target.")
+                return
             thr = float(trim.get("thr", _PASSIVE_IC_THRUST))
             if not 0.0 <= thr <= 1.0:
                 print(f"  [FAIL] Passive thrust must be within [0,1], got {thr}.")
                 return
             session.send_message(NamedValueFloat("RAWES_THR", thr))
             print(f"  Staging RAWES_THR = {thr:.3f} for passive hold")
-            session.set_param("RAWES_MODE", cfg["rawes_mode"])
-            print(f"  RAWES_MODE -> {cfg['rawes_mode']} ({name} mode, staged in ACRO)")
+            for wire_name, value in (
+                ("RAWES_RLL", 0.0),
+                ("RAWES_PIT", 0.0),
+                ("RAWES_COL", thr),
+            ):
+                session.send_message(NamedValueFloat(wire_name, value))
+            session.set_param("RAWES_MODE", 2)
+            print(
+                "  RAWES_MODE -> 2 "
+                "(neutral-cyclic ACRO collective clears landed state)"
+            )
+            if not _wait_for_passive_land_clear(
+                session,
+                stop_requested=stop_requested,
+            ):
+                return
             _send_set_servo(session, SERVO_MOTOR, MOTOR_OFF_US)
             print(
                 f"  SERVO{SERVO_MOTOR} -> {MOTOR_OFF_US} us "
@@ -1886,6 +2043,8 @@ def _cmd_run(
             print(f"  Flight mode -> {_COPTER_MODES.get(_fm, _fm)} ({_fm})")
             if not _wait_for_passive_ekf_settle(
                 session,
+                target_q=initial_q,
+                thrust=thr,
                 stop_requested=stop_requested,
                 timeout_s=settle_timeout_s,
                 settle_s=settle_s,
@@ -1894,8 +2053,22 @@ def _cmd_run(
                 return
             if not seed_passive_target():
                 return
+            mode_cursor = session.current_cursor()
             session.send_message(NamedValueFloat("RAWES_PEN", 1.0))
-            print("  RAWES_PEN -> 1 (absolute passive hold captured)")
+            print("  RAWES_PEN -> 1 (steady-state handoff prepared)")
+            session.set_param("RAWES_MODE", cfg["rawes_mode"])
+            print(
+                f"  RAWES_MODE -> {cfg['rawes_mode']} "
+                "(Lua steady-state control)"
+            )
+            if not _wait_for_passive_mode_ack(
+                session,
+                mode_cursor,
+                target_q=initial_q,
+                thrust=thr,
+                stop_requested=stop_requested,
+            ):
+                return
             _restore_servo4(session, saved_fn)
             print("  Motor function restored after passive capture")
             saved_fn = None
@@ -1928,12 +2101,15 @@ def _cmd_run(
             finally:
                 _safety_shutdown(
                     session,
-                    saved_overrides=saved_overrides,
                     skip_motor_off=(name == "passive" and saved_fn is None),
                 )
         finally:
-            session.export_mavlog(mavlog_path, mavlog_cursor)
+            journal_end_cursor = session.current_cursor()
             log.close()
             print(f"  Wrote {log.n_rows} rows to {log.path}")
+            print(
+                "  LinkHub journal range: "
+                f"{journal_start_cursor}..{journal_end_cursor}"
+            )
     if done_ok:
         print("  Done.")

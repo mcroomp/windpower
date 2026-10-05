@@ -64,10 +64,8 @@ def _cmd_watch(session: LinkHubClient, args: list[str]) -> None:
     }
     log = _RunLog.open("watch", stream, meta)
     print(f"  Logging to {log.path}")
-    mavlog_path = Path(log.path).with_suffix(".mavlink.jsonl")
-    mavlog_path.write_text("", encoding="utf-8")
-    mavlog_cursor = session.current_cursor()
-    print(f"  Canonical MAVLink JSONL: {mavlog_path}")
+    journal_start_cursor = session.current_cursor()
+    print(f"  LinkHub journal starts at {journal_start_cursor}")
 
     try:
         if stream == "servos":
@@ -81,9 +79,13 @@ def _cmd_watch(session: LinkHubClient, args: list[str]) -> None:
         elif stream == "power":
             _watch_power(session, duration, log)
     finally:
-        session.export_mavlog(mavlog_path, mavlog_cursor)
+        journal_end_cursor = session.current_cursor()
         log.close()
         print(f"  Wrote {log.n_rows} rows to {log.path}")
+        print(
+            "  LinkHub journal range: "
+            f"{journal_start_cursor}..{journal_end_cursor}"
+        )
     print("  Done.")
 
 

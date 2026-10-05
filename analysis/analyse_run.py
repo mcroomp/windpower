@@ -1408,6 +1408,17 @@ def validate_ekf_window(
     return _check_ekf_records(records, t_start_s, t_end_s)
 
 
+def validate_ekf_records(
+    records: list[dict],
+    t_start_s: float,
+    t_end_s: float,
+) -> list[str]:
+    """Check EKF health in a simulation-time window from journal records."""
+    if not records:
+        return ["LinkHub journal query returned no MAVLink records"]
+    return _check_ekf_records(records, t_start_s, t_end_s)
+
+
 # ---------------------------------------------------------------------------
 # Bucketed flight analysis report
 # ---------------------------------------------------------------------------

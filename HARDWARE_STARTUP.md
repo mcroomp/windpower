@@ -1,11 +1,16 @@
 # Hardware Startup Investigation
 
-Last updated: 2026-09-23
+Last updated: 2026-10-05
 
 This is the running record for diagnosing unexpected attitude, swash, and
 anti-rotation-motor movement during RAWES hardware startup. Keep new
 observations, commands, and conclusions here so a later session can resume
 without repeating unsafe experiments.
+
+The current normative arm/disarm procedures, safe-off invariant, and verified
+ArduPilot behavior are owned by [`design/arming.md`](design/arming.md). This
+file is a dated investigation log; when a session changes the current model,
+update both files in the same change.
 
 ## Session-maintenance instruction
 
@@ -41,13 +46,10 @@ The 2026-09-23 safe-off attitude watch used this policy and produced:
 The vehicle remained disarmed in ACRO with the motor off. This confirms that
 the raw-to-canonical pipeline works for read-only investigation sessions.
 
-The first raw-derived NDJSON output lacked the `_t_wall` metadata required by
-`analysis/mavlink_jsonl_query.py`. This was a ground-side conversion bug, not a
-MAVLink or hardware finding. The converter now adds `_t_wall` during replay so the canonical file remains
-compatible with the analysis tools. It derives that field from MAVLink
-`time_boot_ms` when present, rather than from conversion speed. The raw capture
-does not contain host arrival timestamps, so packet order and
-`time_boot_ms` remain the authoritative timing evidence.
+The first raw-derived NDJSON output lacked `_t_wall`; this was a ground-side
+conversion bug, not a MAVLink or hardware finding. LinkHub now keeps host
+ingest time and simulation-clock metadata in its canonical journal, and
+`linkhub query ... show --json` projects both without a duplicate log file.
 
 The converter was validated by querying
 `watch_attitude_20260923_151443.mavlink.jsonl`: it contains 606 decoded
@@ -661,6 +663,66 @@ live status verified:
 - `SERVO9_FUNCTION=0`, `H_YAW_TRIM=0`;
 - S1/S2/S3 `1518/1518/1518 us`, channel 8 `1000 us`.
 
+## 2026-10-05 ground-owned passive handoff and hardware validation
+
+The attached Pixhawk auto-detected on the direct native USB connection as
+`COM7` at `115200` baud. The repository
+[`scripts/rawes.lua`](scripts/rawes.lua) was uploaded over that verified USB
+connection. The deployed file was `67,453` bytes, matching the local file, with
+SHA-256
+`307E064C4CBE59016F33758ADDB526FC8DBA363F809BA1D6E5B957CF9CE3DE52`;
+`script list` independently reported `67,453` bytes.
+
+The first post-upload passive attempt,
+`simulation/logs/calibrate/run_passive_20261005_072440.csv`, aborted during
+runup. RC8 remained low and no RAWES status text appeared: toggling
+`SCR_ENABLE` off and on had not resumed Lua, despite the upload command
+reporting that the scripting engine had restarted. Automatic cleanup restored
+canonical safe-off. A disarmed reboot was then performed, the connection was
+auto-detected again rather than assumed, and safe-off was explicitly restored.
+A six-second read-only watch received `RAWES: mode 0 (none) disarmed`, proving
+that Lua was running before another arm attempt. Do not treat an
+`SCR_ENABLE` toggle or a successful file transfer alone as proof that the
+uploaded script is executing; reboot and obtain live script status before an
+armed post-deployment run.
+
+With the physical servos and motors confirmed disconnected, the successful
+bounded run was:
+
+```text
+.\.venv\Scripts\python.exe -m calibrate --connection COM7 --baud 115200 run passive --duration 140 --force --trim thr=0.342 --protocol-debug
+```
+
+Canonical CSV evidence is
+`simulation/logs/calibrate/run_passive_20261005_072814.csv` (LinkHub run
+`a402b5dd-a8b2-4f1b-9669-b396c668a286`, 3,499 rows). The vehicle armed, reached
+runup complete, cleared landed state in ACRO, entered GUIDED_NOGPS, passed the
+three-second quiet gate, and received Lua's `RAWES: passive active`
+acknowledgment. Calibration owned the startup attitude stream and overlapped it
+until that acknowledgment; Lua then owned steady-state control and continuous
+neutral RC fallback.
+
+The measured handoff had no significant swash transient:
+
+- swash spread was at most `2 us` during the first five seconds and `4 us`
+  during the first ten seconds;
+- no adjacent S1/S2/S3 sample changed by more than `1 us`;
+- quaternion error was at most approximately `0.0381 deg` during the first five
+  seconds;
+- complete-run quaternion error was at most approximately `0.1891 deg`, with
+  approximately `0.1796 deg` at the 95th percentile and `0.1364 deg` at the
+  final sample.
+
+Swash spread increased gradually rather than discontinuously: approximately
+`5 us` at 20 seconds, `9 us` at 40 seconds, `37 us` at 80 seconds, `64 us` at
+120 seconds, and `82 us` at the end. This is accumulated steady attitude
+correction, not the former GUIDED-entry transient.
+
+Shutdown restored and verified canonical safe-off: disarmed in ACRO with
+`RAWES_MODE=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`,
+`SERVO9_FUNCTION=0`, and `H_YAW_TRIM=0`. No further hardware arm is needed to
+validate this handoff.
+
 ## Changes already made
 
 - Fixed the attitude watch double-decode bug in `calibrate/watch.py`.
@@ -700,3 +762,5 @@ live status verified:
   off.
 - Do not change compass/EKF yaw-source parameters during a live armed test.
 - Do not use the MCP and a shell command against `COM6` concurrently.
+- Do not assume an `SCR_ENABLE` toggle restarted Lua after upload. Reboot and
+  verify live RAWES status before arming.

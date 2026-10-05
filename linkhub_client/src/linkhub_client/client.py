@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import mav_constants as mavlink
-from .messages import RawMessage
+from .messages import Message, RawMessage, decode_message
 from .records import DiagnosticEvent, DiagnosticRecord, SimClock, TelemetryRecord
 
 
@@ -25,7 +25,7 @@ class WallClock:
 
 @dataclass(frozen=True)
 class MessageBatch:
-    messages: tuple[RawMessage, ...]
+    messages: tuple[Message | RawMessage, ...]
     next_cursor: str
     next_clock: SimClock
 
@@ -88,6 +88,10 @@ class LinkHubClient:
 
     def current_cursor(self) -> str:
         return str(self.vehicle_status()["cursor"])
+
+    def flush_journal(self) -> str:
+        result = self._request_json("POST", "/v1/journal/flush", {})
+        return str(result["cursor"])
 
     def send_diagnostics(
         self,
@@ -361,6 +365,7 @@ class LinkHubClient:
         direction: str | None = None,
         wait: float = 0.0,
         limit: int = 1_000,
+        collapse: bool = False,
     ) -> MessageBatch:
         records, next_cursor, next_clock = self._read_telemetry_batch(
             after,
@@ -368,29 +373,13 @@ class LinkHubClient:
             direction=direction,
             wait=wait,
             limit=limit,
+            collapse=collapse,
         )
         return MessageBatch(
             messages=tuple(_decode_record(record) for record in records),
             next_cursor=next_cursor,
             next_clock=next_clock,
         )
-
-    def export_mavlog(self, path: str | Path, after: str) -> str:
-        output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cursor = after
-        with output_path.open("a", encoding="utf-8") as output:
-            while True:
-                records, next_cursor, _next_clock = self._read_telemetry_batch(
-                    cursor,
-                    limit=10_000,
-                    request_timeout=30.0,
-                )
-                for record in records:
-                    _write_mavlog_record(output, record)
-                if next_cursor == cursor:
-                    return cursor
-                cursor = next_cursor
 
     def list_files(self, path: str) -> list[dict[str, Any]]:
         result = self._request_json(
@@ -553,6 +542,7 @@ class LinkHubClient:
         direction: str | None = None,
         wait: float = 0.0,
         limit: int = 1_000,
+        collapse: bool = False,
         request_timeout: float | None = None,
     ) -> tuple[list[TelemetryRecord], str, SimClock]:
         if wait < 0.0:
@@ -564,6 +554,8 @@ class LinkHubClient:
             "wait_ms": round(wait * 1_000),
             "limit": limit,
         }
+        if collapse:
+            query["collapse"] = "true"
         if message_types is not None:
             names = [message_types] if isinstance(message_types, str) else message_types
             query["messages"] = ",".join(sorted(name.upper() for name in names))
@@ -689,24 +681,8 @@ class LinkHubMotorController:
                 return
 
 
-def _decode_record(record: TelemetryRecord) -> RawMessage:
-    return RawMessage(record.message, dict(record.fields))
-
-
-def _write_mavlog_record(output, record: TelemetryRecord) -> None:
-    output.write(json.dumps({
-        "_t_wall": record.received_time_ns / 1_000_000_000,
-        "_dir": record.direction,
-        "_sim_epoch": record.sim_clock.epoch,
-        "_sim_time_boot_ms": record.sim_clock.time_boot_ms,
-        "_sim_time_quality": (
-            None
-            if record.sim_clock.quality is None
-            else record.sim_clock.quality.value
-        ),
-        "mavpackettype": record.message,
-        **record.fields,
-    }) + "\n")
+def _decode_record(record: TelemetryRecord) -> Message | RawMessage:
+    return decode_message(RawMessage(record.message, dict(record.fields)))
 
 
 def _http_error_message(exc: urllib.error.HTTPError) -> str:

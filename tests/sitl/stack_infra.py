@@ -38,7 +38,8 @@ from pathlib import Path
 import pytest
 
 import simulation as _simulation_pkg
-from analysis.enrich_sitl_telemetry import enrich_sitl_telemetry
+from analysis.enrich_sitl_telemetry import enrich_sitl_telemetry_from_journal
+from analysis.linkhub_journal import cursor_sequence
 
 _SIM_DIR    = Path(_simulation_pkg.__file__).resolve().parent
 _SITL_DIR   = Path(__file__).resolve().parent
@@ -325,7 +326,7 @@ class StackContext:
     Flight tests only (default None/empty for torque tests)
     --------------------------------------------------------
     telemetry_log  : path to mediator telemetry CSV
-    mavlink_log    : path to MAVLink JSON log
+    linkhub_journal: canonical LinkHub journal directory
     initial_state  : dict from steady_state_starting.json (vel overridden to 0)
     home_alt_m     : hub altitude above anchor [m] at launch
     flight_events  : timing checkpoints; setup populates, tests add their own
@@ -350,7 +351,7 @@ class StackContext:
     log:           logging.Logger
     # ── flight tests (default empty for torque) ───────────────────────────────
     telemetry_log:       Path | None  = None
-    mavlink_log:         Path | None  = None
+    linkhub_journal:     Path | None  = None
     mavlog_cursor:        str | None  = None
     initial_state:       dict | None  = None
     home_alt_m:          float        = 0.0
@@ -509,7 +510,6 @@ class SitlContext:
     linkhub_log: Path
     linkhub_data: Path
     gcs_log:       Path
-    mavlink_log:   Path              # pass as mavlog_path= to RawesGCS to enable logging
     telemetry_log: Path              # write telemetry CSV here; copied to test_log_dir on teardown
     sim_dir:       Path
     repo_root:     Path
@@ -570,7 +570,6 @@ def _sitl_stack(
     linkhub_log = tmp_path / "linkhub.log"
     linkhub_data = tmp_path / "linkhub"
     gcs_log       = tmp_path / "gcs.log"
-    mavlink_log   = tmp_path / "mavlink.jsonl"
     telemetry_log = tmp_path / "telemetry.csv"
 
     _configure_logging(gcs_log)
@@ -639,7 +638,6 @@ def _sitl_stack(
         linkhub_log = linkhub_log,
         linkhub_data = linkhub_data,
         gcs_log       = gcs_log,
-        mavlink_log   = mavlink_log,
         telemetry_log = telemetry_log,
         sim_dir       = sim_dir,
         repo_root     = repo_root,
@@ -670,11 +668,15 @@ def _sitl_stack(
             "gcs.log": gcs_log,
             "linkhub.log": linkhub_log,
         }
-        if mavlink_log.exists():
-            _copy_map["mavlink.jsonl"] = mavlink_log
         if telemetry_log.exists():
             _copy_map["telemetry.csv"] = telemetry_log
         copy_logs_to_dir(test_log_dir, _copy_map)
+        if linkhub_data.exists():
+            shutil.copytree(
+                linkhub_data,
+                test_log_dir / "linkhub",
+                dirs_exist_ok=True,
+            )
         _ardupilot_log = Path("/tmp/ArduCopter.log")
         if _ardupilot_log.exists():
             shutil.copy2(_ardupilot_log, test_log_dir / "arducopter.log")
@@ -823,7 +825,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
         # ── Extra log paths (mediator-specific) ────────────────────────────────
         mediator_log  = tmp_path / "mediator.log"
         telemetry_log = tmp_path / "telemetry.csv"
-        mavlink_log   = tmp_path / "mavlink.jsonl"
+
         events_path   = tmp_path / "events.jsonl"
 
         # ── Launch mediator ────────────────────────────────────────────────────
@@ -864,7 +866,7 @@ def _acro_stack(tmp_path, *, extra_config=None,
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
             mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
             gcs_log=sitl_ctx.gcs_log, telemetry_log=telemetry_log,
-            mavlink_log=mavlink_log,
+            linkhub_journal=sitl_ctx.linkhub_data,
             events_log=MediatorEventLog(events_path),
             initial_state=initial_state, home_alt_m=home_alt_m,
             flight_events={}, all_statustext=[], setup_samples=[],
@@ -889,12 +891,6 @@ def _acro_stack(tmp_path, *, extra_config=None,
                 )
             yield ctx
         finally:
-            if ctx.mavlink_log is not None and ctx.mavlog_cursor is not None:
-                ctx.mavlog_cursor = gcs.export_mavlog(
-                    ctx.mavlink_log,
-                    ctx.mavlog_cursor,
-                )
-            gcs.close()
             if mediator_proc is not None:
                 _terminate_process(mediator_proc)
             physics_telemetry_log = tmp_path / "telemetry.physics.csv"
@@ -903,24 +899,24 @@ def _acro_stack(tmp_path, *, extra_config=None,
                     raise FileNotFoundError(
                         f"mediator did not produce physics telemetry: {telemetry_log}"
                     )
-                if not mavlink_log.exists():
-                    raise FileNotFoundError(
-                        f"LinkHub MAVLink export is missing: {mavlink_log}"
-                    )
+                assert ctx.linkhub_journal is not None
+                assert ctx.mavlog_cursor is not None
+                through_cursor = gcs.flush_journal()
                 shutil.copy2(telemetry_log, physics_telemetry_log)
-                enrich_sitl_telemetry(
+                enrich_sitl_telemetry_from_journal(
                     physics_telemetry_log,
-                    mavlink_log,
+                    ctx.linkhub_journal,
                     telemetry_log,
+                    after=cursor_sequence(ctx.mavlog_cursor),
+                    through=cursor_sequence(through_cursor),
                 )
+            gcs.close()
             # Copy mediator-specific logs on top of what _sitl_stack already copies
             _logs = {}
             if with_mediator:
                 _logs["mediator.log"]  = mediator_log
                 _logs["telemetry.csv"] = telemetry_log
                 _logs["telemetry.physics.csv"] = physics_telemetry_log
-            if mavlink_log.exists():
-                _logs["mavlink.jsonl"] = mavlink_log
             if events_path.exists():
                 _logs["events.jsonl"] = events_path
             if _logs:
@@ -1168,9 +1164,7 @@ def _run_acro_setup(
             f"(SITL may not have started yet): {exc}"
         ) from exc
     _procs_alive()
-    if ctx.mavlink_log is not None:
-        ctx.mavlink_log.parent.mkdir(parents=True, exist_ok=True)
-        ctx.mavlink_log.write_text("", encoding="utf-8")
+    if ctx.linkhub_journal is not None:
         ctx.mavlog_cursor = gcs.current_cursor()
 
     # One shared MAVLink channel serves both tests and mediator telemetry.
@@ -2027,6 +2021,7 @@ def _torque_stack(
     startup_hold_s: float = _TORQUE_STARTUP_HOLD_S,
     startup_yaw_rate_deg_s: float = 0.0,
     armon_ms: "int | None" = None,
+    target_mode: int = GUIDED_NOGPS,
     passive_init: bool = False,
     passive_thrust: float = 0.263,
     passive_roll_rad: float = 0.0,
@@ -2034,6 +2029,7 @@ def _torque_stack(
     passive_yaw_rad: "float | None" = None,
     use_vanilla_boot_defaults: bool = False,
     motor_delay_ms: float = 0.0,
+    mutable_param_names: "set[str] | frozenset[str]" = frozenset(),
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
@@ -2063,6 +2059,7 @@ def _torque_stack(
                                   STATUSTEXT (hard fail if not received); no RC override sent.
                              0: skip arming entirely; yield unarmed (test controls arming).
                             None (default): GCS force-arm (no RC override).
+    target_mode            : flight mode selected by the fixture arm sequence.
     passive_init           : if True, adopt the flight GUIDED_NOGPS init technique:
                              install rawes.lua, boot in MODE_PASSIVE (RAWES_MODE=3),
                              seed thrust plus relative attitude offsets, then send
@@ -2081,6 +2078,8 @@ def _torque_stack(
     motor_delay_ms         : transport delay [ms] applied to the motor throttle
                              response in mediator_torque (models ESC/actuation
                              latency).  0 = no delay (default).
+    mutable_param_names    : boot parameters intentionally changed by the test;
+                             excluded from immutable teardown verification.
     """
     # Pre-launch: install Lua scripts before SITL starts.
     # passive_init requires rawes.lua (MODE_PASSIVE) -> ensure it is installed.
@@ -2150,7 +2149,6 @@ def _torque_stack(
         )
 
         mediator_log = tmp_path / "mediator.log"
-        mavlink_log  = tmp_path / "mavlink.jsonl"
         events_path  = tmp_path / "events.jsonl"
 
         mediator_proc = _launch_mediator_torque(
@@ -2179,7 +2177,7 @@ def _torque_stack(
             gcs=gcs, mediator_proc=mediator_proc, sitl_proc=sitl_ctx.sitl_proc,
             mediator_log=mediator_log, sitl_log=sitl_ctx.sitl_log,
             gcs_log=sitl_ctx.gcs_log,
-            mavlink_log=mavlink_log,
+            linkhub_journal=sitl_ctx.linkhub_data,
             events_log=MediatorEventLog(events_path),
             omega_rotor=omega_rotor, log=log,
             test_log_dir=sitl_ctx.test_log_dir,
@@ -2188,7 +2186,6 @@ def _torque_stack(
         try:
             log.info("Connecting GCS ...")
             gcs.connect(timeout=30.0)
-            mavlink_log.write_text("", encoding="utf-8")
             ctx.mavlog_cursor = gcs.current_cursor()
             _assert_alive()
             log.info("GCS connected")
@@ -2312,7 +2309,7 @@ def _torque_stack(
                 fail=pytest.fail,
                 mode_timeout=10.0,
                 arm_timeout=15.0,
-                target_mode=GUIDED_NOGPS,
+                target_mode=target_mode,
                 pre_arm_attitude_rpy=_pre_arm_rpy,
             )
             if armon_ms is None:
@@ -2320,8 +2317,11 @@ def _torque_stack(
             elif armon_ms > 0:
                 log.info("Armed via GCS + RAWES_ARM disarm timer -- profile=%s", profile)
             else:
-                log.info("GUIDED_NOGPS active (unarmed) -- profile=%s",
-                         profile)
+                log.info(
+                    "Mode %d active (unarmed) -- profile=%s",
+                    target_mode,
+                    profile,
+                )
 
             yield ctx
 
@@ -2333,7 +2333,7 @@ def _torque_stack(
             immutable_setup = ParamSetup({
                 name: value
                 for name, value in torque_setup.as_list()
-                if name != "H_YAW_TRIM"
+                if name != "H_YAW_TRIM" and name not in mutable_param_names
             })
             immutable_setup.verify(gcs, log=log)
             _assert_alive()
@@ -2342,19 +2342,15 @@ def _torque_stack(
             log.info("Teardown: closing GCS and terminating mediator ...")
             try:
                 if ctx.mavlog_cursor is not None:
-                    ctx.mavlog_cursor = gcs.export_mavlog(
-                        mavlink_log,
-                        ctx.mavlog_cursor,
-                    )
+                    gcs.flush_journal()
                 gcs.close()
             except Exception:
                 pass
             _terminate_process(mediator_proc)
             # sitl/gcs/arducopter/dataflash logs are handled by _sitl_stack teardown.
-            # Copy mediator log and mavlink log here.
+            # Copy mediator-specific artifacts here; LinkHub journal is copied
+            # by _sitl_stack after the service exits and flushes.
             _logs = {"mediator.log": mediator_log}
-            if mavlink_log.exists():
-                _logs["mavlink.jsonl"] = mavlink_log
             if events_path.exists():
                 _logs["events.jsonl"] = events_path
             copy_logs_to_dir(sitl_ctx.test_log_dir, _logs)

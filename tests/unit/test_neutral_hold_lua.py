@@ -57,3 +57,20 @@ def test_neutral_hold_clears_when_armed_or_mode_becomes_active():
     sim.tick()
     assert (sim.ch_out[1], sim.ch_out[2], sim.ch_out[3]) == (0, 0, 0)
     assert not sim.fns.neutral_hold_active()
+
+
+def test_interlock_waits_for_acro_target_reset_and_clears_on_disarm():
+    sim = RawesLua(mode=0)
+    sim.tick()
+    assert sim.ch_out[8] == 0
+
+    sim.armed = True
+    sim.run(0.49)
+    assert sim.ch_out[8] == 0
+
+    sim.run(0.02)
+    assert sim.ch_out[8] == 2000
+
+    sim.armed = False
+    sim.tick()
+    assert sim.ch_out[8] == 0

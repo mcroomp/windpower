@@ -7,8 +7,9 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
+from analysis.linkhub_journal import iter_messages
 from simulation.telemetry_columns import ASYNC_MAV_COLUMNS
 
 
@@ -122,36 +123,62 @@ def _project_record(record: dict[str, Any]) -> dict[str, float]:
     return fields
 
 
-def _load_observations(path: Path) -> list[tuple[int, dict[str, float]]]:
+def _observations_from_records(
+    records: Iterable[dict[str, Any]],
+    source: str,
+) -> list[tuple[int, dict[str, float]]]:
     observations: list[tuple[int, dict[str, float]]] = []
     epochs: set[int] = set()
-    with path.open(encoding="utf-8") as source:
-        for line_number, line in enumerate(source, start=1):
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            if record.get("_dir") != "rx":
-                continue
-            if "_sim_time_boot_ms" not in record or "_sim_epoch" not in record:
-                raise ValueError(
-                    f"{path}:{line_number}: LinkHub export lacks simulation clock metadata"
-                )
-            time_boot_ms = record.get("_sim_time_boot_ms")
-            epoch = record.get("_sim_epoch")
-            if time_boot_ms is None or epoch is None:
-                continue
-            epochs.add(int(epoch))
-            fields = _project_record(record)
-            if len(fields) > 1 or (
-                fields and "mav_time_boot_ms" not in fields
-            ):
-                observations.append((int(time_boot_ms), fields))
+    for record_number, record in enumerate(records, start=1):
+        if record.get("_dir") != "rx":
+            continue
+        if "_sim_time_boot_ms" not in record or "_sim_epoch" not in record:
+            raise ValueError(
+                f"{source}:{record_number}: LinkHub record lacks simulation clock metadata"
+            )
+        time_boot_ms = record.get("_sim_time_boot_ms")
+        epoch = record.get("_sim_epoch")
+        if time_boot_ms is None or epoch is None:
+            continue
+        epochs.add(int(epoch))
+        fields = _project_record(record)
+        if len(fields) > 1 or (
+            fields and "mav_time_boot_ms" not in fields
+        ):
+            observations.append((int(time_boot_ms), fields))
 
     if not observations:
-        raise ValueError(f"{path}: no supported inbound MAVLink observations")
+        raise ValueError(f"{source}: no supported inbound MAVLink observations")
     if len(epochs) != 1:
-        raise ValueError(f"{path}: expected one simulation clock epoch, got {sorted(epochs)}")
+        raise ValueError(
+            f"{source}: expected one simulation clock epoch, got {sorted(epochs)}"
+        )
     return observations
+
+
+def _load_observations(path: Path) -> list[tuple[int, dict[str, float]]]:
+    def records() -> Iterable[dict[str, Any]]:
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                if line.strip():
+                    yield json.loads(line)
+
+    return _observations_from_records(records(), str(path))
+
+
+def enrich_sitl_telemetry_from_journal(
+    physics_csv: str | Path,
+    journal: str | Path,
+    output_csv: str | Path,
+    *,
+    after: int = 0,
+    through: int | None = None,
+) -> None:
+    observations = _observations_from_records(
+        iter_messages(journal, after=after, through=through, direction="rx"),
+        str(journal),
+    )
+    _enrich(Path(physics_csv), Path(output_csv), observations)
 
 
 def enrich_sitl_telemetry(
@@ -164,7 +191,14 @@ def enrich_sitl_telemetry(
     mavlink_path = Path(mavlink_jsonl)
     output_path = Path(output_csv)
     observations = _load_observations(mavlink_path)
+    _enrich(physics_path, output_path, observations)
 
+
+def _enrich(
+    physics_path: Path,
+    output_path: Path,
+    observations: list[tuple[int, dict[str, float]]],
+) -> None:
     with physics_path.open(newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
         if reader.fieldnames is None:

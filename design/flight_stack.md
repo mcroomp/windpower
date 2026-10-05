@@ -417,18 +417,19 @@ Armed-but-quiet mode used during the kinematic hold/release of stack tests.
 The vehicle stays armed (motor interlock ch8 high) and does **not** write
 swashplate channels directly or run body_z/altitude/winch guidance.
 
-**Ground-owned capture gate.** Ground first sends `RAWES_THR` and leaves
-`RAWES_PEN=0`. In GUIDED, Lua commands zero body rates plus that thrust through
-`set_target_rate_and_throttle`; it deliberately sends no Euler angle target.
-The ground station qualifies active mode, estimator events, telemetry freshness,
-body-rate threshold, and continuous quiet duration. These policies are tunable
-without a Lua upload (`--settle-rate-deg-s`, `--settle-time`,
-`--settle-timeout`). Only after the gate passes does ground send
-`RAWES_PEN=1`.
+**Ground-owned capture gate.** Calibration captures the ACRO attitude before
+the temporary landed-state-clearing collective. After entering GUIDED_NOGPS it
+streams that quaternion, zero body rates, and normalized thrust through
+`SET_ATTITUDE_TARGET` with `GUID_OPTIONS` bit 3 set. Calibration qualifies
+active mode, estimator events, telemetry freshness, body-rate threshold, and
+continuous quiet duration. These policies are tunable without a Lua upload
+(`--settle-rate-deg-s`, `--settle-time`, `--settle-timeout`).
 
 **Lua-owned quaternion anchor.** On `RAWES_PEN=1`, Lua performs a final AHRS
-health/quaternion-validity check and captures `ahrs:get_quaternion()` once.
-Ground sends complete relative state through:
+health/quaternion-validity check and captures `ahrs:get_quaternion()` once while
+still in ACRO-manual RAWES mode. Ground then selects `RAWES_MODE=3` and keeps
+streaming the same MAVLink target until Lua confirms both capture and mode
+entry. Ground sends complete relative state through:
 
 - `RAWES_ROFF` — roll offset [rad];
 - `RAWES_POFF` — pitch offset [rad];
@@ -436,8 +437,15 @@ Ground sends complete relative state through:
 
 Lua computes `q_target = q_anchor * q_relative`, normalizes it, and converts to
 Euler only at the final `set_target_angle_and_rate_and_throttle` API boundary.
+The fixed passive target is refreshed at 20 Hz; no `AP_Vehicle` call is made
+before activation and passive hold does not separately poll `vehicle:get_mode()`.
 The anchor remains fixed until hold is explicitly disabled. Space in the
 interactive tool resets all offsets to zero; it does not recapture the anchor.
+
+Lua owns continuous RC fallback throughout the handoff. ACRO staging temporarily
+uses the passive collective to clear landed state. Mode 3 changes RC1-RC4 to
+neutral roll, pitch, collective, and yaw before its first steady
+`vehicle:set_target_*()` call, and keeps those overrides active in GUIDED_NOGPS.
 
 **Yaw observer.** Passive yaw trim remains inhibited before `RAWES_PEN`.
 After the fixed anchor is active, `run_yaw_trim()` may operate alongside the
@@ -543,7 +551,7 @@ Re-sending refreshes the timer. Works in any mode.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC overrides only in mode 2 | 400 Hz / 100 Hz | GUIDED setpoints in automatic modes; normalized NVP → refreshed RC override → ACRO flybar mixer in mode 2. |
+| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC fallback in modes 2 and 3 | 400 Hz / 100 Hz | Mode 2 applies normalized staging commands through ACRO; mode 3 refreshes neutral fallback overrides while GUIDED setpoints own active control. |
 | Ch4 (yaw input) | rawes.lua | 100 Hz | Held at 1500 µs so AP yaw-rate demand is zero; AP yaw PID and Lua trim observer drive the anti-rotation motor. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
 | Motor4 output — anti-rotation motor | ArduPilot ATC_RAT_YAW (modes 0/1/2/3/4) | 400 Hz / 100 Hz | DDFP CW (H_TAIL_TYPE=3, no sign flip): CCW body drift -> positive PID -> positive throttle. |
@@ -555,8 +563,8 @@ Yaw regulation is handled entirely by ArduPilot's built-in yaw rate PID in modes
 ACRO manual additionally requires `H_FLYBAR_MODE=1` and
 `IM_ACRO_COL_EXP=0`. Disabling ACRO collective expo makes `RAWES_COL`
 follow the same linear normalized `[0,1]` collective convention as the
-GUIDED throttle path. Leaving mode 2 writes override value zero on RC1–RC3,
-which immediately releases those Lua overrides.
+GUIDED throttle path. The mode-2 to mode-3 handoff does not release RC1-RC3;
+it replaces the temporary staging values with neutral fallback overrides.
 
 ```
 Sensing:    gyro.z (from EKF attitude estimate)
@@ -864,19 +872,10 @@ not apply the requested attitude until spool state reaches
 internal roll/pitch target and produces a large target slew when runup
 completes, even when the requested quaternion equals the actual attitude.
 
-Passive hardware startup avoids that transition:
-
-1. Select `RAWES_MODE=0` and ACRO.
-2. Arm; Lua asserts CH8 while ACRO keeps the attitude target aligned.
-3. Wait for ArduPilot's `Runup Complete` status. The configured ramp/runup
-   durations are timeout inputs, not proof that the internal
-   `rotor_runup_complete()` gate is true.
-4. Stage passive thrust with `RAWES_MODE=3`, but leave `RAWES_PEN=0`. Lua enters
-   GUIDED_NOGPS using zero body-rate plus thrust only, with yaw trim inhibited.
-5. Wait for Copter `MAV_STATE_ACTIVE` and three quiet seconds after the last EKF
-   yaw-alignment event or measured body-rate excursion.
-6. Capture the settled attitude and send `RAWES_PEN=1`; only then does Lua issue
-   the absolute quaternion-derived attitude command and passive yaw trim.
+Passive startup must clear Copter's landed state in armed ACRO before entering
+GUIDED_NOGPS; otherwise GUIDED deliberately installs a level roll/pitch target.
+The canonical safe sequence, flybar/manual-servo constraints, telemetry gates,
+and current validation status are owned by [arming.md](arming.md).
 
 ### B.2 RAWES_ARM Lua Timer (Lua tests)
 

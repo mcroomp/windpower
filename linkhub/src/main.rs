@@ -6,6 +6,8 @@ use linkhub::{
     journal::{JournalConfig, JournalHandle},
     mavlink::{MavlinkLinkConfig, start_link},
     motor::MotorHandle,
+    protocol,
+    query::QueryArgs,
     records::{DiagnosticEvent, DiagnosticLevel, wall_time_ns},
 };
 use serde_json::{Map, json};
@@ -22,6 +24,13 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Query(QueryArgs),
+    Schema {
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        python_output: Option<PathBuf>,
+    },
     Serve {
         #[arg(long, env = "LINKHUB_CONNECTION")]
         connection: String,
@@ -63,6 +72,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     match Args::parse().command {
+        Command::Query(args) => linkhub::query::execute(args).await?,
+        Command::Schema {
+            output,
+            python_output,
+        } => {
+            let schema = serde_json::to_string_pretty(&protocol::json_schema())? + "\n";
+            if let Some(path) = output {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::write(path, schema).await?;
+            } else {
+                print!("{schema}");
+            }
+            if let Some(path) = python_output {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).await?;
+                }
+                fs::write(path, protocol::python_types()).await?;
+            }
+        }
         Command::Serve {
             connection,
             listen,

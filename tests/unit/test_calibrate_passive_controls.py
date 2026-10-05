@@ -6,7 +6,15 @@ import pytest
 import calibrate.run as calibrate_run
 from linkhub_client import MessageBatch, SimClock
 from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import Attitude, Heartbeat, NamedValueFloat, StatusText
+from linkhub_client.messages import (
+    Attitude,
+    ExtendedSysState,
+    Heartbeat,
+    MavLandedState,
+    NamedValueFloat,
+    SetAttitudeTarget,
+    StatusText,
+)
 from calibrate.run import (
     _PASSIVE_PROTOCOL_SEQUENCE,
     _PassiveTarget,
@@ -21,6 +29,8 @@ from calibrate.run import (
     _passive_target_messages,
     _set_passive_target_to_actual,
     _wait_for_passive_ekf_settle,
+    _wait_for_passive_land_clear,
+    _wait_for_passive_mode_ack,
     _wait_for_passive_runup,
 )
 from simulation.rawes_lua_harness import RawesLua
@@ -48,6 +58,7 @@ class _CaptureSession:
 
     def __init__(self) -> None:
         self.sent = []
+        self.read_count = 0
 
     def send_message(self, message) -> None:
         self.sent.append(message)
@@ -56,6 +67,9 @@ class _CaptureSession:
         return "v1:0"
 
     def read_messages(self, *_args, **_kwargs):
+        self.read_count += 1
+        if self.read_count == 1:
+            return MessageBatch((), "v1:1", _CLOCK)
         return MessageBatch((_RawAttitudeQuaternion(),), "v1:1", _CLOCK)
 
 
@@ -66,6 +80,7 @@ def test_capture_current_attitude_uses_quaternion_telemetry():
 
     assert captured == pytest.approx(_CAPTURE_Q)
     assert len(session.sent) == 1
+    assert session.read_count == 2
 
 
 def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
@@ -96,6 +111,27 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
     assert _wait_for_passive_runup(Session()) is True
     assert events
 
+    class LandClearSession:
+        def current_cursor(self):
+            return "v1:0"
+
+        def read_messages(
+            self, _after, _message_types, *, direction, wait, limit
+        ):
+            assert direction == "rx"
+            return MessageBatch(
+                (
+                    ExtendedSysState(
+                        vtol_state=0,
+                        landed_state=MavLandedState.IN_AIR,
+                    ),
+                ),
+                "v1:1",
+                _CLOCK,
+            )
+
+    assert _wait_for_passive_land_clear(LandClearSession()) is True
+
 
 def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
     messages = iter([
@@ -121,8 +157,10 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
         _target_component = 1
         receive_types = None
 
-        def send_message(self, _message):
-            pass
+        sent = []
+
+        def send_message(self, message):
+            self.sent.append(message)
 
         def current_cursor(self):
             return "v1:0"
@@ -141,10 +179,46 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
     session = Session()
     assert _wait_for_passive_ekf_settle(
         session,
+        target_q=_CAPTURE_Q,
+        thrust=0.342,
         timeout_s=0.1,
         settle_s=0.0,
     ) is True
     assert "ATTITUDE" in session.receive_types
+    assert any(isinstance(message, SetAttitudeTarget) for message in session.sent)
+
+
+def test_passive_waits_for_lua_to_consume_rawes_mode(monkeypatch):
+    messages = iter([
+        StatusText(
+            severity=6,
+            text="RAWES: passive active",
+        ),
+        StatusText(severity=6, text="RAWES: mode 3 (passive) entered"),
+    ])
+
+    class Session:
+        _target_system = 1
+        _target_component = 1
+
+        def send_message(self, _message):
+            pass
+
+        def read_messages(self, after, message_types, **_kwargs):
+            assert after in ("v1:10", "v1:11")
+            assert message_types == ["HEARTBEAT", "STATUSTEXT"]
+            message = next(messages)
+            next_cursor = "v1:11" if after == "v1:10" else "v1:12"
+            return MessageBatch((message,), next_cursor, _CLOCK)
+
+    monkeypatch.setattr(calibrate_run, "decode_message", lambda message: message)
+
+    assert _wait_for_passive_mode_ack(
+        Session(),
+        "v1:10",
+        target_q=_CAPTURE_Q,
+        thrust=0.342,
+    ) is True
 
 
 def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
@@ -193,6 +267,8 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
 
     assert _wait_for_passive_ekf_settle(
         Session(),
+        target_q=_CAPTURE_Q,
+        thrust=0.342,
         timeout_s=0.5,
         settle_s=0.1,
     ) is False
@@ -203,6 +279,15 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     settle_options = []
 
     class Session:
+        _target_system = 1
+        _target_component = 1
+
+        def get_param(self, name):
+            return {
+                "H_FLYBAR_MODE": 1.0,
+                "GUID_OPTIONS": 8.0,
+            }[name]
+
         def set_param(self, name, value):
             events.append(("set-param", name, value))
             return True
@@ -267,6 +352,16 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         calibrate_run,
+        "_wait_for_passive_land_clear",
+        lambda *_args, **_kwargs: events.append(("land-clear",)) or True,
+    )
+    monkeypatch.setattr(
+        calibrate_run,
+        "_wait_for_passive_mode_ack",
+        lambda *_args, **_kwargs: events.append(("mode-ack",)) or True,
+    )
+    monkeypatch.setattr(
+        calibrate_run,
         "_capture_current_quaternion",
         lambda _session: events.append(("capture",)) or _CAPTURE_Q,
     )
@@ -313,7 +408,9 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     acro_index = events.index(("set-mode", 1))
     arm_index = events.index(("arm", True))
     runup_index = events.index(("runup",))
-    passive_index = events.index(("set-param", "RAWES_MODE", 3))
+    capture_index = events.index(("capture",))
+    manual_index = events.index(("set-param", "RAWES_MODE", 2))
+    land_clear_index = events.index(("land-clear",))
     guided_index = events.index(("set-mode", 20))
     settle_index = events.index(("ekf-settle",))
     enable_index = next(
@@ -321,20 +418,40 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
         for index, event in enumerate(events)
         if event[:2] == ("send", "RAWES_PEN")
     )
+    passive_index = events.index(("set-param", "RAWES_MODE", 3))
+    mode_ack_index = events.index(("mode-ack",))
     observe_index = events.index(("observe",))
 
     assert events.index(("set-param", "RAWES_MODE", 0)) < acro_index
-    assert acro_index < arm_index < runup_index < passive_index
+    assert not any(
+        event[:2] == ("set-param", "H_FLYBAR_MODE")
+        for event in events
+    )
+    assert (
+        acro_index
+        < arm_index
+        < runup_index
+        < capture_index
+        < manual_index
+        < land_clear_index
+        < guided_index
+        < settle_index
+        < enable_index
+        < passive_index
+        < mode_ack_index
+    )
     motor_disable_index = events.index(
         ("disable-motor-function", calibrate_run._PASSIVE_TAIL_FUNCTION)
     )
     motor_off_index = events.index(("servo", calibrate_run.SERVO_MOTOR, calibrate_run.MOTOR_OFF_US))
     restore_index = events.index(("restore-motor-function", 36.0))
     assert motor_disable_index < acro_index < arm_index
-    assert passive_index < motor_off_index < guided_index
-    assert guided_index < settle_index < enable_index < restore_index < observe_index
+    assert land_clear_index < motor_off_index < guided_index
+    assert mode_ack_index < restore_index < observe_index
     assert ("shutdown", True) in events
     assert settle_options == [{
+        "target_q": _CAPTURE_Q,
+        "thrust": 0.342,
         "stop_requested": None,
         "timeout_s": 12.0,
         "settle_s": 4.0,
@@ -457,6 +574,37 @@ def test_automatic_protocol_sequence_returns_to_baseline_after_each_axis():
     )
 
 
+def test_lua_stages_acro_rc_then_uses_neutral_passive_fallback():
+    neutral = RawesLua(mode=0)
+    neutral.tick()
+    neutral_collective_pwm = neutral.ch_out[3]
+
+    sim = RawesLua(mode=2)
+    sim.vehicle_mode = 20
+    sim.healthy = True
+    sim.armed = True
+    sim.send_message(NamedValueFloat("RAWES_RLL", 0.0))
+    sim.send_message(NamedValueFloat("RAWES_PIT", 0.0))
+    sim.send_message(NamedValueFloat("RAWES_COL", 0.342))
+    sim.run(0.1)
+
+    assert sim.armed
+    assert sim.ch_out[1] is not None
+    assert sim.ch_out[2] is not None
+    assert sim.ch_out[3] != neutral_collective_pwm
+
+    sim.send_message(NamedValueFloat("RAWES_THR", 0.342))
+    sim.send_message(NamedValueFloat("RAWES_PEN", 1.0))
+    sim.run(0.1)
+    sim.set_param("RAWES_MODE", 3)
+    sim.run(0.1)
+
+    assert sim.ch_out[1] == 1500
+    assert sim.ch_out[2] == 1500
+    assert sim.ch_out[3] == neutral_collective_pwm
+    assert sim.guided_target is not None
+
+
 def test_passive_lua_applies_incremental_target_updates_and_preserves_yaw():
     sim = RawesLua(mode=3)
     sim.vehicle_mode = 20
@@ -506,11 +654,7 @@ def test_passive_yaw_trim_waits_until_guided_handoff():
     sim.run(0.1)
 
     assert sim.guided_target is None
-    assert sim.guided_rate_target == pytest.approx({
-        "roll_rate": 0.0,
-        "pitch_rate": 0.0,
-        "yaw_rate": 0.0,
-    })
+    assert sim.guided_rate_target is None
     assert sim.get_param("H_YAW_TRIM") == pytest.approx(0.0)
 
     sim.send_message(NamedValueFloat("RAWES_PEN", 1.0))
@@ -520,7 +664,7 @@ def test_passive_yaw_trim_waits_until_guided_handoff():
     assert sim.get_param("H_YAW_TRIM") == pytest.approx(0.3)
 
 
-def test_passive_precondition_uses_only_zero_rates_near_hardware_attitude():
+def test_passive_waits_for_ground_owned_capture_near_hardware_attitude():
     roll = math.radians(90.6)
     pitch = math.radians(-35.8)
     yaw = math.radians(77.2)
@@ -541,12 +685,8 @@ def test_passive_precondition_uses_only_zero_rates_near_hardware_attitude():
     sim.run(0.1)
 
     assert sim.guided_target is None
-    assert sim.guided_rate_target == pytest.approx({
-        "roll_rate": 0.0,
-        "pitch_rate": 0.0,
-        "yaw_rate": 0.0,
-    })
-    assert sim.guided_throttle == pytest.approx(0.342)
+    assert sim.guided_rate_target is None
+    assert sim.guided_throttle is None
     assert sim.fns.passive_anchor_q() is None
 
     sim.send_message(NamedValueFloat("RAWES_PEN", 1.0))

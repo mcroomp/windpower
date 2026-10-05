@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     sync::{
@@ -223,18 +223,34 @@ impl JournalHandle {
     }
 
     pub async fn read_after(&self, after: u64) -> Result<JournalRead, JournalError> {
+        self.read_after_bounded(after, usize::MAX).await
+    }
+
+    pub async fn read_after_bounded(
+        &self,
+        after: u64,
+        max_records: usize,
+    ) -> Result<JournalRead, JournalError> {
+        assert!(max_records > 0, "max_records must be positive");
         let snapshot = self.snapshot().await?;
-        let mut records = read_flushed_after(&self.directory, after).await?;
+        let mut records = read_flushed_after(&self.directory, after, max_records).await?;
         records.retain(|record| record.sequence <= snapshot.tail);
-        let flushed_sequences: HashSet<u64> =
-            records.iter().map(|record| record.sequence).collect();
-        records.extend(snapshot.pending.into_iter().filter(|record| {
-            record.sequence > after && !flushed_sequences.contains(&record.sequence)
-        }));
+        let scanned_through = records.last().map_or(after, |record| record.sequence);
+        let remaining = max_records.saturating_sub(records.len());
+        records.extend(
+            snapshot
+                .pending
+                .into_iter()
+                .filter(|record| record.sequence > scanned_through)
+                .take(remaining),
+        );
         records.sort_unstable_by_key(|record| record.sequence);
+        let tail_clock = records
+            .last()
+            .map_or(snapshot.sim_clock, |record| record.sim_clock);
         Ok(JournalRead {
             records,
-            tail_clock: snapshot.sim_clock,
+            tail_clock,
         })
     }
 
@@ -447,6 +463,7 @@ async fn flush_pending(
 async fn read_flushed_after(
     directory: &Path,
     after: u64,
+    max_records: usize,
 ) -> Result<Vec<JournalRecord>, JournalError> {
     let mut entries = fs::read_dir(directory).await?;
     let mut paths = Vec::new();
@@ -475,9 +492,26 @@ async fn read_flushed_after(
             chunk
                 .records
                 .into_iter()
-                .filter(|record| record.sequence > after),
+                .filter(|record| record.sequence > after)
+                .take(max_records - records.len()),
         );
+        if records.len() == max_records {
+            break;
+        }
     }
+    Ok(records)
+}
+
+pub async fn read_persisted(
+    directory: &Path,
+    after: u64,
+    through: Option<u64>,
+) -> Result<Vec<JournalRecord>, JournalError> {
+    let mut records = read_flushed_after(directory, after, usize::MAX).await?;
+    if let Some(through) = through {
+        records.retain(|record| record.sequence <= through);
+    }
+    records.sort_unstable_by_key(|record| record.sequence);
     Ok(records)
 }
 
@@ -674,6 +708,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_reads_advance_without_materializing_the_remaining_tail() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let mut config = JournalConfig::for_directory(temp.path(), run_id);
+        config.max_chunk_records = 2;
+        config.flush_interval = Duration::from_secs(60);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+
+        for source_sequence in 1..=5 {
+            journal
+                .append_diagnostic(diagnostic(run_id, source_sequence))
+                .await
+                .expect("append");
+        }
+
+        let first = journal
+            .read_after_bounded(0, 3)
+            .await
+            .expect("first bounded read");
+        let second = journal
+            .read_after_bounded(3, 3)
+            .await
+            .expect("second bounded read");
+
+        assert_eq!(
+            first
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            second
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
     async fn replay_skips_chunks_ending_at_or_before_cursor() {
         let temp = TempDir::new().expect("temp directory");
         let path = chunk_path(temp.path(), 1, 10);
@@ -681,7 +761,7 @@ mod tests {
         invalid_chunk.push(0xff);
         fs::write(path, invalid_chunk).await.expect("old chunk");
 
-        let records = read_flushed_after(temp.path(), 10)
+        let records = read_flushed_after(temp.path(), 10, usize::MAX)
             .await
             .expect("old chunk must not be decoded");
 

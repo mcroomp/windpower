@@ -77,6 +77,8 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
 
 BASE_PERIOD_MS    = 10        -- 100 Hz base tick
 FLIGHT_PERIOD_MS  = 20        -- 50 Hz flight subsystem
+PASSIVE_TARGET_PERIOD_MS = 50 -- 20 Hz fixed passive hold target
+INTERLOCK_ARM_DELAY_MS = 500  -- let ACRO reset its attitude target at ground idle
 GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
 ACRO_MODE_NUM     = 1         -- ArduCopter ACRO = 1
 -- Smooth handoff after kinematic release: keep plant physics unchanged, but
@@ -191,6 +193,7 @@ _rc_ch3 = rc:get_channel(3)
 local _manual_status_ms = 0
 local _manual_active = false
 local _neutral_hold_active = false
+local _armed_since_ms = nil
 
 -- Thrust state [0..1]
 -- _last_thrust starts at 0; seeded at capture from RAWES_THR (ic_thrust_or_default).
@@ -249,6 +252,8 @@ _dbg_cap_bz_z   = 1.0
 _capture_ms     = nil
 _dbg_precap_last_ms = -100000   -- throttle for pre-capture pos_ned/anchor diagnostic
 _passive_enabled = false       -- ground enables only after GUIDED/EKF yaw settling
+_passive_target_last_ms = 0
+_passive_guided_ok = false
 _first_nonzero_rate_logged = false
 _guided_cmd_last_log_ms = -2000
 -- ── Yaw trim observer ────────────────────────────────────────────────────────────
@@ -376,7 +381,7 @@ local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, rol
                 src or "unknown"))
         end
     end
-    vehicle:set_target_angle_and_rate_and_throttle(
+    return vehicle:set_target_angle_and_rate_and_throttle(
         roll_deg, pitch_deg, yaw_deg,
         rr, pr, yr,
         throttle)
@@ -675,7 +680,12 @@ local function _on_mode_enter(mode)
     -- Preserve a manual seed received in the same scheduler tick as the mode
     -- change. Leaving manual mode clears it, so a later re-entry needs a new seed.
     _none_status_ms = 0
-    if mode ~= MODE_ACRO_MANUAL and _manual_active then
+    if mode == MODE_PASSIVE and _manual_active then
+        if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+        if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+        if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
+        _manual_active = false
+    elseif mode ~= MODE_ACRO_MANUAL and _manual_active then
         if _rc_ch1 then _rc_ch1:set_override(0) end
         if _rc_ch2 then _rc_ch2:set_override(0) end
         if _rc_ch3 then _rc_ch3:set_override(0) end
@@ -689,16 +699,13 @@ local function _on_mode_enter(mode)
     end
     if mode == MODE_PASSIVE then
         _passive_status_ms    = 0
-        _passive_enabled      = false
-        _passive_anchor_q     = nil
-        _passive_target_q     = nil
-        _passive_roll_offset_rad  = 0.0
-        _passive_pitch_offset_rad = 0.0
-        _passive_yaw_offset_rad   = 0.0
+        _passive_target_last_ms = 0
+        _passive_guided_ok = false
         _passive_capture_stable   = 0
         _passive_last_capture_q   = nil
         _yaw_ff_trim          = 0.0
         _nvf_last_ms          = nil
+        gcs:send_text(6, "RAWES: mode 3 (passive) entered")
     end
 end
 
@@ -1123,14 +1130,6 @@ local function run_yaw_trim(now, is_passive)
 end
 
 local function run_acro_manual_mode(now)
-    if vehicle:get_mode() ~= ACRO_MODE_NUM then
-        if arming:is_armed() then arming:disarm() end
-        if now - _manual_status_ms >= 1000 then
-            _manual_status_ms = now
-            gcs:send_text(3, "RAWES ACRO manual: AP not in ACRO -- DISARMED")
-        end
-        return false
-    end
     if math.floor(p("H_FLYBAR_MODE", 0) + 0.5) ~= 1 then
         if arming:is_armed() then arming:disarm() end
         if now - _manual_status_ms >= 1000 then
@@ -1174,8 +1173,11 @@ local function run_passive_mode(now)
     local ic_full_ready = (_ic_thrust ~= nil and _passive_anchor_q ~= nil)
     local ic_thrust_only = (_ic_thrust ~= nil and _passive_anchor_q == nil)
 
-    local mode_now  = vehicle:get_mode()
-    local guided_ok = (mode_now == GUIDED_MODE_NUM or mode_now == 20) and ahrs:healthy()
+    if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+    if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+    if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
+
+    local guided_ok = _passive_guided_ok
     local gyro = ahrs:get_gyro()
     local gx, gy, gz = 0.0, 0.0, 0.0
     if gyro then
@@ -1195,13 +1197,6 @@ local function run_passive_mode(now)
         _diag_set("OL_AI", 0.0)
         _diag_set("OL_AD", 0.0)
         _diag_set("OL_COL", ic_thrust_or_default())
-        if guided_ok and arming:is_armed() and _ic_thrust ~= nil then
-            -- The ground owns capture qualification and sends RAWES_PEN only
-            -- after rates remain quiet. Avoid Euler angle targets here: near
-            -- 90-degree roll their representation can jump and drive yaw.
-            vehicle:set_target_rate_and_throttle(
-                0.0, 0.0, 0.0, ic_thrust_or_default())
-        end
         return false
     end
 
@@ -1234,10 +1229,7 @@ local function run_passive_mode(now)
         _diag_set("OL_AI", 0.0)
         _diag_set("OL_AD", 0.0)
         _diag_set("OL_COL", ic_thrust_or_default())
-        if guided_ok and arming:is_armed() and _ic_thrust ~= nil then
-            vehicle:set_target_rate_and_throttle(0.0, 0.0, 0.0, ic_thrust_or_default())
-        end
-        return guided_ok
+        return false
     end
 
     local col_thrust_p = ic_thrust_or_default()
@@ -1251,13 +1243,15 @@ local function run_passive_mode(now)
     _diag_set("OL_AI", 0.0)
     _diag_set("OL_AD", 0.0)
     _diag_set("OL_COL", col_thrust_p)
-    if guided_ok then
+    if now - _passive_target_last_ms >= PASSIVE_TARGET_PERIOD_MS then
+        _passive_target_last_ms = now
         local qw, qx, qy, qz = table.unpack(_passive_target_q)
         local roll_rad, pitch_rad, yaw_rad = quaternion_to_euler(qw, qx, qy, qz)
-        send_guided_angle_rate_throttle(
+        guided_ok = send_guided_angle_rate_throttle(
             math.deg(roll_rad), math.deg(pitch_rad), math.deg(yaw_rad),
             0.0, 0.0, 0.0, col_thrust_p,
-            "passive_hold")
+            "passive_hold") and ahrs:healthy()
+        _passive_guided_ok = guided_ok
     end
     return guided_ok
 end
@@ -1360,6 +1354,7 @@ local function update()
                 _passive_target_q = passive_target_from_anchor()
                 _passive_enabled = true
                 gcs:send_text(6, "RAWES passive: anchor captured, absolute hold enabled")
+                gcs:send_text(6, "RAWES: passive active")
             else
                 gcs:send_text(3, "RAWES passive: rejected invalid AHRS quaternion")
             end
@@ -1406,15 +1401,20 @@ local function update()
         if _rc_ch4 then _rc_ch4:set_override(1500) end
     end
 
-    -- Latch the motor interlock (CH8) high while armed so the heli rotor stays
-    -- runup-complete and ArduPilot clears land_complete (otherwise GUIDED angle
-    -- commands are silently dropped by angle_control_run's takeoff/relax branch).
-    -- Scripting RC overrides expire after RC_OVERRIDE_TIME, so this must be
-    -- re-asserted every tick.  Gated on armed only (NOT on IC seed): CH8 high
-    -- before arm blocks arming ("Motor Interlock Enabled"), but the rotor must
-    -- run up through the whole kinematic phase so land_complete is already
-    -- cleared at release.
-    if _rc_ch8 and armed then _rc_ch8:set_override(2000) end
+    -- Give ACRO at least one deterministic ground-idle control interval after
+    -- arming so it resets ArduPilot's internal attitude target to the AHRS
+    -- attitude. Rate-only GUIDED preserves that target; asserting interlock on
+    -- the first armed tick can otherwise carry a stale near-inverted target
+    -- into the later absolute-hold handoff.
+    if armed then
+        if _armed_since_ms == nil then _armed_since_ms = now end
+        if _rc_ch8 and now - _armed_since_ms >= INTERLOCK_ARM_DELAY_MS then
+            _rc_ch8:set_override(2000)
+        end
+    else
+        _armed_since_ms = nil
+        if _rc_ch8 then _rc_ch8:set_override(0) end
+    end
 
     if mode == MODE_NONE then
         if now - _none_status_ms >= 5000 then

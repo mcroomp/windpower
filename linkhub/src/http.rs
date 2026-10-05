@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -18,6 +18,7 @@ use crate::{
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
     operations::{MavlinkOperations, OperationError},
+    protocol,
     records::{DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock},
 };
 
@@ -27,6 +28,24 @@ pub struct AppState {
     link: Option<MavlinkLinkHandle>,
     operations: Option<MavlinkOperations>,
     motor: Option<MotorHandle>,
+}
+
+fn collapse_state_records(records: Vec<JournalRecord>) -> Vec<JournalRecord> {
+    let mut collapsed: Vec<Option<JournalRecord>> = Vec::with_capacity(records.len());
+    let mut state_positions = HashMap::new();
+    for record in records {
+        let key = match &record.payload {
+            RecordPayload::MavlinkFrame(frame) => frame.state_key(),
+            RecordPayload::Diagnostic(_) => None,
+        };
+        if let Some(key) = key
+            && let Some(previous) = state_positions.insert(key, collapsed.len())
+        {
+            collapsed[previous] = None;
+        }
+        collapsed.push(Some(record));
+    }
+    collapsed.into_iter().flatten().collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +113,9 @@ pub fn router_with_motor(
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/v1/status", get(status))
+        .route("/v1/schema", get(protocol_schema))
         .route("/v1/records", get(records))
+        .route("/v1/journal/flush", axum::routing::post(flush_journal))
         .route(
             "/v1/diagnostics/events",
             get(diagnostic_events).post(ingest_diagnostics),
@@ -190,6 +211,17 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
+async fn protocol_schema() -> Json<Value> {
+    Json(protocol::json_schema())
+}
+
+async fn flush_journal(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    state.journal.flush().await?;
+    Ok(Json(json!({
+        "cursor": format_cursor(state.journal.tail()),
+    })))
+}
+
 async fn mavlink_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let status = state.link.as_ref().map_or_else(
         || LinkStatus {
@@ -228,6 +260,7 @@ struct RecordQuery {
 
 const DEFAULT_MESSAGE_BATCH_LIMIT: usize = 1_000;
 const MAX_MESSAGE_BATCH_LIMIT: usize = 10_000;
+const MAX_JOURNAL_SCAN_RECORDS: usize = 10_000;
 const MAX_MESSAGE_WAIT_MS: u64 = 30_000;
 
 #[derive(Debug, Default, Deserialize)]
@@ -239,6 +272,8 @@ struct MessageQuery {
     #[serde(default)]
     wait_ms: u64,
     limit: Option<usize>,
+    #[serde(default)]
+    collapse: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -421,22 +456,31 @@ async fn mavlink_messages(
     let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
     loop {
-        let read = state.journal.read_after(cursor).await?;
+        let read = state
+            .journal
+            .read_after_bounded(cursor, MAX_JOURNAL_SCAN_RECORDS)
+            .await?;
         let mut next_clock = read.tail_clock;
         let mut records = Vec::new();
         for record in read.records {
             cursor = cursor.max(record.sequence);
             next_clock = record.sim_clock;
-            if filter.matches(&record)
-                && let Some(value) = encode_telemetry_record(&record)
-            {
-                records.push(value);
+            if filter.matches(&record) {
+                records.push(record);
                 if records.len() == limit {
                     break;
                 }
             }
         }
-        if !records.is_empty() || query.wait_ms == 0 || Instant::now() >= deadline {
+        if query.collapse {
+            records = collapse_state_records(records);
+        }
+        let records: Vec<Value> = records.iter().filter_map(encode_telemetry_record).collect();
+        if !records.is_empty()
+            || query.wait_ms == 0
+            || Instant::now() >= deadline
+            || cursor < state.journal.tail()
+        {
             return Ok(Json(MessageBatch {
                 records,
                 next_cursor: format_cursor(cursor),
@@ -482,7 +526,10 @@ async fn read_record_batch(
     let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
     loop {
-        let read = state.journal.read_after(cursor).await?;
+        let read = state
+            .journal
+            .read_after_bounded(cursor, MAX_JOURNAL_SCAN_RECORDS)
+            .await?;
         let mut next_clock = read.tail_clock;
         let mut records = Vec::new();
         for record in read.records {
@@ -495,7 +542,11 @@ async fn read_record_batch(
                 }
             }
         }
-        if !records.is_empty() || query.wait_ms == 0 || Instant::now() >= deadline {
+        if !records.is_empty()
+            || query.wait_ms == 0
+            || Instant::now() >= deadline
+            || cursor < state.journal.tail()
+        {
             return Ok(Json(RecordBatch {
                 records,
                 next_cursor: format_cursor(cursor),
@@ -1164,6 +1215,26 @@ mod tests {
         }
     }
 
+    fn mavlink_frame(
+        message_id: u32,
+        message_name: &str,
+        fields: Map<String, Value>,
+    ) -> MavlinkFrame {
+        MavlinkFrame {
+            link_id: "test".to_owned(),
+            direction: Direction::Rx,
+            protocol_version: 2,
+            sequence: 1,
+            system_id: 1,
+            component_id: 1,
+            message_id,
+            message_name: message_name.to_owned(),
+            fields,
+            signed: false,
+            frame: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn ingests_deduplicates_and_batches_diagnostics() {
         let temp = TempDir::new().expect("temp directory");
@@ -1217,6 +1288,41 @@ mod tests {
         assert_eq!(batch["records"][0]["kind"], "diagnostic.event");
         assert_eq!(batch["records"][0]["data"]["source"], "groundstation");
         assert_eq!(batch["next_cursor"], "v1:1");
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn serves_the_generated_protocol_schema() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let app = router(journal.clone(), None);
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/schema")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("schema body");
+        let schema: Value = serde_json::from_slice(&body).expect("schema JSON");
+
+        assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+        assert_eq!(
+            schema["$defs"]["MavLandedState"]["x-enum-varnames"][2],
+            "IN_AIR"
+        );
+        assert_eq!(
+            schema["$defs"]["ExtendedSysState"]["properties"]["landed_state"]["$ref"],
+            "#/$defs/MavLandedState"
+        );
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
@@ -1289,6 +1395,65 @@ mod tests {
         assert_eq!(matched_batch["records"][0]["message"], "STATUSTEXT");
         assert_eq!(matched_batch["records"][0]["fields"]["text"], "ready");
         assert_eq!(matched_batch["next_cursor"], "v1:2");
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn message_batch_collapses_state_but_preserves_events() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        for payload in [
+            mavlink_frame(
+                30,
+                "ATTITUDE",
+                Map::from_iter([("roll".to_owned(), json!(1.0))]),
+            ),
+            mavlink_frame(
+                253,
+                "STATUSTEXT",
+                Map::from_iter([("text".to_owned(), json!("first"))]),
+            ),
+            mavlink_frame(
+                30,
+                "ATTITUDE",
+                Map::from_iter([("roll".to_owned(), json!(2.0))]),
+            ),
+            mavlink_frame(
+                253,
+                "STATUSTEXT",
+                Map::from_iter([("text".to_owned(), json!("second"))]),
+            ),
+        ] {
+            journal
+                .append(RecordPayload::MavlinkFrame(payload), None)
+                .await
+                .expect("MAVLink frame");
+        }
+        let app = router(journal.clone(), None);
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/mavlink/messages?after=v1:0&limit=10&collapse=true")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let batch: Value = serde_json::from_slice(&body).expect("message batch");
+
+        assert_eq!(batch["next_cursor"], "v1:4");
+        assert_eq!(batch["records"].as_array().map(Vec::len), Some(3));
+        assert_eq!(batch["records"][0]["fields"]["text"], "first");
+        assert_eq!(batch["records"][1]["message"], "ATTITUDE");
+        assert_eq!(batch["records"][1]["fields"]["roll"], 2.0);
+        assert_eq!(batch["records"][2]["fields"]["text"], "second");
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");

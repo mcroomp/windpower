@@ -715,7 +715,13 @@ impl MavlinkOperations {
                 })
                 .await
                 {
-                    Ok(message) => download.receive(data_packet(&message)?)?,
+                    Ok(message) => match download.receive(data_packet(&message)?) {
+                        Err(DataFlashError::EarlyEnd { .. }) => {
+                            tokio::time::sleep(packet_timeout).await;
+                            download.on_timeout()?;
+                        }
+                        result => result?,
+                    },
                     Err(OperationError::Timeout) => download.on_timeout()?,
                     Err(error) => return Err(error),
                 }

@@ -190,6 +190,37 @@ def torque_unarmed_lua(tmp_path, request):
 
 
 @pytest.fixture
+def torque_unarmed_lua_calibrate(tmp_path, request):
+    """Compass-only torque stack whose lifecycle is owned by calibrate run passive."""
+    import simulation.torque_model as _m
+
+    with _torque_stack(
+        tmp_path,
+        omega_rotor=_m.OMEGA_ROTOR_NOMINAL,
+        tail_channel=8,
+        extra_params=_LUA_TORQUE_EXTRA_PARAMS,
+        install_scripts=("rawes.lua",),
+        test_name=request.node.name,
+        armon_ms=0,
+        target_mode=1,
+        boot_params={
+            "GCS_PID_MASK": 4,
+            "H_COL_MIN": 1342,
+            "H_COL_MAX": 1657,
+            "H_COL_ANG_MIN": -2,
+            "H_COL_ANG_MAX": 12,
+            "H_COL_LAND_MIN": -2,
+            "H_FLYBAR_MODE": 1,
+            "IM_ACRO_COL_EXP": 0,
+            "SCR_DEBUG_OPTS": 8,
+        },
+        startup_hold_s=35.0,
+        mutable_param_names={"SERVO9_FUNCTION"},
+    ) as ctx:
+        yield ctx
+
+
+@pytest.fixture
 def torque_armed_ddfp_zero(tmp_path, request):
     """
     DDFP fixture with prescribed zero yaw throughout DYNAMIC.

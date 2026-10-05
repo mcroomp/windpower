@@ -340,9 +340,9 @@ name, duration, trim/gain dicts, run-start timestamps (local + UTC), and a snaps
 of relevant AP params. Data section is plain CSV.
 
 LinkHub owns the lossless raw MAVLink journal for all clients. Calibration
-sessions may additionally write a filtered `*.mavlink.jsonl` trace beside the
-CSV for convenient analysis; it is derived from LinkHub's decoded HTTP
-stream and is not the raw source of truth.
+does not write a duplicate MAVLink JSONL. Each CSV records its LinkHub start
+cursor, and the command prints the final cursor range. Query that range with
+the native `linkhub query` commands documented in `design/linkhub.md`.
 
 For `run`, the CSV now also captures:
 - Lua diagnostic NVFs: `YFF_*` and `OL_*`
@@ -364,10 +364,9 @@ with the legacy `EXTRA1` `REQUEST_DATA_STREAM` group on ArduCopter -- `run`
 explicitly requests both via `MAV_CMD_SET_MESSAGE_INTERVAL` at 25 Hz. Without
 that explicit request, `mav_att_q_*`/`mav_att_target_q_*`/`mav_att_qerr_*`
 stay empty even while a GUIDED angle target is actively held (verify with
-`analysis/mavlink_jsonl_query.py types <log>.mavlink.jsonl` -- if a message
-type never appears at all, it's a missing stream/interval request, not a
-decode bug; see `analysis/mavlink_jsonl_query.md` for full usage -- it is
-the first-line tool for diagnosing any problematic run). `ATTITUDE_TARGET`
+`linkhub query <journal> types` -- if a message type never appears at all,
+it's a missing stream/interval request, not a decode bug; see
+`design/linkhub.md`). `ATTITUDE_TARGET`
 also only appears at all once the vehicle is
 actually in `GUIDED`/`GUIDED_NOGPS` and Lua is driving an angle target.
 `run passive` waits for ground-side qualification, then asks Lua to capture the
@@ -376,8 +375,11 @@ populated once that hold is engaged.
 
 ### Interactive passive attitude hold
 
-`run passive` arms and completes heli runup in ACRO with `RAWES_MODE=0`, stages
-passive thrust with absolute hold disabled, and then enters `GUIDED_NOGPS`.
+`run passive` arms and completes heli runup in ACRO with `RAWES_MODE=0`, applies
+neutral cyclic plus passive collective until `EXTENDED_SYS_STATE` confirms that
+Copter's landed state is clear, stages passive thrust with absolute hold
+disabled, and then enters `GUIDED_NOGPS`. The complete startup and safe-off
+sequence is owned by [arming.md](arming.md).
 During this staging phase Lua commands zero body rate plus thrust only; it does
 not send an Euler angle target and passive yaw trim remains inhibited. The
 ground waits for an `ACTIVE` heartbeat, fresh attitude-rate telemetry, and a

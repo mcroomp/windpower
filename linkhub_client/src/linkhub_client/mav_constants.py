@@ -62,6 +62,13 @@ MAV_DATA_STREAM_EXTRA3 = 12
 MAV_STATE_ACTIVE = 4
 MAV_STATE_STANDBY = 3
 
+# -- MAV_LANDED_STATE --------------------------------------------------------
+MAV_LANDED_STATE_UNDEFINED = 0
+MAV_LANDED_STATE_ON_GROUND = 1
+MAV_LANDED_STATE_IN_AIR = 2
+MAV_LANDED_STATE_TAKEOFF = 3
+MAV_LANDED_STATE_LANDING = 4
+
 # -- MAV_TYPE / MAV_AUTOPILOT (GCS heartbeat identity) -----------------------
 MAV_TYPE_GCS = 6
 MAV_TYPE_HELICOPTER = 4
@@ -73,6 +80,7 @@ MAVLINK_MSG_ID_ATTITUDE_QUATERNION = 31
 MAVLINK_MSG_ID_LOCAL_POSITION_NED = 32
 MAVLINK_MSG_ID_RC_CHANNELS = 65
 MAVLINK_MSG_ID_ATTITUDE_TARGET = 83
+MAVLINK_MSG_ID_EXTENDED_SYS_STATE = 245
 
 # Existing calibration algorithms use the familiar ``mavutil.mavlink.CONSTANT``
 # spelling. This namespace contains constants only; it does not provide or load

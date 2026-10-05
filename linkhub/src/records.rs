@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    hash::{Hash, Hasher},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -32,21 +35,11 @@ pub enum SimTimeQuality {
     Estimated,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SimClock {
     pub epoch: u64,
     pub time_boot_ms: Option<u64>,
     pub quality: Option<SimTimeQuality>,
-}
-
-impl Default for SimClock {
-    fn default() -> Self {
-        Self {
-            epoch: 0,
-            time_boot_ms: None,
-            quality: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -88,6 +81,107 @@ pub struct MavlinkFrame {
     pub signed: bool,
     #[serde(with = "serde_bytes")]
     pub frame: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq)]
+pub struct MavlinkStateKey {
+    link_id: String,
+    direction: Direction,
+    system_id: u8,
+    component_id: u8,
+    message_id: u32,
+    discriminator: Option<String>,
+}
+
+impl PartialEq for MavlinkStateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.link_id == other.link_id
+            && self.direction == other.direction
+            && self.system_id == other.system_id
+            && self.component_id == other.component_id
+            && self.message_id == other.message_id
+            && self.discriminator == other.discriminator
+    }
+}
+
+impl Hash for MavlinkStateKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.link_id.hash(state);
+        self.direction.hash(state);
+        self.system_id.hash(state);
+        self.component_id.hash(state);
+        self.message_id.hash(state);
+        self.discriminator.hash(state);
+    }
+}
+
+impl Hash for Direction {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (*self as u8).hash(state);
+    }
+}
+
+impl MavlinkFrame {
+    #[must_use]
+    pub fn state_key(&self) -> Option<MavlinkStateKey> {
+        let discriminator_field = match self.message_name.as_str() {
+            "NAMED_VALUE_FLOAT" | "NAMED_VALUE_INT" | "DEBUG_VECT" => Some("name"),
+            "PID_TUNING" => Some("axis"),
+            "BATTERY_STATUS" => Some("id"),
+            _ if is_snapshot_message(&self.message_name) => None,
+            _ => return None,
+        };
+        let discriminator = discriminator_field
+            .and_then(|field| self.fields.get(field))
+            .map(Value::to_string);
+        if discriminator_field.is_some() && discriminator.is_none() {
+            return None;
+        }
+        Some(MavlinkStateKey {
+            link_id: self.link_id.clone(),
+            direction: self.direction,
+            system_id: self.system_id,
+            component_id: self.component_id,
+            message_id: self.message_id,
+            discriminator,
+        })
+    }
+}
+
+fn is_snapshot_message(message_name: &str) -> bool {
+    matches!(
+        message_name,
+        "HEARTBEAT"
+            | "SYS_STATUS"
+            | "SYSTEM_TIME"
+            | "GPS_RAW_INT"
+            | "RAW_IMU"
+            | "SCALED_IMU"
+            | "SCALED_IMU2"
+            | "SCALED_IMU3"
+            | "SCALED_PRESSURE"
+            | "SCALED_PRESSURE2"
+            | "SCALED_PRESSURE3"
+            | "ATTITUDE"
+            | "ATTITUDE_QUATERNION"
+            | "LOCAL_POSITION_NED"
+            | "GLOBAL_POSITION_INT"
+            | "RC_CHANNELS"
+            | "RC_CHANNELS_RAW"
+            | "SERVO_OUTPUT_RAW"
+            | "VFR_HUD"
+            | "HIGHRES_IMU"
+            | "ATTITUDE_TARGET"
+            | "POSITION_TARGET_LOCAL_NED"
+            | "POSITION_TARGET_GLOBAL_INT"
+            | "ESTIMATOR_STATUS"
+            | "VIBRATION"
+            | "HOME_POSITION"
+            | "EXTENDED_SYS_STATE"
+            | "ESC_TELEMETRY_1_TO_4"
+            | "ESC_TELEMETRY_5_TO_8"
+            | "ESC_TELEMETRY_9_TO_12"
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

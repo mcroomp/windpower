@@ -265,6 +265,10 @@ pub fn project_fields(message: &DialectMessage) -> Result<Map<String, Value>, Co
         MavMessage::ATTITUDE_TARGET(data) => {
             put_number(&mut object, "type_mask", u64::from(data.type_mask.bits()));
         }
+        MavMessage::EXTENDED_SYS_STATE(data) => {
+            put_number(&mut object, "vtol_state", data.vtol_state as u64);
+            put_number(&mut object, "landed_state", data.landed_state as u64);
+        }
         _ => {}
     }
 
@@ -488,8 +492,8 @@ fn u8_array_251(
 mod tests {
     use super::*;
     use mavlink::dialects::ardupilotmega::{
-        AUTOPILOT_VERSION_DATA, HEARTBEAT_DATA, MavAutopilot, MavModeFlag, MavProtocolCapability,
-        MavState, MavType,
+        AUTOPILOT_VERSION_DATA, EXTENDED_SYS_STATE_DATA, HEARTBEAT_DATA, MavAutopilot,
+        MavLandedState, MavModeFlag, MavProtocolCapability, MavState, MavType, MavVtolState,
     };
 
     #[test]
@@ -555,6 +559,19 @@ mod tests {
         let fields = project_fields(&message).expect("project version");
 
         assert_eq!(fields["capabilities"], 40);
+    }
+
+    #[test]
+    fn extended_system_state_projects_numeric_enums() {
+        let message = DialectMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
+            vtol_state: MavVtolState::MAV_VTOL_STATE_MC,
+            landed_state: MavLandedState::MAV_LANDED_STATE_IN_AIR,
+        });
+
+        let fields = project_fields(&message).expect("project extended state");
+
+        assert_eq!(fields["vtol_state"], 3);
+        assert_eq!(fields["landed_state"], 2);
     }
 
     #[test]

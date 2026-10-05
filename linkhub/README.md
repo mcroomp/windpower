@@ -22,6 +22,18 @@ For hardware, pass a serial port and baud, for example
 serial ports automatically when the default local endpoint is not already live.
 Build with `--features bluetooth` to enable the optional motor backend.
 
+Query a persisted journal without starting the service:
+
+```powershell
+.\target\release\linkhub.exe query <run-or-journal-path> types
+.\target\release\linkhub.exe query <run-or-journal-path> show `
+  --type PID_TUNING --dir rx --json |
+  ForEach-Object { $_ | ConvertFrom-Json }
+```
+
+The native query surface and `jq` examples are documented in
+[`design/linkhub.md`](../design/linkhub.md).
+
 Run the reusable, actuator-safe HTTP/telemetry stress harness against an
 already-running LinkHub:
 
@@ -39,6 +51,8 @@ restored before exit.
 - `GET /health/live`
 - `GET /health/ready`
 - `GET /v1/status`
+- `GET /v1/schema`
+- `POST /v1/journal/flush`
 - `GET /v1/records?after=v1:<sequence>&wait_ms=<bounded>`
 - `GET /v1/mavlink/status`
 - `GET|POST /v1/mavlink/messages`
@@ -68,3 +82,10 @@ typed API uses the official `mavlink/rust-mavlink` ArduPilotMega dialect and is
 compatible with the dependency-free Python client. MAVFTP, DataFlash, serial
 transport, component/capability discovery, and optional Bluetooth motor control
 are implemented in Rust.
+
+Typed message reads accept comma-separated `messages`, `direction`, `limit`,
+and `collapse=true` query parameters. LinkHub scans the journal in bounded raw
+batches and advances the cursor past nonmatching records. Collapse keeps only
+the newest snapshot for recognized state telemetry within a batch while
+preserving event and transaction messages such as `STATUSTEXT` and
+`COMMAND_ACK`.

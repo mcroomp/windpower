@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import sys
 
-
+from analysis.linkhub_journal import cursor_sequence, iter_messages
 from tests.sitl.stack_infra import _acro_stack
 
-from analysis.analyse_run import validate_ekf_window
+from analysis.analyse_run import validate_ekf_records
 
 import pytest
 pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1200)]
@@ -103,14 +103,20 @@ def test_kinematic_gps_sitl(tmp_path, request):
         )
 
         # Validate EKF was clean from GPS fusion to fusion+40 s.
-        # Export the corresponding LinkHub journal range before reading it.
-        assert ctx.mavlink_log is not None
+        assert ctx.linkhub_journal is not None
         assert ctx.mavlog_cursor is not None
-        ctx.mavlog_cursor = ctx.gcs.export_mavlog(
-            ctx.mavlink_log,
-            ctx.mavlog_cursor,
+        through_cursor = ctx.gcs.flush_journal()
+        records = list(iter_messages(
+            ctx.linkhub_journal,
+            after=cursor_sequence(ctx.mavlog_cursor),
+            through=cursor_sequence(through_cursor),
+            direction="rx",
+        ))
+        issues = validate_ekf_records(
+            records,
+            t_fused,
+            t_end,
         )
-        issues = validate_ekf_window(ctx.mavlink_log, t_fused, t_end)
         for issue in issues:
             log.warning("EKF issue: %s", issue)
         assert not issues, (

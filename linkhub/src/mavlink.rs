@@ -810,11 +810,7 @@ mod tests {
             &record.payload,
             RecordPayload::MavlinkFrame(frame) if frame.direction == Direction::Tx
         )));
-        assert!(
-            records
-                .iter()
-                .all(|record| record.sim_clock.epoch == 1)
-        );
+        assert!(records.iter().all(|record| record.sim_clock.epoch == 1));
         assert_eq!(link.status().clock_epoch, 1);
         assert_eq!(link.status().target_system, 1);
         assert_eq!(link.status().base_mode, 0);

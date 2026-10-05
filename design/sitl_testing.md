@@ -70,7 +70,7 @@ runs in its own fresh Docker container, one per test file.
   ArduPilot receive wait, mediator step, and UDP send time.
 - Stack test logs land in `simulation/logs/{test_name}/` —
   `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.physics.csv`,
-  enriched `telemetry.csv`, `mavlink.jsonl`, and `arducopter.log`.
+  enriched `telemetry.csv`, the LinkHub journal, and `arducopter.log`.
   Suite summary: `simulation/logs/suite_summary.json`.
 - **`internal_controller` MUST be `False` for all full-stack flight tests** — the
   whole point is to validate that ArduPilot + Lua actually fly the vehicle.
@@ -96,10 +96,10 @@ physical world rather than MAVLink transports. There is no dedicated mediator
 MAVLink connection on port 5762.
 
 The mediator writes `telemetry.physics.csv`. During fixture teardown the harness
-exports LinkHub's journal range to `mavlink.jsonl`, preserves the raw physics
-artifact, and runs `analysis/enrich_sitl_telemetry.py` to produce the canonical
-`telemetry.csv`. Enrichment uses LinkHub simulation-clock metadata and
-latest-observation sampling; it never runs in the lockstep process.
+flushes and queries LinkHub's journal directly, preserves the journal and raw
+physics artifact, and runs `analysis/enrich_sitl_telemetry.py` to produce the
+canonical `telemetry.csv`. Enrichment uses LinkHub simulation-clock metadata
+and latest-observation sampling; it never runs in the lockstep process.
 
 The dependency-free `linkhub_client` project supplies the common record
 dataclasses and HTTP client. It must not import `pymavlink`; protocol framing
@@ -211,7 +211,7 @@ post-release flight failure a real controller/physics bug — then move on to
 `analyse_run.py`.
 
 **Run `analyse_run.py` only after `diagnose_sitl.py` passes both gates.** It loads
-all log sources (telemetry CSV, mavlink.jsonl, mediator.log, arducopter.log) into
+all log sources (telemetry CSV, LinkHub journal, mediator.log, arducopter.log) into
 a unified `FlightLog` and prints a single bucketed report.
 
 ```
@@ -228,7 +228,7 @@ first — diagnosing from bad telemetry produces wrong conclusions.
 |------|---------|
 | Pump cycle diagnosis | `.venv/Scripts/python.exe analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
 | Landing diagnosis | `.venv/Scripts/python.exe analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
-| Raw MAVLink inspection (STATUSTEXT, message presence, NVF/param events) | `.venv/Scripts/python.exe analysis/mavlink_jsonl_query.py ... <test_name>/*.mavlink.jsonl` -- see [analysis/mavlink_jsonl_query.md](../analysis/mavlink_jsonl_query.md) |
+| Raw MAVLink inspection (STATUSTEXT, message presence, NVF/param events) | `linkhub query simulation/logs/<test_name>/linkhub/<run-id> ...` -- see [design/linkhub.md](linkhub.md) |
 | Visualize result | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
 | EKF gating reference | [design/EKF_GATING.md](EKF_GATING.md), [design/ekf_const_pos_mode.md](ekf_const_pos_mode.md) |
 

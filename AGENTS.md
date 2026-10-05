@@ -62,14 +62,18 @@ Run `uv sync` explicitly after changing dependencies or pulling a lockfile updat
 ## Read Order (for agents)
 
 1. `design/flight_stack.md` (system behavior and control ownership)
-2. `design/simulation.md` (simulation internals and module responsibilities)
-3. `design/sitl_testing.md` (stack workflow and diagnosis)
-4. Topic-specific docs from the ownership map below
+2. `design/arming.md` before any arm/disarm, passive-startup, or hardware work
+3. `design/simulation.md` (simulation internals and module responsibilities)
+4. `design/sitl_testing.md` (stack workflow and diagnosis)
+5. Topic-specific docs from the ownership map below
 
 For ongoing Pixhawk startup and direction-glitch investigation, read the
 root-level [`HARDWARE_STARTUP.md`](HARDWARE_STARTUP.md) before touching
 hardware. It records verified observations, the required safe-off state, and
 the next safe diagnostic steps; update it after each hardware session.
+`design/arming.md` owns the current arm/disarm model and procedures; update it
+in the same change whenever a source or test finding changes a critical
+ArduPilot arm/disarm fact.
 
 ## Code Search: Prefer ast-grep over grep/ripgrep
 
@@ -148,6 +152,7 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Topic | Primary doc | Supporting docs |
 |---|---|---|
 | Flight architecture, mode ownership, AP/Lua boundaries | `design/flight_stack.md` | `design/tension_collective_control_loop.md`, `design/GUIDED_CONTROL_LOOPS.md` |
+| Arming, disarming, safe-off, and passive/bench startup | `design/arming.md` | `HARDWARE_STARTUP.md`, `design/calibration.md`, `design/flight_stack.md` |
 | Simulation internals (physics, sensors, controller plumbing, module map) | `design/simulation.md` | `simulation/README.md`, code docstrings |
 | SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `analysis/diagnose_sitl.py` usage text |
 | SITL IC-start timeline and event anchors | `design/sitl_flight_timeline.md` | `design/sitl_testing.md`, `tests/sitl/flight/conftest.py` |
@@ -159,7 +164,7 @@ Use the primary doc for each topic. Other docs should link, not restate.
 | Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
 | LinkHub transport, journal, diagnostics, and HTTP architecture | `design/linkhub.md` | `linkhub/README.md`, `design/sitl_testing.md` |
 | Milestones and decisions history | `design/history.md` | this file (summary only) |
-| MAVLink `*.mavlink.jsonl` log inspection (calibrate `run`, SITL stack tests) | `analysis/mavlink_jsonl_query.md` | `design/calibration.md` |
+| LinkHub journal and MAVLink inspection | `design/linkhub.md` | `linkhub/README.md`, `design/calibration.md` |
 
 Parameter-reference ownership note:
 - Canonical place for ArduPilot parameter defaults and inline explanations is `tests/sitl/copter-heli.parm`.
@@ -168,13 +173,12 @@ Parameter-reference ownership note:
 
 ## MAVLink Log Diagnosis (Agent Critical)
 
-For ANY problematic run that produced a `*.mavlink.jsonl` log (calibrate `run`,
-SITL stack tests), use `analysis/mavlink_jsonl_query.py` as the first-line
-diagnostic tool -- before writing one-off jsonl-parsing code or manually
-grepping the raw file. See `analysis/mavlink_jsonl_query.md` for the full
-interface (subcommands, filters, gotchas); do not duplicate its contents
-here. If a diagnosis need doesn't fit an existing subcommand, prefer
-extending the script (new subcommand/filter) over a standalone script.
+For ANY problematic hardware or SITL run, query LinkHub's canonical journal
+with `linkhub query` before writing one-off parsing code. Use the native
+`types`, `show`, `count`, `stats`, `armed`, `statustext`, `nvf`, `param`, and
+`diagnostics` subcommands; pipe `show --json` into `jq` for composed analysis.
+See `design/linkhub.md` for the full interface. New runs must not export a
+duplicate `mavlink.jsonl`.
 
 ## Core Invariants (summary)
 

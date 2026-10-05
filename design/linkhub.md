@@ -87,6 +87,7 @@ The foundation provides:
 - `GET /health/live`;
 - `GET /health/ready`;
 - `GET /v1/status`;
+- `GET /v1/schema`;
 - `GET /v1/records`;
 - `GET|POST /v1/diagnostics/events`;
 - `GET|POST /v1/mavlink/frames`;
@@ -114,18 +115,112 @@ or the deadline expires. It does not create server-side subscription state.
 Response `limit` bounds the number of matching records; LinkHub never advances
 `next_cursor` past a matching record it did not return. Raw frame bodies are
 base64 in JSON; completed journal chunks keep the original binary frame bytes.
+Journal traversal is also bounded independently of the response limit. A sparse
+filtered read can therefore return an empty batch with an advanced cursor before
+reaching the live tail; clients continue from `next_cursor` rather than
+rescanning irrelevant high-rate telemetry.
+
+Decoded-message reads accept `collapse=true` for consumers that only need
+current state. Within each bounded batch, LinkHub keeps the newest recognized
+snapshot per link, direction, sender, message type, and message-specific key
+(for example `NAMED_VALUE_FLOAT.name` or `PID_TUNING.axis`). Event and
+transaction messages such as `STATUSTEXT`, `COMMAND_ACK`, parameter traffic,
+and file transfers are never collapsed. Calibration recording uses filtered
+batches without collapse because its CSV and smoothness checks require every
+sample.
 
 Python clients do not mirror the journal in a local message queue and do not
 retain a global receive cursor. Each logical operation owns an opaque cursor and
 passes it explicitly on every finite batch read. Heartbeat-derived mode/arming
 state and the latest vehicle boot time are exposed by
 `/v1/mavlink/status`, so polling state never depends on which telemetry a client
-chooses to consume. Test MAVLink JSONL artifacts are exported from the journal
-cursor range with an explicit export cursor instead of being assembled by a
-client receive thread.
+chooses to consume. Calibration CSV headers record their LinkHub start cursor,
+and SITL preserves the run's `linkhub/<run-id>/journal/` directory. New runs do
+not export a duplicate `mavlink.jsonl`.
+
+## Generated protocol boundary
+
+LinkHub's Rust descriptor in `linkhub/src/protocol.rs` owns the public enum
+codes, known MAVLink message field types, aliases, and defaults. It generates:
+
+- `linkhub/schema/protocol-v1.schema.json`;
+- `linkhub_client/src/linkhub_client/generated_protocol.py`;
+- the live `GET /v1/schema` response.
+
+Regenerate checked artifacts with:
+
+```powershell
+cargo run --manifest-path .\linkhub\Cargo.toml -- schema `
+  --output .\linkhub\schema\protocol-v1.schema.json `
+  --python-output .\linkhub_client\src\linkhub_client\generated_protocol.py
+```
+
+Rust tests fail when either checked artifact drifts from the descriptor.
+Known messages decode to generated dataclasses and numeric MAVLink enums decode
+to generated forward-compatible `IntEnum` values. Unknown enum values become
+`UNKNOWN_<value>` pseudo-members; unknown message types remain `RawMessage`.
+Do not hand-edit the generated artifacts or duplicate these public types in
+Python.
 
 Rate leases remain future work; calibration uses explicit message-rate
 configuration.
+
+## Offline journal query
+
+`linkhub query` reads immutable `.lhc` chunks directly. Pass a journal
+directory, its parent run directory, or a data directory containing exactly
+one run:
+
+```powershell
+.\linkhub\target\release\linkhub.exe query <journal-path> types
+.\linkhub\target\release\linkhub.exe query <journal-path> armed
+.\linkhub\target\release\linkhub.exe query <journal-path> statustext
+.\linkhub\target\release\linkhub.exe query <journal-path> nvf --name YFF_U
+.\linkhub\target\release\linkhub.exe query <journal-path> param --id RAWES_MODE
+```
+
+All commands accept a cursor-bounded journal slice through the parent query
+options `--after <sequence>` and `--through <sequence>`. Calibration prints
+the corresponding `v1:<sequence>` start/end cursors.
+
+`show`, `count`, and `stats` support message type, RX/TX direction, relative
+ingest-time range, exact field, and case-insensitive content filters. `show
+--json` emits flat decoded MAVLink JSON Lines with journal sequence, host
+ingest time, and LinkHub simulation-clock metadata. This is the composition
+boundary for PowerShell or `jq`; no project-specific query script is needed:
+
+```powershell
+# Yaw PID P/I contribution ranges.
+$yawPid = .\linkhub\target\release\linkhub.exe query <journal-path> show `
+  --type PID_TUNING --dir rx --eq axis=3 --json |
+  ForEach-Object { $_ | ConvertFrom-Json }
+$yawPid | ForEach-Object { [math]::Abs($_.P) } |
+  Measure-Object -Maximum
+
+# Largest adjacent output-9 step.
+$pwm = @(
+  .\linkhub\target\release\linkhub.exe query <journal-path> show `
+  --type SERVO_OUTPUT_RAW --dir rx --json |
+  ForEach-Object { ($_ | ConvertFrom-Json).servo9_raw }
+)
+1..($pwm.Count - 1) |
+  ForEach-Object { [math]::Abs($pwm[$_] - $pwm[$_ - 1]) } |
+  Measure-Object -Maximum
+```
+
+The equivalent `jq` composition remains available in any shell:
+
+```bash
+linkhub query <journal-path> show \
+  --type PID_TUNING --dir rx --eq axis=3 --json |
+  jq -s '{max_abs_p: (map(.P | fabs) | max), max_abs_i: (map(.I | fabs) | max)}'
+```
+
+`statustext` reassembles ArduPilot's multi-chunk messages before printing.
+`diagnostics` queries structured LinkHub diagnostic events by source, event,
+level, or content. Use the live HTTP DataFlash endpoints before shutting down
+a SITL container; offline journal queries and DataFlash recovery are
+complementary.
 
 ## Protocol boundary
 
