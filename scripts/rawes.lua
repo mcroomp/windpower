@@ -6,6 +6,10 @@ Mode is selected at runtime via RAWES_MODE (script-generated parameter):
     0  none        -- script passive: no control-channel overrides; CH8 interlock hold still applies while armed
     1  steady      -- primary guided flight path (set_target_rate_and_throttle)
     2  acro_manual -- normalized NVP controls through ACRO flybar passthrough
+    5  takeoff     -- fixed level attitude (body_z=[0,0,1]) + altitude-PID collective climb;
+                      no anchor/elevation tracking or lateral position hold.  Ground station
+                      switches RAWES_MODE to steady (and tightens the winch) once a minimum
+                      height is reached -- see run_takeoff().
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
     4  landing     -- reserved, not yet implemented
 
@@ -68,7 +72,7 @@ Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
   without capturing again.
 
 Parameters (script-generated; visible in GCS as RAWES_* params):
-  RAWES_MODE    Mode selector (0=none,1=steady,2=acro-manual,3=passive,4=landing) default 0
+    RAWES_MODE    Mode selector (0=none,1=steady,2=acro-manual,3=passive,4=landing,5=takeoff) default 0
   RAWES_YAW_SLP Yaw motor slope [RPM/µs] (0=bench default 0.504)       default 0
   RAWES_KP_ALT  Altitude-P gain                                         default 0.0263
   RAWES_KI_ALT  Altitude-I gain                                         default 0.0026
@@ -135,6 +139,7 @@ MODE_STEADY  = 1
 MODE_ACRO_MANUAL = 2
 MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable during release.
 MODE_LANDING = 4   -- reserved; not implemented here
+MODE_TAKEOFF = 5   -- fixed level attitude + altitude-PID climb; see run_takeoff().
 
 -- MODE_PASSIVE receives thrust plus relative roll/pitch/yaw offsets.  Lua
 -- captures the AHRS quaternion anchor locally when absolute hold is enabled.
@@ -230,6 +235,14 @@ local _armed_since_ms = nil
 _last_thrust = 0.0
 _thrust_trim = 0.0
 _alt_i       = 0.0
+
+-- MODE_TAKEOFF state (run_takeoff()) -- own thrust/integrator state, kept
+-- separate from MODE_STEADY's _last_thrust/_alt_i so a mode switch never
+-- carries over a stale integrator or thrust value between the two loops.
+_to_initialized = false   -- true once first GPS/position fix received
+_to_alt_i       = 0.0     -- altitude-PID integrator [thrust units]
+_to_last_thrust = 0.0     -- slew-limited thrust command [0..1]
+_to_thrust_trim = 0.0     -- IC thrust captured on first fix [0..1]
 
 -- Altitude hold state
 _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
@@ -570,6 +583,8 @@ local _diag_nvf_keys = {
     "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
     "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded thrust
     "OL_TEN",                            -- ramped tension feedforward [N]
+    "OL_EL",                             -- current rate-limited elevation angle [rad]
+    "BZG_N", "BZG_E", "BZG_D",           -- body_z_eq goal (NED unit vector)
     "ANCH_N", "ANCH_E", "ANCH_D"        -- resolved anchor NED offset from EKF origin [m]
 }
 
@@ -732,6 +747,13 @@ local function _on_mode_enter(mode)
         _dbg_cmd_logged = false
         _capture_ms = millis()
         gcs:send_text(6, string.format("RAWES steady: IC thrust=%.3f", ic_thrust_or_default()))
+    end
+    if mode == MODE_TAKEOFF then
+        _to_initialized = false
+        _to_alt_i       = 0.0
+        _to_last_thrust = 0.0
+        _to_thrust_trim = 0.0
+        gcs:send_text(6, "RAWES takeoff: level climb start")
     end
     if mode == MODE_PASSIVE then
         _passive_status_ms    = 0
@@ -1025,6 +1047,10 @@ local function run_flight()
     _diag_set("OL_AI", alt_i)
     _diag_set("OL_AD", alt_d)
     _diag_set("OL_COL", _last_thrust)
+    _diag_set("OL_EL", _el_rad)
+    _diag_set("BZG_N", bz_goal:x())
+    _diag_set("BZG_E", bz_goal:y())
+    _diag_set("BZG_D", bz_goal:z())
 
     -- ANCH_N/E/D: the resolved anchor NED offset from the EKF origin (see
     -- _try_resolve_anchor()).  pos_ned itself is already telemetered via the
@@ -1050,6 +1076,86 @@ local function run_flight()
             "RAWES: cmd_rp=(%.1f,%.1f) now_rp=(%.1f,%.1f) d_rp=(%.1f,%.1f) thr=%.3f el=%.1f alt=%.1f%s",
             roll_deg, pitch_deg, roll_now_deg, pitch_now_deg,
             d_roll, d_pitch, _last_thrust, math.deg(_el_rad), _target_alt, sub_info))
+    end
+end
+
+-- ── Takeoff subsystem (MODE_TAKEOFF) ─────────────────────────────────────────
+-- Holds a fixed level attitude (body_z = [0,0,1] NED -> roll=pitch=0, thrust
+-- straight up) and climbs toward RAWES_ALT via the same altitude-PID
+-- collective loop as run_flight, but with no anchor/elevation tracking and no
+-- lateral position hold -- drifting downwind during the vertical climb is
+-- expected and not corrected.  The ground station is responsible for
+-- switching RAWES_MODE to MODE_STEADY (and re-tensioning the winch) once the
+-- hub reaches whatever minimum height it has chosen; this mode only executes
+-- the climb, it never transitions itself.
+local function run_takeoff()
+    local mode = vehicle:get_mode()
+    if mode ~= GUIDED_MODE_NUM and mode ~= 20 then return end
+    if not ahrs:healthy() then return end
+
+    local yaw_now = ahrs:get_yaw_rad()
+    if yaw_now == nil then return end
+
+    local dt      = FLIGHT_PERIOD_MS * 0.001
+    local pos_ned = ahrs:get_relative_position_NED_origin()
+    if not pos_ned then
+        -- No position fix yet -- hold level attitude at IC thrust; the
+        -- altitude PID cannot run without a position fix.
+        send_guided_angle_rate_throttle(0.0, 0.0, math.deg(yaw_now),
+            0.0, 0.0, 0.0, ic_thrust_or_default(), "takeoff_pre_gps")
+        return
+    end
+
+    if not _to_initialized then
+        _to_initialized = true
+        _to_thrust_trim = math.max(0.0, math.min(1.0, ic_thrust_or_default()))
+        _to_last_thrust = _to_thrust_trim
+        _to_alt_i       = 0.0
+        gcs:send_text(6, string.format("RAWES takeoff: capture thr=%.3f", _to_thrust_trim))
+    end
+
+    -- Altitude relative to the EKF origin (no anchor subtraction -- takeoff
+    -- starts at/near the anchor, and elevation geometry is irrelevant while
+    -- the disk is held level).
+    local alt_m = -pos_ned:z()
+    local vz_up = 0.0
+    local vel_ned = ahrs:get_velocity_NED()
+    if vel_ned then vz_up = -vel_ned:z() end
+
+    local alt_err = _target_alt - alt_m
+    _to_alt_i = _to_alt_i + KI_ALT * alt_err * dt
+    local i_min = 0.0 - _to_thrust_trim
+    local i_max = 1.0 - _to_thrust_trim
+    if _to_alt_i < i_min then _to_alt_i = i_min end
+    if _to_alt_i > i_max then _to_alt_i = i_max end
+
+    local alt_p = KP_ALT * alt_err
+    local alt_d = -KD_VZ * vz_up
+    local thrust_cmd = _to_thrust_trim + alt_p + _to_alt_i + alt_d
+    if thrust_cmd < 0.0 then thrust_cmd = 0.0 end
+    if thrust_cmd > 1.0 then thrust_cmd = 1.0 end
+
+    local thrust_delta = thrust_cmd - _to_last_thrust
+    if thrust_delta >  THRUST_SLEW_MAX then thrust_delta =  THRUST_SLEW_MAX end
+    if thrust_delta < -THRUST_SLEW_MAX then thrust_delta = -THRUST_SLEW_MAX end
+    _to_last_thrust = _to_last_thrust + thrust_delta
+
+    send_guided_angle_rate_throttle(0.0, 0.0, math.deg(yaw_now),
+        0.0, 0.0, 0.0, _to_last_thrust, "takeoff_climb")
+
+    _diag_set("OL_AP", alt_p)
+    _diag_set("OL_AI", _to_alt_i)
+    _diag_set("OL_AD", alt_d)
+    _diag_set("OL_COL", _to_last_thrust)
+    _diag_set("OL_EL", 0.0)   -- MODE_TAKEOFF holds a level disk; no elevation geometry tracked
+    _diag_set("BZG_N", 0.0)   -- MODE_TAKEOFF has no body_z_eq goal (level-disk climb, no tension geometry)
+    _diag_set("BZG_E", 0.0)
+    _diag_set("BZG_D", 0.0)
+
+    if _diag % 250 == 1 then
+        gcs:send_text(6, string.format(
+            "RAWES takeoff: alt=%.2f target=%.2f thr=%.3f",
+            alt_m, _target_alt, _to_last_thrust))
     end
 end
 
@@ -1308,6 +1414,10 @@ local function run_passive_mode(now)
         _diag_set("OL_AI", 0.0)
         _diag_set("OL_AD", 0.0)
         _diag_set("OL_COL", ic_thrust_or_default())
+        _diag_set("OL_EL", 0.0)
+        _diag_set("BZG_N", 0.0)
+        _diag_set("BZG_E", 0.0)
+        _diag_set("BZG_D", 0.0)
         return false
     end
 
@@ -1322,6 +1432,10 @@ local function run_passive_mode(now)
     _diag_set("OL_AI", 0.0)
     _diag_set("OL_AD", 0.0)
     _diag_set("OL_COL", col_thrust_p)
+    _diag_set("OL_EL", 0.0)
+    _diag_set("BZG_N", 0.0)
+    _diag_set("BZG_E", 0.0)
+    _diag_set("BZG_D", 0.0)
     guided_ok = hold_guided_quaternion(_passive_target_q, col_thrust_p, "passive_hold", now)
         and ahrs:healthy()
     _passive_guided_ok = guided_ok
@@ -1581,6 +1695,14 @@ local function update()
         end
     end
 
+    if mode == MODE_TAKEOFF then
+        run_yaw_trim(now, false)
+        if now - _last_flight_ms >= FLIGHT_PERIOD_MS then
+            _last_flight_ms = now
+            run_takeoff()
+        end
+    end
+
     -- MODE_LANDING (4): not yet implemented
 
     _diag_emit(now)
@@ -1591,7 +1713,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 local _mode_init  = math.floor(p("RAWES_MODE", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="steady", [2]="acro_manual", [3]="passive", [4]="landing"}
+local _mode_names = {[0]="none", [1]="steady", [2]="acro_manual", [3]="passive", [4]="landing", [5]="takeoff"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(

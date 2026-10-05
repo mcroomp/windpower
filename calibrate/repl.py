@@ -67,14 +67,7 @@ Long-running (always log; ESC or Ctrl-C aborts):
 
         --duration N       run for N seconds; omit for unbounded
         --force            bypass ArduPilot pre-arm checks on secured bench hardware
-        --trim K=V,K=V     cyclic trim + IC thrust sent as NAMED_VALUE_FLOAT
-                           to rawes.lua.  Repeatable.
-                             tlon  longitudinal cyclic [deg].  >0 = nose-down
-                                   (forward-stick); <0 = nose-up.
-                                   Range +/- H_CYC_MAX_cd/100 (passive: +/- 10).
-                                   Typical bench: 0.5 .. 3 deg.
-                             tlat  lateral cyclic [deg].  >0 = roll-right.
-                                   Same range/limits as tlon.
+        --trim K=V,K=V     IC thrust sent as NAMED_VALUE_FLOAT to rawes.lua.
                              thr   IC thrust [0..1] (passive mode only; sent as
                                    RAWES_THR before arming).
                                    col_min=-0.28 rad (-16 deg) at thrust=0,
@@ -99,16 +92,6 @@ Long-running (always log; ESC or Ctrl-C aborts):
         --rotor-speed N    Initial external rotor-drive speed, 0..100 (default 10).
         --rotor-direction D
                            External rotor-drive direction: cw (default) or ccw.
-        --osc TARGET       Walk a sequence of trim setpoints, 5 s/step;
-                           overrides --trim.  Targets:
-                             all  full 13-step sweep through tlon/tlat/col
-                                  extremes (~65 s)
-                             s1   isolated S1 up/down (~25 s, 5 steps)
-                             s2   isolated S2 up/down
-                             s3   isolated S3 up/down (longitudinal axis)
-                           The s1/s2/s3 sequences use mixer-isolated
-                           combinations so the target servo dominates while
-                           the other two stay near center.
 
                 Modes:
           acro-manual
@@ -136,12 +119,6 @@ Long-running (always log; ESC or Ctrl-C aborts):
           # Live yaw PID tuning during steady/pumping runs:
           #   q/a = P +/- 0.002,  w/s = I +/- 0.0005,  e/d = D +/- 0.001
 
-          # Full oscillation sweep through every axis extreme (~65 s)
-          run passive --osc all
-
-          # Isolated S2 swashplate-servo test (~25 s, S2 dominant up/down)
-          run passive --osc s2
-
   watch <stream> [--duration N]
         Read-only observation; no state change.  Default duration 10 s.
         streams: servos    SERVO_OUTPUT_RAW for ch1..8
@@ -166,6 +143,10 @@ One-shot:
     swash fit-range <min> <max> --cyclic N --allow-full-range
                                     Fit/verify H_COL limits using native oscillation
     servo hold <ch> <pwm> [--duration N]  Hold ch; disconnect/restore swash ch1-3
+  swash test [--duration N] --allow-full-range
+                                  Alias for `servo mode oscillate` (native
+                                  H_SV_MAN=5, disarmed only)
+  swash test off                  Restore H_SV_MAN=0 after an interrupted test
   motor <pwm_us> [--duration N]   Arm via MAVLink + drive the motor output at
                                   pwm_us for N s (default 5).  DShot ESC self-arms
                                   from idle -- no ESC pre-arm hold.
@@ -496,22 +477,42 @@ def _fmt_az(az):
     return f"{az:+.0f} deg"
 
 
+def _cmd_swash_test(session: LinkHubClient, args: list[str]) -> None:
+    """swash test [--duration N] --allow-full-range
+       swash test off
+
+    Alias for `servo mode oscillate`: ArduPilot's own H_SV_MAN=5 swash
+    exercise through the FC's H3-120 mixer.  Disarmed only (AP resets
+    H_SV_MAN on arm).  `off` restores H_SV_MAN=0 after an interrupted run.
+    """
+    if args and args[0].lower() == "off":
+        ok = _set_heli_servo_mode(session, 0.0)
+        print(f"  {'[OK]  ' if ok else '[FAIL]'} H_SV_MAN=0 (native swash test stopped)")
+        return
+    _cmd_servo(session, ["mode", "oscillate", *args])
+
+
 def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
     """swash <coll%> [lon%] [lat%]
        swash range <min> <max>
        swash neutral [n]
        swash fit-range <min> <max> --cyclic N --allow-full-range
-       swash info"""
+       swash info
+       swash test [--duration N] --allow-full-range | swash test off"""
     if not args:
         print("  Usage: swash <coll%> [lon%] [lat%]")
         print("         swash range <min_us> <max_us>")
         print("         swash neutral [n]")
         print("         swash fit-range <min_us> <max_us> --cyclic N --allow-full-range")
         print("         swash info")
+        print("         swash test [--duration N] --allow-full-range  |  swash test off")
         return
     sub = args[0].lower()
     if sub == "info":
         _print_swash_layout(session)
+        return
+    if sub == "test":
+        _cmd_swash_test(session, args[1:])
         return
     if sub == "range":
         if len(args) != 3:

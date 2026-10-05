@@ -62,7 +62,6 @@ from types import SimpleNamespace
 DT_TARGET    = 1.0 / SIM_CLOCK_HZ   # fixed lockstep loop rate [s]
 TELEMETRY_HZ = 100.0           # diagnostic CSV rate; physics runs at SIM_RATE_HZ
 LOG_INTERVAL = 1.0             # position/attitude log interval [s]
-WEIGHT_N     = 294.3           # rotor weight [N] = 30 kg * 9.81 m/s²
 
 
 # GB4008 yaw-damper gain [N·m·s/rad].  Large value → near-perfect yaw lock.

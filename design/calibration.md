@@ -116,12 +116,10 @@ the same production path.
 | `steady` | 1 | observer active |
 | `landing` | 4 | no |
 
-`--trim` keys, applies to all modes:
+`--trim` keys (passive only):
 
 | Key | NVF sent | Meaning |
 |---|---|---|
-| `tlon` | `RAWES_TLN` | cyclic trim longitudinal |
-| `tlat` | `RAWES_TLT` | cyclic trim lateral |
 | `thr`  | `RAWES_THR` | IC thrust [0..1] (passive only) |
 
 `run` uses current FC parameters as-is and does not apply per-run parameter
@@ -130,7 +128,7 @@ calibrate `RAWES_YAW_SLP` (slope) from a bench measurement.
 
 ```bash
 # Bench check: hold IC swashplate, observer active, 30 s
-python -m calibrate --server http://127.0.0.1:8999 run passive --duration 30 --force --trim tlon=0.02,thr=0.342
+python -m calibrate --server http://127.0.0.1:8999 run passive --duration 30 --force --trim thr=0.342
 
 # Steady-flight bench, unbounded (ESC to stop)
 python -m calibrate --server http://127.0.0.1:8999 run steady
@@ -540,8 +538,8 @@ python -m calibrate --server http://127.0.0.1:8999 script upload scripts/rawes.l
 python -m calibrate --server http://127.0.0.1:8999 script list
 
 # 8. Quiet armed bench check
-python -m calibrate --server http://127.0.0.1:8999 run passive --duration 30 --trim tlon=0.02,thr=0.342
+python -m calibrate --server http://127.0.0.1:8999 run passive --duration 30 --trim thr=0.342
 
 # 9. Passive hold check with current controller settings
-python -m calibrate --server http://127.0.0.1:8999 run passive --duration 60 --trim tlon=0.02,thr=0.342
+python -m calibrate --server http://127.0.0.1:8999 run passive --duration 60 --trim thr=0.342
 ```

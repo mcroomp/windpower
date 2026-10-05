@@ -139,7 +139,6 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         v_rad  = float(np.dot(r.hub_state["vel"][:2], pos_h / r_norm))
         return {
             **ap.log_fields(),
-            **winch.log_fields(),
             "phase":          phase_label,
             "gnd_alt_cmd_m":  ic_alt,
             "roll_sp_rads":   ap.roll_sp,
@@ -148,6 +147,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         }
 
     ap.tel_fn = _tel_fn
+    ap.winch  = winch   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
     comms     = VirtualComms()
     max_steps = int(T_END_SIM / DT) + 1
 

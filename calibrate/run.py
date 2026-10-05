@@ -1,5 +1,5 @@
 """
-calibrate/run.py -- Observation loop engine, run command, oscillate.
+calibrate/run.py -- Observation loop engine, run command.
 """
 from __future__ import annotations
 
@@ -53,8 +53,7 @@ from .constants import (
     StatusText,
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
-    _RUN_MODES, _TRIM_NVF, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
-    _OSCILLATE_TARGETS, _OSCILLATE_STEP_S,
+    _RUN_MODES, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
     _COPTER_MODES,
 )
 from .hw import (
@@ -806,35 +805,6 @@ def _observation_loop(session: LinkHubClient, *,
 
 
 # ---------------------------------------------------------------------------
-# Oscillate callback
-# ---------------------------------------------------------------------------
-
-def _make_oscillate_tick(session: LinkHubClient, steps: list):
-    """Return an on_tick(t_rel) callback that advances through `steps`
-    (a list of (tlon_deg, tlat_deg, thr, label) tuples) at
-    _OSCILLATE_STEP_S sec/step.  Sends RAWES_TLN/TLT NVFs (in radians) and
-    RAWES_THR (thrust [0..1]) on each step boundary.  Once the sequence ends
-    the callback is a no-op (the duration timer in _observation_loop expires
-    shortly after)."""
-    last_step: list[int | None] = [None]
-    def _tick(t_rel: float) -> None:
-        idx = int(t_rel / _OSCILLATE_STEP_S)
-        if idx >= len(steps):
-            return
-        if idx == last_step[0]:
-            return
-        last_step[0] = idx
-        tlon_d, tlat_d, thr_d, label = steps[idx]
-        session.send_message(NamedValueFloat("RAWES_TLN", math.radians(tlon_d)))
-        session.send_message(NamedValueFloat("RAWES_TLT", math.radians(tlat_d)))
-        session.send_message(NamedValueFloat("RAWES_THR", float(thr_d)))
-        print(f"  [{t_rel:6.1f}s] osc {idx+1}/{len(steps)}  "
-              f"tlon={tlon_d:+5.1f}  tlat={tlat_d:+5.1f}  thr={thr_d:.3f}  "
-              f"({label})")
-    return _tick
-
-
-# ---------------------------------------------------------------------------
 # Generic run observation loop
 # ---------------------------------------------------------------------------
 
@@ -851,8 +821,8 @@ def _run_observation(session: LinkHubClient, mode_name: str,
     same across all modes; the row content is whatever the FC reports.  Per-
     mode NVFs (e.g. YAW_I, YAW_OUT) appear as columns when emitted.
 
-    on_tick(t_rel) is called once per loop iteration (~10 Hz); used by
-    oscillate mode to advance the trim sequence.
+    on_tick(t_rel) is called once per loop iteration (~10 Hz); used e.g. by
+    the `motor` command to refresh PWM.
 
     Serial bandwidth is tight (57600 SiK ~= 5760 B/s, ~70% used by default),
     which drops NVF/telemetry.  So we trim streams we do not need for tuning:
@@ -1699,12 +1669,11 @@ def _cmd_run(
     stop_requested=None,
     log_dir: str | Path | None = None,
 ) -> None:
-    """run <mode> [--duration N] [--trim K=V,...] [--osc TARGET]"""
+    """run <mode> [--duration N] [--trim thr=V]"""
     schema = {
         "--duration":         "float",
         "--force":            "bool",    # explicitly bypass ArduPilot pre-arm checks
         "--trim":             "kv",
-        "--osc":              "str",
         "--yaw":              "float",   # passive yaw offset from Lua anchor [deg]
         "--roll":             "float",   # passive roll offset from Lua anchor [deg]
         "--pitch":            "float",   # passive pitch offset from Lua anchor [deg]
@@ -1720,8 +1689,7 @@ def _cmd_run(
         "--rotor-direction":   "str",    # cw or ccw
     }
     if not args:
-        print("  Usage: run <name> [--duration N] [--trim K=V,...] "
-              "[--osc {all|s1|s2|s3}] [--protocol-debug]")
+        print("  Usage: run <name> [--duration N] [--trim thr=V] [--protocol-debug]")
         print("  Modes:")
         for name, cfg in _RUN_MODES.items():
             print(f"    {name:<8} -- {cfg['doc']}")
@@ -1731,8 +1699,7 @@ def _cmd_run(
     except ValueError as e:
         print(f"  Error: {e}"); return
     if len(pos) != 1:
-        print("  Usage: run <name> [--duration N] [--trim K=V,...] "
-              "[--osc {all|s1|s2|s3}] [--protocol-debug]")
+        print("  Usage: run <name> [--duration N] [--trim thr=V] [--protocol-debug]")
         return
     name = pos[0].lower()
     cfg = _RUN_MODES.get(name)
@@ -1788,7 +1755,6 @@ def _cmd_run(
     if auto_sequence and duration is None:
         duration = len(_PASSIVE_PROTOCOL_SEQUENCE) * step_hold_s + 1.0
     trim             = flags.get("--trim", {}) or {}
-    osc              = flags.get("--osc")
     manual_controls = (
         {"roll": 0.0, "pitch": 0.0, "collective": 0.5}
         if cfg.get("manual_control")
@@ -1796,24 +1762,8 @@ def _cmd_run(
     )
     passive_target = None
 
-    osc_steps = None
-    if osc is not None:
-        osc = osc.lower()
-        if osc not in _OSCILLATE_TARGETS:
-            print(f"  Unknown --osc target {osc!r}  "
-                  f"(valid: {', '.join(_OSCILLATE_TARGETS)})")
-            return
-        osc_steps = _OSCILLATE_TARGETS[osc]
-        if duration is None:
-            duration = len(osc_steps) * _OSCILLATE_STEP_S
-        if trim:
-            print(f"  [WARN] --trim {list(trim)} ignored because --osc is set")
-            trim = {}
-
-    # Validate trim keys: angle keys (tlon/tlat) + ic-seed thrust key (thr, passive only)
-    allowed_trim = set(_TRIM_NVF)
-    if cfg.get("ic_seed"):
-        allowed_trim |= _IC_TRIM_KEYS
+    # Validate trim keys: ic-seed thrust key (thr, passive only)
+    allowed_trim = set(_IC_TRIM_KEYS) if cfg.get("ic_seed") else set()
     bad = [k for k in trim if k not in allowed_trim]
     if bad:
         print(f"  Unknown --trim keys: {bad}  (valid: {', '.join(sorted(allowed_trim))})")
@@ -1825,7 +1775,6 @@ def _cmd_run(
         "name":            name,
         "duration_s":      duration if duration is not None else "",
         "trim_deg":        ", ".join(f"{k}={v}" for k, v in trim.items()),
-        "osc":             osc if osc is not None else "",
         "run_start_local": datetime.now().isoformat(timespec="seconds"),
         "run_start_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "RAWES_MODE":      cfg["rawes_mode"],
@@ -1924,16 +1873,6 @@ def _cmd_run(
             trim.pop("thr", None)
             return True
 
-    # Send angle trims.  Passive thrust is consumed later, after runup, with
-    # the attitude capture.
-        angle_trim = {key: value for key, value in trim.items() if key != "thr"}
-        if angle_trim:
-            print("  Sending trim NVFs (deg -> rad on the wire):")
-            for k, v_deg in angle_trim.items():
-                v_rad = math.radians(float(v_deg))
-                session.send_message(NamedValueFloat(_TRIM_NVF[k], v_rad))
-                print(f"    {_TRIM_NVF[k]} = {v_deg:+7.3f} deg  ({v_rad:+.4f} rad)")
-
     # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip
     # direct DO_SET_SERVO pre-arm pulses on SERVO4 to avoid ownership conflicts.
         esc_arm = (name not in ("passive", "acro-manual"))
@@ -2003,15 +1942,8 @@ def _cmd_run(
                 "ENTER_PASSIVE (Lua captures the passive anchor)",
             ):
                 return
-    # Build the oscillate tick callback if --osc was set
-        on_tick = None
-        if osc_steps is not None:
-            on_tick = _make_oscillate_tick(session, osc_steps)
-            total_s = len(osc_steps) * _OSCILLATE_STEP_S
-            print(f"  Oscillate target={osc!r}: walking {len(osc_steps)} steps "
-                  f"x {_OSCILLATE_STEP_S:.0f}s each (total {total_s:.0f}s).")
 
-        _run_observation(session, name, duration, log, on_tick=on_tick,
+        _run_observation(session, name, duration, log,
                          keep_rc=bool(flags.get("--rc", False) or manual_controls),
                          manual_controls=manual_controls,
                          passive_target=passive_target,

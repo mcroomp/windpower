@@ -99,7 +99,8 @@ def _run_landing(log) -> dict:
     sim.vehicle_mode = 4   # GUIDED
 
     lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
-    lua.tel_fn = lambda r, sr: dict(body_z_eq=None, phase=phase)
+    lua.winch  = winch   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
+    lua.tel_fn = lambda r, sr: dict(phase=phase)
 
     events    = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
