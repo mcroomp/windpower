@@ -112,6 +112,17 @@ Other current entry points:
 Prefer `diagnose_sitl.py`, `analyse_run.py`, and `linkhub query` over older
 helpers that still expect a legacy `mavlink.jsonl`.
 
+Journal records and `linkhub_client` messages carry MAVLink enumerations and
+bitmasks as names, not numbers: the client decodes them to
+`linkhub_client.messages` types (`MavCmd`, `MavResult`, `MavModeFlag`,
+`EkfStatusFlags`, ...; bitmasks are frozensets, test with `flag in
+message.base_mode`). Raw journal fields from `linkhub query ... show --json`
+use `{"type": "MAV_X"}` objects and `"A | B"` strings; decode them with
+`decode_message(RawMessage(...))`. Only the legacy `mavlink.jsonl` readers
+(`flight_log.py`, `diagnose_sitl.py`, `ekf_flags.py` integer masks) see numeric
+pymavlink values. Fixture STATUSTEXT log lines print the severity name
+(`[sev=MAV_SEVERITY_INFO]`).
+
 ## Lockstep protocol: one non-negotiable rule
 
 The physics worker must reply to **every** SITL servo packet. Missing one reply

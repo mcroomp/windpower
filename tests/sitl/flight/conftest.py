@@ -67,9 +67,9 @@ def _send_anchor_location(ctx) -> None:
     lat_e7 = round(HOME_LAT_DEG * 1e7)
     lon_e7 = round(HOME_LON_DEG * 1e7)
     alt_cm = round(anchor_alt_m * 100)
-    ctx.gcs.send_message(NamedValueInt("RAWES_LAT", lat_e7))
-    ctx.gcs.send_message(NamedValueInt("RAWES_LON", lon_e7))
-    ctx.gcs.send_message(NamedValueInt("RAWES_AAL", alt_cm))
+    ctx.gcs.send_message(NamedValueInt(name="RAWES_LAT", value=lat_e7))
+    ctx.gcs.send_message(NamedValueInt(name="RAWES_LON", value=lon_e7))
+    ctx.gcs.send_message(NamedValueInt(name="RAWES_AAL", value=alt_cm))
     ctx.log.info(
         "  anchor location sent via NVI (lat=%.7f lon=%.7f alt=%.1fm, "
         "home_alt_m=%.2f)",
@@ -365,13 +365,13 @@ def _ic_trapezoid_stack(
                 raise KeyError(
                     "initial_state missing thrust seed: eq_thrust"
                 )
-            ctx.gcs.send_message(NamedValueFloat("RAWES_THR", float(_ic_thrust)))
+            ctx.gcs.send_message(NamedValueFloat(name="RAWES_THR", value=float(_ic_thrust)))
             ctx.log.info("IC thrust: %.3f", _ic_thrust)
 
             _roll_offset, _pitch_offset, _yaw_offset = _ic_relative_rpy
-            ctx.gcs.send_message(NamedValueFloat("RAWES_ROFF", float(_roll_offset)))
-            ctx.gcs.send_message(NamedValueFloat("RAWES_POFF", float(_pitch_offset)))
-            ctx.gcs.send_message(NamedValueFloat("RAWES_YOFF", float(_yaw_offset)))
+            ctx.gcs.send_message(NamedValueFloat(name="RAWES_ROFF", value=float(_roll_offset)))
+            ctx.gcs.send_message(NamedValueFloat(name="RAWES_POFF", value=float(_pitch_offset)))
+            ctx.gcs.send_message(NamedValueFloat(name="RAWES_YOFF", value=float(_yaw_offset)))
 
             # Seed the yaw-motor trim equilibrium for the IC/release rotor spin
             # rate (same torque_model.equilibrium_throttle() calc physics_core.py
@@ -401,7 +401,7 @@ def _ic_trapezoid_stack(
             # reading, avoiding the ~2.5 m EKF vertical convergence-lag bias
             # present at capture time.
             _tension_eq = float(_ic["tension_eq_n"])
-            ctx.gcs.send_message(NamedValueFloat("RAWES_TEN", _tension_eq))
+            ctx.gcs.send_message(NamedValueFloat(name="RAWES_TEN", value=_tension_eq))
 
             # Anchor location is a static constant, sent EXACTLY ONCE here
             # (after the IC seed values are queued) -- it does not depend on
@@ -416,7 +416,7 @@ def _ic_trapezoid_stack(
             # needed).
             _alt_ic = float(ctx.home_alt_m)
 
-            ctx.gcs.send_message(NamedValueFloat("RAWES_ALT", _alt_ic))
+            ctx.gcs.send_message(NamedValueFloat(name="RAWES_ALT", value=_alt_ic))
             ctx.log.info("IC equilibrium tension: %.0f N  target altitude: %.1f m",
                          _tension_eq, _alt_ic)
         ctx.wait_drain(timeout=1.0, label="post-param")
@@ -448,7 +448,7 @@ def _ic_trapezoid_stack(
                 )
                 _gps_seen = True
                 break
-            if isinstance(_decoded, StatusText):
+            if isinstance(_decoded, Statustext):
                 ctx.all_statustext.append(_decoded.text)
                 ctx.log.info("STATUSTEXT [gps-fuse]: %s", _decoded.text)
         if not _gps_seen:

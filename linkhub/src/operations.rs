@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::{
     sync::{Mutex, MutexGuard, broadcast},
@@ -8,7 +8,17 @@ use tokio::{
 };
 
 use crate::{
-    codec::message_id_from_name,
+    codec::{
+        MavMessage,
+        dialect::{
+            AUTOPILOT_VERSION_DATA, COMMAND_ACK_DATA, COMMAND_LONG_DATA,
+            FILE_TRANSFER_PROTOCOL_DATA, LOG_DATA_DATA, LOG_REQUEST_DATA_DATA,
+            LOG_REQUEST_END_DATA, LOG_REQUEST_LIST_DATA, MavCmd, MavParamType,
+            MavProtocolCapability, MavResult, PARAM_REQUEST_LIST_DATA, PARAM_REQUEST_READ_DATA,
+            PARAM_SET_DATA, PARAM_VALUE_DATA,
+        },
+        message_id_from_name,
+    },
     dataflash::{
         DataFlashError, DataPacket, LogDownload, LogEntry, LogList, Target as DataFlashTarget,
     },
@@ -16,13 +26,21 @@ use crate::{
     mavlink::{LinkError, MavlinkLinkHandle, ReceivedMessage},
     records::wall_time_ns,
 };
-use linkhub_mavio_dialect::enum_bit_names;
+use linkhub_dialect::types::CharArray;
 
-const MAV_CMD_SET_MESSAGE_INTERVAL: u32 = 511;
-const MAV_CMD_GET_MESSAGE_INTERVAL: u32 = 510;
-const MAV_CMD_REQUEST_MESSAGE: u32 = 512;
 const MAVFTP_SOURCE_COMPONENT: u8 = 190;
 const MAVFTP_PACKET_RETRIES: usize = 3;
+
+// ArduPilot still answers the superseded MAV_CMD_GET_MESSAGE_INTERVAL; it
+// returns the interval as a MESSAGE_INTERVAL message.
+#[allow(deprecated)]
+const GET_MESSAGE_INTERVAL: MavCmd = MavCmd::MAV_CMD_GET_MESSAGE_INTERVAL;
+
+// Bit 2: the dialect deprecates PARAM_FLOAT, but it is a different bit from its
+// suggested replacement PARAM_ENCODE_C_CAST (131072), and vehicles still set it.
+#[allow(deprecated)]
+const PARAM_FLOAT: MavProtocolCapability =
+    MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_PARAM_FLOAT;
 
 #[derive(Clone)]
 pub struct MavlinkOperations {
@@ -35,9 +53,9 @@ pub struct MavlinkOperations {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CommandResult {
-    pub command: u32,
-    pub result: u64,
-    pub progress: u64,
+    pub command: MavCmd,
+    pub result: MavResult,
+    pub progress: u8,
     pub status: &'static str,
     pub after_cursor: String,
 }
@@ -47,10 +65,23 @@ pub struct ParameterResult {
     pub name: String,
     pub value: f64,
     #[serde(rename = "type")]
-    pub param_type: u64,
+    pub param_type: MavParamType,
     pub index: i64,
     pub count: u64,
     pub after_cursor: String,
+}
+
+/// One requested parameter write; `type` defaults to `MAV_PARAM_TYPE_REAL32`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ParameterSetting {
+    pub name: String,
+    pub value: f64,
+    #[serde(rename = "type", default = "default_parameter_type")]
+    pub param_type: MavParamType,
+}
+
+fn default_parameter_type() -> MavParamType {
+    MavParamType::MAV_PARAM_TYPE_REAL32
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +135,7 @@ impl MavlinkOperations {
 
     pub async fn command(
         &self,
-        command: u32,
+        command: MavCmd,
         params: &[f64],
         target_system: Option<u8>,
         target_component: Option<u8>,
@@ -118,23 +149,22 @@ impl MavlinkOperations {
         let deadline = time::Instant::now() + timeout;
         let _guard = lock_until(&self.command_lock, deadline).await?;
         let (target_system, target_component) = self.targets(target_system, target_component);
-        let mut fields = Map::new();
-        fields.insert("target_system".to_owned(), Value::from(target_system));
-        fields.insert("target_component".to_owned(), Value::from(target_component));
-        fields.insert("command".to_owned(), Value::from(command));
-        for index in 0..7 {
-            fields.insert(
-                format!("param{}", index + 1),
-                Value::from(params.get(index).copied().unwrap_or_default()),
-            );
-        }
 
         let mut receiver = self.link.subscribe_messages();
         let mut confirmation = 0_u8;
         let message = loop {
-            fields.insert("confirmation".to_owned(), Value::from(confirmation));
             self.link
-                .send_message("COMMAND_LONG", &fields, None, None)
+                .send_message(
+                    command_long(
+                        command,
+                        params,
+                        target_system,
+                        target_component,
+                        confirmation,
+                    ),
+                    None,
+                    None,
+                )
                 .await?;
             let remaining = deadline.saturating_duration_since(time::Instant::now());
             if remaining.is_zero() {
@@ -143,11 +173,7 @@ impl MavlinkOperations {
             match wait_for_message(
                 &mut receiver,
                 remaining.min(Duration::from_secs(1)),
-                |message| {
-                    message.name == "COMMAND_ACK"
-                        && message.fields.get("command").and_then(Value::as_u64)
-                            == Some(u64::from(command))
-                },
+                |message| acknowledges(message, command),
             )
             .await
             {
@@ -158,18 +184,11 @@ impl MavlinkOperations {
                 Err(error) => return Err(error),
             }
         };
+        let ack = command_ack(&message).expect("wait predicate selected a COMMAND_ACK");
         Ok(CommandResult {
             command,
-            result: message
-                .fields
-                .get("result")
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-            progress: message
-                .fields
-                .get("progress")
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
+            result: ack.result,
+            progress: ack.progress,
             status: "acknowledged",
             after_cursor: format_cursor(message.journal_sequence),
         })
@@ -187,13 +206,12 @@ impl MavlinkOperations {
         let mut receiver = self.link.subscribe_messages();
         self.link
             .send_message(
-                "PARAM_REQUEST_READ",
-                &object(json!({
-                    "target_system": target_system,
-                    "target_component": target_component,
-                    "param_id": normalized,
-                    "param_index": -1,
-                }))?,
+                MavMessage::PARAM_REQUEST_READ(PARAM_REQUEST_READ_DATA {
+                    param_index: -1,
+                    target_system,
+                    target_component,
+                    param_id: CharArray::from(normalized.as_str()),
+                }),
                 None,
                 None,
             )
@@ -209,7 +227,7 @@ impl MavlinkOperations {
         &self,
         name: &str,
         value: f64,
-        param_type: u64,
+        param_type: MavParamType,
         timeout: Duration,
     ) -> Result<ParameterResult, OperationError> {
         let deadline = time::Instant::now() + timeout;
@@ -219,14 +237,13 @@ impl MavlinkOperations {
         let mut receiver = self.link.subscribe_messages();
         self.link
             .send_message(
-                "PARAM_SET",
-                &object(json!({
-                    "target_system": target_system,
-                    "target_component": target_component,
-                    "param_id": normalized,
-                    "param_value": value,
-                    "param_type": param_type,
-                }))?,
+                param_set(
+                    &normalized,
+                    value,
+                    param_type,
+                    target_system,
+                    target_component,
+                ),
                 None,
                 None,
             )
@@ -248,11 +265,10 @@ impl MavlinkOperations {
         let mut receiver = self.link.subscribe_messages();
         self.link
             .send_message(
-                "PARAM_REQUEST_LIST",
-                &object(json!({
-                    "target_system": target_system,
-                    "target_component": target_component,
-                }))?,
+                MavMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+                    target_system,
+                    target_component,
+                }),
                 None,
                 None,
             )
@@ -266,7 +282,7 @@ impl MavlinkOperations {
             }
 
             let message = recv_message(&mut receiver, remaining).await?;
-            if message.name != "PARAM_VALUE"
+            if param_value(&message).is_none()
                 || message.system_id != target_system
                 || message.component_id != target_component
             {
@@ -283,7 +299,7 @@ impl MavlinkOperations {
 
     pub async fn set_parameters(
         &self,
-        parameters: &[Value],
+        parameters: &[ParameterSetting],
         timeout: Duration,
         retries: usize,
     ) -> Result<Vec<ParameterResult>, OperationError> {
@@ -293,34 +309,19 @@ impl MavlinkOperations {
             return Ok(Vec::new());
         }
         let (target_system, target_component) = self.targets(None, None);
-        let mut requests = Vec::with_capacity(parameters.len());
+        let mut requests: Vec<(String, f64, MavParamType)> = Vec::with_capacity(parameters.len());
         for parameter in parameters {
-            let parameter = parameter.as_object().ok_or_else(|| {
-                OperationError::Invalid("each parameter must be an object".to_owned())
-            })?;
-            let name = normalize_parameter_name(
-                parameter
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        OperationError::Invalid("parameter name is required".to_owned())
-                    })?,
-            )?;
+            let name = normalize_parameter_name(&parameter.name)?;
             if requests.iter().any(|(existing, _, _)| existing == &name) {
                 return Err(OperationError::Invalid(format!(
                     "duplicate parameter {name}"
                 )));
             }
-            let value = parameter
-                .get("value")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| OperationError::Invalid(format!("{name} value must be numeric")))?;
-            let param_type = parameter.get("type").and_then(Value::as_u64).unwrap_or(9);
-            requests.push((name, value, param_type));
+            requests.push((name, parameter.value, parameter.param_type));
         }
 
         let mut receiver = self.link.subscribe_messages();
-        let mut pending: BTreeMap<String, (f64, u64)> = requests
+        let mut pending: BTreeMap<String, (f64, MavParamType)> = requests
             .iter()
             .map(|(name, value, param_type)| (name.clone(), (*value, *param_type)))
             .collect();
@@ -329,14 +330,7 @@ impl MavlinkOperations {
             for (name, (value, param_type)) in &pending {
                 self.link
                     .send_message(
-                        "PARAM_SET",
-                        &object(json!({
-                            "target_system": target_system,
-                            "target_component": target_component,
-                            "param_id": name,
-                            "param_value": value,
-                            "param_type": param_type,
-                        }))?,
+                        param_set(name, *value, *param_type, target_system, target_component),
                         None,
                         None,
                     )
@@ -354,7 +348,7 @@ impl MavlinkOperations {
                     Err(OperationError::Timeout) => break,
                     Err(error) => return Err(error),
                 };
-                if message.name != "PARAM_VALUE"
+                if param_value(&message).is_none()
                     || message.system_id != target_system
                     || message.component_id != target_component
                 {
@@ -390,41 +384,9 @@ impl MavlinkOperations {
         timeout: Duration,
     ) -> Result<Value, OperationError> {
         let message_name = message.to_uppercase();
-        let message_id = message_id_from_name(&message_name).ok_or_else(|| {
-            OperationError::Invalid(format!("unknown MAVLink message {message:?}"))
-        })?;
-        let deadline = time::Instant::now() + timeout;
-        let _guard = lock_until(&self.command_lock, deadline).await?;
-        let (target_system, target_component) = self.targets(target_system, target_component);
-        let mut receiver = self.link.subscribe_messages();
-        self.send_command_long(
-            MAV_CMD_REQUEST_MESSAGE,
-            &[f64::from(message_id)],
-            target_system,
-            target_component,
-        )
-        .await?;
-        let (ack, response) = wait_for_command_response(
-            &mut receiver,
-            remaining_until(deadline)?,
-            MAV_CMD_REQUEST_MESSAGE,
-            |candidate| {
-                candidate.name == message_name
-                    && candidate.system_id == target_system
-                    && (target_component == 0 || candidate.component_id == target_component)
-            },
-        )
-        .await?;
-        let result = ack
-            .fields
-            .get("result")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        if result != 0 {
-            return Err(OperationError::Invalid(format!(
-                "vehicle rejected request for {message_name} with MAV_RESULT {result}"
-            )));
-        }
+        let (ack, response) = self
+            .request_response(&message_name, target_system, target_component, timeout)
+            .await?;
         Ok(json!({
             "message": message_name,
             "system_id": response.system_id,
@@ -435,65 +397,96 @@ impl MavlinkOperations {
         }))
     }
 
+    /// Sends `MAV_CMD_REQUEST_MESSAGE` and returns the acknowledgement together
+    /// with the requested message.
+    async fn request_response(
+        &self,
+        message_name: &str,
+        target_system: Option<u8>,
+        target_component: Option<u8>,
+        timeout: Duration,
+    ) -> Result<(Arc<ReceivedMessage>, Arc<ReceivedMessage>), OperationError> {
+        let message_id = message_id_from_name(message_name).ok_or_else(|| {
+            OperationError::Invalid(format!("unknown MAVLink message {message_name:?}"))
+        })?;
+        let deadline = time::Instant::now() + timeout;
+        let _guard = lock_until(&self.command_lock, deadline).await?;
+        let (target_system, target_component) = self.targets(target_system, target_component);
+        let mut receiver = self.link.subscribe_messages();
+        self.send_command_long(
+            MavCmd::MAV_CMD_REQUEST_MESSAGE,
+            &[f64::from(message_id)],
+            target_system,
+            target_component,
+        )
+        .await?;
+        let (ack, response) = wait_for_command_response(
+            &mut receiver,
+            remaining_until(deadline)?,
+            MavCmd::MAV_CMD_REQUEST_MESSAGE,
+            |candidate| {
+                candidate.name == message_name
+                    && candidate.system_id == target_system
+                    && (target_component == 0 || candidate.component_id == target_component)
+            },
+        )
+        .await?;
+        ensure_accepted(&ack, &format!("request for {message_name}"))?;
+        Ok((ack, response))
+    }
+
     pub async fn autopilot_version(
         &self,
         target_system: Option<u8>,
         target_component: Option<u8>,
         timeout: Duration,
     ) -> Result<Value, OperationError> {
-        let mut result = self
-            .request_message(
+        let (ack, response) = self
+            .request_response(
                 "AUTOPILOT_VERSION",
                 target_system,
                 target_component,
                 timeout,
             )
             .await?;
-        let object = result
-            .as_object_mut()
-            .ok_or_else(|| OperationError::Invalid("invalid version response".to_owned()))?;
-        let fields = object
-            .get("fields")
-            .and_then(Value::as_object)
-            .cloned()
-            .ok_or_else(|| OperationError::Invalid("version fields are missing".to_owned()))?;
-        object.extend(fields.clone());
-        let capabilities = fields
-            .get("capabilities")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| OperationError::Invalid("capabilities are missing".to_owned()))?;
+        let version = autopilot_version_data(&response)?;
+        let mut result = json!({
+            "message": "AUTOPILOT_VERSION",
+            "system_id": response.system_id,
+            "component_id": response.component_id,
+            "fields": response.fields,
+            "ack_cursor": format_cursor(ack.journal_sequence),
+            "after_cursor": format_cursor(response.journal_sequence),
+        });
+        let object = result.as_object_mut().expect("version result is an object");
+        object.extend(response.fields.clone());
         object.insert(
             "capability_names".to_owned(),
-            Value::Array(capability_names(capabilities)),
+            capability_names(version.capabilities),
         );
         Ok(result)
     }
 
     pub async fn capabilities(&self, timeout: Duration) -> Result<Value, OperationError> {
-        let version = self.autopilot_version(None, None, timeout).await?;
-        let capabilities = version
-            .get("capabilities")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| OperationError::Invalid("capabilities are missing".to_owned()))?;
+        let (_, response) = self
+            .request_response("AUTOPILOT_VERSION", None, None, timeout)
+            .await?;
+        let version = autopilot_version_data(&response)?;
+        let capabilities = version.capabilities;
         Ok(json!({
-            "system_id": version["system_id"],
-            "component_id": version["component_id"],
+            "system_id": response.system_id,
+            "component_id": response.component_id,
             "capabilities": capabilities,
             "capability_names": capability_names(capabilities),
-            "services": {
-                "mavftp": capabilities & 32 != 0,
-                "mission_int": capabilities & 4 != 0,
-                "parameter_float": capabilities & 2 != 0,
-                "command_int": capabilities & 8 != 0,
-            },
+            "services": capability_services(capabilities),
             "firmware": {
-                "flight_sw_version": version["flight_sw_version"],
-                "middleware_sw_version": version["middleware_sw_version"],
-                "os_sw_version": version["os_sw_version"],
-                "board_version": version["board_version"],
-                "vendor_id": version["vendor_id"],
-                "product_id": version["product_id"],
-                "uid": version["uid"],
+                "flight_sw_version": version.flight_sw_version,
+                "middleware_sw_version": version.middleware_sw_version,
+                "os_sw_version": version.os_sw_version,
+                "board_version": version.board_version,
+                "vendor_id": version.vendor_id,
+                "product_id": version.product_id,
+                "uid": version.uid,
             },
         }))
     }
@@ -512,7 +505,7 @@ impl MavlinkOperations {
         let (target_system, target_component) = self.targets(None, None);
         let mut receiver = self.link.subscribe_messages();
         self.send_command_long(
-            MAV_CMD_GET_MESSAGE_INTERVAL,
+            GET_MESSAGE_INTERVAL,
             &[f64::from(message_id)],
             target_system,
             target_component,
@@ -521,29 +514,23 @@ impl MavlinkOperations {
         let (ack, response) = wait_for_command_response(
             &mut receiver,
             remaining_until(deadline)?,
-            MAV_CMD_GET_MESSAGE_INTERVAL,
+            GET_MESSAGE_INTERVAL,
             |candidate| {
-                candidate.name == "MESSAGE_INTERVAL"
-                    && candidate.fields.get("message_id").and_then(Value::as_u64)
-                        == Some(u64::from(message_id))
+                matches!(
+                    &candidate.message,
+                    MavMessage::MESSAGE_INTERVAL(interval)
+                        if u32::from(interval.message_id) == message_id
+                )
             },
         )
         .await?;
-        let result = ack
-            .fields
-            .get("result")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        if result != 0 {
-            return Err(OperationError::Invalid(format!(
-                "vehicle rejected interval request for {message_name} with MAV_RESULT {result}"
-            )));
-        }
-        let interval_us = response
-            .fields
-            .get("interval_us")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| OperationError::Invalid("MESSAGE_INTERVAL is invalid".to_owned()))?;
+        ensure_accepted(&ack, &format!("interval request for {message_name}"))?;
+        let MavMessage::MESSAGE_INTERVAL(interval) = &response.message else {
+            return Err(OperationError::Invalid(
+                "MESSAGE_INTERVAL is invalid".to_owned(),
+            ));
+        };
+        let interval_us = i64::from(interval.interval_us);
         Ok(json!({
             "message": message_name,
             "message_id": message_id,
@@ -658,7 +645,21 @@ impl MavlinkOperations {
 
     pub async fn list_logs(&self, timeout: Duration) -> Result<Vec<Value>, OperationError> {
         let _guard = self.log_lock.lock().await;
-        self.request_log_entries(0, u16::MAX, timeout).await
+        Ok(self
+            .request_log_entries(0, u16::MAX, timeout)
+            .await?
+            .into_iter()
+            .map(|(entry, journal_sequence)| {
+                json!({
+                    "id": entry.id,
+                    "size": entry.size,
+                    "time_utc": entry.time_utc,
+                    "num_logs": entry.num_logs,
+                    "last_log_num": entry.last_log_num,
+                    "after_cursor": format_cursor(journal_sequence),
+                })
+            })
+            .collect())
     }
 
     pub async fn download_log(
@@ -668,18 +669,13 @@ impl MavlinkOperations {
         max_retries: u32,
     ) -> Result<DownloadedLog, OperationError> {
         let _guard = self.log_lock.lock().await;
-        let entries = self
+        let (entry, _) = self
             .request_log_entries(log_id, log_id, packet_timeout)
-            .await?;
-        let entry = entries
-            .iter()
-            .find(|entry| entry.get("id").and_then(Value::as_u64) == Some(u64::from(log_id)))
+            .await?
+            .into_iter()
+            .find(|(entry, _)| entry.id == log_id)
             .ok_or_else(|| OperationError::NotFound(format!("DataFlash log {log_id}")))?;
-        let entry = entry
-            .as_object()
-            .ok_or_else(|| OperationError::Invalid("invalid log entry".to_owned()))?;
-        let size = value_u32(entry, "size")?;
-        let time_utc = value_u32(entry, "time_utc")?;
+        let (size, time_utc) = (entry.size, entry.time_utc);
         let (target_system, target_component) = self.targets(None, None);
         let target = DataFlashTarget {
             system: target_system,
@@ -693,23 +689,20 @@ impl MavlinkOperations {
                 if let Some(request) = download.next_request() {
                     self.link
                         .send_message(
-                            "LOG_REQUEST_DATA",
-                            &object(json!({
-                                "target_system": request.target.system,
-                                "target_component": request.target.component,
-                                "id": request.id,
-                                "ofs": request.offset,
-                                "count": request.count,
-                            }))?,
+                            MavMessage::LOG_REQUEST_DATA(LOG_REQUEST_DATA_DATA {
+                                ofs: request.offset,
+                                count: request.count,
+                                id: request.id,
+                                target_system: request.target.system,
+                                target_component: request.target.component,
+                            }),
                             None,
                             None,
                         )
                         .await?;
                 }
                 match wait_for_message(&mut receiver, packet_timeout, |message| {
-                    message.name == "LOG_DATA"
-                        && message.fields.get("id").and_then(Value::as_u64)
-                            == Some(u64::from(log_id))
+                    log_data(message).is_some_and(|data| data.id == log_id)
                 })
                 .await
                 {
@@ -733,11 +726,10 @@ impl MavlinkOperations {
         let end_cursor = self
             .link
             .send_message(
-                "LOG_REQUEST_END",
-                &object(json!({
-                    "target_system": target.system,
-                    "target_component": target.component,
-                }))?,
+                MavMessage::LOG_REQUEST_END(LOG_REQUEST_END_DATA {
+                    target_system: target.system,
+                    target_component: target.component,
+                }),
                 None,
                 None,
             )
@@ -783,21 +775,16 @@ impl MavlinkOperations {
             let payload = packet.encode()?;
             let expected_reply_sequence = packet.sequence.wrapping_add(1);
             let expected_request_opcode = packet.opcode as u8;
-            let fields = object(json!({
-                "target_network": 0,
-                "target_system": target_system,
-                "target_component": target_component,
-                "payload": payload.to_vec(),
-            }))?;
+            let message = MavMessage::FILE_TRANSFER_PROTOCOL(FILE_TRANSFER_PROTOCOL_DATA {
+                target_network: 0,
+                target_system,
+                target_component,
+                payload,
+            });
             let mut retries = 0;
             let reply = loop {
                 self.link
-                    .send_message(
-                        "FILE_TRANSFER_PROTOCOL",
-                        &fields,
-                        None,
-                        Some(MAVFTP_SOURCE_COMPONENT),
-                    )
+                    .send_message(message.clone(), None, Some(MAVFTP_SOURCE_COMPONENT))
                     .await?;
                 let remaining = deadline.saturating_duration_since(time::Instant::now());
                 if remaining.is_zero() {
@@ -806,19 +793,16 @@ impl MavlinkOperations {
                 match wait_for_message(
                     &mut receiver,
                     remaining.min(Duration::from_secs(2)),
-                    |message| {
-                        message.name == "FILE_TRANSFER_PROTOCOL"
-                            && message.component_id == target_component
-                            && message
-                                .fields
-                                .get("target_component")
-                                .and_then(Value::as_u64)
-                                == Some(u64::from(MAVFTP_SOURCE_COMPONENT))
-                            && ftp_reply_matches(
-                                message,
-                                expected_reply_sequence,
-                                expected_request_opcode,
-                            )
+                    |candidate| {
+                        ftp_payload(candidate).is_some_and(|(target, payload)| {
+                            candidate.component_id == target_component
+                                && target == MAVFTP_SOURCE_COMPONENT
+                                && ftp_reply_matches(
+                                    payload,
+                                    expected_reply_sequence,
+                                    expected_request_opcode,
+                                )
+                        })
                     },
                 )
                 .await
@@ -831,16 +815,19 @@ impl MavlinkOperations {
                 }
             };
             last_cursor = reply.journal_sequence;
-            operation.handle_reply(Packet::decode(&byte_array(&reply, "payload", 251)?)?)?;
+            let (_, reply_payload) = ftp_payload(&reply).expect("wait predicate selected FTP");
+            operation.handle_reply(Packet::decode(reply_payload)?)?;
         }
     }
 
+    /// The log entries the vehicle reported, each with the journal sequence of
+    /// the `LOG_ENTRY` message it came from.
     async fn request_log_entries(
         &self,
         start: u16,
         end: u16,
         timeout: Duration,
-    ) -> Result<Vec<Value>, OperationError> {
+    ) -> Result<Vec<(LogEntry, u64)>, OperationError> {
         let (target_system, target_component) = self.targets(None, None);
         let target = DataFlashTarget {
             system: target_system,
@@ -850,13 +837,12 @@ impl MavlinkOperations {
         let mut receiver = self.link.subscribe_messages();
         self.link
             .send_message(
-                "LOG_REQUEST_LIST",
-                &object(json!({
-                    "target_system": target.system,
-                    "target_component": target.component,
-                    "start": start,
-                    "end": end,
-                }))?,
+                MavMessage::LOG_REQUEST_LIST(LOG_REQUEST_LIST_DATA {
+                    start,
+                    end,
+                    target_system: target.system,
+                    target_component: target.component,
+                }),
                 None,
                 None,
             )
@@ -864,7 +850,7 @@ impl MavlinkOperations {
         let mut entries = BTreeMap::new();
         while !list.is_complete() {
             let message = wait_for_message(&mut receiver, timeout, |message| {
-                message.name == "LOG_ENTRY"
+                matches!(message.message, MavMessage::LOG_ENTRY(_))
                     && message.system_id == target.system
                     && (target.component == 0 || message.component_id == target.component)
             })
@@ -874,17 +860,7 @@ impl MavlinkOperations {
             if entry.num_logs == 0 {
                 return Ok(Vec::new());
             }
-            entries.insert(
-                entry.id,
-                json!({
-                    "id": entry.id,
-                    "size": entry.size,
-                    "time_utc": entry.time_utc,
-                    "num_logs": entry.num_logs,
-                    "last_log_num": entry.last_log_num,
-                    "after_cursor": format_cursor(message.journal_sequence),
-                }),
-            );
+            entries.insert(entry.id, (entry, message.journal_sequence));
         }
         Ok(entries.into_values().collect())
     }
@@ -921,16 +897,16 @@ impl MavlinkOperations {
             };
             let result = self
                 .command(
-                    MAV_CMD_SET_MESSAGE_INTERVAL,
+                    MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                     &[f64::from(message_id), interval_us as f64],
                     None,
                     None,
                     timeout,
                 )
                 .await?;
-            if result.result != 0 {
+            if result.result != MavResult::MAV_RESULT_ACCEPTED {
                 return Err(OperationError::Invalid(format!(
-                    "vehicle rejected {message_name} rate with MAV_RESULT {}",
+                    "vehicle rejected {message_name} rate with {:?}",
                     result.result
                 )));
             }
@@ -962,25 +938,18 @@ impl MavlinkOperations {
 
     async fn send_command_long(
         &self,
-        command: u32,
+        command: MavCmd,
         params: &[f64],
         target_system: u8,
         target_component: u8,
     ) -> Result<u64, OperationError> {
-        let mut fields = Map::new();
-        fields.insert("target_system".to_owned(), Value::from(target_system));
-        fields.insert("target_component".to_owned(), Value::from(target_component));
-        fields.insert("command".to_owned(), Value::from(command));
-        fields.insert("confirmation".to_owned(), Value::from(0));
-        for index in 0..7 {
-            fields.insert(
-                format!("param{}", index + 1),
-                Value::from(params.get(index).copied().unwrap_or_default()),
-            );
-        }
         Ok(self
             .link
-            .send_message("COMMAND_LONG", &fields, None, None)
+            .send_message(
+                command_long(command, params, target_system, target_component, 0),
+                None,
+                None,
+            )
             .await?)
     }
 }
@@ -1024,7 +993,7 @@ async fn wait_for_message(
 async fn wait_for_command_response(
     receiver: &mut broadcast::Receiver<Arc<ReceivedMessage>>,
     timeout: Duration,
-    command: u32,
+    command: MavCmd,
     response_predicate: impl Fn(&ReceivedMessage) -> bool,
 ) -> Result<(Arc<ReceivedMessage>, Arc<ReceivedMessage>), OperationError> {
     let deadline = time::Instant::now() + timeout;
@@ -1042,9 +1011,7 @@ async fn wait_for_command_response(
             return Err(OperationError::Timeout);
         }
         let message = recv_message(receiver, remaining).await?;
-        if message.name == "COMMAND_ACK"
-            && message.fields.get("command").and_then(Value::as_u64) == Some(u64::from(command))
-        {
+        if acknowledges(&message, command) {
             acknowledgement = Some(message);
         } else if response_predicate(&message) {
             response = Some(message);
@@ -1066,134 +1033,158 @@ async fn recv_message(
     }
 }
 
+fn command_long(
+    command: MavCmd,
+    params: &[f64],
+    target_system: u8,
+    target_component: u8,
+    confirmation: u8,
+) -> MavMessage {
+    let param = |index: usize| params.get(index).copied().unwrap_or_default() as f32;
+    MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+        param1: param(0),
+        param2: param(1),
+        param3: param(2),
+        param4: param(3),
+        param5: param(4),
+        param6: param(5),
+        param7: param(6),
+        command,
+        target_system,
+        target_component,
+        confirmation,
+    })
+}
+
+fn param_set(
+    name: &str,
+    value: f64,
+    param_type: MavParamType,
+    target_system: u8,
+    target_component: u8,
+) -> MavMessage {
+    MavMessage::PARAM_SET(PARAM_SET_DATA {
+        param_value: value as f32,
+        target_system,
+        target_component,
+        param_id: CharArray::from(name),
+        param_type,
+    })
+}
+
+fn command_ack(message: &ReceivedMessage) -> Option<&COMMAND_ACK_DATA> {
+    match &message.message {
+        MavMessage::COMMAND_ACK(ack) => Some(ack),
+        _ => None,
+    }
+}
+
+fn autopilot_version_data(
+    message: &ReceivedMessage,
+) -> Result<&AUTOPILOT_VERSION_DATA, OperationError> {
+    match &message.message {
+        MavMessage::AUTOPILOT_VERSION(version) => Ok(version),
+        _ => Err(OperationError::Invalid(
+            "response is not AUTOPILOT_VERSION".to_owned(),
+        )),
+    }
+}
+
+fn acknowledges(message: &ReceivedMessage, command: MavCmd) -> bool {
+    command_ack(message).is_some_and(|ack| ack.command == command)
+}
+
+fn ensure_accepted(ack: &ReceivedMessage, what: &str) -> Result<(), OperationError> {
+    let result = command_ack(ack).map_or(MavResult::MAV_RESULT_FAILED, |ack| ack.result);
+    if result == MavResult::MAV_RESULT_ACCEPTED {
+        Ok(())
+    } else {
+        Err(OperationError::Invalid(format!(
+            "vehicle rejected {what} with {result:?}"
+        )))
+    }
+}
+
+fn param_value(message: &ReceivedMessage) -> Option<&PARAM_VALUE_DATA> {
+    match &message.message {
+        MavMessage::PARAM_VALUE(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn log_data(message: &ReceivedMessage) -> Option<&LOG_DATA_DATA> {
+    match &message.message {
+        MavMessage::LOG_DATA(data) => Some(data),
+        _ => None,
+    }
+}
+
+/// The target component and 251-byte payload of a FILE_TRANSFER_PROTOCOL message.
+fn ftp_payload(message: &ReceivedMessage) -> Option<(u8, &[u8])> {
+    match &message.message {
+        MavMessage::FILE_TRANSFER_PROTOCOL(ftp) => Some((ftp.target_component, &ftp.payload)),
+        _ => None,
+    }
+}
+
 fn parameter_matches(
     message: &ReceivedMessage,
     name: &str,
     target_system: u8,
     target_component: u8,
 ) -> bool {
-    message.name == "PARAM_VALUE"
-        && message.system_id == target_system
+    message.system_id == target_system
         && message.component_id == target_component
-        && message.fields.get("param_id").and_then(Value::as_str) == Some(name)
+        && param_value(message).is_some_and(|value| value.param_id.to_str() == Ok(name))
 }
 
 fn parameter_result(message: &ReceivedMessage) -> Result<ParameterResult, OperationError> {
-    let field = |name| {
-        message
-            .fields
-            .get(name)
-            .ok_or_else(|| OperationError::Invalid(format!("PARAM_VALUE missing {name}")))
-    };
+    let value = param_value(message)
+        .ok_or_else(|| OperationError::Invalid("message is not PARAM_VALUE".to_owned()))?;
     Ok(ParameterResult {
-        name: field("param_id")?
-            .as_str()
-            .ok_or_else(|| OperationError::Invalid("PARAM_VALUE param_id is not text".to_owned()))?
+        name: value
+            .param_id
+            .to_str()
+            .map_err(|_| OperationError::Invalid("PARAM_VALUE param_id is not text".to_owned()))?
             .to_owned(),
-        value: field("param_value")?.as_f64().ok_or_else(|| {
-            OperationError::Invalid("PARAM_VALUE value is not numeric".to_owned())
-        })?,
-        param_type: field("param_type")?
-            .as_u64()
-            .ok_or_else(|| OperationError::Invalid("PARAM_VALUE type is not numeric".to_owned()))?,
-        index: field("param_index")?.as_i64().ok_or_else(|| {
-            OperationError::Invalid("PARAM_VALUE index is not numeric".to_owned())
-        })?,
-        count: field("param_count")?.as_u64().ok_or_else(|| {
-            OperationError::Invalid("PARAM_VALUE count is not numeric".to_owned())
-        })?,
+        value: f64::from(value.param_value),
+        param_type: value.param_type,
+        index: i64::from(value.param_index),
+        count: u64::from(value.param_count),
         after_cursor: format_cursor(message.journal_sequence),
     })
 }
 
 fn log_entry(message: &ReceivedMessage) -> Result<LogEntry, OperationError> {
+    let MavMessage::LOG_ENTRY(entry) = &message.message else {
+        return Err(OperationError::Invalid(
+            "message is not LOG_ENTRY".to_owned(),
+        ));
+    };
     Ok(LogEntry {
-        id: value_u16(&message.fields, "id")?,
-        size: value_u32(&message.fields, "size")?,
-        time_utc: value_u32(&message.fields, "time_utc")?,
-        num_logs: value_u16(&message.fields, "num_logs")?,
-        last_log_num: value_u16(&message.fields, "last_log_num")?,
+        id: entry.id,
+        size: entry.size,
+        time_utc: entry.time_utc,
+        num_logs: entry.num_logs,
+        last_log_num: entry.last_log_num,
     })
 }
 
 fn data_packet(message: &ReceivedMessage) -> Result<DataPacket, OperationError> {
-    let bytes = byte_array(message, "data", crate::dataflash::LOG_DATA_LEN)?;
-    let mut data = [0; crate::dataflash::LOG_DATA_LEN];
-    data.copy_from_slice(&bytes);
+    let data = log_data(message)
+        .ok_or_else(|| OperationError::Invalid("message is not LOG_DATA".to_owned()))?;
     Ok(DataPacket {
-        id: value_u16(&message.fields, "id")?,
-        offset: value_u32(&message.fields, "ofs")?,
-        count: value_u8(&message.fields, "count")?,
-        data,
+        id: data.id,
+        offset: data.ofs,
+        count: data.count,
+        data: data.data,
     })
 }
 
-fn byte_array(
-    message: &ReceivedMessage,
-    field: &'static str,
-    expected: usize,
-) -> Result<Vec<u8>, OperationError> {
-    let array = message
-        .fields
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| OperationError::Invalid(format!("{} missing {field}", message.name)))?;
-    if array.len() != expected {
-        return Err(OperationError::Invalid(format!(
-            "{} {field} has {} bytes, expected {expected}",
-            message.name,
-            array.len()
-        )));
-    }
-
-    array
-        .iter()
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or_else(|| {
-                    OperationError::Invalid(format!("{} {field} is not byte data", message.name))
-                })
-        })
-        .collect()
-}
-
-fn ftp_reply_matches(
-    message: &ReceivedMessage,
-    expected_sequence: u16,
-    expected_request_opcode: u8,
-) -> bool {
-    byte_array(message, "payload", 251)
-        .ok()
-        .and_then(|payload| Packet::decode(&payload).ok())
-        .is_some_and(|reply| {
-            reply.sequence == expected_sequence && reply.request_opcode == expected_request_opcode
-        })
-}
-
-fn value_u8(fields: &Map<String, Value>, name: &'static str) -> Result<u8, OperationError> {
-    fields
-        .get(name)
-        .and_then(Value::as_u64)
-        .and_then(|value| u8::try_from(value).ok())
-        .ok_or_else(|| OperationError::Invalid(format!("{name} is not an unsigned byte")))
-}
-
-fn value_u16(fields: &Map<String, Value>, name: &'static str) -> Result<u16, OperationError> {
-    fields
-        .get(name)
-        .and_then(Value::as_u64)
-        .and_then(|value| u16::try_from(value).ok())
-        .ok_or_else(|| OperationError::Invalid(format!("{name} is not an unsigned 16-bit integer")))
-}
-
-fn value_u32(fields: &Map<String, Value>, name: &'static str) -> Result<u32, OperationError> {
-    fields
-        .get(name)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| OperationError::Invalid(format!("{name} is not an unsigned 32-bit integer")))
+fn ftp_reply_matches(payload: &[u8], expected_sequence: u16, expected_request_opcode: u8) -> bool {
+    Packet::decode(payload).ok().is_some_and(|reply| {
+        reply.sequence == expected_sequence && reply.request_opcode == expected_request_opcode
+    })
 }
 
 fn normalize_parameter_name(name: &str) -> Result<String, OperationError> {
@@ -1213,30 +1204,37 @@ fn normalize_parameter_name(name: &str) -> Result<String, OperationError> {
     Ok(name)
 }
 
-fn object(value: Value) -> Result<Map<String, Value>, OperationError> {
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| OperationError::Invalid("internal request is not an object".to_owned()))
-}
-
 fn format_cursor(sequence: u64) -> String {
     format!("v1:{sequence}")
 }
 
-fn capability_names(bits: u64) -> Vec<Value> {
-    enum_bit_names("MAV_PROTOCOL_CAPABILITY", bits)
-        .expect("embedded dialect defines MAV_PROTOCOL_CAPABILITY")
-        .into_iter()
-        .map(Value::String)
-        .collect()
+fn capability_names(capabilities: MavProtocolCapability) -> Value {
+    Value::Array(
+        capabilities
+            .iter_names()
+            .map(|(name, _)| Value::from(name))
+            .collect(),
+    )
+}
+
+fn capability_services(capabilities: MavProtocolCapability) -> Value {
+    json!({
+        "mavftp": capabilities.contains(MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_FTP),
+        "mission_int": capabilities
+            .contains(MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_MISSION_INT),
+        "parameter_float": capabilities.contains(PARAM_FLOAT),
+        "command_int": capabilities
+            .contains(MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_COMMAND_INT),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::message_fields;
 
-    fn received(name: &str, fields: Value, journal_sequence: u64) -> Arc<ReceivedMessage> {
+    fn received(message: MavMessage, journal_sequence: u64) -> Arc<ReceivedMessage> {
+        use linkhub_dialect::Message as _;
         Arc::new(ReceivedMessage {
             journal_sequence,
             ingest_time_ns: journal_sequence,
@@ -1244,9 +1242,18 @@ mod tests {
             system_id: 1,
             component_id: 1,
             sequence: journal_sequence as u8,
-            message_id: 0,
-            name: name.to_owned(),
-            fields: fields.as_object().expect("message fields").clone(),
+            message_id: message.message_id(),
+            name: message.message_name().to_owned(),
+            fields: message_fields(&message).expect("message fields"),
+            message,
+        })
+    }
+
+    fn command_ack_message(command: MavCmd, result: MavResult) -> MavMessage {
+        MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+            command,
+            result,
+            ..COMMAND_ACK_DATA::default()
         })
     }
 
@@ -1256,15 +1263,16 @@ mod tests {
         let mut receiver = sender.subscribe();
         sender
             .send(received(
-                "AUTOPILOT_VERSION",
-                json!({"capabilities": 32}),
+                MavMessage::AUTOPILOT_VERSION(Default::default()),
                 10,
             ))
             .expect("response");
         sender
             .send(received(
-                "COMMAND_ACK",
-                json!({"command": MAV_CMD_REQUEST_MESSAGE, "result": 0}),
+                command_ack_message(
+                    MavCmd::MAV_CMD_REQUEST_MESSAGE,
+                    MavResult::MAV_RESULT_ACCEPTED,
+                ),
                 11,
             ))
             .expect("acknowledgement");
@@ -1272,7 +1280,7 @@ mod tests {
         let (acknowledgement, response) = wait_for_command_response(
             &mut receiver,
             Duration::from_millis(100),
-            MAV_CMD_REQUEST_MESSAGE,
+            MavCmd::MAV_CMD_REQUEST_MESSAGE,
             |message| message.name == "AUTOPILOT_VERSION",
         )
         .await
@@ -1280,6 +1288,24 @@ mod tests {
 
         assert_eq!(acknowledgement.journal_sequence, 11);
         assert_eq!(response.journal_sequence, 10);
+    }
+
+    #[test]
+    fn rejected_acknowledgement_reports_the_typed_result() {
+        let ack = received(
+            command_ack_message(
+                MavCmd::MAV_CMD_REQUEST_MESSAGE,
+                MavResult::MAV_RESULT_DENIED,
+            ),
+            1,
+        );
+
+        let error = ensure_accepted(&ack, "request for HOME_POSITION").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid operation: vehicle rejected request for HOME_POSITION with MAV_RESULT_DENIED"
+        );
     }
 
     #[tokio::test]
@@ -1310,12 +1336,56 @@ mod tests {
     }
 
     #[test]
+    fn parameter_results_are_typed() {
+        let message = received(
+            MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                param_value: 4.5,
+                param_count: 700,
+                param_index: 12,
+                param_id: CharArray::from("RAWES_MODE"),
+                param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+            }),
+            3,
+        );
+
+        let result = parameter_result(&message).expect("parameter");
+
+        assert_eq!(result.name, "RAWES_MODE");
+        assert_eq!(result.value, 4.5);
+        assert_eq!(result.param_type, MavParamType::MAV_PARAM_TYPE_REAL32);
+        assert_eq!((result.index, result.count), (12, 700));
+        assert!(parameter_matches(&message, "RAWES_MODE", 1, 1));
+        assert!(!parameter_matches(&message, "RAWES_OTHER", 1, 1));
+    }
+
+    #[test]
     fn capability_names_use_official_mavlink_flags() {
-        let names = capability_names(2 | 32);
+        let names =
+            capability_names(PARAM_FLOAT | MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_FTP);
+        let names = names.as_array().expect("names are an array");
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&Value::String("MAV_PROTOCOL_CAPABILITY_FTP".to_owned())));
         assert!(names.contains(&Value::String(
             "MAV_PROTOCOL_CAPABILITY_PARAM_FLOAT".to_owned()
         )));
-        assert!(names.contains(&Value::String("MAV_PROTOCOL_CAPABILITY_FTP".to_owned())));
+    }
+
+    #[test]
+    fn capability_services_map_to_their_mavlink_bits() {
+        // Bits 2 (PARAM_FLOAT) and 32 (FTP): the combination a real ArduCopter reports.
+        let services =
+            capability_services(PARAM_FLOAT | MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_FTP);
+
+        assert_eq!(
+            services,
+            json!({
+                "mavftp": true,
+                "mission_int": false,
+                "parameter_float": true,
+                "command_int": false,
+            })
+        );
+        assert_eq!(PARAM_FLOAT.bits(), 2);
     }
 
     #[test]
@@ -1330,19 +1400,15 @@ mod tests {
             offset: 0,
             data: Vec::new(),
         };
-        let message = received(
-            "FILE_TRANSFER_PROTOCOL",
-            json!({"payload": packet.encode().expect("packet").to_vec()}),
-            1,
-        );
+        let payload = packet.encode().expect("packet");
 
         assert!(!ftp_reply_matches(
-            &message,
+            &payload,
             11,
             crate::mavftp::Opcode::CreateFile as u8
         ));
         assert!(ftp_reply_matches(
-            &message,
+            &payload,
             11,
             crate::mavftp::Opcode::CreateDirectory as u8
         ));

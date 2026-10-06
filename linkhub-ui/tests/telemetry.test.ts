@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LinkHubApi } from "../src/api";
+import { MavModeFlag, MavState } from "../src/generated/protocol";
+import { mavEnum } from "../src/mav";
 import { TelemetryStore } from "../src/telemetry";
 import { DISPLAY_TELEMETRY_RATES } from "../src/telemetry-rates";
 import type { LinkHubStatus } from "../src/types";
@@ -11,8 +13,8 @@ it("requests measured RPM telemetry at 5 Hz", () => {
 function status(generation: string, ready = true): LinkHubStatus {
   return {
     connected: ready, ready, generation, cursor: "v1:0", connection: "serial:test",
-    clock_epoch: 1, target_system: 1, target_component: 1, base_mode: 0,
-    custom_mode: 0, system_status: 3, latest_time_boot_ms: 0,
+    clock_epoch: 1, target_system: 1, target_component: 1, base_mode: "",
+    custom_mode: 0, system_status: mavEnum(MavState.STANDBY), latest_time_boot_ms: 0,
     received_messages: 0, transmitted_messages: 0,
     received_bytes: 0, transmitted_bytes: 0, rx_bps: null, tx_bps: null,
   };
@@ -74,6 +76,41 @@ describe("live display telemetry", () => {
       "first", "first", "second", "second",
     ]);
     unsubscribe();
+    telemetry.stop();
+  });
+
+  it("folds typed HEARTBEAT mode fields into the live status", async () => {
+    const api = new LinkHubApi();
+    vi.spyOn(api, "status").mockResolvedValue({ ...status("first"), cursor: "v1:1" });
+    vi.spyOn(api, "setMessageRates").mockResolvedValue({});
+    let delivered = false;
+    vi.spyOn(api, "readMessages").mockImplementation(async () => {
+      if (delivered) {
+        return new Promise(() => {});
+      }
+      delivered = true;
+      return {
+        records: [{
+          received_time: "t", received_time_ns: 1, direction: "rx", system_id: 1,
+          component_id: 1, message: "HEARTBEAT", cursor: "v1:1",
+          fields: {
+            mavtype: { type: "MAV_TYPE_HELICOPTER" },
+            autopilot: { type: "MAV_AUTOPILOT_ARDUPILOTMEGA" },
+            base_mode: `${MavModeFlag.SAFETY_ARMED} | ${MavModeFlag.CUSTOM_MODE_ENABLED}`,
+            custom_mode: 20,
+            system_status: { type: "MAV_STATE_FLIGHT_TERMINATION" },
+          },
+        }],
+        next_cursor: "v1:1",
+      };
+    });
+    const telemetry = new TelemetryStore(api);
+    await telemetry.start();
+    expect(telemetry.status).toMatchObject({
+      base_mode: "MAV_MODE_FLAG_SAFETY_ARMED | MAV_MODE_FLAG_CUSTOM_MODE_ENABLED",
+      custom_mode: 20,
+      system_status: { type: "MAV_STATE_FLIGHT_TERMINATION" },
+    });
     telemetry.stop();
   });
 });

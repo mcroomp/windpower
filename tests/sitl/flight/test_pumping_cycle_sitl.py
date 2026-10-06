@@ -45,7 +45,7 @@ from simulation.telemetry_csv import read_csv
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from groundstation.pumping_planner import PumpingGroundController
 from groundstation.unified_ground import _cmd_to_nv
-from linkhub_client.messages import NamedValueFloat, StatusText, decode_message
+from linkhub_client.messages import NamedValueFloat, Statustext, decode_message
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _ROTOR = load_default_rotor()
@@ -122,11 +122,11 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             "initial_state missing thrust seed: eq_thrust"
         )
     ten_seed = float(ic["tension_eq_n"])
-    gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
-    gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
-    gcs.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
-    gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
-    gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_THR", value=thr_seed))
+    gcs.send_message(NamedValueFloat(name="RAWES_TEN", value=ten_seed))
+    gcs.send_message(NamedValueFloat(name="RAWES_ROFF", value=0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_POFF", value=0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_YOFF", value=0.0))
     gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info("  Holding MODE_PASSIVE 10 s to settle before MODE_STEADY ...")
@@ -236,7 +236,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
 
                 # Send NVF to Lua via GCS
                 for name, value in _cmd_to_nv(cmd):
-                    gcs.send_message(NamedValueFloat(name, value))
+                    gcs.send_message(NamedValueFloat(name=name, value=value))
 
                 # All cycles complete -> planner returns to hold (mirrors simtest).
                 if planner.cycle_count >= N_CYCLES:
@@ -251,7 +251,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             )
             message_cursor = batch.next_cursor
             for msg in batch.messages:
-                if isinstance((decoded := decode_message(msg)), StatusText):
+                if isinstance((decoded := decode_message(msg)), Statustext):
                     text = decoded.text
                     all_statustext.append(text)
                     log.info("STATUSTEXT: %s", text)

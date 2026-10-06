@@ -56,6 +56,12 @@ vehicle-status endpoints used by calibration are:
 - `GET /v1/motor`, `PUT /v1/motor`, `POST /v1/motor/stop`, `POST /v1/motor/reconnect`
   when the optional Bluetooth motor backend is enabled
 
+MAVLink enumerations and bitmasks are named values on LinkHub's wire, not
+numbers. `calibrate` uses the typed `linkhub_client.messages` members
+(`MavCmd`, `MavResult`, `MavModeFlag`, `MavState`, ...) and tests flags with
+`flag in message.base_mode` rather than bit masks. Rejected arm/disarm commands
+print the result name (for example `MAV_RESULT_FAILED`).
+
 The hardware-focused environment is intentionally lightweight, so:
 
 ```bash
@@ -219,7 +225,7 @@ duration is 10 s.
 |---|---|---|
 | `servos` | `SERVO_OUTPUT_RAW` (requested through the RC stream) | `t_s`, `s1_us` … `s8_us` |
 | `esc` | `ESC_TELEMETRY_*` | `t_s`, `erpm`, `mech_rpm`, `rotor_rpm`, `voltage_v`, `current_a`, `temp_c` |
-| `text` | `STATUSTEXT` | `t_s`, `severity`, `text` |
+| `text` | `STATUSTEXT` | `t_s`, `severity` (MAVLink name, e.g. `MAV_SEVERITY_INFO`), `text` |
 | `attitude` | `ATTITUDE` | `t_s`, roll/pitch/yaw + body rates |
 | `power` | `BATTERY_STATUS`, `SYS_STATUS` | `t_s`, `vbat_v`, `current_a`, `power_w` |
 
@@ -242,9 +248,9 @@ python -m calibrate --server http://127.0.0.1:8999 watch text
 
 Print a live snapshot of:
 
-- heartbeat-derived armed state and flight mode,
+- heartbeat-derived armed state, flight mode, and system status name,
 - battery state,
-- EKF status,
+- EKF status (named `EKF_*` flags),
 - active `SERVO_OUTPUT_RAW` channels,
 - key RAWES / motor-path / yaw-control parameters,
 - `[DIFF]` markers against the shared parameter defaults.

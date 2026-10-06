@@ -29,7 +29,7 @@ from linkhub_client.messages import (
     CommandLong,
     decode_message,
     RequestDataStream,
-    StatusText,
+    Statustext,
 )
 from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,
                                         MOTOR_PWM_MIN, MOTOR_PWM_MAX)
@@ -106,9 +106,6 @@ _COPTER_MODES = {
     13: "SPORT", 14: "FLIP", 15: "AUTOTUNE", 16: "POSHOLD", 17: "BRAKE",
     18: "THROW", 19: "AVOID_ADSB", 20: "GUIDED_NOGPS", 21: "SMART_RTL",
 }
-
-_SYS_STATUS = {0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
-               4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY", 7: "POWEROFF"}
 
 _LUA_MODES = {0: "none", 1: "steady", 2: "acro_manual", 3: "passive", 4: "landing"}
 

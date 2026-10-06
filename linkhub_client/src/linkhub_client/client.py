@@ -10,8 +10,21 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from . import mav_constants as mavlink
-from .messages import Message, RawMessage, decode_message
+from .messages import (
+    MavAutopilot,
+    MavCmd,
+    MavModeFlag,
+    MavParamType,
+    MavResult,
+    MavState,
+    MavType,
+    Message,
+    RawMessage,
+    decode_enum,
+    decode_message,
+    encode_enum,
+    parse_flags,
+)
 from .records import DiagnosticEvent, DiagnosticRecord, SimClock, TelemetryRecord
 
 
@@ -132,7 +145,10 @@ class LinkHubClient:
         return dict(self._request_json("GET", "/v1/status"))
 
     def vehicle_status(self) -> dict[str, Any]:
-        return dict(self._request_json("GET", "/v1/mavlink/status"))
+        """Vehicle and link state; ``base_mode`` is a ``frozenset[MavModeFlag]``
+        and ``system_status`` a ``MavState``."""
+        status = dict(self._request_json("GET", "/v1/mavlink/status"))
+        return _decode_heartbeat_state(status)
 
     def current_cursor(self) -> str:
         return str(self.vehicle_status()["cursor"])
@@ -205,23 +221,32 @@ class LinkHubClient:
 
     def command(
         self,
-        command: int,
+        command: MavCmd | str,
         params: list[float] | None = None,
         *,
         timeout: float = 3.0,
     ) -> dict[str, Any]:
+        """Send a COMMAND_LONG and wait for its COMMAND_ACK.
+
+        ``command`` is a ``MavCmd`` (or its full ``MAV_CMD_*`` name). The
+        result's ``command`` and ``result`` are ``MavCmd`` and ``MavResult``.
+        """
         result = self._request_json(
             "POST",
             "/v1/mavlink/commands",
             {
-                "command": command,
+                "command": encode_enum(command),
                 "params": params or [],
                 "target_system": self._target_system,
                 "target_component": self._target_component,
                 "timeout_ms": round(timeout * 1000),
             },
         )
-        return result
+        return {
+            **result,
+            "command": decode_enum(MavCmd, result["command"]),
+            "result": decode_enum(MavResult, result["result"]),
+        }
 
     def get_param(self, name: str, timeout: float = 3.0) -> float | None:
         query = urllib.parse.urlencode({"timeout_ms": round(timeout * 1000)})
@@ -241,21 +266,19 @@ class LinkHubClient:
         value: float,
         *,
         timeout: float = 3.0,
-        param_type: int | None = None,
+        param_type: MavParamType | None = None,
     ) -> bool:
+        if param_type is None:
+            param_type = (
+                MavParamType.INT32 if isinstance(value, int) else MavParamType.REAL32
+            )
         try:
             result = self._request_json(
                 "PUT",
                 f"/v1/mavlink/parameters/{urllib.parse.quote(name.upper())}",
                 {
                     "value": value,
-                    "type": (
-                        mavlink.MAV_PARAM_TYPE_INT32
-                        if param_type is None and isinstance(value, int)
-                        else mavlink.MAV_PARAM_TYPE_REAL32
-                        if param_type is None
-                        else param_type
-                    ),
+                    "type": encode_enum(param_type),
                     "timeout_ms": round(timeout * 1000),
                 },
                 timeout=timeout + 1.0,
@@ -281,7 +304,7 @@ class LinkHubClient:
             timeout=timeout + 1.0,
         )
         return {
-            str(item["name"]): dict(item)
+            str(item["name"]): _decode_parameter(item)
             for item in result["parameters"]
         }
 
@@ -292,18 +315,25 @@ class LinkHubClient:
         timeout: float = 15.0,
         retries: int = 2,
     ) -> dict[str, dict[str, Any]]:
+        """Write parameters; each entry is ``{"name", "value"}`` plus an
+        optional ``"type"`` (a ``MavParamType``, default ``REAL32``)."""
         result = self._request_json(
             "PUT",
             "/v1/mavlink/parameters",
             {
-                "parameters": parameters,
+                "parameters": [
+                    {**item, "type": encode_enum(item["type"])}
+                    if "type" in item
+                    else item
+                    for item in parameters
+                ],
                 "timeout_ms": round(timeout * 1000),
                 "retries": retries,
             },
             timeout=timeout + 1.0,
         )
         records = {
-            str(item["name"]): dict(item)
+            str(item["name"]): _decode_parameter(item)
             for item in result["parameters"]
         }
         return records
@@ -315,11 +345,11 @@ class LinkHubClient:
         timeout: float = 10.0,
     ) -> bool:
         result = self.command(
-            mavlink.MAV_CMD_DO_SET_MODE,
-            [float(mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), float(custom_mode)],
+            MavCmd.DO_SET_MODE,
+            [float(DO_SET_MODE_CUSTOM_MODE_ENABLED), float(custom_mode)],
             timeout=timeout,
         )
-        if result.get("result") != mavlink.MAV_RESULT_ACCEPTED:
+        if result["result"] != MavResult.ACCEPTED:
             raise LinkHubError(f"Mode {custom_mode} was rejected: {result}")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -330,9 +360,8 @@ class LinkHubClient:
 
     @property
     def is_armed(self) -> bool:
-        return bool(
-            int(self.vehicle_status().get("base_mode", 0))
-            & mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        return MavModeFlag.SAFETY_ARMED in self.vehicle_status().get(
+            "base_mode", frozenset()
         )
 
     def arm(
@@ -342,11 +371,11 @@ class LinkHubClient:
         force: bool = False,
     ) -> bool:
         result = self.command(
-            mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            MavCmd.COMPONENT_ARM_DISARM,
             [1.0, 21196.0 if force else 0.0],
             timeout=timeout,
         )
-        if result.get("result") != mavlink.MAV_RESULT_ACCEPTED:
+        if result["result"] != MavResult.ACCEPTED:
             raise LinkHubError(f"Arm was rejected: {result}")
         return self._wait_armed(True, timeout)
 
@@ -357,11 +386,11 @@ class LinkHubClient:
         force: bool = False,
     ) -> bool:
         result = self.command(
-            mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            MavCmd.COMPONENT_ARM_DISARM,
             [0.0, 21196.0 if force else 0.0],
             timeout=timeout,
         )
-        if result.get("result") != mavlink.MAV_RESULT_ACCEPTED:
+        if result["result"] != MavResult.ACCEPTED:
             raise LinkHubError(f"Disarm was rejected: {result}")
         return self._wait_armed(False, timeout)
 
@@ -401,7 +430,7 @@ class LinkHubClient:
 
     def set_message_interval(self, message_id: int, interval_us: int) -> None:
         self.command(
-            mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            MavCmd.SET_MESSAGE_INTERVAL,
             [float(message_id), float(interval_us)],
         )
 
@@ -447,12 +476,14 @@ class LinkHubClient:
         )
 
     def components(self) -> list[dict[str, Any]]:
+        """Known heartbeat senders; enumerations and ``base_mode`` are decoded
+        like ``vehicle_status()`` (plus ``vehicle_type`` and ``autopilot``)."""
         result = self._request_json(
             "GET",
             "/v1/mavlink/components",
             timeout=5.0,
         )
-        return list(result["components"])
+        return [_decode_heartbeat_state(dict(item)) for item in result["components"]]
 
     def download_file(
         self,
@@ -743,6 +774,31 @@ class LinkHubMotorController:
 
 def _decode_record(record: TelemetryRecord) -> Message | RawMessage:
     return decode_message(RawMessage(record.message, dict(record.fields)))
+
+
+# MAV_CMD_DO_SET_MODE param1 value selecting the vehicle's custom mode
+# (the numeric value of MAV_MODE_FLAG_CUSTOM_MODE_ENABLED).
+DO_SET_MODE_CUSTOM_MODE_ENABLED = 1
+
+_HEARTBEAT_ENUM_KEYS = {
+    "vehicle_type": MavType,
+    "autopilot": MavAutopilot,
+    "system_status": MavState,
+}
+
+
+def _decode_heartbeat_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Decode the heartbeat-derived enumerations and bitmask in LinkHub state."""
+    for key, enum_type in _HEARTBEAT_ENUM_KEYS.items():
+        if key in state:
+            state[key] = decode_enum(enum_type, state[key])
+    if "base_mode" in state:
+        state["base_mode"] = parse_flags(MavModeFlag, state["base_mode"])
+    return state
+
+
+def _decode_parameter(record: dict[str, Any]) -> dict[str, Any]:
+    return {**record, "type": decode_enum(MavParamType, record["type"])}
 
 
 def _http_error_payload(exc: urllib.error.HTTPError) -> dict[str, Any]:

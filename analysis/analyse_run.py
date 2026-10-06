@@ -222,9 +222,9 @@ class RunReport:
 
 _RE_RUN_ID      = re.compile(r"RUN_ID=(\d+)")
 # Two STATUSTEXT formats in gcs.log:
-#   fixture logger:  STATUSTEXT [sev=6]: <text>
+#   fixture logger:  STATUSTEXT [sev=MAV_SEVERITY_INFO]: <text>
 #   test logger:     STATUSTEXT [t=1.7s]: <text>
-_RE_STATUSTEXT  = re.compile(r"STATUSTEXT \[(?:sev=\d+|t=[\d.]+s)\]:\s*(.+)$")
+_RE_STATUSTEXT  = re.compile(r"STATUSTEXT \[(?:sev=\w+|t=[\d.]+s)\]:\s*(.+)$")
 _RE_STATUSTEXT_T = re.compile(r"STATUSTEXT \[t=([\d.]+)s\]:\s*(.+)$")
 _RE_EKF_FLAGS   = re.compile(r"EKF_STATUS\s+flags=(0x[0-9a-fA-F]+)")
 _RE_SETUP_STEP  = re.compile(r"\[setup\s+\d+/\d+\]\s+(.+)$")
@@ -239,7 +239,7 @@ _RE_KIN_START   = re.compile(
 )
 _RE_TIMESTAMP   = re.compile(r"^(\d+:\d+:\d+)")
 # Lines in gcs.log that prove ArduPilot was alive (heartbeat or STATUSTEXT received).
-# Covers all logger formats: [sev=6], [t=Xs], [post-kin drain], [drain], etc.
+# Covers all logger formats: [sev=MAV_SEVERITY_INFO], [t=Xs], [post-kin drain], [drain], etc.
 _RE_AP_ALIVE    = re.compile(
     r"HEARTBEAT: sysid=1|"
     r"STATUSTEXT[^:]*:|"

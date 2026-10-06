@@ -18,7 +18,6 @@ use std::{
     time::Duration,
 };
 
-use mavio::{AsyncReceiver, io::TokioReader};
 use serde::Serialize;
 use tokio::{
     io::{AsyncRead, ReadBuf},
@@ -28,7 +27,7 @@ use tokio_serial::{
     ClearBuffer, SerialPort, SerialPortBuilderExt, SerialPortInfo, SerialPortType, SerialStream,
 };
 
-use crate::{codec::decode_raw, mavlink::HEARTBEAT_MESSAGE_ID, records::wall_time_ns};
+use crate::{codec::FrameReader, mavlink::HEARTBEAT_MESSAGE_ID, records::wall_time_ns};
 
 /// Baud rates probed when the caller does not restrict them, ordered by how
 /// commonly the RAWES hardware uses them.
@@ -471,13 +470,11 @@ async fn wait_for_heartbeat<R>(reader: R, frames: &mut u64) -> Result<(), String
 where
     R: AsyncRead + Unpin,
 {
-    let mut receiver = AsyncReceiver::versionless(TokioReader::new(reader));
+    let mut receiver = FrameReader::new(reader);
     loop {
-        let frame = receiver.recv().await.map_err(|error| error.to_string())?;
-        let message_id = frame.message_id();
-        decode_raw(frame).map_err(|error| error.to_string())?;
+        let decoded = receiver.recv().await.map_err(|error| error.to_string())?;
         *frames += 1;
-        if message_id == HEARTBEAT_MESSAGE_ID {
+        if decoded.message_id == HEARTBEAT_MESSAGE_ID {
             return Ok(());
         }
     }

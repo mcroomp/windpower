@@ -34,7 +34,7 @@ from tests.sitl.stack_infra import (  # noqa: E402
 from linkhub_client.messages import (
     NamedValueFloat,
     ServoOutputRaw,
-    StatusText,
+    Statustext,
     decode_message,
 )
 
@@ -88,11 +88,11 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
 
     thr_seed = _get_ic_thrust(ic)
     ten_seed = float(ic["tension_eq_n"])
-    gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
-    gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
-    gcs.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
-    gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
-    gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_THR", value=thr_seed))
+    gcs.send_message(NamedValueFloat(name="RAWES_TEN", value=ten_seed))
+    gcs.send_message(NamedValueFloat(name="RAWES_ROFF", value=0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_POFF", value=0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_YOFF", value=0.0))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info(
@@ -122,7 +122,7 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
             activity = abs(decoded.servo1_raw - 1500) + abs(decoded.servo2_raw - 1500)
             if activity > state["max_cyclic"]:
                 state["max_cyclic"] = activity
-        elif isinstance(decoded, StatusText):
+        elif isinstance(decoded, Statustext):
             text = decoded.text
             all_statustext.append(text)
             tl = text.lower()

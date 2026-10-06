@@ -9,9 +9,8 @@ use std::{
     time::Duration,
 };
 
-use mavio::{AsyncReceiver, io::TokioReader};
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -22,8 +21,9 @@ use tokio::{
 
 use crate::{
     codec::{
-        CodecError, DecodedMessage, EncodedMessage, MavHeader, decode_raw, decode_raw_bytes,
-        encode_message, serialize_message,
+        CodecError, DecodedMessage, FrameReader, MavHeader, MavMessage, decode_raw_bytes,
+        dialect::{HEARTBEAT_DATA, MavAutopilot, MavModeFlag, MavState, MavType},
+        message_from_fields, serialize_message,
     },
     discovery::{DiscoveryConfig, ScanReport},
     journal::{JournalError, JournalHandle},
@@ -66,9 +66,9 @@ pub struct LinkStatus {
     pub clock_epoch: u64,
     pub target_system: u8,
     pub target_component: u8,
-    pub base_mode: u64,
-    pub custom_mode: u64,
-    pub system_status: u64,
+    pub base_mode: MavModeFlag,
+    pub custom_mode: u32,
+    pub system_status: MavState,
     pub latest_time_boot_ms: u64,
     pub received_messages: u64,
     pub transmitted_messages: u64,
@@ -76,8 +76,9 @@ pub struct LinkStatus {
     pub transmitted_bytes: u64,
     pub rx_bps: Option<f64>,
     pub tx_bps: Option<f64>,
-    pub framing_errors: u64,
-    pub discarded_bytes: u64,
+    /// Frames that passed their CRC but did not decode as a typed dialect
+    /// message (for example an enum value outside the dialect) and were dropped.
+    pub dropped_frames: u64,
     pub last_received_ns: Option<u64>,
     pub error: Option<String>,
     /// Which step produced `error`: `scan`, `open`, `acquire`, or `link`.
@@ -130,11 +131,11 @@ impl LinkThroughput {
 pub struct ComponentInfo {
     pub system_id: u8,
     pub component_id: u8,
-    pub vehicle_type: u64,
-    pub autopilot: u64,
-    pub base_mode: u64,
-    pub custom_mode: u64,
-    pub system_status: u64,
+    pub vehicle_type: MavType,
+    pub autopilot: MavAutopilot,
+    pub base_mode: MavModeFlag,
+    pub custom_mode: u32,
+    pub system_status: MavState,
     pub last_heartbeat_ns: u64,
 }
 
@@ -213,12 +214,13 @@ pub struct ReceivedMessage {
     pub message_id: u32,
     pub name: String,
     pub fields: Map<String, Value>,
+    pub message: MavMessage,
 }
 
 enum OutboundPayload {
     Raw(Vec<u8>),
     Message {
-        message: Box<EncodedMessage>,
+        message: Box<MavMessage>,
         source_system: Option<u8>,
         source_component: Option<u8>,
     },
@@ -266,20 +268,33 @@ impl MavlinkLinkHandle {
         self.send(OutboundPayload::Raw(frame)).await
     }
 
+    /// Sends a typed message, journaling it on the shared link timeline.
     pub async fn send_message(
         &self,
-        name: &str,
-        fields: &Map<String, Value>,
+        message: MavMessage,
         source_system: Option<u8>,
         source_component: Option<u8>,
     ) -> Result<u64, LinkError> {
-        let message = encode_message(name, fields)?;
         self.send(OutboundPayload::Message {
             message: Box::new(message),
             source_system,
             source_component,
         })
         .await
+    }
+
+    /// Builds a message from its dialect name and typed JSON fields (see
+    /// [`message_from_fields`]) and sends it.
+    pub async fn send_message_fields(
+        &self,
+        name: &str,
+        fields: &Map<String, Value>,
+        source_system: Option<u8>,
+        source_component: Option<u8>,
+    ) -> Result<u64, LinkError> {
+        let message = message_from_fields(name, fields)?;
+        self.send_message(message, source_system, source_component)
+            .await
     }
 
     async fn send(&self, payload: OutboundPayload) -> Result<u64, LinkError> {
@@ -725,7 +740,7 @@ where
         tx_sequence,
     } = context;
     let (receive_tx, mut receive_rx) = mpsc::channel(256);
-    let receive_task = tokio::spawn(receive_messages(reader, receive_tx));
+    let receive_task = tokio::spawn(receive_messages(reader, receive_tx, status_tx.clone()));
     let mut heartbeat = time::interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let now = time::Instant::now();
@@ -802,17 +817,20 @@ where
     result
 }
 
-async fn receive_messages<R>(reader: R, sender: mpsc::Sender<Result<DecodedMessage, String>>)
-where
+async fn receive_messages<R>(
+    reader: R,
+    sender: mpsc::Sender<Result<DecodedMessage, String>>,
+    status_tx: watch::Sender<LinkStatus>,
+) where
     R: AsyncRead + Unpin,
 {
-    let mut receiver = AsyncReceiver::versionless(TokioReader::new(reader));
+    let mut receiver = FrameReader::new(reader);
     loop {
-        let result = receiver
-            .recv()
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|frame| decode_raw(frame).map_err(|error| error.to_string()));
+        let result = receiver.recv().await.map_err(|error| error.to_string());
+        let dropped = receiver.take_dropped_frames();
+        if dropped > 0 {
+            status_tx.send_modify(|status| status.dropped_frames += dropped);
+        }
         let failed = result.is_err();
         if sender.send(result).await.is_err() || failed {
             return;
@@ -831,19 +849,15 @@ async fn archive_received(
 ) -> Result<(), LinkError> {
     let now = wall_time_ns();
     let frame_bytes = decoded.raw.len() as u64;
-    let is_heartbeat = decoded.message_id == HEARTBEAT_MESSAGE_ID;
     let system_id = decoded.system_id;
     let component_id = decoded.component_id;
     let time_boot_ms = decoded.fields.get("time_boot_ms").and_then(Value::as_u64);
-    let heartbeat_state = is_heartbeat.then(|| {
-        (
-            decoded.fields["base_mode"].as_u64().unwrap_or_default(),
-            decoded.fields["custom_mode"].as_u64().unwrap_or_default(),
-            decoded.fields["system_status"].as_u64().unwrap_or_default(),
-        )
-    });
-    if is_heartbeat {
-        update_component_registry(components, system_id, component_id, &decoded.fields, now)?;
+    let heartbeat = match &decoded.message {
+        MavMessage::HEARTBEAT(heartbeat) => Some(heartbeat.clone()),
+        _ => None,
+    };
+    if let Some(heartbeat) = &heartbeat {
+        update_component_registry(components, system_id, component_id, heartbeat, now);
         let _ = components_tx.send(components.values().cloned().collect());
     }
     let record = decoded_frame(&config.id, Direction::Rx, &decoded);
@@ -866,19 +880,20 @@ async fn archive_received(
         message_id: decoded.message_id,
         name: decoded.name,
         fields: decoded.fields,
+        message: decoded.message,
     }));
     status_tx.send_modify(|status| {
         status.received_messages += 1;
         status.received_bytes += frame_bytes;
         status.last_received_ns = Some(now);
-        if is_heartbeat && system_id != config.source_system {
+        if system_id != config.source_system
+            && let Some(heartbeat) = &heartbeat
+        {
             status.target_system = system_id;
             status.target_component = component_id;
-            let (base_mode, custom_mode, system_status) =
-                heartbeat_state.expect("heartbeat state was captured");
-            status.base_mode = base_mode;
-            status.custom_mode = custom_mode;
-            status.system_status = system_status;
+            status.base_mode = heartbeat.base_mode;
+            status.custom_mode = heartbeat.custom_mode;
+            status.system_status = heartbeat.system_status;
             status.ready = true;
         }
         if let Some(time_boot_ms) = time_boot_ms {
@@ -892,29 +907,22 @@ fn update_component_registry(
     components: &mut BTreeMap<(u8, u8), ComponentInfo>,
     system_id: u8,
     component_id: u8,
-    fields: &Map<String, Value>,
+    heartbeat: &HEARTBEAT_DATA,
     timestamp_ns: u64,
-) -> Result<(), LinkError> {
-    let integer = |name| {
-        fields
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| LinkError::Receive(format!("HEARTBEAT missing numeric {name}")))
-    };
+) {
     components.insert(
         (system_id, component_id),
         ComponentInfo {
             system_id,
             component_id,
-            vehicle_type: integer("type")?,
-            autopilot: integer("autopilot")?,
-            base_mode: integer("base_mode")?,
-            custom_mode: integer("custom_mode")?,
-            system_status: integer("system_status")?,
+            vehicle_type: heartbeat.mavtype,
+            autopilot: heartbeat.autopilot,
+            base_mode: heartbeat.base_mode,
+            custom_mode: heartbeat.custom_mode,
+            system_status: heartbeat.system_status,
             last_heartbeat_ns: timestamp_ns,
         },
     );
-    Ok(())
 }
 
 async fn send_outbound(
@@ -950,7 +958,7 @@ async fn send_typed(
     config: &MavlinkLinkConfig,
     journal: &JournalHandle,
     writer: &mut (impl AsyncWrite + Unpin),
-    message: EncodedMessage,
+    message: MavMessage,
     source: (Option<u8>, Option<u8>),
     status_tx: &watch::Sender<LinkStatus>,
     tx_sequence: &AtomicU8,
@@ -960,7 +968,7 @@ async fn send_typed(
         component_id: source.1.unwrap_or(config.source_component),
         sequence: tx_sequence.fetch_add(1, Ordering::Relaxed),
     };
-    let bytes = serialize_message(&message, header)?;
+    let bytes = serialize_message(&message, header);
     send_bytes(config, journal, writer, bytes, status_tx).await
 }
 
@@ -1003,18 +1011,15 @@ fn decoded_frame(link_id: &str, direction: Direction, decoded: &DecodedMessage) 
     }
 }
 
-pub(crate) fn heartbeat_message() -> EncodedMessage {
-    let Value::Object(fields) = json!({
-        "custom_mode": 0,
-        "type": 6,
-        "autopilot": 8,
-        "base_mode": 0,
-        "system_status": 4,
-        "mavlink_version": 3,
-    }) else {
-        unreachable!("heartbeat literal is an object");
-    };
-    encode_message("HEARTBEAT", &fields).expect("static heartbeat fields are valid")
+pub(crate) fn heartbeat_message() -> MavMessage {
+    MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+        custom_mode: 0,
+        mavtype: MavType::MAV_TYPE_GCS,
+        autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
+        base_mode: MavModeFlag::empty(),
+        system_status: MavState::MAV_STATE_ACTIVE,
+        mavlink_version: 3,
+    })
 }
 
 #[cfg(test)]
@@ -1152,6 +1157,51 @@ mod tests {
         journal_task.await.expect("journal");
     }
 
+    #[tokio::test]
+    async fn link_counts_undecodable_frames_without_dropping_the_connection() {
+        let server = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = server.local_addr().expect("address");
+        let (disconnect, disconnected) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept");
+            // A HEARTBEAT whose MAV_TYPE byte is outside the dialect, with a valid CRC.
+            let mut invalid = heartbeat(1, 1, 1);
+            invalid[14] = 250;
+            let crc = linkhub_dialect::calculate_crc(&invalid[1..19], 50);
+            invalid[19..21].copy_from_slice(&crc.to_le_bytes());
+            socket.write_all(&invalid).await.expect("invalid frame");
+            socket
+                .write_all(&heartbeat(2, 1, 1))
+                .await
+                .expect("heartbeat");
+            disconnected.await.expect("disconnect signal");
+        });
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, journal_task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let (link, link_task) = start_link(MavlinkLinkConfig::sitl(address), journal.clone());
+        let mut status = link.subscribe_status();
+        time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = status.borrow_and_update().clone();
+                if snapshot.dropped_frames == 1 && snapshot.received_bytes == 21 {
+                    assert!(snapshot.connected);
+                    break;
+                }
+                status.changed().await.expect("status");
+            }
+        })
+        .await
+        .expect("dropped frame counted");
+        disconnect.send(()).expect("disconnect");
+        peer.await.expect("peer");
+        link_task.abort();
+        journal.shutdown().await.expect("shutdown");
+        journal_task.await.expect("journal");
+    }
+
     fn heartbeat(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
         serialize_message(
             &heartbeat_message(),
@@ -1161,7 +1211,6 @@ mod tests {
                 component_id,
             },
         )
-        .expect("heartbeat")
     }
 
     #[test]
@@ -1186,17 +1235,18 @@ mod tests {
     #[test]
     fn component_registry_matches_http_contract_and_refreshes_heartbeats() {
         let mut components = BTreeMap::new();
-        let fields = serde_json::from_value(json!({
-            "type": 2,
-            "autopilot": 3,
-            "base_mode": 129,
-            "custom_mode": 4,
-            "system_status": 4,
-        }))
-        .expect("heartbeat fields");
+        let heartbeat = HEARTBEAT_DATA {
+            custom_mode: 4,
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED
+                | MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            system_status: MavState::MAV_STATE_ACTIVE,
+            mavlink_version: 3,
+        };
 
-        update_component_registry(&mut components, 1, 1, &fields, 100).expect("first heartbeat");
-        update_component_registry(&mut components, 1, 1, &fields, 200).expect("new heartbeat");
+        update_component_registry(&mut components, 1, 1, &heartbeat, 100);
+        update_component_registry(&mut components, 1, 1, &heartbeat, 200);
 
         let value = serde_json::to_value(components.get(&(1, 1)).expect("component"))
             .expect("serialize component");
@@ -1205,11 +1255,11 @@ mod tests {
             json!({
                 "system_id": 1,
                 "component_id": 1,
-                "vehicle_type": 2,
-                "autopilot": 3,
-                "base_mode": 129,
+                "vehicle_type": {"type": "MAV_TYPE_QUADROTOR"},
+                "autopilot": {"type": "MAV_AUTOPILOT_ARDUPILOTMEGA"},
+                "base_mode": "MAV_MODE_FLAG_SAFETY_ARMED | MAV_MODE_FLAG_CUSTOM_MODE_ENABLED",
                 "custom_mode": 4,
-                "system_status": 4,
+                "system_status": {"type": "MAV_STATE_ACTIVE"},
                 "last_heartbeat_ns": 200,
             })
         );
@@ -1294,9 +1344,9 @@ mod tests {
         .await
         .expect("TX byte counter");
         assert_eq!(connected_status.target_system, 1);
-        assert_eq!(connected_status.base_mode, 0);
+        assert_eq!(connected_status.base_mode, MavModeFlag::empty());
         assert_eq!(connected_status.custom_mode, 0);
-        assert_eq!(connected_status.system_status, 4);
+        assert_eq!(connected_status.system_status, MavState::MAV_STATE_ACTIVE);
 
         link_task.abort();
         journal.shutdown().await.expect("shutdown");

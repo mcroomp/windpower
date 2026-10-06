@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compareConfig, configTargets, parseParm } from "../src/config";
+import { MavParamType } from "../src/generated/protocol";
+import { mavEnum } from "../src/mav";
 
 describe("parseParm", () => {
   it("parses names and values, skipping comments and bad lines", () => {
@@ -26,8 +28,8 @@ describe("compareConfig", () => {
     const rows = compareConfig(
       new Map([["A", 1], ["B", 0], ["C", 5]]),
       new Map([
-        ["A", { name: "A", value: 1.00001, type: 9 }],
-        ["B", { name: "B", value: 1, type: 2 }],
+        ["A", { name: "A", value: 1.00001, type: mavEnum(MavParamType.REAL32) }],
+        ["B", { name: "B", value: 1, type: mavEnum(MavParamType.INT8) }],
       ]),
     );
     expect(rows.map((row) => [row.name, row.status])).toEqual([
@@ -35,6 +37,6 @@ describe("compareConfig", () => {
       ["B", "diff"],
       ["C", "missing"],
     ]);
-    expect(rows[1]?.type).toBe(2);
+    expect(rows[1]?.type).toEqual({ type: "MAV_PARAM_TYPE_INT8" });
   });
 });

@@ -7,7 +7,6 @@ use linkhub::{
     journal::{JournalConfig, JournalHandle},
     mavlink::{MavlinkLinkConfig, start_link},
     motor::MotorHandle,
-    protocol,
     query::QueryArgs,
     records::{DiagnosticEvent, DiagnosticLevel, wall_time_ns},
 };
@@ -26,14 +25,6 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     Query(QueryArgs),
-    Schema {
-        #[arg(long)]
-        output: Option<PathBuf>,
-        #[arg(long)]
-        python_output: Option<PathBuf>,
-        #[arg(long)]
-        typescript_output: Option<PathBuf>,
-    },
     Serve {
         /// MAVLink endpoint: `tcp:HOST:PORT` for SITL, or `auto` (the
         /// default) to discover a serial port by scanning for a MAVLink
@@ -97,33 +88,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match Args::parse().command {
         Command::Query(args) => linkhub::query::execute(args).await?,
-        Command::Schema {
-            output,
-            python_output,
-            typescript_output,
-        } => {
-            let schema = serde_json::to_string_pretty(&protocol::json_schema())? + "\n";
-            if let Some(path) = output {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).await?;
-                }
-                fs::write(path, schema).await?;
-            } else {
-                print!("{schema}");
-            }
-            if let Some(path) = python_output {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).await?;
-                }
-                fs::write(path, protocol::python_types()).await?;
-            }
-            if let Some(path) = typescript_output {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).await?;
-                }
-                fs::write(path, protocol::typescript_types()).await?;
-            }
-        }
         Command::Serve {
             connection,
             listen,

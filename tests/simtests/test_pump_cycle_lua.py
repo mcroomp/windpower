@@ -10,7 +10,7 @@ kite-side controller is the real Lua flight code instead of the Python equivalen
 Division of labour (mirrors real stack):
   Ground (Python, 10 Hz): inline reel_out/reel_in state machine; commands the
                           GovernedWinchController and sends RAWES_ALT/RAWES_TEN/
-                          RAWES_SUB to Lua via LuaComms (send_named_float).
+                          RAWES_SUB to Lua via GcsComms (send_message).
   Winch  (400 Hz):        GovernedWinchController -- +/-V_CRUISE cruise with a
                           proportional tension governor, acceleration- and
                           jerk-limited for smooth motion.
@@ -40,7 +40,7 @@ from tests.common.mock_ardupilot import MockArdupilot
 from groundstation.pumping_planner import PumpingGroundController
 from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
-from simulation.unified_ground import LuaComms
+from groundstation.unified_ground import GcsComms
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _IC    = load_ic()
@@ -122,7 +122,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     node = GovernedWinchNode(gov, Anemometer())
 
     # ── Ground -> Lua command channel (NAMED_VALUE_FLOAT) ─────────────────────
-    comms = LuaComms(sim.send_named_float)
+    comms = GcsComms(sim)
 
     lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
     lua.winch = gov   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()

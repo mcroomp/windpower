@@ -255,6 +255,17 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
   exited before launching the replacement. Never start a second Cargo command
   merely because the first has not printed output, and never kill Cargo/rustc
   processes by name or disturb unrelated editor/rust-analyzer processes.
+- **Critical — keep LinkHub's MAVLink dialect in step with the pinned ArduPilot
+  version.** ArduPilot is pinned in `simulation/Dockerfile` (`ARDUPILOT_TAG`,
+  currently `Copter-4.7.1`). LinkHub's dialect (`linkhub/dialect`) is generated
+  from ArduPilot's own MAVLink definitions, vendored in
+  `linkhub/dialect/definitions` at the `ArduPilot/mavlink` commit that tag builds
+  from (`ARDUPILOT_VERSION` records the tag, the commit and file hashes;
+  `cargo test -p linkhub-dialect` fails when they drift). Whenever
+  `ARDUPILOT_TAG` changes, run `uv run python scripts/update_mavlink_definitions.py`
+  in the same change (see [linkhub/dialect/README.md](linkhub/dialect/README.md)),
+  regenerate the checked protocol artifacts (`cargo run -p linkhub-clientgen`
+  from `linkhub/`), and run `cargo test --workspace` for LinkHub.
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
 - Do not preserve backward-compatibility parameters, fields, aliases, or shims when making code changes.
 - Assume no external callers: prefer a clean cutover and remove legacy paths in the same change to avoid debt.

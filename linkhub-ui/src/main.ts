@@ -2,6 +2,7 @@ import "./styles.css";
 import { LinkHubApi } from "./api";
 import { formatLinkThroughput } from "./link-throughput";
 import { formatCopterMode } from "./modes";
+import { isArmed } from "./mav";
 import { PassiveController, type PassivePhase } from "./passive";
 import { VehicleScene } from "./scene";
 import { decodeH3Swashplate, swashControlPositions } from "./swashplate";
@@ -63,7 +64,7 @@ function updateOverlay(): void {
     typeof value === "number" ? (value * 180 / Math.PI).toFixed(1) : "n/a"
   );
   const field = (name: string) => String(servos?.fields[name] ?? "n/a");
-  const armed = Boolean(status && (status.base_mode & 128));
+  const armed = isArmed(status);
   const motorCommand = !armed
     ? "inactive"
     : typeof yawMotor?.fields.value === "number"

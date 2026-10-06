@@ -15,8 +15,9 @@ from linkhub_client import LinkHubClient
 ```
 
 The checked generated protocol file lives at
-`linkhub_client\src\linkhub_client\generated_protocol.py`. When you regenerate
-LinkHub's public protocol, regenerate this file via `linkhub schema`; do not
+`linkhub_client\src\linkhub_client\generated_protocol.py`. It is generated from
+ArduPilot's MAVLink definitions by `linkhub-clientgen`
+(`cargo run --manifest-path .\linkhub\Cargo.toml -p linkhub-clientgen`); do not
 hand-edit it.
 
 ## Minimal example
@@ -67,6 +68,35 @@ top level:
   when a read using `expected_generation=` receives LinkHub's
   `generation_changed` HTTP error.
 
+## Typed MAVLink values
+
+MAVLink enumerations and bitmasks are typed, not integers. The enumerations
+(`MavCmd`, `MavResult`, `MavParamType`, `MavState`, `MavType`, ...) are
+`StrEnum`s whose value is the full MAVLink name, so `MavCmd.DO_SET_MODE ==
+"MAV_CMD_DO_SET_MODE"`; names outside the generated members become
+pseudo-members instead of raising. Bitmask fields (`MavModeFlag`,
+`EkfStatusFlags`, `AttitudeTargetTypemask`, ...) decode to `frozenset`s, so test
+membership instead of masking bits:
+
+```python
+from linkhub_client import LinkHubClient
+from linkhub_client.messages import MavCmd, MavModeFlag, MavResult
+
+hub = LinkHubClient()
+hub.connect()
+if MavModeFlag.SAFETY_ARMED in hub.vehicle_status()["base_mode"]:
+    result = hub.command(MavCmd.COMPONENT_ARM_DISARM, [0.0, 0.0])
+    assert result["result"] is MavResult.ACCEPTED
+```
+
+On the wire an enumeration is `{"type": "<NAME>"}`, a bitmask is a
+`" | "`-joined string, and a dialect field named `type` is `mavtype`
+(`Heartbeat.mavtype`); see
+[design/linkhub.md](../design/linkhub.md#mavlink-value-representation).
+`linkhub_client.mav_constants` keeps only values that are plain integers on the
+wire (copter modes and message ids). `MAV_DATA_STREAM` is an enumeration here
+too: use `MavDataStream` for `RequestDataStream.req_stream_id`.
+
 ## `LinkHubClient` surface
 
 Core connection and journal methods:
@@ -85,9 +115,9 @@ Core connection and journal methods:
 MAVLink command and parameter helpers:
 
 - `send_message(message)`
-- `command(command, params=None, timeout=3.0)`
+- `command(command: MavCmd, params=None, timeout=3.0)`
 - `get_param(name, timeout=3.0)`
-- `set_param(name, value, timeout=3.0, param_type=None)`
+- `set_param(name, value, timeout=3.0, param_type: MavParamType | None = None)`
 - `fetch_all_params(timeout=15.0)`
 - `fetch_all_param_records(timeout=15.0)`
 - `set_params(parameters, timeout=15.0, retries=2)`

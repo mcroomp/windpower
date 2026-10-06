@@ -73,6 +73,37 @@ Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
 
+### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
+
+Pixhawk native USB (`VID:PID=3162:0053`, serial `160031001751343131363538`,
+COM5/COM6), ArduCopter 4.7.1, with the swash servos and the output-9 yaw motor
+disconnected and no battery connected (so arming needs `--force`). The running
+LinkHub service was replaced after flushing its journal: stopped, release binary
+rebuilt, restarted with the same arguments (`serve --connection auto --baud 115200
+--port 8999`). The service now speaks the typed-enum JSON contract
+([design/linkhub.md](design/linkhub.md#mavlink-value-representation)).
+
+Read-only checks passed: typed link and component status, capabilities, the full
+1,078-parameter list, MAVFTP listing of `/APM/scripts`, `calibrate status`, and
+`linkhub query` (`armed`, `statustext`, `param`, `show --json`) on the recorded
+journal. No frames were dropped.
+
+`run passive --duration 8` without `--force` was refused by ArduPilot:
+`Arm: Hardware safety switch` and `Arm: Compass not calibrated`
+(`BRD_SAFETY_DEFLT=1`); the cleanup left the vehicle disarmed in ACRO with the full
+canonical safe-off state verified. `run passive --duration 8 --force` then passed:
+arm accepted, `Runup Complete`, `ENTER_GUIDED` and `ENTER_PASSIVE` (`MAV_CMD_USER_1`
+and `USER_2`) accepted, 200 observation rows, disarm accepted, and safe-off
+verified again (`H_YAW_TRIM` returned to 0).
+
+Findings: `SYSID_THISMAV` does not exist on 4.7.1 (the parameter is `MAV_SYSID`),
+so it is not a valid "parameters ready" probe. `calibrate status` missed the
+1 Hz HEARTBEAT on a busy link because `calibrate.messages.read_one` treated
+LinkHub's early empty long-poll as a timeout; it now polls until its deadline.
+The service was later redeployed with the dialect generated from ArduPilot's own
+Copter-4.7.1 definitions; the read-only checks were repeated on that build, the
+armed run was not.
+
 ### 2026-10-06 ArduCopter 4.7.1 passive-run verification
 
 The flight controller was updated from ArduCopter 4.7.0 beta

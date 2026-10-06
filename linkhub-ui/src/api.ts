@@ -7,10 +7,13 @@ import type {
   ServiceStatus,
 } from "./types";
 import {
+  MavCmd,
   MavParamType,
   MavResult,
+  type MavEnum,
   type MavlinkMessage,
 } from "./generated/protocol";
+import { enumIs, enumName, mavEnum } from "./mav";
 
 export class ApiError extends Error {
   constructor(
@@ -21,11 +24,8 @@ export class ApiError extends Error {
   }
 }
 
-export function formatMavResult(result: number): string {
-  const name = MavResult[result];
-  return typeof name === "string"
-    ? `MAV_RESULT_${name} (${result})`
-    : `unknown MAV_RESULT (${result})`;
+export function formatMavResult(result: MavEnum<MavResult>): string {
+  return enumName(result) ?? "unknown MAV_RESULT";
 }
 
 export class LinkHubApi {
@@ -101,7 +101,7 @@ export class LinkHubApi {
       `/v1/mavlink/parameters/${encodeURIComponent(name)}`,
       {
         value,
-        type: integer ? MavParamType.INT32 : MavParamType.REAL32,
+        type: mavEnum(integer ? MavParamType.INT32 : MavParamType.REAL32),
         timeout_ms: 3000,
       },
       signal,
@@ -132,9 +132,9 @@ export class LinkHubApi {
     return new Map(result.parameters.map((parameter) => [parameter.name, parameter]));
   }
 
-  command(command: number, params: number[], timeoutMs = 10_000): Promise<CommandResult> {
+  command(command: MavCmd, params: number[], timeoutMs = 10_000): Promise<CommandResult> {
     return this.request("POST", "/v1/mavlink/commands", {
-      command,
+      command: mavEnum(command),
       params,
       timeout_ms: timeoutMs,
     });
@@ -155,18 +155,18 @@ export class LinkHubApi {
   }
 
   async setMode(mode: number): Promise<void> {
-    const result = await this.command(176, [1, mode]);
-    if (result.result !== MavResult.ACCEPTED) {
+    const result = await this.command(MavCmd.DO_SET_MODE, [1, mode]);
+    if (!enumIs(result.result, MavResult.ACCEPTED)) {
       throw new Error(`Mode ${mode} rejected with ${formatMavResult(result.result)}`);
     }
   }
 
   async setArmed(armed: boolean, force = false): Promise<void> {
-    const result = await this.command(400, [
+    const result = await this.command(MavCmd.COMPONENT_ARM_DISARM, [
       armed ? 1 : 0,
       force ? 21196 : 0,
     ], 15_000);
-    if (result.result !== MavResult.ACCEPTED) {
+    if (!enumIs(result.result, MavResult.ACCEPTED)) {
       throw new Error(
         `${armed ? "Arm" : "Disarm"} rejected with ${formatMavResult(result.result)}`,
       );

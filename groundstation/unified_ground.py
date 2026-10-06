@@ -10,9 +10,9 @@ NAMED_VALUE_FLOAT pairs:
 
   GcsComms(gcs)   SITL stack test / real hardware: sends NAMED_VALUE_FLOAT via MAVLink
 
-The NvComms base + _cmd_to_nv marshalling here is the single source of truth
-for this wire format; simulation.unified_ground's test-only adapters
-(DirectComms, LuaComms) reuse NvComms from this module.
+The _cmd_to_nv marshalling here is the single source of truth for this wire
+format. Lua unit tests reuse GcsComms with the Lua harness as the `gcs`;
+simulation.unified_ground only holds the Python-simtest DirectComms.
 """
 
 from __future__ import annotations
@@ -37,18 +37,7 @@ def _cmd_to_nv(cmd: TensionCommand) -> list[tuple[str, float]]:
     ]
 
 
-class NvComms:
-    """Base for comms that marshal TensionCommand to NAMED_VALUE_FLOAT pairs."""
-
-    def send_nv(self, name: str, value: float) -> None:
-        raise NotImplementedError
-
-    def send(self, cmd: TensionCommand, dt: float) -> None:
-        for name, value in _cmd_to_nv(cmd):
-            self.send_nv(name, value)
-
-
-class GcsComms(NvComms):
+class GcsComms:
     """Sends TensionCommand via MAVLink NAMED_VALUE_FLOAT (SITL stack tests).
 
     gcs: object with send_message(msg) — e.g. LinkHubClient.
@@ -57,5 +46,6 @@ class GcsComms(NvComms):
     def __init__(self, gcs) -> None:
         self._gcs = gcs
 
-    def send_nv(self, name: str, value: float) -> None:
-        self._gcs.send_message(NamedValueFloat(name, value))
+    def send(self, cmd: TensionCommand, dt: float) -> None:
+        for name, value in _cmd_to_nv(cmd):
+            self._gcs.send_message(NamedValueFloat(name=name, value=value))

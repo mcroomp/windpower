@@ -1,4 +1,5 @@
 import type { LinkHubApi } from "./api";
+import { heartbeatState } from "./mav";
 import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
 import type { LinkHubStatus, MessageRecord } from "./types";
 
@@ -155,16 +156,9 @@ export class TelemetryStore {
         listener(record);
       }
       if (record.direction === "rx" && record.message === "HEARTBEAT") {
-        const baseMode = Number(record.fields.base_mode);
-        const customMode = Number(record.fields.custom_mode);
-        const systemStatus = Number(record.fields.system_status);
-        if (this.currentStatus) {
-          this.currentStatus = {
-            ...this.currentStatus,
-            base_mode: baseMode,
-            custom_mode: customMode,
-            system_status: systemStatus,
-          };
+        const heartbeat = heartbeatState(record.fields);
+        if (this.currentStatus && heartbeat) {
+          this.currentStatus = { ...this.currentStatus, ...heartbeat };
         }
       }
     }

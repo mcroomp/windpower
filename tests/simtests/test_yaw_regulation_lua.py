@@ -108,9 +108,9 @@ def test_yaw_regulation_lua():
     )
 
     # Seed IC so _ic_seeded becomes True on the first update() tick
-    sim.send_message(NamedValueFloat("RAWES_THR", _IC_THRUST))
-    sim.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
-    sim.send_message(NamedValueFloat("RAWES_POFF", 0.0))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=_IC_THRUST))
+    sim.send_message(NamedValueFloat(name="RAWES_ROFF", value=0.0))
+    sim.send_message(NamedValueFloat(name="RAWES_POFF", value=0.0))
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
 
     # ---------------------------------------------------------------------------

@@ -86,11 +86,12 @@ from tests.sitl.stack_utils import (
     check_ports_free,
 )
 
-from linkhub_client import mav_constants as _mavlink
 from linkhub_client.mav_constants import GUIDED, GUIDED_NOGPS, STABILIZE
 from linkhub_client.messages import (
     Attitude,
+    AttitudeTargetTypemask,
     decode_message,
+    EkfStatusFlags,
     EkfStatusReport,
     GlobalPositionInt,
     LocalPositionNed,
@@ -98,10 +99,11 @@ from linkhub_client.messages import (
     NamedValueFloat,
     ParamRequestRead,
     RequestDataStream,
-    StatusText,
+    Statustext,
     SetAttitudeTarget,
 )
 from linkhub_client.client import LinkHubClient
+from groundstation.ekf_flags import flags_to_mask
 from groundstation.rawes_modes import (
     CMD_ENTER_PASSIVE,
     enter_passive_params,
@@ -422,7 +424,7 @@ class StackContext:
                 last_text[0] = None
                 return
             decoded = decode_message(msg)
-            if isinstance(decoded, StatusText):
+            if isinstance(decoded, Statustext):
                 text = decoded.text
                 self.all_statustext.append(text)
                 self.log.info("STATUSTEXT [%s]: %s", label, text)
@@ -1063,12 +1065,12 @@ def _arm_sequence(
         ]
 
         # Attitude-only target: ignore body-rate axes and throttle.
-        mask = (
-            _mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
-            | _mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
-            | _mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
-            | _mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
-        )
+        mask = frozenset({
+            AttitudeTargetTypemask.BODY_ROLL_RATE_IGNORE,
+            AttitudeTargetTypemask.BODY_PITCH_RATE_IGNORE,
+            AttitudeTargetTypemask.BODY_YAW_RATE_IGNORE,
+            AttitudeTargetTypemask.THROTTLE_IGNORE,
+        })
         gcs.send_message(SetAttitudeTarget(
             target_system=gcs._target_system,
             target_component=gcs._target_component,
@@ -1101,7 +1103,7 @@ def _arm_sequence(
 
     # Optional Lua disarm timer (ms from now). This no longer controls arming.
     if armon_ms is not None and armon_ms > 0:
-        gcs.send_message(NamedValueFloat("RAWES_ARM", float(armon_ms)))
+        gcs.send_message(NamedValueFloat(name="RAWES_ARM", value=float(armon_ms)))
         log.info("[arm] Sent RAWES_ARM disarm timer=%d ms", armon_ms)
 
 
@@ -1245,7 +1247,7 @@ def _run_acro_setup(
         t_now = gcs.sim_now()
         decoded = decode_message(msg)
 
-        if isinstance(decoded, StatusText):
+        if isinstance(decoded, Statustext):
             text = decoded.text
             sev  = decoded.severity
             log.info("[setup 4/6] STATUSTEXT [sev=%s]: %s", sev, text)
@@ -1280,15 +1282,16 @@ def _run_acro_setup(
 
         elif isinstance(decoded, EkfStatusReport):
             flags = decoded.flags
+            flag_mask = flags_to_mask(flags)
             log.info("[setup 4/6] EKF_STATUS  flags=0x%04x  vel_var=%.3f  "
                      "pos_var=%.3f  hgt_var=%.3f",
-                     flags,
+                     flag_mask,
                      getattr(msg, "velocity_variance", float("nan")),
                      getattr(msg, "pos_horiz_variance", float("nan")),
                      getattr(msg, "pos_vert_variance", float("nan")))
-            setup_samples.append({"t": t_now, "type": "EKF_STATUS", "flags": flags})
-            if flags & _mavlink.EKF_ATTITUDE and not ekf_att:
-                log.info("[setup 4/6] EKF_ATTITUDE flag set (flags=0x%04x).", flags)
+            setup_samples.append({"t": t_now, "type": "EKF_STATUS", "flags": flag_mask})
+            if EkfStatusFlags.ATTITUDE in flags and not ekf_att:
+                log.info("[setup 4/6] EKF_ATTITUDE flag set (flags=0x%04x).", flag_mask)
                 ekf_att = True
                 t_ekf   = t_now
             ekf_ok = ekf_att
@@ -1338,7 +1341,7 @@ def _run_acro_setup(
     _procs_alive()
 
     # Stabilisation wait: arm immediately when EKF3 first reports attitude
-    # confidence (flags & EKF_ATTITUDE = 0x0001).
+    # confidence (EkfStatusFlag.ATTITUDE in flags).
     #
     # WHY early arm (not waiting for GPS fusion):
     #   With physical sensor mode (hub at roll~124 deg, pitch~-46 deg), EKF3
@@ -1356,12 +1359,10 @@ def _run_acro_setup(
     #   ~41 s : GPS fusion attempt -> large innovations -> EKF3 reinit -> DCM diverges
     #
     # WHAT we wait for:
-    #   - EKF_STATUS flags & 0x0001 (EKF_ATTITUDE): EKF3 attitude confidence.
+    #   - EKF_STATUS EkfStatusFlag.ATTITUDE: EKF3 attitude confidence.
     #     This is the earliest moment both DCM and EKF3 agree on the attitude.
     #   - Still capture LOCAL_POSITION_NED if it arrives (for test_gps_fuses_*).
     #   - Fallback: 20 s timeout (EKF3 should align well within this).
-    _EKF_ATT_FLAG  = 0x0001   # bit 0: EKF3 attitude estimate good
-    _EKF_POS_FLAG  = 0x0010   # bit 4: horiz_pos_abs (GPS position fused)
     log.info("[setup] Waiting for EKF3 attitude confidence before arming (timeout=20s) ...")
     ekf_att_ready  = False
     ekf_yaw_ready  = not require_yaw_alignment
@@ -1377,7 +1378,7 @@ def _run_acro_setup(
         )
         if msg is not None:
             decoded = decode_message(msg)
-            if isinstance(decoded, StatusText):
+            if isinstance(decoded, Statustext):
                 text = decoded.text
                 sev  = decoded.severity
                 log.info("[stabilise] STATUSTEXT [sev=%s]: %s", sev, text)
@@ -1409,15 +1410,15 @@ def _run_acro_setup(
                     ekf_pos = True
             elif isinstance(decoded, EkfStatusReport):
                 flags      = decoded.flags
-                last_flags = flags
-                log.info("[stabilise] EKF_STATUS  flags=0x%04x", flags)
-                if flags & _EKF_POS_FLAG:
+                last_flags = flags_to_mask(flags)
+                log.info("[stabilise] EKF_STATUS  flags=0x%04x", last_flags)
+                if EkfStatusFlags.POS_HORIZ_ABS in flags:
                     log.info("[stabilise] horiz_pos_abs set (flags=0x%04x) — GPS position fused.",
-                             flags)
-                if (flags & _EKF_ATT_FLAG) and not ekf_att_ready:
+                             last_flags)
+                if EkfStatusFlags.ATTITUDE in flags and not ekf_att_ready:
                     ekf_att_ready = True
                     log.info("[stabilise] EKF3 attitude confidence (flags=0x%04x). "
-                             "Proceeding to arm.", flags)
+                             "Proceeding to arm.", last_flags)
         if ekf_att_ready and ekf_yaw_ready:
             break
     if require_yaw_alignment and not ekf_yaw_ready:
@@ -1441,7 +1442,7 @@ def _run_acro_setup(
                     ["STATUSTEXT", "EKF_STATUS_REPORT", "LOCAL_POSITION_NED"],
                     wait=0.5,
                 )
-                if msg is not None and isinstance((decoded := decode_message(msg)), StatusText):
+                if msg is not None and isinstance((decoded := decode_message(msg)), Statustext):
                     text = decoded.text
                     all_statustext.append(text)
                     log.info("[setup-delay] STATUSTEXT: %s", text)
@@ -1830,7 +1831,7 @@ def _wait_params_ready(
     log,
     timeout: float = 15.0,
     *,
-    param_name: str = "SYSID_THISMAV",
+    param_name: str = "MAV_SYSID",
 ) -> None:
     deadline = gcs.sim_now() + timeout
     cursor = gcs.current_cursor()
@@ -2248,15 +2249,15 @@ def _torque_stack(
             # alignment STATUSTEXT precedes usable EKF outputs, and ArduPilot's
             # mandatory arm checks (which force-arm does not bypass) need EKF
             # attitude and a vertical position estimate.
-            _ekf_ready_flags = (
-                _mavlink.EKF_ATTITUDE
-                | _mavlink.EKF_VELOCITY_VERT
-                | _mavlink.EKF_POS_VERT_ABS
-            )
+            _ekf_ready_flags = frozenset({
+                EkfStatusFlags.ATTITUDE,
+                EkfStatusFlags.VELOCITY_VERT,
+                EkfStatusFlags.POS_VERT_ABS,
+            })
             log.info("Waiting for EKF alignment and EKF_STATUS flags 0x%04x (up to 45 s) ...",
-                     _ekf_ready_flags)
+                     flags_to_mask(_ekf_ready_flags))
             aligned = False
-            ekf_flags = 0
+            ekf_flags: frozenset[EkfStatusFlags] = frozenset()
             deadline = gcs.sim_now() + 45.0
 
             while gcs.sim_now() < deadline:
@@ -2270,7 +2271,7 @@ def _torque_stack(
                 if msg is None:
                     continue
                 decoded = decode_message(msg)
-                if isinstance(decoded, StatusText):
+                if isinstance(decoded, Statustext):
                     text = decoded.text
                     log.info("SITL: %s", text)
                     if "rawes" in text.lower() and "mode=" in text.lower():
@@ -2278,14 +2279,14 @@ def _torque_stack(
                     if "alignment complete" in text.lower():
                         aligned = True
                 elif isinstance(decoded, EkfStatusReport):
-                    ekf_flags = int(decoded.flags)
-                if aligned and (ekf_flags & _ekf_ready_flags) == _ekf_ready_flags:
-                    log.info("EKF ready: flags=0x%04x", ekf_flags)
+                    ekf_flags = decoded.flags
+                if aligned and _ekf_ready_flags <= ekf_flags:
+                    log.info("EKF ready: flags=0x%04x", flags_to_mask(ekf_flags))
                     break
             else:
                 pytest.fail(
                     "EKF not ready after 45 s "
-                    f"(aligned={aligned}, flags=0x{ekf_flags:04x}); refusing to arm"
+                    f"(aligned={aligned}, flags=0x{flags_to_mask(ekf_flags):04x}); refusing to arm"
                 )
 
             # passive_init: seed the passive operating point BEFORE arm so
@@ -2305,11 +2306,11 @@ def _torque_stack(
                     _pre_arm_roll = float(_att.roll)
                     _pre_arm_pitch = float(_att.pitch)
                     _pre_arm_yaw = float(_att.yaw)
-                gcs.send_message(NamedValueFloat("RAWES_THR", float(passive_thrust)))
-                gcs.send_message(NamedValueFloat("RAWES_ROFF", float(passive_roll_rad)))
-                gcs.send_message(NamedValueFloat("RAWES_POFF", float(passive_pitch_rad)))
+                gcs.send_message(NamedValueFloat(name="RAWES_THR", value=float(passive_thrust)))
+                gcs.send_message(NamedValueFloat(name="RAWES_ROFF", value=float(passive_roll_rad)))
+                gcs.send_message(NamedValueFloat(name="RAWES_POFF", value=float(passive_pitch_rad)))
                 if passive_yaw_rad is not None:
-                    gcs.send_message(NamedValueFloat("RAWES_YOFF", float(passive_yaw_rad)))
+                    gcs.send_message(NamedValueFloat(name="RAWES_YOFF", value=float(passive_yaw_rad)))
                 send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
                 log.info(
                     "PASSIVE seed: RAWES_THR=%.3f, ROFF=%+.4f, POFF=%+.4f, YOFF=%s; pre-arm yaw=%.1f deg",

@@ -5,8 +5,20 @@ import calibrate.repl as calibrate_repl
 import calibrate.run as calibrate_run
 from calibrate.hw import _disarm, _h3_forward_mix, verify_safe_off
 from linkhub_client import MessageBatch, SimClock
-from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import Heartbeat, ServoOutputRaw, StatusText
+from linkhub_client.messages import (
+    EkfStatusFlags,
+    EkfStatusReport,
+    Heartbeat,
+    MavAutopilot,
+    MavModeFlag,
+    MavResult,
+    MavState,
+    MavSysStatusSensor,
+    MavType,
+    ServoOutputRaw,
+    Statustext,
+    SysStatus,
+)
 from calibrate.params import _config_target_params
 from calibrate.repl import (
     _bounded_swash_waypoints,
@@ -131,7 +143,7 @@ def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
             self.cursors = []
 
         def vehicle_status(self):
-            return {"base_mode": 0, "custom_mode": 1}
+            return {"base_mode": frozenset(), "custom_mode": 1}
 
         def get_param(self, name):
             return {
@@ -192,7 +204,7 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
 
         def command(self, *_args, **_kwargs):
             events.append("disarm-command")
-            return {"result": mavutil.mavlink.MAV_RESULT_ACCEPTED}
+            return {"result": MavResult.ACCEPTED}
 
         def current_cursor(self):
             return "v1:0"
@@ -201,11 +213,11 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
             if "SERVO_OUTPUT_RAW" in message_types:
                 return MessageBatch((ServoOutputRaw(servo9_raw=0),), "v1:2", _CLOCK)
             return MessageBatch((Heartbeat(
-                type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
-                autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-                base_mode=0,
+                mavtype=MavType.HELICOPTER,
+                autopilot=MavAutopilot.ARDUPILOTMEGA,
+                base_mode=frozenset(),
                 custom_mode=4,
-                system_status=mavutil.mavlink.MAV_STATE_STANDBY,
+                system_status=MavState.STANDBY,
             ),), "v1:1", _CLOCK)
 
         def set_param(self, name, value):
@@ -220,7 +232,7 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
             events.append(("set-mode", mode))
 
         def vehicle_status(self):
-            return {"base_mode": 0, "custom_mode": 1}
+            return {"base_mode": frozenset(), "custom_mode": 1}
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 
@@ -242,14 +254,14 @@ def test_arm_rejection_prints_named_result_and_fc_reason(monkeypatch, capsys):
             return "v1:10"
 
         def command(self, *_args, **_kwargs):
-            return {"result": mavutil.mavlink.MAV_RESULT_FAILED}
+            return {"result": MavResult.FAILED}
 
         def read_messages(self, after, message_types, **_kwargs):
             assert after == "v1:10"
             assert message_types == ["STATUSTEXT"]
             assert _kwargs["expected_generation"] == 7
             return MessageBatch(
-                (StatusText("Arm: Motor Interlock Enabled"),),
+                (Statustext(text="Arm: Motor Interlock Enabled"),),
                 "v1:11",
                 _CLOCK,
             )
@@ -258,14 +270,62 @@ def test_arm_rejection_prints_named_result_and_fc_reason(monkeypatch, capsys):
 
     assert calibrate_hw._arm(Session()) is False
     output = capsys.readouterr().out
-    assert "MAV_RESULT_FAILED (4)" in output
+    assert "Arm rejected: MAV_RESULT_FAILED" in output
     assert "[FC] Arm: Motor Interlock Enabled" in output
+
+
+def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(capsys):
+    motor_outputs = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS
+    replies = {
+        "HEARTBEAT": Heartbeat(
+            mavtype=MavType.HELICOPTER,
+            autopilot=MavAutopilot.ARDUPILOTMEGA,
+            base_mode=frozenset({MavModeFlag.SAFETY_ARMED}),
+            custom_mode=4,
+            system_status=MavState.CRITICAL,
+        ),
+        "EKF_STATUS_REPORT": EkfStatusReport(
+            flags=frozenset({EkfStatusFlags.ATTITUDE, EkfStatusFlags.VELOCITY_HORIZ}),
+        ),
+        "SYS_STATUS": SysStatus(
+            onboard_control_sensors_present=frozenset({motor_outputs}),
+            onboard_control_sensors_enabled=frozenset({motor_outputs}),
+        ),
+    }
+
+    class Session:
+        _target_system = 1
+        _target_component = 1
+
+        def current_cursor(self):
+            return "v1:0"
+
+        def send_message(self, _message):
+            pass
+
+        def get_param(self, _name):
+            return None
+
+        def read_messages(self, after, message_types, **_kwargs):
+            message = replies.get(message_types)
+            return MessageBatch(
+                () if message is None else (message,), after, _CLOCK,
+            )
+
+    calibrate_hw._print_status(Session())
+
+    output = capsys.readouterr().out
+    assert "Armed      : YES" in output
+    assert "Mode       : GUIDED (4)" in output
+    assert "Sys status : CRITICAL" in output
+    assert "att=True  vel=True  pos_rel=False  OK" in output
+    assert "motor outputs          present=True  enabled=True  [WARN] unhealthy" in output
 
 
 def test_wait_for_disarmed_uses_linkhub_vehicle_snapshot(monkeypatch, capsys):
     class Session:
         def vehicle_status(self):
-            return {"base_mode": 0}
+            return {"base_mode": frozenset()}
 
     monkeypatch.setattr(
         calibrate_run,
@@ -299,7 +359,7 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
             pass
 
         def command(self, *_args, **_kwargs):
-            return {"result": mavutil.mavlink.MAV_RESULT_ACCEPTED}
+            return {"result": MavResult.ACCEPTED}
 
         def current_cursor(self):
             return "v1:0"
@@ -308,11 +368,11 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
             if "SERVO_OUTPUT_RAW" in message_types:
                 return MessageBatch((ServoOutputRaw(servo9_raw=0),), "v1:2", _CLOCK)
             return MessageBatch((Heartbeat(
-                type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
-                autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-                base_mode=0,
+                mavtype=MavType.HELICOPTER,
+                autopilot=MavAutopilot.ARDUPILOTMEGA,
+                base_mode=frozenset(),
                 custom_mode=4,
-                system_status=mavutil.mavlink.MAV_STATE_STANDBY,
+                system_status=MavState.STANDBY,
             ),), "v1:1", _CLOCK)
 
         def get_param(self, name):
@@ -327,7 +387,7 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
             events.append(("set-mode", mode))
 
         def vehicle_status(self):
-            return {"base_mode": 0, "custom_mode": 1}
+            return {"base_mode": frozenset(), "custom_mode": 1}
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 

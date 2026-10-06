@@ -61,8 +61,8 @@ def test_enriches_physics_rows_with_latest_mavlink_observation(tmp_path) -> None
             "_sim_time_boot_ms": None,
             "_sim_time_quality": None,
             "mavpackettype": "COMMAND_ACK",
-            "command": 511,
-            "result": 0,
+            "command": {"type": "MAV_CMD_SET_MESSAGE_INTERVAL"},
+            "result": {"type": "MAV_RESULT_ACCEPTED"},
         },
         _record(
             500,
@@ -123,3 +123,26 @@ def test_enrichment_rejects_export_without_simulation_clock_metadata(
 
     with pytest.raises(ValueError, match="lacks simulation clock metadata"):
         enrich_sitl_telemetry(physics, mavlink, tmp_path / "telemetry.csv")
+
+
+def test_enrichment_maps_typed_pid_tuning_axis_to_rate_columns(tmp_path) -> None:
+    physics = tmp_path / "telemetry.physics.csv"
+    mavlink = tmp_path / "mavlink.jsonl"
+    output = tmp_path / "telemetry.csv"
+    _write_physics_csv(physics)
+    records = [
+        _record(500, "PID_TUNING", axis={"type": "PID_TUNING_YAW"}, P=0.25),
+        _record(600, "PID_TUNING", axis={"type": "PID_TUNING_ACCZ"}, P=9.0),
+    ]
+    mavlink.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    enrich_sitl_telemetry(physics, mavlink, output)
+
+    with output.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    assert float(rows[1]["rate_yaw_p_contrib"]) == pytest.approx(0.25)
+    assert math.isnan(float(rows[1]["rate_roll_p_contrib"]))
+    assert math.isnan(float(rows[1]["rate_pitch_p_contrib"]))

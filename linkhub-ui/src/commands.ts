@@ -5,6 +5,7 @@ import {
   type ConfigProvider,
 } from "./config-core";
 import { formatCopterMode } from "./modes";
+import { isArmed, parseFlags } from "./mav";
 import { parseRunPassive, type PassiveController } from "./passive";
 import { decodeH3Swashplate } from "./swashplate";
 import type { TelemetryStore } from "./telemetry";
@@ -64,7 +65,7 @@ export class CommandRunner {
 
   private async status(): Promise<void> {
     const status = await this.api.status();
-    const armed = Boolean(status.base_mode & 128);
+    const armed = isArmed(status);
     this.write("VEHICLE");
     this.write(`  connected  ${status.connected ? "yes" : "no"}`);
     this.write(`  generation ${status.generation}`);
@@ -84,7 +85,8 @@ export class CommandRunner {
 
     const ekf = this.telemetry.get("EKF_STATUS_REPORT");
     if (ekf) {
-      this.write(`  EKF flags 0x${Number(ekf.fields.flags ?? 0).toString(16).padStart(4, "0")}`);
+      const flags = [...parseFlags(ekf.fields.flags)];
+      this.write(`  EKF flags ${flags.length > 0 ? flags.join(" | ") : "none"}`);
     }
 
     const servos = this.telemetry.get("SERVO_OUTPUT_RAW");
@@ -149,7 +151,7 @@ export class CommandRunner {
     const all = options.includes("--all");
     if (apply) {
       const status = await this.api.status();
-      if (status.base_mode & 128) {
+      if (isArmed(status)) {
         throw new Error("config apply refused: vehicle is ARMED");
       }
       if (this.passive.phase !== "idle") {
@@ -170,7 +172,7 @@ export class CommandRunner {
       verified = await this.api.setParameters(diffs.map((row) => ({
         name: row.name,
         value: row.expected,
-        type: row.type as number,
+        type: row.type as ParameterResult["type"],
       })));
     }
 

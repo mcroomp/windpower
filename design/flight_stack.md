@@ -301,7 +301,8 @@ the single `COMMAND_ACK` itself on the receiving channel. Ground clients
 retry with an incremented `confirmation`; Lua treats a retry of an already
 completed command as ACCEPTED without repeating the side effect. Rejections
 also emit `RAWES cmd <id> rejected: <reason>` STATUSTEXT. IDs live in
-`groundstation/rawes_modes.py` (`CMD_*`) and `linkhub-ui/src/passive.ts`.
+`groundstation/rawes_modes.py` (`CMD_*`, typed `MavCmd.USER_1`/`USER_2`;
+`send_rawes_command` requires `MavResult.ACCEPTED`) and `linkhub-ui/src/passive.ts`.
 
 | Command | ID | Params | Lua action | Gate (else DENIED; set_mode failure → FAILED) |
 |---|---|---|---|---|

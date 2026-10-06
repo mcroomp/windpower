@@ -1,20 +1,19 @@
 """
 unified_ground.py -- Ground-side pumping comms adapters (simtest/test-only).
 
-Marshals a PumpingGroundController's TensionCommand to the AP via one of two
-test-only comms adapters:
+Marshals a PumpingGroundController's TensionCommand to the AP via a test-only
+comms adapter:
 
   DirectComms(ap)      Python simtest: calls ap.receive_command() directly
-  LuaComms(inject)     Lua unit test: injects NV floats via send_named_float
 
-The real production adapter (GcsComms) and the NvComms base + _cmd_to_nv wire
-marshalling live in groundstation/unified_ground.py.
+The real production adapter (GcsComms) and the _cmd_to_nv wire
+marshalling live in groundstation/unified_ground.py. Lua unit tests use GcsComms
+with the Lua harness as the `gcs`, since it implements send_message() too.
 """
 
 from __future__ import annotations
 
 from groundstation.pumping_planner import TensionCommand
-from groundstation.unified_ground import NvComms
 
 
 class DirectComms:
@@ -25,17 +24,4 @@ class DirectComms:
 
     def send(self, cmd: TensionCommand, dt: float) -> None:
         self._ap.receive_command(cmd, dt)
-
-
-class LuaComms(NvComms):
-    """Injects TensionCommand into Lua's named-value inbox via send_named_float.
-
-    inject: callable(name: str, value: float) — e.g. RawesLua.send_named_float.
-    """
-
-    def __init__(self, inject) -> None:
-        self._inject = inject
-
-    def send_nv(self, name: str, value: float) -> None:
-        self._inject(name, value)
 

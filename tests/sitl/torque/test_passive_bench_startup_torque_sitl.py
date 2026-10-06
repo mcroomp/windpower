@@ -7,13 +7,21 @@ import statistics
 from pathlib import Path
 
 import pytest
-from pymavlink import mavutil
 
 from analysis.linkhub_journal import cursor_sequence, iter_messages
 from calibrate.hw import verify_safe_off
 from calibrate.run import PassiveRunOptions, run_passive
-from groundstation.ekf_flags import MAV_MODE_ARMED
 from groundstation.rawes_modes import CMD_ENTER_GUIDED, CMD_ENTER_PASSIVE
+from linkhub_client.messages import (
+    ExtendedSysState,
+    Heartbeat,
+    MavCmd,
+    MavLandedState,
+    MavModeFlag,
+    RawMessage,
+    decode_message,
+    encode_enum,
+)
 from tests.sitl.stack_infra import StackContext
 from tests.sitl.thread_trace import LinuxThreadTrace
 from tests.sitl.torque.torque_test_utils import (
@@ -49,11 +57,31 @@ def _first_time(messages: list[dict], predicate) -> float:
     pytest.fail("Expected MAVLink event was not present")
 
 
-def _is_command(message: dict, command: int) -> bool:
-    """Match a journal COMMAND_LONG; LinkHub decodes ``command`` as an enum."""
-    return message.get("command") == {
-        "type": mavutil.mavlink.enums["MAV_CMD"][command].name
-    }
+def _is_command(message: dict, command: MavCmd) -> bool:
+    """Match a journal COMMAND_LONG; LinkHub encodes ``command`` as an enum."""
+    return message.get("command") == encode_enum(command)
+
+
+def _armed_heartbeat_in_mode(message: dict, custom_mode: int) -> bool:
+    if message.get("_dir") != "rx" or message.get("mavpackettype") != "HEARTBEAT":
+        return False
+    heartbeat = decode_message(RawMessage("HEARTBEAT", message))
+    assert isinstance(heartbeat, Heartbeat)
+    return (
+        MavModeFlag.SAFETY_ARMED in heartbeat.base_mode
+        and heartbeat.custom_mode == custom_mode
+    )
+
+
+def _is_in_air(message: dict) -> bool:
+    if (
+        message.get("_dir") != "rx"
+        or message.get("mavpackettype") != "EXTENDED_SYS_STATE"
+    ):
+        return False
+    state = decode_message(RawMessage("EXTENDED_SYS_STATE", message))
+    assert isinstance(state, ExtendedSysState)
+    return state.landed_state == MavLandedState.IN_AIR
 
 
 @pytest.mark.timeout(2400)
@@ -202,12 +230,7 @@ def test_passive_bench_startup_torque_sitl(
     ))
     armed_acro_at = _first_time(
         messages,
-        lambda message: (
-            message.get("_dir") == "rx"
-            and message.get("mavpackettype") == "HEARTBEAT"
-            and int(message.get("base_mode", 0)) & MAV_MODE_ARMED
-            and int(message.get("custom_mode", -1)) == 1
-        ),
+        lambda message: _armed_heartbeat_in_mode(message, 1),
     )
     runup_complete_at = _first_time(
         messages,
@@ -217,15 +240,7 @@ def test_passive_bench_startup_torque_sitl(
             and "runup complete" in str(message.get("text", "")).lower()
         ),
     )
-    land_clear_at = _first_time(
-        messages,
-        lambda message: (
-            message.get("_dir") == "rx"
-            and message.get("mavpackettype") == "EXTENDED_SYS_STATE"
-            and int(message.get("landed_state", -1))
-            == 2  # MAV_LANDED_STATE_IN_AIR
-        ),
-    )
+    land_clear_at = _first_time(messages, _is_in_air)
     enter_guided_at = _first_time(
         messages,
         lambda message: (
@@ -236,12 +251,7 @@ def test_passive_bench_startup_torque_sitl(
     )
     guided_at = _first_time(
         messages,
-        lambda message: (
-            message.get("_dir") == "rx"
-            and message.get("mavpackettype") == "HEARTBEAT"
-            and int(message.get("base_mode", 0)) & MAV_MODE_ARMED
-            and int(message.get("custom_mode", -1)) == 20
-        ),
+        lambda message: _armed_heartbeat_in_mode(message, 20),
     )
     passive_enable_at = _first_time(
         messages,

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { MavState } from "../src/generated/protocol";
 import { formatLinkThroughput } from "../src/link-throughput";
+import { mavEnum } from "../src/mav";
 import type { LinkHubStatus } from "../src/types";
 
 const status: LinkHubStatus = {
   connected: true, ready: true, generation: "first", cursor: "v1:0", connection: "test",
-  clock_epoch: 1, target_system: 1, target_component: 1, base_mode: 0,
-  custom_mode: 0, system_status: 3, latest_time_boot_ms: 0,
+  clock_epoch: 1, target_system: 1, target_component: 1, base_mode: "",
+  custom_mode: 0, system_status: mavEnum(MavState.STANDBY), latest_time_boot_ms: 0,
   received_messages: 0, transmitted_messages: 0,
   received_bytes: 0, transmitted_bytes: 0, rx_bps: null, tx_bps: null,
 };

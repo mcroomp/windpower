@@ -11,8 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Protocol
 
-from linkhub_client import mav_constants as mavlink
-from linkhub_client.mav_constants import mavutil
+from linkhub_client.messages import MavCmd, MavDataStream, MavModeFlag
 
 from .constants import (
     LinkHubClient, WallClock, CommandLong, RequestDataStream,
@@ -229,7 +228,7 @@ def _run_command(session: LinkHubClient, tokens: list[str],
 def _cmd_reboot(session: LinkHubClient) -> None:
     print("  Sending reboot command ...")
     session.command(
-        mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+        MavCmd.PREFLIGHT_REBOOT_SHUTDOWN,
         [1.0],
     )
 
@@ -363,7 +362,7 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_stream_id=MavDataStream.RC_CHANNELS,
         req_message_rate=10,
     ))
     srv, _ = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
@@ -608,7 +607,7 @@ def _run_servo_mode(
     if heartbeat is None:
         print("  [FAIL] no heartbeat; servo mode aborted")
         return None
-    if heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+    if MavModeFlag.SAFETY_ARMED in heartbeat.base_mode:
         print("  [FAIL] vehicle is armed; native servo modes require disarmed")
         return None
     saved_mode = session.get_param("H_SV_MAN")
@@ -623,7 +622,7 @@ def _run_servo_mode(
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_stream_id=MavDataStream.RC_CHANNELS,
         req_message_rate=10,
     ))
     print("  t(s)    S1(us)  S2(us)  S3(us)")
@@ -774,7 +773,7 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
     if heartbeat is None:
         print("  [FAIL] no heartbeat; swash sweep aborted")
         return
-    if heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+    if MavModeFlag.SAFETY_ARMED in heartbeat.base_mode:
         print("  [FAIL] vehicle is armed; swash sweep requires disarmed")
         return
 
@@ -801,7 +800,7 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+        req_stream_id=MavDataStream.RC_CHANNELS,
         req_message_rate=10,
     ))
     next_print = started
@@ -1213,7 +1212,7 @@ def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
         {
             "name": name,
             "value": float(target[name]),
-            "type": int(current[name]["type"]),
+            "type": current[name]["type"],
         }
         for name in sorted(target)
         if name in current
@@ -1341,7 +1340,7 @@ def _connect(server: str) -> LinkHubClient:
     session.send_message(RequestDataStream(
         target_system=session._target_system,
         target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RAW_CONTROLLER,
+        req_stream_id=MavDataStream.RAW_CONTROLLER,
         req_message_rate=10,
     ))
     _refresh_pole_pairs(session)

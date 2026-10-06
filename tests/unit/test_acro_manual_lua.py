@@ -3,9 +3,9 @@ from simulation.rawes_lua_harness import RawesLua
 
 
 def _seed_manual(sim: RawesLua, roll: float, pitch: float, collective: float) -> None:
-    sim.send_message(NamedValueFloat("RAWES_RLL", roll))
-    sim.send_message(NamedValueFloat("RAWES_PIT", pitch))
-    sim.send_message(NamedValueFloat("RAWES_COL", collective))
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=roll))
+    sim.send_message(NamedValueFloat(name="RAWES_PIT", value=pitch))
+    sim.send_message(NamedValueFloat(name="RAWES_COL", value=collective))
 
 
 def test_acro_manual_latches_normalized_controls_and_reasserts_overrides():

@@ -1,15 +1,16 @@
 import { formatMavResult, type LinkHubApi } from "./api";
 import {
+  MavCmd,
   MavLandedState,
   MavResult,
   MavState,
   NamedValueFloat,
 } from "./generated/protocol";
+import { enumIs, isArmed } from "./mav";
 import type { TelemetryStore } from "./telemetry";
 import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
-import type { LinkHubStatus, MessageRecord } from "./types";
+import type { MessageRecord } from "./types";
 
-const ARMED_FLAG = 128;
 const MODE_ACRO = 1;
 const MODE_GUIDED_NOGPS = 20;
 const MODE_PASSIVE = 3;
@@ -18,8 +19,8 @@ const ANGLE_LIMIT_DEG = 30;
 const THRUST_STEP = 0.05;
 const DEFAULT_THRUST = 0.342;
 // rawes.lua COMMAND_LONG IDs (MAV_CMD_USER_1/2); Lua owns the acknowledgement.
-export const CMD_ENTER_GUIDED = 31010;
-export const CMD_ENTER_PASSIVE = 31011;
+export const CMD_ENTER_GUIDED = MavCmd.USER_1;
+export const CMD_ENTER_PASSIVE = MavCmd.USER_2;
 
 export interface PassiveOptions {
   force: boolean;
@@ -96,17 +97,9 @@ function boundedNumber(value: string, option: string, minimum: number, maximum: 
   return parsed;
 }
 
-function isArmed(status: LinkHubStatus | null): boolean {
-  return Boolean(status && (status.base_mode & ARMED_FLAG));
-}
-
 function recordNumber(record: MessageRecord | undefined, field: string): number | null {
   const value = record?.fields[field];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function recordEnum(value: unknown, expectedName: string, expectedValue: number): boolean {
-  return value === expectedName || Number(value) === expectedValue;
 }
 
 export class PassiveController {
@@ -373,12 +366,12 @@ export class PassiveController {
 
   private async waitForInAir(signal: AbortSignal): Promise<void> {
     const current = this.telemetry.get("EXTENDED_SYS_STATE");
-    if (recordEnum(current?.fields.landed_state, "IN_AIR", MavLandedState.IN_AIR)) {
+    if (enumIs(current?.fields.landed_state, MavLandedState.IN_AIR)) {
       return;
     }
     await this.telemetry.waitFor(
       (record) => record.message === "EXTENDED_SYS_STATE"
-        && recordEnum(record.fields.landed_state, "IN_AIR", MavLandedState.IN_AIR),
+        && enumIs(record.fields.landed_state, MavLandedState.IN_AIR),
       3_000,
       signal,
     );
@@ -388,13 +381,13 @@ export class PassiveController {
     this.write("Waiting for GUIDED ACTIVE and a quiet attitude interval…");
     let quietSince: number | null = null;
     let latestAttitudeAt: number | null = null;
-    let active = this.telemetry.status?.system_status === MavState.ACTIVE;
+    let active = enumIs(this.telemetry.status?.system_status, MavState.ACTIVE);
     const unsubscribe = this.telemetry.onRecord((record) => {
       if (record.direction !== "rx") {
         return;
       }
       if (record.message === "HEARTBEAT") {
-        active = recordEnum(record.fields.system_status, "ACTIVE", MavState.ACTIVE);
+        active = enumIs(record.fields.system_status, MavState.ACTIVE);
         if (!active) {
           quietSince = null;
         }
@@ -439,14 +432,14 @@ export class PassiveController {
   }
 
   private async luaCommand(
-    command: number,
+    command: MavCmd,
     params: number[],
     label: string,
     signal: AbortSignal,
   ): Promise<void> {
     const after = this.telemetry.checkpoint();
     const result = await this.api.command(command, params);
-    if (result.result === MavResult.ACCEPTED) {
+    if (enumIs(result.result, MavResult.ACCEPTED)) {
       this.write(`Lua accepted ${label}.`);
       return;
     }

@@ -28,7 +28,7 @@ from linkhub_client.messages import (
     Attitude,
     NamedValueFloat,
     ServoOutputRaw,
-    StatusText,
+    Statustext,
     decode_message,
 )
 from tests.sitl.stack_infra import observe  # noqa: E402
@@ -76,7 +76,7 @@ def run_observation_loop(
         if msg is None:
             return None
         match decode_message(msg):
-            case StatusText(text=text):
+            case Statustext(text=text):
                 log.debug("SITL t=%.1fs: %s", t_rel, text)
             case ServoOutputRaw() as servo:
                 pwm[0] = yaw_motor_pwm_from_servo_output(servo, default=pwm[0])

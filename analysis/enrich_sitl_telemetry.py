@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from analysis.linkhub_journal import iter_messages
+from linkhub_client.messages import PidTuningAxis, decode_enum
 from simulation.telemetry_columns import ASYNC_MAV_COLUMNS
 
 
@@ -31,9 +32,9 @@ _NVF_FIELDS = {
 }
 
 _PID_PREFIXES = {
-    1: "rate_roll",
-    2: "rate_pitch",
-    3: "rate_yaw",
+    PidTuningAxis.ROLL: "rate_roll",
+    PidTuningAxis.PITCH: "rate_pitch",
+    PidTuningAxis.YAW: "rate_yaw",
 }
 
 
@@ -107,7 +108,8 @@ def _project_record(record: dict[str, Any]) -> dict[str, float]:
             ekf_pos_z=float(record["z"]),
         )
     elif message_type == "PID_TUNING":
-        prefix = _PID_PREFIXES.get(int(record.get("axis", -1)))
+        axis = record.get("axis")
+        prefix = None if axis is None else _PID_PREFIXES.get(decode_enum(PidTuningAxis, axis))
         if prefix is not None:
             for source, suffix in (
                 ("P", "p_contrib"),

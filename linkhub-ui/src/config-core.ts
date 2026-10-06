@@ -67,7 +67,7 @@ export interface ConfigRow {
   name: string;
   expected: number;
   actual?: number;
-  type?: number;
+  type?: ParameterResult["type"];
   status: "ok" | "diff" | "missing";
 }
 

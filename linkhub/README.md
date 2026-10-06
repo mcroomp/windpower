@@ -26,12 +26,14 @@ backend explicitly:
 cargo build --manifest-path .\linkhub\Cargo.toml --release --features bluetooth
 ```
 
-LinkHub uses Mavio with its default features disabled. The `mavio-dialect` path
-dependency embeds MAVInspect's resolved ArduPilotMega protocol model as
-compressed Postcard data. A single descriptor-driven codec uses that model to
-checksum, encode, decode, and project every dialect message as structured JSON;
-there are no generated per-message Rust types or generated Serde
-implementations.
+The MAVLink dialect is generated at build time from ArduPilot's own definitions,
+vendored in `dialect/definitions` (no submodule or network access is needed to
+build). LinkHub uses the `linkhub-dialect` crate (`mavlink-core` plus
+`mavlink-bindgen`; see [dialect/README.md](dialect/README.md)) for framing,
+CRC, and message types. MAVLink
+enumerations and bitmasks appear in JSON as `{"type": "MAV_X_NAME"}` objects and
+`" | "`-joined name strings; see
+[design/linkhub.md](../design/linkhub.md#mavlink-value-representation).
 
 For iterative development, run a subcommand directly:
 
@@ -39,25 +41,25 @@ For iterative development, run a subcommand directly:
 cargo run --manifest-path .\linkhub\Cargo.toml -- serve --connection tcp:127.0.0.1:5760
 ```
 
+The development and test profiles keep line-level debug information for
+LinkHub while omitting debug information from third-party dependencies. This
+reduces normal compile/link time and target-directory growth without affecting
+optimized release builds.
+
 ## Generate the checked protocol artifacts
 
-`linkhub schema` can print the live JSON schema to stdout and/or refresh the
-checked schema and generated client files:
+`linkhub-clientgen` (`linkhub/clientgen`) generates the Python and TypeScript
+types for every message and enumeration in the vendored ArduPilot definitions.
+Rerun it after changing `linkhub/dialect/definitions`:
 
 ```powershell
-cargo run --manifest-path .\linkhub\Cargo.toml -- schema `
-  --output .\linkhub\schema\protocol-v1.schema.json `
-  --python-output .\linkhub_client\src\linkhub_client\generated_protocol.py `
-  --typescript-output .\linkhub-ui\src\generated\protocol.ts
+cargo run --manifest-path .\linkhub\Cargo.toml -p linkhub-clientgen
 ```
 
-Supported flags:
-
-| Flag | Meaning |
-| --- | --- |
-| `--output <path>` | Write the JSON schema instead of printing it. |
-| `--python-output <path>` | Regenerate the Python protocol types. |
-| `--typescript-output <path>` | Regenerate the TypeScript protocol types. |
+It rewrites `linkhub_client\src\linkhub_client\generated_protocol.py` and
+`linkhub-ui\src\generated\protocol.ts`. `cargo test --workspace` fails when
+either file is stale, and checks the declared field shapes against what the
+dialect serializes for every message.
 
 ## Run the service
 
@@ -137,7 +139,6 @@ Routes come from `linkhub\src\http.rs`.
 | `/health/live` | `GET` | Liveness probe. |
 | `/health/ready` | `GET` | Ready when MAVLink is connected and has a heartbeat. |
 | `/v1/status` | `GET` | Service/run/journal status. |
-| `/v1/schema` | `GET` | Live protocol schema JSON. |
 | `/v1/journal/flush` | `POST` | Flush the active in-memory journal chunk. |
 | `/v1/records` | `GET` | Mixed journal view over diagnostic + MAVLink records. |
 | `/v1/diagnostics/events` | `GET`, `POST` | Read or ingest diagnostic events. |
@@ -198,9 +199,11 @@ The status object includes:
 
 - connectivity and target state: `connected`, `ready`, `phase`, `connection`,
   `port`, `baud`, `clock_epoch`, `target_system`, `target_component`,
-  `base_mode`, `custom_mode`, `system_status`, `latest_time_boot_ms`;
+  `base_mode` (bitmask string), `custom_mode` (integer), `system_status`
+  (enumeration object), `latest_time_boot_ms`;
 - counters: `received_messages`, `transmitted_messages`, `received_bytes`,
-  `transmitted_bytes`, `framing_errors`, `discarded_bytes`;
+  `transmitted_bytes`, `dropped_frames` (frames that passed their CRC but did not
+  decode as a typed dialect message, for example an unknown enum value);
 - rate samples: `rx_bps`, `tx_bps`;
 - troubleshooting fields: `last_received_ns`, `error`, `last_error_stage`,
   `last_error_ns`, `attempts`, `consecutive_failures`, `connected_since_ns`,
@@ -239,7 +242,7 @@ Set one parameter:
 Invoke-RestMethod `
   -Method Put `
   -ContentType "application/json" `
-  -Body '{"value":1,"type":6,"timeout_ms":3000}' `
+  -Body '{"value":1,"type":{"type":"MAV_PARAM_TYPE_INT32"},"timeout_ms":3000}' `
   http://127.0.0.1:8999/v1/mavlink/parameters/RAWES_MODE
 ```
 

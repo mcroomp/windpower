@@ -10,11 +10,18 @@ import {
   parseRunPassive,
 } from "../src/passive";
 import { MavResult } from "../src/generated/protocol";
+import { mavEnum } from "../src/mav";
 
 describe("Lua command IDs", () => {
   it("match rawes.lua", () => {
-    expect(luaSource).toMatch(new RegExp(`MAV_CMD_RAWES_ENTER_GUIDED = ${CMD_ENTER_GUIDED}\\b`));
-    expect(luaSource).toMatch(new RegExp(`MAV_CMD_RAWES_ENTER_PASSIVE = ${CMD_ENTER_PASSIVE}\\b`));
+    // MAV_CMD_USER_1 / MAV_CMD_USER_2 in the MAVLink dialect.
+    const numericIds = { [CMD_ENTER_GUIDED]: 31010, [CMD_ENTER_PASSIVE]: 31011 };
+    expect(luaSource).toMatch(
+      new RegExp(`MAV_CMD_RAWES_ENTER_GUIDED = ${numericIds[CMD_ENTER_GUIDED]}\\b`),
+    );
+    expect(luaSource).toMatch(
+      new RegExp(`MAV_CMD_RAWES_ENTER_PASSIVE = ${numericIds[CMD_ENTER_PASSIVE]}\\b`),
+    );
   });
 });
 
@@ -32,15 +39,15 @@ describe("parseRunPassive", () => {
     describe("passive recapture", () => {
       it("clears keyboard offsets before recapturing the onboard direction", async () => {
         const messages: Array<{ name: string; value: number }> = [];
-        const commands: Array<{ command: number; params: number[] }> = [];
+        const commands: Array<{ command: string; params: number[] }> = [];
         const writes: string[] = [];
         const api = {
           async sendMessage(message: { name: string; value: number }) {
             messages.push({ name: message.name, value: message.value });
           },
-          async command(command: number, params: number[]) {
+          async command(command: string, params: number[]) {
             commands.push({ command, params });
-            return { result: MavResult.ACCEPTED };
+            return { result: mavEnum(MavResult.ACCEPTED) };
           },
         };
         const telemetry = {

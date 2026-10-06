@@ -1,3 +1,12 @@
+import type {
+  MavCmd,
+  MavEnum,
+  MavFlags,
+  MavParamType,
+  MavResult,
+  MavState,
+} from "./generated/protocol";
+
 export type JsonObject = Record<string, unknown>;
 
 export interface LinkHubStatus {
@@ -7,9 +16,9 @@ export interface LinkHubStatus {
   clock_epoch: number;
   target_system: number;
   target_component: number;
-  base_mode: number;
+  base_mode: MavFlags;
   custom_mode: number;
-  system_status: number;
+  system_status: MavEnum<MavState>;
   latest_time_boot_ms: number;
   received_messages: number;
   transmitted_messages: number;
@@ -48,12 +57,12 @@ export interface MessageBatch {
 export interface ParameterResult {
   name: string;
   value: number;
-  type: number;
+  type: MavEnum<MavParamType>;
 }
 
 export interface CommandResult {
-  command: number;
-  result: number;
+  command: MavEnum<MavCmd>;
+  result: MavEnum<MavResult>;
   progress: number;
   status: string;
   after_cursor: string;

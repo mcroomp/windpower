@@ -81,9 +81,10 @@ Two extra boundaries exist around that loop:
     (`_PumpingPythonMode`, `_LandingPythonMode`) for fast closed-loop
     simtests.
 - `simulation\comms.py::VirtualComms` and
-  `simulation\unified_ground.py::{DirectComms,LuaComms}` are simtest-only
+  `simulation\unified_ground.py::DirectComms` are simtest-only
   helpers. The production MAVLink adapter is
-  `groundstation.unified_ground.GcsComms`.
+  `groundstation.unified_ground.GcsComms`; Lua unit tests use it too, with the
+  Lua harness as the `gcs`.
 
 ## Timing and lockstep
 
