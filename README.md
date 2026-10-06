@@ -1,8 +1,9 @@
 # RAWES -- Rotary Airborne Wind Energy System
 
 A tethered autorotating rotor kite that harvests wind energy through a pumping cycle.
-This repository contains the ArduPilot flight controller model, physics simulation, and
-all documentation for the RAWES hardware and control system.
+This repository contains the flight scripts, production ground-control policy,
+LinkHub transport gateway and browser UI, physics simulation, calibration tooling,
+and documentation for the RAWES hardware and control system.
 
 ---
 
@@ -19,116 +20,133 @@ generator on the ground -- **generating electricity**. Reel the cable back in at
 cost, let the rotor climb again, and repeat. This is a Rotary Airborne Wind Energy System.
 
 Our system has four blades, each two metres long, spinning at roughly 270 RPM at an altitude
-of 50 metres. Four small servo motors tilt a mechanical plate inside the hub (a swashplate)
-to control the blade pitch -- exactly as a helicopter controls its rotor, but entirely from
-the ground via trailing-edge flaps.
+of 50 metres. Three servo motors tilt a mechanical plate inside the hub (a swashplate)
+to control the blade pitch through trailing-edge flaps. The airborne flight
+controller handles the fast control loops; the ground station supplies slow
+flight setpoints.
 
 Key distinction from a drone: **no motor drives rotation** -- wind does. Control is entirely
 through blade pitch, actuated indirectly via trailing-edge flaps on each blade.
 
-### Key Parameters
-
-| Parameter          | Value         |
-|--------------------|---------------|
-| Blade count        | 4 (90 deg apart) |
-| Blade length       | 2000 mm       |
-| Total rotor radius | ~2500 mm      |
-| Rotor mass         | 5 kg          |
-| Blade airfoil      | SG6042        |
-| Tether diameter    | 1.9 mm (Dyneema SK75) |
-| Max tether length  | 300 m         |
-| Min altitude       | 10 m          |
-| Tether attachment  | Bottom of axle|
-| Anti-rotation motor| EMAX GB4008 66KV, 10:1 spur gear |
-| Servos S1/S2/S3    | DS113MG V6.0 |
-| Flight controller  | Holybro Pixhawk 6C |
-| Battery            | 4S LiPo 15.2V, 450 mAh |
+Hardware dimensions, assembly, and the distinction between physical and
+simulation geometry are documented in [hardware.md](design/hardware.md).
 
 ---
 
-## Simulation Overview
+## Runtime Architecture
 
-The simulation is a digital twin -- a complete mathematical replica of the physical system
-running inside a computer. It has three interconnected layers:
+The physical system has three nodes: ground winch, ground station, and airborne
+Pixhawk. Software ownership is the same on hardware and in full-stack SITL:
 
+```mermaid
+flowchart LR
+    UI["Browser UI / calibration / test clients"] <-->|HTTP/JSON| LH["LinkHub"]
+    GND["Ground-control policy"] <-->|HTTP/JSON| LH
+    LH <-->|MAVLink: USB / radio / SITL TCP| AP["ArduPilot + rawes.lua"]
+    GND <-->|Winch commands / telemetry| WIN["Winch node"]
+    AP <-->|Sensors / actuator outputs| WORLD["Hardware or simulated physical world"]
+    WIN <-->|Load cell / motor / drum| WORLD
 ```
-+-------------------------------------------------------------+
-|  Flight Controller (ArduPilot SITL)                         |
-|  The "brain" -- decides how to tilt the rotor               |
-|  to follow a target path or hold altitude                   |
-+---------------------------+---------------------------------+
-                            | Servo commands (4x per step)
-                            v
-+-------------------------------------------------------------+
-|  Aerodynamics + Control Bridge  (Python)                    |
-|  Translates servo positions -> blade pitch angles           |
-|  Calculates lift, drag, and moments from the wind           |
-|  Simulates the swashplate mechanism                         |
-+---------------------------+---------------------------------+
-                            | Forces and moments (6 values per step)
-                            v
-+-------------------------------------------------------------+
-|  Physics Engine  (Python RK4)                               |
-|  Rigid-body dynamics: gravity, inertia, tether              |
-|  Updates position, velocity, orientation                    |
-|  400 times per second                                       |
-+-------------------------------------------------------------+
-```
+
+| Component | Owns | Does not own |
+|-----------|------|--------------|
+| ArduPilot + Lua | Estimation, vehicle modes, flight guidance, attitude/rate control, servo mixing | Ground phase planning or winch load-cell feedback |
+| Production ground policy (`groundstation/`) | Pumping/landing planning and commanded tension, altitude, phase | Vehicle estimation or fast attitude control |
+| LinkHub (`linkhub/`) | Sole MAVLink connection, heartbeat, frame writer, transactions, message-rate configuration, ordered RX/TX and diagnostics journal | Flight policy, physics, or browser rendering |
+| Browser UI / calibration | Operator workflows, visualization, HTTP client requests | Direct MAVLink transport or a duplicate transport journal |
+| Simulation mediator (`simulation/`) | Dynamics, aero, tether, wind, sensors, simulated hardware plants, actuator application, lockstep, raw physics telemetry | Production ground policy or MAVLink consumption to decorate CSV rows |
+| SITL harness (`tests/sitl/`) | Processes, timeouts, artifacts, post-run enrichment of physics CSV with LinkHub observations | Replacement flight control or simulation-only stabilization |
+
+The winch closes its own load-cell tension loop. The vehicle receives **commanded
+tension**, target altitude, and phase -- not measured tension. Lua uses commanded
+tension for orientation feedforward and altitude feedback for collective.
+See [flight_stack.md](design/flight_stack.md) for the control contract.
+
+SITL replaces the hardware world with the mediator, not the flight controller.
+The full stack uses 1200 Hz lockstep physics frames with ArduPilot's 400 Hz control
+loop; simtests use an in-process mock and the Python control port. These are
+different test tiers, not interchangeable flight acceptance.
+
+### Link throughput and stream management
+
+**Implemented:** LinkHub measures validated MAVLink frame bytes separately for
+RX and TX, publishes bits/s using one-second samples and a three-second average,
+and resets the rate window on reconnect. The browser only formats these values.
+They exclude UART/radio/network overhead and are not a measurement of RF capacity.
+Clients currently request explicit message intervals through LinkHub.
+
+**Proposed, not implemented:** LinkHub-owned USB/radio profiles, priority tiers,
+minimum useful rates, and conservative adaptation using delivered rates, message
+age, and radio feedback. Sustained congestion would shed optional streams first
+and restore them slowly; filtering browser HTTP batches does not save radio
+bandwidth. ArduPilot's own radio-buffer flow control is complementary.
+The detailed boundary and proposal live in [linkhub.md](design/linkhub.md).
+
+### Repository entry points
+
+| Area | Entry point |
+|------|-------------|
+| Physical-world simulation and Python/Lua test adapters | [simulation/README.md](simulation/README.md) |
+| Python port of ArduPilot control loops | [arduloop/README.md](arduloop/README.md) |
+| Rust gateway, service commands, and HTTP API usage | [linkhub/README.md](linkhub/README.md) |
+| Browser telemetry, control, and 3D visualization | [linkhub-ui/README.md](linkhub-ui/README.md) |
+| Shared typed Python HTTP client | [linkhub_client/README.md](linkhub_client/README.md) |
+| Production phase planning and winch protocol | [groundstation/](groundstation/) |
+| Hardware calibration | [design/calibration.md](design/calibration.md) |
+| Offline reports, envelope analysis, telemetry playback | [analysis/](analysis/), [envelope/](envelope/), [viz3d/](viz3d/) |
+| Deployed Lua and standalone tools | [scripts/](scripts/) |
 
 ---
 
 ## Documentation Map
 
-### Single Source of Truth Rules
+Each topic has one owner. Other documents link to the owner instead of
+restating it, and numeric defaults live in code or parm files rather than
+prose. [AGENTS.md](AGENTS.md) points agents directly at the owner for a task
+so they do not load unrelated documents.
 
-To keep docs AI-friendly and avoid drift:
+- Parameter defaults and their explanations: [copter-heli.parm](tests/sitl/copter-heli.parm)
+  (ArduPilot), [rawes_common_defaults.parm](tests/sitl/rawes_common_defaults.parm)
+  (RAWES, shared and SITL) and [rawes_hardware_defaults.parm](hardware/rawes_hardware_defaults.parm)
+  (hardware-only).
+- The RAWES wire/API contract is owned by [flight_stack.md](design/flight_stack.md).
+- Module READMEs give orientation and local usage only.
+- Historical observations are evidence, never current procedure.
 
-- Each major topic has one primary owner doc.
-- Neighbor docs should summarize briefly and link to the owner doc instead of duplicating deep details.
-- If behavior changes, update the owner doc first.
+### Design documents
 
-| Topic | Primary owner doc |
-|------|--------------------|
-| Flight architecture and mode ownership | [design/flight_stack.md](design/flight_stack.md) |
-| Simulation internals and module boundaries | [design/simulation.md](design/simulation.md) |
-| SITL workflow and diagnosis | [design/sitl_testing.md](design/sitl_testing.md) |
-| Aero conventions and signs | [design/aero_conventions.md](design/aero_conventions.md) |
-| EKF GPS/yaw gating | [design/EKF_GATING.md](design/EKF_GATING.md) |
-| Test taxonomy and harness conventions | [design/testing.md](design/testing.md) |
+| Document | Owns |
+|----------|------|
+| [flight_stack.md](design/flight_stack.md) | System ownership, ground/AP command contract, Lua modes and wire interface, yaw behavior |
+| [GUIDED_CONTROL_LOOPS.md](design/GUIDED_CONTROL_LOOPS.md) | ArduPilot Guided/heli attitude and rate-control internals |
+| [arming.md](design/arming.md) | Arm/disarm, safe-off invariant, passive and ACRO startup (hardware safety) |
+| [calibration.md](design/calibration.md) | `calibrate` commands, recording, Lua deployment, operator workflows |
+| [linkhub.md](design/linkhub.md) | LinkHub ownership, journal, cursor API, generated protocol, throughput, rate policy |
+| [simulation.md](design/simulation.md) | Physical-world runtime: `PhysicsCore`, sensors, plants, test adapters, lockstep interface |
+| [aero_conventions.md](design/aero_conventions.md) | `dynbem` interface, frames, signs, reference rotors and papers |
+| [sitl_testing.md](design/sitl_testing.md) | Docker stack execution, artifacts, diagnosis, lockstep behavior, flight timeline anchors |
+| [testing.md](design/testing.md) | Unit/simtest layout and Lua/Python test conventions |
+| [EKF_GATING.md](design/EKF_GATING.md) | GPS/moving-baseline yaw bring-up gates and `const_pos_mode` triage |
+| [hardware.md](design/hardware.md) | Airframe geometry, components, swash mapping, yaw motor and DShot path |
 
-### Hardware
+### Other documents
 
-| File | Description |
-|------|-------------|
-| [design/hardware.md](design/hardware.md) | Full assembly layout, rotor geometry, blade design (SG6042), swashplate, Kaman servo flap mechanism (US3217809), anti-rotation motor, electronics and power architecture |
-| [design/components.md](design/components.md) | Detailed component specs: GB4008 motor, REVVitRC ESC, AM32 firmware, DS113MG servos, SiK radio, RP3-H receiver, Boxer M2 transmitter |
-| [design/flap_sensor_bench.md](design/flap_sensor_bench.md) | Bench measurement system for swashplate-to-flap deflection characterisation (ESP32 + MPU-6050 WiFi rig + manual digital level procedure) |
+| Document | Purpose |
+|----------|---------|
+| [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md) | Current verified hardware state plus dated session evidence; read before touching hardware |
+| [simulation/README.md](simulation/README.md) | Simulation package orientation and entry points |
+| [arduloop/README.md](arduloop/README.md) | Python port of the ArduPilot heli attitude/rate stack |
+| [linkhub/README.md](linkhub/README.md) | Build, run, CLI, HTTP usage and journal queries |
+| [linkhub-ui/README.md](linkhub-ui/README.md) | Browser UI setup and behavior |
+| [linkhub_client/README.md](linkhub_client/README.md) | Typed Python HTTP client |
+| [envelope/CLAUDE.md](envelope/CLAUDE.md) | Agent notes for the flight-envelope package |
+| [presentations/presentation_sitl_aero.md](presentations/presentation_sitl_aero.md) | Slide deck on the SITL and aero architecture |
 
-### Theory
-
-| File | Description |
-|------|-------------|
-| [design/theory_pumping.md](design/theory_pumping.md) | De Schutter et al. 2018 -- pumping cycle OCP, state variables, aerodynamics (Eq. 25-31), structural constraints, system parameters (Table I) |
-| [design/theory_flap.md](design/theory_flap.md) | Weyel 2025 thesis summary -- flap state-space model, feed-forward + PID controller, N4SID identification, performance results |
-
-### System / Flight Stack
-
-| File | Description |
-|------|-------------|
-| [design/flight_stack.md](design/flight_stack.md) | Complete flight control reference -- system architecture (3-node diagram), ground planner, winch controller, Lua-guided attitude/throttle control path, yaw trim behavior, ArduPilot configuration, startup/arming sequence, EKF3 GPS fusion analysis, Lua API constraints |
-
-### Simulation
-
-| File | Description |
-|------|-------------|
-| [simulation/README.md](simulation/README.md) | Simulation architecture, module summary, coordinate frames, sensor design, initial state, running tests, analysis tools index |
-| [design/simulation.md](design/simulation.md) | Sensor design, controller functions, dynamics model, `PhysicsCore` ownership, quasi-static aero path, tether, pumping cycle architecture, known gaps |
-| [design/history.md](design/history.md) | Milestone and design-decision log |
-| [simulation/torque_model.py](simulation/torque_model.py) | Counter-torque hub yaw physics model -- HubParams, GB4008 motor torque, RK4 integrator, equilibrium throttle |
-| [design/aero.md](design/aero.md) | De Schutter 2018 equation-level validation -- maps Eq. 25-31 to implementation, C_{D,T} derivation, beta diagnostic, and model-gap notes |
+Swashplate geometry and sign mapping are owned by the implementation,
+[swashplate.py](simulation/swashplate.py). The reference papers are in
+[documents/](documents/).
 
 ---
-
 ## Running Tests
 
 First-time setup (creates/refreshes the repository Python environment, idempotent):
@@ -147,26 +165,30 @@ bash setup.sh build
 bash setup.sh build-lite
 ```
 
-For direct Python commands on Windows, use `.venv/Scripts/python.exe` from the repository root.
-Do not use system Python.
+Use `uv` for the local Python environment. `uv sync --dev` provisions the
+lightweight hardware environment; `uv sync --dev --extra simulation` adds the
+scientific/Lua stack. Run `uv sync` explicitly after dependency changes
+(`UV_NO_SYNC=1` is configured on this workstation).
 
-Then run tests in three sequential stages. Always run them in order.
+Choose the smallest tier that covers the change; full validation proceeds from
+unit tests to simtests to the real SITL stack.
 
 ```bash
-# Stage 1 -- Unit tests (Windows, no Docker, ~460 tests, ~65 s)
-.venv/Scripts/python.exe -m pytest tests/unit -m "not simtest" -q
+# Stage 1 -- Unit tests (local Python, no Docker)
+uv run python -m pytest tests/unit -m "not simtest" -q
 
-# Stage 2 -- Simtests (Windows, no Docker, ~29 tests, ~5 min)
-.venv/Scripts/python.exe -m pytest tests/simtests -m simtest -q
+# Stage 2 -- Simtests (local Python, no Docker)
+uv run python -m pytest tests/simtests -m simtest -q
 
 # Stage 3 -- Stack tests (Docker, ArduPilot SITL)
-bash test.sh stack -v
+bash test.sh stack -n 4
 ```
 
-`test.cmd` is a Windows shim to `test.sh` for Docker SITL workflows. See [design/testing.md](design/testing.md) and [design/sitl_testing.md](design/sitl_testing.md) for full workflow and troubleshooting.
+For one stack test, use `bash test.sh stack -n 1 -k <test_name>`.
+All Docker operations go through these scripts, which select WSL when launched
+from Windows; never run stack tests with host-side pytest.
+`test.cmd` is a Windows shim to `test.sh` for Docker SITL workflows.
+See [design/testing.md](design/testing.md) and
+[design/sitl_testing.md](design/sitl_testing.md) for full workflow and troubleshooting.
 
 ---
-
-## Current Status
-
-Current milestone progress and gates are tracked in [design/history.md](design/history.md).

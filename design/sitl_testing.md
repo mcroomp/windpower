@@ -1,454 +1,254 @@
-# SITL Testing
+# SITL stack testing
 
-Everything you need to **run, diagnose, and reason about RAWES SITL stack tests**
-— the full-stack (ArduPilot + Lua) Docker tests under
-[tests/sitl/](../tests/sitl/). Read this whenever you are
-editing or diagnosing a SITL stack test; it is intentionally kept out of the
-always-on [AGENTS.md](../AGENTS.md) context.
+This document owns the current workflow for `tests/sitl/`: running the Docker
+stack, understanding its artifacts, and doing first-pass diagnosis. Windows-native
+unit tests and simtests are covered by [testing.md](testing.md).
 
-> **Scope.** This doc covers SITL **stack** tests only. Windows-native unit tests
-> and simtests (no Docker, no ArduPilot/Lua) are covered by
-> [design/testing.md](testing.md) and the Running Tests section of
-> [AGENTS.md](../AGENTS.md).
+## Current entry points
 
----
-
-## When to use this doc
-
-Pull this doc into context when you are:
-
-- running a SITL stack test (`bash test.sh stack ...`);
-- diagnosing a SITL failure (`diagnose_sitl.py`, `analyse_run.py`, EKF/GPS gating);
-- touching the kinematic-hold trajectory, the IC-start fixtures, or stack setup sequencing;
-- debugging the SITL lockstep protocol or the GPS/EKF startup path.
-
----
-
-## Running SITL stack tests
-
-**Stack tests require Docker. Never mix with the Windows venv.** Each stack test
-runs in its own fresh Docker container, one per test file.
+Use the real Bash scripts from the repo root:
 
 | Task | Command |
-|------|---------|
-| Stack test (single) | `bash test.sh stack -n 1 -k test_foo` |
-| Stack test (full) | `bash test.sh stack -n 8` |
+|---|---|
+| Build the stack image | `bash setup.sh build` |
+| Run one stack selection | `bash test.sh stack -n 1 -k test_name` |
+| Run the full stack suite | `bash test.sh stack -n 2` |
+| Profile lockstep timing | `bash test.sh stack -n 1 --profile-lockstep -k test_name` |
 
-- **NEVER call `docker exec` directly to run stack tests. Use `bash test.sh stack`.**
-- Use the Bash tool directly — never `wsl.exe`. Always absolute paths.
-- The Docker image is built by `bash setup.sh build` (with ArduPilot) or
-  `bash setup.sh build-lite` (without). `bash test.sh` creates and tears down
-  one ephemeral container per test file automatically — there is no persistent
-  dev container to manage.
-- `bash setup.sh build` stores the expensive runtime as the versioned
-  `rawes-sim-ardupilot-base:Copter-4.7.1-v1` image. The final `rawes-sim` image
-  carries a deterministic hash of its Dockerfile, Python requirement files, and
-  LinkHub manifests/source. Stack startup compares that label first and skips
-  Docker BuildKit entirely when it matches. A changed input rebuilds through
-  the normal layered cache; LinkHub remains independent of the ArduPilot
-  compilation stage. Set `RAWES_REBUILD_ARDUPILOT=1` only to intentionally
-  disable that cache and force the expensive base rebuild.
-- The ArduPilot source is pinned to the official `Copter-4.7.1` release and
-  commit `dbe792162d06cab66c3475fd5556bf7a120f119e`; the Docker build verifies the
-  checked-out commit before compiling.
-- Before collection, `test.sh` probes the selected image for Python 3.12+, the
-  ArduCopter-heli binary, and LinkHub. An incompatible cached image fails before
-  any workers start.
-- `test.sh -n N` treats `N` as an upper bound. On the supported Windows
-  workstation it runs at most two lockstep stacks concurrently; higher
-  concurrency causes host scheduling stalls and UDP loss rather than useful
-  throughput. The LinkHub stress test runs exclusively so its 100 Hz transport
-  assertion measures LinkHub instead of contention from another stack.
-- The stress harness's bounded ATTITUDE waits follow `next_cursor` across empty
-  filtered batches under one fixed wall-clock deadline. An empty batch can
-  report journal progress rather than a telemetry timeout; do not assert that
-  every individual HTTP response must contain a matching record.
-- Each stack-test file has an outer 10-minute wall-clock deadline in addition
-  to pytest's in-process timeout. This catches blocked subprocesses and native
-  calls that pytest cannot interrupt. Override it with
-  `RAWES_STACK_TEST_TIMEOUT_S=<seconds>` for an intentional long diagnostic run.
-- The physical mediator and ArduPilot run in lockstep at `SIM_RATE_HZ=1200`
-  (three physics frames per 400 Hz control loop). Do not lower it to 400: the
-  SITL scheduler then holds its semaphore for the whole frame and starves Lua
-  (see `design/arming.md`, "SITL scripting-thread starvation"). The
-  diagnostic physics CSV is sampled at 100 Hz to match the fastest MAVLink
-  observations.
-- Pass `--profile-lockstep` to log five-second timing windows split into
-  ArduPilot receive wait, mediator step, and UDP send time.
-- Stack test logs land in `simulation/logs/{test_name}/` —
-  `mediator.log`, `sitl.log`, `gcs.log`, `telemetry.physics.csv`,
-  enriched `telemetry.csv`, the LinkHub journal, and `arducopter.log`.
-  Suite summary: `simulation/logs/suite_summary.json`.
-- **`internal_controller` MUST be `False` for all full-stack flight tests** — the
-  whole point is to validate that ArduPilot + Lua actually fly the vehicle.
-- **SITL must run as close to hardware as possible.** Find and fix root causes; do
-  NOT paper over failures with simulation-only hacks. Confirm with the user before
-  adding any override. `base_k_ang` is diagnostic-only and defaults to 0.
+Important current behavior verified from `test.sh` and `setup.sh`:
 
-### Torque yaw acceptance
+- `test.cmd` is only a thin wrapper around `bash.exe test.sh %*`; document and
+  use `bash test.sh`, not the wrapper.
+- `bash setup.sh build-lite` builds the lightweight runtime target **without**
+  ArduPilot or LinkHub. It is useful for non-stack container work, but it is
+  **not** sufficient for `tests/sitl/`.
+- `bash test.sh stack ...` is the only supported runner for the stack suite.
+  Do **not** run `tests/sitl/` with host-side `pytest`.
 
-Torque physics assertions use absolute mediator `t_sim`, including the startup
-hold; they do not subtract `dynamics_start`. The shared check requires finite
-physics rates and one-second heartbeat coverage across the complete observation
-window, so missing or truncated telemetry cannot pass as zero yaw.
+## Current runner contract
 
-The IC yaw-regulation fixture uses Lua PASSIVE in GUIDED_NOGPS, not ACRO.
-Its settling time, observation duration, and rate limit are owned by
-[test_yaw_regulation_sitl.py](../tests/sitl/torque/test_yaw_regulation_sitl.py).
-Torque motor integration, angle integration, and tilt-rate derivatives must use
-`SITLInterface.dt()`, not the 400 Hz ArduPilot control-loop period. At the
-configured 1200 Hz physics rate, a fixed 400 Hz integration step advances the
-attitude three times faster than its reported gyro rate and destabilizes
-estimation/control. Motor transport delay uses simulation timestamps, so its
-duration also remains correct if the declared frame rate changes.
+The stack runner is file-parallel, not test-function-parallel.
 
-### Single MAVLink owner
+Verified behavior from `test.sh`:
 
-Each per-test container launches the Rust LinkHub process. It is the only process
-connected to ArduPilot's TCP port 5760 and owns the GCS heartbeat, message rates,
-transaction correlation, and the complete binary archive. The Dockerfile adds
-LinkHub only onto the separately tagged, reusable ArduPilot runtime image, so
-LinkHub changes cannot invalidate the expensive ArduPilot build.
-The LinkHub build stage also keeps Cargo registry and target artifacts in
-BuildKit cache mounts, so source-only LinkHub changes recompile the crate rather
-than every Rust dependency.
+- It discovers `tests/sitl/**/test_*.py` and runs one ephemeral container per
+  matching **file**.
+- `-n` is an upper bound only. The runner currently caps effective concurrency
+  to **2** lockstep stacks because higher parallelism causes host scheduling
+  stalls and UDP loss.
+- `test_linkhub_stress_sitl.py` runs exclusively so the transport benchmark
+  measures LinkHub rather than contention from another stack.
+- Before collection the runner calls `bash setup.sh build` and probes the image
+  for Python 3.12+, `arducopter-heli`, and `linkhub`.
+- Each selected file gets an outer wall-clock timeout through
+  `RAWES_STACK_TEST_TIMEOUT_S` (default `600` seconds).
 
-Pytest fixtures consume the shared finite HTTP/JSON API on `127.0.0.1:8999`.
-The mediator does not consume LinkHub or MAVLink: its JSON physics link on UDP
-9002/9003 and the winch command socket remain direct because they model the
-physical world rather than MAVLink transports. There is no dedicated mediator
-MAVLink connection on port 5762.
+## Architecture facts the harness assumes
 
-The mediator writes `telemetry.physics.csv`. During fixture teardown the harness
-flushes and queries LinkHub's journal directly, preserves the journal and raw
-physics artifact, and runs `analysis/enrich_sitl_telemetry.py` to produce the
-canonical `telemetry.csv`. Enrichment uses LinkHub simulation-clock metadata
-and latest-observation sampling; it never runs in the lockstep process.
+- ArduPilot SITL, the mediator, and LinkHub run inside the per-test container.
+- The physical mediator and ArduPilot are in lockstep at `SIM_RATE_HZ=1200`,
+  i.e. three physics frames per 400 Hz ArduPilot control-loop tick.
+- LinkHub is the **only** MAVLink owner and journal. The mediator does not read
+  MAVLink merely to decorate telemetry, and the stack does **not** export a
+  duplicate `mavlink.jsonl`.
+- Post-run enrichment is owned by the harness: mediator physics telemetry is
+  copied to `telemetry.physics.csv`, then
+  `analysis/enrich_sitl_telemetry.py` samples LinkHub observations onto that
+  timeline to produce the canonical `telemetry.csv`.
 
-The dependency-free `linkhub_client` project supplies the common record
-dataclasses and HTTP client. It must not import `pymavlink`; protocol framing
-belongs exclusively to LinkHub.
+## Current per-test artifacts
 
-LinkHub uses the official `mavlink/rust-mavlink` ArduPilotMega dialect for
-validated MAVLink 1/2 decoding and typed encoding. Its decoded stream, command
-ACK correlation, parameter operations, message-rate API, MAVFTP, DataFlash, and
-capability discovery are implemented. The architecture and current extension
-points are owned by [design/linkhub.md](linkhub.md).
+Per-test artifacts land under `simulation\logs\<test_name>\`.
 
----
+Common current artifacts:
 
-## Efficient long-running command handling (agent-critical)
+| Artifact | Source |
+|---|---|
+| `worker.log` | `test.sh` worker stdout/stderr summary |
+| `sitl.log` | ArduPilot SITL process |
+| `gcs.log` | stack-side GCS/setup helpers |
+| `linkhub.log` | LinkHub service process |
+| `linkhub\` | copied LinkHub journal root for the run |
+| `arducopter.log` | ArduPilot DataFlash/log artifact, when produced |
 
-Unit/simtest/stack runs can take 1-5+ minutes. Handle them like this:
+Mediator-backed fixtures also add:
 
-- Do NOT pipe a command through `| tail -N` if it might run in a mode that can
-  background — a slow/idle command piped through `tail` produces no output until
-  the pipeline's stdout closes, so a background poll via `get_terminal_output`
-  just returns the same stale snapshot every time (wastes calls, looks like a
-  hang). Run the bare command first; only pipe through `tail`/`grep` once you've
-  confirmed the run completes synchronously, or redirect to a file
-  (`... > /tmp/out.log 2>&1`) and read/grep the file instead.
-- Once a command has moved to background, do not repeatedly call
-  `get_terminal_output` in a tight loop — it will not return new content until
-  the process actually produces more output or exits. Wait for the automatic
-  completion notification instead of polling.
-- Do NOT call `get_terminal_output` immediately after a command backgrounds
-  "just to check progress". It returns a byte-limited tail of the WHOLE
-  terminal scrollback, not just the new command's output — if the new command
-  has only printed a little so far, the tail can still be dominated by
-  leftover output from earlier unrelated commands in the same terminal, which
-  looks like stale/wrong output but really just means "not enough new output
-  yet to push the old stuff out of the tail window". End the turn and wait for
-  the automatic completion notification instead; only poll if genuinely unsure
-  whether the process is hung after a long silence.
-- Prefer `bash test.sh stack -n 1 -k <test_name>` (single test) while iterating;
-  only widen to `-n 4`/full suite once the targeted test is confirmed passing,
-  to keep turnaround short.
+| Artifact | Source |
+|---|---|
+| `mediator.log` | mediator process |
+| `events.jsonl` | mediator event log |
+| `telemetry.physics.csv` | raw mediator physics telemetry before enrichment |
+| `telemetry.csv` | enriched telemetry sampled with LinkHub observations |
 
-## Git Bash vs WSL `/tmp` gotcha
+There is **no current `suite_summary.json` emitter in `test.sh`**. Do not rely
+on it in new documentation or tooling.
 
-`/tmp` is NOT one shared filesystem on Windows dev boxes — Git Bash (mingw/MSYS2,
-the default terminal) and WSL2 (used for `docker`/`test.sh stack`) each have their
-own separate `/tmp`:
+## Diagnosis workflow
 
-Docker is WSL-only on the supported workstation. Invoke `bash test.sh ...` or
-`bash setup.sh build` from Git Bash and let those scripts re-enter WSL; do not
-use Docker Desktop's native Windows engine or manually wrap commands with `wsl`.
+Always start with the current repo tools:
 
-- A bare `> /tmp/foo.log` redirection in a Git Bash command writes to Git Bash's
-  own `/tmp` (really `C:\Users\<user>\AppData\Local\Temp\foo.log` — check with
-  `cygpath -w /tmp/foo.log`).
-- A command run via `wsl -e bash -lc "... > /tmp/foo.log"` writes inside WSL's
-  `/tmp` (`\\wsl$\...\tmp\foo.log` from Windows, or `/tmp/foo.log` from *inside*
-  another `wsl -e` call) — NOT reachable from a later plain Git Bash
-  `cat /tmp/foo.log`.
-- If the redirection is written OUTSIDE the `wsl -e bash -lc "..."` quoted
-  string (e.g. `wsl -e bash -lc "cmd" > /tmp/foo.log`), it's the OUTER (Git
-  Bash) shell that owns the redirect, not WSL — easy to mix up.
-- A native Windows executable (e.g. `.venv/Scripts/python.exe`) invoked from
-  Git Bash does NOT understand `/tmp/...` paths passed as arguments (it's a
-  Windows process, not MSYS2-aware) — convert with `cygpath -w /tmp/foo.log`
-  first, or it'll fail with `FileNotFoundError` even though
-  `ls /tmp/foo.log` (from Git Bash) shows the file existing.
-- Rule of thumb: know which shell environment (Git Bash vs WSL) is actually
-  creating/reading a `/tmp` path before assuming a file exists or is missing;
-  don't conclude "no output was produced" just because a naive `cat`/`find`
-  from the wrong shell doesn't see it.
-
-## DShot/BLHeli params excluded from SITL boot verification
-
-BLHeli/DShot params (`SERVO9_*`, `SERVO_BLH_*`, `SERVO_DSHOT_*`, `RPM1_*` —
-full table in [design/dshot.md](dshot.md)) are intentionally excluded from
-SITL boot-param verification via `SITL_UNSUPPORTED_PARAMS` in
-[tests/sitl/stack_utils.py](../tests/sitl/stack_utils.py), because
-ArduCopter-heli SITL does not compile the BLHeli backend and drives output 9
-as plain PWM instead of DShot.
-
----
-
-## Post-run diagnosis workflow
-
-**ALWAYS run `diagnose_sitl.py` FIRST after ANY SITL stack run, before making any
-decision.**
-
-```
-.venv/Scripts/python.exe analysis/diagnose_sitl.py <test_name>
+```powershell
+uv run python analysis/diagnose_sitl.py <test_name>
+uv run python analysis/analyse_run.py <test_name>
 ```
 
-It answers the two gating questions in order:
+Decision order:
 
-- **CHECK 1 — was the EKF healthy (GPS-aiding) at the kinematic exit?** If not, a
-  dataflash blocker chain (GPS 3D fix → GPS pre-arm checks `XKF4.GPS` → `ORGN`
-  origin → `XKF4.SS` nav_filter_status) pinpoints the first broken link. When the
-  EKF is stuck in `const_pos_mode`/`AID_NONE` it enumerates every
-  `readyToUseGPS()` gate (PosXY source, validOrigin, tiltAlignComplete,
-  **yawAlignComplete**, delAngBiasLearned, gpsGoodToAlign, gpsDataToFuse) to name
-  the exact blocking condition. Without a healthy EKF the Lua can never capture
-  GPS, so nothing downstream is trustworthy — everything after the exit gate is
-  ignored.
-- **CHECK 2 — at kinematic exit, are we at the IC position, disk tilt (body_z),
-  and rotor RPM** (vs `steady_state_starting.json`)?
+1. `diagnose_sitl.py` CHECK 1: was the EKF healthy and GPS-aiding at
+   `kinematic_exit`?
+2. `diagnose_sitl.py` CHECK 2: did the kinematic hand-off land at the expected
+   IC position, disk tilt, and rotor RPM?
+3. Only if both pass should you treat the failure as a post-release controller
+   or physics bug and continue with `analyse_run.py`.
 
-Decision order: if CHECK 1 fails, fix the EKF/GPS path first. If CHECK 1 passes
-but CHECK 2 fails, fix the kinematic hand-off first. Only when both pass is a
-post-release flight failure a real controller/physics bug — then move on to
-`analyse_run.py`.
-
-**Run `analyse_run.py` only after `diagnose_sitl.py` passes both gates.** It loads
-all log sources (telemetry CSV, LinkHub journal, mediator.log, arducopter.log) into
-a unified `FlightLog` and prints a single bucketed report.
-
-```
-.venv/Scripts/python.exe analysis/analyse_run.py <test_name>   # --bucket 10 coarse, --bucket 1 frame-level
-```
-
-**Fix telemetry/logging before diagnosing physics.** If telemetry columns are
-zero/missing/wrong (e.g. `tether_m=0`, phase never changes), fix the logging bug
-first — diagnosing from bad telemetry produces wrong conclusions.
-
-### Other diagnosis entry points
+Other current entry points:
 
 | Task | Command |
-|------|---------|
-| Pump cycle diagnosis | `.venv/Scripts/python.exe analysis/pump_diagnosis.py --test test_pump_cycle_unified --bucket 1` |
-| Landing diagnosis | `.venv/Scripts/python.exe analysis/analyse_landing.py [--test test_landing_lua_sitl] [--bucket 2]` |
-| Raw MAVLink inspection (STATUSTEXT, message presence, NVF/param events) | `linkhub query simulation/logs/<test_name>/linkhub/<run-id> ...` -- see [design/linkhub.md](linkhub.md) |
-| Visualize result | `visualize.cmd simulation/logs/<test_name>/telemetry.csv` |
-| EKF gating reference | [design/EKF_GATING.md](EKF_GATING.md), [design/ekf_const_pos_mode.md](ekf_const_pos_mode.md) |
+|---|---|
+| Torque-stack diagnosis | `uv run python analysis/diagnose_torque.py test_yaw_regulation_sitl` |
+| Raw LinkHub journal inspection | `linkhub query simulation\logs\<test_name>\linkhub show --json` |
+| Visualize telemetry | `visualize.cmd simulation\logs\<test_name>\telemetry.csv` |
 
----
+Prefer `diagnose_sitl.py`, `analyse_run.py`, and `linkhub query` over older
+helpers that still expect a legacy `mavlink.jsonl`.
 
-## SITL lockstep protocol — key rule
+## Lockstep protocol: one non-negotiable rule
 
-The physics worker must reply to **every** SITL servo packet without exception —
-skipping a reply causes ArduPilot to stall permanently. `gcs.sim_now()` returns
-LinkHub's latest observed `time_boot_ms/1000`, not wall-clock time and not
-necessarily the timestamp of a message just returned by a filtered journal
-read. `sim_sleep(N)` waits N sim-seconds; the physics loop must keep running
-during the wait. Full reference:
-[design/simulation.md § SITL Lockstep Protocol](simulation.md).
+The physics worker must reply to **every** SITL servo packet. Missing one reply
+stalls ArduPilot permanently.
 
----
+Related current facts:
 
-## Kinematic hold timeline
+- `gcs.sim_now()` is simulation time derived from LinkHub observations, not wall
+  clock.
+- `sim_sleep(N)` waits `N` simulation seconds; the physics loop must continue to
+  service lockstep packets during that wait.
 
-Canonical timeline note:
-- The repository-level canonical timeline definition for IC-start SITL flight
-  analysis is `design/sitl_flight_timeline.md`.
-- Use this section for stack-specific execution details; use the canonical doc
-  for shared event anchors (`t_sim`, `kinematic_exit`, `t_rel`).
+For lower-level lockstep ownership, see
+[simulation.md](simulation.md).
 
-The **kinematic hold** (a.k.a. kinematic startup phase) is the artificial,
-physics-free trajectory that brings the hub to the IC operating point and holds
-it there while the EKF aligns on GPS. It exists for one reason: to leave the EKF
-**healthy and GPS-aiding** (out of `const_pos_mode`/`AID_NONE`, with
-`yawAlignComplete` latched) by the time real physics takes over at *kinematic
-exit*. Nothing downstream is trustworthy until that gate passes — see
-[design/EKF_GATING.md](EKF_GATING.md) and the `diagnose_sitl.py` CHECK 1/CHECK 2
-contract above.
+## SITL scripting-thread starvation
 
-> **Single source of truth.** There is exactly **one** central kinematic-hold
-> implementation. The trajectory math lives in
-> [simulation/kinematic.py](../simulation/kinematic.py); the production loop
-> ([simulation/mediator.py](../simulation/mediator.py)) and every Windows-native
-> unit/simtest build their trajectory from it. Every SITL **flight** fixture that
-> must *start at the IC* goes through the single shared helper
-> `_ic_trapezoid_stack` in
-> [tests/sitl/flight/conftest.py](../tests/sitl/flight/conftest.py).
-> **Do not** fork or re-derive a kinematic trajectory inside a test. If a test
-> needs to start at the IC, call the shared fixture; if it needs a different
-> profile, change the shared implementation (and this doc), do not copy it.
+Every generated `AP_Vehicle` Lua binding in ArduPilot 4.7.1 is marked
+`scheduler-semaphore`. The main loop holds that semaphore while it runs and
+releases it only inside `AP::ins().wait_for_sample()`. In SITL the stack
+reached a state where the main thread almost never released it, so
+`vehicle:*` calls from Lua blocked for seconds. RC4/RC8 overrides then expired
+(`RC_OVERRIDE_TIME`), output 8 dropped, and heli runup restarted. Do not hide
+this by raising or disabling `RC_OVERRIDE_TIME`.
 
----
+**Root cause: `SIM_RATE_HZ=400`.** A gdb stall snapshot
+(`tests/sitl/thread_trace.py`, `stall_snapshot_s`) taken while Lua was blocked
+in `HALSITL::Semaphore::take` from
+`AP_Vehicle_set_target_angle_and_rate_and_throttle` showed the main thread in
+`AP_Scheduler::loop` → `delay_microseconds` → `SITL_State::wait_clock` →
+`JSON::recv_fdm` → `sync_frame_time`. That is the SITL-only
+`delay_microseconds(1)` that `AP_Scheduler::loop()` runs *after* `run()`, while
+it still holds the semaphore. In lockstep, any delay must step at least one
+physics frame. At 400 Hz one frame is the whole 2.5 ms loop, so the full
+wall-clock frame (including the real-time pacing sleep) elapsed with the lock
+held. `wait_for_sample()` then found its sample already due and returned
+immediately, so the unlocked window was effectively zero.
 
-## 1. Components (the one implementation)
+At ArduPilot's SITL default of `SIM_RATE_HZ=1200`, the locked delay advances
+one 0.83 ms frame and `wait_for_sample()` steps the remaining frames unlocked.
+Keep `SIM_RATE_HZ` at 1200 in `tests/sitl/rawes_sitl_defaults.parm` and the
+torque boot params; the mediator follows the servo-packet frame rate. This is a
+lockstep artifact; hardware does not step physics inside the scheduler.
 
-| Layer | Symbol | File | Role |
-|-------|--------|------|------|
-| Trajectory factory | `make_smooth_trapezoid_traj()` | [kinematic.py](../simulation/kinematic.py) | C1-continuous (raised-cosine) trapezoid ending exactly at `pos0` with zero velocity |
-| Trajectory factory | `make_linear_traj()` / `compute_launch_position()` | [kinematic.py](../simulation/kinematic.py) | Constant-velocity fallback path (used only when `kinematic_cruise_speed == 0`) |
-| Driver | `KinematicStartup` | [kinematic.py](../simulation/kinematic.py) | Wraps a `traj_fn(t)->(pos,vel)` (+ optional `R_fn(t)->R`); `state_at(t)` returns the held kinematic state |
-| Production wiring | mediator startup block | [mediator.py](../simulation/mediator.py) (`_kin_duration`, `make_smooth_trapezoid_traj`, `KinematicStartup`) | Builds the trajectory from config and feeds the SITL sensor stream |
-| Config knobs | `startup_damp_seconds`, `kinematic_cruise_speed`, `kinematic_accel_s`, `kinematic_decel_s`, `kinematic_vel_ramp_s`, `kinematic_aero_mode` | [config.py](../simulation/config.py) | Default profile; overridden per-fixture |
-| Central IC fixture | `_ic_trapezoid_stack` | [flight/conftest.py](../tests/sitl/flight/conftest.py) | The **only** entry point for "start at the IC" SITL flight tests |
-| SITL setup sequence | stack setup helpers (6 steps) | [stack_infra.py](../tests/sitl/stack_infra.py) | Connect → params → EKF tilt align → arm → confirm GUIDED_NOGPS |
+The static GUIDED holds (the entry hold after `ENTER_GUIDED` and the passive
+hold after `ENTER_PASSIVE`) never poll `vehicle:get_mode()`. They call
+`vehicle:set_target_angle_and_rate_and_throttle()` only when the target changes
+(at most every 50 ms) and otherwise once per second as a keepalive inside
+`GUID_TIMEOUT` (3 s). This keeps scheduler-locked calls to a minimum but was
+not, by itself, sufficient at 400 Hz.
 
-The trapezoid path is selected whenever `kinematic_cruise_speed > 0`; otherwise
-the linear fallback path is used. With dual GPS (`EK3_SRC1_YAW=2`, RELPOSNED
-heading) yaw is known from the first fix, so the motion exists only to give the
-EKF **velocity observability** during the hold — not to align yaw.
+## Kinematic hold: current shared implementation
 
----
+The canonical time anchors for the hold and release are defined in
+[Flight timeline anchors](#flight-timeline-anchors) below.
 
-## 2. Canonical IC-start timeline (trapezoid)
+Current shared implementation, verified from `tests/sitl/flight/conftest.py` and
+`simulation/config.py`:
 
-This is the profile set by `_ic_trapezoid_stack` and shared by the steady,
-ic-passive, and pumping fixtures. Parameters: `startup_damp_seconds = 60`,
-`kinematic_cruise_speed = 1.0 m/s`, `kinematic_accel_s = 5`,
-`kinematic_decel_s = 5`, `kinematic_aero_mode = "nul"`, `_arm_at_sim_s = 8`.
-Time is measured from mediator start at `speedup = 1`.
+| Path | Current role |
+|---|---|
+| `simulation/kinematic.py` | central trajectory math (`make_smooth_trapezoid_traj`, `make_linear_traj`, `KinematicStartup`) |
+| `simulation/mediator.py` | production wiring of the kinematic startup into the lockstep mediator |
+| `tests/sitl/flight/conftest.py::_ic_trapezoid_stack` | the only IC-start flight-fixture entry point |
 
-```
- t (s)  phase / event
- ------  --------------------------------------------------------------
- 0       kinematic hold begins; hub at launch_pos (back-computed so the
-         trapezoid ends exactly at pos0). Lua not yet active.
- 0..5    accelerate 0 -> 1 m/s along the IC yaw heading (raised cosine).
- ~6      GPS first fix; EKF3 origin set.
- ~8      arm (after EKF tilt alignment); RAWES_MODE=3 (MODE_PASSIVE) set;
-         IC attitude commanded via nul-aero cyclic during the hold.
- 5..55   cruise at 1 m/s along the IC heading (constant velocity).
- ~34     GPS fuses: delAngBiasLearned converges, readyToUseGPS() passes,
-         const_pos_mode clears. (yawAlignComplete must latch by here.)
- 55..60  decelerate 1 -> 0 m/s, arriving EXACTLY at pos0 at rest.
- 60      KINEMATIC EXIT: physics takes over. Test promotes RAWES_MODE 3 -> 1
-         (MODE_STEADY) and steady guidance becomes active.
- 60+     free flight under ArduPilot + Lua.
-```
+Exact durations, gains, and hand-off timings live in those code paths and can
+drift. Do not duplicate them here; read `_ic_trapezoid_stack` and
+`simulation\config.py` when a change depends on the current numeric values.
 
-Why this shape:
+## Current stack setup sequence
 
-- **Ends at `pos0` with zero velocity.** `launch_pos` is back-computed from the
-  integrated speed profile so there is **no residual position/velocity error** at
-  release — GPS aiding engages with nothing to shock the EKF. (A constant-velocity
-  drift used to leave the hub ~58 m from `pos0` and jolt the filter when aiding
-  finally engaged.)
-- **Raised-cosine ramps** give continuous acceleration (no jerk step) at every
-  phase boundary.
-- **Level frame yawed to the IC heading.** The hold starts at roll=pitch=0 yawed
-  to the IC heading; the IC roll/pitch is slewed in later via the `nul`-aero
-  cyclic (it cannot apply yaw), keeping the EKF pre-arm seed level and consistent.
-- **MODE_PASSIVE during the hold.** `RAWES_MODE=3` is set right after arm so the
-  Lua commands the IC attitude as a GUIDED angle target (the quaternion
-  anchor captured on `ENTER_PASSIVE` composed with the IC tilt sent as
-  `RAWES_ROFF`/`RAWES_POFF`/`RAWES_YOFF` offsets, with **zero rate
-  feed-forward**) plus IC collective via throttle. The `nul`-aero integrates
-  that angle command so the disk slews to the IC tilt during the hold.
+The setup sequence still needs to finish inside the hold:
 
----
+1. Connect GCS and request message rates.
+2. Wait for the parameter subsystem.
+3. Verify boot parameters.
+4. Wait for EKF tilt alignment.
+5. Arm.
+6. Confirm the intended guided mode before yielding to the test.
 
-## 3. Where the timeline is parameterized
+The IC-start flight fixtures then move Lua through the passive/steady hand-off
+described under [Flight timeline anchors](#flight-timeline-anchors).
 
-Not every SITL test uses the 60 s canonical profile. The duration and ramp
-windows are config-driven; only the *implementation* is shared:
+## Flight timeline anchors
 
-| Test / fixture | `startup_damp_seconds` | Notes |
-|----------------|------------------------|-------|
-| `_ic_trapezoid_stack` (steady / ic-passive / pumping) | 60 | Canonical trapezoid, `cruise=1.0` |
-| `guided_nogps_armed_landing_lua` | 65 | Trapezoid + `kinematic_vel_ramp_s` tail; body_z capture gated by `KINEMATIC_SETTLE_MS` |
-| `test_kinematic_gps_sitl` | 160 | Long hold for GPS-fusion timing studies |
-| `config.py` default | 30 | **Linear** fallback path (`kinematic_cruise_speed=0`) for non-IC stacks |
+These anchors apply to IC-start flight stacks (`tests/sitl/flight/`: steady,
+passive, pumping, landing, and GPS bring-up). They do not apply to
+Windows-native unit tests, simtests, or torque-only stacks.
 
-> Note: one setup helper docstring still mentions a "30 s" damping window;
-> that is the legacy default, not the IC-start value. The IC fixtures override
-> `startup_damp_seconds` to 60. The authoritative duration for any given test is
-> the value in its fixture/extra-config, not the docstring.
+Use, in order:
 
----
+1. `t_sim` from the telemetry/event stream (raw traceability to logs and
+   fixture timing);
+2. the row/event where `note == "kinematic_exit"`;
+3. `t_rel = t_sim - t_kin_exit`.
 
-## 4. SITL setup sequence (runs inside the hold)
+Rules:
 
-The setup sequence must complete its six steps **inside** the kinematic window so
-the hub is still being held when GPS aligns:
+- Use `t_rel` for release-to-flight comparisons across runs.
+- If `kinematic_exit` is missing, the run is invalid for post-release flight
+  diagnosis until the telemetry/event path is fixed.
+- Every diagnosis reports raw `t_sim`, derived `t_rel`, and whether the event is
+  before or after `kinematic_exit`. For a first divergence, also report the
+  comparison window in `t_rel` and the artifact used (`telemetry.csv`,
+  `events.jsonl`, or the LinkHub journal).
 
-1. Connect GCS; request telemetry streams.
-2. Wait for the param subsystem.
-3. Verify boot params via MAVLink read-back.
-4. Wait for EKF tilt alignment (FAIL HARD if it never arrives).
-5. Arm with `force=True`.
-6. Confirm GUIDED_NOGPS mode.
+Field names to use in analysis (schema in `simulation/telemetry_columns.py`):
+`t_sim`, `sitl_time`, `phase`, `note`, `omega_rotor`,
+`mav_att_{roll,pitch,yaw}_deg`, `mav_att_target_{roll,pitch,yaw}_deg`,
+`ekf_pos_{x,y,z}`.
 
-The arm at `t ~ 8 s` is deliberately early so the IC attitude is commanded as
-soon as possible, giving the `nul`-aero the full remaining hold window to slew
-the disk to the IC orientation before release.
+Sequence: `t_sim = 0` starts the mediator and kinematic hold; arm/setup
+finishes inside the hold and Lua enters PASSIVE before release; the mediator
+logs `kinematic_exit` (`t_rel = 0`). For the steady hand-off,
+`tests/sitl/flight/test_lua_flight_steady_sitl.py` waits `_PASSIVE_SETTLE_S`,
+then promotes `RAWES_MODE` from PASSIVE to STEADY and sends `RAWES_ALT`.
+Numeric timings live in `_ic_trapezoid_stack` and `simulation/config.py`.
 
----
+## DShot/BLHeli parameters excluded from SITL verification
 
-## 5. Verification
+`tests/sitl/stack_utils.py` currently excludes these hardware-only parameters
+from SITL boot verification because ArduCopter-heli SITL does not compile the
+BLHeli / bidirectional-DShot backend:
 
-After any change, confirm the hold still delivers a healthy EKF and a clean
-hand-off:
+- `SERVO_BLH_MASK`
+- `SERVO_BLH_BDMASK`
+- `SERVO_BLH_AUTO`
+- `SERVO_BLH_OTYPE`
+- `SERVO_BLH_POLES`
+- `SERVO_BLH_TRATE`
+- `BRD_IO_DSHOT`
 
-```
-bash test.sh stack -n 1 -k test_lua_flight_steady_sitl
-.venv/Scripts/python.exe analysis/diagnose_sitl.py test_lua_flight_steady_sitl
-```
+The yaw motor still appears in telemetry and control flow through the simulated
+stack; only the hardware ESC backend itself is absent.
 
-- **CHECK 1** — EKF GPS-aiding (out of `const_pos_mode`, `yawAlignComplete`
-  latched) **before** the 60 s release.
-- **CHECK 2** — at exit, hub is at IC position, disk tilt (body_z), and rotor RPM
-  vs `steady_state_starting.json`.
+## Windows / WSL path gotcha
 
-The Windows-native guard for the trajectory math is
-[tests/unit/test_startup_trajectory.py](../tests/unit/test_startup_trajectory.py)
-(`make_smooth_trapezoid_traj` ends at `pos0` with zero velocity, continuous accel).
-
----
-
-## 6. Keeping this doc in sync
-
-**This doc is the canonical reference for SITL stack testing and the kinematic
-hold timeline. If you change any of the SITL workflow, the diagnosis entry
-points, the lockstep contract, or the kinematic-hold timeline, update this doc in
-the same commit** (and update the short pointer in [AGENTS.md](../AGENTS.md) only
-if the *summary* changes). Specifically, update the relevant section whenever you
-change any of:
-
-- the SITL run/diagnose commands (`test.sh stack`, `diagnose_sitl.py`,
-  `analyse_run.py`) or the CHECK 1 / CHECK 2 contract;
-- the SITL lockstep protocol;
-- the central trajectory implementation in
-  [simulation/kinematic.py](../simulation/kinematic.py)
-  (`make_smooth_trapezoid_traj`, `make_linear_traj`, `KinematicStartup`,
-  `compute_launch_position`);
-- the mediator wiring that builds the trajectory in
-  [simulation/mediator.py](../simulation/mediator.py);
-- the shared IC fixture `_ic_trapezoid_stack` or the kinematic config keys
-  (`startup_damp_seconds`, `kinematic_cruise_speed`, `kinematic_accel_s`,
-  `kinematic_decel_s`, `kinematic_vel_ramp_s`, `kinematic_aero_mode`,
-  `_arm_at_sim_s`) in any fixture or in [config.py](../simulation/config.py);
-- the stack setup six-step sequence or the arm timing.
-
-Any SITL test that needs to **start at the IC must reuse the single shared
-implementation** (`_ic_trapezoid_stack` → `kinematic.py`). Do not add a second
-kinematic-hold path; extend the shared one and record the change here.
+On the supported workstation, Docker access is WSL-only. Invoke `bash test.sh`
+or `bash setup.sh build` from Git Bash and let those scripts re-enter WSL
+themselves. Do not wrap them manually in `wsl.exe`.

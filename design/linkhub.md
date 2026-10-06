@@ -1,8 +1,7 @@
 # LinkHub Architecture
 
-LinkHub is the setup-neutral Rust gateway for MAVLink, future device links, and
-structured diagnostics. It is the active MAVLink owner for SITL and hardware
-calibration; the former Python service has been removed.
+LinkHub is the Rust transport and diagnostic gateway used by the current
+RAWES MAVLink stack.
 
 ## Ownership
 
@@ -27,7 +26,6 @@ classes currently include:
 - `mavlink.tx`;
 - `diagnostic.event`.
 
-Future transports add record classes rather than separate logging systems.
 Every record has a global sequence, ingestion timestamp, optional correlation
 ID, and versioned payload. HTTP cursors are opaque encodings of the global
 sequence.
@@ -40,10 +38,8 @@ reads merge flushed chunks with the in-memory chunk. Each file is the magic
 `LHCHNK02`, the minimum and maximum host ingest time (two little-endian `u64`
 nanosecond values), then the MessagePack chunk; time-range reads use this
 header to skip files without decoding them. Files with any other magic are
-rejected rather than skipped. Losing up to one minute of the active in-memory
-chunk on a process or machine crash is an accepted design tradeoff; LinkHub
-does not fsync or repair partial tail files. A clean shutdown flushes the
-active chunk.
+rejected rather than skipped. LinkHub does not fsync or repair partial tail
+files. A clean shutdown flushes the active chunk.
 
 For a replay, the actor first fixes one tail sequence and snapshots the active
 chunk; the reader then merges that snapshot with completed chunks through the
@@ -69,57 +65,66 @@ External retries are deduplicated by `(run_id, source_instance,
 source_sequence)`. A diagnostic operation can reference the exact MAVLink RX or
 TX sequences that caused it.
 
-High-rate numeric simulation samples do not become diagnostic events.
-`telemetry.csv` remains the dense physics/control signal artifact. The LinkHub
-journal provides semantic ordering and raw transport evidence.
-
-## Task and lock model
-
-Mutable resources have one Tokio task owner:
-
-- the MAVLink link task owns its socket and official-library codec;
-- the journal task owns sequence allocation and the active chunk;
-- operation state machines own protocol-specific correlation state.
-
-HTTP handlers read immutable status snapshots and communicate through bounded
-channels. They do not hold a socket, archive, or transaction lock while waiting
-on a client. A broadcast notification is only a wake-up mechanism; the journal
-cursor remains authoritative.
-
 LinkHub can optionally serve compiled static browser assets from the directory
 configured by `--static-dir` or `LINKHUB_STATIC_DIR`. Static serving is a
-deployment convenience only: browser applications continue to use the same
-finite HTTP/JSON API, and LinkHub owns no UI session or rendering state.
+deployment convenience only: browser applications still use the same finite
+HTTP/JSON API.
 
 ## HTTP API
 
-The foundation provides:
+The live router currently exposes:
 
-- `GET /health/live`;
-- `GET /health/ready`;
-- `GET /v1/status`;
-- `GET /v1/schema`;
-- `GET /v1/records`;
-- `GET|POST /v1/diagnostics/events`;
-- `GET|POST /v1/mavlink/frames`;
-- `GET|POST /v1/mavlink/messages`;
-- `POST /v1/mavlink/commands`;
-- `POST /v1/mavlink/message-requests`;
-- `GET /v1/mavlink/version`, `/capabilities`, and `/components`;
-- `GET|PUT /v1/mavlink/parameters`;
-- `GET|PUT /v1/mavlink/parameters/{name}`;
-- `GET|PUT /v1/mavlink/message-rates`;
-- MAVFTP file and directory operations;
-- DataFlash list and download operations;
-- optional Bluetooth motor status, command, stop, and reconnect operations;
-- `GET /v1/mavlink/status`.
+| Route | Methods | Purpose |
+| --- | --- | --- |
+| `/health/live` | `GET` | Liveness probe. |
+| `/health/ready` | `GET` | Ready when MAVLink is connected and has a heartbeat. |
+| `/v1/status` | `GET` | Service/run/journal status. |
+| `/v1/schema` | `GET` | Generated protocol schema. |
+| `/v1/journal/flush` | `POST` | Flush the active in-memory chunk. |
+| `/v1/records` | `GET` | Mixed journal projection over diagnostic + MAVLink records. |
+| `/v1/diagnostics/events` | `GET`, `POST` | Diagnostic-event projection and diagnostic ingestion. |
+| `/v1/mavlink/frames` | `GET`, `POST` | Raw/decoded MAVLink frame projection and raw frame injection. |
+| `/v1/mavlink/messages` | `GET`, `POST` | Decoded MAVLink message projection and decoded message send. |
+| `/v1/mavlink/commands` | `POST` | `COMMAND_LONG` execution. |
+| `/v1/mavlink/message-requests` | `POST` | One-shot message request by name. |
+| `/v1/mavlink/version` | `GET` | `AUTOPILOT_VERSION` request. |
+| `/v1/mavlink/capabilities` | `GET` | Capability summary. |
+| `/v1/mavlink/components` | `GET` | Known heartbeat senders. |
+| `/v1/mavlink/parameters` | `GET`, `PUT` | Bulk parameter list / batch set. |
+| `/v1/mavlink/parameters/{name}` | `GET`, `PUT` | Single parameter read/write. |
+| `/v1/mavlink/message-rates` | `PUT` | Explicit message-rate requests. |
+| `/v1/mavlink/message-rates/{message}` | `GET` | Read one configured interval. |
+| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/download/upload/remove. |
+| `/v1/mavlink/directories` | `POST` | MAVFTP create-directory operation. |
+| `/v1/mavlink/logs` | `GET` | DataFlash log list. |
+| `/v1/mavlink/logs/{id}` | `GET` | DataFlash log download. |
+| `/v1/mavlink/status` | `GET` | Live link + vehicle status snapshot. |
+| `/v1/motor` | `GET`, `PUT` | Optional Bluetooth motor status and set-running command. |
+| `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop. |
+| `/v1/motor/reconnect` | `POST` | Optional Bluetooth motor reconnect. |
 
-Generic, diagnostics, raw MAVLink frames, and decoded MAVLink messages are
-finite projections over the same cursor space. Every GET accepts an explicit
-`after` cursor and returns:
+Route-by-route invocation examples, request bodies, and CLI usage live in
+[linkhub/README.md](../linkhub/README.md); this document keeps the shared API
+semantics.
+
+Generic records, diagnostics, raw MAVLink frames, and decoded MAVLink messages
+are finite projections over the same cursor space. Every journal-backed GET
+projection accepts an explicit `after` cursor and returns:
 
 - a bounded `records` array;
-- `next_cursor`, the last journal position scanned even when no record matched.
+- `next_cursor`, the last journal position scanned even when no record matched;
+- `next_clock`, the LinkHub simulation-clock snapshot at that cursor.
+
+The projection-specific filter surface is:
+
+- `GET /v1/records`: `after`, `classes`, `source`, `event`, `level`,
+  `direction`, `message_ids`, `messages`, `wait_ms`, `limit`;
+- `GET /v1/diagnostics/events` and `GET /v1/mavlink/frames`: the same filter
+  model, projected to only diagnostic or only MAVLink-frame records;
+- `GET /v1/mavlink/messages`: `after`, `direction`, `message_ids`, `messages`,
+  `wait_ms`, `limit`, `collapse`, `max_lag_ms`, `expected_generation`,
+  one-shot range bounds `since_ns`, `until_ns`, `last_ms`, `through`, plus
+  decoded-field/content filters `eq` and `contains`.
 
 An optional bounded `wait_ms` keeps one HTTP request open until a match arrives
 or the deadline expires. It does not create server-side subscription state.
@@ -136,18 +141,14 @@ current state. Within each bounded batch, LinkHub keeps the newest recognized
 snapshot per link, direction, sender, message type, and message-specific key
 (for example `NAMED_VALUE_FLOAT.name` or `PID_TUNING.axis`). Event and
 transaction messages such as `STATUSTEXT`, `COMMAND_ACK`, parameter traffic,
-and file transfers are never collapsed. Calibration recording uses filtered
-batches without collapse because its CSV and smoothness checks require every
-sample.
+and file transfers are never collapsed.
 
 Python clients do not mirror the journal in a local message queue and do not
 retain a global receive cursor. Each logical operation owns an opaque cursor and
 passes it explicitly on every finite batch read. Heartbeat-derived mode/arming
 state and the latest vehicle boot time are exposed by
 `/v1/mavlink/status`, so polling state never depends on which telemetry a client
-chooses to consume. Calibration CSV headers record their LinkHub start cursor,
-and SITL preserves the run's `linkhub/<run-id>/journal/` directory. New runs do
-not export a duplicate `mavlink.jsonl`.
+chooses to consume.
 
 `/v1/mavlink/status` also exposes `generation = v1:<run-id>:<clock-epoch>`.
 The run ID changes when the service is replaced; the clock epoch changes both
@@ -157,6 +158,18 @@ soon as the link becomes untrustworthy rather than only once it is
 reacquired. Browser clients use this ETag-like value to invalidate
 reconstructed command and telemetry state. It intentionally does not include
 the journal cursor.
+
+The same status snapshot includes lifetime `received_bytes` and
+`transmitted_bytes` counters for validated MAVLink frames (including protocol
+headers, checksums, and signatures), plus `rx_bps` and `tx_bps` in bits per
+second. These exclude UART framing, TCP/IP overhead, and radio framing.
+The link-owning task samples counters once per monotonic second and averages
+over the latest three seconds (the available shorter window during startup).
+Sampling uses actual elapsed time, including scheduler delays, and continues
+while idle so rates decay to zero. Rates are null while disconnected and
+until the first sample after reconnect; lifetime counters are retained.
+The browser only formats this snapshot, never estimates rates from its
+filtered/collapsed telemetry stream or HTTP response sizes.
 
 A multi-step sequence that polls for a state transition across several
 requests (e.g. confirming arm/disarm) can pass its captured `generation` as
@@ -196,113 +209,38 @@ to generated forward-compatible `IntEnum` values. Unknown enum values become
 Do not hand-edit the generated artifacts or duplicate these public types in
 Python or TypeScript.
 
-Rate leases remain future work; calibration uses explicit message-rate
-configuration.
+## Message-rate policy and bandwidth
+
+**Current implementation:** clients configure explicit message intervals through
+LinkHub's message-rate API. LinkHub measures `rx_bps` and `tx_bps` in the link
+task with 1-second samples and a 3-second moving average. Rates are null while
+disconnected and until the first sample after reconnect.
+
+**Proposed, not implemented:** USB/radio bandwidth profiles, priority tiers,
+rate leases, and adaptive shedding.
 
 ## Journal query
 
-For a running LinkHub, prefer the HTTP range query on
-`GET /v1/mavlink/messages` (see `linkhub/README.md`): for example
-`?last_ms=120000&messages=ATTITUDE_TARGET,STATUSTEXT&direction=rx` returns the
-last two minutes without touching files on disk. `linkhub query` remains the
-offline tool for journals of stopped runs.
+For a running LinkHub, prefer the live HTTP range query on
+`GET /v1/mavlink/messages`; `linkhub query` is the offline reader for
+immutable `.lhc` chunks of stopped runs.
 
-`linkhub query` reads immutable `.lhc` chunks directly. Pass a journal
-directory, its parent run directory, or a data directory containing exactly
-one run:
+The query CLI accepts a journal directory, its parent run directory, or a data
+directory containing exactly one run. Parent options `--after <sequence>` and
+`--through <sequence>` bound the slice in journal-sequence space.
 
-```powershell
-.\linkhub\target\release\linkhub.exe query <journal-path> types
-.\linkhub\target\release\linkhub.exe query <journal-path> armed
-.\linkhub\target\release\linkhub.exe query <journal-path> statustext
-.\linkhub\target\release\linkhub.exe query <journal-path> nvf --name YFF_U
-.\linkhub\target\release\linkhub.exe query <journal-path> param --id RAWES_MODE
-```
+Subcommands are `types`, `show`, `count`, `stats`, `armed`, `statustext`,
+`nvf`, `param`, and `diagnostics`.
 
-All commands accept a cursor-bounded journal slice through the parent query
-options `--after <sequence>` and `--through <sequence>`. Calibration prints
-the corresponding `v1:<sequence>` start/end cursors.
+- `show`, `count`, and `stats` support message-type, RX/TX, relative-ingest
+  time, exact field (`--eq`), and case-insensitive content (`--contains`)
+  filters.
+- `show --json` emits decoded MAVLink JSON Lines with journal sequence, host
+  ingest time, and LinkHub simulation-clock metadata; this is the intended
+  composition boundary for PowerShell or `jq`.
+- `statustext` reassembles ArduPilot's multi-chunk messages before printing.
+- `diagnostics` queries structured LinkHub diagnostic events by source, event,
+  level, or content.
 
-`show`, `count`, and `stats` support message type, RX/TX direction, relative
-ingest-time range, exact field, and case-insensitive content filters. `show
---json` emits flat decoded MAVLink JSON Lines with journal sequence, host
-ingest time, and LinkHub simulation-clock metadata. This is the composition
-boundary for PowerShell or `jq`; no project-specific query script is needed:
-
-```powershell
-# Yaw PID P/I contribution ranges.
-$yawPid = .\linkhub\target\release\linkhub.exe query <journal-path> show `
-  --type PID_TUNING --dir rx --eq axis=3 --json |
-  ForEach-Object { $_ | ConvertFrom-Json }
-$yawPid | ForEach-Object { [math]::Abs($_.P) } |
-  Measure-Object -Maximum
-
-# Largest adjacent output-9 step.
-$pwm = @(
-  .\linkhub\target\release\linkhub.exe query <journal-path> show `
-  --type SERVO_OUTPUT_RAW --dir rx --json |
-  ForEach-Object { ($_ | ConvertFrom-Json).servo9_raw }
-)
-1..($pwm.Count - 1) |
-  ForEach-Object { [math]::Abs($pwm[$_] - $pwm[$_ - 1]) } |
-  Measure-Object -Maximum
-```
-
-The equivalent `jq` composition remains available in any shell:
-
-```bash
-linkhub query <journal-path> show \
-  --type PID_TUNING --dir rx --eq axis=3 --json |
-  jq -s '{max_abs_p: (map(.P | fabs) | max), max_abs_i: (map(.I | fabs) | max)}'
-```
-
-`statustext` reassembles ArduPilot's multi-chunk messages before printing.
-`diagnostics` queries structured LinkHub diagnostic events by source, event,
-level, or content. Use the live HTTP DataFlash endpoints before shutting down
-a SITL container; offline journal queries and DataFlash recovery are
-complementary.
-
-## Protocol boundary
-
-Rust implementation types are private. Public JSON DTOs are mirrored by the
-dependency-free `linkhub_client` Python package and protected by
-cross-language conformance fixtures and tests. Python clients contain no
-MAVLink framing or dialect dependency.
-
-The package and public classes use LinkHub naming throughout.
-
-## Current MAVLink boundary
-
-The current Rust implementation:
-
-- uses the official `mavlink/rust-mavlink` ArduPilotMega dialect;
-- validates MAVLink 1 and MAVLink 2 CRCs while framing arbitrary TCP reads;
-- preserves exact frame bytes;
-- records system, component, message, protocol, signing, and direction metadata;
-- owns GCS heartbeat transmission;
-- journals RX and TX in the same global order;
-- exposes finite raw and decoded message batches;
-- supports the typed messages used by calibration and SITL;
-- correlates command ACKs and serializes command transactions;
-- supports named and bulk parameter reads plus named writes;
-- configures and queries message intervals;
-- owns TCP and serial MAVLink transports;
-- implements MAVFTP and DataFlash state machines;
-- optionally owns the Bluetooth motor link with command-expiry safe stop.
-
-MAVLink 2 signature verification, UDP transport, and expiring rate leases
-remain future extensions.
-
-## Cutover validation
-
-SITL and hardware calibration cutover are complete. Hardware validation covered
-automatic serial discovery, decoded telemetry, capability/component discovery,
-parameter reads and batch writes, message-interval queries, MAVFTP
-upload/download/CRC/remove, DataFlash list and download, and force arm/disarm
-with actuators disconnected. Motor protocol, timeout, and safe-stop behavior are
-covered by hardware-free Rust backend tests.
-
-The reusable hardware stress harness additionally verifies malformed-request
-and operation-timeout isolation, concurrent TX journaling, bounded-wait
-requests, lossless multi-reader batch replay, and requested telemetry
-throughput.
+Invocation examples and per-subcommand flags live in
+[linkhub/README.md](../linkhub/README.md).

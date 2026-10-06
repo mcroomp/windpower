@@ -1,35 +1,14 @@
 import * as THREE from "three";
+import { buildAirframe } from "./airframe";
 import type { TelemetryStore } from "./telemetry";
 import { VehicleMotion } from "./vehicle-motion";
-
-function createBayCheckerTexture(): THREE.DataTexture {
-  const size = 8;
-  const colors = [
-    [216, 59, 59],
-    [239, 107, 100],
-  ] as const;
-  const pixels = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const offset = (y * size + x) * 4;
-      const color = colors[(x + y) % 2 === 0 ? 0 : 1];
-      pixels.set([...color, 255], offset);
-    }
-  }
-  const texture = new THREE.DataTexture(pixels, size, size, THREE.RGBAFormat);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.needsUpdate = true;
-  return texture;
-}
 
 export class VehicleScene {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(38, 1, 0.1, 200);
   private readonly renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   private readonly vehicle = new THREE.Group();
-  private readonly rotor = new THREE.Group();
+  private readonly airframe = buildAirframe();
   private readonly targetArrow = new THREE.ArrowHelper(
     new THREE.Vector3(0, 1, 0),
     new THREE.Vector3(),
@@ -48,7 +27,6 @@ export class VehicleScene {
   private readonly rotorAxis = new THREE.Vector3();
   private readonly previousRotorAxis = new THREE.Vector3(0, 1, 0);
   private readonly unsubscribe: (() => void)[];
-  private readonly textures = new Set<THREE.Texture>();
 
   constructor(
     private readonly container: HTMLElement,
@@ -140,62 +118,13 @@ export class VehicleScene {
     });
     geometries.forEach((geometry) => geometry.dispose());
     materials.forEach((material) => material.dispose());
-    this.textures.forEach((texture) => texture.dispose());
+    this.airframe.textures.forEach((texture) => texture.dispose());
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
 
   private buildVehicle(): void {
-    const bayTexture = createBayCheckerTexture();
-    this.textures.add(bayTexture);
-    const bayMaterial = new THREE.MeshStandardMaterial({
-      map: bayTexture,
-      roughness: 0.55,
-      metalness: 0.25,
-    });
-    const bay = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.55, 0.55, 0.12, 48),
-      bayMaterial,
-    );
-    this.vehicle.add(bay);
-
-    const axle = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.055, 0.055, 1.1, 24),
-      new THREE.MeshStandardMaterial({ color: 0xb0bec5, metalness: 0.8, roughness: 0.25 }),
-    );
-    axle.position.y = 0.2;
-    this.vehicle.add(axle);
-
-    const forward = new THREE.ArrowHelper(
-      new THREE.Vector3(1, 0, 0),
-      new THREE.Vector3(0, 0.08, 0),
-      0.8,
-      0x08090c,
-      0.2,
-      0.12,
-    );
-    this.vehicle.add(forward);
-
-    const hub = new THREE.Mesh(
-      new THREE.SphereGeometry(0.13, 24, 16),
-      new THREE.MeshStandardMaterial({ color: 0xd7dde2, metalness: 0.8, roughness: 0.2 }),
-    );
-    this.rotor.add(hub);
-    const bladeGeometry = new THREE.BoxGeometry(2.35, 0.025, 0.16);
-    bladeGeometry.translate(1.32, 0, 0);
-    const bladeMaterials = [0xf5f5f5, 0x263238].map((color) => (
-      new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1 })
-    ));
-    for (let index = 0; index < 4; index += 1) {
-      const blade = new THREE.Mesh(
-        bladeGeometry,
-        bladeMaterials[index % 2],
-      );
-      blade.rotation.y = index * Math.PI / 2;
-      this.rotor.add(blade);
-    }
-    this.rotor.position.y = 0.35;
-    this.vehicle.add(this.rotor);
+    this.vehicle.add(this.airframe.root);
   }
 
   private onVisibilityChange = (): void => {
@@ -241,8 +170,8 @@ export class VehicleScene {
     }
     this.spin = (this.spin + this.motion.rpm * 2 * Math.PI / 60 * elapsed / 10)
       % (2 * Math.PI);
-    if (this.rotor.rotation.y !== this.spin) {
-      this.rotor.rotation.y = this.spin;
+    if (this.airframe.rotor.rotation.y !== this.spin) {
+      this.airframe.rotor.rotation.y = this.spin;
       changed = true;
     }
 

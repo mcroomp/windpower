@@ -25,8 +25,8 @@ Wind drives autorotation; cyclic steers; tether tension during reel-out drives a
 ## Repository Layout
 
 The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
-9 first-party top-level packages, installed in editable mode
-(`pip install -e . --no-deps`, done by `setup.cmd`/`setup.sh`). Import them as plain dotted
+9 first-party top-level packages, installed in editable mode by `uv sync`.
+Import them as plain dotted
 packages (`from simulation.controller import ...`, `from analysis.flight_log import ...`) —
 there are no `sys.path.insert()` hacks anywhere in the codebase.
 
@@ -60,21 +60,32 @@ On this Windows workstation, `UV_NO_SYNC=1` is configured as a persistent user e
 variable, so ordinary `uv run ...` commands do not perform dependency synchronization.
 Run `uv sync` explicitly after changing dependencies or pulling a lockfile update.
 
-## Read Order (for agents)
+## Task-scoped reading (for agents)
 
-1. `design/flight_stack.md` (system behavior and control ownership)
-2. `design/arming.md` before any arm/disarm, passive-startup, or hardware work
-3. `design/simulation.md` (simulation internals and module responsibilities)
-4. `design/sitl_testing.md` (stack workflow and diagnosis)
-5. Topic-specific docs from the ownership map below
+Do not preload the design library or read every document in sequence. Start with
+the relevant entry below and read only sections needed for the task; follow
+cross-links when the work actually crosses an ownership boundary.
 
-For ongoing Pixhawk startup and direction-glitch investigation, read the
-root-level [`HARDWARE_STARTUP.md`](HARDWARE_STARTUP.md) before touching
-hardware. It records verified observations, the required safe-off state, and
-the next safe diagnostic steps; update it after each hardware session.
-`design/arming.md` owns the current arm/disarm model and procedures; update it
-in the same change whenever a source or test finding changes a critical
-ArduPilot arm/disarm fact.
+| Work area | Read directly |
+|---|---|
+| Flight modes, Lua behavior, ground/AP command contracts | [flight_stack.md](design/flight_stack.md) |
+| Arm/disarm, passive startup, any hardware operation | [arming.md](design/arming.md); also [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md) before touching hardware |
+| Calibration commands, recording, Lua deployment | [calibration.md](design/calibration.md), plus the safety documents above for hardware work |
+| LinkHub service, HTTP API, journal queries | [LinkHub README](linkhub/README.md); [architecture](design/linkhub.md) for ownership, cursor, protocol, or rate-policy changes |
+| Browser UI | [UI README](linkhub-ui/README.md); read LinkHub architecture only when changing its API boundary |
+| Python HTTP client | [client README](linkhub_client/README.md) |
+| Simulation physics, sensors, actuator plants, mediator | [simulation.md](design/simulation.md) |
+| Unit/simtest conventions, Lua/Python parity | [testing.md](design/testing.md) |
+| Docker/SITL execution, diagnosis, or IC-start timeline (`kinematic_exit`, `t_rel`) | [sitl_testing.md](design/sitl_testing.md) |
+| ArduPilot attitude/rate internals or Python port | [GUIDED_CONTROL_LOOPS.md](design/GUIDED_CONTROL_LOOPS.md) or [ArduLoop README](arduloop/README.md), according to the implementation being changed |
+| Aero axes, signs, units, `dynbem` interface | [aero_conventions.md](design/aero_conventions.md) |
+| GPS/yaw aiding failure, `const_pos_mode` | [EKF_GATING.md](design/EKF_GATING.md) |
+| Airframe geometry, components, swash mapping, yaw motor / DShot / RPM | [hardware.md](design/hardware.md) |
+
+The hardware-session log contains observations and next diagnostic steps, not
+authority to override current safety procedures. Update it after each hardware
+session. Update the arming owner in the same change whenever a source or test
+finding changes a critical ArduPilot arm/disarm fact.
 
 ## Code Search: Prefer ast-grep over grep/ripgrep
 
@@ -150,22 +161,12 @@ workspace folder, go straight to a terminal command (`grep`/`sed`/`rg` via
 
 Use the primary doc for each topic. Other docs should link, not restate.
 
-| Topic | Primary doc | Supporting docs |
-|---|---|---|
-| Flight architecture, mode ownership, AP/Lua boundaries | `design/flight_stack.md` | `design/tension_collective_control_loop.md`, `design/GUIDED_CONTROL_LOOPS.md` |
-| Arming, disarming, safe-off, and passive/bench startup | `design/arming.md` | `HARDWARE_STARTUP.md`, `design/calibration.md`, `design/flight_stack.md` |
-| Simulation internals (physics, sensors, controller plumbing, module map) | `design/simulation.md` | `simulation/README.md`, code docstrings |
-| SITL stack workflow, lockstep, diagnosis procedure | `design/sitl_testing.md` | `analysis/diagnose_sitl.py` usage text |
-| SITL IC-start timeline and event anchors | `design/sitl_flight_timeline.md` | `design/sitl_testing.md`, `tests/sitl/flight/conftest.py` |
-| Aero interfaces and conventions | `design/aero_conventions.md` | `design/aero.md` |
-| EKF gating and GPS yaw bring-up | `design/EKF_GATING.md` | `design/ekf_const_pos_mode.md` |
-| ArduPilot heli control-loop behavior | `design/GUIDED_CONTROL_LOOPS.md` | `design/flight_stack.md` |
-| Swashplate geometry and sign mapping | `simulation/swashplate.py` | `design/flight_stack.md` |
-| Hardware assembly and components | `design/hardware.md` | `design/components.md`, `design/dshot.md`, `design/flap_sensor_bench.md` |
-| Testing taxonomy and Lua/Python test conventions | `design/testing.md` | `pyproject.toml` (`[tool.pytest.ini_options]`) |
-| LinkHub transport, journal, diagnostics, and HTTP architecture | `design/linkhub.md` | `linkhub/README.md`, `design/sitl_testing.md` |
-| Milestones and decisions history | `design/history.md` | this file (summary only) |
-| LinkHub journal and MAVLink inspection | `design/linkhub.md` | `linkhub/README.md`, `design/calibration.md` |
+The canonical ownership map and complete document list live in
+[README.md -- Documentation Map](README.md#documentation-map); the
+Task-scoped reading table above routes directly to the owner for a task.
+Keep both current rather than maintaining another table here.
+Module READMEs own orientation and local usage; design owners hold detailed
+behavior. Historical evidence must not override a current owner procedure.
 
 Parameter-reference ownership note:
 - Canonical place for ArduPilot parameter defaults and inline explanations is `tests/sitl/copter-heli.parm`.
@@ -215,12 +216,14 @@ and §4.2b–4.5) — do not duplicate those tables here. Live defaults for
 non-RAWES_* AP params are in `tests/sitl/rawes_common_defaults.parm`; set
 `RAWES_MODE` per-test.
 
-For signs, frame details, EKF gating, and mixer conventions, read the primary docs in the ownership table.
+For signs, frame details, EKF gating, and mixer conventions, use the direct links
+in Task-scoped reading; do not preload unrelated references.
 
 ## DShot Setup (Agent Critical)
 
-Canonical owner doc: `design/dshot.md` (full parameter tables, wiring, RPM
-conversion). One SITL-specific gotcha not covered there: BLHeli/DShot params
+Canonical owner doc: [design/hardware.md](design/hardware.md) (wiring, RPM
+conversion, SITL exclusion); parameter values live in
+`tests/sitl/rawes_common_defaults.parm`. BLHeli/DShot params
 (`SERVO9_*`, `SERVO_BLH_*`, `SERVO_DSHOT_*`, `RPM1_*`) are intentionally
 excluded from SITL boot verification (`tests/sitl/stack_utils.py` ->
 `SITL_UNSUPPORTED_PARAMS`) because ArduCopter-heli SITL does not compile the
@@ -282,8 +285,8 @@ There are three tiers, each with a different scope and runtime:
 
 | Tier | Command | Marker | Notes |
 |---|---|---|---|
-| Unit | `.venv/Scripts/python.exe -m pytest tests/unit` | (none) | Fast; no physics sim |
-| Simtest | `.venv/Scripts/python.exe -m pytest tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
+| Unit | `uv run python -m pytest tests/unit` | (none) | Fast; no physics sim |
+| Simtest | `uv run python -m pytest tests/simtests` | `simtest` | Python physics loop; seconds–minutes |
 | Stack | `bash test.sh stack [-n N]` | `sitl` | ArduPilot SITL in Docker |
 
 ## Hardware Calibration Connection
@@ -325,12 +328,12 @@ SITL IC-start timeline rule (agent-critical):
 - For SITL flight diagnosis, use one shared timeline anchored at the IC-start flow.
 - Treat `t_sim` with the `kinematic_exit` event as the canonical phase boundary for
   release-to-flight comparisons across steady/passive/pumping/landing stack tests.
-- Canonical definition and per-phase markers live in `design/sitl_flight_timeline.md`.
+- Canonical definition and per-phase markers live in [Flight timeline anchors](design/sitl_testing.md#flight-timeline-anchors).
 
 Stack-test execution rule (CRITICAL, non-negotiable):
 - For any test under `tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
 - NEVER run SITL tests with host-side pytest commands like
-    `.venv/Scripts/python.exe -m pytest tests/sitl/...`.
+    `uv run python -m pytest tests/sitl/...`.
     Those bypass the Docker stack harness and can fail with host-path issues
     (for example `/ardupilot/scripts` not existing on Windows host).
 - For a single SITL test, use:
@@ -367,20 +370,20 @@ path.
 
 Flight telemetry (pumping, steady, passive SITL runs):
 ```
-.venv/Scripts/python.exe viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv
+uv run python viz3d/visualize_3d.py simulation/logs/<test_name>/telemetry.csv
 ```
 Example — most recent pumping SITL run:
 ```
-.venv/Scripts/python.exe viz3d/visualize_3d.py simulation/logs/test_pumping_cycle_lua_sitl/telemetry.csv
+uv run python viz3d/visualize_3d.py simulation/logs/test_pumping_cycle_lua_sitl/telemetry.csv
 ```
 
 Counter-torque motor telemetry (torque SITL runs):
 ```
-.venv/Scripts/python.exe viz3d/visualize_torque.py simulation/logs/<test_name>/telemetry.csv
+uv run python viz3d/visualize_torque.py simulation/logs/<test_name>/telemetry.csv
 ```
 Example — yaw regulation run:
 ```
-.venv/Scripts/python.exe viz3d/visualize_torque.py simulation/logs/test_yaw_regulation_sitl/telemetry.csv
+uv run python viz3d/visualize_torque.py simulation/logs/test_yaw_regulation_sitl/telemetry.csv
 ```
 
 
@@ -398,7 +401,8 @@ When updating documentation:
 - Edit the primary owner doc for the topic.
 - In other docs, keep only short context + link to the owner doc.
 - Avoid duplicating long parameter tables or algorithm walkthroughs across multiple files.
-- If ownership changes, update this map first.
+- If ownership changes, update the [README ownership map](README.md#documentation-map)
+  first and keep the task-scoped links above in sync.
 
 **If a mistake was caused by stale documentation, fix that documentation in the same commit
 as the code fix.** The test for "stale" is: would a future agent reading only the docs make

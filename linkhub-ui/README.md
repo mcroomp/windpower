@@ -1,21 +1,14 @@
 # LinkHub UI
 
-Static TypeScript browser client for LinkHub. It provides a live Three.js
-vehicle-state view and a command terminal with `status`, `config check|apply`,
-`run passive`, and `stop`.
+The LinkHub UI is a static TypeScript/Three.js browser client that talks to
+LinkHub over its HTTP API.
 
-From the repository root, launch the existing LinkHub executable and compiled
-UI with:
+## Build and launch
+
+From the repository root, launch a previously built UI plus LinkHub:
 
 ```powershell
 .\run_linkhub_ui.cmd COM7 115200
-```
-
-Add `--build` to install UI dependencies and rebuild both the UI and LinkHub
-before launching:
-
-```powershell
-.\run_linkhub_ui.cmd --build COM7 115200
 ```
 
 For SITL:
@@ -24,62 +17,38 @@ For SITL:
 .\run_linkhub_ui.cmd tcp:127.0.0.1:5760
 ```
 
-The connection can alternatively be supplied through `LINKHUB_CONNECTION`.
-The optional third argument overrides the HTTP port.
-The launcher does not invoke or depend on `python -m calibrate`.
-It runs LinkHub with `--no-cache`, so after `npm run build` a normal browser
-refresh always shows the new UI.
-
-The equivalent manual commands are:
+Add `--build` to install UI dependencies, build the UI, and build LinkHub with
+the `bluetooth` Cargo feature:
 
 ```powershell
-Set-Location .\linkhub-ui
-npm install
-npm run build
-
-cargo run --manifest-path ..\linkhub\Cargo.toml -- serve `
-  --connection COM7 --baud 57600 `
-  --data-dir ..\simulation\logs\linkhub `
-  --static-dir .\dist --no-cache
+.\run_linkhub_ui.cmd --build COM7 115200 8999
 ```
 
-Open `http://127.0.0.1:8999/`. LinkHub serves only the compiled files and
-continues to expose its existing transport-generic HTTP/JSON API. The browser
-owns RAWES-specific passive sequencing and reconstructs active targets from the
-journal after reconnect. A change to the status `generation` token invalidates
-that reconstructed state. Message reads ask LinkHub to enforce a one-second
-maximum lag; the server advances stale reads to the current journal tail instead
-of sending backlog for the browser to replay.
+`run_linkhub_ui.cmd` also:
 
-The 3D view uses a blue sky background and green ground plane with a reference grid.
-The yellow arrow in front of the axle shows the target rotor-axis direction from
-`ATTITUDE_TARGET` (the upper-axis direction, opposite FRD body-down). Its origin
-uses the vehicle pose; the target quaternion is decoded from MAVLink's `q`
-array in `[w, x, y, z]` order. The arrow
-direction follows the target, not the current axle.
-It is hidden until a target is received and cleared on disconnect or generation change.
-The overlay shows "No capture target" while the arrow is hidden; it does not
-substitute the current attitude for a missing target.
-It interpolates position with lerp and attitude/target orientation with
-shortest-arc quaternion slerp, using an 80 ms exponential smoothing time constant
-independent of display refresh rate. The first observation, a gap exceeding one
-second, or a new link generation starts a fresh pose rather than blending across
-unrelated samples. This is display-only smoothing: command and telemetry values
-remain unchanged. No position or attitude is extrapolated beyond the latest
-sample, and stale RPM decays to zero after one second without an update.
+- accepts `LINKHUB_CONNECTION`, `LINKHUB_BAUD`, and `LINKHUB_PORT`;
+- defaults the HTTP port to `8999`;
+- serves `linkhub-ui\dist` through LinkHub's `--static-dir`;
+- adds `--no-cache` so a browser refresh picks up a new build immediately.
 
-Opening the live view requests its attitude, target, servo, position, and battery
-streams as soon as the link is ready, and requests them again for each new link
-generation. No passive run or arm command is required. Stream-configuration
-failures are surfaced in the terminal. Use the LinkHub endpoint (normally
-`http://127.0.0.1:8999/`); the Vite development server alone has no MAVLink API.
+## `npm` scripts
 
-Telemetry is decoded on arrival rather than in the render loop. The view reuses
-its math objects, shares blade resources, skips draws when the scene is unchanged,
-and pauses animation in hidden tabs. Overlay updates are coalesced to at most
-10 Hz; GPU resources and telemetry subscriptions are released on disposal.
+`linkhub-ui\package.json` currently defines exactly three scripts:
 
-Supported terminal commands:
+| Command | What it runs | Notes |
+| --- | --- | --- |
+| `npm run build` | `tsc --noEmit && vite build` | Type-checks, then writes static assets to `dist\`. |
+| `npm run dev` | `vite --host 127.0.0.1` | Frontend-only Vite dev server bound to loopback. The command does not set a port, so Vite chooses its default port. |
+| `npm run test` | `vitest run` | One-shot test run. |
+
+There is no checked-in Vite proxy configuration and the frontend uses relative
+`/v1/...` fetches, so `npm run dev` is only a frontend server. If you need the
+live LinkHub API, either serve the built UI through LinkHub or put your own
+reverse proxy in front of the dev server.
+
+## Browser interface
+
+Supported terminal commands come from `src\terminal.ts`:
 
 ```text
 status
@@ -91,16 +60,86 @@ stop
 help
 ```
 
-`config check` mirrors `python -m calibrate config check`: it compares the
-vehicle's parameters with `tests/sitl/rawes_common_defaults.parm` plus
-`hardware/rawes_hardware_defaults.parm` (`--all` also includes
-`tests/sitl/copter-heli.parm`), excluding sensor-calibration values. The
-`.parm` files are bundled at build time, so rebuild the UI after editing them.
-`config apply` writes only the differing parameters in one batch and verifies
-them; it refuses while armed or during a passive run.
+During a passive run, the browser hotkeys are:
 
-The browser bench route enters GUIDED_NOGPS and passive hold through the
-Lua-handled `ENTER_GUIDED`/`ENTER_PASSIVE` commands (see
-`design/flight_stack.md`). `ENTER_PASSIVE` carries a zero yaw-trim seed, which
-keeps Lua's adaptive yaw trim at zero during the stationary hold while leaving
-ArduPilot's ordinary yaw PID available for transient correction.
+```text
+Arrows = roll/pitch
+Minus or equals = thrust
+Comma or period = yaw
+Space = reset
+Esc = stop
+```
+
+`config check` compares the live vehicle against:
+
+- `tests\sitl\rawes_common_defaults.parm`;
+- `hardware\rawes_hardware_defaults.parm`;
+- and, with `--all`, `tests\sitl\copter-heli.parm`.
+
+Calibration-only sensor values are excluded. `config apply` writes only
+differing parameters in one batch, verifies them, and refuses while armed or
+while a passive run is active.
+
+## Telemetry behavior
+
+When LinkHub reports the connection as ready, the UI requests these display
+message rates through `PUT /v1/mavlink/message-rates`:
+
+- `ATTITUDE`: 25 Hz
+- `ATTITUDE_QUATERNION`: 25 Hz
+- `ATTITUDE_TARGET`: 25 Hz
+- `SERVO_OUTPUT_RAW`: 25 Hz
+- `LOCAL_POSITION_NED`: 10 Hz
+- `BATTERY_STATUS`: 2 Hz
+
+The UI also consumes other messages when present:
+
+- `HEARTBEAT` for mode/armed state;
+- `NAMED_VALUE_FLOAT` named `YFF_U` for yaw-motor display;
+- `EKF_STATUS_REPORT` for status text;
+- `ESC_TELEMETRY_1_TO_4` for rotor-speed display.
+
+Reads use `GET /v1/mavlink/messages` with `collapse=true` and
+`max_lag_ms=1000`, so the browser does not replay stale backlog beyond one
+second. A generation change clears reconstructed state and causes the display
+message-rate configuration to be requested again.
+
+The yellow reference arrow is driven by `ATTITUDE_TARGET`. Its quaternion `q`
+is interpreted as `[w, x, y, z]`, and the arrow points along the target
+upper-axis direction (opposite FRD body-down), not the current rotor axle. It
+is hidden until a target arrives and cleared on disconnect or generation
+change.
+
+Position, attitude, target, and RPM are display-only smoothed. The smoothing
+time constant is 80 ms, stale telemetry resets after one second, and a
+generation change clears reconstructed state.
+
+## Throughput and rate-policy status
+
+Implemented today:
+
+- explicit message-rate requests from the browser;
+- display of LinkHub-reported `rx_bps` / `tx_bps`;
+- LinkHub-side 1-second sampling and 3-second averaging;
+- `null` throughput while disconnected.
+
+Proposed, not implemented:
+
+- USB/radio bandwidth profiles;
+- priority tiers;
+- rate leases;
+- adaptive shedding.
+
+The browser formats the throughput values reported by LinkHub; it does not
+estimate rates from filtered telemetry or HTTP payload size.
+
+## Safety and boundaries
+
+Bench commands may change vehicle mode and Lua state. Follow the primary
+[arming](../design/arming.md) and [calibration](../design/calibration.md)
+procedures; this README is not a hardware operating procedure.
+
+For the system boundary, see:
+
+- [flight stack ownership](../design/flight_stack.md);
+- [LinkHub transport and journal semantics](../design/linkhub.md).

@@ -1,130 +1,88 @@
-# Envelope Module — RAWES Flight Envelope Computation
+# Envelope module guide
 
-## Overview
+This file supplements the repo-level guidance in `AGENTS.md` with the current
+state of the `envelope/` subpackage. Keep it focused on live module facts; do
+not duplicate the general project workflow here.
 
-Computes and maps the RAWES flight envelope: the achievable equilibrium collective
-at each (wind_speed, tether_elevation, tether_tension, v_reel_target) operating point.
-Used to validate the operating range, tune pumping cycle parameters, and check whether
-target tensions are reachable across the full reel-out/reel-in envelope.
+## Current module map
 
----
+| File | Current role |
+|---|---|
+| `point_mass.py` | single-point along-tether simulation and equilibrium search (`simulate_point`) |
+| `compute_map.py` | grid / column sweep driver, parallelized with `ProcessPoolExecutor` |
+| `analyse_envelope.py` | CLI for phase sweeps, envelope slices, and equilibrium inspection |
+| `rotor_helpers.py` | shared rotor-definition loading for the envelope tools |
 
-## Module Map
+## Current aerodynamic model choice
 
-| File | Purpose |
-|------|---------|
-| `point_mass.py` | Single-cell ODE integrator — generalised point-mass force balance at arbitrary elevation. `simulate_point(col, elevation_deg, tension_n, wind_speed, ...)` → `{eq, history}`. Uses `model="quasi_static"` (the project's production aero model; see below for the open validity caveat). |
-| `compute_map.py` | Parallel grid computation. `_ramp_full_column()` sweeps tension from T_min→T_max on a single (wind, angle, v_target) column, sampling at each grid tension. `compute_grid()` runs all columns in a `ProcessPoolExecutor`. CLI: `--quick` / `--full` / `--load`. |
-| `analyse_envelope.py` | Post-processing: load `.npz` grid, compute net-energy contours, plot slices, export CSVs. |
+Both `point_mass.py` and `compute_map.py` currently instantiate:
 
----
-
-## Aero Model — Peters-He Removed, Not Yet Replaced for High Elevation
-
-The envelope module used to run all cells with `model="peters_he"` (`PetersHeBEMJit`,
-Numba JIT, 5-state dynamic inflow) because the envelope covers near-vertical angles
-(high elevation, xi ≳ 85°) where the Coleman skewed-wake correction degenerates.
-Peters-He used a momentum ODE (`V_T = sqrt(v_inplane² + v_axial²)`) valid from hover
-through axial descent.
-
-**`dynbem` no longer exposes a Peters-He model at all** (no `"peters_he"`/`"jit"` key,
-no `PetersHeBEM` class — see `design/simulation.md` "Aerodynamic Model" section for the
-current model list: `quasi_static`/`bem`, `pitt_peters`, `oye`/`oye_bem`, `vpm`). The
-module has been migrated to `model="quasi_static"` (the project's production model,
-used everywhere else in windpower) purely to restore a working state-based API — this
-has **not** been validated as accurate at high elevation/near-axial-descent angles the
-way Peters-He was. Treat envelope results near xi ≳ 85° with caution until this is
-revisited (e.g. by trying `pitt_peters`/`oye` or asking upstream for a Peters-He-
-equivalent replacement in `dynbem`).
-
-The per-step `isfinite`/`OverflowError`/`ValueError` guards that used to call
-`PetersHeBEM.is_valid()` now check `np.isfinite(f.F_world)` / `math.isfinite(f.Q_spin)`
-directly on the `AeroResult` returned by `aero.step()` — there is no separate
-`is_valid()` method in the current API.
-
----
-
-## Bistability at High Tension — Critical Finding
-
-**At el=30° and T ≥ ~725 N, cold-start simulations (omega_init=5 rad/s) land on a
-different attractor than the operational branch.**
-
-- The operational equilibrium is reached by ramping tension continuously from low values
-  (as `_ramp_full_column` in `compute_map.py` does). This is the correct operating branch.
-- A cold-start at high tension finds a separate equilibrium with very different omega
-  that is not physically accessible from normal flight.
-- This is real physics (bistability in the autorotation ODE), not a model bug.
-
-**Consequence:** `test_30deg_convergence.py` skips T ≥ 725 N with an explanation.
-The `compute_map.py` ramp-based approach correctly maps the operational envelope.
-
-**Operating context:** `T_hard_max = 496 N` (from main CLAUDE.md ground winch spec).
-Tensions 725–1000 N are beyond the normal operating range and only relevant for
-structural margin analysis — use `compute_map.py` continuation, not cold-start tests.
-
----
-
-## Omega Convergence Tolerance
-
-`simulate_point` has `omega_conv_tol` and `conv_window_s` parameters. The convergence
-detection checks omega variance over a rolling window.
-
-At the operating-envelope boundary (T ≈ 100–175 N and T ≈ 700 N), the natural omega
-oscillation amplitude is 0.18–0.47 rad/s — physically settled but above the internal
-`omega_conv_tol=0.1` criterion. The `test_omega_settled` test uses a 0.6 rad/s tolerance
-to accept these marginal-but-settled cells.
-
----
-
-## Test Suite Status
-
-All tests passing after cleanup (117 pass, 27 skip):
-
-| File | Tests | Notes |
-|------|-------|-------|
-| `test_compute_map.py` | 10 pass | Grid computation, ramp continuation, energy |
-| `test_30deg_convergence.py` | 90 pass, 27 skip | skip = T≥725 (bistable beyond T_hard_max) |
-| `test_collective_sign.py` | pass | Positive collective → positive thrust |
-| `test_collective_pid_el0.py` | pass | PI settling at el=0 |
-| `test_pid_collective.py` | pass | Collective PI convergence |
-| `test_tension_continuation.py` | pass | Ramp-based tension continuation |
-| `test_tension_ramp_30deg.py` | pass | Full column ramp at 30 deg |
-| ~~`test_reel_out_30deg.py`~~ | deleted | Imported `_bisect_cell`/`_sim_cell` which were removed from `compute_map.py` |
-
----
-
-## Running the Envelope Grid
-
-```bash
-# Quick preview (coarse grid, ~90 s)
-.venv/Scripts/python.exe envelope/compute_map.py --quick --save envelope/map_quick.npz
-
-# Full grid (fine grid, hours)
-.venv/Scripts/python.exe envelope/compute_map.py --full --save envelope/map_full.npz
-
-# Reload saved grid and render
-.venv/Scripts/python.exe envelope/compute_map.py --load envelope/map_quick.npz
-
-# Sweep wind speeds with pump_envelope.py (main CLAUDE.md tool)
-.venv/Scripts/python.exe analysis/pump_envelope.py --wind 8 10 12
+```python
+create_aero(rotor, model="quasi_static")
 ```
 
-PNG output lands in `envelope/plots/` when `--save` is specified.
+That is the current repo-truth for the envelope tooling. If the model changes,
+update this file and the envelope tests in the same change.
 
----
+## Current operating caveat: high-tension cold-start bistability
 
-## Aero Model Parameters (beaupoil_2026.yaml)
+`tests/envelope/test_30deg_convergence.py` documents and enforces the current
+behavior at `30°` tether elevation:
 
-Linear lift model (no polar table):
+- for `T >= 725 N`, a cold start (`omega_init=5`) can converge to a different
+  bistable attractor than the operational continuation branch;
+- those cases are beyond the stated `T_hard_max=496 N` operating envelope and
+  are skipped rather than treated as the normal operating solution.
 
-| Parameter | YAML field | aero_kwargs key | Value |
-|-----------|-----------|-----------------|-------|
-| Zero-lift CL | `CL0` | `CL0` | 0.524 |
-| Lift slope | `CL_alpha_per_rad` | `CL_alpha` | 5.47 rad⁻¹ |
-| Zero-lift CD | `CD0` | `CD0` | 0.018 |
-| Oswald efficiency | `oswald_efficiency` | `oswald_eff` | 0.8 |
-| Stall AoA | `alpha_stall_deg` | `aoa_limit` (radians) | 14.4° |
+`compute_map.py` addresses this by ramping tension through a column instead of
+solving each high-tension point from an unrelated cold start.
 
-`RotorDefinition.aero_kwargs()` maps YAML names → constructor names with unit conversion
-for `aoa_limit` (degrees → radians). Spin torque (drive − drag) is computed from BEM strip
-integration (`Q_spin` field of `AeroResult`) — no empirical K_drive/K_drag constants.
+## Current tests
+
+Envelope tests currently live in `tests/envelope/`:
+
+- `test_compute_map.py`
+- `test_30deg_convergence.py`
+- `test_collective_sign.py`
+- `test_collective_pid_el0.py`
+- `test_pid_collective.py`
+- `test_tension_continuation.py`
+- `test_tension_ramp_30deg.py`
+
+Query the exact current inventory with:
+
+```powershell
+uv run python -m pytest --collect-only -q tests\envelope
+```
+
+Run the suite with:
+
+```powershell
+uv run python -m pytest tests\envelope -q
+```
+
+## Current CLI entry points
+
+```powershell
+# Fast preview grid
+uv run python envelope\compute_map.py --quick --save envelope\map_quick.npz
+
+# Larger grid
+uv run python envelope\compute_map.py --full --save envelope\map_full.npz
+
+# Reload a saved grid
+uv run python envelope\compute_map.py --load envelope\map_quick.npz
+
+# Inspect a named phase or one operating point
+uv run python envelope\analyse_envelope.py --phase reel_out
+uv run python envelope\analyse_envelope.py --el 80 --tension 200 --wind 10
+```
+
+## Current synchronization rules
+
+When changing the envelope dynamics or CLI:
+
+1. keep `CLAUDE.md` aligned with the actual file set and entry points;
+2. update the matching `tests/envelope/` assertions in the same change;
+3. prefer describing current behavior over copying historical pass counts or
+   deleted test names.

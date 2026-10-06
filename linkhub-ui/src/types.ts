@@ -13,6 +13,10 @@ export interface LinkHubStatus {
   latest_time_boot_ms: number;
   received_messages: number;
   transmitted_messages: number;
+  received_bytes: number;
+  transmitted_bytes: number;
+  rx_bps: number | null;
+  tx_bps: number | null;
   error?: string | null;
   cursor: string;
   generation: string;

@@ -69,7 +69,7 @@ Cleanup must run after partial startup failures as well as successful runs.
 
 ### Interlock and runup
 
-Lua owns the channel-8 motor-interlock override. After arming it currently
+Lua owns the channel-8 motor-interlock override. After arming it
 holds interlock low for 500 ms, then asserts it. This provides at least one
 ACRO ground-idle controller interval before runup.
 
@@ -135,9 +135,7 @@ the GUIDED angle target to level roll/pitch at the current yaw, and Copter
 ignores `SET_ATTITUDE_TARGET` until the vehicle is already in a guided mode.
 The interval between the mode change and the first ground attitude target
 therefore commands level. Away from level attitude this produces a swash
-transient (about 10 deg target error and ~95 us servo swing measured near
-pitch -89 deg on 2026-10-05; see `HARDWARE_STARTUP.md`). Clearing landed state
-alone does not remove it.
+transient; clearing landed state alone does not remove it.
 
 Armed ACRO provides a stock-firmware route to clear the flag before the mode
 switch. With spool state `THROTTLE_UNLIMITED`, traditional-heli land detection
@@ -149,9 +147,7 @@ zero_thrust_pct + 0.5 * (H_COL_HOVER - zero_thrust_pct)
 
 where `zero_thrust_pct` maps `H_COL_ZERO_THRST` from the configured
 `H_COL_ANG_MIN..H_COL_ANG_MAX` range into normalized collective. ACRO also
-clears the flag when collective is above its lower limit. A stationary bench
-can reassert landed state after approximately one second if all landing
-criteria become true again.
+clears the flag when collective is above its lower limit.
 
 ## Passive bench startup
 
@@ -207,14 +203,6 @@ Lua must continue sampling and publishing the applied Motor4 readback
 the ground display retain a pre-passive value and can falsely imply an active
 motor command. Ground displays must mark `YFF_U` inactive while disarmed.
 
-A stationary, motor-disconnected hardware acceptance run on 2026-10-05 sent
-a zero yaw-trim seed (then `RAWES_YFF=0`, now ENTER_PASSIVE param1) before
-passive capture. Every one of the 59 passive-hold samples
-reported both `YFF_T=0` and live `YFF_U=0`; cleanup verified the complete
-safe-off invariant. This establishes the no-Motor4-command behavior only for
-the stationary LinkHub bench route. It does not replace connected-actuator
-direction and load testing.
-
 Lua does not poll `vehicle:get_mode()` during ACRO staging. Calibration verifies
 the actual ArduPilot mode from heartbeats. Once mode 3 is active, Lua keeps
 neutral roll, pitch, collective, and yaw RC overrides refreshed even in
@@ -226,11 +214,8 @@ is populated by `SRV_Channels::update_aux_servo_function()` during
 `Copter::init_rc_out()`. Keep function 36 configured at boot instead of trying
 to transfer ownership during the handoff.
 
-Disarmed hardware verification on 2026-10-05 used a boot-established function
-36 mapping and deliberately stale `H_YAW_TRIM=0.25`. Output 9 remained off for
-100 consecutive samples across STABILIZE/ACRO mode changes and returned off
-after a force-arm/disarm cycle. Approval of a connected yaw motor still
-requires the passive bench startup test to prove:
+Approval of a connected yaw motor still requires the passive bench startup test
+to prove:
 
 - landed state clears before the mode change;
 - no level target is introduced;
@@ -246,7 +231,7 @@ ACRO manual operation requires:
 - `H_FLYBAR_MODE=1`;
 - `H_SV_MAN=0`;
 - `IM_ACRO_COL_EXP=0`;
-- - `RAWES_MODE=2`;
+- `RAWES_MODE=2`;
 - normalized roll, pitch, and collective seeded before use.
 
 Roll and pitch are always ordered `roll, pitch`. Calibration owns mode and
@@ -257,41 +242,7 @@ through the common safe-off path.
 
 ## SITL scripting-thread starvation
 
-Every generated `AP_Vehicle` Lua binding in ArduPilot 4.7.1 is marked
-`scheduler-semaphore`. The main loop holds that semaphore while it runs and
-releases it only inside `AP::ins().wait_for_sample()`. In SITL the stack
-reached a state where the main thread almost never released it, so
-`vehicle:*` calls from Lua blocked for seconds. RC4/RC8 overrides then expired
-(`RC_OVERRIDE_TIME`), output 8 dropped, and heli runup restarted. Do not hide
-this by raising or disabling `RC_OVERRIDE_TIME`.
-
-**Root cause: `SIM_RATE_HZ=400`.** A gdb stall snapshot
-(`tests/sitl/thread_trace.py`, `stall_snapshot_s`) taken while Lua was blocked
-in `HALSITL::Semaphore::take` from
-`AP_Vehicle_set_target_angle_and_rate_and_throttle` showed the main thread in
-`AP_Scheduler::loop` → `delay_microseconds` → `SITL_State::wait_clock` →
-`JSON::recv_fdm` → `sync_frame_time`. That is the SITL-only
-`delay_microseconds(1)` that `AP_Scheduler::loop()` runs *after* `run()`, while
-it still holds the semaphore. In lockstep, any delay must step at least one
-physics frame. At 400 Hz one frame is the whole 2.5 ms loop, so the full
-wall-clock frame (including the real-time pacing sleep) elapsed with the lock
-held. `wait_for_sample()` then found its sample already due and returned
-immediately, so the unlocked window was effectively zero.
-
-At ArduPilot's SITL default of `SIM_RATE_HZ=1200`, the locked delay advances
-one 0.83 ms frame and `wait_for_sample()` steps the remaining frames unlocked.
-On 2026-10-05 the passive torque regression went from more than 100 scripting
-futex waits over 0.3 s (max 6.4 s, repeated RC8 drops) to a 0.02 s maximum and
-passed. Keep `SIM_RATE_HZ` at 1200 in `tests/sitl/rawes_sitl_defaults.parm` and
-the torque boot params; the mediator follows the servo-packet frame rate. This
-is a lockstep artifact; hardware does not step physics inside the scheduler.
-
-The static GUIDED holds (the entry hold after `ENTER_GUIDED` and the passive
-hold after `ENTER_PASSIVE`) never poll `vehicle:get_mode()`. They call
-`vehicle:set_target_angle_and_rate_and_throttle()` only when the target changes
-(at most every 50 ms) and otherwise once per second as a keepalive inside
-`GUID_TIMEOUT` (3 s). This keeps scheduler-locked calls to a minimum but was
-not, by itself, sufficient at 400 Hz.
+SITL-only lockstep scheduling behavior (not a hardware arm/disarm fact) is documented in [sitl_testing.md](sitl_testing.md#sitl-scripting-thread-starvation).
 
 ## Evidence and tests
 

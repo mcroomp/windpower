@@ -1,5 +1,6 @@
 import "./styles.css";
 import { LinkHubApi } from "./api";
+import { formatLinkThroughput } from "./link-throughput";
 import { formatCopterMode } from "./modes";
 import { PassiveController, type PassivePhase } from "./passive";
 import { VehicleScene } from "./scene";
@@ -20,6 +21,7 @@ const telemetry = new TelemetryStore(api);
 const output = required<HTMLElement>("#terminal-output");
 const operationState = required<HTMLElement>("#operation-state");
 const connectionState = required<HTMLElement>("#connection-state");
+const linkThroughput = required<HTMLElement>("#link-throughput");
 const overlay = required<HTMLElement>("#telemetry-overlay");
 const form = required<HTMLFormElement>("#terminal-form");
 const input = required<HTMLInputElement>("#terminal-input");
@@ -116,11 +118,15 @@ telemetry.onRecord((record) => {
   }
 });
 telemetry.onGeneration(() => {
+  linkThroughput.textContent = formatLinkThroughput(null);
   scheduleOverlay();
   connectionState.textContent = "reconnecting";
   connectionState.className = "badge offline";
 });
 telemetry.onConnection((connected, error) => {
+  if (!connected) {
+    linkThroughput.textContent = formatLinkThroughput(null);
+  }
   scheduleOverlay();
   connectionState.textContent = connected ? "connected" : "offline";
   connectionState.className = `badge ${connected ? "online" : "offline"}`;
@@ -129,6 +135,9 @@ telemetry.onConnection((connected, error) => {
   } else if (connected) {
     write("Telemetry connection restored.");
   }
+});
+telemetry.onStatus((status) => {
+  linkThroughput.textContent = formatLinkThroughput(status);
 });
 
 while (!telemetry.status) {
