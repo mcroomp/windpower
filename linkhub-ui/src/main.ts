@@ -1,5 +1,6 @@
 import "./styles.css";
 import { LinkHubApi } from "./api";
+import { eulerFromAttitudeQuaternion } from "./attitude";
 import { diagValue, DIAG_ARRAY_NAME, isDiagRecord } from "./diag-array";
 import {
   formatKbps,
@@ -65,7 +66,7 @@ const scene = new VehicleScene(required<HTMLElement>("#scene"), telemetry);
 
 function updateOverlay(): void {
   const status = telemetry.status;
-  const attitude = telemetry.get("ATTITUDE");
+  const attitude = eulerFromAttitudeQuaternion(telemetry.get("ATTITUDE_QUATERNION"));
   const servos = telemetry.get("SERVO_OUTPUT_RAW");
   const yawMotor = diagValue(
     telemetry.get("DEBUG_FLOAT_ARRAY", "rx", DIAG_ARRAY_NAME),
@@ -129,7 +130,7 @@ function updateOverlay(): void {
   );
   overlay.textContent = [
     `${armed ? "ARMED" : "disarmed"} · ${formatCopterMode(status?.custom_mode)}`,
-    `roll ${degrees(attitude?.fields.roll)}°  pitch ${degrees(attitude?.fields.pitch)}°  yaw ${degrees(attitude?.fields.yaw)}°`,
+    `roll ${degrees(attitude?.roll)}°  pitch ${degrees(attitude?.pitch)}°  yaw ${degrees(attitude?.yaw)}°`,
     scene.hasCaptureTarget ? "Capture target: yellow arrow" : "No capture target",
     `swash ${swashText}`,
     `S1 ${field("servo1_raw")}  S2 ${field("servo2_raw")}  S3 ${field("servo3_raw")}  DShot/S9 ${field("servo9_raw")}  YFF_U ${motorCommand}`,
@@ -192,7 +193,6 @@ renderLinkThroughput(null);
 telemetry.onRecord((record) => {
   if (record.direction === "rx" && (
     record.message === "HEARTBEAT"
-    || record.message === "ATTITUDE"
     || record.message === "ATTITUDE_QUATERNION"
     || record.message === "ATTITUDE_TARGET"
     || record.message === "SERVO_OUTPUT_RAW"

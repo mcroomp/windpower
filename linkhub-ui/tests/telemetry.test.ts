@@ -15,12 +15,13 @@ it("requests measured RPM telemetry at 5 Hz", () => {
 
 it("uses reduced rates for radio telemetry", () => {
   expect(TELEMETRY_PROFILES.radio).toEqual({
-    ATTITUDE: 10,
+    ATTITUDE: 0,
     ATTITUDE_QUATERNION: 10,
     ATTITUDE_TARGET: 10,
     SERVO_OUTPUT_RAW: 10,
     LOCAL_POSITION_NED: 5,
     BATTERY_STATUS: 1,
+    RC_CHANNELS: 1,
     RPM: 5,
   });
 });

@@ -151,13 +151,20 @@ profiles through `PUT /v1/mavlink/message-rates`. USB is the default.
 
 | Message | USB | Radio |
 | --- | ---: | ---: |
-| `ATTITUDE` | 25 Hz | 10 Hz |
+| `ATTITUDE` | off | off |
 | `ATTITUDE_QUATERNION` | 25 Hz | 10 Hz |
 | `ATTITUDE_TARGET` | 25 Hz | 10 Hz |
 | `SERVO_OUTPUT_RAW` | 25 Hz | 10 Hz |
 | `LOCAL_POSITION_NED` | 10 Hz | 5 Hz |
 | `BATTERY_STATUS` | 2 Hz | 1 Hz |
+| `RC_CHANNELS` | 1 Hz | 1 Hz |
 | `RPM` | 5 Hz | 5 Hz |
+
+`ATTITUDE` is requested at rate 0, which disables it on the vehicle: it is
+redundant with `ATTITUDE_QUATERNION`, which carries the same body rates, and
+the overlay's roll/pitch/yaw are computed from the quaternion
+(`src\attitude.ts`, ZYX convention). Other tools that need `ATTITUDE` (for
+example `calibrate`) request their own stream when they run.
 
 Changing the selector applies the new profile immediately. The selected profile
 is reapplied after a LinkHub generation change for the lifetime of the page.

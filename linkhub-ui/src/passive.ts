@@ -392,7 +392,7 @@ export class PassiveController {
           quietSince = null;
         }
       }
-      if (record.message === "ATTITUDE" || record.message === "ATTITUDE_QUATERNION") {
+      if (record.message === "ATTITUDE_QUATERNION") {
         latestAttitudeAt = performance.now();
         const rates = ["rollspeed", "pitchspeed", "yawspeed"]
           .map((field) => Math.abs(Number(record.fields[field] ?? Infinity)));
