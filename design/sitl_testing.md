@@ -59,6 +59,10 @@ runs in its own fresh Docker container, one per test file.
   concurrency causes host scheduling stalls and UDP loss rather than useful
   throughput. The LinkHub stress test runs exclusively so its 100 Hz transport
   assertion measures LinkHub instead of contention from another stack.
+- The stress harness's bounded ATTITUDE waits follow `next_cursor` across empty
+  filtered batches under one fixed wall-clock deadline. An empty batch can
+  report journal progress rather than a telemetry timeout; do not assert that
+  every individual HTTP response must contain a matching record.
 - Each stack-test file has an outer 10-minute wall-clock deadline in addition
   to pytest's in-process timeout. This catches blocked subprocesses and native
   calls that pytest cannot interrupt. Override it with

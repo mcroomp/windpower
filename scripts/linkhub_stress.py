@@ -124,20 +124,32 @@ def _read_attitudes(server: str, after: str, through: int) -> list[str]:
 
 
 def _bounded_attitude_wait(server: str, after: str) -> bool:
-    query = urllib.parse.urlencode({
-        "after": after,
-        "direction": "rx",
-        "messages": "ATTITUDE",
-        "wait_ms": 2_000,
-        "limit": 1,
-    })
-    batch = _json_request(
-        server,
-        "GET",
-        f"/v1/mavlink/messages?{query}",
-        timeout=3.0,
-    )
-    return bool(batch["records"]) and str(batch["next_cursor"]) != after
+    deadline = time.monotonic() + 2.0
+    cursor = after
+    while (remaining := deadline - time.monotonic()) > 0.0:
+        query = urllib.parse.urlencode({
+            "after": cursor,
+            "direction": "rx",
+            "messages": "ATTITUDE",
+            "wait_ms": int(remaining * 1_000),
+            "limit": 1,
+        })
+        batch = _json_request(
+            server,
+            "GET",
+            f"/v1/mavlink/messages?{query}",
+            timeout=remaining + 1.0,
+        )
+        next_cursor = str(batch["next_cursor"])
+        if _cursor_sequence(next_cursor) < _cursor_sequence(cursor):
+            raise AssertionError("bounded wait journal cursor moved backwards")
+        if batch["records"]:
+            if _cursor_sequence(next_cursor) <= _cursor_sequence(cursor):
+                raise AssertionError("bounded wait returned telemetry without cursor progress")
+            return time.monotonic() <= deadline
+        # Empty filtered batches may advance across unrelated journal records.
+        cursor = next_cursor
+    return False
 
 
 def _send_named_value(server: str, index: int) -> str:
