@@ -225,6 +225,15 @@ const fn schema_version() -> u16 {
     SCHEMA_VERSION
 }
 
+#[must_use]
+pub fn wall_time_ns() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    u64::try_from(nanos).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -259,15 +268,10 @@ mod tests {
 
     #[test]
     fn debug_float_array_without_array_id_is_not_collapsed() {
-        assert!(frame("DEBUG_FLOAT_ARRAY", json!({"data": [1.0]})).state_key().is_none());
+        assert!(
+            frame("DEBUG_FLOAT_ARRAY", json!({"data": [1.0]}))
+                .state_key()
+                .is_none()
+        );
     }
-}
-
-#[must_use]
-pub fn wall_time_ns() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    u64::try_from(nanos).unwrap_or(u64::MAX)
 }

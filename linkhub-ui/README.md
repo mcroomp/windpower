@@ -165,7 +165,9 @@ is reapplied after a LinkHub generation change for the lifetime of the page.
 The UI also consumes other messages when present:
 
 - `HEARTBEAT` for mode/armed state;
-- `NAMED_VALUE_FLOAT` named `YFF_U` for yaw-motor display;
+- the RAWES diagnostic `DEBUG_FLOAT_ARRAY` (`array_id` 1) for `YFF_U` yaw-motor
+  display; the key order is in `src\diag-array.ts` and owned by
+  [flight stack](../design/flight_stack.md);
 - `EKF_STATUS_REPORT` for status text (`status` prints the set flag names);
 - `RPM.rpm1` for measured yaw-motor speed. The 3D view divides motor RPM by
   the 10:1 gearbox ratio and spins the rotor at that measured output speed.

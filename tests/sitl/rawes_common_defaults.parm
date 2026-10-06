@@ -94,7 +94,7 @@ ATC_RAT_YAW_I     0.018
 #   RAWES_KD_EL   in-plane position rate-D [rad/s per (m/s)]
 #   RAWES_CWMAX   position rate saturation [rad/s]
 #   RAWES_SLW     elevation/body_z slew limit [rad/s]
-#   RAWES_TEL_HZ  diagnostic NVF emission rate [Hz]
+#   RAWES_TEL_HZ  diagnostic DEBUG_FLOAT_ARRAY emission rate [Hz]
 #   RAWES_YFF_MAX yaw trim clamp upper bound [throttle fraction]
 #   RAWES_YFF_TAU yaw trim low-pass tau [s]
 #   RAWES_TRP     tension feedforward ramp tau [s]
@@ -114,7 +114,7 @@ RAWES_KP_AZ       0.5     # crosswind (azimuth) position rate-P gain   [rad/s pe
 RAWES_KD_EL       0.0     # in-plane position rate-D gain [rad/s per (m/s)]
 RAWES_CWMAX       0.6     # position rate saturation [rad/s]
 RAWES_SLW         0.40    # elevation/body_z slew rate limit [rad/s]
-RAWES_TEL_HZ      2.0     # diagnostic NVF telemetry emission rate [Hz]
+RAWES_TEL_HZ      2.0     # diagnostic DEBUG_FLOAT_ARRAY telemetry emission rate [Hz]
 RAWES_YFF_MAX     0.7     # yaw trim clamp upper bound [throttle fraction]
 RAWES_YFF_TAU     0.3     # yaw trim low-pass time constant [s]
 

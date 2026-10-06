@@ -277,6 +277,39 @@ script-generated parameters directly in code: `RAWES_MODE`, `RAWES_YAW_SLP`,
 [`tests/sitl/rawes_common_defaults.parm`](../tests/sitl/rawes_common_defaults.parm);
 this document owns only the behavioral contract.
 
+**Diagnostic telemetry (Lua → ground, `DEBUG_FLOAT_ARRAY`).** `rawes.lua`
+sends all of its diagnostic floats as one MAVLink `DEBUG_FLOAT_ARRAY`
+(msgid 350, `array_id` 1, `name` `RAWES_DIAG`) at `RAWES_TEL_HZ`, instead of
+one `NAMED_VALUE_FLOAT` per value (about 5× fewer bytes on the link). It uses
+`mavlink.send_chan` on every channel slot, because `send_chan` targets one
+channel and ArduPilot's Lua bindings can only send message IDs compiled into
+the firmware (a custom message would need a custom firmware build).
+
+- `data[0]` is a bitmask (float-encoded integer) of the keys set this tick; bit
+  *i* set means `data[1 + i]` holds `DIAG_KEYS[i]`. Unset keys are sent as 0.0,
+  so a clear bit, not a zero, means "absent". NaN is not used because
+  LinkHub's JSON turns it into `null`.
+- The ordered key list is owned by
+  [`groundstation/rawes_diag.py`](../groundstation/rawes_diag.py)
+  (`DIAG_KEYS`, `diag_values()`); `rawes.lua`'s `_diag_nvf_keys` and
+  `linkhub-ui/src/diag-array.ts` mirror it, and
+  `tests/unit/test_rawes_diag.py` checks all three. **Append new keys at the
+  end only**: reordering breaks old captures.
+- Keys: yaw trim observer (`YFF_T/U/GZ`), commanded body rates (`OL_RSP/PSP/YSP`),
+  rate errors (`OL_RER/PER/YER`), altitude PID terms and thrust
+  (`OL_AP/AI/AD/COL`), ramped tension feedforward (`OL_TEN`) and the resolved
+  anchor offset (`ANCH_N/E/D`).
+- `OL_EL` and `BZG_N/E/D` are still stored by the script (the in-process simtest
+  mock reads them) but are not sent: nothing consumes them over MAVLink, and
+  SITL takes `elevation_rad`/`bz_eq` from the mediator.
+- LinkHub collapses `DEBUG_FLOAT_ARRAY` per `array_id` for `collapse=true`
+  reads. The array has `time_usec` rather than `time_boot_ms`, so its journal
+  records carry the last observed simulation time (`LastObserved`).
+- Readers: `analysis/enrich_sitl_telemetry.py` (SITL telemetry columns),
+  `calibrate/run.py`, the SITL torque/steady tests, and the LinkHub UI
+  (`YFF_U`). Ground-to-Lua inputs are unchanged and still use
+  `NAMED_VALUE_FLOAT` / `NAMED_VALUE_INT`.
+
 **Named float inputs (ground → Lua, via `gcs.send_message(NamedValueFloat(...))`):**
 
 | Name | Value | Purpose |

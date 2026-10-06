@@ -60,6 +60,13 @@ Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
   RAWES_POFF: passive pitch offset [rad] (relative to Lua's captured anchor)
   RAWES_YOFF: passive yaw offset   [rad] (relative to Lua's captured anchor)
 
+Vehicle -> ground diagnostics via DEBUG_FLOAT_ARRAY (array_id 1, name "RAWES_DIAG"),
+sent at RAWES_TEL_HZ on every MAVLink channel (mavlink.send_chan, msgid 350):
+  One frame carries all diagnostics instead of one NAMED_VALUE_FLOAT per value.
+  data[0] is a bitmask of the keys that were set this tick; data[i] (1-based) holds
+  _diag_nvf_keys[i].  The ordered key list is owned by groundstation/rawes_diag.py
+  (mirrored in linkhub-ui/src/diag-array.ts); append new keys at the end only.
+
 Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
   31010 ENTER_GUIDED  (MAV_CMD_USER_1): requires armed, RAWES_MODE=2, RAWES_THR
         and healthy AHRS. Captures the current attitude, switches to
@@ -319,11 +326,11 @@ local YFF_TAU  = 0.3     -- trim low-pass time constant [s]            (RAWES_YF
 local SERVO9_SPAN_US   = 1000.0  -- SERVO9_MAX - SERVO9_MIN
 local YFF_A            = 0.504 * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)  -- default slope 0.504 RPM/µs
 local YAW_MOTOR_FUNC   = 36      -- ArduPilot servo function for Motor4 (SERVO9)
-local TEL_HZ           = 2.0     -- diagnostic NVF emission rate [Hz]  (RAWES_TEL_HZ)
+local TEL_HZ           = 2.0     -- diagnostic DEBUG_FLOAT_ARRAY emission rate [Hz]  (RAWES_TEL_HZ)
 
 local _yaw_ff_trim  = 0.0     -- current H_YAW_TRIM value [0, YFF_MAX]
 _yaw_ff_seed        = nil     -- ground-provided equilibrium trim seed [0, YFF_MAX] (ENTER_PASSIVE param1)
-local _nvf_last_ms  = nil     -- shared timer for all outer-rate NVF diagnostic emissions
+local _nvf_last_ms  = nil     -- shared timer for the diagnostic array emission (name predates the NVF -> DEBUG_FLOAT_ARRAY switch)
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 -- Convert a millis() result to seconds (float).  On real ArduPilot millis()
 -- returns a uint32_t userdata whose __mul/__div cannot coerce a fractional
@@ -1054,7 +1061,7 @@ local function run_flight()
         roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, _last_thrust,
         "steady_attitude")
 
-    -- Record outer-loop diagnostics for centralized NVF telemetry emission.
+    -- Record outer-loop diagnostics for centralized DEBUG_FLOAT_ARRAY emission.
     local gx, gy, gz = 0.0, 0.0, 0.0
     local gyro_now = ahrs:get_gyro()
     if gyro_now then
