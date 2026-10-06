@@ -5,6 +5,7 @@ import type { LinkHubStatus, MessageRecord } from "./types";
 type Listener = (record: MessageRecord) => void;
 type GenerationListener = (generation: string, previous: string | null) => void;
 type ConnectionListener = (connected: boolean, error?: Error) => void;
+type StatusListener = (status: LinkHubStatus) => void;
 
 const MAX_TELEMETRY_LAG_MS = 1_000;
 
@@ -24,6 +25,7 @@ export class TelemetryStore {
   private readonly listeners = new Set<Listener>();
   private readonly generationListeners = new Set<GenerationListener>();
   private readonly connectionListeners = new Set<ConnectionListener>();
+  private readonly statusListeners = new Set<StatusListener>();
   private controller: AbortController | null = null;
   private cursor = "v1:0";
   private currentStatus: LinkHubStatus | null = null;
@@ -36,6 +38,11 @@ export class TelemetryStore {
     return this.currentStatus;
   }
 
+  onStatus(listener: StatusListener): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
   async start(): Promise<void> {
     if (this.running) {
       return;
@@ -45,6 +52,9 @@ export class TelemetryStore {
       const status = await this.api.status(this.controller.signal);
       await this.configureDisplayTelemetry(status);
       this.currentStatus = status;
+      for (const listener of this.statusListeners) {
+        listener(status);
+      }
       const initialTail = status.cursor;
       while (cursorSequence(this.cursor) < cursorSequence(initialTail)) {
         const batch = await this.api.readMessages(
@@ -167,7 +177,7 @@ export class TelemetryStore {
       try {
         const batch = await this.api.readMessages(
           this.cursor,
-          10_000,
+          1_000,
           true,
           signal,
           MAX_TELEMETRY_LAG_MS,
@@ -189,6 +199,9 @@ export class TelemetryStore {
           }
           await this.configureDisplayTelemetry(status);
           this.currentStatus = status;
+          for (const listener of this.statusListeners) {
+            listener(status);
+          }
         }
       } catch (error) {
         if (signal.aborted) {

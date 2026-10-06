@@ -14,7 +14,10 @@
             <p class="eyebrow">RAWES</p>
             <h1>Live vehicle state</h1>
           </div>
-          <div id="connection-state" class="badge offline">connecting</div>
+          <div class="link-status">
+            <div id="connection-state" class="badge offline">connecting</div>
+            <div id="link-throughput" title="MAVLink frame throughput, averaged over 3 seconds; excludes UART and radio overhead.">RX — · TX —</div>
+          </div>
         </header>
         <div id="scene"></div>
         <div id="telemetry-overlay" class="telemetry-overlay">Waiting for telemetry…</div>

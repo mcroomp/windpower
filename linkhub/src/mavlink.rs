@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io,
     net::SocketAddr,
     sync::{
@@ -78,6 +78,10 @@ pub struct LinkStatus {
     pub latest_time_boot_ms: u64,
     pub received_messages: u64,
     pub transmitted_messages: u64,
+    pub received_bytes: u64,
+    pub transmitted_bytes: u64,
+    pub rx_bps: Option<f64>,
+    pub tx_bps: Option<f64>,
     pub framing_errors: u64,
     pub discarded_bytes: u64,
     pub last_received_ns: Option<u64>,
@@ -93,6 +97,39 @@ pub struct LinkStatus {
     pub connected_since_ns: Option<u64>,
     /// Most recent serial discovery scan, with per-port probe outcomes.
     pub last_scan: Option<ScanReport>,
+}
+
+struct LinkThroughput {
+    samples: VecDeque<(time::Instant, u64, u64)>,
+}
+
+impl LinkThroughput {
+    fn new(now: time::Instant, rx: u64, tx: u64) -> Self {
+        Self {
+            samples: VecDeque::from([(now, rx, tx)]),
+        }
+    }
+
+    fn sample(&mut self, now: time::Instant, rx: u64, tx: u64) -> (f64, f64) {
+        self.samples.push_back((now, rx, tx));
+        let cutoff = now - Duration::from_secs(3);
+        while self.samples.len() > 2 && self.samples[1].0 <= cutoff {
+            self.samples.pop_front();
+        }
+        let &(start, start_rx, start_tx) = self.samples.front().expect("initial sample");
+        let mut rx_delta = (rx - start_rx) as f64;
+        let mut tx_delta = (tx - start_tx) as f64;
+        let window_start = start.max(cutoff);
+        if start < cutoff {
+            let &(next, next_rx, next_tx) = &self.samples[1];
+            let fraction = cutoff.duration_since(start).as_secs_f64()
+                / next.duration_since(start).as_secs_f64();
+            rx_delta -= (next_rx - start_rx) as f64 * fraction;
+            tx_delta -= (next_tx - start_tx) as f64 * fraction;
+        }
+        let elapsed = now.duration_since(window_start).as_secs_f64();
+        (rx_delta * 8.0 / elapsed, tx_delta * 8.0 / elapsed)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -563,6 +600,8 @@ where
         status.latest_time_boot_ms = 0;
         status.attempts += 1;
         status.connected_since_ns = Some(opened_ns);
+        status.rx_bps = None;
+        status.tx_bps = None;
         status.error = None;
     });
     let status_tx = context.status_tx.clone();
@@ -617,6 +656,8 @@ where
         status.connected = false;
         status.clock_epoch = clock_epoch;
         status.connected_since_ns = None;
+        status.rx_bps = None;
+        status.tx_bps = None;
     });
     let target = target.to_owned();
     let error_kind = error.kind_name();
@@ -694,9 +735,27 @@ where
     let receive_task = tokio::spawn(receive_messages(reader, receive_tx));
     let mut heartbeat = time::interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let now = time::Instant::now();
+    let mut throughput = {
+        let status = status_tx.borrow();
+        LinkThroughput::new(now, status.received_bytes, status.transmitted_bytes)
+    };
+    let mut throughput_tick =
+        time::interval_at(now + Duration::from_secs(1), Duration::from_secs(1));
+    throughput_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     let result = loop {
         tokio::select! {
+            _ = throughput_tick.tick() => {
+                let (rx, tx) = {
+                    let status = status_tx.borrow();
+                    throughput.sample(time::Instant::now(), status.received_bytes, status.transmitted_bytes)
+                };
+                status_tx.send_modify(|status| {
+                    status.rx_bps = Some(rx);
+                    status.tx_bps = Some(tx);
+                });
+            }
             received_frame = receive_rx.recv() => {
                 let Some(received_frame) = received_frame else {
                     break Err(LinkError::Receive("MAVLink receive task stopped".to_owned()));
@@ -778,6 +837,7 @@ async fn archive_received(
     decoded: DecodedMessage,
 ) -> Result<(), LinkError> {
     let now = wall_time_ns();
+    let frame_bytes = decoded.raw.len() as u64;
     let is_heartbeat = decoded.message_id == HEARTBEAT_MESSAGE_ID;
     let system_id = decoded.system_id;
     let component_id = decoded.component_id;
@@ -817,6 +877,7 @@ async fn archive_received(
     }));
     status_tx.send_modify(|status| {
         status.received_messages += 1;
+        status.received_bytes += frame_bytes;
         status.last_received_ns = Some(now);
         if is_heartbeat && system_id != config.source_system {
             status.target_system = system_id;
@@ -925,6 +986,7 @@ async fn send_bytes(
         ));
     }
     writer.write_all(&bytes).await?;
+    status_tx.send_modify(|status| status.transmitted_bytes += bytes.len() as u64);
     let frame = decoded_frame(&config.id, Direction::Tx, &decoded);
     let sequence = journal
         .append(RecordPayload::MavlinkFrame(frame), None)
@@ -972,6 +1034,128 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{codec::serialize_message, journal::JournalConfig};
+
+    #[test]
+    fn throughput_uses_bits_and_actual_elapsed_time() {
+        let start = time::Instant::now();
+        let mut throughput = LinkThroughput::new(start, 100, 200);
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(1), 1100, 700),
+            (8000.0, 4000.0)
+        );
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(3), 3100, 1700),
+            (8000.0, 4000.0)
+        );
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(6), 6100, 3200),
+            (8000.0, 4000.0)
+        );
+    }
+
+    #[test]
+    fn throughput_rolls_off_traffic_while_idle() {
+        let start = time::Instant::now();
+        let mut throughput = LinkThroughput::new(start, 0, 0);
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(1), 300, 600),
+            (2400.0, 4800.0)
+        );
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(2), 300, 600),
+            (1200.0, 2400.0)
+        );
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(3), 300, 600),
+            (800.0, 1600.0)
+        );
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(4), 300, 600),
+            (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn throughput_new_connection_excludes_previous_traffic() {
+        let start = time::Instant::now();
+        let mut throughput = LinkThroughput::new(start, 1_000_000, 2_000_000);
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(1), 1_000_100, 2_000_050),
+            (800.0, 400.0)
+        );
+        let status = LinkStatus::default();
+        assert!(status.rx_bps.is_none());
+        assert!(status.tx_bps.is_none());
+    }
+
+    #[test]
+    fn throughput_interpolates_window_boundary_after_scheduler_delay() {
+        let start = time::Instant::now();
+        let mut throughput = LinkThroughput::new(start, 0, 0);
+        throughput.sample(start + Duration::from_secs(2), 200, 400);
+        // The window starts halfway through the first bucket; only half counts.
+        assert_eq!(
+            throughput.sample(start + Duration::from_secs(4), 200, 400),
+            (800.0 / 3.0, 1600.0 / 3.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn link_publishes_throughput_and_clears_it_on_disconnect() {
+        let server = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = server.local_addr().expect("address");
+        let (disconnect, disconnected) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept");
+            socket
+                .write_all(&heartbeat(1, 1, 1))
+                .await
+                .expect("heartbeat");
+            let mut buffer = [0; 21];
+            socket.read_exact(&mut buffer).await.expect("GCS heartbeat");
+            disconnected.await.expect("disconnect signal");
+        });
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, journal_task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let (link, link_task) = start_link(MavlinkLinkConfig::sitl(address), journal.clone());
+        let mut status = link.subscribe_status();
+        time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = status.borrow_and_update().clone();
+                if let (Some(rx), Some(tx)) = (snapshot.rx_bps, snapshot.tx_bps) {
+                    assert!(snapshot.connected);
+                    assert_eq!(snapshot.received_bytes, 21);
+                    assert!(snapshot.transmitted_bytes >= 21);
+                    assert!(rx > 0.0 && tx > 0.0);
+                    break;
+                }
+                status.changed().await.expect("status");
+            }
+        })
+        .await
+        .expect("published rates");
+        disconnect.send(()).expect("disconnect");
+        peer.await.expect("peer");
+        time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = status.borrow_and_update().clone();
+                if !snapshot.connected {
+                    assert!(snapshot.rx_bps.is_none() && snapshot.tx_bps.is_none());
+                    assert_eq!(snapshot.received_bytes, 21);
+                    break;
+                }
+                status.changed().await.expect("status");
+            }
+        })
+        .await
+        .expect("cleared rates");
+        link_task.abort();
+        journal.shutdown().await.expect("shutdown");
+        journal_task.await.expect("journal");
+    }
 
     fn heartbeat(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
         serialize_message(
@@ -1106,6 +1290,14 @@ mod tests {
                 .all(|record| record.sim_clock.epoch == 1)
         );
         assert_eq!(connected_status.clock_epoch, 1);
+        assert_eq!(connected_status.received_bytes, 21);
+        time::timeout(Duration::from_secs(2), async {
+            while link.status().transmitted_bytes < 21 {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("TX byte counter");
         assert_eq!(connected_status.target_system, 1);
         assert_eq!(connected_status.base_mode, 0);
         assert_eq!(connected_status.custom_mode, 0);

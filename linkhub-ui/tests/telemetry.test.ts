@@ -10,6 +10,7 @@ function status(generation: string, ready = true): LinkHubStatus {
     clock_epoch: 1, target_system: 1, target_component: 1, base_mode: 0,
     custom_mode: 0, system_status: 3, latest_time_boot_ms: 0,
     received_messages: 0, transmitted_messages: 0,
+    received_bytes: 0, transmitted_bytes: 0, rx_bps: null, tx_bps: null,
   };
 }
 
@@ -22,8 +23,11 @@ describe("live display telemetry", () => {
     const rates = vi.spyOn(api, "setMessageRates").mockResolvedValue({});
     vi.spyOn(api, "readMessages").mockImplementation(() => new Promise(() => {}));
     const telemetry = new TelemetryStore(api);
+    const onStatus = vi.fn();
+    telemetry.onStatus(onStatus);
     await telemetry.start();
     expect(rates).toHaveBeenCalledExactlyOnceWith(DISPLAY_TELEMETRY_RATES);
+    expect(onStatus).toHaveBeenCalledExactlyOnceWith(status("first"));
     telemetry.stop();
   });
 
@@ -55,11 +59,17 @@ describe("live display telemetry", () => {
       return { records: [], next_cursor: "v1:0" };
     });
     const telemetry = new TelemetryStore(api);
+    const snapshots: LinkHubStatus[] = [];
+    const unsubscribe = telemetry.onStatus((snapshot) => snapshots.push(snapshot));
     await telemetry.start();
     await vi.waitFor(() => expect(rates).toHaveBeenCalledTimes(2));
     expect(rates.mock.calls).toEqual([
       [DISPLAY_TELEMETRY_RATES], [DISPLAY_TELEMETRY_RATES],
     ]);
+    expect(snapshots.map((snapshot) => snapshot.generation)).toEqual([
+      "first", "first", "second", "second",
+    ]);
+    unsubscribe();
     telemetry.stop();
   });
 });

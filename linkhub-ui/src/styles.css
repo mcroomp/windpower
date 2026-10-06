@@ -81,6 +81,19 @@ h2 {
   text-transform: uppercase;
 }
 
+.link-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+#link-throughput {
+  color: #aebdd2;
+  font: 11px ui-monospace, "Cascadia Code", monospace;
+  white-space: nowrap;
+}
+
 .badge.online,
 .badge.running {
   border-color: #2d8f6f;
