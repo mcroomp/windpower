@@ -59,6 +59,10 @@ runs in its own fresh Docker container, one per test file.
   concurrency causes host scheduling stalls and UDP loss rather than useful
   throughput. The LinkHub stress test runs exclusively so its 100 Hz transport
   assertion measures LinkHub instead of contention from another stack.
+- The stress harness's bounded ATTITUDE waits follow `next_cursor` across empty
+  filtered batches under one fixed wall-clock deadline. An empty batch can
+  report journal progress rather than a telemetry timeout; do not assert that
+  every individual HTTP response must contain a matching record.
 - Each stack-test file has an outer 10-minute wall-clock deadline in addition
   to pytest's in-process timeout. This catches blocked subprocesses and native
   calls that pytest cannot interrupt. Override it with
@@ -80,6 +84,23 @@ runs in its own fresh Docker container, one per test file.
 - **SITL must run as close to hardware as possible.** Find and fix root causes; do
   NOT paper over failures with simulation-only hacks. Confirm with the user before
   adding any override. `base_k_ang` is diagnostic-only and defaults to 0.
+
+### Torque yaw acceptance
+
+Torque physics assertions use absolute mediator `t_sim`, including the startup
+hold; they do not subtract `dynamics_start`. The shared check requires finite
+physics rates and one-second heartbeat coverage across the complete observation
+window, so missing or truncated telemetry cannot pass as zero yaw.
+
+The IC yaw-regulation fixture uses Lua PASSIVE in GUIDED_NOGPS, not ACRO.
+Its settling time, observation duration, and rate limit are owned by
+[test_yaw_regulation_sitl.py](../tests/sitl/torque/test_yaw_regulation_sitl.py).
+Torque motor integration, angle integration, and tilt-rate derivatives must use
+`SITLInterface.dt()`, not the 400 Hz ArduPilot control-loop period. At the
+configured 1200 Hz physics rate, a fixed 400 Hz integration step advances the
+attitude three times faster than its reported gyro rate and destabilizes
+estimation/control. Motor transport delay uses simulation timestamps, so its
+duration also remains correct if the declared frame rate changes.
 
 ### Single MAVLink owner
 
