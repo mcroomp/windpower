@@ -11,7 +11,7 @@ use std::{
 
 use mavio::{AsyncReceiver, io::TokioReader};
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -22,7 +22,7 @@ use tokio::{
 
 use crate::{
     codec::{
-        CodecError, DecodedMessage, DialectMessage, MavHeader, decode_raw, decode_raw_bytes,
+        CodecError, DecodedMessage, EncodedMessage, MavHeader, decode_raw, decode_raw_bytes,
         encode_message, serialize_message,
     },
     discovery::{DiscoveryConfig, ScanReport},
@@ -30,7 +30,6 @@ use crate::{
     link_events::{FailureRepeats, LinkEvent, LinkEvents},
     records::{Direction, MavlinkFrame, RecordPayload, wall_time_ns},
 };
-use linkhub_mavio_dialect::dialects::ardupilotmega::{enums, messages};
 
 pub(crate) const HEARTBEAT_MESSAGE_ID: u32 = 0;
 
@@ -219,7 +218,7 @@ pub struct ReceivedMessage {
 enum OutboundPayload {
     Raw(Vec<u8>),
     Message {
-        message: Box<DialectMessage>,
+        message: Box<EncodedMessage>,
         source_system: Option<u8>,
         source_component: Option<u8>,
     },
@@ -951,7 +950,7 @@ async fn send_typed(
     config: &MavlinkLinkConfig,
     journal: &JournalHandle,
     writer: &mut (impl AsyncWrite + Unpin),
-    message: DialectMessage,
+    message: EncodedMessage,
     source: (Option<u8>, Option<u8>),
     status_tx: &watch::Sender<LinkStatus>,
     tx_sequence: &AtomicU8,
@@ -1004,15 +1003,18 @@ fn decoded_frame(link_id: &str, direction: Direction, decoded: &DecodedMessage) 
     }
 }
 
-pub(crate) fn heartbeat_message() -> DialectMessage {
-    DialectMessage::Heartbeat(messages::Heartbeat {
-        custom_mode: 0,
-        type_: enums::MavType::Gcs,
-        autopilot: enums::MavAutopilot::Invalid,
-        base_mode: enums::MavModeFlag::empty(),
-        system_status: enums::MavState::Active,
-        mavlink_version: 3,
-    })
+pub(crate) fn heartbeat_message() -> EncodedMessage {
+    let Value::Object(fields) = json!({
+        "custom_mode": 0,
+        "type": 6,
+        "autopilot": 8,
+        "base_mode": 0,
+        "system_status": 4,
+        "mavlink_version": 3,
+    }) else {
+        unreachable!("heartbeat literal is an object");
+    };
+    encode_message("HEARTBEAT", &fields).expect("static heartbeat fields are valid")
 }
 
 #[cfg(test)]

@@ -209,16 +209,16 @@ to generated forward-compatible `IntEnum` values. Unknown enum values become
 Do not hand-edit the generated artifacts or duplicate these public types in
 Python or TypeScript.
 
-LinkHub's MAVLink wire implementation uses Mavio with default features
-disabled. The `linkhub/mavio-dialect` path dependency owns the filtered typed
-ArduPilotMega message set used for structured JSON projection and named message
-operations, keeping generated code out of LinkHub's frequently rebuilt
-compilation unit. Its build script also generates a compact registry for every
-ArduPilotMega message ID, name, and `CRC_EXTRA`: messages outside the typed set
-are still checksum-validated and journaled losslessly, but their `fields`
-object is empty and clients therefore see them as `RawMessage`. Add a message
-to the filtered set only when LinkHub needs to decode its fields or address it
-by name; do not enable Mavio's complete generated ArduPilotMega dialect.
+LinkHub's MAVLink framing implementation uses Mavio with default features
+disabled. The `linkhub/mavio-dialect` path dependency embeds MAVInspect's
+resolved ArduPilotMega `Protocol` model as compressed Postcard data. LinkHub's
+single descriptor-driven payload codec uses the embedded message IDs, names,
+wire-ordered fields, scalar and array types, extension markers, payload sizes,
+and `CRC_EXTRA` values to encode and decode every dialect message directly
+between binary payloads and JSON field objects. No per-message Rust structures,
+builders, generated Serde implementations, typed-message allowlist, or
+separate query-name registry are maintained. Unknown message IDs are rejected;
+all dialect-defined names are valid for message operations and query filters.
 
 ## Message-rate policy and bandwidth
 

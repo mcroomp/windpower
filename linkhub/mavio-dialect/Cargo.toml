@@ -4,19 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[features]
-default = ["serde"]
-serde = []
-
 [dependencies]
-mavspec = { version = "0.6.7", default-features = false, features = ["rust", "serde", "std"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_arrays = "0.1"
-
-[build-dependencies]
 mavinspect = { version = "0.6.6", default-features = false }
-mavlink-message-definitions = { version = "0.6.7", default-features = false, features = ["dlct-ardupilotmega", "std"] }
-mavspec = { version = "0.6.7", default-features = false, features = ["rust_gen"] }
+mavlink-message-definitions = { version = "0.6.7", default-features = false, features = ["compress", "dlct-ardupilotmega", "std"] }
+serde_json = "1.0"
+thiserror = "2.0"
 
 [lints.rust]
 unsafe_code = "forbid"

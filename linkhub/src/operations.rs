@@ -16,7 +16,7 @@ use crate::{
     mavlink::{LinkError, MavlinkLinkHandle, ReceivedMessage},
     records::wall_time_ns,
 };
-use linkhub_mavio_dialect::dialects::ardupilotmega::enums::MavProtocolCapability;
+use linkhub_mavio_dialect::enum_bit_names;
 
 const MAV_CMD_SET_MESSAGE_INTERVAL: u32 = 511;
 const MAV_CMD_GET_MESSAGE_INTERVAL: u32 = 510;
@@ -1225,9 +1225,10 @@ fn format_cursor(sequence: u64) -> String {
 }
 
 fn capability_names(bits: u64) -> Vec<Value> {
-    MavProtocolCapability::from_bits_retain(bits as u32)
-        .iter_names()
-        .map(|(name, _)| Value::String(format!("MAV_PROTOCOL_CAPABILITY_{name}")))
+    enum_bit_names("MAV_PROTOCOL_CAPABILITY", bits)
+        .expect("embedded dialect defines MAV_PROTOCOL_CAPABILITY")
+        .into_iter()
+        .map(Value::String)
         .collect()
 }
 

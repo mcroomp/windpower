@@ -26,13 +26,12 @@ backend explicitly:
 cargo build --manifest-path .\linkhub\Cargo.toml --release --features bluetooth
 ```
 
-LinkHub uses Mavio with its default features disabled. The
-`mavio-dialect` path dependency generates a filtered typed dialect for the
-messages LinkHub projects as structured JSON, plus a compact full
-ArduPilotMega message ID/name/CRC registry. Other valid ArduPilotMega messages
-remain checksum-validated and journaled with empty `fields`; add a message to
-`mavio-dialect/build.rs` when LinkHub must expose its decoded fields or accept
-its name in message-operation APIs.
+LinkHub uses Mavio with its default features disabled. The `mavio-dialect` path
+dependency embeds MAVInspect's resolved ArduPilotMega protocol model as
+compressed Postcard data. A single descriptor-driven codec uses that model to
+checksum, encode, decode, and project every dialect message as structured JSON;
+there are no generated per-message Rust types or generated Serde
+implementations.
 
 For iterative development, run a subcommand directly:
 

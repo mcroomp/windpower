@@ -1010,10 +1010,8 @@ dependencies = [
  "hex",
  "linkhub-mavio-dialect",
  "mavio",
- "mavspec",
  "rmp-serde",
  "serde",
- "serde_arrays",
  "serde_bytes",
  "serde_json",
  "tempfile",
@@ -1033,9 +1031,8 @@ version = "0.1.0"
 dependencies = [
  "mavinspect",
  "mavlink-message-definitions",
- "mavspec",
- "serde",
- "serde_arrays",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1175,7 +1172,6 @@ dependencies = [
  "mavlink-dialects",
  "mavlink-message-definitions",
  "mavspec_rust_derive",
- "mavspec_rust_gen",
  "mavspec_rust_spec",
  "serde",
  "serde_arrays",
