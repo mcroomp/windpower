@@ -20,18 +20,19 @@ A tethered rotary airborne wind-energy prototype: the SITL test framework, the a
 ## Why this system exists
 
 - RAWES is a tethered rotary airborne wind-energy prototype built around a rotorcraft-like hub, a ground winch, and a Pixhawk running ArduPilot plus Lua.
-- The main goal of the simulation and SITL framework is to exercise the real control stack under repeatable conditions: the ground planner, the winch, the Lua scripts, the ArduPilot inner loops, and the physics/aero models.
+- The main goal of the simulation and SITL framework is to exercise the real control stack under repeatable conditions: the groundstation planner, the winch, LinkHub transport/journaling, the Lua scripts, the ArduPilot inner loops, and the physics/aero models.
 - The system is not a generic flight simulator. It is structured to preserve the same control boundaries, timing, and sign conventions that the hardware and stack tests expect.
-- The external aero package in the separate `aero` repository provides the blade-element/momentum model used by the physics path.
+- The external `dynbem` package provides the blade-element/momentum model used by the physics path.
 
 ---
 
 ## Physical system at a glance
 
-- The architecture has three live nodes: the winch on the ground, the ground station, and the airborne Pixhawk.
+- The architecture has three live physical nodes: the winch on the ground, the ground station, and the airborne Pixhawk.
 - The winch owns tension sensing and reel-speed actuation.
 - The ground station owns phase sequencing and setpoint generation.
 - The Pixhawk owns flight control through `rawes.lua` and ArduPilot’s rate controller.
+- LinkHub is the sole MAVLink owner between ground-side clients and ArduPilot.
 - The simulation mirrors that split instead of collapsing everything into one controller.
 
 ```mermaid
@@ -42,11 +43,13 @@ flowchart LR
     subgraph GND["Ground station"]
         GP["Phase planner"] --> TE["Commanded tension / altitude"]
     end
+    LH["LinkHub\nsole MAVLink owner"]
     subgraph PIX["Pixhawk"]
         EKF["EKF + sensors"] --> LUA["rawes.lua"] --> ATC["ArduPilot rate loop"] --> ACT["Swashplate + anti-rotation motor"]
     end
     WIN <--> GND
-    GND <--> PIX
+    GND <--> LH
+    LH <--> PIX
 ```
 
 ---
@@ -55,15 +58,16 @@ flowchart LR
 
 - The stack is not only physics; it also includes communications, state machines, controller timing, and the startup hand-off from kinematic hold to free flight.
 - The physics worker steps at 1200 Hz and must answer every servo packet: ArduPilot SITL runs in lockstep in a docker container.
-- The test harness records telemetry, logs events, and provides post-run diagnosis tools.
+- The test harness records telemetry, logs events, and provides post-run diagnosis tools. The mediator owns only physics/sensors/actuator application; LinkHub owns MAVLink and the ordered journal.
 
 ```mermaid
 flowchart TB
     PHY["Physics core\nrigid body + tether + aero"] --> SEN["Sensor model\nIMU / GPS / attitude"]
     SEN --> SITL["ArduPilot SITL"]
     SITL --> LUA["rawes.lua"]
-    LUA --> COMM["MAVLink / GCS link"]
-    COMM --> GND["Ground planner + winch controller"]
+    SITL --> LH["LinkHub"]
+    LH --> GND["Groundstation planner"]
+    GND --> WIN["Winch controller"]
     GND --> PHY
 ```
 
@@ -212,51 +216,19 @@ flowchart LR
 - Effects the BEM models handle with separate empirical patches (wake skew, descent/autorotation, vortex ring state) fall out of the same wake convection in the VPM formulation.
 - It is still inviscid and leans on the same airfoil polar tables for sectional lift and drag, so stall and compressibility remain polar-table concerns.
 
-Cost per step (parallel; machine-dependent, so read the ratios, not the absolute ms). BEM is ~11 ms/step, Oye / Pitt-Peters ~0.1 ms.
-
-| Wake size N | Direct sum O(N^2) | Barnes-Hut O(N log N) | BH vs BEM |
-|---:|---:|---:|---:|
-| 5,000 | ~59 ms | ~53 ms | ~5x |
-| 16,000 | ~428 ms | ~139 ms | ~13x |
-| 32,000 | ~2,265 ms | ~337 ms | ~31x |
-
 ---
 
-## Aero validation against classic rotor experiments
+## Scope limits to say out loud
 
-- The aero package is checked against digitized wind-tunnel data from several classic rotor experiments.
-- I'd frame these numbers as an honest picture rather than a success story: the default quasi-static BEM is consistent in structure but has a known, systematic thrust bias, and the experimental VPM tightens that where it has been run.
-- The values below are taken from the aero package's own empirical-validation notes. VPM has only been run against the hover and forward-flight autorotation datasets so far.
-
-| Dataset (source) | Regime / quantity | Quasi-static BEM error | VPM error |
-|---|---|---:|---:|
-| Castles & Gray 1951 (NACA TN-2474) | Hover CT | +11% (Table I) to ~+30-45% (Table V) | ~8-13% |
-| Castles & Gray 1951 | Hover CQ / power | ~14% RMSE (Table I) | <~21% |
-| Castles & Gray 1951 | Figure of merit | sanity band only | <~11% |
-| Caradonna & Tung 1981 (NASA TM-81232) | Hover CT | ~+30 to +45% | not run |
-| Harrington 1951 (NACA TN-2318) | Full-scale hover CT | ~+30 to +45% | not run |
-| Wheatley & Hood 1935 (NACA TR 515, PCA-2 autogyro) | Forward-flight autorotation | CT ratio ~1.25-2.65; negative CQ residual | <= ~8% to mu = 0.32 |
-
----
-
-## Independent cross-check against CCBlade
-
-- Beyond wind-tunnel data, the aero package is compared point-for-point against CCBlade, NREL's open-source BEM, on two rotors.
-- This is a code-to-code agreement check, so it does not fix the absolute-thrust bias against real data, but it does show the implementation is internally sound.
-
-| Cross-check | Sweep | CT agreement | CQ agreement |
-|---|---|---:|---:|
-| NREL Phase VI (twisted/tapered HAWT) | 21 operating points | ~2% median, 2.3% max | ~2.4% median, 2.9% max |
-| Beaupoil RAWES rotor (4-blade, R=2.5 m) | 25 operating points | ~1.4% median, 1.8% max | ~2.7% median, 11.1% max at autorotation crossing |
-
-- The larger CQ outlier on the Beaupoil rotor is near the autorotation crossing where the torque coefficient passes through zero, so the relative error inflates even though the absolute agreement is good.
-
----
-
-## Known gaps
-
-- The servo-flap actuation model is covered by behavior tests but is not yet benchmarked against a dedicated published servo-flap rotor dataset, so its authority should be treated as engineering behavior rather than a calibrated claim.
-- The BEM does not model dynamic stall, blade flapping degrees of freedom, or compressibility corrections.
-- Several source datasets were digitized from scanned figures, so some scatter reflects extraction quality rather than model error.
-- The tether, winch and hub physics are modeled separately from the aero package and have their own, lighter validation.
-
+- The default repo path is the quasi-static `dynbem` model called from the
+  mediator/physics core; other `dynbem` models are opt-in rather than the
+  maintained stack default.
+- The repo keeps the aero model, tether/winch model, and hub rigid-body model as
+  separate pieces coupled by the physics step; validation claims should stay
+  attached to the owning package/docs rather than copied into slides.
+- Servo-flap behavior is represented through the current simulation interfaces
+  and parameter files, not by a fully identified flap-dynamics model inside this
+  repo.
+- For current caveats and validation status, point people to
+  `design\simulation.md` and the `dynbem` package docs instead of freezing
+  numeric error tables into the presentation.

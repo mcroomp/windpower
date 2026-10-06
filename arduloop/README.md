@@ -11,6 +11,10 @@ and rate-control stack. It has two layers:
 Both layers use parameter names that are 1:1 with ArduPilot. Gains tuned here
 transfer directly to a `.parm` file.
 
+Current RAWES Lua steady/passive/takeoff behavior uses the direct-thrust Guided
+angle path (`set_target_angle_and_rate_and_throttle(...)`). This package also
+keeps the rate-only and climbrate-compatible Guided paths for parity/testing.
+
 ---
 
 ## Module map
@@ -35,12 +39,10 @@ arduloop/
 ## Quick-start: rate loop only
 
 ```python
-from arduloop import HeliParams, RateAxisParams, HeliRateController, HeliPlant
+from arduloop import HeliParams, HeliRateController, HeliPlant
+from simulation.param_defaults import load_ap_params
 
-p = HeliParams(loop_rate_hz=400.0)
-p.roll = RateAxisParams(P=0.12, I=0.10, D=0.004, FF=0.05,
-                        FLTT=1.5, FLTD=20.0,
-                        NEF_center_hz=3.77, NEF_bandwidth_hz=0.5)
+p = HeliParams.from_ap_dict(load_ap_params())
 ctrl = HeliRateController(p)
 plant = HeliPlant()
 
@@ -62,24 +64,28 @@ python -m arduloop.run_demo
 
 ---
 
-## Quick-start: GUIDED attitude loop (RAWES / tethered hover)
+## Quick-start: GUIDED attitude loop
 
-`GuidedAttitudeController` is the class to use whenever `rawes.lua` calls
-`vehicle:set_target_angle_and_climbrate(...)` — i.e. any simtest or stack
-test that uses GUIDED mode.
+`GuidedAttitudeController` is the class to use for the Guided attitude path in
+simulation. Current `rawes.lua` steady/passive/takeoff behavior mirrors
+`vehicle:set_target_angle_and_rate_and_throttle(...)`; the port also retains
+`set_target_angle_and_climbrate(...)` for API parity with ArduPilot.
 
 ```python
 from scipy.spatial.transform import Rotation
 from arduloop import HeliParams, GuidedAttitudeController, GuidedAttitudeParams
+from simulation.param_defaults import load_ap_params
 
-hp = HeliParams(loop_rate_hz=400.0)
-gp = GuidedAttitudeParams()              # AP defaults: ATC_INPUT_TC=0.15, etc.
+hp = HeliParams.from_ap_dict(load_ap_params())
+gp = GuidedAttitudeParams.from_heli_params(hp)
 ctrl = GuidedAttitudeController(hp, gp)
+rot = Rotation.identity()
 
-# -- 50 Hz outer tick (mirrors rawes.lua) --
-ctrl.set_target_angle_and_climbrate(
+# -- 50 Hz outer tick (mirrors current rawes.lua steady path) --
+ctrl.set_target_angle_and_rate_and_throttle(
     roll_deg=0.0, pitch_deg=-65.0, yaw_deg=0.0,
-    climbrate_ms=0.0, sim_time=t_outer)
+    roll_rate_degs=0.0, pitch_rate_degs=0.0, yaw_rate_degs=0.0,
+    throttle=0.26, sim_time=t_outer)
 
 # Alternatively, from a 3×3 rotation matrix (body columns in NED):
 # ctrl.set_target_rotation(R_body_ned, sim_time=t_outer)
@@ -99,7 +105,9 @@ out = ctrl.update(
 
 ### How `GuidedAttitudeController` maps to ArduPilot
 
-Every 400 Hz tick runs the same four steps as ArduPilot:
+Regardless of whether the caller uses direct thrust or the climbrate-compatible
+path, every 400 Hz tick runs the same target-slew / attitude / rate machinery
+as ArduPilot:
 
 ```
 set_target_angle_and_climbrate(roll, pitch, yaw)
@@ -132,7 +140,7 @@ set_target_angle_and_climbrate(roll, pitch, yaw)
 
 ### The 30/60 degree feedforward blending threshold
 
-This is not intuitive and causes real SITL bugs if missed:
+This behavior is easy to miss:
 
 - The threshold is on the angle between **`_attitude_target`** and **`q_body`**,
   NOT between `_q_commanded` and `q_body`.
@@ -141,9 +149,6 @@ This is not intuitive and causes real SITL bugs if missed:
   body has been physically pushed far from where AP last computed the target.
 - When locked: `yaw_rate_target = gyro[2]` — yaw PID error = 0, `yaw_cmd ≈ 0`.
   This prevents yaw I-term windup while the thrust vector is being recovered.
-- For RAWES at 65° tether elevation: the slewed target should track the body
-  closely. If `_attitude_target` ever diverges (timeout reset, disturbance),
-  the locked branch will suppress yaw output until error < 60°.
 
 ### Timeout behaviour
 
@@ -163,7 +168,7 @@ To convert from a rotation matrix: `Rotation.from_matrix(R.T).as_quat()`.
 `set_target_rotation(R_body_ned)` takes a 3×3 matrix where the columns are
 body axes expressed in NED — the same `R_hub` used in the physics runner.
 It skips the Euler round-trip, which matters at extreme tilts (>80°) where
-gimbal lock degrades the ZYX decomposition. Always prefer this when you have
+gimbal lock degrades the ZYX decomposition. Prefer this when you have
 the full rotation matrix.
 
 ---
@@ -263,8 +268,8 @@ transition to prevent stale I-term from spiking the output.
 ## `HeliPlant` — design-time only
 
 A simple coupled plant for rate-loop tuning offline (not used in simtests).
-Modes: inner-loop flap response, pendulum (~0.05 Hz), tether spring (~3.77 Hz).
-Sufficient to distinguish good tunings from bad, not a physics-accurate model.
+It is useful for comparative controller experiments, not as a physics-accurate
+runtime model.
 
 ---
 
@@ -275,18 +280,14 @@ Sufficient to distinguish good tunings from bad, not a physics-accurate model.
 In ArduPilot, `set_target_angle_and_climbrate` stores the commanded quaternion
 but does NOT immediately set `_attitude_target` to it. Instead, every 400 Hz
 tick, `input_shaping_angle` advances `_attitude_target` a small step toward
-`_q_commanded`, capped by `ATC_ACCEL_*_MAX` and `ATC_INPUT_TC`. With AP
-defaults loaded from `.parm` (for example `ATC_INPUT_TC=0.2 s` and
-`ATC_ACC_P_MAX=600 deg/s² ≈ 10.5 rad/s²` in `copter-heli.parm`),
-a 65° step takes roughly 1.5 s to ramp up. This is the correct closed-loop
-transient. A simplified controller that skips this will converge faster in
-simulation but slower in SITL — defeating the purpose of pre-SITL tuning.
+`_q_commanded`, capped by `ATC_ACCEL_*_MAX` and `ATC_INPUT_TC`. A simplified
+controller that skips this no longer matches the guided-path dynamics that
+`arduloop` is trying to preserve.
 
 ### Why `_attitude_target` is initialised to body attitude
 
-If `_attitude_target` started at identity and the body is at 65° tether
-equilibrium, the first tick would see a 65° step error → huge rate command →
-spike. `update()` sets `_attitude_target = q_body` on the very first call to
+If `_attitude_target` started at identity while the body was already tilted,
+the first tick would see a large step error and command spike. `update()` sets `_attitude_target = q_body` on the very first call to
 avoid this. This matches ArduPilot's `input_quaternion` initialisation.
 
 ### Why notches are applied before FLTE/FLTD
@@ -297,29 +298,9 @@ and reduces its depth. `pid.py` preserves the AP ordering.
 
 ---
 
-## Tuning workflow (rate loop)
-
-1. **No notches, no outer loop.** Tune `P`, `D`, `FF` with `FLTD ≈ 0.3 × Hz`.
-   Use `signals.step` + `analysis.step_response_score`.
-2. **Add tether-spring error notch.** `NEF_center_hz = 3.77`, `bandwidth = 0.4–0.6`.
-   Confirm ≥ 25 dB attenuation via `empirical_frf`.
-3. **Lowpass.** `FLTT = FLTE = 1.0–1.5 Hz`.
-4. **Swash phase.** Sweep `H_SW_H3_PHANG ∈ [-30°, 30°]`; minimise cross-axis
-   coupling at high frequency.
-5. **I + IMAX last**, on slow-drift signals only.
-
-Repeat for pitch. Yaw is independent.
-
----
-
 ## C++ source cross-references
 
-| Python | C++ source |
-|--------|-----------|
-| `guided.py` | `AC_AttitudeControl/AC_AttitudeControl.cpp` — `input_quaternion`, `update_attitude_target`, `attitude_controller_run_quat`, `thrust_vector_rotation_angles`, `input_shaping_angle`, `input_shaping_ang_vel` |
-| `guided.py` | `AP_Math/control.cpp` — `sqrt_controller` |
-| `guided.py` | `ArduCopter/mode_guided.cpp` — `set_angle`, `run_angle_control` |
-| `attitude_heli.py` | `AC_AttitudeControl/AC_AttitudeControl_Heli.cpp` — rate wrapper, PIRO_COMP, hover trim |
-| `pid.py` | `AC_PID/AC_PID.cpp` — `update_all` |
-| `swash.py` | `AP_Motors/AP_MotorsHeli_Swash.cpp` — phase rotation |
-| `filters.py` | `Filter/NotchFilter.cpp`, `Filter/LowPassFilter.cpp` |
+Use the parity-oriented docstrings in `guided.py`, `attitude_heli.py`, and
+`pid.py` as the verified in-repo pointers. If you need an exact ArduPilot
+mapping, compare those against the current ArduPilot checkout rather than
+relying on a static table here.

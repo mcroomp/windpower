@@ -63,7 +63,7 @@ SERVO_S1    = 1
 SERVO_S2    = 2
 SERVO_S3    = 3
 # GB4008 anti-rotation motor: bidirectional DShot on AUX 1 = SERVO9 (output 9).
-# Single source of truth for the motor output location -- see design/dshot.md.
+# Single source of truth for the motor output location -- see design/hardware.md.
 SERVO_MOTOR         = 9
 MOTOR_TEST_INSTANCE = 4   # Heli tail motor NUMBER (Motor4); independent of output
 
