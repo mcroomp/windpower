@@ -76,6 +76,12 @@ pub struct LinkStatus {
     pub transmitted_bytes: u64,
     pub rx_bps: Option<f64>,
     pub tx_bps: Option<f64>,
+    /// Lifetime validated frame bytes per MAVLink message name.
+    pub received_bytes_by_message: BTreeMap<String, u64>,
+    pub transmitted_bytes_by_message: BTreeMap<String, u64>,
+    /// Windowed bits per second per message name; idle types are omitted.
+    pub rx_bps_by_message: BTreeMap<String, f64>,
+    pub tx_bps_by_message: BTreeMap<String, f64>,
     /// Frames that passed their CRC but did not decode as a typed dialect
     /// message (for example an enum value outside the dialect) and were dropped.
     pub dropped_frames: u64,
@@ -124,6 +130,51 @@ impl LinkThroughput {
         }
         let elapsed = now.duration_since(window_start).as_secs_f64();
         (rx_delta * 8.0 / elapsed, tx_delta * 8.0 / elapsed)
+    }
+}
+
+type ByteCounts = BTreeMap<String, u64>;
+
+/// Per-message-name counterpart of [`LinkThroughput`], using the same
+/// 3-second window and boundary interpolation.
+struct MessageThroughput {
+    samples: VecDeque<(time::Instant, ByteCounts)>,
+}
+
+impl MessageThroughput {
+    fn new(now: time::Instant, counts: &ByteCounts) -> Self {
+        Self {
+            samples: VecDeque::from([(now, counts.clone())]),
+        }
+    }
+
+    fn sample(&mut self, now: time::Instant, counts: &ByteCounts) -> BTreeMap<String, f64> {
+        self.samples.push_back((now, counts.clone()));
+        let cutoff = now - Duration::from_secs(3);
+        while self.samples.len() > 2 && self.samples[1].0 <= cutoff {
+            self.samples.pop_front();
+        }
+        let (start, start_counts) = self.samples.front().expect("initial sample");
+        let window_start = (*start).max(cutoff);
+        let elapsed = now.duration_since(window_start).as_secs_f64();
+        let rolled_off = (*start < cutoff).then(|| {
+            let (next, next_counts) = &self.samples[1];
+            let fraction = cutoff.duration_since(*start).as_secs_f64()
+                / next.duration_since(*start).as_secs_f64();
+            (fraction, next_counts)
+        });
+        counts
+            .iter()
+            .filter_map(|(name, &total)| {
+                let base = start_counts.get(name).copied().unwrap_or(0);
+                let mut delta = (total - base) as f64;
+                if let Some((fraction, next_counts)) = rolled_off {
+                    let next_total = next_counts.get(name).copied().unwrap_or(0);
+                    delta -= (next_total - base) as f64 * fraction;
+                }
+                (delta > 0.0).then(|| (name.clone(), delta * 8.0 / elapsed))
+            })
+            .collect()
     }
 }
 
@@ -610,6 +661,8 @@ where
         status.connected_since_ns = Some(opened_ns);
         status.rx_bps = None;
         status.tx_bps = None;
+        status.rx_bps_by_message.clear();
+        status.tx_bps_by_message.clear();
         status.error = None;
     });
     let status_tx = context.status_tx.clone();
@@ -666,6 +719,8 @@ where
         status.connected_since_ns = None;
         status.rx_bps = None;
         status.tx_bps = None;
+        status.rx_bps_by_message.clear();
+        status.tx_bps_by_message.clear();
     });
     let target = target.to_owned();
     let error_kind = error.kind_name();
@@ -744,9 +799,13 @@ where
     let mut heartbeat = time::interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let now = time::Instant::now();
-    let mut throughput = {
+    let (mut throughput, mut rx_by_message, mut tx_by_message) = {
         let status = status_tx.borrow();
-        LinkThroughput::new(now, status.received_bytes, status.transmitted_bytes)
+        (
+            LinkThroughput::new(now, status.received_bytes, status.transmitted_bytes),
+            MessageThroughput::new(now, &status.received_bytes_by_message),
+            MessageThroughput::new(now, &status.transmitted_bytes_by_message),
+        )
     };
     let mut throughput_tick =
         time::interval_at(now + Duration::from_secs(1), Duration::from_secs(1));
@@ -755,13 +814,26 @@ where
     let result = loop {
         tokio::select! {
             _ = throughput_tick.tick() => {
-                let (rx, tx) = {
+                let sampled_at = time::Instant::now();
+                let (rx, tx, rx_messages, tx_messages) = {
                     let status = status_tx.borrow();
-                    throughput.sample(time::Instant::now(), status.received_bytes, status.transmitted_bytes)
+                    let (rx, tx) = throughput.sample(
+                        sampled_at,
+                        status.received_bytes,
+                        status.transmitted_bytes,
+                    );
+                    (
+                        rx,
+                        tx,
+                        rx_by_message.sample(sampled_at, &status.received_bytes_by_message),
+                        tx_by_message.sample(sampled_at, &status.transmitted_bytes_by_message),
+                    )
                 };
                 status_tx.send_modify(|status| {
                     status.rx_bps = Some(rx);
                     status.tx_bps = Some(tx);
+                    status.rx_bps_by_message = rx_messages;
+                    status.tx_bps_by_message = tx_messages;
                 });
             }
             received_frame = receive_rx.recv() => {
@@ -849,6 +921,7 @@ async fn archive_received(
 ) -> Result<(), LinkError> {
     let now = wall_time_ns();
     let frame_bytes = decoded.raw.len() as u64;
+    let message_name = decoded.name.clone();
     let system_id = decoded.system_id;
     let component_id = decoded.component_id;
     let time_boot_ms = decoded.fields.get("time_boot_ms").and_then(Value::as_u64);
@@ -885,6 +958,10 @@ async fn archive_received(
     status_tx.send_modify(|status| {
         status.received_messages += 1;
         status.received_bytes += frame_bytes;
+        *status
+            .received_bytes_by_message
+            .entry(message_name)
+            .or_default() += frame_bytes;
         status.last_received_ns = Some(now);
         if system_id != config.source_system
             && let Some(heartbeat) = &heartbeat
@@ -986,7 +1063,13 @@ async fn send_bytes(
         ));
     }
     writer.write_all(&bytes).await?;
-    status_tx.send_modify(|status| status.transmitted_bytes += bytes.len() as u64);
+    status_tx.send_modify(|status| {
+        status.transmitted_bytes += bytes.len() as u64;
+        *status
+            .transmitted_bytes_by_message
+            .entry(decoded.name.clone())
+            .or_default() += bytes.len() as u64;
+    });
     let frame = decoded_frame(&config.id, Direction::Tx, &decoded);
     let sequence = journal
         .append(RecordPayload::MavlinkFrame(frame), None)
@@ -1100,6 +1183,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn message_throughput_splits_rates_by_name_and_rolls_off_idle_types() {
+        let start = time::Instant::now();
+        let counts = |attitude, rpm| {
+            ByteCounts::from([("ATTITUDE".to_owned(), attitude), ("RPM".to_owned(), rpm)])
+        };
+        let mut throughput = MessageThroughput::new(start, &counts(1000, 0));
+        let rates = throughput.sample(start + Duration::from_secs(1), &counts(1300, 100));
+        assert_eq!(rates["ATTITUDE"], 2400.0);
+        assert_eq!(rates["RPM"], 800.0);
+        let rates = throughput.sample(start + Duration::from_secs(4), &counts(1300, 100));
+        assert!(rates.is_empty());
+    }
+
     #[tokio::test]
     async fn link_publishes_throughput_and_clears_it_on_disconnect() {
         let server = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -1130,6 +1227,10 @@ mod tests {
                     assert_eq!(snapshot.received_bytes, 21);
                     assert!(snapshot.transmitted_bytes >= 21);
                     assert!(rx > 0.0 && tx > 0.0);
+                    assert_eq!(snapshot.received_bytes_by_message["HEARTBEAT"], 21);
+                    assert!(snapshot.transmitted_bytes_by_message["HEARTBEAT"] >= 21);
+                    assert!(snapshot.rx_bps_by_message["HEARTBEAT"] > 0.0);
+                    assert!(snapshot.tx_bps_by_message["HEARTBEAT"] > 0.0);
                     break;
                 }
                 status.changed().await.expect("status");
@@ -1144,6 +1245,8 @@ mod tests {
                 let snapshot = status.borrow_and_update().clone();
                 if !snapshot.connected {
                     assert!(snapshot.rx_bps.is_none() && snapshot.tx_bps.is_none());
+                    assert!(snapshot.rx_bps_by_message.is_empty());
+                    assert!(snapshot.tx_bps_by_message.is_empty());
                     assert_eq!(snapshot.received_bytes, 21);
                     break;
                 }

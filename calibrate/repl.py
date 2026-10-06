@@ -14,7 +14,7 @@ from typing import Protocol
 from linkhub_client.messages import MavCmd, MavDataStream, MavModeFlag
 
 from .constants import (
-    LinkHubClient, WallClock, CommandLong, RequestDataStream,
+    LinkHubClient, WallClock, CommandLong,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
     MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
     SWASH_SERVOS,
@@ -359,12 +359,7 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     sv_man    = g("H_SV_MAN")
 
     cursor = session.current_cursor()
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.RC_CHANNELS,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     srv, _ = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
     pwm = {
         1: getattr(srv, "servo1_raw", 0) if srv else 0,
@@ -619,12 +614,7 @@ def _run_servo_mode(
         return None
     mode_name = next(name for name, value in _SV_MAN_MODES.items() if value == mode)
     print(f"  H_SV_MAN={mode} ({mode_name}) running for {duration:.1f}s (ESC or Ctrl-C to stop)")
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.RC_CHANNELS,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     print("  t(s)    S1(us)  S2(us)  S3(us)")
     started = time.monotonic()
     deadline = time.monotonic() + duration
@@ -797,12 +787,7 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
     deadline = started + duration
     print(f"  Safe HR3 sweep: {lo}..{hi} us for {duration:.1f}s (ESC or Ctrl-C to stop)")
     print("  t(s)    S1(us)  S2(us)  S3(us)")
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.RC_CHANNELS,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     next_print = started
     try:
         while time.monotonic() < deadline:
@@ -1337,12 +1322,7 @@ def _connect(server: str) -> LinkHubClient:
     session = LinkHubClient(address=server)
     session.connect(timeout=15.0)
     print(f"Connected: sysid={session._target_system} compid={session._target_component}")
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.RAW_CONTROLLER,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.RAW_CONTROLLER, 10)
     _refresh_pole_pairs(session)
     return session
 

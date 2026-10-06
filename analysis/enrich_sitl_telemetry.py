@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from analysis.linkhub_journal import iter_messages
+from groundstation.rawes_diag import diag_values
 from linkhub_client.messages import PidTuningAxis, decode_enum
 from simulation.telemetry_columns import ASYNC_MAV_COLUMNS
 
 
-_NVF_FIELDS = {
+_DIAG_FIELDS = {
     "YFF_T": "mav_nvf_yff_trim",
     "YFF_U": "mav_nvf_yff_u",
     "YFF_GZ": "mav_nvf_yff_gz",
@@ -96,11 +97,14 @@ def _project_record(record: dict[str, Any]) -> dict[str, float]:
             value = _float_field(record, f"servo{servo}_raw")
             if value is not None:
                 fields[f"mav_servo{servo}_us"] = value
-    elif message_type == "NAMED_VALUE_FLOAT":
-        target = _NVF_FIELDS.get(str(record.get("name", "")))
-        value = _float_field(record, "value")
-        if target is not None and value is not None:
-            fields[target] = value
+    elif message_type == "DEBUG_FLOAT_ARRAY":
+        values = diag_values(
+            int(record.get("array_id", -1)), record.get("data") or ()
+        )
+        for key, value in values.items():
+            target = _DIAG_FIELDS.get(key)
+            if target is not None:
+                fields[target] = value
     elif message_type == "LOCAL_POSITION_NED":
         fields.update(
             ekf_pos_x=float(record["x"]),

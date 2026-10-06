@@ -205,13 +205,19 @@ The status object includes:
   `transmitted_bytes`, `dropped_frames` (frames that passed their CRC but did not
   decode as a typed dialect message, for example an unknown enum value);
 - rate samples: `rx_bps`, `tx_bps`;
+- per-message-name breakdown: lifetime `received_bytes_by_message` /
+  `transmitted_bytes_by_message` (bytes) and windowed `rx_bps_by_message` /
+  `tx_bps_by_message` (bits per second, keyed by MAVLink message name such as
+  `ATTITUDE`);
 - troubleshooting fields: `last_received_ns`, `error`, `last_error_stage`,
   `last_error_ns`, `attempts`, `consecutive_failures`, `connected_since_ns`,
   `last_scan`.
 
 `rx_bps` and `tx_bps` are measured from validated MAVLink frame bytes, sampled
 once per second, averaged over the most recent 3-second window, and reported as
-`null` while disconnected and until the first sample after reconnect.
+`null` while disconnected and until the first sample after reconnect. The
+per-message rate maps use the same window and are empty while disconnected;
+message types with no traffic in the window are omitted.
 
 ### Example requests
 

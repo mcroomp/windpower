@@ -63,12 +63,14 @@ import pytest
 pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1800)]
 
 
+from groundstation.rawes_diag import diag_values
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from tests.sitl.stack_infra import (
     StackContext, dump_startup_diagnostics,
     observe, assert_no_mediator_criticals, get_arducopter_crash_info,
 )
 from linkhub_client.messages import (
+    DebugFloatArray,
     LocalPositionNed,
     NamedValueFloat,
     ServoOutputRaw,
@@ -248,10 +250,10 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 if "emergency yaw" in tl or "yaw reset" in tl:
                     state["ekf_yaw_reset"] = True
                     log.warning("EKF yaw reset at t=%.1fs: %s", t_rel, text)
-            elif isinstance(decoded, NamedValueFloat):
-                name, value = decoded.name, decoded.value
-                if name in ("ANCH_N", "ANCH_E", "ANCH_D"):
-                    state["anch"][name[-1]] = value
+            elif isinstance(decoded, DebugFloatArray):
+                for name, value in diag_values(decoded.array_id, decoded.data).items():
+                    if name in ("ANCH_N", "ANCH_E", "ANCH_D"):
+                        state["anch"][name[-1]] = value
             elif isinstance(decoded, LocalPositionNed):
                 state["pos_samples"].append((
                     decoded.time_boot_ms * 0.001,
@@ -278,7 +280,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
 
     observe(ctx, _OBS_SECONDS, _handle,
             msg_types=["SERVO_OUTPUT_RAW", "STATUSTEXT", "ATTITUDE",
-                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT", "NAMED_VALUE_FLOAT"],
+                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT", "DEBUG_FLOAT_ARRAY"],
             label="observation")
 
     lua_captured      = state["lua_captured"]

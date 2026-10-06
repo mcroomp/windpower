@@ -18,7 +18,6 @@ from linkhub_client.messages import (
     PidTuning,
     BatteryStatus,
     RcChannels,
-    SetAttitudeTarget,
     SysStatus,
     CommandAck,
     ExtendedSysState,
@@ -27,8 +26,8 @@ from linkhub_client.messages import (
     MavLandedState,
     NamedValueFloat,
     CommandLong,
+    DebugFloatArray,
     decode_message,
-    RequestDataStream,
     Statustext,
 )
 from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,

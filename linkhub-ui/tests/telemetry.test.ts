@@ -3,11 +3,26 @@ import { LinkHubApi } from "../src/api";
 import { MavModeFlag, MavState } from "../src/generated/protocol";
 import { mavEnum } from "../src/mav";
 import { TelemetryStore } from "../src/telemetry";
-import { DISPLAY_TELEMETRY_RATES } from "../src/telemetry-rates";
+import {
+  DISPLAY_TELEMETRY_RATES,
+  TELEMETRY_PROFILES,
+} from "../src/telemetry-rates";
 import type { LinkHubStatus } from "../src/types";
 
 it("requests measured RPM telemetry at 5 Hz", () => {
   expect(DISPLAY_TELEMETRY_RATES.RPM).toBe(5);
+});
+
+it("uses reduced rates for radio telemetry", () => {
+  expect(TELEMETRY_PROFILES.radio).toEqual({
+    ATTITUDE: 10,
+    ATTITUDE_QUATERNION: 10,
+    ATTITUDE_TARGET: 10,
+    SERVO_OUTPUT_RAW: 10,
+    LOCAL_POSITION_NED: 5,
+    BATTERY_STATUS: 1,
+    RPM: 5,
+  });
 });
 
 function status(generation: string, ready = true): LinkHubStatus {
@@ -17,6 +32,7 @@ function status(generation: string, ready = true): LinkHubStatus {
     custom_mode: 0, system_status: mavEnum(MavState.STANDBY), latest_time_boot_ms: 0,
     received_messages: 0, transmitted_messages: 0,
     received_bytes: 0, transmitted_bytes: 0, rx_bps: null, tx_bps: null,
+    rx_bps_by_message: {}, tx_bps_by_message: {},
   };
 }
 
@@ -44,6 +60,34 @@ describe("live display telemetry", () => {
     const telemetry = new TelemetryStore(api);
     await expect(telemetry.start()).rejects.toThrow("stream request rejected");
     expect(telemetry.status).toBeNull();
+    telemetry.stop();
+  });
+
+  it("applies a selected profile immediately and keeps it across generations", async () => {
+    const api = new LinkHubApi();
+    vi.spyOn(api, "status")
+      .mockResolvedValueOnce(status("first"))
+      .mockResolvedValueOnce(status("second"));
+    const rates = vi.spyOn(api, "setMessageRates").mockResolvedValue({});
+    let reads = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => reads * 1_100);
+    vi.spyOn(api, "readMessages").mockImplementation(async () => {
+      reads += 1;
+      if (reads > 1) {
+        return new Promise(() => {});
+      }
+      return { records: [], next_cursor: "v1:0" };
+    });
+    const telemetry = new TelemetryStore(api);
+    await telemetry.start();
+    await telemetry.setProfile("radio");
+    await vi.waitFor(() => expect(rates).toHaveBeenCalledTimes(3));
+    expect(telemetry.profile).toBe("radio");
+    expect(rates.mock.calls).toEqual([
+      [TELEMETRY_PROFILES.usb],
+      [TELEMETRY_PROFILES.radio],
+      [TELEMETRY_PROFILES.radio],
+    ]);
     telemetry.stop();
   });
 

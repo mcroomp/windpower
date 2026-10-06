@@ -20,5 +20,5 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         relative="${path#"$REPO_DIR/"}"
         printf '%s\0' "$relative"
         sha256sum "$path"
-    done < <(find "$REPO_DIR/linkhub/src" -type f -print0 | sort -z)
+    done < <(find "$REPO_DIR/linkhub/src" "$REPO_DIR/linkhub/dialect" "$REPO_DIR/linkhub/clientgen" -type f -print0 | sort -z)
 } | sha256sum | awk '{print $1}'

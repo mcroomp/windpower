@@ -146,16 +146,21 @@ the generated enums are tolerated, and commands and parameter types are sent as
 
 ## Telemetry behavior
 
-When LinkHub reports the connection as ready, the UI requests these display
-message rates through `PUT /v1/mavlink/message-rates`:
+The selector beside the connection state applies one of two display telemetry
+profiles through `PUT /v1/mavlink/message-rates`. USB is the default.
 
-- `ATTITUDE`: 25 Hz
-- `ATTITUDE_QUATERNION`: 25 Hz
-- `ATTITUDE_TARGET`: 25 Hz
-- `SERVO_OUTPUT_RAW`: 25 Hz
-- `LOCAL_POSITION_NED`: 10 Hz
-- `BATTERY_STATUS`: 2 Hz
-- `RPM`: 5 Hz
+| Message | USB | Radio |
+| --- | ---: | ---: |
+| `ATTITUDE` | 25 Hz | 10 Hz |
+| `ATTITUDE_QUATERNION` | 25 Hz | 10 Hz |
+| `ATTITUDE_TARGET` | 25 Hz | 10 Hz |
+| `SERVO_OUTPUT_RAW` | 25 Hz | 10 Hz |
+| `LOCAL_POSITION_NED` | 10 Hz | 5 Hz |
+| `BATTERY_STATUS` | 2 Hz | 1 Hz |
+| `RPM` | 5 Hz | 5 Hz |
+
+Changing the selector applies the new profile immediately. The selected profile
+is reapplied after a LinkHub generation change for the lifetime of the page.
 
 The UI also consumes other messages when present:
 
@@ -191,12 +196,15 @@ Implemented today:
 
 - explicit message-rate requests from the browser;
 - display of LinkHub-reported `rx_bps` / `tx_bps`;
+- a per-message-type RX/TX kbps table, shown by clicking the RX/TX readout
+  beside the connection state (click again, click elsewhere, or press Esc to
+  close it), built from LinkHub's `rx_bps_by_message` / `tx_bps_by_message`
+  and sorted busiest first;
 - LinkHub-side 1-second sampling and 3-second averaging;
 - `null` throughput while disconnected.
 
 Proposed, not implemented:
 
-- USB/radio bandwidth profiles;
 - priority tiers;
 - rate leases;
 - adaptive shedding.

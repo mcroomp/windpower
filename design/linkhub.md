@@ -167,6 +167,10 @@ over the latest three seconds (the available shorter window during startup).
 Sampling uses actual elapsed time, including scheduler delays, and continues
 while idle so rates decay to zero. Rates are null while disconnected and
 until the first sample after reconnect; lifetime counters are retained.
+The same status snapshot breaks bytes and rates down by MAVLink message name
+(`received_bytes_by_message`, `transmitted_bytes_by_message`,
+`rx_bps_by_message`, `tx_bps_by_message`) using the same sampler and window;
+idle message types are omitted from the rate maps.
 The browser only formats this snapshot, never estimates rates from its
 filtered/collapsed telemetry stream or HTTP response sizes.
 

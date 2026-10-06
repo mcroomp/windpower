@@ -13,6 +13,7 @@ from typing import Any
 from .messages import (
     MavAutopilot,
     MavCmd,
+    MavDataStream,
     MavModeFlag,
     MavParamType,
     MavResult,
@@ -20,6 +21,7 @@ from .messages import (
     MavType,
     Message,
     RawMessage,
+    RequestDataStream,
     decode_enum,
     decode_message,
     encode_enum,
@@ -218,6 +220,18 @@ class LinkHubClient:
                 for field in fields(message)
             }
         return self._send_raw(message_name, payload)
+
+    def request_data_stream(self, stream: MavDataStream, rate_hz: int) -> str:
+        """Start (or retune) a legacy telemetry stream group; ``rate_hz`` 0 stops it."""
+        return self.send_message(
+            RequestDataStream(
+                target_system=self._target_system,
+                target_component=self._target_component,
+                req_stream_id=stream,
+                req_message_rate=rate_hz,
+                start_stop=1 if rate_hz > 0 else 0,
+            )
+        )
 
     def command(
         self,

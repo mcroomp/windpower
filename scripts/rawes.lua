@@ -82,7 +82,7 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
   RAWES_KD_EL   In-plane position rate-D gain              [rad/s/(m/s)]  default 0.0
   RAWES_CWMAX   Position rate saturation                   [rad/s]        default 0.6
   RAWES_SLW     Elevation/body_z slew rate limit           [rad/s]        default 0.40
-  RAWES_TEL_HZ  Diagnostic NVF telemetry emission rate     [Hz]           default 2.0
+  RAWES_TEL_HZ  Diagnostic telemetry (DEBUG_FLOAT_ARRAY) rate   [Hz]           default 2.0
   RAWES_YFF_MAX Yaw trim clamp upper bound                 [throttle]     default 0.7
   RAWES_YFF_TAU Yaw trim low-pass time constant            [s]            default 0.3
   RAWES_TRP     Tension feedforward ramp time constant     [s]            default 2.0
@@ -563,9 +563,9 @@ local function update_disarmed_neutral_hold(mode, armed)
     end
 end
 
--- Rate gate for diagnostic NVF telemetry (RAWES_TEL_HZ).  Returns true and
+-- Rate gate for diagnostic telemetry (RAWES_TEL_HZ).  Returns true and
 -- advances the timer when it is time to emit; returns false otherwise.
--- All diagnostic NVFs (YFF_T/U/GZ, etc.) share this single timer so they
+-- All diagnostics (YFF_T/U/GZ, etc.) share this single timer so they
 -- are always emitted together at a consistent rate.
 local function _nvf_due(now)
     if _nvf_last_ms == nil or (now - _nvf_last_ms) >= (1000.0 / TEL_HZ) then
@@ -575,7 +575,11 @@ local function _nvf_due(now)
     return false
 end
 
--- Shared diagnostic NVF state and single emitter.
+-- Shared diagnostic state and single emitter.  All diagnostics go out as one
+-- MAVLink DEBUG_FLOAT_ARRAY (see groundstation/rawes_diag.py, which owns this
+-- schema): data[0] is a bitmask of the keys that were set, data[i] holds
+-- _diag_nvf_keys[i].  Keep this list in sync with DIAG_KEYS there and in
+-- linkhub-ui/src/diag-array.ts; append new keys at the end.
 local _diag_nvf = {}
 local _diag_nvf_keys = {
     "YFF_T", "YFF_U", "YFF_GZ",           -- yaw trim observer
@@ -583,10 +587,19 @@ local _diag_nvf_keys = {
     "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
     "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded thrust
     "OL_TEN",                            -- ramped tension feedforward [N]
-    "OL_EL",                             -- current rate-limited elevation angle [rad]
-    "BZG_N", "BZG_E", "BZG_D",           -- body_z_eq goal (NED unit vector)
+    -- OL_EL and BZG_N/E/D are still stored by _diag_set (the simtest mock reads
+    -- them in-process) but are deliberately not sent over MAVLink: nothing
+    -- consumes them on the wire and SITL takes elevation/bz_eq from the mediator.
     "ANCH_N", "ANCH_E", "ANCH_D"        -- resolved anchor NED offset from EKF origin [m]
 }
+local _DEBUG_FLOAT_ARRAY_MSG_ID = 350
+local _DIAG_ARRAY_ID   = 1
+local _DIAG_ARRAY_NAME = "RAWES_DIAG"
+-- send_chan targets one channel (unlike gcs:send_named_float, which broadcasts)
+-- and raises on a channel beyond the build's MAVLINK_COMM_NUM_BUFFERS, so try
+-- each slot under pcall.  Slots without a GCS return nil and are skipped.
+local _DIAG_CHANNELS = 6
+local _DIAG_PACK_FMT = "<I8I2c10" .. string.rep("f", #_diag_nvf_keys + 1)
 
 local function _diag_set(name, value)
     _diag_nvf[name] = value
@@ -594,12 +607,24 @@ end
 
 local function _diag_emit(now)
     if not _nvf_due(now) then return end
+    local mask = 0
+    local values = {}
     for i = 1, #_diag_nvf_keys do
-        local k = _diag_nvf_keys[i]
-        local v = _diag_nvf[k]
+        local v = _diag_nvf[_diag_nvf_keys[i]]
         if v ~= nil then
-            gcs:send_named_float(k, v)
+            mask = mask | (1 << (i - 1))
+            values[i + 1] = v
+        else
+            values[i + 1] = 0.0
         end
+    end
+    values[1] = mask + 0.0
+    local now_ms = type(now) == "number" and math.floor(now) or now:toint()
+    local payload = string.pack(
+        _DIAG_PACK_FMT, now_ms * 1000, _DIAG_ARRAY_ID, _DIAG_ARRAY_NAME,
+        table.unpack(values))
+    for chan = 0, _DIAG_CHANNELS - 1 do
+        pcall(mavlink.send_chan, chan, _DEBUG_FLOAT_ARRAY_MSG_ID, payload)
     end
 end
 

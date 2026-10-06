@@ -26,12 +26,10 @@ from .constants import (
     CommandAck,
     EscTelemetry,
     PidTuning,
-    RequestDataStream,
     RcChannels,
     CommandLong,
     decode_message,
     Heartbeat,
-    SetAttitudeTarget,
     Statustext,
     GB4008_KV, GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
@@ -254,12 +252,7 @@ def _print_status(session: LinkHubClient) -> None:
     print(f"\n{sep}")
     print("SERVO OUTPUTS")
     print(sep)
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.RC_CHANNELS,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     srv, cursor = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
     if srv:
         for i in range(1, 13):

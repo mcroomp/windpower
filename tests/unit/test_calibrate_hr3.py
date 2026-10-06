@@ -157,6 +157,8 @@ def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
 
         def send_message(self, _message):
             pass
+        def request_data_stream(self, _stream, _rate_hz):
+            pass
 
         def current_cursor(self):
             return "v1:10"
@@ -200,6 +202,8 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
             }
 
         def send_message(self, _message):
+            pass
+        def request_data_stream(self, _stream, _rate_hz):
             pass
 
         def command(self, *_args, **_kwargs):
@@ -302,6 +306,8 @@ def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(capsys):
 
         def send_message(self, _message):
             pass
+        def request_data_stream(self, _stream, _rate_hz):
+            pass
 
         def get_param(self, _name):
             return None
@@ -356,6 +362,8 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
             }
 
         def send_message(self, _message):
+            pass
+        def request_data_stream(self, _stream, _rate_hz):
             pass
 
         def command(self, *_args, **_kwargs):
@@ -451,6 +459,8 @@ def test_safety_shutdown_force_disarms_when_normal_disarm_fails(monkeypatch):
 
         def send_message(self, _message):
             pass
+        def request_data_stream(self, _stream, _rate_hz):
+            pass
 
     monkeypatch.setattr(calibrate_run, "_send_set_servo", lambda *_args: None)
     monkeypatch.setattr(
@@ -520,6 +530,8 @@ def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
             }.get(name)
 
         def send_message(self, _message):
+            pass
+        def request_data_stream(self, _stream, _rate_hz):
             pass
 
         def current_cursor(self):

@@ -21,12 +21,13 @@ from pathlib import Path
 
 import pytest
 
+from groundstation.rawes_diag import diag_values
 from simulation.telemetry_csv import TelRow, write_csv
 from simulation.mediator_events import MediatorEventLog
 from simulation.simtest_log import BadEventLog
 from linkhub_client.messages import (
     Attitude,
-    NamedValueFloat,
+    DebugFloatArray,
     ServoOutputRaw,
     Statustext,
     decode_message,
@@ -80,10 +81,11 @@ def run_observation_loop(
                 log.debug("SITL t=%.1fs: %s", t_rel, text)
             case ServoOutputRaw() as servo:
                 pwm[0] = yaw_motor_pwm_from_servo_output(servo, default=pwm[0])
-            case NamedValueFloat(name=name, value=value):
-                mapped = nvf_map.get(name)
-                if mapped is not None:
-                    nvf_latest[mapped] = value
+            case DebugFloatArray(array_id=array_id, data=data):
+                for name, value in diag_values(array_id, data).items():
+                    mapped = nvf_map.get(name)
+                    if mapped is not None:
+                        nvf_latest[mapped] = value
             case Attitude() as att:
                 rows.append(TelRow(
                     t_sim=t_rel, phase="DYNAMIC",
@@ -104,7 +106,7 @@ def run_observation_loop(
         return None
 
     observe(ctx, settle_s + observe_s + timeout_margin_s, handle,
-        msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "NAMED_VALUE_FLOAT"])
+        msg_types=["ATTITUDE", "STATUSTEXT", "SERVO_OUTPUT_RAW", "DEBUG_FLOAT_ARRAY"])
     return obs, rows
 
 

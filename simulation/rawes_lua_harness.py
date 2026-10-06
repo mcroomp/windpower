@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 from lupa import lua54
 
+from groundstation.rawes_diag import diag_values
 from linkhub_client.messages import MavCmd, MavResult, NamedValueFloat, NamedValueInt
 
 # Wire ids of the MAVLink enumerations the Lua mock exchanges with rawes.lua.
@@ -496,3 +497,22 @@ class RawesLua:
                 "target_component": target_component,
             })
         return acks
+
+    @property
+    def diag_array(self) -> tuple[int, str, tuple[float, ...]] | None:
+        """Latest diagnostic DEBUG_FLOAT_ARRAY Lua sent as ``(array_id, name, data)``,
+        decoded like LinkHub would (``data`` is the full wire payload's floats).
+        ``None`` until Lua has emitted one."""
+        hex_payload = self._mock.diag_array_hex
+        if hex_payload is None:
+            return None
+        payload = bytes.fromhex(hex_payload)
+        _time_usec, array_id, raw_name = struct.unpack_from("<QH10s", payload)
+        count = (len(payload) - 20) // 4
+        data = struct.unpack_from(f"<{count}f", payload, 20)
+        return array_id, raw_name.rstrip(b"\x00").decode("ascii"), data
+
+    def diag_values(self) -> dict[str, float]:
+        """Keys the latest diagnostic array reports as set (empty before the first)."""
+        diag = self.diag_array
+        return {} if diag is None else diag_values(diag[0], diag[2])

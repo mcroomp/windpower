@@ -24,6 +24,7 @@ from linkhub_client.messages import (
     PidTuningAxis,
     decode_message,
 )
+from groundstation.rawes_diag import diag_values
 from groundstation.rawes_modes import (
     CMD_ENTER_GUIDED,
     CMD_ENTER_PASSIVE,
@@ -54,8 +55,7 @@ from .constants import (
     LinkHubClient,
     NamedValueFloat,
     CommandLong,
-    RequestDataStream,
-    SetAttitudeTarget,
+    DebugFloatArray,
     Statustext,
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
@@ -71,6 +71,15 @@ from .util import (
     _fmt, _log_path, _parse_kv_list, _parse_flags,
     _RunLog, _esc_check, _poll_keys,
 )
+
+# Diagnostic-array key -> observation-state slot (None: not displayed).
+_DIAG_STATE_KEYS = {
+    "YFF_T": "yff_t", "YFF_U": "yff_u", "YFF_GZ": "yff_gz",
+    "OL_RSP": "ol_rsp", "OL_PSP": "ol_psp", "OL_YSP": "ol_ysp",
+    "OL_RER": "ol_rer", "OL_PER": "ol_per", "OL_YER": "ol_yer",
+    "OL_AP": "ol_ap", "OL_AI": "ol_ai", "OL_AD": "ol_ad",
+    "OL_COL": "ol_col", "OL_TEN": "ol_ten",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -433,12 +442,7 @@ def _wait_for_passive_ekf_settle(
 
     Lua holds the attitude captured by ENTER_GUIDED throughout this wait.
     """
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.EXTRA1,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.EXTRA1, 10)
     deadline = time.monotonic() + timeout_s
     quiet_since: float | None = None
     last_attitude_at: float | None = None
@@ -512,12 +516,7 @@ def _configure_passive_startup_telemetry(session: LinkHubClient) -> None:
         MavDataStream.EXTRA1,
         MavDataStream.RC_CHANNELS,
     ):
-        session.send_message(RequestDataStream(
-            target_system=session._target_system,
-            target_component=session._target_component,
-            req_stream_id=stream,
-            req_message_rate=25,
-        ))
+        session.request_data_stream(stream, 25)
     for message_id in (
         AttitudeQuaternion.MAVLINK_ID,
         AttitudeTarget.MAVLINK_ID,
@@ -726,12 +725,7 @@ def _observation_loop(session: LinkHubClient, *,
     Returns (n_rows, aborted).
     """
     for stream, hz in streams:
-        session.send_message(RequestDataStream(
-            target_system=session._target_system,
-            target_component=session._target_component,
-            req_stream_id=stream,
-            req_message_rate=hz,
-        ))
+        session.request_data_stream(stream, hz)
 
     if setup_hook is not None:
         setup_hook()
@@ -1254,7 +1248,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                 _fmt(state["pid_yaw_des"]), _fmt(state["pid_yaw_ach"]), _fmt(state["pid_yaw_ff"]), _fmt(state["pid_yaw_p"]), _fmt(state["pid_yaw_i"]), _fmt(state["pid_yaw_d"]),
                 _fmt(_erpm), _fmt(_mech), _fmt(_rotor),
             ]
-        if isinstance(msg, SetAttitudeTarget):
+        if isinstance(msg, AttitudeTarget):
             nonlocal protocol_last_target_q
             att_r, att_p, att_y = _quat_to_rpy_deg(msg.q)
             state["att_target_roll"] = att_r
@@ -1328,39 +1322,14 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                     cutoff = t_rel - mot_window_s
                     while state["mrpm_hist"] and state["mrpm_hist"][0][0] < cutoff:
                         state["mrpm_hist"].pop(0)
-        elif isinstance(msg, NamedValueFloat):
-            nm = msg.name
-            if nm == "YFF_T":
-                state["yff_t"] = float(msg.value)
-                state["yff_t_ts"] = t_rel
-            elif nm == "YFF_U":
-                state["yff_u"] = float(msg.value)
-                state["yff_u_ts"] = t_rel
-            elif nm == "YFF_GZ":
-                state["yff_gz"] = float(msg.value)
-                state["yff_gz_ts"] = t_rel
-            elif nm == "OL_RSP":
-                state["ol_rsp"] = float(msg.value)
-            elif nm == "OL_PSP":
-                state["ol_psp"] = float(msg.value)
-            elif nm == "OL_YSP":
-                state["ol_ysp"] = float(msg.value)
-            elif nm == "OL_RER":
-                state["ol_rer"] = float(msg.value)
-            elif nm == "OL_PER":
-                state["ol_per"] = float(msg.value)
-            elif nm == "OL_YER":
-                state["ol_yer"] = float(msg.value)
-            elif nm == "OL_AP":
-                state["ol_ap"] = float(msg.value)
-            elif nm == "OL_AI":
-                state["ol_ai"] = float(msg.value)
-            elif nm == "OL_AD":
-                state["ol_ad"] = float(msg.value)
-            elif nm == "OL_COL":
-                state["ol_col"] = float(msg.value)
-            elif nm == "OL_TEN":
-                state["ol_ten"] = float(msg.value)
+        elif isinstance(msg, DebugFloatArray):
+            for nm, value in diag_values(msg.array_id, msg.data).items():
+                state_key = _DIAG_STATE_KEYS.get(nm)
+                if state_key is None:
+                    continue
+                state[state_key] = value
+                if state_key in ("yff_t", "yff_u", "yff_gz"):
+                    state[f"{state_key}_ts"] = t_rel
         elif isinstance(msg, PidTuning):
             axis = msg.axis
             prefix = {
@@ -1614,7 +1583,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                        "ATTITUDE_TARGET", "ATTITUDE_QUATERNION",
                        "LOCAL_POSITION_NED", "PID_TUNING",
                        "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
-                       "NAMED_VALUE_FLOAT",
+                       "DEBUG_FLOAT_ARRAY",
                        _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],
             streams=[
                 (MavDataStream.EXTRA1,          25),
@@ -1647,18 +1616,8 @@ def _run_observation(session: LinkHubClient, mode_name: str,
             param1=float(RcChannels.MAVLINK_ID),
             param2=0.0,
         ))
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.EXTENDED_STATUS,
-        req_message_rate=2,
-    ))
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=MavDataStream.EXTRA3,
-        req_message_rate=2,
-    ))
+    session.request_data_stream(MavDataStream.EXTENDED_STATUS, 2)
+    session.request_data_stream(MavDataStream.EXTRA3, 2)
 
     # Report final H_YAW_TRIM.
     _tv = session.get_param("H_YAW_TRIM")

@@ -130,6 +130,9 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
         def send_message(self, message):
             self.sent.append(message)
 
+        def request_data_stream(self, stream, rate_hz):
+            self.sent.append((stream, rate_hz))
+
         def current_cursor(self):
             return "v1:0"
 
@@ -184,6 +187,8 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
         first = True
 
         def send_message(self, _message):
+            pass
+        def request_data_stream(self, _stream, _rate_hz):
             pass
 
         def current_cursor(self):
@@ -271,6 +276,9 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
         def send_message(self, message):
             if isinstance(message, NamedValueFloat):
                 events.append(("send", message.name, message.value))
+
+        def request_data_stream(self, _stream, _rate_hz):
+            pass
 
         def current_cursor(self):
             return "v1:0"

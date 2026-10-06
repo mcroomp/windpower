@@ -26,6 +26,8 @@ export interface LinkHubStatus {
   transmitted_bytes: number;
   rx_bps: number | null;
   tx_bps: number | null;
+  rx_bps_by_message: Record<string, number>;
+  tx_bps_by_message: Record<string, number>;
   error?: string | null;
   cursor: string;
   generation: string;

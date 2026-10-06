@@ -20,6 +20,7 @@ from linkhub_client.messages import (
     Heartbeat,
     MavAutopilot,
     MavCmd,
+    MavDataStream,
     MavLandedState,
     MavModeFlag,
     MavParamType,
@@ -403,6 +404,22 @@ def test_decode_message_keeps_sensor_flags_including_unknown_names() -> None:
     )
     assert status.onboard_control_sensors_enabled == frozenset()
     assert status.onboard_control_sensors_health == {MavSysStatusSensor.SENSOR_GPS}
+
+
+def test_request_data_stream_starts_the_stream_unless_the_rate_is_zero(monkeypatch) -> None:
+    client = LinkHubClient("http://127.0.0.1:8999")
+    sent = []
+    monkeypatch.setattr(client, "_send_raw", lambda name, payload: sent.append((name, payload)))
+
+    client.request_data_stream(MavDataStream.EXTRA1, 25)
+    client.request_data_stream(MavDataStream.EXTRA3, 0)
+
+    assert [(payload["req_message_rate"], payload["start_stop"]) for _, payload in sent] == [
+        (25, 1),
+        (0, 0),
+    ]
+    assert sent[0][0] == "REQUEST_DATA_STREAM"
+    assert sent[0][1]["req_stream_id"] == {"type": "MAV_DATA_STREAM_EXTRA1"}
 
 
 def test_generated_messages_encode_enumerations_and_bitmasks_for_requests() -> None:

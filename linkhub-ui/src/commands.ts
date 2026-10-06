@@ -4,6 +4,7 @@ import {
   matchesTarget,
   type ConfigProvider,
 } from "./config-core";
+import { diagValue, DIAG_ARRAY_NAME } from "./diag-array";
 import { formatCopterMode } from "./modes";
 import { isArmed, parseFlags } from "./mav";
 import { parseRunPassive, type PassiveController } from "./passive";
@@ -120,10 +121,12 @@ export class CommandRunner {
         this.write("  swash     unavailable (H_COL_MIN/MAX read failed)", "error");
       }
     }
-    const yawMotor = this.telemetry.get("NAMED_VALUE_FLOAT", "rx", "YFF_U");
-    const motorCommand = yawMotor?.fields.value;
+    const motorCommand = diagValue(
+      this.telemetry.get("DEBUG_FLOAT_ARRAY", "rx", DIAG_ARRAY_NAME),
+      "YFF_U",
+    );
     this.write(
-      `  motor     DShot/S9=${String(servos?.fields.servo9_raw ?? "n/a")}  YFF_U=${typeof motorCommand === "number"
+      `  motor     DShot/S9=${String(servos?.fields.servo9_raw ?? "n/a")}  YFF_U=${motorCommand !== undefined
         ? `${(motorCommand * 100).toFixed(1)}%`
         : "unavailable"}`,
     );

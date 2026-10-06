@@ -1,6 +1,9 @@
 import type { LinkHubApi } from "./api";
 import { heartbeatState } from "./mav";
-import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
+import {
+  TELEMETRY_PROFILES,
+  type TelemetryProfile,
+} from "./telemetry-rates";
 import type { LinkHubStatus, MessageRecord } from "./types";
 
 type Listener = (record: MessageRecord) => void;
@@ -32,11 +35,27 @@ export class TelemetryStore {
   private currentStatus: LinkHubStatus | null = null;
   private running: Promise<void> | null = null;
   private configuredGeneration: string | null = null;
+  private currentProfile: TelemetryProfile = "usb";
 
   constructor(private readonly api: LinkHubApi) {}
 
   get status(): LinkHubStatus | null {
     return this.currentStatus;
+  }
+
+  get profile(): TelemetryProfile {
+    return this.currentProfile;
+  }
+
+  async setProfile(profile: TelemetryProfile): Promise<void> {
+    if (profile === this.currentProfile) {
+      return;
+    }
+    this.currentProfile = profile;
+    this.configuredGeneration = null;
+    if (this.currentStatus) {
+      await this.configureDisplayTelemetry(this.currentStatus);
+    }
   }
 
   onStatus(listener: StatusListener): () => void {
@@ -216,7 +235,7 @@ export class TelemetryStore {
       || status.generation === this.configuredGeneration) {
       return;
     }
-    await this.api.setMessageRates(DISPLAY_TELEMETRY_RATES);
+    await this.api.setMessageRates(TELEMETRY_PROFILES[this.currentProfile]);
     this.configuredGeneration = status.generation;
   }
 

@@ -82,16 +82,111 @@ h2 {
 }
 
 .link-status {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
 }
 
+.connection-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.connection-controls label {
+  color: #7591b8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#telemetry-profile {
+  padding: 4px 22px 4px 8px;
+  border: 1px solid #40506b;
+  border-radius: 999px;
+  color: #cbd8e9;
+  background: #111a29;
+  font: 600 11px ui-monospace, "Cascadia Code", monospace;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#telemetry-profile:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 #link-throughput {
+  padding: 0;
+  border: 0;
+  background: none;
   color: #aebdd2;
   font: 11px ui-monospace, "Cascadia Code", monospace;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+#link-throughput:hover,
+#link-throughput[aria-expanded="true"] {
+  color: #e8edf5;
+}
+
+#link-throughput::after {
+  content: " \25BE";
+}
+
+#link-throughput[aria-expanded="true"]::after {
+  content: " \25B4";
+}
+
+.link-details {
+  position: absolute;
+  z-index: 10;
+  top: 100%;
+  right: 0;
+  max-height: 60vh;
+  margin-top: 6px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid rgba(70, 90, 121, 0.7);
+  border-radius: 8px;
+  background: rgba(7, 12, 21, 0.95);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  color: #cbd8e9;
+  font: 11px ui-monospace, "Cascadia Code", monospace;
+}
+
+.link-details[hidden] {
+  display: none;
+}
+
+.link-details table {
+  border-collapse: collapse;
+}
+
+.link-details th,
+.link-details td {
+  padding: 2px 0 2px 16px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.link-details th:first-child,
+.link-details td:first-child {
+  padding-left: 0;
+  text-align: left;
+}
+
+.link-details th {
+  color: #7591b8;
+  font-weight: 700;
+}
+
+.link-details .empty {
+  color: #8fa2bc;
 }
 
 .badge.online,

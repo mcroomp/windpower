@@ -1,12 +1,19 @@
 import "./styles.css";
 import { LinkHubApi } from "./api";
-import { formatLinkThroughput } from "./link-throughput";
+import { diagValue, DIAG_ARRAY_NAME, isDiagRecord } from "./diag-array";
+import {
+  formatKbps,
+  formatLinkThroughput,
+  messageThroughputRows,
+} from "./link-throughput";
+import type { LinkHubStatus } from "./types";
 import { formatCopterMode } from "./modes";
 import { isArmed } from "./mav";
 import { PassiveController, type PassivePhase } from "./passive";
 import { VehicleScene } from "./scene";
 import { decodeH3Swashplate, swashControlPositions } from "./swashplate";
 import { TelemetryStore } from "./telemetry";
+import type { TelemetryProfile } from "./telemetry-rates";
 import { Terminal } from "./terminal";
 import { MOTOR_TO_ROTOR_GEAR_RATIO } from "./vehicle-motion";
 
@@ -23,7 +30,9 @@ const telemetry = new TelemetryStore(api);
 const output = required<HTMLElement>("#terminal-output");
 const operationState = required<HTMLElement>("#operation-state");
 const connectionState = required<HTMLElement>("#connection-state");
-const linkThroughput = required<HTMLElement>("#link-throughput");
+const telemetryProfile = required<HTMLSelectElement>("#telemetry-profile");
+const linkThroughput = required<HTMLButtonElement>("#link-throughput");
+const linkDetails = required<HTMLElement>("#link-details");
 const overlay = required<HTMLElement>("#telemetry-overlay");
 const form = required<HTMLFormElement>("#terminal-form");
 const input = required<HTMLInputElement>("#terminal-input");
@@ -58,7 +67,10 @@ function updateOverlay(): void {
   const status = telemetry.status;
   const attitude = telemetry.get("ATTITUDE");
   const servos = telemetry.get("SERVO_OUTPUT_RAW");
-  const yawMotor = telemetry.get("NAMED_VALUE_FLOAT", "rx", "YFF_U");
+  const yawMotor = diagValue(
+    telemetry.get("DEBUG_FLOAT_ARRAY", "rx", DIAG_ARRAY_NAME),
+    "YFF_U",
+  );
   const rpm = telemetry.get("RPM");
   const degrees = (value: unknown) => (
     typeof value === "number" ? (value * 180 / Math.PI).toFixed(1) : "n/a"
@@ -67,8 +79,8 @@ function updateOverlay(): void {
   const armed = isArmed(status);
   const motorCommand = !armed
     ? "inactive"
-    : typeof yawMotor?.fields.value === "number"
-    ? `${(yawMotor.fields.value * 100).toFixed(1)}%`
+    : yawMotor !== undefined
+    ? `${(yawMotor * 100).toFixed(1)}%`
     : "n/a";
   const motorRpm = typeof rpm?.fields.rpm1 === "number" && rpm.fields.rpm1 >= 0
     ? rpm.fields.rpm1
@@ -134,6 +146,49 @@ function scheduleOverlay(): void {
     }, 100);
   }
 }
+function renderLinkThroughput(status: LinkHubStatus | null): void {
+  linkThroughput.textContent = formatLinkThroughput(status);
+  const rows = messageThroughputRows(status);
+  const table = document.createElement("table");
+  const head = table.createTHead().insertRow();
+  for (const label of ["Message", "RX kbps", "TX kbps"]) {
+    head.append(Object.assign(document.createElement("th"), { textContent: label }));
+  }
+  const body = table.createTBody();
+  for (const row of rows) {
+    const tr = body.insertRow();
+    for (const text of [row.message, formatKbps(row.rxBps), formatKbps(row.txBps)]) {
+      tr.insertCell().textContent = text;
+    }
+  }
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = status?.connected ? "No traffic in the last 3 s" : "Not connected";
+    linkDetails.replaceChildren(empty);
+  } else {
+    linkDetails.replaceChildren(table);
+  }
+}
+
+function setLinkDetailsOpen(open: boolean): void {
+  linkDetails.hidden = !open;
+  linkThroughput.setAttribute("aria-expanded", String(open));
+}
+linkThroughput.addEventListener("click", () => setLinkDetailsOpen(linkDetails.hidden));
+document.addEventListener("click", (event) => {
+  if (!linkDetails.hidden && event.target instanceof Node
+    && !linkThroughput.contains(event.target) && !linkDetails.contains(event.target)) {
+    setLinkDetailsOpen(false);
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !linkDetails.hidden) {
+    setLinkDetailsOpen(false);
+  }
+});
+renderLinkThroughput(null);
+
 telemetry.onRecord((record) => {
   if (record.direction === "rx" && (
     record.message === "HEARTBEAT"
@@ -142,20 +197,20 @@ telemetry.onRecord((record) => {
     || record.message === "ATTITUDE_TARGET"
     || record.message === "SERVO_OUTPUT_RAW"
     || record.message === "RPM"
-    || (record.message === "NAMED_VALUE_FLOAT" && record.fields.name === "YFF_U")
+    || isDiagRecord(record)
   )) {
     scheduleOverlay();
   }
 });
 telemetry.onGeneration(() => {
-  linkThroughput.textContent = formatLinkThroughput(null);
+  renderLinkThroughput(null);
   scheduleOverlay();
   connectionState.textContent = "reconnecting";
   connectionState.className = "badge offline";
 });
 telemetry.onConnection((connected, error) => {
   if (!connected) {
-    linkThroughput.textContent = formatLinkThroughput(null);
+    renderLinkThroughput(null);
   }
   scheduleOverlay();
   connectionState.textContent = connected ? "connected" : "offline";
@@ -166,8 +221,22 @@ telemetry.onConnection((connected, error) => {
     write("Telemetry connection restored.");
   }
 });
-telemetry.onStatus((status) => {
-  linkThroughput.textContent = formatLinkThroughput(status);
+telemetry.onStatus(renderLinkThroughput);
+telemetryProfile.addEventListener("change", async () => {
+  const profile = telemetryProfile.value as TelemetryProfile;
+  telemetryProfile.disabled = true;
+  try {
+    await telemetry.setProfile(profile);
+    write(`Telemetry profile changed to ${profile}.`);
+  } catch (error) {
+    write(
+      `Telemetry profile change failed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  } finally {
+    telemetryProfile.value = telemetry.profile;
+    telemetryProfile.disabled = false;
+  }
 });
 
 while (!telemetry.status) {
