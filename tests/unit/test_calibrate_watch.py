@@ -28,6 +28,8 @@ class _Session:
 
     def send_message(self, _message):
         pass
+    def request_data_stream(self, _stream, _rate_hz):
+        pass
 
     def current_cursor(self):
         return "v1:0"

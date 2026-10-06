@@ -25,7 +25,7 @@ Usage
 
 import math
 
-from linkhub_client.messages import NamedValueInt
+from linkhub_client.messages import MavCmd, MavResult, NamedValueInt
 
 # ── Mode numbers (RAWES_MODE script-generated param) ──────────────────────────
 
@@ -42,10 +42,9 @@ MODE_TAKEOFF  = 5   # fixed level attitude + altitude-PID climb toward RAWES_ALT
 # rawes.lua blocks these IDs from ArduPilot's own command handler and sends the
 # COMMAND_ACK itself; see the command table in rawes.lua's header.
 
-CMD_ENTER_GUIDED  = 31010  # MAV_CMD_USER_1: capture attitude, enter GUIDED_NOGPS holding it
-CMD_ENTER_PASSIVE = 31011  # MAV_CMD_USER_2: capture passive anchor; param1 = yaw-trim seed
+CMD_ENTER_GUIDED  = MavCmd.USER_1  # (31010) capture attitude, enter GUIDED_NOGPS holding it
+CMD_ENTER_PASSIVE = MavCmd.USER_2  # (31011) capture passive anchor; param1 = yaw-trim seed
 NO_YAW_TRIM_SEED  = -1.0   # ENTER_PASSIVE param1: keep the adaptive yaw-trim observer
-MAV_RESULT_ACCEPTED = 0
 
 
 def enter_passive_params(yaw_trim_seed: float | None = None) -> list[float]:
@@ -55,16 +54,16 @@ def enter_passive_params(yaw_trim_seed: float | None = None) -> list[float]:
 
 def send_rawes_command(
     gcs,
-    command: int,
+    command: MavCmd,
     params: list[float] | None = None,
     *,
     timeout: float = 10.0,
 ) -> None:
     """Send a RAWES Lua command and raise unless Lua acknowledges ACCEPTED."""
     result = gcs.command(command, params or [], timeout=timeout)
-    if int(result["result"]) != MAV_RESULT_ACCEPTED:
+    if result["result"] != MavResult.ACCEPTED:
         raise RuntimeError(
-            f"RAWES command {command} rejected with MAV_RESULT {result['result']}"
+            f"RAWES command {command} rejected with {result['result']}"
         )
 
 
@@ -124,18 +123,13 @@ def anchor_ned_to_gps(dn_m: float, de_m: float, dd_m: float) -> tuple[int, int, 
 def send_anchor_ned(sim, dn_m: float, de_m: float, dd_m: float) -> None:
     """Send the anchor at NED offset (dn_m, de_m, dd_m) from MOCK_ORIGIN_* via NAMED_VALUE_INT.
 
-    `sim` may expose `send_message(NamedValueInt(...))` or the older
-    `send_named_int(name, value)` compatibility shim.
+    `sim` is anything with `send_message(msg)`, such as a LinkHubClient or the
+    Lua harness. The values are int32 to keep ArduPilot's own Location precision.
     """
     lat_e7, lon_e7, alt_cm = anchor_ned_to_gps(dn_m, de_m, dd_m)
-    if hasattr(sim, "send_message"):
-        sim.send_message(NamedValueInt(NV_ANCHOR_LAT_KEY, lat_e7))
-        sim.send_message(NamedValueInt(NV_ANCHOR_LON_KEY, lon_e7))
-        sim.send_message(NamedValueInt(NV_ANCHOR_ALT_KEY, alt_cm))
-        return
-    sim.send_named_int(NV_ANCHOR_LAT_KEY, lat_e7)
-    sim.send_named_int(NV_ANCHOR_LON_KEY, lon_e7)
-    sim.send_named_int(NV_ANCHOR_ALT_KEY, alt_cm)
+    sim.send_message(NamedValueInt(name=NV_ANCHOR_LAT_KEY, value=lat_e7))
+    sim.send_message(NamedValueInt(name=NV_ANCHOR_LON_KEY, value=lon_e7))
+    sim.send_message(NamedValueInt(name=NV_ANCHOR_ALT_KEY, value=alt_cm))
 
 
 

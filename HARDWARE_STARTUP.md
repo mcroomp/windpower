@@ -73,6 +73,93 @@ Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
 
+### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
+
+Pixhawk native USB (`VID:PID=3162:0053`, serial `160031001751343131363538`,
+COM5/COM6), ArduCopter 4.7.1, with the swash servos and the output-9 yaw motor
+disconnected and no battery connected (so arming needs `--force`). The running
+LinkHub service was replaced after flushing its journal: stopped, release binary
+rebuilt, restarted with the same arguments (`serve --connection auto --baud 115200
+--port 8999`). The service now speaks the typed-enum JSON contract
+([design/linkhub.md](design/linkhub.md#mavlink-value-representation)).
+
+Read-only checks passed: typed link and component status, capabilities, the full
+1,078-parameter list, MAVFTP listing of `/APM/scripts`, `calibrate status`, and
+`linkhub query` (`armed`, `statustext`, `param`, `show --json`) on the recorded
+journal. No frames were dropped.
+
+`run passive --duration 8` without `--force` was refused by ArduPilot:
+`Arm: Hardware safety switch` and `Arm: Compass not calibrated`
+(`BRD_SAFETY_DEFLT=1`); the cleanup left the vehicle disarmed in ACRO with the full
+canonical safe-off state verified. `run passive --duration 8 --force` then passed:
+arm accepted, `Runup Complete`, `ENTER_GUIDED` and `ENTER_PASSIVE` (`MAV_CMD_USER_1`
+and `USER_2`) accepted, 200 observation rows, disarm accepted, and safe-off
+verified again (`H_YAW_TRIM` returned to 0).
+
+Findings: `SYSID_THISMAV` does not exist on 4.7.1 (the parameter is `MAV_SYSID`),
+so it is not a valid "parameters ready" probe. `calibrate status` missed the
+1 Hz HEARTBEAT on a busy link because `calibrate.messages.read_one` treated
+LinkHub's early empty long-poll as a timeout; it now polls until its deadline.
+The service was later redeployed with the dialect generated from ArduPilot's own
+Copter-4.7.1 definitions; the read-only checks were repeated on that build, the
+armed run was not.
+
+### 2026-10-06 ArduCopter 4.7.1 passive-run verification
+
+The flight controller was updated from ArduCopter 4.7.0 beta
+(`97775f82`) to official ArduCopter 4.7.1 (`dbe79216`). Live
+`AUTOPILOT_VERSION` reported `flight_sw_version=0x040701FF`.
+
+With actuators unplugged, the shared TypeScript CLI successfully completed:
+
+```text
+.\rawes run passive --duration 8
+```
+
+The LinkHub journal from cursor `v1:332692` showed normal arm acceptance,
+channel-8 interlock assertion, ArduPilot `Runup Complete`, accepted
+`ENTER_GUIDED` and `ENTER_PASSIVE` commands, repeated `passive_hold` commands
+for the bounded run, then canonical cleanup. Final live state was disarmed
+ACRO with `RAWES_MODE=0`, neutral swash outputs, `SERVO9_FUNCTION=36`, and
+output 9 at 1000 us.
+
+The preceding 4.7.0-beta attempt armed after the Lua channel-8 low-override fix
+but never emitted `Runup Complete`, so the required passive-start gate timed
+out. The same gate succeeds on the documented 4.7.1 hardware firmware.
+
+### 2026-10-06 LinkHub telemetry-radio discovery verification
+
+Connected the FTDI telemetry radio on COM6 (`VID:PID=0403:6015`, serial
+`D30IKLCCA`) and started the rebuilt LinkHub service on port 8999 without a
+baud restriction. LinkHub opened COM6 once, rejected 115200 after the expected
+read timeout, changed the same open handle to 57600, and received a heartbeat.
+Live status reported `serial:COM6:57600`, `ready=true`, no current error, and
+zero consecutive failures. A three-second health sample received 336 MAVLink
+messages and 13,707 bytes.
+
+The vehicle was observed disarmed in ACRO. This was a read-only,
+ground-service verification: no arming command, parameter write, or Lua
+deployment was performed. Lua was not uploaded through the FTDI/telemetry
+radio, and the complete canonical safe-off parameter set was not reverified
+over this lower-bandwidth connection.
+
+### 2026-10-06 Lua deployment through LinkHub
+
+Ran the focused Lua unit surface before deployment: 63 tests passed. Attached
+the calibration client to the existing LinkHub service on port 8999. LinkHub
+auto-discovery selected `serial:COM4:115200`; both LinkHub and
+`serial.tools.list_ports` identified it as native Pixhawk USB
+(`VID:PID=3162:0053`, serial `25001C001651333337363133`, location
+`1-5:x.2`). The paired COM5 interface reported the same board identity.
+
+Uploaded `scripts/rawes.lua` through LinkHub MAVFTP and verified the remote
+`/APM/scripts/rawes.lua` size as 78,806 bytes. Rebooted the flight controller
+through LinkHub and allowed automatic reconnection. Post-reboot status showed
+the vehicle disarmed in ACRO with `RAWES_MODE=0`, `SERVO9_FUNCTION=36`, and
+output 9 at 1000 us. The common disarm cleanup then verified the complete
+canonical safe-off state: disarmed, ACRO, `RAWES_MODE=0`, `H_FLYBAR_MODE=1`,
+`H_SV_MAN=0`, `SERVO9_FUNCTION=36`, `H_YAW_TRIM=0`, and output 9 at 1000 us.
+
 ### 2026-10-06 LinkHub throughput deployment record (preserved factual content)
 
 Rebuilt the LinkHub release binary and restarted only the ground-side service

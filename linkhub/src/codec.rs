@@ -1,16 +1,24 @@
-use std::io::Cursor;
+use std::{collections::HashSet, io::Cursor};
 
-use mavlink::{
-    MAVLinkMessageRaw, MavHeader, MavlinkVersion, Message, ReadVersion,
-    dialects::ardupilotmega::{self, AttitudeTargetTypemask},
+pub use dialect::MavMessage;
+use linkhub_dialect::{
+    MAVLinkMessageRaw, MAVLinkV2MessageRaw, Message,
+    async_peek_reader::AsyncPeekReader,
+    error::{MessageReadError, ParserError},
     peek_reader::PeekReader,
-    read_versioned_raw_message, write_versioned_msg,
+    read_any_raw_message, read_any_raw_message_async,
 };
-use num_traits::FromPrimitive;
+pub use linkhub_dialect::{MavHeader, dialects::ardupilotmega as dialect};
 use serde_json::{Map, Value};
 use thiserror::Error;
+use tokio::io::AsyncRead;
 
-pub type DialectMessage = ardupilotmega::MavMessage;
+/// JSON key that the dialect's serde representation uses to tag the message.
+/// A dialect field literally named `type` is exposed as `mavtype`.
+const MESSAGE_TAG: &str = "type";
+
+// MAVLink v2 incompatibility flag marking a trailing signature block.
+const IFLAG_SIGNED: u8 = 0x01;
 
 #[derive(Debug)]
 pub struct DecodedMessage {
@@ -23,498 +31,186 @@ pub struct DecodedMessage {
     pub message_id: u32,
     pub name: String,
     pub fields: Map<String, Value>,
-    pub message: DialectMessage,
+    pub message: MavMessage,
 }
 
 #[derive(Debug, Error)]
 pub enum CodecError {
-    #[error("invalid MAVLink frame: {0}")]
-    Read(#[from] mavlink::error::MessageReadError),
+    #[error("cannot read MAVLink frame: {0}")]
+    Read(#[from] MessageReadError),
+    #[error("cannot parse MAVLink message: {0}")]
+    Parse(#[from] ParserError),
     #[error("cannot serialize MAVLink message: {0}")]
-    Write(#[from] mavlink::error::MessageWriteError),
-    #[error("cannot decode MAVLink message {message_id}: {source}")]
-    Parse {
-        message_id: u32,
-        source: mavlink::error::ParserError,
-    },
-    #[error("message fields must be a JSON object")]
-    FieldsNotObject,
-    #[error("unsupported outbound MAVLink message {0}")]
-    UnsupportedMessage(String),
-    #[error("missing or invalid field {field} for {message}")]
-    InvalidField {
-        message: String,
-        field: &'static str,
-    },
-    #[error("invalid enum value {value} for {field} in {message}")]
-    InvalidEnum {
-        message: String,
-        field: &'static str,
-        value: u64,
-    },
-    #[error("cannot project MAVLink message as JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("unknown MAVLink message {0:?}")]
+    UnknownMessage(String),
+    #[error("invalid fields for {message}: {reason}")]
+    InvalidFields { message: String, reason: String },
 }
 
 pub fn decode_raw_bytes(bytes: &[u8]) -> Result<DecodedMessage, CodecError> {
     let mut reader = PeekReader::new(Cursor::new(bytes));
-    let raw = read_versioned_raw_message::<DialectMessage, _>(&mut reader, ReadVersion::Any)?;
-    decode_raw(raw)
+    decode_raw(&read_any_raw_message::<MavMessage, _>(&mut reader)?)
 }
 
-pub fn decode_raw(raw: MAVLinkMessageRaw) -> Result<DecodedMessage, CodecError> {
-    let message_id = raw.message_id();
-    let message = DialectMessage::parse(raw.version(), message_id, raw.payload())
-        .map_err(|source| CodecError::Parse { message_id, source })?;
-    let fields = project_fields(&message)?;
-    let (bytes, mavlink_version, signed) = match &raw {
-        MAVLinkMessageRaw::V1(frame) => (frame.raw_bytes().to_vec(), 1, false),
+/// Reads MAVLink v1/v2 frames from an async byte stream.
+///
+/// Corrupt frames are skipped by `mavlink` while resynchronizing. Frames that
+/// pass the CRC but do not decode as a typed message, such as an enum value
+/// outside the dialect, are dropped here without ending the stream.
+pub struct FrameReader<R> {
+    reader: AsyncPeekReader<R>,
+    dropped_frames: u64,
+    reported_ids: HashSet<u32>,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader: AsyncPeekReader::new(reader),
+            dropped_frames: 0,
+            reported_ids: HashSet::new(),
+        }
+    }
+
+    /// Frames dropped since the previous call, which resets the count.
+    pub fn take_dropped_frames(&mut self) -> u64 {
+        std::mem::take(&mut self.dropped_frames)
+    }
+
+    pub async fn recv(&mut self) -> Result<DecodedMessage, CodecError> {
+        loop {
+            let frame = read_any_raw_message_async::<MavMessage, _>(&mut self.reader).await?;
+            match decode_raw(&frame) {
+                Ok(decoded) => return Ok(decoded),
+                Err(error) => {
+                    self.dropped_frames += 1;
+                    if self.reported_ids.insert(frame.message_id()) {
+                        tracing::warn!(
+                            message_id = frame.message_id(),
+                            %error,
+                            "dropping undecodable MAVLink frame"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn decode_raw(frame: &MAVLinkMessageRaw) -> Result<DecodedMessage, CodecError> {
+    let message_id = frame.message_id();
+    let message = MavMessage::parse(frame.version(), message_id, frame.payload())?;
+    let (mavlink_version, raw, signed) = match frame {
+        MAVLinkMessageRaw::V1(frame) => (1, frame.raw_bytes(), false),
         MAVLinkMessageRaw::V2(frame) => (
-            frame.raw_bytes().to_vec(),
             2,
-            frame.incompatibility_flags() & 0x01 != 0,
+            frame.raw_bytes(),
+            frame.incompatibility_flags() & IFLAG_SIGNED != 0,
         ),
     };
 
     Ok(DecodedMessage {
-        raw: bytes,
+        raw: raw.to_vec(),
         mavlink_version,
         signed,
-        system_id: raw.system_id(),
-        component_id: raw.component_id(),
-        sequence: raw.sequence(),
+        system_id: frame.system_id(),
+        component_id: frame.component_id(),
+        sequence: frame.sequence(),
         message_id,
         name: message.message_name().to_owned(),
-        fields,
+        fields: message_fields(&message)?,
         message,
     })
 }
 
-#[allow(deprecated)]
-pub fn encode_message(
+/// The message's field object: `mavlink`'s serde JSON without the type tag.
+///
+/// Enumerations are `{"type": "NAME"}` objects, bitmasks are `"A | B"` strings
+/// (empty when no flag is set), and a dialect field named `type` is `mavtype`.
+pub fn message_fields(message: &MavMessage) -> Result<Map<String, Value>, CodecError> {
+    let Value::Object(mut fields) = serde_json::to_value(message)? else {
+        unreachable!("MavMessage serializes as a tagged object");
+    };
+    fields.remove(MESSAGE_TAG);
+    Ok(fields)
+}
+
+/// Builds a typed message from its dialect name and a field object in the
+/// representation produced by [`message_fields`].
+pub fn message_from_fields(
     name: &str,
     fields: &Map<String, Value>,
-) -> Result<DialectMessage, CodecError> {
-    use ardupilotmega::MavMessage;
-
-    let message = match name {
-        "COMMAND_LONG" => MavMessage::COMMAND_LONG(ardupilotmega::COMMAND_LONG_DATA {
-            param1: f32_field(name, fields, "param1")?,
-            param2: f32_field(name, fields, "param2")?,
-            param3: f32_field(name, fields, "param3")?,
-            param4: f32_field(name, fields, "param4")?,
-            param5: f32_field(name, fields, "param5")?,
-            param6: f32_field(name, fields, "param6")?,
-            param7: f32_field(name, fields, "param7")?,
-            command: enum_field(name, fields, "command")?,
-            target_system: u8_field(name, fields, "target_system")?,
-            target_component: u8_field(name, fields, "target_component")?,
-            confirmation: u8_field(name, fields, "confirmation")?,
-        }),
-        "NAMED_VALUE_FLOAT" => {
-            MavMessage::NAMED_VALUE_FLOAT(ardupilotmega::NAMED_VALUE_FLOAT_DATA {
-                time_boot_ms: u32_field(name, fields, "time_boot_ms")?,
-                value: f32_field(name, fields, "value")?,
-                name: str_field(name, fields, "name")?.into(),
-            })
-        }
-        "NAMED_VALUE_INT" => MavMessage::NAMED_VALUE_INT(ardupilotmega::NAMED_VALUE_INT_DATA {
-            time_boot_ms: u32_field(name, fields, "time_boot_ms")?,
-            value: i32_field(name, fields, "value")?,
-            name: str_field(name, fields, "name")?.into(),
-        }),
-        "PARAM_SET" => MavMessage::PARAM_SET(ardupilotmega::PARAM_SET_DATA {
-            param_value: f32_field(name, fields, "param_value")?,
-            target_system: u8_field(name, fields, "target_system")?,
-            target_component: u8_field(name, fields, "target_component")?,
-            param_id: str_field(name, fields, "param_id")?.into(),
-            param_type: enum_field(name, fields, "param_type")?,
-        }),
-        "PARAM_REQUEST_READ" => {
-            MavMessage::PARAM_REQUEST_READ(ardupilotmega::PARAM_REQUEST_READ_DATA {
-                param_index: i16_field(name, fields, "param_index")?,
-                target_system: u8_field(name, fields, "target_system")?,
-                target_component: u8_field(name, fields, "target_component")?,
-                param_id: str_field(name, fields, "param_id")?.into(),
-            })
-        }
-        "PARAM_REQUEST_LIST" => {
-            MavMessage::PARAM_REQUEST_LIST(ardupilotmega::PARAM_REQUEST_LIST_DATA {
-                target_system: u8_field(name, fields, "target_system")?,
-                target_component: u8_field(name, fields, "target_component")?,
-            })
-        }
-        "REQUEST_DATA_STREAM" => {
-            MavMessage::REQUEST_DATA_STREAM(ardupilotmega::REQUEST_DATA_STREAM_DATA {
-                req_message_rate: u16_field(name, fields, "req_message_rate")?,
-                target_system: u8_field(name, fields, "target_system")?,
-                target_component: u8_field(name, fields, "target_component")?,
-                req_stream_id: u8_field(name, fields, "req_stream_id")?,
-                start_stop: u8_field(name, fields, "start_stop")?,
-            })
-        }
-        "SET_ATTITUDE_TARGET" => {
-            MavMessage::SET_ATTITUDE_TARGET(ardupilotmega::SET_ATTITUDE_TARGET_DATA {
-                time_boot_ms: u32_field(name, fields, "time_boot_ms")?,
-                q: f32_array_4(name, fields, "q")?,
-                body_roll_rate: f32_field(name, fields, "body_roll_rate")?,
-                body_pitch_rate: f32_field(name, fields, "body_pitch_rate")?,
-                body_yaw_rate: f32_field(name, fields, "body_yaw_rate")?,
-                thrust: f32_field(name, fields, "thrust")?,
-                thrust_body: [0.0; 3],
-                target_system: u8_field(name, fields, "target_system")?,
-                target_component: u8_field(name, fields, "target_component")?,
-                type_mask: AttitudeTargetTypemask::from_bits_retain(u8_field(
-                    name,
-                    fields,
-                    "type_mask",
-                )?),
-            })
-        }
-        "FILE_TRANSFER_PROTOCOL" => {
-            MavMessage::FILE_TRANSFER_PROTOCOL(ardupilotmega::FILE_TRANSFER_PROTOCOL_DATA {
-                target_network: u8_field(name, fields, "target_network")?,
-                target_system: u8_field(name, fields, "target_system")?,
-                target_component: u8_field(name, fields, "target_component")?,
-                payload: u8_array_251(name, fields, "payload")?,
-            })
-        }
-        "LOG_REQUEST_LIST" => MavMessage::LOG_REQUEST_LIST(ardupilotmega::LOG_REQUEST_LIST_DATA {
-            target_system: u8_field(name, fields, "target_system")?,
-            target_component: u8_field(name, fields, "target_component")?,
-            start: u16_field(name, fields, "start")?,
-            end: u16_field(name, fields, "end")?,
-        }),
-        "LOG_REQUEST_DATA" => MavMessage::LOG_REQUEST_DATA(ardupilotmega::LOG_REQUEST_DATA_DATA {
-            target_system: u8_field(name, fields, "target_system")?,
-            target_component: u8_field(name, fields, "target_component")?,
-            id: u16_field(name, fields, "id")?,
-            ofs: u32_field(name, fields, "ofs")?,
-            count: u32_field(name, fields, "count")?,
-        }),
-        "LOG_REQUEST_END" => MavMessage::LOG_REQUEST_END(ardupilotmega::LOG_REQUEST_END_DATA {
-            target_system: u8_field(name, fields, "target_system")?,
-            target_component: u8_field(name, fields, "target_component")?,
-        }),
-        _ => return Err(CodecError::UnsupportedMessage(name.to_owned())),
-    };
-    Ok(message)
-}
-
-pub fn serialize_message(
-    message: &DialectMessage,
-    header: MavHeader,
-) -> Result<Vec<u8>, CodecError> {
-    let mut bytes = Vec::with_capacity(280);
-    write_versioned_msg(&mut bytes, MavlinkVersion::V2, header, message)?;
-    Ok(bytes)
-}
-
-pub fn project_fields(message: &DialectMessage) -> Result<Map<String, Value>, CodecError> {
-    use ardupilotmega::MavMessage;
-
-    let mut object = serde_json::to_value(message)?
-        .as_object()
-        .cloned()
-        .ok_or(CodecError::FieldsNotObject)?;
-    object.remove("type");
-
-    match message {
-        MavMessage::HEARTBEAT(data) => {
-            put_number(&mut object, "type", data.mavtype as u64);
-            put_number(&mut object, "autopilot", data.autopilot as u64);
-            put_number(&mut object, "base_mode", u64::from(data.base_mode.bits()));
-            put_number(&mut object, "system_status", data.system_status as u64);
-        }
-        MavMessage::COMMAND_ACK(data) => {
-            put_number(&mut object, "command", data.command as u64);
-            put_number(&mut object, "result", data.result as u64);
-        }
-        MavMessage::PARAM_VALUE(data) => {
-            put_number(&mut object, "param_type", data.param_type as u64);
-        }
-        MavMessage::AUTOPILOT_VERSION(data) => {
-            put_number(&mut object, "capabilities", data.capabilities.bits());
-        }
-        MavMessage::STATUSTEXT(data) => {
-            put_number(&mut object, "severity", data.severity as u64);
-        }
-        MavMessage::PID_TUNING(data) => {
-            put_number(&mut object, "axis", data.axis as u64);
-        }
-        MavMessage::EKF_STATUS_REPORT(data) => {
-            put_number(&mut object, "flags", u64::from(data.flags.bits()));
-        }
-        MavMessage::SYS_STATUS(data) => {
-            put_number(
-                &mut object,
-                "onboard_control_sensors_present",
-                u64::from(data.onboard_control_sensors_present.bits()),
-            );
-            put_number(
-                &mut object,
-                "onboard_control_sensors_enabled",
-                u64::from(data.onboard_control_sensors_enabled.bits()),
-            );
-            put_number(
-                &mut object,
-                "onboard_control_sensors_health",
-                u64::from(data.onboard_control_sensors_health.bits()),
-            );
-        }
-        MavMessage::ATTITUDE_TARGET(data) => {
-            put_number(&mut object, "type_mask", u64::from(data.type_mask.bits()));
-        }
-        MavMessage::EXTENDED_SYS_STATE(data) => {
-            put_number(&mut object, "vtol_state", data.vtol_state as u64);
-            put_number(&mut object, "landed_state", data.landed_state as u64);
-        }
-        _ => {}
+) -> Result<MavMessage, CodecError> {
+    if MavMessage::message_id_from_name(name).is_none() {
+        return Err(CodecError::UnknownMessage(name.to_owned()));
     }
-
-    Ok(object)
-}
-
-fn put_number(object: &mut Map<String, Value>, name: &str, value: u64) {
-    object.insert(name.to_owned(), Value::from(value));
-}
-
-fn value<'a>(
-    message: &str,
-    fields: &'a Map<String, Value>,
-    field: &'static str,
-) -> Result<&'a Value, CodecError> {
-    fields.get(field).ok_or_else(|| CodecError::InvalidField {
-        message: message.to_owned(),
-        field,
+    if fields.contains_key(MESSAGE_TAG) {
+        return Err(CodecError::InvalidFields {
+            message: name.to_owned(),
+            reason: "`type` is reserved; a dialect field named `type` is called `mavtype`"
+                .to_owned(),
+        });
+    }
+    let mut object = fields.clone();
+    object.insert(MESSAGE_TAG.to_owned(), Value::String(name.to_owned()));
+    serde_json::from_value(Value::Object(object)).map_err(|error| CodecError::InvalidFields {
+        message: name.to_owned(),
+        reason: error.to_string(),
     })
 }
 
-fn u64_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<u64, CodecError> {
-    value(message, fields, field)?
-        .as_u64()
-        .ok_or_else(|| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
+#[must_use]
+pub fn message_id_from_name(name: &str) -> Option<u32> {
+    MavMessage::message_id_from_name(name)
 }
 
-fn u8_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<u8, CodecError> {
-    u64_field(message, fields, field)?
-        .try_into()
-        .map_err(|_| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn u16_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<u16, CodecError> {
-    u64_field(message, fields, field)?
-        .try_into()
-        .map_err(|_| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn u32_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<u32, CodecError> {
-    u64_field(message, fields, field)?
-        .try_into()
-        .map_err(|_| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn i64_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<i64, CodecError> {
-    value(message, fields, field)?
-        .as_i64()
-        .ok_or_else(|| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn i16_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<i16, CodecError> {
-    i64_field(message, fields, field)?
-        .try_into()
-        .map_err(|_| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn i32_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<i32, CodecError> {
-    i64_field(message, fields, field)?
-        .try_into()
-        .map_err(|_| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn f32_field(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<f32, CodecError> {
-    value(message, fields, field)?
-        .as_f64()
-        .map(|value| value as f32)
-        .ok_or_else(|| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn str_field<'a>(
-    message: &str,
-    fields: &'a Map<String, Value>,
-    field: &'static str,
-) -> Result<&'a str, CodecError> {
-    value(message, fields, field)?
-        .as_str()
-        .ok_or_else(|| CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        })
-}
-
-fn enum_field<T>(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<T, CodecError>
-where
-    T: FromPrimitive,
-{
-    let number = u64_field(message, fields, field)?;
-    T::from_u64(number).ok_or(CodecError::InvalidEnum {
-        message: message.to_owned(),
-        field,
-        value: number,
-    })
-}
-
-fn f32_array_4(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<[f32; 4], CodecError> {
-    let array =
-        value(message, fields, field)?
-            .as_array()
-            .ok_or_else(|| CodecError::InvalidField {
-                message: message.to_owned(),
-                field,
-            })?;
-    if array.len() != 4 {
-        return Err(CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        });
-    }
-
-    let mut result = [0.0; 4];
-    for (target, source) in result.iter_mut().zip(array) {
-        *target =
-            source
-                .as_f64()
-                .map(|value| value as f32)
-                .ok_or_else(|| CodecError::InvalidField {
-                    message: message.to_owned(),
-                    field,
-                })?;
-    }
-    Ok(result)
-}
-
-fn u8_array_251(
-    message: &str,
-    fields: &Map<String, Value>,
-    field: &'static str,
-) -> Result<[u8; 251], CodecError> {
-    let array =
-        value(message, fields, field)?
-            .as_array()
-            .ok_or_else(|| CodecError::InvalidField {
-                message: message.to_owned(),
-                field,
-            })?;
-    if array.len() != 251 {
-        return Err(CodecError::InvalidField {
-            message: message.to_owned(),
-            field,
-        });
-    }
-    let mut result = [0; 251];
-    for (target, source) in result.iter_mut().zip(array) {
-        *target = source
-            .as_u64()
-            .and_then(|number| number.try_into().ok())
-            .ok_or_else(|| CodecError::InvalidField {
-                message: message.to_owned(),
-                field,
-            })?;
-    }
-    Ok(result)
+#[must_use]
+pub fn serialize_message(message: &MavMessage, header: MavHeader) -> Vec<u8> {
+    let mut frame = MAVLinkV2MessageRaw::new();
+    frame.serialize_message(header, message);
+    frame.raw_bytes().to_vec()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mavlink::dialects::ardupilotmega::{
-        AUTOPILOT_VERSION_DATA, EXTENDED_SYS_STATE_DATA, HEARTBEAT_DATA, MavAutopilot,
-        MavLandedState, MavModeFlag, MavProtocolCapability, MavState, MavType, MavVtolState,
+    use linkhub_dialect::{
+        MAVLinkV1MessageRaw, calculate_crc,
+        dialects::ardupilotmega::{
+            AUTOPILOT_VERSION_DATA, COMMAND_LONG_DATA, EXTENDED_SYS_STATE_DATA, HEARTBEAT_DATA,
+            MavAutopilot, MavCmd, MavLandedState, MavModeFlag, MavProtocolCapability, MavState,
+            MavType, MavVtolState,
+        },
     };
+    use serde_json::json;
 
-    #[test]
-    fn heartbeat_matches_pymavlink_and_projects_numeric_enums() {
-        let message = DialectMessage::HEARTBEAT(HEARTBEAT_DATA {
+    fn object(value: Value) -> Map<String, Value> {
+        value.as_object().expect("JSON object").clone()
+    }
+
+    fn header(sequence: u8) -> MavHeader {
+        MavHeader {
+            system_id: 255,
+            component_id: 0,
+            sequence,
+        }
+    }
+
+    fn heartbeat() -> MavMessage {
+        MavMessage::HEARTBEAT(HEARTBEAT_DATA {
             custom_mode: 0,
             mavtype: MavType::MAV_TYPE_GCS,
             autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
             base_mode: MavModeFlag::empty(),
             system_status: MavState::MAV_STATE_ACTIVE,
             mavlink_version: 3,
-        });
-        let bytes = serialize_message(
-            &message,
-            MavHeader {
-                system_id: 255,
-                component_id: 0,
-                sequence: 9,
-            },
-        )
-        .unwrap();
+        })
+    }
+
+    #[test]
+    fn heartbeat_matches_pymavlink_and_projects_typed_enums() {
+        let bytes = serialize_message(&heartbeat(), header(9));
 
         assert_eq!(
             hex::encode(&bytes),
@@ -523,10 +219,17 @@ mod tests {
         let decoded = decode_raw_bytes(&bytes).unwrap();
         assert_eq!(decoded.raw, bytes);
         assert_eq!(decoded.name, "HEARTBEAT");
-        assert_eq!(decoded.fields["type"], 6);
-        assert_eq!(decoded.fields["autopilot"], 8);
-        assert_eq!(decoded.fields["base_mode"], 0);
-        assert_eq!(decoded.fields["system_status"], 4);
+        assert_eq!(decoded.fields["mavtype"], json!({"type": "MAV_TYPE_GCS"}));
+        assert_eq!(
+            decoded.fields["autopilot"],
+            json!({"type": "MAV_AUTOPILOT_INVALID"})
+        );
+        assert_eq!(decoded.fields["base_mode"], "");
+        assert_eq!(
+            decoded.fields["system_status"],
+            json!({"type": "MAV_STATE_ACTIVE"})
+        );
+        assert!(!decoded.fields.contains_key("type"));
     }
 
     #[test]
@@ -539,63 +242,58 @@ mod tests {
     }
 
     #[test]
-    fn autopilot_capabilities_project_as_numeric_bits() {
-        let message = DialectMessage::AUTOPILOT_VERSION(AUTOPILOT_VERSION_DATA {
-            capabilities: MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_FTP
-                | MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_COMMAND_INT,
-            flight_sw_version: 1,
-            middleware_sw_version: 2,
-            os_sw_version: 3,
-            board_version: 4,
-            flight_custom_version: [0; 8],
-            middleware_custom_version: [0; 8],
-            os_custom_version: [0; 8],
-            vendor_id: 5,
-            product_id: 6,
-            uid: 7,
-            uid2: [0; 18],
-        });
-
-        let fields = project_fields(&message).expect("project version");
-
-        assert_eq!(fields["capabilities"], 40);
+    fn every_dialect_message_round_trips_through_json() {
+        let mut checked = 0;
+        for id in 0..u32::from(u16::MAX) {
+            let Some(message) = MavMessage::default_message_from_id(id) else {
+                continue;
+            };
+            let fields = message_fields(&message).unwrap();
+            let rebuilt = message_from_fields(message.message_name(), &fields).unwrap();
+            assert_eq!(rebuilt.message_id(), id, "{}", message.message_name());
+            assert_eq!(message_fields(&rebuilt).unwrap(), fields);
+            checked += 1;
+        }
+        assert!(checked > 250, "only {checked} messages checked");
     }
 
     #[test]
-    fn extended_system_state_projects_numeric_enums() {
-        let message = DialectMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
+    fn bitmask_capabilities_project_as_flag_names() {
+        let message = MavMessage::AUTOPILOT_VERSION(AUTOPILOT_VERSION_DATA {
+            capabilities: MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_COMMAND_INT
+                | MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_FTP,
+            ..AUTOPILOT_VERSION_DATA::default()
+        });
+        let bytes = serialize_message(&message, header(0));
+
+        assert_eq!(
+            decode_raw_bytes(&bytes).unwrap().fields["capabilities"],
+            "MAV_PROTOCOL_CAPABILITY_COMMAND_INT | MAV_PROTOCOL_CAPABILITY_FTP"
+        );
+    }
+
+    #[test]
+    fn extended_system_state_projects_typed_enums() {
+        let message = MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
             vtol_state: MavVtolState::MAV_VTOL_STATE_MC,
             landed_state: MavLandedState::MAV_LANDED_STATE_IN_AIR,
         });
+        let fields = decode_raw_bytes(&serialize_message(&message, header(0)))
+            .unwrap()
+            .fields;
 
-        let fields = project_fields(&message).expect("project extended state");
-
-        assert_eq!(fields["vtol_state"], 3);
-        assert_eq!(fields["landed_state"], 2);
+        assert_eq!(fields["vtol_state"], json!({"type": "MAV_VTOL_STATE_MC"}));
+        assert_eq!(
+            fields["landed_state"],
+            json!({"type": "MAV_LANDED_STATE_IN_AIR"})
+        );
     }
 
     #[test]
     fn decodes_and_preserves_v1_frames() {
-        let message = DialectMessage::HEARTBEAT(HEARTBEAT_DATA {
-            custom_mode: 0,
-            mavtype: MavType::MAV_TYPE_GCS,
-            autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
-            base_mode: MavModeFlag::empty(),
-            system_status: MavState::MAV_STATE_ACTIVE,
-            mavlink_version: 3,
-        });
-        let mut bytes = Vec::new();
-        write_versioned_msg(
-            &mut bytes,
-            MavlinkVersion::V1,
-            MavHeader {
-                system_id: 255,
-                component_id: 0,
-                sequence: 4,
-            },
-            &message,
-        )
-        .unwrap();
+        let mut frame = MAVLinkV1MessageRaw::new();
+        frame.serialize_message(header(4), &heartbeat());
+        let bytes = frame.raw_bytes().to_vec();
 
         let decoded = decode_raw_bytes(&bytes).unwrap();
         assert_eq!(decoded.mavlink_version, 1);
@@ -604,11 +302,11 @@ mod tests {
     }
 
     #[test]
-    fn encodes_calibration_command_long() {
-        let fields = serde_json::json!({
+    fn builds_calibration_command_long_from_typed_fields() {
+        let fields = object(json!({
             "target_system": 1,
             "target_component": 1,
-            "command": 400,
+            "command": {"type": "MAV_CMD_COMPONENT_ARM_DISARM"},
             "confirmation": 0,
             "param1": 1.0,
             "param2": 0.0,
@@ -616,10 +314,70 @@ mod tests {
             "param4": 0.0,
             "param5": 0.0,
             "param6": 0.0,
-            "param7": 0.0
-        });
-        let message = encode_message("COMMAND_LONG", fields.as_object().unwrap()).unwrap();
+            "param7": 0.0,
+        }));
 
-        assert!(matches!(message, DialectMessage::COMMAND_LONG(_)));
+        let MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            command, param1, ..
+        }) = message_from_fields("COMMAND_LONG", &fields).unwrap()
+        else {
+            panic!("expected COMMAND_LONG");
+        };
+        assert_eq!(command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
+        assert_eq!(param1, 1.0);
+    }
+
+    #[test]
+    fn numeric_enums_unknown_names_and_reserved_type_key_are_rejected() {
+        let mut fields = object(json!({"command": 400}));
+        assert!(matches!(
+            message_from_fields("COMMAND_LONG", &fields),
+            Err(CodecError::InvalidFields { .. })
+        ));
+        assert!(matches!(
+            message_from_fields("NOT_A_MESSAGE", &fields),
+            Err(CodecError::UnknownMessage(_))
+        ));
+        fields.insert("type".to_owned(), json!("HEARTBEAT"));
+        assert!(matches!(
+            message_from_fields("COMMAND_LONG", &fields),
+            Err(CodecError::InvalidFields { .. })
+        ));
+    }
+
+    /// A HEARTBEAT whose MAV_TYPE byte is outside the dialect but whose CRC is valid.
+    fn heartbeat_with_unknown_type(sequence: u8) -> Vec<u8> {
+        let mut bytes = serialize_message(&heartbeat(), header(sequence));
+        let payload_start = 10;
+        bytes[payload_start + 4] = 250;
+        let crc_end = payload_start + 9;
+        let crc = calculate_crc(&bytes[1..crc_end], 50);
+        bytes[crc_end..crc_end + 2].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn unknown_enum_value_drops_only_that_frame() {
+        let invalid = heartbeat_with_unknown_type(1);
+        assert!(matches!(
+            decode_raw_bytes(&invalid),
+            Err(CodecError::Parse(_))
+        ));
+
+        let valid = serialize_message(&heartbeat(), header(2));
+        let stream = [invalid, valid.clone()].concat();
+        let decoded = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut reader = FrameReader::new(Cursor::new(stream));
+                let decoded = reader.recv().await.unwrap();
+                assert_eq!(reader.take_dropped_frames(), 1);
+                assert_eq!(reader.take_dropped_frames(), 0);
+                decoded
+            });
+
+        assert_eq!(decoded.sequence, 2);
+        assert_eq!(decoded.raw, valid);
     }
 }

@@ -5,6 +5,7 @@ import math
 import pytest
 
 from analysis.enrich_sitl_telemetry import enrich_sitl_telemetry
+from groundstation.rawes_diag import DIAG_ARRAY_ID, DIAG_KEYS
 from simulation.telemetry_columns import COLUMNS
 from simulation.telemetry_csv import read_csv
 
@@ -61,8 +62,8 @@ def test_enriches_physics_rows_with_latest_mavlink_observation(tmp_path) -> None
             "_sim_time_boot_ms": None,
             "_sim_time_quality": None,
             "mavpackettype": "COMMAND_ACK",
-            "command": 511,
-            "result": 0,
+            "command": {"type": "MAV_CMD_SET_MESSAGE_INTERVAL"},
+            "result": {"type": "MAV_RESULT_ACCEPTED"},
         },
         _record(
             500,
@@ -123,3 +124,56 @@ def test_enrichment_rejects_export_without_simulation_clock_metadata(
 
     with pytest.raises(ValueError, match="lacks simulation clock metadata"):
         enrich_sitl_telemetry(physics, mavlink, tmp_path / "telemetry.csv")
+
+
+def test_enrichment_maps_typed_pid_tuning_axis_to_rate_columns(tmp_path) -> None:
+    physics = tmp_path / "telemetry.physics.csv"
+    mavlink = tmp_path / "mavlink.jsonl"
+    output = tmp_path / "telemetry.csv"
+    _write_physics_csv(physics)
+    records = [
+        _record(500, "PID_TUNING", axis={"type": "PID_TUNING_YAW"}, P=0.25),
+        _record(600, "PID_TUNING", axis={"type": "PID_TUNING_ACCZ"}, P=9.0),
+    ]
+    mavlink.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    enrich_sitl_telemetry(physics, mavlink, output)
+
+    with output.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    assert float(rows[1]["rate_yaw_p_contrib"]) == pytest.approx(0.25)
+    assert math.isnan(float(rows[1]["rate_roll_p_contrib"]))
+    assert math.isnan(float(rows[1]["rate_pitch_p_contrib"]))
+
+
+def test_enrichment_maps_diagnostic_array_keys_by_validity_mask(tmp_path) -> None:
+    physics = tmp_path / "telemetry.physics.csv"
+    mavlink = tmp_path / "mavlink.jsonl"
+    output = tmp_path / "telemetry.csv"
+    _write_physics_csv(physics)
+    keys = list(DIAG_KEYS)
+    data = [0.0] * 58
+    for key, value in (("YFF_U", 0.25), ("OL_TEN", 12.5), ("OL_AP", 0.0)):
+        index = keys.index(key)
+        data[0] += 1 << index
+        data[index + 1] = value
+    records = [
+        _record(500, "DEBUG_FLOAT_ARRAY", array_id=DIAG_ARRAY_ID, name="RAWES_DIAG", data=data),
+        _record(600, "DEBUG_FLOAT_ARRAY", array_id=DIAG_ARRAY_ID + 1, name="OTHER", data=data),
+    ]
+    mavlink.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    enrich_sitl_telemetry(physics, mavlink, output)
+
+    with output.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    assert float(rows[1]["mav_nvf_yff_u"]) == pytest.approx(0.25)
+    assert float(rows[1]["lua_ol_tension_n"]) == pytest.approx(12.5)
+    assert float(rows[1]["lua_ol_alt_p_contrib"]) == 0.0
+    assert math.isnan(float(rows[1]["mav_nvf_yff_trim"]))

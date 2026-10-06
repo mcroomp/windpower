@@ -60,6 +60,13 @@ Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
   RAWES_POFF: passive pitch offset [rad] (relative to Lua's captured anchor)
   RAWES_YOFF: passive yaw offset   [rad] (relative to Lua's captured anchor)
 
+Vehicle -> ground diagnostics via DEBUG_FLOAT_ARRAY (array_id 1, name "RAWES_DIAG"),
+sent at RAWES_TEL_HZ on every MAVLink channel (mavlink.send_chan, msgid 350):
+  One frame carries all diagnostics instead of one NAMED_VALUE_FLOAT per value.
+  data[0] is a bitmask of the keys that were set this tick; data[i] (1-based) holds
+  _diag_nvf_keys[i].  The ordered key list is owned by groundstation/rawes_diag.py
+  (mirrored in linkhub-ui/src/diag-array.ts); append new keys at the end only.
+
 Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
   31010 ENTER_GUIDED  (MAV_CMD_USER_1): requires armed, RAWES_MODE=2, RAWES_THR
         and healthy AHRS. Captures the current attitude, switches to
@@ -82,7 +89,7 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
   RAWES_KD_EL   In-plane position rate-D gain              [rad/s/(m/s)]  default 0.0
   RAWES_CWMAX   Position rate saturation                   [rad/s]        default 0.6
   RAWES_SLW     Elevation/body_z slew rate limit           [rad/s]        default 0.40
-  RAWES_TEL_HZ  Diagnostic NVF telemetry emission rate     [Hz]           default 2.0
+  RAWES_TEL_HZ  Diagnostic telemetry (DEBUG_FLOAT_ARRAY) rate   [Hz]           default 2.0
   RAWES_YFF_MAX Yaw trim clamp upper bound                 [throttle]     default 0.7
   RAWES_YFF_TAU Yaw trim low-pass time constant            [s]            default 0.3
   RAWES_TRP     Tension feedforward ramp time constant     [s]            default 2.0
@@ -319,11 +326,11 @@ local YFF_TAU  = 0.3     -- trim low-pass time constant [s]            (RAWES_YF
 local SERVO9_SPAN_US   = 1000.0  -- SERVO9_MAX - SERVO9_MIN
 local YFF_A            = 0.504 * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)  -- default slope 0.504 RPM/µs
 local YAW_MOTOR_FUNC   = 36      -- ArduPilot servo function for Motor4 (SERVO9)
-local TEL_HZ           = 2.0     -- diagnostic NVF emission rate [Hz]  (RAWES_TEL_HZ)
+local TEL_HZ           = 2.0     -- diagnostic DEBUG_FLOAT_ARRAY emission rate [Hz]  (RAWES_TEL_HZ)
 
 local _yaw_ff_trim  = 0.0     -- current H_YAW_TRIM value [0, YFF_MAX]
 _yaw_ff_seed        = nil     -- ground-provided equilibrium trim seed [0, YFF_MAX] (ENTER_PASSIVE param1)
-local _nvf_last_ms  = nil     -- shared timer for all outer-rate NVF diagnostic emissions
+local _nvf_last_ms  = nil     -- shared timer for the diagnostic array emission (name predates the NVF -> DEBUG_FLOAT_ARRAY switch)
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 -- Convert a millis() result to seconds (float).  On real ArduPilot millis()
 -- returns a uint32_t userdata whose __mul/__div cannot coerce a fractional
@@ -563,9 +570,9 @@ local function update_disarmed_neutral_hold(mode, armed)
     end
 end
 
--- Rate gate for diagnostic NVF telemetry (RAWES_TEL_HZ).  Returns true and
+-- Rate gate for diagnostic telemetry (RAWES_TEL_HZ).  Returns true and
 -- advances the timer when it is time to emit; returns false otherwise.
--- All diagnostic NVFs (YFF_T/U/GZ, etc.) share this single timer so they
+-- All diagnostics (YFF_T/U/GZ, etc.) share this single timer so they
 -- are always emitted together at a consistent rate.
 local function _nvf_due(now)
     if _nvf_last_ms == nil or (now - _nvf_last_ms) >= (1000.0 / TEL_HZ) then
@@ -575,7 +582,11 @@ local function _nvf_due(now)
     return false
 end
 
--- Shared diagnostic NVF state and single emitter.
+-- Shared diagnostic state and single emitter.  All diagnostics go out as one
+-- MAVLink DEBUG_FLOAT_ARRAY (see groundstation/rawes_diag.py, which owns this
+-- schema): data[0] is a bitmask of the keys that were set, data[i] holds
+-- _diag_nvf_keys[i].  Keep this list in sync with DIAG_KEYS there and in
+-- linkhub-ui/src/diag-array.ts; append new keys at the end.
 local _diag_nvf = {}
 local _diag_nvf_keys = {
     "YFF_T", "YFF_U", "YFF_GZ",           -- yaw trim observer
@@ -583,10 +594,19 @@ local _diag_nvf_keys = {
     "OL_RER", "OL_PER", "OL_YER",        -- body-rate tracking errors
     "OL_AP", "OL_AI", "OL_AD", "OL_COL", -- altitude PID terms + commanded thrust
     "OL_TEN",                            -- ramped tension feedforward [N]
-    "OL_EL",                             -- current rate-limited elevation angle [rad]
-    "BZG_N", "BZG_E", "BZG_D",           -- body_z_eq goal (NED unit vector)
+    -- OL_EL and BZG_N/E/D are still stored by _diag_set (the simtest mock reads
+    -- them in-process) but are deliberately not sent over MAVLink: nothing
+    -- consumes them on the wire and SITL takes elevation/bz_eq from the mediator.
     "ANCH_N", "ANCH_E", "ANCH_D"        -- resolved anchor NED offset from EKF origin [m]
 }
+local _DEBUG_FLOAT_ARRAY_MSG_ID = 350
+local _DIAG_ARRAY_ID   = 1
+local _DIAG_ARRAY_NAME = "RAWES_DIAG"
+-- send_chan targets one channel (unlike gcs:send_named_float, which broadcasts)
+-- and raises on a channel beyond the build's MAVLINK_COMM_NUM_BUFFERS, so try
+-- each slot under pcall.  Slots without a GCS return nil and are skipped.
+local _DIAG_CHANNELS = 6
+local _DIAG_PACK_FMT = "<I8I2c10" .. string.rep("f", #_diag_nvf_keys + 1)
 
 local function _diag_set(name, value)
     _diag_nvf[name] = value
@@ -594,12 +614,24 @@ end
 
 local function _diag_emit(now)
     if not _nvf_due(now) then return end
+    local mask = 0
+    local values = {}
     for i = 1, #_diag_nvf_keys do
-        local k = _diag_nvf_keys[i]
-        local v = _diag_nvf[k]
+        local v = _diag_nvf[_diag_nvf_keys[i]]
         if v ~= nil then
-            gcs:send_named_float(k, v)
+            mask = mask | (1 << (i - 1))
+            values[i + 1] = v
+        else
+            values[i + 1] = 0.0
         end
+    end
+    values[1] = mask + 0.0
+    local now_ms = type(now) == "number" and math.floor(now) or now:toint()
+    local payload = string.pack(
+        _DIAG_PACK_FMT, now_ms * 1000, _DIAG_ARRAY_ID, _DIAG_ARRAY_NAME,
+        table.unpack(values))
+    for chan = 0, _DIAG_CHANNELS - 1 do
+        pcall(mavlink.send_chan, chan, _DEBUG_FLOAT_ARRAY_MSG_ID, payload)
     end
 end
 
@@ -1029,7 +1061,7 @@ local function run_flight()
         roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, _last_thrust,
         "steady_attitude")
 
-    -- Record outer-loop diagnostics for centralized NVF telemetry emission.
+    -- Record outer-loop diagnostics for centralized DEBUG_FLOAT_ARRAY emission.
     local gx, gy, gz = 0.0, 0.0, 0.0
     local gyro_now = ahrs:get_gyro()
     if gyro_now then
@@ -1644,19 +1676,22 @@ local function update()
         if _rc_ch4 then _rc_ch4:set_override(1500) end
     end
 
-    -- Give ACRO at least one deterministic ground-idle control interval after
-    -- arming so it resets ArduPilot's internal attitude target to the AHRS
-    -- attitude. Rate-only GUIDED preserves that target; asserting interlock on
-    -- the first armed tick can otherwise carry a stale near-inverted target
-    -- into the later absolute-hold handoff.
+    -- Hold the interlock explicitly low before arming and during ACRO ground
+    -- idle. A zero override releases the channel and can expose a high input.
+    -- After the delay, assert interlock so ACRO has first reset its internal
+    -- attitude target to the AHRS attitude.
     if armed then
         if _armed_since_ms == nil then _armed_since_ms = now end
-        if _rc_ch8 and now - _armed_since_ms >= INTERLOCK_ARM_DELAY_MS then
-            _rc_ch8:set_override(2000)
+        if _rc_ch8 then
+            if now - _armed_since_ms >= INTERLOCK_ARM_DELAY_MS then
+                _rc_ch8:set_override(2000)
+            else
+                _rc_ch8:set_override(1000)
+            end
         end
     else
         _armed_since_ms = nil
-        if _rc_ch8 then _rc_ch8:set_override(0) end
+        if _rc_ch8 then _rc_ch8:set_override(1000) end
     end
 
     if mode == MODE_NONE then

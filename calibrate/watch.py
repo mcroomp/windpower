@@ -8,8 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from linkhub_client import mav_constants as mavlink
-from linkhub_client.mav_constants import mavutil
+from linkhub_client.messages import MavCmd, MavDataStream, MavSeverity
 
 from .constants import (
     Attitude,
@@ -18,7 +17,7 @@ from .constants import (
     LinkHubClient,
     CommandLong,
     SysStatus,
-    StatusText,
+    Statustext,
     MOTOR_ESC_CHANNEL, SERVO_MOTOR,
     _WATCH_STREAMS,
 )
@@ -110,7 +109,7 @@ def _watch_servos(session, duration, log):
     _observation_loop(
         session, duration_s=duration,
         msg_types=["SERVO_OUTPUT_RAW", "HEARTBEAT", "STATUSTEXT"],
-        streams=[(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)],
+        streams=[(MavDataStream.RC_CHANNELS, 10)],
         handle_msg=handle, render_row=render,
         header_cols=cols,
         header_print_cols=["t(s)"] + [f"s{i}" for i in range(1, 9)],
@@ -154,7 +153,7 @@ def _watch_esc(session, duration, log):
         session.send_message(CommandLong(
             target_system=session._target_system,
             target_component=session._target_component,
-            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            command=MavCmd.SET_MESSAGE_INTERVAL,
             param1=float(esc_id),
             param2=100000.0,
         ))  # 10 Hz
@@ -162,7 +161,7 @@ def _watch_esc(session, duration, log):
     _observation_loop(
         session, duration_s=duration,
         msg_types=[esc_name, "HEARTBEAT", "STATUSTEXT"],
-        streams=[(mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 10)],
+        streams=[(MavDataStream.RC_CHANNELS, 10)],
         handle_msg=handle, render_row=render,
         header_cols=cols,
         header_print_cols=["t(s)", "eRPM", "mRPM", "rotRPM", "V", "A", "T"],
@@ -177,10 +176,11 @@ def _watch_text(session, duration, log):
     def handle(st, msg, t_rel):
         # STATUSTEXTs are handled by the engine and surfaced via state["pending_text"]
         # We still log them here so the CSV captures everything.
-        if isinstance(msg, StatusText):
+        if isinstance(msg, Statustext):
             text = msg.text
             if text:
-                return [f"{t_rel:.4f}", int(getattr(msg, "severity", 6)), text]
+                severity = getattr(msg, "severity", MavSeverity.INFO)
+                return [f"{t_rel:.4f}", str(severity), text]
         return None
 
     def render(st, t_rel):
@@ -232,7 +232,7 @@ def _watch_attitude(session, duration, log):
     _observation_loop(
         session, duration_s=duration,
         msg_types=["ATTITUDE", "HEARTBEAT", "STATUSTEXT"],
-        streams=[(mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 25)],
+        streams=[(MavDataStream.EXTRA1, 25)],
         handle_msg=handle, render_row=render,
         header_cols=cols, log=log,
     )
@@ -272,7 +272,7 @@ def _watch_power(session, duration, log):
     _observation_loop(
         session, duration_s=duration,
         msg_types=["BATTERY_STATUS", "SYS_STATUS", "HEARTBEAT", "STATUSTEXT"],
-        streams=[(mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 5)],
+        streams=[(MavDataStream.EXTENDED_STATUS, 5)],
         handle_msg=handle, render_row=render,
         header_cols=cols, log=log,
     )

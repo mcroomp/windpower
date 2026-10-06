@@ -5,15 +5,21 @@ import pytest
 
 import calibrate.run as calibrate_run
 from linkhub_client import MessageBatch, SimClock
-from linkhub_client.mav_constants import mavutil
 from linkhub_client.messages import (
     Attitude,
     ExtendedSysState,
     Heartbeat,
+    MavAutopilot,
     MavLandedState,
+    MavModeFlag,
+    MavResult,
+    MavSeverity,
+    MavState,
+    MavType,
+    MavVtolState,
     NamedValueFloat,
     SetAttitudeTarget,
-    StatusText,
+    Statustext,
 )
 from calibrate.run import (
     _PASSIVE_PROTOCOL_SEQUENCE,
@@ -34,7 +40,6 @@ from calibrate.run import (
 from groundstation.rawes_modes import (
     CMD_ENTER_GUIDED,
     CMD_ENTER_PASSIVE,
-    MAV_RESULT_ACCEPTED,
     enter_passive_params,
 )
 from simulation.rawes_lua_harness import RawesLua
@@ -62,7 +67,7 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
             events.append(wait)
             time.sleep(wait)
             return MessageBatch(
-                (StatusText(severity=6, text="Runup Complete"),),
+                (Statustext(severity=MavSeverity.INFO, text="Runup Complete"),),
                 "v1:1",
                 _CLOCK,
             )
@@ -85,7 +90,7 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
             return MessageBatch(
                 (
                     ExtendedSysState(
-                        vtol_state=0,
+                        vtol_state=MavVtolState.UNDEFINED,
                         landed_state=MavLandedState.IN_AIR,
                     ),
                 ),
@@ -99,11 +104,11 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
 def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
     messages = iter([
         Heartbeat(
-            type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
-            autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-            base_mode=mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED,
+            mavtype=MavType.HELICOPTER,
+            autopilot=MavAutopilot.ARDUPILOTMEGA,
+            base_mode=frozenset({MavModeFlag.SAFETY_ARMED}),
             custom_mode=20,
-            system_status=mavutil.mavlink.MAV_STATE_ACTIVE,
+            system_status=MavState.ACTIVE,
         ),
         Attitude(
             roll=0.0,
@@ -124,6 +129,9 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
 
         def send_message(self, message):
             self.sent.append(message)
+
+        def request_data_stream(self, stream, rate_hz):
+            self.sent.append((stream, rate_hz))
 
         def current_cursor(self):
             return "v1:0"
@@ -158,11 +166,11 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
             return self.now
 
     heartbeat = Heartbeat(
-        type=mavutil.mavlink.MAV_TYPE_HELICOPTER,
-        autopilot=mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-        base_mode=mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED,
+        mavtype=MavType.HELICOPTER,
+        autopilot=MavAutopilot.ARDUPILOTMEGA,
+        base_mode=frozenset({MavModeFlag.SAFETY_ARMED}),
         custom_mode=20,
-        system_status=mavutil.mavlink.MAV_STATE_ACTIVE,
+        system_status=MavState.ACTIVE,
     )
     spin = Attitude(
         roll=0.0,
@@ -179,6 +187,8 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
         first = True
 
         def send_message(self, _message):
+            pass
+        def request_data_stream(self, _stream, _rate_hz):
             pass
 
         def current_cursor(self):
@@ -266,6 +276,9 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
         def send_message(self, message):
             if isinstance(message, NamedValueFloat):
                 events.append(("send", message.name, message.value))
+
+        def request_data_stream(self, _stream, _rate_hz):
+            pass
 
         def current_cursor(self):
             return "v1:0"
@@ -518,9 +531,9 @@ def test_lua_stages_acro_rc_then_uses_neutral_passive_fallback():
     sim.vehicle_mode = 20
     sim.healthy = True
     sim.armed = True
-    sim.send_message(NamedValueFloat("RAWES_RLL", 0.0))
-    sim.send_message(NamedValueFloat("RAWES_PIT", 0.0))
-    sim.send_message(NamedValueFloat("RAWES_COL", 0.342))
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=0.0))
+    sim.send_message(NamedValueFloat(name="RAWES_PIT", value=0.0))
+    sim.send_message(NamedValueFloat(name="RAWES_COL", value=0.342))
     sim.run(0.1)
 
     assert sim.armed
@@ -528,7 +541,7 @@ def test_lua_stages_acro_rc_then_uses_neutral_passive_fallback():
     assert sim.ch_out[2] is not None
     assert sim.ch_out[3] != neutral_collective_pwm
 
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.342))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.342))
     sim.set_param("RAWES_MODE", 3)
     sim.run(0.1)
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
@@ -546,19 +559,19 @@ def test_passive_lua_applies_incremental_target_updates_and_preserves_yaw():
     sim.healthy = True
     sim.armed = True
     sim.tick()
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.4))
-    sim.send_message(NamedValueFloat("RAWES_ROFF", math.radians(10.0)))
-    sim.send_message(NamedValueFloat("RAWES_POFF", math.radians(-5.0)))
-    sim.send_message(NamedValueFloat("RAWES_YOFF", math.radians(120.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.4))
+    sim.send_message(NamedValueFloat(name="RAWES_ROFF", value=math.radians(10.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_POFF", value=math.radians(-5.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_YOFF", value=math.radians(120.0)))
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
     sim.run(0.1)
 
-    sim.send_message(NamedValueFloat("RAWES_ROFF", math.radians(20.0)))
-    sim.send_message(NamedValueFloat("RAWES_POFF", math.radians(-5.0)))
-    sim.send_message(NamedValueFloat("RAWES_YOFF", math.radians(120.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_ROFF", value=math.radians(20.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_POFF", value=math.radians(-5.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_YOFF", value=math.radians(120.0)))
     sim.run(0.1)
     assert sim.guided_target["roll_deg"] == pytest.approx(20.0)
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.45))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.45))
     sim.run(0.1)
 
     assert sim.guided_target == pytest.approx({
@@ -578,7 +591,7 @@ def test_passive_yaw_trim_waits_until_guided_handoff():
     sim.vehicle_mode = 1
     sim.healthy = True
     sim.armed = True
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.4))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.4))
     sim.run(0.1)
 
     assert sim.guided_target is None
@@ -617,7 +630,7 @@ def test_passive_waits_for_ground_owned_capture_near_hardware_attitude():
         [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
         [-sp, cp * sr, cp * cr],
     ]
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.342))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.342))
     sim.run(0.1)
 
     assert sim.guided_target is None
@@ -652,14 +665,14 @@ def test_passive_anchor_is_captured_in_lua_and_offsets_are_relative():
         [math.sin(yaw), math.cos(yaw), 0.0],
         [0.0, 0.0, 1.0],
     ]
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.4))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.4))
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
     sim.run(0.1)
 
     assert sim.fns.passive_anchor_q() is not None
     assert sim.guided_target["yaw_deg"] == pytest.approx(30.0)
 
-    sim.send_message(NamedValueFloat("RAWES_YOFF", math.radians(20.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_YOFF", value=math.radians(20.0)))
     sim.run(0.1)
 
     assert sim.guided_target["yaw_deg"] == pytest.approx(50.0)
@@ -683,10 +696,10 @@ def _acro_manual_sim():
     sim.healthy = True
     sim.armed = True
     sim.R = _hold_attitude_r(-134.0, -80.0, -56.0)
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.342))
-    sim.send_message(NamedValueFloat("RAWES_RLL", 0.0))
-    sim.send_message(NamedValueFloat("RAWES_PIT", 0.0))
-    sim.send_message(NamedValueFloat("RAWES_COL", 0.342))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.342))
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=0.0))
+    sim.send_message(NamedValueFloat(name="RAWES_PIT", value=0.0))
+    sim.send_message(NamedValueFloat(name="RAWES_COL", value=0.342))
     sim.run(0.1)
     return sim
 
@@ -701,7 +714,7 @@ def test_enter_guided_switches_mode_and_installs_captured_attitude_same_tick():
     assert sim.vehicle_mode == 20
     assert sim.command_acks == [{
         "command": CMD_ENTER_GUIDED,
-        "result": MAV_RESULT_ACCEPTED,
+        "result": MavResult.ACCEPTED,
         "target_system": 255,
         "target_component": 190,
     }]
@@ -738,7 +751,7 @@ def test_guided_entry_hold_persists_until_enter_passive_captures_anchor():
     sim.run(0.2)
 
     assert [ack["result"] for ack in sim.command_acks] == [
-        MAV_RESULT_ACCEPTED, MAV_RESULT_ACCEPTED,
+        MavResult.ACCEPTED, MavResult.ACCEPTED,
     ]
     assert sim.fns.passive_anchor_q() is not None
     assert sim.guided_target["roll_deg"] == pytest.approx(-130.0, abs=1e-4)
@@ -768,7 +781,7 @@ def test_static_holds_call_scheduler_locked_binding_only_on_change_or_keepalive(
 
     # A changed target is sent promptly.
     calls = _guided_target_calls(sim)
-    sim.send_message(NamedValueFloat("RAWES_YOFF", math.radians(5.0)))
+    sim.send_message(NamedValueFloat(name="RAWES_YOFF", value=math.radians(5.0)))
     sim.run(0.1)
     assert _guided_target_calls(sim) == calls + 1
 
@@ -778,17 +791,17 @@ def test_enter_guided_is_denied_outside_armed_acro_manual_staging():
     disarmed.armed = False
     disarmed.send_command(CMD_ENTER_GUIDED)
     disarmed.tick()
-    assert disarmed.command_acks[0]["result"] == 2
+    assert disarmed.command_acks[0]["result"] == MavResult.DENIED
     assert disarmed.vehicle_mode == 1
 
     wrong_mode = RawesLua(mode=3)
     wrong_mode.vehicle_mode = 1
     wrong_mode.healthy = True
     wrong_mode.armed = True
-    wrong_mode.send_message(NamedValueFloat("RAWES_THR", 0.342))
+    wrong_mode.send_message(NamedValueFloat(name="RAWES_THR", value=0.342))
     wrong_mode.send_command(CMD_ENTER_GUIDED)
     wrong_mode.tick()
-    assert wrong_mode.command_acks[0]["result"] == 2
+    assert wrong_mode.command_acks[0]["result"] == MavResult.DENIED
     assert wrong_mode.vehicle_mode == 1
 
     unseeded = RawesLua(mode=2)
@@ -797,7 +810,7 @@ def test_enter_guided_is_denied_outside_armed_acro_manual_staging():
     unseeded.armed = True
     unseeded.send_command(CMD_ENTER_GUIDED)
     unseeded.tick()
-    assert unseeded.command_acks[0]["result"] == 2
+    assert unseeded.command_acks[0]["result"] == MavResult.DENIED
 
 
 def test_enter_guided_reports_failed_mode_change():
@@ -806,7 +819,7 @@ def test_enter_guided_reports_failed_mode_change():
     sim.send_command(CMD_ENTER_GUIDED)
     sim.tick()
 
-    assert sim.command_acks[0]["result"] == 4
+    assert sim.command_acks[0]["result"] == MavResult.FAILED
     assert sim.guided_target is None
 
 
@@ -815,20 +828,20 @@ def test_enter_passive_requires_passive_mode_and_retry_does_not_recapture():
     sim.vehicle_mode = 20
     sim.healthy = True
     sim.armed = True
-    sim.send_message(NamedValueFloat("RAWES_THR", 0.342))
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.342))
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
     sim.tick()
-    assert sim.command_acks[0]["result"] == 2
+    assert sim.command_acks[0]["result"] == MavResult.DENIED
     assert sim.fns.passive_anchor_q() is None
 
     sim.set_param("RAWES_MODE", 3)
     sim.R = _hold_attitude_r(0.0, 0.0, 30.0)
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
     sim.tick()
-    assert sim.command_acks[1]["result"] == MAV_RESULT_ACCEPTED
+    assert sim.command_acks[1]["result"] == MavResult.ACCEPTED
 
     sim.R = _hold_attitude_r(0.0, 0.0, 60.0)
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params(), confirmation=1)
     sim.run(0.1)
-    assert sim.command_acks[2]["result"] == MAV_RESULT_ACCEPTED
+    assert sim.command_acks[2]["result"] == MavResult.ACCEPTED
     assert sim.guided_target["yaw_deg"] == pytest.approx(30.0, abs=1e-4)

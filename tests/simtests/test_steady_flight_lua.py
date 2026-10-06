@@ -82,7 +82,7 @@ def _run_steady(log) -> dict:
 
         if i % LUA_EVERY == 0:
             lua.tick(t, runner,
-                     inject=lambda s, r: s.send_message(NamedValueFloat("RAWES_TEN", 300.0)))
+                     inject=lambda s, r: s.send_message(NamedValueFloat(name="RAWES_TEN", value=300.0)))
 
         dT       = runner.tension_now - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))

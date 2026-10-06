@@ -31,7 +31,7 @@ def _armon_deadline_ms(sim: RawesLua):
 
 
 def _send_arm(sim: RawesLua, ms: float):
-    sim.send_message(NamedValueFloat("RAWES_ARM", ms))
+    sim.send_message(NamedValueFloat(name="RAWES_ARM", value=ms))
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,9 @@
 import type { LinkHubApi } from "./api";
-import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
+import { heartbeatState } from "./mav";
+import {
+  TELEMETRY_PROFILES,
+  type TelemetryProfile,
+} from "./telemetry-rates";
 import type { LinkHubStatus, MessageRecord } from "./types";
 
 type Listener = (record: MessageRecord) => void;
@@ -31,11 +35,27 @@ export class TelemetryStore {
   private currentStatus: LinkHubStatus | null = null;
   private running: Promise<void> | null = null;
   private configuredGeneration: string | null = null;
+  private currentProfile: TelemetryProfile = "usb";
 
   constructor(private readonly api: LinkHubApi) {}
 
   get status(): LinkHubStatus | null {
     return this.currentStatus;
+  }
+
+  get profile(): TelemetryProfile {
+    return this.currentProfile;
+  }
+
+  async setProfile(profile: TelemetryProfile): Promise<void> {
+    if (profile === this.currentProfile) {
+      return;
+    }
+    this.currentProfile = profile;
+    this.configuredGeneration = null;
+    if (this.currentStatus) {
+      await this.configureDisplayTelemetry(this.currentStatus);
+    }
   }
 
   onStatus(listener: StatusListener): () => void {
@@ -120,7 +140,7 @@ export class TelemetryStore {
     signal?: AbortSignal,
   ): Promise<MessageRecord> {
     return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
+      const timeout = globalThis.setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out after ${(timeoutMs / 1000).toFixed(1)} s`));
       }, timeoutMs);
@@ -135,7 +155,7 @@ export class TelemetryStore {
         }
       };
       const cleanup = () => {
-        window.clearTimeout(timeout);
+        globalThis.clearTimeout(timeout);
         this.listeners.delete(listener);
         signal?.removeEventListener("abort", abort);
       };
@@ -155,16 +175,9 @@ export class TelemetryStore {
         listener(record);
       }
       if (record.direction === "rx" && record.message === "HEARTBEAT") {
-        const baseMode = Number(record.fields.base_mode);
-        const customMode = Number(record.fields.custom_mode);
-        const systemStatus = Number(record.fields.system_status);
-        if (this.currentStatus) {
-          this.currentStatus = {
-            ...this.currentStatus,
-            base_mode: baseMode,
-            custom_mode: customMode,
-            system_status: systemStatus,
-          };
+        const heartbeat = heartbeatState(record.fields);
+        if (this.currentStatus && heartbeat) {
+          this.currentStatus = { ...this.currentStatus, ...heartbeat };
         }
       }
     }
@@ -212,7 +225,7 @@ export class TelemetryStore {
         for (const listener of this.connectionListeners) {
           listener(false, failure);
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
       }
     }
   }
@@ -222,7 +235,7 @@ export class TelemetryStore {
       || status.generation === this.configuredGeneration) {
       return;
     }
-    await this.api.setMessageRates(DISPLAY_TELEMETRY_RATES);
+    await this.api.setMessageRates(TELEMETRY_PROFILES[this.currentProfile]);
     this.configuredGeneration = status.generation;
   }
 

@@ -5,7 +5,7 @@ comms.py — MAVLink communication boundary between ground controller and AP
 VirtualComms simulates the comms link for Python simtests (latency queue +
 optional Gaussian noise).  The real SITL/hardware adapter is
 groundstation.unified_ground.GcsComms, which marshals commands to NAMED_VALUE_FLOAT
-via MAVLink (see groundstation/unified_ground.py for the shared NvComms protocol).
+via MAVLink (see groundstation/unified_ground.py for the shared NV wire protocol).
 
 Simtest loop (VirtualComms):
 

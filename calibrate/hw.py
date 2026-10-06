@@ -8,9 +8,17 @@ import math
 import time
 from dataclasses import dataclass
 
-from linkhub_client import mav_constants as mavlink
-from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import ParamSet, ServoOutputRaw
+from linkhub_client.messages import (
+    EkfStatusFlags,
+    MavCmd,
+    MavDataStream,
+    MavModeFlag,
+    MavParamType,
+    MavResult,
+    MavSysStatusSensor,
+    ParamSet,
+    ServoOutputRaw,
+)
 
 from .constants import (
     LinkHubClient,
@@ -18,13 +26,11 @@ from .constants import (
     CommandAck,
     EscTelemetry,
     PidTuning,
-    RequestDataStream,
     RcChannels,
     CommandLong,
     decode_message,
     Heartbeat,
-    SetAttitudeTarget,
-    StatusText,
+    Statustext,
     GB4008_KV, GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO,
     SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
     SWASH_SERVOS,
@@ -32,7 +38,7 @@ from .constants import (
     _ESC_TELEM_MSGS,
     PWM_MIN, PWM_MAX, PWM_NEUTRAL,
     _AZ_S1, _AZ_S2, _AZ_S3,
-    _COPTER_MODES, _SYS_STATUS, _LUA_MODES,
+    _COPTER_MODES, _LUA_MODES,
     _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES,
 )
 from .messages import read_one
@@ -139,7 +145,7 @@ def _send_set_servo(session: LinkHubClient, instance: int, pwm: int) -> None:
     session.send_message(CommandLong(
         target_system=session._target_system,
         target_component=session._target_component,
-        command=mavlink.MAV_CMD_DO_SET_SERVO,
+        command=MavCmd.DO_SET_SERVO,
         confirmation=0,
         param1=float(instance),
         param2=float(pwm),
@@ -158,7 +164,7 @@ def _send_motor_test(session: LinkHubClient, instance: int,
     session.send_message(CommandLong(
         target_system=session._target_system,
         target_component=session._target_component,
-        command=mavlink.MAV_CMD_DO_MOTOR_TEST,
+        command=MavCmd.DO_MOTOR_TEST,
         confirmation=0,
         param1=float(instance),
         param2=0.0,
@@ -187,10 +193,10 @@ def _print_status(session: LinkHubClient) -> None:
     if hb is None:
         print("  (no HEARTBEAT received)")
     else:
-        armed   = bool(hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+        armed   = MavModeFlag.SAFETY_ARMED in hb.base_mode
         mode_id = hb.custom_mode
         mode    = _COPTER_MODES.get(mode_id, f"MODE_{mode_id}")
-        status  = _SYS_STATUS.get(hb.system_status, str(hb.system_status))
+        status  = str(hb.system_status).removeprefix("MAV_STATE_")
         print(f"  Armed      : {'YES  <--' if armed else 'no'}")
         print(f"  Mode       : {mode} ({mode_id})")
         print(f"  Sys status : {status}")
@@ -231,11 +237,14 @@ def _print_status(session: LinkHubClient) -> None:
     ekf, cursor = read_one(session, cursor, "EKF_STATUS_REPORT", wait=2.0)
     if ekf:
         flags  = ekf.flags
-        att_ok = bool(flags & 0x01)
-        vel_ok = bool(flags & 0x02)
-        pos_ok = bool(flags & 0x04)
+        att_ok = EkfStatusFlags.ATTITUDE in flags
+        vel_ok = EkfStatusFlags.VELOCITY_HORIZ in flags
+        pos_ok = EkfStatusFlags.POS_HORIZ_REL in flags
         health = "OK" if (att_ok and vel_ok) else "DEGRADED"
-        print(f"  Flags: 0x{flags:04X}  att={att_ok}  vel={vel_ok}  pos_rel={pos_ok}  {health}")
+        flag_names = ",".join(
+            sorted(str(flag).removeprefix("EKF_") for flag in flags)
+        ) or "none"
+        print(f"  Flags: {flag_names}  att={att_ok}  vel={vel_ok}  pos_rel={pos_ok}  {health}")
     else:
         print("  (no EKF_STATUS_REPORT received)")
 
@@ -243,12 +252,7 @@ def _print_status(session: LinkHubClient) -> None:
     print(f"\n{sep}")
     print("SERVO OUTPUTS")
     print(sep)
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     srv, cursor = read_one(session, cursor, "SERVO_OUTPUT_RAW", wait=2.0)
     if srv:
         for i in range(1, 13):
@@ -305,10 +309,9 @@ def _print_status(session: LinkHubClient) -> None:
 
     ss2, cursor = read_one(session, cursor, "SYS_STATUS", wait=2.0)
     if ss2:
-        motor_bit = 0x000200
-        present = bool(ss2.onboard_control_sensors_present & motor_bit)
-        enabled = bool(ss2.onboard_control_sensors_enabled & motor_bit)
-        healthy = bool(ss2.onboard_control_sensors_health  & motor_bit)
+        present = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in ss2.onboard_control_sensors_present
+        enabled = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in ss2.onboard_control_sensors_enabled
+        healthy = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in ss2.onboard_control_sensors_health
         health  = "OK" if healthy else "[WARN] unhealthy"
         print(f"  {'motor outputs':<22} present={present}  enabled={enabled}  {health}")
         print(f"  {'CPU load':<22} {ss2.load/10.0:.1f}%")
@@ -399,7 +402,7 @@ def _monitor_esc(session: LinkHubClient, duration: float = 10.0) -> None:
     session.send_message(CommandLong(
         target_system=session._target_system,
         target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        command=MavCmd.SET_MESSAGE_INTERVAL,
         param1=float(esc_id),
         param2=100000.0,
     ))  # 10 Hz
@@ -472,8 +475,8 @@ def verify_safe_off(
 ) -> SafeOffReport:
     """Read and validate the canonical disarmed hardware state."""
     status = session.vehicle_status()
-    base_mode = int(status.get("base_mode", 0))
-    armed = bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    base_mode = status.get("base_mode", frozenset())
+    armed = MavModeFlag.SAFETY_ARMED in base_mode
     flight_mode = int(status.get("custom_mode", -1))
     params = {
         name: session.get_param(name)
@@ -490,8 +493,8 @@ def verify_safe_off(
     session.send_message(CommandLong(
         target_system=session._target_system,
         target_component=session._target_component,
-        command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-        param1=float(mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW),
+        command=MavCmd.SET_MESSAGE_INTERVAL,
+        param1=float(ServoOutputRaw.MAVLINK_ID),
         param2=100_000.0,
     ))
     cursor = session.current_cursor()
@@ -657,7 +660,7 @@ def _set_safe_off_state(
 
 
 def _arm(session: LinkHubClient, force: bool = False,
-         timeout: float = 15.0, esc_arm: bool = True) -> bool:
+         timeout: float = 15.0) -> bool:
     """
     Arm sequence:
             1. Send MAV_CMD_COMPONENT_ARM_DISARM.
@@ -674,12 +677,28 @@ def _arm(session: LinkHubClient, force: bool = False,
     generation = session.generation
     param2 = 21196.0 if force else 0.0
     result = session.command(
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        MavCmd.COMPONENT_ARM_DISARM,
         [1.0, param2],
         timeout=timeout,
     )
-    if result.get("result") != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-        print(f"  [FAIL] Arm rejected: result={result.get('result')}")
+    result_code = result.get("result")
+    if result_code != MavResult.ACCEPTED:
+        print(f"  [FAIL] Arm rejected: {result_code}.")
+        reason_deadline = time.monotonic() + 1.0
+        while time.monotonic() < reason_deadline:
+            msg, cursor = read_one(
+                session,
+                cursor,
+                ["STATUSTEXT"],
+                wait=min(0.2, reason_deadline - time.monotonic()),
+                expected_generation=generation,
+            )
+            if msg is None:
+                continue
+            decoded = decode_message(msg)
+            if isinstance(decoded, Statustext):
+                print(f"  [FC] {decoded.text}")
+                break
         return False
     print("  Arm command accepted -- waiting for armed heartbeat ...")
 
@@ -697,10 +716,10 @@ def _arm(session: LinkHubClient, force: bool = False,
         if msg is None:
             continue
         match decode_message(msg):
-            case StatusText(text=text):
+            case Statustext(text=text):
                 print(f"  [FC] {text}")
             case Heartbeat(base_mode=base_mode):
-                if bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                if MavModeFlag.SAFETY_ARMED in base_mode:
                     print("  [OK] Vehicle armed.")
                     armed = True
                     break
@@ -710,9 +729,7 @@ def _arm(session: LinkHubClient, force: bool = False,
         return False
 
     # DShot ESCs self-arm from the idle throttle ArduPilot streams once armed, so
-    # no special "hold min throttle" pre-arm pulse is needed.  esc_arm is accepted
-    # for call-site compatibility only.
-    _ = esc_arm
+    # no special "hold min throttle" pre-arm pulse is needed.
     return True
 
 
@@ -728,11 +745,11 @@ def _disarm(session: LinkHubClient, timeout: float = 10.0,
     generation = session.generation
     param2 = 21196.0 if force else 0.0
     result = session.command(
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        MavCmd.COMPONENT_ARM_DISARM,
         [0.0, param2],
         timeout=timeout,
     )
-    if result.get("result") != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+    if result.get("result") != MavResult.ACCEPTED:
         print(f"  [FAIL] Disarm rejected: result={result.get('result')}")
         return False
     print("  Disarm command accepted -- waiting for disarmed heartbeat ...")
@@ -749,11 +766,11 @@ def _disarm(session: LinkHubClient, timeout: float = 10.0,
         if msg is None:
             continue
         match decode_message(msg):
-            case StatusText(text=text):
+            case Statustext(text=text):
                 print(f"  [FC] {text}")
                 continue
             case Heartbeat(base_mode=base_mode):
-                if not bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                if MavModeFlag.SAFETY_ARMED not in base_mode:
                     print("  [OK] Vehicle disarmed.")
                     _set_safe_off_state(session)
                     return True
@@ -771,7 +788,7 @@ def _set_servo_function(session: LinkHubClient, output: int, value: float) -> bo
     return session.set_param(
         servo_function,
         value,
-        param_type=mavutil.mavlink.MAV_PARAM_TYPE_INT16,
+        param_type=MavParamType.INT16,
     )
 
 
@@ -780,7 +797,7 @@ def _set_heli_servo_mode(session: LinkHubClient, value: float) -> bool:
         session.set_param(
             "H_SV_MAN",
             value,
-            param_type=mavutil.mavlink.MAV_PARAM_TYPE_INT8,
+            param_type=MavParamType.INT8,
         )
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:

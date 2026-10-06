@@ -32,7 +32,7 @@ goto parse_args
 
 if not defined CONNECTION set "CONNECTION=%LINKHUB_CONNECTION%"
 if not defined BAUD set "BAUD=%LINKHUB_BAUD%"
-if not defined BAUD set "BAUD=115200"
+if not defined BAUD set "BAUD=auto"
 if not defined PORT set "PORT=%LINKHUB_PORT%"
 if not defined PORT set "PORT=8999"
 
@@ -40,13 +40,16 @@ if not defined CONNECTION (
     echo Usage: %~nx0 [--build] ^<connection^> [baud] [port]
     echo.
     echo Hardware:
-    echo   %~nx0 COM7 115200 8999
-    echo   %~nx0 --build COM7 115200 8999
+    echo   %~nx0 auto
+    echo   %~nx0 COM7
+    echo   %~nx0 COM7 57600 8999
+    echo   %~nx0 --build auto
     echo.
     echo SITL:
     echo   %~nx0 tcp:127.0.0.1:5760
     echo.
-    echo The connection may also be set with LINKHUB_CONNECTION.
+    echo Baud defaults to auto-discovery. Set it explicitly only to restrict scanning.
+    echo Connection and baud may also be set with LINKHUB_CONNECTION and LINKHUB_BAUD.
     exit /b 2
 )
 
@@ -90,21 +93,23 @@ if "%BUILD%"=="1" (
 )
 
 if not exist "%REPO%\linkhub\target\release\linkhub.exe" (
-    echo ERROR: LinkHub executable not found. Run %~nx0 --build %CONNECTION% %BAUD% %PORT%
+    echo ERROR: LinkHub executable not found. Run %~nx0 --build %CONNECTION%
     exit /b 1
 )
 
 if not exist "%REPO%\linkhub-ui\dist\index.html" (
-    echo ERROR: Compiled LinkHub UI not found. Run %~nx0 --build %CONNECTION% %BAUD% %PORT%
+    echo ERROR: Compiled LinkHub UI not found. Run %~nx0 --build %CONNECTION%
     exit /b 1
 )
 
 echo [INFO] Starting LinkHub on http://127.0.0.1:%PORT%/
 echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
 echo [INFO] Press Ctrl+C to stop.
+set "BAUD_ARG="
+if /i not "%BAUD%"=="auto" set BAUD_ARG=--baud "%BAUD%"
 "%REPO%\linkhub\target\release\linkhub.exe" serve ^
     --connection "%CONNECTION%" ^
-    --baud "%BAUD%" ^
+    %BAUD_ARG% ^
     --port "%PORT%" ^
     --data-dir "%REPO%\simulation\logs\linkhub" ^
     --static-dir "%REPO%\linkhub-ui\dist" ^

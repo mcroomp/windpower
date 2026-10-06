@@ -1,12 +1,22 @@
 import "./styles.css";
 import { LinkHubApi } from "./api";
-import { formatLinkThroughput } from "./link-throughput";
+import { eulerFromAttitudeQuaternion } from "./attitude";
+import { diagValue, DIAG_ARRAY_NAME, isDiagRecord } from "./diag-array";
+import {
+  formatKbps,
+  formatLinkThroughput,
+  messageThroughputRows,
+} from "./link-throughput";
+import type { LinkHubStatus } from "./types";
 import { formatCopterMode } from "./modes";
+import { isArmed } from "./mav";
 import { PassiveController, type PassivePhase } from "./passive";
 import { VehicleScene } from "./scene";
 import { decodeH3Swashplate, swashControlPositions } from "./swashplate";
 import { TelemetryStore } from "./telemetry";
+import type { TelemetryProfile } from "./telemetry-rates";
 import { Terminal } from "./terminal";
+import { MOTOR_TO_ROTOR_GEAR_RATIO } from "./vehicle-motion";
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -21,13 +31,18 @@ const telemetry = new TelemetryStore(api);
 const output = required<HTMLElement>("#terminal-output");
 const operationState = required<HTMLElement>("#operation-state");
 const connectionState = required<HTMLElement>("#connection-state");
-const linkThroughput = required<HTMLElement>("#link-throughput");
+const telemetryProfile = required<HTMLSelectElement>("#telemetry-profile");
+const linkThroughput = required<HTMLButtonElement>("#link-throughput");
+const linkDetails = required<HTMLElement>("#link-details");
 const overlay = required<HTMLElement>("#telemetry-overlay");
 const form = required<HTMLFormElement>("#terminal-form");
 const input = required<HTMLInputElement>("#terminal-input");
 const swashControls = required<HTMLElement>("#swash-controls");
 const cyclicDot = required<HTMLElement>("#cyclic-dot");
 const collectiveDot = required<HTMLElement>("#collective-dot");
+const targetErrorWidget = required<HTMLElement>("#target-error-widget");
+const targetErrorDot = required<HTMLElement>("#target-error-dot");
+const targetErrorValue = required<HTMLElement>("#target-error-value");
 let swashLimits: { min: number; max: number } | null = null;
 
 let terminal: Terminal;
@@ -51,19 +66,29 @@ const scene = new VehicleScene(required<HTMLElement>("#scene"), telemetry);
 
 function updateOverlay(): void {
   const status = telemetry.status;
-  const attitude = telemetry.get("ATTITUDE");
+  const attitude = eulerFromAttitudeQuaternion(telemetry.get("ATTITUDE_QUATERNION"));
   const servos = telemetry.get("SERVO_OUTPUT_RAW");
-  const yawMotor = telemetry.get("NAMED_VALUE_FLOAT", "rx", "YFF_U");
+  const yawMotor = diagValue(
+    telemetry.get("DEBUG_FLOAT_ARRAY", "rx", DIAG_ARRAY_NAME),
+    "YFF_U",
+  );
+  const rpm = telemetry.get("RPM");
   const degrees = (value: unknown) => (
     typeof value === "number" ? (value * 180 / Math.PI).toFixed(1) : "n/a"
   );
   const field = (name: string) => String(servos?.fields[name] ?? "n/a");
-  const armed = Boolean(status && (status.base_mode & 128));
+  const armed = isArmed(status);
   const motorCommand = !armed
     ? "inactive"
-    : typeof yawMotor?.fields.value === "number"
-    ? `${(yawMotor.fields.value * 100).toFixed(1)}%`
+    : yawMotor !== undefined
+    ? `${(yawMotor * 100).toFixed(1)}%`
     : "n/a";
+  const motorRpm = typeof rpm?.fields.rpm1 === "number" && rpm.fields.rpm1 >= 0
+    ? rpm.fields.rpm1
+    : null;
+  const rpmText = motorRpm === null
+    ? "RPM unavailable"
+    : `motor ${motorRpm.toFixed(0)} RPM  rotor ${(motorRpm / MOTOR_TO_ROTOR_GEAR_RATIO).toFixed(1)} RPM`;
   const swash = swashLimits
     ? decodeH3Swashplate(
       Number(servos?.fields.servo1_raw),
@@ -82,18 +107,34 @@ function updateOverlay(): void {
     Number(servos?.fields.servo2_raw),
     Number(servos?.fields.servo3_raw),
   );
-  swashControls.classList.toggle("unavailable", controls === null);
   if (controls) {
     cyclicDot.style.left = `${(controls.cyclicLeftRight + 1) * 50}%`;
     cyclicDot.style.top = `${(1 - controls.cyclicUpDown) * 50}%`;
     collectiveDot.style.top = `${(1 - controls.collectiveUpDown) * 50}%`;
   }
+  const targetError = scene.targetDirectionError;
+  targetErrorWidget.classList.toggle("unavailable", targetError === null);
+  if (targetError) {
+    const limitDegrees = 30;
+    const right = Math.max(-1, Math.min(1, targetError.rightDegrees / limitDegrees));
+    const forward = Math.max(-1, Math.min(1, targetError.forwardDegrees / limitDegrees));
+    targetErrorDot.style.left = `${(right + 1) * 50}%`;
+    targetErrorDot.style.top = `${(1 - forward) * 50}%`;
+    targetErrorValue.textContent = `${targetError.totalDegrees.toFixed(1)}°`;
+  } else {
+    targetErrorValue.textContent = "n/a";
+  }
+  swashControls.classList.toggle(
+    "unavailable",
+    controls === null && targetError === null,
+  );
   overlay.textContent = [
     `${armed ? "ARMED" : "disarmed"} · ${formatCopterMode(status?.custom_mode)}`,
-    `roll ${degrees(attitude?.fields.roll)}°  pitch ${degrees(attitude?.fields.pitch)}°  yaw ${degrees(attitude?.fields.yaw)}°`,
+    `roll ${degrees(attitude?.roll)}°  pitch ${degrees(attitude?.pitch)}°  yaw ${degrees(attitude?.yaw)}°`,
     scene.hasCaptureTarget ? "Capture target: yellow arrow" : "No capture target",
     `swash ${swashText}`,
     `S1 ${field("servo1_raw")}  S2 ${field("servo2_raw")}  S3 ${field("servo3_raw")}  DShot/S9 ${field("servo9_raw")}  YFF_U ${motorCommand}`,
+    rpmText,
   ].join("\n");
 }
 
@@ -106,26 +147,70 @@ function scheduleOverlay(): void {
     }, 100);
   }
 }
+function renderLinkThroughput(status: LinkHubStatus | null): void {
+  linkThroughput.textContent = formatLinkThroughput(status);
+  const rows = messageThroughputRows(status);
+  const table = document.createElement("table");
+  const head = table.createTHead().insertRow();
+  for (const label of ["Message", "RX kbps", "TX kbps"]) {
+    head.append(Object.assign(document.createElement("th"), { textContent: label }));
+  }
+  const body = table.createTBody();
+  for (const row of rows) {
+    const tr = body.insertRow();
+    for (const text of [row.message, formatKbps(row.rxBps), formatKbps(row.txBps)]) {
+      tr.insertCell().textContent = text;
+    }
+  }
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = status?.connected ? "No traffic in the last 3 s" : "Not connected";
+    linkDetails.replaceChildren(empty);
+  } else {
+    linkDetails.replaceChildren(table);
+  }
+}
+
+function setLinkDetailsOpen(open: boolean): void {
+  linkDetails.hidden = !open;
+  linkThroughput.setAttribute("aria-expanded", String(open));
+}
+linkThroughput.addEventListener("click", () => setLinkDetailsOpen(linkDetails.hidden));
+document.addEventListener("click", (event) => {
+  if (!linkDetails.hidden && event.target instanceof Node
+    && !linkThroughput.contains(event.target) && !linkDetails.contains(event.target)) {
+    setLinkDetailsOpen(false);
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !linkDetails.hidden) {
+    setLinkDetailsOpen(false);
+  }
+});
+renderLinkThroughput(null);
+
 telemetry.onRecord((record) => {
   if (record.direction === "rx" && (
     record.message === "HEARTBEAT"
-    || record.message === "ATTITUDE"
+    || record.message === "ATTITUDE_QUATERNION"
     || record.message === "ATTITUDE_TARGET"
     || record.message === "SERVO_OUTPUT_RAW"
-    || (record.message === "NAMED_VALUE_FLOAT" && record.fields.name === "YFF_U")
+    || record.message === "RPM"
+    || isDiagRecord(record)
   )) {
     scheduleOverlay();
   }
 });
 telemetry.onGeneration(() => {
-  linkThroughput.textContent = formatLinkThroughput(null);
+  renderLinkThroughput(null);
   scheduleOverlay();
   connectionState.textContent = "reconnecting";
   connectionState.className = "badge offline";
 });
 telemetry.onConnection((connected, error) => {
   if (!connected) {
-    linkThroughput.textContent = formatLinkThroughput(null);
+    renderLinkThroughput(null);
   }
   scheduleOverlay();
   connectionState.textContent = connected ? "connected" : "offline";
@@ -136,8 +221,22 @@ telemetry.onConnection((connected, error) => {
     write("Telemetry connection restored.");
   }
 });
-telemetry.onStatus((status) => {
-  linkThroughput.textContent = formatLinkThroughput(status);
+telemetry.onStatus(renderLinkThroughput);
+telemetryProfile.addEventListener("change", async () => {
+  const profile = telemetryProfile.value as TelemetryProfile;
+  telemetryProfile.disabled = true;
+  try {
+    await telemetry.setProfile(profile);
+    write(`Telemetry profile changed to ${profile}.`);
+  } catch (error) {
+    write(
+      `Telemetry profile change failed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  } finally {
+    telemetryProfile.value = telemetry.profile;
+    telemetryProfile.disabled = false;
+  }
 });
 
 while (!telemetry.status) {

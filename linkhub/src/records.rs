@@ -126,6 +126,7 @@ impl MavlinkFrame {
     pub fn state_key(&self) -> Option<MavlinkStateKey> {
         let discriminator_field = match self.message_name.as_str() {
             "NAMED_VALUE_FLOAT" | "NAMED_VALUE_INT" | "DEBUG_VECT" => Some("name"),
+            "DEBUG_FLOAT_ARRAY" => Some("array_id"),
             "PID_TUNING" => Some("axis"),
             "BATTERY_STATUS" => Some("id"),
             _ if is_snapshot_message(&self.message_name) => None,
@@ -231,4 +232,46 @@ pub fn wall_time_ns() -> u64 {
         .unwrap_or_default()
         .as_nanos();
     u64::try_from(nanos).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn frame(message_name: &str, fields: Value) -> MavlinkFrame {
+        MavlinkFrame {
+            link_id: "link".to_owned(),
+            direction: Direction::Rx,
+            protocol_version: 2,
+            sequence: 0,
+            system_id: 1,
+            component_id: 1,
+            message_id: 350,
+            message_name: message_name.to_owned(),
+            fields: fields.as_object().expect("fields").clone(),
+            signed: false,
+            frame: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn debug_float_arrays_collapse_per_array_id() {
+        let first = frame("DEBUG_FLOAT_ARRAY", json!({"array_id": 1, "data": [1.0]}));
+        let newer = frame("DEBUG_FLOAT_ARRAY", json!({"array_id": 1, "data": [2.0]}));
+        let other = frame("DEBUG_FLOAT_ARRAY", json!({"array_id": 2, "data": [1.0]}));
+        let key = first.state_key().expect("array state key");
+        assert_eq!(Some(key.clone()), newer.state_key());
+        assert_ne!(Some(key), other.state_key());
+    }
+
+    #[test]
+    fn debug_float_array_without_array_id_is_not_collapsed() {
+        assert!(
+            frame("DEBUG_FLOAT_ARRAY", json!({"data": [1.0]}))
+                .state_key()
+                .is_none()
+        );
+    }
 }

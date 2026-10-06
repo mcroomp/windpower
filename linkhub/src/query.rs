@@ -8,6 +8,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
 use crate::{
+    codec::dialect::{MavModeFlag, MavSeverity},
     journal::{JournalError, read_persisted},
     records::{Direction, JournalRecord, RecordPayload},
 };
@@ -499,17 +500,16 @@ fn print_armed(messages: &[Message]) {
         .iter()
         .filter(|message| message.direction == Direction::Rx && message.message_type == "HEARTBEAT")
     {
-        let base_mode = message
+        let armed = message
             .fields
             .get("base_mode")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
+            .and_then(|value| serde_json::from_value::<MavModeFlag>(value.clone()).ok())
+            .is_some_and(|flags| flags.contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED));
         let custom_mode = message
             .fields
             .get("custom_mode")
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        let armed = base_mode & 128 != 0;
         if previous == Some((armed, custom_mode)) {
             continue;
         }
@@ -554,17 +554,24 @@ fn clean_string(value: Option<&Value>) -> String {
         .to_owned()
 }
 
+/// A STATUSTEXT message being reassembled: id, first-chunk time, severity, chunks by sequence.
+type PendingStatusText = (u64, f64, Option<MavSeverity>, BTreeMap<u64, String>);
+
 fn print_statustext(
     messages: &[Message],
     since: Option<f64>,
     until: Option<f64>,
     minimum_severity: Option<u64>,
 ) {
-    let mut pending: Option<(u64, f64, u64, BTreeMap<u64, String>)> = None;
-    let flush = |pending: &mut Option<(u64, f64, u64, BTreeMap<u64, String>)>| {
+    let mut pending: Option<PendingStatusText> = None;
+    let admitted = |severity: Option<MavSeverity>| {
+        minimum_severity
+            .is_none_or(|limit| severity.is_none_or(|severity| u64::from(severity as u32) <= limit))
+    };
+    let flush = |pending: &mut Option<PendingStatusText>| {
         if let Some((_, time, severity, chunks)) = pending.take() {
             let text = chunks.into_values().collect::<String>();
-            if minimum_severity.is_none_or(|limit| severity <= limit) {
+            if admitted(severity) {
                 println!("[{time:>9.3}s] {:<9} {text}", severity_name(severity));
             }
         }
@@ -582,12 +589,11 @@ fn print_statustext(
         let severity = message
             .fields
             .get("severity")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX);
+            .and_then(|value| serde_json::from_value::<MavSeverity>(value.clone()).ok());
         let text = clean_string(message.fields.get("text"));
         if id == 0 {
             flush(&mut pending);
-            if minimum_severity.is_none_or(|limit| severity <= limit) {
+            if admitted(severity) {
                 println!(
                     "[{:>9.3}s] {:<9} {text}",
                     message.relative_s,
@@ -612,18 +618,17 @@ fn print_statustext(
     flush(&mut pending);
 }
 
-fn severity_name(severity: u64) -> &'static str {
-    match severity {
-        0 => "EMERGENCY",
-        1 => "ALERT",
-        2 => "CRITICAL",
-        3 => "ERROR",
-        4 => "WARNING",
-        5 => "NOTICE",
-        6 => "INFO",
-        7 => "DEBUG",
-        _ => "UNKNOWN",
-    }
+/// `EMERGENCY`, `INFO`, ...: the dialect name without its `MAV_SEVERITY_` prefix.
+fn severity_name(severity: Option<MavSeverity>) -> String {
+    severity.map_or_else(
+        || "UNKNOWN".to_owned(),
+        |severity| {
+            let name = format!("{severity:?}");
+            name.strip_prefix("MAV_SEVERITY_")
+                .unwrap_or(&name)
+                .to_owned()
+        },
+    )
 }
 
 fn print_nvf(

@@ -538,6 +538,12 @@ end
 
 function mavlink.send_chan(chan, msgid, payload)
     local hex = payload:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+    if msgid == 350 then
+        -- Diagnostics are re-broadcast on every channel at TEL_HZ; keep only the
+        -- latest so long simulations do not accumulate them.
+        _mock.diag_array_hex = hex
+        return true
+    end
     table.insert(_mock.mavlink_sent, {chan = chan, msgid = msgid, payload_hex = hex})
     return true
 end

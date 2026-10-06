@@ -12,9 +12,18 @@ gps_glitching bit is hardcoded as (1<<15) = 0x8000.
 Only the flags that ArduPilot actually sends are defined here.
 nav_filter_status bits 10-18 (takeoff_detected, using_gps,
 gps_quality_good, etc.) are NOT transmitted.  0x0800 is unused.
+
+The integer masks and ``MAV_MODE_ARMED``/``ARDU_MODES``/``MAV_STATE`` tables
+decode the numeric pymavlink-format logs (legacy ``mavlink.jsonl``).
+LinkHub-sourced data is typed instead: ``EkfStatusReport.flags`` is a
+frozenset of ``EkfStatusFlags`` (test membership with ``in``; use
+``flags_to_mask`` only to print or compare against these integer tables) and
+``Heartbeat.base_mode`` a frozenset of ``MavModeFlag``.
 """
 
 from __future__ import annotations
+
+from linkhub_client.messages import EkfStatusFlags
 
 # ---------------------------------------------------------------------------
 # EKF_STATUS_FLAGS (MAVLink) as sent by AP_NavEKF3_Outputs.cpp
@@ -34,6 +43,35 @@ EKF_FLAGS: dict[int, str] = {
     0x0400: "uninitialized",      # EKF_UNINITIALIZED   -- EKF has never been healthy (!initalized)
     0x8000: "gps_glitching",      # (1<<15) hardcoded   -- nav_filter_status.gps_glitching
 }
+
+# Bit value of each EKF_STATUS_FLAGS member (``EkfStatusReport.flags`` is a
+# frozenset of these).
+EKF_FLAG_BITS: dict[EkfStatusFlags, int] = {
+    EkfStatusFlags.ATTITUDE:                          0x0001,
+    EkfStatusFlags.VELOCITY_HORIZ:                    0x0002,
+    EkfStatusFlags.VELOCITY_VERT:                     0x0004,
+    EkfStatusFlags.POS_HORIZ_REL:                     0x0008,
+    EkfStatusFlags.POS_HORIZ_ABS:                     0x0010,
+    EkfStatusFlags.POS_VERT_ABS:                      0x0020,
+    EkfStatusFlags.POS_VERT_AGL:                      0x0040,
+    EkfStatusFlags.CONST_POS_MODE:                    0x0080,
+    EkfStatusFlags.PRED_POS_HORIZ_REL:                0x0100,
+    EkfStatusFlags.PRED_POS_HORIZ_ABS:                0x0200,
+    EkfStatusFlags.UNINITIALIZED:                     0x0400,
+    EkfStatusFlags.GPS_GLITCHING:                     0x8000,
+}
+
+
+def flags_to_mask(flags: frozenset[EkfStatusFlags]) -> int:
+    """Integer EKF_STATUS_FLAGS mask of a decoded ``EkfStatusReport.flags``.
+
+    For log lines and the legacy integer-mask helpers below.  Raises KeyError
+    for a flag with no known bit instead of silently dropping it.
+    """
+    mask = 0
+    for flag in flags:
+        mask |= EKF_FLAG_BITS[flag]
+    return mask
 
 # Flags whose presence indicates a problem
 EKF_WARN: frozenset[int] = frozenset({0x0080, 0x0400, 0x8000})
@@ -56,7 +94,7 @@ GPS_FIX: dict[int, str] = {
 # MAVLink HEARTBEAT constants
 # ---------------------------------------------------------------------------
 
-MAV_MODE_ARMED = 0x80  # base_mode bit: vehicle is armed
+MAV_MODE_ARMED = 0x80  # legacy numeric base_mode bit: vehicle is armed
 
 ARDU_MODES: dict[int, str] = {
     0:  "STABILIZE", 1:  "ACRO",     2:  "ALT_HOLD",

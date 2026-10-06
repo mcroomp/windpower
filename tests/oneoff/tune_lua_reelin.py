@@ -25,7 +25,7 @@ from arduloop import HeliParams, RateAxisParams
 from simulation.pumping_planner import TensionCommand
 from simulation.rawes_lua_harness import RawesLua
 from simulation.rawes_modes import MODE_STEADY
-from simulation.unified_ground import LuaComms
+from groundstation.unified_ground import GcsComms
 from tests.simtests._rotor_helpers import load_default_rotor
 
 _IC = load_ic()
@@ -74,7 +74,7 @@ def run(P=0.02, I=0.10, D=0.0, FF=0.0, FLTD=10.0, SMAX=0.0,
         kp_tension=4.0e-4, accel_limit_ms2=2.0, jerk_limit_ms3=10.0,
         tension_tau_s=0.08, min_length=2.0,
     )
-    comms = LuaComms(sim.send_named_float)
+    comms = GcsComms(sim)
     lua = MockArdupilot.for_lua(sim, initial_col_rad=_IC.coll_eq_rad, wind=WIND, dt=DT)
     # Override rate-PID gains for this sweep point.
     hz = round(1.0 / DT)

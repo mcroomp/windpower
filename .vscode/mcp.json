@@ -1,22 +1,3 @@
 {
-  "servers": {
-    "rawes-calibrate": {
-      "type": "stdio",
-      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "args": [
-        "-m",
-        "calibrate.mcp_server",
-        "--port",
-        "COM6",
-        "--baud",
-        "57600",
-        "--command-timeout",
-        "30",
-        "--long-command-timeout",
-        "600",
-        "--timeout-grace",
-        "10"
-      ]
-    }
-  }
+	"servers": {}
 }

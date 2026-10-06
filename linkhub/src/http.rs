@@ -19,11 +19,11 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 use crate::{
+    codec::dialect::{MavCmd, MavParamType},
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
-    operations::{MavlinkOperations, OperationError},
-    protocol,
+    operations::{MavlinkOperations, OperationError, ParameterSetting},
     records::{
         DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, wall_time_ns,
     },
@@ -156,7 +156,6 @@ pub fn router_with_motor_and_static(
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/v1/status", get(status))
-        .route("/v1/schema", get(protocol_schema))
         .route("/v1/records", get(records))
         .route("/v1/journal/flush", axum::routing::post(flush_journal))
         .route(
@@ -265,10 +264,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "cursor": format_cursor(state.journal.tail()),
         "mavlink": state.link.as_ref().map(MavlinkLinkHandle::status),
     }))
-}
-
-async fn protocol_schema() -> Json<Value> {
-    Json(protocol::json_schema())
 }
 
 async fn flush_journal(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
@@ -953,7 +948,7 @@ struct SendMessageRequest {
 
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
-    command: u32,
+    command: MavCmd,
     #[serde(default)]
     params: Vec<f64>,
     target_system: Option<u8>,
@@ -1008,7 +1003,7 @@ async fn get_parameter(
 struct SetParameterRequest {
     value: f64,
     #[serde(rename = "type")]
-    param_type: u64,
+    param_type: MavParamType,
     timeout_ms: Option<u64>,
 }
 
@@ -1042,7 +1037,7 @@ async fn list_parameters(
 
 #[derive(Debug, Deserialize)]
 struct SetParametersRequest {
-    parameters: Vec<Value>,
+    parameters: Vec<ParameterSetting>,
     #[serde(default = "default_batch_timeout_ms")]
     timeout_ms: u64,
     #[serde(default = "default_parameter_retries")]
@@ -1324,7 +1319,7 @@ async fn send_mavlink_message(
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("MAVLink is not configured".to_owned()))?;
     let sequence = link
-        .send_message(
+        .send_message_fields(
             &request.message.to_uppercase(),
             &request.fields,
             request.source_system,
@@ -1446,7 +1441,6 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use mavlink::MavHeader;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1455,7 +1449,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        codec::serialize_message,
+        codec::{MavHeader, serialize_message},
         journal::JournalConfig,
         mavlink::{MavlinkLinkConfig, heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
@@ -1470,7 +1464,6 @@ mod tests {
                 component_id,
             },
         )
-        .expect("heartbeat frame")
     }
 
     fn event(run_id: Uuid) -> DiagnosticEvent {
@@ -1568,41 +1561,6 @@ mod tests {
         assert_eq!(batch["records"][0]["kind"], "diagnostic.event");
         assert_eq!(batch["records"][0]["data"]["source"], "groundstation");
         assert_eq!(batch["next_cursor"], "v1:1");
-
-        journal.shutdown().await.expect("shutdown");
-        task.await.expect("journal task");
-    }
-
-    #[tokio::test]
-    async fn serves_the_generated_protocol_schema() {
-        let temp = TempDir::new().expect("temp directory");
-        let run_id = Uuid::new_v4();
-        let config = JournalConfig::for_directory(temp.path(), run_id);
-        let (journal, task) = JournalHandle::start(config).await.expect("journal");
-        let app = router(journal.clone(), None);
-
-        let response = app
-            .oneshot(
-                Request::get("/v1/schema")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("schema body");
-        let schema: Value = serde_json::from_slice(&body).expect("schema JSON");
-
-        assert_eq!(schema["properties"]["schema_version"]["const"], 1);
-        assert_eq!(
-            schema["$defs"]["MavLandedState"]["x-enum-varnames"][2],
-            "IN_AIR"
-        );
-        assert_eq!(
-            schema["$defs"]["ExtendedSysState"]["properties"]["landed_state"]["$ref"],
-            "#/$defs/MavLandedState"
-        );
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");

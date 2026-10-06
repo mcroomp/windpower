@@ -11,13 +11,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from linkhub_client import mav_constants as mavlink
-from linkhub_client.mav_constants import mavutil
 from linkhub_client.client import (
     LinkHubError,
     LinkHubMotorController,
 )
-from linkhub_client.messages import decode_message
+from linkhub_client.messages import (
+    AttitudeTarget,
+    MavCmd,
+    MavDataStream,
+    MavModeFlag,
+    MavState,
+    PidTuningAxis,
+    decode_message,
+)
+from groundstation.rawes_diag import diag_values
 from groundstation.rawes_modes import (
     CMD_ENTER_GUIDED,
     CMD_ENTER_PASSIVE,
@@ -48,9 +55,8 @@ from .constants import (
     LinkHubClient,
     NamedValueFloat,
     CommandLong,
-    RequestDataStream,
-    SetAttitudeTarget,
-    StatusText,
+    DebugFloatArray,
+    Statustext,
     SERVO_MOTOR, MOTOR_OFF_US, MOTOR_ESC_CHANNEL,
     _ESC_TELEM_MSGS,
     _RUN_MODES, _IC_TRIM_KEYS, _PASSIVE_IC_THRUST,
@@ -65,6 +71,15 @@ from .util import (
     _fmt, _log_path, _parse_kv_list, _parse_flags,
     _RunLog, _esc_check, _poll_keys,
 )
+
+# Diagnostic-array key -> observation-state slot (None: not displayed).
+_DIAG_STATE_KEYS = {
+    "YFF_T": "yff_t", "YFF_U": "yff_u", "YFF_GZ": "yff_gz",
+    "OL_RSP": "ol_rsp", "OL_PSP": "ol_psp", "OL_YSP": "ol_ysp",
+    "OL_RER": "ol_rer", "OL_PER": "ol_per", "OL_YER": "ol_yer",
+    "OL_AP": "ol_ap", "OL_AI": "ol_ai", "OL_AD": "ol_ad",
+    "OL_COL": "ol_col", "OL_TEN": "ol_ten",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -350,10 +365,10 @@ def _wait_for_armed(session: LinkHubClient, timeout_s: float = 15.0) -> bool:
         if msg is None:
             continue
         decoded = decode_message(msg)
-        if isinstance(decoded, StatusText):
+        if isinstance(decoded, Statustext):
             print(f"  [FC] {decoded.text}")
         elif isinstance(decoded, Heartbeat):
-            if bool(decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+            if MavModeFlag.SAFETY_ARMED in decoded.base_mode:
                 return True
     return False
 
@@ -397,13 +412,13 @@ def _wait_for_passive_runup(
         )
         if msg is not None:
             decoded = decode_message(msg)
-            if isinstance(decoded, StatusText):
+            if isinstance(decoded, Statustext):
                 print(f"  [FC] {decoded.text}")
                 if "runup complete" in decoded.text.lower():
                     print("  [OK] ArduPilot reports heli runup complete.")
                     return True
-            elif isinstance(decoded, Heartbeat) and not bool(
-                decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+            elif isinstance(decoded, Heartbeat) and (
+                MavModeFlag.SAFETY_ARMED not in decoded.base_mode
             ):
                 print("  [FAIL] Vehicle disarmed during heli runup.")
                 return False
@@ -427,12 +442,7 @@ def _wait_for_passive_ekf_settle(
 
     Lua holds the attitude captured by ENTER_GUIDED throughout this wait.
     """
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
-        req_message_rate=10,
-    ))
+    session.request_data_stream(MavDataStream.EXTRA1, 10)
     deadline = time.monotonic() + timeout_s
     quiet_since: float | None = None
     last_attitude_at: float | None = None
@@ -456,20 +466,17 @@ def _wait_for_passive_ekf_settle(
         if msg is not None:
             decoded = decode_message(msg)
             if isinstance(decoded, Heartbeat):
-                if not bool(
-                    decoded.base_mode
-                    & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                ):
+                if MavModeFlag.SAFETY_ARMED not in decoded.base_mode:
                     print("  [FAIL] Vehicle disarmed during EKF settling.")
                     return False
                 if require_active and (
-                    decoded.system_status == mavutil.mavlink.MAV_STATE_ACTIVE
+                    decoded.system_status == MavState.ACTIVE
                     and not active
                 ):
                     active = True
                     quiet_since = None
                     print("  [FC] GUIDED is ACTIVE; monitoring yaw settling.")
-            elif isinstance(decoded, StatusText):
+            elif isinstance(decoded, Statustext):
                 print(f"  [FC] {decoded.text}")
                 if "yaw alignment complete" in decoded.text.lower():
                     quiet_since = None
@@ -505,25 +512,20 @@ def _wait_for_passive_ekf_settle(
 
 def _configure_passive_startup_telemetry(session: LinkHubClient) -> None:
     """Enable evidence streams before arming so the handoff is fully logged."""
-    for stream_id in (
-        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
-        mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+    for stream in (
+        MavDataStream.EXTRA1,
+        MavDataStream.RC_CHANNELS,
     ):
-        session.send_message(RequestDataStream(
-            target_system=session._target_system,
-            target_component=session._target_component,
-            req_stream_id=stream_id,
-            req_message_rate=25,
-        ))
+        session.request_data_stream(stream, 25)
     for message_id in (
-        mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION,
-        mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET,
-        mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE,
+        AttitudeQuaternion.MAVLINK_ID,
+        AttitudeTarget.MAVLINK_ID,
+        ExtendedSysState.MAVLINK_ID,
     ):
         session.send_message(CommandLong(
             target_system=session._target_system,
             target_component=session._target_component,
-            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            command=MavCmd.SET_MESSAGE_INTERVAL,
             param1=float(message_id),
             param2=40000.0,
         ))
@@ -555,12 +557,12 @@ def _wait_for_passive_land_clear(
             if decoded.landed_state is MavLandedState.IN_AIR:
                 print("  [OK] ArduPilot landed state cleared in ACRO.")
                 return True
-        elif isinstance(decoded, Heartbeat) and not bool(
-            decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        elif isinstance(decoded, Heartbeat) and (
+            MavModeFlag.SAFETY_ARMED not in decoded.base_mode
         ):
             print("  [FAIL] Vehicle disarmed while clearing landed state.")
             return False
-        elif isinstance(decoded, StatusText):
+        elif isinstance(decoded, Statustext):
             print(f"  [FC] {decoded.text}")
     print("  [FAIL] ArduPilot remained landed after ACRO collective staging.")
     return False
@@ -568,6 +570,12 @@ def _wait_for_passive_land_clear(
 
 def _wait_for_disarmed(session: LinkHubClient, timeout_s: float) -> bool:
     """Wait for Lua or ArduPilot to confirm disarm via heartbeat."""
+    status = session.vehicle_status()
+    base_mode = status.get("base_mode")
+    if base_mode is not None and MavModeFlag.SAFETY_ARMED not in base_mode:
+        print("  [OK] Vehicle already disarmed.")
+        return True
+
     deadline = time.monotonic() + timeout_s
     cursor = session.current_cursor()
     while time.monotonic() < deadline:
@@ -577,13 +585,10 @@ def _wait_for_disarmed(session: LinkHubClient, timeout_s: float) -> bool:
         if msg is None:
             continue
         decoded = decode_message(msg)
-        if isinstance(decoded, StatusText):
+        if isinstance(decoded, Statustext):
             print(f"  [FC] {decoded.text}")
         elif isinstance(decoded, Heartbeat):
-            if not bool(
-                decoded.base_mode
-                & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-            ):
+            if MavModeFlag.SAFETY_ARMED not in decoded.base_mode:
                 print("  [OK] Vehicle disarmed by Lua.")
                 return True
     return False
@@ -692,7 +697,7 @@ def _safety_shutdown(session: LinkHubClient, *,
 def _observation_loop(session: LinkHubClient, *,
                       duration_s: "float | None",
                       msg_types: list[str],
-                      streams: list[tuple],
+                      streams: list[tuple[MavDataStream, int]],
                       handle_msg,
                       render_row,
                       header_cols: list[str],
@@ -719,13 +724,8 @@ def _observation_loop(session: LinkHubClient, *,
 
     Returns (n_rows, aborted).
     """
-    for s_id, hz in streams:
-        session.send_message(RequestDataStream(
-            target_system=session._target_system,
-            target_component=session._target_component,
-            req_stream_id=s_id,
-            req_message_rate=hz,
-        ))
+    for stream, hz in streams:
+        session.request_data_stream(stream, hz)
 
     if setup_hook is not None:
         setup_hook()
@@ -775,8 +775,8 @@ def _observation_loop(session: LinkHubClient, *,
             for msg in batch.messages:
                 decoded = decode_message(msg)
                 if isinstance(decoded, Heartbeat):
-                    state["armed"] = bool(decoded.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                elif isinstance(decoded, StatusText):
+                    state["armed"] = MavModeFlag.SAFETY_ARMED in decoded.base_mode
+                elif isinstance(decoded, Statustext):
                     if not suppress_status:
                         text = decoded.text
                         if text:
@@ -965,7 +965,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                 "pitch": "RAWES_PIT",
                 "collective": "RAWES_COL",
             }[name]
-            session.send_message(NamedValueFloat(wire_name, manual_controls[name]))
+            session.send_message(NamedValueFloat(name=wire_name, value=manual_controls[name]))
 
         def _show_manual() -> None:
             print(
@@ -1034,7 +1034,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
             for wire_name, value in _adjust_passive_target(
                 passive_target, axis, direction
             ):
-                session.send_message(NamedValueFloat(wire_name, value))
+                session.send_message(NamedValueFloat(name=wire_name, value=value))
                 _protocol_print(
                     f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
                     f"{wire_name}={value:+.7f}"
@@ -1056,7 +1056,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
             for wire_name, value in _set_passive_target_to_actual(
                 passive_target, actual_q
             ):
-                session.send_message(NamedValueFloat(wire_name, value))
+                session.send_message(NamedValueFloat(name=wire_name, value=value))
                 _protocol_print(
                     f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
                     f"{wire_name}={value:+.1f} (onboard atomic capture)"
@@ -1248,7 +1248,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                 _fmt(state["pid_yaw_des"]), _fmt(state["pid_yaw_ach"]), _fmt(state["pid_yaw_ff"]), _fmt(state["pid_yaw_p"]), _fmt(state["pid_yaw_i"]), _fmt(state["pid_yaw_d"]),
                 _fmt(_erpm), _fmt(_mech), _fmt(_rotor),
             ]
-        if isinstance(msg, SetAttitudeTarget):
+        if isinstance(msg, AttitudeTarget):
             nonlocal protocol_last_target_q
             att_r, att_p, att_y = _quat_to_rpy_deg(msg.q)
             state["att_target_roll"] = att_r
@@ -1322,43 +1322,21 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                     cutoff = t_rel - mot_window_s
                     while state["mrpm_hist"] and state["mrpm_hist"][0][0] < cutoff:
                         state["mrpm_hist"].pop(0)
-        elif isinstance(msg, NamedValueFloat):
-            nm = msg.name
-            if nm == "YFF_T":
-                state["yff_t"] = float(msg.value)
-                state["yff_t_ts"] = t_rel
-            elif nm == "YFF_U":
-                state["yff_u"] = float(msg.value)
-                state["yff_u_ts"] = t_rel
-            elif nm == "YFF_GZ":
-                state["yff_gz"] = float(msg.value)
-                state["yff_gz_ts"] = t_rel
-            elif nm == "OL_RSP":
-                state["ol_rsp"] = float(msg.value)
-            elif nm == "OL_PSP":
-                state["ol_psp"] = float(msg.value)
-            elif nm == "OL_YSP":
-                state["ol_ysp"] = float(msg.value)
-            elif nm == "OL_RER":
-                state["ol_rer"] = float(msg.value)
-            elif nm == "OL_PER":
-                state["ol_per"] = float(msg.value)
-            elif nm == "OL_YER":
-                state["ol_yer"] = float(msg.value)
-            elif nm == "OL_AP":
-                state["ol_ap"] = float(msg.value)
-            elif nm == "OL_AI":
-                state["ol_ai"] = float(msg.value)
-            elif nm == "OL_AD":
-                state["ol_ad"] = float(msg.value)
-            elif nm == "OL_COL":
-                state["ol_col"] = float(msg.value)
-            elif nm == "OL_TEN":
-                state["ol_ten"] = float(msg.value)
+        elif isinstance(msg, DebugFloatArray):
+            for nm, value in diag_values(msg.array_id, msg.data).items():
+                state_key = _DIAG_STATE_KEYS.get(nm)
+                if state_key is None:
+                    continue
+                state[state_key] = value
+                if state_key in ("yff_t", "yff_u", "yff_gz"):
+                    state[f"{state_key}_ts"] = t_rel
         elif isinstance(msg, PidTuning):
             axis = msg.axis
-            # ArduPilot emits PID_TUNING axis as 1=roll, 2=pitch, 3=yaw, 4=accelz.
-            prefix = {1: "pid_roll", 2: "pid_pitch", 3: "pid_yaw"}.get(axis)
+            prefix = {
+                PidTuningAxis.ROLL: "pid_roll",
+                PidTuningAxis.PITCH: "pid_pitch",
+                PidTuningAxis.YAW: "pid_yaw",
+            }.get(axis)
             if prefix is not None:
                 state[f"{prefix}_des"] = msg.desired
                 state[f"{prefix}_ach"] = msg.achieved
@@ -1505,7 +1483,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                 f"step {requested_index + 1}: {label}"
             )
             for wire_name, wire_value in _passive_target_messages(passive_target):
-                session.send_message(NamedValueFloat(wire_name, wire_value))
+                session.send_message(NamedValueFloat(name=wire_name, value=wire_value))
                 _protocol_print(
                     f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
                     f"{wire_name}={wire_value:+.7f}"
@@ -1523,7 +1501,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                 f"step {requested_index + 1}: {label}"
             )
             session.send_message(
-                NamedValueFloat("RAWES_THR", passive_target.thrust)
+                NamedValueFloat(name="RAWES_THR", value=passive_target.thrust)
             )
             _protocol_print(
                 f"TX #{protocol_sequence} NAMED_VALUE_FLOAT "
@@ -1543,7 +1521,7 @@ def _run_observation(session: LinkHubClient, mode_name: str,
         session.send_message(CommandLong(
             target_system=session._target_system,
             target_component=session._target_component,
-            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            command=MavCmd.SET_MESSAGE_INTERVAL,
             param1=float(_esc_id),
             param2=200000.0,
         ))  # 5 Hz
@@ -1555,8 +1533,8 @@ def _run_observation(session: LinkHubClient, mode_name: str,
         session.send_message(CommandLong(
             target_system=session._target_system,
             target_component=session._target_component,
-            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-            param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_QUATERNION),
+            command=MavCmd.SET_MESSAGE_INTERVAL,
+            param1=float(AttitudeQuaternion.MAVLINK_ID),
             param2=40000.0,
         ))  # 25 Hz
 
@@ -1564,8 +1542,8 @@ def _run_observation(session: LinkHubClient, mode_name: str,
             session.send_message(CommandLong(
                 target_system=session._target_system,
                 target_component=session._target_component,
-                command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                param1=float(mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED),
+                command=MavCmd.SET_MESSAGE_INTERVAL,
+                param1=float(LocalPositionNed.MAVLINK_ID),
                 param2=40000.0,
             ))  # 25 Hz
 
@@ -1578,8 +1556,8 @@ def _run_observation(session: LinkHubClient, mode_name: str,
         session.send_message(CommandLong(
             target_system=session._target_system,
             target_component=session._target_component,
-            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-            param1=float(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE_TARGET),
+            command=MavCmd.SET_MESSAGE_INTERVAL,
+            param1=float(AttitudeTarget.MAVLINK_ID),
             param2=40000.0,
         ))  # 25 Hz
 
@@ -1587,8 +1565,8 @@ def _run_observation(session: LinkHubClient, mode_name: str,
             session.send_message(CommandLong(
                 target_system=session._target_system,
                 target_component=session._target_component,
-                command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                param1=float(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS),
+                command=MavCmd.SET_MESSAGE_INTERVAL,
+                param1=float(RcChannels.MAVLINK_ID),
                 param2=-1.0,
             ))
             print("  Stream trim: RC_CHANNELS off, AHRS2 off, EXTENDED_STATUS 1 Hz "
@@ -1605,13 +1583,13 @@ def _run_observation(session: LinkHubClient, mode_name: str,
                        "ATTITUDE_TARGET", "ATTITUDE_QUATERNION",
                        "LOCAL_POSITION_NED", "PID_TUNING",
                        "HEARTBEAT", "STATUSTEXT", "BATTERY_STATUS", "SYS_STATUS",
-                       "NAMED_VALUE_FLOAT",
+                       "DEBUG_FLOAT_ARRAY",
                        _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)[0]],
             streams=[
-                (mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,          25),
-                (mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,     25),
-                (mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 1),
-                (mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,          0),
+                (MavDataStream.EXTRA1,          25),
+                (MavDataStream.RC_CHANNELS,     25),
+                (MavDataStream.EXTENDED_STATUS, 1),
+                (MavDataStream.EXTRA3,          0),
             ],
             handle_msg=handle_msg,
             render_row=render_row,
@@ -1634,22 +1612,12 @@ def _run_observation(session: LinkHubClient, mode_name: str,
         session.send_message(CommandLong(
             target_system=session._target_system,
             target_component=session._target_component,
-            command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-            param1=float(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS),
+            command=MavCmd.SET_MESSAGE_INTERVAL,
+            param1=float(RcChannels.MAVLINK_ID),
             param2=0.0,
         ))
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
-        req_message_rate=2,
-    ))
-    session.send_message(RequestDataStream(
-        target_system=session._target_system,
-        target_component=session._target_component,
-        req_stream_id=mavutil.mavlink.MAV_DATA_STREAM_EXTRA3,
-        req_message_rate=2,
-    ))
+    session.request_data_stream(MavDataStream.EXTENDED_STATUS, 2)
+    session.request_data_stream(MavDataStream.EXTRA3, 2)
 
     # Report final H_YAW_TRIM.
     _tv = session.get_param("H_YAW_TRIM")
@@ -1847,7 +1815,7 @@ def _cmd_run(
                 ("RAWES_PIT", manual_controls["pitch"]),
                 ("RAWES_COL", manual_controls["collective"]),
             ):
-                session.send_message(NamedValueFloat(wire_name, value))
+                session.send_message(NamedValueFloat(name=wire_name, value=value))
             print("  Manual seed: roll=+0.00 pitch=+0.00 collective=0.50")
 
         def seed_passive_target() -> bool:
@@ -1864,24 +1832,22 @@ def _cmd_run(
                 yaw_offset_deg=float(flags.get("--yaw", 0.0)),
             )
             print("  Seeding passive thrust and relative offsets:")
-            session.send_message(NamedValueFloat("RAWES_THR", thr))
+            session.send_message(NamedValueFloat(name="RAWES_THR", value=thr))
             print(f"    RAWES_THR = {thr:.3f}  (thrust [0..1])")
             for wire_name, value in _passive_target_messages(passive_target):
-                session.send_message(NamedValueFloat(wire_name, value))
+                session.send_message(NamedValueFloat(name=wire_name, value=value))
                 print(f"    {wire_name} = {value:+.6f}")
             # thr was consumed by the IC seed -- don't re-send it via the trim block.
             trim.pop("thr", None)
             return True
 
-    # Arm. Passive mode keeps channel 4 under AP/Lua tail ownership, so skip
-    # direct DO_SET_SERVO pre-arm pulses on SERVO4 to avoid ownership conflicts.
-        esc_arm = (name not in ("passive", "acro-manual"))
+    # Arm.
         if stop_requested is not None and stop_requested():
             print("  [REMOTE] stop requested before arm.")
             return
         if force_arm:
             print("  [WARN] Force-arm enabled: ArduPilot pre-arm checks are bypassed.")
-        if not _arm(session, force=force_arm, esc_arm=esc_arm):
+        if not _arm(session, force=force_arm):
             return
         print("  [OK] Armed.")
 
@@ -1895,14 +1861,14 @@ def _cmd_run(
             if not 0.0 <= thr <= 1.0:
                 print(f"  [FAIL] Passive thrust must be within [0,1], got {thr}.")
                 return
-            session.send_message(NamedValueFloat("RAWES_THR", thr))
+            session.send_message(NamedValueFloat(name="RAWES_THR", value=thr))
             print(f"  Staging RAWES_THR = {thr:.3f} for passive hold")
             for wire_name, value in (
                 ("RAWES_RLL", 0.0),
                 ("RAWES_PIT", 0.0),
                 ("RAWES_COL", thr),
             ):
-                session.send_message(NamedValueFloat(wire_name, value))
+                session.send_message(NamedValueFloat(name=wire_name, value=value))
             session.set_param("RAWES_MODE", 2)
             print(
                 "  RAWES_MODE -> 2 "

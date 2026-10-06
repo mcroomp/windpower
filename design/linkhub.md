@@ -79,7 +79,6 @@ The live router currently exposes:
 | `/health/live` | `GET` | Liveness probe. |
 | `/health/ready` | `GET` | Ready when MAVLink is connected and has a heartbeat. |
 | `/v1/status` | `GET` | Service/run/journal status. |
-| `/v1/schema` | `GET` | Generated protocol schema. |
 | `/v1/journal/flush` | `POST` | Flush the active in-memory chunk. |
 | `/v1/records` | `GET` | Mixed journal projection over diagnostic + MAVLink records. |
 | `/v1/diagnostics/events` | `GET`, `POST` | Diagnostic-event projection and diagnostic ingestion. |
@@ -168,6 +167,10 @@ over the latest three seconds (the available shorter window during startup).
 Sampling uses actual elapsed time, including scheduler delays, and continues
 while idle so rates decay to zero. Rates are null while disconnected and
 until the first sample after reconnect; lifetime counters are retained.
+The same status snapshot breaks bytes and rates down by MAVLink message name
+(`received_bytes_by_message`, `transmitted_bytes_by_message`,
+`rx_bps_by_message`, `tx_bps_by_message`) using the same sampler and window;
+idle message types are omitted from the rate maps.
 The browser only formats this snapshot, never estimates rates from its
 filtered/collapsed telemetry stream or HTTP response sizes.
 
@@ -185,29 +188,71 @@ protect.
 
 ## Generated protocol boundary
 
-LinkHub's Rust descriptor in `linkhub/src/protocol.rs` owns the public enum
-codes, known MAVLink message field types, aliases, and defaults. It generates:
+`linkhub-clientgen` (`linkhub/clientgen`) generates the client-facing types
+directly from the vendored ArduPilot definitions, parsed with `mavlink-bindgen`'s
+own parser, so there is no hand-maintained list of messages or enumeration
+members:
 
-- `linkhub/schema/protocol-v1.schema.json`;
 - `linkhub_client/src/linkhub_client/generated_protocol.py`;
-- `linkhub-ui/src/generated/protocol.ts`;
-- the live `GET /v1/schema` response.
+- `linkhub-ui/src/generated/protocol.ts`.
 
-Regenerate checked artifacts with:
+Regenerate them with:
 
 ```powershell
-cargo run --manifest-path .\linkhub\Cargo.toml -- schema `
-  --output .\linkhub\schema\protocol-v1.schema.json `
-  --python-output .\linkhub_client\src\linkhub_client\generated_protocol.py `
-  --typescript-output .\linkhub-ui\src\generated\protocol.ts
+cargo run --manifest-path .\linkhub\Cargo.toml -p linkhub-clientgen
 ```
 
-Rust tests fail when either checked artifact drifts from the descriptor.
-Known messages decode to generated dataclasses and numeric MAVLink enums decode
-to generated forward-compatible `IntEnum` values. Unknown enum values become
-`UNKNOWN_<value>` pseudo-members; unknown message types remain `RawMessage`.
+Rust tests fail when either checked artifact drifts from the definitions, and
+they compare the declared shape of every field of every message with what the
+real dialect serializes. Every message decodes to a generated dataclass whose
+fields default to zero values, enumerations to generated `WireEnum`
+(`StrEnum`) members whose names drop the prefix shared by every entry
+(`MavCmd.COMPONENT_ARM_DISARM`), and bitmasks to `frozenset`s of members. Names
+the generated enumerations do not list become pseudo-members named after the wire
+name. Message classes are the PascalCase of the MAVLink name (`Statustext`,
+`CommandLong`), are keyword-only in Python, and the TypeScript field interfaces
+require every base field and leave extension fields optional.
 Do not hand-edit the generated artifacts or duplicate these public types in
 Python or TypeScript.
+
+### MAVLink value representation
+
+LinkHub uses the `linkhub-dialect` crate (`linkhub/dialect`) for framing, CRC,
+and message types. It is the `mavlink` crate's own recipe, `mavlink-core` plus
+`mavlink-bindgen`, with the `ardupilotmega` dialect (and `mav2-message-extensions`)
+generated from ArduPilot's definitions ([ArduPilot/mavlink](https://github.com/ArduPilot/mavlink),
+vendored in `linkhub/dialect/definitions` at the commit the simulated ArduPilot
+release builds from), so LinkHub's message and
+enumeration set matches the firmware's rather than a crates.io snapshot.
+Messages cross the HTTP API, the journal, and `linkhub query` in the generated
+types' serde JSON form, with the message tag removed from `fields`:
+
+- an **enumeration** is `{"type": "MAV_X_NAME"}`, for example HEARTBEAT
+  `system_status` is `{"type": "MAV_STATE_ACTIVE"}`;
+- a **bitmask** is a string of ` | `-joined names such as
+  `"MAV_MODE_FLAG_SAFETY_ARMED | MAV_MODE_FLAG_CUSTOM_MODE_ENABLED"`, and `""`
+  when no flag is set;
+- a dialect field named `type` is exposed as `mavtype`;
+- plain integers, floats, text, and arrays stay JSON numbers, strings, and
+  arrays, and extension fields are included.
+
+LinkHub-owned JSON follows the same rule: link and component `base_mode` is a
+bitmask string and `system_status`, `vehicle_type` and `autopilot` are
+enumeration objects; command requests take `command` as an enumeration and
+return `command` and `result` as enumerations; parameter `type` is an
+enumeration; capability `capabilities` is a bitmask string. Requests that
+build a message (`POST /v1/mavlink/messages`) take `fields` in this form, and a
+numeric enumeration value or a missing non-extension field is rejected.
+
+The dialect cannot represent an enumeration value outside it. A frame
+that passes its CRC but does not decode as a typed message (for example an
+unknown enum value) is dropped without ending the link; the first drop per
+message ID is logged. Corrupt frames are skipped while `mavlink-core`
+resynchronizes the byte stream. Keeping the dialect in step with the pinned
+ArduPilot release is enforced by tests and described in
+[linkhub/dialect/README.md](../linkhub/dialect/README.md). All dialect-defined
+message names are valid for message operations and query filters; unknown names
+are rejected.
 
 ## Message-rate policy and bandwidth
 

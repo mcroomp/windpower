@@ -1,18 +1,39 @@
 from uuid import UUID
 
+import pytest
+
 import linkhub_client.client as client_module
 from linkhub_client import (
     DiagnosticEvent,
     DiagnosticLevel,
     DiagnosticRecord,
+    LinkHubClient,
+    LinkHubError,
     SimClock,
     SimTimeQuality,
-    LinkHubClient,
 )
 from linkhub_client.messages import (
+    CommandAck,
+    EkfStatusFlags,
+    EkfStatusReport,
     ExtendedSysState,
+    Heartbeat,
+    MavAutopilot,
+    MavCmd,
+    MavDataStream,
     MavLandedState,
+    MavModeFlag,
+    MavParamType,
+    MavResult,
+    MavSeverity,
+    MavState,
+    MavSysStatusSensor,
+    MavType,
     MavVtolState,
+    ParamSet,
+    decode_message,
+    encode_enum,
+    RawMessage,
 )
 
 _CLOCK_DICT = {
@@ -71,15 +92,114 @@ def test_client_reads_authoritative_vehicle_state(monkeypatch) -> None:
     client = LinkHubClient()
     monkeypatch.setattr(
         client,
-        "vehicle_status",
-        lambda: {
-            "base_mode": client_module.mavlink.MAV_MODE_FLAG_SAFETY_ARMED,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "base_mode": (
+                "MAV_MODE_FLAG_SAFETY_ARMED | MAV_MODE_FLAG_CUSTOM_MODE_ENABLED"
+            ),
+            "custom_mode": 4,
+            "system_status": {"type": "MAV_STATE_ACTIVE"},
             "sim_clock": _CLOCK_DICT,
         },
     )
 
+    status = client.vehicle_status()
+
     assert client.sim_now() == 12.345
     assert client.is_armed
+    assert status["base_mode"] == {
+        MavModeFlag.SAFETY_ARMED,
+        MavModeFlag.CUSTOM_MODE_ENABLED,
+    }
+    assert status["system_status"] is MavState.ACTIVE
+    assert status["custom_mode"] == 4
+
+
+def test_client_reports_disarmed_when_the_armed_flag_is_clear(monkeypatch) -> None:
+    client = LinkHubClient()
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda *_args, **_kwargs: {"base_mode": "MAV_MODE_FLAG_CUSTOM_MODE_ENABLED"},
+    )
+    assert not client.is_armed
+
+    monkeypatch.setattr(
+        client, "_request_json", lambda *_args, **_kwargs: {"base_mode": ""}
+    )
+    assert not client.is_armed
+
+
+def test_client_decodes_component_heartbeat_state(monkeypatch) -> None:
+    client = LinkHubClient()
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "components": [
+                {
+                    "system_id": 1,
+                    "component_id": 1,
+                    "vehicle_type": {"type": "MAV_TYPE_HELICOPTER"},
+                    "autopilot": {"type": "MAV_AUTOPILOT_ARDUPILOTMEGA"},
+                    "base_mode": "MAV_MODE_FLAG_SAFETY_ARMED",
+                    "custom_mode": 4,
+                    "system_status": {"type": "MAV_STATE_STANDBY"},
+                    "last_heartbeat_ns": 5,
+                }
+            ]
+        },
+    )
+
+    (component,) = client.components()
+
+    assert component["vehicle_type"] is MavType.HELICOPTER
+    assert component["autopilot"] is MavAutopilot.ARDUPILOTMEGA
+    assert component["base_mode"] == {MavModeFlag.SAFETY_ARMED}
+    assert component["system_status"] is MavState.STANDBY
+
+
+def test_client_sends_typed_commands_and_decodes_the_acknowledgement(
+    monkeypatch,
+) -> None:
+    client = LinkHubClient()
+    requests = []
+
+    def request(method, path, body=None, **kwargs):
+        requests.append((method, path, body))
+        return {
+            "command": {"type": "MAV_CMD_COMPONENT_ARM_DISARM"},
+            "result": {"type": "MAV_RESULT_TEMPORARILY_REJECTED"},
+            "progress": 0,
+            "status": "acknowledged",
+            "after_cursor": "v1:3",
+        }
+
+    monkeypatch.setattr(client, "_request_json", request)
+
+    result = client.command(MavCmd.COMPONENT_ARM_DISARM, [1.0, 0.0])
+
+    assert requests[0][0:2] == ("POST", "/v1/mavlink/commands")
+    assert requests[0][2]["command"] == {"type": "MAV_CMD_COMPONENT_ARM_DISARM"}
+    assert requests[0][2]["params"] == [1.0, 0.0]
+    assert result["command"] is MavCmd.COMPONENT_ARM_DISARM
+    assert result["result"] is MavResult.TEMPORARILY_REJECTED
+    assert result["after_cursor"] == "v1:3"
+
+
+def test_client_rejects_a_refused_arm_command(monkeypatch) -> None:
+    client = LinkHubClient()
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "command": {"type": "MAV_CMD_COMPONENT_ARM_DISARM"},
+            "result": {"type": "MAV_RESULT_DENIED"},
+        },
+    )
+
+    with pytest.raises(LinkHubError, match="Arm was rejected"):
+        client.arm()
 
 
 def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
@@ -91,7 +211,7 @@ def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
         "system_id": 1,
         "component_id": 1,
         "message": "STATUSTEXT",
-        "fields": {"text": "ready", "severity": 6},
+        "fields": {"text": "ready", "severity": {"type": "MAV_SEVERITY_INFO"}},
         "cursor": "v1:12",
         "sim_clock": _CLOCK_DICT,
     }
@@ -161,11 +281,17 @@ def test_client_decodes_generated_enum_types_and_preserves_unknown_values(
             "system_id": 1,
             "component_id": 1,
             "message": "EXTENDED_SYS_STATE",
-            "fields": {"vtol_state": 3, "landed_state": landed_state},
+            "fields": {
+                "vtol_state": {"type": "MAV_VTOL_STATE_MC"},
+                "landed_state": {"type": landed_state},
+            },
             "cursor": f"v1:{index}",
             "sim_clock": _CLOCK_DICT,
         }
-        for index, landed_state in ((1, 2), (2, 99))
+        for index, landed_state in (
+            (1, "MAV_LANDED_STATE_IN_AIR"),
+            (2, "MAV_LANDED_STATE_FUTURE"),
+        )
     ]
     monkeypatch.setattr(
         client,
@@ -180,10 +306,151 @@ def test_client_decodes_generated_enum_types_and_preserves_unknown_values(
     batch = client.read_messages("v1:0", "EXTENDED_SYS_STATE")
 
     assert batch.messages == (
-        ExtendedSysState(MavVtolState.MC, MavLandedState.IN_AIR),
-        ExtendedSysState(MavVtolState.MC, MavLandedState(99)),
+        ExtendedSysState(vtol_state=MavVtolState.MC, landed_state=MavLandedState.IN_AIR),
+        ExtendedSysState(
+            vtol_state=MavVtolState.MC,
+            landed_state=MavLandedState("MAV_LANDED_STATE_FUTURE"),
+        ),
     )
-    assert batch.messages[1].landed_state.name == "UNKNOWN_99"
+    assert batch.messages[1].landed_state.name == "MAV_LANDED_STATE_FUTURE"
+
+
+def test_decode_message_projects_bitmask_and_enumeration_fields() -> None:
+    heartbeat = decode_message(
+        RawMessage(
+            "HEARTBEAT",
+            {
+                "mavtype": {"type": "MAV_TYPE_HELICOPTER"},
+                "autopilot": {"type": "MAV_AUTOPILOT_ARDUPILOTMEGA"},
+                "base_mode": "MAV_MODE_FLAG_SAFETY_ARMED | MAV_MODE_FLAG_CUSTOM_MODE_ENABLED",
+                "custom_mode": 4,
+                "system_status": {"type": "MAV_STATE_ACTIVE"},
+                "mavlink_version": 3,
+            },
+        )
+    )
+    ekf = decode_message(
+        RawMessage(
+            "EKF_STATUS_REPORT",
+            {"flags": "EKF_ATTITUDE | EKF_VELOCITY_VERT | EKF_SOMETHING_NEW"},
+        )
+    )
+    ack = decode_message(
+        RawMessage(
+            "COMMAND_ACK",
+            {
+                "command": {"type": "MAV_CMD_DO_SET_MODE"},
+                "result": {"type": "MAV_RESULT_ACCEPTED"},
+            },
+        )
+    )
+
+    assert heartbeat == Heartbeat(
+        mavtype=MavType.HELICOPTER,
+        autopilot=MavAutopilot.ARDUPILOTMEGA,
+        base_mode=frozenset({MavModeFlag.SAFETY_ARMED, MavModeFlag.CUSTOM_MODE_ENABLED}),
+        custom_mode=4,
+        system_status=MavState.ACTIVE,
+        mavlink_version=3,
+    )
+    assert ekf == EkfStatusReport(
+        flags=frozenset(
+            {
+                EkfStatusFlags.ATTITUDE,
+                EkfStatusFlags.VELOCITY_VERT,
+                EkfStatusFlags("EKF_SOMETHING_NEW"),
+            }
+        )
+    )
+    assert ack == CommandAck(command=MavCmd.DO_SET_MODE, result=MavResult.ACCEPTED)
+
+
+def test_decode_message_projects_an_empty_bitmask_to_an_empty_set() -> None:
+    heartbeat = decode_message(
+        RawMessage(
+            "HEARTBEAT",
+            {
+                "mavtype": {"type": "MAV_TYPE_GCS"},
+                "autopilot": {"type": "MAV_AUTOPILOT_INVALID"},
+                "base_mode": "",
+                "custom_mode": 0,
+                "system_status": {"type": "MAV_STATE_STANDBY"},
+            },
+        )
+    )
+
+    assert heartbeat.base_mode == frozenset()
+
+
+def test_decode_message_keeps_sensor_flags_including_unknown_names() -> None:
+    status = decode_message(
+        RawMessage(
+            "SYS_STATUS",
+            {
+                "onboard_control_sensors_present": (
+                    "MAV_SYS_STATUS_SENSOR_MOTOR_OUTPUTS"
+                    " | MAV_SYS_STATUS_SENSOR_FUTURE"
+                ),
+                "onboard_control_sensors_enabled": "",
+                "onboard_control_sensors_health": "MAV_SYS_STATUS_SENSOR_GPS",
+            },
+        )
+    )
+
+    assert MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in status.onboard_control_sensors_present
+    assert (
+        MavSysStatusSensor("MAV_SYS_STATUS_SENSOR_FUTURE")
+        in status.onboard_control_sensors_present
+    )
+    assert status.onboard_control_sensors_enabled == frozenset()
+    assert status.onboard_control_sensors_health == {MavSysStatusSensor.SENSOR_GPS}
+
+
+def test_request_data_stream_starts_the_stream_unless_the_rate_is_zero(monkeypatch) -> None:
+    client = LinkHubClient("http://127.0.0.1:8999")
+    sent = []
+    monkeypatch.setattr(client, "_send_raw", lambda name, payload: sent.append((name, payload)))
+
+    client.request_data_stream(MavDataStream.EXTRA1, 25)
+    client.request_data_stream(MavDataStream.EXTRA3, 0)
+
+    assert [(payload["req_message_rate"], payload["start_stop"]) for _, payload in sent] == [
+        (25, 1),
+        (0, 0),
+    ]
+    assert sent[0][0] == "REQUEST_DATA_STREAM"
+    assert sent[0][1]["req_stream_id"] == {"type": "MAV_DATA_STREAM_EXTRA1"}
+
+
+def test_generated_messages_encode_enumerations_and_bitmasks_for_requests() -> None:
+    message = ParamSet(
+        target_system=1,
+        target_component=1,
+        param_id="RAWES_MODE",
+        param_value=2.0,
+        param_type=MavParamType.INT32,
+    )
+
+    assert message.to_request() == (
+        "PARAM_SET",
+        {
+            "target_system": 1,
+            "target_component": 1,
+            "param_id": "RAWES_MODE",
+            "param_value": 2.0,
+            "param_type": {"type": "MAV_PARAM_TYPE_INT32"},
+        },
+    )
+    assert encode_enum(MavSeverity.INFO) == {"type": "MAV_SEVERITY_INFO"}
+    assert Heartbeat(
+        mavtype=MavType.GCS,
+        autopilot=MavAutopilot.INVALID,
+        base_mode=frozenset({MavModeFlag.SAFETY_ARMED, MavModeFlag.CUSTOM_MODE_ENABLED}),
+        custom_mode=0,
+        system_status=MavState.ACTIVE,
+    ).to_request()[1]["base_mode"] == (
+        "MAV_MODE_FLAG_CUSTOM_MODE_ENABLED | MAV_MODE_FLAG_SAFETY_ARMED"
+    )
 
 
 def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
@@ -210,7 +477,42 @@ def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
         "/v1/mavlink/parameters/TEST_PARAM",
     )
     assert requests[1][2]["timeout_ms"] == 4_000
+    assert requests[1][2]["type"] == {"type": "MAV_PARAM_TYPE_REAL32"}
     assert requests[1][3] == {"timeout": 5.0}
+
+
+def test_client_encodes_and_decodes_parameter_types(monkeypatch) -> None:
+    client = LinkHubClient()
+    requests = []
+
+    def request(method, path, body=None, **kwargs):
+        requests.append((method, path, body))
+        return {
+            "parameters": [
+                {
+                    "name": "RAWES_MODE",
+                    "value": 2.0,
+                    "type": {"type": "MAV_PARAM_TYPE_INT8"},
+                    "index": 1,
+                    "count": 5,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_request_json", request)
+
+    records = client.set_params(
+        [
+            {"name": "RAWES_MODE", "value": 2.0, "type": MavParamType.INT8},
+            {"name": "RAWES_THR", "value": 0.5},
+        ]
+    )
+
+    assert requests[0][2]["parameters"] == [
+        {"name": "RAWES_MODE", "value": 2.0, "type": {"type": "MAV_PARAM_TYPE_INT8"}},
+        {"name": "RAWES_THR", "value": 0.5},
+    ]
+    assert records["RAWES_MODE"]["type"] is MavParamType.INT8
 
 
 def test_client_flushes_journal_and_returns_cursor(monkeypatch) -> None:

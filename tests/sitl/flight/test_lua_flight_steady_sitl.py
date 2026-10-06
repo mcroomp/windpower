@@ -63,16 +63,18 @@ import pytest
 pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1800)]
 
 
+from groundstation.rawes_diag import diag_values
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from tests.sitl.stack_infra import (
     StackContext, dump_startup_diagnostics,
     observe, assert_no_mediator_criticals, get_arducopter_crash_info,
 )
 from linkhub_client.messages import (
+    DebugFloatArray,
     LocalPositionNed,
     NamedValueFloat,
     ServoOutputRaw,
-    StatusText,
+    Statustext,
     decode_message,
 )
 from analysis.analyse_run import compute_steady_metrics, print_flight_report
@@ -163,11 +165,11 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     ic_roll_rad = math.atan2(r21, r22)
     ic_pitch_rad = -math.asin(max(-1.0, min(1.0, r20)))
 
-    gcs.send_message(NamedValueFloat("RAWES_THR", thr_seed))
-    gcs.send_message(NamedValueFloat("RAWES_TEN", ten_seed))
-    gcs.send_message(NamedValueFloat("RAWES_ROFF", 0.0))
-    gcs.send_message(NamedValueFloat("RAWES_POFF", 0.0))
-    gcs.send_message(NamedValueFloat("RAWES_YOFF", 0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_THR", value=thr_seed))
+    gcs.send_message(NamedValueFloat(name="RAWES_TEN", value=ten_seed))
+    gcs.send_message(NamedValueFloat(name="RAWES_ROFF", value=0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_POFF", value=0.0))
+    gcs.send_message(NamedValueFloat(name="RAWES_YOFF", value=0.0))
     ok = gcs.set_param("RAWES_MODE", 3, timeout=5.0)
     send_rawes_command(gcs, CMD_ENTER_PASSIVE, enter_passive_params())
     log.info(
@@ -195,7 +197,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         # Send RAWES_ALT immediately after MODE_STEADY so Lua's capture uses the
         # physics IC altitude, not the EKF-reported altitude (which has a ~2.5 m
         # vertical bias).  Mode enter clears _nv_floats, so this must arrive after.
-        gcs.send_message(NamedValueFloat("RAWES_ALT", float(-ic["pos"][2])))
+        gcs.send_message(NamedValueFloat(name="RAWES_ALT", value=float(-ic["pos"][2])))
 
     all_statustext = ctx.all_statustext
     lua_captured   = False
@@ -237,7 +239,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 activity = abs(decoded.servo1_raw - 1500) + abs(decoded.servo2_raw - 1500)
                 if activity > state["max_cyclic"]:
                     state["max_cyclic"] = activity
-            elif isinstance(decoded, StatusText):
+            elif isinstance(decoded, Statustext):
                 text = decoded.text
                 log.info("STATUSTEXT [t=%.1fs]: %s", t_rel, text)
                 all_statustext.append(text)
@@ -248,10 +250,10 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
                 if "emergency yaw" in tl or "yaw reset" in tl:
                     state["ekf_yaw_reset"] = True
                     log.warning("EKF yaw reset at t=%.1fs: %s", t_rel, text)
-            elif isinstance(decoded, NamedValueFloat):
-                name, value = decoded.name, decoded.value
-                if name in ("ANCH_N", "ANCH_E", "ANCH_D"):
-                    state["anch"][name[-1]] = value
+            elif isinstance(decoded, DebugFloatArray):
+                for name, value in diag_values(decoded.array_id, decoded.data).items():
+                    if name in ("ANCH_N", "ANCH_E", "ANCH_D"):
+                        state["anch"][name[-1]] = value
             elif isinstance(decoded, LocalPositionNed):
                 state["pos_samples"].append((
                     decoded.time_boot_ms * 0.001,
@@ -278,7 +280,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
 
     observe(ctx, _OBS_SECONDS, _handle,
             msg_types=["SERVO_OUTPUT_RAW", "STATUSTEXT", "ATTITUDE",
-                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT", "NAMED_VALUE_FLOAT"],
+                       "LOCAL_POSITION_NED", "EKF_STATUS_REPORT", "DEBUG_FLOAT_ARRAY"],
             label="observation")
 
     lua_captured      = state["lua_captured"]

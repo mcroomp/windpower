@@ -8,10 +8,11 @@ Signals used (each on the FC boot-time clock, so they align):
   * ATTITUDE.yawspeed      yaw RATE [rad/s]  (== the Lua's regulated gyro:z())  24 Hz
   * ATTITUDE.yaw           heading [rad]                                        24 Hz
   * SERVO_OUTPUT_RAW.servo4_raw   yaw motor PWM [us]  (time_usec clock)         24 Hz
-  * NAMED_VALUE_FLOAT YFF_T   Lua trim  = H_YAW_TRIM  [0..1]                    ~2 Hz
-  * NAMED_VALUE_FLOAT YFF_U   applied SERVO4 throttle u [0..1]                  ~2 Hz
-  * NAMED_VALUE_FLOAT YFF_GZ  Lua psi_dot (gyro:z()) [rad/s]                    ~2 Hz
-  * NAMED_VALUE_FLOAT YFF_A   calibrated slope [rad/s per u]                    ~2 Hz
+  * DEBUG_FLOAT_ARRAY RAWES_DIAG keys (rawes.lua diagnostics, ~2 Hz; boot-time time_usec):
+      YFF_T   Lua trim  = H_YAW_TRIM  [0..1]
+      YFF_U   applied SERVO4 throttle u [0..1]
+      YFF_GZ  Lua psi_dot (gyro:z()) [rad/s]
+    (YFF_A / YFF_KD are no longer emitted, so their series are empty.)
 
 Reports oscillation frequency / amplitude (FFT + zero-crossings), the
 actuator<->response phase, the ESC deadband duty, and the trim behaviour.
@@ -28,6 +29,8 @@ from pathlib import Path
 
 import numpy as np
 
+from groundstation.rawes_diag import diag_values
+
 # Bench-calibrated SERVO4 deadband (see repo memory yaw-regulation-lua-ff-clamp.md).
 YAW_DEADBAND_US = 1108.0
 SERVO4_MIN_US = 800.0
@@ -40,7 +43,7 @@ SERVO4_MAX_US = 2000.0
 
 def _boot_ms(d: dict) -> "float | None":
     """FC boot-time [ms] for a message, using the most reliable native field."""
-    if d.get("mavpackettype") == "SERVO_OUTPUT_RAW" and "time_usec" in d:
+    if d.get("mavpackettype") in ("SERVO_OUTPUT_RAW", "DEBUG_FLOAT_ARRAY") and "time_usec" in d:
         return float(d["time_usec"]) / 1000.0
     tb = d.get("time_boot_ms")
     return float(tb) if tb is not None else None
@@ -89,11 +92,13 @@ def load(path: str) -> dict:
                     pidy_i.append(float(d.get("I", math.nan)))
                     pidy_d.append(float(d.get("D", math.nan)))
                     pidy_ff.append(float(d.get("FF", math.nan)))
-            elif mt == "NAMED_VALUE_FLOAT":
-                nm = d.get("name")
-                if nm in nvf:
-                    nvf[nm].append(float(d.get("value", math.nan)))
-                    nvf_t[nm].append(t)
+            elif mt == "DEBUG_FLOAT_ARRAY":
+                for nm, value in diag_values(
+                    int(d.get("array_id", -1)), d.get("data") or (),
+                ).items():
+                    if nm in nvf:
+                        nvf[nm].append(value)
+                        nvf_t[nm].append(t)
 
     return {
         "att_t": np.array(att_t), "att_yaw": np.array(att_yaw),

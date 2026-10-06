@@ -8,6 +8,5 @@ pub mod mavftp;
 pub mod mavlink;
 pub mod motor;
 pub mod operations;
-pub mod protocol;
 pub mod query;
 pub mod records;

@@ -1,30 +1,44 @@
-"""Runtime decoding around LinkHub's generated protocol types."""
+"""Runtime decoding around LinkHub's generated protocol types.
+
+LinkHub's JSON carries MAVLink enumerations as ``{"type": "<NAME>"}`` objects
+and bitmasks as ``" | "``-joined name strings (see ``generated_protocol``).
+This module turns them into ``WireEnum`` members and ``frozenset``s of members.
+"""
 
 from __future__ import annotations
 
 from dataclasses import MISSING, dataclass, fields
-from typing import Any
+from typing import Any, TypeVar
 
 from .generated_protocol import (
     ENUM_FIELDS,
+    FLAG_FIELDS,
     MESSAGE_TYPES,
     TUPLE_FIELDS,
     Attitude,
     AttitudeQuaternion,
+    AttitudeTarget,
+    AttitudeTargetTypemask,
     BatteryStatus,
     CommandAck,
     CommandLong,
+    DebugFloatArray,
+    EkfStatusFlags,
     EkfStatusReport,
     ExtendedSysState,
     GlobalPositionInt,
     Heartbeat,
     LocalPositionNed,
     MavAutopilot,
+    MavCmd,
+    MavDataStream,
     MavLandedState,
+    MavModeFlag,
     MavParamType,
     MavResult,
     MavSeverity,
     MavState,
+    MavSysStatusSensor,
     MavType,
     MavVtolState,
     Message,
@@ -33,16 +47,32 @@ from .generated_protocol import (
     ParamRequestRead,
     ParamSet,
     ParamValue,
-    PidAxis,
+    PidTuningAxis,
     PidTuning,
     RcChannels,
     RequestDataStream,
     ServoOutputRaw,
     SetAttitudeTarget,
-    StatusText,
+    Statustext,
     SysStatus,
-    WireIntEnum,
+    WireEnum,
+    encode_flags,
+    parse_flags,
 )
+
+_E = TypeVar("_E", bound=WireEnum)
+
+
+def decode_enum(enum_type: type[_E], value: Any) -> _E:
+    """Decode a wire enumeration: ``{"type": NAME}`` (or a bare name)."""
+    if isinstance(value, dict):
+        value = value["type"]
+    return enum_type(value)
+
+
+def encode_enum(value: WireEnum | str) -> dict[str, str]:
+    """Encode an enumeration value for LinkHub requests and message fields."""
+    return {"type": str(value)}
 
 
 @dataclass(frozen=True)
@@ -99,6 +129,7 @@ def decode_message(message: Any) -> Any:
         return message
     values: dict[str, Any] = {}
     enum_fields = ENUM_FIELDS.get(message_type, {})
+    flag_fields = FLAG_FIELDS.get(message_type, {})
     tuple_fields = TUPLE_FIELDS.get(message_type, frozenset())
     for field in fields(message_type):
         if field.default is not MISSING:
@@ -108,21 +139,25 @@ def decode_message(message: Any) -> Any:
         else:
             value = getattr(message, field.name)
         if field.name in enum_fields:
-            value = enum_fields[field.name](value)
+            value = decode_enum(enum_fields[field.name], value)
+        elif field.name in flag_fields:
+            value = parse_flags(flag_fields[field.name], value)
         elif field.name in tuple_fields:
             value = tuple(value)
         values[field.name] = value
-    if message_type is SetAttitudeTarget and "q" in values:
-        values["q"] = list(values["q"]) if values["q"] else []
     return message_type(**values)
 
 
 __all__ = [
     "Attitude",
     "AttitudeQuaternion",
+    "AttitudeTarget",
+    "AttitudeTargetTypemask",
     "BatteryStatus",
     "CommandAck",
     "CommandLong",
+    "DebugFloatArray",
+    "EkfStatusFlags",
     "EkfStatusReport",
     "EscTelemetry",
     "ExtendedSysState",
@@ -130,11 +165,15 @@ __all__ = [
     "Heartbeat",
     "LocalPositionNed",
     "MavAutopilot",
+    "MavCmd",
+    "MavDataStream",
     "MavLandedState",
+    "MavModeFlag",
     "MavParamType",
     "MavResult",
     "MavSeverity",
     "MavState",
+    "MavSysStatusSensor",
     "MavType",
     "MavVtolState",
     "Message",
@@ -143,15 +182,19 @@ __all__ = [
     "ParamRequestRead",
     "ParamSet",
     "ParamValue",
-    "PidAxis",
+    "PidTuningAxis",
     "PidTuning",
     "RawMessage",
     "RcChannels",
     "RequestDataStream",
     "ServoOutputRaw",
     "SetAttitudeTarget",
-    "StatusText",
+    "Statustext",
     "SysStatus",
-    "WireIntEnum",
+    "WireEnum",
+    "decode_enum",
     "decode_message",
+    "encode_enum",
+    "encode_flags",
+    "parse_flags",
 ]

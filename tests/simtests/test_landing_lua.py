@@ -144,7 +144,7 @@ def _run_landing(log) -> dict:
 
         # ── Send final_drop substate to Lua once ──────────────────────────
         if cmd.phase == "final_drop" and not final_drop_sent:
-            sim.send_message(NamedValueFloat("RAWES_SUB", LAND_FINAL_DROP))
+            sim.send_message(NamedValueFloat(name="RAWES_SUB", value=LAND_FINAL_DROP))
             final_drop_sent = True
             t_final_start   = t_sim
 

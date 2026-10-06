@@ -9,14 +9,6 @@ use std::{
     time::Duration,
 };
 
-use mavlink::{
-    MavHeader, ReadVersion,
-    async_peek_reader::AsyncPeekReader,
-    dialects::ardupilotmega::{
-        HEARTBEAT_DATA, MavAutopilot, MavMessage, MavModeFlag, MavState, MavType,
-    },
-    read_versioned_raw_message_async,
-};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tokio::{
@@ -29,7 +21,9 @@ use tokio::{
 
 use crate::{
     codec::{
-        CodecError, DecodedMessage, decode_raw, decode_raw_bytes, encode_message, serialize_message,
+        CodecError, DecodedMessage, FrameReader, MavHeader, MavMessage, decode_raw_bytes,
+        dialect::{HEARTBEAT_DATA, MavAutopilot, MavModeFlag, MavState, MavType},
+        message_from_fields, serialize_message,
     },
     discovery::{DiscoveryConfig, ScanReport},
     journal::{JournalError, JournalHandle},
@@ -72,9 +66,9 @@ pub struct LinkStatus {
     pub clock_epoch: u64,
     pub target_system: u8,
     pub target_component: u8,
-    pub base_mode: u64,
-    pub custom_mode: u64,
-    pub system_status: u64,
+    pub base_mode: MavModeFlag,
+    pub custom_mode: u32,
+    pub system_status: MavState,
     pub latest_time_boot_ms: u64,
     pub received_messages: u64,
     pub transmitted_messages: u64,
@@ -82,8 +76,15 @@ pub struct LinkStatus {
     pub transmitted_bytes: u64,
     pub rx_bps: Option<f64>,
     pub tx_bps: Option<f64>,
-    pub framing_errors: u64,
-    pub discarded_bytes: u64,
+    /// Lifetime validated frame bytes per MAVLink message name.
+    pub received_bytes_by_message: BTreeMap<String, u64>,
+    pub transmitted_bytes_by_message: BTreeMap<String, u64>,
+    /// Windowed bits per second per message name; idle types are omitted.
+    pub rx_bps_by_message: BTreeMap<String, f64>,
+    pub tx_bps_by_message: BTreeMap<String, f64>,
+    /// Frames that passed their CRC but did not decode as a typed dialect
+    /// message (for example an enum value outside the dialect) and were dropped.
+    pub dropped_frames: u64,
     pub last_received_ns: Option<u64>,
     pub error: Option<String>,
     /// Which step produced `error`: `scan`, `open`, `acquire`, or `link`.
@@ -132,15 +133,60 @@ impl LinkThroughput {
     }
 }
 
+type ByteCounts = BTreeMap<String, u64>;
+
+/// Per-message-name counterpart of [`LinkThroughput`], using the same
+/// 3-second window and boundary interpolation.
+struct MessageThroughput {
+    samples: VecDeque<(time::Instant, ByteCounts)>,
+}
+
+impl MessageThroughput {
+    fn new(now: time::Instant, counts: &ByteCounts) -> Self {
+        Self {
+            samples: VecDeque::from([(now, counts.clone())]),
+        }
+    }
+
+    fn sample(&mut self, now: time::Instant, counts: &ByteCounts) -> BTreeMap<String, f64> {
+        self.samples.push_back((now, counts.clone()));
+        let cutoff = now - Duration::from_secs(3);
+        while self.samples.len() > 2 && self.samples[1].0 <= cutoff {
+            self.samples.pop_front();
+        }
+        let (start, start_counts) = self.samples.front().expect("initial sample");
+        let window_start = (*start).max(cutoff);
+        let elapsed = now.duration_since(window_start).as_secs_f64();
+        let rolled_off = (*start < cutoff).then(|| {
+            let (next, next_counts) = &self.samples[1];
+            let fraction = cutoff.duration_since(*start).as_secs_f64()
+                / next.duration_since(*start).as_secs_f64();
+            (fraction, next_counts)
+        });
+        counts
+            .iter()
+            .filter_map(|(name, &total)| {
+                let base = start_counts.get(name).copied().unwrap_or(0);
+                let mut delta = (total - base) as f64;
+                if let Some((fraction, next_counts)) = rolled_off {
+                    let next_total = next_counts.get(name).copied().unwrap_or(0);
+                    delta -= (next_total - base) as f64 * fraction;
+                }
+                (delta > 0.0).then(|| (name.clone(), delta * 8.0 / elapsed))
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ComponentInfo {
     pub system_id: u8,
     pub component_id: u8,
-    pub vehicle_type: u64,
-    pub autopilot: u64,
-    pub base_mode: u64,
-    pub custom_mode: u64,
-    pub system_status: u64,
+    pub vehicle_type: MavType,
+    pub autopilot: MavAutopilot,
+    pub base_mode: MavModeFlag,
+    pub custom_mode: u32,
+    pub system_status: MavState,
     pub last_heartbeat_ns: u64,
 }
 
@@ -219,7 +265,7 @@ pub struct ReceivedMessage {
     pub message_id: u32,
     pub name: String,
     pub fields: Map<String, Value>,
-    pub message: Arc<MavMessage>,
+    pub message: MavMessage,
 }
 
 enum OutboundPayload {
@@ -273,20 +319,33 @@ impl MavlinkLinkHandle {
         self.send(OutboundPayload::Raw(frame)).await
     }
 
+    /// Sends a typed message, journaling it on the shared link timeline.
     pub async fn send_message(
         &self,
-        name: &str,
-        fields: &Map<String, Value>,
+        message: MavMessage,
         source_system: Option<u8>,
         source_component: Option<u8>,
     ) -> Result<u64, LinkError> {
-        let message = encode_message(name, fields)?;
         self.send(OutboundPayload::Message {
             message: Box::new(message),
             source_system,
             source_component,
         })
         .await
+    }
+
+    /// Builds a message from its dialect name and typed JSON fields (see
+    /// [`message_from_fields`]) and sends it.
+    pub async fn send_message_fields(
+        &self,
+        name: &str,
+        fields: &Map<String, Value>,
+        source_system: Option<u8>,
+        source_component: Option<u8>,
+    ) -> Result<u64, LinkError> {
+        let message = message_from_fields(name, fields)?;
+        self.send_message(message, source_system, source_component)
+            .await
     }
 
     async fn send(&self, payload: OutboundPayload) -> Result<u64, LinkError> {
@@ -602,6 +661,8 @@ where
         status.connected_since_ns = Some(opened_ns);
         status.rx_bps = None;
         status.tx_bps = None;
+        status.rx_bps_by_message.clear();
+        status.tx_bps_by_message.clear();
         status.error = None;
     });
     let status_tx = context.status_tx.clone();
@@ -658,6 +719,8 @@ where
         status.connected_since_ns = None;
         status.rx_bps = None;
         status.tx_bps = None;
+        status.rx_bps_by_message.clear();
+        status.tx_bps_by_message.clear();
     });
     let target = target.to_owned();
     let error_kind = error.kind_name();
@@ -732,13 +795,17 @@ where
         tx_sequence,
     } = context;
     let (receive_tx, mut receive_rx) = mpsc::channel(256);
-    let receive_task = tokio::spawn(receive_messages(reader, receive_tx));
+    let receive_task = tokio::spawn(receive_messages(reader, receive_tx, status_tx.clone()));
     let mut heartbeat = time::interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let now = time::Instant::now();
-    let mut throughput = {
+    let (mut throughput, mut rx_by_message, mut tx_by_message) = {
         let status = status_tx.borrow();
-        LinkThroughput::new(now, status.received_bytes, status.transmitted_bytes)
+        (
+            LinkThroughput::new(now, status.received_bytes, status.transmitted_bytes),
+            MessageThroughput::new(now, &status.received_bytes_by_message),
+            MessageThroughput::new(now, &status.transmitted_bytes_by_message),
+        )
     };
     let mut throughput_tick =
         time::interval_at(now + Duration::from_secs(1), Duration::from_secs(1));
@@ -747,13 +814,26 @@ where
     let result = loop {
         tokio::select! {
             _ = throughput_tick.tick() => {
-                let (rx, tx) = {
+                let sampled_at = time::Instant::now();
+                let (rx, tx, rx_messages, tx_messages) = {
                     let status = status_tx.borrow();
-                    throughput.sample(time::Instant::now(), status.received_bytes, status.transmitted_bytes)
+                    let (rx, tx) = throughput.sample(
+                        sampled_at,
+                        status.received_bytes,
+                        status.transmitted_bytes,
+                    );
+                    (
+                        rx,
+                        tx,
+                        rx_by_message.sample(sampled_at, &status.received_bytes_by_message),
+                        tx_by_message.sample(sampled_at, &status.transmitted_bytes_by_message),
+                    )
                 };
                 status_tx.send_modify(|status| {
                     status.rx_bps = Some(rx);
                     status.tx_bps = Some(tx);
+                    status.rx_bps_by_message = rx_messages;
+                    status.tx_bps_by_message = tx_messages;
                 });
             }
             received_frame = receive_rx.recv() => {
@@ -809,17 +889,20 @@ where
     result
 }
 
-async fn receive_messages<R>(reader: R, sender: mpsc::Sender<Result<DecodedMessage, String>>)
-where
+async fn receive_messages<R>(
+    reader: R,
+    sender: mpsc::Sender<Result<DecodedMessage, String>>,
+    status_tx: watch::Sender<LinkStatus>,
+) where
     R: AsyncRead + Unpin,
 {
-    let mut reader = AsyncPeekReader::new(reader);
+    let mut receiver = FrameReader::new(reader);
     loop {
-        let result =
-            read_versioned_raw_message_async::<MavMessage, _>(&mut reader, ReadVersion::Any)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|raw| decode_raw(raw).map_err(|error| error.to_string()));
+        let result = receiver.recv().await.map_err(|error| error.to_string());
+        let dropped = receiver.take_dropped_frames();
+        if dropped > 0 {
+            status_tx.send_modify(|status| status.dropped_frames += dropped);
+        }
         let failed = result.is_err();
         if sender.send(result).await.is_err() || failed {
             return;
@@ -838,19 +921,16 @@ async fn archive_received(
 ) -> Result<(), LinkError> {
     let now = wall_time_ns();
     let frame_bytes = decoded.raw.len() as u64;
-    let is_heartbeat = decoded.message_id == HEARTBEAT_MESSAGE_ID;
+    let message_name = decoded.name.clone();
     let system_id = decoded.system_id;
     let component_id = decoded.component_id;
     let time_boot_ms = decoded.fields.get("time_boot_ms").and_then(Value::as_u64);
-    let heartbeat_state = is_heartbeat.then(|| {
-        (
-            decoded.fields["base_mode"].as_u64().unwrap_or_default(),
-            decoded.fields["custom_mode"].as_u64().unwrap_or_default(),
-            decoded.fields["system_status"].as_u64().unwrap_or_default(),
-        )
-    });
-    if is_heartbeat {
-        update_component_registry(components, system_id, component_id, &decoded.fields, now)?;
+    let heartbeat = match &decoded.message {
+        MavMessage::HEARTBEAT(heartbeat) => Some(heartbeat.clone()),
+        _ => None,
+    };
+    if let Some(heartbeat) = &heartbeat {
+        update_component_registry(components, system_id, component_id, heartbeat, now);
         let _ = components_tx.send(components.values().cloned().collect());
     }
     let record = decoded_frame(&config.id, Direction::Rx, &decoded);
@@ -873,20 +953,24 @@ async fn archive_received(
         message_id: decoded.message_id,
         name: decoded.name,
         fields: decoded.fields,
-        message: Arc::new(decoded.message),
+        message: decoded.message,
     }));
     status_tx.send_modify(|status| {
         status.received_messages += 1;
         status.received_bytes += frame_bytes;
+        *status
+            .received_bytes_by_message
+            .entry(message_name)
+            .or_default() += frame_bytes;
         status.last_received_ns = Some(now);
-        if is_heartbeat && system_id != config.source_system {
+        if system_id != config.source_system
+            && let Some(heartbeat) = &heartbeat
+        {
             status.target_system = system_id;
             status.target_component = component_id;
-            let (base_mode, custom_mode, system_status) =
-                heartbeat_state.expect("heartbeat state was captured");
-            status.base_mode = base_mode;
-            status.custom_mode = custom_mode;
-            status.system_status = system_status;
+            status.base_mode = heartbeat.base_mode;
+            status.custom_mode = heartbeat.custom_mode;
+            status.system_status = heartbeat.system_status;
             status.ready = true;
         }
         if let Some(time_boot_ms) = time_boot_ms {
@@ -900,29 +984,22 @@ fn update_component_registry(
     components: &mut BTreeMap<(u8, u8), ComponentInfo>,
     system_id: u8,
     component_id: u8,
-    fields: &Map<String, Value>,
+    heartbeat: &HEARTBEAT_DATA,
     timestamp_ns: u64,
-) -> Result<(), LinkError> {
-    let integer = |name| {
-        fields
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| LinkError::Receive(format!("HEARTBEAT missing numeric {name}")))
-    };
+) {
     components.insert(
         (system_id, component_id),
         ComponentInfo {
             system_id,
             component_id,
-            vehicle_type: integer("type")?,
-            autopilot: integer("autopilot")?,
-            base_mode: integer("base_mode")?,
-            custom_mode: integer("custom_mode")?,
-            system_status: integer("system_status")?,
+            vehicle_type: heartbeat.mavtype,
+            autopilot: heartbeat.autopilot,
+            base_mode: heartbeat.base_mode,
+            custom_mode: heartbeat.custom_mode,
+            system_status: heartbeat.system_status,
             last_heartbeat_ns: timestamp_ns,
         },
     );
-    Ok(())
 }
 
 async fn send_outbound(
@@ -968,7 +1045,7 @@ async fn send_typed(
         component_id: source.1.unwrap_or(config.source_component),
         sequence: tx_sequence.fetch_add(1, Ordering::Relaxed),
     };
-    let bytes = serialize_message(&message, header)?;
+    let bytes = serialize_message(&message, header);
     send_bytes(config, journal, writer, bytes, status_tx).await
 }
 
@@ -986,7 +1063,13 @@ async fn send_bytes(
         ));
     }
     writer.write_all(&bytes).await?;
-    status_tx.send_modify(|status| status.transmitted_bytes += bytes.len() as u64);
+    status_tx.send_modify(|status| {
+        status.transmitted_bytes += bytes.len() as u64;
+        *status
+            .transmitted_bytes_by_message
+            .entry(decoded.name.clone())
+            .or_default() += bytes.len() as u64;
+    });
     let frame = decoded_frame(&config.id, Direction::Tx, &decoded);
     let sequence = journal
         .append(RecordPayload::MavlinkFrame(frame), None)
@@ -1100,6 +1183,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn message_throughput_splits_rates_by_name_and_rolls_off_idle_types() {
+        let start = time::Instant::now();
+        let counts = |attitude, rpm| {
+            ByteCounts::from([("ATTITUDE".to_owned(), attitude), ("RPM".to_owned(), rpm)])
+        };
+        let mut throughput = MessageThroughput::new(start, &counts(1000, 0));
+        let rates = throughput.sample(start + Duration::from_secs(1), &counts(1300, 100));
+        assert_eq!(rates["ATTITUDE"], 2400.0);
+        assert_eq!(rates["RPM"], 800.0);
+        let rates = throughput.sample(start + Duration::from_secs(4), &counts(1300, 100));
+        assert!(rates.is_empty());
+    }
+
     #[tokio::test]
     async fn link_publishes_throughput_and_clears_it_on_disconnect() {
         let server = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -1130,6 +1227,10 @@ mod tests {
                     assert_eq!(snapshot.received_bytes, 21);
                     assert!(snapshot.transmitted_bytes >= 21);
                     assert!(rx > 0.0 && tx > 0.0);
+                    assert_eq!(snapshot.received_bytes_by_message["HEARTBEAT"], 21);
+                    assert!(snapshot.transmitted_bytes_by_message["HEARTBEAT"] >= 21);
+                    assert!(snapshot.rx_bps_by_message["HEARTBEAT"] > 0.0);
+                    assert!(snapshot.tx_bps_by_message["HEARTBEAT"] > 0.0);
                     break;
                 }
                 status.changed().await.expect("status");
@@ -1144,6 +1245,8 @@ mod tests {
                 let snapshot = status.borrow_and_update().clone();
                 if !snapshot.connected {
                     assert!(snapshot.rx_bps.is_none() && snapshot.tx_bps.is_none());
+                    assert!(snapshot.rx_bps_by_message.is_empty());
+                    assert!(snapshot.tx_bps_by_message.is_empty());
                     assert_eq!(snapshot.received_bytes, 21);
                     break;
                 }
@@ -1152,6 +1255,51 @@ mod tests {
         })
         .await
         .expect("cleared rates");
+        link_task.abort();
+        journal.shutdown().await.expect("shutdown");
+        journal_task.await.expect("journal");
+    }
+
+    #[tokio::test]
+    async fn link_counts_undecodable_frames_without_dropping_the_connection() {
+        let server = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = server.local_addr().expect("address");
+        let (disconnect, disconnected) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept");
+            // A HEARTBEAT whose MAV_TYPE byte is outside the dialect, with a valid CRC.
+            let mut invalid = heartbeat(1, 1, 1);
+            invalid[14] = 250;
+            let crc = linkhub_dialect::calculate_crc(&invalid[1..19], 50);
+            invalid[19..21].copy_from_slice(&crc.to_le_bytes());
+            socket.write_all(&invalid).await.expect("invalid frame");
+            socket
+                .write_all(&heartbeat(2, 1, 1))
+                .await
+                .expect("heartbeat");
+            disconnected.await.expect("disconnect signal");
+        });
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, journal_task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let (link, link_task) = start_link(MavlinkLinkConfig::sitl(address), journal.clone());
+        let mut status = link.subscribe_status();
+        time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = status.borrow_and_update().clone();
+                if snapshot.dropped_frames == 1 && snapshot.received_bytes == 21 {
+                    assert!(snapshot.connected);
+                    break;
+                }
+                status.changed().await.expect("status");
+            }
+        })
+        .await
+        .expect("dropped frame counted");
+        disconnect.send(()).expect("disconnect");
+        peer.await.expect("peer");
         link_task.abort();
         journal.shutdown().await.expect("shutdown");
         journal_task.await.expect("journal");
@@ -1166,7 +1314,6 @@ mod tests {
                 component_id,
             },
         )
-        .expect("heartbeat")
     }
 
     #[test]
@@ -1191,17 +1338,18 @@ mod tests {
     #[test]
     fn component_registry_matches_http_contract_and_refreshes_heartbeats() {
         let mut components = BTreeMap::new();
-        let fields = serde_json::from_value(json!({
-            "type": 2,
-            "autopilot": 3,
-            "base_mode": 129,
-            "custom_mode": 4,
-            "system_status": 4,
-        }))
-        .expect("heartbeat fields");
+        let heartbeat = HEARTBEAT_DATA {
+            custom_mode: 4,
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED
+                | MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            system_status: MavState::MAV_STATE_ACTIVE,
+            mavlink_version: 3,
+        };
 
-        update_component_registry(&mut components, 1, 1, &fields, 100).expect("first heartbeat");
-        update_component_registry(&mut components, 1, 1, &fields, 200).expect("new heartbeat");
+        update_component_registry(&mut components, 1, 1, &heartbeat, 100);
+        update_component_registry(&mut components, 1, 1, &heartbeat, 200);
 
         let value = serde_json::to_value(components.get(&(1, 1)).expect("component"))
             .expect("serialize component");
@@ -1210,11 +1358,11 @@ mod tests {
             json!({
                 "system_id": 1,
                 "component_id": 1,
-                "vehicle_type": 2,
-                "autopilot": 3,
-                "base_mode": 129,
+                "vehicle_type": {"type": "MAV_TYPE_QUADROTOR"},
+                "autopilot": {"type": "MAV_AUTOPILOT_ARDUPILOTMEGA"},
+                "base_mode": "MAV_MODE_FLAG_SAFETY_ARMED | MAV_MODE_FLAG_CUSTOM_MODE_ENABLED",
                 "custom_mode": 4,
-                "system_status": 4,
+                "system_status": {"type": "MAV_STATE_ACTIVE"},
                 "last_heartbeat_ns": 200,
             })
         );
@@ -1299,9 +1447,9 @@ mod tests {
         .await
         .expect("TX byte counter");
         assert_eq!(connected_status.target_system, 1);
-        assert_eq!(connected_status.base_mode, 0);
+        assert_eq!(connected_status.base_mode, MavModeFlag::empty());
         assert_eq!(connected_status.custom_mode, 0);
-        assert_eq!(connected_status.system_status, 4);
+        assert_eq!(connected_status.system_status, MavState::MAV_STATE_ACTIVE);
 
         link_task.abort();
         journal.shutdown().await.expect("shutdown");

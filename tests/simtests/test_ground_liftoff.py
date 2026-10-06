@@ -192,8 +192,8 @@ def test_ground_liftoff(simtest_log):
 
     def _inject(s, r):
         if transition_t is None:
-            s.send_message(NamedValueFloat("RAWES_ALT", TAKEOFF_ALT_TARGET_M))
-            s.send_message(NamedValueFloat("RAWES_THR", TARGET_THRUST))
+            s.send_message(NamedValueFloat(name="RAWES_ALT", value=TAKEOFF_ALT_TARGET_M))
+            s.send_message(NamedValueFloat(name="RAWES_THR", value=TARGET_THRUST))
         else:
             # Ramp the altitude target at a fixed climb rate from the
             # transition altitude toward the fully-reeled-out target (capped
@@ -203,11 +203,11 @@ def test_ground_liftoff(simtest_log):
                 STEADY_ALT_TARGET_M,
                 alt_at_transition + CLIMB_RATE_MPS * (r.t_sim - transition_t),
             )
-            s.send_message(NamedValueFloat("RAWES_ALT", alt_cmd))
-            s.send_message(NamedValueFloat("RAWES_TEN", TETHER_TEN_TARGET_N))
-            s.send_message(NamedValueFloat("RAWES_THR", capture_thrust_seed))
-        s.send_message(NamedValueFloat("RAWES_ROFF", TARGET_ROLL_RAD))
-        s.send_message(NamedValueFloat("RAWES_POFF", TARGET_PITCH_RAD))
+            s.send_message(NamedValueFloat(name="RAWES_ALT", value=alt_cmd))
+            s.send_message(NamedValueFloat(name="RAWES_TEN", value=TETHER_TEN_TARGET_N))
+            s.send_message(NamedValueFloat(name="RAWES_THR", value=capture_thrust_seed))
+        s.send_message(NamedValueFloat(name="RAWES_ROFF", value=TARGET_ROLL_RAD))
+        s.send_message(NamedValueFloat(name="RAWES_POFF", value=TARGET_PITCH_RAD))
 
     for i in range(total_steps):
         t = i * DT

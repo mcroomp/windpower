@@ -36,7 +36,19 @@ from pathlib import Path
 import numpy as np
 from lupa import lua54
 
-from linkhub_client.messages import NamedValueFloat, NamedValueInt
+from groundstation.rawes_diag import diag_values
+from linkhub_client.messages import MavCmd, MavResult, NamedValueFloat, NamedValueInt
+
+# Wire ids of the MAVLink enumerations the Lua mock exchanges with rawes.lua.
+_MAV_CMD_IDS = {MavCmd.USER_1: 31010, MavCmd.USER_2: 31011}
+_MAV_CMDS_BY_ID = {wire_id: command for command, wire_id in _MAV_CMD_IDS.items()}
+_MAV_RESULTS_BY_ID = {
+    0: MavResult.ACCEPTED,
+    1: MavResult.TEMPORARILY_REJECTED,
+    2: MavResult.DENIED,
+    3: MavResult.UNSUPPORTED,
+    4: MavResult.FAILED,
+}
 
 # ── File paths ────────────────────────────────────────────────────────────────
 
@@ -122,8 +134,8 @@ class RawesLua:
             kp_el     -> RAWES_KP_EL  (elevation crosswind gain)
             kp_az     -> RAWES_KP_AZ  (azimuth crosswind gain)
             ...etc.   Full names (e.g. "RAWES_KP_ALT") are also accepted.
-        Anchor uses sim.send_named_int ("RAWES_LAT"/"RAWES_LON"/"RAWES_AAL");
-        slew uses sim.send_named_float ("RAWES_SLW").
+        Anchor is sent as NAMED_VALUE_INT ("RAWES_LAT"/"RAWES_LON"/"RAWES_AAL") and
+        slew as NAMED_VALUE_FLOAT ("RAWES_SLW"), both through send_message().
     """
 
     # Base tick rate: rawes.lua BASE_PERIOD_MS = 10 ms (100 Hz)
@@ -262,9 +274,10 @@ class RawesLua:
     def set_param(self, name: str, value: float):
         """Set a parameter by ArduPilot name or the ``mode`` alias.
 
-        RAWES_MODE is a script-generated parameter; slew flows via
-        send_named_float (RAWES_SLW); anchor flows via send_named_int
-        (RAWES_LAT / RAWES_LON / RAWES_AAL — see rawes_modes.send_anchor_ned()).
+        RAWES_MODE is a script-generated parameter; slew flows as a
+        NAMED_VALUE_FLOAT (RAWES_SLW) and the anchor as NAMED_VALUE_INT
+        (RAWES_LAT / RAWES_LON / RAWES_AAL — see rawes_modes.send_anchor_ned()),
+        both through send_message().
 
         Example:
             sim.set_param("mode", 1)          # RAWES_MODE = 1 (steady)
@@ -446,7 +459,7 @@ class RawesLua:
 
     def send_command(
         self,
-        command: int,
+        command: MavCmd,
         params: list[float] | tuple[float, ...] = (),
         *,
         confirmation: int = 0,
@@ -455,15 +468,18 @@ class RawesLua:
     ) -> None:
         """Inject a COMMAND_LONG addressed to the vehicle into the Lua inbox."""
         values = [float(value) for value in params] + [0.0] * (7 - len(params))
-        payload = struct.pack("<7fHBBB", *values, command, 1, 1, confirmation)
+        payload = struct.pack(
+            "<7fHBBB", *values, _MAV_CMD_IDS[command], 1, 1, confirmation,
+        )
         header = b"\x00" * 7 + bytes((sysid, compid)) + (76).to_bytes(3, "little")
         raw = header + payload
         lua_str = "".join(f"\\x{b:02x}" for b in raw)
         self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
 
     @property
-    def command_acks(self) -> list[dict[str, int]]:
-        """COMMAND_ACK messages sent by Lua through mavlink.send_chan."""
+    def command_acks(self) -> list[dict[str, MavCmd | MavResult | int]]:
+        """COMMAND_ACK messages sent by Lua through mavlink.send_chan, decoded
+        to the typed ``MavCmd``/``MavResult`` LinkHub clients see."""
         acks = []
         sent = self._mock.mavlink_sent
         for index in range(1, len(sent) + 1):
@@ -475,21 +491,28 @@ class RawesLua:
                 "<HBBiBB", payload,
             )
             acks.append({
-                "command": command,
-                "result": result,
+                "command": _MAV_CMDS_BY_ID[command],
+                "result": _MAV_RESULTS_BY_ID[result],
                 "target_system": target_system,
                 "target_component": target_component,
             })
         return acks
 
-    def send_named_float(self, name: str, value: float) -> None:
-        """Compatibility shim: inject a NAMED_VALUE_FLOAT into the Lua inbox."""
-        self.send_message(NamedValueFloat(name, float(value)))
+    @property
+    def diag_array(self) -> tuple[int, str, tuple[float, ...]] | None:
+        """Latest diagnostic DEBUG_FLOAT_ARRAY Lua sent as ``(array_id, name, data)``,
+        decoded like LinkHub would (``data`` is the full wire payload's floats).
+        ``None`` until Lua has emitted one."""
+        hex_payload = self._mock.diag_array_hex
+        if hex_payload is None:
+            return None
+        payload = bytes.fromhex(hex_payload)
+        _time_usec, array_id, raw_name = struct.unpack_from("<QH10s", payload)
+        count = (len(payload) - 20) // 4
+        data = struct.unpack_from(f"<{count}f", payload, 20)
+        return array_id, raw_name.rstrip(b"\x00").decode("ascii"), data
 
-    def send_named_int(self, name: str, value: int) -> None:
-        """Compatibility shim: inject a NAMED_VALUE_INT into the Lua inbox.
-
-        Used for the anchor lat/lon/alt (RAWES_LAT/LON/AAL), which are sent as
-        int32 to preserve ArduPilot's own Location precision end-to-end.
-        """
-        self.send_message(NamedValueInt(name, int(value)))
+    def diag_values(self) -> dict[str, float]:
+        """Keys the latest diagnostic array reports as set (empty before the first)."""
+        diag = self.diag_array
+        return {} if diag is None else diag_values(diag[0], diag[2])

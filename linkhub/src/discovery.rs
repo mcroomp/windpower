@@ -18,18 +18,16 @@ use std::{
     time::Duration,
 };
 
-use mavlink::{
-    ReadVersion, async_peek_reader::AsyncPeekReader,
-    dialects::ardupilotmega::MavMessage as DialectMessage, read_versioned_raw_message_async,
-};
 use serde::Serialize;
 use tokio::{
     io::{AsyncRead, ReadBuf},
     time,
 };
-use tokio_serial::{SerialPortBuilderExt, SerialPortInfo, SerialPortType, SerialStream};
+use tokio_serial::{
+    ClearBuffer, SerialPort, SerialPortBuilderExt, SerialPortInfo, SerialPortType, SerialStream,
+};
 
-use crate::{mavlink::HEARTBEAT_MESSAGE_ID, records::wall_time_ns};
+use crate::{codec::FrameReader, mavlink::HEARTBEAT_MESSAGE_ID, records::wall_time_ns};
 
 /// Baud rates probed when the caller does not restrict them, ordered by how
 /// commonly the RAWES hardware uses them.
@@ -227,10 +225,28 @@ pub async fn discover_serial_transport(
 
     let candidates: Vec<String> = report.ports.iter().map(|port| port.port.clone()).collect();
     for port in &candidates {
+        let initial_baud = discovery.bauds[0];
+        let mut stream = match tokio_serial::new(port, initial_baud).open_native_async() {
+            Ok(stream) => stream,
+            Err(error) => {
+                report.probes.push(ProbeReport {
+                    port: port.clone(),
+                    baud: initial_baud,
+                    stage: ProbeStage::Open,
+                    error: Some(error.to_string()),
+                    error_kind: Some(serial_error_kind(&error)),
+                    bytes_read: 0,
+                    frames: 0,
+                    elapsed_ms: 0,
+                });
+                continue;
+            }
+        };
         for baud in &discovery.bauds {
             tracing::debug!(port = %port, baud, "probing serial port for MAVLink");
-            let (probe, stream) = probe_candidate(port, *baud, discovery.probe_timeout).await;
-            if stream.is_none() {
+            let probe = probe_candidate(&mut stream, port, *baud, discovery.probe_timeout).await;
+            let heartbeat_found = probe.stage == ProbeStage::Heartbeat;
+            if !heartbeat_found {
                 tracing::debug!(
                     port = %port,
                     baud,
@@ -241,7 +257,7 @@ pub async fn discover_serial_transport(
                 );
             }
             report.probes.push(probe);
-            if let Some(stream) = stream {
+            if heartbeat_found {
                 tracing::info!(port = %port, baud, "MAVLink heartbeat found");
                 report.elapsed_ms = elapsed_ms(started);
                 return Ok(DiscoveredSerial {
@@ -317,15 +333,14 @@ pub fn serial_error_kind(error: &tokio_serial::Error) -> String {
     format!("{:?}", error.kind)
 }
 
-/// Probe one port/baud. On a heartbeat the still-open stream is returned so
-/// the live link uses it directly: closing and immediately reopening a
-/// Windows serial port fails with "Access is denied" while the probe's
-/// handle is still being released.
+/// Probe one baud on an already-open port. The caller keeps the handle open
+/// across baud changes and transfers it directly to the live link on success.
 async fn probe_candidate(
+    stream: &mut SerialStream,
     port: &str,
     baud: u32,
     probe_timeout: Duration,
-) -> (ProbeReport, Option<SerialStream>) {
+) -> ProbeReport {
     let started = time::Instant::now();
     let mut report = ProbeReport {
         port: port.to_owned(),
@@ -337,38 +352,38 @@ async fn probe_candidate(
         frames: 0,
         elapsed_ms: 0,
     };
-    let mut stream = match tokio_serial::new(port, baud).open_native_async() {
-        Ok(stream) => stream,
-        Err(error) => {
-            report.error_kind = Some(serial_error_kind(&error));
-            report.error = Some(error.to_string());
-            report.elapsed_ms = elapsed_ms(started);
-            return (report, None);
-        }
-    };
-    let mut reader = SerialReader::new(&mut stream);
+    if let Err(error) = stream.set_baud_rate(baud) {
+        report.error_kind = Some(serial_error_kind(&error));
+        report.error = Some(format!("could not set baud rate: {error}"));
+        report.elapsed_ms = elapsed_ms(started);
+        return report;
+    }
+    if let Err(error) = stream.clear(ClearBuffer::Input) {
+        report.error_kind = Some(serial_error_kind(&error));
+        report.error = Some(format!("could not clear serial input: {error}"));
+        report.elapsed_ms = elapsed_ms(started);
+        return report;
+    }
+    let mut reader = SerialReader::new(stream);
     let mut frames = 0;
     let outcome = time::timeout(probe_timeout, wait_for_heartbeat(&mut reader, &mut frames)).await;
     report.bytes_read = reader.bytes_read();
     report.frames = frames;
-    let stream = match outcome {
+    match outcome {
         Ok(Ok(())) => {
             report.stage = ProbeStage::Heartbeat;
-            Some(stream)
         }
         Ok(Err(error)) => {
             report.stage = ProbeStage::Read;
             report.error = Some(error);
-            None
         }
         Err(_) => {
             report.stage = ProbeStage::Timeout;
             report.error = Some("no heartbeat within the probe timeout".to_owned());
-            None
         }
-    };
+    }
     report.elapsed_ms = elapsed_ms(started);
-    (report, stream)
+    report
 }
 
 /// Back-off before re-polling a serial port that returned no bytes.
@@ -421,7 +436,20 @@ impl<R: AsyncRead + Unpin> AsyncRead for SerialReader<R> {
                 this.backoff = None;
             }
             let before = buf.filled().len();
-            ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+            match ready!(Pin::new(&mut this.inner).poll_read(cx, buf)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    if this.last_data.elapsed() >= SERIAL_SILENCE_TIMEOUT {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("serial port silent for {SERIAL_SILENCE_TIMEOUT:?}"),
+                        )));
+                    }
+                    this.backoff = Some(Box::pin(time::sleep(EMPTY_READ_BACKOFF)));
+                    continue;
+                }
+                Err(error) => return Poll::Ready(Err(error)),
+            }
             if buf.filled().len() > before || buf.remaining() == 0 {
                 this.bytes_read += (buf.filled().len() - before) as u64;
                 this.last_data = time::Instant::now();
@@ -442,14 +470,11 @@ async fn wait_for_heartbeat<R>(reader: R, frames: &mut u64) -> Result<(), String
 where
     R: AsyncRead + Unpin,
 {
-    let mut reader = AsyncPeekReader::new(reader);
+    let mut receiver = FrameReader::new(reader);
     loop {
-        let raw =
-            read_versioned_raw_message_async::<DialectMessage, _>(&mut reader, ReadVersion::Any)
-                .await
-                .map_err(|error| error.to_string())?;
+        let decoded = receiver.recv().await.map_err(|error| error.to_string())?;
         *frames += 1;
-        if raw.message_id() == HEARTBEAT_MESSAGE_ID {
+        if decoded.message_id == HEARTBEAT_MESSAGE_ID {
             return Ok(());
         }
     }
@@ -548,6 +573,48 @@ mod tests {
             .read_exact(&mut bytes)
             .await
             .expect("data after idle reads");
+        assert_eq!(bytes, [0xfd, 0x09]);
+        assert_eq!(reader.bytes_read(), 2);
+    }
+
+    struct TimeoutThenData {
+        timeout_reads: usize,
+        payload: Option<Vec<u8>>,
+    }
+
+    impl AsyncRead for TimeoutThenData {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.timeout_reads > 0 {
+                this.timeout_reads -= 1;
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "transient Windows operation aborted",
+                )));
+            }
+            if let Some(payload) = this.payload.take() {
+                buf.put_slice(&payload);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn serial_reader_retries_transient_timeouts() {
+        use tokio::io::AsyncReadExt;
+        let mut reader = SerialReader::new(TimeoutThenData {
+            timeout_reads: 2,
+            payload: Some(vec![0xfd, 0x09]),
+        });
+        let mut bytes = [0u8; 2];
+        reader
+            .read_exact(&mut bytes)
+            .await
+            .expect("data after transient timeouts");
         assert_eq!(bytes, [0xfd, 0x09]);
         assert_eq!(reader.bytes_read(), 2);
     }
