@@ -1446,7 +1446,6 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use mavlink::MavHeader;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1455,7 +1454,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        codec::serialize_message,
+        codec::{MavHeader, serialize_message},
         journal::JournalConfig,
         mavlink::{MavlinkLinkConfig, heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},

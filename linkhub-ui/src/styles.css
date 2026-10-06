@@ -168,9 +168,14 @@ h2 {
 }
 
 .cyclic-widget,
-.collective-widget {
+.collective-widget,
+.target-error-widget {
   position: relative;
   padding: 10px 12px 12px;
+}
+
+.target-error-widget.unavailable {
+  opacity: 0.4;
 }
 
 .cyclic-plane {
@@ -233,6 +238,20 @@ h2 {
 
 .collective-track .instrument-dot {
   left: 50%;
+}
+
+.error-dot {
+  border-color: #ffd8dc;
+  background: #ff5964;
+  box-shadow: 0 0 12px rgba(255, 89, 100, 0.65);
+}
+
+.instrument-value {
+  margin-top: 7px;
+  color: #cbd8e9;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .direction {

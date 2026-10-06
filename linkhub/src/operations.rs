@@ -1,9 +1,5 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use mavlink::{
-    Message,
-    dialects::ardupilotmega::{MavMessage, MavProtocolCapability},
-};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -12,6 +8,7 @@ use tokio::{
 };
 
 use crate::{
+    codec::message_id_from_name,
     dataflash::{
         DataFlashError, DataPacket, LogDownload, LogEntry, LogList, Target as DataFlashTarget,
     },
@@ -19,6 +16,7 @@ use crate::{
     mavlink::{LinkError, MavlinkLinkHandle, ReceivedMessage},
     records::wall_time_ns,
 };
+use linkhub_mavio_dialect::dialects::ardupilotmega::enums::MavProtocolCapability;
 
 const MAV_CMD_SET_MESSAGE_INTERVAL: u32 = 511;
 const MAV_CMD_GET_MESSAGE_INTERVAL: u32 = 510;
@@ -392,7 +390,7 @@ impl MavlinkOperations {
         timeout: Duration,
     ) -> Result<Value, OperationError> {
         let message_name = message.to_uppercase();
-        let message_id = MavMessage::message_id_from_name(&message_name).ok_or_else(|| {
+        let message_id = message_id_from_name(&message_name).ok_or_else(|| {
             OperationError::Invalid(format!("unknown MAVLink message {message:?}"))
         })?;
         let deadline = time::Instant::now() + timeout;
@@ -506,7 +504,7 @@ impl MavlinkOperations {
         timeout: Duration,
     ) -> Result<Value, OperationError> {
         let message_name = message.to_uppercase();
-        let message_id = MavMessage::message_id_from_name(&message_name).ok_or_else(|| {
+        let message_id = message_id_from_name(&message_name).ok_or_else(|| {
             OperationError::Invalid(format!("unknown MAVLink message {message:?}"))
         })?;
         let deadline = time::Instant::now() + timeout;
@@ -899,7 +897,7 @@ impl MavlinkOperations {
         let mut configured = Vec::with_capacity(rates.len());
         for (requested_name, rate) in rates {
             let message_name = requested_name.to_uppercase();
-            let message_id = MavMessage::message_id_from_name(&message_name).ok_or_else(|| {
+            let message_id = message_id_from_name(&message_name).ok_or_else(|| {
                 OperationError::Invalid(format!("unknown MAVLink message {requested_name:?}"))
             })?;
             let (rate_hz, interval_us) = if rate.is_null() {
@@ -1200,9 +1198,16 @@ fn value_u32(fields: &Map<String, Value>, name: &'static str) -> Result<u32, Ope
 
 fn normalize_parameter_name(name: &str) -> Result<String, OperationError> {
     let name = name.trim().to_uppercase();
-    if name.is_empty() || name.len() > 16 || !name.is_ascii() {
+    let mut characters = name.bytes();
+    let valid = characters
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+        && characters.all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == b'_'
+        });
+    if name.len() > 16 || !valid {
         return Err(OperationError::Invalid(
-            "parameter names must contain 1-16 ASCII characters".to_owned(),
+            "parameter names must match [A-Z][A-Z0-9_]{0,15}".to_owned(),
         ));
     }
     Ok(name)
@@ -1220,18 +1225,15 @@ fn format_cursor(sequence: u64) -> String {
 }
 
 fn capability_names(bits: u64) -> Vec<Value> {
-    MavProtocolCapability::from_bits_retain(bits)
+    MavProtocolCapability::from_bits_retain(bits as u32)
         .iter_names()
-        .map(|(name, _)| Value::String(name.to_owned()))
+        .map(|(name, _)| Value::String(format!("MAV_PROTOCOL_CAPABILITY_{name}")))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mavlink::dialects::ardupilotmega::{
-        HEARTBEAT_DATA, MavAutopilot, MavModeFlag, MavState, MavType,
-    };
 
     fn received(name: &str, fields: Value, journal_sequence: u64) -> Arc<ReceivedMessage> {
         Arc::new(ReceivedMessage {
@@ -1244,14 +1246,6 @@ mod tests {
             message_id: 0,
             name: name.to_owned(),
             fields: fields.as_object().expect("message fields").clone(),
-            message: Arc::new(MavMessage::HEARTBEAT(HEARTBEAT_DATA {
-                custom_mode: 0,
-                mavtype: MavType::MAV_TYPE_GENERIC,
-                autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
-                base_mode: MavModeFlag::empty(),
-                system_status: MavState::MAV_STATE_ACTIVE,
-                mavlink_version: 3,
-            })),
         })
     }
 
@@ -1308,6 +1302,10 @@ mod tests {
         assert!(normalize_parameter_name("").is_err());
         assert!(normalize_parameter_name("12345678901234567").is_err());
         assert!(normalize_parameter_name("RAWES_\u{2603}").is_err());
+        assert!(normalize_parameter_name("=5000").is_err());
+        assert!(normalize_parameter_name("RAWES MODE").is_err());
+        assert!(normalize_parameter_name("RAWES-MODE").is_err());
+        assert!(normalize_parameter_name("_RAWES_MODE").is_err());
     }
 
     #[test]

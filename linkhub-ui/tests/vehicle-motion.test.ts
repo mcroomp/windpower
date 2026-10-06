@@ -58,6 +58,28 @@ describe("VehicleMotion", () => {
     expect(direction.distanceTo(new THREE.Vector3(1, 0, 0))).toBeLessThan(1e-10);
   });
 
+  it("reports target upper-axis direction error in the current hub frame", () => {
+    const motion = new VehicleMotion();
+    motion.accept(pose(new THREE.Quaternion()), 0);
+    motion.accept(record("ATTITUDE_TARGET", { q: [1, 0, 0, 0] }), 0);
+    expect(motion.targetDirectionError()).toEqual({
+      forwardDegrees: 0,
+      rightDegrees: 0,
+      totalDegrees: 0,
+    });
+
+    const angle = 10 * Math.PI / 180;
+    motion.accept(record("ATTITUDE_TARGET", {
+      q: [Math.cos(angle / 2), Math.sin(angle / 2), 0, 0],
+    }), 100);
+    motion.update(1, 1_100);
+    const error = motion.targetDirectionError();
+    expect(error).not.toBeNull();
+    expect(error?.forwardDegrees).toBeCloseTo(0, 8);
+    expect(error?.rightDegrees).toBeCloseTo(10, 8);
+    expect(error?.totalDegrees).toBeCloseTo(10, 8);
+  });
+
   it("maps NED position and snaps the first observation without flying from the origin", () => {
     const motion = new VehicleMotion();
     motion.accept(record("LOCAL_POSITION_NED", { x: 2, y: 3, z: -4 }), 0);
@@ -154,7 +176,7 @@ describe("VehicleMotion", () => {
     const motion = new VehicleMotion();
     motion.accept(record("LOCAL_POSITION_NED", { x: 0, y: 10, z: 0 }), 0);
     motion.accept(record("ATTITUDE_TARGET", { q: [1, 0, 0, 0] }), 0);
-    motion.accept(record("ESC_TELEMETRY_1_TO_4", { rpm1: 1_000 }), 0);
+    motion.accept(record("RPM", { rpm1: 1_000, rpm2: -1 }), 0);
     motion.update(0.1, 100);
     expect(motion.rpm).toBeGreaterThan(0);
     expect(new THREE.Vector3(0, 0, 1).applyQuaternion(motion.target).toArray())
@@ -166,11 +188,23 @@ describe("VehicleMotion", () => {
     expect(motion.position.x).toBe(100);
   });
 
-  it("stops animating stale RPM instead of spinning indefinitely", () => {
+  it("holds the last measured RPM through telemetry gaps", () => {
     const motion = new VehicleMotion();
-    motion.accept(record("ESC_TELEMETRY_1_TO_4", { rpm1: 1_000 }), 0);
+    motion.accept(record("RPM", { rpm1: 1_000, rpm2: -1 }), 0);
     motion.update(0.1, 100);
     motion.update(1, 2_000);
-    expect(motion.rpm).toBe(0);
+    expect(motion.rpm).toBeCloseTo(1_000);
+  });
+
+  it("accepts measured RPM1 and rejects invalid RPM samples", () => {
+    const motion = new VehicleMotion();
+    motion.accept(record("RPM", { rpm1: 600, rpm2: -1 }), 0);
+    motion.update(0.08, 80);
+    expect(motion.rpm).toBeCloseTo(600 * (1 - Math.exp(-1)));
+
+    motion.accept(record("RPM", { rpm1: -1, rpm2: -1 }), 100);
+    motion.accept(record("RPM", { rpm1: NaN, rpm2: -1 }), 100);
+    motion.update(0.08, 180);
+    expect(motion.rpm).toBeGreaterThan(0);
   });
 });

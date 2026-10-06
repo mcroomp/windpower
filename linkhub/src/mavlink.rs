@@ -9,14 +9,7 @@ use std::{
     time::Duration,
 };
 
-use mavlink::{
-    MavHeader, ReadVersion,
-    async_peek_reader::AsyncPeekReader,
-    dialects::ardupilotmega::{
-        HEARTBEAT_DATA, MavAutopilot, MavMessage, MavModeFlag, MavState, MavType,
-    },
-    read_versioned_raw_message_async,
-};
+use mavio::{AsyncReceiver, io::TokioReader};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tokio::{
@@ -29,13 +22,15 @@ use tokio::{
 
 use crate::{
     codec::{
-        CodecError, DecodedMessage, decode_raw, decode_raw_bytes, encode_message, serialize_message,
+        CodecError, DecodedMessage, DialectMessage, MavHeader, decode_raw, decode_raw_bytes,
+        encode_message, serialize_message,
     },
     discovery::{DiscoveryConfig, ScanReport},
     journal::{JournalError, JournalHandle},
     link_events::{FailureRepeats, LinkEvent, LinkEvents},
     records::{Direction, MavlinkFrame, RecordPayload, wall_time_ns},
 };
+use linkhub_mavio_dialect::dialects::ardupilotmega::{enums, messages};
 
 pub(crate) const HEARTBEAT_MESSAGE_ID: u32 = 0;
 
@@ -219,13 +214,12 @@ pub struct ReceivedMessage {
     pub message_id: u32,
     pub name: String,
     pub fields: Map<String, Value>,
-    pub message: Arc<MavMessage>,
 }
 
 enum OutboundPayload {
     Raw(Vec<u8>),
     Message {
-        message: Box<MavMessage>,
+        message: Box<DialectMessage>,
         source_system: Option<u8>,
         source_component: Option<u8>,
     },
@@ -813,13 +807,13 @@ async fn receive_messages<R>(reader: R, sender: mpsc::Sender<Result<DecodedMessa
 where
     R: AsyncRead + Unpin,
 {
-    let mut reader = AsyncPeekReader::new(reader);
+    let mut receiver = AsyncReceiver::versionless(TokioReader::new(reader));
     loop {
-        let result =
-            read_versioned_raw_message_async::<MavMessage, _>(&mut reader, ReadVersion::Any)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|raw| decode_raw(raw).map_err(|error| error.to_string()));
+        let result = receiver
+            .recv()
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|frame| decode_raw(frame).map_err(|error| error.to_string()));
         let failed = result.is_err();
         if sender.send(result).await.is_err() || failed {
             return;
@@ -873,7 +867,6 @@ async fn archive_received(
         message_id: decoded.message_id,
         name: decoded.name,
         fields: decoded.fields,
-        message: Arc::new(decoded.message),
     }));
     status_tx.send_modify(|status| {
         status.received_messages += 1;
@@ -958,7 +951,7 @@ async fn send_typed(
     config: &MavlinkLinkConfig,
     journal: &JournalHandle,
     writer: &mut (impl AsyncWrite + Unpin),
-    message: MavMessage,
+    message: DialectMessage,
     source: (Option<u8>, Option<u8>),
     status_tx: &watch::Sender<LinkStatus>,
     tx_sequence: &AtomicU8,
@@ -1011,13 +1004,13 @@ fn decoded_frame(link_id: &str, direction: Direction, decoded: &DecodedMessage) 
     }
 }
 
-pub(crate) fn heartbeat_message() -> MavMessage {
-    MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+pub(crate) fn heartbeat_message() -> DialectMessage {
+    DialectMessage::Heartbeat(messages::Heartbeat {
         custom_mode: 0,
-        mavtype: MavType::MAV_TYPE_GCS,
-        autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
-        base_mode: MavModeFlag::empty(),
-        system_status: MavState::MAV_STATE_ACTIVE,
+        type_: enums::MavType::Gcs,
+        autopilot: enums::MavAutopilot::Invalid,
+        base_mode: enums::MavModeFlag::empty(),
+        system_status: enums::MavState::Active,
         mavlink_version: 3,
     })
 }

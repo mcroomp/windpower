@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { buildAirframe } from "./airframe";
 import type { TelemetryStore } from "./telemetry";
-import { VehicleMotion } from "./vehicle-motion";
+import { MOTOR_TO_ROTOR_GEAR_RATIO, VehicleMotion } from "./vehicle-motion";
+import type { TargetDirectionError } from "./vehicle-motion";
 
 export class VehicleScene {
   private readonly scene = new THREE.Scene();
@@ -82,7 +83,7 @@ export class VehicleScene {
       }),
     ];
     for (const message of [
-      "ATTITUDE_QUATERNION", "LOCAL_POSITION_NED", "ATTITUDE_TARGET", "ESC_TELEMETRY_1_TO_4",
+      "ATTITUDE_QUATERNION", "LOCAL_POSITION_NED", "ATTITUDE_TARGET", "RPM",
     ]) {
       const record = telemetry.get(message);
       if (record) {
@@ -95,6 +96,10 @@ export class VehicleScene {
 
   get hasCaptureTarget(): boolean {
     return this.motion.targetVisible;
+  }
+
+  get targetDirectionError(): TargetDirectionError | null {
+    return this.motion.targetDirectionError();
   }
 
   dispose(): void {
@@ -168,7 +173,10 @@ export class VehicleScene {
       this.camera.lookAt(this.vehicle.position);
       changed = true;
     }
-    this.spin = (this.spin + this.motion.rpm * 2 * Math.PI / 60 * elapsed / 10)
+    this.spin = (
+      this.spin
+      + this.motion.rpm * 2 * Math.PI / 60 * elapsed / MOTOR_TO_ROTOR_GEAR_RATIO
+    )
       % (2 * Math.PI);
     if (this.airframe.rotor.rotation.y !== this.spin) {
       this.airframe.rotor.rotation.y = this.spin;

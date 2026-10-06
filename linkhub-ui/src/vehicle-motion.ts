@@ -45,6 +45,12 @@ function readQuaternion(record: MessageRecord, output: THREE.Quaternion): boolea
 // A time-based blend gives the same response at 30, 60, and 144 Hz.
 const SMOOTHING_SECONDS = 0.08;
 const STALE_AFTER_MS = 1_000;
+export const MOTOR_TO_ROTOR_GEAR_RATIO = 10;
+export interface TargetDirectionError {
+  forwardDegrees: number;
+  rightDegrees: number;
+  totalDegrees: number;
+}
 
 export class VehicleMotion {
   readonly position = new THREE.Vector3(0, 5, 0);
@@ -56,12 +62,13 @@ export class VehicleMotion {
   private readonly desiredPosition = new THREE.Vector3();
   private readonly desiredAttitude = new THREE.Quaternion();
   private readonly desiredTarget = new THREE.Quaternion();
+  private readonly actualBodyToNed = new THREE.Quaternion();
+  private readonly targetBodyToNed = new THREE.Quaternion();
   private hasPosition = false;
   private hasAttitude = false;
   private positionTime = -Infinity;
   private attitudeTime = -Infinity;
   private targetTime = -Infinity;
-  private rpmTime = -Infinity;
   private desiredRpm = 0;
 
   reset(): void {
@@ -70,7 +77,6 @@ export class VehicleMotion {
     this.targetVisible = false;
     this.desiredRpm = 0;
     this.rpm = 0;
-    this.rpmTime = -Infinity;
   }
 
   targetArrowPose(origin: THREE.Vector3, direction: THREE.Vector3): void {
@@ -79,14 +85,30 @@ export class VehicleMotion {
     direction.set(0, 0, -1).applyQuaternion(this.target);
   }
 
+  targetDirectionError(): TargetDirectionError | null {
+    if (!this.hasAttitude || !this.targetVisible) {
+      return null;
+    }
+    const targetAxis = new THREE.Vector3(0, 0, -1)
+      .applyQuaternion(this.targetBodyToNed)
+      .applyQuaternion(this.actualBodyToNed.clone().invert());
+    return {
+      forwardDegrees: Math.atan2(targetAxis.x, -targetAxis.z) * 180 / Math.PI,
+      rightDegrees: Math.atan2(targetAxis.y, -targetAxis.z) * 180 / Math.PI,
+      totalDegrees: Math.acos(THREE.MathUtils.clamp(-targetAxis.z, -1, 1)) * 180 / Math.PI,
+    };
+  }
+
   accept(record: MessageRecord, now: number): void {
     if (record.direction !== "rx") {
       return;
     }
     switch (record.message) {
       case "ATTITUDE_QUATERNION":
-        if (readQuaternion(record, this.desiredAttitude)) {
-          this.desiredAttitude.premultiply(WORLD_FROM_NED).multiply(BODY_FROM_MODEL);
+        if (readQuaternion(record, this.actualBodyToNed)) {
+          this.desiredAttitude.copy(this.actualBodyToNed)
+            .premultiply(WORLD_FROM_NED)
+            .multiply(BODY_FROM_MODEL);
           if (!this.hasAttitude || now - this.attitudeTime > STALE_AFTER_MS) {
             this.attitude.copy(this.desiredAttitude);
           }
@@ -109,8 +131,8 @@ export class VehicleMotion {
         break;
       }
       case "ATTITUDE_TARGET":
-        if (readQuaternion(record, this.desiredTarget)) {
-          this.desiredTarget.premultiply(WORLD_FROM_NED);
+        if (readQuaternion(record, this.targetBodyToNed)) {
+          this.desiredTarget.copy(this.targetBodyToNed).premultiply(WORLD_FROM_NED);
           if (!this.targetVisible || now - this.targetTime > STALE_AFTER_MS) {
             this.target.copy(this.desiredTarget);
           }
@@ -118,18 +140,17 @@ export class VehicleMotion {
           this.targetTime = now;
         }
         break;
-      case "ESC_TELEMETRY_1_TO_4": {
+      case "RPM": {
         const rpm = numberField(record, "rpm1");
         if (rpm !== null && rpm >= 0) {
           this.desiredRpm = rpm;
-          this.rpmTime = now;
         }
         break;
       }
     }
   }
 
-  update(elapsed: number, now: number): void {
+  update(elapsed: number, _now: number): void {
     const blend = -Math.expm1(-Math.max(0, elapsed) / SMOOTHING_SECONDS);
     if (this.hasPosition) {
       this.position.lerp(this.desiredPosition, blend);
@@ -139,9 +160,6 @@ export class VehicleMotion {
     }
     if (this.targetVisible) {
       this.target.slerp(this.desiredTarget, blend);
-    }
-    if (now - this.rpmTime > STALE_AFTER_MS) {
-      this.desiredRpm = 0;
     }
     this.rpm += (this.desiredRpm - this.rpm) * blend;
     if (this.rpm < 0.01) {

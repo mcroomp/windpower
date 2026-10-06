@@ -209,6 +209,17 @@ to generated forward-compatible `IntEnum` values. Unknown enum values become
 Do not hand-edit the generated artifacts or duplicate these public types in
 Python or TypeScript.
 
+LinkHub's MAVLink wire implementation uses Mavio with default features
+disabled. The `linkhub/mavio-dialect` path dependency owns the filtered typed
+ArduPilotMega message set used for structured JSON projection and named message
+operations, keeping generated code out of LinkHub's frequently rebuilt
+compilation unit. Its build script also generates a compact registry for every
+ArduPilotMega message ID, name, and `CRC_EXTRA`: messages outside the typed set
+are still checksum-validated and journaled losslessly, but their `fields`
+object is empty and clients therefore see them as `RawMessage`. Add a message
+to the filtered set only when LinkHub needs to decode its fields or address it
+by name; do not enable Mavio's complete generated ArduPilotMega dialect.
+
 ## Message-rate policy and bandwidth
 
 **Current implementation:** clients configure explicit message intervals through

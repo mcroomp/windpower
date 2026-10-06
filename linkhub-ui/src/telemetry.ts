@@ -120,7 +120,7 @@ export class TelemetryStore {
     signal?: AbortSignal,
   ): Promise<MessageRecord> {
     return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
+      const timeout = globalThis.setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out after ${(timeoutMs / 1000).toFixed(1)} s`));
       }, timeoutMs);
@@ -135,7 +135,7 @@ export class TelemetryStore {
         }
       };
       const cleanup = () => {
-        window.clearTimeout(timeout);
+        globalThis.clearTimeout(timeout);
         this.listeners.delete(listener);
         signal?.removeEventListener("abort", abort);
       };
@@ -212,7 +212,7 @@ export class TelemetryStore {
         for (const listener of this.connectionListeners) {
           listener(false, failure);
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
       }
     }
   }

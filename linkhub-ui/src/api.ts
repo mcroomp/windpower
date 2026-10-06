@@ -29,13 +29,16 @@ export function formatMavResult(result: number): string {
 }
 
 export class LinkHubApi {
+  constructor(private readonly baseUrl = "") {}
+
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<T> {
-    const response = await fetch(path, {
+    const url = this.baseUrl ? new URL(path, this.baseUrl).toString() : path;
+    const response = await fetch(url, {
       method,
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: body === undefined ? undefined : { "Content-Type": "application/json" },

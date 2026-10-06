@@ -6,7 +6,7 @@ import calibrate.run as calibrate_run
 from calibrate.hw import _disarm, _h3_forward_mix, verify_safe_off
 from linkhub_client import MessageBatch, SimClock
 from linkhub_client.mav_constants import mavutil
-from linkhub_client.messages import Heartbeat, ServoOutputRaw
+from linkhub_client.messages import Heartbeat, ServoOutputRaw, StatusText
 from calibrate.params import _config_target_params
 from calibrate.repl import (
     _bounded_swash_waypoints,
@@ -232,6 +232,49 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
         ("set-param", "H_FLYBAR_MODE", 1.0),
         ("set-mode", 1),
     ]
+
+
+def test_arm_rejection_prints_named_result_and_fc_reason(monkeypatch, capsys):
+    class Session:
+        generation = 7
+
+        def current_cursor(self):
+            return "v1:10"
+
+        def command(self, *_args, **_kwargs):
+            return {"result": mavutil.mavlink.MAV_RESULT_FAILED}
+
+        def read_messages(self, after, message_types, **_kwargs):
+            assert after == "v1:10"
+            assert message_types == ["STATUSTEXT"]
+            assert _kwargs["expected_generation"] == 7
+            return MessageBatch(
+                (StatusText("Arm: Motor Interlock Enabled"),),
+                "v1:11",
+                _CLOCK,
+            )
+
+    monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
+
+    assert calibrate_hw._arm(Session()) is False
+    output = capsys.readouterr().out
+    assert "MAV_RESULT_FAILED (4)" in output
+    assert "[FC] Arm: Motor Interlock Enabled" in output
+
+
+def test_wait_for_disarmed_uses_linkhub_vehicle_snapshot(monkeypatch, capsys):
+    class Session:
+        def vehicle_status(self):
+            return {"base_mode": 0}
+
+    monkeypatch.setattr(
+        calibrate_run,
+        "read_one",
+        lambda *_args, **_kwargs: pytest.fail("journal polling should not be needed"),
+    )
+
+    assert calibrate_run._wait_for_disarmed(Session(), timeout_s=0.2) is True
+    assert "Vehicle already disarmed" in capsys.readouterr().out
 
 
 def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):

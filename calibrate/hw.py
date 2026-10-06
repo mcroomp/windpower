@@ -43,6 +43,14 @@ from .messages import read_one
 # ---------------------------------------------------------------------------
 _motor_pole_pairs = GB4008_POLE_PAIRS
 
+_MAV_RESULT_NAMES = {
+    mavlink.MAV_RESULT_ACCEPTED: "MAV_RESULT_ACCEPTED",
+    mavlink.MAV_RESULT_TEMPORARILY_REJECTED: "MAV_RESULT_TEMPORARILY_REJECTED",
+    mavlink.MAV_RESULT_DENIED: "MAV_RESULT_DENIED",
+    mavlink.MAV_RESULT_UNSUPPORTED: "MAV_RESULT_UNSUPPORTED",
+    mavlink.MAV_RESULT_FAILED: "MAV_RESULT_FAILED",
+}
+
 # ---------------------------------------------------------------------------
 # ESC telemetry helpers
 # ---------------------------------------------------------------------------
@@ -678,8 +686,25 @@ def _arm(session: LinkHubClient, force: bool = False,
         [1.0, param2],
         timeout=timeout,
     )
-    if result.get("result") != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-        print(f"  [FAIL] Arm rejected: result={result.get('result')}")
+    result_code = result.get("result")
+    if result_code != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+        result_name = _MAV_RESULT_NAMES.get(result_code, "UNKNOWN_MAV_RESULT")
+        print(f"  [FAIL] Arm rejected: {result_name} ({result_code}).")
+        reason_deadline = time.monotonic() + 1.0
+        while time.monotonic() < reason_deadline:
+            msg, cursor = read_one(
+                session,
+                cursor,
+                ["STATUSTEXT"],
+                wait=min(0.2, reason_deadline - time.monotonic()),
+                expected_generation=generation,
+            )
+            if msg is None:
+                continue
+            decoded = decode_message(msg)
+            if isinstance(decoded, StatusText):
+                print(f"  [FC] {decoded.text}")
+                break
         return False
     print("  Arm command accepted -- waiting for armed heartbeat ...")
 

@@ -1644,19 +1644,22 @@ local function update()
         if _rc_ch4 then _rc_ch4:set_override(1500) end
     end
 
-    -- Give ACRO at least one deterministic ground-idle control interval after
-    -- arming so it resets ArduPilot's internal attitude target to the AHRS
-    -- attitude. Rate-only GUIDED preserves that target; asserting interlock on
-    -- the first armed tick can otherwise carry a stale near-inverted target
-    -- into the later absolute-hold handoff.
+    -- Hold the interlock explicitly low before arming and during ACRO ground
+    -- idle. A zero override releases the channel and can expose a high input.
+    -- After the delay, assert interlock so ACRO has first reset its internal
+    -- attitude target to the AHRS attitude.
     if armed then
         if _armed_since_ms == nil then _armed_since_ms = now end
-        if _rc_ch8 and now - _armed_since_ms >= INTERLOCK_ARM_DELAY_MS then
-            _rc_ch8:set_override(2000)
+        if _rc_ch8 then
+            if now - _armed_since_ms >= INTERLOCK_ARM_DELAY_MS then
+                _rc_ch8:set_override(2000)
+            else
+                _rc_ch8:set_override(1000)
+            end
         end
     else
         _armed_since_ms = nil
-        if _rc_ch8 then _rc_ch8:set_override(0) end
+        if _rc_ch8 then _rc_ch8:set_override(1000) end
     end
 
     if mode == MODE_NONE then

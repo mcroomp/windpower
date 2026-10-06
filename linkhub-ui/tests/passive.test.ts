@@ -4,10 +4,12 @@ import luaSource from "../../scripts/rawes.lua?raw";
 import {
   CMD_ENTER_GUIDED,
   CMD_ENTER_PASSIVE,
+  PassiveController,
   PASSIVE_TELEMETRY_RATES,
   PASSIVE_YAW_TRIM_SEED,
   parseRunPassive,
 } from "../src/passive";
+import { MavResult } from "../src/generated/protocol";
 
 describe("Lua command IDs", () => {
   it("match rawes.lua", () => {
@@ -25,6 +27,50 @@ describe("parseRunPassive", () => {
       rollDegrees: 0,
       pitchDegrees: 0,
       yawDegrees: 0,
+    });
+
+    describe("passive recapture", () => {
+      it("clears keyboard offsets before recapturing the onboard direction", async () => {
+        const messages: Array<{ name: string; value: number }> = [];
+        const commands: Array<{ command: number; params: number[] }> = [];
+        const writes: string[] = [];
+        const api = {
+          async sendMessage(message: { name: string; value: number }) {
+            messages.push({ name: message.name, value: message.value });
+          },
+          async command(command: number, params: number[]) {
+            commands.push({ command, params });
+            return { result: MavResult.ACCEPTED };
+          },
+        };
+        const telemetry = {
+          checkpoint: () => 0,
+          recordsAfter: () => [],
+        };
+        const controller = new PassiveController(
+          api as never,
+          telemetry as never,
+          (message) => writes.push(message),
+          () => undefined,
+        );
+        (controller as unknown as { currentPhase: string }).currentPhase = "running";
+
+        await controller.adjust("roll", 1);
+        await controller.adjust("pitch", -1);
+        await controller.adjust("yaw", 1);
+        await controller.recaptureTarget();
+
+        expect(messages.slice(-3)).toEqual([
+          { name: "RAWES_ROFF", value: 0 },
+          { name: "RAWES_POFF", value: 0 },
+          { name: "RAWES_YOFF", value: 0 },
+        ]);
+        expect(commands).toEqual([
+          { command: CMD_ENTER_PASSIVE, params: [PASSIVE_YAW_TRIM_SEED] },
+        ]);
+        expect(writes.at(-1)).toContain("recaptured");
+        expect(writes.at(-1)).toContain("offsets cleared");
+      });
     });
   });
 

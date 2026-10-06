@@ -7,6 +7,7 @@ import { VehicleScene } from "./scene";
 import { decodeH3Swashplate, swashControlPositions } from "./swashplate";
 import { TelemetryStore } from "./telemetry";
 import { Terminal } from "./terminal";
+import { MOTOR_TO_ROTOR_GEAR_RATIO } from "./vehicle-motion";
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -28,6 +29,9 @@ const input = required<HTMLInputElement>("#terminal-input");
 const swashControls = required<HTMLElement>("#swash-controls");
 const cyclicDot = required<HTMLElement>("#cyclic-dot");
 const collectiveDot = required<HTMLElement>("#collective-dot");
+const targetErrorWidget = required<HTMLElement>("#target-error-widget");
+const targetErrorDot = required<HTMLElement>("#target-error-dot");
+const targetErrorValue = required<HTMLElement>("#target-error-value");
 let swashLimits: { min: number; max: number } | null = null;
 
 let terminal: Terminal;
@@ -54,6 +58,7 @@ function updateOverlay(): void {
   const attitude = telemetry.get("ATTITUDE");
   const servos = telemetry.get("SERVO_OUTPUT_RAW");
   const yawMotor = telemetry.get("NAMED_VALUE_FLOAT", "rx", "YFF_U");
+  const rpm = telemetry.get("RPM");
   const degrees = (value: unknown) => (
     typeof value === "number" ? (value * 180 / Math.PI).toFixed(1) : "n/a"
   );
@@ -64,6 +69,12 @@ function updateOverlay(): void {
     : typeof yawMotor?.fields.value === "number"
     ? `${(yawMotor.fields.value * 100).toFixed(1)}%`
     : "n/a";
+  const motorRpm = typeof rpm?.fields.rpm1 === "number" && rpm.fields.rpm1 >= 0
+    ? rpm.fields.rpm1
+    : null;
+  const rpmText = motorRpm === null
+    ? "RPM unavailable"
+    : `motor ${motorRpm.toFixed(0)} RPM  rotor ${(motorRpm / MOTOR_TO_ROTOR_GEAR_RATIO).toFixed(1)} RPM`;
   const swash = swashLimits
     ? decodeH3Swashplate(
       Number(servos?.fields.servo1_raw),
@@ -82,18 +93,34 @@ function updateOverlay(): void {
     Number(servos?.fields.servo2_raw),
     Number(servos?.fields.servo3_raw),
   );
-  swashControls.classList.toggle("unavailable", controls === null);
   if (controls) {
     cyclicDot.style.left = `${(controls.cyclicLeftRight + 1) * 50}%`;
     cyclicDot.style.top = `${(1 - controls.cyclicUpDown) * 50}%`;
     collectiveDot.style.top = `${(1 - controls.collectiveUpDown) * 50}%`;
   }
+  const targetError = scene.targetDirectionError;
+  targetErrorWidget.classList.toggle("unavailable", targetError === null);
+  if (targetError) {
+    const limitDegrees = 30;
+    const right = Math.max(-1, Math.min(1, targetError.rightDegrees / limitDegrees));
+    const forward = Math.max(-1, Math.min(1, targetError.forwardDegrees / limitDegrees));
+    targetErrorDot.style.left = `${(right + 1) * 50}%`;
+    targetErrorDot.style.top = `${(1 - forward) * 50}%`;
+    targetErrorValue.textContent = `${targetError.totalDegrees.toFixed(1)}°`;
+  } else {
+    targetErrorValue.textContent = "n/a";
+  }
+  swashControls.classList.toggle(
+    "unavailable",
+    controls === null && targetError === null,
+  );
   overlay.textContent = [
     `${armed ? "ARMED" : "disarmed"} · ${formatCopterMode(status?.custom_mode)}`,
     `roll ${degrees(attitude?.fields.roll)}°  pitch ${degrees(attitude?.fields.pitch)}°  yaw ${degrees(attitude?.fields.yaw)}°`,
     scene.hasCaptureTarget ? "Capture target: yellow arrow" : "No capture target",
     `swash ${swashText}`,
     `S1 ${field("servo1_raw")}  S2 ${field("servo2_raw")}  S3 ${field("servo3_raw")}  DShot/S9 ${field("servo9_raw")}  YFF_U ${motorCommand}`,
+    rpmText,
   ].join("\n");
 }
 
@@ -110,8 +137,10 @@ telemetry.onRecord((record) => {
   if (record.direction === "rx" && (
     record.message === "HEARTBEAT"
     || record.message === "ATTITUDE"
+    || record.message === "ATTITUDE_QUATERNION"
     || record.message === "ATTITUDE_TARGET"
     || record.message === "SERVO_OUTPUT_RAW"
+    || record.message === "RPM"
     || (record.message === "NAMED_VALUE_FLOAT" && record.fields.name === "YFF_U")
   )) {
     scheduleOverlay();

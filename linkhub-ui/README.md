@@ -8,7 +8,7 @@ LinkHub over its HTTP API.
 From the repository root, launch a previously built UI plus LinkHub:
 
 ```powershell
-.\run_linkhub_ui.cmd COM7 115200
+.\run_linkhub_ui.cmd auto
 ```
 
 For SITL:
@@ -21,12 +21,16 @@ Add `--build` to install UI dependencies, build the UI, and build LinkHub with
 the `bluetooth` Cargo feature:
 
 ```powershell
-.\run_linkhub_ui.cmd --build COM7 115200 8999
+.\run_linkhub_ui.cmd --build auto
 ```
 
 `run_linkhub_ui.cmd` also:
 
 - accepts `LINKHUB_CONNECTION`, `LINKHUB_BAUD`, and `LINKHUB_PORT`;
+- leaves baud unrestricted by default so LinkHub probes
+  `115200,57600,38400,19200,9600` and can move between native USB and a
+  telemetry radio; set a numeric baud only when intentionally restricting the
+  scan;
 - defaults the HTTP port to `8999`;
 - serves `linkhub-ui\dist` through LinkHub's `--static-dir`;
 - adds `--no-cache` so a browser refresh picks up a new build immediately.
@@ -38,6 +42,8 @@ the `bluetooth` Cargo feature:
 | Command | What it runs | Notes |
 | --- | --- | --- |
 | `npm run build` | `tsc --noEmit && vite build` | Type-checks, then writes static assets to `dist\`. |
+| `npm run cli -- <command>` | esbuild runner + Node | Bundles the CLI quickly under `tmp\linkhub-cli\`, then runs it against LinkHub; defaults to `http://127.0.0.1:8999`. |
+| `npm run cli:debug -- <command>` | Node inspector + `vite-node` | Runs the same CLI paused on startup for a VS Code/Chrome debugger. |
 | `npm run dev` | `vite --host 127.0.0.1` | Frontend-only Vite dev server bound to loopback. The command does not set a port, so Vite chooses its default port. |
 | `npm run test` | `vitest run` | One-shot test run. |
 
@@ -45,6 +51,54 @@ There is no checked-in Vite proxy configuration and the frontend uses relative
 `/v1/...` fetches, so `npm run dev` is only a frontend server. If you need the
 live LinkHub API, either serve the built UI through LinkHub or put your own
 reverse proxy in front of the dev server.
+
+## Node CLI
+
+The npm CLI and browser terminal share `CommandRunner`, `PassiveController`,
+`TelemetryStore`, `LinkHubApi`, parameter parsing/merging, and generated
+protocol code. The CLI is only a process/input-output and file-loading adapter;
+it does not maintain a second passive-start implementation. The CLI uses a
+small esbuild runner and Node filesystem reads for fast iteration, while the
+browser keeps its Vite raw-file imports and full Three.js build. Every CLI
+invocation checks the CLI TypeScript dependency tree and rebuilds its
+source-mapped bundle only when those sources changed; it never rebuilds the
+browser or Three.js bundle. Pass `--rebuild` before the command to force it:
+
+```powershell
+.\rawes --rebuild help
+```
+
+From the repository root:
+
+```powershell
+.\rawes status
+.\rawes config check
+.\rawes run passive --duration 30 --trim thr=0.342
+.\rawes stop
+```
+
+The npm form remains available for automation:
+
+```powershell
+npm --prefix linkhub-ui run cli -- status
+```
+
+Use a non-default LinkHub endpoint with either form:
+
+```powershell
+.\rawes --server http://127.0.0.1:8999 status
+```
+
+`run passive` keeps the Node process alive until its duration expires or it
+receives Ctrl+C. Both paths call the shared canonical safe-off implementation.
+The standalone `stop` command also applies that same safe-off sequence, so it
+can recover a run started by another CLI or browser process.
+
+For an inspector session:
+
+```powershell
+npm --prefix linkhub-ui run cli:debug -- --server http://127.0.0.1:8999 status
+```
 
 ## Browser interface
 
@@ -66,7 +120,7 @@ During a passive run, the browser hotkeys are:
 Arrows = roll/pitch
 Minus or equals = thrust
 Comma or period = yaw
-Space = reset
+Space = recapture the current direction and clear roll/pitch/yaw offsets
 Esc = stop
 ```
 
@@ -91,13 +145,15 @@ message rates through `PUT /v1/mavlink/message-rates`:
 - `SERVO_OUTPUT_RAW`: 25 Hz
 - `LOCAL_POSITION_NED`: 10 Hz
 - `BATTERY_STATUS`: 2 Hz
+- `RPM`: 5 Hz
 
 The UI also consumes other messages when present:
 
 - `HEARTBEAT` for mode/armed state;
 - `NAMED_VALUE_FLOAT` named `YFF_U` for yaw-motor display;
 - `EKF_STATUS_REPORT` for status text;
-- `ESC_TELEMETRY_1_TO_4` for rotor-speed display.
+- `RPM.rpm1` for measured yaw-motor speed. The 3D view divides motor RPM by
+  the 10:1 gearbox ratio and spins the rotor at that measured output speed.
 
 Reads use `GET /v1/mavlink/messages` with `collapse=true` and
 `max_lag_ms=1000`, so the browser does not replay stale backlog beyond one
@@ -110,9 +166,14 @@ upper-axis direction (opposite FRD body-down), not the current rotor axle. It
 is hidden until a target arrives and cleared on disconnect or generation
 change.
 
+The target-error bullseye next to the swash instruments compares the measured
+and target upper rotor-axis directions. Center means the directions coincide;
+the dot shows forward/right error in the current hub frame and the number is
+the total axis-angle error. It intentionally ignores yaw about the rotor axis.
+
 Position, attitude, target, and RPM are display-only smoothed. The smoothing
-time constant is 80 ms, stale telemetry resets after one second, and a
-generation change clears reconstructed state.
+time constant is 80 ms. The rotor holds the last valid RPM through telemetry
+gaps; disconnects and generation changes clear reconstructed state.
 
 ## Throughput and rate-policy status
 

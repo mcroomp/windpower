@@ -113,11 +113,13 @@ export class PassiveController {
   private currentPhase: PassivePhase = "idle";
   private operation: AbortController | null = null;
   private cleanup: Promise<void> | null = null;
-  private durationTimer: number | null = null;
+  private durationTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private thrust = DEFAULT_THRUST;
   private rollDegrees = 0;
   private pitchDegrees = 0;
   private yawDegrees = 0;
+  private recapturing = false;
+  private targetUpdate = Promise.resolve();
 
   constructor(
     private readonly api: LinkHubApi,
@@ -211,7 +213,7 @@ export class PassiveController {
       this.setPhase("running");
       this.write("Passive run active. Keyboard controls are enabled.");
       if (options.durationSeconds !== null) {
-        this.durationTimer = window.setTimeout(
+        this.durationTimer = globalThis.setTimeout(
           () => void this.stop(),
           options.durationSeconds * 1_000,
         );
@@ -226,7 +228,7 @@ export class PassiveController {
   }
 
   async stop(): Promise<void> {
-    if (this.currentPhase === "idle" || this.currentPhase === "stopping") {
+    if (this.currentPhase === "stopping") {
       return this.cleanup ?? Promise.resolve();
     }
     this.operation?.abort();
@@ -235,7 +237,7 @@ export class PassiveController {
   }
 
   async adjust(axis: "roll" | "pitch" | "yaw" | "collective", direction: -1 | 1): Promise<void> {
-    if (this.currentPhase !== "running") {
+    if (this.currentPhase !== "running" || this.recapturing) {
       return;
     }
     if (axis === "collective") {
@@ -243,7 +245,8 @@ export class PassiveController {
       await this.sendNamedValue("RAWES_THR", this.thrust);
     } else if (axis === "yaw") {
       this.yawDegrees = ((this.yawDegrees + direction * ANGLE_STEP_DEG + 180) % 360) - 180;
-      await this.sendOffsets();
+      const offsets = this.currentOffsets();
+      await this.queueTargetUpdate(() => this.sendOffsets(offsets));
     } else {
       const next = Math.max(
         -ANGLE_LIMIT_DEG,
@@ -258,7 +261,8 @@ export class PassiveController {
       } else {
         this.pitchDegrees = next;
       }
-      await this.sendOffsets();
+      const offsets = this.currentOffsets();
+      await this.queueTargetUpdate(() => this.sendOffsets(offsets));
     }
     this.write(
       `target roll=${this.rollDegrees.toFixed(0)}° pitch=${this.pitchDegrees.toFixed(0)}° `
@@ -266,15 +270,29 @@ export class PassiveController {
     );
   }
 
-  async resetTarget(): Promise<void> {
-    if (this.currentPhase !== "running") {
+  async recaptureTarget(): Promise<void> {
+    if (this.currentPhase !== "running" || this.recapturing) {
       return;
     }
-    this.rollDegrees = 0;
-    this.pitchDegrees = 0;
-    this.yawDegrees = 0;
-    await this.sendOffsets();
-    this.write("Passive offsets reset to the onboard attitude anchor.");
+    this.recapturing = true;
+    try {
+      this.rollDegrees = 0;
+      this.pitchDegrees = 0;
+      this.yawDegrees = 0;
+      const signal = this.operation?.signal ?? new AbortController().signal;
+      await this.queueTargetUpdate(async () => {
+        await this.sendOffsets(this.currentOffsets());
+        await this.luaCommand(
+          CMD_ENTER_PASSIVE,
+          [PASSIVE_YAW_TRIM_SEED],
+          "ENTER_PASSIVE recapture",
+          signal,
+        );
+      });
+      this.write("Passive direction recaptured; keyboard attitude offsets cleared.");
+    } finally {
+      this.recapturing = false;
+    }
   }
 
   private async configureTelemetry(): Promise<void> {
@@ -519,12 +537,25 @@ export class PassiveController {
     await this.sendOffsets();
   }
 
-  private async sendOffsets(): Promise<void> {
+  private currentOffsets(): readonly [number, number, number] {
+    return [this.rollDegrees, this.pitchDegrees, this.yawDegrees];
+  }
+
+  private async sendOffsets(
+    offsets: readonly [number, number, number] = this.currentOffsets(),
+  ): Promise<void> {
+    const [roll, pitch, yaw] = offsets;
     await Promise.all([
-      this.sendNamedValue("RAWES_ROFF", radians(this.rollDegrees)),
-      this.sendNamedValue("RAWES_POFF", radians(this.pitchDegrees)),
-      this.sendNamedValue("RAWES_YOFF", radians(this.yawDegrees)),
+      this.sendNamedValue("RAWES_ROFF", radians(roll)),
+      this.sendNamedValue("RAWES_POFF", radians(pitch)),
+      this.sendNamedValue("RAWES_YOFF", radians(yaw)),
     ]);
+  }
+
+  private queueTargetUpdate(operation: () => Promise<void>): Promise<void> {
+    const result = this.targetUpdate.then(operation);
+    this.targetUpdate = result.catch(() => undefined);
+    return result;
   }
 
   private async sendNamedValue(name: string, value: number): Promise<void> {
@@ -592,7 +623,7 @@ export class PassiveController {
 
   private resetLocalState(): void {
     if (this.durationTimer !== null) {
-      window.clearTimeout(this.durationTimer);
+      globalThis.clearTimeout(this.durationTimer);
       this.durationTimer = null;
     }
     this.operation = null;
@@ -626,9 +657,9 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
       signal.removeEventListener("abort", abort);
       resolve();
     };
-    const timeout = window.setTimeout(complete, milliseconds);
+    const timeout = globalThis.setTimeout(complete, milliseconds);
     const abort = () => {
-      window.clearTimeout(timeout);
+      globalThis.clearTimeout(timeout);
       signal.removeEventListener("abort", abort);
       reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
     };

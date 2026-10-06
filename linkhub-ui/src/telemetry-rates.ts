@@ -5,4 +5,5 @@ export const DISPLAY_TELEMETRY_RATES = Object.freeze({
   SERVO_OUTPUT_RAW: 25,
   LOCAL_POSITION_NED: 10,
   BATTERY_STATUS: 2,
+  RPM: 5,
 });

@@ -568,6 +568,14 @@ def _wait_for_passive_land_clear(
 
 def _wait_for_disarmed(session: LinkHubClient, timeout_s: float) -> bool:
     """Wait for Lua or ArduPilot to confirm disarm via heartbeat."""
+    status = session.vehicle_status()
+    base_mode = status.get("base_mode")
+    if base_mode is not None and not bool(
+        int(base_mode) & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+    ):
+        print("  [OK] Vehicle already disarmed.")
+        return True
+
     deadline = time.monotonic() + timeout_s
     cursor = session.current_cursor()
     while time.monotonic() < deadline:

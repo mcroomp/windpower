@@ -69,9 +69,13 @@ Cleanup must run after partial startup failures as well as successful runs.
 
 ### Interlock and runup
 
-Lua owns the channel-8 motor-interlock override. After arming it
-holds interlock low for 500 ms, then asserts it. This provides at least one
-ACRO ground-idle controller interval before runup.
+Lua owns the channel-8 motor-interlock override. It actively refreshes the low
+PWM override (1000 us) while disarmed and for 500 ms after arming, then asserts
+the high override (2000 us). Using a zero override here is incorrect because
+ArduPilot interprets it as releasing the override, which can expose a high
+physical/default input and reject arming with `Motor Interlock Enabled`. The
+500 ms low interval provides at least one ACRO ground-idle controller interval
+before runup.
 
 `H_RSC_RAMP_TIME` and `H_RSC_RUNUP_TIME` are timeout inputs, not proof that
 runup completed. Startup must wait for ArduPilot's `Runup Complete` status.

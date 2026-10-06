@@ -12,11 +12,20 @@
     "linkhub_client"
   ],
   "exclude": [
+    ".git",
+    ".obsidian",
     "**/__pycache__",
     "**/tests/oneoff",
+    "**/node_modules",
+    "**/target",
     ".pytest_cache",
     ".venv",
-    "simulation/logs"
+    "archive",
+    "build",
+    "dist",
+    "rawes.egg-info",
+    "simulation/logs",
+    "tmp"
   ],
   "extraPaths": [
     "linkhub_client/src"

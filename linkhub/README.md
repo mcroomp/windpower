@@ -19,11 +19,20 @@ cargo build --manifest-path .\linkhub\Cargo.toml --release
 
 The executable is `.\linkhub\target\release\linkhub.exe`.
 
-To include the optional Bluetooth motor backend:
+Bluetooth is excluded from ordinary builds. To include the optional motor
+backend explicitly:
 
 ```powershell
 cargo build --manifest-path .\linkhub\Cargo.toml --release --features bluetooth
 ```
+
+LinkHub uses Mavio with its default features disabled. The
+`mavio-dialect` path dependency generates a filtered typed dialect for the
+messages LinkHub projects as structured JSON, plus a compact full
+ArduPilotMega message ID/name/CRC registry. Other valid ArduPilotMega messages
+remain checksum-validated and journaled with empty `fields`; add a message to
+`mavio-dialect/build.rs` when LinkHub must expose its decoded fields or accept
+its name in message-operation APIs.
 
 For iterative development, run a subcommand directly:
 
@@ -174,6 +183,9 @@ Routes come from `linkhub\src\http.rs`.
   bytes instead of listing a directory, and `verify_crc=false` to skip the
   post-download CRC check.
 - `GET /v1/mavlink/logs/{id}` accepts `timeout_ms` and `max_retries`.
+- Parameter names are trimmed and uppercased, then must match
+  `[A-Z][A-Z0-9_]{0,15}`. Malformed names are rejected before LinkHub sends a
+  MAVLink parameter request.
 
 ### Status snapshots
 

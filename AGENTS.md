@@ -246,6 +246,15 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
   `bash test.sh ...` or `bash setup.sh build` from the current environment and
   let the scripts choose the Docker execution path. Do not wrap commands in
   `wsl -e bash -lc "..."`.
+- **Critical — run only one Cargo command at a time for `linkhub/`.** Cargo
+  commands share `linkhub/target`; overlapping checks, tests, or builds contend
+  for its lock and can appear stuck while duplicating expensive dependency
+  compilation. Before starting any Cargo command, inspect active shell sessions
+  and Cargo/rustc process trees. If an earlier task-owned Cargo command is stale
+  or superseded, stop its specific owning shell/process tree and confirm it has
+  exited before launching the replacement. Never start a second Cargo command
+  merely because the first has not printed output, and never kill Cargo/rustc
+  processes by name or disturb unrelated editor/rust-analyzer processes.
 - Do not use git history (`git log`, `git show`, `git blame`) for diagnosis unless user asks.
 - Do not preserve backward-compatibility parameters, fields, aliases, or shims when making code changes.
 - Assume no external callers: prefer a clean cutover and remove legacy paths in the same change to avoid debt.
