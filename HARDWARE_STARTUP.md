@@ -103,7 +103,8 @@ MAVLink messages from the autopilot. The Pixhawk side read
   expect range limits; no arming, parameter write or Lua upload was done over
   this link.
 - The ESP is on the Pixhawk's `SERIAL2` (TELEM2). At 57600 baud the UART was
-  nearly saturated by the ~38 kbit/s stream, so both ends were raised to 460800:
+  nearly saturated by the ~38 kbit/s stream, so both ends were raised to 460800
+  (later raised again to 921600, see below):
   `SERIAL2_BAUD=460` on the Pixhawk and `baud=460800` in the ESP settings
   (`POST /api/settings` with the form's fields, which saves and reboots the
   board). Gotchas: ArduPilot applies a `SERIALn_BAUD` change only after a reboot
@@ -136,6 +137,24 @@ MAVLink messages from the autopilot. The Pixhawk side read
   were still identical (FTP 41 s, log 82 s, i.e. about 36 KB/s aggregate) and
   the engines repaired 5 and 16 gaps with 0 duplicate packets. The vehicle
   stayed disarmed.
+- Wire rate at 460800: while downloading, LinkHub's `received_bytes` averaged
+  about 43.4 KB/s against the 46.08 KB/s UART ceiling (460800 / 10 bits), so
+  that link was UART-bound. Idle telemetry was about 5 KB/s.
+- Raised to **921600** (`SERIAL2_BAUD=921`, ESP `baud=921600`, same order as
+  above; the ESP's `POST /api/settings` takes the full settings JSON from
+  `GET /api/settings` with `baud` changed). Link recovered with 0 dropped
+  frames, vehicle disarmed in ACRO, safe-off parameters unchanged. Same log 17,
+  byte-identical every time: MAVFTP 25 s (59.5 KB/s, was 38), DataFlash 27 s
+  (56.1 KB/s, was 34), both at once FTP 29 s and log 59 s (was 41 s and 82 s;
+  13-17 timeouts each and 14-49 gaps, all repaired, 0 duplicates). Wire rate
+  averaged about 71-73 KB/s, only about 78% of the new 92 KB/s UART ceiling, so
+  the UART is no longer the bottleneck (Wi-Fi at about -90 dBm and the ESP are
+  the likely limit). Not tried: 1500000 baud, or RTS/CTS flow control (the ESP
+  settings expose `gpio_rts`/`gpio_cts`; the Pixhawk side is `BRD_SER2_RTSCTS`,
+  currently 2 = auto).
+  I expected ArduPilot's one-`LOG_DATA`-per-400-Hz-tick limit to cap DataFlash
+  near 36 KB/s on a link without flow control, but it reached 56 KB/s, so that
+  limit does not apply to this build or link.
 
 ### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
 
