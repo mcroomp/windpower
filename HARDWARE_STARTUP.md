@@ -104,7 +104,7 @@ MAVLink messages from the autopilot. The Pixhawk side read
   this link.
 - The ESP is on the Pixhawk's `SERIAL2` (TELEM2). At 57600 baud the UART was
   nearly saturated by the ~38 kbit/s stream, so both ends were raised to 460800
-  (later raised again to 921600, see below):
+  (later raised again to 921600 and then 1500000, see below):
   `SERIAL2_BAUD=460` on the Pixhawk and `baud=460800` in the ESP settings
   (`POST /api/settings` with the form's fields, which saves and reboots the
   board). Gotchas: ArduPilot applies a `SERIALn_BAUD` change only after a reboot
@@ -155,6 +155,17 @@ MAVLink messages from the autopilot. The Pixhawk side read
   I expected ArduPilot's one-`LOG_DATA`-per-400-Hz-tick limit to cap DataFlash
   near 36 KB/s on a link without flow control, but it reached 56 KB/s, so that
   limit does not apply to this build or link.
+- Raised again to **1500000** (`SERIAL2_BAUD=1500`, ESP `baud=1500000`), same
+  procedure; the ESP took about 40 s to rejoin Wi-Fi after its reboot. Link
+  recovered with 0 dropped frames and the vehicle stayed disarmed in ACRO with
+  safe-off parameters unchanged. Same log 17, byte-identical every time: MAVFTP
+  17 s (85.8 KB/s), DataFlash 23 s (64.7 KB/s), both at once FTP 22 s and log
+  38 s (the log needed 137 gap repairs; 0 duplicates). MAVFTP wire rate averaged
+  about 109 KB/s of the 150 KB/s UART ceiling (73%). Speed by baud for the
+  same log, MAVFTP / DataFlash alone: 460800 38 / 34 KB/s, 921600 59.5 /
+  56 KB/s, 1500000 85.8 / 64.7 KB/s. DataFlash scales less and loses more
+  frames under contention at 1.5M. Left at 1500000. To revert: set the ESP
+  baud first or last as above; the Pixhawk side is `SERIAL2_BAUD` (921 or 460).
 
 ### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
 
