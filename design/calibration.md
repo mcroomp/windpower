@@ -384,9 +384,9 @@ See [linkhub.md](linkhub.md) for journal semantics and query examples.
 
 - RAWES diagnostic `NAMED_VALUE_FLOAT`s (`YFF_*`, `OL_*`, etc.),
 - `ATTITUDE_TARGET` and `PID_TUNING` when ArduPilot emits them (`PID_TUNING`
-  needs the axis enabled in `GCS_PID_MASK`, yaw = 4, plus a message-interval
-  request; `run` does not set either, see
-  [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md)),
+  needs the axis enabled in `GCS_PID_MASK`, which the hardware defaults set to
+  yaw only (4), plus a message-interval request that the shared observation loop
+  makes at 4 Hz; see [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md)),
 - actual and target attitude quaternions,
 - quaternion error metrics.
 

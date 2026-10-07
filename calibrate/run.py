@@ -694,6 +694,22 @@ def _safety_shutdown(session: LinkHubClient, *,
 # Shared observation loop engine
 # ---------------------------------------------------------------------------
 
+# Yaw rate-PID telemetry rate. ArduPilot emits PID_TUNING only for the axes
+# enabled in GCS_PID_MASK (hardware/rawes_hardware_defaults.parm sets yaw) and
+# only after a rate is requested; this is low enough to stay cheap on a radio.
+_PID_TUNING_HZ = 4.0
+
+
+def _request_pid_tuning(session: LinkHubClient, hz: float = _PID_TUNING_HZ) -> None:
+    session.send_message(CommandLong(
+        target_system=session._target_system,
+        target_component=session._target_component,
+        command=MavCmd.SET_MESSAGE_INTERVAL,
+        param1=float(PidTuning.MAVLINK_ID),
+        param2=1_000_000.0 / hz,
+    ))
+
+
 def _observation_loop(session: LinkHubClient, *,
                       duration_s: "float | None",
                       msg_types: list[str],
@@ -726,6 +742,7 @@ def _observation_loop(session: LinkHubClient, *,
     """
     for stream, hz in streams:
         session.request_data_stream(stream, hz)
+    _request_pid_tuning(session)
 
     if setup_hook is not None:
         setup_hook()

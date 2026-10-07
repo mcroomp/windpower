@@ -201,8 +201,15 @@ MAVLink messages from the autopilot. The Pixhawk side read
   gyro noise around 0 (+/-0.004), `P` equalled `ATC_RAT_YAW_P` (0.18) times the
   error, and `FF`, `I` and `D` were 0, so this only proves the path; the yaw
   loop needs an armed run with the motor to be informative. The mask was
-  restored to 0 and the message turned off (`0` Hz) afterwards; nothing else
-  in the repo sets `GCS_PID_MASK`.
+  restored to 0 and the message turned off (`0` Hz) afterwards.
+- Yaw PID telemetry is now a default: `hardware/rawes_hardware_defaults.parm`
+  sets `GCS_PID_MASK` to 4 (yaw only) and calibrate's shared observation loop
+  (`watch`, `run`) requests `PID_TUNING` at 4 Hz. `GCS_PID_MASK` was written to 4
+  on the vehicle (it persists; `config fix` would also write it). Check:
+  `calibrate watch attitude --duration 12` produced 54 `PID_TUNING` frames in
+  13.3 s (3.99 Hz), axis yaw only. The 4 Hz request is a runtime interval, so it
+  lasts until the Pixhawk reboots and is re-sent by the next calibrate
+  observation; it is not restored at the end of a run.
 
 ### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
 
