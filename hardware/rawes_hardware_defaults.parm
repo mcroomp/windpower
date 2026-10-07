@@ -56,3 +56,10 @@ SCR_ENABLE          1
 # SHUT_DOWN/GROUND_IDLE/SPOOLING_DOWN; runtime function remapping does not
 # rebuild SRV_Channels' live map.
 SERVO9_FUNCTION     36
+
+# Emit the yaw rate-PID terms (MAVLink PID_TUNING, axis yaw) so LinkHub's journal
+# records how the DDFP yaw loop behaves. The mask only enables the message;
+# calibrate requests it at 4 Hz, which is cheap on a telemetry radio (SITL logs
+# all axes instead, see tests/sitl/rawes_sitl_defaults.parm). Bitmask reference
+# in tests/sitl/copter-heli.parm.
+GCS_PID_MASK        4
