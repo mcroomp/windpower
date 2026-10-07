@@ -383,7 +383,10 @@ See [linkhub.md](linkhub.md) for journal semantics and query examples.
 `run` additionally records the passive-handoff and controller evidence it needs:
 
 - RAWES diagnostic `NAMED_VALUE_FLOAT`s (`YFF_*`, `OL_*`, etc.),
-- `ATTITUDE_TARGET` and `PID_TUNING` when ArduPilot emits them,
+- `ATTITUDE_TARGET` and `PID_TUNING` when ArduPilot emits them (`PID_TUNING`
+  needs the axis enabled in `GCS_PID_MASK`, yaw = 4, plus a message-interval
+  request; `run` does not set either, see
+  [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md)),
 - actual and target attitude quaternions,
 - quaternion error metrics.
 

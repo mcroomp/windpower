@@ -191,6 +191,18 @@ MAVLink messages from the autopilot. The Pixhawk side read
   runtime by something other than LinkHub and are not restored by a `null`
   (vehicle-default) rate; `null` turned the streams off until the next
   reboot. Restore them with explicit rates, or reboot.
+- Yaw rate-PID telemetry (`PID_TUNING`, axis `PID_TUNING_YAW`): ArduPilot only
+  sends it for axes enabled in `GCS_PID_MASK` (bit 2 = yaw, value 4; it was 0),
+  and then it must be requested with `PUT /v1/mavlink/message-rates`
+  (`{"PID_TUNING": 50}`). It arrived at the requested rate (50 Hz: 502 frames in
+  10 s, 200 Hz: 1994) for about 2.3 KB/s per 50 Hz of extra wire, with fields
+  `desired`, `achieved`, `FF`, `P`, `I`, `D`, `SRate`, `PDmod`. Disarmed on the
+  bench `desired` held at about 0.945 rad/s (a heading error), `achieved` was
+  gyro noise around 0 (+/-0.004), `P` equalled `ATC_RAT_YAW_P` (0.18) times the
+  error, and `FF`, `I` and `D` were 0, so this only proves the path; the yaw
+  loop needs an armed run with the motor to be informative. The mask was
+  restored to 0 and the message turned off (`0` Hz) afterwards; nothing else
+  in the repo sets `GCS_PID_MASK`.
 
 ### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
 
