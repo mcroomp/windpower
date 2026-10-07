@@ -166,6 +166,31 @@ MAVLink messages from the autopilot. The Pixhawk side read
   56 KB/s, 1500000 85.8 / 64.7 KB/s. DataFlash scales less and loses more
   frames under contention at 1.5M. Left at 1500000. To revert: set the ESP
   baud first or last as above; the Pixhawk side is `SERIAL2_BAUD` (921 or 460).
+- High telemetry rates at 1500000 baud (`PUT /v1/mavlink/message-rates`, measured
+  from the journal's frame sequence numbers, the sender's `time_boot_ms` and
+  LinkHub's arrival time). Starting streams are about 25 Hz for `ATTITUDE`,
+  `ATTITUDE_QUATERNION`, `ATTITUDE_TARGET` and `SERVO_OUTPUT_RAW` (4.9 KB/s on
+  the wire). Stepping the rates up: 50 Hz, then 3 messages at 100 Hz (15 KB/s),
+  then up to 200 Hz (33 KB/s), then up to 300 Hz for 30 s (64 KB/s, 43% of the
+  UART): 0 of 45,940 autopilot frames missing, 0 dropped frames, and the
+  autopilot emitted at a steady interval (no gaps). The vehicle rejects a
+  400 Hz request (`MAV_RESULT_DENIED`) and a 300 Hz request is delivered as
+  333 Hz because the interval rounds to 3 ms. One earlier 200 Hz run lost
+  0.7% in a single stall of about 150 ms; two later runs at the same rate lost
+  nothing. Arrival at LinkHub is bursty (the ESP batches): per-message delivery
+  delay above the best case was p99 about 32 ms at 333 Hz, 57 ms at 200 Hz and
+  140 ms at the 25 Hz default, so use `time_boot_ms`, not arrival time, for
+  timing. With a DataFlash download running at the same time the autopilot
+  itself cut the 300 Hz streams to about 56 Hz (hundreds of missed emissions,
+  gaps up to about 300 ms, 0.6% frames lost) while `LOG_DATA` took about
+  97 KB/s, so high-rate telemetry is only smooth when no bulk transfer is
+  running; the UART was at about 69% then, so this is the autopilot's own
+  scheduling, not the wire.
+- Gotcha: every `MAV2_*` stream parameter is 0 on this vehicle (4.7.1 names
+  them `MAVn_*`, not `SRn_*`), so the starting streams are requested at
+  runtime by something other than LinkHub and are not restored by a `null`
+  (vehicle-default) rate; `null` turned the streams off until the next
+  reboot. Restore them with explicit rates, or reboot.
 
 ### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
 

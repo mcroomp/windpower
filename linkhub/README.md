@@ -180,7 +180,12 @@ Routes come from `linkhub\src\http.rs`.
   to a MAVLink target, such as commands, version requests, and message requests.
 - `PUT /v1/mavlink/message-rates` accepts a JSON object mapping message names
   to numeric Hz values or `null`. The response reports `message`, `rate_hz`,
-  `interval_us`, and `after_cursor` for each configured entry.
+  `interval_us`, and `after_cursor` for each configured entry. `0` disables a
+  message; `null` asks for the vehicle's default interval, which comes from the
+  `MAVn_*` stream parameters and is "off" when those are 0, so it will not
+  bring back a stream that another client had requested at runtime. The
+  vehicle may refuse a rate (for example 400 Hz on ArduCopter 4.7.1 returns
+  `MAV_RESULT_DENIED` and the request fails with 400).
 - `GET /v1/mavlink/files` requires `path` and lists a directory. Downloads
   are transfers (below).
 - Parameter names are trimmed and uppercased, then must match
