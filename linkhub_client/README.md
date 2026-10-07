@@ -133,14 +133,20 @@ MAVLink command and parameter helpers:
 MAVFTP, DataFlash, and optional motor helpers:
 
 - `list_files(path)`
-- `download_file(remote_path, local_path, verify_crc=True)`
+- `download_file(remote_path, local_path, verify_crc=True, stall_timeout=15.0, progress=None)`
 - `upload_file(local_path, remote_path)`
 - `remove_file(path)`
 - `create_directory(path)`
 - `capabilities()`
 - `components()`
 - `list_logs(timeout=5.0)`
-- `download_log(log_id, local_path, timeout=1.0, max_retries=5)`
+- `download_log(log_id, local_path, timeout=2.0, max_retries=10, progress=None)`
+- `transfers()`, `transfer(id)`, `cancel_transfer(id)`
+
+`download_file` and `download_log` start a LinkHub transfer, poll it (calling
+`progress` with each status dict), write the verified content atomically, and
+cancel the transfer on any error or Ctrl-C. See the
+[transfer API](../linkhub/README.md#transfers).
 - `motor_status()`
 - `motor_set(speed_percent, direction, timeout_ms=2000)`
 - `motor_stop()`

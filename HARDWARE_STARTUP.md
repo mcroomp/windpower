@@ -73,6 +73,137 @@ Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
 
+### 2026-10-07 DroneBridge ESP32-C6 Wi-Fi telemetry link
+
+Plugged in an official DroneBridge for ESP32 board (HW v1.2, ESP32-C6, firmware
+v2.4.1, USB `VID:PID=303A:1001`, COM7, MAC `10:BD:A3:90:B4:9C`). It was already
+wired to the Pixhawk telemetry port: its settings showed MAVLink protocol, UART
+57600, GPIO TX 21 / RX 2 / RTS 22 / CTS 23, and its stats counted decoded
+MAVLink messages from the autopilot. The Pixhawk side read
+`SERIAL1_PROTOCOL=2, SERIAL1_BAUD=57` and the same for `SERIAL2`.
+
+- The factory access point is `192.168.2.1`, which collides with the bench LAN
+  (`192.168.2.0/24`, router `192.168.2.1`). The board's Gateway IP was changed to
+  `192.168.4.1` once, from the web UI over a phone. The SSID stays
+  `DroneBridge for ESP32` (default password `dronebridge`).
+- The PC joins the access point with a manual-connect Wi-Fi profile; the ESP's
+  web UI/API is `http://192.168.4.1` and its MAVLink is TCP 5760 / UDP 14550.
+  LinkHub connects with `--connection tcp:192.168.4.1:5760` (serial discovery does
+  not apply). Windows needs Location services enabled for desktop apps before
+  `netsh wlan` can scan.
+- The ESP injects its own HEARTBEAT (component 68, `MAV_TYPE_ONBOARD_CONTROLLER`,
+  autopilot INVALID) and RADIO_STATUS. LinkHub used to let any non-GCS heartbeat
+  retarget the link and overwrite mode/armed state, so status flipped to
+  `1/68`, STABILIZE and ACTIVE. Fixed: only autopilot heartbeats update link
+  status, and the Python client and UI leave non-autopilot heartbeats out of
+  vehicle state.
+- Read-only verification over Wi-Fi: status ready with target `1/1`, ACRO,
+  disarmed; capabilities, `MAV_SYSID` and `SERIAL*` parameter reads; about
+  38 kbit/s received with no dropped frames. Station RSSI was weak (-89 dBm), so
+  expect range limits; no arming, parameter write or Lua upload was done over
+  this link.
+- The ESP is on the Pixhawk's `SERIAL2` (TELEM2). At 57600 baud the UART was
+  nearly saturated by the ~38 kbit/s stream, so both ends were raised to 460800
+  (later raised again to 921600 and then 1500000, see below):
+  `SERIAL2_BAUD=460` on the Pixhawk and `baud=460800` in the ESP settings
+  (`POST /api/settings` with the form's fields, which saves and reboots the
+  board). Gotchas: ArduPilot applies a `SERIALn_BAUD` change only after a reboot
+  (the write is accepted and the old speed keeps running), and the ESP is
+  powered from the Pixhawk telemetry connector, so rebooting the Pixhawk also
+  reboots the ESP and drops its Wi-Fi; rejoin with `netsh wlan connect`.
+  Order used: write the Pixhawk parameter, reboot the Pixhawk through LinkHub,
+  then set the ESP baud over Wi-Fi (the web UI works independently of the UART,
+  so the link is always recoverable). After this the link recovered with no
+  dropped frames, 1078 parameters downloaded in about 7 s, and the vehicle was
+  disarmed in ACRO with `RAWES_MODE=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0` and
+  `SERVO9_FUNCTION=36`. `SERIAL1_BAUD` stayed 57.
+- File and log downloads over this link (460800 baud, RSSI about -90 dBm).
+  First attempt, with the old lock-step MAVFTP read and whole-suffix DataFlash
+  re-request: log 17 (1,495,040 B) took 155 s over DataFlash with about 37%
+  duplicate packets, and MAVFTP ran at about 2.4 KB/s and then failed with
+  `NAK Fail` because the previous download never sent `TerminateSession` and
+  ArduPilot refuses to open a new file while a session was active in the last
+  3 s (`GCS_FTP.cpp`). Under load about 1.4% of autopilot frames were lost, in
+  bursts, and the ESP's own frames about 7%. The ESP also injects its own
+  heartbeat (component 68, autopilot INVALID), which LinkHub now ignores for
+  target, mode and armed state.
+- After moving downloads to transfer jobs (`BurstReadFile`, pipelined hole
+  repair, selective DataFlash re-request, `TerminateSession` always sent; see
+  [linkhub/README.md](linkhub/README.md#transfers)): MAVFTP 1,495,040 B in
+  39 s (about 38 KB/s, close to the 46 KB/s wire limit) with CRC verified; the
+  DataFlash download of the same log in 44 s (34 KB/s); the two files were
+  byte-identical (SHA-256). Cancelling a transfer mid-way and starting a new
+  one immediately works. With FTP and DataFlash running at once both files
+  were still identical (FTP 41 s, log 82 s, i.e. about 36 KB/s aggregate) and
+  the engines repaired 5 and 16 gaps with 0 duplicate packets. The vehicle
+  stayed disarmed.
+- Wire rate at 460800: while downloading, LinkHub's `received_bytes` averaged
+  about 43.4 KB/s against the 46.08 KB/s UART ceiling (460800 / 10 bits), so
+  that link was UART-bound. Idle telemetry was about 5 KB/s.
+- Raised to **921600** (`SERIAL2_BAUD=921`, ESP `baud=921600`, same order as
+  above; the ESP's `POST /api/settings` takes the full settings JSON from
+  `GET /api/settings` with `baud` changed). Link recovered with 0 dropped
+  frames, vehicle disarmed in ACRO, safe-off parameters unchanged. Same log 17,
+  byte-identical every time: MAVFTP 25 s (59.5 KB/s, was 38), DataFlash 27 s
+  (56.1 KB/s, was 34), both at once FTP 29 s and log 59 s (was 41 s and 82 s;
+  13-17 timeouts each and 14-49 gaps, all repaired, 0 duplicates). Wire rate
+  averaged about 71-73 KB/s, only about 78% of the new 92 KB/s UART ceiling, so
+  the UART is no longer the bottleneck (Wi-Fi at about -90 dBm and the ESP are
+  the likely limit). Not tried: 1500000 baud, or RTS/CTS flow control (the ESP
+  settings expose `gpio_rts`/`gpio_cts`; the Pixhawk side is `BRD_SER2_RTSCTS`,
+  currently 2 = auto).
+  I expected ArduPilot's one-`LOG_DATA`-per-400-Hz-tick limit to cap DataFlash
+  near 36 KB/s on a link without flow control, but it reached 56 KB/s, so that
+  limit does not apply to this build or link.
+- Raised again to **1500000** (`SERIAL2_BAUD=1500`, ESP `baud=1500000`), same
+  procedure; the ESP took about 40 s to rejoin Wi-Fi after its reboot. Link
+  recovered with 0 dropped frames and the vehicle stayed disarmed in ACRO with
+  safe-off parameters unchanged. Same log 17, byte-identical every time: MAVFTP
+  17 s (85.8 KB/s), DataFlash 23 s (64.7 KB/s), both at once FTP 22 s and log
+  38 s (the log needed 137 gap repairs; 0 duplicates). MAVFTP wire rate averaged
+  about 109 KB/s of the 150 KB/s UART ceiling (73%). Speed by baud for the
+  same log, MAVFTP / DataFlash alone: 460800 38 / 34 KB/s, 921600 59.5 /
+  56 KB/s, 1500000 85.8 / 64.7 KB/s. DataFlash scales less and loses more
+  frames under contention at 1.5M. Left at 1500000. To revert: set the ESP
+  baud first or last as above; the Pixhawk side is `SERIAL2_BAUD` (921 or 460).
+- High telemetry rates at 1500000 baud (`PUT /v1/mavlink/message-rates`, measured
+  from the journal's frame sequence numbers, the sender's `time_boot_ms` and
+  LinkHub's arrival time). Starting streams are about 25 Hz for `ATTITUDE`,
+  `ATTITUDE_QUATERNION`, `ATTITUDE_TARGET` and `SERVO_OUTPUT_RAW` (4.9 KB/s on
+  the wire). Stepping the rates up: 50 Hz, then 3 messages at 100 Hz (15 KB/s),
+  then up to 200 Hz (33 KB/s), then up to 300 Hz for 30 s (64 KB/s, 43% of the
+  UART): 0 of 45,940 autopilot frames missing, 0 dropped frames, and the
+  autopilot emitted at a steady interval (no gaps). The vehicle rejects a
+  400 Hz request (`MAV_RESULT_DENIED`) and a 300 Hz request is delivered as
+  333 Hz because the interval rounds to 3 ms. One earlier 200 Hz run lost
+  0.7% in a single stall of about 150 ms; two later runs at the same rate lost
+  nothing. Arrival at LinkHub is bursty (the ESP batches): per-message delivery
+  delay above the best case was p99 about 32 ms at 333 Hz, 57 ms at 200 Hz and
+  140 ms at the 25 Hz default, so use `time_boot_ms`, not arrival time, for
+  timing. With a DataFlash download running at the same time the autopilot
+  itself cut the 300 Hz streams to about 56 Hz (hundreds of missed emissions,
+  gaps up to about 300 ms, 0.6% frames lost) while `LOG_DATA` took about
+  97 KB/s, so high-rate telemetry is only smooth when no bulk transfer is
+  running; the UART was at about 69% then, so this is the autopilot's own
+  scheduling, not the wire.
+- Gotcha: every `MAV2_*` stream parameter is 0 on this vehicle (4.7.1 names
+  them `MAVn_*`, not `SRn_*`), so the starting streams are requested at
+  runtime by something other than LinkHub and are not restored by a `null`
+  (vehicle-default) rate; `null` turned the streams off until the next
+  reboot. Restore them with explicit rates, or reboot.
+- Yaw rate-PID telemetry (`PID_TUNING`, axis `PID_TUNING_YAW`): ArduPilot only
+  sends it for axes enabled in `GCS_PID_MASK` (bit 2 = yaw, value 4; it was 0),
+  and then it must be requested with `PUT /v1/mavlink/message-rates`
+  (`{"PID_TUNING": 50}`). It arrived at the requested rate (50 Hz: 502 frames in
+  10 s, 200 Hz: 1994) for about 2.3 KB/s per 50 Hz of extra wire, with fields
+  `desired`, `achieved`, `FF`, `P`, `I`, `D`, `SRate`, `PDmod`. Disarmed on the
+  bench `desired` held at about 0.945 rad/s (a heading error), `achieved` was
+  gyro noise around 0 (+/-0.004), `P` equalled `ATC_RAT_YAW_P` (0.18) times the
+  error, and `FF`, `I` and `D` were 0, so this only proves the path; the yaw
+  loop needs an armed run with the motor to be informative. The mask was
+  restored to 0 and the message turned off (`0` Hz) afterwards; nothing else
+  in the repo sets `GCS_PID_MASK`.
+
 ### 2026-10-06 Typed-MAVLink LinkHub verification on bench hardware
 
 Pixhawk native USB (`VID:PID=3162:0053`, serial `160031001751343131363538`,

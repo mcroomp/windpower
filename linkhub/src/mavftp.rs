@@ -16,6 +16,7 @@ pub enum Opcode {
     RemoveFile = 8,
     CreateDirectory = 9,
     CalculateFileCrc32 = 14,
+    BurstReadFile = 15,
     Ack = 128,
     Nak = 129,
 }
@@ -33,10 +34,16 @@ impl Opcode {
             8 => Ok(Self::RemoveFile),
             9 => Ok(Self::CreateDirectory),
             14 => Ok(Self::CalculateFileCrc32),
+            15 => Ok(Self::BurstReadFile),
             128 => Ok(Self::Ack),
             129 => Ok(Self::Nak),
             _ => Err(MavFtpError::UnknownOpcode(value)),
         }
+    }
+
+    /// Reads carry their chunk size in `size` while their `data` stays empty.
+    fn is_read_request(self) -> bool {
+        matches!(self, Self::ReadFile | Self::BurstReadFile)
     }
 }
 
@@ -67,7 +74,7 @@ impl Packet {
             sequence,
             session,
             opcode,
-            size: if opcode == Opcode::ReadFile && data.is_empty() {
+            size: if opcode.is_read_request() && data.is_empty() {
                 DATA_LEN as u8
             } else {
                 data.len() as u8
@@ -80,7 +87,7 @@ impl Packet {
     }
 
     pub fn encode(&self) -> Result<[u8; PAYLOAD_LEN], MavFtpError> {
-        let read_request = self.opcode == Opcode::ReadFile && self.data.is_empty();
+        let read_request = self.opcode.is_read_request() && self.data.is_empty();
         if (!read_request && self.data.len() != usize::from(self.size))
             || self.data.len() > DATA_LEN
         {
@@ -172,7 +179,13 @@ pub struct DirectoryEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationResult {
     Files(Vec<DirectoryEntry>),
-    Download { content: Vec<u8>, crc32: u32 },
+    /// A file opened for reading: its session and size in bytes.
+    Opened {
+        session: u8,
+        size: u32,
+    },
+    /// A session was terminated (a refused close is not an error).
+    Closed,
     Uploaded(usize),
     Removed,
     DirectoryCreated(bool),
@@ -186,18 +199,18 @@ enum State {
         entries: Vec<DirectoryEntry>,
         offset: u32,
     },
-    DownloadOpen {
+    /// Clears sessions a cancelled or failed earlier transfer left open.
+    OpenReset {
         path: Vec<u8>,
-        verify_crc: bool,
     },
-    DownloadRead {
+    Open {
         path: Vec<u8>,
+    },
+    Terminate {
         session: u8,
-        content: Vec<u8>,
-        expected_size: Option<usize>,
-        verify_crc: bool,
     },
-    DownloadCrc {
+    UploadReset {
+        path: Vec<u8>,
         content: Vec<u8>,
     },
     UploadCreate {
@@ -245,20 +258,27 @@ impl Operation {
         )
     }
 
-    pub fn download(sequence: u16, path: &str, verify_crc: bool) -> Self {
+    /// Opens `path` for reading, first clearing sessions a cancelled earlier
+    /// transfer may have left open. The bulk read is done by
+    /// [`FtpReader`](crate::transfer::FtpReader), not by this operation.
+    pub fn open_read(sequence: u16, path: &str) -> Self {
         Self::new(
             sequence,
-            State::DownloadOpen {
+            State::OpenReset {
                 path: path.as_bytes().to_vec(),
-                verify_crc,
             },
         )
+    }
+
+    /// Releases the file `session` holds open.
+    pub fn terminate(sequence: u16, session: u8) -> Self {
+        Self::new(sequence, State::Terminate { session })
     }
 
     pub fn upload(sequence: u16, path: &str, content: Vec<u8>) -> Self {
         Self::new(
             sequence,
-            State::UploadCreate {
+            State::UploadReset {
                 path: path.as_bytes().to_vec(),
                 content,
             },
@@ -321,17 +341,11 @@ impl Operation {
         }
         let (session, opcode, offset, data) = match &self.state {
             State::List { path, offset, .. } => (0, Opcode::ListDirectory, *offset, path.clone()),
-            State::DownloadOpen { path, .. } => (0, Opcode::OpenFileReadOnly, 0, path.clone()),
-            State::DownloadRead {
-                session, content, ..
-            } => {
-                let offset = u32::try_from(content.len())
-                    .map_err(|_| MavFtpError::MalformedReply("file is larger than 4 GiB"))?;
-                (*session, Opcode::ReadFile, offset, Vec::new())
+            State::OpenReset { .. } | State::UploadReset { .. } => {
+                (0, Opcode::ResetSessions, 0, Vec::new())
             }
-            State::DownloadCrc { .. } => {
-                return Err(MavFtpError::MalformedReply("CRC path was not retained"));
-            }
+            State::Open { path } => (0, Opcode::OpenFileReadOnly, 0, path.clone()),
+            State::Terminate { session } => (*session, Opcode::TerminateSession, 0, Vec::new()),
             State::UploadCreate { path, .. } => (0, Opcode::CreateFile, 0, path.clone()),
             State::UploadWrite {
                 session,
@@ -416,82 +430,24 @@ impl Operation {
                     }
                 }
             }
-            State::DownloadOpen { path, verify_crc } => {
+            State::OpenReset { path } => {
+                // Advisory: firmware without ResetSessions NAKs and is still usable.
+                State::Open { path }
+            }
+            State::UploadReset { path, content } => State::UploadCreate { path, content },
+            State::Open { .. } => {
                 reject_nak(nak)?;
-                let expected_size = if reply.data.len() >= 4 {
-                    Some(u32::from_le_bytes(reply.data[..4].try_into().expect("checked")) as usize)
-                } else {
-                    None
-                };
-                State::DownloadRead {
-                    path,
+                let size = reply
+                    .data
+                    .get(..4)
+                    .ok_or(MavFtpError::MalformedReply("open reply has no file size"))?;
+                State::Complete(OperationResult::Opened {
                     session: reply.session,
-                    content: Vec::with_capacity(expected_size.unwrap_or(0)),
-                    expected_size,
-                    verify_crc,
-                }
-            }
-            State::DownloadRead {
-                path,
-                session,
-                mut content,
-                expected_size,
-                verify_crc,
-            } => {
-                if let Some((code, system_error)) = nak {
-                    if code != NakCode::EndOfFile as u8 {
-                        return Err(MavFtpError::Nak { code, system_error });
-                    }
-                } else {
-                    if reply.offset != content.len() as u32 {
-                        return Err(MavFtpError::MalformedReply("non-contiguous read reply"));
-                    }
-                    content.extend_from_slice(&reply.data);
-                }
-                let done = nak.is_some()
-                    || expected_size.is_some_and(|size| content.len() >= size)
-                    || reply.data.len() < DATA_LEN;
-                if done {
-                    if expected_size.is_some_and(|size| size != content.len()) {
-                        return Err(MavFtpError::MalformedReply("download size mismatch"));
-                    }
-                    if verify_crc {
-                        let packet = Packet::request(
-                            self.next_sequence,
-                            0,
-                            Opcode::CalculateFileCrc32,
-                            0,
-                            &path,
-                        )?;
-                        self.next_sequence = self.next_sequence.wrapping_add(1);
-                        self.outstanding = Some(packet);
-                        State::DownloadCrc { content }
-                    } else {
-                        let crc32 = mavftp_crc32(&content);
-                        State::Complete(OperationResult::Download { content, crc32 })
-                    }
-                } else {
-                    State::DownloadRead {
-                        path,
-                        session,
-                        content,
-                        expected_size,
-                        verify_crc,
-                    }
-                }
-            }
-            State::DownloadCrc { content } => {
-                reject_nak(nak)?;
-                let remote = read_crc(&reply.data)?;
-                let local = mavftp_crc32(&content);
-                if remote != local {
-                    return Err(MavFtpError::CrcMismatch { remote, local });
-                }
-                State::Complete(OperationResult::Download {
-                    content,
-                    crc32: local,
+                    size: u32::from_le_bytes(size.try_into().expect("checked")),
                 })
             }
+            // The data is already complete; a refused close is not a failure.
+            State::Terminate { .. } => State::Complete(OperationResult::Closed),
             State::UploadCreate { content, .. } => {
                 reject_nak(nak)?;
                 State::UploadWrite {
@@ -691,48 +647,81 @@ mod tests {
     }
 
     #[test]
-    fn download_reads_chunks_and_verifies_crc() {
-        let content: Vec<_> = (0..300).map(|value| value as u8).collect();
-        let mut operation = Operation::download(1, "/file", true);
-        let open = operation.next_request().unwrap().unwrap();
+    fn open_read_clears_stale_sessions_then_returns_the_session_and_size() {
+        let mut operation = Operation::open_read(1, "/file");
+        let reset = operation.next_request().unwrap().unwrap();
+        assert_eq!(reset.opcode, Opcode::ResetSessions);
+        // Firmware without ResetSessions refuses it; the open still proceeds.
         operation
             .handle_reply(reply(
-                &open,
-                Opcode::Ack,
-                &(content.len() as u32).to_le_bytes(),
+                &reset,
+                Opcode::Nak,
+                &[NakCode::UnknownCommand as u8],
                 0,
             ))
             .unwrap();
-        let read = operation.next_request().unwrap().unwrap();
-        assert_eq!(read.size, DATA_LEN as u8);
+        let open = operation.next_request().unwrap().unwrap();
+        assert_eq!(open.opcode, Opcode::OpenFileReadOnly);
         operation
-            .handle_reply(reply(&read, Opcode::Ack, &content[..DATA_LEN], 0))
+            .handle_reply(reply(&open, Opcode::Ack, &300_u32.to_le_bytes(), 0))
             .unwrap();
-        let read = operation.next_request().unwrap().unwrap();
+        assert_eq!(
+            operation.result(),
+            Some(&OperationResult::Opened {
+                session: 1,
+                size: 300
+            })
+        );
+    }
+
+    #[test]
+    fn open_read_fails_when_the_file_cannot_be_opened() {
+        let mut operation = Operation::open_read(1, "/missing");
+        let reset = operation.next_request().unwrap().unwrap();
+        operation
+            .handle_reply(reply(&reset, Opcode::Ack, &[], 0))
+            .unwrap();
+        let open = operation.next_request().unwrap().unwrap();
+        let error = operation
+            .handle_reply(reply(&open, Opcode::Nak, &[NakCode::FileNotFound as u8], 0))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MavFtpError::Nak {
+                code: 10,
+                system_error: None
+            }
+        ));
+    }
+
+    #[test]
+    fn terminate_names_the_session_and_tolerates_a_refusal() {
+        let mut operation = Operation::terminate(5, 9);
+        let request = operation.next_request().unwrap().unwrap();
+        assert_eq!(request.opcode, Opcode::TerminateSession);
+        assert_eq!(request.session, 9);
+        operation
+            .handle_reply(reply(&request, Opcode::Nak, &[NakCode::Fail as u8], 0))
+            .unwrap();
+        assert_eq!(operation.result(), Some(&OperationResult::Closed));
+    }
+
+    #[test]
+    fn crc_request_returns_the_remote_checksum() {
+        let mut operation = Operation::crc32(7, "/file");
+        let request = operation.next_request().unwrap().unwrap();
+        assert_eq!(request.opcode, Opcode::CalculateFileCrc32);
         operation
             .handle_reply(reply(
-                &read,
+                &request,
                 Opcode::Ack,
-                &content[DATA_LEN..],
-                DATA_LEN as u32,
-            ))
-            .unwrap();
-        let crc = operation.next_request().unwrap().unwrap();
-        assert_eq!(crc.opcode, Opcode::CalculateFileCrc32);
-        operation
-            .handle_reply(reply(
-                &crc,
-                Opcode::Ack,
-                &mavftp_crc32(&content).to_le_bytes(),
+                &0xdead_beef_u32.to_le_bytes(),
                 0,
             ))
             .unwrap();
         assert_eq!(
             operation.result(),
-            Some(&OperationResult::Download {
-                content: content.clone(),
-                crc32: mavftp_crc32(&content),
-            })
+            Some(&OperationResult::Crc32(0xdead_beef))
         );
     }
 

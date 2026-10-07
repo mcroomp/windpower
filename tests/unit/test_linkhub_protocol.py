@@ -202,6 +202,51 @@ def test_client_rejects_a_refused_arm_command(monkeypatch) -> None:
         client.arm()
 
 
+def test_read_messages_leaves_out_heartbeats_from_non_autopilot_components(monkeypatch) -> None:
+    client = LinkHubClient()
+
+    def heartbeat(component_id: int, autopilot: str, cursor: str) -> dict:
+        return {
+            "received_time": "2026-01-01T00:00:00Z",
+            "received_time_ns": 1,
+            "direction": "rx",
+            "system_id": 1,
+            "component_id": component_id,
+            "message": "HEARTBEAT",
+            "fields": {
+                "mavtype": {"type": "MAV_TYPE_HELICOPTER"},
+                "autopilot": {"type": autopilot},
+                "base_mode": "MAV_MODE_FLAG_SAFETY_ARMED",
+                "custom_mode": 1,
+                "system_status": {"type": "MAV_STATE_ACTIVE"},
+                "mavlink_version": 3,
+            },
+            "cursor": cursor,
+            "sim_clock": _CLOCK_DICT,
+        }
+
+    records = [
+        heartbeat(1, "MAV_AUTOPILOT_ARDUPILOTMEGA", "v1:1"),
+        heartbeat(68, "MAV_AUTOPILOT_INVALID", "v1:2"),
+    ]
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "records": records,
+            "next_cursor": "v1:3",
+            "next_clock": _CLOCK_DICT,
+        },
+    )
+
+    batch = client.read_messages("v1:0", "HEARTBEAT", direction="rx")
+
+    assert [message.autopilot for message in batch.messages] == [
+        MavAutopilot.ARDUPILOTMEGA
+    ]
+    assert batch.next_cursor == "v1:3"
+
+
 def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
     client = LinkHubClient()
     record = {

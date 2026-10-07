@@ -6,7 +6,7 @@ import {
   MavState,
   NamedValueFloat,
 } from "./generated/protocol";
-import { enumIs, isArmed } from "./mav";
+import { enumIs, isArmed, isVehicleHeartbeat } from "./mav";
 import type { TelemetryStore } from "./telemetry";
 import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
 import type { MessageRecord } from "./types";
@@ -386,7 +386,7 @@ export class PassiveController {
       if (record.direction !== "rx") {
         return;
       }
-      if (record.message === "HEARTBEAT") {
+      if (record.message === "HEARTBEAT" && isVehicleHeartbeat(record.fields)) {
         active = enumIs(record.fields.system_status, MavState.ACTIVE);
         if (!active) {
           quietSince = null;

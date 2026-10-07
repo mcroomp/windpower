@@ -1,4 +1,4 @@
-import { MavModeFlag, type MavEnum } from "./generated/protocol";
+import { MavAutopilot, MavModeFlag, type MavEnum } from "./generated/protocol";
 import type { JsonObject, LinkHubStatus } from "./types";
 
 const FLAG_SEPARATOR = " | ";
@@ -38,13 +38,23 @@ export function isArmed(status: Pick<LinkHubStatus, "base_mode"> | null | undefi
     && hasFlag(status.base_mode, MavModeFlag.SAFETY_ARMED);
 }
 
+/**
+ * True for a heartbeat that describes the vehicle. Radios (a DroneBridge ESP32),
+ * GCSs and companion computers heartbeat with autopilot INVALID and would
+ * otherwise overwrite the vehicle's mode and armed state.
+ */
+export function isVehicleHeartbeat(fields: JsonObject): boolean {
+  return !enumIs(fields.autopilot, MavAutopilot.INVALID);
+}
+
 /** Mode fields of a HEARTBEAT record, or null when the record is malformed. */
 export function heartbeatState(
   fields: JsonObject,
 ): Pick<LinkHubStatus, "base_mode" | "custom_mode" | "system_status"> | null {
   const { base_mode: baseMode, custom_mode: customMode, system_status: systemStatus } = fields;
   if (
-    typeof baseMode !== "string"
+    !isVehicleHeartbeat(fields)
+    || typeof baseMode !== "string"
     || typeof customMode !== "number"
     || enumName(systemStatus) === null
   ) {
