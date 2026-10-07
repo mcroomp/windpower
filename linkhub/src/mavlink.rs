@@ -963,8 +963,13 @@ async fn archive_received(
             .entry(message_name)
             .or_default() += frame_bytes;
         status.last_received_ns = Some(now);
+        // Only an autopilot's heartbeat describes the vehicle. Other components
+        // (a telemetry radio such as DroneBridge, a gimbal, a companion computer)
+        // heartbeat with autopilot INVALID and must not retarget the link or
+        // overwrite its mode and armed state.
         if system_id != config.source_system
             && let Some(heartbeat) = &heartbeat
+            && heartbeat.autopilot != MavAutopilot::MAV_AUTOPILOT_INVALID
         {
             status.target_system = system_id;
             status.target_component = component_id;
@@ -1105,6 +1110,19 @@ pub(crate) fn heartbeat_message() -> MavMessage {
     })
 }
 
+/// A heartbeat as the vehicle's autopilot sends it, for tests that play the peer.
+#[cfg(test)]
+pub(crate) fn autopilot_heartbeat_message() -> MavMessage {
+    MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+        custom_mode: 0,
+        mavtype: MavType::MAV_TYPE_HELICOPTER,
+        autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+        base_mode: MavModeFlag::empty(),
+        system_status: MavState::MAV_STATE_STANDBY,
+        mavlink_version: 3,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,7 +1223,7 @@ mod tests {
         let peer = tokio::spawn(async move {
             let (mut socket, _) = server.accept().await.expect("accept");
             socket
-                .write_all(&heartbeat(1, 1, 1))
+                .write_all(&autopilot_heartbeat(1, 1, 1))
                 .await
                 .expect("heartbeat");
             let mut buffer = [0; 21];
@@ -1268,7 +1286,7 @@ mod tests {
         let peer = tokio::spawn(async move {
             let (mut socket, _) = server.accept().await.expect("accept");
             // A HEARTBEAT whose MAV_TYPE byte is outside the dialect, with a valid CRC.
-            let mut invalid = heartbeat(1, 1, 1);
+            let mut invalid = autopilot_heartbeat(1, 1, 1);
             invalid[14] = 250;
             let crc = linkhub_dialect::calculate_crc(&invalid[1..19], 50);
             invalid[19..21].copy_from_slice(&crc.to_le_bytes());
@@ -1305,9 +1323,71 @@ mod tests {
         journal_task.await.expect("journal");
     }
 
+    #[tokio::test]
+    async fn non_autopilot_heartbeats_do_not_retarget_the_link() {
+        let server = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = server.local_addr().expect("address");
+        let (disconnect, disconnected) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept");
+            // The autopilot, then a telemetry radio (component 68) that injects its own
+            // heartbeat with autopilot INVALID, as DroneBridge does.
+            socket
+                .write_all(&autopilot_heartbeat(1, 1, 1))
+                .await
+                .expect("autopilot heartbeat");
+            socket
+                .write_all(&heartbeat(2, 1, 68))
+                .await
+                .expect("radio heartbeat");
+            disconnected.await.expect("disconnect signal");
+        });
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, journal_task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let (link, link_task) = start_link(MavlinkLinkConfig::sitl(address), journal.clone());
+        let mut status_rx = link.subscribe_status();
+        time::timeout(Duration::from_secs(3), async {
+            while link.components().len() < 2 {
+                status_rx.changed().await.expect("status");
+            }
+        })
+        .await
+        .expect("both components seen");
+        let status = link.status();
+        assert_eq!(
+            (status.target_system, status.target_component),
+            (1, 1),
+            "the radio heartbeat must not retarget the link"
+        );
+        assert_eq!(
+            status.system_status,
+            MavState::MAV_STATE_STANDBY,
+            "the radio heartbeat must not overwrite the vehicle state"
+        );
+        disconnect.send(()).expect("disconnect");
+        peer.await.expect("peer");
+        link_task.abort();
+        journal.shutdown().await.expect("shutdown");
+        journal_task.await.expect("journal");
+    }
+
     fn heartbeat(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
         serialize_message(
             &heartbeat_message(),
+            MavHeader {
+                sequence,
+                system_id,
+                component_id,
+            },
+        )
+    }
+
+    fn autopilot_heartbeat(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
+        serialize_message(
+            &autopilot_heartbeat_message(),
             MavHeader {
                 sequence,
                 system_id,
@@ -1378,7 +1458,7 @@ mod tests {
         let peer = tokio::spawn(async move {
             let (mut socket, _) = server.accept().await.expect("accept link");
             socket
-                .write_all(&heartbeat(1, 1, 1))
+                .write_all(&autopilot_heartbeat(1, 1, 1))
                 .await
                 .expect("send vehicle heartbeat");
             let mut received = [0_u8; 21];
@@ -1449,7 +1529,7 @@ mod tests {
         assert_eq!(connected_status.target_system, 1);
         assert_eq!(connected_status.base_mode, MavModeFlag::empty());
         assert_eq!(connected_status.custom_mode, 0);
-        assert_eq!(connected_status.system_status, MavState::MAV_STATE_ACTIVE);
+        assert_eq!(connected_status.system_status, MavState::MAV_STATE_STANDBY);
 
         link_task.abort();
         journal.shutdown().await.expect("shutdown");
@@ -1465,7 +1545,7 @@ mod tests {
         let peer = tokio::spawn(async move {
             let (mut socket, _) = server.accept().await.expect("accept link");
             socket
-                .write_all(&heartbeat(1, 1, 1))
+                .write_all(&autopilot_heartbeat(1, 1, 1))
                 .await
                 .expect("send vehicle heartbeat");
             let mut received = [0_u8; 21];

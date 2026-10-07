@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -469,7 +470,11 @@ class LinkHubClient:
             expected_generation=expected_generation,
         )
         return MessageBatch(
-            messages=tuple(_decode_record(record) for record in records),
+            messages=tuple(
+                _decode_record(record)
+                for record in records
+                if not _is_non_autopilot_heartbeat(record)
+            ),
             next_cursor=next_cursor,
             next_clock=next_clock,
         )
@@ -505,21 +510,89 @@ class LinkHubClient:
         local_path: str | Path,
         *,
         verify_crc: bool = True,
+        stall_timeout: float = 15.0,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> int:
-        query = urllib.parse.urlencode({
-            "path": remote_path,
-            "download": "true",
-            "verify_crc": str(verify_crc).lower(),
-        })
-        request = urllib.request.Request(
-            f"{self._base_url}/v1/mavlink/files?{query}"
+        """Download over MAVFTP as a background transfer; returns the byte count.
+
+        ``stall_timeout`` is how long LinkHub tolerates no forward progress.
+        ``progress`` receives each polled transfer status.
+        """
+        path = self._run_transfer(
+            {
+                "kind": "ftp_download",
+                "path": remote_path,
+                "verify_crc": verify_crc,
+                "stall_timeout_ms": round(stall_timeout * 1000),
+            },
+            local_path,
+            progress,
         )
-        with urllib.request.urlopen(request, timeout=60.0) as response:
-            content = response.read()
-        destination = Path(local_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-        return len(content)
+        return path.stat().st_size
+
+    def transfers(self) -> list[dict[str, Any]]:
+        """Recent transfers with progress, rate and loss statistics."""
+        return list(
+            self._request_json("GET", "/v1/mavlink/transfers", timeout=5.0)["transfers"]
+        )
+
+    def transfer(self, transfer_id: int) -> dict[str, Any]:
+        return self._request_json(
+            "GET", f"/v1/mavlink/transfers/{transfer_id}", timeout=5.0
+        )
+
+    def cancel_transfer(self, transfer_id: int) -> None:
+        self._request_json(
+            "DELETE", f"/v1/mavlink/transfers/{transfer_id}", timeout=5.0
+        )
+
+    def _run_transfer(
+        self,
+        request: dict[str, Any],
+        destination: str | Path,
+        progress: Callable[[dict[str, Any]], None] | None,
+        *,
+        poll_interval: float = 0.25,
+    ) -> Path:
+        """Start a transfer, poll until it finishes, then fetch the content.
+
+        The content is only released by LinkHub once it is complete and
+        verified, so a partial file never reaches ``destination``. Any
+        failure here, including Ctrl-C, cancels the transfer.
+        """
+        destination_path = Path(destination)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        info = self._request_json(
+            "POST", "/v1/mavlink/transfers", request, timeout=10.0
+        )
+        transfer_id = int(info["id"])
+        try:
+            while info["state"] in ("queued", "running"):
+                if progress is not None:
+                    progress(info)
+                time.sleep(poll_interval)
+                info = self.transfer(transfer_id)
+            if progress is not None:
+                progress(info)
+            if info["state"] != "complete":
+                raise LinkHubError(
+                    f"transfer {transfer_id} {info['state']}: "
+                    f"{info.get('error') or 'no detail'}"
+                )
+            content = self._request_bytes(
+                "GET", f"/v1/mavlink/transfers/{transfer_id}/content", timeout=60.0
+            )
+        except BaseException:
+            try:
+                self.cancel_transfer(transfer_id)
+            except LinkHubError:
+                pass
+            raise
+        partial_path = destination_path.with_name(destination_path.name + ".part")
+        partial_path.write_bytes(content)
+        partial_path.replace(destination_path)
+        self.cancel_transfer(transfer_id)
+        return destination_path
 
     def upload_file(self, local_path: str | Path, remote_path: str) -> int:
         content = Path(local_path).read_bytes()
@@ -562,39 +635,24 @@ class LinkHubClient:
         log_id: int,
         destination: str | Path,
         *,
-        timeout: float = 1.0,
-        max_retries: int = 5,
+        timeout: float = 2.0,
+        max_retries: int = 10,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> Path:
-        destination_path = Path(destination)
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        partial_path = destination_path.with_name(destination_path.name + ".part")
-        query = urllib.parse.urlencode({
-            "timeout_ms": round(timeout * 1000),
-            "max_retries": max_retries,
-        })
-        request = urllib.request.Request(
-            f"{self._base_url}/v1/mavlink/logs/{log_id}?{query}"
+        """Download a DataFlash log as a background transfer.
+
+        ``timeout`` is the silence after which LinkHub repeats a request.
+        """
+        return self._run_transfer(
+            {
+                "kind": "log_download",
+                "log_id": log_id,
+                "packet_timeout_ms": round(timeout * 1000),
+                "max_retries": max_retries,
+            },
+            destination,
+            progress,
         )
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=max(30.0, timeout * (max_retries + 1)),
-            ) as response, partial_path.open("wb") as output:
-                while chunk := response.read(64 * 1024):
-                    output.write(chunk)
-        except urllib.error.HTTPError as exc:
-            partial_path.unlink(missing_ok=True)
-            try:
-                error = json.load(exc)
-                message = error.get("message") or error.get("error")
-            except (ValueError, AttributeError):
-                message = str(exc)
-            raise LinkHubError(message) from exc
-        except Exception:
-            partial_path.unlink(missing_ok=True)
-            raise
-        partial_path.replace(destination_path)
-        return destination_path
 
     def motor_status(self) -> dict[str, Any]:
         return self._request_json("GET", "/v1/motor")
@@ -686,6 +744,25 @@ class LinkHubClient:
     ) -> Any:
         if content is None and body is not None:
             content = json.dumps(body).encode()
+        return json.loads(
+            self._request_bytes(
+                method,
+                path,
+                content=content,
+                content_type=content_type,
+                timeout=timeout,
+            )
+        )
+
+    def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes | None = None,
+        content_type: str = "application/json",
+        timeout: float = 10.0,
+    ) -> bytes:
         request = urllib.request.Request(
             self._base_url + path,
             data=content,
@@ -694,7 +771,7 @@ class LinkHubClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.load(response)
+                return response.read()
         except urllib.error.HTTPError as exc:
             payload = _http_error_payload(exc)
             if payload.get("error") == "generation_changed":
@@ -788,6 +865,19 @@ class LinkHubMotorController:
 
 def _decode_record(record: TelemetryRecord) -> Message | RawMessage:
     return decode_message(RawMessage(record.message, dict(record.fields)))
+
+
+def _is_non_autopilot_heartbeat(record: TelemetryRecord) -> bool:
+    """A received heartbeat from a radio, GCS or companion (autopilot INVALID).
+
+    These describe a link component, not the vehicle (a DroneBridge ESP32 injects
+    one with ``base_mode`` unarmed), so ``read_messages`` leaves them out; use
+    ``components()`` to see them.
+    """
+    if record.direction != "rx" or record.message != "HEARTBEAT":
+        return False
+    autopilot = record.fields.get("autopilot")
+    return isinstance(autopilot, dict) and autopilot.get("type") == "MAV_AUTOPILOT_INVALID"
 
 
 # MAV_CMD_DO_SET_MODE param1 value selecting the vehicle's custom mode

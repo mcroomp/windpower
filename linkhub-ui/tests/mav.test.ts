@@ -7,6 +7,7 @@ import {
   hasFlag,
   heartbeatState,
   isArmed,
+  isVehicleHeartbeat,
   mavEnum,
   parseFlags,
 } from "../src/mav";
@@ -90,5 +91,21 @@ describe("heartbeatState", () => {
       custom_mode: 20,
       system_status: 4,
     })).toBeNull();
+  });
+
+  it("ignores heartbeats from radios and other non-autopilot components", () => {
+    const radio = {
+      mavtype: { type: "MAV_TYPE_ONBOARD_CONTROLLER" },
+      autopilot: { type: "MAV_AUTOPILOT_INVALID" },
+      base_mode: "MAV_MODE_FLAG_CUSTOM_MODE_ENABLED",
+      custom_mode: 0,
+      system_status: { type: "MAV_STATE_ACTIVE" },
+    };
+    expect(isVehicleHeartbeat(radio)).toBe(false);
+    expect(heartbeatState(radio)).toBeNull();
+    expect(isVehicleHeartbeat({
+      ...radio,
+      autopilot: { type: "MAV_AUTOPILOT_ARDUPILOTMEGA" },
+    })).toBe(true);
   });
 });

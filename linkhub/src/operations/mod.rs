@@ -11,25 +11,23 @@ use crate::{
     codec::{
         MavMessage,
         dialect::{
-            AUTOPILOT_VERSION_DATA, COMMAND_ACK_DATA, COMMAND_LONG_DATA,
-            FILE_TRANSFER_PROTOCOL_DATA, LOG_DATA_DATA, LOG_REQUEST_DATA_DATA,
-            LOG_REQUEST_END_DATA, LOG_REQUEST_LIST_DATA, MavCmd, MavParamType,
+            AUTOPILOT_VERSION_DATA, COMMAND_ACK_DATA, COMMAND_LONG_DATA, MavCmd, MavParamType,
             MavProtocolCapability, MavResult, PARAM_REQUEST_LIST_DATA, PARAM_REQUEST_READ_DATA,
             PARAM_SET_DATA, PARAM_VALUE_DATA,
         },
         message_id_from_name,
     },
-    dataflash::{
-        DataFlashError, DataPacket, LogDownload, LogEntry, LogList, Target as DataFlashTarget,
-    },
-    mavftp::{MavFtpError, Operation as MavFtpOperation, OperationResult as MavFtpResult, Packet},
+    dataflash::DataFlashError,
+    mavftp::MavFtpError,
     mavlink::{LinkError, MavlinkLinkHandle, ReceivedMessage},
     records::wall_time_ns,
+    transfer::{FtpReadError, TransferRegistry},
 };
 use linkhub_dialect::types::CharArray;
 
-const MAVFTP_SOURCE_COMPONENT: u8 = 190;
-const MAVFTP_PACKET_RETRIES: usize = 3;
+mod files;
+mod job;
+mod logs;
 
 // ArduPilot still answers the superseded MAV_CMD_GET_MESSAGE_INTERVAL; it
 // returns the interval as a MESSAGE_INTERVAL message.
@@ -45,6 +43,7 @@ const PARAM_FLOAT: MavProtocolCapability =
 #[derive(Clone)]
 pub struct MavlinkOperations {
     link: MavlinkLinkHandle,
+    transfers: TransferRegistry,
     command_lock: Arc<Mutex<()>>,
     parameter_lock: Arc<Mutex<()>>,
     ftp_sequence: Arc<Mutex<u16>>,
@@ -84,23 +83,6 @@ fn default_parameter_type() -> MavParamType {
     MavParamType::MAV_PARAM_TYPE_REAL32
 }
 
-#[derive(Clone, Debug)]
-pub struct DownloadedFile {
-    pub path: String,
-    pub content: Vec<u8>,
-    pub crc32: u32,
-    pub after_cursor: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct DownloadedLog {
-    pub id: u16,
-    pub size: u32,
-    pub time_utc: u32,
-    pub content: Vec<u8>,
-    pub after_cursor: String,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     #[error(transparent)]
@@ -118,19 +100,28 @@ pub enum OperationError {
     #[error(transparent)]
     MavFtp(#[from] MavFtpError),
     #[error(transparent)]
+    FtpRead(#[from] FtpReadError),
+    #[error(transparent)]
     DataFlash(#[from] DataFlashError),
 }
 
 impl MavlinkOperations {
     #[must_use]
-    pub fn new(link: MavlinkLinkHandle) -> Self {
+    pub fn new(link: MavlinkLinkHandle, transfers: TransferRegistry) -> Self {
         Self {
             link,
+            transfers,
             command_lock: Arc::new(Mutex::new(())),
             parameter_lock: Arc::new(Mutex::new(())),
             ftp_sequence: Arc::new(Mutex::new(wall_time_ns() as u16)),
             log_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// File and log transfers: progress, statistics, and collected content.
+    #[must_use]
+    pub fn transfers(&self) -> &TransferRegistry {
+        &self.transfers
     }
 
     pub async fn command(
@@ -545,326 +536,6 @@ impl MavlinkOperations {
         }))
     }
 
-    pub async fn list_files(
-        &self,
-        path: &str,
-        timeout: Duration,
-    ) -> Result<Vec<Value>, OperationError> {
-        let (result, _) = self
-            .execute_mavftp(|sequence| MavFtpOperation::list(sequence, path), timeout)
-            .await?;
-        let MavFtpResult::Files(files) = result else {
-            return Err(OperationError::Invalid(
-                "MAVFTP list returned an unexpected result".to_owned(),
-            ));
-        };
-        Ok(files
-            .into_iter()
-            .map(|entry| {
-                json!({
-                    "name": entry.name,
-                    "is_dir": entry.is_dir,
-                    "size": entry.size,
-                })
-            })
-            .collect())
-    }
-
-    pub async fn download_file(
-        &self,
-        path: &str,
-        verify_crc: bool,
-        timeout: Duration,
-    ) -> Result<DownloadedFile, OperationError> {
-        let (result, cursor) = self
-            .execute_mavftp(
-                |sequence| MavFtpOperation::download(sequence, path, verify_crc),
-                timeout,
-            )
-            .await?;
-        let MavFtpResult::Download { content, crc32 } = result else {
-            return Err(OperationError::Invalid(
-                "MAVFTP download returned an unexpected result".to_owned(),
-            ));
-        };
-        Ok(DownloadedFile {
-            path: path.to_owned(),
-            content,
-            crc32,
-            after_cursor: format_cursor(cursor),
-        })
-    }
-
-    pub async fn upload_file(
-        &self,
-        path: &str,
-        content: Vec<u8>,
-        timeout: Duration,
-    ) -> Result<usize, OperationError> {
-        let (result, _) = self
-            .execute_mavftp(
-                |sequence| MavFtpOperation::upload(sequence, path, content),
-                timeout,
-            )
-            .await?;
-        let MavFtpResult::Uploaded(bytes) = result else {
-            return Err(OperationError::Invalid(
-                "MAVFTP upload returned an unexpected result".to_owned(),
-            ));
-        };
-        Ok(bytes)
-    }
-
-    pub async fn remove_file(&self, path: &str, timeout: Duration) -> Result<(), OperationError> {
-        let (result, _) = self
-            .execute_mavftp(|sequence| MavFtpOperation::remove(sequence, path), timeout)
-            .await?;
-        if result != MavFtpResult::Removed {
-            return Err(OperationError::Invalid(
-                "MAVFTP remove returned an unexpected result".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub async fn create_directory(
-        &self,
-        path: &str,
-        timeout: Duration,
-    ) -> Result<bool, OperationError> {
-        let (result, _) = self
-            .execute_mavftp(|sequence| MavFtpOperation::mkdir(sequence, path), timeout)
-            .await?;
-        let MavFtpResult::DirectoryCreated(created) = result else {
-            return Err(OperationError::Invalid(
-                "MAVFTP mkdir returned an unexpected result".to_owned(),
-            ));
-        };
-        Ok(created)
-    }
-
-    pub async fn list_logs(&self, timeout: Duration) -> Result<Vec<Value>, OperationError> {
-        let _guard = self.log_lock.lock().await;
-        Ok(self
-            .request_log_entries(0, u16::MAX, timeout)
-            .await?
-            .into_iter()
-            .map(|(entry, journal_sequence)| {
-                json!({
-                    "id": entry.id,
-                    "size": entry.size,
-                    "time_utc": entry.time_utc,
-                    "num_logs": entry.num_logs,
-                    "last_log_num": entry.last_log_num,
-                    "after_cursor": format_cursor(journal_sequence),
-                })
-            })
-            .collect())
-    }
-
-    pub async fn download_log(
-        &self,
-        log_id: u16,
-        packet_timeout: Duration,
-        max_retries: u32,
-    ) -> Result<DownloadedLog, OperationError> {
-        let _guard = self.log_lock.lock().await;
-        let (entry, _) = self
-            .request_log_entries(log_id, log_id, packet_timeout)
-            .await?
-            .into_iter()
-            .find(|(entry, _)| entry.id == log_id)
-            .ok_or_else(|| OperationError::NotFound(format!("DataFlash log {log_id}")))?;
-        let (size, time_utc) = (entry.size, entry.time_utc);
-        let (target_system, target_component) = self.targets(None, None);
-        let target = DataFlashTarget {
-            system: target_system,
-            component: target_component,
-        };
-        let mut download = LogDownload::new(target, log_id, size, max_retries);
-        let mut receiver = self.link.subscribe_messages();
-
-        let transfer = async {
-            while !download.is_complete() {
-                if let Some(request) = download.next_request() {
-                    self.link
-                        .send_message(
-                            MavMessage::LOG_REQUEST_DATA(LOG_REQUEST_DATA_DATA {
-                                ofs: request.offset,
-                                count: request.count,
-                                id: request.id,
-                                target_system: request.target.system,
-                                target_component: request.target.component,
-                            }),
-                            None,
-                            None,
-                        )
-                        .await?;
-                }
-                match wait_for_message(&mut receiver, packet_timeout, |message| {
-                    log_data(message).is_some_and(|data| data.id == log_id)
-                })
-                .await
-                {
-                    Ok(message) => match download.receive(data_packet(&message)?) {
-                        Err(DataFlashError::EarlyEnd { .. }) => {
-                            tokio::time::sleep(packet_timeout).await;
-                            download.on_timeout()?;
-                        }
-                        result => result?,
-                    },
-                    Err(OperationError::Timeout) => download.on_timeout()?,
-                    Err(error) => return Err(error),
-                }
-            }
-            download
-                .into_bytes()
-                .ok_or_else(|| OperationError::Invalid("log transfer is incomplete".to_owned()))
-        }
-        .await;
-
-        let end_cursor = self
-            .link
-            .send_message(
-                MavMessage::LOG_REQUEST_END(LOG_REQUEST_END_DATA {
-                    target_system: target.system,
-                    target_component: target.component,
-                }),
-                None,
-                None,
-            )
-            .await;
-        let content = transfer?;
-        Ok(DownloadedLog {
-            id: log_id,
-            size,
-            time_utc,
-            content,
-            after_cursor: format_cursor(end_cursor?),
-        })
-    }
-
-    async fn execute_mavftp(
-        &self,
-        create: impl FnOnce(u16) -> MavFtpOperation,
-        timeout: Duration,
-    ) -> Result<(MavFtpResult, u64), OperationError> {
-        let mut sequence = self.ftp_sequence.lock().await;
-        let mut operation = create(*sequence);
-        let result = self.run_mavftp(&mut operation, timeout).await;
-        *sequence = operation.next_sequence();
-        result
-    }
-
-    async fn run_mavftp(
-        &self,
-        operation: &mut MavFtpOperation,
-        timeout: Duration,
-    ) -> Result<(MavFtpResult, u64), OperationError> {
-        let deadline = time::Instant::now() + timeout;
-        let (target_system, target_component) = self.targets(None, None);
-        let mut receiver = self.link.subscribe_messages();
-        let mut last_cursor = 0;
-        loop {
-            if let Some(result) = operation.result().cloned() {
-                return Ok((result, last_cursor));
-            }
-            let packet = operation.next_request()?.ok_or_else(|| {
-                OperationError::Invalid("MAVFTP operation ended without a result".to_owned())
-            })?;
-            let payload = packet.encode()?;
-            let expected_reply_sequence = packet.sequence.wrapping_add(1);
-            let expected_request_opcode = packet.opcode as u8;
-            let message = MavMessage::FILE_TRANSFER_PROTOCOL(FILE_TRANSFER_PROTOCOL_DATA {
-                target_network: 0,
-                target_system,
-                target_component,
-                payload,
-            });
-            let mut retries = 0;
-            let reply = loop {
-                self.link
-                    .send_message(message.clone(), None, Some(MAVFTP_SOURCE_COMPONENT))
-                    .await?;
-                let remaining = deadline.saturating_duration_since(time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(OperationError::Timeout);
-                }
-                match wait_for_message(
-                    &mut receiver,
-                    remaining.min(Duration::from_secs(2)),
-                    |candidate| {
-                        ftp_payload(candidate).is_some_and(|(target, payload)| {
-                            candidate.component_id == target_component
-                                && target == MAVFTP_SOURCE_COMPONENT
-                                && ftp_reply_matches(
-                                    payload,
-                                    expected_reply_sequence,
-                                    expected_request_opcode,
-                                )
-                        })
-                    },
-                )
-                .await
-                {
-                    Ok(message) => break message,
-                    Err(OperationError::Timeout) if retries < MAVFTP_PACKET_RETRIES => {
-                        retries += 1;
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
-            last_cursor = reply.journal_sequence;
-            let (_, reply_payload) = ftp_payload(&reply).expect("wait predicate selected FTP");
-            operation.handle_reply(Packet::decode(reply_payload)?)?;
-        }
-    }
-
-    /// The log entries the vehicle reported, each with the journal sequence of
-    /// the `LOG_ENTRY` message it came from.
-    async fn request_log_entries(
-        &self,
-        start: u16,
-        end: u16,
-        timeout: Duration,
-    ) -> Result<Vec<(LogEntry, u64)>, OperationError> {
-        let (target_system, target_component) = self.targets(None, None);
-        let target = DataFlashTarget {
-            system: target_system,
-            component: target_component,
-        };
-        let mut list = LogList::new(target, start, end)?;
-        let mut receiver = self.link.subscribe_messages();
-        self.link
-            .send_message(
-                MavMessage::LOG_REQUEST_LIST(LOG_REQUEST_LIST_DATA {
-                    start,
-                    end,
-                    target_system: target.system,
-                    target_component: target.component,
-                }),
-                None,
-                None,
-            )
-            .await?;
-        let mut entries = BTreeMap::new();
-        while !list.is_complete() {
-            let message = wait_for_message(&mut receiver, timeout, |message| {
-                matches!(message.message, MavMessage::LOG_ENTRY(_))
-                    && message.system_id == target.system
-                    && (target.component == 0 || message.component_id == target.component)
-            })
-            .await?;
-            let entry = log_entry(&message)?;
-            list.receive(entry.clone())?;
-            if entry.num_logs == 0 {
-                return Ok(Vec::new());
-            }
-            entries.insert(entry.id, (entry, message.journal_sequence));
-        }
-        Ok(entries.into_values().collect())
-    }
-
     pub async fn set_message_rates(
         &self,
         rates: &Map<String, Value>,
@@ -1112,21 +783,6 @@ fn param_value(message: &ReceivedMessage) -> Option<&PARAM_VALUE_DATA> {
     }
 }
 
-fn log_data(message: &ReceivedMessage) -> Option<&LOG_DATA_DATA> {
-    match &message.message {
-        MavMessage::LOG_DATA(data) => Some(data),
-        _ => None,
-    }
-}
-
-/// The target component and 251-byte payload of a FILE_TRANSFER_PROTOCOL message.
-fn ftp_payload(message: &ReceivedMessage) -> Option<(u8, &[u8])> {
-    match &message.message {
-        MavMessage::FILE_TRANSFER_PROTOCOL(ftp) => Some((ftp.target_component, &ftp.payload)),
-        _ => None,
-    }
-}
-
 fn parameter_matches(
     message: &ReceivedMessage,
     name: &str,
@@ -1152,38 +808,6 @@ fn parameter_result(message: &ReceivedMessage) -> Result<ParameterResult, Operat
         index: i64::from(value.param_index),
         count: u64::from(value.param_count),
         after_cursor: format_cursor(message.journal_sequence),
-    })
-}
-
-fn log_entry(message: &ReceivedMessage) -> Result<LogEntry, OperationError> {
-    let MavMessage::LOG_ENTRY(entry) = &message.message else {
-        return Err(OperationError::Invalid(
-            "message is not LOG_ENTRY".to_owned(),
-        ));
-    };
-    Ok(LogEntry {
-        id: entry.id,
-        size: entry.size,
-        time_utc: entry.time_utc,
-        num_logs: entry.num_logs,
-        last_log_num: entry.last_log_num,
-    })
-}
-
-fn data_packet(message: &ReceivedMessage) -> Result<DataPacket, OperationError> {
-    let data = log_data(message)
-        .ok_or_else(|| OperationError::Invalid("message is not LOG_DATA".to_owned()))?;
-    Ok(DataPacket {
-        id: data.id,
-        offset: data.ofs,
-        count: data.count,
-        data: data.data,
-    })
-}
-
-fn ftp_reply_matches(payload: &[u8], expected_sequence: u16, expected_request_opcode: u8) -> bool {
-    Packet::decode(payload).ok().is_some_and(|reply| {
-        reply.sequence == expected_sequence && reply.request_opcode == expected_request_opcode
     })
 }
 
@@ -1386,31 +1010,5 @@ mod tests {
             })
         );
         assert_eq!(PARAM_FLOAT.bits(), 2);
-    }
-
-    #[test]
-    fn mavftp_correlation_rejects_delayed_prior_operation_reply() {
-        let packet = Packet {
-            sequence: 11,
-            session: 0,
-            opcode: crate::mavftp::Opcode::Ack,
-            size: 0,
-            request_opcode: crate::mavftp::Opcode::CreateDirectory as u8,
-            burst_complete: 0,
-            offset: 0,
-            data: Vec::new(),
-        };
-        let payload = packet.encode().expect("packet");
-
-        assert!(!ftp_reply_matches(
-            &payload,
-            11,
-            crate::mavftp::Opcode::CreateFile as u8
-        ));
-        assert!(ftp_reply_matches(
-            &payload,
-            11,
-            crate::mavftp::Opcode::CreateDirectory as u8
-        ));
     }
 }

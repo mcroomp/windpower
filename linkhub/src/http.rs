@@ -27,6 +27,7 @@ use crate::{
     records::{
         DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, wall_time_ns,
     },
+    transfer::{CancelResult, ContentError, TransferInfo, TransferRegistry},
 };
 
 #[derive(Clone)]
@@ -61,6 +62,10 @@ enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Gone(String),
     #[error(transparent)]
     Journal(#[from] JournalError),
     #[error(transparent)]
@@ -87,6 +92,8 @@ impl IntoResponse for ApiError {
         let (status, code) = match self {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            Self::Conflict(_) => (StatusCode::CONFLICT, "not_ready"),
+            Self::Gone(_) => (StatusCode::GONE, "content_gone"),
             Self::Journal(_) => (StatusCode::SERVICE_UNAVAILABLE, "journal_unavailable"),
             Self::Link(_) => (StatusCode::SERVICE_UNAVAILABLE, "link_unavailable"),
             Self::Operation(OperationError::Invalid(_)) => {
@@ -97,6 +104,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::GATEWAY_TIMEOUT, "operation_timeout")
             }
             Self::Operation(OperationError::MavFtp(_))
+            | Self::Operation(OperationError::FtpRead(_))
             | Self::Operation(OperationError::DataFlash(_)) => {
                 (StatusCode::BAD_GATEWAY, "mavlink_transfer_failed")
             }
@@ -151,7 +159,9 @@ pub fn router_with_motor_and_static(
     static_dir: Option<PathBuf>,
     no_cache: bool,
 ) -> Router {
-    let operations = link.clone().map(MavlinkOperations::new);
+    let operations = link
+        .clone()
+        .map(|link| MavlinkOperations::new(link, TransferRegistry::new(journal.clone())));
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -203,7 +213,15 @@ pub fn router_with_motor_and_static(
             axum::routing::post(create_directory),
         )
         .route("/v1/mavlink/logs", get(list_logs))
-        .route("/v1/mavlink/logs/{id}", get(download_log))
+        .route(
+            "/v1/mavlink/transfers",
+            get(list_transfers).post(start_transfer),
+        )
+        .route(
+            "/v1/mavlink/transfers/{id}",
+            get(get_transfer).delete(cancel_transfer),
+        )
+        .route("/v1/mavlink/transfers/{id}/content", get(transfer_content))
         .route("/v1/motor", get(motor_status).put(set_motor))
         .route("/v1/motor/stop", axum::routing::post(stop_motor))
         .route("/v1/motor/reconnect", axum::routing::post(reconnect_motor))
@@ -1138,10 +1156,6 @@ async fn get_message_interval(
 #[derive(Debug, Deserialize)]
 struct FileQuery {
     path: Option<String>,
-    #[serde(default)]
-    download: bool,
-    #[serde(default = "default_true")]
-    verify_crc: bool,
 }
 
 async fn files(
@@ -1149,23 +1163,10 @@ async fn files(
     Query(query): Query<FileQuery>,
 ) -> Result<Response, ApiError> {
     let path = required_path(query.path)?;
-    if !query.download {
-        let files = require_operations(&state)?
-            .list_files(&path, Duration::from_secs(30))
-            .await?;
-        return Ok(Json(json!({"files": files})).into_response());
-    }
-    let download = require_operations(&state)?
-        .download_file(&path, query.verify_crc, Duration::from_secs(60))
+    let files = require_operations(&state)?
+        .list_files(&path, Duration::from_secs(30))
         .await?;
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/octet-stream")
-        .header("X-MAVFTP-Path", download.path)
-        .header("X-MAVFTP-CRC32", format!("{:08x}", download.crc32))
-        .header("X-LinkHub-After-Cursor", download.after_cursor)
-        .body(Body::from(download.content))
-        .map_err(|error| ApiError::BadRequest(error.to_string()))
+    Ok(Json(json!({"files": files})).into_response())
 }
 
 async fn upload_file(
@@ -1213,8 +1214,6 @@ async fn create_directory(
 struct LogQuery {
     #[serde(default = "default_log_timeout_ms")]
     timeout_ms: u64,
-    #[serde(default = "default_log_retries")]
-    max_retries: u32,
 }
 
 async fn list_logs(
@@ -1227,26 +1226,109 @@ async fn list_logs(
     Ok(Json(json!({"logs": logs})))
 }
 
-async fn download_log(
+/// A transfer to run in the background. Poll it at `/v1/mavlink/transfers/{id}`
+/// and collect the verified content from `.../content` once it is complete.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StartTransfer {
+    FtpDownload {
+        path: String,
+        #[serde(default = "default_true")]
+        verify_crc: bool,
+        /// Fail after this long without gaining a contiguous byte.
+        #[serde(default = "default_stall_timeout_ms")]
+        stall_timeout_ms: u64,
+    },
+    LogDownload {
+        log_id: u16,
+        /// Silence after which a request is repeated.
+        #[serde(default = "default_transfer_packet_timeout_ms")]
+        packet_timeout_ms: u64,
+        #[serde(default = "default_transfer_retries")]
+        max_retries: u32,
+    },
+}
+
+async fn start_transfer(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u16>,
-    Query(query): Query<LogQuery>,
+    Json(request): Json<StartTransfer>,
+) -> Result<(StatusCode, Json<TransferInfo>), ApiError> {
+    let operations = require_operations(&state)?;
+    let info = match request {
+        StartTransfer::FtpDownload {
+            path,
+            verify_crc,
+            stall_timeout_ms,
+        } => {
+            if path.is_empty() {
+                return Err(ApiError::BadRequest("path is required".to_owned()));
+            }
+            operations.start_file_download(&path, verify_crc, operation_timeout(stall_timeout_ms)?)
+        }
+        StartTransfer::LogDownload {
+            log_id,
+            packet_timeout_ms,
+            max_retries,
+        } => operations.start_log_download(
+            log_id,
+            operation_timeout(packet_timeout_ms)?,
+            max_retries,
+        ),
+    };
+    Ok((StatusCode::ACCEPTED, Json(info)))
+}
+
+async fn list_transfers(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let transfers = require_operations(&state)?.transfers().list();
+    Ok(Json(json!({"transfers": transfers})))
+}
+
+async fn get_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<Json<TransferInfo>, ApiError> {
+    require_operations(&state)?
+        .transfers()
+        .get(id)
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("transfer {id}")))
+}
+
+async fn transfer_content(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
 ) -> Result<Response, ApiError> {
-    let download = require_operations(&state)?
-        .download_log(id, operation_timeout(query.timeout_ms)?, query.max_retries)
-        .await?;
+    let content = require_operations(&state)?
+        .transfers()
+        .content(id)
+        .map_err(|error| match error {
+            ContentError::NotFound => ApiError::NotFound(format!("transfer {id}")),
+            ContentError::NotReady => ApiError::Conflict(format!("transfer {id} is not complete")),
+            ContentError::Gone => {
+                ApiError::Gone(format!("transfer {id}'s content is no longer held"))
+            }
+        })?;
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "application/octet-stream")
-        .header(
-            "Content-Disposition",
-            format!("attachment; filename=\"dataflash-{}.BIN\"", download.id),
-        )
-        .header("X-DataFlash-Log-Id", download.id.to_string())
-        .header("X-DataFlash-Time-UTC", download.time_utc.to_string())
-        .header("X-LinkHub-After-Cursor", download.after_cursor)
-        .body(Body::from(download.content))
+        .header("X-Transfer-Id", id.to_string())
+        .body(Body::from(Bytes::copy_from_slice(&content)))
         .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+/// Stops a queued or running transfer, or forgets a finished one.
+async fn cancel_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    match require_operations(&state)?.transfers().cancel(id) {
+        CancelResult::NotFound => Err(ApiError::NotFound(format!("transfer {id}"))),
+        CancelResult::Requested => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({"id": id, "cancelling": true})),
+        )),
+        CancelResult::Removed => Ok((StatusCode::OK, Json(json!({"id": id, "removed": true})))),
+    }
 }
 
 async fn motor_status(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -1371,8 +1453,17 @@ const fn default_log_timeout_ms() -> u64 {
     1_000
 }
 
-const fn default_log_retries() -> u32 {
-    5
+/// Transfers run over lossy links, so they wait longer than a one-shot query.
+const fn default_transfer_packet_timeout_ms() -> u64 {
+    2_000
+}
+
+const fn default_transfer_retries() -> u32 {
+    10
+}
+
+const fn default_stall_timeout_ms() -> u64 {
+    15_000
 }
 
 const fn default_true() -> bool {
@@ -1451,13 +1542,13 @@ mod tests {
     use crate::{
         codec::{MavHeader, serialize_message},
         journal::JournalConfig,
-        mavlink::{MavlinkLinkConfig, heartbeat_message, start_link},
+        mavlink::{MavlinkLinkConfig, autopilot_heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
     };
 
     fn heartbeat_frame(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
         serialize_message(
-            &heartbeat_message(),
+            &autopilot_heartbeat_message(),
             MavHeader {
                 sequence,
                 system_id,
@@ -1932,6 +2023,136 @@ mod tests {
             "v1:00000000-0000-0000-0000-000000000000:1"
         );
         assert!(value["cursor"].as_str().is_some());
+
+        link_task.abort();
+        peer.abort();
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn transfer_endpoints_start_poll_and_cancel_a_job() {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = server.local_addr().expect("listener address");
+        // The vehicle heartbeats but never answers FTP, so the job stays running.
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept link");
+            socket
+                .write_all(&heartbeat_frame(1, 1, 1))
+                .await
+                .expect("send vehicle heartbeat");
+            let mut sink = Vec::new();
+            let _ = socket.read_to_end(&mut sink).await;
+        });
+
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let mut link_config = MavlinkLinkConfig::sitl(address);
+        link_config.heartbeat_interval = Duration::from_millis(10);
+        let (link, link_task) = start_link(link_config, journal.clone());
+        timeout(Duration::from_secs(2), async {
+            let mut status = link.subscribe_status();
+            while !status.borrow().ready {
+                status.changed().await.expect("status update");
+            }
+        })
+        .await
+        .expect("link ready");
+        let app = router(journal.clone(), Some(link));
+
+        async fn call(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
+            let response = app.clone().oneshot(request).await.expect("response");
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+        }
+
+        let (status, started) = call(
+            &app,
+            Request::post("/v1/mavlink/transfers")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"kind": "ftp_download", "path": "/APM/LOGS/1.BIN"}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = started["id"].as_u64().expect("transfer id");
+        assert_eq!(started["kind"], "ftp_download");
+
+        let (status, _) = call(
+            &app,
+            Request::post("/v1/mavlink/transfers")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"kind": "ftp_download", "path": ""}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, listed) = call(
+            &app,
+            Request::get("/v1/mavlink/transfers")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["transfers"][0]["id"], id);
+
+        let (status, _) = call(
+            &app,
+            Request::get(format!("/v1/mavlink/transfers/{id}/content"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (status, _) = call(
+            &app,
+            Request::get("/v1/mavlink/transfers/9999")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = call(
+            &app,
+            Request::delete(format!("/v1/mavlink/transfers/{id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let (_, info) = call(
+                    &app,
+                    Request::get(format!("/v1/mavlink/transfers/{id}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await;
+                if info["state"] == "cancelled" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("transfer cancelled");
 
         link_task.abort();
         peer.abort();

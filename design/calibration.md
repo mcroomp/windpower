@@ -53,6 +53,7 @@ vehicle-status endpoints used by calibration are:
 - `GET|PUT|DELETE /v1/mavlink/files`
 - `POST /v1/mavlink/directories`
 - `GET /v1/mavlink/logs`
+- `POST|GET|DELETE /v1/mavlink/transfers[/{id}[/content]]` (file and log downloads)
 - `GET /v1/motor`, `PUT /v1/motor`, `POST /v1/motor/stop`, `POST /v1/motor/reconnect`
   when the optional Bluetooth motor backend is enabled
 

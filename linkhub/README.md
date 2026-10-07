@@ -153,10 +153,12 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/mavlink/parameters/{name}` | `GET`, `PUT` | Read or write one parameter. |
 | `/v1/mavlink/message-rates` | `PUT` | Set explicit message-rate requests. |
 | `/v1/mavlink/message-rates/{message}` | `GET` | Read one configured message interval. |
-| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/download/upload/remove by `path`. |
+| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/upload/remove by `path`. |
 | `/v1/mavlink/directories` | `POST` | MAVFTP create-directory operation. |
 | `/v1/mavlink/logs` | `GET` | List DataFlash logs. |
-| `/v1/mavlink/logs/{id}` | `GET` | Download one DataFlash log. |
+| `/v1/mavlink/transfers` | `GET`, `POST` | List background file/log downloads, or start one. |
+| `/v1/mavlink/transfers/{id}` | `GET`, `DELETE` | Poll one transfer; cancel it, or forget it once finished. |
+| `/v1/mavlink/transfers/{id}/content` | `GET` | The verified bytes of a completed transfer. |
 | `/v1/mavlink/status` | `GET` | Live link + vehicle status snapshot. |
 | `/v1/motor` | `GET`, `PUT` | Optional Bluetooth motor status and set-running command. |
 | `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop command. |
@@ -179,13 +181,47 @@ Routes come from `linkhub\src\http.rs`.
 - `PUT /v1/mavlink/message-rates` accepts a JSON object mapping message names
   to numeric Hz values or `null`. The response reports `message`, `rate_hz`,
   `interval_us`, and `after_cursor` for each configured entry.
-- `GET /v1/mavlink/files` requires `path`; add `download=true` to download raw
-  bytes instead of listing a directory, and `verify_crc=false` to skip the
-  post-download CRC check.
-- `GET /v1/mavlink/logs/{id}` accepts `timeout_ms` and `max_retries`.
+- `GET /v1/mavlink/files` requires `path` and lists a directory. Downloads
+  are transfers (below).
 - Parameter names are trimmed and uppercased, then must match
   `[A-Z][A-Z0-9_]{0,15}`. Malformed names are rejected before LinkHub sends a
   MAVLink parameter request.
+
+### Transfers
+
+Downloads run as background jobs, so one HTTP request never has to outlive a
+slow or lossy radio link: start, poll, then collect.
+
+```
+POST   /v1/mavlink/transfers   {"kind":"ftp_download","path":"/APM/LOGS/00000017.BIN"}
+POST   /v1/mavlink/transfers   {"kind":"log_download","log_id":17}
+GET    /v1/mavlink/transfers/{id}           progress, rate, loss stats
+GET    /v1/mavlink/transfers/{id}/content   200 bytes | 409 not complete | 410 evicted
+DELETE /v1/mavlink/transfers/{id}           202 cancel requested | 200 finished job removed
+```
+
+- `ftp_download` accepts `verify_crc` (default `true`) and `stall_timeout_ms`
+  (default 15000, fail after this long without a contiguous byte).
+- `log_download` accepts `packet_timeout_ms` (default 2000) and `max_retries`
+  (default 10).
+- `POST` returns `202` with a status object: `id`, `kind`, `target`, `state`
+  (`queued`, `running`, `complete`, `failed`, `cancelled`), `total_bytes`,
+  `done_bytes`, `received_bytes`, `elapsed_ms`, `rate_bytes_per_s`, `error`,
+  `content_available` and `stats`.
+- `stats` counts `packets_received`, `duplicate_packets`, `gaps`,
+  `requests_sent`, `bursts`, `repair_requests`, `retransmits`, `timeouts` and
+  `naks`. Duplicates should stay near zero and `gaps` track link loss.
+- Content is only released after the transfer completes, and after the CRC
+  check for MAVFTP, so a truncated download is never mistaken for a whole one.
+  LinkHub keeps the last 32 finished transfers within 128 MiB.
+- Transfers are serialized per protocol: one MAVFTP job at a time (queued jobs
+  wait), and DataFlash downloads run alongside MAVFTP.
+- MAVFTP uses `BurstReadFile` (the autopilot streams up to 2000 chunks per
+  request) and repairs holes with a few pipelined reads, then always sends
+  `TerminateSession`. DataFlash downloads re-request only the first missing
+  range. Each transfer also journals `linkhub.transfer` diagnostics
+  (`transfer.started`, `.complete`, `.failed`, `.cancelled`) with the final
+  stats, so `linkhub query diagnostics` shows how a run went.
 
 ### Status snapshots
 
