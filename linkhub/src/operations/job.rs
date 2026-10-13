@@ -28,7 +28,7 @@ impl Failure {
 /// Waits for `lock` while staying cancellable, so a queued job can be dropped.
 pub(super) async fn acquire<T: ?Sized>(
     lock: std::sync::Arc<tokio::sync::Mutex<T>>,
-    handle: &mut TransferHandle,
+    handle: &TransferHandle,
 ) -> Result<tokio::sync::OwnedMutexGuard<T>, Failure> {
     tokio::select! {
         guard = lock.lock_owned() => Ok(guard),

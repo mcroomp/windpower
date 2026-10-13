@@ -46,10 +46,9 @@ files against GitHub without changing anything.
 ## Build dependencies
 
 `mavlink-core` and `mavlink-bindgen` come from
-[mavlink/rust-mavlink](https://github.com/mavlink/rust-mavlink), pinned by commit in
-`Cargo.toml` (both at the same `rev`; `Cargo.lock` records it). The crates.io
-0.18.0 release of `mavlink-bindgen` rejects ArduPilot's definitions, where a
-16-bit and a 32-bit field share `GIMBAL_DEVICE_CAP_FLAGS`
+[mavlink/rust-mavlink](https://github.com/mavlink/rust-mavlink) through crates.io
+at the same release. Version 0.19.0 is the minimum usable release because older
+versions of `mavlink-bindgen` reject ArduPilot's definitions, where a 16-bit and
+a 32-bit field share `GIMBAL_DEVICE_CAP_FLAGS`
 ([rust-mavlink#495](https://github.com/mavlink/rust-mavlink/issues/495), fixed by
-[#500](https://github.com/mavlink/rust-mavlink/pull/500)). Switch both back to
-crates.io versions once a release newer than 0.18.0 contains that fix.
+[#500](https://github.com/mavlink/rust-mavlink/pull/500)).

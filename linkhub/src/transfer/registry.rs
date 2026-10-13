@@ -348,9 +348,10 @@ impl TransferHandle {
     }
 
     /// Resolves when the transfer is cancelled (for waits that must not outlive it).
-    pub async fn cancelled(&mut self) {
-        while !*self.cancel.borrow_and_update() {
-            if self.cancel.changed().await.is_err() {
+    pub async fn cancelled(&self) {
+        let mut cancel = self.cancel.clone();
+        while !*cancel.borrow_and_update() {
+            if cancel.changed().await.is_err() {
                 // The registry forgot this transfer; nothing will cancel it.
                 std::future::pending::<()>().await;
             }
@@ -492,7 +493,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_signals_the_worker_and_a_finished_transfer_is_forgotten() {
         let (registry, _temp, _journal) = registry().await;
-        let mut handle = registry.submit(TransferKind::LogDownload, "log 7");
+        let handle = registry.submit(TransferKind::LogDownload, "log 7");
         let id = handle.id();
         assert!(!handle.is_cancelled());
         assert_eq!(registry.cancel(id), CancelResult::Requested);

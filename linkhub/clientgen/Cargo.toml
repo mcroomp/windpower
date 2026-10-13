@@ -6,9 +6,9 @@ publish = false
 description = "Generates the Python and TypeScript MAVLink types from the vendored ArduPilot definitions"
 
 [dependencies]
-# Same pin as the dialect crate: the parser must read the XML exactly as the generated
+# Same release as the dialect crate: the parser must read the XML exactly as the generated
 # Rust dialect does. `mav2-message-extensions` keeps extension fields in the model.
-mavlink-bindgen = { git = "https://github.com/mavlink/rust-mavlink", rev = "97c5d6517608d969a8e07d8f172a786ee11dbc46", default-features = false, features = ["mav2-message-extensions"] }
+mavlink-bindgen = { version = "0.19.0", default-features = false, features = ["mav2-message-extensions"] }
 
 [dev-dependencies]
 linkhub-dialect = { path = "../dialect" }

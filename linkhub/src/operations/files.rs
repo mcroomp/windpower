@@ -143,13 +143,13 @@ impl MavlinkOperations {
 
     async fn run_file_download(
         self,
-        mut handle: TransferHandle,
+        handle: TransferHandle,
         path: String,
         verify_crc: bool,
         stall_timeout: Duration,
     ) {
         let mut summary = Summary::default();
-        let result = match acquire(self.ftp_sequence.clone(), &mut handle).await {
+        let result = match acquire(self.ftp_sequence.clone(), &handle).await {
             Ok(mut sequence) => {
                 self.read_file(
                     &mut sequence,
@@ -180,7 +180,10 @@ impl MavlinkOperations {
         summary: &mut Summary,
     ) -> Result<Vec<u8>, Failure> {
         let mut open = MavFtpOperation::open_read(*sequence, path);
-        let opened = self.run_mavftp(&mut open, stall_timeout).await;
+        let opened = tokio::select! {
+            result = self.run_mavftp(&mut open, stall_timeout) => result,
+            () = handle.cancelled() => return Err(Failure::Cancelled),
+        };
         *sequence = open.next_sequence();
         let (MavFtpResult::Opened { session, size }, _) = opened? else {
             return Err(OperationError::Invalid(
