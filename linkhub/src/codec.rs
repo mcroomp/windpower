@@ -2,11 +2,8 @@ use std::{collections::HashSet, io::Cursor};
 
 pub use dialect::MavMessage;
 use linkhub_dialect::{
-    MAVLinkMessageRaw, MAVLinkV2MessageRaw, Message,
-    async_peek_reader::AsyncPeekReader,
+    AsyncMavlinkReader, MAVLinkMessageRaw, MAVLinkV2MessageRaw, MavlinkReader, Message,
     error::{MessageReadError, ParserError},
-    peek_reader::PeekReader,
-    read_any_raw_message, read_any_raw_message_async,
 };
 pub use linkhub_dialect::{MavHeader, dialects::ardupilotmega as dialect};
 use serde_json::{Map, Value};
@@ -49,8 +46,8 @@ pub enum CodecError {
 }
 
 pub fn decode_raw_bytes(bytes: &[u8]) -> Result<DecodedMessage, CodecError> {
-    let mut reader = PeekReader::new(Cursor::new(bytes));
-    decode_raw(&read_any_raw_message::<MavMessage, _>(&mut reader)?)
+    let mut reader = MavlinkReader::new(Cursor::new(bytes));
+    decode_raw(&reader.read_any_raw_message::<MavMessage>()?)
 }
 
 /// Reads MAVLink v1/v2 frames from an async byte stream.
@@ -59,7 +56,7 @@ pub fn decode_raw_bytes(bytes: &[u8]) -> Result<DecodedMessage, CodecError> {
 /// pass the CRC but do not decode as a typed message, such as an enum value
 /// outside the dialect, are dropped here without ending the stream.
 pub struct FrameReader<R> {
-    reader: AsyncPeekReader<R>,
+    reader: AsyncMavlinkReader<R>,
     dropped_frames: u64,
     reported_ids: HashSet<u32>,
 }
@@ -67,7 +64,7 @@ pub struct FrameReader<R> {
 impl<R: AsyncRead + Unpin> FrameReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            reader: AsyncPeekReader::new(reader),
+            reader: AsyncMavlinkReader::new(reader),
             dropped_frames: 0,
             reported_ids: HashSet::new(),
         }
@@ -80,7 +77,7 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
 
     pub async fn recv(&mut self) -> Result<DecodedMessage, CodecError> {
         loop {
-            let frame = read_any_raw_message_async::<MavMessage, _>(&mut self.reader).await?;
+            let frame = self.reader.read_any_raw_message::<MavMessage>().await?;
             match decode_raw(&frame) {
                 Ok(decoded) => return Ok(decoded),
                 Err(error) => {

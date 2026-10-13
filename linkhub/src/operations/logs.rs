@@ -90,13 +90,13 @@ impl MavlinkOperations {
 
     async fn run_log_download(
         self,
-        mut handle: TransferHandle,
+        handle: TransferHandle,
         log_id: u16,
         packet_timeout: Duration,
         max_retries: u32,
     ) {
         let mut summary = Summary::default();
-        let result = match acquire(self.log_lock.clone(), &mut handle).await {
+        let result = match acquire(self.log_lock.clone(), &handle).await {
             Ok(_guard) => {
                 self.read_log(&handle, log_id, packet_timeout, max_retries, &mut summary)
                     .await

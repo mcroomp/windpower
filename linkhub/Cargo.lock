@@ -238,12 +238,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,7 +801,6 @@ name = "linkhub-dialect"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
- "futures",
  "mavlink-bindgen",
  "mavlink-core",
  "num-derive",
@@ -864,8 +857,9 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mavlink-bindgen"
-version = "0.18.0"
-source = "git+https://github.com/mavlink/rust-mavlink?rev=97c5d6517608d969a8e07d8f172a786ee11dbc46#97c5d6517608d969a8e07d8f172a786ee11dbc46"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0059289d3f5daf95a46e151c57113e95fa0ee80e8ebacb3cc5a305e7280fa020"
 dependencies = [
  "crc-any",
  "proc-macro2",
@@ -877,15 +871,15 @@ dependencies = [
 
 [[package]]
 name = "mavlink-core"
-version = "0.18.0"
-source = "git+https://github.com/mavlink/rust-mavlink?rev=97c5d6517608d969a8e07d8f172a786ee11dbc46#97c5d6517608d969a8e07d8f172a786ee11dbc46"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c71af820ebc18c4a21abe634bf297dc0dde578edc92e9b538c0c50c9ea4b69d"
 dependencies = [
  "async-trait",
- "byteorder",
  "crc-any",
  "futures",
+ "memchr",
  "serde",
- "serde_arrays",
  "tokio",
  "tokio-serial",
 ]
@@ -1080,9 +1074,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.40.1"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
 ]
