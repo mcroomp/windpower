@@ -38,6 +38,14 @@ DDFP to minimum output in `SHUT_DOWN`, `GROUND_IDLE`, and `SPOOLING_DOWN`.
 Do not unassign or restore `SERVO9_FUNCTION` at runtime: Copter 4.7.1 does not
 rebuild the live `SRV_Channels` function map for those parameter writes.
 
+The hardware also boots into the safe-off flight mode: `INITIAL_MODE=1` (ACRO) is
+part of [`hardware/rawes_hardware_defaults.parm`](../hardware/rawes_hardware_defaults.parm)
+and is written by `config apply` / `config fix`. ArduPilot's own default
+(STABILIZE) otherwise leaves the vehicle outside safe-off after every reboot.
+SITL is unaffected: the stack harness sets its own `INITIAL_MODE`. The other
+safe-off items are still verified after a reboot, so run `stop` / `disarm`
+before an armed test.
+
 Disarmed does not by itself mean that the swash is neutral or that an output is
 unassigned. Verify the complete invariant. Do not use historical port or baud
 values: the first hardware operation in a conversation must run

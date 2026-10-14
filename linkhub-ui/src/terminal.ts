@@ -37,7 +37,7 @@ export class Terminal {
     });
     input.addEventListener("keydown", (event) => this.keyDown(event));
     this.write("RAWES LinkHub UI");
-    this.write("Commands: status, config check|apply, run passive [options], stop, help");
+    this.write("Commands: status, config check|apply, run passive [options], compass calibrate|accept|cancel, reboot, stop, help");
     input.focus();
   }
 
@@ -87,6 +87,11 @@ export class Terminal {
     } else if (event.key === " " && this.passive.phase === "running" && this.input.value === "") {
       event.preventDefault();
       void this.passive.recaptureTarget();
+    } else if (event.key === "Escape" && this.runner.compassActive) {
+      event.preventDefault();
+      void this.runner.cancelCompass().catch((error: unknown) => {
+        this.write(error instanceof Error ? error.message : String(error), "error");
+      });
     } else if (event.key === "Escape" && this.passive.phase !== "idle") {
       event.preventDefault();
       void this.passive.stop();

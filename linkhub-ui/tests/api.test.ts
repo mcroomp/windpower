@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { formatMavResult, LinkHubApi } from "../src/api";
+import {
+  formatMavResult,
+  LinkHubApi,
+  LinkHubGenerationChanged,
+} from "../src/api";
 import { MavCmd, MavParamType, MavResult } from "../src/generated/protocol";
 import { mavEnum } from "../src/mav";
 
@@ -15,7 +19,7 @@ function stubFetch(response: unknown) {
 }
 
 function requestBody(fetchMock: ReturnType<typeof stubFetch>): unknown {
-  return JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+  return JSON.parse((fetchMock.mock.lastCall?.[1] as { body: string }).body);
 }
 
 const ACCEPTED = { command: mavEnum(MavCmd.DO_SET_MODE), result: mavEnum(MavResult.ACCEPTED) };
@@ -42,6 +46,81 @@ describe("formatMavResult", () => {
 });
 
 describe("typed wire contract", () => {
+  it("reads filtered journal messages with generation protection", async () => {
+    const fetchMock = stubFetch({ records: [], next_cursor: "v1:8" });
+
+    await new LinkHubApi().queryMessages({
+      after: "v1:3",
+      waitMs: 1_500,
+      limit: 25,
+      direction: "rx",
+      messages: ["HEARTBEAT", "STATUSTEXT"],
+      collapse: true,
+      maxLagMs: 500,
+      expectedGeneration: "v1:run:2",
+    });
+
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain("/v1/mavlink/messages?");
+    expect(Object.fromEntries(new URL(url, "http://test").searchParams)).toEqual({
+      after: "v1:3",
+      wait_ms: "1500",
+      limit: "25",
+      collapse: "true",
+      direction: "rx",
+      messages: "HEARTBEAT,STATUSTEXT",
+      max_lag_ms: "500",
+      expected_generation: "v1:run:2",
+    });
+  });
+
+  it("surfaces generation changes with recovery details", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: "generation_changed",
+        message: "generation changed",
+        expected_generation: "v1:old:1",
+        current_generation: "v1:new:2",
+        cursor: "v1:19",
+      }),
+    }));
+
+    const failure = await new LinkHubApi().queryMessages({
+      after: "v1:4",
+      expectedGeneration: "v1:old:1",
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(LinkHubGenerationChanged);
+    expect(failure).toMatchObject({
+      baseline: "v1:old:1",
+      current: "v1:new:2",
+      cursor: "v1:19",
+    });
+  });
+
+  it("flushes the journal and sends decoded messages by name", async () => {
+    const fetchMock = stubFetch({ cursor: "v1:7" });
+    await expect(new LinkHubApi().flushJournal()).resolves.toBe("v1:7");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/v1/journal/flush",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ after_cursor: "v1:8" }),
+    });
+    await expect(
+      new LinkHubApi().sendRawMessage("NAMED_VALUE_FLOAT", { name: "TEST", value: 1 }),
+    ).resolves.toBe("v1:8");
+    expect(requestBody(fetchMock)).toEqual({
+      message: "NAMED_VALUE_FLOAT",
+      fields: { name: "TEST", value: 1 },
+    });
+  });
+
   it("sends commands with a typed command enumeration", async () => {
     const fetchMock = stubFetch({ ...ACCEPTED, progress: 0, status: "ok", after_cursor: "v1:1" });
 
@@ -107,5 +186,23 @@ describe("typed wire contract", () => {
     fetchMock.mockClear();
     await new LinkHubApi().setParameter("RAWES_YAW_SLP", 0.5);
     expect(requestBody(fetchMock)).toMatchObject({ type: { type: "MAV_PARAM_TYPE_REAL32" } });
+
+    fetchMock.mockClear();
+    await new LinkHubApi().setParameter(
+      " rawes_mode ",
+      0,
+      true,
+      undefined,
+      5_000,
+      MavParamType.UINT8,
+    );
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/v1/mavlink/parameters/RAWES_MODE",
+    );
+    expect(requestBody(fetchMock)).toEqual({
+      value: 0,
+      type: { type: "MAV_PARAM_TYPE_UINT8" },
+      timeout_ms: 5_000,
+    });
   });
 });

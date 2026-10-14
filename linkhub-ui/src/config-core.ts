@@ -1,3 +1,4 @@
+import { TELEMETRY_PROFILE_PARAM_NAMES } from "./telemetry-rates";
 import type { ParameterResult } from "./types";
 
 const CALIBRATION_PARAM_PREFIXES = [
@@ -56,7 +57,10 @@ export function mergeConfigTargets(files: string[]): Map<string, number> {
     }
   }
   for (const name of merged.keys()) {
-    if (CALIBRATION_PARAM_PREFIXES.some((prefix) => name.startsWith(prefix))) {
+    if (
+      CALIBRATION_PARAM_PREFIXES.some((prefix) => name.startsWith(prefix))
+      || TELEMETRY_PROFILE_PARAM_NAMES.includes(name)
+    ) {
       merged.delete(name);
     }
   }

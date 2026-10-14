@@ -18,6 +18,11 @@ describe("configTargets", () => {
     expect([...targets.keys()].some((name) => name.startsWith("INS_ACCOFFS_"))).toBe(false);
   });
 
+  it("leaves parameters owned by the telemetry profiles to the profile", () => {
+    expect(configTargets(false).has("RAWES_TEL_HZ")).toBe(false);
+    expect(configTargets(true).has("RAWES_TEL_HZ")).toBe(false);
+  });
+
   it("adds the ArduPilot base file with --all", () => {
     expect(configTargets(true).size).toBeGreaterThan(configTargets(false).size);
   });

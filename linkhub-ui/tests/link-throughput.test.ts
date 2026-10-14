@@ -10,6 +10,7 @@ import type { LinkHubStatus } from "../src/types";
 
 const status: LinkHubStatus = {
   connected: true, ready: true, generation: "first", cursor: "v1:0", connection: "test",
+  port: null, baud: null,
   clock_epoch: 1, target_system: 1, target_component: 1, base_mode: "",
   custom_mode: 0, system_status: mavEnum(MavState.STANDBY), latest_time_boot_ms: 0,
   received_messages: 0, transmitted_messages: 0,

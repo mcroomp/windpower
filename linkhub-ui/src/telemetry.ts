@@ -1,6 +1,8 @@
 import type { LinkHubApi } from "./api";
 import { heartbeatState } from "./mav";
 import {
+  DEFAULT_TELEMETRY_PROFILE,
+  selectTelemetryProfile,
   TELEMETRY_PROFILES,
   type TelemetryProfile,
 } from "./telemetry-rates";
@@ -10,10 +12,11 @@ type Listener = (record: MessageRecord) => void;
 type GenerationListener = (generation: string, previous: string | null) => void;
 type ConnectionListener = (connected: boolean, error?: Error) => void;
 type StatusListener = (status: LinkHubStatus) => void;
+type WarningListener = (message: string) => void;
 
 const MAX_TELEMETRY_LAG_MS = 1_000;
 
-function cursorSequence(cursor: string): number {
+export function cursorSequence(cursor: string): number {
   const value = Number(cursor.split(":", 2)[1]);
   return Number.isFinite(value) ? value : 0;
 }
@@ -30,12 +33,14 @@ export class TelemetryStore {
   private readonly generationListeners = new Set<GenerationListener>();
   private readonly connectionListeners = new Set<ConnectionListener>();
   private readonly statusListeners = new Set<StatusListener>();
+  private readonly warningListeners = new Set<WarningListener>();
   private controller: AbortController | null = null;
   private cursor = "v1:0";
   private currentStatus: LinkHubStatus | null = null;
   private running: Promise<void> | null = null;
   private configuredGeneration: string | null = null;
-  private currentProfile: TelemetryProfile = "usb";
+  private manualProfileGeneration: string | null = null;
+  private currentProfile: TelemetryProfile = DEFAULT_TELEMETRY_PROFILE;
 
   constructor(private readonly api: LinkHubApi) {}
 
@@ -54,6 +59,7 @@ export class TelemetryStore {
     this.currentProfile = profile;
     this.configuredGeneration = null;
     if (this.currentStatus) {
+      this.manualProfileGeneration = this.currentStatus.generation;
       await this.configureDisplayTelemetry(this.currentStatus);
     }
   }
@@ -61,6 +67,12 @@ export class TelemetryStore {
   onStatus(listener: StatusListener): () => void {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
+  }
+
+  /** Profile parameters that could not be applied; rates are still in effect. */
+  onWarning(listener: WarningListener): () => void {
+    this.warningListeners.add(listener);
+    return () => this.warningListeners.delete(listener);
   }
 
   async start(): Promise<void> {
@@ -235,8 +247,22 @@ export class TelemetryStore {
       || status.generation === this.configuredGeneration) {
       return;
     }
-    await this.api.setMessageRates(TELEMETRY_PROFILES[this.currentProfile]);
+    if (this.manualProfileGeneration !== status.generation) {
+      this.currentProfile = selectTelemetryProfile(status.baud);
+    }
+    const profile = TELEMETRY_PROFILES[this.currentProfile];
+    await this.api.setMessageRates(profile.rates);
     this.configuredGeneration = status.generation;
+    for (const [name, value] of Object.entries(profile.params)) {
+      try {
+        await this.api.setParameter(name, value, false);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        for (const listener of this.warningListeners) {
+          listener(`Telemetry profile ${this.currentProfile}: ${name} not applied: ${reason}`);
+        }
+      }
+    }
   }
 
   private handleGenerationChange(status: LinkHubStatus): boolean {

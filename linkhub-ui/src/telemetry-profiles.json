@@ -1,0 +1,47 @@
+{
+  "default": "wifi",
+  "profiles": {
+    "wifi": {
+      "label": "Wi-Fi",
+      "minbaud": 1500000,
+      "rates": {
+        "ATTITUDE": 0,
+        "ATTITUDE_QUATERNION": 300,
+        "ATTITUDE_TARGET": 300,
+        "SERVO_OUTPUT_RAW": 300,
+        "PID_TUNING": 200,
+        "LOCAL_POSITION_NED": 10,
+        "BATTERY_STATUS": 2,
+        "RC_CHANNELS": 1,
+        "RPM": 100,
+        "EKF_STATUS_REPORT": 2,
+        "VIBRATION": 2,
+        "ESC_TELEMETRY_1_TO_4": 10
+      },
+      "params": {
+        "RAWES_TEL_HZ": 20
+      }
+    },
+    "radio": {
+      "label": "Radio",
+      "minbaud": 57600,
+      "rates": {
+        "ATTITUDE": 0,
+        "ATTITUDE_QUATERNION": 10,
+        "ATTITUDE_TARGET": 10,
+        "SERVO_OUTPUT_RAW": 10,
+        "PID_TUNING": 4,
+        "LOCAL_POSITION_NED": 5,
+        "BATTERY_STATUS": 1,
+        "RC_CHANNELS": 1,
+        "RPM": 5,
+        "EKF_STATUS_REPORT": 2,
+        "VIBRATION": 2,
+        "ESC_TELEMETRY_1_TO_4": 1
+      },
+      "params": {
+        "RAWES_TEL_HZ": 2
+      }
+    }
+  }
+}
