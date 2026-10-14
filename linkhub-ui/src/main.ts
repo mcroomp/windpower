@@ -20,6 +20,9 @@ import {
 } from "./telemetry-rates";
 import { Terminal } from "./terminal";
 import { MOTOR_TO_ROTOR_GEAR_RATIO } from "./vehicle-motion";
+import { YawModel } from "./yaw-model";
+import { YawPanel } from "./yaw-panel";
+import { YawRecorder } from "./yaw-recorder";
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -230,6 +233,46 @@ telemetry.onConnection((connected, error) => {
   }
 });
 telemetry.onWarning((message) => write(message, "error"));
+
+const scenePanel = required<HTMLElement>(".scene-panel");
+const yawToggle = required<HTMLButtonElement>("#yaw-toggle");
+const yawModel = new YawModel();
+const yawPanel = new YawPanel(required<HTMLElement>("#yaw-panel"), yawModel);
+const yawRecorder = new YawRecorder(api, yawModel, (error) => {
+  write(`Yaw chart: ${error.message}`, "error");
+});
+telemetry.onGeneration(() => yawModel.reset());
+
+async function configureYawModel(): Promise<void> {
+  try {
+    const [minimum, maximum, slope] = await Promise.all([
+      api.getParameter("SERVO9_MIN"),
+      api.getParameter("SERVO9_MAX"),
+      api.getParameter("RAWES_YAW_SLP"),
+    ]);
+    yawModel.configure(minimum.value, maximum.value, slope.value);
+  } catch (error) {
+    write(
+      `Yaw chart is using default servo range and yaw gain: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  }
+}
+
+yawToggle.addEventListener("click", () => {
+  const open = !yawPanel.isOpen;
+  scenePanel.classList.toggle("yaw-open", open);
+  yawToggle.setAttribute("aria-pressed", String(open));
+  if (open) {
+    yawModel.reset();
+    void configureYawModel();
+    yawRecorder.start();
+    yawPanel.open();
+  } else {
+    yawRecorder.stop();
+    yawPanel.close();
+  }
+});
 telemetry.onStatus((status) => {
   renderLinkThroughput(status);
   telemetryProfile.value = telemetry.profile;
