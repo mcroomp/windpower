@@ -13,6 +13,8 @@ export interface LinkHubStatus {
   connected: boolean;
   ready: boolean;
   connection: string;
+  port: string | null;
+  baud: number | null;
   clock_epoch: number;
   target_system: number;
   target_component: number;
@@ -49,11 +51,19 @@ export interface MessageRecord {
   message: string;
   fields: JsonObject;
   cursor: string;
+  sim_clock?: SimClock;
 }
 
 export interface MessageBatch {
   records: MessageRecord[];
   next_cursor: string;
+  next_clock?: SimClock;
+}
+
+export interface SimClock {
+  epoch: number;
+  time_boot_ms: number | null;
+  quality: string | null;
 }
 
 export interface ParameterResult {

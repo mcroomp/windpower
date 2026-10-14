@@ -52,6 +52,11 @@ INS_POS3_Z         0.0
 # Load rawes.lua from /APM/scripts at boot.
 SCR_ENABLE          1
 
+# Boot directly into ACRO, the canonical safe-off flight mode (see
+# design/arming.md). ArduPilot's default is STABILIZE, which would leave the
+# vehicle outside safe-off after every power cycle or reboot.
+INITIAL_MODE        1
+
 # Keep the DDFP yaw motor mapped at boot. ArduPilot forces DDFP to minimum in
 # SHUT_DOWN/GROUND_IDLE/SPOOLING_DOWN; runtime function remapping does not
 # rebuild SRV_Channels' live map.

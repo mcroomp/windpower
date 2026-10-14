@@ -73,3 +73,41 @@ def test_lua_emits_set_keys_in_one_array_at_tel_hz():
     # the anchor is unresolved).
     assert "YFF_T" not in values
     assert "ANCH_N" not in values
+
+
+def _emissions(sim: RawesLua, seconds: float) -> int:
+    """Number of diagnostic arrays Lua sends over `seconds` of 100 Hz ticks.
+
+    Compares the raw payload because only it carries the per-send timestamp;
+    the decoded `diag_array` is identical between sends when values are steady.
+    """
+    count = 0
+    last = sim._mock.diag_array_hex
+    for _ in range(round(seconds * 100)):
+        sim.tick()
+        current = sim._mock.diag_array_hex
+        if current != last:
+            count += 1
+        last = current
+    return count
+
+
+def test_lua_applies_tel_hz_changes_without_a_restart():
+    sim = RawesLua(mode=3)
+    sim.vehicle_mode = 20
+    sim.healthy = True
+    sim.armed = True
+    sim.set_param("RAWES_TEL_HZ", 2.0)
+    sim.run(1.0)
+    slow = _emissions(sim, 4.0)
+
+    sim.set_param("RAWES_TEL_HZ", 20.0)
+    fast = _emissions(sim, 4.0)
+
+    sim.set_param("RAWES_TEL_HZ", 0.0)
+    sim.run(0.1)
+    disabled = _emissions(sim, 4.0)
+
+    assert slow == pytest.approx(8, abs=1)
+    assert fast == pytest.approx(80, abs=2)
+    assert disabled == 0

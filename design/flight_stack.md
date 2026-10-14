@@ -279,7 +279,9 @@ this document owns only the behavioral contract.
 
 **Diagnostic telemetry (Lua → ground, `DEBUG_FLOAT_ARRAY`).** `rawes.lua`
 sends all of its diagnostic floats as one MAVLink `DEBUG_FLOAT_ARRAY`
-(msgid 350, `array_id` 1, `name` `RAWES_DIAG`) at `RAWES_TEL_HZ`, instead of
+(msgid 350, `array_id` 1, `name` `RAWES_DIAG`) at `RAWES_TEL_HZ` (read on every
+tick, so a write applies live; `0` disables; the LinkHub UI telemetry profile
+sets it, see [UI README](../linkhub-ui/README.md#telemetry-behavior)), instead of
 one `NAMED_VALUE_FLOAT` per value (about 5× fewer bytes on the link). It uses
 `mavlink.send_chan` on every channel slot, because `send_chan` targets one
 channel and ArduPilot's Lua bindings can only send message IDs compiled into

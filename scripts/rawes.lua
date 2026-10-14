@@ -89,7 +89,7 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
   RAWES_KD_EL   In-plane position rate-D gain              [rad/s/(m/s)]  default 0.0
   RAWES_CWMAX   Position rate saturation                   [rad/s]        default 0.6
   RAWES_SLW     Elevation/body_z slew rate limit           [rad/s]        default 0.40
-  RAWES_TEL_HZ  Diagnostic telemetry (DEBUG_FLOAT_ARRAY) rate   [Hz]           default 2.0
+  RAWES_TEL_HZ  Diagnostic telemetry (DEBUG_FLOAT_ARRAY) rate   [Hz]           default 2.0 (read live; 0 = off)
   RAWES_YFF_MAX Yaw trim clamp upper bound                 [throttle]     default 0.7
   RAWES_YFF_TAU Yaw trim low-pass time constant            [s]            default 0.3
   RAWES_TRP     Tension feedforward ramp time constant     [s]            default 2.0
@@ -573,8 +573,12 @@ end
 -- Rate gate for diagnostic telemetry (RAWES_TEL_HZ).  Returns true and
 -- advances the timer when it is time to emit; returns false otherwise.
 -- All diagnostics (YFF_T/U/GZ, etc.) share this single timer so they
--- are always emitted together at a consistent rate.
+-- are always emitted together at a consistent rate.  The parameter is read on
+-- every call so a ground-side write (telemetry profile switch) applies live;
+-- a rate <= 0 disables emission.
 local function _nvf_due(now)
+    TEL_HZ = p("RAWES_TEL_HZ", TEL_HZ)
+    if TEL_HZ <= 0 then return false end
     if _nvf_last_ms == nil or (now - _nvf_last_ms) >= (1000.0 / TEL_HZ) then
         _nvf_last_ms = now
         return true

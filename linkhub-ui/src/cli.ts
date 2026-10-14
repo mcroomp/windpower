@@ -39,6 +39,7 @@ async function main(): Promise<void> {
   const command = options.command.length > 0 ? options.command : ["help"];
   const api = new LinkHubApi(options.server);
   const telemetry = new TelemetryStore(api);
+  telemetry.onWarning((message) => write(message, "error"));
   let phase: PassivePhase = "idle";
   let finishRun: (() => void) | null = null;
   const passive = new PassiveController(
@@ -55,12 +56,18 @@ async function main(): Promise<void> {
   );
   const runner = new CommandRunner(api, telemetry, passive, write, nodeConfigProvider);
   const needsTelemetry = command[0] === "status"
-    || (command[0] === "run" && command[1] === "passive");
+    || (command[0] === "run" && command[1] === "passive")
+    || (command[0] === "compass" && command[1] === "calibrate");
 
   const stop = () => {
-    void passive.stop().catch((error: unknown) => {
+    const failed = (error: unknown) => {
       write(error instanceof Error ? error.message : String(error), "error");
-    });
+    };
+    if (runner.compassActive) {
+      void runner.cancelCompass().catch(failed);
+      return;
+    }
+    void passive.stop().catch(failed);
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);

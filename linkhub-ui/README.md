@@ -72,6 +72,12 @@ From the repository root:
 
 ```powershell
 .\rawes status
+.\rawes hub status
+.\rawes journal cursor
+.\rawes journal read v1:0 --messages HEARTBEAT,STATUSTEXT --direction rx
+.\rawes param get RAWES_MODE
+.\rawes param set RAWES_MODE 0
+.\rawes rates set ATTITUDE=0 RPM=5 BATTERY_STATUS=default
 .\rawes config check
 .\rawes run passive --duration 30 --trim thr=0.342
 .\rawes stop
@@ -91,8 +97,42 @@ Use a non-default LinkHub endpoint with either form:
 
 `run passive` keeps the Node process alive until its duration expires or it
 receives Ctrl+C. Both paths call the shared canonical safe-off implementation.
-The standalone `stop` command also applies that same safe-off sequence, so it
-can recover a run started by another CLI or browser process.
+The standalone `stop` command and its `disarm` alias apply that same safe-off
+sequence, so either can recover a run started by another CLI or browser
+process. `arm [--force]` sends and confirms a direct arm request; `--force`
+explicitly bypasses ArduPilot pre-arm checks and is only appropriate for
+secured bench hardware.
+
+The shared `LinkHubApi` also supports service and vehicle status, current
+journal cursor and flush, finite filtered message reads with generation-change
+protection, decoded message send, arbitrary `COMMAND_LONG`, typed single and
+batch parameter operations, confirmed mode/arm state transitions, and message
+rates/intervals. These methods are used by both the browser and Node runtimes.
+Core CLI commands print API records as JSON so they can be used in scripts:
+
+```text
+hub status
+journal cursor
+journal flush
+journal read AFTER [--messages A,B] [--direction rx|tx] [--wait S]
+                   [--limit N] [--collapse]
+                   [--expected-generation TOKEN]
+message send NAME COMPACT_JSON_FIELDS
+command send MAV_CMD_NAME [PARAM ...] [--timeout S]
+param get NAME
+param list
+param set NAME VALUE [--type MAV_PARAM_TYPE_NAME]
+mode set CUSTOM_MODE
+arm [--force]
+disarm
+rates set MESSAGE=HZ|default [MESSAGE=HZ|default ...]
+```
+
+`message send` accepts one compact JSON object argument, for example:
+
+```powershell
+.\rawes message send NAMED_VALUE_FLOAT '{"time_boot_ms":0,"name":"TEST","value":1}'
+```
 
 For an inspector session:
 
@@ -106,13 +146,54 @@ Supported terminal commands come from `src\terminal.ts`:
 
 ```text
 status
+hub status
+journal cursor|flush
+journal read AFTER [--messages A,B] [--direction rx|tx] [--wait S]
+message send NAME COMPACT_JSON_FIELDS
+command send MAV_CMD_NAME [PARAM ...] [--timeout S]
+param get NAME
+param list
+param set NAME VALUE [--type MAV_PARAM_TYPE_NAME]
+mode set CUSTOM_MODE
+arm [--force]
+disarm
+rates set MESSAGE=HZ|default [...]
 config check [--all]
 config apply [--all]
 run passive [--force] [--duration S] [--trim thr=0.342]
             [--roll DEG] [--pitch DEG] [--yaw DEG]
+compass calibrate [--mask N] [--retry] [--autosave] [--delay S]
+compass accept
+compass cancel
+reboot
 stop
 help
 ```
+
+`reboot` sends `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` (param1 = 1, a normal
+autopilot reboot). It refuses while the vehicle is armed (ArduPilot refuses too),
+during a passive run, and during a compass calibration. The link reconnects by
+itself. The vehicle comes back in its `INITIAL_MODE`, which the hardware defaults
+set to ACRO (`config apply` writes it); run `stop` afterwards to verify the
+canonical safe-off state.
+
+`compass calibrate` sends `MAV_CMD_DO_START_MAG_CAL` and streams
+`MAG_CAL_PROGRESS` and `MAG_CAL_REPORT` until every compass reports a final
+result (Esc, Ctrl-C in the CLI, or `compass cancel` aborts):
+
+- it refuses while armed or during a passive run, and the vehicle only
+  calibrates compasses that are healthy with `COMPASS_USE`/`USE2`/`USE3`
+  enabled, so a bare `FAILED` usually means one of those;
+- `--mask` selects compasses (bitmask 0..7, default 0 = all), `--retry` lets the
+  vehicle restart a failed fit, `--delay` waits S seconds before starting, and
+  `--autosave` saves on success;
+- without `--autosave` a successful result is held on the vehicle until
+  `compass accept`; offsets apply after a reboot, which the UI never triggers;
+- ArduPilot only streams these two messages when asked (they belong to its
+  EXTRA3 stream), so the command requests them at 2 Hz and returns them to the
+  vehicle's default rate when it ends. Reports repeat while a result is held,
+  so the UI prints each distinct result once and ignores anything the vehicle
+  sent before it accepted the start command.
 
 During a passive run, the browser hotkeys are:
 
@@ -146,19 +227,49 @@ the generated enums are tolerated, and commands and parameter types are sent as
 
 ## Telemetry behavior
 
-The selector beside the connection state applies one of two display telemetry
-profiles through `PUT /v1/mavlink/message-rates`. USB is the default.
+The selector beside the connection state is populated from
+`src\telemetry-profiles.json` and applies the selected display telemetry profile
+through `PUT /v1/mavlink/message-rates`. Each profile declares its minimum
+serial baud. On each connection generation, the UI selects the highest-rate
+profile whose minimum fits the detected baud; below every minimum it uses the
+lowest-rate profile. Connections without a baud, such as Wi-Fi/TCP, use the
+highest-rate profile. A manual selection remains active until the connection
+generation changes.
 
-| Message | USB | Radio |
+| Message | Wi-Fi | Radio |
 | --- | ---: | ---: |
 | `ATTITUDE` | off | off |
-| `ATTITUDE_QUATERNION` | 25 Hz | 10 Hz |
-| `ATTITUDE_TARGET` | 25 Hz | 10 Hz |
-| `SERVO_OUTPUT_RAW` | 25 Hz | 10 Hz |
+| `ATTITUDE_QUATERNION` | 300 Hz | 10 Hz |
+| `ATTITUDE_TARGET` | 300 Hz | 10 Hz |
+| `SERVO_OUTPUT_RAW` | 300 Hz | 10 Hz |
+| `PID_TUNING` (yaw) | 200 Hz | 4 Hz |
 | `LOCAL_POSITION_NED` | 10 Hz | 5 Hz |
 | `BATTERY_STATUS` | 2 Hz | 1 Hz |
 | `RC_CHANNELS` | 1 Hz | 1 Hz |
-| `RPM` | 5 Hz | 5 Hz |
+| `RPM` | 100 Hz | 5 Hz |
+| `EKF_STATUS_REPORT` | 2 Hz | 2 Hz |
+| `VIBRATION` | 2 Hz | 2 Hz |
+| `ESC_TELEMETRY_1_TO_4` (see note) | 10 Hz | 1 Hz |
+| `RAWES_TEL_HZ` (parameter, `DEBUG_FLOAT_ARRAY` rate) | 20 Hz | 2 Hz |
+
+Each profile in `src\telemetry-profiles.json` has `label`, `minbaud`, `rates`
+(message rates in Hz, `0` = off) and `params` (vehicle parameters written as
+floats after the rates). Rates and parameters persist on the vehicle, so every
+profile must set exactly the same keys; the loader throws otherwise, which
+guarantees that switching profiles never leaves a stale value behind. A rate
+the vehicle rejects fails the profile (later entries in the file are not
+applied, so keep optional messages last); a parameter that cannot be written,
+for example `RAWES_TEL_HZ` while `rawes.lua` is not loaded, is reported as a
+warning and the rates stay in effect. Parameters owned by a profile are
+excluded from `config check`/`config apply`, otherwise `config apply` would
+reset them to the `.parm` default.
+
+`ESC_TELEMETRY_1_TO_4` is the only ESC block ArduPilot accepts an interval for
+(`5_TO_8` and `9_TO_12` return `MAV_RESULT_DENIED`, which would fail the whole
+profile). The request makes the autopilot emit whichever blocks have data, so
+the yaw motor on output 9 arrives as `ESC_TELEMETRY_9_TO_12`. While disarmed
+ArduPilot holds the DShot output off, so no ESC frames arrive until the motor
+is armed.
 
 `ATTITUDE` is requested at rate 0, which disables it on the vehicle: it is
 redundant with `ATTITUDE_QUATERNION`, which carries the same body rates, and
@@ -166,8 +277,17 @@ the overlay's roll/pitch/yaw are computed from the quaternion
 (`src\attitude.ts`, ZYX convention). Other tools that need `ATTITUDE` (for
 example `calibrate`) request their own stream when they run.
 
-Changing the selector applies the new profile immediately. The selected profile
-is reapplied after a LinkHub generation change for the lifetime of the page.
+Changing the selector applies the new profile immediately. A manual choice is
+kept until the connection generation changes, then the baud-based selection
+runs again.
+
+The Wi-Fi profile is sized for the DroneBridge link measured at 1500000 baud
+(about 73 KB/s, see [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md)), so its
+`minbaud` is 1500000; slower serial links get the Radio profile. It is only
+smooth while no MAVFTP/DataFlash download is running. `PID_TUNING` is sent by
+the autopilot only for axes in `GCS_PID_MASK` (hardware defaults set it to 4,
+yaw). Rates persist on the vehicle, so every profile sets `PID_TUNING`
+explicitly.
 
 The UI also consumes other messages when present:
 

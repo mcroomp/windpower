@@ -14,7 +14,10 @@ import { PassiveController, type PassivePhase } from "./passive";
 import { VehicleScene } from "./scene";
 import { decodeH3Swashplate, swashControlPositions } from "./swashplate";
 import { TelemetryStore } from "./telemetry";
-import type { TelemetryProfile } from "./telemetry-rates";
+import {
+  isTelemetryProfile,
+  TELEMETRY_PROFILE_OPTIONS,
+} from "./telemetry-rates";
 import { Terminal } from "./terminal";
 import { MOTOR_TO_ROTOR_GEAR_RATIO } from "./vehicle-motion";
 
@@ -44,6 +47,11 @@ const targetErrorWidget = required<HTMLElement>("#target-error-widget");
 const targetErrorDot = required<HTMLElement>("#target-error-dot");
 const targetErrorValue = required<HTMLElement>("#target-error-value");
 let swashLimits: { min: number; max: number } | null = null;
+
+for (const profile of TELEMETRY_PROFILE_OPTIONS) {
+  telemetryProfile.add(new Option(profile.label, profile.name));
+}
+telemetryProfile.value = telemetry.profile;
 
 let terminal: Terminal;
 const write = (message: string, kind: "info" | "error" | "fc" = "info") => {
@@ -221,9 +229,18 @@ telemetry.onConnection((connected, error) => {
     write("Telemetry connection restored.");
   }
 });
-telemetry.onStatus(renderLinkThroughput);
+telemetry.onWarning((message) => write(message, "error"));
+telemetry.onStatus((status) => {
+  renderLinkThroughput(status);
+  telemetryProfile.value = telemetry.profile;
+});
 telemetryProfile.addEventListener("change", async () => {
-  const profile = telemetryProfile.value as TelemetryProfile;
+  const profile = telemetryProfile.value;
+  if (!isTelemetryProfile(profile)) {
+    write(`Unknown telemetry profile ${profile}.`, "error");
+    telemetryProfile.value = telemetry.profile;
+    return;
+  }
   telemetryProfile.disabled = true;
   try {
     await telemetry.setProfile(profile);
