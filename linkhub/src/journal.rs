@@ -1,6 +1,6 @@
 use std::{
-    collections::HashMap,
-    io,
+    collections::{BTreeMap, HashMap},
+    io::{self, Cursor},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -9,10 +9,9 @@ use std::{
     time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::{
     fs,
-    io::AsyncReadExt,
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
     time,
@@ -21,12 +20,8 @@ use uuid::Uuid;
 
 use crate::records::{DiagnosticEvent, JournalRecord, RecordPayload, SimClock, SimTimeQuality};
 
-// Chunk file layout: magic, min ingest ns (u64 LE), max ingest ns (u64 LE),
-// then the MessagePack `Chunk`. The time header lets range reads skip files
-// without decoding them; min/max (not first/last) tolerate wall-clock steps.
-const CHUNK_MAGIC: &[u8; 8] = b"LHCHNK02";
-const CHUNK_HEADER_LEN: usize = CHUNK_MAGIC.len() + 16;
-const CHUNK_VERSION: u16 = 2;
+const MCAP_PROFILE: &str = "linkhub";
+const MCAP_TOPIC: &str = "linkhub/records";
 
 /// Inclusive host-ingest-time window, in wall-clock nanoseconds.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,25 +63,16 @@ impl JournalConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Chunk {
-    version: u16,
-    run_id: Uuid,
-    first_sequence: u64,
-    last_sequence: u64,
-    records: Vec<JournalRecord>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
     #[error("journal task is unavailable")]
     Unavailable,
     #[error("journal I/O failed: {0}")]
     Io(#[from] io::Error),
-    #[error("journal encoding failed: {0}")]
-    Encode(#[from] rmp_serde::encode::Error),
-    #[error("journal decoding failed: {0}")]
-    Decode(#[from] rmp_serde::decode::Error),
+    #[error("journal MCAP operation failed: {0}")]
+    Mcap(#[from] mcap::McapError),
+    #[error("journal JSON operation failed: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("{0} is not a supported LinkHub journal chunk")]
     UnsupportedChunk(PathBuf),
     #[error("diagnostic event run ID does not match this journal")]
@@ -461,49 +447,59 @@ async fn flush_pending(
     let records = std::mem::take(pending);
     let first_sequence = records[0].sequence;
     let last_sequence = records[records.len() - 1].sequence;
-    let chunk = Chunk {
-        version: CHUNK_VERSION,
-        run_id: config.run_id,
-        first_sequence,
-        last_sequence,
-        records,
-    };
-    let encoded = match rmp_serde::to_vec_named(&chunk) {
+    let encoded = match encode_chunk(config.run_id, &records) {
         Ok(encoded) => encoded,
         Err(error) => {
-            pending.extend(chunk.records);
-            return Err(JournalError::Encode(error));
+            pending.extend(records);
+            return Err(error);
         }
     };
     let final_path = chunk_path(&config.directory, first_sequence, last_sequence);
-    let temporary_path = final_path.with_extension("lhc.tmp");
-    let (min_ns, max_ns) =
-        chunk
-            .records
-            .iter()
-            .fold((u64::MAX, u64::MIN), |(min_ns, max_ns), record| {
-                (
-                    min_ns.min(record.ingest_time_ns),
-                    max_ns.max(record.ingest_time_ns),
-                )
-            });
-    let mut bytes = Vec::with_capacity(CHUNK_HEADER_LEN + encoded.len());
-    bytes.extend_from_slice(CHUNK_MAGIC);
-    bytes.extend_from_slice(&min_ns.to_le_bytes());
-    bytes.extend_from_slice(&max_ns.to_le_bytes());
-    bytes.extend_from_slice(&encoded);
+    let temporary_path = final_path.with_extension("mcap.tmp");
     let result = async {
-        fs::write(&temporary_path, bytes).await?;
+        fs::write(&temporary_path, encoded).await?;
         fs::rename(temporary_path, final_path).await
     }
     .await;
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
-            pending.extend(chunk.records);
+            pending.extend(records);
             Err(JournalError::Io(error))
         }
     }
+}
+
+fn encode_chunk(run_id: Uuid, records: &[JournalRecord]) -> Result<Vec<u8>, JournalError> {
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let options = mcap::WriteOptions::new()
+            .profile(MCAP_PROFILE)
+            .library(concat!("linkhub/", env!("CARGO_PKG_VERSION")));
+        let mut writer = mcap::Writer::with_options(&mut cursor, options)?;
+        let metadata = BTreeMap::from([
+            ("run_id".to_owned(), run_id.to_string()),
+            (
+                "schema_version".to_owned(),
+                crate::records::SCHEMA_VERSION.to_string(),
+            ),
+        ]);
+        let channel_id = writer.add_channel(0, MCAP_TOPIC, "json", &metadata)?;
+        for record in records {
+            let data = serde_json::to_vec(record)?;
+            writer.write_to_known_channel(
+                &mcap::records::MessageHeader {
+                    channel_id,
+                    sequence: u32::try_from(record.sequence).unwrap_or_default(),
+                    log_time: record.ingest_time_ns,
+                    publish_time: record.ingest_time_ns,
+                },
+                &data,
+            )?;
+        }
+        writer.finish()?;
+    }
+    Ok(cursor.into_inner())
 }
 
 async fn read_flushed_after(
@@ -516,8 +512,13 @@ async fn read_flushed_after(
     let mut paths = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().is_some_and(|extension| extension == "lhc") {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "mcap")
+        {
             paths.push(path);
+        } else if path.extension().is_some_and(|extension| extension == "lhc") {
+            return Err(JournalError::UnsupportedChunk(path));
         }
     }
     paths.sort_unstable();
@@ -527,23 +528,16 @@ async fn read_flushed_after(
         if chunk_last_sequence(&path).is_some_and(|last_sequence| last_sequence <= after) {
             continue;
         }
+        let bytes = fs::read(&path).await?;
         if window != TimeWindow::default() {
-            let (min_ns, max_ns) = read_chunk_times(&path).await?;
+            let (min_ns, max_ns) = chunk_times(&path, &bytes)?;
             if !window.overlaps(min_ns, max_ns) {
                 continue;
             }
         }
-        let bytes = fs::read(&path).await?;
-        if bytes.len() < CHUNK_HEADER_LEN || !bytes.starts_with(CHUNK_MAGIC) {
-            return Err(JournalError::UnsupportedChunk(path));
-        }
-        let chunk: Chunk = rmp_serde::from_slice(&bytes[CHUNK_HEADER_LEN..])?;
-        if chunk.last_sequence <= after {
-            continue;
-        }
+        let chunk = decode_chunk(&path, &bytes)?;
         records.extend(
             chunk
-                .records
                 .into_iter()
                 .filter(|record| record.sequence > after)
                 .take(max_records - records.len()),
@@ -555,20 +549,31 @@ async fn read_flushed_after(
     Ok(records)
 }
 
+#[cfg(test)]
 async fn read_chunk_times(path: &Path) -> Result<(u64, u64), JournalError> {
-    let mut header = [0_u8; CHUNK_HEADER_LEN];
-    let mut file = fs::File::open(path).await?;
-    if file.read_exact(&mut header).await.is_err() || !header.starts_with(CHUNK_MAGIC) {
-        return Err(JournalError::UnsupportedChunk(path.to_owned()));
-    }
-    let time = |offset: usize| {
-        u64::from_le_bytes(
-            header[offset..offset + 8]
-                .try_into()
-                .expect("header slice is eight bytes"),
-        )
-    };
-    Ok((time(CHUNK_MAGIC.len()), time(CHUNK_MAGIC.len() + 8)))
+    let bytes = fs::read(path).await?;
+    chunk_times(path, &bytes)
+}
+
+fn chunk_times(path: &Path, bytes: &[u8]) -> Result<(u64, u64), JournalError> {
+    let summary = mcap::Summary::read(bytes)?
+        .ok_or_else(|| JournalError::UnsupportedChunk(path.to_owned()))?;
+    let stats = summary
+        .stats
+        .ok_or_else(|| JournalError::UnsupportedChunk(path.to_owned()))?;
+    Ok((stats.message_start_time, stats.message_end_time))
+}
+
+fn decode_chunk(path: &Path, bytes: &[u8]) -> Result<Vec<JournalRecord>, JournalError> {
+    mcap::MessageStream::new(bytes)?
+        .map(|message| {
+            let message = message?;
+            if message.channel.topic != MCAP_TOPIC || message.channel.message_encoding != "json" {
+                return Err(JournalError::UnsupportedChunk(path.to_owned()));
+            }
+            Ok(serde_json::from_slice(&message.data)?)
+        })
+        .collect()
 }
 
 pub async fn read_persisted(
@@ -613,7 +618,7 @@ fn estimated_size(record: &JournalRecord) -> usize {
 }
 
 fn chunk_path(directory: &Path, first_sequence: u64, last_sequence: u64) -> PathBuf {
-    directory.join(format!("{first_sequence:020}-{last_sequence:020}.lhc"))
+    directory.join(format!("{first_sequence:020}-{last_sequence:020}.mcap"))
 }
 
 fn chunk_last_sequence(path: &Path) -> Option<u64> {
@@ -827,9 +832,7 @@ mod tests {
     async fn replay_skips_chunks_ending_at_or_before_cursor() {
         let temp = TempDir::new().expect("temp directory");
         let path = chunk_path(temp.path(), 1, 10);
-        let mut invalid_chunk = CHUNK_MAGIC.to_vec();
-        invalid_chunk.push(0xff);
-        fs::write(path, invalid_chunk).await.expect("old chunk");
+        fs::write(path, b"not an MCAP").await.expect("old chunk");
 
         let records = read_flushed_after(temp.path(), 10, TimeWindow::default(), usize::MAX)
             .await
@@ -855,12 +858,28 @@ mod tests {
             .expect("chunk header");
         assert!(min_ns > 0 && min_ns == max_ns);
 
-        // A chunk whose header is outside the window must not be decoded.
-        let mut undecodable = CHUNK_MAGIC.to_vec();
-        undecodable.extend_from_slice(&1_u64.to_le_bytes());
-        undecodable.extend_from_slice(&2_u64.to_le_bytes());
-        undecodable.push(0xc1);
-        fs::write(chunk_path(temp.path(), 2, 2), undecodable)
+        // A valid MCAP outside the window must not have its invalid JSON decoded.
+        let invalid_path = chunk_path(temp.path(), 2, 2);
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = mcap::Writer::new(&mut cursor).expect("MCAP writer");
+            let channel_id = writer
+                .add_channel(0, MCAP_TOPIC, "json", &BTreeMap::new())
+                .expect("channel");
+            writer
+                .write_to_known_channel(
+                    &mcap::records::MessageHeader {
+                        channel_id,
+                        sequence: 2,
+                        log_time: 1,
+                        publish_time: 1,
+                    },
+                    b"not JSON",
+                )
+                .expect("message");
+            writer.finish().expect("finish");
+        }
+        fs::write(invalid_path, cursor.into_inner())
             .await
             .expect("out-of-window chunk");
 
@@ -877,21 +896,35 @@ mod tests {
         let unsupported = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
             .await
             .expect_err("full read must decode, and reject, the corrupt chunk");
-        assert!(matches!(unsupported, JournalError::Decode(_)));
+        assert!(matches!(unsupported, JournalError::Json(_)));
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
     }
 
     #[tokio::test]
-    async fn rejects_chunks_without_current_magic() {
+    async fn rejects_non_mcap_chunks() {
         let temp = TempDir::new().expect("temp directory");
-        fs::write(chunk_path(temp.path(), 1, 1), b"LHCHNK01\x80")
+        fs::write(chunk_path(temp.path(), 1, 1), b"not an MCAP")
             .await
-            .expect("legacy chunk");
+            .expect("invalid chunk");
         let error = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
             .await
-            .expect_err("legacy chunk");
+            .expect_err("invalid chunk");
+        assert!(matches!(error, JournalError::Mcap(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_legacy_lhc_chunks() {
+        let temp = TempDir::new().expect("temp directory");
+        let path = temp
+            .path()
+            .join("00000000000000000001-00000000000000000001.lhc");
+        fs::write(path, b"LHCHNK02").await.expect("legacy chunk");
+
+        let error = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
+            .await
+            .expect_err("legacy chunks require an explicit migration");
         assert!(matches!(error, JournalError::UnsupportedChunk(_)));
     }
 

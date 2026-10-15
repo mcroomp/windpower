@@ -258,7 +258,7 @@ SITL-only lockstep scheduling behavior (not a hardware arm/disarm fact) is docum
 
 ## Evidence and tests
 
-Use LinkHub as the sole MAVLink owner and evidence source. Its `.lhc` journal
+Use LinkHub as the sole MAVLink owner and evidence source. Its `.mcap` journal
 contains RX, TX, host ingest time, and simulation clock in one global order.
 Use `linkhub query`; do not create duplicate MAVLink JSONL logs.
 

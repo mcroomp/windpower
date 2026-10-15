@@ -305,7 +305,7 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8999/v1/journal/flush
 
 ## Query a saved run
 
-`linkhub query` reads immutable `.lhc` chunks directly. The positional path may
+`linkhub query` reads immutable `.mcap` chunks directly. The positional path may
 be:
 
 - a run directory containing `journal\`;

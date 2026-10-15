@@ -31,15 +31,22 @@ ID, and versioned payload. HTTP cursors are opaque encodings of the global
 sequence.
 
 The journal actor is the only sequence allocator and chunk writer. Records
-accumulate in an in-memory chunk. A chunk is written as one immutable `.lhc`
+accumulate in an in-memory chunk. A chunk is written as one immutable `.mcap`
 file when it reaches the configured record/byte limit (4096 records / 4 MiB)
 or the 60-second flush interval. Live readers never wait for a flush: HTTP
-reads merge flushed chunks with the in-memory chunk. Each file is the magic
-`LHCHNK02`, the minimum and maximum host ingest time (two little-endian `u64`
-nanosecond values), then the MessagePack chunk; time-range reads use this
-header to skip files without decoding them. Files with any other magic are
-rejected rather than skipped. LinkHub does not fsync or repair partial tail
-files. A clean shutdown flushes the active chunk.
+reads merge flushed chunks with the in-memory chunk. Each file is a complete
+MCAP recording with a `linkhub/records` JSON channel, Zstandard-compressed data
+chunks, CRCs, message indexes, and summary statistics. Time-range reads use the
+MCAP summary's message-time bounds to skip files without decoding their
+messages. Legacy `.lhc` chunks are rejected rather than silently skipped.
+LinkHub writes each file to a temporary path and atomically renames it after
+the MCAP footer is complete. A clean shutdown flushes the active chunk.
+
+The MCAP registry does not define a MAVLink message or schema encoding.
+LinkHub therefore stores its canonical `JournalRecord` envelope as JSON on the
+`linkhub/records` channel, including the original MAVLink frame bytes. This
+keeps global sequence, correlation, decoded fields, and simulation-clock
+metadata together without inventing a nominally standard MAVLink adapter.
 
 For a replay, the actor first fixes one tail sequence and snapshots the active
 chunk; the reader then merges that snapshot with completed chunks through the
@@ -276,7 +283,7 @@ rate leases, and adaptive shedding.
 
 For a running LinkHub, prefer the live HTTP range query on
 `GET /v1/mavlink/messages`; `linkhub query` is the offline reader for
-immutable `.lhc` chunks of stopped runs.
+immutable `.mcap` chunks of stopped runs.
 
 The query CLI accepts a journal directory, its parent run directory, or a data
 directory containing exactly one run. Parent options `--after <sequence>` and
