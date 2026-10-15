@@ -596,14 +596,37 @@ class LinkHubClient:
 
     def upload_file(self, local_path: str | Path, remote_path: str) -> int:
         content = Path(local_path).read_bytes()
-        result = self._request_json(
+        info = self._request_json(
             "PUT",
             "/v1/mavlink/files?" + urllib.parse.urlencode({"path": remote_path}),
             content=content,
             content_type="application/octet-stream",
-            timeout=60.0,
+            timeout=10.0,
         )
-        return int(result["bytes"])
+        transfer_id = int(info["id"])
+        try:
+            while info["state"] in ("queued", "running"):
+                time.sleep(0.25)
+                info = self.transfer(transfer_id)
+            if info["state"] != "complete":
+                raise LinkHubError(
+                    f"transfer {transfer_id} {info['state']}: "
+                    f"{info.get('error') or 'no detail'}"
+                )
+            written = int(info["done_bytes"])
+            if written != len(content):
+                raise LinkHubError(
+                    f"transfer {transfer_id} completed with {written} of "
+                    f"{len(content)} bytes"
+                )
+        except BaseException:
+            try:
+                self.cancel_transfer(transfer_id)
+            except LinkHubError:
+                pass
+            raise
+        self.cancel_transfer(transfer_id)
+        return written
 
     def remove_file(self, path: str) -> None:
         self._request_json(

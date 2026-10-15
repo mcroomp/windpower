@@ -27,6 +27,7 @@ const KEPT_CONTENT_BYTES: usize = 128 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum TransferKind {
     FtpDownload,
+    FtpUpload,
     LogDownload,
 }
 
@@ -53,6 +54,8 @@ impl TransferState {
 pub enum Outcome {
     /// The verified content, held for collection.
     Complete(Vec<u8>),
+    /// A verified write completed; there is no content for the client to collect.
+    CompleteNoContent,
     Failed(String),
     Cancelled,
 }
@@ -409,6 +412,11 @@ impl TransferHandle {
                         DiagnosticLevel::Info,
                     )
                 }
+                Outcome::CompleteNoContent => (
+                    TransferState::Complete,
+                    "transfer.complete",
+                    DiagnosticLevel::Info,
+                ),
                 Outcome::Failed(error) => {
                     job.info.error = Some(error);
                     (
@@ -488,6 +496,28 @@ mod tests {
         assert_eq!(done.state, TransferState::Complete);
         assert!(done.content_available);
         assert_eq!(registry.content(id).unwrap().len(), 1000);
+    }
+
+    #[tokio::test]
+    async fn a_completed_upload_has_no_collectable_content() {
+        let (registry, _temp, _journal) = registry().await;
+        let handle = registry.submit(TransferKind::FtpUpload, "/APM/scripts/rawes.lua");
+        let id = handle.id();
+        handle.start(1000).await;
+        handle
+            .finish(
+                Outcome::CompleteNoContent,
+                1000,
+                1000,
+                TransferStats::default(),
+            )
+            .await;
+
+        let done = registry.get(id).unwrap();
+        assert_eq!(done.state, TransferState::Complete);
+        assert_eq!(done.kind, TransferKind::FtpUpload);
+        assert!(!done.content_available);
+        assert_eq!(registry.content(id), Err(ContentError::Gone));
     }
 
     #[tokio::test]

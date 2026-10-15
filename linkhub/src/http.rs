@@ -1173,12 +1173,14 @@ async fn upload_file(
     State(state): State<Arc<AppState>>,
     Query(query): Query<FileQuery>,
     body: Bytes,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<(StatusCode, Json<TransferInfo>), ApiError> {
     let path = required_path(query.path)?;
-    let bytes = require_operations(&state)?
-        .upload_file(&path, body.to_vec(), Duration::from_secs(60))
-        .await?;
-    Ok(Json(json!({"path": path, "bytes": bytes})))
+    let info = require_operations(&state)?.start_file_upload(
+        &path,
+        body.to_vec(),
+        Duration::from_secs(15),
+    );
+    Ok((StatusCode::ACCEPTED, Json(info)))
 }
 
 async fn remove_file(
@@ -2153,6 +2155,27 @@ mod tests {
         })
         .await
         .expect("transfer cancelled");
+
+        let (status, upload) = call(
+            &app,
+            Request::put("/v1/mavlink/files?path=%2FAPM%2Fscripts%2Frawes.lua")
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from("print('rawes')"))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(upload["kind"], "ftp_upload");
+        assert_eq!(upload["target"], "/APM/scripts/rawes.lua");
+        let upload_id = upload["id"].as_u64().expect("upload transfer id");
+        let (status, _) = call(
+            &app,
+            Request::delete(format!("/v1/mavlink/transfers/{upload_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
 
         link_task.abort();
         peer.abort();

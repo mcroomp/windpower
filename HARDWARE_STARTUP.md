@@ -1,6 +1,6 @@
 # Hardware Startup Investigation
 
-Last updated: 2026-10-06
+Last updated: 2026-10-15
 
 This file is a chronological hardware-session evidence log for startup-related
 swash, attitude, and anti-rotation-motor observations. It is not the owner for
@@ -72,6 +72,25 @@ These remain current and safety-relevant:
 Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
+
+### 2026-10-15 direct-USB Lua deployment and observable uploads
+
+- Auto-detection selected `COM5` at 115200 through LinkHub. Windows and
+  LinkHub both reported the Pixhawk 6C identity `VID:PID=3162:0053`, serial
+  `160031001751343131363538`; the vehicle was disarmed in ACRO.
+- The first 80,512-byte `rawes.lua` upload hit the old synchronous 60-second
+  HTTP/MAVFTP deadline and left a zero-byte remote file. LinkHub uploads were
+  moved to background `ftp_upload` transfer jobs with progress, retry/loss
+  statistics, cancellation, a progress-resetting stall deadline, and remote
+  CRC verification. The Python client now starts and polls that job.
+- After rebuilding and restarting LinkHub, the standard calibration upload
+  completed and `/APM/scripts/rawes.lua` listed at 80,512 bytes. The scripting
+  engine was restarted, the Pixhawk was rebooted, and no-argument auto-detection
+  reselected the same direct-USB interface.
+- Final cleanup verified canonical safe-off: disarmed, ACRO, `RAWES_MODE=0`,
+  `SERVO9_FUNCTION=36`, `H_YAW_TRIM=0`, `H_FLYBAR_MODE=1`, `H_SV_MAN=0`, and
+  output 9 off. Live `DEBUG_FLOAT_ARRAY` traffic after reboot confirmed the Lua
+  script was running.
 
 ### 2026-10-07 DroneBridge ESP32-C6 Wi-Fi telemetry link
 

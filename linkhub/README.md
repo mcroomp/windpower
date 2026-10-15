@@ -153,7 +153,7 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/mavlink/parameters/{name}` | `GET`, `PUT` | Read or write one parameter. |
 | `/v1/mavlink/message-rates` | `PUT` | Set explicit message-rate requests. |
 | `/v1/mavlink/message-rates/{message}` | `GET` | Read one configured message interval. |
-| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/upload/remove by `path`. |
+| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/start-upload/remove by `path`. |
 | `/v1/mavlink/directories` | `POST` | MAVFTP create-directory operation. |
 | `/v1/mavlink/logs` | `GET` | List DataFlash logs. |
 | `/v1/mavlink/transfers` | `GET`, `POST` | List background file/log downloads, or start one. |
@@ -186,8 +186,9 @@ Routes come from `linkhub\src\http.rs`.
   bring back a stream that another client had requested at runtime. The
   vehicle may refuse a rate (for example 400 Hz on ArduCopter 4.7.1 returns
   `MAV_RESULT_DENIED` and the request fails with 400).
-- `GET /v1/mavlink/files` requires `path` and lists a directory. Downloads
-  are transfers (below).
+- `GET /v1/mavlink/files` requires `path` and lists a directory. `PUT` starts
+  an `ftp_upload` transfer and returns its record with HTTP 202; downloads are
+  transfers too (below).
 - Parameter names are trimmed and uppercased, then must match
   `[A-Z][A-Z0-9_]{0,15}`. Malformed names are rejected before LinkHub sends a
   MAVLink parameter request.
@@ -200,6 +201,7 @@ slow or lossy radio link: start, poll, then collect.
 ```
 POST   /v1/mavlink/transfers   {"kind":"ftp_download","path":"/APM/LOGS/00000017.BIN"}
 POST   /v1/mavlink/transfers   {"kind":"log_download","log_id":17}
+PUT    /v1/mavlink/files?path=/APM/scripts/rawes.lua   raw file bytes; starts ftp_upload
 GET    /v1/mavlink/transfers/{id}           progress, rate, loss stats
 GET    /v1/mavlink/transfers/{id}/content   200 bytes | 409 not complete | 410 evicted
 DELETE /v1/mavlink/transfers/{id}           202 cancel requested | 200 finished job removed
@@ -207,6 +209,8 @@ DELETE /v1/mavlink/transfers/{id}           202 cancel requested | 200 finished 
 
 - `ftp_download` accepts `verify_crc` (default `true`) and `stall_timeout_ms`
   (default 15000, fail after this long without a contiguous byte).
+- `ftp_upload` reports the acknowledged contiguous byte count, retries, and
+  rate; it completes only after the remote CRC matches the uploaded bytes.
 - `log_download` accepts `packet_timeout_ms` (default 2000) and `max_retries`
   (default 10).
 - `POST` returns `202` with a status object: `id`, `kind`, `target`, `state`
