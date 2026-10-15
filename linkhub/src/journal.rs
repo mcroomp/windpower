@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    io::{self, Cursor},
+    io::{self, Cursor, Seek, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -22,6 +22,7 @@ use crate::records::{DiagnosticEvent, JournalRecord, RecordPayload, SimClock, Si
 
 const MCAP_PROFILE: &str = "linkhub";
 const MCAP_TOPIC: &str = "linkhub/records";
+const MCAP_MESSAGE_ENCODING: &str = "msgpack";
 
 /// Inclusive host-ingest-time window, in wall-clock nanoseconds.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -71,8 +72,10 @@ pub enum JournalError {
     Io(#[from] io::Error),
     #[error("journal MCAP operation failed: {0}")]
     Mcap(#[from] mcap::McapError),
-    #[error("journal JSON operation failed: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("journal MessagePack encoding failed: {0}")]
+    Encode(#[from] rmp_serde::encode::Error),
+    #[error("journal MessagePack decoding failed: {0}")]
+    Decode(#[from] rmp_serde::decode::Error),
     #[error("{0} is not a supported LinkHub journal chunk")]
     UnsupportedChunk(PathBuf),
     #[error("diagnostic event run ID does not match this journal")]
@@ -330,7 +333,9 @@ async fn run_journal(
             biased;
             command = receiver.recv() => {
                 let Some(command) = command else {
-                    let _ = flush_pending(&config, &mut pending).await;
+                    if let Err(error) = finish_journal(&config, &mut pending).await {
+                        tracing::error!(%error, "journal finalization failed");
+                    }
                     return;
                 };
                 match command {
@@ -420,7 +425,7 @@ async fn run_journal(
                         let _ = reply.send(result);
                     }
                     Command::Shutdown { reply } => {
-                        let result = flush_pending(&config, &mut pending).await;
+                        let result = finish_journal(&config, &mut pending).await;
                         let _ = reply.send(result);
                         return;
                     }
@@ -435,6 +440,14 @@ async fn run_journal(
             }
         }
     }
+}
+
+async fn finish_journal(
+    config: &JournalConfig,
+    pending: &mut Vec<JournalRecord>,
+) -> Result<(), JournalError> {
+    flush_pending(config, pending).await?;
+    compact_segments(config)
 }
 
 async fn flush_pending(
@@ -473,20 +486,9 @@ async fn flush_pending(
 fn encode_chunk(run_id: Uuid, records: &[JournalRecord]) -> Result<Vec<u8>, JournalError> {
     let mut cursor = Cursor::new(Vec::new());
     {
-        let options = mcap::WriteOptions::new()
-            .profile(MCAP_PROFILE)
-            .library(concat!("linkhub/", env!("CARGO_PKG_VERSION")));
-        let mut writer = mcap::Writer::with_options(&mut cursor, options)?;
-        let metadata = BTreeMap::from([
-            ("run_id".to_owned(), run_id.to_string()),
-            (
-                "schema_version".to_owned(),
-                crate::records::SCHEMA_VERSION.to_string(),
-            ),
-        ]);
-        let channel_id = writer.add_channel(0, MCAP_TOPIC, "json", &metadata)?;
+        let (mut writer, channel_id) = create_writer(&mut cursor, run_id)?;
         for record in records {
-            let data = serde_json::to_vec(record)?;
+            let data = rmp_serde::to_vec_named(record)?;
             writer.write_to_known_channel(
                 &mcap::records::MessageHeader {
                     channel_id,
@@ -500,6 +502,77 @@ fn encode_chunk(run_id: Uuid, records: &[JournalRecord]) -> Result<Vec<u8>, Jour
         writer.finish()?;
     }
     Ok(cursor.into_inner())
+}
+
+fn create_writer<W: Write + Seek>(
+    output: W,
+    run_id: Uuid,
+) -> Result<(mcap::Writer<W>, u16), JournalError> {
+    let options = mcap::WriteOptions::new()
+        .profile(MCAP_PROFILE)
+        .library(concat!("linkhub/", env!("CARGO_PKG_VERSION")));
+    let mut writer = mcap::Writer::with_options(output, options)?;
+    let metadata = BTreeMap::from([
+        ("run_id".to_owned(), run_id.to_string()),
+        (
+            "schema_version".to_owned(),
+            crate::records::SCHEMA_VERSION.to_string(),
+        ),
+    ]);
+    let channel_id = writer.add_channel(0, MCAP_TOPIC, MCAP_MESSAGE_ENCODING, &metadata)?;
+    Ok((writer, channel_id))
+}
+
+fn compact_segments(config: &JournalConfig) -> Result<(), JournalError> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(&config.directory)? {
+        let path = entry?.path();
+        if chunk_last_sequence(&path).is_some() {
+            paths.push(path);
+        }
+    }
+    paths.sort_unstable();
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let final_path = config.directory.join("journal.mcap");
+    if paths.len() == 1 {
+        std::fs::rename(&paths[0], final_path)?;
+        return Ok(());
+    }
+
+    let temporary_path = final_path.with_extension("mcap.tmp");
+    {
+        let file = std::fs::File::create(&temporary_path)?;
+        let (mut writer, channel_id) = create_writer(file, config.run_id)?;
+        for path in &paths {
+            let bytes = std::fs::read(path)?;
+            for message in mcap::MessageStream::new(&bytes)? {
+                let message = message?;
+                if message.channel.topic != MCAP_TOPIC
+                    || message.channel.message_encoding != MCAP_MESSAGE_ENCODING
+                {
+                    return Err(JournalError::UnsupportedChunk(path.clone()));
+                }
+                writer.write_to_known_channel(
+                    &mcap::records::MessageHeader {
+                        channel_id,
+                        sequence: message.sequence,
+                        log_time: message.log_time,
+                        publish_time: message.publish_time,
+                    },
+                    &message.data,
+                )?;
+            }
+        }
+        writer.finish()?;
+    }
+    std::fs::rename(temporary_path, final_path)?;
+    for path in paths {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 async fn read_flushed_after(
@@ -517,8 +590,6 @@ async fn read_flushed_after(
             .is_some_and(|extension| extension == "mcap")
         {
             paths.push(path);
-        } else if path.extension().is_some_and(|extension| extension == "lhc") {
-            return Err(JournalError::UnsupportedChunk(path));
         }
     }
     paths.sort_unstable();
@@ -568,10 +639,12 @@ fn decode_chunk(path: &Path, bytes: &[u8]) -> Result<Vec<JournalRecord>, Journal
     mcap::MessageStream::new(bytes)?
         .map(|message| {
             let message = message?;
-            if message.channel.topic != MCAP_TOPIC || message.channel.message_encoding != "json" {
+            if message.channel.topic != MCAP_TOPIC
+                || message.channel.message_encoding != MCAP_MESSAGE_ENCODING
+            {
                 return Err(JournalError::UnsupportedChunk(path.to_owned()));
             }
-            Ok(serde_json::from_slice(&message.data)?)
+            Ok(rmp_serde::from_slice(&message.data)?)
         })
         .collect()
 }
@@ -858,13 +931,13 @@ mod tests {
             .expect("chunk header");
         assert!(min_ns > 0 && min_ns == max_ns);
 
-        // A valid MCAP outside the window must not have its invalid JSON decoded.
+        // A valid MCAP outside the window must not have invalid MessagePack decoded.
         let invalid_path = chunk_path(temp.path(), 2, 2);
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut writer = mcap::Writer::new(&mut cursor).expect("MCAP writer");
             let channel_id = writer
-                .add_channel(0, MCAP_TOPIC, "json", &BTreeMap::new())
+                .add_channel(0, MCAP_TOPIC, MCAP_MESSAGE_ENCODING, &BTreeMap::new())
                 .expect("channel");
             writer
                 .write_to_known_channel(
@@ -874,7 +947,7 @@ mod tests {
                         log_time: 1,
                         publish_time: 1,
                     },
-                    b"not JSON",
+                    &[0xc1],
                 )
                 .expect("message");
             writer.finish().expect("finish");
@@ -896,10 +969,52 @@ mod tests {
         let unsupported = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
             .await
             .expect_err("full read must decode, and reject, the corrupt chunk");
-        assert!(matches!(unsupported, JournalError::Json(_)));
+        assert!(matches!(unsupported, JournalError::Decode(_)));
+        fs::remove_file(chunk_path(temp.path(), 2, 2))
+            .await
+            .expect("remove invalid chunk");
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn clean_shutdown_compacts_segments_into_one_mcap() {
+        let temp = TempDir::new().expect("temp directory");
+        let run_id = Uuid::new_v4();
+        let mut config = JournalConfig::for_directory(temp.path(), run_id);
+        config.max_chunk_records = 1;
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+
+        for source_sequence in 1..=3 {
+            journal
+                .append_diagnostic(diagnostic(run_id, source_sequence))
+                .await
+                .expect("append");
+        }
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+
+        let mcap_paths = std::fs::read_dir(temp.path())
+            .expect("journal directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "mcap")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mcap_paths, vec![temp.path().join("journal.mcap")]);
+
+        let records = read_persisted(temp.path(), 0, None)
+            .await
+            .expect("compacted records");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+        );
     }
 
     #[tokio::test]
@@ -912,20 +1027,6 @@ mod tests {
             .await
             .expect_err("invalid chunk");
         assert!(matches!(error, JournalError::Mcap(_)));
-    }
-
-    #[tokio::test]
-    async fn rejects_legacy_lhc_chunks() {
-        let temp = TempDir::new().expect("temp directory");
-        let path = temp
-            .path()
-            .join("00000000000000000001-00000000000000000001.lhc");
-        fs::write(path, b"LHCHNK02").await.expect("legacy chunk");
-
-        let error = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
-            .await
-            .expect_err("legacy chunks require an explicit migration");
-        assert!(matches!(error, JournalError::UnsupportedChunk(_)));
     }
 
     #[tokio::test]

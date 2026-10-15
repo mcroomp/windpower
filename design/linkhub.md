@@ -30,29 +30,34 @@ Every record has a global sequence, ingestion timestamp, optional correlation
 ID, and versioned payload. HTTP cursors are opaque encodings of the global
 sequence.
 
-The journal actor is the only sequence allocator and chunk writer. Records
-accumulate in an in-memory chunk. A chunk is written as one immutable `.mcap`
-file when it reaches the configured record/byte limit (4096 records / 4 MiB)
-or the 60-second flush interval. Live readers never wait for a flush: HTTP
-reads merge flushed chunks with the in-memory chunk. Each file is a complete
-MCAP recording with a `linkhub/records` JSON channel, Zstandard-compressed data
-chunks, CRCs, message indexes, and summary statistics. Time-range reads use the
-MCAP summary's message-time bounds to skip files without decoding their
-messages. Legacy `.lhc` chunks are rejected rather than silently skipped.
-LinkHub writes each file to a temporary path and atomically renames it after
-the MCAP footer is complete. A clean shutdown flushes the active chunk.
+The journal actor is the only sequence allocator and writer. Records accumulate
+in memory, then flush to temporary, sequence-named MCAP segments at the
+configured record/byte limit (4096 records / 4 MiB) or the 60-second interval.
+Live readers merge completed segments with the in-memory tail and never wait
+for a flush. On clean shutdown LinkHub combines the segments into the run's
+single `journal.mcap`; an interrupted run retains its independently valid
+segments for diagnosis and recovery.
+
+Every segment and the final recording use a `linkhub/records` MessagePack
+channel, Zstandard-compressed MCAP data chunks, CRCs, message indexes, and
+summary statistics. Time-range reads use each file's MCAP summary bounds to
+skip files without decoding messages. Segment files and the final recording
+are written to temporary paths and atomically renamed only after their MCAP
+footers are complete.
 
 The MCAP registry does not define a MAVLink message or schema encoding.
-LinkHub therefore stores its canonical `JournalRecord` envelope as JSON on the
-`linkhub/records` channel, including the original MAVLink frame bytes. This
-keeps global sequence, correlation, decoded fields, and simulation-clock
-metadata together without inventing a nominally standard MAVLink adapter.
+LinkHub therefore serializes its canonical Serde `JournalRecord` envelope with
+the registry-defined `msgpack` encoding on the `linkhub/records` channel,
+including the original MAVLink frame bytes. Named MessagePack fields keep
+global sequence, correlation, decoded fields, and simulation-clock metadata
+together without inventing a nominally standard MAVLink adapter.
 
 For a replay, the actor first fixes one tail sequence and snapshots the active
-chunk; the reader then merges that snapshot with completed chunks through the
-fixed tail. This ordering prevents a periodic flush from moving records between
-the disk and RAM views while a replay is being assembled. Public reads are
-finite batches; LinkHub keeps no per-client subscription or queue.
+in-memory records; the reader then merges that snapshot with completed segments
+or the finalized recording through the fixed tail. This ordering prevents a
+periodic flush from moving records between the disk and RAM views while a
+replay is being assembled. Public reads are finite batches; LinkHub keeps no
+per-client subscription or queue.
 
 ## Diagnostics
 
@@ -283,7 +288,7 @@ rate leases, and adaptive shedding.
 
 For a running LinkHub, prefer the live HTTP range query on
 `GET /v1/mavlink/messages`; `linkhub query` is the offline reader for
-immutable `.mcap` chunks of stopped runs.
+the finalized `journal.mcap` recording of a stopped run.
 
 The query CLI accepts a journal directory, its parent run directory, or a data
 directory containing exactly one run. Parent options `--after <sequence>` and
