@@ -900,7 +900,10 @@ export class YawPanel {
     const m = this.model;
     const rpm = { t: m.rpm.t, v: m.rpm.v("rpm") };
     const applied = { t: m.servo.t, v: m.servo.v("u") };
-    const range = visibleRange([rpm], this.view, [0], 20);
+    const autoRange = visibleRange([rpm], this.view, [0], 20);
+    const range = autoRange === null
+      ? null
+      : { min: 0, max: Math.max(20, autoRange.max) };
     const yOf = this.frameAndAxes(ctx, rect, "MOTOR SPEED", "RPM", range, [
       { label: "measured RPM", color: COLORS.setpoint },
       { label: "applied throttle (right axis)", color: COLORS.measured, dash: [4, 3] },
