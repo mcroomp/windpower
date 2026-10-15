@@ -93,24 +93,25 @@ impl MavlinkOperations {
         info
     }
 
-    pub async fn upload_file(
+    /// Queues an upload of `content` to `path` and returns its transfer record.
+    /// Progress is the contiguous prefix acknowledged by the remote MAVFTP server.
+    #[must_use]
+    pub fn start_file_upload(
         &self,
         path: &str,
         content: Vec<u8>,
-        timeout: Duration,
-    ) -> Result<usize, OperationError> {
-        let (result, _) = self
-            .execute_mavftp(
-                |sequence| MavFtpOperation::upload(sequence, path, content),
-                timeout,
-            )
-            .await?;
-        let MavFtpResult::Uploaded(bytes) = result else {
-            return Err(OperationError::Invalid(
-                "MAVFTP upload returned an unexpected result".to_owned(),
-            ));
-        };
-        Ok(bytes)
+        stall_timeout: Duration,
+    ) -> TransferInfo {
+        let handle = self.transfers.submit(TransferKind::FtpUpload, path);
+        let info = self
+            .transfers
+            .get(handle.id())
+            .expect("a submitted transfer is registered");
+        tokio::spawn(
+            self.clone()
+                .run_file_upload(handle, path.to_owned(), content, stall_timeout),
+        );
+        info
     }
 
     pub async fn remove_file(&self, path: &str, timeout: Duration) -> Result<(), OperationError> {
@@ -167,6 +168,171 @@ impl MavlinkOperations {
         handle
             .finish(outcome, summary.done, summary.received, summary.stats)
             .await;
+    }
+
+    async fn run_file_upload(
+        self,
+        handle: TransferHandle,
+        path: String,
+        content: Vec<u8>,
+        stall_timeout: Duration,
+    ) {
+        let total = content.len() as u64;
+        let mut done = 0;
+        let mut stats = TransferStats::default();
+        let result = match acquire(self.ftp_sequence.clone(), &handle).await {
+            Ok(mut sequence) => {
+                handle.start(total).await;
+                let local_crc = mavftp_crc32(&content);
+                let mut upload = MavFtpOperation::upload(*sequence, &path, content);
+                let uploaded = self
+                    .drive_upload(&mut upload, &handle, stall_timeout, &mut done, &mut stats)
+                    .await;
+                *sequence = upload.next_sequence();
+                match uploaded {
+                    Ok(bytes) if bytes == total as usize => {
+                        let mut crc = MavFtpOperation::crc32(*sequence, &path);
+                        let remote = tokio::select! {
+                            result = self.run_mavftp(&mut crc, stall_timeout) => result,
+                            () = handle.cancelled() => Err(OperationError::Invalid(
+                                "MAVFTP upload verification cancelled".to_owned()
+                            )),
+                        };
+                        *sequence = crc.next_sequence();
+                        match remote {
+                            Ok((MavFtpResult::Crc32(remote_crc), _)) if remote_crc == local_crc => {
+                                Ok(())
+                            }
+                            Ok((MavFtpResult::Crc32(remote_crc), _)) => {
+                                Err(MavFtpError::CrcMismatch {
+                                    remote: remote_crc,
+                                    local: local_crc,
+                                }
+                                .into())
+                            }
+                            Ok(_) => Err(OperationError::Invalid(
+                                "MAVFTP CRC returned an unexpected result".to_owned(),
+                            )),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(bytes) => Err(OperationError::Invalid(format!(
+                        "MAVFTP upload wrote {bytes} of {total} bytes"
+                    ))),
+                    Err(failure) => Err(match failure {
+                        Failure::Cancelled => {
+                            handle.finish(Outcome::Cancelled, done, done, stats).await;
+                            return;
+                        }
+                        Failure::Error(error) => error,
+                    }),
+                }
+            }
+            Err(failure) => Err(match failure {
+                Failure::Cancelled => {
+                    handle.finish(Outcome::Cancelled, done, done, stats).await;
+                    return;
+                }
+                Failure::Error(error) => error,
+            }),
+        };
+        let outcome = result.map_or_else(
+            |error| Outcome::Failed(error.to_string()),
+            |()| Outcome::CompleteNoContent,
+        );
+        handle.finish(outcome, done, done, stats).await;
+    }
+
+    async fn drive_upload(
+        &self,
+        operation: &mut MavFtpOperation,
+        handle: &TransferHandle,
+        stall_timeout: Duration,
+        done: &mut u64,
+        stats: &mut TransferStats,
+    ) -> Result<usize, Failure> {
+        let mut deadline = time::Instant::now() + stall_timeout;
+        let (target_system, target_component) = self.targets(None, None);
+        let mut receiver = self.link.subscribe_messages();
+        loop {
+            if let Some(result) = operation.result().cloned() {
+                let MavFtpResult::Uploaded(bytes) = result else {
+                    return Err(OperationError::Invalid(
+                        "MAVFTP upload returned an unexpected result".to_owned(),
+                    )
+                    .into());
+                };
+                return Ok(bytes);
+            }
+            if handle.is_cancelled() {
+                return Err(Failure::Cancelled);
+            }
+            let packet = operation.next_request()?.ok_or_else(|| {
+                OperationError::Invalid("MAVFTP upload ended without a result".to_owned())
+            })?;
+            let payload = packet.encode()?;
+            let expected_reply_sequence = packet.sequence.wrapping_add(1);
+            let expected_request_opcode = packet.opcode as u8;
+            let message = MavMessage::FILE_TRANSFER_PROTOCOL(FILE_TRANSFER_PROTOCOL_DATA {
+                target_network: 0,
+                target_system,
+                target_component,
+                payload,
+            });
+            let mut retries = 0;
+            let reply = loop {
+                if retries == 0 {
+                    stats.requests_sent += 1;
+                } else {
+                    stats.retransmits += 1;
+                }
+                self.link
+                    .send_message(message.clone(), None, Some(MAVFTP_SOURCE_COMPONENT))
+                    .await?;
+                let remaining = deadline.saturating_duration_since(time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(OperationError::Timeout.into());
+                }
+                let waiting = wait_for_message(
+                    &mut receiver,
+                    remaining.min(Duration::from_secs(2)),
+                    |candidate| {
+                        ftp_payload(candidate).is_some_and(|(target, payload)| {
+                            candidate.component_id == target_component
+                                && target == MAVFTP_SOURCE_COMPONENT
+                                && ftp_reply_matches(
+                                    payload,
+                                    expected_reply_sequence,
+                                    expected_request_opcode,
+                                )
+                        })
+                    },
+                );
+                match tokio::select! {
+                    result = waiting => result,
+                    () = handle.cancelled() => return Err(Failure::Cancelled),
+                } {
+                    Ok(message) => break message,
+                    Err(OperationError::Timeout) if retries < MAVFTP_PACKET_RETRIES => {
+                        retries += 1;
+                        stats.timeouts += 1;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            stats.packets_received += 1;
+            let (_, reply_payload) = ftp_payload(&reply).expect("wait predicate selected FTP");
+            let reply_packet = Packet::decode(reply_payload)?;
+            if reply_packet.opcode == crate::mavftp::Opcode::Nak {
+                stats.naks += 1;
+            }
+            operation.handle_reply(reply_packet)?;
+            if packet.opcode == crate::mavftp::Opcode::WriteFile {
+                *done = u64::from(packet.offset) + packet.data.len() as u64;
+                handle.progress(*done, *done, *stats);
+                deadline = time::Instant::now() + stall_timeout;
+            }
+        }
     }
 
     /// Opens, reads, releases and verifies `path`, holding the FTP session.
@@ -291,13 +457,13 @@ impl MavlinkOperations {
     }
 
     /// Runs a stop-and-wait operation: each request is repeated until its
-    /// reply arrives or the deadline passes.
+    /// reply arrives or the operation stops making progress for `stall_timeout`.
     async fn run_mavftp(
         &self,
         operation: &mut MavFtpOperation,
-        timeout: Duration,
+        stall_timeout: Duration,
     ) -> Result<(MavFtpResult, u64), OperationError> {
-        let deadline = time::Instant::now() + timeout;
+        let mut deadline = time::Instant::now() + stall_timeout;
         let (target_system, target_component) = self.targets(None, None);
         let mut receiver = self.link.subscribe_messages();
         let mut last_cursor = 0;
@@ -353,6 +519,7 @@ impl MavlinkOperations {
             last_cursor = reply.journal_sequence;
             let (_, reply_payload) = ftp_payload(&reply).expect("wait predicate selected FTP");
             operation.handle_reply(Packet::decode(reply_payload)?)?;
+            deadline = time::Instant::now() + stall_timeout;
         }
     }
 

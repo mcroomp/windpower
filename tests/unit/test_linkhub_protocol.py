@@ -88,6 +88,51 @@ def test_client_preserves_per_message_rate_results(monkeypatch) -> None:
     assert client.set_message_rates({"ATTITUDE": 100.0}) == configured
 
 
+def test_client_uploads_through_a_polled_transfer(monkeypatch, tmp_path) -> None:
+    client = LinkHubClient()
+    source = tmp_path / "rawes.lua"
+    source.write_bytes(b"print('rawes')")
+    requests = []
+    replies = iter(
+        [
+            {
+                "id": 7,
+                "state": "queued",
+                "done_bytes": 0,
+            },
+            {
+                "id": 7,
+                "state": "running",
+                "done_bytes": 5,
+            },
+            {
+                "id": 7,
+                "state": "complete",
+                "done_bytes": len(source.read_bytes()),
+            },
+            {
+                "id": 7,
+                "removed": True,
+            },
+        ]
+    )
+
+    def request(method, path, body=None, **kwargs):
+        requests.append((method, path, body, kwargs))
+        return next(replies)
+
+    monkeypatch.setattr(client, "_request_json", request)
+    monkeypatch.setattr(client_module.time, "sleep", lambda _seconds: None)
+
+    assert client.upload_file(source, "/APM/scripts/rawes.lua") == len(source.read_bytes())
+    assert requests[0][0:2] == (
+        "PUT",
+        "/v1/mavlink/files?path=%2FAPM%2Fscripts%2Frawes.lua",
+    )
+    assert requests[0][3]["content"] == source.read_bytes()
+    assert requests[-1][0:2] == ("DELETE", "/v1/mavlink/transfers/7")
+
+
 def test_client_reads_authoritative_vehicle_state(monkeypatch) -> None:
     client = LinkHubClient()
     monkeypatch.setattr(

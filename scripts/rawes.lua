@@ -307,7 +307,6 @@ _held_target = nil             -- last static-hold target sent {roll, pitch, yaw
 _held_target_ok = false
 _held_target_ms = 0
 _first_nonzero_rate_logged = false
-_guided_cmd_last_log_ms = -2000
 -- ── Yaw trim observer ────────────────────────────────────────────────────────────
 -- Reads back the actual SERVO9 (Motor4) throttle u that ArduPilot applied,
 -- computes the equilibrium trim that would hold psi_dot=0:
@@ -413,16 +412,6 @@ local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, rol
     local pr = pitch_rate or 0.0
     local yr = yaw_rate or 0.0
     local now_ms = millis()
-    if now_ms - _guided_cmd_last_log_ms >= 2000 then
-        _guided_cmd_last_log_ms = now_ms
-        gcs:send_text(6, string.format(
-            "RAWES guided cmd: src=%s rpy=(%.1f,%.1f,%.1f) rr/pr/yr=(%.4f,%.4f,%.4f) thr=%.3f",
-            src or "unknown",
-            roll_deg, pitch_deg, yaw_deg,
-            rr, pr, yr,
-            throttle))
-    end
-
     if not _first_nonzero_rate_logged then
         if math.abs(rr) > 1.0e-6 or math.abs(pr) > 1.0e-6 or math.abs(yr) > 1.0e-6 then
             _first_nonzero_rate_logged = true

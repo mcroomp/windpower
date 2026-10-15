@@ -211,8 +211,312 @@ h2 {
 }
 
 #scene {
+  flex: 1 1 0;
   width: 100%;
-  height: calc(100% - 70px);
+  min-height: 0;
+}
+
+.scene-panel {
+  display: flex;
+  flex-direction: column;
+  --drawer-height: 0px;
+}
+
+.scene-panel header {
+  flex: none;
+}
+
+.scene-panel.yaw-open,
+.scene-panel.wobble-open {
+  --drawer-height: clamp(340px, 54%, 560px);
+}
+
+#yaw-toggle,
+#wobble-toggle {
+  padding: 4px 10px;
+  border: 1px solid #40506b;
+  border-radius: 999px;
+  color: #cbd8e9;
+  background: #111a29;
+  font: 600 11px ui-monospace, "Cascadia Code", monospace;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#yaw-toggle[aria-pressed="true"],
+#wobble-toggle[aria-pressed="true"] {
+  border-color: #2d8f6f;
+  color: #71ddb4;
+  background: rgba(30, 123, 89, 0.14);
+}
+
+.yaw-panel {
+  position: relative;
+  z-index: 3;
+  display: none;
+  flex: none;
+  flex-direction: column;
+  height: var(--drawer-height);
+  min-height: 0;
+  border-top: 1px solid #263249;
+  background: rgba(8, 13, 22, 0.96);
+}
+
+.yaw-open .yaw-panel {
+  display: flex;
+}
+
+.wobble-panel {
+  position: relative;
+  z-index: 3;
+  display: none;
+  flex: none;
+  flex-direction: column;
+  height: var(--drawer-height);
+  min-height: 0;
+  border-top: 1px solid #263249;
+  background: rgba(8, 13, 22, 0.96);
+}
+
+.wobble-open .wobble-panel {
+  display: flex;
+}
+
+.wobble-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 4px;
+  color: #cbd8e9;
+  font: 11px ui-monospace, "Cascadia Code", monospace;
+}
+
+.wobble-status {
+  color: #aebdd2;
+  font-weight: 700;
+}
+
+.wobble-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  color: #7591b8;
+}
+
+.wobble-controls select {
+  padding: 3px 8px;
+  border: 1px solid #40506b;
+  border-radius: 6px;
+  color: #cbd8e9;
+  background: #111a29;
+  font: 600 11px ui-monospace, "Cascadia Code", monospace;
+}
+
+.wobble-charts {
+  display: grid;
+  flex: 1 1 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-height: 0;
+  padding: 4px 10px;
+}
+
+.wobble-axis {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #27334a;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.wobble-axis h3 {
+  margin: 6px 8px 0;
+  color: #cbd8e9;
+  font: 700 10px ui-monospace, "Cascadia Code", monospace;
+  letter-spacing: 0.08em;
+}
+
+.wobble-roll h3 {
+  color: #78b7ff;
+}
+
+.wobble-pitch h3 {
+  color: #f0c36b;
+}
+
+.wobble-yaw h3 {
+  color: #c792ea;
+}
+
+.wobble-mode h3 {
+  color: #71ddb4;
+}
+
+.wobble-axis canvas {
+  display: block;
+  flex: 1 1 0;
+  width: 100%;
+  min-height: 80px;
+}
+
+.wobble-mode-details {
+  flex: none;
+  min-height: 76px;
+  padding: 3px 8px 6px;
+  color: #8fa2bc;
+  font: 10px/1.5 ui-monospace, "Cascadia Code", monospace;
+}
+
+.wobble-mode-details div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.wobble-mode-details span {
+  color: #5c7aa6;
+}
+
+.wobble-mode-details strong {
+  color: #e8edf5;
+  font-weight: 600;
+  text-align: right;
+}
+
+.wobble-components {
+  flex: none;
+  min-height: 58px;
+  padding: 3px 8px 6px;
+  color: #5c7aa6;
+  font: 10px/1.55 ui-monospace, "Cascadia Code", monospace;
+}
+
+.wobble-components div {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 6px;
+  color: #8fa2bc;
+}
+
+.wobble-components strong {
+  color: #e8edf5;
+  font-weight: 600;
+}
+
+.wobble-note {
+  flex: none;
+  padding: 1px 12px 6px;
+  color: #5c7aa6;
+  font: 9px ui-monospace, "Cascadia Code", monospace;
+}
+
+@media (max-width: 1200px) {
+  .wobble-charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-y: auto;
+  }
+
+  .wobble-axis {
+    min-height: 210px;
+  }
+}
+
+.yaw-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px 4px;
+}
+
+.yaw-readout {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: #cbd8e9;
+  font: 11px ui-monospace, "Cascadia Code", monospace;
+}
+
+.yaw-readout .state {
+  color: #aebdd2;
+  font-weight: 700;
+}
+
+.yaw-readout .state.armed {
+  color: #71ddb4;
+}
+
+.yaw-readout .metric-label {
+  margin-right: 6px;
+  color: #7591b8;
+}
+
+.yaw-dial {
+  flex: none;
+}
+
+.yaw-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.yaw-controls button,
+.yaw-controls select {
+  padding: 3px 9px;
+  border: 1px solid #40506b;
+  border-radius: 6px;
+  color: #cbd8e9;
+  background: #111a29;
+  font: 600 11px ui-monospace, "Cascadia Code", monospace;
+  cursor: pointer;
+}
+
+.yaw-controls button[aria-pressed="true"] {
+  border-color: #aa8139;
+  color: #f0c36b;
+}
+
+.yaw-chart-wrap {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.yaw-chart {
+  display: block;
+  cursor: crosshair;
+}
+
+.yaw-tip {
+  position: absolute;
+  z-index: 3;
+  padding: 6px 8px;
+  border: 1px solid rgba(70, 90, 121, 0.8);
+  border-radius: 6px;
+  background: rgba(7, 12, 21, 0.93);
+  color: #cbd8e9;
+  font: 10px/1.5 ui-monospace, "Cascadia Code", monospace;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.yaw-tip[hidden] {
+  display: none;
+}
+
+.yaw-note {
+  flex: none;
+  padding: 2px 12px 5px;
+  color: #5c7aa6;
+  font: 9px ui-monospace, "Cascadia Code", monospace;
 }
 
 #scene canvas {
@@ -237,7 +541,7 @@ h2 {
   position: absolute;
   z-index: 2;
   left: 16px;
-  bottom: 16px;
+  bottom: calc(16px + var(--drawer-height));
   display: flex;
   gap: 22px;
   padding: 12px 14px 14px;
@@ -386,7 +690,7 @@ h2 {
 
 .control-hint {
   right: 16px;
-  bottom: 16px;
+  bottom: calc(16px + var(--drawer-height));
   max-width: 460px;
   padding: 8px 10px;
   color: #8fa2bc;
@@ -461,6 +765,12 @@ h2 {
   .scene-panel {
     height: 58vh;
     min-height: 420px;
+  }
+
+  .scene-panel.yaw-open {
+    height: auto;
+    min-height: 880px;
+    --drawer-height: 400px;
   }
 
   .terminal-panel {

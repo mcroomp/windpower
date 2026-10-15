@@ -93,17 +93,18 @@ The live router currently exposes:
 | `/v1/mavlink/parameters/{name}` | `GET`, `PUT` | Single parameter read/write. |
 | `/v1/mavlink/message-rates` | `PUT` | Explicit message-rate requests. |
 | `/v1/mavlink/message-rates/{message}` | `GET` | Read one configured interval. |
-| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/upload/remove. |
+| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/start-upload/remove. |
 | `/v1/mavlink/directories` | `POST` | MAVFTP create-directory operation. |
 | `/v1/mavlink/logs` | `GET` | DataFlash log list. |
-| `/v1/mavlink/transfers[/{id}[/content]]` | `GET`, `POST`, `DELETE` | Background MAVFTP/DataFlash downloads: start, poll, collect, cancel. |
+| `/v1/mavlink/transfers[/{id}[/content]]` | `GET`, `POST`, `DELETE` | Background MAVFTP uploads and MAVFTP/DataFlash downloads: poll, collect downloads, cancel. |
 
-Downloads are jobs rather than streamed responses because HTTP cannot signal a
-mid-body failure, and a client reading a truncated body cannot tell it from a
-complete one. A job's progress and loss statistics are its own state, it
-survives client disconnects, and content is released only once it is whole and
-verified. The engines live in `linkhub/src/transfer/` (pure, deterministic
-MAVFTP burst reader) and `linkhub/src/operations/{files,logs}.rs`.
+File transfers are jobs rather than long-lived or streamed responses because
+HTTP cannot reliably represent link stalls or mid-body failures. A job's
+progress and loss statistics are its own state and it survives client
+disconnects. Download content is released only once it is whole and verified;
+uploads complete only after the remote CRC matches. The engines live in
+`linkhub/src/transfer/` (including the pure, deterministic MAVFTP burst reader)
+and `linkhub/src/operations/{files,logs}.rs`.
 | `/v1/mavlink/status` | `GET` | Live link + vehicle status snapshot. |
 | `/v1/motor` | `GET`, `PUT` | Optional Bluetooth motor status and set-running command. |
 | `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop. |

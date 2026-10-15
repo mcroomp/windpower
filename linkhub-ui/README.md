@@ -319,6 +319,86 @@ Position, attitude, target, and RPM are display-only smoothed. The smoothing
 time constant is 80 ms. The rotor holds the last valid RPM through telemetry
 gaps; disconnects and generation changes clear reconstructed state.
 
+## Yaw panel
+
+The **Yaw** button beside the telemetry selector opens a drawer under the 3D
+scene for diagnosing the anti-rotation loop. It needs the Wi-Fi telemetry
+profile for full detail; over a slow link it still draws whatever arrives.
+
+Four charts share one time axis (10, 30 or 60 s). Dashed lines are setpoints,
+solid lines are measurements, and red shading is the error between them:
+
+| Chart | Setpoint | Measured | Source |
+| --- | --- | --- | --- |
+| Heading (deg) | heading the target implies | actual heading | `ATTITUDE_TARGET`, `ATTITUDE_QUATERNION` |
+| Yaw rate (rad/s) | `PID_TUNING.desired`, attitude-target rate, Lua `OL_YSP` | `PID_TUNING.achieved` | `PID_TUNING` (yaw axis), `ATTITUDE_TARGET`, `DEBUG_FLOAT_ARRAY` |
+| Motor command (0-1) | stacked trim + FF + P + I + D | applied throttle (`servo9_raw`), observer target | `PID_TUNING`, `SERVO_OUTPUT_RAW`, `DEBUG_FLOAT_ARRAY` |
+| Motor speed (RPM) | | measured RPM, applied throttle on its own 0-1 scale | `RPM`, `SERVO_OUTPUT_RAW` |
+
+Details that matter when reading it:
+
+- **Heading error is a quaternion twist about the rotor axis**, not a
+  difference of Euler yaw angles, so it does not wrap at 180 degrees and stays
+  defined with the rotor axis horizontal. The dashed heading line is the actual
+  heading minus that error.
+- **The motor command stack is exact for this vehicle.** ArduPilot sums
+  `P+I+D+FF` and adds `H_YAW_TRIM` (the heli yaw output plus the DDFP trim), then clamps to 0-1. With
+  `H_DDFP_SPIN_MIN=0`, `SPIN_MAX=1`, `THST_EXPO=0` and `H_COL2YAW=0` the applied
+  throttle equals that clamped sum. Changing those parameters breaks the
+  equality; the applied line still shows the truth. The trim comes from the Lua
+  `YFF_T` (`H_YAW_TRIM`), which is only reported while armed, so it reads zero
+  while disarmed. The dotted red lines mark the 0 and 1 limits and red ticks
+  mark armed samples at a limit.
+- **The observer line** is `YFF_U - YFF_GZ / YFF_A`, the throttle the Lua trim
+  observer is converging to, using `RAWES_YAW_SLP` (read when the panel opens;
+  `0` means the bench default 0.504 RPM/us).
+- **Time alignment.** `ATTITUDE_*`, `SERVO_OUTPUT_RAW` and the Lua array carry
+  the vehicle clock and are mapped to the PC clock by the smallest observed
+  transit delay. `PID_TUNING`, `RPM` and ESC frames have no timestamp, so their
+  arrival times are de-batched (the Wi-Fi link stalls for 0.1-0.2 s and then
+  delivers a burst) by fitting the tightest line under the arrivals in blocks
+  of about two seconds; a pause over one second starts a new segment. Their
+  alignment with attitude is therefore approximate, to about 50 ms.
+- **Gaps are real.** Lines break where frames were not received, and a link
+  reconnect clears the chart.
+- The readout strip shows rate-error RMS, heading-error RMS, the I term's share
+  of the output, the share of armed samples at a limit, and the command-to-RPM
+  delay (cross-correlation over the last 10 s, only shown above 0.5
+  correlation). All use the last 10 s and only armed samples where noted.
+- Hover reads every chart at the cursor. **Pause** freezes the view and lets
+  you drag to scroll back up to a minute. Markers on the bottom axis show arm
+  and disarm, mode changes and important status text.
+
+The panel has its own journal reader (`src\yaw-recorder.ts`) because the
+shared telemetry store reads collapsed frames, which would drop almost every
+sample of a 300 Hz stream. It starts at the live end of the journal when the
+panel opens and stops when it closes. The data model and maths
+(`src\yaw-model.ts`, `src\yaw-math.ts`) are DOM-free and unit tested; drawing is
+in `src\yaw-panel.ts`.
+
+## Wobble panel
+
+The **Wobble** button beside the telemetry selector opens a live Pixhawk
+body-rate frequency analyzer. Like the yaw panel, its uncollapsed journal reader
+only runs while the drawer is open. Opening either drawer closes the other.
+
+The panel uses `ATTITUDE_QUATERNION.rollspeed`, `pitchspeed`, and `yawspeed` from
+the Wi-Fi profile's 300 Hz stream. For each axis it resamples the latest
+contiguous 8-second window, removes the mean, applies a Hann window, and displays
+the FFT spectrum and three strongest component frequencies. The selectable
+frequency range changes only the displayed spectrum and peak list. All three
+plots use one selectable absolute amplitude ceiling (default 0.25 rad/s), so
+levels remain comparable across axes and over time. Peaks above the ceiling are
+clamped and marked at the top edge; reported component amplitudes remain
+unclamped in rad/s.
+
+The fourth **Dominant mode** plot combines the complex FFT values from all three
+body-rate axes at the strongest shared frequency. It draws the principal body
+axis and reports roll/pitch/yaw axis shares. Its linearity score is derived from
+the two axes of the polarization ellipse: a high score indicates oscillation
+about one stable axis, while a low score is labeled circular/multi-axis rather
+than presenting an unreliable single axis.
+
 ## Throughput and rate-policy status
 
 Implemented today:
