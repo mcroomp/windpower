@@ -23,6 +23,9 @@ import { MOTOR_TO_ROTOR_GEAR_RATIO } from "./vehicle-motion";
 import { YawModel } from "./yaw-model";
 import { YawPanel } from "./yaw-panel";
 import { YawRecorder } from "./yaw-recorder";
+import { WobbleModel } from "./wobble-model";
+import { WobblePanel } from "./wobble-panel";
+import { WobbleRecorder } from "./wobble-recorder";
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -241,7 +244,14 @@ const yawPanel = new YawPanel(required<HTMLElement>("#yaw-panel"), yawModel);
 const yawRecorder = new YawRecorder(api, yawModel, (error) => {
   write(`Yaw chart: ${error.message}`, "error");
 });
+const wobbleToggle = required<HTMLButtonElement>("#wobble-toggle");
+const wobbleModel = new WobbleModel();
+const wobblePanel = new WobblePanel(required<HTMLElement>("#wobble-panel"), wobbleModel);
+const wobbleRecorder = new WobbleRecorder(api, wobbleModel, (error) => {
+  write(`Wobble analyzer: ${error.message}`, "error");
+});
 telemetry.onGeneration(() => yawModel.reset());
+telemetry.onGeneration(() => wobbleModel.reset());
 
 async function configureYawModel(): Promise<void> {
   try {
@@ -259,19 +269,46 @@ async function configureYawModel(): Promise<void> {
   }
 }
 
-yawToggle.addEventListener("click", () => {
-  const open = !yawPanel.isOpen;
+function setYawOpen(open: boolean): void {
   scenePanel.classList.toggle("yaw-open", open);
   yawToggle.setAttribute("aria-pressed", String(open));
-  if (open) {
+  if (open && !yawPanel.isOpen) {
     yawModel.reset();
     void configureYawModel();
     yawRecorder.start();
     yawPanel.open();
-  } else {
+  } else if (!open && yawPanel.isOpen) {
     yawRecorder.stop();
     yawPanel.close();
   }
+}
+
+function setWobbleOpen(open: boolean): void {
+  scenePanel.classList.toggle("wobble-open", open);
+  wobbleToggle.setAttribute("aria-pressed", String(open));
+  if (open && !wobblePanel.isOpen) {
+    wobbleModel.reset();
+    wobbleRecorder.start();
+    wobblePanel.open();
+  } else if (!open && wobblePanel.isOpen) {
+    wobbleRecorder.stop();
+    wobblePanel.close();
+  }
+}
+
+yawToggle.addEventListener("click", () => {
+  const open = !yawPanel.isOpen;
+  if (open) {
+    setWobbleOpen(false);
+  }
+  setYawOpen(open);
+});
+wobbleToggle.addEventListener("click", () => {
+  const open = !wobblePanel.isOpen;
+  if (open) {
+    setYawOpen(false);
+  }
+  setWobbleOpen(open);
 });
 telemetry.onStatus((status) => {
   renderLinkThroughput(status);
@@ -330,6 +367,10 @@ await passive.reconcile().catch((error) => {
 
 window.addEventListener("beforeunload", () => {
   window.clearTimeout(overlayTimer);
+  yawRecorder.stop();
+  yawPanel.dispose();
+  wobbleRecorder.stop();
+  wobblePanel.dispose();
   scene.dispose();
   telemetry.stop();
 });

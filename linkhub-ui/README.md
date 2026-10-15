@@ -376,6 +376,29 @@ panel opens and stops when it closes. The data model and maths
 (`src\yaw-model.ts`, `src\yaw-math.ts`) are DOM-free and unit tested; drawing is
 in `src\yaw-panel.ts`.
 
+## Wobble panel
+
+The **Wobble** button beside the telemetry selector opens a live Pixhawk
+body-rate frequency analyzer. Like the yaw panel, its uncollapsed journal reader
+only runs while the drawer is open. Opening either drawer closes the other.
+
+The panel uses `ATTITUDE_QUATERNION.rollspeed`, `pitchspeed`, and `yawspeed` from
+the Wi-Fi profile's 300 Hz stream. For each axis it resamples the latest
+contiguous 8-second window, removes the mean, applies a Hann window, and displays
+the FFT spectrum and three strongest component frequencies. The selectable
+frequency range changes only the displayed spectrum and peak list. All three
+plots use one selectable absolute amplitude ceiling (default 0.25 rad/s), so
+levels remain comparable across axes and over time. Peaks above the ceiling are
+clamped and marked at the top edge; reported component amplitudes remain
+unclamped in rad/s.
+
+The fourth **Dominant mode** plot combines the complex FFT values from all three
+body-rate axes at the strongest shared frequency. It draws the principal body
+axis and reports roll/pitch/yaw axis shares. Its linearity score is derived from
+the two axes of the polarization ellipse: a high score indicates oscillation
+about one stable axis, while a low score is labeled circular/multi-axis rather
+than presenting an unreliable single axis.
+
 ## Throughput and rate-policy status
 
 Implemented today:
