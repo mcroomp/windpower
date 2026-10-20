@@ -2,6 +2,10 @@
 
 The LinkHub UI is a static TypeScript/Three.js browser client that talks to
 LinkHub over its HTTP API.
+Parameter methods preserve the flat numeric `value` and MAVLink `type` JSON;
+JavaScript numbers represent all supported Int32 values exactly. Classic
+MAVLink encoding limits still apply at the vehicle boundary; see
+[Parameter values](../design/linkhub.md#parameter-values).
 
 ## Build and launch
 

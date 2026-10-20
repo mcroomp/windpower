@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use super::TransferStats;
 use crate::mavftp::{DATA_LEN, MavFtpError, NakCode, Opcode, Packet};
+use crate::stats::TransferStats;
 
 /// `BurstReadFile` replies ArduPilot sends per request (`GCS_FTP.cpp`).
 pub const BURST_PACKETS: u32 = 2000;

@@ -1,8 +1,7 @@
 use serde::Serialize;
 
-/// Counters describing how a transfer coped with the link. They are journaled
-/// when a transfer ends and served live from `GET /v1/mavlink/transfers`, so a
-/// slow or lossy transfer can be diagnosed from the record alone.
+/// Counters describing how a transfer coped with the link. Hosts can expose
+/// these in progress records and persist them when a transfer ends.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct TransferStats {
     /// Data packets received, including duplicates.

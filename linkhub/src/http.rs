@@ -12,6 +12,8 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use mavlink_protocol::client::{OperationError, ParameterSetting, ParameterValue};
+use mavlink_protocol::codec::{dialect::MavCmd, json as dialect_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -19,11 +21,10 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 use crate::{
-    codec::dialect::{MavCmd, MavParamType},
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
-    operations::{MavlinkOperations, OperationError, ParameterSetting},
+    operations::MavlinkOperations,
     records::{
         DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, wall_time_ns,
     },
@@ -966,6 +967,7 @@ struct SendMessageRequest {
 
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
+    #[serde(with = "dialect_json::command")]
     command: MavCmd,
     #[serde(default)]
     params: Vec<f64>,
@@ -1019,9 +1021,8 @@ async fn get_parameter(
 
 #[derive(Debug, Deserialize)]
 struct SetParameterRequest {
-    value: f64,
-    #[serde(rename = "type")]
-    param_type: MavParamType,
+    #[serde(flatten)]
+    value: ParameterValue,
     timeout_ms: Option<u64>,
 }
 
@@ -1034,7 +1035,6 @@ async fn set_parameter(
         .set_parameter(
             &name,
             request.value,
-            request.param_type,
             operation_timeout(request.timeout_ms.unwrap_or(default_timeout_ms()))?,
         )
         .await?;
@@ -1529,6 +1529,14 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
+    use mavlink_protocol::{
+        codec::{
+            FrameReader, MavHeader, MavMessage,
+            dialect::{MavParamType, PARAM_VALUE_DATA},
+            serialize_message,
+        },
+        types::CharArray,
+    };
     use serde_json::Map;
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -1542,11 +1550,69 @@ mod tests {
 
     use super::*;
     use crate::{
-        codec::{MavHeader, serialize_message},
         journal::JournalConfig,
         mavlink::{MavlinkLinkConfig, autopilot_heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
     };
+
+    #[test]
+    fn command_and_parameter_requests_preserve_dialect_json() {
+        let command: CommandRequest = serde_json::from_value(json!({
+            "command": {"type": "MAV_CMD_COMPONENT_ARM_DISARM"},
+            "params": [1.0]
+        }))
+        .expect("command request");
+        assert_eq!(command.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
+        assert!(serde_json::from_value::<CommandRequest>(json!({"command": 400})).is_err());
+
+        let parameter: SetParameterRequest = serde_json::from_value(json!({
+            "value": 1.0,
+            "type": {"type": "MAV_PARAM_TYPE_REAL32"}
+        }))
+        .expect("parameter request");
+        assert_eq!(parameter.value, ParameterValue::Real32(1.0));
+        assert!(
+            serde_json::from_value::<SetParameterRequest>(json!({"value": 1.0, "type": 9}))
+                .is_err()
+        );
+
+        let batch: SetParametersRequest = serde_json::from_value(json!({
+            "parameters": [{"name": "RAWES_MODE", "value": 0.0}]
+        }))
+        .expect("default parameter type");
+        assert_eq!(batch.parameters[0].value, ParameterValue::Real32(0.0));
+    }
+
+    #[test]
+    fn parameter_requests_validate_integer_types_and_ranges() {
+        let parameter: SetParameterRequest = serde_json::from_value(json!({
+            "value": -42,
+            "type": {"type": "MAV_PARAM_TYPE_INT16"},
+            "timeout_ms": 500
+        }))
+        .unwrap();
+        assert_eq!(parameter.value, ParameterValue::Int16(-42));
+        assert_eq!(parameter.timeout_ms, Some(500));
+        for (param_type, value) in [
+            ("INT8", 128.0),
+            ("INT16", -32769.0),
+            ("INT32", 3.5),
+            ("UINT8", 1.0),
+            ("REAL64", 1.0),
+        ] {
+            let setting = json!({
+                "value": value,
+                "type": {"type": format!("MAV_PARAM_TYPE_{param_type}")}
+            });
+            assert!(serde_json::from_value::<SetParameterRequest>(setting.clone()).is_err());
+            let mut named = setting;
+            named["name"] = json!("TEST");
+            assert!(
+                serde_json::from_value::<SetParametersRequest>(json!({"parameters": [named]}))
+                    .is_err()
+            );
+        }
+    }
 
     fn heartbeat_frame(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
         serialize_message(
@@ -1557,6 +1623,140 @@ mod tests {
                 component_id,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn parameter_http_operations_roundtrip_typed_values_over_mavlink() {
+        let values = [
+            ("INT8", -12.0, MavParamType::MAV_PARAM_TYPE_INT8),
+            ("INT16", 30000.0, MavParamType::MAV_PARAM_TYPE_INT16),
+            ("INT32", 16_777_218.0, MavParamType::MAV_PARAM_TYPE_INT32),
+            ("REAL32", 1.25, MavParamType::MAV_PARAM_TYPE_REAL32),
+        ];
+        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = server.accept().await.unwrap();
+            let (read, mut write) = socket.into_split();
+            write.write_all(&heartbeat_frame(0, 1, 1)).await.unwrap();
+            let mut reader = FrameReader::new(Box::new(read));
+            let mut sequence = 1_u8;
+            while let Ok(frame) = reader.recv().await {
+                let replies = match frame.message {
+                    MavMessage::PARAM_REQUEST_LIST(_) => values.to_vec(),
+                    MavMessage::PARAM_REQUEST_READ(request) => values
+                        .iter()
+                        .copied()
+                        .filter(|(name, _, _)| request.param_id.to_str() == Ok(*name))
+                        .collect(),
+                    MavMessage::PARAM_SET(request) => vec![(
+                        values
+                            .iter()
+                            .find(|(name, _, _)| request.param_id.to_str() == Ok(*name))
+                            .unwrap()
+                            .0,
+                        request.param_value,
+                        request.param_type,
+                    )],
+                    _ => continue,
+                };
+                for (name, value, param_type) in replies {
+                    let index = values
+                        .iter()
+                        .position(|(candidate, _, _)| *candidate == name)
+                        .unwrap();
+                    let response = MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                        param_id: CharArray::from(name),
+                        param_value: value,
+                        param_type,
+                        param_index: index as u16,
+                        param_count: values.len() as u16,
+                    });
+                    write
+                        .write_all(&serialize_message(
+                            &response,
+                            MavHeader {
+                                sequence,
+                                system_id: 1,
+                                component_id: 1,
+                            },
+                        ))
+                        .await
+                        .unwrap();
+                    sequence = sequence.wrapping_add(1);
+                }
+            }
+        });
+        let temp = TempDir::new().unwrap();
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .unwrap();
+        let (link, link_task) = start_link(MavlinkLinkConfig::sitl(address), journal.clone());
+        timeout(Duration::from_secs(2), async {
+            let mut status = link.subscribe_status();
+            while !status.borrow().ready {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let app = router(journal.clone(), Some(link));
+
+        async fn call(app: &Router, method: &str, path: &str, body: Value) -> Value {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::OK, "{result}");
+            result
+        }
+        let mut settings = Vec::new();
+        for (name, value, param_type) in values {
+            let path = format!("/v1/mavlink/parameters/{name}");
+            let read = call(&app, "GET", &path, Value::Null).await;
+            assert_eq!(read["value"].as_f64(), Some(f64::from(value)));
+            assert_eq!(read["value"].is_i64(), name != "REAL32");
+            let setting = json!({
+                "name": name, "value": value,
+                "type": dialect_json::parameter_type::to_value(&param_type).unwrap()
+            });
+            let written = call(&app, "PUT", &path, setting.clone()).await;
+            assert_eq!(written["value"], read["value"]);
+            assert_eq!(written["type"], read["type"]);
+            settings.push(setting);
+        }
+        let listed = call(&app, "GET", "/v1/mavlink/parameters", Value::Null).await;
+        let written = call(
+            &app,
+            "PUT",
+            "/v1/mavlink/parameters",
+            json!({"parameters": settings}),
+        )
+        .await;
+        assert_eq!(listed["parameters"].as_array().unwrap().len(), values.len());
+        for record in written["parameters"].as_array().unwrap() {
+            let name = record["name"].as_str().unwrap();
+            let expected = listed["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == name)
+                .unwrap();
+            assert_eq!(record["value"], expected["value"]);
+            assert_eq!(record["type"], expected["type"]);
+            assert!(record["after_cursor"].as_str().unwrap().starts_with("v1:"));
+        }
+        link_task.abort();
+        peer.abort();
+        journal.shutdown().await.unwrap();
+        task.await.unwrap();
     }
 
     fn event(run_id: Uuid) -> DiagnosticEvent {

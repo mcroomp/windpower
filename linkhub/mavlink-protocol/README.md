@@ -1,4 +1,4 @@
-# linkhub-dialect
+# mavlink-protocol
 
 The MAVLink `ardupilotmega` dialect LinkHub speaks, generated at build time
 with `mavlink-bindgen` on top of `mavlink-core`, the same pair the `mavlink`
@@ -7,6 +7,25 @@ the `mavlink` crate, it is [ArduPilot's own](https://github.com/ArduPilot/mavlin
 definitions, vendored in [definitions/](definitions) at the exact commit that the
 ArduPilot release under test builds from. LinkHub's message and enumeration set
 therefore matches the firmware's instead of an unrelated upstream snapshot.
+
+The default `codec` feature exposes `mavlink_protocol::codec`, which owns binary
+framing, typed-message JSON conversion, and concrete enum/bitmask JSON adapters.
+Callers may construct and match generated types, but must route MAVLink
+serialization through the codec so its code generation is reused across
+application rebuilds. See the [architecture owner](../../design/linkhub.md#mavlink-value-representation)
+for the boundary and wire representation.
+
+The `client` module exposes an async `Protocol` trait. `client::new_protocol`
+accepts an `Arc<dyn transport::Transport>` supplied by the host and returns
+`Arc<dyn client::Protocol>` backed by a private implementation. `#[async_trait]`
+generates boxed `Send` futures so callers can `.await` typed results without
+compiling the concrete protocol futures. It owns command, parameter and message
+transactions plus MAVFTP and DataFlash protocol drivers. The `mavftp`,
+`ftp_read`, `dataflash` and `stats` modules provide packet/state-machine types
+and transfer accounting. LinkHub's host adapter retains actual transmission,
+connection and journal ownership; application transfer jobs retain progress,
+cancellation and content storage integration. See the architecture owner above
+for the complete ownership boundary.
 
 [ARDUPILOT_VERSION](ARDUPILOT_VERSION) records the pin and a SHA-256 per file:
 
@@ -17,7 +36,7 @@ sha256.ardupilotmega.xml=...
 ```
 
 `tag` must equal `ARDUPILOT_TAG` in [simulation/Dockerfile](../../simulation/Dockerfile),
-and the files must be unmodified; `cargo test -p linkhub-dialect` fails when
+and the files must be unmodified; `cargo test -p mavlink-protocol` fails when
 either drifts. The files are exact copies (marked `-text` in `.gitattributes`):
 never edit them by hand.
 

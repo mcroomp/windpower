@@ -27,7 +27,8 @@ use tokio_serial::{
     ClearBuffer, SerialPort, SerialPortBuilderExt, SerialPortInfo, SerialPortType, SerialStream,
 };
 
-use crate::{codec::FrameReader, mavlink::HEARTBEAT_MESSAGE_ID, records::wall_time_ns};
+use crate::{mavlink::HEARTBEAT_MESSAGE_ID, records::wall_time_ns};
+use mavlink_protocol::codec::FrameReader;
 
 /// Baud rates probed when the caller does not restrict them, ordered by how
 /// commonly the RAWES hardware uses them.
@@ -468,9 +469,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for SerialReader<R> {
 
 async fn wait_for_heartbeat<R>(reader: R, frames: &mut u64) -> Result<(), String>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send,
 {
-    let mut receiver = FrameReader::new(reader);
+    let mut receiver = FrameReader::new(Box::new(reader));
     loop {
         let decoded = receiver.recv().await.map_err(|error| error.to_string())?;
         *frames += 1;

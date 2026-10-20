@@ -225,13 +225,46 @@ Python or TypeScript.
 
 ### MAVLink value representation
 
-LinkHub uses the `linkhub-dialect` crate (`linkhub/dialect`) for framing, CRC,
+LinkHub uses the `mavlink-protocol` crate (`linkhub/mavlink-protocol`) for framing, CRC,
 and message types. It is the `mavlink` crate's own recipe, `mavlink-core` plus
 `mavlink-bindgen`, with the `ardupilotmega` dialect (and `mav2-message-extensions`)
 generated from ArduPilot's definitions ([ArduPilot/mavlink](https://github.com/ArduPilot/mavlink),
-vendored in `linkhub/dialect/definitions` at the commit the simulated ArduPilot
+vendored in `linkhub/mavlink-protocol/definitions` at the commit the simulated ArduPilot
 release builds from), so LinkHub's message and
 enumeration set matches the firmware's rather than a crates.io snapshot.
+The protocol crate owns `codec`: concrete MAVLink frame encoding/decoding,
+typed-message JSON conversion, and explicit JSON adapters for dialect enums and
+bitmasks. Application structs use those adapters rather than directly invoking
+generated Serde implementations. The async frame reader accepts a boxed
+`AsyncRead + Unpin + Send` (including borrowed streams), so framing and full-message
+serialization code generation stays in the protocol crate and is cached across
+application-only builds. Generated message types remain available for constructing
+commands and matching responses.
+
+The same crate owns command/acknowledgement, parameter, message-request and
+message-interval transactions, MAVFTP packets and stop-and-wait/burst transfer
+drivers, and DataFlash `LOG_*` listing/download reassembly and retries. Shared
+transfer statistics are protocol values, not dependencies on the application
+job registry. `client::new_protocol` accepts the host's `Arc<dyn Transport>` and
+returns `Arc<dyn client::Protocol>`; the concrete implementation is private.
+The public trait and its implementation use `#[async_trait]`, which turns their
+`async fn` methods into boxed `Send` futures. These non-inlined entry points keep
+concrete protocol state machines inside the protocol crate; internal async helpers
+remain concrete. Erasing the transport or client alone does not erase future
+state machines: the boxed-future boundary is also required. Callers still use
+`.await`, with borrowed inputs and typed results/errors unchanged. Boxing allocates
+per operation, not per transfer packet; the codec frame reader is not part of this
+transaction API. Cloned protocol handles share command,
+parameter and file/log transaction locks and MAVFTP sequence state.
+
+LinkHub remains the sole connection, transmission, and journal owner. Its adapter
+supplies target selection and observed messages and performs every actual send
+through the existing link/journal boundary. HTTP/CLI projections, transfer job
+IDs, job spawning, cancellation integration, content retention, and user-visible
+progress/diagnostic events remain application responsibilities. Protocol cleanup
+(MAVFTP session termination and `LOG_REQUEST_END`) must still run on failed or
+cancelled transfers; extraction must not turn cancellation into an unobserved
+background operation.
 Messages cross the HTTP API, the journal, and `linkhub query` in the generated
 types' serde JSON form, with the message tag removed from `fields`:
 
@@ -252,13 +285,52 @@ enumeration; capability `capabilities` is a bitmask string. Requests that
 build a message (`POST /v1/mavlink/messages`) take `fields` in this form, and a
 numeric enumeration value or a missing non-extension field is rejected.
 
+### Parameter values
+
+The protocol API represents ArduPilot parameters as
+`client::ParameterValue::{Int8(i8), Int16(i16), Int32(i32), Real32(f32)}`.
+Settings and results carry that value rather than a separate numeric value and
+independently selectable type. The wire type is derived from the enum.
+The enum describes the logical value, not its transport.
+`encode_classic`/`decode_classic` implement the float-based message path;
+its precision restrictions do not limit the values the enum or HTTP JSON can
+represent. Packed-file encoding can use the same enum without those conversions.
+HTTP JSON remains flat: `"value": -42, "type": {"type": "MAV_PARAM_TYPE_INT16"}`.
+Integer values serialize as JSON integers. A missing write type defaults to
+`REAL32`; explicit integer types require integral, in-range values.
+Non-finite values, unsupported types and overflowing `REAL32` inputs are errors.
+
+The pinned Copter-4.7.1 flight-controller parameter server implements classic
+`PARAM_REQUEST_READ`, `PARAM_REQUEST_LIST`, `PARAM_SET` and `PARAM_VALUE`, not
+`PARAM_EXT_*`. Its scalar types are the four above, and it numerically converts
+integers to/from the classic float field rather than using bytewise encoding.
+See upstream [parameter dispatch](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/GCS_MAVLink/GCS_Common.cpp#L4368),
+[writes](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/GCS_MAVLink/GCS_Param.cpp#L265)
+and [scalar types](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Param/AP_Param.h#L187).
+LinkHub rejects integer writes that cannot be represented exactly as `f32`
+instead of silently changing the requested value. Integer replies must be
+integral and in range; their original precision cannot be recovered if the
+vehicle already rounded it during transmission. These transaction APIs do not
+claim general MAVLink bytewise or extended-parameter support; raw message
+construction and journal access remain available separately.
+
+ArduPilot also provides a lossless alternative over MAVFTP: its virtual
+`@PARAM/param.pck` filesystem packs the native scalar bytes for reads and accepts
+packed parameter uploads. In Copter-4.7.1,
+[the packer copies native value bytes](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Filesystem/AP_Filesystem_Param.cpp#L246),
+and [uploads explicitly preserve all Int32 bits](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Filesystem/AP_Filesystem_Param.cpp#L607)
+when the uploaded and destination types both match Int32. This is a distinct
+ArduPilot-specific packed-file protocol, not `PARAM_EXT_*` or bytewise classic
+parameter encoding. The typed parameter transaction API currently uses classic
+messages; it does not yet implement packed-file parameter reads/writes.
+
 The dialect cannot represent an enumeration value outside it. A frame
 that passes its CRC but does not decode as a typed message (for example an
 unknown enum value) is dropped without ending the link; the first drop per
 message ID is logged. Corrupt frames are skipped while `mavlink-core`
 resynchronizes the byte stream. Keeping the dialect in step with the pinned
 ArduPilot release is enforced by tests and described in
-[linkhub/dialect/README.md](../linkhub/dialect/README.md). All dialect-defined
+[protocol README](../linkhub/mavlink-protocol/README.md). All dialect-defined
 message names are valid for message operations and query filters; unknown names
 are rejected.
 

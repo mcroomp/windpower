@@ -244,6 +244,7 @@ pub struct Operation {
     next_sequence: u16,
     outstanding: Option<Packet>,
     state: State,
+    active_session: Option<u8>,
 }
 
 impl Operation {
@@ -260,7 +261,7 @@ impl Operation {
 
     /// Opens `path` for reading, first clearing sessions a cancelled earlier
     /// transfer may have left open. The bulk read is done by
-    /// [`FtpReader`](crate::transfer::FtpReader), not by this operation.
+    /// [`FtpReader`](crate::ftp_read::FtpReader), not by this operation.
     pub fn open_read(sequence: u16, path: &str) -> Self {
         Self::new(
             sequence,
@@ -332,7 +333,13 @@ impl Operation {
             next_sequence: sequence,
             outstanding: None,
             state,
+            active_session: None,
         }
+    }
+
+    /// Session to release if an upload fails or is cancelled mid-operation.
+    pub fn active_session(&self) -> Option<u8> {
+        self.active_session
     }
 
     pub fn next_request(&mut self) -> Result<Option<Packet>, MavFtpError> {
@@ -404,6 +411,11 @@ impl Operation {
             None
         };
 
+        if request.opcode == Opcode::CreateFile && nak.is_none() {
+            self.active_session = Some(reply.session);
+        } else if request.opcode == Opcode::TerminateSession && nak.is_none() {
+            self.active_session = None;
+        }
         let old = std::mem::replace(&mut self.state, State::Complete(OperationResult::Removed));
         self.state = match old {
             State::List {

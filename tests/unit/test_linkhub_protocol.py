@@ -581,7 +581,7 @@ def test_client_encodes_and_decodes_parameter_types(monkeypatch) -> None:
             "parameters": [
                 {
                     "name": "RAWES_MODE",
-                    "value": 2.0,
+                    "value": 2,
                     "type": {"type": "MAV_PARAM_TYPE_INT8"},
                     "index": 1,
                     "count": 5,
@@ -603,6 +603,69 @@ def test_client_encodes_and_decodes_parameter_types(monkeypatch) -> None:
         {"name": "RAWES_THR", "value": 0.5},
     ]
     assert records["RAWES_MODE"]["type"] is MavParamType.INT8
+    assert type(records["RAWES_MODE"]["value"]) is int
+
+
+@pytest.mark.parametrize(
+    ("value", "param_type"),
+    [
+        (-128, MavParamType.INT8),
+        (32767, MavParamType.INT16),
+        (16_777_218, MavParamType.INT32),
+        (1.25, MavParamType.REAL32),
+    ],
+)
+def test_parameter_clients_preserve_json_numeric_types(monkeypatch, value, param_type) -> None:
+    client = LinkHubClient()
+    record = {
+        "name": "TEST",
+        "value": value,
+        "type": encode_enum(param_type),
+        "index": 0,
+        "count": 1,
+        "after_cursor": "v1:1",
+    }
+    requests = []
+
+    def request(method, path, body=None, **kwargs):
+        requests.append((method, path, body))
+        if path.startswith("/v1/mavlink/parameters/"):
+            return record.copy()
+        return {"parameters": [record.copy()]}
+
+    monkeypatch.setattr(client, "_request_json", request)
+
+    read = client.get_param("TEST")
+    assert read == value
+    assert type(read) is type(value)
+    assert client.set_param("TEST", value, param_type=param_type)
+    assert requests[-1][2]["type"] == encode_enum(param_type)
+    assert type(requests[-1][2]["value"]) is type(value)
+    values = client.fetch_all_params()
+    assert values["TEST"] == value
+    assert type(values["TEST"]) is type(value)
+    listed = client.fetch_all_param_records()["TEST"]
+    assert listed["type"] is param_type
+    assert type(listed["value"]) is type(value)
+    written = client.set_params([{"name": "TEST", "value": value, "type": param_type}])
+    assert written["TEST"]["type"] is param_type
+    assert type(written["TEST"]["value"]) is type(value)
+
+
+def test_parameter_clients_preserve_existing_error_contract(monkeypatch) -> None:
+    client = LinkHubClient()
+
+    def request(*args, **kwargs):
+        raise LinkHubError("integer cannot be represented exactly")
+
+    monkeypatch.setattr(client, "_request_json", request)
+
+    assert client.get_param("TEST") is None
+    assert not client.set_param("TEST", 16_777_217)
+    with pytest.raises(LinkHubError, match="cannot be represented exactly"):
+        client.set_params([{"name": "TEST", "value": 16_777_217, "type": MavParamType.INT32}])
+    with pytest.raises(LinkHubError, match="cannot be represented exactly"):
+        client.fetch_all_params()
 
 
 def test_client_flushes_journal_and_returns_cursor(monkeypatch) -> None:

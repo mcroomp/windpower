@@ -7,7 +7,7 @@ const TYPESCRIPT_OUTPUT: &str = "../../linkhub-ui/src/generated/protocol.ts";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let profile = load_profile(&root.join("../dialect/definitions"))?;
+    let profile = load_profile(&root.join("../mavlink-protocol/definitions"))?;
     for (output, text) in [
         (PYTHON_OUTPUT, python_types(&profile)),
         (TYPESCRIPT_OUTPUT, typescript_types(&profile)),

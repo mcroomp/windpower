@@ -1,4 +1,4 @@
-"""Generated from ArduPilot's MAVLink definitions (linkhub/dialect). Do not edit.
+"""Generated from ArduPilot's MAVLink definitions (linkhub/mavlink-protocol). Do not edit.
 
 Regenerate with `cargo run --manifest-path linkhub/Cargo.toml -p linkhub-clientgen`.
 

@@ -263,7 +263,7 @@ class LinkHubClient:
             "result": decode_enum(MavResult, result["result"]),
         }
 
-    def get_param(self, name: str, timeout: float = 3.0) -> float | None:
+    def get_param(self, name: str, timeout: float = 3.0) -> int | float | None:
         query = urllib.parse.urlencode({"timeout_ms": round(timeout * 1000)})
         try:
             result = self._request_json(
@@ -273,12 +273,12 @@ class LinkHubClient:
             )
         except LinkHubError:
             return None
-        return float(result["value"])
+        return result["value"]
 
     def set_param(
         self,
         name: str,
-        value: float,
+        value: int | float,
         *,
         timeout: float = 3.0,
         param_type: MavParamType | None = None,
@@ -300,11 +300,13 @@ class LinkHubClient:
             )
         except LinkHubError:
             return False
-        return abs(float(result["value"]) - float(value)) < 1e-4
+        if isinstance(value, int):
+            return result["value"] == value
+        return abs(result["value"] - value) < 1e-4
 
-    def fetch_all_params(self, timeout: float = 15.0) -> dict[str, float]:
+    def fetch_all_params(self, timeout: float = 15.0) -> dict[str, int | float]:
         return {
-            name: float(record["value"])
+            name: record["value"]
             for name, record in self.fetch_all_param_records(timeout).items()
         }
 

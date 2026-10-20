@@ -1,4 +1,4 @@
-"""Vendor ArduPilot's MAVLink definitions into linkhub/dialect/definitions.
+"""Vendor ArduPilot's MAVLink definitions into linkhub/mavlink-protocol/definitions.
 
 LinkHub generates its MAVLink dialect from the XML that the simulated ArduPilot
 release builds from: ArduPilot pins ``ArduPilot/mavlink`` as its
@@ -6,7 +6,7 @@ release builds from: ArduPilot pins ``ArduPilot/mavlink`` as its
 simulation/Dockerfile) points at fixes the definitions. This resolves that
 commit through the GitHub API, downloads ``ardupilotmega.xml`` and everything it
 includes at exactly that commit, and records the tag, the commit and a SHA-256
-per file in linkhub/dialect/ARDUPILOT_VERSION.
+per file in linkhub/mavlink-protocol/ARDUPILOT_VERSION.
 
     uv run python scripts/update_mavlink_definitions.py           # tag from the Dockerfile
     uv run python scripts/update_mavlink_definitions.py --tag Copter-4.8.0
@@ -26,9 +26,9 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DIALECT = ROOT / "linkhub" / "dialect"
-DEFINITIONS = DIALECT / "definitions"
-VERSION_FILE = DIALECT / "ARDUPILOT_VERSION"
+PROTOCOL = ROOT / "linkhub" / "mavlink-protocol"
+DEFINITIONS = PROTOCOL / "definitions"
+VERSION_FILE = PROTOCOL / "ARDUPILOT_VERSION"
 DOCKERFILE = ROOT / "simulation" / "Dockerfile"
 ROOT_DEFINITION = "ardupilotmega.xml"
 

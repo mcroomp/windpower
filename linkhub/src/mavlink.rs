@@ -9,6 +9,12 @@ use std::{
     time::Duration,
 };
 
+use mavlink_protocol::codec::{
+    CodecError, DecodedMessage, FrameReader, MavHeader, MavMessage, decode_raw_bytes,
+    dialect::{HEARTBEAT_DATA, MavAutopilot, MavModeFlag, MavState, MavType},
+    json as dialect_json, message_from_fields, serialize_message,
+};
+use mavlink_protocol::transport::{BoxFuture, ReceivedMessage, Transport, TransportError};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tokio::{
@@ -20,11 +26,6 @@ use tokio::{
 };
 
 use crate::{
-    codec::{
-        CodecError, DecodedMessage, FrameReader, MavHeader, MavMessage, decode_raw_bytes,
-        dialect::{HEARTBEAT_DATA, MavAutopilot, MavModeFlag, MavState, MavType},
-        message_from_fields, serialize_message,
-    },
     discovery::{DiscoveryConfig, ScanReport},
     journal::{JournalError, JournalHandle},
     link_events::{FailureRepeats, LinkEvent, LinkEvents},
@@ -66,8 +67,10 @@ pub struct LinkStatus {
     pub clock_epoch: u64,
     pub target_system: u8,
     pub target_component: u8,
+    #[serde(with = "dialect_json::mode_flags")]
     pub base_mode: MavModeFlag,
     pub custom_mode: u32,
+    #[serde(with = "dialect_json::state")]
     pub system_status: MavState,
     pub latest_time_boot_ms: u64,
     pub received_messages: u64,
@@ -182,10 +185,14 @@ impl MessageThroughput {
 pub struct ComponentInfo {
     pub system_id: u8,
     pub component_id: u8,
+    #[serde(with = "dialect_json::vehicle_type")]
     pub vehicle_type: MavType,
+    #[serde(with = "dialect_json::autopilot")]
     pub autopilot: MavAutopilot,
+    #[serde(with = "dialect_json::mode_flags")]
     pub base_mode: MavModeFlag,
     pub custom_mode: u32,
+    #[serde(with = "dialect_json::state")]
     pub system_status: MavState,
     pub last_heartbeat_ns: u64,
 }
@@ -252,20 +259,6 @@ impl MavlinkLinkConfig {
             command_capacity: 1024,
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct ReceivedMessage {
-    pub journal_sequence: u64,
-    pub ingest_time_ns: u64,
-    pub link_id: String,
-    pub system_id: u8,
-    pub component_id: u8,
-    pub sequence: u8,
-    pub message_id: u32,
-    pub name: String,
-    pub fields: Map<String, Value>,
-    pub message: MavMessage,
 }
 
 enum OutboundPayload {
@@ -355,6 +348,31 @@ impl MavlinkLinkHandle {
             .await
             .map_err(|_| LinkError::Unavailable)?;
         response.await.map_err(|_| LinkError::Unavailable)?
+    }
+}
+
+impl Transport for MavlinkLinkHandle {
+    fn target(&self) -> (u8, u8) {
+        let status = self.status.borrow();
+        (status.target_system, status.target_component)
+    }
+
+    fn subscribe_messages(&self) -> broadcast::Receiver<Arc<ReceivedMessage>> {
+        self.subscribe_messages()
+    }
+
+    fn send_message(
+        &self,
+        message: MavMessage,
+        source_system: Option<u8>,
+        source_component: Option<u8>,
+    ) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(async move {
+            self.send_message(message, source_system, source_component)
+                .await
+                .map(|_| ())
+                .map_err(|error| TransportError(Box::new(error)))
+        })
     }
 }
 
@@ -894,9 +912,9 @@ async fn receive_messages<R>(
     sender: mpsc::Sender<Result<DecodedMessage, String>>,
     status_tx: watch::Sender<LinkStatus>,
 ) where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send,
 {
-    let mut receiver = FrameReader::new(reader);
+    let mut receiver = FrameReader::new(Box::new(reader));
     loop {
         let result = receiver.recv().await.map_err(|error| error.to_string());
         let dropped = receiver.take_dropped_frames();
@@ -944,13 +962,9 @@ async fn archive_received(
         None => journal.append(payload, None).await?,
     };
     let _ = received.send(Arc::new(ReceivedMessage {
-        journal_sequence,
-        ingest_time_ns: now,
-        link_id: config.id.clone(),
+        cursor: format!("v1:{journal_sequence}"),
         system_id,
         component_id,
-        sequence: decoded.sequence,
-        message_id: decoded.message_id,
         name: decoded.name,
         fields: decoded.fields,
         message: decoded.message,
@@ -1134,7 +1148,7 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use crate::{codec::serialize_message, journal::JournalConfig};
+    use crate::journal::JournalConfig;
 
     #[test]
     fn throughput_uses_bits_and_actual_elapsed_time() {
@@ -1288,7 +1302,7 @@ mod tests {
             // A HEARTBEAT whose MAV_TYPE byte is outside the dialect, with a valid CRC.
             let mut invalid = autopilot_heartbeat(1, 1, 1);
             invalid[14] = 250;
-            let crc = linkhub_dialect::calculate_crc(&invalid[1..19], 50);
+            let crc = mavlink_protocol::calculate_crc(&invalid[1..19], 50);
             invalid[19..21].copy_from_slice(&crc.to_le_bytes());
             socket.write_all(&invalid).await.expect("invalid frame");
             socket

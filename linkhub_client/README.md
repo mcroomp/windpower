@@ -70,6 +70,13 @@ top level:
 
 ## Typed MAVLink values
 
+Parameter convenience reads preserve Python `int`/`float` values instead of
+coercing all values to `float`; record APIs also retain the MAVLink type.
+Parameter operations use classic messages, including batch/list operations;
+packed MAVFTP parameter access is not implemented. Supported types and
+classic-wire precision limits are owned by
+[Parameter values](../design/linkhub.md#parameter-values).
+
 MAVLink enumerations and bitmasks are typed, not integers. The enumerations
 (`MavCmd`, `MavResult`, `MavParamType`, `MavState`, `MavType`, ...) are
 `StrEnum`s whose value is the full MAVLink name, so `MavCmd.DO_SET_MODE ==
