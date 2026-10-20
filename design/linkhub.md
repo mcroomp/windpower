@@ -285,6 +285,45 @@ enumeration; capability `capabilities` is a bitmask string. Requests that
 build a message (`POST /v1/mavlink/messages`) take `fields` in this form, and a
 numeric enumeration value or a missing non-extension field is rejected.
 
+### Parameter values
+
+The protocol API represents ArduPilot parameters as
+`client::ParameterValue::{Int8(i8), Int16(i16), Int32(i32), Real32(f32)}`.
+Settings and results carry that value rather than a separate numeric value and
+independently selectable type. The wire type is derived from the enum.
+The enum describes the logical value, not its transport.
+`encode_classic`/`decode_classic` implement the float-based message path;
+its precision restrictions do not limit the values the enum or HTTP JSON can
+represent. Packed-file encoding can use the same enum without those conversions.
+HTTP JSON remains flat: `"value": -42, "type": {"type": "MAV_PARAM_TYPE_INT16"}`.
+Integer values serialize as JSON integers. A missing write type defaults to
+`REAL32`; explicit integer types require integral, in-range values.
+Non-finite values, unsupported types and overflowing `REAL32` inputs are errors.
+
+The pinned Copter-4.7.1 flight-controller parameter server implements classic
+`PARAM_REQUEST_READ`, `PARAM_REQUEST_LIST`, `PARAM_SET` and `PARAM_VALUE`, not
+`PARAM_EXT_*`. Its scalar types are the four above, and it numerically converts
+integers to/from the classic float field rather than using bytewise encoding.
+See upstream [parameter dispatch](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/GCS_MAVLink/GCS_Common.cpp#L4368),
+[writes](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/GCS_MAVLink/GCS_Param.cpp#L265)
+and [scalar types](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Param/AP_Param.h#L187).
+LinkHub rejects integer writes that cannot be represented exactly as `f32`
+instead of silently changing the requested value. Integer replies must be
+integral and in range; their original precision cannot be recovered if the
+vehicle already rounded it during transmission. These transaction APIs do not
+claim general MAVLink bytewise or extended-parameter support; raw message
+construction and journal access remain available separately.
+
+ArduPilot also provides a lossless alternative over MAVFTP: its virtual
+`@PARAM/param.pck` filesystem packs the native scalar bytes for reads and accepts
+packed parameter uploads. In Copter-4.7.1,
+[the packer copies native value bytes](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Filesystem/AP_Filesystem_Param.cpp#L246),
+and [uploads explicitly preserve all Int32 bits](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Filesystem/AP_Filesystem_Param.cpp#L607)
+when the uploaded and destination types both match Int32. This is a distinct
+ArduPilot-specific packed-file protocol, not `PARAM_EXT_*` or bytewise classic
+parameter encoding. The typed parameter transaction API currently uses classic
+messages; it does not yet implement packed-file parameter reads/writes.
+
 The dialect cannot represent an enumeration value outside it. A frame
 that passes its CRC but does not decode as a typed message (for example an
 unknown enum value) is dropped without ending the link; the first drop per

@@ -26,7 +26,9 @@ use crate::{
 
 mod files;
 mod logs;
+mod parameter_value;
 mod transfer;
+pub use parameter_value::ParameterValue;
 pub use transfer::{TransferError, TransferObserver, TransferSummary};
 
 #[cfg(test)]
@@ -65,29 +67,19 @@ pub struct CommandResult {
 #[derive(Clone, Debug, Serialize)]
 pub struct ParameterResult {
     pub name: String,
-    pub value: f64,
-    #[serde(rename = "type", with = "dialect_json::parameter_type")]
-    pub param_type: MavParamType,
+    #[serde(flatten)]
+    pub value: ParameterValue,
     pub index: i64,
     pub count: u64,
     pub after_cursor: String,
 }
 
-/// One requested parameter write; `type` defaults to `MAV_PARAM_TYPE_REAL32`.
+/// One requested parameter write with its type encoded by the value.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ParameterSetting {
     pub name: String,
-    pub value: f64,
-    #[serde(
-        rename = "type",
-        default = "default_parameter_type",
-        with = "dialect_json::parameter_type"
-    )]
-    pub param_type: MavParamType,
-}
-
-fn default_parameter_type() -> MavParamType {
-    MavParamType::MAV_PARAM_TYPE_REAL32
+    #[serde(flatten)]
+    pub value: ParameterValue,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -144,8 +136,7 @@ pub trait Protocol: Send + Sync {
     async fn set_parameter(
         &self,
         name: &str,
-        value: f64,
-        param_type: MavParamType,
+        value: ParameterValue,
         timeout: Duration,
     ) -> Result<ParameterResult, OperationError>;
 
@@ -330,8 +321,7 @@ impl Protocol for ProtocolClient {
     async fn set_parameter(
         &self,
         name: &str,
-        value: f64,
-        param_type: MavParamType,
+        value: ParameterValue,
         timeout: Duration,
     ) -> Result<ParameterResult, OperationError> {
         let deadline = time::Instant::now() + timeout;
@@ -341,13 +331,7 @@ impl Protocol for ProtocolClient {
         let mut receiver = self.link.subscribe_messages();
         self.link
             .send_message(
-                param_set(
-                    &normalized,
-                    value,
-                    param_type,
-                    target_system,
-                    target_component,
-                ),
+                param_set(&normalized, value, target_system, target_component)?,
                 None,
                 None,
             )
@@ -372,28 +356,29 @@ impl Protocol for ProtocolClient {
             return Ok(Vec::new());
         }
         let (target_system, target_component) = self.targets(None, None);
-        let mut requests: Vec<(String, f64, MavParamType)> = Vec::with_capacity(parameters.len());
+        let mut requests = Vec::with_capacity(parameters.len());
         for parameter in parameters {
             let name = normalize_parameter_name(&parameter.name)?;
-            if requests.iter().any(|(existing, _, _)| existing == &name) {
+            if requests.iter().any(|(existing, _)| existing == &name) {
                 return Err(OperationError::Invalid(format!(
                     "duplicate parameter {name}"
                 )));
             }
-            requests.push((name, parameter.value, parameter.param_type));
+            parameter.value.encode_classic()?;
+            requests.push((name, parameter.value));
         }
 
         let mut receiver = self.link.subscribe_messages();
-        let mut pending: BTreeMap<String, (f64, MavParamType)> = requests
+        let mut pending: BTreeMap<String, ParameterValue> = requests
             .iter()
-            .map(|(name, value, param_type)| (name.clone(), (*value, *param_type)))
+            .map(|(name, value)| (name.clone(), *value))
             .collect();
         let mut results = BTreeMap::new();
         for attempt in 0..=retries {
-            for (name, (value, param_type)) in &pending {
+            for (name, value) in &pending {
                 self.link
                     .send_message(
-                        param_set(name, *value, *param_type, target_system, target_component),
+                        param_set(name, *value, target_system, target_component)?,
                         None,
                         None,
                     )
@@ -425,7 +410,7 @@ impl Protocol for ProtocolClient {
             if pending.is_empty() {
                 return requests
                     .iter()
-                    .map(|(name, _, _)| {
+                    .map(|(name, _)| {
                         results.remove(name).ok_or_else(|| {
                             OperationError::Invalid(format!("missing result for {name}"))
                         })
@@ -922,18 +907,17 @@ fn command_long(
 
 fn param_set(
     name: &str,
-    value: f64,
-    param_type: MavParamType,
+    value: ParameterValue,
     target_system: u8,
     target_component: u8,
-) -> MavMessage {
-    MavMessage::PARAM_SET(PARAM_SET_DATA {
-        param_value: value as f32,
+) -> Result<MavMessage, OperationError> {
+    Ok(MavMessage::PARAM_SET(PARAM_SET_DATA {
+        param_value: value.encode_classic()?,
         target_system,
         target_component,
         param_id: CharArray::from(name),
-        param_type,
-    })
+        param_type: value.param_type(),
+    }))
 }
 
 fn command_ack(message: &ReceivedMessage) -> Option<&COMMAND_ACK_DATA> {
@@ -996,8 +980,7 @@ fn parameter_result(message: &ReceivedMessage) -> Result<ParameterResult, Operat
             .to_str()
             .map_err(|_| OperationError::Invalid("PARAM_VALUE param_id is not text".to_owned()))?
             .to_owned(),
-        value: f64::from(value.param_value),
-        param_type: value.param_type,
+        value: ParameterValue::decode_classic(value.param_value, value.param_type)?,
         index: i64::from(value.param_index),
         count: u64::from(value.param_count),
         after_cursor: message.cursor.clone(),
@@ -1160,8 +1143,7 @@ mod tests {
         let result = parameter_result(&message).expect("parameter");
 
         assert_eq!(result.name, "RAWES_MODE");
-        assert_eq!(result.value, 4.5);
-        assert_eq!(result.param_type, MavParamType::MAV_PARAM_TYPE_REAL32);
+        assert_eq!(result.value, ParameterValue::Real32(4.5));
         assert_eq!((result.index, result.count), (12, 700));
         assert!(parameter_matches(&message, "RAWES_MODE", 1, 1));
         assert!(!parameter_matches(&message, "RAWES_OTHER", 1, 1));

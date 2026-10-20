@@ -45,8 +45,7 @@ fn public_operations_return_boxed_send_futures_and_stay_lazy() {
     let params = vec![1.0];
     let settings = vec![ParameterSetting {
         name: name.clone(),
-        value: 0.0,
-        param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+        value: ParameterValue::Real32(0.0),
     }];
     let rates = Map::from_iter([(message.clone(), Value::from(1.0))]);
     let observer = Observer::new(None);
@@ -60,7 +59,7 @@ fn public_operations_return_boxed_send_futures_and_stay_lazy() {
         timeout,
     ));
     assert_boxed(client.get_parameter(&name, timeout));
-    assert_boxed(client.set_parameter(&name, 0.0, MavParamType::MAV_PARAM_TYPE_REAL32, timeout));
+    assert_boxed(client.set_parameter(&name, ParameterValue::Real32(0.0), timeout));
     assert_boxed(client.list_parameters(timeout));
     assert_boxed(client.set_parameters(&settings, timeout, 2));
     assert_boxed(client.request_message(&message, None, None, timeout));
@@ -693,13 +692,13 @@ async fn parameter_message_and_rate_transactions_use_the_transport_boundary() {
     let read = client.get_parameter(" test ", timeout).await.unwrap();
     assert_eq!(
         (read.name.as_str(), read.value, read.after_cursor.as_str()),
-        ("TEST", 4.5, "v1:40")
+        ("TEST", ParameterValue::Real32(4.5), "v1:40")
     );
     let write = client
-        .set_parameter("TEST", 7.0, MavParamType::MAV_PARAM_TYPE_REAL32, timeout)
+        .set_parameter("TEST", ParameterValue::Real32(7.0), timeout)
         .await
         .unwrap();
-    assert_eq!(write.value, 7.0);
+    assert_eq!(write.value, ParameterValue::Real32(7.0));
     assert_eq!(write.after_cursor, "v1:41");
     let response = client
         .request_message("autopilot_version", None, None, timeout)
@@ -713,4 +712,108 @@ async fn parameter_message_and_rate_transactions_use_the_transport_boundary() {
         .unwrap();
     assert_eq!(rates[0]["interval_us"], 100_000);
     assert_eq!(rates[0]["after_cursor"], "v1:44");
+}
+
+#[tokio::test]
+async fn parameter_transactions_preserve_integer_and_float_types() {
+    for value in [
+        ParameterValue::Int8(-12),
+        ParameterValue::Int16(30000),
+        ParameterValue::Int32(16_777_218),
+        ParameterValue::Real32(4.5),
+    ] {
+        let transport = MockTransport::new(move |message, _| {
+            if let MavMessage::PARAM_SET(request) = message {
+                assert_eq!(request.param_type, value.param_type());
+                assert_eq!(request.param_value, value.encode_classic().unwrap());
+            }
+            Response::Messages(vec![MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                param_id: CharArray::from("TEST"),
+                param_value: value.encode_classic().unwrap(),
+                param_type: value.param_type(),
+                param_count: 1,
+                param_index: 0,
+            })])
+        });
+        let client = new_protocol(transport, 0);
+        let timeout = Duration::from_secs(1);
+        assert_eq!(
+            client.get_parameter("TEST", timeout).await.unwrap().value,
+            value
+        );
+        assert_eq!(
+            client.list_parameters(timeout).await.unwrap()[0].value,
+            value
+        );
+        assert_eq!(
+            client
+                .set_parameter("TEST", value, timeout)
+                .await
+                .unwrap()
+                .value,
+            value
+        );
+        let settings = [ParameterSetting {
+            name: "TEST".to_owned(),
+            value,
+        }];
+        assert_eq!(
+            client.set_parameters(&settings, timeout, 0).await.unwrap()[0].value,
+            value
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_parameter_writes_send_nothing_even_in_a_batch() {
+    let transport = MockTransport::new(|_, _| panic!("invalid parameter write must not send"));
+    let client = new_protocol(transport.clone(), 0);
+    let timeout = Duration::from_secs(1);
+    for value in [
+        ParameterValue::Int32(16_777_217),
+        ParameterValue::Real32(f32::NAN),
+    ] {
+        assert!(matches!(
+            client.set_parameter("TEST", value, timeout).await,
+            Err(OperationError::Invalid(_))
+        ));
+        let settings = [
+            ParameterSetting {
+                name: "VALID".to_owned(),
+                value: ParameterValue::Int8(1),
+            },
+            ParameterSetting {
+                name: "INVALID".to_owned(),
+                value,
+            },
+        ];
+        assert!(matches!(
+            client.set_parameters(&settings, timeout, 0).await,
+            Err(OperationError::Invalid(_))
+        ));
+    }
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
+async fn unsupported_parameter_replies_surface_an_error() {
+    let transport = MockTransport::new(|_, _| {
+        Response::Messages(vec![MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+            param_id: CharArray::from("TEST"),
+            param_value: 1.0,
+            param_type: MavParamType::MAV_PARAM_TYPE_UINT64,
+            param_count: 1,
+            param_index: 0,
+        })])
+    });
+    let client = new_protocol(transport, 0);
+    let timeout = Duration::from_secs(1);
+    assert!(matches!(
+        client.get_parameter("TEST", timeout).await,
+        Err(OperationError::Invalid(_))
+    ));
+    assert!(matches!(
+        client.list_parameters(timeout).await,
+        Err(OperationError::Invalid(_))
+    ));
 }

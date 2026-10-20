@@ -194,15 +194,49 @@ describe("typed wire contract", () => {
       true,
       undefined,
       5_000,
-      MavParamType.UINT8,
+      MavParamType.INT8,
     );
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "/v1/mavlink/parameters/RAWES_MODE",
     );
     expect(requestBody(fetchMock)).toEqual({
       value: 0,
-      type: { type: "MAV_PARAM_TYPE_UINT8" },
+      type: { type: "MAV_PARAM_TYPE_INT8" },
       timeout_ms: 5_000,
     });
+  });
+
+  it.each([
+    [-128, MavParamType.INT8],
+    [32767, MavParamType.INT16],
+    [16_777_218, MavParamType.INT32],
+    [1.25, MavParamType.REAL32],
+  ])("preserves parameter value %s across all four operations", async (value, paramType) => {
+    const record = { name: "TEST", value, type: mavEnum(paramType) };
+    const fetchMock = stubFetch(record);
+    const api = new LinkHubApi();
+
+    await expect(api.getParameter("TEST")).resolves.toEqual(record);
+    await expect(api.setParameter("TEST", value, Number.isInteger(value), undefined, 3_000, paramType))
+      .resolves.toEqual(record);
+    expect(requestBody(fetchMock)).toMatchObject({ value, type: record.type });
+
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ parameters: [record] }) });
+    await expect(api.listParameters()).resolves.toEqual(new Map([["TEST", record]]));
+    await expect(api.setParameters([record])).resolves.toEqual(new Map([["TEST", record]]));
+    expect(requestBody(fetchMock)).toMatchObject({ parameters: [record] });
+  });
+
+  it("surfaces rejected lossy integer writes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "invalid_operation",
+        message: "integer parameter value cannot be represented exactly",
+      }),
+    }));
+    await expect(new LinkHubApi().setParameter("TEST", 16_777_217))
+      .rejects.toThrow("cannot be represented exactly");
   });
 });
