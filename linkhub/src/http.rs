@@ -12,6 +12,11 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use mavlink_protocol::client::{OperationError, ParameterSetting};
+use mavlink_protocol::codec::{
+    dialect::{MavCmd, MavParamType},
+    json as dialect_json,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -19,11 +24,10 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 use crate::{
-    codec::dialect::{MavCmd, MavParamType},
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
-    operations::{MavlinkOperations, OperationError, ParameterSetting},
+    operations::MavlinkOperations,
     records::{
         DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, wall_time_ns,
     },
@@ -966,6 +970,7 @@ struct SendMessageRequest {
 
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
+    #[serde(with = "dialect_json::command")]
     command: MavCmd,
     #[serde(default)]
     params: Vec<f64>,
@@ -1020,7 +1025,7 @@ async fn get_parameter(
 #[derive(Debug, Deserialize)]
 struct SetParameterRequest {
     value: f64,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", with = "dialect_json::parameter_type")]
     param_type: MavParamType,
     timeout_ms: Option<u64>,
 }
@@ -1529,6 +1534,7 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
+    use mavlink_protocol::codec::{MavHeader, serialize_message};
     use serde_json::Map;
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -1542,11 +1548,41 @@ mod tests {
 
     use super::*;
     use crate::{
-        codec::{MavHeader, serialize_message},
         journal::JournalConfig,
         mavlink::{MavlinkLinkConfig, autopilot_heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
     };
+
+    #[test]
+    fn command_and_parameter_requests_preserve_dialect_json() {
+        let command: CommandRequest = serde_json::from_value(json!({
+            "command": {"type": "MAV_CMD_COMPONENT_ARM_DISARM"},
+            "params": [1.0]
+        }))
+        .expect("command request");
+        assert_eq!(command.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
+        assert!(serde_json::from_value::<CommandRequest>(json!({"command": 400})).is_err());
+
+        let parameter: SetParameterRequest = serde_json::from_value(json!({
+            "value": 1.0,
+            "type": {"type": "MAV_PARAM_TYPE_REAL32"}
+        }))
+        .expect("parameter request");
+        assert_eq!(parameter.param_type, MavParamType::MAV_PARAM_TYPE_REAL32);
+        assert!(
+            serde_json::from_value::<SetParameterRequest>(json!({"value": 1.0, "type": 9}))
+                .is_err()
+        );
+
+        let batch: SetParametersRequest = serde_json::from_value(json!({
+            "parameters": [{"name": "RAWES_MODE", "value": 0.0}]
+        }))
+        .expect("default parameter type");
+        assert_eq!(
+            batch.parameters[0].param_type,
+            MavParamType::MAV_PARAM_TYPE_REAL32
+        );
+    }
 
     fn heartbeat_frame(sequence: u8, system_id: u8, component_id: u8) -> Vec<u8> {
         serialize_message(

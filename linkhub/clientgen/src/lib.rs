@@ -169,7 +169,7 @@ fn check_names(profile: &MavProfile, reserved: &[&str]) {
     }
 }
 
-const PYTHON_PREAMBLE: &str = r#""""Generated from ArduPilot's MAVLink definitions (linkhub/dialect). Do not edit.
+const PYTHON_PREAMBLE: &str = r#""""Generated from ArduPilot's MAVLink definitions (linkhub/mavlink-protocol). Do not edit.
 
 Regenerate with `cargo run --manifest-path linkhub/Cargo.toml -p linkhub-clientgen`.
 
@@ -351,7 +351,7 @@ pub fn python_types(profile: &MavProfile) -> String {
     out
 }
 
-const TYPESCRIPT_PREAMBLE: &str = r#"// Generated from ArduPilot's MAVLink definitions (linkhub/dialect). Do not edit.
+const TYPESCRIPT_PREAMBLE: &str = r#"// Generated from ArduPilot's MAVLink definitions (linkhub/mavlink-protocol). Do not edit.
 // Regenerate with `cargo run --manifest-path linkhub/Cargo.toml -p linkhub-clientgen`.
 
 export interface MavlinkMessage<TFields extends object> {
@@ -406,13 +406,15 @@ pub fn typescript_types(profile: &MavProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linkhub_dialect::{Message as _, dialects::ardupilotmega::MavMessage as DialectMessage};
+    use mavlink_protocol::{
+        Message as _, codec::message_fields, dialects::ardupilotmega::MavMessage as DialectMessage,
+    };
     use serde_json::Value;
 
     fn profile() -> MavProfile {
         load_profile(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../dialect/definitions"
+            "/../mavlink-protocol/definitions"
         )))
         .expect("ardupilotmega profile")
     }
@@ -439,15 +441,10 @@ mod tests {
         for message in profile.messages.values() {
             let default = DialectMessage::default_message_from_id(message.id)
                 .unwrap_or_else(|| panic!("{} is not in the dialect", message.name));
-            let json = serde_json::to_value(&default).expect("message JSON");
-            let object = json.as_object().expect("message object");
-            assert_eq!(object["type"], message.name.as_str());
+            let object = message_fields(&default).expect("message fields");
+            assert_eq!(default.message_name(), message.name);
 
-            let mut wire_fields: Vec<&str> = object
-                .keys()
-                .map(String::as_str)
-                .filter(|key| *key != "type")
-                .collect();
+            let mut wire_fields: Vec<&str> = object.keys().map(String::as_str).collect();
             let mut declared: Vec<&str> = message.fields.iter().map(|f| f.name.as_str()).collect();
             wire_fields.sort_unstable();
             declared.sort_unstable();

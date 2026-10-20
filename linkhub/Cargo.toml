@@ -6,7 +6,7 @@ description = "Transport and diagnostic gateway for MAVLink and device links"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-members = ["clientgen", "dialect"]
+members = ["clientgen", "mavlink-protocol"]
 resolver = "2"
 
 [features]
@@ -18,7 +18,7 @@ axum = "0.8"
 base64 = "0.22"
 btleplug = { version = "0.13", optional = true }
 clap = { version = "4.5", features = ["derive", "env"] }
-linkhub-dialect = { path = "dialect" }
+mavlink-protocol = { path = "mavlink-protocol" }
 rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"

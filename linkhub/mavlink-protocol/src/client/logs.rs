@@ -1,125 +1,102 @@
-//! DataFlash log listing and loss-tolerant log downloads, run as observable
-//! transfer jobs.
+//! DataFlash log listing and loss-tolerant downloads with host progress hooks.
 
 use std::{collections::BTreeMap, time::Duration};
 
+use crate::codec::{
+    MavMessage,
+    dialect::{LOG_DATA_DATA, LOG_REQUEST_DATA_DATA, LOG_REQUEST_END_DATA, LOG_REQUEST_LIST_DATA},
+};
 use serde_json::{Value, json};
 use tokio::time;
 
 use super::{
-    MavlinkOperations, OperationError, ReceivedMessage, format_cursor,
-    job::{Failure, acquire},
+    OperationError, ProtocolClient, ReceivedMessage, TransferObserver, TransferSummary,
+    transfer::{TransferError as Failure, acquire, merge_cleanup},
     wait_for_message,
 };
-use crate::{
-    codec::{
-        MavMessage,
-        dialect::{
-            LOG_DATA_DATA, LOG_REQUEST_DATA_DATA, LOG_REQUEST_END_DATA, LOG_REQUEST_LIST_DATA,
-        },
-    },
-    dataflash::{
-        DataFlashError, DataPacket, LogDownload, LogEntry, LogList, Target as DataFlashTarget,
-    },
-    transfer::{Outcome, TransferHandle, TransferInfo, TransferKind, TransferStats},
+use crate::dataflash::{
+    DataFlashError, DataPacket, LogDownload, LogEntry, LogList, Target as DataFlashTarget,
 };
 
-/// What a download had achieved when it ended, for the transfer record.
-#[derive(Default)]
-struct Summary {
-    done: u64,
-    received: u64,
-    stats: TransferStats,
-}
-
-impl Summary {
-    fn capture(&mut self, download: &LogDownload) {
+impl TransferSummary {
+    fn capture_log(&mut self, download: &LogDownload) {
         self.done = u64::from(download.offset());
         self.received = download.received_bytes();
         self.stats = download.stats();
     }
 }
 
-impl MavlinkOperations {
-    pub async fn list_logs(&self, timeout: Duration) -> Result<Vec<Value>, OperationError> {
+impl ProtocolClient {
+    pub(super) async fn list_logs_inner(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<Value>, OperationError> {
         let _guard = self.log_lock.lock().await;
         Ok(self
             .request_log_entries(0, u16::MAX, timeout)
             .await?
             .into_iter()
-            .map(|(entry, journal_sequence)| {
+            .map(|(entry, cursor)| {
                 json!({
                     "id": entry.id,
                     "size": entry.size,
                     "time_utc": entry.time_utc,
                     "num_logs": entry.num_logs,
                     "last_log_num": entry.last_log_num,
-                    "after_cursor": format_cursor(journal_sequence),
+                    "after_cursor": cursor,
                 })
             })
             .collect())
     }
 
-    /// Queues a download of log `log_id` and returns its record at once. The
-    /// transfer runs in the background: poll [`transfers`](Self::transfers) for
-    /// progress and collect the content when it completes.
-    ///
-    /// `packet_timeout` is how long the vehicle may stay silent before a
-    /// request is repeated; the transfer fails after `max_retries` repeats
-    /// without progress.
-    #[must_use]
-    pub fn start_log_download(
+    /// `packet_timeout` bounds silence before a request is repeated. Failure
+    /// follows `max_retries` repeats without progress.
+    pub(super) async fn download_log_inner(
         &self,
+        handle: &dyn TransferObserver,
         log_id: u16,
         packet_timeout: Duration,
         max_retries: u32,
-    ) -> TransferInfo {
-        let handle = self
-            .transfers
-            .submit(TransferKind::LogDownload, format!("log {log_id}"));
-        let info = self
-            .transfers
-            .get(handle.id())
-            .expect("a submitted transfer is registered");
-        tokio::spawn(
-            self.clone()
-                .run_log_download(handle, log_id, packet_timeout, max_retries),
-        );
-        info
-    }
-
-    async fn run_log_download(
-        self,
-        handle: TransferHandle,
-        log_id: u16,
-        packet_timeout: Duration,
-        max_retries: u32,
-    ) {
-        let mut summary = Summary::default();
-        let result = match acquire(self.log_lock.clone(), &handle).await {
+        summary: &mut TransferSummary,
+    ) -> Result<Vec<u8>, Failure> {
+        match acquire(self.log_lock.clone(), handle).await {
             Ok(_guard) => {
-                self.read_log(&handle, log_id, packet_timeout, max_retries, &mut summary)
-                    .await
+                let result = self
+                    .read_log(handle, log_id, packet_timeout, max_retries, summary)
+                    .await;
+                let (target_system, target_component) = self.targets(None, None);
+                // Release the vehicle's stream even if metadata lookup or the
+                // data phase failed or was cancelled. Keep the lock until done.
+                let ended = self
+                    .link
+                    .send_message(
+                        MavMessage::LOG_REQUEST_END(LOG_REQUEST_END_DATA {
+                            target_system,
+                            target_component,
+                        }),
+                        None,
+                        None,
+                    )
+                    .await;
+                merge_cleanup(result, ended.map(|_| ()).map_err(OperationError::from))
             }
             Err(failure) => Err(failure),
-        };
-        let outcome = result.map_or_else(Failure::into_outcome, Outcome::Complete);
-        handle
-            .finish(outcome, summary.done, summary.received, summary.stats)
-            .await;
+        }
     }
 
     async fn read_log(
         &self,
-        handle: &TransferHandle,
+        handle: &dyn TransferObserver,
         log_id: u16,
         packet_timeout: Duration,
         max_retries: u32,
-        summary: &mut Summary,
+        summary: &mut TransferSummary,
     ) -> Result<Vec<u8>, Failure> {
-        let (entry, _) = self
-            .request_log_entries(log_id, log_id, packet_timeout)
-            .await?
+        let entries = tokio::select! {
+            result = self.request_log_entries(log_id, log_id, packet_timeout) => result?,
+            () = handle.cancelled() => return Err(Failure::Cancelled),
+        };
+        let (entry, _) = entries
             .into_iter()
             .find(|(entry, _)| entry.id == log_id)
             .ok_or_else(|| OperationError::NotFound(format!("DataFlash log {log_id}")))?;
@@ -152,14 +129,19 @@ impl MavlinkOperations {
                         )
                         .await?;
                 }
-                match wait_for_message(&mut receiver, packet_timeout, |message| {
-                    log_data(message).is_some_and(|data| data.id == log_id)
-                })
-                .await
-                {
+                let received = tokio::select! {
+                    result = wait_for_message(&mut receiver, packet_timeout, |message| {
+                        log_data(message).is_some_and(|data| data.id == log_id)
+                    }) => result,
+                    () = handle.cancelled() => return Err(Failure::Cancelled),
+                };
+                match received {
                     Ok(message) => match download.receive(data_packet(&message)?) {
                         Err(DataFlashError::EarlyEnd { .. }) => {
-                            time::sleep(packet_timeout).await;
+                            tokio::select! {
+                                () = time::sleep(packet_timeout) => {},
+                                () = handle.cancelled() => return Err(Failure::Cancelled),
+                            }
                             download.on_timeout()?;
                         }
                         result => result?,
@@ -176,35 +158,21 @@ impl MavlinkOperations {
             Ok(())
         }
         .await;
-        summary.capture(&download);
+        summary.capture_log(&download);
 
-        // End the stream on the vehicle whether or not the transfer finished.
-        let ended = self
-            .link
-            .send_message(
-                MavMessage::LOG_REQUEST_END(LOG_REQUEST_END_DATA {
-                    target_system: target.system,
-                    target_component: target.component,
-                }),
-                None,
-                None,
-            )
-            .await;
         transferred?;
-        ended?;
         download
             .into_bytes()
             .ok_or_else(|| OperationError::Invalid("log transfer is incomplete".to_owned()).into())
     }
 
-    /// The log entries the vehicle reported, each with the journal sequence of
-    /// the `LOG_ENTRY` message it came from.
+    /// Entries paired with the opaque host cursor of their `LOG_ENTRY`.
     async fn request_log_entries(
         &self,
         start: u16,
         end: u16,
         timeout: Duration,
-    ) -> Result<Vec<(LogEntry, u64)>, OperationError> {
+    ) -> Result<Vec<(LogEntry, String)>, OperationError> {
         let (target_system, target_component) = self.targets(None, None);
         let target = DataFlashTarget {
             system: target_system,
@@ -237,7 +205,7 @@ impl MavlinkOperations {
             if entry.num_logs == 0 {
                 return Ok(Vec::new());
             }
-            entries.insert(entry.id, (entry, message.journal_sequence));
+            entries.insert(entry.id, (entry, message.cursor.clone()));
         }
         Ok(entries.into_values().collect())
     }

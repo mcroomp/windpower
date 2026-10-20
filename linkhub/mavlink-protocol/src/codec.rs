@@ -1,11 +1,11 @@
 use std::{collections::HashSet, io::Cursor};
 
-pub use dialect::MavMessage;
-use linkhub_dialect::{
+use crate::{
     AsyncMavlinkReader, MAVLinkMessageRaw, MAVLinkV2MessageRaw, MavlinkReader, Message,
     error::{MessageReadError, ParserError},
 };
-pub use linkhub_dialect::{MavHeader, dialects::ardupilotmega as dialect};
+pub use crate::{MavHeader, dialects::ardupilotmega as dialect};
+pub use dialect::MavMessage;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -55,14 +55,14 @@ pub fn decode_raw_bytes(bytes: &[u8]) -> Result<DecodedMessage, CodecError> {
 /// Corrupt frames are skipped by `mavlink` while resynchronizing. Frames that
 /// pass the CRC but do not decode as a typed message, such as an enum value
 /// outside the dialect, are dropped here without ending the stream.
-pub struct FrameReader<R> {
-    reader: AsyncMavlinkReader<R>,
+pub struct FrameReader<'a> {
+    reader: AsyncMavlinkReader<Box<dyn AsyncRead + Unpin + Send + 'a>>,
     dropped_frames: u64,
     reported_ids: HashSet<u32>,
 }
 
-impl<R: AsyncRead + Unpin> FrameReader<R> {
-    pub fn new(reader: R) -> Self {
+impl<'a> FrameReader<'a> {
+    pub fn new(reader: Box<dyn AsyncRead + Unpin + Send + 'a>) -> Self {
         Self {
             reader: AsyncMavlinkReader::new(reader),
             dropped_frames: 0,
@@ -169,10 +169,57 @@ pub fn serialize_message(message: &MavMessage, header: MavHeader) -> Vec<u8> {
     frame.raw_bytes().to_vec()
 }
 
+/// Concrete generated-type conversions. The Serde adapters only forward JSON
+/// values so generated serialization is compiled here, not in callers.
+pub mod json {
+    macro_rules! adapter {
+        ($module:ident, $ty:ident) => {
+            pub mod $module {
+                use super::super::dialect::$ty;
+                use serde::{Deserialize, Deserializer, Serialize, Serializer};
+                use serde_json::Value;
+
+                pub fn to_value(value: &$ty) -> Result<Value, serde_json::Error> {
+                    serde_json::to_value(value)
+                }
+
+                pub fn from_value(value: Value) -> Result<$ty, serde_json::Error> {
+                    serde_json::from_value(value)
+                }
+
+                pub fn serialize<S: Serializer>(
+                    value: &$ty,
+                    serializer: S,
+                ) -> Result<S::Ok, S::Error> {
+                    to_value(value)
+                        .map_err(serde::ser::Error::custom)?
+                        .serialize(serializer)
+                }
+
+                pub fn deserialize<'de, D: Deserializer<'de>>(
+                    deserializer: D,
+                ) -> Result<$ty, D::Error> {
+                    from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+                }
+            }
+        };
+    }
+
+    adapter!(command, MavCmd);
+    adapter!(result, MavResult);
+    adapter!(parameter_type, MavParamType);
+    adapter!(mode_flags, MavModeFlag);
+    adapter!(state, MavState);
+    adapter!(vehicle_type, MavType);
+    adapter!(autopilot, MavAutopilot);
+    adapter!(severity, MavSeverity);
+    adapter!(capabilities, MavProtocolCapability);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linkhub_dialect::{
+    use crate::{
         MAVLinkV1MessageRaw, calculate_crc,
         dialects::ardupilotmega::{
             AUTOPILOT_VERSION_DATA, COMMAND_LONG_DATA, EXTENDED_SYS_STATE_DATA, HEARTBEAT_DATA,
@@ -342,6 +389,58 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn enum_and_bitmask_adapters_preserve_generated_json() {
+        macro_rules! check {
+            ($module:ident, $value:expr, $expected:tt) => {{
+                let value = $value;
+                let expected = json!($expected);
+                assert_eq!(json::$module::to_value(&value).unwrap(), expected);
+                assert_eq!(json::$module::from_value(expected).unwrap(), value);
+                assert!(json::$module::from_value(json!(0)).is_err());
+            }};
+        }
+
+        check!(command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, {"type": "MAV_CMD_COMPONENT_ARM_DISARM"});
+        check!(result, dialect::MavResult::MAV_RESULT_ACCEPTED, {"type": "MAV_RESULT_ACCEPTED"});
+        check!(parameter_type, dialect::MavParamType::MAV_PARAM_TYPE_REAL32, {"type": "MAV_PARAM_TYPE_REAL32"});
+        check!(mode_flags, MavModeFlag::empty(), "");
+        check!(
+            mode_flags,
+            MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED,
+            "MAV_MODE_FLAG_SAFETY_ARMED"
+        );
+        check!(state, MavState::MAV_STATE_ACTIVE, {"type": "MAV_STATE_ACTIVE"});
+        check!(vehicle_type, MavType::MAV_TYPE_GCS, {"type": "MAV_TYPE_GCS"});
+        check!(autopilot, MavAutopilot::MAV_AUTOPILOT_INVALID, {"type": "MAV_AUTOPILOT_INVALID"});
+        check!(severity, dialect::MavSeverity::MAV_SEVERITY_INFO, {"type": "MAV_SEVERITY_INFO"});
+        check!(
+            capabilities,
+            MavProtocolCapability::MAV_PROTOCOL_CAPABILITY_FTP,
+            "MAV_PROTOCOL_CAPABILITY_FTP"
+        );
+        assert!(json::command::from_value(json!({"type": "NOT_A_COMMAND"})).is_err());
+    }
+
+    #[test]
+    fn frame_reader_accepts_borrowed_streams_and_is_send() {
+        let bytes = serialize_message(&heartbeat(), header(3));
+        let mut stream = Cursor::new(bytes.clone());
+        let mut reader = FrameReader::new(Box::new(&mut stream));
+        fn assert_send<T: Send>(_: &T) {}
+        let receive = reader.recv();
+        assert_send(&receive);
+        let decoded = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(receive)
+            .unwrap();
+        assert_eq!(decoded.sequence, 3);
+        assert_eq!(decoded.raw, bytes);
+        drop(reader);
+        assert!(stream.position() > 0);
+    }
+
     /// A HEARTBEAT whose MAV_TYPE byte is outside the dialect but whose CRC is valid.
     fn heartbeat_with_unknown_type(sequence: u8) -> Vec<u8> {
         let mut bytes = serialize_message(&heartbeat(), header(sequence));
@@ -367,7 +466,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let mut reader = FrameReader::new(Cursor::new(stream));
+                let mut reader = FrameReader::new(Box::new(Cursor::new(stream)));
                 let decoded = reader.recv().await.unwrap();
                 assert_eq!(reader.take_dropped_frames(), 1);
                 assert_eq!(reader.take_dropped_frames(), 0);

@@ -27,10 +27,10 @@ cargo build --manifest-path .\linkhub\Cargo.toml --release --features bluetooth
 ```
 
 The MAVLink dialect is generated at build time from ArduPilot's own definitions,
-vendored in `dialect/definitions` (no submodule or network access is needed to
-build). LinkHub uses the `linkhub-dialect` crate (`mavlink-core` plus
-`mavlink-bindgen`; see [dialect/README.md](dialect/README.md)) for framing,
-CRC, and message types. MAVLink
+vendored in `mavlink-protocol/definitions` (no submodule or network access is needed to
+build). LinkHub uses the `mavlink-protocol` crate (`mavlink-core` plus
+`mavlink-bindgen`; see [protocol README](mavlink-protocol/README.md)) for framing,
+CRC, message types, protocol transactions, and file/log transfer drivers. MAVLink
 enumerations and bitmasks appear in JSON as `{"type": "MAV_X_NAME"}` objects and
 `" | "`-joined name strings; see
 [design/linkhub.md](../design/linkhub.md#mavlink-value-representation).
@@ -46,11 +46,16 @@ LinkHub while omitting debug information from third-party dependencies. This
 reduces normal compile/link time and target-directory growth without affecting
 optimized release builds.
 
+MAVLink encoding/decoding, generated-type JSON conversions, and protocol drivers live in
+`mavlink-protocol`, so application-only edits reuse their compiled code.
+Use development builds for normal iteration; release builds still optimize the
+application. See [the protocol README](mavlink-protocol/README.md) for the boundary.
+
 ## Generate the checked protocol artifacts
 
 `linkhub-clientgen` (`linkhub/clientgen`) generates the Python and TypeScript
 types for every message and enumeration in the vendored ArduPilot definitions.
-Rerun it after changing `linkhub/dialect/definitions`:
+Rerun it after changing `linkhub/mavlink-protocol/definitions`:
 
 ```powershell
 cargo run --manifest-path .\linkhub\Cargo.toml -p linkhub-clientgen

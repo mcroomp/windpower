@@ -24,4 +24,4 @@
 *.gz  binary
 
 # Vendored ArduPilot MAVLink definitions — byte-exact (hashed in ARDUPILOT_VERSION)
-linkhub/dialect/definitions/*.xml -text
+linkhub/mavlink-protocol/definitions/*.xml -text

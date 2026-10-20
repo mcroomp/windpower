@@ -5,10 +5,13 @@ use std::{
 };
 
 use clap::{Args, Subcommand, ValueEnum};
+use mavlink_protocol::codec::{
+    dialect::{MavModeFlag, MavSeverity},
+    json as dialect_json,
+};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    codec::dialect::{MavModeFlag, MavSeverity},
     journal::{JournalError, read_persisted},
     records::{Direction, JournalRecord, RecordPayload},
 };
@@ -503,7 +506,7 @@ fn print_armed(messages: &[Message]) {
         let armed = message
             .fields
             .get("base_mode")
-            .and_then(|value| serde_json::from_value::<MavModeFlag>(value.clone()).ok())
+            .and_then(|value| dialect_json::mode_flags::from_value(value.clone()).ok())
             .is_some_and(|flags| flags.contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED));
         let custom_mode = message
             .fields
@@ -589,7 +592,7 @@ fn print_statustext(
         let severity = message
             .fields
             .get("severity")
-            .and_then(|value| serde_json::from_value::<MavSeverity>(value.clone()).ok());
+            .and_then(|value| dialect_json::severity::from_value(value.clone()).ok());
         let text = clean_string(message.fields.get("text"));
         if id == 0 {
             flush(&mut pending);

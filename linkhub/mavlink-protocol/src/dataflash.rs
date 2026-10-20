@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use thiserror::Error;
 
-use crate::transfer::TransferStats;
+use crate::stats::TransferStats;
 
 pub const LOG_DATA_LEN: usize = 90;
 /// Bytes requested per LOG_REQUEST_DATA window. A lost packet only costs a

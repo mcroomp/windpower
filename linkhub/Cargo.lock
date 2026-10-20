@@ -771,7 +771,7 @@ dependencies = [
  "btleplug",
  "clap",
  "hex",
- "linkhub-dialect",
+ "mavlink-protocol",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -791,23 +791,9 @@ dependencies = [
 name = "linkhub-clientgen"
 version = "0.1.0"
 dependencies = [
- "linkhub-dialect",
  "mavlink-bindgen",
+ "mavlink-protocol",
  "serde_json",
-]
-
-[[package]]
-name = "linkhub-dialect"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.2",
- "mavlink-bindgen",
- "mavlink-core",
- "num-derive",
- "num-traits",
- "serde",
- "serde_arrays",
- "sha2",
 ]
 
 [[package]]
@@ -882,6 +868,26 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-serial",
+]
+
+[[package]]
+name = "mavlink-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitflags 2.13.2",
+ "hex",
+ "mavlink-bindgen",
+ "mavlink-core",
+ "num-derive",
+ "num-traits",
+ "serde",
+ "serde_arrays",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

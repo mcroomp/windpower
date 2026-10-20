@@ -225,13 +225,46 @@ Python or TypeScript.
 
 ### MAVLink value representation
 
-LinkHub uses the `linkhub-dialect` crate (`linkhub/dialect`) for framing, CRC,
+LinkHub uses the `mavlink-protocol` crate (`linkhub/mavlink-protocol`) for framing, CRC,
 and message types. It is the `mavlink` crate's own recipe, `mavlink-core` plus
 `mavlink-bindgen`, with the `ardupilotmega` dialect (and `mav2-message-extensions`)
 generated from ArduPilot's definitions ([ArduPilot/mavlink](https://github.com/ArduPilot/mavlink),
-vendored in `linkhub/dialect/definitions` at the commit the simulated ArduPilot
+vendored in `linkhub/mavlink-protocol/definitions` at the commit the simulated ArduPilot
 release builds from), so LinkHub's message and
 enumeration set matches the firmware's rather than a crates.io snapshot.
+The protocol crate owns `codec`: concrete MAVLink frame encoding/decoding,
+typed-message JSON conversion, and explicit JSON adapters for dialect enums and
+bitmasks. Application structs use those adapters rather than directly invoking
+generated Serde implementations. The async frame reader accepts a boxed
+`AsyncRead + Unpin + Send` (including borrowed streams), so framing and full-message
+serialization code generation stays in the protocol crate and is cached across
+application-only builds. Generated message types remain available for constructing
+commands and matching responses.
+
+The same crate owns command/acknowledgement, parameter, message-request and
+message-interval transactions, MAVFTP packets and stop-and-wait/burst transfer
+drivers, and DataFlash `LOG_*` listing/download reassembly and retries. Shared
+transfer statistics are protocol values, not dependencies on the application
+job registry. `client::new_protocol` accepts the host's `Arc<dyn Transport>` and
+returns `Arc<dyn client::Protocol>`; the concrete implementation is private.
+The public trait and its implementation use `#[async_trait]`, which turns their
+`async fn` methods into boxed `Send` futures. These non-inlined entry points keep
+concrete protocol state machines inside the protocol crate; internal async helpers
+remain concrete. Erasing the transport or client alone does not erase future
+state machines: the boxed-future boundary is also required. Callers still use
+`.await`, with borrowed inputs and typed results/errors unchanged. Boxing allocates
+per operation, not per transfer packet; the codec frame reader is not part of this
+transaction API. Cloned protocol handles share command,
+parameter and file/log transaction locks and MAVFTP sequence state.
+
+LinkHub remains the sole connection, transmission, and journal owner. Its adapter
+supplies target selection and observed messages and performs every actual send
+through the existing link/journal boundary. HTTP/CLI projections, transfer job
+IDs, job spawning, cancellation integration, content retention, and user-visible
+progress/diagnostic events remain application responsibilities. Protocol cleanup
+(MAVFTP session termination and `LOG_REQUEST_END`) must still run on failed or
+cancelled transfers; extraction must not turn cancellation into an unobserved
+background operation.
 Messages cross the HTTP API, the journal, and `linkhub query` in the generated
 types' serde JSON form, with the message tag removed from `fields`:
 
@@ -258,7 +291,7 @@ unknown enum value) is dropped without ending the link; the first drop per
 message ID is logged. Corrupt frames are skipped while `mavlink-core`
 resynchronizes the byte stream. Keeping the dialect in step with the pinned
 ArduPilot release is enforced by tests and described in
-[linkhub/dialect/README.md](../linkhub/dialect/README.md). All dialect-defined
+[protocol README](../linkhub/mavlink-protocol/README.md). All dialect-defined
 message names are valid for message operations and query filters; unknown names
 are rejected.
 

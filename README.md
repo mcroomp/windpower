@@ -89,6 +89,7 @@ The detailed boundary and proposal live in [linkhub.md](design/linkhub.md).
 | Physical-world simulation and Python/Lua test adapters | [simulation/README.md](simulation/README.md) |
 | Python port of ArduPilot control loops | [arduloop/README.md](arduloop/README.md) |
 | Rust gateway, service commands, and HTTP API usage | [linkhub/README.md](linkhub/README.md) |
+| MAVLink codec, transactions, and file/log transfer protocols | [mavlink-protocol README](linkhub/mavlink-protocol/README.md) |
 | Browser telemetry, control, and 3D visualization | [linkhub-ui/README.md](linkhub-ui/README.md) |
 | Shared typed Python HTTP client | [linkhub_client/README.md](linkhub_client/README.md) |
 | Production phase planning and winch protocol | [groundstation/](groundstation/) |
@@ -137,6 +138,7 @@ so they do not load unrelated documents.
 | [simulation/README.md](simulation/README.md) | Simulation package orientation and entry points |
 | [arduloop/README.md](arduloop/README.md) | Python port of the ArduPilot heli attitude/rate stack |
 | [linkhub/README.md](linkhub/README.md) | Build, run, CLI, HTTP usage and journal queries |
+| [mavlink-protocol README](linkhub/mavlink-protocol/README.md) | Stable MAVLink protocol crate, pinned definitions and generation workflow |
 | [linkhub-ui/README.md](linkhub-ui/README.md) | Browser UI setup and behavior |
 | [linkhub_client/README.md](linkhub_client/README.md) | Typed Python HTTP client |
 | [envelope/CLAUDE.md](envelope/CLAUDE.md) | Agent notes for the flight-envelope package |

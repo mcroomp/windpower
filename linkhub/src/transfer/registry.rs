@@ -12,11 +12,11 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::watch;
 
-use super::TransferStats;
 use crate::{
     journal::JournalHandle,
     records::{DiagnosticEvent, DiagnosticLevel, wall_time_ns},
 };
+use mavlink_protocol::{client::TransferObserver, stats::TransferStats, transport::BoxFuture};
 
 /// Finished transfers kept for inspection.
 const KEPT_FINISHED: usize = 32;
@@ -449,6 +449,24 @@ impl Drop for TransferHandle {
                 }
             });
         }
+    }
+}
+
+impl TransferObserver for TransferHandle {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+
+    fn cancelled(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.cancelled())
+    }
+
+    fn start(&self, total_bytes: u64) -> BoxFuture<'_, ()> {
+        Box::pin(self.start(total_bytes))
+    }
+
+    fn progress(&self, done_bytes: u64, received_bytes: u64, stats: TransferStats) {
+        self.progress(done_bytes, received_bytes, stats);
     }
 }
 

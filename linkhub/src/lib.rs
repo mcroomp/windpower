@@ -1,10 +1,7 @@
-pub mod codec;
-pub mod dataflash;
 pub mod discovery;
 pub mod http;
 pub mod journal;
 pub mod link_events;
-pub mod mavftp;
 pub mod mavlink;
 pub mod motor;
 pub mod operations;

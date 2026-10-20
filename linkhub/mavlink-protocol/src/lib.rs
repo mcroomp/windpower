@@ -1,10 +1,27 @@
-//! The MAVLink `ardupilotmega` dialect generated from ArduPilot's own
-//! definitions.
+//! MAVLink codec, generated `ardupilotmega` dialect and concrete async protocol
+//! transactions. Hosts supply [`transport::Transport`] and retain ownership of
+//! connections, observation cursors and transfer job policy.
 //!
 //! This mirrors the `mavlink` crate (generated dialects plus `mavlink-core`),
 //! but its XML is vendored from the `ArduPilot/mavlink` commit that the ArduPilot
 //! release under test builds from, so LinkHub's message set matches the
 //! firmware's. See `README.md` for how to move to a new ArduPilot release.
+
+#[cfg(feature = "codec")]
+pub mod codec;
+
+#[cfg(feature = "protocol")]
+pub mod client;
+#[cfg(feature = "protocol")]
+pub mod dataflash;
+#[cfg(feature = "protocol")]
+pub mod ftp_read;
+#[cfg(feature = "protocol")]
+pub mod mavftp;
+#[cfg(feature = "protocol")]
+pub mod stats;
+#[cfg(feature = "protocol")]
+pub mod transport;
 
 #[allow(clippy::all, clippy::pedantic, deprecated)]
 pub mod dialects {
@@ -45,7 +62,7 @@ mod tests {
         assert_eq!(
             recorded()["tag"],
             docker_tag,
-            "linkhub/dialect/ARDUPILOT_VERSION and simulation/Dockerfile ARDUPILOT_TAG must name \
+            "linkhub/mavlink-protocol/ARDUPILOT_VERSION and simulation/Dockerfile ARDUPILOT_TAG must name \
              the same ArduPilot release; run scripts/update_mavlink_definitions.py"
         );
     }

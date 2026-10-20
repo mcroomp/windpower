@@ -163,7 +163,7 @@ FROM rust:1.95-bookworm AS linkhub-build
 
 WORKDIR /build
 COPY linkhub/Cargo.toml linkhub/Cargo.lock ./
-COPY linkhub/dialect ./dialect
+COPY linkhub/mavlink-protocol ./mavlink-protocol
 COPY linkhub/clientgen ./clientgen
 COPY linkhub/src ./src
 RUN --mount=type=cache,id=linkhub-cargo-registry,target=/usr/local/cargo/registry \
