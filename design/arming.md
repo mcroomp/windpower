@@ -256,8 +256,8 @@ through the common safe-off path.
 
 ## Disarmed collective setup
 
-`run collective [--duration S] [--trim thr=0.5]` in the shared browser/Node
-command runner selects `RAWES_MODE=6`. This is an explicit **servos-live setup
+`run collective [--duration S] [--trim thr=0.5]` and the browser's **Swash**
+calibration panel share `RAWES_MODE=6`. This is an explicit **servos-live setup
 state**, not normal safe-off and not a flight-staging mode. The rotor and swash
 must be physically secured before use. It never arms or enters GUIDED.
 
@@ -265,16 +265,20 @@ Startup requires a connected, ready, disarmed vehicle, `H_FLYBAR_MODE=1`,
 `IM_ACRO_COL_EXP=0`, and the boot-established `H_TAIL_TYPE=3` /
 `SERVO9_FUNCTION=36` configuration. The command selects ACRO, sets `H_SV_MAN=0`
 and `H_YAW_TRIM=0`, then sends normalized `RAWES_COL`. The default is 50%
-collective, not a promise of zero blade pitch. Browser minus/equals changes it
-in five-percentage-point steps; other passive motion hotkeys are inactive.
+collective, not a promise of zero blade pitch. The terminal command provides
+collective-only adjustment; the panel also sends normalized `RAWES_RLL` and
+`RAWES_PIT`. Passive-flight attitude and yaw hotkeys remain inactive.
 
-Lua holds roll/pitch/yaw inputs neutral and interlock low on every setup tick;
-ArduPilot continues to own swash mixing and disarmed DDFP inhibition. Only
-`RAWES_COL` changes motion in this mode: no GUIDED controller or yaw-trim
-observer runs. Collective uses the existing normalized RC3 mapping and clamps
-finite inputs to `[0,1]`; non-finite inputs are rejected with a status message.
+Lua holds yaw neutral and interlock low on every setup tick; ArduPilot continues
+to own swash mixing, configured travel limits, and disarmed DDFP inhibition.
+No GUIDED controller or yaw-trim observer runs. Collective uses the existing
+normalized RC3 mapping and clamps finite inputs to `[0,1]`. Cyclic uses the
+existing RC1/RC2 calibration and reversal, bounded to the unit roll/pitch circle.
+Each cyclic axis defaults to neutral and expires independently after 3000 ms
+without its own fresh finite command, even if collective is still refreshed.
+Non-finite inputs are rejected with a status message.
 
-Every entry discards the old collective seed. Until a fresh value arrives, Lua
+Every entry discards all three setup seeds. Until a fresh value arrives, Lua
 holds the existing neutral collective. The client refreshes its command every
 500 ms, after checking disarmed ACRO and mode 6. At 3000 ms without a fresh
 finite `RAWES_COL` (including the initial wait), Lua neutralizes the swash,
@@ -285,11 +289,39 @@ latched indefinitely.
 An observed arm or invalid setup configuration latches a setup failure:
 collective is neutralized immediately, interlock stays low, and Lua requests
 disarm until confirmed before returning to mode 0. A refreshed collective
-cannot clear that failure. Leaving setup clears its collective and releases
+cannot clear that failure. Leaving setup clears all three inputs and releases
 its RC1-RC3 overrides; it cannot seed a later manual or flight session.
 Normal Stop/Escape, CLI Ctrl-C, duration expiry, and client errors use the shared
 canonical safe-off cleanup. Browser reload does not attach to setup; the
 vehicle timeout returns it to neutral.
+
+The Swash panel opens read-only. Enabling movement requires explicit confirmation
+that the mechanism is secured and recent valid S1/S2/S3 telemetry from the target
+flight controller. The shared controller aborts movement if these samples stall
+for 2 seconds, disarmed ACRO is lost, or mode 6 is no longer active. Closing or
+switching away from the panel, clearing its secured confirmation, and Escape
+stop the panel's operation through the shared safe-off path. Tab/process exit
+also retains the vehicle-side 3-second watchdog; browser unload cannot guarantee
+that HTTP cleanup completes.
+
+Manual controls provide a cyclic pad, cardinal-limit/center buttons, and a
+collective slider. Target updates coalesce to the latest position at no more
+than 10 Hz; unchanged targets are refreshed by the 500 ms keepalive.
+The optional sweep has its own modal dialog. Closing it or pressing Escape
+applies safe-off, rather than hiding an active movement. It holds collective fixed, ramps out from
+center, traverses one cyclic circle, and ramps back to center. Radius defaults
+to 25% of configured cyclic travel, with a 12-second total duration. An operator
+must confirm clearance for the chosen radius and collective before starting;
+manual input cancels the sweep. This does not run native `H_SV_MAN=5` or cycle
+collective through its endpoints. Software bounds do not establish physical
+clearance: expanding configured limits can bind or damage the mechanism.
+
+Limit writes (`H_COL_MIN`, `H_COL_MAX`, `H_CYC_MAX`) require an idle controller,
+`RAWES_MODE=0`, `H_SV_MAN=0`, and confirmed disarmed status before each write.
+Edits apply only on explicit Apply, preserve a valid endpoint ordering during
+writes, and verify readbacks. An uncertain/partial write is reported as a
+failure requiring reload and verification; it is not silently rolled back or
+reported as successful.
 
 `tests/unit/test_collective_lua.py` checks the actual Lua mode, mapping,
 freshness/timeout boundaries, neutralization and arm/configuration rejection.

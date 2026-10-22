@@ -206,7 +206,36 @@ result (Esc, Ctrl-C in the CLI, or `compass cancel` aborts):
   so the UI prints each distinct result once and ignores anything the vehicle
   sent before it accepted the start command.
 
-`run collective` is disarmed-only, collective-only bench setup (default 50%).
+### Swash calibration panel
+
+Click **Swash** beside **Yaw** and **Wobble** for collective/cyclic calibration.
+Opening the drawer only reads limits and live S1/S2/S3/S9 PWM telemetry; it does
+not enable movement. Confirm secured hardware, then **Enable movement**.
+
+- Drag the cyclic pad or choose a cardinal-limit or center button.
+- Use the collective slider from 0 to 100% of configured collective travel.
+- Edit `H_COL_MIN`, `H_COL_MAX` (microseconds), and `H_CYC_MAX` (centidegrees)
+  while stopped, then explicitly **Apply limits**. **Reload limits** reads the
+  controller again; limits are not automatically restored on Stop.
+- The read-only calculated S1/S2/S3 min/max updates as the draft limits change,
+  without writing parameters. It predicts the full configured cyclic envelope,
+  not just the current slider position; see the
+  [mixer assumptions and clipping](../design/hardware.md#swashplate-and-servos).
+- For an automatic single-circle sweep, center cyclic, open **Automatic cyclic
+  sweep...**, choose radius/duration in its modal dialog, confirm clearance at
+  the current collective, then **Sweep one circle**. The dialog shows a live
+  commanded-position graphic, roll/pitch/collective values, and servo PWM.
+  **Stop / close** or Escape
+  closes the modal and applies safe-off. **Stop / safe-off** exits setup;
+  closing or switching drawers also stops movement started by the panel.
+
+This uses the existing collective mode 6, extended to accept fresh cyclic
+commands. Deploy the updated Lua before use; a browser rebuild alone does not
+update the vehicle. Stale servo telemetry inhibits/aborts panel movement.
+The [arming owner](../design/arming.md#disarmed-collective-setup) defines the
+watchdog, limit-write, and physical-clearance safety contract.
+
+`run collective` is disarmed-only, collective-only command-line setup (default 50%).
 The browser displays **servos live**; minus/equals adjusts collective by 5
 percentage points, and Escape or `stop` returns to neutral safe-off. The CLI
 uses `--trim thr=...` to select the value and Ctrl-C or `--duration` to stop.

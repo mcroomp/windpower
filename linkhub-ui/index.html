@@ -20,6 +20,7 @@
               <select id="telemetry-profile" aria-label="Telemetry link profile"></select>
               <button id="yaw-toggle" type="button" aria-pressed="false" aria-controls="yaw-panel" title="Yaw setpoint, PID, motor command and speed charts">Yaw</button>
               <button id="wobble-toggle" type="button" aria-pressed="false" aria-controls="wobble-panel" title="Pixhawk roll, pitch and yaw wobble frequency analysis">Wobble</button>
+              <button id="swash-toggle" type="button" aria-pressed="false" aria-controls="swash-panel" title="Disarmed collective/cyclic calibration and servo readback">Swash</button>
               <div id="connection-state" class="badge offline">connecting</div>
             </div>
             <button id="link-throughput" type="button" aria-expanded="false" aria-controls="link-details" title="MAVLink frame throughput, averaged over 3 seconds; excludes UART and radio overhead. Click for a per-message breakdown.">RX — · TX —</button>
@@ -68,6 +69,7 @@
         </div>
         <section id="yaw-panel" class="yaw-panel" aria-label="Yaw tracking"></section>
         <section id="wobble-panel" class="wobble-panel" aria-label="Pixhawk wobble frequency analysis"></section>
+        <section id="swash-panel" class="swash-panel" aria-label="Collective and cyclic calibration"></section>
       </section>
       <section class="panel terminal-panel">
         <header>

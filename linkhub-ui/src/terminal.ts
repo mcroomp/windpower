@@ -9,6 +9,10 @@ export class Terminal {
   private historyIndex = 0;
   private readonly runner: CommandRunner;
 
+  get compassActive(): boolean {
+    return this.runner.compassActive;
+  }
+
   constructor(
     form: HTMLFormElement,
     private readonly input: HTMLInputElement,

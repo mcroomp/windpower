@@ -297,6 +297,12 @@ swash test off
 is the native `H_SV_MAN=5` oscillation path. Full-envelope oscillation requires
 disconnected servos and explicit `--allow-full-range`.
 
+The browser also provides a manual collective/cyclic calibration panel with
+limit editing, live PWM readback, and a bounded cyclic-circle sweep. See the
+[UI usage](../linkhub-ui/README.md#swash-calibration-panel) and
+[setup safety contract](arming.md#disarmed-collective-setup); it does not use the
+native full-envelope oscillation command above.
+
 ### `servo`
 
 ```text

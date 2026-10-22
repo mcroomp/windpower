@@ -26,6 +26,7 @@ import { YawRecorder } from "./yaw-recorder";
 import { WobbleModel } from "./wobble-model";
 import { WobblePanel } from "./wobble-panel";
 import { WobbleRecorder } from "./wobble-recorder";
+import { SwashPanel } from "./swash-panel";
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -71,7 +72,7 @@ const write = (message: string, kind: "info" | "error" | "fc" = "info") => {
   output.append(line);
 };
 const setPhase = (phase: PassivePhase) => {
-  operationState.textContent = phase === "collective" ? "collective (servos live)" : phase;
+  operationState.textContent = phase === "collective" || phase === "swash" ? `${phase} (servos live)` : phase;
   operationState.className = `badge ${phase}`;
 };
 const passive = new PassiveController(api, telemetry, write, setPhase);
@@ -242,6 +243,11 @@ telemetry.onConnection((connected, error) => {
 telemetry.onWarning((message) => write(message, "error"));
 
 const scenePanel = required<HTMLElement>(".scene-panel");
+const swashToggle = required<HTMLButtonElement>("#swash-toggle");
+const swashPanel = new SwashPanel(required<HTMLElement>("#swash-panel"), passive, telemetry, write, (limits) => {
+  swashLimits = limits;
+  scheduleOverlay();
+}, () => terminal.compassActive);
 const yawToggle = required<HTMLButtonElement>("#yaw-toggle");
 const yawModel = new YawModel();
 const yawPanel = new YawPanel(required<HTMLElement>("#yaw-panel"), yawModel);
@@ -300,10 +306,18 @@ function setWobbleOpen(open: boolean): void {
   }
 }
 
+function setSwashOpen(open: boolean): void {
+  scenePanel.classList.toggle("swash-open", open);
+  swashToggle.setAttribute("aria-pressed", String(open));
+  if (open && !swashPanel.isOpen) swashPanel.open();
+  else if (!open && swashPanel.isOpen) void swashPanel.close();
+}
+
 yawToggle.addEventListener("click", () => {
   const open = !yawPanel.isOpen;
   if (open) {
     setWobbleOpen(false);
+    setSwashOpen(false);
   }
   setYawOpen(open);
 });
@@ -311,8 +325,17 @@ wobbleToggle.addEventListener("click", () => {
   const open = !wobblePanel.isOpen;
   if (open) {
     setYawOpen(false);
+    setSwashOpen(false);
   }
   setWobbleOpen(open);
+});
+swashToggle.addEventListener("click", () => {
+  const open = !swashPanel.isOpen;
+  if (open) {
+    setYawOpen(false);
+    setWobbleOpen(false);
+  }
+  setSwashOpen(open);
 });
 telemetry.onStatus((status) => {
   renderLinkThroughput(status);
@@ -375,6 +398,7 @@ window.addEventListener("beforeunload", () => {
   yawPanel.dispose();
   wobbleRecorder.stop();
   wobblePanel.dispose();
+  swashPanel.dispose();
   scene.dispose();
   telemetry.stop();
 });
