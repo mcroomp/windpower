@@ -264,6 +264,12 @@ per operation, not per transfer packet; the codec frame reader is not part of th
 transaction API. Cloned protocol handles share command,
 parameter and file/log transaction locks and MAVFTP sequence state.
 
+Single-parameter reads and writes resend the identical request at one-second
+intervals when no matching `PARAM_VALUE` arrives. Retries share the caller's
+original deadline, including time waiting for the parameter lock; they do not
+extend it. A matching reply ends the transaction, and transport, receive-stream,
+and decoding errors remain explicit failures rather than triggering retries.
+
 LinkHub remains the sole connection, transmission, and journal owner. Its adapter
 supplies target selection and observed messages and performs every actual send
 through the existing link/journal boundary. HTTP/CLI projections, transfer job

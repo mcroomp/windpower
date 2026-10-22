@@ -295,26 +295,7 @@ impl Protocol for ProtocolClient {
     ) -> Result<ParameterResult, OperationError> {
         let deadline = time::Instant::now() + timeout;
         let _guard = lock_until(&self.parameter_lock, deadline).await?;
-        let normalized = normalize_parameter_name(name)?;
-        let (target_system, target_component) = self.targets(None, None);
-        let mut receiver = self.link.subscribe_messages();
-        self.link
-            .send_message(
-                MavMessage::PARAM_REQUEST_READ(PARAM_REQUEST_READ_DATA {
-                    param_index: -1,
-                    target_system,
-                    target_component,
-                    param_id: CharArray::from(normalized.as_str()),
-                }),
-                None,
-                None,
-            )
-            .await?;
-        let message = wait_for_message(&mut receiver, remaining_until(deadline)?, |message| {
-            parameter_matches(message, &normalized, target_system, target_component)
-        })
-        .await?;
-        parameter_result(&message)
+        self.parameter_transaction(name, None, deadline).await
     }
 
     #[inline(never)]
@@ -326,21 +307,8 @@ impl Protocol for ProtocolClient {
     ) -> Result<ParameterResult, OperationError> {
         let deadline = time::Instant::now() + timeout;
         let _guard = lock_until(&self.parameter_lock, deadline).await?;
-        let normalized = normalize_parameter_name(name)?;
-        let (target_system, target_component) = self.targets(None, None);
-        let mut receiver = self.link.subscribe_messages();
-        self.link
-            .send_message(
-                param_set(&normalized, value, target_system, target_component)?,
-                None,
-                None,
-            )
-            .await?;
-        let message = wait_for_message(&mut receiver, remaining_until(deadline)?, |message| {
-            parameter_matches(message, &normalized, target_system, target_component)
-        })
-        .await?;
-        parameter_result(&message)
+        self.parameter_transaction(name, Some(value), deadline)
+            .await
     }
 
     #[inline(never)]
@@ -736,6 +704,41 @@ impl ProtocolClient {
             parameter_lock: Arc::new(Mutex::new(())),
             ftp_sequence: Arc::new(Mutex::new(initial_ftp_sequence)),
             log_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    async fn parameter_transaction(
+        &self,
+        name: &str,
+        value: Option<ParameterValue>,
+        deadline: time::Instant,
+    ) -> Result<ParameterResult, OperationError> {
+        let normalized = normalize_parameter_name(name)?;
+        let (target_system, target_component) = self.targets(None, None);
+        let request = match value {
+            Some(value) => param_set(&normalized, value, target_system, target_component)?,
+            None => MavMessage::PARAM_REQUEST_READ(PARAM_REQUEST_READ_DATA {
+                param_index: -1,
+                target_system,
+                target_component,
+                param_id: CharArray::from(normalized.as_str()),
+            }),
+        };
+        let mut receiver = self.link.subscribe_messages();
+        loop {
+            remaining_until(deadline)?;
+            self.link.send_message(request.clone(), None, None).await?;
+            match wait_for_message(
+                &mut receiver,
+                remaining_until(deadline)?.min(Duration::from_secs(1)),
+                |message| parameter_matches(message, &normalized, target_system, target_component),
+            )
+            .await
+            {
+                Ok(message) => return parameter_result(&message),
+                Err(OperationError::Timeout) if time::Instant::now() < deadline => {}
+                Err(error) => return Err(error),
+            }
         }
     }
 
