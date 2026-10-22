@@ -18,7 +18,7 @@ def send_collective(sim, value):
     sim.send_message(NamedValueFloat(name="RAWES_COL", value=value))
 
 
-def test_collective_only_moves_collective_without_arming_or_guided_control():
+def test_collective_supports_bounded_cyclic_without_arming_or_guided_control():
     sim = collective_sim()
     sim.send_message(NamedValueFloat(name="RAWES_RLL", value=1))
     sim.send_message(NamedValueFloat(name="RAWES_PIT", value=-1))
@@ -26,7 +26,9 @@ def test_collective_only_moves_collective_without_arming_or_guided_control():
     send_collective(sim, 0.7)
     sim.tick()
 
-    assert (sim.ch_out[1], sim.ch_out[2], sim.ch_out[3]) == (1500, 1500, 1700)
+    assert sim.ch_out[1] == pytest.approx(1854, abs=1)
+    assert sim.ch_out[2] == pytest.approx(1146, abs=1)
+    assert sim.ch_out[3] == 1700
     assert (sim.ch_out[4], sim.ch_out[8]) == (1500, 1000)
     assert not sim.armed
     assert sim.arm_call_count == 0
@@ -151,3 +153,54 @@ def test_collective_rejects_nonfinite_commands_without_refreshing_watchdog(value
     assert sim.has_message("rejected non-finite RAWES_COL")
     sim.run(3.0)
     assert sim.get_param("mode") == 0
+
+
+def test_cyclic_expires_independently_while_collective_is_refreshed():
+    sim = collective_sim()
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=1))
+    sim.send_message(NamedValueFloat(name="RAWES_PIT", value=0.5))
+    send_collective(sim, 0.7)
+    sim.tick()
+    assert sim.ch_out[1] > 1500
+    assert sim.ch_out[2] > 1500
+    for _ in range(3):
+        send_collective(sim, 0.7)
+        sim.run(1)
+    assert sim.get_param("mode") == MODE_COLLECTIVE
+    assert (sim.ch_out[1], sim.ch_out[2], sim.ch_out[3]) == (1500, 1500, 1700)
+
+
+def test_setup_discards_cyclic_seeds_on_exit_and_reentry():
+    sim = collective_sim()
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=1))
+    send_collective(sim, 0.5)
+    sim.tick()
+    assert sim.ch_out[1] == 2000
+    sim.set_param("mode", 0)
+    sim.tick()
+    sim.set_param("mode", MODE_COLLECTIVE)
+    send_collective(sim, 0.5)
+    sim.tick()
+    assert (sim.ch_out[1], sim.ch_out[2]) == (1500, 1500)
+
+
+@pytest.mark.parametrize("name", ["RAWES_RLL", "RAWES_PIT"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_setup_rejects_nonfinite_cyclic(name, value):
+    sim = collective_sim()
+    sim.send_message(NamedValueFloat(name=name, value=value))
+    send_collective(sim, 0.5)
+    sim.tick()
+    assert (sim.ch_out[1], sim.ch_out[2]) == (1500, 1500)
+    assert sim.has_message("rejected non-finite cyclic")
+
+
+def test_armed_failure_neutralizes_cyclic_and_collective():
+    sim = collective_sim()
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=1))
+    send_collective(sim, 0.8)
+    sim.tick()
+    sim.armed = True
+    sim.tick()
+    assert not sim.armed
+    assert (sim.ch_out[1], sim.ch_out[2], sim.ch_out[3], sim.ch_out[8]) == (1500, 1500, 1505, 1000)

@@ -10,6 +10,7 @@ import { enumIs, isArmed, isVehicleHeartbeat } from "./mav";
 import type { TelemetryStore } from "./telemetry";
 import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
 import type { MessageRecord } from "./types";
+import { swashSweepTarget, validateSwashLimits, validateSwashTarget, type SwashGeometry, type SwashLimits, type SwashServo, type SwashTarget } from "./swashplate";
 
 const MODE_ACRO = 1;
 const MODE_GUIDED_NOGPS = 20;
@@ -40,7 +41,7 @@ export const PASSIVE_TELEMETRY_RATES = Object.freeze({
 // Negative ENTER_PASSIVE param1 leaves Lua's adaptive yaw-trim observer active.
 export const NO_YAW_TRIM_SEED = -1;
 
-export type PassivePhase = "idle" | "starting" | "running" | "collective" | "stopping" | "failed";
+export type PassivePhase = "idle" | "starting" | "configuring" | "running" | "collective" | "swash" | "stopping" | "failed";
 
 export interface CollectiveOptions {
   thrust: number;
@@ -137,6 +138,13 @@ export class PassiveController {
   private yawDegrees = 0;
   private recapturing = false;
   private targetUpdate = Promise.resolve();
+  private cyclicSetup = false;
+  private swashTarget: SwashTarget = { roll: 0, pitch: 0, collective: 0.5 };
+  private swashSend: Promise<void> | null = null;
+  private swashDirty = false;
+  private swashLastSent: number | null = null;
+  private sweep: AbortController | null = null;
+  private swashServoAt: number | null = null;
 
   constructor(
     private readonly api: LinkHubApi,
@@ -148,6 +156,17 @@ export class PassiveController {
       this.write(`Link generation changed: ${previous ?? "none"} -> ${generation}`, "error");
       this.resetLocalState();
       this.setPhase("idle");
+      this.swashServoAt = null;
+    });
+    telemetry.onRecord((record) => {
+      const status = telemetry.status;
+      if (record.direction === "rx" && record.message === "SERVO_OUTPUT_RAW"
+        && record.fields.port === 0 && status
+        && record.system_id === status.target_system && record.component_id === status.target_component
+        && [1, 2, 3].every((channel) => {
+          const value = record.fields[`servo${channel}_raw`];
+          return typeof value === "number" && Number.isFinite(value) && value >= 500 && value <= 2500;
+        })) this.swashServoAt = performance.now();
     });
   }
 
@@ -245,12 +264,34 @@ export class PassiveController {
   }
 
   async startCollective(options: CollectiveOptions): Promise<void> {
+    return this.startSetup(options, "collective");
+  }
+
+  async startSwash(): Promise<void> {
+    return this.startSetup({ thrust: 0.5, durationSeconds: null }, "swash");
+  }
+
+  get swashPosition(): Readonly<SwashTarget> {
+    return { ...this.swashTarget };
+  }
+
+  get swashSweeping(): boolean {
+    return this.sweep !== null;
+  }
+
+  get swashServoFresh(): boolean {
+    return this.swashServoAt !== null && performance.now() - this.swashServoAt < 2000;
+  }
+
+  private async startSetup(options: CollectiveOptions, phase: "collective" | "swash"): Promise<void> {
     if (this.currentPhase !== "idle") {
-      throw new Error(`Cannot start collective while ${this.currentPhase}`);
+      throw new Error(`Cannot start ${phase} while ${this.currentPhase}`);
     }
     this.operation = new AbortController();
     const signal = this.operation.signal;
     this.thrust = options.thrust;
+    this.cyclicSetup = phase === "swash";
+    this.swashTarget = { roll: 0, pitch: 0, collective: options.thrust };
     this.setPhase("starting");
     try {
       const status = await this.api.status(signal);
@@ -265,6 +306,10 @@ export class PassiveController {
     }
     try {
       await this.ensureTailSetup();
+      if (phase === "swash") {
+        await this.readSwashLimits(signal);
+        if (!this.swashServoFresh) throw new Error("Swash calibration requires fresh S1/S2/S3 servo telemetry.");
+      }
       for (const [name, expected] of [["H_FLYBAR_MODE", 1], ["IM_ACRO_COL_EXP", 0]] as const) {
         const parameter = await this.api.getParameter(name, signal);
         if (parameter.value !== expected) {
@@ -283,10 +328,13 @@ export class PassiveController {
       }
       await this.setParameter("RAWES_MODE", MODE_COLLECTIVE, signal);
       signal.throwIfAborted();
-      await this.sendNamedValue("RAWES_COL", this.thrust);
+      if (phase === "swash") await this.sendSwashTarget(signal);
+      else await this.sendNamedValue("RAWES_COL", this.thrust);
       signal.throwIfAborted();
-      this.setPhase("collective");
-      this.write(`DISARMED — SERVOS LIVE. Collective ${(this.thrust * 100).toFixed(1)}%; -/= adjusts, Esc/stop exits.`);
+      this.setPhase(phase);
+      this.write(phase === "swash"
+        ? "DISARMED — SERVOS LIVE. Use the Swash panel; Escape or Stop exits."
+        : `DISARMED — SERVOS LIVE. Collective ${(this.thrust * 100).toFixed(1)}%; -/= adjusts, Esc/stop exits.`);
       void this.keepCollectiveAlive(signal).catch((error: unknown) => {
         this.write(error instanceof Error ? error.message : String(error), "error");
       });
@@ -298,8 +346,10 @@ export class PassiveController {
         }, options.durationSeconds * 1_000);
       }
     } catch (error) {
-      this.operation?.abort();
-      await this.safeOff();
+      if (this.operation?.signal === signal) {
+        this.operation.abort();
+        await this.safeOff();
+      }
       throw error;
     }
   }
@@ -315,7 +365,9 @@ export class PassiveController {
           || status.custom_mode !== MODE_ACRO || mode.value !== MODE_COLLECTIVE) {
           throw new Error("Collective setup lost disarmed ACRO/setup state");
         }
-        await this.sendNamedValue("RAWES_COL", this.thrust);
+        if (this.cyclicSetup && !this.swashServoFresh) throw new Error("Swash servo telemetry is stale; stopping calibration.");
+        if (this.cyclicSetup) await this.sendSwashTarget(signal);
+        else await this.sendNamedValue("RAWES_COL", this.thrust);
       }
     } catch (error) {
       if (signal.aborted) return;
@@ -324,11 +376,173 @@ export class PassiveController {
     }
   }
 
+  async readSwashLimits(signal?: AbortSignal): Promise<SwashLimits> {
+    const [min, max, cyclic] = await Promise.all([
+      this.api.getParameter("H_COL_MIN", signal), this.api.getParameter("H_COL_MAX", signal),
+      this.api.getParameter("H_CYC_MAX", signal),
+    ]);
+    const limits = { min: min.value, max: max.value, cyclic: cyclic.value };
+    signal?.throwIfAborted();
+    validateSwashLimits(limits);
+    return limits;
+  }
+
+  async readSwashGeometry(): Promise<SwashGeometry> {
+    const read = async (name: string) => {
+      const parameter = await this.api.getParameter(name);
+      if (!Number.isFinite(parameter.value)) throw new Error(`${name} is not finite.`);
+      return parameter.value;
+    };
+    const flag = async (name: string) => {
+      const value = await read(name);
+      if (value !== 0 && value !== 1) throw new Error(`${name} must be 0 or 1.`);
+      return value === 1;
+    };
+    const type = await read("H_SW_TYPE");
+    const collectiveReversed = await flag("H_SW_COL_DIR");
+    const linear = await flag("H_SW_LIN_SVO");
+    const servo = async (channel: number): Promise<SwashServo> => {
+      const fn = await read(`SERVO${channel}_FUNCTION`);
+      if (fn !== 32 + channel) throw new Error(`Envelope requires SERVO${channel}_FUNCTION=${32 + channel}.`);
+      return {
+        min: await read(`SERVO${channel}_MIN`),
+        max: await read(`SERVO${channel}_MAX`),
+        trim: await read(`SERVO${channel}_TRIM`),
+        reversed: await flag(`SERVO${channel}_REVERSED`),
+      };
+    };
+    return { type, collectiveReversed, linear, servos: [await servo(1), await servo(2), await servo(3)] };
+  }
+
+  async applySwashLimits(limits: SwashLimits): Promise<SwashLimits> {
+    validateSwashLimits(limits);
+    if (this.currentPhase !== "idle") throw new Error("Stop the active run before applying swash limits.");
+    const operation = new AbortController();
+    this.operation = operation;
+    const signal = operation.signal;
+    this.setPhase("configuring");
+    let written = false;
+    try {
+      const current = await this.readSwashLimits(signal);
+      const [mode, manual] = await Promise.all([
+        this.api.getParameter("RAWES_MODE", signal), this.api.getParameter("H_SV_MAN", signal),
+      ]);
+      if (mode.value !== 0 || manual.value !== 0) throw new Error("Limit changes require RAWES_MODE=0 and H_SV_MAN=0.");
+      const endpoints: [string, number][] = limits.min >= current.max
+        ? [["H_COL_MAX", limits.max], ["H_COL_MIN", limits.min]]
+        : [["H_COL_MIN", limits.min], ["H_COL_MAX", limits.max]];
+      const writes: [string, number][] = [...endpoints, ["H_CYC_MAX", limits.cyclic]];
+      for (const [name, value] of writes) {
+        const status = await this.api.status(signal);
+        signal.throwIfAborted();
+        if (!status.connected || !status.ready || isArmed(status)) {
+          throw new Error("Swash limits require a connected, ready, confirmed disarmed vehicle.");
+        }
+        written = true;
+        await this.setParameter(name, value, signal);
+      }
+      signal.throwIfAborted();
+      const actual = await this.readSwashLimits(signal);
+      if (actual.min !== limits.min || actual.max !== limits.max || actual.cyclic !== limits.cyclic) {
+        throw new Error("Swash limit readback does not match the requested values.");
+      }
+      return actual;
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${written ? " Limits may be partially applied; reload and verify." : ""}`);
+    } finally {
+      if (this.operation === operation) {
+        this.resetLocalState();
+        this.setPhase("idle");
+      }
+    }
+  }
+
+  async setSwashTarget(target: SwashTarget): Promise<void> {
+    this.cancelSwashSweep();
+    await this.updateSwashTarget(target);
+  }
+
+  cancelSwashSweep(): void {
+    this.sweep?.abort();
+    this.sweep = null;
+  }
+
+  async startSwashSweep(radius: number, durationSeconds: number): Promise<void> {
+    swashSweepTarget(0, radius);
+    if (!Number.isFinite(durationSeconds) || durationSeconds < 4 || durationSeconds > 60) {
+      throw new Error("Sweep duration must be 4..60 seconds.");
+    }
+    if (this.currentPhase !== "swash") throw new Error("Enable swash calibration before sweeping.");
+    if (this.sweep) throw new Error("A cyclic sweep is already active.");
+    if (Math.hypot(this.swashTarget.roll, this.swashTarget.pitch) > 1e-6) {
+      throw new Error("Center cyclic before starting a sweep.");
+    }
+    const sweep = new AbortController();
+    const operation = this.operation;
+    this.sweep = sweep;
+    const started = performance.now();
+    const collective = this.swashTarget.collective;
+    try {
+      while (true) {
+        sweep.signal.throwIfAborted();
+        const progress = Math.min(1, (performance.now() - started) / (durationSeconds * 1000));
+        await this.updateSwashTarget({ ...swashSweepTarget(progress, radius), collective });
+        if (progress === 1) break;
+        await delay(100, sweep.signal);
+      }
+    } catch (error) {
+      if (sweep.signal.aborted && error instanceof DOMException && error.name === "AbortError") return;
+      if (this.operation === operation) await this.stop();
+      throw error;
+    } finally {
+      if (this.sweep === sweep) this.sweep = null;
+    }
+  }
+
+  private async updateSwashTarget(target: SwashTarget): Promise<void> {
+    validateSwashTarget(target);
+    if (this.currentPhase !== "swash" || !this.operation) throw new Error("Swash calibration is not active.");
+    const operation = this.operation;
+    this.swashTarget = { ...target };
+    try {
+      await this.sendSwashTarget(operation.signal);
+    } catch (error) {
+      if (this.operation === operation && this.currentPhase === "swash") await this.stop();
+      throw error;
+    }
+  }
+
+  private sendSwashTarget(signal: AbortSignal): Promise<void> {
+    this.swashDirty = true;
+    if (this.swashSend) return this.swashSend;
+    const sending = (async () => {
+      do {
+        const wait = this.swashLastSent === null ? 0 : 100 - (performance.now() - this.swashLastSent);
+        if (wait > 0) await delay(wait, signal);
+        signal.throwIfAborted();
+        this.swashDirty = false;
+        this.swashLastSent = performance.now();
+        const target = { ...this.swashTarget };
+        for (const [name, value] of [
+          ["RAWES_RLL", target.roll], ["RAWES_PIT", target.pitch], ["RAWES_COL", target.collective],
+        ] as const) {
+          signal.throwIfAborted();
+          await this.sendNamedValue(name, value);
+        }
+      } while (this.swashDirty);
+    })().finally(() => {
+      if (this.swashSend === sending) this.swashSend = null;
+    });
+    this.swashSend = sending;
+    return sending;
+  }
+
   async stop(): Promise<void> {
     if (this.currentPhase === "stopping") {
       return this.cleanup ?? Promise.resolve();
     }
     this.operation?.abort();
+    this.cancelSwashSweep();
     this.setPhase("stopping");
     await this.safeOff();
   }
@@ -733,6 +947,11 @@ export class PassiveController {
 
   private resetLocalState(): void {
     this.operation?.abort();
+    this.cancelSwashSweep();
+    this.swashSend = null;
+    this.swashDirty = false;
+    this.swashLastSent = null;
+    this.swashTarget = { roll: 0, pitch: 0, collective: 0.5 };
     if (this.durationTimer !== null) {
       globalThis.clearTimeout(this.durationTimer);
       this.durationTimer = null;
@@ -763,6 +982,7 @@ function degrees(value: number): number {
 }
 
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const complete = () => {
       signal.removeEventListener("abort", abort);

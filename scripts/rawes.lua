@@ -12,7 +12,7 @@ Mode is selected at runtime via RAWES_MODE (script-generated parameter):
                       height is reached -- see run_takeoff().
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
     4  landing     -- reserved, not yet implemented
-    6  collective  -- disarmed-only collective setup; neutral cyclic, motor off
+    6  collective  -- disarmed collective/cyclic calibration, motor off
 
 Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
@@ -31,8 +31,8 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
   RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
   RAWES_ARM: optional disarm timer (value = ms until forced disarm)
-  RAWES_RLL: ACRO-manual normalized roll [-1,1]
-  RAWES_PIT: ACRO-manual normalized pitch [-1,1]
+  RAWES_RLL: normalized roll [-1,1] (latched in mode 2, fresh in mode 6)
+  RAWES_PIT: normalized pitch [-1,1] (latched in mode 2, fresh in mode 6)
   RAWES_COL: normalized collective [0,1] (ACRO-manual or disarmed setup)
   RAWES_ROFF: passive roll offset from the Lua-owned anchor [rad]
   RAWES_POFF: passive pitch offset from the Lua-owned anchor [rad]
@@ -154,6 +154,9 @@ MODE_COLLECTIVE = 6
 local _collective_value = nil
 local _collective_seen_ms = nil
 local _collective_failure = nil
+local _swash_roll = nil
+local _swash_pitch = nil
+local _swash_cyclic_ms = {}
 
 -- MODE_PASSIVE receives thrust plus relative roll/pitch/yaw offsets.  Lua
 -- captures the AHRS quaternion anchor locally when absolute hold is enabled.
@@ -761,6 +764,11 @@ local function _on_mode_enter(mode)
         _collective_seen_ms = nil
         _collective_failure = nil
         _nv_floats["RAWES_COL"] = nil
+        _swash_roll = nil
+        _swash_pitch = nil
+        _swash_cyclic_ms = {}
+        _nv_floats["RAWES_RLL"] = nil
+        _nv_floats["RAWES_PIT"] = nil
         if _prev_mode == MODE_COLLECTIVE then
             if _rc_ch1 then _rc_ch1:set_override(0) end
             if _rc_ch2 then _rc_ch2:set_override(0) end
@@ -1593,15 +1601,25 @@ local function run_collective_setup(now)
         param:set("H_SV_MAN", 0)
         vehicle:set_mode(ACRO_MODE_NUM)
         if not arming:is_armed() then param:set("RAWES_MODE", MODE_NONE) end
-    elseif _rc_ch3 then
-        _rc_ch3:set_override(_collective_value ~= nil
-            and normalized_collective_pwm(_collective_value) or neutral_collective_pwm())
+    else
+        local roll = _swash_cyclic_ms.roll and now - _swash_cyclic_ms.roll < COLLECTIVE_TIMEOUT_MS
+            and _swash_roll or 0
+        local pitch = _swash_cyclic_ms.pitch and now - _swash_cyclic_ms.pitch < COLLECTIVE_TIMEOUT_MS
+            and _swash_pitch or 0
+        local magnitude = math.max(1, math.sqrt(roll * roll + pitch * pitch))
+        if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(roll / magnitude, 1)) end
+        if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(pitch / magnitude, 2)) end
+        if _rc_ch3 then
+            _rc_ch3:set_override(_collective_value ~= nil
+                and normalized_collective_pwm(_collective_value) or neutral_collective_pwm())
+        end
     end
 end
 
 local function update()
     _diag = _diag + 1
     local collective_received = nil
+    local cyclic_received = {}
 
     -- Drain MAVLink named-value inbox (floats + ints; all modes including 0)
     local nv_raw, nv_chan = mavlink.receive_chan()
@@ -1636,6 +1654,13 @@ local function update()
             elseif nv_name == "RAWES_COL" then
                 gcs:send_text(3, "RAWES: rejected non-finite RAWES_COL")
             end
+            if nv_name == "RAWES_RLL" or nv_name == "RAWES_PIT" then
+                if nv_val == nv_val and math.abs(nv_val) < math.huge then
+                    cyclic_received[nv_name] = math.max(-1.0, math.min(1.0, nv_val))
+                else
+                    gcs:send_text(3, "RAWES: rejected non-finite cyclic input")
+                end
+            end
             if previous == nil or previous ~= nv_val then
                 gcs:send_text(6, string.format("RAWES: rcvd %s=%.6g", nv_name, nv_val))
             end
@@ -1662,6 +1687,16 @@ local function update()
     if mode == MODE_COLLECTIVE and collective_received ~= nil then
         _collective_value = collective_received
         _collective_seen_ms = now
+    end
+    if mode == MODE_COLLECTIVE then
+        if cyclic_received.RAWES_RLL ~= nil then
+            _swash_roll = cyclic_received.RAWES_RLL
+            _swash_cyclic_ms.roll = now
+        end
+        if cyclic_received.RAWES_PIT ~= nil then
+            _swash_pitch = cyclic_received.RAWES_PIT
+            _swash_cyclic_ms.pitch = now
+        end
     end
 
     -- Update altitude, tension, cyclic and collective targets from NV messages

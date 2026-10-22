@@ -261,7 +261,7 @@ setpoints** (or ACRO RC overrides in modes 2 and 6), while ArduPilot owns the
 | 3 — passive | Lua-captured AHRS quaternion anchor composed with relative `RAWES_ROFF` / `RAWES_POFF` / `RAWES_YOFF` offsets (§4.2b) | IC thrust via GUIDED throttle | armed-but-quiet kinematic release hold |
 | 4 — landing | reserved in the current script; no landing controller runs here yet | reserved | reserved |
 | 5 — takeoff | fixed level attitude (`roll=pitch=0`, current yaw) via GUIDED angle target | altitude-PID climb toward `RAWES_ALT` | vertical climb before handoff to steady |
-| 6 — collective | disarmed ACRO only; neutral roll/pitch/yaw inputs and low interlock | fresh `RAWES_COL` through ACRO collective; no GUIDED targets or yaw-trim observer | collective-only bench setup; [safety contract](arming.md#disarmed-collective-setup) |
+| 6 — collective | disarmed ACRO only; fresh bounded cyclic inputs, neutral yaw and low interlock | fresh `RAWES_COL` through ACRO collective; no GUIDED targets or yaw-trim observer | collective/cyclic bench calibration; [safety contract](arming.md#disarmed-collective-setup) |
 
 **Before the first valid position fix:**
 
@@ -325,8 +325,8 @@ the firmware (a custom message would need a custom firmware build).
 | RAWES_POFF | rad | Passive pitch offset relative to the Lua-captured anchor. |
 | RAWES_YOFF | rad | Passive yaw offset relative to the Lua-captured anchor. |
 | RAWES_THR | [0..1] | IC/passive thrust seed. ENTER_GUIDED requires it; passive and takeoff warm-start from it. |
-| RAWES_RLL | [-1..1] | Latched ACRO-manual roll input. Lua converts it with the inverse RC MIN/TRIM/MAX mapping and continuously refreshes the RC override. |
-| RAWES_PIT | [-1..1] | Latched ACRO-manual pitch input. Positive is ArduPilot positive pitch; the calibration Up arrow increases it. |
+| RAWES_RLL | [-1..1] | ACRO roll input with inverse RC MIN/TRIM/MAX mapping. Latched in mode 2; mode 6 uses fresh inputs bounded to the unit cyclic circle under the [setup safety contract](arming.md#disarmed-collective-setup). |
+| RAWES_PIT | [-1..1] | ACRO pitch input; positive is ArduPilot positive pitch. Latched in mode 2; mode 6 uses the same freshness/circle bounds as roll. |
 | RAWES_COL | [0..1] | ACRO collective input using RC3 MIN/MAX and reversal. Latched in mode 2; mode 6 requires fresh updates under the [disarmed setup safety contract](arming.md#disarmed-collective-setup). |
 
 **Command inputs (ground → Lua, via `COMMAND_LONG`):** one-shot actions use
@@ -520,7 +520,7 @@ contract: `RAWES_ARM` is the Lua-side timed arm/disarm trigger.
 
 | Channel | Owner | Rate | Path |
 |---|---|---|---|
-| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC inputs in modes 2, 3, and 6 | 400 Hz / 100 Hz | Mode 2 applies normalized staging commands through ACRO; mode 3 refreshes neutral fallback overrides while GUIDED setpoints own active control; mode 6 applies only disarmed collective with neutral cyclic. |
+| Ch1-Ch3 (swash inputs) | ArduPilot, with Lua RC inputs in modes 2, 3, and 6 | 400 Hz / 100 Hz | Mode 2 applies normalized staging commands through ACRO; mode 3 refreshes neutral fallback overrides while GUIDED setpoints own active control; mode 6 applies disarmed collective and cyclic calibration commands. |
 | Ch4 (yaw input) | rawes.lua | 100 Hz | Held at 1500 µs so AP yaw-rate demand is zero; AP yaw PID and Lua trim observer drive the anti-rotation motor. |
 | Ch8 — motor interlock | rawes.lua (RAWES_ARM active) | 50 Hz | 2000 µs (interlock ON) while armed; 1000 µs during disarm transition. |
 | Motor4 output — anti-rotation motor | ArduPilot `ATC_RAT_YAW` path | 400 Hz / 100 Hz | Current hardware uses `SERVO9_FUNCTION=36` (Motor4) with `H_TAIL_TYPE=3` (DDFP CW, no sign flip). |
@@ -731,7 +731,7 @@ Current `rawes.lua` mode split at 50 Hz:
 | `RAWES_MODE=3` | Hold the Lua-captured passive quaternion anchor plus relative offsets, with GUIDED keepalive throttling and optional yaw-trim observer. |
 | `RAWES_MODE=5` | Hold a level attitude and climb toward `RAWES_ALT` with the takeoff altitude PID. |
 | `RAWES_MODE=4` | Reserved / not implemented in the current script. |
-| `RAWES_MODE=6` | Disarmed collective-only RC overrides at the 100 Hz base tick; safety and timeout rules are owned by [arming.md](arming.md#disarmed-collective-setup). |
+| `RAWES_MODE=6` | Disarmed collective/cyclic RC overrides at the 100 Hz base tick; safety and timeout rules are owned by [arming.md](arming.md#disarmed-collective-setup). |
 
 For the exact formulas and gate conditions, see §4 plus
 [`scripts/rawes.lua`](../scripts/rawes.lua).

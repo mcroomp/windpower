@@ -51,6 +51,16 @@ and `H_CYC_MAX` are measured airframe values; read them from
 Swash geometry and sign mapping are implemented in
 [swashplate.py](../simulation/swashplate.py).
 
+The browser's calculated S1/S2/S3 envelope covers both draft collective
+endpoints and the full configured cyclic circle for H3-120. ArduPilot limits
+the cyclic vector to `H_CYC_MAX/4500` before the 0.45 mixer gain (equivalent
+to +/- `H_CYC_MAX/10` microseconds per servo before trim and linearization).
+The estimate includes loaded collective direction, servo trims/reversal,
+optional swash linearization, and output-endpoint clipping. Reload refreshes
+those dependencies; unsupported mappings or missing calibration show
+unavailable, not assumed defaults. It is not measured travel or proof of
+mechanical clearance; the safety procedure remains in [arming.md](arming.md).
+
 ## Yaw motor and DShot telemetry
 
 The GB4008 anti-rotation motor is Motor4 on AUX 1 (output 9),
