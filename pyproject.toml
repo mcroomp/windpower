@@ -9,6 +9,7 @@ description = "RAWES tethered autorotating rotor kite -- simulation, flight-stac
 requires-python = ">=3.12"
 
 dependencies = [
+    "linkhub-client",
     "mcp==2.2.0",
     "pyserial",
     "pyyaml",
@@ -34,6 +35,9 @@ dev = [
     "pytest",
     "pytest-timeout",
 ]
+
+[tool.uv.sources]
+linkhub-client = { path = "linkhub_client", editable = true }
 
 [[tool.uv.index]]
 name = "microsoft-python"

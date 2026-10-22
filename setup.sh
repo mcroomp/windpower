@@ -2,10 +2,8 @@
 #
 # setup.sh -- RAWES one-time setup tasks.  All subcommands are idempotent.
 ## Subcommands:
-#   (no args)   create or refresh the Windows venv at .venv (repo root)
-#                 hash-gated: requirements.txt and the editable rawes package
-#                 install are each re-installed only when their source
-#                 (requirements.txt / pyproject.toml) changes.
+#   (no args)   sync Python dependencies and build the UI and LinkHub
+#                 Windows setup.cmd bootstraps missing tools with WinGet.
 #   build       build rawes-sim runtime with ArduPilot (~30-60 min)
 #   build-lite  build rawes-sim runtime without ArduPilot (fast)
 #   hw          push canonical params to a real Pixhawk via MAVLink
@@ -37,87 +35,49 @@ if [[ ("${1:-}" == "build" || "${1:-}" == "build-lite") \
         "cd '$_wsl_dir' && RAWES_REBUILD_ARDUPILOT=$_rebuild_ardupilot bash setup.sh $(printf '%q ' "$@")"
 fi
 
-export PIP_INDEX_URL="https://packagefeedproxy.microsoft.io/pypi/simple/"
 SIM_DIR="$REPO_DIR/simulation"
 VENV="$REPO_DIR/.venv"
-PYTHON="$VENV/Scripts/python.exe"
-REQS="$SIM_DIR/requirements.txt"
-STAMP="$VENV/Scripts/.requirements_hash"
-PYPROJECT="$REPO_DIR/pyproject.toml"
-PKG_STAMP="$VENV/Scripts/.editable_install_hash"
-
-_winpath() {
-    if command -v cygpath &>/dev/null; then
-        cygpath -w "$1"
-    elif command -v wslpath &>/dev/null; then
-        wslpath -w "$1"
-    else
-        # Plain bash on a native Windows PATH — no conversion needed.
-        echo "$1"
-    fi
-}
+PYTHON="$VENV/bin/python"
+if [[ -n "${MSYSTEM:-}" ]]; then
+    PYTHON="$VENV/Scripts/python.exe"
+fi
 
 # --- venv (default) ----------------------------------------------------
 _setup_venv() {
-    if [ -x "$PYTHON" ]; then
-        echo "[INFO] Reusing venv at $VENV"
-    else
-        if [ -e "$VENV" ]; then
-            echo "[WARN] $VENV exists but has no python.exe -- recreating"
-            rm -rf "$VENV"
+    if [[ -n "${MSYSTEM:-}" ]]; then
+        (
+            cd "$REPO_DIR"
+            cmd.exe /d /c setup.cmd
+        )
+        return
+    fi
+
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "[ERROR] uv is required. Install it from https://docs.astral.sh/uv/getting-started/installation/" >&2
+        return 1
+    fi
+    for tool in npm cargo; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "[ERROR] $tool is required for project setup." >&2
+            return 1
         fi
-        echo "[INFO] Creating venv at $VENV ..."
-        py -3 -m venv "$(_winpath "$VENV")"
-        "$PYTHON" -m pip install --upgrade pip --quiet
-    fi
+    done
+    echo "[INFO] Installing uv-managed Python 3.12 ..."
+    uv python install 3.12
+    echo "[INFO] Synchronizing the project environment ..."
+    uv sync --project "$REPO_DIR" --python 3.12 --managed-python --locked --dev --extra simulation
 
-    if [ ! -f "$REQS" ]; then
-        echo "[WARN] $REQS not found -- skipping requirements install"
-    else
-        local digest
-        digest="$(sha256sum "$REQS" | awk '{print $1}')"
-        if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$digest" ]; then
-            echo "[INFO] requirements.txt unchanged -- skipping pip install"
-        else
-            echo "[INFO] Installing requirements ..."
-            "$PYTHON" -m pip install -r "$(_winpath "$REQS")"
-            echo "$digest" > "$STAMP"
-        fi
-    fi
-
-    # Install the editable package only when its distribution is missing.
-    # Re-running pip install -e can invoke the build backend and appear to hang,
-    # while an existing editable install remains valid as source files change.
-    if [ ! -f "$PYPROJECT" ]; then
-        echo "[WARN] $PYPROJECT not found -- skipping editable install"
-    elif "$PYTHON" -c "import importlib.metadata as m; m.version('rawes')" >/dev/null 2>&1; then
-        echo "[INFO] rawes editable package already installed -- skipping pip install -e"
-    else
-        local pkg_digest
-        pkg_digest="$(sha256sum "$PYPROJECT" | awk '{print $1}')"
-        if [ -f "$PKG_STAMP" ] && [ "$(cat "$PKG_STAMP")" = "$pkg_digest" ]; then
-            echo "[INFO] pyproject.toml unchanged -- skipping pip install -e"
-        else
-            echo "[INFO] Installing rawes package (editable) ..."
-            "$PYTHON" -m pip install -e "$(_winpath "$REPO_DIR")" --no-deps --quiet
-            echo "$pkg_digest" > "$PKG_STAMP"
-        fi
-    fi
-
-    if ! "$PYTHON" -c "import linkhub_client.client" >/dev/null 2>&1; then
-        echo "[INFO] Installing linkhub-client package (editable) ..."
-        "$PYTHON" -m pip install -e "$(_winpath "$REPO_DIR/linkhub_client")" --no-deps --quiet
-    fi
-
-    local linkhub="$REPO_DIR/linkhub/target/release/linkhub.exe"
-    if [ ! -x "$linkhub" ]; then
-        echo "[INFO] Building LinkHub ..."
-        cargo build \
-            --manifest-path "$REPO_DIR/linkhub/Cargo.toml" \
-            --release
-    fi
+    (
+        cd "$REPO_DIR/linkhub-ui"
+        npm ci --no-audit --no-fund
+        npm run build
+    )
+    echo "[INFO] Building LinkHub ..."
+    cargo build \
+        --manifest-path "$REPO_DIR/linkhub/Cargo.toml" \
+        --release
+    uv run --no-sync --project "$REPO_DIR" python --version
     echo "[INFO] Done."
-    "$PYTHON" --version
 }
 
 # --- Docker image ------------------------------------------------------

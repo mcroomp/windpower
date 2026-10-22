@@ -71,7 +71,7 @@ const write = (message: string, kind: "info" | "error" | "fc" = "info") => {
   output.append(line);
 };
 const setPhase = (phase: PassivePhase) => {
-  operationState.textContent = phase;
+  operationState.textContent = phase === "collective" ? "collective (servos live)" : phase;
   operationState.className = `badge ${phase}`;
 };
 const passive = new PassiveController(api, telemetry, write, setPhase);

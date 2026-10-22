@@ -356,8 +356,12 @@ Upload, list, or remove Lua scripts under `/APM/scripts`. `upload` writes the
 file through LinkHub's MAVFTP API and then toggles `SCR_ENABLE 1→0→1` to
 restart the scripting engine.
 
-Use `script upload` only over a positively verified direct Pixhawk USB
-connection; do not deploy Lua over the radio.
+Use `script upload` over a confirmed TCP connection to the flight controller
+or its high-speed network bridge, or over positively verified native Pixhawk
+USB. Do not upload through the 57600-baud SiK/telemetry radio, even when it is
+tunneled over TCP. For automatic deployment, run the focused Lua/control tests
+first, verify the remote script size after upload, then reboot, reconnect, and
+restore canonical safe-off before any armed test.
 
 ### `logs list` / `logs fetch [--id N] [--dir D]`
 
@@ -445,7 +449,7 @@ python -m calibrate servo sweep --duration 12
 python -m calibrate motor 1050 --duration 5
 python -m calibrate watch esc --duration 10
 
-# 7. On verified direct USB only, upload Lua and confirm it is present
+# 7. On confirmed TCP (not the 57600-baud radio) or native USB, upload Lua
 python -m calibrate script upload scripts\rawes.lua
 python -m calibrate script list
 

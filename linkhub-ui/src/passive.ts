@@ -14,6 +14,7 @@ import type { MessageRecord } from "./types";
 const MODE_ACRO = 1;
 const MODE_GUIDED_NOGPS = 20;
 const MODE_PASSIVE = 3;
+const MODE_COLLECTIVE = 6;
 const ANGLE_STEP_DEG = 5;
 const ANGLE_LIMIT_DEG = 30;
 const THRUST_STEP = 0.05;
@@ -39,7 +40,29 @@ export const PASSIVE_TELEMETRY_RATES = Object.freeze({
 // Negative ENTER_PASSIVE param1 leaves Lua's adaptive yaw-trim observer active.
 export const NO_YAW_TRIM_SEED = -1;
 
-export type PassivePhase = "idle" | "starting" | "running" | "stopping" | "failed";
+export type PassivePhase = "idle" | "starting" | "running" | "collective" | "stopping" | "failed";
+
+export interface CollectiveOptions {
+  thrust: number;
+  durationSeconds: number | null;
+}
+
+export function parseRunCollective(tokens: string[]): CollectiveOptions {
+  const options: CollectiveOptions = { thrust: 0.5, durationSeconds: null };
+  for (let index = 0; index < tokens.length; index += 2) {
+    const token = tokens[index];
+    const value = tokens[index + 1];
+    if (value === undefined) throw new Error(`${token} requires a value`);
+    if (token === "--duration") {
+      options.durationSeconds = positiveNumber(value, token);
+    } else if (token === "--trim" && /^thr=.+$/.test(value)) {
+      options.thrust = boundedNumber(value.slice(4), "--trim thr", 0, 1);
+    } else {
+      throw new Error(`Unknown run collective option: ${token} ${value}`);
+    }
+  }
+  return options;
+}
 
 export function parseRunPassive(tokens: string[]): PassiveOptions {
   const options: PassiveOptions = {
@@ -221,6 +244,86 @@ export class PassiveController {
     }
   }
 
+  async startCollective(options: CollectiveOptions): Promise<void> {
+    if (this.currentPhase !== "idle") {
+      throw new Error(`Cannot start collective while ${this.currentPhase}`);
+    }
+    this.operation = new AbortController();
+    const signal = this.operation.signal;
+    this.thrust = options.thrust;
+    this.setPhase("starting");
+    try {
+      const status = await this.api.status(signal);
+      signal.throwIfAborted();
+      if (!status.connected || !status.ready || isArmed(status)) {
+        throw new Error("run collective requires a connected, ready, confirmed disarmed vehicle");
+      }
+    } catch (error) {
+      this.resetLocalState();
+      this.setPhase("idle");
+      throw error;
+    }
+    try {
+      await this.ensureTailSetup();
+      for (const [name, expected] of [["H_FLYBAR_MODE", 1], ["IM_ACRO_COL_EXP", 0]] as const) {
+        const parameter = await this.api.getParameter(name, signal);
+        if (parameter.value !== expected) {
+          throw new Error(`Collective requires ${name}=${expected}; found ${parameter.value}`);
+        }
+      }
+      signal.throwIfAborted();
+      await this.setParameter("RAWES_MODE", 0, signal);
+      await this.setParameter("H_SV_MAN", 0, signal);
+      await this.setParameter("H_YAW_TRIM", 0, signal);
+      await this.api.setModeAndWait(MODE_ACRO);
+      signal.throwIfAborted();
+      const confirmed = await this.api.status();
+      if (!confirmed.connected || !confirmed.ready || isArmed(confirmed)) {
+        throw new Error("Collective start lost confirmed disarmed state");
+      }
+      await this.setParameter("RAWES_MODE", MODE_COLLECTIVE, signal);
+      signal.throwIfAborted();
+      await this.sendNamedValue("RAWES_COL", this.thrust);
+      signal.throwIfAborted();
+      this.setPhase("collective");
+      this.write(`DISARMED — SERVOS LIVE. Collective ${(this.thrust * 100).toFixed(1)}%; -/= adjusts, Esc/stop exits.`);
+      void this.keepCollectiveAlive(signal).catch((error: unknown) => {
+        this.write(error instanceof Error ? error.message : String(error), "error");
+      });
+      if (options.durationSeconds !== null) {
+        this.durationTimer = globalThis.setTimeout(() => {
+          void this.stop().catch((error: unknown) => {
+            this.write(String(error), "error");
+          });
+        }, options.durationSeconds * 1_000);
+      }
+    } catch (error) {
+      this.operation?.abort();
+      await this.safeOff();
+      throw error;
+    }
+  }
+
+  private async keepCollectiveAlive(signal: AbortSignal): Promise<void> {
+    try {
+      while (true) {
+        await delay(500, signal);
+        const status = await this.api.status(signal);
+        const mode = await this.api.getParameter("RAWES_MODE", signal);
+        signal.throwIfAborted();
+        if (!status.connected || !status.ready || isArmed(status)
+          || status.custom_mode !== MODE_ACRO || mode.value !== MODE_COLLECTIVE) {
+          throw new Error("Collective setup lost disarmed ACRO/setup state");
+        }
+        await this.sendNamedValue("RAWES_COL", this.thrust);
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      this.write(error instanceof Error ? error.message : String(error), "error");
+      await this.stop();
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.currentPhase === "stopping") {
       return this.cleanup ?? Promise.resolve();
@@ -231,6 +334,18 @@ export class PassiveController {
   }
 
   async adjust(axis: "roll" | "pitch" | "yaw" | "collective", direction: -1 | 1): Promise<void> {
+    if (this.currentPhase === "collective") {
+      if (axis !== "collective") return;
+      this.thrust = Math.max(0, Math.min(1, this.thrust + direction * THRUST_STEP));
+      try {
+        await this.sendNamedValue("RAWES_COL", this.thrust);
+      } catch (error) {
+        await this.stop();
+        throw error;
+      }
+      this.write(`Collective ${(this.thrust * 100).toFixed(1)}% (disarmed)`);
+      return;
+    }
     if (this.currentPhase !== "running" || this.recapturing) {
       return;
     }
@@ -348,10 +463,10 @@ export class PassiveController {
       this.api.getParameter("SERVO9_FUNCTION"),
     ]);
     if (Math.round(tail.value) !== 3) {
-      throw new Error(`Passive requires H_TAIL_TYPE=3; found ${tail.value}`);
+      throw new Error(`RAWES requires H_TAIL_TYPE=3; found ${tail.value}`);
     }
     if (Math.round(motorFunction.value) !== 36) {
-      throw new Error(`Passive requires SERVO9_FUNCTION=36 at boot; found ${motorFunction.value}`);
+      throw new Error(`RAWES requires SERVO9_FUNCTION=36 at boot; found ${motorFunction.value}`);
     }
   }
 
@@ -560,8 +675,9 @@ export class PassiveController {
     }));
   }
 
-  private async setParameter(name: string, value: number): Promise<void> {
-    const result = await this.api.setParameter(name, value);
+  private async setParameter(name: string, value: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const result = await this.api.setParameter(name, value, Number.isInteger(value), signal);
     if (Math.abs(result.value - value) > 1e-4) {
       throw new Error(`${name} read back as ${result.value}, expected ${value}`);
     }
@@ -616,6 +732,7 @@ export class PassiveController {
   }
 
   private resetLocalState(): void {
+    this.operation?.abort();
     if (this.durationTimer !== null) {
       globalThis.clearTimeout(this.durationTimer);
       this.durationTimer = null;

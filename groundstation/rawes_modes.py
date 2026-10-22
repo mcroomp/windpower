@@ -3,7 +3,7 @@ rawes_modes.py — RAWES_MODE constants and NAMED_VALUE_FLOAT constants for rawe
 
 RAWES_MODE is a script-generated parameter (registered by rawes.lua via param:add_table).
 Valid values: 0=none, 1=steady, 2=acro manual, 3=passive, 4=landing,
-5=takeoff.
+5=takeoff, 6=disarmed collective setup.
 Every other dynamic input (substate, tuning) is delivered via NAMED_VALUE_FLOAT --
 never encoded in a parameter. Substate is delivered via NAMED_VALUE_FLOAT("RAWES_SUB", N).
 The anchor location (RAWES_LAT/LON/AAL) is delivered via NAMED_VALUE_INT as an
@@ -36,6 +36,7 @@ MODE_PASSIVE  = 3   # kinematic capture helper: hold IC attitude during release
 MODE_LANDING  = 4   # (reserved, not yet implemented)
 MODE_TAKEOFF  = 5   # fixed level attitude + altitude-PID climb toward RAWES_ALT;
                     # no anchor/elevation tracking or lateral position hold
+MODE_COLLECTIVE = 6  # disarmed-only RAWES_COL setup; neutral cyclic, interlock low
 # Pumping runs in MODE_STEADY; the ground schedule varies RAWES_TEN and RAWES_SUB.
 
 # ── Ground -> Lua commands (COMMAND_LONG, acknowledged by rawes.lua) ──────────

@@ -74,8 +74,8 @@ describe("yaw trim sweep", () => {
   it("uses canonical cleanup, restores gains and verifies fresh output telemetry", async () => {
     const { api, set, messages } = mockSafeOff();
     await safeOff(api, new Map([["ATC_RAT_YAW_P", 0.18]]));
-    expect(set).toHaveBeenCalledWith("RAWES_MODE", 0);
-    expect(set).toHaveBeenCalledWith("H_YAW_TRIM", 0);
+    expect(set).toHaveBeenCalledWith("RAWES_MODE", 0, true, undefined);
+    expect(set).toHaveBeenCalledWith("H_YAW_TRIM", 0, true, undefined);
     expect(set).toHaveBeenCalledWith("ATC_RAT_YAW_P", 0.18, false);
     expect(messages).toHaveBeenCalledWith(expect.objectContaining({
       after: "v1:10", expectedGeneration: "run-1", direction: "rx",

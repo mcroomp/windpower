@@ -54,45 +54,19 @@ if not defined CONNECTION (
     exit /b 2
 )
 
-if "%BUILD%"=="1" (
-    where npm >nul 2>nul
-    if errorlevel 1 (
-        echo ERROR: npm was not found on PATH.
-        exit /b 1
-    )
+if "%BUILD%"=="1" goto setup
+if not exist "%REPO%\linkhub\target\release\linkhub.exe" goto setup
+if not exist "%REPO%\linkhub-ui\dist\index.html" goto setup
+goto verify_build
 
-    where cargo >nul 2>nul
-    if errorlevel 1 (
-        echo ERROR: cargo was not found on PATH.
-        exit /b 1
-    )
-
-    echo [INFO] Installing LinkHub UI dependencies...
-    pushd "%REPO%\linkhub-ui"
-    call npm install --no-audit --no-fund
-    if errorlevel 1 (
-        popd
-        echo ERROR: LinkHub UI dependency installation failed.
-        exit /b 1
-    )
-
-    echo [INFO] Building LinkHub UI...
-    call npm run build
-    if errorlevel 1 (
-        popd
-        echo ERROR: LinkHub UI build failed.
-        exit /b 1
-    )
-    popd
-
-    echo [INFO] Building LinkHub...
-    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release
-    if errorlevel 1 (
-        echo ERROR: LinkHub build failed.
-        exit /b 1
-    )
+:setup
+call "%REPO%\setup.cmd"
+if errorlevel 1 (
+    echo ERROR: Project setup failed. LinkHub was not started.
+    exit /b 1
 )
 
+:verify_build
 if not exist "%REPO%\linkhub\target\release\linkhub.exe" (
     echo ERROR: LinkHub executable not found. Run %~nx0 --build %CONNECTION%
     exit /b 1
@@ -108,7 +82,7 @@ echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
 echo [INFO] Press Ctrl+C to stop.
 set "BAUD_ARG="
 if /i not "%BAUD%"=="auto" set BAUD_ARG=--baud "%BAUD%"
-"%REPO%\linkhub\target\release\linkhub.exe" serve ^
+call "%REPO%\linkhub\target\release\linkhub.exe" serve ^
     --connection "%CONNECTION%" ^
     %BAUD_ARG% ^
     --port "%PORT%" ^

@@ -12,6 +12,7 @@ Mode is selected at runtime via RAWES_MODE (script-generated parameter):
                       height is reached -- see run_takeoff().
     3  passive     -- kinematic capture helper; keeps the IC attitude stable during release
     4  landing     -- reserved, not yet implemented
+    6  collective  -- disarmed-only collective setup; neutral cyclic, motor off
 
 Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
   Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
@@ -32,7 +33,7 @@ Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
   RAWES_ARM: optional disarm timer (value = ms until forced disarm)
   RAWES_RLL: ACRO-manual normalized roll [-1,1]
   RAWES_PIT: ACRO-manual normalized pitch [-1,1]
-  RAWES_COL: ACRO-manual normalized collective [0,1]
+  RAWES_COL: normalized collective [0,1] (ACRO-manual or disarmed setup)
   RAWES_ROFF: passive roll offset from the Lua-owned anchor [rad]
   RAWES_POFF: passive pitch offset from the Lua-owned anchor [rad]
   RAWES_YOFF: passive yaw offset from the Lua-owned anchor [rad]
@@ -80,7 +81,7 @@ Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
   without capturing again.
 
 Parameters (script-generated; visible in GCS as RAWES_* params):
-    RAWES_MODE    Mode selector (0=none,1=steady,2=acro-manual,3=passive,4=landing,5=takeoff) default 0
+    RAWES_MODE    Mode selector (0=none,1=steady,2=acro-manual,3=passive,4=landing,5=takeoff,6=collective) default 0
   RAWES_YAW_SLP Yaw motor slope [RPM/µs] (0=bench default 0.504)       default 0
   RAWES_KP_ALT  Altitude-P gain                                         default 0.0263
   RAWES_KI_ALT  Altitude-I gain                                         default 0.0026
@@ -106,6 +107,7 @@ PASSIVE_TARGET_PERIOD_MS = 50 -- max rate for changed static-hold targets
 -- takes the scheduler semaphore, which can starve the scripting thread in SITL.
 GUIDED_KEEPALIVE_MS = 1000
 INTERLOCK_ARM_DELAY_MS = 500  -- let ACRO reset its attitude target at ground idle
+COLLECTIVE_TIMEOUT_MS = 3000
 GUIDED_MODE_NUM   = 4         -- ArduCopter GUIDED = 4
 ACRO_MODE_NUM     = 1         -- ArduCopter ACRO = 1
 -- Smooth handoff after kinematic release: keep plant physics unchanged, but
@@ -148,6 +150,10 @@ MODE_ACRO_MANUAL = 2
 MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable during release.
 MODE_LANDING = 4   -- reserved; not implemented here
 MODE_TAKEOFF = 5   -- fixed level attitude + altitude-PID climb; see run_takeoff().
+MODE_COLLECTIVE = 6
+local _collective_value = nil
+local _collective_seen_ms = nil
+local _collective_failure = nil
 
 -- MODE_PASSIVE receives thrust plus relative roll/pitch/yaw offsets.  Lua
 -- captures the AHRS quaternion anchor locally when absolute hold is enabled.
@@ -750,6 +756,17 @@ end
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 
 local function _on_mode_enter(mode)
+    if mode == MODE_COLLECTIVE or _prev_mode == MODE_COLLECTIVE then
+        _collective_value = nil
+        _collective_seen_ms = nil
+        _collective_failure = nil
+        _nv_floats["RAWES_COL"] = nil
+        if _prev_mode == MODE_COLLECTIVE then
+            if _rc_ch1 then _rc_ch1:set_override(0) end
+            if _rc_ch2 then _rc_ch2:set_override(0) end
+            if _rc_ch3 then _rc_ch3:set_override(0) end
+        end
+    end
     -- Preserve a manual seed received in the same scheduler tick as the mode
     -- change. Leaving manual mode clears it, so a later re-entry needs a new seed.
     _none_status_ms = 0
@@ -1545,8 +1562,46 @@ end
 
 -- ── Main update ───────────────────────────────────────────────────────────────
 
+local function run_collective_setup(now)
+    if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+    if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+    if _rc_ch4 then _rc_ch4:set_override(1500) end
+    if _rc_ch8 then _rc_ch8:set_override(1000) end
+    _armed_since_ms = nil
+    local reason = nil
+    if arming:is_armed() then
+        reason = "vehicle armed"
+    elseif vehicle:get_mode() ~= ACRO_MODE_NUM
+        or p("H_FLYBAR_MODE", 0) ~= 1 or p("H_SV_MAN", 0) ~= 0
+        or p("IM_ACRO_COL_EXP", 0) ~= 0
+        or p("SERVO9_FUNCTION", 0) ~= 36 or p("H_TAIL_TYPE", 0) ~= 3 then
+        reason = "invalid setup configuration"
+    elseif now - (_collective_seen_ms or _mode_ms) >= COLLECTIVE_TIMEOUT_MS then
+        reason = "RAWES_COL timeout"
+    end
+    if reason and not _collective_failure then
+        _collective_failure = reason
+        gcs:send_text(3, "RAWES collective stopped: " .. reason)
+    end
+    if _collective_failure then
+        _collective_value = nil
+        _nv_floats["RAWES_COL"] = nil
+        if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
+        if arming:is_armed() then arming:disarm() end
+        param:set("H_YAW_TRIM", 0)
+        param:set("H_FLYBAR_MODE", 1)
+        param:set("H_SV_MAN", 0)
+        vehicle:set_mode(ACRO_MODE_NUM)
+        if not arming:is_armed() then param:set("RAWES_MODE", MODE_NONE) end
+    elseif _rc_ch3 then
+        _rc_ch3:set_override(_collective_value ~= nil
+            and normalized_collective_pwm(_collective_value) or neutral_collective_pwm())
+    end
+end
+
 local function update()
     _diag = _diag + 1
+    local collective_received = nil
 
     -- Drain MAVLink named-value inbox (floats + ints; all modes including 0)
     local nv_raw, nv_chan = mavlink.receive_chan()
@@ -1576,6 +1631,11 @@ local function update()
             nv_name = nv_name:gsub("\0", "")
             local previous = _nv_floats[nv_name]
             _nv_floats[nv_name] = nv_val
+            if nv_name == "RAWES_COL" and nv_val == nv_val and math.abs(nv_val) < math.huge then
+                collective_received = math.max(0.0, math.min(1.0, nv_val))
+            elseif nv_name == "RAWES_COL" then
+                gcs:send_text(3, "RAWES: rejected non-finite RAWES_COL")
+            end
             if previous == nil or previous ~= nv_val then
                 gcs:send_text(6, string.format("RAWES: rcvd %s=%.6g", nv_name, nv_val))
             end
@@ -1598,6 +1658,10 @@ local function update()
     elseif sub ~= _prev_sub then
         _prev_sub   = sub
         _submode_ms = now
+    end
+    if mode == MODE_COLLECTIVE and collective_received ~= nil then
+        _collective_value = collective_received
+        _collective_seen_ms = now
     end
 
     -- Update altitude, tension, cyclic and collective targets from NV messages
@@ -1654,6 +1718,12 @@ local function update()
 
     -- Over-spin auto-disarm: last-resort protection in EVERY mode.
     run_spin_safety(now)
+
+    if mode == MODE_COLLECTIVE then
+        run_collective_setup(now)
+        _diag_emit(now)
+        return update, BASE_PERIOD_MS
+    end
 
     -- Tension feed-forward ramp: apply every tick so orientation changes
     -- smoothly when the ground transitions between phase tension targets.
@@ -1742,7 +1812,7 @@ end
 -- ── Entry point ───────────────────────────────────────────────────────────────
 
 local _mode_init  = math.floor(p("RAWES_MODE", 0) + 0.5)
-local _mode_names = {[0]="none", [1]="steady", [2]="acro_manual", [3]="passive", [4]="landing", [5]="takeoff"}
+local _mode_names = {[0]="none", [1]="steady", [2]="acro_manual", [3]="passive", [4]="landing", [5]="takeoff", [6]="collective"}
 local _mode_str   = _mode_names[_mode_init] or "unknown"
 
 gcs:send_text(6, string.format(
