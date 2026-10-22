@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     write,
     (nextPhase) => {
       phase = nextPhase;
-      write(`Passive phase: ${nextPhase}`);
+      write(`Run phase: ${nextPhase}`);
       if (nextPhase === "idle") {
         finishRun?.();
       }
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   );
   const runner = new CommandRunner(api, telemetry, passive, write, nodeConfigProvider);
   const needsTelemetry = command[0] === "status"
-    || (command[0] === "run" && command[1] === "passive")
+    || (command[0] === "run" && (command[1] === "passive" || command[1] === "collective"))
     || (command[0] === "compass" && command[1] === "calibrate");
 
   const stop = () => {
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
       await telemetry.start();
     }
     await runner.executeTokens(command);
-    if (command[0] === "run" && command[1] === "passive" && phase !== "idle") {
+    if (command[0] === "run" && phase !== "idle") {
       await new Promise<void>((resolve) => {
         finishRun = resolve;
         if (phase === "idle") {

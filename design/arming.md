@@ -254,7 +254,50 @@ refreshes the short-lived overrides. Entering passive replaces the temporary
 runup collective with neutral collective rather than releasing RC1-RC3. Exit
 through the common safe-off path.
 
-### Yaw-trim sweep
+## Disarmed collective setup
+
+`run collective [--duration S] [--trim thr=0.5]` in the shared browser/Node
+command runner selects `RAWES_MODE=6`. This is an explicit **servos-live setup
+state**, not normal safe-off and not a flight-staging mode. The rotor and swash
+must be physically secured before use. It never arms or enters GUIDED.
+
+Startup requires a connected, ready, disarmed vehicle, `H_FLYBAR_MODE=1`,
+`IM_ACRO_COL_EXP=0`, and the boot-established `H_TAIL_TYPE=3` /
+`SERVO9_FUNCTION=36` configuration. The command selects ACRO, sets `H_SV_MAN=0`
+and `H_YAW_TRIM=0`, then sends normalized `RAWES_COL`. The default is 50%
+collective, not a promise of zero blade pitch. Browser minus/equals changes it
+in five-percentage-point steps; other passive motion hotkeys are inactive.
+
+Lua holds roll/pitch/yaw inputs neutral and interlock low on every setup tick;
+ArduPilot continues to own swash mixing and disarmed DDFP inhibition. Only
+`RAWES_COL` changes motion in this mode: no GUIDED controller or yaw-trim
+observer runs. Collective uses the existing normalized RC3 mapping and clamps
+finite inputs to `[0,1]`; non-finite inputs are rejected with a status message.
+
+Every entry discards the old collective seed. Until a fresh value arrives, Lua
+holds the existing neutral collective. The client refreshes its command every
+500 ms, after checking disarmed ACRO and mode 6. At 3000 ms without a fresh
+finite `RAWES_COL` (including the initial wait), Lua neutralizes the swash,
+restores safe-off configuration and returns to mode 0. Closing a browser,
+killing the CLI, or losing the link therefore cannot leave the setup value
+latched indefinitely.
+
+An observed arm or invalid setup configuration latches a setup failure:
+collective is neutralized immediately, interlock stays low, and Lua requests
+disarm until confirmed before returning to mode 0. A refreshed collective
+cannot clear that failure. Leaving setup clears its collective and releases
+its RC1-RC3 overrides; it cannot seed a later manual or flight session.
+Normal Stop/Escape, CLI Ctrl-C, duration expiry, and client errors use the shared
+canonical safe-off cleanup. Browser reload does not attach to setup; the
+vehicle timeout returns it to neutral.
+
+`tests/unit/test_collective_lua.py` checks the actual Lua mode, mapping,
+freshness/timeout boundaries, neutralization and arm/configuration rejection.
+`linkhub-ui/tests/collective.test.ts` checks the shared command and client
+lifecycle. These do not replace secured hardware acceptance of physical servo
+motion and output-9 inhibition.
+
+## Yaw-trim sweep
 
 The LinkHub UI's standalone yaw-trim sweep is an operator-invoked bench tool,
 not part of passive startup. It stays in ACRO with `RAWES_MODE=0`, requires the

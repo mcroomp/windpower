@@ -1,122 +1,132 @@
 @echo off
 setlocal
-set "PIP_INDEX_URL=https://packagefeedproxy.microsoft.io/pypi/simple/"
 
 set "REPO=%~dp0"
 set "REPO=%REPO:~0,-1%"
-set "VENV=%REPO%\.venv"
-set "PYTHON=%VENV%\Scripts\python.exe"
-set "REQS=%REPO%\simulation\requirements.txt"
-set "STAMP=%VENV%\Scripts\.requirements_hash"
-set "PYPROJECT=%REPO%\pyproject.toml"
-set "PKG_STAMP=%VENV%\Scripts\.editable_install_hash"
+set "VS_INSTALLER=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
+set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%ProgramFiles%\WinGet\Links;%ProgramFiles%\nodejs;%USERPROFILE%\.cargo\bin;%VS_INSTALLER%;%PATH%"
 
-:: Create venv if missing
-if exist "%PYTHON%" goto :check_reqs
-if exist "%VENV%" (
-    echo [WARN] %VENV% exists but has no python.exe -- recreating
-    rmdir /s /q "%VENV%"
-)
-echo [INFO] Creating venv at %VENV% ...
-py -3 -m venv "%VENV%"
+call :ensure_tool uv astral-sh.uv
+if errorlevel 1 exit /b 1
+echo [INFO] Installing uv-managed Python 3.12 ...
+call uv python install 3.12
 if errorlevel 1 (
-    echo ERROR: Failed to create venv. Is Python 3 on PATH?
+    echo ERROR: uv could not install Python 3.12.
     exit /b 1
 )
-"%PYTHON%" -m pip install --upgrade pip --quiet
-
-:check_reqs
-if not exist "%PYTHON%" (
-    echo ERROR: venv python not found at %PYTHON%
+echo [INFO] Synchronizing the project environment ...
+call uv sync --project "%REPO%" --python 3.12 --managed-python --locked --dev --extra simulation
+if errorlevel 1 (
+    echo ERROR: uv sync failed.
     exit /b 1
 )
-if not exist "%REQS%" (
-    echo [WARN] requirements.txt not found -- skipping install
-    goto :install_pkg
-)
 
-:: Hash-gated install: only reinstall when requirements.txt changes.
-:: certutil writes "SHA256 hash of <file>:" then the hash then "CertUtil: -hashfile command completed successfully."
-:: We extract just the hash line (line 2).
-for /f "skip=1 tokens=1" %%H in ('certutil -hashfile "%REQS%" SHA256 2^>nul') do (
-    set "DIGEST=%%H"
-    goto :got_hash
-)
-:got_hash
+call :ensure_tool npm OpenJS.NodeJS.LTS
+if errorlevel 1 exit /b 1
+call :ensure_msvc
+if errorlevel 1 exit /b 1
+call :ensure_tool cargo Rustlang.Rustup
+if errorlevel 1 exit /b 1
 
-set "CACHED="
-if exist "%STAMP%" set /p CACHED=<"%STAMP%"
-
-if "%DIGEST%"=="%CACHED%" (
-    echo [INFO] requirements.txt unchanged -- skipping pip install
-    goto :install_pkg
-)
-
-echo [INFO] Installing requirements ...
-"%PYTHON%" -m pip install -r "%REQS%"
+pushd "%REPO%\linkhub-ui"
 if errorlevel 1 (
-    echo ERROR: pip install -r failed.
+    echo ERROR: LinkHub UI directory was not found.
     exit /b 1
 )
-echo %DIGEST%>"%STAMP%"
-
-:install_pkg
-:: Install the editable package only when its distribution is missing.
-:: Re-running pip install -e can invoke the build backend and appear to hang,
-:: while an existing editable install remains valid as source files change.
-if not exist "%PYPROJECT%" (
-    echo [WARN] pyproject.toml not found -- skipping editable install
-    goto :done
-)
-set "PKG_PRESENT="
-"%PYTHON%" -c "import importlib.metadata as m; m.version('rawes')" >nul 2>nul
-if not errorlevel 1 set "PKG_PRESENT=1"
-if defined PKG_PRESENT (
-    echo [INFO] rawes editable package already installed -- skipping pip install -e
-    goto :done
-)
-for /f "skip=1 tokens=1" %%H in ('certutil -hashfile "%PYPROJECT%" SHA256 2^>nul') do (
-    set "PKG_DIGEST=%%H"
-    goto :got_pkg_hash
-)
-:got_pkg_hash
-
-set "PKG_CACHED="
-if exist "%PKG_STAMP%" set /p PKG_CACHED=<"%PKG_STAMP%"
-
-if "%PKG_DIGEST%"=="%PKG_CACHED%" (
-    echo [INFO] pyproject.toml unchanged -- skipping pip install -e
-    goto :done
-)
-
-echo [INFO] Installing rawes package (editable) ...
-"%PYTHON%" -m pip install -e "%REPO%" --no-deps --quiet
+echo [INFO] Installing LinkHub UI dependencies ...
+call npm ci --no-audit --no-fund
 if errorlevel 1 (
-    echo ERROR: pip install -e failed.
+    popd
+    echo ERROR: LinkHub UI dependency installation failed.
     exit /b 1
 )
-echo %PKG_DIGEST%>"%PKG_STAMP%"
-
-:done
-set "LINKHUB=%REPO%\linkhub\target\release\linkhub.exe"
-if not exist "%LINKHUB%" (
-    echo [INFO] Building LinkHub ...
-    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release
-    if errorlevel 1 (
-        echo ERROR: LinkHub build failed.
-        exit /b 1
-    )
-)
-set "LINKHUB_CLIENT=%REPO%\linkhub_client"
-"%PYTHON%" -c "import linkhub_client.client" >nul 2>nul
+echo [INFO] Building LinkHub UI ...
+call npm run build
 if errorlevel 1 (
-    echo [INFO] Installing linkhub-client package ^(editable^) ...
-    "%PYTHON%" -m pip install -e "%LINKHUB_CLIENT%" --no-deps --quiet
-    if errorlevel 1 (
-        echo ERROR: linkhub-client editable install failed.
-        exit /b 1
-    )
+    popd
+    echo ERROR: LinkHub UI build failed.
+    exit /b 1
+)
+popd
+
+echo [INFO] Building LinkHub ...
+call cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release
+if errorlevel 1 (
+    echo ERROR: LinkHub build failed.
+    exit /b 1
+)
+
+call uv run --no-sync --project "%REPO%" python --version
+if errorlevel 1 (
+    echo ERROR: The managed Python environment could not be verified.
+    exit /b 1
 )
 echo [INFO] Done.
-"%PYTHON%" --version
 endlocal
+exit /b 0
+
+:ensure_tool
+where %~1 >nul 2>nul
+if not errorlevel 1 exit /b 0
+call :install_package %~2
+if errorlevel 1 exit /b 1
+where %~1 >nul 2>nul
+if not errorlevel 1 exit /b 0
+echo ERROR: %~1 is not available after installation. Open a new terminal
+echo        and run setup.cmd again.
+exit /b 1
+
+:install_package
+where winget >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: WinGet is required to install %~1. Install or update App Installer
+    echo        from Microsoft Store, then run setup.cmd again.
+    exit /b 1
+)
+echo [INFO] Installing %~1 with WinGet ...
+call winget install --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity --id %*
+if not errorlevel 1 exit /b 0
+echo ERROR: WinGet could not install %~1. If a restart is required,
+echo        restart Windows and run setup.cmd again.
+exit /b 1
+
+:check_msvc
+set "VC_INSTALL="
+set "SDK_FOUND="
+where vswhere >nul 2>nul
+if errorlevel 1 exit /b 1
+for /f "delims=" %%I in ('vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath') do set "VC_INSTALL=%%I"
+if not defined VC_INSTALL exit /b 1
+for /d %%D in ("%ProgramFiles(x86)%\Windows Kits\10\Lib\*") do (
+    if exist "%%~fD\um\x64\kernel32.lib" if exist "%%~fD\ucrt\x64\ucrt.lib" set "SDK_FOUND=1"
+)
+if not defined SDK_FOUND exit /b 1
+exit /b 0
+
+:ensure_msvc
+call :check_msvc
+if not errorlevel 1 exit /b 0
+set "BUILD_TOOLS="
+where vswhere >nul 2>nul
+if errorlevel 1 goto :install_msvc
+for /f "delims=" %%I in ('vswhere -latest -products Microsoft.VisualStudio.Product.BuildTools -property installationPath') do set "BUILD_TOOLS=%%I"
+if not defined BUILD_TOOLS goto :install_msvc
+echo [INFO] Adding the C++ build workload to existing Visual Studio Build Tools ...
+call "%VS_INSTALLER%\setup" modify --installPath "%BUILD_TOOLS%" --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart
+if errorlevel 1 (
+    echo ERROR: C++ workload installation failed. Restart Windows if required,
+    echo        then run setup.cmd again.
+    exit /b 1
+)
+goto :verify_msvc
+
+:install_msvc
+call :install_package Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+if errorlevel 1 exit /b 1
+
+:verify_msvc
+call :check_msvc
+if not errorlevel 1 exit /b 0
+echo ERROR: Visual Studio C++ tools or the x64 Windows SDK are still missing.
+echo        Restart Windows if required, then run setup.cmd again.
+exit /b 1

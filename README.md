@@ -157,6 +157,28 @@ First-time setup (creates/refreshes the repository Python environment, idempoten
 setup.cmd            (Windows)         or       bash setup.sh
 ```
 
+On Windows, `setup.cmd` owns the complete setup:
+
+- Install missing uv (`astral-sh.uv`), Node.js LTS (`OpenJS.NodeJS.LTS`),
+  Rust (`Rustlang.Rustup`), and Visual Studio C++ Build Tools through WinGet.
+  An existing Build Tools installation missing C++ support is updated through
+  its Visual Studio installer. C++ tools and the x64 Windows SDK can require a
+  large download, administrator approval, or a Windows restart.
+- Use uv to install managed Python 3.12 and sync locked development and
+  simulation dependencies, including editable `rawes` and `linkhub-client`.
+  No existing Python, `py` launcher, or pip installation is needed.
+- Run `npm ci` and build the UI, then build the LinkHub release binary.
+
+Git Bash delegates to the same Windows bootstrap. If WinGet is missing, install
+or update **App Installer** from Microsoft Store first. Setup stops explicitly
+if any installation or build fails; restart Windows if requested and rerun it.
+On native Linux, install uv, Node.js/npm, and Rust/Cargo before running
+`bash setup.sh`; system build prerequisites are not installed automatically.
+
+`run_linkhub_ui.cmd --build <connection>` calls `setup.cmd` before launching.
+Without `--build`, the launcher reuses existing artifacts, running setup
+automatically if the LinkHub binary or compiled UI is missing.
+
 Docker image builds:
 
 ```bash

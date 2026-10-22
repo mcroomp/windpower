@@ -37,7 +37,7 @@ export class Terminal {
     });
     input.addEventListener("keydown", (event) => this.keyDown(event));
     this.write("RAWES LinkHub UI");
-    this.write("Commands: status, config check|apply, run passive [options], compass calibrate|accept|cancel, reboot, stop, help");
+    this.write("Commands: status, config check|apply, run passive|collective [options], compass calibrate|accept|cancel, reboot, stop, help");
     input.focus();
   }
 
@@ -72,12 +72,16 @@ export class Terminal {
     } else if (event.key === "ArrowRight" && this.passive.phase === "running") {
       event.preventDefault();
       void this.passive.adjust("roll", 1);
-    } else if (event.key === "-" && this.passive.phase === "running") {
+    } else if (event.key === "-" && (this.passive.phase === "running" || this.passive.phase === "collective")) {
       event.preventDefault();
-      void this.passive.adjust("collective", -1);
-    } else if (event.key === "=" && this.passive.phase === "running") {
+      void this.passive.adjust("collective", -1).catch((error: unknown) => {
+        this.write(error instanceof Error ? error.message : String(error), "error");
+      });
+    } else if (event.key === "=" && (this.passive.phase === "running" || this.passive.phase === "collective")) {
       event.preventDefault();
-      void this.passive.adjust("collective", 1);
+      void this.passive.adjust("collective", 1).catch((error: unknown) => {
+        this.write(error instanceof Error ? error.message : String(error), "error");
+      });
     } else if ((event.key === "," || event.key === "<") && this.passive.phase === "running") {
       event.preventDefault();
       void this.passive.adjust("yaw", -1);

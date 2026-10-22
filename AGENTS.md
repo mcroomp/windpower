@@ -301,6 +301,13 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
 
 ## Test Entry Points
 
+VS Code test discovery and its `runTests` integration are known broken in this
+workspace. Do not use them or spend task time diagnosing or repairing discovery.
+Run tests through the canonical CLI entry points below instead, with focused
+file selectors where appropriate. This does not waive test requirements: actual
+CLI runner, collection, or test failures still require diagnosis under the
+broken-tooling rule above.
+
 There are three tiers, each with a different scope and runtime:
 
 | Tier | Command | Marker | Notes |
@@ -318,19 +325,21 @@ There are three tiers, each with a different scope and runtime:
 - Never assume a port or baud from an earlier session. If the remembered
   connection fails, fall back immediately to `python -m calibrate` without
   connection parameters instead of trying guessed ports.
-- An agent may upload `scripts/rawes.lua` automatically only when the selected
-  port is positively identified as the flight controller's native direct-USB
-  interface. Verify the selected port with `serial.tools.list_ports` and require
+- An agent may upload `scripts/rawes.lua` automatically over a confirmed TCP
+  connection to the flight controller or its high-speed network bridge, or over
+  the flight controller's positively identified native direct-USB interface.
+  TCP must not merely tunnel the prohibited 57600-baud radio link.
+  For USB, verify the selected port with `serial.tools.list_ports` and require
   board-specific USB identity (VID/PID plus device serial/location), not merely
   a `COM` name or the fact that the adapter itself uses USB. The current Pixhawk
   6C native interface enumerates as `VID:PID=3162:0053` with device serial
   `160031001751343131363538` (COM7/COM8 interfaces). Reconfirm this metadata
   each hardware session; do not assume the port assignment persists.
-- Never upload Lua through a SiK/telemetry radio, generic USB-serial adapter, or
-  any connection whose metadata is missing or ambiguous. If direct USB cannot
-  be proven, stop before deployment and give the operator the exact upload
-  command to run manually.
-- Before an automatic direct-USB upload, run the focused Lua/control tests and
+- Never upload Lua through the 57600-baud SiK/telemetry radio, including when
+  tunneled over TCP. Do not treat a generic USB-serial adapter or an ambiguous
+  connection as proof of an allowed upload path. If neither an allowed TCP
+  connection nor native USB can be confirmed, stop before deployment.
+- Before an automatic upload, run the focused Lua/control tests and
   require them to pass. After upload, verify the remote script size, reboot,
   auto-detect again without connection arguments, and restore canonical
   safe-off before any armed test.

@@ -13,7 +13,7 @@ import { diagValue, DIAG_ARRAY_NAME } from "./diag-array";
 import { MavCmd, MavParamType, MavResult } from "./generated/protocol";
 import { formatCopterMode } from "./modes";
 import { enumIs, isArmed, parseFlags } from "./mav";
-import { parseRunPassive, type PassiveController } from "./passive";
+import { parseRunCollective, parseRunPassive, type PassiveController } from "./passive";
 import { decodeH3Swashplate } from "./swashplate";
 import type { TelemetryStore } from "./telemetry";
 import type { ParameterResult } from "./types";
@@ -87,6 +87,11 @@ export class CommandRunner {
       await this.passive.stop();
     } else if (tokens[0] === "rates") {
       await this.rates(tokens.slice(1));
+    } else if (tokens[0] === "run" && tokens[1] === "collective") {
+      if (this.compass.active) {
+        throw new Error("run collective refused: a compass calibration is active");
+      }
+      await this.passive.startCollective(parseRunCollective(tokens.slice(2)));
     } else if (tokens[0] === "run" && tokens[1] === "passive") {
       if (this.compass.active) {
         throw new Error("run passive refused: a compass calibration is active");
@@ -238,7 +243,7 @@ export class CommandRunner {
       throw new Error("arm refused: a compass calibration is active");
     }
     if (this.passive.phase !== "idle") {
-      throw new Error("arm refused: a passive run is active");
+      throw new Error("arm refused: a run is active");
     }
     const force = args[0] === "--force";
     await this.api.setArmedAndWait(true, force);
@@ -436,7 +441,7 @@ export class CommandRunner {
       await this.compass.accept();
     } else {
       if (this.passive.phase !== "idle") {
-        throw new Error("compass calibrate refused: a passive run is active");
+        throw new Error("compass calibrate refused: a run is active");
       }
       await this.compass.start(command.options);
     }
@@ -458,6 +463,7 @@ export class CommandRunner {
     this.write("config apply [--all]   write differing params (disarmed only)");
     this.write("run passive [--force] [--duration S] [--trim thr=0.342]");
     this.write("            [--roll DEG] [--pitch DEG] [--yaw DEG]");
+    this.write("run collective [--duration S] [--trim thr=0.5] (disarmed only)");
     this.write("stop                     apply canonical safe-off");
     this.write("reboot                   reboot the autopilot (disarmed only)");
     this.write("compass calibrate [--mask N] [--retry] [--autosave] [--delay S]");

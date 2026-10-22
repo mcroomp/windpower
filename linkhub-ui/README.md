@@ -21,12 +21,17 @@ For SITL:
 .\run_linkhub_ui.cmd tcp:127.0.0.1:5760
 ```
 
-Add `--build` to install UI dependencies, build the UI, and build LinkHub
+Add `--build` to run the complete project setup before launching
 (Bluetooth support is always included):
 
 ```powershell
 .\run_linkhub_ui.cmd --build auto
 ```
+
+`setup.cmd` owns tool installation, uv-managed Python, dependencies, and both
+builds; see the [root setup instructions](../README.md#running-tests).
+The launcher also runs setup automatically when either build artifact is
+missing. With both artifacts present, a normal launch needs no Python or uv.
 
 `run_linkhub_ui.cmd` also:
 
@@ -84,6 +89,7 @@ From the repository root:
 .\rawes rates set ATTITUDE=0 RPM=5 BATTERY_STATUS=default
 .\rawes config check
 .\rawes run passive --duration 30 --trim thr=0.342
+.\rawes run collective --duration 30 --trim thr=0.5
 .\rawes stop
 ```
 
@@ -99,7 +105,7 @@ Use a non-default LinkHub endpoint with either form:
 .\rawes --server http://127.0.0.1:8999 status
 ```
 
-`run passive` keeps the Node process alive until its duration expires or it
+`run passive` and `run collective` keep the Node process alive until the duration expires or it
 receives Ctrl+C. Both paths call the shared canonical safe-off implementation.
 The standalone `stop` command and its `disarm` alias apply that same safe-off
 sequence, so either can recover a run started by another CLI or browser
@@ -166,6 +172,7 @@ config check [--all]
 config apply [--all]
 run passive [--force] [--duration S] [--trim thr=0.342]
             [--roll DEG] [--pitch DEG] [--yaw DEG]
+run collective [--duration S] [--trim thr=0.5]
 compass calibrate [--mask N] [--retry] [--autosave] [--delay S]
 compass accept
 compass cancel
@@ -198,6 +205,16 @@ result (Esc, Ctrl-C in the CLI, or `compass cancel` aborts):
   vehicle's default rate when it ends. Reports repeat while a result is held,
   so the UI prints each distinct result once and ignores anything the vehicle
   sent before it accepted the start command.
+
+`run collective` is disarmed-only, collective-only bench setup (default 50%).
+The browser displays **servos live**; minus/equals adjusts collective by 5
+percentage points, and Escape or `stop` returns to neutral safe-off. The CLI
+uses `--trim thr=...` to select the value and Ctrl-C or `--duration` to stop.
+It does not arm, and passive attitude controls are inactive. Secure the
+mechanism before use. The vehicle watchdog and full safety contract are owned
+by [Disarmed collective setup](../design/arming.md#disarmed-collective-setup).
+The updated Lua script must be deployed before using this command; rebuilding
+the browser alone does not update the vehicle.
 
 During a passive run, the browser hotkeys are:
 

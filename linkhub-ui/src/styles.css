@@ -204,6 +204,7 @@ h2 {
 }
 
 .badge.starting,
+.badge.collective,
 .badge.stopping {
   border-color: #aa8139;
   color: #f0c36b;
