@@ -37,21 +37,27 @@ it("carries yaw tracking diagnostics in every profile", () => {
   expect(TELEMETRY_PROFILES.radio.params).toEqual({ RAWES_TEL_HZ: 2 });
 });
 
-it("loads selectable Wi-Fi and radio profiles from JSON", () => {
+it("loads selectable Wi-Fi, BLE and radio profiles from JSON", () => {
   expect(DEFAULT_TELEMETRY_PROFILE).toBe("wifi");
   expect(TELEMETRY_PROFILE_OPTIONS).toEqual([
     { name: "wifi", label: "Wi-Fi" },
+    { name: "ble", label: "BLE" },
     { name: "radio", label: "Radio" },
   ]);
 });
 
 it("selects the largest profile supported by the detected baud", () => {
-  expect(selectTelemetryProfile(null)).toBe("wifi");
-  expect(selectTelemetryProfile(1_500_000)).toBe("wifi");
-  expect(selectTelemetryProfile(2_000_000)).toBe("wifi");
-  expect(selectTelemetryProfile(921_600)).toBe("radio");
-  expect(selectTelemetryProfile(57600)).toBe("radio");
-  expect(selectTelemetryProfile(38400)).toBe("radio");
+  expect(selectTelemetryProfile("tcp:127.0.0.1:5760", null)).toBe("wifi");
+  expect(selectTelemetryProfile("auto", 1_500_000)).toBe("wifi");
+  expect(selectTelemetryProfile("auto", 2_000_000)).toBe("wifi");
+  expect(selectTelemetryProfile("auto", 921_600)).toBe("radio");
+  expect(selectTelemetryProfile("auto", 57600)).toBe("radio");
+  expect(selectTelemetryProfile("auto", 38400)).toBe("radio");
+});
+
+it("selects the BLE profile for a DroneBridge BLE connection", () => {
+  expect(selectTelemetryProfile("ble:DroneBridge", null)).toBe("ble");
+  expect(TELEMETRY_PROFILES.ble.rates.ATTITUDE_QUATERNION).toBe(50);
 });
 
 it("uses reduced rates for radio telemetry", () => {

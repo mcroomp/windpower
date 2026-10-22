@@ -74,7 +74,8 @@ Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
         at 20 Hz until passive hold takes over or the vehicle leaves GUIDED.
   31011 ENTER_PASSIVE (MAV_CMD_USER_2): requires RAWES_MODE=3 and healthy AHRS.
         Captures the passive anchor and enables absolute hold.
-        param1 = yaw-trim seed [0, RAWES_YFF_MAX]; negative = adaptive observer.
+        param1 = yaw-trim seed [0, RAWES_YFF_MAX]; negative = adaptive observer
+        (also clears a seed from an earlier ENTER_PASSIVE).
   A retry (confirmation > 0) of an already-applied command is acknowledged
   without capturing again.
 
@@ -1518,7 +1519,7 @@ local function enter_passive(cmd, mode)
     _passive_target_q = passive_target_from_anchor()
     _passive_enabled = true
     _guided_hold_q = nil
-    if cmd.param1 >= 0.0 then _yaw_ff_seed = cmd.param1 end
+    if cmd.param1 >= 0.0 then _yaw_ff_seed = cmd.param1 else _yaw_ff_seed = nil end
     gcs:send_text(6, "RAWES passive: anchor captured, absolute hold enabled")
     gcs:send_text(6, "RAWES: passive active")
     return MAV_RESULT_ACCEPTED

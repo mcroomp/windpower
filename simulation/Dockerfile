@@ -161,6 +161,10 @@ COPY --from=ardupilot-build ${ARDUPILOT_PATH} ${ARDUPILOT_PATH}
 # =============================================================================
 FROM rust:1.95-bookworm AS linkhub-build
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libdbus-1-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 COPY linkhub/Cargo.toml linkhub/Cargo.lock ./
 COPY linkhub/mavlink-protocol ./mavlink-protocol
@@ -176,6 +180,6 @@ ARG RAWES_IMAGE_INPUT_HASH
 LABEL org.rawes.image-input-hash="${RAWES_IMAGE_INPUT_HASH}"
 # gdb lets SITL diagnostics snapshot thread stacks and mutex owners
 # (tests/sitl/thread_trace.py); containers run with SYS_PTRACE.
-RUN apt-get update && apt-get install -y --no-install-recommends gdb \
+RUN apt-get update && apt-get install -y --no-install-recommends gdb libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=linkhub-build /tmp/linkhub /usr/local/bin/linkhub

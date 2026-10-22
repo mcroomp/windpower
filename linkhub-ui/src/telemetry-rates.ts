@@ -45,9 +45,23 @@ export const TELEMETRY_PROFILE_OPTIONS: readonly {
   label: profile.label,
 }));
 
-export function selectTelemetryProfile(baud: number | null | undefined): TelemetryProfile {
+export function selectTelemetryProfile(
+  connection: string | null | undefined,
+  baud: number | null | undefined,
+): TelemetryProfile {
+  const byConnection = TELEMETRY_PROFILE_OPTIONS.find(({ name }) => {
+    const profile = TELEMETRY_PROFILES[name];
+    return "connection_prefix" in profile
+      && connection?.startsWith(profile.connection_prefix) === true;
+  });
+  if (byConnection) {
+    return byConnection.name;
+  }
   const profiles = TELEMETRY_PROFILE_OPTIONS
-    .map(({ name }) => ({ name, minbaud: TELEMETRY_PROFILES[name].minbaud }))
+    .flatMap(({ name }) => {
+      const minbaud = TELEMETRY_PROFILES[name].minbaud;
+      return minbaud === null ? [] : [{ name, minbaud }];
+    })
     .sort((left, right) => left.minbaud - right.minbaud);
   const selected = baud === null || baud === undefined
     ? profiles.at(-1)

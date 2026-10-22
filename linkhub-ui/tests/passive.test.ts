@@ -4,9 +4,9 @@ import luaSource from "../../scripts/rawes.lua?raw";
 import {
   CMD_ENTER_GUIDED,
   CMD_ENTER_PASSIVE,
+  NO_YAW_TRIM_SEED,
   PassiveController,
   PASSIVE_TELEMETRY_RATES,
-  PASSIVE_YAW_TRIM_SEED,
   parseRunPassive,
 } from "../src/passive";
 import { MavResult } from "../src/generated/protocol";
@@ -73,7 +73,7 @@ describe("parseRunPassive", () => {
           { name: "RAWES_YOFF", value: 0 },
         ]);
         expect(commands).toEqual([
-          { command: CMD_ENTER_PASSIVE, params: [PASSIVE_YAW_TRIM_SEED] },
+          { command: CMD_ENTER_PASSIVE, params: [NO_YAW_TRIM_SEED] },
         ]);
         expect(writes.at(-1)).toContain("recaptured");
         expect(writes.at(-1)).toContain("offsets cleared");
@@ -104,8 +104,8 @@ describe("parseRunPassive", () => {
       expect(PASSIVE_TELEMETRY_RATES).not.toHaveProperty("STATUSTEXT");
     });
 
-    it("holds zero adaptive yaw trim during a bench passive run", () => {
-      expect(PASSIVE_YAW_TRIM_SEED).toBe(0);
+    it("leaves the adaptive yaw-trim observer active during a bench passive run", () => {
+      expect(NO_YAW_TRIM_SEED).toBeLessThan(0);
     });
   });
 

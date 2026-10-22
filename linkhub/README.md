@@ -19,12 +19,12 @@ cargo build --manifest-path .\linkhub\Cargo.toml --release
 
 The executable is `.\linkhub\target\release\linkhub.exe`.
 
-Bluetooth is excluded from ordinary builds. To include the optional motor
-backend explicitly:
-
-```powershell
-cargo build --manifest-path .\linkhub\Cargo.toml --release --features bluetooth
-```
+Bluetooth support, including the DroneBridge BLE transport and the optional
+Bluetooth motor backend, is included in ordinary builds.
+On Debian/Ubuntu, building requires `pkg-config` and `libdbus-1-dev`; the
+executable requires `libdbus-1-3` at runtime. The stack Dockerfile installs
+these dependencies. TCP/serial operation does not require a running Bluetooth
+adapter or D-Bus service.
 
 The MAVLink dialect is generated at build time from ArduPilot's own definitions,
 vendored in `mavlink-protocol/definitions` (no submodule or network access is needed to
@@ -70,6 +70,20 @@ dialect serializes for every message.
 
 ### Common examples
 
+Check a DroneBridge BLE connection without starting the LinkHub service:
+
+```powershell
+.\linkhub\target\release\linkhub.exe test-connection `
+  --connection ble:DroneBridge `
+  --timeout-ms 10000
+```
+
+The command exits successfully only after receiving a MAVLink heartbeat. It
+does not start the HTTP server or send MAVLink messages. Use `--connection
+tcp:127.0.0.1:5760` for SITL, or `--connection auto` (the default) to scan
+serial ports. For serial checks, `--baud` restricts the baud rate;
+`--discovery-bauds` selects the ordered baud rates to probe otherwise.
+
 SITL:
 
 ```powershell
@@ -83,6 +97,14 @@ Hardware auto-discovery:
 ```powershell
 .\linkhub\target\release\linkhub.exe serve `
   --connection auto `
+  --data-dir .\simulation\logs\linkhub
+```
+
+DroneBridge BLE:
+
+```powershell
+.\linkhub\target\release\linkhub.exe serve `
+  --connection ble:DroneBridge `
   --data-dir .\simulation\logs\linkhub
 ```
 
@@ -102,7 +124,7 @@ Defaults come from `linkhub\src\main.rs`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--connection` | `auto` | `tcp:HOST:PORT`, bare `HOST:PORT`, `auto`, or a serial-port restriction such as `COM7` / `serial:COM7`. Serial values still go through heartbeat-based discovery. |
+| `--connection` | `auto` | `tcp:HOST:PORT`, `ble:DEVICE_NAME_OR_ADDRESS`, bare `HOST:PORT`, `auto`, or a serial-port restriction such as `COM7` / `serial:COM7`. Serial values still go through heartbeat-based discovery. |
 | `--listen` | `127.0.0.1` | HTTP bind address. |
 | `--port` | `8999` | HTTP port. |
 | `--data-dir` | `linkhub-data` | Parent directory where each run creates `<run-id>\run.json` and `<run-id>\journal\`. |
@@ -129,6 +151,15 @@ Defaults come from `linkhub\src\main.rs`.
 - Serial discovery keeps the successful probe handle open for the live link.
 - Open serial connections tolerate empty reads and only treat 5 seconds of
   silence as a lost port.
+- `ble:DroneBridge` scans for a matching BLE device name or address (for
+  example `ble:10:BD:A3:90:B4:9E`) and connects to
+  DroneBridge's GATT serial service (service `0000db32-0000-1000-8000-00805f9b34fb`,
+  write `0000db33-0000-1000-8000-00805f9b34fb`, notify
+  `0000db34-0000-1000-8000-00805f9b34fb`). Device notifications are passed to the
+  MAVLink parser as a byte stream; outgoing bytes are split to the negotiated
+  ATT payload size. BLE reconnect attempts rescan for the configured device.
+  The DroneBridge ESP32 must be in Bluetooth LE mode and configured for MAVLink
+  on its UART.
 - `/v1/mavlink/status` reports the current `phase`, `connection`, `port`,
   `baud`, `attempts`, `consecutive_failures`, `last_error_stage`, `error`,
   and the most recent serial `last_scan` report.

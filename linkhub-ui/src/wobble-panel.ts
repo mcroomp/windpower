@@ -137,20 +137,21 @@ export class WobblePanel {
     if (!this.opened) {
       return;
     }
-    const spectra = new Map<WobbleAxis, WobbleSpectrum | null>(
-      AXES.map((axis) => [axis, this.model.spectrum(axis)]),
-    );
-    const first = spectra.get("roll");
+    const { spectra, state } = this.model.snapshot();
+    const first = spectra.roll;
     const stale = this.model.ingestedAt === 0 || performance.now() - this.model.ingestedAt > 2_000;
     this.status.textContent = stale
-      ? "No recent attitude telemetry"
+      ? `No recent attitude telemetry${first ? " - showing last valid spectrum" : ""}`
+      : state === "rebuilding"
+      ? "Rebuilding after telemetry gap - showing last valid spectrum"
       : first
-      ? `${first.sampleRateHz.toFixed(0)} samples/s · ${first.durationS.toFixed(1)} s window`
+      ? `${first.durationS.toFixed(1)} s window · ${(first.coverage * 100).toFixed(0)}% coverage`
+        + ` · ${first.sampleRateHz.toFixed(0)} Hz grid`
       : "Collecting samples…";
     const maxHz = Number(this.maxFrequency.value);
     const maxAmplitude = Number(this.maxAmplitude.value);
     for (const axis of AXES) {
-      const spectrum = spectra.get(axis) ?? null;
+      const spectrum = spectra[axis];
       this.drawSpectrum(
         this.canvases.get(axis) as HTMLCanvasElement,
         spectrum,
@@ -172,11 +173,7 @@ export class WobblePanel {
         components.append(row);
       }
     }
-    const mode = analyzeDominantMode({
-      roll: spectra.get("roll") ?? null,
-      pitch: spectra.get("pitch") ?? null,
-      yaw: spectra.get("yaw") ?? null,
-    }, maxHz);
+    const mode = analyzeDominantMode(spectra, maxHz);
     this.drawMode(mode);
   }
 

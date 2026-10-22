@@ -7,7 +7,7 @@ RAWES MAVLink stack.
 
 One LinkHub process owns each configured physical link. For MAVLink this means:
 
-- one TCP or serial connection;
+- one TCP, serial, or BLE connection;
 - one GCS heartbeat source;
 - one outbound frame writer;
 - one component and capability model;
@@ -16,6 +16,13 @@ One LinkHub process owns each configured physical link. For MAVLink this means:
 - one lossless record of every complete RX and TX frame accepted by LinkHub.
 
 Clients use finite HTTP/JSON requests and do not link a MAVLink implementation.
+
+The DroneBridge BLE transport (`ble:DEVICE_NAME_OR_ADDRESS`) connects as a BLE central to
+the ESP32 GATT serial service. Notification payloads and writes are treated as
+one raw MAVLink byte stream; outgoing writes are fragmented to fit the
+negotiated ATT payload size. BLE support is built into LinkHub. The BLE
+peripheral must be advertising, in Bluetooth LE mode, and configured to forward
+MAVLink from its UART.
 
 ## Unified journal
 

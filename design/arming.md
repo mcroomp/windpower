@@ -203,12 +203,14 @@ generation, but must not be used to tune the observer. Never reconnect the
 motor while armed or with accumulated trim; canonical safe-off clears
 `H_YAW_TRIM` before reconnection.
 
-The LinkHub UI stationary bench route must send `ENTER_PASSIVE` with
-param1 = 0. A supplied seed makes Lua hold that trim during passive instead
-of entering the adaptive observer fallback. This prevents a small persistent
-AP yaw correction from being absorbed into trim while the actuator is
-disconnected. The AP yaw PID remains active; zero trim does not promise an
-exactly zero transient Motor4 command.
+The LinkHub UI stationary bench route sends `ENTER_PASSIVE` with
+param1 = -1 (`NO_YAW_TRIM_SEED`), so Lua runs the adaptive yaw-trim observer
+during passive. A non-negative seed would pin `H_YAW_TRIM` at that value; with
+a one-directional yaw motor, a zero seed clips every negative AP yaw correction
+and produces a rate limit cycle about the rotor axis. Because the observer is
+active, run the UI passive route only with the yaw motor and ESC connected; a
+disconnected run can wind trim toward `RAWES_YFF_MAX` as described above.
+Canonical safe-off clears the accumulated trim.
 
 Lua must continue sampling and publishing the applied Motor4 readback
 (`YFF_U`) while holding a passive seed. Returning before that readback makes
@@ -251,6 +253,18 @@ landed-state validation; Lua applies each received RC value immediately and
 refreshes the short-lived overrides. Entering passive replaces the temporary
 runup collective with neutral collective rather than releasing RC1-RC3. Exit
 through the common safe-off path.
+
+### Yaw-trim sweep
+
+The LinkHub UI's standalone yaw-trim sweep is an operator-invoked bench tool,
+not part of passive startup. It stays in ACRO with `RAWES_MODE=0`, requires the
+boot-established DDFP mapping, and waits for armed heartbeat and runup before
+applying its bounded trim ladder. Stalled attitude, heartbeat, or servo telemetry
+aborts the sweep. Cleanup uses the production passive controller's safe-off
+path, restores saved yaw gains, and verifies disarmed ACRO plus a fresh output-9
+sample at or below `SERVO9_MIN`. Cleanup failures must be reported as failures,
+not successful sweep exits. Invocation is documented in the
+[UI README](../linkhub-ui/README.md#yaw-trim-bench-sweep).
 
 ## SITL scripting-thread starvation
 

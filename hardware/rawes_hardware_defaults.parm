@@ -4,6 +4,12 @@
 # shared SITL/hardware defaults. They must not be loaded by SITL because the
 # simulator uses the standard rear-elevator H3-120 channel geometry.
 
+# MAVLink telemetry ports: TELEM1 at 57,600 baud and TELEM2 at 1,500,000 baud.
+SERIAL1_PROTOCOL     2
+SERIAL1_BAUD        57
+SERIAL2_PROTOCOL     2
+SERIAL2_BAUD      1500
+
 # Vehicle +X points from the Pixhawk toward the centre of gravity. The Pixhawk
 # arrow is aligned with +X, so no board-orientation rotation is required.
 AHRS_ORIENTATION   0
