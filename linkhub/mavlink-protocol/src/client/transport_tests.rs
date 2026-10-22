@@ -764,6 +764,111 @@ async fn parameter_transactions_preserve_integer_and_float_types() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn parameter_reads_retry_after_an_unrelated_reply() {
+    let transport = MockTransport::new(|message, index| {
+        let MavMessage::PARAM_REQUEST_READ(request) = message else {
+            panic!("parameter read")
+        };
+        Response::Messages(vec![MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+            param_id: if index == 0 {
+                CharArray::from("OTHER")
+            } else {
+                request.param_id
+            },
+            param_value: 0.0,
+            param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+            param_count: 1,
+            param_index: 0,
+        })])
+    });
+    let client = new_protocol(transport.clone(), 0);
+    let start = time::Instant::now();
+    let result = client
+        .get_parameter("RAWES_MODE", Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(result.name, "RAWES_MODE");
+    assert_eq!(result.after_cursor, "v1:41");
+    assert_eq!(transport.requests().len(), 2);
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn parameter_writes_retry_the_identical_request_after_a_lost_reply() {
+    let transport = MockTransport::new(|message, index| {
+        let MavMessage::PARAM_SET(request) = message else {
+            panic!("parameter write")
+        };
+        assert_eq!(request.param_type, MavParamType::MAV_PARAM_TYPE_REAL32);
+        assert_eq!(request.param_value, 0.0);
+        Response::Messages(if index == 0 {
+            vec![]
+        } else {
+            vec![MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                param_id: request.param_id,
+                param_value: request.param_value,
+                param_type: request.param_type,
+                param_count: 1,
+                param_index: 0,
+            })]
+        })
+    });
+    let client = new_protocol(transport.clone(), 0);
+    let result = client
+        .set_parameter(
+            "H_YAW_TRIM",
+            ParameterValue::Real32(0.0),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.value, ParameterValue::Real32(0.0));
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        message_fields(&requests[0]).unwrap(),
+        message_fields(&requests[1]).unwrap()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn parameter_retries_keep_the_deadline_and_surface_transport_failures() {
+    for write in [false, true] {
+        for (response, expected) in [
+            (0, "timed out"),
+            (1, "closed"),
+            (2, "lagged"),
+            (3, "test transport failed"),
+        ] {
+            let transport = MockTransport::new(move |_, _| match response {
+                0 => Response::Messages(vec![]),
+                1 => Response::Close,
+                2 => Response::Messages(vec![MavMessage::HEARTBEAT(Default::default()); 4]),
+                _ => Response::Fail,
+            });
+            let client = new_protocol(transport.clone(), 0);
+            let start = time::Instant::now();
+            let timeout = Duration::from_millis(2500);
+            let result = if write {
+                client
+                    .set_parameter("TEST", ParameterValue::Real32(0.0), timeout)
+                    .await
+            } else {
+                client.get_parameter("TEST", timeout).await
+            };
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            if response == 0 {
+                assert_eq!(start.elapsed(), timeout);
+                assert_eq!(transport.requests().len(), 3);
+            } else {
+                assert_eq!(transport.requests().len(), 1);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn invalid_parameter_writes_send_nothing_even_in_a_batch() {
     let transport = MockTransport::new(|_, _| panic!("invalid parameter write must not send"));

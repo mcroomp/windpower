@@ -1,6 +1,6 @@
 # Hardware Startup Investigation
 
-Last updated: 2026-10-15
+Last updated: 2026-10-22
 
 This file is a chronological hardware-session evidence log for startup-related
 swash, attitude, and anti-rotation-motor observations. It is not the owner for
@@ -72,6 +72,109 @@ These remain current and safety-relevant:
 Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
+
+### 2026-10-22 script-upload timeout over network bridge
+
+- No-argument calibration connected through the existing LinkHub at
+  `tcp:192.168.9.143:5760`, target `1/1`. Windows reported no serial ports.
+  The DroneBridge API reported firmware 2.4.1, build 23, and UART 1500000 baud.
+  Upload-path policy is owned by [calibration.md](design/calibration.md).
+- Node.js queries against the running LinkHub and its canonical journal
+  showed the failed uploads stopping at `CreateDirectory /APM/scripts`,
+  before any upload job existed. Each operation sent four requests without
+  receiving a matching reply.
+- Read-only `ListDirectory` probes with source components 190 and 0 also
+  received no replies. The transmitted MAVFTP frame matched the standard
+  CRC extra (84); a full-length, untruncated MAVLink 2 listing request did
+  not recover responses either. Ordinary parameter reads and the vehicle's
+  advertised MAVFTP capability worked.
+- With the operator's confirmation that the hardware was secured, calibration
+  first verified safe-off, then a LinkHub command rebooted the Pixhawk.
+  Reconnection was confirmed by a new vehicle clock epoch. The post-reboot
+  directory listing still timed out. One delayed NAK for an earlier directory
+  creation was observed; this was not a successful listing or upload.
+- DroneBridge's GCS-facing `RADIO_STATUS.txbuf` was consistently zero.
+  ArduPilot's FTP reply path checks radio buffer availability, but these
+  observations do not prove that the flight controller received those same
+  reports. Do not treat this as an established cause or inject fabricated
+  buffer reports as a fix.
+- No script was uploaded or replaced. Final `calibrate disarm` verified the
+  full canonical safe-off invariant, including output 9 at 1000 us.
+  Next isolation step: compare a directory listing over verified native USB
+  with the network path before changing upload deadlines or transfer logic.
+
+#### Second-controller USB comparison
+
+- The operator connected a second Pixhawk for testing. Native USB enumerated
+  as COM7/COM8, `VID:PID=3162:0053`, serial `160031001751343131363538`.
+  Heartbeat-based discovery selected COM7 at 115200 baud. An isolated instance
+  of the same release LinkHub binary served port 9000; the original TCP
+  instance on port 8999 was left untouched.
+- Node.js calls to the isolated Rust HTTP API successfully listed
+  `/APM/scripts` (`rawes.lua`, 80512 bytes) and created the already-existing
+  scripts directory (`created=false`, the expected successful result).
+- A disposable 98304-byte non-Lua file under `/APM` uploaded successfully in
+  15.187 seconds, including the upload engine's remote CRC verification.
+  All 415 requests completed with zero retries or timeouts; a directory
+  listing confirmed the exact file size. The temporary remote file and
+  transfer record were removed afterwards.
+- The installed Lua script was not changed, no parameters or modes were
+  written, and the test controller remained disarmed in ACRO. The temporary
+  USB LinkHub was stopped after the check.
+- This validates the current Rust directory and upload implementation on
+  native USB. Because the USB test used a second controller, it does not yet
+  distinguish a network-bridge fault from an FTP problem on the original
+  controller. A same-controller USB/TCP comparison is still needed.
+
+#### Same-controller USB/DroneBridge comparison
+
+- The operator then connected the original controller simultaneously over
+  native USB and DroneBridge. USB enumerated as COM4/COM5,
+  `VID:PID=3162:0053`, serial `25001C001651333337363133`; heartbeat discovery
+  selected COM4 at 115200 baud. Its first USB directory listing also timed out,
+  although USB parameter reads worked.
+- At the operator's request, canonical safe-off was verified and the controller
+  rebooted over USB. Following reconnection, a USB listing succeeded:
+  `rawes.lua` was 80595 bytes and `keep_armed.lua` was 1678 bytes.
+- A fresh isolated LinkHub connection to DroneBridge then timed out on the
+  same directory listing. After 85 focused Lua/control tests passed through
+  the canonical pytest CLI, the original calibration upload command was
+  retried over verified USB. It again failed before an upload job started;
+  both services' transfer registries were empty.
+- This sequence shows that USB FTP can recover after reboot and later become
+  unresponsive after a network-side FTP attempt. It is consistent with a
+  shared flight-controller FTP worker being blocked, but does not establish
+  the precise blocking condition. No Lua file was replaced.
+- Post-reboot cleanup verified the full safe-off invariant, including output
+  9 at 1000 us; final USB and TCP observations both showed disarmed ACRO.
+  Temporary diagnostic LinkHub instances were stopped. The remaining physical
+  isolation test is USB with DroneBridge disconnected from the controller.
+
+#### Collective watchdog and cleanup parameter timeouts
+
+- A later disarmed collective run reported a MAVLink timeout and failed to
+  confirm `RAWES_MODE=0` during cleanup. The active service was connected
+  through DroneBridge. Live Lua status subsequently reported mode 0, disarmed.
+- Canonical journal evidence in run
+  `37727958-4592-42c5-a5f9-d259ca543ebc` showed a single `H_YAW_TRIM` read
+  at sequence 145445 with no matching reply. A subsequent read at 153618
+  received the zero-valued reply at 153670. The Rust single-parameter read
+  and write transactions had no retransmission, unlike command transactions.
+- A complete subsequent `calibrate disarm` verified the canonical safe-off
+  invariant, including `RAWES_MODE=0`, `H_YAW_TRIM=0`, and output 9 at 1000 us.
+  No armed or collective motion test was started during this diagnosis.
+- This parameter-loss finding is separate from the earlier MAVFTP
+  `FailErrno` code 2 with errno 0; an unspecified filesystem error must not
+  be treated as proof that a directory already exists.
+- Single-parameter read/write retries were added in the protocol crate, sharing
+  the original operation deadline. Three regression tests first reproduced the
+  missing retries; all 71 protocol unit tests then passed with the fix.
+  The release binary was rebuilt and, with operator approval, LinkHub restarted
+  on the same TCP connection. Its readiness check and full canonical safe-off
+  verification passed. A further 24 read-only checks of `RAWES_MODE` and
+  `H_YAW_TRIM` all returned zero over TCP. No collective or armed retest was
+  performed. The fixed service was subsequently stopped at the operator's
+  request, and its process exit was confirmed.
 
 ### 2026-10-15 direct-USB Lua deployment and observable uploads
 
